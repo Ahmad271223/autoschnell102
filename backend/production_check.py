@@ -343,6 +343,22 @@ def pruefe_produktion(log) -> None:
         # ohne Anbieter-Zugang startet Produktion nicht (Ausnahme: Mock im Test).
         (fehler if (ist_prod and not _mock) else warnungen).append(
             "APIFY_TOKEN fehlt — mobile.de/AutoScout24-Abrufe sind nicht moeglich.")
+    else:
+        # Rollenprüfung 22.09.2026 (RP-549): ein LEERER Actor-Name gilt seit
+        # heute als Standard (mobile_service/autoscout_service). Ein
+        # vertippter Name ("memo23 mobile-de-scraper", nur "mobile-de-scraper")
+        # liess dagegen jeden neuen Link scheitern, ohne Alarm. Apify-Actors
+        # heissen <Besitzer>~<Name> (oder <Besitzer>/<Name>). Nur eine
+        # Warnung: wer bewusst eine reine Actor-ID eintraegt, sieht sie
+        # ebenfalls und kann sie stehen lassen.
+        for _name in ("APIFY_MOBILE_ACTOR", "APIFY_AUTOSCOUT_ACTOR"):
+            _wert = (os.environ.get(_name) or "").strip()
+            if _wert and (any(z.isspace() for z in _wert)
+                          or ("~" not in _wert and "/" not in _wert)):
+                warnungen.append(
+                    f"{_name}={_wert!r} sieht nicht wie ein Apify-Actor aus (erwartet "
+                    f"<Besitzer>~<Name>, z. B. memo23~mobile-de-scraper). Leer lassen = "
+                    f"Standard-Actor. Pruefen: grep APIFY_.*ACTOR /opt/autoschnell/.env")
     # Nachpruefung 20.09.2026 (Frage Ahmad, gemessen mit
     # scripts/lasttest_apify_grenze.py): mobile.de und AutoScout24 laufen
     # BEIDE ueber Apify, haben aber je eine eigene Obergrenze — und keine

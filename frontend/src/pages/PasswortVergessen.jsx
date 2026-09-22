@@ -1,5 +1,6 @@
 import { Link } from "react-router-dom";
 import { Bolt, KeyRound } from "lucide-react";
+import RechtsLinks from "@/components/RechtsLinks";
 
 /**
  * Kontonummer (13.09.2026): Ein neues Passwort vergibt ausschliesslich der
@@ -34,6 +35,8 @@ export default function PasswortVergessen() {
         <div className="mt-8 text-sm text-zinc-400 space-y-2">
           <div><Link to="/login" className="text-white hover:underline">Zurück zur Anmeldung</Link></div>
         </div>
+        {/* Rollenprüfung 22.09.2026 (RP-563): Impressum, Datenschutz, AGB. */}
+        <RechtsLinks className="mt-10" />
       </div>
     </div>
   );

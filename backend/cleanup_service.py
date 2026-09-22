@@ -331,215 +331,319 @@ async def _anderer_vorgang_offen(db, dealer_id: str, vehicle_id: str, appt_id: s
          "status": {"$in": list(_VORGANG_OFFEN)}}, limit=1))
 
 
-def _weiter(wache) -> None:
+class SchreibpauseAktiv(RuntimeError):
+    """Rollenprüfung 22.09.2026 (RP-245/RP-396): Waehrend der Aufraeumlauf
+    schon lief, hat die Sicherung bzw. ein Restore eine Schreibpause gesetzt.
+    Wer das faengt, hoert auf (wie bei SperreVerloren) — der naechste Lauf
+    nach der Pause macht weiter."""
+
+
+async def _weiter(wache, db=None) -> None:
     """Pruefbericht 20.09.2026 (AL-12): zwischen den Abschnitten eines langen
-    Laufs nachsehen, ob die Sperre noch uns gehoert (sonst SperreVerloren)."""
+    Laufs nachsehen, ob die Sperre noch uns gehoert (sonst SperreVerloren).
+
+    Rollenprüfung 22.09.2026 (RP-245/RP-396): vorher wurde die Schreibpause
+    nur VOR dem Lauf geprueft. Setzte die Sicherung oder ein Restore den
+    Merker, waehrend der Lauf schon arbeitete, loeschte er weiter — mitten im
+    Dump bzw. mitten im Umschalten. Jetzt wird vor jedem Schritt gefragt und
+    sauber abgebrochen (SchreibpauseAktiv)."""
     if wache is not None:
         wache.pruefen()
+    if db is not None and await wartung.aktiv_async(db):
+        raise SchreibpauseAktiv("Schreibpause (Sicherung/Restore) — Aufraeumlauf angehalten")
+
+
+#: Rollenprüfung 22.09.2026 (RP-243/RP-394): Stand des letzten Laufs in
+#: system_reports (typ "aufraeumlauf"). /api/ready warnt, wenn der letzte
+#: VOLLSTAENDIGE Lauf zu lange her ist.
+AUFRAEUMLAUF_BERICHT = "aufraeumlauf"
+
+
+async def _schritt(db, stats: dict, name: str, aufruf, wache=None, *,
+                   in_stats: bool = True):
+    """Rollenprüfung 22.09.2026 (RP-243/RP-394): EIN Teilschritt des
+    Aufraeumlaufs, gegen die anderen abgeschottet.
+
+    Vorher liefen rund 35 Schritte ohne eigenes try nacheinander. Warf ein
+    frueher Schritt dauerhaft (z. B. ein kaputter Datensatz in
+    auto_daten_reparieren), liefen alle folgenden NIE mehr — Fristloeschung,
+    Nacharbeit, Frischabgleich, Uebergaben, Storage-Nachholung — und das
+    stand nur im Log. Jetzt: Fehler protokollieren, im Ergebnis als "fehler"
+    vermerken, Betriebsalarm je Schritt (bei Erfolg wieder geschlossen) und
+    mit dem naechsten Schritt weitermachen.
+
+    `aufruf` ist eine Funktion ohne Argumente, die die Coroutine liefert —
+    so entsteht sie erst NACH der Pruefung von Sperre und Schreibpause.
+    SperreVerloren und SchreibpauseAktiv werden weitergereicht: dann soll
+    der ganze Lauf enden, nicht nur der Schritt. `in_stats=False`: das
+    Ergebnis nicht unter `name` ablegen (der Aufrufer verarbeitet es)."""
+    await _weiter(wache, db)
+    from job_lock import SperreVerloren
+    try:
+        ergebnis = await aufruf()
+    except (SperreVerloren, SchreibpauseAktiv):
+        raise
+    except Exception as exc:  # noqa: BLE001 — ein Schritt darf den Lauf nicht kippen
+        log.exception("Aufraeumschritt %s fehlgeschlagen", name)
+        stats[name] = "fehler"
+        stats.setdefault("schritte_fehlgeschlagen", []).append(name)
+        await alarm(db, "aufraeumschritt_fehlgeschlagen", ref=name,
+                    fehler=f"{type(exc).__name__}: {str(exc)[:280]}",
+                    hinweis="Dieser Teil des stuendlichen Aufraeumlaufs scheitert — "
+                            "die uebrigen Schritte laufen weiter. Protokoll pruefen.")
+        return None
+    if in_stats:
+        stats[name] = ergebnis
+    await alarm_schliessen(db, "aufraeumschritt_fehlgeschlagen", ref=name)
+    return ergebnis
 
 
 async def _cleanup_once(db, wache=None) -> dict:
     """Ein Durchlauf. Liefert Metriken. `wache` (AL-12): die Wache der
-    Job-Sperre — zwischen den Abschnitten wird geprueft, ob sie noch gilt."""
+    Job-Sperre — zwischen den Abschnitten wird geprueft, ob sie noch gilt.
+
+    Rollenprüfung 22.09.2026 (RP-243/RP-394): jeder Teilschritt laeuft ueber
+    _schritt (eigener Fehlerfang + Betriebsalarm), vor jedem Schritt wird
+    Sperre UND Schreibpause geprueft (RP-245/RP-396), und am Ende steht der
+    Stand in system_reports (typ "aufraeumlauf")."""
     now = datetime.now(timezone.utc)
     stats = {"checked": 0, "cleaned": 0, "snapshots_deleted": 0, "photos_cleared": 0}
 
-    for status_name, days in CLEANUP_RULES:
-        cutoff_iso = (now - timedelta(days=days)).isoformat()
-        # Kandidaten: Termin hat den Status, der Abschluss ist älter als
-        # cutoff, und assets wurden noch nicht bereits gecleant.
-        # Nachpruefung Runde 14 (Nr. 100): Frist ab abgeschlossen_seit
-        # (Zeitpunkt des Abschlusses), ersatzweise status_changed_at
-        # (Altbestand / Termine ohne das Feld).
-        cursor = db.appointments.find(
-            {
-                "status": status_name,
-                "assets_cleaned_at": {"$in": [None, ""]},
-                "$or": [
-                    {"abgeschlossen_seit": {"$lte": cutoff_iso}},
-                    {"abgeschlossen_seit": {"$in": [None, ""]},
-                     "status_changed_at": {"$lte": cutoff_iso}},
-                ],
-            },
-            {"_id": 0, "id": 1, "vehicle_id": 1, "dealer_id": 1,
-             "status_changed_at": 1, "abgeschlossen_seit": 1},
-        )
-        async for appt in cursor:
-            stats["checked"] += 1
-            vehicle_id = appt.get("vehicle_id")
+    async def _termin_fristen() -> int:
+        """7/14-Tage-Regel fuer Inseratsfotos und Snapshots abgeschlossener
+        Termine (bisher direkt im Rumpf von _cleanup_once; jetzt ein eigener
+        Schritt mit eigenem Fehlerfang, RP-243)."""
+        for status_name, days in CLEANUP_RULES:
+            cutoff_iso = (now - timedelta(days=days)).isoformat()
+            # Kandidaten: Termin hat den Status, der Abschluss ist älter als
+            # cutoff, und assets wurden noch nicht bereits gecleant.
+            # Nachpruefung Runde 14 (Nr. 100): Frist ab abgeschlossen_seit
+            # (Zeitpunkt des Abschlusses), ersatzweise status_changed_at
+            # (Altbestand / Termine ohne das Feld).
+            cursor = db.appointments.find(
+                {
+                    "status": status_name,
+                    "assets_cleaned_at": {"$in": [None, ""]},
+                    "$or": [
+                        {"abgeschlossen_seit": {"$lte": cutoff_iso}},
+                        {"abgeschlossen_seit": {"$in": [None, ""]},
+                         "status_changed_at": {"$lte": cutoff_iso}},
+                    ],
+                },
+                {"_id": 0, "id": 1, "vehicle_id": 1, "dealer_id": 1,
+                 "status_changed_at": 1, "abgeschlossen_seit": 1},
+            )
+            async for appt in cursor:
+                stats["checked"] += 1
+                vehicle_id = appt.get("vehicle_id")
 
-            # Runde 21 (Befund Ahmad 10.09.2026): Fahrerfotos haben eine
-            # EIGENE Frist ab dem Hochladen (berichtsfotos_nach_frist_loeschen
-            # unten) und haengen nicht mehr am Terminabschluss. Hier geht es
-            # nur noch um Inseratsfotos und Snapshots des Fahrzeugs.
+                # Runde 21 (Befund Ahmad 10.09.2026): Fahrerfotos haben eine
+                # EIGENE Frist ab dem Hochladen (berichtsfotos_nach_frist_loeschen
+                # unten) und haengen nicht mehr am Terminabschluss. Hier geht es
+                # nur noch um Inseratsfotos und Snapshots des Fahrzeugs.
 
-            # Händler hat bereits über das Fahrzeug entschieden? Dann regelt
-            # der Lebenszyklus die Aufbewahrung — 7-Tage-Regel entfällt
-            # (nur fuer Inserats-Fotos/Snapshots, NICHT fuer Berichts-Fotos).
-            # Pruefbericht Runde 8: Fahrzeug-IDs sind "v_<Inserat>" und damit
-            # bei zwei Firmen mit demselben Inserat IDENTISCH. Ohne Firma in
-            # der Abfrage traf der Aufraeumer das Fahrzeug der falschen Firma.
-            firma = appt.get("dealer_id", "")
-            if vehicle_id:
-                v_state = await db.vehicles.find_one(
-                    {"id": vehicle_id, "dealer_id": firma}, {"_id": 0, "lifecycle": 1})
-                if v_state and v_state.get("lifecycle") in _DECIDED_STATES:
-                    await db.appointments.update_one(
-                        {"id": appt["id"]},
-                        {"$set": {"assets_cleaned_at": now.isoformat(),
-                                  "cleanup_skipped": "haendler_entscheidung"}},
-                    )
-                    continue
-
-            # Runde 18: Das Inserat ist firmenweit gemeinsam (Kaufvorgaenge).
-            # Hat ein ANDERER Sucher zum selben Fahrzeug noch einen offenen
-            # Termin oder Vorgang, bleiben Inserats-Fotos und Snapshots —
-            # sein eigener Termin raeumt nach seinem Abschluss auf. Die
-            # Berichtsfotos dieses Termins sind oben bereits weg.
-            if vehicle_id and await _anderer_vorgang_offen(db, firma, vehicle_id, appt["id"]):
-                # Runde 27 (Gegenpruefung 12.09.2026): NICHT assets_cleaned_at
-                # setzen. Sonst gilt der Termin als erledigt und wird nie
-                # wieder geprueft — bleibt der Vorgang des Kollegen fuer immer
-                # offen (das System storniert bewusst nichts von selbst),
-                # lagen Inseratsfotos und Snapshots dauerhaft weiter herum.
-                # Nur vermerken und beim naechsten Lauf erneut versuchen.
-                await db.appointments.update_one(
-                    {"id": appt["id"]},
-                    {"$set": {"cleanup_zurueckgestellt_am": now.isoformat(),
-                              "cleanup_skipped": "anderer_vorgang_offen"}},
-                )
-                stats["zurueckgestellt"] = stats.get("zurueckgestellt", 0) + 1
-                continue
-
-            # 1) Fotos aus dem Vehicle-Cache räumen — Runde 18: NUR die
-            #    Fotofelder ($set data.<feld>), nicht das ganze data-Objekt
-            #    zurueckschreiben. Vorher gingen zwischenzeitliche
-            #    Korrekturen (Kilometerstand, Fahrzeugdaten) verloren.
-            #    Pruefbericht 20.09.2026 (R1-29): als Compare-and-Set auf den
-            #    Lebenszyklus — uebernahm der Chef das Fahrzeug ZWISCHEN der
-            #    Pruefung oben und diesem Schreiben in den Bestand/Verkauf,
-            #    wurden seine Fotos trotzdem geleert. Und die Snapshots
-            #    (Schritt 2) gehen erst nach erfolgreichem CAS.
-            if vehicle_id:
-                v = await db.vehicles.find_one(
-                    {"id": vehicle_id, "dealer_id": firma},
-                    {"_id": 0, "data": 1, "mobile_ad_id": 1})
-                if v is not None:
-                    data = v.get("data") if isinstance(v.get("data"), dict) else {}
-                    leeren = {f"data.{key}": [] for key in _iter_photo_keys() if data.get(key)}
-                    res = await db.vehicles.update_one(
-                        {"id": vehicle_id, "dealer_id": firma,
-                         "lifecycle": {"$nin": sorted(_DECIDED_STATES)}},
-                        {"$set": {**leeren, "assets_cleaned_at": now.isoformat()}},
-                    )
-                    if res.matched_count == 0:
-                        # inzwischen entschieden -> nichts anfassen
+                # Händler hat bereits über das Fahrzeug entschieden? Dann regelt
+                # der Lebenszyklus die Aufbewahrung — 7-Tage-Regel entfällt
+                # (nur fuer Inserats-Fotos/Snapshots, NICHT fuer Berichts-Fotos).
+                # Pruefbericht Runde 8: Fahrzeug-IDs sind "v_<Inserat>" und damit
+                # bei zwei Firmen mit demselben Inserat IDENTISCH. Ohne Firma in
+                # der Abfrage traf der Aufraeumer das Fahrzeug der falschen Firma.
+                firma = appt.get("dealer_id", "")
+                if vehicle_id:
+                    v_state = await db.vehicles.find_one(
+                        {"id": vehicle_id, "dealer_id": firma}, {"_id": 0, "lifecycle": 1})
+                    if v_state and v_state.get("lifecycle") in _DECIDED_STATES:
                         await db.appointments.update_one(
                             {"id": appt["id"]},
                             {"$set": {"assets_cleaned_at": now.isoformat(),
                                       "cleanup_skipped": "haendler_entscheidung"}},
                         )
                         continue
-                    if leeren:
-                        stats["photos_cleared"] += 1
 
-                # 2) Snapshots + Storage-Objekte wegwerfen
-                deleted = await _delete_snapshots_for_vehicle(
-                    db, vehicle_id, dealer_id=appt.get("dealer_id", ""))
-                stats["snapshots_deleted"] += deleted
+                # Runde 18: Das Inserat ist firmenweit gemeinsam (Kaufvorgaenge).
+                # Hat ein ANDERER Sucher zum selben Fahrzeug noch einen offenen
+                # Termin oder Vorgang, bleiben Inserats-Fotos und Snapshots —
+                # sein eigener Termin raeumt nach seinem Abschluss auf. Die
+                # Berichtsfotos dieses Termins sind oben bereits weg.
+                if vehicle_id and await _anderer_vorgang_offen(db, firma, vehicle_id, appt["id"]):
+                    # Runde 27 (Gegenpruefung 12.09.2026): NICHT assets_cleaned_at
+                    # setzen. Sonst gilt der Termin als erledigt und wird nie
+                    # wieder geprueft — bleibt der Vorgang des Kollegen fuer immer
+                    # offen (das System storniert bewusst nichts von selbst),
+                    # lagen Inseratsfotos und Snapshots dauerhaft weiter herum.
+                    # Nur vermerken und beim naechsten Lauf erneut versuchen.
+                    await db.appointments.update_one(
+                        {"id": appt["id"]},
+                        {"$set": {"cleanup_zurueckgestellt_am": now.isoformat(),
+                                  "cleanup_skipped": "anderer_vorgang_offen"}},
+                    )
+                    stats["zurueckgestellt"] = stats.get("zurueckgestellt", 0) + 1
+                    continue
 
-                # 3) Listings-Cache-Eintrag entfernen, damit ein neuer
-                #    Vergleich wieder frisch zieht. WICHTIG: der
-                #    listings_cache ist GEMEINSAM (ein Eintrag je Anzeige,
-                #    von allen Haendlern genutzt). Ihn wegen der Frist EINES
-                #    Haendlers zu loeschen wuerde alle anderen zu einem
-                #    neuen Anbieter-Abruf zwingen. Deshalb nur die
-                #    haendlereigenen Fotos (oben) entfernen und den
-                #    gemeinsamen Cache ueber seine eigene Ablauffrist
-                #    (LISTING_CACHE_TTL_HOURS) auslaufen lassen.
+                # 1) Fotos aus dem Vehicle-Cache räumen — Runde 18: NUR die
+                #    Fotofelder ($set data.<feld>), nicht das ganze data-Objekt
+                #    zurueckschreiben. Vorher gingen zwischenzeitliche
+                #    Korrekturen (Kilometerstand, Fahrzeugdaten) verloren.
+                #    Pruefbericht 20.09.2026 (R1-29): als Compare-and-Set auf den
+                #    Lebenszyklus — uebernahm der Chef das Fahrzeug ZWISCHEN der
+                #    Pruefung oben und diesem Schreiben in den Bestand/Verkauf,
+                #    wurden seine Fotos trotzdem geleert. Und die Snapshots
+                #    (Schritt 2) gehen erst nach erfolgreichem CAS.
+                if vehicle_id:
+                    v = await db.vehicles.find_one(
+                        {"id": vehicle_id, "dealer_id": firma},
+                        {"_id": 0, "data": 1, "mobile_ad_id": 1})
+                    if v is not None:
+                        data = v.get("data") if isinstance(v.get("data"), dict) else {}
+                        leeren = {f"data.{key}": [] for key in _iter_photo_keys() if data.get(key)}
+                        res = await db.vehicles.update_one(
+                            {"id": vehicle_id, "dealer_id": firma,
+                             "lifecycle": {"$nin": sorted(_DECIDED_STATES)}},
+                            {"$set": {**leeren, "assets_cleaned_at": now.isoformat()}},
+                        )
+                        if res.matched_count == 0:
+                            # inzwischen entschieden -> nichts anfassen
+                            await db.appointments.update_one(
+                                {"id": appt["id"]},
+                                {"$set": {"assets_cleaned_at": now.isoformat(),
+                                          "cleanup_skipped": "haendler_entscheidung"}},
+                            )
+                            continue
+                        if leeren:
+                            stats["photos_cleared"] += 1
 
-            # 4) Termin markieren, damit wir ihn nicht nochmal anfassen
-            await db.appointments.update_one(
-                {"id": appt["id"]},
-                {"$set": {"assets_cleaned_at": now.isoformat()}},
-            )
-            stats["cleaned"] += 1
+                    # 2) Snapshots + Storage-Objekte wegwerfen
+                    deleted = await _delete_snapshots_for_vehicle(
+                        db, vehicle_id, dealer_id=appt.get("dealer_id", ""))
+                    stats["snapshots_deleted"] += deleted
 
+                    # 3) Listings-Cache-Eintrag entfernen, damit ein neuer
+                    #    Vergleich wieder frisch zieht. WICHTIG: der
+                    #    listings_cache ist GEMEINSAM (ein Eintrag je Anzeige,
+                    #    von allen Haendlern genutzt). Ihn wegen der Frist EINES
+                    #    Haendlers zu loeschen wuerde alle anderen zu einem
+                    #    neuen Anbieter-Abruf zwingen. Deshalb nur die
+                    #    haendlereigenen Fotos (oben) entfernen und den
+                    #    gemeinsamen Cache ueber seine eigene Ablauffrist
+                    #    (LISTING_CACHE_TTL_HOURS) auslaufen lassen.
+
+                # 4) Termin markieren, damit wir ihn nicht nochmal anfassen
+                await db.appointments.update_one(
+                    {"id": appt["id"]},
+                    {"$set": {"assets_cleaned_at": now.isoformat()}},
+                )
+                stats["cleaned"] += 1
+
+        return stats["cleaned"]
+
+    async def _link_jobs_zurueckstellen() -> int:
+        # Pruefbericht 20.09.2026 (A-08): haengende Link-Jobs auch dann
+        # zurueckstellen, wenn der Link-Worker dieses Prozesses nicht laeuft.
+        from link_jobs import _requeue_stale
+        await _requeue_stale(db)
+        return 0
+
+    async def s(name: str, aufruf, in_stats: bool = True):
+        return await _schritt(db, stats, name, aufruf, wache, in_stats=in_stats)
+
+    await s("termin_fristen", _termin_fristen)
     # ---- Runde 21: Fahrerfotos FAHRERFOTO_TAGE nach dem Hochladen ----
-    _weiter(wache)
-    stats["berichtsfotos_frist"] = await berichtsfotos_nach_frist_loeschen(db, now, stats)
-    stats["berichte_frist"] = await berichte_nach_frist_loeschen(db, now, stats)
+    await s("berichtsfotos_frist", lambda: berichtsfotos_nach_frist_loeschen(db, now, stats))
+    await s("berichte_frist", lambda: berichte_nach_frist_loeschen(db, now, stats))
     # ---- 50-Tage-Regel: abgelaufene Bestandsfahrzeuge archivieren ----
-    stats["archived"] = await _archive_expired_bestand(db, now)
+    await s("archived", lambda: _archive_expired_bestand(db, now))
     # ---- Versand, der nie ein Ergebnis bekam (Runde 8, Befund 3) ----
-    stats["zustellungen_unklar"] = await haengende_zustellungen_markieren(db, now)
-    # ---- 90-Tage-Regel: Kaufvertraege samt Personendaten loeschen ----
+    await s("zustellungen_unklar", lambda: haengende_zustellungen_markieren(db, now))
+    # ---- 60-Tage-Regel: Kaufvertraege samt Personendaten loeschen ----
     # Reihenfolge (Runde 5): ZUERST fehlende Auto-Datensaetze nachtragen,
     # DANN loeschen — sonst verschwanden Altvertraege beim allerersten
-    # Lauf, bevor ihr dauerhafter Datensatz je existierte.
-    _weiter(wache)
-    stats["auto_daten_repariert"] = await auto_daten_reparieren(db)
+    # Lauf, bevor ihr dauerhafter Datensatz je existierte. (Scheitert das
+    # Nachtragen, prueft die Loeschung trotzdem JEDEN Vertrag selbst auf
+    # seinen Datensatz und haelt ihn sonst fest — RP-243.)
+    await s("auto_daten_repariert", lambda: auto_daten_reparieren(db))
     # Abgebrochene Loeschungen (Grabstein aelter als 10 min) zu Ende bringen
-    stats["vertragsloeschungen_wiederaufgenommen"] = \
-        await vertragsloeschungen_wiederaufnehmen(db, now)
-    stats["contracts_deleted"] = await vertraege_nach_frist_loeschen(
-        db, now, stats=stats)
-    stats["termine_ohne_vertrag_bereinigt"] = await termine_ohne_vertrag_bereinigen(db, now)
-    stats["protokoll_orte_nachgezogen"] = await protokoll_orte_nachziehen(db)
+    await s("vertragsloeschungen_wiederaufgenommen",
+            lambda: vertragsloeschungen_wiederaufnehmen(db, now))
+    await s("contracts_deleted", lambda: vertraege_nach_frist_loeschen(db, now, stats=stats))
+    await s("termine_ohne_vertrag_bereinigt", lambda: termine_ohne_vertrag_bereinigen(db, now))
+    await s("protokoll_orte_nachgezogen", lambda: protokoll_orte_nachziehen(db))
     # Pruefung 14.09.2026: liegengebliebene Nacharbeit (C4), gescheiterte
     # Freigabe-Ruecknahmen (C19), Termine ohne aktuelle Protokollversion
     # (C17/C18) und nicht verteilte Fahrernamen (A6) nachziehen.
-    _weiter(wache)
-    stats["termin_nacharbeit_nachgeholt"] = await termin_nacharbeit_nachholen(db, now)
-    stats["vertrags_nacharbeit_nachgeholt"] = await vertrags_nacharbeit_nachholen(db)
-    stats["konto_nachlese"] = await konto_nachlese_abarbeiten(db, now)
-    stats["kaufvorgang_nacharbeit_nachgeholt"] = await kaufvorgang_nacharbeit_nachholen(db)
-    stats["termin_verweise_bereinigt"] = await termin_verweise_bereinigen(db, now)
-    stats["inserat_fahrzeug_nachgezogen"] = await inserat_fahrzeug_nacharbeit_nachholen(db)
-    stats["protokoll_freigaben_zurueckgenommen"] = \
-        await protokoll_freigaben_nachziehen(db)
-    stats["protokolle_repariert"] = await protokolle_ohne_aktuelle_version_reparieren(db)
-    stats["protokoll_entwuerfe_ohne_termin"] = await verwaiste_protokoll_entwuerfe_loeschen(db, now)
-    # Pruefbericht 20.09.2026 (A-08): haengende Link-Jobs auch dann
-    # zurueckstellen, wenn der Link-Worker dieses Prozesses nicht laeuft.
-    try:
-        from link_jobs import _requeue_stale
-        await _requeue_stale(db)
-    except Exception:  # noqa: BLE001
-        log.exception("Haengende Link-Jobs nicht zurueckgestellt")
-    _weiter(wache)
-    stats["fahrernamen_nachgezogen"] = await fahrernamen_nachziehen(db)
-    stats["konten_ohne_firma_gesperrt"] = await konten_ohne_firma_sperren(db)
-    stats["firmenreste_bereinigt"] = await firmenreste_bereinigen(db)
-    stats["storage_nachgeholt"] = await storage_loeschungen_nachholen(db)
-    stats["logs_rotiert"] = await logs_rotieren(db, now)
+    await s("termin_nacharbeit_nachgeholt", lambda: termin_nacharbeit_nachholen(db, now))
+    await s("vertrags_nacharbeit_nachgeholt", lambda: vertrags_nacharbeit_nachholen(db))
+    await s("konto_nachlese", lambda: konto_nachlese_abarbeiten(db, now))
+    await s("kaufvorgang_nacharbeit_nachgeholt", lambda: kaufvorgang_nacharbeit_nachholen(db))
+    await s("termin_verweise_bereinigt", lambda: termin_verweise_bereinigen(db, now))
+    await s("inserat_fahrzeug_nachgezogen", lambda: inserat_fahrzeug_nacharbeit_nachholen(db))
+    await s("protokoll_freigaben_zurueckgenommen", lambda: protokoll_freigaben_nachziehen(db))
+    await s("protokolle_repariert", lambda: protokolle_ohne_aktuelle_version_reparieren(db))
+    await s("protokoll_entwuerfe_ohne_termin",
+            lambda: verwaiste_protokoll_entwuerfe_loeschen(db, now))
+    await s("link_jobs_zurueckgestellt", _link_jobs_zurueckstellen, in_stats=False)
+    await s("fahrernamen_nachgezogen", lambda: fahrernamen_nachziehen(db))
+    await s("konten_ohne_firma_gesperrt", lambda: konten_ohne_firma_sperren(db))
+    # Rollenprüfung 22.09.2026 (RP-046/RP-145 Nr. 5): Firmen mit mehr als
+    # einem Chefkonto melden (Alarm statt Unique-Index, siehe Funktion).
+    await s("mehrere_chefkonten", lambda: mehrere_chefkonten_melden(db))
+    await s("firmenreste_bereinigt", lambda: firmenreste_bereinigen(db))
+    await s("storage_nachgeholt", lambda: storage_loeschungen_nachholen(db))
+    await s("logs_rotiert", lambda: logs_rotieren(db, now))
     # ---- Aufbewahrungsfristen (Go-Live-Audit 09/2026) ----
-    stats["anfragen_rotiert"] = await anfragen_rotieren(db, now)
-    stats["fehlerlogs_begrenzt"] = await fehlerlogs_begrenzen(db, now)
+    await s("anfragen_rotiert", lambda: anfragen_rotieren(db, now))
+    await s("fehlerlogs_begrenzt", lambda: fehlerlogs_begrenzen(db, now))
     # Audit 13.09.2026 (#35/#42): abgelaufene Inserats-Zwischenspeicher
-    stats["inseratscache_rotiert"] = await inseratscache_rotieren(db, now)
-    stats.update(await marktplatz_rotieren(db, now))
+    await s("inseratscache_rotiert", lambda: inseratscache_rotieren(db, now))
+    markt = await s("marktplatz_rotieren", lambda: marktplatz_rotieren(db, now), in_stats=False)
+    if isinstance(markt, dict):
+        stats.update(markt)
+    # Rollenprüfung 22.09.2026 (RP-183): Fahrzeuge, die ohne aktives Inserat
+    # auf "veroeffentlicht"/"reserviert" haengen geblieben sind (Altbestand
+    # der 21-Tage-Loeschung ohne Fahrzeug-Rueckweg), zurueck in den Bestand.
+    await s("fahrzeuge_ohne_inserat_zurueckgesetzt",
+            lambda: fahrzeuge_ohne_inserat_zuruecksetzen(db, now))
     # Runde 12 (15.09.2026): Nachholjobs fuer Abholbericht-Nacharbeit (Nr. 22),
     # Vertrag nach Abholung (Nr. 25) und Frischabgleich ohne Merker (Nr. 29).
-    _weiter(wache)
-    stats["abholberichte_nachgeholt"] = await abholberichte_nacharbeit_nachholen(db)
-    stats["vertraege_nach_abholung_nachgeholt"] = await vertrag_nach_abholung_nachholen(db)
-    stats["vertraege_veraltet_nachgeholt"] = await vertraege_veraltet_nachholen(db)
-    stats["termine_frisch_abgeglichen"] = await termine_frisch_abgleichen(db, now)
-    stats["fahrer_trennungen_nachgeholt"] = await fahrer_trennung_nachholen(db)
-    stats["fahrer_verknuepfungen_abgeglichen"] = await fahrer_verknuepfung_abgleichen(db)
+    await s("abholberichte_nachgeholt", lambda: abholberichte_nacharbeit_nachholen(db))
+    await s("vertraege_nach_abholung_nachgeholt", lambda: vertrag_nach_abholung_nachholen(db))
+    await s("vertraege_veraltet_nachgeholt", lambda: vertraege_veraltet_nachholen(db))
+    await s("termine_frisch_abgeglichen", lambda: termine_frisch_abgleichen(db, now))
+    await s("fahrer_trennungen_nachgeholt", lambda: fahrer_trennung_nachholen(db))
+    await s("fahrer_verknuepfungen_abgeglichen", lambda: fahrer_verknuepfung_abgleichen(db))
     # Runde 19 (Nr. 6/7): abgebrochene Besitzerwechsel zu Ende bringen —
     # seit 21.09.2026 (R1-01) nur noch alte Merker von vor der Abschaltung
     # des Umhaengens durch den Chef.
-    stats["uebergaben_nachgeholt"] = await uebergaben_nachholen(db, now)
+    await s("uebergaben_nachgeholt", lambda: uebergaben_nachholen(db, now))
     # Runde 14 (15.09.2026): Fahrer-Pseudonym in Berichten nachholen (Nr. 9/10),
     # Termine ohne Vertrag loesen (Nr. 3/4).
-    stats["abholberichte_pseudonymisiert"] = await abholberichte_pseudonym_nachholen(db, now)
-    stats["termin_vertragsverweise_bereinigt"] = await termin_vertragsverweise_bereinigen(db, now)
+    await s("abholberichte_pseudonymisiert", lambda: abholberichte_pseudonym_nachholen(db, now))
+    await s("termin_vertragsverweise_bereinigt",
+            lambda: termin_vertragsverweise_bereinigen(db, now))
 
+    # Rollenprüfung 22.09.2026 (RP-394): Stand des Laufs festhalten — ein
+    # Lauf, der Schritt fuer Schritt scheitert, faellt in /api/ready auf.
+    await _aufraeumlauf_bericht_schreiben(db, now, stats)
     if any(stats.values()):
         log.info("cleanup run: %s", stats)
     return stats
+
+
+async def _aufraeumlauf_bericht_schreiben(db, start: datetime, stats: dict) -> None:
+    """Rollenprüfung 22.09.2026 (RP-394): letzter Lauf, letzter VOLLSTAENDIGER
+    Lauf und die gescheiterten Schritte in system_reports. Wirft nie."""
+    fehlgeschlagen = list(stats.get("schritte_fehlgeschlagen") or [])
+    jetzt = datetime.now(timezone.utc).isoformat()
+    setzen = {"typ": AUFRAEUMLAUF_BERICHT, "letzter_lauf": jetzt,
+              "letzter_lauf_start": start.isoformat(),
+              "fehlgeschlagen": fehlgeschlagen, "vollstaendig": not fehlgeschlagen}
+    if not fehlgeschlagen:
+        setzen["letzter_vollstaendiger_lauf"] = jetzt
+    try:
+        await db.system_reports.update_one(
+            {"typ": AUFRAEUMLAUF_BERICHT},
+            {"$set": setzen, "$setOnInsert": {"id": str(uuid.uuid4())}}, upsert=True)
+    except Exception:  # noqa: BLE001
+        log.exception("Stand des Aufraeumlaufs nicht gespeichert")
 
 
 # Kaufvertraege (Personendaten des Verkaeufers, Unterschriften, PDF) werden
@@ -589,36 +693,46 @@ async def vertraege_nach_frist_loeschen(db, now: datetime,
     cutoff = (now - timedelta(days=VERTRAG_AUFBEWAHRUNG_TAGE)).isoformat()
     if aktiv is None:
         aktiv = vertrag_loeschung_aktiv()
-    kandidaten = [c async for c in db.generated_pdfs.find(
-        {"created_at": {"$lte": cutoff}},
-        {"_id": 0, "id": 1, "dealer_id": 1, "contract_no": 1,
-         "admin_vehicle_data_id": 1, "auto_daten_entfernt_am": 1,
-         "contract_data": 1, "make": 1, "model": 1, "vehicle_id": 1, "created_at": 1})]
+    ueber_frist = {"created_at": {"$lte": cutoff}}
     if not aktiv:
-        ids = [c["id"] for c in kandidaten]
+        # Rollenprüfung 22.09.2026 (RP-247/RP-398): Im Trockenlauf wird nie
+        # geloescht — die Liste wuchs also stuendlich weiter und wurde samt
+        # contract_data (Verkaeuferdaten, Bilder-URLs ...) komplett geladen.
+        # Jetzt: zaehlen + hoechstens _LOESCHVORSCHAU_MAX_IDS IDs lesen.
+        anzahl = await db.generated_pdfs.count_documents(ueber_frist)
+        ids = [c["id"] async for c in db.generated_pdfs.find(
+            ueber_frist, {"_id": 0, "id": 1}).sort("created_at", 1).limit(_LOESCHVORSCHAU_MAX_IDS)]
         log.info("Vertragsloeschung INAKTIV (VERTRAG_LOESCHUNG_AKTIV=false) — "
                  "Vorschau: %d Vertraege mit created_at <= %s waeren zu "
-                 "loeschen; ids: %s", len(ids), cutoff, ids[:20])
+                 "loeschen; ids: %s", anzahl, cutoff, ids[:20])
         await db.system_reports.replace_one(
             {"typ": "vertrag_loeschvorschau"},
             {"id": str(uuid.uuid4()), "typ": "vertrag_loeschvorschau",
-             "created_at": now.isoformat(), "anzahl": len(ids),
-             "ids": ids[:_LOESCHVORSCHAU_MAX_IDS], "cutoff": cutoff},
+             "created_at": now.isoformat(), "anzahl": anzahl,
+             "ids": ids, "cutoff": cutoff},
             upsert=True)
-        if ids:
+        if anzahl:
             # Nachpruefung Runde 14 (Nr. 97): der Trockenlauf ist gewollt
             # (Go-Live-Entscheidung), aber ein vergessenes Flag darf nicht
             # still bleiben — sonst laeuft die versprochene 90-Tage-Frist nie.
             # Ein Alarm je (typ, ref) wird nur hochgezaehlt, nicht dupliziert.
             await alarm(db, "vertrag_loeschung_trockenlauf",
-                        ref="vertrag_loeschvorschau", anzahl=len(ids),
+                        ref="vertrag_loeschvorschau", anzahl=anzahl,
                         cutoff=cutoff,
                         hinweis="VERTRAG_LOESCHUNG_AKTIV ist aus: Vertraege "
                                 "ueber der Frist werden nur gezaehlt, nicht "
                                 "geloescht (siehe DEPLOYMENT.md, Scharfschalten)")
         if stats is not None:
-            stats["contracts_vorschau"] = len(ids)
+            stats["contracts_vorschau"] = anzahl
         return 0
+    # RP-247/RP-398: Kandidaten weiter VORAB einsammeln (kein Loeschen im
+    # laufenden Cursor), aber ohne contract_data — die Vertragsfassung wird
+    # nur fuer eine Reparatur des Auto-Datensatzes nachgeladen. Zurueck-
+    # gestellte Vertraege kosten damit je Lauf nur ein paar Felder.
+    kandidaten = [c async for c in db.generated_pdfs.find(
+        ueber_frist,
+        {"_id": 0, "id": 1, "dealer_id": 1, "contract_no": 1,
+         "admin_vehicle_data_id": 1, "auto_daten_entfernt_am": 1})]
     geloescht = 0
     uebersprungen = 0
     zurueckgestellt = 0
@@ -633,9 +747,15 @@ async def vertraege_nach_frist_loeschen(db, now: datetime,
             # Stelle reparieren (Datensatz aus der Vertragsfassung neu anlegen)
             # statt ihn ueber die Frist hinaus festzuhalten.
             repariert = False
-            if c.get("contract_data"):          # ohne Vertragsdaten gibt es nichts zu retten
+            voll = await db.generated_pdfs.find_one(
+                {"id": c["id"]},
+                {"_id": 0, "id": 1, "dealer_id": 1, "contract_no": 1,
+                 "admin_vehicle_data_id": 1, "auto_daten_entfernt_am": 1,
+                 "contract_data": 1, "make": 1, "model": 1, "vehicle_id": 1,
+                 "created_at": 1}) or {}
+            if voll.get("contract_data"):       # ohne Vertragsdaten gibt es nichts zu retten
                 try:
-                    repariert = await auto_daten.nachfuehren(db, c)
+                    repariert = await auto_daten.nachfuehren(db, voll)
                 except Exception:  # noqa: BLE001
                     log.exception("Vertrag %s: Auto-Datensatz nicht reparierbar", c["id"])
             if not repariert:
@@ -675,6 +795,26 @@ async def vertrag_noch_in_gebrauch(db, contract_id: str, cutoff: str) -> bool:
     # Datenschutzfrist darf ihn nicht stornieren.
     if await db.kaufvorgaenge.count_documents(
             {"contract_id": contract_id, "status": {"$in": list(_KV_OFFEN)},
+             "updated_at": {"$gt": cutoff}}, limit=1):
+        return True
+    # Rollenprüfung 22.09.2026 (RP-244/RP-395): Die Frist soll ab dem
+    # ABSCHLUSS der Abholung laufen (D1). Geschuetzt waren aber nur Abholungen
+    # mit finalem Protokoll (unten). Setzte der Chef einen Termin OHNE Fahrer
+    # (also ohne Protokoll) zu einem ueber 60 Tage alten Vertrag heute auf
+    # "abgeholt", war der Vertrag im naechsten Stundenlauf endgueltig weg.
+    # Jetzt halten auch (a) ein abgeschlossener Abholtermin, dessen Abschluss
+    # juenger als die Frist ist, und (b) ein Kaufvorgang "abgeholt" mit
+    # Bewegung innerhalb der Frist den Vertrag. Storno/"nicht abgeholt"
+    # zaehlen bewusst NICHT (der Kauf gilt dann nicht) — die Frist ab dem
+    # Anlegen bleibt dort wie bisher.
+    if await db.appointments.count_documents(
+            {"contract_id": contract_id, "status": {"$in": ["abgeholt", "erledigt"]},
+             "$or": [{"abgeschlossen_seit": {"$gt": cutoff}},
+                     {"abgeschlossen_seit": {"$in": [None, ""]},
+                      "status_changed_at": {"$gt": cutoff}}]}, limit=1):
+        return True
+    if await db.kaufvorgaenge.count_documents(
+            {"contract_id": contract_id, "status": "abgeholt",
              "updated_at": {"$gt": cutoff}}, limit=1):
         return True
     termin_ids = [a["id"] async for a in db.appointments.find(
@@ -877,6 +1017,39 @@ async def vertrags_nacharbeit_nachholen(db) -> int:
     return n
 
 
+async def _fahrzeug_ohne_vorgang_nachziehen(appt: dict, status: str) -> Optional[str]:
+    """Fahrzeugzustand eines Termins OHNE eigenen Kaufvorgang (Terminplaner
+    ohne Vertrag) nachziehen — gemeinsamer Weg fuer termin_nacharbeit_nachholen
+    und termine_frisch_abgleichen.
+
+    Rollenprüfung 22.09.2026:
+      * RP-080/RP-179 Nr. 5: der Zielzustand kommt aus derselben Tabelle wie
+        im Buero und in der Fahrer-App (lifecycle.zustand_fuer_terminstatus):
+        "erledigt" gilt als abgeholt, "storniert" aendert nichts; offene
+        Termine bedeuten "abholung_geplant". Vorher hatte die Nacharbeit
+        eine eigene Zuordnung ohne "erledigt".
+      * RP-265/RP-015: haengen am (firmenweit gemeinsamen) Fahrzeug
+        Kaufvorgaenge — auch die eines Kollegen —, bestimmt allein deren
+        Zusammenfassung den Lebenszyklus (kaufvorgang.fahrzeug_status_
+        aggregieren). Vorher schob der Aufraeumlauf mit einem Termin ohne
+        Vertrag das Auto des Kollegen z. B. auf "nicht abgeholt".
+    Liefert den gesetzten Zielzustand, "zusammengefasst" oder None."""
+    vehicle_id, dealer_id = appt.get("vehicle_id"), appt.get("dealer_id") or ""
+    if not vehicle_id:
+        return None
+    from lifecycle import try_set_lifecycle, zustand_fuer_terminstatus
+    import kaufvorgang as _kv
+    ziel = zustand_fuer_terminstatus(status) or (
+        "abholung_geplant" if status not in _TERMIN_GESCHLOSSEN else None)
+    if not ziel:
+        return None
+    if await _kv.fahrzeug_hat_vorgaenge(vehicle_id, dealer_id):
+        await _kv.fahrzeug_status_aggregieren(vehicle_id, dealer_id)
+        return "zusammengefasst"
+    await try_set_lifecycle(vehicle_id, dealer_id, ziel)
+    return ziel
+
+
 async def termin_nacharbeit_nachholen(db, now: datetime, mindestalter_min: int = 10) -> int:
     """Pruefung 14.09.2026 (C4): Termine mit Merker nacharbeit_offen (Vorgangs-
     und Fahrzeugstatus bzw. Preis nach einem DB-Aussetzer nicht nachgezogen)
@@ -897,7 +1070,6 @@ async def termin_nacharbeit_nachholen(db, now: datetime, mindestalter_min: int =
                 {"id": appt["id"]}, {"$set": {"nacharbeit_versuch_am": now_iso()}})
             from routes.protocols import preis_nachholen
             import kaufvorgang as _kv
-            from lifecycle import try_set_lifecycle
             status = appt.get("status") or "offen"
             await preis_nachholen(appt)
             # Phase 2 (2.4, D4-D6): auch die Vertragszeiger gehoeren zur Nacharbeit
@@ -957,10 +1129,10 @@ async def termin_nacharbeit_nachholen(db, now: datetime, mindestalter_min: int =
                 log.warning("Termin-Nacharbeit %s: Fahrzeug-Zusammenfassung weiter offen", appt["id"])
                 continue
             if not hat_vorgang and appt.get("vehicle_id"):
-                ziel = {"abgeholt": "abgeholt", "nicht abgeholt": "nicht_abgeholt"}.get(
-                    status, "abholung_geplant" if status not in _TERMIN_GESCHLOSSEN else None)
-                if ziel:
-                    await try_set_lifecycle(appt["vehicle_id"], appt.get("dealer_id", ""), ziel)
+                # Rollenprüfung 22.09.2026 (RP-080/RP-179 Nr. 5, RP-265/RP-015):
+                # dieselbe Tabelle wie Buero und Fahrer-App und nie am
+                # Fahrzeug eines Kollegen, dessen Kauf noch laeuft.
+                await _fahrzeug_ohne_vorgang_nachziehen(appt, status)
             await db.appointments.update_one(
                 {"id": appt["id"]},
                 {"$unset": {"nacharbeit_offen": "", "nacharbeit_protokoll_id": "",
@@ -1434,11 +1606,18 @@ async def inseratscache_rotieren(db, now: datetime,
 
 
 async def _inserat_mit_fotos_loeschen(db, listing: dict, *, grund: str,
-                                      dealer_id: str = "") -> bool:
+                                      dealer_id: str = "",
+                                      bedingung: Optional[dict] = None) -> bool:
     """Inserat samt hochgeladener Fotos loeschen. Fotos, die sich nicht
     loeschen lassen, werden vorgemerkt; das Inserat bleibt dann mit
     `loeschung_offen: True` und den restlichen Keys stehen und wird von der
-    Nachholung geloescht, sobald das letzte Foto weg ist. True = Dokument weg."""
+    Nachholung geloescht, sobald das letzte Foto weg ist. True = Dokument weg.
+
+    Rollenprüfung 22.09.2026 (RP-084/RP-183): `bedingung` (z. B. {"status":
+    "geloescht"}) gilt fuer das Loeschen bzw. Markieren des Dokuments mit —
+    vorher traf der Write nur die id, egal was inzwischen am Inserat
+    passiert war."""
+    bedingung = dict(bedingung or {})
     keys = list((listing.get("photos") or {}).get("uploaded_keys") or [])
     weg = []
     for k in keys:
@@ -1450,13 +1629,13 @@ async def _inserat_mit_fotos_loeschen(db, listing: dict, *, grund: str,
         if ok:
             weg.append(k)
     if len(weg) == len(keys):
-        await db.resale_listings.delete_one({"id": listing["id"]})
-        return True
+        r = await db.resale_listings.delete_one({"id": listing["id"], **bedingung})
+        return bool(r.deleted_count) or not bedingung
     upd = {"$set": {"status": "geloescht", "loeschung_offen": True,
                     "updated_at": now_iso()}}
     if weg:
         upd["$pull"] = {"photos.uploaded_keys": {"$in": weg}}
-    await db.resale_listings.update_one({"id": listing["id"]}, upd)
+    await db.resale_listings.update_one({"id": listing["id"], **bedingung}, upd)
     return False
 
 
@@ -1483,15 +1662,53 @@ async def abgelaufene_inserate_entfernen(db, now: datetime) -> int:
     from routes.resale import INSERAT_LAUFZEIT_TAGE
     grenze = (now - timedelta(days=INSERAT_LAUFZEIT_TAGE)).isoformat()
     n = 0
-    async for l in db.resale_listings.find(
-            {"status": "veroeffentlicht", "published_at": {"$lt": grenze}},
-            {"_id": 0, "id": 1, "dealer_id": 1, "photos": 1,
-             "published_at": 1, "vehicle_id": 1}).limit(500):
+    # Rollenprüfung 22.09.2026 (RP-517 / RP-098 Nr. 1): Gibt der Betreiber
+    # die Reservierung eines gesperrten oder geloeschten Kaeufers frei
+    # (admin.kaeufer_reservierungen_freigeben), steht das Inserat wieder
+    # oeffentlich und traegt `wieder_veroeffentlicht_am`. War published_at
+    # aelter als die Laufzeit, loeschte dieser Lauf es binnen einer Stunde —
+    # der Haendler verlor sein Inserat, ohne etwas getan zu haben. Jetzt
+    # zaehlt die Laufzeit ab dem SPAETEREN der beiden Zeitpunkte
+    # (max(published_at, wieder_veroeffentlicht_am)); ohne Freigabe bleibt es
+    # bei der ersten Veroeffentlichung.
+    frei_frist = {"$or": [{"wieder_veroeffentlicht_am": {"$exists": False}},
+                          {"wieder_veroeffentlicht_am": {"$in": [None, ""]}},
+                          {"wieder_veroeffentlicht_am": {"$lt": grenze}}]}
+    kandidaten = await db.resale_listings.find(
+        {"status": "veroeffentlicht", "published_at": {"$lt": grenze}, **frei_frist},
+        {"_id": 0, "id": 1, "dealer_id": 1, "photos": 1, "published_at": 1,
+         "wieder_veroeffentlicht_am": 1, "vehicle_id": 1}).limit(500).to_list(500)
+    for l in kandidaten:
         try:
-            if await _inserat_mit_fotos_loeschen(
-                    db, l, grund="inserat_laufzeit_abgelaufen",
-                    dealer_id=l.get("dealer_id") or ""):
-                n += 1
+            # Rollenprüfung 22.09.2026 (RP-084/RP-183): ZUERST per Compare-and-
+            # Set beenden — nur, wenn das Inserat noch "veroeffentlicht" ist und
+            # dieselbe Veroeffentlichung traegt. Vorher wurde per id geloescht:
+            # reservierte ein Kaeufer das Inserat zwischen Lesen und Loeschen,
+            # verschwand die Reservierung mit. Trifft der CAS nicht, hat sich
+            # etwas geaendert (reserviert, verkauft, zurueckgezogen, freigegeben)
+            # — dann bleibt das Inserat unberuehrt.
+            jetzt = now_iso()
+            r = await db.resale_listings.update_one(
+                {"id": l["id"], "status": "veroeffentlicht",
+                 "published_at": l.get("published_at"),
+                 "wieder_veroeffentlicht_am": l.get("wieder_veroeffentlicht_am")},
+                {"$set": {"status": "geloescht", "deleted_at": jetzt, "updated_at": jetzt,
+                          "geloescht_grund": "laufzeit_abgelaufen"}})
+            if not r.matched_count:
+                continue
+            n += 1
+            # Laufende Verhandlungen mit eigenem Grund beenden (RP-084/RP-519)
+            # — vorher standen sie bis zum naechsten Lauf als "laufend" da und
+            # wurden dann nur als "inserat_weg" geschlossen.
+            await _anfragen_zum_inserat_schliessen(db, l["id"], "inserat_abgelaufen")
+            # Das Fahrzeug blieb dauerhaft auf "veroeffentlicht" — create_draft
+            # verweigerte danach jedes neue Inserat (400). Zurueck in den
+            # Bestand, wie beim Loeschen eines Inserats von Hand.
+            await _fahrzeug_nach_inseratsende_zuruecksetzen(db, l.get("vehicle_id"),
+                                                             l.get("dealer_id") or "")
+            await _inserat_mit_fotos_loeschen(
+                db, l, grund="inserat_laufzeit_abgelaufen",
+                dealer_id=l.get("dealer_id") or "", bedingung={"status": "geloescht"})
             await log_activity_sicher(
                 l.get("dealer_id") or "", "", "inserat.laufzeit_abgelaufen",
                 ref=l["id"], meta={"veroeffentlicht_am": l.get("published_at"),
@@ -1501,6 +1718,164 @@ async def abgelaufene_inserate_entfernen(db, now: datetime) -> int:
     if n:
         log.info("%d Inserate nach %d Tagen Laufzeit entfernt",
                  n, INSERAT_LAUFZEIT_TAGE)
+    return n
+
+
+async def _anfragen_zum_inserat_schliessen(db, listing_id: str, grund: str) -> int:
+    """Rollenprüfung 22.09.2026 (RP-084/RP-519): laufende Kaufanfragen eines
+    beendeten Inserats schliessen — dieselbe Wirkung wie
+    routes.resale._anfragen_schliessen (auch akzeptierte), aber ueber die
+    uebergebene Datenbank des Aufraeumlaufs."""
+    try:
+        from routes.marketplace import INTERESSE_OFFEN
+        stati = [*INTERESSE_OFFEN, "akzeptiert"]
+    except Exception:  # noqa: BLE001
+        stati = ["offen", "gegenangebot", "gegenangebot_kaeufer", "akzeptiert"]
+    jetzt = now_iso()
+    r = await db.listing_interest.update_many(
+        {"listing_id": listing_id, "status": {"$in": stati}},
+        {"$set": {"status": "abgelehnt", "beendet_grund": grund, "updated_at": jetzt},
+         "$push": {"history": {"von": "system", "aktion": grund, "zeit": jetzt}}})
+    return r.modified_count
+
+
+#: Fahrzeugzustaende, in denen das Fahrzeug "dem Inserat gehoert" (wie
+#: routes.resale._RESALE_LIFECYCLES).
+_INSERAT_LEBENSZYKLEN = ("verkaufsentwurf", "verkaufsbereit", "veroeffentlicht", "reserviert")
+
+
+async def _zustand_vor_abholung_in(db, vehicle_id: str, dealer_id: str) -> Optional[str]:
+    """Rollenprüfung 22.09.2026 (Review): dieselbe Regel wie
+    routes.resale._zustand_vor_abholung (RP-518), aber ueber die UEBERGEBENE
+    Datenbank des Aufraeumlaufs (die routes-Funktion liest die globale
+    deps.db). Kaufzustand VOR der Abholung, wenn noch nichts abgeholt, aber
+    ein Kauf offen ist (abholung_geplant > gekauft); sonst None ("bestand").
+    Aendert sich die Regel dort, muss sie hier mitgezogen werden."""
+    v = await db.vehicles.find_one({"id": vehicle_id, "dealer_id": dealer_id},
+                                   {"_id": 0, "id": 1, "purchase_price": 1,
+                                    "abgeholt_kaufvorgang_id": 1})
+    if v is None or v.get("purchase_price") is not None or v.get("abgeholt_kaufvorgang_id"):
+        return None
+    grund = {"vehicle_id": vehicle_id, "dealer_id": dealer_id}
+    if await db.kaufvorgaenge.find_one({**grund, "status": "abgeholt"}, {"_id": 0, "id": 1}):
+        return None
+    if await db.kaufvorgaenge.find_one({**grund, "status": "abholung_geplant"},
+                                       {"_id": 0, "id": 1}):
+        return "abholung_geplant"
+    if await db.kaufvorgaenge.find_one({**grund, "status": {"$in": ["vertrag_erstellt",
+                                                                   "gesendet"]}},
+                                       {"_id": 0, "id": 1}):
+        return "gekauft"
+    return None
+
+
+async def _fahrzeug_nach_inseratsende_zuruecksetzen(db, vehicle_id: Optional[str],
+                                                    dealer_id: str,
+                                                    nur_aus: Optional[tuple] = None) -> bool:
+    """Rollenprüfung 22.09.2026 (RP-084/RP-183): Fahrzeug nach dem Ende seines
+    Inserats zurueck in den Bestand (wie routes.resale.delete_listing; bei
+    offenem Kauf ohne Abholung in den Kaufzustand, RP-518) — als
+    EIN Compare-and-Set auf den gelesenen Zustand, mit frischer Bestandsfrist
+    (sonst archivierte eine alte, laengst abgelaufene Frist das Fahrzeug im
+    naechsten Lauf samt Fotos). Fahrzeuge ausserhalb des Verkaufsblocks
+    (archiviert, geloescht, verkauft ...) bleiben unberuehrt. True = zurueck-
+    gesetzt; bei einem verlorenen CAS Betriebsalarm (der Nachholer
+    fahrzeuge_ohne_inserat_zuruecksetzen versucht es erneut)."""
+    if not vehicle_id:
+        return False
+    v = await db.vehicles.find_one({"id": vehicle_id, "dealer_id": dealer_id},
+                                   {"_id": 0, "lifecycle": 1})
+    aktuell = (v or {}).get("lifecycle")
+    if not v or aktuell not in (nur_aus or _INSERAT_LEBENSZYKLEN):
+        return False
+    # Rollenprüfung 22.09.2026 (Review): RP-518 galt nur fuer das Loeschen von
+    # Hand (resale.delete_listing). Ein VOR der Abholung angelegtes Inserat,
+    # das nach 21 Tagen automatisch endet (oder das der Nachholer unten
+    # findet), setzte das Fahrzeug weiter fest auf "bestand" — danach aenderte
+    # "nicht abgeholt"/"storniert" nichts mehr, und nach 50 Tagen archivierte
+    # der Aufraeumer ein nie abgeholtes Auto samt Fotos. Jetzt dieselbe
+    # Zielbestimmung wie delete_listing: ist ein Kauf offen und nichts
+    # abgeholt, zurueck in den Kaufzustand; nur sonst "bestand".
+    vor_abholung = await _zustand_vor_abholung_in(db, vehicle_id, dealer_id)
+    try:
+        from routes.resale import _lifecycle_pfad, _pfad_zurueck
+        weg = _pfad_zurueck(aktuell, vor_abholung) if vor_abholung else None
+        pfad = weg or _lifecycle_pfad(aktuell, "bestand")
+    except Exception as exc:  # noqa: BLE001 — kein erlaubter Weg: melden
+        await alarm(db, "inserat_ende_fahrzeug_offen", ref=f"{dealer_id}/{vehicle_id}",
+                    dealer_id=dealer_id, vehicle_id=vehicle_id, lifecycle=aktuell,
+                    fehler=str(exc)[:200])
+        return False
+    ziel = pfad[-1]
+    jetzt = datetime.now(timezone.utc)
+    setzen = {"lifecycle": ziel, "lifecycle_changed_at": jetzt.isoformat(),
+              "updated_at": jetzt.isoformat()}
+    if ziel == "bestand":
+        # Frische Bestandsfrist NUR fuer den Bestand (RP-092/191/342).
+        try:
+            from routes.bestand import BESTAND_RETENTION_DAYS as _tage
+        except Exception:  # noqa: BLE001
+            _tage = 50
+        setzen["bestand.expires_at"] = (jetzt + timedelta(days=_tage)).isoformat()
+        setzen["bestand.inserat_beendet_am"] = jetzt.isoformat()
+    r = await db.vehicles.update_one(
+        {"id": vehicle_id, "dealer_id": dealer_id, "lifecycle": aktuell},
+        {"$set": setzen})
+    if not r.matched_count:
+        await alarm(db, "inserat_ende_fahrzeug_offen", ref=f"{dealer_id}/{vehicle_id}",
+                    dealer_id=dealer_id, vehicle_id=vehicle_id, lifecycle=aktuell,
+                    fehler="Fahrzeugstatus hat sich zwischenzeitlich geaendert")
+        return False
+    await alarm_schliessen(db, "inserat_ende_fahrzeug_offen", ref=f"{dealer_id}/{vehicle_id}")
+    try:
+        from deps import log_activity_sicher
+        von = aktuell
+        for nach in pfad:
+            await log_activity_sicher(dealer_id, "", f"fahrzeug.status.{nach}",
+                                      ref=vehicle_id, meta={"von": von, "nach": nach,
+                                                            "grund": "inserat_beendet"})
+            von = nach
+    except Exception:  # noqa: BLE001 — der Zustand ist geschrieben
+        log.exception("Audit fuer Fahrzeug %s nach Inseratsende fehlt", vehicle_id)
+    return True
+
+
+async def fahrzeuge_ohne_inserat_zuruecksetzen(db, now: datetime, mindestalter_min: int = 30,
+                                               limit: int = 200) -> int:
+    """Rollenprüfung 22.09.2026 (RP-183): Nachholer fuer Fahrzeuge, die auf
+    "veroeffentlicht" bzw. "reserviert" stehen, obwohl es zu ihnen KEIN
+    Inserat mehr gibt, das nicht geloescht ist (Altbestand der 21-Tage-
+    Loeschung ohne Fahrzeug-Rueckweg, oder ein verlorener CAS oben). Solche
+    Fahrzeuge liessen sich nie wieder inserieren. Nur, wenn der Zustand
+    aelter als `mindestalter_min` ist (eine laufende Veroeffentlichung wird
+    nicht gestoert), und nie bei verkauften Inseraten."""
+    grenze = (now - timedelta(minutes=mindestalter_min)).isoformat()
+    kandidaten = await db.vehicles.aggregate([
+        {"$match": {"lifecycle": {"$in": ["veroeffentlicht", "reserviert"]},
+                    "$or": [{"lifecycle_changed_at": {"$lt": grenze}},
+                            {"lifecycle_changed_at": {"$in": [None, ""]}}]}},
+        {"$lookup": {"from": "resale_listings",
+                     "let": {"vid": "$id", "did": "$dealer_id"},
+                     "pipeline": [
+                         {"$match": {"$expr": {"$and": [
+                             {"$eq": ["$vehicle_id", "$$vid"]},
+                             {"$eq": ["$dealer_id", "$$did"]},
+                             {"$ne": ["$status", "geloescht"]}]}}},
+                         {"$limit": 1}, {"$project": {"_id": 1}}],
+                     "as": "inserate"}},
+        {"$match": {"inserate": {"$size": 0}}},
+        {"$project": {"_id": 0, "id": 1, "dealer_id": 1}},
+        {"$limit": limit},
+    ]).to_list(limit)
+    n = 0
+    for v in kandidaten:
+        try:
+            if await _fahrzeug_nach_inseratsende_zuruecksetzen(
+                    db, v["id"], v.get("dealer_id") or "",
+                    nur_aus=("veroeffentlicht", "reserviert")):
+                n += 1
+        except Exception:  # noqa: BLE001
+            log.exception("Fahrzeug %s ohne Inserat nicht zurueckgesetzt", v.get("id"))
     return n
 
 
@@ -1562,6 +1937,44 @@ async def konten_ohne_firma_sperren(db) -> int:
     return n
 
 
+async def mehrere_chefkonten_melden(db, limit: int = 200) -> int:
+    """Rollenprüfung 22.09.2026 (RP-046/RP-145 Nr. 5): "genau EIN Chefkonto
+    (role dealer) je Firma" hat keinen Rueckhalt in der Datenbank. Ein
+    Teil-Unique-Index users(dealer_id | role='dealer') waere einer — er
+    wuerde aber den Chefwechsel brechen: admin._chef_befoerdern macht in
+    seiner Transaktion ZUERST den Nachfolger zum dealer und stuft erst danach
+    den bisherigen Chef herab, und Mongo prueft Eindeutigkeit je Schreibvorgang
+    (nicht erst am Ende der Transaktion). Deshalb hier der Alarm ohne Sperre:
+    jeder Aufraeumlauf meldet Firmen mit mehr als einem aktiven dealer-Konto
+    (Alarm mehrere_chefkonten, ref = Firma) und schliesst ihn, sobald nur noch
+    eines uebrig ist. Nichts wird automatisch geaendert (der Betreiber stuft
+    ueberzaehlige Konten zum Sucher herab). Liefert die Zahl der Firmen."""
+    betroffen = await db.users.aggregate([
+        {"$match": {"role": "dealer", "dealer_id": {"$type": "string", "$gt": ""},
+                    "loeschung.status": {"$ne": "laeuft"}}},
+        {"$group": {"_id": "$dealer_id", "n": {"$sum": 1},
+                    "konten": {"$push": {"$ifNull": ["$kontonummer", "$id"]}}}},
+        {"$match": {"n": {"$gt": 1}}},
+        {"$sort": {"_id": 1}},
+        {"$limit": limit},
+    ]).to_list(limit)
+    gemeldet = set()
+    for f in betroffen:
+        gemeldet.add(f["_id"])
+        await alarm(db, "mehrere_chefkonten", ref=f["_id"], konten=f["n"],
+                    kontonummern=", ".join(str(k) for k in f["konten"][:10]),
+                    hinweis="Eine Firma hat genau einen Chef (dealers.user_id). "
+                            "Ueberzaehlige dealer-Konten in der Nutzerverwaltung "
+                            "zum Sucher machen.")
+    if len(betroffen) < limit:
+        # nur schliessen, wenn die Liste vollstaendig war
+        async for a in db.betriebsalarme.find({"typ": "mehrere_chefkonten", "offen": True},
+                                              {"_id": 0, "ref": 1}):
+            if a.get("ref") not in gemeldet:
+                await alarm_schliessen(db, "mehrere_chefkonten", ref=a.get("ref") or "")
+    return len(betroffen)
+
+
 async def marktplatz_rotieren(db, now: datetime) -> dict:
     """Marktplatz-Altdaten: abgeschlossene Interessensanfragen nach 180
     Tagen, geloeschte Inserate (Soft-Delete) samt Fotos nach 90 Tagen,
@@ -1605,8 +2018,20 @@ async def marktplatz_rotieren(db, now: datetime) -> dict:
     if paket:
         stats["interessen_verwaist_geschlossen"] += await _paket_schliessen(paket)
     cutoff = (now - timedelta(days=INTERESSEN_AUFBEWAHRUNG_TAGE)).isoformat()
+    # Rollenprüfung 22.09.2026 (RP-513): Eine AKZEPTIERTE Anfrage ist die
+    # Grundlage einer laufenden Reservierung. Nach 60 Tagen ohne Aenderung
+    # wurde sie trotzdem geloescht — der Kaeufer sah "sein" reserviertes Auto
+    # nicht mehr, der Haendler die Absprache nicht. Akzeptierte Anfragen zu
+    # Inseraten, die noch "reserviert" sind, bleiben deshalb stehen; ihre
+    # Frist beginnt erst, wenn die Reservierung endet (dann schliesst
+    # _anfragen_schliessen sie, und updated_at laeuft neu).
+    reserviert = [i for i in await db.resale_listings.distinct(
+        "id", {"status": "reserviert"}) if i]
     r = await db.listing_interest.delete_many(
-        {"status": {"$in": ["akzeptiert", "abgelehnt"]}, **_aelter_als(cutoff)})
+        {"$and": [
+            {"$or": [{"status": "abgelehnt"},
+                     {"status": "akzeptiert", "listing_id": {"$nin": reserviert}}]},
+            _aelter_als(cutoff)]})
     stats["interessen_geloescht"] = r.deleted_count
 
     cutoff = (now - timedelta(days=INSERATE_GELOESCHT_AUFBEWAHRUNG_TAGE)).isoformat()
@@ -1619,7 +2044,8 @@ async def marktplatz_rotieren(db, now: datetime) -> dict:
             {"_id": 0, "id": 1, "dealer_id": 1, "photos": 1}).batch_size(200):
         if await _inserat_mit_fotos_loeschen(
                 db, l, grund="inserat_geloescht_frist",
-                dealer_id=l.get("dealer_id") or ""):
+                dealer_id=l.get("dealer_id") or "",
+                bedingung={"status": "geloescht"}):   # RP-084: nur, was geloescht IST
             stats["inserate_geloescht"] += 1
 
     listing_ids = await db.buyer_favorites.distinct("listing_id")
@@ -1775,13 +2201,17 @@ async def storage_loeschungen_nachholen(db, limit: int = 200) -> int:
         # Referenz bereinigen — ein zweites Loeschen koennte fehlschlagen.
         if not e.get("storage_deleted"):
             try:
+                # Rollenprüfung 22.09.2026 (RP-550): im eigenen Speicher-Pool —
+                # ein haengender Objektspeicher blockiert so nicht den
+                # gemeinsamen Pool (Passwortpruefung, PDF).
+                from storage_service import speicher_aufruf
                 if art == "prefix":
-                    await asyncio.to_thread(storage.delete_prefix, e["prefix"])
+                    await speicher_aufruf(storage.delete_prefix, e["prefix"])
                 elif art == "snapshot":
-                    if not await asyncio.to_thread(delete_object, e["key"]):
+                    if not await speicher_aufruf(delete_object, e["key"]):
                         raise RuntimeError("Snapshot-Storage meldet Fehlschlag")
                 else:
-                    await asyncio.to_thread(storage.delete, e["key"])
+                    await speicher_aufruf(storage.delete, e["key"])
             except Exception as exc:  # noqa: BLE001
                 await _fehlschlag(e, art, str(exc))
                 continue
@@ -1856,20 +2286,34 @@ async def auto_daten_reparieren(db, limit: int = 500) -> int:
                 repariert += 1
         except Exception:  # noqa: BLE001
             log.exception("Nachfuehrung der Auto-Daten fuer Vertrag %s fehlgeschlagen", c.get("id"))
-    ohne_datum = [d["id"] async for d in db[auto_daten.COLLECTION].find(
-        {"purchase_date": {"$exists": False}}, {"_id": 0, "id": 1})]
-    for i in range(0, len(ohne_datum), limit):
-        async for c in db.generated_pdfs.find(
-                {"admin_vehicle_data_id": {"$in": ohne_datum[i:i + limit]}},
-                {"_id": 0, "admin_vehicle_data_id": 1, "created_at": 1}):
-            tag = auto_daten.kaufdatum(c.get("created_at"))
-            if tag:
-                r = await db[auto_daten.COLLECTION].update_one(
-                    {"id": c["admin_vehicle_data_id"],
-                     "purchase_date": {"$exists": False}},
-                    {"$set": {"purchase_date": tag,
-                              "schema_version": auto_daten.SCHEMA_VERSION}})
-                repariert += r.modified_count
+    # Rollenprüfung 22.09.2026 (RP-250/RP-401): Vorher wurden in JEDEM Lauf
+    # ALLE Datensaetze ohne purchase_date als Liste geladen. Datensaetze, deren
+    # Vertrag schon geloescht ist, bekommen nie mehr ein Datum (genau das ist
+    # die Anonymisierung) — die Liste wuchs also ohne Grenze. Jetzt geht der
+    # Weg ueber die VERTRAEGE (die haben selbst eine Frist und sind damit
+    # begrenzt): nur Vertraege, deren Datensatz noch ohne Datum ist, und das
+    # als Datenbank-Cursor. Datensaetze ohne Vertrag werden gar nicht erst
+    # gelesen und bleiben unveraendert.
+    async for c in db.generated_pdfs.aggregate([
+            {"$match": {"admin_vehicle_data_id": {"$type": "string", "$ne": ""}}},
+            {"$project": {"_id": 0, "admin_vehicle_data_id": 1, "created_at": 1}},
+            {"$lookup": {"from": auto_daten.COLLECTION,
+                         "let": {"avd": "$admin_vehicle_data_id"},
+                         "pipeline": [
+                             {"$match": {"$expr": {"$eq": ["$id", "$$avd"]},
+                                         "purchase_date": {"$exists": False}}},
+                             {"$limit": 1}, {"$project": {"_id": 1}}],
+                         "as": "ohne_datum"}},
+            {"$match": {"ohne_datum": {"$ne": []}}},
+    ]):
+        tag = auto_daten.kaufdatum(c.get("created_at"))
+        if tag:
+            r = await db[auto_daten.COLLECTION].update_one(
+                {"id": c["admin_vehicle_data_id"],
+                 "purchase_date": {"$exists": False}},
+                {"$set": {"purchase_date": tag,
+                          "schema_version": auto_daten.SCHEMA_VERSION}})
+            repariert += r.modified_count
     return repariert
 
 
@@ -1886,17 +2330,34 @@ async def termine_ohne_vertrag_bereinigen(db, now: datetime, frist_tage: int = 0
     frist_tage = frist_tage or VERTRAG_AUFBEWAHRUNG_TAGE
     grenze = (now - timedelta(days=frist_tage))
     grenze_iso = grenze.isoformat()
+    # Rollenprüfung 22.09.2026 (RP-248/RP-399): Vorher gab es KEINE
+    # Statusbedingung, und der Stichtag war Abholdatum bzw. Anlage — ein noch
+    # OFFENER Termin ohne Vertrag mit altem Datum verlor Verkaeufername,
+    # Telefon, E-Mail, Anschrift, Notizen und Protokoll-Dateien, waehrend er
+    # noch lief. Jetzt: nur geschlossene Termine; Stichtag ist der Abschluss
+    # (abgeschlossen_seit, ersatzweise status_changed_at, erst dann Abhol-
+    # bzw. Anlagedatum). Die Datumsgrenze filtert schon die Datenbank grob
+    # vor (naechster Tag als ISO-Text), damit nicht jede Stunde ALLE Termine
+    # mit Personendaten geladen werden; die genaue Pruefung steht unten.
+    tag_danach = (grenze + timedelta(days=1)).date().isoformat()
+    projektion = {"_id": 0, "id": 1, "dealer_id": 1, "pickup_date": 1, "created_at": 1,
+                  "contract_id": 1, "status": 1, "abgeschlossen_seit": 1,
+                  "status_changed_at": 1}
     n = 0
     cursor = db.appointments.find(
         {"$and": [
             {"pii_geloescht_at": {"$in": [None, ""]}},
+            {"status": {"$in": list(_TERMIN_GESCHLOSSEN)}},
             {"$or": [{"seller_name": {"$nin": [None, ""]}},
                      {"seller_phone": {"$nin": [None, ""]}},
                      {"seller_email": {"$nin": [None, ""]}},
                      {"pickup_address": {"$nin": [None, ""]}}]},
+            {"$or": [{"abgeschlossen_seit": {"$lt": tag_danach}},
+                     {"status_changed_at": {"$lt": tag_danach}},
+                     {"pickup_date": {"$lt": tag_danach}},
+                     {"created_at": {"$lt": tag_danach}}]},
         ]},
-        {"_id": 0, "id": 1, "dealer_id": 1, "pickup_date": 1, "created_at": 1,
-         "contract_id": 1})
+        projektion).batch_size(500)
     kandidaten = [a async for a in cursor]
     # Pruefung 14.09.2026 (Liste 5, Nr. 8): Termine, deren eigene Felder schon
     # leer sind, aber deren PROTOKOLL noch Personendaten/Dateien traegt, fielen
@@ -1911,14 +2372,15 @@ async def termine_ohne_vertrag_bereinigen(db, now: datetime, frist_tage: int = 0
         aid = p.get("appointment_id")
         if not aid or aid in gesehen:
             continue
-        a = await db.appointments.find_one(
-            {"id": aid}, {"_id": 0, "id": 1, "dealer_id": 1, "pickup_date": 1,
-                          "created_at": 1, "contract_id": 1})
+        a = await db.appointments.find_one({"id": aid}, projektion)
         if a:
             gesehen.add(aid)
             kandidaten.append(a)
     for a in kandidaten:
-        stichtag = (a.get("pickup_date") or a.get("created_at") or "")[:10]
+        if (a.get("status") or "offen") not in _TERMIN_GESCHLOSSEN:
+            continue        # RP-248: laufende Termine behalten ihre Daten
+        stichtag = (a.get("abgeschlossen_seit") or a.get("status_changed_at")
+                    or a.get("pickup_date") or a.get("created_at") or "")[:10]
         if not stichtag or stichtag > grenze_iso[:10]:
             continue
         if a.get("contract_id"):
@@ -2266,25 +2728,63 @@ async def run_cleanup_forever(db):
         # verloren, hat sie schon ein anderer Prozess. Vor JEDEM weiteren
         # Schritt nachsehen und dann aufhoeren — sonst loeschen zwei
         # Prozesse gleichzeitig dieselben Dateien.
-        from job_lock import SperreVerloren
-        async with heartbeat(db, "cleanup-cycle", token,
-                             CLEANUP_INTERVAL_SECONDS - 60) as wache:
-            schritte = (
-                ("cleanup loop", lambda d, _w=wache: _cleanup_once(d, wache=_w)),
-                ("snapshot reaper", _reap_stuck_snapshots),
-                ("snapshot expiry", _expire_old_snapshots),
-                ("beweis expiry", _beweise_verfallen),
-            )
-            for name, schritt in schritte:
-                try:
-                    wache.pruefen()
-                    await schritt(db)
-                except SperreVerloren as exc:
-                    log.warning("Aufraeumlauf bei '%s' beendet: %s", name, exc)
-                    break
-                except Exception as exc:  # noqa: BLE001
-                    log.exception("%s error: %s", name, exc)
+        from job_lock import SperreVerloren, release
+        pausiert = False
+        # Rollenprüfung 22.09.2026 (RP-245/RP-396): Der laufende Lauf zaehlt
+        # als Schreiber (wartung.hintergrund_schreibt) — die Sicherung wartet
+        # in auslaufen_lassen auf sein Ende, statt nur auf HTTP-Anfragen. Und
+        # die Sperre traegt "lauf_aktiv", damit ein Restore sieht, ob gerade
+        # wirklich aufgeraeumt wird (die Sperre selbst gilt eine Stunde).
+        await _lauf_aktiv_setzen(db, token, True)
+        try:
+            with wartung.hintergrund_schreibt():
+                async with heartbeat(db, "cleanup-cycle", token,
+                                     CLEANUP_INTERVAL_SECONDS - 60) as wache:
+                    schritte = (
+                        ("cleanup loop", lambda d, _w=wache: _cleanup_once(d, wache=_w)),
+                        ("snapshot reaper", _reap_stuck_snapshots),
+                        ("snapshot expiry", _expire_old_snapshots),
+                        ("beweis expiry", _beweise_verfallen),
+                    )
+                    for name, schritt in schritte:
+                        try:
+                            wache.pruefen()
+                            # RP-245: auch die Schreibpause zwischen den Schritten
+                            await _weiter(None, db)
+                            await schritt(db)
+                        except SperreVerloren as exc:
+                            log.warning("Aufraeumlauf bei '%s' beendet: %s", name, exc)
+                            break
+                        except SchreibpauseAktiv as exc:
+                            log.warning("Aufraeumlauf bei '%s' angehalten: %s", name, exc)
+                            pausiert = True
+                            break
+                        except Exception as exc:  # noqa: BLE001
+                            log.exception("%s error: %s", name, exc)
+        finally:
+            await _lauf_aktiv_setzen(db, token, False)
+        if pausiert:
+            # Sperre freigeben: sonst waere sie noch fast eine Stunde belegt,
+            # obwohl nichts mehr laeuft — der naechste Lauf nach der Pause
+            # soll nicht daran haengen.
+            try:
+                await release(db, "cleanup-cycle", token=token)
+            except Exception:  # noqa: BLE001
+                log.warning("Sperre cleanup-cycle nach der Schreibpause nicht freigegeben")
         await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
+
+
+async def _lauf_aktiv_setzen(db, token: str, aktiv: bool) -> None:
+    """Rollenprüfung 22.09.2026 (RP-245): Merker an der eigenen Sperre, ob
+    der Aufraeumlauf gerade arbeitet (scripts/restore_mongo.py wartet darauf).
+    Wirft nie."""
+    try:
+        await db.job_locks.update_one(
+            {"name": "cleanup-cycle", "token": token},
+            {"$set": {"lauf_aktiv": bool(aktiv),
+                      "lauf_stand": datetime.now(timezone.utc)}})
+    except Exception:  # noqa: BLE001
+        log.debug("lauf_aktiv an der Sperre cleanup-cycle nicht gesetzt")
 
 
 async def _beweise_verfallen(db) -> None:
@@ -2675,6 +3175,23 @@ async def vertrag_nach_abholung_nachholen(db) -> int:
             # Deshalb wird jetzt das GANZE Protokoll geladen und werden die
             # Korrekturen genauso berechnet wie im Normalpfad.
             p = await db.pickup_protocols.find_one({"id": protokoll_id}, {"_id": 0})
+            umgeleitet = False
+            if p and p.get("superseded"):
+                # Rollenprüfung 22.09.2026 (RP-073/RP-172): Der Alarm nennt die
+                # Protokollversion, bei der die Neuerzeugung scheiterte (v1).
+                # Wurde das Protokoll danach korrigiert (v2 final, v1 abgeloest),
+                # erzeugte dieser Nachholer den Vertrag mit Preis, Schaeden und
+                # Korrekturen von v1 NEU und ueberschrieb die richtige
+                # v2-Fassung — der Idempotenz-Merker half nicht (v2 != v1).
+                # Jetzt: auf die aktuelle finale Version desselben Termins
+                # umleiten. Gibt es keine, ist nichts mehr nachzuholen.
+                p = await db.pickup_protocols.find_one(
+                    {"appointment_id": p.get("appointment_id"), "status": "final",
+                     "superseded": {"$ne": True}}, {"_id": 0},
+                    sort=[("version", -1)])
+                if p:
+                    protokoll_id = p["id"]
+                    umgeleitet = True
             appt = await db.appointments.find_one({"id": (p or {}).get("appointment_id")}, {"_id": 0}) \
                 if p else None
             # Pruefbericht 20.09.2026 (V-12): hat der Chef die Abholung
@@ -2683,10 +3200,33 @@ async def vertrag_nach_abholung_nachholen(db) -> int:
             # "Neuen Vertrag senden" fuer einen Kauf, der nicht mehr gilt).
             if not p or not appt or p.get("status") != "final" \
                     or appt.get("contract_id") != contract_id \
+                    or ("contract_id" in p and (p.get("contract_id") or None) != contract_id) \
                     or (appt.get("status") or "offen") in _AUSGANG_ZURUECK:
                 await alarm_schliessen(db, "vertrag_nach_abholung_offen", ref=contract_id)
                 continue
             korrekturen, neue_schaeden = await protokoll_korrekturen(appt, p)
+            # Rollenprüfung 22.09.2026 (Review): Nach der Umleitung auf die
+            # aktuelle Version (RP-073) blieb der v1-Alarm fuer immer offen,
+            # wenn v2 nichts Neues traegt (kein Preis, kein Vermerk, keine
+            # Korrekturen/Schaeden — z. B. Preis zurueck auf den Vertragspreis)
+            # und der Vertrag nie eine Fassung nach der Abholung bekam:
+            # vertrag_nach_abholung_aktualisieren steigt dann mit False aus,
+            # ohne den Alarm zu schliessen — jede Stunde derselbe Versuch und
+            # ein falscher Hinweis "Neuerzeugung fehlgeschlagen". Der Vertrag
+            # stimmt in diesem Fall (v2 selbst verlangt keine neue Fassung):
+            # Alarm zu. Nur bei Umleitung — ohne sie deutet "nichts Neues" bei
+            # einem Alarm dieser Version eher auf einen voruebergehenden
+            # Lesefehler (protokoll_korrekturen wirft nie), dann bleibt er.
+            if umgeleitet and p.get("neuer_preis") is None \
+                    and not (p.get("sondervereinbarung") or "").strip() \
+                    and not korrekturen and not neue_schaeden:
+                stand = await db.generated_pdfs.find_one(
+                    {"id": contract_id},
+                    {"_id": 0, "nach_abholung_protokoll_id": 1, "vertrag_vor_abholung": 1})
+                if not (stand or {}).get("nach_abholung_protokoll_id") \
+                        and not (stand or {}).get("vertrag_vor_abholung"):
+                    await alarm_schliessen(db, "vertrag_nach_abholung_offen", ref=contract_id)
+                    continue
             erneuert = await vertrag_nach_abholung_aktualisieren(
                 appt, protokoll_id, p.get("neuer_preis"),
                 p.get("sondervereinbarung"),
@@ -2780,7 +3320,6 @@ async def termine_frisch_abgleichen(db, now: datetime, stunden: int = 2, limit: 
     try:
         from routes.appointments import _vertragszeiger_abgleichen
         from routes.protocols import preis_nachholen
-        from lifecycle import try_set_lifecycle, zustand_fuer_terminstatus
         import kaufvorgang as _kv
     except Exception:  # noqa: BLE001
         return 0
@@ -2795,8 +3334,20 @@ async def termine_frisch_abgleichen(db, now: datetime, stunden: int = 2, limit: 
              "vehicle_id": 1, "kaufvorgang_id": 1, "updated_at": 1,
              "status_changed_at": 1, "abgeschlossen_seit": 1},
         ).sort("updated_at", 1).to_list(limit)
-        for appt in paket:
+        for paket_stand in paket:
             try:
+                # Rollenprüfung 22.09.2026 (RP-241/RP-392): Das Paket wurde
+                # vorab gelesen. Stornierte oder oeffnete der Chef den Termin
+                # dazwischen (V-12), schrieb der Job den ALTEN Status per
+                # termin_status_uebernehmen in den Kaufvorgang ("abgeholt") —
+                # bis zum naechsten Lauf waren Fahrzeug und Vorgang falsch.
+                # Jetzt vor Preis und Status frisch lesen (wie
+                # termin_nacharbeit_nachholen) und den Termin ueberspringen,
+                # wenn er sich geaendert hat — sein neues updated_at bringt
+                # ihn im naechsten Lauf ohnehin wieder in dieses Fenster.
+                appt = await _termin_unveraendert(db, paket_stand)
+                if appt is None:
+                    continue
                 await _vertragszeiger_abgleichen(appt["dealer_id"], appt["id"], appt.get("contract_id"))
                 status = appt.get("status") or "offen"
                 # Pruefbericht 20.09.2026 (V-29): dieselben Schritte wie der
@@ -2810,15 +3361,19 @@ async def termine_frisch_abgleichen(db, now: datetime, stunden: int = 2, limit: 
                 except Exception:  # noqa: BLE001
                     log.exception("Frischabgleich: Preis zu Termin %s nicht nachgezogen",
                                   appt.get("id"))
+                # RP-241: unmittelbar vor der Statusuebernahme noch einmal —
+                # der Preis-Schritt dauert, der Chef kann dazwischen speichern.
+                appt = await _termin_unveraendert(db, appt)
+                if appt is None:
+                    continue
                 hat_vorgang = await _kv.termin_status_uebernehmen(appt, status)
                 if not hat_vorgang and appt.get("vehicle_id"):
                     # Termin ohne Kaufvorgang: Lebenszyklus direkt (dieselbe
                     # Tabelle wie Fahrer-App und Buero; ungueltige Uebergaenge
-                    # lehnt try_set_lifecycle ab).
-                    ziel = zustand_fuer_terminstatus(status) or (
-                        "abholung_geplant" if status not in _TERMIN_GESCHLOSSEN else None)
-                    if ziel:
-                        await try_set_lifecycle(appt["vehicle_id"], appt["dealer_id"], ziel)
+                    # lehnt try_set_lifecycle ab). Rollenprüfung 22.09.2026
+                    # (RP-265/RP-015): nur, wenn am Fahrzeug keine Kaufvorgaenge
+                    # (auch keine eines Kollegen) haengen — sonst Zusammenfassung.
+                    await _fahrzeug_ohne_vorgang_nachziehen(appt, status)
                 if status in _TERMIN_GESCHLOSSEN and not appt.get("abgeschlossen_seit") \
                         and appt.get("status_changed_at"):
                     # Frist ab dem ersten Endstatus (sonst nur ueber den Rueckfall)
@@ -2827,7 +3382,7 @@ async def termine_frisch_abgleichen(db, now: datetime, stunden: int = 2, limit: 
                         {"$set": {"abgeschlossen_seit": appt["status_changed_at"]}})
                 n += 1
             except Exception:  # noqa: BLE001
-                log.exception("Frischabgleich Termin %s fehlgeschlagen", appt.get("id"))
+                log.exception("Frischabgleich Termin %s fehlgeschlagen", paket_stand.get("id"))
         if len(paket) < limit or not paket[-1].get("updated_at") or paket[-1]["updated_at"] == ab:
             break
         ab, op = paket[-1]["updated_at"], "$gt"
@@ -2853,6 +3408,24 @@ async def termine_frisch_abgleichen(db, now: datetime, stunden: int = 2, limit: 
             break
         ab, op = paket[-1]["updated_at"], "$gt"
     return n
+
+
+_FRISCHABGLEICH_FELDER = {"_id": 0, "id": 1, "dealer_id": 1, "contract_id": 1, "status": 1,
+                          "vehicle_id": 1, "kaufvorgang_id": 1, "updated_at": 1,
+                          "status_changed_at": 1, "abgeschlossen_seit": 1}
+
+
+async def _termin_unveraendert(db, stand: dict) -> Optional[dict]:
+    """Rollenprüfung 22.09.2026 (RP-241/RP-392): den Termin frisch lesen und
+    nur zurueckgeben, wenn Status und updated_at noch dem gelesenen Stand
+    entsprechen. None = geloescht oder inzwischen geaendert (ueberspringen)."""
+    frisch = await db.appointments.find_one({"id": stand.get("id")}, _FRISCHABGLEICH_FELDER)
+    if not frisch:
+        return None
+    if (frisch.get("status") or "offen") != (stand.get("status") or "offen") \
+            or frisch.get("updated_at") != stand.get("updated_at"):
+        return None
+    return frisch
 
 
 async def fahrer_trennung_nachholen(db) -> int:
@@ -2891,26 +3464,71 @@ async def fahrer_verknuepfung_abgleichen(db, limit: int = 500) -> int:
     fehlt die Zuteilung, wird sie auf 'offen' gesetzt."""
     from deps import TERMIN_OFFEN_WERTE
     n = 0
-    paare: set = set()
-    async for appt in db.appointments.find(
-            {"driver_id": {"$type": "string", "$ne": ""},
-             "status": {"$in": TERMIN_OFFEN_WERTE}},
-            {"_id": 0, "id": 1, "dealer_id": 1, "driver_id": 1, "zuteilung": 1}).limit(limit):
-        schluessel = (appt.get("dealer_id"), appt["driver_id"])
-        if schluessel in paare:
-            continue
-        paare.add(schluessel)
+    # Rollenprüfung 22.09.2026 (RP-242/RP-393): vorher ging der Lauf mit
+    # .limit(500) ueber TERMINE (ohne Sortierung, ohne Weiterblaettern) und
+    # bildete daraus die Paare. Hatten die ersten 500 offenen Termine nur
+    # wenige Fahrer, sah er Paare dahinter NIE — ein entfernter Fahrer blieb
+    # dort dauerhaft zugeteilt. Jetzt bildet die Datenbank die Paare
+    # (Firma, Fahrer) ueber ALLE offenen Termine und liefert nur die ohne
+    # Verknuepfung; `limit` begrenzt diese kaputten Paare je Lauf (bereinigte
+    # fallen heraus, es verhungert also keines dahinter).
+    # Rollenprüfung 22.09.2026 (RP-080/RP-179 Nr. 2): ein GESPERRTES Fahrer-
+    # konto (active False) oder eines in laufender Loeschung zaehlt wie eine
+    # fehlende Verknuepfung. Der Fahrer kommt nicht mehr in die App — die
+    # Fahrt hinge sonst unsichtbar an ihm. Dieselbe Regel wie beim Sperren
+    # durch den Betreiber (admin_driver_set_active); hier der Rueckhalt, wenn
+    # dort ein Schritt scheiterte oder der Chef den Fahrer danach zuteilte.
+    # Ein Konto, das es gar nicht (mehr) gibt, ohne Verknuepfung, faellt
+    # schon unter die erste Regel.
+    paare_liste = await db.appointments.aggregate([
+        {"$match": {"driver_id": {"$type": "string", "$ne": ""},
+                    "status": {"$in": TERMIN_OFFEN_WERTE}}},
+        {"$group": {"_id": {"dealer_id": "$dealer_id", "driver_id": "$driver_id"}}},
+        {"$lookup": {"from": "dealer_drivers",
+                     "let": {"d": "$_id.dealer_id", "f": "$_id.driver_id"},
+                     "pipeline": [
+                         {"$match": {"$expr": {"$and": [
+                             {"$eq": ["$dealer_id", "$$d"]},
+                             {"$eq": ["$driver_account_id", "$$f"]}]}}},
+                         {"$limit": 1}, {"$project": {"_id": 1}}],
+                     "as": "verknuepfung"}},
+        {"$lookup": {"from": "driver_accounts",
+                     "let": {"f": "$_id.driver_id"},
+                     "pipeline": [
+                         {"$match": {"$expr": {"$eq": ["$id", "$$f"]}}},
+                         {"$limit": 1},
+                         {"$project": {"_id": 0, "active": 1, "loeschung.status": 1}}],
+                     "as": "konto"}},
+        {"$match": {"$or": [{"verknuepfung": {"$size": 0}},
+                            {"konto.active": False},
+                            {"konto.loeschung.status": "laeuft"}]}},
+        {"$sort": {"_id.dealer_id": 1, "_id.driver_id": 1}},
+        {"$limit": limit},
+    ]).to_list(limit)
+    for zeile in paare_liste:
+        appt = {"dealer_id": zeile["_id"].get("dealer_id"),
+                "driver_id": zeile["_id"].get("driver_id")}
         try:
-            if not await db.dealer_drivers.find_one(
-                    {"dealer_id": appt.get("dealer_id"), "driver_account_id": appt["driver_id"]},
-                    {"_id": 1}):
-                r = await db.appointments.update_many(
-                    {"dealer_id": appt.get("dealer_id"), "driver_id": appt["driver_id"],
-                     "status": {"$in": TERMIN_OFFEN_WERTE}},
-                    {"$unset": {"driver_id": ""}, "$set": {"zuteilung": None, "updated_at": now_iso()}})
-                n += r.modified_count
-                await alarm(db, "fahrer_ohne_verknuepfung_getrennt", ref=appt["driver_id"],
-                            dealer_id=appt.get("dealer_id") or "", termine=r.modified_count)
+            # frisch nachsehen (zwischen Aggregation und Schreiben kann der
+            # Chef neu verknuepfen bzw. der Betreiber entsperren)
+            verknuepft = await db.dealer_drivers.find_one(
+                {"dealer_id": appt.get("dealer_id"), "driver_account_id": appt["driver_id"]},
+                {"_id": 1})
+            konto = await db.driver_accounts.find_one(
+                {"id": appt["driver_id"]}, {"_id": 0, "active": 1, "loeschung": 1})
+            gesperrt = konto is not None and (
+                konto.get("active") is False
+                or (konto.get("loeschung") or {}).get("status") == "laeuft")
+            if verknuepft and not gesperrt:
+                continue
+            r = await db.appointments.update_many(
+                {"dealer_id": appt.get("dealer_id"), "driver_id": appt["driver_id"],
+                 "status": {"$in": TERMIN_OFFEN_WERTE}},
+                {"$unset": {"driver_id": ""}, "$set": {"zuteilung": None, "updated_at": now_iso()}})
+            n += r.modified_count
+            await alarm(db, "fahrer_ohne_verknuepfung_getrennt", ref=appt["driver_id"],
+                        dealer_id=appt.get("dealer_id") or "", termine=r.modified_count,
+                        grund="konto_gesperrt" if gesperrt else "ohne_verknuepfung")
         except Exception:  # noqa: BLE001
             log.exception("Fahrer-Verknuepfung %s/%s nicht abgeglichen", appt.get("dealer_id"),
                           appt["driver_id"])

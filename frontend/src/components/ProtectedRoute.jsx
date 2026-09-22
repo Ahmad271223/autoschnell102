@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { Navigate, useLocation } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { bereichVonPfad, darfBereich, startseite } from "@/lib/rollen";
@@ -30,6 +31,30 @@ export const ProtectedRoute = ({ children, requireSub = true, adminOnly = false 
   const bereich = adminOnly ? "admin" : bereichVonPfad(loc.pathname);
   if (!darfBereich(user, bereich)) return <Navigate to={startseite(user)} replace />;
 
-  if (requireSub && !subscription?.active) return <Navigate to="/abo" replace />;
+  if (requireSub && !subscription?.active) return <AboNachpruefen />;
   return children;
 };
+
+/**
+ * Rollenprüfung 22.09.2026 (RP-006/RP-105/RP-109, Welle 2): Der Abo-Stand im
+ * Anmelde-Kontext stammt vom Laden der App. Hat der Betreiber inzwischen
+ * freigeschaltet, schickte die Sperre trotzdem nach /abo — bis zum Neuladen.
+ * Jetzt wird vor der Umleitung EINMAL frisch nachgefragt: ist das Abo aktiv,
+ * rendert ProtectedRoute danach die Seite (der Kontext ist neu), sonst geht
+ * es wie bisher nach /abo. Kein Kreislauf: je Aufruf genau ein refresh().
+ */
+function AboNachpruefen() {
+  const { refresh } = useAuth();
+  const [geprueft, setGeprueft] = useState(false);
+  useEffect(() => {
+    let aktiv = true;
+    Promise.resolve(typeof refresh === "function" ? refresh() : null)
+      .catch(() => null)
+      .finally(() => { if (aktiv) setGeprueft(true); });
+    return () => { aktiv = false; };
+  }, [refresh]);
+  if (!geprueft) {
+    return <div className="min-h-screen flex items-center justify-center text-zinc-500">Lade…</div>;
+  }
+  return <Navigate to="/abo" replace />;
+}

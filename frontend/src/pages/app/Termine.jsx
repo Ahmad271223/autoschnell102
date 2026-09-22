@@ -16,6 +16,7 @@ import AbholberichtDialog from "@/components/AbholberichtDialog";
 import { Link } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { useFreigabeZaehler } from "@/lib/freigaben";
+import { preisAusText } from "@/lib/preis";
 import {
   startOfMonth, endOfMonth, startOfWeek, endOfWeek, eachDayOfInterval,
   format, isSameMonth, isSameDay, addMonths, addDays, parseISO, isValid as isValidDate,
@@ -176,6 +177,86 @@ export function ausgangFrage(alt, neu, hatProtokoll = false,
     + "\n\nWirklich ändern?";
 }
 
+/**
+ * Rollenprüfung 22.09.2026 (RP-043/142): Hat der Nutzer im Dialog etwas
+ * geändert? Ein Tipp neben das Fenster (am Handy schnell passiert) schloss den
+ * Dialog bisher ohne Rückfrage — alle Eingaben waren weg. Leer, null und
+ * „nicht gesetzt“ gelten als gleich (ein leeres Auswahlfeld ist keine Änderung).
+ */
+export function dialogGeaendert(a, appt) {
+  const leer = (v) => v === null || v === undefined || v === "";
+  const schluessel = new Set([...Object.keys(a || {}), ...Object.keys(appt || {})]);
+  for (const k of schluessel) {
+    const x = a?.[k];
+    const y = appt?.[k];
+    if (leer(x) && leer(y)) continue;
+    if (typeof x === "object" || typeof y === "object") {
+      if (JSON.stringify(x ?? null) !== JSON.stringify(y ?? null)) return true;
+      continue;
+    }
+    if (String(x) !== String(y)) return true;
+  }
+  return false;
+}
+
+/**
+ * Rollenprüfung 22.09.2026 (RP-418): „Sonstige Kosten“ in deutscher
+ * Schreibweise. Das Feld war type="number" mit Number(...) — aus „1.200“
+ * wurden 1,20 €. Jetzt über preisAusText (lib/preis.js).
+ * Rückgabe { wert, fehler }: leer -> wert null; unlesbar -> fehler true.
+ */
+export function kostenAusEingabe(text) {
+  const t = String(text ?? "").trim();
+  if (!t) return { wert: null, fehler: false };
+  const zahl = preisAusText(t);
+  return zahl === null ? { wert: null, fehler: true } : { wert: zahl, fehler: false };
+}
+
+/** Gespeicherten Betrag für das Textfeld deutsch zeigen („1.200,5“). */
+export function kostenAlsText(wert) {
+  if (wert === null || wert === undefined || wert === "") return "";
+  const zahl = Number(wert);
+  if (!Number.isFinite(zahl)) return "";
+  return new Intl.NumberFormat("de-DE", { maximumFractionDigits: 2 }).format(zahl);
+}
+
+// Rollenprüfung 22.09.2026 (RP-464): stilles Nachladen der Terminliste.
+export const TERMINE_NACHLADEN_MS = 60000;
+
+/**
+ * Rollenprüfung 22.09.2026 (RP-464): Offene Termine, die der Fahrer abgelehnt
+ * hat und die noch niemand neu zugeteilt hat — neueste Ablehnung zuerst.
+ */
+export function vomFahrerAbgelehnt(items) {
+  return (Array.isArray(items) ? items : [])
+    .filter((a) => a && a.zuteilung === "abgelehnt" && !a.driver_id
+      && !ABGESCHLOSSEN.has(a.status || "offen"))
+    .sort((x, y) => String(y.zuteilung_beantwortet_am || "")
+      .localeCompare(String(x.zuteilung_beantwortet_am || "")));
+}
+
+/**
+ * Rollenprüfung 22.09.2026 (RP-542): tel:-Link zur Fahrer-Telefonnummer
+ * (nur Ziffern und ein führendes +); null, wenn nichts Wählbares bleibt.
+ */
+export function telHref(nummer) {
+  const roh = String(nummer ?? "").trim();
+  const ziffern = roh.replace(/[^\d+]/g, "").replace(/(?!^)\+/g, "");
+  return ziffern.replace(/\D/g, "").length >= 3 ? `tel:${ziffern}` : null;
+}
+
+// Rollenprüfung 22.09.2026 (RP-482/075/174): Rückfrage, wenn der Server eine
+// offene (abgebrochene) Protokoll-Korrektur meldet.
+export const KORREKTUR_VERWERFEN_FRAGE = "Für diesen Termin ist eine Korrektur-Version des "
+  + "Abholprotokolls offen, die der Fahrer nicht abgeschlossen hat.\n\n"
+  + "Korrektur verwerfen und den Termin wieder auf „abgeholt“ setzen? Danach gilt wieder "
+  + "die zuvor unterschriebene Fassung des Protokolls.";
+// Rollenprüfung 22.09.2026 (RP-497): Rückfrage beim Löschen mit Abholbericht.
+export const BERICHT_LOESCHEN_FRAGE = "Zu diesem Termin gibt es einen Abholbericht des Fahrers "
+  + "(Fotos, Kilometerstand, Mängel). Empfohlen: den Termin stornieren statt löschen — dann "
+  + "bleibt der Bericht erhalten.\n\nTrotzdem löschen? Der Bericht wird samt Fotos "
+  + "unwiderruflich mitgelöscht.";
+
 /** Hinweis im Termin-Dialog, wenn der Ausgang nachtraeglich geaendert wurde. */
 export function ausgangHinweis(ag) {
   if (!ag || typeof ag !== "object") return null;
@@ -252,6 +333,30 @@ export default function Termine() {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filter]);
+  // Rollenprüfung 22.09.2026 (RP-464, Übergabe Fahrer-App): Die Liste lud nur
+  // beim Öffnen — eine Ablehnung des Fahrers (oder seine Annahme) sah der Chef
+  // erst nach manuellem Neuladen. Jetzt still alle 60 s (nur sichtbar) und
+  // beim Zurückkehren auf die Seite (visibilitychange/focus), wie Freigaben.jsx.
+  const ladenRef = useRef(load);
+  useEffect(() => { ladenRef.current = load; });
+  useEffect(() => {
+    let zuletzt = 0;
+    const sichtbar = () => {
+      // focus und visibilitychange kommen beim Tabwechsel beide — nur einmal laden.
+      if (document.visibilityState !== "visible" || Date.now() - zuletzt < 2000) return;
+      zuletzt = Date.now();
+      ladenRef.current();
+    };
+    const t = setInterval(sichtbar, TERMINE_NACHLADEN_MS);
+    document.addEventListener("visibilitychange", sichtbar);
+    window.addEventListener("focus", sichtbar);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", sichtbar);
+      window.removeEventListener("focus", sichtbar);
+    };
+  }, []);
+  const abgelehnt = useMemo(() => vomFahrerAbgelehnt(items), [items]);
   // H21: Ob die Fahrerliste da ist — sonst darf der Dialog einen schon
   // zugeteilten Fahrer nicht als "kein Fahrer" anzeigen (und beim Speichern
   // entfernen).
@@ -298,6 +403,13 @@ export default function Termine() {
           && /Rückfrage im Terminplaner/i.test(errMsg(err, ""))) {
         return "ausgang";
       }
+      // Rollenprüfung 22.09.2026 (RP-482/075/174): offene Protokoll-Korrektur —
+      // der Hauptaccount wird gefragt, ob sie verworfen werden soll (Sucher
+      // bekommen die Meldung als Fehler, der Server lässt nur den Chef zu).
+      if (status === 409 && a.id && chef && !a.korrektur_verwerfen
+          && /Korrektur verwerfen/i.test(errMsg(err, ""))) {
+        return "korrektur";
+      }
       // Pruefbericht 20.09.2026 (B11): Beim veralteten Stand (409 "bitte neu
       // laden") behielt der Dialog seinen alten Stand samt updated_at — jeder
       // weitere Versuch scheiterte identisch, ohne Ausweg. Jetzt wird der
@@ -325,10 +437,13 @@ export default function Termine() {
   // Pruefbericht 20.09.2026 (B9/F12): await ohne Fehlerbehandlung — jeder
   // Backend-Fehler ("abgeschlossene Termine loescht nur der Hauptaccount",
   // "bitte zuerst stornieren") verschwand; der Dialog blieb einfach stehen.
-  const remove = async (id) => {
-    if (!window.confirm("Termin löschen?")) return false;
+  // Rollenprüfung 22.09.2026 (RP-497): mit berichtOk bestätigt der Chef
+  // ausdrücklich, dass der Abholbericht des Fahrers mitgelöscht wird.
+  const remove = async (id, berichtOk = false) => {
+    if (!berichtOk && !window.confirm("Termin löschen?")) return false;
     try {
-      await api.delete(`/appointments/${id}`);
+      await api.delete(`/appointments/${id}`,
+        berichtOk ? { params: { bericht_loeschen: 1 } } : undefined);
       toast.success("Gelöscht");
       setEditing(null);
       load();
@@ -339,6 +454,10 @@ export default function Termine() {
         setEditing(null);
         load();
         return true;
+      }
+      if (chef && !berichtOk && err?.response?.status === 409
+          && /Abholbericht des Fahrers/i.test(errMsg(err, ""))) {
+        return window.confirm(BERICHT_LOESCHEN_FRAGE) ? remove(id, true) : false;
       }
       toast.error(errMsg(err, "Termin konnte nicht gelöscht werden"), { duration: 10000 });
       return false;
@@ -392,6 +511,9 @@ export default function Termine() {
       {/* Runde 30: Abholprotokolle, die auf die Freigabe des Chefs warten.
           Runde 33: Sie haben eine eigene Seite — hier nur der Hinweis. */}
       <FreigabeHinweis />
+      {/* Rollenprüfung 22.09.2026 (RP-464): Ablehnungen des Fahrers mit Grund
+          im Klartext — vorher nur als Tooltip am einzelnen Termin. */}
+      <AbgelehntHinweis liste={abgelehnt} onEdit={setEditing} />
       {/* Header */}
       <div className="flex flex-wrap items-end justify-between gap-4 mb-6">
         <div>
@@ -489,9 +611,13 @@ export default function Termine() {
 
 function MonthView({ cursor, setCursor, days, apptsByDay, selectedDay, setSelectedDay, selectedAppts, upcomingAppts, onEdit }) {
   return (
-    <div className="grid lg:grid-cols-[1fr_380px] gap-5">
+    // Rollenprüfung 22.09.2026 (RP-466): unter lg eine feste Spalte (grid-cols-1)
+    // und min-w-0 — vorher bestimmte die min-content-Breite des Seitenpanels
+    // (ein langer Termintitel mit truncate) die Spaltenbreite, und am Handy
+    // lagen Monatswechsel sowie Fr/Sa/So ausserhalb des Bildes.
+    <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_380px] gap-5">
       {/* Calendar */}
-      <div className="apple-surface-gloss p-4 lg:p-5">
+      <div className="apple-surface-gloss p-4 lg:p-5 min-w-0">
         <div className="flex items-center justify-between mb-4">
           <div className="font-display font-bold text-2xl lg:text-3xl tracking-tight">
             {format(cursor, "LLLL yyyy", { locale: de })}
@@ -552,7 +678,7 @@ function MonthView({ cursor, setCursor, days, apptsByDay, selectedDay, setSelect
       </div>
 
       {/* Side panel: selected day + upcoming */}
-      <div className="space-y-5">
+      <div className="space-y-5 min-w-0">
         <div className="apple-surface-gloss p-5" data-testid="day-panel">
           <div className="flex items-center justify-between mb-4">
             <div>
@@ -631,9 +757,29 @@ function DayApptItem({ a, onEdit, compact, mitBeweis = false }) {
               {a.zuteilung === "angenommen" && <span className="text-emerald-300"> · angenommen</span>}
             </span>
           )}
+          {/* Rollenprüfung 22.09.2026 (RP-542): Telefon des Fahrers (nur der
+              Hauptchef bekommt es vom Server). Die Zeile ist selbst ein Knopf —
+              deshalb kein <a> darin, sondern role="link" wie beim Abholbericht. */}
+          {telHref(a.driver?.phone) && (
+            <span role="link" tabIndex={0} data-testid={`fahrer-tel-${a.id}`}
+                  title={`${a.driver.name || "Fahrer"} anrufen`}
+                  onClick={(e) => { e.stopPropagation(); window.location.href = telHref(a.driver.phone); }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault(); e.stopPropagation();
+                      window.location.href = telHref(a.driver.phone);
+                    }
+                  }}
+                  className="inline-flex items-center gap-1 text-[11px] text-sky-300 hover:underline cursor-pointer">
+              <Phone size={10} /> {a.driver.phone}
+            </span>
+          )}
           {!a.driver?.name && a.zuteilung === "abgelehnt" && (
-            <span className="inline-flex items-center gap-1 text-[11px] text-red-300" title={a.zuteilung_abgelehnt_grund || ""}>
-              <UserIcon size={10} /> vom Fahrer abgelehnt{a.zuteilung_abgelehnt_von ? ` (${a.zuteilung_abgelehnt_von})` : ""} — bitte neu zuteilen
+            <span className="inline-flex flex-wrap items-center gap-1 text-[11px] text-red-300 min-w-0 [overflow-wrap:anywhere]"
+                  data-testid={`abgelehnt-zeile-${a.id}`}>
+              <UserIcon size={10} /> vom Fahrer abgelehnt{a.zuteilung_abgelehnt_von ? ` (${a.zuteilung_abgelehnt_von})` : ""}
+              {/* Rollenprüfung 22.09.2026 (RP-464): Grund im Klartext statt nur als Tooltip */}
+              {a.zuteilung_abgelehnt_grund ? `: „${a.zuteilung_abgelehnt_grund}“` : ""} — bitte neu zuteilen
             </span>
           )}
           {a.has_pickup_report && (
@@ -752,13 +898,20 @@ function EditDialog({ appt, drivers, fahrerGeladen = true, chef = false, isNew, 
   // H19: Doppelklick legte zwei identische Termine an — waehrend des
   // Speicherns/Loeschens sind die Knoepfe gesperrt.
   const [arbeitet, setArbeitet] = useState(false);
+  // Rollenprüfung 22.09.2026 (RP-418): Kosten als getippter Text (deutsche
+  // Schreibweise), erst beim Speichern über preisAusText in eine Zahl.
+  const kostenStart = kostenAlsText(appt?.extra_costs);
+  const [kostenText, setKostenText] = useState(kostenStart);
   const speichern = async () => {
     if (arbeitet) return;
-    const kosten = a.extra_costs;
-    if (kosten !== null && kosten !== undefined && kosten !== "" && !(Number(kosten) >= 0)) {
-      toast.error("Sonstige Kosten: bitte einen Betrag ab 0 € eintragen.");
+    const kosten = kostenAusEingabe(kostenText);
+    if (kosten.fehler) {
+      toast.error("Sonstige Kosten: bitte einen Betrag ab 0 € eintragen, z. B. 1.200 oder 12,50.");
       return;
     }
+    // Unverändertes Feld: der gespeicherte Betrag geht unverändert mit (keine
+    // Rundung über die Anzeige); nur ein neu getippter Betrag wird umgerechnet.
+    const mitKosten = kostenText === kostenStart ? a : { ...a, extra_costs: kosten.wert };
     // Pruefbericht 20.09.2026 (V-12): abgeholt/erledigt -> storniert / nicht
     // abgeholt nur nach Rueckfrage; Abbrechen laesst den alten Status stehen.
     // Pruefung 21.09.2026 (V-12): mit Kauf- und Fahrzeugstand des Termins,
@@ -774,14 +927,21 @@ function EditDialog({ appt, drivers, fahrerGeladen = true, chef = false, isNew, 
     }
     setArbeitet(true);
     try {
-      let ok = await onSave(frage ? { ...a, ausgang_bestaetigt: true } : a);
+      let ok = await onSave(frage ? { ...mitKosten, ausgang_bestaetigt: true } : mitKosten);
       if (ok === "ausgang") {
         // Pruefung 21.09.2026 (V-12): Der Server verlangt die Rueckfrage.
         const nachfrage = ausgangFrage(altStatus, a.status, !!appt.protocol_id,
           { ...ausgangOpts, belegt: true });
         ok = nachfrage && window.confirm(nachfrage)
-          ? await onSave({ ...a, ausgang_bestaetigt: true }) : false;
+          ? await onSave({ ...mitKosten, ausgang_bestaetigt: true }) : false;
         if (ok === "ausgang") ok = false;
+      }
+      if (ok === "korrektur") {
+        // Rollenprüfung 22.09.2026 (RP-482/075/174): offene Protokoll-Korrektur
+        // verwerfen (nur nach ausdrücklicher Bestätigung des Chefs).
+        ok = window.confirm(KORREKTUR_VERWERFEN_FRAGE)
+          ? await onSave({ ...mitKosten, korrektur_verwerfen: true }) : false;
+        if (ok === "korrektur" || ok === "ausgang") ok = false;
       }
       // U-54: nach einem gescheiterten Speichern zeigt der Dialog wieder den
       // Status, der wirklich gilt — nicht den abgelehnten.
@@ -823,9 +983,18 @@ function EditDialog({ appt, drivers, fahrerGeladen = true, chef = false, isNew, 
     return () => { cancelled = true; };
   }, [a.driver_id, a.pickup_date, a.id]);
 
+  // Rollenprüfung 22.09.2026 (RP-043/142): Ein Tipp neben das Fenster schließt
+  // nur, wenn nichts geändert wurde — sonst mit Rückfrage. X und „Abbrechen“
+  // schließen wie bisher sofort.
+  const hintergrundKlick = () => {
+    if (arbeitet) return;
+    const geaendert = dialogGeaendert(a, appt) || kostenText !== kostenStart;
+    if (!geaendert || window.confirm("Änderungen verwerfen?")) onClose();
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 apple-modal-backdrop"
-         onClick={onClose}>
+         onClick={hintergrundKlick} data-testid="edit-appt-hintergrund">
       <div className="apple-modal w-full max-w-xl max-h-[90vh] overflow-y-auto"
            onClick={(e) => e.stopPropagation()}
            data-testid="edit-appt-dialog">
@@ -924,6 +1093,13 @@ function EditDialog({ appt, drivers, fahrerGeladen = true, chef = false, isNew, 
                 )}
                 {drivers.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
               </select>
+              {/* Rollenprüfung 22.09.2026 (RP-542): zugeteilten Fahrer direkt anrufen */}
+              {a.driver_id && a.driver_id === appt?.driver_id && telHref(appt?.driver?.phone) && (
+                <a href={telHref(appt.driver.phone)} data-testid="edit-driver-tel"
+                   className="mt-1.5 inline-flex items-center gap-1.5 text-xs text-sky-300 hover:underline">
+                  <Phone size={12} /> {appt.driver.name || "Fahrer"} anrufen: {appt.driver.phone}
+                </a>
+              )}
               {conflict && (
                 <div data-testid="driver-conflict-warning"
                      className="mt-2 p-2.5 rounded-sm text-xs leading-relaxed"
@@ -971,10 +1147,13 @@ function EditDialog({ appt, drivers, fahrerGeladen = true, chef = false, isNew, 
             <div className="space-y-1.5">
               <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Sonstige Kosten (€)</label>
               {/* N18: "0" ist ein gueltiger Betrag (vorher wurde er verworfen),
-                  negative Betraege lehnt speichern() ab. */}
-              <input data-testid="edit-extra-costs" type="number" min="0" step="0.01"
-                     value={a.extra_costs ?? ""}
-                     onChange={(e) => set("extra_costs", e.target.value === "" ? null : Number(e.target.value))}
+                  negative Betraege lehnt speichern() ab.
+                  Rollenprüfung 22.09.2026 (RP-418): Texteingabe in deutscher
+                  Schreibweise ("1.200" = 1200 €, "12,50") statt type="number". */}
+              <input data-testid="edit-extra-costs" type="text" inputMode="decimal"
+                     value={kostenText}
+                     onChange={(e) => setKostenText(e.target.value)}
+                     placeholder="z. B. 1.200"
                      className="apple-input" />
             </div>
           </div>
@@ -1100,6 +1279,41 @@ function EditDialog({ appt, drivers, fahrerGeladen = true, chef = false, isNew, 
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+// Rollenprüfung 22.09.2026 (RP-464): „Vom Fahrer abgelehnt (n)“ mit Grund.
+function AbgelehntHinweis({ liste, onEdit }) {
+  if (!liste?.length) return null;
+  return (
+    <div className="mb-5 rounded-xl border px-4 py-3 text-sm" role="status"
+         data-testid="termine-abgelehnt-hinweis"
+         style={{ borderColor: "#ff3b3055", background: "#ff3b3014", color: "var(--tx-rot)" }}>
+      <div className="font-semibold">Vom Fahrer abgelehnt ({liste.length}) — bitte neu zuteilen</div>
+      <ul className="mt-2 space-y-1.5">
+        {liste.map((a) => {
+          const datum = safeParse(a.pickup_date);
+          return (
+            <li key={a.id} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 min-w-0"
+                data-testid={`abgelehnt-${a.id}`}>
+              <button type="button" onClick={() => onEdit(a)}
+                      className="underline underline-offset-2 hover:opacity-80 text-left min-w-0 [overflow-wrap:anywhere]"
+                      style={{ color: "var(--text-primary)" }}>
+                {a.title || "Termin"}
+              </button>
+              <span className="text-[12px]" style={{ color: "var(--text-muted)" }}>
+                {datum ? format(datum, "d. LLL", { locale: de }) : "ohne Datum"}
+                {a.pickup_time ? `, ${a.pickup_time}` : ""}
+                {a.zuteilung_abgelehnt_von ? ` · ${a.zuteilung_abgelehnt_von}` : ""}
+              </span>
+              <span className="text-[12px] w-full [overflow-wrap:anywhere]" data-testid={`abgelehnt-grund-${a.id}`}>
+                {a.zuteilung_abgelehnt_grund ? `Grund: ${a.zuteilung_abgelehnt_grund}` : "ohne Angabe eines Grundes"}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
     </div>
   );
 }

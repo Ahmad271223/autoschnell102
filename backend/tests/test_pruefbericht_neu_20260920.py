@@ -102,8 +102,11 @@ def test_02_die_nachlese_wiederholt_die_uebergabe():
     assert hasattr(CS, "konto_nachlese_abarbeiten")
     code = _nur_code("cleanup_service.py")
     # ast.unparse normalisiert Anfuehrungszeichen — beide Schreibweisen gelten.
+    # Rollenprüfung 22.09.2026 (RP-243): jeder Schritt laeuft ueber _schritt,
+    # das Ergebnis landet dort unter seinem Namen in stats — s('konto_nachlese', ...).
     assert ('stats["konto_nachlese"]' in code
-            or "stats['konto_nachlese']" in code), (
+            or "stats['konto_nachlese']" in code
+            or "s('konto_nachlese'" in code or 's("konto_nachlese"' in code), (
         "die Nachlese laeuft in keinem Aufraeumdurchgang")
 
 

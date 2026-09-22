@@ -327,6 +327,18 @@ class LocalDiskStorage:
         return sum(1 for p in ordner.rglob("*") if p.is_file())
 
 
+def _ist_nicht_gefunden(exc: Exception) -> bool:
+    """RP-547: Meldet der Objektspeicher "gibt es nicht"? (botocore
+    ClientError mit Code NoSuchKey / 404 / NotFound)"""
+    antwort = getattr(exc, "response", None)
+    if not isinstance(antwort, dict):
+        return False
+    fehler = antwort.get("Error") or {}
+    code = str(fehler.get("Code") or "")
+    status = (antwort.get("ResponseMetadata") or {}).get("HTTPStatusCode")
+    return code in ("NoSuchKey", "404", "NotFound") or status == 404
+
+
 class S3Storage:
     """S3-kompatibles Backend (MinIO / AWS S3 / Cloudflare R2 / …).
 
@@ -354,7 +366,18 @@ class S3Storage:
 
     def load(self, key: str) -> bytes:
         _validate_key(key)
-        obj = self.client.get_object(Bucket=self.bucket, Key=key)
+        try:
+            obj = self.client.get_object(Bucket=self.bucket, Key=key)
+        except Exception as exc:  # noqa: BLE001
+            # Rollenprüfung 22.09.2026 (RP-547): ein fehlender Schluessel kam
+            # als botocore-ClientError (NoSuchKey) statt als StorageError —
+            # /api/files antwortete 500 statt 404, und jeder Aufruf schrieb
+            # einen Traceback in error_logs. Wie LocalDiskStorage: "nicht
+            # gefunden" ist ein StorageError. Andere Fehler (Rechte, Stoerung)
+            # bleiben, was sie sind.
+            if _ist_nicht_gefunden(exc):
+                raise StorageError("Datei nicht gefunden") from exc
+            raise
         return obj["Body"].read()
 
     def delete(self, key: str) -> bool:
@@ -486,22 +509,51 @@ storage = _build_storage()
 # diese Wrapper nutzen, sonst steht der ganze Event-Loop des Workers,
 # waehrend EINE Datei geschrieben/gelesen/geloescht wird.
 import asyncio as _asyncio
+import contextvars as _contextvars
+import functools as _functools
+from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor
+
+
+def _speicher_threads() -> int:
+    try:
+        return max(2, min(64, int((os.environ.get("SPEICHER_THREADS") or "").strip() or 16)))
+    except ValueError:
+        return 16
+
+
+#: Rollenprüfung 22.09.2026 (RP-550): EIGENER Thread-Pool fuer Dateizugriffe.
+#: Vorher liefen Speicherzugriffe (asyncio.to_thread) und die Passwortpruefung
+#: (bcrypt, auth.verify_password_async) im selben Standard-Pool — auf 4 vCPU
+#: gerade 8 Threads. Hing R2, belegten wartende Datei-Aufrufe alle Threads,
+#: und Anmeldung, PDF-Erzeugung und Vertragsdruck standen fuer alle. Jetzt
+#: koennen Speicher-Aufrufe nur noch diesen Pool fuellen.
+_SPEICHER_POOL = _ThreadPoolExecutor(max_workers=_speicher_threads(),
+                                     thread_name_prefix="speicher")
+
+
+async def speicher_aufruf(funktion, *args):
+    """Blockierenden Speicher-Aufruf im eigenen Pool ausfuehren (wie
+    asyncio.to_thread, inklusive Kontextvariablen)."""
+    loop = _asyncio.get_running_loop()
+    kontext = _contextvars.copy_context()
+    return await loop.run_in_executor(
+        _SPEICHER_POOL, _functools.partial(kontext.run, funktion, *args))
 
 
 async def save_async(key: str, data: bytes) -> str:
-    return await _asyncio.to_thread(storage.save, key, data)
+    return await speicher_aufruf(storage.save, key, data)
 
 
 async def load_async(key: str) -> bytes:
-    return await _asyncio.to_thread(storage.load, key)
+    return await speicher_aufruf(storage.load, key)
 
 
 async def delete_async(key: str) -> bool:
-    return await _asyncio.to_thread(storage.delete, key)
+    return await speicher_aufruf(storage.delete, key)
 
 
 async def delete_prefix_async(prefix: str) -> int:
-    return await _asyncio.to_thread(storage.delete_prefix, prefix)
+    return await speicher_aufruf(storage.delete_prefix, prefix)
 
 
 # ---------- Loeschen oder vormerken (Go-Live-Audit 09/2026) ----------

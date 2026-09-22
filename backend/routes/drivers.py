@@ -26,8 +26,8 @@ from deps import (bearer, current_user, db, log_activity, log_activity_sicher, n
 from passwoerter import pruefe_passwort as _check_password_strength
 from rate_limiter import (client_ip, driver_login_limiter,
                           login_ip_limiter, login_schluessel,
-                          bekannte_ip_merken, konto_fehlversuch, konto_gesperrt,
-                          konto_gesperrt_text)
+                          bekannte_ip_merken, bekanntes_geraet_merken,
+                          konto_fehlversuch, konto_gesperrt, konto_gesperrt_text)
 # Kontonummer (13.09.2026): Fahrer-Code-Erzeugung liegt in kontenanlage und
 # bleibt unter demselben Namen hier importierbar.
 from kontenanlage import (DRIVER_CODE_ALPHABET, ensure_unique_driver_code,  # noqa: F401
@@ -50,6 +50,10 @@ class DriverAccountLogin(BaseModel):
     email: Optional[str] = Field(default=None, max_length=254)
     # Nachpruefung 15.09.2026: Schema-Deckel (bcrypt liest ohnehin nur 72 Bytes).
     password: str = Field(max_length=200)
+    # Rollenprüfung 22.09.2026 (RP-557): Schluessel des "bekannten Geraets"
+    # (wie /auth/login). Form prueft rate_limiter.geraet_id_gueltig; ein
+    # falscher Wert zaehlt einfach als unbekanntes Geraet (kein 422).
+    geraet_id: Optional[str] = Field(default=None, max_length=80)
 
 
 class DriverProfileUpdate(BaseModel):
@@ -109,6 +113,13 @@ class PickupReportIn(BaseModel):
     fuel_level: Optional[Literal["leer", "1/4", "1/2", "3/4", "voll"]] = None
     deviations: list[DeviationIn] = Field(default_factory=list, max_length=30)
     notes: str = Field(default="", max_length=5000)
+    # Rollenpruefung 22.09.2026 (RP-066/RP-165): Idempotenz-Schluessel, den die
+    # App je Abhol-Check-Dialog EINMAL erzeugt. Wiederholt sie nach einem
+    # Netzabbruch denselben Bericht, antwortet der Server mit dem schon
+    # gespeicherten (200) statt mit einem irrefuehrenden 409 bzw. einer
+    # zweiten Berichtsversion. Ohne Angabe wie bisher (aeltere App).
+    client_bericht_id: Optional[str] = Field(default=None, min_length=8, max_length=64,
+                                             pattern=r"^[A-Za-z0-9_.:-]+$")
 
     @field_validator("deviations")
     @classmethod
@@ -138,22 +149,65 @@ FOTOS_GESAMT_MAX = 20_000_000
 # generate_driver_code / ensure_unique_driver_code: siehe kontenanlage (Import oben).
 
 
-def create_driver_token(driver_id: str, session_id: str) -> str:
+FAHRER_TOKEN_TAGE = 7
+
+
+def create_driver_token(driver_id: str, session_id: str, seit: Optional[int] = None,
+                        bis: Optional[datetime] = None) -> str:
     """JWT für Fahrer-Accounts.  Enthält jetzt eine Session-ID (sid) damit
     alte Tokens nach erneutem Login automatisch ungültig werden.
-    TTL: 7 Tage (statt 30) — reduziert das Risiko bei Token-Leakage in URLs."""
-    exp = datetime.now(timezone.utc) + timedelta(days=7)
+    TTL: 7 Tage (statt 30) — reduziert das Risiko bei Token-Leakage in URLs.
+
+    Rollenprüfung 22.09.2026 (RP-546): "seit" = Beginn der Sitzung (Unix-
+    Sekunden, wie auth.create_token); `bis` deckelt den Ablauf einer
+    verlaengerten Sitzung (fahrer_token_erneuern)."""
+    jetzt = datetime.now(timezone.utc)
+    exp = jetzt + timedelta(days=FAHRER_TOKEN_TAGE)
+    if bis is not None and bis < exp:
+        exp = bis
     payload = {
         "sub": driver_id,
         "sid": session_id,
         "role": "driver_account",
         "exp": exp,
+        "seit": int(seit if seit is not None else jetzt.timestamp()),
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
 
+def fahrer_token_erneuern(payload: dict) -> Optional[str]:
+    """Rollenprüfung 22.09.2026 (RP-546): gleitende Fahrer-Sitzung — dieselben
+    Grenzen wie auth.token_erneuern (fuer Firmen- und Sucherkonten):
+    frisches Token derselben Sitzung (sid), sobald die Restlaufzeit unter
+    TOKEN_ERNEUERN_AB_TAGEN faellt, hoechstens SITZUNG_MAX_TAGE ab der
+    Anmeldung. Vorher endete jede Fahrer-Sitzung hart nach 7 Tagen — auch
+    mitten beim Unterschreiben vor Ort. Reine Funktion; der Aufrufer
+    (current_driver) hat Token und Sitzung bereits geprueft."""
+    from auth import SITZUNG_MAX_TAGE, TOKEN_ERNEUERN_AB_TAGEN
+    if not isinstance(payload, dict) or payload.get("role") != "driver_account":
+        return None
+    sub, sid, exp = payload.get("sub"), payload.get("sid"), payload.get("exp")
+    if not sub or not sid or not isinstance(exp, (int, float)):
+        return None
+    jetzt = datetime.now(timezone.utc).timestamp()
+    if exp - jetzt > TOKEN_ERNEUERN_AB_TAGEN * 86400:
+        return None
+    seit = payload.get("seit")
+    if not isinstance(seit, (int, float)):
+        # Alt-Token ohne "seit": Beginn = Ausstellung (exp - TTL).
+        seit = exp - FAHRER_TOKEN_TAGE * 86400
+    ende = seit + SITZUNG_MAX_TAGE * 86400
+    # Nur wenn es wirklich laenger gilt — sonst bekaeme in den letzten Tagen
+    # jede Antwort ein neues Token.
+    if ende <= exp + 60:
+        return None
+    return create_driver_token(sub, sid, seit=int(seit),
+                               bis=datetime.fromtimestamp(ende, tz=timezone.utc))
+
+
 async def current_driver(request: Request, auth: Optional[str] = None,
-                         creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer)):
+                         creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer),
+                         response: Response = None):
     """Token NUR via `Authorization: Bearer ...`.
 
     ?auth=<token> in der URL wird NICHT mehr akzeptiert: der Token landete
@@ -186,6 +240,19 @@ async def current_driver(request: Request, auth: Optional[str] = None,
     if not stored_sid or token_sid != stored_sid:
         raise HTTPException(401, "Session beendet (anderes Gerät aktiv oder "
                                  "abgemeldet)")
+    # Rollenprüfung 22.09.2026 (RP-546): laeuft das Token bald ab, bekommt die
+    # Antwort ein frisches derselben Sitzung (Kopfzeile X-Neues-Token, die
+    # Fahrer-App legt es in DriverContext ab). Abmelden, Sperre oder
+    # Passwortwechsel beenden die Sitzung (sid) weiter sofort. response ist
+    # None bei direktem Aufruf ausserhalb von FastAPI.
+    if response is not None:
+        try:
+            from auth import NEUES_TOKEN_KOPF
+            neu = fahrer_token_erneuern(payload)
+            if neu:
+                response.headers[NEUES_TOKEN_KOPF] = neu
+        except Exception:  # noqa: BLE001 — die Verlaengerung ist Kuer, nie ein 500
+            log.exception("Fahrer-Token-Verlaengerung fehlgeschlagen")
     return driver
 
 
@@ -205,18 +272,76 @@ FAHRER_SICHT_ABGEHOLT_TAGE = zahl_env("FAHRER_SICHT_ABGEHOLT_TAGE", 14, unten=1)
 FAHRER_SICHT_GESCHLOSSEN_TAGE = zahl_env("FAHRER_SICHT_GESCHLOSSEN_TAGE", 30, unten=1)
 
 
+# Rollenprüfung 22.09.2026 (Review): eingefrorene Uhr der Sichtfrist. Wechselt
+# der Chef zwischen ENDZUSTAENDEN (abgeholt -> erledigt, V-12 abgeholt -> nicht
+# abgeholt, storniert <-> nicht abgeholt), frischt der Terminplaner
+# status_changed_at auf — die Sichtfrist haette dann neu begonnen, und eine
+# laengst verschwundene Fahrt stand wieder 30 Tage mit Verkaeuferdaten und
+# Unterlagen in der App. Bei so einem Wechsel haelt dieses Feld den bisherigen
+# Abschlusszeitpunkt fest (sichtfrist_bei_statuswechsel); jeder andere
+# Statuswechsel (Wieder-Oeffnen, offen -> geschlossen) loescht es, dann zaehlt
+# wieder status_changed_at (RP-237: neu abgeschlossene Korrektur bleibt sichtbar).
+SICHTFRIST_UHR = "zuletzt_abgeschlossen_am"
+
+
 def _abgeschlossen_seit_filter(status, tage: int) -> dict:
     """Termine mit diesem Status, deren Abschluss hoechstens `tage` zurueckliegt.
-    Zeitpunkt: abgeschlossen_seit, sonst status_changed_at, sonst updated_at."""
+
+    Rollenpruefung 22.09.2026 (RP-237/RP-388): Zeitpunkt ist der LETZTE
+    Abschluss — der juengere Wert aus status_changed_at und abgeschlossen_seit,
+    fehlen beide, updated_at. Vorher zaehlte zuerst abgeschlossen_seit, und das
+    Feld bleibt beim Wieder-Oeffnen bewusst stehen (Aufraeumfrist, Befund 114):
+    lag der ERSTE Abschluss mehr als 14/30 Tage zurueck, verschwand eine gerade
+    korrigierte und neu abgeschlossene Fahrt sofort aus der App, und der
+    Abhol-Check (24 h) war nicht mehr erreichbar. Die Aufraeumfrist im
+    cleanup_service rechnet weiter ab abgeschlossen_seit.
+
+    Rollenprüfung 22.09.2026 (Review): steht SICHTFRIST_UHR (Wechsel zwischen
+    Endzustaenden), zaehlt sie statt status_changed_at — dieselbe Regel wie
+    _letzter_abschluss."""
     from datetime import datetime as _dt, timedelta as _td, timezone as _tz
     grenze = (_dt.now(_tz.utc) - _td(days=tage)).isoformat()
     leer = {"$in": [None, ""]}
     st = {"$in": list(status)} if isinstance(status, (list, set, tuple)) else status
     return {"status": st,
             "$or": [{"abgeschlossen_seit": {"$gte": grenze}},
-                    {"abgeschlossen_seit": leer, "status_changed_at": {"$gte": grenze}},
-                    {"abgeschlossen_seit": leer, "status_changed_at": leer,
-                     "updated_at": {"$gte": grenze}}]}
+                    {SICHTFRIST_UHR: {"$gte": grenze}},
+                    {SICHTFRIST_UHR: leer, "status_changed_at": {"$gte": grenze}},
+                    {SICHTFRIST_UHR: leer, "abgeschlossen_seit": leer,
+                     "status_changed_at": leer, "updated_at": {"$gte": grenze}}]}
+
+
+def _letzter_abschluss(appt: dict) -> str:
+    """RP-237: juengerer Wert aus status_changed_at und abgeschlossen_seit
+    (ISO-Zeitstempel, als Text vergleichbar), sonst updated_at, sonst "".
+
+    Rollenprüfung 22.09.2026 (Review): steht SICHTFRIST_UHR (der Chef hat
+    zwischen Endzustaenden gewechselt), ersetzt sie status_changed_at — ein
+    solcher Wechsel startet die Sichtfrist nicht neu."""
+    uhr = SICHTFRIST_UHR if appt.get(SICHTFRIST_UHR) else "status_changed_at"
+    kandidaten = [str(appt.get(k)) for k in (uhr, "abgeschlossen_seit") if appt.get(k)]
+    if kandidaten:
+        return max(kandidaten)
+    return str(appt.get("updated_at") or "")
+
+
+def sichtfrist_bei_statuswechsel(vorher: dict, neuer_status: str):
+    """Rollenprüfung 22.09.2026 (Review): Felder fuer SICHTFRIST_UHR bei einem
+    Statuswechsel des Termins — fuer JEDEN Schreibweg, der den Status aendert
+    (Terminplaner, Fahrer-App, Protokollabschluss, Storno).
+
+    Liefert (setzen, entfernen): Wechsel zwischen zwei VERSCHIEDENEN
+    Endzustaenden -> bisherigen Abschlusszeitpunkt festhalten (bzw. einen schon
+    festgehaltenen behalten); jeder andere Wechsel -> Feld entfernen, dann gilt
+    wieder status_changed_at."""
+    alt = (vorher.get("status") or "offen")
+    if alt in _TERMIN_ABGESCHLOSSEN and neuer_status in _TERMIN_ABGESCHLOSSEN \
+            and alt != neuer_status:
+        bisher = _letzter_abschluss(vorher)
+        return ({SICHTFRIST_UHR: bisher} if bisher else {}), []
+    if alt == neuer_status:
+        return {}, []
+    return {}, [SICHTFRIST_UHR]
 def unterlagen_zugriff_oder_404(appt: dict) -> None:
     """Darf der Fahrer die Unterlagen dieser Fahrt noch oeffnen?
 
@@ -239,8 +364,9 @@ def unterlagen_zugriff_oder_404(appt: dict) -> None:
         return
     tage = (FAHRER_SICHT_ABGEHOLT_TAGE if status == "abgeholt"
             else FAHRER_SICHT_GESCHLOSSEN_TAGE)
-    seit = (appt.get("abgeschlossen_seit") or appt.get("status_changed_at")
-            or appt.get("updated_at") or "")
+    # RP-237/RP-388: dieselbe Uhr wie die Liste (_abgeschlossen_seit_filter) —
+    # der LETZTE Abschluss, nicht der erste.
+    seit = _letzter_abschluss(appt)
     if not seit:
         return                                  # ohne Zeitpunkt nicht sperren
     try:
@@ -252,6 +378,32 @@ def unterlagen_zugriff_oder_404(appt: dict) -> None:
     if zeit < _dt.now(_tz.utc) - _td(days=tage):
         raise HTTPException(404, "Diese Fahrt ist abgeschlossen — die Unterlagen "
                                  "stehen in der App nicht mehr zur Verfügung.")
+
+
+async def _erste_fahrt_mit_zugriff(query: dict, projektion: dict, meldung: str) -> dict:
+    """Rollenpruefung 22.09.2026 (RP-239/RP-390): Legitimierenden Termin fuer
+    ein Dokument (Kaufvertrag, Snapshot) suchen. Vorher nahm find_one IRGEND-
+    einen Treffer und pruefte erst danach die Sichtfrist — mit einer alten,
+    abgelaufenen und einer aktuellen Fahrt zum selben Fahrzeug/Vertrag hing
+    die Antwort (200 oder 404) von der Speicherreihenfolge ab. Jetzt zaehlt
+    der erste Kandidat, der die Frist besteht (juengste Aenderung zuerst);
+    besteht keiner, dieselbe 404 wie bisher."""
+    # Rollenprüfung 22.09.2026 (Review): die eingefrorene Sichtfrist-Uhr gehoert
+    # zur Frist — bei einer Einschluss-Projektion (auch aus beweise.py) mitladen.
+    if projektion and any(v for k, v in projektion.items() if k != "_id"):
+        projektion = {**projektion, SICHTFRIST_UHR: 1}
+    kandidaten = await db.appointments.find(query, projektion).sort(
+        [("status_changed_at", -1), ("updated_at", -1)]).to_list(50)
+    if not kandidaten:
+        raise HTTPException(404, meldung)
+    fehler: Optional[HTTPException] = None
+    for kandidat in kandidaten:
+        try:
+            unterlagen_zugriff_oder_404(kandidat)
+            return kandidat
+        except HTTPException as exc:
+            fehler = exc
+    raise fehler  # type: ignore[misc]
 
 
 # Zugriffsfilter fuer Termin-Abfragen des Fahrers (Befund 160): angenommen
@@ -267,6 +419,15 @@ ZUTEILUNG_ANGENOMMEN = {"$or": [{"zuteilung": "angenommen"},
 # leerer Status zaehlt als "offen" (wie ueberall: appt.get("status") or "offen").
 _TERMIN_OFFEN = {"offen", "verschoben", "bestätigt", "in Bearbeitung"}
 _OFFEN_WERTE: List[Any] = sorted(_TERMIN_OFFEN) + ["", None]
+
+# Rollenpruefung 22.09.2026 (RP-175): Protokoll-Zustaende, in denen der Fahrer
+# nicht aus der Firma entfernt werden darf (siehe delete_driver).
+PROTOKOLL_LAEUFT_BEIM_CHEF = ("zur_freigabe", "freigegeben", "wird_abgeschlossen")
+FAHRER_ENTFERNEN_PROTOKOLL_LAEUFT = (
+    "Dieser Fahrer hat ein Abholprotokoll, das gerade beim Händler zur Freigabe "
+    "liegt, freigegeben ist oder abgeschlossen wird. Bitte das Protokoll zuerst "
+    "abschließen lassen oder unter „Freigaben“ an den Fahrer zurückschicken — "
+    "danach kann er entfernt werden.")
 
 
 async def _verknuepfte_dealer_ids(driver_id: str) -> List[str]:
@@ -290,9 +451,16 @@ def notiz_anhaengen_ausdruck(zusatz: str) -> dict:
     """Pruefung 14.09.2026 (P6/P7): Aggregations-Ausdruck, der `zusatz` an die
     VORHANDENEN Notizen anhaengt (Zeilenumbruch nur, wenn schon Text da ist).
     Damit ueberschreibt der Fahrer nie eine gleichzeitig geschriebene Notiz
-    des Chefs — der Server liest den Text erst beim Schreiben."""
+    des Chefs — der Server liest den Text erst beim Schreiben.
+
+    Rollenpruefung 22.09.2026 (RP-234/RP-385): `zusatz` ist Nutzertext und
+    steht in einer Update-PIPELINE — ein Wert, der mit "$" beginnt, galt dort
+    als Feldpfad ("$seller_phone" kopierte die Telefonnummer, "$" allein gab
+    einen 500). Heute beginnt jeder Aufrufer mit "[Fahrer]"; $literal macht
+    den Ausdruck unabhaengig davon sicher."""
     alt = {"$ifNull": [{"$toString": {"$ifNull": ["$notes", ""]}}, ""]}
-    return {"$concat": [alt, {"$cond": [{"$eq": [alt, ""]}, "", "\n"]}, zusatz]}
+    return {"$concat": [alt, {"$cond": [{"$eq": [alt, ""]}, "", "\n"]},
+                        {"$literal": str(zusatz)}]}
 
 
 async def _zugriff_pruefen(appt: dict, driver: dict) -> None:
@@ -323,33 +491,58 @@ async def _zugriff_pruefen(appt: dict, driver: dict) -> None:
 #   über die öffentlichen Fahrer-Codes der Fahrer-Accounts)
 # =========================================================
 _PLZ_ORT = re.compile(r"\b(\d{5})\s+([^\d,]{2,60}?)\s*(?:,|$)")
+# Rollenpruefung 22.09.2026 (RP-238/RP-389): typische Strassen-Endungen bzw.
+# -Anfaenge. Endungen nur am Wortende ("Thueringen" ist kein "...ring"),
+# Anfaenge nur am Beginn des Teils ("Frankfurt am Main" bleibt ein Ort).
+_STRASSEN_ENDUNG = re.compile(
+    r"(stra(ss|ß)e|str\.?|weg|allee|platz|ring|gasse|damm|markt|ufer|chaussee|"
+    r"steig|pfad|promenade|kamp)\b", re.IGNORECASE)
+_STRASSEN_ANFANG = re.compile(
+    r"^(am|an der|an den|auf der|auf dem|im|in der|zum|zur|hinter der|hinter dem|"
+    r"unter den|vor dem)\b", re.IGNORECASE)
+
+
+def _sieht_nach_strasse_aus(teil: str) -> bool:
+    return bool(_STRASSEN_ENDUNG.search(teil) or _STRASSEN_ANFANG.search(teil.strip()))
 
 
 def ort_ohne_strasse(adresse) -> str:
     """Nachpruefung 15.09.2026 (Fahrer Nr. 1/2): Adresse vor der Annahme auf
-    'PLZ Ort' kuerzen. Ohne PLZ: nur ein reiner Ortsname (keine Ziffern)
-    bleibt, sonst der letzte Kommateil; im Zweifel nichts."""
+    'PLZ Ort' kuerzen. Ohne PLZ: der letzte Kommateil bzw. ein reiner
+    Ortsname; im Zweifel nichts.
+
+    Rollenpruefung 22.09.2026 (RP-238/RP-389): Vorher ging jede Adresse ohne
+    Ziffern komplett durch — "Am Marktplatz, Musterdorf" oder "Lindenallee
+    Musterstadt" sah der Fahrer schon vor der Annahme vollstaendig. Jetzt
+    bleibt nur ein Teil, der weder Ziffern noch ein Strassenwort enthaelt."""
     s = " ".join(str(adresse or "").split())
     if not s:
         return ""
     m = _PLZ_ORT.search(s)
     if m:
         return f"{m.group(1)} {m.group(2).strip()}"
-    if not any(c.isdigit() for c in s):
-        return s
     teile = [t.strip() for t in s.split(",") if t.strip()]
-    return teile[-1] if len(teile) > 1 and not any(c.isdigit() for c in teile[-1]) else ""
+    kandidat = teile[-1] if teile else ""
+    if not kandidat or any(c.isdigit() for c in kandidat) or _sieht_nach_strasse_aus(kandidat):
+        return ""
+    return kandidat
 
 
 def _fahrer_eintrag(da: dict, link: dict, voll: bool = True) -> dict:
     """Fahrer-Account + Firmen-Verknuepfung zu EINEM Listeneintrag.
     voll=False (Sucher, Nachpruefung 15.09.2026 Fahrer Nr. 14): ohne E-Mail und
-    Fahrer-ID — zum Zuteilen reichen Name und Status."""
+    Fahrer-ID — zum Zuteilen reichen Name und Status.
+
+    Rollenpruefung 22.09.2026 (RP-542): Der Betreiber erfasst die Telefonnummer
+    am Fahrerkonto, der Chef hatte sie aber nirgends. Jetzt fuer den Hauptchef
+    (voll=True) mit; Sucher sehen sie wie E-Mail und Fahrer-ID nicht (ob sie
+    sie sehen duerfen, ist eine offene Frage an Ahmad)."""
     return {
         "id": da["id"],
         "driver_code": da.get("driver_code") if voll else None,
         "name": link.get("display_name") or da.get("display_name"),
         "email": da.get("email") if voll else None,
+        "phone": (da.get("phone") or None) if voll else None,
         "active": da.get("active", True),
         "added_at": link.get("added_at"),
     }
@@ -382,7 +575,14 @@ async def add_driver_by_code(body: DriverLinkIn, user=Depends(current_firma)):
         raise HTTPException(403, "Nur der Händler-Hauptaccount darf Fahrer "
                                  "hinzufügen")
     """Händler fügt Fahrer per öffentlichem Code hinzu."""
-    code = (body.driver_code or "").strip().upper()
+    # Rollenpruefung 22.09.2026 (RP-457): "FD7K2M9QX4", "fd 7k2m9qx4" oder ein
+    # Gedankenstrich statt Bindestrich ergaben 404, obwohl der Login dieselbe
+    # Kennung laengst normalisiert. Jetzt dieselbe Regel (kontonummer.
+    # fahrer_normalisieren); fuer aeltere Codes ausserhalb des Musters bleibt
+    # der bisherige Vergleich (getrimmt, Grossbuchstaben).
+    from kontonummer import fahrer_normalisieren
+    roh = (body.driver_code or "").strip()
+    code = fahrer_normalisieren(roh) or roh.upper()
     if not code:
         raise HTTPException(400, "Bitte Fahrer-Code eingeben")
     da = await db.driver_accounts.find_one({"driver_code": code}, {"_id": 0})
@@ -458,6 +658,21 @@ async def list_drivers(user=Depends(current_firma), response: Response = None):
     voll = await ist_haupt_chef(user)
     out = [_fahrer_eintrag(konten[l["driver_account_id"]], l, voll=voll)
            for l in links if l.get("driver_account_id") in konten]
+    # Rollenpruefung 22.09.2026 (RP-041/RP-140): Beim Entfernen trennt der
+    # Server alle offenen Fahrten vom Fahrer — der Chef erfuhr vorher nicht,
+    # wie viele das sind. Die Zahl je Fahrer steht jetzt in der Liste (EINE
+    # Aggregation fuer alle Fahrer), die Rueckfrage nennt sie. Nur fuer den
+    # Hauptchef: nur er darf entfernen.
+    if voll and out:
+        offen_je: Dict[str, int] = {}
+        async for g in db.appointments.aggregate([
+                {"$match": {"dealer_id": user["dealer_id"],
+                            "driver_id": {"$in": [d["id"] for d in out]},
+                            "status": {"$in": _OFFEN_WERTE}}},
+                {"$group": {"_id": "$driver_id", "n": {"$sum": 1}}}]):
+            offen_je[g["_id"]] = int(g.get("n") or 0)
+        for d in out:
+            d["offene_fahrten"] = offen_je.get(d["id"], 0)
     out.sort(key=lambda d: (d.get("name") or "").lower())
     return out
 
@@ -490,6 +705,27 @@ async def delete_driver(driver_id: str, user=Depends(current_firma)):
     if user.get("role") != "dealer":
         raise HTTPException(403, "Nur der Händler-Hauptaccount darf Fahrer "
                                  "entfernen")
+    if not await db.dealer_drivers.find_one(
+            {"dealer_id": user["dealer_id"], "driver_account_id": driver_id}, {"_id": 1}):
+        raise HTTPException(404, "Fahrer nicht in deiner Liste")
+    # Rollenpruefung 22.09.2026 (RP-175, RP-179 Punkt 3): Liegt ein Protokoll
+    # dieses Fahrers zu einer OFFENEN Fahrt beim Chef (zur Freigabe), ist es
+    # freigegeben oder wird gerade abgeschlossen, darf der Fahrer nicht
+    # entfernt werden. Vorher verlor die Fahrt den Fahrer mitten im Ablauf:
+    # das Protokoll stand danach in der Freigabeliste, niemand konnte es mehr
+    # abschliessen — oder der Abschluss lief genau im Moment des Entfernens
+    # durch, das Protokoll wurde final, der Termin-CAS scheiterte, und Preis
+    # und Vertrag nach der Abholung wurden nie uebernommen. Der Chef schickt
+    # das Protokoll zuerst zurueck (Freigaben -> "Zurück an den Fahrer") oder
+    # laesst den Fahrer abschliessen.
+    offene_ids = await db.appointments.distinct(
+        "id", {"dealer_id": user["dealer_id"], "driver_id": driver_id,
+               "status": {"$in": _OFFEN_WERTE}})
+    if offene_ids and await db.pickup_protocols.count_documents(
+            {"appointment_id": {"$in": offene_ids},
+             "status": {"$in": list(PROTOKOLL_LAEUFT_BEIM_CHEF)},
+             "superseded": {"$ne": True}}, limit=1):
+        raise HTTPException(409, FAHRER_ENTFERNEN_PROTOKOLL_LAEUFT)
     res = await db.dealer_drivers.delete_one(
         {"dealer_id": user["dealer_id"], "driver_account_id": driver_id},
     )
@@ -565,11 +801,28 @@ async def driver_conflicts(driver_id: str, date: str, user=Depends(current_firma
         {"_id": 0, "id": 1, "dealer_id": 1, "pickup_time": 1,
          "pickup_address": 1, "title": 1},
     ).sort("pickup_time", 1).to_list(50)
+    # Rollenpruefung 22.09.2026 (RP-013/RP-112/RP-263): Sucher sehen Termine
+    # nur zu eigenen Vorgaengen (Entscheidung 09.09.2026, deps.termin_bereich).
+    # Die Konfliktliste lieferte Termine der KOLLEGEN aber mit ID, Titel und
+    # Abholadresse. Jetzt: fuer Sucher nur die eigenen Termine im Klartext,
+    # alle anderen der Firma wie fremde Firmen nur als "belegt um".
+    sichtbar_eigene = None                       # None = Chef, alles der Firma
+    from deps import ist_sucher, termin_bereich
+    if ist_sucher(user):
+        firmen_ids = [c["id"] for c in conflicts
+                      if c.get("dealer_id") == user["dealer_id"] and c.get("id")]
+        sichtbar_eigene = set()
+        if firmen_ids:
+            bereich = await termin_bereich(user)
+            sichtbar_eigene = set(await db.appointments.distinct(
+                "id", {**bereich, "id": {"$in": firmen_ids}}))
     for c in conflicts:
         c["is_own"] = c.get("dealer_id") == user["dealer_id"]
-        if not c["is_own"]:
+        im_bereich = c["is_own"] and (sichtbar_eigene is None or c.get("id") in sichtbar_eigene)
+        if not im_bereich:
             # Runde 12 (15.09.2026, Nr. 35): von fremden Firmen nur "belegt um":
-            # keine Termin-ID, keine Anschrift, kein Titel.
+            # keine Termin-ID, keine Anschrift, kein Titel. Seit RP-013 ebenso
+            # fuer Termine der Kollegen eines Suchers.
             c.pop("pickup_address", None)
             c["title"] = "Andere Fahrt"
             c["id"] = None
@@ -703,7 +956,10 @@ async def driver_login(body: DriverAccountLogin, request: Request):
     if nr:
         da = await db.driver_accounts.find_one({"kontonummer": nummer_bedingung(nr)})
     konto_k = anmeldekennung(kennung)
-    if await konto_gesperrt(konto_k, ip, da):
+    # Rollenprüfung 22.09.2026 (RP-557): ein bekanntes Geraet entlastet von der
+    # Konto-Sperre wie eine bekannte IP — Fahrer im Mobilnetz wechseln die IP
+    # staendig und waren sonst fuer jeden fremden Sperrversuch mit gesperrt.
+    if await konto_gesperrt(konto_k, ip, da, geraet_id=body.geraet_id):
         raise HTTPException(429, konto_gesperrt_text())
     # Always run bcrypt (constant-time) to prevent user-enumeration via timing.
     pw_hash = da["password_hash"] if da else _DUMMY_HASH
@@ -733,6 +989,9 @@ async def driver_login(body: DriverAccountLogin, request: Request):
         from routes.auth import SITZUNG_UNGUELTIG
         raise HTTPException(401, SITZUNG_UNGUELTIG)
     await bekannte_ip_merken(db, "driver_accounts", da["id"], ip)
+    # RP-557: dieses Geraet ist ab jetzt bekannt (am Konto nur der HMAC);
+    # den Schluessel legt die App ab und schickt ihn beim naechsten Mal mit.
+    gid = await bekanntes_geraet_merken(db, "driver_accounts", da["id"], body.geraet_id)
     # Nachpruefung 15.09.2026 (Anmeldung Nr. 14): einheitliches Login-Audit.
     from routes.auth import geraet_kurz
     await log_activity_sicher("", da["id"], "auth.login",
@@ -740,7 +999,7 @@ async def driver_login(body: DriverAccountLogin, request: Request):
                                     "art": "fahrer", "ip": ip,
                                     "geraet": geraet_kurz(request)[:60]})
     token = create_driver_token(da["id"], sid)
-    return {
+    antwort = {
         "token": token,
         "driver": {
             "id": da["id"], "kontonummer": da.get("kontonummer"),
@@ -749,6 +1008,9 @@ async def driver_login(body: DriverAccountLogin, request: Request):
             "driver_code": da.get("driver_code"),
         },
     }
+    if gid:
+        antwort["geraet_id"] = gid
+    return antwort
 
 
 @router.post("/driver/logout")
@@ -770,6 +1032,13 @@ async def driver_me(driver=Depends(current_driver)):
     links = await db.dealer_drivers.find(
         {"driver_account_id": driver["id"]}, {"_id": 0},
     ).to_list(None)
+    # Rollenpruefung 22.09.2026 (RP-168): gesperrte Firmen nicht mehr auffuehren
+    # — Termine, Unterlagen und Status sind fuer sie ohnehin gesperrt
+    # (_verknuepfte_dealer_ids, _zugriff_pruefen); die Liste in den
+    # Einstellungen zeigte sie aber weiter samt Telefonnummer.
+    if links:
+        gesperrt = await gesperrte_firmen_ids()
+        links = [link for link in links if link.get("dealer_id") not in gesperrt]
     dealer_ids = [link["dealer_id"] for link in links]
     dealers = {}
     if dealer_ids:
@@ -1026,20 +1295,35 @@ async def driver_appointments(driver=Depends(current_driver),
         # abgleichen setzt sie binnen einer Stunde auf "offen".
         zut = a.get("zuteilung") or "angenommen"
         vor_annahme = zut in ZUTEILUNG_OHNE_ZUGRIFF
+        # Rollenpruefung 22.09.2026 (RP-235/RP-386): Eine stornierte Fahrt
+        # steht 30 Tage in der App — bisher mit voller Anschrift, Name und
+        # Telefon des Verkaeufers, waehrend alle Unterlagen dazu schon gesperrt
+        # sind (unterlagen_zugriff_oder_404: storniert = nie). Jetzt wie vor
+        # der Annahme: nur PLZ/Ort, kein Kontakt, keine Notizen, keine
+        # Dokument-Verweise (die Adressen liefern ohnehin 404).
+        storniert = (a.get("status") or "") == "storniert"
+        ohne_kontakt = vor_annahme or storniert
+        # Rollenpruefung 22.09.2026 (RP-236/RP-387): Chef-Notizen (oft mit
+        # Telefon oder Anschrift) erst nach der Annahme — genau wie
+        # seller_name/seller_phone. Die Entscheidung vom 14.09. ("Notizen sehen
+        # Chef und Fahrer") meint den Fahrer, der die Fahrt angenommen hat.
+        notiz_da = bool(str(a.get("notes") or "").strip())
         out.append({
             "id": a.get("id"),
             "title": a.get("title"),
             "pickup_date": a.get("pickup_date"),
             "pickup_time": a.get("pickup_time"),
-            "pickup_address": (ort_ohne_strasse(a.get("pickup_address")) if vor_annahme
+            "pickup_address": (ort_ohne_strasse(a.get("pickup_address")) if ohne_kontakt
                                else a.get("pickup_address")),
-            "seller_name": None if vor_annahme else a.get("seller_name"),
-            "seller_phone": None if vor_annahme else a.get("seller_phone"),
+            "seller_name": None if vor_annahme or storniert else a.get("seller_name"),
+            "seller_phone": None if vor_annahme or storniert else a.get("seller_phone"),
             "kontakt_nach_annahme": vor_annahme,
             "status": a.get("status", "offen"),
             "zuteilung": zut,
-            "notes": a.get("notes"),
-            "contract_id": a.get("contract_id"),
+            "notes": None if ohne_kontakt else a.get("notes"),
+            # Die App sagt dann "Notizen des Händlers nach der Annahme".
+            "notizen_nach_annahme": vor_annahme and not storniert and notiz_da,
+            "contract_id": None if storniert else a.get("contract_id"),
             "vehicle_id": vid,
             "dealer": {
                 "id": d_info.get("id"),
@@ -1058,8 +1342,8 @@ async def driver_appointments(driver=Depends(current_driver),
                 "fin": v.get("vin") or v.get("fin"),
                 "photos": photos,
             } if v else None,
-            "snapshot_id": snap_map.get(schluessel),
-            "beweis_id": beweis_map.get(schluessel),
+            "snapshot_id": None if storniert else snap_map.get(schluessel),
+            "beweis_id": None if storniert else beweis_map.get(schluessel),
             "bericht_vorhanden": a.get("id") in mit_bericht,
             "status_changed_at": a.get("status_changed_at"),
             # Pruefbericht 20.09.2026 (V-09): Stand des Termins — die App
@@ -1074,20 +1358,90 @@ async def driver_appointments(driver=Depends(current_driver),
 
 
 ERSTBERICHT_RESERVIERUNG_MIN = 10
+BERICHT_WIRD_GESPEICHERT = ("Dieser Abhol-Check wird gerade noch gespeichert — bitte einen "
+                            "Moment warten und die Fahrten neu laden.")
 
 
-async def _erstbericht_reservieren(appt_id: str, driver_id: str):
+async def _erstbericht_reservieren(appt_id: str, driver_id: str,
+                                   schluessel: Optional[str] = None):
     """Atomare Reservierung des Erstberichts. Nachpruefung 15.09.2026 (Fahrer
     Nr. 5/6): die Reservierung ist ein Lease — stirbt der Prozess nach der
     Reservierung (kein finally), verfaellt sie nach ERSTBERICHT_RESERVIERUNG_MIN
-    Minuten; vorher blieb der Fahrer dauerhaft bei 409."""
+    Minuten; vorher blieb der Fahrer dauerhaft bei 409.
+    RP-066: der Idempotenz-Schluessel des Berichts steht mit an der
+    Reservierung — eine Wiederholung DESSELBEN Berichts erkennt so, dass er
+    gerade noch gespeichert wird."""
     frist = (datetime.now(timezone.utc)
              - timedelta(minutes=ERSTBERICHT_RESERVIERUNG_MIN)).isoformat()
     return await db.appointments.find_one_and_update(
         {"id": appt_id, "driver_id": driver_id,
          "$or": [{"erstbericht_reserviert_at": {"$exists": False}},
                  {"erstbericht_reserviert_at": {"$lt": frist}}]},
-        {"$set": {"erstbericht_reserviert_at": now_iso()}})
+        {"$set": {"erstbericht_reserviert_at": now_iso(),
+                  "erstbericht_schluessel": schluessel or ""}})
+
+
+async def _bericht_mit_schluessel(appt_id: str, driver_id: str,
+                                  schluessel: Optional[str]) -> Optional[dict]:
+    """RP-066/RP-165: schon gespeicherter Bericht mit diesem Idempotenz-
+    Schluessel (derselbe Fahrer, derselbe Termin)."""
+    if not schluessel:
+        return None
+    return await db.pickup_reports.find_one(
+        {"appointment_id": appt_id, "driver_account_id": driver_id,
+         "client_bericht_id": schluessel},
+        {"_id": 0, "id": 1, "version": 1, "deviations": 1, "client_bericht_fp": 1},
+        sort=[("version", -1)])
+
+
+# Rollenprüfung 22.09.2026 (Review): Der Idempotenz-Schluessel blieb nach einer
+# verlorenen Antwort im Zwischenstand des Dialogs liegen. Ein spaeterer, GEAENDERTER
+# Bericht (Chef hat die Fahrt wieder geoeffnet: neue km, andere Abweichungen) kam
+# mit demselben Schluessel und bekam still den ALTEN Bericht als "gespeichert"
+# zurueck. Jetzt wiederholt der Server nur bei gleichem Inhalt; sonst 409 mit
+# diesem Text (die App erkennt ihn und legt einen neuen Schluessel an).
+BERICHT_ANDERER_INHALT = ("Dieser Abhol-Check wurde schon mit anderen Angaben gespeichert — "
+                          "die Änderungen sind noch nicht übernommen. Bitte erneut senden, "
+                          "dann gehen sie als neue Version ein.")
+
+
+def _bericht_fingerabdruck(body: "PickupReportIn") -> dict:
+    """Inhalt eines Berichts als Pruefsummen: `text` ueber km, Schluessel,
+    Tank, Bemerkung und alle Abweichungs-Texte (samt Anzahl), `fotos` je
+    Abweichung die Pruefsumme des gesendeten Fotos (oder None)."""
+    import json as _json
+    text = {"km": body.mileage_at_pickup, "schluessel": body.keys_count,
+            "tank": body.fuel_level, "notiz": body.notes,
+            "abw": [[d.field, d.label, d.expected, d.actual, d.note] for d in body.deviations]}
+    return {"text": hashlib.sha256(_json.dumps(text, sort_keys=True, ensure_ascii=False)
+                                   .encode("utf-8")).hexdigest(),
+            "fotos": [hashlib.sha256(d.photo_b64.encode("utf-8")).hexdigest()
+                      if d.photo_b64 else None for d in body.deviations]}
+
+
+def _gleicher_bericht(gespeichert: Optional[dict], neu: Optional[dict]) -> bool:
+    """Ist die Wiederholung derselbe Bericht? Altbestand ohne Fingerabdruck:
+    ja (wie bisher). Ein fehlendes Foto in der Wiederholung zaehlt nicht als
+    Unterschied — der Zwischenstand im Tab speichert Fotos nicht, wenn er zu
+    gross wird; der erste Versuch hatte sie."""
+    if not isinstance(gespeichert, dict) or not neu:
+        return True
+    if gespeichert.get("text") != neu.get("text"):
+        return False
+    alt_fotos = gespeichert.get("fotos") or []
+    for i, foto in enumerate(neu.get("fotos") or []):
+        if foto is not None and (i >= len(alt_fotos) or alt_fotos[i] != foto):
+            return False
+    return True
+
+
+def _bericht_wiederholt_antwort(bericht: dict, fingerabdruck: Optional[dict] = None) -> dict:
+    """Dieselbe Antwort wie beim ersten Speichern, dazu `wiederholt`.
+    Rollenprüfung 22.09.2026 (Review): nur bei gleichem Inhalt — sonst 409."""
+    if not _gleicher_bericht(bericht.get("client_bericht_fp"), fingerabdruck):
+        raise HTTPException(409, BERICHT_ANDERER_INHALT)
+    return {"ok": True, "report_id": bericht.get("id"), "version": bericht.get("version"),
+            "deviations_count": len(bericht.get("deviations") or []), "wiederholt": True}
 
 
 @router.get("/driver/appointments/{appt_id}/pickup-order.pdf")
@@ -1158,18 +1512,24 @@ async def driver_contract_pdf(contract_id: str, driver=Depends(current_driver)):
     # stornierten Termin — vorher genuegte eine offene Anfrage oder ein
     # stornierter Termin, um den ganzen Kaufvertrag (Verkaeuferdaten, Preis)
     # zu laden.
-    appt = await db.appointments.find_one(
+    # Rollenpruefung 22.09.2026 (RP-239/RP-390): nicht IRGENDEINEN Termin
+    # nehmen — gibt es zum Vertrag eine alte, abgelaufene und eine aktuelle
+    # Fahrt, entschied die Speicherreihenfolge ueber 404. Jetzt der erste
+    # Kandidat, der die Frist besteht (_erste_fahrt_mit_zugriff).
+    appt = await _erste_fahrt_mit_zugriff(
         {"driver_id": driver["id"], "contract_id": contract_id,
          "status": {"$ne": "storniert"}, **ZUTEILUNG_ANGENOMMEN},
         {"_id": 0, "id": 1, "dealer_id": 1, "status": 1, "abgeschlossen_seit": 1,
          "status_changed_at": 1, "updated_at": 1},
-    )
-    if not appt:
-        raise HTTPException(404, "Kein Zugriff auf diesen Vertrag")
+        "Kein Zugriff auf diesen Vertrag")
     await _zugriff_pruefen(appt, driver)
     unterlagen_zugriff_oder_404(appt)           # Befund 156: Frist wie in der App
+    # Rollenpruefung 22.09.2026 (RP-240/RP-391): kein Vertrag, dessen Loeschung
+    # gerade laeuft (Grabstein gesetzt, contract_id am Termin noch nicht
+    # gekappt) — dieselbe Regel wie contracts.py und _vertrag_bereich.
     doc = await db.generated_pdfs.find_one(
-        {"id": contract_id, "dealer_id": appt.get("dealer_id")},
+        {"id": contract_id, "dealer_id": appt.get("dealer_id"),
+         "loeschung.status": {"$ne": "laeuft"}},
         {"_id": 0, "pdf_b64": 1},
     )
     if not doc or not doc.get("pdf_b64"):
@@ -1207,14 +1567,16 @@ async def driver_snapshot(snap_id: str, kind: str,
         # Befund 158 (19.09.2026): Frueher genuegte IRGENDEIN Termin — auch
         # ein nie angenommener oder stornierter. Jetzt dieselbe Regel wie
         # beim Kaufvertrag: angenommene, nicht stornierte Fahrt in der Frist.
-        allowed = await db.appointments.find_one(
+        # Rollenpruefung 22.09.2026 (RP-239/RP-390): der erste Kandidat, der
+        # die Sichtfrist besteht — nicht der zufaellig zuerst gefundene.
+        allowed = await _erste_fahrt_mit_zugriff(
             {"driver_id": driver["id"],
              "dealer_id": {"$in": dealer_ids_aktiv},
              "vehicle_id": snap.get("vehicle_id"),
              "status": {"$ne": "storniert"}, **ZUTEILUNG_ANGENOMMEN},
             {"_id": 0, "id": 1, "status": 1, "abgeschlossen_seit": 1,
              "status_changed_at": 1, "updated_at": 1},
-        )
+            "Kein Zugriff auf diesen Snapshot")
     if not allowed:
         raise HTTPException(404, "Kein Zugriff auf diesen Snapshot")
     unterlagen_zugriff_oder_404(allowed)
@@ -1283,14 +1645,20 @@ async def driver_zuteilung(appt_id: str, body: DriverZuteilungIn,
     ablehn_filt: Dict[str, Any] = {"id": appt_id, "driver_id": driver["id"], "zuteilung": "offen"}
     if getattr(body, "stand", None):
         ablehn_filt["updated_at"] = body.stand
+    # Rollenpruefung 22.09.2026 (RP-234/RP-385): Update-PIPELINE — Nutzertext
+    # (Anzeigename aus PUT /driver/me, Ablehnungsgrund) und Zeitstempel nur als
+    # $literal. Ein Name "$seller_phone" kopierte sonst die Telefonnummer des
+    # Verkaeufers in den Termin, ein Grund "$" liess das Ablehnen mit 500
+    # scheitern — dauerhaft fuer diesen Fahrer.
+    jetzt_abl = now_iso()
     r = await db.appointments.update_one(
         ablehn_filt,
         [{"$set": {"zuteilung": "abgelehnt",
-                   "zuteilung_beantwortet_am": now_iso(),
-                   "zuteilung_abgelehnt_von": (driver.get("display_name") or driver.get("name")
-                                               or "Fahrer"),
-                   "zuteilung_abgelehnt_grund": grund,
-                   "updated_at": now_iso(),
+                   "zuteilung_beantwortet_am": {"$literal": jetzt_abl},
+                   "zuteilung_abgelehnt_von": {"$literal": (
+                       driver.get("display_name") or driver.get("name") or "Fahrer")},
+                   "zuteilung_abgelehnt_grund": {"$literal": grund},
+                   "updated_at": {"$literal": jetzt_abl},
                    "notes": notiz_anhaengen_ausdruck(notiz)}},
          {"$unset": ["driver_id", "zuteilung_neu_wegen_aenderung"]}])
     if r.modified_count == 0:
@@ -1377,7 +1745,14 @@ async def driver_set_status(appt_id: str, body: DriverStatusIn,
                                    "zuteilung": {"$nin": ["offen", "abgelehnt"]}}
     if getattr(body, "stand", None):
         status_filt["updated_at"] = body.stand
-    res = await db.appointments.update_one(status_filt, [{"$set": update}])
+    # Rollenprüfung 22.09.2026 (Review): offen -> geschlossen — eine alte,
+    # eingefrorene Sichtfrist-Uhr gilt nicht mehr (sonst verschwaende die
+    # gerade abgeschlossene Fahrt zu frueh aus der App).
+    uhr_setzen, uhr_weg = sichtfrist_bei_statuswechsel(appt, body.status)
+    stufen: List[Dict[str, Any]] = [{"$set": {**update, **uhr_setzen}}]
+    if uhr_weg:
+        stufen.append({"$unset": uhr_weg})
+    res = await db.appointments.update_one(status_filt, stufen)
     if res.matched_count == 0:
         raise HTTPException(409, "Der Termin wurde zwischenzeitlich geändert "
                                  "(storniert, neu zugeteilt oder Datum/Adresse geändert) — "
@@ -1413,10 +1788,23 @@ async def driver_set_status(appt_id: str, body: DriverStatusIn,
             from lifecycle import try_set_lifecycle, zustand_fuer_terminstatus
             zustand = zustand_fuer_terminstatus(body.status)
             if zustand:
-                await try_set_lifecycle(
-                    appt["vehicle_id"], appt.get("dealer_id"), zustand,
-                    user={"id": driver["id"]},
-                )
+                # Rollenprüfung 22.09.2026 (RP-114/015/265): das Fahrzeug ist
+                # firmenweit gemeinsam. Haengen daran Kaufvorgaenge (auch die
+                # eines Kollegen), bestimmt allein deren Zusammenfassung den
+                # Lebenszyklus — ein Termin OHNE eigenen Vorgang setzt ihn dann
+                # nicht direkt (gleiche Regel wie appointments.
+                # _fahrzeug_ohne_vorgang_setzen). Vorher schob "nicht abgeholt"
+                # an so einem Termin das Auto des Kollegen von "Abholung
+                # geplant" auf "nicht abgeholt".
+                if await _kv.fahrzeug_hat_vorgaenge(appt["vehicle_id"], appt.get("dealer_id")):
+                    await _kv.fahrzeug_status_aggregieren(
+                        appt["vehicle_id"], appt.get("dealer_id"),
+                        user={"id": driver["id"]})
+                else:
+                    await try_set_lifecycle(
+                        appt["vehicle_id"], appt.get("dealer_id"), zustand,
+                        user={"id": driver["id"]},
+                    )
     except Exception:  # noqa: BLE001
         log.exception("Nacharbeit nach Fahrer-Status %s an Termin %s fehlgeschlagen",
                       body.status, appt_id)
@@ -1424,9 +1812,14 @@ async def driver_set_status(appt_id: str, body: DriverStatusIn,
             await db.appointments.update_one({"id": appt_id}, {"$set": {"nacharbeit_offen": True}})
         except Exception:  # noqa: BLE001
             log.exception("Merker nacharbeit_offen fuer Termin %s nicht gesetzt", appt_id)
+    # Rollenpruefung 22.09.2026 (RP-537): Der Grund fuer "nicht abgeholt"
+    # (die App fragt ihn jetzt ab) steht zusaetzlich im Verlauf des Chefs —
+    # wie der Grund beim Ablehnen einer Fahrt (termin.fahrer.abgelehnt).
     await log_activity_sicher(
         appt.get("dealer_id"), driver["id"],
         f"termin.fahrer.{body.status.replace(' ', '_')}", ref=appt_id,
+        **({"meta": {"grund": body.notes.strip()[:500]}}
+           if body.status == "nicht abgeholt" and (body.notes or "").strip() else {}),
     )
     return {"ok": True, "status": body.status,
             "auto_cleanup_days": 7 if body.status == "abgeholt" else 14}
@@ -1514,7 +1907,7 @@ async def driver_pickup_foto(key: str, driver=Depends(current_driver)):
     _termin = await db.appointments.find_one(
         {"id": eigener_bericht.get("appointment_id"), "driver_id": driver["id"]},
         {"_id": 0, "status": 1, "abgeschlossen_seit": 1,
-         "status_changed_at": 1, "updated_at": 1})
+         "status_changed_at": 1, "updated_at": 1, SICHTFRIST_UHR: 1})
     if not _termin:
         raise HTTPException(404, "Datei nicht gefunden")
     try:
@@ -1541,6 +1934,22 @@ async def driver_submit_report(appt_id: str, body: PickupReportIn,
     if not appt:
         raise HTTPException(404, "Termin nicht gefunden")
     await _zugriff_pruefen(appt, driver)
+    # Rollenpruefung 22.09.2026 (RP-066/RP-165): Wiederholung DESSELBEN
+    # Berichts (gleicher Idempotenz-Schluessel, z. B. nach Netzabbruch) ->
+    # der gespeicherte Bericht mit 200. Vorher gab es hier im Normalfall einen
+    # irrefuehrenden 409 ("kann nur einmal eingereicht werden"), obwohl alles
+    # gespeichert war — bzw. bei offenem Termin eine zweite Berichtsversion.
+    schluessel = body.client_bericht_id
+    # Rollenprüfung 22.09.2026 (Review): Inhalt des Berichts als Pruefsumme —
+    # eine Wiederholung mit demselben Schluessel gilt nur bei gleichem Inhalt.
+    # Fotos (bis ~30 MB) in einem eigenen Faden pruefsummieren.
+    fingerabdruck: Optional[dict] = None
+    if schluessel:
+        import asyncio as _aio_fp
+        fingerabdruck = await _aio_fp.to_thread(_bericht_fingerabdruck, body)
+    schon_da = await _bericht_mit_schluessel(appt_id, driver["id"], schluessel)
+    if schon_da:
+        return _bericht_wiederholt_antwort(schon_da, fingerabdruck)
     # Sperre nach Abschluss — mit EINER Ausnahme (Pruefbericht Runde 4): Der
     # Abweichungsbericht gehoert zur Abholung und wird direkt NACH dem
     # unterschriebenen Protokoll (Termin dann schon "abgeholt") eingereicht.
@@ -1562,13 +1971,25 @@ async def driver_submit_report(appt_id: str, body: PickupReportIn,
         # ATOMARE Reservierung des Erstberichts (Runde 5): zwei parallele
         # Erstanfragen bestanden vorher beide die Vorpruefung, die zweite
         # wurde als "Korrekturversion" gespeichert. Genau EINE gewinnt.
-        res = await _erstbericht_reservieren(appt_id, driver["id"])
+        res = await _erstbericht_reservieren(appt_id, driver["id"], schluessel)
         vorhanden = await db.pickup_reports.count_documents(
             {"appointment_id": appt_id})
         if res is None or vorhanden or not frisch:
             if res is not None and not vorhanden and not frisch:
                 await db.appointments.update_one(
-                    {"id": appt_id}, {"$unset": {"erstbericht_reserviert_at": ""}})
+                    {"id": appt_id}, {"$unset": {"erstbericht_reserviert_at": "",
+                                                 "erstbericht_schluessel": ""}})
+            if schluessel:
+                # RP-066: Der erste Versuch DESSELBEN Berichts war schneller —
+                # fertig (200) oder noch beim Speichern (409 mit klarem Hinweis).
+                fertig = await _bericht_mit_schluessel(appt_id, driver["id"], schluessel)
+                if fertig:
+                    return _bericht_wiederholt_antwort(fertig, fingerabdruck)
+                if res is None:
+                    jetzt_appt = await db.appointments.find_one(
+                        {"id": appt_id}, {"_id": 0, "erstbericht_schluessel": 1}) or {}
+                    if jetzt_appt.get("erstbericht_schluessel") == schluessel:
+                        raise HTTPException(409, BERICHT_WIRD_GESPEICHERT)
             raise HTTPException(409, "Termin ist bereits 'abgeholt' — der "
                                      "Abholbericht kann nur einmal direkt nach "
                                      "der Abholung eingereicht werden; "
@@ -1600,6 +2021,7 @@ async def driver_submit_report(appt_id: str, body: PickupReportIn,
     geschrieben: List[str] = []
     deviations: List[dict] = []
     erfolg = False
+    wiederholung: Optional[dict] = None          # RP-066: parallele Wiederholung erkannt
     try:
         # Fotos aus base64 in den Storage auslagern (nie in Mongo speichern).
         for d in body.deviations:
@@ -1677,11 +2099,21 @@ async def driver_submit_report(appt_id: str, body: PickupReportIn,
             "status": "bestaetigt",
             "created_at": now_iso(),
         }
+        if schluessel:
+            doc["client_bericht_id"] = schluessel       # RP-066: Idempotenz
+            doc["client_bericht_fp"] = fingerabdruck    # Review: nur gleicher Inhalt
         for versuch in range(3):
             try:
                 await db.pickup_reports.insert_one(doc)
                 break
             except DuplicateKeyError:
+                # RP-066/RP-165: Mit dem (Teil-)Unique-Index auf
+                # (appointment_id, client_bericht_id) scheitert eine
+                # GLEICHZEITIGE Wiederholung desselben Berichts hier — dann
+                # gilt der gespeicherte; unsere Fotos raeumt der Rollback weg.
+                wiederholung = await _bericht_mit_schluessel(appt_id, driver["id"], schluessel)
+                if wiederholung:
+                    break
                 # Unique-Index (appointment_id, version): ein paralleler
                 # Bericht hat dieselbe Version belegt -> frisch lesen, neue
                 # Versionsnummer nehmen und erneut versuchen.
@@ -1693,29 +2125,32 @@ async def driver_submit_report(appt_id: str, body: PickupReportIn,
                 doc.pop("_id", None)
                 version, replaces_id = await _naechste_version()
                 doc["version"], doc["replaces_id"] = version, replaces_id
-        erfolg = True
+        # RP-066: Bei einer erkannten Wiederholung bleibt erfolg False — der
+        # Rollback unten verwirft die Fotos DIESES Aufrufs.
+        erfolg = wiederholung is None
         # Runde 8 (15.09.2026, Liste 3 Nr. 1): Lief die Konto-Loeschung des
         # Fahrers genau zwischen der Nachpruefung oben und dem Insert, hat
         # fahrer_konto_anonymisieren diesen Bericht verpasst — er truege Kennung
         # und Klarnamen dauerhaft. Deshalb nach dem Insert nachpruefen.
-        try:
-            konto = await db.driver_accounts.find_one(
-                {"id": driver["id"]}, {"_id": 0, "loeschung": 1})
-            if konto is None or (konto.get("loeschung") or {}).get("status"):
-                await db.pickup_reports.update_one(
-                    {"id": report_id, "driver_account_id": driver["id"]},
-                    {"$set": {"driver_account_id": fahrer_pseudonym(driver["id"]),
-                              "driver_name": "Fahrer (gelöscht)"}})
-        except Exception:  # noqa: BLE001
-            log.exception("Nachpruefung Konto-Loeschung nach Bericht %s", report_id)
-            # Nachpruefung 15.09.2026 (Fahrer Nr. 9/10): Marker statt Fail-open —
-            # cleanup_service.abholberichte_pseudonym_nachholen holt es nach.
+        if erfolg:
             try:
-                await betrieb.alarm(db, "abholbericht_pseudonym_offen", ref=report_id,
-                                    driver_id=driver["id"])
+                konto = await db.driver_accounts.find_one(
+                    {"id": driver["id"]}, {"_id": 0, "loeschung": 1})
+                if konto is None or (konto.get("loeschung") or {}).get("status"):
+                    await db.pickup_reports.update_one(
+                        {"id": report_id, "driver_account_id": driver["id"]},
+                        {"$set": {"driver_account_id": fahrer_pseudonym(driver["id"]),
+                                  "driver_name": "Fahrer (gelöscht)"}})
             except Exception:  # noqa: BLE001
-                log.exception("Alarm abholbericht_pseudonym_offen fuer %s nicht gesetzt",
-                              report_id)
+                log.exception("Nachpruefung Konto-Loeschung nach Bericht %s", report_id)
+                # Nachpruefung 15.09.2026 (Fahrer Nr. 9/10): Marker statt Fail-open —
+                # cleanup_service.abholberichte_pseudonym_nachholen holt es nach.
+                try:
+                    await betrieb.alarm(db, "abholbericht_pseudonym_offen", ref=report_id,
+                                        driver_id=driver["id"])
+                except Exception:  # noqa: BLE001
+                    log.exception("Alarm abholbericht_pseudonym_offen fuer %s nicht gesetzt",
+                                  report_id)
     finally:
         if not erfolg:
             # Rollback (Nr. 36/37/43): Reservierung loesen, Dateien
@@ -1725,7 +2160,8 @@ async def driver_submit_report(appt_id: str, body: PickupReportIn,
                 try:
                     await db.appointments.update_one(
                         {"id": appt_id},
-                        {"$unset": {"erstbericht_reserviert_at": ""}})
+                        {"$unset": {"erstbericht_reserviert_at": "",
+                                    "erstbericht_schluessel": ""}})
                 except Exception:  # noqa: BLE001
                     log.exception("Abholbericht-Rollback: Reservierung an %s "
                                   "konnte nicht geloest werden", appt_id)
@@ -1734,6 +2170,10 @@ async def driver_submit_report(appt_id: str, body: PickupReportIn,
                     db, key=key, grund="abholbericht-rollback",
                     dealer_id=dealer_id,
                     ref={"collection": "appointments", "id": appt_id})
+    if wiederholung is not None:
+        # RP-066/RP-165: parallele Wiederholung desselben Berichts — Antwort
+        # des gespeicherten Berichts, keine Nacharbeit und kein zweites Audit.
+        return _bericht_wiederholt_antwort(wiederholung, fingerabdruck)
     # Nachpruefung Runde 14, Nr. 38: alle aelteren, noch aktuellen Versionen
     # in EINEM Schritt ersetzen (vorher nur der vorher gelesene prev):
     # heilt Doppelzustaende aus abgebrochenen Laeufen selbst. Nur Versionen
@@ -1778,7 +2218,8 @@ async def driver_get_report(appt_id: str, driver=Depends(current_driver)):
     appt = await db.appointments.find_one(
         {"id": appt_id, "driver_id": driver["id"]},
         {"_id": 0, "id": 1, "dealer_id": 1, "status": 1, "zuteilung": 1,
-         "abgeschlossen_seit": 1, "status_changed_at": 1, "updated_at": 1},
+         "abgeschlossen_seit": 1, "status_changed_at": 1, "updated_at": 1,
+         SICHTFRIST_UHR: 1},
     )
     if not appt:
         raise HTTPException(404, "Termin nicht gefunden")

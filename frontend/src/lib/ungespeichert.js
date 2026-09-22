@@ -39,6 +39,24 @@ export function hatUngespeichert() {
   return offen.size > 0;
 }
 
+export const VERLASSEN_FRAGE = "Es gibt ungespeicherte Änderungen auf dieser Seite.\n"
+  + "Seite trotzdem verlassen? Die Eingaben gehen dann verloren.";
+
+/**
+ * Rollenprüfung 22.09.2026 (RP-143): beforeunload greift nur beim Neuladen
+ * oder Schließen des Fensters. Ein Klick in der Seitenleiste (Wechsel
+ * innerhalb der App) verwarf Eingaben still. Die Navigation der App fragt
+ * deshalb hier vorher nach. true = darf weiter.
+ */
+export function verlassenBestaetigen(frage = VERLASSEN_FRAGE) {
+  if (!hatUngespeichert()) return true;
+  try {
+    return window.confirm(frage);
+  } catch {
+    return true;               // kein Dialog möglich (z. B. eingebettet): nicht blockieren
+  }
+}
+
 /** Hook: solange `aktiv` wahr ist, gilt die Komponente als ungespeichert. */
 export function useUngespeichert(aktiv) {
   useEffect(() => {

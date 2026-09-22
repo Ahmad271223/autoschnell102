@@ -76,6 +76,9 @@ const konflikt = () => Promise.reject(Object.assign(new Error("409"), { response
 const finalizeAufrufe = () => api.post.mock.calls.filter(([url]) => url.endsWith("/protocol/finalize"));
 
 beforeEach(() => {
+  // Rollenprüfung 22.09.2026 (RP-546): die Seite sichert offene Stände im Tab
+  // (sessionStorage) — jeder Test beginnt ohne Sicherung.
+  try { window.sessionStorage.clear(); } catch { /* egal */ }
   vi.spyOn(window, "confirm").mockReturnValue(true);
   api.put.mockResolvedValue({ data: {} });
 });

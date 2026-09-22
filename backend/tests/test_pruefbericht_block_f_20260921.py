@@ -254,9 +254,16 @@ def test_p06_geleerte_fin_bleibt_leer():
     v, _ = _apply_contract_overrides(contract={"vehicle_vin": "", "vehicle_color": ""},
                                      vehicle=fahrzeug, dealer={})
     assert v["vin"] == "" and v["fin"] == "", "bewusst geleert = keine FIN im Vertrag"
-    assert v["exterior_color"] == "Blau", "andere leere Felder: weiter der Inseratswert"
+    # Rollenpruefung 22.09.2026 (RP-404): dieselbe Regel gilt jetzt fuer ALLE
+    # Fahrzeugfelder, die der Dialog vorbelegt — auch die Farbe bleibt leer.
+    assert v["exterior_color"] == "" and v["color"] == "", \
+        "bewusst geleert = auch die Farbe bleibt im Vertrag leer (RP-404)"
     v2, _ = _apply_contract_overrides(contract={}, vehicle=fahrzeug, dealer={})
     assert v2["vin"] == "WVWZZZ1KZAW000001", "Feld fehlt ganz (Altvertrag) = Inseratswert"
+    assert v2["exterior_color"] == "Blau", "Feld fehlt ganz = Inseratswert"
+    v3, _ = _apply_contract_overrides(contract={"vehicle_color": None}, vehicle=fahrzeug,
+                                      dealer={})
+    assert v3["exterior_color"] == "Blau", "None = nicht angegeben = Inseratswert"
 
 
 # ====================================================================== R1-30

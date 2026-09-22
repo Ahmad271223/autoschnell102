@@ -48,7 +48,8 @@ def main():
     s3 = s3_client(endpoint=endpoint,
                    access_key=os.environ.get("BACKUP_S3_ACCESS_KEY", "").strip() or None,
                    secret_key=os.environ.get("BACKUP_S3_SECRET_KEY", "").strip() or None,
-                   region=os.environ.get("BACKUP_S3_REGION", "").strip() or None)
+                   region=os.environ.get("BACKUP_S3_REGION", "").strip() or None,
+                   sicherung=True)   # Rollenprüfung 22.09.2026 (Review): wie die Sicherung
     fehler = 0
     # 1) Erreichbarkeit
     try:

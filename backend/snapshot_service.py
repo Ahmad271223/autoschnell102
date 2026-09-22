@@ -17,7 +17,6 @@ Noch lokal liegende Altkopien werden beim Lesen weiterhin gefunden.
 """
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
 import os
@@ -111,7 +110,12 @@ def get_object(path: str) -> tuple[bytes, str]:
 
 
 async def get_object_async(path: str) -> tuple[bytes, str]:
-    return await asyncio.to_thread(get_object, path)
+    # Rollenprüfung 22.09.2026 (RP-550): im eigenen Speicher-Pool
+    # (storage_service.speicher_aufruf) statt im Standard-Pool von
+    # asyncio.to_thread — haengt R2, blockieren wartende Snapshot-Zugriffe
+    # nicht mehr Passwortpruefung (bcrypt) und PDF-Erzeugung.
+    from storage_service import speicher_aufruf
+    return await speicher_aufruf(get_object, path)
 
 
 def delete_object(path: str) -> bool:
@@ -150,7 +154,9 @@ def delete_object(path: str) -> bool:
 
 
 async def delete_object_async(path: str) -> bool:
-    return await asyncio.to_thread(delete_object, path)
+    # Rollenprüfung 22.09.2026 (RP-550): eigener Speicher-Pool (wie oben).
+    from storage_service import speicher_aufruf
+    return await speicher_aufruf(delete_object, path)
 
 
 def snapshot_pseudonym(kennung: str) -> str:

@@ -28,17 +28,39 @@ const DEFAULTS = {
   retry503Ms: 5_000,    // Fallback, wenn kein Retry-After-Header kommt
 };
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 // Wunsch Ahmad 18.09.2026: Der Nutzer bricht das Warten mit "X" ab. Ein
 // AbortSignal geht durch alle Schritte; wer abbricht, bekommt einen Fehler
 // mit code "abgebrochen" — die Oberflaeche zeigt dafuer keine Fehlermeldung.
 export const ABBRUCH = "abgebrochen";
 
-function abbruchFehler() {
+export function abbruchFehler() {
   const e = new Error("Abgebrochen");
   e.code = ABBRUCH;
   return e;
+}
+
+/**
+ * Pause, die ein Abbruch sofort beendet.
+ *
+ * Rollenprüfung 22.09.2026 (RP-004/RP-103/RP-254): Die Pausen zwischen den
+ * Statusabfragen und vor der 503-Wiederholung beachteten das Signal nicht.
+ * Ein abgebrochener Lauf hing darin bis zu 5 Sekunden weiter und räumte
+ * danach den Zustand eines inzwischen neu gestarteten Laufs ab. Jetzt endet
+ * die Pause beim Abbruch sofort mit dem Abbruch-Fehler.
+ */
+export function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(abbruchFehler()); return; }
+    let weg = null;
+    const t = setTimeout(() => {
+      if (weg) signal?.removeEventListener?.("abort", weg);
+      resolve();
+    }, ms);
+    if (signal?.addEventListener) {
+      weg = () => { clearTimeout(t); reject(abbruchFehler()); };
+      signal.addEventListener("abort", weg, { once: true });
+    }
+  });
 }
 
 /** true, wenn der Fehler vom Abbrechen kommt (axios meldet ERR_CANCELED). */
@@ -75,7 +97,7 @@ export async function postWithRetry503(client, path, body, opts = {}) {
         e.code = "timeout";
         throw e;
       }
-      await sleep(wait);
+      await sleep(wait, signal);          // RP-254: Abbruch beendet die Pause
     }
   }
 }
@@ -112,7 +134,7 @@ export async function checkLink(client, url, opts = {}) {
     }
     // Erste Abfrage SOFORT — der Server long-pollt und antwortet, sobald
     // der Abruf fertig ist. Nur zwischen weiteren Abfragen kurz pausieren.
-    if (!ersteAbfrage) await sleep(pollMs);
+    if (!ersteAbfrage) await sleep(pollMs, signal);   // RP-254
     ersteAbfrage = false;
     let data;
     try {

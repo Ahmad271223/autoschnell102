@@ -219,11 +219,16 @@ def test_g2_erneuter_vergleich_ueberschreibt_korrekturen_nicht(welt):
 # ---------------------------------------------------------------- G3 (Loeschen)
 def test_g3b_sucher_kann_eigenen_termin_loeschen(welt):
     """Ein zweiter Vertrag von A -> eigener Termin -> A loescht ihn."""
-    r = requests.post(f"{API}/contracts", headers=welt["a"]["h"], json={
-        "vehicle_id": welt["vid"], "seller_name": "V Zwei",
-        "seller_address": "Weg 11", "seller_zip": "30159",
-        "seller_city": "Hannover", "purchase_price": 4200,
-        "pickup_date": "2099-08-01", "pickup_time": "11:00"}, timeout=90)
+    # Rollenpruefung 22.09.2026 (RP-416): A hat schon einen offenen Vertrag zu
+    # diesem Fahrzeug — ein zweiter nur nach Rueckfrage (409 ohne Bestaetigung).
+    zweit = {"vehicle_id": welt["vid"], "seller_name": "V Zwei",
+             "seller_address": "Weg 11", "seller_zip": "30159",
+             "seller_city": "Hannover", "purchase_price": 4200,
+             "pickup_date": "2099-08-01", "pickup_time": "11:00"}
+    r = requests.post(f"{API}/contracts", headers=welt["a"]["h"], json=zweit, timeout=90)
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "vertrag_vorhanden", r.text[:300]
+    r = requests.post(f"{API}/contracts", headers=welt["a"]["h"],
+                      json={**zweit, "zweiter_vertrag_bestaetigt": True}, timeout=90)
     assert r.status_code == 200, r.text[:200]
     appt = _db().appointments.find_one({"contract_id": r.json()["id"]}, {"_id": 0, "id": 1})
     r = requests.delete(f"{API}/appointments/{appt['id']}", headers=welt["b"]["h"], timeout=30)
@@ -240,12 +245,13 @@ def test_f3_termin_ohne_vertrag_verliert_personendaten_nach_frist(monkeypatch):
     alt_id, jung_id = f"r10-alt-{SUF}", f"r10-jung-{SUF}"
 
     async def _lauf(db):
+        # Rollenprüfung 22.09.2026 (RP-248): nur geschlossene Termine
         await db.appointments.insert_many([
-            {"id": alt_id, "dealer_id": f"f-{SUF}", "contract_id": None,
+            {"id": alt_id, "dealer_id": f"f-{SUF}", "contract_id": None, "status": "abgeholt",
              "seller_name": "Max Muster", "seller_phone": "0170", "seller_email": "m@x.de",
              "pickup_address": "Weg 1", "pickup_date": (jetzt - timedelta(days=120)).strftime("%Y-%m-%d"),
              "created_at": (jetzt - timedelta(days=130)).isoformat()},
-            {"id": jung_id, "dealer_id": f"f-{SUF}", "contract_id": None,
+            {"id": jung_id, "dealer_id": f"f-{SUF}", "contract_id": None, "status": "abgeholt",
              "seller_name": "Erika", "pickup_date": (jetzt - timedelta(days=10)).strftime("%Y-%m-%d"),
              "created_at": (jetzt - timedelta(days=12)).isoformat()},
         ])

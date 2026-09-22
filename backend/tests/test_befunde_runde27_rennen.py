@@ -163,16 +163,19 @@ def test_03_nur_verkauft_geloescht_archiviert_sperren_den_vertrag(welt):
     loeschen Sucher und Chef es selbst."""
     C = _modul("routes.contracts")
     w = welt
+    # Rollenpruefung 22.09.2026 (RP-113): B hat jeweils verglichen
+    # (Mitbearbeiter) — ohne Vergleich gaebe es fuer ihn gar keinen Vertrag.
+    mit_b = {"mitbearbeiter_ids": [w.b["id"]]}
     for lc in ("verkauft", "archiviert"):
         vid = f"v_{lc}_{w.s}"
-        w.run(w.db.vehicles.insert_one(_fahrzeug(w, vid, w.a, lifecycle=lc)))
+        w.run(w.db.vehicles.insert_one(_fahrzeug(w, vid, w.a, lifecycle=lc, **mit_b)))
         with pytest.raises(HTTPException) as e:
             w.run(C.create_contract(_vertrag_body(C, vid), w.b))
         assert e.value.status_code == 409, (lc, e.value.detail)
     # Abgeholt: ausdruecklich ERLAUBT (auch mit abgeschlossenem Kaufvorgang)
     vid = f"v_abgeholt_{w.s}"
     w.run(w.db.vehicles.insert_one(_fahrzeug(
-        w, vid, w.a, lifecycle="abgeholt", abgeholt_kaufvorgang_id="kv-1")))
+        w, vid, w.a, lifecycle="abgeholt", abgeholt_kaufvorgang_id="kv-1", **mit_b)))
     w.run(C.create_contract(_vertrag_body(C, vid), w.b))
     assert w.run(w.db.generated_pdfs.count_documents({"vehicle_id": vid})) == 1
 

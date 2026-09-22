@@ -1,4 +1,5 @@
 """Dealer endpoints: settings GET/PUT, active-profile, subscription info/cancel."""
+import math
 import os
 from datetime import datetime, timezone
 from typing import Optional
@@ -285,10 +286,13 @@ def _collect_settings_update(body: DealerSettingsIn) -> dict:
         update["comparison_rules"] = _regeln_pruefen(body.comparison_rules, "Inland")
     if body.export_rules is not None:
         update["export_rules"] = _regeln_pruefen(body.export_rules, "Export")
-    if body.active_profile is not None:
-        if body.active_profile not in ("inland", "export"):
-            raise HTTPException(400, "active_profile muss 'inland' oder 'export' sein")
-        update["active_profile"] = body.active_profile
+    # Rollenprüfung 22.09.2026 (RP-005/RP-104/RP-425, Welle 2): active_profile
+    # wird hier NICHT mehr uebernommen. Die Einstellungen schickten es aus dem
+    # (veralteten) Anmelde-Kontext mit — ein Speichern setzte das Profil der
+    # Firma still zurueck (z. B. Export -> Inland, auch fuer alle Sucher ohne
+    # eigenen Wert). Das Profil schreibt nur PUT /dealer/active-profile; ein
+    # alter Client, der es noch mitschickt, bekommt keinen Fehler, der Wert
+    # wird nur ignoriert.
     if body.email_subject is not None:
         update["email_subject"] = body.email_subject
     if body.email_template is not None:
@@ -376,8 +380,31 @@ async def update_settings(body: DealerSettingsIn, user=Depends(current_firma)):
                       "zurueckgesetzt": sorted(k.split(".", 1)[1] for k in loeschen)})
         fresh_user = await db.users.find_one({"id": user["id"]}, {"_id": 0})
         return _sucher_sicht(await effective_dealer(fresh_user))
+    # Rollenprüfung 22.09.2026 (RP-138, Welle 2): Das Logo aendert nur
+    # POST /dealer/logo. Hier gilt nur "" (Logo entfernen) oder der
+    # unveraenderte Wert. Ein aelterer Tab schickte sonst die ALTE Logo-URL
+    # mit — deren Datei war beim Hochladen schon geloescht, das Logo danach
+    # kaputt. Ein abweichender Wert wird ignoriert (die uebrigen Felder
+    # werden gespeichert), die Antwort zeigt das tatsaechliche Logo.
+    logo_vorher = None
+    if "logo_url" in update:
+        stand = await db.dealers.find_one({"id": user["dealer_id"]},
+                                          {"_id": 0, "logo_url": 1}) or {}
+        logo_vorher = stand.get("logo_url") or ""
+        neu_logo = update["logo_url"] or ""
+        if neu_logo and neu_logo != logo_vorher:
+            del update["logo_url"]
+            logo_vorher = None
+            from deps import log_activity_sicher as _log
+            await _log(user["dealer_id"], user["id"], "einstellungen.logo.ignoriert",
+                       meta={"grund": "logo_url nur ueber /dealer/logo"})
+        elif neu_logo == logo_vorher:
+            logo_vorher = None                   # unveraendert: nichts wegraeumen
     update["updated_at"] = now_iso()
     await db.dealers.update_one({"id": user["dealer_id"]}, {"$set": update})
+    if logo_vorher:
+        # "Logo entfernen": die hochgeladene Datei nicht als Waise liegen lassen
+        await _altes_logo_wegraeumen(logo_vorher, user["dealer_id"])
     # Runde 11: Firmenweite Aenderungen des Chefs ins Protokoll — vorher
     # war nur der persoenliche Sucher-Override nachvollziehbar, nicht wann
     # der Chef die Vergleichsregeln der ganzen Firma geaendert hat.
@@ -405,7 +432,11 @@ async def settings_zuruecksetzen(body: OverrideZuruecksetzenIn, user=Depends(cur
     if await ist_haupt_chef(user):
         raise HTTPException(400, "Der Hauptaccount hat keine persönlichen Abweichungen — "
                                  "seine Werte SIND die Vorgaben der Firma.")
-    felder = set(body.felder or SUCHER_SETTINGS_FIELDS)
+    # Rollenprüfung 22.09.2026 (RP-005, Welle 2): ohne Feldliste (alte
+    # Oberflaeche) NICHT das eigene aktive Profil mitloeschen — die Anzeige
+    # blendet es aus, der Sucher haette sein Profil unbemerkt verloren. Wer
+    # es wirklich zuruecksetzen will, nennt es ausdruecklich.
+    felder = set(body.felder or (SUCHER_SETTINGS_FIELDS - {"active_profile"}))
     unbekannt = felder - SUCHER_SETTINGS_FIELDS
     if unbekannt:
         raise HTTPException(400, f"Unbekannte Einstellung: {', '.join(sorted(unbekannt))}")
@@ -526,13 +557,24 @@ async def _altes_logo_wegraeumen(alte_url: Optional[str], dealer_id: str) -> Non
     if not alte_url or not alte_url.startswith(f"/api/files/logo/{dealer_id}/"):
         return
     alte_url = alte_url.split("?")[0].split("#")[0]
+    key = alte_url[len("/api/files/"):]
+    # Rollenprüfung 22.09.2026 (Review): Seit RP-452 haelt jeder Vertrag
+    # SEIN Logo fest (contract_data.logo_key, routes/contracts.logo_schluessel)
+    # und jede spaetere Fassung laedt genau diese Datei. Wurde sie hier beim
+    # Logowechsel geloescht, kam Fassung 2 (Terminverschiebung, Abschluss nach
+    # der Abholung) ohne Logo heraus, Fassung 1 hatte es — die Einstellung
+    # hat den bestehenden Vertrag doch veraendert. Solange ein Vertrag der
+    # Firma die Datei nennt, bleibt sie liegen (Index dealer_id).
     noch_genutzt = (await db.dealers.count_documents({"logo_url": alte_url})
                     or await db.users.count_documents(
-                        {"settings_override.logo_url": alte_url}))
+                        {"settings_override.logo_url": alte_url})
+                    or await db.generated_pdfs.find_one(
+                        {"dealer_id": dealer_id, "contract_data.logo_key": key},
+                        {"_id": 1}))
     if noch_genutzt:
         return
     from storage_service import loeschen_oder_vormerken
-    await loeschen_oder_vormerken(db, key=alte_url[len("/api/files/"):],
+    await loeschen_oder_vormerken(db, key=key,
                                   grund="logo_ersetzt", dealer_id=dealer_id)
 
 
@@ -606,7 +648,11 @@ async def dealer_subscription(user=Depends(current_firma)):
         from deps import _ablauf_parsen
         ea = _ablauf_parsen(expires_at)
         if ea is not None:
-            days_remaining = max(0, (ea - datetime.now(timezone.utc)).days)
+            # Rollenpruefung 22.09.2026 (RP-232/RP-383): angefangene Tage
+            # zaehlen (aufrunden) — timedelta.days rundete ab, eine frische
+            # 3-Tage-Probe zeigte sofort "noch 2 Tage".
+            rest_s = (ea - datetime.now(timezone.utc)).total_seconds()
+            days_remaining = max(0, math.ceil(rest_s / 86400))
 
     is_lifetime = status.get("plan") == "lifetime"
     raw_status = (sub_doc or {}).get("status", "active") if sub_doc else "none"

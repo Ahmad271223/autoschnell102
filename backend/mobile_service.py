@@ -27,8 +27,14 @@ from urllib.parse import urlencode, quote
 import ssl
 import certifi
 import httpx
-from anbieter_fehler import AnbieterFehler, aus_http_antwort, aus_ausnahme
+from anbieter_fehler import (ART_AUSFALL, AnbieterFehler, ListingGone,
+                             aus_ausnahme, aus_http_antwort)
 import xmltodict
+
+# Rollenprüfung 22.09.2026 (RP-202): Text fuer ein Inserat, das Apify nicht
+# (mehr) liefert — geht 1:1 an den Sucher (Vergleich 404, Link-Job-Status).
+INSERAT_WEG_MOBILE = ("Das Inserat ist bei mobile.de nicht mehr online "
+                      "(entfernt oder verkauft) oder nicht abrufbar.")
 
 _SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
@@ -44,8 +50,31 @@ MOBILE_PASS = os.environ.get("MOBILE_API_PASS", "")
 # API-Zugang noetig. Kostet ca. $0.006 je frischem Abruf; der Cache
 # (vehicle_cache + listings_cache) verhindert Doppelabrufe.
 APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "").strip()
-APIFY_MOBILE_ACTOR = os.environ.get(
-    "APIFY_MOBILE_ACTOR", "memo23~mobile-de-scraper").strip()
+# Rollenprüfung 22.09.2026 (RP-549): docker-compose setzt die Variable als
+# LEEREN Wert (${APIFY_MOBILE_ACTOR:-}), wenn sie in der .env fehlt. Mit
+# os.environ.get(NAME, Standard) blieb das "" — der Aufruf ging an
+# /v2/acts//run-sync... und JEDER neue mobile.de-Link scheiterte. Leer oder nur
+# Leerzeichen bedeutet jetzt: Standard-Actor.
+APIFY_MOBILE_ACTOR = (os.environ.get("APIFY_MOBILE_ACTOR") or "").strip() \
+    or "memo23~mobile-de-scraper"
+
+
+def apify_lauf_parameter(build_env: str) -> dict:
+    """Query-Parameter fuer run-sync-get-dataset-items (mobile.de UND AutoScout).
+
+    Rollenprüfung 22.09.2026 (RP-553): Speicher und Actor-Version waren nicht
+    festgelegt — der Actor lief mit seinem Standardspeicher, und viele
+    gleichzeitige Laeufe stiessen an Apifys Speichergrenze (402). Beides ist
+    jetzt einstellbar: APIFY_MEMORY_MB (z. B. 1024) und APIFY_MOBILE_BUILD /
+    APIFY_AUTOSCOUT_BUILD. Leer = wie bisher (nichts mitsenden)."""
+    params = {"format": "json", "clean": "1"}
+    speicher = (os.environ.get("APIFY_MEMORY_MB") or "").strip()
+    if speicher.isdigit() and int(speicher) > 0:
+        params["memory"] = speicher
+    build = (os.environ.get(build_env) or "").strip()
+    if build:
+        params["build"] = build
+    return params
 # Sandbox-/Demo-Daten NUR ausliefern, wenn ausdrücklich aktiviert. Sonst würde
 # jeder fehlgeschlagene mobile.de-Abruf still ein erfundenes Fahrzeug liefern
 # (und es 24 h cachen + in Verträge übernehmen). Default: ehrlicher Fehler.
@@ -673,7 +702,7 @@ async def _fetch_from_apify(ad_id: str, url: Optional[str] = None) -> Optional[d
                 # Token im Header statt als ?token=: sonst landet er ueber
                 # die httpx-Request-Logzeile im Backend-Log.
                 headers={"Authorization": f"Bearer {APIFY_TOKEN}"},
-                params={"format": "json", "clean": "1"},
+                params=apify_lauf_parameter("APIFY_MOBILE_BUILD"),
                 json={"startUrls": [{"url": detail_url}], "maxItems": 1},
             )
             fehler = aus_http_antwort(r.status_code, r.text, "mobile.de")
@@ -682,18 +711,30 @@ async def _fetch_from_apify(ad_id: str, url: Optional[str] = None) -> Optional[d
                             r.status_code, ad_id, r.text[:300])
                 raise fehler
             items = r.json()
-            if not isinstance(items, list) or not items or not isinstance(items[0], dict):
-                log.warning("Apify mobile.de: leere/unerwartete Antwort fuer %s", ad_id)
-                return None
+            if not isinstance(items, list) or (items and not isinstance(items[0], dict)):
+                # Kaputte/unerwartete Antwortform: Stoerung beim Dienst, kein
+                # Beleg fuer ein Offline-Inserat — Wiederholung erlaubt.
+                log.warning("Apify mobile.de: unerwartete Antwort fuer %s", ad_id)
+                raise AnbieterFehler(ART_AUSFALL, "mobile.de", "unerwartete Antwortform")
+            # Rollenprüfung 22.09.2026 (RP-202/RP-353): Leere Liste bzw. ein
+            # Element ohne Inhalt heisst "Inserat nicht (mehr) online". Vorher
+            # kam hier None zurueck -> RuntimeError: drei bezahlte Apify-Laeufe,
+            # das Tageslimit wurde zurueckgebucht (Umgehung) und der Sucher las
+            # "Technischer Fehler". Mit ListingGone zaehlt der Abruf (der Dienst
+            # wurde bezahlt), der Link-Job endet sofort, /mobile/compare
+            # antwortet 404 mit dieser Meldung.
+            if not items:
+                log.warning("Apify mobile.de: leere Antwort fuer %s — Inserat weg", ad_id)
+                raise ListingGone(INSERAT_WEG_MOBILE)
             v = _parse_apify_item(items[0], ad_id, url=detail_url)
             # Echter Lauf 09/2026: fuer eine nicht existierende Nummer liefert
             # Apify EIN Element ohne Inhalt. Daraus wurde ein leeres Fahrzeug
             # statt "Inserat nicht mehr online". Leer heisst: weg.
-            if v and not (v.get("make") or v.get("model") or v.get("list_price")):
+            if not v or not (v.get("make") or v.get("model") or v.get("list_price")):
                 log.warning("Apify mobile.de: Antwort ohne Inhalt fuer %s — Inserat weg", ad_id)
-                return None
+                raise ListingGone(INSERAT_WEG_MOBILE)
             return v
-    except AnbieterFehler:
+    except (AnbieterFehler, ListingGone):
         raise
     except Exception as exc:
         # Zeitueberschreitung / Netz / kaputte Antwort: klarer Text statt
@@ -1036,6 +1077,45 @@ def _resolve_make(vehicle: dict) -> Tuple[Optional[str], Optional[Dict[str, Any]
     return None, None
 
 
+# Rollenprüfung 22.09.2026 (RP-419): Modellnamen, die AutoScout24/Kleinanzeigen
+# anders schreiben als der mobile.de-Katalog (normalisiert, je Marke). Ohne
+# Eintrag suchte der mobile.de-Link ueber die GANZE Marke.
+_MODELL_ALIASE = {
+    ("kia", "ceedsw"): "ceedsportswagon",          # AutoScout: "Ceed SW"
+    ("kia", "ceedsw" + "ceedsw"): "ceedsportswagon",  # "Ceed SW / cee'd SW"
+}
+
+# Rollenprüfung 22.09.2026 (RP-421): "T6.1 Multivan" -> "T6 Multivan". Der
+# Katalog kennt keine Facelift-Stufen; normalisiert wurde aus "T6.1" "t61…",
+# die Verkuerzung traf dann die Sammelgruppe "T6 (Alle)" — Transporter,
+# Multivan und California wurden gemeinsam verglichen.
+_GENERATION_PUNKT = re.compile(r"\b(T\d)\.\d\b", re.IGNORECASE)
+
+
+def _modell_kandidaten(vehicle: dict) -> list:
+    """Modellbezeichnungen in der Reihenfolge, in der sie aufgeloest werden:
+    je Feld zuerst die um die Facelift-Stufe vereinfachte Form, dann das
+    Original."""
+    raus: list = []
+    for cand in (vehicle.get("model_label"), vehicle.get("model")):
+        if not cand:
+            continue
+        vereinfacht = _GENERATION_PUNKT.sub(r"\1", str(cand))
+        for c in (vereinfacht, str(cand)):
+            if c not in raus:
+                raus.append(c)
+    return raus
+
+
+def modell_aufgeloest(vehicle: dict) -> Tuple[bool, bool]:
+    """(Marke erkannt, Modell erkannt) im mobile.de-Katalog — fuer die
+    Hinweise im Vergleich (RP-419)."""
+    make_id, make_entry = _resolve_make(vehicle)
+    if not make_id:
+        return False, False
+    return True, bool(_resolve_model(make_entry, vehicle))
+
+
 def _resolve_model(make_entry: Dict[str, Any], vehicle: dict) -> Optional[str]:
     """Return the mobile.de model id for the given vehicle within the
     given make. Tries (1) exact normalized match on model_label / model,
@@ -1044,12 +1124,14 @@ def _resolve_model(make_entry: Dict[str, Any], vehicle: dict) -> Optional[str]:
     if not make_entry:
         return None
     models = make_entry.get("models") or {}
-    for cand in (vehicle.get("model_label"), vehicle.get("model")):
-        if not cand:
-            continue
+    marke_norm = _normalize(make_entry.get("raw_name") or "")
+    for cand in _modell_kandidaten(vehicle):
         norm = _normalize(cand)
         if not norm:
             continue
+        # Rollenprüfung 22.09.2026 (RP-419): bekannte Schreibweisen anderer
+        # Portale, die der mobile.de-Katalog anders nennt.
+        norm = _MODELL_ALIASE.get((marke_norm, norm), norm)
         if norm in models:
             return models[norm]
         # Pruefbericht 20.09.2026 (B-03): zuerst die VOLLE Bezeichnung. Die

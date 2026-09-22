@@ -121,6 +121,57 @@ def _json_sicher(wert):
     return str(wert)
 
 
+#: Rollenprüfung 22.09.2026 (RP-135/RP-036): deutsche Namen der Felder, die in
+#: Laengenfehlern am haeufigsten auftauchen (sonst der Feldname selbst) —
+#: dieselbe Liste und derselbe Wortlaut wie validierungsText in
+#: frontend/src/lib/api.js, damit jeder Weg denselben Satz zeigt.
+_FELD_NAMEN = {
+    "description": "Beschreibung", "title": "Titel", "notes": "Notizen", "notiz": "Notiz",
+    "location": "Standort", "label": "Bezeichnung", "costs": "Kosten",
+    "features": "Ausstattung", "known_defects": "Bekannte Mängel", "message": "Nachricht",
+    "nachricht": "Nachricht", "grund": "Grund", "name": "Name",
+    "company_name": "Firmenname", "contact_person": "Ansprechpartner", "email": "E-Mail",
+    "phone": "Telefon", "address": "Adresse", "city": "Ort", "zip_code": "PLZ",
+    "default_terms": "Vertragsbedingungen", "agb": "AGB",
+}
+
+
+def _feldname(loc) -> str:
+    teile = [t for t in (loc or ()) if isinstance(t, str) and t not in ("body", "query", "path")]
+    if not teile:
+        return ""
+    return _FELD_NAMEN.get(teile[-1], teile[-1])
+
+
+def _meldung_deutsch(e: dict) -> Optional[str]:
+    """Rollenprüfung 22.09.2026 (RP-135/RP-036): Pydantic liefert englische
+    Texte ('String should have at most 500 characters'). Fuer die
+    Laengengrenzen (die ein Nutzer beim Tippen wirklich erreicht) steht in
+    `msg` jetzt ein deutscher Satz mit Feldname — auch fuer Aufrufer, die
+    nicht ueber errMsg/validierungsText der Oberflaeche gehen. `type` und
+    `ctx` bleiben unveraendert. Alles andere bleibt, wie es ist (None)."""
+    ctx = e.get("ctx") or {}
+    feld = _feldname(e.get("loc"))
+
+    def mit(satz: str) -> str:
+        return f"{feld}: {satz}" if feld else satz[:1].upper() + satz[1:]
+    typ = e.get("type")
+    try:
+        if typ == "string_too_long":
+            return mit(f"höchstens {int(ctx['max_length'])} Zeichen")
+        if typ == "too_long":
+            return mit(f"höchstens {int(ctx['max_length'])} Einträge")
+        if typ == "string_too_short":
+            n = int(ctx["min_length"])
+            return mit(f"mindestens {n} Zeichen") if n > 1 else mit("darf nicht leer sein")
+        if typ == "too_short":
+            n = int(ctx["min_length"])
+            return mit(f"mindestens {n} Einträge") if n > 1 else mit("mindestens ein Eintrag")
+    except (KeyError, TypeError, ValueError):
+        return None
+    return None
+
+
 @app.exception_handler(RequestValidationError)
 async def _validierungsfehler(request: Request, exc: RequestValidationError):
     from fastapi.responses import JSONResponse
@@ -128,6 +179,9 @@ async def _validierungsfehler(request: Request, exc: RequestValidationError):
     for e in exc.errors():
         e = dict(e)
         e.pop("url", None)
+        deutsch = _meldung_deutsch(e)
+        if deutsch:
+            e["msg"] = deutsch
         if "ctx" in e:
             e["ctx"] = _json_sicher({k: (str(v) if isinstance(v, Exception) else v)
                                      for k, v in e["ctx"].items()})
@@ -256,18 +310,45 @@ class ErrorReportingMiddleware(BaseHTTPMiddleware):
             log.exception("Unhandled error on %s %s (ref=%s)",
                           request.method, request.url.path, err_id[:8])
             try:
-                await db.error_logs.insert_one({
-                    "id": err_id,
-                    "source": "backend",
-                    "method": request.method,
-                    "path": str(request.url.path)[:300],
-                    "error_type": type(exc).__name__,
-                    "message": redigieren(str(exc))[:1000],
-                    "traceback": tb[-8000:],
-                    "ip": (request.client.host if request.client else "") or "",
-                    "status": "open",
-                    "created_at": now_iso(),
-                })
+                # Rollenprüfung 22.09.2026 (RP-547): Jeder Aufruf schrieb bis
+                # zu 8 KB Traceback in error_logs — ohne Zusammenfassen und
+                # ohne Obergrenze (die galten nur fuer /client-errors). Ein
+                # oeffentlicher Weg, der wiederholt scheitert (fehlende Datei
+                # im Objektspeicher, logo/ ohne Signatur), fuellte so die
+                # Sammlung. Jetzt wie bei /client-errors: gleicher Weg + Typ
+                # + Meldung in 10 Minuten wird hochgezaehlt, und ab
+                # ERROR_LOG_MAX wird nichts Neues mehr angelegt.
+                import hashlib as _hashlib
+                pfad = str(request.url.path)[:300]
+                nachricht = redigieren(str(exc))[:1000]
+                hash_ = _hashlib.sha256(
+                    f"backend|{request.method}|{pfad}|{type(exc).__name__}|{nachricht}"
+                    .encode("utf-8")).hexdigest()[:24]
+                frist = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+                dup = await db.error_logs.find_one_and_update(
+                    {"hash": hash_, "created_at": {"$gte": frist}},
+                    {"$inc": {"anzahl": 1}, "$set": {"zuletzt": now_iso()}},
+                    projection={"_id": 0, "id": 1})
+                if dup:
+                    err_id = dup.get("id") or err_id
+                elif await db.error_logs.estimated_document_count() < \
+                        int(os.environ.get("ERROR_LOG_MAX", "20000") or 20000):
+                    await db.error_logs.insert_one({
+                        "id": err_id,
+                        "source": "backend",
+                        "method": request.method,
+                        "path": pfad,
+                        "error_type": type(exc).__name__,
+                        "message": nachricht,
+                        "traceback": tb[-8000:],
+                        "ip": (request.client.host if request.client else "") or "",
+                        "hash": hash_, "anzahl": 1,
+                        "status": "open",
+                        "created_at": now_iso(),
+                    })
+                else:
+                    log.error("error_logs voll (ERROR_LOG_MAX) — Fehler %s nur im Protokoll",
+                              err_id[:8])
             except Exception:
                 log.exception("error_logs write failed (ref=%s)", err_id[:8])
             return JSONResponse(
@@ -511,12 +592,20 @@ async def _darf_betriebsdaten_sehen(request: Request) -> bool:
         return False
     try:
         from auth import decode_token
-        daten = decode_token(kopf.split(" ", 1)[1].strip())
+        daten = decode_token(kopf.split(" ", 1)[1].strip()) or {}
+        # Rollenprüfung 22.09.2026 (RP-233/RP-384): decode_token prueft nur
+        # die Signatur. Ein Zwischen-Token nach dem Passwort (typ "mfa", noch
+        # OHNE zweiten Faktor) und ein abgemeldetes Token (sid passt nicht
+        # mehr zur aktuellen Sitzung) bekamen hier trotzdem alle
+        # Betriebsdaten. Jetzt dieselben Regeln wie deps.current_user.
+        if daten.get("typ") == "mfa" or not daten.get("sid"):
+            return False
         nutzer = await db.users.find_one(
-            {"id": (daten or {}).get("sub")},
-            {"_id": 0, "is_super_admin": 1, "active": 1})
+            {"id": daten.get("sub")},
+            {"_id": 0, "is_super_admin": 1, "active": 1, "current_session_id": 1})
         return bool(nutzer and nutzer.get("is_super_admin")
-                    and nutzer.get("active") is not False)
+                    and nutzer.get("active") is not False
+                    and daten.get("sid") == nutzer.get("current_session_id"))
     except Exception:  # noqa: BLE001
         return False
 
@@ -594,7 +683,17 @@ async def _readiness_pruefen():
                 info["s3"] = "ungeprueft"
                 warnungen.append("s3: keine Erreichbarkeitspruefung vorhanden")
             else:
-                ok = await asyncio.to_thread(head)
+                # Rollenprüfung 22.09.2026 (RP-550): ohne Zeitlimit hing
+                # /api/ready mit, wenn R2 Pakete verschluckt (botocore wartet
+                # sonst 60 s + 60 s je Versuch). Nach 5 s gilt der Speicher
+                # als nicht erreichbar; der Hintergrund-Aufruf laeuft im
+                # eigenen Speicher-Pool aus (storage_service), nicht im
+                # gemeinsamen Pool von Passwortpruefung und PDF.
+                try:
+                    from storage_service import speicher_aufruf
+                    ok = await asyncio.wait_for(speicher_aufruf(head), timeout=5)
+                except asyncio.TimeoutError:
+                    ok = False
                 info["s3"] = "up" if ok else "nicht erreichbar"
                 if not ok:
                     warnungen.append("s3: nicht erreichbar")
@@ -733,6 +832,28 @@ async def _readiness_pruefen():
         _ = alt
     except Exception as exc:
         warnungen.append(f"queue: {exc}")
+    try:
+        # Rollenprüfung 22.09.2026 (RP-394): Scheiterten Teile des stuendlichen
+        # Aufraeumlaufs, stand das nur im Log. Jetzt steht der Stand des
+        # letzten Laufs in system_reports (cleanup_service) — eine Warnung,
+        # wenn der letzte VOLLSTAENDIGE Lauf laenger als AUFRAEUMLAUF_WARN_H
+        # (Standard 3 h) her ist. Erst nach dieser Zeit Laufzeit des Prozesses
+        # (frischer Stack, Rollout).
+        grenze_h = zahl_env("AUFRAEUMLAUF_WARN_H", 3, unten=1)
+        bericht = await db.system_reports.find_one({"typ": "aufraeumlauf"}, {"_id": 0}) or {}
+        info["aufraeumlauf"] = {k: bericht.get(k) for k in (
+            "letzter_lauf", "letzter_vollstaendiger_lauf", "fehlgeschlagen")}
+        _laeuft_h = (datetime.now(timezone.utc) - _PROZESS_START).total_seconds() / 3600
+        vollstaendig = bericht.get("letzter_vollstaendiger_lauf") or ""
+        grenze_iso = (datetime.now(timezone.utc) - timedelta(hours=grenze_h)).isoformat()
+        if _laeuft_h > grenze_h and vollstaendig < grenze_iso:
+            warnungen.append(
+                "Aufraeumlauf: kein vollstaendiger Lauf seit "
+                + (vollstaendig[:16].replace("T", " ") + " UTC" if vollstaendig else "dem Start")
+                + (f" (zuletzt gescheitert: {', '.join(bericht.get('fehlgeschlagen') or [])})"
+                   if bericht.get("fehlgeschlagen") else ""))
+    except Exception as exc:  # noqa: BLE001
+        warnungen.append(f"aufraeumlauf: {exc}")
     try:
         # Audit 13.09.2026 (#38): prozessunabhaengige Stau-Warnung — startet
         # flottenweit kein Beweis-Worker, bliebe /ready sonst gruen. Warnung,
@@ -1065,6 +1186,16 @@ async def ensure_indexes():
     await unique_anlegen(
         db.pickup_reports, [("appointment_id", 1), ("version", 1)],
         name="berichtsversion_eindeutig")
+    # Rollenprüfung 22.09.2026 (RP-066/RP-165): Idempotenz des Abholberichts —
+    # die Fahrer-App schickt je Dialog einen client_bericht_id mit. Eine
+    # GLEICHZEITIGE Wiederholung (Netzabbruch, Doppeltipp) scheitert hier;
+    # drivers.driver_submit_report faengt den DuplicateKeyError ab und
+    # liefert den gespeicherten Bericht (200, wiederholt). Weich: Altberichte
+    # haben das Feld nicht, Dubletten sind nur ein Alarm.
+    await unique_anlegen(
+        db.pickup_reports, [("appointment_id", 1), ("client_bericht_id", 1)],
+        name="bericht_idempotenz", weich=True,
+        partialFilterExpression={"client_bericht_id": {"$type": "string"}})
     # Runde 21: Fahrerfotos laufen FAHRERFOTO_TAGE nach dem Hochladen ab
     # (cleanup_service.berichtsfotos_nach_frist_loeschen sucht nach created_at).
     await db.pickup_reports.create_index([("created_at", 1)], name="bericht_erstellt")
@@ -1401,6 +1532,9 @@ async def seed_super_admin():
                 "id": str(uuid.uuid4()), "dealer_id": d_id,
                 "plan": "lifetime", "status": "active",
                 "expires_at": None, "created_at": now_iso(),
+                # Rollenprüfung 22.09.2026 (RP-145): Firmen-Abo-Kennzeichen
+                # (Index ein_aktives_firmen_abo_je_firma, indizes.py)
+                "art": "firma",
             })
             log.warning("seed_super_admin: fehlendes Abo nachgezogen")
         return
@@ -1428,6 +1562,18 @@ async def seed_super_admin():
         "current_session_id": None,
         "created_at": now_iso(),
         "company_name": "Cash Car Hannover (Super-Admin)",
+        # Rollenprüfung 22.09.2026 (RP-543): Bei einer Neuinstallation kam
+        # der erste Betreiber nie ins System — in Produktion verlangt
+        # /auth/login fuer den Super-Admin den zweiten Faktor, einrichten
+        # kann man ihn aber erst NACH der Anmeldung. Damit liessen sich auch
+        # keine Konten anlegen. Jetzt bekommt NUR das frisch angelegte Konto
+        # SEED_MFA_FRIST_MIN (Standard 60) Minuten Gnadenfrist — dieselbe
+        # Regel wie nach scripts/mfa_pruefen.py --abschalten. Ein bestehendes
+        # Konto wird nie angefasst (Zweig oben).
+        "mfa": {"aktiv": False,
+                "pflicht_ausgesetzt_bis": (datetime.now(timezone.utc) + timedelta(
+                    minutes=zahl_env("SEED_MFA_FRIST_MIN", 60, unten=5, oben=1440))
+                ).isoformat()},
     })
     await db.dealers.insert_one({
         "kunden_nr": await naechste_kunden_nr(),
@@ -1440,6 +1586,7 @@ async def seed_super_admin():
         "id": str(uuid.uuid4()), "dealer_id": dealer_id,
         "plan": "lifetime", "status": "active",
         "expires_at": None, "created_at": now_iso(),
+        "art": "firma",               # Rollenprüfung 22.09.2026 (RP-145)
     })
     log.info("seed_super_admin: created %s", username)
 
@@ -1673,6 +1820,13 @@ async def _alle_indexe():
     # Bereinigung, und die Dublettenpruefung kann den Start nicht abbrechen.
     from indizes import abo_unique_index
     await abo_unique_index(db)
+    # Rollenprüfung 22.09.2026 (RP-046/RP-145/RP-152): hoechstens EIN aktives
+    # Firmen-Abo je Firma (art='firma'); RP-083/RP-182: hoechstens EIN aktives
+    # Inserat je Fahrzeug. Beide weich — Altdubletten melden einen Alarm und
+    # bleiben unveraendert, der Start laeuft weiter. Wirft nie.
+    from indizes import firmen_abo_unique_index, inserat_je_fahrzeug_unique_index
+    await firmen_abo_unique_index(db)
+    await inserat_je_fahrzeug_unique_index(db)
     await unique_anlegen(db.manual_payments, "vorgang_id", sparse=True,
                          name="zahlung_je_vorgang")
     await db.abo_vorgaenge.create_index([("status", 1), ("updated_at", 1)])
@@ -1702,8 +1856,11 @@ async def run_schreiber_melden_forever():
         try:
             doc = await wartung.lesen_async(db)
             if wartung.pausiert(doc, "POST"):
+                # Rollenprüfung 22.09.2026 (RP-245/RP-396): dazu die laufenden
+                # Hintergrundarbeiten dieses Prozesses (Aufraeumlauf) — sonst
+                # meldete der Prozess 0, waehrend der Lauf noch loeschte.
                 await wartung.schreiber_melden(
-                    db, WartungsmodusMiddleware._offene_schreiber)
+                    db, WartungsmodusMiddleware._offene_schreiber + wartung.hintergrund_offen())
                 await asyncio.sleep(1)
                 continue
         except Exception as exc:  # noqa: BLE001
@@ -1790,6 +1947,9 @@ app.add_middleware(
     # 20.09.2026: Kopfzeilen, die die Oberflaeche auswertet. In Produktion
     # liegt die API unter derselben Herkunft (dort sind sie ohnehin lesbar);
     # bei getrennter API-Adresse blieben sie ohne diese Liste unsichtbar.
+    # Rollenprüfung 22.09.2026 (RP-546): X-Neues-Token (auth.NEUES_TOKEN_KOPF)
+    # traegt die verlaengerte Sitzung aus deps.current_user.
     expose_headers=["X-Sperre", "X-Wiederholen", "Retry-After", "X-AH-Fassung",
-                    "X-Truncated", "X-Truncated-Laufend", "X-Next-Before"],
+                    "X-Truncated", "X-Truncated-Laufend", "X-Next-Before",
+                    "X-Neues-Token"],
 )

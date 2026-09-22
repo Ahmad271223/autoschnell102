@@ -68,6 +68,27 @@ def _login(mail):
     return konten.login_per_mail(mail, PW, "auth", timeout=30)
 
 
+def _nutzerzeile(headers, user_id):
+    """Zeile eines Kontos aus GET /admin/users — seitenweise.
+
+    Rollenpruefung 22.09.2026 (Welle 3): Die Liste kommt neueste zuerst in
+    Seiten zu 1000 (X-Truncated: 1 = es gibt weitere). Die Test-Admins tragen
+    created_at 2026-01-01; in einer gewachsenen Test-DB (autoschnell_r29:
+    ueber 1000 juengere Konten) lagen sie nicht mehr auf Seite 1, und der Test
+    fiel mit StopIteration, obwohl die Route unveraendert richtig war. Die
+    Pruefung selbst (mfa_aktiv ja, mfa-Block nie) bleibt dieselbe."""
+    for seite in range(1, 51):
+        r = requests.get(f"{API}/admin/users", headers=headers,
+                         params={"page": seite}, timeout=60)
+        assert r.status_code == 200, r.text[:200]
+        treffer = [u for u in r.json() if u["id"] == user_id]
+        if treffer:
+            return treffer[0]
+        if r.headers.get("X-Truncated") != "1":
+            break
+    raise AssertionError(f"Konto {user_id} steht auf keiner Seite von /admin/users")
+
+
 def _hdr(token):
     return {"Authorization": f"Bearer {token}"}
 
@@ -128,8 +149,7 @@ def test_01_einrichten_und_aktivieren(welt):
     # ... und in keiner API-Antwort
     me = requests.get(f"{API}/auth/me", headers=S, timeout=30).json()
     assert "secret" not in str(me.get("user", {}).get("mfa", "")) and secret not in me.__str__()
-    liste = requests.get(f"{API}/admin/users", headers=S, timeout=30).json()
-    ich = next(u for u in liste if u["id"] == welt["super_id"])
+    ich = _nutzerzeile(S, welt["super_id"])
     assert ich["mfa_aktiv"] is True and "mfa" not in ich
 
 

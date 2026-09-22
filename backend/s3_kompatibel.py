@@ -49,36 +49,88 @@ def sse_optionen(endpoint: Optional[str] = None) -> Dict[str, str]:
     return {} if _eigenwillig(endpoint) else {"ServerSideEncryption": "AES256"}
 
 
-def client_konfiguration(endpoint: Optional[str] = None):
-    """botocore-Config passend zum Ziel (oder None, wenn nichts noetig ist)."""
+def _zahl(name: str, standard: float, unten: float) -> float:
+    try:
+        return max(unten, float((os.environ.get(name) or "").strip() or standard))
+    except ValueError:
+        return standard
+
+
+def zeitlimits(sicherung: bool = False) -> Dict[str, object]:
+    """Rollenprüfung 22.09.2026 (RP-550): Zeitlimits und Wiederholungen fuer
+    JEDEN S3-Zugriff. Vorher bekam der Client keine — botocore wartet dann
+    60 s auf die Verbindung, 60 s aufs Lesen und versucht es mehrmals. Hing
+    R2 (Pakete verschluckt), standen Datei-Aufrufe minutenlang und blockierten
+    den gemeinsamen Thread-Pool: Anmeldung (Passwortpruefung), PDF-Erzeugung
+    und Vertragsdruck standen fuer alle.
+      S3_VERBINDUNG_TIMEOUT_S  Standard 5
+      S3_LESE_TIMEOUT_S        Standard 30
+      S3_VERSUCHE              Standard 2 (Modus "standard")
+
+    Rollenprüfung 22.09.2026 (Review): Die knappen Grenzen sind fuer den
+    ANFRAGEWEG gedacht. Die naechtliche Sicherung (Offsite-Archiv mehrere GB,
+    mehrteilig; Datei-Sicherung Objekt fuer Objekt) lief mit denselben Werten
+    — wenige Wiederholungen je Teil und 30 s Lesezeit; ein kurzer
+    5xx/SlowDown-Schub brach den ganzen Upload ab. Mit sicherung=True gelten
+    eigene, grosszuegige Werte (nie knapper als die botocore-Vorgaben):
+      BACKUP_S3_VERBINDUNG_TIMEOUT_S  Standard 10
+      BACKUP_S3_LESE_TIMEOUT_S        Standard 120
+      BACKUP_S3_VERSUCHE              Standard 5 (Modus "standard")
+    Achtung Zaehlweise: botocore liest `max_attempts` in der Config als
+    WIEDERHOLUNGEN nach dem ersten Versuch (5 -> 6 Versuche insgesamt, 2 -> 3).
+    Die alte Vorgabe ohne Config waren 5 Versuche insgesamt."""
+    if sicherung:
+        return {"connect_timeout": _zahl("BACKUP_S3_VERBINDUNG_TIMEOUT_S", 10, 1),
+                "read_timeout": _zahl("BACKUP_S3_LESE_TIMEOUT_S", 120, 1),
+                "retries": {"max_attempts": int(_zahl("BACKUP_S3_VERSUCHE", 5, 1)),
+                            "mode": "standard"}}
+    return {"connect_timeout": _zahl("S3_VERBINDUNG_TIMEOUT_S", 5, 1),
+            "read_timeout": _zahl("S3_LESE_TIMEOUT_S", 30, 1),
+            "retries": {"max_attempts": int(_zahl("S3_VERSUCHE", 2, 1)),
+                        "mode": "standard"}}
+
+
+def client_konfiguration(endpoint: Optional[str] = None, *, sicherung: bool = False):
+    """botocore-Config passend zum Ziel.
+
+    Rollenprüfung 22.09.2026 (RP-550): liefert jetzt IMMER eine Config (mit
+    Zeitlimits, siehe zeitlimits(); sicherung=True fuer die Sicherungs-
+    skripte); die Pruefsummen-Schalter kommen nur fuer
+    eigenwillige Ziele (R2 & Co.) bzw. S3_PRUEFSUMMEN=nur_noetig dazu. Nur
+    ohne botocore (Tests ohne boto3) gibt es None."""
     endpoint = endpoint if endpoint is not None else os.environ.get("S3_ENDPOINT", "")
     wahl = (os.environ.get("S3_PRUEFSUMMEN") or "auto").strip().lower()
-    if wahl == "immer":
-        return None
-    if wahl != "nur_noetig" and not _eigenwillig(endpoint):
-        return None
+    pruefsummen_zahm = wahl != "immer" and (wahl == "nur_noetig" or _eigenwillig(endpoint))
     try:
         from botocore.config import Config
     except ImportError:                                   # pragma: no cover
         return None
+    grenzen = zeitlimits(sicherung)
+    if not pruefsummen_zahm:
+        try:
+            return Config(**grenzen)
+        except (TypeError, ValueError):                   # pragma: no cover
+            return None
     try:
         return Config(signature_version="s3v4",
                       request_checksum_calculation="when_required",
-                      response_checksum_validation="when_required")
+                      response_checksum_validation="when_required", **grenzen)
     except (TypeError, ValueError):
         # Aeltere botocore-Fassungen kennen die Schalter nicht — dort gab es
         # das Problem auch noch nicht.
         try:
             from botocore.config import Config as _C
-            return _C(signature_version="s3v4")
+            return _C(signature_version="s3v4", **grenzen)
         except Exception:                                 # pragma: no cover
             return None
 
 
 def s3_client(*, endpoint: str = None, bucket_unbenutzt: str = None,
               access_key: str = None, secret_key: str = None,
-              region: str = None):
-    """boto3-Client mit den passenden Eigenheiten des jeweiligen Anbieters."""
+              region: str = None, sicherung: bool = False):
+    """boto3-Client mit den passenden Eigenheiten des jeweiligen Anbieters.
+    sicherung=True: Zeitlimits der Sicherungsskripte statt der knappen des
+    Anfragewegs (Rollenprüfung 22.09.2026, Review; siehe zeitlimits())."""
     import boto3
     # Nachpruefung 20.09.2026, Nr. 46: Schluessel und Geheimnis fielen
     # EINZELN auf die S3_*-Werte zurueck. War nur einer der beiden gesetzt
@@ -101,7 +153,7 @@ def s3_client(*, endpoint: str = None, bucket_unbenutzt: str = None,
     }
     if endpoint:
         kwargs["endpoint_url"] = endpoint
-    cfg = client_konfiguration(endpoint)
+    cfg = client_konfiguration(endpoint, sicherung=sicherung)
     if cfg is not None:
         kwargs["config"] = cfg
     return boto3.client("s3", **kwargs)

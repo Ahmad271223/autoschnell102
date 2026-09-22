@@ -74,6 +74,7 @@ _PDF_SKETCH_WIDTH = 900
 def _pdf_sketch(src_name: str) -> str:
     src = SKETCH_DIR / src_name
     cached = _SKETCH_CACHE_DIR / (src_name.rsplit(".", 1)[0] + ".jpg")
+    tmp = None
     try:
         if cached.exists() and cached.stat().st_mtime >= src.stat().st_mtime:
             return str(cached)
@@ -83,11 +84,26 @@ def _pdf_sketch(src_name: str) -> str:
         ratio = _PDF_SKETCH_WIDTH / im.width
         im = im.resize((_PDF_SKETCH_WIDTH, max(1, int(im.height * ratio))),
                        _PILImage.LANCZOS)
-        im.save(cached, "JPEG", quality=82, optimize=True)
+        # Rollenprüfung 22.09.2026 (RP-170): erst in eine eigene Temp-Datei,
+        # dann atomar umbenennen — vorher schrieben parallele PDF-Laeufe (zwei
+        # Worker, zwei Threads) direkt ins Ziel, und ein dritter las eine halb
+        # geschriebene JPEG-Datei.
+        import tempfile
+        fd, tmp = tempfile.mkstemp(dir=str(_SKETCH_CACHE_DIR), suffix=".tmp")
+        with os.fdopen(fd, "wb") as fh:
+            im.save(fh, "JPEG", quality=82, optimize=True)
+        os.replace(tmp, cached)
+        tmp = None
         return str(cached)
     except Exception:
         # Notfall: Original verwenden (Groesse egal, Hauptsache es rendert)
         return str(src)
+    finally:
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 SKETCHES = {
     "front": {"src": "front.png", "w": 1536, "h": 1024, "label": "Frontansicht"},
     "rear":  {"src": "rear.png",  "w": 1536, "h": 1024, "label": "Heckansicht"},
@@ -181,6 +197,31 @@ def now_iso_str() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _jetzt_berlin(jetzt: Optional[datetime] = None) -> datetime:
+    """Rollenprüfung 22.09.2026 (RP-071/170): Ort/Datum ueber den
+    Unterschriften stand in UTC (zwischen Mitternacht und 1/2 Uhr der
+    VORTAG), die Fusszeile in der Uhrzeit des Containers — ein Dokument, zwei
+    Zeitzonen. Beides jetzt in deutscher Ortszeit; ohne tzdata im Image die
+    EU-Sommerzeitregel von Hand (wie beweis_pdf)."""
+    from datetime import timedelta, timezone
+    u = (jetzt or datetime.now(timezone.utc))
+    if u.tzinfo is None:
+        u = u.replace(tzinfo=timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+        return u.astimezone(ZoneInfo("Europe/Berlin"))
+    except Exception:  # noqa: BLE001
+        u = u.astimezone(timezone.utc)
+
+        def _letzter_sonntag(monat: int) -> datetime:
+            d = datetime(u.year, monat, 31, 1, tzinfo=timezone.utc)
+            while d.weekday() != 6:
+                d -= timedelta(days=1)
+            return d
+        sommer = _letzter_sonntag(3) <= u < _letzter_sonntag(10)
+        return u.astimezone(timezone(timedelta(hours=2 if sommer else 1)))
+
+
 def _fmt_date(iso: Optional[str]) -> str:
     if not iso:
         return "—"
@@ -188,6 +229,59 @@ def _fmt_date(iso: Optional[str]) -> str:
         return datetime.fromisoformat(str(iso).replace("Z", "+00:00")).strftime("%d.%m.%Y")
     except (TypeError, ValueError):
         return str(iso)
+
+
+def _sig_faktor(breite: Any, hoehe: Any, w_max: float, h_max: float) -> float:
+    """Rollenprüfung 22.09.2026 (RP-071/170): Skalierungsfaktor, der das
+    Unterschriftsbild in w_max x h_max einpasst, OHNE es zu verzerren."""
+    try:
+        b = float(breite or 0) or 1.0
+        h = float(hoehe or 0) or 1.0
+    except (TypeError, ValueError):
+        b = h = 1.0
+    return min(w_max / b, h_max / h)
+
+
+def _notes_text(wert: Any) -> str:
+    """Bemerkung als Text (None/Zahl robust), Zeilenenden vereinheitlicht."""
+    return str(wert or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+# Rollenprüfung 22.09.2026 (RP-535): so gross wird ein Stueck der Bemerkung
+# hoechstens (Zeilen bzw. Zeichen) — weit unter einer Seitenhoehe.
+_BEMERKUNG_ZEILEN_JE_STUECK = 8
+_BEMERKUNG_ZEICHEN_JE_STUECK = 600
+
+
+def _notes_stuecke(text: str) -> List[str]:
+    """Rollenprüfung 22.09.2026 (RP-535): Bemerkung in Stuecke fuer je eine
+    Tabellenzeile teilen — hoechstens _BEMERKUNG_ZEILEN_JE_STUECK Zeilen bzw.
+    _BEMERKUNG_ZEICHEN_JE_STUECK Zeichen; eine ueberlange Einzelzeile wird an
+    Wortgrenzen geteilt. Zeilenumbrueche bleiben erhalten ("\\n" im Stueck,
+    beim Rendern <br/>). Kein Wort geht verloren — nur das Leerzeichen an einer
+    Trennstelle langer Zeilen entfaellt."""
+    zeilen: List[str] = []
+    for zeile in text.split("\n"):
+        while len(zeile) > _BEMERKUNG_ZEICHEN_JE_STUECK:
+            schnitt = zeile.rfind(" ", 0, _BEMERKUNG_ZEICHEN_JE_STUECK)
+            if schnitt <= 0:
+                schnitt = _BEMERKUNG_ZEICHEN_JE_STUECK
+            zeilen.append(zeile[:schnitt])
+            zeile = zeile[schnitt:].lstrip(" ")
+        zeilen.append(zeile)
+    stuecke: List[str] = []
+    aktuell: List[str] = []
+    laenge = 0
+    for zeile in zeilen:
+        if aktuell and (len(aktuell) >= _BEMERKUNG_ZEILEN_JE_STUECK
+                        or laenge + len(zeile) > _BEMERKUNG_ZEICHEN_JE_STUECK):
+            stuecke.append("\n".join(aktuell))
+            aktuell, laenge = [], 0
+        aktuell.append(zeile)
+        laenge += len(zeile)
+    if aktuell:
+        stuecke.append("\n".join(aktuell))
+    return stuecke
 
 
 def _check_row(label: str, value: Any, options: List[str], st, *,
@@ -233,13 +327,25 @@ def _checklist(items: List[tuple], st, col_count: int = 2,
                checked: Optional[Dict[str, bool]] = None) -> Table:
     """Renders a grid of [ ] Label items. `items` is list of
     (label, sub_note?) tuples; sub_note is optional gray line.
-    `checked` (Label -> bool) markiert erledigte Punkte mit [X]."""
+    `checked` (Label -> bool) markiert erledigte Punkte mit [X].
+
+    Rollenprüfung 22.09.2026 (RP-068/167): Seit jede Zeile mit Ja ODER Nein
+    beantwortet werden muss, ist ein ausdrueckliches Nein (False) etwas anderes
+    als "nicht beantwortet" — im unterschriebenen PDF sahen beide gleich aus
+    ("[  ]"). Jetzt: True "[X]", False "[–] … nein", fehlend "[  ]"."""
     cells = []
     for item in items:
         label, note = (item if isinstance(item, tuple) else (item, ""))
-        is_checked = bool((checked or {}).get(str(label)))
-        box = "[X]" if is_checked else "[&nbsp;&nbsp;]"
+        wert = (checked or {}).get(str(label))
+        if wert is False:
+            box = "[–]"
+        elif wert is not None and bool(wert):
+            box = "[X]"
+        else:
+            box = "[&nbsp;&nbsp;]"
         txt = f"{box}&nbsp;{_xe(str(label))}"
+        if wert is False:
+            txt += " <font color='#71717A'>— nein</font>"
         para_html = f"<font size=9 color='#0A0A0A'>{txt}</font>"
         if note:
             para_html += f"<br/><font size=7 color='#71717A'>{_xe(str(note))}</font>"
@@ -440,6 +546,20 @@ def _make_doc(buf: io.BytesIO) -> BaseDocTemplate:
     return doc
 
 
+def _auf_breite(text: str, schrift: str, groesse: float, max_breite: float) -> str:
+    """Rollenprüfung 22.09.2026 (RP-071/170): Text auf eine Breite kuerzen
+    (mit "…"), gemessen in der tatsaechlichen Schrift."""
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+    text = str(text or "")
+    if max_breite <= 0:
+        return ""
+    if stringWidth(text, schrift, groesse) <= max_breite:
+        return text
+    while text and stringWidth(text + "…", schrift, groesse) > max_breite:
+        text = text[:-1]
+    return (text.rstrip() + "…") if text else ""
+
+
 def _numbered_canvas_factory(footer_left: str, footer_center: str):
     """Canvas mit rotem Akzentbalken oben + Fußzeile 'Seite X von Y' auf
     jeder Seite — identisch zum Kaufvertrag. Zwei-Pass-Verfahren, damit die
@@ -473,8 +593,14 @@ def _numbered_canvas_factory(footer_left: str, footer_center: str):
             self.setLineWidth(0.5)
             self.line(MARGIN, y + 0.35 * cm, PAGE_W - MARGIN, y + 0.35 * cm)
             self.setFillColor(GREY)
-            self.setFont(_schrift("Helvetica"), 7)
-            self.drawString(MARGIN, y, footer_left)
+            schrift = _schrift("Helvetica")
+            self.setFont(schrift, 7)
+            # Rollenprüfung 22.09.2026 (RP-071/170): ein langer Firmenname lief
+            # in die mittlere Zeile hinein — links nur so viel, wie bis zur Mitte
+            # Platz ist (mit Abstand), sonst mit "…" gekuerzt.
+            mitte_breite = self.stringWidth(footer_center, schrift, 7)
+            links_max = (PAGE_W / 2 - mitte_breite / 2) - MARGIN - 0.4 * cm
+            self.drawString(MARGIN, y, _auf_breite(footer_left, schrift, 7, links_max))
             self.drawCentredString(PAGE_W / 2, y, footer_center)
             self.drawRightString(PAGE_W - MARGIN, y,
                                  f"Seite {self._pageNumber} von {total}")
@@ -501,9 +627,30 @@ def _section(title: str, st) -> Table:
     return t
 
 
+#: Rollenprüfung 22.09.2026 (RP-067/166): Zeile unter Abschnitt 5.
+SCHAEDEN_BESTAETIGT_TEXT = "Zustand entspricht der Dokumentation (vom Fahrer bestätigt):"
+
+
+def damages_confirmed_zeile(filled: Optional[Dict[str, Any]]) -> str:
+    """Rollenprüfung 22.09.2026 (RP-067/166): Antwort des Fahrers zu
+    Abschnitt 5 als Zeile (Paragraph-Markup). Ausgefuellt: Ja / Nein / "—"
+    (nicht beantwortet); leeres Formular: Kaestchen zum Ankreuzen."""
+    if not filled:
+        return f"<b>{_xe(SCHAEDEN_BESTAETIGT_TEXT)}</b> &nbsp;[&nbsp;&nbsp;] Ja &nbsp;&nbsp;[&nbsp;&nbsp;] Nein"
+    wert = filled.get("damages_confirmed")
+    antwort = "Ja" if wert is True else "Nein" if wert is False else "—"
+    return f"<b>{_xe(SCHAEDEN_BESTAETIGT_TEXT)}</b> {antwort}"
+
+
 # ---------------------------------------------------------------------------
 # Main builder
 # ---------------------------------------------------------------------------
+
+#: Rollenprüfung 22.09.2026 (RP-535): Laenge der Bemerkung im Notfall-Neubau.
+BEMERKUNG_NOTFALL_ZEICHEN = 1500
+BEMERKUNG_GEKUERZT_HINWEIS = ("[… gekürzt — der vollständige Text ist im digitalen "
+                              "Protokoll gespeichert]")
+
 
 def build_pickup_pdf(
     *,
@@ -518,7 +665,41 @@ def build_pickup_pdf(
 
     Ohne `filled` entsteht das LEERE Formular zum Ausdrucken (unveraendert).
     Mit `filled` (aus der Fahrer-App) wird dasselbe Protokoll AUSGEFUELLT
-    gerendert: Haken gesetzt, Werte eingetragen, Unterschriften eingebettet."""
+    gerendert: Haken gesetzt, Werte eingetragen, Unterschriften eingebettet.
+
+    Rollenprüfung 22.09.2026 (RP-535): Scheitert der Seitenumbruch trotzdem
+    (LayoutError — ein Block groesser als eine Seite), wird EINMAL mit
+    gekuerzter Bemerkung und deutlichem Hinweis neu gebaut. Vorher endete
+    jeder Abschluss vor Ort mit 500, und das Protokoll blieb fuer den Fahrer
+    gesperrt."""
+    from reportlab.platypus.doctemplate import LayoutError
+    kw = dict(appointment=appointment, vehicle=vehicle, contract=contract,
+              dealer=dealer, driver=driver)
+    try:
+        return _build_pickup_pdf(**kw, filled=filled)
+    except LayoutError:
+        notes = _notes_text((filled or {}).get("notes"))
+        if not notes:
+            raise
+        import logging
+        logging.getLogger("autohandel").warning(
+            "Abholprotokoll %s: Seitenumbruch gescheitert — Bemerkung (%d Zeichen) "
+            "im PDF gekuerzt", (appointment or {}).get("id"), len(notes))
+        kurz = dict(filled or {})
+        kurz["notes"] = notes[:BEMERKUNG_NOTFALL_ZEICHEN].rstrip() + "\n" + BEMERKUNG_GEKUERZT_HINWEIS
+        return _build_pickup_pdf(**kw, filled=kurz)
+
+
+def _build_pickup_pdf(
+    *,
+    appointment: Dict[str, Any],
+    vehicle: Optional[Dict[str, Any]] = None,
+    contract: Optional[Dict[str, Any]] = None,
+    dealer: Optional[Dict[str, Any]] = None,
+    driver: Optional[Dict[str, Any]] = None,
+    filled: Optional[Dict[str, Any]] = None,
+) -> bytes:
+    """Eigentlicher Aufbau (siehe build_pickup_pdf)."""
     appointment = appointment or {}
     vehicle = vehicle or {}
     contract = contract or {}
@@ -797,7 +978,10 @@ def build_pickup_pdf(
     # -----------------------------------------------------------------
     story.append(_section("2 · Dokumente & Zubehör", st))
     story.append(Spacer(1, 4))
-    story.append(Paragraph("Vor Ort beim Verkäufer einsammeln und abhaken.", st["small"]))
+    story.append(Paragraph(
+        "Vor Ort beim Verkäufer einsammeln und abhaken."
+        # Rollenprüfung 22.09.2026 (RP-068/167): Legende im ausgefuellten Protokoll
+        + (" [X] = ja / vorhanden, [–] = nein / fehlt." if filled else ""), st["small"]))
     story.append(Spacer(1, 0.2 * cm))
 
     docs_items = [
@@ -901,6 +1085,11 @@ def build_pickup_pdf(
         "vor Ort, ob diese vorhanden sind (bestätigt / nicht vorhanden / "
         "weicht ab) und markiert ggf. zusätzliche Schäden auf der "
         "leeren Skizze der nächsten Seite.", st["small"]))
+    story.append(Spacer(1, 0.15 * cm))
+    # Rollenprüfung 22.09.2026 (RP-067/166, Uebergabe Fahrer-App): Die Antwort
+    # des Fahrers zu Abschnitt 5 (damages_confirmed) stand nirgends im PDF —
+    # ein "Nein" war im unterschriebenen Protokoll nicht zu sehen.
+    story.append(Paragraph(damages_confirmed_zeile(filled), st["value"]))
     story.append(Spacer(1, 0.2 * cm))
     legend = _damage_legend(damages, st)
     if legend:
@@ -960,21 +1149,36 @@ def build_pickup_pdf(
     story.append(_section("7 · Bemerkungen des Fahrers", st))
     story.append(Spacer(1, 4))
     # Ausgefuellt: echter Text; sonst 6 leere Linien zum Handschreiben.
+    # Rollenprüfung 22.09.2026 (RP-535): Die ganze Bemerkung stand als EIN
+    # Absatz in EINER Tabellenzeile. Tabellenzeilen werden nicht ueber Seiten
+    # geteilt — ab ca. einer Seitenhoehe (z. B. 32 Stichpunkte) brach der Bau
+    # mit LayoutError ab, der Abschluss vor Ort scheiterte bei jedem Versuch
+    # mit 500. Jetzt eine Tabellenzeile je Zeile/Absatz (die Tabelle bricht
+    # zwischen den Zeilen um); ueberlange Einzelzeilen werden in Stuecke
+    # geteilt. Dazu faengt build_pickup_pdf einen LayoutError noch einmal ab.
     bem_lines = []
-    _notes = (filled.get("notes") or "").strip()
+    _notes = _notes_text(filled.get("notes"))
     if _notes:
-        bem_lines.append([Paragraph(_xe(_notes).replace(chr(10), "<br/>"), st["body"])])
+        for stueck in _notes_stuecke(_notes):
+            bem_lines.append([Paragraph(_xe(stueck).replace("\n", "<br/>")
+                                        if stueck.strip() else "&nbsp;", st["body"])])
+        # zwei leere Linien darunter (Nachtraege von Hand), wie bisher
         for _ in range(2):
             bem_lines.append([Paragraph("", st["body"])])
+        bem_style = [("LINEBELOW", (0, -3), (-1, -1), 0.4, DIVIDER),
+                     ("TOPPADDING", (0, 0), (-1, -1), 1),
+                     ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
+                     ("TOPPADDING", (0, 0), (-1, 0), 8),
+                     ("TOPPADDING", (0, -2), (-1, -1), 8),
+                     ("BOTTOMPADDING", (0, -3), (-1, -1), 8)]
     else:
         for _ in range(6):
             bem_lines.append([Paragraph("", st["body"])])
+        bem_style = [("LINEBELOW", (0, 0), (-1, -1), 0.4, DIVIDER),
+                     ("TOPPADDING", (0, 0), (-1, -1), 8),
+                     ("BOTTOMPADDING", (0, 0), (-1, -1), 8)]
     bem_t = Table(bem_lines, colWidths=[17.5 * cm])
-    bem_t.setStyle(TableStyle([
-        ("LINEBELOW", (0, 0), (-1, -1), 0.4, DIVIDER),
-        ("TOPPADDING", (0, 0), (-1, -1), 8),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-    ]))
+    bem_t.setStyle(TableStyle(bem_style))
     story.append(bem_t)
 
     # ---- Unterschriften — umrahmte Boxen, gleiche Optik wie im Kaufvertrag ----
@@ -992,9 +1196,14 @@ def build_pickup_pdf(
             from storage_service import bild_lesbar_pruefen
             bild_lesbar_pruefen(raw, wo="Unterschrift")
             img = Image(io.BytesIO(raw))
-            ratio = (img.imageHeight or 1) / (img.imageWidth or 1)
-            img.drawWidth = min(sig_col_w - 20, 6.5 * cm)
-            img.drawHeight = min(img.drawWidth * ratio, 1.8 * cm)
+            # Rollenprüfung 22.09.2026 (RP-071/170): proportional skalieren. Vorher
+            # war die Breite fest und nur die Hoehe gedeckelt — eine hohe
+            # Unterschrift (Handy hochkant) wurde gestaucht. Jetzt EIN Faktor fuer
+            # beide Masse (der kleinere aus Breiten- und Hoehengrenze).
+            w_max, h_max = min(sig_col_w - 20, 6.5 * cm), 1.8 * cm
+            faktor = _sig_faktor(img.imageWidth, img.imageHeight, w_max, h_max)
+            img.drawWidth = (img.imageWidth or 1) * faktor
+            img.drawHeight = (img.imageHeight or 1) * faktor
             img.hAlign = "LEFT"
             return img
         except Exception:
@@ -1027,7 +1236,9 @@ def build_pickup_pdf(
     _place_date = ""
     if filled:
         _place = filled.get("place") or ""
-        _date = _fmt_date(now_iso_str())
+        # Rollenprüfung 22.09.2026 (RP-071/170): deutsches Datum (vorher UTC —
+        # nachts bis 1/2 Uhr stand der Vortag ueber den Unterschriften).
+        _date = _jetzt_berlin().strftime("%d.%m.%Y")
         _place_date = f"{_place}, {_date}" if _place else _date
     sig_t = Table(
         [[_sig_box("Verkäufer / Übergebender",
@@ -1048,7 +1259,13 @@ def build_pickup_pdf(
     # Unterschriften. Findet der Fahrer vor Ort Abweichungen, verhandelt der
     # Haendler nach — unterschrieben wird dann der NEUE Preis. Im leeren
     # Formular stehen Linien zum Eintragen, im ausgefuellten die Werte.
+    # Rollenprüfung 22.09.2026 (RP-480): "Kaufpreis laut Vertrag" ist der Preis
+    # VOR der Abholung — bei einer Korrektur traegt der Vertrag schon den
+    # verhandelten Preis der Vorversion (neue Fassung), den der Chef bei der
+    # Freigabe gerade auf den Vertragspreis zuruecksetzen kann.
     _preis_vertrag = contract.get("purchase_price")
+    if contract.get("preis_vor_abholung") is not None:
+        _preis_vertrag = contract.get("preis_vor_abholung")
     _preis_neu = filled.get("neuer_preis")
     # Gegenpruefung 12.09.2026: Der Vermerk ist Freitext des Chefs und geht
     # in einen ReportLab-Absatz — der wird als Mini-XML gelesen. Ein
@@ -1119,7 +1336,9 @@ def build_pickup_pdf(
     ]))
 
     footer_left = dealer_name
+    # Rollenprüfung 22.09.2026 (RP-071/170): deutsche Ortszeit wie ueber den
+    # Unterschriften (vorher die Uhr des Containers, meist UTC).
     footer_center = (f"Abholprotokoll {auftrag_nr} · erstellt am "
-                     f"{datetime.now().strftime('%d.%m.%Y · %H:%M')}")
+                     f"{_jetzt_berlin().strftime('%d.%m.%Y · %H:%M')}")
     doc.build(story, canvasmaker=_numbered_canvas_factory(footer_left, footer_center))
     return buf.getvalue()

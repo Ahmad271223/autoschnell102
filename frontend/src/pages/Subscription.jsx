@@ -13,15 +13,33 @@ import { Check, Bolt, ShieldCheck, Mail, Clock } from "lucide-react";
  * (19.09.2026: Text an den Server angeglichen — Verträge verlangen das Abo.)
  * Diese Seite erklärt das und zeigt den eigenen Abo-Stand.
  */
+// Rollenpruefung 22.09.2026 (RP-256): so oft fragt /abo nach, ob der
+// Betreiber inzwischen freigeschaltet hat.
+export const ABO_NACHFRAGE_MS = 30000;
+
 export default function Subscription() {
   const nav = useNavigate();
-  const { user, subscription, logout } = useAuth();
+  const { user, subscription, logout, refresh } = useAuth();
 
   useEffect(() => {
     if (subscription?.active) {
       nav("/app/vergleich");
     }
   }, [subscription, nav]);
+
+  // Rollenpruefung 22.09.2026 (RP-256): Der Abo-Stand kam nur beim Anmelden
+  // bzw. nach einer 402 in den Kontext. Schaltete der Betreiber frei,
+  // waehrend der Sucher hier wartete, blieb er auf /abo stehen (bzw. wurde
+  // immer wieder hierher umgeleitet), bis er die Seite neu lud. Jetzt: beim
+  // Oeffnen einmal nachfragen und danach alle 30 s, solange kein Abo aktiv
+  // ist — das Weiterleiten oben uebernimmt dann der Kontext.
+  const aktiv = !!subscription?.active;
+  useEffect(() => {
+    if (aktiv || typeof refresh !== "function") return undefined;
+    refresh();
+    const t = setInterval(() => { refresh(); }, ABO_NACHFRAGE_MS);
+    return () => clearInterval(t);
+  }, [aktiv, refresh]);
 
   const istSucher = user?.role === "sucher";
 

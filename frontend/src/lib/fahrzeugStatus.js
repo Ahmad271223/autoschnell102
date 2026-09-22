@@ -82,6 +82,17 @@ const AKTION_TEXTE = {
   "vertrag.abholtermin.geaendert": "Abholtermin im Vertrag geändert",
   "vertrag.link.abgerufen": "Vertrag über den Download-Link abgerufen",
   "vertrag.geloescht.manuell": "Kaufvertrag gelöscht",
+  // Rollenprüfung 22.09.2026 (RP-483/RP-450): die Akte zeigt jetzt auch
+  // Vertrags-, Protokoll- und Inserats-Einträge sowie die verlängerte Frist.
+  "fahrzeug.bestand.verlaengert": "Bestandsfrist um 50 Tage verlängert",
+  "bestand.geaendert": "Standort, Notizen oder Kosten geändert",
+  "pdf.erstellt": "Kaufvertrag erstellt",
+  "pdf.gesendet.email": "Kaufvertrag per E-Mail verschickt",
+  "pdf.gesendet.whatsapp": "Kaufvertrag per WhatsApp geteilt",
+  "pdf.gesendet.ohne_vermerk": "Kaufvertrag verschickt",
+  "vertrag.nach_abholung_aktualisiert": "Kaufvertrag nach der Abholung aktualisiert",
+  "protokoll.zur_freigabe": "Abholprotokoll zur Freigabe eingereicht",
+  "protokoll.zurueck_an_fahrer": "Abholprotokoll zurück an den Fahrer",
 };
 
 /**
@@ -93,6 +104,7 @@ export function aktionText(a) {
   if (AKTION_TEXTE[s]) return AKTION_TEXTE[s];
   if (s.startsWith("fahrzeug.status.")) return `Status: ${lifecycleText(s.slice("fahrzeug.status.".length))}`;
   if (s.startsWith("vertrag.geloescht.")) return "Kaufvertrag gelöscht";
+  if (s.startsWith("pdf.folgemail.")) return "Nachricht zum Kaufvertrag verschickt";
   const inserat = /^inserat\.([a-z_]+)$/.exec(s);
   if (inserat && INSERAT_LABELS[inserat[1]]) return `Inserat: ${INSERAT_LABELS[inserat[1]]}`;
   return lesbar(s.replace(/\./g, " "));

@@ -316,8 +316,11 @@ async def _fremdes_dealer_konto():
 
 def test_10_chefwechsel_ist_unteilbar():
     quelle = _quelle("routes/admin.py")
-    anfang = quelle.index('sperre = await acquire(db, f"chefwechsel-')
-    block = quelle[anfang:anfang + 2600]
+    # Rollenpruefung 22.09.2026 (RP-028): der Chefwechsel steht jetzt in
+    # _chef_befoerdern (Sperre _chefwechsel_sperre, Rolle NUR dort geschrieben).
+    anfang = quelle.index("async def _chef_befoerdern")
+    block = quelle[anfang:anfang + 5200]
+    assert "async with _chefwechsel_sperre(" in block
     code = "\n".join(z.split("#", 1)[0] for z in block.splitlines())
     assert "await transaktion(" in code, (
         "der Chefwechsel laeuft noch als vier einzelne Schreibvorgaenge — "

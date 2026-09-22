@@ -25,19 +25,51 @@ export function thumbFehler(e, original) {
 
 
 /**
+ * Bildformate, die der Server annimmt (backend/storage_service.py
+ * validate_image_bytes: JPEG, PNG, WebP, GIF).
+ */
+const HOCHLADBAR = /^data:image\/(jpeg|jpg|pjpeg|png|webp|gif)[;,]/i;
+
+/** Nimmt der Server diese data:-URL als Bild an? */
+export function istHochladbaresBild(dataUrl) {
+  return typeof dataUrl === "string" && HOCHLADBAR.test(dataUrl);
+}
+
+/**
+ * Rollenprüfung 22.09.2026 (RP-533): Fehler für Fotos, die der Browser nicht
+ * umwandeln kann (typisch HEIC vom iPhone am PC/Mac). Vorher ging die
+ * Originaldatei trotzdem raus; der Server lehnte dann das GANZE Fotopaket
+ * ab, und die folgenden Pakete wurden gar nicht mehr gesendet.
+ */
+export class BildFormatFehler extends Error {
+  constructor(dateiname) {
+    super(`${dateiname ? `„${dateiname}“: ` : ""}Dieses Bildformat (z. B. HEIC vom iPhone) `
+      + "kann hier nicht verarbeitet werden — bitte als JPG speichern oder am iPhone unter "
+      + "Einstellungen → Kamera → Formate „Maximale Kompatibilität“ wählen.");
+    this.name = "BildFormatFehler";
+  }
+}
+
+/**
  * Foto im Browser verkleinern, bevor es hochgeladen wird (Runde 21).
  * Handyfotos haben oft 4000 px und 5-8 MB; mit schwachem Netz dauert der
  * Upload beim Fahrer lange. Das Umzeichnen auf eine Leinwand entfernt
  * ausserdem alle Metadaten (Aufnahmezeit, Geraet, GPS-Position).
- * Liefert eine data:-URL (JPEG). Klappt es nicht, kommt die Originaldatei.
+ * Liefert eine data:-URL (JPEG). Klappt es nicht, kommt die Originaldatei —
+ * aber nur, wenn der Server ihr Format annimmt; sonst wirft die Funktion
+ * einen BildFormatFehler (RP-533) mit einer Meldung fuer den Nutzer.
  */
 export async function verkleinereBildDatei(file, { maxKante = 2000, qualitaet = 0.85 } = {}) {
-  const original = () => new Promise((res, rej) => {
-    const r = new FileReader();
-    r.onload = () => res(r.result);
-    r.onerror = rej;
-    r.readAsDataURL(file);
-  });
+  const original = async () => {
+    const url = await new Promise((res, rej) => {
+      const r = new FileReader();
+      r.onload = () => res(r.result);
+      r.onerror = rej;
+      r.readAsDataURL(file);
+    });
+    if (!istHochladbaresBild(url)) throw new BildFormatFehler(file?.name);
+    return url;
+  };
   try {
     if (typeof document === "undefined" || !file) return await original();
     let quelle = null;

@@ -113,7 +113,11 @@ def test_07_merker_fuer_die_rueckfrage_nur_nach_der_abholung():
     assert '"nach_abholung_versand_offen": True' in q
     assert 'grund == "abholung_abgeschlossen"' in q, \
         "eine blosse Terminverschiebung fragt nicht nach dem Versand"
-    assert '"felder": sorted(korrigiert.keys())' in q
+    # Rollenprüfung 22.09.2026 (Review): nach einer Korrektur-Version nennt
+    # "felder" die Abweichungen gegen den Vertrag VOR der Abholung
+    # (Verhalten: test_rp_vertrag_welle4_20260922).
+    assert "felder_geaendert = sorted(korrigiert.keys())" in q
+    assert '"felder": felder_geaendert' in q
     # Nach dem Versand ist die Frage beantwortet. Nachpruefung 20.09.2026
     # (N1): das steht jetzt in _abschluss — und zwar NUR, wenn die
     # versendete Fassung auch die aktuelle ist. Ging waehrend des Versands

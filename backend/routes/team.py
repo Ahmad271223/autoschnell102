@@ -143,7 +143,13 @@ async def list_sucher(response: Response, user=Depends(current_haendler)):
         # Befund 62 (16.09.2026): ersetzte Abos zaehlen nicht — wie die
         # Zugriffspruefung; sonst zeigte der Chef einen anderen Abo-Stand als
         # der Sucher tatsaechlich hat.
-        {"$match": {"dealer_id": user["dealer_id"],
+        # Rollenpruefung 22.09.2026 (RP-232/RP-383): dieselbe Firmenbindung
+        # wie die Zugriffspruefung (deps.get_subscription_status) — Altbestand
+        # OHNE dealer_id zaehlt dort, die Teamliste zeigte ihn aber als "nicht
+        # freigeschaltet". Fremde Firmen bleiben weiter draussen (Nr. 92).
+        {"$match": {"$or": [{"dealer_id": user["dealer_id"]},
+                            {"dealer_id": {"$exists": False}},
+                            {"dealer_id": None}],
                     "subject_user_id": {"$in": ids},
                     "status": {"$ne": "ersetzt"}}},
         {"$sort": {"created_at": -1}},
@@ -460,7 +466,12 @@ async def sucher_abo_request(sucher_id: str, body: dict = Body(default={}),
     Anfrage: eine offene Anfrage fuer den Sucher wird zurueckgegeben, nicht
     verdoppelt (Nr. 33)."""
     plan = body.get("plan", "monthly")
-    if plan not in SUCHER_PLANS:
+    # Rollenpruefung 22.09.2026 (RP-224/RP-375): dieselbe Regel wie bei der
+    # eigenen Anfrage (Befund 92) — nur ANFRAGBARE Plaene (keine Probe: die
+    # vergibt nur der Betreiber, sonst holte sich die Firma alle paar Tage eine
+    # neue Probe, und der Betreiber sah dazu "1 Monat · 150 €"), und ein
+    # nicht hashbarer Wert ({"plan": []}) ist 400 statt TypeError/500.
+    if not isinstance(plan, str) or plan not in ANFRAGBARE_PLANS:
         raise HTTPException(400, "Unbekannter Abo-Zeitraum")
     sucher = await db.users.find_one(
         {"id": sucher_id, "dealer_id": user["dealer_id"], "role": "sucher"},

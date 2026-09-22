@@ -5,8 +5,9 @@ import { API_BASE } from "@/lib/api";
 import { errMsg } from "@/lib/api";
 import { useFeatures } from "@/lib/features";
 import DemnaechstVerfuegbar from "@/components/DemnaechstVerfuegbar";
+import { einladungMerken } from "@/pages/markt/marktHilfen";
 import { toast } from "sonner";
-import { Bolt, Check, ArrowRight } from "lucide-react";
+import { Bolt, Check, ArrowRight, Handshake } from "lucide-react";
 
 /**
  * Zugangs-Anfrage (Beschluss 09/2026): Firmen registrieren sich nicht mehr
@@ -35,6 +36,12 @@ const feldStil = { borderColor: "var(--border-default)" };
 export default function Anfrage() {
   const [sp, setSp] = useSearchParams();
   const art = artAus(sp.get("art"));
+  // Rollenprüfung 22.09.2026 (RP-511): Ein eingeladener Partner OHNE Konto
+  // kam über "Zugang anfragen" hierher — und die Einladung war weg. Jetzt
+  // wird sie auf diesem Gerät gemerkt (die erste Anmeldung löst sie ein) und
+  // mit der Anfrage an den Betreiber geschickt.
+  const invite = art === "kaeufer" ? (sp.get("invite") || "").trim().slice(0, 200) : "";
+  useEffect(() => { if (invite) einladungMerken(invite); }, [invite]);
   // Go-Live-Schalter (15.09.2026): Zwischenhaendler-Zugang erst mit Marktplatz.
   const features = useFeatures();
   const arten = ARTEN.filter((a) => a.key !== "kaeufer" || features.marktplatz);
@@ -71,6 +78,9 @@ export default function Anfrage() {
         sucher_anzahl: art === "firma" ? (parseInt(f.sucher_anzahl, 10) || 0) : 0,
         gewerblich_bestaetigt: gewerblich,
         ...(art === "kaeufer" ? { ust_id: f.ust_id.trim() } : {}),
+        // RP-511: der Betreiber sieht die Einladung und kann sie beim Anlegen
+        // einlösen (Backend: Übergabe an das Team der Kontenanlage).
+        ...(invite ? { invite_token: invite } : {}),
       });
       setDone(true);
     } catch (err) {
@@ -146,6 +156,17 @@ export default function Anfrage() {
               )}
               {" "}Kontonummer und Passwort bekommst du von uns.
             </p>
+            {invite && (
+              <div className="mt-4 rounded-sm border px-3 py-2.5 text-xs flex items-start gap-2"
+                   data-testid="anfrage-einladung" style={feldStil}>
+                <Handshake size={14} className="mt-0.5 shrink-0" />
+                <span>
+                  Du wurdest in ein Händler-Netzwerk eingeladen. Die Einladung ist gemerkt:
+                  Meldest du dich nach der Freischaltung auf diesem Gerät an, trittst du
+                  dem Netzwerk automatisch bei.
+                </span>
+              </div>
+            )}
 
             <div className="mt-6 space-y-4">
               <div>

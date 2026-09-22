@@ -2,6 +2,7 @@ import { Suspense } from "react";
 import NachladeFehler from "@/components/NachladeFehler";
 import ThemeToggle from "@/components/ThemeToggle";
 import SeiteLaedt from "@/components/SeiteLaedt";
+import RechtsLinks from "@/components/RechtsLinks";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import {
@@ -175,6 +176,9 @@ export default function AdminLayout() {
                 <Outlet />
               </Suspense>
             </NachladeFehler>
+            {/* Rollenprüfung 22.09.2026 (RP-563): Impressum, Datenschutz und
+                AGB auch im Betreiber-Bereich erreichbar (Handy und Desktop). */}
+            <RechtsLinks className="py-4 mt-6" />
           </div>
         </main>
       </div>

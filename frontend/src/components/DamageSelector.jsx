@@ -1,6 +1,28 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Trash2, Eraser } from "lucide-react";
 import { toast } from "sonner";
+
+// Rollenprüfung 22.09.2026 (RP-070/RP-169/RP-514): Ein Tipp auf einen Marker
+// löschte den Schaden sofort — und der Marker liegt genau auf dem Bauteilpunkt
+// (größer als der Punkt). Wer am selben Bauteil einen ZWEITEN Schaden
+// ("Delle" zusätzlich zu "Kratzer") setzen wollte, löschte still den ersten;
+// "Alle entfernen" fragte gar nicht. Jetzt:
+//  * Tipp auf einen Marker mit ANDERER aktiver Schadensart -> weiterer Schaden
+//    am selben Bauteil (Marker wird daneben gezeichnet);
+//  * gleiche Schadensart -> Rückfrage, dann entfernen;
+//  * jedes Entfernen (Marker, Liste, "Alle entfernen") mit "Rückgängig".
+const RUECKGAENGIG_MS = 8000;
+
+/** Anzeige-Versatz für Marker, die am selben Punkt liegen (Index je Punkt). */
+export function markerVersatz(markers) {
+  const zaehler = new Map();
+  return markers.map((m) => {
+    const k = `${m.x}|${m.y}`;
+    const i = zaehler.get(k) || 0;
+    zaehler.set(k, i + 1);
+    return i;
+  });
+}
 
 /**
  * Schaden-Selector mit fixen Klick-Punkten je Fahrzeug-Ansicht.
@@ -292,12 +314,53 @@ export default function DamageSelector({ damages = [], onChange }) {
     if (dot) handleDotClick(view, dot);
   };
 
-  const removeDamage = (id) => {
-    const next = damages.filter((d) => d.id !== id);
+  // Immer die AKTUELLE Liste — "Rückgängig" kann Sekunden später kommen, dann
+  // hat der Nutzer vielleicht schon weitere Schäden gesetzt.
+  const aktuell = useRef(damages);
+  useEffect(() => { aktuell.current = damages; });
+
+  const wiederherstellen = (entfernt) => {
+    const da = new Set((aktuell.current || []).map((d) => d.id));
+    const next = [...(aktuell.current || []), ...entfernt.filter((d) => !da.has(d.id))];
     onChange?.(next, damagesToText(next));
   };
 
-  const clearAll = () => onChange?.([], "");
+  const mitRueckgaengig = (text, entfernt) => {
+    toast.success(text, {
+      duration: RUECKGAENGIG_MS,
+      action: { label: "Rückgängig", onClick: () => wiederherstellen(entfernt) },
+    });
+  };
+
+  const removeDamage = (id) => {
+    const weg = damages.filter((d) => d.id === id);
+    const next = damages.filter((d) => d.id !== id);
+    onChange?.(next, damagesToText(next));
+    if (weg.length) mitRueckgaengig(`Entfernt: ${weg[0].type_label} – ${weg[0].zone}`, weg);
+  };
+
+  // RP-514: Tipp auf einen vorhandenen Marker.
+  const handleMarkerTap = (view, m) => {
+    if (activeType && activeType.key !== m.type_key) {
+      // Andere Schadensart gewählt -> zusätzlicher Schaden am selben Bauteil.
+      handleDotClick(view, { name: m.zone, cx: m.x, cy: m.y });
+      return;
+    }
+    if (!window.confirm(`„${m.type_label} – ${m.zone}“ entfernen?`)) return;
+    removeDamage(m.id);
+  };
+
+  const clearAll = () => {
+    const vorher = damages;
+    if (!vorher.length) return;
+    // Rollenprüfung 22.09.2026 (Review): Einzahl bei genau einem Schaden
+    // (vorher "Alle 1 erfassten Schäden entfernen?" / "1 Schäden entfernt").
+    const einer = vorher.length === 1;
+    if (!window.confirm(einer ? "Den erfassten Schaden entfernen?"
+      : `Alle ${vorher.length} erfassten Schäden entfernen?`)) return;
+    onChange?.([], "");
+    mitRueckgaengig(einer ? "1 Schaden entfernt" : `${vorher.length} Schäden entfernt`, vorher);
+  };
 
   const grouped = useMemo(() => {
     const map = {};
@@ -348,7 +411,8 @@ export default function DamageSelector({ damages = [], onChange }) {
           <span className="text-zinc-400">Anleitung:</span> Schadenstyp oben
           wählen → in einer der Skizzen auf einen der kleinen Punkte klicken.
           Hover zeigt den Namen, nach dem Klick wird der Eintrag automatisch
-          in den Vertrag übernommen.
+          in den Vertrag übernommen. Tipp auf einen gesetzten Marker: andere
+          Schadensart = zusätzlich am selben Teil, gleiche = entfernen (mit Rückfrage).
         </div>
         {damages.length > 0 && (
           <button
@@ -371,27 +435,27 @@ export default function DamageSelector({ damages = [], onChange }) {
                   activeColor={activeType?.color}
                   onDotClick={handleDotClick}
                   onSvgClick={handleSvgClick}
-                  onMarkerRemove={removeDamage} />
+                  onMarkerTap={handleMarkerTap} />
         <ViewCard view="rear"  markers={grouped.rear  || []}
                   activeColor={activeType?.color}
                   onDotClick={handleDotClick}
                   onSvgClick={handleSvgClick}
-                  onMarkerRemove={removeDamage} />
+                  onMarkerTap={handleMarkerTap} />
         <ViewCard view="left"  markers={grouped.left  || []}
                   activeColor={activeType?.color}
                   onDotClick={handleDotClick}
                   onSvgClick={handleSvgClick}
-                  onMarkerRemove={removeDamage} />
+                  onMarkerTap={handleMarkerTap} />
         <ViewCard view="right" markers={grouped.right || []}
                   activeColor={activeType?.color}
                   onDotClick={handleDotClick}
                   onSvgClick={handleSvgClick}
-                  onMarkerRemove={removeDamage} />
+                  onMarkerTap={handleMarkerTap} />
         <ViewCard view="top"   markers={grouped.top   || []}
                   activeColor={activeType?.color}
                   onDotClick={handleDotClick}
                   onSvgClick={handleSvgClick}
-                  onMarkerRemove={removeDamage} />
+                  onMarkerTap={handleMarkerTap} />
       </div>
 
       {/* Erfasste Schäden */}
@@ -439,11 +503,12 @@ export default function DamageSelector({ damages = [], onChange }) {
   );
 }
 
-function ViewCard({ view, markers, activeColor, onDotClick, onSvgClick, onMarkerRemove, className = "" }) {
+function ViewCard({ view, markers, activeColor, onDotClick, onSvgClick, onMarkerTap, className = "" }) {
   const dim = VIEW_IMAGES[view];
   const dots = DOTS[view] || [];
   const markerR = view === "top" ? 28 : 26;
   const markerFs = view === "top" ? 24 : 22;
+  const versatz = markerVersatz(markers);
   // Klickbare Dot-Größe — bewusst klein, damit die Skizze ruhig bleibt.
   // Der Hover-Halo macht den Hit-Bereich grosszuegig.
   const dotR = 14;
@@ -508,19 +573,25 @@ function ViewCard({ view, markers, activeColor, onDotClick, onSvgClick, onMarker
             />
           ))}
 
-          {/* Bereits gesetzte Marker */}
-          {markers.map((m) => (
-            <Marker
-              key={m.id}
-              d={m}
-              r={markerR}
-              fs={markerFs}
-              onRemove={(e) => {
-                e.stopPropagation();
-                onMarkerRemove(m.id);
-              }}
-            />
-          ))}
+          {/* Bereits gesetzte Marker — RP-514: mehrere Schäden am selben
+              Bauteil nebeneinander (gespeichert bleibt der Bauteilpunkt). */}
+          {markers.map((m, i) => {
+            const n = versatz[i];
+            const x = Math.min(dim.w - markerR, Math.max(markerR, m.x + n * markerR * 1.7));
+            return (
+              <Marker
+                key={m.id}
+                d={m}
+                x={x}
+                r={markerR}
+                fs={markerFs}
+                onTap={(e) => {
+                  e.stopPropagation();
+                  onMarkerTap(view, m);
+                }}
+              />
+            );
+          })}
         </svg>
       </div>
     </div>
@@ -552,9 +623,10 @@ function Dot({ dot, r, haloR, onClick }) {
   );
 }
 
-function Marker({ d, r, fs, onRemove }) {
+function Marker({ d, x, r, fs, onTap }) {
   return (
-    <g transform={`translate(${d.x}, ${d.y})`} style={{ cursor: "pointer" }} onClick={onRemove}>
+    <g transform={`translate(${x ?? d.x}, ${d.y})`} style={{ cursor: "pointer" }} onClick={onTap}
+       data-testid={`damage-marker-${d.id}`}>
       <circle r={r} fill={d.color} stroke="#0a0a0a" strokeWidth="3" opacity="0.95" />
       <text
         textAnchor="middle"
@@ -567,7 +639,7 @@ function Marker({ d, r, fs, onRemove }) {
         {d.abbr}
       </text>
       <title>
-        {d.type_label} – {d.zone} (Klick zum Entfernen)
+        {d.type_label} – {d.zone} (Tippen mit gleicher Schadensart: entfernen; mit anderer: hinzufügen)
       </title>
     </g>
   );

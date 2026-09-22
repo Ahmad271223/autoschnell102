@@ -71,4 +71,13 @@ describe("kmAusText (Prüfbericht 20.09.2026, K-01)", () => {
     expect(Number.isNaN(kmAusText("abc"))).toBe(true);
     expect(Number.isNaN(kmAusText("3.000.000"))).toBe(true);
   });
+  it("versteht Tausender-Kürzel (Rollenprüfung 22.09.2026)", () => {
+    expect(kmAusText("150 Tkm")).toBe(150000);
+    expect(kmAusText("150tkm")).toBe(150000);
+    expect(kmAusText("150 Tsd")).toBe(150000);
+    expect(kmAusText("150 Tsd.")).toBe(150000);
+    expect(kmAusText("150k")).toBe(150000);
+    expect(kmAusText("12,5 T")).toBe(12500);
+    expect(Number.isNaN(kmAusText("5000 Tkm"))).toBe(true);   // über 2 Mio.
+  });
 });

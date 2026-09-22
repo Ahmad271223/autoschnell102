@@ -28,6 +28,11 @@ log = logging.getLogger("autohandel")
 router = APIRouter()
 
 _NICHT_GEFUNDEN = "Beweisdokument nicht gefunden"
+#: Rollenpruefung 22.09.2026 (RP-446)
+BEWEIS_NICHT_FUER_BROWSERDATEN = (
+    "Für Inserate, die über die Browser-Erweiterung geladen wurden, gibt es kein "
+    "Beweisdokument — die Daten stammen aus deinem Browser, nicht von einem Abruf "
+    "unseres Servers. Sichere das Inserat bei Bedarf selbst (z. B. als PDF drucken).")
 
 
 async def _stand_aus_eigenem_vertrag(user: dict, cache_key: str) -> Optional[dict]:
@@ -253,6 +258,16 @@ async def beweis_anfordern(body: AnforderungIn, user=Depends(current_firma)):
         # damit geht das Beweisdokument auch danach noch, und nur fuer ihn.
         eintrag = await _stand_aus_eigenem_vertrag(user, schluessel) or eintrag
         daten = (eintrag or {}).get("data") or None
+    if not daten and await db.listings_cache_client.count_documents(
+            {"cache_key": schluessel, "dealer_id": user["dealer_id"]}, limit=1):
+        # Rollenpruefung 22.09.2026 (RP-446): Per Browser-Erweiterung geladene
+        # Inserate liegen nur in der Quarantaene des eigenen Haendlers — sie
+        # stammen aus dem Browser des Nutzers, nicht von einem Abruf unseres
+        # Servers, und taugen deshalb nicht als Beweis (dieselbe Vorsicht wie
+        # bei der Quarantaene: niemand soll mit selbst eingereichtem HTML
+        # einen "Beweis" erzeugen). Vorher kam hier der Hinweis "bitte neu
+        # vergleichen" — der aenderte nichts, eine Schleife ohne Ausweg.
+        raise HTTPException(409, BEWEIS_NICHT_FUER_BROWSERDATEN)
     if not daten:
         raise HTTPException(404, "Zu diesem Inserat liegen keine Inseratsdaten mehr "
                                  "vor — bitte den Link noch einmal vergleichen.")
@@ -326,15 +341,18 @@ async def driver_beweis_pdf(beweis_id: str, driver=Depends(current_driver)):
     # Pruefung 14.09.2026 (C22/C23): nur ueber einen ANGENOMMENEN, nicht
     # stornierten Termin. Befund 160: "angenommen ODER Altbestand ohne Feld"
     # statt "$nin offen/abgelehnt" — unbekannte Altwerte kamen sonst durch.
-    from routes.drivers import ZUTEILUNG_ANGENOMMEN, unterlagen_zugriff_oder_404
-    treffer = None
-    if paare:
-        treffer = await db.appointments.find_one(
-            {"driver_id": driver["id"], "status": {"$ne": "storniert"},
-             "$and": [{"$or": paare}, ZUTEILUNG_ANGENOMMEN]},
-            {"_id": 0, "id": 1, "status": 1, "abgeschlossen_seit": 1,
-             "status_changed_at": 1, "updated_at": 1})
-    if not treffer:
+    from routes.drivers import ZUTEILUNG_ANGENOMMEN, _erste_fahrt_mit_zugriff
+    if not paare:
         raise HTTPException(404, _NICHT_GEFUNDEN)
-    unterlagen_zugriff_oder_404(treffer)        # Befund 156: Frist wie in der App
+    # Rollenpruefung 22.09.2026 (RP-390, wie RP-239 in drivers.py): find_one
+    # nahm IRGENDEINEN passenden Termin und pruefte erst danach die Sichtfrist —
+    # mit einer alten, abgelaufenen und einer aktuellen Fahrt zum selben Inserat
+    # hing 200/404 von der Speicherreihenfolge ab. Jetzt zaehlt der erste
+    # Kandidat, der die Frist besteht (Befund 156); besteht keiner, 404.
+    await _erste_fahrt_mit_zugriff(
+        {"driver_id": driver["id"], "status": {"$ne": "storniert"},
+         "$and": [{"$or": paare}, ZUTEILUNG_ANGENOMMEN]},
+        {"_id": 0, "id": 1, "status": 1, "abgeschlossen_seit": 1,
+         "status_changed_at": 1, "updated_at": 1},
+        _NICHT_GEFUNDEN)
     return await _pdf_antwort(doc)

@@ -254,6 +254,8 @@ def oeffentlich(doc: Optional[dict]) -> Optional[dict]:
 # Fotoliste image_urls (foto_urls nimmt images vor image_urls).
 _ANBIETER_ERSATZNAMEN = ("händler", "privatverkäufer", "privatanbieter")
 _ANBIETER_KONTAKT = ("seller_address", "seller_phone", "seller_email")
+#: Weitere Namensfelder der Parser (RP-440/RP-444), maskiert wie seller_name.
+_ANBIETER_NAMEN = ("seller_alias", "seller_ansprechpartner")
 
 
 def quelle_einfrieren(quelle: Any, daten: Any) -> Optional[Dict[str, Any]]:
@@ -285,6 +287,14 @@ def quelle_einfrieren(quelle: Any, daten: Any) -> Optional[Dict[str, Any]]:
     name = gemaskt.get("seller_name")
     if name and str(name).strip().lower() not in _ANBIETER_ERSATZNAMEN:
         gemaskt["seller_name"] = KONTAKT_ENTFERNT
+    # Rollenpruefung 22.09.2026 (RP-440/RP-444): Das Kleinanzeigen-Pseudonym
+    # eines Privatanbieters steht seit heute in seller_alias (vorher in
+    # seller_name, das hier maskiert wurde), der Ansprechpartner eines
+    # AutoScout-Haendlers in seller_ansprechpartner. Beides sind Namen — bei
+    # privaten/unbekannten Anbietern genauso ersetzen wie seller_name.
+    for feld in _ANBIETER_NAMEN:
+        if gemaskt.get(feld):
+            gemaskt[feld] = KONTAKT_ENTFERNT
     if gemaskt != aus:
         # Merker fuer _fuer_pdf ("_" = nie im PDF): hier wurde maskiert.
         gemaskt["_kontakt_maskiert"] = True
@@ -404,9 +414,66 @@ async def beweis_vormerken(db, *, cache_key: str, quelle: str, item_id: Any,
                 doc = dict(doc, status="offen", fehler=None)
         except Exception as exc:  # noqa: BLE001
             log.warning("Beweisdokument %s nicht wiederbelebt: %s", cache_key, exc)
+    if doc and doc.get("status") == "geloescht" and anlass == "angefordert" and eingefroren:
+        doc = await _nach_verfall_neu_erzeugen(
+            db, doc, cache_key=cache_key, quelle=quelle, item_id=item_id, url=url,
+            eingefroren=eingefroren, abgerufen_am=abgerufen_am)
     if doc and doc.get("status") == "offen":
         _wecken()
     return oeffentlich(doc)
+
+
+async def _nach_verfall_neu_erzeugen(db, doc: dict, *, cache_key: str, quelle: str,
+                                     item_id: Any, url: str, eingefroren: dict,
+                                     abgerufen_am: Optional[datetime]) -> dict:
+    """Rollenpruefung 22.09.2026 (RP-498): Ein fertiges Dokument, das nur ein
+    Vergleich hielt, verfaellt nach BEWEIS_AUFBEWAHRUNG_TAGE; der Grabstein
+    blieb fuer immer "geloescht". Entstand DANACH ein Kaufvertrag, bekam er
+    nie mehr ein Beweisdokument — /beweise/anfordern lieferte nur den
+    Grabstein zurueck (auch firmenuebergreifend, der Schluessel gilt je
+    Inserat).
+
+    Seit 18.09.2026 entstehen Dokumente nur noch auf Knopfdruck. Verlangt
+    jemand AUSDRUECKLICH ein neues (anlass "angefordert") und liegen
+    Inseratsdaten vor, wird der Grabstein wiederbelebt: neuer Datenstand,
+    neuer Erstellzeitpunkt, und das Dokument nennt das fruehere (erstellt
+    am …, geloescht am …) — es gibt also kein zweites "erstes" Dokument
+    ohne Hinweis. Wirft nie; im Fehlerfall bleibt der Grabstein."""
+    # Nur Grabsteine eines FERTIGEN Dokuments — nie erzeugte (fehlgeschlagene)
+    # belebt beweis_vormerken selbst wieder, mit der Pause WIEDERBELEBEN_MINUTEN.
+    filt = {"cache_key": cache_key, "status": "geloescht",
+            "$or": [{"status_vor_loeschung": "fertig"},
+                    {"status_vor_loeschung": {"$exists": False},
+                     "fertig_am": {"$nin": [None]}}]}
+    try:
+        alt = await db.inserat_beweise.find_one(
+            filt, {"_id": 0, "erstellt_am": 1, "fertig_am": 1, "geloescht_am": 1})
+        if not alt:
+            return doc
+        frueher = {"erstellt_am": alt.get("fertig_am") or alt.get("erstellt_am"),
+                   "geloescht_am": alt.get("geloescht_am")}
+        jetzt = _jetzt()
+        r = await db.inserat_beweise.update_one(
+            filt,
+            {"$set": {"status": "offen", "versuche": 0, "fehler": None,
+                      "naechster_versuch_ab": None, "bearbeitung_bis": None,
+                      "erstellt_am": jetzt, "fertig_am": None,
+                      "verfall_pruefen_ab": None, "wiederbelebt_am": jetzt,
+                      "anlass": "angefordert", "quelle": quelle,
+                      "item_id": str(item_id or ""),
+                      "url": kanonische_url(quelle, item_id, url),
+                      "quelle_daten": eingefroren,
+                      "quelle_abgerufen_am": abgerufen_am or jetzt,
+                      "neu_nach_verfall": frueher},
+             "$unset": {"geloescht_am": "", "status_vor_loeschung": "",
+                        "daten_quelle": "", "ohne_fotos": ""}})
+        if r.modified_count:
+            log.info("Beweisdokument %s nach Verfall neu angefordert", cache_key)
+            return dict(doc, status="offen", fehler=None, erstellt_am=jetzt, fertig_am=None,
+                        pdf_bytes=None, pdf_sha256=None)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Beweisdokument %s nach Verfall nicht neu vorgemerkt: %s", cache_key, exc)
+    return doc
 
 
 # ---------------------------------------------------------------- Worker --
@@ -549,7 +616,10 @@ async def beweis_erzeugen(db, doc: dict) -> bool:
                            or daten.get("detail_url") or ""),
         item_id=doc.get("item_id") or "", beweis_id=doc["id"],
         abgerufen_am=abgerufen_am, erstellt_am=erstellt,
-        fotos=fotos, foto_urls=urls, privatdaten=BEWEIS_PRIVATDATEN)
+        fotos=fotos, foto_urls=urls, privatdaten=BEWEIS_PRIVATDATEN,
+        # Rollenpruefung 22.09.2026 (RP-498): nach Verfall neu angefordert —
+        # das Dokument nennt das fruehere.
+        frueheres_dokument=doc.get("neu_nach_verfall"))
     key = neuer_speicher_key(doc)
     # Erst vermerken, dann schreiben: jeder je geschriebene Schluessel steht in
     # alle_keys und wird beim Verfall mit geloescht (auch verwaiste).

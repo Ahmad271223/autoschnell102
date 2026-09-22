@@ -544,7 +544,13 @@ def test_p5n_gegenprobe_umgehaengter_termin_preis_nicht_in_anderen_vorgang(welt,
     # Runde 12 (15.09.2026, Nr. 13): ein abgeschlossener Termin mit finalem
     # Protokoll wird nicht mehr direkt umgehaengt — erst wieder oeffnen.
     w.run(A.update_appointment(t.aid, A.AppointmentIn(status="offen"), w.chef))
-    w.run(A.update_appointment(t.aid, A.AppointmentIn(contract_id=t.cb), w.chef))
+    # Rollenprüfung 22.09.2026 (RP-027/126/277): auch NACH dem Wiederoeffnen
+    # haengt ein Termin mit unterschriebenem Protokoll nicht an einen anderen
+    # Vertrag — fuer Vertrag B gibt es einen neuen Termin.
+    with pytest.raises(HTTPException) as fehler:
+        w.run(A.update_appointment(t.aid, A.AppointmentIn(contract_id=t.cb), w.chef))
+    assert fehler.value.status_code == 409 and "neuen Termin" in fehler.value.detail
+    assert _doc(w, "appointments", t.aid)["contract_id"] == t.ca
     kb = _doc(w, "kaufvorgaenge", t.kb)
     assert kb["purchase_price"] == 20000.0 and "preis_protokoll_id" not in kb, kb
     assert "nacharbeit_offen" not in _doc(w, "appointments", t.aid)

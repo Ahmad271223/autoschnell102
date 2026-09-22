@@ -6,6 +6,7 @@ import { TrendingUp, UserPlus, Info } from "lucide-react";
 import { useFeatures } from "@/lib/features";
 import { useAuth } from "@/context/AuthContext";
 import { startseite } from "@/lib/rollen";
+import { planText } from "@/lib/abo";
 
 /**
  * Mitarbeiter / Sucher-Übersicht + Weiterverkaufsplan.
@@ -21,6 +22,25 @@ const fmtDatum = (iso) => {
   try { return new Date(iso).toLocaleDateString("de-DE"); } catch { return iso.slice(0, 10); }
 };
 
+// Rollenpruefung 22.09.2026 (RP-232/RP-383): Jeder Plan ausser "yearly" hiess
+// hier "monatlich" — auch das 3- bzw. 5-Tage-Probe-Abo.
+// Rollenprüfung 22.09.2026 (RP-109/RP-144, Welle 2): keine eigene Tabelle
+// mehr — dieselbe wie auf der Abo-Karte (lib/abo.js, kennt auch probeN), damit
+// Team-Seite und Einstellungen denselben Namen zeigen.
+export function teamPlanText(plan) {
+  return planText(plan);
+}
+
+// Rollenprüfung 22.09.2026 (RP-045 (5)/RP-047/RP-144): Ein Fehler von
+// /dealer/sale-plan wurde verschluckt (plan=null) und sah aus wie "Kein
+// Verkaufspaket aktiv". Jetzt ein eigener Fehlerzustand mit "Erneut versuchen".
+export function verkaufsplanZustand(plan, fehler) {
+  if (fehler) return "fehler";
+  if (plan == null) return "laedt";
+  if (plan.kostenlos) return "kostenlos";
+  return plan.active ? "aktiv" : "ohne";
+}
+
 export default function Team() {
   // Rollentest 18.09.2026: Diese Seite ist Chefsache (der Server lehnt sie
   // fuer Sucher mit 403 ab). Ueber das Menue kommt ein Sucher nie her —
@@ -30,6 +50,7 @@ export default function Team() {
   const chef = user?.role === "dealer";
   const [sucher, setSucher] = useState([]);
   const [plan, setPlan] = useState(null);
+  const [planFehler, setPlanFehler] = useState("");
   const [sucherPlans, setSucherPlans] = useState(null);
   // Pruefbericht 20.09.2026 (U-159): drei Abrufe gekoppelt, ohne Lade- und
   // Fehlerzustand — fiel einer aus, stand gleichzeitig "Noch keine Sucher" und
@@ -59,8 +80,14 @@ export default function Team() {
       setSucherPlans(sp.data?.plans || null);
     } catch { setSucherPlans(null); }
     if (features.marktplatz) {
-      try { const p = await api.get("/dealer/sale-plan"); setPlan(p.data); }
-      catch { setPlan(null); }
+      try {
+        const p = await api.get("/dealer/sale-plan");
+        setPlan(p.data || {});
+        setPlanFehler("");
+      } catch (e) {
+        // RP-045 (5)/RP-144: nicht als "kein Paket" darstellen
+        setPlanFehler(errMsg(e, "Verkaufsplan konnte nicht geladen werden"));
+      }
     }
   }, [features.marktplatz, chef]);
 
@@ -93,6 +120,7 @@ export default function Team() {
   };
 
   const pct = plan?.quota ? Math.min(100, (plan.used / plan.quota) * 100) : 0;
+  const planZustand = verkaufsplanZustand(plan, planFehler);
 
   if (!chef) return <Navigate to={startseite(user)} replace />;
 
@@ -138,11 +166,21 @@ export default function Team() {
             <div className="text-sm font-bold uppercase tracking-wide inline-flex items-center gap-2">
               <TrendingUp size={15} /> Weiterverkaufsplan
             </div>
-            {plan?.kostenlos ? (
+            {planZustand === "fehler" ? (
+              <div className="mt-1 text-xs" role="alert" data-testid="team-plan-fehler"
+                   style={{ color: "var(--text-primary)" }}>
+                {planFehler} — ob ein Paket aktiv ist, ist gerade unbekannt.{" "}
+                <button type="button" onClick={load} className="underline underline-offset-2 font-semibold">
+                  Erneut versuchen
+                </button>
+              </div>
+            ) : planZustand === "laedt" ? (
+              <div className="mt-1 text-xs text-zinc-500">lade…</div>
+            ) : planZustand === "kostenlos" ? (
               <div className="mt-1 text-xs text-zinc-500">
                 Fahrzeuge verkaufen ist kostenlos — du kannst beliebig viele veröffentlichen.
               </div>
-            ) : plan?.active ? (
+            ) : planZustand === "aktiv" ? (
               <div className="mt-1 text-xs text-zinc-500">
                 Abrechnungszeitraum {plan.period_start?.slice(0, 10)} – {plan.period_end?.slice(0, 10)}
               </div>
@@ -152,7 +190,7 @@ export default function Team() {
               </div>
             )}
           </div>
-          {plan?.kostenlos ? (
+          {planZustand === "fehler" || planZustand === "laedt" ? null : plan?.kostenlos ? (
             <div className="text-right">
               <div className="text-2xl font-black">kostenlos</div>
               <div className="text-[11px] text-zinc-500">unbegrenzt viele Fahrzeuge</div>
@@ -238,7 +276,7 @@ export default function Team() {
                 </td>
                 <td className="px-4 py-3">
                   {s.subscription?.active ? (
-                    <span className="text-emerald-400 text-xs">aktiv ({s.subscription.plan === "yearly" ? "jährlich" : "monatlich"})</span>
+                    <span className="text-emerald-400 text-xs">aktiv ({teamPlanText(s.subscription.plan)})</span>
                   ) : (
                     <div className="flex flex-col gap-1">
                       <span className="text-amber-400 text-xs">nicht freigeschaltet</span>

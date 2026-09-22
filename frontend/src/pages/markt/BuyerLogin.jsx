@@ -8,6 +8,10 @@ import { errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import { Store, ArrowRight } from "lucide-react";
 import InstallPWAButton from "@/components/InstallPWAButton";
+import RechtsLinks from "@/components/RechtsLinks";
+import {
+  abmeldegrundLesenUndLoeschen, einladungMerken, einladungVergessen, entwurfLesen, gemerkteEinladung,
+} from "./marktHilfen";
 
 export default function BuyerLogin() {
   const { buyer, ready, login } = useBuyer();
@@ -20,8 +24,16 @@ export default function BuyerLogin() {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const hierAngemeldet = useRef(false);
+  // Rollenprüfung 22.09.2026 (RP-531): Grund der Abmeldung (vom 401-Abfänger
+  // gemerkt) — vorher stand hier nach einer beendeten Sitzung nur das Formular.
+  const [abmeldegrund] = useState(() => abmeldegrundLesenUndLoeschen());
+  const [entwurfDa] = useState(() => Boolean(entwurfLesen("anfrage") || entwurfLesen("gegenangebot")));
   // Wer von hier aus die App installiert, soll beim Start hier landen.
   useEffect(() => { anmeldeartVormerken(TOKEN_KAEUFER); }, []);
+  // RP-511: Die Einladung eines Partners OHNE Konto ging verloren, sobald er
+  // auf "Zugang anfragen" tippte. Jetzt wird sie auf diesem Gerät gemerkt und
+  // bei der ersten Anmeldung eingelöst (auch wenn der Link dann fehlt).
+  useEffect(() => { if (invite) einladungMerken(invite); }, [invite]);
 
   // Einladungslinks fuehren seit dem Wegfall der Registrierung hierher
   // (/markt/login?invite=). Schon angemeldete Kaeufer gehen direkt in den
@@ -49,13 +61,20 @@ export default function BuyerLogin() {
     // neueFassungLaden ruft window.location.assign, fremde Adressen waeren
     // sonst eine offene Weiterleitung.
     let ziel = sicheresZiel({ role: "b2b_buyer" }, sp.get("next"));
-    if (invite) {
+    // RP-511: Link-Einladung oder eine auf diesem Gerät gemerkte (Anfrage ohne Konto).
+    const einladung = invite || gemerkteEinladung();
+    if (einladung) {
       // Einladung direkt nach der Anmeldung einloesen. Ein Fehler hier ist
       // KEIN Anmeldefehler — die Sitzung steht, nur der Beitritt fehlt.
       try {
-        const { data } = await buyerApi.post(`/invites/${encodeURIComponent(invite)}/redeem`);
+        const { data } = await buyerApi.post(`/invites/${encodeURIComponent(einladung)}/redeem`);
         toast.success(`Netzwerk beigetreten: ${data?.dealer || ""}`, { duration: 6000 });
+        einladungVergessen();
       } catch (err) {
+        // Endgültig abgelehnt (abgelaufen/verbraucht): vergessen. Bei Netz- oder
+        // Serverfehlern bleibt sie gemerkt und wird beim nächsten Mal versucht.
+        const st = err?.response?.status;
+        if (st && st < 500) einladungVergessen();
         toast.warning(`${errMsg(err, "Einladung konnte nicht eingelöst werden")} — `
           + "bitte den Händler um einen neuen Link.", { duration: 8000 });
       }
@@ -76,7 +95,7 @@ export default function BuyerLogin() {
     // dunkel auf dunkel (Gegenpruefung 11.09.2026).
     <div className="min-h-screen flex items-center justify-center p-4"
          style={{ background: "#0a0a0a", "--text-primary": "#f4f4f5", "--text-secondary": "#a1a1aa",
-                  "--border-default": "rgba(255,255,255,0.12)" }}>
+                  "--text-muted": "#a1a1aa", "--border-default": "rgba(255,255,255,0.12)" }}>
       <div className="w-full max-w-sm">
         <div className="flex items-center gap-2 mb-6">
           <div className="w-9 h-9 rounded-lg flex items-center justify-center text-white"
@@ -86,6 +105,15 @@ export default function BuyerLogin() {
           <div className="font-black tracking-tight text-lg text-white">B2B-MARKTPLATZ</div>
         </div>
         <h1 className="font-display font-black text-3xl tracking-tighter text-white">Händler-Login</h1>
+        {sp.get("reason") === "session" && (
+          <div className="mt-4 text-xs px-3 py-2 rounded-lg border" role="alert"
+               data-testid="buyer-abmeldegrund"
+               style={{ borderColor: "var(--accent-red)", background: "rgba(255,59,48,0.08)", color: "#fca5a5" }}>
+            {abmeldegrund || "Du wurdest abgemeldet (neu angemeldet auf einem anderen Gerät, Sperre oder "
+              + "neues Passwort). Bitte neu anmelden."}
+            {entwurfDa && " Deine angefangene Anfrage ist gesichert und wird nach der Anmeldung wiederhergestellt."}
+          </div>
+        )}
         <p className="text-sm text-zinc-500 mt-1 mb-6">
           {invite ? "Du wurdest in ein Händler-Netzwerk eingeladen — nach der Anmeldung trittst du bei."
                   : "Zugang für Zwischenhändler."}
@@ -124,11 +152,15 @@ export default function BuyerLogin() {
         </div>
         <div className="mt-4 text-center text-sm text-zinc-500">
           Noch kein Zugang?{" "}
-          <Link to="/anfrage?art=kaeufer" data-testid="buyer-link-anfrage" className="text-white font-semibold">Zugang anfragen</Link>
+          {/* RP-511: die Einladung mitnehmen — sonst ging sie beim Anfragen verloren. */}
+          <Link to={invite ? `/anfrage?art=kaeufer&invite=${encodeURIComponent(invite)}` : "/anfrage?art=kaeufer"}
+                data-testid="buyer-link-anfrage" className="text-white font-semibold">Zugang anfragen</Link>
         </div>
         <div className="mt-8">
           <InstallPWAButton />
         </div>
+        {/* RP-563: Impressum, Datenschutz, AGB auch hier erreichbar. */}
+        <RechtsLinks className="mt-8" />
       </div>
     </div>
   );

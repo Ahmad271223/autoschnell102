@@ -1,12 +1,28 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
 import { errMsg } from "@/lib/api";
-import { Plus, Trash2, Copy, User, Mail, KeyRound } from "lucide-react";
+import { Plus, Trash2, Copy, User, Mail, KeyRound, Phone } from "lucide-react";
+
+/**
+ * Rollenprüfung 22.09.2026 (RP-041/RP-140): Rückfrage beim Entfernen nennt,
+ * wie viele offene Fahrten danach ohne Fahrer dastehen (der Server trennt sie
+ * alle). `offene` kommt aus GET /drivers (nur für den Hauptchef).
+ */
+export function entfernenRueckfrage(name, offene) {
+  const wer = name ? `„${name}“` : "Diesen Fahrer";
+  if (typeof offene !== "number") return `${wer} aus deiner Liste entfernen?`;
+  if (offene === 0) return `${wer} aus deiner Liste entfernen?\n\nEr hat keine offenen Fahrten.`;
+  return `${wer} aus deiner Liste entfernen?\n\n${offene === 1 ? "1 offene Fahrt verliert"
+    : `${offene} offene Fahrten verlieren`} dabei den Fahrer und ${offene === 1 ? "muss" : "müssen"} `
+    + "im Terminplaner neu zugeteilt werden.";
+}
 
 export default function Fahrer() {
   const { user } = useAuth();
+  const navigate = useNavigate();
   // Fahrer hinzufuegen/entfernen ist Chefsache (Backend erzwingt 403);
   // Sucher sehen die Liste nur, um Termine zuweisen zu koennen.
   const chef = user?.role === "dealer";
@@ -45,14 +61,24 @@ export default function Fahrer() {
   const [entfernt, setEntfernt] = useState("");
   const remove = async (id) => {
     if (entfernt) return;
-    if (!window.confirm("Fahrer aus deiner Liste entfernen?")) return;
+    const fahrer = items.find((d) => d.id === id);
+    if (!window.confirm(entfernenRueckfrage(fahrer?.name, fahrer?.offene_fahrten))) return;
     setEntfernt(id);
     try {
       const { data } = await api.delete(`/drivers/${id}`);
       // Pruefbericht 20.09.2026 (U-160): "Termine konnten nicht vollstaendig
       // bereinigt werden" kam als Hinweis zurueck und ging verloren.
       if (data?.hinweis) toast.warning(data.hinweis, { duration: 10000 });
-      else toast.success("Entfernt");
+      else if (data?.offene_termine_getrennt > 0) {
+        // RP-041/RP-140: sagen, dass Fahrten jetzt ohne Fahrer sind — mit Weg
+        // zum Terminplaner (vorher nur "Entfernt").
+        const n = data.offene_termine_getrennt;
+        toast.warning(`Fahrer entfernt — ${n === 1 ? "1 offene Fahrt ist" : `${n} offene Fahrten sind`} `
+                      + "jetzt ohne Fahrer. Bitte im Terminplaner neu zuteilen.", {
+          duration: 15000,
+          action: { label: "Zum Terminplaner", onClick: () => navigate("/app/termine") },
+        });
+      } else toast.success("Entfernt");
     } catch (e) {
       toast.error(errMsg(e, "Fahrer konnte nicht entfernt werden"));
     } finally {
@@ -103,8 +129,10 @@ export default function Fahrer() {
       </form>
       )}
 
-      <div className="mt-6 tactical-card overflow-hidden">
-        <table className="w-full text-sm">
+      {/* RP-041/RP-140: am Handy quer scrollbar statt abgeschnitten — vorher
+          lag die Spalte "Aktion" (Entfernen) bei langen E-Mails außerhalb. */}
+      <div className="mt-6 tactical-card overflow-x-auto" data-testid="drivers-tabelle">
+        <table className="w-full min-w-[640px] text-sm">
           <thead>
             <tr className="text-left overline" style={{ background: "var(--wa-02)" }}>
               <th className="px-4 py-3">Name</th>
@@ -135,7 +163,21 @@ export default function Fahrer() {
             {items.map((d) => (
               <tr key={d.id} className="border-t" style={{ borderColor: "var(--border-default)" }}
                   data-testid={`driver-row-${d.id}`}>
-                <td className="px-4 py-3 font-semibold">{d.name}</td>
+                <td className="px-4 py-3">
+                  <div className="font-semibold">{d.name}</div>
+                  {/* RP-542: Telefonnummer des Fahrers (nur Hauptchef, vom Betreiber erfasst) */}
+                  {d.phone && (
+                    <a href={`tel:${String(d.phone).replace(/[^\d+]/g, "")}`} data-testid={`driver-phone-${d.id}`}
+                       className="mt-0.5 inline-flex items-center gap-1 text-xs text-zinc-400 hover:text-white">
+                      <Phone size={11} />{d.phone}
+                    </a>
+                  )}
+                  {chef && typeof d.offene_fahrten === "number" && d.offene_fahrten > 0 && (
+                    <div className="text-[11px] text-zinc-500">
+                      {d.offene_fahrten} offene {d.offene_fahrten === 1 ? "Fahrt" : "Fahrten"}
+                    </div>
+                  )}
+                </td>
                 <td className="px-4 py-3">
                   {/* Sucher sehen keine Fahrer-ID und keine E-Mail (Nachpruefung 15.09.2026) */}
                   {d.driver_code ? (

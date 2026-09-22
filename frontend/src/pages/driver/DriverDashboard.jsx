@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { driverApi, openDriverPdf } from "@/context/DriverContext";
 import { errMsg } from "@/lib/api";
 import { toast } from "sonner";
@@ -9,6 +9,63 @@ import {
 } from "lucide-react";
 import PhotoGallery from "@/components/PhotoGallery";
 import AbholCheckDialog from "@/components/AbholCheckDialog";
+import { NICHT_ABGEHOLT_GRUENDE, nichtAbgeholtNotiz, protokollIstFinal } from "./fahrtPruefung";
+
+// Rollenprüfung 22.09.2026 (RP-464): Zuweisung, Verlegung und Storno kamen
+// erst nach manuellem Neuladen an. Jetzt still nachladen — im Takt und
+// sobald die App wieder sichtbar wird.
+const NACHLADEN_MS = 60000;
+const GESCHLOSSEN = ["abgeholt", "nicht abgeholt", "storniert", "erledigt"];
+
+/** RP-537: "Nicht abgeholt" nur mit Grund (vorher ein nacktes confirm). */
+function NichtAbgeholtDialog({ fahrt, onAbbrechen, onSenden, busy }) {
+  const [grund, setGrund] = useState("");
+  const [text, setText] = useState("");
+  const notiz = nichtAbgeholtNotiz(grund, text);
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4"
+         style={{ background: "rgba(0,0,0,0.7)" }} data-testid="nicht-abgeholt-dialog">
+      <div className="bleibt-dunkel w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl p-5"
+           style={{ background: "#141416", border: "1px solid rgba(255,255,255,0.1)", color: "#ffffff" }}>
+        <div className="text-lg font-bold">Nicht abgeholt</div>
+        <div className="text-xs text-zinc-500 mt-0.5 mb-3">
+          {fahrt?.title || "Fahrt"} — warum konnte das Fahrzeug nicht abgeholt werden?
+        </div>
+        <div className="space-y-1.5">
+          {NICHT_ABGEHOLT_GRUENDE.map((g) => (
+            <label key={g.key} className="flex items-center gap-2 text-sm cursor-pointer">
+              <input type="radio" name="nicht-abgeholt-grund" value={g.key}
+                     checked={grund === g.key} onChange={() => setGrund(g.key)}
+                     data-testid={`nicht-abgeholt-grund-${g.key}`} />
+              {g.label}
+            </label>
+          ))}
+        </div>
+        <textarea value={text} onChange={(e) => setText(e.target.value)} rows={3} maxLength={1500}
+                  data-testid="nicht-abgeholt-text"
+                  placeholder={grund === "sonstiges" ? "Bitte kurz erklären *" : "Details für den Händler (optional)"}
+                  className="mt-3 w-full rounded-lg border bg-transparent px-3 py-2 text-sm outline-none"
+                  style={{ borderColor: "rgba(255,255,255,0.15)" }} />
+        <div className="mt-2 text-[11px] text-zinc-500">
+          Der Grund geht an den Händler. Inseratsfotos werden nach 14 Tagen automatisch gelöscht.
+        </div>
+        <div className="mt-4 grid grid-cols-2 gap-2">
+          <button type="button" onClick={onAbbrechen} disabled={busy}
+                  className="rounded-xl py-3 text-sm border disabled:opacity-50"
+                  style={{ borderColor: "rgba(255,255,255,0.15)" }}>
+            Abbrechen
+          </button>
+          <button type="button" onClick={() => notiz && onSenden(notiz)} disabled={busy || !notiz}
+                  data-testid="nicht-abgeholt-senden"
+                  className="rounded-xl py-3 text-sm font-semibold text-white disabled:opacity-40"
+                  style={{ background: "var(--accent-red, #FF3B30)" }}>
+            Als nicht abgeholt melden
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 const fmtDate = (s) => {
   if (!s) return "—";
@@ -27,9 +84,18 @@ export default function DriverDashboard() {
   // Pruefung 14.09.2026 (A1): Ladefehler getrennt merken — vorher stand nach
   // einem Funkloch "Noch keine Fahrten", obwohl Fahrten zugeteilt waren.
   const [ladeFehler, setLadeFehler] = useState(null);
-  const [open, setOpen] = useState({});
+  // Rollenprüfung 22.09.2026 (RP-062/RP-161): Das Protokoll schickt nach einer
+  // geänderten Fahrt hierher (/fahrer?fahrt=<id>) — genau diese Fahrt gleich
+  // aufgeklappt zeigen, damit der Fahrer sie prüfen und erneut annehmen kann.
+  const [zielFahrt] = useState(() => {
+    try { return new URLSearchParams(window.location.search).get("fahrt") || ""; }
+    catch { return ""; }
+  });
+  const [open, setOpen] = useState(() => (zielFahrt ? { [zielFahrt]: true } : {}));
   const [busy, setBusy] = useState(null);
   const [checkAppt, setCheckAppt] = useState(null); // Abhol-Check-Dialog
+  const [nichtAbgeholt, setNichtAbgeholt] = useState(null); // RP-537: Grund-Dialog
+  const navigate = useNavigate();
 
   const laden = () => {
     setLoading(true);
@@ -40,6 +106,29 @@ export default function DriverDashboard() {
       .finally(() => setLoading(false));
   };
   useEffect(() => { laden(); }, []);
+
+  // RP-464: still nachladen (kein "Lade …", kein Fehler-Toast im Funkloch) —
+  // alle 60 s, solange die App sichtbar ist, und beim Zurückkehren in die App.
+  const stillLaeuft = useRef(false);
+  useEffect(() => {
+    const still = () => {
+      if (document.visibilityState !== "visible" || stillLaeuft.current) return;
+      stillLaeuft.current = true;
+      driverApi.get("/driver/appointments")
+        .then((r) => { setItems(r.data); setLadeFehler(null); })
+        .catch(() => { /* nächster Takt versucht es erneut */ })
+        .finally(() => { stillLaeuft.current = false; });
+    };
+    const takt = setInterval(still, NACHLADEN_MS);
+    const sichtbar = () => { if (document.visibilityState === "visible") still(); };
+    document.addEventListener("visibilitychange", sichtbar);
+    window.addEventListener("focus", sichtbar);
+    return () => {
+      clearInterval(takt);
+      document.removeEventListener("visibilitychange", sichtbar);
+      window.removeEventListener("focus", sichtbar);
+    };
+  }, []);
 
   // Pruefung 14.09.2026 (A2): Nach einer gelungenen Aenderung die Liste neu
   // laden — scheitert NUR das Nachladen, gibt es keinen widerspruechlichen
@@ -89,18 +178,37 @@ export default function DriverDashboard() {
     // "abgeholt" läuft über den Abhol-Check-Dialog (mit Abweichungsbericht).
     if (status === "abgeholt") {
       const appt = items.find((a) => a.id === id);
-      if (appt) setCheckAppt(appt);
+      if (!appt) return;
+      // Rollenprüfung 22.09.2026 (RP-064/RP-163): ERST prüfen, ob das
+      // Protokoll unterschrieben ist — vorher öffnete der Dialog sofort, und
+      // erst beim Absenden hieß es "Protokoll fehlt": km, Abweichungen und
+      // Fotos waren weg. Ohne Verbindung (null) entscheidet wie bisher die
+      // Prüfung beim Absenden.
+      setBusy(id);
+      const final = await protokollIstFinal(id);
+      setBusy(null);
+      if (final === false) {
+        toast.warning("Bitte zuerst das Abholprotokoll ausfüllen und unterschreiben — "
+                      + "danach den Abhol-Check.");
+        navigate(`/fahrer/protokoll/${id}`);
+        return;
+      }
+      setCheckAppt(appt);
       return;
     }
-    const confirmMsg =
-      "Fahrt als 'nicht abgeholt' markieren?\nHinweis: Inseratsfotos werden nach 14 Tagen automatisch gelöscht.";
-    if (!window.confirm(confirmMsg)) return;
+    // RP-537: "Nicht abgeholt" nur mit Grund (Dialog statt confirm).
+    setNichtAbgeholt(items.find((a) => a.id === id) || { id });
+  };
+
+  const nichtAbgeholtSenden = async (id, notiz) => {
+    if (busy) return;
     setBusy(id);
     try {
       const stand = items.find((a) => a.id === id)?.updated_at;
       await driverApi.put(`/driver/appointments/${id}/status`,
-        { status, ...(stand ? { stand } : {}) });
-      toast.success(status === "abgeholt" ? "Als abgeholt markiert" : "Als nicht abgeholt markiert");
+        { status: "nicht abgeholt", notes: notiz, ...(stand ? { stand } : {}) });
+      toast.success("Als nicht abgeholt markiert — der Händler sieht den Grund");
+      setNichtAbgeholt(null);
     } catch (e) {
       toast.error(errMsg(e, "Statuswechsel fehlgeschlagen"));
       setBusy(null);
@@ -125,6 +233,17 @@ export default function DriverDashboard() {
 
   const oeffnePdf = (path) =>
     openDriverPdf(path).catch((e) => toast.error(errMsg(e)));
+
+  // RP-062: die Ziel-Fahrt einmal in den Blick holen, sobald sie geladen ist.
+  const zielGezeigt = useRef(false);
+  useEffect(() => {
+    if (!zielFahrt || zielGezeigt.current || !items.some((a) => a.id === zielFahrt)) return;
+    zielGezeigt.current = true;
+    try {
+      document.querySelector(`[data-testid="appt-${CSS.escape(zielFahrt)}"]`)
+        ?.scrollIntoView?.({ block: "start", behavior: "smooth" });
+    } catch { /* nur Komfort */ }
+  }, [zielFahrt, items]);
 
   return (
     <div data-testid="driver-dashboard">
@@ -253,8 +372,9 @@ export default function DriverDashboard() {
                         )}
 
                         {/* Digitales Protokoll: dieselben Punkte wie im PDF,
-                            direkt in der App ausfüllbar inkl. Unterschrift. */}
-                        {a.zuteilung !== "offen" && (
+                            direkt in der App ausfüllbar inkl. Unterschrift.
+                            RP-235: nicht bei stornierten Fahrten (Server: 404). */}
+                        {a.zuteilung !== "offen" && a.status !== "storniert" && (
                         <Link to={`/fahrer/protokoll/${a.id}`}
                               data-testid={`protokoll-${a.id}`}
                               className="flex items-center justify-center gap-2 px-4 py-3 rounded-sm text-sm font-bold kinetic-button mb-2">
@@ -263,12 +383,14 @@ export default function DriverDashboard() {
                         )}
 
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          {a.status !== "storniert" && (
                           <button onClick={() => oeffnePdf(`/driver/appointments/${a.id}/pickup-order.pdf`)}
                                   data-testid={`pickup-pdf-${a.id}`}
                                   className="flex items-center justify-center gap-2 px-4 py-3 rounded-sm text-sm border"
                                   style={{ borderColor: "var(--border-default)" }}>
                             <FileText size={15} /> Papier-PDF
                           </button>
+                          )}
                           {a.contract_id && (
                             <button onClick={() => oeffnePdf(`/driver/contracts/${a.contract_id}/pdf`)}
                                     data-testid={`contract-pdf-${a.id}`}
@@ -300,15 +422,21 @@ export default function DriverDashboard() {
                             {a.notes}
                           </div>
                         )}
+                        {/* RP-236: Chef-Notizen gibt es erst nach der Annahme. */}
+                        {a.notizen_nach_annahme && (
+                          <div className="text-[11px] text-zinc-500" data-testid={`notizen-nach-annahme-${a.id}`}>
+                            Der Händler hat Notizen hinterlegt — sichtbar nach der Annahme.
+                          </div>
+                        )}
 
                         {/* Zuteilung: erst annehmen oder ablehnen (09/2026) */}
-                        {a.zuteilung === "offen" && a.status !== "abgeholt" && a.status !== "nicht abgeholt" && (
+                        {a.zuteilung === "offen" && !GESCHLOSSEN.includes(a.status) && (
                           <div className="pt-2 border-t" style={{ borderColor: "var(--border-default)" }}
                                data-testid={`zuteilung-${a.id}`}>
                             <div className="text-xs mb-2 font-semibold"
                                  style={{ color: a.zuteilung_neu_wegen_aenderung ? "var(--accent-red)" : "var(--accent-green)" }}>
                               {a.zuteilung_neu_wegen_aenderung
-                                ? "Fahrt wurde geändert (Datum, Uhrzeit oder Adresse) — bitte erneut bestätigen"
+                                ? "Fahrt wurde geändert (Datum, Uhrzeit, Adresse, Fahrzeug oder Verkäufer) — bitte prüfen und erneut bestätigen"
                                 : "Neue Fahrt zugeteilt — annehmen?"}
                             </div>
                             <div className="grid grid-cols-2 gap-2">
@@ -328,7 +456,8 @@ export default function DriverDashboard() {
                           </div>
                         )}
                         {/* Status-Aktionen (Fahrer markiert Ergebnis) — erst nach Annahme */}
-                        {a.zuteilung !== "offen" && a.status !== "abgeholt" && a.status !== "nicht abgeholt" && (
+                        {/* RP-235: auch nicht bei stornierten/erledigten Fahrten (Server: 409). */}
+                        {a.zuteilung !== "offen" && !GESCHLOSSEN.includes(a.status) && (
                           <div className="grid grid-cols-2 gap-2 pt-2 border-t"
                                style={{ borderColor: "var(--border-default)" }}>
                             <button
@@ -362,6 +491,15 @@ export default function DriverDashboard() {
                             {" · "}Fotos & Beweis-Archiv werden automatisch gelöscht
                           </div>
                         )}
+                        {(a.status === "storniert" || a.status === "erledigt") && (
+                          <div className="text-xs text-zinc-500 p-3 rounded-sm text-center"
+                               data-testid={`fahrt-geschlossen-${a.id}`}
+                               style={{ background: "var(--wa-02)" }}>
+                            {a.status === "storniert"
+                              ? "✕ Fahrt storniert — Kontakt und Unterlagen stehen nicht mehr zur Verfügung"
+                              : "✓ Vom Händler als erledigt markiert"}
+                          </div>
+                        )}
                         {/* 19.09.2026 (sichtbarer Mangel 4): Nach dem unterschriebenen
                             Protokoll steht die Fahrt auf "abgeholt" — der Abhol-Check
                             (km, Schluessel, Tank, Fotos) war dann nicht mehr erreichbar,
@@ -384,6 +522,12 @@ export default function DriverDashboard() {
           </section>
         ))}
       </div>
+
+      {nichtAbgeholt && (
+        <NichtAbgeholtDialog fahrt={nichtAbgeholt} busy={busy === nichtAbgeholt.id}
+                             onAbbrechen={() => setNichtAbgeholt(null)}
+                             onSenden={(notiz) => nichtAbgeholtSenden(nichtAbgeholt.id, notiz)} />
+      )}
 
       {checkAppt && (
         <AbholCheckDialog

@@ -1,4 +1,6 @@
 import { toast } from "sonner";
+import { laeuftAlsApp, plattform } from "@/lib/installation";
+import { dateiTeilen, kannDateiTeilen } from "@/lib/teilen";
 
 /**
  * Geladene Datei (PDF, Foto) in einem neuen Tab öffnen — auch dann, wenn das
@@ -48,12 +50,60 @@ function linkKlicken(blobUrl, dateiname) {
 }
 
 /**
+ * Rollenprüfung 22.09.2026 (RP-413): In der auf dem iPhone/iPad INSTALLIERTEN
+ * App (Home-Bildschirm, standalone) öffnet ein Link mit target=_blank die
+ * In-App-Safari-Ansicht — und die kann die blob:-Adresse der App nicht laden:
+ * der Kaufvertrag bleibt weiß. Dort geht die Datei stattdessen über das
+ * Teilen-Menü (Web Share API: "In Dateien sichern", "Öffnen in …", Drucken).
+ */
+export function iosApp({ nav = typeof navigator !== "undefined" ? navigator : undefined,
+                         alsApp = laeuftAlsApp } = {}) {
+  try {
+    return plattform(nav || {}) === "ios" && Boolean(alsApp());
+  } catch {
+    return false;
+  }
+}
+
+function alsDatei(daten, dateiname, mime) {
+  const name = dateiname || (String(mime || daten?.type || "").includes("pdf") ? "Dokument.pdf" : "Datei");
+  try {
+    return new File([daten], name, { type: mime || daten?.type || "application/octet-stream" });
+  } catch {
+    return null;
+  }
+}
+
+async function teilenOderHinweis(datei, titel) {
+  const erg = await dateiTeilen({ datei, titel });
+  if (erg === "nicht_moeglich") {
+    toast.error(`${titel} lässt sich in der installierten App nicht anzeigen — bitte in Safari öffnen.`);
+  }
+  return erg;
+}
+
+/**
  * blob: die geladene Datei. startMs: Zeitpunkt des Klicks (vor dem Laden).
  * titel: für den Hinweis ("Der Kaufvertrag ist fertig."). dateiname: statt
  * Tab herunterladen. mime: Dateityp erzwingen (z. B. "application/pdf").
  */
 export function blobOeffnen(blob, { startMs = Date.now(), titel = "Das Dokument", dateiname = null, mime = null } = {}) {
   const daten = mime && blob && blob.type !== mime ? new Blob([blob], { type: mime }) : blob;
+  // RP-413: iPhone/iPad als installierte App — teilen statt neuen Tab.
+  if (iosApp()) {
+    const datei = alsDatei(daten, dateiname, mime);
+    if (datei && kannDateiTeilen(datei)) {
+      if (klickNochFrisch(startMs)) {
+        teilenOderHinweis(datei, titel);
+        return "geteilt";
+      }
+      toast.success(`${titel} ist fertig.`, {
+        duration: 60000,
+        action: { label: "Teilen / Sichern", onClick: () => { teilenOderHinweis(datei, titel); } },
+      });
+      return "hinweis";
+    }
+  }
   const blobUrl = URL.createObjectURL(daten);
   setTimeout(() => URL.revokeObjectURL(blobUrl), FREIGABE_NACH_MS);
   if (klickNochFrisch(startMs)) {

@@ -234,9 +234,11 @@ def test_381_b2b_zweig_nur_bei_angemeldetem_nutzer_in_der_pipeline(welt, monkeyp
     assert len(pipelines) == 2
 
     def zweige(p):
+        # Rollenprüfung 22.09.2026 (RP-521): _eff_price ist jetzt das Minimum
+        # der zulaessigen Stufen ($min) statt der ersten gesetzten ($switch).
         for st in p:
             if "$addFields" in st and "_eff_price" in st["$addFields"]:
-                return st["$addFields"]["_eff_price"]["$switch"]["branches"]
+                return st["$addFields"]["_eff_price"]["$min"]
         raise AssertionError("kein _eff_price in der Pipeline")
     assert "$prices.b2b" not in str(zweige(pipelines[0]))
     assert "$prices.b2b" in str(zweige(pipelines[1]))

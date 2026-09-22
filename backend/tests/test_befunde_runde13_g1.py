@@ -119,8 +119,13 @@ def test_c1_c2_zugang_erzwingen_und_abhaengigkeiten(monkeypatch):
         m._zugang_erzwingen(_buyer({"active": True, "gesperrt": True}))
     assert e.value.status_code == 403
     # C1: Kaeufer-Antwort haengt am Zugang; C2: Favorit setzen prueft den Zugang
+    # Rollenprüfung 22.09.2026 (RP-510): die Route haengt an buyer_nicht_gesperrt
+    # (Sperre -> 403 fuer alles), der Zugang (402) wird fuer annehmen und
+    # gegenangebot inline geprueft; ablehnen/zurueckziehen beenden nur.
     sig = inspect.signature(m.buyer_answer_interest)
-    assert "require_marketplace_access" in str(sig.parameters["user"].default.dependency.__name__)
+    assert sig.parameters["user"].default.dependency is m.buyer_nicht_gesperrt
+    quelle = inspect.getsource(m.buyer_answer_interest)
+    assert "if not beenden:\n        _zugang_erzwingen(user)" in quelle
     assert "_zugang_erzwingen(user)" in inspect.getsource(m.toggle_favorit)
 
 

@@ -132,7 +132,11 @@ def welt():
 
     ctx = _Ctx()
     ctx.run(ctx.db.users.insert_many(w.konten()))
-    ctx.run(ctx.db.dealers.insert_one({"id": w.dealer_id, "company_name": "R16 GmbH", "created_at": _jetzt()}))
+    # Rollenprüfung 22.09.2026 (Welle 2): mit Chef-Zeiger wie im Betrieb — dealers.user_id
+    # ist eindeutig (server._unique_index_sicher); eine zweite Firma ohne Zeiger aus einem
+    # parallel laufenden Test (runde14_infra) liess das Anlegen sonst mit E11000 scheitern.
+    ctx.run(ctx.db.dealers.insert_one({"id": w.dealer_id, "user_id": w.chef["id"],
+                                       "company_name": "R16 GmbH", "created_at": _jetzt()}))
     yield ctx
     try:
         ctx.run(w.aufraeumen(ctx.db))
@@ -505,8 +509,12 @@ def test_09_vergleich_kollegenfahrzeug_bleibt_unangetastet(welt):
     assert k2 == {"user_id": w.a["id"], "name": "Anna A", "seit": v1["updated_at"], "mitbearbeiter": True}
     assert v2["owner_user_id"] == w.a["id"] and v2["mitbearbeiter_ids"] == [w.b["id"]]
     assert v2["data"]["mileage"] == 999, "Inseratsdaten werden wie bei jedem Vergleich aktualisiert"
-    assert k3 is None and v3["data"]["mileage"] == 500 and v3["owner_user_id"] == w.a["id"], \
+    assert v3["data"]["mileage"] == 500 and v3["owner_user_id"] == w.a["id"], \
         "Chef aktualisiert, Besitzer bleibt"
+    # Rollenprüfung 22.09.2026 (RP-048/RP-147): der Chef erfaehrt, wer das
+    # Fahrzeug bearbeitet — ohne selbst Mitbearbeiter zu werden.
+    assert k3 and k3["user_id"] == w.a["id"] and k3["mitbearbeiter"] is False, k3
+    assert v3["mitbearbeiter_ids"] == [w.b["id"]], "Chef steht nicht in der Mitbearbeiterliste"
     assert k4 is None and v4["owner_user_id"] == w.b["id"]
 
 
@@ -550,7 +558,16 @@ def test_11_jeder_sucher_der_firma_darf_einen_eigenen_vertrag_anlegen(welt, monk
     async def lauf():
         await db.vehicles.insert_many([w.fahrzeug(vid, owner=w.a["id"]),
                                        w.fahrzeug(weg, owner=w.b["id"], lifecycle="geloescht")])
-        out_b = await C.create_contract(body(vid, 4000), w.b)      # B: weder Besitzer noch Mitbearbeiter
+        # Rollenpruefung 22.09.2026 (RP-014/RP-113): ohne eigenen Vergleich
+        # (weder Besitzer noch Mitbearbeiter) gibt es keinen Vertrag mehr —
+        # Fahrzeug-IDs sind aus der Anzeigennummer ableitbar.
+        with pytest.raises(HTTPException) as e0:
+            await C.create_contract(body(vid, 4000), w.b)
+        assert e0.value.status_code == 404
+        # Der Vergleich desselben Links traegt B als Mitbearbeiter ein
+        # (routes/listings.py) — danach darf er seinen eigenen Vertrag anlegen.
+        await db.vehicles.update_one({"id": vid}, {"$addToSet": {"mitbearbeiter_ids": w.b["id"]}})
+        out_b = await C.create_contract(body(vid, 4000), w.b)      # B: Mitbearbeiter nach Vergleich
         out_a = await C.create_contract(body(vid, 5000), w.a)      # A: Besitzer, eigener Vorgang daneben
         with pytest.raises(HTTPException) as e:
             await C.create_contract(body(weg, 1), w.b)

@@ -174,6 +174,8 @@ export default function AdminBetrieb() {
         </div>
       </Card>
 
+      {"aufraeumlauf" in data && <AufraeumlaufKarte lauf={data.aufraeumlauf} />}
+
       <Card padded={false}>
         <div className="flex items-center gap-2 px-5 py-4" style={{ borderBottom: "1px solid var(--wa-08)" }}>
           <AlertTriangle size={16} className="text-zinc-500" />
@@ -236,6 +238,45 @@ export default function AdminBetrieb() {
         </Card>
       )}
     </div>
+  );
+}
+
+/**
+ * Rollenprüfung 22.09.2026 (RP-394, Welle 2): Stand des stündlichen
+ * Aufräumlaufs. Scheiterte ein Teilschritt, stand das vorher nur im Log;
+ * jetzt sieht der Betreiber den letzten VOLLSTÄNDIGEN Lauf und die
+ * gescheiterten Schritte (der Alarm aufraeumschritt_fehlgeschlagen steht
+ * zusätzlich unten bei den Alarmen).
+ */
+export function aufraeumlaufZustand(lauf) {
+  if (!lauf || !lauf.letzter_lauf) return { tone: "yellow", text: "noch kein Lauf erfasst" };
+  const fehl = lauf.fehlgeschlagen || [];
+  if (lauf.ueberfaellig) return { tone: "red", text: "kein vollständiger Lauf seit über " + (lauf.grenze_h || 3) + " Std." };
+  if (fehl.length) return { tone: "red", text: `${fehl.length} Schritt(e) gescheitert` };
+  return { tone: "green", text: "vollständig" };
+}
+
+function AufraeumlaufKarte({ lauf }) {
+  const z = aufraeumlaufZustand(lauf);
+  const fehl = lauf?.fehlgeschlagen || [];
+  return (
+    <Card className="mb-4" data-testid="aufraeumlauf">
+      <div className="flex items-center gap-2 mb-2">
+        <Activity size={16} className="text-zinc-500" />
+        <span className="text-[15px] font-semibold text-white">Aufräumlauf</span>
+        <Badge tone={z.tone}>{z.text}</Badge>
+      </div>
+      <div className="text-[13px] text-zinc-400">
+        Letzter vollständiger Aufräumlauf:{" "}
+        <span className="text-zinc-200">{lauf?.letzter_vollstaendiger_lauf ? fmtDate(lauf.letzter_vollstaendiger_lauf) : "—"}</span>
+        {lauf?.letzter_lauf ? ` · letzter Lauf ${fmtDate(lauf.letzter_lauf)}` : ""}
+      </div>
+      {fehl.length > 0 && (
+        <div className="mt-1 text-[12.5px] text-red-300" data-testid="aufraeumlauf-fehlgeschlagen">
+          Gescheiterte Schritte im letzten Lauf: {fehl.join(", ")}
+        </div>
+      )}
+    </Card>
   );
 }
 

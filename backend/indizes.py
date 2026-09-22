@@ -4,6 +4,7 @@ Tests und der Admin-Reparaturlauf sie ohne Import von server.py nutzen
 koennen (server.py bindet beim Import den Motor-Client an den aktuellen
 Event-Loop)."""
 import os
+from typing import Optional
 
 from deps import db, log
 
@@ -606,6 +607,130 @@ async def abo_unique_index(db) -> bool:
     await alarm_schliessen(db, "mehrfache_aktive_abos", ref="subscriptions")
     await _index_steht(db, "unique_index_fehlt", ref=ref)
     return True
+
+
+async def _weicher_teilindex(db, coll, name: str, felder: list, filter_: dict,
+                             alarm_typ: str, alarm_ref: str, hinweis: str,
+                             pruef_filter: Optional[dict] = None) -> bool:
+    """Rollenprüfung 22.09.2026 (RP-083/RP-182, RP-046/RP-145/RP-152): Teil-
+    Unique-Index fuer eine NEUE Regel auf Altdaten — weich wie
+    _unique_index_weich, aber mit Dublettenbericht vorher:
+
+    1. Dubletten im Filter per Aggregation suchen. Gibt es welche, wird der
+       Index NICHT angelegt und NICHTS veraendert (Geld- bzw. Verkaufsdaten,
+       die Entscheidung trifft der Betreiber): Betriebsalarm `alarm_typ` mit
+       Beispielen, kein Startabbruch (kein Eintrag in FEHLENDE_UNIQUE).
+    2. Einen gleichnamigen Index mit ANDEREN Optionen ersetzen (z. B. eine
+       fruehere Fassung des Filters).
+    3. Anlegen; scheitert es trotzdem (Rennen mit einem parallelen Write),
+       Alarm unique_index_fehlt_weich — der naechste Start versucht es erneut.
+    Steht der Index, werden beide Alarme geschlossen. Wirft nie.
+
+    Rollenprüfung 22.09.2026 (Review): `pruef_filter` (Standard: filter_)
+    darf WEITER sein als der Indexfilter — fuer Regeln, deren Kennzeichen erst
+    eine Migration nachtraegt (Firmen-Abos: art='firma'). Sonst sah die
+    Dublettensuche ein unmarkiert gebliebenes Altabo nicht und schloss den
+    Alarm der Migration gleich wieder."""
+    from betrieb import alarm, alarm_schliessen
+    ref = f"{coll.name}.{name}"
+    keys = [(f, 1) for f in felder]
+    try:
+        dubletten = await coll.aggregate([
+            {"$match": pruef_filter or filter_},
+            {"$group": {"_id": {f: f"${f}" for f in felder}, "n": {"$sum": 1}}},
+            {"$match": {"n": {"$gt": 1}}}, {"$limit": 20}]).to_list(20)
+        if dubletten:
+            beispiele = ", ".join(
+                "/".join(str(d["_id"].get(f)) for f in felder) for d in dubletten)
+            log.error("ensure_indexes: %s: Dubletten vorhanden (%s) — Unique-Index NICHT "
+                      "angelegt, nichts automatisch geaendert. %s", ref, beispiele, hinweis)
+            await alarm(db, alarm_typ, ref=alarm_ref, beispiele=beispiele,
+                        gruppen=len(dubletten), hinweis=hinweis)
+            return False
+        vorhanden = (await coll.index_information()).get(name)
+        if vorhanden is not None and (
+                not vorhanden.get("unique")
+                or vorhanden.get("partialFilterExpression") != filter_
+                or [(f, int(r)) for f, r in vorhanden.get("key", [])] != keys):
+            from pymongo.errors import OperationFailure
+            try:
+                await coll.drop_index(name)
+            except OperationFailure as exc:
+                if exc.code != 27:              # IndexNotFound: ein anderer war schneller
+                    raise
+        await coll.create_index(keys, unique=True, name=name,
+                                partialFilterExpression=filter_)
+    except Exception as exc:  # noqa: BLE001
+        log.error("ensure_indexes: %s nicht anlegbar: %s", ref, exc)
+        try:
+            await alarm(db, "unique_index_fehlt_weich", ref=ref, fehler=str(exc)[:300])
+        except Exception:  # noqa: BLE001
+            log.exception("Alarm unique_index_fehlt_weich fuer %s nicht gesetzt", ref)
+        return False
+    try:
+        await alarm_schliessen(db, alarm_typ, ref=alarm_ref)
+        await alarm_schliessen(db, "unique_index_fehlt_weich", ref=ref)
+    except Exception:  # noqa: BLE001
+        pass
+    return True
+
+
+#: Rollenprüfung 22.09.2026 (RP-083/RP-182): Stati, in denen ein Inserat zu
+#: seinem Fahrzeug "aktiv" ist — dieselbe Liste wie routes.resale._AKTIV (hier
+#: kopiert, damit indizes.py kein Routenmodul laden muss; ein Test vergleicht
+#: beide Listen).
+INSERAT_AKTIV = ("entwurf", "verkaufsbereit", "veroeffentlicht", "reserviert",
+                 "zurueckgezogen")
+
+
+async def inserat_je_fahrzeug_unique_index(db) -> bool:
+    """Rollenprüfung 22.09.2026 (RP-083/RP-182): hoechstens EIN aktives
+    Inserat je Fahrzeug und Firma. Zwei parallele create_draft-Aufrufe
+    legten vorher zwei Inserate an (zwei Reservierungen, zwei Verkaeufe
+    desselben Autos moeglich). resale.create_draft serialisiert inzwischen
+    selbst und faengt den DuplicateKeyError dieses Index ab (vorhandenes
+    Inserat zurueck); der Index ist der Rueckhalt fuer alle anderen Wege.
+    Nur Inserate MIT Fahrzeug (vehicle_id als String) zaehlen. Altdubletten:
+    Alarm inserat_dubletten_je_fahrzeug, nichts wird geloescht — der Haendler
+    bzw. Betreiber entscheidet, welches Inserat bleibt."""
+    return await _weicher_teilindex(
+        db, db.resale_listings, "ein_aktives_je_fahrzeug", ["dealer_id", "vehicle_id"],
+        {"status": {"$in": list(INSERAT_AKTIV)}, "vehicle_id": {"$type": "string"}},
+        "inserat_dubletten_je_fahrzeug", "resale_listings",
+        "Je Fahrzeug nur ein aktives Inserat: die ueberzaehligen im Inserats-Editor "
+        "loeschen (oder auf 'geloescht' setzen), beim naechsten Start greift der Index.")
+
+
+async def firmen_abo_unique_index(db) -> bool:
+    """Rollenprüfung 22.09.2026 (RP-046/RP-145 Nr. 3, RP-152): hoechstens EIN
+    aktives FIRMEN-Abo je Firma (Abo ohne subject_user_id, Kennzeichen
+    art='firma' — admin_create_user, der plan_type-Pfad und der Betreiber-
+    Seed setzen es, Migration 11 traegt es im Altbestand nach). Vorher legte
+    der plan_type-Pfad ein zweites aktives Firmen-Abo an, und das juengste
+    (evtl. kuerzere) verdraengte still das aeltere. Der Index
+    ein_aktives_abo_je_konto nimmt Firmen-Abos ausdruecklich aus.
+    Weich: Altbestand mit mehreren aktiven Firmen-Abos bleibt unveraendert
+    (Geld- und Zugangsdaten), Alarm mehrfache_aktive_firmen_abos.
+
+    Rollenprüfung 22.09.2026 (Review): Die Dublettensuche zaehlt auch
+    UNMARKIERTE Firmen-Abos (ohne subject_user_id, wie Migration 11 sie
+    erkennt). Vorher sah sie nur art='firma': Migration 11 liess bei zwei
+    aktiven Firmen-Abos das zweite unmarkiert und meldete den Konflikt, der
+    naechste Indexlauf (wartende Worker, Start von prod1) fand keine
+    Dublette und schloss den Alarm sofort wieder — die Firma behielt still
+    zwei aktive Abos. Jetzt bleibt der Alarm offen, bis der Altbestand
+    bereinigt ist; mit Dubletten wird der Index (wie bisher) nicht angelegt,
+    ein schon stehender bleibt."""
+    return await _weicher_teilindex(
+        db, db.subscriptions, "ein_aktives_firmen_abo_je_firma", ["dealer_id"],
+        {"status": "active", "art": "firma"},
+        "mehrfache_aktive_firmen_abos", "subscriptions",
+        "Aeltere aktive Firmen-Abos auf status=ersetzt setzen, beim naechsten "
+        "Start greift der Index.",
+        pruef_filter={"status": "active",
+                      "$or": [{"art": "firma"},
+                              {"subject_user_id": {"$exists": False}},
+                              {"subject_user_id": None}]})
 
 
 async def plan_requests_unique_indizes(db) -> None:

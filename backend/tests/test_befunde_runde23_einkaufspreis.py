@@ -148,9 +148,11 @@ def test_01_vor_abholung_sieht_jeder_sucher_nur_seinen_vertragspreis(welt):
     assert akte_a["einkaufspreis"] == {"preis": PREIS_A, "quelle": "vertrag", "kaufvorgang_id": kv_a}
     assert akte_b["einkaufspreis"] == {"preis": PREIS_B, "quelle": "vertrag", "kaufvorgang_id": kv_b}
     assert [k["id"] for k in akte_b["kaufvorgaenge"]] == [kv_b]
-    # Chef unveraendert: firmenweit (juengster offener Vertrag) — wie bisher
+    # Chef: firmenweit. Rollenprüfung 22.09.2026 (RP-057 b): zwei offene
+    # Vertraege verschiedener Sucher mit VERSCHIEDENEN Preisen — vorher galt
+    # der zuletzt geaenderte (Zufall), jetzt kein Preis bis zur Abholung.
     assert akte_chef["einkaufspreis"] == firmenweit
-    assert firmenweit == {"preis": PREIS_B, "quelle": "vertrag", "kaufvorgang_id": kv_b}
+    assert firmenweit == {"preis": None, "quelle": "mehrdeutig", "kaufvorgang_id": None}
     assert {k["id"] for k in akte_chef["kaufvorgaenge"]} == {kv_a, kv_b}
 
 

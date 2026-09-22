@@ -1,7 +1,7 @@
 import { fassungMithoeren } from "@/lib/fassung";
 import { vergleichLeeren } from "@/lib/vergleichSpeicher";
 import axios from "axios";
-import { TOKEN_APP, tokenLesen, tokenLoeschen } from "@/lib/sitzung";
+import { TOKEN_APP, tokenErneuern, tokenLesen, tokenLoeschen } from "@/lib/sitzung";
 import { schreiben, sitzungsSpeicher } from "@/lib/speicher";
 import { blobOeffnen } from "@/lib/dateiOeffnen";
 
@@ -67,6 +67,21 @@ export function gehoertZumAktuellenToken(config, aktuell) {
   const gesendet = String(config?.headers?.Authorization || "");
   if (!gesendet) return true;      // ohne Token gesendet: nichts zu schuetzen
   return gesendet === `Bearer ${aktuell || ""}`;
+}
+
+/**
+ * Loest eine 401 auf diesem Weg die Abmeldung samt Umleitung aus?
+ *
+ * Rollenprüfung 22.09.2026 (RP-012/RP-111/RP-262): Beim Abmelden mit einer
+ * schon beendeten Sitzung antwortet POST /auth/logout mit 401. Der Abfaenger
+ * merkte dann "Sitzung beendet" vor und leitete hart auf /login um, waehrend
+ * logout() und der Aufrufer selbst weiterleiteten — doppelte Umleitung und
+ * eine falsche Meldung, obwohl der Nutzer sich selbst abgemeldet hat. Anmelden
+ * (/auth/login, /auth/login/mfa) und Abmelden erledigen ihren Rest selbst.
+ */
+export function loestAbmeldungAus(url) {
+  const pfad = String(url || "").split("?")[0];
+  return !/\/auth\/(login|logout)(\/|$)/.test(pfad);
 }
 
 /**
@@ -163,8 +178,35 @@ export function wiederholenNachMs(err) {
   return (Number.isFinite(sek) && sek > 0 ? Math.min(sek, 30) : 3) * 1000;
 }
 
+/**
+ * Rollenprüfung 22.09.2026 (RP-546): gleitende Sitzung. Bringt eine
+ * erfolgreiche Antwort die Kopfzeile `X-Neues-Token` mit (Restlaufzeit unter
+ * 2 Tagen, backend/auth.token_erneuern), wird das neue Token abgelegt — aber
+ * nur, wenn die Anfrage mit dem Token gesendet wurde, das GERADE gilt. Eine
+ * verspätete Antwort einer früheren Anmeldung (oder eine Anfrage mit fremdem
+ * Token, z. B. Käufer/Fahrer) darf die aktuelle Anmeldung nie ersetzen
+ * (gleiche Regel wie gehoertZumAktuellenToken, Nr. 39/40).
+ * Rein exportiert (mit `key`), damit Käufer- und Fahrer-Instanzen dieselbe
+ * Regel nutzen können und es sich prüfen lässt. Wirft nie.
+ */
+export function neuesTokenUebernehmen(r, key = TOKEN_APP) {
+  try {
+    const h = r?.headers;
+    const kopf = (typeof h?.get === "function" ? h.get("x-neues-token") : null)
+      ?? h?.["x-neues-token"] ?? h?.["X-Neues-Token"];
+    if (!kopf) return false;
+    const aktuell = tokenLesen(key);
+    if (!aktuell) return false;
+    const gesendet = String(r?.config?.headers?.Authorization || "");
+    if (gesendet !== `Bearer ${aktuell}`) return false;
+    return tokenErneuern(key, aktuell, String(kopf));
+  } catch {
+    return false;
+  }
+}
+
 api.interceptors.response.use(
-  (r) => r,
+  (r) => { neuesTokenUebernehmen(r, TOKEN_APP); return r; },
   async (err) => {
     await blobFehlerLesbar(err);
     if (darfWiederholen(err)) {
@@ -199,7 +241,7 @@ api.interceptors.response.use(
         // bleibt bestehen (Nr. 39/40).
         return Promise.reject(err);
       }
-      if (!url.includes("/auth/login")) {
+      if (loestAbmeldungAus(url)) {
         tokenLoeschen(TOKEN_APP);
         const pfad = window.location.pathname;
         const imBereich = pfad.startsWith("/app") || pfad.startsWith("/admin");
@@ -262,10 +304,52 @@ export const errMsg = (err, fallback = "Ein Fehler ist aufgetreten") => {
   const d = err?.response?.data?.detail;
   if (typeof d === "string") return d;
   if (Array.isArray(d)) {
-    const parts = d.map((it) => (typeof it === "string" ? it
-      : (it?.msg || JSON.stringify(it)).replace(/^Value error, /, "")));
+    const parts = d.map(validierungsText);
     return parts.filter(Boolean).join(" · ") || fallback;
   }
-  if (d && typeof d === "object") return d.msg || JSON.stringify(d);
+  if (d && typeof d === "object") return validierungsText(d) || fallback;
   return err?.message || fallback;
 };
+
+// Rollenprüfung 22.09.2026 (RP-036/RP-286): deutsche Namen der Felder, die in
+// Längenfehlern am häufigsten vorkommen. Unbekannte Felder bleiben, wie sie sind.
+const FELDNAMEN = {
+  description: "Beschreibung", title: "Titel", notes: "Notizen", notiz: "Notiz",
+  location: "Standort", label: "Bezeichnung", costs: "Kosten", features: "Ausstattung",
+  known_defects: "Bekannte Mängel", message: "Nachricht", nachricht: "Nachricht",
+  grund: "Grund", name: "Name", company_name: "Firmenname", contact_person: "Ansprechpartner",
+  email: "E-Mail", phone: "Telefon", address: "Adresse", city: "Ort", zip_code: "PLZ",
+  default_terms: "Vertragsbedingungen", agb: "AGB",
+};
+
+/**
+ * Ein Eintrag einer FastAPI-422-Liste als deutscher Satz.
+ *
+ * Rollenprüfung 22.09.2026 (RP-036/RP-286): Längenfehler kamen roh als
+ * englische Pydantic-Meldung an ("String should have at most 500 characters").
+ * Jetzt: "Beschreibung: höchstens 500 Zeichen". Das Feld ist der letzte
+ * Name in `loc` (Listen-Indizes und "body" zählen nicht). Alles andere wie
+ * bisher über `msg`. Rein exportiert, damit es sich prüfen lässt.
+ */
+export function validierungsText(it) {
+  if (typeof it === "string") return it;
+  if (!it || typeof it !== "object") return "";
+  const typ = String(it.type || "");
+  const loc = Array.isArray(it.loc) ? it.loc : [];
+  const roh = [...loc].reverse().find(
+    (t) => typeof t === "string" && !["body", "query", "path"].includes(t));
+  const feld = roh ? (FELDNAMEN[roh] || roh) : "";
+  const mit = (satz) => (feld ? `${feld}: ${satz}` : satz.charAt(0).toUpperCase() + satz.slice(1));
+  const max = it.ctx?.max_length;
+  const min = it.ctx?.min_length;
+  if (typ === "string_too_long" && max != null) return mit(`höchstens ${max} Zeichen`);
+  if (typ === "too_long" && max != null) return mit(`höchstens ${max} Einträge`);
+  if (typ === "string_too_short" && min != null) {
+    return Number(min) <= 1 ? mit("darf nicht leer sein") : mit(`mindestens ${min} Zeichen`);
+  }
+  // Gleicher Wortlaut wie backend/server.py _meldung_deutsch (Listen).
+  if (typ === "too_short" && min != null) {
+    return Number(min) <= 1 ? mit("mindestens ein Eintrag") : mit(`mindestens ${min} Einträge`);
+  }
+  return String(it.msg || JSON.stringify(it)).replace(/^Value error, /, "");
+}

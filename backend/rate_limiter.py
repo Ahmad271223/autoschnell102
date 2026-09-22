@@ -12,10 +12,12 @@ Usage:
 import ipaddress
 import logging
 import os
+import re
 import time
 from collections import defaultdict
 from pathlib import Path
 from threading import Lock
+from typing import Optional
 
 # .env selbst laden — der Schalter darf nicht davon abhängen, in welcher
 # Reihenfolge die Module importiert werden (sonst liest er den Default,
@@ -452,7 +454,42 @@ def ip_merkwert(ip: str) -> str:
                     hashlib.sha256).hexdigest()[:16]
 
 
-async def konto_gesperrt(kennung: str, ip: str, konto=None) -> bool:
+# Rollenpruefung 22.09.2026 (RP-557): "bekanntes Geraet". Ein Angreifer mit
+# EINER IP konnte jede (fortlaufende) Kontonummer — auch den Betreiber — fuer
+# alle NEUEN IPs sperren: 30 Fehlversuche je 15 Minuten halten die Sperre.
+# Getroffen hat das vor allem Fahrer und Sucher im Mobilnetz (wechselnde IP).
+# Jetzt zaehlt zusaetzlich zur IP ein zufaelliger Geraete-Schluessel, den das
+# Geraet nach der ersten erfolgreichen Anmeldung bekommt und bei jeder
+# Anmeldung mitschickt: am Konto liegt nur sein HMAC (hoechstens 5 Geraete).
+# Ein bekanntes Geraet wird wie eine bekannte IP behandelt (Sperre erst beim
+# Dreifachen der Schwelle). Den Schluessel kennt nur das Geraet selbst — ein
+# Angreifer kann ihn weder erraten noch sich selbst "bekannt" machen, ohne das
+# Passwort zu kennen.
+GERAET_ID_MUSTER = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
+_BEKANNTE_GERAETE_MAX = 5
+
+
+def geraet_id_gueltig(wert) -> Optional[str]:
+    """Geraete-Schluessel aus der Anfrage oder None (Form falsch/fehlt)."""
+    if isinstance(wert, str) and GERAET_ID_MUSTER.match(wert.strip()):
+        return wert.strip()
+    return None
+
+
+def geraet_id_neu() -> str:
+    import secrets
+    return secrets.token_urlsafe(24)          # 32 Zeichen, passt ins Muster
+
+
+def geraet_merkwert(geraet_id: str) -> str:
+    """HMAC des Geraete-Schluessels (kein Klartext am Konto), 24 Hex-Zeichen.
+    Eigener Praefix, damit der Wert nie mit einem IP-Merkwert kollidiert."""
+    return ip_merkwert("geraet:" + (geraet_id or ""))[:16] + \
+        ip_merkwert("geraet2:" + (geraet_id or ""))[:8]
+
+
+async def konto_gesperrt(kennung: str, ip: str, konto=None,
+                         geraet_id: Optional[str] = None) -> bool:
     """True = Anmeldung fuer diese Kennung von dieser IP vorerst gesperrt.
     VOR bcrypt rufen. Liest nur (zaehlt nicht)."""
     if not _RATE_LIMIT_ENABLED or _LOGIN_KONTO_LIMIT <= 0:
@@ -463,10 +500,15 @@ async def konto_gesperrt(kennung: str, ip: str, konto=None) -> bool:
     if not k:
         return False
     stand = await login_konto_limiter.stand(k)
-    if konto and ip and ip_merkwert(ip) in (konto.get("login_ips_bekannt") or []):
+    bekannt = bool(konto and ip and ip_merkwert(ip) in (konto.get("login_ips_bekannt") or []))
+    geraet = geraet_id_gueltig(geraet_id)
+    if not bekannt and konto and geraet:
+        bekannt = geraet_merkwert(geraet) in (konto.get("login_geraete_bekannt") or [])
+    if bekannt:
         # Nachpruefung 15.09.2026 (Anmeldung Nr. 6): eine bekannte IP (Firmen-
         # NAT) entschaerft die Kontosperre, hebt sie aber nicht auf — ab dem
         # Dreifachen der Schwelle ist auch das eigene Netz gesperrt.
+        # Rollenpruefung 22.09.2026 (RP-557): ebenso ein bekanntes Geraet.
         return stand >= _LOGIN_KONTO_LIMIT * _BEKANNTE_IP_FAKTOR
     return stand >= _LOGIN_KONTO_LIMIT
 
@@ -506,6 +548,28 @@ async def bekannte_ip_merken(db, sammlung: str, konto_id: str, ip: str) -> None:
             {"$push": {"login_ips_bekannt": {"$each": [wert], "$slice": -5}}})
     except Exception:
         logging.getLogger("rate_limiter").exception("Konto-Limiter: IP nicht gemerkt")
+
+
+async def bekanntes_geraet_merken(db, sammlung: str, konto_id: str,
+                                  geraet_id: Optional[str]) -> Optional[str]:
+    """Rollenpruefung 22.09.2026 (RP-557): nach vollstaendig erfolgreicher
+    Anmeldung den Geraete-Schluessel am Konto merken (HMAC, hoechstens 5,
+    aelteste fallen raus). Fehlt ein gueltiger Schluessel, wird einer
+    erzeugt. Liefert den Schluessel fuer die Antwort (das Geraet legt ihn ab)
+    oder None bei einem Fehler. Wirft nie."""
+    if not konto_id:
+        return None
+    try:
+        gid = geraet_id_gueltig(geraet_id) or geraet_id_neu()
+        wert = geraet_merkwert(gid)
+        await db[sammlung].update_one(
+            {"id": konto_id, "login_geraete_bekannt": {"$ne": wert}},
+            {"$push": {"login_geraete_bekannt": {
+                "$each": [wert], "$slice": -_BEKANNTE_GERAETE_MAX}}})
+        return gid
+    except Exception:
+        logging.getLogger("rate_limiter").exception("Konto-Limiter: Geraet nicht gemerkt")
+        return None
 
 # Slightly more lenient for the driver app (mobile clients can have flaky
 # connectivity and may retry quickly), but still bounded.

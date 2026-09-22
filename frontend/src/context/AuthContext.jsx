@@ -1,11 +1,65 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { aboNeuLadenAnmelden, api } from "@/lib/api";
-import { sitzungsSpeicher } from "@/lib/speicher";
+import { lesen, lokalerSpeicher, schreiben, sitzungsSpeicher } from "@/lib/speicher";
 import { vergleichLeeren } from "@/lib/vergleichSpeicher";
 import { TOKEN_APP, TOKEN_KAEUFER, tokenLesen, tokenLoeschen, tokenSetzen } from "@/lib/sitzung";
 import { verbindungsGrund } from "@/components/VerbindungsFehler";
 
 const AuthCtx = createContext(null);
+
+/*
+ * Rollenpruefung 22.09.2026 (RP-557): "bekanntes Geraet". Nach der ersten
+ * erfolgreichen Anmeldung schickt der Server einen zufaelligen Geraete-
+ * Schluessel (geraet_id); das Geraet legt ihn ab und schickt ihn bei jeder
+ * Anmeldung mit. Ein bekanntes Geraet ist — wie eine bekannte IP — von der
+ * Konto-Sperre nach vielen Fehlversuchen entlastet: ein Angreifer kann so ein
+ * Konto (auch das des Betreibers) nicht mehr fuer ALLE neuen IPs aussperren,
+ * etwa fuer Sucher im Mobilnetz. Der Schluessel gilt fuer alle Konten dieses
+ * Browsers; am Konto liegt nur sein HMAC. Kein Speicher (Privatmodus) = wie
+ * bisher, nur ohne Entlastung.
+ */
+export const GERAET_SCHLUESSEL = "as_geraet_id";
+const GERAET_MUSTER = /^[A-Za-z0-9_-]{16,64}$/;
+
+export function geraetIdLesen() {
+  const wert = lesen(lokalerSpeicher(), GERAET_SCHLUESSEL, "");
+  return GERAET_MUSTER.test(wert || "") ? wert : undefined;
+}
+
+export function geraetIdMerken(antwort) {
+  const wert = antwort?.geraet_id;
+  if (typeof wert === "string" && GERAET_MUSTER.test(wert)) {
+    schreiben(lokalerSpeicher(), GERAET_SCHLUESSEL, wert);
+  }
+}
+
+/*
+ * Rollenprüfung 22.09.2026 (Review): Zu welcher SITZUNG gehoert ein Token?
+ * Seit RP-546 ersetzt jede Antwort mit X-Neues-Token (lib/api ->
+ * sitzung.tokenErneuern) das Token dieses Tabs durch ein frisches Token
+ * DERSELBEN Sitzung — gleiches Konto (sub), gleiche Sitzungs-ID (sid). Die
+ * Regel "anderes Token = andere Anmeldung" warf danach beim naechsten
+ * Netzaussetzer die laufende Seite weg ("Keine Verbindung" im Vollbild).
+ * Verglichen wird deshalb die Sitzung aus dem Token-Inhalt. Der Inhalt wird
+ * NICHT geprueft — er dient nur dem Wiedererkennen der eigenen Sitzung, nie
+ * einer Berechtigung (die prueft allein der Server). Ist das Token nicht
+ * lesbar, zaehlt wie bisher das Token selbst.
+ */
+export function sitzungVonToken(token) {
+  if (!token) return null;
+  try {
+    const teil = String(token).split(".")[1] || "";
+    const b64 = teil.replace(/-/g, "+").replace(/_/g, "/");
+    const inhalt = JSON.parse(atob(b64 + "===".slice((b64.length + 3) % 4)));
+    const { sub, sid } = inhalt || {};
+    if (typeof sub === "string" && sub && typeof sid === "string" && sid) {
+      return `s:${sub}|${sid}`;
+    }
+  } catch {
+    /* nicht lesbar: das Token selbst vergleichen */
+  }
+  return `t:${token}`;
+}
 
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
@@ -26,7 +80,10 @@ export const AuthProvider = ({ children }) => {
   // inzwischen geaendert (login() mit anderem Konto im selben Tab), werden
   // die alten Daten verworfen, damit nicht Konto A mit dem Token von B
   // stehen bleibt.
-  const geladenFuerToken = useRef(null);
+  // Rollenprüfung 22.09.2026 (Review): gemerkt wird die SITZUNG des Tokens
+  // (sitzungVonToken) — ein verlaengertes Token derselben Sitzung ist keine
+  // andere Anmeldung.
+  const geladenFuerSitzung = useRef(null);
   // Pruefbericht 20.09.2026 (B2): Warum hat der letzte refresh() keinen
   // Nutzer geliefert? login() braucht das — vorher meldete die Anmeldung
   // "Willkommen zurueck", obwohl /auth/me die Sitzung gerade abgelehnt
@@ -37,7 +94,7 @@ export const AuthProvider = ({ children }) => {
   const refresh = useCallback(async () => {
     const token = tokenLesen(TOKEN_APP);
     if (!token) {
-      geladenFuerToken.current = null;
+      geladenFuerSitzung.current = null;
       setUser(null);
       setDealer(null);
       setSubscription(null);
@@ -47,7 +104,7 @@ export const AuthProvider = ({ children }) => {
     }
     try {
       const { data } = await api.get("/auth/me");
-      geladenFuerToken.current = token;
+      geladenFuerSitzung.current = sitzungVonToken(token);
       letzteAblehnung.current = "";
       setUser(data.user);
       setDealer(data.dealer);
@@ -74,15 +131,16 @@ export const AuthProvider = ({ children }) => {
         setVerbindungsfehler(null);
       } else {
         setVerbindungsfehler(verbindungsGrund(e));
-        // Schon geladen und derselbe Token -> Seite laeuft weiter (siehe
-        // geladenFuerToken). Nur beim ersten Laden bleibt user null und
-        // ProtectedRoute zeigt die Meldung.
-        if (geladenFuerToken.current && geladenFuerToken.current === tokenLesen(TOKEN_APP)) {
+        // Schon geladen und dieselbe Sitzung (auch mit verlaengertem Token)
+        // -> Seite laeuft weiter (siehe geladenFuerSitzung). Nur beim ersten
+        // Laden bleibt user null und ProtectedRoute zeigt die Meldung.
+        if (geladenFuerSitzung.current
+            && geladenFuerSitzung.current === sitzungVonToken(tokenLesen(TOKEN_APP))) {
           setLoading(false);
           return null;
         }
       }
-      geladenFuerToken.current = null;
+      geladenFuerSitzung.current = null;
       setUser(null);
       setDealer(null);
       setSubscription(null);
@@ -115,7 +173,9 @@ export const AuthProvider = ({ children }) => {
   // Benutzername des Betreibers). Konten legt nur der Betreiber an — die
   // fruehere register()-Funktion gibt es nicht mehr.
   const login = async (kennung, password) => {
-    const { data } = await api.post("/auth/login", { kontonummer: kennung, password });
+    const { data } = await api.post("/auth/login",
+      { kontonummer: kennung, password, geraet_id: geraetIdLesen() });
+    geraetIdMerken(data);
     if (data?.mfa_erforderlich) {
       // Zwei-Faktor (Admin/Super-Admin): noch kein Sitzungs-Token — die
       // Login-Seite fragt jetzt den Code aus der Authenticator-App ab.
@@ -134,7 +194,9 @@ export const AuthProvider = ({ children }) => {
     return data.user;
   };
   const loginMfa = async (mfaToken, code) => {
-    const { data } = await api.post("/auth/login/mfa", { mfa_token: mfaToken, code });
+    const { data } = await api.post("/auth/login/mfa",
+      { mfa_token: mfaToken, code, geraet_id: geraetIdLesen() });
+    geraetIdMerken(data);
     tokenSetzen(TOKEN_APP, data.token, { nurSitzung: !!data.user?.is_super_admin });
     await sitzungPruefen();
     return data.user;
@@ -149,7 +211,7 @@ export const AuthProvider = ({ children }) => {
     // Zugriff — der blanke window.sessionStorage wirft bei gesperrtem
     // Speicher, und dann haette das Abmelden selbst abgebrochen.
     vergleichLeeren(sitzungsSpeicher());
-    geladenFuerToken.current = null;
+    geladenFuerSitzung.current = null;
     setUser(null);
     setDealer(null);
     setSubscription(null);

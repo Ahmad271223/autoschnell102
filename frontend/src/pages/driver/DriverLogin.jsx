@@ -2,12 +2,13 @@ import { neueFassungLaden } from "@/lib/fassung";
 import { useEffect, useState } from "react";
 import { Link, Navigate, useNavigate, useSearchParams } from "react-router-dom";
 import { lesen, sitzungsSpeicher } from "@/lib/speicher";
-import { useDriver } from "@/context/DriverContext";
+import { fahrerRuecksprungHolen, useDriver } from "@/context/DriverContext";
 import { TOKEN_FAHRER, anmeldeartVormerken } from "@/lib/sitzung";
 import { errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import { Truck, Hash, Lock } from "lucide-react";
 import InstallPWAButton from "@/components/InstallPWAButton";
+import RechtsLinks from "@/components/RechtsLinks";
 
 export default function DriverLogin() {
   const { driver, ready, login } = useDriver();
@@ -37,9 +38,13 @@ export default function DriverLogin() {
     try {
       await login(kennung.trim(), password);
       toast.success("Willkommen zurück!");
+      // Rollenprüfung 22.09.2026 (RP-546): kam die Abmeldung mitten im
+      // Abholprotokoll, dorthin zurück (Eingaben/Unterschriften kommen aus
+      // der Sicherung im Tab wieder).
+      const ziel = fahrerRuecksprungHolen() || "/fahrer";
       // Runde 31: Gibt es inzwischen eine neue Fassung, jetzt vollstaendig
       // laden — direkt nach der Anmeldung geht dabei nichts verloren.
-      if (!neueFassungLaden("/fahrer")) nav("/fahrer");
+      if (!neueFassungLaden(ziel)) nav(ziel);
     } catch (err) {
       toast.error(errMsg(err, "Login fehlgeschlagen"));
     } finally {
@@ -124,6 +129,9 @@ export default function DriverLogin() {
             <InstallPWAButton />
           </div>
         </div>
+        {/* Rollenprüfung 22.09.2026 (RP-563): Impressum, Datenschutz und AGB
+            auch vor der Anmeldung erreichbar (§ 5 DDG, Art. 13 DSGVO). */}
+        <RechtsLinks className="mt-8" />
       </div>
     </div>
   );

@@ -316,7 +316,11 @@ def test_160_161_fahrer_beweis_ohne_deckel_und_mit_echter_annahme():
     assert ".limit(50)" not in fahrer, "50-Fahrzeuge-Deckel sperrt echte Termine aus (161)"
     assert '"$nin": ["offen", "abgelehnt"]' not in fahrer, \
         "unbekannte Alt-Zuteilungen kommen durch (160)"
-    assert "ZUTEILUNG_ANGENOMMEN" in fahrer and "unterlagen_zugriff_oder_404" in fahrer
+    # Rollenpruefung 22.09.2026 (RP-390): die Frist prueft jetzt
+    # drivers._erste_fahrt_mit_zugriff je Kandidat (ruft
+    # unterlagen_zugriff_oder_404 selbst auf).
+    assert "ZUTEILUNG_ANGENOMMEN" in fahrer and (
+        "unterlagen_zugriff_oder_404" in fahrer or "_erste_fahrt_mit_zugriff(" in fahrer)
 
 
 def test_162_datumslose_fahrten_werden_sortiert_gekappt():

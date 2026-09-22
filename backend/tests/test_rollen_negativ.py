@@ -228,6 +228,11 @@ def test_03_sucher_loescht_keine_fremden_vertraege(welt):
     # Umbau Kaufvorgaenge (09.09.2026): das Fahrzeug ist das gemeinsame
     # Inserat der Firma — der Sucher legt fuer dasselbe Auto seinen EIGENEN
     # Vertrag (eigener Kaufvorgang) an und darf nur diesen loeschen.
+    # Rollenpruefung 22.09.2026 (RP-113): ohne eigenen Vergleich kein Vertrag
+    # (404); der Vergleich traegt ihn als Mitbearbeiter ein.
+    r = requests.post(f"{API}/contracts", headers=welt["HS"], json=basis, timeout=90)
+    assert r.status_code == 404, r.text[:200]
+    assert _vehicle_for(welt["HS"]) == welt["vehicle_id"]
     r = requests.post(f"{API}/contracts", headers=welt["HS"], json=basis, timeout=90)
     assert r.status_code == 200, r.text[:200]
     eigener = r.json()["id"]
@@ -474,15 +479,20 @@ def test_14_inland_export_manuelle_suche_und_autoscout(welt):
     r = requests.put(f"{API}/dealer/settings", headers=welt["HA"], json={
         "export_rules": {"country": {"mode": "all"}, "damage": {"mode": "ignore"},
                          "first_registration": {"mode": "any"},
-                         "mileage": {"mode": "ignore"}, "seller": {"mode": "dealer"}},
-        "active_profile": "export"}, timeout=30)
+                         "mileage": {"mode": "ignore"}, "seller": {"mode": "dealer"}}},
+                     timeout=30)
+    assert r.status_code == 200, r.text[:200]
+    # Rollenpruefung 22.09.2026 (RP-005, Welle 2): das Profil schaltet nur
+    # noch PUT /dealer/active-profile um (PUT /dealer/settings ignoriert es).
+    r = requests.put(f"{API}/dealer/active-profile", headers=welt["HA"],
+                     json={"active_profile": "export"}, timeout=30)
     assert r.status_code == 200, r.text[:200]
     r = requests.post(f"{API}/manual/search", headers=welt["HA"],
                       json={"make": "VW", "model": "Golf"}, timeout=30)
     assert r.status_code == 200, r.text[:200]
     url = r.json()["autoscout_url"]
     assert "cy=" not in url and "damaged_listing" not in url and "custtype=D" in url, url
-    r = requests.put(f"{API}/dealer/settings", headers=welt["HA"],
+    r = requests.put(f"{API}/dealer/active-profile", headers=welt["HA"],
                      json={"active_profile": "inland"}, timeout=30)
     assert r.status_code == 200
     r = requests.post(f"{API}/manual/search", headers=welt["HA"],

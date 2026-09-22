@@ -24,3 +24,24 @@ export function wurdeZusammengefuehrt(agb, bedingungen) {
   if (!a) return false;
   return !String(bedingungen ?? "").includes(a);
 }
+
+/**
+ * Rollenprüfung 22.09.2026 (RP-423): Leere Vertragsbedingungen bedeuten
+ * "es gilt der Standardtext" (vier Klauseln). zusammenfuehren(agb, "")
+ * lieferte dann NUR den alten AGB-Text — beim nächsten Speichern ersetzte er
+ * den Standardtext, die vier Klauseln waren still aus jedem neuen Vertrag
+ * verschwunden. Gibt es noch AGB, ist bei leerem Feld deshalb der
+ * Standardtext die Grundlage, und die AGB kommen darunter.
+ *
+ * Liefert { text, zusammengefuehrt, standardGenutzt }.
+ */
+export function vertragstextFuerFormular(agb, bedingungen, standard) {
+  const a = String(agb ?? "").trim();
+  const b = String(bedingungen ?? "").trim();
+  const basis = (!b && a) ? String(standard ?? "").trim() : b;
+  return {
+    text: zusammenfuehren(a, basis),
+    zusammengefuehrt: wurdeZusammengefuehrt(a, basis),
+    standardGenutzt: Boolean(!b && a && basis),
+  };
+}

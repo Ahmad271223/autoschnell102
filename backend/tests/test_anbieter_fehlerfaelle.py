@@ -8,7 +8,7 @@ AutoScout24 nicht wie erwartet antworten:
   - Anbieter-Limit (429)              -> "spaeter erneut"
   - Zeitueberschreitung / Netzfehler  -> "antwortet nicht"
   - Anbieter-5xx / kaputte Antwort    -> "voruebergehend gestoert"
-  - leeres Ergebnis                   -> wie bisher None (Inserat weg)
+  - leeres Ergebnis                   -> ListingGone (Inserat weg, RP-202 22.09.2026)
   - Tagesbudget erreicht              -> Text mit Limit, Zaehler zurueckgenommen
   - Alarm-Drosselung: gleicher Fehler nur einmal je Stunde als Alarm
 
@@ -117,13 +117,18 @@ def test_zeitueberschreitung_und_netzfehler(apify):
     assert e.value.art == anbieter_fehler.ART_AUSFALL and "gestört" in str(e.value)
 
 
-def test_kaputte_antwort_ist_ausfall_leere_antwort_bleibt_none(apify):
+def test_kaputte_antwort_ist_ausfall_leere_antwort_ist_inserat_weg(apify):
     _FakeClient.antwort = _Antwort(200, "<html>", daten=None)      # kein JSON
     with pytest.raises(anbieter_fehler.AnbieterFehler) as e:
         _mobile()
     assert e.value.art == anbieter_fehler.ART_AUSFALL
+    # Rollenprüfung 22.09.2026 (RP-202/RP-353): leere Liste = Inserat weg —
+    # ListingGone statt None (None wurde zu "Technischer Fehler", drei
+    # bezahlte Wiederholungen und ein zurueckgebuchtes Tageslimit).
     _FakeClient.antwort = _Antwort(200, "[]", daten=[])            # Inserat weg
-    assert _mobile() is None
+    with pytest.raises(anbieter_fehler.ListingGone) as weg:
+        _mobile()
+    assert "mobile.de" in str(weg.value) and "nicht mehr online" in str(weg.value)
 
 
 def test_autoscout_gleiche_behandlung(apify):
@@ -268,12 +273,21 @@ def test_warnung_meldet_einmal_und_bremst_nicht(monkeypatch):
 def test_antwort_ohne_inhalt_heisst_inserat_weg(apify):
     """Echter Lauf auf prod1 (09/2026): fuer eine erfundene Nummer liefert
     Apify EIN Element ohne Daten. Das darf kein leeres Fahrzeug werden,
-    sondern muss wie ein verschwundenes Inserat behandelt werden (None)."""
+    sondern muss wie ein verschwundenes Inserat behandelt werden.
+    Rollenprüfung 22.09.2026 (RP-202/RP-353): als ListingGone (vorher None ->
+    RuntimeError -> drei bezahlte Wiederholungen, "Technischer Fehler")."""
     _FakeClient.antwort = _Antwort(200, "[{}]", daten=[{}])
-    assert _mobile() is None
+    with pytest.raises(anbieter_fehler.ListingGone):
+        _mobile()
     _FakeClient.antwort = _Antwort(200, "[{}]", daten=[{"url": "https://www.autoscout24.de/x"}])
-    assert asyncio.run(autoscout_service.fetch_autoscout_vehicle(
-        "https://www.autoscout24.de/angebote/vw-golf-abc123", "abc123")) is None
+    with pytest.raises(anbieter_fehler.ListingGone) as weg:
+        asyncio.run(autoscout_service.fetch_autoscout_vehicle(
+            "https://www.autoscout24.de/angebote/vw-golf-abc123", "abc123"))
+    assert "AutoScout24" in str(weg.value)
+    _FakeClient.antwort = _Antwort(200, "[]", daten=[])
+    with pytest.raises(anbieter_fehler.ListingGone):
+        asyncio.run(autoscout_service.fetch_autoscout_vehicle(
+            "https://www.autoscout24.de/angebote/vw-golf-abc123", "abc123"))
 
 
 def test_tageslimit_je_konto_zaehlt_alle_quellen(monkeypatch):

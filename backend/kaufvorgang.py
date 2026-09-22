@@ -271,6 +271,44 @@ async def status_setzen(kaufvorgang_id: str, status: str, *, user: Optional[dict
     return doc
 
 
+async def abholung_protokoll_belegt(appointment_id: str) -> bool:
+    """Belegt ein unterschriebenes Abholprotokoll die Abholung dieses Termins?
+
+    Phase 2 (D15): ein finales, nicht abgeloestes Protokoll.
+    Rollenprüfung 22.09.2026 (RP-075/174): ODER eine offene Korrektur-Version
+    (Entwurf/zur Freigabe/freigegeben/wird unterschrieben, mit
+    corrects_version). Eine Korrektur entsteht nur aus einer finalen Version
+    (start_correction); solange sie laeuft, ist diese abgeloest. Vorher setzte
+    der Frischabgleich den Vorgang in genau diesem Fenster auf "Abholung
+    geplant" — und "abgeholt" war danach per Hand gesperrt."""
+    if not appointment_id:
+        return False
+    if await db.pickup_protocols.count_documents(
+            {"appointment_id": appointment_id, "status": "final",
+             "superseded": {"$ne": True}}, limit=1):
+        return True
+    return bool(await db.pickup_protocols.count_documents(
+        {"appointment_id": appointment_id, "corrects_version": {"$exists": True},
+         "superseded": {"$ne": True},
+         "status": {"$in": ["entwurf", "zur_freigabe", "freigegeben", "wird_abgeschlossen"]}},
+        limit=1))
+
+
+async def fahrzeug_hat_vorgaenge(vehicle_id: Optional[str], dealer_id: str) -> bool:
+    """Rollenprüfung 22.09.2026 (RP-015/114/265): Haengen am (firmenweit
+    gemeinsamen) Fahrzeug Kaufvorgaenge — auch die eines Kollegen? Dann
+    bestimmt allein deren Zusammenfassung (fahrzeug_status_aggregieren) den
+    Lebenszyklus; ein Termin OHNE eigenen Vorgang (Terminplaner ohne Vertrag)
+    darf ihn nicht direkt setzen. Vorher schob ein Mitbearbeiter mit einem
+    eigenen Termin ohne Vertrag das Auto des Kollegen von "Abholung geplant"
+    auf "nicht abgeholt" bzw. "abgeholt". Gemeinsame Regel fuer Terminplaner,
+    Fahrer-App, Protokoll-Abschluss und Aufraeumjobs."""
+    if not vehicle_id:
+        return False
+    return bool(await db.kaufvorgaenge.count_documents(
+        {"vehicle_id": vehicle_id, "dealer_id": dealer_id}, limit=1))
+
+
 async def termin_status_uebernehmen(appt: dict, termin_status: str, *,
                                     user: Optional[dict] = None) -> bool:
     """Terminstatus auf den Kaufvorgang des Termins abbilden (abgeholt,
@@ -290,13 +328,13 @@ async def termin_status_uebernehmen(appt: dict, termin_status: str, *,
             return False
         neu = _TERMIN_ZU_STATUS.get(termin_status, "abholung_geplant")
         if kv.get("status") == "abgeholt" and neu == "abholung_geplant" and appt.get("id") \
-                and await db.pickup_protocols.count_documents(
-                    {"appointment_id": appt["id"], "status": "final",
-                     "superseded": {"$ne": True}}, limit=1):
+                and await abholung_protokoll_belegt(appt["id"]):
             # Phase 2 (2.6, D15): Wieder-Oeffnen eines abgeholten Termins mit
             # unterschriebenem Protokoll — die Abholung ist belegt, der Vorgang
             # bleibt abgeholt (eine Korrektur-Version aendert Preis/Details,
             # nicht den Kauf). Vorher fiel der Vorgang auf "Abholung geplant".
+            # Rollenprüfung 22.09.2026 (RP-075/174): auch waehrend einer
+            # laufenden Korrektur (siehe abholung_protokoll_belegt).
             neu = "abgeholt"
         if kv.get("status") == neu:
             # Runde 18: Vorgang steht schon richtig, aber die Fahrzeug-
@@ -509,6 +547,9 @@ async def einkaufspreis_vorschlag(vehicle_id: str, dealer_id: str,
       fahrzeug   — am Fahrzeug eingetragen (Abholung oder von Hand)
       abgeholt   — aus dem abgeholten Vorgang
       vertrag    — aus dem (juengsten offenen) Vertrag
+      mehrdeutig — (nur firmenweit) offene Vertraege mehrerer Konten mit
+                   verschiedenen Preisen, noch nichts abgeholt: kein Preis
+                   (Rollenprüfung 22.09.2026, RP-057 b)
       keiner     — nichts bekannt
 
     Runde 23 (11.09.2026, Befund A): mit `user_id` (Sucher) zaehlen NUR
@@ -554,11 +595,31 @@ async def einkaufspreis_vorschlag(vehicle_id: str, dealer_id: str,
     # Vorher fiel der Code ohne offenen Vorgang auf ALLE zurueck — ein
     # stornierter oder nicht abgeholter Kauf erschien dann als aktueller
     # "Vertragspreis".
-    f = await _juengster({"status": {"$in": list(OFFEN)}})
+    offen_filter = {"status": {"$in": list(OFFEN)}}
+    f = await _juengster(offen_filter)
+    if f and user_id is None and await _vertragspreise_mehrdeutig(filt, offen_filter):
+        # Rollenprüfung 22.09.2026 (RP-057 b): Firmenweit (Chef, Inserat) gab
+        # es bei Doppel-Vertraegen mehrerer Sucher mit VERSCHIEDENEN Preisen
+        # den zuletzt geaenderten Vorgang irgendeines Kontos — der Zufall
+        # entschied ueber den Einkaufspreis im Inserat und in der Akte. Welcher
+        # Kauf zustande kommt, zeigt erst die Abholung; bis dahin kein Preis.
+        return {"preis": None, "quelle": "mehrdeutig", "kaufvorgang_id": None}
     if f:
         return {"preis": f["purchase_price"], "quelle": "vertrag",
                 "kaufvorgang_id": f["id"]}
     return {"preis": None, "quelle": "keiner", "kaufvorgang_id": None}
+
+
+async def _vertragspreise_mehrdeutig(filt: Dict[str, Any], zusatz: Dict[str, Any]) -> bool:
+    """Rollenprüfung 22.09.2026 (RP-057 b): offene Vorgaenge mit Preis von
+    MEHREREN Konten und VERSCHIEDENEN Preisen? Gleicher Preis oder nur ein
+    Konto (dessen juengster Vorgang gilt wie bisher) ist nicht mehrdeutig.
+    distinct statt Liste — kein Deckel (Runde 29)."""
+    q = {**filt, "purchase_price": {"$ne": None}, **zusatz}
+    preise = await db.kaufvorgaenge.distinct("purchase_price", q)
+    if len(preise) < 2:
+        return False
+    return len(await db.kaufvorgaenge.distinct("user_id", q)) > 1
 
 
 # Runde 23 (11.09.2026, Befund A): Felder am gemeinsamen Fahrzeug, die den

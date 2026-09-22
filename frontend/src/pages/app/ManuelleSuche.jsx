@@ -58,7 +58,20 @@ export default function ManuelleSuche() {
   // Runde 11: Das aktive Regelprofil (Inland/Export) bestimmt Land,
   // Unfallwagen, Anbieter usw. der Suche — vorher stand es nirgends auf
   // dieser Seite, zwei gleiche Eingaben konnten voellig verschieden suchen.
-  const aktivesProfil = dealer?.active_profile === "export" ? "Export" : "Inland";
+  // Rollenprüfung 22.09.2026 (RP-123): Der Anmeldezustand (dealer) kennt
+  // einen Profilwechsel über das Abzeichen im Vergleich erst nach dem
+  // Neuladen — hier stand dann das alte Profil. Deshalb das wirksame Profil
+  // einmal frisch vom Server lesen (wie das Abzeichen selbst); bis dahin und
+  // bei Fehlern gilt der Wert aus dem Anmeldezustand.
+  const [profilServer, setProfilServer] = useState(null);
+  useEffect(() => {
+    let aktiv = true;
+    api.get("/dealer/settings")
+      .then((r) => { if (aktiv && r.data?.active_profile) setProfilServer(r.data.active_profile); })
+      .catch(() => { /* Anzeige bleibt beim Anmeldezustand */ });
+    return () => { aktiv = false; };
+  }, []);
+  const aktivesProfil = (profilServer || dealer?.active_profile) === "export" ? "Export" : "Inland";
   const [makes, setMakes] = useState([]);
   const [makeId, setMakeId] = useState(null);
   const [modelId, setModelId] = useState(null);

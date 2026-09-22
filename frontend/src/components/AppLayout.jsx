@@ -11,6 +11,9 @@ import {
 import { useAuth } from "@/context/AuthContext";
 import { startseite } from "@/lib/rollen";
 import { useFeatures } from "@/lib/features";
+import { verlassenBestaetigen } from "@/lib/ungespeichert";
+import { useAnfragenZaehler } from "@/lib/anfragenZaehler";
+import { useAbgelehntZaehler } from "@/lib/abgelehntZaehler";
 import ThemeToggle from "@/components/ThemeToggle";
 import InstallPWAButton from "@/components/InstallPWAButton";
 import RechtsLinks from "@/components/RechtsLinks";
@@ -19,13 +22,17 @@ const NAV = [
   { to: "/app/vergleich", label: "Vergleich", icon: Activity },
   { to: "/app/suche", label: "Manuelle Suche", icon: Search },
   { to: "/app/vertraege", label: "Verträge / PDFs", icon: FileText },
-  { to: "/app/termine", label: "Terminplaner", icon: Calendar },
+  // Rollenprüfung 22.09.2026 (RP-464): Zahl der Fahrten, die ein Fahrer
+  // abgelehnt hat und die noch keinen neuen Fahrer haben (nur Chef).
+  { to: "/app/termine", label: "Terminplaner", icon: Calendar, abgelehnt: true },
   // Runde 33: Abholprotokolle, die auf die Freigabe warten — mit Zaehler.
   // 14.09.2026 (Wunsch Ahmad): nur der Chef kommuniziert mit dem Fahrer vor Ort.
   { to: "/app/freigaben", label: "Freigaben", icon: ClipboardCheck, zaehler: true, haendlerOnly: true },
   { to: "/app/fahrzeuge", label: "Fahrzeugpool", icon: Car },
   { to: "/app/bestand", label: "Bestand & Verkauf", icon: Warehouse, haendlerOnly: true },
-  { to: "/app/anfragen", label: "Kaufanfragen", icon: Inbox, haendlerOnly: true },
+  // Rollenprüfung 22.09.2026 (RP-472): Zahl der Kaufanfragen, die eine
+  // Antwort brauchen (neu oder Gegenangebot des Käufers).
+  { to: "/app/anfragen", label: "Kaufanfragen", icon: Inbox, haendlerOnly: true, anfragen: true },
   { to: "/app/team", label: "Mitarbeiter / Sucher", icon: Users, haendlerOnly: true },
   { to: "/app/fahrer", label: "Fahrer", icon: Users },
   { to: "/app/einstellungen", label: "Einstellungen", icon: SettingsIcon },
@@ -60,6 +67,17 @@ export default function AppLayout({ children }) {
   // 14.09.2026: Freigaben sind Chefsache — Sucher fragen den Zaehler nicht ab
   // (das Backend antwortet ihnen mit 403).
   const freigabe = useFreigabeZaehler(Boolean(user) && user.role === "dealer");
+  const anfragenWarten = useAnfragenZaehler(
+    Boolean(user) && user.role === "dealer" && Boolean(features.marktplatz), user?.id);
+  // RP-464: vom Fahrer abgelehnte Zuteilungen — Fahrer teilt nur der Chef zu.
+  const abgelehnt = useAbgelehntZaehler(Boolean(user) && user.role === "dealer", user?.id);
+  // Rollenprüfung 22.09.2026 (RP-143): Wechsel innerhalb der App fragt nach,
+  // solange eine Seite ungespeicherte Eingaben gemeldet hat (vorher schützte
+  // nur beforeunload beim Neuladen — ein Klick in die Leiste verwarf still).
+  const wegBestaetigen = (ziel) => (e) => {
+    if (ziel && ziel === pathname) return;
+    if (!verlassenBestaetigen()) e.preventDefault();
+  };
   const vorherWartend = useRef(null);
   useEffect(() => {
     if (!freigabe.geladen) {
@@ -75,7 +93,7 @@ export default function AppLayout({ children }) {
     if (neu > 0 && !pathname.startsWith("/app/freigaben")) {
       toast.message(neu === 1 ? "Ein Fahrer wartet auf deine Freigabe"
         : `${neu} Fahrer warten auf deine Freigabe`, {
-        action: { label: "Öffnen", onClick: () => nav("/app/freigaben") },
+        action: { label: "Öffnen", onClick: () => { if (verlassenBestaetigen()) nav("/app/freigaben"); } },
         duration: 15000,
       });
     }
@@ -97,7 +115,7 @@ export default function AppLayout({ children }) {
       >
         {/* U-144: das Logo fuehrt zur eigenen Startseite (Chef ohne Abo sonst
             direkt auf die Abo-Sperre des Vergleichs) */}
-        <Link to={startseite(user)}
+        <Link to={startseite(user)} onClick={wegBestaetigen(startseite(user))}
               className="h-16 border-b flex items-center justify-center shrink-0"
               style={{ borderColor: "var(--border-default)" }}
               title="Autohandel">
@@ -113,24 +131,30 @@ export default function AppLayout({ children }) {
             const Icon = it.icon;
             // Pruefbericht 20.09.2026 (M-02): aria-label nennt den Bereich samt
             // Zahl wartender Freigaben (der sichtbare Zaehler ist ausgeblendet).
+            const zahl = it.zaehler ? freigabe.wartet
+              : it.anfragen ? anfragenWarten : it.abgelehnt ? abgelehnt : 0;
+            const zahlText = it.anfragen ? "brauchen eine Antwort"
+              : it.abgelehnt ? "vom Fahrer abgelehnt, bitte neu zuteilen" : "warten";
+            const zaehlerId = it.anfragen ? "nav-anfragen-zaehler"
+              : it.abgelehnt ? "nav-termine-zaehler" : "nav-freigaben-zaehler";
             return (
               <Link
                 key={it.to}
                 to={it.to}
+                onClick={wegBestaetigen(it.to)}
                 data-testid={`nav-${it.to.split("/").pop()}`}
                 title={it.label}
-                aria-label={it.zaehler && freigabe.wartet > 0
-                  ? `${it.label} — ${freigabe.wartet} warten` : it.label}
+                aria-label={zahl > 0 ? `${it.label} — ${zahl} ${zahlText}` : it.label}
                 className={`relative flex items-center justify-center w-full py-3 rounded-lg sidebar-link ${
                   Active ? "sidebar-link-active" : ""
                 }`}
               >
                 <Icon size={20} className={Active ? "text-[var(--accent-red)]" : ""} />
-                {it.zaehler && freigabe.wartet > 0 && (
-                  <span data-testid="nav-freigaben-zaehler" aria-hidden="true"
+                {zahl > 0 && (
+                  <span data-testid={zaehlerId} aria-hidden="true"
                         className="absolute top-1 right-1.5 min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold flex items-center justify-center text-white"
                         style={{ background: "var(--accent-red)" }}>
-                    {freigabe.wartet > 9 ? "9+" : freigabe.wartet}
+                    {zahl > 9 ? "9+" : zahl}
                   </span>
                 )}
                 {Active && (
@@ -145,9 +169,13 @@ export default function AppLayout({ children }) {
         <div className="flex flex-col items-center gap-2 pb-2 border-t pt-2"
              style={{ borderColor: "var(--border-default)" }}>
           <InstallPWAButton variante="symbol" />
-          <ThemeToggle />
+          {/* Rollenprüfung 22.09.2026 (RP-024/M-19): der Zwei-Segment-Schalter
+              ist ~90 px breit und ragte aus der 64-px-Leiste — hier als
+              runder Symbolknopf. */}
+          <ThemeToggle variante="symbol" />
           {/* U-143: der Abo-Punkt fuehrt zum Abo-Bereich in den Einstellungen */}
-          <Link to="/app/einstellungen" className="p-1.5 rounded-md hover:bg-white/5"
+          <Link to="/app/einstellungen" onClick={wegBestaetigen("/app/einstellungen")}
+                className="p-1.5 rounded-md hover:bg-white/5"
                 aria-label={`Abo: ${subscription?.plan === "lifetime" ? "Lifetime"
                   : subscription?.active ? "aktiv" : "kein Abo"} — zu den Einstellungen`}>
             <span
@@ -161,7 +189,11 @@ export default function AppLayout({ children }) {
             />
           </Link>
           <button
-            onClick={async () => { await logout(); nav("/"); }}
+            onClick={async () => {
+              if (!verlassenBestaetigen()) return;
+              await logout();
+              nav("/");
+            }}
             data-testid="logout-btn"
             className="p-2 rounded-md hover:bg-white/5"
             style={{ color: "var(--text-secondary)" }}

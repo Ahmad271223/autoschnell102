@@ -10,6 +10,70 @@ import FahrerAnlegenDialog from "@/components/admin/FahrerAnlegenDialog";
 import { mitAbweichung } from "@/lib/anfrageAbweichung";
 
 /**
+ * Rollenpruefung 22.09.2026 (RP-224/RP-375): Die Zeile einer Sucher-Abo-
+ * Anfrage zeigte fuer JEDEN Plan ausser "yearly" "1 Monat · 150 €" — auch fuer
+ * eine (inzwischen nicht mehr anfragbare) Probe, die dann still und kostenlos
+ * vergeben wurde. Jetzt eine Tabelle; Proben werden hier nicht freigeschaltet.
+ */
+export const ANFRAGE_PLAENE = {
+  monthly: { text: "1 Monat · 150 €", freischaltbar: true },
+  yearly: { text: "1 Jahr · 1.500 €", freischaltbar: true },
+  probe3: { text: "Probe · 3 Tage (kostenlos) — nur direkt in der Firmenansicht", freischaltbar: false },
+  probe5: { text: "Probe · 5 Tage (kostenlos) — nur direkt in der Firmenansicht", freischaltbar: false },
+};
+/**
+ * Rollenprüfung 22.09.2026 (RP-511, Welle 2): Käufer-Anfragen über einen
+ * Einladungslink tragen die Einladung (der Server nennt nur Firma und ob sie
+ * noch gilt, nie das Token). Beim Anlegen löst der Server sie selbst ein.
+ */
+export function einladungText(einladung) {
+  if (!einladung) return "";
+  const von = einladung.firma ? ` von ${einladung.firma}` : "";
+  return einladung.gueltig === false
+    ? `mit Einladung${von} (abgelaufen/verbraucht)`
+    : `mit Einladung${von}`;
+}
+
+/** Hinweis nach dem Anlegen: wurde die Einladung eingelöst? */
+export function einladungErgebnisText(ergebnis) {
+  const e = ergebnis?.einladung;
+  if (!e) return "";
+  const von = e.firma ? ` von ${e.firma}` : "";
+  return e.eingeloest
+    ? `Einladung${von} eingelöst — der Käufer sieht deren Netzwerk-Fahrzeuge.`
+    : `Einladung${von} konnte nicht eingelöst werden (abgelaufen, verbraucht oder Firma gesperrt).`;
+}
+
+/**
+ * Rollenprüfung 22.09.2026 (RP-509, Welle 3): Käufer-Anfragen tragen jetzt
+ * `verlaengerung` (der Zugang läuft noch) und `zugang_bis` (bisheriger
+ * Ablauf). Die Zeile zeigt das als Badge „Verlängerung (bis TT.MM.JJJJ)“ —
+ * Freischalten verlängert ab diesem Datum, nicht ab heute.
+ */
+function datumText(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const opt = { day: "2-digit", month: "2-digit", year: "numeric" };
+  try {
+    return d.toLocaleDateString("de-DE", { ...opt, timeZone: "Europe/Berlin" });
+  } catch {
+    return d.toLocaleDateString("de-DE", opt);
+  }
+}
+
+export function verlaengerungText(anfrage) {
+  if (!anfrage?.verlaengerung) return "";
+  const bis = datumText(anfrage.zugang_bis);
+  return bis ? `Verlängerung (bis ${bis})` : "Verlängerung";
+}
+
+export function anfragePlan(wanted) {
+  return ANFRAGE_PLAENE[wanted || "monthly"]
+    || { text: `unbekannter Plan „${wanted}“`, freischaltbar: false };
+}
+
+/**
  * Freischaltungen (Betreiber-Modell 09/2026):
  * - Zugangs-Anfragen (Startseite) -> Konto direkt anlegen. Kontonummer
  *   (13.09.2026): je nach Art Firma, Zwischenhändler oder Fahrer; das Backend
@@ -96,17 +160,32 @@ export default function AdminFreischaltungen() {
   };
 
   const grantSucher = (req) => aktion(req.id, async () => {
+    const plan = req.wanted_plan || "monthly";
+    if (!anfragePlan(plan).freischaltbar) {
+      toast.error("Diese Anfrage nennt kein bezahltes Abo — bitte ablehnen und ggf. in der "
+        + "Firmenansicht direkt freischalten.");
+      return;
+    }
     try {
-      await api.post(`/admin/sucher/${req.subject_user_id}/abo`,
-        { plan: req.wanted_plan || "monthly" });
+      // Rollenpruefung 22.09.2026 (RP-225/RP-376): die Anfrage-ID bindet die
+      // Buchung an GENAU diese Anfrage — ein zweiter Klick (anderer Tab,
+      // Wiederholung nach Netzfehler) bucht nicht noch einmal.
+      const { data } = await api.post(`/admin/sucher/${req.subject_user_id}/abo`,
+        { plan, anfrage_id: req.id });
       await anfrageSchliessen(req);
-      toast.success(`Sucher-Abo aktiviert (${req.sucher_name || req.kontonummer || ""})`);
+      if (data?.bereits_freigeschaltet) {
+        toast.info(`War bereits freigeschaltet (${req.sucher_name || req.kontonummer || ""}) — nichts doppelt gebucht`);
+      } else {
+        toast.success(`Sucher-Abo aktiviert (${req.sucher_name || req.kontonummer || ""})`);
+      }
     } catch (e) { toast.error(errMsg(e)); }
   });
 
   const grantPlan = (req) => aktion(req.id, async () => {
     try {
-      await api.put(`/admin/dealers/${req.dealer_id}/sale-plan`, { tier: req.wanted_tier });
+      // Rollenpruefung 22.09.2026 (RP-508): mit Laufzeit (1 Monat) — ohne
+      // months blieb das Paket im Bezahlmodus unbefristet.
+      await api.put(`/admin/dealers/${req.dealer_id}/sale-plan`, { tier: req.wanted_tier, months: 1 });
       await anfrageSchliessen(req);
       toast.success(`Verkaufspaket ${req.wanted_tier} aktiviert (${req.company_name || ""})`);
     } catch (e) { toast.error(errMsg(e)); }
@@ -114,9 +193,10 @@ export default function AdminFreischaltungen() {
 
   const grantBuyer = (req) => aktion(req.id, async () => {
     try {
-      await api.post(`/admin/buyers/${req.buyer_user_id}/access`, { plan: "monthly" });
+      const { data } = await api.post(`/admin/buyers/${req.buyer_user_id}/access`, { plan: "monthly" });
       await anfrageSchliessen(req);
-      toast.success("Marktplatz-Zugang aktiviert");
+      toast.success(data?.zahlungsart === "kostenlos"
+        ? "Marktplatz-Zugang freigegeben (kostenlos, keine Zahlung erfasst)" : "Marktplatz-Zugang aktiviert");
     } catch (e) { toast.error(errMsg(e)); }
   });
 
@@ -127,10 +207,21 @@ export default function AdminFreischaltungen() {
     } catch (e) { toast.error(errMsg(e, "Ablehnen fehlgeschlagen")); }
   });
 
-  const setBuyerAccess = (buyer, activate) => aktion(`k-${buyer.id}`, async () => {
+  const setBuyerAccess = (buyer, activate, verlaengern = false) => {
+    // Rollenpruefung 22.09.2026 (RP-098/RP-348 Nr. 2): Sperren beendet jetzt
+    // auch laufende Verhandlungen und Reservierungen — vorher fragen.
+    if (!activate && !window.confirm("Marktplatz-Zugang sperren?\n\nLaufende Anfragen des Käufers "
+      + "werden beendet und für ihn reservierte Fahrzeuge wieder freigegeben.")) return undefined;
+    return zugangSetzen(buyer, activate, verlaengern);
+  };
+  const zugangSetzen = (buyer, activate, verlaengern) => aktion(`k-${buyer.id}`, async () => {
     try {
-      await api.post(`/admin/buyers/${buyer.id}/access`, { plan: activate ? "monthly" : null });
-      toast.success(activate ? "Zugang aktiviert" : "Zugang gesperrt");
+      const { data } = await api.post(`/admin/buyers/${buyer.id}/access`, { plan: activate ? "monthly" : null });
+      // Rollenprüfung 22.09.2026 (RP-507 (3)): im Kostenlos-Modus bucht der
+      // Server keine 20 € mehr, sondern "kostenlos" mit 0 € — das steht hier.
+      toast.success(!activate ? "Zugang gesperrt"
+        : data?.zahlungsart === "kostenlos" ? "Zugang freigegeben (Marktplatz kostenlos, keine Zahlung erfasst)"
+          : verlaengern ? `Zugang verlängert bis ${fmtDate(data?.expires_at)}` : "Zugang aktiviert");
     } catch (e) { toast.error(errMsg(e)); }
   });
 
@@ -187,6 +278,11 @@ export default function AdminFreischaltungen() {
                         <Badge tone={isZugang ? ZUGANG_ART[art].tone : isSucher ? "purple" : isBuyer ? "blue" : "gray"}>
                           {isZugang ? ZUGANG_ART[art].label : isSucher ? "Sucher-Abo" : isBuyer ? "Marktplatz-Zugang" : (r.type || "Paket")}
                         </Badge>
+                        {isBuyer && r.verlaengerung ? (
+                          <Badge tone="yellow">
+                            <span data-testid={`anfrage-verlaengerung-${r.id}`}>{verlaengerungText(r)}</span>
+                          </Badge>
+                        ) : null}
                         <div className="min-w-0">
                           <div className="text-[14px] text-white font-medium">
                             {isSucher ? (
@@ -196,8 +292,8 @@ export default function AdminFreischaltungen() {
                                 {r.company_name ? ` von Firma ${r.company_name}` : ""}
                                 {r.kunden_nr != null ? ` (#${r.kunden_nr})` : ""}
                                 {" möchte das Sucher-Abo verlängern"}
-                                <span className="text-zinc-500 font-normal">
-                                  {" · "}{r.wanted_plan === "yearly" ? "1 Jahr · 1.500 €" : "1 Monat · 150 €"}
+                                <span className="text-zinc-500 font-normal" data-testid={`anfrage-plan-${r.id}`}>
+                                  {" · "}{anfragePlan(r.wanted_plan).text}
                                 </span>
                               </>
                             ) : (
@@ -213,6 +309,9 @@ export default function AdminFreischaltungen() {
                             {isZugang && r.contact_phone ? ` · ${r.contact_phone}` : ""}
                             {isZugang && art === "kaeufer" && r.ust_id ? ` · USt ${r.ust_id}` : ""}
                             {isZugang && art === "kaeufer" && r.gewerblich_bestaetigt_am ? " · B2B bestätigt" : ""}
+                            {isZugang && art === "kaeufer" && r.einladung ? (
+                              <span data-testid={`anfrage-einladung-${r.id}`}>{" · "}{einladungText(r.einladung)}</span>
+                            ) : null}
                             {" · "}{fmtDate(r.created_at)}
                           </div>
                           {isZugang && r.message ? (
@@ -235,7 +334,9 @@ export default function AdminFreischaltungen() {
                               <Truck size={14} /> Fahrer anlegen
                             </Button>
                           )}
-                          {isSucher && <Button size="sm" onClick={() => grantSucher(r)} disabled={!!arbeitet} data-testid={`abo-ja-${r.id}`}><Check size={14} /> Ja, freischalten</Button>}
+                          {isSucher && anfragePlan(r.wanted_plan).freischaltbar && (
+                            <Button size="sm" onClick={() => grantSucher(r)} disabled={!!arbeitet} data-testid={`abo-ja-${r.id}`}><Check size={14} /> Ja, freischalten</Button>
+                          )}
                           {isBuyer && <Button size="sm" onClick={() => grantBuyer(r)} disabled={!!arbeitet}><Check size={14} /> Zugang aktivieren</Button>}
                           {!isZugang && !isSucher && !isBuyer && r.wanted_tier && r.dealer_id && (
                             <Button size="sm" onClick={() => grantPlan(r)} disabled={!!arbeitet}><Check size={14} /> Paket aktivieren</Button>
@@ -316,9 +417,19 @@ export default function AdminFreischaltungen() {
                                     title="Neues Passwort setzen (beendet die Sitzung, hebt eine Anmeldesperre auf)">
                               <KeyRound size={13} /> Passwort setzen
                             </Button>
-                            {b.access?.active ? (
+                            {b.access?.active ? (<>
+                              {/* Rollenpruefung 22.09.2026 (RP-509): vorher ging nur
+                                  "Sperren → Freischalten", und das verwarf die bezahlte
+                                  Restlaufzeit. Verlaengert wird ab dem bisherigen Ablauf. */}
+                              {!b.access?.kostenlos && (
+                                <Button size="sm" variant="ghost" onClick={() => setBuyerAccess(b, true, true)} disabled={!!arbeitet}
+                                        data-testid={`buyer-verlaengern-${b.id}`}
+                                        title="Zugang um 30 Tage verlängern (ab dem bisherigen Ablauf) — erfasst die Zahlung">
+                                  Verlängern (+30 Tage)
+                                </Button>
+                              )}
                               <Button size="sm" variant="ghost" onClick={() => setBuyerAccess(b, false)} disabled={!!arbeitet}>Sperren</Button>
-                            ) : (
+                            </>) : (
                               <Button size="sm" onClick={() => setBuyerAccess(b, true)} disabled={!!arbeitet}>Freischalten</Button>
                             )}
                           </td>
@@ -495,12 +606,14 @@ function KaeuferAnlegenDialog({ request, onClose }) {
       {ergebnis ? (
         <ZugangsdatenKarte titel="Zwischenhändler angelegt" name={ergebnis.name} kontonummer={ergebnis.kontonummer}
                            passwort={ergebnis.passwort}
-                           hinweis="Der Käufer-Code ist die Anmeldekennung im B2B-Marktplatz (Groß-/Kleinschreibung egal)."
+                           hinweis={"Der Käufer-Code ist die Anmeldekennung im B2B-Marktplatz (Groß-/Kleinschreibung egal)."
+                             + (einladungErgebnisText(ergebnis) ? ` ${einladungErgebnisText(ergebnis)}` : "")}
                            bereich="kaeufer" onClose={onClose} />
       ) : (<>
         <div className="text-[12px] text-zinc-500 mb-4">
           {request
             ? `Aus Anfrage vom ${fmtDate(request.created_at)}${request.gewerblich_bestaetigt_am ? " · B2B im Formular bestätigt" : ""}`
+              + (request.einladung ? ` · ${einladungText(request.einladung)} — wird beim Anlegen eingelöst` : "")
             : "Die Kontonummer vergibt das System."}
           {" — E-Mail ist nur Kontaktadresse (optional)."}
         </div>

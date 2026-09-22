@@ -81,16 +81,52 @@ def _kurz(wert, laenge: int = 120) -> str:
     return text if len(text) <= laenge else text[:laenge - 1] + "…"
 
 
+#: Rollenprüfung 22.09.2026 (RP-249/RP-400): Kennzeichnung der Zeiten in
+#: jeder Mail — vorher stand dort die Serverzeit ohne Angabe, und im Image
+#: ohne tzdata war das still UTC (zwei Stunden daneben).
+ZEITZONE_HINWEIS = "Alle Zeiten in deutscher Zeit (MEZ/MESZ)."
+
+
+def _berlin(d: datetime) -> datetime:
+    """Zeitpunkt in deutscher Zeit (Europe/Berlin).
+
+    Rollenprüfung 22.09.2026 (RP-249/RP-400): vorher d.astimezone() — also
+    die Zeitzone des SERVERS. Das Image (python:3.12-slim) bringt kein tzdata
+    mit; TZ=Europe/Berlin aus Compose greift dann nicht, und alle Zeiten der
+    Mails (und die Stunde des Tagesberichts) waren still UTC. Jetzt
+    ausdruecklich Europe/Berlin — mit zoneinfo, und ohne Zeitzonendaten nach
+    der EU-Regel von Hand (wie beweis_pdf._berlin): Sommerzeit vom letzten
+    Sonntag im Maerz bis zum letzten Sonntag im Oktober, jeweils 01:00 UTC."""
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+        return d.astimezone(ZoneInfo("Europe/Berlin"))
+    except Exception:  # noqa: BLE001 — Image ohne tzdata: EU-Regel von Hand
+        u = d.astimezone(timezone.utc)
+
+        def _letzter_sonntag(monat: int) -> datetime:
+            tag = datetime(u.year, monat, 31, 1, tzinfo=timezone.utc)
+            while tag.weekday() != 6:
+                tag -= timedelta(days=1)
+            return tag
+
+        sommer = _letzter_sonntag(3) <= u < _letzter_sonntag(10)
+        return u.astimezone(timezone(timedelta(hours=2 if sommer else 1)))
+
+
+def _jetzt_berlin() -> datetime:
+    return _berlin(_jetzt())
+
+
 def _zeitpunkt(iso) -> str:
-    """ISO-Zeit -> "20.09.2026 13:40" in der Zeit des Servers.
+    """ISO-Zeit -> "20.09.2026 13:40" in deutscher Zeit (RP-249).
 
     Der Rohwert (2026-09-20T11:40:37.754523+00:00) ist fuer einen Bericht
     unbrauchbar — abgeschnitten erst recht."""
     try:
         d = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
-        if d.tzinfo is None:
-            d = d.replace(tzinfo=timezone.utc)
-        return d.astimezone().strftime("%d.%m.%Y %H:%M")
+        return _berlin(d).strftime("%d.%m.%Y %H:%M")
     except (ValueError, TypeError):
         return _kurz(iso, 30)
 
@@ -123,6 +159,7 @@ def alarm_text(alarme: list, gesamt_offen: int) -> tuple:
         zeilen.append("")
     zeilen += [
         f"Offene Alarme insgesamt: {gesamt_offen}",
+        ZEITZONE_HINWEIS,
         "",
         "Nachsehen und abhaken: Betrieb-Seite im Admin-Bereich.",
         "Diese Mail kommt nur bei NEUEN Alarmen — ein bereits gemeldeter",
@@ -233,6 +270,7 @@ def anfrage_text(anfragen: list, gesamt_offen: int) -> tuple:
         zeilen += [f"… und {n - MAX_EINZELN} weitere.", ""]
     zeilen += [
         f"Offene Anfragen insgesamt: {gesamt_offen}",
+        ZEITZONE_HINWEIS,
         "",
         "Bearbeiten: Freischaltungen im Admin-Bereich.",
     ]
@@ -362,6 +400,7 @@ def bericht_text(daten: dict, tag: str) -> tuple:
 
     zeilen += [
         "",
+        ZEITZONE_HINWEIS,
         "Bleibt diese Mail einmal aus, stimmt etwas nicht — sie kommt auch",
         "dann, wenn nichts passiert ist.",
     ]
@@ -374,7 +413,8 @@ async def tagesbericht_senden(db, tag: str = "", versuch: int = 1) -> bool:
     if not ziel or bericht_stunde() < 0:
         return False
     try:
-        tag = tag or datetime.now().strftime("%d.%m.%Y")
+        # RP-249: der Tag in deutscher Zeit, nicht in der des Servers
+        tag = tag or _jetzt_berlin().strftime("%d.%m.%Y")
         betreff, text = bericht_text(await tagesbericht_daten(db), tag)
         from email_service import send_email
         # Wunsch Ahmad 21.09.2026 (Betrieb): jeder Wiederholungsversuch am
@@ -458,7 +498,8 @@ def testmail_text(ziel: str, von: str = "", server: str = "") -> tuple:
     """(Betreff, Text) der Probe-Mail von der Betrieb-Seite — rein, damit
     pruefbar. Wunsch Ahmad 21.09.2026: bisher war der Tagesbericht der
     einzige Test, und der kam erst um 8 Uhr."""
-    jetzt = datetime.now().astimezone().strftime("%d.%m.%Y %H:%M")
+    # RP-249: deutsche Zeit mit Kennzeichnung statt Serverzeit ohne Angabe
+    jetzt = _jetzt_berlin().strftime("%d.%m.%Y %H:%M") + " Uhr (MEZ/MESZ)"
     stunde = bericht_stunde()
     bericht = ("der Tagesbericht ist abgeschaltet (BETRIEB_TAGESBERICHT_STUNDE=-1)"
                if stunde < 0 else f"der Tagesbericht täglich um {stunde:02d}:00 Uhr")
@@ -553,7 +594,7 @@ async def run_betriebsmeldung_forever(db) -> None:
 
     Beide unter einer Job-Sperre: zwei Server mit je vier Prozessen wuerden
     sonst achtmal dasselbe verschicken."""
-    from job_lock import acquire, release
+    from job_lock import acquire
     await asyncio.sleep(45)          # Backend erst in Ruhe hochfahren lassen
     if not empfaenger():
         # NICHT einfach return: ein beendeter Hintergrundjob zaehlt in
@@ -582,16 +623,19 @@ async def run_betriebsmeldung_forever(db) -> None:
                 continue
             # Sofortmeldung: die Sperre laeuft mit dem Takt ab, damit nach
             # einem Ausfall der naechste Prozess uebernimmt.
+            # Rollenprüfung 22.09.2026 (RP-249/RP-400): Die Sperre wurde nach
+            # jeder Runde im finally SOFORT freigegeben. Jeder der 8 Prozesse
+            # wacht zu einem eigenen Zeitpunkt auf, bekam sie also auch —
+            # neue Alarme gingen bis zu achtmal je Sammelfrist raus statt
+            # gesammelt. Jetzt bleibt sie stehen und laeuft nach `takt` von
+            # selbst ab: hoechstens EINE Runde je Sammelfrist, flottenweit.
             token = await acquire(db, "betriebsmeldung", ttl_seconds=takt)
             if token:
-                try:
-                    await neue_alarme_melden(db)
-                    # Wunsch Ahmad 20.09.2026: Anfragen genauso — sie sind
-                    # kein Fehler, sondern Geschaeft, und lagen bisher nur
-                    # auf der Freischaltungs-Seite.
-                    await neue_anfragen_melden(db)
-                finally:
-                    await release(db, "betriebsmeldung", token=token)
+                await neue_alarme_melden(db)
+                # Wunsch Ahmad 20.09.2026: Anfragen genauso — sie sind
+                # kein Fehler, sondern Geschaeft, und lagen bisher nur
+                # auf der Freischaltungs-Seite.
+                await neue_anfragen_melden(db)
         except Exception:  # noqa: BLE001
             log.exception("[betriebsmeldung] Runde fehlgeschlagen")
         # Tagesbericht: die Tagessperre allein entscheidet, dass er genau
@@ -602,7 +646,10 @@ async def run_betriebsmeldung_forever(db) -> None:
         # tagesbericht_mit_wiederholung die Sperre (45 min, hoechstens vier
         # Versuche am Tag) — sonst kam der naechste Versuch erst morgen.
         try:
-            jetzt = datetime.now()
+            # RP-249/RP-400: Stunde und Datum in deutscher Zeit — vorher
+            # datetime.now() in der Zeit des Servers (ohne tzdata: UTC, der
+            # "8-Uhr-Bericht" kam um 10 Uhr).
+            jetzt = _jetzt_berlin()
             if bericht_stunde() >= 0 and jetzt.hour >= bericht_stunde():
                 tag = jetzt.strftime("%Y-%m-%d")
                 bericht_token = await acquire(db, f"tagesbericht-{tag}",

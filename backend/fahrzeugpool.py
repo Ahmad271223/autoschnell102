@@ -42,19 +42,32 @@ async def _aktive_konten(db, dealer_id: str, ids) -> set:
 
 SCHUTZ_SEKUNDEN = 300
 
+# Rollenprüfung 22.09.2026 (RP-538): Vergleicht der CHEF ein Fahrzeug, das
+# einem Sucher gehoert, wird er nicht Mitbearbeiter (RP-048). Ohne Schutz
+# loeschte das Pool-Trimmen DES SUCHERS das Fahrzeug nach 30 weiteren
+# Vergleichen — "Kaufvertrag erstellen" des Chefs endete dann mit 404
+# "Fahrzeug nicht gefunden". So lange bleibt es nach dem Chef-Vergleich
+# vom Trimmen ausgenommen (jeder weitere Chef-Vergleich verlaengert).
+CHEF_VERGLEICH_SCHUTZ_SEKUNDEN = 7 * 24 * 3600
+
 
 async def kurz_schuetzen(db, dealer_id: str, vehicle_id, sekunden: int = SCHUTZ_SEKUNDEN) -> None:
     """Runde 19 (16.09.2026, Nr. 37): waehrend ein Vertrag oder Termin zu
     einem Fahrzeug entsteht, darf das Pool-Trimmen es nicht loeschen. Der
     Schutzscan (Vertraege/Termine/Inserate) sieht den neuen Datensatz erst
-    nach dem Insert — dazwischen schuetzt dieser kurze Stempel."""
+    nach dem Insert — dazwischen schuetzt dieser kurze Stempel.
+
+    Rollenprüfung 22.09.2026 (RP-538): $max statt $set — ein kurzer Stempel
+    (Vertragsanlage, 5 Minuten) verkuerzt nie einen laengeren Schutz (Chef-
+    Vergleich, 7 Tage). ISO-Zeitstempel gleichen Formats sortieren als Text
+    richtig; so vergleicht auch das Trimmen."""
     if not dealer_id or not vehicle_id:
         return
     from datetime import datetime, timedelta, timezone
     bis = (datetime.now(timezone.utc) + timedelta(seconds=sekunden)).isoformat()
     try:
         await db.vehicles.update_one({"id": vehicle_id, "dealer_id": dealer_id},
-                                     {"$set": {"geschuetzt_bis": bis}})
+                                     {"$max": {"geschuetzt_bis": bis}})
     except Exception:  # noqa: BLE001 — Schutz ist Zusatz, der Vorgang laeuft
         log.exception("Fahrzeug %s nicht kurz geschuetzt", vehicle_id)
 

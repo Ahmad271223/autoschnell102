@@ -204,8 +204,11 @@ def test_abschalten_falscher_code_ist_400_nicht_401(wegwerf):
     u = run(db.users.find_one({"id": "sa"}))
     assert u["mfa"]["aktiv"] is True and u["mfa"]["fehlversuche"] == 1
     erg = run(ADMIN.admin_mfa_deaktivieren(ADMIN.MfaCodeIn(code=MFA.totp(secret)), admin=SA))
-    assert erg == {"ok": True, "aktiv": False}
-    assert "mfa" not in run(db.users.find_one({"id": "sa"}))
+    assert erg["ok"] is True and erg["aktiv"] is False
+    # Rollenpruefung 22.09.2026 (RP-556): statt "gar nichts" bleibt eine
+    # 30-Minuten-Gnadenfrist zum Neu-Einrichten (MFA-Pflicht in Produktion).
+    m = run(db.users.find_one({"id": "sa"}))["mfa"]
+    assert m["aktiv"] is False and "secret" not in m and m["pflicht_ausgesetzt_bis"]
     # Quelltext: keine 401 mehr in den Code-Pruefungen der eigenen Einstellungen
     for f in (ADMIN.admin_mfa_deaktivieren, ADMIN.admin_mfa_codes_neu,
               ADMIN._mfa_app_code_bestaetigen):

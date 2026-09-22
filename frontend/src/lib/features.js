@@ -8,6 +8,8 @@ import { api } from "@/lib/api";
  * "Demnaechst verfuegbar" statt einer halben Seite.
  */
 const STANDARD = { marktplatz: false };
+/** Nach einem Fehlschlag fragt eine offene Seite nach dieser Zeit erneut. */
+export const FEATURES_NEU_VERSUCH_MS = 30000;
 let cache = null;
 let laufend = null;
 
@@ -16,7 +18,11 @@ export async function featuresLaden() {
   if (!laufend) {
     laufend = api.get("/features")
       .then((r) => { cache = { ...STANDARD, ...(r.data || {}) }; return cache; })
-      .catch(() => { cache = { ...STANDARD }; return cache; })
+      // Rollenprüfung 22.09.2026 (RP-045/RP-144): Ein einziger Fehlschlag
+      // (Funkloch, Neustart des Servers) blieb bis zum Neuladen der Seite
+      // als "Marktplatz aus" stehen. Jetzt gilt "aus" nur für DIESEN Aufruf;
+      // der Zwischenspeicher bleibt leer, der nächste Aufruf fragt neu.
+      .catch(() => ({ ...STANDARD }))
       .finally(() => { laufend = null; });
   }
   return laufend;
@@ -26,8 +32,16 @@ export function useFeatures() {
   const [f, setF] = useState(cache);
   useEffect(() => {
     let aktiv = true;
-    featuresLaden().then((x) => { if (aktiv) setF(x); });
-    return () => { aktiv = false; };
+    let timer = null;
+    const holen = () => featuresLaden().then((x) => {
+      if (!aktiv) return;
+      setF(x);
+      // Gescheitert (nichts zwischengespeichert): auf einer offenen Seite
+      // später noch einmal fragen, statt bis zum Neuladen "aus" zu zeigen.
+      if (!cache) timer = setTimeout(holen, FEATURES_NEU_VERSUCH_MS);
+    });
+    holen();
+    return () => { aktiv = false; clearTimeout(timer); };
   }, []);
   return { ...(f || STANDARD), geladen: !!f };
 }

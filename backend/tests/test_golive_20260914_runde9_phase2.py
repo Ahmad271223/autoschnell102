@@ -234,8 +234,11 @@ def test_27_reservierung_und_sperre_ziehen_fahrzeug_mit(wegwerf):
     run(db.resale_listings.insert_many([
         {"id": "l1", "dealer_id": "d1", "vehicle_id": "v1", "status": "reserviert",
          "reserved_for": "k1", "visibility": "public"},
-        {"id": "l2", "dealer_id": "d1", "vehicle_id": "v2", "status": "veroeffentlicht",
-         "visibility": "public"},
+        # Rollenprüfung 22.09.2026 (RP-093(3)): nachgezogen wird nur, solange
+        # das Inserat auf dem Ziel steht — hier also ein reserviertes Inserat,
+        # dessen Fahrzeug (verkauft) den Uebergang nicht mitmacht.
+        {"id": "l2", "dealer_id": "d1", "vehicle_id": "v2", "status": "reserviert",
+         "reserved_for": "k9", "visibility": "public"},
     ]))
     # B9: Reservierung zurueck -> Fahrzeug geht mit
     run(M.reservierung_zurueckgeben("l1", "k1"))

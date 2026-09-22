@@ -310,6 +310,8 @@ class Schreibpause:
         self.db = db
         self.logfile = logfile
         self.kennung = None
+        #: RP-246: True, wenn ein fremder gueltiger Merker das Setzen verhindert hat
+        self.fremder_merker = False
         self._stop = threading.Event()
         self._faden = None
 
@@ -325,6 +327,15 @@ class Schreibpause:
         except Exception as exc:  # noqa: BLE001
             log(f"  WARNUNG: Schreibpause konnte nicht gesetzt werden: {exc}",
                 self.logfile)
+            return False
+        if self.kennung is None:
+            # Rollenprüfung 22.09.2026 (RP-246/RP-397): ein FREMDER, noch
+            # gueltiger Merker steht (z. B. ein laufender Restore). Frueher
+            # wurde er ueberschrieben und am Ende sogar aufgehoben.
+            self.fremder_merker = True
+            log("  WARNUNG: Es steht bereits ein fremder Wartungsmerker (Restore "
+                "oder zweite Sicherung) — die Schreibpause wird NICHT gesetzt "
+                "und der fremde Merker bleibt unangetastet.", self.logfile)
             return False
         log(f"  Schreibpause AN (Lesen bleibt moeglich, laengstens "
             f"{_wartung_frist_min()} min)", self.logfile)
@@ -425,6 +436,36 @@ def _snapshot_pause_s() -> float:
         return 5.0
 
 
+def _mehrheit_rueckstand_max_s() -> float:
+    """RP-552: ab so vielen Sekunden Rueckstand des Mehrheits-Commitpunkts gilt
+    ein Snapshot als veraltet (Standard 600 s = 10 min)."""
+    try:
+        return max(30.0, float(os.environ.get("BACKUP_MEHRHEIT_RUECKSTAND_MAX_S", "")
+                               .strip() or 600))
+    except ValueError:
+        return 600.0
+
+
+def mehrheit_rueckstand_s(client):
+    """Rollenprüfung 22.09.2026 (RP-552): Abstand in Sekunden zwischen dem
+    zuletzt angewendeten und dem von der Mehrheit bestaetigten Stand
+    (replSetGetStatus). None = nicht ermittelbar (Einzelserver, fehlendes
+    Recht clusterMonitor, Stoerung) — dann bleibt alles wie bisher."""
+    try:
+        st = client.admin.command("replSetGetStatus")
+        o = st.get("optimes") or {}
+        angewendet, bestaetigt = o.get("lastAppliedWallTime"), o.get("lastCommittedWallTime")
+        if isinstance(angewendet, datetime) and isinstance(bestaetigt, datetime):
+            return max(0.0, (angewendet - bestaetigt).total_seconds())
+        a = (o.get("appliedOpTime") or {}).get("ts")
+        c = (o.get("lastCommittedOpTime") or {}).get("ts")
+        if a is not None and c is not None:
+            return max(0.0, float(a.time - c.time))
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 def _teildateien_entfernen(target: Path) -> None:
     """Reste eines abgebrochenen Versuchs entfernen, damit kein Teil eines
     frueheren Zeitstands im Backup landet."""
@@ -456,7 +497,25 @@ def dump_datenbank(client, db, names, target: Path, logfile: Path,
     if rs is None:
         log("  WARNUNG: Replica-Set-Erkennung (hello/isMaster) ohne Antwort — "
             "Snapshot wird versucht", logfile)
-    if rs or rs is None or pflicht:
+    # Rollenprüfung 22.09.2026 (RP-552): Im Aufbau Primary + Secondary +
+    # Arbiter bleibt der Mehrheits-Commitpunkt stehen, sobald prod2 ausfaellt.
+    # Die Snapshot-Sitzung liest genau diesen Punkt — jede Nacht kam deshalb
+    # still der Stand vom Ausfallzeitpunkt heraus, und das Manifest nannte ihn
+    # "snapshot". Jetzt: Rueckstand messen; ist er groesser als
+    # BACKUP_MEHRHEIT_RUECKSTAND_MAX_S, wird vom Primary nacheinander gelesen
+    # (aktuell, aber nicht stichtagsgenau) und der Lauf als INKONSISTENT
+    # gemeldet — backup_service legt daraus den Betriebsalarm an.
+    rueckstand = mehrheit_rueckstand_s(client) if (rs or rs is None or pflicht) else None
+    zu_alt = rueckstand is not None and rueckstand > _mehrheit_rueckstand_max_s()
+    if zu_alt:
+        konsistenz = KONSISTENZ_RUECKFALL
+        inkonsistent = (f"Mehrheits-Commitpunkt {rueckstand / 60:.0f} min hinter dem "
+                        f"Primary (Replikat-Mitglied ausgefallen?) — ein Snapshot "
+                        f"zeigte den alten Stand; Collections vom Primary nacheinander "
+                        f"gelesen, Zeitstaende koennen abweichen")
+        log(f"  WARNUNG: {inkonsistent}. Abhilfe: DEPLOYMENT.md, 'prod2 laenger "
+            f"weg' (ausgefallenes Mitglied votes:0/priority:0).", logfile)
+    elif rs or rs is None or pflicht:
         versuche = _snapshot_versuche()
         letzter = None
         for versuch in range(1, versuche + 1):
@@ -751,11 +810,16 @@ def _backup_s3_client():
     """S3-Client fuer die Offsite-Kopie. Phase 3 (3.5, E3): eigene Zugangs-
     daten BACKUP_S3_ACCESS_KEY / BACKUP_S3_SECRET_KEY (und BACKUP_S3_REGION),
     damit ein kompromittierter Datei-Speicher-Schluessel nicht auch an die
-    Sicherungen kommt; ohne diese Werte wie bisher die S3_*-Zugangsdaten."""
+    Sicherungen kommt; ohne diese Werte wie bisher die S3_*-Zugangsdaten.
+    Rollenprüfung 22.09.2026 (Review): mit den Zeitlimits der Sicherung
+    (sicherung=True, 5 Versuche/120 s) statt der knappen des Anfragewegs
+    (S3_VERSUCHE=2/30 s) — sonst brach ein kurzer 5xx an EINEM Teil den
+    ganzen mehrteiligen Offsite-Upload ab."""
     return s3_client(endpoint=backup_endpoint(),
                      access_key=os.environ.get("BACKUP_S3_ACCESS_KEY", "").strip() or None,
                      secret_key=os.environ.get("BACKUP_S3_SECRET_KEY", "").strip() or None,
-                     region=os.environ.get("BACKUP_S3_REGION", "").strip() or None)
+                     region=os.environ.get("BACKUP_S3_REGION", "").strip() or None,
+                     sicherung=True)
 
 
 def _object_lock_tage() -> int:
@@ -983,8 +1047,29 @@ def backup_erstellen(base: Path, db_name: str = None, mongo_url: str = None,
     # Dateisicherung an. Vorher endete sie direkt nach dem Datenbank-Dump —
     # eine danach geloeschte Datei war in der Datenbanksicherung noch
     # verzeichnet, in der Dateisicherung aber schon weg.
+    # Rollenprüfung 22.09.2026 (RP-246/RP-397): Laeuft gerade ein Restore
+    # (Wartungsmodus "alles"), ist die Datenbank halb alt, halb neu — eine
+    # Sicherung davon waere wertlos, und frueher ueberschrieb die
+    # Schreibpause hier sogar den Restore-Merker. Dann: keine Sicherung
+    # (Exit 1, backup_service versucht es in einer Stunde erneut).
+    try:
+        merker = db[_wartung_modul.FLAG_COLLECTION].find_one({"_id": _wartung_modul.FLAG_ID})
+    except Exception:  # noqa: BLE001 — nicht lesbar: wie bisher weiter
+        merker = None
+    if _wartung_modul.pausiert(merker, "GET"):
+        log(f"FEHLER: Wartungsmodus 'alles' aktiv ({_wartung_modul.beschreibung(merker)}, "
+            f"Besitzer {(merker or {}).get('besitzer') or 'unbekannt'}) — waehrend eines "
+            f"Restores wird nicht gesichert. Kein Backup angelegt.", logfile)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return 1
     schreibpause = Schreibpause(db, logfile)
     pause = wartung and schreibpause.einschalten()
+    if wartung and schreibpause.fremder_merker:
+        log("FEHLER: Schreibpause nicht moeglich, weil bereits ein fremder "
+            "Wartungsmerker steht — kein Backup angelegt (naechster Versuch "
+            "spaeter).", logfile)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return 1
     ruhig = False          # N6: wurde das Auslaufen bestaetigt?
     try:
         if pause:

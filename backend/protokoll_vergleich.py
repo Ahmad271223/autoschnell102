@@ -204,12 +204,22 @@ def vertragswerte(vehicle: Optional[dict], contract: Optional[dict]) -> Dict[str
     werte["power"] = {"wert": kw, "text": leistung,
                       "quelle": quelle("vehicle_power_kw", "vehicle_power_ps", inserat=leistung)}
 
-    halter = zahl(c.get("previous_owners"))
-    halter_quelle = "vertrag" if halter is not None else None
-    if halter is None:
+    # Rollenprüfung 22.09.2026 (RP-404, Info Vertrag-Team): wie
+    # pdf_service._halter_anzahl — nur ein FEHLENDES Feld (None) faellt auf das
+    # Inserat zurueck; "" heisst "im Vertrag bewusst leer". Vorher zeigte der
+    # Abholauftrag dann die Halterzahl des Inserats "laut Vertrag", obwohl der
+    # Kaufvertrag keine nennt.
+    halter_roh = c.get("previous_owners")
+    halter_text = ""
+    if halter_roh is None:
         halter = zahl(roh.get("previous_owners"))
         halter_quelle = "inserat" if halter is not None else None
-    werte["previous_owners"] = {"wert": halter, "text": str(halter) if halter is not None else "",
+    else:
+        halter = zahl(halter_roh)
+        halter_text = "" if halter is not None else _text(halter_roh)
+        halter_quelle = "vertrag" if (halter is not None or halter_text) else None
+    werte["previous_owners"] = {"wert": halter,
+                                "text": str(halter) if halter is not None else halter_text,
                                 "quelle": halter_quelle}
 
     farbe = _text(v.get("exterior_color") or v.get("color"))
@@ -399,9 +409,34 @@ def vertrags_korrekturen(zeilen: List[dict]) -> Dict[str, Any]:
             if n is None:
                 continue
             raus[feld] = n
+        elif art == "hu":
+            raus.update(hu_korrektur(text))
         else:
             raus[feld] = text
     return raus
+
+
+def hu_korrektur(text: str, heute: Optional[datetime] = None) -> Dict[str, Any]:
+    """Rollenprüfung 22.09.2026 (RP-488): Die HU-Korrektur des Fahrers ersetzte
+    nur das Datum (hu_until) — hu_valid blieb stehen, und der neue Vertrag
+    druckte z. B. "HU/AU: Ja, gültig bis 03/2025" fuer eine laengst
+    abgelaufene HU. Jetzt beide Felder:
+      * MM/JJJJ: hu_until = Datum, hu_valid = "Ja", solange der Monat nicht
+        vorbei ist, sonst "Nein";
+      * Text ohne Datum ("keine HU", "abgelaufen"): hu_valid = "Nein" und
+        hu_until leer (ein leerer Wert wird erst wirksam, wenn die
+        Vertragsneuerzeugung leere Korrekturen fuer hu_until zulaesst — bis
+        dahin bleibt das alte Datum, aber mit "Nein")."""
+    t = (text or "").strip()
+    m = re.fullmatch(r"(\d{2})/(\d{4})", t)
+    if m:
+        jetzt = heute or datetime.now()
+        monat, jahr = int(m.group(1)), int(m.group(2))
+        gueltig = (jahr, monat) >= (jetzt.year, jetzt.month)
+        return {"hu_until": t, "hu_valid": "Ja" if gueltig else "Nein"}
+    if t and not re.search(r"\d", t):
+        return {"hu_until": "", "hu_valid": "Nein"}
+    return {"hu_until": t} if t else {}
 
 
 def abweichungen(zeilen: List[dict]) -> List[dict]:

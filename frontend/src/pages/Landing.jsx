@@ -1,13 +1,25 @@
 import { Link, useNavigate } from "react-router-dom";
 import { useEffect, useState } from "react";
-import { ArrowRight, Bolt, Check, FileText, Send, Calendar, ShieldCheck, Sparkles, Menu, X } from "lucide-react";
+import { ArrowRight, Bolt, Car, Check, FileText, KeyRound, Send, Calendar, ShieldCheck, Sparkles, Menu, X } from "lucide-react";
 import { api } from "../lib/api";
 import { useFeatures } from "../lib/features";
 
-const HERO_BG = "https://static.prod-images.emergentagent.com/jobs/a1ceceb6-7b86-4add-b1a2-2ba09adbd577/images/bc1425c15b101d82928a736d8d5885c8173800a2867499223e36b183b11097eb.png";
-const SECTION_BG = "https://static.prod-images.emergentagent.com/jobs/a1ceceb6-7b86-4add-b1a2-2ba09adbd577/images/dd3f3682a6a7806bf9c8c9664b184e0728edf5f897bc17bdf2836ddfb7e76644.png";
-const CAR_IMG = "https://images.pexels.com/photos/18320398/pexels-photo-18320398.jpeg";
-const KEYS_IMG = "https://images.pexels.com/photos/4173191/pexels-photo-4173191.jpeg";
+// Rollenprüfung 22.09.2026 (RP-566): Die Hintergrundbilder kamen von
+// static.prod-images.emergentagent.com und images.pexels.com. Jeder Besuch
+// der Startseite schickte damit IP-Adresse und Zeitpunkt an zwei fremde
+// Server, die in der Datenschutzerklärung nicht stehen (und der erste ist
+// ein Überbleibsel der Entwicklungsumgebung, der jederzeit verschwinden
+// kann). Jetzt reine CSS-Verläufe ohne fremden Abruf. Eigene Fotos können
+// später unter frontend/public/img liegen und hier als url(/img/…) vor den
+// Verlauf gesetzt werden.
+const HERO_BG = "radial-gradient(ellipse at 75% 15%, rgba(255,59,48,0.32), transparent 55%), "
+  + "radial-gradient(ellipse at 10% 85%, rgba(10,132,255,0.16), transparent 50%), "
+  + "linear-gradient(180deg, #17171a 0%, #0a0a0a 100%)";
+const SECTION_BG = "radial-gradient(circle at 85% 25%, rgba(255,255,255,0.07), transparent 45%), "
+  + "repeating-linear-gradient(135deg, rgba(255,255,255,0.025) 0 2px, transparent 2px 16px)";
+const CAR_BG = "radial-gradient(ellipse at 50% 35%, rgba(255,59,48,0.28), transparent 60%), "
+  + "linear-gradient(160deg, #26262b 0%, #141416 55%, #2a0c0a 100%)";
+const KEYS_BG = "linear-gradient(135deg, #2a2a2e 0%, #141416 60%, #3a100d 100%)";
 
 export default function Landing() {
   const nav = useNavigate();
@@ -166,7 +178,7 @@ export default function Landing() {
       <section className="relative pt-32 pb-24 overflow-hidden">
         <div
           className="absolute inset-0 opacity-50 bg-cover bg-center"
-          style={{ backgroundImage: `url(${HERO_BG})` }}
+          style={{ backgroundImage: HERO_BG }}
         />
         <div className="absolute inset-0" style={{ background: "linear-gradient(180deg, rgba(10,10,10,0.55) 0%, rgba(10,10,10,0.95) 100%)" }} />
         <div className="relative max-w-7xl mx-auto px-6">
@@ -230,9 +242,12 @@ export default function Landing() {
 
             <div className="lg:col-span-5 hidden lg:block">
               <div className="relative">
-                <div className="aspect-[4/5] rounded-lg overflow-hidden bg-cover bg-center"
-                     style={{ backgroundImage: `url(${CAR_IMG})` }}>
-                  <div className="w-full h-full" style={{ background: "linear-gradient(180deg, transparent 50%, rgba(10,10,10,0.85) 100%)" }} />
+                <div className="aspect-[4/5] rounded-lg overflow-hidden bg-cover bg-center relative"
+                     style={{ backgroundImage: CAR_BG }}>
+                  <Car size={160} strokeWidth={1} aria-hidden="true"
+                       className="absolute left-1/2 top-[38%] -translate-x-1/2 -translate-y-1/2"
+                       style={{ color: "rgba(255,255,255,0.22)" }} />
+                  <div className="relative w-full h-full" style={{ background: "linear-gradient(180deg, transparent 50%, rgba(10,10,10,0.85) 100%)" }} />
                 </div>
                 <div className="absolute -bottom-6 -left-6 tactical-card p-4 w-64">
                   <div className="overline">live · jetzt</div>
@@ -278,7 +293,7 @@ export default function Landing() {
       {/* FEATURES */}
       <section id="features" className="py-24 relative">
         <div className="absolute inset-0 opacity-20 bg-cover bg-center"
-             style={{ backgroundImage: `url(${SECTION_BG})` }} />
+             style={{ backgroundImage: SECTION_BG }} />
         <div className="relative max-w-7xl mx-auto px-6">
           <div className="grid lg:grid-cols-12 gap-6">
             <div className="lg:col-span-12 mb-4">
@@ -318,8 +333,11 @@ export default function Landing() {
                   Jede Händler-Datenbank ist getrennt. Verschlüsseltes Login, eine aktive Session pro Account, anonyme Live-Zähler.
                 </p>
               </div>
-              <div className="hidden md:block w-32 h-32 rounded-sm bg-cover bg-center"
-                   style={{ backgroundImage: `url(${KEYS_IMG})` }} />
+              <div className="hidden md:flex w-32 h-32 rounded-sm items-center justify-center"
+                   style={{ backgroundImage: KEYS_BG }}>
+                <KeyRound size={48} strokeWidth={1.25} aria-hidden="true"
+                          style={{ color: "rgba(255,255,255,0.45)" }} />
+              </div>
             </div>
 
             <div className="tactical-card p-7 lg:col-span-12">

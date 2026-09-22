@@ -118,12 +118,17 @@ def test_01_chef_ist_der_eingetragene_hauptaccount(wegwerf):
 def test_02_chefwechsel_sperre_und_loeschguards(wegwerf):
     db, run = wegwerf.db, wegwerf.run
     src = inspect.getsource(ADMIN.admin_update_user)
-    assert 'acquire(db, f"chefwechsel-{target[\'dealer_id\']}"' in src
+    # Rollenpruefung 22.09.2026 (RP-028): Sperre und Schreiben stehen jetzt in
+    # _chef_befoerdern (Sperre _chefwechsel_sperre, Name unveraendert).
+    befoerdern = inspect.getsource(ADMIN._chef_befoerdern)
+    assert "async with _chefwechsel_sperre(dealer_id)" in befoerdern
+    assert 'name = f"chefwechsel-{dealer_id}"' in inspect.getsource(ADMIN._chefwechsel_sperre)
+    assert "await _chef_befoerdern(" in src
     # Nachpruefung 20.09.2026: die vier Schritte stehen jetzt in _wechseln()
     # unter EINER Transaktion, also eine Ebene tiefer eingerueckt. Geprueft
     # wird deshalb die Aussage statt der Einrueckung: alle uebrigen
     # dealer-Konten der Firma werden zu Suchern — und zwar in einem Zug.
-    ohne_raum = " ".join(src.split())
+    ohne_raum = " ".join(befoerdern.split())
     assert '"id": {"$ne": target["id"]}}, {"$set": {"role": "sucher"' in ohne_raum
     assert "await transaktion(" in ohne_raum, (
         "der Chefwechsel laeuft nicht mehr als EIN Vorgang")

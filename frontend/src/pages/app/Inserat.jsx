@@ -6,10 +6,12 @@ import { api, errMsg, openAuthedFile } from "@/lib/api";
 import { openContractPdf } from "@/lib/pdf";
 import { thumbSrc, thumbFehler, verkleinereBildDatei } from "@/lib/bilder";
 import { INSERAT_LABELS } from "@/lib/fahrzeugStatus";
-import { preisAusText, preisText } from "@/lib/preis";
+import { kmAusText, preisAusText, preisText } from "@/lib/preis";
+import { useUngespeichert } from "@/lib/ungespeichert";
 import { toast } from "sonner";
 import {
   ArrowLeft, Camera, CheckCircle2, Undo2, Tag, Globe, EyeOff, Trash2, X, FileText, PenLine,
+  ChevronLeft, ChevronRight, Star,
 } from "lucide-react";
 
 /**
@@ -22,12 +24,187 @@ const fmtEur = (n) => (n == null ? "—" : `${Number(n).toLocaleString("de-DE", 
 
 const STATUS_LABELS = INSERAT_LABELS;
 
+// ---------------------------------------------------------------------------
+// Rollenprüfung 22.09.2026 — reine Hilfsfunktionen (mit vitest geprüft,
+// Inserat.rp_markt_haendler.test.jsx).
+// ---------------------------------------------------------------------------
+
+/** Die Felder, die der Editor bearbeitet — Grundlage für "ungespeichert"
+ *  (RP-044) und für den Abgleich nach Foto-Aktionen (RP-522). */
+export function inseratStand(l) {
+  if (!l) return "";
+  return JSON.stringify({
+    title: l.title ?? "", description: l.description ?? "",
+    known_defects: l.known_defects || [], prices: l.prices || {}, data: l.data || {},
+  });
+}
+
+/** RP-523: Kilometerstand deutsch lesen ("150.000", "150 Tkm") — Fehlertext
+ *  oder "" (leer ist erlaubt). */
+export function kmFehler(data) {
+  const km = data?.mileage;
+  if (km === null || km === undefined || typeof km === "number") return "";
+  return Number.isNaN(kmAusText(km))
+    ? "Bitte den Kilometerstand als Zahl eintragen, z. B. 150.000 oder 150 Tkm."
+    : "";
+}
+
+/** RP-523: Fahrzeugdaten so, wie der Server sie bekommt — der Kilometerstand
+ *  als Zahl ("150 Tkm" → 150000), damit nicht still 150 km daraus werden. */
+export function datenFuerServer(data) {
+  const d = { ...(data || {}) };
+  if (typeof d.mileage === "string") {
+    const km = kmAusText(d.mileage);
+    if (km === null) d.mileage = "";
+    else if (!Number.isNaN(km)) d.mileage = km;
+  }
+  return d;
+}
+
+/** Was "Speichern" an den Server schickt.
+ *  RP-037/136/287/455/091/190/341: Während einer Reservierung lehnt der
+ *  Server Preis, Fahrzeugdaten und Mängel ab (der Käufer ist an das gesehene
+ *  Angebot gebunden). Vorher gingen sie immer mit — jedes Speichern und auch
+ *  "Reservierung aufheben" scheiterten mit 400. Jetzt nur, was erlaubt ist.
+ *  RP-463: `stand` (updated_at) — ein veralteter Tab bekommt 409 statt den
+ *  Live-Stand still zurückzusetzen. RP-458: geleerte Preise gehen als null
+ *  mit und werden entfernt.
+ *  RP-532: Den Foto-Modus schickt der Editor nicht mehr mit (der Umschalter
+ *  ist seit dem 20.09. weg) — sonst konnte ein Speichern kurz nach dem
+ *  Hochladen den vom Server gesetzten Modus "beide" auf "einkauf"
+ *  zurückdrehen, und die neuen Fotos wären beim Käufer wieder unsichtbar. */
+export function speicherDaten(l) {
+  const basis = {
+    title: l.title, description: l.description, costs: l.costs,
+    ...(l.updated_at ? { stand: l.updated_at } : {}),
+  };
+  if (l.status === "reserviert") return basis;
+  return {
+    ...basis,
+    known_defects: (l.known_defects || []).map((m) => String(m).trim()).filter(Boolean),
+    price_public: l.prices?.public ?? null,
+    price_b2b: l.prices?.b2b ?? null,
+    price_network: l.prices?.network ?? null,
+    data: datenFuerServer(l.data),
+  };
+}
+
+/** RP-036: zu lange Beschreibung an einer Zeilen-/Aufzählungs-/Wortgrenze
+ *  kürzen (wie routes/resale._beschreibung_kuerzen), Länge inkl. "…" ≤ max. */
+export function beschreibungKuerzen(text, max) {
+  const t = String(text || "").trim();
+  if (t.length <= max) return t;
+  let schnitt = t.slice(0, max - 1);
+  for (const trenner of ["\n", ", ", " "]) {
+    const pos = schnitt.lastIndexOf(trenner);
+    if (pos >= Math.floor(max / 2)) { schnitt = schnitt.slice(0, pos); break; }
+  }
+  return schnitt.replace(/[\s,;:]+$/, "") + "…";
+}
+
+/** RP-522/RP-045: Nach Foto-Aktionen nur die Foto-Felder vom Server
+ *  übernehmen — vorher ersetzte load() das ganze Formular, und ungespeicherte
+ *  Preise, Beschreibung und Mängel waren weg. Den neuen Stand (updated_at)
+ *  nur übernehmen, wenn sonst niemand die bearbeiteten Felder geändert hat;
+ *  sonst meldet das nächste Speichern zu Recht "inzwischen geändert". */
+export function fotoFelderUebernehmen(alt, neu, basis) {
+  if (!alt) return neu;
+  if (!neu) return alt;
+  const out = {
+    ...alt, photos: neu.photos, photo_urls: neu.photo_urls,
+    einkauf_thumbs: neu.einkauf_thumbs, abholfotos: neu.abholfotos,
+  };
+  if (inseratStand(neu) === basis) out.updated_at = neu.updated_at;
+  return out;
+}
+
+/** RP-469: Foto um eine Stelle verschieben (richtung -1/+1) bzw. mit
+ *  richtung "titel" an den Anfang. Liefert die neue Reihenfolge oder null. */
+export function fotoReihenfolge(keys, key, richtung) {
+  const liste = [...(keys || [])];
+  const i = liste.indexOf(key);
+  if (i < 0) return null;
+  const ziel = richtung === "titel" ? 0 : i + richtung;
+  if (ziel < 0 || ziel >= liste.length || ziel === i) return null;
+  liste.splice(i, 1);
+  liste.splice(ziel, 0, key);
+  return liste;
+}
+
+/** RP-460: Vorschlag für "Verkauft" — der mit dem Käufer vereinbarte Preis
+ *  (akzeptierte Anfrage), sonst der öffentliche Preis. */
+export function verkaufsVorschlag(l) {
+  const v = l?.vereinbarter_preis;
+  if (typeof v === "number" && v > 0) return { betrag: v, vereinbart: true };
+  const p = l?.prices?.public;
+  return { betrag: p != null ? Number(p) : null, vereinbart: false };
+}
+
+/** RP-468: Restlaufzeit ab der ersten Veröffentlichung. */
+export function laufzeitInfo(laufzeitBis, jetzt = new Date()) {
+  if (!laufzeitBis) return null;
+  const ende = new Date(laufzeitBis);
+  if (Number.isNaN(ende.getTime())) return null;
+  const tage = Math.ceil((ende.getTime() - jetzt.getTime()) / 86400000);
+  return { abgelaufen: tage <= 0, tage: Math.max(0, tage),
+           // RP-519: "Läuft ab am TT.MM.JJJJ"
+           datum: ende.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric" }) };
+}
+
+/** RP-521: Der Marktplatz rechnet mit dem NIEDRIGSTEN Preis, den ein Käufer
+ *  sehen darf (öffentlich gilt für alle). Liegt der öffentliche Preis unter
+ *  dem B2B- oder Netzwerkpreis, sehen auch B2B- und Netzwerk-Käufer den
+ *  öffentlichen — der höhere Stufenpreis wirkt dann nicht. "" = kein Hinweis. */
+export function preisStufenHinweis(prices) {
+  const pub = prices?.public;
+  if (!(typeof pub === "number" && pub > 0)) return "";
+  const hoeher = [];
+  if (typeof prices?.b2b === "number" && prices.b2b > pub) hoeher.push("der B2B-Preis");
+  if (typeof prices?.network === "number" && prices.network > pub) hoeher.push("der Netzwerkpreis");
+  if (!hoeher.length) return "";
+  return `Der öffentliche Preis ist niedriger als ${hoeher.join(" und ")}. Käufer sehen immer den `
+    + "niedrigsten für sie zulässigen Preis — hier den öffentlichen.";
+}
+
+/** RP-533: Rückmeldung nach dem Hochladen — Dateien, die der Browser (HEIC)
+ *  oder der Server (kein Bild, zu groß) abgelehnt hat, mit Namen nennen. */
+export function fotoAblehnungText(heic, abgelehnt) {
+  const teile = [];
+  if (heic > 0) teile.push(`${heic} Foto(s) im HEIC-Format übersprungen — bitte als JPG speichern`);
+  if (abgelehnt?.length) {
+    const namen = abgelehnt.slice(0, 3).map((a) => `${a.name || "Foto"}: ${a.grund}`).join("; ");
+    teile.push(`${abgelehnt.length} Foto(s) abgelehnt (${namen}${abgelehnt.length > 3 ? "; …" : ""})`);
+  }
+  return teile.join(". ");
+}
+
+/** Rollenprüfung 22.09.2026 (RP-057 b): Einkaufspreis noch offen — mehrere
+ *  Kaufverträge verschiedener Konten mit verschiedenen Preisen, nichts
+ *  abgeholt. Der Server liefert dann purchase_price null und
+ *  purchase_price_quelle "mehrdeutig" (keine Summe, keine Marge). */
+export function einkaufspreisOffen(margin) {
+  return margin?.purchase_price_quelle === "mehrdeutig" && margin?.purchase_price == null;
+}
+
+/** Lesbarer Anfragestatus für die Karte im Editor (vorher der rohe Code). */
+const ANFRAGE_STATUS = {
+  offen: "offen", gegenangebot: "dein Gegenangebot", gegenangebot_kaeufer: "Gegenangebot Käufer",
+  akzeptiert: "angenommen", abgelehnt: "beendet",
+};
+
 export default function Inserat() {
   const { id } = useParams();
   const nav = useNavigate();
   const [l, setL] = useState(null);
   const [busy, setBusy] = useState(false);
   const [abholBusy, setAbholBusy] = useState(false);
+  const [fotoBusy, setFotoBusy] = useState(false);   // RP-469: Umsortieren läuft
+  // Rollenprüfung 22.09.2026 (Review): Statuswechsel läuft — sperrt alle
+  // Status-Knöpfe bis der neue Stand geladen ist (vorher schickte ein
+  // Doppelklick einen zweiten Wechsel mit dem alten angezeigten Status).
+  // Die Ref fängt Klicks ab, die vor dem nächsten Rendern ankommen.
+  const [statusBusy, setStatusBusy] = useState(false);
+  const statusLaeuft = useRef(false);
   // U-103/H35: waehrend des Hochladens gesperrt (kein zweiter Upload parallel)
   const [ladeHoch, setLadeHoch] = useState(false);
   // Wunsch Ahmad 14.09.2026: Beim Inserieren soll der Chef das unterschriebene
@@ -43,10 +220,15 @@ export default function Inserat() {
   // Sucher, 500, Funkloch) liess die Seite fuer immer auf "lade…" stehen —
   // ohne Text, ohne Rueckweg, ohne neuen Versuch.
   const [ladeFehler, setLadeFehler] = useState("");
+  // Rollenprüfung 22.09.2026 (RP-044): zuletzt geladener bzw. gespeicherter
+  // Stand der bearbeiteten Felder — weicht das Formular davon ab, gilt die
+  // Seite als ungespeichert (Rückfrage vor dem Verlassen).
+  const basisRef = useRef("");
   const load = useCallback(async () => {
     try {
       const r = await api.get(`/resale/${id}`);
       setLadeFehler("");
+      basisRef.current = inseratStand(r.data);
       setL(r.data);
     } catch (e) {
       const status = e?.response?.status;
@@ -80,6 +262,27 @@ export default function Inserat() {
       setL((s) => (s ? { ...s, photo_urls: r.data?.photo_urls || [] } : s));
     } catch { /* bleibt beim leeren Rahmen */ }
   }, [id]);
+
+  // RP-522/RP-045: nach Foto-Aktionen nur die Foto-Felder nachladen —
+  // ungespeicherte Eingaben bleiben stehen.
+  const fotosNeuLaden = useCallback(async () => {
+    try {
+      const r = await api.get(`/resale/${id}`);
+      setL((s) => fotoFelderUebernehmen(s, r.data, basisRef.current));
+    } catch { /* Anzeige bleibt beim letzten Stand */ }
+  }, [id]);
+
+  // RP-044: ungespeicherte Änderungen — Browser fragt vor Neuladen/Schließen,
+  // der Link zurück zur Akte fragt selbst (die Seitenleiste: Übergabe an
+  // AppLayout, siehe Bericht).
+  const geaendert = !!l && l.status !== "verkauft" && !!basisRef.current
+    && inseratStand(l) !== basisRef.current;
+  useUngespeichert(geaendert);
+  const wegNavigieren = (e) => {
+    if (geaendert && !window.confirm("Es gibt ungespeicherte Änderungen am Inserat. Trotzdem verlassen?")) {
+      e.preventDefault();
+    }
+  };
 
   // Eingabetext je Preisfeld (so, wie getippt) — gezeigt wird der Text, gerechnet
   // mit der gelesenen Zahl in l.prices.
@@ -140,25 +343,40 @@ export default function Inserat() {
     .filter(([, text]) => String(text || "").trim() && preisAusText(text) === null)
     .map(([k]) => k);
 
+  const reserviert = l.status === "reserviert";
+
   const save = async (extra = {}) => {
-    const ezFehler = monatJahrFehler(l.data?.first_registration);
-    if (ezFehler) { toast.error(`Erstzulassung: ${ezFehler}`); return false; }
-    if (preisFehler.length) {
-      toast.error("Bitte die Preise als Zahl eintragen, z. B. 20.900 oder 20900.");
+    // RP-037: Preis, Fahrzeugdaten und Mängel gehen während einer
+    // Reservierung nicht mit — dann auch nicht vorher prüfen.
+    if (!reserviert) {
+      const ezFehler = monatJahrFehler(l.data?.first_registration);
+      if (ezFehler) { toast.error(`Erstzulassung: ${ezFehler}`); return false; }
+      if (preisFehler.length) {
+        toast.error("Bitte die Preise als Zahl eintragen, z. B. 20.900 oder 20900.");
+        return false;
+      }
+      const km = kmFehler(l.data);
+      if (km) { toast.error(km); return false; }
+    }
+    // RP-036/135/286: Der Server nimmt höchstens BESCHREIBUNG_MAX Zeichen.
+    // Ältere Entwürfe sind länger (maxLength kürzt vorhandenen Text nicht) —
+    // vorher endete jedes Speichern mit einer englischen 422-Meldung.
+    const text = l.description || "";
+    if (text.length > BESCHREIBUNG_MAX) {
+      if (window.confirm(`Die Beschreibung ist ${text.length} Zeichen lang, erlaubt sind `
+          + `${BESCHREIBUNG_MAX}.\n\nJetzt auf ${BESCHREIBUNG_MAX} Zeichen kürzen? `
+          + "Bitte den gekürzten Text danach prüfen und erneut speichern.")) {
+        setL((s) => ({ ...s, description: beschreibungKuerzen(s.description, BESCHREIBUNG_MAX) }));
+        toast.message("Beschreibung gekürzt — bitte prüfen und erneut speichern.");
+      } else {
+        toast.error(`Bitte die Beschreibung auf höchstens ${BESCHREIBUNG_MAX} Zeichen kürzen.`);
+      }
       return false;
     }
     setBusy(true);
     try {
-      const r = await api.put(`/resale/${l.id}`, {
-        title: l.title, description: l.description,
-        known_defects: l.known_defects,
-        photo_mode: l.photos?.mode,
-        price_public: l.prices?.public, price_b2b: l.prices?.b2b,
-        price_network: l.prices?.network,
-        costs: l.costs,
-        data: l.data,
-        ...extra,
-      });
+      const r = await api.put(`/resale/${l.id}`, { ...speicherDaten(l), ...extra });
+      basisRef.current = inseratStand(r.data);
       setL(r.data);
       toast.success("Gespeichert");
       return true;
@@ -167,20 +385,56 @@ export default function Inserat() {
   };
 
   const setStatus = async (status, soldPrice) => {
-    if (busy) return;
-    if (status === "verkaufsbereit" && !(await save())) return;
+    if (busy || statusLaeuft.current) return;
+    // Rollenprüfung 22.09.2026 (Review): selbst sperren, bis der neue Stand
+    // geladen ist — vorher prüfte setStatus nur busy, setzte es aber nie.
+    statusLaeuft.current = true;
+    setStatusBusy(true);
     try {
-      await api.post(`/resale/${l.id}/status`, { status, sold_price: soldPrice });
-      toast.success(`Status: ${STATUS_LABELS[status] || status}`);
-      load();
-    } catch (e) { toast.error(errMsg(e)); }
+      // RP-455: "Reservierung aufheben" speichert vorher nur, was während der
+      // Reservierung erlaubt ist (speicherDaten) — vorher scheiterte es immer.
+      if (status === "verkaufsbereit" && !(await save())) return;
+      try {
+        // RP-492: angezeigten Status mitschicken — hat inzwischen ein Käufer
+        // reserviert, antwortet der Server 409 statt die Reservierung zu treffen.
+        await api.post(`/resale/${l.id}/status`, { status, sold_price: soldPrice, von_status: l.status });
+        toast.success(`Status: ${STATUS_LABELS[status] || status}`);
+        await load();
+      } catch (e) {
+        toast.error(errMsg(e));
+        if (e?.response?.status === 409) await load();
+      }
+    } finally {
+      statusLaeuft.current = false;
+      setStatusBusy(false);
+    }
+  };
+  // Status-Knöpfe: gesperrt während Speichern oder Statuswechsel.
+  const statusGesperrt = busy || statusBusy;
+
+  // RP-093/192/343: Reservieren von Hand beendet offene Kaufanfragen.
+  const reservierenVonHand = () => {
+    if (!window.confirm("Inserat von Hand reservieren (z. B. für einen Käufer am Telefon)?\n\n"
+        + "Offene Kaufanfragen vom Marktplatz werden dabei beendet.")) return;
+    setStatus("reserviert");
+  };
+
+  // RP-455: Aufheben beendet auch die angenommene Anfrage des Käufers.
+  const reservierungAufheben = () => {
+    if (!window.confirm("Reservierung aufheben?\n\nEine angenommene Kaufanfrage wird dabei "
+        + "beendet, das Inserat steht danach wieder auf „verkaufsbereit“.")) return;
+    setStatus("verkaufsbereit");
   };
 
   // H36/U-104: Der tatsaechliche Verkaufspreis wird deutsch gelesen und vor
   // dem Speichern so angezeigt, wie er verstanden wurde ("20.900" -> 20.900 €).
+  // RP-460: Vorschlag ist der mit dem Käufer vereinbarte Preis, falls es einen gibt.
   const verkauftMelden = () => {
-    const vorschlag = l.prices?.public != null ? Number(l.prices.public).toLocaleString("de-DE") : "";
-    const roh = window.prompt("Tatsächlicher Verkaufspreis in € (z. B. 20.900):", vorschlag);
+    const { betrag, vereinbart } = verkaufsVorschlag(l);
+    const vorschlag = betrag != null ? Number(betrag).toLocaleString("de-DE") : "";
+    const roh = window.prompt(vereinbart
+      ? `Tatsächlicher Verkaufspreis in € (mit dem Käufer vereinbart: ${preisText(betrag)}):`
+      : "Tatsächlicher Verkaufspreis in € (z. B. 20.900):", vorschlag);
     if (roh === null) return;
     if (!roh.trim()) {
       if (window.confirm("Ohne Verkaufspreis als verkauft markieren?")) setStatus("verkauft", null);
@@ -195,12 +449,17 @@ export default function Inserat() {
     setStatus("verkauft", preis);
   };
 
+  // RP-093/192/343 (e): Der Dialog versprach "jederzeit wieder
+  // veröffentlichen" — gelöscht ist aber endgültig (der Server setzt
+  // "geloescht"), und das Kontingent zählt weiter.
   const removeListing = async () => {
     if (!window.confirm(
-      "Inserat wirklich löschen?\n\nHinweis: Bereits veröffentlichte Inserate "
-      + "können jederzeit wieder veröffentlicht werden.")) return;
+      "Inserat endgültig löschen?\n\nEs verschwindet vom Marktplatz und lässt sich nicht "
+      + "wiederherstellen; offene Kaufanfragen werden beendet. Bereits veröffentlichte "
+      + "Inserate zählen im laufenden Monat weiter auf dein Kontingent.")) return;
     try {
       await api.delete(`/resale/${l.id}`);
+      basisRef.current = "";
       toast.success("Inserat gelöscht");
       nav("/app/bestand");
     } catch (e) { toast.error(errMsg(e)); }
@@ -208,10 +467,27 @@ export default function Inserat() {
 
   const publish = async (visibility = "public") => {
     if (busy) return;
+    // RP-467: Öffentliche Inserate sehen Käufer nur bei öffentlichem
+    // Marktplatz-Profil. Vorher kam "veröffentlicht", obwohl bei neuen Firmen
+    // niemand außer dem eigenen Netzwerk das Inserat sah.
+    if (visibility === "public" && l.marktplatz_profil_oeffentlich === false) {
+      if (!window.confirm("Dein Marktplatz-Profil ist noch nicht öffentlich — ein öffentliches "
+          + "Inserat sähen dann nur deine Netzwerk-Partner.\n\nProfil jetzt öffentlich schalten "
+          + "und veröffentlichen?\n(Abbrechen = nichts veröffentlichen)")) return;
+      try {
+        await api.put("/dealer/marketplace-profile", { public: true });
+        setL((s) => (s ? { ...s, marktplatz_profil_oeffentlich: true } : s));
+      } catch (e) {
+        toast.error(errMsg(e, "Das Marktplatz-Profil konnte nicht öffentlich geschaltet werden"));
+        return;
+      }
+    }
     if (!(await save())) return;           // zuerst aktuellen Stand sichern (v.a. Preis)
     try {
-      await api.post(`/resale/${l.id}/publish`, { visibility });
-      toast.success("Auf dem Marktplatz veröffentlicht");
+      const r = await api.post(`/resale/${l.id}/publish`, { visibility });
+      if (r.data?.hinweis) toast.warning(r.data.hinweis);
+      else toast.success(visibility === "private"
+        ? "Für dein Netzwerk veröffentlicht" : "Auf dem Marktplatz veröffentlicht");
       load();
     } catch (e) {
       // 402 = kein Verkaufspaket / Kontingent voll -> aussagekräftige Meldung
@@ -253,44 +529,68 @@ export default function Inserat() {
       toast.message(`Es werden ${frei} von ${files.length} Fotos übernommen (maximal ${FOTOS_MAX} je Inserat).`);
     }
     setLadeHoch(true);
+    let fertig = 0;
+    let gesamt = 0;
+    let heic = 0;
+    const abgelehnt = [];                  // RP-533: vom Server übersprungene Fotos
     try {
-      const photos = [];
+      const photos = [];                   // { bild, name }
       let zuGross = 0;
       for (const f of auswahl) {
-        const bild = await verkleinereBildDatei(f);
+        // RP-533: HEIC u. ä. kann der Browser nicht umwandeln und der Server
+        // nicht annehmen — die Datei überspringen statt die ganze Auswahl
+        // abzubrechen. Andere Fehler brechen wie bisher ab.
+        let bild;
+        try {
+          bild = await verkleinereBildDatei(f);
+        } catch (err) {
+          if (err?.name === "BildFormatFehler") { heic += 1; continue; }
+          throw err;
+        }
         if (String(bild || "").length > EINZELFOTO_ZEICHEN_MAX) { zuGross += 1; continue; }
-        photos.push(bild);
+        photos.push({ bild, name: f?.name || "" });
       }
       if (zuGross) {
-        toast.warning(`${zuGross} Foto(s) zu groß und nicht verkleinerbar (z. B. HEIC) — bitte als JPG aufnehmen oder speichern.`);
+        toast.warning(`${zuGross} Foto(s) zu groß und nicht verkleinerbar — bitte als JPG aufnehmen oder speichern.`);
       }
+      gesamt = photos.length;
       // Pakete: hoechstens FOTOS_JE_PAKET Fotos UND hoechstens PAKET_ZEICHEN_MAX.
       const pakete = [];
       let aktuell = [];
       let groesse = 0;
-      for (const bild of photos) {
-        const n = String(bild).length;
+      for (const foto of photos) {
+        const n = String(foto.bild).length;
         if (aktuell.length && (aktuell.length >= FOTOS_JE_PAKET || groesse + n > PAKET_ZEICHEN_MAX)) {
           pakete.push(aktuell);
           aktuell = [];
           groesse = 0;
         }
-        aktuell.push(bild);
+        aktuell.push(foto);
         groesse += n;
       }
       if (aktuell.length) pakete.push(aktuell);
-      let fertig = 0;
       for (const paket of pakete) {
-        await api.post(`/resale/${l.id}/photos`, { photos_b64: paket });
-        fertig += paket.length;
+        const r = await api.post(`/resale/${l.id}/photos`, { photos_b64: paket.map((p) => p.bild) });
+        // RP-533: einzelne unbrauchbare Fotos lehnt der Server jetzt je Foto
+        // ab (statt das ganze Paket) — die Stelle im Paket nennt die Datei.
+        const weg = Array.isArray(r?.data?.abgelehnt) ? r.data.abgelehnt : [];
+        weg.forEach((a) => abgelehnt.push({ name: paket[a?.index]?.name || "", grund: a?.grund || "" }));
+        fertig += paket.length - weg.length;
       }
       if (fertig) toast.success(`${fertig} Foto(s) hochgeladen`);
-      load();
     } catch (e) {
-      toast.error(e?.response?.status === 413
+      const grund = e?.response?.status === 413
         ? "Die Fotos sind zu groß für eine Übertragung — bitte weniger Fotos auf einmal hochladen."
-        : errMsg(e));
+        : errMsg(e);
+      // RP-045/144 (1): Scheiterte ein späteres Paket, fehlte der Hinweis,
+      // dass die ersten schon oben sind — und die Ansicht zeigte sie nicht.
+      toast.error(fertig ? `${fertig} von ${gesamt} Fotos hochgeladen, der Rest nicht: ${grund}` : grund);
     } finally {
+      const hinweis = fotoAblehnungText(heic, abgelehnt);
+      if (hinweis) toast.warning(hinweis);
+      // RP-522: nur die Foto-Felder nachladen (auch nach einem Teilfehler) —
+      // vor dem Freigeben, damit ein Speichern den neuen Stand mitschickt.
+      await fotosNeuLaden();
       setLadeHoch(false);
     }
   };
@@ -301,19 +601,46 @@ export default function Inserat() {
     setAbholBusy(true);
     try {
       const r = await api.post(`/resale/${l.id}/photos/aus-abholbericht`, {});
-      toast.success(`${r.data?.uebernommen || 0} Foto(s) vom Fahrer übernommen`);
-      await load();
+      // RP-090/340: übersprungene (Datei weg) und nicht mehr passende Fotos nennen
+      const zusatz = [
+        r.data?.fehlend ? `${r.data.fehlend} nicht mehr vorhanden` : "",
+        r.data?.kein_platz ? `${r.data.kein_platz} ohne freien Platz (max. ${FOTOS_MAX})` : "",
+      ].filter(Boolean).join(", ");
+      toast.success(`${r.data?.uebernommen || 0} Foto(s) vom Fahrer übernommen${zusatz ? ` — ${zusatz}` : ""}`);
     } catch (e) { toast.error(errMsg(e)); }
-    finally { setAbholBusy(false); }
+    finally {
+      await fotosNeuLaden();               // RP-522: Eingaben bleiben stehen
+      setAbholBusy(false);
+    }
+  };
+
+  // RP-469: Reihenfolge / Titelbild (das erste Foto ist das Titelbild).
+  const fotoVerschieben = async (key, richtung) => {
+    const neu = fotoReihenfolge(l.photos?.uploaded_keys, key, richtung);
+    if (!neu || fotoBusy) return;
+    setFotoBusy(true);
+    try {
+      const r = await api.post(`/resale/${l.id}/photos/reihenfolge`, { keys: neu });
+      setL((s) => ({ ...s, photos: { ...s.photos, uploaded_keys: r.data?.uploaded_keys || neu } }));
+      if (richtung === "titel") toast.success("Titelbild geändert");
+    } catch (e) { toast.error(errMsg(e)); }
+    finally {
+      await fotosNeuLaden();
+      setFotoBusy(false);
+    }
   };
 
   const margin = l.margin || {};
-  const inputCls = "w-full rounded-lg border bg-transparent px-3 py-2 text-sm outline-none focus:border-white/40";
+  // Rollenprüfung 22.09.2026 (RP-057 b): Einkaufspreis noch nicht eindeutig
+  const einkaufOffen = einkaufspreisOffen(margin);
+  const inputCls ="w-full rounded-lg border bg-transparent px-3 py-2 text-sm outline-none focus:border-white/40";
   const st = { borderColor: "var(--border-default)" };
   const removePhoto = async (which) => {
     if (!window.confirm(which.key
         ? "Dieses hochgeladene Bild endgültig löschen?"
         : "Dieses Einkaufsfoto aus dem Inserat entfernen?\n(Das Original bleibt in der Fahrzeugakte.)")) return;
+    if (fotoBusy) return;
+    setFotoBusy(true);
     try {
       const r = await api.post(`/resale/${l.id}/photos/remove`, which);
       setL((s) => ({ ...s, photos: { ...s.photos,
@@ -322,8 +649,10 @@ export default function Inserat() {
       toast.success("Bild entfernt" + (l.status === "veroeffentlicht" ? " — Änderung ist sofort live" : ""));
       // Pruefbericht 20.09.2026 (U-96): die Vorschaubilder (einkauf_thumbs)
       // haengen am Index — ohne Neuladen waren sie danach verschoben.
-      load();
+      // RP-522: nur die Foto-Felder, ungespeicherte Eingaben bleiben.
+      await fotosNeuLaden();
     } catch (e) { toast.error(errMsg(e)); }
+    finally { setFotoBusy(false); }
   };
 
   const einkaufFotos = l.photos?.einkauf_urls || [];
@@ -331,10 +660,17 @@ export default function Inserat() {
   // Signierte, kurzlebige Links (Audit 09/2026) — Fallback nur fuer alte Antworten
   const fotoUrl = (k) => (l.photo_urls || []).find((p) => p.key === k)?.url || `${backend}/api/files/${k}`;
   const mode = l.photos?.mode || "einkauf";
+  const abgeschlossen = ["verkauft", "geloescht"].includes(l.status);
+  // RP-468: Laufzeit ab der ersten Veröffentlichung
+  const laufzeit = laufzeitInfo(l.laeuft_ab_am ?? l.laufzeit_bis);
+  const erneutGesperrt = !!laufzeit?.abgelaufen && ["zurueckgezogen", "verkaufsbereit"].includes(l.status);
+  // RP-037: während einer Reservierung sind Preis, Daten und Mängel gesperrt
+  const gesperrt = l.status === "verkauft" || reserviert;
 
   return (
     <div className="p-3 sm:p-6 lg:p-10 max-w-5xl mx-auto" data-testid="inserat-page">
-      <Link to={`/app/akte/${l.vehicle_id}`} className="inline-flex items-center gap-1.5 text-xs text-zinc-400 hover:text-white">
+      <Link to={`/app/akte/${l.vehicle_id}`} onClick={wegNavigieren}
+            className="inline-flex items-center gap-1.5 text-xs text-zinc-400 hover:text-white">
         <ArrowLeft size={14} /> Zur Fahrzeugakte
       </Link>
       {unterlagen && (unterlagen.protocols.length > 0 || unterlagen.contracts.length > 0) && (
@@ -374,78 +710,110 @@ export default function Inserat() {
         </div>
         <div className="flex flex-wrap gap-2">
           {l.status === "entwurf" && (
-            <button onClick={() => setStatus("verkaufsbereit")} disabled={busy}
-                    className="inline-flex items-center gap-1.5 rounded-xl px-4 py-2.5 text-sm font-semibold text-white"
+            <button onClick={() => setStatus("verkaufsbereit")} disabled={statusGesperrt}
+                    className="inline-flex items-center gap-1.5 rounded-xl px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
                     style={{ background: "var(--accent-red)" }}>
               <CheckCircle2 size={16} /> Verkaufsbereit machen
             </button>
           )}
           {l.status === "verkaufsbereit" && (
             <>
-              <button onClick={() => publish("public")} disabled={busy}
-                      className="inline-flex items-center gap-1.5 rounded-xl px-4 py-2.5 text-sm font-semibold text-white"
+              <button onClick={() => publish("public")} disabled={statusGesperrt || erneutGesperrt}
+                      className="inline-flex items-center gap-1.5 rounded-xl px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
                       style={{ background: "var(--accent-red)" }}>
                 <Globe size={16} /> Öffentlich veröffentlichen
               </button>
-              <button onClick={() => publish("private")} disabled={busy}
+              <button onClick={() => publish("private")} disabled={statusGesperrt || erneutGesperrt}
                       title="Nur für eingeladene Netzwerk-Partner sichtbar"
-                      className="inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold border"
+                      className="inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold border disabled:opacity-50"
                       style={st}>
                 <EyeOff size={14} /> Nur Netzwerk (privat)
               </button>
-              <button onClick={() => setStatus("reserviert")} className="rounded-xl px-3 py-2 text-xs border" style={st}>Reservieren</button>
+              <button onClick={reservierenVonHand} disabled={statusGesperrt} className="rounded-xl px-3 py-2 text-xs border disabled:opacity-50" style={st}>Reservieren</button>
               <button onClick={() => {
                         verkauftMelden();
-                      }}
-                      className="inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold text-white"
+                      }} disabled={statusGesperrt}
+                      className="inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold text-white disabled:opacity-50"
                       style={{ background: "var(--st-gruen)" }}>
                 <Tag size={13} /> Verkauft
               </button>
-              <button onClick={() => setStatus("entwurf")} className="rounded-xl px-3 py-2 text-xs text-zinc-400 hover:text-white inline-flex items-center gap-1"><Undo2 size={13} /> Zurück zu Entwurf</button>
+              <button onClick={() => setStatus("entwurf")} disabled={statusGesperrt} data-testid="inserat-zurueck-entwurf" className="rounded-xl px-3 py-2 text-xs text-zinc-400 hover:text-white inline-flex items-center gap-1 disabled:opacity-50"><Undo2 size={13} /> Zurück zu Entwurf</button>
             </>
           )}
           {l.status === "veroeffentlicht" && (
             <>
               <span className="inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold"
                     style={{ background: "#34c75920", color: "var(--st-gruen)", border: "1px solid #34c75955" }}>
-                <Globe size={14} /> Live auf dem Marktplatz
+                <Globe size={14} /> {l.visibility === "private" ? "Live für dein Netzwerk" : "Live auf dem Marktplatz"}
               </span>
-              <button onClick={() => setStatus("reserviert")} className="rounded-xl px-3 py-2 text-xs border" style={st}>Reservieren</button>
+              <button onClick={reservierenVonHand} disabled={statusGesperrt} className="rounded-xl px-3 py-2 text-xs border disabled:opacity-50" style={st}>Reservieren</button>
               <button onClick={() => {
                         verkauftMelden();
-                      }}
-                      className="inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold text-white"
+                      }} disabled={statusGesperrt}
+                      className="inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold text-white disabled:opacity-50"
                       style={{ background: "var(--st-gruen)" }}>
                 <Tag size={13} /> Verkauft
               </button>
-              <button onClick={() => setStatus("zurueckgezogen")} className="rounded-xl px-3 py-2 text-xs text-zinc-400 hover:text-white inline-flex items-center gap-1">
+              <button onClick={() => setStatus("zurueckgezogen")} disabled={statusGesperrt} data-testid="inserat-vom-marktplatz"
+                      className="rounded-xl px-3 py-2 text-xs text-zinc-400 hover:text-white inline-flex items-center gap-1 disabled:opacity-50">
                 <EyeOff size={13} /> Vom Marktplatz nehmen
               </button>
             </>
           )}
           {l.status === "zurueckgezogen" && (
             <>
-              <button onClick={() => publish("public")} disabled={busy}
-                      className="inline-flex items-center gap-1.5 rounded-xl px-4 py-2.5 text-sm font-semibold text-white"
+              {/* RP-091/190/341: vorher immer publish("public") — ein privates
+                  Netzwerk-Inserat wurde beim erneuten Veröffentlichen öffentlich.
+                  Jetzt mit der bisherigen Sichtbarkeit, die andere als zweiter Knopf. */}
+              <button onClick={() => publish(l.visibility === "private" ? "private" : "public")}
+                      disabled={statusGesperrt || erneutGesperrt} data-testid="inserat-erneut-veroeffentlichen"
+                      className="inline-flex items-center gap-1.5 rounded-xl px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
                       style={{ background: "var(--accent-red)" }}>
-                <Globe size={16} /> Erneut veröffentlichen
+                {l.visibility === "private" ? <EyeOff size={16} /> : <Globe size={16} />}
+                {l.visibility === "private" ? " Erneut veröffentlichen (nur Netzwerk)" : " Erneut veröffentlichen (öffentlich)"}
               </button>
-              <button onClick={() => setStatus("verkaufsbereit")} className="rounded-xl px-3 py-2 text-xs border" style={st}>Auf „verkaufsbereit" setzen</button>
+              <button onClick={() => publish(l.visibility === "private" ? "public" : "private")}
+                      disabled={statusGesperrt || erneutGesperrt}
+                      className="inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold border disabled:opacity-50"
+                      style={st}>
+                {l.visibility === "private" ? <><Globe size={14} /> Stattdessen öffentlich</> : <><EyeOff size={14} /> Stattdessen nur Netzwerk</>}
+              </button>
+              <button onClick={() => setStatus("verkaufsbereit")} disabled={statusGesperrt} className="rounded-xl px-3 py-2 text-xs border disabled:opacity-50" style={st}>Auf „verkaufsbereit" setzen</button>
             </>
           )}
           {l.status === "reserviert" && (
             <>
               <button onClick={() => {
                         verkauftMelden();
-                      }}
-                      className="rounded-xl px-4 py-2.5 text-sm font-semibold text-white" style={{ background: "var(--st-gruen)" }}>
+                      }} disabled={statusGesperrt}
+                      className="rounded-xl px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50" style={{ background: "var(--st-gruen)" }}>
                 Als verkauft markieren
               </button>
-              <button onClick={() => setStatus("verkaufsbereit")} className="rounded-xl px-3 py-2 text-xs border" style={st}>Reservierung aufheben</button>
+              <button onClick={reservierungAufheben} disabled={statusGesperrt} data-testid="inserat-reservierung-aufheben"
+                      className="rounded-xl px-3 py-2 text-xs border disabled:opacity-50" style={st}>Reservierung aufheben</button>
             </>
           )}
         </div>
       </div>
+
+      {laufzeit && ["veroeffentlicht", "zurueckgezogen", "verkaufsbereit"].includes(l.status) && (
+        <div className="mt-3 text-[12px]" data-testid="inserat-laufzeit"
+             style={{ color: laufzeit.abgelaufen ? "var(--st-rot)" : "var(--text-muted)" }}>
+          {laufzeit.abgelaufen
+            ? (l.status === "veroeffentlicht"
+              ? "Die Laufzeit ist abgelaufen — das Inserat wird in Kürze automatisch entfernt."
+              : "Die Laufzeit (seit der ersten Veröffentlichung) ist abgelaufen — erneut veröffentlichen geht nicht mehr. Du kannst das Inserat löschen und aus der Fahrzeugakte neu anlegen.")
+            : `Läuft ab am ${laufzeit.datum} (noch ${laufzeit.tage} Tag${laufzeit.tage === 1 ? "" : "e"}) — gezählt ab der ersten Veröffentlichung, danach wird das Inserat automatisch entfernt und laufende Kaufanfragen enden.`}
+        </div>
+      )}
+      {reserviert && (
+        <div className="mt-3 text-[12px]" data-testid="inserat-reserviert-hinweis" style={{ color: "var(--text-muted)" }}>
+          {l.reserviert_manuell ? "Von Hand reserviert." : "Für einen Käufer vom Marktplatz reserviert."}
+          {typeof l.vereinbarter_preis === "number" ? ` Vereinbarter Preis: ${preisText(l.vereinbarter_preis)}.` : ""}
+          {" "}Preis, Fahrzeugdaten und Mängel bleiben während der Reservierung unverändert; Titel,
+          Beschreibung und Fotos kannst du weiter bearbeiten.
+        </div>
+      )}
 
       {(l.auto_notes || []).length > 0 && (
         <div className="mt-3 rounded-xl border px-4 py-3 text-xs space-y-0.5"
@@ -475,7 +843,7 @@ export default function Inserat() {
             <label className="text-[11px] text-zinc-500 mt-3 block">Bekannte Mängel (eine je Zeile)</label>
             <textarea value={(l.known_defects || []).join("\n")}
                       onChange={(e) => setL((s) => ({ ...s, known_defects: e.target.value.split("\n") }))}
-                      rows={4} className={inputCls} style={st} disabled={l.status === "verkauft"} />
+                      rows={4} className={inputCls} style={st} disabled={gesperrt} />
           </div>
 
           {/* Fahrzeugdaten: 1:1 aus der Akte übernommen — vor Veröffentlichung
@@ -493,11 +861,19 @@ export default function Inserat() {
                 <div key={k}>
                   <label className="text-[11px] text-zinc-500">{label}</label>
                   {k === "first_registration" ? (
-                    <MonatJahrEingabe value={String(l.data?.[k] ?? "")} disabled={l.status === "verkauft"}
+                    <MonatJahrEingabe value={String(l.data?.[k] ?? "")} disabled={gesperrt}
                                       onChange={(v) => setL((s) => ({ ...s, data: { ...s.data, [k]: v } }))}
                                       art="ez" className={inputCls} style={st} />
+                  ) : k === "mileage" ? (
+                    // RP-523: deutsch lesen ("150.000", "150 Tkm") und formatiert zeigen
+                    <input value={typeof l.data?.mileage === "number"
+                             ? l.data.mileage.toLocaleString("de-DE") : (l.data?.mileage ?? "")}
+                           disabled={gesperrt} inputMode="numeric" placeholder="z. B. 150.000"
+                           aria-invalid={!!kmFehler(l.data)} data-testid="inserat-km"
+                           onChange={(e) => setL((s) => ({ ...s, data: { ...s.data, mileage: e.target.value } }))}
+                           className={inputCls} style={st} />
                   ) : (
-                    <input value={l.data?.[k] ?? ""} disabled={l.status === "verkauft"}
+                    <input value={l.data?.[k] ?? ""} disabled={gesperrt}
                            onChange={(e) => setL((s) => ({ ...s, data: { ...s.data, [k]: e.target.value } }))}
                            className={inputCls} style={st} />
                   )}
@@ -505,7 +881,7 @@ export default function Inserat() {
               ))}
               <div>
                 <label className="text-[11px] text-zinc-500">Unfallfrei</label>
-                <select value={l.data?.accident_free ?? ""} disabled={l.status === "verkauft"}
+                <select value={l.data?.accident_free ?? ""} disabled={gesperrt}
                         onChange={(e) => setL((s) => ({ ...s, data: { ...s.data, accident_free: e.target.value } }))}
                         className={inputCls + " bg-[var(--bg-elevated)]"} style={st}>
                   <option value="">— bitte angeben —</option>
@@ -523,9 +899,9 @@ export default function Inserat() {
           <div className="tactical-card p-4">
             <div className="flex items-center justify-between">
               <div className="text-sm font-bold uppercase tracking-wide">Fotos</div>
-              <button onClick={() => fileRef.current?.click()}
-                      className="inline-flex items-center gap-1.5 text-xs text-zinc-300 hover:text-white">
-                <Camera size={14} /> Neue Fotos hochladen
+              <button onClick={() => fileRef.current?.click()} disabled={ladeHoch || abgeschlossen}
+                      className="inline-flex items-center gap-1.5 text-xs text-zinc-300 hover:text-white disabled:opacity-50">
+                <Camera size={14} /> {ladeHoch ? "Wird hochgeladen…" : "Neue Fotos hochladen"}
               </button>
               <input ref={fileRef} type="file" accept="image/*" multiple className="hidden"
                      disabled={ladeHoch}
@@ -571,12 +947,48 @@ export default function Inserat() {
                   </button>
                 </div>
               ))}
-              {(mode !== "einkauf") && uploadedKeys.map((k) => (
+              {/* RP-532: eigene Fotos immer zeigen — Altinserate stehen noch auf
+                  photos.mode "einkauf", dort waren sie unsichtbar und nicht löschbar. */}
+              {uploadedKeys.map((k, i) => (
                 <div key={k} className="relative group">
                   <a href={fotoUrl(k)} target="_blank" rel="noreferrer" title="Foto in Originalgröße öffnen">
                     <img src={fotoUrl(k)} alt="" onError={fotoFehler}
                          className="aspect-square w-full object-cover rounded-lg hover:opacity-90 cursor-zoom-in" />
                   </a>
+                  {/* RP-469: Titelbild und Reihenfolge (das erste eigene Foto ist das Titelbild) */}
+                  {i === 0 && uploadedKeys.length > 1 && (
+                    <span className="absolute bottom-1 left-1 rounded px-1.5 py-0.5 text-[10px] font-semibold text-white"
+                          style={{ background: "rgba(0,0,0,0.7)" }} data-testid="foto-titelbild">Titelbild</span>
+                  )}
+                  {!abgeschlossen && uploadedKeys.length > 1 && (
+                    <div className="absolute bottom-1 right-1 flex gap-1">
+                      {i > 0 && (
+                        <button type="button" onClick={() => fotoVerschieben(k, "titel")} disabled={fotoBusy}
+                                title="Als Titelbild verwenden" aria-label="Als Titelbild verwenden"
+                                data-testid={`foto-titel-${k.slice(-8)}`}
+                                className="foto-aktion w-8 h-8 rounded-full flex items-center justify-center text-white transition"
+                                style={{ background: "rgba(0,0,0,0.7)" }}>
+                          <Star size={13} />
+                        </button>
+                      )}
+                      {i > 0 && (
+                        <button type="button" onClick={() => fotoVerschieben(k, -1)} disabled={fotoBusy}
+                                title="Nach vorne" aria-label="Foto nach vorne"
+                                className="foto-aktion w-8 h-8 rounded-full flex items-center justify-center text-white transition"
+                                style={{ background: "rgba(0,0,0,0.7)" }}>
+                          <ChevronLeft size={14} />
+                        </button>
+                      )}
+                      {i < uploadedKeys.length - 1 && (
+                        <button type="button" onClick={() => fotoVerschieben(k, 1)} disabled={fotoBusy}
+                                title="Nach hinten" aria-label="Foto nach hinten"
+                                className="foto-aktion w-8 h-8 rounded-full flex items-center justify-center text-white transition"
+                                style={{ background: "rgba(0,0,0,0.7)" }}>
+                          <ChevronRight size={14} />
+                        </button>
+                      )}
+                    </div>
+                  )}
                   <button onClick={() => removePhoto({ key: k })}
                           data-testid={`foto-del-${k.slice(-8)}`}
                           title="Bild endgültig löschen"
@@ -587,7 +999,7 @@ export default function Inserat() {
                   </button>
                 </div>
               ))}
-              {mode === "neu" && uploadedKeys.length === 0 && (
+              {uploadedKeys.length === 0 && (mode === "neu" || einkaufFotos.length === 0) && (
                 <div className="col-span-full text-xs text-zinc-500 py-4">Noch keine neuen Fotos hochgeladen.</div>
               )}
             </div>
@@ -601,15 +1013,23 @@ export default function Inserat() {
             <label className="text-[11px] text-zinc-500">Verkaufspreis (öffentlich) *</label>
             <input type="text" inputMode="decimal" value={preisEingabe.public ?? ""} onChange={setPrice("public")}
                    aria-invalid={preisFehler.includes("public")}
-                   className={inputCls} style={st} placeholder="20.900" disabled={l.status === "verkauft"} />
+                   className={inputCls} style={st} placeholder="20.900" disabled={gesperrt} />
             <label className="text-[11px] text-zinc-500 mt-2 block">B2B-Preis (optional)</label>
             <input type="text" inputMode="decimal" value={preisEingabe.b2b ?? ""} onChange={setPrice("b2b")}
                    aria-invalid={preisFehler.includes("b2b")}
-                   className={inputCls} style={st} disabled={l.status === "verkauft"} />
+                   className={inputCls} style={st} disabled={gesperrt} />
             <label className="text-[11px] text-zinc-500 mt-2 block">Privater Netzwerkpreis (optional)</label>
             <input type="text" inputMode="decimal" value={preisEingabe.network ?? ""} onChange={setPrice("network")}
                    aria-invalid={preisFehler.includes("network")}
-                   className={inputCls} style={st} disabled={l.status === "verkauft"} />
+                   className={inputCls} style={st} disabled={gesperrt} />
+            {/* RP-458: geleerte optionale Preise werden jetzt wirklich entfernt */}
+            <div className="mt-1 text-[10px] text-zinc-600">Feld leeren und speichern entfernt einen optionalen Preis.</div>
+            {preisStufenHinweis(l.prices) && (
+              <div className="mt-2 text-[11px]" data-testid="inserat-preisstufen-hinweis"
+                   style={{ color: "var(--tx-amber)" }}>
+                {preisStufenHinweis(l.prices)}
+              </div>
+            )}
           </div>
 
           <div className="tactical-card p-4">
@@ -622,18 +1042,31 @@ export default function Inserat() {
                   {margin.purchase_price_quelle === "abgeholt" && <span className="ml-1 text-[11px] text-zinc-500">(bei Abholung)</span>}
                   {margin.purchase_price_quelle === "fahrzeug" && <span className="ml-1 text-[11px] text-zinc-500">(Fahrzeugakte)</span>}
                 </span>
-                <span data-testid="kalkulation-einkaufspreis">{fmtEur(margin.purchase_price)}</span>
+                <span data-testid="kalkulation-einkaufspreis">{einkaufOffen ? "offen" : fmtEur(margin.purchase_price)}</span>
               </div>
+              {/* Rollenprüfung 22.09.2026 (RP-057 b): mehrere offene Kaufverträge
+                  mit verschiedenen Preisen — welcher gilt, zeigt erst die Abholung. */}
+              {einkaufOffen && (
+                <div className="text-[11px]" data-testid="kalkulation-einkauf-offen"
+                     style={{ color: "var(--tx-amber)" }}>
+                  Einkaufspreis offen: mehrere Kaufverträge mit verschiedenen Preisen.
+                  Er steht fest, sobald das Fahrzeug abgeholt ist.
+                </div>
+              )}
               <div className="flex justify-between"><span className="text-zinc-500">Kosten gesamt</span><span>{fmtEur(margin.costs_total)}</span></div>
               <div className="flex justify-between border-t pt-1" style={st}><span className="text-zinc-500">Gesamtkosten</span><span>{fmtEur(margin.total_cost)}</span></div>
               <div className="flex justify-between text-base font-bold pt-1">
-                <span>Erwartete Marge</span>
+                {/* RP-459: brutto gegen brutto, ohne Steuer — ehrlich beschriften */}
+                <span>{l.status === "verkauft" ? "Rohertrag" : "Erwarteter Rohertrag"}</span>
                 {(() => {
                   // M39: Farbe und angezeigter Wert aus DERSELBEN Zahl — vorher
                   // war ein Verlustgeschaeft nach dem Verkauf gruen.
-                  const marge = l.status === "verkauft" && l.sold_price != null
-                    ? l.sold_price - (margin.total_cost || 0)
-                    : margin.expected_margin;
+                  // RP-057 b: ohne feststehenden Einkaufspreis kein Rohertrag
+                  const marge = einkaufOffen
+                    ? null
+                    : l.status === "verkauft" && l.sold_price != null
+                      ? l.sold_price - (margin.total_cost || 0)
+                      : margin.expected_margin;
                   return (
                     <span style={{ color: (marge ?? 0) >= 0 ? "var(--st-gruen)" : "var(--st-rot)" }}>
                       {fmtEur(marge)}
@@ -648,17 +1081,24 @@ export default function Inserat() {
               )}
             </div>
             <div className="mt-2 text-[10px] text-zinc-600">
-              Kosten werden in der Fahrzeugakte gepflegt (Transport, Aufbereitung, …).
+              Kosten werden in der Fahrzeugakte gepflegt (Transport, Aufbereitung, …) und hier
+              laufend übernommen. Rohertrag = Verkaufspreis minus Einkauf und Kosten, brutto —
+              vor Umsatzsteuer bzw. §25a-Differenzsteuer.
             </div>
           </div>
 
           {l.status !== "verkauft" && (
-            <button onClick={() => save()} disabled={busy}
+            <button onClick={() => save()} disabled={busy || ladeHoch || abholBusy || fotoBusy}
+                    data-testid="inserat-speichern"
                     className="w-full rounded-xl py-3 text-sm font-semibold border disabled:opacity-50" style={st}>
-              {busy ? "Speichert…" : "Änderungen speichern"}
+              {busy ? "Speichert…" : geaendert ? "Änderungen speichern •" : "Änderungen speichern"}
             </button>
           )}
-          <AnfragenKarte listingId={id} />
+          {geaendert && !busy && (
+            <div className="-mt-2 text-center text-[11px]" data-testid="inserat-ungespeichert"
+                 style={{ color: "var(--text-muted)" }}>Es gibt ungespeicherte Änderungen.</div>
+          )}
+          <AnfragenKarte listingId={id} onWeg={wegNavigieren} />
 
           {l.status !== "verkauft" && (
             <button onClick={removeListing}
@@ -676,7 +1116,7 @@ export default function Inserat() {
 /** Eingehende Marktplatz-Anfragen zu DIESEM Inserat (beantwortet werden
  *  sie zentral unter /app/anfragen). Sucher bekommen auf dem dealer-only
  *  Endpunkt 403 — die Karte bleibt dann einfach leer. */
-function AnfragenKarte({ listingId }) {
+function AnfragenKarte({ listingId, onWeg }) {
   const [anfragen, setAnfragen] = useState(null);
   useEffect(() => {
     api.get("/dealer/interessen", { params: { listing_id: listingId } })
@@ -693,12 +1133,12 @@ function AnfragenKarte({ listingId }) {
           <div key={a.id} className="flex items-center justify-between gap-2">
             <span className="truncate" style={{ color: "var(--text-secondary)" }}>{a.buyer_name}</span>
             <span className="shrink-0 text-[12px]" style={{ color: "var(--text-muted)" }}>
-              {a.offer != null ? `${Number(a.offer).toLocaleString("de-DE")} €` : "ohne Angebot"} · {a.status}
+              {a.offer != null ? `${Number(a.offer).toLocaleString("de-DE")} €` : "ohne Angebot"} · {ANFRAGE_STATUS[a.status] || a.status}
             </span>
           </div>
         ))}
       </div>
-      <Link to="/app/anfragen"
+      <Link to="/app/anfragen" onClick={onWeg}
             className="mt-3 inline-block text-[12.5px] font-semibold hover:underline"
             style={{ color: "var(--accent-red)" }}>
         {offen > 0 ? `${offen} offene Anfrage(n) beantworten ›` : "Alle Anfragen ansehen ›"}

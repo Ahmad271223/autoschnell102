@@ -219,7 +219,13 @@ def test_03_verpasster_erstvergleich_chef_wird_nicht_mitbearbeiter(welt):
         return k, await w.db.vehicles.find_one({"id": vid}, {"_id": 0})
 
     k, v = w.run(lauf())
-    assert k is None and v["owner_user_id"] == w.a["id"] and "mitbearbeiter_ids" not in v
+    # Rollenprüfung 22.09.2026 (RP-048/RP-538): Der Chef wird weiterhin NICHT
+    # Mitbearbeiter — er bekommt aber den Hinweis auf den Bearbeiter, und das
+    # Fahrzeug ist vor dem Pool-Trimmen des Suchers geschuetzt.
+    assert k == {"user_id": w.a["id"], "name": "Anna A",
+                 "seit": "2026-09-01T10:00:00+00:00", "mitbearbeiter": False}, k
+    assert v["owner_user_id"] == w.a["id"] and "mitbearbeiter_ids" not in v
+    assert v.get("geschuetzt_bis", "") > _jetzt(), v.get("geschuetzt_bis")
 
 
 def test_04_duplicate_key_wird_einmal_wiederholt(welt):

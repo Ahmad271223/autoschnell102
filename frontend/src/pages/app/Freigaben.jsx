@@ -44,24 +44,27 @@ function VergleichZeile({ z }) {
   const ohneVertrag = !z.vertrag_text;
   // "nicht im Vertrag" steht schon links als Platzhalter — nicht doppelt.
   const hinweis = ohneVertrag && z.hinweis === NICHT_IM_VERTRAG ? "" : z.hinweis;
+  // Rollenprüfung 22.09.2026 (RP-465): am Handy Bezeichnung über dem Wert
+  // (eine Spalte), der Wert vor Ort in eigener Zeile und lange Werte (FIN)
+  // umbrechen — vorher liefen zwei FIN nebeneinander aus der Karte.
   return (
-    <div className="grid grid-cols-[minmax(0,9rem)_1fr] gap-x-3 gap-y-0.5 py-1.5 border-b last:border-b-0"
+    <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,9rem)_1fr] gap-x-3 gap-y-0.5 py-1.5 border-b last:border-b-0"
          style={{ borderColor: "var(--wa-06)" }}
          data-testid={`vergleich-${z.schluessel}`}>
       <div className="text-[11px] text-zinc-500 pt-0.5">{z.label}</div>
-      <div className="text-[13px] min-w-0">
+      <div className="text-[13px] min-w-0 [overflow-wrap:anywhere]">
         <span className={rot && !ohneVertrag ? "text-zinc-500 line-through" : "text-zinc-300"}
               data-testid={`vergleich-${z.schluessel}-vertrag`}>
           {z.vertrag_text || <i className="not-italic text-zinc-600">{NICHT_IM_VERTRAG}</i>}
         </span>
         {(rot || (z.vor_ort_text && z.vor_ort_text !== z.vertrag_text)) && (
-          <>
-            <span className="mx-1.5 text-zinc-500">→</span>
+          <span className="block sm:inline">
+            <span className="mr-1.5 sm:mx-1.5 text-zinc-500">→</span>
             <b style={{ color: rot ? "var(--st-amber)" : "var(--text-strong)" }}
                data-testid={`vergleich-${z.schluessel}-vor-ort`}>
               {z.vor_ort_text || "—"}
             </b>
-          </>
+          </span>
         )}
         {hinweis && (
           <span className="ml-2 text-[11px]" style={{ color: rot ? "var(--st-amber)" : "var(--text-dim)" }}>
@@ -110,8 +113,8 @@ function Vergleich({ eintrag }) {
         <div className="rounded-lg px-3 py-1"
              style={{ background: wichtig.some((z) => z.abweichend) ? "#ff9f0a10" : "var(--wa-03)",
                       border: `1px solid ${wichtig.some((z) => z.abweichend) ? "#ff9f0a44" : "var(--wa-06)"}` }}>
-          <div className="grid grid-cols-[minmax(0,9rem)_1fr] gap-x-3 pt-1.5 pb-1 text-[10px] uppercase tracking-wider text-zinc-500">
-            <span />
+          <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,9rem)_1fr] gap-x-3 pt-1.5 pb-1 text-[10px] uppercase tracking-wider text-zinc-500">
+            <span className="hidden sm:block" />
             <span>laut Vertrag → vor Ort</span>
           </div>
           {sichtbar.map((z) => <VergleichZeile key={z.schluessel} z={z} />)}
@@ -124,6 +127,104 @@ function Vergleich({ eintrag }) {
       </button>
     </div>
   );
+}
+
+/** Rollenprüfung 22.09.2026 (RP-453): Zusatz hinter dem Fahrer-Vorschlag. */
+export function vorschlagHinweis(e, freigegeben) {
+  if (e?.preis_vorschlag_verworfen) return " — verworfen (auf Vertragspreis zurückgesetzt)";
+  if (e?.neuer_preis == null && !freigegeben) return " — gilt, wenn du ohne eigenen Preis freigibst";
+  // Rollenprüfung 22.09.2026 (RP-080/179): Der geltende Preis stammt aus einem
+  // früheren Vorschlag des Fahrers, jetzt schlägt er einen anderen vor — der
+  // neue ersetzt ihn bei der Freigabe ohne eigenen Preis (wie im Backend).
+  if (e?.preis_quelle === "fahrer" && e?.neuer_preis != null && e?.preis_vorschlag_fahrer != null
+      && Math.abs(Number(e.preis_vorschlag_fahrer) - Number(e.neuer_preis)) > 0.004) {
+    return " — ersetzt den bisherigen Fahrer-Preis, wenn du ohne eigenen Preis freigibst";
+  }
+  return "";
+}
+
+/**
+ * Rollenprüfung 22.09.2026 (RP-146): Was geht als Vermerk mit? Das Feld zeigt
+ * den gespeicherten Vermerk, solange nichts getippt wurde. undefined = nicht
+ * senden (Vermerk bleibt), "" = leeren (nur wenn einer gespeichert ist), sonst
+ * der getippte Text. Bei „Zurück an den Fahrer“ ist der Text die Rückfrage —
+ * dort zählt nur Getipptes.
+ */
+export function notizFuerSenden(eigener, e, { zurueck = false } = {}) {
+  if (!eigener || !Object.prototype.hasOwnProperty.call(eigener, "notiz")) return undefined;
+  const text = String(eigener.notiz ?? "").trim();
+  if (text) return text;
+  return !zurueck && e?.preis_notiz ? "" : undefined;
+}
+
+/**
+ * Ungespeicherte Eingaben? Ein getippter Preis immer; ein Vermerk nur, wenn er
+ * vom gespeicherten abweicht (RP-146: das Feld zeigt den gespeicherten
+ * Vermerk — auch ein geleerter zählt als Änderung).
+ */
+export function entwurfUngespeichert(entwurf, liste) {
+  const gespeichert = new Map((liste || []).map((e) => [e.protocol_id, e.preis_notiz || ""]));
+  return Object.entries(entwurf || {}).some(([id, x]) => {
+    if (String(x?.preis ?? "").trim()) return true;
+    if (!x || !Object.prototype.hasOwnProperty.call(x, "notiz")) return false;
+    return String(x.notiz ?? "").trim() !== String(gespeichert.get(id) ?? "").trim();
+  });
+}
+
+/*
+ * Rollenprüfung 22.09.2026 (RP-499): Ein getippter Verhandlungspreis sollte
+ * „Zurück an den Fahrer“ überstehen. laden() verwarf aber alle Entwürfe, deren
+ * Protokoll nicht mehr in der Liste stand — und nach dem Zurückschicken ist das
+ * Protokoll ein Entwurf des Fahrers, also nicht in der Liste. Beim erneuten
+ * Einreichen war das Feld leer, und die Freigabe galt mit Vertrags- bzw.
+ * Fahrerpreis. Jetzt wird der Preis beim Zurückschicken gemerkt (im Browser,
+ * je Protokoll, höchstens 7 Tage) und wieder eingesetzt, sobald das Protokoll
+ * erneut wartet.
+ */
+const PREIS_MERKER_SCHLUESSEL = "freigaben_preis_zurueck";
+const PREIS_MERKER_TAGE = 7;
+
+function preisMerkerLesen() {
+  try {
+    const roh = JSON.parse(window.localStorage.getItem(PREIS_MERKER_SCHLUESSEL) || "{}");
+    return roh && typeof roh === "object" ? roh : {};
+  } catch { return {}; }
+}
+
+function preisMerkerSchreiben(merker) {
+  try {
+    if (Object.keys(merker).length) {
+      window.localStorage.setItem(PREIS_MERKER_SCHLUESSEL, JSON.stringify(merker));
+    } else {
+      window.localStorage.removeItem(PREIS_MERKER_SCHLUESSEL);
+    }
+  } catch { /* privates Fenster / gesperrter Speicher: dann ohne Merker */ }
+}
+
+/**
+ * Entwürfe mit der neu geladenen Liste abgleichen (rein, ohne Seiteneffekte).
+ * ids: Protokolle, die jetzt warten. gemerkt: {protocol_id: {preis, am}}.
+ * Liefert { entwurf, gemerkt } — Entwürfe verschwundener Protokolle fallen weg
+ * (keine dauerhafte „ungespeichert“-Warnung), gemerkte Preise kommen zurück,
+ * sobald ihr Protokoll wieder wartet; Merker älter als 7 Tage verfallen.
+ */
+export function entwuerfeAbgleichen(entwurf, ids, gemerkt, jetztMs = Date.now()) {
+  const neu = {};
+  for (const [id, wert] of Object.entries(entwurf || {})) {
+    if (ids.has(id)) neu[id] = wert;
+  }
+  const rest = {};
+  const grenze = jetztMs - PREIS_MERKER_TAGE * 24 * 3600 * 1000;
+  for (const [id, m] of Object.entries(gemerkt || {})) {
+    if (!m || typeof m !== "object" || !(Number(m.am) >= grenze)) continue;
+    if (ids.has(id)) {
+      const vorhanden = String(neu[id]?.preis ?? "").trim();
+      if (!vorhanden && String(m.preis ?? "").trim()) neu[id] = { ...neu[id], preis: String(m.preis) };
+      continue;   // eingesetzt (oder schon neu getippt) — Merker erledigt
+    }
+    rest[id] = m;
+  }
+  return { entwurf: neu, gemerkt: rest };
 }
 
 function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
@@ -222,9 +323,11 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
           </div>
           <div className="text-[11px] flex-1 min-w-[160px]">
             <label className="text-zinc-500">Vermerk (erscheint im Protokoll)</label>
+            {/* Rollenprüfung 22.09.2026 (RP-146): gespeicherter Vermerk steht im
+                Feld und lässt sich leeren (vorher nie mehr löschbar). */}
             <input type="text" maxLength={200}
                    data-testid={`freigabe-notiz-${e.protocol_id}`}
-                   value={meinEntwurf.notiz ?? ""}
+                   value={"notiz" in meinEntwurf ? (meinEntwurf.notiz ?? "") : (e.preis_notiz || "")}
                    onChange={(ev) => setzen("notiz", ev.target.value)}
                    placeholder="z. B. Rost am Schweller"
                    className="mt-1 w-full rounded-lg border bg-transparent px-2.5 py-1.5 text-sm outline-none focus:border-white/40"
@@ -235,7 +338,10 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
         {e.preis_vorschlag_fahrer != null && (
           <div className="mt-2 text-[12px] text-amber-300" data-testid={`freigabe-vorschlag-${e.protocol_id}`}>
             Vorschlag des Fahrers vor Ort: {eur(e.preis_vorschlag_fahrer)}
-            {e.neuer_preis == null && !freigegeben ? " — gilt, wenn du ohne eigenen Preis freigibst" : ""}
+            {/* Rollenprüfung 22.09.2026 (RP-453): nach „auf Vertragspreis
+                zurücksetzen“ gilt der Vorschlag nicht mehr — auch nicht beim
+                nächsten „Preis aktualisieren“ ohne eigenen Preis. */}
+            {vorschlagHinweis(e, freigegeben)}
           </div>
         )}
         {e.sondervereinbarung && (
@@ -305,10 +411,14 @@ export default function Freigaben() {
       // Gegenpruefung 12.09.2026: Entwuerfe zu Protokollen, die nicht mehr
       // warten (abgeschlossen, zurueckgeschickt), verwerfen — sonst hielten
       // unsichtbare Eingaben die Warnung "ungespeichert" dauerhaft aktiv.
+      // Rollenprüfung 22.09.2026 (RP-499): beim Zurückschicken gemerkte Preise
+      // wieder einsetzen, sobald das Protokoll erneut wartet.
       const ids = new Set(neu.map((x) => x.protocol_id));
+      const gemerkt = preisMerkerLesen();
+      preisMerkerSchreiben(entwuerfeAbgleichen({}, ids, gemerkt).gemerkt);
       setEntwurf((s) => {
-        const behalten = Object.entries(s).filter(([id]) => ids.has(id));
-        return behalten.length === Object.keys(s).length ? s : Object.fromEntries(behalten);
+        const erg = entwuerfeAbgleichen(s, ids, gemerkt).entwurf;
+        return JSON.stringify(erg) === JSON.stringify(s) ? s : erg;
       });
     } catch (e) {
       setLadeFehler(errMsg(e, "Freigaben konnten nicht geladen werden"));
@@ -327,8 +437,8 @@ export default function Freigaben() {
   }, [laden]);
 
   const ungespeichert = useMemo(
-    () => Object.values(entwurf).some((x) => String(x?.preis ?? "").trim() || String(x?.notiz ?? "").trim()),
-    [entwurf]);
+    () => entwurfUngespeichert(entwurf, liste),
+    [entwurf, liste]);
   useUngespeichert(ungespeichert);
 
   const senden = async (e, { zurueck = false, preis_zuruecksetzen = false } = {}) => {
@@ -349,10 +459,18 @@ export default function Freigaben() {
       }
       // Der Vermerk geht mit der Freigabe ins Protokoll bzw. als Rueckfrage an
       // den Fahrer — beim Zuruecksetzen des Preises wird er nicht verwendet.
-      if (!preis_zuruecksetzen && String(eigener.notiz ?? "").trim() !== "") {
-        koerper.notiz = String(eigener.notiz).trim();
-      }
+      // Rollenprüfung 22.09.2026 (RP-146): ein geleerter Vermerk geht als ""
+      // mit (der Server entfernt ihn), ein unberührtes Feld gar nicht.
+      const notiz = preis_zuruecksetzen ? undefined : notizFuerSenden(eigener, e, { zurueck });
+      if (notiz !== undefined) koerper.notiz = notiz;
       await api.post(`/protocols/${id}/freigabe`, koerper);
+      if (zurueck && String(eigener.preis ?? "").trim()) {
+        // Rollenprüfung 22.09.2026 (RP-499): getippten Preis merken — laden()
+        // verwirft den Entwurf gleich (das Protokoll wartet nicht mehr).
+        const m = preisMerkerLesen();
+        m[id] = { preis: String(eigener.preis).trim(), am: Date.now() };
+        preisMerkerSchreiben(m);
+      }
       toast.success(zurueck ? "Zurück an den Fahrer geschickt"
         : preis_zuruecksetzen ? "Verhandelter Preis entfernt — es gilt wieder der Vertragspreis"
           : "Freigegeben — der Fahrer kann jetzt unterschreiben lassen");

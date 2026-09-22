@@ -326,8 +326,11 @@ def test_14_anlegen_ohne_kaeufername_422_vorschau_bleibt_erlaubt(welt, monkeypat
     C = _module("routes.contracts")
     w = welt
     vid = f"v_r24a_{w.s}"
+    # Rollenpruefung 22.09.2026 (RP-113): der Sucher hat das Inserat verglichen
+    # (Mitbearbeiter) — sonst gibt es fuer ihn gar keinen Vertrag (404).
     w.run(w.db.vehicles.insert_one({"id": vid, "dealer_id": w.leer_id,
                                     "lifecycle": "verglichen", "status": "verglichen",
+                                    "mitbearbeiter_ids": [w.sucher_leer["id"]],
                                     "data": {"make_label": "BMW", "model_label": "320d"},
                                     "created_at": _jetzt()}))
 

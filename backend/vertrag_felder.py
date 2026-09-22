@@ -29,7 +29,10 @@ def _apply_contract_overrides(*, contract: dict, vehicle: dict, dealer: dict) ->
     So bleibt der bestehende PDF-Code unverändert.
 
     Werte werden NUR überschrieben, wenn der Händler im Dialog tatsächlich
-    etwas eingetragen hat (nicht None und nicht leer-string)."""
+    etwas eingetragen hat (nicht None und nicht leer-string) — Ausnahme seit
+    22.09.2026 (RP-404): bei den Fahrzeugfeldern (Menge `leerbar`) heisst
+    ein leerer Text "im Vertrag bewusst leer"; nur None/fehlend faellt auf
+    das Inserat zurueck. Kaeuferfelder bleiben bei "leer = Profilwert"."""
     v = dict(vehicle or {})
     d = dict(dealer or {})
 
@@ -63,7 +66,13 @@ def _apply_contract_overrides(*, contract: dict, vehicle: dict, dealer: dict) ->
     # (vorbelegt aus dem Inserat). Ein bewusst geleertes Feld heisst "keine
     # FIN" — vorher machte take() daraus None, und die Inserats-FIN stand
     # wieder im Vertrag.
-    leerbar = {"vehicle_vin"}
+    # Rollenpruefung 22.09.2026 (RP-404): dasselbe gilt fuer ALLE Fahrzeug-
+    # felder, die der Dialog vorbelegt und immer mitschickt (Kilometerstand,
+    # Erstzulassung, Farbe, …): "" = im Vertrag bewusst leer, None bzw. ein
+    # fehlendes Feld (Altvertrag, anderer Client) = Wert aus dem Inserat.
+    # Vorher kam z. B. ein geleerter Kilometerstand still aus dem Inserat
+    # zurueck. Das Kennzeichen steht seit 15.09. nicht mehr im Vertrag.
+    leerbar = set(veh_map) - {"vehicle_license_plate"}
     for src, targets in veh_map.items():
         val = take(src)
         if val is None:

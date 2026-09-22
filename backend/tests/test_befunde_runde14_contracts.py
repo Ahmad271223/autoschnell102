@@ -282,8 +282,12 @@ def test_73_list_contracts_limit_2000_mit_kopfzeile():
     import routes.contracts as cm
     assert cm.CONTRACTS_LIST_MAX == 2000
     quelle = inspect.getsource(cm.list_contracts)
-    assert "to_list(CONTRACTS_LIST_MAX + 1)" in quelle
+    # Rollenpruefung 22.09.2026 (RP-007): ohne `limit` weiter hoechstens 2.000
+    # (grenze = limit or CONTRACTS_LIST_MAX), mit `limit` seitenweise.
+    assert "grenze = limit or CONTRACTS_LIST_MAX" in quelle
+    assert "to_list(grenze + 1)" in quelle
     assert 'response.headers["X-Truncated"]' in quelle
+    assert 'response.headers["X-Next-Before"]' in quelle
 
 
 # =============================================================== HTTP

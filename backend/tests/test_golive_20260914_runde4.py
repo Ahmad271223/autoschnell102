@@ -184,8 +184,10 @@ def test_l6_vertrag_lebenszyklus_nacharbeit_und_versionen(welt, monkeypatch):
     chef = {**w.chef, "active": True}
 
     def _vertrag(vid, key):
+        # Rollenpruefung 22.09.2026 (RP-416): zu diesem Fahrzeug gibt es schon
+        # einen offenen Vertrag des Chefs — bewusst ein weiterer.
         return C.ContractIn(vehicle_id=vid, seller_name="Vera", purchase_price=12000,
-                            idempotency_key=key)
+                            idempotency_key=key, zweiter_vertrag_bestaetigt=True)
     # L6-1: Fahrzeug wird waehrend der PDF-Erzeugung verkauft
     from pymongo import MongoClient
     import os as _os

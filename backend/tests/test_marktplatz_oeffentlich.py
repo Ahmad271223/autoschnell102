@@ -154,9 +154,11 @@ def test_04_haendlerseite_ohne_anmeldung(welt):
     ids = {l.get("id") for l in (r.json().get("listings") or [])}
     assert welt["oeffentlich"] in ids
     assert welt["privat"] not in ids, "privates Inserat auf der Haendlerseite sichtbar"
-    # Nicht oeffentlicher Haendler bleibt gesperrt
+    # Nicht oeffentlicher Haendler bleibt gesperrt — Rollenprüfung 22.09.2026
+    # (RP-098 Nr. 11): 404 wie "unbekannt", damit sich nicht pruefen laesst,
+    # ob es die Firma gibt (vorher 403 "privat").
     r = requests.get(f"{API}/marktplatz/haendler/{welt['h2']['dealer_id']}", timeout=30)
-    assert r.status_code == 403, r.text[:200]
+    assert r.status_code == 404, r.text[:200]
 
 
 def test_05_merken_und_anfragen_brauchen_weiterhin_anmeldung(welt):
@@ -167,9 +169,16 @@ def test_05_merken_und_anfragen_brauchen_weiterhin_anmeldung(welt):
     assert r.status_code in (401, 403), r.text[:200]
 
 
-def test_06_kaputtes_token_gilt_als_nicht_angemeldet(welt):
+def test_06_kaputtes_token_wird_gemeldet_ohne_token_oeffentlich(welt):
+    """Rollenprüfung 22.09.2026 (RP-530): Ein mitgeschicktes, aber ungueltiges
+    Token (Sitzung verdraengt/abgemeldet) galt vorher still als "nicht
+    angemeldet" — die Liste lud ohne Netzwerk-Inserate, der Kaeufer merkte
+    nichts. Jetzt 401 (die Kaeufer-App meldet ab und nennt den Grund); ohne
+    Token bleibt der Marktplatz oeffentlich."""
     r = requests.get(f"{API}/marktplatz/listings",
                      headers={"Authorization": "Bearer unsinn"}, timeout=30)
+    assert r.status_code == 401, r.text[:200]
+    r = requests.get(f"{API}/marktplatz/listings", timeout=30)
     assert r.status_code == 200, r.text[:200]
     assert welt["privat"] not in _ids(r)
 
@@ -190,7 +199,7 @@ def test_08_kaeufer_ohne_netzwerk_sieht_nichts_privates(welt):
     assert welt["h2_inserat"] not in ids
     r = requests.get(f"{API}/marktplatz/haendler/{welt['h2']['dealer_id']}",
                      headers=welt["kaeufer"], timeout=30)
-    assert r.status_code == 403
+    assert r.status_code == 404     # RP-098 Nr. 11: privat wie unbekannt
 
 
 def test_09_privates_inserat_nicht_ueber_die_id_erreichbar(welt):
@@ -225,7 +234,7 @@ def test_11_einladung_gilt_nur_fuer_diesen_haendler(welt):
     assert welt["h2_inserat"] not in ids
     r = requests.get(f"{API}/marktplatz/haendler/{welt['h2']['dealer_id']}",
                      headers=welt["kaeufer"], timeout=30)
-    assert r.status_code == 403
+    assert r.status_code == 404     # RP-098 Nr. 11: privat wie unbekannt
 
 def test_13_werbetexte_nennen_keinen_festen_preis():
     """Regressionsschutz im Frontend: der Preis darf nicht wieder fest im

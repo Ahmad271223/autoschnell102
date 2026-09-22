@@ -39,7 +39,7 @@ export function useTheme() {
   return theme;
 }
 
-export default function ThemeToggle() {
+export default function ThemeToggle({ variante = "segment" } = {}) {
   const [theme, setTheme] = useState(() => {
     if (typeof document === "undefined") return "dark";
     return document.documentElement.getAttribute("data-theme") || "dark";
@@ -51,6 +51,27 @@ export default function ThemeToggle() {
   }, [theme]);
 
   const toggle = () => setTheme((t) => (t === "light" ? "dark" : "light"));
+
+  if (variante === "symbol") {
+    // Rollenprüfung 22.09.2026 (RP-024/M-19): In der 64 px schmalen
+    // Seitenleiste ragte der Zwei-Segment-Schalter (~90 px) heraus. Dort
+    // steht jetzt ein runder Knopf mit dem Symbol des Ziel-Designs.
+    const hell = theme === "light";
+    return (
+      <button
+        type="button"
+        onClick={toggle}
+        data-testid="theme-toggle"
+        aria-pressed={hell}
+        aria-label={hell ? "Helles Design aktiv — auf dunkles wechseln" : "Dunkles Design aktiv — auf helles wechseln"}
+        title={hell ? "Auf dunkles Design wechseln" : "Auf helles Design wechseln"}
+        className="w-9 h-9 rounded-full flex items-center justify-center hover:bg-white/5"
+        style={{ color: "var(--text-secondary)", border: "1px solid var(--border-default)" }}
+      >
+        {hell ? <Moon size={15} /> : <Sun size={15} />}
+      </button>
+    );
+  }
 
   return (
     <button

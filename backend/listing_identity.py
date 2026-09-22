@@ -186,6 +186,31 @@ _EXTRACTORS = {
 }
 
 
+# Rollenprüfung 22.09.2026 (RP-409): "Teilen" aus der Kleinanzeigen- bzw.
+# mobile.de-App liefert Text MIT Link ("Schau mal: https://…"). Der ganze Text
+# ging als Adresse durch — urlparse fand kein Schema, jeder solche Link endete
+# mit 400. Aus einem Text wird deshalb die erste unterstuetzte Inserats-Adresse
+# gezogen; Satzzeichen am Ende gehoeren nicht zur Adresse.
+_RE_URL_IM_TEXT = re.compile(r"https?://[^\s<>\"'“”„«»]+", re.IGNORECASE)
+_URL_ENDE_WEG = ".,;:!?)]}>'\"“”„«»"
+
+
+def inserats_url_aus_text(text):
+    """Reine Adresse -> unveraendert (nur getrimmt). Text mit Adresse -> die
+    erste Adresse einer unterstuetzten Quelle (ohne Satzzeichen am Ende).
+    Nichts gefunden -> der getrimmte Text (die Pruefung meldet dann den Fehler)."""
+    if not isinstance(text, str):
+        return text
+    t = text.strip()
+    if not t or re.fullmatch(r"(?i)https?://\S+", t):
+        return t
+    for m in _RE_URL_IM_TEXT.finditer(t):
+        kandidat = m.group(0).rstrip(_URL_ENDE_WEG)
+        if detect_source(kandidat):
+            return kandidat
+    return t
+
+
 def get_listing_identity(url: str) -> dict:
     """
     Gibt {"source", "item_id", "cache_key"} zurück.
@@ -208,6 +233,17 @@ def get_listing_identity(url: str) -> dict:
         raise ListingIdentityError(
             f"Konnte keine Inserats-ID aus {source}-URL extrahieren: {url!r}"
         )
+    # Rollenprüfung 22.09.2026 (RP-205/RP-356): Angenommen wurden alle
+    # AutoScout-Laender (.com/.it/.fr/.nl ...), der Abruf-Dienst liest aber nur
+    # Inserate unter "/angebote/" (autoscout_service.detail_looks_like_
+    # autoscout_listing). Alles andere lief in drei Job-Versuche und endete als
+    # "Technischer Fehler". Jetzt sofort eine klare Meldung (HTTP 400).
+    if source == "autoscout24" and "/angebote/" not in (urlparse(url).path or "").lower():
+        raise ListingIdentityError(
+            "Dieser AutoScout24-Link kann nicht gelesen werden: Bitte den Link eines "
+            "einzelnen Inserats von autoscout24.de oder autoscout24.at verwenden "
+            "(Adresse mit „/angebote/“). Auslandsseiten (/offers/, /annunci/ …) "
+            "werden nicht unterstützt.")
 
     return {
         "source": source,
@@ -381,6 +417,16 @@ async def store_client_listing(db, url: str, data: dict, dealer_id: str,
     identity = get_listing_identity(url)
     cache_key = identity["cache_key"]
     now = datetime.now(timezone.utc)
+    # Rollenprüfung 22.09.2026 (RP-442): Ein ABGELAUFENER eigener Eintrag,
+    # den der TTL-Monitor (laeuft etwa minuetlich) noch nicht entfernt hat,
+    # blockierte das $setOnInsert unten — die neue Einreichung wurde still
+    # verworfen, und der Vergleich verlangte erneut die Erweiterung. Nur der
+    # abgelaufene Eintrag wird ersetzt; ein gueltiger bleibt (first-wins).
+    await db.listings_cache_client.update_one(
+        {"cache_key": cache_key, "dealer_id": dealer_id, "expires_at": {"$lte": now}},
+        {"$set": {"data": data, "url": url, "zuletzt_gesehen": now,
+                  "expires_at": now + timedelta(hours=ttl_hours),
+                  "created_at": now}})
     # Runde 19 (Nr. 22): first-wins ATOMAR — die Daten stehen nur im
     # $setOnInsert. Zwei gleichzeitige erste Einreichungen liessen sonst die
     # spaetere gewinnen (Vorpruefung und Upsert waren zwei Schritte).

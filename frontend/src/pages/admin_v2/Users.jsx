@@ -26,6 +26,15 @@ function kontoZusatz(u) {
   return [person, u.username, u.email].filter(Boolean).join(" · ");
 }
 
+// Rollenpruefung 22.09.2026 (RP-033/RP-132): Chef ist der eingetragene
+// Hauptaccount der Firma (Server-Feld `ist_chef`), nicht jedes Konto mit
+// Rolle "dealer". Aeltere Server ohne das Feld: Rolle wie bisher.
+export function istChefKonto(u) {
+  if (!u) return false;
+  if (typeof u.ist_chef === "boolean") return u.ist_chef;
+  return u.role === "dealer";
+}
+
 // Haendler-Hauptaccount: das Backend verlangt eine ausdrueckliche
 // Bestaetigung (?firma_loeschen=true), weil dabei die KOMPLETTE Firma
 // entfernt wird. Vorher zeigen wir die Loeschvorschau des Backends.
@@ -37,7 +46,7 @@ async function deleteUserSmart(u) {
     // Pruefbericht 20.09.2026 (AD-09): 409 kommt auch fuer einen Sucher,
     // dessen Firma keinen Hauptaccount hat — dann NICHT die Rueckfrage
     // "komplette Firma loeschen", sondern der echte Grund.
-    if (e?.response?.status !== 409 || u.role !== "dealer") throw e;
+    if (e?.response?.status !== 409 || !istChefKonto(u)) throw e;
   }
   let vorschau = "";
   try {
@@ -119,7 +128,8 @@ export default function AdminUsers() {
 
   const toggleActive = async (u) => {
     if (u.active) {
-      const firma = u.role === "dealer";
+      // RP-033: nur der Hauptchef sperrt die ganze Firma (Server-Regel)
+      const firma = istChefKonto(u);
       const text = firma
         ? `Firma "${kontoLabel(u)}" komplett sperren?\n\nDer Chef UND alle Sucher dieser Firma werden sofort abgemeldet und koennen sich nicht mehr anmelden (auch die kostenlosen Bereiche). Das ist etwas anderes als "Abo aufheben" (nur Suche/Vergleich).`
         : `Konto "${kontoLabel(u)}" sperren?\n\nAnmeldung wird sofort unmoeglich, die Sitzung beendet. "Abo aufheben" (nur Suche/Vergleich) findest du in der Firmenansicht.`;
@@ -222,6 +232,11 @@ export default function AdminUsers() {
                       {u.kunden_nr != null && <Badge tone="blue">#{u.kunden_nr}</Badge>}
                       {u.role === "admin" && <Badge tone="purple">Admin</Badge>}
                       {u.role === "sucher" && <Badge>Sucher</Badge>}
+                      {u.role === "dealer" && !istChefKonto(u) && (
+                        <span title="Altbestand: Rolle „dealer“, aber nicht der eingetragene Chef — arbeitet als Sucher">
+                          <Badge>weiteres Konto (Sucher)</Badge>
+                        </span>
+                      )}
                       {u.role === "b2b_buyer" && <Badge>Zwischenhändler</Badge>}
                       {u.is_super_admin && <Crown size={13} className="text-amber-400" />}
                       {u.active === false ? <Badge tone="red">Gesperrt</Badge> : <Badge tone="green">Aktiv</Badge>}

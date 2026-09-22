@@ -295,6 +295,8 @@ services:
       # Pruefbericht 20.09.2026 (DP-03): vom Code ueber konfig.zahl_env u. a.
       # gelesen, erreichten den Container aber nicht (Vorgabewerte = Code)
       - DATEI_LINK_TTL_SEKUNDEN=${DATEI_LINK_TTL_SEKUNDEN:-3600}
+      # Rollenprüfung 22.09.2026 (RP-098 Nr. 8): Inseratsfotos (resale/) 24 h
+      - DATEI_LINK_TTL_INSERAT_SEKUNDEN=${DATEI_LINK_TTL_INSERAT_SEKUNDEN:-86400}
       - MAX_IMAGE_EDGE=${MAX_IMAGE_EDGE:-1600}
       - BEWEIS_FOTO_KANTE_ERSTE=${BEWEIS_FOTO_KANTE_ERSTE:-1000}
       - BEWEIS_FOTO_KANTE=${BEWEIS_FOTO_KANTE:-640}
@@ -347,6 +349,36 @@ services:
       - WARTUNG_FRIST_MIN=${WARTUNG_FRIST_MIN:-}
       - BACKUP_SNAPSHOT_VERSUCHE=${BACKUP_SNAPSHOT_VERSUCHE:-}
       - BACKUP_SNAPSHOT_PAUSE_S=${BACKUP_SNAPSHOT_PAUSE_S:-}
+      # Rollenprüfung 22.09.2026 (RP-552): ab so vielen Sekunden Rueckstand
+      # des Mehrheits-Commitpunkts (prod2 ausgefallen) liest die Sicherung vom
+      # Primary statt aus einem veralteten Snapshot und meldet sich als
+      # INKONSISTENT (Betriebsalarm). Leer = 600 s.
+      - BACKUP_MEHRHEIT_RUECKSTAND_MAX_S=${BACKUP_MEHRHEIT_RUECKSTAND_MAX_S:-}
+      # RP-245: der Restore wartet nach dem Wartungsmodus auf laufende Arbeiten
+      # (mindestens / hoechstens, Sekunden; leer = 6 / 180).
+      - RESTORE_AUSLAUF_MIN_S=${RESTORE_AUSLAUF_MIN_S:-}
+      - RESTORE_AUSLAUF_MAX_S=${RESTORE_AUSLAUF_MAX_S:-}
+      # RP-394: /api/ready warnt, wenn der letzte VOLLSTAENDIGE Aufraeumlauf
+      # laenger als so viele Stunden her ist.
+      - AUFRAEUMLAUF_WARN_H=${AUFRAEUMLAUF_WARN_H:-3}
+      # RP-543: Gnadenfrist (Minuten) ohne Zwei-Faktor fuer den ERSTEN, frisch
+      # angelegten Betreiber — sonst kommt bei einer Neuinstallation niemand
+      # hinein, um den zweiten Faktor einzurichten.
+      - SEED_MFA_FRIST_MIN=${SEED_MFA_FRIST_MIN:-60}
+      # RP-550: Zeitlimits fuer den Objektspeicher (R2/S3) und eigene Threads
+      # fuer Dateizugriffe (Standard 5 s Verbindung, 30 s Lesen, 2 Versuche,
+      # 16 Threads) — ein haengender Speicher blockiert so nicht mehr Anmeldung
+      # und PDF-Erzeugung.
+      - S3_VERBINDUNG_TIMEOUT_S=${S3_VERBINDUNG_TIMEOUT_S:-5}
+      - S3_LESE_TIMEOUT_S=${S3_LESE_TIMEOUT_S:-30}
+      - S3_VERSUCHE=${S3_VERSUCHE:-2}
+      # Rollenpruefung 22.09.2026 (Review): die Sicherungsskripte (Offsite-
+      # Upload, Datei-Sicherung) laufen NICHT mit den knappen Werten oben,
+      # sondern mit eigenen (10 s Verbindung, 120 s Lesen, 5 Wiederholungen).
+      - BACKUP_S3_VERBINDUNG_TIMEOUT_S=${BACKUP_S3_VERBINDUNG_TIMEOUT_S:-10}
+      - BACKUP_S3_LESE_TIMEOUT_S=${BACKUP_S3_LESE_TIMEOUT_S:-120}
+      - BACKUP_S3_VERSUCHE=${BACKUP_S3_VERSUCHE:-5}
+      - SPEICHER_THREADS=${SPEICHER_THREADS:-16}
       # Datei-Speicher (19.09.2026): Speicher-zu-Speicher in den Sicherungs-
       # Bucket statt Spiegel auf die Platte (leer = bucket, sobald
       # BACKUP_S3_BUCKET gesetzt ist).
@@ -360,6 +392,11 @@ services:
       - APIFY_TOKEN=${APIFY_TOKEN:-}
       - APIFY_MOBILE_ACTOR=${APIFY_MOBILE_ACTOR:-}
       - APIFY_AUTOSCOUT_ACTOR=${APIFY_AUTOSCOUT_ACTOR:-}
+      # Rollenpruefung 22.09.2026 (RP-553, mobile_service.apify_lauf_parameter):
+      # Speicher je Actor-Lauf (MB) und feste Actor-Version; leer = wie bisher.
+      - APIFY_MEMORY_MB=${APIFY_MEMORY_MB:-}
+      - APIFY_MOBILE_BUILD=${APIFY_MOBILE_BUILD:-}
+      - APIFY_AUTOSCOUT_BUILD=${APIFY_AUTOSCOUT_BUILD:-}
       - MOBILE_API_USER=${MOBILE_API_USER:-}
       - MOBILE_API_PASS=${MOBILE_API_PASS:-}
       - PROXY_URL=${PROXY_URL:-}

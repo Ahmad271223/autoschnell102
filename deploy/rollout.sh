@@ -352,8 +352,25 @@ echo "== 6/6 Abschlusspruefung von aussen (ueber Cloudflare und Load Balancer, w
 #   - Ein automatischer Drain waere wieder ein Drain, den man vergessen kann.
 # Wer den Server trotzdem herausnehmen will, tut das bewusst von Hand
 # (touch deploy/drain/aktiv, Freigabe spaeter mit sh deploy/freigeben.sh).
+
+# Rollenpruefung 22.09.2026 (RP-559): Jedes Rollout baut neue Images
+# ("up -d --build"), die alten blieben fuer immer liegen — bei heutigem
+# Tempo rund 2 GB im Monat, die Platte waere nach gut einem Jahr voll, und
+# /api/ready meldet das erst unter MIN_FREI_MB. Nach einem ERFOLGREICHEN
+# Rollout werden deshalb nur verwaiste Images (ohne Namen, von keinem
+# Container benutzt) und Bau-Zwischenstaende aelter als 7 Tage entfernt.
+# Laufende Images und die Bau-Zwischenstaende der letzten Woche bleiben —
+# ein Rollback per "git reset --hard" + "up -d --build" (DEPLOYMENT.md)
+# baut also weiterhin schnell. Fehler hier brechen nichts ab.
+alte_images_aufraeumen() {
+    echo "   Alte Docker-Images aufraeumen (verwaiste Images, Bau-Reste aelter als 7 Tage) ..."
+    docker image prune -f >/dev/null 2>&1 || echo "   Hinweis: 'docker image prune' fehlgeschlagen — spaeter von Hand (DEPLOYMENT.md, 'Speicher voll')."
+    docker builder prune -f --filter until=168h >/dev/null 2>&1 || true
+}
+
 if [ "$OHNE_AUSSENPROBE" = 1 ]; then
     trap - EXIT INT TERM
+    alte_images_aufraeumen
     echo "ACHTUNG: Abschlusspruefung von aussen UEBERSPRUNGEN (OHNE_AUSSENPROBE=1, bewusst gesetzt)."
     echo "   Vor dem anderen Server von Hand ausfuehren und nur bei 'ERGEBNIS: ... 0 Fehler' weitermachen:"
     echo "     $PROBE_BEFEHL"
@@ -405,6 +422,7 @@ if [ "$PROBE_RC" != 0 ]; then
     echo "   (falls dort noch nicht ausgerollt)."
     exit 3
 fi
+alte_images_aufraeumen
 if [ -n "$ZWISCHEN" ]; then
     echo "FERTIG auf $(hostname) (erster Server, Zwischenstand geprueft) — jetzt 'sh deploy/rollout.sh' OHNE ERSTER_SERVER auf dem anderen Server; dort wird streng geprueft."
 else

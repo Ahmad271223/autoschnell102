@@ -16,7 +16,7 @@
 // Fahrzeuge von vor der Umstellung haben evtl. noch einen alten Snapshot —
 // der wird angezeigt, solange er existiert (er verfaellt nach 60 Tagen bzw.
 // mit dem Kaufvertrag).
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, errMsg, openAuthedFile } from "@/lib/api";
 import { printBlobUrl } from "@/lib/pdf";
 import { AlertTriangle, CheckCircle2, ExternalLink, FileText, Loader2, Printer, ShieldCheck } from "lucide-react";
@@ -70,8 +70,46 @@ async function pdfDrucken(id) {
   }
 }
 
-export default function BeweisCard({ beweis: start, beweisId, vehicleId, cacheKey,
-                                    compact = false }) {
+/**
+ * Rollenprüfung 22.09.2026 (RP-007/RP-106/RP-257): Ist das Element (bald)
+ * sichtbar? Im Vertragsarchiv stellte JEDE Karte sofort zwei Anfragen
+ * (/beweise und /snapshots) — bei vielen Verträgen tausende. Mit `aktiv`
+ * wartet die Karte, bis sie in die Nähe des Bildschirms kommt (400 px
+ * Vorlauf). Ohne IntersectionObserver (alte Browser, Tests): sofort sichtbar.
+ */
+export function useSichtbar(aktiv) {
+  const ref = useRef(null);
+  const [sichtbar, setSichtbar] = useState(!aktiv);
+  useEffect(() => {
+    if (!aktiv || sichtbar) return undefined;
+    const el = ref.current;
+    if (!el || typeof IntersectionObserver === "undefined") {
+      setSichtbar(true);
+      return undefined;
+    }
+    const beobachter = new IntersectionObserver((eintraege) => {
+      if (eintraege.some((e) => e.isIntersecting)) {
+        setSichtbar(true);
+        beobachter.disconnect();
+      }
+    }, { rootMargin: "400px 0px" });
+    beobachter.observe(el);
+    return () => beobachter.disconnect();
+  }, [aktiv, sichtbar]);
+  return [ref, sichtbar];
+}
+
+export default function BeweisCard({ lazy = false, ...props }) {
+  // RP-007: Platzhalter, bis die Karte sichtbar wird — erst dann laden.
+  const [ref, sichtbar] = useSichtbar(lazy);
+  if (!sichtbar) {
+    return <div ref={ref} data-testid="beweis-wartet" style={{ minHeight: 20 }} />;
+  }
+  return <BeweisCardInhalt {...props} />;
+}
+
+function BeweisCardInhalt({ beweis: start, beweisId, vehicleId, cacheKey,
+                            compact = false }) {
   const [beweis, setBeweis] = useState(start || null);
   const [altSnapshot, setAltSnapshot] = useState(null);
   const [geladen, setGeladen] = useState(!vehicleId);

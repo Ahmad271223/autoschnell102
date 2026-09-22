@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from motor.motor_asyncio import AsyncIOMotorClient
 
@@ -205,7 +205,8 @@ def clean_doc(d: dict) -> dict:
 
 
 # ---------- Auth dependencies ----------
-async def current_user(creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer)):
+async def current_user(creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer),
+                       response: Response = None):
     if not creds or not creds.credentials:
         raise HTTPException(401, "Nicht authentifiziert")
     try:
@@ -239,6 +240,18 @@ async def current_user(creds: Optional[HTTPAuthorizationCredentials] = Depends(b
         # dieses Kontos; Zeitpunkt und Geraet der neueren Anmeldung darf er
         # erfahren (so macht es jeder Mail-Anbieter).
         raise HTTPException(401, sitzung_beendet_grund(user))
+    # Rollenpruefung 22.09.2026 (RP-546): gleitende Sitzung — laeuft das Token
+    # bald ab, liefert die Antwort ein frisches derselben Sitzung mit
+    # (auth.token_erneuern: hoechstens SITZUNG_MAX_TAGE, nie fuer Betreiber).
+    # response ist None bei direktem Aufruf ausserhalb von FastAPI.
+    if response is not None:
+        try:
+            from auth import NEUES_TOKEN_KOPF, token_erneuern
+            neu = token_erneuern(payload, user.get("role"))
+            if neu:
+                response.headers[NEUES_TOKEN_KOPF] = neu
+        except Exception:  # noqa: BLE001 — die Verlaengerung ist Kuer, nie ein 500
+            log.exception("Token-Verlaengerung fehlgeschlagen")
     return user
 
 
@@ -319,9 +332,16 @@ async def gesperrte_firmen_ids() -> set:
             {"$lookup": {"from": "users", "localField": "user_id", "foreignField": "id",
                          "as": "chef"}},
             {"$project": {"id": 1, "chef.active": 1}}]):
-        mit_hauptkonto.add(d["id"])
         chefs = d.get("chef") or []
-        if chefs and chefs[0].get("active") is False:
+        # Rollenpruefung 22.09.2026 (RP-131/RP-282): zeigt der Zeiger auf ein
+        # Konto, das es nicht (mehr) gibt, faellt firma_gesperrt auf das
+        # aelteste dealer-Konto zurueck — diese Liste tat das nicht, beide
+        # bewerteten dieselbe Firma verschieden. Jetzt: ohne gefundenes
+        # Zeiger-Konto zaehlt die Firma wie eine ohne Zeiger (Rueckfall unten).
+        if not chefs:
+            continue
+        mit_hauptkonto.add(d["id"])
+        if chefs[0].get("active") is False:
             gesperrt.add(d["id"])
     rows = db.users.aggregate([
         {"$match": {"role": "dealer", "dealer_id": {"$nin": [None, ""]}}},
@@ -450,6 +470,26 @@ async def ist_haupt_chef(user) -> bool:
         {"dealer_id": user["dealer_id"], "role": "dealer"},
         {"_id": 0, "id": 1}, sort=[("created_at", 1)])
     return not aeltester or aeltester["id"] == user["id"]
+
+
+async def haupt_chef_id(dealer_id: Optional[str]) -> Optional[str]:
+    """Konto-ID des EINEN Hauptchefs einer Firma (oder None).
+
+    Rollenpruefung 22.09.2026 (RP-031/RP-033/RP-151): Betreiber-Ansichten,
+    Sperren und Loeschen entschieden nach der rohen Rolle ("jedes dealer-Konto
+    ist Chef"). Dieselbe Regel wie ist_haupt_chef/current_chef an EINER Stelle:
+    der Zeiger dealers.user_id, ohne Zeiger (Altbestand) das aelteste
+    dealer-Konto."""
+    if not dealer_id:
+        return None
+    firma = await db.dealers.find_one({"id": dealer_id}, {"_id": 0, "user_id": 1})
+    haupt = (firma or {}).get("user_id")
+    if haupt:
+        return haupt
+    aeltester = await db.users.find_one(
+        {"dealer_id": dealer_id, "role": "dealer"},
+        {"_id": 0, "id": 1}, sort=[("created_at", 1)])
+    return (aeltester or {}).get("id")
 
 
 async def current_chef(user=Depends(current_firma)):
@@ -624,6 +664,14 @@ async def subscription_for(user: dict) -> dict:
     personal = await get_subscription_status(user.get("dealer_id", ""),
                                              subject_user_id=user["id"])
     if personal.get("active"):
+        return personal
+    # Rollenpruefung 22.09.2026 (RP-057): Der Rueckfall aufs Firmen-Abo gilt
+    # NUR fuer den Hauptchef. Die HTTP-Wege ordnen ein weiteres dealer-Konto
+    # schon in current_firma als Sucher ein; der Link-Worker, die Admin-Liste
+    # und andere Aufrufer mit der ROHEN Rolle aus db.users bekamen dagegen das
+    # Firmen-Abo mit. Jetzt entscheidet diese Funktion selbst (eine indexierte
+    # Abfrage, nur fuer dealer-Konten ohne aktives eigenes Abo).
+    if not await ist_haupt_chef(user):
         return personal
     return await get_subscription_status(user.get("dealer_id", ""))
 

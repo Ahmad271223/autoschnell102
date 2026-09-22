@@ -1,12 +1,64 @@
 import { useUngespeichert } from "@/lib/ungespeichert";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { driverApi } from "@/context/DriverContext";
 import { errMsg } from "@/lib/api";
 import { verkleinereBildDatei } from "@/lib/bilder";
 import { kmAusText } from "@/lib/preis";
+import { lesen, schreiben, sitzungsSpeicher } from "@/lib/speicher";
+import { protokollIstFinal, protokollNachsehen } from "@/pages/driver/fahrtPruefung";
 import { toast } from "sonner";
 import { X, Plus, Trash2, Camera, CheckCircle2 } from "lucide-react";
+
+// Rollenprüfung 22.09.2026 (RP-070): Der Server nimmt höchstens 10 Schlüssel
+// an (PickupReportIn.keys_count le=10) — die App erlaubte 20, 11–20 endeten
+// als 422 erst beim Absenden.
+export const SCHLUESSEL_HOECHSTENS = 10;
+
+/** Idempotenz-Schlüssel je Dialog (RP-066/RP-165) — mit Rückfall ohne crypto. */
+export function neueBerichtId() {
+  try {
+    if (window.crypto?.randomUUID) return window.crypto.randomUUID();
+  } catch { /* Rückfall unten */ }
+  return `ac-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+// Rollenprüfung 22.09.2026 (Review): Der Server wiederholt einen Bericht mit
+// demselben Schlüssel nur bei GLEICHEM Inhalt. Blieb der Schlüssel nach einer
+// verlorenen Antwort im Zwischenstand liegen und wurden die Angaben danach
+// geändert (Fahrt wieder geöffnet), antwortet er 409 mit diesem Text
+// (BERICHT_ANDERER_INHALT in routes/drivers.py) — dann ein neuer Schlüssel.
+export const ANDERER_INHALT_MERKMAL = "schon mit anderen Angaben gespeichert";
+
+export function istAndererInhalt(e) {
+  return e?.response?.status === 409 && errMsg(e, "").includes(ANDERER_INHALT_MERKMAL);
+}
+
+// RP-064/RP-163: Zwischenstand des Dialogs je Termin (nur diese Sitzung) —
+// scheitert das Absenden, weil das Protokoll noch fehlt, geht nichts verloren.
+const entwurfSchluessel = (id) => `ah_abholcheck_${id}`;
+
+function entwurfLesen(id) {
+  try {
+    const roh = lesen(sitzungsSpeicher(), entwurfSchluessel(id), null);
+    return roh ? JSON.parse(roh) : null;
+  } catch {
+    return null;
+  }
+}
+
+function entwurfSichern(id, stand) {
+  const speicher = sitzungsSpeicher();
+  if (schreiben(speicher, entwurfSchluessel(id), JSON.stringify(stand))) return;
+  // Zu groß (Fotos) — dann wenigstens alles ohne Fotos.
+  schreiben(speicher, entwurfSchluessel(id), JSON.stringify({
+    ...stand, deviations: (stand.deviations || []).map((d) => ({ ...d, photo_b64: null })),
+  }));
+}
+
+export function abholCheckEntwurfLoeschen(id) {
+  try { sitzungsSpeicher()?.removeItem(entwurfSchluessel(id)); } catch { /* egal */ }
+}
 
 /**
  * Abhol-Check der Fahrer-App: km-Stand, Schlüssel, Tankstand + Abweichungen
@@ -30,12 +82,43 @@ const FUEL_LEVELS = ["leer", "1/4", "1/2", "3/4", "voll"];
 
 export default function AbholCheckDialog({ appointment, onDone, onClose }) {
   const navigate = useNavigate();
-  const [mileage, setMileage] = useState("");
-  const [keys, setKeys] = useState("2");
-  const [fuel, setFuel] = useState("1/2");
-  const [notes, setNotes] = useState("");
-  const [deviations, setDeviations] = useState([]);
+  // RP-064/RP-163: gesicherten Zwischenstand dieser Fahrt wieder aufnehmen.
+  const [start] = useState(() => entwurfLesen(appointment.id) || {});
+  const [mileage, setMileage] = useState(start.mileage ?? "");
+  const [keys, setKeys] = useState(start.keys ?? "2");
+  const [fuel, setFuel] = useState(start.fuel ?? "1/2");
+  const [notes, setNotes] = useState(start.notes ?? "");
+  const [deviations, setDeviations] = useState(Array.isArray(start.deviations) ? start.deviations : []);
   const [busy, setBusy] = useState(false);
+  // RP-066/RP-165: EIN Schlüssel je Dialog — ein zweiter Versuch nach einem
+  // Netzabbruch schickt denselben, der Server erkennt die Wiederholung.
+  const [berichtId, setBerichtId] = useState(() => start.berichtId || neueBerichtId());
+  const berichtGespeichert = useRef(false);
+  // Rollenprüfung 22.09.2026 (RP-068/RP-167): Der Kilometerstand steht schon
+  // im unterschriebenen Protokoll (Abschnitt 4) — vorbelegen statt ein
+  // zweites Mal abfragen. Nur solange der Fahrer selbst nichts eingetragen hat
+  // (auch kein gesicherter Zwischenstand).
+  const kmGetippt = useRef(Boolean(start.mileage));
+  const [kmAusProtokoll, setKmAusProtokoll] = useState(false);
+  useEffect(() => {
+    if (kmGetippt.current) return undefined;
+    let aktiv = true;
+    protokollNachsehen(appointment.id).then(({ kmStand }) => {
+      if (!aktiv || kmGetippt.current || kmStand === null || kmStand === undefined) return;
+      setMileage(String(kmStand));
+      setKmAusProtokoll(true);
+    }).catch(() => { /* ohne Vorbelegung weiter */ });
+    return () => { aktiv = false; };
+  }, [appointment.id]);
+  useEffect(() => {
+    if (!(mileage || notes.trim() || deviations.length)) return undefined;
+    const t = setTimeout(() => {
+      if (!berichtGespeichert.current) {
+        entwurfSichern(appointment.id, { mileage, keys, fuel, notes, deviations, berichtId });
+      }
+    }, 400);
+    return () => clearTimeout(t);
+  }, [appointment.id, mileage, keys, fuel, notes, deviations, berichtId]);
   // Runde 21 (Gegenpruefung): Fotos, die gerade noch verkleinert werden —
   // solange darf nicht abgesendet werden (sonst fehlt das Foto im
   // unveraenderbaren Bericht).
@@ -65,7 +148,12 @@ export default function AbholCheckDialog({ appointment, onDone, onClose }) {
     setFotoLaeuft((n) => n + 1);
     try {
       let dataUrl = null;
-      try { dataUrl = await verkleinereBildDatei(file); } catch { dataUrl = null; }
+      try { dataUrl = await verkleinereBildDatei(file); } catch (e) {
+        // Rollenprüfung 22.09.2026 (RP-533): HEIC & Co. — die Meldung aus
+        // lib/bilder sagt, was zu tun ist (statt "konnte nicht gelesen werden").
+        if (e?.name === "BildFormatFehler") { toast.error(e.message); return; }
+        dataUrl = null;
+      }
       if (!dataUrl) { toast.error("Foto konnte nicht gelesen werden"); return; }
       if (dataUrl.length > 8000000) { toast.error("Foto zu groß (max. 6 MB)"); return; }
       updateDev(id, { photo_b64: dataUrl });
@@ -100,8 +188,9 @@ export default function AbholCheckDialog({ appointment, onDone, onClose }) {
       return;
     }
     const schluessel = keys === "" ? null : Number(keys);
-    if (schluessel !== null && (!Number.isInteger(schluessel) || schluessel < 0 || schluessel > 20)) {
-      toast.error("Anzahl Schlüssel bitte als ganze Zahl von 0 bis 20 eintragen.");
+    if (schluessel !== null && (!Number.isInteger(schluessel) || schluessel < 0
+                                || schluessel > SCHLUESSEL_HOECHSTENS)) {
+      toast.error(`Anzahl Schlüssel bitte als ganze Zahl von 0 bis ${SCHLUESSEL_HOECHSTENS} eintragen.`);
       return;
     }
     setBusy(true);
@@ -110,15 +199,15 @@ export default function AbholCheckDialog({ appointment, onDone, onClose }) {
       // erst der Bericht geschickt und dann der Status — der lief ohne
       // Protokoll in 409, jeder neue Versuch legte eine weitere
       // Berichtsversion an (Pruefbericht Runde 4). Jetzt: Protokoll zuerst.
+      // Die Startseite prüft das seit RP-064 schon VOR dem Öffnen; hier bleibt
+      // die Prüfung als Netz, falls sich der Stand inzwischen geändert hat.
       if ((appointment.status || "") !== "abgeholt") {
-        let proto = null;
-        try {
-          const r = await driverApi.get(`/driver/appointments/${appointment.id}/protocol`);
-          proto = r.data?.protocol || r.data?.doc || r.data;
-        } catch (_) { proto = null; }
-        const final = proto && (proto.status === "final" || proto.protocol?.status === "final");
-        if (!final) {
-          toast.info("Bitte zuerst das Abholprotokoll ausfüllen und unterschreiben — danach den Abhol-Check senden.");
+        const final = await protokollIstFinal(appointment.id);
+        if (final !== true) {
+          // RP-064/RP-163: die Eingaben bleiben für diese Fahrt gesichert.
+          entwurfSichern(appointment.id, { mileage, keys, fuel, notes, deviations, berichtId });
+          toast.info("Bitte zuerst das Abholprotokoll ausfüllen und unterschreiben — danach den "
+                     + "Abhol-Check senden. Deine Eingaben bleiben gespeichert.");
           onClose?.();
           navigate(`/fahrer/protokoll/${appointment.id}`);
           return;
@@ -135,7 +224,11 @@ export default function AbholCheckDialog({ appointment, onDone, onClose }) {
           photo_b64: d.photo_b64,
         })),
         notes,
+        client_bericht_id: berichtId,
       });
+      // Der Bericht ist gespeichert — der Zwischenstand wird nicht mehr gebraucht.
+      berichtGespeichert.current = true;
+      abholCheckEntwurfLoeschen(appointment.id);
       // Idempotent: nach dem Protokoll-Abschluss ist der Termin bereits
       // "abgeholt"; das Backend bestaetigt das ohne Fehler.
       await driverApi.put(`/driver/appointments/${appointment.id}/status`, { status: "abgeholt" });
@@ -144,6 +237,14 @@ export default function AbholCheckDialog({ appointment, onDone, onClose }) {
         : "Abgeholt — keine Abweichungen");
       onDone?.();
     } catch (e) {
+      if (istAndererInhalt(e)) {
+        // Rollenprüfung 22.09.2026 (Review): der alte Schlüssel gehört zu einem
+        // schon gespeicherten Bericht — die geänderten Angaben bekommen einen
+        // neuen; der nächste Tipp meldet sie als neue Version.
+        const neu = neueBerichtId();
+        setBerichtId(neu);
+        entwurfSichern(appointment.id, { mileage, keys, fuel, notes, deviations, berichtId: neu });
+      }
       toast.error(errMsg(e, "Abholbericht konnte nicht gesendet werden"));
     } finally {
       setBusy(false);
@@ -174,13 +275,19 @@ export default function AbholCheckDialog({ appointment, onDone, onClose }) {
             {/* text + inputMode: "85.120" bleibt so stehen, wie getippt, und
                 wird deutsch gelesen (ein Zahlenfeld machte daraus 85,12). */}
             <input type="text" inputMode="numeric" value={mileage}
-                   onChange={(e) => setMileage(e.target.value)}
+                   onChange={(e) => { kmGetippt.current = true; setKmAusProtokoll(false); setMileage(e.target.value); }}
                    data-testid="abholcheck-km" autoComplete="off"
                    placeholder="z. B. 85.120" className={inputCls} style={inputStyle} />
+            {kmAusProtokoll && (
+              <div className="mt-1 text-[10px] text-zinc-500" data-testid="abholcheck-km-aus-protokoll">
+                aus dem unterschriebenen Protokoll übernommen — bitte prüfen
+              </div>
+            )}
           </div>
           <div>
             <label className="text-[11px] text-zinc-500">Anzahl Schlüssel</label>
-            <input type="number" inputMode="numeric" value={keys}
+            <input type="number" inputMode="numeric" value={keys} min={0} max={SCHLUESSEL_HOECHSTENS}
+                   data-testid="abholcheck-schluessel"
                    onChange={(e) => setKeys(e.target.value)} className={inputCls} style={inputStyle} />
           </div>
         </div>
@@ -246,7 +353,7 @@ export default function AbholCheckDialog({ appointment, onDone, onClose }) {
                     className={inputCls} style={inputStyle} />
         </div>
 
-        <button onClick={submit} disabled={busy || fotoLaeuft > 0}
+        <button onClick={submit} disabled={busy || fotoLaeuft > 0} data-testid="abholcheck-absenden"
                 className="mt-4 w-full inline-flex items-center justify-center gap-2 rounded-xl py-3 font-semibold text-white disabled:opacity-50"
                 style={{ background: "var(--accent-red, #FF3B30)" }}>
           <CheckCircle2 size={17} />

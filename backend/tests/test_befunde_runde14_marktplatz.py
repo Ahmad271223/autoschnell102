@@ -441,26 +441,33 @@ def test_u_115_loeschen_im_fenster_hinterlaesst_kein_mitglied(einladung_unit, mo
 
 
 def test_u_115_bestehende_mitgliedschaft_bleibt(einladung_unit, monkeypatch):
-    """Eine aeltere Mitgliedschaft (andere Einladung) wird beim Rueckbau
-    NICHT mitgeloescht: nur die eben angelegte (upserted_id) faellt."""
+    """Eine aeltere Mitgliedschaft (andere Einladung) bleibt unberuehrt.
+
+    Rollenprüfung 22.09.2026 (RP-541): Wer schon ueber eine ANDERE Einladung
+    Mitglied ist, verbraucht mit diesem Link gar keine Nutzung mehr — der
+    Weg ueber Upsert/Verbrauch/Rueckbau wird nicht betreten (vorher: Nutzung
+    verbraucht, obwohl der Upsert ein No-op war). Die Mitgliedschaft bleibt,
+    der Link bleibt voll nutzbar fuer andere Eingeladene."""
     import routes.marketplace as m
     w = einladung_unit
     dbx = w["dbx"]
     dbx.network_members.insert_one({"dealer_id": w["did"], "buyer_user_id": w["k_id"],
                                     "via_invite_id": "alt", "created_at": _jetzt()})
     inv = w["einladung"](max_uses=1)
-    echt_db = m.db
+    angefasst = []
 
     def ersatz(echt_update):
         async def update_one(*a, **kw):
-            r = await echt_update(*a, **kw)
-            await echt_db.dealer_invites.delete_one({"id": inv["id"]})
-            return r
+            angefasst.append(a)
+            return await echt_update(*a, **kw)
         return update_one
     monkeypatch.setattr(m, "db", _DbHaken(m.db, "network_members", "update_one", ersatz))
-    assert asyncio.run(m._redeem_invite(inv["token"], w["k_id"])) is None
+    assert asyncio.run(m._redeem_invite(inv["token"], w["k_id"])) == w["did"]
+    assert angefasst == [], "kein Upsert auf die bestehende Mitgliedschaft"
     assert _mitglieder(w) == 1
     assert dbx.network_members.find_one({"buyer_user_id": w["k_id"]})["via_invite_id"] == "alt"
+    d = dbx.dealer_invites.find_one({"id": inv["id"]})
+    assert d["used_count"] == 0 and d["used_by"] == [], "keine Nutzung verbraucht"
 
 
 # ------------------------------------------------------------------- Nr. 66
@@ -659,6 +666,16 @@ def _inserat_freigeben(lid):
                                                    "$unset": {"reserved_for": ""}})
 
 
+def _beendet_durch_sperre(iid):
+    """Rollenprüfung 22.09.2026 (RP-098 Nr. 2): Konto- und Zugangssperre
+    beenden die Anfrage selbst — abgelehnt, Grund kaeufer_gesperrt, mit
+    System-Eintrag im Verlauf (der Marktplatz zeigt "dein Zugang wurde gesperrt")."""
+    it = _db().listing_interest.find_one({"id": iid})
+    assert it["status"] == "abgelehnt" and it["beendet_grund"] == "kaeufer_gesperrt", it
+    assert any(h.get("von") == "system" and h.get("aktion") == "kaeufer_gesperrt"
+               for h in it.get("history") or []), it.get("history")
+
+
 def test_h_1_gesperrter_und_geloeschter_kaeufer(welt):
     if not HTTP:
         pytest.skip(HTTP_GRUND)
@@ -668,12 +685,13 @@ def test_h_1_gesperrter_und_geloeschter_kaeufer(welt):
     r = requests.post(f"{API}/admin/users/{k1['id']}/active", headers=welt["A"],
                       json={"active": False}, timeout=30)
     assert r.status_code == 200, r.text[:200]
+    # Die Kontosperre schliesst die Anfrage sofort (admin.kaeufer_verhandlungen_beenden)
+    # — der Haendler bekommt 400 "bereits abgeschlossen", reserviert wird nichts.
+    _beendet_durch_sperre(iid)
     r = _antwort_http(welt, iid, action="akzeptieren")
-    # Die Sperre schliesst die Anfrage sofort (400 "bereits abgeschlossen");
-    # ohne dieses Schliessen greift die Kaeuferpruefung mit 409.
-    assert r.status_code in (400, 409), r.text[:300]
+    assert r.status_code == 400, r.text[:300]
     _inserat_frei(lid)
-    assert _antwort_http(welt, iid, action="gegenangebot", counter_offer=21000).status_code in (400, 409)
+    assert _antwort_http(welt, iid, action="gegenangebot", counter_offer=21000).status_code == 400
     # Betreiber-Sperre des Marktplatz-Zugangs (neue Anfrage, die alte ist geschlossen)
     r = requests.post(f"{API}/admin/users/{k1['id']}/active", headers=welt["A"],
                       json={"active": True}, timeout=30)
@@ -683,8 +701,20 @@ def test_h_1_gesperrter_und_geloeschter_kaeufer(welt):
     r = requests.post(f"{API}/admin/buyers/{k1['id']}/access", headers=welt["A"],
                       json={"plan": None}, timeout=30)
     assert r.status_code == 200, r.text[:200]
+    # Rollenprüfung 22.09.2026 (RP-098 Nr. 2): "Zugang sperren" beendet laufende
+    # Anfragen jetzt wie die Kontosperre (Grund kaeufer_gesperrt). Vorher blieb
+    # die Anfrage offen, und nur die Kaeuferpruefung wies das Annehmen mit 409 ab.
+    _beendet_durch_sperre(iid2)
+    assert _antwort_http(welt, iid2, action="akzeptieren").status_code == 400
+    _inserat_frei(lid)
+    # Die Kaeuferpruefung (_kaeufer_darf_noch) bleibt die zweite Linie: eine
+    # Anfrage, die das Beenden verpasst hat (Rennen mit der Sperre), oeffnen wir
+    # hier von Hand wieder — Annehmen und Gegenangebot bleiben 409.
+    _db().listing_interest.update_one({"id": iid2}, {"$set": {"status": "offen"},
+                                                     "$unset": {"beendet_grund": ""}})
     assert _antwort_http(welt, iid2, action="akzeptieren").status_code == 409
     _inserat_frei(lid)
+    assert _antwort_http(welt, iid2, action="gegenangebot", counter_offer=21000).status_code == 409
     # Ablehnen geht trotzdem
     r = _antwort_http(welt, iid2, action="ablehnen")
     assert r.status_code == 200, r.text[:300]

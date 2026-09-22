@@ -283,8 +283,15 @@ def test_folgemail_kopieren_und_verschicken(welt):
     eintraege = [e for e in doc.get("send_status") or [] if e.get("art") == "nach_kauf"]
     assert len(eintraege) == 1 and eintraege[0]["zustellung"] in ("mock", "versendet")
 
+    # Rollenpruefung 22.09.2026 (RP-215): die unveraenderte Bahn-Vorlage
+    # kuendigt eine Verbindung an, die fehlt -> 400; mit Verbindung geht sie.
     r = requests.post(f"{API}/contracts/{c['id']}/folge-mail", headers=welt["kopf"],
                       timeout=60, json={"art": "bahn", "recipient": "verkaeufer@e2etest-mail.de"})
+    assert r.status_code == 400 and "Bahnverbindung" in r.json().get("detail", ""), r.text[:300]
+    r = requests.post(f"{API}/contracts/{c['id']}/folge-mail", headers=welt["kopf"],
+                      timeout=60, json={"art": "bahn", "recipient": "verkaeufer@e2etest-mail.de",
+                                        "message": "Sehr geehrte/r {kunde_name},\nICE 571, "
+                                                   "Ankunft Köln Hbf 10:12 Uhr."})
     assert r.status_code == 200, r.text[:300]
     for art, wort in (("korrektur", "Senden"), ("nach_kauf_whatsapp", "WhatsApp"),
                       ("quatsch", "Unbekannt")):

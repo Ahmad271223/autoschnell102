@@ -15,8 +15,8 @@ from typing import Annotated, Any, Dict, List, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, StringConstraints
 
-from deps import (besitzer_anreichern, besitzer_namen, clean_doc, current_chef,
-                  konten_maskieren,
+from deps import (TERMIN_OFFEN_WERTE, besitzer_anreichern, besitzer_namen, clean_doc,
+                  current_chef, haupt_chef_id, konten_maskieren,
                   current_firma, db, fahrzeug_bereich, ist_sucher,
                   log_activity, log_activity_sicher, now_iso)
 from lifecycle import LifecycleError, set_lifecycle
@@ -78,6 +78,11 @@ async def current_haendler(user=Depends(current_chef)):
 # ---------- Models ----------
 class DecisionIn(BaseModel):
     decision: Literal["bestand", "verkaufsentwurf", "loeschen"]
+    # Rollenprüfung 22.09.2026 (RP-496): der Zustand, den die Oberflaeche
+    # beim Klick ANGEZEIGT hat. "Nur speichern" in einem veralteten Tab setzte
+    # sonst ein inzwischen veroeffentlichtes Fahrzeug still auf "bestand".
+    # Optional, damit alte Oberflaechen/Skripte weiter funktionieren.
+    von_lifecycle: Optional[str] = Field(default=None, max_length=40)
 
 
 class BestandUpdateIn(BaseModel):
@@ -86,6 +91,11 @@ class BestandUpdateIn(BaseModel):
     # Runde 17 (Nr. 337): Liste gedeckelt — _clean_costs schnitt zwar auf 30,
     # verarbeitete davor aber beliebig lange Eingaben.
     costs: Optional[List[Dict[str, Any]]] = Field(default=None, max_length=30)  # [{label, amount}]
+    # Rollenprüfung 22.09.2026 (RP-461): Stand der Bestandsdaten, den die Akte
+    # geladen hat (bestand.stand; "" = noch nie gespeichert). Ein veralteter
+    # Tab (Handy/PC) ueberschrieb sonst Kosten, Notizen und Standort eines
+    # anderen Geraets still. None = ohne Pruefung (alte Oberflaechen).
+    stand: Optional[str] = Field(default=None, max_length=64)
 
 
 class ApplyDeviationsIn(BaseModel):
@@ -137,9 +147,27 @@ def _clean_costs(costs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             # Pruefung 14.09.2026 (F13): negative Kosten erhoehten die Marge.
             raise HTTPException(422, f"Kosten bei '{label or 'Kosten'}' dürfen nicht "
                                      "negativ sein")
+        # Rollenprüfung 22.09.2026 (RP-449): Ein Betrag ohne Bezeichnung
+        # verschwand beim Speichern still — die Marge stimmte danach nicht
+        # mehr mit dem ueberein, was der Chef eingetippt hatte. Jetzt bekommt
+        # er die Bezeichnung "Kosten"; nur ganz leere Zeilen fallen weg.
+        if not label and amount:
+            label = "Kosten"
         if label:
             out.append({"label": label, "amount": amount})
     return out
+
+
+# Rollenprüfung 22.09.2026 (RP-085/RP-184/RP-496): Inserate in diesen
+# Zustaenden sind verkaufsbereit oder live. Solange es eines gibt, darf das
+# Fahrzeug nicht per Entscheidung zurueck in den Bestand oder in einen neuen
+# Entwurf — sonst stand es auf "bestand", waehrend das Inserat weiter live
+# war, und Reservieren, Annehmen und Verkaufen endeten in 409 bzw. einem
+# Fahrzeug/Inserat-Widerspruch mit Betriebsalarm.
+_INSERAT_LIVE = ("verkaufsbereit", "veroeffentlicht", "reserviert")
+_INSERAT_LIVE_TEXT = {"verkaufsbereit": "verkaufsbereit",
+                      "veroeffentlicht": "auf dem Marktplatz",
+                      "reserviert": "reserviert"}
 
 
 # =========================================================
@@ -155,6 +183,12 @@ async def vehicle_decision(vehicle_id: str, body: DecisionIn,
         {"id": vehicle_id, "dealer_id": user["dealer_id"]}, {"_id": 0})
     if not v:
         raise HTTPException(404, "Fahrzeug nicht gefunden")
+    # Rollenprüfung 22.09.2026 (RP-496): Hat sich der Zustand seit dem
+    # Anzeigen geaendert (zweiter Tab, anderes Geraet), entscheidet der Chef
+    # ueber etwas, das er gar nicht sieht — 409 statt still umzuschalten.
+    if body.von_lifecycle is not None and v.get("lifecycle") != body.von_lifecycle:
+        raise HTTPException(409, "Der Fahrzeugstatus hat sich inzwischen geändert — "
+                                 "bitte die Seite neu laden und dann entscheiden.")
 
     # Runde 17 (Nr. 261/263/287): Statuswechsel UND Zusatzfelder (Fotos
     # leeren, deleted_at, Bestandsfrist) in EINEM Write mit CAS auf den
@@ -162,6 +196,19 @@ async def vehicle_decision(vehicle_id: str, body: DecisionIn,
     # Zwischenzustand ("geloescht" mit Fotos, "bestand" ohne Frist), und
     # ein paralleler Wechsel wurde ueberschrieben. LifecycleError -> 409.
     if body.decision == "loeschen":
+        # Rollenprüfung 22.09.2026 (RP-454): nicht loeschen, solange zum
+        # Fahrzeug noch ein Abholtermin laeuft (Doppel-Abholung: ein zweiter
+        # Vertrag kann einen eigenen offenen Termin haben). Vorher stand der
+        # Fahrer danach mit einem Termin zu einem geloeschten Fahrzeug da, und
+        # der Termin liess sich weder aendern noch stornieren. Bewusst kein
+        # stilles Mitstornieren — Fahrer und Verkaeufer sind schon verabredet.
+        offen = await db.appointments.count_documents(
+            {"dealer_id": user["dealer_id"], "vehicle_id": vehicle_id,
+             "status": {"$in": TERMIN_OFFEN_WERTE}}, limit=1)
+        if offen:
+            raise HTTPException(409, "Zu diesem Fahrzeug gibt es noch einen offenen "
+                                     "Abholtermin — bitte den Termin zuerst abschließen "
+                                     "oder stornieren (Termine), dann löschen.")
         # Fotos sofort räumen — Vertrag, Abholbericht, Historie bleiben.
         # Dotted-Paths statt Ganzobjekt: nichts anderes in data wird angefasst.
         leeren = {f"data.{key}": [] for key in ("image_urls", "images", "photos", "pictures")}
@@ -186,13 +233,34 @@ async def vehicle_decision(vehicle_id: str, body: DecisionIn,
         # Go-Live-Schalter (15.09.2026): "Jetzt inserieren" / "Weiterverkaufen"
         # gibt es erst, wenn der Marktplatz freigeschaltet ist.
         raise HTTPException(503, MARKTPLATZ_GESPERRT)
+    # Rollenprüfung 22.09.2026 (RP-085/RP-184/RP-496): nicht zurueck in den
+    # Bestand (oder in einen neuen Entwurf), solange ein Inserat
+    # verkaufsbereit, live oder reserviert ist. Entwurf und "zurueckgezogen"
+    # sind nicht sichtbar und blockieren nicht (create_draft nimmt sie wieder).
+    live = await db.resale_listings.find_one(
+        {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"],
+         "status": {"$in": list(_INSERAT_LIVE)}}, {"_id": 0, "id": 1, "status": 1})
+    if live:
+        raise HTTPException(409, "Zu diesem Fahrzeug gibt es ein Inserat, das "
+                                 f"{_INSERAT_LIVE_TEXT.get(live.get('status'), 'aktiv')} ist — "
+                                 "bitte das Inserat zuerst zurückziehen "
+                                 "(Inserat öffnen → „Vom Marktplatz nehmen“).")
     target = "bestand" if body.decision == "bestand" else "verkaufsentwurf"
     extra: Dict[str, Any] = {}
+    verlaengert = False
     if body.decision == "bestand":
         expires = (datetime.now(timezone.utc)
                    + timedelta(days=BESTAND_RETENTION_DAYS)).isoformat()
-        extra["bestand.saved_at"] = now_iso()
         extra["bestand.expires_at"] = expires
+        if v.get("lifecycle") == "bestand":
+            # Rollenprüfung 22.09.2026 (RP-450): "bestand" auf ein Fahrzeug im
+            # Bestand = Frist verlaengern (+50 Tage ab heute). Nach Ablauf
+            # archiviert der Aufraeumer endgueltig (Fotos weg) — auch wenn das
+            # Auto noch auf dem Hof steht. Das Aufnahmedatum bleibt stehen.
+            verlaengert = True
+            extra["bestand.verlaengert_am"] = now_iso()
+        else:
+            extra["bestand.saved_at"] = now_iso()
     else:
         # Weiterverkauf: keine automatische Löschfrist; saved_at bleibt,
         # wenn es schon eines gibt.
@@ -205,9 +273,12 @@ async def vehicle_decision(vehicle_id: str, body: DecisionIn,
                             extra_set=extra)
     except LifecycleError as exc:
         raise HTTPException(409, str(exc))
-    await log_activity_sicher(user["dealer_id"], user["id"],
-                       f"fahrzeug.entscheidung.{body.decision}", ref=vehicle_id)
-    return {"ok": True, "lifecycle": target, "expires_at": expires}
+    aktion = ("fahrzeug.bestand.verlaengert" if verlaengert
+              else f"fahrzeug.entscheidung.{body.decision}")
+    await log_activity_sicher(user["dealer_id"], user["id"], aktion, ref=vehicle_id,
+                              meta={"expires_at": expires} if verlaengert else None)
+    return {"ok": True, "lifecycle": target, "expires_at": expires,
+            "verlaengert": verlaengert}
 
 
 # Termine, die noch laufen (alles ausser diesen Zustaenden) — gleiche Liste
@@ -241,11 +312,22 @@ async def vehicle_fuer_sucher_entfernen(vehicle_id: str, user=Depends(current_fi
     eigene_vertraege = [c["id"] async for c in db.generated_pdfs.find(
         {"dealer_id": user["dealer_id"], "vehicle_id": vehicle_id, "user_id": user["id"]},
         {"_id": 0, "id": 1})]
+    # Rollenprüfung 22.09.2026 (RP-276a): Termine haengen seit dem Umbau
+    # Kaufvorgaenge auch NUR ueber kaufvorgang_id am Sucher (Vertrag
+    # geloescht, Termin vom Chef angelegt). Die zaehlen genauso als eigener,
+    # noch laufender Vorgang.
+    eigene_vorgaenge = [k["id"] async for k in db.kaufvorgaenge.find(
+        {"dealer_id": user["dealer_id"], "vehicle_id": vehicle_id, "user_id": user["id"]},
+        {"_id": 0, "id": 1})]
+    termin_wege: List[Dict[str, Any]] = [{"created_by": user["id"]}]
+    if eigene_vertraege:
+        termin_wege.append({"contract_id": {"$in": eigene_vertraege}})
+    if eigene_vorgaenge:
+        termin_wege.append({"kaufvorgang_id": {"$in": eigene_vorgaenge}})
     offen = await db.appointments.count_documents(
         {"dealer_id": user["dealer_id"], "vehicle_id": vehicle_id,
          "status": {"$nin": list(_TERMIN_GESCHLOSSEN)},
-         "$or": [{"created_by": user["id"]},
-                 {"contract_id": {"$in": eigene_vertraege}} if eigene_vertraege else {"_id": None}]},
+         "$or": termin_wege},
         limit=1)
     if offen:
         raise HTTPException(409, "Zu diesem Fahrzeug läuft noch ein Termin von dir — "
@@ -363,11 +445,24 @@ async def update_bestand(vehicle_id: str, body: BestandUpdateIn,
                      if isinstance(c, dict) and math.isfinite(float(c.get("amount") or 0)))
     if body.costs is not None:
         b["costs"] = update["bestand.costs"] = _clean_costs(body.costs)
-    res = await db.vehicles.update_one(
-        {"id": vehicle_id, "dealer_id": user["dealer_id"],
-         "lifecycle": {"$nin": list(_ABGESCHLOSSEN)}},
-        {"$set": update})
+    # Rollenprüfung 22.09.2026 (RP-461): jeder Write bekommt einen neuen
+    # Stand; wer einen Stand mitschickt, schreibt nur, wenn er noch gilt.
+    b["stand"] = update["bestand.stand"] = uuid.uuid4().hex[:16]
+    filt: Dict[str, Any] = {"id": vehicle_id, "dealer_id": user["dealer_id"],
+                            "lifecycle": {"$nin": list(_ABGESCHLOSSEN)}}
+    if body.stand is not None:
+        # "" = die Akte kannte noch keinen Stand ($in [None] trifft auch das
+        # fehlende Feld).
+        filt["bestand.stand"] = body.stand if body.stand else {"$in": [None, ""]}
+    res = await db.vehicles.update_one(filt, {"$set": update})
     if res.matched_count == 0:
+        jetzt = await db.vehicles.find_one(
+            {"id": vehicle_id, "dealer_id": user["dealer_id"]}, {"_id": 0, "lifecycle": 1})
+        if body.stand is not None and jetzt and jetzt.get("lifecycle") not in _ABGESCHLOSSEN:
+            raise HTTPException(409, "Standort, Notizen oder Kosten wurden inzwischen an "
+                                     "anderer Stelle geändert (zweiter Tab oder anderes "
+                                     "Gerät) — bitte neu laden. Deine Eingaben bleiben "
+                                     "beim Neuladen stehen.")
         raise HTTPException(409, "Fahrzeug wurde zwischenzeitlich abgeschlossen — "
                                  "Bestandsdaten sind eingefroren, bitte neu laden")
     # Runde 15 (Nr. 5): Kosten beeinflussen die Marge — wer wann aus 500 EUR
@@ -604,6 +699,20 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
         {"_id": 0},
     ).sort("created_at", -1).to_list(5)
 
+    # Rollenprüfung 22.09.2026 (RP-474): Kilometerstand und neue Schaeden aus
+    # dem UNTERSCHRIEBENEN Abholprotokoll (abgeholter/erledigter Termin). Die
+    # Akte bot bisher nur die Abweichungen des freiwilligen Abhol-Checks zum
+    # Uebernehmen an — ohne Check kamen km und Schaeden nie ins Fahrzeug.
+    # Nur fuer den Chef (Uebernehmen ist Chefsache); gleiche Auswertung wie
+    # beim Inseratsentwurf (resale._protokoll_befund, wirft nie).
+    protokoll_befund = None
+    if not ist_sucher:
+        from routes.resale import _protokoll_befund
+        befund = await _protokoll_befund(vehicle_id, user["dealer_id"])
+        if befund.get("km") is not None or befund.get("schaeden"):
+            protokoll_befund = {"km": befund.get("km"),
+                                "schaeden": list(befund.get("schaeden") or [])}
+
     # Abgeschlossene Abhol-Protokolle (vom Fahrer, mit Unterschriften) —
     # in der Akte als Unterlage sichtbar für Chef UND Sucher.
     # Nachpruefung Runde 14 (Nr. 35): nur nicht-abgeloeste finale Versionen
@@ -625,12 +734,26 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
     # nicht, was Chef oder Kollegen damit gemacht haben.
     # Runde 21: auch Eintraege zu den Terminen des Fahrzeugs (z.B. "Abholbericht
     # eingereicht", ref=Termin) — vorher fehlten sie in jeder Akte.
-    history_filter = {"ref": {"$in": [vehicle_id, *alle_termin_ids]},
+    # Rollenprüfung 22.09.2026 (RP-483): auch Eintraege zu den Vertraegen
+    # (erstellt, verschickt, Folge-Mail, nach Abholung aktualisiert), zu den
+    # Abholprotokollen (zur Freigabe, zurueck an den Fahrer, Preis) und — nur
+    # fuer den Chef — zu den Inseraten des Fahrzeugs. Vorher fehlten sie in
+    # der Akte, obwohl sie genau dieses Auto betreffen. Jeweils nur im Bereich
+    # des Kontos (Sucher: eigene Vertraege/Termine); der Index (dealer_id,
+    # ref, created_at) traegt die groessere $in-Liste.
+    vertrag_ids = await db.generated_pdfs.distinct(
+        "id", {"vehicle_id": vehicle_id, **_vertrag_bereich(user)})
+    protokoll_ids = await db.pickup_protocols.distinct(
+        "id", {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"], **nur_eigene})
+    inserat_ids = [] if ist_sucher else await db.resale_listings.distinct(
+        "id", {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"]})
+    bezug_ids = [*alle_termin_ids, *vertrag_ids, *protokoll_ids]
+    history_filter = {"ref": {"$in": [vehicle_id, *bezug_ids, *inserat_ids]},
                       "dealer_id": user["dealer_id"]}
     if ist_sucher:
         history_filter = {"dealer_id": user["dealer_id"], "$or": [
             {"ref": vehicle_id, "user_id": user["id"]},
-            {"ref": {"$in": alle_termin_ids}}]}
+            {"ref": {"$in": bezug_ids}}]}
     # Audit 13.09.2026 (#53): Die Historie endete still bei 100 Eintraegen —
     # bei mehreren Suchern mit eigenen Terminen fehlten die aeltesten (Vertrag,
     # Abholung) ohne Hinweis. Einen Eintrag mehr lesen statt count_documents
@@ -670,12 +793,14 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
     owner = None
     if not ist_sucher and v.get("owner_user_id"):
         namen = await besitzer_namen(user["dealer_id"], [v["owner_user_id"]])
-        konto = await db.users.find_one(
-            {"id": v["owner_user_id"], "dealer_id": user["dealer_id"]},
-            {"_id": 0, "role": 1})
+        # Rollenprüfung 22.09.2026 (RP-132): "Hauptaccount" nach dem Zeiger
+        # dealers.user_id (deps.haupt_chef_id, gleiche Regel wie current_chef)
+        # statt nach der rohen Rolle — ein uebrig gebliebenes zweites
+        # dealer-Konto (abgebrochener Chefwechsel, Altbestand) arbeitet als
+        # Sucher und erschien hier trotzdem als Hauptaccount.
         owner = {"id": v["owner_user_id"],
                  "name": namen.get(v["owner_user_id"]) or "unbekanntes Konto",
-                 "hauptaccount": (konto or {}).get("role") == "dealer"}
+                 "hauptaccount": v["owner_user_id"] == await haupt_chef_id(user["dealer_id"])}
     # Runde 29: Wer sonst noch an diesem Auto arbeitet, geht einen Sucher
     # nichts an (Regel Ahmad: Konten nicht vermischen). Nur der Chef sieht
     # die Mitbearbeiter — fuer Sucher gar keine Namensabfrage.
@@ -732,6 +857,7 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
         "appointments": appointments,
         "appointments_gesamt": appointments_gesamt,
         "pickup_report": report,
+        "protokoll_befund": protokoll_befund,
         "pickup_reports": pickup_reports,
         "pickup_reports_gesamt": pickup_reports_gesamt,
         "comparisons": comparisons,
@@ -750,6 +876,10 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
 # Mapping Abweichungs-Feld → Fahrzeugdaten-Feld (nur strukturierte Felder
 # lassen sich automatisch übernehmen; Rest landet als bekannter Mangel).
 _FIELD_MAP = {"mileage": "mileage", "keys": "keys_count"}
+# Rollenprüfung 22.09.2026 (RP-474): Kennung, mit der die Akte "km und Schaeden
+# aus dem unterschriebenen Abholprotokoll uebernehmen" anfordert (keine
+# Abweichungs-ID eines Abhol-Checks sieht so aus — die sind UUIDs/"d1").
+PROTOKOLL_BEFUND_ID = "abholprotokoll"
 
 
 @router.post("/vehicles/{vehicle_id}/apply-deviations")
@@ -771,10 +901,25 @@ async def apply_deviations(vehicle_id: str, body: ApplyDeviationsIn,
     # hier unbekannt (applied=[]) oder ein alter Termin ueberschrieb die Daten.
     from abholbericht import massgeblicher_bericht
     report = await massgeblicher_bericht(db, vehicle_id, user["dealer_id"])
-    if not report:
-        raise HTTPException(404, "Kein Abholbericht vorhanden")
+    # Rollenprüfung 22.09.2026 (RP-474): Ohne Abhol-Check kam hier 404 — km
+    # und neue Schaeden aus dem UNTERSCHRIEBENEN Abholprotokoll liessen sich
+    # nie ins Fahrzeug uebernehmen. Jetzt faellt die Uebernahme auf das
+    # Protokoll zurueck (ohne Bericht immer, mit Bericht ueber die Kennung
+    # PROTOKOLL_BEFUND_ID, die die Akte anbietet). Gleiche Auswertung wie beim
+    # Inseratsentwurf: resale._protokoll_befund (wirft nie, nur Protokolle
+    # abgeholter/erledigter Termine).
+    befund: Dict[str, Any] = {}
+    if not report or PROTOKOLL_BEFUND_ID in body.deviation_ids:
+        from routes.resale import _protokoll_befund
+        befund = await _protokoll_befund(vehicle_id, user["dealer_id"]) or {}
+    hat_befund = befund.get("km") is not None or bool(befund.get("schaeden"))
+    if not report and not hat_befund:
+        raise HTTPException(404, "Kein Abholbericht und kein unterschriebenes "
+                                 "Abholprotokoll mit Kilometerstand oder Schäden vorhanden")
+    report = report or {}
 
-    by_id = {d["id"]: d for d in report.get("deviations", [])}
+    by_id = {d["id"]: d for d in (report.get("deviations") or [])
+             if isinstance(d, dict) and d.get("id")}
     # Audit 13.09.2026 (#7): nur die tatsaechlich geaenderten data-Felder
     # sammeln und per Dotted-Path schreiben. Vorher ging das ganze data-Objekt
     # aus dem Lesestand zurueck — zwischenzeitlich geleerte Fotofelder
@@ -793,7 +938,19 @@ async def apply_deviations(vehicle_id: str, body: ApplyDeviationsIn,
                             "neu": report["mileage_at_pickup"]})
         elif d.get("actual") and target_field:
             geaendert[target_field] = d["actual"]
-            applied.append({"feld": d.get("label"), "neu": d["actual"]})
+            eintrag = {"feld": d.get("label"), "neu": d["actual"]}
+            if d.get("field") == "keys":
+                # Rollenprüfung 22.09.2026 (RP-475): data.keys_count liest
+                # niemand — die Abweichung "Schlüssel fehlt" verschwand damit
+                # still. Sie steht jetzt zusaetzlich bei den bekannten
+                # Maengeln (die gehen auch ins Inserat).
+                txt = f"Schlüssel: {d['actual']}"
+                if d.get("expected"):
+                    txt += f" (erwartet {d['expected']})"
+                if txt not in known_defects:
+                    known_defects.append(txt)
+                eintrag["mangel"] = txt
+            applied.append(eintrag)
         else:
             txt = d.get("label") or "Abweichung"
             if d.get("actual"):
@@ -801,6 +958,18 @@ async def apply_deviations(vehicle_id: str, body: ApplyDeviationsIn,
             if txt not in known_defects:
                 known_defects.append(txt)
             applied.append({"mangel": txt})
+
+    # RP-474: das unterschriebene Protokoll geht vor (wie im Inseratsentwurf,
+    # dort ueberschreibt es ebenfalls den km-Stand des Abhol-Checks).
+    if befund.get("km") is not None:
+        geaendert["mileage"] = befund["km"]
+        applied = [a for a in applied if a.get("feld") != "Kilometerstand"]
+        applied.append({"feld": "Kilometerstand", "neu": befund["km"],
+                        "quelle": "abholprotokoll"})
+    for txt in befund.get("schaeden") or []:
+        if txt not in known_defects:
+            known_defects.append(txt)
+            applied.append({"mangel": txt, "quelle": "abholprotokoll"})
 
     update: Dict[str, Any] = {"known_defects": known_defects,
                               "deviations_applied_at": now_iso(),
@@ -825,7 +994,8 @@ async def apply_deviations(vehicle_id: str, body: ApplyDeviationsIn,
     await log_activity_sicher(user["dealer_id"], user["id"],
                               "fahrzeug.abweichungen.uebernommen", ref=vehicle_id,
                               meta={"anzahl": len(applied), "bericht": report.get("id"),
-                                    "termin": report.get("appointment_id")})
+                                    "termin": report.get("appointment_id"),
+                                    "abholprotokoll": hat_befund})
     return {"ok": True, "applied": applied, "known_defects": known_defects}
 
 

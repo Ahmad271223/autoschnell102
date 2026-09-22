@@ -40,11 +40,28 @@ function MfaKarte() {
     } catch (e) { toast.error(errMsg(e)); } finally { setBusy(false); }
   };
   const deaktivieren = async () => {
+    // Rollenpruefung 22.09.2026 (RP-556): In Produktion ist der zweite Faktor
+    // fuer den Betreiber Pflicht — wer abschaltet und sich abmeldet, kam
+    // vorher nie wieder herein. Jetzt: deutliche Rueckfrage, der Server laesst
+    // 30 Minuten Gnadenfrist, und die Neu-Einrichtung oeffnet sich sofort.
+    if (st?.pflicht && !window.confirm(
+      "Achtung: Für den Betreiber ist die Zwei-Faktor-Anmeldung Pflicht.\n\n"
+      + "Nach dem Abschalten bleiben 30 Minuten, um sie (z. B. auf dem neuen Handy) neu "
+      + "einzurichten. Danach ist nach dem Abmelden KEINE Anmeldung mehr möglich "
+      + "(nur noch über scripts/mfa_pruefen.py auf dem Server).\n\nTrotzdem abschalten?")) return;
     const c = window.prompt("Zum Abschalten den aktuellen Code aus der App eingeben:");
     if (!c) return;
     setBusy(true);
-    try { await api.post("/admin/me/mfa/deaktivieren", { code: c }); toast.success("Zwei-Faktor abgeschaltet"); setCodes(null); setNeuOffen(false); load(); }
+    let pflicht = false;
+    try {
+      const r = await api.post("/admin/me/mfa/deaktivieren", { code: c });
+      pflicht = !!r.data?.pflicht;
+      if (pflicht) toast.warning(r.data?.hinweis || "Bitte die Zwei-Faktor-Anmeldung jetzt neu einrichten.", { duration: 15000 });
+      else toast.success("Zwei-Faktor abgeschaltet");
+      setCodes(null); setNeuOffen(false); load();
+    }
     catch (e) { toast.error(errMsg(e)); } finally { setBusy(false); }
+    if (pflicht) await einrichten();
   };
   const codesNeu = async () => {
     setBusy(true);
@@ -68,6 +85,14 @@ function MfaKarte() {
         Beim Anmelden wird zusätzlich zum Passwort ein 6-stelliger Code aus einer Authenticator-App
         (z.B. Google Authenticator, Microsoft Authenticator, Aegis) verlangt. Für den Super-Admin dringend empfohlen.
       </p>
+      {st && !st.aktiv && st.neu_einrichten_bis && (
+        <div className="rounded-lg p-3 mb-3 text-[12.5px] text-amber-200" role="alert" data-testid="mfa-gnadenfrist"
+             style={{ background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.35)" }}>
+          Zwei-Faktor ist abgeschaltet, für den Betreiber aber Pflicht: bitte bis{" "}
+          {new Date(st.neu_einrichten_bis).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" })} Uhr
+          neu einrichten — danach ist nach dem Abmelden keine Anmeldung mehr möglich.
+        </div>
+      )}
       {st && !st.aktiv && !setup && (
         <Button size="sm" onClick={einrichten} disabled={busy} data-testid="mfa-einrichten">Einrichten</Button>
       )}

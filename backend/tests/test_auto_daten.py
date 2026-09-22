@@ -277,6 +277,9 @@ def test_07_schaeden_bereinigt_html_pii_laenge_anzahl(welt):
     lang = "Rost " * 200
     r = requests.post(f"{API}/contracts", headers=welt["H"], json={
         "vehicle_id": welt["vehicle_id"], **SELLER, "purchase_price": 1000,
+        # Rollenpruefung 22.09.2026 (RP-416): zweiter Vertrag zum selben
+        # Fahrzeug nur nach Rueckfrage — hier bewusst.
+        "zweiter_vertrag_bestaetigt": True,
         "vehicle_damage_note": '<script>alert("x")</script>Lack <b>zerkratzt</b>',
         "damages_text": "Rueckruf unter 0176 12345678 vereinbart",
         "damages": ([f"Kontakt {SELLER['seller_email']}", f"FIN {VIN} beschaedigt",
@@ -610,7 +613,8 @@ def test_21_betreiber_loescht_auto_datensatz(welt):
     dbx.vehicles.update_one({"id": welt["vehicle_id"]}, {"$unset": {"lifecycle": ""}})
     # Vertrag 3 zum selben Fahrzeug: die frueheren Vertraege sind geloescht -> frischer Datensatz
     r = requests.post(f"{API}/contracts", headers=welt["H"], json={
-        "vehicle_id": welt["vehicle_id"], **SELLER, "purchase_price": 2000}, timeout=90)
+        "vehicle_id": welt["vehicle_id"], **SELLER, "purchase_price": 2000,
+        "zweiter_vertrag_bestaetigt": True}, timeout=90)   # RP-416
     assert r.status_code == 200, r.text[:300]
     cid3 = r.json()["id"]
     did = dbx.generated_pdfs.find_one({"id": cid3})["admin_vehicle_data_id"]
@@ -634,7 +638,8 @@ def test_21_betreiber_loescht_auto_datensatz(welt):
     assert dbx.generated_pdfs.find_one({"id": cid3})["admin_vehicle_data_id"] == did
     # Ein weiterer Vertrag zu dem Wagen beginnt mit einem frischen Datensatz
     r = requests.post(f"{API}/contracts", headers=welt["H"], json={
-        "vehicle_id": welt["vehicle_id"], **SELLER, "purchase_price": 2100}, timeout=90)
+        "vehicle_id": welt["vehicle_id"], **SELLER, "purchase_price": 2100,
+        "zweiter_vertrag_bestaetigt": True}, timeout=90)   # RP-416
     assert r.status_code == 200, r.text[:300]
     cid4 = r.json()["id"]
     did4 = dbx.generated_pdfs.find_one({"id": cid4})["admin_vehicle_data_id"]

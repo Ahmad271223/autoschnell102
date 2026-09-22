@@ -194,7 +194,8 @@ def test_04_super_admin_kann_eigene_mfa_nicht_zuruecksetzen():
             "created_at": "2026-01-01T00:00:00+00:00"})
         r = requests.post(f"{API}/admin/users/{uid2}/mfa-zuruecksetzen",
                           json={}, headers=_hdr(tok), timeout=30)
-        assert r.status_code == 401, r.text[:200]
+        # Rollenpruefung 22.09.2026 (RP-554): 400 statt 401 (sonst Abmeldung)
+        assert r.status_code == 400 and "Passwort" in r.text, r.text[:200]
         r = requests.post(f"{API}/admin/users/{uid2}/mfa-zuruecksetzen",
                           json={"passwort": PW}, headers=_hdr(tok), timeout=30)
         assert r.status_code == 400 and "Grund" in r.text, r.text[:200]

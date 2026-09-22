@@ -50,6 +50,19 @@ _ALARM_ZULETZT: dict = {}
 _ALARM_ABSTAND_S = 3600
 
 
+class ListingGone(RuntimeError):
+    """Inserat existiert nicht mehr (404/410, leere Anbieter-Antwort) — kein
+    Retry, saubere Meldung.
+
+    Rollenprüfung 22.09.2026 (RP-202/RP-353): Die Klasse lag bisher in
+    kleinanzeigen_service. mobile_service und autoscout_service konnten sie
+    dort nicht importieren (kleinanzeigen_service importiert mobile_service —
+    Kreis) und meldeten ein Offline-Inserat deshalb als technischen Fehler:
+    drei bezahlte Apify-Laeufe, Tageslimit zurueckgebucht, am Ende "Technischer
+    Fehler". Jetzt hier; kleinanzeigen_service reicht dieselbe Klasse weiter,
+    alle bisherigen Importe bleiben gueltig."""
+
+
 class AnbieterFehler(RuntimeError):
     def __init__(self, art: str, quelle: str, detail: str = ""):
         self.art = art
@@ -69,6 +82,14 @@ def aus_http_antwort(status: int, text: str, quelle: str) -> Optional[AnbieterFe
     t = (text or "").lower()
     if status in (401, 403):
         return AnbieterFehler(ART_TOKEN, quelle, f"HTTP {status}: {text[:120]}")
+    # Rollenprüfung 22.09.2026 (RP-553): Apify antwortet auch dann mit 402,
+    # wenn nur die SPEICHERGRENZE aller gleichzeitig laufenden Actor-Laeufe
+    # erreicht ist ("actor-memory-limit-exceeded"). Das ist kein leeres
+    # Guthaben, sondern ein vorübergehender Engpass — also wie ein Tempolimit
+    # behandeln (Hinweis "in einigen Minuten", Link-Job wartet kurz), ohne
+    # Guthaben-Betriebsalarm.
+    if status == 402 and "memory" in t:
+        return AnbieterFehler(ART_LIMIT, quelle, f"HTTP {status}: {text[:120]}")
     if status == 402 or "insufficient" in t or "usage limit" in t or "credit" in t and "exceed" in t:
         return AnbieterFehler(ART_GUTHABEN, quelle, f"HTTP {status}: {text[:120]}")
     if status == 429 or "rate limit" in t or "too many" in t:

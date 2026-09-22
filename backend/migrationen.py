@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger("autohandel.migrationen")
 
-ZIEL_VERSION = 10
+ZIEL_VERSION = 13
 _SPERRE = "migration"
 
 
@@ -492,6 +492,84 @@ async def m10_vorlagen_texte(db) -> dict:
     return {"firmen_felder": firmen, "sucher_felder": sucher}
 
 
+async def m11_firmen_abo_art(db) -> dict:
+    """Rollenprüfung 22.09.2026 (RP-046/RP-145 Nr. 3, RP-152): Firmen-Abos
+    (ohne subject_user_id) tragen seit heute das Kennzeichen art='firma' —
+    Grundlage des Teil-Unique-Index ein_aktives_firmen_abo_je_firma
+    (indizes.firmen_abo_unique_index). Hier wird es im Altbestand
+    nachgetragen.
+
+    Die Indizes entstehen VOR den Migrationen (ausfuehren: indexe -> seeds ->
+    migrationen). Beim ersten Rollout kann der Index also schon stehen,
+    waehrend hier markiert wird. Deshalb aktive Abos EINZELN: hat eine Firma
+    zwei aktive Firmen-Abos, scheitert das zweite am Index — es bleibt
+    unmarkiert (unveraendert, Geld- und Zugangsdaten) und wird gemeldet
+    (Alarm mehrfache_aktive_firmen_abos). Kein Abbruch des Starts.
+    Rollenprüfung 22.09.2026 (Review): Den Alarm haelt danach
+    indizes.firmen_abo_unique_index offen — dessen Dublettensuche zaehlt
+    auch unmarkierte Firmen-Abos und schliesst ihn erst nach der Bereinigung.
+    Idempotent."""
+    from pymongo.errors import DuplicateKeyError
+    ohne_konto = {"$or": [{"subject_user_id": {"$exists": False}},
+                          {"subject_user_id": None}],
+                  "art": {"$exists": False}}
+    r = await db.subscriptions.update_many({**ohne_konto, "status": {"$ne": "active"}},
+                                           {"$set": {"art": "firma"}})
+    stats = {"inaktiv_markiert": r.modified_count, "aktiv_markiert": 0, "konflikte": 0}
+    konflikte = []
+    async for sub in db.subscriptions.find({**ohne_konto, "status": "active"},
+                                           {"_id": 1, "dealer_id": 1}):
+        try:
+            r = await db.subscriptions.update_one({"_id": sub["_id"], **ohne_konto},
+                                                  {"$set": {"art": "firma"}})
+            stats["aktiv_markiert"] += r.modified_count
+        except DuplicateKeyError:
+            stats["konflikte"] += 1
+            konflikte.append(str(sub.get("dealer_id")))
+    if konflikte:
+        from betrieb import alarm
+        await alarm(db, "mehrfache_aktive_firmen_abos", ref="subscriptions",
+                    beispiele=", ".join(sorted(set(konflikte))[:20]),
+                    hinweis="Aeltere aktive Firmen-Abos auf status=ersetzt setzen, "
+                            "beim naechsten Start greift der Index.")
+    return stats
+
+
+async def m12_termine_abschluss_zeit(db) -> dict:
+    """Rollenprüfung 22.09.2026 (RP-223/RP-374): Termine, die gleich
+    geschlossen angelegt wurden (erledigt, storniert, nicht abgeholt,
+    abgeholt), hatten weder `abgeschlossen_seit` noch `status_changed_at`.
+    Das Aufraeumen (7/14-Tage-Regel) und der Frischabgleich brauchen eines
+    der beiden — solche Termine wurden nie aufgeraeumt. Seit heute setzt
+    create_appointment beide Felder; der Altbestand bekommt einmalig den
+    Anlagezeitpunkt (der fruehestmoegliche Abschluss). Nur Termine MIT
+    created_at; der Merker abschluss_zeit_nachgetragen zeigt die Herkunft.
+    Idempotent."""
+    geschlossen = ["abgeholt", "nicht abgeholt", "storniert", "erledigt"]
+    leer = [None, ""]
+    r = await db.appointments.update_many(
+        {"status": {"$in": geschlossen},
+         "abgeschlossen_seit": {"$in": leer}, "status_changed_at": {"$in": leer},
+         "created_at": {"$type": "string", "$gt": ""}},
+        [{"$set": {"abgeschlossen_seit": "$created_at", "status_changed_at": "$created_at",
+                   "abschluss_zeit_nachgetragen": True}}])
+    return {"termine": r.modified_count}
+
+
+async def m13_inserat_fotomodus(db) -> dict:
+    """Rollenprüfung 22.09.2026 (RP-532): Altinserate mit photos.mode
+    'einkauf' (oder ohne Modus — gilt als 'einkauf') zeigten eigene,
+    hochgeladene Fotos weder im Editor noch auf dem Marktplatz. Neue Uploads
+    schalten seit heute selbst auf 'beide' (routes.resale.upload_photos);
+    hier einmalig der Altbestand mit mindestens einem eigenen Foto.
+    Idempotent."""
+    r = await db.resale_listings.update_many(
+        {"photos.mode": {"$in": ["einkauf", None]},
+         "photos.uploaded_keys.0": {"$exists": True}},
+        {"$set": {"photos.mode": "beide"}})
+    return {"inserate": r.modified_count}
+
+
 MIGRATIONEN = [
     (1, "abos_normalisieren", m1_abos_normalisieren),
     (2, "lifecycle_nachziehen", m2_lifecycle),
@@ -503,6 +581,10 @@ MIGRATIONEN = [
     (8, "konten_aktiv_feld", m8_konten_aktiv_feld),
     (9, "chef_zeiger", m9_chef_zeiger),
     (10, "vorlagen_texte", m10_vorlagen_texte),
+    # Rollenprüfung 22.09.2026 (RP-145, RP-223, RP-532)
+    (11, "firmen_abo_art", m11_firmen_abo_art),
+    (12, "termine_abschluss_zeit", m12_termine_abschluss_zeit),
+    (13, "inserat_fotomodus", m13_inserat_fotomodus),
 ]
 
 

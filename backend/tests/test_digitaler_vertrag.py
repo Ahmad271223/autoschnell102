@@ -319,6 +319,9 @@ def test_21_vertragsliste_ohne_pdf_inhalte(welt):
 def test_22_vertrag_sucher_nutzt_eigenen_text(welt):
     # Mitbearbeiter-Regel: der Sucher darf fuers gleiche Auto einen eigenen
     # Vertrag anlegen — mit SEINEM digitalen Text.
+    # Rollenpruefung 22.09.2026 (RP-113): erst nach seinem eigenen Vergleich
+    # (der ihn als Mitbearbeiter eintraegt).
+    assert _vergleich(welt["S"]) == welt["vehicle_id"]
     r = requests.post(f"{API}/contracts", headers=welt["S"], json={
         "vehicle_id": welt["vehicle_id"], "seller_name": "Digi Verkaeufer",
         "seller_address": "Weg 3", "seller_zip": "30159",
@@ -481,6 +484,9 @@ def test_27_terminverschiebung_gibt_altvertrag_keine_heutigen_bedingungen(welt):
     dbx = _db()
     r = requests.post(f"{API}/contracts", headers=welt["H"], json={
         "vehicle_id": welt["vehicle_id"], "seller_name": "Alt V",
+        # Rollenpruefung 22.09.2026 (RP-416): zweiter Vertrag des Chefs zu
+        # diesem Fahrzeug — bewusst bestaetigt.
+        "zweiter_vertrag_bestaetigt": True,
         "purchase_price": 100, "pickup_date": "2099-06-01", "pickup_time": "10:00",
         # Runde 22: von Hand anders gesetztes Empfangsdatum bleibt stehen
         "empfang_datum": "2099-05-31"},

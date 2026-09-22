@@ -149,15 +149,41 @@ def _satz(kennung: str, grund: str, umfang: str, frist_min: int) -> dict:
 
 
 def setzen(coll, grund: str, umfang: str = UMFANG_SCHREIBEN,
-           frist_min: int | None = None, kennung: str | None = None) -> str:
+           frist_min: int | None = None, kennung: str | None = None,
+           zwang: bool = False) -> str | None:
     """Wartungsmodus einschalten (synchron, fuer die Skripte).
 
-    Liefert die Besitzer-Kennung, mit der er wieder aufgehoben wird."""
+    Liefert die Besitzer-Kennung, mit der er wieder aufgehoben wird.
+
+    Rollenprüfung 22.09.2026 (RP-246/RP-397): vorher ueberschrieb setzen()
+    per replace_one JEDEN bestehenden Merker. Lief gerade ein Restore
+    (umfang "alles", besitzer "restore") und startete die Sicherung ihre
+    Schreibpause, war der Restore-Merker weg — aus "alles" wurde "schreiben"
+    (Lesen wieder frei auf einer halb umgeschalteten Datenbank), und das
+    aufheben() der Sicherung oeffnete die Plattform mitten im Restore.
+    Jetzt wird nur geschrieben, wenn kein FREMDER, noch gueltiger Merker
+    steht (Compare-and-Set). Sonst: None — der Aufrufer bricht ab. Ein
+    Merker ohne Ablaufzeit (Restore) gilt als gueltig. `zwang=True`
+    ueberschreibt wie frueher (nur fuer ausdruecklich staerkere Merker)."""
     kennung = kennung or neue_kennung()
-    coll.replace_one({"_id": FLAG_ID},
-                     {"_id": FLAG_ID, **_satz(kennung, grund, umfang,
-                                              frist_minuten(frist_min))},
-                     upsert=True)
+    satz = {"_id": FLAG_ID, **_satz(kennung, grund, umfang, frist_minuten(frist_min))}
+    if zwang:
+        coll.replace_one({"_id": FLAG_ID}, satz, upsert=True)
+        return kennung
+    frei = {"_id": FLAG_ID,
+            "$or": [{"aktiv": {"$ne": True}},
+                    {"gilt_bis": {"$lt": _jetzt().isoformat()}},
+                    {"besitzer": kennung}]}
+    try:
+        coll.replace_one(frei, satz, upsert=True)
+    except Exception as exc:  # noqa: BLE001
+        # Kein Treffer, aber das Dokument existiert: der Upsert will ein
+        # zweites mit derselben _id anlegen -> DuplicateKeyError. Genau das
+        # ist "fremder, gueltiger Merker".
+        if getattr(exc, "code", None) == 11000 or "E11000" in str(exc) \
+                or type(exc).__name__ == "DuplicateKeyError":
+            return None
+        raise
     return kennung
 
 
@@ -216,6 +242,32 @@ def schreiber_kennung() -> str:
     import os as _os
     import socket as _socket
     return f"{_socket.gethostname()}:{_os.getpid()}"
+
+
+#: Rollenprüfung 22.09.2026 (RP-245/RP-396): Hintergrundarbeiten dieses
+#: Prozesses, die gerade schreiben (Aufraeumlauf). Die Middleware zaehlt nur
+#: HTTP-Anfragen — ein laufender Aufraeumlauf loeschte deshalb weiter, waehrend
+#: die Sicherung schon "0 offene Schreibzugriffe" las. server.py meldet die
+#: Summe aus beidem (run_schreiber_melden_forever).
+_HINTERGRUND = {"offen": 0}
+
+
+def hintergrund_offen() -> int:
+    """Wie viele schreibende Hintergrundarbeiten laufen in diesem Prozess?"""
+    return max(0, int(_HINTERGRUND["offen"]))
+
+
+class hintergrund_schreibt:
+    """`with wartung.hintergrund_schreibt(): ...` — zaehlt eine laufende
+    Hintergrundarbeit als Schreiber, bis der Block endet (auch bei Fehlern)."""
+
+    def __enter__(self):
+        _HINTERGRUND["offen"] += 1
+        return self
+
+    def __exit__(self, *_):
+        _HINTERGRUND["offen"] = max(0, _HINTERGRUND["offen"] - 1)
+        return False
 
 
 async def schreiber_melden(db, offen: int) -> None:

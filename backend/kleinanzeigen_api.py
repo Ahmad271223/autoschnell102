@@ -232,7 +232,8 @@ def fahrzeug_aus_api(ad: Dict[str, Any], url: str,
     Die Form ist identisch zu kleinanzeigen_service.parse_kleinanzeigen_html;
     ein Test haelt beide Schluesselmengen zusammen, damit sie nicht
     auseinanderlaufen."""
-    from kleinanzeigen_service import (_enhance_kleinanzeigen_model,
+    from kleinanzeigen_service import (_enhance_kleinanzeigen_model, _km_aus_text,
+                                       _marke_aus_titel, _marke_fehlt,
                                        _parse_first_registration, _parse_fuel,
                                        _parse_gearbox, _parse_power,
                                        _resolve_make, _resolve_model, _to_int)
@@ -276,9 +277,21 @@ def fahrzeug_aus_api(ad: Dict[str, Any], url: str,
         ortszeile = f"{ortszeile} - {stadtteil}"
 
     verkaeufer = ad.get("seller") if isinstance(ad.get("seller"), dict) else {}
-    verkaeufer_name = str(verkaeufer.get("name") or "").strip() or None
+    anzeigename = str(verkaeufer.get("name") or "").strip() or None
+    verkaeufer_art = {"COMMERCIAL": "haendler", "PRIVATE": "privat"}.get(
+        str(verkaeufer.get("type") or "").strip().upper())
+    # Rollenprüfung 22.09.2026 (RP-440): Bei Privatanbietern ist seller.name
+    # das frei gewaehlte Kleinanzeigen-Pseudonym ("vnightx") — kein Name einer
+    # Vertragspartei. Es fuellte im Kaufvertrag das Pflichtfeld "Name / Firma",
+    # das damit als erledigt galt. Nur bei gewerblichen Anbietern ist der Name
+    # die Firma; sonst bleibt seller_name leer und das Pseudonym steht getrennt
+    # in seller_alias (nur als Hinweis fuer den Sucher).
+    verkaeufer_name = anzeigename if verkaeufer_art == "haendler" else None
+    verkaeufer_alias = None if verkaeufer_art == "haendler" else anzeigename
 
-    marke_roh = tabelle.get("Marke")
+    # RP-439: Nutzfahrzeuge (Kategorie 276) tragen die Marke teils unter
+    # "Hersteller" statt "Marke" und den Aufbau unter "Art".
+    marke_roh = tabelle.get("Marke") or tabelle.get("Hersteller")
     modell_roh = tabelle.get("Modell")
     if modell_roh:
         import re
@@ -289,6 +302,21 @@ def fahrzeug_aus_api(ad: Dict[str, Any], url: str,
     pseudo = {"make_label": marke_roh, "make": marke_roh,
               "model_label": modell_roh, "model": modell_roh}
     marke_id, marke_eintrag = _resolve_make(pseudo)
+    marke_aus_titel = False
+    if not marke_eintrag and _marke_fehlt(marke_roh):
+        # Rollenprüfung 22.09.2026 (RP-439): Ohne Marke in der Tabelle (z. B.
+        # Nutzfahrzeuge, Kategorie 276) gab es anders als im HTML-Weg keinen
+        # Rueckfall — der mobile.de-Link lief dann ohne ms= ueber den GANZEN
+        # Pkw-Markt. Review 22.09.: nur aus dem TITEL und streng — die erste
+        # Fassung las auch die Beschreibung und nahm gewoehnliche Woerter
+        # als Marke ("Man kann ihn besichtigen" -> MAN, "andere Extras" ->
+        # Andere) und ueberschrieb sogar "Weitere Automarken" damit. Eine
+        # konkrete, dem Katalog unbekannte Marke aus der Tabelle bleibt.
+        marke_eintrag = _marke_aus_titel(titel)
+        if marke_eintrag:
+            marke_id = marke_eintrag["id"]
+            marke_aus_titel = True
+            pseudo["make_label"] = pseudo["make"] = marke_eintrag["raw_name"]
     modell_id = _resolve_model(marke_eintrag, pseudo) if marke_eintrag else None
 
     ez = _parse_first_registration(tabelle.get("Erstzulassung"))
@@ -321,9 +349,10 @@ def fahrzeug_aus_api(ad: Dict[str, Any], url: str,
         "model_label": modell_roh,
         "model_description": titel,
         "category": None,
-        "category_label": tabelle.get("Fahrzeugtyp"),
+        "category_label": tabelle.get("Fahrzeugtyp") or tabelle.get("Art"),
         "first_registration": ez,
-        "mileage": _to_int(tabelle.get("Kilometerstand")),
+        # RP-436: derselbe Kilometer-Leser wie im HTML-Weg (erste Zahl, plausibel)
+        "mileage": _km_aus_text(tabelle.get("Kilometerstand")),
         "fuel": kraftstoff,
         "fuel_label": kraftstoff_text,
         "gearbox": getriebe,
@@ -348,12 +377,14 @@ def fahrzeug_aus_api(ad: Dict[str, Any], url: str,
         "currency": str(preis.get("currency_code") or "EUR"),
         # Der eigene Abruf liefert den Verkaeufernamen NICHT (er steht nicht
         # im sichtbaren Text) — ueber die API kommt er mit und spart dem
-        # Sucher das Abtippen im Kaufvertrag.
+        # Sucher das Abtippen im Kaufvertrag. RP-440: nur die FIRMA eines
+        # gewerblichen Anbieters; das Pseudonym eines Privatanbieters steht
+        # getrennt in seller_alias.
         "seller_name": verkaeufer_name,
+        "seller_alias": verkaeufer_alias,
         # Pruefbericht 20.09.2026 (S-14): gewerblich/privat wie bei den anderen
         # Quellen — vorher galten gewerbliche Anbieter als "unbekannt".
-        "seller_type": {"COMMERCIAL": "haendler", "PRIVATE": "privat"}.get(
-            str(verkaeufer.get("type") or "").strip().upper()),
+        "seller_type": verkaeufer_art,
         "seller_address": None,
         "seller_zip": plz,
         "seller_city": stadt,
@@ -369,6 +400,9 @@ def fahrzeug_aus_api(ad: Dict[str, Any], url: str,
         "image_count": len(bilder),
         "_resolved_make_id": marke_id,
         "_resolved_model_id": modell_id,
+        # Review zu RP-439: Marke nur aus dem Titel geschlossen -> Hinweis
+        # im Vergleich (routes/listings._katalog_pruefen).
+        "_marke_aus_titel": marke_aus_titel,
         "_source": "kleinanzeigen",
         # Nur fuer Protokoll/Diagnose: welcher Weg hat die Daten geholt.
         "_abrufweg": "api",

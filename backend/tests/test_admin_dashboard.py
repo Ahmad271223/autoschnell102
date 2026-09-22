@@ -5,7 +5,7 @@ Covers:
   * POST /api/auth/login (Benutzername/Kontonummer + soft-block 403)
   * POST /api/admin/users/{id}/active (soft-block, super-admin guard, self-block guard)
   * POST /api/admin/users/{id}/password (admin reset, min 8 chars)
-  * POST /api/admin/me/password (self change, wrong current → 401)
+  * POST /api/admin/me/password (self change, wrong current → 400, RP-554)
   * GET  /api/admin/users (subscription / company_name / active)
   * GET  /api/admin/users/{id}/contracts (no _id, no pdf_b64)
   * GET  /api/admin/comparisons
@@ -195,13 +195,15 @@ class TestAdminSelfPassword:
         yield {"Authorization": f"Bearer {r.json()['token']}"}
         dbx.users.delete_many({"email": self.MAIL})
 
-    def test_wrong_current_password_returns_401(self, eigener_admin):
+    def test_wrong_current_password_returns_400(self, eigener_admin):
+        # Rollenpruefung 22.09.2026 (RP-554): 400 statt 401 — die Oberflaeche
+        # meldet bei jeder 401 ab, ein Tippfehler warf den Betreiber hinaus.
         r = requests.post(
             f"{BASE_URL}/api/admin/me/password",
             json={"current_password": "wrong-current", "new_password": "Whatever12345"},
             headers=eigener_admin, timeout=20,
         )
-        assert r.status_code == 401, r.text
+        assert r.status_code == 400, r.text
 
     def test_change_then_change_back(self, eigener_admin):
         new_pw = "TempAdminPw12345"

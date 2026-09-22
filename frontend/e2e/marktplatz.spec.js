@@ -17,6 +17,11 @@ test.describe("Marktplatz-Verhandlung", () => {
 
   test("Interesse senden, Gegenangebot, Annahme -> akzeptiert & reserviert", async ({ page, browser }) => {
     // Kaeufer: Inserat oeffnen und Interesse mit Angebot senden
+    // Rollenpruefung 22.09.2026 (RP-501): vor dem Senden fragt der Marktplatz
+    // "Dein Angebot: 17.000,00 € ... So an den Haendler senden?" (window.confirm)
+    // — bestaetigen.
+    const rueckfragen = [];
+    page.on("dialog", (d) => { rueckfragen.push(d.message()); d.accept(); });
     await h.authPage(page, "buyer", buyer.token);
     await page.goto("/markt");
     await expect(page.getByTestId("markt-page")).toBeVisible();
@@ -29,6 +34,7 @@ test.describe("Marktplatz-Verhandlung", () => {
     await page.getByTestId("interesse-nachricht").fill("E2E: Interesse am Fahrzeug");
     await page.getByTestId("interesse-senden").click();
     await expect(page.getByTestId("interesse-gesendet")).toBeVisible();
+    expect(rueckfragen.some((t) => t.includes("17.000,00"))).toBe(true);
 
     const interessen = await h.get(`/dealer/interessen?listing_id=${listing.listingId}`, { token: firma.token });
     expect(interessen).toHaveLength(1);
@@ -58,7 +64,9 @@ test.describe("Marktplatz-Verhandlung", () => {
     await expect(meine).toBeVisible();
     await expect(meine).toContainText("18.000 €");
     await meine.getByTestId(`gegenangebot-annehmen-${iid}`).click();
-    await expect(meine).toContainText("akzeptiert");
+    // RP-477: lesbarer Status und der vereinbarte Preis statt des Rohwerts "akzeptiert"
+    await expect(meine).toContainText("Angenommen");
+    await expect(meine).toContainText("Vereinbarter Preis: 18.000 €");
     await expect(meine.getByTestId(`gegenangebot-annehmen-${iid}`)).toHaveCount(0);
 
     // Gegenprobe: Anfrage akzeptiert, Inserat reserviert

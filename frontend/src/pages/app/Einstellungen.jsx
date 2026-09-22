@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, errMsg } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { useFeatures } from "@/lib/features";
 import { ungespeichertMelden } from "@/lib/ungespeichert";
+import { kmAusText } from "@/lib/preis";
+import { aboKontextVeraltet, planText } from "@/lib/abo";
 
 // Vorlage Ahmad 20.09.2026: dieselben Namen wie im Backend
 // (backend/vertrag_platzhalter.py). Der Test test_vertragstexte_20260920.py
@@ -24,7 +26,7 @@ const PLATZHALTER = [
   "{händler_name}", "{telefon}", "{email}",
 ];
 import { toast } from "sonner";
-import { wurdeZusammengefuehrt, zusammenfuehren } from "@/lib/vertragstext";
+import { vertragstextFuerFormular } from "@/lib/vertragstext";
 import KopierKnopf from "@/components/KopierKnopf";
 import {
   Building2, Sliders, FileText, Mail, MessageSquare, ShieldCheck, Save, Check, Globe,
@@ -33,7 +35,12 @@ import {
 import CountryPicker from "@/components/CountryPicker";
 
 // Formular aus dem (wirksamen) Haendlerdokument — ohne reine UI-Felder.
-function formAus(dealer) {
+export function formAus(dealer) {
+  // Rollenprüfung 22.09.2026 (RP-423): bei leeren Bedingungen und noch
+  // vorhandenen AGB ist der Standardtext die Grundlage — sonst ersetzte der
+  // AGB-Text beim Speichern die vier Standardklauseln.
+  const vt = vertragstextFuerFormular(dealer.default_terms, dealer.digital_vertragstext,
+                                      dealer.digital_vertragstext_standard);
   return {
     profile: {
       company_name: dealer.company_name || "", contact_person: dealer.contact_person || "",
@@ -63,8 +70,9 @@ function formAus(dealer) {
     // angehaengt; beim Speichern wird das alte Feld geleert.
     default_terms: "",
     default_special_agreements: dealer.default_special_agreements || "",
-    digital_vertragstext: zusammenfuehren(dealer.default_terms, dealer.digital_vertragstext),
-    _agb_zusammengefuehrt: wurdeZusammengefuehrt(dealer.default_terms, dealer.digital_vertragstext),
+    digital_vertragstext: vt.text,
+    _agb_zusammengefuehrt: vt.zusammengefuehrt,
+    _agb_standard_genutzt: vt.standardGenutzt,
   };
 }
 
@@ -123,6 +131,39 @@ export function nurGeaenderte(payload, stand) {
   return out;
 }
 
+/**
+ * Was beim Speichern an PUT /dealer/settings geht.
+ *
+ * Rollenprüfung 22.09.2026:
+ *   RP-005/RP-104/RP-255/RP-425: active_profile ging mit — aus einem veralteten
+ *     Kontext (Wechsel über das Profil-Abzeichen im Vergleich). Jedes
+ *     Speichern drehte Export still auf Inland zurück, für die ganze Firma.
+ *     Der Live-Schalter hat seine eigene Route (/dealer/active-profile) und
+ *     gehört nie in dieses Formular.
+ *   RP-426/RP-138: Der Chef schickte das GANZE Formular. Ein zweiter Tab oder
+ *     Handy und PC setzten damit alle Felder des anderen zurück — auch die
+ *     Logo-Adresse, deren Datei beim neuen Hochladen schon gelöscht war.
+ *     Jetzt schickt auch der Chef nur, was er wirklich geändert hat.
+ *     Ausnahme: sind alte AGB in das Vertragstext-Feld gewandert (Hinweis
+ *     "bitte einmal speichern"), geht der zusammengeführte Text mit, damit das
+ *     alte Feld geleert wird. Bei Suchern nicht — das würde die Chef-Vorgabe
+ *     als persönlichen Wert einfrieren (B19).
+ */
+export function speicherPayload(form, stand, { istChef = false } = {}) {
+  const { _edit_profile, _agb_zusammengefuehrt, _agb_standard_genutzt, active_profile, ...alles } = form || {};
+  let basis = stand;
+  if (stand && "active_profile" in stand) {
+    basis = { ...stand };
+    delete basis.active_profile;
+  }
+  const payload = { ...nurGeaenderte(alles, basis) };
+  if (istChef && _agb_zusammengefuehrt) {
+    payload.digital_vertragstext = alles.digital_vertragstext;
+    payload.default_terms = "";
+  }
+  return payload;
+}
+
 // Anzeige der persoenlich ueberschriebenen Felder (Sucher).
 const FELD_TITEL = {
   company_name: "Firmenname", contact_person: "Ansprechpartner", phone: "Telefon",
@@ -167,14 +208,20 @@ export default function Einstellungen() {
   // geaendert" (B19) und fuer das Erhalten ungespeicherter Eingaben (H37).
   const ausgangRef = useRef(null);
   const istChef = user?.role === "dealer";
+  // Rollenprüfung 22.09.2026 (RP-414): Eingabefelder mit unlesbarem Wert
+  // (z. B. Kilometer "50.0") — solange einer da ist, wird nicht gespeichert.
+  const [feldFehler, setFeldFehler] = useState({});
+  const feldFehlerSetzen = useCallback((feld, text) => {
+    setFeldFehler((s) => ((s[feld] || "") === (text || "") ? s : { ...s, [feld]: text || "" }));
+  }, []);
 
   // Pruefbericht 20.09.2026 (U-130): Ungespeicherte Aenderungen gingen beim
   // Verlassen/Neuladen ohne Rueckfrage verloren. Jetzt meldet die Seite sie
   // an, solange das Formular vom letzten Serverstand abweicht.
-  const geaendert = !!form && !!ausgangRef.current && (() => {
-    const { _edit_profile, _agb_zusammengefuehrt, ...rest } = form;
-    return Object.keys(nurGeaenderte(rest, ausgangRef.current)).filter((k) => k !== "default_terms").length > 0;
-  })();
+  // Rollenprüfung 22.09.2026: der Live-Schalter (active_profile) zählt nicht
+  // — er wird sofort über seine eigene Route gespeichert.
+  const geaendert = !!form && !!ausgangRef.current
+    && Object.keys(speicherPayload(form, ausgangRef.current)).filter((k) => k !== "default_terms").length > 0;
   useEffect(() => (geaendert ? ungespeichertMelden() : undefined), [geaendert]);
 
   useEffect(() => {
@@ -220,13 +267,17 @@ export default function Einstellungen() {
 
   const save = async () => {
     if (speichert) return;
-    // _edit_profile ist nur UI-State, nicht ans Backend schicken
-    const { _edit_profile, _agb_zusammengefuehrt, ...alles } = form;
+    const offenerFehler = Object.values(feldFehler).find(Boolean);
+    if (offenerFehler) {
+      toast.error(`Bitte zuerst korrigieren: ${offenerFehler}`);
+      return;
+    }
     // B19: Sucher schicken nur echte Aenderungen (sonst wurden geerbte
-    // Chef-Werte als persoenliche Werte eingefroren). Der Chef schreibt die
-    // Firmenvorgaben und schickt wie bisher alles.
-    const payload = istChef ? alles : nurGeaenderte(alles, ausgangRef.current);
-    if (!istChef && Object.keys(payload).length === 0) {
+    // Chef-Werte als persoenliche Werte eingefroren). Rollenprüfung
+    // 22.09.2026 (RP-426/RP-138/RP-425): der Chef jetzt ebenso, und
+    // active_profile nie (siehe speicherPayload).
+    const payload = speicherPayload(form, ausgangRef.current, { istChef });
+    if (Object.keys(payload).length === 0) {
       toast.info("Keine Änderungen zum Speichern.");
       return;
     }
@@ -252,8 +303,12 @@ export default function Einstellungen() {
   const aufChefZuruecksetzen = async () => {
     if (!window.confirm("Alle eigenen Werte löschen? Danach gelten wieder die Vorgaben deines Chefs "
       + "(auch für künftige Änderungen).")) return;
+    if (!eigene.length) return;
     try {
-      await api.post("/dealer/settings/zuruecksetzen", {});
+      // Rollenprüfung 22.09.2026 (RP-005): ohne Feldliste löschte der Server
+      // ALLE persönlichen Werte — auch das eigene aktive Profil (Inland/
+      // Export), das hier gar nicht aufgeführt ist. Jetzt nur die angezeigten.
+      await api.post("/dealer/settings/zuruecksetzen", { felder: eigene });
       ausgangRef.current = null;
       setForm(null);
       await refresh();
@@ -269,6 +324,9 @@ export default function Einstellungen() {
     try {
       await api.put("/dealer/active-profile", { active_profile: p });
       toast.success(p === "inland" ? "Inland-Profil aktiv" : "Export-Profil aktiv");
+      // Rollenprüfung 22.09.2026 (RP-255): Kontext nachziehen, damit Vergleich
+      // und manuelle Suche das neue Profil zeigen.
+      refresh();
     } catch (err) {
       // Runde 16 (15.09.2026): bei Fehler den alten Stand wieder anzeigen —
       // sonst stand "Export aktiv" da, waehrend der Server Inland behielt.
@@ -349,7 +407,9 @@ export default function Einstellungen() {
                   // Entscheidung Ahmad 16.09.2026: das Firmenlogo pflegt nur der
                   // Chef — Sucher sehen es, aendern es aber nicht (Server: 403).
                   <div className="text-[12px] text-zinc-500" data-testid="logo-nur-chef">
-                    Das Firmenlogo pflegt der Chef. Es erscheint auf deinen Verträgen.
+                    {/* Rollenprüfung 22.09.2026 (RP-452): genau sagen, wo das Logo
+                        erscheint — bereits erstellte Verträge bekommen es nie nachträglich. */}
+                    Das Firmenlogo pflegt der Chef. Es erscheint auf neuen Kaufverträgen und in Vertrags-Mails.
                   </div>
                 ) : (
                 <div>
@@ -361,7 +421,12 @@ export default function Einstellungen() {
                     <input type="file" accept="image/*" className="hidden"
                            onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; uploadLogo(f); }} />
                   </label>
-                  <div className="text-[11px] text-zinc-500 mt-1.5">PNG/JPG, max. 2 MB. Erscheint auf Vertrag & Marktplatz.</div>
+                  {/* RP-452: das Logo wird beim Anlegen im Vertrag festgehalten
+                      (contract_data.logo_key) — ältere Verträge bleiben ohne. */}
+                  <div className="text-[11px] text-zinc-500 mt-1.5" data-testid="logo-hinweis">
+                    PNG/JPG, max. 2 MB. Erscheint auf neuen Kaufverträgen, in Vertrags-Mails und auf dem
+                    Marktplatz. Bereits erstellte Verträge bleiben unverändert.
+                  </div>
                   {form.profile.logo_url && (
                     <button type="button" onClick={() => setProfile("logo_url", "")}
                             className="text-[11px] text-zinc-500 hover:text-red-400 mt-1">Logo entfernen</button>
@@ -477,9 +542,13 @@ export default function Einstellungen() {
                                { v: "range", l: "± X km" },
                              ]} />
                 {r.mileage?.mode !== "ignore" && r.mileage?.mode !== "exact" && (
-                  <AppleNumber testid="rule-km-value" value={r.mileage?.value ?? 30000}
-                               onChange={(v) => setRule("mileage", { ...r.mileage, value: v })}
-                               className="w-32" />
+                  // Rollenprüfung 22.09.2026 (RP-414): deutsch lesen — "50.000"
+                  // wurde im number-Feld zu 50 und die Suche lief mit ±50 km.
+                  <KmFeld key={`${rulesKey}-km`} feld={`${rulesKey}.mileage`}
+                          testid="rule-km-value" value={r.mileage?.value ?? 30000}
+                          onChange={(v) => setRule("mileage", { ...r.mileage, value: v })}
+                          onFehler={feldFehlerSetzen}
+                          className="w-32" />
                 )}
               </RuleRow>
 
@@ -624,7 +693,9 @@ export default function Einstellungen() {
                      data-testid="agb-zusammengefuehrt"
                      style={{ borderColor: "#f59e0b55", background: "#f59e0b14", color: "var(--tx-amber)" }}>
                   Aus zwei Textfeldern ist eins geworden: Deine bisherigen AGB stehen jetzt
-                  unten im Feld „Vertragsbedingungen“. Bitte einmal durchlesen und speichern.
+                  unten im Feld „Vertragsbedingungen“
+                  {form._agb_standard_genutzt ? " — angehängt an den Standardtext, der bisher galt" : ""}.
+                  Bitte einmal durchlesen und speichern.
                 </div>
               )}
               <AppleTextarea
@@ -774,6 +845,106 @@ function AppleNumber({ value, onChange, min, max, className = "", testid }) {
   );
 }
 
+/** 30000 -> "30.000"; kein Wert -> "". */
+export function kmAnzeige(n) {
+  return typeof n === "number" && Number.isFinite(n) ? n.toLocaleString("de-DE") : "";
+}
+
+/**
+ * Rollenprüfung 22.09.2026 (RP-414): Kilometer-Toleranz als Textfeld mit
+ * deutscher Zahlenlogik (kmAusText). Das frühere type="number"-Feld machte
+ * aus "50.000" im deutschen Chrome 50 — gespeichert wurde ±50 km, der
+ * Vergleich fand kaum noch etwas. Unlesbares wird angezeigt und blockiert
+ * das Speichern (onFehler), statt still einen falschen Wert zu schreiben.
+ * Leer = Standard (wie bisher), übernommen beim Verlassen des Feldes.
+ */
+export function KmFeld({ feld, value, onChange, onFehler, testid, className = "" }) {
+  const [text, setText] = useState(() => kmAnzeige(value));
+  const [fehler, setFehler] = useState("");
+  const textRef = useRef(text);
+  // Rollenprüfung 22.09.2026 (Review): der Wert, der VOR der laufenden
+  // Eingabe galt (beim Einhängen, nach einer Änderung von außen oder nach dem
+  // Verlassen mit lesbarem Text). Beim Tippen gehen Zwischenstände ins
+  // Formular ("5", "50" ...); wird der Text unlesbar ("50.00"), bekommt das
+  // Formular diesen Wert zurück. Vorher blieb der Zwischenstand 50 stehen —
+  // und nach einem Profilwechsel (Aushängen räumt den Fehler) speicherte
+  // "Speichern" still ±50 km.
+  const vorherRef = useRef(value);
+
+  const fehlerSetzen = useCallback((f) => {
+    setFehler(f);
+    onFehler?.(feld, f);
+  }, [feld, onFehler]);
+
+  // Wert von außen geändert (Neuladen, anderes Profil): Anzeige nachziehen —
+  // aber nicht, solange der Text genau diesen Wert schon meint, und nicht,
+  // wenn wir selbst bei unlesbarem Text den Vorwert zurückgegeben haben
+  // (sonst verschwände die Eingabe samt Fehlermeldung unter dem Finger).
+  useEffect(() => {
+    const n = kmAusText(textRef.current);
+    if (n === value || (n === null && value == null)) return;
+    if (Number.isNaN(n) && value === vorherRef.current) return;
+    const neu = kmAnzeige(value);
+    textRef.current = neu;
+    setText(neu);
+    vorherRef.current = value;
+    fehlerSetzen("");
+  }, [value, fehlerSetzen]);
+  // Beim Aushängen (Profilwechsel, Modus "Nicht übernehmen"/"1:1") keinen
+  // alten Fehler stehen lassen — das Formular hält dann ja den Vorwert, nie
+  // einen halb getippten Zwischenstand (siehe aendern).
+  useEffect(() => () => onFehler?.(feld, ""), [feld, onFehler]);
+
+  const aendern = (s) => {
+    textRef.current = s;
+    setText(s);
+    const n = kmAusText(s);
+    if (n === null) { fehlerSetzen(""); return; }            // leer: erst beim Verlassen
+    if (Number.isNaN(n)) {
+      fehlerSetzen("Kilometer bitte als ganze Zahl eingeben, z. B. 50.000");
+      // Zwischenstand aus dem Formular nehmen (siehe vorherRef).
+      if (value !== vorherRef.current) onChange(vorherRef.current);
+      return;
+    }
+    fehlerSetzen("");
+    onChange(n);
+  };
+  const verlassen = () => {
+    const n = kmAusText(textRef.current);
+    if (n === null) { onChange(undefined); return; }         // leer = Standard
+    if (!Number.isNaN(n)) {
+      const schoen = kmAnzeige(n);
+      textRef.current = schoen;
+      setText(schoen);
+      vorherRef.current = n;
+    }
+  };
+
+  return (
+    <span className="inline-flex flex-col gap-1">
+      <span className="inline-flex items-center gap-1.5">
+        <input data-testid={testid} type="text" inputMode="numeric" autoComplete="off"
+               value={text} onChange={(e) => aendern(e.target.value)} onBlur={verlassen}
+               aria-invalid={fehler ? "true" : undefined}
+               className={`apple-input ${className}`}
+               style={fehler ? { borderColor: "var(--st-rot)" } : undefined} />
+        <span className="text-xs text-zinc-500">km</span>
+      </span>
+      {fehler && (
+        <span role="alert" className="text-[11px]" style={{ color: "var(--tx-rot)" }}
+              data-testid={testid ? `${testid}-fehler` : undefined}>{fehler}</span>
+      )}
+      {/* Altwerte aus dem number-Feld ("50.000" -> 50) sichtbar machen. */}
+      {!fehler && typeof value === "number" && value > 0 && value < 1000 && (
+        <span className="text-[11px]" style={{ color: "var(--tx-amber)" }}
+              data-testid={testid ? `${testid}-hinweis` : undefined}>
+          Nur {kmAnzeige(value)} km — gemeint {kmAnzeige(value * 1000)} km?
+        </span>
+      )}
+    </span>
+  );
+}
+
 function AppleTextarea({ label, rows = 4, value, onChange, hint, testid, icon: Icon, kopieren = false }) {
   return (
     <div className="space-y-1.5">
@@ -792,14 +963,29 @@ function AppleTextarea({ label, rows = 4, value, onChange, hint, testid, icon: I
   );
 }
 
+// Rollenprüfung 22.09.2026 (RP-484): {abholdatum} steht im Kaufvertrag nur als
+// Datum (backend/vertrag_platzhalter.py, mit_uhrzeit=False), in Mails mit Uhrzeit.
+const PLATZHALTER_HINWEIS = {
+  "{abholdatum}": "im Kaufvertrag nur das Datum, in Mails mit Uhrzeit",
+};
+
 function PlaceholderHint({ placeholders }) {
+  const hinweise = placeholders.filter((p) => PLATZHALTER_HINWEIS[p]);
   return (
-    <div className="text-[11px] text-zinc-500 mt-1 flex items-center gap-2 flex-wrap">
-      <span className="font-semibold text-zinc-400">Platzhalter:</span>
-      {placeholders.map((p) => (
-        <code key={p} className="px-1.5 py-0.5 rounded-md bg-white/[0.05] text-zinc-300 border border-white/[0.06]">
-          {p}
-        </code>
+    <div className="text-[11px] text-zinc-500 mt-1">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="font-semibold text-zinc-400">Platzhalter:</span>
+        {placeholders.map((p) => (
+          <code key={p} title={PLATZHALTER_HINWEIS[p] || undefined}
+                className="px-1.5 py-0.5 rounded-md bg-white/[0.05] text-zinc-300 border border-white/[0.06]">
+            {p}
+          </code>
+        ))}
+      </div>
+      {hinweise.map((p) => (
+        <div key={p} className="mt-1" data-testid="platzhalter-hinweis">
+          <code>{p}</code>: {PLATZHALTER_HINWEIS[p]}
+        </div>
       ))}
     </div>
   );
@@ -807,12 +993,9 @@ function PlaceholderHint({ placeholders }) {
 
 /* ── Abo-Panel ── */
 
-const PLAN_LABEL = {
-  monthly:  "Monatsabo",
-  yearly:   "Jahresabo",
-  lifetime: "Lifetime",
-  trial:    "Test-Phase",
-};
+// Rollenprüfung 22.09.2026 (RP-010/RP-109/RP-260): Planname und
+// Kontext-Abgleich stehen in lib/abo.js (auch für die Team-Seite).
+export { PLAN_LABEL, planText, aboKontextVeraltet } from "@/lib/abo";
 
 const STATUS_BADGE = {
   active:    { label: "Aktiv",     bg: "rgba(52,199,89,0.15)",  fg: "var(--accent-green)", border: "rgba(52,199,89,0.35)" },
@@ -830,13 +1013,36 @@ function fmtGermanDate(iso) {
   } catch { return iso; }
 }
 
+/**
+ * Rollenprüfung 22.09.2026 (RP-040/RP-139): Ladefehler sichtbar mit
+ * "Erneut versuchen" — vorher stand der Marktplatz-Reiter für immer auf
+ * "Lädt…", und Einladungen/Mitglieder zeigten bei einem Fehler "Noch keine".
+ */
+function LadeFehler({ text, onErneut, testid }) {
+  return (
+    <div className="flex flex-wrap items-center gap-3 text-sm rounded-xl border px-3 py-2.5" role="alert"
+         data-testid={testid}
+         style={{ borderColor: "rgba(255,69,58,0.35)", background: "rgba(255,69,58,0.08)",
+                  color: "var(--text-primary)" }}>
+      <span className="flex-1 min-w-0">{text}</span>
+      <button type="button" onClick={onErneut}
+              className="rounded-lg px-3 py-1.5 text-xs border font-semibold"
+              style={{ borderColor: "var(--border-default)" }}>
+        Erneut versuchen
+      </button>
+    </div>
+  );
+}
+
 function MarketplacePanel() {
   const [mp, setMp] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [ladeFehler, setLadeFehler] = useState("");
 
   const load = async () => {
+    setLadeFehler("");
     try { const { data } = await api.get("/dealer/marketplace-profile"); setMp(data); }
-    catch (e) { toast.error(errMsg(e, "Marktplatz-Profil konnte nicht geladen werden")); }
+    catch (e) { setLadeFehler(errMsg(e, "Marktplatz-Profil konnte nicht geladen werden")); }
   };
   useEffect(() => { load(); }, []);
 
@@ -855,7 +1061,15 @@ function MarketplacePanel() {
     catch (e) { toast.error(errMsg(e)); }
   };
 
-  if (!mp) return <Section title="Marktplatz"><div className="text-sm text-zinc-500">Lädt…</div></Section>;
+  if (!mp) {
+    return (
+      <Section title="Marktplatz">
+        {ladeFehler
+          ? <LadeFehler text={ladeFehler} onErneut={load} testid="markt-profil-ladefehler" />
+          : <div className="text-sm text-zinc-500">Lädt…</div>}
+      </Section>
+    );
+  }
 
   return (
     <Section title="Marktplatz" subtitle="Steuert, ob deine veröffentlichten Fahrzeuge für registrierte Zwischenhändler sichtbar sind.">
@@ -919,10 +1133,12 @@ function InvitePanel() {
   const [invites, setInvites] = useState(null);
   const [validity, setValidity] = useState(168);
   const [uses, setUses] = useState(1);
+  const [ladeFehler, setLadeFehler] = useState("");
 
   const load = async () => {
-    try { const { data } = await api.get("/dealer/invites"); setInvites(data); }
-    catch (e) { setInvites([]); }
+    setLadeFehler("");
+    try { const { data } = await api.get("/dealer/invites"); setInvites(Array.isArray(data) ? data : []); }
+    catch (e) { setInvites(null); setLadeFehler(errMsg(e, "Einladungen konnten nicht geladen werden")); }
   };
   useEffect(() => { load(); }, []);
 
@@ -983,7 +1199,9 @@ function InvitePanel() {
           + Einladungslink erstellen
         </button>
       </div>
-      {invites === null ? (
+      {ladeFehler ? (
+        <LadeFehler text={ladeFehler} onErneut={load} testid="einladungen-ladefehler" />
+      ) : invites === null ? (
         <div className="text-xs text-zinc-500">Lädt…</div>
       ) : invites.length === 0 ? (
         <div className="text-xs text-zinc-500">Noch keine Einladungen erstellt.</div>
@@ -1017,10 +1235,12 @@ function InvitePanel() {
 // Inseraten und Netzwerkpreisen (Backend: DELETE /dealer/network/members).
 function NetzwerkMitglieder() {
   const [members, setMembers] = useState(null);
+  const [ladeFehler, setLadeFehler] = useState("");
 
   const load = async () => {
-    try { const { data } = await api.get("/dealer/network/members"); setMembers(data); }
-    catch (e) { setMembers([]); }
+    setLadeFehler("");
+    try { const { data } = await api.get("/dealer/network/members"); setMembers(Array.isArray(data) ? data : []); }
+    catch (e) { setMembers(null); setLadeFehler(errMsg(e, "Netzwerk-Mitglieder konnten nicht geladen werden")); }
   };
   useEffect(() => { load(); }, []);
 
@@ -1038,7 +1258,9 @@ function NetzwerkMitglieder() {
       <div className="text-xs text-zinc-500 mb-2">
         Zwischenhändler, die über eine Einladung beigetreten sind. Zugang jederzeit widerrufbar.
       </div>
-      {members === null ? (
+      {ladeFehler ? (
+        <LadeFehler text={ladeFehler} onErneut={load} testid="netzwerk-ladefehler" />
+      ) : members === null ? (
         <div className="text-xs text-zinc-500">Lädt…</div>
       ) : members.length === 0 ? (
         <div className="text-xs text-zinc-500">Noch keine Mitglieder.</div>
@@ -1064,31 +1286,42 @@ function NetzwerkMitglieder() {
 }
 
 function SubscriptionPanel() {
+  const { refresh, subscription } = useAuth();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState("");
+  // Letzter Kontext-Stand, ohne den Abruf-Takt neu aufzusetzen.
+  const kontextRef = useRef(subscription);
+  kontextRef.current = subscription;
 
-  const load = async () => {
+  const uebernehmen = useCallback((d) => {
+    setData(d);
+    if (aboKontextVeraltet(kontextRef.current, d)) refresh();
+  }, [refresh]);
+
+  const load = useCallback(async () => {
     setLoading(true);
     try {
       const { data } = await api.get("/dealer/subscription");
-      setData(data);
+      uebernehmen(data);
     } catch (err) {
       toast.error(errMsg(err, "Abo-Info konnte nicht geladen werden"));
     } finally {
       setLoading(false);
     }
-  };
+  }, [uebernehmen]);
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [load]);
   // Audit 09/2026: nach Freischaltung durch den Betreiber aktualisiert sich
   // die Seite selbst (alle 30 s, solange kein aktives Abo) — plus Button.
+  // Rollenprüfung 22.09.2026 (RP-105): dabei auch den Anmelde-Kontext, damit
+  // Vergleich und Suche sofort freigegeben sind ("geht es sofort weiter").
   useEffect(() => {
     if (!data || data.active) return undefined;
-    const t = setInterval(() => { api.get("/dealer/subscription").then((r) => setData(r.data)).catch(() => {}); }, 30000);
+    const t = setInterval(() => { api.get("/dealer/subscription").then((r) => uebernehmen(r.data)).catch(() => {}); }, 30000);
     return () => clearInterval(t);
-  }, [data]);
+  }, [data, uebernehmen]);
 
   const cancel = async () => {
     setBusy("cancel");
@@ -1097,6 +1330,7 @@ function SubscriptionPanel() {
       toast.success(data?.message || "Abo gekündigt");
       setConfirming(false);
       await load();
+      refresh();              // RP-105: Abo-Punkt in der Leiste nachziehen
     } catch (err) {
       toast.error(errMsg(err, "Kündigung fehlgeschlagen"));
     } finally {
@@ -1131,13 +1365,16 @@ function SubscriptionPanel() {
   if (!data) return null;
 
   const badge = STATUS_BADGE[data.status] || STATUS_BADGE.none;
-  const planLabel = PLAN_LABEL[data.plan] || (data.plan ? data.plan : "—");
+  const planLabel = planText(data.plan);
   const isCancelled = data.status === "cancelled";
   const isExpired = data.status === "expired" || data.status === "none";
 
+  // Rollenprüfung 22.09.2026 (RP-010/RP-109): Verträge und Versand verlangen
+  // das Abo (contracts.py require_active_sub) — der alte Untertitel nannte
+  // sie "kostenlos". Gleicher Wortlaut wie auf der Abo-Seite.
   return (
     <Section title="Abo & Zahlung"
-             subtitle="Das Sucher-Abo schaltet Suche & Vergleich frei. Bestand, Inserate, Verträge, Versand und Termine bleiben für die Firma kostenlos.">
+             subtitle="Das Sucher-Abo schaltet Suche, Vergleich und Kaufverträge (samt Versand) frei. Terminplaner, Freigaben, Bestand und Inserate bleiben kostenlos.">
       <div className="flex justify-end -mt-2 mb-2">
         <button onClick={load} data-testid="abo-status-aktualisieren"
                 className="text-xs text-zinc-400 hover:text-white underline underline-offset-2">

@@ -101,7 +101,15 @@ def _absender(anzeigename: Optional[str] = None, *, kodiert: bool = True) -> str
     if kodiert:
         return formataddr((name, adresse))
     # JSON ist UTF-8 — Resend kodiert den Anzeigenamen selbst korrekt.
-    name = name.replace('"', "'")
+    # Rollenpruefung 22.09.2026 (RP-433): Ein Firmenname wie "Autohaus
+    # Müller, Inh. X" stand ungequotet vor der Adresse — laut RFC 5322 muss
+    # ein Anzeigename mit Sonderzeichen (Komma, Semikolon, Punkt, Klammern …)
+    # in Anfuehrungszeichen stehen, sonst liest ein Mailprogramm das Komma
+    # als Trenner zweier Adressen. Zeilenumbrueche fliegen raus, " wird wie
+    # bisher zu ', ein Backslash wird maskiert.
+    name = " ".join(name.replace('"', "'").split())
+    if any(z in name for z in '()<>[]:;@\\,."'):
+        name = '"' + name.replace("\\", "\\\\") + '"'
     return f'{name} <{adresse}>'
 
 

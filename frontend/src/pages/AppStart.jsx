@@ -5,6 +5,7 @@ import { useDriver } from "@/context/DriverContext";
 import { useBuyer } from "@/context/BuyerContext";
 import SeiteLaedt from "@/components/SeiteLaedt";
 import VerbindungsFehler from "@/components/VerbindungsFehler";
+import RechtsLinks from "@/components/RechtsLinks";
 import { startZiel } from "@/lib/appstart";
 import { letzteAnmeldung } from "@/lib/sitzung";
 import { useFeatures } from "@/lib/features";
@@ -54,6 +55,9 @@ function Auswahl() {
             </Link>
           ))}
         </div>
+        {/* Rollenprüfung 22.09.2026 (RP-563): auch der Start der installierten
+            App verlinkt Impressum, Datenschutz und AGB. */}
+        <RechtsLinks className="mt-8" />
       </div>
     </div>
   );

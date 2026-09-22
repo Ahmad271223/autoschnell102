@@ -2,6 +2,7 @@
 listings/extract, listings/resolve."""
 import logging
 import os
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -34,7 +35,7 @@ CLIENT_CONFIRMED_TTL_HOURS = int(os.environ.get("CLIENT_CONFIRMED_TTL_HOURS", "1
 
 from fastapi import (APIRouter, BackgroundTasks, Depends, HTTPException, Query,
                      Request, Response)
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from auth import decode_token
 from autoscout_service import build_search_url as build_autoscout_url
@@ -53,8 +54,8 @@ from provider_fetch import TageslimitErreicht, fetch_listing
 from rate_limiter import SlidingWindowRateLimiter
 from listing_identity import (
     ListingBusy, ListingIdentityError, get_listing_identity,
-    get_or_fetch_listing, peek_cached_listing, set_cache_snapshot,
-    store_client_listing,
+    get_or_fetch_listing, inserats_url_aus_text, peek_cached_listing,
+    set_cache_snapshot, store_client_listing,
 )
 
 # Client-seitiges Abrufen (nur Kleinanzeigen): ist es an, holt NICHT der
@@ -106,16 +107,38 @@ router = APIRouter()
 URL_MAX = 2048
 
 
+def _url_aus_geteiltem_text(v):
+    """Rollenprüfung 22.09.2026 (RP-409): "Teilen" aus der Kleinanzeigen- bzw.
+    mobile.de-App liefert "Schau mal: https://…". Vorher ging der ganze Text als
+    Adresse durch und scheiterte immer mit 400 — jetzt zaehlt die erste
+    unterstuetzte Inserats-Adresse darin (listing_identity.inserats_url_aus_text).
+    Die Laengengrenze gilt danach fuer die Adresse selbst; ein absurd langer
+    Text wird vorher abgewiesen, damit die Suche nicht beliebig viel liest."""
+    if isinstance(v, str) and len(v) > URL_MAX * 4:
+        return v            # Field(max_length) lehnt ab (422)
+    return inserats_url_aus_text(v)
+
+
 class CompareIn(BaseModel):
     url: str = Field(min_length=1, max_length=URL_MAX)
     # Rueckfall 09/2026: Browser ohne Abruf-Helfer -> Server holt selbst,
     # statt den Nutzer mit "Erweiterung installieren" zu blockieren.
     ohne_erweiterung: bool = False
 
+    @field_validator("url", mode="before")
+    @classmethod
+    def url_aus_text(cls, v):
+        return _url_aus_geteiltem_text(v)
+
 
 class ListingURLIn(BaseModel):
     url: str = Field(min_length=1, max_length=URL_MAX)
     ohne_erweiterung: bool = False
+
+    @field_validator("url", mode="before")
+    @classmethod
+    def url_aus_text(cls, v):
+        return _url_aus_geteiltem_text(v)
 
 
 # =========================================================
@@ -248,6 +271,86 @@ async def _fahrzeug_id(source: str, ad_id: str, dealer_id: str) -> str:
     return neu
 
 
+def _katalog_pruefen(vehicle: dict):
+    """Rollenprüfung 22.09.2026 (RP-419/RP-439): Kennen die Kataloge von
+    mobile.de und AutoScout24 Marke und Modell dieses Inserats?
+
+    Vorher suchte ein Link bei unbekanntem Modell still ueber die GANZE Marke
+    (Kia "Ceed SW", VW "Multivan"), bei fehlender Marke (Kleinanzeigen-
+    Nutzfahrzeuge) sogar ueber den ganzen Pkw-Markt — ohne jeden Hinweis;
+    nur die manuelle Suche warnte. Liefert (hinweise, mobile_link_bauen,
+    autoscout_link_bauen)."""
+    from autoscout_service import _find_make, _find_model
+    from mobile_service import _is_generic_model_label, modell_aufgeloest
+    marke = str(vehicle.get("make_label") or vehicle.get("make") or "").strip()
+    modell = str(vehicle.get("model_label") or vehicle.get("model") or "").strip()
+    hinweise: list = []
+    if marke and _is_generic_model_label(marke):
+        # Rollenprüfung 22.09.2026 (Review zu RP-439): "Weitere Automarken"
+        # (Kleinanzeigen) ist keine Marke — mobile.de kennt sie nicht, und der
+        # AutoScout-Link wurde /lst/weitere-automarken. Wie ohne Marke:
+        # keine Links, klarer Hinweis.
+        hinweise.append(f"Im Inserat steht keine Marke, nur „{marke}“ — keine Vergleichslinks. "
+                        "Bitte über „Manuelle Suche“ suchen.")
+        return hinweise, False, False
+    marke_mobile, modell_mobile = modell_aufgeloest(vehicle)
+    as_marke = _find_make(marke) if marke else None
+    # dieselbe Modellangabe wie autoscout_service.build_search_url
+    as_name = str(vehicle.get("model_label") or vehicle.get("model_description")
+                  or vehicle.get("model") or "").strip()
+    as_modell = _find_model(as_marke, as_name) if (as_marke and as_name) else None
+    if not marke:
+        hinweise.append("Marke im Inserat nicht erkannt — keine Vergleichslinks (sie hätten "
+                        "über den ganzen Markt gesucht). Bitte über „Manuelle Suche“ suchen.")
+        return hinweise, False, False
+    if vehicle.get("_marke_aus_titel"):
+        # Review zu RP-439: Die Detailtabelle nannte keine Marke; sie ist aus
+        # dem Titel geschlossen. Links und Kaufvertrag uebernehmen sie — der
+        # Sucher soll sie vorher pruefen.
+        hinweise.append(f"Marke „{marke}“ stand nicht in den Inseratsdaten, sondern wurde aus "
+                        "dem Titel übernommen — bitte prüfen, bevor sie in den Kaufvertrag geht.")
+    if not marke_mobile:
+        hinweise.append(f"mobile.de kennt die Marke „{marke}“ nicht — kein mobile.de-Link "
+                        "(er hätte über alle Marken gesucht).")
+    if not modell:
+        hinweise.append(f"Kein Modell im Inserat — die Links suchen über die ganze Marke {marke}.")
+    elif marke_mobile and not modell_mobile and not as_modell:
+        hinweise.append(f"Modell „{modell}“ nicht erkannt — beide Links suchen über die "
+                        f"ganze Marke {marke}. Bitte das Modell im Portal selbst eingrenzen.")
+    elif marke_mobile and not modell_mobile:
+        hinweise.append(f"mobile.de kennt das Modell „{modell}“ nicht — der mobile.de-Link "
+                        f"sucht über die ganze Marke {marke}.")
+    elif as_marke and not as_modell:
+        hinweise.append(f"AutoScout24 kennt das Modell „{modell}“ nicht eindeutig — der "
+                        f"AutoScout-Link sucht über die ganze Marke {marke}.")
+    return hinweise, marke_mobile, True
+
+
+# Kleinanzeigen: /s-anzeige/<slug>/<id>-<Kategorie>-<Ort>; 276 = Nutzfahrzeuge.
+_RE_KA_KATEGORIE = re.compile(r"/s-anzeige/(?:[^/?#]+/)?\d{6,}-(\d+)-\d+")
+_NFZ_AUFBAUTEN = ("transporter", "kastenwagen", "pritsche", "kipper", "koffer",
+                  "nutzfahrzeug", "lkw", "planwagen", "kühlwagen", "kuehlwagen")
+
+
+def _nutzfahrzeug_hinweis(vehicle: dict, url: str, source: str) -> Optional[str]:
+    """Rollenprüfung 22.09.2026 (RP-422): Beide Links suchen fest in der
+    Pkw-Rubrik (mobile.de s=Car/vc=Car, AutoScout atype=C). Transporter und
+    Kastenwagen stehen dort meist nicht. Die Nutzfahrzeug-Suche je Portal ist
+    ein eigener Umbau (Link-Formate erst an echten Links pruefen) — bis dahin
+    sagt der Vergleich es wenigstens."""
+    kategorie = None
+    if source == "kleinanzeigen":
+        m = _RE_KA_KATEGORIE.search(url or "")
+        kategorie = m.group(1) if m else None
+    aufbau = f"{vehicle.get('category_label') or ''} {vehicle.get('category') or ''}".lower()
+    mobile_nfz = source == "mobile" and "vc=van" in (url or "").lower()
+    if kategorie == "276" or mobile_nfz or any(w in aufbau for w in _NFZ_AUFBAUTEN):
+        return ("Nutzfahrzeug erkannt (Transporter/Kastenwagen) — beide Vergleichslinks "
+                "suchen in der Pkw-Rubrik. Vergleichbare Nutzfahrzeuge bitte zusätzlich "
+                "in der Nutzfahrzeug-Suche des Portals prüfen.")
+    return None
+
+
 # Lebenszyklen, in denen ein erneuter Vergleich die Inseratsdaten (data)
 # ueberschreiben darf. Alles andere traegt Korrekturen des Haendlers —
 # dort landen frische Daten nur unter inserat_aktuell (Runde 10).
@@ -270,6 +373,37 @@ async def _als_mitbearbeiter_eintragen(user: dict, filt: dict, besitzer: str,
             "mitbearbeiter": True}
 
 
+async def _chef_sieht_bearbeiter(user: dict, filt: dict, besitzer: str,
+                                 seit: Optional[str]) -> dict:
+    """Der CHEF vergleicht ein Fahrzeug, das ein Sucher bearbeitet.
+
+    Rollenprüfung 22.09.2026 (RP-048/RP-147): Der Kollegen-Hinweis entstand
+    nur fuer Sucher — und wurde genau dort seit Runde 29 wieder entfernt. Der
+    Chef, dem er laut Regel gilt, bekam ihn nie. Jetzt bekommt er ihn (Name
+    des Bearbeiters), wird dabei aber NICHT Mitbearbeiter.
+    RP-538: Damit das Pool-Trimmen des Suchers das Fahrzeug nicht loescht,
+    bevor der Chef seinen Vertrag anlegt, bleibt es nach dem Chef-Vergleich
+    eine Weile vom Trimmen ausgenommen (fahrzeugpool.CHEF_VERGLEICH_SCHUTZ_
+    SEKUNDEN). Kein Umhaengen im Sinne von R1-01."""
+    from fahrzeugpool import CHEF_VERGLEICH_SCHUTZ_SEKUNDEN, kurz_schuetzen
+    await kurz_schuetzen(db, user["dealer_id"], filt["id"],
+                         sekunden=CHEF_VERGLEICH_SCHUTZ_SEKUNDEN)
+    namen = await besitzer_namen(user["dealer_id"], [besitzer])
+    return {"user_id": besitzer,
+            "name": namen.get(besitzer) or "ein Sucher",
+            "seit": seit,
+            "mitbearbeiter": False}
+
+
+async def _kollege_eintragen(user: dict, filt: dict, besitzer: str,
+                             seit: Optional[str]) -> dict:
+    """Sucher -> Mitbearbeiter (Wunsch Ahmad 09.09.2026); Chef -> nur Hinweis
+    und Trimm-Schutz (RP-048/RP-538)."""
+    if ist_sucher(user):
+        return await _als_mitbearbeiter_eintragen(user, filt, besitzer, seit)
+    return await _chef_sieht_bearbeiter(user, filt, besitzer, seit)
+
+
 async def _altbestand_uebernehmen(user: dict, filt: dict) -> Optional[dict]:
     """Runde 19 (16.09.2026, Nr. 33): Altbestand ohne Besitzer — wer den CAS
     gewinnt, wird Hauptbearbeiter; der Verlierer wird Mitbearbeiter. Vorher
@@ -280,15 +414,16 @@ async def _altbestand_uebernehmen(user: dict, filt: dict) -> Optional[dict]:
         return None
     jetzt = await db.vehicles.find_one(filt, {"_id": 0, "owner_user_id": 1, "updated_at": 1})
     besitzer = (jetzt or {}).get("owner_user_id")
-    if besitzer and besitzer != user["id"] and ist_sucher(user):
-        return await _als_mitbearbeiter_eintragen(user, filt, besitzer, (jetzt or {}).get("updated_at"))
+    if besitzer and besitzer != user["id"]:
+        return await _kollege_eintragen(user, filt, besitzer, (jetzt or {}).get("updated_at"))
     return None
 
 
 async def _fahrzeug_uebernehmen(user: dict, vid: str, ad_id: str,
                                 frisch: dict,
                                 quelle: Optional[str] = None,
-                                schluessel: Optional[str] = None) -> Optional[dict]:
+                                schluessel: Optional[str] = None,
+                                zustand: Optional[dict] = None) -> Optional[dict]:
     """Fahrzeug in den Pool des Kontos uebernehmen (Runde 16).
 
     Liefert {"user_id", "name", "seit"}, wenn das Fahrzeug bereits einem
@@ -347,12 +482,16 @@ async def _fahrzeug_uebernehmen(user: dict, vid: str, ad_id: str,
         vorhanden = await db.vehicles.find_one(
             filt, {"_id": 0, "lifecycle": 1, "owner_user_id": 1, "updated_at": 1})
         if vorhanden is not None:
+            if zustand is not None:
+                # RP-210: der Aufrufer erfaehrt den Lebenszyklus (z. B. "geloescht")
+                zustand["lifecycle"] = vorhanden.get("lifecycle") or "verglichen"
             besitzer = vorhanden.get("owner_user_id")
-            if ist_sucher(user) and besitzer and besitzer != user["id"]:
+            if besitzer and besitzer != user["id"]:
                 # Die Inseratsdaten werden wie bei jedem Vergleich
                 # aktualisiert (nur solange das Fahrzeug noch "verglichen"
-                # ist, siehe unten).
-                kollege = await _als_mitbearbeiter_eintragen(
+                # ist, siehe unten). RP-048/RP-538: auch der Chef bekommt
+                # den Hinweis (ohne Mitbearbeiter zu werden).
+                kollege = await _kollege_eintragen(
                     user, filt, besitzer, vorhanden.get("updated_at"))
             daten_geschrieben = False
             if (vorhanden.get("lifecycle") or "verglichen") in _NEUVERGLEICH_UEBERSCHREIBT:
@@ -420,8 +559,8 @@ async def _fahrzeug_uebernehmen(user: dict, vid: str, ad_id: str,
             besitzer = vorher.get("owner_user_id")
             if not besitzer:
                 kollege = await _altbestand_uebernehmen(user, filt)
-            elif ist_sucher(user) and besitzer != user["id"]:
-                kollege = await _als_mitbearbeiter_eintragen(
+            elif besitzer != user["id"]:
+                kollege = await _kollege_eintragen(
                     user, filt, besitzer, vorher.get("updated_at"))
         break
     # Fahrzeugpool je Konto auf die neuesten 30 Vergleiche begrenzen
@@ -573,8 +712,13 @@ async def compare(body: CompareIn, background: BackgroundTasks,
         rules = regeln_lesen((dealer or {}).get("export_rules"), DEFAULT_EXPORT_RULES)
     else:
         rules = regeln_lesen((dealer or {}).get("comparison_rules"), DEFAULT_RULES)
-    search_url = build_search_url(vehicle, rules)
-    autoscout_url = build_autoscout_url(vehicle, rules)
+    # Rollenprüfung 22.09.2026 (RP-419/RP-439): Welche Marke/welches Modell
+    # kennen die beiden Kataloge? Ohne erkannte Marke gibt es keinen
+    # mobile.de-Link mehr (sonst Suche ueber ALLE Marken — wie in der
+    # manuellen Suche, Entscheidung Ahmad Phase 4); der Grund steht als Hinweis.
+    katalog_hinweise, mit_mobile, mit_autoscout = _katalog_pruefen(vehicle)
+    search_url = build_search_url(vehicle, rules) if mit_mobile else None
+    autoscout_url = build_autoscout_url(vehicle, rules) if mit_autoscout else None
 
     # Persist vehicle for re-use (PDF, Termine). Runde 17 (Nr. 382): ID je
     # Quelle eindeutig (Legacy-Rueckfall in _fahrzeug_id); die tatsaechlich
@@ -588,8 +732,18 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     # Beweisdokument: das Fahrzeug kennt sein Inserat (bei AutoScout24 weicht
     # die Anzeigen-ID von der ID in der Adresse ab — deshalb der cache_key).
     # Lasttest 16.09.2026: wandert mit demselben Write ans Fahrzeug.
+    fz_zustand: dict = {}
     kollege = await _fahrzeug_uebernehmen(user, vid, ad_id, frisch, quelle=source,
-                                          schluessel=identity["cache_key"])
+                                          schluessel=identity["cache_key"],
+                                          zustand=fz_zustand)
+    # Rollenprüfung 22.09.2026 (RP-210/RP-361): Wurde das Fahrzeug in der
+    # Firma geloescht (Fahrzeugakte -> Loeschen), bleibt es geloescht — ein
+    # neuer Vergleich legte nur frische Daten ab, meldete aber Erfolg, und
+    # "Kaufvertrag erstellen" endete mit 404. Jetzt sagt die Antwort das
+    # (fahrzeug_geloescht), die Oberflaeche blendet den Vertrag aus und
+    # erklaert es. Ob ein neuer Vergleich ein Neuanfang sein soll, ist eine
+    # Produktfrage an Ahmad.
+    fahrzeug_geloescht = fz_zustand.get("lifecycle") == "geloescht"
 
     # Track comparison (anonym)
     expires_at = datetime.now(timezone.utc) + timedelta(days=14)
@@ -638,7 +792,10 @@ async def compare(body: CompareIn, background: BackgroundTasks,
         else:
             beweis = oeffentlich(await beweis_fuer_schluessel(db, identity["cache_key"]))
 
-    hinweise = regeln_nicht_abgebildet(vehicle, rules)
+    hinweise = list(katalog_hinweise) + list(regeln_nicht_abgebildet(vehicle, rules))
+    nfz = _nutzfahrzeug_hinweis(vehicle, raw_url, source)
+    if nfz:
+        hinweise.append(nfz)
     # Runde 29 (12.09.2026, Regel Ahmad): Ein Sucher erfaehrt NICHT, welcher
     # Kollege dasselbe Auto bearbeitet — weder den Namen noch die Konto-ID.
     # Wie gefragt das Auto ist, sagt ihm der anonyme LIVE-Zaehler. Der Chef
@@ -646,12 +803,17 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     if ist_sucher(user):
         kollege = None
     if kollege:
-        # Runde 26 (12.09.2026): Seit dem Umbau auf Kaufvorgaenge hat JEDER
-        # Vertrag seinen eigenen Abholtermin — der alte Hinweis sagte das
-        # Gegenteil und haette die Sucher in der Schulung verwirrt.
-        hinweise = [f"Dieses Fahrzeug vergleicht auch {kollege['name']} — ihr "
-                    "arbeitet unabhängig voneinander: Jeder kann einen eigenen "
-                    "Kaufvertrag mit eigenem Abholtermin anlegen."] + list(hinweise)
+        # Rollenprüfung 22.09.2026 (RP-048/RP-147): Der Hinweis gilt jetzt dem
+        # Chef (Sucher bekommen ihn seit Runde 29 nicht). Runde 26: Jeder
+        # Vertrag hat seinen eigenen Abholtermin.
+        hinweise = [f"Dieses Fahrzeug bearbeitet bereits {kollege['name']}. Legst du "
+                    "selbst einen Kaufvertrag an, bekommt er einen eigenen Abholtermin — "
+                    f"der Vorgang von {kollege['name']} bleibt unberührt."] + hinweise
+    if fahrzeug_geloescht:
+        hinweise = ["Dieses Fahrzeug wurde in deiner Firma gelöscht (Fahrzeugakte). "
+                    "Die Vergleichslinks funktionieren, ein neuer Kaufvertrag ist dafür "
+                    "aber nicht möglich"
+                    + (" — bitte beim Chef nachfragen." if ist_sucher(user) else ".")] + hinweise
     # Befund 10.09.2026: Vorschaubilder ueber den eigenen Bild-Proxy (klein,
     # zwischengespeichert, kein Fremdhost im Browser). Nur in der Antwort,
     # nie im gespeicherten Fahrzeug (die Links laufen ab).
@@ -687,6 +849,8 @@ async def compare(body: CompareIn, background: BackgroundTasks,
         # Runde 16: gehoert das Fahrzeug einem Kollegen, bleibt es dort —
         # das Frontend blendet Vertrag/Snapshot aus und zeigt den Hinweis.
         "kollege": kollege,
+        # RP-210: in der Firma geloescht -> kein neuer Kaufvertrag moeglich
+        "fahrzeug_geloescht": fahrzeug_geloescht,
         "rules_applied": rules,
         "active_profile": active,
         "source": source,
@@ -701,6 +865,12 @@ class IngestIn(BaseModel):
     # Pruefbericht 20.09.2026 (A-01): 6 MB waren das Vierfache einer echten
     # Kleinanzeigen-Seite und die Grundlage des Rechenzeit-Angriffs.
     html: str = Field(min_length=500, max_length=3_000_000)
+
+    # RP-409: dieselbe Adresse wie beim Vergleich (Text mit Link -> Link)
+    @field_validator("url", mode="before")
+    @classmethod
+    def url_aus_text(cls, v):
+        return _url_aus_geteiltem_text(v)
 
 
 # Runde 17 (Nr. 292): je Konto hoechstens 20 HTML-Einreichungen pro Minute —
@@ -1199,12 +1369,35 @@ async def listings_resolve(body: ListingURLIn, user=Depends(require_active_sub))
                                        dealer_id=user.get("dealer_id") or "",
                                        user_id=user.get("id") or "")
 
+    # Rollenprüfung 22.09.2026 (RP-209/RP-360): Die Adresse zuerst pruefen —
+    # peek_cached_listing stand vor jedem try und warf bei einer ungueltigen
+    # Adresse ListingIdentityError, fuer den es keinen Handler gibt (HTTP 500).
+    try:
+        identity = get_listing_identity(body.url)
+    except ListingIdentityError as exc:
+        raise HTTPException(400, str(exc) or "Ungültige URL.")
+    # Rollenprüfung 22.09.2026 (RP-276b, Welle 2): dieselben Quellen-Sperren
+    # wie /listings/check und /mobile/compare — ohne Zugang endete der Abruf
+    # hier erst tief im Fetcher mit 502 statt mit einer klaren 400.
+    if identity["source"] == "autoscout24" and not autoscout_quelle_verfuegbar():
+        raise HTTPException(400, "AutoScout24-Links sind noch nicht "
+                                 "freigeschaltet (kein Zugang hinterlegt).")
+    if identity["source"] == "mobile" and not mobile_quelle_verfuegbar():
+        raise HTTPException(400, "mobile.de-Links sind noch nicht "
+                                 "freigeschaltet (kein Zugang hinterlegt).")
+    # RP-276b (Welle 2): auch jeder Cache-Treffer schreibt hier einen Audit-
+    # Eintrag — dasselbe Tempolimit je Konto wie beim Vergleich (Runde 19,
+    # Nr. 24), gemeinsamer Zaehler, damit ein Skript nicht ausweicht.
+    if not await _vergleich_limiter.check(f"vergleich:{user.get('id') or user.get('dealer_id')}"):
+        raise HTTPException(429, "Zu viele Vergleiche in kurzer Zeit von diesem Konto — "
+                                 "bitte kurz warten.")
+
     # Eigene Quarantaene zuerst: sonst wuerde der Server eine Anzeige selbst
     # abrufen, die der Nutzer per Erweiterung bereits geliefert hat.
     eigen = await peek_cached_listing(db, body.url,
                                       dealer_id=user.get("dealer_id"))
     if eigen is not None:
-        ident = get_listing_identity(body.url)
+        ident = identity
         # Befund 87 (16.09.2026): auch der Treffer aus Quarantaene/Cache steht
         # im Vergleichsprotokoll — vorher nur der frische externe Abruf.
         await log_activity_sicher(user.get("dealer_id") or "", user.get("id"), "inserat.aufgeloest",
@@ -1215,20 +1408,55 @@ async def listings_resolve(body: ListingURLIn, user=Depends(require_active_sub))
                 "cache_key": ident["cache_key"], "cached": True,
                 "vehicle": eigen[0], "snapshot_id": eigen[1]}
 
+    # Rollenprüfung 22.09.2026 (RP-026): Dieselbe Kleinanzeigen-Regel wie beim
+    # Vergleich — muss der Browser holen (Erweiterungsbetrieb ohne API-
+    # Schluessel), holt der Server nur im Rahmen des Rueckfall-Kontingents.
+    # Vorher holte ein direkter Aufruf dieser Route Kleinanzeigen unbegrenzt
+    # serverseitig (die Oberflaeche nutzt die Route nicht).
+    rueckfall_gebucht = False
+    if identity["source"] == "kleinanzeigen" and _erweiterung_noetig():
+        if not await _rueckfall_erlaubt(body.ohne_erweiterung, user):
+            return {"needs_client_fetch": True, "url": body.url,
+                    "source": "kleinanzeigen",
+                    "hint": "Bitte über die Browser-Erweiterung laden."}
+        rueckfall_gebucht = bool(body.ohne_erweiterung)
+
     try:
         data, was_cached, cached_snapshot_id = await get_or_fetch_listing(
             db, body.url, _fetcher, ttl_hours=LISTING_CACHE_TTL_HOURS,
         )
     except ListingIdentityError as exc:
+        if rueckfall_gebucht:
+            await _rueckfall_zurueck(user)
         raise HTTPException(400, str(exc))
+    except ListingGone as exc:
+        # RP-202: wie beim Vergleich — Inserat weg ist kein Serverfehler
+        if rueckfall_gebucht:
+            await _rueckfall_zurueck(user)
+        raise HTTPException(404, str(exc))
     except ListingBusy as exc:
+        if rueckfall_gebucht:
+            await _rueckfall_zurueck(user)
         raise HTTPException(503, str(exc), headers={"Retry-After": "5"})
     except TageslimitErreicht as exc:
+        if rueckfall_gebucht:
+            await _rueckfall_zurueck(user)
         raise HTTPException(429, str(exc))
     except RuntimeError as exc:
+        if rueckfall_gebucht:
+            await _rueckfall_zurueck(user)
         raise HTTPException(502, str(exc))
-
-    identity = get_listing_identity(body.url)
+    except HTTPException:
+        if rueckfall_gebucht:
+            await _rueckfall_zurueck(user)
+        raise
+    except Exception:
+        # RP-276b (Welle 2): wie beim Vergleich — auch ein unerwarteter Fehler
+        # gibt das Rueckfall-Kontingent zurueck (vorher blieb es verbraucht).
+        if rueckfall_gebucht:
+            await _rueckfall_zurueck(user)
+        log.exception("resolve fetch failed for %s", body.url)
+        raise HTTPException(500, "Fahrzeugdaten konnten nicht geladen werden.")
     await log_activity_sicher(user.get("dealer_id") or "", user.get("id"), "inserat.aufgeloest",
                               ref=identity["cache_key"],
                               meta={"source": identity["source"], "cached": bool(was_cached)})

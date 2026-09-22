@@ -56,8 +56,36 @@ def _absatz(text: str) -> str:
 
 
 def _fahrzeug_titel(vertrag: dict) -> str:
-    teile = [str(vertrag.get(k) or "").strip() for k in ("make", "model")]
+    # Rollenpruefung 22.09.2026 (RP-432): zuerst die im Vertrag bearbeiteten
+    # Werte (nach einer Korrektur des Fahrers stehen sie nur dort), dann
+    # make/model — dieselbe Regel wie die Platzhalter {fahrzeug}/{marke}.
+    from vertrag_platzhalter import marke_modell
+    teile = marke_modell(vertrag or {})
     return " ".join(t for t in teile if t) or "Fahrzeug"
+
+
+def _antwort_moeglich(adresse: str) -> bool:
+    """Rollenpruefung 22.09.2026 (RP-473): Erreicht eine Antwort des
+    Verkaeufers wirklich jemanden? Ohne gueltige Adresse filtert der Versand
+    reply_to heraus, und die Antwort landet bei unserer Plattformadresse."""
+    try:
+        from email_service import gueltige_adresse
+        return bool(adresse) and gueltige_adresse(adresse)
+    except Exception:  # noqa: BLE001
+        return bool(adresse) and "@" in adresse
+
+
+def _logo_adresse(logo_url: str) -> str:
+    """Rollenpruefung 22.09.2026 (RP-452): hochgeladene Logos liegen unter
+    /api/files/logo/… (oeffentlich) — fuer die Mail als volle https-Adresse
+    (FRONTEND_URL, dieselbe Quelle wie der Download-Link). Nur https; alles
+    andere wird nicht eingebunden."""
+    url = str(logo_url or "").strip()
+    if url.startswith("/api/files/logo/"):
+        import os
+        basis = (os.environ.get("FRONTEND_URL") or "").split("?")[0].rstrip("/")
+        url = f"{basis}{url}" if basis else ""
+    return url if url.startswith("https://") else ""
 
 
 def _zeilen(vertrag: dict) -> list:
@@ -79,7 +107,8 @@ def _zeilen(vertrag: dict) -> list:
 
 def _kopf(firma: str, logo_url: str = "") -> str:
     logo = ""
-    if logo_url and logo_url.startswith("https://"):
+    logo_url = _logo_adresse(logo_url)
+    if logo_url:
         logo = (f'<img src="{escape(logo_url)}" alt="" height="34" '
                 f'style="display:block;border:0;max-height:34px;margin-bottom:8px">')
     return (
@@ -173,6 +202,12 @@ def vertrag_mail(*, vertrag: dict, firma: dict, sucher: dict,
     # Kontonummer (13.09.2026): die Adresse, an die Antworten wirklich gehen
     # (eigene Adresse des Suchers, sonst die Firmenadresse)
     _, sucher_mail = sucher_kontakt(sucher, firma)
+    # Rollenpruefung 22.09.2026 (RP-473): ohne gueltige Antwortadresse
+    # verspricht die Mail NICHT mehr "Ihre Antwort geht direkt an …" — die
+    # Antwort landete sonst bei unserer Plattformadresse.
+    antwort_ok = _antwort_moeglich(sucher_mail)
+    if not antwort_ok:
+        sucher_mail = ""
     sucher_tel = (sucher.get("phone") or firma.get("phone") or "").strip()
 
     betreff = (betreff or "").strip() or f"Ihr Kaufvertrag – {titel}"
@@ -198,13 +233,19 @@ def vertrag_mail(*, vertrag: dict, firma: dict, sucher: dict,
     if nummer:
         text_zeilen.append(f"Vertragsnummer: {nummer}")
     antwort_an = f"{sucher_name}{f' ({sucher_mail})' if sucher_mail else ''}"
+    if antwort_ok:
+        fragen = ("Bei Fragen antworten Sie einfach auf diese E-Mail — Ihre Antwort "
+                  f"geht direkt an {antwort_an}.")
+    elif sucher_tel:
+        fragen = f"Bei Fragen erreichen Sie uns telefonisch unter {sucher_tel}."
+    else:
+        fragen = ""
     if eigener_text:
         # Gruss steht schon in der Vorlage — hier nur noch der Kontakt.
         text_zeilen += [
             "",
             "Der vollständige Kaufvertrag liegt dieser E-Mail als PDF bei.",
-            "Bei Fragen antworten Sie einfach auf diese E-Mail — Ihre Antwort "
-            f"geht direkt an {antwort_an}.",
+            *([fragen] if fragen else []),
             "",
             f"Kontakt: {sucher_name} · {firmenname}",
         ]
@@ -212,8 +253,7 @@ def vertrag_mail(*, vertrag: dict, firma: dict, sucher: dict,
         text_zeilen += [
             "",
             "Der vollständige Kaufvertrag liegt dieser E-Mail als PDF bei.",
-            "Bitte prüfen Sie ihn in Ruhe. Bei Fragen antworten Sie einfach auf "
-            f"diese E-Mail — Ihre Antwort geht direkt an {antwort_an}.",
+            " ".join(t for t in ("Bitte prüfen Sie ihn in Ruhe.", fragen) if t),
             "",
             "Freundliche Grüße",
             sucher_name,
@@ -251,8 +291,9 @@ def vertrag_mail(*, vertrag: dict, firma: dict, sucher: dict,
             + (f'<br>Telefon: {escape(sucher_tel)}' if sucher_tel else "")
             + (f'<br>E-Mail: <a href="mailto:{escape(sucher_mail)}" '
                f'style="color:{FARBE_GRAU}">{escape(sucher_mail)}</a>' if sucher_mail else "")
-            + '<br><br>Antworten auf diese E-Mail gehen direkt an '
-            + escape(sucher_name) + '.')
+            # RP-473: nur, wenn eine Antwort wirklich beim Sucher/der Firma ankommt
+            + ('<br><br>Antworten auf diese E-Mail gehen direkt an '
+               + escape(sucher_name) + '.' if antwort_ok else ""))
     )
     return betreff, text, _rahmen(inhalt)
 

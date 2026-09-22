@@ -432,6 +432,28 @@ oder vollständig auf Backup-Stand**, nie gemischt.
 6. Kontrolle: Dokumentzahlen/Indexe der Live-Datenbank erneut gegen das
    Manifest — nur dann `RESTORE OK`; sonst Rollback und Exit 1.
 
+> **Seit 22.09.2026 (Rollenprüfung RP-544/545/245):**
+> - **TTL-Indexe** (Ablaufzeiten, z. B. `vehicle_cache`, `rate_limits`,
+>   `betriebsalarme`) werden in Schritt 2 zunächst **ohne** Ablaufzeit angelegt
+>   und erst nach der Kontrolle in Schritt 6 scharf geschaltet (`collMod`).
+>   Vorher löschte die Datenbank in der temporären Kopie sofort alles, was seit
+>   der Sicherung abgelaufen war — die Dokumentzahlen stimmten dann nicht mehr
+>   mit dem Manifest überein, und der Restore brach ab (je älter das Backup,
+>   desto sicherer). Nach dem Scharfschalten räumt die Datenbank abgelaufene
+>   Einträge wie im laufenden Betrieb selbst weg.
+> - Die Collections werden **Stück für Stück** (je 1000 Dokumente) aus der
+>   Datei geladen statt komplett im Arbeitsspeicher gehalten — ein großer
+>   Restore im Backend-Container (4 GB) wird nicht mehr per OOM beendet.
+> - Nach dem Setzen des Wartungsmodus wartet der Restore, bis ein laufender
+>   Aufräumlauf angehalten hat und alle Backend-Prozesse null offene
+>   Schreibzugriffe melden (mindestens `RESTORE_AUSLAUF_MIN_S`, Standard 6 s,
+>   höchstens `RESTORE_AUSLAUF_MAX_S`, Standard 180 s; danach fährt er mit
+>   Warnung fort). Der Aufräumlauf selbst hält jetzt vor jedem Schritt an,
+>   sobald eine Schreibpause oder ein Restore läuft.
+> - Die Sicherung überschreibt einen Restore-Merker nicht mehr und startet
+>   während eines Restores gar nicht erst (Exit 1, neuer Versuch in einer
+>   Stunde).
+
 | Flag | Wirkung |
 |---|---|
 | `--dry-run` | nur prüfen, nichts verändern (meldet auch unvollständige Backups als Fehler) |
@@ -729,6 +751,66 @@ docker compose exec mongo mongosh -u "$MONGO_USER" -p "$MONGO_PASSWORD" --eval '
   rs.reconfig(cfg, {force: true})'
 ```
 
+**prod2 laenger weg (Rollenpruefung 22.09.2026, RP-552).** Mit
+Schiedsrichter bleibt prod1 PRIMARY und schreibt weiter (`{w: 1}`). Aber der
+**Mehrheits-Commitpunkt** bleibt stehen, solange prod2 fehlt: nur prod1 hat
+die neuen Daten, der Schiedsrichter traegt keine. Zwei Folgen:
+
+1. Der PRIMARY muss alles seit dem Ausfall im Cache halten — er wird mit
+   der Zeit langsam (WiredTiger-Cachedruck).
+2. Die naechtliche Sicherung liest per Snapshot genau diesen stehenden
+   Punkt. Frueher kam deshalb jede Nacht **still der Stand vom
+   Ausfallzeitpunkt** heraus. Seit 22.09.2026 misst `backup_mongo.py` den
+   Rueckstand (`replSetGetStatus`); ist er groesser als
+   `BACKUP_MEHRHEIT_RUECKSTAND_MAX_S` (Standard 600 s), liest die Sicherung
+   die Collections nacheinander vom PRIMARY (aktuell, aber nicht
+   stichtagsgenau), endet mit Code 3 und legt den Betriebsalarm
+   `backup_inkonsistent` an. Einspielen ginge nur mit
+   `--notfall-inkonsistent-akzeptieren`.
+
+Ist absehbar, dass prod2 laenger als ein paar Stunden fehlt, das
+ausgefallene Mitglied voruebergehend **ohne Stimme** fuehren — dann gilt
+wieder prod1 + Schiedsrichter als Mehrheit, der Commitpunkt laeuft mit,
+Cache und Sicherung sind wieder normal (auf prod1):
+
+```bash
+docker compose exec mongo mongosh -u "$MONGO_USER" -p "$MONGO_PASSWORD" --eval '
+  cfg = rs.conf();
+  m = cfg.members.find(x => x.host.startsWith("mongo-prod2"));
+  m.votes = 0; m.priority = 0;
+  rs.reconfig(cfg)'
+docker compose exec -T backend python scripts/replikat_pruefen.py
+```
+
+**Ruecknahme**, sobald prod2 wieder laeuft und aufgeholt hat (Rueckstand
+0 s in `replikat_pruefen.py` — vorher NICHT, sonst haengt der Schritt):
+
+```bash
+docker compose exec mongo mongosh -u "$MONGO_USER" -p "$MONGO_PASSWORD" --eval '
+  cfg = rs.conf();
+  i = cfg.members.findIndex(x => x.host.startsWith("mongo-prod2"));
+  cfg.members[i].votes = 1; cfg.members[i].priority = 0.5;
+  rs.reconfigForPSASet(i, cfg)'
+docker compose exec -T backend python scripts/replikat_pruefen.py
+```
+
+Wichtig (Rollenpruefung 22.09.2026, Review): **nicht** `rs.reconfig(cfg)`.
+Ab MongoDB 5.0 (wir laufen mit 8.2) lehnt `rs.reconfig` genau diesen
+Uebergang ab — alte Konfiguration mit nur einem schreibenden Mitglied mit
+Stimme, neue PSA mit waehlbarem Secondary ("Rejecting reconfig where the new
+config has a PSA topology and the secondary is electable ..."). prod2 bliebe
+dann ohne Stimme und ohne Failover. `rs.reconfigForPSASet(<Index im
+members-Feld>, cfg)` macht es in zwei sicheren Schritten (erst Stimme mit
+priority 0, nach dem Mehrheits-Commit priority 0.5). Von Hand geht
+dasselbe so: erst `votes = 1; priority = 0` mit `rs.reconfig(cfg)`, warten,
+bis `rs.status()` prod2 als SECONDARY zeigt, dann `priority = 0.5` mit
+einem zweiten `rs.reconfig(cfg)`. Am Ende muss `rs.conf()` bei prod2
+`votes: 1, priority: 0.5` zeigen.
+
+Danach eine Sicherung von Hand ziehen
+(`docker compose exec backend python scripts/backup_mongo.py`) und den
+Alarm `backup_inkonsistent` auf der Betrieb-Seite abhaken.
+
 **Was serveruebergreifend schon stimmt:** Sicherung, Aufraeumer und
 Sperren laufen ueber Sperren in der Datenbank (`job_locks`) — sie laufen
 auch mit zwei Backends genau einmal. Anfragesperren (Login-Versuche)
@@ -936,6 +1018,10 @@ die Sicherung endet mit Exit 1, Uploads scheitern.
    - nach einem geprüften Restore die Rückfalllinie: Datenbank `<db>__vorher_<zeit>`
      und die Ordner `uploads.vorher-<zeit>` / `local_storage.vorher-<zeit>`;
    - alte Docker-Images: `docker image prune -a` (laufende bleiben).
+     Seit 22.09.2026 (RP-559) raeumt `deploy/rollout.sh` nach jedem
+     erfolgreichen Rollout selbst auf: verwaiste Images und Bau-Reste aelter
+     als 7 Tage (`docker image prune -f`, `docker builder prune -f --filter
+     until=168h`). Vorher kamen bei jedem Rollout rund 2 GB im Monat dazu.
 3. **Wichtig:** Die Rotation (14 Stände) läuft erst **nach einem erfolgreichen
    Lauf**. Scheitert die Sicherung an voller Platte, bleiben alle alten Stände
    liegen, bis von Hand Platz geschaffen ist. Danach die Sicherung nachholen:
@@ -1461,7 +1547,15 @@ docker compose run --rm backend python scripts/betriebsprobe.py app.auto-schnell
 
 Der Host-Kopf ist nötig, weil der Webserver nur die eingetragene Domain bedient; `-k` überspringt die Zertifikatsprüfung, weil `localhost` nicht im Zertifikat steht.
 
-Danach zeigt `https://app.auto-schnellkauf.de` die Anmeldung. Erste Anmeldung mit `SUPER_ADMIN_USERNAME` und `SUPER_ADMIN_PASSWORD` aus der `.env`, danach **sofort** die Zwei-Faktor-Anmeldung einrichten.
+Danach zeigt `https://app.auto-schnellkauf.de` die Anmeldung. Erste Anmeldung mit `SUPER_ADMIN_USERNAME` und `SUPER_ADMIN_PASSWORD` aus der `.env`, danach **sofort** die Zwei-Faktor-Anmeldung einrichten (Einstellungen → Zwei-Faktor).
+
+**Wichtig (Rollenprüfung 22.09.2026, RP-543):** In Produktion verlangt die Anmeldung für den Betreiber den zweiten Faktor — den kann man aber erst *nach* der Anmeldung einrichten. Deshalb bekommt das beim allerersten Start **neu angelegte** Betreiberkonto eine Gnadenfrist von **60 Minuten** (`SEED_MFA_FRIST_MIN`), in der die Anmeldung mit Benutzername + Passwort reicht. Ist die Frist verstrichen, bevor der zweite Faktor eingerichtet war, einmal:
+
+```bash
+docker compose exec backend python scripts/mfa_pruefen.py --konto <SUPER_ADMIN_USERNAME> --abschalten --ja
+```
+
+Das setzt 30 Minuten Gnadenfrist — dann anmelden und die Zwei-Faktor-Anmeldung einrichten. Passwort vergessen: siehe „Notfall: Betreiber-Passwort vergessen“ weiter unten.
 
 Konten gibt es nur über den Super-Admin (Kontonummer, 13.09.2026): Er legt Firma mit Chef, Sucher, Zwischenhändler und Fahrer an. **Kontonummer und Passwort vergibt der Betreiber** und teilt sie den Kunden mit — Chef z. B. `10023`, Sucher `10023-2`, Fahrer seit 14.09.2026 ihre **Fahrer-ID** wie `FD-7K2M9QX4` (zugleich der Code, mit dem die Firma den Fahrer verknüpft; ältere Fahrerkonten mit reiner Nummer gelten weiter), Zwischenhändler seit 14.09.2026 einen **Käufer-Code** wie `6FE7K2M` (7 Zeichen, Buchstaben und Ziffern ohne I/O/0/1, Groß-/Kleinschreibung und Trenner egal; ältere numerische Käufernummern gelten weiter). Passwörter: mindestens 10 Zeichen mit Ziffer oder Sonderzeichen, bis 72 Zeichen — die Admin-Formulare bieten „Sicheres Passwort mit 20 Zeichen vorschlagen“ und zeigen das Passwort nach dem Anlegen einmalig neben der Kontonummer. Eine Selbstregistrierung gibt es nicht; ein vergessenes Passwort setzt der Betreiber neu (Admin → Passwort setzen). Konten aus der Zeit vor dem 14.09.2026, die als Zwischenhändler oder Fahrer noch eine reine Nummer tragen, listet und löscht `docker compose exec backend python scripts/alte_kontonummern_loeschen.py` (ohne `--ausfuehren` nur Probelauf; Firmen und Sucher werden nie angefasst).
 
@@ -1572,7 +1666,13 @@ Wenn ein anderer Anbieter zickt, lassen sich beide Eigenheiten von Hand steuern:
 
 - **Zwei-Faktor wird nicht aus einer laufenden Sitzung ersetzt.** Gerätewechsel: unter
   Einstellungen mit dem aktuellen Code **abschalten**, dann neu einrichten. Eine begonnene
-  Einrichtung verfällt nach einer Stunde. Die Aktivierung beendet die bisherige Sitzung ohne
+  Einrichtung verfällt nach einer Stunde. Seit der Rollenprüfung 22.09.2026 (RP-556) gilt nach
+  dem Abschalten eine **Gnadenfrist von 30 Minuten** (`mfa.pflicht_ausgesetzt_bis`); die
+  Einstellungen öffnen die Einrichtung sofort und zeigen die Frist an. **Abschalten und neu
+  Einrichten in einem Zug erledigen:** Wer sich nach Ablauf der Frist ohne neuen zweiten Faktor
+  abmeldet, kommt in Produktion nur noch über den Notweg auf dem Server herein
+  (`docker compose exec backend python scripts/mfa_pruefen.py --konto <SUPER_ADMIN_USERNAME> --abschalten --ja`,
+  setzt erneut 30 Minuten). Die Aktivierung beendet die bisherige Sitzung ohne
   zweiten Faktor (andere Geräte müssen sich neu anmelden, jetzt mit Code); der Tab, der aktiviert
   hat, läuft mit neuem Token weiter.
 - **`DATEN_SCHLUESSEL`** (optional, `openssl rand -hex 32`): eigener Schlüssel für die Ablage der
@@ -2901,3 +3001,64 @@ Vertrags-Nacharbeit 250 Zeilen weiter oben seit Phase 2 macht.
 
 Waechter: `backend/tests/test_pruefbericht_p0p1_20260920.py` (14) und
 sechs weitere in `frontend/src/lib/api.test.js`.
+
+### Notfall: Betreiber-Passwort vergessen (Rollenprüfung 22.09.2026, RP-551)
+
+Bisher gab es dafür **keinen** Weg außer einem Eingriff in die Datenbank: der
+Admin-Reset ist für den Super-Admin gesperrt, `/admin/me/password` verlangt das
+alte Passwort, und ein neues `SUPER_ADMIN_PASSWORD` in der `.env` wird beim
+Start bewusst nicht übernommen. Jetzt auf einem der Server:
+
+```bash
+docker compose exec backend python scripts/betreiber_passwort_setzen.py --konto <SUPER_ADMIN_USERNAME> --ja
+```
+
+Das Skript fragt das neue Passwort zweimal verdeckt ab (es steht nie in der
+Befehlszeile), prüft dieselbe Passwortregel wie überall, beendet die laufende
+Sitzung, hebt die Anmeldesperre des Kontos auf und schreibt einen Eintrag ins
+Aktivitätsprotokoll (`auth.passwort.gesetzt.betreiber_konsole`). Die
+Zwei-Faktor-Anmeldung bleibt unverändert; ist auch das Handy weg, zusätzlich
+`scripts/mfa_pruefen.py --konto <name> --abschalten --ja`. Ohne `--ja` ändert
+das Skript nichts. Stimmt das neue Passwort nicht mit `SUPER_ADMIN_PASSWORD`
+in der `.env` überein, meldet der nächste Start das als Alarm — die `.env` dann
+bei Gelegenheit angleichen.
+
+### Rollenprüfung 22.09.2026 — Betrieb (Aufräumlauf, Sicherung, Speicher)
+
+| Nr. | Was war | Was jetzt gilt |
+|---|---|---|
+| RP-243/394 | Ein Fehler in EINEM Schritt des stündlichen Aufräumlaufs brach alle folgenden ab (Fristlöschung, Nacharbeit, Storage-Nachholung …) — nur im Log | jeder Schritt hat einen eigenen Fehlerfang und Betriebsalarm `aufraeumschritt_fehlgeschlagen` (Bezug = Schritt); der Stand des letzten Laufs steht in `system_reports` (`typ: aufraeumlauf`), `/api/ready` warnt nach `AUFRAEUMLAUF_WARN_H` (3 h) ohne vollständigen Lauf |
+| RP-245/396 | eine Schreibpause (Sicherung/Restore) hielt einen laufenden Aufräumlauf nicht an | der Lauf prüft vor jedem Schritt die Schreibpause und hält an; er zählt als Schreiber (die Sicherung wartet auf ihn), und der Restore wartet auf ihn |
+| RP-246/397 | `wartung.setzen()` überschrieb einen fremden Merker (Sicherung über Restore) | nur noch, wenn kein fremder gültiger Merker steht; die Sicherung startet während eines Restores nicht |
+| RP-073/172 | der Nachholer „Vertrag nach Abholung“ erzeugte den Vertrag mit der ABGELÖSTEN Protokollversion neu | er nimmt die aktuelle finale Version des Termins |
+| RP-084/183 | ein nach 21 Tagen abgelaufenes Inserat verschwand ohne Status-Prüfung, das Fahrzeug blieb „veröffentlicht“ und ließ sich nie wieder inserieren | Ende per Compare-and-Set, Kaufanfragen mit Grund `inserat_abgelaufen` beendet, Fahrzeug zurück in den Bestand (frische 50-Tage-Frist); ein Nachholer setzt alte hängengebliebene Fahrzeuge zurück |
+| RP-244/395 | ein Vertrag, dessen Abholung (ohne Protokoll) gerade erst abgeschlossen wurde, wurde bei über 60 Tage altem Vertrag sofort gelöscht | die Frist läuft ab dem Abschluss der Abholung (Termin „abgeholt/erledigt“ bzw. Kaufvorgang „abgeholt“) — die 60 Tage selbst sind unverändert |
+| RP-248/399 | Personendaten OFFENER Termine ohne Vertrag wurden nach Abhol-/Anlagedatum gelöscht | nur geschlossene Termine, Stichtag ist der Abschluss |
+| RP-513 | die akzeptierte Anfrage einer noch laufenden Reservierung wurde nach 60 Tagen gelöscht | bleibt, solange das Inserat reserviert ist |
+| RP-544/545 | der Restore scheiterte an TTL-Indexen und hielt die ganze Datenbank im Speicher | siehe „Restore“ oben |
+| RP-547 | eine fehlende Datei im Objektspeicher gab 500 (und je Aufruf einen Traceback in `error_logs`) | 404; Backend-Fehler werden wie Browser-Fehler zusammengefasst und durch `ERROR_LOG_MAX` begrenzt |
+| RP-550 | hängender R2 blockierte Anmeldung, PDF und `/api/ready` | Zeitlimits (`S3_VERBINDUNG_TIMEOUT_S` 5, `S3_LESE_TIMEOUT_S` 30, `S3_VERSUCHE` 2), eigener Thread-Pool für Dateizugriffe (`SPEICHER_THREADS` 16), `/api/ready` wartet höchstens 5 s auf den Speicher. Die Sicherungsskripte (Offsite-Upload, Datei-Sicherung, `offsite_pruefen.py`) laufen bewusst mit eigenen, großzügigeren Werten (`BACKUP_S3_VERBINDUNG_TIMEOUT_S` 10, `BACKUP_S3_LESE_TIMEOUT_S` 120, `BACKUP_S3_VERSUCHE` 5) |
+| RP-552 | fällt prod2 länger aus, froren die Sicherungen still auf den Ausfallzeitpunkt ein | siehe „prod2 länger weg“ |
+| RP-559 | alte Docker-Images wurden nie entfernt | `rollout.sh` räumt nach Erfolg auf |
+| RP-548/560 | `env_erzeugen.py` erzeugte eine `.env`, an der die Startprüfung scheiterte, und warf mit `--vorlage` Werte weg | klare Platzhalter (`APIFY_TOKEN`, `BACKUP_S3_BUCKET`), `DATEN_SCHLUESSEL` wird erzeugt, jeder Wert der Vorlage gewinnt, unbekannte Schlüssel stehen unter „Übernommen aus der Vorlage“ |
+| RP-249/400 | Betriebsmeldungen: Sammelfrist durch sofortiges Freigeben der Sperre ausgehebelt, Zeiten in Serverzeit (ohne tzdata: UTC) | Sperre läuft mit der Sammelfrist ab; alle Zeiten und die Stunde des Tagesberichts in deutscher Zeit, gekennzeichnet |
+| RP-233/384 | `/api/ready` gab Betriebsdaten auch an ein MFA-Zwischen-Token oder ein abgemeldetes Token | nur noch mit gültiger Sitzung |
+| RP-543 | eine Neuinstallation ließ den ersten Betreiber nicht herein | 60 Minuten Gnadenfrist ohne Zwei-Faktor für das frisch angelegte Konto |
+
+**Zweite Welle (Übergaben anderer Teams an Betrieb, 22.09.2026):**
+
+| Nr. | Was war | Was jetzt gilt |
+|---|---|---|
+| RP-083/182 | zwei parallele „Inserat anlegen“ ergaben zwei aktive Inserate für dasselbe Fahrzeug | Teil-Unique-Index `resale_listings.ein_aktives_je_fahrzeug` (Firma + Fahrzeug, Status entwurf … zurückgezogen). Weich: Altdubletten werden **nicht** gelöscht, sondern als Alarm `inserat_dubletten_je_fahrzeug` gemeldet (überzählige Inserate im Editor löschen, beim nächsten Start greift der Index) |
+| RP-046/145/152 | ein zweites aktives Firmen-Abo verdrängte still das ältere | Teil-Unique-Index `subscriptions.ein_aktives_firmen_abo_je_firma` (`art: firma`); Migration 11 kennzeichnet Altbestand, Dubletten → Alarm `mehrfache_aktive_firmen_abos`. Mehr als ein Chefkonto je Firma meldet der Aufräumlauf als Alarm `mehrere_chefkonten` (kein Index: er würde den Chefwechsel blockieren) |
+| RP-066/165 | ein wiederholter Abholbericht (Netzabbruch) konnte doppelt gespeichert werden | Teil-Unique-Index `pickup_reports.bericht_idempotenz` (Termin + `client_bericht_id`, weich) |
+| RP-223/374 | gleich geschlossen angelegte Termine wurden nie aufgeräumt | Migration 12 setzt bei solchen Altterminen `abgeschlossen_seit`/`status_changed_at` auf den Anlagezeitpunkt (Merker `abschluss_zeit_nachgetragen`) |
+| RP-532 | eigene Fotos von Altinseraten (Fotomodus „einkauf“) waren unsichtbar | Migration 13 stellt diese Inserate auf „beide“ |
+| RP-517 | nach der Freigabe einer Käufer-Reservierung durch den Betreiber löschte der Aufräumlauf ein über 21 Tage altes Inserat binnen einer Stunde | die Laufzeit zählt ab dem späteren von erster Veröffentlichung und `wieder_veroeffentlicht_am` |
+| RP-265/015, RP-080/179 | der Aufräumlauf setzte bei Terminen ohne Vertrag den Fahrzeugstatus auch über laufende Käufe von Kollegen hinweg; gesperrte Fahrer blieben Fahrten zugeteilt | nur ohne Kaufvorgänge am Fahrzeug (sonst Zusammenfassung), dieselbe Status-Tabelle wie Büro und Fahrer-App; Fahrten gesperrter oder gelöschter Fahrerkonten verlieren die Zuweisung |
+| RP-098 Nr. 8 | Inseratsfotos im Editor waren nach einer Stunde Fehlbilder | `DATEI_LINK_TTL_INSERAT_SEKUNDEN` (Standard 24 h) für `resale/` |
+| RP-549/553 | ein vertippter Apify-Actor-Name ließ jeden neuen Link scheitern | der Produktions-Check warnt bei Namen ohne `~`/`/`; `APIFY_MEMORY_MB`, `APIFY_MOBILE_BUILD`, `APIFY_AUTOSCOUT_BUILD` in `.env.example` |
+| RP-546, RP-135 | verlängerte Sitzung und deutsche Längenfehler | CORS gibt `X-Neues-Token` frei; 422-Meldungen zu Längengrenzen kommen deutsch (z. B. „Beschreibung: höchstens 500 Zeichen“) |
+| RP-249/400 | Zeitzonen ohne tzdata | `tzdata` steht jetzt in `backend/requirements.txt` (Image) |
+
+Nach dem Rollout in **/admin/betrieb** nach `inserat_dubletten_je_fahrzeug`, `mehrfache_aktive_firmen_abos` und `mehrere_chefkonten` sehen — alle drei ändern nichts selbst, sie zeigen nur Altbestand, der von Hand bereinigt werden muss.

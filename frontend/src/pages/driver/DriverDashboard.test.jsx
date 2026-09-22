@@ -19,7 +19,9 @@ vi.mock("@/context/DriverContext", () => ({ driverApi: api, openDriverPdf: vi.fn
 vi.mock("sonner", () => ({ toast: toastMock }));
 vi.mock("react-router-dom", async () => {
   const { createElement: h } = await import("react");
-  return { Link: ({ children, to }) => h("a", { href: String(to) }, children) };
+  // Rollenprüfung 22.09.2026 (RP-064): die Startseite leitet selbst zum Protokoll.
+  return { Link: ({ children, to }) => h("a", { href: String(to) }, children),
+           useNavigate: () => () => {} };
 });
 vi.mock("@/components/PhotoGallery", () => ({ default: () => null }));
 vi.mock("@/components/AbholCheckDialog", () => ({ default: () => null }));

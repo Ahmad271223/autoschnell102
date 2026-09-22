@@ -48,15 +48,36 @@ def test_pruefsummen_werden_fuer_r2_gebremst(monkeypatch):
     assert cfg is not None
     assert getattr(cfg, "request_checksum_calculation", None) == "when_required"
     assert getattr(cfg, "signature_version", None) == "s3v4"
-    # AWS braucht die Sonderbehandlung nicht
-    assert k.client_konfiguration(AWS) is None
+    # AWS braucht die Sonderbehandlung nicht — seit RP-550 (22.09.2026) gibt
+    # es trotzdem eine Config, aber nur mit den Zeitlimits.
+    aws = k.client_konfiguration(AWS)
+    assert aws is not None
+    assert getattr(aws, "request_checksum_calculation", None) != "when_required"
 
 
 def test_pruefsummen_schalter(monkeypatch):
     monkeypatch.setenv("S3_PRUEFSUMMEN", "immer")
-    assert k.client_konfiguration(R2) is None
+    assert getattr(k.client_konfiguration(R2), "request_checksum_calculation",
+                   None) != "when_required"
     monkeypatch.setenv("S3_PRUEFSUMMEN", "nur_noetig")
-    assert k.client_konfiguration(AWS) is not None
+    assert getattr(k.client_konfiguration(AWS), "request_checksum_calculation",
+                   None) == "when_required"
+
+
+def test_rp550_jeder_client_hat_zeitlimits(monkeypatch):
+    """Rollenprüfung 22.09.2026 (RP-550): ohne Zeitlimits wartete botocore
+    60 s + 60 s je Versuch — ein haengender R2 blockierte Anmeldung und PDF."""
+    for name in ("S3_PRUEFSUMMEN", "S3_VERBINDUNG_TIMEOUT_S", "S3_LESE_TIMEOUT_S",
+                 "S3_VERSUCHE"):
+        monkeypatch.delenv(name, raising=False)
+    for ziel in (R2, AWS, MINIO):
+        cfg = k.client_konfiguration(ziel)
+        assert cfg.connect_timeout == 5 and cfg.read_timeout == 30, ziel
+        assert cfg.retries == {"max_attempts": 2, "mode": "standard"}, ziel
+    monkeypatch.setenv("S3_LESE_TIMEOUT_S", "12")
+    monkeypatch.setenv("S3_VERSUCHE", "kaputt")
+    cfg = k.client_konfiguration(AWS)
+    assert cfg.read_timeout == 12 and cfg.retries["max_attempts"] == 2
 
 
 def test_client_laesst_sich_bauen(monkeypatch):

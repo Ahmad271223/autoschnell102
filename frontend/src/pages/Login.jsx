@@ -73,8 +73,12 @@ export default function Login() {
           Designs dunkel (18.09.2026; vorher war die Schrift dort unlesbar). */}
       <div className="bleibt-dunkel hidden lg:block lg:w-1/2 relative" data-theme="dark"
            style={{ background: "#0c0c0c" }}>
-        <div className="absolute inset-0 opacity-30 bg-cover bg-center"
-             style={{ backgroundImage: "url(https://static.prod-images.emergentagent.com/jobs/a1ceceb6-7b86-4add-b1a2-2ba09adbd577/images/bc1425c15b101d82928a736d8d5885c8173800a2867499223e36b183b11097eb.png)" }} />
+        {/* Rollenprüfung 22.09.2026 (RP-566): kein Bild mehr von einem fremden
+            Server (emergentagent.com, nicht in der Datenschutzerklärung) —
+            ein reiner Verlauf, jeder Aufruf bleibt auf dem eigenen Server. */}
+        <div className="absolute inset-0 opacity-60"
+             style={{ backgroundImage: "radial-gradient(ellipse at 70% 20%, rgba(255,59,48,0.35), transparent 55%), "
+                        + "radial-gradient(ellipse at 15% 90%, rgba(10,132,255,0.18), transparent 50%)" }} />
         <div className="absolute inset-0 flex items-end p-12">
           <div>
             <h2 className="font-display font-black text-4xl tracking-tighter">

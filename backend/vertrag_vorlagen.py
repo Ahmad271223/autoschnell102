@@ -82,12 +82,40 @@ def sondervereinbarungen(firma: dict) -> str:
     """
     firma = firma or {}
     teile = []
-    if standard_an(firma):
+    an = standard_an(firma)
+    if an:
         teile.append(BESONDERE_VEREINBARUNGEN)
     eigen = (firma.get("default_special_agreements") or "").strip()
+    if eigen and an:
+        eigen = ohne_doppelte_standardzeilen(eigen)
     if eigen:
         teile.append(eigen)
     return "\n\n".join(teile)
+
+
+def _zeile_vergleichbar(zeile: str) -> str:
+    """Zeile ohne Aufzaehlungszeichen und Leerraum — zum Vergleichen."""
+    return " ".join(str(zeile or "").strip().lstrip("•-*–").split())
+
+
+def ohne_doppelte_standardzeilen(eigen: str) -> str:
+    """Rollenpruefung 22.09.2026 (RP-486): Wer VOR dem 20.09.2026 Ahmads
+    Papiersatz "Die Fahrzeugübergabe findet bis/am ___ in ___ gegen ___
+    statt." als EIGENEN Text gespeichert hat (Firma oder Sucher-Override),
+    bekam die Klausel doppelt — einmal gefuellt aus unserem Standardsatz,
+    einmal mit "___". Bei eingeschaltetem Standardsatz fallen deshalb aus
+    dem eigenen Text heraus: jede Zeile mit dem festen Anfang des
+    Uebergabesatzes und jede Zeile, die woertlich schon im Standardsatz
+    steht. Alles andere bleibt, wie die Firma es geschrieben hat."""
+    standard = {_zeile_vergleichbar(z) for z in BESONDERE_VEREINBARUNGEN.split("\n")
+                if z.strip()}
+    zeilen = [z for z in str(eigen or "").split("\n")
+              if UEBERGABE_SATZ_ANFANG not in z
+              and _zeile_vergleichbar(z) not in standard]
+    text = "\n".join(zeilen)
+    while "\n\n\n" in text:
+        text = text.replace("\n\n\n", "\n\n")
+    return text.strip()
 
 # ---------------------------------------------------------------- E-Mail
 # Wunsch Ahmad 21.09.2026: die Texte WOERTLICH nach seiner Vorlage. Zwei

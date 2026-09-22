@@ -7,10 +7,12 @@ import { useAuth } from "@/context/AuthContext";
 import { useFeatures } from "@/lib/features";
 import { toast } from "sonner";
 import {
-  Plus, AlertTriangle, Archive, Trash2, Tag, Clock, X,
+  Plus, AlertTriangle, Archive, Trash2, Tag, Clock, X, Pencil,
 } from "lucide-react";
 import StatusSchild from "@/components/StatusSchild";
 import { beschreibungLesbar, lifecycleText } from "@/lib/fahrzeugStatus";
+import { kmAusText, preisAusText } from "@/lib/preis";
+import { betragAlsText, fristErneuertText } from "@/lib/bestandForm";
 
 /**
  * Fahrzeugbestand (B2B-Modul Phase 1).
@@ -54,6 +56,8 @@ export default function Bestand() {
   const [filter, setFilter] = useState("");
   const [sourceFilter, setSourceFilter] = useState("");
   const [showManual, setShowManual] = useState(false);
+  // Rollenprüfung 22.09.2026 (RP-411): manuelles Fahrzeug in Bearbeitung
+  const [bearbeiten, setBearbeiten] = useState(null);
   const [busy, setBusy] = useState(null);
   const nav = useNavigate();
   // Pruefbericht 20.09.2026 (M23/F8): Ladefehler NICHT als "Noch keine
@@ -85,7 +89,7 @@ export default function Bestand() {
   useEffect(() => { load(); }, [load]);
 
   const features = useFeatures();          // Go-Live-Schalter (15.09.2026)
-  const decide = async (vehicleId, decision) => {
+  const decide = async (vehicleId, decision, vonLifecycle) => {
     if (busy) return;
     if (decision === "loeschen" &&
         !window.confirm("Fahrzeug wirklich löschen?\nFotos werden entfernt — Vertrag und Historie bleiben erhalten.")) {
@@ -93,8 +97,12 @@ export default function Bestand() {
     }
     setBusy(vehicleId);
     try {
-      const r = await api.post(`/vehicles/${vehicleId}/decision`, { decision });
       if (decision === "verkaufsentwurf") {
+        // Rollenprüfung 22.09.2026 (RP-092/RP-191/RP-342): EIN Aufruf statt
+        // zwei. create_draft setzt den Fahrzeugstatus selbst (und nimmt ihn
+        // bei einem Fehler zurück) — vorher blieb nach einem Abbruch
+        // zwischen /decision und /resale/draft ein "Verkaufsentwurf" ohne
+        // Inserat und ohne Knopf zurück.
         const draft = await api.post(`/resale/draft/${vehicleId}`);
         toast.success("Inseratsentwurf erstellt");
         // N14: innerhalb der App navigieren statt die Seite neu zu laden.
@@ -102,12 +110,18 @@ export default function Bestand() {
         else load();
         return;
       }
-      toast.success(decision === "bestand"
-        ? "Ins Bestand übernommen (50 Tage Aufbewahrung)"
-        : "Fahrzeug gelöscht");
+      // RP-496: der angezeigte Zustand geht mit (409, wenn ein anderer Tab
+      // das Fahrzeug inzwischen inseriert hat).
+      const r = await api.post(`/vehicles/${vehicleId}/decision`, { decision, von_lifecycle: vonLifecycle });
+      toast.success(r.data?.verlaengert
+        ? fristErneuertText(r.data?.expires_at)
+        : decision === "bestand"
+          ? "Ins Bestand übernommen (50 Tage Aufbewahrung)"
+          : "Fahrzeug gelöscht");
       load();
     } catch (e) {
       toast.error(errMsg(e));
+      if (e?.response?.status === 409) load();
     } finally {
       setBusy(null);
     }
@@ -126,6 +140,10 @@ export default function Bestand() {
 
   const counts = data.counts || {};
   const pending = (counts["abgeholt"] || 0);
+  // Rollenprüfung 22.09.2026 (RP-450): Fahrzeuge, deren Bestandsfrist in den
+  // nächsten 7 Tagen endet — danach archiviert der Aufräumer sie endgültig.
+  const baldArchiviert = (data.items || []).filter((v) => v.lifecycle === "bestand"
+    && v.retention_days_left != null && v.retention_days_left <= 7).length;
   // Runde 19: Entscheidungen und manuelles Anlegen sind Chefsache (Backend:
   // current_haendler) — Sucher sehen die Knoepfe nicht mehr (vorher 403 erst beim Klick).
   const chef = user?.role === "dealer";
@@ -159,6 +177,21 @@ export default function Bestand() {
              style={{ borderColor: "#f59e0b55", background: "#f59e0b14", color: "var(--tx-amber)" }}>
           <AlertTriangle size={16} />
           {pending} abgeholte(s) Fahrzeug(e) warten auf deine Entscheidung.
+        </div>
+      )}
+
+      {chef && baldArchiviert > 0 && (
+        <div className="mt-4 rounded-xl border px-4 py-3 flex items-center gap-2 text-sm"
+             data-testid="bestand-frist-hinweis"
+             style={{ borderColor: "#f59e0b55", background: "#f59e0b14", color: "var(--tx-amber)" }}>
+          <Clock size={16} />
+          {/* Rollenprüfung 22.09.2026 (Review): der Server setzt die Frist auf
+              50 Tage AB HEUTE (nicht alte Frist + 50) — Knopf und Hinweis sagen
+              das jetzt so; dazu Einzahl/Mehrzahl ("Stehen sie ..."). */}
+          {baldArchiviert === 1
+            ? "Ein Fahrzeug wird in den nächsten 7 Tagen archiviert (Fotos werden gelöscht). Steht es noch auf dem Hof?"
+            : `${baldArchiviert} Fahrzeuge werden in den nächsten 7 Tagen archiviert (Fotos werden gelöscht). Stehen sie noch auf dem Hof?`}
+          {" "}Dann „Frist erneuern“ wählen — sie gilt danach 50 Tage ab heute.
         </div>
       )}
 
@@ -275,17 +308,23 @@ export default function Bestand() {
                   {lc === "abgeholt" ? (
                     <>
                       {chef && (<>
-                      <button onClick={() => decide(v.id, "verkaufsentwurf")} disabled={busy === v.id}
-                              className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white"
-                              style={{ background: "var(--accent-red)" }}>
-                        <Tag size={13} /> Speichern & weiterverkaufen
-                      </button>
-                      <button onClick={() => decide(v.id, "bestand")} disabled={busy === v.id}
+                      {/* Rollenprüfung 22.09.2026 (RP-045/RP-144): auch hier nur
+                          mit freigeschaltetem Marktplatz — sonst endete der
+                          Klick in "Demnächst verfügbar" (503). */}
+                      {features.marktplatz && (
+                        <button onClick={() => decide(v.id, "verkaufsentwurf", lc)} disabled={busy === v.id}
+                                data-testid={`bestand-weiterverkaufen-${v.id}`}
+                                className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white"
+                                style={{ background: "var(--accent-red)" }}>
+                          <Tag size={13} /> Speichern & weiterverkaufen
+                        </button>
+                      )}
+                      <button onClick={() => decide(v.id, "bestand", v.lifecycle)} disabled={busy === v.id}
                               className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs border text-zinc-200"
                               style={{ borderColor: "var(--border-default)" }}>
                         <Archive size={13} /> Nur speichern
                       </button>
-                      <button onClick={() => decide(v.id, "loeschen")} disabled={busy === v.id}
+                      <button onClick={() => decide(v.id, "loeschen", v.lifecycle)} disabled={busy === v.id}
                               className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs text-zinc-500 hover:text-red-400">
                         <Trash2 size={13} /> Löschen
                       </button>
@@ -300,17 +339,61 @@ export default function Bestand() {
                     </>
                   ) : (
                     <>
-                      {chef && (lc === "bestand") && (
-                        <button onClick={() => decide(v.id, "verkaufsentwurf")} disabled={busy === v.id}
+                      {/* Rollenprüfung 22.09.2026: "Weiterverkaufen" nur mit
+                          freigeschaltetem Marktplatz (wie in der Akte) — sonst
+                          endete der Klick in "Demnächst verfügbar" (503). */}
+                      {chef && features.marktplatz && (lc === "bestand") && (
+                        <button onClick={() => decide(v.id, "verkaufsentwurf", lc)} disabled={busy === v.id}
                                 className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white"
                                 style={{ background: "var(--accent-red)" }}>
                           <Tag size={13} /> Weiterverkaufen
                         </button>
                       )}
+                      {/* Rollenprüfung 22.09.2026 (RP-450): Frist verlängern,
+                          bevor der Aufräumer das Fahrzeug archiviert.
+                          Review 22.09.: die neue Frist ist 50 Tage ab heute,
+                          nicht die alte Frist + 50 — so steht es jetzt da. */}
+                      {chef && lc === "bestand" && (
+                        <button onClick={() => decide(v.id, "bestand", v.lifecycle)} disabled={busy === v.id}
+                                data-testid={`bestand-verlaengern-${v.id}`}
+                                title="Setzt die Frist neu auf 50 Tage ab heute"
+                                className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs border text-zinc-200"
+                                style={{ borderColor: "var(--border-default)" }}>
+                          <Clock size={13} /> Frist erneuern (50 Tage ab heute)
+                        </button>
+                      )}
+                      {/* RP-411: von Hand angelegte Fahrzeuge lassen sich
+                          korrigieren und — solange sie nur im Bestand stehen —
+                          auch wieder löschen. */}
+                      {chef && v.source === "manuell" && !["verkauft", "archiviert", "geloescht"].includes(lc) && (
+                        <button onClick={() => setBearbeiten(v)} disabled={busy === v.id}
+                                data-testid={`bestand-bearbeiten-${v.id}`}
+                                className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs border text-zinc-200"
+                                style={{ borderColor: "var(--border-default)" }}>
+                          <Pencil size={13} /> Bearbeiten
+                        </button>
+                      )}
+                      {chef && v.source === "manuell" && lc === "bestand" && (
+                        <button onClick={() => decide(v.id, "loeschen", v.lifecycle)} disabled={busy === v.id}
+                                data-testid={`bestand-loeschen-${v.id}`}
+                                className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs text-zinc-500 hover:text-red-400">
+                          <Trash2 size={13} /> Löschen
+                        </button>
+                      )}
+                      {/* RP-191/RP-342: "Verkaufsentwurf" ohne geöffnetes
+                          Inserat — öffnet das vorhandene oder legt es an. */}
+                      {chef && features.marktplatz && lc === "verkaufsentwurf" && (
+                        <button onClick={() => decide(v.id, "verkaufsentwurf", lc)} disabled={busy === v.id}
+                                data-testid={`bestand-inserat-${v.id}`}
+                                className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white"
+                                style={{ background: "var(--accent-red)" }}>
+                          <Tag size={13} /> Zum Inserat
+                        </button>
+                      )}
                       {/* Ab Vertragserstellung sofort inserierbar — die Abholung
                           läuft parallel weiter (Bericht landet in der Akte). */}
                       {chef && features.marktplatz && ["vertrag_erstellt", "gekauft", "abholung_geplant"].includes(lc) && (
-                        <button onClick={() => decide(v.id, "verkaufsentwurf")} disabled={busy === v.id}
+                        <button onClick={() => decide(v.id, "verkaufsentwurf", lc)} disabled={busy === v.id}
                                 className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white"
                                 style={{ background: "var(--accent-red)" }}>
                           <Tag size={13} /> Jetzt inserieren
@@ -331,37 +414,92 @@ export default function Bestand() {
       </div>
 
       {showManual && <ManualVehicleDialog onClose={() => setShowManual(false)} onDone={() => { setShowManual(false); load(); }} />}
+      {bearbeiten && (
+        <ManualVehicleDialog fahrzeug={bearbeiten} onClose={() => setBearbeiten(null)}
+                             onDone={() => { setBearbeiten(null); load(); }} />
+      )}
     </div>
   );
 }
 
-function ManualVehicleDialog({ onClose, onDone }) {
-  const [f, setF] = useState({
-    make_label: "", model_label: "", model_description: "",
-    first_registration: "", mileage: "", fuel_label: "", gearbox_label: "",
-    power_ps: "", color: "", vin: "", previous_owners: "",
-    features: "", description: "", purchase_price: "",
-  });
+/** Formular eines manuellen Fahrzeugs (leer oder aus einem vorhandenen). */
+export function manuellFormAus(fahrzeug) {
+  const d = fahrzeug?.data || {};
+  const text = (x) => (x === null || x === undefined ? "" : String(x));
+  return {
+    make_label: text(d.make_label), model_label: text(d.model_label),
+    model_description: text(d.model_description),
+    first_registration: text(d.first_registration),
+    mileage: typeof d.mileage === "number" ? d.mileage.toLocaleString("de-DE") : text(d.mileage),
+    fuel_label: text(d.fuel_label), gearbox_label: text(d.gearbox_label),
+    power_ps: text(d.power_ps), color: text(d.color), vin: text(d.vin),
+    previous_owners: text(d.previous_owners),
+    features: Array.isArray(d.features) ? d.features.join(", ") : text(d.features),
+    description: text(d.description),
+    purchase_price: betragAlsText(fahrzeug?.purchase_price),
+  };
+}
+
+/**
+ * Rollenprüfung 22.09.2026 (RP-411/RP-146): Kilometer, PS und Einkaufspreis
+ * deutsch lesen. Vorher machten parseInt/parseFloat aus "150.000 km" 150 km
+ * und aus "12.990 €" 12,99 € — und korrigieren ließ es sich nicht.
+ * Liefert { payload, fehler }. power_kw bleibt beim Bearbeiten erhalten.
+ */
+export function manuellPayload(f, fahrzeug = null) {
+  if (!String(f.make_label || "").trim() || !String(f.model_label || "").trim()) {
+    return { payload: null, fehler: "Marke und Modell sind Pflichtfelder" };
+  }
+  const km = kmAusText(f.mileage);
+  if (Number.isNaN(km)) {
+    return { payload: null, fehler: "Kilometerstand: bitte als ganze Zahl eingeben, z. B. 150.000" };
+  }
+  const psRoh = String(f.power_ps ?? "").trim();
+  if (psRoh && !/^\d{1,4}$/.test(psRoh)) {
+    return { payload: null, fehler: "Leistung: bitte die PS als ganze Zahl eingeben, z. B. 150" };
+  }
+  const ekRoh = String(f.purchase_price ?? "").trim();
+  const ek = ekRoh ? preisAusText(ekRoh) : null;
+  if (ekRoh && ek === null) {
+    return { payload: null, fehler: "Einkaufspreis: bitte als Betrag eingeben, z. B. 12.990 oder 12.990,50" };
+  }
+  const altKw = fahrzeug?.data?.power_kw;
+  return {
+    fehler: null,
+    payload: {
+      ...f,
+      make_label: f.make_label.trim(), model_label: f.model_label.trim(),
+      mileage: km,
+      power_ps: psRoh ? Number(psRoh) : null,
+      power_kw: typeof altKw === "number" ? altKw : null,
+      purchase_price: ek,
+      features: String(f.features || "").split(",").map((x) => x.trim()).filter(Boolean),
+    },
+  };
+}
+
+function ManualVehicleDialog({ fahrzeug = null, onClose, onDone }) {
+  const [f, setF] = useState(() => manuellFormAus(fahrzeug));
   const [busy, setBusy] = useState(false);
   const set = (k) => (e) => setF((s) => ({ ...s, [k]: e.target.value }));
+  const bearbeiten = Boolean(fahrzeug?.id);
 
   const submit = async () => {
-    if (!f.make_label.trim() || !f.model_label.trim()) {
-      toast.error("Marke und Modell sind Pflichtfelder"); return;
-    }
+    const { payload, fehler } = manuellPayload(f, fahrzeug);
+    if (fehler) { toast.error(fehler); return; }
     const ezFehler = monatJahrFehler(f.first_registration);
     if (ezFehler) { toast.error(`Erstzulassung: ${ezFehler}`); return; }
     setBusy(true);
     try {
-      await api.post("/vehicles/manual", {
-        ...f,
-        mileage: f.mileage ? parseInt(f.mileage, 10) : null,
-        power_ps: f.power_ps ? parseInt(f.power_ps, 10) : null,
-        power_kw: null,
-        purchase_price: f.purchase_price ? parseFloat(f.purchase_price) : null,
-        features: f.features.split(",").map((x) => x.trim()).filter(Boolean),
-      });
-      toast.success("Fahrzeug im Bestand angelegt");
+      if (bearbeiten) {
+        // RP-411: PUT /vehicles/manual/{id} hatte keinen Aufrufer — ein
+        // Tippfehler ließ sich nicht mehr korrigieren.
+        await api.put(`/vehicles/manual/${fahrzeug.id}`, payload);
+        toast.success("Fahrzeugdaten gespeichert");
+      } else {
+        await api.post("/vehicles/manual", payload);
+        toast.success("Fahrzeug im Bestand angelegt");
+      }
       onDone?.();
     } catch (e) {
       toast.error(errMsg(e));
@@ -379,9 +517,13 @@ function ManualVehicleDialog({ onClose, onDone }) {
            style={{ background: "var(--bg-elevated)", border: "1px solid var(--wa-10)" }}>
         <div className="flex items-center justify-between mb-3">
           <div>
-            <div className="text-lg font-bold">Fahrzeug manuell hinzufügen</div>
+            <div className="text-lg font-bold">
+              {bearbeiten ? "Fahrzeugdaten bearbeiten" : "Fahrzeug manuell hinzufügen"}
+            </div>
             <div className="text-xs text-zinc-500">
-              Für Fahrzeuge, die du bereits besitzt oder außerhalb der Plattform gekauft hast.
+              {bearbeiten
+                ? "Von Hand angelegtes Fahrzeug korrigieren. Ein bestehendes Inserat behält seine eigene Kopie der Daten."
+                : "Für Fahrzeuge, die du bereits besitzt oder außerhalb der Plattform gekauft hast."}
             </div>
           </div>
           <button onClick={onClose} className="text-zinc-400 hover:text-white"><X size={20} /></button>
@@ -393,10 +535,10 @@ function ManualVehicleDialog({ onClose, onDone }) {
             <Field label="Modellbezeichnung"><input value={f.model_description} onChange={set("model_description")} className={inputCls} style={st} placeholder="320d Touring M Sport" /></Field>
           </div>
           <Field label="Erstzulassung"><MonatJahrEingabe value={f.first_registration} onChange={(v) => set("first_registration")({ target: { value: v } })} art="ez" testid="manuell-ez" className={inputCls} style={st} /></Field>
-          <Field label="Kilometerstand"><input type="number" value={f.mileage} onChange={set("mileage")} className={inputCls} style={st} /></Field>
+          <Field label="Kilometerstand"><input type="text" inputMode="numeric" autoComplete="off" value={f.mileage} onChange={set("mileage")} className={inputCls} style={st} placeholder="z. B. 150.000" data-testid="manuell-km" /></Field>
           <Field label="Kraftstoff"><input value={f.fuel_label} onChange={set("fuel_label")} className={inputCls} style={st} placeholder="Diesel" /></Field>
           <Field label="Getriebe"><input value={f.gearbox_label} onChange={set("gearbox_label")} className={inputCls} style={st} placeholder="Automatik" /></Field>
-          <Field label="Leistung (PS)"><input type="number" value={f.power_ps} onChange={set("power_ps")} className={inputCls} style={st} /></Field>
+          <Field label="Leistung (PS)"><input type="text" inputMode="numeric" autoComplete="off" value={f.power_ps} onChange={set("power_ps")} className={inputCls} style={st} placeholder="z. B. 150" /></Field>
           <Field label="Farbe"><input value={f.color} onChange={set("color")} className={inputCls} style={st} /></Field>
           <Field label="FIN"><input value={f.vin} onChange={set("vin")} className={inputCls} style={st} /></Field>
           <Field label="Vorbesitzer"><input value={f.previous_owners} onChange={set("previous_owners")} className={inputCls} style={st} /></Field>
@@ -406,12 +548,14 @@ function ManualVehicleDialog({ onClose, onDone }) {
           <div className="col-span-2">
             <Field label="Beschreibung"><textarea rows={3} value={f.description} onChange={set("description")} className={inputCls} style={st} /></Field>
           </div>
-          <Field label="Einkaufspreis (€)"><input type="number" value={f.purchase_price} onChange={set("purchase_price")} className={inputCls} style={st} /></Field>
+          <Field label="Einkaufspreis (€)"><input type="text" inputMode="decimal" autoComplete="off" value={f.purchase_price} onChange={set("purchase_price")} className={inputCls} style={st} placeholder="z. B. 12.990" data-testid="manuell-ek" /></Field>
         </div>
         <button onClick={submit} disabled={busy}
                 className="mt-4 w-full rounded-xl py-3 font-semibold text-white disabled:opacity-50"
                 style={{ background: "var(--accent-red)" }}>
-          {busy ? "Wird angelegt…" : "In den Bestand aufnehmen"}
+          {bearbeiten
+            ? (busy ? "Wird gespeichert…" : "Änderungen speichern")
+            : (busy ? "Wird angelegt…" : "In den Bestand aufnehmen")}
         </button>
       </div>
     </div>

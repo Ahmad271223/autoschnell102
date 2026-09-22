@@ -14,12 +14,32 @@ export const MIN_STRICH_PX = 25;
  * Finger — Scrollen ist im Feld deaktiviert (touch-none), damit der Strich
  * nicht abreißt.
  */
-export default function SignaturePad({ label, onChange, height = 160 }) {
+export default function SignaturePad({ label, onChange, height = 160, startBild = null }) {
   const canvasRef = useRef(null);
   const drawing = useRef(false);
   const strecke = useRef(0);           // gezeichnete Strecke seit dem letzten Löschen
   const letzter = useRef(null);
   const [hasInk, setHasInk] = useState(false);
+
+  // Rollenprüfung 22.09.2026 (RP-546): eine gesicherte Unterschrift (nach einer
+  // Neuanmeldung wiederhergestellt) wieder ins Feld zeichnen. Die Seite hat das
+  // Bild schon — onChange wird dafür nicht gerufen; "löschen" leert wie immer.
+  useEffect(() => {
+    if (!startBild) return undefined;
+    let aktiv = true;
+    const bild = new Image();
+    bild.onload = () => {
+      const canvas = canvasRef.current;
+      if (!aktiv || !canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      if (!rect.width) return;
+      canvas.getContext("2d").drawImage(bild, 0, 0, rect.width, height);
+      strecke.current = Math.max(strecke.current, MIN_STRICH_PX);
+      setHasInk(true);
+    };
+    bild.src = startBild;
+    return () => { aktiv = false; };
+  }, [startBild, height]);
 
   // Leinwand auf die aktuelle Größe einstellen. U-158: beim Drehen des
   // Handys änderte sich die Anzeigebreite, die Leinwand aber nicht — der

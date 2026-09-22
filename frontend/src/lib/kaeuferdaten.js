@@ -63,3 +63,28 @@ export function kaeuferLueckenFuellen(form, dealer) {
   }
   return next;
 }
+
+// Rollenprüfung 22.09.2026 (RP-490): Ändert der Chef die Firmenadresse, während
+// ein Sucher den Vertragsdialog offen hat, füllte das Nachladen nur LEERE
+// Felder — die alte Anschrift ging als Käufer in den Vertrag. Jetzt werden
+// alle Käuferfelder, die der Nutzer NICHT selbst angefasst hat
+// (beruehrt[feld]), auf den frischen Profilstand gesetzt. Leere Profilwerte
+// überschreiben nichts. Gibt dasselbe Objekt zurück, wenn sich nichts ändert.
+export function kaeuferAktualisieren(form, dealer, beruehrt = {}) {
+  const profil = kaeuferAusProfil(dealer);
+  const next = { ...form };
+  let geaendert = false;
+  for (const [key, wert] of Object.entries(profil)) {
+    if (beruehrt?.[key]) continue;
+    if (wert && String(form[key] ?? "") !== String(wert)) {
+      next[key] = wert;
+      geaendert = true;
+    }
+  }
+  if (!geaendert) return form;
+  if (next.dealer_city !== form.dealer_city && form.empfang_ort_kaeufer === form.dealer_city
+      && !beruehrt?.empfang_ort_kaeufer) {
+    next.empfang_ort_kaeufer = next.dealer_city;
+  }
+  return next;
+}

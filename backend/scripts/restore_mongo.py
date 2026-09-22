@@ -112,6 +112,55 @@ def read_bson_stream(fh):
         yield bson.decode(body)
 
 
+class BsonDatei:
+    """Rollenprüfung 22.09.2026 (RP-545): die Dokumente EINER .bson.gz —
+    gezaehlt, aber nicht im Speicher.
+
+    Vorher las pruefe_backup jede Collection per list(...) komplett ein und
+    hielt ALLE gleichzeitig (das Laden brauchte sie danach noch einmal). Als
+    Python-Objekte ist das das 1,7- bis 6-fache der Datenmenge — im
+    Backend-Container (mem_limit 4g, neben den laufenden Workern) drohte ab
+    etwa 0,5-1,5 GB Daten der OOM-Kill mitten im Notfall-Restore.
+
+    Jetzt steht hier nur Pfad und Anzahl; `for doc in datei` liest die Datei
+    erneut Dokument fuer Dokument. `len()` liefert die Anzahl — alle Stellen,
+    die bisher `len(docs)` nutzten, bleiben unveraendert."""
+
+    def __init__(self, pfad: Path, anzahl: int):
+        self.pfad = Path(pfad)
+        self.anzahl = int(anzahl)
+
+    def __len__(self) -> int:
+        return self.anzahl
+
+    def __iter__(self):
+        with gzip.open(self.pfad, "rb") as fh:
+            yield from read_bson_stream(fh)
+
+    def __repr__(self) -> str:
+        return f"BsonDatei({self.pfad.name}, {self.anzahl} Dokumente)"
+
+
+#: RP-545: so viele Dokumente je insert_many (statt der ganzen Collection).
+LADE_PAKET = 1000
+
+
+def dokumente_laden(coll, docs) -> int:
+    """Dokumente paketweise einfuegen (RP-545) — `docs` darf eine Liste oder
+    eine BsonDatei sein. Liefert die Anzahl der eingefuegten Dokumente."""
+    n, paket = 0, []
+    for doc in docs:
+        paket.append(doc)
+        if len(paket) >= LADE_PAKET:
+            coll.insert_many(paket, ordered=False)
+            n += len(paket)
+            paket = []
+    if paket:
+        coll.insert_many(paket, ordered=False)
+        n += len(paket)
+    return n
+
+
 def sha256_datei(p: Path) -> str:
     h = hashlib.sha256()
     with open(p, "rb") as fh:
@@ -144,7 +193,8 @@ def index_metadaten_mangel(meta_path: Path, soll_namen=None) -> str:
 def pruefe_backup(root: Path, allow_no_manifest: bool,
                   alt_ohne_indexdaten: bool = False):
     """Liefert (dumps: {name: (docs, metadata-Pfad)}, manifest|None, db_dir).
-    Wirft bei jedem Fehler.
+    Wirft bei jedem Fehler. `docs` ist seit RP-545 eine BsonDatei (Anzahl
+    per len(), Dokumente per Iteration aus der Datei) statt einer Liste.
 
     Runde 21 (Befund B): metadata.json ist fuer jede Collection Pflicht.
     Nur mit alt_ohne_indexdaten (--alt-backup-ohne-indexdaten) wird eine
@@ -187,8 +237,12 @@ def pruefe_backup(root: Path, allow_no_manifest: bool,
     dumps, index_maengel = {}, []
     for f in sorted(db_dir.glob("*.bson.gz")):
         name = f.name[:-len(".bson.gz")]
+        # RP-545: vollstaendig einlesen (jedes Dokument wird dekodiert, eine
+        # abgeschnittene Datei faellt weiter auf) — aber nur ZAEHLEN, nichts
+        # behalten.
         with gzip.open(f, "rb") as fh:
-            docs = list(read_bson_stream(fh))
+            anzahl = sum(1 for _ in read_bson_stream(fh))
+        docs = BsonDatei(f, anzahl)
         erwartet = (manifest or {}).get("collections", {}).get(name)
         if erwartet is not None and erwartet != len(docs):
             raise ValueError(f"{name}: {len(docs)} Dokumente gelesen, Manifest "
@@ -270,18 +324,64 @@ def erwartete_indexe(meta_path) -> dict:
     return out
 
 
-def indexe_anlegen(coll, meta_path) -> list:
-    """Indexe laut metadata.json anlegen; liefert die Liste der Fehler."""
+def _ohne_ttl(soll: dict) -> dict:
+    """RP-544: dieselben Indexe, aber ohne Ablaufzeit (expireAfterSeconds)."""
+    return {name: (keys, {k: v for k, v in opts.items() if k != "expireAfterSeconds"})
+            for name, (keys, opts) in soll.items()}
+
+
+def indexe_anlegen(coll, meta_path, ttl_spaeter: bool = False) -> list:
+    """Indexe laut metadata.json anlegen; liefert die Liste der Fehler.
+
+    Rollenprüfung 22.09.2026 (RP-544): `ttl_spaeter=True` legt TTL-Indexe
+    zunaechst OHNE Ablaufzeit an. Sonst loeschte der TTL-Waechter der
+    Datenbank (alle 60 s) in der temporaeren Datenbank sofort alle Dokumente,
+    die seit der Sicherung abgelaufen sind (vehicle_cache, rate_limits,
+    link_jobs, mail_idempotenz, betriebsalarme ...). Die Kontrolle verlangt
+    aber exakt die Zahl aus dem Manifest — der Restore brach in Schritt 3 ab
+    bzw. rollte nach Schritt 6 zurueck, je aelter die Sicherung, desto
+    sicherer. Die Ablaufzeit setzt ttl_aktivieren() erst nach der Kontrolle."""
     fehler = []
     try:
         soll = erwartete_indexe(meta_path)
     except Exception as exc:  # noqa: BLE001
         return [f"{coll.name}: Index-Metadaten nicht lesbar ({exc})"]
+    if ttl_spaeter:
+        soll = _ohne_ttl(soll)
     for name, (keys, opts) in soll.items():
         try:
             coll.create_index(keys, name=name, **opts)
         except Exception as exc:  # noqa: BLE001
             fehler.append(f"Index {coll.name}.{name} nicht angelegt: {exc}")
+    return fehler
+
+
+def ttl_indexe(dumps: dict) -> list:
+    """RP-544: [(collection, indexname, expireAfterSeconds)] aller TTL-Indexe
+    laut Sicherung."""
+    out = []
+    for name, (_docs, meta_path) in dumps.items():
+        try:
+            soll = erwartete_indexe(meta_path)
+        except Exception:  # noqa: BLE001 — meldet pruefe_datenbank
+            continue
+        for idx_name, (_keys, opts) in soll.items():
+            if opts.get("expireAfterSeconds") is not None:
+                out.append((name, idx_name, opts["expireAfterSeconds"]))
+    return out
+
+
+def ttl_aktivieren(db, dumps: dict) -> list:
+    """RP-544: die zunaechst ohne Ablaufzeit angelegten TTL-Indexe per collMod
+    scharf schalten (MongoDB >= 5.1 wandelt so einen normalen Einzelfeld-Index
+    in einen TTL-Index um). Liefert die Liste der Fehler."""
+    fehler = []
+    for coll_name, idx_name, sekunden in ttl_indexe(dumps):
+        try:
+            db.command("collMod", coll_name,
+                       index={"name": idx_name, "expireAfterSeconds": int(sekunden)})
+        except Exception as exc:  # noqa: BLE001
+            fehler.append(f"TTL-Index {coll_name}.{idx_name} nicht scharf geschaltet: {exc}")
     return fehler
 
 
@@ -350,21 +450,31 @@ def index_abweichungen(coll_name: str, soll: dict, ist_info: dict) -> list:
     return out
 
 
-def pruefe_datenbank(db, dumps: dict, manifest) -> list:
+def pruefe_datenbank(db, dumps: dict, manifest, ttl_ausstehend: bool = False,
+                     nur_indexe: bool = False) -> list:
     """Dokumentzahlen (gegen Manifest bzw. gelesene Dokumente) und Indexe
     jeder Collection in db pruefen. Liefert die Liste der Abweichungen.
-    Runde 21: Indexe nach Name UND Eigenschaften (index_abweichungen)."""
+    Runde 21: Indexe nach Name UND Eigenschaften (index_abweichungen).
+
+    Rollenprüfung 22.09.2026 (RP-544): `ttl_ausstehend=True` erwartet die
+    TTL-Indexe noch OHNE Ablaufzeit (sie werden erst nach der Kontrolle
+    scharf geschaltet); `nur_indexe=True` prueft nach dem Scharfschalten nur
+    noch die Indexe — die Dokumentzahl darf dann durch den TTL-Waechter
+    sinken, genau wie im laufenden Betrieb."""
     probleme = []
     for name, (docs, meta_path) in dumps.items():
-        soll = erwartete_anzahl(manifest, name, len(docs))
-        ist = db[name].count_documents({})
-        if ist != soll:
-            probleme.append(f"{name}: {ist} Dokumente, erwartet {soll}")
+        if not nur_indexe:
+            soll = erwartete_anzahl(manifest, name, len(docs))
+            ist = db[name].count_documents({})
+            if ist != soll:
+                probleme.append(f"{name}: {ist} Dokumente, erwartet {soll}")
         try:
             soll_idx = erwartete_indexe(meta_path)
         except Exception as exc:  # noqa: BLE001
             probleme.append(f"{name}: Index-Metadaten nicht lesbar ({exc})")
             continue
+        if ttl_ausstehend:
+            soll_idx = _ohne_ttl(soll_idx)
         try:
             ist_info = db[name].index_information()
         except Exception as exc:  # noqa: BLE001
@@ -779,6 +889,11 @@ def wartungsmodus(ziel_db, aktiv: bool, grund: str = "Restore") -> None:
     Serverstart raeumt nur Merker MIT abgelaufener Frist weg."""
     coll = ziel_db[FLAG_COLLECTION]
     if aktiv:
+        # Rollenprüfung 22.09.2026 (RP-246/RP-397): Der Restore ist der
+        # STAERKERE Merker und darf eine laufende Schreibpause der Sicherung
+        # bewusst ersetzen. Umgekehrt nicht mehr: wartung.setzen() (Sicherung)
+        # laesst diesen Merker jetzt stehen, und die Sicherung startet gar
+        # nicht erst, solange er gilt.
         coll.replace_one(
             {"_id": FLAG_ID},
             {"_id": FLAG_ID, "aktiv": True, "grund": grund,
@@ -787,6 +902,86 @@ def wartungsmodus(ziel_db, aktiv: bool, grund: str = "Restore") -> None:
             upsert=True)
     else:
         wartung.aufheben(coll, "restore", zwang=True)
+
+
+def _zahl_env(name: str, standard: float) -> float:
+    try:
+        return max(0.0, float(os.environ.get(name, "").strip() or standard))
+    except ValueError:
+        return standard
+
+
+def _utc(wert):
+    if isinstance(wert, datetime):
+        return wert if wert.tzinfo else wert.replace(tzinfo=timezone.utc)
+    return None
+
+
+def _backend_laeuft(ziel_db) -> bool:
+    """RP-245: Arbeitet ueberhaupt ein Backend gegen diese Datenbank? Jeder
+    Backend-Prozess nimmt stuendlich die Sperre des Aufraeumlaufs; wurde sie
+    in den letzten zwei Stunden genommen, laeuft eins. (Ohne Backend — Probe
+    in eine Testdatenbank — gibt es nichts abzuwarten.)"""
+    try:
+        doc = ziel_db.job_locks.find_one({"name": "cleanup-cycle"},
+                                         {"_id": 0, "acquired_at": 1, "expires_at": 1})
+    except Exception:  # noqa: BLE001
+        return True                     # im Zweifel lieber warten
+    if not doc:
+        return False
+    from datetime import timedelta as _td
+    genommen = _utc(doc.get("acquired_at")) or _utc(doc.get("expires_at"))
+    return bool(genommen) and genommen > datetime.now(timezone.utc) - _td(hours=2)
+
+
+def hintergrund_abwarten(ziel_db) -> bool:
+    """Rollenprüfung 22.09.2026 (RP-245/RP-396): Nach dem Setzen des
+    Wartungsmodus begann der Restore SOFORT mit S3-Upload und Umschalten —
+    ohne zu warten, ob ein Aufraeumlauf gerade loescht oder eine Anfrage noch
+    schreibt. Der Runbook-Weg (docker compose exec backend) heisst aber: das
+    Backend LAEUFT dabei.
+
+    Jetzt: RESTORE_AUSLAUF_MIN_S (Standard 6 s) warten, bis alle Prozesse den
+    Merker gelesen haben, dann bis RESTORE_AUSLAUF_MAX_S (Standard 180 s)
+    darauf, dass der Aufraeumlauf steht (lauf_aktiv an seiner Sperre) und
+    alle Prozesse null offene Schreibzugriffe melden (wartung_schreiber, wie
+    bei der Sicherung). True = ruhig. Nach Ablauf wird mit Warnung
+    weitergemacht — ein Notfall-Restore darf nicht an einem haengenden
+    Prozess scheitern; der Aufraeumlauf haelt vor seinem naechsten Schritt
+    ohnehin selbst an."""
+    import time as _time
+    if not _backend_laeuft(ziel_db):
+        print("  kein laufendes Backend erkannt — nichts abzuwarten")
+        return True
+    mindestens = _zahl_env("RESTORE_AUSLAUF_MIN_S", 6)
+    hoechstens = _zahl_env("RESTORE_AUSLAUF_MAX_S", 180)
+    print(f"  warte mindestens {mindestens:.0f} s, bis alle Backend-Prozesse den "
+          f"Wartungsmodus sehen, dann bis {hoechstens:.0f} s auf laufende Arbeiten ...")
+    _time.sleep(mindestens)
+    ende = _time.monotonic() + hoechstens
+    while True:
+        try:
+            aufraeumen = ziel_db.job_locks.count_documents(
+                {"name": "cleanup-cycle", "lauf_aktiv": True,
+                 "expires_at": {"$gt": datetime.now(timezone.utc)}}, limit=1)
+            ruhig, offen, prozesse = wartung.schreiber_stand(
+                ziel_db[wartung.SCHREIBER_COLLECTION])
+        except Exception as exc:  # noqa: BLE001
+            print(f"  WARNUNG: Stand der laufenden Arbeiten nicht lesbar ({exc}) — "
+                  f"es wird trotzdem fortgefahren")
+            return False
+        if not aufraeumen and (ruhig or prozesse == 0):
+            print("  keine laufenden Schreibzugriffe mehr"
+                  + (f" ({prozesse} Prozesse melden 0)" if prozesse else ""))
+            return True
+        if _time.monotonic() >= ende:
+            print(f"  !!! WARNUNG: nach {hoechstens:.0f} s "
+                  + ("laeuft der Aufraeumlauf noch" if aufraeumen else
+                     f"melden {prozesse} Prozesse noch {offen} offene Schreibzugriffe")
+                  + " — der Restore faehrt trotzdem fort (der Aufraeumlauf haelt "
+                    "vor seinem naechsten Schritt selbst an).")
+            return False
+        _time.sleep(1)
 
 
 def _wartungsmodus_befehl(ziel_name: str) -> str:
@@ -961,11 +1156,13 @@ def wiederherstellen(args) -> int:
     index_fehler, total = [], 0
     try:
         for name, (docs, meta_path) in dumps.items():
-            if docs:
-                tmp[name].insert_many(docs, ordered=False)
+            # RP-545: paketweise aus der Datei, nie die ganze Collection im
+            # Speicher. RP-544: TTL-Indexe erst nach der Kontrolle scharf.
+            if len(docs):
+                dokumente_laden(tmp[name], docs)
             else:
                 tmp.create_collection(name)
-            index_fehler += indexe_anlegen(tmp[name], meta_path)
+            index_fehler += indexe_anlegen(tmp[name], meta_path, ttl_spaeter=True)
             total += len(docs)
     except Exception as exc:  # noqa: BLE001
         print(f"FEHLER beim Laden: {exc} — temporaere Datenbank wird entfernt, "
@@ -974,7 +1171,7 @@ def wiederherstellen(args) -> int:
         return 1
 
     print("3/6 Pruefung VOR dem Umschalten (Dokumentzahlen, Indexe, Datei-Pruefsummen) ...")
-    probleme = index_fehler + pruefe_datenbank(tmp, dumps, manifest)
+    probleme = index_fehler + pruefe_datenbank(tmp, dumps, manifest, ttl_ausstehend=True)
     if not args.nur_datenbank:
         staging, f = dateien_bereitstellen(root, live, stamp, manifest)
         probleme += f
@@ -993,6 +1190,9 @@ def wiederherstellen(args) -> int:
     print(f"4/6 Wartungsmodus fuer '{args.db}' setzen ...")
     wartungsmodus(ziel, True)
     print(f"  {FLAG_COLLECTION}.{FLAG_ID} aktiv — die API antwortet jetzt mit 503")
+    # RP-245: laufenden Aufraeumlauf und offene Schreibzugriffe abwarten,
+    # bevor Dateien und Collections umgeschaltet werden.
+    hintergrund_abwarten(ziel)
     n_s3 = 0
     s3_gesichert = []
     if s3_aktiv:
@@ -1039,10 +1239,22 @@ def wiederherstellen(args) -> int:
         if fehler is None:
             print(f"  {len(stand['umgeschaltet'])} Collections umgeschaltet")
             print("6/6 Kontrolle nach dem Umschalten ...")
-            abweichungen = pruefe_datenbank(ziel, dumps, manifest)
+            abweichungen = pruefe_datenbank(ziel, dumps, manifest, ttl_ausstehend=True)
             if abweichungen:
                 fehler = ("Kontrolle nach dem Umschalten: "
                           + "; ".join(abweichungen[:10]))
+        if fehler is None:
+            # RP-544: erst jetzt — Zahlen stimmen — die Ablaufzeiten setzen,
+            # danach die Indexe mit Ablaufzeit gegen die Sicherung pruefen.
+            ttl = ttl_indexe(dumps)
+            fehler_ttl = ttl_aktivieren(ziel, dumps)
+            if not fehler_ttl:
+                fehler_ttl = pruefe_datenbank(ziel, dumps, manifest, nur_indexe=True)
+            if fehler_ttl:
+                fehler = "TTL-Indexe: " + "; ".join(fehler_ttl[:10])
+            elif ttl:
+                print(f"  {len(ttl)} TTL-Index(e) scharf geschaltet — abgelaufene "
+                      f"Eintraege raeumt die Datenbank ab jetzt selbst")
     except BaseException as exc:  # noqa: BLE001  (auch KeyboardInterrupt)
         fehler = f"Abbruch waehrend des Umschaltens ({type(exc).__name__}: {exc})"
     if fehler is not None:

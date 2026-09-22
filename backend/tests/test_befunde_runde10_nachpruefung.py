@@ -208,11 +208,13 @@ def test_termin_mit_baumelndem_vertrag_wird_bereinigt(monkeypatch):
 
     async def _lauf(db):
         await db.generated_pdfs.insert_one({"id": cid, "dealer_id": f"f-{SUF}"})
+        # Rollenprüfung 22.09.2026 (RP-248): nur geschlossene Termine
         await db.appointments.insert_many([
             {"id": alt, "dealer_id": f"f-{SUF}", "contract_id": "gibt-es-nicht",
+             "status": "abgeholt",
              "seller_name": "Anna", "pickup_date": (JETZT - timedelta(days=120)).strftime("%Y-%m-%d"),
              "created_at": (JETZT - timedelta(days=130)).isoformat()},
-            {"id": mit, "dealer_id": f"f-{SUF}", "contract_id": cid,
+            {"id": mit, "dealer_id": f"f-{SUF}", "contract_id": cid, "status": "abgeholt",
              "seller_name": "Bert", "pickup_date": (JETZT - timedelta(days=120)).strftime("%Y-%m-%d"),
              "created_at": (JETZT - timedelta(days=130)).isoformat()},
         ])

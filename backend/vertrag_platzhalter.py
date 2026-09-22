@@ -38,7 +38,8 @@ PLATZHALTER_HILFE = {
     "{fahrzeug}": "Marke und Modell",
     "{marke}": "Marke",
     "{modell}": "Modell",
-    "{abholdatum}": "Abholdatum, mit Uhrzeit falls vorhanden",
+    # Rollenpruefung 22.09.2026 (RP-484): im Kaufvertrag nur das Datum.
+    "{abholdatum}": "Abholdatum (in Mails mit Uhrzeit, im Kaufvertrag nur das Datum)",
     "{ort}": "Übergabeort — Anschrift des Verkäufers",
     "{zahlungsart}": "Bar, Echtzeitüberweisung oder Banküberweisung",
     "{kaufpreis}": "Kaufpreis in Euro",
@@ -62,10 +63,17 @@ def datum_de(iso: str) -> str:
     return roh
 
 
-def abholzeitpunkt(vertrag: dict) -> str:
-    """Datum plus Uhrzeit, so wie es im Satz stehen soll."""
+def abholzeitpunkt(vertrag: dict, mit_uhrzeit: bool = True) -> str:
+    """Datum plus Uhrzeit, so wie es im Satz stehen soll.
+
+    Rollenpruefung 22.09.2026 (RP-484): mit_uhrzeit=False fuer den
+    Kaufvertrag — dort steht nur das Datum (Wunsch Ahmad 15.09.2026, der
+    Dialog sagt "Abholuhrzeit … steht nicht im Vertrag"). Mails behalten
+    Datum und Uhrzeit."""
     daten = vertrag.get("contract_data") or {}
     datum = datum_de(vertrag.get("pickup_date") or daten.get("pickup_date") or "")
+    if not mit_uhrzeit:
+        return datum
     zeit = _text(vertrag.get("pickup_time") or daten.get("pickup_time"))
     if datum and zeit:
         return f"{datum} um {zeit} Uhr"
@@ -112,8 +120,30 @@ def _euro(wert) -> str:
     return f"{zahl:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
+def marke_modell(vertrag: dict) -> tuple:
+    """(Marke, Modell) eines Vertrags.
+
+    Rollenpruefung 22.09.2026 (RP-217/RP-368/RP-432): Zuerst die im Vertrag
+    bearbeiteten Werte (vehicle_make/vehicle_model — so heissen sie im
+    Dialog und nach einer Korrektur des Fahrers), dann make/model. Vorher
+    las die Tabelle NUR make/model: im PDF (dort gibt es nur die vehicle_*-
+    Felder) stand "____", und nach einer Korrektur des Fahrers nannte die
+    Mail das alte Fahrzeug."""
+    daten = (vertrag or {}).get("contract_data") or {}
+
+    def erstes(*namen):
+        for name in namen:
+            for quelle in (vertrag or {}, daten):
+                wert = _text(quelle.get(name))
+                if wert:
+                    return wert
+        return ""
+
+    return erstes("vehicle_make", "make"), erstes("vehicle_model", "model")
+
+
 def werte(vertrag: dict, firma: Optional[dict] = None,
-          sucher: Optional[dict] = None) -> Dict[str, str]:
+          sucher: Optional[dict] = None, mit_uhrzeit: bool = True) -> Dict[str, str]:
     """Die Ersetzungstabelle fuer EINEN Vertrag."""
     firma = firma or {}
     sucher = sucher or {}
@@ -124,8 +154,7 @@ def werte(vertrag: dict, firma: Optional[dict] = None,
 
     firmenname = (_text(firma.get("company_name"))
                   or _text(daten.get("dealer_company")))
-    marke = aus_vertrag("make")
-    modell = aus_vertrag("model")
+    marke, modell = marke_modell(vertrag)
     telefon = _text(daten.get("dealer_phone")) or _text(firma.get("phone"))
     mail = (_text(daten.get("dealer_email")) or _text(firma.get("email"))
             or _text(firma.get("contact_email")))
@@ -136,7 +165,7 @@ def werte(vertrag: dict, firma: Optional[dict] = None,
         "{fahrzeug}": " ".join(x for x in (marke, modell) if x),
         "{marke}": marke,
         "{modell}": modell,
-        "{abholdatum}": abholzeitpunkt(vertrag),
+        "{abholdatum}": abholzeitpunkt(vertrag, mit_uhrzeit=mit_uhrzeit),
         "{ort}": uebergabeort(vertrag),
         "{zahlungsart}": zahlungsart(vertrag),
         "{kaufpreis}": _euro(vertrag.get("purchase_price")
@@ -150,17 +179,20 @@ def werte(vertrag: dict, firma: Optional[dict] = None,
 
 
 def ersetzen(text: str, vertrag: dict, firma: Optional[dict] = None,
-             sucher: Optional[dict] = None, luecke: str = LUECKE) -> str:
+             sucher: Optional[dict] = None, luecke: str = LUECKE,
+             mit_uhrzeit: bool = True) -> str:
     """Alle Platzhalter in `text` ersetzen.
 
     Fehlt eine Angabe, steht dort `luecke` ("____") — NIE der Platzhalter
     selbst. Ein Kunde darf in seinem Kaufvertrag niemals "{abholdatum}"
     lesen; eine Lücke zum Ausfüllen ist dagegen genau das, was frueher im
     Papiervertrag stand.
+
+    mit_uhrzeit=False (RP-484): {abholdatum} nur als Datum — so im Vertrag.
     """
     if not text:
         return text or ""
-    tabelle = werte(vertrag, firma, sucher)
+    tabelle = werte(vertrag, firma, sucher, mit_uhrzeit=mit_uhrzeit)
     ergebnis = text
     for name, wert in tabelle.items():
         if name in ergebnis:

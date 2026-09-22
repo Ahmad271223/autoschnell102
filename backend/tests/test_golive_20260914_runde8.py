@@ -191,12 +191,16 @@ def test_l3_10_termine_ohne_vertrag_60_tage(wegwerf, monkeypatch):
     assert inspect.signature(CS.termine_ohne_vertrag_bereinigen).parameters["frist_tage"].default == 0
     assert CS.VERTRAG_AUFBEWAHRUNG_TAGE == 60
     jetzt = datetime.now(timezone.utc)
+    # Rollenprüfung 22.09.2026 (RP-248): nur GESCHLOSSENE Termine verlieren
+    # ihre Personendaten — daher hier "abgeholt" (offene: siehe
+    # test_rp_betrieb_20260922.py).
     run(db.appointments.insert_many([
-        {"id": "alt", "dealer_id": "d1", "seller_name": "Anna", "seller_phone": "1",
-         "seller_email": "a@x.de", "pickup_address": "Weg 1",
+        {"id": "alt", "dealer_id": "d1", "status": "abgeholt", "seller_name": "Anna",
+         "seller_phone": "1", "seller_email": "a@x.de", "pickup_address": "Weg 1",
          "pickup_date": (jetzt - timedelta(days=70)).strftime("%Y-%m-%d"),
          "created_at": (jetzt - timedelta(days=75)).isoformat()},
-        {"id": "jung", "dealer_id": "d1", "seller_name": "Bert", "pickup_address": "Weg 2",
+        {"id": "jung", "dealer_id": "d1", "status": "abgeholt", "seller_name": "Bert",
+         "pickup_address": "Weg 2",
          "pickup_date": (jetzt - timedelta(days=50)).strftime("%Y-%m-%d"),
          "created_at": (jetzt - timedelta(days=55)).isoformat()},
     ]))

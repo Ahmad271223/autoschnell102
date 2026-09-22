@@ -710,10 +710,14 @@ def test_http_103_fremder_logo_host_abgelehnt(welt):
                          json={"profile": {"logo_url": "https://tracker.example/x.png"}},
                          timeout=30)
         assert r.status_code == 400, r.text[:200]
+    vorher = requests.get(f"{API}/dealer/settings", headers=welt["C"], timeout=30).json().get("logo_url")
     r = requests.put(f"{API}/dealer/settings", headers=welt["C"],
                      json={"profile": {"logo_url": "/api/files/logo/x/y.png"}}, timeout=30)
     assert r.status_code == 200, r.text[:200]
-    assert r.json()["logo_url"] == "/api/files/logo/x/y.png"
+    # Rollenpruefung 22.09.2026 (RP-138, Welle 2): ein eigener Pfad wird
+    # nicht mehr abgelehnt, aber auch nicht uebernommen — das Logo aendert
+    # nur POST /dealer/logo (der PUT kennt nur "" = entfernen).
+    assert r.json().get("logo_url") == vorher
 
 
 def test_http_116_zu_grosser_base64_string_422(welt):

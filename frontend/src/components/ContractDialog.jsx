@@ -8,7 +8,8 @@ import { toast } from "sonner";
 import { useAuth } from "@/context/AuthContext";
 import { X, Eye, FileText, Loader2, AlertTriangle, ExternalLink } from "lucide-react";
 import DamageSelector from "./DamageSelector";
-import { fehlendeKaeuferfelder, kaeuferAusProfil, kaeuferLueckenFuellen } from "@/lib/kaeuferdaten";
+import { fehlendeKaeuferfelder, kaeuferAktualisieren, kaeuferAusProfil } from "@/lib/kaeuferdaten";
+import { kmAusText, preisAusText, preisText } from "@/lib/preis";
 
 const YN_OPTIONS = [
   { value: "", label: "—" },
@@ -73,13 +74,91 @@ const neuerIdempotenzSchluessel = () =>
     ? crypto.randomUUID()
     : `k${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
 
-export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCreated }) {
-  const { dealer, refresh, user } = useAuth();
+// Rollenprüfung 22.09.2026 (RP-412): Am Handy verwirft der Browser eine Seite
+// im Hintergrund ohne Nachfrage (beforeunload kommt dort nicht zuverlässig) —
+// ein halb ausgefüllter Vertrag war weg. Der Entwurf liegt jetzt im
+// sessionStorage DIESES Tabs (nicht dauerhaft auf dem Gerät: Verkäuferdaten),
+// je Konto und Fahrzeug, höchstens einen Tag alt.
+const ENTWURF_PRAEFIX = "ah_vertragsentwurf:";
+const ENTWURF_MAX_MS = 24 * 60 * 60 * 1000;
+export const entwurfSchluessel = (userId, vehicleId) =>
+  `${ENTWURF_PRAEFIX}${userId || "?"}:${vehicleId || "?"}`;
+
+export function entwurfLesen(schluessel, jetzt = Date.now()) {
+  try {
+    const roh = window.sessionStorage.getItem(schluessel);
+    if (!roh) return null;
+    const e = JSON.parse(roh);
+    if (!e || typeof e !== "object" || !e.form || typeof e.form !== "object") return null;
+    if (!(jetzt - Number(e.gespeichert || 0) < ENTWURF_MAX_MS)) return null;
+    return e;
+  } catch {
+    return null;
+  }
+}
+
+export function entwurfSpeichern(schluessel, daten, jetzt = Date.now()) {
+  try {
+    window.sessionStorage.setItem(schluessel, JSON.stringify({ ...daten, gespeichert: jetzt }));
+  } catch { /* Speicher voll/gesperrt: dann eben ohne Entwurf */ }
+}
+
+export function entwurfLoeschen(schluessel) {
+  try { window.sessionStorage.removeItem(schluessel); } catch { /* egal */ }
+}
+
+// Rollenprüfung 22.09.2026 (RP-402): Der Kaufpreis war ein Zahlenfeld mit
+// Number() — aus "15.000" (übliche deutsche Schreibweise) wurden 15 € im
+// Kaufvertrag. Jetzt Textfeld + preisAusText (lib/preis.js): "15.000" ->
+// 15000, "15.000,50" -> 15000.5, Unlesbares -> null (blockiert).
+export function kaufpreisPruefen(text) {
+  const roh = String(text ?? "").trim();
+  if (!roh) return { betrag: null, fehler: "Bitte Kaufpreis eingeben" };
+  const betrag = preisAusText(roh);
+  if (betrag === null) {
+    return { betrag: null, fehler: "Kaufpreis nicht lesbar — bitte z. B. 15.000 oder 15.000,50 eingeben" };
+  }
+  if (!(betrag > 0)) return { betrag: null, fehler: "Der Kaufpreis muss größer als 0 sein" };
+  return { betrag, fehler: "" };
+}
+
+// Kilometerstand für den Vertrag (Rollenprüfung 22.09.2026): deutsche
+// Schreibweise über kmAusText — "85.120" / "150 Tkm" / "85.120 km".
+// Liefert den Text, der an den Server geht ("" = leer), oder null, wenn der
+// Eintrag nicht lesbar ist.
+export function kmFuerVertrag(text) {
+  const km = kmAusText(text);
+  if (km === null) return "";
+  if (Number.isNaN(km)) return null;
+  return String(km);
+}
+
+// Rollenprüfung 22.09.2026 (RP-440/RP-444): Bei privaten Kleinanzeigen-
+// Anbietern ist der angezeigte Name ein frei gewähltes Pseudonym ("vnightx")
+// — der Parser legt ihn nur noch in seller_alias ab, das Pflichtfeld
+// "Name / Firma" bleibt leer. Hier als Hinweis unter dem Feld, NIE als Wert.
+// Bei AutoScout24-Händlern ist seller_name jetzt die Firma, die Person steht
+// in seller_ansprechpartner (nur zur Info).
+export function verkaeuferNameHinweise(vehicle, eingabe = "") {
   const v = vehicle || {};
-  // Runde 22 (11.09.2026, Nachprüfung): Vorgabe fürs Empfangsdatum einmal
-  // beim Öffnen festhalten — set() vergleicht damit (siehe unten).
-  const [heute] = useState(todayLocalIso);
-  const [form, setForm] = useState({
+  const hinweise = [];
+  const alias = String(v.seller_alias || "").trim();
+  const name = String(v.seller_name || "").trim();
+  const getippt = String(eingabe || "").trim();
+  // Nur solange das Feld leer ist oder das Pseudonym selbst eingetragen wurde.
+  if (!name && alias && (!getippt || getippt.toLowerCase() === alias.toLowerCase())) {
+    hinweise.push(`Kleinanzeigen-Name: ${alias} — ein frei gewähltes Pseudonym, bitte den `
+      + "echten Namen des Verkäufers eintragen.");
+  }
+  const ansprechpartner = String(v.seller_ansprechpartner || "").trim();
+  if (ansprechpartner && ansprechpartner.toLowerCase() !== name.toLowerCase()) {
+    hinweise.push(`Ansprechpartner laut Inserat: ${ansprechpartner}`);
+  }
+  return hinweise;
+}
+
+function anfangsFormular(v, dealer, heute) {
+  return {
     seller_name: v.seller_name || "",
     seller_address: v.seller_address || "",
     seller_zip: v.seller_zip || "",
@@ -156,7 +235,16 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
     // Händler-Profil — pre-filled, kann pro Vertrag überschrieben werden
     // (z.B. abweichende Telefonnummer im Vertretungsfall).
     ...kaeuferAusProfil(dealer),
-  });
+  };
+}
+
+export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCreated }) {
+  const { dealer, refresh, user } = useAuth();
+  const v = vehicle || {};
+  // Runde 22 (11.09.2026, Nachprüfung): Vorgabe fürs Empfangsdatum einmal
+  // beim Öffnen festhalten — set() vergleicht damit (siehe unten).
+  const [heute] = useState(todayLocalIso);
+  const [form, setForm] = useState(() => anfangsFormular(v, dealer, heute));
   const [loading, setLoading] = useState(false);
   const [previewing, setPreviewing] = useState(false);
   // Runde 31: rund 60 Felder ohne Zwischenspeicher — solange der Dialog offen
@@ -168,11 +256,18 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
   // aus den Einstellungen zaehlt nicht).
   const bearbeitet = useRef(false);
   useEffect(() => { if (open) bearbeitet.current = false; }, [open]);
+  // Wunsch Ahmad 18.09.2026 / Rollenprüfung 22.09.2026 (RP-490): Felder, die
+  // der Nutzer selbst angefasst hat — nur die bleiben beim Nachladen der
+  // Einstellungen stehen.
+  const beruehrt = useRef({});
+  const entwurfKey = entwurfSchluessel(user?.id, vehicleId);
   const schliessen = () => {
     if (bearbeitet.current
         && !window.confirm("Eingaben im Kaufvertrag verwerfen? Sie sind noch nicht gespeichert.")) {
       return;
     }
+    // RP-412: bewusst geschlossen = Entwurf weg.
+    entwurfLoeschen(entwurfKey);
     onClose?.();
   };
   // Runde 24 (11.09.2026): Käuferdaten sind Pflicht (Wunsch Ahmad). Der
@@ -180,34 +275,94 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
   // abgeleitet, nicht aus dem Formular: er bleibt stehen, während der
   // Sucher tippt.
   const fehltInEinstellungen = fehlendeKaeuferfelder(kaeuferAusProfil(dealer));
+  // RP-440/RP-444: Pseudonym/Ansprechpartner als Hinweis unter "Name / Firma".
+  const namensHinweise = verkaeuferNameHinweise(v, form.seller_name);
   const kaeuferRef = useRef(null);
   // Pruefung 14.09.2026: ein Idempotenz-Schluessel je geoeffnetem Dialog.
   const idempotenz = useRef(neuerIdempotenzSchluessel());
   useEffect(() => { if (open) idempotenz.current = neuerIdempotenzSchluessel(); }, [open]);
+
+  // Rollenprüfung 22.09.2026 (RP-412): Entwurf beim Öffnen wiederherstellen
+  // (nach den beiden Effekten oben — sonst setzten sie ihn gleich zurück).
+  // Der Idempotenz-Schlüssel kommt mit: ging die Antwort auf "PDF erstellen"
+  // verloren, bekommt die Wiederholung denselben Vertrag statt eines zweiten.
+  const entwurfGeprueft = useRef(null);
+  useEffect(() => {
+    if (!open) { entwurfGeprueft.current = null; return; }
+    if (entwurfGeprueft.current === entwurfKey) return;
+    entwurfGeprueft.current = entwurfKey;
+    const e = entwurfLesen(entwurfKey);
+    if (!e) return;
+    setForm((f) => ({ ...f, ...e.form }));
+    beruehrt.current = { ...(e.beruehrt || {}) };
+    bearbeitet.current = true;
+    if (e.idempotenz) idempotenz.current = e.idempotenz;
+    toast.info("Dein angefangener Kaufvertrag wurde wiederhergestellt.", {
+      duration: 12000,
+      action: {
+        label: "Verwerfen",
+        onClick: () => {
+          entwurfLoeschen(entwurfKey);
+          beruehrt.current = {};
+          bearbeitet.current = false;
+          idempotenz.current = neuerIdempotenzSchluessel();
+          setForm(anfangsFormular(v, dealer, heute));
+        },
+      },
+    });
+  }, [open, entwurfKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // RP-412: Entwurf mitschreiben — entprellt bei jeder Änderung und sofort,
+  // wenn die Seite in den Hintergrund geht (dort verwirft das Handy sie).
+  const formRef = useRef(form);
+  formRef.current = form;
+  useEffect(() => {
+    if (!open) return undefined;
+    const sichern = () => {
+      if (!bearbeitet.current) return;
+      entwurfSpeichern(entwurfKey, { form: formRef.current, beruehrt: beruehrt.current,
+                                     idempotenz: idempotenz.current });
+    };
+    const timer = window.setTimeout(sichern, 800);
+    const versteckt = () => { if (document.visibilityState === "hidden") sichern(); };
+    document.addEventListener("visibilitychange", versteckt);
+    window.addEventListener("pagehide", sichern);
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", versteckt);
+      window.removeEventListener("pagehide", sichern);
+    };
+  }, [open, form, entwurfKey]);
 
   // Runde 24 (11.09.2026, Gegenprüfung): useAuth().dealer wird nur beim
   // App-Start/Login geladen. Speichert der Sucher seine Käuferdaten über den
   // Link im Hinweis in einem ANDEREN Tab (oder ergänzt der Chef die
   // Firmenadresse), wäre das Profil hier veraltet: der Hinweis stünde
   // wieder da und die Pflicht blockierte "PDF erstellen", obwohl die Daten
-  // gespeichert sind. Deshalb beim Öffnen frisch laden und nur LEERE
-  // Käuferfelder nachfüllen (Getipptes bleibt). refresh() behält bei
+  // gespeichert sind. Deshalb beim Öffnen frisch laden. refresh() behält bei
   // Netzfehlern den geladenen Stand und hängt die Seite nicht aus.
+  // Rollenprüfung 22.09.2026 (RP-490): nicht mehr nur LEERE Felder füllen —
+  // alle Käuferfelder, die der Nutzer nicht selbst angefasst hat, bekommen
+  // den frischen Stand (vorher ging eine veraltete Firmenanschrift in den
+  // Vertrag). Getipptes bleibt.
   useEffect(() => {
     if (!open || !refresh) return undefined;
     let aktiv = true;
     Promise.resolve(refresh())
       .then((data) => {
-        if (aktiv && data?.dealer) setForm((f) => kaeuferLueckenFuellen(f, data.dealer));
+        if (aktiv && data?.dealer) {
+          setForm((f) => kaeuferAktualisieren(f, data.dealer, beruehrt.current));
+        }
       })
       .catch(() => {});
     return () => { aktiv = false; };
   }, [open, refresh]);
 
   // Wunsch Ahmad 18.09.2026: Kommen die Einstellungen erst nach dem Oeffnen
-  // (frisch geladene Seite), werden die Textfelder nachgetragen — aber nur,
-  // solange sie noch leer und unberuehrt sind.
-  const beruehrt = useRef({});
+  // (frisch geladene Seite), werden die Textfelder nachgetragen.
+  // Rollenprüfung 22.09.2026 (RP-490): Hat der Chef die Vorlagen/Texte
+  // geändert, während der Dialog offen war, bekommen alle UNBERÜHRTEN
+  // Textfelder den neuen Stand (vorher nur leere).
   useEffect(() => {
     if (!dealer) return;
     const vorgaben = {
@@ -218,10 +373,11 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
       agb_text: dealer.default_terms || "",
     };
     setForm((f) => {
-      const neu = { ...f };
-      let geaendert = false;
+      const kaeufer = kaeuferAktualisieren(f, dealer, beruehrt.current);
+      const neu = { ...kaeufer };
+      let geaendert = kaeufer !== f;
       for (const [feld, wert] of Object.entries(vorgaben)) {
-        if (wert && !beruehrt.current[feld] && !(f[feld] || "").trim()) {
+        if (wert && !beruehrt.current[feld] && (f[feld] || "") !== wert) {
           neu[feld] = wert;
           geaendert = true;
         }
@@ -229,6 +385,12 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
       return geaendert ? neu : f;
     });
   }, [dealer]);
+
+  // RP-218: das Feld "Zusätzlicher AGB-Abschnitt" verschwand, sobald man es
+  // leerte — obwohl der Server den Text aus den Einstellungen wieder einsetzt.
+  // Einmal gezeigt, bleibt es sichtbar (mit Hinweis "leer = Einstellungen").
+  const agbGezeigt = useRef(false);
+  if ((form.agb_text || "").trim()) agbGezeigt.current = true;
 
   if (!open) return null;
 
@@ -257,6 +419,12 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
     if (k === "dealer_city" && f.empfang_ort_kaeufer === f.dealer_city) {
       next.empfang_ort_kaeufer = v;
     }
+    // Rollenprüfung 22.09.2026 (RP-405): Das Datumsfeld wurde bei "HU: Nein"
+    // nur gesperrt, nicht geleert — im Vertrag stand "Nein, gültig bis
+    // 05/2027" (und die Monat/Jahr-Prüfung lief auf das gesperrte Feld).
+    // Dasselbe beim Scheckheft ("bis" nur bei "teilweise").
+    if (k === "hu_valid" && v !== "Ja") next.hu_until = "";
+    if (k === "service_book" && v !== "teilweise") next.service_book_until = "";
     return next;
   });
 
@@ -273,15 +441,23 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
     }));
   };
 
+  // Rollenprüfung 22.09.2026 (RP-402): Kaufpreis und Kilometerstand in
+  // deutscher Schreibweise lesen (lib/preis.js) — nie Number() auf
+  // getippten Text ("15.000" wurde zu 15 €).
+  const preis = kaufpreisPruefen(form.purchase_price);
+  const kmText = kmFuerVertrag(form.vehicle_mileage);
   const buildPayload = () => ({
     vehicle_id: vehicleId,
     ...form,
-    purchase_price: form.purchase_price ? Number(form.purchase_price) : 0,
+    purchase_price: preis.betrag ?? 0,
+    // Unlesbarer km-Text geht nur in die Vorschau unverändert; "PDF
+    // erstellen" blockiert vorher (siehe submit).
+    vehicle_mileage: kmText ?? form.vehicle_mileage,
   });
 
   const openPreview = async () => {
-    if (!form.purchase_price || Number(form.purchase_price) <= 0) {
-      toast.error("Bitte Kaufpreis eingeben (auch für Vorschau erforderlich)");
+    if (preis.fehler) {
+      toast.error(`${preis.fehler} (auch für die Vorschau erforderlich)`);
       return;
     }
     setPreviewing(true);
@@ -317,8 +493,18 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
         ?.focus({ preventScroll: true });
       return;
     }
-    if (!form.purchase_price || Number(form.purchase_price) <= 0) {
-      toast.error("Bitte Kaufpreis manuell eingeben");
+    if (preis.fehler) {
+      toast.error(preis.fehler);
+      return;
+    }
+    // RP-402: kleine Beträge sind fast immer ein Tippfehler ("15.000" als 15
+    // gelesen, Komma vergessen) — einmal nachfragen.
+    if (preis.betrag < 100
+        && !window.confirm(`Kaufpreis ${preisText(preis.betrag)} — ist das richtig?`)) {
+      return;
+    }
+    if (kmText === null) {
+      toast.error("Kilometerstand nicht lesbar — bitte z. B. 85.120 oder 150 Tkm eingeben");
       return;
     }
     // Runde 22 (11.09.2026): Zahlungsart ist Pflicht beim Erstellen
@@ -340,7 +526,26 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
     try {
       // Pruefung 14.09.2026: Idempotenz — Doppelklick oder Wiederholung nach
       // Netzabbruch legt keinen zweiten Vertrag an (Schluessel je Dialog).
-      const { data } = await api.post("/contracts", { ...buildPayload(), idempotency_key: idempotenz.current });
+      const senden = (extra = {}) => api.post("/contracts",
+        { ...buildPayload(), idempotency_key: idempotenz.current, ...extra });
+      let data;
+      try {
+        ({ data } = await senden());
+      } catch (err) {
+        // Rollenprüfung 22.09.2026 (RP-416): Derselbe Sucher hat für dieses
+        // Fahrzeug schon einen offenen Vertrag — erst nachfragen, dann
+        // bewusst einen zweiten anlegen (z. B. nachverhandelter Preis).
+        const d = err?.response?.data?.detail;
+        if (err?.response?.status === 409 && d?.code === "vertrag_vorhanden"
+            && window.confirm(`${d.msg}\n\nTrotzdem einen zweiten Kaufvertrag anlegen?`)) {
+          ({ data } = await senden({ zweiter_vertrag_bestaetigt: true }));
+        } else {
+          throw err;
+        }
+      }
+      // RP-412: gespeichert — der Entwurf wird nicht mehr gebraucht.
+      entwurfLoeschen(entwurfKey);
+      bearbeitet.current = false;
       // Runde 15: der Vertrag ist gespeichert, auch wenn der automatische
       // Abholtermin nicht angelegt werden konnte — der Server sagt es.
       if (data?.termin_hinweis) toast.warning(data.termin_hinweis, { duration: 8000 });
@@ -374,7 +579,12 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
           {/* Verkäufer + Käufer side-by-side on lg, stacked on small */}
           <div className="grid lg:grid-cols-2 gap-5">
             <Section title="Verkäufer / Halter">
-              <Field label="Name / Firma *" required value={form.seller_name} onChange={(v) => set("seller_name", v)} testid="contract-seller-name" />
+              <Field label="Name / Firma *" required value={form.seller_name} onChange={(v) => set("seller_name", v)} testid="contract-seller-name"
+                     helper={namensHinweise.length > 0 && (
+                       <span data-testid="contract-seller-name-hinweis">
+                         {namensHinweise.map((h) => <span key={h} className="block">{h}</span>)}
+                       </span>
+                     )} />
               <div className="grid grid-cols-2 gap-3">
                 <Field label="Telefon" value={form.seller_phone} onChange={(v) => set("seller_phone", v)} testid="contract-seller-phone" />
                 <Field label="E-Mail" type="email" value={form.seller_email} onChange={(v) => set("seller_email", v)} testid="contract-seller-email" />
@@ -442,7 +652,10 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
 
           {/* Fahrzeugdaten — direkt aus dem Inserat übernommen, vor
               Vertrags-Erstellung anpassbar. */}
-          <Section title="Fahrzeugdaten" subtitle="Aus dem Inserat übernommen — bei Bedarf korrigieren.">
+          {/* Rollenprüfung 22.09.2026 (RP-404): ein geleertes Feld kommt nicht
+              mehr still aus dem Inserat zurück. */}
+          <Section title="Fahrzeugdaten" subtitle="Aus dem Inserat übernommen — bei Bedarf korrigieren. Ein geleertes Feld bleibt im Vertrag leer.">
+
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               <Field label="Marke" value={form.vehicle_make} onChange={(v) => set("vehicle_make", v)} testid="contract-veh-make" />
               <Field label="Modell" value={form.vehicle_model} onChange={(v) => set("vehicle_model", v)} testid="contract-veh-model" />
@@ -455,7 +668,11 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                                   onChange={(v) => set("vehicle_first_registration", v)}
                                   art="ez" testid="contract-veh-ez" className="input-base w-full mt-1" />
               </div>
-              <Field label="Kilometerstand" value={form.vehicle_mileage} onChange={(v) => set("vehicle_mileage", v)} testid="contract-veh-km" />
+              {/* Rollenprüfung 22.09.2026: "85.120" / "150 Tkm" werden richtig
+                  gelesen (kmAusText); Unlesbares blockiert "PDF erstellen". */}
+              <Field label="Kilometerstand" value={form.vehicle_mileage} onChange={(v) => set("vehicle_mileage", v)} testid="contract-veh-km"
+                     inputMode="numeric"
+                     helper={kmText === null ? "Nicht lesbar — bitte z. B. 85.120 eingeben." : undefined} />
               <Field label="Hubraum (ccm)" value={form.vehicle_displacement} onChange={(v) => set("vehicle_displacement", v)} testid="contract-veh-ccm" />
             </div>
             <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
@@ -468,15 +685,18 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
               <Field label="Farbe" value={form.vehicle_color} onChange={(v) => set("vehicle_color", v)} testid="contract-veh-color" />
               <Field label="Türen" value={form.vehicle_doors} onChange={(v) => set("vehicle_doors", v)} testid="contract-veh-doors" />
               <Field label="Sitze" value={form.vehicle_seats} onChange={(v) => set("vehicle_seats", v)} testid="contract-veh-seats" />
+              {/* Rollenprüfung 22.09.2026 (RP-430): Die Portale liefern die
+                  ANZAHL DER FAHRZEUGHALTER (der jetzige mitgezählt, "2. Hand"
+                  = 2) — als "Vorhalter" war das um eins zu hoch. */}
               <Field
-                label="Vorhalter"
+                label="Fahrzeughalter (Anzahl)"
                 type="number"
                 value={form.previous_owners}
                 onChange={(v) => set("previous_owners", cleanIntStr(v))}
                 testid="contract-veh-prev"
                 inputMode="numeric"
-                placeholder="z.B. 1"
-                helper="Wird automatisch aus dem Inserat erkannt (Halter / Fahrzeughalter / Vorhalter / 2.Hand). Falls leer: bitte selbst eintragen."
+                placeholder="z.B. 2"
+                helper="Anzahl der Halter laut Inserat bzw. Fahrzeugbrief, der jetzige mitgezählt („2. Hand“ = 2). Wird aus dem Inserat übernommen — bitte prüfen."
               />
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -587,11 +807,21 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
 
           <Section title="Konditionen">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <Field
-                label="Kaufpreis (€) *" type="number" required
-                value={form.purchase_price} onChange={(v) => set("purchase_price", v)}
-                testid="contract-price" placeholder="z.B. 8900"
-              />
+              {/* Rollenprüfung 22.09.2026 (RP-402): Textfeld mit deutscher
+                  Schreibweise; darunter steht, welcher Betrag erkannt wurde. */}
+              <div>
+                <Field
+                  label="Kaufpreis (€) *" required inputMode="decimal"
+                  value={form.purchase_price} onChange={(v) => set("purchase_price", v)}
+                  testid="contract-price" placeholder="z.B. 8.900"
+                />
+                {String(form.purchase_price || "").trim() !== "" && (
+                  <div className="text-[11px] mt-1 leading-snug" data-testid="contract-price-erkannt"
+                       style={{ color: preis.fehler ? "var(--accent-red)" : "var(--text-secondary)" }}>
+                    {preis.fehler ? preis.fehler : `= ${preisText(preis.betrag)}`}
+                  </div>
+                )}
+              </div>
               <SelectField
                 label="Zahlungsart *"
                 required
@@ -612,9 +842,9 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                 <span className="block text-[11px] text-zinc-500">
                   Für gewerbliche Verkäufe (Regelbesteuerung): der Kaufpreis gilt
                   als Brutto, der Vertrag zeigt Netto und Steuer.
-                  {form.show_vat && form.purchase_price > 0 && (
-                    <> {" "}Netto {(form.purchase_price / 1.19).toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} € ·
-                    MwSt {(form.purchase_price - form.purchase_price / 1.19).toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €</>
+                  {form.show_vat && preis.betrag > 0 && (
+                    <> {" "}Netto {(preis.betrag / 1.19).toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} € ·
+                    MwSt {(preis.betrag - preis.betrag / 1.19).toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €</>
                   )}
                 </span>
               </span>
@@ -624,8 +854,12 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
               <Field label="Abholuhrzeit (nur Terminplaner)" type="time" value={form.pickup_time} onChange={(v) => set("pickup_time", v)} testid="contract-pickup-time"
                      helper="Steht nicht im Vertrag — nur für den Termin und die Fahrer-App." />
             </div>
+            {/* Rollenprüfung 22.09.2026 (RP-218): Der Hilfetext sagt jetzt, was
+                beim Leeren passiert — wie bei den Vertragsbedingungen ("leer =
+                Standard", Entscheidung 09.09.). Ob "leer" künftig "weglassen"
+                heißen soll, entscheidet Ahmad. */}
             <Field label="Besondere Vereinbarungen" value={form.additional_terms} onChange={(v) => set("additional_terms", v)} multiline rows={4} testid="contract-terms"
-                   helper="Aus deinen Einstellungen vorausgefüllt — hier nur für diesen Vertrag anpassbar. Platzhalter in geschweiften Klammern (z. B. {abholdatum}) werden beim Erstellen des PDF automatisch eingesetzt." />
+                   helper="Aus deinen Einstellungen vorausgefüllt — hier nur für diesen Vertrag anpassbar. Leerst du das Feld, gilt wieder der Text aus den Einstellungen. Platzhalter in geschweiften Klammern (z. B. {abholdatum}) werden beim Erstellen des PDF automatisch eingesetzt." />
             {/* Wunsch Ahmad (15.09.2026): Sucher schreiben interne Notizen nicht beim
                 Vertrag, sondern spaeter im Terminplaner am Termin.
                 Wunsch Ahmad 21.09.2026: die Notiz steht nicht mehr im Vertrags-PDF
@@ -710,7 +944,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
               multiline
               rows={6}
               testid="contract-vehicle-description"
-              helper="Wurde automatisch aus dem Inserat übernommen und landet im PDF. Frei editierbar."
+              helper="Wurde automatisch aus dem Inserat übernommen und landet im PDF. Frei editierbar — leerst du das Feld, steht keine Beschreibung im Vertrag."
             />
           </Section>
 
@@ -727,7 +961,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
               testid="contract-vertragsbedingungen"
               helper="Aus deinen Einstellungen geladen. Änderungen hier gelten nur für diesen einen Vertrag; leerst du das Feld, gilt wieder der Text aus den Einstellungen."
             />
-            {(form.agb_text || "").trim() ? (
+            {agbGezeigt.current ? (
               <Field
                 label="Zusätzlicher AGB-Abschnitt (aus älteren Einstellungen)"
                 value={form.agb_text}
@@ -735,7 +969,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                 multiline
                 rows={6}
                 testid="contract-agb-text"
-                helper="Steht im PDF als eigener Abschnitt „Allgemeine Geschäftsbedingungen“ vor den Vertragsbedingungen."
+                helper="Steht im PDF als eigener Abschnitt „Allgemeine Geschäftsbedingungen“ vor den Vertragsbedingungen. Leerst du das Feld, gilt wieder der AGB-Text aus den Einstellungen."
               />
             ) : null}
           </Section>

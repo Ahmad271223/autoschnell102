@@ -1,8 +1,12 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, errMsg, openAuthedFile } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { useFeatures } from "@/lib/features";
+import { useUngespeichert } from "@/lib/ungespeichert";
+import {
+  bestandFormAus, bestandGeaendert, bestandMitOffenenAenderungen, fristErneuertText, kostenLesen,
+} from "@/lib/bestandForm";
 import { toast } from "sonner";
 import AbholFoto from "@/components/AbholFoto";
 import BeweisCard from "@/components/BeweisCard";
@@ -54,6 +58,9 @@ function Section({ title, children, warn }) {
   );
 }
 
+// Inserate, die noch laufen (wie backend/routes/resale.py _AKTIV).
+const INSERAT_AKTIV = ["entwurf", "verkaufsbereit", "reserviert", "veroeffentlicht", "zurueckgezogen"];
+
 function KV({ k, val }) {
   return (
     <div className="flex justify-between gap-4 py-1 border-b text-sm" style={{ borderColor: "var(--wa-04)" }}>
@@ -71,6 +78,11 @@ export default function FahrzeugAkte() {
   const [akte, setAkte] = useState(null);
   const [selectedDevs, setSelectedDevs] = useState([]);
   const [bestandForm, setBestandForm] = useState(null);
+  // Rollenprüfung 22.09.2026 (RP-462): letzter Serverstand des
+  // Bestandsformulars — Grundlage für "ungespeichert" und dafür, dass ein
+  // Neuladen (nach "Nur speichern", "Änderungen übernehmen" …) offene
+  // Eingaben nicht mehr verwirft.
+  const bestandStandRef = useRef(null);
   const [busy, setBusy] = useState(false);
   // Pruefbericht 20.09.2026 (B5): Ein Ladefehler (404 nach Entfernen oder
   // Loeschen, 500, Funkloch) liess die Seite fuer immer auf "lade…" stehen —
@@ -88,16 +100,15 @@ export default function FahrzeugAkte() {
     ? { pfad: "/app/fahrzeuge", text: "Zurück zu meinen Fahrzeugen" }
     : { pfad: "/app/bestand", text: "Zurück zum Bestand" };
 
-  const load = useCallback(async () => {
+  const load = useCallback(async ({ offeneVerwerfen = false } = {}) => {
     try {
       const r = await api.get(`/vehicles/${id}/akte`);
       setLadeFehler(null);
       setAkte(r.data);
-      const b = r.data.vehicle?.bestand || {};
-      setBestandForm({
-        location: b.location || "", notes: b.notes || "",
-        costs: b.costs || [],
-      });
+      const neu = bestandFormAus(r.data.vehicle?.bestand);
+      const alterStand = offeneVerwerfen ? null : bestandStandRef.current;
+      bestandStandRef.current = neu;
+      setBestandForm((alt) => bestandMitOffenenAenderungen(alt, alterStand, neu));
     } catch (e) {
       // Wunsch Ahmad 21.09.2026 (R1-01): der Chef haengt keine Fahrzeuge mehr
       // um — "einem anderen Konto zugeordnet" ist deshalb kein Grund mehr.
@@ -113,8 +124,15 @@ export default function FahrzeugAkte() {
   useEffect(() => {
     setAkte(null);
     setLadeFehler(null);
+    // anderes Fahrzeug: kein Formularrest des vorigen
+    bestandStandRef.current = null;
+    setBestandForm(null);
     load();
   }, [load]);
+
+  // RP-462: Verlassen/Neuladen mit offenen Standort-/Kosten-Eingaben fragt nach
+  // (auch der Wechsel über die Seitenleiste, siehe AppLayout).
+  useUngespeichert(bestandGeaendert(bestandForm, bestandStandRef.current));
 
   if (!akte) {
     return (
@@ -150,15 +168,31 @@ export default function FahrzeugAkte() {
         !window.confirm("Fahrzeug wirklich löschen?\nFotos werden entfernt — Vertrag und Historie bleiben erhalten.")) return;
     setBusy(true);
     try {
-      await api.post(`/vehicles/${v.id}/decision`, { decision });
       if (decision === "verkaufsentwurf") {
+        // Rollenprüfung 22.09.2026 (RP-092/RP-191/RP-342): EIN Aufruf. Vorher
+        // setzte /decision das Fahrzeug erst auf "verkaufsentwurf" und danach
+        // legte /resale/draft das Inserat an — scheiterte der zweite Schritt,
+        // stand das Auto ohne Inserat und ohne Knopf da. create_draft setzt
+        // den Fahrzeugstatus selbst und nimmt ihn bei einem Fehler zurück.
         const draft = await api.post(`/resale/draft/${v.id}`);
         nav(`/app/inserat/${draft.data.id}`);
         return;
       }
-      toast.success("Gespeichert");
+      // RP-496: der angezeigte Zustand geht mit — hat er sich inzwischen
+      // geändert (zweiter Tab), antwortet der Server mit 409 statt still
+      // umzuschalten.
+      const r = await api.post(`/vehicles/${v.id}/decision`, { decision, von_lifecycle: v.lifecycle });
+      toast.success(r.data?.verlaengert
+        ? fristErneuertText(r.data?.expires_at)
+        : "Gespeichert");
       load();
-    } catch (e) { toast.error(errMsg(e)); } finally { setBusy(false); }
+    } catch (e) {
+      // 409: Status inzwischen geändert (RP-496), Termine offen (RP-454) oder
+      // Inserat wird gerade angelegt — den aktuellen Stand zeigen (offene
+      // Eingaben im Bestandsformular bleiben, RP-462).
+      toast.error(errMsg(e));
+      if (e?.response?.status === 409) load();
+    } finally { setBusy(false); }
   };
 
   const entfernen = async () => {
@@ -185,14 +219,52 @@ export default function FahrzeugAkte() {
     } catch (e) { toast.error(errMsg(e)); } finally { setBusy(false); }
   };
 
-  const saveBestand = async () => {
+  // RP-474: was aus dem unterschriebenen Abholprotokoll noch fehlt (nur Chef,
+  // nur solange das Fahrzeug nicht abgeschlossen ist — wie der Server).
+  const befund = akte.protokoll_befund;
+  const bekannteMaengel = v.known_defects || [];
+  const befundNeueSchaeden = (befund?.schaeden || []).filter((s) => !bekannteMaengel.includes(s));
+  const befundKmNeu = befund?.km != null && Number(befund.km) !== Number(d.mileage);
+  const befundOffen = !sucher && Boolean(befund)
+    && !["verkauft", "archiviert", "geloescht"].includes(v.lifecycle)
+    && (befundKmNeu || befundNeueSchaeden.length > 0);
+
+  const befundUebernehmen = async () => {
     if (busy) return;
     setBusy(true);
     try {
-      await api.put(`/vehicles/${v.id}/bestand`, bestandForm);
-      toast.success("Bestandsdaten gespeichert");
+      // "abholprotokoll" = backend/routes/bestand.py PROTOKOLL_BEFUND_ID
+      const r = await api.post(`/vehicles/${v.id}/apply-deviations`, { deviation_ids: ["abholprotokoll"] });
+      toast.success(`${(r.data.applied || []).length} Änderung(en) aus dem Abholprotokoll übernommen`);
       load();
-    } catch (e) { toast.error(errMsg(e)); } finally { setBusy(false); }
+    } catch (e) {
+      toast.error(errMsg(e));
+      if (e?.response?.status === 409) load();
+    } finally { setBusy(false); }
+  };
+
+  const saveBestand = async () => {
+    if (busy) return;
+    // Rollenprüfung 22.09.2026 (RP-449/RP-565): Beträge deutsch lesen
+    // ("1.200" = 1.200 €, "249,90" = 249,90 €); Unlesbares nicht speichern.
+    const { costs, fehler } = kostenLesen(bestandForm.costs);
+    if (fehler) { toast.error(fehler); return; }
+    setBusy(true);
+    try {
+      // RP-461: der geladene Stand geht mit — hat ein anderes Gerät
+      // inzwischen gespeichert, kommt 409 statt eines stillen Überschreibens.
+      await api.put(`/vehicles/${v.id}/bestand`, {
+        location: bestandForm.location, notes: bestandForm.notes, costs,
+        stand: bestandForm.stand || "",
+      });
+      toast.success("Bestandsdaten gespeichert");
+      load({ offeneVerwerfen: true });
+    } catch (e) {
+      toast.error(errMsg(e));
+      // Bei 409 den neuen Serverstand holen — die eigenen Eingaben bleiben
+      // stehen (RP-462), ein zweiter Klick speichert sie dann.
+      if (e?.response?.status === 409) load();
+    } finally { setBusy(false); }
   };
 
   return (
@@ -254,9 +326,14 @@ export default function FahrzeugAkte() {
           )}
           {!sucher && v.lifecycle === "abgeholt" && (
             <>
-              <button onClick={() => decide("verkaufsentwurf")} disabled={busy} className="rounded-lg px-3 py-2 text-xs font-semibold text-white inline-flex items-center gap-1.5 disabled:opacity-50" style={{ background: "var(--accent-red)" }}>
-                <Tag size={13} /> Speichern & weiterverkaufen
-              </button>
+              {/* Rollenprüfung 22.09.2026 (RP-045/RP-144): nur mit
+                  freigeschaltetem Marktplatz — sonst 503 "Demnächst verfügbar". */}
+              {features.marktplatz && (
+                <button onClick={() => decide("verkaufsentwurf")} disabled={busy} data-testid="akte-weiterverkaufen"
+                        className="rounded-lg px-3 py-2 text-xs font-semibold text-white inline-flex items-center gap-1.5 disabled:opacity-50" style={{ background: "var(--accent-red)" }}>
+                  <Tag size={13} /> Speichern & weiterverkaufen
+                </button>
+              )}
               <button onClick={() => decide("bestand")} disabled={busy} className="rounded-lg px-3 py-2 text-xs border inline-flex items-center gap-1.5 disabled:opacity-50" style={{ borderColor: "var(--border-default)" }}>
                 <Archive size={13} /> Nur speichern
               </button>
@@ -266,20 +343,46 @@ export default function FahrzeugAkte() {
             </>
           )}
           {features.marktplatz && !sucher && v.lifecycle === "bestand" && (
-            <button onClick={() => decide("verkaufsentwurf")} className="rounded-lg px-3 py-2 text-xs font-semibold text-white inline-flex items-center gap-1.5" style={{ background: "var(--accent-red)" }}>
+            <button onClick={() => decide("verkaufsentwurf")} disabled={busy}
+                    className="rounded-lg px-3 py-2 text-xs font-semibold text-white inline-flex items-center gap-1.5 disabled:opacity-50" style={{ background: "var(--accent-red)" }}>
               <Tag size={13} /> Weiterverkaufen
+            </button>
+          )}
+          {/* Rollenprüfung 22.09.2026 (RP-450): Nach 50 Tagen archiviert der
+              Aufräumer das Fahrzeug endgültig (Fotos weg) — auch wenn es noch
+              auf dem Hof steht. Der Chef kann die Frist hier verlängern.
+              Review 22.09.: die neue Frist ist 50 Tage ab heute, nicht die
+              alte Frist + 50 — so steht es jetzt auf dem Knopf. */}
+          {!sucher && v.lifecycle === "bestand" && (
+            <button onClick={() => decide("bestand")} disabled={busy} data-testid="akte-frist-verlaengern"
+                    title="Setzt die Frist neu auf 50 Tage ab heute"
+                    className="rounded-lg px-3 py-2 text-xs border inline-flex items-center gap-1.5 disabled:opacity-50"
+                    style={{ borderColor: "var(--border-default)" }}>
+              <Clock size={13} /> Frist erneuern (50 Tage ab heute)
+            </button>
+          )}
+          {/* RP-191/RP-342: Fahrzeug steht auf "Verkaufsentwurf", aber es gibt
+              kein Inserat (z. B. alter Abbruch zwischen zwei Aufrufen) — hier
+              lässt es sich nachholen. */}
+          {features.marktplatz && !sucher && v.lifecycle === "verkaufsentwurf"
+            && !(akte.listings || []).some((l) => INSERAT_AKTIV.includes(l.status)) && (
+            <button onClick={() => decide("verkaufsentwurf")} disabled={busy} data-testid="akte-inserat-anlegen"
+                    className="rounded-lg px-3 py-2 text-xs font-semibold text-white inline-flex items-center gap-1.5 disabled:opacity-50"
+                    style={{ background: "var(--accent-red)" }}>
+              <Tag size={13} /> Inserat anlegen
             </button>
           )}
           {/* Ab Vertragserstellung sofort inserierbar (Abholung läuft parallel) */}
           {features.marktplatz && !sucher && ["vertrag_erstellt", "gekauft", "abholung_geplant"].includes(v.lifecycle) && (
-            <button onClick={() => decide("verkaufsentwurf")} className="rounded-lg px-3 py-2 text-xs font-semibold text-white inline-flex items-center gap-1.5" style={{ background: "var(--accent-red)" }}>
+            <button onClick={() => decide("verkaufsentwurf")} disabled={busy}
+                    className="rounded-lg px-3 py-2 text-xs font-semibold text-white inline-flex items-center gap-1.5 disabled:opacity-50" style={{ background: "var(--accent-red)" }}>
               <Tag size={13} /> Jetzt inserieren
             </button>
           )}
           {/* Pruefbericht 20.09.2026 (B17): Die Inseratseite ist Chefsache
               (resale.py -> current_chef). Sucher bekamen den Knopf trotzdem
               und landeten in einem 403 mit ewigem "lade…". */}
-          {features.marktplatz && !sucher && listing && ["entwurf", "verkaufsbereit", "reserviert", "veroeffentlicht", "zurueckgezogen"].includes(listing.status) && (
+          {features.marktplatz && !sucher && listing && INSERAT_AKTIV.includes(listing.status) && (
             <Link to={`/app/inserat/${listing.id}`} data-testid="akte-inserat-link"
                   className="rounded-lg px-3 py-2 text-xs border inline-flex items-center gap-1.5" style={{ borderColor: "var(--border-default)" }}>
               {listing.status === "veroeffentlicht" ? "Inserat öffnen (live · vom Marktplatz nehmen / löschen)" : `Inserat öffnen (${inseratText(listing.status)})`}
@@ -381,6 +484,31 @@ export default function FahrzeugAkte() {
         </Section>
       )}
 
+      {/* Rollenprüfung 22.09.2026 (RP-474): km und neue Schäden aus dem
+          UNTERSCHRIEBENEN Abholprotokoll — auch ohne Abhol-Check. Vorher kamen
+          sie nie ins Fahrzeug (nur ins Inserat, und auch das erst seit heute). */}
+      {befundOffen && (
+        <Section title="Aus dem Abholprotokoll übernehmen">
+          <div className="text-xs text-zinc-400 mb-2">
+            Im unterschriebenen Abholprotokoll steht etwas, das noch nicht in den Fahrzeugdaten ist:
+          </div>
+          <div className="text-sm space-y-1" data-testid="akte-protokoll-befund">
+            {befundKmNeu && (
+              <div>
+                Kilometerstand: <span className="font-semibold">{fmtKm(befund.km) || `${befund.km} km`}</span>
+                <span className="text-zinc-500"> (bisher {fmtKm(d.mileage) || "—"})</span>
+              </div>
+            )}
+            {befundNeueSchaeden.map((s, i) => <div key={i} className="text-amber-400">• {s}</div>)}
+          </div>
+          <button onClick={befundUebernehmen} disabled={busy} data-testid="akte-protokoll-uebernehmen"
+                  className="mt-3 rounded-lg px-3 py-2 text-xs font-semibold text-white disabled:opacity-50"
+                  style={{ background: "var(--accent-red)" }}>
+            In die Fahrzeugdaten übernehmen
+          </button>
+        </Section>
+      )}
+
       {/* Fahrzeugdaten + Kauf */}
       {/* grid-cols-1 = minmax(0,1fr): ein langer Name darf die Spalte auf dem
           Handy nicht breiter als den Bildschirm machen (Pruefbefund 11.09.2026). */}
@@ -393,6 +521,9 @@ export default function FahrzeugAkte() {
           <KV k="Leistung" val={d.power_ps ? `${d.power_ps} PS` : null} />
           <KV k="Farbe" val={d.color} />
           <KV k="FIN" val={d.vin} />
+          {/* Rollenprüfung 22.09.2026 (RP-475): übernommene Schlüssel-Abweichung
+              (data.keys_count) — vorher las diesen Wert niemand. */}
+          {d.keys_count != null && d.keys_count !== "" && <KV k="Schlüssel" val={String(d.keys_count)} />}
           {(v.known_defects || []).length > 0 && (
             <div className="mt-2 text-xs">
               <div className="text-zinc-500 mb-1">Bekannte Mängel:</div>
@@ -435,7 +566,12 @@ export default function FahrzeugAkte() {
             : akte.einkaufspreis?.preis != null
               ? <KV k={akte.einkaufspreis.quelle === "vertrag" ? "Einkaufspreis (aus dem Kaufvertrag)" : "Einkaufspreis"}
                     val={fmtEur(akte.einkaufspreis.preis)} />
-              : <KV k="Einkaufspreis" val="—" />}
+              // Rollenprüfung 22.09.2026 (RP-057 b, kaufvorgang.einkaufspreis_vorschlag):
+              // mehrere offene Verträge verschiedener Sucher mit verschiedenen
+              // Preisen — welcher gilt, entscheidet erst die Abholung.
+              : akte.einkaufspreis?.quelle === "mehrdeutig"
+                ? <KV k="Einkaufspreis" val="mehrere Verträge mit verschiedenen Preisen — steht nach der Abholung fest" />
+                : <KV k="Einkaufspreis" val="—" />}
           <KV k="Quelle" val={v.source === "manuell" ? "Manuell angelegt" : (d.detail_url ? "Inserat (Plattform)" : "Plattform")} />
           {(akte.appointments || []).slice(0, 1).map((a) => (
             <KV key={a.id} k="Geplante Abholung"
@@ -530,18 +666,24 @@ export default function FahrzeugAkte() {
           <div className="mt-3">
             <div className="flex items-center justify-between">
               <label className="text-[11px] text-zinc-500">Kosten (Transport, Aufbereitung, Reparatur, …)</label>
-              <button onClick={() => setBestandForm((s) => ({ ...s, costs: [...s.costs, { label: "", amount: 0 }] }))}
+              <button onClick={() => setBestandForm((s) => ({ ...s, costs: [...s.costs, { label: "", amount: "" }] }))}
                       className="text-xs text-zinc-400 hover:text-white">+ Kostenposition</button>
             </div>
             {bestandForm.costs.map((c, i) => (
               <div key={i} className="mt-1.5 flex gap-2">
-                <input value={c.label} placeholder="Bezeichnung"
+                <input value={c.label} placeholder="Bezeichnung" aria-label={`Kostenposition ${i + 1}: Bezeichnung`}
                        onChange={(e) => setBestandForm((s) => ({ ...s, costs: s.costs.map((x, xi) => xi === i ? { ...x, label: e.target.value } : x) }))}
-                       className="flex-1 rounded-lg border bg-transparent px-3 py-1.5 text-sm" style={{ borderColor: "var(--border-default)" }} />
-                <input type="number" value={c.amount} placeholder="€"
-                       onChange={(e) => setBestandForm((s) => ({ ...s, costs: s.costs.map((x, xi) => xi === i ? { ...x, amount: parseFloat(e.target.value || 0) } : x) }))}
+                       className="flex-1 min-w-0 rounded-lg border bg-transparent px-3 py-1.5 text-sm" style={{ borderColor: "var(--border-default)" }} />
+                {/* Rollenprüfung 22.09.2026 (RP-449/RP-565): Text statt
+                    type="number" — "1.200" blieb sonst 1,20 €, und bei "249,"
+                    sprang das Feld auf 0 zurück. Gelesen wird beim Speichern. */}
+                <input type="text" inputMode="decimal" autoComplete="off" value={c.amount} placeholder="€"
+                       aria-label={`Kostenposition ${i + 1}: Betrag in Euro`}
+                       data-testid={`akte-kosten-betrag-${i}`}
+                       onChange={(e) => setBestandForm((s) => ({ ...s, costs: s.costs.map((x, xi) => xi === i ? { ...x, amount: e.target.value } : x) }))}
                        className="w-28 rounded-lg border bg-transparent px-3 py-1.5 text-sm text-right" style={{ borderColor: "var(--border-default)" }} />
                 <button onClick={() => setBestandForm((s) => ({ ...s, costs: s.costs.filter((_, xi) => xi !== i) }))}
+                        aria-label={`Kostenposition ${i + 1} entfernen`}
                         className="text-zinc-500 hover:text-red-400"><Trash2 size={14} /></button>
               </div>
             ))}

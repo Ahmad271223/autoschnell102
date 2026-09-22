@@ -310,7 +310,9 @@ def test_14b_migration_kennt_die_texte_der_live_firmen(wegwerf_db):
 def test_15_migration_ist_eingetragen():
     import migrationen as M
     assert (10, "vorlagen_texte", M.m10_vorlagen_texte) in M.MIGRATIONEN
-    assert M.ZIEL_VERSION == 10
+    # Rollenprüfung 22.09.2026: spaetere Migrationen (11-13) heben die
+    # Zielversion an; Migration 10 muss nur enthalten sein.
+    assert M.ZIEL_VERSION >= 10
     for feld, alte in M._FRUEHERE_VORLAGEN.items():
         assert feld in V.STARTWERTE
         assert V.STARTWERTE[feld] not in alte, f"{feld}: neuer Text gleich altem"

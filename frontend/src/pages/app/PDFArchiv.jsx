@@ -1,13 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
 import { thumbSrc, thumbFehler } from "@/lib/bilder";
 import { toast } from "sonner";
-import { Search, Trash2, Eye, X, Car, ChevronLeft, ChevronRight, MapPin, FileText, Send, Mail } from "lucide-react";
+import { Search, Trash2, Eye, X, Car, ChevronLeft, ChevronRight, MapPin, FileText, Send, Mail, CalendarPlus } from "lucide-react";
 import { openContractPdf } from "@/lib/pdf";
 import { openAuthedFile } from "@/lib/api";
 import BeweisCard from "@/components/BeweisCard";
-import SendDialog from "@/components/SendDialog";
+import SendDialog, { abholterminAnlegen, TERMIN_MELDUNG } from "@/components/SendDialog";
 import FolgeMailDialog from "@/components/FolgeMailDialog";
+
+// Rollenprüfung 22.09.2026 (RP-007/RP-106/RP-257): Verträge je Seite.
+export const ARCHIV_SEITE = 50;
+
+// Rollenprüfung 22.09.2026 (RP-417): Braucht dieser Vertrag einen neuen
+// Abholtermin? Nur, wenn der Server sagt, dass KEIN offener existiert, und
+// der Kauf weder storniert noch abgeholt ist.
+export function brauchtAbholtermin(it) {
+  if (!it || it.termin_offen !== false) return false;
+  return !["storniert", "abgeholt"].includes(it.kaufvorgang_status);
+}
 
 // Pruefbericht 20.09.2026 (H23): Jeder Status stand als GRUENE Pille da —
 // auch "versand_vorbereitet", den das Backend bewusst setzt, weil WhatsApp
@@ -33,6 +45,7 @@ const DAY_FILTERS = [
 ];
 
 export default function PDFArchiv() {
+  const nav = useNavigate();
   const [items, setItems] = useState([]);
   const [q, setQ] = useState("");
   const [days, setDays] = useState(0);
@@ -49,21 +62,42 @@ export default function PDFArchiv() {
   // Runde 16 (15.09.2026): ein Ladefehler sah aus wie "keine Vertraege", und
   // die Kuerzung des Servers (X-Truncated ab 2.000) blieb unsichtbar.
   const [ladeFehler, setLadeFehler] = useState(false);
-  const [gekuerzt, setGekuerzt] = useState(false);
+  // Rollenprüfung 22.09.2026 (RP-007/RP-106/RP-257): Das Archiv lud bis zu
+  // 2.000 Verträge in EINEM Aufruf, und jede Karte stellte dazu zwei
+  // Beweis-Abfragen — bei vielen Verträgen tausende Anfragen. Jetzt
+  // seitenweise (SEITE Verträge, "Weitere laden" über den Cursor des
+  // Servers), und die Beweis-Karte lädt erst, wenn sie sichtbar wird.
+  const [weiterAb, setWeiterAb] = useState("");
+  const [laedtMehr, setLaedtMehr] = useState(false);
   // M20: nur die letzte Anfrage zaehlt (Zeitraum schnell gewechselt).
   const anfrageNr = useRef(0);
+  // Rollenprüfung 22.09.2026 (Review): "Weitere Verträge laden" nahm die
+  // GERADE getippte (noch nicht mit Enter gesuchte) Suche zusammen mit dem
+  // Cursor der alten Liste — Treffer zweier Abfragen standen gemischt da.
+  // Jetzt merkt sich load(), womit die erste Seite geladen wurde, und
+  // mehrLaden fragt genau damit weiter.
+  const geladenMit = useRef({ q: "", days: 0 });
+  const holen = async ({ before = "", suche = q, zeitraum = days } = {}) => {
+    const params = { limit: ARCHIV_SEITE };
+    if (suche) params.q = suche;
+    if (zeitraum) params.days = zeitraum;
+    if (before) params.before = before;
+    const r = await api.get("/contracts", { params });
+    const naechste = String(r.headers?.["x-next-before"] || "");
+    const mehr = String(r.headers?.["x-truncated"] || "") === "1";
+    return { liste: Array.isArray(r.data) ? r.data : [], weiter: mehr ? naechste : "" };
+  };
   const load = async () => {
     const nr = ++anfrageNr.current;
+    const mit = { q, days };
     setLoading(true);
     setLadeFehler(false);
     try {
-      const params = {};
-      if (q) params.q = q;
-      if (days) params.days = days;
-      const r = await api.get("/contracts", { params });
+      const { liste, weiter } = await holen({ suche: mit.q, zeitraum: mit.days });
       if (nr !== anfrageNr.current) return;
-      setItems(Array.isArray(r.data) ? r.data : []);
-      setGekuerzt(String(r.headers?.["x-truncated"] || "") === "1");
+      geladenMit.current = mit;
+      setItems(liste);
+      setWeiterAb(weiter);
     } catch (e) {
       if (nr !== anfrageNr.current) return;
       // Pruefbericht 20.09.2026 (B13): errMsg war hier nicht importiert —
@@ -72,6 +106,49 @@ export default function PDFArchiv() {
       toast.error(errMsg(e, "Verträge konnten nicht geladen werden"));
     } finally {
       if (nr === anfrageNr.current) setLoading(false);
+    }
+  };
+  const mehrLaden = async () => {
+    if (!weiterAb || laedtMehr) return;
+    const nr = anfrageNr.current;
+    setLaedtMehr(true);
+    try {
+      const { q: suche, days: zeitraum } = geladenMit.current;
+      const { liste, weiter } = await holen({ before: weiterAb, suche, zeitraum });
+      if (nr !== anfrageNr.current) return;   // inzwischen neu gesucht
+      setItems((alt) => {
+        const bekannt = new Set(alt.map((i) => i.id));
+        return [...alt, ...liste.filter((i) => !bekannt.has(i.id))];
+      });
+      setWeiterAb(weiter);
+    } catch (e) {
+      toast.error(errMsg(e, "Weitere Verträge konnten nicht geladen werden"));
+    } finally {
+      setLaedtMehr(false);
+    }
+  };
+
+  // Rollenprüfung 22.09.2026 (RP-417): Verträge ohne offenen Abholtermin
+  // (ohne Abholdatum erstellt, oder "nicht abgeholt") bekommen hier einen —
+  // vorher ging das nur versteckt über "Senden" → "Speichern & Termin".
+  const [terminLaeuft, setTerminLaeuft] = useState("");
+  const terminAnlegen = async (it) => {
+    if (terminLaeuft) return;
+    setTerminLaeuft(it.id);
+    try {
+      const erg = await abholterminAnlegen(it);
+      if (erg.angelegt) {
+        toast.success("Abholtermin angelegt — Datum und Uhrzeit im Terminplaner eintragen.");
+        if (erg.hinweis) toast.warning(erg.hinweis, { duration: 10000 });
+        nav("/app/termine");
+      } else {
+        toast.info(TERMIN_MELDUNG[erg.grund] || TERMIN_MELDUNG.offen);
+        load();
+      }
+    } catch (e) {
+      toast.error(errMsg(e, "Abholtermin konnte nicht angelegt werden"));
+    } finally {
+      setTerminLaeuft("");
     }
   };
 
@@ -166,12 +243,6 @@ export default function PDFArchiv() {
             Verträge konnten nicht geladen werden — bitte neu laden.
           </div>
         )}
-        {!loading && !ladeFehler && gekuerzt && (
-          <div className="mb-3 rounded-sm border px-4 py-2 text-sm" data-testid="pdfs-gekuerzt"
-               style={{ borderColor: "var(--border-default)", color: "var(--text-muted)" }}>
-            Die Liste zeigt nur die neuesten 2.000 Verträge — Zeitraum oder Suche eingrenzen, um ältere zu sehen.
-          </div>
-        )}
         {!loading && !ladeFehler && items.length === 0 && (
           <div className="apple-surface p-12 text-center text-[15px]"
                style={{ color: "var(--text-muted)" }}>Noch keine Verträge erstellt.</div>
@@ -188,8 +259,13 @@ export default function PDFArchiv() {
               />
 
               {/* Hauptbereich */}
+              {/* Rollenprüfung 22.09.2026 (RP-038/RP-137/RP-288): Inhalt und
+                  Aktionsspalte standen immer nebeneinander — am Handy (375 px)
+                  blieben neben fünf 40-px-Knöpfen rund 60 px für Fahrzeug,
+                  Verkäufer und Hinweise. Unter sm stehen Preis und Knöpfe
+                  jetzt UNTER dem Inhalt, die Knopfleiste bricht um. */}
               <div className="flex-1 min-w-0">
-                <div className="flex items-start justify-between gap-4">
+                <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
                   <div className="min-w-0">
                     <div className="flex items-center gap-3 flex-wrap">
                       <span className="font-display font-bold text-xl tracking-tight truncate">
@@ -241,7 +317,8 @@ export default function PDFArchiv() {
                     <NachAbholungHinweis item={it} onSenden={() => setSenden(it)} />
                     <div className="mt-3">
                       {it.vehicle_id ? (
-                        <BeweisCard vehicleId={it.vehicle_id} compact />
+                        // RP-007: lädt erst, wenn die Karte sichtbar wird
+                        <BeweisCard vehicleId={it.vehicle_id} compact lazy />
                       ) : (
                         <span className="text-xs" style={{ color: "var(--text-muted)" }}>—</span>
                       )}
@@ -249,13 +326,26 @@ export default function PDFArchiv() {
                     {(it.version || 1) > 1 && <VersionenZeile contractId={it.id} />}
                   </div>
 
-                  {/* Preis + Aktionen rechts */}
-                  <div className="shrink-0 flex flex-col items-end gap-3">
+                  {/* Preis + Aktionen rechts (am Handy darunter) */}
+                  <div className="sm:shrink-0 flex flex-row sm:flex-col flex-wrap items-center sm:items-end justify-between gap-3"
+                       data-testid={`pdf-aktionen-${it.id}`}>
                     <div className="font-display font-black text-2xl tracking-tight whitespace-nowrap">
                       {it.purchase_price
                         ? `${Number(it.purchase_price).toLocaleString("de-DE")} €` : "—"}
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {brauchtAbholtermin(it) && (
+                        <button onClick={() => terminAnlegen(it)}
+                                data-testid={`termin-anlegen-${it.id}`}
+                                disabled={!!terminLaeuft}
+                                className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-white/10 disabled:opacity-50"
+                                style={{ background: "var(--apple-btn-secondary-bg)",
+                                         color: "var(--text-primary)" }}
+                                aria-label="Abholtermin anlegen"
+                                title="Abholtermin anlegen — zu diesem Vertrag gibt es keinen offenen Termin">
+                          <CalendarPlus size={16} />
+                        </button>
+                      )}
                       <button onClick={() => openPdf(it.id)} data-testid={`open-pdf-${it.id}`}
                               disabled={!!pdfLaeuft} aria-busy={pdfLaeuft === `${it.id}:druck`}
                               className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-white/10 disabled:opacity-50"
@@ -307,6 +397,15 @@ export default function PDFArchiv() {
             </div>
           </div>
         ))}
+        {/* RP-007: nächste Seite nur auf Wunsch */}
+        {!loading && !ladeFehler && weiterAb && (
+          <div className="flex justify-center pt-2">
+            <button onClick={mehrLaden} disabled={laedtMehr} data-testid="pdfs-mehr-laden"
+                    className="apple-btn apple-btn-secondary !rounded-full !px-6 !py-2.5 disabled:opacity-60">
+              {laedtMehr ? "Lade…" : "Weitere Verträge laden"}
+            </button>
+          </div>
+        )}
       </div>
 
       {senden && (
@@ -435,29 +534,15 @@ function AbholZeile({ item }) {
 }
 
 function VehicleThumb({ item, onOpen }) {
-  // Foto-URLs kommen normalerweise direkt mit der Vertragsliste
-  // (vehicle_image_urls). Fehlen sie (z.B. sehr alte Verträge, deren
-  // Fahrzeug inzwischen gelöscht ist), einmal still beim Fahrzeug nachsehen.
-  const [urls, setUrls] = useState(item.vehicle_image_urls || []);
+  // Foto-URLs kommen direkt mit der Vertragsliste (vehicle_image_urls).
+  // Rollenprüfung 22.09.2026 (RP-106): Fehlten sie, fragte jede Karte noch
+  // einmal GET /vehicles/{id} — der Server ergänzt die Fotos alter Verträge
+  // aber schon selbst aus dem Fahrzeug (list_contracts, bilder_nachgetragen).
+  // Bleibt die Liste leer, hat auch das Fahrzeug keine: keine Extra-Anfrage.
+  const urls = item.vehicle_image_urls || [];
   // 10.09.2026: fuer das kleine Vorschaubild den Bild-Proxy nutzen (klein,
   // zuverlaessig); die grosse Ansicht zeigt weiter das Originalfoto.
   const thumbs = item.vehicle_image_urls_thumbs || [];
-
-  useEffect(() => {
-    let aktiv = true;
-    setUrls(item.vehicle_image_urls || []);
-    if ((item.vehicle_image_urls || []).length === 0 && item.vehicle_id) {
-      api.get(`/vehicles/${item.vehicle_id}`)
-        .then(({ data }) => {
-          const d = data?.data || data || {};
-          const fb = (d.image_urls || d.images || [])
-            .filter((u) => typeof u === "string" && u.startsWith("http"));
-          if (aktiv && fb.length > 0) setUrls(fb);
-        })
-        .catch(() => {});
-    }
-    return () => { aktiv = false; };
-  }, [item]);
 
   if (urls.length === 0) {
     return (
@@ -624,13 +709,18 @@ function GalleryViewer({ item, urls, startIndex = 0, onClose }) {
 function VersionenZeile({ contractId }) {
   const [offen, setOffen] = useState(false);
   const [versionen, setVersionen] = useState(null);
+  // Rollenprüfung 22.09.2026 (RP-045/RP-144): Der Server kürzt die Liste
+  // (X-Truncated, die neuesten 1.000) — das blieb hier unsichtbar.
+  const [gekuerzt, setGekuerzt] = useState(false);
 
   const toggle = async () => {
     const jetzt = !offen;
     setOffen(jetzt);
     if (jetzt && versionen === null) {
       try {
-        const { data } = await api.get(`/contracts/${contractId}/versions`);
+        const r = await api.get(`/contracts/${contractId}/versions`);
+        const data = r.data;
+        setGekuerzt(String(r.headers?.["x-truncated"] || "") === "1");
         setVersionen(Array.isArray(data) ? data : []);
       } catch {
         // Fehler nicht als "keine Fassungen" cachen — zuklappen, damit der
@@ -661,7 +751,14 @@ function VersionenZeile({ contractId }) {
           ) : versionen.length === 0 ? (
             <span className="text-xs" style={{ color: "var(--text-muted)" }}>Keine älteren Fassungen.</span>
           ) : (
-            versionen.map((v) => (
+            <>
+            {gekuerzt && (
+              <span className="text-xs basis-full" style={{ color: "var(--text-muted)" }}
+                    data-testid={`versions-gekuerzt-${contractId}`}>
+                Es gibt mehr Fassungen — angezeigt sind die neuesten {versionen.length.toLocaleString("de-DE")}.
+              </span>
+            )}
+            {versionen.map((v) => (
               <button key={v.id}
                       data-testid={`version-pdf-${contractId}-${v.version}`}
                       onClick={() => openAuthedFile(`/contracts/${contractId}/versions/${v.version}/pdf`)
@@ -670,7 +767,8 @@ function VersionenZeile({ contractId }) {
                       className="apple-btn apple-btn-secondary !py-1 !px-2 !text-[11px] !rounded-full">
                 v{v.version}{v.pickup_date ? ` · Abholung ${v.pickup_date}` : ""}
               </button>
-            ))
+            ))}
+            </>
           )}
         </div>
       )}

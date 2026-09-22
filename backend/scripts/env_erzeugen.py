@@ -64,6 +64,45 @@ def vorlage_lesen(pfad: str) -> dict:
     return werte
 
 
+#: Aus --domain abgeleitet: hier gilt die Angabe auf der Kommandozeile, nicht
+#: die Vorlage (sonst liesse sich die Domain mit --vorlage nie wechseln).
+_DOMAIN_FELDER = ("PUBLIC_HOST", "FRONTEND_URL", "CORS_ORIGINS")
+
+
+def vorlage_anwenden(zeilen: list, alt: dict, domain_felder=_DOMAIN_FELDER) -> list:
+    """Rollenprüfung 22.09.2026 (RP-560): `--vorlage .env` hiess bisher "nur
+    einige Werte uebernehmen". Das Skript schrieb eine feste Liste —
+    Schluessel der Vorlage, die es nicht kannte (DATEN_SCHLUESSEL,
+    MONGO_EXTRA_ARGS, BACKUP_S3_ACCESS_KEY/SECRET_KEY, COMPOSE_FILE,
+    MARKTPLATZ_AKTIV, APIFY_*_ACTOR ...), fielen STILL weg, und feste Werte
+    (VERTRAG_LOESCHUNG_AKTIV=false, MONGO_CACHE_GB=4, MONGO_MEM_LIMIT=6g,
+    WEB_CONCURRENCY=4 ...) setzten die Einstellungen des Servers zurueck.
+    Ohne DATEN_SCHLUESSEL war ein damit verschluesseltes MFA-Geheimnis
+    unlesbar, ohne MONGO_EXTRA_ARGS startete Mongo ohne Replica Set.
+
+    Jetzt gilt: Jeder Wert der Vorlage gewinnt (ausser den aus --domain
+    abgeleiteten Adressen), und alles, was die Vorlage darueber hinaus
+    enthaelt, steht unten im Abschnitt "Uebernommen aus der Vorlage"."""
+    if not alt:
+        return list(zeilen)
+    aus = []
+    geschrieben = set()
+    for z in zeilen:
+        if "=" in z and not z.startswith("#"):
+            name, _, wert = z.partition("=")
+            name = name.strip()
+            geschrieben.add(name)
+            if name in alt and name not in domain_felder and alt[name] != wert:
+                z = f"{name}={alt[name]}"
+        aus.append(z)
+    rest = [k for k in alt if k not in geschrieben]
+    if rest:
+        aus += ["# ---- Uebernommen aus der Vorlage (vom Skript nicht selbst geschrieben) ----"]
+        aus += [f"{k}={alt[k]}" for k in rest]
+        aus.append("")
+    return aus
+
+
 def _domain_saeubern(roh: str) -> str:
     """Schema und Schraegstriche entfernen.
 
@@ -166,6 +205,11 @@ def main() -> int:
         "",
         "# ---- Anmeldung ----",
         f"JWT_SECRET={wert('JWT_SECRET', geheimnis)}",
+        "# Eigener Schluessel fuer die Zwei-Faktor-Geheimnisse (mfa.py). Beim",
+        "# Lesen wird auch JWT_SECRET probiert — vorhandene Geheimnisse bleiben",
+        "# lesbar. NIE ersatzlos entfernen, sonst ist ein damit verschluesseltes",
+        "# MFA-Geheimnis unlesbar (Rollenpruefung 22.09.2026, RP-548/RP-560).",
+        f"DATEN_SCHLUESSEL={wert('DATEN_SCHLUESSEL', geheimnis)}",
         f"SUPER_ADMIN_USERNAME={wert('SUPER_ADMIN_USERNAME', lambda: 'chef-' + secrets.token_hex(3))}",
         f"SUPER_ADMIN_PASSWORD={wert('SUPER_ADMIN_PASSWORD', passwort)}",
         "",
@@ -187,13 +231,16 @@ def main() -> int:
         "# ---- Sicherung ----",
         "BACKUP_DIR=/backups",
         "BACKUP_HOUR=3",
-        f"BACKUP_S3_BUCKET={alt.get('BACKUP_S3_BUCKET', '')}",
+        "# Pflicht in Produktion (production_check): ohne Offsite-Sicherung",
+        "# startet das Backend nicht (RP-548).",
+        f"BACKUP_S3_BUCKET={alt.get('BACKUP_S3_BUCKET') or 'BITTE-AUSFUELLEN'}",
         "BACKUP_S3_PREFIX=autoschnell-backups/",
         "BACKUP_S3_OBJECT_LOCK_DAYS=",
         "BACKUP_S3_KEEP=14",
         "",
         "# ---- Anbieter-Abrufe ----",
-        f"APIFY_TOKEN={alt.get('APIFY_TOKEN') or 'BITTE-AUSFUELLEN-oder-leer-lassen'}",
+        "# Pflicht (production_check): leer bricht den Start ab (RP-548).",
+        f"APIFY_TOKEN={alt.get('APIFY_TOKEN') or 'BITTE-AUSFUELLEN'}",
         "# 0 = kein Tageslimit fuer mobile.de/AutoScout (Entscheidung 09/2026).",
         "# Ab ANBIETER_TAGESWARNUNG Abrufen gibt es EINEN Hinweis im Bereich",
         "# Betrieb — eine Warnung, kein Riegel.",
@@ -214,11 +261,13 @@ def main() -> int:
         "AUTO_DATEN_SCHAEDEN_FREITEXT=false",
         "",
     ]
+    zeilen = vorlage_anwenden(zeilen, alt, domain_felder=_DOMAIN_FELDER)
     print("\n".join(zeilen))
     offen = [z.split("=")[0] for z in zeilen if "BITTE-AUSFUELLEN" in z]
     leer = [z.split("=")[0] for z in zeilen
             if z.endswith("=") and z.split("=")[0] in
-            ("S3_ENDPOINT", "S3_BUCKET", "S3_ACCESS_KEY", "S3_SECRET_KEY")]
+            ("S3_ENDPOINT", "S3_BUCKET", "S3_ACCESS_KEY", "S3_SECRET_KEY",
+             "BACKUP_S3_BUCKET")]
     if offen or leer:
         print("\n# NOCH ZU ERGAENZEN: " + ", ".join(offen + leer), file=sys.stderr)
     print("# Passwoerter wurden zufaellig erzeugt — sicher ablegen "

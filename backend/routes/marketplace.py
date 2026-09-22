@@ -13,6 +13,7 @@ import math
 import os
 import re
 import secrets
+import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Optional
@@ -20,6 +21,7 @@ from typing import Any, Dict, List, Literal, Optional
 from fastapi import (APIRouter, Body, Depends, HTTPException, Query, Request,
                      Response)
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from bson.regex import Regex
 from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
 
@@ -30,7 +32,8 @@ from deps import (_ablauf_parsen, current_user, db,
                   log_activity_sicher, now_iso)
 from rate_limiter import (client_ip, login_limiter,
                           login_ip_limiter, login_schluessel,
-                          bekannte_ip_merken, konto_fehlversuch, konto_gesperrt,
+                          bekannte_ip_merken, bekanntes_geraet_merken,
+                          konto_fehlversuch, konto_gesperrt,
                           konto_gesperrt_text)
 from routes.bestand import current_haendler
 from dateien import signierte_datei_url   # signierte Foto-Links (Audit 09/2026)
@@ -53,6 +56,9 @@ MARKTPLATZ_KOSTENLOS = os.environ.get(
 
 BUYER_ACCESS_PRICE = 20.00         # € pro Monat, nur wenn nicht kostenlos
 BUYER_ACCESS_DAYS = 30
+# Rollenprüfung 22.09.2026 (RP-509): so viele Tage vor dem Ablauf darf der
+# Kaeufer die Verlaengerung anfragen (Marktplatz.jsx nutzt dieselbe Zahl).
+VERLAENGERN_AB_TAGEN = 7
 
 
 GESPERRT_MELDUNG = ("Dein Marktplatz-Zugang wurde vom Betreiber gesperrt — "
@@ -152,22 +158,32 @@ async def require_marketplace_access(user=Depends(buyer_nicht_gesperrt)):
 
 
 async def marktplatz_besucher(
-        creds: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False))):
+        creds: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False)),
+        response: Response = None):
     """Angemeldeter Zwischenhaendler ODER oeffentlicher Besucher (None).
 
-    Ohne Anmeldung sind nur oeffentlich veroeffentlichte Fahrzeuge
-    oeffentlicher Haendler sichtbar. Ein ungueltiges oder abgelaufenes
-    Token gilt wie "nicht angemeldet" — der Marktplatz soll deswegen
-    nicht unbenutzbar werden.
+    Rollenprüfung 22.09.2026 (RP-546): die Antwort wird an current_user
+    durchgereicht — so bekommt auch die Fahrzeugliste (die Seite, auf der der
+    Kaeufer die meiste Zeit verbringt) kurz vor Ablauf ein frisches Token
+    (Kopfzeile X-Neues-Token). None bei direktem Aufruf.
+
+    Ohne Anmeldung (KEIN Token) sind nur oeffentlich veroeffentlichte
+    Fahrzeuge oeffentlicher Haendler sichtbar.
+
+    Rollenprüfung 22.09.2026 (RP-530): Ein MITGESCHICKTES, aber ungueltiges
+    Token (Sitzung auf einem anderen Geraet neu angemeldet, abgemeldet,
+    Passwort neu) galt vorher still als "nicht angemeldet". Die Liste lud
+    dann ohne Netzwerk-Inserate und mit oeffentlichen Preisen, und der
+    Kaeufer merkte nicht, dass er abgemeldet war. Jetzt geht der Fehler von
+    current_user (401 mit Grund) unveraendert durch; die Kaeufer-App meldet
+    ab und zeigt den Grund auf der Anmeldeseite. Ohne Token bleibt alles
+    oeffentlich wie bisher.
 
     Ist der Marktplatz NICHT kostenlos, gilt weiterhin: nur angemeldete
     Zwischenhaendler mit aktivem Zugang."""
     nutzer = None
     if creds and creds.credentials:
-        try:
-            nutzer = await current_user(creds)
-        except HTTPException:
-            nutzer = None
+        nutzer = await current_user(creds, response)
     if nutzer is not None and nutzer.get("role") != "b2b_buyer":
         raise HTTPException(403, "Nur für registrierte Zwischenhändler")
     # Runde 13: C6 — die Betreiber-Sperre gilt auch im Kostenlos-Modus
@@ -204,10 +220,58 @@ _MAKE_ALIASES = {
 }
 
 
+# Rollenprüfung 22.09.2026 (RP-524): Akzente falten. "Citroën" (mobile.de)
+# und "Citroen" (Picker/AutoScout) fanden sich vorher gegenseitig nie: das
+# "ë" fiel beim Normalisieren weg ("citron") bzw. galt im Mongo-Muster als
+# Trennzeichen. Buchstaben ohne Zerlegung (ø, æ, ß) stehen hier ausdruecklich.
+_OHNE_ZERLEGUNG = {"ø": "o", "æ": "ae", "œ": "oe", "ß": "ss", "ł": "l", "đ": "d"}
+# Im Mongo-Muster steht fuer jeden Grundbuchstaben eine Klasse mit allen
+# Akzentformen (klein UND gross: ob PCRE Nicht-ASCII-Buchstaben mit der
+# Option "i" faltet, haengt vom Build ab).
+_AKZENTE = {
+    "a": "àáâãäåāą", "c": "çćč", "d": "ďđ", "e": "èéêëēėęě", "g": "ğ",
+    "i": "ìíîïīı", "l": "łľ", "n": "ñńň", "o": "òóôõöøō", "r": "ř",
+    "s": "śšş", "t": "ť", "u": "ùúûüūů", "y": "ýÿ", "z": "źżž",
+}
+# Trennzeichen zwischen zwei Buchstaben: alles ausser Ziffern und Buchstaben
+# (auch akzentuierten — sonst "verschluckte" das Muster ein "ë").
+_TRENNER = "[^a-z0-9A-Z\u00c0-\u024f]*"
+# Wortgrenzen (RP-507/RP-529): davor darf kein Buchstabe/keine Ziffer stehen.
+_VORNE = "(?<![a-z0-9A-Z\u00c0-\u024f])"
+
+
+def _falten(s: Optional[str]) -> str:
+    """Klein, Akzente entfernt ("Citroën" -> "citroen", "Škoda" -> "skoda")."""
+    t = str(s or "").lower()
+    t = "".join(_OHNE_ZERLEGUNG.get(ch, ch) for ch in t)
+    t = unicodedata.normalize("NFKD", t)
+    return "".join(ch for ch in t if not unicodedata.combining(ch))
+
+
+def _schluessel(s: Optional[str]) -> str:
+    """Gefaltet und nur a-z/0-9 — Vergleichsschluessel fuer Marke/Modell."""
+    return re.sub(r"[^a-z0-9]", "", _falten(s))
+
+
 def _norm_make(s: Optional[str]) -> str:
-    """Klein, ohne Leer-/Sonderzeichen, plus Alias-Auflösung (VW->Volkswagen)."""
-    key = re.sub(r"[^a-z0-9]", "", (s or "").lower())
+    """Klein, ohne Leer-/Sonderzeichen und Akzente, plus Alias-Auflösung
+    (VW->Volkswagen)."""
+    key = _schluessel(s)
     return _MAKE_ALIASES.get(key, key)
+
+
+def _zeichen_muster(ch: str) -> str:
+    """Ein Zeichen des Suchschluessels als Mongo-Regex (mit Akzentformen)."""
+    akz = _AKZENTE.get(ch)
+    if not akz:
+        return re.escape(ch)
+    return "[" + ch + akz + akz.upper() + "]"
+
+
+def _tolerantes_muster(key: str) -> str:
+    """"mercedesbenz" trifft auch "Mercedes-Benz", "ds3" auch "DS 3",
+    "citroen" auch "Citroën": zwischen den Zeichen beliebige Trennzeichen."""
+    return _TRENNER.join(_zeichen_muster(ch) for ch in key)
 
 
 def _make_regex_variants(filter_make: str) -> str:
@@ -215,18 +279,112 @@ def _make_regex_variants(filter_make: str) -> str:
     Alias-Toleranz von _make_matches wieder her (VW <-> Volkswagen,
     Mercedes <-> Mercedes-Benz). Erzeugt aus dem Filter alle Schreibweisen,
     die auf denselben normalisierten Namen zeigen, und matcht sie
-    zeichenweise tolerant (Leer-/Sonderzeichen zwischen den Buchstaben)."""
-    key = re.sub(r"[^a-z0-9]", "", (filter_make or "").lower())
+    zeichenweise tolerant (Leer-/Sonderzeichen zwischen den Buchstaben).
+
+    Rollenprüfung 22.09.2026 (RP-507): vorher ohne Wortgrenzen — der Alias
+    "mb" (Mercedes) wurde zu "m[^a-z0-9]*b" und traf "Lamborghini". Jetzt
+    muss jede Schreibweise als ganzes Wort stehen. RP-524: mit Akzenten."""
+    key = _schluessel(filter_make)
     canon = _MAKE_ALIASES.get(key, key)
     variants = {key, canon} | {a for a, c in _MAKE_ALIASES.items() if c == canon}
     parts = []
     for v in sorted(variants, key=len, reverse=True):
         if len(v) < 2:
             continue
-        # "mercedesbenz" soll auch "Mercedes-Benz" treffen: zwischen den
-        # Zeichen beliebige Nicht-Alphanumerik zulassen.
-        parts.append(r"[^a-z0-9]*".join(re.escape(ch) for ch in v))
-    return "|".join(parts) or re.escape(filter_make.strip())
+        parts.append(_tolerantes_muster(v))
+    if not parts:
+        return re.escape((filter_make or "").strip())
+    return _VORNE + "(?:" + "|".join(parts) + ")(?![a-z0-9A-Z\u00c0-\u024f])"
+
+
+def _modell_regex(modell: str) -> Optional[str]:
+    """Rollenprüfung 22.09.2026 (RP-528/RP-529): Mongo-Muster fuer den
+    Modellfilter. Vorher ein reiner Teilstring: "C 200" traf "GLC 200", "X1"
+    traf "iX1", "TT" traf "quattro" — und "DS 3", "Ceed", "RS Q3" fanden
+    Importe mit "DS3", "cee'd", "RSQ3" nie. Jetzt:
+      * vorne eine Wortgrenze (kein Buchstabe/keine Ziffer davor),
+      * zwischen den Zeichen beliebige Trennzeichen, Akzente egal,
+      * hinten: endet die Eingabe auf eine Ziffer, darf keine Ziffer folgen
+        ("A3" trifft nicht "A35", "C 200" aber "C 200 d"); endet sie auf
+        einen Buchstaben, darf kein Buchstabe folgen ("Ka" nicht "Kadjar").
+    None, wenn die Eingabe keinen Buchstaben/keine Ziffer enthaelt."""
+    key = _schluessel(modell)
+    if not key:
+        return None
+    ende = "(?![0-9])" if key[-1].isdigit() else "(?![a-zA-Z\u00c0-\u024f])"
+    return _VORNE + _tolerantes_muster(key) + ende
+
+
+# Rollenprüfung 22.09.2026 (RP-506): Kraftstoff-Filter auf den Code statt
+# Teilstring auf die Beschriftung. AutoScout speichert "Elektro/Benzin" —
+# "Hybrid" traf das nie, "Benzin" und "Elektro" lieferten die Hybride mit,
+# und "LPG / Gas" traf "Erdgas (CNG)" nicht. Gruppen wie im Picker:
+_KRAFTSTOFF_GRUPPEN = {
+    "PETROL": ("PETROL",), "DIESEL": ("DIESEL",), "ELECTRICITY": ("ELECTRICITY",),
+    "HYBRID": ("HYBRID", "HYBRID_DIESEL"), "HYBRID_DIESEL": ("HYBRID", "HYBRID_DIESEL"),
+    "LPG": ("LPG", "CNG"), "CNG": ("LPG", "CNG"),
+    "HYDROGENIUM": ("HYDROGENIUM",), "ETHANOL": ("ETHANOL",), "OTHER": ("OTHER",),
+}
+# Altbestand ohne Code (data.fuel roh, z.B. "ELEKTRO/BENZIN"): Beschriftung
+# nach denselben Regeln wie fahrzeug_codes.kraftstoff_code einordnen.
+_KS_HYBRID = (r"hybrid|plug.?in|(elektr|electr|strom).*(benzin|petrol|gasoline|diesel)"
+              r"|(benzin|petrol|gasoline|diesel).*(elektr|electr|strom)")
+_KS_GAS = r"lpg|autogas|fl.{1,2}ssiggas|cng|erdgas|natural.?gas"
+_KS_ELEKTRO = r"elektr|electr|strom"
+_KS_TEXT = {
+    "HYBRID": (_KS_HYBRID, ()),
+    "LPG": (_KS_GAS, (_KS_HYBRID,)),
+    "ELECTRICITY": (_KS_ELEKTRO, (_KS_HYBRID, _KS_GAS)),
+    "DIESEL": (r"diesel", (_KS_HYBRID, _KS_GAS)),
+    "PETROL": (r"benzin|petrol|gasoline|^\s*super", (_KS_HYBRID, _KS_GAS, _KS_ELEKTRO)),
+    "HYDROGENIUM": (r"wasserstoff|hydrogen", ()),
+    "ETHANOL": (r"ethanol|e85", ()),
+}
+
+
+def _kraftstoff_bedingung(fuel: str) -> Dict[str, Any]:
+    """Mongo-Bedingung fuer den Kraftstoff-Filter (RP-506). Erkannte Werte
+    ("Benzin", "Hybrid", "Gas", "LPG", Codes) filtern auf data.fuel und — fuer
+    Inserate ohne gueltigen Code — auf die Beschriftung nach Regeln. Nicht
+    erkannte Werte bleiben beim alten Teilstring-Filter."""
+    from fahrzeug_codes import KRAFTSTOFF_CODES, kraftstoff_code
+    roh = (fuel or "").strip()
+    code = "LPG" if _schluessel(roh) in ("gas", "lpggas") else kraftstoff_code(roh)
+    if not code or code not in _KRAFTSTOFF_GRUPPEN:
+        return {"data.fuel_label": {"$regex": re.escape(roh), "$options": "i"}}
+    codes = list(_KRAFTSTOFF_GRUPPEN[code])
+    text_code = {"HYBRID_DIESEL": "HYBRID", "CNG": "LPG"}.get(code, code)
+    alternativen: List[Dict[str, Any]] = [{"data.fuel": {"$in": codes}}]
+    if text_code in _KS_TEXT:
+        treffer, ausser = _KS_TEXT[text_code]
+        text: List[Dict[str, Any]] = [
+            {"data.fuel": {"$nin": list(KRAFTSTOFF_CODES)}},
+            {"data.fuel_label": {"$regex": treffer, "$options": "i"}}]
+        # bson.Regex statt re.compile: genau die Option "i" (ein kompiliertes
+        # Python-Muster braechte zusaetzlich das Unicode-Flag "u" mit).
+        text += [{"data.fuel_label": {"$not": Regex(a, "i")}} for a in ausser]
+        alternativen.append({"$and": text})
+    return {"$or": alternativen}
+
+
+def _ganzzahl_filter(wert: Optional[str], name: str) -> Optional[int]:
+    """Rollenprüfung 22.09.2026 (RP-512): km/PS-Filter deutsch lesen.
+    Vorher Optional[int]: "95.5" ergab eine englische FastAPI-422, und die
+    Oberflaeche machte aus "150.000" im deutschen Browser 150. Punkte in
+    Dreierbloecken sind Tausender ("150.000"), "km"/"PS" darf dabei stehen.
+    Leer -> None, Unsinn -> 400 auf Deutsch."""
+    if isinstance(wert, int) and not isinstance(wert, bool):
+        return wert
+    if not isinstance(wert, str):
+        return None        # None oder (Direktaufruf) der Query-Standardwert
+    t = wert.strip().lower()
+    t = re.sub(r"(km|ps)$", "", t)
+    t = re.sub(r"[\s\u00a0\u202f']", "", t)
+    if not t:
+        return None
+    if re.fullmatch(r"\d{1,3}(\.\d{3})+|\d{1,9}", t):
+        return int(t.replace(".", ""))
+    raise HTTPException(400, f"{name}: bitte eine ganze Zahl eingeben (z. B. 150.000)")
 
 
 def _make_matches(filter_make: str, label: Optional[str]) -> bool:
@@ -247,14 +405,39 @@ async def _is_network_member(dealer_id: str, user_id: str) -> bool:
         {"dealer_id": dealer_id, "buyer_user_id": user_id}, {"_id": 0, "dealer_id": 1}))
 
 
-def _price_for(listing: dict, *, is_member: bool, is_trade: bool) -> Optional[float]:
-    """Sichtbarer Preis je Betrachter: Netzwerk > B2B > öffentlich."""
+def _preis_gesetzt(wert: Any) -> bool:
+    return (isinstance(wert, (int, float)) and not isinstance(wert, bool)
+            and math.isfinite(wert) and wert > 0)
+
+
+def _preisstufe(listing: dict, *, is_member: bool, is_trade: bool) -> tuple:
+    """(Preis, Stufe) fuer diesen Betrachter.
+
+    Rollenprüfung 22.09.2026 (RP-521): vorher galt die ERSTE gesetzte Stufe
+    (Netzwerk, dann B2B, dann oeffentlich). Senkte der Haendler nur den
+    oeffentlichen Preis unter den B2B-Preis, sahen B2B-Kaeufer und
+    Netzwerkpartner weiter den alten, hoeheren Preis — die Preissenkung
+    erreichte ausgerechnet die bevorzugten Kaeufer nicht. Jetzt gilt der
+    NIEDRIGSTE Preis unter den Stufen, die der Betrachter sehen darf
+    (anonym: nur oeffentlich). Bei Gleichstand die bevorzugte Stufe.
+    Ohne gesetzten Preis wie bisher der oeffentliche Wert ("auf Anfrage")."""
     p = listing.get("prices") or {}
-    if is_member and p.get("network"):
-        return p["network"]
-    if is_trade and p.get("b2b"):
-        return p["b2b"]
-    return p.get("public")
+    kandidaten = []
+    if is_member and _preis_gesetzt(p.get("network")):
+        kandidaten.append((p["network"], "netzwerk"))
+    if is_trade and _preis_gesetzt(p.get("b2b")):
+        kandidaten.append((p["b2b"], "b2b"))
+    if _preis_gesetzt(p.get("public")):
+        kandidaten.append((p["public"], "oeffentlich"))
+    if not kandidaten:
+        return _json_sicher(p.get("public")), "oeffentlich"
+    # min() liefert bei Gleichstand das ERSTE Element (Netzwerk vor B2B).
+    return min(kandidaten, key=lambda k: k[0])
+
+
+def _price_for(listing: dict, *, is_member: bool, is_trade: bool) -> Optional[float]:
+    """Sichtbarer Preis je Betrachter (RP-521: niedrigste zulaessige Stufe)."""
+    return _preisstufe(listing, is_member=is_member, is_trade=is_trade)[0]
 
 
 def _json_sicher(wert: Any) -> Any:
@@ -265,6 +448,35 @@ def _json_sicher(wert: Any) -> Any:
         return None
     if isinstance(wert, list):
         return [w for w in wert if not (isinstance(w, float) and not math.isfinite(w))]
+    return wert
+
+
+# Rollenprüfung 22.09.2026 (RP-099/RP-349): Marktplatz-Fotos waren nur eine
+# Stunde signiert (dateien.STANDARD_TTL). Wer die Liste morgens oeffnete, sah
+# nachmittags beim Blaettern in der Lightbox nur noch Fehlbilder. Jetzt so
+# lange wie die Portal-Vorschaubilder (bild_proxy, 3 Tage).
+MARKT_FOTO_TTL = 3 * 24 * 3600
+
+# Oeffentlich ausgegebene Fahrzeugdaten. Rollenprüfung 22.09.2026:
+#  * RP-505: "model_description" (Anzeigentitel des PRIVATverkaeufers aus dem
+#    Portal, im Editor nicht pflegbar, teils mit Telefonnummern) geht nicht
+#    mehr raus — der Kaeufer sieht den Titel, den der Haendler pflegt.
+#  * RP-504: "accident_damaged" (ungepruefte Portal-Angabe) geht nicht mehr
+#    raus — die Oberflaeche machte aus False "Unfallfrei: Ja", ohne dass der
+#    Haendler etwas zugesichert hatte. Zaehlt nur accident_free aus dem Editor.
+_OEFFENTLICHE_DATEN = (
+    "make_label", "model_label",
+    "first_registration", "mileage", "fuel_label", "gearbox_label",
+    "power_ps", "power_kw", "color", "previous_owners", "features",
+    "accident_free")
+# RP-507: leer gespeicherte Zahlen ("") kamen als 0 km / 0 PS beim Kaeufer an.
+_ZAHLFELDER = ("mileage", "power_ps", "power_kw")
+
+
+def _oeffentlicher_wert(k: str, wert: Any) -> Any:
+    wert = _json_sicher(wert)
+    if k in _ZAHLFELDER and isinstance(wert, str) and not wert.strip():
+        return None
     return wert
 
 
@@ -279,29 +491,68 @@ def _public_listing_view(l: dict, *, is_member: bool, is_trade: bool) -> dict:
         # zuverlaessig, kein Fremdhost beim Kaeufer); 3 Tage gueltig.
         from bild_proxy import thumbs as _thumbs
         urls += _thumbs(photos.get("einkauf_urls", []), ttl=3 * 24 * 3600)
+    haendler_fotos = [signierte_datei_url(k, ttl=MARKT_FOTO_TTL)
+                      for k in photos.get("uploaded_keys", [])]
     if mode in ("neu", "beide"):
-        urls += [signierte_datei_url(k) for k in photos.get("uploaded_keys", [])]
+        urls += haendler_fotos
+    daten = {k: _oeffentlicher_wert(k, data.get(k)) for k in _OEFFENTLICHE_DATEN}
+    # RP-504: Hat der Haendler NICHTS zur Unfallfreiheit angegeben, das
+    # Einkaufsinserat aber einen Unfallschaden gemeldet, bleibt das als
+    # Hinweis sichtbar (nie als Zusicherung "unfallfrei").
+    if data.get("accident_damaged") is True and daten.get("accident_free") in (None, ""):
+        daten["unfallschaden_laut_einkauf"] = True
+    preis, stufe = _preisstufe(l, is_member=is_member, is_trade=is_trade)
     return {
         "id": l["id"], "dealer_id": l["dealer_id"],
         "title": l.get("title"), "description": l.get("description"),
         "known_defects": l.get("known_defects") or [],
         "status": l.get("status"),
-        "data": {k: _json_sicher(data.get(k)) for k in (
-            "make_label", "model_label", "model_description",
-            "first_registration", "mileage", "fuel_label", "gearbox_label",
-            "power_ps", "power_kw", "color", "previous_owners", "features",
-            "accident_free", "accident_damaged")},
+        "data": daten,
         "photos": urls[:40],
         # Vom Haendler nachtraeglich hochgeladene Bilder (z.B. Schaeden) —
         # beim Kaeufer als 'Weitere Bilder vom Haendler' zum genauen Hinschauen.
-        "dealer_photos": [signierte_datei_url(k)
-                          for k in photos.get("uploaded_keys", [])][:40],
-        "price": _price_for(l, is_member=is_member, is_trade=is_trade),
-        "price_level": ("netzwerk" if is_member and (l.get("prices") or {}).get("network")
-                        else "b2b" if is_trade and (l.get("prices") or {}).get("b2b")
-                        else "oeffentlich"),
+        "dealer_photos": haendler_fotos[:40],
+        "price": preis,
+        "price_level": stufe,
         "published_at": l.get("published_at"),
+        # Rollenprüfung 22.09.2026 (RP-519): Ablaufdatum auch fuer Kaeufer
+        # (Marktplatz-Liste, -Detail, Haendlerseite) — dasselbe Feld wie in
+        # den Inseraten des Haendlers und in den Anfragen.
+        "laeuft_ab_am": _laeuft_ab_am(l),
     }
+
+
+def _laeuft_ab_am(l: dict) -> Optional[str]:
+    """Rollenprüfung 22.09.2026 (RP-519): Ende der Laufzeit eines Inserats
+    (ISO) — nur solange es veroeffentlicht ist, sonst None. Die 21-Tage-
+    Loeschung (cleanup_service.abgelaufene_inserate_entfernen) beendete
+    laufende Verhandlungen, ohne dass Haendler oder Kaeufer die Frist irgendwo
+    sahen. Gerechnet wird an EINER Stelle (routes.resale._laufzeit_bis), damit
+    Inserat, Kaufanfragen und Marktplatz dasselbe Datum zeigen. Das ganze
+    Inserat geht hinein: nach einer Freigabe durch den Betreiber zaehlt
+    wieder_veroeffentlicht_am als spaeterer Start (RP-517, _laufzeit_anker —
+    wie der Aufraeumlauf)."""
+    if not l or l.get("status") != "veroeffentlicht":
+        return None
+    from routes.resale import _laufzeit_bis
+    return _laufzeit_bis(l)
+
+
+def _erstes_foto(l: dict) -> str:
+    """Erstes Bild eines Inserats (fuer die Anfrageliste, RP-503) — ohne alle
+    40 Links zu signieren."""
+    photos = l.get("photos") or {}
+    mode = photos.get("mode", "einkauf")
+    if mode in ("neu", "beide"):
+        for k in photos.get("uploaded_keys") or []:
+            if k:
+                return signierte_datei_url(k, ttl=MARKT_FOTO_TTL)
+    if mode in ("einkauf", "beide"):
+        from bild_proxy import thumbs as _thumbs
+        erste = _thumbs((photos.get("einkauf_urls") or [])[:1], ttl=MARKT_FOTO_TTL)
+        if erste:
+            return erste[0]
+    return ""
 
 
 # =========================================================
@@ -565,15 +816,66 @@ async def remove_network_member(buyer_user_id: str,
              "reserved_for": buyer_user_id}, {"_id": 0, "id": 1}):
         await reservierung_zurueckgeben(l["id"], buyer_user_id)
         freigegeben.append(l["id"])
+    # Rollenprüfung 22.09.2026 (RP-089/RP-188/RP-339): die Anfragen dieses
+    # Kaeufers mit beenden — vorher blieb seine Anfrage "akzeptiert", obwohl
+    # das Inserat wieder veroeffentlicht war; nahm der Haendler danach einen
+    # zweiten Kaeufer an, standen zwei "akzeptiert" fuer ein Auto. Ebenso
+    # blieben offene Verhandlungen auf Inseraten, die er nicht mehr sehen darf,
+    # beim Haendler mit Knoepfen stehen, die nur noch 409 gaben.
+    # VOR dem Loeschen der Mitgliedschaft (Wiederholung nach Teilfehler).
+    beendet = await _anfragen_netzwerk_beenden(user["dealer_id"], buyer_user_id,
+                                               weg=weg, oeffentlich=oeffentlich)
     r = await db.network_members.delete_one(mitglied_filt)
     # Nur wer tatsaechlich geloescht hat, schreibt das Audit (Doppelklick auf
     # zwei Servern: ein Eintrag); ok auch, wenn ein paralleler Aufruf schneller war.
     if r.deleted_count:
+        meta: Dict[str, Any] = {}
+        if freigegeben:
+            meta["reservierungen_freigegeben"] = freigegeben
+        if beendet:
+            meta["anfragen_beendet"] = beendet
         await log_activity_sicher(user["dealer_id"], user["id"],
                                   "netzwerk.mitglied.entfernt", ref=buyer_user_id,
-                                  meta=({"reservierungen_freigegeben": freigegeben}
-                                        if freigegeben else {}))
+                                  meta=meta)
     return {"ok": True, **({"reservierungen_freigegeben": freigegeben} if freigegeben else {})}
+
+
+async def _anfragen_netzwerk_beenden(dealer_id: str, buyer_user_id: str, *,
+                                     weg: List[str], oeffentlich: bool) -> int:
+    """RP-089/RP-188/RP-339: Anfragen eines aus dem Netzwerk entfernten
+    Kaeufers bei dieser Firma beenden (Status abgelehnt, beendet_grund
+    'netzwerk_entfernt', Verlaufseintrag von 'system'). Idempotent.
+
+    * "akzeptiert": alle bei dieser Firma, deren Inserat NICHT an ihn verkauft
+      ist — seine Reservierungen hat der Widerruf eben freigegeben (auch bei
+      einer Wiederholung nach Teilfehler, wenn nichts mehr freizugeben war).
+    * laufende (offen/gegenangebot/gegenangebot_kaeufer): nur auf Inseraten,
+      die er ab jetzt nicht mehr sieht — private Inserate eines oeffentlichen
+      Haendlers bzw. ALLE eines nicht oeffentlichen. Anfragen auf weiter
+      oeffentlichen Inseraten laufen weiter (er sieht sie ja noch)."""
+    jetzt = now_iso()
+    verkauft_an_ihn = [l["id"] async for l in db.resale_listings.find(
+        {"dealer_id": dealer_id, "status": "verkauft", "sold_to_user_id": buyer_user_id},
+        {"_id": 0, "id": 1})]
+    oder: List[Dict[str, Any]] = [
+        {"status": "akzeptiert", "listing_id": {"$nin": verkauft_an_ihn}}]
+    if oeffentlich:
+        if weg:
+            oder.append({"status": {"$in": list(INTERESSE_OFFEN)}, "listing_id": {"$in": weg}})
+    else:
+        oder.append({"status": {"$in": list(INTERESSE_OFFEN)}})
+    res = await db.listing_interest.update_many(
+        {"dealer_id": dealer_id, "buyer_user_id": buyer_user_id, "$or": oder},
+        {"$set": {"status": "abgelehnt", "beendet_grund": "netzwerk_entfernt",
+                  "updated_at": jetzt},
+         "$push": {"history": {"von": "system", "aktion": "netzwerk_entfernt",
+                               "zeit": jetzt}}})
+    return res.modified_count
+
+
+#: Fahrzeug-Ziele, die GENAU dem gleichnamigen Inseratsstatus entsprechen
+#: (RP-093(3)): nur solange das Inserat so steht, wird nachgezogen.
+_NACHZIEH_ZIELE = ("reserviert", "veroeffentlicht")
 
 
 async def inserat_fahrzeug_nachziehen(listing_id: str, ziel: str) -> bool:
@@ -581,11 +883,30 @@ async def inserat_fahrzeug_nachziehen(listing_id: str, ziel: str) -> bool:
     nachziehen (reserviert bzw. veroeffentlicht). Gelingt es nicht, bleibt der
     Merker lifecycle_nacharbeit am Inserat, den cleanup_service.
     inserat_fahrzeug_nacharbeit_nachholen abarbeitet — vorher gab es nur einen
-    Alarm, und das Fahrzeug blieb falsch. Liefert True bei Erfolg."""
+    Alarm, und das Fahrzeug blieb falsch. Liefert True bei Erfolg.
+
+    Rollenprüfung 22.09.2026 (RP-093(3)/RP-192/RP-343(c)): Vorher wurde das
+    Ziel blind nachgezogen — auch wenn das Inserat inzwischen verkauft,
+    geloescht, zurueckgezogen oder wieder anders reserviert war. Der
+    Nachholer (cleanup_service.inserat_fahrzeug_nacharbeit_nachholen) setzte
+    so z.B. ein verkauftes Auto Stunden spaeter zurueck auf "veroeffentlicht",
+    oder er scheiterte endlos und schlug Alarm. Jetzt wird zuerst der
+    AKTUELLE Inseratsstatus gelesen: passt er nicht mehr zum Ziel, hat der
+    spaetere Statuswechsel das Fahrzeug selbst mitgenommen — der Merker wird
+    entfernt statt nachgezogen (Ergebnis True: nichts mehr zu tun)."""
     try:
         l = await db.resale_listings.find_one(
-            {"id": listing_id}, {"_id": 0, "vehicle_id": 1, "dealer_id": 1})
+            {"id": listing_id},
+            {"_id": 0, "vehicle_id": 1, "dealer_id": 1, "status": 1})
         if not l or not l.get("vehicle_id"):
+            return True
+        if ziel in _NACHZIEH_ZIELE and l.get("status") != ziel:
+            weg = await db.resale_listings.update_one(
+                {"id": listing_id, "lifecycle_nacharbeit": ziel},
+                {"$unset": {"lifecycle_nacharbeit": "", "nacharbeit_versuche": ""}})
+            if weg.modified_count:
+                log.info("Inserat %s steht inzwischen auf %r — Fahrzeug-Nacharbeit "
+                         "%r verworfen", listing_id, l.get("status"), ziel)
             return True
         from lifecycle import LifecycleError, set_lifecycle
         try:
@@ -659,6 +980,18 @@ async def _redeem_invite(token: str, buyer_user_id: str) -> Optional[str]:
     if (inv.get("expires_at", "") <= now_iso()
             or (inv.get("used_count") or 0) >= (inv.get("max_uses") or 0)):
         return None
+    # Rollenprüfung 22.09.2026 (RP-541): Ist der Kaeufer schon Mitglied — ueber
+    # eine ANDERE Einladung (oder Altbestand ohne via_invite_id) —, verbraucht
+    # dieser Link keine Nutzung. Vorher war der Upsert unten ein No-op, der
+    # Verbrauch lief trotzdem: ein 5er-Link in einer Gruppe mit Bestands-
+    # mitgliedern war leer, bevor die neuen Partner ihn oeffnen konnten.
+    # Eine Mitgliedschaft ueber GENAU diesen Link (paralleler Aufruf) laeuft
+    # weiter den normalen Weg (Audit #23).
+    schon = await db.network_members.find_one(
+        {"dealer_id": inv["dealer_id"], "buyer_user_id": buyer_user_id},
+        {"_id": 0, "via_invite_id": 1})
+    if schon is not None and schon.get("via_invite_id") != inv["id"]:
+        return inv["dealer_id"]
     # Nachpruefung Runde 14 (Nr. 64/115): Reihenfolge gedreht — ZUERST die
     # Mitgliedschaft anlegen (Upsert, No-op wenn sie schon besteht), DANN
     # die Einladung atomar verbrauchen. Vorher wurde erst verbraucht und
@@ -741,6 +1074,10 @@ class BuyerLoginIn(BaseModel):
     kontonummer: Optional[str] = Field(default=None, max_length=80)
     email: Optional[str] = Field(default=None, max_length=254)
     password: str
+    # Rollenprüfung 22.09.2026 (RP-557): Geraete-Schluessel aus einer frueheren
+    # Anmeldung (wie /auth/login) — ein bekanntes Geraet ist wie eine bekannte
+    # IP von der Konto-Sperre entlastet. Falsche Form = ignoriert.
+    geraet_id: Optional[str] = Field(default=None, max_length=80)
 
 
 @router.post("/buyer/login")
@@ -771,7 +1108,11 @@ async def buyer_login(body: BuyerLoginIn, request: Request):
                                      "role": "b2b_buyer"})
     # Konto-Limiter VOR bcrypt (gleicher Weg fuer bekannte und unbekannte).
     konto_k = anmeldekennung(kennung)
-    if await konto_gesperrt(konto_k, ip, u):
+    # Rollenprüfung 22.09.2026 (RP-557): vorher sperrte ein Angreifer mit 30
+    # Fehlversuchen je Viertelstunde jede fortlaufende Kaeufernummer fuer ALLE
+    # neuen IPs (Mobilnetz, Hotel-WLAN). Ein bekanntes Geraet zaehlt jetzt wie
+    # eine bekannte IP (Sperre erst beim Dreifachen) — wie /auth/login.
+    if await konto_gesperrt(konto_k, ip, u, geraet_id=body.geraet_id):
         raise HTTPException(429, konto_gesperrt_text())
     # Immer bcrypt rechnen (Dummy-Hash), um User-Enumeration per Timing zu
     # verhindern. Deaktivierte Accounts geben dieselbe 401 wie falsche Daten.
@@ -798,19 +1139,32 @@ async def buyer_login(body: BuyerLoginIn, request: Request):
     # zwischen Pruefung und Schreiben eine gueltige Sitzung mit dem ALTEN
     # Passwort entstehen lassen. Jetzt auch beim Kaeufer: gleiches Passwort,
     # noch aktiv, nicht in Loeschung.
-    from routes.auth import SITZUNG_UNGUELTIG, sitzungs_bedingung
+    from routes.auth import SITZUNG_UNGUELTIG, geraet_kurz, sitzungs_bedingung
+    # Rollenprüfung 22.09.2026 (RP-098 Nr. 12 / RP-348): Zeitpunkt, Geraet und
+    # IP der Sitzung wie beim Firmen-Login (routes/auth._sitzung_ausstellen).
+    # Vorher stand hier nur die Sitzungs-ID — ein verdraengtes Kaeufer-Geraet
+    # erfuhr nicht, WANN und von WELCHEM Geraet neu angemeldet wurde
+    # (deps.sitzung_beendet_grund liest genau diese Felder).
     r = await db.users.update_one(
         {"id": u["id"], **sitzungs_bedingung(u)},
-        {"$set": {"current_session_id": sid}})
+        {"$set": {"current_session_id": sid, "current_session_seit": now_iso(),
+                  "current_session_geraet": geraet_kurz(request)[:60],
+                  "current_session_ip": ip}})
     if r.matched_count == 0:
         raise HTTPException(401, SITZUNG_UNGUELTIG)
     await bekannte_ip_merken(db, "users", u["id"], ip)
+    # RP-557: dieses Geraet ab jetzt als bekannt merken (HMAC am Konto); der
+    # Schluessel geht in der Antwort zurueck, die Kaeufer-App legt ihn ab.
+    gid = await bekanntes_geraet_merken(db, "users", u["id"], body.geraet_id)
     # Pruefung 14.09.2026 (Liste 1, Nr. 18): dieselbe Anmeldespur wie /auth/login.
     await log_activity_sicher("", u["id"], "auth.login",
                               meta={"ip": ip, "weg": "kaeufer",
                                     "geraet": (request.headers.get("user-agent") or "")[:200]})
-    return {"ok": True, "token": create_token(u["id"], sid),
-            "user": _buyer_public(u)}
+    antwort = {"ok": True, "token": create_token(u["id"], sid),
+               "user": _buyer_public(u)}
+    if gid:
+        antwort["geraet_id"] = gid
+    return antwort
 
 
 def _buyer_public(u: dict) -> dict:
@@ -842,8 +1196,34 @@ async def request_marketplace_access(user=Depends(current_buyer)):
     Admin (manuelle Bezahlung/Freischaltung, wie bei Sucher-Abo & Paketen)."""
     if user.get("role") != "b2b_buyer":
         raise HTTPException(400, "Nur Zwischenhändler benötigen einen Zugang")
-    if _access_status(user)["active"]:
-        return {"ok": True, "hinweis": "Zugang ist bereits aktiv."}
+    status = _access_status(user)
+    # Rollenprüfung 22.09.2026 (RP-098 Nr. 4 / RP-348): ein vom Betreiber
+    # GESPERRTER Kaeufer sah die Bezahlseite und konnte hier eine neue
+    # Freischaltung anfragen — die Anfrage landete in den Freischaltungen, als
+    # waere nichts gewesen. Jetzt 409 mit dem Sperrtext.
+    if status.get("gesperrt"):
+        raise HTTPException(409, GESPERRT_MELDUNG)
+    # RP-509: Ein aktiver, bezahlter Zugang liess sich nicht vorab verlaengern
+    # ("bereits aktiv" bis zum letzten Tag; der Umweg ueber Sperren vernichtete
+    # die Restlaufzeit). Jetzt ist die Anfrage ab VERLAENGERN_AB_TAGEN vor dem
+    # Ablauf eine Verlaengerungsanfrage; die Freischaltung rechnet ab dem
+    # bisherigen Ablauf weiter (admin._restlaufzeit_basis). Im Kostenlos-Modus
+    # (kein Ablauf) bleibt es bei "bereits aktiv".
+    verlaengerung = False
+    if status["active"]:
+        ablauf = _ablauf_parsen(status.get("expires_at"))
+        if (ablauf is None or ablauf - datetime.now(timezone.utc)
+                > timedelta(days=VERLAENGERN_AB_TAGEN)):
+            # Rollenprüfung 22.09.2026 (Review): das Datum in deutscher Zeit —
+            # vorher UTC, die Kopfzeile des Marktplatzes zeigt es aber in
+            # Ortszeit ("Zugang bis 23.10.") und die Antwort nannte bei einem
+            # Ablauf zwischen 22 und 24 Uhr UTC den Vortag. betriebsmeldung.
+            # _berlin rechnet ohne Zeitzonendaten nach der EU-Regel von Hand.
+            from betriebsmeldung import _berlin   # spaet: nur hier gebraucht
+            bis = f" (bis {_berlin(ablauf):%d.%m.%Y})" if ablauf else ""
+            return {"ok": True, "hinweis": f"Zugang ist bereits aktiv{bis}.",
+                    "verlaengerbar_ab_tagen": VERLAENGERN_AB_TAGEN}
+        verlaengerung = True
     # Audit 13.09.2026 (#27): vorher legte jeder Klick eine NEUE offene Anfrage
     # an (auch fuer gesperrte Kaeufer) und konnte die Freischaltungsliste des
     # Betreibers fluten. Jetzt atomarer Upsert wie bei Sucher-Abo und
@@ -860,14 +1240,20 @@ async def request_marketplace_access(user=Depends(current_buyer)):
          "contact_phone": user.get("phone", "")},
         # Beschluss Ahmad 10.09.2026: Marktplatz vorerst 0 € — keine Kosten
         # mehr in Anfragen und Freischaltungen nennen.
-        {"wanted": ("Marktplatz-Zugang (kostenlos)" if MARKTPLATZ_KOSTENLOS
-                    else f"Marktplatz-Zugang ({BUYER_ACCESS_PRICE:.2f} €/Monat)"),
+        {"wanted": (("Verlängerung " if verlaengerung else "")
+                    + ("Marktplatz-Zugang (kostenlos)" if MARKTPLATZ_KOSTENLOS
+                       else f"Marktplatz-Zugang ({BUYER_ACCESS_PRICE:.2f} €/Monat)")),
+         # RP-509: fuer die Freischaltungen — Verlaengerung eines laufenden Zugangs
+         "verlaengerung": verlaengerung,
+         "zugang_bis": status.get("expires_at") if verlaengerung else None,
          "updated_at": now_iso()})
     if neu:
         await log_activity_sicher("", user["id"], "marktplatz.zugang.anfrage",
-                                  ref=doc["id"])
-    return {"ok": True, "request_id": doc["id"],
-            "hinweis": "Anfrage wurde an den Administrator übermittelt."}
+                                  ref=doc["id"], meta={"verlaengerung": verlaengerung})
+    return {"ok": True, "request_id": doc["id"], "verlaengerung": verlaengerung,
+            "hinweis": ("Verlängerung wurde an den Administrator übermittelt."
+                        if verlaengerung else
+                        "Anfrage wurde an den Administrator übermittelt.")}
 
 
 @router.post("/invites/{token}/redeem")
@@ -959,11 +1345,16 @@ async def browse_listings(
     model: Optional[str] = Query(default=None, max_length=100),
     fuel: Optional[str] = Query(default=None, max_length=100),
     price_min: Optional[float] = None, price_max: Optional[float] = None,
-    km_min: Optional[int] = None, km_max: Optional[int] = None,
-    ps_min: Optional[int] = None, ps_max: Optional[int] = None,
+    # Rollenprüfung 22.09.2026 (RP-512): km/PS als Text, deutsch gelesen
+    # (_ganzzahl_filter) — "150.000" = 150000, Unsinn -> 400 auf Deutsch.
+    km_min: Optional[str] = Query(default=None, max_length=20),
+    km_max: Optional[str] = Query(default=None, max_length=20),
+    ps_min: Optional[str] = Query(default=None, max_length=20),
+    ps_max: Optional[str] = Query(default=None, max_length=20),
     sort: Optional[str] = None, dealer: Optional[str] = None,
     nur_favoriten: Optional[int] = 0,
     page: int = Query(1, ge=1, le=1000), limit: int = 300,
+    response: Response = None,
 ):
     """Alle für den Betrachter sichtbaren veröffentlichten Fahrzeuge.
 
@@ -979,6 +1370,11 @@ async def browse_listings(
     # Runde 17 (Nr. 385): Deckel auch hier, falls die Funktion nicht ueber
     # FastAPI (Query-Validierung) aufgerufen wird.
     page = max(1, min(int(page or 1), 1000))
+    # RP-512: vor jeder Datenbankabfrage lesen (400 statt halber Arbeit).
+    km_min = _ganzzahl_filter(km_min, "Kilometer von")
+    km_max = _ganzzahl_filter(km_max, "Kilometer bis")
+    ps_min = _ganzzahl_filter(ps_min, "PS von")
+    ps_max = _ganzzahl_filter(ps_max, "PS bis")
 
     # Oeffentlicher Besucher (nicht angemeldet): kein Merkzettel, kein
     # Netzwerk — er sieht ausschliesslich oeffentliche Haendler und dort
@@ -1004,12 +1400,14 @@ async def browse_listings(
         match["data.make_label"] = {"$regex": _make_regex_variants(make),
                                     "$options": "i"}
     if model:
-        rx = {"$regex": re.escape(model.strip()), "$options": "i"}
+        # RP-528/RP-529: tolerant (Trennzeichen, Akzente) und mit Wortgrenzen.
+        muster = _modell_regex(model) or re.escape(model.strip())
+        rx = {"$regex": muster, "$options": "i"}
         match["$and"].append({"$or": [{"data.model_label": rx},
                                       {"data.model_description": rx}]})
-    if fuel:
-        match["data.fuel_label"] = {"$regex": re.escape(fuel.strip()),
-                                    "$options": "i"}
+    if fuel and fuel.strip():
+        # RP-506: Code-Gruppen statt Teilstring der Beschriftung.
+        match["$and"].append(_kraftstoff_bedingung(fuel))
     if q:
         rx = {"$regex": re.escape(q.strip()), "$options": "i"}
         match["$and"].append({"$or": [{"title": rx},
@@ -1036,20 +1434,24 @@ async def browse_listings(
         # in der Datenbank — nur wenn Preisfilter/-sortierung aktiv ist
         # (sonst muesste Mongo ihn fuer JEDES Dokument berechnen).
         # $gt 0 statt $gt None: ein als 0 hinterlegter Platzhalter-Preis
-        # zaehlt nicht — exakt wie _price_for es beim Anzeigen haelt.
-        zweige: List[Dict[str, Any]] = [
-            {"case": {"$and": [{"$in": ["$dealer_id", my_networks]},
-                               {"$gt": ["$prices.network", 0]}]},
-             "then": "$prices.network"},
+        # zaehlt nicht — exakt wie _preisstufe es beim Anzeigen haelt.
+        # Rollenprüfung 22.09.2026 (RP-521): der NIEDRIGSTE zulaessige Preis
+        # ($min ueberspringt null) statt der ersten gesetzten Stufe —
+        # dieselbe Regel wie _preisstufe, sonst filterte/sortierte die Liste
+        # nach einem anderen Preis als dem angezeigten.
+        stufen: List[Dict[str, Any]] = [
+            {"$cond": [{"$and": [{"$in": ["$dealer_id", my_networks]},
+                                 {"$gt": ["$prices.network", 0]}]},
+                       "$prices.network", None]},
         ]
-        # Runde 17 (Nr. 381): den B2B-Zweig nur fuer angemeldete
+        # Runde 17 (Nr. 381): die B2B-Stufe nur fuer angemeldete
         # Zwischenhaendler — vorher filterte und sortierte ein anonymer
         # Besucher nach dem B2B-Preis (per price_max ablesbar), obwohl die
         # Anzeige ihm den oeffentlichen Preis zeigte.
         if user is not None:
-            zweige.append({"case": {"$gt": ["$prices.b2b", 0]},
-                           "then": "$prices.b2b"})
-        eff_price = {"$switch": {"branches": zweige, "default": "$prices.public"}}
+            stufen.append({"$cond": [{"$gt": ["$prices.b2b", 0]}, "$prices.b2b", None]})
+        stufen.append({"$cond": [{"$gt": ["$prices.public", 0]}, "$prices.public", None]})
+        eff_price = {"$min": stufen}
         pipeline.append({"$addFields": {"_eff_price": eff_price}})
         price_match: Dict[str, Any] = {}
         if price_min:
@@ -1084,10 +1486,18 @@ async def browse_listings(
         order = [("published_at", -1)]
     pipeline.append({"$sort": dict(order)})
     pipeline.append({"$skip": (page - 1) * limit})
-    pipeline.append({"$limit": limit})
+    # Rollenprüfung 22.09.2026 (RP-098 Nr. 9 / RP-348): Die Liste endete
+    # still nach 300 Treffern — Fahrzeug 301 sah niemand, und nichts sagte,
+    # dass es mehr gibt. Jetzt einen Treffer mehr holen: X-Truncated=1 heisst
+    # "es gibt eine weitere Seite" (Marktplatz.jsx laedt sie per page=N+1).
+    pipeline.append({"$limit": limit + 1})
     pipeline.append({"$project": {"_id": 0, "_eff_price": 0, "_sortkey": 0}})
 
-    items = await db.resale_listings.aggregate(pipeline).to_list(limit)
+    items = await db.resale_listings.aggregate(pipeline).to_list(limit + 1)
+    weitere = len(items) > limit
+    items = items[:limit]
+    if response is not None:
+        response.headers["X-Truncated"] = "1" if weitere else "0"
 
     # Haendler-Infos in EINER Abfrage statt je Inserat (kein N+1).
     dealer_ids = list({l["dealer_id"] for l in items})
@@ -1254,7 +1664,11 @@ async def dealer_page(slug: str, user=Depends(marktplatz_besucher)):
     member = await _is_network_member(dl["id"], user["id"]) if user else False
     eigene_firma = user.get("dealer_id") if user else None
     if not mp.get("public") and not member and dl["id"] != eigene_firma:
-        raise HTTPException(403, "Dieses Händlerprofil ist privat (nur auf Einladung)")
+        # Rollenprüfung 22.09.2026 (RP-098 Nr. 11 / RP-348): vorher 403
+        # "privat" — damit liess sich per Dealer-ID oder geratenem Kurznamen
+        # pruefen, ob es eine Firma gibt (404 = nein, 403 = ja, privat). Jetzt
+        # wie "nicht gefunden" und wie die gesperrte Firma oben.
+        raise HTTPException(404, "Händler nicht gefunden")
     # Private Inserate nur für Netzwerk-Mitglieder (und den Händler selbst).
     # Audit 13.09.2026 (#22): der Sichtbarkeitsfilter lief NACH dem 200er-
     # Deckel, und die Fahrzeugzahl kam aus der gedeckelten Liste (250
@@ -1311,6 +1725,13 @@ class InterestAnswerIn(BaseModel):
     action: Literal["akzeptieren", "ablehnen", "gegenangebot"]
     counter_offer: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
     message: str = Field(default="", max_length=2000)
+    # Rollenprüfung 22.09.2026 (RP-491): Stand, den der Haendler auf dem
+    # Bildschirm hatte. Weicht der gespeicherte Stand ab (der Kaeufer hat
+    # inzwischen ein neues Angebot geschickt), antwortet der Server 409 statt
+    # zu einem nie gesehenen Preis zu reservieren. Optional (aeltere
+    # Oberflaechen); "erwarteter_betrag": null heisst "ohne Preisangebot".
+    erwarteter_status: Optional[str] = Field(default=None, max_length=40)
+    erwarteter_betrag: Optional[float] = Field(default=None, allow_inf_nan=False)
 
 
 @router.post("/marktplatz/listings/{listing_id}/interesse")
@@ -1408,7 +1829,41 @@ async def _interessen_laden(filt: Dict[str, Any], response: Response,
         items = laufend[:ANFRAGEN_MAX] + erledigt[:ERLEDIGTE_ANFRAGEN_MAX]
         items.sort(key=lambda i: i.get("created_at") or "", reverse=True)
     response.headers["X-Truncated"] = "1" if abgeschnitten else "0"
+    await _inseratsstand_anhaengen(items)
     return items
+
+
+async def _inseratsstand_anhaengen(items: list) -> None:
+    """Rollenprüfung 22.09.2026 (RP-478): Ist das Auto fuer einen ANDEREN
+    Kaeufer reserviert, liefen die uebrigen Anfragen dazu scheinbar weiter —
+    jede Aktion gab 409, und Kaeufer B erfuhr nichts. Statt eines neuen
+    Status (Index, Listen, Wiedereroeffnen beim Aufheben) wird der Zustand
+    beim Lesen abgeleitet: inserat_status und anderweitig_reserviert. Wird
+    die Reservierung aufgehoben, sind die Anfragen automatisch wieder frei;
+    beim Verkauf schliesst resale._anfragen_nach_wechsel sie wie bisher.
+    Die Oberflaechen zeigen den Hinweis und blenden die Knoepfe aus."""
+    ids = list({i.get("listing_id") for i in items if i.get("listing_id")})
+    if not ids:
+        return
+    # RP-519: published_at/wieder_veroeffentlicht_am fuer das Ablaufdatum.
+    stand = {l["id"]: l async for l in db.resale_listings.find(
+        {"id": {"$in": ids}}, {"_id": 0, "id": 1, "status": 1, "reserved_for": 1,
+                               "published_at": 1, "wieder_veroeffentlicht_am": 1})}
+    for i in items:
+        l = stand.get(i.get("listing_id"))
+        if l is None:
+            continue
+        i["inserat_status"] = l.get("status")
+        # Rollenprüfung 22.09.2026 (RP-519): Wann endet das Inserat (und mit
+        # ihm die Anfrage)? Haendler (Kaufanfragen) und Kaeufer (Meine
+        # Anfragen) sehen dasselbe Datum; None, sobald es nicht mehr
+        # veroeffentlicht ist (reserviert, verkauft, zurueckgezogen ...).
+        i["laeuft_ab_am"] = _laeuft_ab_am(l)
+        # RP-093(1): auch die Reservierung von Hand (ohne reserved_for) ist
+        # "anderweitig" — verhandelt wird dort nicht (_inserat_verhandelbar).
+        i["anderweitig_reserviert"] = bool(
+            i.get("status") in INTERESSE_OFFEN and l.get("status") == "reserviert"
+            and l.get("reserved_for") != i.get("buyer_user_id"))
 
 
 @router.get("/dealer/interessen")  # noqa: E302
@@ -1426,24 +1881,190 @@ async def dealer_list_interests(response: Response,
     return await _interessen_laden(q, response, gefiltert=bool(status or listing_id))
 
 
+#: Anfragen, bei denen der HAENDLER am Zug ist (neu bzw. Kaeufer hat nachverhandelt).
+INTERESSE_HAENDLER_AM_ZUG = ("offen", "gegenangebot_kaeufer")
+
+
+@router.get("/dealer/interessen/anzahl")
+async def dealer_interessen_anzahl(user=Depends(current_haendler)):
+    """Rollenprüfung 22.09.2026 (RP-472): Der Chef erfuhr von neuen Anfragen
+    und Kaeufer-Gegenangeboten nur, wenn er "Kaufanfragen" selbst oeffnete.
+    Das Menue (lib/anfragenZaehler.js) holte dafuer bisher zwei komplette
+    Listen je Minute (samt Inseratsstand) — hier nur zwei Zaehlungen.
+    Mail an die Firma: nicht gebaut (Entscheidung Ahmad offen)."""
+    zahlen = {}
+    for status in INTERESSE_HAENDLER_AM_ZUG:
+        zahlen[status] = await db.listing_interest.count_documents(
+            {"dealer_id": user["dealer_id"], "status": status})
+    return {"anzahl": sum(zahlen.values()), **zahlen}
+
+
 @router.get("/buyer/interessen")
 async def buyer_interests(response: Response, user=Depends(buyer_nicht_gesperrt)):
     # Audit 13.09.2026 (#21): laufende Verhandlungen nicht mehr verdraengt
-    return await _interessen_laden({"buyer_user_id": user["id"]}, response,
-                                   gefiltert=False)
+    items = await _interessen_laden({"buyer_user_id": user["id"]}, response,
+                                    gefiltert=False)
+    await _haendler_und_inserat_anhaengen(items, user)
+    return items
+
+
+async def _haendler_und_inserat_anhaengen(items: list, user: dict) -> None:
+    """Rollenprüfung 22.09.2026 (RP-503): Das Anfrage-Dokument kennt nur
+    dealer_id und den Inseratstitel von damals. Ein reservierter Kaeufer
+    wusste weder, bei WELCHER Firma er reserviert hatte, noch wie er sie
+    erreicht — das reservierte Inserat faellt aus der Marktplatzliste.
+    Jetzt je Anfrage:
+      * haendler: Firmenname und Kurzname (immer — mit wem man verhandelt)
+      * haendler.kontakt (Telefon, E-Mail, Ort, Ansprechpartner): bei einer
+        angenommenen Anfrage (Reservierung) — dann muss er anrufen koennen
+      * inserat (aktueller Titel, Marke/Modell, erstes Bild): nur solange er
+        das Inserat sehen darf oder es fuer ihn reserviert/an ihn verkauft ist
+    Gesperrte Firmen liefern nichts (wie ueberall im Marktplatz). Alles in
+    wenigen Abfragen, nicht je Anfrage."""
+    if not items:
+        return
+    dealer_ids = list({i.get("dealer_id") for i in items if i.get("dealer_id")})
+    listing_ids = list({i.get("listing_id") for i in items if i.get("listing_id")})
+    gesperrt = await gesperrte_firmen_ids()
+    firmen = {d["id"]: d async for d in db.dealers.find(
+        {"id": {"$in": dealer_ids}},
+        {"_id": 0, "id": 1, "company_name": 1, "city": 1, "phone": 1,
+         "whatsapp_number": 1, "email": 1, "contact_person": 1, "marketplace": 1})}
+    inserate = {l["id"]: l async for l in db.resale_listings.find(
+        {"id": {"$in": listing_ids}},
+        {"_id": 0, "id": 1, "dealer_id": 1, "title": 1, "status": 1, "visibility": 1,
+         "reserved_for": 1, "sold_to_user_id": 1, "photos": 1,
+         "data.make_label": 1, "data.model_label": 1})}
+    my_networks, visible_dealers = await _sichtbare_haendler(user)
+    for i in items:
+        d = firmen.get(i.get("dealer_id"))
+        if d and d["id"] not in gesperrt:
+            mp = d.get("marketplace") or {}
+            haendler: Dict[str, Any] = {
+                "company_name": d.get("company_name", ""),
+                "slug": mp.get("slug") or _slugify(d.get("company_name", ""), d["id"]),
+            }
+            if i.get("status") == "akzeptiert":
+                haendler["kontakt"] = {
+                    "phone": d.get("phone") or d.get("whatsapp_number") or "",
+                    "email": d.get("email") or "",
+                    "city": d.get("city") or "",
+                    "contact_person": d.get("contact_person") or "",
+                }
+            i["haendler"] = haendler
+        l = inserate.get(i.get("listing_id"))
+        if not l or (d and d["id"] in gesperrt):
+            continue
+        fuer_ihn = user["id"] in (l.get("reserved_for"), l.get("sold_to_user_id"))
+        sichtbar = (l.get("status") == "veroeffentlicht"
+                    and l.get("dealer_id") in visible_dealers
+                    and ((l.get("visibility") or "") != "private"
+                         or l.get("dealer_id") in my_networks))
+        if fuer_ihn or sichtbar:
+            daten = l.get("data") or {}
+            i["inserat"] = {"title": l.get("title") or i.get("listing_title") or "",
+                            "make_label": daten.get("make_label") or "",
+                            "model_label": daten.get("model_label") or "",
+                            "foto": _erstes_foto(l)}
+
+
+@router.get("/buyer/interessen/zaehler")
+async def buyer_interessen_zaehler(seit: Optional[str] = Query(default=None, max_length=64),
+                                   user=Depends(buyer_nicht_gesperrt)):
+    """Rollenprüfung 22.09.2026 (RP-520): Der Kaeufer erfuhr nie von einem
+    Gegenangebot, einer Annahme oder Ablehnung — es gab keinen Hinweis im
+    Marktplatz. Zaehler fuer den Knopf "Meine Anfragen":
+      * am_zug: Gegenangebote des Haendlers, auf die er antworten soll
+      * neu: seit `seit` (Zeitpunkt, zu dem er "Meine Anfragen" zuletzt
+        geoeffnet hat) vom Haendler oder vom System geaenderte Anfragen —
+        OHNE die Gegenangebote (die stecken schon in am_zug; die Summe
+        zaehlt nichts doppelt)
+    Leichtgewichtig (zwei count-Abfragen), damit die Seite ihn regelmaessig
+    abfragen kann."""
+    am_zug = await db.listing_interest.count_documents(
+        {"buyer_user_id": user["id"], "status": "gegenangebot"})
+    neu = 0
+    ab = _ablauf_parsen(seit) if seit else None
+    if ab is not None:
+        neu = await db.listing_interest.count_documents({
+            "buyer_user_id": user["id"],
+            "status": {"$ne": "gegenangebot"},
+            "updated_at": {"$gt": ab.astimezone(timezone.utc).isoformat()},
+            # zuletzt hat NICHT der Kaeufer selbst gehandelt
+            "$expr": {"$ne": [{"$arrayElemAt": ["$history.von", -1]}, "kaeufer"]},
+        })
+    return {"am_zug": am_zug, "neu": neu}
 
 
 class BuyerInterestAnswerIn(BaseModel):
     # 09/2026: der Kaeufer kann jetzt auch selbst ein Gegenangebot machen
-    action: Literal["annehmen", "ablehnen", "gegenangebot"]
+    # Rollenprüfung 22.09.2026 (RP-502): und eine laufende Anfrage
+    # zurueckziehen (in jedem laufenden Status).
+    action: Literal["annehmen", "ablehnen", "gegenangebot", "zurueckziehen"]
     # Runde 17 (Nr. 397): kein inf/nan als Gegenangebot.
     counter_offer: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
     message: str = Field(default="", max_length=2000)
+    # Rollenprüfung 22.09.2026 (RP-495): das Gegenangebot, das der Kaeufer auf
+    # dem Bildschirm hatte. Hat der Haendler es inzwischen geaendert, nimmt
+    # "annehmen" nicht still den neuen Betrag an (409). Optional (alte Oberflaeche).
+    erwarteter_betrag: Optional[float] = Field(default=None, allow_inf_nan=False)
 
 
 # Verhandlungszustaende (beide Seiten): offen -> gegenangebot (Haendler)
 # -> gegenangebot_kaeufer (Kaeufer) -> ... -> akzeptiert | abgelehnt
 INTERESSE_OFFEN = ("offen", "gegenangebot", "gegenangebot_kaeufer")
+
+
+def _betrag_gleich(a: Any, b: Any) -> bool:
+    """Zwei Betraege auf den Cent gleich (None nur gleich None)."""
+    if a is None or b is None:
+        return a is None and b is None
+    try:
+        return abs(round(float(a), 2) - round(float(b), 2)) < 0.005
+    except (TypeError, ValueError):
+        return False
+
+
+def _eur(betrag: Any) -> str:
+    """Deutscher Betrag fuer Meldungen: 12.500 € / 12.500,50 €."""
+    if betrag is None:
+        return "ohne Preisangebot"
+    try:
+        wert = round(float(betrag), 2)
+    except (TypeError, ValueError):
+        return str(betrag)
+    text = f"{wert:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    if text.endswith(",00"):
+        text = text[:-3]
+    return f"{text} €"
+
+
+async def _kaeufer_zieht_zurueck(it: dict, body: "BuyerInterestAnswerIn", user: dict) -> dict:
+    """Rollenprüfung 22.09.2026 (RP-502): Der Kaeufer beendet eine LAUFENDE
+    Anfrage selbst (vorher gab es dafuer keinen Weg: Ablehnen ging nur bei
+    einem Haendler-Gegenangebot, ein neues Senden gab 409). Status abgelehnt
+    mit beendet_grund 'kaeufer_zurueckgezogen' — wie die anderen Abschluesse,
+    damit Listen, Filter und der Teil-Unique-Index unveraendert bleiben.
+    Eine akzeptierte Anfrage (Reservierung) zieht er hier nicht zurueck: das
+    klaert er mit dem Haendler, der die Reservierung aufhebt."""
+    if it.get("status") not in INTERESSE_OFFEN:
+        raise HTTPException(400, "Die Anfrage ist bereits abgeschlossen — "
+                                 "zurückziehen geht nur bei laufenden Anfragen")
+    jetzt = now_iso()
+    upd = await db.listing_interest.update_one(
+        {"id": it["id"], "buyer_user_id": user["id"], "status": it.get("status")},
+        {"$set": {"status": "abgelehnt", "beendet_grund": "kaeufer_zurueckgezogen",
+                  "updated_at": jetzt},
+         "$push": {"history": {"von": "kaeufer", "aktion": "zurueckgezogen",
+                               "angebot": None, "nachricht": body.message,
+                               "zeit": jetzt}}})
+    if upd.modified_count == 0:
+        raise HTTPException(409, "Die Anfrage wurde gerade anderweitig "
+                                 "beantwortet — bitte neu laden.")
+    await log_activity_sicher(it.get("dealer_id", ""), user["id"],
+                              "interesse.kaeufer.zurueckgezogen", ref=it["id"],
+                              meta={"listing_id": it.get("listing_id")})
+    return {"ok": True, "status": "abgelehnt", "beendet_grund": "kaeufer_zurueckgezogen"}
 
 
 # Runde 13: C1 — vorher hing nur die ERSTE Anfrage (send_interest) am
@@ -1452,14 +2073,25 @@ INTERESSE_OFFEN = ("offen", "gegenangebot", "gegenangebot_kaeufer")
 # "annehmen" ein Fahrzeug reservieren. Jetzt: 403 gesperrt / 402 ohne
 # aktiven Zugang — fuer alle drei Aktionen (auch "ablehnen" schreibt eine
 # Nachricht in die Historie beim Haendler).
+# Rollenprüfung 22.09.2026 (RP-510): Die Route haengt jetzt an
+# buyer_nicht_gesperrt (Betreiber-Sperre -> 403 fuer ALLES wie bisher); der
+# Zugang (402) wird nur noch fuer annehmen und gegenangebot verlangt
+# (_zugang_erzwingen inline). Ablehnen und Zurueckziehen BEENDEN nur — nach
+# Ablauf des Zugangs konnte der Kaeufer seine laufenden Anfragen vorher weder
+# sehen noch loswerden, der Haendler wartete auf eine Antwort, die nie kam.
 @router.post("/interessen/{interest_id}/kaeufer-antwort")
 async def buyer_answer_interest(interest_id: str, body: BuyerInterestAnswerIn,
-                                user=Depends(require_marketplace_access)):
+                                user=Depends(buyer_nicht_gesperrt)):
     """Kaeufer reagiert auf ein GEGENANGEBOT des Haendlers (Review 09/2026:
     der Kaeufer sah Gegenangebote, konnte aber nicht antworten).
     annehmen: Inserat wird atomar fuer den Kaeufer reserviert, Status
     'akzeptiert'. ablehnen: Status 'abgelehnt'. Beides nur einmal —
-    der Statuswechsel selbst ist atomar gegen parallele Antworten."""
+    der Statuswechsel selbst ist atomar gegen parallele Antworten.
+    gegenangebot: eigenes (neues) Angebot — RP-502 auch, um das eigene
+    Angebot zu aendern. zurueckziehen (RP-502): laufende Anfrage beenden."""
+    beenden = body.action in ("ablehnen", "zurueckziehen")
+    if not beenden:
+        _zugang_erzwingen(user)
     it = await db.listing_interest.find_one(
         {"id": interest_id, "buyer_user_id": user["id"]}, {"_id": 0})
     if not it:
@@ -1470,29 +2102,39 @@ async def buyer_answer_interest(interest_id: str, body: BuyerInterestAnswerIn,
     # keine Reservierung. Bewusst 403 statt 404: der Kaeufer kennt die
     # Anfrage, es geht um entzogenen Zugang. Kein Status-Filter beim Laden,
     # damit die Pruefung auch beim Kaeufer-Gegenangebot greift.
+    # RP-510: Beenden (ablehnen/zurueckziehen) fuehrt nichts fort und
+    # reserviert nichts — das darf der Kaeufer auch ohne Sicht auf das Inserat.
     l = await db.resale_listings.find_one(
         {"id": it["listing_id"]},
-        {"_id": 0, "dealer_id": 1, "visibility": 1, "status": 1, "reserved_for": 1})
-    if not l or not await _inserat_sichtbar_fuer(user, l):
+        {"_id": 0, "dealer_id": 1, "visibility": 1, "status": 1, "reserved_for": 1,
+         "reserviert_manuell": 1})
+    if not beenden and (not l or not await _inserat_sichtbar_fuer(user, l)):
         raise HTTPException(403, "Kein Zugang mehr zu diesem Inserat — die "
                                  "Anfrage kann nicht weitergeführt werden")
+    if body.action == "zurueckziehen":
+        return await _kaeufer_zieht_zurueck(it, body, user)
     if body.action == "gegenangebot" and not _inserat_verhandelbar(l, user["id"]):
         # Pruefung 14.09.2026 (D14): wie beim Haendler — kein Gegenangebot auf
         # ein nicht mehr verfuegbares Inserat.
         raise HTTPException(409, "Das Inserat ist nicht mehr verfügbar — ein "
                                  "Gegenangebot ist nicht mehr möglich")
     if body.action == "gegenangebot":
-        # Kaeufer macht (erneut) ein Angebot — solange nichts abgeschlossen ist
-        # und der Haendler nicht gerade auf DIESES Kaeufer-Angebot antworten muss.
-        if it.get("status") not in ("offen", "gegenangebot"):
+        # Kaeufer macht (erneut) ein Angebot — solange nichts abgeschlossen ist.
+        # RP-502: auch aus 'gegenangebot_kaeufer' — damit aendert der Kaeufer
+        # sein eigenes, noch unbeantwortetes Angebot (vorher 400, ein neues
+        # Senden gab 409, und es blieb nur, auf den Haendler zu warten).
+        if it.get("status") not in INTERESSE_OFFEN:
             raise HTTPException(400, "Ein Gegenangebot ist jetzt nicht moeglich "
                                      f"(Status '{it.get('status')}')")
         if body.counter_offer is None or float(body.counter_offer) <= 0:
             raise HTTPException(400, "Gegenangebot benoetigt einen Betrag")
         betrag = round(float(body.counter_offer), 2)
         upd = await db.listing_interest.update_one(
+            # RP-491: Betrag mit festnageln — nimmt der Haendler PARALLEL das
+            # bisherige Kaeufer-Angebot an, gewinnt genau einer von beiden.
             {"id": interest_id, "buyer_user_id": user["id"],
-             "status": it.get("status")},
+             "status": it.get("status"),
+             "buyer_counter_offer": it.get("buyer_counter_offer")},
             {"$set": {"status": "gegenangebot_kaeufer",
                       "buyer_counter_offer": betrag, "updated_at": now_iso()},
              "$push": {"history": {"von": "kaeufer", "aktion": "gegenangebot",
@@ -1508,6 +2150,13 @@ async def buyer_answer_interest(interest_id: str, body: BuyerInterestAnswerIn,
     if it.get("status") != "gegenangebot":
         raise HTTPException(400, "Nur ein Gegenangebot des Haendlers kann "
                                  "angenommen oder abgelehnt werden")
+    # RP-495: hat der Haendler sein Gegenangebot geaendert, seit der Kaeufer
+    # die Liste geladen hat, wird NICHT still der neue Betrag angenommen.
+    if (body.action == "annehmen" and body.erwarteter_betrag is not None
+            and not _betrag_gleich(it.get("counter_offer"), body.erwarteter_betrag)):
+        raise HTTPException(409, "Der Händler hat sein Angebot inzwischen auf "
+                                 f"{_eur(it.get('counter_offer'))} geändert — bitte "
+                                 "neu laden und prüfen.")
     reserviert = False
     if body.action == "annehmen":
         res = await db.resale_listings.find_one_and_update(
@@ -1551,7 +2200,9 @@ async def buyer_answer_interest(interest_id: str, body: BuyerInterestAnswerIn,
                                  "beantwortet — bitte neu laden.")
     if reserviert:
         await fahrzeug_reserviert_markieren(it["listing_id"])
-    await log_activity_sicher("", user["id"], f"interesse.kaeufer.{body.action}",
+    # Rollenprüfung 22.09.2026 (RP-098 Nr. 6 / RP-348): mit der Firma des
+    # Inserats — vorher dealer_id "", der Eintrag fehlte im Firmenprotokoll.
+    await log_activity_sicher(it.get("dealer_id", ""), user["id"], f"interesse.kaeufer.{body.action}",
                        ref=interest_id,
                        meta={"listing_id": it.get("listing_id"),
                              "betrag": it.get("counter_offer")})
@@ -1561,12 +2212,21 @@ async def buyer_answer_interest(interest_id: str, body: BuyerInterestAnswerIn,
 def _inserat_verhandelbar(l: dict, buyer_user_id) -> bool:
     """Pruefung 14.09.2026 (D13/D14): verhandelt wird nur auf einem
     veroeffentlichten Inserat — oder auf einem, das fuer GENAU diesen Kaeufer
-    reserviert ist."""
+    reserviert ist.
+
+    Rollenprüfung 22.09.2026 (RP-093(1)/RP-343(a), zweite Absicherung): Eine
+    Reservierung von Hand (Kaeufer am Telefon, reserviert_manuell, ohne
+    reserved_for) liess vorher JEDEN Kaeufer weiterverhandeln (reserved_for
+    None galt als "fuer ihn"). resale beendet die offenen Anfragen dabei
+    inzwischen selbst; hier gilt zusaetzlich: ohne reserved_for oder bei
+    Hand-Reservierung wird nicht verhandelt."""
     status = l.get("status")
     if status == "veroeffentlicht":
         return True
     if status == "reserviert":
-        return l.get("reserved_for") in (None, buyer_user_id)
+        if l.get("reserviert_manuell") or l.get("reserved_for") is None:
+            return False
+        return l.get("reserved_for") == buyer_user_id
     return False
 
 
@@ -1588,9 +2248,19 @@ async def _kaeufer_darf_noch(it: dict) -> None:
             or _access_status(k).get("gesperrt")):
         raise HTTPException(409, "Der Käufer ist nicht mehr aktiv — die "
                                  "Anfrage kann nicht weitergeführt werden")
+    # Rollenprüfung 22.09.2026 (RP-098 Nr. 5 / RP-348): vorher nur "gesperrt" —
+    # im Bezahlmodus (MARKTPLATZ_KOSTENLOS=false) konnte der Haendler fuer einen
+    # Kaeufer mit ABGELAUFENEM Zugang reservieren, der selbst weder annehmen
+    # noch ein Gegenangebot schicken durfte (402). Im Kostenlos-Modus ist jeder
+    # nicht gesperrte Kaeufer aktiv — dort aendert sich nichts.
+    if not _access_status(k).get("active"):
+        raise HTTPException(409, "Der Marktplatz-Zugang des Käufers ist abgelaufen — "
+                                 "die Anfrage kann erst nach seiner Verlängerung "
+                                 "weitergeführt werden")
     l = await db.resale_listings.find_one(
         {"id": it.get("listing_id")},
-        {"_id": 0, "dealer_id": 1, "visibility": 1, "status": 1, "reserved_for": 1})
+        {"_id": 0, "dealer_id": 1, "visibility": 1, "status": 1, "reserved_for": 1,
+         "reserviert_manuell": 1})
     if l and not _inserat_verhandelbar(l, it.get("buyer_user_id")):
         # Pruefung 14.09.2026 (D13): kein Gegenangebot auf ein Inserat, das
         # inzwischen verkauft, zurueckgezogen oder fuer jemand anderen reserviert ist.
@@ -1600,6 +2270,44 @@ async def _kaeufer_darf_noch(it: dict) -> None:
         raise HTTPException(409, "Der Käufer hat keinen Zugang mehr zu diesem "
                                  "Inserat — die Anfrage kann nicht "
                                  "weitergeführt werden")
+
+
+def _vereinbarter_preis(it: dict) -> Optional[float]:
+    """Preis, zu dem "Akzeptieren" abschliesst: Kaeufer-Gegenangebot, sonst
+    das urspruengliche Angebot."""
+    if it.get("status") == "gegenangebot_kaeufer":
+        return it.get("buyer_counter_offer")
+    return it.get("offer")
+
+
+async def _inseratspreis_fuer_kaeufer(it: dict) -> tuple:
+    """RP-093(4): (Preis, Stufe) des Inserats aus Sicht des Kaeufers dieser
+    Anfrage — angemeldeter Zwischenhaendler (B2B-Stufe), Netzwerkpreis nur
+    als Mitglied der Firma. (None, None) ohne gesetzten Preis."""
+    l = await db.resale_listings.find_one(
+        {"id": it.get("listing_id")}, {"_id": 0, "prices": 1, "dealer_id": 1})
+    if not l:
+        return None, None
+    mitglied = await _is_network_member(l.get("dealer_id"), it.get("buyer_user_id"))
+    preis, stufe = _preisstufe(l, is_member=mitglied, is_trade=True)
+    if not _preis_gesetzt(preis):
+        return None, None
+    return round(float(preis), 2), stufe
+
+
+def _stand_geaendert_text(it: dict) -> str:
+    """RP-491: 409-Text, wenn sich die Anfrage seit dem Laden geaendert hat."""
+    st = it.get("status")
+    if st == "gegenangebot_kaeufer":
+        return (f"Der Käufer hat inzwischen {_eur(it.get('buyer_counter_offer'))} "
+                "angeboten — bitte neu laden und prüfen.")
+    if st == "gegenangebot":
+        return (f"Dein Gegenangebot über {_eur(it.get('counter_offer'))} liegt "
+                "inzwischen beim Käufer — bitte neu laden.")
+    if st == "offen":
+        return (f"Die Anfrage steht inzwischen auf „offen“ ({_eur(it.get('offer'))}) "
+                "— bitte neu laden und prüfen.")
+    return "Die Anfrage hat sich inzwischen geändert — bitte neu laden."
 
 
 @router.post("/interessen/{interest_id}/antwort")
@@ -1621,6 +2329,16 @@ async def answer_interest(interest_id: str, body: InterestAnswerIn,
         raise HTTPException(400, "Dein Gegenangebot liegt beim Käufer — warte "
                                  "auf seine Antwort oder schreibe ein neues "
                                  "Angebot")
+    # Rollenprüfung 22.09.2026 (RP-491): veraltete Kaufanfragen-Seite. Der
+    # Haendler sah z.B. "offen, 20.000 €", der Kaeufer hatte inzwischen
+    # 18.000 € geboten — "Akzeptieren" reservierte zu 18.000 €, einem Preis,
+    # den der Haendler nie gesehen hatte. Schickt die Oberflaeche ihren Stand
+    # mit, gilt die Antwort nur fuer genau diesen Stand.
+    if body.erwarteter_status is not None and body.erwarteter_status != it["status"]:
+        raise HTTPException(409, _stand_geaendert_text(it))
+    if body.action == "akzeptieren" and "erwarteter_betrag" in body.model_fields_set:
+        if not _betrag_gleich(_vereinbarter_preis(it), body.erwarteter_betrag):
+            raise HTTPException(409, _stand_geaendert_text(it))
     # Nr. 1/2/3: Ablehnen darf der Haendler immer (schliesst nur ab);
     # Annehmen und Gegenangebot nur, wenn der Kaeufer noch darf.
     if body.action in ("akzeptieren", "gegenangebot"):
@@ -1631,9 +2349,22 @@ async def answer_interest(interest_id: str, body: InterestAnswerIn,
     update: Dict[str, Any] = {"status": new_status, "updated_at": now_iso()}
     if body.action == "akzeptieren":
         # Vereinbarter Preis: Kaeufer-Gegenangebot > urspruengliches Angebot
-        update["agreed_price"] = (it.get("buyer_counter_offer")
-                                  if it["status"] == "gegenangebot_kaeufer"
-                                  else it.get("offer"))
+        vereinbart = _vereinbarter_preis(it)
+        if vereinbart is None:
+            # Rollenprüfung 22.09.2026 (RP-093(4)/RP-343(d)): Eine Anfrage OHNE
+            # Preisangebot ("Interesse zum angegebenen Preis") wurde mit
+            # agreed_price None angenommen — Reservierung, Verkauf melden und
+            # Kaufvertrag hatten keinen Betrag. Jetzt gilt der Inseratspreis,
+            # den GENAU dieser Kaeufer sieht (Netzwerk/B2B/oeffentlich, der
+            # niedrigste zulaessige wie in der Liste). Ohne jeden Preis ("auf
+            # Anfrage") wird nicht blind angenommen.
+            vereinbart, stufe = await _inseratspreis_fuer_kaeufer(it)
+            if vereinbart is None:
+                raise HTTPException(400, "Der Käufer hat keinen Betrag genannt und das "
+                                         "Inserat hat keinen Preis — bitte ein "
+                                         "Gegenangebot mit Preis senden.")
+            update["agreed_price_quelle"] = f"inserat_{stufe}"
+        update["agreed_price"] = vereinbart
     if body.action == "gegenangebot":
         if body.counter_offer is None:
             raise HTTPException(400, "Gegenangebot benötigt einen Betrag")
@@ -1660,13 +2391,21 @@ async def answer_interest(interest_id: str, body: InterestAnswerIn,
     # parallel geantwortet (z.B. Gegenangebot angenommen) und ein
     # ungefilterter Write wuerde dessen "akzeptiert" ueberschreiben,
     # waehrend das Inserat reserviert bliebe (Lost Update).
+    # RP-491: zusaetzlich die Betraege des gelesenen Stands festnageln — seit
+    # RP-502 kann der Kaeufer sein Angebot im Status 'gegenangebot_kaeufer'
+    # aendern, ohne dass sich der Status aendert.
+    # RP-477: beim Akzeptieren steht der VEREINBARTE Preis in der Historie
+    # (vorher body.counter_offer, also leer).
+    angebot_historie = (update.get("agreed_price") if body.action == "akzeptieren"
+                        else update.get("counter_offer"))
     try:
         upd = await db.listing_interest.update_one(
             {"id": interest_id, "dealer_id": user["dealer_id"],
-             "status": it["status"]},
+             "status": it["status"], "offer": it.get("offer"),
+             "buyer_counter_offer": it.get("buyer_counter_offer")},
             {"$set": update,
              "$push": {"history": {"von": "haendler", "aktion": body.action,
-                                   "angebot": body.counter_offer,
+                                   "angebot": angebot_historie,
                                    "nachricht": body.message, "zeit": now_iso()}}})
     except Exception:
         # Pruefung 14.09.2026 (Liste 1, Nr. 20): Ausnahme im zweiten Write —

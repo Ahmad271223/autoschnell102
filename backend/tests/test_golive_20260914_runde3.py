@@ -55,12 +55,19 @@ def test_l3_vertrag_idempotent_und_validiert(welt):
         C.ContractIn(vehicle_id="x", seller_name="  ", purchase_price=100)
     t = _abholung(w, proto_status="entwurf")
     chef = {**w.chef, "active": True}
-    eins = w.run(C.create_contract(_vertrag_in(C, t.vid, idempotency_key="k-" + w.s), chef))
+    # Rollenpruefung 22.09.2026 (RP-416): Der Chef hat zu diesem Fahrzeug schon
+    # einen offenen Vertrag (aus _abholung) — ein weiterer nur nach Rueckfrage.
+    from fastapi import HTTPException as _HE
+    with pytest.raises(_HE) as vorher:
+        w.run(C.create_contract(_vertrag_in(C, t.vid, idempotency_key="k0-" + w.s), chef))
+    assert vorher.value.status_code == 409 and vorher.value.detail["code"] == "vertrag_vorhanden"
+    zweiter = {"zweiter_vertrag_bestaetigt": True}
+    eins = w.run(C.create_contract(_vertrag_in(C, t.vid, idempotency_key="k-" + w.s, **zweiter), chef))
     assert eins["id"] and "pdf_b64" not in eins
-    zwei = w.run(C.create_contract(_vertrag_in(C, t.vid, idempotency_key="k-" + w.s), chef))
+    zwei = w.run(C.create_contract(_vertrag_in(C, t.vid, idempotency_key="k-" + w.s, **zweiter), chef))
     assert zwei["id"] == eins["id"] and zwei.get("bereits_vorhanden") is True
     assert w.run(w.db.generated_pdfs.count_documents({"idempotency_key": "k-" + w.s})) == 1
-    drei = w.run(C.create_contract(_vertrag_in(C, t.vid, idempotency_key="k2-" + w.s), chef))
+    drei = w.run(C.create_contract(_vertrag_in(C, t.vid, idempotency_key="k2-" + w.s, **zweiter), chef))
     assert drei["id"] != eins["id"]
 
 

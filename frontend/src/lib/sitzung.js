@@ -94,6 +94,35 @@ export function tokenSetzen(key, wert, { nurSitzung = false } = {}) {
   sicher(() => window.localStorage.setItem(LETZTE_ANMELDUNG, key));
 }
 
+/**
+ * Rollenprüfung 22.09.2026 (RP-546): Läuft ein Token bald ab, schickt der
+ * Server mit der Antwort ein frisches Token DERSELBEN Sitzung (Kopfzeile
+ * X-Neues-Token, backend/auth.token_erneuern). Vorher endete jede Sitzung hart
+ * nach 7 Tagen — mitten in der Arbeit kam die 401 und die Anmeldeseite.
+ *
+ * Abgelegt wird das neue Token nur dort, wo noch das alte liegt:
+ *   - in diesem Tab nur, wenn er noch mit `alt` arbeitet (nicht abgemeldet,
+ *     keine andere Anmeldung dazwischen);
+ *   - als "letzte Anmeldung" (localStorage) nur, wenn dort noch `alt` steht —
+ *     eine neuere Anmeldung aus einem anderen Tab bleibt unangetastet, ebenso
+ *     das Betreiber-Token, das nie in localStorage liegt.
+ * LETZTE_ANMELDUNG bleibt, wie es ist — es ist keine neue Anmeldung.
+ * Liefert true, wenn das Token übernommen wurde.
+ */
+export function tokenErneuern(key, alt, neu) {
+  if (!alt || typeof neu !== "string" || !neu || neu === alt) return false;
+  // Nur etwas, das wie ein Token aussieht (drei Teile, JWT) — nie Müll ablegen.
+  if (!/^[\w-]+\.[\w-]+\.[\w-]+$/.test(neu)) return false;
+  if (sicher(() => window.sessionStorage.getItem(abgemeldetKey(key)))) return false;
+  const eigener = sicher(() => window.sessionStorage.getItem(key));
+  if (eigener && eigener !== alt) return false;
+  sicher(() => window.sessionStorage.setItem(key, neu));
+  if (sicher(() => window.localStorage.getItem(key)) === alt) {
+    sicher(() => window.localStorage.setItem(key, neu));
+  }
+  return true;
+}
+
 /** Nach Abmeldung oder abgelaufener Sitzung: nur dieser Tab — und die
  *  "letzte Anmeldung" nur, wenn sie zu diesem Token gehoerte. Der Tab
  *  uebernimmt danach keine fremde letzte Anmeldung mehr. */

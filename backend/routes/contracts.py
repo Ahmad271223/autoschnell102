@@ -16,20 +16,24 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 log = logging.getLogger("autohandel")
 
 
+from vertrag_dateiname import content_disposition, sicherer_dateiname  # noqa: E402
+
+
 def _safe_filename(name: str, fallback: str = "document.pdf") -> str:
     """Strip characters that could inject extra HTTP header lines or break parsers.
 
-    Removes control characters (CR, LF, TAB), double-quotes, and backslashes,
-    then trims whitespace and limits length.
+    Rollenpruefung 22.09.2026 (RP-200/RP-351): Der Name allein reicht fuer die
+    Kopfzeile nicht mehr — 'Š', '–' oder ein Emoji liessen Starlette (latin-1)
+    mit 500 scheitern. Die Kopfzeilen bauen jetzt alle ueber
+    vertrag_dateiname.content_disposition (ASCII + filename*=UTF-8''…);
+    dieser Name bleibt fuer Aufrufer, die nur den gesaeuberten Text brauchen.
     """
-    safe = re.sub(r'[\r\n\t"\\]', "", name)  # Remove newlines / quotes / backslash
-    safe = safe.strip()
-    return safe[:200] or fallback
+    return sicherer_dateiname(name, fallback=fallback)
 
 from pymongo.errors import DuplicateKeyError
 
 from deps import (
-    TERMIN_OFFEN_WERTE, current_firma, fahrzeug_bereich,
+    TERMIN_OFFEN_WERTE, current_firma, fahrzeug_bereich, ist_sucher,
     clean_doc, db, log_activity, log_activity_sicher, now_iso,
     require_active_sub, datum_iso_pruefen, uhrzeit_hhmm_pruefen,
 )
@@ -159,7 +163,14 @@ class ContractIn(BaseModel):
     eu_import: Optional[str] = ""          # "Ja" | "Nein" | ""
     drivable: Optional[str] = ""           # "Ja" | "Nein" | ""
     commercial_since_ez: Optional[str] = ""  # "Ja" | "Nein" | ""
-    previous_owners: Optional[str] = ""    # vom Händler manuell eingegeben (Anzahl)
+    # Rollenpruefung 22.09.2026 (RP-404): None = nicht angegeben (dann gilt
+    # der Wert aus dem Inserat), "" = im Dialog bewusst geleert (dann steht
+    # KEINE Angabe im Vertrag). Vorher war "" der Standard, und pdf_service
+    # holte bei "" still den Inseratswert zurueck.
+    # Rollenpruefung 22.09.2026 (RP-430): gemeint ist die ANZAHL DER
+    # FAHRZEUGHALTER (so liefern sie mobile.de, AutoScout und Kleinanzeigen,
+    # "2. Hand" = 2) — nicht die Zahl der Vorbesitzer.
+    previous_owners: Optional[str] = None  # Anzahl Fahrzeughalter (lt. Inserat / Händler)
     # Runde 22 (11.09.2026, Vorlage Ahmad): Zulassungsstatus des Fahrzeugs
     # und die Empfangsbestaetigung im Abschnitt "Unterschriften" —
     # Kaeufer: Zulassungsbescheinigung Teil I & II, KFZ mit n Schluessel(n);
@@ -199,8 +210,27 @@ class ContractIn(BaseModel):
     @classmethod
     def _empfang_datum_pruefen(cls, v):
         return datum_iso_pruefen(v)
+
+    @model_validator(mode="after")
+    def _hu_ohne_gueltigkeit(self):
+        # Rollenpruefung 22.09.2026 (RP-405): "HU/AU: Nein, gültig bis
+        # 05/2027" stand im Vertrag — der Dialog sperrte das Datumsfeld nur,
+        # statt es zu leeren. Ohne HU gibt es kein "gültig bis".
+        if str(self.hu_valid or "").strip().lower() == "nein":
+            self.hu_until = ""
+        return self
+
     # Auto-prefilled from listing description but editable per contract.
-    vehicle_description: Optional[str] = ""
+    # Rollenpruefung 22.09.2026 (RP-404): None = nicht angegeben (dann die
+    # Inseratsbeschreibung), "" = im Dialog bewusst geleert (keine
+    # Beschreibung im Vertrag). Vorher kam eine geleerte Beschreibung still
+    # aus dem Inserat zurueck.
+    vehicle_description: Optional[str] = None
+    # Rollenpruefung 22.09.2026 (RP-416): hat DERSELBE Sucher zu diesem
+    # Fahrzeug schon einen offenen Kaufvertrag, fragt die Anlage erst nach
+    # (409 mit Vertragsnummer). Mit true legt er bewusst einen zweiten an
+    # (Nachverhandlung). Steuerfeld — kommt nicht in den Vertrag.
+    zweiter_vertrag_bestaetigt: Optional[bool] = False
     # Optional override for the dealer's default AGB block. If empty,
     # the dealer's saved AGB are used (current behaviour).
     agb_text: Optional[str] = ""
@@ -374,6 +404,9 @@ async def _digitales_pdf_bytes(c: dict, user: dict, cache: bool = True) -> Optio
         contract_dict["digital_vertragstext"] = gespeichert or DIGITAL_NACHTRAEGLICH
         vehicle, dealer = _apply_contract_overrides(
             contract=contract_dict, vehicle=vehicle, dealer=dealer)
+        # Rollenpruefung 22.09.2026 (RP-452): nur das beim Vertrag
+        # festgehaltene Logo (Altvertraege: keins).
+        dealer = await _logo_einsetzen(dealer, contract_dict)
         pdf_bytes = await asyncio.to_thread(
             generate_contract_pdf, dealer=dealer, vehicle=vehicle,
             contract=contract_dict, digital=True)
@@ -418,15 +451,25 @@ def wa_nummer(recipient: Optional[str]) -> str:
     Befund Ahmad 10.09.2026: Verkaeufer-Nummern stehen meist deutsch
     ("0170 1234567" oder "+49 170 …"); wa.me/01701234567 meldet "ungueltig"
     und oeffnet keinen Chat. Regeln: '00' am Anfang weg, eine fuehrende '0'
-    wird zu '49' (deutsche Nummer), '+49…' bleibt 49…"""
-    digits = "".join(ch for ch in (recipient or "") if ch.isdigit())
-    roh = (recipient or "").strip()
+    wird zu '49' (deutsche Nummer), '+49…' bleibt 49…
+
+    Rollenpruefung 22.09.2026 (RP-515): "+49 (0)1515 1747777" (so liefert
+    mobile.de die Nummer) wurde zu 49015151747777 — wa.me meldet dann
+    "ungueltige Nummer". Die "(0)" nach der Laendervorwahl ist nur eine
+    Lesehilfe und faellt jetzt weg; ebenso eine direkt nach +49/0049
+    geschriebene 0 ("+49 0170 …")."""
+    roh = re.sub(r"\(\s*0\s*\)", "", str(recipient or "")).strip()
+    digits = "".join(ch for ch in roh if ch.isdigit())
+    international = roh.startswith("+") or digits.startswith("00")
     if roh.startswith("+"):
-        return digits
-    if digits.startswith("00"):
-        return digits[2:]
-    if digits.startswith("0") and len(digits) >= 6:
+        pass
+    elif digits.startswith("00"):
+        digits = digits[2:]
+    elif digits.startswith("0") and len(digits) >= 6:
         return "49" + digits[1:]
+    if international and digits.startswith("490"):
+        # deutsche Nummer mit Fern-Null nach der Laendervorwahl
+        digits = "49" + digits[3:]
     return digits
 
 
@@ -598,6 +641,77 @@ def _vehicle_bild_urls(vehicle: dict) -> list:
     return [u for u in urls if isinstance(u, str) and u.startswith("http")]
 
 
+#: Rollenpruefung 22.09.2026 (RP-014/RP-113): Meldung, wenn ein Sucher einen
+#: Vertrag zu einem Fahrzeug anlegen will, das nicht (mehr) in SEINER Liste
+#: steht.
+#: Rollenpruefung 22.09.2026 (RP-443): auch der Fall "war im Vergleich, ist
+#: aber aus dem Fahrzeugpool aussortiert" (aeltere Vergleiche fallen heraus) —
+#: dann hilft nur neu vergleichen, und das kostet nichts.
+FAHRZEUG_NICHT_IM_BEREICH = ("Fahrzeug nicht gefunden — bitte das Inserat zuerst "
+                             "vergleichen, dann den Kaufvertrag anlegen. War es schon "
+                             "verglichen, wurde es inzwischen aus deinem Fahrzeugpool "
+                             "aussortiert (ältere Vergleiche fallen heraus) — bitte den "
+                             "Link neu vergleichen, das kostet nichts.")
+
+
+async def _fahrzeug_fuer_vertrag(user: dict, vehicle_id: str) -> Optional[dict]:
+    """Das Fahrzeug, zu dem dieses Konto einen Kaufvertrag anlegen darf.
+
+    Rollenpruefung 22.09.2026 (RP-014/RP-113): Vorschau und Anlage suchten
+    nur nach der Firma. Fahrzeug-IDs sind aus der Anzeigennummer ableitbar
+    (v_<Anzeigennummer>) — ein Sucher konnte so am Vergleich vorbei (Abruf,
+    Tageslimit) und an einem selbst aus der Liste entfernten Fahrzeug einen
+    Vertrag anlegen und wurde dabei Mitbearbeiter. Jetzt gilt dieselbe Regel
+    wie beim Termin (appointments._fahrzeug_fuer_termin_erlaubt): Chef =
+    Firma, Sucher = eigene bzw. mitbearbeitete Fahrzeuge. Der normale Weg
+    aendert sich nicht — der Vergleich traegt den Sucher bereits ein."""
+    return await db.vehicles.find_one(
+        {"id": vehicle_id, **fahrzeug_bereich(user)}, {"_id": 0})
+
+
+# Rollenpruefung 22.09.2026 (RP-452): Das Firmenlogo stand nie im Vertrag,
+# obwohl die Einstellungen es zusagen ("Es erscheint auf deinen Verträgen").
+# Hochgeladene Logos liegen oeffentlich unter /api/files/logo/<firma>/….
+_LOGO_PFAD = "/api/files/"
+
+
+def logo_schluessel(firma: Optional[dict]) -> str:
+    """Speicher-Schluessel des hochgeladenen Firmenlogos ('' ohne Logo).
+    Nur eigene Uploads (logo/…) — nie eine fremde Adresse."""
+    url = str((firma or {}).get("logo_url") or "").strip()
+    if not url.startswith(_LOGO_PFAD):
+        return ""
+    key = url[len(_LOGO_PFAD):].split("?", 1)[0]
+    return key if key.startswith("logo/") and ".." not in key else ""
+
+
+async def _logo_bytes(key: Optional[str]) -> Optional[bytes]:
+    """Logo-Datei laden — fehlt sie oder ist der Speicher weg, gibt es den
+    Vertrag eben ohne Logo (nie ein Fehler deswegen)."""
+    if not key:
+        return None
+    try:
+        from storage_service import load_async
+        daten = await load_async(key)
+        return daten if daten and len(daten) <= 3 * 1024 * 1024 else None
+    except Exception as exc:  # noqa: BLE001
+        log.info("Logo %s fuer den Vertrag nicht ladbar: %s", key, exc)
+        return None
+
+
+async def _logo_einsetzen(dealer: dict, contract_dict: dict) -> dict:
+    """Das im Vertrag festgehaltene Logo (contract_data.logo_key) als Bytes
+    fuer pdf_service in das dealer-Dict legen. Altvertraege ohne Merker
+    bleiben ohne Logo — eine neue Fassung sieht nie anders aus als die alte,
+    nur weil heute ein Logo hinterlegt ist (Beschluss 09.09.2026: Einstellungen
+    veraendern bestehende Vertraege nie)."""
+    daten = await _logo_bytes(contract_dict.get("logo_key"))
+    if daten:
+        dealer = dict(dealer or {})
+        dealer["_logo_bytes"] = daten
+    return dealer
+
+
 # ---------- Endpoints ----------
 @router.post("/contracts/preview")
 async def preview_contract(body: ContractIn, user=Depends(require_active_sub),
@@ -607,16 +721,15 @@ async def preview_contract(body: ContractIn, user=Depends(require_active_sub),
     ?variante=digital liefert die Ausfertigung ohne Unterschriftslinien."""
     # Umbau Kaufvorgaenge 09.09.2026: das Inserat ist firmenweit gemeinsam —
     # JEDER Sucher der Firma darf dafuer einen eigenen Vertrag anlegen.
-    v = await db.vehicles.find_one(
-        {"id": body.vehicle_id, "dealer_id": user["dealer_id"],
-         "lifecycle": {"$ne": "geloescht"}}, {"_id": 0},
-    )
+    # Rollenpruefung 22.09.2026 (RP-014/RP-113): ... aber nur, wenn er es
+    # verglichen hat (Fahrzeug in seiner Liste) — siehe _fahrzeug_fuer_vertrag.
+    v = await _fahrzeug_fuer_vertrag(user, body.vehicle_id)
     if not v:
-        raise HTTPException(404, "Fahrzeug nicht gefunden")
+        raise HTTPException(404, FAHRZEUG_NICHT_IM_BEREICH)
     from deps import effective_dealer
     dealer = await effective_dealer(user) or {}
     vehicle = v["data"]
-    contract_dict = body.model_dump()
+    contract_dict = body.model_dump(exclude={"zweiter_vertrag_bestaetigt"})
     if not (contract_dict.get("additional_terms") or "").strip():
         # Wunsch Ahmad 20.09.2026: unser Standardsatz (falls eingeschaltet)
         # UND der eigene Text der Firma — nicht mehr nur das Freitextfeld.
@@ -632,11 +745,17 @@ async def preview_contract(body: ContractIn, user=Depends(require_active_sub),
     # Vehicle description: pre-fill from the scraped listing if the user
     # didn't paste/override anything. Lets the description appear in the
     # PDF without an extra step.
-    if not (contract_dict.get("vehicle_description") or "").strip():
+    # Rollenpruefung 22.09.2026 (RP-404): nur, wenn das Feld FEHLT — eine im
+    # Dialog bewusst geleerte Beschreibung ("") bleibt leer.
+    if contract_dict.get("vehicle_description") is None:
         contract_dict["vehicle_description"] = vehicle.get("description", "") or ""
     vehicle, dealer = _apply_contract_overrides(
         contract=contract_dict, vehicle=vehicle, dealer=dealer,
     )
+    # Rollenpruefung 22.09.2026 (RP-452): die Vorschau zeigt das Logo, das
+    # beim Erstellen festgehalten wuerde.
+    contract_dict["logo_key"] = logo_schluessel(dealer)
+    dealer = await _logo_einsetzen(dealer, contract_dict)
     # ReportLab ist CPU-gebunden -> in Thread auslagern, damit der
     # Event-Loop unter Last (200-500 Nutzer) nicht blockiert.
     # try/except: ein Layout-Fehler (z.B. pathologische Eingabe) wird zu
@@ -664,9 +783,46 @@ def _anfrage_hash(body) -> str:
     Schluessel selbst — bindet einen Idempotenz-Schluessel an seinen Inhalt."""
     import hashlib
     import json
-    daten = body.model_dump(exclude={"idempotency_key"})
+    # Rollenpruefung 22.09.2026 (RP-416): die Rueckfrage "zweiter Vertrag?"
+    # ist Steuerung, kein Vertragsinhalt — dieselbe Anfrage mit und ohne
+    # Bestaetigung ist derselbe Vertrag.
+    daten = body.model_dump(exclude={"idempotency_key", "zweiter_vertrag_bestaetigt"})
     roh = json.dumps(daten, sort_keys=True, default=str, ensure_ascii=False)
     return hashlib.sha256(roh.encode("utf-8")).hexdigest()[:32]
+
+
+def _vertrag_dateiname(vehicle: dict, datum: Optional[datetime] = None) -> str:
+    """Dateiname eines Kaufvertrags aus Marke und Modell (gesaeubert)."""
+    tag = (datum or datetime.now()).strftime("%Y%m%d")
+    return sicherer_dateiname(
+        f"Kaufvertrag_{(vehicle or {}).get('make_label', '')}_"
+        f"{(vehicle or {}).get('model_label', '')}_{tag}.pdf",
+        fallback=f"Kaufvertrag_{tag}.pdf")
+
+
+async def _offener_eigener_vertrag(user: dict, vehicle_id: str) -> Optional[dict]:
+    """Rollenpruefung 22.09.2026 (RP-416): der noch offene Kaufvertrag DIESES
+    Kontos zu diesem Fahrzeug (Vorgang vertrag_erstellt / gesendet /
+    abholung_geplant) — oder None.
+
+    Vorher legte ein zweiter Vertrag (z. B. nachverhandelter Preis) still
+    einen zweiten Kaufvorgang samt zweitem Abholtermin an; der erste lief mit
+    dem alten Preis weiter. Ob der alte Vertrag dabei automatisch storniert
+    werden soll, ist Ahmads Entscheidung — hier wird nur nachgefragt."""
+    from kaufvorgang import OFFEN as _kv_offen
+    async for kv in db.kaufvorgaenge.find(
+            {"dealer_id": user["dealer_id"], "user_id": user["id"],
+             "vehicle_id": vehicle_id, "status": {"$in": list(_kv_offen)}},
+            {"_id": 0, "contract_id": 1}).sort("created_at", -1).limit(5):
+        if not kv.get("contract_id"):
+            continue
+        vertrag = await db.generated_pdfs.find_one(
+            {"id": kv["contract_id"], "dealer_id": user["dealer_id"],
+             "loeschung.status": {"$ne": "laeuft"}},
+            {"_id": 0, "id": 1, "contract_no": 1})
+        if vertrag is not None:
+            return vertrag
+    return None
 
 
 @router.post("/contracts")
@@ -687,11 +843,11 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
             return {**clean_doc(vorhanden), "bereits_vorhanden": True}
     # Umbau Kaufvorgaenge 09.09.2026: Inserat firmenweit gemeinsam — jeder
     # Sucher darf einen eigenen Vertrag (= eigenen Kaufvorgang) anlegen.
-    v = await db.vehicles.find_one(
-        {"id": body.vehicle_id, "dealer_id": user["dealer_id"],
-         "lifecycle": {"$ne": "geloescht"}}, {"_id": 0})
+    # Rollenpruefung 22.09.2026 (RP-014/RP-113): Sucher nur fuer Fahrzeuge in
+    # ihrer Liste (verglichen / Mitbearbeiter) — _fahrzeug_fuer_vertrag.
+    v = await _fahrzeug_fuer_vertrag(user, body.vehicle_id)
     if not v:
-        raise HTTPException(404, "Fahrzeug nicht gefunden")
+        raise HTTPException(404, FAHRZEUG_NICHT_IM_BEREICH)
     # Runde 17 (Nr. 270): Kein neuer Kaufvertrag fuer ein Fahrzeug, das
     # bereits verkauft, geloescht oder archiviert ist — vorher entstand ein
     # Vertrag samt Auto-Datensatz, der Lebenszyklus blieb stumm stehen.
@@ -700,6 +856,22 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     if (v.get("lifecycle") or "") in VERTRAG_GESPERRT:
         raise HTTPException(409, "Fahrzeug ist bereits verkauft/gelöscht/archiviert "
                                  "— kein neuer Kaufvertrag möglich")
+    # Rollenpruefung 22.09.2026 (RP-416): zweiter Vertrag DESSELBEN Kontos zum
+    # selben Fahrzeug nur nach Rueckfrage (Doppel-Abholung durch ZWEI Sucher
+    # bleibt erlaubt, Beschluss 13.09.2026).
+    if not body.zweiter_vertrag_bestaetigt:
+        vorheriger = await _offener_eigener_vertrag(user, body.vehicle_id)
+        if vorheriger:
+            nr = vorheriger.get("contract_no") or ""
+            raise HTTPException(409, {
+                "code": "vertrag_vorhanden",
+                "contract_id": vorheriger.get("id"),
+                "contract_no": nr,
+                "msg": (f"Du hast für dieses Fahrzeug schon einen offenen Kaufvertrag"
+                        f"{f' (Nr. {nr})' if nr else ''}. Ein zweiter Vertrag ergibt einen "
+                        f"zweiten Kauf mit eigenem Abholtermin — der erste läuft mit "
+                        f"seinem Preis weiter, bis du ihn im Vertragsarchiv löschst."),
+            })
     from deps import effective_dealer
     dealer = await effective_dealer(user) or {}
     vehicle = v["data"]
@@ -728,7 +900,7 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     # Apply dealer defaults if the form didn't override them. Both
     # special_agreements and agb_text now support a per-contract override
     # (otherwise we still fall back to the dealer's saved defaults).
-    contract_dict = body.model_dump()
+    contract_dict = body.model_dump(exclude={"zweiter_vertrag_bestaetigt"})
     if not (contract_dict.get("additional_terms") or "").strip():
         # Wunsch Ahmad 20.09.2026: unser Standardsatz (falls eingeschaltet)
         # UND der eigene Text der Firma — nicht mehr nur das Freitextfeld.
@@ -736,7 +908,9 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
         contract_dict["additional_terms"] = _vorlagen.sondervereinbarungen(dealer)
     if not (contract_dict.get("agb_text") or "").strip():
         contract_dict["agb_text"] = dealer.get("default_terms", "") or ""
-    if not (contract_dict.get("vehicle_description") or "").strip():
+    # Rollenpruefung 22.09.2026 (RP-404): nur ein FEHLENDES Feld wird aus dem
+    # Inserat gefuellt — "" heisst "bewusst geleert".
+    if contract_dict.get("vehicle_description") is None:
         contract_dict["vehicle_description"] = vehicle.get("description", "") or ""
     # Text der digitalen Ausfertigung zum Zeitpunkt der Erstellung
     # festhalten (Beweis: so wurde der Vertrag verschickt). Ein im Dialog
@@ -751,11 +925,19 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     # Runde 25: Kaeuferdaten einfrieren, damit spaetere Fassungen und das
     # Abholprotokoll genau diesen Stand zeigen (Pruefbefund 12.09.2026).
     kaeufer_einfrieren(contract_dict, dealer)
+    # Rollenpruefung 22.09.2026 (RP-452): das Firmenlogo gehoert zum Kaeufer —
+    # der Schluessel wird wie die Kaeuferdaten festgehalten; spaetere Fassungen
+    # nehmen genau dieses Logo (oder keins), nie das heutige.
+    contract_dict["logo_key"] = logo_schluessel(dealer)
+    dealer = await _logo_einsetzen(dealer, contract_dict)
     # Vertragsnummer VOR der PDF-Erzeugung festlegen, damit sie im Dokument
     # (Kopf + Fußzeile) erscheint und im Archiv wiederauffindbar ist.
     pdf_id = str(uuid.uuid4())
     contract_no = f"KV-{datetime.now().strftime('%Y%m%d')}-{pdf_id[:6].upper()}"
     contract_dict["contract_no"] = contract_no
+    # Rollenpruefung 22.09.2026 (RP-494): die erste Fassung — jede neue Fassung
+    # (verschobener Termin, Abholung) traegt ihre Nummer im PDF-Kopf.
+    contract_dict["fassung"] = 1
     # ReportLab ist CPU-gebunden -> in Thread auslagern, damit der
     # Event-Loop unter Last (200-500 Nutzer) nicht blockiert.
     # try/except: ein Layout-Fehler (z.B. pathologische Eingabe) wird zu
@@ -793,7 +975,10 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
         "pdf_digital_b64": pdf_digital_b64,
         "vehicle_image_urls": vehicle_image_urls,
         "inserat_stand": inserat_stand,
-        "filename": f"Kaufvertrag_{vehicle.get('make_label','')}_{vehicle.get('model_label','')}_{datetime.now().strftime('%Y%m%d')}.pdf",
+        # Rollenpruefung 22.09.2026 (RP-200/RP-351): schon beim Anlegen ohne
+        # Steuerzeichen/Anfuehrungszeichen; die Kopfzeile baut
+        # content_disposition (ASCII + UTF-8), 'Š' & Co. geben kein 500 mehr.
+        "filename": _vertrag_dateiname(vehicle),
         "send_status": [],
         "status": "erstellt",
         "appointment_id": None,
@@ -852,7 +1037,11 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
             db, user["dealer_id"], body.vehicle_id)
         auto_daten_neu = auto_daten_id is None
         if auto_daten_neu:
-            auto_daten_id = await auto_daten.anlegen(db, contract_dict, vehicle)
+            # Rollenpruefung 22.09.2026 (RP-401): Kaufdatum ausdruecklich =
+            # Erstellung des Vertrags (anlegen nimmt sonst "jetzt" — ueber
+            # Mitternacht haette der Datensatz einen anderen Tag als der Vertrag).
+            auto_daten_id = await auto_daten.anlegen(db, contract_dict, vehicle,
+                                                     gekauft_am=doc["created_at"])
         doc["admin_vehicle_data_id"] = auto_daten_id
         try:
             await db.generated_pdfs.insert_one(doc)
@@ -896,8 +1085,10 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
             # Vertrag einen frischen — kein Verweis ins Leere.
             try:
                 if not await auto_daten.aktualisieren(db, auto_daten_id, contract_dict, vehicle,
-                                                      gekauft_am=now_iso()):
-                    neu_id = await auto_daten.anlegen(db, contract_dict, vehicle)
+                                                      gekauft_am=doc["created_at"]):
+                    # RP-401: auch der Ersatz-Datensatz traegt das Vertragsdatum.
+                    neu_id = await auto_daten.anlegen(db, contract_dict, vehicle,
+                                                      gekauft_am=doc["created_at"])
                     r_neu = await db.generated_pdfs.update_one(
                         {"id": pdf_id, "admin_vehicle_data_id": auto_daten_id},
                         {"$set": {"admin_vehicle_data_id": neu_id}})
@@ -1199,6 +1390,64 @@ def _vertrag_bereich(user) -> Dict[str, Any]:
 CONTRACTS_LIST_MAX = 2000
 
 
+def _vertrag_maskieren(user: dict, doc: Optional[dict]) -> Optional[dict]:
+    """Rollenpruefung 22.09.2026 (RP-017/RP-116): Konto-IDs von Chef und
+    Kollegen aus Vertragsdaten entfernen — nur fuer Sucher, wie
+    deps.konten_maskieren bei Fahrzeugen (Runde 30).
+
+    Ein Sucher sieht nur eigene Vertraege (user_id ist seine eigene ID);
+    Herkunfts- und Bearbeitungsvermerke nennen aber andere Konten:
+    uebergeben_von, pickup_history[].geaendert_von (Chef verschiebt den
+    Termin), freigabe[_alt].erstellt_von (Chef erzeugte den Link) und bei
+    archivierten Fassungen archived_by. Kein Rechte-Leck, aber dieselbe
+    Regel wie ueberall. Aendert das Dokument an Ort und Stelle."""
+    if not ist_sucher(user) or not isinstance(doc, dict):
+        return doc
+    doc.pop("uebergeben_von", None)
+    doc.pop("archived_by", None)
+    if isinstance(doc.get("freigabe"), dict):
+        doc["freigabe"] = {k: w for k, w in doc["freigabe"].items() if k != "erstellt_von"}
+    if isinstance(doc.get("freigabe_alt"), list):
+        doc["freigabe_alt"] = [{k: w for k, w in f.items() if k != "erstellt_von"}
+                               if isinstance(f, dict) else f for f in doc["freigabe_alt"]]
+    if isinstance(doc.get("pickup_history"), list):
+        doc["pickup_history"] = [{k: w for k, w in e.items() if k != "geaendert_von"}
+                                 if isinstance(e, dict) else e for e in doc["pickup_history"]]
+    return doc
+
+
+async def _vorgang_und_termin_anreichern(user: dict, items: list) -> list:
+    """Rollenpruefung 22.09.2026 (RP-406/RP-417): je Vertrag
+    `kaufvorgang_status` und `termin_offen` (gibt es einen OFFENEN
+    Abholtermin?) — in ZWEI Sammelabfragen fuer die ganze Seite.
+
+    Vorher zeigte der Versand-Dialog nach "nicht abgeholt" / "storniert"
+    "Termin im Terminplaner angelegt", obwohl nichts angelegt wurde: er
+    kannte nur appointment_id, und die zeigt weiter auf den geschlossenen
+    Termin. Wirft nie — ohne Anreicherung faellt die Oberflaeche auf
+    appointment_id zurueck."""
+    ids = [i.get("id") for i in items if isinstance(i, dict) and i.get("id")]
+    if not ids:
+        return items
+    try:
+        vorgaenge: Dict[str, str] = {}
+        async for kv in db.kaufvorgaenge.find(
+                {"dealer_id": user["dealer_id"], "contract_id": {"$in": ids}},
+                {"_id": 0, "contract_id": 1, "status": 1}):
+            vorgaenge[kv.get("contract_id")] = kv.get("status")
+        offen = set(await db.appointments.distinct(
+            "contract_id", {"dealer_id": user["dealer_id"], "contract_id": {"$in": ids},
+                            "status": {"$in": TERMIN_OFFEN_WERTE}}))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Vertragsliste: Vorgang/Termin nicht angereichert: %s", exc)
+        return items
+    for i in items:
+        if isinstance(i, dict) and i.get("id"):
+            i["kaufvorgang_status"] = vorgaenge.get(i["id"])
+            i["termin_offen"] = i["id"] in offen
+    return items
+
+
 @router.get("/contracts")
 async def list_contracts(
     response: Response,
@@ -1211,11 +1460,20 @@ async def list_contracts(
     q: Annotated[Optional[str], Query(max_length=200)] = None,
     days: Annotated[Optional[int], Query(ge=1, le=3650)] = None,
     channel: Optional[str] = None,
+    limit: Annotated[Optional[int], Query(ge=1, le=500)] = None,
+    before: Annotated[Optional[str], Query(max_length=64)] = None,
 ):
     query: Dict[str, Any] = _vertrag_bereich(user)
+    # Rollenpruefung 22.09.2026 (RP-007/RP-106/RP-257): Das Archiv lud bis zu
+    # 2.000 Vertraege auf einmal (und je Karte zwei Beweis-Abfragen). Jetzt
+    # seitenweise: `limit` + Cursor `before` (created_at des letzten Eintrags,
+    # wie /snapshots); X-Next-Before nennt den Cursor der naechsten Seite.
+    # Ohne `limit` bleibt es beim alten Verhalten (bis 2.000, X-Truncated).
     if days:
         since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         query["created_at"] = {"$gte": since}
+    if before:
+        query.setdefault("created_at", {})["$lt"] = before
     if q:
         # re.escape prevents ReDoS and NoSQL-regex injection via crafted patterns.
         q_safe = re.escape(q)
@@ -1231,11 +1489,12 @@ async def list_contracts(
         # Pruefung 14.09.2026 (Liste 3, Nr. 7): in der Abfrage filtern — vorher
         # erst NACH dem 2000er-Schnitt, aeltere Treffer fehlten trotz Filter.
         query["send_status.channel"] = channel
+    grenze = limit or CONTRACTS_LIST_MAX
     items = await db.generated_pdfs.find(
         query, {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0},
-    ).sort("created_at", -1).to_list(CONTRACTS_LIST_MAX + 1)
-    abgeschnitten = len(items) > CONTRACTS_LIST_MAX
-    items = items[:CONTRACTS_LIST_MAX]
+    ).sort("created_at", -1).to_list(grenze + 1)
+    abgeschnitten = len(items) > grenze
+    items = items[:grenze]
     # 10.09.2026: Inseratsfotos neben dem Vertrag als Vorschaubilder ueber
     # den eigenen Bild-Proxy (klein, zuverlaessig).
     from bild_proxy import thumbs as _thumbs
@@ -1243,6 +1502,14 @@ async def list_contracts(
         if i.get("vehicle_image_urls"):
             i["vehicle_image_urls_thumbs"] = _thumbs(i["vehicle_image_urls"][:12])
     response.headers["X-Truncated"] = "1" if abgeschnitten else "0"
+    if limit and abgeschnitten and items:
+        response.headers["X-Next-Before"] = str(items[-1].get("created_at") or "")
+    # Rollenpruefung 22.09.2026 (RP-406/RP-417): Stand von Kaufvorgang und
+    # Abholtermin je Vertrag (eine Sammelabfrage) — der Versand-Dialog und das
+    # Archiv wissen so, ob noch ein OFFENER Termin existiert.
+    await _vorgang_und_termin_anreichern(user, items)
+    for i in items:
+        _vertrag_maskieren(user, i)
     # Alt-Vertraege ohne `vehicle_image_urls` (frueher lagen die Fotos beim
     # Fahrzeug unter `data.images`, nicht `image_urls`): die Fotos werden
     # NUR fuer die Anzeige aus dem Fahrzeug ergaenzt und als nachgetragen
@@ -1302,7 +1569,10 @@ async def get_contract(contract_id: str, user=Depends(current_firma)):
     )
     if not c:
         raise HTTPException(404, "Vertrag nicht gefunden")
-    return c
+    # Rollenpruefung 22.09.2026 (RP-406): wie die Liste mit Vorgangs-/Terminstand.
+    await _vorgang_und_termin_anreichern(user, [c])
+    # Rollenpruefung 22.09.2026 (RP-017/RP-116): keine fremden Konto-IDs fuer Sucher.
+    return _vertrag_maskieren(user, c)
 
 
 @router.get("/contracts/{contract_id}/pdf")
@@ -1326,12 +1596,13 @@ async def get_contract_pdf(contract_id: str, user=Depends(current_firma),
             raise HTTPException(503, DIGITAL_FEHLER_HINWEIS)
     else:
         pdf_bytes = base64.b64decode(c["pdf_b64"])
-    fname = _safe_filename(c.get("filename") or "", fallback="kaufvertrag.pdf")
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
         # Pruefung 14.09.2026 (Liste 3, Nr. 4): Personendaten nie im Browser-Cache.
-        headers={"Content-Disposition": f'inline; filename="{fname}"',
+        # Rollenpruefung 22.09.2026 (RP-200): ASCII + UTF-8-Name, kein 500 bei 'Š'.
+        headers={"Content-Disposition": content_disposition(
+                     c.get("filename") or "", fallback="kaufvertrag.pdf"),
                  "Cache-Control": "no-store"},
     )
 
@@ -1423,11 +1694,12 @@ async def public_vertrag_pdf(token: str, request: Request):
     await log_activity_sicher(c.get("dealer_id"), None, "vertrag.link.abgerufen",
                               ref=c["id"], meta={"anonym": True,
                                                  "version": geteilte_version})
-    fname = _safe_filename(fname_quelle, fallback="kaufvertrag.pdf")
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'inline; filename="{fname}"',
+        # Rollenpruefung 22.09.2026 (RP-200): ASCII + UTF-8-Name, kein 500 bei 'Š'.
+        headers={"Content-Disposition": content_disposition(
+                     fname_quelle, fallback="kaufvertrag.pdf"),
                  "Cache-Control": "private, no-store",
                  "X-Robots-Tag": "noindex"},
     )
@@ -1444,12 +1716,19 @@ async def list_contract_versions(contract_id: str, response: Response,
     if not c:
         raise HTTPException(404, "Vertrag nicht gefunden")
     grenze = 1000
+    # Rollenpruefung 22.09.2026 (RP-045/RP-144): bei einer Kuerzung fehlten
+    # die NEUESTEN Fassungen (aufsteigend gelesen, hinten abgeschnitten). Jetzt
+    # die juengsten `grenze` lesen und aufsteigend ausliefern; das Archiv
+    # zeigt den Hinweis auf X-Truncated.
     fassungen = await db.generated_pdf_versions.find(
         {"contract_id": contract_id, "dealer_id": user["dealer_id"]},
         {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0, "contract_data": 0},
-    ).sort("version", 1).to_list(grenze + 1)
+    ).sort("version", -1).to_list(grenze + 1)
     response.headers["X-Truncated"] = "1" if len(fassungen) > grenze else "0"
-    return fassungen[:grenze]
+    fassungen = list(reversed(fassungen[:grenze]))
+    # Rollenpruefung 22.09.2026 (RP-017/RP-116): archived_by nennt das Konto,
+    # das die Fassung abgeloest hat (oft der Chef) — fuer Sucher weg.
+    return [_vertrag_maskieren(user, f) for f in fassungen]
 
 
 @router.get("/contracts/{contract_id}/versions/{version}/pdf")
@@ -1485,12 +1764,12 @@ async def get_contract_version_pdf(contract_id: str, version: int,
             raise HTTPException(503, DIGITAL_FEHLER_HINWEIS)
     else:
         pdf_bytes = base64.b64decode(v["pdf_b64"])
-    fname = _safe_filename(v.get("filename") or "",
-                           fallback=f"kaufvertrag-v{version}.pdf")
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'inline; filename="{fname}"',
+        # Rollenpruefung 22.09.2026 (RP-200): ASCII + UTF-8-Name, kein 500 bei 'Š'.
+        headers={"Content-Disposition": content_disposition(
+                     v.get("filename") or "", fallback=f"kaufvertrag-v{version}.pdf"),
                  "Cache-Control": "no-store"},
     )
 
@@ -1593,6 +1872,56 @@ def _kein_laufender_versand() -> Dict[str, Any]:
 VERSAND_LAEUFT_TEXT = ("Dieser Vertrag wird gerade verschickt — bitte in ein paar "
                        "Sekunden erneut versuchen.")
 
+#: Rollenpruefung 22.09.2026 (RP-216/RP-367): Kaufvorgaenge, zu denen kein
+#: Vertrag und keine Folge-Mail mehr an den Verkaeufer geht.
+KAUF_BEENDET = ("storniert", "nicht_abgeholt")
+VERSAND_KAUF_BEENDET = ("Der Kauf ist storniert bzw. das Fahrzeug wurde nicht abgeholt — "
+                        "der Kaufvertrag wird nicht mehr verschickt. Soll die Abholung "
+                        "doch stattfinden, zuerst einen neuen Abholtermin anlegen.")
+
+
+async def _kaufvorgang_status(c: dict) -> Optional[str]:
+    """Status des Kaufvorgangs zu diesem Vertrag (None = keiner / nicht
+    lesbar). Rein lesend; ein Lesefehler sperrt den Versand nicht."""
+    try:
+        kv = await db.kaufvorgaenge.find_one(
+            {"contract_id": c.get("id"), "dealer_id": c.get("dealer_id")},
+            {"_id": 0, "status": 1})
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Kaufvorgang zu Vertrag %s nicht lesbar: %s", c.get("id"), exc)
+        return None
+    return (kv or {}).get("status")
+
+
+def _platzhalter_im_versand(text: Optional[str], vertrag: dict, firma: dict,
+                            user: dict) -> Optional[str]:
+    """Rollenpruefung 22.09.2026 (RP-212/RP-363/RP-424): Platzhalter in
+    Betreff und Nachricht des Vertragsversands serverseitig einsetzen —
+    dieselbe Tabelle wie PDF und Folge-Mail (vertrag_platzhalter). Leerer
+    Text bleibt leer (dann nimmt vertrag_mail den Standard)."""
+    if not text:
+        return text
+    from vertrag_platzhalter import ersetzen as _ersetzen
+    return _ersetzen(text, vertrag, firma, user)
+
+
+async def _haengenden_versand_abloesen(contract_id: str, bereich: dict,
+                                       eintrag: dict) -> None:
+    """Rollenpruefung 22.09.2026 (RP-221/RP-372): einen haengenden
+    Versandeintrag (laeuft/unklar, ohne Ergebnis) mit ANDEREM Inhalt als
+    "abgeloest" markieren. Der Eintrag bleibt als Beleg; nur ein Eintrag,
+    der seit dem Lesen nicht wieder aufgenommen wurde, wird angefasst."""
+    await db.generated_pdfs.update_one(
+        {"id": contract_id, **bereich,
+         "send_status": {"$elemMatch": {
+             "idempotency_key": eintrag.get("idempotency_key"),
+             "zustellung": {"$in": ["laeuft", "unklar"]},
+             "wiederaufnahme_am": eintrag.get("wiederaufnahme_am")}}},
+        {"$set": {"send_status.$.zustellung": "abgeloest",
+                  "send_status.$.abgeloest_am": now_iso()}})
+    log.warning("Vertrag %s: haengender Versand %s (anderer Inhalt) abgeloest",
+                contract_id, eintrag.get("idempotency_key"))
+
 
 def _abschluss(send_entry: dict, neuer_status: str, fassung_veraltet: bool,
                *, wiederaufnahme: bool) -> dict:
@@ -1646,12 +1975,20 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
             raise HTTPException(422, "Bitte genau EINE gültige E-Mail-Adresse eingeben "
                                      "(z. B. name@beispiel.de).")
         body.recipient = adresse
+    # Rollenpruefung 22.09.2026 (RP-216/RP-367): Nach einem Storno (auch dem
+    # V-12-Rueckweg durch den Chef) oder "nicht abgeholt" liess sich der
+    # Kaufvertrag weiter an den Verkaeufer schicken — dieselbe Regel wie bei
+    # der Folge-Mail (FOLGE_MAIL_STORNIERT). Erst ein neuer Abholtermin macht
+    # den Kauf wieder offen.
+    if await _kaufvorgang_status(c) in KAUF_BEENDET:
+        raise HTTPException(409, VERSAND_KAUF_BEENDET)
     # Runde 16 (15.09.2026): Versand-Limit je Konto — kein Spam-/Kostenpfad
     # ueber frei eingetragene Empfaenger (Resend/SMTP).
     if not await _versand_limiter.check(f"konto:{user.get('id')}"):
         raise HTTPException(429, f"Zu viele Versände in kurzer Zeit — höchstens "
                                  f"{VERSAND_JE_KONTO_10MIN} je 10 Minuten. Bitte etwas warten.")
     anfrage_hash = _versand_anfrage_hash(c, body)
+    frueherer_versand_abgeloest = False
     # Idempotenz RESERVIEREND (Review 09/2026): Der Schluessel wurde vorher
     # erst NACH dem Senden eingetragen — zwei gleichzeitige Anfragen mit
     # demselben Schluessel konnten beide zustellen. Jetzt wird der Eintrag
@@ -1703,7 +2040,20 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                              and (e.get("recipient") or "") == (body.recipient or "")
                              and e.get("zustellung") in ("laeuft", "unklar")
                              and _zustellung_haengt(e)), None)
-            if haengend:
+            if haengend and haengend.get("anfrage_hash") \
+                    and haengend["anfrage_hash"] != anfrage_hash:
+                # Rollenpruefung 22.09.2026 (RP-221/RP-372): Der haengende
+                # Versand hatte einen ANDEREN Inhalt (neue Fassung, anderer
+                # Text). Frueher wurde er trotzdem uebernommen und scheiterte
+                # dann an der Hash-Pruefung mit 409 — und weil "unklar" nie
+                # verschwindet, war derselbe Empfaenger fuer immer gesperrt,
+                # auch nach dem Neuladen. Jetzt: der alte Eintrag bleibt als
+                # Beleg stehen (zustellung "abgeloest"), dieser Versand wird
+                # normal reserviert. Vor Doppelversand schuetzt weiter die
+                # Sperre fuer FRISCH laufende Versande (unten).
+                await _haengenden_versand_abloesen(contract_id, bereich, haengend)
+                frueherer_versand_abgeloest = True
+            elif haengend:
                 body.idempotency_key = haengend["idempotency_key"]
                 vorhanden = haengend
         if vorhanden and vorhanden.get("anfrage_hash") and vorhanden["anfrage_hash"] != anfrage_hash:
@@ -1871,7 +2221,12 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                 bis_text = datetime.fromisoformat(gueltig_bis).strftime("%d.%m.%Y")
             except ValueError:
                 bis_text = gueltig_bis[:10]
-            text = (body.message or "").rstrip() + \
+            # Rollenpruefung 22.09.2026 (RP-212/RP-363): auch selbst getippte
+            # Platzhalter werden eingesetzt — mit der Firma DES VERTRAGS.
+            from deps import effective_dealer as _eff
+            nachricht = _platzhalter_im_versand(
+                body.message, c, _firma_des_vertrags(c, await _eff(user) or {}), user)
+            text = (nachricht or "").rstrip() + \
                 f"\n\nKaufvertrag als PDF (Link gültig bis {bis_text}):\n{link}"
             out["wa_url"] = f"https://wa.me/{digits}?text={quote_plus(text)}"
             out["download_link"] = link
@@ -1923,14 +2278,27 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
             # gewinnen ueber den heutigen Stand von Firma/Filiale.
             _, firma = _apply_contract_overrides(
                 contract=dict(c.get("contract_data") or {}), vehicle={}, dealer=dict(firma))
+            # Rollenpruefung 22.09.2026 (RP-212/RP-363/RP-424): Platzhalter in
+            # Betreff UND Text setzt jetzt auch der Server ein. Vorher ersetzte
+            # nur der Browser beim Oeffnen des Dialogs — der Betreff nie, und
+            # spaeter getippte Platzhalter gingen woertlich an den Verkaeufer.
+            # Idempotent: bereits ersetzter Text hat keine Klammern mehr.
+            nachricht = _platzhalter_im_versand(body.message, c, firma, user)
+            betreff_roh = _platzhalter_im_versand(body.subject, c, firma, user)
             betreff, text, html = vertrag_mail(
                 vertrag=c, firma=firma, sucher=user,
-                nachricht=body.message, betreff=body.subject)
+                nachricht=nachricht, betreff=betreff_roh)
             # Kontonummer (13.09.2026): Konten ohne E-Mail — Antworten gehen an
             # die eigene Adresse des Suchers, sonst an die Firmenadresse; die
             # Belegkopie NUR an eine eigene Adresse (sonst kopie=nicht_moeglich);
             # beim Chef zaehlt die Firmenadresse als seine eigene.
             sucher_mail, antwort_adresse = sucher_kontakt(user, firma)
+            # Rollenpruefung 22.09.2026 (RP-473): ohne gueltige Antwortadresse
+            # landen Antworten des Verkaeufers bei unserer Plattformadresse —
+            # die Mail verspricht das dann nicht mehr (vertrag_mail), und die
+            # Oberflaeche sagt es dem Sucher.
+            if not email_service.gueltige_adresse(antwort_adresse):
+                out["antwort_adresse_fehlt"] = True
             ok, beleg = await email_service.send_email_mit_beleg(
                 body.recipient, betreff, text, anhang=pdf_bytes,
                 anhang_name=dateiname, html=html,
@@ -2005,7 +2373,7 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                 k_betreff, k_text, k_html = kopie_mail(
                     vertrag=c, firma=firma, sucher=user,
                     empfaenger_adresse=body.recipient,
-                    betreff_original=betreff, nachricht=body.message,
+                    betreff_original=betreff, nachricht=nachricht,
                     zeitpunkt=reserviert_am)
                 out["kopie"] = "gesendet" if await email_service.send_email(
                     sucher_mail, k_betreff, k_text, anhang=pdf_bytes,
@@ -2030,6 +2398,10 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
     if out.get("download_link"):
         send_entry["download_link"] = out["download_link"]
         send_entry["link_gueltig_bis"] = out.get("link_gueltig_bis")
+    if frueherer_versand_abgeloest:
+        # Rollenpruefung 22.09.2026 (RP-221): Hinweis fuer die Oberflaeche —
+        # ein frueherer Versuch an diesen Empfaenger blieb ohne Ergebnis.
+        out["frueherer_versand_unklar"] = True
     if reserviert:
         # Reservierten Eintrag mit dem Ergebnis fuellen (positional update).
         send_entry["idempotency_key"] = body.idempotency_key
@@ -2133,6 +2505,48 @@ FOLGE_MAIL_ART_HINWEIS = {
 }
 FOLGE_MAIL_STORNIERT = ("Der Kauf ist storniert bzw. nicht abgeholt — diese "
                         "Mail wird nicht mehr verschickt.")
+#: Rollenpruefung 22.09.2026 (RP-215/RP-366)
+FOLGE_MAIL_BAHN_OHNE_VERBINDUNG = (
+    "Bitte zuerst die Bahnverbindung (Zug und voraussichtliche Ankunftszeit des "
+    "Fahrers) in den Text schreiben — die Vorlage kündigt sie an, und die Mail hat "
+    "keinen Anhang.")
+
+
+def _ohne_leerraum(text: Optional[str]) -> str:
+    """Vergleichsform eines Textes: Leerraum und Zeilenumbrueche egal."""
+    return " ".join(str(text or "").split())
+
+
+async def _folge_mail_vorhanden(contract_id: str, bereich: dict,
+                                schluessel: str) -> Optional[dict]:
+    """Rollenpruefung 22.09.2026 (RP-434): Was ist mit dem Eintrag, der
+    diesen Schluessel schon traegt?
+
+    * versendet/mock -> {"zustellung": …} (wirklich schon verschickt)
+    * laeuft, noch frisch -> {"zustellung": "laeuft"} (die Oberflaeche sagt
+      "laeuft noch" statt "bereits verschickt")
+    * laeuft, aber haengend (Prozess starb) -> wird ATOMAR neu beansprucht,
+      Rueckgabe None: der Aufrufer versendet erneut (derselbe Anbieter-
+      Schluessel verhindert eine doppelte Zustellung)."""
+    doc = await db.generated_pdfs.find_one({"id": contract_id, **bereich},
+                                           {"_id": 0, "send_status": 1})
+    eintrag = next((e for e in (doc or {}).get("send_status") or []
+                    if isinstance(e, dict) and e.get("idempotency_key") == schluessel), None)
+    if eintrag is None:
+        return {"zustellung": "laeuft"}
+    zustellung = eintrag.get("zustellung") or ""
+    if zustellung != "laeuft":
+        return {"zustellung": zustellung}
+    if _zustellung_haengt(eintrag):
+        res = await db.generated_pdfs.update_one(
+            {"id": contract_id, **bereich,
+             "send_status": {"$elemMatch": {
+                 "idempotency_key": schluessel, "zustellung": "laeuft",
+                 "wiederaufnahme_am": eintrag.get("wiederaufnahme_am")}}},
+            {"$set": {"send_status.$.wiederaufnahme_am": now_iso()}})
+        if res.modified_count:
+            return None
+    return {"zustellung": "laeuft"}
 
 
 def _firma_des_vertrags(vertrag: dict, firma: dict) -> dict:
@@ -2200,9 +2614,27 @@ async def folge_mail_senden(contract_id: str, body: FolgeMailIn,
     # sonst las der Verkaeufer "{kunde_name}" (Rollenpruefung 21.09.2026).
     betreff = _ersetzen((body.subject or "").strip() or std_betreff, c, firma, user)
     text = _ersetzen((body.message or "").strip() or std_text, c, firma, user)
+    if art == "bahn" and _ohne_leerraum(text) == _ohne_leerraum(
+            _ersetzen(std_text, c, firma, user)):
+        # Rollenpruefung 22.09.2026 (RP-215/RP-366): Die Vorlage kuendigt
+        # "anbei … die Bahnverbindung mit der voraussichtlichen Ankunftszeit"
+        # an — verschickt wird aber nur Text, ohne Anhang. Unveraendert
+        # abgeschickt versprach die Mail etwas, das fehlt. (Den Wortlaut der
+        # Vorlage aendert nur Ahmad.)
+        raise HTTPException(400, FOLGE_MAIL_BAHN_OHNE_VERBINDUNG)
 
     schluessel = (body.idempotency_key or "").strip()
     if schluessel:
+        # Rollenpruefung 22.09.2026 (RP-434): Ein frueher gescheiterter
+        # Versuch mit DIESEM Schluessel (Altbestand: zustellung
+        # "fehlgeschlagen") blockiert nicht mehr — vorher meldete der naechste
+        # Klick "bereits verschickt", obwohl nie etwas rausging.
+        await db.generated_pdfs.update_one(
+            {"id": contract_id, **bereich,
+             "send_status": {"$elemMatch": {"idempotency_key": schluessel,
+                                            "zustellung": "fehlgeschlagen"}}},
+            {"$pull": {"send_status": {"idempotency_key": schluessel,
+                                       "zustellung": "fehlgeschlagen"}}})
         # Doppelklick-Schutz wie beim Vertragsversand: derselbe Schluessel
         # legt garantiert nur EINEN Eintrag an.
         res = await db.generated_pdfs.update_one(
@@ -2215,7 +2647,16 @@ async def folge_mail_senden(contract_id: str, body: FolgeMailIn,
                 "$slice": -SEND_STATUS_MAX}}})
         if res.modified_count == 0:
             await _reservierung_nachlesen(contract_id, bereich, schluessel)
-            return {"status": "ok", "bereits_gesendet": True, "art": art}
+            # RP-434: ehrlich sagen, was mit dem vorhandenen Eintrag ist —
+            # "laeuft" heisst "laeuft noch", nicht "verschickt".
+            antwort = await _folge_mail_vorhanden(contract_id, bereich, schluessel)
+            if antwort is not None:
+                return {"status": "ok", "bereits_gesendet": True, "art": art, **antwort}
+            # None: ein abgebrochener Versuch (Prozess starb) wurde gerade neu
+            # beansprucht — derselbe Anbieter-Schluessel unten verhindert eine
+            # doppelte Zustellung.
+            log.info("Folge-Mail %s zu %s: haengender Versuch wird wiederholt",
+                     art, contract_id)
 
     _, antwort_adresse = sucher_kontakt(user, firma)
     if MOCK_PROVIDER_FETCH:
@@ -2233,10 +2674,15 @@ async def folge_mail_senden(contract_id: str, body: FolgeMailIn,
             ok, beleg = False, ""
     if not ok:
         if schluessel:
+            # Rollenpruefung 22.09.2026 (RP-434): Reservierung wieder
+            # entfernen (wie _reservierung_zurueck beim Vertragsversand) —
+            # vorher blieb "fehlgeschlagen" stehen, und derselbe Schluessel
+            # (der Dialog behaelt ihn fuer die Wiederholung) meldete danach
+            # "bereits verschickt".
             await db.generated_pdfs.update_one(
-                {"id": contract_id, **bereich,
-                 "send_status.idempotency_key": schluessel},
-                {"$set": {"send_status.$.zustellung": "fehlgeschlagen"}})
+                {"id": contract_id, **bereich},
+                {"$pull": {"send_status": {"idempotency_key": schluessel,
+                                           "zustellung": "laeuft"}}})
         raise HTTPException(502, "E-Mail-Versand fehlgeschlagen — bitte in ein "
                                  "paar Minuten erneut versuchen.")
     if schluessel:
@@ -2249,6 +2695,36 @@ async def folge_mail_senden(contract_id: str, body: FolgeMailIn,
                               f"pdf.folgemail.{art}", ref=contract_id)
     return {"status": "ok", "art": art, "empfaenger": empfaenger,
             "betreff": betreff, "zustellung": "mock" if beleg == "mock" else "versendet"}
+
+
+async def _offene_termine_beim_loeschen_stornieren(user: dict, contract_id: str) -> int:
+    """Rollenpruefung 22.09.2026 (RP-415): offene Abholtermine eines Vertrags,
+    der gerade manuell geloescht wird, auf "storniert" setzen — samt Fahrer-
+    Zusage, die damit hinfaellig ist. Felder wie beim Statuswechsel im
+    Terminplaner (status_changed_at, abgeschlossen_seit beim ERSTEN Endstatus).
+    Die Fristloeschung bleibt davon unberuehrt (sie laeuft nur bei Vertraegen,
+    die nicht mehr in Gebrauch sind). Liefert die Zahl der stornierten Termine."""
+    jetzt = now_iso()
+    n = 0
+    async for a in db.appointments.find(
+            {"contract_id": contract_id, "dealer_id": user["dealer_id"],
+             "status": {"$in": TERMIN_OFFEN_WERTE}},
+            {"_id": 0, "id": 1, "driver_id": 1, "zuteilung": 1, "abgeschlossen_seit": 1}):
+        aenderung = {"status": "storniert", "status_changed_at": jetzt,
+                     "updated_at": jetzt, "storno_grund": "vertrag_geloescht"}
+        if not a.get("abgeschlossen_seit"):
+            aenderung["abgeschlossen_seit"] = jetzt
+        res = await db.appointments.update_one(
+            {"id": a["id"], "dealer_id": user["dealer_id"],
+             "status": {"$in": TERMIN_OFFEN_WERTE}},
+            {"$set": aenderung})
+        if res.modified_count:
+            n += 1
+            await log_activity_sicher(
+                user["dealer_id"], user["id"], "termin.storniert.vertrag_geloescht",
+                ref=a["id"], meta={"contract_id": contract_id,
+                                   "fahrer_zugesagt": a.get("zuteilung") == "angenommen"})
+    return n
 
 
 @router.delete("/contracts/{contract_id}")
@@ -2307,6 +2783,13 @@ async def delete_contract(contract_id: str, user=Depends(current_firma)):
         raise HTTPException(409, "Zu diesem Vertrag gibt es ein unterschriebenes Abhol-"
                                  "protokoll — der Beleg bleibt. Löschen kann ihn nur der "
                                  "Händler-Hauptaccount.")
+    # Rollenpruefung 22.09.2026 (RP-415): Die Kaskade leerte am OFFENEN Termin
+    # nur Verkaeuferdaten und Adresse — Status und Fahrer-Zusage blieben. Der
+    # Fahrer sah eine offene Fahrt ohne Adresse, und der Sucher konnte sie
+    # nicht mehr loeschen (409 bei angenommener Fahrt). Offene Termine des
+    # Vertrags werden jetzt vorher storniert (mit Verlaufseintrag). Das
+    # Loeschrecht des Chefs bleibt wie entschieden (21.09.2026).
+    await _offene_termine_beim_loeschen_stornieren(user, contract_id)
     ok = await vertrag_endgueltig_loeschen(
         db, contract_id, scrub_pii=True, grund="manuell", audit=False)
     if not ok:
@@ -2377,6 +2860,40 @@ def _schadenstext_nach_abholung(damages_text: Optional[str],
     return bisher.rstrip() + "\n" + "\n".join(zeilen)
 
 
+#: Rollenpruefung 22.09.2026 (RP-494): Kennzeichnung der Fassung im PDF.
+FASSUNGS_FELDER = ("fassung", "fassung_erstellt_am", "ersetzt_fassung_am")
+#: RP-479: Diese Angaben kommen beim Neuaufbau aus dem Stand vor der Abholung
+#: trotzdem aus der AKTUELLEN Fassung — sie aendert keine Abholung: Termin,
+#: eingefrorene Kaeuferdaten (Runde 25), Logo und Fassungsangaben.
+_AUS_AKTUELLER_FASSUNG = ("pickup_date", "pickup_time", "empfang_datum", "logo_key",
+                          *KAEUFER_FELDER, *FASSUNGS_FELDER)
+#: Rollenprüfung 22.09.2026 (Review): die Vertragsfelder, die eine Protokoll-
+#: Korrektur setzt (protokoll_vergleich.vertrags_korrekturen / hu_korrektur).
+#: protocols.protokoll_korrekturen ermittelt sie gegen die AKTUELLE Fassung —
+#: beim Neuaufbau aus dem Stand vor der Abholung kommen sie deshalb ebenfalls
+#: aus der aktuellen Fassung (siehe regenerate_contract_for_pickup).
+from protokoll_vergleich import KORREKTUR_FELDER as _PV_KORREKTUR_FELDER  # noqa: E402
+_VOR_ORT_FELDER = tuple(dict.fromkeys((*_PV_KORREKTUR_FELDER.values(), "hu_valid")))
+
+
+def _inhalt(vertragsdaten: dict) -> dict:
+    """Vertragsinhalt ohne die Fassungsangaben (fuer "hat sich etwas geaendert?")."""
+    return {k: w for k, w in (vertragsdaten or {}).items() if k not in FASSUNGS_FELDER}
+
+
+def _fassung_kennzeichnen(contract_dict: dict, doc: dict, neue_version: int) -> None:
+    """Rollenpruefung 22.09.2026 (RP-494): Eine neue Fassung trug dieselbe
+    Vertragsnummer, "erstellt am <heute>" und z. B. einen anderen Preis —
+    ohne jeden Hinweis, dass sie eine fruehere ersetzt. Jetzt stehen Nummer
+    der Fassung und Datum der ersetzten Fassung im Vertrag (pdf_service
+    druckt sie ab Fassung 2 im Kopf und in der Fusszeile)."""
+    vorher = str((doc.get("contract_data") or {}).get("fassung_erstellt_am")
+                 or doc.get("created_at") or "")
+    contract_dict["fassung"] = int(neue_version)
+    contract_dict["ersetzt_fassung_am"] = vorher[:10]
+    contract_dict["fassung_erstellt_am"] = now_iso()
+
+
 async def regenerate_contract_for_pickup(
     *, contract_id: str, dealer_id: str, user: dict,
     pickup_date: Optional[str] = None, pickup_time: Optional[str] = None,
@@ -2418,11 +2935,26 @@ async def regenerate_contract_for_pickup(
     preis_aenderung = neuer_preis is not None or bool((sondervereinbarung or "").strip())
     # 19.09.2026 (Wunsch Ahmad): auch die vor Ort korrigierten Fahrzeugdaten
     # und neu aufgenommene Schaeden loesen eine neue Fassung aus.
-    korrekturen = {k: w for k, w in (korrekturen or {}).items() if w not in (None, "")}
+    roh_korrekturen = dict(korrekturen or {})
+    korrekturen = {k: w for k, w in roh_korrekturen.items() if w not in (None, "")}
+    # Rollenpruefung 22.09.2026 (RP-488): "keine HU" vor Ort liefert
+    # protokoll_vergleich.hu_korrektur als {"hu_until": "", "hu_valid": "Nein"}.
+    # Der Filter oben warf das leere Datum weg — das alte "gueltig bis" blieb im
+    # Vertrag stehen. Nur in DIESEM Fall (HU ausdruecklich "Nein") leert ein ""
+    # das Datum; sonst bleibt "leer = keine Angabe".
+    if roh_korrekturen.get("hu_until") == "" \
+            and str(roh_korrekturen.get("hu_valid") or "").strip() == "Nein":
+        korrekturen["hu_until"] = ""
     neue_schaeden = [d for d in (neue_schaeden or []) if d]
-    if not contract_id or (pickup_date is None and pickup_time is None
-                           and not preis_aenderung and not korrekturen
-                           and not neue_schaeden):
+    # Rollenpruefung 22.09.2026 (RP-479): Nach der Abholung wird die neue
+    # Fassung aus dem Stand VOR der Abholung aufgebaut (siehe unten) — eine
+    # korrigierte Protokollversion OHNE Preis/Aenderungen darf deshalb nicht
+    # schon hier aussteigen: sie nimmt die Aenderungen der vorigen Version
+    # zurueck. Ob es etwas zurueckzunehmen gibt, steht erst am Vertrag.
+    abholung = grund == "abholung_abgeschlossen"
+    ohne_anlass = (pickup_date is None and pickup_time is None
+                   and not preis_aenderung and not korrekturen and not neue_schaeden)
+    if not contract_id or (ohne_anlass and not abholung):
         return _grund("kein_anlass")
     # Pruefbericht 20.09.2026 (N2): keine neue Fassung mitten im Versand.
     # Sonst haelt der Verkaeufer die alte Fassung in der Hand, waehrend die
@@ -2455,7 +2987,58 @@ async def regenerate_contract_for_pickup(
 
     neu_datum = _neu(pickup_date, alt_datum)
     neu_zeit = _neu(pickup_time, alt_zeit)
-    contract_dict = dict(doc.get("contract_data") or {})
+    cd_aktuell = dict(doc.get("contract_data") or {})
+    # Rollenpruefung 22.09.2026 (RP-479): Nach der Abholung arbeitete die
+    # Neuerzeugung nur ADDITIV — Schaeden und Sondervereinbarung wurden
+    # angehaengt, der Preis nur gesetzt, wenn einer kam. Eine korrigierte
+    # Protokollversion konnte deshalb nichts zuruecknehmen (ein
+    # zurueckgesetzter Preis blieb im Kaufvertrag stehen). Jetzt: bei der
+    # ERSTEN Neuerzeugung nach einer Abholung wird der Stand davor
+    # festgehalten (vertrag_vor_abholung); jede weitere Neuerzeugung fuer eine
+    # Abholung geht von diesem Stand aus und legt nur das AKTUELLE Protokoll
+    # darueber. Terminangaben (Datum, Uhrzeit, Empfangsdatum) kommen aus der
+    # aktuellen Fassung.
+    basis = None
+    if abholung:
+        basis = doc.get("vertrag_vor_abholung")
+        if not isinstance(basis, dict):
+            basis = None
+        if basis is None and doc.get("nach_abholung_protokoll_id"):
+            # Vertraege, die VOR dieser Aenderung schon einmal nach einer
+            # Abholung neu erzeugt wurden: der Stand davor liegt im Archiv
+            # (die erste Fassung mit grund "abholung_abgeschlossen").
+            frueher = await db.generated_pdf_versions.find_one(
+                {"contract_id": contract_id, "dealer_id": dealer_id,
+                 "grund": "abholung_abgeschlossen"},
+                {"_id": 0, "contract_data": 1}, sort=[("version", 1)])
+            if isinstance((frueher or {}).get("contract_data"), dict):
+                basis = frueher["contract_data"]
+        if basis is None and ohne_anlass:
+            # Erste Abholung ohne jede Aenderung: nichts neu zu erzeugen.
+            return _grund("kein_anlass")
+    if basis is not None:
+        contract_dict = dict(basis)
+        for feld in _AUS_AKTUELLER_FASSUNG:
+            if feld in cd_aktuell:
+                contract_dict[feld] = cd_aktuell[feld]
+        # Rollenprüfung 22.09.2026 (Review): Die Korrekturen einer Protokoll-
+        # version (protocols.protokoll_korrekturen) werden gegen die AKTUELLE
+        # Fassung ermittelt — die zeigt die Fahrer-App auch als "laut Vertrag".
+        # Bestaetigt eine Korrektur-Version einen schon eingearbeiteten Wert
+        # (v1 "unfallfrei: Nein", v2 als Kopie unveraendert), fehlt er in ihren
+        # Korrekturen; aus dem Stand VOR der Abholung aufgebaut, stand danach
+        # wieder "unfallfrei: Ja" im Kaufvertrag, obwohl das unterschriebene
+        # Protokoll "Nein" sagt. Die Fahrzeugangaben kommen deshalb aus der
+        # aktuellen Fassung, die Korrekturen liegen darueber — eine Ruecknahme
+        # kommt als Korrektur auf den alten Wert. Preis, Sondervereinbarung und
+        # Schaeden bauen weiter auf dem Stand vor der Abholung auf (RP-479).
+        for feld in _VOR_ORT_FELDER:
+            if feld in cd_aktuell:
+                contract_dict[feld] = cd_aktuell[feld]
+            else:
+                contract_dict.pop(feld, None)
+    else:
+        contract_dict = dict(cd_aktuell)
     alt_preis = contract_dict.get("purchase_price")
     sonder = (sondervereinbarung or "").strip()
     preis_neu = neuer_preis is not None and (
@@ -2470,11 +3053,20 @@ async def regenerate_contract_for_pickup(
     schaeden_neu = [d for d in neue_schaeden if d not in schaeden_alt]
     # gilt, wenn der naechste Block aussteigt (der Vertrag zeigt schon alles)
     _grund("keine_aenderung")
-    if (neu_datum or "") == (alt_datum or "") and (neu_zeit or "") == (alt_zeit or "") \
+    if basis is None and (neu_datum or "") == (alt_datum or "") \
+            and (neu_zeit or "") == (alt_zeit or "") \
             and not preis_neu and not sonder_neu and not korrigiert and not schaeden_neu:
         return False
     if korrigiert:
         contract_dict.update(korrigiert)
+    # Hinweis im Archiv ("was ist anders?"): wie der Preis (preis_vorher) gegen
+    # den Vertrag VOR der Abholung — auch wenn die Werte schon aus der
+    # vorigen Protokollversion stammen (Rollenprüfung 22.09.2026, Review).
+    felder_geaendert = sorted(korrigiert.keys())
+    if basis is not None:
+        felder_geaendert = sorted(
+            f for f in _VOR_ORT_FELDER
+            if str(contract_dict.get(f) or "").strip() != str(basis.get(f) or "").strip())
     if schaeden_neu:
         # Die vor Ort aufgenommenen Schaeden kommen zu den im Vertrag
         # dokumentierten dazu — die alten waren bekannt und bleiben stehen.
@@ -2505,6 +3097,10 @@ async def regenerate_contract_for_pickup(
     # anders gesetztes Datum bleibt.
     if alt_datum and (contract_dict.get("empfang_datum") or "") == alt_datum:
         contract_dict["empfang_datum"] = neu_datum or ""
+    if basis is not None and _inhalt(contract_dict) == _inhalt(cd_aktuell):
+        # RP-479: aus dem Stand vor der Abholung neu aufgebaut, und es kommt
+        # genau die aktuelle Fassung heraus — nichts zu tun.
+        return False
 
     v = await db.vehicles.find_one(
         {"id": doc.get("vehicle_id"), "dealer_id": dealer_id}, {"_id": 0}) or {}
@@ -2526,6 +3122,34 @@ async def regenerate_contract_for_pickup(
     # Altvertrag ohne gespeicherte Kaeuferdaten: den jetzt verwendeten Stand
     # festhalten, damit alle weiteren Fassungen identisch bleiben (Runde 25).
     kaeufer_einfrieren(contract_dict, dealer)
+    # Rollenpruefung 22.09.2026 (RP-452): nur das beim Vertrag festgehaltene Logo.
+    dealer = await _logo_einsetzen(dealer, contract_dict)
+    # Rollenpruefung 22.09.2026 (RP-494): "Fassung N — ersetzt Fassung N-1 vom …"
+    _fassung_kennzeichnen(contract_dict, doc, int(doc.get("version") or 1) + 1)
+    # Rollenpruefung 22.09.2026 (RP-432): Korrigiert der Fahrer Marke/Modell,
+    # standen sie nur in contract_data — Mail-Betreff, Archivliste, Suche und
+    # Dateiname nannten weiter das alte Fahrzeug (make/model oben am Vertrag).
+    kopf: Dict[str, Any] = {}
+    if any((contract_dict.get(k) or "") != (cd_aktuell.get(k) or "")
+           for k in ("vehicle_make", "vehicle_model")):
+        marke = str(contract_dict.get("vehicle_make") or doc.get("make") or "").strip()
+        modell = str(contract_dict.get("vehicle_model") or doc.get("model") or "").strip()
+        kopf = {"make": marke, "model": modell,
+                "filename": _vertrag_dateiname({"make_label": marke, "model_label": modell})}
+    # RP-479: der Preis folgt dem neu aufgebauten Stand — auch zurueck.
+    preis_danach = contract_dict.get("purchase_price")
+    if preis_danach is not None and doc.get("purchase_price") is not None:
+        try:
+            if abs(float(preis_danach) - float(doc.get("purchase_price"))) > 0.004:
+                kopf["purchase_price"] = float(preis_danach)
+        except (TypeError, ValueError):
+            pass
+    elif preis_neu:
+        kopf["purchase_price"] = float(neuer_preis)
+    if abholung and not isinstance(doc.get("vertrag_vor_abholung"), dict):
+        # RP-479: Stand vor der (ersten) Abholung festhalten — Grundlage jeder
+        # weiteren Neuerzeugung fuer eine Abholung.
+        kopf["vertrag_vor_abholung"] = basis if basis is not None else cd_aktuell
 
     # Beschluss Ahmad 09.09.2026: Texte aus den Einstellungen gelten NUR fuer
     # neue Vertraege. Der bei der Erstellung festgehaltene Text bleibt; ein
@@ -2613,20 +3237,27 @@ async def regenerate_contract_for_pickup(
             "updated_at": now_iso(),
             # Runde 16 (15.09.2026): eine neue Fassung ist noch NICHT versendet.
             **({"status": "neu erstellt"} if doc.get("status") in ("versendet", "versand_vorbereitet") else {}),
-            **({"purchase_price": float(neuer_preis)} if preis_neu else {}),
+            # purchase_price (RP-479: auch zurueck), make/model/filename
+            # (RP-432), vertrag_vor_abholung (RP-479)
+            **kopf,
             # 19.09.2026: Woran erkennt die Oberflaeche, dass sie den neuen
             # Vertrag zum Senden anbieten soll — und was sich geaendert hat?
+            # RP-479: auch, wenn eine korrigierte Protokollversion Aenderungen
+            # der vorigen zuruecknimmt (basis gesetzt) — der Verkaeufer hat
+            # dann eine Fassung, die nicht mehr gilt.
             **({"nach_abholung_aktualisiert_am": now_iso(),
                 "nach_abholung_protokoll_id": protokoll_id,
                 "nach_abholung_aenderungen": {
                     "preis": float(neuer_preis) if preis_neu else None,
                     "preis_vorher": alt_preis if preis_neu else None,
                     "sondervereinbarung": bool(sonder_neu),
-                    "felder": sorted(korrigiert.keys()),
-                    "neue_schaeden": len(schaeden_neu)},
+                    "felder": felder_geaendert,
+                    "neue_schaeden": len(schaeden_neu),
+                    "nach_protokoll_korrektur": basis is not None},
                 "nach_abholung_versand_offen": True}
-               if grund == "abholung_abgeschlossen"
-               and (preis_neu or sonder_neu or korrigiert or schaeden_neu) else {}),
+               if abholung
+               and (preis_neu or sonder_neu or korrigiert or schaeden_neu
+                    or basis is not None) else {}),
         },
          # Runde 17 (Nr. 321): Historie gedeckelt — die juengsten 100
          # Verschiebungen bleiben, das Dokument waechst nicht unbegrenzt.

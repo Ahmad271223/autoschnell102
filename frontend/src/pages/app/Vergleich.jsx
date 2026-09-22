@@ -3,8 +3,10 @@ import { useNavigate } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
 import { lokalerSpeicher, sitzungsSpeicher } from "@/lib/speicher";
 import { thumbSrc } from "@/lib/bilder";
-import { checkLink, istAbbruch, postWithRetry503, TIMEOUT_MESSAGE } from "@/lib/linkCheck";
-import { istInseratsLink, zwischenablageLesen } from "@/lib/inseratsLink";
+import {
+  abbruchFehler, checkLink, istAbbruch, postWithRetry503, TIMEOUT_MESSAGE,
+} from "@/lib/linkCheck";
+import { inseratsLinkAusText, zwischenablageLesen } from "@/lib/inseratsLink";
 import { extensionReady, fetchViaExtension } from "@/lib/clientFetch";
 import { toast } from "sonner";
 import {
@@ -42,6 +44,22 @@ export function datenStand(result, jetzt = Date.now()) {
   return { text: `Daten vom ${datum}${stunden >= 24 ? " — Preis/km ggf. veraltet" : ""}`, alt: stunden >= 24 };
 }
 
+// Rollenprüfung 22.09.2026 (RP-207/RP-358): Der LIVE-Zähler zählt je
+// Inserats-Schlüssel (cache_key = "quelle:id"). Gefragt wurde mit ad_id —
+// bei AutoScout24 ist das die Anzeigen-Nummer des Anbieters (uniqueRef), die
+// von der ID in der Adresse abweichen kann; der Zähler stand dann immer auf 0.
+// Jetzt zählt der Schlüssel, unter dem der Vergleich gespeichert wurde.
+export function liveZaehlerPfad(r) {
+  const key = r?.cache_key || "";
+  const i = key.indexOf(":");
+  if (i > 0 && i < key.length - 1) {
+    return `/mobile/live-counter/${encodeURIComponent(key.slice(i + 1))}`
+      + `?quelle=${encodeURIComponent(key.slice(0, i))}`;
+  }
+  if (!r?.ad_id) return null;
+  return `/mobile/live-counter/${encodeURIComponent(r.ad_id)}?quelle=${encodeURIComponent(r.source || "")}`;
+}
+
 // Runde 22 (11.09.2026): Eintraege fuer filterOeffnen aus den Ergebnisdaten
 // und den Portal-Toggles — ein Ort fuer "Filter öffnen", die Einzel-Knoepfe
 // und das automatische Oeffnen nach dem Auslesen.
@@ -57,15 +75,21 @@ export default function Vergleich() {
   // haengt am KONTO. Vorher lag er unter einem festen Schluessel — meldete
   // sich am selben Browser ein anderer Sucher an, sah er Fahrzeug,
   // Verkaeuferdaten und den letzten Vertrag seines Kollegen.
-  const { user, refresh } = useAuth();
+  const { user, refresh, setDealer } = useAuth();
   const nav = useNavigate();
   const kontoId = user?.id || null;
-  const gespeichert = vergleichLaden(sitzungsSpeicher(), kontoId);
+  // Rollenprüfung 22.09.2026 (RP-023/RP-122/RP-273): Der gespeicherte Stand
+  // wird nur EINMAL gelesen (Startwert). Vorher lief der Zugriff samt
+  // JSON.parse des ganzen Ergebnisses bei jedem Render — jedem Tastendruck,
+  // jeder Wartemeldung, jedem Zähler-Update.
   // Pruefbericht 20.09.2026 (B3): Nur ein Stand MIT Fahrzeug wird
   // wiederhergestellt — eine aeltere Fassung konnte eine Antwort ohne
   // Fahrzeug ("needs_client_fetch") ablegen, und die liess die Seite beim
   // Rendern abstuerzen, bei jedem Neuladen erneut.
-  const restored = gespeichert?.result?.vehicle ? gespeichert : null;
+  const [restored] = useState(() => {
+    const gespeichert = vergleichLaden(sitzungsSpeicher(), kontoId);
+    return gespeichert?.result?.vehicle ? gespeichert : null;
+  });
 
   const [url, setUrl] = useState(restored?.url || "");
   const [loading, setLoading] = useState(false);
@@ -76,6 +100,38 @@ export default function Vergleich() {
   const [contract, setContract] = useState(restored?.contract || null);
   const [showSend, setShowSend] = useState(false);
   const [pdfLaeuft, setPdfLaeuft] = useState(false);
+
+  // RP-023: Ein wiederhergestellter Kaufvertrag kann inzwischen gelöscht
+  // sein (Chef löscht, Übergabe). Vorher standen "PDF öffnen"/"Versenden"
+  // weiter da, erst der Klick brachte 404. Einmal im Hintergrund nachfragen.
+  useEffect(() => {
+    const id = restored?.contract?.id;
+    if (!id) return undefined;
+    let aktiv = true;
+    api.get(`/contracts/${id}`).catch((err) => {
+      if (aktiv && err?.response?.status === 404) {
+        setContract((c) => (c?.id === id ? null : c));
+      }
+    });
+    return () => { aktiv = false; };
+  }, [restored]);
+
+  // Rollenprüfung 22.09.2026 (RP-443): Der Fahrzeugpool behält je Konto nur
+  // die neuesten Vergleiche. Ein wiederhergestellter Vergleich kann deshalb
+  // auf ein Fahrzeug zeigen, das es nicht mehr gibt — "Kaufvertrag
+  // erstellen" endete dann mit 404. Einmal nachsehen; fehlt es, bietet die
+  // Seite "Neu vergleichen" an (kostet nichts, der Link liegt im Speicher).
+  useEffect(() => {
+    const vid = restored?.result?.vehicle_id;
+    if (!vid) return undefined;
+    let aktiv = true;
+    api.get(`/vehicles/${vid}`).catch((err) => {
+      if (aktiv && err?.response?.status === 404) {
+        setResult((r) => (r?.vehicle_id === vid ? { ...r, fahrzeug_weg: true } : r));
+      }
+    });
+    return () => { aktiv = false; };
+  }, [restored]);
   // Portal-Toggles — Zustand wird in localStorage gespeichert
   const [portalMobile, setPortalMobile] = useState(() => {
     return einstellungLesen(lokalerSpeicher(),
@@ -179,6 +235,11 @@ export default function Vergleich() {
   const abbrechen = () => {
     const job = jobRef.current;
     try { abbruchRef.current?.abort(); } catch { /* egal */ }
+    // Rollenprüfung 22.09.2026 (RP-004/RP-103/RP-254): Der abgebrochene Lauf
+    // ist ab jetzt nicht mehr "der aktuelle" — sein finally (das oft erst
+    // Sekunden später kommt) räumt dann nichts mehr ab, auch nicht den
+    // Zustand eines inzwischen neu gestarteten Laufs.
+    abbruchRef.current = null;
     if (job) {
       api.post(`/listings/check/${job}/abbrechen`).catch(() => { /* egal */ });
       jobRef.current = null;
@@ -186,15 +247,20 @@ export default function Vergleich() {
     laeuftRef.current = false;
     setLoading(false);
     setWaitMsg(null);
+    // Runde 24: das alte Ergebnis ist schon weg — seine Hinweise auch.
+    hinweisIdsRef.current = hinweiseZeigen(toast, [], hinweisIdsRef.current);
     toast.info("Abgebrochen — du kannst sofort einen neuen Link einfügen.");
   };
 
   // Wunsch Ahmad 18.09.2026: "nur reinklicken, dann ist der kopierte Link
   // automatisch drin" — kein Rechtsklick, kein Strg+V. Nur wenn das Feld leer
   // ist, nur bei echten Inserats-Links, und nur solange der Browser die
-  // Zwischenablage hergibt (sonst nie wieder fragen). Gestartet wird NICHT
-  // automatisch: ein alter Link in der Zwischenablage soll keinen Abruf
-  // ausloesen, nur weil man ins Feld klickt.
+  // Zwischenablage hergibt (sonst nie wieder fragen).
+  // Rollenprüfung 22.09.2026 (RP-261): Der Kommentar sagte hier "gestartet
+  // wird NICHT automatisch" — seit dem Wunsch Ahmads ("nach dem Einfügen soll
+  // er auch loslaufen") startet der Vergleich aber gleich mit. Damit ein
+  // alter Link nicht bei jedem Klick erneut abgerufen wird, merkt sich
+  // `zuletzt` den zuletzt übernommenen Text: derselbe Link kommt nicht zweimal.
   const zwischenablageRef = useRef({ zuletzt: "", moeglich: true });
 
   // Rueckmeldung Ahmad 18.09.2026: Der Start haing frueher am paste-Ereignis.
@@ -207,9 +273,12 @@ export default function Vergleich() {
   const vielleichtStarten = (text, vorher = "") => {
     const neu = (text || "").trim();
     if (!neu || loading || laeuftRef.current) return false;
-    if (!istInseratsLink(neu)) return false;
+    // RP-409: geteilter Text ("Schau mal: https://…") -> nur der Link
+    const link = inseratsLinkAusText(neu);
+    if (!link) return false;
     if (neu.length - (vorher || "").trim().length < SPRUNG) return false;
-    startCompare(null, neu);
+    if (link !== neu) setUrl(link);
+    startCompare(null, link);
     return true;
   };
 
@@ -218,24 +287,37 @@ export default function Vergleich() {
     const { text, moeglich } = await zwischenablageLesen();
     zwischenablageRef.current.moeglich = moeglich;
     if (!text || text === zwischenablageRef.current.zuletzt) return;
-    if (!istInseratsLink(text)) return;
+    const link = inseratsLinkAusText(text);           // RP-409
+    if (!link) return;
     zwischenablageRef.current.zuletzt = text;
-    setUrl(text);
+    setUrl(link);
     // Wunsch Ahmad: nach dem Einfuegen soll er auch loslaufen.
-    if (!vielleichtStarten(text)) {
+    if (!vielleichtStarten(link)) {
       toast.success("Link aus der Zwischenablage eingefügt — jetzt „Auslesen“.");
     }
   };
 
   const startCompare = async (e, direktUrl, { behalteVertrag = false } = {}) => {
     e?.preventDefault?.();
-    const ziel = (direktUrl ?? url).trim();
+    const roh = (direktUrl ?? url).trim();
+    // RP-409: steht im Feld ein geteilter Text, zählt nur der Link darin.
+    const ziel = inseratsLinkAusText(roh) || roh;
     if (!ziel) return;
     if (loading || laeuftRef.current) return;   // Mehrfachklicks abfangen
     laeuftRef.current = true;          // Runde 24: sofort, nicht erst nach dem Render
     const steuerung = new AbortController();
     abbruchRef.current = steuerung;
+    // Rollenprüfung 22.09.2026 (RP-004/RP-103/RP-254): Jeder Lauf hat seine
+    // eigene Kennung (seine Steuerung). Er darf den Zustand nur ändern,
+    // solange er der aktuelle ist — nach dem "X" oder einem neuen Lauf hängt
+    // er oft noch in einem Schritt, der nicht abbricht (Erweiterung, Ingest).
+    // Vorher räumte sein finally danach den NEUEN Lauf ab (kein X mehr,
+    // Ladeanzeige weg) und sein Ergebnis überschrieb die Anzeige.
+    const aktuell = () => abbruchRef.current === steuerung && !steuerung.signal.aborted;
+    const nochAktuell = () => { if (!aktuell()) throw abbruchFehler(); };
+    const wartemeldung = (m) => { if (aktuell()) setWaitMsg(m); };
     jobRef.current = null;
+    if (ziel !== roh) setUrl(ziel);
     setLoading(true);
     setWaitMsg(null);
     setResult(null);
@@ -252,8 +334,12 @@ export default function Vergleich() {
       // Schritt 1: Vorab-Check. Bekannte Inserate sind sofort da; neue
       // laufen als Hintergrundjob — wir zeigen die Wartemeldung und
       // fragen den Status ab, statt die Anfrage minutenlang zu halten.
-      const zusatz = { signal: steuerung.signal, onJob: (id) => { jobRef.current = id; } };
-      const check = await checkLink(api, ziel, { onWait: setWaitMsg, ...zusatz });
+      const zusatz = {
+        signal: steuerung.signal,
+        onJob: (id) => { if (aktuell()) jobRef.current = id; },
+      };
+      const check = await checkLink(api, ziel, { onWait: wartemeldung, ...zusatz });
+      nochAktuell();
       let data;
       if (check.status === "needs_client_fetch") {
         data = { needs_client_fetch: true, url: check.url };
@@ -263,7 +349,8 @@ export default function Vergleich() {
         // sieht nur die Wartemeldung, keine technische Fehlermeldung.
         ({ data } = await postWithRetry503(api, "/mobile/compare",
                                            { url: ziel },
-                                           { onWait: setWaitMsg, ...zusatz }));
+                                           { onWait: wartemeldung, ...zusatz }));
+        nochAktuell();
       }
 
       // Client-seitiges Abrufen (nur Kleinanzeigen, wenn serverseitig aktiv):
@@ -272,32 +359,41 @@ export default function Vergleich() {
       // schicken das HTML an den Server und fragen erneut ab.
       if (data?.needs_client_fetch) {
         const ready = await extensionReady();
+        nochAktuell();
         if (!ready) {
           // Rueckfall (09/2026): ohne Abruf-Helfer holt der Server das
           // Inserat selbst — vorher blockierte hier "Erweiterung installieren".
           const check2 = await checkLink(api, ziel,
-                                         { onWait: setWaitMsg, ohneErweiterung: true, ...zusatz });
+                                         { onWait: wartemeldung, ohneErweiterung: true, ...zusatz });
+          nochAktuell();
           if (check2.status === "needs_client_fetch") {
             throw new Error("Abruf ohne Erweiterung nicht möglich — bitte später erneut versuchen.");
           }
           ({ data } = await postWithRetry503(api, "/mobile/compare",
                                              { url: ziel, ohne_erweiterung: true },
-                                             { onWait: setWaitMsg, ...zusatz }));
+                                             { onWait: wartemeldung, ...zusatz }));
+          nochAktuell();
         } else {
-        try {
-          const html = await fetchViaExtension(data.url || ziel);
-          await api.post("/listings/ingest", { url: data.url || ziel, html });
-          ({ data } = await postWithRetry503(api, "/mobile/compare",
-                                             { url: ziel },
-                                             { onWait: setWaitMsg, ...zusatz }));
-        } catch (fe) {
-          toast.error(errMsg(fe, "Abruf über die Erweiterung fehlgeschlagen"));
-          setLoading(false);
-          return;
-        }
+          try {
+            // Die Erweiterung kennt kein Abbruchsignal — danach nachsehen.
+            const html = await fetchViaExtension(data.url || ziel);
+            nochAktuell();
+            await api.post("/listings/ingest", { url: data.url || ziel, html },
+                           { signal: steuerung.signal });
+            nochAktuell();
+            ({ data } = await postWithRetry503(api, "/mobile/compare",
+                                               { url: ziel },
+                                               { onWait: wartemeldung, ...zusatz }));
+            nochAktuell();
+          } catch (fe) {
+            if (istAbbruch(fe) || !aktuell()) throw fe;
+            toast.error(errMsg(fe, "Abruf über die Erweiterung fehlgeschlagen"));
+            return;                  // finally räumt diesen Lauf auf
+          }
         }
       }
 
+      nochAktuell();          // RP-254: kein Ergebnis eines überholten Laufs anzeigen
       // Pruefbericht 20.09.2026 (B3): Auch der zweite Vergleich kann noch
       // "needs_client_fetch" liefern — das Tageskontingent fuer Abrufe ohne
       // Erweiterung ist zwischen Link-Pruefung und Vergleich aufgebraucht
@@ -330,16 +426,19 @@ export default function Vergleich() {
       // denselben Hinweis, statt ihn ein zweites Mal darunter zu setzen.
       hinweisIdsRef.current = hinweiseZeigen(toast, data.hinweise, hinweisIdsRef.current);
       try {
-        const { data: cnt } = await api.get(
-          `/mobile/live-counter/${data.ad_id}?quelle=${encodeURIComponent(data.source || "")}`);
-        setCounter(cnt);
+        const pfad = liveZaehlerPfad(data);                 // RP-207
+        if (pfad) {
+          const { data: cnt } = await api.get(pfad);
+          if (aktuell()) setCounter(cnt);
+        }
       } catch (_) { /* ignore */ }
     } catch (err) {
+      // RP-254: Ein abgebrochener oder überholter Lauf fasst nichts mehr an —
+      // weder Hinweise noch Meldungen (die Abbruch-Meldung kam beim Klick).
+      if (istAbbruch(err) || !aktuell()) return;
       // Runde 24: das alte Ergebnis ist schon weg — seine Hinweise auch.
       hinweisIdsRef.current = hinweiseZeigen(toast, [], hinweisIdsRef.current);
-      if (istAbbruch(err)) {
-        // Abgebrochen (X): die Meldung kam schon beim Klick.
-      } else if (err?.code === "timeout" || err?.code === "ECONNABORTED" || err?.code === "ETIMEDOUT") {
+      if (err?.code === "timeout" || err?.code === "ECONNABORTED" || err?.code === "ETIMEDOUT") {
         toast.info(TIMEOUT_MESSAGE);
       } else if (err?.response?.status === 402) {
         // H2/M11: Abo abgelaufen — Kontext neu laden (die Routensperre greift
@@ -352,25 +451,30 @@ export default function Vergleich() {
         toast.error(errMsg(err, "Vergleich fehlgeschlagen"));
       }
     } finally {
-      laeuftRef.current = false;
-      abbruchRef.current = null;
-      jobRef.current = null;
-      setLoading(false);
-      setWaitMsg(null);
+      // RP-254: nur den EIGENEN Lauf aufräumen. Nach "X" (abbruchRef = null)
+      // oder einem neuen Lauf gehört der Zustand schon jemand anderem.
+      if (abbruchRef.current === steuerung) {
+        laeuftRef.current = false;
+        abbruchRef.current = null;
+        jobRef.current = null;
+        setLoading(false);
+        setWaitMsg(null);
+      }
     }
   };
 
+  // RP-207: Zähler über den Inserats-Schlüssel (siehe liveZaehlerPfad)
+  const zaehlerPfad = liveZaehlerPfad(result);
   useEffect(() => {
-    if (!result?.ad_id) return;
+    if (!zaehlerPfad) return undefined;
     const t = setInterval(async () => {
       try {
-        const { data } = await api.get(
-          `/mobile/live-counter/${result.ad_id}?quelle=${encodeURIComponent(result.source || "")}`);
+        const { data } = await api.get(zaehlerPfad);
         setCounter(data);
       } catch (_) { /* ignore */ }
     }, 30000);
     return () => clearInterval(t);
-  }, [result?.ad_id, result?.source]);
+  }, [zaehlerPfad]);
 
   return (
     <div className="p-3 sm:p-6 lg:p-10 max-w-[1480px] mx-auto" data-testid="vergleich-page">
@@ -389,6 +493,10 @@ export default function Vergleich() {
             lassen, statt nur das Badge umzuschalten (die alten Links
             truegen sonst die Filter des vorherigen Profils). */}
         <ProfileBadge onChange={(p) => {
+          // Rollenprüfung 22.09.2026 (RP-123): das neue Profil auch im
+          // gemeinsamen Anmeldezustand — sonst zeigte z. B. die manuelle
+          // Suche bis zum Neuladen weiter das alte Profil an.
+          setDealer?.((d) => (d ? { ...d, active_profile: p } : d));
           if (result && url.trim() && !loading) {
             startCompare(null, url, { behalteVertrag: true });
           } else {
@@ -420,10 +528,12 @@ export default function Vergleich() {
                 // Auslesen sofort — der Knopf bleibt fuers manuelle
                 // Wiederholen. Nur echte Inserats-URLs, keine Suchseiten.
                 const text = (e.clipboardData?.getData("text") || "").trim();
-                if (istInseratsLink(text) && !loading) {
+                // RP-409: aus "Schau mal: https://…" nur den Link übernehmen
+                const link = inseratsLinkAusText(text);
+                if (link && !loading) {
                   e.preventDefault();
-                  setUrl(text);
-                  vielleichtStarten(text);
+                  setUrl(link);
+                  vielleichtStarten(link);
                 }
               }}
               placeholder="Ins Feld klicken — kopierter Link wird eingefügt (Kleinanzeigen, mobile.de, AutoScout24)"
@@ -504,7 +614,8 @@ export default function Vergleich() {
           <button
             type="button"
             data-testid="open-filter-btn"
-            disabled={!result || (!portalMobile && !portalAutoscout)}
+            disabled={!result
+              || filterEintraege(result, { mobile: portalMobile, autoscout: portalAutoscout }).length === 0}
             onClick={() => {
               // Runde 22: je Klick laesst der Browser nur EIN Fenster zu — den
               // Rest holt der Hinweis-Knopf nach (oder Pop-ups erlauben).
@@ -686,6 +797,9 @@ export default function Vergleich() {
               )}
             </div>
 
+            {/* RP-439/RP-419: ohne erkannte Marke gibt es keinen mobile.de-Link
+                (er hätte über alle Marken gesucht) — der Grund steht im Hinweis. */}
+            {result.search_url && (
             <div className="apple-surface p-6">
               <div className="flex items-start justify-between gap-3 mb-3">
                 <div className="flex items-start gap-3">
@@ -705,6 +819,7 @@ export default function Vergleich() {
                 </button>
               </div>
             </div>
+            )}
 
             {result.autoscout_url && (
               <div className="apple-surface p-6">
@@ -759,18 +874,63 @@ export default function Vergleich() {
 
             <div className="apple-surface p-5">
               <div className="overline mb-3">Aktionen</div>
+              {/* Rollenprüfung 22.09.2026 (RP-048/RP-147): Den Hinweis bekommt
+                  nur noch der Chef (Sucher erfahren seit Runde 29 keine
+                  Kollegen) — deshalb in seiner Sicht formuliert. */}
               {result.kollege && (
                 <div className="text-sm rounded-xl p-3 mb-3" data-testid="kollege-hinweis"
                      style={{ background: "#f59e0b1c", color: "var(--tx-amber)" }}>
-                  Dieses Fahrzeug vergleicht auch <b>{result.kollege.name}</b>.
-                  Ihr arbeitet unabhängig voneinander: Jeder kann einen eigenen
-                  Kaufvertrag mit eigenem Abholtermin anlegen.
+                  Dieses Fahrzeug bearbeitet bereits <b>{result.kollege.name}</b>.
+                  Legst du selbst einen Kaufvertrag an, bekommt er einen eigenen
+                  Abholtermin — der Vorgang von {result.kollege.name} bleibt unberührt.
                 </div>
               )}
-              <button onClick={() => setShowContract(true)} data-testid="create-contract-btn"
-                      className="apple-btn apple-btn-primary w-full !py-3">
-                <FileText size={15} /> Kaufvertrag erstellen
-              </button>
+              {/* RP-210/RP-361: in der Firma gelöschtes Fahrzeug — kein neuer
+                  Vertrag (vorher endete der Klick mit 404). */}
+              {result.fahrzeug_geloescht ? (
+                <div className="text-sm rounded-xl p-3" data-testid="fahrzeug-geloescht-hinweis"
+                     style={{ background: "#f59e0b1c", color: "var(--tx-amber)" }}>
+                  Dieses Fahrzeug wurde in deiner Firma gelöscht. Ein neuer
+                  Kaufvertrag ist dafür nicht möglich — die Vergleichslinks
+                  funktionieren trotzdem.
+                </div>
+              ) : result.fahrzeug_weg ? (
+                <div className="space-y-2" data-testid="fahrzeug-weg-hinweis">
+                  <div className="text-sm rounded-xl p-3"
+                       style={{ background: "#f59e0b1c", color: "var(--tx-amber)" }}>
+                    Dieses Fahrzeug ist nicht mehr in deinem Fahrzeugpool (ältere
+                    Vergleiche werden aussortiert). Bitte den Link neu vergleichen —
+                    das kostet nichts.
+                  </div>
+                  <button type="button" data-testid="neu-vergleichen-btn"
+                          disabled={loading}
+                          onClick={() => startCompare(null, url, { behalteVertrag: true })}
+                          className="apple-btn apple-btn-primary w-full !py-3 disabled:opacity-60">
+                    <ArrowRight size={15} /> Neu vergleichen
+                  </button>
+                </div>
+              ) : (
+                <>
+                  {/* Rollenprüfung 22.09.2026 (RP-416): Steht der eben erstellte
+                      Vertrag schon da, sagt die Seite das VOR dem Formular —
+                      vorher kam die Rückfrage (409 vertrag_vorhanden) erst nach
+                      dem Ausfüllen. Verträge aus früheren Sitzungen fängt
+                      weiter ContractDialog mit seiner Rückfrage ab. */}
+                  {contract && (
+                    <div className="text-sm rounded-xl p-3 mb-3" data-testid="vertrag-vorhanden-hinweis"
+                         style={{ background: "#f59e0b1c", color: "var(--tx-amber)" }}>
+                      Für dieses Fahrzeug hast du schon einen Kaufvertrag erstellt
+                      {contract.contract_no ? <> (Nr. <b>{contract.contract_no}</b>)</> : null}.
+                      Ein weiterer Vertrag ergibt einen zweiten Kauf mit eigenem
+                      Abholtermin — der erste läuft mit seinem Preis weiter.
+                    </div>
+                  )}
+                  <button onClick={() => setShowContract(true)} data-testid="create-contract-btn"
+                          className={`apple-btn ${contract ? "apple-btn-secondary" : "apple-btn-primary"} w-full !py-3`}>
+                    <FileText size={15} /> {contract ? "Weiteren Kaufvertrag erstellen" : "Kaufvertrag erstellen"}
+                  </button>
+                </>
+              )}
               {contract && (
                 <div className="mt-3 space-y-2">
                   <button

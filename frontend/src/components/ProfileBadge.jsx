@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, errMsg } from "@/lib/api";
+import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
 import { Globe2, Flag, Loader2, ArrowLeftRight } from "lucide-react";
 
@@ -10,6 +11,12 @@ import { Globe2, Flag, Loader2, ArrowLeftRight } from "lucide-react";
  * gerade greifen.
  */
 export default function ProfileBadge({ onChange }) {
+  // Rollenprüfung 22.09.2026 (RP-005/RP-104/RP-255/RP-425): Nach dem Wechsel
+  // blieb der Anmelde-Kontext auf dem alten Profil. Die Einstellungen bauten
+  // ihr Formular daraus, und das nächste Speichern drehte Export still auf
+  // Inland zurück; die manuelle Suche zeigte das alte Profil. Jetzt wird der
+  // Kontext nach dem Wechsel neu geladen.
+  const { refresh } = useAuth() || {};
   const [profile, setProfile] = useState(null);
   const [busy, setBusy] = useState(false);
   // Pruefbericht 20.09.2026 (K-03/U-137): Bei einem Ladefehler zeigte das
@@ -33,6 +40,9 @@ export default function ProfileBadge({ onChange }) {
       await api.put("/dealer/active-profile", { active_profile: next });
       setProfile(next);
       onChange?.(next);
+      // Ohne await: der Wechsel ist gespeichert, das Nachladen darf den
+      // Knopf nicht blockieren (Fehler behandelt refresh() selbst).
+      if (typeof refresh === "function") refresh();
       toast.success(
         next === "inland" ? "Filter: Inland aktiv" : "Filter: Export aktiv",
       );

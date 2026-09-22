@@ -690,8 +690,12 @@ def test_09_dict_felder_gedeckelt(feld):
     with pytest.raises(ValidationError):
         P.ProtocolIn(**{feld: {f"k{i}": True for i in range(P.FELD_MAX + 1)}})
     assert P.ProtocolIn(**{feld: {f"k{i}": True for i in range(P.FELD_MAX)}})
+    # Rollenprüfung 22.09.2026 (RP-063/162): Feldnamen bis FELDNAME_MAX (lange
+    # AutoScout-Ausstattungsnamen), darueber weiter 422.
+    assert P.ProtocolIn(**{feld: {"x" * 81: True}})
+    assert P.ProtocolIn(**{feld: {"x" * P.FELDNAME_MAX: True}})
     with pytest.raises(ValidationError):
-        P.ProtocolIn(**{feld: {"x" * 81: True}})
+        P.ProtocolIn(**{feld: {"x" * (P.FELDNAME_MAX + 1): True}})
     with pytest.raises(ValidationError):
         P.ProtocolIn(**{feld: "kein dict"})
     ok = P.ProtocolIn(**{feld: {"Fahrzeugschein": True}})

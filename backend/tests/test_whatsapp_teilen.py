@@ -272,9 +272,12 @@ def test_10_link_ist_an_die_verschickte_fassung_gebunden(welt):
     Vertragsinhalt."""
     dbx = _db()
     # Frischer Vertrag mit Abholtermin (der erzeugt den Termin automatisch)
+    # Rollenpruefung 22.09.2026 (RP-416): weiterer Vertrag des Chefs zu
+    # diesem Fahrzeug — bewusst bestaetigt.
     r = requests.post(f"{API}/contracts", headers=welt["H"], json={
         "vehicle_id": welt["vehicle_id"], "seller_name": "WA Verkaeufer",
         "seller_phone": "+49 170 1234567", "purchase_price": 7100,
+        "zweiter_vertrag_bestaetigt": True,
         "pickup_date": "2099-05-01", "pickup_time": "09:00"}, timeout=90)
     assert r.status_code == 200, r.text[:300]
     cid = r.json()["id"]
@@ -321,7 +324,8 @@ def test_11_gleichzeitige_versande_ergeben_einen_gueltigen_link(welt):
     from concurrent.futures import ThreadPoolExecutor
     r = requests.post(f"{API}/contracts", headers=welt["H"], json={
         "vehicle_id": welt["vehicle_id"], "seller_name": "WA Verkaeufer",
-        "seller_phone": "+49 170 1234567", "purchase_price": 7200}, timeout=90)
+        "seller_phone": "+49 170 1234567", "purchase_price": 7200,
+        "zweiter_vertrag_bestaetigt": True}, timeout=90)   # RP-416
     assert r.status_code == 200, r.text[:300]
     cid = r.json()["id"]
 

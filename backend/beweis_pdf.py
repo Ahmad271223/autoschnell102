@@ -233,6 +233,10 @@ _BEKANNT = {
     "seller_email", "seller_type", "images", "image_urls", "image_count",
     "images_thumbs", "title", "vin", "license_plate", "price_label",
     "location", "kleinanzeigen_id",
+    # Rollenpruefung 22.09.2026 (RP-440/RP-444): neue Namensfelder der Parser
+    # stehen im Abschnitt "Anbieter" (nur wo der Name gedruckt wird) — nie
+    # ungefiltert unter "Weitere ausgelesene Angaben".
+    "seller_alias", "seller_ansprechpartner",
 }
 _WEITERE_LABEL: Dict[str, str] = {
     "price": "Preisangabe (Rohwert)",
@@ -436,7 +440,8 @@ def _bild(bts: Optional[bytes], max_b: float, max_h: float, ersatz: Paragraph):
 def beweis_pdf(*, quelle: str, daten: Dict[str, Any], url: str, item_id: str,
                beweis_id: str, abgerufen_am: Any, erstellt_am: Any,
                fotos: Sequence[Optional[bytes]], foto_urls: Sequence[str],
-               privatdaten: bool = False) -> bytes:
+               privatdaten: bool = False,
+               frueheres_dokument: Optional[Dict[str, Any]] = None) -> bytes:
     """Beweisdokument als PDF-Bytes.
 
     fotos: JPEG-Bytes der ersten Inseratsfotos, in derselben Reihenfolge wie
@@ -528,6 +533,16 @@ def beweis_pdf(*, quelle: str, daten: Dict[str, Any], url: str, item_id: str,
         ("Daten ausgelesen am", abgerufen),
         ("Dokument erstellt am", erstellt),
     ]
+    if isinstance(frueheres_dokument, dict) and frueheres_dokument:
+        # Rollenpruefung 22.09.2026 (RP-498): nach Ablauf der Aufbewahrungsfrist
+        # neu angefordert — das fruehere Dokument wird genannt, damit dieses
+        # nicht fuer den Stand beim ersten Gebrauch des Links gehalten wird.
+        herkunft.append((
+            "Früheres Dokument",
+            f"erstellt am {zeit_text(frueheres_dokument.get('erstellt_am'))}, nach Ablauf "
+            f"der Aufbewahrungsfrist gelöscht am "
+            f"{zeit_text(frueheres_dokument.get('geloescht_am'))} — dieses Dokument "
+            f"wurde danach neu angefordert"))
     schluessel_tabelle(herkunft, spalten=1, grund=HELLGRAU)
     story.append(Table(
         [[Paragraph("Inserat-Adresse", st_k),
@@ -659,6 +674,14 @@ def beweis_pdf(*, quelle: str, daten: Dict[str, Any], url: str, item_id: str,
     name = daten.get("seller_name")
     if voll and name and str(name).strip().lower() not in ("händler", "privatverkäufer"):
         anbieter.append(("Name", name))
+    # RP-440/RP-444: Ansprechpartner (Haendler) und Anzeigename (Pseudonym
+    # eines Privatanbieters) — gedruckt nur, wo auch der Name gedruckt wird.
+    ansprechpartner = daten.get("seller_ansprechpartner")
+    alias = daten.get("seller_alias")
+    if voll and ansprechpartner and ansprechpartner != KONTAKT_ENTFERNT:
+        anbieter.append(("Ansprechpartner", ansprechpartner))
+    if voll and alias and alias != KONTAKT_ENTFERNT:
+        anbieter.append(("Anzeigename", alias))
     if voll and daten.get("seller_address"):
         anbieter.append(("Straße", daten.get("seller_address")))
     if ort:
@@ -672,7 +695,8 @@ def beweis_pdf(*, quelle: str, daten: Dict[str, Any], url: str, item_id: str,
     story.append(KeepTogether([Paragraph("Anbieter laut Inserat", st_h2), Spacer(1, 3)]))
     schluessel_tabelle([(k, _saeubern(v)) for k, v in anbieter], spalten=1)
     if maskiert or not voll and any(daten.get(f) for f in ("seller_address", "seller_phone", "seller_email")) \
-            or (not voll and name and str(name).strip().lower() not in ("händler", "privatverkäufer")):
+            or (not voll and name and str(name).strip().lower() not in ("händler", "privatverkäufer")) \
+            or (not voll and (alias or ansprechpartner)):
         abstand(3)
         story.append(Paragraph(
             "Name, Anschrift, Telefonnummer und E-Mail privater Anbieter werden nicht in "

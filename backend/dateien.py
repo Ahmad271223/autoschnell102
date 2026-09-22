@@ -7,7 +7,8 @@ dauerhaft und ohne Konto abrufen (Cache-Control: public). Jetzt:
 - logo/            oeffentlich (Firmenlogo, absichtlich)
 - protocol/ pickup/ nur ueber authentifizierte Endpunkte (404 hier)
 - alles andere     nur mit gueltiger Signatur (?exp=&sig=), HMAC ueber
-                   Schluessel + Ablauf mit JWT_SECRET, Standard 1 Stunde,
+                   Schluessel + Ablauf mit JWT_SECRET, Standard 1 Stunde
+                   (Inseratsfotos resale/: 24 Stunden, RP-098 Nr. 8),
                    Cache-Control: private
 """
 from __future__ import annotations
@@ -22,6 +23,21 @@ OEFFENTLICHE_PREFIXE = ("logo/",)
 PRIVATE_PREFIXE = ("protocol/", "pickup/")
 from konfig import zahl_env  # Pruefung 14.09.2026: keine Abstuerze durch .env-Tippfehler
 STANDARD_TTL = zahl_env("DATEI_LINK_TTL_SEKUNDEN", 3600, unten=60)
+#: Rollenprüfung 22.09.2026 (RP-098 Nr. 8): Inseratsfotos (resale/) sind
+#: ohnehin oeffentlich auf dem Marktplatz sichtbar. Mit einer Stunde zeigte
+#: der Inserats-Editor nach einer Pause nur noch Fehlbilder (die
+#: Marktplatz-Ansichten setzen schon selbst 3 Tage, marketplace.MARKT_FOTO_TTL).
+#: Standard fuer resale/ daher 24 Stunden; ein ausdruecklicher ttl gewinnt.
+INSERAT_FOTO_TTL = zahl_env("DATEI_LINK_TTL_INSERAT_SEKUNDEN", 24 * 3600, unten=60)
+_PREFIX_TTL = (("resale/", INSERAT_FOTO_TTL),)
+
+
+def standard_ttl(key: str) -> int:
+    """Lebensdauer eines signierten Links ohne ausdruecklichen ttl."""
+    for prefix, ttl in _PREFIX_TTL:
+        if key.startswith(prefix):
+            return int(ttl)
+    return int(STANDARD_TTL)
 
 
 def _geheimnis() -> bytes:
@@ -53,7 +69,7 @@ def signierte_datei_url(key: str, ttl: int | None = None) -> str:
     pfad = "/api/files/" + quote(key, safe="/")
     if not signatur_noetig(key):
         return pfad
-    exp = int(time.time()) + int(ttl or STANDARD_TTL)
+    exp = int(time.time()) + int(ttl or standard_ttl(key))
     return f"{pfad}?exp={exp}&sig={_mac(key, exp)}"
 
 

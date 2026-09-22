@@ -2,7 +2,12 @@ import { fassungMithoeren } from "@/lib/fassung";
 import { createContext, useContext, useEffect, useState } from "react";
 import { TOKEN_KAEUFER, tokenLesen, tokenLoeschen, tokenSetzen } from "@/lib/sitzung";
 import axios from "axios";
-import { API_BASE, gehoertZumAktuellenToken, istLangeAktion, LANGE_AKTION_MS } from "@/lib/api";
+import {
+  API_BASE, gehoertZumAktuellenToken, istLangeAktion, LANGE_AKTION_MS, neuesTokenUebernehmen,
+} from "@/lib/api";
+import { schreiben, sitzungsSpeicher } from "@/lib/speicher";
+import { ABMELDEGRUND_KAEUFER } from "@/pages/markt/marktHilfen";
+import { geraetIdLesen, geraetIdMerken } from "@/context/AuthContext";
 
 /**
  * Zwischenhändler-Auth (Rolle b2b_buyer, eigene Accounts — separat vom
@@ -23,7 +28,19 @@ buyerApi.interceptors.request.use((c) => {
 // Session beendet (anderes Gerät / abgemeldet) -> sauber zum Login statt
 // endloser Fehl-Requests mit totem Token.
 buyerApi.interceptors.response.use(
-  (r) => r,
+  (r) => {
+    // Rollenprüfung 22.09.2026 (RP-546): gleitende Sitzung. Läuft das Token
+    // bald ab, schickt der Server ein frisches derselben Sitzung mit
+    // (X-Neues-Token) — vorher endete jede Käufer-Sitzung hart nach 7 Tagen,
+    // mitten in einer Verhandlung. Dieselbe Regel wie Händler- und Fahrer-App
+    // (lib/api.neuesTokenUebernehmen -> sitzung.tokenErneuern): nur, wenn die
+    // Anfrage mit dem AKTUELLEN Token lief, nur etwas Token-Förmiges, nie in
+    // einem abgemeldeten Tab, und die "letzte Anmeldung" eines anderen Tabs
+    // bleibt stehen. Vorher lief hier tokenSetzen — das hob die Abmeldung
+    // des Tabs auf und schrieb localStorage auch über ein fremdes Konto.
+    neuesTokenUebernehmen(r, TOKEN_KAEUFER);
+    return r;
+  },
   (err) => {
     // Nachpruefung 20.09.2026 (Nr. 41): dasselbe Grundproblem wie in
     // lib/api.js — eine verspaetete 401 aus einer FRUEHEREN Anmeldung
@@ -34,6 +51,12 @@ buyerApi.interceptors.response.use(
         && gehoertZumAktuellenToken(err?.config, tokenLesen(TOKEN_KAEUFER))
         && !String(err?.config?.url || "").includes("/buyer/login")) {
       tokenLoeschen(TOKEN_KAEUFER);
+      // Rollenprüfung 22.09.2026 (RP-531): den Grund merken (z. B. "neu
+      // angemeldet am … von …") — die Käufer-Anmeldung zeigt ihn an, wie die
+      // Händler- und die Fahrer-App. Vorher stand dort kommentarlos das Formular.
+      const detail = err?.response?.data?.detail;
+      schreiben(sitzungsSpeicher(), ABMELDEGRUND_KAEUFER,
+                typeof detail === "string" && detail ? detail : "");
       if (window.location.pathname.startsWith("/markt")
           && !window.location.pathname.startsWith("/markt/login")) {
         window.location.href = "/markt/login?reason=session";
@@ -70,7 +93,12 @@ export function BuyerAuthProvider({ children }) {
   // legt der Betreiber nach einer Anfrage an; Einladungen loest BuyerLogin
   // nach der Anmeldung ein.
   const login = async (kennung, password) => {
-    const { data } = await buyerApi.post("/buyer/login", { kontonummer: kennung, password });
+    // Rollenprüfung 22.09.2026 (RP-557): bekanntes Gerät mitsenden (derselbe
+    // Schlüssel wie bei der Firmen-Anmeldung, AuthContext) — ein Angreifer
+    // kann das Konto dann nicht mehr für dieses Gerät aussperren.
+    const { data } = await buyerApi.post("/buyer/login",
+      { kontonummer: kennung, password, geraet_id: geraetIdLesen() });
+    geraetIdMerken(data);
     tokenSetzen(TOKEN_KAEUFER, data.token);
     // Login war erfolgreich — ein Fehler beim Nachladen des Profils darf
     // NICHT als "Anmeldung fehlgeschlagen" erscheinen.
@@ -80,7 +108,15 @@ export function BuyerAuthProvider({ children }) {
 
   const logout = () => {
     // Server-Session mit beenden (Single-Session: Token wird ungültig).
-    buyerApi.post("/auth/logout").catch(() => {});
+    // Rollenprüfung 22.09.2026 (RP-500): Der Request-Interceptor läuft in
+    // axios 1.x asynchron — er las den Token erst NACH tokenLoeschen, der
+    // Logout ging ohne Authorization raus (401), und die Sitzung blieb auf
+    // dem Server gültig. Jetzt den Token vorher lesen und selbst mitschicken.
+    const t = tokenLesen(TOKEN_KAEUFER);
+    if (t) {
+      buyerApi.post("/auth/logout", null, { headers: { Authorization: `Bearer ${t}` } })
+        .catch(() => {});
+    }
     tokenLoeschen(TOKEN_KAEUFER);
     setBuyer(null);
   };

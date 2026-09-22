@@ -137,8 +137,14 @@ export default function CountryPicker({ value, onChange }) {
         <option value="custom">Ausgewählte Länder…</option>
       </select>
 
+      {/* Rollenprüfung 22.09.2026 (RP-024/RP-274): --card, --border und
+          --accent sind HSL-Tripel ("0 0% 8%") fuer shadcn, keine Farben —
+          als var() direkt eingesetzt war das ungueltiges CSS: kein
+          Hintergrund, weisse Chips auf hellem Grund unsichtbar. Jetzt die
+          echten Farb-Tokens aus index.css. */}
       {currentMode === "custom" && (
-        <div className="rounded-2xl border border-[var(--border)] bg-[var(--card)] p-3 space-y-2">
+        <div className="rounded-2xl border p-3 space-y-2"
+             style={{ borderColor: "var(--border-default)", background: "var(--bg-elevated)" }}>
           <div className="text-[11px]" style={{ color: "var(--text-muted)" }} data-testid="rule-country-zaehler">
             {codes.length} von höchstens {MAX_LAENDER} Ländern ausgewählt
           </div>
@@ -153,7 +159,8 @@ export default function CountryPicker({ value, onChange }) {
                   key={code}
                   type="button"
                   onClick={() => toggleCode(code)}
-                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-[var(--accent)] text-white text-xs font-medium hover:opacity-90 transition"
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-white text-xs font-medium hover:opacity-90 transition"
+                  style={{ background: "var(--accent-blue)" }}
                   data-testid={`country-chip-${code}`}
                 >
                   {labelFor(code)} <X size={12} />
@@ -170,10 +177,13 @@ export default function CountryPicker({ value, onChange }) {
                   type="button"
                   onClick={() => toggleCode(code)}
                   className={`flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-xs text-left transition ${
-                    sel
-                      ? "bg-[var(--accent)]/15 text-[var(--accent)] font-medium"
-                      : "hover:bg-[var(--wa-06)] text-[var(--text-primary)]"
+                    sel ? "font-medium" : "hover:bg-[var(--wa-06)] text-[var(--text-primary)]"
                   }`}
+                  style={sel ? {
+                    background: "color-mix(in srgb, var(--accent-blue) 15%, transparent)",
+                    color: "var(--st-blau)",
+                  } : undefined}
+                  aria-pressed={sel}
                   data-testid={`country-option-${code}`}
                 >
                   {sel ? <Check size={12} /> : <Globe size={12} className="opacity-30" />}

@@ -105,32 +105,94 @@ _MAKE_ALIASES = {
 }
 
 
+def _wortgrenzen(name: str) -> set:
+    """Positionen im normalisierten Namen (_norm), an denen ein Wortteil
+    endet: vor Leer-/Satzzeichen und an jedem Wechsel Buchstabe <-> Ziffer.
+
+    "E 220 d" -> e220d, Grenzen {1, 4, 5}; "M340i" -> m340i, Grenzen {1, 4, 5};
+    "CLA Shooting Brake" -> Grenzen {3, 11, 16}."""
+    grenzen: set = set()
+    if not name:
+        return grenzen
+    nfd = unicodedata.normalize("NFD", name)
+    text = "".join(c for c in nfd if unicodedata.category(c) != "Mn").lower()
+    n = 0
+    vorher = None
+    for ch in text:
+        if re.match(r"[a-z0-9]", ch):
+            art = "z" if ch.isdigit() else "b"
+            if vorher is not None and art != vorher and n:
+                grenzen.add(n)
+            n += 1
+            vorher = art
+        else:
+            if n:
+                grenzen.add(n)
+            vorher = None
+    if n:
+        grenzen.add(n)
+    return grenzen
+
+
 def _find_model(make: dict, model_name: str) -> Optional[dict]:
-    """Sucht ein Modell innerhalb einer Marke. Wir versuchen erst exakte
-    Treffer, dann „startswith" (z.B. „E 220 d" → Modell „E 220" / „E-Klasse"
-    je nach Autoscout-Schreibweise), dann den ersten enthaltenden Eintrag."""
+    """Sucht ein Modell innerhalb einer Marke: erst exakt, dann ein
+    Katalogname, mit dem unser Modell an einer WORTGRENZE beginnt („E 220 d"
+    -> „E 220", „Golf Variant" -> „Golf"), dann ein Katalogname, der mit
+    unserem Modell beginnt — aber nur, wenn es genau EINEN gibt.
+
+    Rollenprüfung 22.09.2026 (RP-435/RP-447): Vorher galt jeder Anfang und
+    im Zweifel der laengste Name. Das machte aus BMW M340i den M3, aus M135i
+    den M1, aus M240i den M2, aus M440i den M4, aus „CLA Shooting Brake" die
+    CL-Klasse und aus EQE/EQB/EQV eine einzelne Motorvariante (EQE 300,
+    EQB 250, EQV 250) — der AutoScout-Link suchte ein anderes Auto. Jetzt:
+    lieber None (Suche ueber die Marke, der Vergleich zeigt einen Hinweis)
+    als ein falsches Modell."""
     if not model_name:
         return None
     target = _norm(model_name)
     if not target:
         return None
     models = make.get("models") or []
-    # 1) Exakt
-    for m in models:
-        if _norm(m.get("modelName", "")) == target:
+    normiert = [(m, _norm(m.get("modelName", ""))) for m in models]
+    # 1) Exakt — auch gegen die Schreibweisen hinter " / " („Ceed / cee'd",
+    #    „Ceed SW / cee'd SW"): sonst war „Ceed" mehrdeutig.
+    for m, n in normiert:
+        if n == target:
             return m
-    # 2) Autoscout-Eintrag fängt mit unserem Modell an (z.B. "C 220" ∈ "C")
-    candidates = []
-    for m in models:
-        n = _norm(m.get("modelName", ""))
-        if n and (n.startswith(target) or target.startswith(n)):
-            candidates.append((m, n))
-    if candidates:
-        # Den spezifischsten (längsten Namen) nehmen
-        candidates.sort(key=lambda kv: len(kv[1]), reverse=True)
-        return candidates[0][0]
-    # 3) substring match (vorsichtig — nur wenn unique-ish)
-    contains = [m for m in models if target in _norm(m.get("modelName", ""))]
+    for m, _n in normiert:
+        teile = [_norm(t) for t in str(m.get("modelName", "")).split("/")]
+        if len(teile) > 1 and target in teile:
+            return m
+    # 2) Katalogname ist der Anfang unseres Modells — nur an einer Wortgrenze
+    #    („m3" ist kein Anfang von „m340i": dort geht die Zahl weiter).
+    grenzen = _wortgrenzen(model_name)
+
+    def _an_grenze(n: str) -> bool:
+        if len(n) in grenzen:
+            return True
+        # Abkuerzung mit EINEM Buchstaben: „Combo-e" fuer „Combo Electric" —
+        # der letzte Buchstabe des Katalognamens beginnt unser naechstes Wort.
+        return n[-1].isalpha() and (len(n) - 1) in grenzen and target[len(n) - 2].isalnum()
+
+    anfaenge = [(m, n) for m, n in normiert
+                if n and len(n) < len(target) and target.startswith(n) and _an_grenze(n)]
+    if anfaenge:
+        anfaenge.sort(key=lambda kv: len(kv[1]), reverse=True)
+        return anfaenge[0][0]
+    # 3) Unser Modell ist der Anfang eines Katalognamens: nur eindeutig.
+    #    „EQE" passt auf EQE 300, EQE 350, EQE 43 AMG ... -> keine Auswahl.
+    #    Vorrang haben Namen, die an einer Wortgrenze weitergehen („S 55" ->
+    #    „S 55 AMG", nicht „S 550").
+    laenger = [(m, n) for m, n in normiert if n and n.startswith(target)]
+    an_grenze = [m for m, n in laenger if len(target) in _wortgrenzen(m.get("modelName", ""))]
+    if len(an_grenze) == 1:
+        return an_grenze[0]
+    if len(laenger) == 1:
+        return laenger[0][0]
+    if laenger:
+        return None
+    # 4) substring match (vorsichtig — nur wenn eindeutig)
+    contains = [m for m, n in normiert if target in n]
     if len(contains) == 1:
         return contains[0]
     return None
@@ -482,13 +544,22 @@ import logging as _logging
 import os as _os
 
 import httpx as _httpx
-from anbieter_fehler import AnbieterFehler, aus_http_antwort, aus_ausnahme
+from anbieter_fehler import (ART_AUSFALL, AnbieterFehler, ListingGone,
+                             aus_ausnahme, aus_http_antwort)
 
 _log = _logging.getLogger("autoscout_service")
 
 APIFY_TOKEN = _os.environ.get("APIFY_TOKEN", "").strip()
-APIFY_AUTOSCOUT_ACTOR = _os.environ.get(
-    "APIFY_AUTOSCOUT_ACTOR", "ivanvs~autoscout-scraper").strip()
+# Rollenprüfung 22.09.2026 (RP-549): ein LEER gesetzter Wert (docker-compose
+# ${APIFY_AUTOSCOUT_ACTOR:-}) ergab vorher "" statt des Standards -> Endpunkt
+# /v2/acts//run-sync... und jeder neue AutoScout-Link scheiterte.
+APIFY_AUTOSCOUT_ACTOR = (_os.environ.get("APIFY_AUTOSCOUT_ACTOR") or "").strip() \
+    or "ivanvs~autoscout-scraper"
+
+# Rollenprüfung 22.09.2026 (RP-202/RP-353): Text fuer ein Inserat, das der
+# Actor nicht (mehr) liefert — geht 1:1 an den Sucher.
+INSERAT_WEG_AUTOSCOUT = ("Das Inserat ist bei AutoScout24 nicht mehr online "
+                         "(entfernt oder verkauft) oder nicht abrufbar.")
 
 
 def autoscout_quelle_verfuegbar() -> bool:
@@ -503,6 +574,31 @@ def detail_looks_like_autoscout_listing(url: str) -> bool:
 
 
 from fahrzeug_codes import getriebe_code, kraftstoff_code  # noqa: E402
+
+
+def _autoscout_verkaeuferart(wert) -> Optional[str]:
+    """"Privat" / "Händler" des Actors -> privat | haendler | None."""
+    s = str(wert or "").strip().lower()
+    if s.startswith("privat"):
+        return "privat"
+    if s.startswith(("händler", "haendler", "dealer", "gewerb")):
+        return "haendler"
+    return None
+
+
+def _autoscout_firmenname(item: dict) -> Optional[str]:
+    """Rollenprüfung 22.09.2026 (RP-444): Firmenname eines Haendlerinserats.
+
+    Der Actor liefert einen Haendlerblock `dealer` (bei Privatinseraten leer,
+    siehe tests/fixtures/apify_autoscout_item.json); je nach Actor-Version
+    heisst das Feld companyName, name oder dealerName — auch flach am
+    Datensatz. Der erste nicht leere Wert gewinnt."""
+    dealer = item.get("dealer") if isinstance(item.get("dealer"), dict) else {}
+    for wert in (dealer.get("companyName"), dealer.get("name"), dealer.get("dealerName"),
+                 item.get("dealerName"), item.get("companyName")):
+        if isinstance(wert, str) and wert.strip():
+            return wert.strip()
+    return None
 
 
 def parse_autoscout_item(item: dict, item_id: str,
@@ -520,6 +616,18 @@ def parse_autoscout_item(item: dict, item_id: str,
     # Pruefbericht 20.09.2026 (S-16): kein Platzhalter als Name — die Art
     # (privat/gewerblich) steht in seller_type.
     verkaeufer = (item.get("contactName") or "").strip() or None
+    seller_type = _autoscout_verkaeuferart(item.get("seller"))
+    # Rollenprüfung 22.09.2026 (RP-444): Bei Haendlerinseraten ist contactName
+    # der Verkaufsberater ("Herr Meier") — im Kaufvertrag muss aber die FIRMA
+    # stehen. Den Firmennamen aus dem Haendlerblock nehmen; der Berater bleibt
+    # nur Rueckfall und steht getrennt als Ansprechpartner.
+    ansprechpartner = None
+    if seller_type == "haendler":
+        firma = _autoscout_firmenname(item)
+        if firma:
+            if verkaeufer and verkaeufer != firma:
+                ansprechpartner = verkaeufer
+            verkaeufer = firma
 
     # S-17: eine Zeichenkette ist EINE Nummer (vorher: ihr erstes Zeichen).
     telefon = telefon_aus(item.get("phones"))
@@ -584,11 +692,10 @@ def parse_autoscout_item(item: dict, item_id: str,
         "list_price": float(preis) if preis is not None else None,
         "currency": item.get("currency") or "EUR",
         "seller_name": verkaeufer,
+        # RP-444: Verkaufsberater eines Haendlers (nur Information, nie Vertragspartei)
+        "seller_ansprechpartner": ansprechpartner,
         # Beweisdokument: gewerblich/privat (privat: Name/Telefon nicht drucken)
-        "seller_type": ("privat" if str(item.get("seller") or "").strip().lower().startswith("privat")
-                        else "haendler" if str(item.get("seller") or "").strip().lower().startswith(
-                            ("händler", "haendler", "dealer", "gewerb"))
-                        else None),
+        "seller_type": seller_type,
         "seller_address": (adresse.get("street") or "") or None,
         "seller_zip": adresse.get("zip") or None,
         "seller_city": adresse.get("city") or None,
@@ -611,13 +718,15 @@ async def fetch_autoscout_vehicle(url: str, item_id: str) -> Optional[dict]:
         return None
     endpoint = (f"https://api.apify.com/v2/acts/{APIFY_AUTOSCOUT_ACTOR}"
                 f"/run-sync-get-dataset-items")
+    from mobile_service import apify_lauf_parameter
     try:
         async with _httpx.AsyncClient(
                 timeout=_httpx.Timeout(180.0, connect=20.0)) as client:
             r = await client.post(
                 endpoint,
                 headers={"Authorization": f"Bearer {APIFY_TOKEN}"},
-                params={"format": "json", "clean": "1"},
+                # RP-553: Speicher/Build optional ueber die .env
+                params=apify_lauf_parameter("APIFY_AUTOSCOUT_BUILD"),
                 json={"urls": [{"url": url}], "maxRecords": 1},
             )
             fehler = aus_http_antwort(r.status_code, r.text, "AutoScout24")
@@ -626,18 +735,23 @@ async def fetch_autoscout_vehicle(url: str, item_id: str) -> Optional[dict]:
                              r.status_code, item_id, r.text[:300])
                 raise fehler
             items = r.json()
-            if not isinstance(items, list) or not items \
-                    or not isinstance(items[0], dict):
-                _log.warning("Apify AutoScout: leere Antwort fuer %s", item_id)
-                return None
+            if not isinstance(items, list) or (items and not isinstance(items[0], dict)):
+                _log.warning("Apify AutoScout: unerwartete Antwort fuer %s", item_id)
+                raise AnbieterFehler(ART_AUSFALL, "AutoScout24", "unerwartete Antwortform")
+            # Rollenprüfung 22.09.2026 (RP-202/RP-353): leer bzw. ohne Inhalt
+            # = Inserat weg. Vorher None -> RuntimeError -> drei bezahlte
+            # Wiederholungen, Budget zurueckgebucht, "Technischer Fehler".
+            if not items:
+                _log.warning("Apify AutoScout: leere Antwort fuer %s — Inserat weg", item_id)
+                raise ListingGone(INSERAT_WEG_AUTOSCOUT)
             v = parse_autoscout_item(items[0], item_id, url=url)
             # Wie bei mobile.de: ein Element ohne Inhalt bedeutet, das
             # Inserat gibt es nicht (mehr) — nicht "leeres Fahrzeug".
-            if v and not (v.get("make") or v.get("model") or v.get("list_price")):
+            if not v or not (v.get("make") or v.get("model") or v.get("list_price")):
                 _log.warning("Apify AutoScout: Antwort ohne Inhalt fuer %s — Inserat weg", item_id)
-                return None
+                raise ListingGone(INSERAT_WEG_AUTOSCOUT)
             return v
-    except AnbieterFehler:
+    except (AnbieterFehler, ListingGone):
         raise
     except Exception as exc:
         _log.exception("Apify AutoScout: Abruf fehlgeschlagen fuer %s", item_id)

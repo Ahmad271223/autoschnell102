@@ -58,17 +58,41 @@ ALLOWED_TRANSITIONS: dict = {
     "abgeholt":         {"bestand", "verkaufsentwurf", "geloescht"},
     "nicht_abgeholt":   {"abholung_geplant", "storniert", "geloescht"},
     "bestand":          {"verkaufsentwurf", "geloescht", "archiviert"},
-    "verkaufsentwurf":  {"verkaufsbereit", "bestand", "geloescht"},
+    # Rollenprüfung 22.09.2026 (RP-518): Rueckweg in den Kaufzustand, wenn ein
+    # VOR der Abholung angelegtes Inserat geloescht wird (siehe
+    # VERKAUF_RUECKWEG_VOR_ABHOLUNG — nur ueber set_lifecycle, nie ueber
+    # try_set_lifecycle).
+    "verkaufsentwurf":  {"verkaufsbereit", "bestand", "geloescht",
+                         "gekauft", "abholung_geplant"},
     # reserviert/verkauft auch direkt aus verkaufsbereit — solange kein
     # Marktplatz existiert (Phase 1/2), wird ohne "veroeffentlicht" verkauft.
     "verkaufsbereit":   {"veroeffentlicht", "reserviert", "verkauft",
-                         "verkaufsentwurf", "bestand", "geloescht"},
+                         "verkaufsentwurf", "bestand", "geloescht",
+                         "gekauft", "abholung_geplant"},
     "veroeffentlicht":  {"reserviert", "verkauft", "verkaufsbereit", "bestand"},
     "reserviert":       {"verkauft", "veroeffentlicht"},
     "verkauft":         {"archiviert"},
     "storniert":        {"verglichen", "geloescht"},
     "geloescht":        set(),
     "archiviert":       set(),
+}
+
+#: Rollenprüfung 22.09.2026 (RP-518): Rueckweg aus dem Verkaufsblock in den
+#: Kaufzustand VOR der Abholung. Inserieren ist schon ab Vertragserstellung
+#: erlaubt; wurde so ein Inserat geloescht, setzte routes/resale.delete_listing
+#: das Fahrzeug bisher auf "bestand" — danach aenderte "nicht abgeholt" nichts
+#: mehr (kaufvorgang._schritte kennt keinen Weg aus "bestand"), und nach 50
+#: Tagen archivierte der Aufraeumer ein nie abgeholtes Auto.
+#: Diese Uebergaenge stehen in ALLOWED_TRANSITIONS (resale._pfad_zurueck sucht
+#: dort), sind aber NUR ueber einen ausdruecklichen set_lifecycle-Aufruf
+#: erlaubt: try_set_lifecycle — die Best-effort-Hooks von Vertrag, Termin,
+#: Fahrer-App und Aufraeumer — lehnt sie ab. Sonst zoege ein neuer Termin ohne
+#: Vertrag ein Fahrzeug mit aktivem Inserat still aus dem Verkauf (Inserat
+#: "entwurf", Fahrzeug "abholung_geplant"), genau wie beim Rueckweg aus
+#: "abgeholt" (abholung_zuruecknehmen).
+VERKAUF_RUECKWEG_VOR_ABHOLUNG = {
+    "verkaufsentwurf": frozenset({"gekauft", "abholung_geplant"}),
+    "verkaufsbereit": frozenset({"gekauft", "abholung_geplant"}),
 }
 
 # Mapping der alten Freitext-Status auf den neuen Lebenszyklus (Migration).
@@ -118,11 +142,15 @@ async def set_lifecycle(
     vehicle_id: str, dealer_id: str, new_state: str, *,
     user: Optional[dict] = None, force: bool = False,
     extra_set: Optional[dict] = None, extra_unset: Optional[dict] = None,
+    verkauf_rueckweg: bool = True,
 ) -> dict:
     """Setzt den Lebenszyklus-Status eines Fahrzeugs.
 
     Validiert den Übergang (außer force=True, z.B. für Migrationen) und
     schreibt einen Audit-Log-Eintrag. Gibt das aktualisierte Fahrzeug zurück.
+
+    Rollenprüfung 22.09.2026 (RP-518): verkauf_rueckweg=False sperrt die
+    Uebergaenge aus VERKAUF_RUECKWEG_VOR_ABHOLUNG (so ruft try_set_lifecycle).
     """
     if new_state not in LIFECYCLE_STATES:
         raise LifecycleError(f"Unbekannter Status: {new_state}")
@@ -152,6 +180,10 @@ async def set_lifecycle(
     if not force and new_state not in ALLOWED_TRANSITIONS.get(current, set()):
         raise LifecycleError(
             f"Übergang '{current}' → '{new_state}' ist nicht erlaubt")
+    if not force and not verkauf_rueckweg \
+            and new_state in VERKAUF_RUECKWEG_VOR_ABHOLUNG.get(current, ()):
+        raise LifecycleError(
+            f"Übergang '{current}' → '{new_state}' nur beim Löschen des Inserats")
     # Runde 17: Zusatzfelder (Fotos leeren, Bestandsfrist, deleted_at ...)
     # im SELBEN Write wie der Statuswechsel — kein Zwischenzustand mehr
     # ("geloescht" ohne Fotoloeschung, "bestand" ohne Frist).
@@ -185,9 +217,13 @@ async def try_set_lifecycle(vehicle_id: str, dealer_id: str, new_state: str, *,
     Übergang (z.B. zweiter Vertrag für dasselbe Fahrzeug) darf den
     Hauptvorgang niemals abbrechen. Phase 2 (15.09.2026, G5): liefert True,
     wenn der Status gesetzt wurde (oder schon stand), sonst False — die
-    Fahrzeug-Zusammenfassung meldet dann keinen falschen Erfolg mehr."""
+    Fahrzeug-Zusammenfassung meldet dann keinen falschen Erfolg mehr.
+    Rollenprüfung 22.09.2026 (RP-518): nie den Rueckweg aus dem Verkaufsblock
+    (VERKAUF_RUECKWEG_VOR_ABHOLUNG) — ein Hook zieht kein inseriertes Fahrzeug
+    aus dem Verkauf."""
     try:
-        await set_lifecycle(vehicle_id, dealer_id, new_state, user=user)
+        await set_lifecycle(vehicle_id, dealer_id, new_state, user=user,
+                            verkauf_rueckweg=False)
         return True
     except LifecycleError as exc:
         # Runde 17: nicht mehr stumm — im Log nachvollziehbar, warum ein

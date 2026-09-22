@@ -218,8 +218,11 @@ class _Coll:
 class _Db:
     def __init__(self, **colls):
         # Umbau Kaufvorgaenge 09.09.2026: create_draft liest den abgeholten Vorgang
+        # Rollenpruefung 22.09.2026 (RP-474): der Entwurf liest zusaetzlich
+        # abgeholte Termine und unterschriebene Abholprotokolle.
         for name in ("resale_listings", "vehicles", "listing_interest",
-                     "dealers", "pickup_reports", "kaufvorgaenge"):
+                     "dealers", "pickup_reports", "kaufvorgaenge",
+                     "appointments", "pickup_protocols"):
             setattr(self, name, _Coll(colls.get(name)))
 
 
@@ -459,6 +462,36 @@ def test_unit_53_54_reserviertes_inserat_loeschen(welt):
         assert it["history"][-1]["aktion"] == "inserat_geloescht"
     assert z.db.listing_interest.one(id="I3")["history"] == []
     assert z.db.listing_interest.one(id="I4")["status"] == "offen"
+
+
+def test_unit_53_54_hand_reservierung_dann_loeschen(welt):
+    """Rollenprüfung 22.09.2026 (RP-093): Gegenstueck zum HTTP-Test 53/54 —
+    die Reservierung von Hand beendet offene Verhandlungen sofort
+    ("inserat_reserviert"); das spaetere Loeschen ueberschreibt diesen Grund
+    nicht und beendet nur, was dann noch laeuft (akzeptiert)."""
+    z = welt.bauen(
+        resale_listings=[_listing("veroeffentlicht")],
+        vehicles=[_fahrzeug("veroeffentlicht")],
+        listing_interest=[{"id": "I1", "listing_id": "L1", "status": "gegenangebot", "history": []},
+                          {"id": "I4", "listing_id": "L9", "status": "offen", "history": []}])
+    from routes.resale import ListingStatusIn
+    r = _run(z.resale.set_listing_status("L1", ListingStatusIn(status="reserviert"), USER))
+    assert r["status"] == "reserviert"
+    assert z.db.resale_listings.one(id="L1")["reserviert_manuell"] is True
+    it = z.db.listing_interest.one(id="I1")
+    assert it["status"] == "abgelehnt" and it["beendet_grund"] == "inserat_reserviert"
+    # Kaeufer-Reservierung nachstellen (akzeptierte Anfrage, Nr. 54)
+    z.db.listing_interest.docs.append({"id": "I2", "listing_id": "L1", "status": "akzeptiert",
+                                       "history": []})
+    assert _run(z.resale.delete_listing("L1", USER))["ok"] is True
+    assert z.db.resale_listings.one(id="L1")["status"] == "geloescht"
+    assert z.db.vehicles.one(id="V1")["lifecycle"] == "bestand"
+    it = z.db.listing_interest.one(id="I2")
+    assert it["status"] == "abgelehnt" and it["beendet_grund"] == "inserat_geloescht"
+    it = z.db.listing_interest.one(id="I1")
+    assert it["beendet_grund"] == "inserat_reserviert"
+    assert [h["aktion"] for h in it["history"]] == ["inserat_reserviert"]
+    assert z.db.listing_interest.one(id="I4")["status"] == "offen"   # fremdes Inserat
 
 
 def test_unit_53_fahrzeug_ausserhalb_verkaufsblock_bleibt_unberuehrt(welt):
@@ -870,12 +903,30 @@ def test_http_53_54_reserviertes_inserat_loeschen(firma):
                                      "created_at": _jetzt(), "updated_at": _jetzt()})
     assert _status(firma, lid, "reserviert").status_code == 200
     assert _lifecycle(vid) == "reserviert"
+    # Rollenprüfung 22.09.2026 (RP-093): die Reservierung von Hand beendet
+    # die laufende Verhandlung schon HIER (Grund "inserat_reserviert") — der
+    # Kaeufer erfaehrt es sofort statt weiter ins Leere zu kontern.
+    assert dbx.resale_listings.find_one({"id": lid})["reserviert_manuell"] is True
+    it = dbx.listing_interest.find_one({"id": f"i_{SUF}_b"})
+    assert it["status"] == "abgelehnt" and it["beendet_grund"] == "inserat_reserviert"
+    # Nr. 54 weiter pruefen: eine akzeptierte Anfrage (Kaeufer-Reservierung,
+    # Zustand wie nach answer_interest: reserved_for statt Hand-Kennzeichen)
+    # endet mit dem Loeschen.
+    dbx.resale_listings.update_one({"id": lid}, {"$set": {"reserved_for": "kaeufer-y"},
+                                                 "$unset": {"reserviert_manuell": ""}})
+    dbx.listing_interest.insert_one({"id": f"i_{SUF}_c", "listing_id": lid, "dealer_id": firma["dealer_id"],
+                                     "buyer_user_id": "kaeufer-y", "status": "akzeptiert", "history": [],
+                                     "created_at": _jetzt(), "updated_at": _jetzt()})
     r = requests.delete(f"{API}/resale/{lid}", headers=firma["kopf"], timeout=30)
     assert r.status_code == 200, r.text[:200]
     assert dbx.resale_listings.find_one({"id": lid})["status"] == "geloescht"
     assert _lifecycle(vid) == "bestand"                             # nie geloescht + reserviert
-    it = dbx.listing_interest.find_one({"id": f"i_{SUF}_b"})
+    it = dbx.listing_interest.find_one({"id": f"i_{SUF}_c"})
     assert it["status"] == "abgelehnt" and it["beendet_grund"] == "inserat_geloescht"
+    # die schon beendete Verhandlung behaelt ihren echten Grund
+    it = dbx.listing_interest.find_one({"id": f"i_{SUF}_b"})
+    assert it["status"] == "abgelehnt" and it["beendet_grund"] == "inserat_reserviert"
+    assert [h["aktion"] for h in it["history"]] == ["inserat_reserviert"]
     # Fahrzeug ist wieder inserierbar
     assert requests.post(f"{API}/resale/draft/{vid}", headers=firma["kopf"], timeout=30).status_code == 200
 

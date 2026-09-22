@@ -20,6 +20,13 @@ Server (offizielle API, keine Sperr-Gefahr).
 Die Erweiterung darf **ausschließlich** kleinanzeigen.de lesen (siehe
 `host_permissions`) und reagiert nur auf die AutoSchnell-Seite.
 
+Auf welchen Adressen sie aktiv ist, steht in `manifest.json` unter
+`content_scripts.matches`. Rollenprüfung 22.09.2026 (RP-445): Die Live-
+Adresse `app.auto-schnellkauf.de` fehlte dort — die Erweiterung lud auf der
+Produktionsseite nie. Wechselt die Adresse (PUBLIC_HOST), muss sie hier
+ergänzt und die Version erhöht werden; bereits installierte Erweiterungen
+danach neu laden bzw. aktualisieren.
+
 ## Installation (bis zur Veröffentlichung im Chrome Web Store)
 1. Chrome öffnen → `chrome://extensions`
 2. Oben rechts „Entwicklermodus" einschalten.

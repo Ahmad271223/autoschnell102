@@ -309,6 +309,46 @@ class KeinBerechtigterWartender(RuntimeError):
     duerfte (und verbraucht dabei fremdes Anbieter-Kontingent)."""
 
 
+NIEMAND_WARTET = ("Der Abruf wurde nicht ausgeführt: auf diesen Link wartet niemand "
+                  "mehr (abgebrochen).")
+
+
+def _ohne_wartende(job: Optional[dict]) -> bool:
+    """Rollenprüfung 22.09.2026 (RP-204/RP-355): Konto-Job ohne Wartende?
+
+    Nur Jobs, die ausdruecklich als Konto-Job markiert sind (intern=False),
+    zaehlen — Altjobs ohne das Feld (vor dem Rollout eingereiht) und interne
+    Jobs behalten das bisherige Verhalten."""
+    return bool(job) and job.get("intern") is False and not (job.get("user_ids") or [])
+
+
+async def _niemand_wartet_mehr(db, job_id: str) -> bool:
+    """Frischer Blick auf den Job: sind seit dem Beanspruchen alle Wartenden
+    ausgestiegen? Dann nicht erneut einreihen (RP-204)."""
+    try:
+        aktuell = await db.link_jobs.find_one(
+            {"id": job_id}, {"_id": 0, "intern": 1, "user_ids": 1})
+    except Exception:  # noqa: BLE001 — im Zweifel wie bisher weiter versuchen
+        return False
+    return _ohne_wartende(aktuell)
+
+
+async def _ist_hauptchef(db, u: dict) -> bool:
+    """RP-156: Ist dieses dealer-Konto der EINE Hauptchef seiner Firma?
+    Dieselbe Regel wie deps.current_firma/ist_haupt_chef (Zeiger
+    dealers.user_id, ohne Zeiger das aelteste dealer-Konto) — aber auf der
+    Datenbank des Workers."""
+    firma = u.get("dealer_id") or ""
+    d = await db.dealers.find_one({"id": firma}, {"_id": 0, "user_id": 1})
+    haupt = (d or {}).get("user_id")
+    if not haupt:
+        aeltester = await db.users.find_one(
+            {"dealer_id": firma, "role": "dealer"}, {"_id": 0, "id": 1},
+            sort=[("created_at", 1)])
+        haupt = (aeltester or {}).get("id")
+    return not haupt or haupt == u.get("id")
+
+
 async def wartender_darf_abrufen(db, user_id: str, job: dict) -> Optional[str]:
     """Darf dieses wartende Konto den Anbieter-Abruf ausloesen?
 
@@ -334,6 +374,13 @@ async def wartender_darf_abrufen(db, user_id: str, job: dict) -> Optional[str]:
             return None
         from deps import subscription_for
         try:
+            # Rollenprüfung 22.09.2026 (RP-156): dieselbe Einnordung wie
+            # deps.current_firma — ein zweites dealer-Konto, das NICHT der
+            # eingetragene Hauptchef ist, gilt als Sucher. Mit dem rohen
+            # users-Dokument kam es sonst ueber den Firmen-Abo-Rueckfall von
+            # subscription_for durch, obwohl die API es ohne eigenes Abo sperrt.
+            if u.get("role") == "dealer" and not await _ist_hauptchef(db, u):
+                u = {**u, "role": "sucher"}
             if not (await subscription_for(u)).get("active"):
                 return None                            # Befund 147: Abo vorbei
         except Exception:  # noqa: BLE001 — im Zweifel nicht abrufen
@@ -394,6 +441,12 @@ async def enqueue_job(db, url: str, dealer_id: str = "",
             "error": None,
             "requested_by_dealer": dealer_id,
             "requested_by_user": user_id,
+            # Rollenprüfung 22.09.2026 (RP-204/RP-355): Nur ein Job, der OHNE
+            # Konto eingereiht wurde (Skripte, Probe), ist ein interner Abruf.
+            # Steigt beim Konto-Job der letzte Wartende aus, darf der Worker
+            # nicht mehr "ohne Konto" abrufen (kein Konto- und Firmenlimit,
+            # und das Ergebnis will niemand mehr).
+            "intern": not user_id,
             # Runde 28: das KONTO, das wartet — fuer Fairness und Statusabfrage.
             "user_ids": [user_id] if user_id else [],
             # Audit 09/2026 (Punkt 33): alle Firmen, die auf diesen Job warten —
@@ -869,6 +922,10 @@ async def _process(db, job: dict) -> None:
         for uid in ([zuerst] if zuerst in wartende else []) + wartende:
             if uid and uid not in konten:
                 konten.append(uid)
+        if not konten and _ohne_wartende(job):
+            # RP-204/RP-355: Konto-Job, auf den niemand mehr wartet — nicht
+            # mit dealer_id=""/user_id="" am Konto- und Firmenlimit vorbei holen.
+            raise KeinBerechtigterWartender(NIEMAND_WARTET)
         if not konten:
             konten = [""] if not wartende else []
         letzte = None
@@ -916,6 +973,13 @@ async def _process(db, job: dict) -> None:
             # BUSY_FRIST_S ein klares Ende.
             busy = int(job.get("busy_versuche") or 0) + 1
             erstellt = _als_utc(job.get("created_at"))
+            if await _niemand_wartet_mehr(db, job["id"]):
+                # RP-204: niemand wartet mehr — nicht wieder einreihen.
+                await db.link_jobs.update_one(
+                    eigener_claim,
+                    {"$set": {"status": "failed", "active": False, "error": NIEMAND_WARTET,
+                              "finished_at": _now(), "updated_at": _now()}})
+                return
             if erstellt is not None and (_now() - erstellt).total_seconds() > BUSY_FRIST_S:
                 await db.link_jobs.update_one(
                     eigener_claim,
@@ -964,6 +1028,16 @@ async def _process(db, job: dict) -> None:
             # bleibt im Log und in error_intern (nicht Teil der Statusantwort).
             log.warning("link_jobs: Job %s Versuch %s fehlgeschlagen: %s",
                         job["id"], job.get("attempts", 1), str(exc)[:300])
+            # RP-204/RP-355: Ist waehrend des Versuchs der letzte Wartende
+            # ausgestiegen, endet der Job hier — ein weiterer Versuch wuerde
+            # sonst ohne Konto (am Konto- und Firmenlimit vorbei) abrufen.
+            if not endgueltig and await _niemand_wartet_mehr(db, job["id"]):
+                await db.link_jobs.update_one(
+                    eigener_claim,
+                    {"$set": {"status": "failed", "active": False, "error": NIEMAND_WARTET,
+                              "error_intern": str(exc)[:300],
+                              "finished_at": _now(), "updated_at": _now()}})
+                return
             if endgueltig:
                 await db.link_jobs.update_one(
                     eigener_claim,

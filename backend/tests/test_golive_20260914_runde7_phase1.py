@@ -135,7 +135,8 @@ def test_14_betraege_null_und_negativ():
     assert f("mileage", "keine Ahnung")[0] is False
     assert f("mileage", "150.000 km") == (True, 150000)
     assert f("power_ps", "110,5") == (True, 111)
-    assert f("mileage", "") == (True, "")
+    # Rollenprüfung 22.09.2026 (RP-507): geleertes Zahlenfeld wird None statt ""
+    assert f("mileage", "") == (True, None)
     assert f("mileage", 2000) == (True, 2000)
     assert f("mileage", True)[0] is False
     assert f("mileage", "1e400")[0] is False

@@ -8,8 +8,59 @@ import { openContractPdf } from "@/lib/pdf";
 import { dateiTeilen, kannDateiTeilen, pdfDatei } from "@/lib/teilen";
 import { nachKorrektur } from "@/lib/versand";
 
+/**
+ * Rollenprüfung 22.09.2026 (RP-406/RP-417): Abholtermin zu einem Vertrag
+ * anlegen, der KEINEN offenen Termin hat (ohne Abholdatum erstellt, oder der
+ * letzte Termin ist "nicht abgeholt"). Vorher meldete "Speichern & Termin"
+ * auch dann "Termin im Terminplaner angelegt", wenn nichts angelegt wurde —
+ * appointment_id zeigte noch auf den geschlossenen Termin.
+ *
+ * Liefert { angelegt: true, hinweis } oder { angelegt: false, grund }:
+ *   "offen"      — es gibt schon einen offenen Termin (nichts zu tun)
+ *   "storniert"  — der Kauf ist storniert: kein neuer Termin (das hebt nur
+ *                  der Chef im Terminplaner auf)
+ *   "abgeholt"   — das Fahrzeug ist schon abgeholt
+ * Fehler des Servers werden geworfen (Aufrufer zeigt errMsg).
+ */
+export async function abholterminAnlegen(contract, client = api) {
+  const kv = contract?.kaufvorgang_status;
+  if (kv === "storniert") return { angelegt: false, grund: "storniert" };
+  if (kv === "abgeholt") return { angelegt: false, grund: "abgeholt" };
+  // Ohne Angabe aus der Vertragsliste (Dialog direkt nach dem Erstellen):
+  // ein frisch angelegter Vertrag mit appointment_id hat einen offenen Termin.
+  const offen = typeof contract?.termin_offen === "boolean"
+    ? contract.termin_offen : Boolean(contract?.appointment_id);
+  if (offen) return { angelegt: false, grund: "offen" };
+  const cd = contract?.contract_data || {};
+  try {
+    const { data } = await client.post("/appointments", {
+      vehicle_id: contract.vehicle_id, contract_id: contract.id,
+      seller_name: contract.seller_name, seller_phone: contract.seller_phone,
+      seller_email: contract.seller_email,
+      pickup_address: `${cd.seller_address || ""} ${cd.seller_zip || ""} ${cd.seller_city || ""}`.trim(),
+      pickup_date: contract.pickup_date || "",
+      pickup_time: contract.pickup_time || "",
+      status: "offen",
+    });
+    return { angelegt: true, hinweis: data?.hinweis || "" };
+  } catch (err) {
+    // Zwischenzeitlich doch ein offener Termin (anderer Tab): kein Fehler.
+    const d = err?.response?.data?.detail;
+    if (err?.response?.status === 409 && typeof d === "string" && /bereits einen offenen/i.test(d)) {
+      return { angelegt: false, grund: "offen" };
+    }
+    throw err;
+  }
+}
+
+export const TERMIN_MELDUNG = {
+  offen: "Der Abholtermin steht schon im Terminplaner.",
+  storniert: "Der Kauf ist storniert — es wird kein neuer Abholtermin angelegt.",
+  abgeholt: "Das Fahrzeug ist bereits abgeholt.",
+};
+
 export default function SendDialog({ open, contract, onClose }) {
-  const { dealer } = useAuth();
+  const { dealer, refresh } = useAuth();
   const nav = useNavigate();
   const [tab, setTab] = useState("whatsapp");
   const [phone, setPhone] = useState(contract.seller_phone || "");
@@ -18,21 +69,26 @@ export default function SendDialog({ open, contract, onClose }) {
   // Vertrags raus, ist das hier der "erneute Versand (nach Korrektur)" —
   // mit eigenem Betreff und Text aus den Einstellungen.
   const korrektur = nachKorrektur(contract);
-  const [subject, setSubject] = useState(
-    (korrektur && dealer?.email_subject_korrektur) || dealer?.email_subject
-    || "Kaufvertrag für Ihr Fahrzeug");
   // 19.09.2026 (sichtbarer Mangel 3): Die Einstellungen bewerben acht
   // Platzhalter, ersetzt wurde nur {händler_name} — {kunde_name}, {fahrzeug},
   // {abholdatum} usw. gingen WOERTLICH an den Verkaeufer. Jetzt werden alle
   // beworbenen Platzhalter aus Vertrag und Firmendaten gefuellt.
-  const platzhalter = (text) => {
+  // Rollenprüfung 22.09.2026 (RP-220/RP-371): zuerst die im VERTRAG
+  // eingefrorenen Firmenangaben, dann die des Betrachters — verschickt der
+  // Chef den Vertrag eines Suchers (Filial-Firmenname), nannte der Text sonst
+  // die Chef-Firma, Vertrag und Absender aber die Filiale.
+  const platzhalter = (text, d = dealer) => {
     const cd = contract?.contract_data || {};
     const datum = String(contract?.pickup_date || cd.pickup_date || "");
     const [j, m, t] = datum.split("-");
     const datumDe = (j && m && t) ? `${t}.${m}.${j}` : datum;
-    const abhol = [datumDe, contract?.pickup_time || cd.pickup_time].filter(Boolean).join(" ");
-    const marke = contract?.make || cd.make || "";
-    const modell = contract?.model || cd.model || "";
+    const zeit = contract?.pickup_time || cd.pickup_time || "";
+    // Wie im Backend (vertrag_platzhalter.abholzeitpunkt): "TT.MM.JJJJ um HH:MM Uhr".
+    const abhol = datumDe && zeit ? `${datumDe} um ${zeit} Uhr` : (datumDe || zeit);
+    // Rollenprüfung 22.09.2026 (RP-432): zuerst die im Vertrag bearbeiteten
+    // Werte (nach einer Korrektur des Fahrers stehen sie nur dort).
+    const marke = cd.vehicle_make || contract?.make || cd.make || "";
+    const modell = cd.vehicle_model || contract?.model || cd.model || "";
     const roh = String(contract?.payment_method || cd.payment_method || "");
     const k = roh.toLowerCase();
     const zahlung = k === "bar" ? "Barzahlung"
@@ -43,14 +99,14 @@ export default function SendDialog({ open, contract, onClose }) {
     const preisText = Number.isFinite(preis)
       ? `${preis.toLocaleString("de-DE", { minimumFractionDigits: 2 })} €` : "";
     const werte = {
-      "{händler_name}": dealer?.company_name || cd.dealer_company || "",
+      "{händler_name}": cd.dealer_company || d?.company_name || "",
       "{kunde_name}": contract?.seller_name || cd.seller_name || "",
       "{fahrzeug}": [marke, modell].filter(Boolean).join(" "),
       "{marke}": marke,
       "{modell}": modell,
       "{abholdatum}": abhol,
-      "{telefon}": cd.dealer_phone || dealer?.phone || "",
-      "{email}": cd.dealer_email || dealer?.email || dealer?.contact_email || "",
+      "{telefon}": cd.dealer_phone || d?.phone || "",
+      "{email}": cd.dealer_email || d?.email || d?.contact_email || "",
       // 20.09.2026 (Wunsch Ahmad): Übergabeort und Zahlungsart — dieselben
       // Namen wie im Backend (vertrag_platzhalter.py), damit derselbe Text
       // im Versand-Dialog und im PDF gleich aussieht.
@@ -61,8 +117,8 @@ export default function SendDialog({ open, contract, onClose }) {
       "{zahlungsart}": zahlung,
       "{kaufpreis}": preisText,
       "{vertragsnummer}": contract?.contract_no || cd.contract_no || "",
-      "{kundennummer}": String(dealer?.kunden_nr || cd.kunden_nr || ""),
-      "{haendler_name}": dealer?.company_name || cd.dealer_company || "",
+      "{kundennummer}": String(cd.kunden_nr || d?.kunden_nr || ""),
+      "{haendler_name}": cd.dealer_company || d?.company_name || "",
     };
     // Wie im Backend: fehlt eine Angabe, steht dort "____" — nie der
     // Platzhalter selbst. Ein Kunde darf nie "{abholdatum}" lesen.
@@ -70,9 +126,41 @@ export default function SendDialog({ open, contract, onClose }) {
       (s, [name, wert]) => s.replaceAll(name, String(wert || "").trim() || "____"),
       text || "");
   };
-  const [waMsg, setWaMsg] = useState(platzhalter(dealer?.whatsapp_template));
-  const [emailMsg, setEmailMsg] = useState(platzhalter(
-    (korrektur && dealer?.email_template_korrektur) || dealer?.email_template));
+  // Rollenprüfung 22.09.2026 (RP-424): auch der BETREFF geht durch die
+  // Platzhalter — "{fahrzeug}" ging sonst wörtlich an den Verkäufer (der
+  // Server setzt sie zusätzlich ein, siehe send_contract).
+  // (Parameter heißt bewusst `dealer`: frischer Stand nach refresh() oder
+  // der aus dem Kontext.)
+  const vorlagen = (dealer) => ({
+    subject: platzhalter((korrektur && dealer?.email_subject_korrektur) || dealer?.email_subject
+      || "Kaufvertrag für Ihr Fahrzeug", dealer),
+    waMsg: platzhalter(dealer?.whatsapp_template, dealer),
+    emailMsg: platzhalter((korrektur && dealer?.email_template_korrektur) || dealer?.email_template,
+                          dealer),
+  });
+  const [subject, setSubject] = useState(() => vorlagen(dealer).subject);
+  const [waMsg, setWaMsg] = useState(() => vorlagen(dealer).waMsg);
+  const [emailMsg, setEmailMsg] = useState(() => vorlagen(dealer).emailMsg);
+  // Rollenprüfung 22.09.2026 (RP-490): Vorlagen, die der Chef geändert hat,
+  // während der Tab offen war, kamen nie an (Kontext ohne refresh). Beim
+  // Öffnen frisch laden und alle Felder, die der Nutzer NICHT angefasst hat,
+  // neu vorbelegen.
+  const angefasst = useRef({});
+  useEffect(() => {
+    if (!open || !refresh) return undefined;
+    angefasst.current = {};
+    let aktiv = true;
+    Promise.resolve(refresh())
+      .then((data) => {
+        if (!aktiv || !data?.dealer) return;
+        const neu = vorlagen(data.dealer);
+        if (!angefasst.current.subject) setSubject(neu.subject);
+        if (!angefasst.current.waMsg) setWaMsg(neu.waMsg);
+        if (!angefasst.current.emailMsg) setEmailMsg(neu.emailMsg);
+      })
+      .catch(() => {});
+    return () => { aktiv = false; };
+  }, [open, contract?.id]); // eslint-disable-line react-hooks/exhaustive-deps
   const [busy, setBusy] = useState(false);
   // Wunsch Ahmad 18.09.2026: Das Beweisdokument entsteht nicht mehr
   // automatisch bei jedem Vergleich. Nach dem Versand fragen wir einmal
@@ -217,6 +305,14 @@ export default function SendDialog({ open, contract, onClose }) {
           toast.warning("Der Versand hat kein Ergebnis gemeldet. Bitte noch einmal "
             + "auf Senden klicken — es wird garantiert nicht doppelt zugestellt.");
         } else if (data?.bereits_gesendet) toast.info("Dieser Versand wurde bereits registriert.");
+        else if (z === "versendet" && data?.hinweis) {
+          // Rollenprüfung 22.09.2026 (RP-448): Während des Versands entstand
+          // eine neue Fassung — die Mail enthielt noch die vorherige. Der
+          // Server hält den Vertrag deshalb unversendet; hier stand trotzdem
+          // "E-Mail mit Vertrag versendet". Jetzt die Warnung, und ein
+          // zweiter Versand geht ohne Rückfrage.
+          toast.warning(data.hinweis, { duration: 15000 });
+        }
         else if (z === "versendet") {
           setEmailGesendet(true);
           // Der Sucher bekommt immer eine Kopie mit dem PDF (09/2026).
@@ -230,9 +326,26 @@ export default function SendDialog({ open, contract, onClose }) {
         }
         else if (z === "mock") toast.success("Testmodus: Versand nur protokolliert, keine E-Mail");
         else toast.success("Versand registriert");
+        // Rollenprüfung 22.09.2026 (RP-473): Ohne gültige E-Mail-Adresse
+        // (eigene oder der Firma) landen Antworten des Verkäufers bei der
+        // Plattformadresse — und eine Kopie an dich gab es auch nicht.
+        if (data?.antwort_adresse_fehlt) {
+          toast.warning("Antworten des Verkäufers erreichen dich nicht: Es ist keine gültige "
+            + "E-Mail-Adresse hinterlegt. Bitte in den Einstellungen eine E-Mail-Adresse "
+            + "eintragen.", { duration: 15000 });
+        } else if (z === "versendet" && data?.kopie === "nicht_moeglich") {
+          toast.info("Keine Kopie an dich: Für dein Konto ist keine eigene E-Mail-Adresse "
+            + "hinterlegt (Einstellungen). Antworten gehen an die Firmenadresse.");
+        }
+        // RP-221: ein früherer Versuch an diese Adresse blieb ohne Ergebnis.
+        if (data?.frueherer_versand_unklar) {
+          toast.info("Ein früherer Versandversuch an diesen Empfänger hatte kein Ergebnis — "
+            + "er wurde durch diesen Versand ersetzt.");
+        }
         // Nur nach einem echten Versand fragen — nicht, wenn er noch laeuft
-        // oder ohne Ergebnis blieb (dann klickt der Nutzer gleich erneut).
-        if (contract.vehicle_id && !beweisFertig && z !== "unklar"
+        // oder ohne Ergebnis blieb (dann klickt der Nutzer gleich erneut),
+        // und nicht, wenn eine alte Fassung rausging (RP-448).
+        if (contract.vehicle_id && !beweisFertig && z !== "unklar" && !data?.hinweis
             && !(data?.bereits_gesendet && z === "laeuft")) {
           setBeweisFrage(true);
         }
@@ -302,20 +415,20 @@ export default function SendDialog({ open, contract, onClose }) {
     setBusy(true);
     try {
       // Termin wird beim PDF-Erstellen bereits automatisch angelegt, wenn ein
-      // Abholdatum gesetzt war. Falls noch keiner existiert (z.B. ohne
-      // pickup_date), legen wir hier einen Fallback-Termin an.
-      if (!contract.appointment_id) {
-        await api.post("/appointments", {
-          vehicle_id: contract.vehicle_id, contract_id: contract.id,
-          seller_name: contract.seller_name, seller_phone: contract.seller_phone,
-          seller_email: contract.seller_email,
-          pickup_address: `${contract.contract_data?.seller_address || ""} ${contract.contract_data?.seller_zip || ""} ${contract.contract_data?.seller_city || ""}`.trim(),
-          pickup_date: contract.pickup_date || "",
-          pickup_time: contract.pickup_time || "",
-          status: "offen",
-        });
+      // Abholdatum gesetzt war. Gibt es keinen OFFENEN Termin (ohne
+      // pickup_date erstellt, oder "nicht abgeholt"), legen wir hier einen an.
+      // Rollenprüfung 22.09.2026 (RP-406): Erfolgsmeldung nur, wenn wirklich
+      // ein Termin entstand — sonst sagt die Meldung, was ist.
+      const erg = await abholterminAnlegen(contract);
+      if (erg.angelegt) {
+        toast.success("Termin im Terminplaner angelegt");
+        if (erg.hinweis) toast.warning(erg.hinweis, { duration: 10000 });
+      } else if (erg.grund === "storniert") {
+        toast.info(TERMIN_MELDUNG.storniert);
+        return;
+      } else {
+        toast.info(TERMIN_MELDUNG[erg.grund] || TERMIN_MELDUNG.offen);
       }
-      toast.success("Termin im Terminplaner angelegt");
       onClose();
       nav("/app/termine");
     } catch (err) {
@@ -324,6 +437,9 @@ export default function SendDialog({ open, contract, onClose }) {
       setBusy(false);
     }
   };
+  // Rollenprüfung 22.09.2026 (RP-216/RP-367): Nach Storno / "nicht abgeholt"
+  // verschickt der Server den Vertrag nicht mehr — der Dialog sagt es vorab.
+  const kaufBeendet = ["storniert", "nicht_abgeholt"].includes(contract?.kaufvorgang_status);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
@@ -347,13 +463,25 @@ export default function SendDialog({ open, contract, onClose }) {
         </div>
 
         <div className="p-6 space-y-4">
+          {kaufBeendet && (
+            <div className="text-[12px] rounded-sm border px-3 py-2" role="alert"
+                 data-testid="send-kauf-beendet"
+                 style={{ borderColor: "rgba(255,159,10,0.35)", background: "rgba(255,159,10,0.10)",
+                          color: "var(--text-primary)" }}>
+              {contract.kaufvorgang_status === "storniert"
+                ? "Der Kauf ist storniert — der Vertrag wird nicht mehr verschickt."
+                : "Das Fahrzeug wurde nicht abgeholt — der Vertrag wird erst wieder verschickt, "
+                  + "wenn ein neuer Abholtermin angelegt ist („Speichern & Termin“)."}
+            </div>
+          )}
           {tab === "whatsapp" ? (
             <>
               <Field label="Telefonnummer (international, z.B. +49…)" value={phone} onChange={setPhone} testid="wa-phone" />
               <div>
                 <label className="text-xs text-zinc-400">Nachricht</label>
                 <textarea data-testid="wa-message" rows={5} className="input-base w-full mt-1"
-                          value={waMsg} onChange={(e) => setWaMsg(e.target.value)} />
+                          value={waMsg}
+                          onChange={(e) => { angefasst.current.waMsg = true; setWaMsg(e.target.value); }} />
               </div>
               {geraetKannTeilen ? (
                 <>
@@ -426,12 +554,15 @@ export default function SendDialog({ open, contract, onClose }) {
                   (änderbar in den Einstellungen unter „Versand“).
                 </div>
               )}
-              <Field label="Betreff" value={subject} onChange={setSubject} testid="email-subject" />
+              <Field label="Betreff" value={subject}
+                     onChange={(v) => { angefasst.current.subject = true; setSubject(v); }}
+                     testid="email-subject" />
               <div className="text-[11px] text-zinc-500 mt-1">Versand über AutoSchnell mit deinem Firmennamen. Antwortet der Verkäufer, landet die Antwort in deinem Postfach — du bekommst zusätzlich eine Kopie mit PDF.</div>
               <div>
                 <label className="text-xs text-zinc-400">Nachricht</label>
                 <textarea data-testid="email-message" rows={5} className="input-base w-full mt-1"
-                          value={emailMsg} onChange={(e) => setEmailMsg(e.target.value)} />
+                          value={emailMsg}
+                          onChange={(e) => { angefasst.current.emailMsg = true; setEmailMsg(e.target.value); }} />
               </div>
               <div className="text-[11px] text-zinc-500">
                 Die E-Mail wird mit der digitalen Vertragsfassung im Anhang versendet (ohne Unterschriftsfelder —

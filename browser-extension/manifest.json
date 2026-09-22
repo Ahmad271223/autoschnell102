@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AutoSchnell Abruf-Helfer",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Lädt Kleinanzeigen-Fahrzeugseiten über deine eigene Internetverbindung für den AutoSchnell-Vergleich (verhindert Sperren durch Massen-Abrufe).",
   "permissions": ["storage"],
   "host_permissions": [
@@ -12,6 +12,10 @@
   "content_scripts": [
     {
       "matches": [
+        "https://app.auto-schnellkauf.de/*",
+        "https://auto-schnellkauf.de/*",
+        "https://www.auto-schnellkauf.de/*",
+        "https://app.autoschnell.de/*",
         "https://autoschnell.de/*",
         "https://www.autoschnell.de/*",
         "http://localhost/*",

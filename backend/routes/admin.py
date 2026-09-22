@@ -18,10 +18,10 @@ from decimal import Decimal
 from typing import Dict, Literal, Optional
 
 
-def _safe_filename(name: str, fallback: str = "document.pdf") -> str:
-    """Strip characters that could inject extra HTTP header lines."""
-    safe = re.sub(r'[\r\n\t"\\]', "", name).strip()
-    return safe[:200] or fallback
+# Rollenprüfung 22.09.2026 (RP-200/RP-351, Welle 3): der alte Helfer
+# _safe_filename liess Nicht-latin-1-Zeichen im Dateinamen durch (500 beim
+# PDF-Abruf) und wird nicht mehr gebraucht — Dateinamen fuer Kopfzeilen nur
+# noch ueber vertrag_dateiname.content_disposition.
 
 from pymongo.errors import DuplicateKeyError
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response
@@ -29,10 +29,11 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from auth import (create_token, hash_password, hash_password_async, new_session_id,
-                  verify_password, verify_password_async)
+                  verify_password_async)
 from cleanup_service import _cleanup_once
 from deps import (
-    current_admin, current_super_admin, db, get_subscription_status, log, log_activity,
+    _ablauf_parsen, current_admin, current_super_admin, db, firma_gesperrt,
+    get_subscription_status, haupt_chef_id, ist_haupt_chef, log, log_activity,
     log_activity_sicher, now_iso, sub_status_from_doc, subscription_for,
 )
 from mobile_service import DEFAULT_RULES, DEFAULT_EXPORT_RULES
@@ -116,22 +117,37 @@ async def admin_trigger_cleanup(user=Depends(current_super_admin)):
     token = await acquire(db, "cleanup-cycle", ttl_seconds=3300)
     if not token:
         raise HTTPException(409, "Ein Aufräumlauf läuft gerade — bitte später erneut.")
+    # Rollenprüfung 22.09.2026 (RP-245, Welle 2): wie der stuendliche Lauf —
+    # die Sperre traegt "lauf_aktiv" (ein Restore wartet darauf), und eine
+    # Schreibpause, die WAEHREND des Laufs beginnt, bricht ihn sauber ab
+    # (cleanup_service.SchreibpauseAktiv) — vorher wurde daraus eine 500.
+    from cleanup_service import SchreibpauseAktiv, _lauf_aktiv_setzen
+    await _lauf_aktiv_setzen(db, token, True)
     try:
         # Nr. 34: geht die Sperre waehrend des Laufs verloren, bricht der
         # Lauf ab — sonst raeumen zwei Prozesse gleichzeitig auf.
         from job_lock import SperreVerloren
         async with heartbeat(db, "cleanup-cycle", token, 3300) as wache:
             try:
-                stats = await _cleanup_once(db)
+                # RP-245: die Wache mitgeben — zwischen den Schritten wird
+                # Sperre UND Schreibpause geprueft.
+                stats = await _cleanup_once(db, wache=wache)
                 wache.pruefen()
             except SperreVerloren as exc:
                 raise HTTPException(
                     409, "Der Aufraeumlauf wurde abgebrochen, weil die Sperre "
                          "zwischenzeitlich an einen anderen Server ging. Bitte "
                          f"spaeter erneut versuchen. ({exc})")
+            except SchreibpauseAktiv:
+                raise HTTPException(503, AUFRAEUMLAUF_SCHREIBPAUSE)
     finally:
+        await _lauf_aktiv_setzen(db, token, False)
         await release(db, "cleanup-cycle", token=token)
     return stats
+
+
+AUFRAEUMLAUF_SCHREIBPAUSE = ("Eine Sicherung oder ein Restore läuft gerade (Schreibpause) — "
+                             "der Aufräumlauf wurde angehalten.")
 
 
 def _vertragstext_start_admin() -> str:
@@ -178,18 +194,260 @@ def _ablaufdatum_pruefen_400(wert, feld: str = "expires_at"):
 async def kaeufer_reservierungen_freigeben(user_id: str, grund: str) -> int:
     """Pruefung 14.09.2026 (M1): Fuer einen Kaeufer reservierte Inserate
     (Status reserviert, reserved_for) wieder veroeffentlichen und seine
-    akzeptierten Anfragen beenden. Liefert die Zahl der freigegebenen Inserate."""
+    akzeptierten Anfragen beenden. Liefert die Zahl der freigegebenen Inserate.
+
+    Rollenpruefung 22.09.2026 (RP-098 Nr. 1, RP-348 Nr. 1, RP-517): Vorher
+    setzte ein update_many nur die INSERATE zurueck — der Fahrzeug-Lebenszyklus
+    blieb 'reserviert'. War das Inserat aelter als 21 Tage, raeumte der
+    Aufraeumlauf es danach weg, und das Fahrzeug stand fuer immer auf
+    'reserviert' (jeder Uebergang 409). Jetzt einzeln je Inserat (CAS auf den
+    Reservierungsstand) und mit derselben Nachfuehrung wie die Rueckgabe im
+    Marktplatz (inserat_fahrzeug_nachziehen, bei Fehler Merker + Nacharbeit).
+    `wieder_veroeffentlicht_am` markiert die Freigabe fuer die Laufzeit-
+    Loeschung (Schonfrist, Uebergabe an cleanup_service)."""
+    from routes.marketplace import inserat_fahrzeug_nachziehen
     jetzt = now_iso()
-    r = await db.resale_listings.update_many(
-        {"reserved_for": user_id, "status": "reserviert"},
-        {"$set": {"status": "veroeffentlicht", "updated_at": jetzt,
-                  "reservierung_aufgehoben_grund": grund},
-         "$unset": {"reserved_for": ""}})
+    freigegeben = 0
+    async for l in db.resale_listings.find(
+            {"reserved_for": user_id, "status": "reserviert"}, {"_id": 0, "id": 1}):
+        r = await db.resale_listings.update_one(
+            {"id": l["id"], "reserved_for": user_id, "status": "reserviert"},
+            {"$set": {"status": "veroeffentlicht", "updated_at": jetzt,
+                      "wieder_veroeffentlicht_am": jetzt,
+                      "reservierung_aufgehoben_grund": grund},
+             "$unset": {"reserved_for": ""}})
+        if r.modified_count:
+            freigegeben += 1
+            await inserat_fahrzeug_nachziehen(l["id"], "veroeffentlicht")
     await db.listing_interest.update_many(
         {"buyer_user_id": user_id, "status": "akzeptiert"},
         {"$set": {"status": "abgelehnt", "beendet_grund": grund, "updated_at": jetzt},
          "$push": {"history": {"von": "system", "aktion": grund, "zeit": jetzt}}})
+    return freigegeben
+
+
+async def kaeufer_verhandlungen_beenden(user_id: str, grund: str) -> int:
+    """Nachpruefung Runde 14 (Befund 1) / Rollenpruefung 22.09.2026 (RP-098
+    Nr. 2, RP-348 Nr. 2): Ein gesperrter Kaeufer behaelt keine laufende
+    Verhandlung — offene Anfragen und Gegenangebote enden, akzeptierte
+    (reservierte) Fahrzeuge werden frei. EIN Weg fuer die Kontosperre und die
+    Sperre des Marktplatz-Zugangs (vorher tat das nur die Kontosperre; nach
+    'Zugang sperren' konnte der Haendler eine alte Anfrage noch annehmen und
+    fuer den gesperrten Kaeufer reservieren). Liefert die Zahl der
+    freigegebenen Inserate."""
+    await db.listing_interest.update_many(
+        {"buyer_user_id": user_id,
+         "status": {"$in": ["offen", "gegenangebot", "gegenangebot_kaeufer"]}},
+        {"$set": {"status": "abgelehnt", "beendet_grund": grund,
+                  "updated_at": now_iso()},
+         "$push": {"history": {"von": "system", "aktion": grund,
+                               "zeit": now_iso()}}})
+    return await kaeufer_reservierungen_freigeben(user_id, grund)
+
+
+async def _ist_hauptchef_konto(konto: Optional[dict]) -> bool:
+    """Rollenpruefung 22.09.2026 (RP-031/RP-151): Ist dieses Konto der EINE
+    Hauptchef seiner Firma (Zeiger dealers.user_id, sonst aeltestes
+    dealer-Konto)? Vorher entschied die rohe Rolle: ein liegengebliebenes
+    zweites dealer-Konto galt als Chef — sein Sperren meldete alle Sucher der
+    Firma ab, sein Loeschen bot die Loeschung der GANZEN Firma an."""
+    if not konto or konto.get("role") != "dealer" or not konto.get("dealer_id"):
+        return False
+    return await ist_haupt_chef(konto)
+
+
+async def _firmenkonten_abmelden(dealer_id: str, chef_id: str) -> int:
+    """Firmensperre (Audit 09/2026): mit dem Hauptchef verlieren ALLE anderen
+    Konten der Firma ihre Sitzung. Rollenpruefung 22.09.2026 (RP-131/RP-282):
+    vorher nur role 'sucher' — ein liegengebliebenes zweites dealer-Konto
+    behielt seine Sitzung. Liefert die Zahl der abgemeldeten Konten."""
+    r = await db.users.update_many(
+        {"dealer_id": dealer_id, "id": {"$ne": chef_id},
+         "current_session_id": {"$ne": None}},
+        {"$set": {"current_session_id": None, "updated_at": now_iso()}})
     return r.modified_count
+
+
+async def _chef_fuer_uebernahme(dealer_id: str, ausser: str) -> Optional[str]:
+    """Wer uebernimmt Fahrzeuge und Vorgaenge eines Kontos, das die Firma
+    verlaesst (Loeschen, Wechsel zum Zwischenhaendler)? Der eingetragene
+    Hauptchef (Zeiger), falls es das Konto gibt; sonst das aelteste andere
+    dealer-Konto. Rollenpruefung 22.09.2026 (RP-031/RP-046): vorher suchte der
+    Rollenwechsel das aelteste dealer-Konto statt des Zeigers."""
+    firma_doc = await db.dealers.find_one({"id": dealer_id}, {"_id": 0, "user_id": 1})
+    zeiger = (firma_doc or {}).get("user_id")
+    if zeiger and zeiger != ausser and await db.users.find_one(
+            {"id": zeiger, "dealer_id": dealer_id}, {"_id": 0, "id": 1}):
+        return zeiger
+    alt = await db.users.find_one(
+        {"dealer_id": dealer_id, "role": "dealer", "id": {"$ne": ausser}},
+        {"_id": 0, "id": 1}, sort=[("created_at", 1)])
+    return (alt or {}).get("id")
+
+
+CHEFWECHSEL_SPERRE_S = 30
+
+
+@asynccontextmanager
+async def _chefwechsel_sperre(dealer_id: str):
+    """Firmenweite Sperre 'chefwechsel-<Firma>' (Runde 12, auch ueber zwei
+    Server). Rollenpruefung 22.09.2026 (RP-029/RP-128/RP-279): dieselbe Sperre
+    nehmen jetzt auch die Konto-Loeschung und der Start der Firmenloeschung —
+    sonst konnte ein Chefwechsel ein Konto zum Chef machen, das parallel als
+    'Sucher' geloescht wurde (Firma ohne Chef)."""
+    from job_lock import acquire, release
+    name = f"chefwechsel-{dealer_id}"
+    token = await acquire(db, name, ttl_seconds=CHEFWECHSEL_SPERRE_S)
+    if not token:
+        raise HTTPException(409, "Ein Chefwechsel oder eine Löschung dieser Firma läuft "
+                                 "gerade — bitte gleich erneut versuchen")
+    try:
+        yield
+    finally:
+        await release(db, name, token=token)
+
+
+_KONTO_GEAENDERT = ("Das Konto wurde zwischenzeitlich geändert oder wird gerade gelöscht "
+                    "— bitte die Seite neu laden und noch einmal ansehen.")
+_FIRMA_IN_LOESCHUNG = "Diese Firma wird gerade gelöscht — keine Änderungen mehr möglich"
+
+
+async def _chef_befoerdern(target: dict, alte_rolle: Optional[str], fields: dict,
+                           chef_wechsel: bool, admin: dict) -> None:
+    """Konto zum Hauptchef machen — unter der Firmen-Sperre, mit Abgleich.
+
+    Pruefung 14.09.2026 (M12) / Runde 12 (15.09.2026, Nr. 2/3) /
+    Nachpruefung 20.09.2026: Zeiger, neue Rolle und Herabstufung aller
+    anderen dealer-Konten laufen als EINE Transaktion (ohne Replica Set
+    einzeln, jeder Schritt wiederholbar).
+
+    Rollenpruefung 22.09.2026 (RP-028/RP-127/RP-278, RP-128/RP-279): Die Rolle
+    schreibt jetzt NUR diese Funktion — innerhalb der Sperre. Nach dem Erwerb
+    wird das Konto frisch gelesen (Rolle unveraendert, keine laufende
+    Loeschung) und die Firma auf eine laufende Firmenloeschung geprueft;
+    geschrieben wird mit Abgleich (Rolle, Grabstein), sonst 409."""
+    dealer_id = target["dealer_id"]
+    async with _chefwechsel_sperre(dealer_id):
+        frisch = await db.users.find_one(
+            {"id": target["id"]}, {"_id": 0, "role": 1, "loeschung": 1, "is_super_admin": 1})
+        if not frisch or frisch.get("role") != alte_rolle \
+                or (frisch.get("loeschung") or {}).get("status") == "laeuft":
+            raise HTTPException(409, _KONTO_GEAENDERT)
+        # Rollenprüfung 22.09.2026 (Review): zweite Linie hinter der Pruefung
+        # in admin_update_user — das Betreiber-Konto wird hier nie zum Chef.
+        if frisch.get("is_super_admin"):
+            raise HTTPException(400, "Super-Admin-Rolle kann nicht geändert werden")
+        firma = await db.dealers.find_one({"id": dealer_id},
+                                          {"_id": 0, "user_id": 1, "loeschung": 1})
+        if firma is None:
+            raise HTTPException(409, "Die Firma dieses Kontos gibt es nicht (mehr) — "
+                                     "ein Chef lässt sich hier nicht bestimmen.")
+        if (firma.get("loeschung") or {}).get("status") == "laeuft":
+            raise HTTPException(409, _FIRMA_IN_LOESCHUNG)
+        chef = await db.users.find_one(
+            {"dealer_id": dealer_id, "role": "dealer", "id": {"$ne": target["id"]}},
+            {"_id": 0, "id": 1, "email": 1, "kontonummer": 1})
+        if chef and not chef_wechsel:
+            # Kontonummer (13.09.2026): Meldung nennt die Kontonummer
+            # (die E-Mail ist optional). Die Nummern bleiben beim
+            # Chefwechsel am Konto.
+            raise HTTPException(
+                400, "Diese Firma hat bereits einen Hauptaccount "
+                     f"(Kontonummer {chef.get('kontonummer') or '—'}). Eine Firma hat genau "
+                     "einen Chef. Soll dieses Konto der neue Chef werden "
+                     "und der bisherige zum Sucher, dann chef_wechsel=true "
+                     "mitschicken.")
+        ziel = {"role": "dealer", "current_session_id": None}
+        if fields.get("dealer_id"):
+            # Pruefung 14.09.2026 (M17): Rueckkehr eines Zwischenhaendlers
+            ziel["dealer_id"] = fields["dealer_id"]
+        from deps import transaktion
+
+        async def _wechseln(s):
+            jetzt = now_iso()
+            # Zuerst das Zielkonto (Abgleich auf Rolle + Grabstein), dann der
+            # Zeiger (Abgleich auf die Firmenloeschung): scheitert einer, ist
+            # in der Transaktion nichts geschrieben.
+            r = await db.users.update_one(
+                {"id": target["id"], "role": alte_rolle,
+                 "is_super_admin": {"$ne": True},
+                 "loeschung.status": {"$ne": "laeuft"}},
+                {"$set": {**ziel, "updated_at": jetzt}}, session=s)
+            if r.matched_count == 0:
+                raise HTTPException(409, _KONTO_GEAENDERT)
+            r = await db.dealers.update_one(
+                {"id": dealer_id, "loeschung.status": {"$ne": "laeuft"}},
+                {"$set": {"user_id": target["id"], "updated_at": jetzt}}, session=s)
+            if r.matched_count == 0:
+                raise HTTPException(409, _FIRMA_IN_LOESCHUNG)
+            if chef:
+                await db.users.update_one(
+                    {"id": chef["id"], "role": "dealer"},
+                    {"$set": {"role": "sucher", "current_session_id": None,
+                              "updated_at": jetzt}}, session=s)
+                await db.users.update_many(
+                    {"dealer_id": dealer_id, "role": "dealer",
+                     "id": {"$ne": target["id"]}},
+                    {"$set": {"role": "sucher", "current_session_id": None,
+                              "updated_at": jetzt}}, session=s)
+
+        await transaktion(_wechseln)
+    if chef:
+        await log_activity_sicher(
+            admin.get("dealer_id", ""), admin["id"], "admin.firma.chefwechsel",
+            ref=dealer_id,
+            meta={"alter_chef": chef.get("kontonummer") or chef["id"],
+                  "neuer_chef": target.get("kontonummer") or target["id"]})
+
+
+async def _grabstein_setzen(u: dict, admin: dict, rolle: Optional[str] = None) -> None:
+    """Loeschung eines einzelnen Kontos beginnen (Grabstein am Konto).
+
+    Nachpruefung Runde 14 (Befund 58): Reihenfolge wie bei
+    cleanup_service.vertrag_endgueltig_loeschen — Grabstein zuerst,
+    Nebendaten danach, das users-Dokument ZULETZT. Jeder Schritt ist
+    wiederholbar: der Grabstein sperrt das Konto sofort (kein Login, keine
+    Sitzung), ein zweiter Aufruf fuehrt die Loeschung zu Ende.
+
+    Rollenpruefung 22.09.2026 (RP-029/RP-128/RP-279): mit `rolle` nur, solange
+    das Konto noch diese Rolle hat (Abgleich) — sonst 409 statt einer
+    Loeschung unter falschen Voraussetzungen."""
+    jetzt = now_iso()
+    filt = {"id": u["id"]}
+    if rolle is not None:
+        filt["role"] = rolle
+    if ((u.get("loeschung") or {}).get("status")) == "laeuft":
+        r = await db.users.update_one(
+            filt,
+            {"$set": {"loeschung.gestartet": jetzt, "active": False,
+                      "current_session_id": None, "updated_at": jetzt},
+             "$inc": {"loeschung.wiederaufnahmen": 1}})
+    else:
+        r = await db.users.update_one(
+            filt,
+            {"$set": {"loeschung": {"status": "laeuft", "gestartet": jetzt,
+                                    "grund": "admin", "durch": admin["id"]},
+                      "active": False, "current_session_id": None,
+                      "updated_at": jetzt}})
+    if r.matched_count == 0:
+        raise HTTPException(409, _KONTO_GEAENDERT)
+
+
+async def _zweitkonto_herabstufen(target: dict) -> None:
+    """Rollenpruefung 22.09.2026 (RP-031/RP-130/RP-281): ein liegengebliebenes
+    zweites dealer-Konto (NICHT der Zeiger) zum Sucher machen — unter der
+    Firmen-Sperre und nur, solange es wirklich nicht der Hauptchef ist."""
+    async with _chefwechsel_sperre(target["dealer_id"]):
+        if await ist_haupt_chef({**target, "role": "dealer"}):
+            raise HTTPException(409, _KONTO_GEAENDERT)
+        r = await db.users.update_one(
+            {"id": target["id"], "role": "dealer",
+             "is_super_admin": {"$ne": True},        # Rollenprüfung 22.09.2026 (Review)
+             "loeschung.status": {"$ne": "laeuft"}},
+            {"$set": {"role": "sucher", "current_session_id": None,
+                      "updated_at": now_iso()}})
+        if r.matched_count == 0:
+            raise HTTPException(409, _KONTO_GEAENDERT)
 
 
 # ---------- Zugangs-Anfrage beim Anlegen schliessen (Kontonummer, 13.09.2026) ----------
@@ -389,7 +647,7 @@ async def admin_konto_pruefen(kennung: str = Query(..., min_length=1, max_length
     proj = {"_id": 0, "id": 1, "role": 1, "active": 1, "password_hash": 1, "dealer_id": 1,
             "company_name": 1, "first_name": 1, "last_name": 1, "contact_name": 1,
             "display_name": 1, "driver_code": 1, "kontonummer": 1, "created_at": 1,
-            "login_ips_bekannt": 1, "loeschung": 1}
+            "login_ips_bekannt": 1, "login_geraete_bekannt": 1, "loeschung": 1}
     konto = await db.users.find_one({"kontonummer": nummer_bedingung(kanon)}, proj)
     fahrer = None if konto else await db.driver_accounts.find_one(
         {"kontonummer": nummer_bedingung(kanon)}, proj)
@@ -450,6 +708,8 @@ async def admin_konto_pruefen(kennung: str = Query(..., min_length=1, max_length
             "fehlversuche": stand, "anmeldesperre": gesperrt, **grund,
             "driver_code": doc.get("driver_code"), "konto_id": doc.get("id"),
             "bekannte_geraete": len(doc.get("login_ips_bekannt") or []),
+            # Rollenpruefung 22.09.2026 (RP-557): gemerkte Geraete (App/Browser)
+            "bekannte_geraete_schluessel": len(doc.get("login_geraete_bekannt") or []),
             "erstellt_am": doc.get("created_at"), "hinweise": hinweise}
 
 
@@ -544,6 +804,10 @@ async def admin_create_user(body: AdminUserIn, admin=Depends(current_super_admin
             "id": str(uuid.uuid4()), "dealer_id": dealer_id,
             "plan": body.plan_type, "status": "active",
             "expires_at": expires,
+            # Rollenpruefung 22.09.2026 (RP-145 Nr. 3): Firmen-Abos tragen ein
+            # Kennzeichen — Grundlage fuer einen Teil-Unique-Index
+            # "ein aktives Firmen-Abo je Firma" (indizes.py, Uebergabe Betrieb).
+            "art": "firma",
             "created_at": now_iso(),
         })
     except Exception:
@@ -581,10 +845,14 @@ async def admin_list_users(response: Response, _=Depends(current_admin),
     # sprengt (page - 1) * limit int64 und pymongo wirft OverflowError (500).
     page = max(1, min(int(page or 1), 10 ** 6))
     # Runde 12: Sitzungs-ID gehoert nicht in Admin-Antworten.
+    # Rollenpruefung 22.09.2026 (Welle 3): 'id' als zweiter Sortierschluessel —
+    # bei gleichem created_at (Altbestand, Import) ist die Reihenfolge sonst
+    # nicht festgelegt, und ueber die Seitengrenze hinweg konnte ein Konto
+    # auf keiner Seite oder auf zweien auftauchen.
     users = await db.users.find({}, {"_id": 0, "password_hash": 0, "mfa.secret": 0,
                                       "mfa.pending_secret": 0, "mfa.wiederherstellung": 0,
                                       "current_session_id": 0}) \
-        .sort("created_at", -1).skip((page - 1) * limit).to_list(limit + 1)
+        .sort([("created_at", -1), ("id", 1)]).skip((page - 1) * limit).to_list(limit + 1)
     # Pruefbericht 20.09.2026 (AD-16): eine Zeile mehr lesen — gibt es sie,
     # ist die Liste gekuerzt (X-Truncated), die Oberflaeche sagt es.
     users = _seite_kopf(response, users, limit)
@@ -593,7 +861,23 @@ async def admin_list_users(response: Response, _=Depends(current_admin),
     dealer_ids = list({u.get("dealer_id") for u in users if u.get("dealer_id")})
     dealers = {d["id"]: d async for d in db.dealers.find(
         {"id": {"$in": dealer_ids}},
-        {"_id": 0, "id": 1, "company_name": 1, "kunden_nr": 1})}
+        {"_id": 0, "id": 1, "company_name": 1, "kunden_nr": 1, "user_id": 1})}
+    # Rollenpruefung 22.09.2026 (RP-033/RP-132): Hauptchef je Firma = Zeiger
+    # dealers.user_id; Firmen ohne Zeiger (Altbestand): aeltestes dealer-Konto
+    # (eine Sammelabfrage). Die Oberflaeche nutzt `ist_chef` statt der rohen
+    # Rolle (Firmensperre, Loeschung der ganzen Firma).
+    haupt_je_firma = {d_id: d.get("user_id") for d_id, d in dealers.items() if d.get("user_id")}
+    ohne_zeiger = [d_id for d_id in dealer_ids if d_id not in haupt_je_firma]
+    if ohne_zeiger:
+        async for row in db.users.aggregate([
+                {"$match": {"dealer_id": {"$in": ohne_zeiger}, "role": "dealer"}},
+                {"$sort": {"created_at": 1}},
+                {"$group": {"_id": "$dealer_id", "id": {"$first": "$id"}}}]):
+            haupt_je_firma[row["_id"]] = row["id"]
+
+    def _ist_chef(u) -> bool:
+        return (u.get("role") == "dealer" and bool(u.get("dealer_id"))
+                and haupt_je_firma.get(u["dealer_id"]) == u.get("id"))
     # Juengstes HAENDLER-Abo je Firma — mit derselben Vorrang-Regel wie
     # deps.get_subscription_status: Dokumente OHNE subject_user_id-Feld
     # gewinnen gegen Alt-Dokumente mit explizitem null, egal wie alt.
@@ -627,7 +911,9 @@ async def admin_list_users(response: Response, _=Depends(current_admin),
         if u.get("role") == "sucher":
             return sub_status_from_doc(persoenlich.get(u["id"]))
         pers = sub_status_from_doc(persoenlich.get(u["id"]))
-        if pers["active"] or u.get("role") != "dealer":
+        # Rollenpruefung 22.09.2026 (RP-033): Firmen-Abo-Rueckfall nur fuer
+        # den Hauptchef — wie deps.subscription_for.
+        if pers["active"] or not _ist_chef(u):
             return pers
         firma = sub_status_from_doc(newest_subs.get(u.get("dealer_id")))
         return firma if firma["active"] else pers
@@ -635,6 +921,7 @@ async def admin_list_users(response: Response, _=Depends(current_admin),
     return [{**u,
              "company_name": dealers.get(u.get("dealer_id"), {}).get("company_name"),
              "kunden_nr": dealers.get(u.get("dealer_id"), {}).get("kunden_nr"),
+             "ist_chef": _ist_chef(u),
              "subscription": _abo(u)}
             for u in users]
 
@@ -667,6 +954,17 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
                                      "weitere Admin-Konten sind nicht vorgesehen.")
         if fields["role"] not in ("dealer", "sucher", "b2b_buyer"):
             raise HTTPException(400, "Unbekannte Rolle")
+        # Rollenprüfung 22.09.2026 (Review): Der Schutz des Betreiber-Kontos
+        # muss VOR jedem Schritt des Rollenwechsels greifen. Seit Befoerderung
+        # und Herabstufung die Rolle selbst schreiben (unter der Firmen-Sperre,
+        # _chef_befoerdern/_zweitkonto_herabstufen), kam die Pruefung weiter
+        # unten erst NACH dem Schreiben: PUT role=dealer auf den Super-Admin
+        # (sein Seed-Konto hat eine dealer_id) machte ihn zum Haendler und
+        # meldete ihn ab — danach 403 auf allen Betreiber-Routen bis zum
+        # Neustart. Auch der Zwischenhaendler-Zweig (Fahrzeuge/Vorgaenge an
+        # den Chef, Abos ersetzt) lief vor der Pruefung.
+        if target.get("is_super_admin") and fields["role"] != target.get("role"):
+            raise HTTPException(400, "Super-Admin-Rolle kann nicht geändert werden")
         # Pruefbericht 09/2026: bisher wurde nur der NAME der Zielrolle
         # geprueft, nicht ob das Konto dazu passt. Aus einem Zwischen-
         # haendler (gehoert zu keiner Firma) liess sich so ein "Sucher ohne
@@ -704,93 +1002,23 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
                 fields["kontonummer_basis"] = kunden_nr
                 fields["kontonummer_art"] = "sucher"
                 fields["kontonummer_vorher"] = target.get("kontonummer")
+            rolle_geschrieben = False
             if neue_rolle == "dealer" and target.get("dealer_id"):
                 # Runde 11: GENAU EIN Hauptaccount je Firma. current_chef()
                 # erkennt den Chef an der Rolle — ein zweites dealer-Konto
                 # haette sofort volle Chef-Rechte, und die Firmensperre
                 # ("gesperrter Chef = gesperrte Firma") wuerde je nach
                 # gefundenem Datensatz zufaellig greifen oder nicht.
-                chef = await db.users.find_one(
-                    {"dealer_id": target["dealer_id"], "role": "dealer",
-                     "id": {"$ne": target["id"]}},
-                    {"_id": 0, "id": 1, "email": 1, "kontonummer": 1})
-                if chef and not body.get("chef_wechsel"):
-                    # Kontonummer (13.09.2026): Meldung nennt die Kontonummer
-                    # (die E-Mail ist optional). Die Nummern bleiben beim
-                    # Chefwechsel am Konto.
-                    raise HTTPException(
-                        400, "Diese Firma hat bereits einen Hauptaccount "
-                             f"(Kontonummer {chef.get('kontonummer') or '—'}). Eine Firma hat genau "
-                             "einen Chef. Soll dieses Konto der neue Chef werden "
-                             "und der bisherige zum Sucher, dann chef_wechsel=true "
-                             "mitschicken.")
-                if chef:
-                    # Chefwechsel. Pruefung 14.09.2026 (M12): Reihenfolge so, dass
-                    # ein Abbruch die Firma nie OHNE Chef laesst — erst zeigt das
-                    # Profil auf den Nachfolger und er bekommt die Rolle, dann
-                    # wird der bisherige Chef Sucher (seine Sitzung endet). Ein
-                    # Wiederholen desselben Aufrufs fuehrt den Rest zu Ende.
-                    # Runde 12 (15.09.2026, Nr. 2/3): Chefwechsel unter einer
-                    # firmenweiten Sperre (auch ueber zwei Server), danach
-                    # Konsistenz: GENAU ein dealer-Konto je Firma. Da current_chef
-                    # dealers.user_id prueft, ist ab dem ersten Schritt nur noch
-                    # der neue Chef handlungsfaehig.
-                    from job_lock import acquire, release
-                    sperre = await acquire(db, f"chefwechsel-{target['dealer_id']}", ttl_seconds=30)
-                    if not sperre:
-                        raise HTTPException(409, "Ein Chefwechsel dieser Firma läuft gerade — "
-                                                 "bitte gleich erneut versuchen")
-                    try:
-                        # Nachpruefung 20.09.2026: die vier Schritte laufen jetzt
-                        # als EINER. Vorher konnte ein Abbruch dazwischen ein
-                        # zweites Konto mit role="dealer" zuruecklassen — die
-                        # Reihenfolge verhinderte zwar, dass die Firma ohne Chef
-                        # dasteht, aber nicht den Rest. (Harmlos ist so ein Konto
-                        # seit demselben Tag ohnehin: current_firma nordet jedes
-                        # dealer-Konto, das nicht der eingetragene Chef ist, auf
-                        # Sucher ein. Trotzdem soll der Zustand gar nicht erst
-                        # entstehen.) Ohne Replica Set laeuft es wie bisher —
-                        # die Schritte sind einzeln wiederholbar.
-                        from deps import transaktion
-
-                        async def _wechseln(s):
-                            jetzt = now_iso()
-                            await db.dealers.update_one(
-                                {"id": target["dealer_id"]},
-                                {"$set": {"user_id": target["id"], "updated_at": jetzt}},
-                                session=s)
-                            await db.users.update_one(
-                                {"id": target["id"]},
-                                {"$set": {"role": "dealer", "current_session_id": None,
-                                          "updated_at": jetzt}}, session=s)
-                            await db.users.update_one(
-                                {"id": chef["id"], "role": "dealer"},
-                                {"$set": {"role": "sucher", "current_session_id": None,
-                                          "updated_at": jetzt}}, session=s)
-                            await db.users.update_many(
-                                {"dealer_id": target["dealer_id"], "role": "dealer",
-                                 "id": {"$ne": target["id"]}},
-                                {"$set": {"role": "sucher", "current_session_id": None,
-                                          "updated_at": jetzt}}, session=s)
-
-                        await transaktion(_wechseln)
-                    finally:
-                        await release(db, f"chefwechsel-{target['dealer_id']}", token=sperre)
-                    await log_activity_sicher(
-                        admin.get("dealer_id", ""), admin["id"], "admin.firma.chefwechsel",
-                        ref=target["dealer_id"],
-                        meta={"alter_chef": chef.get("kontonummer") or chef["id"],
-                              "neuer_chef": target.get("kontonummer") or target["id"]})
-                else:
-                    # Pruefbericht 20.09.2026 (R1-35): Ohne anderen Chef setzte
-                    # dieser Weg nur role='dealer' — dealers.user_id zeigte
-                    # weiter auf das alte (geloeschte/herabgestufte) Konto.
-                    # current_firma/current_chef lassen nur den Zeiger gelten:
-                    # das befoerderte Konto hatte keine Chef-Rechte, und
-                    # Uebergaben gingen an das alte Zeiger-Konto.
-                    await db.dealers.update_one(
-                        {"id": target["dealer_id"]},
-                        {"$set": {"user_id": target["id"], "updated_at": now_iso()}})
+                # Rollenpruefung 22.09.2026 (RP-028/RP-127/RP-278, RP-128):
+                # Befoerderung und Chefwechsel laufen komplett unter der
+                # Firmen-Sperre und schreiben die Rolle SELBST (mit Abgleich).
+                # Vorher schrieb der allgemeine Abschluss-Write unten die Rolle
+                # NACH der Freigabe noch einmal — ein zweiter Chefwechsel
+                # dazwischen hatte dieses Konto schon zum Sucher gemacht, und
+                # es wurde wieder "dealer" (zwei dealer-Konten).
+                await _chef_befoerdern(target, alte_rolle, fields,
+                                       bool(body.get("chef_wechsel")), admin)
+                rolle_geschrieben = True
             if alte_rolle == "dealer" and target.get("dealer_id"):
                 # Runde 12: Der Hauptaccount wird NIE direkt herabgestuft.
                 # Vorher war es erlaubt, sobald kein weiterer Zugang
@@ -799,26 +1027,46 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
                 # einzige Weg ist der Chefwechsel (Nachfolger mit
                 # chef_wechsel=true befoerdern), der den alten Chef selbst
                 # zum Sucher macht.
-                raise HTTPException(
-                    400, "Der Händler-Hauptaccount kann nicht herabgestuft "
-                         "werden — die Firma braucht immer genau einen Chef. "
-                         "Nachfolger bestimmen: dessen Konto mit role=dealer "
-                         "und chef_wechsel=true befördern; der bisherige Chef "
-                         "wird dabei zum Sucher.")
+                # Rollenpruefung 22.09.2026 (RP-031/RP-130/RP-281): gemeint
+                # ist der HAUPTaccount (Zeiger dealers.user_id). Ein
+                # liegengebliebenes zweites dealer-Konto arbeitet laengst als
+                # Sucher (current_firma) — es darf zum Sucher werden, damit der
+                # Betreiber den Altbestand bereinigen kann (unter der Sperre).
+                if neue_rolle != "sucher" or await _ist_hauptchef_konto(target):
+                    raise HTTPException(
+                        400, "Der Händler-Hauptaccount kann nicht herabgestuft "
+                             "werden — die Firma braucht immer genau einen Chef. "
+                             "Nachfolger bestimmen: dessen Konto mit role=dealer "
+                             "und chef_wechsel=true befördern; der bisherige Chef "
+                             "wird dabei zum Sucher.")
+                await _zweitkonto_herabstufen(target)
+                rolle_geschrieben = True
             if neue_rolle == "b2b_buyer" and target.get("dealer_id"):
                 # Pruefung 14.09.2026 (M17): Ein Sucher, der Zwischenhaendler
                 # wird, haengt sonst weiter an seiner Firma (dealer_id) und
                 # besitzt ihre Fahrzeuge. Firmenbindung loesen, Fahrzeuge an
                 # den Chef, aus den Mitbearbeitern raus, Abo-Anfragen weg.
+                # Rollenpruefung 22.09.2026 (RP-046/RP-145 Nr. 1, RP-031): der
+                # Chef ist der ZEIGER (nicht das aelteste dealer-Konto); ohne
+                # Chef bricht der Wechsel ab (wie das Loeschen eines Suchers,
+                # G14), und Kaufvorgaenge, Vertraege und Termine gehen wie
+                # beim Loeschen mit an den Chef (vorgang_uebergeben) — das
+                # Konto verlaesst die Firma, ihre Daten bleiben bei ihr.
                 firma = {"dealer_id": target["dealer_id"]}
-                chef_alt = await db.users.find_one(
-                    {**firma, "role": "dealer", "id": {"$ne": target["id"]}},
-                    {"_id": 0, "id": 1}, sort=[("created_at", 1)])
-                if chef_alt:
-                    await db.vehicles.update_many(
-                        {**firma, "owner_user_id": target["id"]},
-                        {"$set": {"owner_user_id": chef_alt["id"],
-                                  "uebernommen_von": target["id"], "updated_at": now_iso()}})
+                chef_neu = await _chef_fuer_uebernahme(target["dealer_id"], target["id"])
+                if not chef_neu:
+                    raise HTTPException(409, "Die Firma hat keinen Hauptaccount — erst einen "
+                                             "Chef bestimmen, dann das Konto umstellen")
+                await db.vehicles.update_many(
+                    {**firma, "owner_user_id": target["id"]},
+                    {"$set": {"owner_user_id": chef_neu,
+                              "uebernommen_von": target["id"], "updated_at": now_iso()}})
+                from routes.bestand import vorgang_uebergeben
+                uebergabe = await vorgang_uebergeben(target["dealer_id"], None,
+                                                     target["id"], chef_neu)
+                if any(uebergabe.values()):
+                    log.info("Konto %s wird Zwischenhaendler: Vorgang an Chef %s "
+                             "uebergeben: %s", target["id"], chef_neu, uebergabe)
                 await db.vehicles.update_many(
                     {**firma, "mitbearbeiter_ids": target["id"]},
                     {"$pull": {"mitbearbeiter_ids": target["id"]}})
@@ -830,11 +1078,27 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
                               "updated_at": now_iso()}})
                 fields["dealer_id"] = None
                 fields["ehemalige_dealer_id"] = target["dealer_id"]
-            # Runde 12: Jede Rollenaenderung beendet die laufende Sitzung.
-            # current_user() liest die Rolle bei jedem Request frisch — ein
-            # bestehendes Haendler-Token bekam so ohne neue Anmeldung (und
-            # ohne zweiten Faktor) Admin-Rechte.
-            fields["current_session_id"] = None
+            if rolle_geschrieben:
+                # Rolle, Sitzungsende (und ggf. dealer_id) stehen schon — unter
+                # der Sperre geschrieben. Nicht noch einmal ausserhalb.
+                fields.pop("role", None)
+                fields.pop("dealer_id", None)
+            else:
+                # Runde 12: Jede Rollenaenderung beendet die laufende Sitzung.
+                # current_user() liest die Rolle bei jedem Request frisch — ein
+                # bestehendes Haendler-Token bekam so ohne neue Anmeldung (und
+                # ohne zweiten Faktor) Admin-Rechte.
+                fields["current_session_id"] = None
+        else:
+            # Rollenpruefung 22.09.2026 (RP-028): unveraenderte Rolle nicht
+            # blind zurueckschreiben — ein paralleler Chefwechsel koennte
+            # das Konto inzwischen zum Sucher gemacht haben.
+            if neue_rolle == "dealer" and target.get("dealer_id") \
+                    and body.get("chef_wechsel") and not await _ist_hauptchef_konto(target):
+                # Ein abgebrochener Chefwechsel ohne Replica Set (Rolle schon
+                # gesetzt, Zeiger noch alt) wird durch Wiederholen zu Ende gefuehrt.
+                await _chef_befoerdern(target, alte_rolle, fields, True, admin)
+            fields.pop("role", None)
     # Admin-Konten verwalten nur Super-Admins: Passwort-Reset, Sperren
     # oder Loeschen eines Admins durch einen NORMALEN Admin waere eine
     # Kontouebernahme auf gleicher Stufe.
@@ -871,11 +1135,12 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
         fields["active"] = bool(fields["active"])
         if not fields["active"]:
             fields["current_session_id"] = None
-            if target.get("role") == "dealer" and target.get("dealer_id"):
-                r = await db.users.update_many(
-                    {"dealer_id": target["dealer_id"], "role": "sucher"},
-                    {"$set": {"current_session_id": None, "updated_at": now_iso()}})
-                sucher_abgemeldet = r.modified_count
+            # Rollenpruefung 22.09.2026 (RP-151, RP-131/RP-282): nur der
+            # HAUPTchef sperrt die Firma — dann enden die Sitzungen ALLER
+            # anderen Konten der Firma (auch liegengebliebener dealer-Konten).
+            if await _ist_hauptchef_konto(target):
+                sucher_abgemeldet = await _firmenkonten_abmelden(
+                    target["dealer_id"], target["id"])
         elif not target.get("active", True):
             fields["current_session_id"] = None
     if fields:
@@ -901,19 +1166,30 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
             expires = (datetime.now(timezone.utc) + timedelta(
                 days={"monthly": 30, "trial": 14, "yearly": 365}[plan])).isoformat()
         sub_doc = {
-            "id": str(uuid.uuid4()), "dealer_id": u["dealer_id"],
+            "id": str(uuid.uuid4()), "dealer_id": u.get("dealer_id"),
             "plan": plan, "status": "active",
             "expires_at": expires, "created_at": now_iso(),
         }
         # Sucher-Unteraccounts haben ein PERSÖNLICHES Abo (Phase 2).
-        if u.get("role") == "sucher":
+        # Rollenpruefung 22.09.2026 (RP-053/RP-152, RP-046 Nr. 2): ein
+        # liegengebliebenes zweites dealer-Konto ebenso (es arbeitet als
+        # Sucher) — vorher legte es ein FIRMEN-Abo an, das dem Hauptchef galt.
+        # Beim Hauptchef ersetzt das neue Firmen-Abo die bisherigen (auch
+        # gekuendigte): vorher entstand ein zweites aktives Firmen-Abo, und
+        # das juengste (evtl. kuerzere) verdraengte still das aeltere.
+        if u.get("role") == "sucher" or not await _ist_hauptchef_konto(u):
             sub_doc["subject_user_id"] = u["id"]
-            # Genau EIN aktives Abo je Konto (Index): vorheriges zuerst
-            # als "ersetzt" markieren, Historie bleibt.
-            await db.subscriptions.update_many(
-                {"subject_user_id": u["id"], "status": "active"},
-                {"$set": {"status": "ersetzt", "ersetzt_durch": sub_doc["id"],
-                          "updated_at": now_iso()}})
+            alte = {"subject_user_id": u["id"]}
+        else:
+            alte = _FIRMEN_ABO(u.get("dealer_id"))
+            sub_doc["art"] = "firma"          # RP-145 Nr. 3 (Index-Kennzeichen)
+        # Genau EIN aktives Abo je Konto (Index): vorheriges zuerst
+        # als "ersetzt" markieren, Historie bleibt (Vorher-Status fuer die
+        # Ruecknahme gemerkt).
+        await db.subscriptions.update_many(
+            {**alte, "status": {"$in": ["active", "cancelled"]}},
+            [{"$set": {"status_vorher": "$status", "status": "ersetzt",
+                       "ersetzt_durch": sub_doc["id"], "updated_at": now_iso()}}])
         try:
             await db.subscriptions.insert_one(sub_doc)
         except Exception as exc:
@@ -923,8 +1199,9 @@ async def admin_update_user(user_id: str, body: dict = Body(...), admin=Depends(
             try:
                 await db.subscriptions.update_many(
                     {"ersetzt_durch": sub_doc["id"], "status": "ersetzt"},
-                    {"$set": {"status": "active", "updated_at": now_iso()},
-                     "$unset": {"ersetzt_durch": ""}})
+                    [{"$set": {"status": {"$ifNull": ["$status_vorher", "active"]},
+                               "updated_at": now_iso()}},
+                     {"$unset": ["ersetzt_durch", "status_vorher"]}])
             except Exception:  # noqa: BLE001
                 log.exception("admin_update_user: altes Abo nicht wiederhergestellt")
                 await betrieb.alarm(db, "abo_wechsel_offen", ref=user_id,
@@ -1038,43 +1315,56 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
     if u.get("id") == admin.get("id"):
         raise HTTPException(400, "Du kannst dich nicht selbst löschen")
 
-    if u.get("role") != "dealer":
-        # Pruefung 14.09.2026 (G14): ohne Hauptaccount blieben die Fahrzeuge
-        # sonst beim geloeschten Sucher haengen — vorher abbrechen.
-        if u.get("role") == "sucher" and u.get("dealer_id") and not await db.users.find_one(
-                {"dealer_id": u["dealer_id"], "role": "dealer"}, {"_id": 1}):
-            raise HTTPException(409, "Die Firma hat keinen Hauptaccount — erst einen Chef "
-                                     "bestimmen, dann den Sucher löschen")
+    # Rollenpruefung 22.09.2026 (RP-031/RP-130/RP-281): Hauptaccount ist der
+    # ZEIGER dealers.user_id (sonst das aelteste dealer-Konto), nicht jedes
+    # Konto mit role 'dealer'. Ein liegengebliebenes zweites dealer-Konto
+    # arbeitet als Sucher und wird wie ein Sucher geloescht — vorher kam die
+    # Rueckfrage "komplette Firma loeschen", und mit firma_loeschen=true waere
+    # die GANZE Firma weg gewesen.
+    firmenkonto = u.get("role") in ("sucher", "dealer") and bool(u.get("dealer_id"))
+    if u.get("role") != "dealer" or not await _ist_hauptchef_konto(u):
+        if firmenkonto:
+            # Rollenpruefung 22.09.2026 (RP-029/RP-128/RP-279): Entscheidung
+            # und Grabstein unter DERSELBEN Firmen-Sperre wie der Chefwechsel,
+            # mit frisch gelesenem Stand und Abgleich — sonst konnte ein
+            # paralleler Chefwechsel genau dieses Konto zum Chef machen, und
+            # die Loeschung lief als "Sucher" weiter (Firma ohne Chef).
+            async with _chefwechsel_sperre(u["dealer_id"]):
+                frisch = await db.users.find_one(
+                    {"id": user_id}, {"_id": 0, "role": 1, "dealer_id": 1, "loeschung": 1})
+                if not frisch:
+                    raise HTTPException(404)
+                if frisch.get("role") != u.get("role") \
+                        or frisch.get("dealer_id") != u.get("dealer_id"):
+                    raise HTTPException(409, _KONTO_GEAENDERT)
+                firma_doc = await db.dealers.find_one(
+                    {"id": u["dealer_id"]}, {"_id": 0, "user_id": 1, "loeschung": 1})
+                if ((firma_doc or {}).get("loeschung") or {}).get("status") == "laeuft":
+                    raise HTTPException(409, "Die Firma dieses Kontos wird gerade gelöscht — "
+                                             "das Konto verschwindet mit ihr.")
+                if (firma_doc or {}).get("user_id") == user_id:
+                    raise HTTPException(409, "Dieses Konto ist inzwischen der Chef der Firma — "
+                                             "bitte die Seite neu laden.")
+                # Pruefung 14.09.2026 (G14): ohne Hauptaccount blieben die
+                # Fahrzeuge sonst beim geloeschten Sucher haengen — vorher
+                # abbrechen. Chef = Zeiger (sonst aeltestes anderes dealer-Konto).
+                if not await _chef_fuer_uebernahme(u["dealer_id"], user_id):
+                    raise HTTPException(409, "Die Firma hat keinen Hauptaccount — erst einen Chef "
+                                             "bestimmen, dann den Sucher löschen")
+                u["loeschung"] = frisch.get("loeschung")
+                await _grabstein_setzen(u, admin, rolle=frisch.get("role"))
+        else:
+            await _grabstein_setzen(u, admin)
         # Einzelner Mitarbeiter-/Kaeufer-Account: diesen entfernen — samt
         # seiner personenbezogenen Reste (DSGVO): Netzwerk-Mitgliedschaften,
         # Favoriten und Kaufanfragen. Vorher blieb all das nach der
         # "vollstaendigen" Loeschung zurueck.
         #
-        # Nachpruefung Runde 14 (Befund 58): Reihenfolge wie bei
-        # cleanup_service.vertrag_endgueltig_loeschen — Grabstein zuerst,
-        # Nebendaten danach, das users-Dokument ZULETZT. Vorher wurde das
-        # Konto als Erstes geloescht; brach der Prozess danach ab, blieben
-        # Abo/Favoriten/Resets ohne Bezugskonto zurueck und ein erneuter
-        # Aufruf lief auf 404 statt nachzuholen. Jetzt ist jeder Schritt
-        # wiederholbar: der Grabstein sperrt das Konto sofort (kein Login,
-        # keine Sitzung), ein zweiter Aufruf fuehrt die Loeschung zu Ende.
+        # (Grabstein: _grabstein_setzen, oben — unter der Firmen-Sperre.)
         jetzt = now_iso()
         grab = u.get("loeschung") or {}
-        if grab.get("status") == "laeuft":
-            await db.users.update_one(
-                {"id": user_id},
-                {"$set": {"loeschung.gestartet": jetzt, "active": False,
-                          "current_session_id": None, "updated_at": jetzt},
-                 "$inc": {"loeschung.wiederaufnahmen": 1}})
-        else:
-            await db.users.update_one(
-                {"id": user_id},
-                {"$set": {"loeschung": {"status": "laeuft", "gestartet": jetzt,
-                                        "grund": "admin", "durch": admin["id"]},
-                          "active": False, "current_session_id": None,
-                          "updated_at": jetzt}})
         uebernommen = 0
-        if u.get("role") == "sucher" and u.get("dealer_id"):
+        if firmenkonto:
             # Kontonummer (13.09.2026), Schritt 5: aus der entfernten Chef-Route
             # team.delete_sucher uebernommen (Runde 29 / Runde 11 J2) — Sucher
             # loescht nur noch der Betreiber. Die Fahrzeuge des Suchers gehen an
@@ -1084,15 +1374,10 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
             # Grabstein, ein zweiter Lauf findet nichts mehr.
             firma = {"dealer_id": u["dealer_id"]}
             # Runde 12/13: der eingetragene Hauptaccount (dealers.user_id), sonst
-            # das aelteste dealer-Konto.
-            firma_doc = await db.dealers.find_one({"id": u["dealer_id"]}, {"_id": 0, "user_id": 1})
-            chef = None
-            if (firma_doc or {}).get("user_id") and firma_doc["user_id"] != user_id:
-                chef = await db.users.find_one({"id": firma_doc["user_id"]}, {"_id": 0, "id": 1})
-            if not chef:
-                chef = await db.users.find_one(
-                    {"dealer_id": u["dealer_id"], "role": "dealer", "id": {"$ne": user_id}},
-                    {"_id": 0, "id": 1}, sort=[("created_at", 1)])
+            # das aelteste dealer-Konto (_chef_fuer_uebernahme, Rollenpruefung
+            # 22.09.2026 — dieselbe Regel wie beim Wechsel zum Zwischenhaendler).
+            chef_id = await _chef_fuer_uebernahme(u["dealer_id"], user_id)
+            chef = {"id": chef_id} if chef_id else None
             if chef:
                 uebernommen = (await db.vehicles.update_many(
                     {**firma, "owner_user_id": user_id},
@@ -1210,11 +1495,16 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
         firma_doc = await db.dealers.find_one({"id": dealer_id}, {"_id": 0, "loeschung": 1})
         if firma_doc is None or (firma_doc.get("loeschung") or {}).get("status") == "laeuft":
             wiederaufnahme = True
-        await db.dealers.update_one(
-            {"id": dealer_id},
-            {"$set": {"loeschung": {"status": "laeuft", "gestartet": jetzt,
-                                    "grund": "admin", "durch": admin["id"]},
-                      "updated_at": jetzt}})
+        # Rollenpruefung 22.09.2026 (RP-029/RP-128): der Grabstein der Firma
+        # entsteht unter der Firmen-Sperre — ein Chefwechsel, der gerade
+        # laeuft, ist damit fertig, und jeder spaetere sieht die Loeschung
+        # (409). Die Kaskade selbst laeuft danach ohne Sperre weiter.
+        async with _chefwechsel_sperre(dealer_id):
+            await db.dealers.update_one(
+                {"id": dealer_id},
+                {"$set": {"loeschung": {"status": "laeuft", "gestartet": jetzt,
+                                        "grund": "admin", "durch": admin["id"]},
+                          "updated_at": jetzt}})
         # Go-Live 14.09.2026 (B6a): ALLE Konten der Firma sofort sperren und
         # abmelden. Vorher arbeiteten Chef und Sucher waehrend der Kaskade
         # (und nach einem Abbruch unbegrenzt) weiter: der Grabstein am
@@ -1371,25 +1661,12 @@ async def admin_user_set_active(
         # Nachpruefung Runde 14 (Befund 1): Ein gesperrter Kaeufer darf keine
         # laufende Verhandlung behalten — sonst koennte der Haendler seine
         # alte Anfrage spaeter noch annehmen und fuer ihn reservieren.
-        await db.listing_interest.update_many(
-            {"buyer_user_id": user_id,
-             "status": {"$in": ["offen", "gegenangebot", "gegenangebot_kaeufer"]}},
-            {"$set": {"status": "abgelehnt", "beendet_grund": "kaeufer_gesperrt",
-                      "updated_at": now_iso()},
-             "$push": {"history": {"von": "system", "aktion": "kaeufer_gesperrt",
-                                   "zeit": now_iso()}}})
         # Pruefung 14.09.2026 (M1): auch bereits akzeptierte (reservierte)
         # Fahrzeuge werden frei — ein gesperrter Kaeufer kauft nicht.
-        await kaeufer_reservierungen_freigeben(user_id, "kaeufer_gesperrt")
+        await kaeufer_verhandlungen_beenden(user_id, "kaeufer_gesperrt")
     sucher_abgemeldet = 0
-    if not body.active and u.get("role") == "dealer" and u.get("dealer_id"):
-        # Firmensperre (Audit 09/2026): auch die Sitzungen aller Sucher der
-        # Firma sofort widerrufen — vorher wurden alte Sucher-Tokens nach
-        # dem Entsperren wieder gueltig (auch gestohlene).
-        r = await db.users.update_many(
-            {"dealer_id": u["dealer_id"], "role": "sucher"},
-            {"$set": {"current_session_id": None, "updated_at": now_iso()}})
-        sucher_abgemeldet = r.modified_count
+    if not body.active and await _ist_hauptchef_konto(u):
+        sucher_abgemeldet = await _firmenkonten_abmelden(u["dealer_id"], u["id"])
     await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
                        "admin.user.entsperrt" if body.active else "admin.user.gesperrt",
                        ref=user_id, meta={"kontonummer": u.get("kontonummer", ""),
@@ -1713,7 +1990,12 @@ async def admin_user_contracts(user_id: str, response: Response,
     # contracts._vertrag_bereich). Vorher griff beim Sucher der Zweig
     # {dealer_id: <Firma>} und zeigte ALLE Firmenvertraege als "seine";
     # Konten ohne Firma filterten auf {dealer_id: None}.
-    if user.get("role") == "dealer" and user.get("dealer_id"):
+    # Rollenpruefung 22.09.2026 (RP-151): "firmenweit" nur fuer den HAUPTchef
+    # (Zeiger) — ein liegengebliebenes zweites dealer-Konto sieht wie ein
+    # Sucher nur die eigenen Vertraege. `ist_chef` steuert auch die
+    # Firmen-Verwaltung in der Oberflaeche (UserDetail).
+    user["ist_chef"] = await _ist_hauptchef_konto(user)
+    if user["ist_chef"]:
         filt, umfang = {"dealer_id": user["dealer_id"]}, "firma"
     else:
         filt, umfang = {"user_id": user_id}, "nutzer"
@@ -1753,10 +2035,14 @@ async def admin_contract_pdf(contract_id: str, _=Depends(current_admin)):
         raise HTTPException(404, "Vertrag oder PDF nicht gefunden")
     pdf_bytes = base64.b64decode(doc["pdf_b64"])
     raw_name = doc.get("filename") or f"vertrag_{contract_id}.pdf"
-    filename = _safe_filename(raw_name, fallback=f"vertrag_{contract_id}.pdf")
+    # Rollenprüfung 22.09.2026 (RP-200/RP-351, Welle 2): Starlette kodiert
+    # Kopfzeilen als latin-1 — ein 'Š', '–' oder Emoji im Dateinamen gab
+    # hier 500. Derselbe Helfer wie in contracts.py (ASCII + filename*).
+    from vertrag_dateiname import content_disposition
     return StreamingResponse(
         iter([pdf_bytes]), media_type="application/pdf",
-        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+        headers={"Content-Disposition": content_disposition(
+            raw_name, fallback=f"vertrag_{contract_id}.pdf")},
     )
 
 
@@ -1979,6 +2265,14 @@ async def admin_set_sale_plan(dealer_id: str, body: dict = Body(...),
         plan["valid_until"] = (base + timedelta(days=30 * months)).isoformat()
     elif old.get("valid_until"):
         plan["valid_until"] = old["valid_until"]
+        # Rollenpruefung 22.09.2026 (RP-508): ein ABGELAUFENES Paket wurde ohne
+        # months mit seinem alten Ablauf "neu vergeben" — also sofort wieder
+        # abgelaufen. Jetzt gilt es dann 30 Tage ab heute (wie months=1).
+        vu = _ablauf_parsen(old["valid_until"])
+        if vu is not None and vu <= datetime.now(timezone.utc):
+            months = 1
+            plan["valid_until"] = (datetime.now(timezone.utc)
+                                   + timedelta(days=30)).isoformat()
     if tier == "enterprise":
         # Nachpruefung Runde 14 (Befund 32): ungueltige Eingabe ("abc",
         # "1o0", negativ) wurde still zu custom_quota=None — mit
@@ -2013,10 +2307,39 @@ async def admin_set_sale_plan(dealer_id: str, body: dict = Body(...),
     if res.matched_count == 0:
         raise HTTPException(409, "Das Verkaufspaket wurde gerade parallel geändert — "
                                  "bitte neu laden und erneut speichern.")
+    zahlung = None
+    if months and not _verkauf_kostenlos():
+        # Rollenpruefung 22.09.2026 (RP-508): wie bei Sucher-Abo und
+        # Marktplatz-Zugang entsteht zur bezahlten Laufzeit EIN Zahlungs-
+        # eintrag (Upsert ueber vorgang_id). Enterprise ohne Listenpreis: 0 EUR
+        # mit Vermerk — der Betrag wird dann per "Zahlung nachtragen" erfasst.
+        vid = str(uuid.uuid4())
+        preis = SALE_PLANS.get(tier, {}).get("price")
+        await db.manual_payments.update_one(
+            {"vorgang_id": vid},
+            {"$setOnInsert": {
+                "id": str(uuid.uuid4()), "dealer_id": dealer_id,
+                "subject_user_id": None, "plan": f"verkauf_{tier}",
+                "amount": round(float(preis) * int(months), 2) if preis else 0.0,
+                "currency": "EUR", "paid_at": now_iso()[:10],
+                "period_until": plan.get("valid_until"),
+                "zahlungsart": "rechnung_bezahlt",
+                "note": "" if preis else "Enterprise ohne Listenpreis — Betrag nachtragen",
+                "quelle": "manuell", "vorgang_id": vid,
+                "recorded_by": _handelnder(admin), "created_at": now_iso()}},
+            upsert=True)
+        zahlung = vid
     await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
                        "admin.verkaufsplan.gesetzt", ref=dealer_id,
-                       meta={"tier": tier})
+                       meta={"tier": tier, "monate": months or None,
+                             "zahlung_vorgang": zahlung})
     return {"ok": True, "sale_plan": plan}
+
+
+def _verkauf_kostenlos() -> bool:
+    """Schalter aus routes.team (Verkaufen kostenlos) — spaet gelesen."""
+    from routes.team import VERKAUF_KOSTENLOS
+    return bool(VERKAUF_KOSTENLOS)
 
 
 def _seite_kopf(response: Response, items: list, limit: int) -> list:
@@ -2045,7 +2368,33 @@ async def admin_plan_requests(response: Response, status: Optional[str] = None,
     seite = max(1, int(seite))
     items = await db.plan_requests.find(query, {"_id": 0}) \
         .sort("created_at", -1).skip((seite - 1) * limit).to_list(limit + 1)
-    return _seite_kopf(response, items, limit)
+    items = _seite_kopf(response, items, limit)
+    # Rollenprüfung 22.09.2026 (RP-511, Welle 2): "mit Einladung" anzeigen —
+    # mit der einladenden Firma und ob die Einladung noch gilt. Das Token
+    # selbst verlaesst den Server nicht (es ist ein Zugangsschluessel).
+    for item in items:
+        token = item.pop("invite_token", None)
+        if token:
+            item["einladung"] = await _einladung_info(token)
+    return items
+
+
+async def _einladung_info(token: str) -> dict:
+    """Firma und Gueltigkeit einer Einladung (fuer die Anzeige). Wirft nie."""
+    try:
+        inv = await db.dealer_invites.find_one(
+            {"token": token}, {"_id": 0, "dealer_id": 1, "expires_at": 1,
+                               "used_count": 1, "max_uses": 1})
+        if not inv:
+            return {"firma": "", "gueltig": False}
+        firma = await db.dealers.find_one({"id": inv.get("dealer_id")},
+                                          {"_id": 0, "company_name": 1})
+        gueltig = (str(inv.get("expires_at") or "") > now_iso()
+                   and (inv.get("used_count") or 0) < (inv.get("max_uses") or 0))
+        return {"firma": (firma or {}).get("company_name", ""), "gueltig": gueltig}
+    except Exception:  # noqa: BLE001 — nur Anzeige
+        log.exception("Einladung zur Zugangsanfrage nicht lesbar")
+        return {"firma": "", "gueltig": None}
 
 
 # ---------- Sucher-Abo freischalten (manuell) ----------
@@ -2063,6 +2412,14 @@ class AboFreischaltenIn(BaseModel):
     zahlungsart: Literal["rechnung_bezahlt", "kulanz", "probe"] = "rechnung_bezahlt"
     grund: str = Field(default="", max_length=300)
     waehrung: Literal["EUR"] = "EUR"
+    # Rollenpruefung 22.09.2026 (RP-225/RP-376): Bezug zur Anfrage und ein
+    # Schluessel je Klick. Dieselbe Anfrage bzw. derselbe Schluessel bucht
+    # nie ein zweites Mal — eine Wiederholung (zweiter Tab, erneuter Klick
+    # nach Netzfehler, obwohl der erste durchlief) bekommt das Ergebnis des
+    # ersten Vorgangs zurueck.
+    anfrage_id: Optional[str] = Field(default=None, max_length=100)
+    idempotenz_schluessel: Optional[str] = Field(default=None, min_length=8, max_length=80,
+                                                 pattern=r"^[A-Za-z0-9_-]+$")
 
 
 def _datum_pruefen_400(wert, feld: str) -> str:
@@ -2088,7 +2445,8 @@ async def admin_set_sucher_abo(sucher_id: str, body: AboFreischaltenIn,
     from routes.team import SUCHER_PLANS
     sucher = await db.users.find_one(
         {"id": sucher_id, "role": {"$in": ["sucher", "dealer"]}},
-        {"_id": 0, "id": 1, "dealer_id": 1, "email": 1, "active": 1})
+        {"_id": 0, "id": 1, "dealer_id": 1, "email": 1, "active": 1, "role": 1,
+         "loeschung": 1})
     if not sucher:
         raise HTTPException(404, "Sucher nicht gefunden")
     # Nachpruefung 20.09.2026, Nr. 63: gesucht wurde nur nach Id und Rolle.
@@ -2101,6 +2459,27 @@ async def admin_set_sucher_abo(sucher_id: str, body: AboFreischaltenIn,
             400, "Dieses Konto ist deaktiviert — eine Freischaltung wuerde "
                  "bezahlt, das Konto bliebe aber gesperrt. Erst das Konto "
                  "wieder aktivieren.")
+    if body.plan is not None:
+        # Rollenpruefung 22.09.2026 (RP-231/RP-382): dieselbe Ueberlegung fuer
+        # Konto-Loeschung, Firmenloeschung und Firmensperre (Chef gesperrt,
+        # die Sucher bleiben 'active') — bezahlt, aber nicht nutzbar.
+        if (sucher.get("loeschung") or {}).get("status") == "laeuft":
+            raise HTTPException(409, "Dieses Konto wird gerade gelöscht — keine "
+                                     "Freischaltung mehr.")
+        if sucher.get("dealer_id"):
+            firma_doc = await db.dealers.find_one({"id": sucher["dealer_id"]},
+                                                  {"_id": 0, "loeschung": 1})
+            if ((firma_doc or {}).get("loeschung") or {}).get("status") == "laeuft":
+                raise HTTPException(409, "Die Firma dieses Kontos wird gerade gelöscht — "
+                                         "keine Freischaltung mehr.")
+            if await firma_gesperrt(sucher["dealer_id"]):
+                raise HTTPException(409, "Die Firma dieses Kontos ist gesperrt (Chef "
+                                         "deaktiviert) — eine Freischaltung wäre bezahlt, "
+                                         "aber nicht nutzbar. Erst die Firma entsperren.")
+    # Rollenpruefung 22.09.2026 (RP-229/RP-380, RP-051): Beim Hauptchef zaehlt
+    # auch das alte FIRMEN-Abo (deps.subscription_for) — Aufheben und
+    # Verlaengern muessen es mit erfassen.
+    ist_chef = await _ist_hauptchef_konto(sucher)
     if body.plan is None:
       # Aufheben = NUR die kostenpflichtige Sucher-Funktion sperren
       # (Login/Bestand bleiben). Auch Lifetime wird damit inaktiv.
@@ -2108,35 +2487,58 @@ async def admin_set_sucher_abo(sucher_id: str, body: AboFreischaltenIn,
       # sonst konnten sich Aufheben und Freischalten ueberholen.
       async with _sperre(f"abo:{sucher_id}", _handelnder(admin)) as wache:
         wache.pruefen()
+        aufheben = {"$set": {"status": "cancelled", "expires_at": now_iso(),
+                             "aufgehoben_von": _handelnder(admin),
+                             "updated_at": now_iso()}}
         await db.subscriptions.update_many(
             {"subject_user_id": sucher_id, "status": {"$in": ["active", "cancelled"]}},
-            {"$set": {"status": "cancelled", "expires_at": now_iso(),
-                      "aufgehoben_von": _handelnder(admin),
-                      "updated_at": now_iso()}})
+            aufheben)
+        firmen_abos = 0
+        if ist_chef:
+            # Vorher meldete die Oberflaeche "Abo aufgehoben", der Chef suchte
+            # aber ueber das Firmen-Abo (ohne subject_user_id) weiter.
+            firmen_abos = (await db.subscriptions.update_many(
+                {**_FIRMEN_ABO(sucher["dealer_id"]),
+                 "status": {"$in": ["active", "cancelled"]}},
+                aufheben)).modified_count
         await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
                            "admin.sucher.abo.aufgehoben", ref=sucher_id,
-                           meta={"grund": body.grund})
-        return {"ok": True, "active": False}
+                           meta={"grund": body.grund, "firmen_abos": firmen_abos})
+        # Der TATSAECHLICHE Stand danach (dieselbe Regel wie die Zugriffspruefung).
+        danach = await subscription_for(sucher)
+        return {"ok": True, "active": bool(danach.get("active")),
+                "subscription": danach}
     if body.plan not in SUCHER_PLANS:
         raise HTTPException(400, f"Unbekannter Abo-Zeitraum: {body.plan}")
     # Wunsch Ahmad 20.09.2026 — Probe-Abo (kostenlos, wenige Tage):
     from routes.team import ist_probe
     probe = ist_probe(body.plan)
+    anfrage = None
+    if body.anfrage_id:
+        # Rollenpruefung 22.09.2026 (RP-225/RP-376, RP-224/RP-375): die
+        # Freischaltung gilt GENAU dieser Anfrage — sie muss zu diesem Konto
+        # gehoeren, und ueber eine Anfrage gibt es kein Probe-Abo (Proben
+        # vergibt nur der Betreiber direkt; alte Anfragen mit probe3/probe5
+        # vergaben es vorher still und kostenlos).
+        anfrage = await db.plan_requests.find_one(
+            {"id": body.anfrage_id, "type": "sucher_abo"},
+            {"_id": 0, "id": 1, "subject_user_id": 1, "status": 1, "wanted_plan": 1})
+        if not anfrage:
+            raise HTTPException(404, "Abo-Anfrage nicht gefunden")
+        if anfrage.get("subject_user_id") != sucher_id:
+            raise HTTPException(400, "Die Anfrage gehört zu einem anderen Konto")
+        if probe:
+            raise HTTPException(400, "Probe-Abos werden nicht über eine Anfrage vergeben — "
+                                     "bitte monatlich/jährlich wählen oder die Probe direkt "
+                                     "in der Firmenansicht vergeben.")
     if probe:
         # FALLE, die hier sonst zuschlaegt: _abo_vorgang_ausfuehren ersetzt
         # ALLE bisherigen Abos durch das neue. Eine Probe auf ein laufendes
         # Jahres-Abo wuerde also ein bezahltes Jahr durch drei Tage
         # ersetzen. Deshalb nur fuer Konten OHNE laufendes bezahltes Abo.
-        laeuft = await db.subscriptions.find_one(
-            {"subject_user_id": sucher_id, "status": "active",
-             "plan": {"$nin": ["probe3", "probe5"]}},
-            {"_id": 0, "plan": 1, "expires_at": 1})
-        if laeuft and (laeuft.get("expires_at") or "") > now_iso():
-            raise HTTPException(
-                400, "Dieses Konto hat bereits ein bezahltes Abo "
-                     f"({laeuft.get('plan')}, gueltig bis "
-                     f"{str(laeuft.get('expires_at'))[:10]}). Ein Probe-Abo "
-                     f"wuerde es ersetzen — erst das bezahlte Abo aufheben.")
+        # Rollenpruefung 22.09.2026 (RP-228/RP-379): diese Pruefung steht
+        # jetzt in _abo_freischalten UNTER der Sperre (vorher davor — eine
+        # parallele bezahlte Freischaltung konnte dazwischen fertig werden).
         if body.betrag is not None:
             raise HTTPException(400, "Ein Probe-Abo ist kostenlos — kein Betrag.")
         if body.gueltig_bis:
@@ -2156,7 +2558,66 @@ async def admin_set_sucher_abo(sucher_id: str, body: AboFreischaltenIn,
     besitzer = str(uuid.uuid4())
     async with _sperre(sperre, besitzer) as wache:
         return await _abo_freischalten(sucher, sucher_id, body, gezahlt_am,
-                                       admin, wache)
+                                       admin, wache, ist_chef=ist_chef)
+
+
+def _FIRMEN_ABO(dealer_id: Optional[str]) -> dict:
+    """Filter fuer das alte firmenweite Abo (ohne subject_user_id; {feld: None}
+    trifft in MongoDB fehlend UND null) — die Grundlage des Rueckfalls in
+    deps.subscription_for fuer den Hauptchef."""
+    return {"dealer_id": dealer_id, "subject_user_id": None}
+
+
+async def _massgebliches_abo(sucher_id: str, dealer_id: Optional[str],
+                             ist_chef: bool, *,
+                             auch_abgelaufen: bool = False) -> Optional[dict]:
+    """Das Abo-Dokument, das fuer dieses Konto GERADE Zugang gibt — dieselbe
+    Auswahl wie deps.subscription_for: das juengste nicht ersetzte eigene Abo,
+    beim Hauptchef ersatzweise das juengste Firmen-Abo. Nur wenn es wirklich
+    aktiv ist (sub_status_from_doc), sonst None.
+
+    Rollenpruefung 22.09.2026 (RP-050/RP-149, RP-051/RP-150): Restlaufzeit,
+    Probe-Sperre und 'Gueltig bis' suchten nur status 'active' — ein
+    gekuendigtes, aber noch laufendes Abo ('cancelled') und beim Chef das
+    Firmen-Abo, das die Oberflaeche anzeigt, fielen durch.
+
+    Rollenpruefung 22.09.2026 (Welle 3, test_betreiber::test_14):
+    `auch_abgelaufen=True` (nur fuer 'Gueltig bis') liefert ersatzweise
+    dasselbe juengste Dokument, wenn es noch status 'active' traegt und nur
+    per DATUM abgelaufen (oder ohne lesbares Datum) ist. Der Betreiber steuert
+    die Laufzeit frei: ein Datum in der Vergangenheit sperrt, ein neues Datum
+    gibt den Zugang ohne neue Zahlung zurueck — so war es vor RP-050, und die
+    Umstellung auf sub_status_from_doc hatte das mit 404 verbaut. Ein
+    aufgehobenes Abo ('cancelled' mit Ablauf in der Vergangenheit) bleibt
+    aussen vor: es wird ueber das Datum nicht wiederbelebt."""
+    eigen = await db.subscriptions.find_one(
+        {"subject_user_id": sucher_id, "status": {"$ne": "ersetzt"},
+         "$or": [{"dealer_id": dealer_id}, {"dealer_id": {"$exists": False}},
+                 {"dealer_id": None}]},
+        {"_id": 0}, sort=[("created_at", -1)])
+    if sub_status_from_doc(eigen)["active"]:
+        return eigen
+    firma = None
+    if ist_chef and dealer_id:
+        firma = await db.subscriptions.find_one(
+            {**_FIRMEN_ABO(dealer_id), "status": {"$ne": "ersetzt"}},
+            {"_id": 0}, sort=[("created_at", -1)])
+        if sub_status_from_doc(firma)["active"]:
+            return firma
+    if auch_abgelaufen:
+        # Erst das eigene, beim Chef dann das Firmen-Abo — dieselbe Reihenfolge
+        # wie deps.subscription_for. Fehlt das Statusfeld, gilt es wie in
+        # sub_status_from_doc als 'active'.
+        for kandidat in (eigen, firma):
+            if kandidat and (kandidat.get("status") or "active") == "active":
+                return kandidat
+    return None
+
+
+def _vorgang_antwort(v: dict, **extra) -> dict:
+    return {"ok": True, "active": True, "plan": v.get("plan"),
+            "expires_at": v.get("expires_at"), "vorgang_id": v.get("id"),
+            "betrag": v.get("betrag"), **extra}
 
 
 SPERRE_FRIST_S = 45           # so lange gilt eine Sperre ohne Herzschlag
@@ -2255,10 +2716,62 @@ async def _sperre(name: str, besitzer: str):
 
 
 async def _abo_freischalten(sucher: dict, sucher_id: str, body: AboFreischaltenIn,
-                            gezahlt_am: str, admin: dict, wache=None) -> dict:
+                            gezahlt_am: str, admin: dict, wache=None,
+                            ist_chef: bool = False) -> dict:
     from routes.team import SUCHER_PLANS, ist_probe
     plan = body.plan
     days = SUCHER_PLANS[plan]["days"]
+    dealer_id = sucher.get("dealer_id")
+    # Rollenpruefung 22.09.2026 (RP-225/RP-376): Wiederholung erkennen, BEVOR
+    # etwas gebucht wird (unter der Sperre, also ohne Rennen mit dem ersten
+    # Aufruf). Ein noch laufender Vorgang wird zu Ende gefuehrt statt verdoppelt.
+    frueher = None
+    if body.idempotenz_schluessel:
+        frueher = await db.abo_vorgaenge.find_one(
+            {"subject_user_id": sucher_id,
+             "idempotenz_schluessel": body.idempotenz_schluessel}, {"_id": 0})
+    if not frueher and body.anfrage_id:
+        frueher = await db.abo_vorgaenge.find_one(
+            {"subject_user_id": sucher_id, "anfrage_id": body.anfrage_id,
+             "status": {"$in": ["laeuft", "fertig"]}}, {"_id": 0})
+    if frueher:
+        if frueher.get("status") == "laeuft":
+            await _abo_vorgang_ausfuehren(frueher)
+        return _vorgang_antwort(frueher, bereits_freigeschaltet=True)
+    if body.anfrage_id:
+        offen = await db.plan_requests.find_one(
+            {"id": body.anfrage_id, "status": "offen"}, {"_id": 0, "id": 1})
+        if not offen:
+            raise HTTPException(409, "Diese Anfrage ist bereits erledigt oder abgelehnt — "
+                                     "es wurde nichts gebucht. Bitte die Liste neu laden.")
+    # Rollenpruefung 22.09.2026 (RP-050, RP-051): der Stand, der gerade Zugang
+    # gibt — auch gekuendigt-aber-laufend und beim Chef das Firmen-Abo.
+    laufend = await _massgebliches_abo(sucher_id, dealer_id, ist_chef)
+    if ist_probe(plan):
+        # Rollenpruefung 22.09.2026 (RP-228/RP-379, RP-230/RP-381): Probe-Sperre
+        # HIER unter der Sperre; Ablauf als Datum verglichen (vorher String mit
+        # gemischten Zeitzonen, ein datetime-Altwert warf 500). Jedes noch
+        # laufende bezahlte Abo zaehlt — auch 'cancelled' und beim Chef das
+        # Firmen-Abo. Unlesbares Ablaufdatum gilt als laufend (fail-closed:
+        # lieber keine Probe als ein bezahltes Jahr durch drei Tage ersetzen).
+        jetzt_dt = datetime.now(timezone.utc)
+        kandidaten = [d async for d in db.subscriptions.find(
+            {"subject_user_id": sucher_id, "status": {"$in": ["active", "cancelled"]},
+             "plan": {"$nin": ["probe3", "probe5"]}},
+            {"_id": 0, "plan": 1, "expires_at": 1})]
+        if ist_chef and dealer_id:
+            kandidaten += [d async for d in db.subscriptions.find(
+                {**_FIRMEN_ABO(dealer_id), "status": {"$in": ["active", "cancelled"]},
+                 "plan": {"$nin": ["probe3", "probe5"]}},
+                {"_id": 0, "plan": 1, "expires_at": 1})]
+        for bezahlt in kandidaten:
+            ea = _ablauf_parsen(bezahlt.get("expires_at"))
+            if ea is None or ea > jetzt_dt:
+                raise HTTPException(
+                    400, "Dieses Konto hat bereits ein bezahltes Abo "
+                         f"({bezahlt.get('plan')}, gueltig bis "
+                         f"{str(bezahlt.get('expires_at') or 'unbefristet')[:10]}). Ein Probe-Abo "
+                         f"wuerde es ersetzen — erst das bezahlte Abo aufheben.")
     gueltig_bis = _gueltig_bis_parsen(body.gueltig_bis)
     if gueltig_bis:
         # Wunsch 09/2026: der Betreiber schreibt direkt "bis wann gueltig" —
@@ -2273,10 +2786,7 @@ async def _abo_freischalten(sucher: dict, sucher_id: str, body: AboFreischaltenI
             expires_at = (datetime.now(timezone.utc)
                           + timedelta(days=days)).isoformat()
         else:
-            basis = _restlaufzeit_basis(
-                (await db.subscriptions.find_one(
-                    {"subject_user_id": sucher_id, "status": "active"},
-                    {"_id": 0, "expires_at": 1}) or {}).get("expires_at"))
+            basis = _restlaufzeit_basis((laufend or {}).get("expires_at"))
             expires_at = (basis + timedelta(days=days)).isoformat()
     if body.zahlungsart in ("kulanz", "probe"):
         # Probe-Abo (20.09.2026): kostenlos wie Kulanz, aber ein eigener
@@ -2297,14 +2807,22 @@ async def _abo_freischalten(sucher: dict, sucher_id: str, body: AboFreischaltenI
         "status": "laeuft", "schritte": {},
         "created_at": now_iso(), "updated_at": now_iso(),
     }
+    # Rollenpruefung 22.09.2026 (RP-225/RP-376, RP-051): Bezug fuer die
+    # Wiederholungserkennung; beim Hauptchef wird das alte Firmen-Abo mit
+    # ersetzt (seine Resttage stecken jetzt im neuen, persoenlichen Abo).
+    if body.anfrage_id:
+        vorgang["anfrage_id"] = body.anfrage_id
+    if body.idempotenz_schluessel:
+        vorgang["idempotenz_schluessel"] = body.idempotenz_schluessel
+    if ist_chef:
+        vorgang["firmen_abo_ersetzen"] = True
     # Nr. 50: letzte Gegenprobe, bevor Abo und Zahlung entstehen — die
     # Restlaufzeit oben wurde gelesen, als die Sperre noch uns gehoerte.
     if wache is not None:
         wache.pruefen()
     await db.abo_vorgaenge.insert_one(dict(vorgang))
     await _abo_vorgang_ausfuehren(vorgang)
-    return {"ok": True, "active": True, "plan": plan, "expires_at": expires_at,
-            "vorgang_id": vorgang["id"], "betrag": betrag}
+    return _vorgang_antwort(vorgang)
 
 
 async def _abo_vorgang_ausfuehren(v: dict) -> None:
@@ -2315,9 +2833,24 @@ async def _abo_vorgang_ausfuehren(v: dict) -> None:
     ueber vorgang_id), 4) offene Anfrage schliessen, 5) Audit einmalig,
     6) Vorgang fertig."""
     vid, sid, jetzt = v["id"], v["subject_user_id"], now_iso()
+    # Rollenpruefung 22.09.2026 (RP-227/RP-378): ersetzt werden nur Abos, die
+    # VOR diesem Vorgang entstanden sind. Holte der Reparaturlauf einen alten,
+    # abgebrochenen Vorgang nach, machte Schritt 1 sonst ein inzwischen NEU
+    # freigeschaltetes Abo zu 'ersetzt' (zwei Zahlungen, kein aktives Abo).
+    vorher = {"$or": [{"created_at": {"$lt": v.get("created_at") or jetzt}},
+                      {"created_at": {"$exists": False}}, {"created_at": None}]}
     await db.subscriptions.update_many(
-        {"subject_user_id": sid, "id": {"$ne": vid}, "status": {"$ne": "ersetzt"}},
+        {"subject_user_id": sid, "id": {"$ne": vid}, "status": {"$ne": "ersetzt"},
+         **vorher},
         {"$set": {"status": "ersetzt", "ersetzt_durch": vid, "updated_at": jetzt}})
+    if v.get("firmen_abo_ersetzen") and v.get("dealer_id"):
+        # Rollenpruefung 22.09.2026 (RP-051/RP-150): beim Hauptchef steckt die
+        # Restlaufzeit des alten Firmen-Abos jetzt im neuen persoenlichen Abo
+        # — das Firmen-Abo wird Historie, sonst zaehlten seine Tage doppelt
+        # und "Aufheben"/"Gueltig bis" trafen das falsche Dokument.
+        await db.subscriptions.update_many(
+            {**_FIRMEN_ABO(v["dealer_id"]), "status": {"$ne": "ersetzt"}, **vorher},
+            {"$set": {"status": "ersetzt", "ersetzt_durch": vid, "updated_at": jetzt}})
     await db.subscriptions.update_one(
         {"id": vid},
         {"$setOnInsert": {
@@ -2365,11 +2898,59 @@ async def abo_vorgaenge_nachholen(db_=None) -> int:
     async for v in db.abo_vorgaenge.find({"status": "laeuft", "updated_at": {"$lt": frist}},
                                          {"_id": 0}).limit(100):
         try:
-            await _abo_vorgang_ausfuehren(v)
-            n += 1
+            # Rollenpruefung 22.09.2026 (RP-227/RP-378): unter DERSELBEN Sperre
+            # wie die Freischaltung (vorher ohne) — und nur, wenn es fuer das
+            # Konto keinen NEUEREN Vorgang gibt. Hat der Betreiber nach dem
+            # Absturz neu freigeschaltet, gilt der neue; der alte wird nicht
+            # mehr ausgefuehrt (sonst: zwei Zahlungen, kein aktives Abo).
+            async with _sperre(f"abo:{v['subject_user_id']}",
+                               f"nachholen-{uuid.uuid4()}") as wache:
+                wache.pruefen()
+                frisch = await db.abo_vorgaenge.find_one(
+                    {"id": v["id"], "status": "laeuft"}, {"_id": 0})
+                if not frisch:
+                    continue
+                neuer = await db.abo_vorgaenge.find_one(
+                    {"subject_user_id": frisch["subject_user_id"],
+                     "id": {"$ne": frisch["id"]},
+                     "created_at": {"$gt": frisch.get("created_at") or ""},
+                     "status": {"$in": ["laeuft", "fertig"]}},
+                    {"_id": 0, "id": 1}, sort=[("created_at", -1)])
+                if neuer:
+                    await _abo_vorgang_ueberholt(frisch, neuer["id"])
+                else:
+                    await _abo_vorgang_ausfuehren(frisch)
+                n += 1
+        except HTTPException:
+            # Sperre belegt (Freischaltung laeuft gerade) — naechster Lauf.
+            continue
         except Exception:
             log.exception("Abo-Vorgang %s konnte nicht nachgeholt werden", v.get("id"))
     return n
+
+
+async def _abo_vorgang_ueberholt(v: dict, neuer_id: str) -> None:
+    """Rollenpruefung 22.09.2026 (RP-227/RP-378): einen abgebrochenen Vorgang
+    abschliessen, den ein neuerer Vorgang desselben Kontos ueberholt hat —
+    ohne neues Abo und ohne neue Zahlung. Ein schon angelegtes Abo dieses
+    Vorgangs wird Historie ('ersetzt' durch den neueren). Stand bereits eine
+    Zahlung (Absturz nach Schritt 3), bleibt sie stehen: ein Betriebsalarm
+    bittet um Pruefung (evtl. doppelt gebucht)."""
+    vid, jetzt = v["id"], now_iso()
+    await db.subscriptions.update_one(
+        {"id": vid, "status": {"$ne": "ersetzt"}},
+        {"$set": {"status": "ersetzt", "ersetzt_durch": neuer_id, "updated_at": jetzt}})
+    zahlung = await db.manual_payments.find_one({"vorgang_id": vid}, {"_id": 0, "id": 1})
+    await db.abo_vorgaenge.update_one(
+        {"id": vid, "status": "laeuft"},
+        {"$set": {"status": "ueberholt", "ueberholt_durch": neuer_id,
+                  "zahlung_vorhanden": bool(zahlung), "updated_at": jetzt}})
+    try:
+        await betrieb.alarm(db, "abo_vorgang_ueberholt", ref=vid,
+                            konto=v.get("subject_user_id") or "", neuer=neuer_id,
+                            zahlung_vorhanden=bool(zahlung))
+    except Exception:  # noqa: BLE001 — der Abschluss steht, der Alarm ist Zugabe
+        log.exception("Alarm abo_vorgang_ueberholt fuer %s nicht gesetzt", vid)
 
 
 def _gueltig_bis_parsen(wert) -> str:
@@ -2398,8 +2979,9 @@ def _gueltig_bis_parsen(wert) -> str:
 @router.patch("/admin/sucher/{sucher_id}/abo-gueltig-bis")
 async def admin_set_abo_gueltig_bis(sucher_id: str, body: dict = Body(...),
                                     admin=Depends(current_super_admin)):
-    """NUR das Ablaufdatum eines AKTIVEN Abos aendern (Wunsch 09/2026) —
-    ohne Zahlung. Audit 09/2026: die Zahlungshistorie wird NICHT mehr
+    """NUR das Ablaufdatum des massgeblichen Abos aendern (Wunsch 09/2026) —
+    ohne Zahlung; auch eines, das nur per Datum abgelaufen ist (nicht aber
+    eines, das 'Abo aufheben' beendet hat). Audit 09/2026: die Zahlungshistorie wird NICHT mehr
     umgeschrieben; die Aenderung landet als eigener Datensatz in
     zugangs_aenderungen (alt/neu/Grund/Admin)."""
     gueltig_bis = _gueltig_bis_parsen(body.get("gueltig_bis"))
@@ -2417,16 +2999,27 @@ async def admin_set_abo_gueltig_bis(sucher_id: str, body: dict = Body(...),
     # bekommen, waehrend der Verlaufseintrag auf das alte Abo zeigte.
     # Jetzt: dieselbe Sperre, Aenderung NUR am gelesenen Abo, und der alte
     # Ablauf muss beim Schreiben noch derselbe sein.
+    # Rollenpruefung 22.09.2026 (RP-050/RP-149, RP-051/RP-150): gemeint ist das
+    # Abo, das GERADE Zugang gibt — auch ein gekuendigtes, noch laufendes
+    # ('cancelled') und beim Hauptchef das Firmen-Abo, das die Oberflaeche
+    # anzeigt. Vorher: nur status 'active' und nur persoenlich -> 404.
+    # Rollenpruefung 22.09.2026 (Welle 3, test_betreiber::test_14): ein nur per
+    # Datum abgelaufenes Abo (status weiter 'active') bleibt ueber ein neues
+    # Datum verlaengerbar — auch_abgelaufen=True; aufgehobene nicht.
+    konto = await db.users.find_one({"id": sucher_id},
+                                    {"_id": 0, "id": 1, "role": 1, "dealer_id": 1})
+    ist_chef = await _ist_hauptchef_konto(konto)
     async with _sperre(f"abo:{sucher_id}", _handelnder(admin)) as wache:
-        aktiv = await db.subscriptions.find_one(
-            {"subject_user_id": sucher_id, "status": "active"},
-            {"_id": 0, "id": 1, "expires_at": 1, "dealer_id": 1, "plan": 1},
-            sort=[("created_at", -1)])
+        aktiv = await _massgebliches_abo(sucher_id, (konto or {}).get("dealer_id"), ist_chef,
+                                         auch_abgelaufen=True)
         if not aktiv:
             raise HTTPException(404, "Kein aktives Abo fuer dieses Konto")
+        if not aktiv.get("id"):
+            raise HTTPException(409, "Dieses Abo hat keine Kennung (Altbestand) — bitte neu "
+                                     "freischalten statt das Datum zu ändern.")
         wache.pruefen()
         r = await db.subscriptions.update_one(
-            {"id": aktiv["id"], "status": "active",
+            {"id": aktiv["id"], "status": aktiv.get("status"),
              "expires_at": aktiv.get("expires_at")},
             {"$set": {"expires_at": gueltig_bis, "updated_at": now_iso()}})
         if r.matched_count == 0:
@@ -2453,15 +3046,10 @@ def _restlaufzeit_basis(expires_at) -> datetime:
     """Startpunkt einer Verlaengerung: bisheriger Ablauf, falls der noch in
     der Zukunft liegt — sonst jetzt."""
     jetzt = datetime.now(timezone.utc)
-    if not expires_at:
-        return jetzt
-    try:
-        alt = datetime.fromisoformat(expires_at)
-        if alt.tzinfo is None:
-            alt = alt.replace(tzinfo=timezone.utc)
-        return alt if alt > jetzt else jetzt
-    except (ValueError, TypeError):
-        return jetzt
+    # Rollenpruefung 22.09.2026 (RP-230): derselbe Parser wie die
+    # Zugriffspruefung (ISO-String mit Z/Offset oder datetime-Altwert).
+    alt = _ablauf_parsen(expires_at)
+    return alt if alt is not None and alt > jetzt else jetzt
 
 
 # ---------- Sucher-Konten anlegen/verwalten (Betreiber, 09/2026) ----------
@@ -2616,10 +3204,45 @@ async def admin_create_buyer(body: AdminKaeuferIn, admin=Depends(current_super_a
         await _anfrage_freigeben(anfrage)
         raise
     await _anfrage_abschliessen(anfrage, erg["user_id"], erg["kontonummer"], admin)
+    einladung = await _einladung_einloesen(anfrage, erg["user_id"], admin)
     await log_activity_sicher("", admin["id"], "admin.kaeufer.angelegt", ref=erg["user_id"],
                               meta={"kontonummer": erg["kontonummer"],
-                                    "anfrage": bool(anfrage)})
-    return {"ok": True, "user_id": erg["user_id"], "kontonummer": erg["kontonummer"]}
+                                    "anfrage": bool(anfrage),
+                                    "einladung": einladung})
+    return {"ok": True, "user_id": erg["user_id"], "kontonummer": erg["kontonummer"],
+            "einladung": einladung}
+
+
+async def _einladung_einloesen(anfrage: Optional[dict], kaeufer_id: str,
+                               admin: dict) -> Optional[dict]:
+    """Rollenprüfung 22.09.2026 (RP-511, Welle 2): Die Zugangsanfrage eines
+    eingeladenen Partners traegt das Einladungs-Token (routes.auth). Beim
+    Anlegen des Kontos wird es hier eingeloest — vorher ging die Einladung
+    still verloren. Best effort: das Konto steht schon; scheitert es, sieht
+    der Betreiber das in der Antwort, und der Partner kann den Link nach der
+    ersten Anmeldung selbst einloesen (BuyerLogin merkt ihn sich).
+    None = die Anfrage hatte keine Einladung."""
+    token = ((anfrage or {}).get("invite_token") or "").strip()
+    if not token:
+        return None
+    firma = ""
+    dealer_id = None
+    try:
+        from routes.marketplace import _redeem_invite
+        dealer_id = await _redeem_invite(token, kaeufer_id)
+        if dealer_id:
+            d = await db.dealers.find_one({"id": dealer_id}, {"_id": 0, "company_name": 1})
+            firma = (d or {}).get("company_name", "")
+        else:
+            firma = (await _einladung_info(token)).get("firma", "")
+    except Exception:  # noqa: BLE001 — das Konto ist angelegt
+        log.exception("Einladung der Anfrage %s nicht eingeloest", (anfrage or {}).get("id"))
+        dealer_id = None
+    await log_activity_sicher(dealer_id or "", admin["id"], "admin.kaeufer.einladung",
+                              ref=kaeufer_id,
+                              meta={"eingeloest": bool(dealer_id),
+                                    "anfrage": (anfrage or {}).get("id")})
+    return {"eingeloest": bool(dealer_id), "firma": firma}
 
 
 class AdminFahrerIn(BaseModel):
@@ -2699,18 +3322,35 @@ async def admin_list_dealer_sucher(dealer_id: str, response: Response, limit: in
         {"_id": 0, "password_hash": 0},
     ).sort("created_at", 1).skip((seite - 1) * limit).to_list(limit + 1)
     items = _seite_kopf(response, items, limit)
-    items.sort(key=lambda x: 0 if x.get("role") == "dealer" else 1)
+    # Rollenpruefung 22.09.2026 (RP-033/RP-132/RP-151/RP-283): Chef ist der
+    # ZEIGER dealers.user_id (sonst das aelteste dealer-Konto) — vorher galt
+    # jedes Konto mit role 'dealer' als Chef und bekam den Firmen-Abo-Rueckfall.
+    haupt = await haupt_chef_id(dealer_id)
+    items.sort(key=lambda x: 0 if x.get("id") == haupt else 1)
+    # Wann bekam ein Konto zuletzt ein Probe-Abo? (eine Abfrage fuer die Seite)
+    # Die Oberflaeche fragt dann nach, bevor sie eine weitere Probe vergibt.
+    probe_am = {}
+    ids = [s["id"] for s in items]
+    if ids:
+        async for row in db.manual_payments.aggregate([
+                {"$match": {"subject_user_id": {"$in": ids}, "zahlungsart": "probe"}},
+                {"$group": {"_id": "$subject_user_id", "am": {"$max": "$created_at"}}}]):
+            probe_am[row["_id"]] = row["am"]
     out = []
     for s in items:
+        ist_chef = s.get("id") == haupt
         # Chef: zentrale Aufloesung (persoenlich, sonst altes Firmen-Abo)
-        sub = (await subscription_for(s) if s.get("role") == "dealer"
+        sub = (await subscription_for(s) if ist_chef
                else await get_subscription_status(dealer_id, subject_user_id=s["id"]))
         letzte = await db.manual_payments.find_one(
             {"subject_user_id": s["id"]}, {"_id": 0},
             sort=[("created_at", -1)])
-        out.append({**s, "ist_chef": s.get("role") == "dealer",
+        out.append({**s, "ist_chef": ist_chef,
+                    # liegengebliebenes zweites dealer-Konto: arbeitet als Sucher
+                    "weiteres_dealer_konto": s.get("role") == "dealer" and not ist_chef,
                     "subscription": sub,
                     "letzte_zahlung": letzte,
+                    "probe_vergeben_am": probe_am.get(s["id"]),
                     "naechste_zahlung_am": sub.get("expires_at")})
     return out
 
@@ -2828,17 +3468,37 @@ async def admin_set_buyer_access(buyer_id: str, body: dict = Body(...),
                           "marketplace_access.gesperrt_am": now_iso(),
                           "marketplace_access.gesperrt_von": _handelnder(admin),
                           "marketplace_access.updated_at": now_iso()}})
+        # Rollenpruefung 22.09.2026 (RP-098 Nr. 2, RP-348 Nr. 2): wie bei der
+        # Kontosperre enden laufende Verhandlungen und Reservierungen — sonst
+        # konnte der Haendler eine alte Anfrage des gesperrten Kaeufers noch
+        # annehmen und fuer ihn reservieren.
+        # Grund wie bei der Kontosperre — der Marktplatz uebersetzt ihn
+        # ("Beendet — dein Zugang wurde gesperrt").
+        freigegeben = await kaeufer_verhandlungen_beenden(buyer_id, "kaeufer_gesperrt")
         await log_activity_sicher("", admin["id"], "admin.buyer.zugang.gesperrt",
-                           ref=buyer_id)
-        return {"ok": True, "active": False, "gesperrt": True}
+                           ref=buyer_id, meta={"reservierungen_freigegeben": freigegeben})
+        return {"ok": True, "active": False, "gesperrt": True,
+                "reservierungen_freigegeben": freigegeben}
     if plan != "monthly":
         raise HTTPException(400, "Nur 'monthly' unterstützt")
-    zahlungsart = body.get("zahlungsart", "rechnung_bezahlt")
-    if zahlungsart not in ("rechnung_bezahlt", "kulanz"):
-        raise HTTPException(400, "zahlungsart: rechnung_bezahlt oder kulanz")
+    # Rollenprüfung 22.09.2026 (RP-507 (3), Welle 2): Im Kostenlos-Modus
+    # (MARKTPLATZ_KOSTENLOS) buchte "Freischalten" standardmaessig 20 EUR
+    # "rechnung_bezahlt" — obwohl niemand etwas zahlt. Jetzt ist dort
+    # "kostenlos" (0 EUR, ohne Pflicht-Grund) der Standard; eine ausdrueckliche
+    # Zahlungsart gilt weiter. Im Bezahlmodus gibt es "kostenlos" nicht (dafuer
+    # ist "kulanz" mit Begruendung da).
+    kostenlos_modus = _marktplatz_kostenlos()
+    zahlungsart = body.get("zahlungsart") or ("kostenlos" if kostenlos_modus
+                                              else "rechnung_bezahlt")
+    erlaubt = ("rechnung_bezahlt", "kulanz") + (("kostenlos",) if kostenlos_modus else ())
+    if zahlungsart not in erlaubt:
+        raise HTTPException(400, "zahlungsart: " + " oder ".join(erlaubt))
     grund = str(body.get("grund", ""))[:300].strip()
     if zahlungsart == "kulanz" and not grund:
         raise HTTPException(400, "Kulanz-Freischaltung braucht eine Begruendung")
+    if zahlungsart == "kostenlos" and not grund:
+        grund = "Marktplatz kostenlos (MARKTPLATZ_KOSTENLOS)"
+    ohne_geld = zahlungsart in ("kulanz", "kostenlos")
     # Nachpruefung 20.09.2026, Nr. 47/48: Diese Route hatte — anders als die
     # Sucher-Freischaltung — WEDER Sperre NOCH Abgleich. Zwei schnell
     # hintereinander abgeschickte Klicks lasen denselben Ablaufstand,
@@ -2854,7 +3514,12 @@ async def admin_set_buyer_access(buyer_id: str, body: dict = Body(...),
         voll = await db.users.find_one({"id": buyer_id},
                                        {"_id": 0, "marketplace_access": 1})
         acc = (voll or {}).get("marketplace_access") or {}
-        basis = _restlaufzeit_basis(acc.get("expires_at") if acc.get("active") else None)
+        # Rollenpruefung 22.09.2026 (RP-509): auch nach "Sperren" zaehlt die
+        # schon bezahlte Restlaufzeit (gespeichertes expires_at) — vorher
+        # rechnete das Entsperren ab jetzt, die Resttage waren verloren. Bei
+        # aktivem Zugang ist derselbe Aufruf die Verlaengerung (+30 Tage ab
+        # bisherigem Ablauf, Knopf "Verlängern" in den Freischaltungen).
+        basis = _restlaufzeit_basis(acc.get("expires_at"))
         expires_at = (basis + timedelta(days=BUYER_ACCESS_DAYS)).isoformat()
         wache.pruefen()
         # Zuerst der Zugang (das braucht der Kunde), mit Abgleich auf den
@@ -2883,10 +3548,10 @@ async def admin_set_buyer_access(buyer_id: str, body: dict = Body(...),
             {"$setOnInsert": {
                 "id": str(uuid.uuid4()), "dealer_id": None,
                 "subject_user_id": buyer_id, "plan": "marktplatz",
-                "amount": 0.0 if zahlungsart == "kulanz" else float(BUYER_ACCESS_PRICE),
+                "amount": 0.0 if ohne_geld else float(BUYER_ACCESS_PRICE),
                 "currency": "EUR", "paid_at": now_iso()[:10],
                 "period_until": expires_at,
-                "zahlungsart": zahlungsart, "kostenlos": zahlungsart == "kulanz",
+                "zahlungsart": zahlungsart, "kostenlos": ohne_geld,
                 "grund": grund, "note": str(body.get("notiz", ""))[:500],
                 "quelle": "manuell", "vorgang_id": vid,
                 "recorded_by": _handelnder(admin), "created_at": now_iso()}},
@@ -2899,7 +3564,14 @@ async def admin_set_buyer_access(buyer_id: str, body: dict = Body(...),
         {"$set": {"status": "erledigt", "updated_at": now_iso(),
                   "erledigt_durch": "freischaltung"}})
     return {"ok": True, "active": True, "expires_at": expires_at,
-            "vorgang_id": vid}
+            "vorgang_id": vid, "zahlungsart": zahlungsart}
+
+
+def _marktplatz_kostenlos() -> bool:
+    """Schalter aus routes.marketplace (Marktplatz kostenlos) — spaet gelesen,
+    damit Tests ihn per monkeypatch umstellen koennen."""
+    from routes import marketplace as _markt
+    return bool(_markt.MARKTPLATZ_KOSTENLOS)
 
 
 @router.put("/admin/plan-requests/{req_id}")
@@ -3085,7 +3757,10 @@ async def admin_self_password(body: AdminSelfPasswordIn, admin=Depends(current_a
         raise HTTPException(400, str(exc))
     user = await db.users.find_one({"id": admin["id"]})
     if not user or not await verify_password_async(body.current_password, user["password_hash"]):
-        raise HTTPException(401, "Aktuelles Passwort ist nicht korrekt")
+        # Rollenpruefung 22.09.2026 (RP-554): 400 statt 401 — lib/api.js meldet
+        # bei JEDER 401 ab; ein Tippfehler im aktuellen Passwort warf den
+        # Betreiber aus seiner Sitzung (wie beim MFA-Abschalten, AD-06).
+        raise HTTPException(400, "Aktuelles Passwort ist nicht korrekt")
     _pw_persoenlich_400(body.new_password, persoenliche_werte(user))
     # Nachpruefung 15.09.2026: CAS auf den soeben geprueften Hash.
     r = await db.users.update_one(
@@ -3168,7 +3843,32 @@ async def admin_betrieb(admin=Depends(current_super_admin)):
         # Kontonummer (13.09.2026): Konten, die sich per Nummer anmelden
         # muessten, aber keine haben — nur Zaehlung, keine Vergabe.
         "konten_ohne_nummer": await _konten_ohne_nummer_zaehlen(),
+        # Rollenprüfung 22.09.2026 (RP-394, Welle 2): letzter (vollstaendiger)
+        # Aufraeumlauf und die gescheiterten Schritte (cleanup_service).
+        "aufraeumlauf": await _aufraeumlauf_stand(),
     }
+
+
+async def _aufraeumlauf_stand() -> dict:
+    """Rollenprüfung 22.09.2026 (RP-394): Stand aus system_reports (typ
+    "aufraeumlauf") plus "ueberfaellig" nach derselben Grenze wie /api/ready
+    (AUFRAEUMLAUF_WARN_H, Standard 3 h). Wirft nie."""
+    from konfig import zahl_env
+    grenze_h = zahl_env("AUFRAEUMLAUF_WARN_H", 3, unten=1)
+    try:
+        bericht = await db.system_reports.find_one({"typ": "aufraeumlauf"}, {"_id": 0}) or {}
+    except Exception as exc:  # noqa: BLE001
+        return {"hinweis": f"nicht ermittelbar: {exc}", "grenze_h": grenze_h}
+    stand = {k: bericht.get(k) for k in ("letzter_lauf", "letzter_vollstaendiger_lauf",
+                                         "vollstaendig")}
+    stand["fehlgeschlagen"] = list(bericht.get("fehlgeschlagen") or [])
+    stand["grenze_h"] = grenze_h
+    grenze_iso = (datetime.now(timezone.utc) - timedelta(hours=grenze_h)).isoformat()
+    # Nur "ueberfaellig", wenn es ueberhaupt schon Laeufe gab — ein frischer
+    # Stack ohne Bericht meldet /api/ready bereits nach der Anlaufzeit.
+    stand["ueberfaellig"] = bool(bericht.get("letzter_lauf")) and (
+        str(bericht.get("letzter_vollstaendiger_lauf") or "") < grenze_iso)
+    return stand
 
 
 async def _kaufvorgang_index_aktiv() -> bool:
@@ -3297,14 +3997,23 @@ class MfaCodeIn(BaseModel):
 async def admin_mfa_status(admin=Depends(current_admin)):
     voll = await db.users.find_one({"id": admin["id"]}, {"_id": 0, "mfa": 1})
     m = (voll or {}).get("mfa") or {}
+    # Rollenpruefung 22.09.2026 (RP-556): Pflicht und laufende Gnadenfrist
+    # mitliefern — die Einstellungen warnen dann auch nach einem Neuladen.
+    from routes.auth import mfa_pflicht_aktiv
+    frist = m.get("pflicht_ausgesetzt_bis") if not m.get("aktiv") else None
     return {"aktiv": bool(m.get("aktiv")), "aktiviert_am": m.get("aktiviert_am"),
             "wiederherstellungscodes_uebrig": len(m.get("wiederherstellung") or []),
             # Wunsch Ahmad 21.09.2026 (AD-06): wann die Notfall-Codes zuletzt neu erzeugt wurden
             "codes_erneuert_am": m.get("codes_erneuert_am"),
-            "einrichtung_offen": bool(m.get("pending_secret"))}
+            "einrichtung_offen": bool(m.get("pending_secret")),
+            "pflicht": mfa_pflicht_aktiv() and bool(admin.get("is_super_admin")),
+            "neu_einrichten_bis": frist if frist and str(frist) > now_iso() else None}
 
 
 MFA_EINRICHTUNG_MAX_S = 3600
+# Rollenpruefung 22.09.2026 (RP-556): Frist nach dem Abschalten zum Neu-
+# Einrichten (wie das Notfall-Skript scripts/mfa_pruefen.py).
+MFA_GNADENFRIST_MIN = 30
 
 
 @router.post("/admin/me/mfa/einrichten")
@@ -3483,14 +4192,30 @@ async def admin_mfa_deaktivieren(body: MfaCodeIn, admin=Depends(current_admin)):
     await _mfa_app_code_bestaetigen(admin["id"], m, body.code)
     # Runde 15: nur GENAU das geprueft Geheimnis abschalten — ein alter
     # Abschalt-Aufruf loeschte sonst eine inzwischen neu eingerichtete MFA.
+    # Rollenpruefung 22.09.2026 (RP-556): In Produktion ist der zweite Faktor
+    # fuer den Betreiber PFLICHT (routes/auth.py) — nach dem Abschalten liess
+    # ihn die naechste Anmeldung nicht mehr herein (403), dauerhaft. Jetzt
+    # bleibt statt "gar nichts" eine Gnadenfrist stehen (dasselbe Feld wie
+    # beim Notfall-Skript scripts/mfa_pruefen.py): 30 Minuten zum Neu-
+    # Einrichten; die Oberflaeche oeffnet die Einrichtung sofort.
+    from routes.auth import mfa_pflicht_aktiv
+    frist_bis = (datetime.now(timezone.utc)
+                 + timedelta(minutes=MFA_GNADENFRIST_MIN)).isoformat()
     r = await db.users.update_one(
         {"id": admin["id"], "mfa.aktiv": True, "mfa.secret": m.get("secret")},
-        {"$unset": {"mfa": ""}})
+        {"$set": {"mfa": {"aktiv": False, "pflicht_ausgesetzt_bis": frist_bis,
+                          "abgeschaltet_am": now_iso()}}})
     if r.matched_count == 0:
         raise HTTPException(409, "Die Zwei-Faktor-Anmeldung wurde inzwischen geändert — "
                                  "bitte Seite neu laden.")
     await log_activity_sicher("", admin["id"], "admin.mfa.deaktiviert")
-    return {"ok": True, "aktiv": False}
+    pflicht = mfa_pflicht_aktiv() and bool(admin.get("is_super_admin"))
+    return {"ok": True, "aktiv": False, "pflicht": pflicht,
+            "neu_einrichten_bis": frist_bis if pflicht else None,
+            "hinweis": (f"Zwei-Faktor ist aus. Für den Betreiber ist sie Pflicht: bitte in den "
+                        f"nächsten {MFA_GNADENFRIST_MIN} Minuten neu einrichten — sonst ist "
+                        "nach dem Abmelden keine Anmeldung mehr möglich (dann nur noch über "
+                        "scripts/mfa_pruefen.py auf dem Server).") if pflicht else None}
 
 
 @router.post("/admin/me/mfa/codes-neu")
@@ -3582,8 +4307,10 @@ async def admin_mfa_zuruecksetzen(user_id: str, body: dict = Body(default={}),
     if u.get("is_super_admin"):
         passwort = str(body.get("passwort", ""))
         eigener = await db.users.find_one({"id": admin["id"]}, {"_id": 0, "password_hash": 1})
-        if not passwort or not verify_password(passwort, (eigener or {}).get("password_hash", "")):
-            raise HTTPException(401, "Zum Zuruecksetzen eines Super-Admin-Kontos "
+        if not passwort or not await verify_password_async(
+                passwort, (eigener or {}).get("password_hash", "")):
+            # Rollenpruefung 22.09.2026 (RP-554): 400 statt 401 (sonst Abmeldung).
+            raise HTTPException(400, "Zum Zuruecksetzen eines Super-Admin-Kontos "
                                      "bitte das eigene Passwort bestaetigen")
         if not grund:
             raise HTTPException(400, "Bitte einen Grund angeben (wird protokolliert)")

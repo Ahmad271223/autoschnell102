@@ -561,6 +561,79 @@ def _abholzeile(contract: dict) -> str:
     return abhol
 
 
+def _halter_anzahl(contract: dict, vehicle: dict) -> str:
+    """Anzahl der Fahrzeughalter: Vertragswert; fehlt das Feld ganz (None,
+    Altvertrag/anderer Client), der Wert aus dem Inserat (RP-404)."""
+    wert = (contract or {}).get("previous_owners")
+    if wert is None:
+        wert = (vehicle or {}).get("previous_owners", "")
+    return str(wert if wert is not None else "").strip()
+
+
+def _fassung_nummer(contract: dict) -> int:
+    try:
+        return int(contract.get("fassung") or 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+def _fassung_text(contract: dict) -> str:
+    """Rollenpruefung 22.09.2026 (RP-494): "2 · ersetzt Fassung 1 vom
+    21.09.2026" — leer fuer die erste Fassung (sie bleibt, wie sie war)."""
+    nr = _fassung_nummer(contract)
+    if nr < 2:
+        return ""
+    text = f"{nr} · ersetzt Fassung {nr - 1}"
+    vom = str(contract.get("ersetzt_fassung_am") or "").strip()[:10]
+    if vom:
+        try:
+            from datetime import date as _date
+            vom = _date.fromisoformat(vom).strftime("%d.%m.%Y")
+        except (ValueError, TypeError):
+            pass
+        text += f" vom {vom}"
+    return text
+
+
+#: Rollenpruefung 22.09.2026 (RP-452): Groesse des Firmenlogos im Kopf.
+LOGO_HOEHE = 1.2 * cm
+LOGO_BREITE_MAX = 5.0 * cm
+
+
+def _logo_flowable(daten):
+    """Firmenlogo als Bild fuer den Briefkopf — oder None (kein Logo,
+    unlesbare Datei). Nie ein Fehler: ein kaputtes Logo darf keinen
+    Kaufvertrag verhindern."""
+    if not daten:
+        return None
+    try:
+        from reportlab.lib.utils import ImageReader
+        from reportlab.platypus import Image as _RLImage
+        leser = ImageReader(io.BytesIO(daten))
+        breite, hoehe = leser.getSize()
+        if not breite or not hoehe:
+            return None
+        faktor = min(LOGO_HOEHE / hoehe, LOGO_BREITE_MAX / breite)
+        bild = _RLImage(io.BytesIO(daten), width=breite * faktor, height=hoehe * faktor)
+        bild.hAlign = "LEFT"
+        return bild
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _platzhalter_vertrag(contract: dict, vehicle: dict) -> dict:
+    """Rollenpruefung 22.09.2026 (RP-217/RP-368): {fahrzeug}, {marke} und
+    {modell} standen im PDF immer als "____" — das PDF bekommt die
+    Dialogdaten (vehicle_make/vehicle_model), die Platzhalter lasen aber
+    make/model. Marke und Modell kommen jetzt aus den Fahrzeugdaten, in denen
+    die Dialog-Ueberschreibungen schon stecken."""
+    v = vehicle or {}
+    return {**(contract or {}),
+            "make": (contract or {}).get("make") or v.get("make_label") or v.get("make") or "",
+            "model": ((contract or {}).get("model") or v.get("model_description")
+                      or v.get("model_label") or v.get("model") or "")}
+
+
 def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
                           digital: bool = False) -> bytes:
     """Build a Kaufvertrag PDF and return raw bytes.
@@ -585,6 +658,9 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
     company = (dealer.get("company_name") or "Autohändler").strip()
     contract_no = (contract.get("contract_no") or "").strip() or \
         f"KV-{datetime.now().strftime('%Y%m%d-%H%M')}"
+    # Rollenpruefung 22.09.2026 (RP-494): ab der 2. Fassung steht im Kopf und
+    # in der Fusszeile, welche Fassung das ist und welche sie ersetzt.
+    fassung_text = _fassung_text(contract)
 
     # ---------- Header / Briefkopf ----------
     header_left = [
@@ -594,6 +670,12 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         Paragraph("für ein gebrauchtes Kraftfahrzeug — Ankauf durch Händler",
                   st["subtitle"]),
     ]
+    # Rollenpruefung 22.09.2026 (RP-452): Firmenlogo ueber dem Firmennamen,
+    # wenn beim Vertrag eines festgehalten ist (routes.contracts legt die
+    # Bytes als dealer["_logo_bytes"] bereit). Fehler -> ohne Logo.
+    logo = _logo_flowable(dealer.get("_logo_bytes"))
+    if logo is not None:
+        header_left = [logo, Spacer(1, 4)] + header_left
     header_right = [
         Paragraph("VERTRAGS-NR.", st["meta_label"]),
         Paragraph(f"<b>{_xml_escape(contract_no)}</b>", st["meta_value"]),
@@ -601,6 +683,12 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         Paragraph("DATUM", st["meta_label"]),
         Paragraph(f"<b>{today}</b>", st["meta_value"]),
     ]
+    if fassung_text:
+        header_right += [
+            Spacer(1, 5),
+            Paragraph("FASSUNG", st["meta_label"]),
+            Paragraph(f"<b>{_xml_escape(fassung_text)}</b>", st["meta_value"]),
+        ]
     head = Table([[header_left, header_right]], colWidths=[CONTENT_W - 4.5 * cm, 4.5 * cm])
     head.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
@@ -755,7 +843,13 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         ("Sitze", vehicle.get("seats", "")),
         ("FIN", vehicle.get("vin", "")),
         # Wunsch Ahmad (15.09.2026): kein Kennzeichen im Kaufvertrag.
-        ("Vorhalter", contract.get("previous_owners") or vehicle.get("previous_owners", "")),
+        # Rollenpruefung 22.09.2026 (RP-430): Die Quellen liefern die ANZAHL
+        # DER FAHRZEUGHALTER einschliesslich des jetzigen ("2. Hand" = 2) —
+        # als "Vorhalter" war das um eins zu hoch zugesichert. Beschriftung
+        # wie im Beweisdokument und im Abholprotokoll ("Halter laut Schein").
+        # RP-404: der Inseratswert nur, wenn das Feld im Vertrag FEHLT —
+        # im Dialog bewusst geleert ("") heisst: keine Angabe.
+        ("Fahrzeughalter (Anzahl)", _halter_anzahl(contract, vehicle)),
     ]
     story.append(_section("1 · Fahrzeugdaten", st))
     story.append(Spacer(1, 6))
@@ -770,7 +864,10 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
     hu_teile = []
     if _yn(contract.get("hu_valid")) != "—":
         hu_teile.append(_yn(contract.get("hu_valid")))
-    if contract.get("hu_until"):
+    # Rollenpruefung 22.09.2026 (RP-405): "Nein, gültig bis 05/2027" stand im
+    # Vertrag, wenn das (gesperrte, aber nicht geleerte) Datumsfeld noch einen
+    # Wert trug. Ohne HU gibt es kein "gültig bis".
+    if contract.get("hu_until") and _yn(contract.get("hu_valid")) != "Nein":
         hu_teile.append(f"gültig bis {contract['hu_until']}")
     hu_value = ", ".join(hu_teile)
     accident_value = _yn(contract.get("accident_free"))
@@ -841,9 +938,15 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
             ))
             story.append(Spacer(1, 2))
         if damages_text or damages_list:
+            # Rollenpruefung 22.09.2026 (RP-429): Hier stand "Erfassung erfolgte
+            # vor Übergabe gemeinsam mit dem Verkäufer … siehe interne
+            # Dokumentation". Der Sucher erfasst die Schaeden aber meist aus der
+            # Ferne (Inserat/Telefon), und eine "interne Dokumentation" hat der
+            # Verkaeufer nie gesehen. Sachlich, ohne Behauptung, die nicht
+            # stimmt. (Wortlaut mit Ahmad abstimmen — Vertragstext.)
             story.append(Paragraph(
-                "<i>Erfassung erfolgte vor Übergabe gemeinsam mit dem Verkäufer "
-                "anhand der Fahrzeugskizze. Markierungen siehe interne Dokumentation.</i>",
+                "<i>Erfassung anhand der Fahrzeugskizze nach Angaben des Verkäufers "
+                "bzw. laut Inserat.</i>",
                 st["small"],
             ))
         story.append(Spacer(1, 12))
@@ -865,8 +968,10 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
                                ("BOTTOMPADDING", (0, 0), (-1, -1), 2)]))
         story.append(t)
         story.append(Spacer(1, 4))
+        # Rollenpruefung 22.09.2026 (RP-429): "Vor Vertragsabschluss vom Händler
+        # zu prüfen" war eine interne Arbeitsanweisung im Kundenvertrag.
         story.append(Paragraph(
-            "<i>Ausstattung laut Inseratsangaben. Vor Vertragsabschluss vom Händler zu prüfen.</i>",
+            "<i>Ausstattung laut Inseratsangaben.</i>",
             st["small"],
         ))
         story.append(Spacer(1, 12))
@@ -904,8 +1009,15 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
     # blieb "Die Fahrzeugübergabe findet bis/am ___ statt" leer und musste von
     # Hand nachgetragen werden. Jetzt setzt der Server sie selbst ein.
     # Seit 21.09.2026 mit Balken-Ueberschrift wie die AGB (ohne Nummer).
+    # Rollenpruefung 22.09.2026 (RP-217/RP-368): Marke/Modell aus den
+    # Fahrzeugdaten mitgeben ({fahrzeug} war sonst immer "____").
+    # Rollenpruefung 22.09.2026 (RP-484): {abholdatum} im Vertrag OHNE Uhrzeit —
+    # der Dialog sagt "Abholuhrzeit … steht nicht im Vertrag", und die
+    # Abholzeile ist seit 15.09. bewusst ohne Uhrzeit.
+    pl_vertrag = _platzhalter_vertrag(contract, vehicle)
     extra = _platzhalter_ersetzen(
-        (contract.get("additional_terms") or "").strip(), contract, dealer)
+        (contract.get("additional_terms") or "").strip(), pl_vertrag, dealer,
+        mit_uhrzeit=False)
     story.extend(_abschnitt_mit_text(
         "Besondere Vereinbarungen", _absaetze(extra, st["body"]), st, 2))
 
@@ -913,7 +1025,7 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
     # Auch in den Vertragsbedingungen — dieselbe Regel, damit niemand raten
     # muss, wo Platzhalter wirken und wo nicht.
     agb = _platzhalter_ersetzen(
-        (contract.get("agb_text") or "").strip(), contract, dealer)
+        (contract.get("agb_text") or "").strip(), pl_vertrag, dealer, mit_uhrzeit=False)
     story.extend(_abschnitt_mit_text(
         "Allgemeine Geschäftsbedingungen", _absaetze(agb, st["small"]), st, 4))
 
@@ -927,7 +1039,8 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
     # Auch der Vertragstext der digitalen Ausfertigung (Ahmads AGB-Block)
     # darf Platzhalter tragen — sonst waere es die einzige Ausnahme.
     avb = _platzhalter_ersetzen(
-        (contract.get("digital_vertragstext") or "").strip(), contract, dealer)
+        (contract.get("digital_vertragstext") or "").strip(), pl_vertrag, dealer,
+        mit_uhrzeit=False)
     nachtraeglich = bool(avb) and avb == DIGITAL_NACHTRAEGLICH.strip()
     if avb and not nachtraeglich:
         story.extend(_abschnitt_mit_text(
@@ -954,6 +1067,8 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         story.append(KeepTogether(block))
         footer_left = company
         footer_center = f"Kaufvertrag {contract_no} · erstellt am {today} · digitale Ausfertigung"
+        if fassung_text:
+            footer_center += f" · Fassung {_fassung_nummer(contract)}"
         doc.build(story, canvasmaker=_numbered_canvas_factory(footer_left, footer_center))
         return buf.getvalue()
 
@@ -984,5 +1099,7 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
 
     footer_left = company
     footer_center = f"Kaufvertrag {contract_no} · erstellt am {today}"
+    if fassung_text:
+        footer_center += f" · Fassung {_fassung_nummer(contract)}"
     doc.build(story, canvasmaker=_numbered_canvas_factory(footer_left, footer_center))
     return buf.getvalue()

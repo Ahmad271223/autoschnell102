@@ -298,7 +298,10 @@ def test_15_einstellungen_fuehren_alten_agb_text_zusammen():
     beim Speichern das alte Feld — geprueft am Quelltext der Seite."""
     seite = (WURZEL / "frontend" / "src" / "pages" / "app" / "Einstellungen.jsx")
     quelle = seite.read_text(encoding="utf-8")
-    assert "zusammenfuehren(dealer.default_terms, dealer.digital_vertragstext)" in quelle
+    # Rollenprüfung 22.09.2026 (RP-423): bei leerem Feld ist der Standardtext
+    # die Grundlage (vertragstextFuerFormular in lib/vertragstext.js).
+    assert ("vertragstextFuerFormular(dealer.default_terms, dealer.digital_vertragstext,"
+            in quelle)
     assert 'default_terms: "",' in quelle, "altes Feld wird beim Speichern geleert"
     assert "Allgemeine Geschäftsbedingungen (AGB)" not in quelle, "zweites Feld ist weg"
     assert "agb-zusammengefuehrt" in quelle, "Hinweis fuer den Nutzer fehlt"

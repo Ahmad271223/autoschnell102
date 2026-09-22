@@ -296,8 +296,11 @@ def test_c4_bestandskosten_lehnen_inf_nan_ab(wert):
 
 def test_c4_bestandskosten_normal_bleiben():
     B = _module("routes.bestand")
-    assert B._clean_costs([{"label": "x", "amount": "12.345"}, "kaputt", {"label": "", "amount": 1}]) \
-        == [{"label": "x", "amount": 12.35}]
+    # Rollenprüfung 22.09.2026 (RP-449): ein Betrag ohne Bezeichnung
+    # verschwindet nicht mehr still, er heisst "Kosten"; leere Zeilen fallen weg.
+    assert B._clean_costs([{"label": "x", "amount": "12.345"}, "kaputt", {"label": "", "amount": 1},
+                           {"label": "", "amount": 0}]) \
+        == [{"label": "x", "amount": 12.35}, {"label": "Kosten", "amount": 1.0}]
 
 
 # ================================================= Nr. 6: Resale-Aenderungen mit Audit

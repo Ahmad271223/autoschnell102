@@ -165,36 +165,68 @@ def test_01_loeschen_ein_write_fotos_weg_inserate_zu(welt):
     B = _module("routes.bestand")
     w, db = welt.w, welt.db
     vid = f"v_{w.s}"
+    # Rollenprüfung 22.09.2026 (RP-083/182): je Firma und Fahrzeug gibt es
+    # hoechstens EIN aktives Inserat (Teil-Unique-Index
+    # resale_listings.ein_aktives_je_fahrzeug). Frueher legte der Test
+    # "entwurf" und "zurueckgezogen" an DASSELBE Fahrzeug — ein Zustand, den
+    # es nicht mehr geben kann (E11000). Beide aktiven Status bleiben geprueft,
+    # jetzt an zwei Fahrzeugen; dazu kommen die Faelle, die der Index zulaesst:
+    # ein schon geloeschtes Inserat (bleibt unangetastet, Grund bleibt) und das
+    # aktive Inserat einer FREMDEN Firma mit derselben Fahrzeug-ID (bleibt aktiv).
+    vid_z = f"vz_{w.s}"
+    l_e, l_z, l_v, l_g, l_f = (f"l_e_{w.s}", f"l_z_{w.s}", f"l_v_{w.s}",
+                               f"l_g_{w.s}", f"l_f_{w.s}")
 
     async def lauf():
-        await db.vehicles.insert_one(w.fahrzeug(vid, known_defects=["Kratzer"]))
+        await db.vehicles.insert_many([w.fahrzeug(vid, known_defects=["Kratzer"]),
+                                       w.fahrzeug(vid_z)])
         await db.resale_listings.insert_many([
-            w.inserat(f"l_e_{w.s}", vid, "entwurf"),
-            w.inserat(f"l_z_{w.s}", vid, "zurueckgezogen"),
-            w.inserat(f"l_v_{w.s}", vid, "verkauft"),
+            w.inserat(l_e, vid, "entwurf"),
+            w.inserat(l_v, vid, "verkauft"),
+            w.inserat(l_g, vid, "geloescht", geloescht_grund="manuell",
+                      deleted_at="2026-09-01T00:00:00+00:00"),
+            w.inserat(l_z, vid_z, "zurueckgezogen"),
+            w.inserat(l_f, vid, "entwurf", dealer_id=w.fremd),
         ])
-        await db.listing_interest.insert_one(
-            {"id": f"li_{w.s}_1", "listing_id": f"l_e_{w.s}", "status": "offen",
-             "history": [], "dealer_id": w.dealer_id})
+        await db.listing_interest.insert_many([
+            {"id": f"li_{w.s}_1", "listing_id": l_e, "status": "offen",
+             "history": [], "dealer_id": w.dealer_id},
+            {"id": f"li_{w.s}_2", "listing_id": l_z, "status": "offen",
+             "history": [], "dealer_id": w.dealer_id},
+        ])
         r = await B.vehicle_decision(vid, B.DecisionIn(decision="loeschen"), w.chef)
+        r_z = await B.vehicle_decision(vid_z, B.DecisionIn(decision="loeschen"), w.chef)
         v = await db.vehicles.find_one({"id": vid, "dealer_id": w.dealer_id}, {"_id": 0})
-        ins = {l["id"]: l async for l in db.resale_listings.find({"vehicle_id": vid}, {"_id": 0})}
-        it = await db.listing_interest.find_one({"id": f"li_{w.s}_1"}, {"_id": 0})
+        ins = {l["id"]: l async for l in db.resale_listings.find(
+            {"vehicle_id": {"$in": [vid, vid_z]}}, {"_id": 0})}
+        it = {i["id"]: i async for i in db.listing_interest.find(
+            {"id": {"$regex": f"^li_{w.s}_"}}, {"_id": 0})}
         logs = [l["action"] async for l in db.activity_logs.find({"dealer_id": w.dealer_id})]
         with pytest.raises(HTTPException) as e:      # geloescht -> nichts mehr erlaubt
             await B.vehicle_decision(vid, B.DecisionIn(decision="bestand"), w.chef)
-        return r, v, ins, it, logs, _status(e)
+        return r, r_z, v, ins, it, logs, _status(e)
 
-    r, v, ins, it, logs, status = welt.run(lauf())
-    assert r["lifecycle"] == "geloescht" and set(r["inserate_geloescht"]) == {f"l_e_{w.s}", f"l_z_{w.s}"}
+    r, r_z, v, ins, it, logs, status = welt.run(lauf())
+    assert r["lifecycle"] == "geloescht" and r["inserate_geloescht"] == [l_e]
+    assert r_z["lifecycle"] == "geloescht" and r_z["inserate_geloescht"] == [l_z], \
+        "auch ein zurueckgezogenes Inserat ist noch aktiv und endet mit dem Fahrzeug"
     assert v["lifecycle"] == "geloescht" and v["deleted_at"]
     assert v["data"]["images"] == [] and v["data"]["image_urls"] == []
     assert v["data"]["make_label"] == "BMW" and v["known_defects"] == ["Kratzer"], \
         "nur Fotos + deleted_at, Rest der Akte bleibt"
-    assert ins[f"l_e_{w.s}"]["status"] == "geloescht" and ins[f"l_e_{w.s}"]["geloescht_grund"] == "fahrzeug_geloescht"
-    assert ins[f"l_z_{w.s}"]["status"] == "geloescht" and ins[f"l_v_{w.s}"]["status"] == "verkauft"
-    assert it["status"] == "abgelehnt" and it["beendet_grund"] == "fahrzeug_geloescht"
-    assert "fahrzeug.entscheidung.geloescht" in logs and logs.count("inserat.geloescht") == 2
+    for lid in (l_e, l_z):
+        assert ins[lid]["status"] == "geloescht" and ins[lid]["geloescht_grund"] == "fahrzeug_geloescht"
+        assert ins[lid]["deleted_at"]
+    assert ins[l_v]["status"] == "verkauft"
+    assert ins[l_g]["status"] == "geloescht" and ins[l_g]["geloescht_grund"] == "manuell" \
+        and ins[l_g]["deleted_at"] == "2026-09-01T00:00:00+00:00", \
+        "ein schon geloeschtes Inserat wird nicht noch einmal angefasst"
+    assert ins[l_f]["status"] == "entwurf" and "geloescht_grund" not in ins[l_f], \
+        "das Inserat einer fremden Firma bleibt, auch bei gleicher Fahrzeug-ID"
+    for iid in (f"li_{w.s}_1", f"li_{w.s}_2"):
+        assert it[iid]["status"] == "abgelehnt" and it[iid]["beendet_grund"] == "fahrzeug_geloescht"
+    assert logs.count("fahrzeug.entscheidung.geloescht") == 2
+    assert logs.count("inserat.geloescht") == 2, "je beendetem Inserat genau ein Audit-Eintrag"
     assert status == 409
 
 
@@ -267,6 +299,9 @@ def test_04_update_bestand_nur_gesendete_felder_und_cas(welt, monkeypatch):
 
     r, v, s1, s2, v2 = welt.run(lauf())
     assert r["bestand"]["location"] == "Halle 2" and r["bestand"]["notes"] == "alt"
+    # Rollenprüfung 22.09.2026 (RP-461): jeder Write setzt zusaetzlich einen
+    # neuen Stand (bestand.stand) — sonst bleibt alles wie gesendet.
+    assert v["bestand"].pop("stand") == r["bestand"]["stand"]
     assert v["bestand"] == {"notes": "alt", "location": "Halle 2", "costs": [{"label": "x", "amount": 5}]}
     assert s1 == 409 and s2 == 409 and v2["bestand"]["notes"] == "alt"
     q = inspect.getsource(B.update_bestand)

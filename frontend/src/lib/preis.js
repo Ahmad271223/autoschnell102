@@ -67,6 +67,14 @@ export function kmAusText(eingabe) {
   if (!t) return null;
   t = t.replace(/km$/i, "").replace(/[\s\u00a0\u202f']/g, "");
   if (!t) return null;
+  // Rollenpr\u00fcfung 22.09.2026: "150 Tkm", "150 Tsd", "150k", "12,5 T" meinen
+  // Tausend \u2014 vorher wurde daraus still 150 km (Inserat) bzw. ein Fehler.
+  const tausend = /^(\d+(?:[.,]\d{1,3})?)(tsd\.?|t|k)$/i.exec(t);
+  if (tausend) {
+    const basis = Number(tausend[1].replace(",", "."));
+    const zahl = Math.round(basis * 1000);
+    return Number.isFinite(zahl) && zahl >= 0 && zahl <= KM_HOECHSTENS ? zahl : NaN;
+  }
   if (!/^\d{1,3}([.,]\d{3})+$|^\d+$/.test(t)) return NaN;
   const zahl = Number(t.replace(/[.,]/g, ""));
   if (!Number.isFinite(zahl) || zahl < 0 || zahl > KM_HOECHSTENS) return NaN;

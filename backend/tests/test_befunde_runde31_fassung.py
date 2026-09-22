@@ -157,13 +157,30 @@ def test_09_nachladen_heilt_den_zwischenspeicher_und_schont_eingaben():
         "nie neu laden, solange Eingaben offen sind"
     assert "nachladenGescheitert();" in seite
     assert "<FassungsHinweis />" in app
+    # Rollenprüfung 22.09.2026 (RP-065/RP-164): Das Abholprotokoll schützt
+    # jetzt ZUSÄTZLICH getippte Eingaben, die noch nicht beim Server sind
+    # (ungesichert, nur solange nicht gesperrt). Der Schutz der Unterschriften
+    # bis zum Abschluss bleibt unverändert Teil derselben Bedingung.
     for teile, aufruf in (
-        (("src", "pages", "driver", "Protokoll.jsx"), "useUngespeichert(Boolean((sigDriver || sigSeller) && !isFinal));"),
+        (("src", "pages", "driver", "Protokoll.jsx"),
+         "useUngespeichert(Boolean(((sigDriver || sigSeller) && !isFinal) || (ungesichert && !gesperrt)));"),
         (("src", "components", "ContractDialog.jsx"), "useUngespeichert(Boolean(open));"),
         (("src", "components", "AbholCheckDialog.jsx"), "useUngespeichert(Boolean(mileage || notes.trim() || deviations.length));"),
         (("src", "pages", "admin_v2", "Settings.jsx"), "useUngespeichert(Boolean(codes?.length));"),
     ):
         assert aufruf in _lies("frontend", *teile), teile[-1]
+    # RP-065: "ungesichert" wird beim Vormerken des Autosaves gesetzt und erst
+    # zurückgenommen, wenn genau der gesendete Stand noch der aktuelle ist —
+    # sonst bliebe die Warnung hängen oder erlösche zu früh.
+    prot = _lies("frontend", "src", "pages", "driver", "Protokoll.jsx")
+    vormerken = prot[prot.index("const queueSave = useCallback("):]
+    vormerken = vormerken[:vormerken.index("}, [gesperrt]);")]
+    assert "if (gesperrt) return;" in vormerken and "setUngesichert(true);" in vormerken
+    # Review 22.09.2026: verglichen wird der INHALT (nicht mehr die Objekt-
+    # identitaet) — nach einem zusammengefuehrten Revisionskonflikt blieb die
+    # Seite sonst auf "wird gespeichert …" stehen.
+    assert "if (nochAktuell()) setUngesichert(false);" in prot
+    assert "const nochAktuell = () => nutzlastText(nutzlast(fRef.current, mitName())) === text;" in prot
 
 
 def test_10_fehlergrenze_haengt_nicht_mehr_fest():

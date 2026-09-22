@@ -44,8 +44,14 @@ def welt(monkeypatch):
     client = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=5000)
     name = f"autoschnell_mp_{uuid.uuid4().hex[:10]}"
     db = client[name]
-    monkeypatch.setattr(deps, "db", db)
+    # Rollenpruefung 22.09.2026: ERST importieren, DANN umbiegen — sonst
+    # bindet sich ein hier erstmals importiertes Modul per "from deps import
+    # db" dauerhaft an diese Wegwerf-DB (geschlossene Schleife), und spaetere
+    # Testdateien scheiterten mit "Event loop is closed".
+    import importlib
     import cleanup_service
+    importlib.import_module("routes.marketplace")   # wird im Aufraeumlauf nachgeladen
+    monkeypatch.setattr(deps, "db", db)
     monkeypatch.setattr(cleanup_service, "db", db, raising=False)
     try:
         yield SimpleNamespace(db=db, run=loop.run_until_complete)
@@ -221,7 +227,7 @@ def test_13_der_kauf_bleibt_unberuehrt(welt):
     assert zahlen["admin_vehicle_data"] == 1, "die Auto-Daten bleiben"
 
 
-def test_14_die_fotos_verschwinden_mit(welt):
+def test_14_die_fotos_verschwinden_mit(welt, monkeypatch):
     db = welt.db
 
     async def lauf():
@@ -232,7 +238,10 @@ def test_14_die_fotos_verschwinden_mit(welt):
             geloescht.append((key, grund))
             return True
 
-        CS.loeschen_oder_vormerken = _fake
+        # Rollenprüfung 22.09.2026: per monkeypatch — die direkte Zuweisung
+        # blieb nach dem Test stehen und liess spaetere Tests desselben Laufs
+        # (Snapshot-Loeschung mit art=...) an der Attrappe scheitern.
+        monkeypatch.setattr(CS, "loeschen_oder_vormerken", _fake)
         jetzt = datetime.now(timezone.utc)
         await db.resale_listings.insert_one(
             {"id": "alt", "dealer_id": "f1", "status": "veroeffentlicht",

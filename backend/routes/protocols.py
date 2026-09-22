@@ -86,6 +86,13 @@ CONDITION_FIELDS = [
 AUSSTATTUNG_MAX = PV.AUSSTATTUNG_MAX
 # Felder je Abschnitt in der Antwort des Fahrers (Ausstattung + Reserve).
 FELD_MAX = AUSSTATTUNG_MAX + 20
+# Rollenprüfung 22.09.2026 (RP-063/162): Laenge eines Feldnamens. Die
+# Schluessel in Abschnitt 3 sind die Ausstattungsnamen des Inserats, die die
+# Anbieter-Mapper nicht kuerzen (AutoScout liefert Namen mit weit ueber 80
+# Zeichen). Bei 80 lehnte der Server JEDES Speichern dieses Protokolls mit
+# 422 ab — das Fahrzeug liess sich vor Ort gar nicht protokollieren. Die
+# Grenze bleibt als Schutz gegen Ausreisser, gleich der Wertgrenze (500).
+FELDNAME_MAX = 500
 
 
 class ProtocolIn(BaseModel):
@@ -123,7 +130,8 @@ class ProtocolIn(BaseModel):
             raise ValueError(f"Feld {k}: nur Text, Zahl oder Ja/Nein")
         out = {}
         for k, w in v.items():
-            if not isinstance(k, str) or len(k) > 80:
+            # Rollenprüfung 22.09.2026 (RP-063/162): FELDNAME_MAX statt 80.
+            if not isinstance(k, str) or len(k) > FELDNAME_MAX:
                 raise ValueError("ungueltiger Feldname")
             out[k] = _wert(k, w)
         return out
@@ -140,6 +148,12 @@ class ProtocolIn(BaseModel):
     new_damages: Optional[List[DamageIn]] = Field(default=None, max_length=40)
     notes: Optional[str] = Field(default=None, max_length=5000)   # Abschnitt 7
     place: Optional[str] = Field(default=None, max_length=200)    # Ort (Abschnitt 8)
+    # Rollenprüfung 22.09.2026 (RP-058/157/074/173): Verkaeufername wie Ort im
+    # ENTWURF speicherbar. Vorher kannte nur FinalizeIn das Feld; das
+    # Abschicken zur Freigabe verlangt den Namen aber schon (P2) — ein Termin
+    # ohne Verkaeufernamen (Terminplaner ohne Vertrag) lief bei JEDEM
+    # Abschicken in 422, und eine Korrektur konnte den Namen nie aendern.
+    seller_name: Optional[str] = Field(default=None, max_length=200)
     # Wunsch Ahmad 14.09.2026: Auch der Fahrer kann den vor Ort verhandelten
     # Preis und eine Sondervereinbarung eintragen. Der Chef sieht beides bei
     # der Freigabe; gibt er ohne eigenen Preis frei, gilt der Vorschlag.
@@ -219,6 +233,30 @@ class FreigabeIn(BaseModel):
     # Verhandelten Preis entfernen — es gilt wieder der Vertragspreis. Vorher
     # liess sich ein einmal eingetragener Preis nicht mehr loeschen.
     preis_zuruecksetzen: bool = False
+
+
+def _anderer_vorschlag(neu, alt) -> bool:
+    """Rollenprüfung 22.09.2026 (RP-453): Ist das ein ANDERER Preisvorschlag
+    des Fahrers? Kein Vorschlag (None) und 0 gelten als gleich."""
+    try:
+        return abs(float(neu or 0) - float(alt or 0)) > 0.004
+    except (TypeError, ValueError):
+        return True
+
+
+def vertragspreis_vor_abholung(contract_data: Optional[dict]):
+    """Rollenprüfung 22.09.2026 (RP-077/176/480): der Kaufpreis, fuer den man
+    zum Auto gefahren ist. Nach der ersten Abholung mit neuem Preis traegt der
+    Vertrag schon den verhandelten Preis (neue Fassung); den urspruenglichen
+    haelt contract_data.preis_vor_abholung fest (Befund 46, contracts.py).
+    "Preis laut Vertrag" in Fahrer-App, Freigabe, Protokoll-PDF und die
+    Vergleichsbasis im Kaufvorgang meinen DIESEN Preis — sonst verglich eine
+    Korrektur gegen den Zwischenstand, und "auf Vertragspreis zuruecksetzen"
+    landete beim Zwischenpreis statt beim Ursprung."""
+    c = contract_data or {}
+    if c.get("preis_vor_abholung") is not None:
+        return c.get("preis_vor_abholung")
+    return c.get("purchase_price")
 
 
 def unterschrift_hat_tinte(raw: bytes, mindest_pixel: int = 50) -> bool:
@@ -490,7 +528,8 @@ async def _termin_abgeholt_setzen(appt_id: str, driver_id: str,
     return True
 
 
-async def korrektur_verwerfen(appt_id: str) -> bool:
+async def korrektur_verwerfen(appt_id: str, *, nur_id: Optional[str] = None,
+                              session=None) -> bool:
     """Runde 17 (Nr. 11): Schliesst der Haendler den Termin (storniert /
     nicht abgeholt / erledigt), waehrend eine Korrektur-Version des
     Protokolls als Entwurf offen ist, bleibt der Termin sonst OHNE
@@ -504,13 +543,22 @@ async def korrektur_verwerfen(appt_id: str) -> bool:
     Korrektur auch beim Chef liegen (zur_freigabe) oder freigegeben sein.
     Wurde nur nach 'entwurf' gesucht, blieb der Termin nach dem Schliessen
     OHNE massgebliches Protokoll zurueck — das unterschriebene PDF der
-    Vorversion war nicht mehr erreichbar."""
+    Vorversion war nicht mehr erreichbar.
+
+    Rollenprüfung 22.09.2026 (Review, RP-482): `nur_id` verwirft nur genau die
+    gelesene Korrektur (Compare-and-Set); mit `session` laufen beide Schritte in
+    der Transaktion des Aufrufers (update_appointment: zusammen mit dem
+    Termin-Write — scheitert dessen Stand-Pruefung, bleibt die Korrektur)."""
     OFFENE_KORREKTUR = ["entwurf", ZUR_FREIGABE, FREIGEGEBEN]
     try:
+        such: Dict[str, Any] = {"appointment_id": appt_id, "status": {"$in": OFFENE_KORREKTUR},
+                                "corrects_version": {"$exists": True},
+                                "superseded": {"$ne": True}}
+        if nur_id:
+            such["id"] = nur_id
         entwurf = await db.pickup_protocols.find_one(
-            {"appointment_id": appt_id, "status": {"$in": OFFENE_KORREKTUR},
-             "corrects_version": {"$exists": True}, "superseded": {"$ne": True}},
-            {"_id": 0, "id": 1, "corrects_version": 1})
+            such, {"_id": 0, "id": 1, "corrects_version": 1},
+            **({"session": session} if session is not None else {}))
         if not entwurf:
             return False
         jetzt = now_iso()
@@ -546,6 +594,9 @@ async def korrektur_verwerfen(appt_id: str) -> bool:
                 return False
             return True
 
+        if session is not None:
+            # Rollenprüfung 22.09.2026 (Review): Teil der Transaktion des Aufrufers.
+            return await _beide(session)
         from deps import transaktion
         return await transaktion(_beide)
     except Exception:  # noqa: BLE001
@@ -564,6 +615,13 @@ TERMIN_GESCHLOSSEN_RUECKFRAGE = ("Der Termin wurde geschlossen — die Freigabe 
 # geoeffnet wurde. Der Abschluss selbst darf weiterlaufen; laeuft sein Claim
 # aber ab oder scheitert er (Rollback), gilt die alte Freigabe nicht mehr.
 TERMIN_GESCHLOSSEN_MERKER = "termin_geschlossen_im_abschluss"
+
+# Rollenprüfung 22.09.2026 (Review): Zeitpunkt, zu dem der Verkaeufername AM
+# TERMIN zuletzt geaendert wurde (setzt update_appointment) — siehe
+# _korrektur_verkaeufername. Bewusst nur ein Zeitpunkt, kein Name: eine Kopie
+# des Namens im Protokoll ueberstuende die Personendaten-Loeschung
+# (cleanup_service leert dort nur seller_name).
+SELLER_NAME_GEAENDERT_AM = "seller_name_geaendert_am"
 
 
 def _zuruecknehmen_aenderung(user_id: Optional[str]) -> Dict[str, Any]:
@@ -646,6 +704,27 @@ async def protokoll_korrekturen(appt: dict, protokoll: dict) -> tuple:
         return {}, []
 
 
+async def _vertrag_alarm_schliessen(appt: dict, protokoll_id: str) -> None:
+    """Rollenprüfung 22.09.2026 (RP-073/172): Der Vertrag steht auf dem Stand
+    dieser Protokollversion — ein offener Alarm vertrag_nach_abholung_offen
+    zum Vertrag (z. B. von der gescheiterten v1-Neuerzeugung) ist damit
+    erledigt. Vorher schloss ihn nur der Nachholer im Aufraeumer; nach einer
+    gelungenen v2-Neuerzeugung stand der v1-Alarm weiter offen.
+    Nicht fuer eine abgeloeste Version: deren Erfolg sagt nichts ueber die
+    aktuelle Fassung (der Alarm bliebe sonst ohne Nachholversuch zu).
+    Wirft nie (alarm_schliessen faengt selbst ab)."""
+    try:
+        p = await db.pickup_protocols.find_one({"id": protokoll_id},
+                                               {"_id": 0, "id": 1, "superseded": 1})
+        if p is not None and p.get("superseded"):
+            return
+    except Exception:  # noqa: BLE001
+        log.exception("Protokoll %s fuer den Alarmabschluss nicht gelesen", protokoll_id)
+        return
+    await betrieb.alarm_schliessen(db, "vertrag_nach_abholung_offen",
+                                   ref=str(appt.get("contract_id")))
+
+
 async def vertrag_nach_abholung_aktualisieren(appt: dict, protokoll_id: str,
                                               neuer_preis, sondervereinbarung,
                                               korrekturen=None, neue_schaeden=None) -> bool:
@@ -653,10 +732,10 @@ async def vertrag_nach_abholung_aktualisieren(appt: dict, protokoll_id: str,
     mit neuem Preis und Sondervereinbarung neu erzeugen. 19.09.2026: dazu die
     vor Ort korrigierten Fahrzeugdaten und die neu aufgenommenen Schaeden.
     Wirft nie."""
-    if not appt.get("contract_id") or (neuer_preis is None
-                                       and not (sondervereinbarung or "").strip()
-                                       and not korrekturen and not neue_schaeden):
+    if not appt.get("contract_id"):
         return False
+    nichts_neues = (neuer_preis is None and not (sondervereinbarung or "").strip()
+                    and not korrekturen and not neue_schaeden)
     try:
         from routes.contracts import regenerate_contract_for_pickup
         # Pruefbericht 20.09.2026 (V-25): idempotent. Traegt der Vertrag diese
@@ -665,9 +744,25 @@ async def vertrag_nach_abholung_aktualisieren(appt: dict, protokoll_id: str,
         # jeder Doppeltipp bzw. jeder Nachholer legte einen Alarm an, der nie
         # wieder zuging.
         stand = await db.generated_pdfs.find_one(
-            {"id": appt["contract_id"]}, {"_id": 0, "nach_abholung_protokoll_id": 1})
+            {"id": appt["contract_id"]},
+            {"_id": 0, "id": 1, "nach_abholung_protokoll_id": 1, "vertrag_vor_abholung": 1})
         if stand and stand.get("nach_abholung_protokoll_id") == protokoll_id:
+            # Rollenprüfung 22.09.2026 (RP-073/172): ein offener Alarm einer
+            # frueheren Version ist mit dieser Fassung erledigt.
+            await _vertrag_alarm_schliessen(appt, protokoll_id)
             return True
+        # Rollenprüfung 22.09.2026 (RP-480/479): Eine Korrektur-Version OHNE
+        # neuen Preis/Vermerk/Korrekturen stieg hier bisher immer aus — auch
+        # wenn der Vertrag schon die Fassung einer FRUEHEREN Version dieser
+        # Abholung traegt (z. B. deren verhandelten Preis, den der Chef bei der
+        # Korrektur auf den Vertragspreis zurueckgesetzt hat). Dann wird die
+        # Neuerzeugung trotzdem gefragt: contracts.regenerate_contract_for_pickup
+        # baut seit heute aus dem Stand vor der Abholung (vertrag_vor_abholung)
+        # neu auf; "kein Anlass" ist kein Fehler. Nur wenn der Vertrag nie eine
+        # Fassung nach einer Abholung hatte, ist ohne Angaben nichts zu tun.
+        if nichts_neues and not (stand or {}).get("nach_abholung_protokoll_id") \
+                and not (stand or {}).get("vertrag_vor_abholung"):
+            return False
         ok = False
         erg: Dict[str, Any] = {}
         # Verliert der Compare-and-Set gegen eine parallele Neuerzeugung
@@ -685,15 +780,18 @@ async def vertrag_nach_abholung_aktualisieren(appt: dict, protokoll_id: str,
                 ergebnis=erg)
             if ok or erg.get("grund") != "cas_verloren":
                 break
-        if not ok and erg.get("grund") in ("keine_aenderung", "nicht_gefunden"):
+        if not ok and erg.get("grund") in ("keine_aenderung", "nicht_gefunden", "kein_anlass"):
             # Der Vertrag zeigt schon alles (bzw. ist geloescht / in Loeschung):
-            # kein Fehler, kein Alarm.
+            # kein Fehler, kein Alarm. RP-480: ebenso "kein Anlass" (Korrektur
+            # ohne neue Angaben, die Neuerzeugung sieht nichts zu tun).
+            await _vertrag_alarm_schliessen(appt, protokoll_id)
             return True
         if ok:
             await log_activity_sicher(appt.get("dealer_id", ""), appt.get("created_by") or "",
                                       "vertrag.nach_abholung_aktualisiert",
                                       ref=appt["contract_id"],
                                       meta={"protokoll_id": protokoll_id, "neuer_preis": neuer_preis})
+            await _vertrag_alarm_schliessen(appt, protokoll_id)
             return True
         # Nachpruefung 20.09.2026, Nr. 79: Scheitert das Erzeugen der neuen
         # Vertrags-PDF, faengt regenerate_contract_for_pickup() die Ausnahme
@@ -733,7 +831,13 @@ async def vertrag_nach_abholung_sicherstellen(appt: dict, protokoll: dict) -> bo
         if protokoll.get("neuer_preis") is None \
                 and not (protokoll.get("sondervereinbarung") or "").strip() \
                 and not korrekturen and not neue_schaeden:
-            return True
+            # Rollenprüfung 22.09.2026 (RP-480): nur "nichts zu tun", wenn der
+            # Vertrag keine Fassung einer ANDEREN Version dieser Abholung traegt.
+            stand = await db.generated_pdfs.find_one(
+                {"id": appt["contract_id"]}, {"_id": 0, "nach_abholung_protokoll_id": 1})
+            frueher = (stand or {}).get("nach_abholung_protokoll_id")
+            if not frueher or frueher == protokoll.get("id"):
+                return True
         return await vertrag_nach_abholung_aktualisieren(
             appt, protokoll["id"], protokoll.get("neuer_preis"),
             protokoll.get("sondervereinbarung"),
@@ -764,17 +868,26 @@ async def auto_daten_vor_ort_nachtragen(appt: dict, protokoll: dict, neuer_preis
         return False
 
 
-async def entwurf_bei_terminaenderung_verwerfen(appt_id: str) -> bool:
+async def entwurf_bei_terminaenderung_verwerfen(appt_id: str, neuer_fahrer: Optional[str] = None,
+                                               nur_fahrer: bool = False) -> bool:
     """Pruefung 14.09.2026 (Liste 4, Nr. 1/2): Wechselt am Termin das Fahrzeug,
     der Vertrag oder der Fahrer, waehrend das Protokoll noch ein Entwurf ist,
     passen die bisherigen Angaben (Fahrzeugdaten, Schaeden, Zustand) nicht mehr
     — der Entwurf wird verworfen. Ein Korrektur-Entwurf wird verworfen und die
-    korrigierte Version wieder aktuell (korrektur_verwerfen). Best effort."""
+    korrigierte Version wieder aktuell (korrektur_verwerfen). Best effort.
+
+    Rollenprüfung 22.09.2026 (RP-536): `nur_fahrer` = es wechselt NUR der
+    Fahrer. Dann bleibt der Entwurf, wenn er genau dem Fahrer gehoert, der
+    jetzt (wieder) eingeteilt wird — lehnte er die Fahrt ab (driver_id weg,
+    Entwurf bleibt) und teilt der Chef ihn erneut zu, war sein ausgefuellter
+    Entwurf vorher still geloescht."""
     try:
         doc = await db.pickup_protocols.find_one(
             {"appointment_id": appt_id, "superseded": {"$ne": True}, "status": "entwurf"},
-            {"_id": 0, "id": 1, "corrects_version": 1})
+            {"_id": 0, "id": 1, "corrects_version": 1, "driver_account_id": 1})
         if not doc:
+            return False
+        if nur_fahrer and neuer_fahrer and doc.get("driver_account_id") == neuer_fahrer:
             return False
         if "corrects_version" in doc:
             return await korrektur_verwerfen(appt_id)
@@ -869,15 +982,23 @@ async def _preis_uebernehmen(appt: dict, doc: dict, *, nachholen: bool = False) 
     jetzt = now_iso()
     preis = doc.get("neuer_preis")
     if preis is not None:
-        vertragspreis = None
-        if kv.get("contract_id"):
+        # Rollenprüfung 22.09.2026 (RP-077/176/480): Vergleichsbasis ist der
+        # Preis VOR der Abholung. contract_data.purchase_price ist nach der
+        # ersten Nachverhandlung schon der verhandelte Preis (neue Fassung) —
+        # eine Korrektur mit neuem Preis ueberschrieb preis_vorher damit mit dem
+        # Zwischenstand, der Ursprungspreis war weg, und "zuruecksetzen" landete
+        # beim Zwischenpreis. Reihenfolge: ein schon festgehaltenes
+        # kv.preis_vorher (nie ueberschreiben), dann preis_vor_abholung des
+        # Vertrags, dann der Vertragspreis, zuletzt der Vorgangspreis.
+        vertragspreis = kv.get("preis_vorher") if kv.get("preis_nachverhandelt") else None
+        if vertragspreis is None and kv.get("contract_id"):
             c = await db.generated_pdfs.find_one(
                 {"id": kv["contract_id"], "dealer_id": dealer_id},
-                {"_id": 0, "contract_data.purchase_price": 1})
-            vertragspreis = ((c or {}).get("contract_data") or {}).get("purchase_price")
+                {"_id": 0, "contract_data.purchase_price": 1,
+                 "contract_data.preis_vor_abholung": 1})
+            vertragspreis = vertragspreis_vor_abholung((c or {}).get("contract_data"))
         if vertragspreis is None:
-            vertragspreis = (kv.get("preis_vorher") if kv.get("preis_nachverhandelt")
-                             else kv.get("purchase_price"))
+            vertragspreis = kv.get("purchase_price")
         filt: Dict[str, Any] = {"id": kv["id"], "dealer_id": dealer_id,
                                 "preis_protokoll_id": {"$ne": doc["id"]}}
         if nachholen:
@@ -901,6 +1022,21 @@ async def _preis_uebernehmen(appt: dict, doc: dict, *, nachholen: bool = False) 
         {"$set": {"purchase_price": kv["preis_vorher"], "updated_at": jetzt},
          "$unset": {"preis_nachverhandelt": "", "preis_vorher": "",
                     "preis_protokoll_id": "", "preis_quelle": ""}})
+
+
+async def _fahrzeug_ohne_vorgang_abgeholt(vehicle_id: Optional[str], dealer_id: str) -> None:
+    """Rollenprüfung 22.09.2026 (RP-114): Abschluss eines Termins OHNE eigenen
+    Kaufvorgang (Terminplaner ohne Vertrag). Haengen am gemeinsamen Fahrzeug
+    Kaufvorgaenge (auch eines Kollegen), bestimmt deren Zusammenfassung den
+    Lebenszyklus — sonst setzte dieser Abschluss das Auto des Kollegen auf
+    "abgeholt", obwohl dessen Kauf noch offen ist. Ohne Vorgaenge wie bisher."""
+    if not vehicle_id:
+        return
+    import kaufvorgang as _kv
+    if await _kv.fahrzeug_hat_vorgaenge(vehicle_id, dealer_id):
+        await _kv.fahrzeug_status_aggregieren(vehicle_id, dealer_id)
+        return
+    await try_set_lifecycle(vehicle_id, dealer_id, "abgeholt")
 
 
 def _nacharbeit_merker(appt: dict, doc: dict) -> Dict[str, Any]:
@@ -987,7 +1123,9 @@ async def get_protocol(appt_id: str, driver=Depends(current_driver)):
         "damages": contract.get("damages") or vehicle.get("damages") or [],
         # Runde 30: Der Fahrer sieht den Vertragspreis — und nach der
         # Freigabe den nachverhandelten Preis, den er unterschreibt.
-        "preis_vertrag": contract.get("purchase_price"),
+        # Rollenprüfung 22.09.2026 (RP-480): der Preis VOR der Abholung —
+        # derselbe wie in Freigabe und Protokoll-PDF.
+        "preis_vertrag": vertragspreis_vor_abholung(contract),
         "appointment": {k: appt.get(k) for k in
                         ("id", "title", "pickup_date", "pickup_time",
                          "pickup_address", "seller_name", "status")},
@@ -1087,6 +1225,14 @@ async def save_protocol(appt_id: str, body: ProtocolIn,
     payload = {k: v for k, v in body.model_dump(exclude_none=True).items()}
     revision = payload.pop("revision", None)
     revision_filt = {"revision": int(revision)} if revision is not None else {}
+    if "seller_name" in payload:
+        # Rollenprüfung 22.09.2026 (RP-058/157): wie der Ort — getrimmt.
+        payload["seller_name"] = str(payload["seller_name"]).strip()
+    if doc and doc.get("preis_vorschlag_verworfen") and "preis_vorschlag" in payload \
+            and _anderer_vorschlag(payload["preis_vorschlag"], doc.get("preis_vorschlag")):
+        # Rollenprüfung 22.09.2026 (RP-453): ein NEUER Vorschlag des Fahrers
+        # gilt wieder (der Chef hatte nur den alten verworfen).
+        payload["preis_vorschlag_verworfen"] = False
     # Runde 13 (Liste 3 Nr. 9): traegt der Entwurf eine Revision (alle seit
     # Phase 2), ist sie beim Speichern Pflicht — ein alter Tab ohne Stand
     # ueberschreibt nichts mehr.
@@ -1347,7 +1493,20 @@ async def submit_protocol(appt_id: str, driver=Depends(current_driver)):
     # Go-Live 13.09.2026 (P6): Schloss der Haendler den Termin genau zwischen
     # Vorabpruefung und diesem Write, fand sein Zuruecknehmen noch den Entwurf —
     # das Protokoll laege sonst beim Chef an einem geschlossenen Termin.
-    frisch = await db.appointments.find_one({"id": appt_id}, {"_id": 0, "status": 1})
+    frisch = await db.appointments.find_one({"id": appt_id}, {"_id": 0, "status": 1,
+                                                               "seller_name": 1})
+    if frisch is not None and not str(doc.get("seller_name") or "").strip():
+        # Rollenprüfung 22.09.2026 (RP-082/181): Der Verkaeufername kam aus dem
+        # Termin-Stand vom ANFANG dieses Aufrufs. Aenderte der Chef ihn genau
+        # dazwischen (sein PUT prueft laufende Protokolle nur vor unserem
+        # Wechsel), stand in der Freigabe der veraltete Name. Nach dem Anfassen
+        # des Termin-Stands (oben) ist er fest — mit dem frischen Wert
+        # nachziehen, solange die Freigabe noch genau diesen Stand traegt.
+        frischer_name = str(frisch.get("seller_name") or "").strip()
+        if frischer_name and frischer_name != setzen["seller_name"]:
+            await db.pickup_protocols.update_one(
+                {"id": doc["id"], "status": ZUR_FREIGABE, "freigabe_stand": jetzt},
+                {"$set": {"seller_name": frischer_name}})
     if frisch is None:
         # Pruefung 14.09.2026 (F2): Termin inzwischen geloescht — kein
         # verwaister Freigabevorgang beim Chef.
@@ -1374,6 +1533,26 @@ async def submit_protocol(appt_id: str, driver=Depends(current_driver)):
                               meta={"appointment_id": appt_id,
                                     "vehicle_id": appt.get("vehicle_id")})
     return {"ok": True, "status": ZUR_FREIGABE, "protocol_id": doc["id"]}
+
+
+def _korrektur_verkaeufername(vorversion: dict, appt: dict) -> str:
+    """Rollenprüfung 22.09.2026 (Review, RP-058 + RP-074): Verkaeufername der
+    Korrektur-Version.
+
+    Der Name am Termin gilt, wenn der Chef ihn NACH dem Abschluss der
+    Vorversion am Termin geaendert hat (SELLER_NAME_GEAENDERT_AM juenger als
+    finalized_at). Sonst gilt der unterschriebene Name der Vorversion — auch
+    ein vom Fahrer vor Ort korrigierter (RP-058), der nie am Termin stand.
+    Ohne eigenen Namen nimmt die Korrektur den Namen am Termin."""
+    termin = str(appt.get("seller_name") or "").strip()
+    vorher = str(vorversion.get("seller_name") or "").strip()
+    # Beide Zeitpunkte stammen aus now_iso() (UTC, gleiches Format) — der
+    # Textvergleich ordnet sie richtig.
+    geaendert_am = str(appt.get(SELLER_NAME_GEAENDERT_AM) or "")
+    abgeschlossen_am = str(vorversion.get("finalized_at") or "")
+    if termin and geaendert_am and geaendert_am > abgeschlossen_am:
+        return termin
+    return vorher or termin
 
 
 @router.post("/driver/appointments/{appt_id}/protocol/correction")
@@ -1425,6 +1604,16 @@ async def start_correction(appt_id: str, driver=Depends(current_driver)):
         "driver_name": driver.get("display_name", ""),
         # Pruefung 14.09.2026 (P4): das Fahrzeug, das JETZT am Termin haengt.
         "vehicle_id": appt.get("vehicle_id"),
+        # Rollenprüfung 22.09.2026 (RP-074/173): der Verkaeufername kam aus der
+        # Vorversion — hatte der Chef ihn am (wieder geoeffneten) Termin
+        # korrigiert, stand im neu unterschriebenen PDF trotzdem der alte
+        # (Abschicken und Abschluss nehmen zuerst den Namen des Protokolls).
+        # Jetzt gilt der Name am Termin; nur ohne ihn der bisherige. Der Fahrer
+        # kann ihn im Entwurf aendern (ProtocolIn.seller_name).
+        # Rollenprüfung 22.09.2026 (Review): aber nur, wenn der Chef ihn nach dem
+        # Abschluss der Vorversion am Termin GEAENDERT hat — sonst ging ein vom
+        # Fahrer vor Ort korrigierter Name (RP-058) mit der Korrektur verloren.
+        "seller_name": _korrektur_verkaeufername(doc, appt),
         "created_at": now_iso(), "updated_at": now_iso(),
     })
 
@@ -1554,8 +1743,8 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         await _preis_uebernehmen(appt, doc, nachholen=True)
         import kaufvorgang as _kv
         if not await _kv.termin_status_uebernehmen(appt, "abgeholt") and appt.get("vehicle_id"):
-            await try_set_lifecycle(appt["vehicle_id"],
-                                    appt.get("dealer_id", ""), "abgeholt")
+            # Rollenprüfung 22.09.2026 (RP-114): nicht am Fahrzeug mit Kaufvorgaengen.
+            await _fahrzeug_ohne_vorgang_abgeholt(appt["vehicle_id"], appt.get("dealer_id", ""))
         # Nr. 78: Dieser Selbstheilungspfad holte Termin, Preis und
         # Lebenszyklus nach — die Vertragsneuerzeugung fehlte vollstaendig.
         # Genau sie ist aber der Schritt, der beim Absturz uebrigbleibt.
@@ -1919,7 +2108,8 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
         # das Fahrzeug bekommt die Zusammenfassung (und den realisierten Preis).
         import kaufvorgang as _kv
         if not await _kv.termin_status_uebernehmen(appt, "abgeholt") and appt.get("vehicle_id"):
-            await try_set_lifecycle(appt["vehicle_id"], dealer_id, "abgeholt")
+            # Rollenprüfung 22.09.2026 (RP-114): nicht am Fahrzeug mit Kaufvorgaengen.
+            await _fahrzeug_ohne_vorgang_abgeholt(appt["vehicle_id"], dealer_id)
         # Wunsch Ahmad 14.09.2026: Der Kaufvertrag wird abschliessend mit dem vor
         # Ort vereinbarten Preis und der Sondervereinbarung neu erstellt (neue
         # Fassung, alte im Archiv). Best effort — das Protokoll ist der Beleg.
@@ -2260,11 +2450,19 @@ async def protokolle_zur_freigabe(user=Depends(_chef_dep)):
                 "schluessel_vereinbart": d.get("keys_expected") or "",
                 "fahrzeugdaten": d.get("vehicle_check") or {},
                 "ort": d.get("place") or "",
-                "preis_vertrag": vertrag.get("purchase_price"),
+                # Rollenprüfung 22.09.2026 (RP-480): der Preis VOR der Abholung
+                # (bei einer Korrektur nicht der schon verhandelte Zwischenstand).
+                "preis_vertrag": vertragspreis_vor_abholung(vertrag),
                 "neuer_preis": d.get("neuer_preis"),
+                # Rollenprüfung 22.09.2026 (RP-080/179): "fahrer" = der geltende
+                # Preis kam aus einem Vorschlag des Fahrers (ein neuer
+                # Vorschlag ersetzt ihn bei der Freigabe ohne eigenen Preis).
+                "preis_quelle": d.get("preis_quelle") or None,
                 "preis_notiz": d.get("preis_notiz") or "",
                 # Wunsch Ahmad 14.09.2026: vor Ort vom Fahrer eingetragen.
                 "preis_vorschlag_fahrer": d.get("preis_vorschlag") or None,
+                # Rollenprüfung 22.09.2026 (RP-453): vom Chef verworfen.
+                "preis_vorschlag_verworfen": bool(d.get("preis_vorschlag_verworfen")),
                 "sondervereinbarung": d.get("sondervereinbarung") or "",
                 "freigegeben_von_name": namen.get(d.get("freigegeben_von")) or "",
                 "rueckfrage_von_name": namen.get(d.get("rueckfrage_von")) or "",
@@ -2404,7 +2602,13 @@ async def protokoll_freigeben(protocol_id: str, body: FreigabeIn,
         return {"ok": True, "status": "entwurf", "stand": jetzt}
 
     if body.preis_zuruecksetzen:
-        zuruecksetzen: Dict[str, Any] = {"updated_at": jetzt, "freigabe_stand": jetzt}
+        # Rollenprüfung 22.09.2026 (RP-453): "auf Vertragspreis zuruecksetzen"
+        # verwirft auch den Preisvorschlag des Fahrers. Vorher blieb er stehen,
+        # und die naechste Freigabe ohne eigenen Preis ("Preis aktualisieren")
+        # machte ihn still wieder zum Preis, den der Verkaeufer unterschreibt.
+        # Ein NEUER Vorschlag des Fahrers hebt den Merker auf (save_protocol).
+        zuruecksetzen: Dict[str, Any] = {"updated_at": jetzt, "freigabe_stand": jetzt,
+                                         "preis_vorschlag_verworfen": True}
         if doc.get("status") == FREIGEGEBEN:
             # Gegenpruefung 12.09.2026: Wer den Preis zuruecksetzt, bestimmt jetzt,
             # was unterschrieben wird — Liste und Konfliktmeldung nannten sonst
@@ -2431,17 +2635,35 @@ async def protokoll_freigeben(protocol_id: str, body: FreigabeIn,
         # Befund 51 (16.09.2026): der Chef hat den Preis bestimmt — nicht mehr
         # der Fahrer-Vorschlag, auch wenn der vorher galt.
         setzen["preis_quelle"] = "chef"
-    elif doc.get("neuer_preis") is None and doc.get("preis_vorschlag"):
+    elif doc.get("preis_vorschlag") and not doc.get("preis_vorschlag_verworfen") and (
+            doc.get("neuer_preis") is None
+            or (doc.get("preis_quelle") == "fahrer"
+                and _anderer_vorschlag(doc.get("preis_vorschlag"), doc.get("neuer_preis")))):
         # Wunsch Ahmad 14.09.2026: Der Fahrer hat vor Ort einen Preis
         # eingetragen und der Chef gibt ohne eigenen Preis frei — dann gilt
-        # der Vorschlag des Fahrers.
+        # der Vorschlag des Fahrers. Rollenprüfung 22.09.2026 (RP-453): nicht,
+        # wenn der Chef ihn mit "auf Vertragspreis zuruecksetzen" verworfen hat.
+        # Rollenprüfung 22.09.2026 (RP-080/179 Teil 4): Stammt der geltende
+        # Preis selbst aus einem FRUEHEREN Vorschlag des Fahrers und hat der
+        # Fahrer nach "Zurueck an den Fahrer" einen anderen eingetragen, gilt
+        # der neue. Vorher klebte der alte (Bedingung neuer_preis is None), und
+        # der Verkaeufer unterschrieb einen Preis, den keiner mehr wollte.
+        # "Zurueck" selbst loescht weiter nichts (Entscheidung 14.09., Nr. 4);
+        # ein Preis des Chefs (preis_quelle "chef") bleibt unberuehrt.
         setzen["neuer_preis"] = float(doc["preis_vorschlag"])
         setzen["preis_quelle"] = "fahrer"
+    entfernen: Dict[str, Any] = {"rueckfrage": "", "rueckfrage_am": ""}
     if body.notiz is not None:
-        setzen["preis_notiz"] = body.notiz.strip()
+        # Rollenprüfung 22.09.2026 (RP-146): ein geleerter Vermerk wird
+        # entfernt (vorher liess er sich nie mehr loeschen — die Oberflaeche
+        # schickte "" gar nicht, und "" wurde als leerer Text gespeichert).
+        if body.notiz.strip():
+            setzen["preis_notiz"] = body.notiz.strip()
+        else:
+            entfernen["preis_notiz"] = ""
     res = await db.pickup_protocols.update_one(
         bedingung,
-        {"$set": setzen, "$unset": {"rueckfrage": "", "rueckfrage_am": ""}})
+        {"$set": setzen, "$unset": entfernen})
     if not res.matched_count:
         raise HTTPException(409, await _freigabe_konflikt(protocol_id, user))
     await log_activity_sicher(user["dealer_id"], user["id"], "protokoll.freigegeben",

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useParams, Link, useNavigate } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
+import { preisAusText, preisText } from "@/lib/preis";
 import { blobOeffnen } from "@/lib/dateiOeffnen";
 import { toast } from "sonner";
 import { useAuth } from "@/context/AuthContext";
@@ -24,10 +25,37 @@ const sucherLabel = (s) => {
   return s.kontonummer ? `${name} (Kontonummer ${s.kontonummer})` : name;
 };
 
+// Rollenpruefung 22.09.2026 (RP-225/RP-376): ein Schluessel je beabsichtigter
+// Freischaltung. Er bleibt stehen, bis der Server sie bestaetigt hat — ein
+// erneuter Klick nach einem Netzfehler (obwohl die erste Buchung durchlief)
+// schickt denselben Schluessel und bucht nicht doppelt.
+export function neuerSchluessel() {
+  try {
+    if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  } catch { /* aeltere Browser: Rueckfall unten */ }
+  return `k${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
+}
+
+const ZAHLUNG_PLAN = {
+  monthly: "Monats-Abo", yearly: "Jahres-Abo",
+  probe3: "Probe-Abo (3 Tage)", probe5: "Probe-Abo (5 Tage)",
+};
+
+// Rollenpruefung 22.09.2026 (RP-033/RP-132): Firmen-Verwaltung nur fuer den
+// Hauptchef (Zeiger am Firmenprofil), nicht fuer jedes Konto mit Rolle
+// "dealer". Aeltere Server ohne `ist_chef`: Rolle wie bisher.
+export function istHauptchef(u) {
+  if (!u) return false;
+  if (typeof u.ist_chef === "boolean") return u.ist_chef;
+  return u.role === "dealer";
+}
+
 export default function AdminUserDetail() {
   const { user: ich } = useAuth();
   const superAdmin = !!ich?.is_super_admin;   // Betreiber-Funktionen (Audit 09/2026)
   const { id } = useParams();
+  const nav = useNavigate();
+  const schluesselRef = useRef({});                 // RP-225: je Konto+Plan bis zur Bestaetigung
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [sucher, setSucher] = useState(null);
@@ -65,7 +93,7 @@ export default function AdminUserDetail() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, [id]);
 
-  const dealerId = data?.user?.role === "dealer" ? data.user.dealer_id : null;
+  const dealerId = istHauptchef(data?.user) ? data.user.dealer_id : null;
 
   const loadFirma = useCallback(async () => {
     if (!dealerId) return;
@@ -138,17 +166,30 @@ export default function AdminUserDetail() {
   const planText = (plan, feld) => (PLAENE[plan] || {})[feld] || plan || "—";
 
   const grantAbo = async (s, plan) => {
-    if (!sperren(s.id)) return;             // zweiter Klick waehrend der Anfrage: ignorieren
     const probe = !!PLAENE[plan]?.probe;
+    // Rollenpruefung 22.09.2026 (RP-050/RP-224): eine weitere Probe fuer ein
+    // Konto, das schon eine hatte, nur nach ausdruecklicher Rueckfrage.
+    if (probe && s.probe_vergeben_am && !window.confirm(
+      `${sucherLabel(s)} hatte bereits ein Probe-Abo (vergeben am ${fmtTag(s.probe_vergeben_am)}).\n\n`
+      + "Wirklich noch eine kostenlose Probe vergeben?")) return;
+    if (!sperren(s.id)) return;             // zweiter Klick waehrend der Anfrage: ignorieren
+    const schluesselName = `${s.id}:${plan}`;
+    if (!schluesselRef.current[schluesselName]) schluesselRef.current[schluesselName] = neuerSchluessel();
     try {
       // Beim Probe-Abo entscheidet die Laufzeit des Plans — ein eigenes
       // Datum lehnt der Server ausdruecklich ab.
       const datum = probe ? "" : (gueltigBis[s.id] || "").trim();
-      await api.post(`/admin/sucher/${s.id}/abo`,
-        { plan, ...(datum ? { gueltig_bis: datum } : {}) });
-      toast.success(`Abo freigeschaltet (${planText(plan, "lang")})`
-        + (datum ? ` · gültig bis ${datum}` : "")
-        + (probe ? " — kostenlos, sperrt danach automatisch" : " — Zahlung erfasst"));
+      const { data: erg } = await api.post(`/admin/sucher/${s.id}/abo`,
+        { plan, ...(datum ? { gueltig_bis: datum } : {}),
+          idempotenz_schluessel: schluesselRef.current[schluesselName] });
+      delete schluesselRef.current[schluesselName];
+      if (erg?.bereits_freigeschaltet) {
+        toast.info("Diese Freischaltung war schon gebucht — nichts doppelt erfasst.");
+      } else {
+        toast.success(`Abo freigeschaltet (${planText(plan, "lang")})`
+          + (datum ? ` · gültig bis ${datum}` : "")
+          + (probe ? " — kostenlos, sperrt danach automatisch" : " — Zahlung erfasst"));
+      }
       setGueltigBis((g) => ({ ...g, [s.id]: "" }));
       // AD-12: erst nach dem Neuladen freigeben — sonst zeigte die Zeile kurz
       // den alten Stand mit aktiven Knoepfen, ein zweiter Klick buchte doppelt.
@@ -175,8 +216,42 @@ export default function AdminUserDetail() {
   const revokeAbo = async (s) => {
     if (!window.confirm(`Sucher-Funktion (Suche & Vergleich) von ${sucherLabel(s)} aufheben?\n\nDas Konto bleibt aktiv: Anmelden, Bestand, Vertraege und Termine gehen weiter. Zum kompletten Sperren "Konto sperren" bzw. in der Nutzerliste "Firma sperren" verwenden.`)) return;
     if (!sperren(s.id)) return;
-    try { await api.post(`/admin/sucher/${s.id}/abo`, { plan: null }); toast.success("Abo aufgehoben"); await loadFirma(); }
+    try {
+      const { data: erg } = await api.post(`/admin/sucher/${s.id}/abo`, { plan: null });
+      // Rollenpruefung 22.09.2026 (RP-229/RP-380): der Server meldet den
+      // TATSAECHLICHEN Stand danach — nie mehr "aufgehoben", waehrend der
+      // Zugang (z. B. ueber ein Firmen-Abo) weiterlaeuft.
+      if (erg?.active) {
+        toast.warning("Aufgehoben — aber die Sucher-Funktion ist weiter aktiv "
+          + `(${planText(erg?.subscription?.plan, "zeigen")}). Bitte die Seite neu laden und prüfen.`,
+        { duration: 12000 });
+      } else {
+        toast.success("Abo aufgehoben");
+      }
+      await loadFirma();
+    }
     catch (e) { toast.error(errMsg(e)); }
+    finally { freigeben(); }
+  };
+  // Rollenpruefung 22.09.2026 (RP-558): Einen neuen Chef bestimmen ging bisher
+  // nur per API. Der bisherige Chef wird dabei zum Sucher (seine Sitzung
+  // endet), der neue meldet sich mit seiner bisherigen Kontonummer an.
+  const zumChefMachen = async (s) => {
+    const alt = sucher?.find((x) => x.ist_chef);
+    if (!window.confirm(
+      `${sucherLabel(s)} zum neuen Chef dieser Firma machen?\n\n`
+      + `Der bisherige Chef${alt?.kontonummer ? ` (Kontonummer ${alt.kontonummer})` : ""} wird dabei zum Sucher. `
+      + "Beide werden abgemeldet; die Kontonummern bleiben, wie sie sind.")) return;
+    if (!sperren(s.id)) return;
+    try {
+      await api.put(`/admin/users/${s.id}`, { role: "dealer", chef_wechsel: true });
+      toast.success(`${sucherLabel(s)} ist jetzt Chef der Firma`);
+      // Diese Seite gehoert dem bisherigen Chef — die Firmenansicht wandert
+      // zum neuen (dieselbe Firma: die Liste frisch laden, sonst stuende der
+      // alte Chef-Vermerk da).
+      nav(`/admin/users/${s.id}`);
+      await loadFirma();
+    } catch (e) { toast.error(errMsg(e)); }
     finally { freigeben(); }
   };
   const toggleSucherActive = async (s) => {
@@ -193,12 +268,20 @@ export default function AdminUserDetail() {
     catch (e) { toast.error(errMsg(e)); }
   };
   const addZahlung = async () => {
-    const betrag = window.prompt("Betrag in € (nur Zahl):");
+    const betrag = window.prompt("Betrag in € (z. B. 1.500 oder 150,00):");
     if (!betrag) return;
+    // Rollenpruefung 22.09.2026: deutsche Schreibweise ueber preisAusText —
+    // parseFloat machte aus "1.500" (Jahres-Abo) still 1,50 €.
+    const amount = preisAusText(betrag);
+    if (amount === null) { toast.error("Betrag nicht lesbar — bitte z. B. 1.500 oder 150,00 eingeben"); return; }
+    // Rollenprüfung 22.09.2026 (RP-349, Welle 2): den GELESENEN Betrag vor dem
+    // Buchen bestätigen lassen — ein Tippfehler ("15.00" statt "150,00")
+    // landete sonst still in der Zahlungshistorie.
+    if (!window.confirm(`Zahlung über ${preisText(amount)} erfassen?`)) return;
     const note = window.prompt("Notiz (optional, z.B. Rechnungsnummer):") || "";
     try {
       await api.post(`/admin/dealers/${dealerId}/zahlungen`,
-        { amount: parseFloat(betrag.replace(",", ".")), note });
+        { amount, note });
       toast.success("Zahlung erfasst");
       loadFirma();
     } catch (e) { toast.error(errMsg(e)); }
@@ -342,6 +425,12 @@ export default function AdminUserDetail() {
                           <div className="text-white font-medium flex items-center gap-1.5">
                             {s.ist_chef ? (u.contact_person || u.company_name || "Firmenchef") : `${s.first_name || ""} ${s.last_name || ""}`.trim() || "—"}
                             {s.ist_chef && <Badge tone="yellow">Chef</Badge>}
+                            {/* RP-132: liegengebliebenes zweites dealer-Konto — arbeitet als Sucher */}
+                            {s.weiteres_dealer_konto && (
+                              <span title="Altbestand: Rolle „dealer“, aber nicht der eingetragene Chef — arbeitet als Sucher">
+                                <Badge tone="gray">weiteres Konto (arbeitet als Sucher)</Badge>
+                              </span>
+                            )}
                           </div>
                           <div className="text-[11px] text-zinc-500">
                             <span className="font-mono text-zinc-300" data-testid={`sucher-kontonummer-${s.id}`}>{s.kontonummer || "—"}</span>
@@ -417,6 +506,13 @@ export default function AdminUserDetail() {
                           )}
                           {!s.ist_chef && (
                             <>
+                              {s.active && (
+                                <Button size="sm" variant="ghost" onClick={() => zumChefMachen(s)} disabled={!superAdmin || busy === s.id}
+                                        data-testid={`zum-chef-${s.id}`}
+                                        title="Dieses Konto wird Chef der Firma, der bisherige Chef wird Sucher">
+                                  <Crown size={13} /> Zum Chef machen
+                                </Button>
+                              )}
                               <Button size="sm" variant="ghost" onClick={() => toggleSucherActive(s)} disabled={!superAdmin} title={s.active ? "Konto komplett sperren (Anmeldung unmoeglich)" : "Konto entsperren"}>
                                 <Ban size={13} /> {s.active ? "Konto sperren" : "Entsperren"}
                               </Button>
@@ -456,7 +552,8 @@ export default function AdminUserDetail() {
                       <span className="text-[12px] text-zinc-500 tabular-nums">{z.paid_at}</span>
                     </div>
                     <div className="text-[12px] text-zinc-400">
-                      {z.plan ? (z.plan === "yearly" ? "Jahres-Abo" : "Monats-Abo") : "manuell"}
+                      {/* RP-232: Proben erschienen hier als "Monats-Abo" */}
+                      {z.plan ? (ZAHLUNG_PLAN[z.plan] || z.plan) : "manuell"}
                       {z.period_until ? ` · bezahlt bis ${fmtTag(z.period_until)}` : ""}
                       {z.note ? ` · ${z.note}` : ""}
                     </div>

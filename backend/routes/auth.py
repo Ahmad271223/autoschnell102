@@ -4,6 +4,7 @@ Kontonummer (13.09.2026), Schritt 5: Selbst-Registrierung und Passwort-Reset
 per E-Mail gibt es nicht mehr — die Routen antworten 410 mit Hinweis, damit
 gecachte alte Oberflaechen keine 404/422 zeigen."""
 import os
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -22,6 +23,7 @@ from deps import (
     log_activity, log_activity_sicher,
 )
 from rate_limiter import (client_ip, SlidingWindowRateLimiter, bekannte_ip_merken,
+                          bekanntes_geraet_merken,
                           konto_fehlversuch, konto_gesperrt, konto_gesperrt_text,
                           login_ip_limiter,
                           login_limiter, login_schluessel, register_limiter)
@@ -48,6 +50,10 @@ class LoginIn(BaseModel):
     email: Optional[str] = Field(default=None, max_length=254)
     # Nachpruefung 15.09.2026: Schema-Deckel (bcrypt liest ohnehin nur 72 Bytes).
     password: str = Field(max_length=200)
+    # Rollenpruefung 22.09.2026 (RP-557): Geraete-Schluessel aus einer frueheren
+    # Anmeldung (localStorage) — ein bekanntes Geraet ist wie eine bekannte IP
+    # von der Konto-Sperre entlastet. Falsche Form = ignoriert (nie 422).
+    geraet_id: Optional[str] = Field(default=None, max_length=80)
 
 
 _NUMMERN_ROLLEN = ["dealer", "sucher", "b2b_buyer"]
@@ -108,6 +114,12 @@ class ZugangsAnfrageIn(BaseModel):
     # B2B-Bestaetigung (AGB §1, Pflicht)
     ust_id: str = Field(default="", max_length=40)
     gewerblich_bestaetigt: bool = False
+    # Rollenprüfung 22.09.2026 (RP-511, Welle 2): Ein eingeladener Partner ohne
+    # Konto fragt ueber den Einladungslink an (/anfrage?art=kaeufer&invite=…).
+    # Vorher ignorierte der Server das Feld — die Einladung ging still
+    # verloren. Nur art=kaeufer; beim Anlegen des Kontos loest der Betreiber-
+    # Weg (POST /admin/buyers mit anfrage_id) sie ein.
+    invite_token: str = Field(default="", max_length=200)
 
     @field_validator("ust_id")
     @classmethod
@@ -115,6 +127,17 @@ class ZugangsAnfrageIn(BaseModel):
         from ustid import feld_pruefen
         return feld_pruefen(v)
 
+    @field_validator("invite_token", mode="before")
+    @classmethod
+    def _einladung(cls, v):
+        """Nur die Zeichen, die secrets.token_urlsafe erzeugt. Ein kaputtes
+        Token (abgeschnittener Link) darf die Anfrage nicht mit 422 kippen —
+        es wird dann einfach nicht gespeichert."""
+        wert = str(v or "").strip()
+        return wert if _EINLADUNG_MUSTER.fullmatch(wert) else ""
+
+
+_EINLADUNG_MUSTER = re.compile(r"[A-Za-z0-9_-]{8,200}")
 
 _ANFRAGE_WUNSCH = {"firma": "Zugang zum Programm",
                    "kaeufer": "Marktplatz-Zugang (Zwischenhändler)",
@@ -161,6 +184,9 @@ async def zugang_anfrage(body: ZugangsAnfrageIn, request: Request):
     }
     if body.art == "kaeufer":
         doc["ust_id"] = body.ust_id
+        # RP-511 (Welle 2): Einladung mit der Anfrage speichern
+        if body.invite_token:
+            doc["invite_token"] = body.invite_token
     # Kontonummer (13.09.2026, Gegenpruefung): Das Formular verlangt die
     # Bestaetigung (Unternehmer, AGB, Datenschutz) fuer JEDE Art — der
     # Zeitpunkt wird festgehalten (AGB §1). Pflicht im Backend bleibt sie
@@ -178,12 +204,21 @@ async def zugang_anfrage(body: ZugangsAnfrageIn, request: Request):
         return {"ok": True, "hinweis": ANFRAGE_EINGEGANGEN}
     await log_activity_sicher("", "", "zugang.anfrage",
                        ref=req_id, meta={"firma": body.company_name, "art": body.art,
-                                         "email": body.email, "ip": ip})
+                                         "email": body.email, "ip": ip,
+                                         "mit_einladung": bool(doc.get("invite_token"))})
     return {"ok": True, "hinweis": ANFRAGE_EINGEGANGEN}
 
 
 ANFRAGE_EINGEGANGEN = ("Anfrage ist eingegangen — wir melden uns "
                        "und schalten dein Firmen-Konto frei.")
+
+#: Rollenprüfung 22.09.2026 (RP-543): 403-Text beim Betreiber-Login ohne
+#: Zwei-Faktor in Produktion — mit dem vollstaendigen Notfallbefehl.
+MFA_PFLICHT_HINWEIS = (
+    "Für den Betreiber ist die Zwei-Faktor-Anmeldung Pflicht. Auf dem Server "
+    "'docker compose exec backend python scripts/mfa_pruefen.py --konto "
+    "<Benutzername> --abschalten --ja' ausführen (setzt 30 Minuten Frist), "
+    "dann anmelden und unter Einstellungen die Zwei-Faktor-Anmeldung einrichten.")
 
 
 def mfa_pflicht_aktiv() -> bool:
@@ -285,7 +320,8 @@ async def _firmensperre_pruefen(user: dict) -> None:
         raise firma_gesperrt_fehler()
 
 
-async def _sitzung_ausstellen(user: dict, ip: str, geraet: str = "") -> dict:
+async def _sitzung_ausstellen(user: dict, ip: str, geraet: str = "",
+                              geraet_id: Optional[str] = None) -> dict:
     """Passwort (und ggf. 2. Faktor) sind geprueft: neue Einzel-Sitzung,
     Token, Audit. Runde 19: Zeitpunkt und Geraet der Sitzung werden am Konto
     festgehalten, damit ein verdraengtes Geraet erfaehrt, WER es verdraengt
@@ -304,6 +340,9 @@ async def _sitzung_ausstellen(user: dict, ip: str, geraet: str = "") -> dict:
     # Kontonummer (13.09.2026): Anmeldung ist vollstaendig (beim Super-Admin
     # nach der 2FA) — diese IP gilt fuer den Konto-Limiter ab jetzt als bekannt.
     await bekannte_ip_merken(db, "users", user["id"], ip)
+    # Rollenpruefung 22.09.2026 (RP-557): ebenso dieses Geraet (Schluessel geht
+    # in der Antwort zurueck, die Oberflaeche legt ihn ab).
+    gid = await bekanntes_geraet_merken(db, "users", user["id"], geraet_id)
     meta = {"email": user.get("email", ""), "ip": ip, "geraet": geraet[:60]}
     if user.get("kontonummer"):
         meta["kontonummer"] = user["kontonummer"]
@@ -314,12 +353,19 @@ async def _sitzung_ausstellen(user: dict, ip: str, geraet: str = "") -> dict:
     user_clean = {k: v for k, v in user.items() if k not in ("password_hash", "_id", "mfa")}
     user_clean["current_session_id"] = sid
     user_clean["mfa_aktiv"] = bool((user.get("mfa") or {}).get("aktiv"))
-    return {"token": token, "user": user_clean}
+    # Merkwerte (IP/Geraet) gehoeren nicht in die Antwort.
+    user_clean.pop("login_ips_bekannt", None)
+    user_clean.pop("login_geraete_bekannt", None)
+    antwort = {"token": token, "user": user_clean}
+    if gid:
+        antwort["geraet_id"] = gid
+    return antwort
 
 
 class MfaLoginIn(BaseModel):
     mfa_token: str = Field(min_length=20, max_length=1000)
     code: str = Field(min_length=6, max_length=40)
+    geraet_id: Optional[str] = Field(default=None, max_length=80)   # RP-557
 
 
 @router.post("/auth/login/mfa")
@@ -412,7 +458,7 @@ async def login_mfa(body: MfaLoginIn, request: Request):
     await _firmensperre_pruefen(user)
     await login_limiter.reset(login_schluessel(
         ip, user.get("kontonummer") or user.get("username") or user.get("email") or ""))
-    return await _sitzung_ausstellen(user, ip, geraet_kurz(request))
+    return await _sitzung_ausstellen(user, ip, geraet_kurz(request), body.geraet_id)
 
 
 @router.post("/auth/login")
@@ -437,7 +483,9 @@ async def login(body: LoginIn, request: Request):
     # Konto-Limiter VOR bcrypt — gleicher Text und Weg fuer vorhandene und
     # unbekannte Kennungen (keine Aufzaehlung der Nummern).
     konto_k = anmeldekennung(identifier)
-    if await konto_gesperrt(konto_k, ip, user):
+    # Rollenpruefung 22.09.2026 (RP-557): ein bekanntes Geraet (Schluessel aus
+    # einer frueheren Anmeldung) zaehlt wie eine bekannte IP.
+    if await konto_gesperrt(konto_k, ip, user, geraet_id=body.geraet_id):
         raise HTTPException(429, konto_gesperrt_text())
     # Always run bcrypt (constant-time) to prevent user-enumeration via timing.
     pw_hash = user["password_hash"] if user else _DUMMY_HASH
@@ -461,9 +509,11 @@ async def login(body: LoginIn, request: Request):
         # Nachpruefung 15.09.2026 (Anmeldung, MFA-Pflicht): in Produktion kein
         # Betreiber-Login ohne zweiten Faktor — /ready meldet den Zustand nur.
         await log_activity_sicher("", user["id"], "auth.login.mfa_fehlt", meta={"ip": ip})
-        raise HTTPException(403, "Für den Betreiber ist die Zwei-Faktor-Anmeldung Pflicht — "
-                                 "bitte zuerst über die Konsole einrichten "
-                                 "(python scripts/mfa_pruefen.py).")
+        # Rollenprüfung 22.09.2026 (RP-543, Welle 2): der Hinweis nennt den
+        # Befehl, der wirklich hilft — er setzt 30 Minuten Frist, in denen die
+        # Anmeldung ohne Code geht und der zweite Faktor eingerichtet wird.
+        # (Ein neu angelegtes Betreiberkonto hat seit dem Seed 60 Minuten.)
+        raise HTTPException(403, MFA_PFLICHT_HINWEIS)
     # Passwort stimmte: Zaehler dieses Kontos leeren, damit fruehere
     # Fehlversuche eine richtige Anmeldung spaeter nicht blockieren.
     # Nachpruefung 15.09.2026 (Anmeldung Nr. 7): bei Zwei-Faktor erst nach
@@ -483,7 +533,7 @@ async def login(body: LoginIn, request: Request):
         await log_activity_sicher("", user["id"], "auth.login.mfa.angefordert", meta={"ip": ip})
         return {"mfa_erforderlich": True, "mfa_token": create_mfa_token(user),
                 "hinweis": "Bitte den 6-stelligen Code aus der Authenticator-App eingeben."}
-    return await _sitzung_ausstellen(user, ip, geraet_kurz(request))
+    return await _sitzung_ausstellen(user, ip, geraet_kurz(request), body.geraet_id)
 
 
 @router.post("/auth/logout")

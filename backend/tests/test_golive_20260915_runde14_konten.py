@@ -347,8 +347,10 @@ def test_verkaeuferdaten_erst_nach_annahme_und_sucher_ohne_kontaktdaten():
     # Tests (Sucher sieht nur Name und Status) ist dieselbe geblieben und
     # wird oben am echten Verhalten geprueft.
     assert "voll = await ist_haupt_chef(user)" in inspect.getsource(DRV.list_drivers)
-    assert inspect.getsource(A.list_appointments).count('if chef_sicht else None') == 2
-    assert inspect.getsource(A.get_appointment).count('if chef_sicht else None') == 2
+    # Rollenprüfung 22.09.2026 (RP-542): dazu das Telefon des Fahrers — ebenso
+    # nur fuer den Hauptchef (driver_code, email, phone).
+    assert inspect.getsource(A.list_appointments).count('if chef_sicht else None') == 3
+    assert inspect.getsource(A.get_appointment).count('if chef_sicht else None') == 3
     # Fotos je Bericht gedeckelt
     with pytest.raises(ValueError):
         DRV.PickupReportIn(deviations=[DRV.DeviationIn(label="x", photo_b64="a" * 7_000_000) for _ in range(6)])

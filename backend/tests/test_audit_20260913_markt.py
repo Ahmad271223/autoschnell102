@@ -295,7 +295,8 @@ def test_17_reine_regel_und_altbestand_in_der_oeffentlichen_sicht():
     assert f("accident_free", "") == (True, "")
     assert f("accident_free", "Ja") == (True, "Ja")
     assert f("accident_free", True) == (True, True)
-    assert f("mileage", "") == (True, "")
+    # Rollenprüfung 22.09.2026 (RP-507): geleertes Zahlenfeld wird None statt ""
+    assert f("mileage", "") == (True, None)
     assert f("mileage", 2000) == (True, 2000)
     assert f("mileage", "1e400")[0] is False
     assert f("mileage", float("nan"))[0] is False
@@ -671,10 +672,15 @@ def test_25_26_quelltext_wie_auth_login():
 
 
 # ============================================================ Nr. 27
-def test_27_hoechstens_eine_offene_zugangsanfrage(welt):
+def test_27_hoechstens_eine_offene_zugangsanfrage(welt, monkeypatch):
     M, I = _mod("routes.marketplace"), _mod("indizes")
     db = welt.db
-    k = {**welt.k, "marketplace_access": {"gesperrt": True, "active": False}}
+    # Rollenprüfung 22.09.2026 (RP-098 Nr. 4): ein GESPERRTER Kaeufer bekommt
+    # jetzt 409 statt einer Anfrage — die Invariante "hoechstens eine offene
+    # Anfrage" pruefen wir deshalb mit Kaeufern OHNE Zugang im Bezahlmodus
+    # (im Kostenlos-Modus ist jeder nicht gesperrte Kaeufer schon aktiv).
+    monkeypatch.setattr(M, "MARKTPLATZ_KOSTENLOS", False)
+    k = {**welt.k, "marketplace_access": {}}
     k2, k3 = f"k2_a13_{welt.s}", f"k3_a13_{welt.s}"
     welt.user_ids += [k2, k3]
 
@@ -693,7 +699,7 @@ def test_27_hoechstens_eine_offene_zugangsanfrage(welt):
         logs = await db.activity_logs.count_documents(
             {"user_id": k["id"], "action": "marktplatz.zugang.anfrage"})
         k3u = {"id": k3, "role": "b2b_buyer", "email": "x@y.de",
-               "marketplace_access": {"gesperrt": True}}
+               "marketplace_access": {}}
         await asyncio.gather(*(M.request_marketplace_access(user=k3u) for _ in range(3)))
         offen3 = await db.plan_requests.count_documents({"type": "buyer_access", "buyer_user_id": k3})
         return steht, k2_stati, r1, r2, offen, logs, offen3

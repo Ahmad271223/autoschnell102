@@ -205,6 +205,19 @@ def test_15_13_14_firmenreste_bereinigen():
 
     async def lauf(db):
         import cleanup_service as cs
+        try:
+            await _befuellen(db)
+            await _pruefen(db, cs)
+        finally:
+            await db.dealers.delete_many({"id": da})
+            await db.link_jobs.delete_many({"cache_key": ck})
+            await db.listings_cache_client.delete_many({"cache_key": ck})
+            await db.listings_cache.delete_many({"cache_key": ck})
+
+    async def _befuellen(db):
+        # 22.09.2026: vorher lag dieses Anlegen VOR dem try — scheiterte ein
+        # spaeteres insert, blieb "Da GmbH" ohne user_id in der Test-DB liegen
+        # und jede weitere Firma ohne Chef lief in den Unique-Index user_id_1.
         await db.dealers.insert_one({"id": da, "company_name": "Da GmbH",
                                      "created_at": _iso(JETZT)})
         await db.link_jobs.insert_one({
@@ -220,25 +233,21 @@ def test_15_13_14_firmenreste_bereinigen():
             "cache_key": ck, "source": "kleinanzeigen", "item_id": f"r14{SUF}",
             "data": {"title": "T", "ingested_by_user": "u", "ingested_by_dealer": weg},
             "confirmed_by": [weg, da], "expires_at": JETZT + timedelta(hours=1)})
-        try:
-            n = await cs.firmenreste_bereinigen(db)
-            assert n >= 4, n
-            job = await db.link_jobs.find_one({"id": f"job_r14_{SUF}"}, {"_id": 0})
-            assert job["dealer_ids"] == [da] and job["requested_by_dealer"] == ""
-            assert await db.listings_cache_client.count_documents({"dealer_id": weg}) == 0
-            assert await db.listings_cache_client.count_documents({"dealer_id": da}) == 1
-            lc = await db.listings_cache.find_one({"cache_key": ck}, {"_id": 0})
-            assert lc["confirmed_by"] == [da]
-            assert "ingested_by_dealer" not in lc["data"] \
-                and "ingested_by_user" not in lc["data"], lc["data"]
-            assert lc["data"]["title"] == "T"
-            # zweiter Lauf: nichts mehr zu tun
-            assert await cs.firmenreste_bereinigen(db) == 0
-        finally:
-            await db.dealers.delete_many({"id": da})
-            await db.link_jobs.delete_many({"cache_key": ck})
-            await db.listings_cache_client.delete_many({"cache_key": ck})
-            await db.listings_cache.delete_many({"cache_key": ck})
+
+    async def _pruefen(db, cs):
+        n = await cs.firmenreste_bereinigen(db)
+        assert n >= 4, n
+        job = await db.link_jobs.find_one({"id": f"job_r14_{SUF}"}, {"_id": 0})
+        assert job["dealer_ids"] == [da] and job["requested_by_dealer"] == ""
+        assert await db.listings_cache_client.count_documents({"dealer_id": weg}) == 0
+        assert await db.listings_cache_client.count_documents({"dealer_id": da}) == 1
+        lc = await db.listings_cache.find_one({"cache_key": ck}, {"_id": 0})
+        assert lc["confirmed_by"] == [da]
+        assert "ingested_by_dealer" not in lc["data"] \
+            and "ingested_by_user" not in lc["data"], lc["data"]
+        assert lc["data"]["title"] == "T"
+        # zweiter Lauf: nichts mehr zu tun
+        assert await cs.firmenreste_bereinigen(db) == 0
 
     _run(lauf)
 

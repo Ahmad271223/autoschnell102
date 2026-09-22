@@ -164,8 +164,18 @@ def test_02_jeder_sucher_der_firma_darf_einen_eigenen_vertrag_anlegen(welt, monk
                                         "updated_at": _jetzt()})
         sicht_vorher = {n: await w.db.vehicles.count_documents({"id": vid, **D.fahrzeug_bereich(u)})
                         for n, u in (("a", w.a), ("b", w.b), ("c", w.c))}
+        # Rollenpruefung 22.09.2026 (RP-014/RP-113): C hat nie verglichen —
+        # ohne Vergleich kein Vertrag (Fahrzeug-IDs sind ableitbar). Der
+        # Vergleich desselben Links traegt ihn als Mitbearbeiter ein
+        # (routes/listings._als_mitbearbeiter_eintragen), danach geht es.
+        with pytest.raises(HTTPException) as ohne_vergleich:
+            await C.create_contract(body(3000), w.c)
+        assert ohne_vergleich.value.status_code == 404
         outs = {}
         for n, u, preis in (("a", w.a, 1000), ("b", w.b, 2000), ("c", w.c, 3000)):
+            if n == "c":
+                await w.db.vehicles.update_one({"id": vid},
+                                               {"$addToSet": {"mitbearbeiter_ids": w.c["id"]}})
             outs[n] = await C.create_contract(body(preis), u)
         sicht_nachher = {n: await w.db.vehicles.count_documents({"id": vid, **D.fahrzeug_bereich(u)})
                          for n, u in (("a", w.a), ("b", w.b), ("c", w.c))}
@@ -177,7 +187,7 @@ def test_02_jeder_sucher_der_firma_darf_einen_eigenen_vertrag_anlegen(welt, monk
     assert sicht_vorher == {"a": 1, "b": 1, "c": 0}, "Sichtbarkeit: Haupt- und Mitbearbeiter, ein Dritter nicht"
     assert {n: o["user_id"] for n, o in outs.items()} == {"a": w.a["id"], "b": w.b["id"], "c": w.c["id"]}
     assert len({o["id"] for o in outs.values()}) == 3, "drei eigene Vertraege zum selben Inserat"
-    assert sicht_nachher == {"a": 1, "b": 1, "c": 1}, "C wird durch seinen Vertrag Mitbearbeiter"
+    assert sicht_nachher == {"a": 1, "b": 1, "c": 1}, "C ist nach seinem Vergleich Mitbearbeiter"
     assert v["owner_user_id"] == w.a["id"] and v["mitbearbeiter_ids"] == [w.b["id"], w.c["id"]]
     assert v.get("purchase_price") is None, "Kaufpreis liegt am Vorgang, nicht am Fahrzeug"
     assert v["lifecycle"] == "gekauft"

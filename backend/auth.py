@@ -95,14 +95,61 @@ async def verify_password_async(plain: str, hashed: str) -> bool:
 _DUMMY_HASH: str = hash_password("__autoschnell_dummy_never_matches__")
 
 
-def create_token(user_id: str, session_id: str) -> str:
-    exp = datetime.now(timezone.utc) + timedelta(days=TOKEN_TTL_DAYS)
-    payload = {"sub": user_id, "sid": session_id, "exp": exp}
+def create_token(user_id: str, session_id: str, seit: Optional[int] = None,
+                 bis: Optional[datetime] = None) -> str:
+    jetzt = datetime.now(timezone.utc)
+    exp = jetzt + timedelta(days=TOKEN_TTL_DAYS)
+    if bis is not None and bis < exp:
+        exp = bis
+    # Rollenpruefung 22.09.2026 (RP-546): "seit" = Beginn der Sitzung (Unix-
+    # Sekunden). Eine erneuerte Sitzung (token_erneuern) traegt ihn weiter,
+    # damit die Verlaengerung nach SITZUNG_MAX_TAGE endet.
+    payload = {"sub": user_id, "sid": session_id, "exp": exp,
+               "seit": int(seit if seit is not None else jetzt.timestamp())}
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
 
 def decode_token(token: str) -> dict:
     return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+
+
+# Rollenpruefung 22.09.2026 (RP-546): Jede Sitzung endete hart nach 7 Tagen —
+# mitten in der Arbeit (Fahrer mit halb unterschriebenem Protokoll) kam die
+# 401 und der Abfaenger leitete zur Anmeldung um. Jetzt gleitend: faellt die
+# Restlaufzeit unter TOKEN_ERNEUERN_AB_TAGEN, bekommt die Antwort ein frisches
+# Token derselben Sitzung (Kopfzeile X-Neues-Token, die Oberflaeche legt es
+# ab). Grenzen: hoechstens SITZUNG_MAX_TAGE ab der Anmeldung, nie fuer
+# Betreiber-Konten (die melden sich mit zweitem Faktor woechentlich neu an),
+# und die Einzel-Sitzung (sid) bleibt dieselbe — Abmelden, Sperre oder
+# Passwortwechsel beenden sie wie bisher sofort.
+TOKEN_ERNEUERN_AB_TAGEN = 2
+SITZUNG_MAX_TAGE = 30        # fest (kein .env-Schalter — der muesste in jeden Container)
+NEUES_TOKEN_KOPF = "X-Neues-Token"
+
+
+def token_erneuern(payload: dict, rolle: Optional[str] = None) -> Optional[str]:
+    """Frisches Token derselben Sitzung, wenn das alte bald ablaeuft — sonst
+    None. Reine Funktion (keine Datenbank); der Aufrufer hat das Token und
+    die Sitzung (sid == current_session_id) bereits geprueft."""
+    if not isinstance(payload, dict) or payload.get("typ") or rolle == "admin":
+        return None
+    sub, sid, exp = payload.get("sub"), payload.get("sid"), payload.get("exp")
+    if not sub or not sid or not isinstance(exp, (int, float)):
+        return None
+    jetzt = datetime.now(timezone.utc).timestamp()
+    if exp - jetzt > TOKEN_ERNEUERN_AB_TAGEN * 86400:
+        return None
+    # Alt-Token ohne "seit": Beginn = Ausstellung (exp - TTL).
+    seit = payload.get("seit")
+    if not isinstance(seit, (int, float)):
+        seit = exp - TOKEN_TTL_DAYS * 86400
+    ende = seit + SITZUNG_MAX_TAGE * 86400
+    # Nur wenn die Verlaengerung wirklich etwas bringt (neues Ende spaeter als
+    # das alte) — sonst bekaeme jede Antwort der letzten Tage ein neues Token.
+    if ende <= exp + 60:
+        return None
+    return create_token(sub, sid, seit=int(seit),
+                        bis=datetime.fromtimestamp(ende, tz=timezone.utc))
 
 
 MFA_TOKEN_TTL_MINUTES = 5
