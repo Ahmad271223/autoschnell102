@@ -140,21 +140,22 @@ export default function BuyerLogin() {
             {busy ? "Anmelden…" : <>Anmelden <ArrowRight size={16} /></>}
           </button>
         </form>
-        <div className="mt-4 text-center text-xs">
-          <Link to="/passwort-vergessen" className="text-zinc-500 hover:text-white underline">
+        {/* Handy-Ansicht (24.09.2026): Textlinks mit Polster (gut tippbar). */}
+        <div className="mt-3 text-center text-xs">
+          <Link to="/passwort-vergessen" className="inline-block py-2 px-1 text-zinc-500 hover:text-white underline">
             Passwort vergessen? Der Betreiber setzt es neu
           </Link>
         </div>
-        <div className="mt-3 text-center text-[11.5px] text-zinc-600" data-testid="buyer-login-hinweis">
+        <div className="mt-1 text-center text-[11.5px] text-zinc-600 leading-relaxed" data-testid="buyer-login-hinweis">
           Hier melden sich nur Zwischenhändler an. Firmen und Sucher:{" "}
-          <Link to="/login" className="underline">/login</Link> · Fahrer:{" "}
-          <Link to="/fahrer/login" className="underline">Fahrer-App</Link>
+          <Link to="/login" className="underline inline-block py-1.5 px-0.5">/login</Link> · Fahrer:{" "}
+          <Link to="/fahrer/login" className="underline inline-block py-1.5 px-0.5">Fahrer-App</Link>
         </div>
-        <div className="mt-4 text-center text-sm text-zinc-500">
+        <div className="mt-2 text-center text-sm text-zinc-500">
           Noch kein Zugang?{" "}
           {/* RP-511: die Einladung mitnehmen — sonst ging sie beim Anfragen verloren. */}
           <Link to={invite ? `/anfrage?art=kaeufer&invite=${encodeURIComponent(invite)}` : "/anfrage?art=kaeufer"}
-                data-testid="buyer-link-anfrage" className="text-white font-semibold">Zugang anfragen</Link>
+                data-testid="buyer-link-anfrage" className="text-white font-semibold inline-block py-2 px-1">Zugang anfragen</Link>
         </div>
         <div className="mt-8">
           <InstallPWAButton />

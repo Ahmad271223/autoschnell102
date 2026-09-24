@@ -151,16 +151,17 @@ export default function Login() {
           </button>
 
           <RechtsLinks className="mt-8" />
-          <div className="mt-6 text-sm text-zinc-400 text-center space-y-2">
+          {/* Handy-Ansicht (24.09.2026): Textlinks mit Polster (gut tippbar). */}
+          <div className="mt-4 text-sm text-zinc-400 text-center space-y-1">
             <div>
-              <Link to="/passwort-vergessen" className="hover:text-white hover:underline">Passwort vergessen?</Link>
+              <Link to="/passwort-vergessen" className="inline-block py-2 px-1 hover:text-white hover:underline">Passwort vergessen?</Link>
             </div>
             <div>
-              Noch kein Konto? <Link to="/anfrage" className="text-white hover:underline">Zugang anfragen — wir schalten dich frei</Link>
+              Noch kein Konto? <Link to="/anfrage" className="inline-block py-2 px-1 text-white hover:underline">Zugang anfragen — wir schalten dich frei</Link>
             </div>
-            <div className="text-xs text-zinc-500 space-x-3">
-              <Link to="/fahrer/login" data-testid="link-zur-fahrer-app" className="hover:text-white hover:underline">Fahrer? Zur Fahrer-App</Link>
-              <Link to="/markt/login" data-testid="link-zum-marktplatz" className="hover:text-white hover:underline">Zwischenhändler? Zum Marktplatz</Link>
+            <div className="text-xs text-zinc-500 flex flex-wrap justify-center gap-x-3">
+              <Link to="/fahrer/login" data-testid="link-zur-fahrer-app" className="inline-block py-2 px-1 hover:text-white hover:underline">Fahrer? Zur Fahrer-App</Link>
+              <Link to="/markt/login" data-testid="link-zum-marktplatz" className="inline-block py-2 px-1 hover:text-white hover:underline">Zwischenhändler? Zum Marktplatz</Link>
             </div>
           </div>
 

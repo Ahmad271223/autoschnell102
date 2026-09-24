@@ -84,8 +84,8 @@ export default function DriverSettings() {
                          color: "var(--st-rot)" }}>
             {driver.driver_code}
           </code>
-          <button onClick={copy} data-testid="copy-code-btn"
-            className="px-3 py-3 rounded-sm bg-white/5 hover:bg-white/10">
+          <button onClick={copy} data-testid="copy-code-btn" aria-label="Fahrer-ID kopieren"
+            className="tipp shrink-0 rounded-sm bg-white/5 hover:bg-white/10 flex items-center justify-center">
             {copied ? <Check size={16} className="text-emerald-400" /> : <Copy size={16} />}
           </button>
         </div>
@@ -121,9 +121,12 @@ export default function DriverSettings() {
         <input type="password" autoComplete="current-password" placeholder="Aktuelles Passwort"
           value={pw.current} onChange={(e) => setPw({ ...pw, current: e.target.value })}
           className="input-base w-full mt-2" required data-testid="driver-pw-current" />
-        <input type="password" autoComplete="new-password" placeholder="Neues Passwort (mind. 10 Zeichen, Ziffer oder Sonderzeichen)"
+        {/* Handy-Ansicht (24.09.2026): der lange Platzhalter war im Feld
+            abgeschnitten — die Regel steht jetzt als Zeile darunter. */}
+        <input type="password" autoComplete="new-password" placeholder="Neues Passwort"
           value={pw.next} onChange={(e) => setPw({ ...pw, next: e.target.value })}
           className="input-base w-full mt-2" minLength={10} required data-testid="driver-pw-next" />
+        <p className="text-[11px] text-zinc-500 mt-1">Mind. 10 Zeichen, mit Ziffer oder Sonderzeichen.</p>
         <input type="password" autoComplete="new-password" placeholder="Neues Passwort wiederholen"
           value={pw.repeat} onChange={(e) => setPw({ ...pw, repeat: e.target.value })}
           className="input-base w-full mt-2" minLength={8} required data-testid="driver-pw-repeat" />
@@ -150,15 +153,15 @@ export default function DriverSettings() {
           )}
           {(driver.dealers || []).map((d) => (
             <div key={d.id} data-testid={`dealer-${d.id}`}
-                 className="flex items-center justify-between py-2 px-3 rounded-sm"
+                 className="flex items-center justify-between gap-3 py-2 px-3 rounded-sm"
                  style={{ background: "var(--wa-02)" }}>
-              <div>
-                <div className="font-semibold text-sm">{d.name}</div>
+              <div className="min-w-0">
+                <div className="font-semibold text-sm break-words">{d.name}</div>
                 {d.phone && <div className="text-xs text-zinc-500">{d.phone}</div>}
               </div>
               {d.phone && (
                 <a href={`tel:${d.phone}`}
-                  className="text-xs px-3 py-1.5 rounded-sm bg-white/5 hover:bg-white/10">
+                  className="text-xs px-3 tipp-h shrink-0 inline-flex items-center rounded-sm bg-white/5 hover:bg-white/10">
                   Anrufen
                 </a>
               )}

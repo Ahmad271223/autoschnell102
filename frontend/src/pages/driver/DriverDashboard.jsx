@@ -30,17 +30,21 @@ function NichtAbgeholtDialog({ fahrt, onAbbrechen, onSenden, busy }) {
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4"
          style={{ background: "rgba(0,0,0,0.7)" }} data-testid="nicht-abgeholt-dialog">
-      <div className="bleibt-dunkel w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl p-5"
+      {/* Handy-Ansicht (24.09.2026): Blatt hoechstens so hoch wie der Bildschirm
+          (scrollt innen, auch mit offener Tastatur), Polster bis ueber den
+          Home-Balken, jede Auswahlzeile 44 px hoch. */}
+      <div className="bleibt-dunkel w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl p-5 blatt-unten modal-hoehe overflow-y-auto"
            style={{ background: "#141416", border: "1px solid rgba(255,255,255,0.1)", color: "#ffffff" }}>
         <div className="text-lg font-bold">Nicht abgeholt</div>
-        <div className="text-xs text-zinc-500 mt-0.5 mb-3">
+        <div className="text-xs text-zinc-500 mt-0.5 mb-2">
           {fahrt?.title || "Fahrt"} — warum konnte das Fahrzeug nicht abgeholt werden?
         </div>
-        <div className="space-y-1.5">
+        <div>
           {NICHT_ABGEHOLT_GRUENDE.map((g) => (
-            <label key={g.key} className="flex items-center gap-2 text-sm cursor-pointer">
+            <label key={g.key} className="flex items-center gap-3 text-sm cursor-pointer min-h-[44px] py-1">
               <input type="radio" name="nicht-abgeholt-grund" value={g.key}
                      checked={grund === g.key} onChange={() => setGrund(g.key)}
+                     className="shrink-0"
                      data-testid={`nicht-abgeholt-grund-${g.key}`} />
               {g.label}
             </label>
@@ -56,13 +60,13 @@ function NichtAbgeholtDialog({ fahrt, onAbbrechen, onSenden, busy }) {
         </div>
         <div className="mt-4 grid grid-cols-2 gap-2">
           <button type="button" onClick={onAbbrechen} disabled={busy}
-                  className="rounded-xl py-3 text-sm border disabled:opacity-50"
+                  className="rounded-xl py-3 min-h-[48px] text-sm border disabled:opacity-50"
                   style={{ borderColor: "rgba(255,255,255,0.15)" }}>
             Abbrechen
           </button>
           <button type="button" onClick={() => notiz && onSenden(notiz)} disabled={busy || !notiz}
                   data-testid="nicht-abgeholt-senden"
-                  className="rounded-xl py-3 text-sm font-semibold text-white disabled:opacity-40"
+                  className="rounded-xl py-3 min-h-[48px] px-2 text-sm font-semibold text-white disabled:opacity-40"
                   style={{ background: "var(--accent-red, #FF3B30)" }}>
             Als nicht abgeholt melden
           </button>
@@ -310,29 +314,33 @@ export default function DriverDashboard() {
                 return (
                   <div key={a.id} className="tactical-card overflow-hidden"
                        data-testid={`appt-${a.id}`}>
+                    {/* Handy-Ansicht (24.09.2026): Haendlername wird bei Platznot
+                        abgeschnitten (Status bleibt sichtbar); die Adresse steht
+                        aufgeklappt vollstaendig, zugeklappt einzeilig. */}
                     <button onClick={() => setOpen({ ...open, [a.id]: !isOpen })}
+                            aria-expanded={isOpen}
                             className="w-full text-left p-4 flex items-start gap-3 hover:bg-white/[0.02]">
                       <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 text-xs text-zinc-400">
-                          <span className="font-mono">{a.pickup_time || "—"}</span>
+                        <div className="flex items-center gap-2 text-xs text-zinc-400 min-w-0">
+                          <span className="font-mono shrink-0">{a.pickup_time || "—"}</span>
                           {a.dealer?.name && (
-                            <span className="flex items-center gap-1 text-zinc-500">
-                              <Building2 size={10} />{a.dealer.name}
+                            <span className="flex items-center gap-1 text-zinc-500 min-w-0">
+                              <Building2 size={10} className="shrink-0" /><span className="truncate">{a.dealer.name}</span>
                             </span>
                           )}
                           {a.status && (
-                            <span className="ml-auto text-[10px] px-2 py-0.5 rounded-sm"
+                            <span className="ml-auto shrink-0 whitespace-nowrap text-[10px] px-2 py-0.5 rounded-sm"
                                   style={{ background: "var(--wa-05)" }}>
                               {a.status}
                             </span>
                           )}
                         </div>
-                        <div className="font-display font-bold text-lg tracking-tight mt-1 truncate">
+                        <div className={`font-display font-bold text-lg tracking-tight mt-1 ${isOpen ? "break-words" : "truncate"}`}>
                           {v.make || "Fahrzeug"} {v.model || ""}
                         </div>
-                        <div className="text-xs text-zinc-500 flex items-center gap-1 mt-0.5">
-                          <MapPin size={11} className="flex-shrink-0" />
-                          <span className="truncate">
+                        <div className="text-xs text-zinc-500 flex items-start gap-1 mt-0.5">
+                          <MapPin size={11} className="flex-shrink-0 mt-0.5" />
+                          <span className={isOpen ? "break-words" : "truncate"}>
                             {a.pickup_address || a.seller_name || "—"}
                             {a.kontakt_nach_annahme && " · Adresse und Kontakt nach Annahme"}
                           </span>

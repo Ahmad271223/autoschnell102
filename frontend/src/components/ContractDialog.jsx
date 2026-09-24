@@ -614,10 +614,12 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
-      {/* M-07: Rahmen ist der Dialog (role/aria-modal/Fokus, lib/useModal). */}
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-black/70 backdrop-blur-sm">
+      {/* M-07: Rahmen ist der Dialog (role/aria-modal/Fokus, lib/useModal).
+          Handy-Ansicht (24.09.2026): Hoehe nach dvh (iOS-Adressleiste), am
+          Telefon fast randlos. */}
       <div ref={dialogRef} {...MODAL_ATTRIBUTE} aria-labelledby="contract-dialog-titel"
-           className="bg-[var(--bg-surface)] border w-full max-w-4xl max-h-[92vh] overflow-y-auto rounded-2xl"
+           className="bg-[var(--bg-surface)] border w-full max-w-4xl modal-hoehe overflow-y-auto rounded-2xl"
            style={{ borderColor: "var(--border-default)" }} data-testid="contract-dialog">
         <div className="flex items-center justify-between px-6 py-3 border-b sticky top-0 bg-[var(--bg-surface)] z-10"
              style={{ borderColor: "var(--border-default)" }}>
@@ -635,7 +637,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
           </button>
         </div>
 
-        <form onSubmit={submit} className="p-6 space-y-6 vertrag-formular">
+        <form onSubmit={submit} className="p-4 sm:p-6 space-y-6 vertrag-formular">
           {/* Verkäufer + Käufer side-by-side on lg, stacked on small */}
           <div className="grid lg:grid-cols-2 gap-5">
             <Section title="Verkäufer / Halter">
@@ -1036,8 +1038,11 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
             ) : null}
           </Section>
 
-          <div className="flex flex-wrap items-center justify-end gap-3 pt-2 sticky bottom-0 bg-[var(--bg-surface)] py-3 -mx-6 px-6 border-t"
-               style={{ borderColor: "var(--border-default)" }}>
+          {/* Handy-Ansicht (24.09.2026): Rand wie das Formular (4/6), Polster
+              bis ueber den Home-Balken der installierten App. */}
+          <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-3 pt-2 sticky bottom-0 bg-[var(--bg-surface)] py-3 -mx-4 px-4 sm:-mx-6 sm:px-6 border-t"
+               style={{ borderColor: "var(--border-default)",
+                        paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom, 0px))" }}>
             <button type="button" onClick={schliessen}
                     className="apple-btn apple-btn-secondary" data-testid="cancel-contract">
               Abbrechen

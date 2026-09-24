@@ -517,11 +517,12 @@ export default function SendDialog({ open, contract, onClose }) {
   const kaufBeendet = ["storniert", "nicht_abgeholt"].includes(contract?.kaufvorgang_status);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-black/70 backdrop-blur-sm">
       {/* M-07: Rahmen ist der Dialog (role/aria-modal/Fokus); M-11: Kopfzeile
-          bleibt beim Scrollen oben, Schliessen-Knopf mit 44-px-Trefferflaeche. */}
+          bleibt beim Scrollen oben, Schliessen-Knopf mit 44-px-Trefferflaeche.
+          Handy-Ansicht (24.09.2026): Hoehe nach dvh (iOS-Adressleiste). */}
       <div ref={dialogRef} {...MODAL_ATTRIBUTE} aria-labelledby="send-dialog-titel"
-           className="bg-[var(--bg-surface)] border w-full max-w-2xl rounded-md max-h-[90vh] overflow-y-auto"
+           className="bg-[var(--bg-surface)] border w-full max-w-2xl rounded-md modal-hoehe overflow-y-auto"
            style={{ borderColor: "var(--border-default)" }} data-testid="send-dialog">
         <div className="flex items-center justify-between px-6 py-3 border-b sticky top-0 bg-[var(--bg-surface)] z-10"
              style={{ borderColor: "var(--border-default)" }}>
@@ -688,7 +689,9 @@ export default function SendDialog({ open, contract, onClose }) {
             </div>
           )}
 
-          <div className="border-t pt-4 flex gap-3" style={{ borderColor: "var(--border-default)" }}>
+          {/* Handy-Ansicht (24.09.2026): am Telefon untereinander (die Texte
+              brachen sonst dreizeilig um) */}
+          <div className="border-t pt-4 flex flex-col sm:flex-row gap-3" style={{ borderColor: "var(--border-default)" }}>
             <button onClick={saveOnly} data-testid="save-only-btn"
                     className="flex-1 px-4 py-3 rounded-sm border hover:bg-white/5 flex items-center justify-center gap-2"
                     style={{ borderColor: "var(--border-default)" }}>

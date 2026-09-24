@@ -267,7 +267,7 @@ function BeweisCardInhalt({ beweis: start, beweisId, vehicleId, cacheKey,
       <button type="button" onClick={anfordern} disabled={holt}
               data-testid="beweis-erstellen-btn"
               className={compact
-                ? "apple-btn apple-btn-secondary !py-1 !px-2 !text-[11px] !rounded-full disabled:opacity-50"
+                ? "apple-btn apple-btn-secondary !py-1 !px-2.5 !text-[11px] !rounded-full !min-h-[36px] disabled:opacity-50"
                 : "apple-btn apple-btn-secondary !py-2.5 !text-[12px] w-full disabled:opacity-50"}>
         {holt ? <Loader2 size={compact ? 11 : 13} className="animate-spin" />
               : <ShieldCheck size={compact ? 11 : 13} />}

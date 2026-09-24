@@ -1083,3 +1083,82 @@ select option {
 /* Haken im gefuellten Kaestchen (Fahrer-Protokoll): die Fuellung ist im
    hellen Design dunkelgruen, dort muss der Haken weiss sein. */
 [data-theme="light"] .haken-gefuellt { color: #ffffff; }
+
+/* ─────── HANDY-ANSICHT (Wunsch Ahmad 24.09.2026) ───────
+   Gemeinsame Helfer fuer Fahrer-App und Haupt-App am Telefon (iOS Safari als
+   installierte App, Android Chrome). Regeln:
+   - Tippflaechen mindestens 44 px (Apple HIG) bzw. 40 px fuer dichte Reihen
+   - Dialoge nie hoeher als der sichtbare Bereich (dvh statt vh: die iOS-
+     Adressleiste verdeckt sonst die unteren Knoepfe), Inhalt scrollt innen
+   - untere Blaetter und feste Leisten mit Abstand zum Home-Balken
+     (env(safe-area-inset-bottom)), Kopfzeilen unter der Statusleiste
+     (env(safe-area-inset-top), viewport-fit=cover in index.html) */
+html {
+  /* iOS: beim Drehen keine "hilfreiche" Schriftvergroesserung */
+  -webkit-text-size-adjust: 100%;
+  /* Android: kein grauer Blitz auf jedem Tipp (Knoepfe zeigen :active selbst) */
+  -webkit-tap-highlight-color: transparent;
+}
+/* Als installierte App: Herunterziehen loest kein Neuladen der ganzen Seite
+   aus (Android Chrome) — im Abholprotokoll ging sonst der Blick verloren. */
+@media (display-mode: standalone) {
+  html, body { overscroll-behavior-y: none; }
+}
+/* Sichtbarer Fokusring fuer Tastatur und Schaltersteuerung — nur bei
+   :focus-visible, nicht bei jedem Fingertipp. */
+button:focus-visible, a:focus-visible, [role="button"]:focus-visible,
+select:focus-visible, textarea:focus-visible, input:focus-visible {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: 2px;
+}
+.input-base:focus-visible, .apple-input:focus-visible { outline: none; }
+
+/* Tippflaechen */
+.tipp { min-height: 44px; min-width: 44px; }
+.tipp-h { min-height: 44px; }
+.tipp-40 { min-height: 40px; }
+/* Am Touchgeraet bekommen die Standardknoepfe und Reiter von selbst genug
+   Hoehe — mit der Maus bleibt alles kompakt wie bisher. */
+@media (pointer: coarse) {
+  .apple-btn { min-height: 40px; }
+  .apple-segment-item { min-height: 34px; }
+  .cal-day { min-height: 56px; }
+  input[type="checkbox"], input[type="radio"] { width: 18px; height: 18px; }
+}
+
+/* Dialoge: Hoehe am sichtbaren Bereich (dvh, wo bekannt), sonst 90vh. */
+.modal-hoehe { max-height: 90vh; max-height: 90dvh; }
+/* Unteres Blatt (Fahrer-Dialoge): Polster bis ueber den Home-Balken. */
+.blatt-unten { padding-bottom: calc(1.25rem + env(safe-area-inset-bottom, 0px)); }
+/* Volle Hoehe am Telefon ohne die Adressleisten-Luecke von 100vh. */
+.hoehe-voll { min-height: 100vh; min-height: 100dvh; }
+/* Kopfzeilen, die oben kleben: unter der iOS-Statusleiste beginnen. */
+.kopf-sicher { padding-top: env(safe-area-inset-top, 0px); }
+
+/* Terminkalender am Telefon: 7 Spalten auf 300 px — Zellen flacher, keine
+   Textchips (die waeren nur "…"), stattdessen farbige Punkte je Termin; die
+   Tagesliste unter dem Kalender zeigt die Termine im Klartext. */
+.cal-punkte { display: none; flex-wrap: wrap; gap: 3px; padding-left: 4px; }
+.cal-punkte .cal-dot { width: 6px; height: 6px; }
+.cal-punkte-mehr { font-size: 9px; line-height: 6px; color: var(--text-muted); font-weight: 700; }
+@media (max-width: 639px) {
+  .cal-weekday { padding: 8px 2px; text-align: center; letter-spacing: 0.06em; font-size: 10px; }
+  .cal-day { min-height: 52px; padding: 5px 3px; gap: 2px; }
+  .cal-daynum { width: 24px; height: 24px; font-size: 12px; }
+  .cal-event, .cal-event-more { display: none; }
+  .cal-punkte { display: flex; }
+}
+
+/* Tabellen, die breiter als das Telefon sind: seitlich wischbar, der Hinweis
+   steht nur dort, wo er gebraucht wird. */
+.tabelle-wischen { -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; }
+.tabelle-hinweis { display: none; }
+@media (max-width: 767px) {
+  .tabelle-hinweis { display: block; font-size: 11px; color: var(--text-muted); margin: 0 0 6px; }
+}
+
+/* Meldungen (sonner): am Telefon oben mittig, nicht ueber den Kopfzeilen-
+   knoepfen, und unter der Statusleiste der installierten App. */
+@media (max-width: 600px) {
+  [data-sonner-toaster] { top: calc(12px + env(safe-area-inset-top, 0px)) !important; }
+}

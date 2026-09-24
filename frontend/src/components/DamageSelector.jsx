@@ -386,7 +386,7 @@ export default function DamageSelector({ damages = [], onChange }) {
               type="button"
               onClick={() => setActiveType(t)}
               data-testid={`damage-type-${t.key}`}
-              className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs transition ${
+              className={`flex items-center gap-2 rounded-full border px-3 py-1.5 tipp-40 text-xs transition ${
                 active ? "text-white shadow-md" : "text-zinc-300 hover:text-white"
               }`}
               style={{
@@ -418,7 +418,7 @@ export default function DamageSelector({ damages = [], onChange }) {
           <button
             type="button"
             onClick={clearAll}
-            className="inline-flex items-center gap-1 text-zinc-400 hover:text-red-400 shrink-0"
+            className="inline-flex items-center gap-1 text-zinc-400 hover:text-red-400 shrink-0 min-h-[40px] px-1"
             data-testid="damage-clear-all"
           >
             <Eraser size={12} /> Alle entfernen
@@ -482,7 +482,7 @@ export default function DamageSelector({ damages = [], onChange }) {
                 <button
                   type="button"
                   onClick={() => removeDamage(d.id)}
-                  className="text-zinc-500 hover:text-red-400 shrink-0"
+                  className="text-zinc-500 hover:text-red-400 shrink-0 tipp flex items-center justify-center -my-2 -mr-2"
                   data-testid={`damage-remove-${d.id}`}
                   aria-label="Schaden entfernen"
                 >

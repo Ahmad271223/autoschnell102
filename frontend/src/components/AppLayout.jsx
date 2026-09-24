@@ -166,7 +166,9 @@ export default function AppLayout({ children }) {
           })}
         </nav>
 
-        <div className="flex flex-col items-center gap-2 pb-2 border-t pt-2"
+        {/* Handy-Ansicht (24.09.2026): alle vier Knoepfe der Leiste 40 px
+            gross (vorher 20-36 px) — in der 64-px-Leiste bleibt das Platz. */}
+        <div className="flex flex-col items-center gap-1 pb-1 border-t pt-1"
              style={{ borderColor: "var(--border-default)" }}>
           <InstallPWAButton variante="symbol" />
           {/* Rollenprüfung 22.09.2026 (RP-024/M-19): der Zwei-Segment-Schalter
@@ -175,7 +177,7 @@ export default function AppLayout({ children }) {
           <ThemeToggle variante="symbol" />
           {/* U-143: der Abo-Punkt fuehrt zum Abo-Bereich in den Einstellungen */}
           <Link to="/app/einstellungen" onClick={wegBestaetigen("/app/einstellungen")}
-                className="p-1.5 rounded-md hover:bg-white/5"
+                className="w-10 h-10 rounded-md hover:bg-white/5 flex items-center justify-center"
                 aria-label={`Abo: ${subscription?.plan === "lifetime" ? "Lifetime"
                   : subscription?.active ? "aktiv" : "kein Abo"} — zu den Einstellungen`}>
             <span
@@ -195,17 +197,21 @@ export default function AppLayout({ children }) {
               nav("/");
             }}
             data-testid="logout-btn"
-            className="p-2 rounded-md hover:bg-white/5"
+            className="w-10 h-10 rounded-md hover:bg-white/5 flex items-center justify-center"
             style={{ color: "var(--text-secondary)" }}
             title="Abmelden"
+            aria-label="Abmelden"
           >
             <LogOut size={16} />
           </button>
         </div>
       </aside>
 
-      {/* M-03: zu breite Inhalte scrollen statt abgeschnitten zu werden */}
-      <main className="flex-1 overflow-x-auto min-w-0 flex flex-col">
+      {/* M-03: zu breite Inhalte scrollen statt abgeschnitten zu werden.
+          Handy-Ansicht (24.09.2026): als installierte App auf dem iPhone beginnt
+          die Seite unter der Statusleiste (viewport-fit=cover) — sonst lag die
+          Ueberschrift hinter Uhrzeit und Akku. */}
+      <main className="flex-1 overflow-x-auto min-w-0 flex flex-col kopf-sicher">
         <div className="flex-1">
           <NachladeFehler>
             <Suspense fallback={<SeiteLaedt />}>

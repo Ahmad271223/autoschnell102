@@ -273,13 +273,18 @@ export default function AbholCheckDialog({ appointment, onDone, onClose }) {
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4"
          style={{ background: "rgba(0,0,0,0.7)" }}>
-      <div className="bleibt-dunkel w-full sm:max-w-xl max-h-[92vh] overflow-y-auto rounded-t-2xl sm:rounded-2xl p-5"
+      {/* Handy-Ansicht (24.09.2026): Hoehe nach dvh (iOS-Adressleiste), Polster
+          bis ueber den Home-Balken, Schliessen mit 44-px-Trefferflaeche. */}
+      <div className="bleibt-dunkel w-full sm:max-w-xl modal-hoehe overflow-y-auto rounded-t-2xl sm:rounded-2xl p-5 blatt-unten"
            style={{ background: "#141416", border: "1px solid rgba(255,255,255,0.1)",
                     color: "#ffffff" /* Dialog ist bewusst dunkel — Schrift
                     auch im hellen Theme explizit hell, sonst dunkel-auf-dunkel */ }}>
         <div className="flex items-center justify-between mb-1">
           <div className="text-lg font-bold">Abhol-Check</div>
-          <button onClick={onClose} className="text-zinc-400 hover:text-white"><X size={20} /></button>
+          <button type="button" onClick={onClose} aria-label="Schließen"
+                  className="tipp -mr-2 flex items-center justify-center rounded-full text-zinc-400 hover:text-white">
+            <X size={20} />
+          </button>
         </div>
         <div className="text-xs text-zinc-500 mb-4">
           {appointment.title} — bitte vor Ort prüfen und dann bestätigen.
@@ -310,10 +315,11 @@ export default function AbholCheckDialog({ appointment, onDone, onClose }) {
 
         <div className="mt-3">
           <label className="text-[11px] text-zinc-500">Tankfüllstand</label>
+          {/* Handy-Ansicht (24.09.2026): fuenf gleich breite, 40 px hohe Stufen */}
           <div className="flex gap-1.5 mt-1">
             {FUEL_LEVELS.map((f) => (
-              <button key={f} type="button" onClick={() => setFuel(f)}
-                      className={`px-3 py-1.5 rounded-lg text-xs border ${fuel === f ? "bg-white/15 font-semibold" : "text-zinc-400"}`}
+              <button key={f} type="button" onClick={() => setFuel(f)} aria-pressed={fuel === f}
+                      className={`flex-1 px-1 tipp-40 rounded-lg text-xs border ${fuel === f ? "bg-white/15 font-semibold" : "text-zinc-400"}`}
                       style={inputStyle}>
                 {f}
               </button>
@@ -321,10 +327,10 @@ export default function AbholCheckDialog({ appointment, onDone, onClose }) {
           </div>
         </div>
 
-        <div className="mt-4 flex items-center justify-between">
+        <div className="mt-3 flex items-center justify-between gap-2">
           <div className="text-sm font-semibold">Abweichungen ({deviations.length})</div>
           <button type="button" onClick={addDeviation}
-                  className="inline-flex items-center gap-1 text-xs text-zinc-300 hover:text-white">
+                  className="inline-flex items-center gap-1 text-xs text-zinc-300 hover:text-white tipp-h px-2 -mr-2">
             <Plus size={14} /> Abweichung hinzufügen
           </button>
         </div>
@@ -338,8 +344,9 @@ export default function AbholCheckDialog({ appointment, onDone, onClose }) {
                       style={inputStyle}>
                 {DEVIATION_TYPES.map((t) => <option key={t.key} value={t.key}>{t.label}</option>)}
               </select>
-              <button type="button" onClick={() => removeDev(d.id)} className="text-zinc-500 hover:text-red-400">
-                <Trash2 size={15} />
+              <button type="button" onClick={() => removeDev(d.id)} aria-label="Abweichung entfernen"
+                      className="tipp -mr-2 flex items-center justify-center rounded-lg text-zinc-500 hover:text-red-400">
+                <Trash2 size={16} />
               </button>
             </div>
             {/* K-05: Längen wie der Server — sonst 422 mit englischem Text erst beim Absenden */}
@@ -347,15 +354,17 @@ export default function AbholCheckDialog({ appointment, onDone, onClose }) {
                    placeholder="Kurzbeschreibung, z.B. Kratzer hinten rechts *" maxLength={ABWEICHUNG_TEXT_MAX}
                    className={inputCls} style={inputStyle} />
             <div className="grid grid-cols-2 gap-2">
+              {/* Handy-Ansicht (24.09.2026): kurze Platzhalter — die langen waren
+                  in den halbbreiten Feldern abgeschnitten. */}
               <input value={d.expected} onChange={(e) => updateDev(d.id, { expected: e.target.value })}
-                     placeholder="Laut Vertrag (z.B. 84.000 km)" maxLength={ABWEICHUNG_TEXT_MAX}
+                     placeholder="Laut Vertrag" aria-label="Laut Vertrag (z. B. 84.000 km)" maxLength={ABWEICHUNG_TEXT_MAX}
                      className={inputCls} style={inputStyle} />
               <input value={d.actual} onChange={(e) => updateDev(d.id, { actual: e.target.value })}
-                     placeholder="Vor Ort (z.B. 85.120 km)" maxLength={ABWEICHUNG_TEXT_MAX}
+                     placeholder="Vor Ort" aria-label="Vor Ort (z. B. 85.120 km)" maxLength={ABWEICHUNG_TEXT_MAX}
                      className={inputCls} style={inputStyle} />
             </div>
-            <div className="flex items-center gap-2">
-              <label className="inline-flex items-center gap-1.5 text-xs text-zinc-400 cursor-pointer hover:text-white">
+            <div className="flex items-center gap-3">
+              <label className="inline-flex items-center gap-1.5 text-xs text-zinc-400 cursor-pointer hover:text-white tipp-h px-1 -ml-1">
                 <Camera size={14} />
                 {d.photo_b64 ? "Foto ersetzen" : "Foto anhängen"}
                 <input type="file" accept="image/*" capture="environment" className="hidden"

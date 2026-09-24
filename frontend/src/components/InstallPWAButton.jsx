@@ -148,7 +148,7 @@ export default function InstallPWAButton({ variante = "voll" }) {
     return (
       <>
         <button type="button" onClick={klick} data-testid="pwa-install-btn"
-                className="p-2 rounded-md hover:bg-white/5" style={{ color: "var(--text-secondary)" }}
+                className="w-10 h-10 rounded-md hover:bg-white/5 flex items-center justify-center" style={{ color: "var(--text-secondary)" }}
                 title="Als App installieren" aria-label="Als App installieren">
           <Download size={16} />
         </button>
@@ -160,9 +160,14 @@ export default function InstallPWAButton({ variante = "voll" }) {
   if (variante === "kompakt") {
     return (
       <>
+        {/* Handy-Ansicht (24.09.2026): 44 px hoch, kein Zeilenumbruch; auf sehr
+            schmalen Telefonen (unter 390 px, z. B. iPhone SE) nur das Symbol,
+            damit der Fahrername nicht abgeschnitten wird; der Name des Knopfs
+            bleibt im aria-label. */}
         <button type="button" onClick={klick} data-testid="pwa-install-btn"
-                className="flex items-center gap-1.5 text-xs text-zinc-300 hover:text-white px-3 py-2 rounded-sm bg-white/5">
-          <Download size={13} /> App installieren
+                aria-label="App installieren" title="App installieren"
+                className="flex items-center justify-center gap-1.5 text-xs text-zinc-300 hover:text-white px-2.5 tipp rounded-sm bg-white/5 whitespace-nowrap">
+          <Download size={14} /> <span className="max-[389px]:hidden">App installieren</span>
         </button>
         {dialog}
       </>
@@ -173,7 +178,7 @@ export default function InstallPWAButton({ variante = "voll" }) {
   return (
     <div>
       <button type="button" onClick={klick} data-testid="pwa-install-btn"
-              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-sm text-sm font-semibold border hover:bg-white/5"
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 tipp-h rounded-sm text-sm font-semibold border hover:bg-white/5"
               style={{ borderColor: "var(--border-default)", color: "var(--text-primary)" }}>
         <Download size={14} /> Als App installieren
       </button>

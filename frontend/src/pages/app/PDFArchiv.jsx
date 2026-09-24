@@ -573,7 +573,7 @@ function AbholZeile({ item }) {
         <button type="button"
                 onClick={() => setAdresseOffen((o) => !o)}
                 data-testid={`adresse-toggle-${item.id}`}
-                className="shrink-0 text-[11px] font-semibold underline-offset-2 hover:underline"
+                className="shrink-0 text-[11px] font-semibold underline-offset-2 hover:underline min-h-[36px] px-1 -mx-1 inline-flex items-center"
                 style={{ color: "var(--text-muted)" }}
                 title={adresseOffen ? "Vollständige Anschrift ausblenden" : "Vollständige Anschrift des Verkäufers einblenden"}>
           {adresseOffen ? "Adresse ausblenden" : "Adresse anzeigen"}
@@ -815,7 +815,7 @@ function VersionenZeile({ contractId }) {
           Fassungen
         </span>
         <button onClick={toggle} data-testid={`versions-open-${contractId}`}
-                className="apple-btn apple-btn-secondary !py-1 !px-2 !text-[11px] !rounded-full">
+                className="apple-btn apple-btn-secondary !py-1 !px-2.5 !text-[11px] !rounded-full !min-h-[36px]">
           {offen ? "ausblenden" : "ältere Fassungen anzeigen"}
         </button>
       </div>

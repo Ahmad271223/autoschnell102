@@ -65,7 +65,7 @@ export default function ThemeToggle({ variante = "segment" } = {}) {
         aria-pressed={hell}
         aria-label={hell ? "Helles Design aktiv — auf dunkles wechseln" : "Dunkles Design aktiv — auf helles wechseln"}
         title={hell ? "Auf dunkles Design wechseln" : "Auf helles Design wechseln"}
-        className="w-9 h-9 rounded-full flex items-center justify-center hover:bg-white/5"
+        className="w-10 h-10 rounded-full flex items-center justify-center hover:bg-white/5"
         style={{ color: "var(--text-secondary)", border: "1px solid var(--border-default)" }}
       >
         {hell ? <Moon size={15} /> : <Sun size={15} />}

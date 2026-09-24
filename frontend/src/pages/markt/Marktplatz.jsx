@@ -339,13 +339,13 @@ export default function Marktplatz() {
   // stellt eine Rechnung und schaltet nach Zahlungseingang frei.
 
   const Header = () => (
-    <div className="glass-nav sticky top-0 z-10 px-4 sm:px-6 py-3 flex items-center justify-between">
-      <div className="flex items-center gap-2">
-        <div className="w-8 h-8 rounded-lg flex items-center justify-center text-white"
+    <div className="glass-nav sticky top-0 z-10 px-3 sm:px-6 py-2 sm:py-3 flex items-center justify-between gap-2 kopf-sicher">
+      <div className="flex items-center gap-2 min-w-0">
+        <div className="w-8 h-8 shrink-0 rounded-lg flex items-center justify-center text-white"
              style={{ background: "var(--accent-red)" }}><Store size={16} /></div>
-        <div className="font-black tracking-tight text-white">B2B-MARKTPLATZ</div>
+        <div className="font-black tracking-tight text-white truncate text-sm sm:text-base">B2B-MARKTPLATZ</div>
       </div>
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
         {buyer ? (
           <>
             <span className="text-xs text-zinc-500 hidden sm:block">{buyer?.company_name}</span>
@@ -363,16 +363,17 @@ export default function Marktplatz() {
               </button>
             )}
             <button onClick={() => { logout(); nav("/markt/login"); }}
-                    className="text-zinc-400 hover:text-white inline-flex items-center gap-1.5 text-sm">
+                    className="text-zinc-400 hover:text-white inline-flex items-center gap-1.5 text-sm tipp-h px-2 whitespace-nowrap">
               <LogOut size={16} /> Abmelden
             </button>
           </>
         ) : (
           <>
+            {/* Handy-Ansicht (24.09.2026): beide Knoepfe 44 px hoch, kein Umbruch */}
             <button onClick={() => nav("/markt/login")} data-testid="markt-anmelden"
-                    className="text-zinc-400 hover:text-white text-sm">Anmelden</button>
+                    className="text-zinc-400 hover:text-white text-sm tipp-h px-2 whitespace-nowrap">Anmelden</button>
             <button onClick={() => nav("/anfrage?art=kaeufer")} data-testid="markt-anfrage"
-                    className="rounded-lg px-3 py-1.5 text-sm font-semibold text-white"
+                    className="rounded-lg px-3 tipp-h text-sm font-semibold text-white whitespace-nowrap"
                     style={{ background: "var(--accent-red)" }}>Zugang anfragen</button>
           </>
         )}

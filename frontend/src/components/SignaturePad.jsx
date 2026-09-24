@@ -143,7 +143,7 @@ export default function SignaturePad({ label, onChange, height = 160, startBild 
       <div className="flex items-center justify-between mb-1">
         <label className="text-[11px] text-zinc-500">{label}</label>
         <button type="button" onClick={clear}
-                className="text-[11px] text-zinc-500 hover:text-white inline-flex items-center gap-1 min-h-[32px] px-1">
+                className="text-[11px] text-zinc-500 hover:text-white inline-flex items-center gap-1 min-h-[44px] px-2 -mr-2">
           <Eraser size={11} /> löschen
         </button>
       </div>

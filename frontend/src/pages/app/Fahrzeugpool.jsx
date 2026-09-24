@@ -69,7 +69,10 @@ export default function Fahrzeugpool() {
       <div className="overline">Fahrzeugpool</div>
       <h1 className="font-display font-black text-3xl lg:text-4xl tracking-tighter mt-1">Verglichene & geprüfte Fahrzeuge</h1>
 
-      <div className="mt-6 tactical-card overflow-x-auto">
+      {/* Handy-Ansicht (24.09.2026): die Tabelle ist breiter als das Telefon —
+          seitlich wischbar, mit Hinweis (nur unter 768 px sichtbar). */}
+      <p className="tabelle-hinweis mt-6">Tabelle seitlich wischen, um alle Spalten zu sehen.</p>
+      <div className="mt-2 md:mt-6 tactical-card overflow-x-auto tabelle-wischen">
         <table className="w-full text-sm min-w-[720px]">
           <thead>
             <tr className="text-left overline" style={{ background: "var(--wa-02)" }}>
@@ -103,7 +106,7 @@ export default function Fahrzeugpool() {
                 <td className="px-4 py-3">
                   {/* Weg zur Fahrzeugakte — fuer Sucher ist dies die einzige
                       Fahrzeugliste (der Bestand ist Chefsache). */}
-                  <Link to={`/app/akte/${v.id}`} className="font-semibold hover:underline underline-offset-2"
+                  <Link to={`/app/akte/${v.id}`} className="font-semibold hover:underline underline-offset-2 inline-block py-2 -my-2"
                         data-testid={`pool-akte-${v.id}`}>
                     {v.data?.make_label} {v.data?.model_label}
                   </Link>

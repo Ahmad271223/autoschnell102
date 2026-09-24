@@ -69,7 +69,7 @@ export default function DriverLogin() {
           </div>
         </Link>
 
-        <div className="tactical-card p-7">
+        <div className="tactical-card p-5 sm:p-7">
           <h1 className="font-display font-black text-2xl tracking-tighter">Fahrer-Login</h1>
           {params.get("reason") === "session" && (
             <div className="mt-4 text-xs px-3 py-2 rounded-sm border" data-testid="fahrer-abmeldegrund" role="alert"
@@ -107,20 +107,22 @@ export default function DriverLogin() {
             </button>
           </form>
 
-          <div className="mt-3 text-center text-xs">
-            <Link to="/passwort-vergessen" data-testid="link-driver-reset" className="text-zinc-400 hover:text-white underline">
+          {/* Handy-Ansicht (24.09.2026): Textlinks mit Polster (gut tippbar). */}
+          <div className="mt-2 text-center text-xs">
+            <Link to="/passwort-vergessen" data-testid="link-driver-reset"
+                  className="inline-block py-2 px-1 text-zinc-400 hover:text-white underline">
               Passwort vergessen? Der Betreiber setzt es neu
             </Link>
           </div>
-          <div className="mt-3 text-center text-[11.5px] text-zinc-500" data-testid="driver-login-hinweis">
+          <div className="mt-1 text-center text-[11.5px] text-zinc-500 leading-relaxed" data-testid="driver-login-hinweis">
             Hier melden sich nur Fahrer an. Firmen und Sucher:{" "}
-            <Link to="/login" className="underline">/login</Link> · Zwischenhändler:{" "}
-            <Link to="/markt/login" className="underline">B2B-Marktplatz</Link>
+            <Link to="/login" className="underline inline-block py-1.5 px-0.5">/login</Link> · Zwischenhändler:{" "}
+            <Link to="/markt/login" className="underline inline-block py-1.5 px-0.5">B2B-Marktplatz</Link>
           </div>
-          <div className="mt-5 text-center text-sm text-zinc-400">
+          <div className="mt-3 text-center text-sm text-zinc-400">
             Noch kein Zugang?{" "}
             <Link to="/anfrage?art=fahrer" data-testid="link-driver-anfrage"
-              className="font-semibold" style={{ color: "var(--accent-red)" }}>
+              className="font-semibold inline-block py-2 px-1" style={{ color: "var(--accent-red)" }}>
               Zugang anfragen
             </Link>
           </div>

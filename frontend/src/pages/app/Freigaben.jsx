@@ -121,7 +121,7 @@ function Vergleich({ eintrag }) {
         </div>
       )}
       <button type="button" onClick={() => setAlle((a) => !a)}
-              className="mt-1.5 text-[11px] text-zinc-500 hover:text-white inline-flex items-center gap-1">
+              className="mt-0.5 text-[11px] text-zinc-500 hover:text-white inline-flex items-center gap-1 min-h-[40px] px-1 -ml-1">
         {alle ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
         {alle ? "nur Auffälligkeiten" : `alle ${zeilen.length} Zeilen zeigen`}
       </button>
@@ -359,7 +359,7 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
               <button type="button" disabled={busy}
                       onClick={() => senden(e, { preis_zuruecksetzen: true })}
                       data-testid={`freigabe-preis-zuruecksetzen-${e.protocol_id}`}
-                      className="inline-flex items-center gap-1 text-[11px] text-zinc-400 hover:text-white disabled:opacity-50">
+                      className="inline-flex items-center gap-1 text-[11px] text-zinc-400 hover:text-white disabled:opacity-50 min-h-[36px] px-1 -mx-1">
                 <Undo2 size={11} /> auf Vertragspreis zurücksetzen
               </button>
             )}

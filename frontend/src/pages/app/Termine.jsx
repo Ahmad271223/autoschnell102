@@ -579,7 +579,7 @@ export default function Termine() {
         {["", ...STATUSES].map((s) => (
           <button key={s || "all"} onClick={() => setFilter(s)}
                   data-testid={`filter-status-${s || "all"}`}
-                  className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors border ${
+                  className={`px-3 py-1.5 tipp-40 rounded-full text-xs font-medium transition-colors border ${
                     filter === s
                       ? "bg-white/10 text-white border-white/15"
                       : "bg-white/[0.03] text-zinc-400 border-white/[0.06] hover:bg-white/[0.06] hover:text-white"
@@ -718,6 +718,18 @@ function MonthView({ cursor, setCursor, days, apptsByDay, selectedDay, setSelect
                   })}
                   {more > 0 && <div className="cal-event-more">+{more} weitere</div>}
                 </div>
+                {/* Handy-Ansicht (24.09.2026): unter 640 px sind die Textchips
+                    ausgeblendet (index.css) — je Termin ein farbiger Punkt, der
+                    Klartext steht in der Tagesliste unter dem Kalender. */}
+                {dayAppts.length > 0 && (
+                  <div className="cal-punkte" aria-hidden="true">
+                    {dayAppts.slice(0, 4).map((a) => (
+                      <span key={a.id} className="cal-dot"
+                            style={{ background: (STATUS_META[a.status] || STATUS_META.offen).dot }} />
+                    ))}
+                    {dayAppts.length > 4 && <span className="cal-punkte-mehr">+{dayAppts.length - 4}</span>}
+                  </div>
+                )}
               </button>
             );
           })}
@@ -827,7 +839,7 @@ function DayApptItem({ a, onEdit, compact, mitBeweis = false }) {
             <a href={telHref(a.driver.phone)} data-testid={`fahrer-tel-${a.id}`}
                title={`${a.driver.name || "Fahrer"} anrufen`}
                onClick={(e) => e.stopPropagation()}
-               className="inline-flex items-center gap-1 text-[11px] text-sky-300 hover:underline">
+               className="inline-flex items-center gap-1 text-[11px] text-sky-300 hover:underline min-h-[36px] px-1 -mx-1">
               <Phone size={10} /> {a.driver.phone}
             </a>
           )}
@@ -842,7 +854,7 @@ function DayApptItem({ a, onEdit, compact, mitBeweis = false }) {
           {a.has_pickup_report && (
             <button type="button" data-testid={`bericht-${a.id}`}
                     onClick={(e) => { e.stopPropagation(); setBericht(true); }}
-                    className="inline-flex items-center gap-1 text-[11px] text-sky-300 hover:underline">
+                    className="inline-flex items-center gap-1 text-[11px] text-sky-300 hover:underline min-h-[36px] px-1 -mx-1">
               <Camera size={10} /> Abholbericht
               {a.deviations_count ? ` · ${a.deviations_count} Abweichung${a.deviations_count === 1 ? "" : "en"}` : ""}
             </button>
@@ -1080,13 +1092,15 @@ function EditDialog({ appt, drivers, fahrerGeladen = true, chef = false, isNew, 
   const dialogRef = useModal(hintergrundKlick);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 apple-modal-backdrop"
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 apple-modal-backdrop"
          onClick={hintergrundKlick} data-testid="edit-appt-hintergrund">
+      {/* Handy-Ansicht (24.09.2026): Hoehe nach dvh (iOS-Adressleiste), am
+          Telefon fast randlos, die Fusszeile bricht um statt seitlich zu scrollen. */}
       <div ref={dialogRef} {...MODAL_ATTRIBUTE} aria-labelledby="edit-appt-titel"
-           className="apple-modal w-full max-w-xl max-h-[90vh] overflow-y-auto"
+           className="apple-modal w-full max-w-xl modal-hoehe overflow-y-auto overflow-x-hidden"
            onClick={(e) => e.stopPropagation()}
            data-testid="edit-appt-dialog">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-white/[0.08]">
+        <div className="flex items-center justify-between px-4 sm:px-6 py-3 sm:py-4 border-b border-white/[0.08]">
           <div>
             <div className="overline">{isNew ? "Neu" : "Bearbeiten"}</div>
             <div className="font-display font-bold text-xl mt-0.5" id="edit-appt-titel">
@@ -1099,7 +1113,7 @@ function EditDialog({ appt, drivers, fahrerGeladen = true, chef = false, isNew, 
           </button>
         </div>
 
-        <div className="p-6 space-y-5">
+        <div className="p-4 sm:p-6 space-y-5">
           {/* Title */}
           <div className="space-y-1.5">
             <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Titel</label>
@@ -1376,7 +1390,8 @@ function EditDialog({ appt, drivers, fahrerGeladen = true, chef = false, isNew, 
         </div>
 
         {/* Footer */}
-        <div className="px-6 py-4 border-t border-white/[0.08] flex items-center justify-between gap-2 sticky bottom-0 bg-[var(--bg-elevated)] rounded-b-[18px]">
+        <div className="px-4 sm:px-6 py-3 sm:py-4 border-t border-white/[0.08] flex flex-wrap items-center justify-between gap-2 sticky bottom-0 bg-[var(--bg-elevated)] rounded-b-[18px]"
+             style={{ paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom, 0px))" }}>
           <div>
             {onDelete && (
               <button onClick={loeschen} disabled={arbeitet} className="apple-btn apple-btn-danger disabled:opacity-60" data-testid="delete-appt-btn">
@@ -1384,7 +1399,7 @@ function EditDialog({ appt, drivers, fahrerGeladen = true, chef = false, isNew, 
               </button>
             )}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 ml-auto">
             <button onClick={onClose} className="apple-btn apple-btn-ghost">Abbrechen</button>
             <button onClick={speichern} disabled={arbeitet} data-testid="save-appt-btn" className="apple-btn apple-btn-primary disabled:opacity-60">
               {arbeitet ? "Speichert…" : isNew ? "Anlegen" : "Speichern"}

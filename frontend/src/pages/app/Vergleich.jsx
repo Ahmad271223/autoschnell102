@@ -569,7 +569,7 @@ export default function Vergleich() {
                 onClick={() => setUrl("")}
                 data-testid="vergleich-url-clear"
                 title="URL löschen"
-                className="p-2 mr-1 rounded-md hover:bg-white/5 text-zinc-400 hover:text-white shrink-0"
+                className="tipp mr-0.5 flex items-center justify-center rounded-md hover:bg-white/5 text-zinc-400 hover:text-white shrink-0"
               >
                 <XIcon size={16} />
               </button>
@@ -655,7 +655,7 @@ export default function Vergleich() {
         <div className="mt-3 text-xs flex flex-wrap gap-2 items-center" style={{ color: "var(--text-muted)" }}>
           {/* Runde 22 (11.09.2026): Filter nach dem Auslesen automatisch oeffnen */}
           <label
-            className="inline-flex items-center gap-1.5 sm:ml-3 cursor-pointer select-none"
+            className="inline-flex items-center gap-2 sm:ml-3 cursor-pointer select-none min-h-[40px]"
             title="Nach dem Auslesen die Filter der aktiven Portale (mobile.de / AutoScout24) automatisch öffnen"
           >
             <input
@@ -669,7 +669,7 @@ export default function Vergleich() {
           </label>
           {/* 15.09.2026 (Wunsch Ahmad): daneben statt darueber — zweiter Bildschirm */}
           <label
-            className="inline-flex items-center gap-1.5 sm:ml-3 cursor-pointer select-none"
+            className="inline-flex items-center gap-2 sm:ml-3 cursor-pointer select-none min-h-[40px]"
             title="Filter-Fenster neben der App öffnen — auf dem zweiten Bildschirm, wenn der Browser es erlaubt"
           >
             <input
