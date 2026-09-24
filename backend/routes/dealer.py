@@ -64,6 +64,9 @@ class DealerSettingsIn(BaseModel):
     # ein- und ausschalten. Der eigene Text der Firma steht unabhaengig
     # davon in default_special_agreements und kommt im Vertrag darunter.
     sondervereinbarung_standard_aktiv: Optional[bool] = None
+    # Wunsch Ahmad 24.09.2026: Übergabe & Empfangsbestätigung im gedruckten
+    # Vertrag an/aus (Standard an); im Erstellen-Dialog nicht mehr abgefragt.
+    empfang_drucken: Optional[bool] = None
     # Text unter "Unterschriften" in der DIGITALEN Ausfertigung (Versand per
     # E-Mail/WhatsApp, ohne Unterschriftslinien). Leer = Standardtext.
     digital_vertragstext: Optional[str] = None
@@ -313,7 +316,7 @@ def _collect_settings_update(body: DealerSettingsIn) -> dict:
                  "email_subject_nach_kauf", "email_template_nach_kauf",
                  "whatsapp_template_nach_kauf",
                  "email_subject_bahn", "email_template_bahn",
-                 "sondervereinbarung_standard_aktiv"):
+                 "sondervereinbarung_standard_aktiv", "empfang_drucken"):
         wert = getattr(body, feld, None)
         if wert is not None:
             update[feld] = wert

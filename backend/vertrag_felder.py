@@ -24,6 +24,9 @@ KAEUFER_FELDER = {
     # nicht die Anmeldenummer des Chefs (dealers.kunden_nr). Wird wie die
     # anderen Kaeuferdaten beim Vertrag eingefroren.
     "vertrags_kundennummer": "vertrags_kundennummer",
+    # Wunsch Ahmad 24.09.2026: Empfangsbestätigung im Druck an/aus, Stand
+    # beim Erstellen (None = an).
+    "empfang_drucken": "empfang_drucken",
 }
 
 

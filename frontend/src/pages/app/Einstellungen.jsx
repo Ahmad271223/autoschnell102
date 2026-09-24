@@ -66,6 +66,8 @@ export function formAus(dealer) {
     email_template_bahn: dealer.email_template_bahn || "",
     sondervereinbarung_standard_aktiv:
       dealer.sondervereinbarung_standard_aktiv !== false,
+    // Wunsch Ahmad 24.09.2026: Übergabe & Empfangsbestätigung im Druck an/aus
+    empfang_drucken: dealer.empfang_drucken !== false,
     // Runde 26: EIN Feld. Ein noch vorhandener AGB-Text wird hier
     // angehaengt; beim Speichern wird das alte Feld geleert.
     default_terms: "",
@@ -181,6 +183,7 @@ const FELD_TITEL = {
   email_subject_bahn: "Bahnverbindung (Betreff)", email_template_bahn: "Bahnverbindung (E-Mail)",
   default_terms: "AGB", default_special_agreements: "Besondere Vereinbarungen",
   digital_vertragstext: "Vertragstext", sondervereinbarung_standard_aktiv: "Standardsatz an/aus",
+  empfang_drucken: "Empfangsbestätigung an/aus",
 };
 
 const SECTIONS = [
@@ -780,6 +783,39 @@ export default function Einstellungen() {
                   </span>
                 </span>
               </label>
+              {/* Wunsch Ahmad 24.09.2026: Der Block "Übergabe & Empfangs-
+                  bestätigung" (Kästchen für Zulassungsbescheinigung, Schlüssel,
+                  Kaufpreis, "Datum und Ort") steht nicht mehr im Erstellen-
+                  Dialog; hier entscheidet der Chef, ob er im gedruckten
+                  Vertrag unter "Unterschriften" erscheint. */}
+              {user?.role !== "sucher" && (
+                <label className="flex items-start gap-3 p-4 rounded-2xl cursor-pointer"
+                       style={{ background: "var(--wa-03)",
+                                border: "1px solid var(--border-default)" }}
+                       data-testid="set-empfang-drucken">
+                  <input type="checkbox" className="mt-1 w-5 h-5 shrink-0"
+                         checked={form.empfang_drucken !== false}
+                         onChange={(e) => setForm({
+                           ...form,
+                           empfang_drucken: e.target.checked,
+                         })} />
+                  <span>
+                    <span className="block font-semibold"
+                          style={{ color: "var(--text-primary)" }}>
+                      Übergabe &amp; Empfangsbestätigung mitdrucken
+                    </span>
+                    <span className="block text-xs mt-1"
+                          style={{ color: "var(--text-secondary)" }}>
+                      An = im gedruckten Vertrag stehen unter „Unterschriften“ die
+                      Kästchen „Zulassungsbescheinigung Teil I &amp; II“, „KFZ mit
+                      … Schlüssel(n)“ und „Kaufpreis“ zum Ankreuzen von Hand, dazu
+                      „Datum und Ort“ (Abholdatum, Firmensitz, Verkäuferort).
+                      Aus = nur Unterschriftslinie mit „Datum und Ort“.
+                      Die Kundenfassung per E-Mail/WhatsApp ist davon nie betroffen.
+                    </span>
+                  </span>
+                </label>
+              )}
               <AppleTextarea
                 label="Eigene Besondere Vereinbarungen"
                 rows={6}

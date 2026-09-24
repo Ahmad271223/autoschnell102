@@ -934,71 +934,12 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
             )}
           </Section>
 
-          {/* Runde 22 (11.09.2026): Empfangsbestätigung wie auf der
-              Papiervorlage — landet im Vertrag unter "Unterschriften". */}
-          <Section
-            title="Übergabe & Empfangsbestätigung"
-            subtitle="Wie im Vertrag unter „Unterschriften“. Leere Kästchen erscheinen im PDF zum Ankreuzen von Hand."
-          >
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <div className="rounded-lg border px-3 py-3 space-y-2"
-                   style={{ borderColor: "var(--border-default)" }}
-                   data-testid="contract-empfang-kaeufer">
-                <div className="text-sm font-semibold">Käufer (du) bestätigt Empfang von:</div>
-                <CheckRow
-                  checked={form.empfang_zulassungsbescheinigung}
-                  onChange={(c) => set("empfang_zulassungsbescheinigung", c)}
-                  testid="contract-empfang-zb"
-                >
-                  Zulassungsbescheinigung Teil I &amp; II
-                </CheckRow>
-                <CheckRow
-                  checked={form.empfang_schluessel}
-                  onChange={(c) => set("empfang_schluessel", c)}
-                  testid="contract-empfang-schluessel"
-                >
-                  <span>KFZ mit</span>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    maxLength={2}
-                    value={form.schluessel_anzahl}
-                    onChange={(e) => setSchluesselAnzahl(e.target.value)}
-                    placeholder="__"
-                    aria-label="Anzahl Schlüssel"
-                    data-testid="contract-schluessel-anzahl"
-                    className="input-base w-14 text-center"
-                    style={{ padding: "0.25rem 0.5rem" }}
-                  />
-                  <span>Schlüssel(n)</span>
-                </CheckRow>
-                <Field label="Ort (Käufer)" value={form.empfang_ort_kaeufer} onChange={(v) => set("empfang_ort_kaeufer", v)} testid="contract-empfang-ort-kaeufer" />
-              </div>
-              <div className="rounded-lg border px-3 py-3 space-y-2"
-                   style={{ borderColor: "var(--border-default)" }}
-                   data-testid="contract-empfang-verkaeufer">
-                <div className="text-sm font-semibold">Verkäufer bestätigt Empfang von:</div>
-                <CheckRow
-                  checked={form.empfang_kaufpreis}
-                  onChange={(c) => set("empfang_kaufpreis", c)}
-                  testid="contract-empfang-kaufpreis"
-                >
-                  Kaufpreis
-                </CheckRow>
-                <Field label="Ort (Verkäufer)" value={form.empfang_ort_verkaeufer} onChange={(v) => set("empfang_ort_verkaeufer", v)} testid="contract-empfang-ort-verkaeufer" />
-              </div>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <Field
-                label="Datum"
-                type="date"
-                value={form.empfang_datum}
-                onChange={(v) => set("empfang_datum", v)}
-                testid="contract-empfang-datum"
-                helper="Gilt für beide Empfangsbestätigungen. Folgt dem Abholdatum, bis du es hier änderst."
-              />
-            </div>
-          </Section>
+          {/* Wunsch Ahmad 24.09.2026: Die Übergabe & Empfangsbestätigung
+              wird beim Erstellen nicht mehr abgefragt. Ob der Block im
+              gedruckten Vertrag steht, schaltet der Chef unter Einstellungen →
+              Vertragstexte (empfang_drucken); Datum und Orte kommen von selbst
+              aus Abholdatum, Firmensitz und Verkäuferort, die Kästchen bleiben
+              zum Ankreuzen von Hand leer. */}
 
           <Section title="Fahrzeugbeschreibung (vom Inserat)">
             <Field

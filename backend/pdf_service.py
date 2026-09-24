@@ -428,16 +428,34 @@ def _empfang_block(seite, contract, st, breite):
     return t
 
 
-def _empfang_kasten(rolle, seite, contract, st, unterschrift):
+def empfang_drucken(contract, dealer=None) -> bool:
+    """Wunsch Ahmad 24.09.2026: Steht die Empfangsbestaetigung (Kaestchen
+    Zulassungsbescheinigung/Schluessel/Kaufpreis) im gedruckten Vertrag?
+    Beim Erstellen eingefroren (contract_data.empfang_drucken, KAEUFER_FELDER),
+    sonst die Firmeneinstellung; fehlt beides: an (wie bisher)."""
+    for quelle in ((contract or {}).get("empfang_drucken"),
+                   (dealer or {}).get("empfang_drucken")):
+        if quelle is not None:
+            return quelle is not False
+    return True
+
+
+def _empfang_kasten(rolle, seite, contract, st, unterschrift, mit_empfang=True):
     """Kasten einer Partei im Abschnitt "Unterschriften": Titel,
     "bestätigt Empfang von:" mit Kaestchen, "Datum und Ort". Druckfassung
     (unterschrift=True) zusaetzlich mit der Unterschriftslinie; die digitale
     Fassung ohne. Die fruehere Linie "Ort, Datum" entfaellt (Beschluss
     11.09.2026, wie Ahmads Vorlage): "Datum und Ort" steht schon im Kasten —
     zwei Datums-/Ortsangaben je Partei verwirrten."""
+    c = contract or {}
+    ort = c.get("empfang_ort_kaeufer") if seite == "kaeufer" else c.get("empfang_ort_verkaeufer")
+    inhalt = (_empfang_block(seite, contract, st, COL_W - 16) if mit_empfang
+              # Ohne Empfangsbestaetigung (Einstellung aus): nur "Datum und Ort".
+              else Paragraph("Datum und Ort: " + _xml_escape(
+                  _empfang_datum_ort(c.get("empfang_datum"), ort)), st["value"]))
     rows = [
         [Paragraph(f"<b>{_xml_escape(rolle)}</b>", st["sig_label"])],
-        [_empfang_block(seite, contract, st, COL_W - 16)],
+        [inhalt],
     ]
     stil = [
         ("BOX", (0, 0), (-1, -1), 0.5, DIVIDER),
@@ -463,13 +481,13 @@ def _empfang_kasten(rolle, seite, contract, st, unterschrift):
     return t
 
 
-def _empfang_paar(contract, st, unterschrift):
+def _empfang_paar(contract, st, unterschrift, mit_empfang=True):
     """Beide Kaesten nebeneinander — Verkaeufer links, Kaeufer rechts
     (wie die Parteien oben im Vertrag)."""
     t = Table(
-        [[_empfang_kasten("Verkäufer / Halter", "verkaeufer", contract, st, unterschrift),
+        [[_empfang_kasten("Verkäufer / Halter", "verkaeufer", contract, st, unterschrift, mit_empfang),
           "",
-          _empfang_kasten("Käufer / Händler", "kaeufer", contract, st, unterschrift)]],
+          _empfang_kasten("Käufer / Händler", "kaeufer", contract, st, unterschrift, mit_empfang)]],
         colWidths=[COL_W, 0.5 * cm, COL_W],
     )
     t.setStyle(TableStyle([
@@ -1142,7 +1160,8 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
     # ("Verkäufer / Halter" links, "Käufer / Händler" rechts) tragen unter
     # dem Titel die Empfangsbestaetigung mit Ankreuz-Kaestchen und "Datum
     # und Ort", darunter wie bisher die Linien — siehe _empfang_kasten.
-    sig = _empfang_paar(contract, st, unterschrift=True)
+    sig = _empfang_paar(contract, st, unterschrift=True,
+                        mit_empfang=empfang_drucken(contract, dealer))
     story.append(Spacer(1, 8))
     story.append(KeepTogether([
         _section("Unterschriften", st),
