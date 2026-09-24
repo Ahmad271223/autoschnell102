@@ -76,6 +76,19 @@ class DamageIn(BaseModel):
     abbr: Optional[str] = Field(default=None, max_length=500)
     color: Optional[str] = Field(default=None, max_length=500)
     zone: Optional[str] = Field(default="", max_length=500)
+    # Wunsch Ahmad 25.09.2026 (KI-Schadennachlass): wenige Zusatzmerkmale je
+    # Schadensart (Groesse, Lack beschaedigt, Laenge, Funktion) — als kleines
+    # Woerterbuch Text -> Text, hoechstens 8 Eintraege.
+    severity_data: Optional[Dict[str, str]] = None
+
+    @field_validator("severity_data", mode="before")
+    @classmethod
+    def _severity_deckeln(cls, v):
+        if v is None or v == {}:
+            return None
+        if not isinstance(v, dict) or len(v) > 8:
+            raise ValueError("severity_data: hoechstens 8 Merkmale")
+        return {str(k)[:40]: str(w)[:60] for k, w in v.items() if str(k or "").strip()}
     # Runde 17 (Nr. 338): Skizzen-Koordinaten sind Prozent-/Pixelwerte —
     # inf/nan und Riesenzahlen (JSON-Serialisierung, ReportLab-Layout)
     # werden abgelehnt statt bis ins PDF durchgereicht.

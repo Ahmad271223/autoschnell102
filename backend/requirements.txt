@@ -58,3 +58,4 @@ xmltodict==1.0.4
 yarl==1.24.5
 
 annotated-doc==0.0.5
+anthropic>=1.0.0

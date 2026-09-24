@@ -25,6 +25,7 @@ from pymongo.errors import DuplicateKeyError
 
 import betrieb
 import protokoll_vergleich as PV
+from ai import pickup_assessment as KI
 from deps import (besitzer_namen, current_chef, db, ist_sucher,
                   log_activity, log_activity_sicher, now_iso, termin_bereich,
                   termin_im_bereich)
@@ -1565,6 +1566,9 @@ async def submit_protocol(appt_id: str, driver=Depends(current_driver)):
                               "protokoll.zur_freigabe", ref=doc["id"],
                               meta={"appointment_id": appt_id,
                                     "vehicle_id": appt.get("vehicle_id")})
+    # Wunsch Ahmad 25.09.2026: KI-Abholbewertung im Hintergrund — die
+    # Uebergabe an den Chef haengt NICHT davon ab (feuer-und-vergiss).
+    KI.bewertung_anstossen(doc["id"], appt.get("dealer_id", ""))
     return {"ok": True, "status": ZUR_FREIGABE, "protocol_id": doc["id"]}
 
 
@@ -2565,6 +2569,16 @@ async def protokolle_zur_freigabe(user=Depends(_chef_dep), response: Response = 
                 "ladefehler": "Dieses Protokoll enthält ungültige Werte — bitte beim Fahrer "
                               "nachfragen oder an ihn zurückschicken.",
             })
+    # Wunsch Ahmad 25.09.2026: Kurzform der KI-Bewertung je Protokoll (die
+    # Karte laedt Details ueber GET /protocols/{id}/ki-bewertung nach).
+    try:
+        ki = await KI.zusammenfassungen([r["protocol_id"] for r in raus if r.get("protocol_id")],
+                                        user["dealer_id"])
+    except Exception:  # noqa: BLE001 — die KI ist Beiwerk
+        log.exception("Freigaben: KI-Zusammenfassungen nicht geladen")
+        ki = {}
+    for r in raus:
+        r["ki_bewertung"] = ki.get(r.get("protocol_id"))
     return raus
 
 
@@ -2751,9 +2765,35 @@ async def protokoll_freigeben(protocol_id: str, body: FreigabeIn,
                               ref=protocol_id,
                               meta={"neuer_preis": body.neuer_preis,
                                     "notiz": (body.notiz or "")[:200]})
+    # Wunsch Ahmad 25.09.2026: was der Chef aus der KI-Empfehlung machte —
+    # anonymisiert fuer die eigene Preisdatenbank (wirft nie).
+    await KI.lernfall_speichern(protocol_id, user["dealer_id"],
+                                chef_preis=setzen.get("neuer_preis", doc.get("neuer_preis")),
+                                quelle=setzen.get("preis_quelle") or doc.get("preis_quelle") or "vertrag")
     return {"ok": True, "status": FREIGEGEBEN,
             "neuer_preis": setzen.get("neuer_preis", doc.get("neuer_preis")),
             "stand": jetzt}
+
+
+@router.get("/protocols/{protocol_id}/ki-bewertung")
+async def protokoll_ki_bewertung(protocol_id: str, user=Depends(_chef_dep)):
+    """Wunsch Ahmad 25.09.2026: KI-Abholbewertung zum Protokoll (nur Chef —
+    wie die Freigabe selbst). Status: ok | laeuft | keine | veraltet |
+    fehler | zeitlimit | aus. Rein beratend: aendert nichts."""
+    erg = await KI.bewertung_lesen(protocol_id, user["dealer_id"])
+    if erg is None:
+        raise HTTPException(404, "Protokoll nicht gefunden")
+    return erg
+
+
+@router.post("/protocols/{protocol_id}/ki-bewertung/neu")
+async def protokoll_ki_bewertung_neu(protocol_id: str, user=Depends(_chef_dep)):
+    """Bewertung neu rechnen (Chef klickt "Neu berechnen") — wartet auf die
+    Antwort (Zeitlimit KI_ZEITLIMIT_SEKUNDEN), blockiert sonst nichts."""
+    erg = await KI.bewertung_ausfuehren(protocol_id, user["dealer_id"], erzwingen=True)
+    if erg is None:
+        raise HTTPException(404, "Protokoll nicht gefunden")
+    return erg
 
 
 @router.get("/protocols/{protocol_id}.pdf")

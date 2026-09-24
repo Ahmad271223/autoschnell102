@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Trash2, Eraser } from "lucide-react";
 import { toast } from "sonner";
+import { mitAntwort, schwereFragen } from "@/lib/kiSchaden";
 
 // Rollenprüfung 22.09.2026 (RP-070/RP-169/RP-514): Ein Tipp auf einen Marker
 // löschte den Schaden sofort — und der Marker liegt genau auf dem Bauteilpunkt
@@ -464,30 +465,61 @@ export default function DamageSelector({ damages = [], onChange }) {
           <div className="overline">Erfasste Schäden ({damages.length})</div>
           <ul className="divide-y rounded-lg border" style={{ borderColor: "var(--border-default)" }}>
             {damages.map((d) => (
-              <li key={d.id} className="flex items-center justify-between gap-3 px-3 py-2 text-sm">
-                <div className="flex items-center gap-2 min-w-0">
-                  <span
-                    className="inline-flex items-center justify-center rounded-md px-1.5 py-0.5 text-[10px] font-bold shrink-0"
-                    style={{ backgroundColor: d.color, color: "#0a0a0a" }}
+              <li key={d.id} className="px-3 py-2 text-sm">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span
+                      className="inline-flex items-center justify-center rounded-md px-1.5 py-0.5 text-[10px] font-bold shrink-0"
+                      style={{ backgroundColor: d.color, color: "#0a0a0a" }}
+                    >
+                      {d.abbr}
+                    </span>
+                    <span className="text-zinc-200 truncate">{d.type_label}</span>
+                    <span className="text-zinc-500">·</span>
+                    <span className="text-zinc-400 truncate">
+                      {d.zone}{" "}
+                      <span className="text-zinc-600">({VIEW_LABELS[d.view]})</span>
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => removeDamage(d.id)}
+                    className="text-zinc-500 hover:text-red-400 shrink-0 tipp flex items-center justify-center -my-2 -mr-2"
+                    data-testid={`damage-remove-${d.id}`}
+                    aria-label="Schaden entfernen"
                   >
-                    {d.abbr}
-                  </span>
-                  <span className="text-zinc-200 truncate">{d.type_label}</span>
-                  <span className="text-zinc-500">·</span>
-                  <span className="text-zinc-400 truncate">
-                    {d.zone}{" "}
-                    <span className="text-zinc-600">({VIEW_LABELS[d.view]})</span>
-                  </span>
+                    <Trash2 size={14} />
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => removeDamage(d.id)}
-                  className="text-zinc-500 hover:text-red-400 shrink-0 tipp flex items-center justify-center -my-2 -mr-2"
-                  data-testid={`damage-remove-${d.id}`}
-                  aria-label="Schaden entfernen"
-                >
-                  <Trash2 size={14} />
-                </button>
+                {/* Wunsch Ahmad 25.09.2026 (KI-Schadennachlass): zwei Sekunden
+                    mehr je Schaden — Groesse, Lack, Laenge, Funktion — machen die
+                    Kostenschaetzung erst brauchbar. Antworten liegen in
+                    severity_data am Schaden. */}
+                {schwereFragen(d.type_key).length > 0 && (
+                  <div className="mt-1.5 space-y-1" data-testid={`damage-fragen-${d.id}`}>
+                    {schwereFragen(d.type_key).map((f) => (
+                      <div key={f.key} className="flex flex-wrap items-center gap-1">
+                        <span className="text-[11px] text-zinc-500 mr-1 w-24 shrink-0">{f.label}</span>
+                        {f.options.map((o) => {
+                          const aktiv = (d.severity_data || {})[f.key] === o;
+                          return (
+                            <button key={o} type="button"
+                                    onClick={() => onChange?.(damages.map((x) => (x.id === d.id ? mitAntwort(x, f.key, o) : x)),
+                                                              damagesToText(damages))}
+                                    aria-pressed={aktiv}
+                                    data-testid={`damage-frage-${d.id}-${f.key}-${o}`}
+                                    className="rounded-full px-2.5 py-1 text-[11px] min-h-[32px] border transition-colors"
+                                    style={aktiv
+                                      ? { background: "var(--accent-red)", color: "#fff", borderColor: "var(--accent-red)" }
+                                      : { background: "transparent", color: "var(--text-secondary)", borderColor: "var(--border-default)" }}>
+                              {o}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </li>
             ))}
           </ul>

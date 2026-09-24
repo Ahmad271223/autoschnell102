@@ -5,6 +5,7 @@ import { freigabeZaehlerAktualisieren } from "@/lib/freigaben";
 import { preisAusText, preisText } from "@/lib/preis";
 import { useUngespeichert } from "@/lib/ungespeichert";
 import { toast } from "sonner";
+import KiBewertungKarte from "@/components/KiBewertungKarte";
 import {
   AlertTriangle, Check, ChevronDown, ChevronUp, ClipboardCheck, Clock, Euro,
   Phone, RotateCcw, Undo2,
@@ -303,6 +304,16 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
         </div>
       )}
 
+      {/* Wunsch Ahmad 25.09.2026: KI-Einschätzung der Abweichungen — nur
+          beratend. "Preis übernehmen" füllt das Feld "Neuer Preis", mehr nicht;
+          "Fahrer fragen" = bestehendes "Zurück an den Fahrer" mit der Frage. */}
+      {!e.ladefehler && !freigegeben && (
+        <KiBewertungKarte eintrag={e} busy={busy}
+          onPreis={(p) => { setzen("preis", preisText(p)); toast.info("Preis ins Feld übernommen — Freigeben bestätigt ihn."); }}
+          onFrage={(f) => senden(e, { zurueck: true, notiz: `Bitte prüfen: ${f.question}`
+            + (f.options?.length ? ` (${f.options.join(" / ")})` : "") })} />
+      )}
+
       <div className="mt-3 rounded-lg p-3" style={{ background: "var(--wa-03)" }}>
         <div className="flex flex-wrap items-end gap-3">
           <div className="text-[11px]">
@@ -468,7 +479,7 @@ export default function Freigaben() {
     [entwurf, liste]);
   useUngespeichert(ungespeichert);
 
-  const senden = async (e, { zurueck = false, preis_zuruecksetzen = false } = {}) => {
+  const senden = async (e, { zurueck = false, preis_zuruecksetzen = false, notiz: notizVorgabe } = {}) => {
     const id = e.protocol_id;
     setBusy((b) => ({ ...b, [id]: true }));
     try {
@@ -489,7 +500,8 @@ export default function Freigaben() {
       // den Fahrer — beim Zuruecksetzen des Preises wird er nicht verwendet.
       // Rollenprüfung 22.09.2026 (RP-146): ein geleerter Vermerk geht als ""
       // mit (der Server entfernt ihn), ein unberührtes Feld gar nicht.
-      const notiz = preis_zuruecksetzen ? undefined : notizFuerSenden(eigener, e, { zurueck });
+      const notiz = preis_zuruecksetzen ? undefined
+        : (notizVorgabe !== undefined ? notizVorgabe : notizFuerSenden(eigener, e, { zurueck }));
       if (notiz !== undefined) koerper.notiz = notiz;
       await api.post(`/protocols/${id}/freigabe`, koerper);
       if (zurueck && String(eigener.preis ?? "").trim()) {

@@ -3146,3 +3146,34 @@ bei Gelegenheit angleichen.
 | RP-249/400 | Zeitzonen ohne tzdata | `tzdata` steht jetzt in `backend/requirements.txt` (Image) |
 
 Nach dem Rollout in **/admin/betrieb** nach `inserat_dubletten_je_fahrzeug`, `mehrfache_aktive_firmen_abos` und `mehrere_chefkonten` sehen — alle drei ändern nichts selbst, sie zeigen nur Altbestand, der von Hand bereinigt werden muss.
+
+### KI-Abholbewertung (25.09.2026, Wunsch Ahmad) — Claude bewertet Abweichungen in Euro
+
+Schickt ein Fahrer ein Abholprotokoll ab, vergleicht das Backend Ist und Vertrag (Kilometer,
+Schlüssel, Vorbesitzer, HU, Ausstattung, Unterlagen, Zustand, neue Schäden mit den
+Zusatzangaben von der Skizze) und lässt Claude nur den **Geldwert** je Abweichung schätzen.
+Ergebnis: Karte „KI-Einschätzung“ auf **/app/freigaben** mit Vertrag / Fahrer-Vorschlag /
+KI-Zielpreis, Positionen nach Priorität (rot/orange/gelb), Gesamtnachlass mit Bereich und
+Verhandlungs-Einstieg, offenen Rückfragen („Fahrer fragen“ = Protokoll zurück mit Notiz) und
+Argumenten zum Kopieren. Die KI ist **rein beratend**: sie ändert keinen Preis, gibt nichts frei,
+unterschreibt und versendet nichts — „als neuen Preis übernehmen“ füllt nur das Preisfeld.
+Verkäuferdaten (Name, Adresse, Ausweis, Bank) gehen nie an die KI.
+
+**Einrichten (beide Server, einmalig):**
+
+```
+cd /opt/autoschnell && sh deploy/env_setzen.sh ANTHROPIC_API_KEY=sk-ant-…
+```
+
+danach der normale Rollout (`sh deploy/rollout.sh`, ein Server je Aufruf). Ohne Schlüssel ist die
+Funktion still aus — kein Fehler, keine Karte. Schalter und Einstellungen (`.env.example`):
+`KI_BEWERTUNG_AKTIV` (Standard `true`), `KI_MODELL` (Standard `claude-opus-5`; günstiger
+`claude-sonnet-5`), `KI_EFFORT` (Standard `low`), `KI_ZEITLIMIT_SEKUNDEN` (Standard 30),
+`KI_DENKEN_AUS`. Gemessen: 16–20 s je Bewertung, ~3–5 ct (Opus). Die Bewertung läuft nach dem
+Abschicken im Hintergrund; die Karte holt sie beim Öffnen der Liste, „Neu berechnen“ wartet.
+
+**Betrieb:** Ergebnisse liegen in `ki_bewertungen` (je Protokoll und Eingabe-Stand; ändert sich
+das Protokoll, wird neu gerechnet), freigegebene Fälle mit dem tatsächlichen Preis in
+`ki_lernfaelle` (Grundlage für die spätere Kalibrierung). Scheitert ein Aufruf (Zeitlimit,
+Überlastung, ungültiger Schlüssel), erscheint die Meldung `ki_bewertung_fehlgeschlagen` in
+**/admin/betrieb**; Freigabe und Vertrag laufen davon unberührt weiter.

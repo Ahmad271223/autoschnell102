@@ -211,6 +211,15 @@ services:
       - RESEND_RATE=${RESEND_RATE:-10}
       # Pruefbericht 20.09. (P-18): groessere Anhaenge werden nicht per Mail verschickt.
       - MAIL_ANHANG_MAX_BYTES=${MAIL_ANHANG_MAX_BYTES:-20971520}
+      # Wunsch Ahmad 25.09.2026: KI-Abholbewertung (Claude). Schluessel nur in
+      # der Server-.env (deploy/env_setzen.sh ANTHROPIC_API_KEY=...). Ohne
+      # Schluessel ist die Funktion still aus.
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - KI_BEWERTUNG_AKTIV=${KI_BEWERTUNG_AKTIV:-true}
+      - KI_MODELL=${KI_MODELL:-claude-opus-5}
+      - KI_EFFORT=${KI_EFFORT:-low}
+      - KI_ZEITLIMIT_SEKUNDEN=${KI_ZEITLIMIT_SEKUNDEN:-30}
+      - KI_DENKEN_AUS=${KI_DENKEN_AUS:-false}
       - RESEND_PROZESSE=${RESEND_PROZESSE:-8}
       - SCRAPE_MAX_RETRIES=${SCRAPE_MAX_RETRIES:-3}
       - ZUSTELLUNG_HAENGT_NACH_SEK=${ZUSTELLUNG_HAENGT_NACH_SEK:-180}

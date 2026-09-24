@@ -129,6 +129,7 @@ CHEF_ROUTEN = {
     "/api/appointments/fahrer-abgelehnt/anzahl",
     "/api/protocols/zur-freigabe", "/api/protocols/zur-freigabe/anzahl",
     "/api/protocols/{protocol_id}/freigabe",
+    "/api/protocols/{protocol_id}/ki-bewertung", "/api/protocols/{protocol_id}/ki-bewertung/neu",   # KI-Abholbewertung (25.09.2026)
 }
 # Sucher-Funktionen (kostenpflichtig): Abo-Pflicht ueber require_active_sub.
 ABO_ROUTEN = {
