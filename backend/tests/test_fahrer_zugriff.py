@@ -355,6 +355,9 @@ def test_konfliktsuche_ignoriert_abgeschlossene_fahrten():
 def test_finalize_idempotent_wenn_termin_schon_abgeholt():
     async def lauf(db, D, P, t):
         appt_id, vid, proto_id = f"a_{t.tag}", f"v_{t.tag}", f"p_{t.tag}"
+        # Gestern statt fest "2026-09-10": mit festem Datum lief der Termin am
+        # 24.09.2026 aus der Fahrer-Sichtfrist (14 Tage) und finalize gab 404.
+        gestern = (_dt.now(_tz.utc) - _td(days=1)).replace(microsecond=0).isoformat()
         await db.dealer_drivers.insert_one(t.link())
         await db.vehicles.insert_one({"id": vid, "dealer_id": t.dealer_id,
                                       "lifecycle": "abholung_geplant", "data": {}})
@@ -362,14 +365,14 @@ def test_finalize_idempotent_wenn_termin_schon_abgeholt():
         # Schritt 2) und Lebenszyklus noch nicht nachgezogen
         await db.appointments.insert_one(
             t.appt(appt_id, "abgeholt", vehicle_id=vid,
-                   status_changed_at="2026-09-10T10:00:00+00:00"))
+                   status_changed_at=gestern))
         await db.pickup_protocols.insert_one({
             "id": proto_id, "appointment_id": appt_id, "dealer_id": t.dealer_id,
             "vehicle_id": vid, "driver_account_id": t.driver_id,
             "driver_name": t.driver["display_name"], "version": 1,
             "status": "final", "superseded": False,
             "pdf_path": f"protocol/{t.dealer_id}/x.pdf",
-            "finalized_at": "2026-09-10T10:00:00+00:00"})
+            "finalized_at": gestern})
         fin = P.FinalizeIn(signature_driver_b64=_PNG_B64, signature_seller_b64=_PNG_B64)
         r = await P.finalize_protocol(appt_id, fin, t.driver)
         assert r == {"ok": True, "protocol_id": proto_id, "version": 1,
@@ -377,7 +380,7 @@ def test_finalize_idempotent_wenn_termin_schon_abgeholt():
                      "pdf_url": f"/api/driver/appointments/{appt_id}/protocol.pdf"}, r
         a = await db.appointments.find_one({"id": appt_id}, {"_id": 0})
         assert a["status"] == "abgeholt" and a["protocol_id"] == proto_id
-        assert a["status_changed_at"] == "2026-09-10T10:00:00+00:00"   # nicht neu gestempelt
+        assert a["status_changed_at"] == gestern   # nicht neu gestempelt
         v = await db.vehicles.find_one({"id": vid, "dealer_id": t.dealer_id}, {"_id": 0})
         assert v["lifecycle"] == "abgeholt"
         # Wiederholung: gleiches Ergebnis, kein 409, keine neue Version
