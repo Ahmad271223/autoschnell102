@@ -70,4 +70,10 @@ regexes = [
   # (test_rp_betrieb, env_erzeugen --vorlage). Kein echter Schluessel.
   '''abcdefgh12345''',
   '''apify_echt''',
+  # KI-Abholbewertung 25.09.2026 (Commit 51bd520): in .env.example stand
+  # "ANTHROPIC_API_KEY=" (leer) direkt ueber "KI_BEWERTUNG_AKTIV=true" —
+  # die Standardregel generic-api-key liest ueber den Zeilenumbruch hinweg
+  # den Variablennamen der naechsten Zeile als "Geheimnis". Kein Schluessel;
+  # im Arbeitsbaum steht seither ein Kommentar dazwischen.
+  '''^KI_BEWERTUNG_AKTIV''',
 ]
