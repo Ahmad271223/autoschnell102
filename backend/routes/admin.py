@@ -3963,6 +3963,16 @@ async def admin_ki(admin=Depends(current_super_admin)):
     return {"aktiv": ki_aktiv(), "modell": ki_modell(), **(await kalibrierung.statistik())}
 
 
+@router.post("/admin/ki/marktdaten")
+async def admin_ki_marktdaten(admin=Depends(current_super_admin)):
+    """Stufe 5 (26.09.2026): Markttabelle jetzt neu recherchieren (Websuche,
+    ADAC/Smart-Repair) — sonst laeuft das automatisch alle KI_MARKTDATEN_TAGE."""
+    from ai import marktdaten
+    erg = await marktdaten.aktualisieren(erzwingen=True)
+    return {k: erg.get(k) for k in ("status", "grund", "stand", "aktualisiert", "positionen", "quellen",
+                                   "zusammenfassung", "suchen", "dauer_ms", "alter_tage") if k in erg}
+
+
 @router.post("/admin/betrieb/testmail")
 async def admin_betrieb_testmail(admin=Depends(current_super_admin)):
     """Kurze Probe-Mail an BETRIEB_MELDUNG_AN ueber denselben Versandweg wie

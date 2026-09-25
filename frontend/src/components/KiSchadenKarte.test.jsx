@@ -33,6 +33,7 @@ const ERGEBNIS = {
                 manual_review_required: false, recommended_purchase_price_eur: 8650 },
     needs_information: [{ source_id: "d1", question: "Ist der Lack beschädigt?", options: ["Ja", "Nein"] }],
     arguments: ["Die Delle ist im Inserat nicht genannt."],
+    quellen: [{ url: "https://www.adac.de/smart-repair", titel: "ADAC Smart Repair" }],
   },
 };
 
@@ -91,6 +92,9 @@ describe("KiSchadenKarte", () => {
     await klick("ki-vertrag-preis");
     expect(onPreis).toHaveBeenCalledWith(8650);
     expect(el("ki-vertrag-argumente").textContent).toContain("nicht genannt");
+    // Stufe 5: Quellen der Marktrecherche als Links
+    expect(el("ki-vertrag-quellen").textContent).toContain("ADAC Smart Repair");
+    expect(el("ki-vertrag-quellen").querySelector("a").getAttribute("href")).toBe("https://www.adac.de/smart-repair");
   });
 
   it("Antwort auf die Rückfrage landet am Schaden und die Karte gilt als veraltet", async () => {

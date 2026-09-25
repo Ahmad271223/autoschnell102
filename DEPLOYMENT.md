@@ -3197,6 +3197,29 @@ den eigenen Erfahrungswerten (Median „erzielt / empfohlen“, gesamt und je Ka
 Hauptwert. Sichtbar unter **/admin/betrieb → KI-Bewertung** (`GET /admin/ki`): Aufrufe je Art und Status,
 Dauer, Tokens, Kostenschätzung (Richtwerte, keine Abrechnung), letzte Fehler, Lernfälle, Erfahrungswerte.
 
+**Stufe 5 – Marktanalyse (26.09.2026, Wunsch Ahmad „so genau wie es geht, ADAC und Smart-Repair“):**
+Zwei Bausteine, beide über die Websuche der KI (kostet 1 ct je Suche, zusätzlich zu den Tokens):
+(1) **Markttabelle** – alle `KI_MARKTDATEN_TAGE` (Standard 30) recherchiert die KI aktuelle Reparatur- und
+Smart-Repair-Preise für unsere Positionen (Delle, Kratzer, Scheibe, Schlüssel, Reifen, HU …), bevorzugt
+ADAC und Smart-Repair-Anbieter, und legt sie mit Quellen in `ki_marktdaten` ab; die Tabelle geht in jede
+Bewertung und hat Vorrang vor den Startwerten. Ausgelöst vom stündlichen Aufräumlauf (Schritt
+`ki_marktdaten`, nur wenn veraltet; nach einem Fehlversuch frühestens nach 6 h) oder per Knopf
+„Marktdaten jetzt“ unter **/admin/betrieb → KI-Bewertung** (`POST /admin/ki/marktdaten`, 1–2 Minuten).
+(2) **Recherche je Fall** – vor der Bewertung sucht die KI gezielt zu den Schäden dieses Fahrzeugs (höchstens
+4 Suchen) und bekommt das Ergebnis samt Quellen mit; die Quellen stehen als Links unter der Karte.
+Standard: `KI_MARKTANALYSE_ABHOLUNG=true` (läuft im Hintergrund, ~4 ct und 20–40 s mehr je Fall),
+`KI_MARKTANALYSE_VERTRAG=false` (der Sucher wartet auf die Karte). Schalter `KI_MARKTANALYSE_AKTIV`,
+Zeitlimit `KI_RECHERCHE_ZEITLIMIT_SEKUNDEN` (120). Technik: Websuche und unser festes JSON-Antwortformat
+gehen nicht in einem Aufruf (Zitate sind mit strukturierter Ausgabe unvereinbar), deshalb immer zwei
+Schritte – Recherche als Text, dann Bewertung bzw. Umwandlung als JSON. Die Websuche muss in der
+Anthropic-Konsole für die Organisation erlaubt sein (Standard: an); ist sie aus, steht die Meldung
+`ki_marktdaten_fehlgeschlagen` in Betrieb. Die Suche läuft direkt (ohne Vorfilterung per Code – damit
+konnte das Modell im Probelauf nichts anfangen), Handels-, Kleinanzeigen- und Forenseiten sind gesperrt
+(`GESPERRTE_DOMAINS` in provider.py). Probelauf 26.09.: Tabelle 3 Gruppen, 23 Suchen, ~4 Minuten; je Fall
+4 Suchen, ~55 s, ADAC-Zitate für Dellen, Schlüsselpreise je Marke. Ist die Websuche aus, steht die Meldung
+`ki_marktdaten_fehlgeschlagen` in Betrieb, die Bewertung läuft ohne Marktdaten weiter. Die KI bekommt seit
+diesem Stand ausdrücklich Erstzulassung, Alter, PS, Hubraum, Marke, Modell, Variante, Farbe und Klasse.
+
 **Betrieb:** Ergebnisse liegen in `ki_bewertungen` (je Protokoll und Eingabe-Stand; ändert sich
 das Protokoll, wird neu gerechnet), freigegebene Fälle mit dem tatsächlichen Preis in
 `ki_lernfaelle` (Grundlage für die spätere Kalibrierung). Scheitert ein Aufruf (Zeitlimit,

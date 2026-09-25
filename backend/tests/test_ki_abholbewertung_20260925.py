@@ -49,6 +49,12 @@ def _attrappe(monkeypatch, antwort=ANTWORT, status="ok", zaehler=None):
                 "modell": "attrappe", "usage": {"input_tokens": 1}}
     monkeypatch.setattr(K, "json_bewerten", _bewerten)
     monkeypatch.setattr(K, "ki_aktiv", lambda: True)
+    # Stufe 5: nie eine echte Websuche im Test (Attrappe "aus")
+    MD = _module("ai.marktdaten")
+
+    async def _keine_recherche(**kw):
+        return {"status": "aus", "grund": "Test", "text": "", "quellen": [], "suchen": 0, "dauer_ms": 0, "usage": {}}
+    monkeypatch.setattr(MD, "recherche", _keine_recherche)
     return K
 
 

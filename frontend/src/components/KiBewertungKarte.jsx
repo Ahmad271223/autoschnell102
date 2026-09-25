@@ -203,6 +203,19 @@ export default function KiBewertungKarte({ eintrag, onPreis, onFrage, busy }) {
         </div>
       )}
 
+      {/* Stufe 5 (26.09.2026): Quellen der Marktrecherche zu diesem Fall */}
+      {(erg.quellen || []).length > 0 && (
+        <div className="mt-2 text-[11px]" data-testid={`ki-quellen-${id}`} style={{ color: "var(--text-dim)" }}>
+          Marktrecherche: {erg.quellen.slice(0, 6).map((q, i) => (
+            <span key={i}>{i > 0 ? " · " : ""}
+              <a href={q.url} target="_blank" rel="noopener noreferrer" className="underline">
+                {q.titel || q.url}
+              </a>
+            </span>
+          ))}
+        </div>
+      )}
+
       {/* Argumente */}
       {(erg.arguments || []).length > 0 && (
         <div className="mt-2 text-[12px]" data-testid={`ki-argumente-${id}`}>

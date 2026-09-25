@@ -547,6 +547,11 @@ async def _cleanup_once(db, wache=None) -> dict:
         return await _schritt(db, stats, name, aufruf, wache, in_stats=in_stats)
 
     await s("termin_fristen", _termin_fristen)
+    # ---- KI-Marktanalyse (26.09.2026): Markttabelle alle KI_MARKTDATEN_TAGE ----
+    async def _ki_marktdaten():
+        from ai import marktdaten
+        return await marktdaten.pruefen_und_aktualisieren(db)
+    await s("ki_marktdaten", _ki_marktdaten)
     # ---- Runde 21: Fahrerfotos FAHRERFOTO_TAGE nach dem Hochladen ----
     await s("berichtsfotos_frist", lambda: berichtsfotos_nach_frist_loeschen(db, now, stats))
     await s("berichte_frist", lambda: berichte_nach_frist_loeschen(db, now, stats))

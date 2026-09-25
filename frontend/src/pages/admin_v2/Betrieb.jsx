@@ -290,10 +290,26 @@ function AufraeumlaufKarte({ lauf }) {
 function KiKarte() {
   const [ki, setKi] = useState(null);
   const [fehler, setFehler] = useState("");
-  useEffect(() => {
-    api.get("/admin/ki").then((r) => setKi(r.data))
-      .catch((e) => setFehler(errMsg(e, "KI-Zahlen nicht ladbar")));
-  }, []);
+  const [marktLaeuft, setMarktLaeuft] = useState(false);
+  const laden = () => api.get("/admin/ki").then((r) => setKi(r.data))
+    .catch((e) => setFehler(errMsg(e, "KI-Zahlen nicht ladbar")));
+  useEffect(() => { laden(); }, []);
+  // Stufe 5 (26.09.2026): Markttabelle jetzt neu recherchieren (Websuche, 1-2 Minuten)
+  const marktAktualisieren = async () => {
+    if (marktLaeuft) return;
+    setMarktLaeuft(true);
+    try {
+      const r = await api.post("/admin/ki/marktdaten");
+      if (r.data?.status === "ok") {
+        toast.success(`Marktdaten aktualisiert: ${(r.data.positionen || []).length} Positionen, ${r.data.suchen ?? 0} Suchen`);
+      } else {
+        toast.error(`Marktdaten nicht aktualisiert: ${r.data?.grund || r.data?.status || "unbekannt"}`, { duration: 12000 });
+      }
+      await laden();
+    } catch (e) { toast.error(errMsg(e, "Marktdaten nicht aktualisiert")); }
+    finally { setMarktLaeuft(false); }
+  };
+  const md = ki?.marktdaten || null;
   const st = ki?.je_status || {};
   const fehlerZahl = Object.entries(st)
     .filter(([k]) => !["ok", "keine", "laeuft", "cache"].includes(k))
@@ -332,6 +348,27 @@ function KiKarte() {
           {(ki.letzte_fehler || []).length > 0 && (
             <div className="text-red-300">
               Letzte Fehler: {ki.letzte_fehler.slice(0, 3).map((x) => `${x.status} (${x.art}) ${x.grund}`).join(" · ")}
+            </div>
+          )}
+          {md && (
+            <div className="pt-2 mt-2 flex flex-wrap items-center gap-2" style={{ borderTop: "1px solid var(--wa-06)" }}
+                 data-testid="ki-betrieb-marktdaten">
+              <div className="flex-1 min-w-[220px]">
+                Marktanalyse (ADAC/Smart-Repair):{" "}
+                {!md.aktiv ? <span className="text-amber-300">aus</span>
+                  : md.status === "ok"
+                    ? <span className="text-zinc-200">{md.positionen} Positionen, Stand {fmtDate(md.stand)}
+                        {md.alter_tage != null ? ` (vor ${Math.round(md.alter_tage)} Tagen)` : ""}, alle {md.tage} Tage neu</span>
+                    : <span className="text-amber-300">noch keine Tabelle{md.grund ? ` (${md.grund})` : ""}</span>}
+                {" "}· Recherche je Fall: Abholung {md.je_fall_abholung ? "an" : "aus"}, Vertrag {md.je_fall_vertrag ? "an" : "aus"}
+                {(md.quellen || []).length > 0 && (
+                  <div className="text-[12px] text-zinc-500">Quellen: {md.quellen.join(", ")}</div>
+                )}
+              </div>
+              <Button size="sm" variant="outline" onClick={marktAktualisieren} disabled={marktLaeuft || !md.aktiv}
+                      data-testid="ki-marktdaten-aktualisieren">
+                <RefreshCw size={14} className={marktLaeuft ? "animate-spin" : ""} /> {marktLaeuft ? "Recherchiert…" : "Marktdaten jetzt"}
+              </Button>
             </div>
           )}
         </div>

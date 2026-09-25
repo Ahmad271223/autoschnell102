@@ -26,7 +26,7 @@ import protokoll_vergleich as PV
 from deps import db, now_iso
 from konfig import zahl_env
 
-from ai import kalibrierung, preisbasis, schemas
+from ai import kalibrierung, marktdaten, preisbasis, schemas
 from ai.provider import json_bewerten, ki_aktiv, ki_modell
 
 log = logging.getLogger("autohandel.ki")
@@ -90,13 +90,20 @@ def paket_bauen(vehicle: dict, damages: List[dict], *, kaufpreis: Optional[float
     text = " ".join([str(v.get("description") or "")] + [str(m) for m in (v.get("known_defects") or [])]).lower()
     inserat = _zahl(v.get("price")) or _zahl(v.get("list_price"))
     ez = PV.monat_jahr_text(v.get("first_registration") or v.get("ezl") or "", "ez")
+    kw = _zahl(v.get("power_kw"))
+    # Wunsch Ahmad 26.09.2026: EZ, PS, Marke, Modell, Alter, Hubraum, Farbe
+    from ai.pickup_assessment import _alter_jahre
     fahrzeug = {
         "make": (v.get("make_label") or v.get("make") or "")[:60],
         "model": (v.get("model_label") or v.get("model") or "")[:80],
         "variant": (v.get("model_description") or "")[:120],
         "first_registration": ez,
+        "age_years": _alter_jahre(ez),
         "mileage_km": _zahl(v.get("mileage") or v.get("km")),
-        "power_kw": _zahl(v.get("power_kw")),
+        "power_kw": kw,
+        "power_ps": _zahl(v.get("power_ps")) or (round(kw * 1.36) if kw else None),
+        "displacement_ccm": _zahl(v.get("displacement") or v.get("cubic_capacity")),
+        "color": (v.get("exterior_color") or v.get("color") or "")[:40],
         "fuel": (v.get("fuel_label") or v.get("fuel") or "")[:40],
         "gearbox": (v.get("gearbox_label") or v.get("gearbox") or "")[:40],
         "category": (v.get("category_label") or v.get("category") or "")[:40],
@@ -169,15 +176,25 @@ async def bewerten(*, user: dict, vehicle_doc: dict, damages: List[dict],
             return _oeffentlich({**basis, "status": "limit",
                                  "grund": f"Höchstens {MAX_JE_STUNDE} Bewertungen je Stunde und Firma — bitte später erneut.",
                                  "ergebnis": None})
-        system = SYSTEM_PROMPT
-        zusatz = await kalibrierung.prompt_zusatz()
-        if zusatz:
-            system = system + "\n\n" + zusatz
-        antwort = await json_bewerten(system=system, nutzer=paket, schema=schemas.ANTWORT_SCHEMA)
-        eintrag = {**basis, "dauer_ms": antwort.get("dauer_ms"), "usage": antwort.get("usage") or {},
-                   "modell": antwort.get("modell") or basis["modell"], "eingabe": paket}
+        # Zusatz (ungecacht): Marktpreise, Erfahrungswerte, Recherche je Fall
+        # (beim Vertrag standardmaessig aus — der Sucher wartet auf die Karte).
+        fall = await marktdaten.fall_recherche("vertrag", paket)
+        zusatz = "\n\n".join(t for t in (await marktdaten.prompt_zusatz(),
+                                          await kalibrierung.prompt_zusatz(),
+                                          marktdaten.fall_als_text(fall)) if t)
+        antwort = await json_bewerten(system=SYSTEM_PROMPT, nutzer=paket, schema=schemas.ANTWORT_SCHEMA,
+                                      zusatz=zusatz or None)
+        usage = dict(antwort.get("usage") or {})
+        if fall:
+            for k, v in (fall.get("usage") or {}).items():
+                usage[k] = int(usage.get(k) or 0) + int(v or 0)
+        eintrag = {**basis, "dauer_ms": int(antwort.get("dauer_ms") or 0) + int((fall or {}).get("dauer_ms") or 0),
+                   "usage": usage, "modell": antwort.get("modell") or basis["modell"], "eingabe": paket,
+                   "recherche": ({"status": fall.get("status"), "suchen": fall.get("suchen"),
+                                  "quellen": fall.get("quellen"), "text": fall.get("text")} if fall else None)}
         if antwort.get("status") == "ok" and isinstance(antwort.get("daten"), dict):
             ergebnis = schemas.bereinigen(antwort["daten"], kaufpreis=basis_preis)
+            ergebnis["quellen"] = list((fall or {}).get("quellen") or [])
             for it in ergebnis.get("items") or []:
                 it["priority"] = preisbasis.prioritaet(it.get("category") or "damage",
                                                        betrag=it.get("recommended_discount_eur"),

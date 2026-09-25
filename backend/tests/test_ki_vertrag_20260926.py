@@ -54,6 +54,12 @@ def _attrappe(monkeypatch, antwort=ANTWORT, status="ok", zaehler=None):
                 "modell": "attrappe", "usage": {"input_tokens": 1000, "output_tokens": 500}}
     monkeypatch.setattr(D, "json_bewerten", _bewerten)
     monkeypatch.setattr(D, "ki_aktiv", lambda: True)
+    # Stufe 5: nie eine echte Websuche im Test (Attrappe "aus")
+    MD = _module("ai.marktdaten")
+
+    async def _keine_recherche(**kw):
+        return {"status": "aus", "grund": "Test", "text": "", "quellen": [], "suchen": 0, "dauer_ms": 0, "usage": {}}
+    monkeypatch.setattr(MD, "recherche", _keine_recherche)
     return D
 
 
@@ -270,7 +276,7 @@ def test_07_kalibrierung_landet_im_prompt(welt, monkeypatch):
     w = welt.w
     fz = _fahrzeug(welt, f"v_kiv7_{w.s}")
     erg = welt.run(D.bewerten(user=w.sucher, vehicle_doc=fz, damages=SCHAEDEN))
-    assert erg["status"] == "ok" and aufrufe[0]["system"].endswith("Faellen: Test.")
+    assert erg["status"] == "ok" and aufrufe[0]["zusatz"].endswith("Faellen: Test.")
     assert "Ausgangswerte AutoSchnell" in aufrufe[0]["system"]
     # dasselbe fuer die Abholung
     KA = _attrappe_abholung(monkeypatch, zaehler=None)
@@ -282,7 +288,7 @@ def test_07_kalibrierung_landet_im_prompt(welt, monkeypatch):
         return {"status": "fehler", "grund": "Attrappe", "daten": None, "dauer_ms": 1, "modell": "a", "usage": {}}
     monkeypatch.setattr(KA, "json_bewerten", _bewerten)
     welt.run(KA.bewertung_ausfuehren(pid, w.dealer_id))
-    assert gesehen["system"].endswith("Faellen: Test.")
+    assert gesehen["zusatz"].endswith("Faellen: Test.")
     _ki_aufraeumen(welt)
 
 

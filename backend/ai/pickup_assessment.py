@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import protokoll_vergleich as PV
 from deps import db, now_iso
 
-from ai import kalibrierung, preisbasis, schemas
+from ai import kalibrierung, marktdaten, preisbasis, schemas
 from ai.provider import json_bewerten, ki_aktiv, ki_modell
 
 log = logging.getLogger("autohandel.ki")
@@ -62,6 +62,19 @@ Regeln:
 
 
 # ------------------------------------------------ Paket bauen
+def _alter_jahre(ez_text: str) -> Optional[float]:
+    """Fahrzeugalter in Jahren aus 'MM/JJJJ' (oder nur Jahr)."""
+    m = re.search(r"(\d{4})", str(ez_text or ""))
+    if not m:
+        return None
+    jahr = int(m.group(1))
+    mon = re.match(r"\s*(\d{1,2})\s*/", str(ez_text))
+    monat = int(mon.group(1)) if mon else 6
+    from datetime import date
+    heute = date.today()
+    return round(max(0.0, (heute.year - jahr) + (heute.month - monat) / 12.0), 1)
+
+
 def _zahl(w) -> Optional[float]:
     z = PV.zahl(w)
     return float(z) if z is not None else None
@@ -90,16 +103,25 @@ def paket_bauen(protokoll: dict, appt: dict, vehicle: dict, contract: dict) -> D
                           protokoll.get("condition") or {}, werte)
     kaufpreis = _zahl(vertragspreis_vor_abholung(contract))
     ez = werte.get("first_registration", {}).get("text") or ""
+    kw = werte.get("power", {}).get("wert")
+    # Wunsch Ahmad 26.09.2026: EZ, PS, Marke, Modell (und Alter, Hubraum,
+    # Farbe, Klasse) ausdruecklich mitgeben — die KI soll so genau wie
+    # moeglich auf das konkrete Fahrzeug rechnen.
     fahrzeug = {
         "make": werte.get("make", {}).get("text") or "",
         "model": werte.get("model", {}).get("text") or "",
         "variant": (vehicle.get("model_description") or "")[:120],
         "first_registration": ez,
+        "age_years": _alter_jahre(ez),
         "mileage_contract_km": werte.get("mileage_contract", {}).get("wert"),
-        "power_kw": werte.get("power", {}).get("wert"),
+        "mileage_pickup_km": PV.zahl((protokoll.get("condition") or {}).get("mileage")),
+        "power_kw": kw,
+        "power_ps": PV.zahl(vehicle.get("power_ps")) or (round(float(kw) * 1.36) if kw else None),
+        "displacement_ccm": PV.zahl(vehicle.get("displacement") or vehicle.get("cubic_capacity")),
         "fuel": werte.get("fuel", {}).get("text") or "",
         "gearbox": (vehicle.get("gearbox_label") or vehicle.get("gearbox") or "")[:40],
-        "category": (vehicle.get("category") or "")[:40],
+        "category": (vehicle.get("category_label") or vehicle.get("category") or "")[:40],
+        "color": (vehicle.get("exterior_color") or vehicle.get("color") or "")[:40],
         "previous_owners_contract": werte.get("previous_owners", {}).get("wert"),
         "hu_contract": werte.get("hu", {}).get("text") or "",
         "accident_free_contract": werte.get("accident_free", {}).get("wert"),
@@ -279,17 +301,26 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
         await db[SAMMLUNG].update_one({"protocol_id": protocol_id, "input_hash": h},
                                       {"$set": {**basis, "status": "laeuft", "grund": "", "ergebnis": None}},
                                       upsert=True)
-        # Stufe 4: Erfahrungswerte aus den eigenen Faellen (leer, solange zu wenige)
-        system = SYSTEM_PROMPT
-        zusatz = await kalibrierung.prompt_zusatz()
-        if zusatz:
-            system = system + "\n\n" + zusatz
-        antwort = await json_bewerten(system=system, nutzer=paket, schema=schemas.ANTWORT_SCHEMA)
-        eintrag = {**basis, "dauer_ms": antwort.get("dauer_ms"), "usage": antwort.get("usage") or {},
-                   "modell": antwort.get("modell") or basis["modell"]}
+        # Zusatz zum System-Prompt (ungecacht): Marktpreise (Stufe 5),
+        # Erfahrungswerte (Stufe 4), gezielte Recherche zu diesem Fall.
+        fall = await marktdaten.fall_recherche("abholung", paket)
+        zusatz = "\n\n".join(t for t in (await marktdaten.prompt_zusatz(),
+                                          await kalibrierung.prompt_zusatz(),
+                                          marktdaten.fall_als_text(fall)) if t)
+        antwort = await json_bewerten(system=SYSTEM_PROMPT, nutzer=paket, schema=schemas.ANTWORT_SCHEMA,
+                                      zusatz=zusatz or None)
+        usage = dict(antwort.get("usage") or {})
+        if fall:
+            for k, v in (fall.get("usage") or {}).items():
+                usage[k] = int(usage.get(k) or 0) + int(v or 0)
+        eintrag = {**basis, "dauer_ms": int(antwort.get("dauer_ms") or 0) + int((fall or {}).get("dauer_ms") or 0),
+                   "usage": usage, "modell": antwort.get("modell") or basis["modell"],
+                   "recherche": ({"status": fall.get("status"), "suchen": fall.get("suchen"),
+                                  "quellen": fall.get("quellen"), "text": fall.get("text")} if fall else None)}
         if antwort.get("status") == "ok" and isinstance(antwort.get("daten"), dict):
             ergebnis = schemas.bereinigen(antwort["daten"], kaufpreis=basis["kaufpreis"])
             _prioritaeten_nachziehen(ergebnis, basis["kaufpreis"])
+            ergebnis["quellen"] = list((fall or {}).get("quellen") or [])
             eintrag.update(status="ok", grund="", ergebnis=ergebnis, roh=antwort["daten"],
                            eingabe=paket)
         else:

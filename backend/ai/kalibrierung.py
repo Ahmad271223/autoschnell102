@@ -115,7 +115,9 @@ def _kosten_usd(modell: str, usage: Dict[str, Any]) -> float:
     e = float(usage.get("input_tokens") or 0) + float(usage.get("cache_creation_input_tokens") or 0) * 1.25 \
         + float(usage.get("cache_read_input_tokens") or 0) * 0.1
     a = float(usage.get("output_tokens") or 0)
-    return e / 1e6 * ein + a / 1e6 * aus
+    # Websuche (26.09.2026): 10 USD je 1.000 Suchen
+    suchen = float(usage.get("web_search_requests") or 0)
+    return e / 1e6 * ein + a / 1e6 * aus + suchen * 0.01
 
 
 async def statistik(tage: int = 30) -> Dict[str, Any]:
@@ -125,7 +127,8 @@ async def statistik(tage: int = 30) -> Dict[str, Any]:
     je_status: Dict[str, int] = {}
     je_art: Dict[str, int] = {}
     dauern: List[int] = []
-    tokens = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+    tokens = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+              "web_search_requests": 0}
     kosten = 0.0
     fehler: List[Dict[str, Any]] = []
     n = 0
@@ -165,4 +168,21 @@ async def statistik(tage: int = 30) -> Dict[str, Any]:
         "letzte_fehler": fehler,
         "lernfaelle": {"gesamt": lern_n, "mit_ergebnis": lern_mit_ergebnis, "min_fuer_kalibrierung": MIN_FAELLE},
         "erfahrungswerte": await erfahrungswerte(),
+        "marktdaten": await _marktdaten_kurz(),
     }
+
+
+async def _marktdaten_kurz() -> Dict[str, Any]:
+    """Stand der Markttabelle (Stufe 5) fuer die Betriebsseite."""
+    try:
+        from ai import marktdaten
+        doc = await marktdaten.aktuell()
+        return {"aktiv": marktdaten.aktiv(), "je_fall_abholung": marktdaten.je_fall("abholung"),
+                "je_fall_vertrag": marktdaten.je_fall("vertrag"), "tage": marktdaten.tage(),
+                "stand": (doc or {}).get("stand"), "status": (doc or {}).get("status"),
+                "grund": (doc or {}).get("grund") or "", "alter_tage": marktdaten.alter_tage(doc),
+                "positionen": len((doc or {}).get("positionen") or []),
+                "quellen": [q.get("titel") or q.get("url") for q in ((doc or {}).get("quellen") or [])[:8]],
+                "zusammenfassung": (doc or {}).get("zusammenfassung") or ""}
+    except Exception:  # noqa: BLE001
+        return {"aktiv": False, "status": "unbekannt"}
