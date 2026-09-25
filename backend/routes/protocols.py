@@ -175,6 +175,26 @@ class ProtocolIn(BaseModel):
     # der Freigabe; gibt er ohne eigenen Preis frei, gilt der Vorschlag.
     preis_vorschlag: Optional[float] = Field(default=None, ge=0, le=10_000_000)
     sondervereinbarung: Optional[str] = Field(default=None, max_length=2000)
+    # Stufe 3 KI (26.09.2026): Antworten des Fahrers auf die Rueckfrage des
+    # Chefs (Ja/Nein/Unklar-Knopf) — je Eintrag source_id, question, answer.
+    rueckfrage_antworten: Optional[List[Dict[str, Any]]] = Field(default=None, max_length=10)
+
+    @field_validator("rueckfrage_antworten", mode="before")
+    @classmethod
+    def _antworten_deckeln(cls, v):
+        if v is None:
+            return v
+        if not isinstance(v, list) or len(v) > 10:
+            raise ValueError("rueckfrage_antworten: hoechstens 10 Eintraege")
+        out = []
+        for a in v:
+            if not isinstance(a, dict):
+                raise ValueError("rueckfrage_antworten: ungueltiger Eintrag")
+            out.append({"source_id": str(a.get("source_id") or "")[:200],
+                        "question": str(a.get("question") or "")[:300],
+                        "answer": str(a.get("answer") or "")[:100],
+                        "at": str(a.get("at") or "")[:40]})
+        return out
     # Phase 2 (2.9, B26): Revisionsnummer des Entwurfs, wie die App ihn geladen
     # bzw. zuletzt gespeichert hat — zwei Tabs desselben Fahrers ueberschreiben
     # sich nicht mehr gegenseitig. Ohne Angabe wie bisher (aeltere App).
@@ -240,6 +260,23 @@ class FreigabeIn(BaseModel):
     notiz: Optional[str] = Field(default=None, max_length=2000)
     # True = zurueck an den Fahrer (er soll etwas nachtragen/korrigieren).
     zurueck: bool = False
+    # Stufe 3 KI (26.09.2026): die konkrete Rueckfrage der KI (source_id,
+    # question, options) — der Fahrer antwortet per Knopf statt Freitext.
+    rueckfrage_frage: Optional[Dict[str, Any]] = None
+
+    @field_validator("rueckfrage_frage", mode="before")
+    @classmethod
+    def _frage_pruefen(cls, v):
+        if v is None:
+            return v
+        if not isinstance(v, dict) or not str(v.get("question") or "").strip():
+            raise ValueError("rueckfrage_frage: question fehlt")
+        opts = v.get("options") or []
+        if not isinstance(opts, list) or len(opts) > 6:
+            raise ValueError("rueckfrage_frage: hoechstens 6 Antwortmoeglichkeiten")
+        return {"source_id": str(v.get("source_id") or "")[:200],
+                "question": str(v["question"]).strip()[:300],
+                "options": [str(o)[:60] for o in opts if str(o or "").strip()]}
     # Runde 33 (Gegenpruefung 12.09.2026): Den Stand mitschicken, den der
     # Bearbeiter gesehen hat (updated_at aus der Liste). Geben Chef und Sucher
     # gleichzeitig mit verschiedenen Preisen frei, gewann vorher stillschweigend
@@ -1497,7 +1534,7 @@ async def submit_protocol(appt_id: str, driver=Depends(current_driver)):
     res = await db.pickup_protocols.update_one(
         submit_filt,
         {"$set": setzen,
-         "$unset": {"rueckfrage": "", "rueckfrage_am": ""}})
+         "$unset": {"rueckfrage": "", "rueckfrage_am": "", "rueckfrage_frage": ""}})
     if not res.matched_count:
         # Zwischen Lesen und Schreiben hat sich der Stand geaendert.
         akt = await db.pickup_protocols.find_one({"id": doc["id"]},
@@ -2551,6 +2588,8 @@ async def protokolle_zur_freigabe(user=Depends(_chef_dep), response: Response = 
                 "sondervereinbarung": d.get("sondervereinbarung") or "",
                 "freigegeben_von_name": namen.get(d.get("freigegeben_von")) or "",
                 "rueckfrage_von_name": namen.get(d.get("rueckfrage_von")) or "",
+                # Stufe 3 KI (26.09.2026): Antworten des Fahrers auf Rueckfragen
+                "rueckfrage_antworten": [a for a in (d.get("rueckfrage_antworten") or []) if isinstance(a, dict)][:10],
             })
         except Exception:  # noqa: BLE001
             log.exception("Freigaben: Protokoll %s liess sich nicht aufbereiten", d.get("id"))
@@ -2680,12 +2719,18 @@ async def protokoll_freigeben(protocol_id: str, body: FreigabeIn,
         bedingung["updated_at"] = doc.get("updated_at")
 
     if body.zurueck:
+        setzen_zurueck: Dict[str, Any] = {"status": "entwurf", "rueckfrage": (body.notiz or "").strip(),
+                                          "rueckfrage_am": jetzt, "rueckfrage_von": user["id"],
+                                          "updated_at": jetzt, "freigabe_stand": jetzt}
+        entfernen_zurueck: Dict[str, Any] = {"freigegeben_am": "", "freigegeben_von": ""}
+        # Stufe 3 KI (26.09.2026): strukturierte Frage fuer den Antwort-Knopf
+        # der Fahrer-App; ohne Frage wird eine alte entfernt.
+        if body.rueckfrage_frage:
+            setzen_zurueck["rueckfrage_frage"] = body.rueckfrage_frage
+        else:
+            entfernen_zurueck["rueckfrage_frage"] = ""
         res = await db.pickup_protocols.update_one(
-            bedingung,
-            {"$set": {"status": "entwurf", "rueckfrage": (body.notiz or "").strip(),
-                      "rueckfrage_am": jetzt, "rueckfrage_von": user["id"],
-                      "updated_at": jetzt, "freigabe_stand": jetzt},
-             "$unset": {"freigegeben_am": "", "freigegeben_von": ""}})
+            bedingung, {"$set": setzen_zurueck, "$unset": entfernen_zurueck})
         if not res.matched_count:
             raise HTTPException(409, await _freigabe_konflikt(protocol_id, user))
         # Pruefung 14.09.2026 (C8): Die Freigabe ist geschrieben — ein

@@ -3953,6 +3953,16 @@ BETRIEB_TESTMAIL_MAX_S = 45
 BETRIEB_TESTMAIL_PROTOKOLL = "Server-Protokoll: docker compose logs --since 10m backend | grep email_service"
 
 
+@router.get("/admin/ki")
+async def admin_ki(admin=Depends(current_super_admin)):
+    """Stufe 4 (26.09.2026): Betriebszahlen der KI-Bewertung — Aufrufe je
+    Status/Art (30 Tage), Dauer, Tokens, Kostenschaetzung, letzte Fehler,
+    Lernfaelle und die daraus gebildeten Erfahrungswerte."""
+    from ai import kalibrierung
+    from ai.provider import ki_aktiv, ki_modell
+    return {"aktiv": ki_aktiv(), "modell": ki_modell(), **(await kalibrierung.statistik())}
+
+
 @router.post("/admin/betrieb/testmail")
 async def admin_betrieb_testmail(admin=Depends(current_super_admin)):
     """Kurze Probe-Mail an BETRIEB_MELDUNG_AN ueber denselben Versandweg wie

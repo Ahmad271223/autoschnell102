@@ -3172,6 +3172,31 @@ Funktion still aus — kein Fehler, keine Karte. Schalter und Einstellungen (`.e
 `KI_DENKEN_AUS`. Gemessen: 16–20 s je Bewertung, ~3–5 ct (Opus). Die Bewertung läuft nach dem
 Abschicken im Hintergrund; die Karte holt sie beim Öffnen der Liste, „Neu berechnen“ wartet.
 
+**Stufe 3 – Kaufvertrag (26.09.2026):** Beim Öffnen des Vertragsdialogs holt die Oberfläche
+`GET /contracts/vorschlaege/{vehicle_id}` – regelbasiert, ohne KI – und füllt NUR leere Felder aus dem
+Inserat: Schlüsselanzahl („2 Schlüssel“, „Zweitschlüssel fehlt“), HU („HU 07/2028“, „TÜV neu“,
+„abgelaufen“), Scheckheft nur bei „lückenlos/vollständig“ (= Ja, lückenlos) oder „kein Scheckheft“
+(= Nein) – ein bloßes „scheckheftgepflegt“ ist nur ein Hinweis, nie „lückenlos“ –, Unfallfrei,
+fahrbereit, EU-Import, Bereifung. Jeder Wert steht mit Fundstelle unter „Aus dem Inserat übernommen
+(bitte prüfen)“. In der Schadenskizze fragt die Karte rechts „Sind das alle bekannten Schäden?“; erst
+„Ja, Schäden bewerten“ macht EINEN Aufruf (`POST /contracts/ki-schadennachlass`, Abo-Pflicht, höchstens
+`KI_VERTRAG_MAX_JE_STUNDE` je Firma und Stunde, Standard 40). Schäden, die schon im Inserat stehen,
+bekommen einen geringeren Nachlass („eingepreist“). Rückfragen der KI beantwortet der Sucher per Knopf,
+danach „neu bewerten“; „als Kaufpreis übernehmen“ füllt nur das Preisfeld. Beim Erstellen geht die
+gesehene Bewertung als `ki_bewertung_id` mit (nur Lernfall, nicht im Vertrag).
+
+**Fahrer-Antwort per Knopf (26.09.2026):** „Fahrer fragen“ auf /app/freigaben schickt die konkrete Frage
+strukturiert mit (`rueckfrage_frage`); die Fahrer-App zeigt sie mit Antwortknöpfen (z. B. Ja / Nein /
+Unklar), die Antwort wird im Entwurf gespeichert (`rueckfrage_antworten`), fließt in die nächste
+Bewertung ein und steht dem Chef in der Freigabeliste („Antworten des Fahrers“).
+
+**Stufe 4 – Lernen (26.09.2026):** Jede Freigabe (Abholung) und jeder Vertrag mit vorheriger Bewertung
+legt einen anonymen Lernfall in `ki_lernfaelle` ab (KI-Empfehlung, tatsächlich erzielter Nachlass,
+Kategorien). Ab `KI_KALIBRIERUNG_MIN_FAELLE` Fällen (Standard 5) bekommt die KI einen kurzen Zusatz mit
+den eigenen Erfahrungswerten (Median „erzielt / empfohlen“, gesamt und je Kategorie) und kalibriert den
+Hauptwert. Sichtbar unter **/admin/betrieb → KI-Bewertung** (`GET /admin/ki`): Aufrufe je Art und Status,
+Dauer, Tokens, Kostenschätzung (Richtwerte, keine Abrechnung), letzte Fehler, Lernfälle, Erfahrungswerte.
+
 **Betrieb:** Ergebnisse liegen in `ki_bewertungen` (je Protokoll und Eingabe-Stand; ändert sich
 das Protokoll, wird neu gerechnet), freigegebene Fälle mit dem tatsächlichen Preis in
 `ki_lernfaelle` (Grundlage für die spätere Kalibrierung). Scheitert ein Aufruf (Zeitlimit,

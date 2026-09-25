@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import protokoll_vergleich as PV
 from deps import db, now_iso
 
-from ai import preisbasis, schemas
+from ai import kalibrierung, preisbasis, schemas
 from ai.provider import json_bewerten, ki_aktiv, ki_modell
 
 log = logging.getLogger("autohandel.ki")
@@ -56,6 +56,7 @@ Regeln:
 7. arguments: hoechstens 4 kurze, sachliche Saetze fuer das Gespraech mit dem Verkaeufer (deutsch, Sie-Form vermeiden, neutral: "Der Kotfluegel vorne rechts hat eine nicht dokumentierte Delle.").
 8. Preise in Euro inkl. MwSt. (Deutschland 2026). Nutze die Ausgangswerte unten als Orientierung und passe sie an das konkrete Fahrzeug an. Antworte ausschliesslich nach dem vorgegebenen JSON-Schema, alle Texte auf Deutsch.
 9. Knapp: title hoechstens 8 Woerter, reason hoechstens 15 Woerter, repair_method hoechstens 6 Woerter, hoechstens 3 arguments mit je hoechstens 20 Woertern, hoechstens 2 needs_information. Bekannte Schaeden (already_in_contract=true) NICHT als Position ausgeben.
+10. driver_answers sind Antworten des Fahrers auf fruehere Rueckfragen (source_id = Schaden/Abweichung). Nutze sie fuer die Schaetzung und stelle dieselbe Frage nicht erneut.
 
 """ + preisbasis.basis_als_text()
 
@@ -186,6 +187,15 @@ def paket_bauen(protokoll: dict, appt: dict, vehicle: dict, contract: dict) -> D
                              "label": "Reifen", "expected": "fahrbereit laut Inserat",
                              "actual": reifen[:120]})
 
+    # Stufe 3 (26.09.2026): Antworten des Fahrers auf Rueckfragen des Chefs
+    # (Ja/Nein/Unklar-Knopf in der Fahrer-App) — Teil der Eingabe, damit die
+    # Bewertung danach neu gerechnet wird.
+    antworten = []
+    for a in (protokoll.get("rueckfrage_antworten") or [])[:10]:
+        if isinstance(a, dict) and str(a.get("answer") or "").strip():
+            antworten.append({"source_id": str(a.get("source_id") or "")[:200],
+                              "question": str(a.get("question") or "")[:300],
+                              "answer": str(a.get("answer") or "")[:100]})
     return {
         "vehicle": fahrzeug,
         "prices": preise,
@@ -193,6 +203,7 @@ def paket_bauen(protokoll: dict, appt: dict, vehicle: dict, contract: dict) -> D
         "known_defects_listing": bekannte_maengel,
         "new_damages": neu,
         "deviations": abweichungen,
+        "driver_answers": antworten,
         "driver_notes": (protokoll.get("notes") or "")[:500],
     }
 
@@ -246,7 +257,7 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
         paket = paket_bauen(doc, appt, vehicle, contract)
         h = eingabe_hash(paket)
         jetzt = now_iso()
-        basis = {"id": str(uuid.uuid4()), "dealer_id": dealer_id, "protocol_id": protocol_id,
+        basis = {"id": str(uuid.uuid4()), "art": "abholung", "dealer_id": dealer_id, "protocol_id": protocol_id,
                  "appointment_id": doc.get("appointment_id"), "protocol_revision": doc.get("revision"),
                  "input_hash": h, "prompt_version": schemas.PROMPT_VERSION, "modell": ki_modell(),
                  "created_at": jetzt, "kaufpreis": paket["prices"].get("contract_price_eur")}
@@ -268,7 +279,12 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
         await db[SAMMLUNG].update_one({"protocol_id": protocol_id, "input_hash": h},
                                       {"$set": {**basis, "status": "laeuft", "grund": "", "ergebnis": None}},
                                       upsert=True)
-        antwort = await json_bewerten(system=SYSTEM_PROMPT, nutzer=paket, schema=schemas.ANTWORT_SCHEMA)
+        # Stufe 4: Erfahrungswerte aus den eigenen Faellen (leer, solange zu wenige)
+        system = SYSTEM_PROMPT
+        zusatz = await kalibrierung.prompt_zusatz()
+        if zusatz:
+            system = system + "\n\n" + zusatz
+        antwort = await json_bewerten(system=system, nutzer=paket, schema=schemas.ANTWORT_SCHEMA)
         eintrag = {**basis, "dauer_ms": antwort.get("dauer_ms"), "usage": antwort.get("usage") or {},
                    "modell": antwort.get("modell") or basis["modell"]}
         if antwort.get("status") == "ok" and isinstance(antwort.get("daten"), dict):
@@ -391,6 +407,7 @@ async def lernfall_speichern(protocol_id: str, dealer_id: str, *, chef_preis: Op
         await db[LERN_SAMMLUNG].update_one(
             {"protocol_id": protocol_id, "input_hash": bew.get("input_hash")},
             {"$set": {
+                "art": "abholung",
                 "dealer_id": dealer_id, "protocol_id": protocol_id, "input_hash": bew.get("input_hash"),
                 "created_at": now_iso(), "modell": bew.get("modell"), "prompt_version": bew.get("prompt_version"),
                 "fahrzeug": eingabe.get("vehicle"), "abweichungen": eingabe.get("deviations"),
@@ -402,9 +419,13 @@ async def lernfall_speichern(protocol_id: str, dealer_id: str, *, chef_preis: Op
                 "chef_preis": chef_preis, "quelle": quelle,
                 "chef_nachlass": (round(float(kp) - float(chef_preis), 2)
                                   if kp is not None and chef_preis is not None else None),
+                # Stufe 4: einheitlicher Name fuer die Kalibrierung (Vertrag: Inserat - Kaufpreis)
+                "tatsaechlicher_nachlass": (round(float(kp) - float(chef_preis), 2)
+                                            if kp is not None and chef_preis is not None else None),
                 "items": [{k: i.get(k) for k in ("source_id", "category", "title", "recommended_discount_eur",
                                                   "discount_min_eur", "discount_max_eur", "confidence")}
                           for i in (bew.get("ergebnis") or {}).get("items") or []],
             }}, upsert=True)
+        kalibrierung.zuruecksetzen()
     except Exception:  # noqa: BLE001
         log.exception("Lernfall fuer %s nicht gespeichert", protocol_id)

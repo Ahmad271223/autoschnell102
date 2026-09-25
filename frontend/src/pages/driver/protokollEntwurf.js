@@ -22,6 +22,8 @@ export const LEERER_ENTWURF = Object.freeze({
   // Entscheidung Ahmad 22.09.2026 (Ausweisnummer): vor Ort nachgetragen,
   // Teil des Entwurfs (Autosave, Zusammenführung, Sicherung wie alle Felder).
   seller_id_document: "",
+  // Stufe 3 KI (26.09.2026): Antworten auf Rückfragen des Chefs (Knopf Ja/Nein/Unklar)
+  rueckfrage_antworten: [],
 });
 
 /** Zahl vom Server als deutsch lesbarer Text fürs Eingabefeld ("15000,5"). */
@@ -48,6 +50,7 @@ export function entwurfAusServer(p) {
     preis_vorschlag: preisFeldText(x.preis_vorschlag),
     sondervereinbarung: x.sondervereinbarung || "",
     seller_id_document: x.seller_id_document || "",
+    rueckfrage_antworten: Array.isArray(x.rueckfrage_antworten) ? x.rueckfrage_antworten : [],
   };
 }
 

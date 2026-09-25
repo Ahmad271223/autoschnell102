@@ -137,6 +137,7 @@ ABO_ROUTEN = {
     "/api/listings/ingest", "/api/listings/check", "/api/listings/check/{job_id}",
     "/api/listings/resolve", "/api/manual/search",
     "/api/contracts/preview", "/api/contracts",              # POST (GET: nur Firma)
+    "/api/contracts/ki-schadennachlass",                     # KI-Schadennachlass Vertrag (26.09.2026)
     "/api/contracts/{contract_id}/send", "/api/contracts/{contract_id}/folge-mail",
 }
 # Beweisdokumente: die ID-Routen sind firmenuebergreifend (ein Dokument je

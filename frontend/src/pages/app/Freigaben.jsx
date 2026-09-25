@@ -310,8 +310,17 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
       {!e.ladefehler && !freigegeben && (
         <KiBewertungKarte eintrag={e} busy={busy}
           onPreis={(p) => { setzen("preis", preisText(p)); toast.info("Preis ins Feld übernommen — Freigeben bestätigt ihn."); }}
-          onFrage={(f) => senden(e, { zurueck: true, notiz: `Bitte prüfen: ${f.question}`
+          onFrage={(f) => senden(e, { zurueck: true, rueckfrage_frage: f, notiz: `Bitte prüfen: ${f.question}`
             + (f.options?.length ? ` (${f.options.join(" / ")})` : "") })} />
+      )}
+      {(e.rueckfrage_antworten || []).length > 0 && (
+        // Stufe 3 KI (26.09.2026): was der Fahrer per Knopf geantwortet hat
+        <div className="mt-2 text-[12px]" data-testid={`freigabe-antworten-${e.protocol_id}`}>
+          <span className="text-zinc-500">Antworten des Fahrers:</span>{" "}
+          {e.rueckfrage_antworten.map((a, i) => (
+            <span key={i}>{i > 0 ? " · " : ""}{a.question} <b>{a.answer}</b></span>
+          ))}
+        </div>
       )}
 
       <div className="mt-3 rounded-lg p-3" style={{ background: "var(--wa-03)" }}>
@@ -479,11 +488,19 @@ export default function Freigaben() {
     [entwurf, liste]);
   useUngespeichert(ungespeichert);
 
-  const senden = async (e, { zurueck = false, preis_zuruecksetzen = false, notiz: notizVorgabe } = {}) => {
+  const senden = async (e, { zurueck = false, preis_zuruecksetzen = false, notiz: notizVorgabe,
+                            rueckfrage_frage } = {}) => {
     const id = e.protocol_id;
     setBusy((b) => ({ ...b, [id]: true }));
     try {
       const koerper = { zurueck, stand: e.stand };
+      // Stufe 3 KI (26.09.2026): die konkrete Frage geht strukturiert mit —
+      // der Fahrer antwortet per Knopf.
+      if (zurueck && rueckfrage_frage?.question) {
+        koerper.rueckfrage_frage = { source_id: rueckfrage_frage.source_id || "",
+                                     question: rueckfrage_frage.question,
+                                     options: rueckfrage_frage.options || [] };
+      }
       if (preis_zuruecksetzen) koerper.preis_zuruecksetzen = true;
       const eigener = entwurf[id] || {};
       const freigabe = !zurueck && !preis_zuruecksetzen;

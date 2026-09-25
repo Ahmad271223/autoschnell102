@@ -7,7 +7,9 @@ import { blobOeffnen } from "@/lib/dateiOeffnen";
 import { toast } from "sonner";
 import { useAuth } from "@/context/AuthContext";
 import { X, Eye, FileText, Loader2, AlertTriangle, ExternalLink } from "lucide-react";
-import DamageSelector from "./DamageSelector";
+import DamageSelector, { damagesToText } from "./DamageSelector";
+import KiSchadenKarte from "./KiSchadenKarte";
+import { vorschlaegeAnwenden } from "@/lib/kiSchaden";
 import { fehlendeKaeuferfelder, kaeuferAktualisieren, kaeuferAusProfil } from "@/lib/kaeuferdaten";
 import { kmAusText, preisAusText, preisText } from "@/lib/preis";
 import { openContractPdf } from "@/lib/pdf";
@@ -354,6 +356,30 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
     };
   }, [open, form, entwurfKey]);
 
+  // Stufe 3 KI (Wunsch Ahmad 25.09.2026): eindeutige Angaben aus dem Inserat
+  // (Schlüssel, HU, Scheckheft nur bei "lückenlos"/"kein", Unfallfrei …)
+  // füllen NUR leere, nicht angefasste Felder — sichtbar mit Fundstelle.
+  // Dazu die KI-Schadenbewertung, die der Sucher vor dem Erstellen sah
+  // (Steuerfeld ki_bewertung_id für den Lernfall).
+  const [inseratVorschlaege, setInseratVorschlaege] = useState(null);
+  const kiBewertungRef = useRef(null);
+  const schaedenRef = useRef(null);
+  useEffect(() => {
+    if (!open || !vehicleId) { setInseratVorschlaege(null); kiBewertungRef.current = null; return undefined; }
+    let aktiv = true;
+    api.get(`/contracts/vorschlaege/${vehicleId}`)
+      .then((r) => {
+        if (!aktiv || !r?.data) return;
+        const erg = vorschlaegeAnwenden(formRef.current, r.data, beruehrt.current);
+        setInseratVorschlaege({ uebernommen: erg.uebernommen, hinweise: erg.hinweise });
+        if (erg.uebernommen.length) {
+          setForm((f) => vorschlaegeAnwenden(f, r.data, beruehrt.current).form);
+        }
+      })
+      .catch(() => {});
+    return () => { aktiv = false; };
+  }, [open, vehicleId]);
+
   // Runde 24 (11.09.2026, Gegenprüfung): useAuth().dealer wird nur beim
   // App-Start/Login geladen. Speichert der Sucher seine Käuferdaten über den
   // Link im Hinweis in einem ANDEREN Tab (oder ergänzt der Chef die
@@ -470,6 +496,8 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
     vehicle_id: vehicleId,
     ...form,
     purchase_price: preis.betrag ?? 0,
+    // Stufe 3 KI: welche Schadenbewertung vorher zu sehen war (nur Lernfall)
+    ki_bewertung_id: kiBewertungRef.current || undefined,
     // Unlesbarer km-Text geht nur in die Vorschau unverändert; "PDF
     // erstellen" blockiert vorher (siehe submit).
     vehicle_mileage: kmText ?? form.vehicle_mileage,
@@ -857,16 +885,50 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                 testid="contract-zulassung"
               />
             </div>
+            {inseratVorschlaege && (inseratVorschlaege.uebernommen.length > 0 || inseratVorschlaege.hinweise.length > 0) && (
+              <div className="rounded-lg px-3 py-2 text-[11px] leading-snug" data-testid="contract-inserat-vorschlaege"
+                   style={{ background: "var(--wa-03)", color: "var(--text-secondary)" }}>
+                {inseratVorschlaege.uebernommen.length > 0 && (
+                  <div>
+                    <span className="font-semibold">Aus dem Inserat übernommen (bitte prüfen):</span>{" "}
+                    {inseratVorschlaege.uebernommen
+                      .map((u) => `${u.label}: ${u.wert}${u.fund ? ` („${u.fund}“)` : ""}`).join(" · ")}
+                  </div>
+                )}
+                {inseratVorschlaege.hinweise.map((h, i) => <div key={i} className="mt-0.5">{h}</div>)}
+              </div>
+            )}
           </Section>
 
           <Section title="Schäden / Beschädigungen">
-            <DamageSelector
-              damages={form.damages}
-              onChange={(list, text) => {
-                bearbeitet.current = true;
-                setForm((f) => ({ ...f, damages: list, damages_text: text }));
-              }}
-            />
+            <div className="lg:flex lg:gap-4 lg:items-start">
+              <div className="flex-1 min-w-0" ref={schaedenRef}>
+                <DamageSelector
+                  damages={form.damages}
+                  onChange={(list, text) => {
+                    bearbeitet.current = true;
+                    setForm((f) => ({ ...f, damages: list, damages_text: text }));
+                  }}
+                />
+              </div>
+              {/* Stufe 3 KI (Wunsch Ahmad 25.09.2026): "Sind das alle Schäden?" →
+                  ein Aufruf, Karte rechts neben der Skizze; rein beratend. */}
+              <div className="lg:w-[330px] lg:shrink-0 mt-3 lg:mt-0">
+                <KiSchadenKarte
+                  vehicleId={vehicleId}
+                  damages={form.damages}
+                  onDamagesChange={(list) => {
+                    bearbeitet.current = true;
+                    setForm((f) => ({ ...f, damages: list, damages_text: damagesToText(list) }));
+                  }}
+                  preisBetrag={preis.fehler ? null : (preis.betrag || null)}
+                  onPreis={(p) => { set("purchase_price", preisText(p)); toast.info("Preis ins Feld übernommen — bitte prüfen."); }}
+                  onBewertungId={(id) => { kiBewertungRef.current = id; }}
+                  onWeitere={() => schaedenRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}
+                  disabled={loading || previewing}
+                />
+              </div>
+            </div>
           </Section>
 
           <Section title="Konditionen">

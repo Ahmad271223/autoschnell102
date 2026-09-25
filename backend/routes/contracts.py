@@ -270,6 +270,10 @@ class ContractIn(BaseModel):
     # (409 mit Vertragsnummer). Mit true legt er bewusst einen zweiten an
     # (Nachverhandlung). Steuerfeld — kommt nicht in den Vertrag.
     zweiter_vertrag_bestaetigt: Optional[bool] = False
+    # Stufe 3 KI-Schadennachlass (26.09.2026): die Bewertung, die der Sucher
+    # vor dem Erstellen gesehen hat — Steuerfeld fuer den Lernfall (KI-Empfehlung
+    # gegen den tatsaechlichen Vertragspreis), kommt nicht in den Vertrag.
+    ki_bewertung_id: Optional[str] = Field(default=None, max_length=100)
     # Optional override for the dealer's default AGB block. If empty,
     # the dealer's saved AGB are used (current behaviour).
     agb_text: Optional[str] = ""
@@ -649,6 +653,7 @@ async def _freigabe_link(contract_id: str, bereich: dict, user: dict) -> tuple[s
 # (ohne Datenbank), damit das Abholprotokoll-PDF nicht den ganzen Routen-Stack
 # braucht. Die Namen hier bleiben gueltig.
 from vertrag_felder import KAEUFER_FELDER, _apply_contract_overrides  # noqa: E402,F401
+from ai import damage_pricing as _ki_vertrag  # noqa: E402
 
 
 # Runde 24 (11.09.2026, Befund Ahmad): Der Kaeufer (= Auftraggeber im
@@ -773,6 +778,50 @@ async def _logo_einsetzen(dealer: dict, contract_dict: dict) -> dict:
 
 
 # ---------- Endpoints ----------
+class KiSchadenIn(BaseModel):
+    """Stufe 3 (26.09.2026): die Schaeden aus der Skizze des Vertragsdialogs —
+    EIN Aufruf fuer alle, erst nach "Ja, Schaeden bewerten"."""
+    vehicle_id: str = Field(max_length=200)
+    damages: List[DamageIn] = Field(default_factory=list, max_length=60)
+    # schon verhandelter Kaufpreis (sonst gilt der Inseratspreis als Basis)
+    purchase_price: Optional[float] = Field(default=None, ge=0, le=10_000_000)
+
+    @field_validator("purchase_price", mode="before")
+    @classmethod
+    def _preis_endlich(cls, v):
+        if isinstance(v, float) and v != v:
+            raise ValueError("ungültiger Preis")
+        return v
+
+
+@router.get("/contracts/vorschlaege/{vehicle_id}")
+async def vertrag_vorschlaege(vehicle_id: str, user=Depends(current_firma)):
+    """Stufe 3 (Wunsch Ahmad 25.09.2026): eindeutige Vertragsangaben aus dem
+    Inserat — regelbasiert, ohne KI (Schluessel, HU, Scheckheft nur bei
+    "lueckenlos"/"kein", Unfallfreiheit, fahrbereit, EU-Import, Bereifung).
+    Der Dialog fuellt damit NUR leere Felder und zeigt die Fundstelle."""
+    v = await _fahrzeug_fuer_vertrag(user, vehicle_id)
+    if not v:
+        raise HTTPException(404, FAHRZEUG_NICHT_IM_BEREICH)
+    from ai import inserat_regeln
+    return inserat_regeln.vorschlaege(v.get("data") or {})
+
+
+@router.post("/contracts/ki-schadennachlass")
+async def vertrag_ki_schadennachlass(body: KiSchadenIn, user=Depends(require_active_sub)):
+    """Stufe 3 (Wunsch Ahmad 25.09.2026): KI-Schadennachlass fuer die im
+    Vertragsdialog markierten Schaeden — synchron, ein Aufruf, rein beratend.
+    Antwort: status ok | keine | aus | limit | fehler | zeitlimit ... mit
+    ergebnis (items/combined/needs_information/arguments) und der id fuer
+    den Lernfall (ContractIn.ki_bewertung_id)."""
+    v = await _fahrzeug_fuer_vertrag(user, body.vehicle_id)
+    if not v:
+        raise HTTPException(404, FAHRZEUG_NICHT_IM_BEREICH)
+    return await _ki_vertrag.bewerten(user=user, vehicle_doc=v,
+                                      damages=[d.model_dump() for d in body.damages],
+                                      kaufpreis=body.purchase_price)
+
+
 @router.post("/contracts/preview")
 async def preview_contract(body: ContractIn, user=Depends(require_active_sub),
                            variante: str = "druck"):
@@ -789,7 +838,7 @@ async def preview_contract(body: ContractIn, user=Depends(require_active_sub),
     from deps import effective_dealer
     dealer = await effective_dealer(user) or {}
     vehicle = v["data"]
-    contract_dict = body.model_dump(exclude={"zweiter_vertrag_bestaetigt"})
+    contract_dict = body.model_dump(exclude={"zweiter_vertrag_bestaetigt", "ki_bewertung_id"})
     if not (contract_dict.get("additional_terms") or "").strip():
         # Wunsch Ahmad 20.09.2026: unser Standardsatz (falls eingeschaltet)
         # UND der eigene Text der Firma — nicht mehr nur das Freitextfeld.
@@ -846,7 +895,7 @@ def _anfrage_hash(body) -> str:
     # Rollenpruefung 22.09.2026 (RP-416): die Rueckfrage "zweiter Vertrag?"
     # ist Steuerung, kein Vertragsinhalt — dieselbe Anfrage mit und ohne
     # Bestaetigung ist derselbe Vertrag.
-    daten = body.model_dump(exclude={"idempotency_key", "zweiter_vertrag_bestaetigt"})
+    daten = body.model_dump(exclude={"idempotency_key", "zweiter_vertrag_bestaetigt", "ki_bewertung_id"})
     roh = json.dumps(daten, sort_keys=True, default=str, ensure_ascii=False)
     return hashlib.sha256(roh.encode("utf-8")).hexdigest()[:32]
 
@@ -976,7 +1025,7 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     # Apply dealer defaults if the form didn't override them. Both
     # special_agreements and agb_text now support a per-contract override
     # (otherwise we still fall back to the dealer's saved defaults).
-    contract_dict = body.model_dump(exclude={"zweiter_vertrag_bestaetigt"})
+    contract_dict = body.model_dump(exclude={"zweiter_vertrag_bestaetigt", "ki_bewertung_id"})
     if not (contract_dict.get("additional_terms") or "").strip():
         # Wunsch Ahmad 20.09.2026: unser Standardsatz (falls eingeschaltet)
         # UND der eigene Text der Firma — nicht mehr nur das Freitextfeld.
@@ -1051,6 +1100,8 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
         "pdf_digital_b64": pdf_digital_b64,
         "vehicle_image_urls": vehicle_image_urls,
         "inserat_stand": inserat_stand,
+        # Stufe 3 (26.09.2026): welche KI-Schadenbewertung der Sucher vorher sah
+        "ki_bewertung_id": (body.ki_bewertung_id or "").strip() or None,
         # Rollenpruefung 22.09.2026 (RP-200/RP-351): schon beim Anlegen ohne
         # Steuerzeichen/Anfuehrungszeichen; die Kopfzeile baut
         # content_disposition (ASCII + UTF-8), 'Š' & Co. geben kein 500 mehr.
@@ -1121,6 +1172,9 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
         doc["admin_vehicle_data_id"] = auto_daten_id
         try:
             await db.generated_pdfs.insert_one(doc)
+            # Stufe 3/4 (26.09.2026): KI-Empfehlung gegen den tatsaechlichen
+            # Vertragspreis festhalten (anonym, wirft nie).
+            await _ki_vertrag.lernfall_speichern(doc, doc.get("ki_bewertung_id"))
         except DuplicateKeyError:
             # Pruefung 14.09.2026 (Liste 3, Nr. 1): paralleler Doppelklick — der
             # andere Aufruf hat den Vertrag mit demselben Schluessel angelegt.

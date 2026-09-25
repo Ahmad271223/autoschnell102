@@ -191,6 +191,12 @@ export default function Protokoll() {
   } = protokollZustand(data?.protocol?.status);
   const neuerPreis = data?.protocol?.neuer_preis ?? null;
   const rueckfrage = data?.protocol?.rueckfrage || "";
+  // Stufe 3 KI (26.09.2026): strukturierte Rückfrage (Frage + Antwortknöpfe)
+  const rueckfrageFrage = data?.protocol?.rueckfrage_frage || null;
+  const istAntwortZu = (a) => rueckfrageFrage
+    && a.source_id === (rueckfrageFrage.source_id || "") && a.question === rueckfrageFrage.question;
+  const rueckfrageAntwort = rueckfrageFrage
+    ? ((f.rueckfrage_antworten || []).find(istAntwortZu)?.answer || "") : "";
   // Rollenprüfung 22.09.2026 (RP-059/RP-158): Ort und Verkäufername friert
   // der Server beim Abschicken ein, der Abschluss nimmt genau diese Werte
   // (protocols.py: doc.place/seller_name vor dem Wert aus der App). Vorher
@@ -494,6 +500,18 @@ export default function Protokoll() {
   };
   const setDoc = (name, wert) =>
     upd((s) => ({ documents: { ...s.documents, [name]: wert } }));
+  // Stufe 3 KI: Antwort auf die Rückfrage des Chefs — gespeichert wie jede
+  // andere Eingabe (Autosave), danach schickt der Fahrer erneut zur Freigabe.
+  const rueckfrageAntworten = (o) => {
+    if (!rueckfrageFrage) return;
+    upd((s) => ({
+      rueckfrage_antworten: [
+        ...(s.rueckfrage_antworten || []).filter((a) => !istAntwortZu(a)),
+        { source_id: rueckfrageFrage.source_id || "", question: rueckfrageFrage.question,
+          answer: o, at: new Date().toISOString() },
+      ].slice(-10),
+    }));
+  };
   const setFeat = (name, wert) =>
     upd((s) => ({ features: { ...s.features, [name]: wert } }));
   const setCond = (k, v) =>
@@ -772,7 +790,36 @@ export default function Protokoll() {
              data-testid="protokoll-rueckfrage"
              style={{ borderColor: "#ff3b3055", background: "#ff3b3014", color: "var(--st-rot)" }}>
           <AlertTriangle size={16} className="mt-0.5 shrink-0" />
-          <div className="flex-1">Der Händler bittet um eine Ergänzung: {rueckfrage}</div>
+          <div className="flex-1">
+            Der Händler bittet um eine Ergänzung: {rueckfrage}
+            {/* Stufe 3 KI (26.09.2026): Antwort per Knopf statt Freitext */}
+            {rueckfrageFrage && (
+              <div className="mt-2" data-testid="protokoll-rueckfrage-frage">
+                <div className="font-semibold">{rueckfrageFrage.question}</div>
+                <div className="mt-1.5 flex flex-wrap gap-2">
+                  {(rueckfrageFrage.options?.length ? rueckfrageFrage.options : ["Ja", "Nein", "Unklar"]).map((o) => {
+                    const aktiv = rueckfrageAntwort === o;
+                    return (
+                      <button key={o} type="button" onClick={() => rueckfrageAntworten(o)}
+                              data-testid={`protokoll-rueckfrage-antwort-${o}`}
+                              className="min-h-[40px] px-3 rounded-lg text-sm font-semibold border"
+                              style={aktiv
+                                ? { background: "var(--accent-red)", color: "#fff", borderColor: "var(--accent-red)" }
+                                : { borderColor: "var(--border-default)", color: "var(--text-primary)", background: "var(--wa-03)" }}>
+                        {o}
+                      </button>
+                    );
+                  })}
+                </div>
+                {rueckfrageAntwort && (
+                  <div className="mt-1.5 text-[12px]" data-testid="protokoll-rueckfrage-gespeichert"
+                       style={{ color: "var(--text-primary)" }}>
+                    Deine Antwort: <b>{rueckfrageAntwort}</b> — danach unten erneut „Zur Freigabe schicken“.
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       )}
       {isFinal && (

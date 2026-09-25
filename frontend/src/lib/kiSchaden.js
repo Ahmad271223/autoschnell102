@@ -90,6 +90,8 @@ export function kiStatusText(status) {
     case "schluessel": return "KI-Schlüssel fehlt oder ist ungültig (Einstellung auf dem Server).";
     case "abgelehnt": return "KI hat diese Anfrage nicht bewertet.";
     case "fehler": return "KI-Einschätzung momentan nicht verfügbar.";
+    case "limit": return "Stundenlimit für KI-Bewertungen erreicht – bitte später erneut.";
+    case "netz": return "Keine Verbindung zum Server – bitte erneut versuchen.";
     default: return "";
   }
 }
@@ -102,4 +104,71 @@ export function kiWartet(status) {
 /** Argumente als Text zum Kopieren. */
 export function argumenteText(args) {
   return (args || []).map((a, i) => `${i + 1}. ${a}`).join("\n");
+}
+
+// ---------------------------------------------------------------- Vertrag (Stufe 3)
+/** Anzeigename der Vertragsfelder, die das Inserat vorbelegen kann. */
+export const FELD_LABEL = {
+  schluessel_anzahl: "Schlüssel", hu_valid: "HU/AU vorhanden", hu_until: "HU gültig bis",
+  service_book: "Scheckheftgepflegt", accident_free: "Unfallfrei", drivable: "Fahrtauglich",
+  eu_import: "EU-Import", tires: "Bereifung",
+};
+
+const WERT_TEXT = { ja: "Ja, lückenlos", nein: "Nein", teilweise: "Teilweise" };
+
+export function vorschlagWertText(feld, wert) {
+  if (feld === "service_book") return WERT_TEXT[String(wert).toLowerCase()] || String(wert);
+  return String(wert);
+}
+
+/**
+ * Vorschläge aus dem Inserat (GET /contracts/vorschlaege/{id}) in das Formular
+ * übernehmen — NUR in leere Felder, nie in Felder, die der Nutzer schon
+ * angefasst hat (gesperrt). Liefert das neue Formular und die Liste dessen,
+ * was übernommen wurde (mit Fundstelle), damit der Dialog es zeigt.
+ */
+export function vorschlaegeAnwenden(form, vorschlaege, gesperrt = {}) {
+  const felder = vorschlaege?.felder || {};
+  const neu = { ...form };
+  const uebernommen = [];
+  for (const [feld, v] of Object.entries(felder)) {
+    if (!v || v.value === undefined || v.value === null || v.value === "") continue;
+    if (!(feld in form) || gesperrt[feld]) continue;
+    if (String(form[feld] ?? "").trim() !== "") continue;
+    if (feld === "hu_until") {
+      const hu = String(neu.hu_valid || "");
+      if (hu !== "Ja") continue;
+    }
+    neu[feld] = String(v.value);
+    uebernommen.push({ feld, label: FELD_LABEL[feld] || feld, wert: vorschlagWertText(feld, v.value),
+                       fund: v.source_text || "" });
+  }
+  if (uebernommen.some((u) => u.feld === "schluessel_anzahl")) neu.empfang_schluessel = true;
+  return { form: neu, uebernommen, hinweise: vorschlaege?.hinweise || [] };
+}
+
+/** Eine Zeile je Schaden für "Sind das alle Schäden?" */
+export function schadenZeile(d) {
+  const teile = [d?.type_label || d?.type_key || "Schaden", d?.zone].filter(Boolean);
+  const s = schwereText(d);
+  return teile.join(" – ") + (s ? ` – ${s}` : "");
+}
+
+/** Fingerabdruck der Schäden (Art, Bauteil, Zusatzangaben) — ändert er sich
+ *  nach einer Bewertung, ist die Karte veraltet. */
+export function schaedenStand(damages) {
+  return JSON.stringify((damages || []).map((d) => [d.id, d.type_key, d.zone, d.severity_data || {}]));
+}
+
+/** Schlüssel für eine KI-Rückfrage im severity_data des Schadens. */
+export function frageSchluessel(question) {
+  const s = String(question || "").toLowerCase().replace(/[^a-z0-9äöüß]+/g, "_").replace(/^_+|_+$/g, "");
+  return ("frage_" + s).slice(0, 40);
+}
+
+/** Antwort auf eine KI-Rückfrage am passenden Schaden ablegen. */
+export function mitRueckfrageAntwort(damages, frage, antwort) {
+  const key = frageSchluessel(frage?.question);
+  return (damages || []).map((d) => (String(d.id) === String(frage?.source_id)
+    ? { ...d, severity_data: { ...(d.severity_data || {}), [key]: antwort } } : d));
 }

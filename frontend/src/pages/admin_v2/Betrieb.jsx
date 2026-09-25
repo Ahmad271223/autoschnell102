@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
-import { Activity, AlertTriangle, Check, Mail, RefreshCw, Send, ShieldAlert } from "lucide-react";
+import { Activity, AlertTriangle, Check, Mail, RefreshCw, Send, ShieldAlert, Sparkles } from "lucide-react";
 import { PageHeader, Card, Badge, Button, Spinner, EmptyState, fmtDate } from "./_ui";
 
 /**
@@ -177,6 +177,8 @@ export default function AdminBetrieb() {
 
       {"aufraeumlauf" in data && <AufraeumlaufKarte lauf={data.aufraeumlauf} />}
 
+      <KiKarte />
+
       <Card padded={false}>
         <div className="flex items-center gap-2 px-5 py-4" style={{ borderBottom: "1px solid var(--wa-08)" }}>
           <AlertTriangle size={16} className="text-zinc-500" />
@@ -275,6 +277,63 @@ function AufraeumlaufKarte({ lauf }) {
       {fehl.length > 0 && (
         <div className="mt-1 text-[12.5px] text-red-300" data-testid="aufraeumlauf-fehlgeschlagen">
           Gescheiterte Schritte im letzten Lauf: {fehl.join(", ")}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+/**
+ * KI-Bewertung (Stufe 4, 26.09.2026): Aufrufe, Fehler, Dauer, Kostenschätzung,
+ * Lernfälle und ob die eigenen Erfahrungswerte schon einfließen.
+ */
+function KiKarte() {
+  const [ki, setKi] = useState(null);
+  const [fehler, setFehler] = useState("");
+  useEffect(() => {
+    api.get("/admin/ki").then((r) => setKi(r.data))
+      .catch((e) => setFehler(errMsg(e, "KI-Zahlen nicht ladbar")));
+  }, []);
+  const st = ki?.je_status || {};
+  const fehlerZahl = Object.entries(st)
+    .filter(([k]) => !["ok", "keine", "laeuft", "cache"].includes(k))
+    .reduce((s, [, v]) => s + v, 0);
+  const erf = ki?.erfahrungswerte?.gesamt || {};
+  const min = ki?.lernfaelle?.min_fuer_kalibrierung || 5;
+  const sek = (ms) => (ms != null ? `${(ms / 1000).toFixed(1)} s` : "—");
+  return (
+    <Card className="mb-4" data-testid="ki-betrieb">
+      <div className="flex items-center gap-2 mb-2">
+        <Sparkles size={16} className="text-zinc-500" />
+        <span className="text-[15px] font-semibold text-white">KI-Bewertung</span>
+        <Badge tone={!ki ? "yellow" : ki.aktiv ? "green" : "yellow"}>
+          {!ki ? "lädt…" : ki.aktiv ? `an · ${ki.modell}` : "aus (kein Schlüssel)"}
+        </Badge>
+      </div>
+      {fehler && <div className="text-[12.5px] text-red-300">{fehler}</div>}
+      {ki && (
+        <div className="text-[13px] text-zinc-400 space-y-1">
+          <div>
+            Letzte {ki.zeitraum_tage} Tage: <span className="text-zinc-200">{ki.bewertungen}</span> Bewertungen
+            {" "}(Abholung {ki.je_art?.abholung || 0}, Vertrag {ki.je_art?.vertrag || 0}) · ok {st.ok || 0}
+            {" "}· Fehler <span className={fehlerZahl ? "text-red-300" : "text-zinc-200"}>{fehlerZahl}</span>
+          </div>
+          <div>
+            Dauer: Median {sek(ki.dauer_median_ms)} · p95 {sek(ki.dauer_p95_ms)} · Kosten geschätzt{" "}
+            <span className="text-zinc-200">{ki.kosten_usd_geschaetzt} $</span>
+            {" "}(Tokens ein {ki.tokens?.input_tokens ?? 0}, aus {ki.tokens?.output_tokens ?? 0})
+          </div>
+          <div data-testid="ki-betrieb-lernfaelle">
+            Lernfälle: {ki.lernfaelle?.gesamt ?? 0} (mit Ergebnis {ki.lernfaelle?.mit_ergebnis ?? 0}) —{" "}
+            {(erf.n || 0) >= min
+              ? `Erfahrungswerte fließen ein: erzielt im Median ${Math.round((erf.faktor_median || 0) * 100)} % der KI-Empfehlung (n=${erf.n})`
+              : `Erfahrungswerte fließen ab ${min} Fällen ein, noch ${Math.max(0, min - (erf.n || 0))} fehlen`}
+          </div>
+          {(ki.letzte_fehler || []).length > 0 && (
+            <div className="text-red-300">
+              Letzte Fehler: {ki.letzte_fehler.slice(0, 3).map((x) => `${x.status} (${x.art}) ${x.grund}`).join(" · ")}
+            </div>
+          )}
         </div>
       )}
     </Card>

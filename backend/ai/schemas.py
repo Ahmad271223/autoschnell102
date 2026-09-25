@@ -10,7 +10,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-PROMPT_VERSION = "abholung_v1"
+PROMPT_VERSION = "abholung_v2"          # v2 (26.09.2026): Fahrer-Antworten + Erfahrungswerte
+PROMPT_VERSION_VERTRAG = "vertrag_v1"
 
 # Ein Nachlassbereich darf hoechstens +-SPANNE_MAX um den Hauptwert liegen.
 SPANNE_MAX = 0.20
