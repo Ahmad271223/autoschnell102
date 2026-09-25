@@ -8,8 +8,9 @@ Regeln (Wunsch Ahmad 25.09.2026):
   * hartes Zeitlimit (KI_ZEITLIMIT_SEKUNDEN, Standard 30 s); ein Ausfall
     blockiert nie Vertrag, Freigabe oder Unterschrift — der Aufrufer bekommt
     ein Ergebnis mit status "fehler" statt einer Ausnahme
-  * Modell einstellbar (KI_MODELL, Standard claude-opus-5; guenstiger:
-    claude-sonnet-5), Denktiefe KI_EFFORT (Standard low)
+  * Modell einstellbar (KI_MODELL, Standard claude-sonnet-5 — Entscheidung
+    Ahmad 26.09.2026; claude-opus-5 genauer, aber dreimal so teuer),
+    Denktiefe KI_EFFORT (Standard low)
 """
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ from konfig import kommazahl_env, schalter_env
 
 log = logging.getLogger("autohandel.ki")
 
-KI_MODELL_STANDARD = "claude-opus-5"
+KI_MODELL_STANDARD = "claude-sonnet-5"
 # Gemessen 25.09.2026 (BMW-Beispiel, 6 Positionen): 19-35 s je Bewertung —
 # die Bewertung laeuft im Hintergrund, der Chef sieht sie beim Oeffnen der
 # Liste; 30 s Zeitlimit statt der urspruenglich geplanten 12 s.

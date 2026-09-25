@@ -3167,9 +3167,9 @@ cd /opt/autoschnell && sh deploy/env_setzen.sh ANTHROPIC_API_KEY=sk-ant-…
 
 danach der normale Rollout (`sh deploy/rollout.sh`, ein Server je Aufruf). Ohne Schlüssel ist die
 Funktion still aus — kein Fehler, keine Karte. Schalter und Einstellungen (`.env.example`):
-`KI_BEWERTUNG_AKTIV` (Standard `true`), `KI_MODELL` (Standard `claude-opus-5`; günstiger
-`claude-sonnet-5`), `KI_EFFORT` (Standard `low`), `KI_ZEITLIMIT_SEKUNDEN` (Standard 30),
-`KI_DENKEN_AUS`. Gemessen: 16–20 s je Bewertung, ~3–5 ct (Opus). Die Bewertung läuft nach dem
+`KI_BEWERTUNG_AKTIV` (Standard `true`), `KI_MODELL` (Standard `claude-sonnet-5`, Entscheidung Ahmad 26.09.2026; genauer, aber dreimal so teuer:
+`claude-opus-5`), `KI_EFFORT` (Standard `low`), `KI_ZEITLIMIT_SEKUNDEN` (Standard 30),
+`KI_DENKEN_AUS`. Gemessen: 15–20 s je Bewertung, ~1–2 ct (Sonnet; Opus ~3–5 ct). Die Bewertung läuft nach dem
 Abschicken im Hintergrund; die Karte holt sie beim Öffnen der Liste, „Neu berechnen“ wartet.
 
 **Stufe 3 – Kaufvertrag (26.09.2026):** Beim Öffnen des Vertragsdialogs holt die Oberfläche

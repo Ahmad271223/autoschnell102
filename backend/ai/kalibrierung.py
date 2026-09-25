@@ -111,7 +111,7 @@ def zuruecksetzen() -> None:
 
 # ------------------------------------------------ Betriebszahlen (/admin/ki)
 def _kosten_usd(modell: str, usage: Dict[str, Any]) -> float:
-    ein, aus = PREIS_JE_MIO.get(modell or "", PREIS_JE_MIO["claude-opus-5"])
+    ein, aus = PREIS_JE_MIO.get(modell or "", PREIS_JE_MIO["claude-sonnet-5"])
     e = float(usage.get("input_tokens") or 0) + float(usage.get("cache_creation_input_tokens") or 0) * 1.25 \
         + float(usage.get("cache_read_input_tokens") or 0) * 0.1
     a = float(usage.get("output_tokens") or 0)

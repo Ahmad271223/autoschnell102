@@ -216,7 +216,7 @@ services:
       # Schluessel ist die Funktion still aus.
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - KI_BEWERTUNG_AKTIV=${KI_BEWERTUNG_AKTIV:-true}
-      - KI_MODELL=${KI_MODELL:-claude-opus-5}
+      - KI_MODELL=${KI_MODELL:-claude-sonnet-5}
       - KI_EFFORT=${KI_EFFORT:-low}
       - KI_ZEITLIMIT_SEKUNDEN=${KI_ZEITLIMIT_SEKUNDEN:-30}
       - KI_DENKEN_AUS=${KI_DENKEN_AUS:-false}
