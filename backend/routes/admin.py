@@ -2479,6 +2479,37 @@ def _datum_pruefen_400(wert, feld: str) -> str:
     return w
 
 
+class KiFreischaltenIn(BaseModel):
+    """KI-Bewertung je Konto an/aus (Wunsch Ahmad 25.09.2026 abends, wie Abo)."""
+    aktiv: bool
+    grund: Optional[str] = Field(default=None, max_length=300)
+
+
+@router.post("/admin/sucher/{sucher_id}/ki")
+async def admin_set_sucher_ki(sucher_id: str, body: KiFreischaltenIn,
+                              admin=Depends(current_super_admin)):
+    """KI-Bewertung (Abholung + Vertrag) fuer ein Konto freischalten oder
+    sperren. NUR Super-Admin. Unabhaengig vom Abo: ohne Abo laeuft der
+    Vertrag ohnehin nicht; die Abholung haengt am Hauptchef-Konto der Firma.
+    Wirkt sofort — die Karten fragen bei jedem Aufruf nach."""
+    sucher = await db.users.find_one(
+        {"id": sucher_id, "role": {"$in": ["sucher", "dealer"]}},
+        {"_id": 0, "id": 1, "dealer_id": 1, "active": 1, "ki_aktiv": 1, "loeschung": 1})
+    if not sucher:
+        raise HTTPException(404, "Sucher nicht gefunden")
+    if body.aktiv and sucher.get("active") is False:
+        raise HTTPException(400, "Dieses Konto ist deaktiviert — erst das Konto wieder aktivieren.")
+    if body.aktiv and (sucher.get("loeschung") or {}).get("status") == "laeuft":
+        raise HTTPException(409, "Dieses Konto wird gerade gelöscht — keine Freischaltung mehr.")
+    await db.users.update_one({"id": sucher_id},
+                              {"$set": {"ki_aktiv": bool(body.aktiv), "ki_aktiv_seit": now_iso() if body.aktiv else None,
+                                        "ki_aktiv_von": _handelnder(admin), "updated_at": now_iso()}})
+    await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
+                              "admin.sucher.ki." + ("freigeschaltet" if body.aktiv else "gesperrt"),
+                              ref=sucher_id, meta={"grund": body.grund or "", "dealer_id": sucher.get("dealer_id")})
+    return {"ok": True, "ki_aktiv": bool(body.aktiv)}
+
+
 @router.post("/admin/sucher/{sucher_id}/abo")
 async def admin_set_sucher_abo(sucher_id: str, body: AboFreischaltenIn,
                                admin=Depends(current_super_admin)):
@@ -3390,6 +3421,8 @@ async def admin_list_dealer_sucher(dealer_id: str, response: Response, limit: in
             {"subject_user_id": s["id"]}, {"_id": 0},
             sort=[("created_at", -1)])
         out.append({**s, "ist_chef": ist_chef,
+                    # KI-Bewertung je Konto freigeschaltet? (25.09.2026 abends, wie Abo)
+                    "ki_aktiv": s.get("ki_aktiv") is True,
                     # liegengebliebenes zweites dealer-Konto: arbeitet als Sucher
                     "weiteres_dealer_konto": s.get("role") == "dealer" and not ist_chef,
                     "subscription": sub,

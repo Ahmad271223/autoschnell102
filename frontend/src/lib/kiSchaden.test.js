@@ -9,7 +9,7 @@ import {
 describe("kiSchaden", () => {
   it("hat fuer jede Schadensart der Skizze 3 Fragen mit 'unbekannt' wo sinnvoll", () => {
     for (const typ of ["delle", "kratzer", "rost", "hagelschaden", "steinschlag", "beleuchtung",
-                       "unfall_repariert", "unfall_nicht_repariert"]) {
+                       "unfall_repariert", "unfall_nicht_repariert", "technik"]) {
       expect(SCHWERE_FRAGEN[typ].length).toBeGreaterThanOrEqual(3);
       expect(SCHWERE_FRAGEN[typ].length).toBeLessThanOrEqual(4);
     }

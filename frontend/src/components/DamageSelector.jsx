@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Trash2, Eraser } from "lucide-react";
 import { toast } from "sonner";
-import { mitAntwort, schwereFragen } from "@/lib/kiSchaden";
+import { TECHNIK_BEREICHE, TECHNIK_TYP, istTechnik, mitAntwort, schwereFragen, technikSchaden } from "@/lib/kiSchaden";
 
 // Rollenprüfung 22.09.2026 (RP-070/RP-169/RP-514): Ein Tipp auf einen Marker
 // löschte den Schaden sofort — und der Marker liegt genau auf dem Bauteilpunkt
@@ -369,6 +369,20 @@ export default function DamageSelector({ damages = [], onChange }) {
     return map;
   }, [damages]);
 
+  // Technischer Mangel (25.09.2026 abends): kein Skizzenpunkt — Bereich
+  // tippen, dann Stand/Fahrbereit/Warnleuchte und eine kurze Beschreibung.
+  const [technikOffen, setTechnikOffen] = useState(false);
+  const addTechnik = (bereich) => {
+    const next = [...damages, technikSchaden(bereich)];
+    onChange?.(next, damagesToText(next));
+    setTechnikOffen(false);
+    toast.success(`${TECHNIK_TYP.label}: ${bereich}`, { duration: 1600 });
+  };
+  const setNote = (id, note) => {
+    const next = damages.map((x) => (x.id === id ? { ...x, note } : x));
+    onChange?.(next, damagesToText(next));
+  };
+
   // Alle fuenf Skizzen sofort vorladen, sobald der Dialog offen ist — dann
   // liegen sie beim Wechsel der Ansicht schon im Browser-Cache.
   useEffect(() => {
@@ -405,6 +419,35 @@ export default function DamageSelector({ damages = [], onChange }) {
             </button>
           );
         })}
+      </div>
+
+      {/* Technische Maengel ohne Skizze */}
+      <div className="rounded-lg border px-3 py-2" style={{ borderColor: "var(--border-default)" }}
+           data-testid="damage-technik">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 text-xs text-zinc-300">
+            <span className="inline-flex items-center justify-center rounded-md px-1.5 py-0.5 text-[10px] font-bold tracking-wide"
+                  style={{ backgroundColor: TECHNIK_TYP.color, color: "#0a0a0a" }}>{TECHNIK_TYP.abbr}</span>
+            <span>{TECHNIK_TYP.label} (Motor, Getriebe, Elektrik, Klima …) – ohne Skizze</span>
+          </div>
+          <button type="button" onClick={() => setTechnikOffen((o) => !o)} data-testid="damage-technik-oeffnen"
+                  aria-expanded={technikOffen}
+                  className="rounded-full border px-3 py-1.5 tipp-40 text-xs text-zinc-300 hover:text-white"
+                  style={{ borderColor: technikOffen ? TECHNIK_TYP.color : "var(--border-default)" }}>
+            {technikOffen ? "Schließen" : "+ Mangel hinzufügen"}
+          </button>
+        </div>
+        {technikOffen && (
+          <div className="mt-2 flex flex-wrap gap-1.5" data-testid="damage-technik-bereiche">
+            {TECHNIK_BEREICHE.map((b) => (
+              <button key={b} type="button" onClick={() => addTechnik(b)} data-testid={`damage-technik-${b}`}
+                      className="rounded-full px-2.5 py-1 text-[11px] min-h-[32px] border text-zinc-300 hover:text-white"
+                      style={{ borderColor: "var(--border-default)" }}>
+                {b}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="flex items-center justify-between gap-3 text-[11px] text-zinc-500">
@@ -477,8 +520,8 @@ export default function DamageSelector({ damages = [], onChange }) {
                     <span className="text-zinc-200 truncate">{d.type_label}</span>
                     <span className="text-zinc-500">·</span>
                     <span className="text-zinc-400 truncate">
-                      {d.zone}{" "}
-                      <span className="text-zinc-600">({VIEW_LABELS[d.view]})</span>
+                      {d.zone}
+                      {VIEW_LABELS[d.view] ? <span className="text-zinc-600"> ({VIEW_LABELS[d.view]})</span> : null}
                     </span>
                   </div>
                   <button
@@ -519,6 +562,13 @@ export default function DamageSelector({ damages = [], onChange }) {
                       </div>
                     ))}
                   </div>
+                )}
+                {istTechnik(d) && (
+                  <input value={d.note || ""} maxLength={200} data-testid={`damage-note-${d.id}`}
+                         placeholder="Was genau? z. B. Automatik ruckelt beim Kaltstart"
+                         onChange={(e) => setNote(d.id, e.target.value)}
+                         className="mt-1.5 w-full rounded-lg border bg-transparent px-2.5 py-1.5 text-[12px] text-zinc-200"
+                         style={{ borderColor: "var(--border-default)" }} />
                 )}
               </li>
             ))}
@@ -684,7 +734,9 @@ export function damagesToText(damages) {
   const byType = new Map();
   for (const d of damages) {
     if (!byType.has(d.type_label)) byType.set(d.type_label, []);
-    byType.get(d.type_label).push(d.zone);
+    // Technischer Mangel: Bereich plus Beschreibung, damit der Vertrag ihn benennt
+    const note = istTechnik(d) && d.note ? ` (${String(d.note).trim()})` : "";
+    byType.get(d.type_label).push(`${d.zone || ""}${note}`);
   }
   const lines = [];
   for (const [type, zones] of byType) {

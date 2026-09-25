@@ -660,6 +660,13 @@ BEMERKUNG_GEKUERZT_HINWEIS = ("[… gekürzt — der vollständige Text ist im d
                               "Protokoll gespeichert]")
 
 
+def _technik_zeile(d: dict) -> str:
+    """'Getriebe/Kupplung – Automatik ruckelt beim Kaltstart' (XML-sicher)."""
+    zone = _xe(str(d.get("zone") or (d.get("severity_data") or {}).get("bereich") or "?"))
+    note = str(d.get("note") or "").strip()[:200]
+    return f"{zone} – {_xe(note)}" if note else zone
+
+
 def build_pickup_pdf(
     *,
     appointment: Dict[str, Any],
@@ -1133,6 +1140,14 @@ def _build_pickup_pdf(
     if legend:
         story.append(legend)
         story.append(Spacer(1, 0.25 * cm))
+    # Technische Maengel (25.09.2026 abends) haben keinen Skizzenpunkt —
+    # Bereich und Beschreibung im Klartext, sonst blieben sie unsichtbar.
+    _technik_alt = [d for d in damages if isinstance(d, dict) and d.get("view") == "technik"]
+    if _technik_alt:
+        story.append(Paragraph(
+            "<b>Technische Mängel laut Kaufvertrag:</b> "
+            + " &nbsp;·&nbsp; ".join(_technik_zeile(d) for d in _technik_alt[:20]), st["small"]))
+        story.append(Spacer(1, 0.25 * cm))
     if freitext_schaeden:
         # P-03: Schaeden, die im Vertrag als Text stehen, gehoeren genauso
         # auf das Protokoll — sie haben nur keinen Punkt auf der Skizze.
@@ -1166,6 +1181,7 @@ def _build_pickup_pdf(
         _nd_lines = " &nbsp;·&nbsp; ".join(
             f"<b>{_xe(str(d.get('type_label') or '?'))}</b>: "
             f"{_xe(str(d.get('zone') or d.get('view') or '?'))}"
+            + (f" – {_xe(str(d.get('note'))[:200])}" if d.get("view") == "technik" and d.get("note") else "")
             for d in _new_damages[:20])
         story.append(Paragraph(_nd_lines, st["small"]))
         story.append(Spacer(1, 0.25 * cm))

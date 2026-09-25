@@ -34,7 +34,7 @@ import protokoll_vergleich as PV
 from deps import db, now_iso
 from konfig import zahl_env
 
-from ai import budget, kalibrierung, kontext, marktdaten, preisbasis, schemas
+from ai import budget, freischaltung, kalibrierung, kontext, marktdaten, preisbasis, schemas
 from ai.pickup_assessment import LEASE_S, _alter_jahre, _kosten_pruefen, _lease_abgelaufen
 from ai.provider import json_bewerten, ki_aktiv, ki_modell
 
@@ -54,9 +54,9 @@ Regeln:
 3. assumption_made=true bei einer Referenz heisst: eine Angabe war "unbekannt", die Referenz nimmt die vorsichtige Auspraegung — uebernimm das und nenne die Annahme in reason. Stelle keine Rueckfragen.
 4. Vier Geldwerte je Position und insgesamt: minimum_justified_eur (darunter ist der Nachteil nicht ausgeglichen), fair_discount_eur (sachlich am besten begruendbarer Zielwert, meist nahe median der Referenz plus Aufwand/Wertminderung), best_realistic_eur (sehr gutes, noch vertretbares Ergebnis), negotiation_start_eur (erste Forderung, ueber best, nicht absurd). Immer min <= fair <= best <= start.
 5. prices.agreed_price_eur ist der schon VOR der Schadenverhandlung vereinbarte Preis — ein allgemeiner Nachlass gegenueber dem Inserat ist kein Schadennachlass. Basis fuer den Zielpreis ist agreed_price_eur, sonst listing_price_eur. Beruecksichtige Fahrzeugwert, Alter, Kilometer, Klasse, Marke und die Marktposition (liegt der Preis schon unter dem Median, ist der Spielraum kleiner). Bei einem alten, guenstigen Fahrzeug ist voller Reparaturkostenersatz nicht automatisch der faire Nachlass.
-6. manual_review_required=true (alle Betraege 0) bei: Unfallschaden nicht repariert mit Rahmen/unbekanntem Umfang, Durchrostung oder tragende Teile (Schweller, Traeger). Stellen die Schaeden den Kauf wirtschaftlich in Frage, setze deal_risk=reconsider_purchase; bei hohem Preisrisiko high. Kein starrer Prozentdeckel.
+6. assessment_kind je Position: repair_estimate = Schaden sichtbar, Reparaturweg klar (Normalfall). diagnosis_required = nur ein Symptom, keine bestaetigte Ursache: Technik-Mangel (type technik) mit status "nur Symptom" oder "unbekannt", Warnleuchte, Rost unter dem Lack mit unklarem Umfang; dann diagnosis_cost_eur (aus repair_reference.diagnosis) und drei Szenarien scenario_low/mid/high_eur (guenstiger, mittlerer, aufwendiger Reparaturfall aus repair_reference.scenarios und Recherche) — die vier Geldwerte folgen daraus (min = Diagnose, fair = guenstig, best = mittel, start = aufwendig); in reason ausdruecklich als Szenario benennen. Technik-Mangel mit status "Werkstatt hat Diagnose bestaetigt" = repair_estimate mit der Referenz. expert_check_required (manual_review_required=true, alle Betraege 0) bei: Unfallschaden nicht repariert mit Rahmen/unbekanntem Umfang, Durchrostung oder tragende Teile (Schweller, Traeger), Fahrzeug nicht fahrbereit, Hochvolt-Fehler. Kategorie fuer Technik-Maengel ist technical. Stellen die Schaeden den Kauf wirtschaftlich in Frage, setze deal_risk=reconsider_purchase; bei hohem Preisrisiko high. Kein starrer Prozentdeckel.
 7. combined: sum_fair_eur, Abzug fuer ueberlappende Arbeiten (zwei Schaeden am selben Bauteil = eine Lackierung), dann die vier Gesamtwerte und deal_risk. arguments: hoechstens 3 kurze sachliche Saetze fuer das Gespraech mit dem Verkaeufer (deutsch, neutral, z. B. "Der Kotfluegel vorne rechts hat eine Delle, die im Inserat nicht genannt ist.").
-8. Knapp: title hoechstens 8 Woerter, reason hoechstens 14 Woerter, repair_method hoechstens 6 Woerter. Kategorie fuer Skizzen-Schaeden ist "damage". Antworte ausschliesslich nach dem JSON-Schema, alle Texte auf Deutsch, Preise in Euro inkl. MwSt.
+8. Knapp: title hoechstens 8 Woerter, reason hoechstens 14 Woerter, repair_method hoechstens 6 Woerter. Kategorie fuer Skizzen-Schaeden ist "damage", fuer Technik-Maengel "technical". Antworte ausschliesslich nach dem JSON-Schema, alle Texte auf Deutsch, Preise in Euro inkl. MwSt.
 
 """ + preisbasis.basis_als_text()
 
@@ -84,12 +84,29 @@ _ERWAEHNUNG = {
 }
 _BAUTEILE = ("kotflügel", "kotfluegel", "tür", "tuer", "stoß", "stoss", "heck", "front", "haube", "dach", "schweller",
              "spiegel", "scheibe", "felge", "seite", "hinten", "vorne", "links", "rechts")
+# Technischer Mangel (25.09.2026 abends): "im Inserat genannt", wenn der Text
+# den Bereich anspricht (z. B. "Getriebe ruckelt", "Klima ohne Funktion").
+_TECHNIK_WORTE = {
+    "motor": ("motor", "öl", "oel", "kühl", "kuehl", "turbo", "zahnriemen", "steuerkette"),
+    "getriebe": ("getriebe", "kupplung", "automatik", "dsg", "schalt"),
+    "fahrwerk": ("fahrwerk", "brems", "lenk", "stoßd", "stossd", "feder", "achse", "radlager"),
+    "elektrik": ("elektr", "steuerger", "sensor", "display", "infotainment", "navi", "kamera"),
+    "klima": ("klima", "heizung", "gebläse", "geblaese"),
+    "komfort": ("fensterheber", "zentralverriegelung", "verriegel", "sitz", "schiebedach"),
+    "abgas": ("auspuff", "abgas", "agr", "dpf", "partikel", "kat", "adblue"),
+    "batterie": ("batterie", "lichtmaschine", "anlasser", "springt nicht"),
+    "innenraum": ("innenraum", "polster", "himmel", "geruch", "sitz"),
+}
 
 
 def _moeglich_im_inserat(d: dict, text: str) -> bool:
     """Umbau 26.09.2026: nicht mehr 'Wort kommt irgendwo vor' — die Schadensart
     UND ein Bauteilwort der Zone muessen im Inserat stehen. Dann gilt der
     Schaden als MOEGLICHERWEISE bekannt (possibly_known), nie als sicher."""
+    if str(d.get("type_key") or "").lower() == "technik":
+        sd = d.get("severity_data") if isinstance(d.get("severity_data"), dict) else {}
+        bereich = preisbasis._bereich_schluessel(str(sd.get("bereich") or d.get("zone") or ""))
+        return any(w in text for w in _TECHNIK_WORTE.get(bereich, ()))
     muster = _ERWAEHNUNG.get(str(d.get("type_key") or "").lower())
     if not muster or not re.search(muster, text):
         return False
@@ -225,6 +242,9 @@ async def bewerten(*, user: dict, vehicle_doc: dict, damages: List[dict],
         if not ki_aktiv():
             return _oeffentlich({**basis, "status": "aus", "grund": "KI-Bewertung nicht aktiv", "ergebnis": None,
                                  "vorschau": vorl})
+        # Wunsch Ahmad 25.09.2026 abends: KI je Sucher-Konto freigeschaltet (wie Abo).
+        if not await freischaltung.konto_freigeschaltet(user.get("id")):
+            return _oeffentlich({**basis, **freischaltung.gesperrt(), "vorschau": vorl})
         if await _limit_erreicht(dealer_id):
             return _oeffentlich({**basis, "status": "limit",
                                  "grund": f"Höchstens {MAX_JE_STUNDE} Bewertungen je Stunde und Firma — bitte später erneut.",
@@ -289,7 +309,7 @@ async def _rechnen(basis: dict, paket: dict, vorl: dict, bud: dict, eigene: dict
                                                        betrag=it.get("fair_discount_eur"),
                                                        kaufpreis=basis["kaufpreis"],
                                                        manuell=bool(it.get("manual_review_required")))
-            ergebnis["datenlage"] = lage
+            ergebnis["datenlage"] = schemas.datenlage_anpassen(ergebnis, lage)
             ergebnis["market"] = paket.get("market")
             ergebnis["quellen"] = list((fall or {}).get("quellen") or [])
             ergebnis["referenzen"] = {d["id"]: d.get("repair_reference") for d in paket["damages"] if d.get("repair_reference")}

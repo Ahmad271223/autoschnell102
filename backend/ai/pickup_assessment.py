@@ -38,7 +38,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import protokoll_vergleich as PV
 from deps import db, now_iso
 
-from ai import budget, kalibrierung, kontext, marktdaten, preisbasis, schemas
+from ai import budget, freischaltung, kalibrierung, kontext, marktdaten, preisbasis, schemas
 from ai.provider import json_bewerten, ki_aktiv, ki_modell
 
 log = logging.getLogger("autohandel.ki")
@@ -64,7 +64,7 @@ Regeln:
 3. assumption_made=true bei einer Referenz heisst: eine Angabe war "unbekannt", die Referenz nimmt die vorsichtige Auspraegung — uebernimm das und nenne die Annahme in reason. Stelle keine Rueckfragen.
 4. Vier Geldwerte je Position und insgesamt: minimum_justified_eur (darunter ist der Nachteil nicht ausgeglichen), fair_discount_eur (sachlich am besten begruendbarer Zielwert, meist nahe median der Referenz plus Aufwand/Wertminderung), best_realistic_eur (sehr gutes, noch vertretbares Ergebnis), negotiation_start_eur (erste Forderung, ueber best, nicht absurd). Immer min <= fair <= best <= start.
 5. Nachlass = das, was der Haendler wegen dieser Abweichung weniger zahlen sollte (Reparatur + Aufwand + Wertminderung). Beruecksichtige Fahrzeugwert, Alter, Kilometer, Klasse, Marke und die Marktposition (liegt der Vertragspreis schon unter dem Median, ist der Spielraum kleiner). Bei einem alten, guenstigen Fahrzeug ist voller Reparaturkostenersatz nicht automatisch der faire Nachlass.
-6. manual_review_required=true (alle Betraege 0) bei: Unfallfreiheit weicht ab, Warnleuchte Motor/Getriebe/Airbag/ABS, Fahrverhalten mit Maengeln, Durchrostung oder tragende Teile, Zulassungsbescheinigung Teil II fehlt, Kilometerstand niedriger als im Vertrag (manual_hint). Stellen die Maengel den Kauf wirtschaftlich in Frage, setze deal_risk=reconsider_purchase; bei hohem Preisrisiko high.
+6. assessment_kind je Position: repair_estimate = Schaden sichtbar, Reparaturweg klar (Normalfall). diagnosis_required = nur ein Symptom, keine bestaetigte Ursache: Warnleuchte, Geraeusch, Ruckeln, Oelspur, Klima kuehlt nicht, Technik-Mangel (type technik) mit status "nur Symptom" oder "unbekannt", Rost unter dem Lack mit unklarem Umfang; dann diagnosis_cost_eur (Werkstattdiagnose, aus repair_reference.diagnosis) und drei Szenarien scenario_low/mid/high_eur (guenstiger, mittlerer, aufwendiger Reparaturfall aus repair_reference.scenarios und Recherche) — die vier Geldwerte folgen daraus (min = Diagnose, fair = guenstig, best = mittel, start = aufwendig); in reason ausdruecklich als Szenario benennen, nie als festgestellten Schaden. Technik-Mangel mit status "Werkstatt hat Diagnose bestaetigt" = repair_estimate mit der Referenz. expert_check_required (manual_review_required=true, alle Betraege 0) bei: Unfallfreiheit weicht ab, Durchrostung oder tragende Teile, Fahrzeug nicht fahrbereit, Zulassungsbescheinigung Teil II fehlt, Kilometerstand niedriger als im Vertrag (manual_hint), Hochvolt-Fehler. Kategorie fuer Technik-Maengel ist technical. Stellen die Maengel den Kauf wirtschaftlich in Frage, setze deal_risk=reconsider_purchase; bei hohem Preisrisiko high.
 7. equipment_missing = fehlt komplett (Nachruestung oder Wertminderung); equipment_defect = vorhanden, defekt (Reparatur). documents mit agreed=false sind organisatorisch: Nachlass 0, price_relevant=false. mileage/previous_owners: der Betrag steht in difference; keine pauschale Cent-je-km-Regel, sondern Fahrzeugwert und Alter.
 8. combined: sum_fair_eur, Abzug fuer ueberlappende Arbeiten (zwei Schaeden am selben Bauteil = eine Lackierung), dann die vier Gesamtwerte und deal_risk. arguments: hoechstens 3 kurze sachliche Saetze fuer das Gespraech mit dem Verkaeufer (deutsch, neutral).
 9. Knapp: title hoechstens 8 Woerter, reason hoechstens 14 Woerter, repair_method hoechstens 6 Woerter. Antworte ausschliesslich nach dem JSON-Schema, alle Texte auf Deutsch, Preise in Euro inkl. MwSt.
@@ -478,6 +478,11 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
             await db[SAMMLUNG].update_one({"protocol_id": protocol_id, "input_hash": h},
                                           {"$set": eintrag}, upsert=True)
             return _oeffentlich(eintrag)
+        # Wunsch Ahmad 25.09.2026 abends: KI je Konto freigeschaltet (wie Abo) —
+        # bei der Abholung zaehlt das Hauptchef-Konto der Firma. Nicht ablegen:
+        # schaltet der Betreiber frei, rechnet der naechste Aufruf sofort.
+        if not await freischaltung.firma_freigeschaltet(dealer_id):
+            return _oeffentlich({**basis, **freischaltung.gesperrt(), "dauer_ms": 0})
         # Kostenbremse (Wunsch Ahmad 26.09.2026): Monatsbudget je Firma, Sparmodus
         bud = await budget.pruefen(user_id=None, dealer_id=dealer_id, art="abholung")
         if not bud["erlaubt"]:
@@ -522,7 +527,7 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
         if antwort.get("status") == "ok" and isinstance(antwort.get("daten"), dict):
             ergebnis = schemas.bereinigen(antwort["daten"], kaufpreis=basis["kaufpreis"])
             _prioritaeten_nachziehen(ergebnis, basis["kaufpreis"])
-            ergebnis["datenlage"] = lage
+            ergebnis["datenlage"] = schemas.datenlage_anpassen(ergebnis, lage)
             ergebnis["market"] = paket.get("market")
             ergebnis["quellen"] = list((fall or {}).get("quellen") or [])
             ergebnis["referenzen"] = {p["id"]: p.get("repair_reference") for p in
@@ -565,6 +570,8 @@ def bewertung_anstossen(protocol_id: str, dealer_id: str) -> None:
         if not ki_aktiv():
             return
         loop = asyncio.get_running_loop()
+        # (Die Freischaltung prueft bewertung_ausfuehren selbst — hier kein
+        # await moeglich, der Aufrufer ist eine laufende Anfrage.)
         aufgabe = loop.create_task(bewertung_ausfuehren(protocol_id, dealer_id))
         _laufende.add(aufgabe)
         aufgabe.add_done_callback(_laufende.discard)
@@ -596,6 +603,8 @@ async def bewertung_lesen(protocol_id: str, dealer_id: str, *, nachrechnen: bool
     if not ki_aktiv():
         return {"status": "aus", "grund": "KI-Bewertung nicht aktiv", "protocol_id": protocol_id,
                 "input_hash": h, "ergebnis": None}
+    if not await freischaltung.firma_freigeschaltet(dealer_id):
+        return freischaltung.gesperrt(protocol_id=protocol_id, input_hash=h)
     if nachrechnen:
         bewertung_anstossen(protocol_id, dealer_id)
     if passend:

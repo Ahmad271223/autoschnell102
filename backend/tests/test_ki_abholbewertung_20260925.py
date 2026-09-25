@@ -94,6 +94,8 @@ def _welt_aufbauen(welt, suffix, **contract_extra):
         await db.generated_pdfs.insert_one(w.vertrag(cid, contract_data=cd))
         await db.appointments.insert_one(w.appt(tid, vehicle_id=vid, contract_id=cid))
         await db.pickup_protocols.insert_one(_protokoll(w, pid, tid, vid))
+        # KI je Konto freigeschaltet (25.09.2026 abends) — Chef und Sucher der Testfirma
+        await db.users.update_many({"id": {"$in": [w.chef["id"], w.sucher["id"]]}}, {"$set": {"ki_aktiv": True}})
     welt.run(lauf())
     return cid, tid, vid, pid
 
@@ -184,7 +186,7 @@ def test_03_bewertung_wird_abgelegt_bereinigt_und_priorisiert(welt, monkeypatch)
     erg2 = welt.run(K.bewertung_ausfuehren(pid, w.dealer_id))
     assert erg2["input_hash"] == erg["input_hash"] and len(aufrufe) == 1
     gespeichert = welt.run(db.ki_bewertungen.find_one({"protocol_id": pid}, {"_id": 0}))
-    assert gespeichert["status"] == "ok" and gespeichert["prompt_version"] == "abholung_v3"
+    assert gespeichert["status"] == "ok" and gespeichert["prompt_version"] == "abholung_v4"
     assert "Vera" not in str(gespeichert.get("eingabe")) and "lease_until" not in gespeichert
     _aufraeumen(welt)
 
@@ -353,3 +355,158 @@ def test_09_fahrer_sieht_auswertung_ohne_kosten(welt, monkeypatch):
         welt.run(db.dealer_drivers.delete_many({"dealer_id": w.dealer_id, "driver_account_id": w.driver_id}))
     _aufraeumen(welt)
 
+
+def test_10_technik_drei_ergebnisarten_netto(welt, monkeypatch):
+    """Schadenkatalog 25.09.2026 abends: Technik-Mangel ohne Skizze -> Referenz
+    'Diagnose erforderlich' mit Szenarien (bestaetigte Diagnose -> Reparaturpreis);
+    bereinigen leitet die vier Werte aus den Szenarien ab, Fachpruefung = 0;
+    Datenlage sinkt von hoch auf mittel; Netto-Quellen werden brutto gelernt;
+    Technik gilt als 'im Inserat genannt', wenn der Text den Bereich nennt."""
+    PB = _module("ai.preisbasis")
+    S = _module("ai.schemas")
+    MD = _module("ai.marktdaten")
+    DP = _module("ai.damage_pricing")
+    sym = {"bereich": "Getriebe/Kupplung", "status": "nur Symptom bemerkt", "fahrbereit": "ja", "warnleuchte": "keine"}
+    z, annahme = PB.zuordnen("technik", sym, "Getriebe/Kupplung")
+    assert z["schluessel"] == "technik_getriebe" and annahme is False
+    ref = PB.referenz("technik", sym, "Getriebe/Kupplung")
+    assert ref["kind"] == "diagnosis_required" and ref["scenarios"] == {"low": 300, "mid": 1200, "high": 3500}
+    assert ref["diagnosis"] == {"low": 80, "high": 150} and ref["median"] == 1200
+    best = PB.referenz("technik", {**sym, "status": "Werkstatt hat Diagnose bestätigt"}, "Getriebe/Kupplung")
+    assert best["kind"] == "repair_estimate" and "scenarios" not in best
+    z2, annahme2 = PB.zuordnen("technik", {"bereich": "unbekannt", "status": "unbekannt"}, "")
+    assert z2["schluessel"] == "technik_elektrik" and annahme2 is True
+    assert PB.zuordnen("technik", {"bereich": "Klima/Heizung"}, "")[0]["schluessel"] == "technik_klima"
+    # Warnleuchte ist keine manuelle Entscheidung mehr, sondern Diagnose + Szenarien
+    K = _module("ai.kontext")
+    wl = K.abweichungsreferenz("warning_light")
+    assert wl["kind"] == "diagnosis_required" and wl["manual_review"] is False and wl["scenarios"]["high"] == 2500
+    assert "diagnosis_required" in PB.basis_als_text() and "technical / Getriebe" in PB.basis_als_text()
+
+    roh = {"items": [
+        {"source_id": "t1", "category": "technical", "title": "Automatik ruckelt", "price_relevant": True,
+         "repair_method": "Diagnose", "repair_estimate_eur": 0, "minimum_justified_eur": 0, "fair_discount_eur": 0,
+         "best_realistic_eur": 0, "negotiation_start_eur": 0, "manual_review_required": False,
+         "assessment_kind": "diagnosis_required", "diagnosis_cost_eur": 120, "scenario_low_eur": 3500,
+         "scenario_mid_eur": 1200, "scenario_high_eur": 300, "reason": "Szenario."},
+        {"source_id": "t2", "category": "damage", "title": "Delle", "price_relevant": True, "repair_method": "PDR",
+         "repair_estimate_eur": 150, "minimum_justified_eur": 80, "fair_discount_eur": 130, "best_realistic_eur": 160,
+         "negotiation_start_eur": 220, "manual_review_required": False, "assessment_kind": "repair_estimate",
+         "diagnosis_cost_eur": 0, "scenario_low_eur": 0, "scenario_mid_eur": 0, "scenario_high_eur": 0, "reason": "ok"},
+        {"source_id": "t3", "category": "accident_history", "title": "Unfall", "price_relevant": True,
+         "repair_method": "", "repair_estimate_eur": 0, "minimum_justified_eur": 500, "fair_discount_eur": 800,
+         "best_realistic_eur": 900, "negotiation_start_eur": 1000, "manual_review_required": False,
+         "assessment_kind": "expert_check_required", "diagnosis_cost_eur": 0, "scenario_low_eur": 0,
+         "scenario_mid_eur": 0, "scenario_high_eur": 0, "reason": "Fachpruefung."}],
+        "combined": {"sum_fair_eur": 430, "overlap_adjustment_eur": 0, "minimum_justified_eur": 200,
+                     "fair_discount_eur": 430, "best_realistic_eur": 1360, "negotiation_start_eur": 3720,
+                     "deal_risk": "normal", "manual_review_required": False},
+        "arguments": []}
+    erg = S.bereinigen(roh, kaufpreis=8000)
+    it = {i["source_id"]: i for i in erg["items"]}
+    # Szenarien sortiert (die KI hatte sie verdreht), vier Werte daraus
+    assert (it["t1"]["scenario_low_eur"], it["t1"]["scenario_mid_eur"], it["t1"]["scenario_high_eur"]) == (300.0, 1200.0, 3500.0)
+    assert (it["t1"]["minimum_justified_eur"], it["t1"]["fair_discount_eur"],
+            it["t1"]["best_realistic_eur"], it["t1"]["negotiation_start_eur"]) == (120.0, 300.0, 1200.0, 3500.0)
+    assert it["t1"]["assessment_kind"] == "diagnosis_required" and it["t1"]["manual_review_required"] is False
+    assert it["t3"]["manual_review_required"] is True and it["t3"]["fair_discount_eur"] == 0
+    assert it["t2"]["assessment_kind"] == "repair_estimate" and it["t2"]["scenario_high_eur"] == 0
+    c = erg["combined"]
+    assert c["diagnosis_items"] == 1 and c["expert_items"] == 1 and c["uncertain_eur"] == 3200.0
+    assert c["deal_risk"] == "high"            # aufwendiger Fall >= 25 % des Preises
+    assert c["manual_review_required"] is True
+    assert S.datenlage_anpassen(erg, "hoch") == "mittel" and S.datenlage_anpassen(erg, "niedrig") == "niedrig"
+    assert S.datenlage_anpassen({"items": [it["t2"]]}, "hoch") == "hoch"
+    # ohne assessment_kind (alte Antwort): manuell -> Fachpruefung, sonst Reparaturpreis
+    alt = S.bereinigen({"items": [{**roh["items"][1], "assessment_kind": None},
+                                  {**roh["items"][2], "assessment_kind": None, "manual_review_required": True}],
+                        "combined": roh["combined"], "arguments": []}, kaufpreis=8000)
+    assert [i["assessment_kind"] for i in alt["items"]] == ["repair_estimate", "expert_check_required"]
+
+    zeilen = MD._daten_parsen("Text\n###DATEN\nt1|100|200|150|DEKRA Stundensatz netto|https://x\nt2|50|80|60|ADAC|https://y")
+    assert zeilen[0]["min_eur"] == 119.0 and zeilen[0]["max_eur"] == 238.0 and zeilen[0]["typisch_eur"] == 178.5
+    assert "brutto" in zeilen[0]["quelle"] and zeilen[1]["min_eur"] == 50.0
+    assert MD._netto("DEKRA, netto") and not MD._netto("ADAC") and not MD._netto("DEKRA netto, auf brutto umgerechnet")
+    assert "Technik" in MD.RECHERCHE_SYSTEM and "Bosch" in MD.QUELLEN_JE_GRUPPE
+
+    tech = {"type_key": "technik", "zone": "Getriebe/Kupplung", "severity_data": {"bereich": "Getriebe/Kupplung"}}
+    assert DP._moeglich_im_inserat(tech, "automatik ruckelt beim kaltstart, sonst top") is True
+    assert DP._moeglich_im_inserat(tech, "unfallfrei, scheckheft, kleiner kratzer") is False
+    assert DP._moeglich_im_inserat({**tech, "zone": "Klima/Heizung", "severity_data": {"bereich": "Klima/Heizung"}},
+                                   "klimaanlage ohne funktion") is True
+
+
+def test_11_ki_freischaltung_je_konto(welt, monkeypatch):
+    """Wunsch Ahmad 25.09.2026 abends: KI je Konto freischalten wie das Abo.
+    Ohne users.ki_aktiv: Status 'freischaltung' (Chef, Fahrer, Vertrag), kein
+    Aufruf, nichts abgelegt; Admin schaltet frei -> naechster Aufruf rechnet."""
+    from fastapi import HTTPException
+    aufrufe = []
+    K = _attrappe(monkeypatch, zaehler=aufrufe)
+    P = _module("routes.protocols")
+    A = _module("routes.admin")
+    DP = _module("ai.damage_pricing")
+    monkeypatch.setattr(DP, "json_bewerten", K.json_bewerten)     # nie die echte KI im Test
+    monkeypatch.setattr(DP, "ki_aktiv", lambda: True)
+    F = _module("ai.freischaltung")
+    monkeypatch.setattr(P, "_pflichtfelder_pruefen", lambda *a, **k: None)
+    _cid, tid, vid, pid = _welt_aufbauen(welt, "11")
+    w, db = welt.w, welt.db
+    SA = {"id": f"sa_ki_{w.s}", "role": "admin", "is_super_admin": True, "username": "sa", "dealer_id": ""}
+    welt.run(db.users.update_one({"id": w.chef["id"]}, {"$unset": {"ki_aktiv": ""}}))
+    welt.run(db.dealers.update_one({"id": w.dealer_id}, {"$set": {"user_id": w.chef["id"]}}))
+    assert welt.run(F.firma_freigeschaltet(w.dealer_id)) is False
+    assert welt.run(F.konto_freigeschaltet(w.chef["id"])) is False
+    # Chef: gesperrt, KI nie gerufen, nichts in ki_bewertungen
+    erg = welt.run(P.protokoll_ki_bewertung(pid, user=w.chef))
+    assert erg["status"] == "freischaltung" and "nicht freigeschaltet" in erg["grund"]
+    erg = welt.run(P.protokoll_ki_bewertung_neu(pid, user=w.chef))
+    assert erg["status"] == "freischaltung"
+    assert aufrufe == []
+    assert welt.run(db.ki_bewertungen.find_one({"protocol_id": pid})) is None
+    # Fahrer sieht denselben Grund
+    link_neu = not welt.run(db.dealer_drivers.find_one({"dealer_id": w.dealer_id, "driver_account_id": w.driver_id}))
+    if link_neu:
+        welt.run(db.dealer_drivers.insert_one(w.link()))
+    welt.run(db.appointments.update_one({"id": tid}, {"$set": {"driver_id": w.driver_id, "zuteilung": "angenommen"}}))
+    erg = welt.run(P.fahrer_ki_bewertung(tid, driver=w.driver))
+    assert erg["status"] == "freischaltung"
+    # Vertrag: eigenes Konto entscheidet
+    vehicle_doc = welt.run(db.vehicles.find_one({"id": vid}, {"_id": 0}))
+    dmg = [{"id": "d1", "type_key": "delle", "type_label": "Delle", "zone": "Tür vorne links",
+            "severity_data": {"groesse": "2–5 cm", "lack": "nein", "lage": "Fläche"}}]
+    erg = welt.run(DP.bewerten(user=w.chef, vehicle_doc=vehicle_doc, damages=dmg, kaufpreis=8000.0, warten=True))
+    assert erg["status"] == "freischaltung" and erg.get("vorschau")
+    # Admin schaltet frei (nur Super-Admin; deaktiviertes Konto nicht)
+    with pytest.raises(HTTPException) as ex:
+        welt.run(A.admin_set_sucher_ki(f"gibtsnicht_{w.s}", A.KiFreischaltenIn(aktiv=True), admin=SA))
+    assert ex.value.status_code == 404
+    r = welt.run(A.admin_set_sucher_ki(w.chef["id"], A.KiFreischaltenIn(aktiv=True, grund="Test"), admin=SA))
+    assert r == {"ok": True, "ki_aktiv": True}
+    assert welt.run(F.firma_freigeschaltet(w.dealer_id)) is True
+    zeile = next(s for s in welt.run(A.admin_list_dealer_sucher(w.dealer_id, _Antwort(), _=SA)) if s["id"] == w.chef["id"])
+    assert zeile["ki_aktiv"] is True
+    erg = welt.run(P.protokoll_ki_bewertung_neu(pid, user=w.chef))
+    assert erg["status"] == "ok"
+    erg = welt.run(DP.bewerten(user=w.chef, vehicle_doc=vehicle_doc, damages=dmg, kaufpreis=8000.0, warten=True))
+    assert erg["status"] == "ok" and len(aufrufe) == 2
+    # sperren -> wieder gesperrt; das alte Ergebnis bleibt lesbar (Hash passt), neue Laeufe nicht
+    welt.run(A.admin_set_sucher_ki(w.chef["id"], A.KiFreischaltenIn(aktiv=False), admin=SA))
+    erg = welt.run(P.protokoll_ki_bewertung(pid, user=w.chef))
+    assert erg["status"] == "ok"                      # bereits berechnet, passt zum Stand
+    welt.run(db.ki_bewertungen.delete_many({"protocol_id": pid}))
+    erg = welt.run(P.protokoll_ki_bewertung(pid, user=w.chef))
+    assert erg["status"] == "freischaltung"
+    log_eintrag = welt.run(db.activity_logs.find_one({"action": "admin.sucher.ki.freigeschaltet", "ref": w.chef["id"]}))
+    assert log_eintrag is not None
+    if link_neu:
+        welt.run(db.dealer_drivers.delete_many({"dealer_id": w.dealer_id, "driver_account_id": w.driver_id}))
+    welt.run(db.users.update_one({"id": w.chef["id"]}, {"$unset": {"ki_aktiv": ""}}))
+    welt.run(db.activity_logs.delete_many({"ref": w.chef["id"], "action": {"$regex": "^admin.sucher.ki"}}))
+    _aufraeumen(welt)
+
+
+class _Antwort:
+    """Minimaler Response-Ersatz fuer admin_list_dealer_sucher (Kopfzeilen)."""
+    def __init__(self):
+        self.headers = {}

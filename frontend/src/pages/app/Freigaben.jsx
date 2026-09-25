@@ -291,7 +291,7 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
           <ul className="text-[12px] space-y-0.5">
             {neueSchaeden.map((s, i) => (
               <li key={i}>
-                {(s.type_label || s.label || s.type || "Schaden")}{(s.zone || s.part_label) ? ` · ${s.zone || s.part_label}` : ""}
+                {(s.type_label || s.label || s.type || "Schaden")}{(s.zone || s.part_label) ? ` · ${s.zone || s.part_label}` : ""}{s.note ? ` – ${s.note}` : ""}
               </li>
             ))}
           </ul>

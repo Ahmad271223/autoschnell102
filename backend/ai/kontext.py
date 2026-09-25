@@ -182,8 +182,8 @@ def abweichungsreferenz(typ: str, *, betrag: Optional[float] = None) -> Optional
         faktor = max(1.0, float(betrag) / 1000.0)
     if typ == "previous_owners" and betrag:
         faktor = max(1.0, float(betrag))
-    return {"key": z["schluessel"], "method": z["verfahren"], "low": round(z["min"] * faktor),
-            "median": round((z["min"] + z["max"]) / 2 * faktor), "high": round(z["max"] * faktor),
+    ref = preisbasis.referenz_aus_zeile(z, faktor=faktor)
+    return {**ref,
             "manual_review": bool(z.get("manuell")), "source": "AutoSchnell-Startwerte", "assumption_made": False}
 
 

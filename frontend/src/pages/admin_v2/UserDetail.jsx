@@ -258,6 +258,20 @@ export default function AdminUserDetail() {
   // sperren()/freigeben() — ein zweiter Klick schickte den Aufruf doppelt
   // (zwei Toasts, zwei Audit-Eintraege, beim Sperren die Umkehr). Jetzt wie
   // grantAbo: Zeile bis nach dem Neuladen gesperrt.
+  // Wunsch Ahmad 25.09.2026 abends: KI-Bewertung je Konto freischalten (wie Abo).
+  const toggleKi = async (s) => {
+    const aktiv = !s.ki_aktiv;
+    if (!aktiv && !window.confirm(`KI-Bewertung für ${sucherLabel(s)} sperren?`)) return;
+    setBusy(s.id);
+    try {
+      await api.post(`/admin/sucher/${s.id}/ki`, { aktiv });
+      toast.success(aktiv ? "KI-Bewertung freigeschaltet" : "KI-Bewertung gesperrt");
+      await loadFirma();
+    } catch (e) {
+      toast.error(errMsg(e, "KI-Freischaltung fehlgeschlagen"));
+    } finally { setBusy(null); }
+  };
+
   const toggleSucherActive = async (s) => {
     if (s.active && !window.confirm(`Konto ${sucherLabel(s)} komplett sperren?\n\nAnmeldung sofort unmoeglich (nicht nur die Sucher-Funktion).`)) return;
     if (!sperren(s.id)) return;
@@ -421,6 +435,7 @@ export default function AdminUserDetail() {
                     <tr className="text-left text-zinc-500 text-[11px] uppercase tracking-wide">
                       <th className="px-4 py-2.5 font-medium">Sucher</th>
                       <th className="px-4 py-2.5 font-medium">Abo</th>
+                      <th className="px-4 py-2.5 font-medium">KI</th>
                       <th className="px-4 py-2.5 font-medium">Gültig bis / nächste Zahlung</th>
                       <th className="px-4 py-2.5 font-medium">Status</th>
                       <th className="px-4 py-2.5 font-medium text-right">Aktion</th>
@@ -475,6 +490,18 @@ export default function AdminUserDetail() {
                               </Button>
                             </div>
                           )}
+                        </td>
+                        <td className="px-4 py-2.5" data-testid={`ki-zelle-${s.id}`}>
+                          <div className="flex flex-col items-start gap-1">
+                            <Badge tone={s.ki_aktiv ? "green" : "gray"}>{s.ki_aktiv ? "KI: ja" : "KI: nein"}</Badge>
+                            <Button size="sm" variant="ghost" onClick={() => toggleKi(s)} disabled={busy === s.id || !superAdmin}
+                                    data-testid={`ki-schalten-${s.id}`}
+                                    title={s.ist_chef
+                                      ? "KI-Bewertung für Vertrag UND Abholung dieser Firma (Chef-Konto)"
+                                      : "KI-Schadennachlass im Vertragsdialog dieses Kontos"}>
+                              {s.ki_aktiv ? "KI sperren" : "KI freischalten"}
+                            </Button>
+                          </div>
                         </td>
                         <td className="px-4 py-2.5 text-zinc-400 tabular-nums">
                           <div className="flex items-center gap-1.5">

@@ -59,7 +59,7 @@ export default function KiBewertungKarte({ eintrag, onPreis, busy }) {
   const wartetZuLange = kiWartet(status) && Date.now() - start.current > WARTE_MAX_MS;
   const rahmen = { background: "var(--wa-03)", border: "1px solid var(--border-default)" };
 
-  if (!erg || status === "keine" || status === "aus") {
+  if (!erg || status === "keine" || status === "aus" || status === "freischaltung") {
     const text = wartetZuLange ? "KI-Einschätzung momentan nicht verfügbar." : (fehler || kiStatusText(status));
     if (!text) return null;
     return (

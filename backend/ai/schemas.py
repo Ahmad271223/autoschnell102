@@ -20,8 +20,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-PROMPT_VERSION = "abholung_v3"
-PROMPT_VERSION_VERTRAG = "vertrag_v2"
+PROMPT_VERSION = "abholung_v4"
+PROMPT_VERSION_VERTRAG = "vertrag_v3"
 
 KATEGORIEN = ["damage", "damage_worse", "mileage", "keys", "previous_owners",
               "equipment_missing", "equipment_defect", "tires", "documents", "hu",
@@ -29,6 +29,12 @@ KATEGORIEN = ["damage", "damage_worse", "mileage", "keys", "previous_owners",
 PRIORITAETEN = ["rot", "orange", "gelb"]
 DEAL_RISK = ["normal", "high", "reconsider_purchase"]
 DATENLAGE = ["hoch", "mittel", "niedrig"]
+# Drei Ergebnisarten (Wunsch Ahmad 25.09.2026 abends, nach dem Schadenkatalog):
+#   repair_estimate        Schaden sichtbar, Reparaturweg klar -> vier Geldwerte
+#   diagnosis_required     nur ein Symptom (Warnleuchte, Geraeusch, Ruckeln ...):
+#                          Diagnosekosten + drei Szenarien, ausdruecklich Szenarien
+#   expert_check_required  Sachverstaendiger/Fachbetrieb noetig -> keine Zahl
+ARTEN = ["repair_estimate", "diagnosis_required", "expert_check_required"]
 
 _GELD = {"type": "number"}
 
@@ -46,12 +52,19 @@ _POSITION = {
         "best_realistic_eur": _GELD,
         "negotiation_start_eur": _GELD,
         "manual_review_required": {"type": "boolean",
-                                   "description": "true bei Unfallfreiheit, Warnleuchte, Durchrostung tragender Teile u. ae. — dann alle Betraege 0"},
+                                   "description": "true bei expert_check_required (Unfallfreiheit, Durchrostung tragender Teile u. ae.) — dann alle Betraege 0"},
+        "assessment_kind": {"type": "string", "enum": ARTEN,
+                            "description": "repair_estimate = Reparaturpreis geschaetzt; diagnosis_required = nur Symptom, Diagnose noetig (Szenarien); expert_check_required = Fachpruefung, keine Zahl"},
+        "diagnosis_cost_eur": {"type": "number", "description": "nur bei diagnosis_required: Kosten der Werkstattdiagnose, sonst 0"},
+        "scenario_low_eur": {"type": "number", "description": "nur bei diagnosis_required: guenstiger Reparaturfall, sonst 0"},
+        "scenario_mid_eur": {"type": "number", "description": "nur bei diagnosis_required: mittlerer Reparaturfall, sonst 0"},
+        "scenario_high_eur": {"type": "number", "description": "nur bei diagnosis_required: aufwendiger Reparaturfall, sonst 0"},
         "reason": {"type": "string", "description": "ein Satz, deutsch, hoechstens 14 Woerter; bei 'unbekannt' die getroffene Annahme nennen"},
     },
     "required": ["source_id", "category", "title", "price_relevant", "repair_method", "repair_estimate_eur",
                  "minimum_justified_eur", "fair_discount_eur", "best_realistic_eur", "negotiation_start_eur",
-                 "manual_review_required", "reason"],
+                 "manual_review_required", "assessment_kind", "diagnosis_cost_eur", "scenario_low_eur",
+                 "scenario_mid_eur", "scenario_high_eur", "reason"],
     "additionalProperties": False,
 }
 
@@ -119,6 +132,34 @@ def _vier(roh: Dict[str, Any], deckel: Optional[float]) -> Dict[str, float]:
             "negotiation_start_eur": start}
 
 
+def _szenarien(roh: Dict[str, Any], deckel: Optional[float]) -> Dict[str, float]:
+    """Diagnosekosten und drei Reparaturszenarien, sortiert und gedeckelt."""
+    diag = _zahl(roh.get("diagnosis_cost_eur"), 0.0, deckel)
+    lo, mid, hi = sorted(_zahl(roh.get(k), 0.0, deckel) for k in
+                         ("scenario_low_eur", "scenario_mid_eur", "scenario_high_eur"))
+    return {"diagnosis_cost_eur": diag, "scenario_low_eur": lo, "scenario_mid_eur": mid, "scenario_high_eur": hi}
+
+
+def _vier_aus_szenarien(sz: Dict[str, float]) -> Dict[str, float]:
+    """Bei 'Diagnose erforderlich' folgen die vier Werte den Szenarien:
+    mindestens = Diagnosekosten (sonst guenstiger Fall), fair = guenstiger Fall,
+    sehr gut = mittlerer Fall, Start = aufwendiger Fall. Keine 60/40-Deckel —
+    die Spanne IST die Aussage."""
+    lo, mid, hi = sz["scenario_low_eur"], sz["scenario_mid_eur"], sz["scenario_high_eur"]
+    mn = sz["diagnosis_cost_eur"] if sz["diagnosis_cost_eur"] > 0 else lo
+    return {"minimum_justified_eur": min(mn, lo) if lo > 0 else mn, "fair_discount_eur": lo,
+            "best_realistic_eur": max(mid, lo), "negotiation_start_eur": max(hi, mid, lo)}
+
+
+def datenlage_anpassen(ergebnis: Dict[str, Any], lage: str) -> str:
+    """Eine Diagnose- oder Fachpruefungsposition drueckt 'hoch' auf 'mittel':
+    die Zahlen sind dann Szenarien, keine Messung."""
+    arten = {i.get("assessment_kind") for i in ergebnis.get("items") or []}
+    if lage == "hoch" and (arten & {"diagnosis_required", "expert_check_required"}):
+        return "mittel"
+    return lage
+
+
 def bereinigen(daten: Dict[str, Any], *, kaufpreis: Optional[float]) -> Dict[str, Any]:
     """Zahlen absichern, Reihenfolge erzwingen, Summen plausibel halten.
     Liefert eine neue Struktur (das Original bleibt fuer die Ablage)."""
@@ -129,8 +170,19 @@ def bereinigen(daten: Dict[str, Any], *, kaufpreis: Optional[float]) -> Dict[str
         if not isinstance(roh, dict):
             continue
         manuell = bool(roh.get("manual_review_required"))
-        vier = _vier({} if manuell else roh, deckel)
+        art = roh.get("assessment_kind") if roh.get("assessment_kind") in ARTEN else (
+            "expert_check_required" if manuell else "repair_estimate")
+        if art == "expert_check_required":
+            manuell = True
+        szen = {"diagnosis_cost_eur": 0.0, "scenario_low_eur": 0.0, "scenario_mid_eur": 0.0, "scenario_high_eur": 0.0}
+        if art == "diagnosis_required" and not manuell:
+            szen = _szenarien(roh, deckel)
+            vier = _vier_aus_szenarien(szen) if szen["scenario_high_eur"] > 0 else _vier(roh, deckel)
+        else:
+            vier = _vier({} if manuell else roh, deckel)
         items.append({
+            "assessment_kind": art,
+            **szen,
             "source_id": str(roh.get("source_id") or ""),
             "category": roh.get("category") if roh.get("category") in KATEGORIEN else "other",
             "title": str(roh.get("title") or "")[:120],
@@ -157,9 +209,26 @@ def bereinigen(daten: Dict[str, Any], *, kaufpreis: Optional[float]) -> Dict[str
                           "negotiation_start_eur": vier["negotiation_start_eur"] * faktor}, deckel)
     else:
         vier = _vier({}, deckel)
+    # Die Gesamtwerte duerfen nicht unter der Summe der Einzelwerte (abzueglich
+    # Ueberschneidung) liegen — sonst frisst der 60/40-Deckel die Szenarien
+    # einer Diagnose-Position (Einzel-Start 3.500, Gesamt-Start 1.000).
+    if summe > 0:
+        for k in ("best_realistic_eur", "negotiation_start_eur"):
+            boden = round(max(0.0, sum(i[k] for i in items) - ueberlappung), 2)
+            vier[k] = max(vier[k], boden)
+        vier["negotiation_start_eur"] = max(vier["negotiation_start_eur"], vier["best_realistic_eur"])
+        if deckel is not None:
+            vier["best_realistic_eur"] = min(vier["best_realistic_eur"], deckel)
+            vier["negotiation_start_eur"] = min(vier["negotiation_start_eur"], deckel)
     manuell_gesamt = bool(c.get("manual_review_required")) or any(i["manual_review_required"] for i in items)
     risiko = c.get("deal_risk") if c.get("deal_risk") in DEAL_RISK else "normal"
     if kp > 0 and vier["fair_discount_eur"] >= 0.5 * kp and risiko == "normal":
+        risiko = "high"
+    # Diagnose-Positionen: die Spanne zwischen guenstigem und aufwendigem Fall
+    # ist das Unsichere an dieser Empfehlung — wird gesondert ausgewiesen.
+    diag = [i for i in items if i["assessment_kind"] == "diagnosis_required"]
+    unsicher = round(sum(max(0.0, i["scenario_high_eur"] - i["scenario_low_eur"]) for i in diag), 2)
+    if diag and risiko == "normal" and kp > 0 and sum(i["scenario_high_eur"] for i in diag) >= 0.25 * kp:
         risiko = "high"
     combined = {
         "sum_fair_eur": summe,
@@ -167,6 +236,9 @@ def bereinigen(daten: Dict[str, Any], *, kaufpreis: Optional[float]) -> Dict[str
         **vier,
         "deal_risk": risiko,
         "manual_review_required": manuell_gesamt,
+        "diagnosis_items": len(diag),
+        "expert_items": sum(1 for i in items if i["assessment_kind"] == "expert_check_required"),
+        "uncertain_eur": unsicher,
         "recommended_purchase_price_eur": round(kp - vier["fair_discount_eur"], 2)
         if kp > 0 and vier["fair_discount_eur"] > 0 else None,
     }

@@ -1,8 +1,8 @@
 import { Copy, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 import {
-  DATENLAGE_FARBE, DATENLAGE_TEXT, PRIO_FARBE, PRIO_TEXT, RISIKO_TEXT, argumenteText, eur, nachPrioritaet,
-  vierText,
+  ART_TEXT, DATENLAGE_FARBE, DATENLAGE_TEXT, PRIO_FARBE, PRIO_TEXT, RISIKO_TEXT, argumenteText, eur,
+  nachPrioritaet, szenarienText, vierText,
 } from "@/lib/kiSchaden";
 
 /**
@@ -37,15 +37,32 @@ export default function KiErgebnis({ erg, kaufpreis, basisText, testPrefix, onPr
                     {it.title}
                   </span>
                   {it.manual_review_required ? (
-                    <span style={{ color: "var(--st-rot)" }}>manuelle Entscheidung</span>
+                    <span style={{ color: "var(--st-rot)" }} data-testid={`${testPrefix}-art-${it.source_id}`}>
+                      {ART_TEXT[it.assessment_kind] || "manuelle Entscheidung"}
+                    </span>
                   ) : (
-                    <span className="text-right">Fair <b className="text-sm">{eur(it.fair_discount_eur)}</b></span>
+                    <span className="text-right">
+                      {it.assessment_kind === "diagnosis_required" && (
+                        <span className="mr-2 rounded-full px-1.5 py-0.5 border text-[10px]"
+                              style={{ borderColor: "var(--st-amber)", color: "var(--st-amber)" }}
+                              data-testid={`${testPrefix}-art-${it.source_id}`}>
+                          {ART_TEXT.diagnosis_required}
+                        </span>
+                      )}
+                      Fair <b className="text-sm">{eur(it.fair_discount_eur)}</b>
+                    </span>
                   )}
                 </div>
                 {!it.manual_review_required && (
                   <div className="mt-0.5 flex flex-wrap gap-x-3" style={{ color: "var(--text-dim)" }}>
-                    <span>{vierText(it)}</span>
-                    {it.repair_estimate_eur > 0 && <span>Reparatur ca. {eur(it.repair_estimate_eur)}</span>}
+                    {it.assessment_kind === "diagnosis_required" ? (
+                      <span data-testid={`${testPrefix}-szenarien-${it.source_id}`}>{szenarienText(it) || vierText(it)}</span>
+                    ) : (
+                      <>
+                        <span>{vierText(it)}</span>
+                        {it.repair_estimate_eur > 0 && <span>Reparatur ca. {eur(it.repair_estimate_eur)}</span>}
+                      </>
+                    )}
                   </div>
                 )}
                 {(it.repair_method || it.reason) && (
@@ -83,7 +100,13 @@ export default function KiErgebnis({ erg, kaufpreis, basisText, testPrefix, onPr
         </div>
         {c.manual_review_required && (
           <div className="mt-1.5 text-[11px]" style={{ color: "var(--st-rot)" }}>
-            Mindestens ein Punkt braucht deine eigene Entscheidung – die Zahlen decken ihn nicht ab.
+            Mindestens ein Punkt braucht eine Fachprüfung oder deine eigene Entscheidung – die Zahlen decken ihn nicht ab.
+          </div>
+        )}
+        {c.diagnosis_items > 0 && (
+          <div className="mt-1.5 text-[11px]" style={{ color: "var(--st-amber)" }} data-testid={`${testPrefix}-diagnose`}>
+            {c.diagnosis_items === 1 ? "Eine Position" : `${c.diagnosis_items} Positionen`} nur als Szenario (Diagnose erforderlich)
+            {c.uncertain_eur > 0 ? ` – unsicherer Anteil bis ${eur(c.uncertain_eur)}` : ""}. Fair = günstiger Fall, Start = aufwendiger Fall.
           </div>
         )}
         {risiko && (

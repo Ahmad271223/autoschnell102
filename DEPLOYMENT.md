@@ -3292,3 +3292,45 @@ nur lesend): Vertrag / Vorschlag des Fahrers / KI-Zielpreis, Nachlass je Abweich
 Datenlage, Argumente — dieselbe Bewertung wie beim Chef, ohne Kosten, Budget und Modell. Kein „Preis
 übernehmen“ (Protokoll ist gesperrt). Die Bewertung startet weiterhin beim Abschicken; der Fahrer sieht sie
 in der Regel nach 15–30 s.
+
+### Schadenkatalog 25.09.2026 abends (Wunsch Ahmad): drei Ergebnisarten, Technik-Maengel, Quellen je Gruppe
+
+- **Drei Ergebnisarten je Position** (`assessment_kind`, Schema abholung_v4 / vertrag_v3): *Reparaturpreis
+  geschätzt* (wie bisher, vier Geldwerte), *Diagnose erforderlich* (nur ein Symptom: Warnleuchte, Geräusch,
+  Ruckeln, Technik-Mangel ohne bestätigte Diagnose — Diagnosekosten + drei Szenarien günstig/mittel/aufwendig;
+  die vier Werte folgen daraus: mindestens = Diagnose, fair = günstig, sehr gut = mittel, Start = aufwendig)
+  und *Fachprüfung erforderlich* (Unfallfreiheit, tragende Teile, nicht fahrbereit, Hochvolt — keine Zahl).
+  Gesamt: `diagnosis_items`, `expert_items`, `uncertain_eur` (Spanne der Szenarien); Datenlage sinkt bei
+  Szenarien von hoch auf mittel; aufwendiger Fall ≥ 25 % des Preises hebt `deal_risk` auf high. Die
+  Warnleuchte ist keine „manuelle Entscheidung“ mehr, sondern Diagnose + Szenarien.
+- **Technischer Mangel im Schadenformular** (Fahrer-App und Vertragsdialog des Suchers, `DamageSelector`):
+  eigener Block „+ Mangel hinzufügen“ ohne Skizzenpunkt — Bereich (Motor, Getriebe/Kupplung,
+  Fahrwerk/Bremsen/Lenkung, Elektrik/Elektronik, Klima/Heizung, Fensterheber/Verriegelung/Sitze, Auspuff/Abgas,
+  Batterie/Start, Innenraum), dann Stand (nur Symptom / Werkstatt hat Diagnose bestätigt / unbekannt),
+  Fahrbereit, Warnleuchte und ein Feld „Was genau?“ (max. 200 Zeichen). Gespeichert als Schaden mit
+  `type_key technik`, `view technik`, `zone` = Bereich, `note` = Beschreibung, `severity_data.bereich`.
+  Im Vertragstext: „• Technischer Mangel: Getriebe/Kupplung (Automatik ruckelt …)“; im Abholprotokoll-PDF als
+  Klartextzeile (Abschnitt 5 und 6), nie auf der Skizze. Preisbasis: neun `technik_*`-Zeilen mit
+  Diagnosekosten und Szenarien (`preisbasis.BASIS`, art „diagnose“). Im Inserat „genannt“, wenn der Text den
+  Bereich anspricht (`damage_pricing._TECHNIK_WORTE`).
+- **Quellen je Schadengruppe** in der Recherche (`marktdaten.QUELLEN_JE_GRUPPE`): Karosserie ADAC/ATU/FairGarage,
+  Scheiben Carglass, Technik FairGarage/Autobutler/Bosch Car Service (HELLA nur Ursachen), Arbeitskosten DEKRA.
+  Monatstabelle hat eine vierte Gruppe „Technik“ (12 statt 9 Suchen je Lauf).
+- **Netto-Werte** (Quelle mit „netto“, „ohne MwSt“, „zzgl“) werden beim Lernen in `ki_reparaturpreise` mit 1,19
+  auf brutto umgerechnet und so gekennzeichnet.
+- Probelauf Vertrag 25.09.: Getriebe „nur Symptom“ → Diagnose 150 €, Szenarien 300/1.200/3.500 €, Delle normal;
+  15 s, ~3 ct ohne Websuche.
+
+### KI-Freischaltung je Konto (25.09.2026 abends, Wunsch Ahmad: „wie beim Abo extra freischalten“)
+
+Die KI-Bewertung ist je Sucher-Konto **einzeln freizuschalten** (`users.ki_aktiv`, Standard aus), unabhängig vom
+Abo. Der Betreiber macht das in der Firmenansicht (Admin → Nutzer → Firma) in der neuen Spalte **KI** je Konto:
+„KI freischalten“ / „KI sperren“ (`POST /admin/sucher/{id}/ki` `{aktiv}`, nur Super-Admin, Audit
+`admin.sucher.ki.freigeschaltet|gesperrt`). Wirkung:
+- **Vertrag** (KI-Schadennachlass im Vertragsdialog): das eigene Konto des Suchers muss freigeschaltet sein.
+- **Abholung** (KI-Karte in der Freigabe, Fahrer-Ansicht, Start beim Abschicken): das **Hauptchef-Konto** der
+  Firma (`dealers.user_id`) muss freigeschaltet sein — die Abholung ist eine Firmenfunktion.
+- Ohne Freischaltung: Status `freischaltung` mit Hinweistext in den Karten („der Betreiber schaltet sie wie das
+  Abo frei“), kein KI-Aufruf, keine Kosten, nichts abgelegt. Vertrag, Freigabe und Protokoll laufen normal.
+  Nach der Freischaltung rechnet der nächste Aufruf sofort (kein Neustart, kein Deploy).
+- Bestandskonten sind nach dem Deploy **alle gesperrt**, bis Ahmad sie einzeln freischaltet.

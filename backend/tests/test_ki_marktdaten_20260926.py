@@ -62,25 +62,27 @@ def test_01_markttabelle_recherche_umwandlung_ablage(welt, monkeypatch):
     db = welt.db
     _tabelle_weg(welt)
     erg = welt.run(MD.aktualisieren(db))
-    assert erg["status"] == "ok" and erg["aktualisiert"] is True and erg["suchen"] == 9
-    assert len(aufrufe) == 3, "drei Gruppen je Lauf"
+    # 25.09.2026 abends: vierte Gruppe "Technik" (Schadenkatalog)
+    assert erg["status"] == "ok" and erg["aktualisiert"] is True and erg["suchen"] == 12
+    assert len(aufrufe) == 4, "vier Gruppen je Lauf"
+    assert "technical" in aufrufe[3]["frage"]
     assert "ADAC" in aufrufe[0]["frage"] and "delle" in aufrufe[0]["frage"] and "SOFORT" in aufrufe[0]["frage"]
     assert "keys" in aufrufe[2]["frage"]
     doc = welt.run(db.ki_marktdaten.find_one({"_id": "aktuell"}))
     typen = {p["typ"]: p for p in doc["positionen"]}
     assert set(typen) == {"delle", "keys"}
     assert (typen["keys"]["min_eur"], typen["keys"]["max_eur"], typen["keys"]["typisch_eur"]) == (180.0, 420.0, 420.0)
-    assert doc["quellen"] == QUELLEN and doc["usage"]["web_search_requests"] == 9
+    assert doc["quellen"] == QUELLEN and doc["usage"]["web_search_requests"] == 12
     text = MD.als_text(doc)
     assert "Aktuelle Marktpreise" in text and "delle / klein" in text and "Quelle ADAC" in text
     assert MD.frisch(doc) and MD.alter_tage(doc) < 1
     erg2 = welt.run(MD.aktualisieren(db))
-    assert erg2["aktualisiert"] is False and len(aufrufe) == 3
+    assert erg2["aktualisiert"] is False and len(aufrufe) == 4
     schritt = welt.run(MD.pruefen_und_aktualisieren(db))
-    assert schritt["status"] == "frisch" and len(aufrufe) == 3
+    assert schritt["status"] == "frisch" and len(aufrufe) == 4
     welt.run(db.ki_marktdaten.update_one({"_id": "aktuell"}, {"$set": {"stand": "2020-01-01T00:00:00+00:00"}}))
     schritt = welt.run(MD.pruefen_und_aktualisieren(db))
-    assert schritt["status"] == "ok" and schritt["aktualisiert"] is True and len(aufrufe) == 6
+    assert schritt["status"] == "ok" and schritt["aktualisiert"] is True and len(aufrufe) == 8
     # Markttabelle legt sich ueber die Startwert-Referenz (typ + aehnliche Auspraegung)
     KX = _module("ai.kontext")
     ref = KX.reparaturreferenz({"type_key": "delle", "zone": "Tür", "severity_data": {"groesse": "bis 2 cm", "lack": "nein"}}, doc)

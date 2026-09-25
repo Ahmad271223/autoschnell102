@@ -46,7 +46,33 @@ export const SCHWERE_FRAGEN = {
     { key: "fahrbereit", label: "Fahrbereit?", options: ["ja", "nein", "unbekannt"] },
     { key: "airbag", label: "Airbag", options: ["nicht ausgelöst", "ausgelöst", "unbekannt"] },
   ],
+  // Technischer Mangel (Wunsch Ahmad 25.09.2026 abends): kein Punkt auf der
+  // Skizze, sondern Bereich (beim Anlegen) + Stand + Fahrbereitschaft +
+  // Warnleuchte + kurze Beschreibung. Ohne bestätigte Diagnose liefert die KI
+  // "Diagnose erforderlich" mit Diagnosekosten und drei Szenarien.
+  technik: [
+    { key: "status", label: "Stand", options: ["nur Symptom bemerkt", "Werkstatt hat Diagnose bestätigt", "unbekannt"] },
+    { key: "fahrbereit", label: "Fahrbereit?", options: ["ja", "eingeschränkt", "nein", "unbekannt"] },
+    { key: "warnleuchte", label: "Warnleuchte", options: ["keine", "leuchtet", "unbekannt"] },
+  ],
 };
+
+/** Technischer Mangel: eigene Schadensart ohne Skizzenpunkt. */
+export const TECHNIK_TYP = { key: "technik", abbr: "TM", label: "Technischer Mangel", color: "#f97316" };
+export const TECHNIK_BEREICHE = [
+  "Motor", "Getriebe/Kupplung", "Fahrwerk/Bremsen/Lenkung", "Elektrik/Elektronik", "Klima/Heizung",
+  "Fensterheber/Verriegelung/Sitze", "Auspuff/Abgas", "Batterie/Start", "Innenraum",
+];
+export function istTechnik(d) {
+  return (d?.type_key || "") === TECHNIK_TYP.key;
+}
+export function technikSchaden(bereich, id) {
+  return {
+    id: id || `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    view: "technik", type_key: TECHNIK_TYP.key, type_label: TECHNIK_TYP.label, abbr: TECHNIK_TYP.abbr,
+    color: TECHNIK_TYP.color, zone: bereich, note: "", severity_data: { bereich },
+  };
+}
 
 export function schwereFragen(typeKey) {
   return SCHWERE_FRAGEN[typeKey] || [];
@@ -82,6 +108,19 @@ export const PRIO_TEXT = { rot: "Stark preisrelevant", orange: "Preisrelevant", 
 export const PRIO_FARBE = { rot: "var(--st-rot)", orange: "var(--st-amber)", gelb: "var(--text-secondary)" };
 export const DATENLAGE_TEXT = { hoch: "Datenlage hoch", mittel: "Datenlage mittel", niedrig: "Datenlage niedrig" };
 export const DATENLAGE_FARBE = { hoch: "var(--st-gruen)", mittel: "var(--st-amber)", niedrig: "var(--st-rot)" };
+export const ART_TEXT = {
+  repair_estimate: "", diagnosis_required: "Diagnose erforderlich", expert_check_required: "Fachprüfung erforderlich",
+};
+/** Szenarien einer Diagnose-Position als kurzer Text. */
+export function szenarienText(it) {
+  if (!it || it.assessment_kind !== "diagnosis_required") return "";
+  const teile = [];
+  if (it.diagnosis_cost_eur > 0) teile.push(`Diagnose ca. ${eur(it.diagnosis_cost_eur)}`);
+  if (it.scenario_high_eur > 0) {
+    teile.push(`Szenarien: günstig ${eur(it.scenario_low_eur)} · mittel ${eur(it.scenario_mid_eur)} · aufwendig ${eur(it.scenario_high_eur)}`);
+  }
+  return teile.join(" · ");
+}
 export const RISIKO_TEXT = {
   normal: "",
   high: "Hohes Preisrisiko – Zahlen mit Vorsicht, ggf. Werkstattprüfung vor dem Kauf.",
@@ -113,6 +152,7 @@ export function kiStatusText(status) {
     case "veraltet": return "Bewertung veraltet – wird neu berechnet …";
     case "keine": return "Keine preisrelevanten Abweichungen festgestellt.";
     case "aus": return "KI-Bewertung ist nicht eingeschaltet.";
+    case "freischaltung": return "KI-Bewertung für dieses Konto nicht freigeschaltet – der Betreiber schaltet sie wie das Abo frei.";
     case "zeitlimit": return "KI-Einschätzung momentan nicht verfügbar (Zeitlimit).";
     case "ueberlastet": return "KI-Dienst überlastet – bitte später neu berechnen.";
     case "schluessel": return "KI-Schlüssel fehlt oder ist ungültig (Einstellung auf dem Server).";
@@ -180,11 +220,12 @@ export function vorschlaegeAnwenden(form, vorschlaege, gesperrt = {}) {
 export function schadenZeile(d) {
   const teile = [d?.type_label || d?.type_key || "Schaden", d?.zone].filter(Boolean);
   const s = schwereText(d);
-  return teile.join(" – ") + (s ? ` – ${s}` : "");
+  const note = istTechnik(d) && d?.note ? ` – „${String(d.note).trim()}“` : "";
+  return teile.join(" – ") + (s ? ` – ${s}` : "") + note;
 }
 
 /** Fingerabdruck der Schäden (Art, Bauteil, Zusatzangaben) — ändert er sich
  *  nach einer Bewertung, ist die Karte veraltet. */
 export function schaedenStand(damages) {
-  return JSON.stringify((damages || []).map((d) => [d.id, d.type_key, d.zone, d.severity_data || {}]));
+  return JSON.stringify((damages || []).map((d) => [d.id, d.type_key, d.zone, d.severity_data || {}, d.note || ""]));
 }

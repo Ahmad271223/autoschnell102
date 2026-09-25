@@ -67,7 +67,17 @@ _GRUPPEN = (
     ("Licht, Felgen, Unfall", ("beleuchtung", "felge", "unfall_nicht_repariert", "unfall_repariert")),
     ("Schluessel, Reifen, HU, Unterlagen, Abweichungen",
      ("keys", "tires", "documents", "hu", "mileage", "previous_owners", "equipment_missing", "equipment_defect")),
+    ("Technik: Diagnose und Reparatur", ("technical", "warning_light")),
 )
+# Quellen je Schadengruppe (Schadenkatalog 25.09.2026): die Recherche soll
+# nicht ueberall dieselben Seiten befragen.
+QUELLEN_JE_GRUPPE = (
+    "Quellen je Gruppe: Karosserie/Lack (Delle, Kratzer, Rost, Hagel, Steinschlag im Lack): ADAC, ATU Smart-Repair, "
+    "FairGarage, Dellen-Doktor. Scheiben: Carglass, Wintec. Licht/Felgen: FairGarage, Autobutler, Felgenfachbetriebe. "
+    "Technik (Motor, Getriebe, Fahrwerk, Bremsen, Elektrik, Klima, Abgas, Batterie, Warnleuchte): FairGarage/DAT, "
+    "Autobutler, repareo, Bosch Car Service (Diagnoseleistungen und -preise); HELLA Tech World nur fuer Ursachen, "
+    "nicht fuer Preise. Arbeitskosten: DEKRA-Stundensaetze sind NETTO und ohne Lackmaterial — dann 'netto' hinter "
+    "den Quellennamen schreiben. Schluessel/Teile: Markenangaben.")
 
 
 def aktiv() -> bool:
@@ -85,7 +95,9 @@ def je_fall(art: str) -> bool:
 
 
 RECHERCHE_SYSTEM = """Du recherchierst fuer AutoSchnell (Software fuer Autohaendler in Deutschland) aktuelle Reparatur- und Smart-Repair-Preise fuer Gebrauchtwagen — Deutschland, Euro inkl. MwSt., Stand heute.
-Bevorzugte Quellen: ADAC (adac.de), Smart-Repair-Anbieter (z. B. Dellen-Doktor, Dellentechnik, Carglass/Wintec fuer Scheiben, ATU, Pitstop), Werkstattportale (FairGarage, autobutler, repareo, Werkstattvergleich), Fachanbieter fuer Fahrzeugschluessel und Reifen. Verbraucherportale wie Auto Bild, auto motor und sport sind in Ordnung; Forenbeitraege und Anzeigen nicht.
+Bevorzugte Quellen: ADAC (adac.de), Smart-Repair-Anbieter (z. B. Dellen-Doktor, Dellentechnik, Carglass/Wintec fuer Scheiben, ATU, Pitstop), Werkstattportale (FairGarage, autobutler, repareo, Werkstattvergleich), Bosch Car Service (Diagnose), DEKRA (Stundensaetze, netto), Fachanbieter fuer Fahrzeugschluessel und Reifen. Verbraucherportale wie Auto Bild, auto motor und sport sind in Ordnung; Forenbeitraege und Anzeigen nicht.
+""" + QUELLEN_JE_GRUPPE + """
+Bei Technik-Maengeln ohne bestaetigte Diagnose: Diagnosekosten (Fehlerspeicher auslesen, Pruefung) und je einen guenstigen, mittleren und aufwendigen Reparaturfall angeben — als Szenarien.
 Regeln: je Position eine realistische Spanne (min-max) und einen typischen Wert, dazu die Quelle (Name + Adresse). Orientierungswerte ZAEHLEN als Fund: ADAC-Beispielpreise, Preisspannen von Anbietern oder Portalen gehoeren in den Datenblock, auch wenn sie nicht exakt zu Fahrzeug, Groesse oder Jahr passen oder netto sind — schreibe die Einschraenkung kurz hinter den Quellennamen (z. B. "ADAC, netto 2024"). Verboten sind nur frei erfundene Zahlen ohne Quelle; dann sage das statt zu schaetzen. Antworte auf Deutsch, knapp, als Liste."""
 
 UMWANDLUNG_SYSTEM = """Du wandelst einen Recherchebericht ueber Reparaturpreise in eine feste Tabelle um. typ ist IMMER der technische Schluessel aus der Positionsliste (z. B. keys fuer Schluessel, tires fuer Reifen, documents fuer Unterlagen, hu fuer HU), nie ein deutsches Wort. Uebernimm nur Werte, die im Bericht stehen (Euro inkl. MwSt.). Fehlt eine Position im Bericht, lass sie weg. typisch_eur liegt zwischen min_eur und max_eur. quelle: Name der Quelle (z. B. "ADAC", "Dellen-Doktor"), hinweis: hoechstens 12 Woerter. Antworte ausschliesslich nach dem Schema."""
@@ -355,6 +367,11 @@ def _positionen(paket: Dict[str, Any], art: str) -> List[dict]:
     return raus
 
 
+def _netto(quelle: str) -> bool:
+    q = str(quelle or "").lower()
+    return ("netto" in q or "ohne mwst" in q or "ohne mehrwertsteuer" in q or "zzgl" in q) and "brutto" not in q
+
+
 def _daten_parsen(text: str) -> List[Dict[str, Any]]:
     """Zeilen nach ###DATEN: id|min|max|typisch|quelle|url."""
     if not text or DATEN_MARKER not in text:
@@ -372,8 +389,14 @@ def _daten_parsen(text: str) -> List[Dict[str, Any]]:
         if lo > hi:
             lo, hi = hi, lo
         ty = min(max(ty, lo), hi) if ty else round((lo + hi) / 2, 2)
+        quelle = (teile[4] if len(teile) > 4 else "")[:80]
+        # Schadenkatalog 25.09.2026: DEKRA & Co. nennen Netto-Werte — sonst
+        # lernt die eigene Datenbank 19 % zu wenig.
+        if _netto(quelle):
+            lo, hi, ty = (round(x * 1.19, 2) for x in (lo, hi, ty))
+            quelle = (quelle + " (auf brutto umgerechnet)")[:80]
         raus.append({"id": pid[:120], "min_eur": lo, "max_eur": hi, "typisch_eur": ty,
-                     "quelle": (teile[4] if len(teile) > 4 else "")[:80],
+                     "quelle": quelle,
                      "url": (teile[5] if len(teile) > 5 else "")[:300]})
     return raus[:20]
 
@@ -471,16 +494,19 @@ def _fall_frage(art: str, paket: Dict[str, Any], positionen: List[dict]) -> str:
         sd = p.get("severity_data") or {}
         merk = ", ".join(f"{k} {w}" for k, w in sd.items() if str(w).lower() != "unbekannt")
         if p.get("damage_type") or p.get("type") in ("delle", "kratzer", "rost", "steinschlag", "hagelschaden",
-                                                      "beleuchtung", "unfall_repariert", "unfall_nicht_repariert"):
+                                                      "beleuchtung", "unfall_repariert", "unfall_nicht_repariert",
+                                                      "technik"):
+            note = str(p.get("note") or "").strip()[:160]
             zeilen.append(f"- id {p.get('id')}: {p.get('label') or p.get('type')} {p.get('zone') or ''}"
-                          f"{(' (' + merk + ')') if merk else ''}")
+                          f"{(' (' + merk + ')') if merk else ''}{(': ' + note) if note else ''}")
         else:
             zeilen.append(f"- id {p.get('id')}: {p.get('label')}: erwartet {p.get('expected')}, vor Ort {p.get('actual')}")
     if not zeilen:
         return ""
     return (f"Fahrzeug: {auto}, Erstzulassung {ez}, {km or '?'} km. Recherchiere aktuelle Reparatur-/Ersatzkosten "
-            "(Deutschland, inkl. MwSt.) fuer genau diese Punkte; bevorzuge ADAC und Smart-Repair-Anbieter, bei "
-            "Schluesseln/Teilen Markenangaben. Je Punkt: Spanne, typischer Wert, Quelle. Knapp antworten:\n"
+            "(Deutschland, inkl. MwSt.) fuer genau diese Punkte; nutze je Punkt die passenden Quellen (Karosserie: "
+            "ADAC/ATU/FairGarage; Scheiben: Carglass; Technik: FairGarage, Autobutler, Bosch Car Service; "
+            "Schluessel/Teile: Markenangaben). Je Punkt: Spanne, typischer Wert, Quelle. Knapp antworten:\n"
             + "\n".join(zeilen) + "\n\n" + SUCH_ANWEISUNG.format(n=MAX_SUCHEN_FALL) + "\n" + DATEN_ANWEISUNG)
 
 

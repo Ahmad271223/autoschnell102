@@ -25,10 +25,21 @@ const FERTIG = {
     items: [{ source_id: "d1", category: "damage", title: "Delle Kotflügel vorne rechts", priority: "orange",
               repair_method: "Ausbeulen ohne Lackieren", repair_estimate_eur: 150, minimum_justified_eur: 80,
               fair_discount_eur: 130, best_realistic_eur: 160, negotiation_start_eur: 220,
-              manual_review_required: false, reason: "Kleine Delle ohne Lackschaden." }],
-    combined: { sum_fair_eur: 130, overlap_adjustment_eur: 0, minimum_justified_eur: 80, fair_discount_eur: 130,
-                best_realistic_eur: 160, negotiation_start_eur: 220, deal_risk: "normal",
-                manual_review_required: false, recommended_purchase_price_eur: 7970 },
+              manual_review_required: false, reason: "Kleine Delle ohne Lackschaden." },
+            { source_id: "t1", category: "technical", title: "Automatik ruckelt (Symptom)", priority: "rot",
+              repair_method: "Diagnose", repair_estimate_eur: 0, minimum_justified_eur: 120,
+              fair_discount_eur: 300, best_realistic_eur: 1200, negotiation_start_eur: 3500,
+              manual_review_required: false, assessment_kind: "diagnosis_required", diagnosis_cost_eur: 120,
+              scenario_low_eur: 300, scenario_mid_eur: 1200, scenario_high_eur: 3500,
+              reason: "Nur Symptom, Szenarien statt Befund." },
+            { source_id: "u1", category: "accident_history", title: "Unfallfreiheit weicht ab", priority: "rot",
+              repair_method: "", repair_estimate_eur: 0, minimum_justified_eur: 0, fair_discount_eur: 0,
+              best_realistic_eur: 0, negotiation_start_eur: 0, manual_review_required: true,
+              assessment_kind: "expert_check_required", reason: "Sachverständiger." }],
+    combined: { sum_fair_eur: 430, overlap_adjustment_eur: 0, minimum_justified_eur: 200, fair_discount_eur: 430,
+                best_realistic_eur: 1360, negotiation_start_eur: 3720, deal_risk: "high",
+                manual_review_required: true, recommended_purchase_price_eur: 7670,
+                diagnosis_items: 1, expert_items: 1, uncertain_eur: 3200 },
     datenlage: "mittel", arguments: ["Die Delle steht nicht im Vertrag."],
   },
 };
@@ -81,6 +92,13 @@ describe("KiFahrerKarte", () => {
     expect(el("protokoll-ki-gesamt").textContent).toContain("Verhandlung starten");
     expect(el("protokoll-ki-datenlage").textContent).toContain("Datenlage mittel");
     expect(el("protokoll-ki-preis")).toBeNull();            // nur lesend
+    // Drei Ergebnisarten (Schadenkatalog): Diagnose mit Szenarien, Fachpruefung ohne Zahl
+    expect(el("protokoll-ki-art-t1").textContent).toContain("Diagnose erforderlich");
+    expect(el("protokoll-ki-szenarien-t1").textContent).toContain("Diagnose ca. 120 €");
+    expect(el("protokoll-ki-szenarien-t1").textContent).toContain("günstig 300 € · mittel 1.200 € · aufwendig 3.500 €");
+    expect(el("protokoll-ki-art-u1").textContent).toContain("Fachprüfung erforderlich");
+    expect(el("protokoll-ki-diagnose").textContent).toContain("Eine Position nur als Szenario");
+    expect(el("protokoll-ki-diagnose").textContent).toContain("unsicherer Anteil bis 3.200 €");
     expect(karte.textContent).not.toContain("Sicherheit");
     expect(karte.textContent).not.toContain("ct");
     // fertig: keine weitere Nachfrage

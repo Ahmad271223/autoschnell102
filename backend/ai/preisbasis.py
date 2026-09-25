@@ -114,8 +114,40 @@ BASIS: List[Dict[str, Any]] = [
      "verfahren": "Nachruestung oder Wertminderung", "min": 150, "max": 800},
     {"typ": "equipment_defect", "schluessel": "ausstattung_defekt", "auspraegung": "vorhanden, aber defekt",
      "verfahren": "Reparatur (bauteilabhaengig)", "min": 100, "max": 900},
-    {"typ": "warning_light", "schluessel": "warnleuchte", "auspraegung": "Motor/Getriebe/Airbag/ABS",
-     "verfahren": "nur mit Diagnose — hohes Preisrisiko", "min": 0, "max": 0, "manuell": True},
+    {"typ": "warning_light", "schluessel": "warnleuchte", "auspraegung": "Kontrollleuchte (Motor/Getriebe/Airbag/ABS)",
+     "verfahren": "Fehlerspeicher auslesen, dann je nach Ursache", "min": 150, "max": 2500,
+     "art": "diagnose", "diagnose": (60, 150), "szenarien": (150, 600, 2500)},
+    # Technik-Maengel (Wunsch Ahmad 25.09.2026 abends): der Fahrer bzw. Sucher
+    # gibt Bereich, Stand (nur Symptom / Werkstatt hat Diagnose bestaetigt),
+    # Fahrbereitschaft und Warnleuchte an. Ohne bestaetigte Diagnose ist das
+    # Ergebnis "Diagnose erforderlich" mit Diagnosekosten und drei Szenarien.
+    {"typ": "technical", "schluessel": "technik_motor", "auspraegung": "Motor (Oelverlust, Geraeusch, Leistung, Kuehlung)",
+     "verfahren": "Diagnose, dann Reparatur je Ursache", "min": 250, "max": 3000,
+     "art": "diagnose", "diagnose": (80, 150), "szenarien": (250, 900, 3000), "bereich": "motor"},
+    {"typ": "technical", "schluessel": "technik_getriebe", "auspraegung": "Getriebe/Kupplung (Ruckeln, Schaltfehler, rutscht)",
+     "verfahren": "Diagnose (Oel, Fehlercodes), Instandsetzung oder Ersatz", "min": 300, "max": 3500,
+     "art": "diagnose", "diagnose": (80, 150), "szenarien": (300, 1200, 3500), "bereich": "getriebe"},
+    {"typ": "technical", "schluessel": "technik_fahrwerk", "auspraegung": "Fahrwerk/Bremsen/Lenkung (Geraeusche, Spiel, Verschleiss)",
+     "verfahren": "Pruefung auf der Buehne, Teiletausch", "min": 150, "max": 1200,
+     "art": "diagnose", "diagnose": (50, 120), "szenarien": (150, 450, 1200), "bereich": "fahrwerk"},
+    {"typ": "technical", "schluessel": "technik_elektrik", "auspraegung": "Elektrik/Elektronik (Steuergeraet, Kabel, Sensoren)",
+     "verfahren": "Fehlerspeicher und Messung, Reparatur", "min": 100, "max": 1200,
+     "art": "diagnose", "diagnose": (60, 150), "szenarien": (100, 350, 1200), "bereich": "elektrik"},
+    {"typ": "technical", "schluessel": "technik_klima", "auspraegung": "Klima/Heizung (kuehlt/heizt nicht, Geblaese)",
+     "verfahren": "Lecksuche, Kaeltemittel, Kompressor oder Regelung", "min": 150, "max": 1200,
+     "art": "diagnose", "diagnose": (60, 120), "szenarien": (150, 450, 1200), "bereich": "klima"},
+    {"typ": "technical", "schluessel": "technik_komfort", "auspraegung": "Fensterheber/Verriegelung/Sitze/Spiegel elektrisch",
+     "verfahren": "Motor, Schalter oder Verkabelung", "min": 100, "max": 600,
+     "art": "diagnose", "diagnose": (40, 100), "szenarien": (100, 250, 600), "bereich": "komfort"},
+    {"typ": "technical", "schluessel": "technik_abgas", "auspraegung": "Auspuff/Abgas (undicht, AGR, DPF, Kat, AdBlue)",
+     "verfahren": "Sichtpruefung, Reinigung oder Bauteiltausch", "min": 200, "max": 2000,
+     "art": "diagnose", "diagnose": (50, 150), "szenarien": (200, 700, 2000), "bereich": "abgas"},
+    {"typ": "technical", "schluessel": "technik_batterie", "auspraegung": "Batterie/Lichtmaschine/Anlasser (Startprobleme)",
+     "verfahren": "Belastungstest, Tausch", "min": 120, "max": 700,
+     "art": "diagnose", "diagnose": (30, 80), "szenarien": (120, 300, 700), "bereich": "batterie"},
+    {"typ": "technical", "schluessel": "technik_innenraum", "auspraegung": "Innenraum (Sitz, Himmel, Armaturen, Geruch)",
+     "verfahren": "Sattler / Innenraum-Smart-Repair / Aufbereitung", "min": 80, "max": 600,
+     "art": "diagnose", "diagnose": (0, 0), "szenarien": (80, 250, 600), "bereich": "innenraum"},
     {"typ": "accident_history", "schluessel": "unfallfrei_abweichung", "auspraegung": "Unfallfreiheit weicht ab",
      "verfahren": "wesentliche Vertragsabweichung — manuelle Entscheidung", "min": 0, "max": 0, "manuell": True},
 ]
@@ -132,10 +164,16 @@ def basis_als_text() -> str:
     zeilen = ["Ausgangswerte AutoSchnell (EUR inkl. MwSt., Deutschland 2026; gelten nur, wenn keine "
               "repair_reference/Marktpreise mitgeliefert sind; immer auf Fahrzeugwert/Alter/Klasse anpassen):"]
     for b in BASIS:
+        if b.get("art") == "diagnose":
+            d, sz = b.get("diagnose") or (0, 0), b.get("szenarien") or (b["min"], (b["min"] + b["max"]) // 2, b["max"])
+            zeilen.append(f"- {b['typ']} / {b['auspraegung']}: {b['verfahren']}: Diagnose {d[0]}-{d[1]}, "
+                          f"Szenarien guenstig/mittel/aufwendig {sz[0]}/{sz[1]}/{sz[2]} "
+                          "(assessment_kind=diagnosis_required, solange keine bestaetigte Diagnose vorliegt)")
+            continue
         preis = ("manuelle Entscheidung, keine Zahl" if b.get("manuell") and b["max"] == 0
                  else f"{b['min']}-{b['max']}")
         zeilen.append(f"- {b['typ']} / {b['auspraegung']}: {b['verfahren']}: {preis}"
-                      + (" (manual_review_required=true)" if b.get("manuell") else ""))
+                      + (" (expert_check_required, manual_review_required=true)" if b.get("manuell") else ""))
     return "\n".join(zeilen)
 
 
@@ -240,6 +278,11 @@ def zuordnen(type_key: str, severity_data: Optional[Dict[str, Any]], zone: str =
         if _hat(technik, "halogen"):
             return zeile("licht_halogen"), unbek("funktion")
         return zeile("licht_xenon"), True          # Technik unbekannt: vorsichtig
+    if typ == "technik":
+        bereich, status = _t(sd, "bereich"), _t(sd, "status")
+        key = _TECHNIK_BEREICH.get(_bereich_schluessel(bereich), "technik_elektrik")
+        # Bereich unbekannt: vorsichtig (Elektrik-Spanne, Annahme)
+        return zeile(key), (unbek("bereich") or unbek("status"))
     if typ == "unfall_nicht_repariert":
         return zeile("unfall_offen"), False
     if typ == "unfall_repariert":
@@ -250,15 +293,64 @@ def zuordnen(type_key: str, severity_data: Optional[Dict[str, Any]], zone: str =
     return None, False
 
 
+# Bereich aus dem Formular (kiSchaden.js SCHWERE_FRAGEN.technik) -> Referenzzeile
+_TECHNIK_BEREICH = {"motor": "technik_motor", "getriebe": "technik_getriebe", "fahrwerk": "technik_fahrwerk",
+                    "elektrik": "technik_elektrik", "klima": "technik_klima", "komfort": "technik_komfort",
+                    "abgas": "technik_abgas", "batterie": "technik_batterie", "innenraum": "technik_innenraum"}
+
+
+def _bereich_schluessel(bereich: str) -> str:
+    b = str(bereich or "").lower()
+    if _hat(b, "motor", "kühl", "kuehl", "öl", "oel", "turbo", "zahnriemen", "steuerkette"):
+        return "motor"
+    if _hat(b, "getriebe", "kupplung", "automatik", "dsg", "antrieb"):
+        return "getriebe"
+    if _hat(b, "fahrwerk", "brems", "lenk", "stoßd", "stossd", "feder", "achse", "radlager"):
+        return "fahrwerk"
+    if _hat(b, "klima", "heiz", "gebläse", "geblaese"):
+        return "klima"
+    if _hat(b, "fensterheber", "verriegel", "sitz", "spiegel", "komfort", "schloss", "schiebedach"):
+        return "komfort"
+    if _hat(b, "auspuff", "abgas", "agr", "dpf", "kat", "adblue"):
+        return "abgas"
+    if _hat(b, "batterie", "lichtmaschine", "anlasser", "start"):
+        return "batterie"
+    if _hat(b, "innenraum", "himmel", "polster", "armatur", "geruch"):
+        return "innenraum"
+    if _hat(b, "elektr", "steuerger", "kabel", "sensor", "display", "infotainment", "kamera", "navi"):
+        return "elektrik"
+    return ""
+
+
+def bestaetigte_diagnose(severity_data: Optional[Dict[str, Any]]) -> bool:
+    """Technik-Mangel: 'Werkstatt hat Diagnose bestaetigt' -> Reparaturpreis statt Szenarien."""
+    return _hat(_t(severity_data or {}, "status"), "bestätigt", "bestaetigt", "werkstatt")
+
+
+def referenz_aus_zeile(z: Dict[str, Any], *, faktor: float = 1.0, annahme: bool = False,
+                       bestaetigt: bool = False) -> Dict[str, Any]:
+    """Reparaturreferenz fuer das KI-Paket aus einer Tabellenzeile. Zeilen der
+    Art 'diagnose' bekommen Diagnosekosten und Szenarien (kind
+    diagnosis_required), ausser eine Werkstatt hat die Ursache bestaetigt."""
+    ref = {"key": z["schluessel"], "method": z["verfahren"], "low": round(z["min"] * faktor),
+           "median": round((z["min"] + z["max"]) / 2 * faktor), "high": round(z["max"] * faktor),
+           "manual_review": bool(z.get("manuell")), "source": "AutoSchnell-Startwerte",
+           "assumption_made": annahme, "kind": "repair_estimate"}
+    if z.get("manuell"):
+        ref["kind"] = "expert_check_required"
+    elif z.get("art") == "diagnose" and not bestaetigt:
+        d, sz = z.get("diagnose") or (0, 0), z.get("szenarien") or (z["min"], (z["min"] + z["max"]) // 2, z["max"])
+        ref.update(kind="diagnosis_required", diagnosis={"low": d[0], "high": d[1]},
+                   scenarios={"low": sz[0], "mid": sz[1], "high": sz[2]}, median=sz[1])
+    return ref
+
+
 def referenz(type_key: str, severity_data: Optional[Dict[str, Any]], zone: str = "") -> Optional[Dict[str, Any]]:
     """Reparaturreferenz fuer das KI-Paket aus der Startwert-Tabelle."""
     z, annahme = zuordnen(type_key, severity_data, zone)
     if not z:
         return None
-    return {"key": z["schluessel"], "method": z["verfahren"], "low": z["min"],
-            "median": round((z["min"] + z["max"]) / 2), "high": z["max"],
-            "manual_review": bool(z.get("manuell")), "source": "AutoSchnell-Startwerte",
-            "assumption_made": annahme}
+    return referenz_aus_zeile(z, annahme=annahme, bestaetigt=bestaetigte_diagnose(severity_data))
 
 
 # ------------------------------------------------ deterministische Prioritaet

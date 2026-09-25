@@ -45,6 +45,7 @@ SICHERUNG_TAGE = 90                                       # SK-14: TTL
 SCHADENSARTEN = (
     "Unfallschaden repariert", "Unfallschaden NICHT repariert", "Hagelschaden",
     "Steinschlag", "Delle", "Kratzer", "Rost", "Beleuchtung defekt",
+    "Technischer Mangel",                      # 25.09.2026 abends, ohne Skizze
 )
 # Klickpunkte aller fuenf Ansichten (DamageSelector.jsx, DOTS)
 BAUTEILE = (
@@ -65,6 +66,9 @@ BAUTEILE = (
     "Stoßstange hinten", "Stoßstange vorne",
     "Tür hinten links", "Tür hinten rechts", "Tür vorne links", "Tür vorne rechts",
     "Vorderrad / Felge links", "Vorderrad / Felge rechts", "Windschutzscheibe",
+    # Bereiche des Technischen Mangels (kiSchaden.js TECHNIK_BEREICHE)
+    "Motor", "Getriebe/Kupplung", "Fahrwerk/Bremsen/Lenkung", "Elektrik/Elektronik", "Klima/Heizung",
+    "Fensterheber/Verriegelung/Sitze", "Auspuff/Abgas", "Batterie/Start", "Innenraum",
 )
 # Feste Vorbelegung des Hinweisfelds im Vertragsdialog (kein Nutzer-Freitext)
 BEKANNTE_HINWEISE = ("Motorschaden / Unfallschaden vorhanden",)

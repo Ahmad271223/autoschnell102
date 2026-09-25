@@ -61,6 +61,8 @@ def _attrappe(monkeypatch, antwort=ANTWORT, status="ok", zaehler=None):
 
 def _fahrzeug(welt, vid, **data):
     w, db = welt.w, welt.db
+    # KI je Konto freigeschaltet (25.09.2026 abends) — Chef und Sucher der Testfirma
+    welt.run(db.users.update_many({"id": {"$in": [w.chef["id"], w.sucher["id"]]}}, {"$set": {"ki_aktiv": True}}))
     daten = {"make_label": "BMW", "model_label": "530 Gran Turismo", "mileage": 206000,
              "first_registration": "01/2010", "power_kw": 180, "fuel_label": "Diesel", "price": 8900,
              "description": "Gepflegter Wagen, kleiner Kratzer an der Stoßstange hinten. 2 Schlüssel.",
@@ -172,7 +174,7 @@ def test_03_paket_vorschau_und_bewertung_vertrag(welt, monkeypatch):
     assert erg3["basis"] == "kaufpreis" and erg3["kaufpreis"] == 8000 and len(aufrufe) == 2
     assert erg3["ergebnis"]["combined"]["recommended_purchase_price_eur"] == 7600.0
     gespeichert = welt.run(welt.db.ki_bewertungen.find_one({"id": erg["id"]}, {"_id": 0}))
-    assert gespeichert["art"] == "vertrag" and gespeichert["prompt_version"] == "vertrag_v2"
+    assert gespeichert["art"] == "vertrag" and gespeichert["prompt_version"] == "vertrag_v3"
     assert gespeichert["user_id"] == w.sucher["id"] and "Vera" not in str(gespeichert) and "lease_until" not in gespeichert
     _ki_aufraeumen(welt)
 
