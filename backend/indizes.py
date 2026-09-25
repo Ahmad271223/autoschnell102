@@ -927,6 +927,10 @@ async def ki_indizes(db) -> dict:
         await db.ki_bewertungen.create_index(
             [("protocol_id", 1), ("input_hash", 1)], unique=True, name="ki_bewertung_je_protokoll_stand",
             partialFilterExpression={"protocol_id": {"$type": "string"}})
+        # Review 25.09.2026 abends: auch der Vertrag hat genau EINEN laufenden Lauf je Firma und Stand
+        await db.ki_bewertungen.create_index(
+            [("dealer_id", 1), ("input_hash", 1)], unique=True, name="ki_vertrag_laeuft_je_stand",
+            partialFilterExpression={"art": "vertrag", "status": "laeuft"})
         await db.ki_bewertungen.create_index([("dealer_id", 1), ("created_at", -1)], name="ki_bewertung_firma_zeit")
         await db.ki_bewertungen.create_index([("user_id", 1), ("created_at", -1)], name="ki_bewertung_nutzer_zeit")
         await db.ki_bewertungen.create_index("id", name="ki_bewertung_id")

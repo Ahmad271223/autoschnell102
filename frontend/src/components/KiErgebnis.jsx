@@ -37,8 +37,9 @@ export default function KiErgebnis({ erg, kaufpreis, basisText, testPrefix, onPr
                     {it.title}
                   </span>
                   {it.manual_review_required ? (
-                    <span style={{ color: "var(--st-rot)" }} data-testid={`${testPrefix}-art-${it.source_id}`}>
-                      {ART_TEXT[it.assessment_kind] || "manuelle Entscheidung"}
+                    <span className="text-right" style={{ color: "var(--st-rot)" }} data-testid={`${testPrefix}-art-${it.source_id}`}>
+                      <b>{ART_TEXT[it.assessment_kind] || "manuelle Entscheidung"}</b>
+                      <span className="block text-[10px]">Betrag unbekannt – Risiko ggf. erheblich</span>
                     </span>
                   ) : (
                     <span className="text-right">
@@ -99,8 +100,11 @@ export default function KiErgebnis({ erg, kaufpreis, basisText, testPrefix, onPr
           ))}
         </div>
         {c.manual_review_required && (
-          <div className="mt-1.5 text-[11px]" style={{ color: "var(--st-rot)" }}>
-            Mindestens ein Punkt braucht eine Fachprüfung oder deine eigene Entscheidung – die Zahlen decken ihn nicht ab.
+          <div className="mt-1.5 text-[11px] font-semibold rounded-lg px-2 py-1.5" data-testid={`${testPrefix}-fachpruefung`}
+               style={{ color: "var(--st-rot)", border: "1px solid var(--st-rot)" }}>
+            {c.expert_items > 0
+              ? `${c.expert_items === 1 ? "Eine Position" : `${c.expert_items} Positionen`} ohne Betrag (Fachprüfung erforderlich): das Risiko kann erheblich sein – die vier Werte und der Zielpreis decken sie NICHT ab.`
+              : "Mindestens ein Punkt braucht deine eigene Entscheidung – die Zahlen decken ihn nicht ab."}
           </div>
         )}
         {c.diagnosis_items > 0 && (
@@ -118,6 +122,7 @@ export default function KiErgebnis({ erg, kaufpreis, basisText, testPrefix, onPr
         {kaufpreis > 0 && (
           <div className="mt-1.5 text-[11px]" style={{ color: "var(--text-dim)" }}>
             Basis: {basisText} {eur(kaufpreis)}{zielpreis != null ? ` → Zielpreis ${eur(zielpreis)}` : ""}
+            {zielpreis != null && c.expert_items > 0 ? " (ohne die Fachprüfungs-Positionen)" : ""}
           </div>
         )}
         {zielpreis != null && onPreis && (

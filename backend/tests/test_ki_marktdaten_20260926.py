@@ -122,7 +122,10 @@ def test_03_abholung_recherche_je_fall_lernt_und_quellen(welt, monkeypatch):
         recherchen.append(kw)
         text = ("Delle Smart-Repair 120-200 EUR (ADAC), Schluessel BMW 250-400 EUR\n"
                 + MD.DATEN_MARKER + "\nd1|120|200|160|ADAC|https://www.adac.de/x\n"
-                "dev:keys|250|400|300|schluessel24|https://schluessel24.de/bmw\n")
+                "dev:keys|250|400|300|Autobutler|https://www.autobutler.de/bmw-schluessel\n"
+                # Review 25.09.2026 abends: unbekannte Quelle und unplausibler Wert werden NICHT gelernt
+                "d1|1|2|1|irgendwer|https://foren.example.org/x\n"
+                "dev:keys|9000|20000|12000|ADAC|https://www.adac.de/y\n")
         return {"status": "ok", "grund": "", "text": text, "quellen": QUELLEN, "suchen": 2, "dauer_ms": 9,
                 "modell": "attrappe", "usage": {"web_search_requests": 2, "input_tokens": 300}}
     monkeypatch.setattr(MD, "recherche", _recherche)

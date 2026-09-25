@@ -401,6 +401,45 @@ def _daten_parsen(text: str) -> List[Dict[str, Any]]:
     return raus[:20]
 
 
+# Review 25.09.2026 abends: gelernt wird nur aus bekannten Quellen und nur,
+# wenn der Wert plausibel zur Referenz passt — sonst verfaelscht ein
+# schlechter Webwert die eigene Datenbank fuer 180 Tage.
+VERTRAUTE_DOMAINS = ("adac.de", "fairgarage.com", "dat.de", "autobutler.de", "atu.de", "carglass.de", "wintec.de",
+                     "dekra.de", "boschcarservice.com", "repareo.de", "werkstattvergleich.de", "dellen-doktor.de",
+                     "dellendoktor.de", "dellentechnik", "pitstop.de", "autoglas", "reifen.com", "reifendirekt.de",
+                     "autobild.de", "auto-motor-und-sport.de", "hella.com", "tuev", "tuv.com", "gtue.de",
+                     "autoscout24.de", "mobile.de", "kfz-betrieb", "autoservicepraxis", "kfz.net", "autoplenum",
+                     "smart-repair", "smartrepair", "lackprofi", "carglass", "reifenleader", "meinauto", "vergoelst",
+                     "euromaster", "point-s", "premio", "driver-center", "bosch")
+VERTRAUTE_NAMEN = ("adac", "fairgarage", "dat", "autobutler", "atu", "carglass", "wintec", "dekra", "bosch",
+                   "repareo", "werkstattvergleich", "dellen", "pitstop", "hella", "tüv", "tuev", "gtü", "gtue",
+                   "auto bild", "auto motor", "autoscout", "mobile.de", "euromaster", "vergölst", "vergoelst")
+PLAUSIBEL_UNTEN, PLAUSIBEL_OBEN = 0.25, 4.0
+
+
+def quelle_vertraut(quelle: str, url: str) -> bool:
+    """Bekannte Domain ODER bekannter Quellenname (die Recherche nennt oft
+    'ADAC' mit einer verkuerzten Adresse)."""
+    u = str(url or "").lower()
+    host = u.split("//", 1)[-1].split("/", 1)[0] if u else ""
+    q = str(quelle or "").lower()
+    return any(d in host for d in VERTRAUTE_DOMAINS) or any(n in q for n in VERTRAUTE_NAMEN)
+
+
+def wert_plausibel(zeile: Dict[str, Any], ref: Dict[str, Any]) -> bool:
+    """Innerhalb 0,25x der unteren bis 4x der oberen Referenz; min > 0."""
+    try:
+        lo, hi = float(zeile.get("min_eur") or 0), float(zeile.get("max_eur") or 0)
+        r_lo, r_hi = float(ref.get("low") or 0), float(ref.get("high") or 0)
+    except (TypeError, ValueError):
+        return False
+    if lo <= 0 or hi <= 0 or hi > 50000:
+        return False
+    if r_lo <= 0 or r_hi <= 0:
+        return True
+    return lo >= r_lo * PLAUSIBEL_UNTEN and hi <= r_hi * PLAUSIBEL_OBEN
+
+
 async def lernen_aus_recherche(fall: Optional[dict], paket: Dict[str, Any], art: str, db=None) -> int:
     """Gefundene Werte je Position in ki_reparaturpreise ablegen. Wirft nie."""
     if not fall or fall.get("status") != "ok":
@@ -414,6 +453,7 @@ async def lernen_aus_recherche(fall: Optional[dict], paket: Dict[str, Any], art:
         v = paket.get("vehicle") or {}
         jetzt = now_iso()
         docs = []
+        verworfen: List[Dict[str, Any]] = []
         for z in zeilen:
             p = je_id.get(z["id"])
             if not p:
@@ -422,6 +462,10 @@ async def lernen_aus_recherche(fall: Optional[dict], paket: Dict[str, Any], art:
             key = ref.get("key")
             if not key:
                 continue
+            if not quelle_vertraut(z.get("quelle"), z.get("url")) or not wert_plausibel(z, ref):
+                verworfen.append({"id": z["id"], "quelle": z.get("quelle"), "url": z.get("url"),
+                                  "min_eur": z["min_eur"], "max_eur": z["max_eur"]})
+                continue
             docs.append({"key": key, "typ": p.get("type") or p.get("damage_type") or key.split("_")[0],
                          "zone": str(p.get("zone") or "")[:80], "marke": _marke(v), "modell": str(v.get("model") or "")[:60],
                          "alter_klasse": _alter_klasse(v), "min_eur": z["min_eur"], "max_eur": z["max_eur"],
@@ -429,6 +473,9 @@ async def lernen_aus_recherche(fall: Optional[dict], paket: Dict[str, Any], art:
                          "art": art, "stand": jetzt})
         if docs:
             await db[PREIS_SAMMLUNG].insert_many(docs)
+        if verworfen:
+            fall["verworfen"] = verworfen[:20]
+            log.info("Recherche: %d Werte nicht gelernt (Quelle unbekannt oder unplausibel)", len(verworfen))
         return len(docs)
     except Exception:  # noqa: BLE001
         log.exception("Recherche-Werte nicht gelernt")

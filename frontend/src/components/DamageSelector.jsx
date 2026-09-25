@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Trash2, Eraser } from "lucide-react";
 import { toast } from "sonner";
-import { TECHNIK_BEREICHE, TECHNIK_TYP, istTechnik, mitAntwort, schwereFragen, technikSchaden } from "@/lib/kiSchaden";
+import { TECHNIK_BEREICHE, TECHNIK_TYP, fragenFuer, istTechnik, mitAntwort, mitBetrag, technikSchaden } from "@/lib/kiSchaden";
 
 // Rollenprüfung 22.09.2026 (RP-070/RP-169/RP-514): Ein Tipp auf einen Marker
 // löschte den Schaden sofort — und der Marker liegt genau auf dem Bauteilpunkt
@@ -538,9 +538,9 @@ export default function DamageSelector({ damages = [], onChange }) {
                     mehr je Schaden — Groesse, Lack, Laenge, Funktion — machen die
                     Kostenschaetzung erst brauchbar. Antworten liegen in
                     severity_data am Schaden. */}
-                {schwereFragen(d.type_key).length > 0 && (
+                {fragenFuer(d).length > 0 && (
                   <div className="mt-1.5 space-y-1" data-testid={`damage-fragen-${d.id}`}>
-                    {schwereFragen(d.type_key).map((f) => (
+                    {fragenFuer(d).map((f) => (
                       <div key={f.key} className="flex flex-wrap items-center gap-1">
                         <span className="text-[11px] text-zinc-500 mr-1 w-24 shrink-0">{f.label}</span>
                         {f.options.map((o) => {
@@ -563,6 +563,17 @@ export default function DamageSelector({ damages = [], onChange }) {
                     ))}
                   </div>
                 )}
+                {fragenFuer(d).filter((f) => f.betragBei && (d.severity_data || {})[f.key] === f.betragBei).map((f) => (
+                  <div key={f.betragKey} className="mt-1.5 flex items-center gap-2">
+                    <span className="text-[11px] text-zinc-500 w-24 shrink-0">Betrag (€)</span>
+                    <input value={(d.severity_data || {})[f.betragKey] || ""} inputMode="numeric" maxLength={6}
+                           data-testid={`damage-betrag-${d.id}-${f.betragKey}`} placeholder="z. B. 1200"
+                           onChange={(e) => onChange?.(damages.map((x) => (x.id === d.id ? mitBetrag(x, f.betragKey, e.target.value) : x)),
+                                                       damagesToText(damages))}
+                           className="w-32 rounded-lg border bg-transparent px-2.5 py-1.5 text-[12px] text-zinc-200"
+                           style={{ borderColor: "var(--border-default)" }} />
+                  </div>
+                ))}
                 {istTechnik(d) && (
                   <input value={d.note || ""} maxLength={200} data-testid={`damage-note-${d.id}`}
                          placeholder="Was genau? z. B. Automatik ruckelt beim Kaltstart"

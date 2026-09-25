@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   SCHWERE_FRAGEN, alleVollstaendig, argumenteText, eur, kiStatusText, kiWartet, mitAntwort, nachPrioritaet,
-  schadenZeile, schaedenStand, schwereFragen, schwereOffen, schwereText, vierText, vorschlaegeAnwenden,
+  schadenZeile, schaedenStand, schwereFragen, schwereOffen, schwereText, vierText, vorschlaegeAnwenden, fragenFuer, mitBetrag,
 } from "./kiSchaden";
 
 // Wunsch Ahmad 25./26.09.2026: KI-Schadennachlass — feste Fragen je Schadensart
@@ -9,10 +9,23 @@ import {
 describe("kiSchaden", () => {
   it("hat fuer jede Schadensart der Skizze 3 Fragen mit 'unbekannt' wo sinnvoll", () => {
     for (const typ of ["delle", "kratzer", "rost", "hagelschaden", "steinschlag", "beleuchtung",
-                       "unfall_repariert", "unfall_nicht_repariert", "technik"]) {
+                       "unfall_repariert", "unfall_nicht_repariert"]) {
       expect(SCHWERE_FRAGEN[typ].length).toBeGreaterThanOrEqual(3);
       expect(SCHWERE_FRAGEN[typ].length).toBeLessThanOrEqual(4);
     }
+    // Technik: 3 Fragen; bei bestätigter Diagnose zwei Folgefragen (Umfang, Kostenvoranschlag)
+    const symptom = { type_key: "technik", severity_data: { status: "nur Symptom bemerkt" } };
+    const bestaetigt = { type_key: "technik", severity_data: { status: "Werkstatt hat Diagnose bestätigt" } };
+    expect(fragenFuer(symptom).map((f) => f.key)).toEqual(["status", "fahrbereit", "warnleuchte"]);
+    expect(fragenFuer(bestaetigt).map((f) => f.key)).toEqual(["status", "fahrbereit", "warnleuchte", "umfang", "kva"]);
+    // Kostenvoranschlag "liegt vor" braucht einen Betrag
+    const mitKva = { ...bestaetigt, severity_data: { ...bestaetigt.severity_data, fahrbereit: "ja", warnleuchte: "keine",
+                                                     umfang: "Bauteil tauschen", kva: "liegt vor" } };
+    expect(schwereOffen(mitKva)).toEqual(["Betrag"]);
+    const mitBetragWert = mitBetrag(mitKva, "kva_eur", "1.200 €");
+    expect(mitBetragWert.severity_data.kva_eur).toBe("1200");
+    expect(schwereOffen(mitBetragWert)).toEqual([]);
+    expect(schwereText(mitBetragWert)).toContain("liegt vor (1200 €)");
     expect(schwereFragen("delle").map((f) => f.key)).toEqual(["groesse", "lack", "lage"]);
     expect(schwereFragen("rost").map((f) => f.key)).toEqual(["umfang", "groesse", "stelle"]);
     expect(schwereFragen("delle")[1].options).toContain("unbekannt");

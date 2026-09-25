@@ -177,7 +177,8 @@ def test_03_bewertung_wird_abgelegt_bereinigt_und_priorisiert(welt, monkeypatch)
     comb = erg["ergebnis"]["combined"]
     assert comb["fair_discount_eur"] == 530.0 and comb["negotiation_start_eur"] <= round(600 * 1.4)
     assert comb["recommended_purchase_price_eur"] == 8100 - 530
-    assert comb["manual_review_required"] is True and comb["deal_risk"] == "normal"
+    # Review 25.09.2026 abends: eine Fachpruefungs-Position (Unfallfreiheit) hebt das Risiko auf high
+    assert comb["manual_review_required"] is True and comb["deal_risk"] == "high" and comb["expert_items"] == 1
     assert erg["ergebnis"]["datenlage"] in ("hoch", "mittel", "niedrig")
     assert "needs_information" not in erg["ergebnis"]
     assert erg["kosten_ct"] is not None and erg["kosten_ct"] < 5
@@ -510,3 +511,81 @@ class _Antwort:
     """Minimaler Response-Ersatz fuer admin_list_dealer_sucher (Kopfzeilen)."""
     def __init__(self):
         self.headers = {}
+
+
+def test_12_haertung_reservierung_dedupe_risiko_kva(welt, monkeypatch):
+    """Review 25.09.2026 abends: Budget atomar reservieren, Vertrag dedupliziert,
+    Deal-Risk-Stufen fest, bestaetigte Diagnose mit Kostenvoranschlag/Umfang,
+    Quellenqualitaet vor dem Lernen."""
+    B = _module("ai.budget")
+    S = _module("ai.schemas")
+    PB = _module("ai.preisbasis")
+    MD = _module("ai.marktdaten")
+    DP = _module("ai.damage_pricing")
+    w, db = welt.w, welt.db
+    # --- Budget: 45 ct Grenze, 15 ct je Lauf -> drei Reservierungen passen, die vierte nicht
+    monkeypatch.setenv("KI_BUDGET_MONAT_EUR", "0.45")
+    monkeypatch.setenv("KI_KOSTEN_MAX_CT", "15")
+    welt.run(db.ki_budget.delete_many({"_id": {"$regex": f":{w.dealer_id}:"}}))
+    r1 = welt.run(B.reservieren(user_id=None, dealer_id=w.dealer_id, art="abholung"))
+    r2 = welt.run(B.reservieren(user_id=None, dealer_id=w.dealer_id, art="abholung"))
+    r3 = welt.run(B.reservieren(user_id=None, dealer_id=w.dealer_id, art="abholung"))
+    assert r1 and r2 and r3 and r1["est_ct"] == 15.0
+    assert welt.run(B.reservieren(user_id=None, dealer_id=w.dealer_id, art="abholung")) is None
+    assert welt.run(B.zaehler_ct(user_id=None, dealer_id=w.dealer_id, art="abholung")) == 45.0
+    welt.run(B.abrechnen(r1, 11.4))                                 # echte Kosten statt Reservierung
+    assert welt.run(B.zaehler_ct(user_id=None, dealer_id=w.dealer_id, art="abholung")) == 41.4
+    welt.run(B.abrechnen(r2, 0))                                    # freigeben
+    assert welt.run(B.reservieren(user_id=None, dealer_id=w.dealer_id, art="abholung")) is not None
+    assert welt.run(B.reservieren(user_id=None, dealer_id=w.dealer_id, art="abholung")) is None
+    welt.run(B.abrechnen(None, 5))                                  # ohne Reservierung: nichts
+    monkeypatch.setenv("KI_BUDGET_MONAT_EUR", "0")
+    assert welt.run(B.reservieren(user_id=None, dealer_id=w.dealer_id, art="abholung"))["schluessel"] is None
+    welt.run(db.ki_budget.delete_many({"_id": {"$regex": f":{w.dealer_id}:"}}))
+    # --- Vertrag: EIN laufender Lauf je Firma und Stand (Unique-Index), abgelaufener Lease uebernehmbar
+    IX = _module("indizes")
+    welt.run(IX.ki_indizes(db))
+    h = f"hash_{w.s}"
+    start = {"id": f"b1_{w.s}", "art": "vertrag", "dealer_id": w.dealer_id, "user_id": w.sucher["id"], "input_hash": h,
+             "status": "laeuft", "created_at": _jetzt(), "lease_until": "2099-01-01T00:00:00+00:00"}
+    assert welt.run(DP._lauf_beanspruchen(dict(start), w.dealer_id, h)) is None
+    fremd = welt.run(DP._lauf_beanspruchen({**start, "id": f"b2_{w.s}"}, w.dealer_id, h))
+    assert fremd is not None and fremd["id"] == f"b1_{w.s}", "zweiter Start bekommt den laufenden"
+    welt.run(db.ki_bewertungen.update_one({"id": f"b1_{w.s}"}, {"$set": {"lease_until": "2000-01-01T00:00:00+00:00"}}))
+    assert welt.run(DP._lauf_beanspruchen({**start, "id": f"b3_{w.s}"}, w.dealer_id, h)) is None, "abgelaufen: uebernommen"
+    docs = welt.run(db.ki_bewertungen.find({"dealer_id": w.dealer_id, "input_hash": h}, {"_id": 0, "id": 1}).to_list(10))
+    assert [d["id"] for d in docs] == [f"b3_{w.s}"]
+    welt.run(db.ki_bewertungen.delete_many({"dealer_id": w.dealer_id, "input_hash": h}))
+    # --- Deal-Risk-Stufen: nur hoeher, nie niedriger
+    f = S.deal_risk_stufe
+    assert f("normal", kaufpreis=8000, fair=500, szenarien_hoch=0, experten=0) == "normal"
+    assert f("normal", kaufpreis=8000, fair=4000, szenarien_hoch=0, experten=0) == "high"
+    assert f("normal", kaufpreis=8000, fair=0, szenarien_hoch=2000, experten=0) == "high"
+    assert f("normal", kaufpreis=8000, fair=0, szenarien_hoch=0, experten=1) == "high"
+    assert f("normal", kaufpreis=8000, fair=4800, szenarien_hoch=0, experten=0) == "reconsider_purchase"
+    assert f("normal", kaufpreis=8000, fair=2500, szenarien_hoch=3600, experten=0) == "reconsider_purchase"
+    assert f("reconsider_purchase", kaufpreis=8000, fair=0, szenarien_hoch=0, experten=0) == "reconsider_purchase"
+    assert f("high", kaufpreis=0, fair=0, szenarien_hoch=0, experten=0) == "high"
+    assert f("quatsch", kaufpreis=0, fair=0, szenarien_hoch=0, experten=0) == "normal"
+    # --- bestaetigte Diagnose: Kostenvoranschlag gewinnt, sonst Umfang engt die Spanne ein
+    best = {"bereich": "Getriebe/Kupplung", "status": "Werkstatt hat Diagnose bestätigt", "fahrbereit": "ja",
+            "warnleuchte": "keine"}
+    r = PB.referenz("technik", {**best, "kva": "liegt vor", "kva_eur": "1200"}, "Getriebe/Kupplung")
+    assert r["kind"] == "repair_estimate" and (r["low"], r["median"], r["high"]) == (1080, 1200, 1440)
+    assert r["basis"] == "kostenvoranschlag" and r["assumption_made"] is False
+    r = PB.referenz("technik", {**best, "umfang": "Kleinteil/Einstellung"}, "Getriebe/Kupplung")
+    assert r["basis"] == "umfang" and r["low"] == 300 and r["high"] == round(300 + 3200 * 0.35)
+    r = PB.referenz("technik", {**best, "umfang": "Austauschaggregat"}, "Getriebe/Kupplung")
+    assert r["low"] == round(300 + 3200 * 0.7) and r["high"] == 3500
+    r = PB.referenz("technik", best, "Getriebe/Kupplung")
+    assert r["basis"] == "bestaetigt_ohne_umfang" and r["assumption_made"] is True and r["kind"] == "repair_estimate"
+    assert PB.kva_betrag({"kva_eur": "1.200,50"}) == 1200.5 and PB.kva_betrag({"kva_eur": "3"}) is None
+    # --- Quellenqualitaet
+    assert MD.quelle_vertraut("ADAC", "https://www.adac.de/x") and MD.quelle_vertraut("ADAC", "")
+    assert not MD.quelle_vertraut("irgendwer", "https://foren.example.org/x") and not MD.quelle_vertraut("blog", "")
+    ref = {"low": 300, "high": 3500}
+    assert MD.wert_plausibel({"min_eur": 250, "max_eur": 4000}, ref)
+    assert not MD.wert_plausibel({"min_eur": 10, "max_eur": 50}, ref)
+    assert not MD.wert_plausibel({"min_eur": 5000, "max_eur": 20000}, ref)
+    assert MD.wert_plausibel({"min_eur": 5, "max_eur": 50}, {})
+

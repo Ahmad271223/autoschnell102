@@ -3334,3 +3334,28 @@ Abo. Der Betreiber macht das in der Firmenansicht (Admin → Nutzer → Firma) i
   Abo frei“), kein KI-Aufruf, keine Kosten, nichts abgelegt. Vertrag, Freigabe und Protokoll laufen normal.
   Nach der Freischaltung rechnet der nächste Aufruf sofort (kein Neustart, kein Deploy).
 - Bestandskonten sind nach dem Deploy **alle gesperrt**, bis Ahmad sie einzeln freischaltet.
+
+### Härtung nach Review 25.09.2026 abends (vor dem Rollout)
+
+- **Vertrags-KI dedupliziert:** Unique-Index `ki_vertrag_laeuft_je_stand` (dealer_id + input_hash, nur
+  art=vertrag/status=laeuft, `indizes.ki_indizes`). Zwei gleichzeitige Starts desselben Falls: der zweite bekommt
+  den laufenden Lauf zurück; ein abgelaufener Lease (150 s) wird atomar übernommen (`_lauf_beanspruchen`).
+- **Budget atomar reserviert:** Zähler `ki_budget` je Konto/Firma und Monat. Vor jedem Lauf wird die
+  Einzelgrenze (`KI_KOSTEN_MAX_CT`) per `find_one_and_update` mit `$expr` reserviert (`budget.reservieren`),
+  nach dem Lauf durch die echten Kosten ersetzt (`abrechnen`), bei Fehler freigegeben. Parallele Läufe können
+  die 15 € nicht mehr gemeinsam überschreiten. Stirbt ein Prozess mitten im Lauf, bleibt die Reservierung
+  (max. 15 ct) bis zum Monatswechsel stehen — bewusst hingenommen.
+- **Bestätigte Diagnose strukturiert:** bei „Werkstatt hat Diagnose bestätigt“ zwei Folgefragen — Umfang
+  (Kleinteil/Einstellung, Bauteil tauschen, Instandsetzung, Austauschaggregat) und Kostenvoranschlag (liegt vor
+  → Betragsfeld). Mit Betrag gilt dieser als Referenz (−10 %/+20 %, Quelle „Kostenvoranschlag Werkstatt“);
+  sonst engt der Umfang die Szenarien-Spanne ein; ohne beides bleibt die breite Spanne mit Annahme.
+- **Quellenqualität vor dem Lernen** (`marktdaten.quelle_vertraut`, `wert_plausibel`): gelernt wird nur aus
+  bekannten Domains/Namen (ADAC, FairGarage/DAT, Autobutler, ATU, Carglass, DEKRA, Bosch, repareo …) und nur,
+  wenn der Wert zwischen 0,25× der unteren und 4× der oberen Referenz liegt. Abgelehnte Werte stehen im
+  Recherche-Ergebnis unter `verworfen`.
+- **Deal-Risk deterministisch** (`schemas.deal_risk_stufe`, nur höher, nie niedriger als die KI):
+  *high* ab fair ≥ 50 % des Preises, Diagnose-Szenarien (aufwendig) zusammen ≥ 25 %, oder mindestens eine
+  Fachprüfungs-Position; *reconsider_purchase* ab fair ≥ 60 %, Szenarien ≥ 60 % oder fair + Szenarien ≥ 75 %.
+- **Fachprüfung sichtbar:** Position zeigt „Fachprüfung erforderlich – Betrag unbekannt, Risiko ggf.
+  erheblich“; Gesamtkarte roter Kasten „n Positionen ohne Betrag … die vier Werte und der Zielpreis decken sie
+  NICHT ab“; Zielpreis-Zeile trägt „(ohne die Fachprüfungs-Positionen)“.

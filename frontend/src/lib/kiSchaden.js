@@ -54,8 +54,20 @@ export const SCHWERE_FRAGEN = {
     { key: "status", label: "Stand", options: ["nur Symptom bemerkt", "Werkstatt hat Diagnose bestätigt", "unbekannt"] },
     { key: "fahrbereit", label: "Fahrbereit?", options: ["ja", "eingeschränkt", "nein", "unbekannt"] },
     { key: "warnleuchte", label: "Warnleuchte", options: ["keine", "leuchtet", "unbekannt"] },
+    // nur bei bestätigter Diagnose (Review 25.09.2026 abends): Umfang und Kostenvoranschlag
+    { key: "umfang", label: "Umfang lt. Werkstatt", nurWenn: { status: "Werkstatt hat Diagnose bestätigt" },
+      options: ["Kleinteil/Einstellung", "Bauteil tauschen", "Instandsetzung/Überholung", "Austauschaggregat", "unbekannt"] },
+    { key: "kva", label: "Kostenvoranschlag", nurWenn: { status: "Werkstatt hat Diagnose bestätigt" },
+      options: ["liegt vor", "keiner", "unbekannt"], betragBei: "liegt vor", betragKey: "kva_eur" },
   ],
 };
+
+/** Fragen, die zum aktuellen Stand des Schadens gehören (Folgefragen nur, wenn ihre Bedingung erfüllt ist). */
+export function fragenFuer(damage) {
+  const sd = damage?.severity_data || {};
+  return schwereFragen(damage?.type_key).filter((f) => !f.nurWenn
+    || Object.entries(f.nurWenn).every(([k, v]) => sd[k] === v));
+}
 
 /** Technischer Mangel: eigene Schadensart ohne Skizzenpunkt. */
 export const TECHNIK_TYP = { key: "technik", abbr: "TM", label: "Technischer Mangel", color: "#f97316" };
@@ -81,15 +93,30 @@ export function schwereFragen(typeKey) {
 /** Kurztext der beantworteten Merkmale, z. B. "2–5 cm · nein · Fläche". */
 export function schwereText(damage) {
   const sd = damage?.severity_data || {};
-  const fragen = schwereFragen(damage?.type_key);
-  const teile = fragen.map((f) => sd[f.key]).filter(Boolean);
+  const teile = fragenFuer(damage).map((f) => {
+    const w = sd[f.key];
+    if (w && f.betragBei && w === f.betragBei && sd[f.betragKey]) return `${w} (${sd[f.betragKey]} €)`;
+    return w;
+  }).filter(Boolean);
   return teile.join(" · ");
 }
 
 /** Noch nicht beantwortete Fragen eines Schadens ("unbekannt" gilt als Antwort). */
 export function schwereOffen(damage) {
   const sd = damage?.severity_data || {};
-  return schwereFragen(damage?.type_key).filter((f) => !sd[f.key]).map((f) => f.label);
+  const offen = fragenFuer(damage).filter((f) => !sd[f.key]).map((f) => f.label);
+  for (const f of fragenFuer(damage)) {
+    if (f.betragBei && sd[f.key] === f.betragBei && !String(sd[f.betragKey] || "").trim()) offen.push("Betrag");
+  }
+  return offen;
+}
+
+/** Betrag zu einer Betragsfrage setzen (nur Ziffern). */
+export function mitBetrag(damage, key, wert) {
+  const sd = { ...(damage.severity_data || {}) };
+  const ziffern = String(wert || "").replace(/[^0-9]/g, "").slice(0, 6);
+  if (ziffern) sd[key] = ziffern; else delete sd[key];
+  return { ...damage, severity_data: sd };
 }
 
 /** Sind alle Schäden vollständig beschrieben? (Bedingung für "Schäden bewerten") */

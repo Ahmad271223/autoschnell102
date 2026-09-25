@@ -258,11 +258,23 @@ async def bewerten(*, user: dict, vehicle_doc: dict, damages: List[dict],
         lease = (datetime.now(timezone.utc) + timedelta(seconds=LEASE_S)).isoformat()
         start = {**basis, "status": "laeuft", "grund": "", "ergebnis": None, "vorschau": vorl, "lease_until": lease,
                  "kosten_ct": 0}
-        await db[SAMMLUNG].insert_one(dict(start))
+        # Review 25.09.2026 abends: genau EIN laufender Lauf je Firma und
+        # Eingabe-Stand (Unique-Index ki_vertrag_laeuft_je_stand) — zwei
+        # gleichzeitige Klicks starten keine zweite KI. Ein abgelaufener
+        # Lease wird atomar uebernommen.
+        andere = await _lauf_beanspruchen(start, dealer_id, h)
+        if andere is not None:
+            return _oeffentlich(andere)
+        res = await budget.reservieren(user_id=user.get("id"), dealer_id=dealer_id, art=ART)
+        if res is None:
+            eintrag = {**basis, "status": "budget", "grund": bud["grund"] or "Monatsbudget für KI-Bewertungen aufgebraucht.",
+                       "ergebnis": None, "vorschau": vorl, "budget": bud, "dauer_ms": 0, "kosten_ct": 0}
+            await db[SAMMLUNG].update_one({"id": basis["id"]}, {"$set": eintrag, "$unset": {"lease_until": ""}})
+            return _oeffentlich(eintrag)
         paket["market"] = kontext.marktposition(ktx.get("markt"), listing=paket["prices"].get("listing_price_eur"),
                                                 agreed=kaufpreis)
         paket["history"] = ktx.get("historie")
-        lauf = _rechnen(basis, paket, vorl, bud, eigene, vehicle_doc, marktdoc=ktx.get("marktdoc"))
+        lauf = _rechnen(basis, paket, vorl, bud, eigene, vehicle_doc, marktdoc=ktx.get("marktdoc"), res=res)
         if warten:
             return await lauf
         aufgabe = asyncio.get_running_loop().create_task(lauf)
@@ -274,8 +286,32 @@ async def bewerten(*, user: dict, vehicle_doc: dict, damages: List[dict],
         return _oeffentlich({**basis, "status": "fehler", "grund": "interner Fehler", "ergebnis": None})
 
 
+async def _lauf_beanspruchen(start: dict, dealer_id: str, h: str) -> Optional[dict]:
+    """Den 'laeuft'-Platz fuer diesen Stand belegen. None = wir halten ihn;
+    sonst der fremde Lauf (laeuft, frisch), den der Aufrufer zurueckgibt."""
+    from pymongo import ReturnDocument
+    from pymongo.errors import DuplicateKeyError
+    try:
+        await db[SAMMLUNG].insert_one(dict(start))
+        return None
+    except DuplicateKeyError:
+        pass
+    filt = {"art": ART, "dealer_id": dealer_id, "input_hash": h, "status": "laeuft"}
+    fremd = await db[SAMMLUNG].find_one(filt, {"_id": 0})
+    if fremd and not _lease_abgelaufen(fremd):
+        return fremd
+    # abgelaufen: atomar uebernehmen (nur wer den alten Lease trifft, gewinnt)
+    uebernommen = await db[SAMMLUNG].find_one_and_update(
+        {**filt, "lease_until": {"$lt": datetime.now(timezone.utc).isoformat()}},
+        {"$set": {k: v for k, v in start.items() if k != "_id"}},
+        projection={"_id": 0}, return_document=ReturnDocument.AFTER)
+    if uebernommen is not None:
+        return None
+    return await db[SAMMLUNG].find_one(filt, {"_id": 0}) or fremd
+
+
 async def _rechnen(basis: dict, paket: dict, vorl: dict, bud: dict, eigene: dict, vehicle_doc: dict,
-                   *, marktdoc: Optional[dict]) -> dict:
+                   *, marktdoc: Optional[dict], res: Optional[dict] = None) -> dict:
     """Der eigentliche Lauf: Websuche (wenn noetig), Lernen, KI, Ablage."""
     try:
         fall = await marktdaten.fall_recherche(ART, paket, sparmodus=bud["sparmodus"], eigene=eigene)
@@ -291,6 +327,8 @@ async def _rechnen(basis: dict, paket: dict, vorl: dict, bud: dict, eigene: dict
                                       zusatz=zusatz or None)
         kosten = await _kosten_pruefen(antwort.get("usage") or {}, antwort.get("modell") or basis["modell"],
                                        str(vehicle_doc.get("id") or ""), ART, fall)
+        await budget.abrechnen(res, kosten)
+        res = None
         usage = dict(antwort.get("usage") or {})
         if fall:
             for k, v in (fall.get("usage") or {}).items():
@@ -327,6 +365,7 @@ async def _rechnen(basis: dict, paket: dict, vorl: dict, bud: dict, eigene: dict
         return _oeffentlich(eintrag)
     except Exception:  # noqa: BLE001
         log.exception("KI-Schadennachlass-Lauf %s gescheitert", basis.get("id"))
+        await budget.abrechnen(res, 0)           # Reservierung freigeben
         eintrag = {**basis, "status": "fehler", "grund": "interner Fehler", "ergebnis": None, "vorschau": vorl}
         try:
             await db[SAMMLUNG].update_one({"id": basis["id"]}, {"$set": eintrag, "$unset": {"lease_until": ""}})

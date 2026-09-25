@@ -453,6 +453,7 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
         if not grund:
             return None
         doc, appt, vehicle, contract = grund
+        res = None                       # Budget-Reservierung (Review 25.09.2026)
         ktx = await kontext.sammeln(vehicle, "abholung", eigene_id=str(appt.get("vehicle_id") or ""))
         paket = paket_bauen(doc, appt, vehicle, contract, ktx.get("marktdoc"))
         eigene = await marktdaten.eigene_referenzen(paket, "abholung")
@@ -498,6 +499,14 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
                                       {"$set": {**basis, "status": "laeuft", "grund": "", "ergebnis": None,
                                                 "lease_until": lease}},
                                       upsert=True)
+        # Budget atomar reservieren — erst wenn dieser Aufruf den Lauf wirklich haelt
+        res = await budget.reservieren(user_id=None, dealer_id=dealer_id, art="abholung")
+        if res is None:
+            eintrag = {**basis, "status": "budget", "grund": bud["grund"] or "Monatsbudget für KI-Bewertungen aufgebraucht.",
+                       "ergebnis": None, "dauer_ms": 0, "budget": bud}
+            await db[SAMMLUNG].update_one({"protocol_id": protocol_id, "input_hash": h},
+                                          {"$set": eintrag, "$unset": {"lease_until": ""}})
+            return _oeffentlich(eintrag)
         paket["market"] = kontext.marktposition(ktx.get("markt"), listing=paket["prices"].get("listing_price_eur"),
                                                 agreed=paket["prices"].get("contract_price_eur"))
         paket["history"] = ktx.get("historie")
@@ -514,6 +523,8 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
                                       zusatz=zusatz or None)
         kosten = await _kosten_pruefen(antwort.get("usage") or {}, antwort.get("modell") or basis["modell"],
                                        protocol_id, "abholung", fall)
+        await budget.abrechnen(res, kosten)
+        res = None
         usage = dict(antwort.get("usage") or {})
         if fall:
             for k, v in (fall.get("usage") or {}).items():
@@ -548,6 +559,10 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
         return _oeffentlich(eintrag)
     except Exception:  # noqa: BLE001 — die KI ist Beiwerk, nie ein 500
         log.exception("KI-Bewertung %s gescheitert", protocol_id)
+        try:
+            await budget.abrechnen(res, 0)       # Reservierung freigeben
+        except Exception:  # noqa: BLE001
+            pass
         return None
 
 

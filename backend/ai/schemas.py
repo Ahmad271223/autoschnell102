@@ -151,6 +151,32 @@ def _vier_aus_szenarien(sz: Dict[str, float]) -> Dict[str, float]:
             "best_realistic_eur": max(mid, lo), "negotiation_start_eur": max(hi, mid, lo)}
 
 
+# Deterministische Risiko-Stufen (Review 25.09.2026 abends) — die KI kann
+# das Risiko nur ERHOEHEN, nie senken:
+#   high                 fairer Nachlass >= 50 % des Preises
+#                        ODER aufwendige Diagnose-Szenarien zusammen >= 25 %
+#                        ODER mindestens eine Fachpruefungs-Position (Betrag unbekannt)
+#   reconsider_purchase  fairer Nachlass >= 60 % ODER Szenarien zusammen >= 60 %
+#                        ODER fair + Szenarien >= 75 % des Preises
+RISIKO_HIGH_FAIR, RISIKO_HIGH_SZENARIEN = 0.50, 0.25
+RISIKO_RECONSIDER_FAIR, RISIKO_RECONSIDER_SZENARIEN, RISIKO_RECONSIDER_SUMME = 0.60, 0.60, 0.75
+
+
+def deal_risk_stufe(ki_wert: Any, *, kaufpreis: float, fair: float, szenarien_hoch: float, experten: int) -> str:
+    stufe = ki_wert if ki_wert in DEAL_RISK else "normal"
+    rang = {"normal": 0, "high": 1, "reconsider_purchase": 2}
+    eigen = "normal"
+    if kaufpreis > 0:
+        if (fair >= RISIKO_RECONSIDER_FAIR * kaufpreis or szenarien_hoch >= RISIKO_RECONSIDER_SZENARIEN * kaufpreis
+                or fair + szenarien_hoch >= RISIKO_RECONSIDER_SUMME * kaufpreis):
+            eigen = "reconsider_purchase"
+        elif fair >= RISIKO_HIGH_FAIR * kaufpreis or szenarien_hoch >= RISIKO_HIGH_SZENARIEN * kaufpreis:
+            eigen = "high"
+    if experten > 0 and rang[eigen] < 1:
+        eigen = "high"
+    return eigen if rang[eigen] > rang[stufe] else stufe
+
+
 def datenlage_anpassen(ergebnis: Dict[str, Any], lage: str) -> str:
     """Eine Diagnose- oder Fachpruefungsposition drueckt 'hoch' auf 'mittel':
     die Zahlen sind dann Szenarien, keine Messung."""
@@ -221,15 +247,13 @@ def bereinigen(daten: Dict[str, Any], *, kaufpreis: Optional[float]) -> Dict[str
             vier["best_realistic_eur"] = min(vier["best_realistic_eur"], deckel)
             vier["negotiation_start_eur"] = min(vier["negotiation_start_eur"], deckel)
     manuell_gesamt = bool(c.get("manual_review_required")) or any(i["manual_review_required"] for i in items)
-    risiko = c.get("deal_risk") if c.get("deal_risk") in DEAL_RISK else "normal"
-    if kp > 0 and vier["fair_discount_eur"] >= 0.5 * kp and risiko == "normal":
-        risiko = "high"
     # Diagnose-Positionen: die Spanne zwischen guenstigem und aufwendigem Fall
     # ist das Unsichere an dieser Empfehlung — wird gesondert ausgewiesen.
     diag = [i for i in items if i["assessment_kind"] == "diagnosis_required"]
     unsicher = round(sum(max(0.0, i["scenario_high_eur"] - i["scenario_low_eur"]) for i in diag), 2)
-    if diag and risiko == "normal" and kp > 0 and sum(i["scenario_high_eur"] for i in diag) >= 0.25 * kp:
-        risiko = "high"
+    experten = sum(1 for i in items if i["assessment_kind"] == "expert_check_required")
+    risiko = deal_risk_stufe(c.get("deal_risk"), kaufpreis=kp, fair=vier["fair_discount_eur"],
+                             szenarien_hoch=sum(i["scenario_high_eur"] for i in diag), experten=experten)
     combined = {
         "sum_fair_eur": summe,
         "overlap_adjustment_eur": ueberlappung,
@@ -237,7 +261,7 @@ def bereinigen(daten: Dict[str, Any], *, kaufpreis: Optional[float]) -> Dict[str
         "deal_risk": risiko,
         "manual_review_required": manuell_gesamt,
         "diagnosis_items": len(diag),
-        "expert_items": sum(1 for i in items if i["assessment_kind"] == "expert_check_required"),
+        "expert_items": experten,
         "uncertain_eur": unsicher,
         "recommended_purchase_price_eur": round(kp - vier["fair_discount_eur"], 2)
         if kp > 0 and vier["fair_discount_eur"] > 0 else None,

@@ -16,6 +16,8 @@ Zusaetzlich die deterministische Vorsortierung (Prioritaet rot/orange/gelb).
 """
 from __future__ import annotations
 
+import re
+
 from typing import Any, Dict, List, Optional, Tuple
 
 # (Schadensart, Auspraegung) -> (Reparaturweg, Basisspanne EUR); "schluessel"
@@ -280,7 +282,7 @@ def zuordnen(type_key: str, severity_data: Optional[Dict[str, Any]], zone: str =
         return zeile("licht_xenon"), True          # Technik unbekannt: vorsichtig
     if typ == "technik":
         bereich, status = _t(sd, "bereich"), _t(sd, "status")
-        key = _TECHNIK_BEREICH.get(_bereich_schluessel(bereich), "technik_elektrik")
+        key = _TECHNIK_BEREICH.get(_bereich_schluessel(bereich) or _bereich_schluessel(z), "technik_elektrik")
         # Bereich unbekannt: vorsichtig (Elektrik-Spanne, Annahme)
         return zeile(key), (unbek("bereich") or unbek("status"))
     if typ == "unfall_nicht_repariert":
@@ -345,12 +347,63 @@ def referenz_aus_zeile(z: Dict[str, Any], *, faktor: float = 1.0, annahme: bool 
     return ref
 
 
+def kva_betrag(severity_data: Optional[Dict[str, Any]]) -> Optional[float]:
+    """Betrag laut Kostenvoranschlag der Werkstatt (Technik-Mangel, bestaetigt)."""
+    roh = str((severity_data or {}).get("kva_eur") or "").replace(".", "").replace(",", ".").strip()
+    m = re.search(r"\d+(?:\.\d+)?", roh)
+    if not m:
+        return None
+    try:
+        wert = float(m.group(0))
+    except ValueError:
+        return None
+    return wert if 10 <= wert <= 50000 else None
+
+
+# Reparaturumfang laut Werkstatt -> welcher Teil der Szenarien-Spanne gilt
+_UMFANG_BAND = {"kleinteil": (0.0, 0.35), "bauteil": (0.25, 0.7), "instandsetzung": (0.5, 0.9), "austausch": (0.7, 1.0)}
+
+
+def _umfang_schluessel(sd: Dict[str, Any]) -> str:
+    u = _t(sd, "umfang")
+    if _hat(u, "kleinteil", "einstell"):
+        return "kleinteil"
+    if _hat(u, "austausch", "aggregat"):
+        return "austausch"
+    if _hat(u, "instandsetz", "überhol", "ueberhol"):
+        return "instandsetzung"
+    if _hat(u, "bauteil"):
+        return "bauteil"
+    return ""
+
+
 def referenz(type_key: str, severity_data: Optional[Dict[str, Any]], zone: str = "") -> Optional[Dict[str, Any]]:
-    """Reparaturreferenz fuer das KI-Paket aus der Startwert-Tabelle."""
+    """Reparaturreferenz fuer das KI-Paket aus der Startwert-Tabelle.
+    Review 25.09.2026 abends: eine BESTAETIGTE Diagnose braucht mehr als
+    'Werkstatt bestaetigt' + Freitext — mit Kostenvoranschlag gilt dessen
+    Betrag (±10/+20 %), sonst engt der Reparaturumfang die Szenarien-Spanne ein."""
     z, annahme = zuordnen(type_key, severity_data, zone)
     if not z:
         return None
-    return referenz_aus_zeile(z, annahme=annahme, bestaetigt=bestaetigte_diagnose(severity_data))
+    bestaetigt = bestaetigte_diagnose(severity_data)
+    ref = referenz_aus_zeile(z, annahme=annahme, bestaetigt=bestaetigt)
+    if str(type_key or "").lower() == "technik" and bestaetigt:
+        sd = severity_data or {}
+        kva = kva_betrag(sd)
+        if kva:
+            ref.update(low=round(kva * 0.9), median=round(kva), high=round(kva * 1.2),
+                       source="Kostenvoranschlag Werkstatt", basis="kostenvoranschlag", assumption_made=False)
+            return ref
+        band = _UMFANG_BAND.get(_umfang_schluessel(sd))
+        sz = z.get("szenarien") or (z["min"], (z["min"] + z["max"]) // 2, z["max"])
+        if band:
+            lo, hi = sz[0], sz[2]
+            a, b_ = lo + (hi - lo) * band[0], lo + (hi - lo) * band[1]
+            ref.update(low=round(a), median=round((a + b_) / 2), high=round(b_), basis="umfang")
+        else:
+            # bestaetigt, aber weder Kostenvoranschlag noch Umfang: breite Spanne bleibt, Annahme
+            ref.update(assumption_made=True, basis="bestaetigt_ohne_umfang")
+    return ref
 
 
 # ------------------------------------------------ deterministische Prioritaet
