@@ -319,3 +319,37 @@ def test_08_budget_bremst(welt, monkeypatch):
     bud = welt.run(B.pruefen(user_id=None, dealer_id=w.dealer_id, art="abholung"))
     assert bud["erlaubt"] is True and bud["sparmodus"] is True, "letzter Lauf ueber der Einzelgrenze -> Sparmodus"
     _aufraeumen(welt)
+
+
+def test_09_fahrer_sieht_auswertung_ohne_kosten(welt, monkeypatch):
+    """Wunsch Ahmad 25.09.2026 (abends): Fahrer-Route — vor dem Abschicken
+    'keine' mit Grund, danach dasselbe Ergebnis wie beim Chef, aber ohne
+    Kosten/Budget/Modell; fremder Termin 404."""
+    from fastapi import HTTPException
+    _attrappe(monkeypatch)
+    P = _module("routes.protocols")
+    _cid, tid, _vid, pid = _welt_aufbauen(welt, "9")
+    w, db = welt.w, welt.db
+    # Fahrer-Zugriff wie im Betrieb: in der Fahrerliste, zugeteilt UND angenommen (C22)
+    link_neu = not welt.run(db.dealer_drivers.find_one({"dealer_id": w.dealer_id, "driver_account_id": w.driver_id}))
+    if link_neu:
+        welt.run(db.dealer_drivers.insert_one(w.link()))
+    welt.run(db.appointments.update_one({"id": tid}, {"$set": {"driver_id": w.driver_id, "zuteilung": "angenommen"}}))
+    welt.run(db.pickup_protocols.update_one({"id": pid}, {"$set": {"status": "entwurf"}}))
+    erg = welt.run(P.fahrer_ki_bewertung(tid, driver=w.driver))
+    assert erg["status"] == "keine" and "Abschicken" in erg["grund"]
+    welt.run(db.pickup_protocols.update_one({"id": pid}, {"$set": {"status": "zur_freigabe"}}))
+    welt.run(P.protokoll_ki_bewertung_neu(pid, user=w.chef))
+    erg = welt.run(P.fahrer_ki_bewertung(tid, driver=w.driver))
+    assert erg["status"] == "ok" and erg["preis_vorschlag"] == 7300
+    assert erg["ergebnis"]["combined"]["fair_discount_eur"] == 530.0
+    assert erg["kaufpreis"] == 8100
+    for verboten in ("kosten_ct", "budget", "modell", "prompt_version"):
+        assert verboten not in erg
+    with pytest.raises(HTTPException) as ex:
+        welt.run(P.fahrer_ki_bewertung(tid, driver={**w.driver, "id": "fremd_" + w.s}))
+    assert ex.value.status_code == 404
+    if link_neu:
+        welt.run(db.dealer_drivers.delete_many({"dealer_id": w.dealer_id, "driver_account_id": w.driver_id}))
+    _aufraeumen(welt)
+

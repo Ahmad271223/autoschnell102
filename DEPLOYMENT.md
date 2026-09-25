@@ -3285,3 +3285,10 @@ Begriffe bleiben stehen – bitte melden, dann kommen sie in die Tabelle.
 Neue Env-Variablen (compose/.env.example): `KI_BUDGET_MONAT_EUR`, `KI_KOSTEN_MAX_CT`, `KI_RECHERCHE_MODELL`,
 `KI_KONTEXT_ZEITLIMIT_SEKUNDEN`, `KI_KALIBRIERUNG_MIN_FIRMA`; `KI_MARKTANALYSE_VERTRAG` jetzt Standard `true`,
 `KI_DENKEN_AUS` Standard `true`, `KI_KALIBRIERUNG_MIN_FAELLE` Standard 20.
+
+**Nachtrag 25.09.2026 abends (Wunsch Ahmad): KI-Auswertung auch fuer den Fahrer.** Ab „zur Freigabe“ zeigt die
+Fahrer-App unter dem Statusbalken den Knopf „KI-Auswertung anzeigen“ (`GET /driver/appointments/{id}/ki-bewertung`,
+nur lesend): Vertrag / Vorschlag des Fahrers / KI-Zielpreis, Nachlass je Abweichung und gesamt (vier Werte),
+Datenlage, Argumente — dieselbe Bewertung wie beim Chef, ohne Kosten, Budget und Modell. Kein „Preis
+übernehmen“ (Protokoll ist gesperrt). Die Bewertung startet weiterhin beim Abschicken; der Fahrer sieht sie
+in der Regel nach 15–30 s.

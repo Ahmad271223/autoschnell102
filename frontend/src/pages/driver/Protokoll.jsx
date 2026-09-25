@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import SignaturePad from "@/components/SignaturePad";
 import DamageSelector from "@/components/DamageSelector";
+import KiFahrerKarte from "@/components/KiFahrerKarte";
 import { alleVollstaendig, schwereOffen } from "@/lib/kiSchaden";
 import {
   LEERER_ENTWURF, entwurfAusServer, entwurfZusammenfuehren, istAnnahmeFehlt, istRevisionsKonflikt,
@@ -772,6 +773,13 @@ export default function Protokoll() {
             )}
           </div>
         </div>
+      )}
+      {/* Wunsch Ahmad 25.09.2026 (abends): ab dem Abschicken sieht auch der
+          Fahrer die KI-Auswertung (Nachlass je Abweichung und gesamt) — nur
+          lesend, die Bewertung laeuft seit dem Abschicken im Hintergrund. */}
+      {(wartetAufFreigabe || freigegeben || wirdAbgeschlossen || isFinal) && (
+        <KiFahrerKarte apptId={id} preisVertrag={data?.preis_vertrag}
+                       preisVorschlag={data?.protocol?.preis_vorschlag ?? null} />
       )}
       {wirdAbgeschlossen && (
         <div className="mt-4 rounded-xl border px-4 py-3 text-sm flex items-start gap-2"

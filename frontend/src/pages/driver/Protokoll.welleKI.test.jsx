@@ -22,6 +22,9 @@ vi.mock("@/lib/ungespeichert", () => ({ useUngespeichert: () => {} }));
 vi.mock("@/components/DamageSelector", () => ({ default: () => null }));
 vi.mock("@/components/MonatJahrEingabe", () => ({ default: () => null }));
 vi.mock("@/components/SignaturePad", () => ({ default: () => null }));
+vi.mock("@/components/KiFahrerKarte", () => ({
+  default: ({ apptId, preisVorschlag }) => createElement("div", { "data-testid": "protokoll-ki-oeffnen", "data-appt": apptId, "data-vorschlag": String(preisVorschlag) }),
+}));
 
 const { default: Protokoll } = await import("./Protokoll");
 const { LEERER_ENTWURF, entwurfAusServer } = await import("./protokollEntwurf");
@@ -123,5 +126,21 @@ describe("Protokoll.jsx: Rückfrage mit Antwortknöpfen", () => {
   it("ab 'zur Freigabe' keine Rückfrage-Knöpfe mehr", async () => {
     await starten(antwort("zur_freigabe", { rueckfrage_frage: FRAGE }));
     expect(el("protokoll-rueckfrage-frage")).toBeNull();
+  });
+
+  it("KI-Auswertung erst ab 'zur Freigabe' (Wunsch Ahmad 25.09.2026 abends)", async () => {
+    await starten(antwort("entwurf", {}));
+    expect(el("protokoll-ki-oeffnen")).toBeNull();
+    await act(async () => { wurzel.unmount(); });
+    wurzel = null; behaelter?.remove();
+    await starten(antwort("zur_freigabe", { preis_vorschlag: 7300 }));
+    const k = el("protokoll-ki-oeffnen");
+    expect(k).toBeTruthy();
+    expect(k.dataset.appt).toBe("t1");
+    expect(k.dataset.vorschlag).toBe("7300");
+    await act(async () => { wurzel.unmount(); });
+    wurzel = null; behaelter?.remove();
+    await starten(antwort("freigegeben", {}));
+    expect(el("protokoll-ki-oeffnen")).toBeTruthy();
   });
 });

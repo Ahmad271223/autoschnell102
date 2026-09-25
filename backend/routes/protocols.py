@@ -2851,6 +2851,22 @@ async def protokoll_ki_bewertung(protocol_id: str, user=Depends(_chef_dep)):
     return erg
 
 
+@router.get("/driver/appointments/{appt_id}/ki-bewertung")
+async def fahrer_ki_bewertung(appt_id: str, driver=Depends(current_driver)):
+    """Wunsch Ahmad 25.09.2026 (abends): Der Fahrer sieht nach dem Abschicken
+    dieselbe KI-Auswertung wie der Chef (Nachlass je Abweichung und gesamt) —
+    nur lesend, ohne Kosten/Budget. Vor dem Abschicken gibt es nichts: die
+    Bewertung startet erst mit der Uebergabe an den Chef (submit_protocol)."""
+    appt = await _appt_or_404(appt_id, driver)
+    doc = await _current(appt_id)
+    if not doc or (doc.get("status") or "entwurf") == "entwurf":
+        return {"status": "keine", "grund": "Erst nach dem Abschicken an den Händler", "ergebnis": None}
+    erg = await KI.bewertung_lesen(doc["id"], appt.get("dealer_id", ""))
+    if erg is None:
+        return {"status": "keine", "grund": "Keine Bewertung vorhanden", "ergebnis": None}
+    return KI.fuer_fahrer(erg, preis_vorschlag=doc.get("preis_vorschlag"))
+
+
 @router.post("/protocols/{protocol_id}/ki-bewertung/neu")
 async def protokoll_ki_bewertung_neu(protocol_id: str, user=Depends(_chef_dep)):
     """Bewertung neu rechnen (Chef klickt "Neu berechnen") — wartet auf die

@@ -60,7 +60,7 @@ Ein Fahrer holt ein gekauftes Gebrauchtfahrzeug beim Verkaeufer ab und stellt Ab
 
 Regeln:
 1. Bewerte NUR new_damages (ohne already_known) und deviations. Jede Position bekommt genau einen Eintrag mit source_id aus der Eingabe. Bekannte Schaeden (already_known=true) nie bewerten; possibly_known=true heisst: koennte im Vertrag stehen — Nachlass etwas vorsichtiger, nicht streichen. damage_worse: bewerte NUR die Verschlechterung gegenueber expected.
-2. Verwende ausschliesslich die gelieferten Daten: repair_reference (Reparaturweg, low/median/high in EUR, Quelle), market (Vergleichspreise), history (eigene Faelle), prices, die Marktrecherche unten. Allgemeines Fachwissen dient der Einordnung; erfinde keine konkreten aktuellen Markt-, Ersatzteil- oder Werkstattpreise. Fehlt eine Referenz, nutze die Ausgangswerte unten und sage das in reason.
+2. Verwende ausschliesslich die gelieferten Daten: repair_reference (Reparaturweg, low/median/high in EUR, Quelle), market (Vergleichspreise), history (eigene Faelle), prices, die Marktrecherche unten. Allgemeines Fachwissen dient der Einordnung; erfinde keine konkreten aktuellen Markt-, Ersatzteil- oder Werkstattpreise. Fehlt eine Referenz, nutze die Ausgangswerte unten und sage das in reason. reason und title sind fuer Haendler und Fahrer: verstaendliches Deutsch, keine technischen Feldnamen oder Codes (nicht possibly_known, damage_worse, equipment_missing, manual_hint).
 3. assumption_made=true bei einer Referenz heisst: eine Angabe war "unbekannt", die Referenz nimmt die vorsichtige Auspraegung — uebernimm das und nenne die Annahme in reason. Stelle keine Rueckfragen.
 4. Vier Geldwerte je Position und insgesamt: minimum_justified_eur (darunter ist der Nachteil nicht ausgeglichen), fair_discount_eur (sachlich am besten begruendbarer Zielwert, meist nahe median der Referenz plus Aufwand/Wertminderung), best_realistic_eur (sehr gutes, noch vertretbares Ergebnis), negotiation_start_eur (erste Forderung, ueber best, nicht absurd). Immer min <= fair <= best <= start.
 5. Nachlass = das, was der Haendler wegen dieser Abweichung weniger zahlen sollte (Reparatur + Aufwand + Wertminderung). Beruecksichtige Fahrzeugwert, Alter, Kilometer, Klasse, Marke und die Marktposition (liegt der Vertragspreis schon unter dem Median, ist der Spielraum kleiner). Bei einem alten, guenstigen Fahrzeug ist voller Reparaturkostenersatz nicht automatisch der faire Nachlass.
@@ -399,6 +399,16 @@ def _oeffentlich(doc: dict) -> dict:
         "kaufpreis": doc.get("kaufpreis"), "kosten_ct": doc.get("kosten_ct"),
         "budget": doc.get("budget"),
     }
+
+
+def fuer_fahrer(erg: dict, *, preis_vorschlag=None) -> dict:
+    """Wunsch Ahmad 25.09.2026 (abends): Der Fahrer sieht nach dem Abschicken
+    dieselbe Auswertung wie der Chef — aber ohne Kosten, Budget und Modell
+    (Betriebsdaten der Firma). Dazu sein eigener Preisvorschlag."""
+    raus = {k: v for k, v in erg.items()
+            if k not in ("kosten_ct", "budget", "modell", "prompt_version", "dauer_ms")}
+    raus["preis_vorschlag"] = preis_vorschlag
+    return raus
 
 
 def _lease_abgelaufen(doc: Optional[dict]) -> bool:
