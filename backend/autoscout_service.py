@@ -648,7 +648,8 @@ def parse_autoscout_item(item: dict, item_id: str,
     gesehen: set = set()
 
     def _merkmal(text) -> None:
-        t = str(text or "").strip()
+        from ausstattung_de import uebersetzen
+        t = uebersetzen(text)         # 26.09.2026: englische Bezeichnung -> deutsch
         if not t or t.casefold() in gesehen or len(features) >= MAX_MERKMALE:
             return
         gesehen.add(t.casefold())

@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger("autohandel.migrationen")
 
-ZIEL_VERSION = 14
+ZIEL_VERSION = 15
 _SPERRE = "migration"
 
 
@@ -598,6 +598,27 @@ async def m14_vertrags_kundennummern(db) -> dict:
     return {"vertrags_kundennummern_vergeben": vergeben}
 
 
+async def m15_ausstattung_deutsch(db) -> dict:
+    """Befund Ahmad 26.09.2026: Der Scraper (memo23) lieferte die mobile.de-
+    Ausstattung englisch ("Alloy wheels", "Central locking"), und so stand
+    sie im Kaufvertrag, im Abholprotokoll und in der Fahrer-App. Bestand
+    (Fahrzeuge und Inserats-Zwischenspeicher) wird uebersetzt; Deutsches
+    bleibt unveraendert. Idempotent (nur Dokumente, deren Liste sich aendert)."""
+    from ausstattung_de import liste_uebersetzen
+    zaehler = {"vehicles": 0, "listings_cache": 0}
+    for sammlung in ("vehicles", "listings_cache"):
+        async for d in db[sammlung].find({"data.features.0": {"$exists": True}},
+                                         {"_id": 1, "data.features": 1}):
+            alt = (d.get("data") or {}).get("features") or []
+            if not isinstance(alt, list):
+                continue
+            neu = liste_uebersetzen(alt)
+            if neu != [str(x) for x in alt]:
+                r = await db[sammlung].update_one({"_id": d["_id"]}, {"$set": {"data.features": neu}})
+                zaehler[sammlung] += r.modified_count
+    return zaehler
+
+
 MIGRATIONEN = [
     (1, "abos_normalisieren", m1_abos_normalisieren),
     (2, "lifecycle_nachziehen", m2_lifecycle),
@@ -615,6 +636,8 @@ MIGRATIONEN = [
     (13, "inserat_fotomodus", m13_inserat_fotomodus),
     # Entscheidung Ahmad 22.09.2026 (RP-428)
     (14, "vertrags_kundennummern", m14_vertrags_kundennummern),
+    # Befund Ahmad 26.09.2026: Ausstattung deutsch
+    (15, "ausstattung_deutsch", m15_ausstattung_deutsch),
 ]
 
 

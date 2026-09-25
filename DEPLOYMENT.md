@@ -3202,3 +3202,13 @@ das Protokoll, wird neu gerechnet), freigegebene Fälle mit dem tatsächlichen P
 `ki_lernfaelle` (Grundlage für die spätere Kalibrierung). Scheitert ein Aufruf (Zeitlimit,
 Überlastung, ungültiger Schlüssel), erscheint die Meldung `ki_bewertung_fehlgeschlagen` in
 **/admin/betrieb**; Freigabe und Vertrag laufen davon unberührt weiter.
+
+### Ausstattung auf Deutsch (26.09.2026, Befund Ahmad)
+
+Der Apify-Scraper memo23 liefert die mobile.de-Ausstattung auf Englisch („Alloy wheels“, „Central
+locking“, „Heated seats“), obwohl das Inserat deutsch ist – so stand sie im Kaufvertrag, im
+Abholprotokoll und in der Fahrer-App. Jetzt übersetzt `backend/ausstattung_de.py` beim Auslesen
+(Apify, mobile.de-API-Schlüssel wie `ALLOY_WHEELS`, AutoScout) und zusätzlich beim Drucken des
+Vertrags. **Migration 15** (`ausstattung_deutsch`, läuft beim Rollout automatisch) übersetzt den
+Bestand in `vehicles` und `listings_cache`; Deutsches bleibt unverändert. Unbekannte englische
+Begriffe bleiben stehen – bitte melden, dann kommen sie in die Tabelle.

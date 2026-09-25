@@ -86,7 +86,7 @@ def test_04_oberflaeche_und_sucher_sicht():
     assert "vertrags_kundennummer" in _SUCHER_SICHT_ZUSATZ, "Sucher braucht sie fuer den Versand-Dialog"
     import migrationen as M
     assert (14, "vertrags_kundennummern", M.m14_vertrags_kundennummern) in M.MIGRATIONEN
-    assert M.ZIEL_VERSION == 14
+    assert M.ZIEL_VERSION >= 14
 
 
 # ------------------------------------------------------------ mit Wegwerf-DB

@@ -388,7 +388,9 @@ def test_xml_parser_preisart_mwst_tueren_bilder_kuerzel():
     assert v["images"] == v["image_urls"] and v["image_count"] == len(v["images"])
     assert "ABS" in v["features"] and "ESP" in v["features"], v["features"][:10]
     assert "Abs" not in v["features"]
-    assert M._feature_label("ALLOY_WHEELS") == "Alloy Wheels"
+    # 26.09.2026: bekannte Schluessel kommen deutsch (Befund Ahmad)
+    assert M._feature_label("ALLOY_WHEELS") == "Leichtmetallfelgen"
+    assert M._feature_label("SOME_UNKNOWN_KEY") == "Some Unknown Key"
     assert M._feature_label("ABS") == "ABS" and M._feature_label("METALLIC") == "Metallic"
     assert M.preis_verhandelbar("NEGOTIABLE") and not M.preis_verhandelbar("FIXED")
     # S-20: kaputte Knoten werfen nicht

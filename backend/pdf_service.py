@@ -568,7 +568,10 @@ def _ausstattung_liste(wert) -> list:
         teile = wert
     else:
         return []
-    return [str(x).strip() for x in teile if x is not None and str(x).strip()]
+    # Befund Ahmad 26.09.2026: englische Bezeichnungen aus dem Scraper
+    # ("Alloy wheels") auch bei aelteren Fahrzeugdaten deutsch drucken.
+    from ausstattung_de import liste_uebersetzen
+    return liste_uebersetzen(str(x).strip() for x in teile if x is not None and str(x).strip())
 
 
 def _preis_zahl(wert) -> float:

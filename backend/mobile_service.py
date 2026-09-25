@@ -176,6 +176,9 @@ def _desc(node):
     return d
 
 
+import ausstattung_de as _ausstattung  # noqa: E402
+
+
 def _features_list(vehicle: dict) -> List[str]:
     feats_root = vehicle.get("ad:features") or {}
     feats_raw = feats_root.get("ad:feature") if isinstance(feats_root, dict) else []
@@ -190,14 +193,17 @@ def _features_list(vehicle: dict) -> List[str]:
 
 
 def _feature_label(label: str) -> str:
-    """Schluessel wie ALLOY_WHEELS -> "Alloy Wheels". Pruefbericht 20.09.2026
-    (S-27): kurze Abkuerzungen (ABS, ESP, LED, USB — bis 4 Zeichen ohne
-    Unterstrich) blieben nicht stehen, sondern wurden "Abs"/"Esp"."""
+    """Schluessel wie ALLOY_WHEELS -> deutsche Bezeichnung (Befund Ahmad
+    26.09.2026: "Alloy Wheels" stand im Kaufvertrag). Unbekannte Schluessel
+    werden lesbar ("Some Key"); Pruefbericht 20.09.2026 (S-27): kurze
+    Abkuerzungen (ABS, ESP, LED, USB — bis 4 Zeichen ohne Unterstrich)
+    bleiben stehen."""
+    from ausstattung_de import uebersetzen
     if not label.isupper():
-        return label
+        return uebersetzen(label)
     if "_" not in label and len(label) <= 4:
-        return label
-    return label.replace("_", " ").title()
+        return uebersetzen(label)
+    return uebersetzen(label.replace("_", " ").title())
 
 
 def _xml_bool(knoten) -> Optional[bool]:
@@ -734,7 +740,10 @@ def _parse_apify_item(item: dict, ad_id: str, url: Optional[str] = None) -> Dict
                            else extract_owners_from_text(beschreibung),
         "accident_damaged": unfall,
         "roadworthy": zustand_fahrbereit(item.get("readyToDrive"), schaden_text),
-        "features": [str(f) for f in item.get("features") or []],
+        # Befund Ahmad 26.09.2026: memo23 liefert die Ausstattung englisch
+        # ("Alloy wheels", "Central locking") — hier auf Deutsch, damit sie
+        # im Vertrag, Protokoll und in der Fahrer-App deutsch steht.
+        "features": _ausstattung.liste_uebersetzen(item.get("features") or []),
         "description": beschreibung,
         "list_price": preis,
         "currency": waehrung or "EUR",
