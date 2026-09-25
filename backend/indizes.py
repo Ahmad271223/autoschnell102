@@ -915,3 +915,25 @@ async def bestand_lese_indizes(db) -> None:
             await alarm(db, "index_fehlt", ref=ref, fehler=str(exc)[:300])
         else:
             await alarm_schliessen(db, "index_fehlt", ref=ref)
+
+
+async def ki_indizes(db) -> dict:
+    """KI-Bewertung (Umbau 26.09.2026): genau EIN Eintrag je Protokoll und
+    Eingabe-Stand (zwei gleichzeitige Aufrufe loesen keine zweite KI-
+    Bewertung aus), Kostenabfragen je Monat/Nutzer/Firma, eigene
+    Preisdatenbank je Referenzschluessel. Idempotent, wirft nie."""
+    erg = {}
+    try:
+        await db.ki_bewertungen.create_index(
+            [("protocol_id", 1), ("input_hash", 1)], unique=True, name="ki_bewertung_je_protokoll_stand",
+            partialFilterExpression={"protocol_id": {"$type": "string"}})
+        await db.ki_bewertungen.create_index([("dealer_id", 1), ("created_at", -1)], name="ki_bewertung_firma_zeit")
+        await db.ki_bewertungen.create_index([("user_id", 1), ("created_at", -1)], name="ki_bewertung_nutzer_zeit")
+        await db.ki_bewertungen.create_index("id", name="ki_bewertung_id")
+        await db.ki_reparaturpreise.create_index([("key", 1), ("stand", -1)], name="ki_reparaturpreis_key_stand")
+        await db.ki_lernfaelle.create_index([("art", 1), ("fahrzeug.make", 1)], name="ki_lernfall_art_marke")
+        erg["ok"] = True
+    except Exception as exc:  # noqa: BLE001
+        erg["fehler"] = str(exc)[:200]
+        await _index_fehlt(db, "index_fehlt", "ki_bewertungen", fehler=str(exc)[:200])
+    return erg

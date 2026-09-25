@@ -339,6 +339,13 @@ function KiKarte() {
             <span className="text-zinc-200">{ki.kosten_usd_geschaetzt} $</span>
             {" "}(Tokens ein {ki.tokens?.input_tokens ?? 0}, aus {ki.tokens?.output_tokens ?? 0})
           </div>
+          {ki.budget && (
+            <div data-testid="ki-betrieb-budget">
+              Kostenbremse: höchstens {ki.budget.monat_eur} € je Nutzer/Firma und Monat, {ki.budget.lauf_max_ct} ct je Lauf
+              {ki.kosten_median_ct != null ? ` · Median je Lauf ${ki.kosten_median_ct} ct` : ""}
+              {ki.eigene_preise ? ` · eigene Preisdatenbank: ${ki.eigene_preise.werte ?? 0} Werte (${ki.eigene_preise.frisch ?? 0} frisch, ${ki.eigene_preise.schluessel ?? 0} Schadensarten)` : ""}
+            </div>
+          )}
           <div data-testid="ki-betrieb-lernfaelle">
             Lernfälle: {ki.lernfaelle?.gesamt ?? 0} (mit Ergebnis {ki.lernfaelle?.mit_ergebnis ?? 0}) —{" "}
             {(erf.n || 0) >= min

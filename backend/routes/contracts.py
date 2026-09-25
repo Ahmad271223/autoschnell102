@@ -809,17 +809,38 @@ async def vertrag_vorschlaege(vehicle_id: str, user=Depends(current_firma)):
 
 @router.post("/contracts/ki-schadennachlass")
 async def vertrag_ki_schadennachlass(body: KiSchadenIn, user=Depends(require_active_sub)):
-    """Stufe 3 (Wunsch Ahmad 25.09.2026): KI-Schadennachlass fuer die im
-    Vertragsdialog markierten Schaeden — synchron, ein Aufruf, rein beratend.
-    Antwort: status ok | keine | aus | limit | fehler | zeitlimit ... mit
-    ergebnis (items/combined/needs_information/arguments) und der id fuer
-    den Lernfall (ContractIn.ki_bewertung_id)."""
+    """Stufe 3 (Wunsch Ahmad 25.09.2026, Umbau 26.09.): KI-Schadennachlass
+    fuer die im Vertragsdialog markierten Schaeden STARTEN — Antwort sofort
+    mit id, status "laeuft" und einer deterministischen Vorschau; die Karte
+    fragt GET /contracts/ki-schadennachlass/{id} nach. Ein gleicher Stand
+    liefert direkt das fertige Ergebnis. Rein beratend."""
     v = await _fahrzeug_fuer_vertrag(user, body.vehicle_id)
     if not v:
         raise HTTPException(404, FAHRZEUG_NICHT_IM_BEREICH)
     return await _ki_vertrag.bewerten(user=user, vehicle_doc=v,
                                       damages=[d.model_dump() for d in body.damages],
-                                      kaufpreis=body.purchase_price)
+                                      kaufpreis=body.purchase_price, warten=False)
+
+
+@router.post("/contracts/ki-schadennachlass/vorschau")
+async def vertrag_ki_vorschau(body: KiSchadenIn, user=Depends(current_firma)):
+    """Sofortige Vorschau aus den Referenzen (eigene Preisdatenbank,
+    Markttabelle, Startwerte) — kein KI-Aufruf, keine Kosten."""
+    v = await _fahrzeug_fuer_vertrag(user, body.vehicle_id)
+    if not v:
+        raise HTTPException(404, FAHRZEUG_NICHT_IM_BEREICH)
+    from ai import marktdaten
+    return _ki_vertrag.vorschau(v, [d.model_dump() for d in body.damages], body.purchase_price,
+                                await marktdaten.aktuell())
+
+
+@router.get("/contracts/ki-schadennachlass/{bewertung_id}")
+async def vertrag_ki_schadennachlass_stand(bewertung_id: str, user=Depends(current_firma)):
+    """Stand einer gestarteten Bewertung (laeuft | ok | fehler ...)."""
+    erg = await _ki_vertrag.lesen(bewertung_id, user["dealer_id"])
+    if erg is None:
+        raise HTTPException(404, "Bewertung nicht gefunden")
+    return erg
 
 
 @router.post("/contracts/preview")

@@ -29,7 +29,7 @@ KI_MODELL_STANDARD = "claude-sonnet-5"
 # die Bewertung laeuft im Hintergrund, der Chef sieht sie beim Oeffnen der
 # Liste; 30 s Zeitlimit statt der urspruenglich geplanten 12 s.
 KI_ZEITLIMIT_SEKUNDEN = kommazahl_env("KI_ZEITLIMIT_SEKUNDEN", 30.0, unten=3.0, oben=90.0)
-KI_MAX_TOKENS = 3000
+KI_MAX_TOKENS = 2500      # Probelauf 26.09.2026: 1600 schnitt die JSON-Antwort ab; Denken ist aus
 
 
 def ki_modell() -> str:
@@ -44,9 +44,17 @@ def ki_effort() -> str:
 
 
 def ki_denken_aus() -> bool:
-    """KI_DENKEN_AUS=true: ohne Vorab-Nachdenken des Modells (schneller,
-    etwas grober). Standard: an (adaptiv)."""
-    return schalter_env("KI_DENKEN_AUS", False)
+    """KI_DENKEN_AUS (Standard true seit 26.09.2026): ohne Vorab-Nachdenken
+    des Modells — Denk-Tokens zaehlen als Ausgabe und kosteten mehr, als sie
+    an Genauigkeit brachten (der Fall ist vorher vollstaendig aufbereitet)."""
+    return schalter_env("KI_DENKEN_AUS", True)
+
+
+def ki_recherche_modell() -> str:
+    """Modell fuer die Websuche (KI_RECHERCHE_MODELL, Standard Haiku 4.5):
+    Suchergebnisse sind viele Eingabe-Tokens — das guenstige Modell liest sie
+    fuer ein Drittel des Preises; bewertet wird weiter mit KI_MODELL."""
+    return (os.environ.get("KI_RECHERCHE_MODELL") or "").strip() or "claude-haiku-4-5-20251001"
 
 
 def ki_aktiv() -> bool:
@@ -195,7 +203,7 @@ async def recherche(*, system: str, frage: str, max_suchen: int = 6,
     json_bewerten. Wirft nie; status ok | fehler | zeitlimit | ... ."""
     t0 = time.perf_counter()
     antwort = KiAntwort(status="fehler", grund="", text="", quellen=[], suchen=0, dauer_ms=0,
-                        modell=ki_modell(), usage={})
+                        modell=ki_recherche_modell(), usage={})
     if not ki_aktiv():
         antwort.update(status="aus", grund="KI-Bewertung nicht aktiv")
         return antwort
@@ -217,10 +225,9 @@ async def recherche(*, system: str, frage: str, max_suchen: int = 6,
         usage: Dict[str, int] = {}
         for _ in range(_PAUSEN_MAX):
             r = await client.messages.create(
-                model=ki_modell(), max_tokens=4000,
+                model=ki_recherche_modell(), max_tokens=3000,
                 system=_system_bloecke(system, None),
                 tools=tools, messages=messages,
-                output_config={"effort": ki_effort()},
             )
             _usage_addieren(usage, _usage(r))
             for b in r.content:

@@ -1,23 +1,26 @@
 # -*- coding: utf-8 -*-
 """Marktanalyse fuer die KI-Bewertung (Wunsch Ahmad 26.09.2026: "so genau wie
-es geht, auf ADAC und Smart-Repair achten").
+es geht, auf ADAC und Smart-Repair achten" — und: "Websuche erst mal fuer ein
+Jahr, dabei eine eigene Datenbank aufbauen").
 
-Zwei Bausteine:
+Drei Bausteine:
 
 1. **Markttabelle** (ki_marktdaten, ein Dokument "aktuell"): einmal je
-   KI_MARKTDATEN_TAGE (Standard 30) recherchiert die KI per Websuche aktuelle
-   Reparatur-/Smart-Repair-Preise fuer unsere Positionen (Delle, Kratzer,
-   Scheibe, Schluessel, Reifen, HU ...) — bevorzugt ADAC und Smart-Repair-
-   Anbieter — und legt sie mit Quellen ab. Die Tabelle geht als Zusatz in
-   JEDE Bewertung (hat Vorrang vor den Startwerten in preisbasis.py).
-   Ausgeloest vom stuendlichen Aufraeumlauf (nur wenn veraltet) und per
+   KI_MARKTDATEN_TAGE (Standard 30) recherchiert die KI per Websuche in drei
+   Gruppen aktuelle Reparatur-/Smart-Repair-Preise fuer unsere Positionen und
+   legt sie mit Quellen ab. Ausgeloest vom stuendlichen Aufraeumlauf oder per
    Knopf auf /admin/betrieb.
 
-2. **Recherche je Fall** (optional): vor der eigentlichen Bewertung sucht die
-   KI gezielt zu den konkreten Schaeden dieses Fahrzeugs (hoechstens wenige
-   Suchen) und bekommt das Ergebnis samt Quellen mit. Kostet ~1 ct je Suche
-   und 20-40 s — deshalb Standard AN bei der Abholung (laeuft im
-   Hintergrund) und AUS beim Vertrag (der Sucher wartet).
+2. **Recherche je Fall**: vor der Bewertung sucht die KI gezielt zu den
+   Schaeden/Abweichungen dieses Fahrzeugs (hoechstens MAX_SUCHEN_FALL Suchen)
+   — Standard AN bei Abholung und Vertrag (Kostenbremse: ai.budget).
+
+3. **Eigene Preisdatenbank** (ki_reparaturpreise): jede Recherche endet mit
+   einem festen Datenblock (###DATEN, eine Zeile je Wert), der ohne weiteren
+   KI-Aufruf geparst und je Referenzschluessel + Marke + Altersklasse
+   gespeichert wird. Liegen zu einem Schaden genug frische eigene Werte vor
+   (EIGENE_MIN), entfaellt die Websuche fuer diese Position — so wird das
+   System mit jedem Fall guenstiger und schneller.
 
 Websuche und unser festes JSON-Antwortformat gehen nicht in einem Aufruf
 (Zitate sind mit strukturierter Ausgabe unvereinbar) — deshalb immer zwei
@@ -26,7 +29,9 @@ Schritte: Recherche als Text, Bewertung/Umwandlung als JSON.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+import re
+import statistics
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from deps import db as _db, now_iso
@@ -38,22 +43,31 @@ from ai.provider import json_bewerten, ki_aktiv, ki_modell, recherche
 log = logging.getLogger("autohandel.ki")
 
 SAMMLUNG = "ki_marktdaten"
+PREIS_SAMMLUNG = "ki_reparaturpreise"
 DOK_ID = "aktuell"
 MAX_SUCHEN_TABELLE = 8          # je Gruppe (drei Gruppen, siehe _gruppen)
-MAX_SUCHEN_FALL = 4
+MAX_SUCHEN_FALL = 2             # Probelauf 26.09.2026: 4 direkte Suchen = ~140k Tokens = 46 ct
+EIGENE_MIN = 3                  # ab so vielen frischen eigenen Werten keine Suche mehr
+EIGENE_TAGE = 180
+DATEN_MARKER = "###DATEN"
+BERICHT_MAX = 12000
 # Probelauf 26.09.2026: mit EINER Anfrage fuer alle Positionen verbrauchte die
 # KI alle Suchen, bevor sie einen Wert notiert hatte, und gab dann auf.
-# Deshalb drei kleinere Gruppen und die Anweisung, Werte sofort aufzuschreiben.
-SUCH_ANWEISUNG = ("Du hast fuer diese Liste hoechstens {n} Suchen. Plane sie (eine Suche deckt 1-2 Positionen, "
+# Deshalb kleine Gruppen und die Anweisung, Werte sofort aufzuschreiben.
+SUCH_ANWEISUNG = ("Du hast fuer diese Liste hoechstens {n} Suchen. Plane sie (eine Suche deckt 2-3 Positionen, "
                   "ADAC zuerst) und schreibe jeden gefundenen Wert SOFORT in deine Antwort. Ist das Suchlimit "
                   "erreicht, gib die bis dahin gefundenen Werte aus — niemals abbrechen oder eine leere Antwort geben.")
+DATEN_ANWEISUNG = ("Schliesse deine Antwort mit einer Zeile '" + DATEN_MARKER + "' ab und darunter je gefundenem Wert "
+                   "GENAU EINE Zeile im Format: id|min_eur|max_eur|typisch_eur|quelle|url — id ist die id der "
+                   "Position aus der Liste, Betraege als ganze Zahlen ohne Einheit, quelle der Name der Quelle "
+                   "(z. B. ADAC), ggf. mit Einschraenkung. Lieber ein ungefaehrer Wert mit Hinweis als keine Zeile. "
+                   "Keine weiteren Zeilen nach dem Block.")
 _GRUPPEN = (
     ("Karosserie und Lack", ("delle", "kratzer", "steinschlag", "rost", "hagelschaden")),
     ("Licht, Felgen, Unfall", ("beleuchtung", "felge", "unfall_nicht_repariert", "unfall_repariert")),
     ("Schluessel, Reifen, HU, Unterlagen, Abweichungen",
      ("keys", "tires", "documents", "hu", "mileage", "previous_owners", "equipment_missing", "equipment_defect")),
 )
-BERICHT_MAX = 12000
 
 
 def aktiv() -> bool:
@@ -67,14 +81,14 @@ def tage() -> int:
 def je_fall(art: str) -> bool:
     if art == "abholung":
         return schalter_env("KI_MARKTANALYSE_ABHOLUNG", True)
-    return schalter_env("KI_MARKTANALYSE_VERTRAG", False)
+    return schalter_env("KI_MARKTANALYSE_VERTRAG", True)
 
 
 RECHERCHE_SYSTEM = """Du recherchierst fuer AutoSchnell (Software fuer Autohaendler in Deutschland) aktuelle Reparatur- und Smart-Repair-Preise fuer Gebrauchtwagen — Deutschland, Euro inkl. MwSt., Stand heute.
 Bevorzugte Quellen: ADAC (adac.de), Smart-Repair-Anbieter (z. B. Dellen-Doktor, Dellentechnik, Carglass/Wintec fuer Scheiben, ATU, Pitstop), Werkstattportale (FairGarage, autobutler, repareo, Werkstattvergleich), Fachanbieter fuer Fahrzeugschluessel und Reifen. Verbraucherportale wie Auto Bild, auto motor und sport sind in Ordnung; Forenbeitraege und Anzeigen nicht.
-Regeln: je Position eine realistische Spanne (min-max) und einen typischen Wert, dazu die Quelle (Name + Adresse). Wenn du keine belastbare Angabe findest, sage das statt zu schaetzen. Antworte auf Deutsch, knapp, als Liste."""
+Regeln: je Position eine realistische Spanne (min-max) und einen typischen Wert, dazu die Quelle (Name + Adresse). Orientierungswerte ZAEHLEN als Fund: ADAC-Beispielpreise, Preisspannen von Anbietern oder Portalen gehoeren in den Datenblock, auch wenn sie nicht exakt zu Fahrzeug, Groesse oder Jahr passen oder netto sind — schreibe die Einschraenkung kurz hinter den Quellennamen (z. B. "ADAC, netto 2024"). Verboten sind nur frei erfundene Zahlen ohne Quelle; dann sage das statt zu schaetzen. Antworte auf Deutsch, knapp, als Liste."""
 
-UMWANDLUNG_SYSTEM = """Du wandelst einen Recherchebericht ueber Reparaturpreise in eine feste Tabelle um. typ ist IMMER der technische Schluessel aus der Positionsliste (z. B. keys fuer Schluessel, tires fuer Reifen, documents fuer Unterlagen, hu fuer HU), nie ein deutsches Wort. Uebernimm nur Werte, die im Bericht stehen (Euro inkl. MwSt.). Fehlt eine Position im Bericht, lass sie weg. typisch_eur liegt zwischen min_eur und max_eur. quelle: Name der Quelle (z. B. "ADAC", "Dellen-Doktor"), hinweis: hoechstens 12 Woerter (z. B. "je nach Groesse und Lage"). Antworte ausschliesslich nach dem Schema."""
+UMWANDLUNG_SYSTEM = """Du wandelst einen Recherchebericht ueber Reparaturpreise in eine feste Tabelle um. typ ist IMMER der technische Schluessel aus der Positionsliste (z. B. keys fuer Schluessel, tires fuer Reifen, documents fuer Unterlagen, hu fuer HU), nie ein deutsches Wort. Uebernimm nur Werte, die im Bericht stehen (Euro inkl. MwSt.). Fehlt eine Position im Bericht, lass sie weg. typisch_eur liegt zwischen min_eur und max_eur. quelle: Name der Quelle (z. B. "ADAC", "Dellen-Doktor"), hinweis: hoechstens 12 Woerter. Antworte ausschliesslich nach dem Schema."""
 
 MARKT_SCHEMA: Dict[str, Any] = {
     "type": "object",
@@ -82,8 +96,6 @@ MARKT_SCHEMA: Dict[str, Any] = {
         "positionen": {"type": "array", "items": {
             "type": "object",
             "properties": {
-                # Probelauf 26.09.2026: ohne feste Werte kamen "schluessel"/"reifen"
-                # statt keys/tires zurueck und fielen weg — jetzt als Aufzaehlung.
                 "typ": {"type": "string", "enum": sorted({b["typ"] for b in preisbasis.BASIS})},
                 "auspraegung": {"type": "string", "description": "moeglichst der Wortlaut aus der Positionsliste"},
                 "min_eur": {"type": "number"},
@@ -108,7 +120,6 @@ def _positionen_liste() -> List[Dict[str, str]]:
 
 
 def _gruppen() -> List[tuple]:
-    """(Titel, Positionen) je Gruppe — nur Positionen, die es in BASIS gibt."""
     alle = _positionen_liste()
     raus = []
     for titel, typen in _GRUPPEN:
@@ -128,7 +139,7 @@ def _frage_tabelle(titel: str, positionen: List[Dict[str, str]], max_suchen: int
 
 def _zahl(w, unten=0.0) -> float:
     try:
-        z = float(w)
+        z = float(str(w).replace(".", "").replace(",", ".")) if isinstance(w, str) and "," in str(w) else float(w)
     except (TypeError, ValueError):
         return unten
     if z != z or z in (float("inf"), float("-inf")):
@@ -191,7 +202,8 @@ async def aktuell(db=None) -> Optional[dict]:
 
 
 async def aktualisieren(db=None, *, erzwingen: bool = False) -> dict:
-    """Recherche (Websuche) + Umwandlung in die Tabelle; Ablage. Wirft nie."""
+    """Recherche (Websuche, drei Gruppen) + Umwandlung in die Tabelle; Ablage.
+    Eine leere Tabelle ist ein Fehlversuch. Wirft nie."""
     db = db if db is not None else _db
     if not aktiv() or not ki_aktiv():
         return {"status": "aus", "grund": "Marktanalyse oder KI nicht aktiv"}
@@ -205,8 +217,7 @@ async def aktualisieren(db=None, *, erzwingen: bool = False) -> dict:
         usage_r: Dict[str, int] = {}
         suchen = 0
         dauer = 0
-        letzter_status = "fehler"
-        letzter_grund = "keine Antwort"
+        letzter_status, letzter_grund = "fehler", "keine Antwort"
         for titel, positionen in _gruppen():
             r = await recherche(system=RECHERCHE_SYSTEM, frage=_frage_tabelle(titel, positionen),
                                 max_suchen=MAX_SUCHEN_TABELLE)
@@ -226,10 +237,9 @@ async def aktualisieren(db=None, *, erzwingen: bool = False) -> dict:
             await db[SAMMLUNG].update_one({"_id": DOK_ID}, {"$set": eintrag}, upsert=True)
             await _alarm(db, eintrag["status"], eintrag["grund"])
             return {"status": eintrag["status"], "grund": eintrag["grund"], "aktualisiert": False}
-        r = {"text": "\n\n".join(texte), "quellen": [{"url": u, "titel": t} for u, t in quellen.items()],
-             "usage": usage_r, "suchen": suchen, "dauer_ms": dauer, "modell": ki_modell()}
+        bericht = "\n\n".join(texte)
         j = await json_bewerten(system=UMWANDLUNG_SYSTEM,
-                                nutzer={"bericht": r["text"][:BERICHT_MAX], "positionen": _positionen_liste()},
+                                nutzer={"bericht": bericht[:BERICHT_MAX], "positionen": _positionen_liste()},
                                 schema=MARKT_SCHEMA)
         if j.get("status") != "ok" or not isinstance(j.get("daten"), dict):
             grund = j.get("grund") or "Umwandlung fehlgeschlagen"
@@ -239,23 +249,21 @@ async def aktualisieren(db=None, *, erzwingen: bool = False) -> dict:
             return {"status": "fehler", "grund": grund, "aktualisiert": False}
         positionen = _positionen_bereinigen(j["daten"].get("positionen") or [])
         if not positionen:
-            # Probelauf 26.09.2026: die KI gab auf ("Suchlimit erschoepft") — eine
-            # leere Tabelle ist ein Fehlversuch, kein Erfolg (Alarm, spaeter neu).
             grund = "keine Preisangaben gefunden"
             await db[SAMMLUNG].update_one({"_id": DOK_ID},
                                           {"$set": {"stand_versuch": jetzt, "status": "fehler", "grund": grund,
-                                                    "bericht": (r.get("text") or "")[:BERICHT_MAX]}},
-                                          upsert=True)
+                                                    "bericht": bericht[:BERICHT_MAX]}}, upsert=True)
             await _alarm(db, "fehler", grund)
             return {"status": "fehler", "grund": grund, "aktualisiert": False, "suchen": suchen}
-        usage = dict(r.get("usage") or {})
+        usage = dict(usage_r)
         for k, v in (j.get("usage") or {}).items():
             usage[k] = int(usage.get(k) or 0) + int(v or 0)
         doc = {"_id": DOK_ID, "stand": jetzt, "status": "ok", "grund": "", "positionen": positionen,
-               "quellen": list(r.get("quellen") or [])[:20], "bericht": (r.get("text") or "")[:BERICHT_MAX],
+               "quellen": [{"url": u, "titel": t} for u, t in list(quellen.items())[:20]],
+               "bericht": bericht[:BERICHT_MAX],
                "zusammenfassung": str(j["daten"].get("zusammenfassung") or "")[:600],
-               "modell": r.get("modell") or ki_modell(), "suchen": int(r.get("suchen") or 0),
-               "dauer_ms": int(r.get("dauer_ms") or 0) + int(j.get("dauer_ms") or 0), "usage": usage}
+               "modell": ki_modell(), "suchen": suchen,
+               "dauer_ms": dauer + int(j.get("dauer_ms") or 0), "usage": usage}
         await db[SAMMLUNG].replace_one({"_id": DOK_ID}, doc, upsert=True)
         try:
             import betrieb
@@ -284,7 +292,6 @@ async def pruefen_und_aktualisieren(db=None) -> dict:
     doc = await aktuell(db)
     if doc and frisch(doc):
         return {"status": "frisch", "alter_tage": alter_tage(doc)}
-    # Fehlversuch nicht jede Stunde wiederholen: fruehestens nach 6 Stunden
     versuch = (doc or {}).get("stand_versuch")
     if versuch and (doc or {}).get("status") != "ok":
         try:
@@ -304,8 +311,8 @@ def als_text(doc: Optional[dict]) -> str:
     if not doc or doc.get("status") != "ok" or not doc.get("positionen"):
         return ""
     stand = str(doc.get("stand") or "")[:10]
-    zeilen = [f"Aktuelle Marktpreise (recherchiert am {stand}, Deutschland inkl. MwSt.; diese Werte haben "
-              "Vorrang vor den Ausgangswerten oben):"]
+    zeilen = [f"Aktuelle Marktpreise (recherchiert am {stand}, Deutschland inkl. MwSt.; die repair_reference je "
+              "Position ist daraus bzw. aus eigenen Daten abgeleitet und geht vor):"]
     for p in doc["positionen"]:
         q = f" — Quelle {p['quelle']}" if p.get("quelle") else ""
         h = f" ({p['hinweis']})" if p.get("hinweis") else ""
@@ -321,37 +328,173 @@ async def prompt_zusatz(db=None) -> str:
         return ""
 
 
+# ------------------------------------------------ eigene Preisdatenbank
+def _alter_klasse(v: dict) -> str:
+    a = (v or {}).get("age_years")
+    try:
+        a = float(a)
+    except (TypeError, ValueError):
+        return "?"
+    return "0-3" if a < 3 else "3-7" if a < 7 else "7-12" if a < 12 else "12+"
+
+
+def _marke(v: dict) -> str:
+    return str((v or {}).get("make") or "").strip().lower()[:40]
+
+
+def _positionen(paket: Dict[str, Any], art: str) -> List[dict]:
+    """Alle bewertbaren Positionen mit Referenzschluessel: Schaeden + Abweichungen."""
+    raus = []
+    schaeden = paket.get("damages") if art == "vertrag" else [d for d in (paket.get("new_damages") or [])
+                                                             if not d.get("already_known")]
+    for d in schaeden or []:
+        raus.append(d)
+    for a in paket.get("deviations") or []:
+        if a.get("repair_reference"):
+            raus.append(a)
+    return raus
+
+
+def _daten_parsen(text: str) -> List[Dict[str, Any]]:
+    """Zeilen nach ###DATEN: id|min|max|typisch|quelle|url."""
+    if not text or DATEN_MARKER not in text:
+        return []
+    block = text.split(DATEN_MARKER, 1)[1]
+    raus = []
+    for zeile in block.splitlines():
+        teile = [t.strip() for t in zeile.strip().strip("|").split("|")]
+        if len(teile) < 4:
+            continue
+        pid = teile[0].strip("`* ")
+        lo, hi, ty = _zahl(teile[1]), _zahl(teile[2]), _zahl(teile[3])
+        if not pid or hi <= 0:
+            continue
+        if lo > hi:
+            lo, hi = hi, lo
+        ty = min(max(ty, lo), hi) if ty else round((lo + hi) / 2, 2)
+        raus.append({"id": pid[:120], "min_eur": lo, "max_eur": hi, "typisch_eur": ty,
+                     "quelle": (teile[4] if len(teile) > 4 else "")[:80],
+                     "url": (teile[5] if len(teile) > 5 else "")[:300]})
+    return raus[:20]
+
+
+async def lernen_aus_recherche(fall: Optional[dict], paket: Dict[str, Any], art: str, db=None) -> int:
+    """Gefundene Werte je Position in ki_reparaturpreise ablegen. Wirft nie."""
+    if not fall or fall.get("status") != "ok":
+        return 0
+    db = db if db is not None else _db
+    try:
+        zeilen = _daten_parsen(fall.get("text") or "")
+        if not zeilen:
+            return 0
+        je_id = {str(p.get("id")): p for p in _positionen(paket, art)}
+        v = paket.get("vehicle") or {}
+        jetzt = now_iso()
+        docs = []
+        for z in zeilen:
+            p = je_id.get(z["id"])
+            if not p:
+                continue
+            ref = p.get("repair_reference") or {}
+            key = ref.get("key")
+            if not key:
+                continue
+            docs.append({"key": key, "typ": p.get("type") or p.get("damage_type") or key.split("_")[0],
+                         "zone": str(p.get("zone") or "")[:80], "marke": _marke(v), "modell": str(v.get("model") or "")[:60],
+                         "alter_klasse": _alter_klasse(v), "min_eur": z["min_eur"], "max_eur": z["max_eur"],
+                         "typisch_eur": z["typisch_eur"], "quelle": z["quelle"], "url": z["url"],
+                         "art": art, "stand": jetzt})
+        if docs:
+            await db[PREIS_SAMMLUNG].insert_many(docs)
+        return len(docs)
+    except Exception:  # noqa: BLE001
+        log.exception("Recherche-Werte nicht gelernt")
+        return 0
+
+
+async def eigene_referenzen(paket: Dict[str, Any], art: str, db=None) -> Dict[str, Dict[str, Any]]:
+    """Je Referenzschluessel die Statistik der eigenen frischen Werte
+    (gleiche Marke bevorzugt, sonst alle). {} wenn nichts da. Wirft nie."""
+    db = db if db is not None else _db
+    raus: Dict[str, Dict[str, Any]] = {}
+    try:
+        keys = {(p.get("repair_reference") or {}).get("key") for p in _positionen(paket, art)}
+        keys.discard(None)
+        if not keys:
+            return raus
+        marke = _marke(paket.get("vehicle") or {})
+        seit = (datetime.now(timezone.utc) - timedelta(days=EIGENE_TAGE)).isoformat()
+        je_key: Dict[str, List[dict]] = {}
+        async for d in db[PREIS_SAMMLUNG].find({"key": {"$in": sorted(keys)}, "stand": {"$gte": seit}},
+                                               {"_id": 0}).sort("stand", -1).limit(2000):
+            je_key.setdefault(d["key"], []).append(d)
+        for key, docs in je_key.items():
+            eigene_marke = [d for d in docs if marke and d.get("marke") == marke]
+            basis = eigene_marke if len(eigene_marke) >= EIGENE_MIN else docs
+            if not basis:
+                continue
+            basis = basis[:30]
+            quellen = sorted({d.get("quelle") for d in basis if d.get("quelle")})[:4]
+            raus[key] = {"n": len(basis), "low": round(statistics.median(d["min_eur"] for d in basis)),
+                         "median": round(statistics.median(d["typisch_eur"] for d in basis)),
+                         "high": round(statistics.median(d["max_eur"] for d in basis)),
+                         "nur_marke": len(eigene_marke) >= EIGENE_MIN,
+                         "source": f"eigene Datenbank (n={len(basis)}{', ' + marke if len(eigene_marke) >= EIGENE_MIN else ''}"
+                                   f"{'; ' + ', '.join(quellen) if quellen else ''})"}
+    except Exception:  # noqa: BLE001
+        log.exception("eigene Referenzen nicht ladbar")
+    return raus
+
+
+def recherche_noetig(paket: Dict[str, Any], art: str, eigene: Dict[str, Dict[str, Any]]) -> List[dict]:
+    """Positionen, fuer die eigene Daten NICHT reichen (dafuer wird gesucht)."""
+    offen = []
+    for p in _positionen(paket, art):
+        ref = p.get("repair_reference") or {}
+        if ref.get("manual_review"):
+            continue
+        e = eigene.get(ref.get("key") or "")
+        if e and e.get("n", 0) >= EIGENE_MIN:
+            continue
+        offen.append(p)
+    return offen
+
+
 # ------------------------------------------------ Recherche je Fall
-def _fall_frage(art: str, paket: Dict[str, Any]) -> str:
+def _fall_frage(art: str, paket: Dict[str, Any], positionen: List[dict]) -> str:
     v = paket.get("vehicle") or {}
     auto = " ".join(str(x) for x in (v.get("make"), v.get("model"), v.get("variant")) if x).strip()
     ez = v.get("first_registration") or ""
     km = v.get("mileage_pickup_km") or v.get("mileage_contract_km") or v.get("mileage_km")
     zeilen = []
-    schaeden = paket.get("damages") if art == "vertrag" else [d for d in (paket.get("new_damages") or [])
-                                                             if not d.get("already_in_contract")]
-    for d in schaeden or []:
-        sd = d.get("severity_data") or {}
-        merk = ", ".join(f"{k} {w}" for k, w in sd.items())
-        zeilen.append(f"- {d.get('label') or d.get('type')} {d.get('zone') or ''}{(' (' + merk + ')') if merk else ''}")
-    for a in (paket.get("deviations") or []):
-        t = a.get("type")
-        if t in ("keys", "tires", "hu", "equipment_missing", "equipment_defect", "documents"):
-            zeilen.append(f"- {a.get('label')}: erwartet {a.get('expected')}, vor Ort {a.get('actual')}")
+    for p in positionen[:8]:
+        sd = p.get("severity_data") or {}
+        merk = ", ".join(f"{k} {w}" for k, w in sd.items() if str(w).lower() != "unbekannt")
+        if p.get("damage_type") or p.get("type") in ("delle", "kratzer", "rost", "steinschlag", "hagelschaden",
+                                                      "beleuchtung", "unfall_repariert", "unfall_nicht_repariert"):
+            zeilen.append(f"- id {p.get('id')}: {p.get('label') or p.get('type')} {p.get('zone') or ''}"
+                          f"{(' (' + merk + ')') if merk else ''}")
+        else:
+            zeilen.append(f"- id {p.get('id')}: {p.get('label')}: erwartet {p.get('expected')}, vor Ort {p.get('actual')}")
     if not zeilen:
         return ""
     return (f"Fahrzeug: {auto}, Erstzulassung {ez}, {km or '?'} km. Recherchiere aktuelle Reparatur-/Ersatzkosten "
             "(Deutschland, inkl. MwSt.) fuer genau diese Punkte; bevorzuge ADAC und Smart-Repair-Anbieter, bei "
             "Schluesseln/Teilen Markenangaben. Je Punkt: Spanne, typischer Wert, Quelle. Knapp antworten:\n"
-            + "\n".join(zeilen[:8]) + "\n\n" + SUCH_ANWEISUNG.format(n=MAX_SUCHEN_FALL))
+            + "\n".join(zeilen) + "\n\n" + SUCH_ANWEISUNG.format(n=MAX_SUCHEN_FALL) + "\n" + DATEN_ANWEISUNG)
 
 
-async def fall_recherche(art: str, paket: Dict[str, Any]) -> Optional[dict]:
-    """Gezielte Websuche zu den Schaeden/Abweichungen eines Falls. None, wenn
-    aus oder nichts zu suchen; sonst {text, quellen, suchen, dauer_ms, usage}."""
-    if not aktiv() or not je_fall(art) or not ki_aktiv():
+async def fall_recherche(art: str, paket: Dict[str, Any], *, sparmodus: bool = False,
+                         eigene: Optional[Dict[str, Dict[str, Any]]] = None) -> Optional[dict]:
+    """Gezielte Websuche zu den Positionen, fuer die eigene Daten nicht reichen.
+    None, wenn aus, Sparmodus oder nichts zu suchen; sonst {text, quellen,
+    suchen, dauer_ms, usage, status}."""
+    if sparmodus or not aktiv() or not je_fall(art) or not ki_aktiv():
         return None
-    frage = _fall_frage(art, paket)
+    offen = recherche_noetig(paket, art, eigene or {})
+    if not offen:
+        return None
+    frage = _fall_frage(art, paket, offen)
     if not frage:
         return None
     try:
@@ -364,13 +507,28 @@ async def fall_recherche(art: str, paket: Dict[str, Any]) -> Optional[dict]:
                 "usage": r.get("usage") or {}, "status": r.get("status")}
     return {"text": (r.get("text") or "")[:6000], "quellen": list(r.get("quellen") or [])[:10],
             "suchen": int(r.get("suchen") or 0), "dauer_ms": r.get("dauer_ms"), "usage": r.get("usage") or {},
-            "status": "ok"}
+            "modell": r.get("modell"), "status": "ok", "positionen": [str(p.get("id")) for p in offen]}
 
 
 def fall_als_text(fall: Optional[dict]) -> str:
     if not fall or not fall.get("text"):
         return ""
-    return ("Marktrecherche zu diesem Fall (Websuche, Quellen unten; hat Vorrang vor Tabelle und "
-            "Ausgangswerten):\n" + fall["text"]
+    text = fall["text"].split(DATEN_MARKER, 1)[0].strip()
+    return ("Marktrecherche zu diesem Fall (Websuche, Quellen unten; geht vor Tabelle und "
+            "Ausgangswerten):\n" + text
             + ("\nQuellen: " + "; ".join(f"{q.get('titel') or ''} {q.get('url')}".strip() for q in fall.get("quellen") or [])
                if fall.get("quellen") else ""))
+
+
+async def statistik_eigene(db=None) -> Dict[str, Any]:
+    """Fuer die Betriebsseite: Umfang der eigenen Preisdatenbank."""
+    db = db if db is not None else _db
+    try:
+        gesamt = await db[PREIS_SAMMLUNG].count_documents({})
+        seit = (datetime.now(timezone.utc) - timedelta(days=EIGENE_TAGE)).isoformat()
+        frisch_n = await db[PREIS_SAMMLUNG].count_documents({"stand": {"$gte": seit}})
+        keys = await db[PREIS_SAMMLUNG].distinct("key", {"stand": {"$gte": seit}})
+        return {"werte": gesamt, "frisch": frisch_n, "schluessel": len(keys), "min_je_schluessel": EIGENE_MIN,
+                "tage": EIGENE_TAGE}
+    except Exception:  # noqa: BLE001
+        return {"werte": 0, "frisch": 0, "schluessel": 0, "min_je_schluessel": EIGENE_MIN, "tage": EIGENE_TAGE}

@@ -22,13 +22,17 @@ from konfig import zahl_env
 
 log = logging.getLogger("autohandel.ki")
 
-MIN_FAELLE = zahl_env("KI_KALIBRIERUNG_MIN_FAELLE", 5, unten=1, oben=10000)
+# Umbau 26.09.2026: global erst ab 20 Faellen (ein aggressiv verhandelnder
+# Haendler soll nicht alle verschieben), firmeneigen ab 5.
+MIN_FAELLE = zahl_env("KI_KALIBRIERUNG_MIN_FAELLE", 20, unten=1, oben=10000)
+MIN_FIRMA = zahl_env("KI_KALIBRIERUNG_MIN_FIRMA", 5, unten=1, oben=10000)
 CACHE_SEKUNDEN = 600
 LERN_SAMMLUNG = "ki_lernfaelle"
 BEWERTUNGEN = "ki_bewertungen"
 # Richtwerte je Million Tokens (USD, Listenpreise 09/2026) — nur fuer die
 # Kostenschaetzung auf der Betriebsseite, nicht fuer die Abrechnung.
-PREIS_JE_MIO = {"claude-opus-5": (15.0, 75.0), "claude-sonnet-5": (3.0, 15.0)}
+PREIS_JE_MIO = {"claude-opus-5": (15.0, 75.0), "claude-sonnet-5": (3.0, 15.0),
+                "claude-haiku-4-5-20251001": (1.0, 5.0)}
 
 _cache: Dict[str, Any] = {"bis": 0.0, "werte": None}
 
@@ -47,18 +51,21 @@ def _faktor(doc: dict) -> Optional[float]:
     return min(ist / ki, 3.0)      # Deckel: ein Chef, der 5x so viel holt, ist kein Massstab
 
 
-async def erfahrungswerte(*, frisch: bool = False) -> Dict[str, Any]:
+async def erfahrungswerte(*, frisch: bool = False, dealer_id: Optional[str] = None) -> Dict[str, Any]:
     """Gesamt und je Kategorie (nur Faelle mit genau EINER Position, damit
-    das Verhaeltnis der Kategorie zuzuordnen ist). Wirft nie."""
-    if not frisch and _cache["werte"] is not None and time.time() < _cache["bis"]:
-        return _cache["werte"]
+    das Verhaeltnis der Kategorie zuzuordnen ist). dealer_id: nur die Faelle
+    dieser Firma (Cache je Firma). Wirft nie."""
+    cache_key = dealer_id or ""
+    if not frisch and _cache.get(cache_key) is not None and time.time() < _cache.get("bis:" + cache_key, 0):
+        return _cache[cache_key]
     werte: Dict[str, Any] = {"gesamt": {"n": 0}, "je_kategorie": {}, "je_art": {}}
     try:
         faktoren: List[float] = []
         je_kat: Dict[str, List[float]] = {}
         je_art: Dict[str, List[float]] = {}
-        cursor = db[LERN_SAMMLUNG].find({}, {"_id": 0, "ki_nachlass": 1, "tatsaechlicher_nachlass": 1,
-                                            "chef_nachlass": 1, "items": 1, "art": 1}
+        filt = {"dealer_id": dealer_id} if dealer_id else {}
+        cursor = db[LERN_SAMMLUNG].find(filt, {"_id": 0, "ki_nachlass": 1, "tatsaechlicher_nachlass": 1,
+                                              "chef_nachlass": 1, "items": 1, "art": 1}
                                         ).sort("created_at", -1).limit(3000)
         async for d in cursor:
             f = _faktor(d)
@@ -66,7 +73,7 @@ async def erfahrungswerte(*, frisch: bool = False) -> Dict[str, Any]:
                 continue
             faktoren.append(f)
             je_art.setdefault(d.get("art") or "abholung", []).append(f)
-            items = [i for i in (d.get("items") or []) if (i.get("recommended_discount_eur") or 0) > 0]
+            items = [i for i in (d.get("items") or []) if (i.get("fair_discount_eur") or i.get("recommended_discount_eur") or 0) > 0]
             if len(items) == 1:
                 je_kat.setdefault(str(items[0].get("category") or "other"), []).append(f)
         if faktoren:
@@ -77,36 +84,42 @@ async def erfahrungswerte(*, frisch: bool = False) -> Dict[str, Any]:
                            for k, v in je_art.items()}
     except Exception:  # noqa: BLE001
         log.exception("Erfahrungswerte nicht berechenbar")
-    _cache.update(bis=time.time() + CACHE_SEKUNDEN, werte=werte)
+    _cache[cache_key] = werte
+    _cache["bis:" + cache_key] = time.time() + CACHE_SEKUNDEN
     return werte
 
 
-def als_text(werte: Dict[str, Any]) -> str:
+def als_text(werte: Dict[str, Any], *, minimum: Optional[int] = None, titel: str = "AutoSchnell-Faellen") -> str:
     """Kurzer Prompt-Zusatz — leer, solange zu wenige Faelle vorliegen."""
+    mindest = minimum if minimum is not None else MIN_FAELLE
     g = (werte or {}).get("gesamt") or {}
-    if (g.get("n") or 0) < MIN_FAELLE:
+    if (g.get("n") or 0) < mindest:
         return ""
-    zeilen = [f"Erfahrungswerte aus {g['n']} abgeschlossenen AutoSchnell-Faellen: der tatsaechlich "
-              f"erzielte Nachlass lag im Median bei {round(g['faktor_median'] * 100)} % der KI-Empfehlung."]
-    kat = [(k, w) for k, w in ((werte or {}).get("je_kategorie") or {}).items() if (w.get("n") or 0) >= MIN_FAELLE]
+    zeilen = [f"Erfahrungswerte aus {g['n']} abgeschlossenen {titel}: der tatsaechlich "
+              f"erzielte Nachlass lag im Median bei {round(g['faktor_median'] * 100)} % der KI-Empfehlung (fair)."]
+    kat = [(k, w) for k, w in ((werte or {}).get("je_kategorie") or {}).items() if (w.get("n") or 0) >= mindest]
     if kat:
         zeilen.append("Je Kategorie: " + "; ".join(f"{k} {round(w['faktor_median'] * 100)} % (n={w['n']})"
                                                    for k, w in sorted(kat)))
     zeilen.append("Beruecksichtige das: liegt der Wert deutlich unter 100 %, waren fruehere Empfehlungen "
-                  "eher zu hoch, ueber 100 % eher zu niedrig — kalibriere den Hauptwert entsprechend, "
-                  "ohne die Bereiche zu verbreitern.")
+                  "eher zu hoch, ueber 100 % eher zu niedrig — kalibriere fair_discount_eur entsprechend.")
     return "\n".join(zeilen)
 
 
-async def prompt_zusatz() -> str:
+async def prompt_zusatz(dealer_id: Optional[str] = None) -> str:
+    """Global (ab MIN_FAELLE) und zusaetzlich firmeneigen (ab MIN_FIRMA)."""
     try:
-        return als_text(await erfahrungswerte())
+        teile = [als_text(await erfahrungswerte())]
+        if dealer_id:
+            teile.append(als_text(await erfahrungswerte(dealer_id=dealer_id), minimum=MIN_FIRMA,
+                                  titel="Faellen dieser Firma"))
+        return "\n\n".join(t for t in teile if t)
     except Exception:  # noqa: BLE001
         return ""
 
 
 def zuruecksetzen() -> None:
-    _cache.update(bis=0.0, werte=None)
+    _cache.clear()
 
 
 # ------------------------------------------------ Betriebszahlen (/admin/ki)
@@ -130,6 +143,7 @@ async def statistik(tage: int = 30) -> Dict[str, Any]:
     tokens = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
               "web_search_requests": 0}
     kosten = 0.0
+    kosten_liste: List[float] = []
     fehler: List[Dict[str, Any]] = []
     n = 0
     try:
@@ -149,7 +163,10 @@ async def statistik(tage: int = 30) -> Dict[str, Any]:
             for k in tokens:
                 tokens[k] += int(u.get(k) or 0)
             if u:
-                kosten += _kosten_usd(d.get("modell") or "", u)
+                k_usd = _kosten_usd(d.get("modell") or "", u)
+                kosten += k_usd
+                if st == "ok":
+                    kosten_liste.append(round(k_usd * 100, 2))
             if st in ("fehler", "zeitlimit", "ueberlastet", "schluessel", "abgelehnt") and len(fehler) < 10:
                 fehler.append({"status": st, "grund": (d.get("grund") or "")[:160], "am": d.get("created_at"),
                                "art": art, "ref": d.get("protocol_id") or d.get("vehicle_id") or ""})
@@ -166,10 +183,31 @@ async def statistik(tage: int = 30) -> Dict[str, Any]:
         "dauer_median_ms": int(statistics.median(dauern)) if dauern else None,
         "dauer_p95_ms": p95, "tokens": tokens, "kosten_usd_geschaetzt": round(kosten, 2),
         "letzte_fehler": fehler,
-        "lernfaelle": {"gesamt": lern_n, "mit_ergebnis": lern_mit_ergebnis, "min_fuer_kalibrierung": MIN_FAELLE},
+        "lernfaelle": {"gesamt": lern_n, "mit_ergebnis": lern_mit_ergebnis, "min_fuer_kalibrierung": MIN_FAELLE,
+                       "min_firma": MIN_FIRMA},
         "erfahrungswerte": await erfahrungswerte(),
         "marktdaten": await _marktdaten_kurz(),
+        "eigene_preise": await _eigene_kurz(),
+        "budget": {"monat_eur": _budget().budget_monat_eur(), "lauf_max_ct": _budget().kosten_max_ct()},
+        "kosten_median_ct": _median_kosten(kosten_liste),
     }
+
+
+def _budget():
+    from ai import budget
+    return budget
+
+
+def _median_kosten(werte: List[float]) -> Optional[float]:
+    return round(statistics.median(werte), 2) if werte else None
+
+
+async def _eigene_kurz() -> Dict[str, Any]:
+    try:
+        from ai import marktdaten
+        return await marktdaten.statistik_eigene()
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 async def _marktdaten_kurz() -> Dict[str, Any]:

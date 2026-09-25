@@ -1,36 +1,50 @@
-// KI-Schadennachlass (Wunsch Ahmad 25.09.2026): reine Hilfsfunktionen ohne
-// React — die Zusatzfragen je Schadensart (wenige Sekunden fuer den Fahrer,
-// grosser Gewinn fuer die Schaetzung) und die Aufbereitung der KI-Antwort.
+// KI-Schadennachlass (Wunsch Ahmad 25./26.09.2026): reine Hilfsfunktionen ohne
+// React — die festen Fragen je Schadensart (3–4 je Schaden, "unbekannt" ist
+// eine gültige Antwort; erst wenn alles beantwortet ist, darf die KI ran —
+// sie stellt keine Rückfragen mehr) und die Aufbereitung der Antwort mit
+// vier Geldwerten (Mindestens / Fair / Sehr gut / Verhandlungsstart).
 
-/** Zusatzfragen je Schadensart der Skizze (type_key aus DamageSelector). */
+/** Feste Fragen je Schadensart der Skizze (type_key aus DamageSelector). */
 export const SCHWERE_FRAGEN = {
   delle: [
-    { key: "groesse", label: "Größe", options: ["bis 2 cm", "2–5 cm", "5–10 cm", "über 10 cm"] },
+    { key: "groesse", label: "Größe", options: ["bis 2 cm", "2–5 cm", "5–10 cm", "über 10 cm", "unbekannt"] },
     { key: "lack", label: "Lack beschädigt?", options: ["nein", "ja", "unbekannt"] },
+    { key: "lage", label: "Lage", options: ["Fläche", "Kante/Sicke", "unbekannt"] },
   ],
   kratzer: [
-    { key: "laenge", label: "Länge", options: ["bis 5 cm", "5–15 cm", "15–30 cm", "über 30 cm"] },
-    { key: "tiefe", label: "Tiefe", options: ["oberflächlich", "tief", "unbekannt"] },
+    { key: "laenge", label: "Länge", options: ["bis 5 cm", "5–15 cm", "15–30 cm", "über 30 cm", "unbekannt"] },
+    { key: "tiefe", label: "Tiefe", options: ["oberflächlich", "bis Grundierung", "bis Blech", "unbekannt"] },
+    { key: "anzahl", label: "Anzahl", options: ["einzeln", "mehrere", "unbekannt"] },
+  ],
+  rost: [
+    { key: "umfang", label: "Umfang", options: ["oberflächlich", "Blasen", "durchgerostet", "unbekannt"] },
+    { key: "groesse", label: "Größe", options: ["bis 5 cm", "5–15 cm", "über 15 cm", "unbekannt"] },
+    { key: "stelle", label: "Stelle", options: ["Fläche", "Kante/Falz", "tragendes Teil", "unbekannt"] },
+  ],
+  hagelschaden: [
+    { key: "umfang", label: "Umfang", options: ["wenige (unter 10)", "viele (10–30)", "sehr viele (über 30)", "ganzes Fahrzeug"] },
+    { key: "dellengroesse", label: "Dellengröße", options: ["klein (bis 1 cm)", "mittel (1–3 cm)", "groß", "unbekannt"] },
+    { key: "lack", label: "Lack beschädigt?", options: ["nein", "ja", "unbekannt"] },
   ],
   steinschlag: [
     { key: "wo", label: "Wo?", options: ["Lack", "Windschutzscheibe", "andere Scheibe"] },
-    { key: "umfang", label: "Umfang", options: ["einzeln", "mehrere", "Riss"] },
-  ],
-  rost: [
-    { key: "umfang", label: "Umfang", options: ["oberflächlich", "Blasen", "durchgerostet"] },
-    { key: "groesse", label: "Größe", options: ["bis 5 cm", "5–15 cm", "über 15 cm"] },
-  ],
-  hagelschaden: [
-    { key: "umfang", label: "Umfang", options: ["wenige Dellen", "viele Dellen", "ganzes Fahrzeug"] },
+    { key: "umfang", label: "Umfang", options: ["einzeln", "mehrere", "Riss/flächig"] },
+    { key: "tiefe", label: "Tiefe", options: ["nur Deckschicht", "bis Grundierung/Blech", "unbekannt"] },
   ],
   beleuchtung: [
-    { key: "funktion", label: "Funktion", options: ["eingeschränkt", "komplett ausgefallen", "Gehäuse beschädigt"] },
+    { key: "welches", label: "Welches Licht?", options: ["Scheinwerfer", "Rückleuchte", "Blinker/Nebel", "andere"] },
+    { key: "funktion", label: "Funktion", options: ["eingeschränkt", "komplett ausgefallen", "Gehäuse beschädigt", "unbekannt"] },
+    { key: "technik", label: "Technik", options: ["Halogen", "Xenon", "LED", "unbekannt"] },
   ],
   unfall_repariert: [
     { key: "nachweis", label: "Reparatur belegt?", options: ["Rechnung vorhanden", "kein Beleg", "unbekannt"] },
+    { key: "umfang", label: "Umfang", options: ["Blech", "Blech + Rahmen", "unbekannt"] },
+    { key: "qualitaet", label: "Ausführung", options: ["fachgerecht", "sichtbare Mängel", "unbekannt"] },
   ],
   unfall_nicht_repariert: [
     { key: "umfang", label: "Umfang", options: ["Blech", "Blech + Rahmen", "unbekannt"] },
+    { key: "fahrbereit", label: "Fahrbereit?", options: ["ja", "nein", "unbekannt"] },
+    { key: "airbag", label: "Airbag", options: ["nicht ausgelöst", "ausgelöst", "unbekannt"] },
   ],
 };
 
@@ -38,7 +52,7 @@ export function schwereFragen(typeKey) {
   return SCHWERE_FRAGEN[typeKey] || [];
 }
 
-/** Kurztext der beantworteten Merkmale, z. B. "2–5 cm · Lack nein". */
+/** Kurztext der beantworteten Merkmale, z. B. "2–5 cm · nein · Fläche". */
 export function schwereText(damage) {
   const sd = damage?.severity_data || {};
   const fragen = schwereFragen(damage?.type_key);
@@ -46,10 +60,15 @@ export function schwereText(damage) {
   return teile.join(" · ");
 }
 
-/** Fehlen dem Schaden noch Antworten? (fuer den Hinweis vor dem Abschicken) */
+/** Noch nicht beantwortete Fragen eines Schadens ("unbekannt" gilt als Antwort). */
 export function schwereOffen(damage) {
   const sd = damage?.severity_data || {};
   return schwereFragen(damage?.type_key).filter((f) => !sd[f.key]).map((f) => f.label);
+}
+
+/** Sind alle Schäden vollständig beschrieben? (Bedingung für "Schäden bewerten") */
+export function alleVollstaendig(damages) {
+  return (damages || []).every((d) => schwereOffen(d).length === 0);
 }
 
 export function mitAntwort(damage, key, wert) {
@@ -61,14 +80,23 @@ export function mitAntwort(damage, key, wert) {
 // ---------------------------------------------------------------- Anzeige
 export const PRIO_TEXT = { rot: "Stark preisrelevant", orange: "Preisrelevant", gelb: "Geringer Einfluss" };
 export const PRIO_FARBE = { rot: "var(--st-rot)", orange: "var(--st-amber)", gelb: "var(--text-secondary)" };
+export const DATENLAGE_TEXT = { hoch: "Datenlage hoch", mittel: "Datenlage mittel", niedrig: "Datenlage niedrig" };
+export const DATENLAGE_FARBE = { hoch: "var(--st-gruen)", mittel: "var(--st-amber)", niedrig: "var(--st-rot)" };
+export const RISIKO_TEXT = {
+  normal: "",
+  high: "Hohes Preisrisiko – Zahlen mit Vorsicht, ggf. Werkstattprüfung vor dem Kauf.",
+  reconsider_purchase: "Die Mängel stellen den Kauf wirtschaftlich in Frage – bitte neu bewerten statt normal nachverhandeln.",
+};
 
 export function eur(n) {
   if (n === null || n === undefined || Number.isNaN(Number(n))) return "—";
   return `${Math.round(Number(n)).toLocaleString("de-DE")} €`;
 }
 
-export function prozent(p) {
-  return `${Math.round(Number(p || 0) * 100)} %`;
+/** Die vier Geldwerte einer Position/Gesamt als kurzer Text. */
+export function vierText(x) {
+  if (!x) return "";
+  return `mind. ${eur(x.minimum_justified_eur)} · sehr gut ${eur(x.best_realistic_eur)} · Start ${eur(x.negotiation_start_eur)}`;
 }
 
 /** Positionen nach Prioritaet gruppiert (rot, orange, gelb). */
@@ -91,6 +119,7 @@ export function kiStatusText(status) {
     case "abgelehnt": return "KI hat diese Anfrage nicht bewertet.";
     case "fehler": return "KI-Einschätzung momentan nicht verfügbar.";
     case "limit": return "Stundenlimit für KI-Bewertungen erreicht – bitte später erneut.";
+    case "budget": return "Monatsbudget für KI-Bewertungen aufgebraucht – ab dem 1. wieder verfügbar.";
     case "netz": return "Keine Verbindung zum Server – bitte erneut versuchen.";
     default: return "";
   }
@@ -158,17 +187,4 @@ export function schadenZeile(d) {
  *  nach einer Bewertung, ist die Karte veraltet. */
 export function schaedenStand(damages) {
   return JSON.stringify((damages || []).map((d) => [d.id, d.type_key, d.zone, d.severity_data || {}]));
-}
-
-/** Schlüssel für eine KI-Rückfrage im severity_data des Schadens. */
-export function frageSchluessel(question) {
-  const s = String(question || "").toLowerCase().replace(/[^a-z0-9äöüß]+/g, "_").replace(/^_+|_+$/g, "");
-  return ("frage_" + s).slice(0, 40);
-}
-
-/** Antwort auf eine KI-Rückfrage am passenden Schaden ablegen. */
-export function mitRueckfrageAntwort(damages, frage, antwort) {
-  const key = frageSchluessel(frage?.question);
-  return (damages || []).map((d) => (String(d.id) === String(frage?.source_id)
-    ? { ...d, severity_data: { ...(d.severity_data || {}), [key]: antwort } } : d));
 }

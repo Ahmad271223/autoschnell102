@@ -1562,6 +1562,9 @@ async def ensure_indexes():
     # KEIN Nachziehen von Nummern — Konten ohne Nummer werden nur gemeldet.
     from indizes import konto_indizes
     await konto_indizes(db)
+    # KI-Bewertung (26.09.2026): ein Eintrag je Protokoll und Stand, Kosten je Monat
+    from indizes import ki_indizes
+    await ki_indizes(db)
     try:
         from kontenanlage import konten_ohne_nummer
         ohne = await konten_ohne_nummer(db)

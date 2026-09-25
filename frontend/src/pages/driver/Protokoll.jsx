@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import SignaturePad from "@/components/SignaturePad";
 import DamageSelector from "@/components/DamageSelector";
+import { alleVollstaendig, schwereOffen } from "@/lib/kiSchaden";
 import {
   LEERER_ENTWURF, entwurfAusServer, entwurfZusammenfuehren, istAnnahmeFehlt, istRevisionsKonflikt,
   nutzlast, nutzlastText, preisVorschlagLesen,
@@ -552,6 +553,16 @@ export default function Protokoll() {
   // Runde 30: Schritt 1 — ausgefülltes Protokoll an den Händler schicken.
   // Er prüft die Abweichungen, ruft ggf. den Verkäufer an und gibt frei.
   const zurFreigabe = async () => {
+    // Umbau KI 26.09.2026: jeder neue Schaden braucht alle Angaben (Groesse,
+    // Lack, Tiefe ... — "unbekannt" ist erlaubt); die KI stellt keine
+    // Rueckfragen mehr, sie bekommt alles aus dem Formular.
+    if (!alleVollstaendig(f.new_damages || [])) {
+      const offen = (f.new_damages || []).filter((d) => schwereOffen(d).length > 0)
+        .map((d) => `${d.type_label || d.type_key} ${d.zone || ""}: ${schwereOffen(d).join(", ")}`.trim());
+      toast.error(`Bitte bei jedem neuen Schaden alle Angaben wählen („unbekannt“ geht auch): ${offen.join(" · ")}`,
+                  { duration: 9000 });
+      return;
+    }
     // Gegenpruefung 12.09.2026: halb getippte Daten ("06/20") nicht abschicken —
     // sie wurden sonst als 06/2020 gelesen oder unvollstaendig gedruckt.
     const vorlage = data?.template || {};
@@ -955,10 +966,33 @@ export default function Protokoll() {
       {/* 3 Ausstattung */}
       {(tpl.features || []).length > 0 && (
         <Section n="3" title="Ausstattung laut Inserat" hint="Vorhanden? Bei jedem Punkt Ja oder Nein.">
-          {tpl.features.map((ft) => (
-            <JaNein key={ft} disabled={gesperrt} wert={f.features[ft]}
-                    onChange={(w) => setFeat(ft, w)}>{ft}</JaNein>
-          ))}
+          {tpl.features.map((ft) => {
+            const wert = f.features[ft];
+            const nein = wert === false || typeof wert === "string";
+            const art = typeof wert === "string" ? wert : (wert === false ? "fehlt" : "");
+            return (
+              <div key={ft}>
+                <JaNein disabled={gesperrt} wert={nein ? false : wert}
+                        onChange={(w) => setFeat(ft, w ? true : "fehlt")}>{ft}</JaNein>
+                {/* Umbau KI 26.09.2026: bei "Nein" die Art — fehlt komplett, vorhanden
+                    aber defekt, anders als beschrieben — fuer den Geldwert entscheidend. */}
+                {nein && !gesperrt && (
+                  <div className="flex flex-wrap gap-1.5 pb-2 -mt-1" data-testid={`protokoll-ausstattung-art-${ft}`}>
+                    {[["fehlt", "fehlt komplett"], ["defekt", "vorhanden, defekt"], ["anders", "anders als beschrieben"]].map(([k, l]) => (
+                      <button key={k} type="button" onClick={() => setFeat(ft, k)}
+                              data-testid={`protokoll-ausstattung-${ft}-${k}`}
+                              className="px-2.5 min-h-[32px] rounded-lg text-[11px] border"
+                              style={art === k
+                                ? { borderColor: "var(--st-rot)", color: "var(--st-rot)", background: "color-mix(in srgb, var(--st-rot) 18%, transparent)" }
+                                : { borderColor: "var(--border-default)", color: "var(--text-secondary)" }}>
+                        {l}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </Section>
       )}
 

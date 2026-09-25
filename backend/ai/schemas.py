@@ -1,61 +1,57 @@
 # -*- coding: utf-8 -*-
 """JSON-Schema der KI-Antwort und die Nachpruefung im Backend.
 
-Die KI bekommt das Schema ueber output_config.format — die Antwort IST damit
-gueltiges JSON dieser Form. Trotzdem prueft `bereinigen` jede Zahl: keine
-absurden Spannen (Wunsch Ahmad: kein "100-600 EUR"), kein Nachlass ueber dem
-Kaufpreis, Sicherheit 0..1. Fehlt der KI eine Angabe, meldet sie
-needs_information statt einer aufgeblasenen Spanne."""
+Fassung 3 (Umbau 26.09.2026, Wunsch Ahmad): keine Rueckfragen mehr (alle
+Angaben kommen vorher aus dem Formular), keine Prozent-"Sicherheit" (die
+Datenlage hoch/mittel/niedrig rechnet das Backend), vier klare Geldwerte
+je Position und insgesamt:
+
+  minimum_justified_eur  darunter ist der Nachteil nicht ausgeglichen
+  fair_discount_eur      der sachlich am besten begruendbare Zielwert
+  best_realistic_eur     sehr gutes, noch vertretbares Ergebnis
+  negotiation_start_eur  sinnvolle erste Forderung (ueber best, nicht absurd)
+
+dazu deal_risk normal | high | reconsider_purchase (kein 30-%-Deckel mehr:
+ein nicht erwaehnter Motorschaden am 2.000-EUR-Auto darf den Kauf in Frage
+stellen). Die KI bekommt das Schema ueber output_config.format; `bereinigen`
+prueft trotzdem jede Zahl (Reihenfolge min <= fair <= best <= start, nie
+ueber dem Preis, manuell = 0)."""
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-PROMPT_VERSION = "abholung_v2"          # v2 (26.09.2026): Fahrer-Antworten + Erfahrungswerte
-PROMPT_VERSION_VERTRAG = "vertrag_v1"
-
-# Ein Nachlassbereich darf hoechstens +-SPANNE_MAX um den Hauptwert liegen.
-SPANNE_MAX = 0.20
-SICHERHEIT_MIN_FUER_ZAHL = 0.35
+PROMPT_VERSION = "abholung_v3"
+PROMPT_VERSION_VERTRAG = "vertrag_v2"
 
 KATEGORIEN = ["damage", "damage_worse", "mileage", "keys", "previous_owners",
               "equipment_missing", "equipment_defect", "tires", "documents", "hu",
               "accident_history", "warning_light", "technical", "other"]
 PRIORITAETEN = ["rot", "orange", "gelb"]
+DEAL_RISK = ["normal", "high", "reconsider_purchase"]
+DATENLAGE = ["hoch", "mittel", "niedrig"]
+
+_GELD = {"type": "number"}
 
 _POSITION = {
     "type": "object",
     "properties": {
-        "source_id": {"type": "string",
-                      "description": "id der Abweichung/des Schadens aus der Eingabe"},
+        "source_id": {"type": "string", "description": "id der Abweichung/des Schadens aus der Eingabe"},
         "category": {"type": "string", "enum": KATEGORIEN},
-        "title": {"type": "string", "description": "kurz, deutsch, z. B. 'Delle Kotflügel vorne rechts'"},
+        "title": {"type": "string", "description": "kurz, deutsch, hoechstens 8 Woerter"},
         "price_relevant": {"type": "boolean"},
-        "priority": {"type": "string", "enum": PRIORITAETEN},
-        "repair_method": {"type": "string",
-                          "description": "vermutetes Reparaturverfahren, deutsch, kurz; leer wenn keins"},
-        "repair_estimate_eur": {"type": "number", "description": "geschaetzte Reparaturkosten, 0 wenn nicht anwendbar"},
-        "recommended_discount_eur": {"type": "number"},
-        "discount_min_eur": {"type": "number"},
-        "discount_max_eur": {"type": "number"},
-        "confidence": {"type": "number", "description": "0..1"},
+        "repair_method": {"type": "string", "description": "Reparaturweg, deutsch, hoechstens 6 Woerter; leer wenn keiner"},
+        "repair_estimate_eur": {"type": "number", "description": "geschaetzte Reparaturkosten aus der Referenz, 0 wenn nicht anwendbar"},
+        "minimum_justified_eur": _GELD,
+        "fair_discount_eur": _GELD,
+        "best_realistic_eur": _GELD,
+        "negotiation_start_eur": _GELD,
         "manual_review_required": {"type": "boolean",
-                                   "description": "true bei Unfallfreiheit, Warnleuchten ohne Diagnose u. ae. — dann keine Zahl"},
-        "reason": {"type": "string", "description": "ein Satz, deutsch"},
+                                   "description": "true bei Unfallfreiheit, Warnleuchte, Durchrostung tragender Teile u. ae. — dann alle Betraege 0"},
+        "reason": {"type": "string", "description": "ein Satz, deutsch, hoechstens 14 Woerter; bei 'unbekannt' die getroffene Annahme nennen"},
     },
-    "required": ["source_id", "category", "title", "price_relevant", "priority", "repair_method",
-                 "repair_estimate_eur", "recommended_discount_eur", "discount_min_eur",
-                 "discount_max_eur", "confidence", "manual_review_required", "reason"],
-    "additionalProperties": False,
-}
-
-_FRAGE = {
-    "type": "object",
-    "properties": {
-        "source_id": {"type": "string"},
-        "question": {"type": "string", "description": "eine konkrete Frage an den Fahrer, deutsch"},
-        "options": {"type": "array", "items": {"type": "string"}, "description": "2-4 kurze Antwortmoeglichkeiten"},
-    },
-    "required": ["source_id", "question", "options"],
+    "required": ["source_id", "category", "title", "price_relevant", "repair_method", "repair_estimate_eur",
+                 "minimum_justified_eur", "fair_discount_eur", "best_realistic_eur", "negotiation_start_eur",
+                 "manual_review_required", "reason"],
     "additionalProperties": False,
 }
 
@@ -66,27 +62,25 @@ ANTWORT_SCHEMA: Dict[str, Any] = {
         "combined": {
             "type": "object",
             "properties": {
-                "sum_of_items_eur": {"type": "number"},
+                "sum_fair_eur": {"type": "number", "description": "Summe der fair_discount_eur aller Positionen"},
                 "overlap_adjustment_eur": {"type": "number",
-                                           "description": "Abzug fuer ueberlappende Reparaturen (>= 0)"},
-                "recommended_discount_eur": {"type": "number"},
-                "discount_min_eur": {"type": "number"},
-                "discount_max_eur": {"type": "number"},
-                "negotiation_start_eur": {"type": "number",
-                                          "description": "Nachlass, mit dem der Chef das Gespraech beginnt (etwas ueber dem empfohlenen)"},
-                "confidence": {"type": "number"},
+                                           "description": "Abzug fuer ueberlappende Arbeiten (>= 0), z. B. zwei Schaeden am selben Bauteil"},
+                "minimum_justified_eur": _GELD,
+                "fair_discount_eur": _GELD,
+                "best_realistic_eur": _GELD,
+                "negotiation_start_eur": _GELD,
+                "deal_risk": {"type": "string", "enum": DEAL_RISK,
+                              "description": "reconsider_purchase, wenn die Maengel den Kauf wirtschaftlich in Frage stellen"},
                 "manual_review_required": {"type": "boolean"},
             },
-            "required": ["sum_of_items_eur", "overlap_adjustment_eur", "recommended_discount_eur",
-                         "discount_min_eur", "discount_max_eur", "negotiation_start_eur",
-                         "confidence", "manual_review_required"],
+            "required": ["sum_fair_eur", "overlap_adjustment_eur", "minimum_justified_eur", "fair_discount_eur",
+                         "best_realistic_eur", "negotiation_start_eur", "deal_risk", "manual_review_required"],
             "additionalProperties": False,
         },
-        "needs_information": {"type": "array", "items": _FRAGE},
         "arguments": {"type": "array", "items": {"type": "string"},
-                      "description": "hoechstens 4 kurze Verhandlungsargumente fuer den Verkaeufer, deutsch"},
+                      "description": "hoechstens 3 kurze Verhandlungsargumente fuer den Verkaeufer, deutsch"},
     },
-    "required": ["items", "combined", "needs_information", "arguments"],
+    "required": ["items", "combined", "arguments"],
     "additionalProperties": False,
 }
 
@@ -104,92 +98,77 @@ def _zahl(w: Any, unten: float = 0.0, oben: Optional[float] = None) -> float:
     return round(z, 2)
 
 
-def _spanne(haupt: float, unten: float, oben: float) -> tuple:
-    """Enge Spanne um den Hauptwert erzwingen: hoechstens +-SPANNE_MAX,
-    nie unter 0, nie unter/ueber dem Hauptwert verdreht."""
-    if haupt <= 0:
-        return 0.0, 0.0
-    lo = max(0.0, min(unten, haupt))
-    hi = max(oben, haupt)
-    lo = max(lo, round(haupt * (1 - SPANNE_MAX)))
-    hi = min(hi, round(haupt * (1 + SPANNE_MAX)))
-    if hi < haupt:
-        hi = haupt
-    if lo > haupt:
-        lo = haupt
-    return float(lo), float(hi)
+def _vier(roh: Dict[str, Any], deckel: Optional[float]) -> Dict[str, float]:
+    """min <= fair <= best <= start, alle >= 0, keiner ueber dem Deckel
+    (Preis). Start hoechstens 40 % ueber best, best hoechstens 60 % ueber fair."""
+    mn = _zahl(roh.get("minimum_justified_eur"), 0.0, deckel)
+    fair = _zahl(roh.get("fair_discount_eur"), 0.0, deckel)
+    best = _zahl(roh.get("best_realistic_eur"), 0.0, deckel)
+    start = _zahl(roh.get("negotiation_start_eur"), 0.0, deckel)
+    if fair <= 0:
+        return {"minimum_justified_eur": 0.0, "fair_discount_eur": 0.0, "best_realistic_eur": 0.0,
+                "negotiation_start_eur": 0.0}
+    mn = min(mn, fair)
+    best = max(best, fair)
+    best = min(best, round(fair * 1.6, 2))
+    start = max(start, best)
+    start = min(start, round(best * 1.4, 2))
+    if deckel is not None:
+        best, start = min(best, deckel), min(start, deckel)
+    return {"minimum_justified_eur": mn, "fair_discount_eur": fair, "best_realistic_eur": best,
+            "negotiation_start_eur": start}
 
 
 def bereinigen(daten: Dict[str, Any], *, kaufpreis: Optional[float]) -> Dict[str, Any]:
-    """Zahlen absichern, Spannen eng ziehen, Summen plausibel halten.
+    """Zahlen absichern, Reihenfolge erzwingen, Summen plausibel halten.
     Liefert eine neue Struktur (das Original bleibt fuer die Ablage)."""
     kp = _zahl(kaufpreis) if kaufpreis else 0.0
-    deckel = kp * 0.9 if kp > 0 else None    # nie mehr als 90 % des Kaufpreises
+    deckel = kp if kp > 0 else None      # nie mehr als der Preis selbst
     items: List[Dict[str, Any]] = []
     for roh in daten.get("items") or []:
         if not isinstance(roh, dict):
             continue
         manuell = bool(roh.get("manual_review_required"))
-        sicher = _zahl(roh.get("confidence"), 0.0, 1.0)
-        haupt = 0.0 if manuell else _zahl(roh.get("recommended_discount_eur"), 0.0, deckel)
-        if sicher < SICHERHEIT_MIN_FUER_ZAHL and not manuell:
-            # Zu unsicher fuer eine Zahl: als Frage/Hinweis, nicht als Betrag.
-            manuell = True
-            haupt = 0.0
-        lo, hi = _spanne(haupt, _zahl(roh.get("discount_min_eur")), _zahl(roh.get("discount_max_eur")))
-        prio = roh.get("priority") if roh.get("priority") in PRIORITAETEN else "gelb"
-        if manuell and prio == "gelb":
-            prio = "rot" if roh.get("category") in ("accident_history", "warning_light", "technical") else "orange"
+        vier = _vier({} if manuell else roh, deckel)
         items.append({
             "source_id": str(roh.get("source_id") or ""),
             "category": roh.get("category") if roh.get("category") in KATEGORIEN else "other",
             "title": str(roh.get("title") or "")[:120],
-            "price_relevant": bool(roh.get("price_relevant")) and (haupt > 0 or manuell),
-            "priority": prio,
+            "price_relevant": bool(roh.get("price_relevant")) and (vier["fair_discount_eur"] > 0 or manuell),
             "repair_method": str(roh.get("repair_method") or "")[:80],
-            "repair_estimate_eur": _zahl(roh.get("repair_estimate_eur"), 0.0, deckel),
-            "recommended_discount_eur": haupt,
-            "discount_min_eur": lo,
-            "discount_max_eur": hi,
-            "confidence": sicher,
+            "repair_estimate_eur": _zahl(roh.get("repair_estimate_eur"), 0.0, None),
+            **vier,
             "manual_review_required": manuell,
             "reason": str(roh.get("reason") or "")[:300],
         })
     c = daten.get("combined") or {}
-    summe = round(sum(i["recommended_discount_eur"] for i in items), 2)
+    summe = round(sum(i["fair_discount_eur"] for i in items), 2)
     ueberlappung = _zahl(c.get("overlap_adjustment_eur"), 0.0, summe)
-    gesamt = _zahl(c.get("recommended_discount_eur"), 0.0, deckel)
-    # Die Gesamtempfehlung darf die Einzelsumme nicht uebersteigen und nicht
-    # unter Summe minus Ueberlappung fallen — sonst widerspricht sich die Karte.
+    vier = _vier(c, deckel)
+    # Der faire Gesamtwert liegt zwischen Summe minus Ueberlappung und Summe —
+    # sonst widerspricht sich die Karte; die anderen drei folgen der Reihenfolge.
     if summe > 0:
-        gesamt = min(max(gesamt, round(summe - ueberlappung, 2)), summe)
+        fair = min(max(vier["fair_discount_eur"], round(summe - ueberlappung, 2)), summe)
+        if fair != vier["fair_discount_eur"]:
+            faktor = fair / vier["fair_discount_eur"] if vier["fair_discount_eur"] > 0 else 1.0
+            vier = _vier({"minimum_justified_eur": vier["minimum_justified_eur"] * faktor,
+                          "fair_discount_eur": fair,
+                          "best_realistic_eur": vier["best_realistic_eur"] * faktor,
+                          "negotiation_start_eur": vier["negotiation_start_eur"] * faktor}, deckel)
     else:
-        gesamt = 0.0
-    lo, hi = _spanne(gesamt, _zahl(c.get("discount_min_eur")), _zahl(c.get("discount_max_eur")))
-    einstieg = _zahl(c.get("negotiation_start_eur"), gesamt, deckel)
-    if gesamt > 0:
-        einstieg = max(einstieg, gesamt)
-        einstieg = min(einstieg, round(gesamt * 1.35))
-    else:
-        einstieg = 0.0
+        vier = _vier({}, deckel)
     manuell_gesamt = bool(c.get("manual_review_required")) or any(i["manual_review_required"] for i in items)
+    risiko = c.get("deal_risk") if c.get("deal_risk") in DEAL_RISK else "normal"
+    if kp > 0 and vier["fair_discount_eur"] >= 0.5 * kp and risiko == "normal":
+        risiko = "high"
     combined = {
-        "sum_of_items_eur": summe,
+        "sum_fair_eur": summe,
         "overlap_adjustment_eur": ueberlappung,
-        "recommended_discount_eur": gesamt,
-        "discount_min_eur": lo,
-        "discount_max_eur": hi,
-        "negotiation_start_eur": einstieg,
-        "confidence": _zahl(c.get("confidence"), 0.0, 1.0),
+        **vier,
+        "deal_risk": risiko,
         "manual_review_required": manuell_gesamt,
-        "recommended_purchase_price_eur": round(kp - gesamt, 2) if kp > 0 and gesamt > 0 else None,
+        "recommended_purchase_price_eur": round(kp - vier["fair_discount_eur"], 2)
+        if kp > 0 and vier["fair_discount_eur"] > 0 else None,
     }
-    fragen = []
-    for f in (daten.get("needs_information") or [])[:4]:
-        if isinstance(f, dict) and str(f.get("question") or "").strip():
-            fragen.append({"source_id": str(f.get("source_id") or ""),
-                           "question": str(f["question"])[:200],
-                           "options": [str(o)[:40] for o in (f.get("options") or [])[:4]]})
-    argumente = [str(a)[:200] for a in (daten.get("arguments") or [])[:4] if str(a or "").strip()]
-    return {"items": items, "combined": combined, "needs_information": fragen,
-            "arguments": argumente}
+    argumente = [str(a)[:200] for a in (daten.get("arguments") or [])[:3] if str(a or "").strip()]
+    return {"items": items, "combined": combined, "arguments": argumente}

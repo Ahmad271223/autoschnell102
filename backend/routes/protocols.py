@@ -17,7 +17,7 @@ import logging
 import math
 import hashlib
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field, field_validator
@@ -147,7 +147,25 @@ class ProtocolIn(BaseModel):
     documents: Optional[Dict[str, bool]] = None         # Abschnitt 2
     keys_count: Optional[str] = Field(default=None, max_length=20)
     keys_expected: Optional[str] = Field(default=None, max_length=20)
-    features: Optional[Dict[str, bool]] = None          # Abschnitt 3
+    # Umbau 26.09.2026 (KI): True/False wie bisher; bei Abweichung zusaetzlich
+    # "fehlt" | "defekt" | "anders" (False = fehlt, aeltere App).
+    features: Optional[Dict[str, Union[bool, str]]] = None   # Abschnitt 3
+
+    @field_validator("features", mode="after")
+    @classmethod
+    def _ausstattung_werte(cls, v):
+        if v is None:
+            return v
+        raus = {}
+        for k, w in v.items():
+            if isinstance(w, str):
+                s = w.strip().lower()
+                if s not in ("fehlt", "defekt", "anders"):
+                    raise ValueError(f"Ausstattung {k}: nur Ja/Nein oder fehlt/defekt/anders")
+                raus[k] = s
+            else:
+                raus[k] = w
+        return raus
     condition: Optional[Dict[str, Any]] = None          # Abschnitt 4
     damages_confirmed: Optional[bool] = None            # Abschnitt 5
     # Abschnitt 6: neu entdeckte Schaeden, per Tipp auf die Fahrzeug-Skizze
@@ -1476,7 +1494,9 @@ def _alle_abschnitte_pruefen(doc: dict, ausstattung: List[str]) -> None:
         raise HTTPException(422, "Bitte die Anzahl der vereinbarten Schlüssel "
                                  "eintragen (Abschnitt 2).")
     merkmale = doc.get("features") or {}
-    offen = [f for f in ausstattung if not isinstance(merkmale.get(f), bool)]
+    # Umbau 26.09.2026: "fehlt"/"defekt"/"anders" gelten als beantwortet (Nein + Art)
+    offen = [f for f in ausstattung
+             if not (isinstance(merkmale.get(f), bool) or merkmale.get(f) in ("fehlt", "defekt", "anders"))]
     if offen:
         raise HTTPException(422, "Abschnitt 3: bitte bei jeder Ausstattung Ja oder Nein "
                                  "angeben: " + ", ".join(offen))

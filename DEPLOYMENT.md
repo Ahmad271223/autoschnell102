@@ -3235,3 +3235,53 @@ Abholprotokoll und in der Fahrer-App. Jetzt übersetzt `backend/ausstattung_de.p
 Vertrags. **Migration 15** (`ausstattung_deutsch`, läuft beim Rollout automatisch) übersetzt den
 Bestand in `vehicles` und `listings_cache`; Deutsches bleibt unverändert. Unbekannte englische
 Begriffe bleiben stehen – bitte melden, dann kommen sie in die Tabelle.
+
+### KI-Umbau 26.09.2026 (Wunsch Ahmad): keine Rückfragen, vier Geldwerte, eigene Preisdatenbank, Kostenbremse
+
+**Was sich ändert:**
+- **Keine Rückfragen der KI mehr.** Alle Angaben kommen vorher aus dem Formular: je Schadensart 3 feste
+  Fragen (Delle: Größe, Lack, Lage; Kratzer: Länge, Tiefe, Anzahl; Rost: Umfang, Größe, Stelle; Hagel,
+  Steinschlag, Beleuchtung, Unfall …), „unbekannt“ ist erlaubt. „Schäden bewerten“ ist erst aktiv, wenn
+  jeder Schaden vollständig ist; der Fahrer kann erst dann „zur Freigabe“ schicken. Bei „unbekannt“ nimmt
+  die Referenz die vorsichtige Ausprägung und sagt das (`assumption_made`).
+- **Vier Geldwerte statt Spanne und Prozent** (`schemas.py` v3): Mindestens sinnvoll, Fairer Nachlass
+  (Hauptwert), Sehr gutes Ergebnis, Verhandlung starten – je Position und insgesamt; dazu `deal_risk`
+  (normal / high / reconsider_purchase, kein starrer 30-%-Deckel) und die **Datenlage** hoch/mittel/niedrig,
+  die das Backend deterministisch bestimmt (statt einer erfundenen „Sicherheit 84 %“).
+- **Kontextpaket vor der KI** (`ai/kontext.py`, parallel, je 2 s Zeitlimit): Marktvergleich aus unseren
+  eigenen Fahrzeugen/Inseraten (nur Statistik), Reparaturreferenz je Schaden, Historie ähnlicher Fälle,
+  Vorberechnung. Die KI erfindet keine Preise, sie bewertet einen fertigen Fall.
+- **Reparaturreferenz in drei Stufen:** eigene Preisdatenbank `ki_reparaturpreise` (aus jeder Websuche
+  gelernt: Datenblock `###DATEN` am Ende der Recherche, je Referenzschlüssel + Marke + Altersklasse) vor
+  monatlicher Markttabelle vor Startwerten. Liegen zu einem Schaden ≥ 3 frische eigene Werte (180 Tage),
+  entfällt die Websuche dafür – das System wird mit jedem Fall günstiger.
+- **Websuche je Fall** bleibt im ersten Jahr an (Abholung und Vertrag), aber: höchstens 2 Suchen je Fall,
+  Recherche mit dem günstigen Modell (`KI_RECHERCHE_MODELL`, Standard Haiku 4.5 – Suchergebnisse sind
+  viele Eingabe-Tokens), Bewertung weiter mit `KI_MODELL` (Sonnet), Denken aus (`KI_DENKEN_AUS=true`).
+  Probelauf 26.09.: 29 s, ≈ 11 ct je Abholung mit Suche; ohne Suche ≈ 3 ct.
+- **Kostenbremse** (`ai/budget.py`): `KI_BUDGET_MONAT_EUR` (15) je Sucher-Konto (Vertrag) bzw. Firma
+  (Abholung) und Monat, `KI_KOSTEN_MAX_CT` (15) je Lauf. Ab 80 % des Budgets oder nach einem zu teuren
+  Lauf: Sparmodus (keine Websuche); Budget voll: Status „budget“, keine KI bis Monatsanfang, Vertrag und
+  Freigabe laufen normal. Alarm `ki_kosten_ueberschritten`.
+- **Vertrag läuft im Hintergrund:** `POST /contracts/ki-schadennachlass` antwortet sofort mit `id`, Status
+  „laeuft“ und einer deterministischen Vorschau; die Karte fragt `GET /contracts/ki-schadennachlass/{id}`
+  nach. `POST …/vorschau` liefert nur die Vorschau (kostenlos).
+- **Bekannte Schäden** werden nach Art + Bauteil + Ausprägung abgeglichen; eine Verschlechterung
+  (z. B. Kratzer jetzt bis Blech) wird als `damage_worse` nur mit der Differenz bewertet; gleiche Art am
+  ähnlichen Bauteil = `possibly_known` (vorsichtiger, nicht gestrichen). Beim Vertrag gilt ein Schaden nur
+  dann als möglicherweise im Inserat, wenn Art **und** Bauteil dort stehen.
+- **Ausstattung** in der Fahrer-App: bei „Nein“ zusätzlich fehlt / defekt / anders (Kategorien
+  equipment_missing / equipment_defect). **Unterlagen** zählen nur, wenn vereinbart (Zulassung immer,
+  HU-Bericht bei HU=Ja, Servicebuch bei Scheckheft ja/teilweise, Zweitsatz bei 8-fach) – sonst 0 €.
+  **Weniger km als im Vertrag** ist kein Nachlass, sondern eine manuelle Prüfung.
+- **Lernfall beim Vertrag** nur noch aus dem *vor* der Schadenverhandlung vereinbarten Preis minus
+  Vertragspreis (Basis „kaufpreis“); Inseratspreis minus Vertragspreis wird **nicht** gelernt. Kalibrierung
+  global ab 20 Fällen, je Firma ab 5 (`KI_KALIBRIERUNG_MIN_FAELLE`, `KI_KALIBRIERUNG_MIN_FIRMA`).
+- **Hängende Läufe:** „laeuft“ trägt ein Lease (150 s); danach gilt der Lauf als abgestürzt und wird neu
+  gestartet. Unique-Index `ki_bewertung_je_protokoll_stand` (indizes.ki_indizes, beim Start).
+- **Betriebsseite /admin/betrieb → KI-Bewertung:** Kostenbremse, Median je Lauf, eigene Preisdatenbank
+  (Werte, frisch, Schadensarten), Marktdaten, Erfahrungswerte.
+
+Neue Env-Variablen (compose/.env.example): `KI_BUDGET_MONAT_EUR`, `KI_KOSTEN_MAX_CT`, `KI_RECHERCHE_MODELL`,
+`KI_KONTEXT_ZEITLIMIT_SEKUNDEN`, `KI_KALIBRIERUNG_MIN_FIRMA`; `KI_MARKTANALYSE_VERTRAG` jetzt Standard `true`,
+`KI_DENKEN_AUS` Standard `true`, `KI_KALIBRIERUNG_MIN_FAELLE` Standard 20.

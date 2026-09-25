@@ -1,19 +1,27 @@
 # -*- coding: utf-8 -*-
 """KI-Schadennachlass beim Erstellen des Kaufvertrags (Wunsch Ahmad
-25.09.2026, Stufe 3).
+25.09.2026, Stufe 3; Umbau 26.09.2026).
 
-Der Sucher markiert Schaeden in der Skizze (mit den Zusatzangaben Groesse /
-Lack / Laenge ...), bestaetigt "Das sind alle Schaeden" und bekommt mit EINEM
-KI-Aufruf je Schaden Reparaturweg, Reparaturkosten, empfohlenen Nachlass mit
-engem Bereich, Verhandlungseinstieg und Sicherheit — plus Gesamtempfehlung.
-Grundlage ist der Inseratspreis (oder der schon verhandelte Kaufpreis).
+Der Sucher markiert Schaeden in der Skizze und beantwortet je Schaden die
+festen Fragen (Groesse, Lack, Tiefe, Umfang ...; "unbekannt" erlaubt). Erst
+wenn alles beantwortet ist, startet "Ja, Schaeden bewerten" EINE Bewertung:
+sofort eine deterministische Vorschau aus den Referenzen (`vorschau`), im
+Hintergrund Kontext + gezielte Websuche (solange eigene Daten nicht reichen)
++ EIN KI-Aufruf; die Karte holt das Ergebnis per Abfrage (`lesen`).
 
-Rein beratend: "als Kaufpreis uebernehmen" fuellt nur das Preisfeld. Der
-Aufruf ist synchron (der Sucher wartet auf die Karte), begrenzt je Firma und
-Stunde, und dieselbe Eingabe wird nicht zweimal berechnet.
+Die KI bekommt einen fertigen Fall: Fahrzeug, Preise (Inserat und schon
+verhandelter Preis), Inseratszustand, je Schaden eine Reparaturreferenz
+(eigene Datenbank / Markttabelle / Startwerte), Marktvergleich aus unseren
+eigenen Daten, Historie — und liefert vier Geldwerte je Schaden und
+insgesamt. Keine Rueckfragen. Kostenbremse ai.budget (je Nutzer und Monat,
+je Lauf); jede Websuche fuettert die eigene Preisdatenbank.
+
+Rein beratend: "als Kaufpreis uebernehmen" fuellt nur das Preisfeld.
+Dieselbe Eingabe wird nicht zweimal berechnet; begrenzt je Firma und Stunde.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -26,7 +34,8 @@ import protokoll_vergleich as PV
 from deps import db, now_iso
 from konfig import zahl_env
 
-from ai import kalibrierung, marktdaten, preisbasis, schemas
+from ai import budget, kalibrierung, kontext, marktdaten, preisbasis, schemas
+from ai.pickup_assessment import LEASE_S, _alter_jahre, _kosten_pruefen, _lease_abgelaufen
 from ai.provider import json_bewerten, ki_aktiv, ki_modell
 
 log = logging.getLogger("autohandel.ki")
@@ -37,19 +46,17 @@ ART = "vertrag"
 MAX_JE_STUNDE = zahl_env("KI_VERTRAG_MAX_JE_STUNDE", 40, unten=1, oben=10000)
 
 SYSTEM_PROMPT = """Du bist der Bewertungsdienst von AutoSchnell, einer Software fuer Autohaendler in Deutschland.
-Ein Einkaeufer (Sucher) verhandelt mit einem privaten oder gewerblichen Verkaeufer ueber ein inseriertes Gebrauchtfahrzeug und legt gleich den Kaufvertrag an. Er hat Schaeden am Fahrzeug festgestellt (Skizze mit Bauteil und Zusatzangaben). Du bewertest NUR den wirtschaftlichen Einfluss dieser Schaeden in Euro: Welchen Nachlass gegenueber dem Inseratspreis rechtfertigen sie?
+Ein Einkaeufer (Sucher) verhandelt mit einem Verkaeufer ueber ein inseriertes Gebrauchtfahrzeug und legt gleich den Kaufvertrag an. Er hat Schaeden festgestellt (Skizze mit Bauteil und festen Angaben). Du bewertest NUR den wirtschaftlichen Einfluss dieser Schaeden in Euro: Welchen Nachlass rechtfertigen sie? Das Backend hat den Fall vollstaendig vorbereitet: Du ermittelst nichts, du bewertest.
 
 Regeln:
-1. Du bekommst Fahrzeugdaten, Inseratspreis (ggf. schon verhandelter Kaufpreis), die im Inserat genannten bekannten Maengel und die Liste der Schaeden (damages). Bewerte jeden Schaden als eine Position (source_id = id des Schadens).
-2. Je Schaden: Reparaturweg, geschaetzte Reparaturkosten, empfohlener Nachlass als EIN Hauptwert, ein enger realistischer Bereich (hoechstens +-15 bis 20 % um den Hauptwert), Sicherheit 0..1, ein Satz Begruendung. Nachlass = das, was der Haendler wegen dieses Schadens weniger zahlen sollte (Reparatur + Aufwand + Wertminderung), nicht nur die reine Reparatur.
-3. mentioned_in_listing=true heisst: dieser Schaden steht schon im Inserat und ist im Inseratspreis vermutlich eingepreist — dann deutlich geringerer Nachlass (nur der Teil, der ueber die Inseratsbeschreibung hinausgeht) und das in reason sagen.
-4. Keine grossen Spannen. Fehlt dir eine konkrete Angabe (z. B. Lack beschaedigt?, Groesse?), gib die Position mit deiner besten Schaetzung ab UND stelle in needs_information genau EINE konkrete Frage mit 2-4 Antwortmoeglichkeiten (source_id = id des Schadens).
-5. Unfallschaden nicht repariert (Blech + Rahmen oder Umfang unbekannt), Durchrostung tragender Teile: manual_review_required=true, priority "rot", Nachlass 0 (keine scheinpraezise Zahl), Grund nennen. Ein dokumentiert reparierter Unfallschaden ist Wertminderung, keine Reparatur.
-6. Beruecksichtige Fahrzeugwert, Alter, Kilometer, Klasse und Marke (Premiummarken teurer; eine kleine Delle am 3.000-EUR-Auto anders als am 40.000-EUR-Auto). Ein Nachlass darf nie ueber dem Preis liegen und selten ueber 30 % davon.
-7. combined: Einzelsumme, Abzug fuer ueberlappende Arbeiten (zwei Schaeden am selben Bauteil = eine Lackierung), empfohlener Gesamtnachlass, enger Bereich, Verhandlungseinstieg (10-25 % ueber dem empfohlenen Nachlass), Sicherheit.
-8. arguments: hoechstens 3 kurze, sachliche Saetze fuer das Gespraech mit dem Verkaeufer (deutsch, neutral, z. B. "Der Kotfluegel vorne rechts hat eine Delle, die im Inserat nicht genannt ist.").
-9. Preise in Euro inkl. MwSt. (Deutschland 2026). Nutze die Ausgangswerte unten als Orientierung und passe sie an das konkrete Fahrzeug an. Antworte ausschliesslich nach dem vorgegebenen JSON-Schema, alle Texte auf Deutsch.
-10. Knapp: title hoechstens 8 Woerter, reason hoechstens 15 Woerter, repair_method hoechstens 6 Woerter, hoechstens 2 needs_information. Kategorie fuer Skizzen-Schaeden ist "damage".
+1. Jeder Schaden in damages bekommt genau eine Position (source_id = id). possibly_known=true heisst: der Schaden koennte im Inserat genannt und eingepreist sein — Nachlass vorsichtiger, nicht streichen; sage das in reason.
+2. Verwende ausschliesslich die gelieferten Daten: repair_reference (Reparaturweg, low/median/high EUR, Quelle), market (Vergleichspreise), history (eigene Faelle), prices, listing_state, die Marktrecherche unten. Allgemeines Fachwissen dient der Einordnung; erfinde keine konkreten aktuellen Markt-, Ersatzteil- oder Werkstattpreise. Fehlt eine Referenz, nutze die Ausgangswerte unten und sage das in reason.
+3. assumption_made=true bei einer Referenz heisst: eine Angabe war "unbekannt", die Referenz nimmt die vorsichtige Auspraegung — uebernimm das und nenne die Annahme in reason. Stelle keine Rueckfragen.
+4. Vier Geldwerte je Position und insgesamt: minimum_justified_eur (darunter ist der Nachteil nicht ausgeglichen), fair_discount_eur (sachlich am besten begruendbarer Zielwert, meist nahe median der Referenz plus Aufwand/Wertminderung), best_realistic_eur (sehr gutes, noch vertretbares Ergebnis), negotiation_start_eur (erste Forderung, ueber best, nicht absurd). Immer min <= fair <= best <= start.
+5. prices.agreed_price_eur ist der schon VOR der Schadenverhandlung vereinbarte Preis — ein allgemeiner Nachlass gegenueber dem Inserat ist kein Schadennachlass. Basis fuer den Zielpreis ist agreed_price_eur, sonst listing_price_eur. Beruecksichtige Fahrzeugwert, Alter, Kilometer, Klasse, Marke und die Marktposition (liegt der Preis schon unter dem Median, ist der Spielraum kleiner). Bei einem alten, guenstigen Fahrzeug ist voller Reparaturkostenersatz nicht automatisch der faire Nachlass.
+6. manual_review_required=true (alle Betraege 0) bei: Unfallschaden nicht repariert mit Rahmen/unbekanntem Umfang, Durchrostung oder tragende Teile (Schweller, Traeger). Stellen die Schaeden den Kauf wirtschaftlich in Frage, setze deal_risk=reconsider_purchase; bei hohem Preisrisiko high. Kein starrer Prozentdeckel.
+7. combined: sum_fair_eur, Abzug fuer ueberlappende Arbeiten (zwei Schaeden am selben Bauteil = eine Lackierung), dann die vier Gesamtwerte und deal_risk. arguments: hoechstens 3 kurze sachliche Saetze fuer das Gespraech mit dem Verkaeufer (deutsch, neutral, z. B. "Der Kotfluegel vorne rechts hat eine Delle, die im Inserat nicht genannt ist.").
+8. Knapp: title hoechstens 8 Woerter, reason hoechstens 14 Woerter, repair_method hoechstens 6 Woerter. Kategorie fuer Skizzen-Schaeden ist "damage". Antworte ausschliesslich nach dem JSON-Schema, alle Texte auf Deutsch, Preise in Euro inkl. MwSt.
 
 """ + preisbasis.basis_als_text()
 
@@ -75,24 +82,31 @@ _ERWAEHNUNG = {
     "beleuchtung": r"scheinwerfer|leuchte|licht\s+defekt|beleuchtung",
     "unfall_repariert": r"unfall", "unfall_nicht_repariert": r"unfall",
 }
+_BAUTEILE = ("kotflügel", "kotfluegel", "tür", "tuer", "stoß", "stoss", "heck", "front", "haube", "dach", "schweller",
+             "spiegel", "scheibe", "felge", "seite", "hinten", "vorne", "links", "rechts")
 
 
-def _im_inserat(d: dict, text: str) -> bool:
-    """Steht die Schadensart (grob) schon in Beschreibung/bekannten Maengeln?"""
+def _moeglich_im_inserat(d: dict, text: str) -> bool:
+    """Umbau 26.09.2026: nicht mehr 'Wort kommt irgendwo vor' — die Schadensart
+    UND ein Bauteilwort der Zone muessen im Inserat stehen. Dann gilt der
+    Schaden als MOEGLICHERWEISE bekannt (possibly_known), nie als sicher."""
     muster = _ERWAEHNUNG.get(str(d.get("type_key") or "").lower())
-    return bool(muster and re.search(muster, text))
+    if not muster or not re.search(muster, text):
+        return False
+    zone = str(d.get("zone") or "").lower()
+    woerter = [w for w in _BAUTEILE if w in zone]
+    return any(w in text for w in woerter) if woerter else False
 
 
-def paket_bauen(vehicle: dict, damages: List[dict], *, kaufpreis: Optional[float]) -> Dict[str, Any]:
-    """Normalisiertes Eingabepaket — nur Fahrzeug, Preise, bekannte Maengel
-    und die Schaeden. Keine Verkaeuferdaten."""
+def paket_bauen(vehicle: dict, damages: List[dict], *, kaufpreis: Optional[float],
+                marktdoc: Optional[dict] = None) -> Dict[str, Any]:
+    """Normalisiertes Eingabepaket — Fahrzeug, Preise, Inseratszustand und die
+    Schaeden mit Reparaturreferenz. Keine Verkaeuferdaten."""
     v = vehicle or {}
     text = " ".join([str(v.get("description") or "")] + [str(m) for m in (v.get("known_defects") or [])]).lower()
     inserat = _zahl(v.get("price")) or _zahl(v.get("list_price"))
     ez = PV.monat_jahr_text(v.get("first_registration") or v.get("ezl") or "", "ez")
     kw = _zahl(v.get("power_kw"))
-    # Wunsch Ahmad 26.09.2026: EZ, PS, Marke, Modell, Alter, Hubraum, Farbe
-    from ai.pickup_assessment import _alter_jahre
     fahrzeug = {
         "make": (v.get("make_label") or v.get("make") or "")[:60],
         "model": (v.get("model_label") or v.get("model") or "")[:80],
@@ -109,25 +123,36 @@ def paket_bauen(vehicle: dict, damages: List[dict], *, kaufpreis: Optional[float
         "category": (v.get("category_label") or v.get("category") or "")[:40],
         "previous_owners": _zahl(v.get("previous_owners")),
         "hu": PV.monat_jahr_text(v.get("hu") or "", "hu") or (str(v.get("hu") or "")[:20]),
-        "accident_damaged_listing": v.get("accident_damaged"),
+    }
+    listing_state = {
+        "accident_damaged": v.get("accident_damaged"),
+        "roadworthy": v.get("roadworthy"),
+        "keys": PV.zahl(v.get("keys_count")),
+        "known_defects": [str(m)[:200] for m in (v.get("known_defects") or []) if str(m or "").strip()][:20],
+        "equipment_count": len(v.get("features") or []),
     }
     schaeden = []
     for d in damages or []:
         if not isinstance(d, dict):
             continue
         s = _schaden(d)
-        s["mentioned_in_listing"] = _im_inserat(d, text)
+        s["possibly_known"] = _moeglich_im_inserat(d, text)
+        s["repair_reference"] = kontext.reparaturreferenz(d, marktdoc)
         schaeden.append(s)
-    return {
+    paket = {
         "vehicle": fahrzeug,
         "prices": {"listing_price_eur": inserat, "agreed_price_eur": kaufpreis},
-        "known_defects_listing": [str(m)[:200] for m in (v.get("known_defects") or []) if str(m or "").strip()][:20],
+        "listing_state": listing_state,
         "damages": schaeden,
     }
+    paket["precomputed"] = kontext.vorberechnet(paket)
+    return paket
 
 
 def eingabe_hash(paket: Dict[str, Any]) -> str:
-    roh = json.dumps(paket, ensure_ascii=False, sort_keys=True, default=str)
+    kern = {"vehicle": paket.get("vehicle"), "prices": paket.get("prices"), "listing_state": paket.get("listing_state"),
+            "damages": [{k: v for k, v in d.items() if k != "repair_reference"} for d in paket.get("damages") or []]}
+    roh = json.dumps(kern, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(roh.encode("utf-8")).hexdigest()
 
 
@@ -136,7 +161,8 @@ def _oeffentlich(doc: dict) -> dict:
             "input_hash": doc.get("input_hash"), "modell": doc.get("modell"),
             "prompt_version": doc.get("prompt_version"), "created_at": doc.get("created_at"),
             "dauer_ms": doc.get("dauer_ms"), "ergebnis": doc.get("ergebnis"),
-            "kaufpreis": doc.get("kaufpreis"), "basis": doc.get("basis")}
+            "kaufpreis": doc.get("kaufpreis"), "basis": doc.get("basis"), "kosten_ct": doc.get("kosten_ct"),
+            "vorschau": doc.get("vorschau"), "budget": doc.get("budget")}
 
 
 async def _limit_erreicht(dealer_id: str) -> bool:
@@ -146,60 +172,127 @@ async def _limit_erreicht(dealer_id: str) -> bool:
     return n >= MAX_JE_STUNDE
 
 
+# ------------------------------------------------ Vorschau (sofort, ohne KI)
+def vorschau(vehicle_doc: dict, damages: List[dict], kaufpreis: Optional[float] = None,
+             marktdoc: Optional[dict] = None) -> dict:
+    """Deterministische Sofort-Schaetzung aus den Referenzen — erscheint, bevor
+    die KI antwortet. Kein Aufruf, keine Kosten."""
+    vehicle = (vehicle_doc or {}).get("data") or {}
+    paket = paket_bauen(vehicle, damages, kaufpreis=kaufpreis, marktdoc=marktdoc)
+    basis_preis = kaufpreis if kaufpreis else paket["prices"].get("listing_price_eur")
+    v = kontext.vorschau(paket, basis_preis)
+    v["positionen"] = [{"source_id": d["id"], "title": f"{d['label']} {d['zone']}".strip(),
+                        "repair_reference": d.get("repair_reference")} for d in paket["damages"]]
+    v["datenlage"] = kontext.datenlage(paket)
+    v["kaufpreis"] = basis_preis
+    v["basis"] = "kaufpreis" if kaufpreis else "inseratspreis"
+    return v
+
+
 # ------------------------------------------------ Bewerten
+_laufende: set = set()
+
+
 async def bewerten(*, user: dict, vehicle_doc: dict, damages: List[dict],
-                   kaufpreis: Optional[float] = None) -> dict:
-    """Synchron: baut das Paket, nimmt ein vorhandenes Ergebnis fuer denselben
-    Stand, sonst EIN KI-Aufruf. Liefert immer ein Ergebnis mit status (ok |
-    keine | aus | limit | fehler | zeitlimit | ...). Wirft nie."""
+                   kaufpreis: Optional[float] = None, warten: bool = True) -> dict:
+    """Startet die Bewertung. warten=True: rechnet inline und liefert das
+    Endergebnis (Tests, Skripte). warten=False: legt sofort einen "laeuft"-
+    Eintrag mit Vorschau an, rechnet im Hintergrund und liefert den Start-
+    Zustand — die Karte fragt per `lesen(id)` nach. Wirft nie."""
     dealer_id = user.get("dealer_id") or ""
     vehicle = (vehicle_doc or {}).get("data") or {}
-    paket = paket_bauen(vehicle, damages, kaufpreis=kaufpreis)
-    h = eingabe_hash(paket)
-    basis_preis = kaufpreis if kaufpreis else paket["prices"].get("listing_price_eur")
     jetzt = now_iso()
     basis = {"id": str(uuid.uuid4()), "art": ART, "dealer_id": dealer_id, "user_id": user.get("id"),
-             "vehicle_id": vehicle_doc.get("id"), "input_hash": h,
-             "prompt_version": schemas.PROMPT_VERSION_VERTRAG, "modell": ki_modell(),
-             "created_at": jetzt, "kaufpreis": basis_preis,
-             "basis": "kaufpreis" if kaufpreis else "inseratspreis"}
+             "vehicle_id": vehicle_doc.get("id"), "prompt_version": schemas.PROMPT_VERSION_VERTRAG,
+             "modell": ki_modell(), "created_at": jetzt, "basis": "kaufpreis" if kaufpreis else "inseratspreis"}
+    # Kosten der Recherche (Haiku) werden separat mit dem Recherche-Modell gerechnet
     try:
+        ktx = await kontext.sammeln(vehicle, ART, eigene_id=str(vehicle_doc.get("id") or ""))
+        paket = paket_bauen(vehicle, damages, kaufpreis=kaufpreis, marktdoc=ktx.get("marktdoc"))
+        eigene = await marktdaten.eigene_referenzen(paket, ART)
+        kontext.eigene_anwenden(paket, eigene)
+        h = eingabe_hash(paket)
+        basis_preis = kaufpreis if kaufpreis else paket["prices"].get("listing_price_eur")
+        basis.update(input_hash=h, kaufpreis=basis_preis)
         if not paket["damages"]:
             return _oeffentlich({**basis, "status": "keine", "grund": "keine Schäden erfasst", "ergebnis": None})
         vorhanden = await db[SAMMLUNG].find_one({"art": ART, "dealer_id": dealer_id, "input_hash": h,
-                                                 "status": "ok"}, {"_id": 0})
-        if vorhanden:
+                                                 "status": {"$in": ["ok", "laeuft"]}}, {"_id": 0},
+                                                sort=[("created_at", -1)])
+        if vorhanden and (vorhanden.get("status") == "ok" or not _lease_abgelaufen(vorhanden)):
             return _oeffentlich(vorhanden)
+        vorl = kontext.vorschau(paket, basis_preis)
         if not ki_aktiv():
-            return _oeffentlich({**basis, "status": "aus", "grund": "KI-Bewertung nicht aktiv", "ergebnis": None})
+            return _oeffentlich({**basis, "status": "aus", "grund": "KI-Bewertung nicht aktiv", "ergebnis": None,
+                                 "vorschau": vorl})
         if await _limit_erreicht(dealer_id):
             return _oeffentlich({**basis, "status": "limit",
                                  "grund": f"Höchstens {MAX_JE_STUNDE} Bewertungen je Stunde und Firma — bitte später erneut.",
-                                 "ergebnis": None})
-        # Zusatz (ungecacht): Marktpreise, Erfahrungswerte, Recherche je Fall
-        # (beim Vertrag standardmaessig aus — der Sucher wartet auf die Karte).
-        fall = await marktdaten.fall_recherche("vertrag", paket)
-        zusatz = "\n\n".join(t for t in (await marktdaten.prompt_zusatz(),
-                                          await kalibrierung.prompt_zusatz(),
+                                 "ergebnis": None, "vorschau": vorl})
+        bud = await budget.pruefen(user_id=user.get("id"), dealer_id=dealer_id, art=ART)
+        if not bud["erlaubt"]:
+            eintrag = {**basis, "status": "budget", "grund": bud["grund"], "ergebnis": None, "vorschau": vorl,
+                       "budget": bud, "dauer_ms": 0, "kosten_ct": 0}
+            await db[SAMMLUNG].insert_one(dict(eintrag))
+            return _oeffentlich(eintrag)
+        lease = (datetime.now(timezone.utc) + timedelta(seconds=LEASE_S)).isoformat()
+        start = {**basis, "status": "laeuft", "grund": "", "ergebnis": None, "vorschau": vorl, "lease_until": lease,
+                 "kosten_ct": 0}
+        await db[SAMMLUNG].insert_one(dict(start))
+        paket["market"] = kontext.marktposition(ktx.get("markt"), listing=paket["prices"].get("listing_price_eur"),
+                                                agreed=kaufpreis)
+        paket["history"] = ktx.get("historie")
+        lauf = _rechnen(basis, paket, vorl, bud, eigene, vehicle_doc, marktdoc=ktx.get("marktdoc"))
+        if warten:
+            return await lauf
+        aufgabe = asyncio.get_running_loop().create_task(lauf)
+        _laufende.add(aufgabe)
+        aufgabe.add_done_callback(_laufende.discard)
+        return _oeffentlich(start)
+    except Exception:  # noqa: BLE001 — die KI ist Beiwerk, nie ein 500
+        log.exception("KI-Schadennachlass %s gescheitert", vehicle_doc.get("id"))
+        return _oeffentlich({**basis, "status": "fehler", "grund": "interner Fehler", "ergebnis": None})
+
+
+async def _rechnen(basis: dict, paket: dict, vorl: dict, bud: dict, eigene: dict, vehicle_doc: dict,
+                   *, marktdoc: Optional[dict]) -> dict:
+    """Der eigentliche Lauf: Websuche (wenn noetig), Lernen, KI, Ablage."""
+    try:
+        fall = await marktdaten.fall_recherche(ART, paket, sparmodus=bud["sparmodus"], eigene=eigene)
+        gelernt = await marktdaten.lernen_aus_recherche(fall, paket, ART)
+        if gelernt:
+            eigene = await marktdaten.eigene_referenzen(paket, ART)
+            kontext.eigene_anwenden(paket, eigene)
+        lage = kontext.datenlage(paket)
+        zusatz = "\n\n".join(t for t in (marktdaten.als_text(marktdoc),
+                                          await kalibrierung.prompt_zusatz(basis["dealer_id"]),
                                           marktdaten.fall_als_text(fall)) if t)
         antwort = await json_bewerten(system=SYSTEM_PROMPT, nutzer=paket, schema=schemas.ANTWORT_SCHEMA,
                                       zusatz=zusatz or None)
+        kosten = await _kosten_pruefen(antwort.get("usage") or {}, antwort.get("modell") or basis["modell"],
+                                       str(vehicle_doc.get("id") or ""), ART, fall)
         usage = dict(antwort.get("usage") or {})
         if fall:
             for k, v in (fall.get("usage") or {}).items():
                 usage[k] = int(usage.get(k) or 0) + int(v or 0)
         eintrag = {**basis, "dauer_ms": int(antwort.get("dauer_ms") or 0) + int((fall or {}).get("dauer_ms") or 0),
-                   "usage": usage, "modell": antwort.get("modell") or basis["modell"], "eingabe": paket,
+                   "usage": usage, "kosten_ct": kosten, "modell": antwort.get("modell") or basis["modell"],
+                   "eingabe": paket, "datenlage": lage, "vorschau": vorl,
+                   "budget": {k: bud.get(k) for k in ("verbraucht_ct", "grenze_ct", "sparmodus")},
                    "recherche": ({"status": fall.get("status"), "suchen": fall.get("suchen"),
-                                  "quellen": fall.get("quellen"), "text": fall.get("text")} if fall else None)}
+                                  "quellen": fall.get("quellen"), "text": fall.get("text"),
+                                  "gelernt": gelernt} if fall else None)}
         if antwort.get("status") == "ok" and isinstance(antwort.get("daten"), dict):
-            ergebnis = schemas.bereinigen(antwort["daten"], kaufpreis=basis_preis)
-            ergebnis["quellen"] = list((fall or {}).get("quellen") or [])
+            ergebnis = schemas.bereinigen(antwort["daten"], kaufpreis=basis["kaufpreis"])
             for it in ergebnis.get("items") or []:
                 it["priority"] = preisbasis.prioritaet(it.get("category") or "damage",
-                                                       betrag=it.get("recommended_discount_eur"),
-                                                       kaufpreis=basis_preis,
+                                                       betrag=it.get("fair_discount_eur"),
+                                                       kaufpreis=basis["kaufpreis"],
                                                        manuell=bool(it.get("manual_review_required")))
+            ergebnis["datenlage"] = lage
+            ergebnis["market"] = paket.get("market")
+            ergebnis["quellen"] = list((fall or {}).get("quellen") or [])
+            ergebnis["referenzen"] = {d["id"]: d.get("repair_reference") for d in paket["damages"] if d.get("repair_reference")}
             eintrag.update(status="ok", grund="", ergebnis=ergebnis, roh=antwort["daten"])
         else:
             eintrag.update(status=antwort.get("status") or "fehler", grund=antwort.get("grund") or "",
@@ -210,17 +303,37 @@ async def bewerten(*, user: dict, vehicle_doc: dict, damages: List[dict],
                                     status=eintrag["status"], grund=eintrag["grund"][:200], art=ART)
             except Exception:  # noqa: BLE001
                 pass
-        await db[SAMMLUNG].insert_one(dict(eintrag))
+        await db[SAMMLUNG].update_one({"id": basis["id"]}, {"$set": eintrag, "$unset": {"lease_until": ""}})
         return _oeffentlich(eintrag)
-    except Exception:  # noqa: BLE001 — die KI ist Beiwerk, nie ein 500
-        log.exception("KI-Schadennachlass %s gescheitert", vehicle_doc.get("id"))
-        return _oeffentlich({**basis, "status": "fehler", "grund": "interner Fehler", "ergebnis": None})
+    except Exception:  # noqa: BLE001
+        log.exception("KI-Schadennachlass-Lauf %s gescheitert", basis.get("id"))
+        eintrag = {**basis, "status": "fehler", "grund": "interner Fehler", "ergebnis": None, "vorschau": vorl}
+        try:
+            await db[SAMMLUNG].update_one({"id": basis["id"]}, {"$set": eintrag, "$unset": {"lease_until": ""}})
+        except Exception:  # noqa: BLE001
+            pass
+        return _oeffentlich(eintrag)
+
+
+async def lesen(bewertung_id: str, dealer_id: str) -> Optional[dict]:
+    """Stand einer Bewertung (die Karte fragt nach). Ein "laeuft" ohne
+    Ergebnis nach LEASE_S Sekunden gilt als abgestuerzt -> fehler."""
+    doc = await db[SAMMLUNG].find_one({"id": bewertung_id, "art": ART, "dealer_id": dealer_id}, {"_id": 0})
+    if not doc:
+        return None
+    if _lease_abgelaufen(doc):
+        doc = {**doc, "status": "fehler", "grund": "Bewertung abgebrochen (Zeitlimit) — bitte erneut versuchen."}
+    return _oeffentlich(doc)
 
 
 # ------------------------------------------------ Lernen
 async def lernfall_speichern(contract: dict, ki_bewertung_id: Optional[str]) -> None:
     """Beim Anlegen des Vertrags: was die KI empfahl und was wirklich im
-    Vertrag steht (Inseratspreis minus Kaufpreis = erzielter Nachlass).
+    Vertrag steht. Umbau 26.09.2026: gelernt wird NUR der Nachlass wegen der
+    Schaeden — also nur, wenn die Bewertung auf dem schon VOR der
+    Schadenverhandlung vereinbarten Preis (basis "kaufpreis") beruhte:
+    tatsaechlich = dieser Preis minus Vertragspreis. Inseratspreis minus
+    Vertragspreis enthaelt den allgemeinen Nachlass und wird NICHT gelernt.
     Anonym, ohne Verkaeuferdaten. Wirft nie."""
     if not ki_bewertung_id:
         return
@@ -232,11 +345,16 @@ async def lernfall_speichern(contract: dict, ki_bewertung_id: Optional[str]) -> 
         eingabe = bew.get("eingabe") or {}
         comb = (bew.get("ergebnis") or {}).get("combined") or {}
         inserat = (eingabe.get("prices") or {}).get("listing_price_eur")
+        vorher = (eingabe.get("prices") or {}).get("agreed_price_eur")
         kaufpreis = contract.get("purchase_price")
-        try:
-            erzielt = round(float(inserat) - float(kaufpreis), 2) if inserat is not None and kaufpreis is not None else None
-        except (TypeError, ValueError):
-            erzielt = None
+        erzielt = None
+        if bew.get("basis") == "kaufpreis" and vorher is not None and kaufpreis is not None:
+            try:
+                erzielt = round(float(vorher) - float(kaufpreis), 2)
+            except (TypeError, ValueError):
+                erzielt = None
+            if erzielt is not None and erzielt < 0:
+                erzielt = None
         await db[LERN_SAMMLUNG].update_one(
             {"contract_id": contract.get("id"), "ki_bewertung_id": ki_bewertung_id},
             {"$set": {
@@ -244,12 +362,13 @@ async def lernfall_speichern(contract: dict, ki_bewertung_id: Optional[str]) -> 
                 "ki_bewertung_id": ki_bewertung_id, "input_hash": bew.get("input_hash"),
                 "created_at": now_iso(), "modell": bew.get("modell"), "prompt_version": bew.get("prompt_version"),
                 "fahrzeug": eingabe.get("vehicle"), "schaeden": eingabe.get("damages"),
-                "inseratspreis": inserat, "vertragspreis": kaufpreis,
-                "ki_nachlass": comb.get("recommended_discount_eur"),
-                "ki_bereich": [comb.get("discount_min_eur"), comb.get("discount_max_eur")],
-                "tatsaechlicher_nachlass": erzielt if (erzielt is None or erzielt >= 0) else None,
-                "items": [{k: i.get(k) for k in ("source_id", "category", "title", "recommended_discount_eur",
-                                                  "discount_min_eur", "discount_max_eur", "confidence")}
+                "datenlage": bew.get("datenlage"),
+                "inseratspreis": inserat, "preis_vor_maengelverhandlung": vorher, "vertragspreis": kaufpreis,
+                "ki_nachlass": comb.get("fair_discount_eur"),
+                "ki_bereich": [comb.get("minimum_justified_eur"), comb.get("best_realistic_eur")],
+                "tatsaechlicher_nachlass": erzielt,
+                "items": [{k: i.get(k) for k in ("source_id", "category", "title", "fair_discount_eur",
+                                                  "minimum_justified_eur", "best_realistic_eur")}
                           for i in (bew.get("ergebnis") or {}).get("items") or []],
             }}, upsert=True)
         kalibrierung.zuruecksetzen()

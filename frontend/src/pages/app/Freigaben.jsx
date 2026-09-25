@@ -309,9 +309,7 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
           "Fahrer fragen" = bestehendes "Zurück an den Fahrer" mit der Frage. */}
       {!e.ladefehler && !freigegeben && (
         <KiBewertungKarte eintrag={e} busy={busy}
-          onPreis={(p) => { setzen("preis", preisText(p)); toast.info("Preis ins Feld übernommen — Freigeben bestätigt ihn."); }}
-          onFrage={(f) => senden(e, { zurueck: true, rueckfrage_frage: f, notiz: `Bitte prüfen: ${f.question}`
-            + (f.options?.length ? ` (${f.options.join(" / ")})` : "") })} />
+          onPreis={(p) => { setzen("preis", preisText(p)); toast.info("Preis ins Feld übernommen — Freigeben bestätigt ihn."); }} />
       )}
       {(e.rueckfrage_antworten || []).length > 0 && (
         // Stufe 3 KI (26.09.2026): was der Fahrer per Knopf geantwortet hat
