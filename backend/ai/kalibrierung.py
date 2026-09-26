@@ -63,6 +63,7 @@ async def erfahrungswerte(*, frisch: bool = False, dealer_id: Optional[str] = No
         faktoren: List[float] = []
         je_kat: Dict[str, List[float]] = {}
         je_art: Dict[str, List[float]] = {}
+        je_art_kat: Dict[str, Dict[str, List[float]]] = {}
         filt = {"dealer_id": dealer_id} if dealer_id else {}
         cursor = db[LERN_SAMMLUNG].find(filt, {"_id": 0, "ki_nachlass": 1, "tatsaechlicher_nachlass": 1,
                                               "chef_nachlass": 1, "items": 1, "art": 1}
@@ -71,16 +72,23 @@ async def erfahrungswerte(*, frisch: bool = False, dealer_id: Optional[str] = No
             f = _faktor(d)
             if f is None:
                 continue
+            art = d.get("art") or "abholung"
             faktoren.append(f)
-            je_art.setdefault(d.get("art") or "abholung", []).append(f)
+            je_art.setdefault(art, []).append(f)
             items = [i for i in (d.get("items") or []) if (i.get("fair_discount_eur") or i.get("recommended_discount_eur") or 0) > 0]
             if len(items) == 1:
-                je_kat.setdefault(str(items[0].get("category") or "other"), []).append(f)
+                kat = str(items[0].get("category") or "other")
+                je_kat.setdefault(kat, []).append(f)
+                je_art_kat.setdefault(art, {}).setdefault(kat, []).append(f)
         if faktoren:
             werte["gesamt"] = {"n": len(faktoren), "faktor_median": round(statistics.median(faktoren), 2)}
         werte["je_kategorie"] = {k: {"n": len(v), "faktor_median": round(statistics.median(v), 2)}
                                  for k, v in je_kat.items()}
-        werte["je_art"] = {k: {"n": len(v), "faktor_median": round(statistics.median(v), 2)}
+        # Review 26.09.2026 (Nr. 36-38): der Prompt-Zusatz nimmt den Faktor JE ART
+        # (Abholung und Vertrag verhandeln verschieden), samt Kategorien je Art.
+        werte["je_art"] = {k: {"n": len(v), "faktor_median": round(statistics.median(v), 2),
+                               "je_kategorie": {kk: {"n": len(vv), "faktor_median": round(statistics.median(vv), 2)}
+                                                for kk, vv in (je_art_kat.get(k) or {}).items()}}
                            for k, v in je_art.items()}
     except Exception:  # noqa: BLE001
         log.exception("Erfahrungswerte nicht berechenbar")
@@ -89,31 +97,54 @@ async def erfahrungswerte(*, frisch: bool = False, dealer_id: Optional[str] = No
     return werte
 
 
-def als_text(werte: Dict[str, Any], *, minimum: Optional[int] = None, titel: str = "AutoSchnell-Faellen") -> str:
-    """Kurzer Prompt-Zusatz — leer, solange zu wenige Faelle vorliegen."""
+# Review 26.09.2026 (Nr. 37): Der Faktor im Prompt bleibt in einem festen
+# Band. Ein Haendler, der wenig verhandelt, wuerde die KI sonst mit jedem
+# Fall weiter herunterziehen (Rueckkopplung) — und ein Verhandlungskuenstler
+# sie nach oben treiben. Die Reparaturkosten bleiben die Grundlage.
+FAKTOR_UNTEN, FAKTOR_OBEN = 0.6, 1.2
+ART_TITEL = {"abholung": "Abholung", "vertrag": "Vertrag"}
+
+
+def faktor_begrenzt(f) -> float:
+    try:
+        return round(min(FAKTOR_OBEN, max(FAKTOR_UNTEN, float(f))), 2)
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def als_text(werte: Dict[str, Any], *, art: str = "abholung", minimum: Optional[int] = None,
+             titel: str = "AutoSchnell-Faellen") -> str:
+    """Kurzer Prompt-Zusatz aus den Faellen DIESER Art — leer, solange zu
+    wenige vorliegen. Faktor auf 60-120 % begrenzt und ausdruecklich als
+    Orientierung formuliert, nicht als Ersatz fuer die Reparaturkosten."""
     mindest = minimum if minimum is not None else MIN_FAELLE
-    g = (werte or {}).get("gesamt") or {}
-    if (g.get("n") or 0) < mindest:
+    a = ((werte or {}).get("je_art") or {}).get(art) or {}
+    if (a.get("n") or 0) < mindest:
         return ""
-    zeilen = [f"Erfahrungswerte aus {g['n']} abgeschlossenen {titel}: der tatsaechlich "
-              f"erzielte Nachlass lag im Median bei {round(g['faktor_median'] * 100)} % der KI-Empfehlung (fair)."]
-    kat = [(k, w) for k, w in ((werte or {}).get("je_kategorie") or {}).items() if (w.get("n") or 0) >= mindest]
+    zeilen = [f"Erfahrungswerte aus {a['n']} abgeschlossenen {titel} ({ART_TITEL.get(art, art)}): der tatsaechlich "
+              f"erzielte Nachlass lag im Median bei etwa {round(faktor_begrenzt(a['faktor_median']) * 100)} % "
+              "der KI-Empfehlung (fair)."]
+    kat = [(k, w) for k, w in (a.get("je_kategorie") or {}).items() if (w.get("n") or 0) >= mindest]
     if kat:
-        zeilen.append("Je Kategorie: " + "; ".join(f"{k} {round(w['faktor_median'] * 100)} % (n={w['n']})"
+        zeilen.append("Je Kategorie: " + "; ".join(f"{k} etwa {round(faktor_begrenzt(w['faktor_median']) * 100)} % (n={w['n']})"
                                                    for k, w in sorted(kat)))
-    zeilen.append("Beruecksichtige das: liegt der Wert deutlich unter 100 %, waren fruehere Empfehlungen "
-                  "eher zu hoch, ueber 100 % eher zu niedrig — kalibriere fair_discount_eur entsprechend.")
+    zeilen.append("Das ist eine Orientierung fuer die Verhandlungswerte, kein Ersatz fuer die Reparaturkosten: "
+                  "fair_discount_eur bleibt an repair_reference und Wertminderung gebunden; passe hoechstens "
+                  "best_realistic_eur und negotiation_start_eur in diese Richtung an.")
     return "\n".join(zeilen)
 
 
-async def prompt_zusatz(dealer_id: Optional[str] = None) -> str:
-    """Global (ab MIN_FAELLE) und zusaetzlich firmeneigen (ab MIN_FIRMA)."""
+async def prompt_zusatz(dealer_id: Optional[str] = None, art: str = "abholung") -> str:
+    """Faktor je Art: die eigene Firma (ab MIN_FIRMA Faellen dieser Art)
+    geht vor; sonst global (ab MIN_FAELLE). Nie beides — die KI bekommt
+    EINEN Wert. Wirft nie."""
     try:
-        teile = [als_text(await erfahrungswerte())]
         if dealer_id:
-            teile.append(als_text(await erfahrungswerte(dealer_id=dealer_id), minimum=MIN_FIRMA,
-                                  titel="Faellen dieser Firma"))
-        return "\n\n".join(t for t in teile if t)
+            firma = als_text(await erfahrungswerte(dealer_id=dealer_id), art=art, minimum=MIN_FIRMA,
+                             titel="Faellen dieser Firma")
+            if firma:
+                return firma
+        return als_text(await erfahrungswerte(), art=art)
     except Exception:  # noqa: BLE001
         return ""
 

@@ -115,19 +115,100 @@ async def zaehler_ct(*, user_id: Optional[str], dealer_id: Optional[str], art: s
 
 
 async def pruefen(*, user_id: Optional[str], dealer_id: Optional[str], art: str, db=None) -> Dict[str, Any]:
-    """{"erlaubt", "sparmodus", "verbraucht_ct", "grenze_ct", "grund"} — wirft nie."""
+    """{"erlaubt", "sparmodus", "verbraucht_ct", "grenze_ct", "grund"} — wirft nie.
+
+    Review 26.09.2026 (Nr. 22): EINE Wahrheit — der Verbrauch kommt aus dem
+    Zaehler (ki_budget), den `reservieren`/`abrechnen` fuehren und den
+    `abgleichen` stuendlich mit den Bewertungen abgleicht. Vorher summierte
+    pruefen() die Bewertungen, reservieren() den Zaehler — beide konnten
+    auseinanderlaufen. Nur der letzte Lauf (Sparmodus) kommt weiter aus
+    den Bewertungen."""
     grenze = round(budget_monat_eur() * 100, 2)
     try:
+        verbraucht = await zaehler_ct(user_id=user_id, dealer_id=dealer_id, art=art, db=db)
         v = await verbraucht_ct(user_id=user_id, dealer_id=dealer_id, art=art, db=db)
     except Exception:  # noqa: BLE001
         return {"erlaubt": True, "sparmodus": False, "verbraucht_ct": None, "grenze_ct": grenze, "grund": ""}
-    erlaubt = grenze <= 0 or v["verbraucht_ct"] < grenze
-    sparmodus = (grenze > 0 and v["verbraucht_ct"] >= grenze * SPARMODUS_AB) or v["letzter_lauf_ct"] > kosten_max_ct()
+    erlaubt = grenze <= 0 or verbraucht < grenze
+    sparmodus = (grenze > 0 and verbraucht >= grenze * SPARMODUS_AB) or v["letzter_lauf_ct"] > kosten_max_ct()
     grund = ""
     if not erlaubt:
-        grund = (f"Monatsbudget für KI-Bewertungen aufgebraucht ({v['verbraucht_ct'] / 100:.2f} € von "
+        grund = (f"Monatsbudget für KI-Bewertungen aufgebraucht ({verbraucht / 100:.2f} € von "
                  f"{grenze / 100:.2f} €) — ab dem 1. des nächsten Monats wieder verfügbar.")
     elif sparmodus:
         grund = "Sparmodus: keine Websuche je Fall (Budget fast erreicht oder letzter Lauf zu teuer)."
-    return {"erlaubt": erlaubt, "sparmodus": sparmodus, "verbraucht_ct": v["verbraucht_ct"],
+    return {"erlaubt": erlaubt, "sparmodus": sparmodus, "verbraucht_ct": verbraucht,
             "letzter_lauf_ct": v["letzter_lauf_ct"], "grenze_ct": grenze, "grund": grund}
+
+
+async def est_ct_vermerken(bewertung_id: Optional[str], reservierung: Optional[Dict[str, Any]], db=None) -> None:
+    """Die Reservierung am Bewertungsdokument festhalten (est_ct), damit
+    `abgleichen` einen laufenden Lauf mitzaehlen kann. Wirft nie."""
+    if not bewertung_id:
+        return
+    db = db if db is not None else _db
+    try:
+        await db[SAMMLUNG].update_one({"id": bewertung_id},
+                                      {"$set": {"est_ct": float((reservierung or {}).get("est_ct") or 0)}})
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _lease_gueltig(doc: Dict[str, Any]) -> bool:
+    bis = doc.get("lease_until")
+    if not bis:
+        return False
+    try:
+        t = datetime.fromisoformat(str(bis).replace("Z", "+00:00"))
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        return t > datetime.now(timezone.utc)
+    except ValueError:
+        return False
+
+
+async def abgleichen(db=None) -> Dict[str, Any]:
+    """Review 26.09.2026 (Nr. 22): Zaehler je Schluessel des laufenden Monats
+    aus den Bewertungen neu setzen — Summe kosten_ct der abgeschlossenen
+    Laeufe (ok, fehler, zeitlimit ...) plus est_ct der Laeufe, die noch
+    "laeuft" sind und einen gueltigen Lease haben. Eine Reservierung, deren
+    Lauf abgestuerzt ist (nie abgerechnet), verfaellt so beim naechsten
+    Aufraeumlauf statt bis Monatsende zu blockieren. Schritt im stuendlichen
+    Aufraeumlauf ("ki_budget"). Wirft nie."""
+    db = db if db is not None else _db
+    monat = _monatsanfang()
+    soll: Dict[str, float] = {}
+    try:
+        cursor = db[SAMMLUNG].find({"created_at": {"$gte": monat}},
+                                   {"_id": 0, "art": 1, "user_id": 1, "dealer_id": 1, "status": 1,
+                                    "kosten_ct": 1, "est_ct": 1, "lease_until": 1}).limit(20000)
+        async for d in cursor:
+            art = d.get("art") or "abholung"
+            key = _schluessel(d.get("user_id"), d.get("dealer_id"), art)
+            if d.get("status") == "laeuft":
+                betrag = float(d.get("est_ct") or 0) if _lease_gueltig(d) else 0.0
+            else:
+                try:
+                    betrag = float(d.get("kosten_ct") or 0)
+                except (TypeError, ValueError):
+                    betrag = 0.0
+            soll[key] = round(soll.get(key, 0.0) + max(0.0, betrag), 2)
+        # Zaehler dieses Monats ohne Bewertungen -> 0 (verwaiste Reservierung)
+        async for z in db[ZAEHLER].find({"_id": {"$regex": ":" + monat[:7] + "$"}}, {"_id": 1}):
+            soll.setdefault(z["_id"], 0.0)
+        geaendert = 0
+        jetzt = datetime.now(timezone.utc).isoformat()
+        for key, ct in soll.items():
+            r = await db[ZAEHLER].update_one({"_id": key, "ct": {"$ne": ct}},
+                                             {"$set": {"ct": ct, "abgeglichen": jetzt}})
+            if r.matched_count:
+                geaendert += 1
+            elif ct > 0:
+                # noch kein Zaehler (Lauf ohne Reservierung, z. B. ohne Grenze): anlegen
+                await db[ZAEHLER].update_one({"_id": key}, {"$setOnInsert": {"ct": ct, "angelegt": jetzt,
+                                                                            "abgeglichen": jetzt}}, upsert=True)
+        return {"schluessel": len(soll), "geaendert": geaendert}
+    except Exception:  # noqa: BLE001
+        import logging
+        logging.getLogger("autohandel.ki").exception("KI-Budget nicht abgeglichen")
+        return {"schluessel": len(soll), "geaendert": 0, "fehler": True}

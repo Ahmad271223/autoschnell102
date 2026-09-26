@@ -60,7 +60,11 @@ export default function KiBewertungKarte({ eintrag, onPreis, busy }) {
   const rahmen = { background: "var(--wa-03)", border: "1px solid var(--border-default)" };
 
   if (!erg || status === "keine" || status === "aus" || status === "freischaltung") {
-    const text = wartetZuLange ? "KI-Einschätzung momentan nicht verfügbar." : (fehler || kiStatusText(status));
+    // Review 26.09.2026 (Nr. 6): bei einem Fehler nennt der Server den Grund
+    // (z. B. "KI hat Position … nicht bewertet — bitte erneut starten").
+    const grundServer = ["fehler", "zeitlimit", "ueberlastet", "abgelehnt"].includes(status) && daten?.grund
+      ? ` ${daten.grund}` : "";
+    const text = wartetZuLange ? "KI-Einschätzung momentan nicht verfügbar." : (fehler || (kiStatusText(status) + grundServer));
     if (!text) return null;
     return (
       <div className="mt-3 rounded-lg p-3 text-[12px] flex flex-wrap items-center gap-2" style={rahmen}

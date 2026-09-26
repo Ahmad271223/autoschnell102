@@ -552,6 +552,11 @@ async def _cleanup_once(db, wache=None) -> dict:
         from ai import marktdaten
         return await marktdaten.pruefen_und_aktualisieren(db)
     await s("ki_marktdaten", _ki_marktdaten)
+    # ---- Review 26.09.2026 (Nr. 22): KI-Budgetzaehler mit den Bewertungen abgleichen ----
+    async def _ki_budget():
+        from ai import budget as ki_budget
+        return await ki_budget.abgleichen(db)
+    await s("ki_budget", _ki_budget)
     # ---- Runde 21: Fahrerfotos FAHRERFOTO_TAGE nach dem Hochladen ----
     await s("berichtsfotos_frist", lambda: berichtsfotos_nach_frist_loeschen(db, now, stats))
     await s("berichte_frist", lambda: berichte_nach_frist_loeschen(db, now, stats))

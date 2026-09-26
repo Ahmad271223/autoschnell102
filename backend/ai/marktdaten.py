@@ -48,8 +48,15 @@ DOK_ID = "aktuell"
 MAX_SUCHEN_TABELLE = 8          # je Gruppe (vier Gruppen, siehe _gruppen)
 UMWANDLUNG_MAX_TOKENS = 6000    # Tabelle je Gruppe umwandeln, nie abschneiden (Betrieb 26.09.2026)
 MAX_SUCHEN_FALL = 2             # Probelauf 26.09.2026: 4 direkte Suchen = ~140k Tokens = 46 ct
-EIGENE_MIN = 3                  # ab so vielen frischen eigenen Werten keine Suche mehr
-EIGENE_TAGE = 180
+# Review 26.09.2026 (Nr. 19/20): eigene Werte reichen erst ab EIGENE_MIN
+# Werten aus mindestens zwei verschiedenen Quellen, hoechstens EIGENE_TAGE alt.
+EIGENE_MIN = 5                  # ab so vielen frischen eigenen Werten keine Suche mehr
+EIGENE_QUELLEN_MIN = 2
+EIGENE_TAGE = 120
+EIGENE_STUFEN = ("marke_modell_alter", "marke_alter", "marke", "alle")
+# Review 26.09.2026 (Nr. 21): je Recherche hoechstens 12 Positionen — die
+# teuersten (Referenz-Median) zuerst, nicht die ersten acht der Liste.
+RECHERCHE_POSITIONEN_MAX = 12
 DATEN_MARKER = "###DATEN"
 BERICHT_MAX = 12000
 # Probelauf 26.09.2026: mit EINER Anfrage fuer alle Positionen verbrauchte die
@@ -527,9 +534,29 @@ async def lernen_aus_recherche(fall: Optional[dict], paket: Dict[str, Any], art:
         return 0
 
 
+def _modell_norm(s) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(s or "").lower()).strip()
+
+
+def _quelle_norm(s) -> str:
+    """Quellenname ohne Zusaetze ('ADAC, netto 2024' -> 'adac')."""
+    return re.split(r"[,(;/]", str(s or "").strip().lower())[0].strip()
+
+
+def _quellen_anzahl(docs: List[dict]) -> int:
+    return len({_quelle_norm(d.get("quelle")) for d in docs if _quelle_norm(d.get("quelle"))})
+
+
 async def eigene_referenzen(paket: Dict[str, Any], art: str, db=None) -> Dict[str, Dict[str, Any]]:
-    """Je Referenzschluessel die Statistik der eigenen frischen Werte
-    (gleiche Marke bevorzugt, sonst alle). {} wenn nichts da. Wirft nie."""
+    """Je Referenzschluessel die Statistik der eigenen frischen Werte.
+
+    Review 26.09.2026 (Nr. 19/20): Auswahl in Stufen — (1) gleiche Marke,
+    gleiches Modell und gleiche Altersklasse, (2) Marke und Altersklasse,
+    (3) Marke, (4) alle. Die erste Stufe mit mindestens EIGENE_MIN Werten
+    aus mindestens EIGENE_QUELLEN_MIN verschiedenen Quellen gewinnt
+    ("reicht": True -> keine Websuche mehr). Reicht keine Stufe, liefert
+    die engste nicht leere Stufe einen Anhalt ("reicht": False, es wird
+    weiter gesucht). {} wenn nichts da. Wirft nie."""
     db = db if db is not None else _db
     raus: Dict[str, Dict[str, Any]] = {}
     try:
@@ -537,24 +564,34 @@ async def eigene_referenzen(paket: Dict[str, Any], art: str, db=None) -> Dict[st
         keys.discard(None)
         if not keys:
             return raus
-        marke = _marke(paket.get("vehicle") or {})
+        v = paket.get("vehicle") or {}
+        marke, modell, alter = _marke(v), _modell_norm(v.get("model")), _alter_klasse(v)
         seit = (datetime.now(timezone.utc) - timedelta(days=EIGENE_TAGE)).isoformat()
         je_key: Dict[str, List[dict]] = {}
         async for d in db[PREIS_SAMMLUNG].find({"key": {"$in": sorted(keys)}, "stand": {"$gte": seit}},
                                                {"_id": 0}).sort("stand", -1).limit(2000):
             je_key.setdefault(d["key"], []).append(d)
         for key, docs in je_key.items():
-            eigene_marke = [d for d in docs if marke and d.get("marke") == marke]
-            basis = eigene_marke if len(eigene_marke) >= EIGENE_MIN else docs
-            if not basis:
+            mit_marke = [d for d in docs if marke and d.get("marke") == marke]
+            mit_alter = [d for d in mit_marke if alter != "?" and d.get("alter_klasse") == alter]
+            mit_modell = [d for d in mit_alter if modell and _modell_norm(d.get("modell")) == modell]
+            stufen = list(zip(EIGENE_STUFEN, (mit_modell, mit_alter, mit_marke, docs)))
+            gewinner = next(((s, b) for s, b in stufen
+                             if len(b) >= EIGENE_MIN and _quellen_anzahl(b) >= EIGENE_QUELLEN_MIN), None)
+            reicht = gewinner is not None
+            if gewinner is None:
+                gewinner = next(((s, b) for s, b in stufen if b), None)
+            if gewinner is None:
                 continue
+            stufe, basis = gewinner
             basis = basis[:30]
             quellen = sorted({d.get("quelle") for d in basis if d.get("quelle")})[:4]
             raus[key] = {"n": len(basis), "low": round(statistics.median(d["min_eur"] for d in basis)),
                          "median": round(statistics.median(d["typisch_eur"] for d in basis)),
                          "high": round(statistics.median(d["max_eur"] for d in basis)),
-                         "nur_marke": len(eigene_marke) >= EIGENE_MIN,
-                         "source": f"eigene Datenbank (n={len(basis)}{', ' + marke if len(eigene_marke) >= EIGENE_MIN else ''}"
+                         "stufe": stufe, "reicht": reicht, "quellen_n": _quellen_anzahl(basis),
+                         "nur_marke": stufe != "alle",
+                         "source": f"eigene Datenbank (n={len(basis)}{', ' + marke if stufe != 'alle' else ''}"
                                    f"{'; ' + ', '.join(quellen) if quellen else ''})"}
     except Exception:  # noqa: BLE001
         log.exception("eigene Referenzen nicht ladbar")
@@ -569,10 +606,24 @@ def recherche_noetig(paket: Dict[str, Any], art: str, eigene: Dict[str, Dict[str
         if ref.get("manual_review"):
             continue
         e = eigene.get(ref.get("key") or "")
-        if e and e.get("n", 0) >= EIGENE_MIN:
+        if e and e.get("reicht"):
             continue
         offen.append(p)
     return offen
+
+
+def _referenz_median(p: dict) -> float:
+    try:
+        return float((p.get("repair_reference") or {}).get("median") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def recherche_auswahl(positionen: List[dict]) -> List[dict]:
+    """Review 26.09.2026 (Nr. 21): hoechstens RECHERCHE_POSITIONEN_MAX
+    Positionen je Recherche — sortiert nach erwartetem Betrag (Median der
+    Referenz, absteigend), damit die teuersten zuerst kommen."""
+    return sorted(positionen, key=_referenz_median, reverse=True)[:RECHERCHE_POSITIONEN_MAX]
 
 
 # ------------------------------------------------ Recherche je Fall
@@ -582,7 +633,7 @@ def _fall_frage(art: str, paket: Dict[str, Any], positionen: List[dict]) -> str:
     ez = v.get("first_registration") or ""
     km = v.get("mileage_pickup_km") or v.get("mileage_contract_km") or v.get("mileage_km")
     zeilen = []
-    for p in positionen[:8]:
+    for p in recherche_auswahl(positionen):
         sd = p.get("severity_data") or {}
         merk = ", ".join(f"{k} {w}" for k, w in sd.items() if str(w).lower() != "unbekannt")
         if p.get("damage_type") or p.get("type") in ("delle", "kratzer", "rost", "steinschlag", "hagelschaden",
@@ -625,7 +676,8 @@ async def fall_recherche(art: str, paket: Dict[str, Any], *, sparmodus: bool = F
                 "usage": r.get("usage") or {}, "status": r.get("status")}
     return {"text": (r.get("text") or "")[:6000], "quellen": list(r.get("quellen") or [])[:10],
             "suchen": int(r.get("suchen") or 0), "dauer_ms": r.get("dauer_ms"), "usage": r.get("usage") or {},
-            "modell": r.get("modell"), "status": "ok", "positionen": [str(p.get("id")) for p in offen]}
+            "modell": r.get("modell"), "status": "ok",
+            "positionen": [str(p.get("id")) for p in recherche_auswahl(offen)]}
 
 
 def fall_als_text(fall: Optional[dict]) -> str:

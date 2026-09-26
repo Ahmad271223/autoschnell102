@@ -39,7 +39,7 @@ import protokoll_vergleich as PV
 from deps import db, now_iso
 
 from ai import budget, freischaltung, kalibrierung, kontext, marktdaten, preisbasis, schemas
-from ai.provider import json_bewerten, ki_aktiv, ki_modell
+from ai.provider import ergebnis_gueltig, json_bewerten, ki_aktiv, ki_modell
 
 log = logging.getLogger("autohandel.ki")
 
@@ -465,8 +465,14 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
                  "input_hash": h, "prompt_version": schemas.PROMPT_VERSION, "modell": ki_modell(),
                  "created_at": jetzt, "kaufpreis": paket["prices"].get("contract_price_eur")}
         vorhanden = await db[SAMMLUNG].find_one({"protocol_id": protocol_id, "input_hash": h}, {"_id": 0})
-        if vorhanden and not erzwingen and (vorhanden.get("status") in ("ok", "keine")
-                                            or (vorhanden.get("status") == "laeuft" and not _lease_abgelaufen(vorhanden))):
+        # Ein laufender Lauf mit gueltigem Lease wird NIE doppelt gestartet —
+        # auch nicht mit erzwingen (Review 26.09.2026, Nr. 25/27).
+        if vorhanden and vorhanden.get("status") == "laeuft" and not _lease_abgelaufen(vorhanden):
+            return _oeffentlich(vorhanden)
+        # Fertiges Ergebnis: nur mit gleicher Prompt-Fassung, gleichem Modell
+        # und innerhalb KI_CACHE_TAGE (Nr. 5/35) — sonst neu rechnen.
+        if vorhanden and not erzwingen and vorhanden.get("status") in ("ok", "keine") \
+                and ergebnis_gueltig(vorhanden, schemas.PROMPT_VERSION):
             return _oeffentlich(vorhanden)
         if not relevant(paket):
             eintrag = {**basis, "status": "keine", "grund": "keine preisrelevanten Abweichungen",
@@ -492,13 +498,15 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
             await db[SAMMLUNG].update_one({"protocol_id": protocol_id, "input_hash": h},
                                           {"$set": eintrag}, upsert=True)
             return _oeffentlich(eintrag)
-        # Merker "laeuft" mit Lease — ein zweiter Aufruf wartet nicht doppelt,
-        # ein abgestuerzter Lauf verfaellt nach LEASE_S Sekunden.
+        # Merker "laeuft" mit Lease, ATOMAR beansprucht (Review 26.09.2026,
+        # Nr. 25/27): zwei gleichzeitige Aufrufe rechnen nie beide — der
+        # zweite bekommt "laeuft" zurueck, ohne Budget und ohne KI. Ein
+        # abgestuerzter Lauf verfaellt nach LEASE_S Sekunden.
         lease = (datetime.now(timezone.utc) + timedelta(seconds=LEASE_S)).isoformat()
-        await db[SAMMLUNG].update_one({"protocol_id": protocol_id, "input_hash": h},
-                                      {"$set": {**basis, "status": "laeuft", "grund": "", "ergebnis": None,
-                                                "lease_until": lease}},
-                                      upsert=True)
+        start = {**basis, "status": "laeuft", "grund": "", "ergebnis": None, "lease_until": lease, "est_ct": 0.0}
+        fremd = await _lauf_beanspruchen(protocol_id, h, start)
+        if fremd is not None:
+            return _oeffentlich(fremd)
         # Budget atomar reservieren — erst wenn dieser Aufruf den Lauf wirklich haelt
         res = await budget.reservieren(user_id=None, dealer_id=dealer_id, art="abholung")
         if res is None:
@@ -507,6 +515,7 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
             await db[SAMMLUNG].update_one({"protocol_id": protocol_id, "input_hash": h},
                                           {"$set": eintrag, "$unset": {"lease_until": ""}})
             return _oeffentlich(eintrag)
+        await budget.est_ct_vermerken(basis["id"], res)      # Nr. 22: Abgleich kennt den Lauf
         paket["market"] = kontext.marktposition(ktx.get("markt"), listing=paket["prices"].get("listing_price_eur"),
                                                 agreed=paket["prices"].get("contract_price_eur"))
         paket["history"] = ktx.get("historie")
@@ -517,7 +526,7 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
             kontext.eigene_anwenden(paket, eigene)
         lage = kontext.datenlage(paket)
         zusatz = "\n\n".join(t for t in (marktdaten.als_text(ktx.get("marktdoc")),
-                                          await kalibrierung.prompt_zusatz(dealer_id),
+                                          await kalibrierung.prompt_zusatz(dealer_id, "abholung"),
                                           marktdaten.fall_als_text(fall)) if t)
         antwort = await json_bewerten(system=SYSTEM_PROMPT, nutzer=paket, schema=schemas.ANTWORT_SCHEMA,
                                       zusatz=zusatz or None)
@@ -535,6 +544,21 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
                    "recherche": ({"status": fall.get("status"), "suchen": fall.get("suchen"),
                                   "quellen": fall.get("quellen"), "text": fall.get("text"),
                                   "gelernt": gelernt} if fall else None)}
+        # Review 26.09.2026 (Nr. 6): genau eine Position je Abweichung — doppelte
+        # und fremde fliegen raus, eine fehlende bricht den Lauf ab.
+        if antwort.get("status") == "ok" and isinstance(antwort.get("daten"), dict):
+            erwartet = _erwartete_positionen(paket)
+            daten, fehlende, doppelte, fremde = schemas.positionen_abgleichen(antwort["daten"], list(erwartet))
+            antwort["daten"] = daten
+            if doppelte or fremde:
+                log.warning("KI-Bewertung %s: %d doppelte, %d fremde Positionen verworfen",
+                            protocol_id, len(doppelte), len(fremde))
+                eintrag["abgleich"] = {"doppelte": doppelte[:20], "fremde": fremde[:20]}
+            if fehlende:
+                antwort.update(status="fehler",
+                               grund="KI hat Position " + ", ".join(erwartet.get(i) or i for i in fehlende[:3])
+                               + " nicht bewertet — bitte erneut starten")
+                eintrag["roh"] = daten
         if antwort.get("status") == "ok" and isinstance(antwort.get("daten"), dict):
             ergebnis = schemas.bereinigen(antwort["daten"], kaufpreis=basis["kaufpreis"])
             _prioritaeten_nachziehen(ergebnis, basis["kaufpreis"])
@@ -564,6 +588,42 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
         except Exception:  # noqa: BLE001
             pass
         return None
+
+
+def _erwartete_positionen(paket: dict) -> Dict[str, str]:
+    """id -> lesbarer Name aller Positionen, die die KI bewerten muss."""
+    raus: Dict[str, str] = {}
+    for d in paket.get("new_damages") or []:
+        if not d.get("already_known"):
+            raus[str(d.get("id"))] = f"{d.get('label') or d.get('type') or ''} {d.get('zone') or ''}".strip()
+    for a in paket.get("deviations") or []:
+        name = str(a.get("label") or a.get("type") or "")
+        zusatz = a.get("equipment") or a.get("document")
+        raus[str(a.get("id"))] = f"{name} {zusatz}".strip() if zusatz else name
+    return raus
+
+
+async def _lauf_beanspruchen(protocol_id: str, h: str, start: dict) -> Optional[dict]:
+    """Den 'laeuft'-Platz fuer diesen Stand atomar belegen (Unique-Index
+    ki_bewertung_je_protokoll_stand auf protocol_id + input_hash). None =
+    wir halten ihn; sonst das fremde Dokument (laeuft mit gueltigem Lease
+    oder schon fertig), das der Aufrufer zurueckgibt — ohne Budget, ohne
+    KI-Aufruf."""
+    from pymongo import ReturnDocument
+    from pymongo.errors import DuplicateKeyError
+    jetzt = datetime.now(timezone.utc).isoformat()
+    filt = {"protocol_id": protocol_id, "input_hash": h,
+            "$or": [{"status": {"$ne": "laeuft"}}, {"lease_until": {"$lt": jetzt}},
+                    {"lease_until": {"$exists": False}}]}
+    try:
+        doc = await db[SAMMLUNG].find_one_and_update(filt, {"$set": dict(start)}, upsert=True,
+                                                     projection={"_id": 0}, return_document=ReturnDocument.AFTER)
+    except DuplicateKeyError:
+        doc = None                       # jemand anderes haelt den Platz gerade
+    if doc is not None and doc.get("id") == start.get("id"):
+        return None
+    fremd = await db[SAMMLUNG].find_one({"protocol_id": protocol_id, "input_hash": h}, {"_id": 0})
+    return fremd or {**start, "id": None}
 
 
 def _prioritaeten_nachziehen(ergebnis: dict, kaufpreis: Optional[float]) -> None:
@@ -597,6 +657,33 @@ def bewertung_anstossen(protocol_id: str, dealer_id: str) -> None:
 _laufende: set = set()
 
 
+async def bewertung_starten(protocol_id: str, dealer_id: str) -> Optional[dict]:
+    """Review 26.09.2026 (Nr. 26): "Neu berechnen" laeuft nicht mehr in der
+    Anfrage (bis 150 s), sondern im Hintergrund — die Antwort kommt sofort
+    mit "laeuft", die Karte fragt GET /protocols/{id}/ki-bewertung alle 3 s
+    nach. Nur, was sofort entscheidbar ist, wird hier beantwortet: fehlendes
+    Protokoll (None -> 404), KI aus, Konto nicht freigeschaltet. Ein Lauf
+    mit gueltigem Lease wird nicht doppelt gestartet (bewertung_ausfuehren
+    prueft das atomar). Wirft nie."""
+    doc = await db.pickup_protocols.find_one({"id": protocol_id, "dealer_id": dealer_id}, {"_id": 1})
+    if not doc:
+        return None
+    if not ki_aktiv():
+        return {"status": "aus", "grund": "KI-Bewertung nicht aktiv", "protocol_id": protocol_id, "ergebnis": None}
+    if not await freischaltung.firma_freigeschaltet(dealer_id):
+        return freischaltung.gesperrt(protocol_id=protocol_id)
+    try:
+        aufgabe = asyncio.get_running_loop().create_task(
+            bewertung_ausfuehren(protocol_id, dealer_id, erzwingen=True))
+        _laufende.add(aufgabe)
+        aufgabe.add_done_callback(_laufende.discard)
+    except Exception:  # noqa: BLE001
+        log.exception("KI-Bewertung fuer %s nicht gestartet", protocol_id)
+        return {"status": "fehler", "grund": "Bewertung konnte nicht gestartet werden", "protocol_id": protocol_id,
+                "ergebnis": None}
+    return {"status": "laeuft", "grund": "", "protocol_id": protocol_id, "ergebnis": None}
+
+
 # ------------------------------------------------ Lesen (Chef)
 async def bewertung_lesen(protocol_id: str, dealer_id: str, *, nachrechnen: bool = True) -> Optional[dict]:
     """Aktuelle Bewertung zum Protokoll. Passt der Hash nicht mehr zum
@@ -610,7 +697,12 @@ async def bewertung_lesen(protocol_id: str, dealer_id: str, *, nachrechnen: bool
     paket = paket_bauen(doc, appt, vehicle, contract, None)
     h = eingabe_hash(paket)
     passend = await db[SAMMLUNG].find_one({"protocol_id": protocol_id, "input_hash": h}, {"_id": 0})
-    if passend and not _lease_abgelaufen(passend):
+    # Review 26.09.2026 (Nr. 5/35): ein fertiges Ergebnis mit alter Prompt-
+    # Fassung, anderem Modell oder aelter als KI_CACHE_TAGE gilt als veraltet
+    # und wird neu gerechnet — wie nach einer Aenderung der Eingabe.
+    abgelaufen = bool(passend) and passend.get("status") in ("ok", "keine") \
+        and not ergebnis_gueltig(passend, schemas.PROMPT_VERSION)
+    if passend and not _lease_abgelaufen(passend) and not abgelaufen:
         return _oeffentlich(passend)
     if not relevant(paket):
         return {"status": "keine", "grund": "keine preisrelevanten Abweichungen", "protocol_id": protocol_id,
@@ -622,10 +714,11 @@ async def bewertung_lesen(protocol_id: str, dealer_id: str, *, nachrechnen: bool
         return freischaltung.gesperrt(protocol_id=protocol_id, input_hash=h)
     if nachrechnen:
         bewertung_anstossen(protocol_id, dealer_id)
-    if passend:
+    if passend and not abgelaufen:
         return {"status": "laeuft", "grund": "", "protocol_id": protocol_id, "input_hash": h, "ergebnis": None}
-    letzte = await db[SAMMLUNG].find_one({"protocol_id": protocol_id, "status": "ok"}, {"_id": 0},
-                                         sort=[("created_at", -1)])
+    letzte = passend if (abgelaufen and passend.get("status") == "ok") else \
+        await db[SAMMLUNG].find_one({"protocol_id": protocol_id, "status": "ok"}, {"_id": 0},
+                                    sort=[("created_at", -1)])
     if letzte:
         alt = _oeffentlich(letzte)
         alt["status"] = "veraltet"

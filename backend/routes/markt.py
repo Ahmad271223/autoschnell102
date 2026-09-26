@@ -11,7 +11,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from deps import current_firma, db
+from deps import current_firma, db, fahrzeug_bereich
 from markt import abfrage, konfig, segmente
 
 log = logging.getLogger(__name__)
@@ -20,9 +20,11 @@ router = APIRouter()
 
 @router.get("/market-intelligence/vehicle/{vehicle_id}")
 async def markt_karte(vehicle_id: str, user=Depends(current_firma)):
-    """Karte 'AutoSchnell Marktdaten' zum Fahrzeug des Vergleichs (nur lesen)."""
+    """Karte 'AutoSchnell Marktdaten' zum Fahrzeug des Vergleichs (nur lesen).
+    Review 26.09.2026 (Nr. 9): Fahrzeug nur im Bereich des Kontos (Chef =
+    Firma, Sucher = eigene/mitbearbeitete) — wie bei Vertrag und Termin."""
     try:
-        v = await db.vehicles.find_one({"id": vehicle_id, "dealer_id": user.get("dealer_id")}, {"_id": 0, "data": 1, "mobile_ad_id": 1})
+        v = await db.vehicles.find_one({"id": vehicle_id, **fahrzeug_bereich(user)}, {"_id": 0, "data": 1, "mobile_ad_id": 1})
         if not v:
             raise HTTPException(404, "Fahrzeug nicht gefunden")
         daten = dict(v.get("data") or {})

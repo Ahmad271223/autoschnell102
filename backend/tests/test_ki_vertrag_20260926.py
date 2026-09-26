@@ -46,9 +46,10 @@ def _attrappe(monkeypatch, antwort=ANTWORT, status="ok", zaehler=None):
     async def _bewerten(**kw):
         if zaehler is not None:
             zaehler.append(kw)
+        # Modell wie konfiguriert: der Zwischenspeicher (Nr. 4/34) vergleicht es
         return {"status": status, "grund": "" if status == "ok" else "Attrappe",
                 "daten": antwort if status == "ok" else None, "dauer_ms": 5,
-                "modell": "attrappe", "usage": {"input_tokens": 1000, "output_tokens": 500}}
+                "modell": D.ki_modell(), "usage": {"input_tokens": 1000, "output_tokens": 500}}
     monkeypatch.setattr(D, "json_bewerten", _bewerten)
     monkeypatch.setattr(D, "ki_aktiv", lambda: True)
     MD = _module("ai.marktdaten")
@@ -78,6 +79,7 @@ def _ki_aufraeumen(welt):
     db, w = welt.db, welt.w
     welt.run(db.ki_bewertungen.delete_many({"dealer_id": w.dealer_id}))
     welt.run(db.ki_lernfaelle.delete_many({"dealer_id": w.dealer_id}))
+    welt.run(db.ki_budget.delete_many({"_id": {"$regex": f":({w.dealer_id}|{w.chef['id']}|{w.sucher['id']}):"}}))
 
 
 # ------------------------------------------------ Inserats-Regeln (ohne DB)
@@ -243,8 +245,10 @@ def test_05_routen_und_lernfall_nur_schadennachlass(welt, monkeypatch):
     b = C.ContractIn(vehicle_id=vid, seller_name="V", purchase_price=8300)
     assert C._anfrage_hash(a) == C._anfrage_hash(b)
     # Lernfall: Basis war der VOR der Schadenverhandlung vereinbarte Preis 8300,
-    # Vertrag 8000 -> gelernt werden 300 (nur der Schadennachlass)
-    vertrag = {"id": f"c_kiv5_{w.s}", "dealer_id": w.dealer_id, "purchase_price": 8000}
+    # Vertrag 8000 -> gelernt werden 300 (nur der Schadennachlass). Review
+    # 26.09.2026 (Nr. 7): der Vertrag muss zu Fahrzeug UND Konto der Bewertung passen.
+    vertrag = {"id": f"c_kiv5_{w.s}", "dealer_id": w.dealer_id, "purchase_price": 8000, "vehicle_id": vid,
+               "user_id": w.chef["id"]}
     welt.run(D.lernfall_speichern(vertrag, stand["id"]))
     lern = welt.run(db.ki_lernfaelle.find_one({"contract_id": vertrag["id"]}, {"_id": 0}))
     assert lern and lern["art"] == "vertrag" and lern["tatsaechlicher_nachlass"] == 300.0
@@ -252,12 +256,18 @@ def test_05_routen_und_lernfall_nur_schadennachlass(welt, monkeypatch):
     # Basis Inseratspreis: Inserat minus Vertrag enthaelt den allgemeinen Nachlass -> NICHT gelernt
     erg_ins = welt.run(D.bewerten(user=w.chef, vehicle_doc=welt.run(db.vehicles.find_one({"id": vid}, {"_id": 0})),
                                   damages=SCHAEDEN))
-    vertrag2 = {"id": f"c_kiv5b_{w.s}", "dealer_id": w.dealer_id, "purchase_price": 7000}
+    vertrag2 = {"id": f"c_kiv5b_{w.s}", "dealer_id": w.dealer_id, "purchase_price": 7000, "vehicle_id": vid,
+                "user_id": w.chef["id"]}
     welt.run(D.lernfall_speichern(vertrag2, erg_ins["id"]))
     lern2 = welt.run(db.ki_lernfaelle.find_one({"contract_id": vertrag2["id"]}, {"_id": 0}))
     assert lern2 and lern2["tatsaechlicher_nachlass"] is None
-    welt.run(D.lernfall_speichern({"id": "c_x_" + w.s, "dealer_id": "d_fremd", "purchase_price": 1}, stand["id"]))
+    welt.run(D.lernfall_speichern({"id": "c_x_" + w.s, "dealer_id": "d_fremd", "purchase_price": 1, "vehicle_id": vid},
+                                  stand["id"]))
     assert welt.run(db.ki_lernfaelle.count_documents({"contract_id": "c_x_" + w.s})) == 0
+    # Nr. 7: anderes Fahrzeug oder anderes Konto -> kein Lernfall
+    welt.run(D.lernfall_speichern({**vertrag, "id": "c_y_" + w.s, "vehicle_id": "v_anderes_" + w.s}, stand["id"]))
+    welt.run(D.lernfall_speichern({**vertrag, "id": "c_z_" + w.s, "user_id": w.sucher["id"]}, stand["id"]))
+    assert welt.run(db.ki_lernfaelle.count_documents({"contract_id": {"$in": ["c_y_" + w.s, "c_z_" + w.s]}})) == 0
     _ki_aufraeumen(welt)
 
 
@@ -278,9 +288,16 @@ def test_06_erfahrungswerte_global_und_je_firma(welt, monkeypatch):
         assert werte["gesamt"]["n"] >= 6 and werte["je_kategorie"]["tires"]["faktor_median"] == 0.5
         firma = welt.run(K.erfahrungswerte(frisch=True, dealer_id=w.dealer_id))
         assert firma["gesamt"]["n"] == 6 and firma["gesamt"]["faktor_median"] == 0.5
-        text = welt.run(K.prompt_zusatz(w.dealer_id))
-        assert "Faellen dieser Firma" in text and "50 %" in text
+        assert firma["je_art"]["vertrag"]["n"] == 6 and firma["je_art"]["vertrag"]["je_kategorie"]["tires"]["n"] == 6
+        # Review 26.09.2026 (Nr. 36-38): Faktor je Art, im Prompt auf 60-120 % begrenzt
+        # (0,5 -> "etwa 60 %"), als Orientierung formuliert; Firma vor global.
+        text = welt.run(K.prompt_zusatz(w.dealer_id, "vertrag"))
+        assert "Faellen dieser Firma" in text and "(Vertrag)" in text and "etwa 60 %" in text
+        assert "50 %" not in text and "Orientierung" in text and "kein Ersatz" in text
+        # keine Abhol-Faelle dieser Firma -> hoechstens der globale Wert (Demo-Daten), nie der Firmenwert
+        assert "Faellen dieser Firma" not in welt.run(K.prompt_zusatz(w.dealer_id, "abholung"))
         assert K.als_text(firma, minimum=100) == ""
+        assert K.faktor_begrenzt(3.0) == 1.2 and K.faktor_begrenzt(0.1) == 0.6 and K.faktor_begrenzt(0.9) == 0.9
         assert K._faktor({"ki_nachlass": 100, "tatsaechlicher_nachlass": 900}) == 3.0
         assert K._faktor({"ki_nachlass": 0, "tatsaechlicher_nachlass": 50}) is None
         st = welt.run(K.statistik(tage=30))
@@ -298,13 +315,17 @@ def test_07_kalibrierung_landet_im_zusatz(welt, monkeypatch):
     D = _attrappe(monkeypatch, zaehler=aufrufe)
     K = _module("ai.kalibrierung")
 
-    async def _zusatz(dealer_id=None):
+    arten = []
+
+    async def _zusatz(dealer_id=None, art=None):
+        arten.append(art)
         return "Erfahrungswerte aus 9 abgeschlossenen AutoSchnell-Faellen: Test."
     monkeypatch.setattr(K, "prompt_zusatz", _zusatz)
     w = welt.w
     fz = _fahrzeug(welt, f"v_kiv7_{w.s}")
     erg = welt.run(D.bewerten(user=w.sucher, vehicle_doc=fz, damages=SCHAEDEN))
     assert erg["status"] == "ok" and aufrufe[0]["zusatz"].endswith("Faellen: Test.")
+    assert arten == ["vertrag"], "Nr. 36: der Aufrufer uebergibt seine Art"
     KA = _attrappe_abholung(monkeypatch, zaehler=None)
     _cid, _tid, _vid, pid = _welt_aufbauen(welt, "7")
     gesehen = {}
@@ -315,6 +336,7 @@ def test_07_kalibrierung_landet_im_zusatz(welt, monkeypatch):
     monkeypatch.setattr(KA, "json_bewerten", _bewerten)
     welt.run(KA.bewertung_ausfuehren(pid, w.dealer_id))
     assert gesehen["zusatz"].endswith("Faellen: Test.")
+    assert arten == ["vertrag", "abholung"]
     _ki_aufraeumen(welt)
 
 

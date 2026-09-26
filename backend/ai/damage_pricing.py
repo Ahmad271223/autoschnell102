@@ -36,7 +36,7 @@ from konfig import zahl_env
 
 from ai import budget, freischaltung, kalibrierung, kontext, marktdaten, preisbasis, schemas
 from ai.pickup_assessment import LEASE_S, _alter_jahre, _kosten_pruefen, _lease_abgelaufen
-from ai.provider import json_bewerten, ki_aktiv, ki_modell
+from ai.provider import ergebnis_gueltig, json_bewerten, ki_aktiv, ki_modell
 
 log = logging.getLogger("autohandel.ki")
 
@@ -233,10 +233,8 @@ async def bewerten(*, user: dict, vehicle_doc: dict, damages: List[dict],
         basis.update(input_hash=h, kaufpreis=basis_preis)
         if not paket["damages"]:
             return _oeffentlich({**basis, "status": "keine", "grund": "keine Schäden erfasst", "ergebnis": None})
-        vorhanden = await db[SAMMLUNG].find_one({"art": ART, "dealer_id": dealer_id, "input_hash": h,
-                                                 "status": {"$in": ["ok", "laeuft"]}}, {"_id": 0},
-                                                sort=[("created_at", -1)])
-        if vorhanden and (vorhanden.get("status") == "ok" or not _lease_abgelaufen(vorhanden)):
+        vorhanden = await _vorhandene_bewertung(dealer_id, h)
+        if vorhanden:
             return _oeffentlich(vorhanden)
         vorl = kontext.vorschau(paket, basis_preis)
         if not ki_aktiv():
@@ -271,6 +269,7 @@ async def bewerten(*, user: dict, vehicle_doc: dict, damages: List[dict],
                        "ergebnis": None, "vorschau": vorl, "budget": bud, "dauer_ms": 0, "kosten_ct": 0}
             await db[SAMMLUNG].update_one({"id": basis["id"]}, {"$set": eintrag, "$unset": {"lease_until": ""}})
             return _oeffentlich(eintrag)
+        await budget.est_ct_vermerken(basis["id"], res)      # Nr. 22: Abgleich kennt den Lauf
         paket["market"] = kontext.marktposition(ktx.get("markt"), listing=paket["prices"].get("listing_price_eur"),
                                                 agreed=kaufpreis)
         paket["history"] = ktx.get("historie")
@@ -284,6 +283,21 @@ async def bewerten(*, user: dict, vehicle_doc: dict, damages: List[dict],
     except Exception:  # noqa: BLE001 — die KI ist Beiwerk, nie ein 500
         log.exception("KI-Schadennachlass %s gescheitert", vehicle_doc.get("id"))
         return _oeffentlich({**basis, "status": "fehler", "grund": "interner Fehler", "ergebnis": None})
+
+
+async def _vorhandene_bewertung(dealer_id: str, h: str) -> Optional[dict]:
+    """Derselbe Stand wurde schon gerechnet? Review 26.09.2026 (Nr. 4/34):
+    ein fertiges Ergebnis zaehlt nur mit gleicher Prompt-Fassung, gleichem
+    Modell und innerhalb KI_CACHE_TAGE; ein laufender Lauf mit gueltigem
+    Lease zaehlt immer."""
+    cursor = db[SAMMLUNG].find({"art": ART, "dealer_id": dealer_id, "input_hash": h,
+                                "status": {"$in": ["ok", "laeuft"]}}, {"_id": 0}).sort("created_at", -1).limit(10)
+    async for d in cursor:
+        if d.get("status") == "laeuft" and not _lease_abgelaufen(d):
+            return d
+        if d.get("status") == "ok" and ergebnis_gueltig(d, schemas.PROMPT_VERSION_VERTRAG):
+            return d
+    return None
 
 
 async def _lauf_beanspruchen(start: dict, dealer_id: str, h: str) -> Optional[dict]:
@@ -321,7 +335,7 @@ async def _rechnen(basis: dict, paket: dict, vorl: dict, bud: dict, eigene: dict
             kontext.eigene_anwenden(paket, eigene)
         lage = kontext.datenlage(paket)
         zusatz = "\n\n".join(t for t in (marktdaten.als_text(marktdoc),
-                                          await kalibrierung.prompt_zusatz(basis["dealer_id"]),
+                                          await kalibrierung.prompt_zusatz(basis["dealer_id"], ART),
                                           marktdaten.fall_als_text(fall)) if t)
         antwort = await json_bewerten(system=SYSTEM_PROMPT, nutzer=paket, schema=schemas.ANTWORT_SCHEMA,
                                       zusatz=zusatz or None)
@@ -340,6 +354,22 @@ async def _rechnen(basis: dict, paket: dict, vorl: dict, bud: dict, eigene: dict
                    "recherche": ({"status": fall.get("status"), "suchen": fall.get("suchen"),
                                   "quellen": fall.get("quellen"), "text": fall.get("text"),
                                   "gelernt": gelernt} if fall else None)}
+        # Review 26.09.2026 (Nr. 6): genau eine Position je Schaden — doppelte
+        # und fremde fliegen raus, eine fehlende bricht den Lauf ab.
+        if antwort.get("status") == "ok" and isinstance(antwort.get("daten"), dict):
+            erwartet = {d["id"]: f"{d.get('label') or d.get('type') or ''} {d.get('zone') or ''}".strip()
+                        for d in paket["damages"]}
+            daten, fehlende, doppelte, fremde = schemas.positionen_abgleichen(antwort["daten"], list(erwartet))
+            antwort["daten"] = daten
+            if doppelte or fremde:
+                log.warning("KI-Schadennachlass %s: %d doppelte, %d fremde Positionen verworfen",
+                            basis.get("id"), len(doppelte), len(fremde))
+                eintrag["abgleich"] = {"doppelte": doppelte[:20], "fremde": fremde[:20]}
+            if fehlende:
+                antwort.update(status="fehler",
+                               grund="KI hat Position " + ", ".join(erwartet.get(i) or i for i in fehlende[:3])
+                               + " nicht bewertet — bitte erneut starten")
+                eintrag["roh"] = daten
         if antwort.get("status") == "ok" and isinstance(antwort.get("daten"), dict):
             ergebnis = schemas.bereinigen(antwort["daten"], kaufpreis=basis["kaufpreis"])
             for it in ergebnis.get("items") or []:
@@ -374,12 +404,22 @@ async def _rechnen(basis: dict, paket: dict, vorl: dict, bud: dict, eigene: dict
         return _oeffentlich(eintrag)
 
 
-async def lesen(bewertung_id: str, dealer_id: str) -> Optional[dict]:
+async def lesen(bewertung_id: str, dealer_id: str, user: Optional[dict] = None) -> Optional[dict]:
     """Stand einer Bewertung (die Karte fragt nach). Ein "laeuft" ohne
-    Ergebnis nach LEASE_S Sekunden gilt als abgestuerzt -> fehler."""
+    Ergebnis nach LEASE_S Sekunden gilt als abgestuerzt -> fehler.
+
+    Review 26.09.2026 (Nr. 8): mit `user` zaehlt nicht nur die Firma — die
+    Bewertung muss vom Konto selbst stammen ODER das Fahrzeug muss im
+    Bereich des Kontos liegen (Chef = Firma, Sucher = eigene bzw.
+    mitbearbeitete Fahrzeuge). Sonst None (404)."""
     doc = await db[SAMMLUNG].find_one({"id": bewertung_id, "art": ART, "dealer_id": dealer_id}, {"_id": 0})
     if not doc:
         return None
+    if user is not None and doc.get("user_id") != user.get("id"):
+        from deps import fahrzeug_bereich
+        vid = doc.get("vehicle_id")
+        if not vid or not await db.vehicles.find_one({"id": vid, **fahrzeug_bereich(user)}, {"_id": 1}):
+            return None
     if _lease_abgelaufen(doc):
         doc = {**doc, "status": "fehler", "grund": "Bewertung abgebrochen (Zeitlimit) — bitte erneut versuchen."}
     return _oeffentlich(doc)
@@ -400,6 +440,18 @@ async def lernfall_speichern(contract: dict, ki_bewertung_id: Optional[str]) -> 
         bew = await db[SAMMLUNG].find_one({"id": ki_bewertung_id, "art": ART, "status": "ok",
                                            "dealer_id": contract.get("dealer_id")}, {"_id": 0})
         if not bew:
+            return
+        # Review 26.09.2026 (Nr. 7): die Bewertung muss zu DIESEM Fahrzeug (und,
+        # wenn der Vertrag ein Konto traegt, zu diesem Konto) gehoeren — sonst
+        # lernt die Kalibrierung aus einer fremden Bewertung.
+        if bew.get("vehicle_id") != contract.get("vehicle_id"):
+            log.warning("Lernfall (Vertrag) %s: Bewertung %s gehoert zu Fahrzeug %s, nicht %s — nicht gelernt",
+                        contract.get("id"), ki_bewertung_id, bew.get("vehicle_id"), contract.get("vehicle_id"))
+            return
+        konto = contract.get("user_id") or contract.get("creator_id") or contract.get("created_by")
+        if konto and bew.get("user_id") and bew.get("user_id") != konto:
+            log.warning("Lernfall (Vertrag) %s: Bewertung %s stammt von Konto %s, Vertrag von %s — nicht gelernt",
+                        contract.get("id"), ki_bewertung_id, bew.get("user_id"), konto)
             return
         eingabe = bew.get("eingabe") or {}
         comb = (bew.get("ergebnis") or {}).get("combined") or {}

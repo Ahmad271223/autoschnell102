@@ -20,11 +20,40 @@ import os
 import time
 from typing import Any, Dict, Optional
 
-from konfig import kommazahl_env, schalter_env
+from konfig import kommazahl_env, schalter_env, zahl_env
 
 log = logging.getLogger("autohandel.ki")
 
 KI_MODELL_STANDARD = "claude-sonnet-5"
+
+
+def ki_cache_tage() -> int:
+    """Review 26.09.2026 (Nr. 4/5/34/35): Ein abgelegtes Ergebnis gilt nur
+    KI_CACHE_TAGE (Standard 7) — der Eingabe-Hash laesst Markt, Referenzen
+    und Historie bewusst weg, deshalb braucht der Zwischenspeicher ein
+    Verfallsdatum. Danach wird derselbe Stand neu gerechnet."""
+    return zahl_env("KI_CACHE_TAGE", 7, unten=1, oben=365)
+
+
+def ergebnis_gueltig(doc, prompt_version: str) -> bool:
+    """Passt ein abgelegtes Ergebnis noch zu Prompt-Fassung, Modell und
+    Verfallsdatum? Ein anderes Modell oder eine neue Prompt-Fassung
+    liefert andere Zahlen — dann rechnen wir neu statt Altes zu zeigen."""
+    if not doc:
+        return False
+    if doc.get("prompt_version") != prompt_version or doc.get("modell") != ki_modell():
+        return False
+    stand = str(doc.get("created_at") or "")
+    if not stand:
+        return False
+    from datetime import datetime, timedelta, timezone
+    try:
+        t = datetime.fromisoformat(stand.replace("Z", "+00:00"))
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    return datetime.now(timezone.utc) - t <= timedelta(days=ki_cache_tage())
 # Gemessen 25.09.2026 (BMW-Beispiel, 6 Positionen): 19-35 s je Bewertung —
 # die Bewertung laeuft im Hintergrund, der Chef sieht sie beim Oeffnen der
 # Liste; 30 s Zeitlimit statt der urspruenglich geplanten 12 s.

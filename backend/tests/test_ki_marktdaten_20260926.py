@@ -202,17 +202,19 @@ def test_03_abholung_recherche_je_fall_lernt_und_quellen(welt, monkeypatch):
     # die Referenz im Paket traegt danach die eigenen Werte
     refs = erg["ergebnis"]["referenzen"]
     assert refs["d1"]["median"] == 160 and refs["d1"]["source"].startswith("eigene Datenbank")
-    # genug eigene Werte (EIGENE_MIN) -> keine Suche mehr fuer diese Positionen
-    for _ in range(MD.EIGENE_MIN):
+    # genug eigene Werte (EIGENE_MIN aus >= 2 Quellen, Review 26.09.2026 Nr. 19/20)
+    # -> keine Suche mehr fuer diese Positionen; Stufe Marke + Altersklasse
+    for i in range(MD.EIGENE_MIN):
         welt.run(welt.db.ki_reparaturpreise.insert_many([
             {"key": "delle_klein", "typ": "delle", "marke": "bmw", "alter_klasse": "12+", "min_eur": 100, "max_eur": 200,
-             "typisch_eur": 150, "quelle": "ADAC", "stand": _jetzt(), "art": "abholung"},
+             "typisch_eur": 150, "quelle": "ADAC" if i % 2 else "FairGarage", "stand": _jetzt(), "art": "abholung"},
             {"key": "keys_fehlt", "typ": "keys", "marke": "bmw", "alter_klasse": "12+", "min_eur": 200, "max_eur": 400,
-             "typisch_eur": 300, "quelle": "x", "stand": _jetzt(), "art": "abholung"}]))
+             "typisch_eur": 300, "quelle": "x" if i % 2 else "y", "stand": _jetzt(), "art": "abholung"}]))
     grund = welt.run(K._grundlagen(pid, w.dealer_id))
     paket = K.paket_bauen(*grund)
     eigene = welt.run(MD.eigene_referenzen(paket, "abholung"))
     assert eigene["delle_klein"]["n"] >= MD.EIGENE_MIN and eigene["delle_klein"]["nur_marke"] is True
+    assert eigene["delle_klein"]["stufe"] == "marke_alter" and eigene["delle_klein"]["reicht"] is True
     offen = MD.recherche_noetig(paket, "abholung", eigene)
     assert all(p.get("id") not in ("d1", "dev:keys") for p in offen), "eigene Daten reichen"
 
@@ -269,6 +271,7 @@ def test_05_kosten_betriebsseite_und_aufraeumschritt(welt, monkeypatch):
     _tabelle_weg(welt)
     quelle = Path(__file__).resolve().parents[1].joinpath("cleanup_service.py").read_text(encoding="utf-8")
     assert 'await s("ki_marktdaten"' in quelle
+    assert 'await s("ki_budget"' in quelle, "Review 26.09.2026 (Nr. 22): Budget-Abgleich im Aufraeumlauf"
     P = _module("ai.provider")
     assert P.WEBSUCHE_TOOL.startswith("web_search_") and callable(P.recherche)
     assert "ebay.de" in P.GESPERRTE_DOMAINS and "kleinanzeigen.de" in P.GESPERRTE_DOMAINS

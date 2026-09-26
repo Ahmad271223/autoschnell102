@@ -2869,9 +2869,10 @@ async def fahrer_ki_bewertung(appt_id: str, driver=Depends(current_driver)):
 
 @router.post("/protocols/{protocol_id}/ki-bewertung/neu")
 async def protokoll_ki_bewertung_neu(protocol_id: str, user=Depends(_chef_dep)):
-    """Bewertung neu rechnen (Chef klickt "Neu berechnen") — wartet auf die
-    Antwort (Zeitlimit KI_ZEITLIMIT_SEKUNDEN), blockiert sonst nichts."""
-    erg = await KI.bewertung_ausfuehren(protocol_id, user["dealer_id"], erzwingen=True)
+    """Bewertung neu rechnen (Chef klickt "Neu berechnen"). Review 26.09.2026
+    (Nr. 26): startet den Lauf im Hintergrund und antwortet sofort mit
+    "laeuft" — die Karte holt den Stand ueber GET .../ki-bewertung."""
+    erg = await KI.bewertung_starten(protocol_id, user["dealer_id"])
     if erg is None:
         raise HTTPException(404, "Protokoll nicht gefunden")
     return erg

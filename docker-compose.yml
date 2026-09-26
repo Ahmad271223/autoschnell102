@@ -231,6 +231,8 @@ services:
       - KI_KOSTEN_MAX_CT=${KI_KOSTEN_MAX_CT:-15}
       - KI_KONTEXT_ZEITLIMIT_SEKUNDEN=${KI_KONTEXT_ZEITLIMIT_SEKUNDEN:-2}
       - KI_KALIBRIERUNG_MIN_FIRMA=${KI_KALIBRIERUNG_MIN_FIRMA:-5}
+      # Review 26.09.2026: abgelegte KI-Ergebnisse gelten hoechstens so viele Tage
+      - KI_CACHE_TAGE=${KI_CACHE_TAGE:-7}
       # Market Intelligence (25.09.2026): taegliche mobile.de-Marktbeobachtung
       # (eigene Warteschlange, eigenes Budget). Standard AUS - erst nach
       # Freischaltung im Admin und MARKT_AKTIV=true laufen Crawls.

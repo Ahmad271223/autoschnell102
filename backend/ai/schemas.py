@@ -186,6 +186,39 @@ def datenlage_anpassen(ergebnis: Dict[str, Any], lage: str) -> str:
     return lage
 
 
+def positionen_abgleichen(ergebnis: Dict[str, Any], erwartete_ids) -> tuple:
+    """Review 26.09.2026 (Nr. 6): Der Prompt fordert GENAU eine Position je
+    Eingabe — das Backend prueft das jetzt. Doppelte source_id: nur die
+    erste bleibt. Fremde (nicht in der Eingabe): verworfen. Fehlende: der
+    Aufrufer bricht den Lauf mit status "fehler" ab. Liefert
+    (ergebnis_neu, fehlende, doppelte, fremde) — ergebnis_neu ist die rohe
+    Antwort mit bereinigter items-Liste; combined rechnet `bereinigen`
+    danach aus den verbleibenden Positionen neu (Boden = Summe der
+    Einzelwerte)."""
+    erwartet = [str(i) for i in (erwartete_ids or [])]
+    erwartet_set = set(erwartet)
+    gesehen: set = set()
+    items: List[Dict[str, Any]] = []
+    doppelte: List[str] = []
+    fremde: List[str] = []
+    for roh in (ergebnis or {}).get("items") or []:
+        if not isinstance(roh, dict):
+            continue
+        sid = str(roh.get("source_id") or "")
+        if sid not in erwartet_set:
+            fremde.append(sid)
+            continue
+        if sid in gesehen:
+            doppelte.append(sid)
+            continue
+        gesehen.add(sid)
+        items.append(roh)
+    fehlende = [i for i in erwartet if i not in gesehen]
+    neu = dict(ergebnis or {})
+    neu["items"] = items
+    return neu, fehlende, doppelte, fremde
+
+
 def bereinigen(daten: Dict[str, Any], *, kaufpreis: Optional[float]) -> Dict[str, Any]:
     """Zahlen absichern, Reihenfolge erzwingen, Summen plausibel halten.
     Liefert eine neue Struktur (das Original bleibt fuer die Ablage)."""

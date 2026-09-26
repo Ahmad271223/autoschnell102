@@ -34,6 +34,10 @@ log = logging.getLogger("autohandel.ki")
 
 KONTEXT_ZEITLIMIT_S = kommazahl_env("KI_KONTEXT_ZEITLIMIT_SEKUNDEN", 2.0, unten=0.5, oben=10.0)
 MARKT_CACHE_S = 6 * 3600
+# Review 26.09.2026 (Nr. 32): nur Vergleichsdaten, die hoechstens so alt sind
+MARKT_MAX_TAGE = 120
+# Leistung +-15 % kW (nur wenn beide bekannt), Kilometer +-40 %, EZ +-2 Jahre
+MARKT_KW_TOLERANZ = 0.15
 _markt_cache: Dict[str, Any] = {}
 
 
@@ -57,29 +61,116 @@ def _norm(s) -> str:
 
 
 # ------------------------------------------------ Marktvergleich
+def _getriebe(v: dict) -> Optional[str]:
+    """mobile.de-Getriebecode; Halbautomatik zaehlt wie Automatik (DSG &
+    Co. stehen mal so, mal so)."""
+    try:
+        from fahrzeug_codes import getriebe_code
+        code = getriebe_code(v.get("gearbox"), v.get("gearbox_label"), v.get("transmission"))
+    except Exception:  # noqa: BLE001
+        return None
+    return "AUTOMATIC_GEAR" if code == "SEMIAUTOMATIC_GEAR" else code
+
+
+def _modell_text(v: dict) -> str:
+    return _norm(v.get("model_label") or v.get("model"))
+
+
 def _markt_schluessel(v: dict) -> str:
+    """Review 26.09.2026 (Nr. 29): exaktes Jahr, km je 10.000, vollstaendiges
+    Modell, Getriebe und Leistung je 10 kW — vorher teilten sich ein 2019er
+    und ein 2021er, ein Schalter und eine Automatik denselben Eintrag."""
     jahr = _jahr(v.get("first_registration") or v.get("ezl")) or 0
     km = _zahl(v.get("mileage") or v.get("km")) or 0
-    return "|".join([_norm(v.get("make_label") or v.get("make")), _norm(v.get("model_label") or v.get("model")),
-                     str(jahr // 2), str(int(km // 30000)), _norm(v.get("fuel_label") or v.get("fuel"))])
+    kw = _zahl(v.get("power_kw")) or 0
+    return "|".join([_norm(v.get("make_label") or v.get("make")), _modell_text(v), str(jahr),
+                     str(int(km // 10000)), _norm(v.get("fuel_label") or v.get("fuel")),
+                     _getriebe(v) or "", str(int(kw // 10))])
+
+
+def _wort_praefix(lang: str, kurz: str) -> bool:
+    return bool(kurz) and (lang == kurz or lang.startswith(kurz + " "))
+
+
+def modell_passt(kandidat: dict, modell: str) -> bool:
+    """Review 26.09.2026 (Nr. 30): das GANZE normalisierte Modell zaehlt, als
+    Wort-Praefix in beide Richtungen — "c 220 d" trifft "C 220 d 4MATIC" und
+    "C 220", nicht "C 180" und nicht "C 2200"."""
+    for feld in ("model_label", "model", "model_description"):
+        n = _norm(kandidat.get(feld))
+        if n and (_wort_praefix(n, modell) or _wort_praefix(modell, n)):
+            return True
+    return False
+
+
+def _frische_filter(sammlung: str) -> Dict[str, Any]:
+    """Nur Daten der letzten MARKT_MAX_TAGE (Nr. 32): vehicles tragen
+    created_at/updated_at als ISO-Text, listings_cache fetched_at/created_at
+    als datetime — beide Formen werden geprueft."""
+    from datetime import datetime, timedelta, timezone
+    seit_dt = datetime.now(timezone.utc) - timedelta(days=MARKT_MAX_TAGE)
+    seit = seit_dt.isoformat()
+    if sammlung == "vehicles":
+        return {"$or": [{"updated_at": {"$gte": seit}}, {"created_at": {"$gte": seit}},
+                        {"updated_at": {"$gte": seit_dt}}, {"created_at": {"$gte": seit_dt}}]}
+    return {"$or": [{"fetched_at": {"$gte": seit_dt}}, {"created_at": {"$gte": seit_dt}},
+                    {"fetched_at": {"$gte": seit}}, {"created_at": {"$gte": seit}}]}
+
+
+async def _marktbeobachtung(vehicle: dict, db) -> Optional[Dict[str, Any]]:
+    """Review 26.09.2026 (Nr. 33): Liegt zum Fahrzeug ein beobachtetes
+    Marktsegment (Market Intelligence, mobile.de-Top-20) mit Daten vor, hat
+    es Vorrang vor dem groben Vergleich aus eigenen Fahrzeugen. Nur lesen,
+    kurzes Zeitlimit, nie eine Ausnahme."""
+    try:
+        from markt import abfrage
+        # halbes Kontext-Zeitlimit: bleibt die Beobachtung aus, hat der grobe
+        # Vergleich noch Zeit, bevor `sammeln` den ganzen Marktteil aufgibt
+        karte = await asyncio.wait_for(abfrage.karte(db, vehicle), timeout=KONTEXT_ZEITLIMIT_S / 2)
+    except Exception as exc:  # noqa: BLE001
+        log.info("Marktbeobachtung nicht verfuegbar: %s", exc)
+        return None
+    if not karte or not karte.get("sample_size") or not karte.get("median_top20_price"):
+        return None
+    return {"source": "marktbeobachtung", "comparable_count": int(karte["sample_size"]),
+            "median_price_eur": round(float(karte["median_top20_price"])),
+            "min_price_eur": round(float(karte["min_price"])) if karte.get("min_price") else None,
+            "p25_price_eur": round(float(karte["p25_price"])) if karte.get("p25_price") else None,
+            "p75_price_eur": round(float(karte["p75_price"])) if karte.get("p75_price") else None,
+            "datenstand": karte.get("datenstand") or karte.get("datum"),
+            "segment": karte.get("label"),
+            "hint": "guenstigstes Segment (Top 20 auf mobile.de), kein Marktmedian"}
 
 
 async def marktvergleich(vehicle: dict, *, eigene_id: str = "", db=None) -> Optional[Dict[str, Any]]:
-    """Statistik vergleichbarer Fahrzeuge (Marke, Modell, EZ +-2 Jahre, km
-    +-40 %, gleicher Kraftstoff) aus vehicles und listings_cache aller Firmen
-    — nur Zahlen, keine Inserate. None, wenn zu wenige."""
+    """EINE Marktzahl fuer die KI: zuerst die Marktbeobachtung (quelle
+    "marktbeobachtung"), sonst der grobe Vergleich (quelle "grob") aus
+    vehicles und listings_cache aller Firmen — Marke, ganzes Modell, EZ +-2
+    Jahre, km +-40 %, gleicher Kraftstoff, gleiches Getriebe, Leistung
+    +-15 % (wenn beide bekannt), Daten hoechstens MARKT_MAX_TAGE alt. Nur
+    Zahlen, keine Inserate. None, wenn zu wenige."""
     db = db if db is not None else _db
     v = vehicle or {}
-    marke, modell = _norm(v.get("make_label") or v.get("make")), _norm(v.get("model_label") or v.get("model"))
+    marke, modell = _norm(v.get("make_label") or v.get("make")), _modell_text(v)
     if not marke or not modell:
         return None
     key = _markt_schluessel(v)
     treffer = _markt_cache.get(key)
     if treffer and time.time() - treffer["t"] < MARKT_CACHE_S:
         return treffer["wert"]
+    wert = await _marktbeobachtung(v, db)
+    if wert is None:
+        wert = await _grober_vergleich(v, marke, modell, eigene_id=eigene_id, db=db)
+    _markt_cache[key] = {"t": time.time(), "wert": wert}
+    return wert
+
+
+async def _grober_vergleich(v: dict, marke: str, modell: str, *, eigene_id: str, db) -> Optional[Dict[str, Any]]:
     jahr = _jahr(v.get("first_registration") or v.get("ezl"))
     km = _zahl(v.get("mileage") or v.get("km"))
+    kw = _zahl(v.get("power_kw"))
     fuel = _norm(v.get("fuel_label") or v.get("fuel"))
+    getriebe = _getriebe(v)
     preise: List[float] = []
     muster_marke = re.compile("^" + re.escape(marke.split(" ")[0]), re.I)
     muster_modell = re.compile(re.escape(modell.split(" ")[0]), re.I)
@@ -89,9 +180,12 @@ async def marktvergleich(vehicle: dict, *, eigene_id: str = "", db=None) -> Opti
                 {"$or": [{f"{feld}.make_label": muster_marke}, {f"{feld}.make": muster_marke}]},
                 {"$or": [{f"{feld}.model_label": muster_modell}, {f"{feld}.model": muster_modell},
                          {f"{feld}.model_description": muster_modell}]},
+                _frische_filter(sammlung),
             ]},
             {"_id": 0, "id": 1, f"{feld}.price": 1, f"{feld}.list_price": 1, f"{feld}.first_registration": 1,
-             f"{feld}.mileage": 1, f"{feld}.fuel_label": 1, f"{feld}.fuel": 1}
+             f"{feld}.mileage": 1, f"{feld}.fuel_label": 1, f"{feld}.fuel": 1, f"{feld}.model_label": 1,
+             f"{feld}.model": 1, f"{feld}.model_description": 1, f"{feld}.gearbox": 1, f"{feld}.gearbox_label": 1,
+             f"{feld}.transmission": 1, f"{feld}.power_kw": 1}
         ).limit(400)
         async for d in cursor:
             if eigene_id and d.get("id") == eigene_id:
@@ -99,6 +193,8 @@ async def marktvergleich(vehicle: dict, *, eigene_id: str = "", db=None) -> Opti
             dd = d.get(feld) or {}
             p = _zahl(dd.get("price")) or _zahl(dd.get("list_price"))
             if not p or p < 300:
+                continue
+            if not modell_passt(dd, modell):
                 continue
             j = _jahr(dd.get("first_registration"))
             if jahr and j and abs(j - jahr) > 2:
@@ -109,15 +205,20 @@ async def marktvergleich(vehicle: dict, *, eigene_id: str = "", db=None) -> Opti
             f = _norm(dd.get("fuel_label") or dd.get("fuel"))
             if fuel and f and f != fuel:
                 continue
+            g = _getriebe(dd)
+            if getriebe and g and g != getriebe:
+                continue
+            k_kw = _zahl(dd.get("power_kw"))
+            if kw and k_kw and abs(k_kw - kw) > kw * MARKT_KW_TOLERANZ:
+                continue
             preise.append(p)
-    preise = sorted(set(round(p) for p in preise))
-    wert = None
-    if len(preise) >= 3:
-        q = statistics.quantiles(preise, n=4) if len(preise) >= 4 else [preise[0], statistics.median(preise), preise[-1]]
-        wert = {"comparable_count": len(preise), "median_price_eur": round(statistics.median(preise)),
-                "p25_price_eur": round(q[0]), "p75_price_eur": round(q[-1])}
-    _markt_cache[key] = {"t": time.time(), "wert": wert}
-    return wert
+    # Nr. 28: KEIN set() — zwei Inserate zum selben Preis sind zwei Inserate
+    preise = sorted(round(p) for p in preise)
+    if len(preise) < 3:
+        return None
+    q = statistics.quantiles(preise, n=4) if len(preise) >= 4 else [preise[0], statistics.median(preise), preise[-1]]
+    return {"source": "grob", "comparable_count": len(preise), "median_price_eur": round(statistics.median(preise)),
+            "p25_price_eur": round(q[0]), "p75_price_eur": round(q[-1])}
 
 
 def marktposition(markt: Optional[dict], *, listing: Optional[float], agreed: Optional[float]) -> Optional[dict]:

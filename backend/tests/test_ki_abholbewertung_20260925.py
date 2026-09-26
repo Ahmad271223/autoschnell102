@@ -36,15 +36,47 @@ ANTWORT = {
 }
 
 
-def _attrappe(monkeypatch, antwort=ANTWORT, status="ok", zaehler=None):
+def _erwartete_ids(paket):
+    """Alle Positionen, die die KI bewerten muss (wie im Prompt gefordert)."""
+    ids = [d["id"] for d in paket.get("new_damages") or [] if not d.get("already_known")]
+    ids += [d["id"] for d in paket.get("damages") or []]
+    ids += [a["id"] for a in paket.get("deviations") or []]
+    return ids
+
+
+def vollstaendig(antwort, paket):
+    """Review 26.09.2026 (Nr. 6): das Backend verlangt GENAU eine Position je
+    Eingabe. Die Attrappe ergaenzt fuer jede Eingabe-ID ohne Position eine
+    neutrale (0 EUR, nicht preisrelevant) — so bleiben die Zahlen der
+    festen Antwort unveraendert."""
+    vorhanden = {str(i.get("source_id")) for i in antwort.get("items") or []}
+    items = list(antwort.get("items") or [])
+    for pid in _erwartete_ids(paket):
+        if pid in vorhanden:
+            continue
+        items.append({"source_id": pid, "category": "other", "title": f"Position {pid}", "price_relevant": False,
+                      "repair_method": "", "repair_estimate_eur": 0, "minimum_justified_eur": 0,
+                      "fair_discount_eur": 0, "best_realistic_eur": 0, "negotiation_start_eur": 0,
+                      "manual_review_required": False, "assessment_kind": "repair_estimate",
+                      "diagnosis_cost_eur": 0, "scenario_low_eur": 0, "scenario_mid_eur": 0, "scenario_high_eur": 0,
+                      "reason": "Ohne wirtschaftlichen Einfluss."})
+    return {**antwort, "items": items}
+
+
+def _attrappe(monkeypatch, antwort=ANTWORT, status="ok", zaehler=None, ergaenzen=True, pause_s=0.0):
     K = _module("ai.pickup_assessment")
 
     async def _bewerten(**kw):
         if zaehler is not None:
             zaehler.append(kw["nutzer"])
+        if pause_s:
+            import asyncio
+            await asyncio.sleep(pause_s)
+        daten = vollstaendig(antwort, kw["nutzer"]) if (ergaenzen and status == "ok") else antwort
+        # Modell wie konfiguriert: der Zwischenspeicher (Nr. 4/5) vergleicht es
         return {"status": status, "grund": "" if status == "ok" else "Attrappe",
-                "daten": antwort if status == "ok" else None, "dauer_ms": 5,
-                "modell": "attrappe", "usage": {"input_tokens": 1000, "output_tokens": 500}}
+                "daten": daten if status == "ok" else None, "dauer_ms": 5,
+                "modell": K.ki_modell(), "usage": {"input_tokens": 1000, "output_tokens": 500}}
     monkeypatch.setattr(K, "json_bewerten", _bewerten)
     monkeypatch.setattr(K, "ki_aktiv", lambda: True)
     # Stufe 5: nie eine echte Websuche im Test (Attrappe "aus")
@@ -104,6 +136,16 @@ def _aufraeumen(welt):
     db, w = welt.db, welt.w
     welt.run(db.ki_bewertungen.delete_many({"dealer_id": w.dealer_id}))
     welt.run(db.ki_lernfaelle.delete_many({"dealer_id": w.dealer_id}))
+    welt.run(db.ki_budget.delete_many({"_id": {"$regex": f":{w.dealer_id}:"}}))
+
+
+def hintergrund_abwarten(welt, K):
+    """Review 26.09.2026 (Nr. 26): "Neu berechnen" rechnet im Hintergrund —
+    die Tests warten die Aufgaben ab, bevor sie das Ergebnis lesen."""
+    async def _warten():
+        for t in list(K._laufende):
+            await t
+    welt.run(_warten())
 
 
 def test_01_paket_ohne_verkaeuferdaten_mit_abgleich_und_referenzen(welt, monkeypatch):
@@ -244,8 +286,10 @@ def test_06_routen_nur_chef_und_lernfall_bei_freigabe(welt, monkeypatch):
     monkeypatch.setattr(P, "_pflichtfelder_pruefen", lambda *a, **k: None)
     _cid, _tid, _vid, pid = _welt_aufbauen(welt, "6")
     w, db = welt.w, welt.db
+    # Nr. 26: "Neu berechnen" antwortet sofort mit laeuft, rechnet im Hintergrund
     erg = welt.run(P.protokoll_ki_bewertung_neu(pid, user=w.chef))
-    assert erg["status"] == "ok"
+    assert erg["status"] == "laeuft" and erg["protocol_id"] == pid
+    hintergrund_abwarten(welt, K)
     erg = welt.run(P.protokoll_ki_bewertung(pid, user=w.chef))
     assert erg["status"] == "ok"
     with pytest.raises(HTTPException) as ex:
@@ -309,10 +353,14 @@ def test_08_budget_bremst(welt, monkeypatch):
     _cid, _tid, _vid, pid = _welt_aufbauen(welt, "8")
     w, db = welt.w, welt.db
     monkeypatch.setenv("KI_BUDGET_MONAT_EUR", "0.01")
-    # ein teurer Lauf dieser Firma in diesem Monat -> Budget voll
+    # ein teurer Lauf dieser Firma in diesem Monat -> Budget voll. Review
+    # 26.09.2026 (Nr. 22): pruefen() liest den Zaehler, der Abgleich (stuendlich)
+    # bringt ihn auf den Stand der Bewertungen.
     welt.run(db.ki_bewertungen.insert_one({"id": f"alt_{w.s}", "art": "abholung", "dealer_id": w.dealer_id,
                                           "protocol_id": f"p_alt_{w.s}", "input_hash": "x", "status": "ok",
                                           "created_at": _jetzt(), "kosten_ct": 2.0}))
+    welt.run(B.abgleichen(db))
+    assert welt.run(B.zaehler_ct(user_id=None, dealer_id=w.dealer_id, art="abholung")) == 2.0
     bud = welt.run(B.pruefen(user_id=None, dealer_id=w.dealer_id, art="abholung"))
     assert bud["erlaubt"] is False and "Monatsbudget" in bud["grund"]
     erg = welt.run(K.bewertung_ausfuehren(pid, w.dealer_id))
@@ -329,7 +377,7 @@ def test_09_fahrer_sieht_auswertung_ohne_kosten(welt, monkeypatch):
     'keine' mit Grund, danach dasselbe Ergebnis wie beim Chef, aber ohne
     Kosten/Budget/Modell; fremder Termin 404."""
     from fastapi import HTTPException
-    _attrappe(monkeypatch)
+    K = _attrappe(monkeypatch)
     P = _module("routes.protocols")
     _cid, tid, _vid, pid = _welt_aufbauen(welt, "9")
     w, db = welt.w, welt.db
@@ -343,6 +391,7 @@ def test_09_fahrer_sieht_auswertung_ohne_kosten(welt, monkeypatch):
     assert erg["status"] == "keine" and "Abschicken" in erg["grund"]
     welt.run(db.pickup_protocols.update_one({"id": pid}, {"$set": {"status": "zur_freigabe"}}))
     welt.run(P.protokoll_ki_bewertung_neu(pid, user=w.chef))
+    hintergrund_abwarten(welt, K)
     erg = welt.run(P.fahrer_ki_bewertung(tid, driver=w.driver))
     assert erg["status"] == "ok" and erg["preis_vorschlag"] == 7300
     assert erg["ergebnis"]["combined"]["fair_discount_eur"] == 530.0
@@ -488,6 +537,9 @@ def test_11_ki_freischaltung_je_konto(welt, monkeypatch):
     zeile = next(s for s in welt.run(A.admin_list_dealer_sucher(w.dealer_id, _Antwort(), _=SA)) if s["id"] == w.chef["id"])
     assert zeile["ki_aktiv"] is True
     erg = welt.run(P.protokoll_ki_bewertung_neu(pid, user=w.chef))
+    assert erg["status"] == "laeuft"
+    hintergrund_abwarten(welt, K)
+    erg = welt.run(P.protokoll_ki_bewertung(pid, user=w.chef))
     assert erg["status"] == "ok"
     erg = welt.run(DP.bewerten(user=w.chef, vehicle_doc=vehicle_doc, damages=dmg, kaufpreis=8000.0, warten=True))
     assert erg["status"] == "ok" and len(aufrufe) == 2

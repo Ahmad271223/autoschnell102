@@ -836,8 +836,10 @@ async def vertrag_ki_vorschau(body: KiSchadenIn, user=Depends(current_firma)):
 
 @router.get("/contracts/ki-schadennachlass/{bewertung_id}")
 async def vertrag_ki_schadennachlass_stand(bewertung_id: str, user=Depends(current_firma)):
-    """Stand einer gestarteten Bewertung (laeuft | ok | fehler ...)."""
-    erg = await _ki_vertrag.lesen(bewertung_id, user["dealer_id"])
+    """Stand einer gestarteten Bewertung (laeuft | ok | fehler ...). Review
+    26.09.2026 (Nr. 8): nur die eigene Bewertung oder ein Fahrzeug im
+    eigenen Bereich (Chef = Firma, Sucher = eigene/mitbearbeitete)."""
+    erg = await _ki_vertrag.lesen(bewertung_id, user["dealer_id"], user)
     if erg is None:
         raise HTTPException(404, "Bewertung nicht gefunden")
     return erg
