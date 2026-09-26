@@ -130,6 +130,11 @@ Das läuft im Hintergrund und kann eine Weile dauern.`)) return;
         {p.ueberschritten && <div className="mt-2 text-[12px] text-red-300" data-testid="auftraege-budget-warnung">
           Die aktive Konfiguration würde das verbleibende Monatsbudget voraussichtlich überschreiten
           {p.restkosten_usd != null ? ` (noch ${Number(p.restkosten_usd).toFixed(2)} $ für ${p.rest_tage ?? "—"} Tage bei ${Number(p.verbleibend_usd || 0).toFixed(2)} $ frei)` : ""}. Das harte Budgetlimit im Worker bleibt bestehen — Läufe warten, wenn es erreicht ist.</div>}
+        {/* Master-Auftrag Phase B: Kosten strikt getrennt — nur die Abrufe der km-Segmente kosten Geld; Berichte, Diagramme,
+            Trends und Deals lesen nur gespeicherte Tageswerte (0 Abrufe, 0 $) */}
+        {p.crawl_cost_exact_km_monat_usd != null && <div className="mt-2 text-[12px] text-zinc-300" data-testid="auftraege-kostenaufteilung">
+          Davon Abrufe der km-Segmente {Number(p.crawl_cost_exact_km_monat_usd || 0).toFixed(2)} $ · Entfernungsprüfung {Number(p.entfernung_monat_usd || 0).toFixed(2)} $
+          {" "}· Berichte/Auswertungen {Number(p.reporting_cost_monat_usd || 0).toFixed(2)} $ (keine Abrufe — lesen nur gespeicherte Tageswerte)</div>}
         <div className="mt-1 text-[11px] text-zinc-500">Rechnung: Segmente = EZ-Jahre × km-Bereiche · Zeilen/Tag = Segmente × Zeilen × Abrufe · Kosten = Läufe × {p.preise?.start_usd} $ + Zeilen × {p.preise?.row_usd} $ (Bündel zu {p.preise?.buendel}, {p.preise?.actor}). Keine KI.</div>
       </Card>
 

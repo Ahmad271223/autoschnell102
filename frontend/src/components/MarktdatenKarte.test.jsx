@@ -23,6 +23,8 @@ const DATEN = {
   sample_size: 20, sample_limit: 20, min_price: 18900, median_sample_price: 20250, avg_sample_price: 20410, max_sample_price: 21700,
   p25_price: 19600, p75_price: 21000, trend_7d_eur: -300, trend_7d_pct: -1.5, trend_30d_eur: -850, trend_30d_pct: -4.0,
   datenstand: "2026-10-01T05:10:00+00:00", datum: "2026-10-01", datenlage: "gut", beobachtete_tage: 31,
+  // Master-Auftrag Phase C: Datenqualitaet und Markttiefe getrennt
+  data_quality: "GOOD", market_depth: "THIN", sample_completeness: "UNKNOWN",
   trend_30d_bestand_eur: -640, trend_30d_bestand_pct: -3.2, anzahl_gemeinsam_30d: 9, trend_7d_bestand_eur: null, anzahl_gemeinsam: 0,
   // Backend-Differenz absichtlich FALSCH (anderer Preis) — die Karte muss selbst rechnen (Nr. 146)
   hinweis: "kein Marktmedian", preis_vs_median_eur: -9999, preis_vs_median_pct: -40, unter_sample_min: true,
@@ -68,6 +70,8 @@ describe("MarktdatenKarte", () => {
     expect(el("marktdaten-verlauf").textContent).toContain("1 Reduzierung");
     expect(el("marktdaten-verlauf").textContent).toContain("Platz 4 von 20");
     expect(el("marktdaten-datenlage").textContent).toContain("Datenlage gut");
+    expect(el("marktdaten-qualitaet-dq").textContent).toBe("Qualität gut");
+    expect(el("marktdaten-qualitaet-tiefe").textContent).toBe("Tiefe dünn");
     expect(k.textContent).toContain("20 Fahrzeuge");
     expect(k.textContent).toContain("kein Marktmedian");
     expect(k.textContent).not.toMatch(/Marktpreis\b/);

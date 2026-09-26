@@ -127,7 +127,8 @@ def test_03_listing_dedupe_snapshots_preisaenderung_not_seen(welt):
     erg1 = welt.run(SP.verarbeiten(db, seg, items1, beobachtet=tag1))
     assert erg1["sample_size"] == 3 and erg1["neu_gesamt"] == 3 and erg1["neu_im_sample"] == 3
     # derselbe Tag noch einmal: keine zweiten Snapshots, keine Preisaenderung
-    welt.run(SP.verarbeiten(db, seg, items1, beobachtet=tag1 + timedelta(minutes=5)))
+    # mitternachtsfest: derselbe Statistik-Tag wie der erste Lauf (Nr. 104: der Tag kommt vom Job, nicht von der Uhr)
+    welt.run(SP.verarbeiten(db, seg, items1, beobachtet=tag1 + timedelta(minutes=5), tag=K.heute_tag(tag1)))
     assert welt.run(db[K.SNAPSHOTS].count_documents({"listing_id": {"$regex": f"^t{s}"}})) == 3
     assert welt.run(db[K.LISTINGS].count_documents({"listing_id": {"$regex": f"^t{s}"}})) == 3
     # Tag 2: a guenstiger (-500), b weg (nicht im Sample!), d neu unter dem bisherigen Minimum
@@ -146,7 +147,8 @@ def test_03_listing_dedupe_snapshots_preisaenderung_not_seen(welt):
     st = welt.run(db[K.SEGMENTSTATS].find_one({"_id": seg["id"]}, {"_id": 0}))
     assert st["sample_size"] == 3 and st["min_price"] == 17500 and st["median_top20_price"] == 18400 and st["max_price"] == 21700
     assert st["new_in_sample_today"] == 1 and st["price_reductions_today"] == 1 and st["beobachtete_tage"] == 2
-    assert st["datenlage"] == "niedrig" and "market_median" not in str(st)
+    # Master-Auftrag Phase C: 3 von 20 bestellten Zeilen = Markttiefe THIN -> Datenlage 'duenn' (Datenqualitaet gut)
+    assert st["datenlage"] == "duenn" and st["data_quality"] == "GOOD" and st["market_depth"] == "THIN" and "market_median" not in str(st)
     ts = welt.run(db[K.TAGESSTATS].find({"segment_id": seg["id"]}, {"_id": 0}).sort("date", 1).to_list(10))
     assert [t["median_price"] for t in ts] == [19900, 18400] and ts[1]["p25_price"] == 17950
     # Chancen: d unter bisherigem Minimum, a stark reduziert? (-500 EUR >= 500 EUR -> ja)
@@ -1005,10 +1007,16 @@ def test_17_unsortierter_lauf_wird_data_invalid(welt, monkeypatch):
     j = welt.run(db[K.JOBS].find_one({"id": job["id"]}, {"_id": 0}))
     assert j["status"] == "data_invalid" and j["error"] == "Sortierung unsicher" and j["actual_rows"] == 0 and j["gelieferte_rows"] == 3
     assert j["actual_cost"] == 0.02 and j["sorted_confirmed"] is False and "lease_until" not in j
-    for coll, filt in ((K.SNAPSHOTS, {"segment_id": seg["id"]}), (K.TAGESSTATS, {"segment_id": seg["id"]}),
-                       (K.SEGMENTSTATS, {"_id": seg["id"]}), (K.CHANCEN, {"segment_id": seg["id"]}),
+    for coll, filt in ((K.SNAPSHOTS, {"segment_id": seg["id"]}), (K.CHANCEN, {"segment_id": seg["id"]}),
                        (K.LISTINGS, {"listing_id": {"$regex": f"^t{s}"}})):
         assert welt.run(db[coll].count_documents(filt)) == 0, f"{coll}: nichts gespeichert"
+    # Master-Auftrag Phase C: der ungueltige Lauf ZAEHLT im Tagesdokument (invalid_runs, Kosten), aber ohne Kennzahlen —
+    # die Segmentstatistik sagt "Datenqualitaet schlecht (nur ungueltige Laeufe)", nie "kein Angebot"
+    ts = welt.run(db[K.TAGESSTATS].find_one({"segment_id": seg["id"]}, {"_id": 0}))
+    assert ts["invalid_runs"] == 1 and "sample_size" not in ts and "median_price" not in ts and ts["crawl_cost_usd"] == 0.02
+    assert ts["data_quality"] == "POOR" and ts["data_quality_grund"] == "ungueltig" and ts["market_depth"] == "UNKNOWN"
+    st = welt.run(db[K.SEGMENTSTATS].find_one({"_id": seg["id"]}, {"_id": 0}))
+    assert st["sample_size"] is None and st["data_quality"] == "POOR" and st["datenlage"] == "fehler"
     sg = welt.run(db[K.SEGMENTE].find_one({"id": seg["id"]}, {"_id": 0}))
     assert sg.get("last_attempt_at") and not sg.get("last_success_at")
     assert welt.run(db.betriebsalarme.find_one({"typ": "markt_sortierung_unsicher", "ref": seg["id"], "offen": True}))
@@ -2968,34 +2976,44 @@ def test_55_preisparser_datum_privat(welt, monkeypatch):
 
 def test_56_datenlage_relativ_und_unvollstaendig(welt, monkeypatch):
     """Nr. 82: 'gut' ab 80 % der bestellten Zeilen, 'mittel' ab 50 % (10 Zeilen: 8 / 5) — vorher fest 15;
-    Nr. 143: liefert der Scraper die Marktgroesse und weniger als bestellt -> sample_incomplete, 'unvollstaendig'."""
+    Nr. 143 + Master-Auftrag Phase C (A4): die Marktgroesse kommt NUR aus einem nachgewiesenen Scraper-Feld
+    (normalisieren.MARKT_GESAMT_FELD, bis dahin None) — geratene Felder wie totalResults zaehlen nicht
+    (Vollstaendigkeit UNKNOWN); mit bestaetigtem Feld -> sample_completeness INCOMPLETE bzw. COMPLETE."""
     assert SP.datenlage(31, 8, 100, rows=10) == "gut" and SP.datenlage(31, 7.9, 100, rows=10) == "mittel"
     assert SP.datenlage(31, 5, 100, rows=10) == "mittel" and SP.datenlage(31, 4.9, 100, rows=10) == "niedrig"
     assert SP.datenlage(31, 16, 100, rows=20) == "gut" and SP.datenlage(31, 15, 100, rows=20) == "mittel"
     assert SP.datenlage(31, 20, 100, rows=10, sample_incomplete=True) == "unvollstaendig"
-    assert NORM.markt_gesamt([{"totalResults": "57"}, {}]) == 57 and NORM.markt_gesamt([_item("a", 1)]) is None
+    assert NORM.MARKT_GESAMT_FELD is None
+    assert NORM.markt_gesamt([{"totalResults": "57"}, {}]) is None, "keine geratenen Feldnamen"
+    assert NORM.markt_gesamt([{"totalResults": "57"}, {}], feld="totalResults") == 57 and NORM.markt_gesamt([_item("a", 1)], feld="totalResults") is None
     s, seg = _vorbereiten(welt, monkeypatch, seg={**_segment(welt.w), "max_items": 10})
     db = welt.db
-    items = [{**_item_pos(f"t{s}{i}", 9000 + i * 10, i + 1), "totalResults": 50} for i in range(4)]     # Markt 50, geliefert 4 < 10
+    items = [{**_item_pos(f"t{s}{i}", 9000 + i * 10, i + 1), "totalResults": 50} for i in range(4)]     # 'Markt 50', geliefert 4 < 10
     monkeypatch.setattr(APIFY, "lauf", _antwort(items))
     job = welt.run(JOBS.job_sofort(db, seg["id"]))
     welt.run(JOBS.verarbeiten_buendel(db, [_eigenen_beanspruchen(welt, job["id"])]))
     j = welt.run(db[K.JOBS].find_one({"id": job["id"]}, {"_id": 0}))
-    assert j["status"] == "completed" and j["sample_incomplete"] is True and j["markt_gesamt"] == 50
+    assert j["status"] == "completed" and j["sample_incomplete"] is None and j["markt_gesamt"] is None
     ts = welt.run(db[K.TAGESSTATS].find_one({"segment_id": seg["id"]}, {"_id": 0}))
-    assert ts["sample_incomplete"] is True and ts["laeufe"][-1]["sample_incomplete"] is True and ts["sample_size"] == 4
+    assert ts["sample_size"] == 4 and ts["sample_completeness"] == "UNKNOWN" and ts["market_depth"] == "THIN"
     st = welt.run(db[K.SEGMENTSTATS].find_one({"_id": seg["id"]}, {"_id": 0}))
-    assert st["datenlage"] == "unvollstaendig" and st["sample_incomplete"] is True and st["sample_limit"] == 10
-    # ohne die Angabe: None (nicht unvollstaendig); Markt <= bestellt: False
-    monkeypatch.setattr(APIFY, "lauf", _antwort([_item_pos(f"t{s}{i}", 9000 + i * 10, i + 1) for i in range(4)]))
+    assert st["datenlage"] == "duenn" and st["sample_completeness"] == "UNKNOWN" and st["sample_limit"] == 10
+    # mit bestaetigtem Feld (spaeter aus dem Actor-Key-Protokoll eingetragen): Markt 50 > 4 geliefert -> INCOMPLETE
+    monkeypatch.setattr(NORM, "MARKT_GESAMT_FELD", "totalResults")
+    monkeypatch.setattr(APIFY, "lauf", _antwort(items, run_id="r-56b"))
     job2 = welt.run(JOBS.job_sofort(db, seg["id"]))
     welt.run(JOBS.verarbeiten_buendel(db, [_eigenen_beanspruchen(welt, job2["id"])]))
-    assert welt.run(db[K.JOBS].find_one({"id": job2["id"]}, {"_id": 0}))["sample_incomplete"] is None
-    monkeypatch.setattr(APIFY, "lauf", _antwort([{**_item_pos(f"t{s}{i}", 9000 + i * 10, i + 1), "totalResults": 4} for i in range(4)]))
+    j2 = welt.run(db[K.JOBS].find_one({"id": job2["id"]}, {"_id": 0}))
+    assert j2["sample_incomplete"] is True and j2["markt_gesamt"] == 50
+    ts = welt.run(db[K.TAGESSTATS].find_one({"segment_id": seg["id"]}, {"_id": 0}))
+    assert ts["sample_completeness"] == "INCOMPLETE" and ts["laeufe"][-1]["sample_incomplete"] is True
+    assert welt.run(db[K.SEGMENTSTATS].find_one({"_id": seg["id"]}, {"_id": 0}))["sample_completeness"] == "INCOMPLETE"
+    # Markt 4 = geliefert: der ganze Markt steckt in der Stichprobe -> COMPLETE
+    monkeypatch.setattr(APIFY, "lauf", _antwort([{**_item_pos(f"t{s}{i}", 9000 + i * 10, i + 1), "totalResults": 4} for i in range(4)], run_id="r-56c"))
     job3 = welt.run(JOBS.job_sofort(db, seg["id"]))
     welt.run(JOBS.verarbeiten_buendel(db, [_eigenen_beanspruchen(welt, job3["id"])]))
     assert welt.run(db[K.JOBS].find_one({"id": job3["id"]}, {"_id": 0}))["sample_incomplete"] is False
-    assert welt.run(db[K.SEGMENTSTATS].find_one({"_id": seg["id"]}, {"_id": 0}))["datenlage"] == "niedrig"
+    assert welt.run(db[K.SEGMENTSTATS].find_one({"_id": seg["id"]}, {"_id": 0}))["sample_completeness"] == "COMPLETE"
     _aufraeumen(welt)
 
 
@@ -3385,11 +3403,13 @@ def test_65_alter_lauf_ueberschreibt_nicht_und_job_tag(welt, monkeypatch):
     x = f"t{s}x"
     jetzt = K.jetzt()
     welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_item(x, 18000)]), beobachtet=jetzt))
-    erg = welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_item(x, 17000)]), beobachtet=jetzt - timedelta(hours=1), lauf_tag=f"{_tag(0)}#alt"))
+    # mitternachtsfest: der alte Lauf gehoert zum selben Job-Tag (Nr. 104), auch wenn er kurz vor Mitternacht beobachtet wurde
+    erg = welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_item(x, 17000)]), beobachtet=jetzt - timedelta(hours=1),
+                                  lauf_tag=f"{K.heute_tag(jetzt)}#alt", tag=K.heute_tag(jetzt)))
     assert erg["veraltet"] == 1
     l = welt.run(db[K.LISTINGS].find_one({"listing_id": x}, {"_id": 0}))
     assert l["current_price"] == 18000 and l["observation_at"] == jetzt.isoformat() and l["price_changes"] == 0
-    snap = welt.run(db[K.SNAPSHOTS].find_one({"listing_id": x, "segment_id": seg["id"], "date": _tag(0)}, {"_id": 0}))
+    snap = welt.run(db[K.SNAPSHOTS].find_one({"listing_id": x, "segment_id": seg["id"], "date": K.heute_tag(jetzt)}, {"_id": 0}))
     assert snap["price"] == 18000 and snap["observed_at"] == jetzt.isoformat() and len(snap["laeufe"]) == 2, "Hauptfelder bleiben, Lauf protokolliert"
     assert welt.run(db[K.CHANCEN].count_documents({"listing_id": x})) == 0
     # neuer Lauf danach aktualisiert wieder
@@ -3495,7 +3515,9 @@ def test_67_filter_unbekannt_und_defekt_und_alle_verworfen(welt, monkeypatch):
     assert erg2["ergebnisse"][0]["status"] == "data_invalid" and "alle Zeilen verworfen" in erg2["ergebnisse"][0]["grund"]
     j2 = welt.run(db[K.JOBS].find_one({"id": job2["id"]}, {"_id": 0}))
     assert j2["status"] == "data_invalid" and j2["verworfen_filter"] == 2 and j2["rohe_rows"] == 2
-    assert welt.run(db[K.TAGESSTATS].count_documents({"segment_id": seg["id"]})) == 0
+    # Phase C: beide ungueltigen Laeufe zaehlen im Tagesdokument — ohne Kennzahlen (keine Marktluecke)
+    ts = welt.run(db[K.TAGESSTATS].find_one({"segment_id": seg["id"]}, {"_id": 0}))
+    assert ts["invalid_runs"] == 2 and "sample_size" not in ts and ts["crawl_rows"] >= 2
     # 0 Zeilen geliefert -> Marktluecke, completed
     monkeypatch.setattr(APIFY, "lauf", _antwort([]))
     job3 = welt.run(JOBS.job_sofort(db, seg["id"]))

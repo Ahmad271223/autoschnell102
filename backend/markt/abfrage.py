@@ -14,7 +14,7 @@ import statistics
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
-from markt import budget, jobs, konfig, normalisieren, segmente
+from markt import budget, jobs, konfig, normalisieren, segmente, speicher
 from markt.konfig import CHANCEN, JOBS, LISTINGS, MODELLE, PRIVATE_DEALS, SEGMENTE, SEGMENTSTATS, SNAPSHOTS, TAGESSTATS
 
 HINWEIS = ("Beobachtet werden je Segment nur die günstigsten passenden Angebote (Anzahl je Suchauftrag) — "
@@ -251,6 +251,8 @@ async def karte(db, v: Dict[str, Any], listing_id: Optional[str] = None) -> Opti
     stat = await db[SEGMENTSTATS].find_one({"_id": seg["id"]}, {"_id": 0})
     if not stat or not stat.get("sample_size"):
         return None
+    # Master-Auftrag Phase C: Datenqualitaet, Markttiefe, Vollstaendigkeit getrennt — mit Frische zum Lesezeitpunkt
+    q = speicher.qualitaet_lesen(stat)
     raus: Dict[str, Any] = {
         "segment_id": seg["id"], "label": seg.get("label"), "km_label": seg.get("km_label"), "ez_label": seg.get("ez_label"),
         "sample_size": stat.get("sample_size"), "min_price": stat.get("min_price"),
@@ -268,7 +270,9 @@ async def karte(db, v: Dict[str, Any], listing_id: Optional[str] = None) -> Opti
         "anzahl_gemeinsam": stat.get("anzahl_gemeinsam") or 0,
         "trend_30d_bestand_eur": stat.get("trend_30d_bestand_eur"), "trend_30d_bestand_pct": stat.get("trend_30d_bestand_pct"),
         "anzahl_gemeinsam_30d": stat.get("anzahl_gemeinsam_30d") or 0,
-        "datenstand": stat.get("updated_at"), "datum": stat.get("date"), "datenlage": stat.get("datenlage"),
+        "datenstand": stat.get("updated_at"), "datum": stat.get("date"), "datenlage": q["datenlage"],
+        "data_quality": q["data_quality"], "data_quality_grund": q.get("data_quality_grund"),
+        "market_depth": q["market_depth"], "sample_completeness": q["sample_completeness"],
         "beobachtete_tage": stat.get("beobachtete_tage"), "abdeckung_pct": stat.get("abdeckung_pct"),
         "hinweis": HINWEIS, "listing": None,
         # Review 26.09.2026 Nr. 3: letzter Abruf nicht sicher preis-aufsteigend -> Karte sagt es
@@ -368,6 +372,13 @@ async def modelle_uebersicht(db, *, mit_archiv: bool = False) -> List[Dict[str, 
         eigene = [s for s in segs if s.get("model_id") == m["id"]]
         aktive = [s for s in eigene if s.get("enabled")]
         st = [stats[s["id"]] for s in aktive if s["id"] in stats and stats[s["id"]].get("sample_size")]
+        # Phase C: Datenqualitaet und Markttiefe je Modell als Zaehler ueber die aktiven Segmente (mit Frische)
+        qz: Dict[str, int] = {}
+        tz: Dict[str, int] = {}
+        for s in aktive:
+            q = speicher.qualitaet_lesen(stats.get(s["id"]))
+            qz[q["data_quality"]] = qz.get(q["data_quality"], 0) + 1
+            tz[q["market_depth"]] = tz.get(q["market_depth"], 0) + 1
         mins = [float(s["min_price"]) for s in st if s.get("min_price") is not None]
         meds = [float(s["median_price"]) for s in st if s.get("median_price") is not None]
         # Welle 6 Nr. 128/129/140: letzter Crawl und Listings NUR aus der aktuellen Fassung (aktive Segmente);
@@ -387,6 +398,7 @@ async def modelle_uebersicht(db, *, mit_archiv: bool = False) -> List[Dict[str, 
                      # nicht so stark wie ein 20er)
                      "trend_7d_pct": _gewichtet(st, "trend_7d_pct"), "trend_30d_pct": _gewichtet(st, "trend_30d_pct"),
                      "trend_gewichtet": True,
+                     "qualitaet_zaehler": qz, "tiefe_zaehler": tz,
                      "version": segmente.modell_version(m),
                      "crawl_status": ("fehler" if any(s["id"] in fehler_heute for s in aktive)
                                       else "ungueltig" if any(s["id"] in ungueltig_heute for s in aktive)
@@ -402,7 +414,9 @@ async def modell_detail(db, model_id: str) -> Optional[Dict[str, Any]]:
     for s in segs:
         st = await db[SEGMENTSTATS].find_one({"_id": s["id"]}, {"_id": 0})
         s["stats"] = st
-        s["datenlage"] = (st or {}).get("datenlage") or "keine"
+        # Phase C: Qualitaet/Tiefe/Vollstaendigkeit mit Frische zum Lesezeitpunkt; datenlage daraus
+        s["qualitaet"] = speicher.qualitaet_lesen(st)
+        s["datenlage"] = s["qualitaet"]["datenlage"]
         naechster = await db[JOBS].find_one({"segment_id": s["id"], "status": "queued"}, {"_id": 0, "scheduled_at": 1}, sort=[("scheduled_at", 1)])
         letzter = await db[JOBS].find_one({"segment_id": s["id"], "status": {"$in": ["completed", "failed", "data_invalid"]}},
                                           {"_id": 0, "status": 1, "error": 1, "finished_at": 1, "actual_rows": 1}, sort=[("finished_at", -1)])
@@ -427,19 +441,20 @@ async def segment_zusammenfassung(db, segment_id: str) -> Optional[Dict[str, Any
     letzter_job = await db[JOBS].find_one({"segment_id": segment_id}, {"_id": 0, "ergebnis": 0}, sort=[("created_at", -1)])
     # Datenqualitaet (Auftrag v3): seit wann, Tage, erfolgreiche vs. erwartete Crawls
     # Nr. 54: Erstbeobachtung = erster Lauf, auch mit 0 Treffern
-    erster = await db[TAGESSTATS].find_one({"segment_id": segment_id}, {"_id": 0, "date": 1}, sort=[("date", 1)])
+    erster = await db[TAGESSTATS].find_one({"segment_id": segment_id, "sample_size": {"$exists": True}}, {"_id": 0, "date": 1}, sort=[("date", 1)])
     # Welle 5 Nr. 48: "erfolgreich" = completed MIT Zeilen und bewiesener Top-N-Sortierung
     erfolgreich = await db[JOBS].count_documents({"segment_id": segment_id, "status": "completed", "actual_rows": {"$gt": 0},
                                                   "top_n_bewiesen": {"$ne": False}})
     nur_monoton = await db[JOBS].count_documents({"segment_id": segment_id, "status": "completed", "actual_rows": {"$gt": 0},
                                                   "top_n_bewiesen": False})
     leer = await db[JOBS].count_documents({"segment_id": segment_id, "status": "completed", "actual_rows": 0})
+    ungueltig = await db[JOBS].count_documents({"segment_id": segment_id, "status": "data_invalid"})
+    ql = speicher.qualitaet_lesen(st)
     k = int(s.get("crawls_per_day") or 1)
     tage_seit = 0
     if erster:
         tage_seit = max(1, (datetime.strptime(konfig.heute_tag(), "%Y-%m-%d") - datetime.strptime(erster["date"], "%Y-%m-%d")).days + 1)
     # Welle 6 Nr. 106/107: erwartet = tatsaechlich geplante Jobs (bis heute); nur ohne Plan die Konfiguration
-    from markt import speicher
     geplant = await speicher.geplante_laeufe(db, segment_id, konfig.heute_tag())
     top_n = (st or {}).get("top_n_bewiesen", True) is not False
     qualitaet = {"daten_seit": (erster or {}).get("date"), "tage_beobachtet": (st or {}).get("beobachtete_tage") or 0,
@@ -450,7 +465,13 @@ async def segment_zusammenfassung(db, segment_id: str) -> Optional[Dict[str, Any
                  "erwartete_crawls": geplant if geplant > 0 else (tage_seit * k if erster else 0),
                  "erwartete_quelle": "plan" if geplant > 0 else "konfiguration",
                  "laeufe_nur_monoton": nur_monoton, "laeufe_leer": leer,
-                 "sample_size": (st or {}).get("sample_size") or 0, "datenlage": (st or {}).get("datenlage") or "keine",
+                 "sample_size": (st or {}).get("sample_size") or 0, "datenlage": ql["datenlage"],
+                 # Phase C: getrennt — Datenqualitaet (technisch), Markttiefe (Angebot), Vollstaendigkeit (UNKNOWN ohne Gesamtzahl)
+                 "data_quality": ql["data_quality"], "data_quality_grund": ql.get("data_quality_grund"),
+                 "market_depth": ql["market_depth"], "sample_completeness": ql["sample_completeness"],
+                 "laeufe_ungueltig": ungueltig, "tage_nur_ungueltig": (st or {}).get("tage_nur_ungueltig") or 0,
+                 "letzter_ungueltiger_lauf_at": (st or {}).get("letzter_ungueltiger_lauf_at"),
+                 "letzter_ungueltiger_grund": (st or {}).get("letzter_ungueltiger_grund"),
                  "crawls_per_day": k, "top_n_bewiesen": top_n,
                  "top_n_hinweis": None if top_n else "Top-N nicht bewiesen (Scraper ohne Positionsnummer — nur monoton sortiert)",
                  "last_empty_at": s.get("last_empty_at")}
@@ -458,6 +479,8 @@ async def segment_zusammenfassung(db, segment_id: str) -> Optional[Dict[str, Any
     # heutigen Auftrag — historisch = die Fassung des Segments ist nicht mehr die des Auftrags
     historisch = bool(m) and int(s.get("version") or 1) != segmente.modell_version(m)
     fassung = s.get("definition") or (segmente.definition_schnappschuss(m) if (m and not historisch) else None)
+    if st:
+        st = {**st, **ql}          # die Statistik zeigt die Qualitaet zum Lesezeitpunkt (Frische)
     return {"segment": s, "modell": m, "stats": st, "letzter_job": letzter_job, "qualitaet": qualitaet, "hinweis": HINWEIS,
             "historisch": historisch, "fassung": fassung, "fassung_version": int(s.get("version") or 1)}
 
@@ -480,19 +503,28 @@ async def segment_verlauf(db, segment_id: str, bereich: str = "30d") -> Dict[str
     # Welle 5 Nr. 58: auch Tage mit 0 Treffern kommen mit (sample_size 0, Preise None) — das Diagramm
     # zeigt dann eine Luecke ("kein Angebot") statt eines Sprungs zum naechsten Tag mit Daten
     docs = await db[TAGESSTATS].find({"segment_id": segment_id, "date": {"$gte": seit}},
-                                     {"_id": 0, "listing_ids": 0}).sort("date", 1).to_list(5000)
+                                     {"_id": 0, "listing_ids": 0, "listing_ids_alle": 0, "listings": 0, "disappeared_ids": 0,
+                                      "price_increase_ids": 0, "new_in_sample_ids": 0, "price_reduced_ids": 0}).sort("date", 1).to_list(5000)
     reihe = []
     vor = None
     for d in docs:
-        leer = int(d.get("sample_size") or 0) == 0
-        med = None if leer else d.get("median_price")
+        # Phase C: ein Tag mit nur ungueltigen Laeufen ist KEINE Marktluecke (kein 'kein Angebot') — nur eine Luecke
+        gueltig = d.get("sample_size") is not None
+        leer = gueltig and int(d.get("sample_size") or 0) == 0
+        nur_ungueltig = not gueltig
+        q = speicher.qualitaet_aus_doc(d)
+        med = None if (leer or nur_ungueltig) else d.get("median_price")
         aend_pct = round((float(med) - float(vor)) / float(vor) * 100, 2) if vor and med is not None else None
         aend_eur = round(float(med) - float(vor), 2) if vor and med is not None else None
-        reihe.append({"date": d["date"], "sample_size": int(d.get("sample_size") or 0), "min": None if leer else d.get("min_price"),
-                      "median": med, "avg": None if leer else d.get("avg_price"), "max": None if leer else d.get("max_price"),
-                      "p25": None if leer else d.get("p25_price"), "p75": None if leer else d.get("p75_price"),
+        ohne = leer or nur_ungueltig
+        reihe.append({"date": d["date"], "sample_size": int(d.get("sample_size") or 0), "min": None if ohne else d.get("min_price"),
+                      "median": med, "avg": None if ohne else d.get("avg_price"), "max": None if ohne else d.get("max_price"),
+                      "p25": None if ohne else d.get("p25_price"), "p75": None if ohne else d.get("p75_price"),
                       "new_in_sample": d.get("new_in_sample_today"), "price_reductions": d.get("price_reductions_today"),
-                      "change_eur": aend_eur, "change_pct": aend_pct, "kein_angebot": leer,
+                      "change_eur": aend_eur, "change_pct": aend_pct, "kein_angebot": leer, "nur_ungueltig": nur_ungueltig,
+                      "data_quality": q["data_quality"], "data_quality_grund": q.get("data_quality_grund"), "market_depth": q["market_depth"],
+                      "invalid_runs": int(d.get("invalid_runs") or 0), "disappeared": d.get("disappeared_count"),
+                      "price_increases": d.get("price_increases_today"), "top3_changed": d.get("top3_changed"),
                       "top_n_bewiesen": d.get("top_n_bewiesen", True) is not False,
                       # Nr. 17: alle Laeufe des Tages (P5: Hauptwerte = letzter gueltiger Lauf mit Treffern)
                       "laeufe": d.get("laeufe") or []})
@@ -518,7 +550,8 @@ async def segment_verlauf(db, segment_id: str, bereich: str = "30d") -> Dict[str
         "tage_unveraendert": sum(1 for r in aend if r["change_eur"] == 0),
         "hoechster_median": max((r["median"] for r in mit_daten), default=None),
         "niedrigster_median": min((r["median"] for r in mit_daten), default=None),
-        "tage": len(reihe), "tage_ohne_angebot": len(reihe) - len(mit_daten),
+        "tage": len(reihe), "tage_ohne_angebot": sum(1 for r in reihe if r["kein_angebot"]),
+        "tage_nur_ungueltig": sum(1 for r in reihe if r["nur_ungueltig"]),
     }
     return {"segment_id": segment_id, "bereich": bereich, "reihe": reihe, "wochen": wochen_reihe, "auswertung": auswertung}
 
@@ -527,8 +560,8 @@ async def segment_listings(db, segment_id: str) -> Dict[str, Any]:
     """Das aktuelle Sample mit Rang heute/gestern und Preisaenderung seit Erstbeobachtung.
     Welle 5 Nr. 11: NUR die listing_ids des letzten gueltigen Laufs (Tagesstatistik, in Rangfolge)
     — vorher mischten sich Morgen- und Abend-Schnappschuss desselben Tages (30 statt 20 Zeilen)."""
-    letzte = await db[TAGESSTATS].find_one({"segment_id": segment_id}, {"_id": 0, "date": 1, "listing_ids": 1, "lauf_tag": 1,
-                                                                        "top_n_bewiesen": 1}, sort=[("date", -1)])
+    letzte = await db[TAGESSTATS].find_one({"segment_id": segment_id, "sample_size": {"$exists": True}},
+                                           {"_id": 0, "date": 1, "listing_ids": 1, "lauf_tag": 1, "top_n_bewiesen": 1}, sort=[("date", -1)])
     if not letzte:
         return {"date": None, "listings": []}
     ids = [str(x) for x in (letzte.get("listing_ids") or [])]
@@ -587,7 +620,6 @@ PRIVATE_LIMIT_MAX = 500
 def _private_stand(st: Optional[Dict[str, Any]], seg: Optional[Dict[str, Any]], tagesstat_last_run: Optional[str] = None) -> Dict[str, Any]:
     """Stand der Privat-Top-3 eines Segments aus Segmentstatistik + Segment: stale, wenn nach dem letzten
     gueltigen Lauf ein Versuch ohne Speicherung (data_invalid: last_attempt_at) oder ein leerer Lauf lag."""
-    from markt import speicher
     st, seg = st or {}, seg or {}
     stand = st.get("private_stand_at")
     stale = bool(st.get("private_stand_stale")) or speicher.private_stand_stale(stand, tagesstat_last_run, seg.get("last_attempt_at"))

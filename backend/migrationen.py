@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger("autohandel.migrationen")
 
-ZIEL_VERSION = 18
+ZIEL_VERSION = 19
 _SPERRE = "migration"
 
 
@@ -719,6 +719,39 @@ async def m18_markt_masterliste_v4(db) -> dict:
     return await masterliste.importieren(db)
 
 
+async def m19_markt_tagesbasis(db) -> dict:
+    """Master-Auftrag Ahmad 26.09.2026 (Phase C): Altdaten der Tagesbasis nachziehen — jedes Tagesdokument ohne
+    data_quality bekommt Datenqualitaet/Markttiefe/Vollstaendigkeit (aus sample_size und Top-N-Nachweis; die
+    Vollstaendigkeit NIE aus geratenen Feldern: COMPLETE nur bei voller Stichprobe, sonst UNKNOWN), die Fassung
+    des Segments (version, definition_hash), gueltige/leere Laeufe aus 'laeufe' und den Zeitpunkt des letzten
+    gueltigen Laufs. Idempotent (nur Dokumente ohne data_quality), in Paketen; ueberschreibt keine Messwerte."""
+    from pymongo import UpdateOne
+    from markt import konfig as mk, speicher
+    segs = {s["id"]: s async for s in db[mk.SEGMENTE].find({}, {"_id": 0, "id": 1, "version": 1, "definition_hash": 1, "max_items": 1})}
+    z = {"tagesstats": 0}
+    paket = []
+    async for d in db[mk.TAGESSTATS].find({"data_quality": {"$exists": False}}, {"listing_ids": 0, "new_in_sample_ids": 0, "price_reduced_ids": 0}):
+        s = segs.get(d.get("segment_id")) or {}
+        rows = int(s.get("max_items") or 0) or None
+        q = speicher.qualitaet_aus_doc(d, rows)
+        laeufe = d.get("laeufe") if isinstance(d.get("laeufe"), list) else []
+        gueltig = [x for x in laeufe if not x.get("ungueltig")]
+        setzen = {**q, "version": int(s.get("version") or 1), "definition_hash": s.get("definition_hash"), "rows_soll": rows,
+                  "valid_runs": len(gueltig) if gueltig else (1 if d.get("sample_size") is not None else 0),
+                  "empty_runs": sum(1 for x in gueltig if x.get("leer")), "migriert_tagesbasis": True}
+        lauf_at = d.get("observed_at") or d.get("last_run_at")
+        if lauf_at:
+            setzen["last_valid_run_at"] = lauf_at
+        paket.append(UpdateOne({"_id": d["_id"], "data_quality": {"$exists": False}}, {"$set": setzen}))
+        if len(paket) >= 500:
+            z["tagesstats"] += (await db[mk.TAGESSTATS].bulk_write(paket, ordered=False)).modified_count
+            paket = []
+    if paket:
+        z["tagesstats"] += (await db[mk.TAGESSTATS].bulk_write(paket, ordered=False)).modified_count
+    log.info("Migration 19 (Markt-Tagesbasis): %s", z)
+    return z
+
+
 MIGRATIONEN = [
     (1, "abos_normalisieren", m1_abos_normalisieren),
     (2, "lifecycle_nachziehen", m2_lifecycle),
@@ -744,6 +777,8 @@ MIGRATIONEN = [
     (17, "markt_standard_v3", m17_markt_standard_v3),
     # Master-Auftrag Ahmad 26.09.2026, Phase A: Masterliste 170 Zeilen
     (18, "markt_masterliste_v4", m18_markt_masterliste_v4),
+    # Master-Auftrag Phase C: Tagesbasis (Datenqualitaet/Markttiefe/Vollstaendigkeit, Fassung) fuer Altdaten
+    (19, "markt_tagesbasis", m19_markt_tagesbasis),
 ]
 
 

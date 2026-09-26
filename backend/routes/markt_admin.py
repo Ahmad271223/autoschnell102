@@ -315,6 +315,16 @@ async def admin_market_masterliste_importieren(admin=Depends(current_super_admin
     return {"ok": True, **z, "takt": await jobs.intervall(db)}
 
 
+@router.get("/admin/market/actor-meta")
+async def admin_market_actor_meta(_=Depends(current_admin)):
+    """Master-Auftrag Phase C: Feldnamen + Typen je Scraper-Build (nie Werte) — Grundlage, um ein verlaessliches
+    Gesamttreffer-Feld einzutragen (normalisieren.MARKT_GESAMT_FELD; bis dahin Vollstaendigkeit UNKNOWN)."""
+    from markt import normalisieren
+    docs = await db[konfig.KONFIG].find({"_id": {"$regex": "^actor_meta_"}}).to_list(20)
+    return {"actors": [{**{k: v for k, v in d.items() if k != "_id"}, "id": d["_id"]} for d in docs],
+            "markt_gesamt_feld": normalisieren.MARKT_GESAMT_FELD}
+
+
 class TestlaufAlleIn(BaseModel):
     aktivieren: bool = True
     mit_review: bool = False

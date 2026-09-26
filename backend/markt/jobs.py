@@ -56,6 +56,11 @@ Reparaturwelle 6 (Review 26.09.2026 abends):
   * Budget voll: Jobs bleiben queued (budget_wait), EIN Alarm, der Takt endet
   * Nr. 127: Zeilen geliefert, alle verworfen -> 'data_invalid'
   * Nr. 143: sample_incomplete, wenn der Markt mehr hergibt als geliefert wurde
+
+Master-Auftrag 26.09.2026, Phase C: der Worker gibt je Lauf Fremdfahrzeuge/Parserfehler/Kosten an die
+Tagesbasis (speicher), vermerkt 'data_invalid'-Laeufe im Tagesdokument und protokolliert einmal je Actor-Build
+die Feldnamen + Typen der Zeilen (market_config/actor_meta_<actor>) — nie Werte. Nur dieses Modul (mit apify)
+loest externe Marktabrufe aus; Auswertungen (speicher, abfrage) lesen nur Tageswerte.
 """
 from __future__ import annotations
 
@@ -211,7 +216,11 @@ async def intervall(db) -> Dict[str, Any]:
             "ohne_budget": ohne_budget, "status": "ohne Budget pausiert" if ohne_budget else "ok",
             # fuer die Kostenformel in der Oberflaeche (nie mehr hart "0,004 $ + Zeilen x 0,003 $")
             "start_usd": konfig.preise_je_actor(konfig.actor())[0], "row_usd": konfig.preise_je_actor(konfig.actor())[1],
-            "actor": konfig.actor(), "automatisch": fest == 0}
+            "actor": konfig.actor(), "automatisch": fest == 0,
+            # Master-Auftrag Phase B: Kosten strikt getrennt — nur die km-Segmente (EXACT_KM) werden abgerufen;
+            # Berichte/Diagramme/Trends/Hot Deals lesen nur gespeicherte Tageswerte (0 Abrufe, 0 $)
+            "crawl_cost_exact_km_usd": round(kosten_je_tag, 2), "crawl_cost_exact_km_monat_usd": round(kosten_je_tag * 30.4, 2),
+            "crawl_cost_entfernung_usd": round(entfernung_tag, 2), "reporting_cost_usd": 0.0, "reporting_cost_monat_usd": 0.0}
 
 
 # ---------------------------------------------------------------- Tagesplan
@@ -496,14 +505,51 @@ async def _abbrechen(db, job: Dict[str, Any], grund: str, **felder) -> bool:
 async def _ungueltig(db, job: Dict[str, Any], grund: str, **felder) -> bool:
     """Review 26.09.2026 abends P1: Lauf gelaufen, Kosten gebucht, aber die Zeilen taugen nicht
     als Statistik (Sortierung unsicher) -> Job 'data_invalid'. Nichts in Snapshots/Tages-/
-    Segmentstatistik, kein Trend, keine Chancen, kein last_success_at (last_attempt_at ja)."""
+    Segmentstatistik, kein Trend, keine Chancen, kein last_success_at (last_attempt_at ja).
+    Phase C: der Lauf zaehlt aber im Tagesdokument als ungueltig (invalid_runs, Kosten) — ausser waehrend
+    einer Wartung (dann wird nichts ausser dem Job geschrieben)."""
     r = await db[JOBS].update_one(_meiner(job), {"$set": {"status": "data_invalid", "finished_at": konfig.jetzt_iso(),
                                                           "error": grund[:300], **felder},
                                                 "$unset": {"lease_until": "", "ergebnis_zwischenspeicher": ""}})
     if r.modified_count == 0:
         log.warning("Job %s inzwischen von anderem Worker uebernommen — 'data_invalid' nicht geschrieben", job["id"])
         return False
+    try:
+        if not await _wartung_aktiv(db):
+            await speicher.ungueltig_vermerken(db, job, grund, kosten=felder.get("actual_cost"), rohe_rows=felder.get("rohe_rows"))
+    except Exception:  # noqa: BLE001 — die Tagesbasis ist Beiwerk, der Job-Status steht
+        log.exception("Tagesdokument fuer ungueltigen Lauf %s nicht geschrieben", job.get("id"))
     return True
+
+
+ACTOR_META_BUILDS_MAX = 20
+ACTOR_META_ZEILEN = 50
+
+
+async def actor_meta_protokollieren(db, r: Dict[str, Any]) -> bool:
+    """Phase C (A4): einmal je Actor-Build die Feldnamen + Typen der gelieferten Zeilen und des Lauf-Dokuments
+    in market_config/actor_meta_<actor> ablegen — NUR Namen und Typen, nie Werte (keine PII). Grundlage, um
+    spaeter ein verlaessliches Gesamttreffer-Feld (normalisieren.MARKT_GESAMT_FELD) einzutragen. Idempotent
+    und rennfest (zwei Server): ein Build, der schon eingetragen ist, wird nicht noch einmal geschrieben."""
+    items = [i for i in (r.get("items") or []) if isinstance(i, dict)]
+    if not items:
+        return False
+    name = konfig.actor_und_build(str(r.get("actor") or konfig.actor()))[0]
+    build = str(r.get("build_number") or r.get("build_id") or "unbekannt")
+    eintrag = {"build": build, "build_id": r.get("build_id"), "at": konfig.jetzt_iso(), "zeilen_geprueft": min(len(items), ACTOR_META_ZEILEN),
+               "item_keys": apify.schluessel_typen(items, ACTOR_META_ZEILEN), "lauf_keys": r.get("lauf_schluessel") or {}}
+    try:
+        res = await db[konfig.KONFIG].update_one(
+            {"_id": f"actor_meta_{name}", "builds.build": {"$ne": build}},
+            {"$push": {"builds": {"$each": [eintrag], "$slice": -ACTOR_META_BUILDS_MAX}},
+             "$set": {"actor": name, "updated_at": konfig.jetzt_iso(), "markt_gesamt_feld": normalisieren.MARKT_GESAMT_FELD}},
+            upsert=True)
+    except DuplicateKeyError:
+        return False          # Build schon protokolliert (oder der andere Server war schneller)
+    if res.upserted_id is not None or res.modified_count:
+        log.info("Market-Scraper %s Build %s: %d Feldnamen protokolliert", name, build, len(eintrag["item_keys"]))
+        return True
+    return False
 
 
 async def _zurueckstellen(db, job: Dict[str, Any], grund: str, warte_s: int, zwischen: Optional[Dict[str, Any]] = None,
@@ -738,6 +784,11 @@ async def _auswerten(db, plan: List[Dict[str, Any]], r: Dict[str, Any], res: Opt
                 unbekannt += 1
     if unbekannt and zwischen is None:
         await _alarm(db, "markt_zuordnung_unklar", ref=str(r.get("run_id") or ""), zeilen=unbekannt)
+    if zwischen is None:
+        try:
+            await actor_meta_protokollieren(db, r)
+        except Exception:  # noqa: BLE001 — Protokoll ist Beiwerk
+            log.exception("Actor-Key-Protokoll gescheitert")
     ergebnisse = []
     kosten = r.get("usd")
     start_usd, row_usd = konfig.preise_je_actor(r.get("actor") or konfig.actor())
@@ -772,7 +823,10 @@ async def _auswerten(db, plan: List[Dict[str, Any]], r: Dict[str, Any], res: Opt
         vorbereitet.append({"p": p, "listings": listings, "sortiert": normalisieren.preise_aufsteigend(listings),
                             "geliefert_n": len(geliefert), "gruende": gruende, "roh": roh, "roh_n": len(roh),
                             "nachweis": nachweis, "nachweis_grund": nachweis_grund, "filter_defekt": filter_defekt,
-                            "sample_incomplete": sample_incomplete, "markt_n": markt_n})
+                            "sample_incomplete": sample_incomplete, "markt_n": markt_n,
+                            # Phase C: Datenqualitaet — erkannte Fremdfahrzeuge und Parserfehler unter den verworfenen Zeilen
+                            "fremd_n": sum(1 for g in gruende if normalisieren.ist_fremdfahrzeug(g)),
+                            "parser_n": sum(1 for g in gruende if normalisieren.ist_parserfehler(g))})
     # Kosten rechnen mit den GELIEFERTEN Rohzeilen (Apify bucht auch verworfene und unbekannte, Nr. 57)
     gesamt_rows = len(r["items"])
     # Befund 26.09.2026: Kosten je Job (Start anteilig + Zeilen) und Monatszaehler liefen
@@ -814,7 +868,7 @@ async def _auswerten(db, plan: List[Dict[str, Any]], r: Dict[str, Any], res: Opt
                            # Nr. 114: Build des Scrapers am Job; Nr. 143: Stichprobe vollstaendig?
                            actor_build_id=r.get("build_id"), actor_build_number=r.get("build_number"),
                            sample_incomplete=v["sample_incomplete"], markt_gesamt=v["markt_n"],
-                           verworfen_gruende=gruende[:20])
+                           verworfen_gruende=gruende[:20], verworfen_fremd=v["fremd_n"], parser_fehler=v["parser_n"])
         # Welle 5 Nr. 36: VOR dem Speichern — gehoert der Job noch uns (running, worker, Lease gueltig)?
         if not await _noch_meiner(db, p["job"]):
             log.warning("Job %s: Lease verloren/abgelaufen — Ergebnis nicht gespeichert, Kosten gebucht", p["job"]["id"])
@@ -874,7 +928,11 @@ async def _auswerten(db, plan: List[Dict[str, Any]], r: Dict[str, Any], res: Opt
                 erg = await speicher.verarbeiten(db, p["seg"], listings, lauf_tag=p["job"].get("tag"), top_n_bewiesen=top_n_bewiesen,
                                                  tag=job_tag(p["job"]),
                                                  lauf_info={"actor_build": r.get("build_number") or r.get("build_id"),
-                                                            "sample_incomplete": v["sample_incomplete"], "run_id": r.get("run_id")})
+                                                            "sample_incomplete": v["sample_incomplete"], "run_id": r.get("run_id"),
+                                                            # Phase C: Datenqualitaet und Crawl-Kosten des Tages
+                                                            "geliefert": geliefert_n, "verworfen_fremd": v["fremd_n"],
+                                                            "parser_fehler": v["parser_n"], "kosten_usd": anteil, "rohe_rows": roh_n,
+                                                            "markt_gesamt": v["markt_n"]})
             except Exception as e:  # noqa: BLE001
                 log.exception("Market-Speicher %s gescheitert", p["job"]["id"])
                 await _scheitern(db, p["job"], f"Speichern: {e}"[:300], endgueltig=False)

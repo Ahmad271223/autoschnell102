@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { BarChart3 } from "lucide-react";
 import { api } from "@/lib/api";
 import { DATENLAGE, bestandText, datumZeit, eur, medianLabel, medianSample, seitErstbeobachtung, trendFarbe, trendText } from "@/lib/markt";
+import MarktQualitaet from "@/components/MarktQualitaet";
 
 const ZEITLIMIT_MS = 8000;
 
@@ -58,6 +59,8 @@ export default function MarktdatenKarte({ vehicleId, preis }) {
               data-testid="marktdaten-datenlage">{dl.text}</span>
       </div>
       <div className="mt-2 text-sm font-semibold">{daten.label}</div>
+      {/* Master-Auftrag Phase C: Datenqualität (Abruf verlässlich?) getrennt von der Markttiefe (wie viele Angebote?) */}
+      <div className="mt-1"><MarktQualitaet q={daten} klein testid="marktdaten-qualitaet" /></div>
       <div className="text-[11px]" style={{ color: "var(--text-secondary)" }}>
         {daten.km_label}{daten.ez_label ? ` · ${daten.ez_label}` : ""} · {daten.sample_size} günstigste Vergleichsangebote
       </div>

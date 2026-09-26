@@ -37,6 +37,46 @@ OHNE_ERSATZ = ("token", "guthaben", "limit", "zuviel")
 DATENSATZ_PUFFER = 20       # Nr. 87: abgerufen wird hoechstens bestellte Zeilen x 2 + 20
 
 
+def typ_name(w: Any) -> str:
+    """Phase C (Actor-Key-Protokoll): nur der TYP eines Werts — nie der Wert selbst. Bei Objekten die
+    Feldnamen der ersten Ebene (Namen, keine Inhalte)."""
+    if w is None:
+        return "null"
+    if isinstance(w, bool):
+        return "bool"
+    if isinstance(w, int):
+        return "int"
+    if isinstance(w, float):
+        return "float"
+    if isinstance(w, str):
+        return "str"
+    if isinstance(w, list):
+        return "list"
+    if isinstance(w, dict):
+        return "dict[" + ",".join(sorted(_schluessel_sauber(k) for k in w.keys())[:40]) + "]"
+    return type(w).__name__
+
+
+def _schluessel_sauber(k: Any) -> str:
+    """Feldnamen als Mongo-Schluessel: kein Punkt, kein fuehrendes $, hoechstens 80 Zeichen."""
+    s = str(k).replace(".", "_")
+    return ("_" + s[1:] if s.startswith("$") else s)[:80]
+
+
+def schluessel_typen(dicts: List[Any], max_n: int = 50) -> Dict[str, str]:
+    """Feldname -> Typ ueber die ersten max_n Zeilen (gemischte Typen 'int|str'); keine Werte, keine PII."""
+    raus: Dict[str, str] = {}
+    for d in [x for x in (dicts or []) if isinstance(x, dict)][:max_n]:
+        for k, w in d.items():
+            name, typ = _schluessel_sauber(k), typ_name(w)
+            alt = raus.get(name)
+            if alt is None or alt == "null":
+                raus[name] = typ
+            elif typ != "null" and typ not in alt.split("|"):
+                raus[name] = f"{alt}|{typ}"[:300]
+    return dict(sorted(raus.items())[:300])
+
+
 def datensatz_limit(max_items: int) -> int:
     return int(max(1, int(max_items or 1)) * 2 + DATENSATZ_PUFFER)
 
@@ -201,7 +241,9 @@ async def lauf(start_urls: List[str], max_items: int, *, zeitlimit_s: Optional[i
                               usd=usd, run_id=run_id)
     return {"items": items, "usd": usd, "run_id": run_id, "status": status,
             "dauer_ms": int((time.perf_counter() - t0) * 1000), "actor": actor_voll, "laeufe": 1,
-            "build_id": daten.get("buildId") or None, "build_number": daten.get("buildNumber") or None}
+            "build_id": daten.get("buildId") or None, "build_number": daten.get("buildNumber") or None,
+            # Phase C: Feldnamen + Typen des Lauf-Dokuments (keine Werte) fuer das Actor-Key-Protokoll
+            "lauf_schluessel": schluessel_typen([daten], 1)}
 
 
 async def lauf_mit_ersatz(start_urls: List[str], max_items: int, *, zeitlimit_s: Optional[int] = None,
@@ -254,7 +296,7 @@ async def lauf_mit_ersatz(start_urls: List[str], max_items: int, *, zeitlimit_s:
         usd += float(rr.get("usd") or 0)
         run_ids.append(str(rr.get("run_id") or ""))
         dauer += int(rr.get("dauer_ms") or 0)
-        build = {"build_id": rr.get("build_id"), "build_number": rr.get("build_number")}
+        build = {"build_id": rr.get("build_id"), "build_number": rr.get("build_number"), "lauf_schluessel": rr.get("lauf_schluessel")}
     return {"items": items, "usd": round(usd, 4), "run_id": ",".join(x for x in run_ids if x), "status": "SUCCEEDED",
             "dauer_ms": dauer, "actor": ersatz, "ersatz_grund": erster, "laeufe": primaer_laeufe + len(start_urls),
             "primaer_usd": round(primaer_usd, 4), "primaer_run_id": primaer_run or None, **build}

@@ -8,7 +8,8 @@ import {
 import { api, errMsg } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { Card, Badge, Button, Spinner, EmptyState, fmtDate } from "./_ui";
-import { BEREICHE, DATENLAGE, bestandText, datumKurz, datumZeit, eur, mobileLink, pct, trendFarbe, trendText, zustandText } from "@/lib/markt";
+import { BEREICHE, DATENLAGE, bestandText, datumKurz, datumZeit, eur, lowMarketLabel, mobileLink, pct, trendFarbe, trendText, zustandText } from "@/lib/markt";
+import MarktQualitaet from "@/components/MarktQualitaet";
 
 const GETRIEBE_TEXT = { AUTOMATIC_GEAR: "Automatik", MANUAL_GEAR: "Schaltgetriebe", SEMIAUTOMATIC_GEAR: "Halbautomatik" };
 // Review 26.09.2026 abends P1: Job-Status 'data_invalid' = Lauf lieferte unsortierte Daten, nichts gespeichert
@@ -128,7 +129,7 @@ export default function MarktModell() {
             <thead><tr className="text-left text-zinc-500 text-[11px] uppercase tracking-wide">
               <th className="px-3 py-2">Segment</th><th className="px-3 py-2">Letzter Crawl</th><th className="px-3 py-2">Nächster</th><th className="px-3 py-2 text-right">N</th>
               <th className="px-3 py-2 text-right">Günstigstes</th><th className="px-3 py-2 text-right">Median</th><th className="px-3 py-2 text-right">Ø</th>
-              <th className="px-3 py-2 text-right">7 Tage</th><th className="px-3 py-2 text-right">30 Tage</th><th className="px-3 py-2">Status</th>
+              <th className="px-3 py-2 text-right">7 Tage</th><th className="px-3 py-2 text-right">30 Tage</th><th className="px-3 py-2">Qualität / Tiefe</th><th className="px-3 py-2">Status</th>
             </tr></thead>
             <tbody>{tabelle.map((s) => (
               <tr key={s.id} className={`border-t border-white/5 tabular-nums ${s.id === segmentId ? "bg-white/5" : ""} ${s.enabled ? "" : "opacity-50"}`} data-testid={`markt-segmentzeile-${s.id}`}>
@@ -143,6 +144,7 @@ export default function MarktModell() {
                 <td className="px-3 py-1.5 text-right">{eur(s.stats?.avg_price)}</td>
                 <td className="px-3 py-1.5 text-right" style={{ color: trendFarbe(s.stats?.trend_7d_pct) }}>{pct(s.stats?.trend_7d_pct)}</td>
                 <td className="px-3 py-1.5 text-right" style={{ color: trendFarbe(s.stats?.trend_30d_pct) }}>{pct(s.stats?.trend_30d_pct)}</td>
+                <td className="px-3 py-1.5"><MarktQualitaet q={s.qualitaet} klein testid={`markt-segment-qualitaet-${s.id}`} /></td>
                 <td className="px-3 py-1.5">{!s.enabled ? <Badge tone="gray">inaktiv</Badge> : s.letzter_job?.status === "failed" ? <Badge tone="red">Fehler</Badge> : s.letzter_job?.status === "data_invalid" ? <Badge tone="yellow">ungültig</Badge> : s.stats?.sample_size ? <Badge tone="green">ok</Badge> : <Badge tone="gray">wartet</Badge>}</td>
               </tr>))}</tbody>
           </table>
@@ -222,6 +224,7 @@ function SegmentAnalyse({ segment, bereich, onBereich, superAdmin }) {
           </div>
           <div className="flex items-center gap-2">
             <span className="text-[11px] rounded-full px-2 py-0.5 border" style={{ color: dl.farbe, borderColor: dl.farbe }} data-testid="markt-segment-datenlage">{dl.text}</span>
+            <MarktQualitaet q={zusammen.qualitaet} mitVollstaendigkeit testid="markt-segment-qualitaet" />
             {superAdmin && <Button size="sm" variant="outline" onClick={crawlJetzt} disabled={busy} data-testid="markt-crawl-jetzt"><Play size={13} /> Jetzt crawlen</Button>}
           </div>
         </div>
@@ -229,13 +232,14 @@ function SegmentAnalyse({ segment, bereich, onBereich, superAdmin }) {
           <div className="mt-3 grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-2 text-[12px]" data-testid="markt-kennzahlen">
             <K label="Aktuell beobachtet" wert={`${st.sample_size} Fahrzeuge`} />
             <K label="Billigstes" wert={eur(st.min_price)} />
-            <K label={`Median Top-${st.sample_size || "N"}`} wert={eur(st.median_price)} gross />
-            <K label={`Durchschnitt Top-${st.sample_size || "N"}`} wert={eur(st.avg_price)} />
-            <K label={`Teuerstes Top-${st.sample_size || "N"}`} wert={eur(st.max_price)} />
+            {/* Master-Auftrag Phase C: neutrale Begriffe — Low-Market-Median der N günstigsten, nicht "Top-N" */}
+            <K label={lowMarketLabel(st.sample_size)} wert={eur(st.median_price)} gross />
+            <K label={`Durchschnitt (${st.sample_size || "N"} günstigste)`} wert={eur(st.avg_price)} />
+            <K label={`Teuerstes (${st.sample_size || "N"} günstigste)`} wert={eur(st.max_price)} />
             <K label="p25 / p75" wert={`${eur(st.p25_price)} / ${eur(st.p75_price)}`} />
-            <K label="7-Tage-Trend Median" wert={trendText(st.trend_7d_eur, st.trend_7d_pct)} farbe={trendFarbe(st.trend_7d_eur)}
+            <K label="7-Tage-Trend Low-Market-Median" wert={trendText(st.trend_7d_eur, st.trend_7d_pct)} farbe={trendFarbe(st.trend_7d_eur)}
                unter={bestandText(st.trend_7d_bestand_eur, st.trend_7d_bestand_pct, st.anzahl_gemeinsam)} testid="markt-trend-7d" />
-            <K label="30-Tage-Trend Median" wert={trendText(st.trend_30d_eur, st.trend_30d_pct)} farbe={trendFarbe(st.trend_30d_eur)}
+            <K label="30-Tage-Trend Low-Market-Median" wert={trendText(st.trend_30d_eur, st.trend_30d_pct)} farbe={trendFarbe(st.trend_30d_eur)}
                unter={bestandText(st.trend_30d_bestand_eur, st.trend_30d_bestand_pct, st.anzahl_gemeinsam_30d)} testid="markt-trend-30d" />
             <K label="Neue Listings 7 Tage" wert={String(st.new_listings_7d ?? 0)} />
             <K label="Preisreduzierungen 7 Tage" wert={String(st.price_reductions_7d ?? 0)} />
@@ -251,6 +255,8 @@ function SegmentAnalyse({ segment, bereich, onBereich, superAdmin }) {
             <span>{zusammen.qualitaet.erfolgreiche_crawls} von {zusammen.qualitaet.erwartete_crawls} erwarteten Crawls gültig{zusammen.qualitaet.laeufe_nur_monoton ? ` (${zusammen.qualitaet.laeufe_nur_monoton} nur monoton sortiert)` : ""}</span>
             <span>aktuelle Sample-Größe {zusammen.qualitaet.sample_size}</span>
             <span style={{ color: dl.farbe }}>{dl.text}</span>
+            {/* Phase C: ungültige Läufe (bezahlt, aber keine gültige Statistik) getrennt sichtbar — keine Marktlücke */}
+            {zusammen.qualitaet.laeufe_ungueltig ? <span style={{ color: "var(--st-amber)" }} data-testid="markt-ungueltige-laeufe">{zusammen.qualitaet.laeufe_ungueltig} ungültige Läufe{zusammen.qualitaet.letzter_ungueltiger_grund ? ` (zuletzt: ${zusammen.qualitaet.letzter_ungueltiger_grund})` : ""}</span> : null}
             {/* Reparaturwelle 5 Nr. 1: Scraper ohne Positionsnummer — die Werte sind monoton sortiert, aber nicht bewiesen die Top-N */}
             {zusammen.qualitaet.top_n_hinweis && <span style={{ color: "var(--st-amber)" }} data-testid="markt-top-n-hinweis">{zusammen.qualitaet.top_n_hinweis}</span>}
           </div>
@@ -279,12 +285,12 @@ function SegmentAnalyse({ segment, bereich, onBereich, superAdmin }) {
                   <Tooltip contentStyle={{ background: "#18181b", border: "1px solid #3f3f46", fontSize: 12 }} formatter={(v, n) => [Array.isArray(v) ? `${eur(v[0])} – ${eur(v[1])}` : eur(v), n]} />
                   <Area type="monotone" dataKey="band" name="p25–p75" stroke="none" fill="#60a5fa" fillOpacity={0.12} />
                   <Line type="monotone" dataKey="min" name="Billigstes" stroke="#34d399" dot={false} strokeWidth={1.5} />
-                  <Line type="monotone" dataKey="median" name="Median (günstigste)" stroke="#f87171" dot={false} strokeWidth={2.2} />
+                  <Line type="monotone" dataKey="median" name="Low-Market-Median" stroke="#f87171" dot={false} strokeWidth={2.2} />
                   <Line type="monotone" dataKey="avg" name="Durchschnitt (günstigste)" stroke="#fbbf24" dot={false} strokeWidth={1.5} strokeDasharray="4 3" />
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
-            <div className="mt-2 text-[11px] text-zinc-500">Grün Billigstes · Rot Median · Gelb Durchschnitt · Blau p25–p75. Fällt nur das Billigste, war es oft ein einzelnes Inserat; fallen alle drei, bewegt sich das ganze günstige Segment.{aw.tage_ohne_angebot ? ` Lücken = Tage ohne Angebot (${aw.tage_ohne_angebot}).` : ""}</div>
+            <div className="mt-2 text-[11px] text-zinc-500">Grün Billigstes · Rot Median · Gelb Durchschnitt · Blau p25–p75. Fällt nur das Billigste, war es oft ein einzelnes Inserat; fallen alle drei, bewegt sich das ganze günstige Segment.{aw.tage_ohne_angebot ? ` Lücken = Tage ohne Angebot (${aw.tage_ohne_angebot}).` : ""}{aw.tage_nur_ungueltig ? ` ${aw.tage_nur_ungueltig} Tag(e) nur mit ungültigen Läufen (Datenlücke, keine Marktlücke).` : ""}</div>
             <div className="mt-4 text-[13px] font-semibold text-white">Tagesveränderung des Medians</div>
             <div style={{ height: 120 }}>
               <ResponsiveContainer width="100%" height="100%" minWidth={0} initialDimension={{ width: 320, height: 200 }}>
@@ -316,12 +322,15 @@ function SegmentAnalyse({ segment, bereich, onBereich, superAdmin }) {
               <summary className="text-[12px] text-zinc-400 cursor-pointer">Tagestabelle ({reihe.length} Tage)</summary>
               <div className="overflow-x-auto mt-2">
                 <table className="w-full text-[12px] min-w-[620px]" data-testid="markt-tagestabelle">
-                  <thead><tr className="text-left text-zinc-500 text-[11px] uppercase"><th className="py-1 pr-3">Datum</th><th className="py-1 pr-3 text-right">Fahrzeuge</th><th className="py-1 pr-3 text-right">Min</th><th className="py-1 pr-3 text-right">Median günstigste</th><th className="py-1 pr-3 text-right">Durchschnitt</th><th className="py-1 pr-3 text-right">Max</th><th className="py-1 pr-3 text-right">Veränderung</th></tr></thead>
+                  <thead><tr className="text-left text-zinc-500 text-[11px] uppercase"><th className="py-1 pr-3">Datum</th><th className="py-1 pr-3 text-right">Fahrzeuge</th><th className="py-1 pr-3 text-right">Min</th><th className="py-1 pr-3 text-right">Low-Market-Median</th><th className="py-1 pr-3 text-right">Durchschnitt</th><th className="py-1 pr-3 text-right">Max</th><th className="py-1 pr-3 text-right">Veränderung</th></tr></thead>
                   <tbody>{reihe.map((r) => (
                     <tr key={r.date} className="border-t border-white/5 tabular-nums" style={r.kein_angebot ? { color: "var(--text-dim)" } : undefined}>
                       <td className="py-1 pr-3 text-zinc-300">{r.date}{(r.laeufe?.length || 0) > 1 && <span className="ml-1 text-[10px] text-zinc-500" data-testid={`markt-laeufe-${r.date}`}>{r.laeufe.length} Läufe</span>}
                         {/* Nr. 58: Tag mit 0 Treffern als Marker, nicht als Sprung */}
-                        {r.kein_angebot && <span className="ml-1 text-[10px]" style={{ color: "var(--st-amber)" }} data-testid={`markt-kein-angebot-${r.date}`}>kein Angebot</span>}</td><td className="py-1 pr-3 text-right">{r.sample_size}</td>
+                        {r.kein_angebot && <span className="ml-1 text-[10px]" style={{ color: "var(--st-amber)" }} data-testid={`markt-kein-angebot-${r.date}`}>kein Angebot</span>}
+                        {/* Phase C: nur ungültige Läufe = Datenlücke, keine Marktlücke; schlechte Datenqualität markiert */}
+                        {r.nur_ungueltig && <span className="ml-1 text-[10px]" style={{ color: "var(--st-rot)" }} data-testid={`markt-nur-ungueltig-${r.date}`}>nur ungültige Läufe</span>}
+                        {!r.nur_ungueltig && r.data_quality === "POOR" && <span className="ml-1 text-[10px]" style={{ color: "var(--st-rot)" }} data-testid={`markt-tag-schlecht-${r.date}`}>Datenqualität schlecht</span>}</td><td className="py-1 pr-3 text-right">{r.sample_size}</td>
                       <td className="py-1 pr-3 text-right">{eur(r.min)}</td><td className="py-1 pr-3 text-right text-white">{eur(r.median)}</td>
                       <td className="py-1 pr-3 text-right">{eur(r.avg)}</td><td className="py-1 pr-3 text-right">{eur(r.max)}</td>
                       <td className="py-1 pr-3 text-right" style={{ color: trendFarbe(r.change_eur) }}>{r.change_pct == null ? "—" : pct(r.change_pct)}</td>
@@ -333,7 +342,7 @@ function SegmentAnalyse({ segment, bereich, onBereich, superAdmin }) {
         )}
       </Card>
 
-      {/* Aktuelle Top-N (die N günstigsten des letzten gültigen Laufs) */}
+      {/* Die N günstigsten des letzten gültigen Laufs */}
       <Card padded={false} data-testid="markt-listings">
         <div className="px-4 py-3 text-[13px] font-semibold text-white" style={{ borderBottom: "1px solid var(--wa-08)" }}>
           Aktuell {listings?.listings?.length || 0} günstigste Fahrzeuge {listings?.date ? `(Stand ${listings.date}${listings.lauf_tag && listings.lauf_tag.includes("#") ? `, letzter Lauf ${listings.lauf_tag.split("#")[1]}` : ""})` : ""}

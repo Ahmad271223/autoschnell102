@@ -220,20 +220,43 @@ def _grob(w: Any) -> Optional[float]:
         return None
 
 
-_MARKT_GESAMT_FELDER = ("totalResults", "resultCount", "totalCount", "numResults", "searchResultCount", "totalItems")
+# Master-Auftrag 26.09.2026 (Phase C, A4): die Gesamttrefferzahl einer Suche kommt NUR aus einem nachgewiesenen
+# Scraper-Feld — nie aus geratenen Feldnamen (vorher: totalResults/resultCount/... geraten). Bis das echte Feld aus
+# dem Actor-Key-Protokoll (market_config/actor_meta_<actor>, jobs.actor_meta_protokollieren) bestaetigt und hier
+# eingetragen ist, gilt None -> sample_completeness UNKNOWN (ausser die Stichprobe ist voll).
+MARKT_GESAMT_FELD: Optional[str] = None
 
 
-def markt_gesamt(items_roh: List[Dict[str, Any]]) -> Optional[int]:
-    """Nr. 143: Gesamtzahl der Treffer der Suche, wenn der Scraper sie je Zeile mitliefert
-    (totalResults/resultCount/...). None, wenn keine Zeile die Angabe traegt."""
+def markt_gesamt(items_roh: List[Dict[str, Any]], feld: Optional[str] = None) -> Optional[int]:
+    """Nr. 143 / Phase C: Gesamtzahl der Treffer der Suche aus dem nachgewiesenen Feld (MARKT_GESAMT_FELD).
+    Ohne bestaetigtes Feld: None (unbekannt) — nie raten."""
+    f = feld if feld is not None else MARKT_GESAMT_FELD
+    if not f:
+        return None
     for it in items_roh or []:
         if not isinstance(it, dict):
             continue
-        for k in _MARKT_GESAMT_FELDER:
-            n = _int(it.get(k))
-            if n is not None and n >= 0:
-                return n
+        n = _int(it.get(f))
+        if n is not None and n >= 0:
+            return n
     return None
+
+
+# Phase C: Gruende des Zeilenfilters fuer die Datenqualitaet. Fremdfahrzeug = erkannter falscher Typ (Modell,
+# Kraftstoff, Getriebe, Karosserie); Parserfehler = Angabe fehlt / nicht lesbar / Preis unplausibel. EZ-, km-,
+# kW-Randabweichungen sind weder das eine noch das andere (Alarm markt_filter_ignoriert bleibt dafuer zustaendig).
+FREMD_PRAEFIXE = ("kraftstoff ", "getriebe ", "karosserie ")
+PARSER_PRAEFIXE = ("fehlend: ", "unbekannt: ", "Zeilenfilter defekt")
+
+
+def ist_fremdfahrzeug(grund: Any) -> bool:
+    g = str(grund or "")
+    return g == "fremdes Modell" or g.startswith(FREMD_PRAEFIXE)
+
+
+def ist_parserfehler(grund: Any) -> bool:
+    g = str(grund or "")
+    return g in (GRUND_PREIS_UNPLAUSIBEL, GRUND_IDENTITAET) or g.startswith(PARSER_PRAEFIXE)
 
 
 def listings_aus_items(items: List[Dict[str, Any]], *, beschaedigte_verwerfen: bool = True) -> List[Dict[str, Any]]:

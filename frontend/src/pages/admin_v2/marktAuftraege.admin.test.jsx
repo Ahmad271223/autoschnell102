@@ -41,6 +41,7 @@ vi.mock("@/lib/api", () => ({
         // Nr. 141: Warnung gegen das verbleibende Budget (Restkosten vs. frei), nicht nur gegen das Monatsbudget
         prognose: { aktive_modelle: 1, segmente: 8, rows_tag: 320, rows_monat: 9728, budget_usd: 700, kosten_monat_usd: 8.6, verbraucht_usd: 690, verbleibend_usd: 10,
                     rest_tage: 5, restkosten_usd: 12.5, ueberschritten: true, ueberschritten_monat: false,
+                    crawl_cost_exact_km_monat_usd: 8.3, entfernung_monat_usd: 0.3, reporting_cost_monat_usd: 0,
                     preise: { start_usd: 0.005, row_usd: 0.0007, buendel: 10, actor: "scrapesmith~mobile-de-scraper" } } } };
       if (url === "/admin/market/katalog" && cfg?.params?.marke) return { data: { modelle: [{ name: "320", model_id: "10" }, { name: "520", model_id: "17" }] } };
       if (url === "/admin/market/katalog") return { data: { marken: [{ name: "BMW", make_id: "3500" }, { name: "Volkswagen", make_id: "25200" }],
@@ -103,6 +104,9 @@ describe("Suchaufträge", () => {
     // Nr. 141: Warnung nennt Restkosten, Resttage und freies Budget
     expect(el("auftraege-budget-warnung").textContent).toContain("verbleibende Monatsbudget");
     expect(el("auftraege-budget-warnung").textContent).toContain("noch 12.50 $ für 5 Tage bei 10.00 $ frei");
+    // Master-Auftrag Phase B: nur Abrufe kosten, Berichte 0 $
+    expect(el("auftraege-kostenaufteilung").textContent).toContain("Abrufe der km-Segmente 8.30 $");
+    expect(el("auftraege-kostenaufteilung").textContent).toContain("Berichte/Auswertungen 0.00 $ (keine Abrufe");
     // Nr. 84: PRIVATE und (alt) FSBO werden beide als "Privat" gezeigt
     expect(el("auftrag-vw-polo-10tsi").textContent).toContain("Privat");
     expect(el("auftrag-opel-astra-ohne").textContent).toContain("Privat");

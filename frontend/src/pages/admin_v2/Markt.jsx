@@ -6,6 +6,7 @@ import { api, errMsg } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { PageHeader, Card, Badge, Button, Spinner, EmptyState, fmtDate } from "./_ui";
 import { DATENLAGE, datumZeit, eur, pct, trendFarbe } from "@/lib/markt";
+import { QualitaetZaehler } from "@/components/MarktQualitaet";
 
 // Review 26.09.2026 abends P1: "ungueltig" = letzter Lauf lieferte unsortierte Daten (data_invalid) —
 // nichts gespeichert, Kosten gebucht; getrennt von "fehler"
@@ -171,9 +172,10 @@ export default function Markt() {
                   <th className="px-4 py-2.5 font-medium">Letzter Crawl</th>
                   <th className="px-4 py-2.5 font-medium text-right">Listings</th>
                   <th className="px-4 py-2.5 font-medium text-right">Günstigstes</th>
-                  <th className="px-4 py-2.5 font-medium text-right">Median günstigste (Ø)</th>
+                  <th className="px-4 py-2.5 font-medium text-right">Low-Market-Median (Ø)</th>
                   <th className="px-4 py-2.5 font-medium text-right">7 Tage</th>
                   <th className="px-4 py-2.5 font-medium text-right">30 Tage</th>
+                  <th className="px-4 py-2.5 font-medium">Qualität / Markttiefe</th>
                   <th className="px-4 py-2.5 font-medium">Status</th>
                   <th className="px-4 py-2.5 font-medium text-right">Aktion</th>
                 </tr>
@@ -193,6 +195,8 @@ export default function Markt() {
                     <td className="px-4 py-2.5 text-right tabular-nums text-zinc-200">{eur(m.median_sample_mittel ?? m.median_top20_mittel)}</td>
                     <td className="px-4 py-2.5 text-right tabular-nums" style={{ color: trendFarbe(m.trend_7d_pct) }}>{pct(m.trend_7d_pct)}</td>
                     <td className="px-4 py-2.5 text-right tabular-nums" style={{ color: trendFarbe(m.trend_30d_pct) }}>{pct(m.trend_30d_pct)}</td>
+                    {/* Master-Auftrag Phase C: Datenqualität und Markttiefe getrennt, gezählt über die aktiven Segmente */}
+                    <td className="px-4 py-2.5"><QualitaetZaehler qz={m.qualitaet_zaehler} tz={m.tiefe_zaehler} testid={`markt-modell-qualitaet-${m.id}`} /></td>
                     <td className="px-4 py-2.5"><Badge tone={m.enabled ? STATUS_TONE[m.crawl_status] || "gray" : "gray"}>{m.enabled ? STATUS_TEXT[m.crawl_status] || m.crawl_status : "pausiert"}</Badge></td>
                     <td className="px-4 py-2.5 text-right">
                       <Button size="sm" variant="ghost" disabled={!superAdmin || !!busy || (!m.enabled && !m.model_id)} onClick={() => schalten(m)}

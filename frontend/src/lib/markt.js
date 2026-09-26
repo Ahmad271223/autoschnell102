@@ -42,12 +42,50 @@ export const DATENLAGE = {
   unsicher: { text: "Datenlage unsicher (Sortierung)", farbe: "var(--st-amber)" },
   // Reparaturwelle 6 Nr. 143: der Markt hat mehr Angebote, als der letzte Abruf lieferte
   unvollstaendig: { text: "Datenlage unvollständig (weniger geliefert als bestellt)", farbe: "var(--st-amber)" },
+  // Master-Auftrag Phase C: Alias aus Datenqualität x Markttiefe — technischer Fehler rot, dünner Markt gelb,
+  // leerer Markt grau (Marktlücke ist kein Fehler), veraltet (letzter gültiger Lauf > 48 h) gelb
+  fehler: { text: "Datenlage: Fehler (letzter Lauf technisch unbrauchbar)", farbe: "var(--st-rot)" },
+  duenn: { text: "Datenlage dünn (wenige Angebote im Segment)", farbe: "var(--st-amber)" },
+  leer: { text: "Datenlage leer (kein Angebot — Marktlücke, kein Fehler)", farbe: "var(--text-dim)" },
+  veraltet: { text: "Datenlage veraltet (letzter gültiger Lauf über 48 h)", farbe: "var(--st-amber)" },
   keine: { text: "noch keine Daten", farbe: "var(--text-dim)" },
 };
 
-/** Nr. 137: "Median der 10 günstigsten" — N aus den Daten (Stichprobe), nie fest. */
+/** Master-Auftrag Phase C: Datenqualität (Lauf technisch verlässlich?) getrennt von der Markttiefe (wie viele Angebote?). */
+export const DATENQUALITAET = {
+  GOOD: { text: "Datenqualität gut", kurz: "Qualität gut", zaehler: "gut", farbe: "var(--st-gruen)" },
+  MEDIUM: { text: "Datenqualität mittel", kurz: "Qualität mittel", zaehler: "mittel", farbe: "var(--st-amber)" },
+  POOR: { text: "Datenqualität schlecht", kurz: "Qualität schlecht", zaehler: "schlecht", farbe: "var(--st-rot)" },
+  UNKNOWN: { text: "Datenqualität unbekannt (kein Lauf)", kurz: "Qualität ?", zaehler: "ohne Lauf", farbe: "var(--text-dim)" },
+};
+export const DATENQUALITAET_GRUND = {
+  fremdfahrzeuge: "Fremdfahrzeuge verworfen", parser: "Parserfehler", nur_monoton: "Top-N nicht bewiesen", stale: "letzter Lauf über 48 h",
+  ungueltig: "nur ungültige Läufe", kein_lauf: "kein Lauf",
+};
+export const MARKTTIEFE = {
+  FULL: { text: "Markttiefe voll", kurz: "Tiefe voll", zaehler: "voll", farbe: "var(--st-gruen)" },
+  NORMAL: { text: "Markttiefe normal", kurz: "Tiefe normal", zaehler: "normal", farbe: "var(--st-gruen)" },
+  THIN: { text: "Markttiefe dünn (wenige Angebote)", kurz: "Tiefe dünn", zaehler: "dünn", farbe: "var(--st-amber)" },
+  EMPTY: { text: "Markttiefe leer (kein Angebot — Marktlücke)", kurz: "Tiefe leer", zaehler: "leer", farbe: "var(--text-dim)" },
+  UNKNOWN: { text: "Markttiefe unbekannt", kurz: "Tiefe ?", zaehler: "unbekannt", farbe: "var(--text-dim)" },
+};
+export const VOLLSTAENDIGKEIT = {
+  COMPLETE: "Stichprobe vollständig", INCOMPLETE: "Stichprobe unvollständig (Markt größer als geliefert)",
+  UNKNOWN: "Vollständigkeit unbekannt (Scraper liefert keine Gesamtzahl)",
+};
+export function qualitaetsText(d) {
+  const q = DATENQUALITAET[d?.data_quality] || DATENQUALITAET.UNKNOWN;
+  const g = d?.data_quality_grund ? DATENQUALITAET_GRUND[d.data_quality_grund] || d.data_quality_grund : "";
+  return g && d?.data_quality !== "GOOD" ? `${q.text} — ${g}` : q.text;
+}
+
+/** Nr. 137: "Low-Market-Median (10 günstigste)" — N aus den Daten (Stichprobe), nie fest;
+ *  Master-Auftrag Phase C: neutrale Bezeichnung statt "Top-N". */
 export function medianLabel(n) {
   return n ? `Median der ${n} günstigsten` : "Median der günstigsten";
+}
+export function lowMarketLabel(n) {
+  return n ? `Low-Market-Median (${n} günstigste)` : "Low-Market-Median (günstigste)";
 }
 
 /** Nr. 137/146: Median aus dem neuen Feld, alte Feldnamen nur als Rückfall. */

@@ -42,7 +42,9 @@ vi.mock("@/lib/api", () => ({
         // Reparaturwelle 6 Nr. 128/140: listings = aktuelle Fassung, listings_historisch = alle Fassungen; median_sample_mittel statt median_top20_mittel
         { id: "bmw-320d", label: "BMW 320d", fuel: "DIESEL", power_kw_min: 120, power_kw_max: 145, enabled: true, model_id: "10",
           segmente_aktiv: 16, segmente_mit_daten: 4, last_success_at: "2026-10-01T04:00:00+00:00", listings: 312, listings_historisch: 450,
-          min_price: 18900, median_sample_mittel: 20250, trend_7d_pct: -2.1, trend_30d_pct: -4.0, crawl_status: "ok" },
+          min_price: 18900, median_sample_mittel: 20250, trend_7d_pct: -2.1, trend_30d_pct: -4.0, crawl_status: "ok",
+          // Master-Auftrag Phase C: Datenqualitaet und Markttiefe je Modell als Zaehler ueber die aktiven Segmente
+          qualitaet_zaehler: { GOOD: 14, MEDIUM: 1, POOR: 1 }, tiefe_zaehler: { FULL: 10, THIN: 4, EMPTY: 2 } },
         { id: "vw-golf-20tdi", label: "VW Golf 2.0 TDI", fuel: "DIESEL", enabled: false, model_id: "14", segmente_aktiv: 0, segmente_mit_daten: 0,
           listings: 0, listings_historisch: 0, min_price: null, median_sample_mittel: null, trend_7d_pct: null, trend_30d_pct: null, crawl_status: "wartet" },
         // P1: heute ein Lauf mit ungueltigen Daten (data_invalid) -> eigener Status, kein "fehler"
@@ -71,7 +73,10 @@ vi.mock("@/lib/api", () => ({
         qualitaet: { daten_seit: "2026-08-01", tage_beobachtet: 3, tage_mit_treffern: 3, abdeckung_pct: 50, erfolgreiche_crawls: 3, erwartete_crawls: 6, sample_size: 0, datenlage: "keine", crawls_per_day: 2 } } };
       if (url.endsWith("/summary")) return { data: { segment: SEG, stats: netz.stats || STATS, letzter_job: { status: "completed" }, historisch: false,
         qualitaet: { daten_seit: "2026-09-01", tage_beobachtet: 31, tage_mit_treffern: 29, abdeckung_pct: 96.9, erfolgreiche_crawls: 60, erwartete_crawls: 62, sample_size: 20, datenlage: "gut", crawls_per_day: 2,
-                     laeufe_nur_monoton: 0, top_n_bewiesen: !netz.topN, top_n_hinweis: netz.topN } } };
+                     laeufe_nur_monoton: 0, top_n_bewiesen: !netz.topN, top_n_hinweis: netz.topN,
+                     // Phase C: getrennt — Datenqualitaet, Markttiefe, Vollstaendigkeit; ungueltige Laeufe sichtbar
+                     data_quality: "MEDIUM", data_quality_grund: "fremdfahrzeuge", market_depth: "FULL", sample_completeness: "UNKNOWN",
+                     laeufe_ungueltig: 2, letzter_ungueltiger_grund: "Sortierung unsicher" } } };
       // Nr. 58: ein Tag mit 0 Treffern kommt mit (Luecke statt Sprung)
       if (url.endsWith("/history")) return { data: { reihe: [
         { date: "2026-09-29", sample_size: 20, min: 19100, median: 20500, avg: 20600, max: 21800, p25: 19700, p75: 21100, change_eur: null, change_pct: null },
@@ -148,6 +153,11 @@ describe("Admin Marktanalyse", () => {
     expect(z.textContent).toContain("20.250 €");
     expect(z.textContent).toContain("-4 %");
     expect(z.textContent).toContain("4/16");
+    // Master-Auftrag Phase C: Qualität und Markttiefe je Modell gezählt
+    expect(el("markt-modell-qualitaet-bmw-320d").textContent).toContain("14 gut");
+    expect(el("markt-modell-qualitaet-bmw-320d").textContent).toContain("1 schlecht");
+    expect(el("markt-modell-qualitaet-bmw-320d").textContent).toContain("4 dünn");
+    expect(el("markt-modell-qualitaet-bmw-320d").textContent).toContain("2 leer");
     // Reparaturwelle 6 Nr. 128/140: Listings der aktuellen Fassung, Historie getrennt; alter Feldname als Rueckfall
     expect(el("markt-historisch-bmw-320d").textContent).toBe(" (450 historisch)");
     expect(el("markt-historisch-audi-a4-40tdi")).toBeNull();
@@ -258,7 +268,14 @@ describe("Admin Marktanalyse", () => {
     expect(el("markt-listings").textContent).toContain("letzter Lauf 2");
     // Nr. 137/138: keine feste "20" mehr in Ueberschriften (die Kennzahlen sagen "Top-N" mit N = sample_size)
     expect(el("markt-tagestabelle").textContent).not.toMatch(/Top-20/);
-    expect(el("markt-kennzahlen").textContent).toContain("Median Top-20");
+    // Master-Auftrag Phase C: neutrale Begriffe — "Low-Market-Median (N günstigste)" statt "Median Top-N"
+    expect(el("markt-kennzahlen").textContent).toContain("Low-Market-Median (20 günstigste)");
+    expect(el("markt-kennzahlen").textContent).not.toMatch(/Top-\d/);
+    // Phase C: zwei getrennte Anzeigen (plus Vollständigkeit) und ungültige Läufe in der Segmentanalyse
+    expect(el("markt-segment-qualitaet-dq").textContent).toBe("Datenqualität mittel — Fremdfahrzeuge verworfen");
+    expect(el("markt-segment-qualitaet-tiefe").textContent).toBe("Markttiefe voll");
+    expect(el("markt-segment-qualitaet-vollstaendigkeit").textContent).toContain("Vollständigkeit unbekannt");
+    expect(el("markt-ungueltige-laeufe").textContent).toBe("2 ungültige Läufe (zuletzt: Sortierung unsicher)");
     // Nr. 139: "neu in diesem Segment" mit globalem Erstdatum daneben
     expect(el("markt-neu-segment-449438530").textContent).toBe("neu in diesem Segment");
     expect(el("markt-listing-449438530").textContent).toContain("(global 13.09.)");

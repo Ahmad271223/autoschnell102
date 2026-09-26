@@ -234,7 +234,10 @@ def prognose_modell(m: Dict[str, Any]) -> Dict[str, Any]:
             "rows_tag": rows_tag, "rows_monat": round(rows_tag * 30.4), "rows_abruf_tag": rows_abruf_tag, "laeufe_tag": laeufe_tag,
             "kosten_tag_usd": round(kosten_tag, 2), "kosten_monat_usd": round(kosten_tag * 30.4, 2),
             "kosten_tag_ersatz_usd": round(kosten_tag_ersatz, 2), "kosten_monat_ersatz_usd": round(kosten_tag_ersatz * 30.4, 2),
-            "ersatz_actor": ersatz or None}
+            "ersatz_actor": ersatz or None,
+            # Master-Auftrag Phase B: nur die km-Segmente kosten Abrufe; Auswertungen/Berichte 0 $
+            "crawl_cost_exact_km_usd": round(kosten_tag, 2), "crawl_cost_exact_km_monat_usd": round(kosten_tag * 30.4, 2),
+            "reporting_cost_usd": 0.0, "reporting_cost_monat_usd": 0.0}
 
 
 async def prognose(db, entwurf: Optional[Dict[str, Any]] = None, *, ohne_id: Optional[str] = None) -> Dict[str, Any]:
@@ -277,6 +280,11 @@ async def prognose(db, entwurf: Optional[Dict[str, Any]] = None, *, ohne_id: Opt
             "verbleibend_usd": round(frei, 2), "rest_tage": rest_tage, "restkosten_usd": round(restkosten, 2),
             "starts_je_tag": starts, "zeilen_gruppen": len(gruppen),
             "entfernung_tag_usd": round(entfernung_tag, 2), "entfernung_monat_usd": round(entfernung_tag * 30.4, 2),
+            # Master-Auftrag Phase B: Kosten strikt getrennt — Crawls der km-Segmente, Entfernungspruefung, Ersatz
+            # (Obergrenze, siehe kosten_*_ersatz), Berichte/Auswertungen = 0 $ (lesen nur Tageswerte)
+            "crawl_cost_exact_km_usd": round(summe["kosten_tag_usd"] - entfernung_tag, 2),
+            "crawl_cost_exact_km_monat_usd": round(summe["kosten_monat_usd"] - entfernung_tag * 30.4, 2),
+            "crawl_cost_entfernung_usd": round(entfernung_tag, 2), "reporting_cost_usd": 0.0, "reporting_cost_monat_usd": 0.0,
             "ueberschritten": budget_usd > 0 and restkosten > frei,
             "ueberschritten_monat": budget_usd > 0 and summe["kosten_monat_usd"] > budget_usd,
             # Nr. 53: Ersatz-Scraper wuerde das Budget sprengen (nur Hinweis, kein Sperrgrund)
