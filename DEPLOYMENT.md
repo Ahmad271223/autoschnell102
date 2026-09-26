@@ -3693,3 +3693,31 @@ löscht die Fahrer-Zähler und pseudonymisiert `driver_id` in den Bewertungen. B
 - **Oberfläche:** „Bereiche & Budget“ mit echter Kostenformel, Hinweis „nur Vorbelegung“, Knopf „Auf alle aktiven Aufträge
   anwenden“; Taktung-Kachel mit Restbudget.
 
+**Reparaturwelle 6 Review 26.09.2026 abends (Markt, Nr. 77–146; Commits 96e72fa + bda4b8d):**
+- **Daten:** Preisparser für alle Schreibweisen (19.990 / 19,990 / 19 990 / 19.990,00), Plausibilität 100 €–5 Mio. €
+  (Alarm `markt_preis_unplausibel`); Datumsparser strikt; Fahrzeugidentität Pflicht (IDs oder Namen); Kraftstoff/Getriebe/
+  Karosserie müssen erkennbar sein, wenn der Auftrag sie setzt; Filtermodul defekt → `data_invalid` + Alarm
+  `markt_filter_defekt`; Actor lieferte Zeilen, alle verworfen → `data_invalid`; Datensatz-Abruf mit Obergrenze
+  (Alarm `markt_datensatz_zu_gross`); Privatverkäufer nur mit gerundeten Koordinaten, ohne seller_id.
+- **Zwei Server / Backup:** Auswertung als Hintergrund-Schreiber (Wartung/Backup), bei Wartung wird das bezahlte
+  Actor-Ergebnis zwischengespeichert und beim nächsten Claim ohne neuen Lauf ausgewertet; Segment-Sperre (5 min) um die
+  Auswertung; Upsert-Rennen einmal wiederholt; ältere Beobachtung überschreibt keinen neueren Preis (`observation_at`);
+  je Segment nur ein Job im Bündel („doppelt fällig“); `cancel_requested` → sofort cancelled; Worker meldet Erfolg erst
+  nach dem Takt; Schalter bei DB-Fehler „aus“.
+- **Budget/Planung:** Admin-Budget als dauerhafte Vorgabe (`market_config/budget`, gilt für Folgemonate); Budget voll →
+  Jobs warten (`budget_wait`, ein Alarm), kein Massen-„failed“; Tages-/Monatszuordnung nach Job-Tag; Kostenabgleich mit Apify
+  nach 10 min–24 h (`markt_kosten_abgleich`); Actor-Build am Job und Tagesaggregat, `MARKT_APIFY_ACTOR` darf `name@build`
+  sein; neue Segmente werden am selben Tag nachgeplant; „Jetzt crawlen“ mit 5-min-Sperre (409).
+- **Fassungen:** Segment trägt unveränderlichen Definitions-Schnappschuss; **Zeilenzahl ist Teil der Fassung** (Änderung =
+  neue Segmente, Historie getrennt, kein neuer Testlauf nötig); historische Fassungen zeigen ihre Definition; Modellübersicht
+  (letzter Crawl, Listings) nur aus der aktuellen Fassung, „N historisch“ getrennt; CAS beim Ändern (409), Anlage-Rennen abgefangen.
+- **Auswertung:** Preisänderung je Segment; je-Segment-Zustand (`segmente.<id>`: erstmals/zuletzt gesehen, Rang,
+  `in_letztem_lauf`, „neu in diesem Segment“); Datenqualität relativ zur Zeilenzahl (gut ≥ 80 %, mittel ≥ 50 %),
+  erwartete Läufe aus dem Plan, Trend-/Chancenbasis nur bewiesene Tage, `sample_incomplete` wenn der Scraper die
+  Marktgröße liefert; wiederauftauchende Inserate verlieren alle Prüfmerker; Verkäuferart intern DEALER/PRIVATE.
+- **API/Oberfläche:** neutrale Feldnamen `sample_limit`, `median_sample_price` … (alte `*_top20_*` parallel), keine festen
+  „20“; Chancen-API: Filter-Schnitt, ein `$in`, `still_valid` („historisch — Preis geändert“); Kostenprognose je
+  Zeilengruppe und gegen Restbudget; PLZ und Radius nur zusammen; Testlauf mit Sortierung/Nachweis je Segment.
+- Hinweis: `sample_incomplete` hängt davon ab, ob der Scraper eine Marktgröße je Zeile liefert (Feldnamen geraten) —
+  am ersten Live-Tag im Job prüfen.
+
