@@ -309,6 +309,23 @@ async def fahrzeug_hat_vorgaenge(vehicle_id: Optional[str], dealer_id: str) -> b
         {"vehicle_id": vehicle_id, "dealer_id": dealer_id}, limit=1))
 
 
+async def _ki_lernfall_ausgang(appt: dict, termin_status: str) -> None:
+    """Review 26.09.2026 (Nr. 76-78): Der KI-Lernfall der Abholung wird erst
+    mit dem Ausgang des Termins endgueltig (abgeholt/erledigt: tatsaechlich
+    erzielter Nachlass aus dem Endpreis) bzw. verworfen (storniert / nicht
+    abgeholt). Diese Funktion ist der eine Punkt, den ALLE Wege passieren
+    (Abschluss mit Unterschriften, Buero, Fahrer-App, Nachholer). Nie ein
+    Fehler nach aussen — die KI ist Beiwerk."""
+    try:
+        if not appt or not appt.get("id"):
+            return
+        from ai import pickup_assessment as _ki
+        await _ki.lernfall_ausgang(str(appt["id"]), ausgang=str(termin_status or ""),
+                                   dealer_id=appt.get("dealer_id"))
+    except Exception:  # noqa: BLE001
+        log.exception("KI-Lernfall: Ausgang von Termin %s nicht uebernommen", (appt or {}).get("id"))
+
+
 async def termin_status_uebernehmen(appt: dict, termin_status: str, *,
                                     user: Optional[dict] = None) -> bool:
     """Terminstatus auf den Kaufvorgang des Termins abbilden (abgeholt,
@@ -318,6 +335,7 @@ async def termin_status_uebernehmen(appt: dict, termin_status: str, *,
     arbeiten. Phase 2: scheiterte die Fahrzeug-Zusammenfassung, traegt der
     Vorgang danach nacharbeit_offen (Aufrufer lesen ihn per fuer_termin)."""
     kv = None
+    await _ki_lernfall_ausgang(appt, termin_status)
     neu = _TERMIN_ZU_STATUS.get(termin_status, "abholung_geplant")
     # Befund 105 (16.09.2026): verliert der Status-CAS (paralleler Termin-/
     # Fahrerabschluss), wird der Vorgang neu gelesen und der Wechsel erneut

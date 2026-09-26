@@ -394,7 +394,8 @@ def vertragswerte_stand(vehicle: dict, contract: dict) -> str:
     import json
     daten = {"werte": PV.werte_als_text(PV.vertragswerte(vehicle, contract)),
              "preis": contract.get("purchase_price"),
-             "schaeden": contract.get("damages") or vehicle.get("damages") or []}
+             # Review 26.09.2026 (Nr. 111/116): dieselbe Liste wie Fahrer-App und KI
+             "schaeden": KI.bekannte_schaeden.zusammenfuehren(contract, vehicle)}
     return hashlib.sha256(json.dumps(daten, sort_keys=True, default=str,
                                      ensure_ascii=False).encode("utf-8")).hexdigest()
 
@@ -1206,7 +1207,9 @@ async def get_protocol(appt_id: str, driver=Depends(current_driver)):
             ],
         },
         "vehicle": vehicle,
-        "damages": contract.get("damages") or vehicle.get("damages") or [],
+        # Review 26.09.2026 (Nr. 81-83/111/116): Vertrag UND Inserat UND Freitext UND
+        # bekannte Maengel — dieselbe Wahrheit wie im KI-Abgleich (ai.bekannte_schaeden)
+        "damages": KI.bekannte_schaeden.zusammenfuehren(contract, vehicle),
         # Runde 30: Der Fahrer sieht den Vertragspreis — und nach der
         # Freigabe den nachverhandelten Preis, den er unterschreibt.
         # Rollenprüfung 22.09.2026 (RP-480): der Preis VOR der Abholung —
@@ -2861,7 +2864,9 @@ async def fahrer_ki_bewertung(appt_id: str, driver=Depends(current_driver)):
     doc = await _current(appt_id)
     if not doc or (doc.get("status") or "entwurf") == "entwurf":
         return {"status": "keine", "grund": "Erst nach dem Abschicken an den Händler", "ergebnis": None}
-    erg = await KI.bewertung_lesen(doc["id"], appt.get("dealer_id", ""))
+    # Review 26.09.2026 (Nr. 79/80): der Fahrer-GET liest NUR — er stoesst nie
+    # eine Neuberechnung (Kosten) an; das tun allein die Chef-Wege.
+    erg = await KI.bewertung_lesen(doc["id"], appt.get("dealer_id", ""), nachrechnen=False)
     if erg is None:
         return {"status": "keine", "grund": "Keine Bewertung vorhanden", "ergebnis": None}
     return KI.fuer_fahrer(erg, preis_vorschlag=doc.get("preis_vorschlag"))

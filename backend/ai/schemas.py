@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-PROMPT_VERSION = "abholung_v4"
+PROMPT_VERSION = "abholung_v5"      # v5: Regel 10 (Freitext = Fahrerangabe), manual_hint, confirmed_by_condition
 PROMPT_VERSION_VERTRAG = "vertrag_v3"
 
 KATEGORIEN = ["damage", "damage_worse", "mileage", "keys", "previous_owners",
@@ -219,11 +219,15 @@ def positionen_abgleichen(ergebnis: Dict[str, Any], erwartete_ids) -> tuple:
     return neu, fehlende, doppelte, fremde
 
 
+REPARATUR_DECKEL_FAKTOR = 1.5           # Review 26.09.2026 (Nr. 97): Reparaturkosten hoechstens 150 % des Preises
+
+
 def bereinigen(daten: Dict[str, Any], *, kaufpreis: Optional[float]) -> Dict[str, Any]:
     """Zahlen absichern, Reihenfolge erzwingen, Summen plausibel halten.
     Liefert eine neue Struktur (das Original bleibt fuer die Ablage)."""
     kp = _zahl(kaufpreis) if kaufpreis else 0.0
     deckel = kp if kp > 0 else None      # nie mehr als der Preis selbst
+    reparatur_deckel = round(kp * REPARATUR_DECKEL_FAKTOR, 2) if kp > 0 else None
     items: List[Dict[str, Any]] = []
     for roh in daten.get("items") or []:
         if not isinstance(roh, dict):
@@ -239,6 +243,8 @@ def bereinigen(daten: Dict[str, Any], *, kaufpreis: Optional[float]) -> Dict[str
             vier = _vier_aus_szenarien(szen) if szen["scenario_high_eur"] > 0 else _vier(roh, deckel)
         else:
             vier = _vier({} if manuell else roh, deckel)
+        reparatur_roh = _zahl(roh.get("repair_estimate_eur"), 0.0, None)
+        reparatur = min(reparatur_roh, reparatur_deckel) if reparatur_deckel is not None else reparatur_roh
         items.append({
             "assessment_kind": art,
             **szen,
@@ -247,14 +253,19 @@ def bereinigen(daten: Dict[str, Any], *, kaufpreis: Optional[float]) -> Dict[str
             "title": str(roh.get("title") or "")[:120],
             "price_relevant": bool(roh.get("price_relevant")) and (vier["fair_discount_eur"] > 0 or manuell),
             "repair_method": str(roh.get("repair_method") or "")[:80],
-            "repair_estimate_eur": _zahl(roh.get("repair_estimate_eur"), 0.0, None),
+            "repair_estimate_eur": reparatur,
+            "gedeckelt": reparatur < reparatur_roh,
             **vier,
             "manual_review_required": manuell,
             "reason": str(roh.get("reason") or "")[:300],
         })
     c = daten.get("combined") or {}
     summe = round(sum(i["fair_discount_eur"] for i in items), 2)
-    ueberlappung = _zahl(c.get("overlap_adjustment_eur"), 0.0, summe)
+    # Review 26.09.2026 (Nr. 98): der Ueberlappungsabzug darf hoechstens die
+    # Summe der KLEINEREN Positionen fressen — die groesste bleibt immer
+    # ganz (eine Position kann sich nicht mit sich selbst ueberlappen).
+    groesste = max((i["fair_discount_eur"] for i in items), default=0.0)
+    ueberlappung = _zahl(c.get("overlap_adjustment_eur"), 0.0, round(max(0.0, summe - groesste), 2))
     vier = _vier(c, deckel)
     # Der faire Gesamtwert liegt zwischen Summe minus Ueberlappung und Summe —
     # sonst widerspricht sich die Karte; die anderen drei folgen der Reihenfolge.

@@ -35,6 +35,8 @@ PREIS_JE_MIO = {"claude-opus-5": (15.0, 75.0), "claude-sonnet-5": (3.0, 15.0),
                 "claude-haiku-4-5-20251001": (1.0, 5.0)}
 
 _cache: Dict[str, Any] = {"bis": 0.0, "werte": None}
+NUR_ENDGUELTIG = {"vorlaeufig": {"$ne": True}, "verworfen": {"$ne": True}, "ersetzt": {"$ne": True},
+                  "abgleich_unsicher": {"$ne": True}}
 
 
 def _faktor(doc: dict) -> Optional[float]:
@@ -64,7 +66,11 @@ async def erfahrungswerte(*, frisch: bool = False, dealer_id: Optional[str] = No
         je_kat: Dict[str, List[float]] = {}
         je_art: Dict[str, List[float]] = {}
         je_art_kat: Dict[str, Dict[str, List[float]]] = {}
-        filt = {"dealer_id": dealer_id} if dealer_id else {}
+        # Review 26.09.2026 (Nr. 76-78, 100, 117, 118): nur ENDGUELTIGE Faelle —
+        # keine vorlaeufigen (Freigabe ohne Abschluss), verworfenen (Abholung
+        # gescheitert), ersetzten (Korrekturversion) oder unsicheren (Abgleich
+        # "moeglich"). Aeltere Lernfaelle ohne die Felder zaehlen wie bisher.
+        filt: Dict[str, Any] = {**NUR_ENDGUELTIG, **({"dealer_id": dealer_id} if dealer_id else {})}
         cursor = db[LERN_SAMMLUNG].find(filt, {"_id": 0, "ki_nachlass": 1, "tatsaechlicher_nachlass": 1,
                                               "chef_nachlass": 1, "items": 1, "art": 1}
                                         ).sort("created_at", -1).limit(3000)
@@ -203,10 +209,12 @@ async def statistik(tage: int = 30) -> Dict[str, Any]:
                                "art": art, "ref": d.get("protocol_id") or d.get("vehicle_id") or ""})
         lern_n = await db[LERN_SAMMLUNG].count_documents({})
         lern_mit_ergebnis = await db[LERN_SAMMLUNG].count_documents(
-            {"$or": [{"tatsaechlicher_nachlass": {"$ne": None}}, {"chef_nachlass": {"$ne": None}}]})
+            {**NUR_ENDGUELTIG, "$or": [{"tatsaechlicher_nachlass": {"$ne": None}}, {"chef_nachlass": {"$ne": None}}]})
+        lern_vorlaeufig = await db[LERN_SAMMLUNG].count_documents({"vorlaeufig": True, "ersetzt": {"$ne": True},
+                                                                  "verworfen": {"$ne": True}})
     except Exception:  # noqa: BLE001
         log.exception("KI-Statistik nicht berechenbar")
-        lern_n = lern_mit_ergebnis = 0
+        lern_n = lern_mit_ergebnis = lern_vorlaeufig = 0
     dauern.sort()
     p95 = dauern[int(len(dauern) * 0.95) - 1] if len(dauern) >= 2 else (dauern[0] if dauern else None)
     return {
@@ -214,8 +222,8 @@ async def statistik(tage: int = 30) -> Dict[str, Any]:
         "dauer_median_ms": int(statistics.median(dauern)) if dauern else None,
         "dauer_p95_ms": p95, "tokens": tokens, "kosten_usd_geschaetzt": round(kosten, 2),
         "letzte_fehler": fehler,
-        "lernfaelle": {"gesamt": lern_n, "mit_ergebnis": lern_mit_ergebnis, "min_fuer_kalibrierung": MIN_FAELLE,
-                       "min_firma": MIN_FIRMA},
+        "lernfaelle": {"gesamt": lern_n, "mit_ergebnis": lern_mit_ergebnis, "vorlaeufig": lern_vorlaeufig,
+                       "min_fuer_kalibrierung": MIN_FAELLE, "min_firma": MIN_FIRMA},
         "erfahrungswerte": await erfahrungswerte(),
         "marktdaten": await _marktdaten_kurz(),
         "eigene_preise": await _eigene_kurz(),

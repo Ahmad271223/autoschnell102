@@ -37,12 +37,11 @@ let wurzel;
 let behaelter;
 const el = (t) => behaelter.querySelector(`[data-testid="${t}"]`);
 
-async function starten(props) {
+async function starten(props, kurz = { status: "ok", input_hash: "h1" }) {
   behaelter = document.createElement("div");
   document.body.appendChild(behaelter);
   wurzel = createRoot(behaelter);
-  const eintrag = { protocol_id: "p1", preis_vertrag: 8100, preis_vorschlag_fahrer: 7300,
-                    ki_bewertung: { status: "ok", input_hash: "h1" } };
+  const eintrag = { protocol_id: "p1", preis_vertrag: 8100, preis_vorschlag_fahrer: 7300, ki_bewertung: kurz };
   await act(async () => { wurzel.render(createElement(KiBewertungKarte, { eintrag, onPreis: vi.fn(), ...props })); });
   await act(async () => { for (let i = 0; i < 5; i += 1) await Promise.resolve(); });
 }
@@ -103,5 +102,20 @@ describe("KiBewertungKarte", () => {
     // kein Polling mehr im Fehlerzustand
     await act(async () => { await vi.advanceTimersByTimeAsync(6100); });
     expect(api.get).toHaveBeenCalledTimes(2);
+  });
+
+  it("zeigt 'veraltet – wird neu berechnet', wenn die Kurzform der Liste veraltet=true meldet (Nr. 119/120)", async () => {
+    // Der Server antwortet noch nicht — die Karte kennt nur die Kurzform aus der Liste
+    api.get.mockReturnValueOnce(new Promise(() => {}));
+    await starten({}, { status: "veraltet", veraltet: true, input_hash: "h0", fairer_nachlass: 530 });
+    expect(el("ki-karte-p1").dataset.status).toBe("veraltet");
+    expect(el("ki-karte-p1").textContent).toContain("veraltet");
+    expect(el("ki-karte-p1").textContent).not.toContain("530");
+    // Kurzform mit altem Status "ok", aber veraltet=true: ebenfalls veraltet
+    await act(async () => { wurzel.unmount(); });
+    behaelter.remove();
+    api.get.mockReturnValueOnce(new Promise(() => {}));
+    await starten({}, { status: "ok", veraltet: true, input_hash: "h0" });
+    expect(el("ki-karte-p1").dataset.status).toBe("veraltet");
   });
 });

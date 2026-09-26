@@ -187,15 +187,21 @@ def test_02_verschlechterung_und_negative_km(welt, monkeypatch):
         "new_damages": [{"id": "k1", "type_key": "kratzer", "type_label": "Kratzer", "zone": "Stoßfänger hinten",
                          "severity_data": {"laenge": "15–30 cm", "tiefe": "bis Blech", "anzahl": "einzeln"}},
                         {"id": "d9", "type_key": "kratzer", "type_label": "Kratzer", "zone": "Stoßfänger vorne",
+                         "severity_data": {"laenge": "bis 5 cm", "tiefe": "oberflächlich", "anzahl": "einzeln"}},
+                        {"id": "d10", "type_key": "kratzer", "type_label": "Kratzer", "zone": "Stoßstange",
                          "severity_data": {"laenge": "bis 5 cm", "tiefe": "oberflächlich", "anzahl": "einzeln"}}],
         "condition": {"mileage": "176000", "warning_lights": "nein"}}}))
     grund = welt.run(K._grundlagen(pid, w.dealer_id))
     paket = K.paket_bauen(*grund)
     neu = {d["id"]: d for d in paket["new_damages"]}
     assert neu["k1"]["already_known"] is True and neu["k1"].get("worse") is True
-    assert neu["d9"]["possibly_known"] is True and neu["d9"]["already_known"] is False, "gleiche Art, aehnliches Bauteil"
+    # Review 26.09.2026 (Nr. 84): andere Position (vorne statt hinten) ist NICHT "moeglich", sondern neu;
+    # "moeglich" nur bei gleichem Bauteil mit unklarer Position/Seite
+    assert neu["d9"]["possibly_known"] is False and neu["d9"]["already_known"] is False, "andere Position = neu"
+    assert neu["d10"]["possibly_known"] is True and neu["d10"]["already_known"] is False, "Bauteil gleich, Position unklar"
     worse = next(d for d in paket["deviations"] if d["type"] == "damage_worse")
     assert worse["expected"]["tiefe"] == "oberflächlich" and worse["actual"]["tiefe"] == "bis Blech"
+    assert worse["worse_field"] in ("laenge", "tiefe")
     km = next(d for d in paket["deviations"] if d["id"] == "dev:mileage_contract")
     assert km["type"] == "other" and km["manual_hint"] is True and km["difference_km"] == -30000
     _aufraeumen(welt)
@@ -229,7 +235,7 @@ def test_03_bewertung_wird_abgelegt_bereinigt_und_priorisiert(welt, monkeypatch)
     erg2 = welt.run(K.bewertung_ausfuehren(pid, w.dealer_id))
     assert erg2["input_hash"] == erg["input_hash"] and len(aufrufe) == 1
     gespeichert = welt.run(db.ki_bewertungen.find_one({"protocol_id": pid}, {"_id": 0}))
-    assert gespeichert["status"] == "ok" and gespeichert["prompt_version"] == "abholung_v4"
+    assert gespeichert["status"] == "ok" and gespeichert["prompt_version"] == "abholung_v5"
     assert "Vera" not in str(gespeichert.get("eingabe")) and "lease_until" not in gespeichert
     _aufraeumen(welt)
 

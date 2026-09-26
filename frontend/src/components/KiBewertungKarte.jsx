@@ -54,7 +54,10 @@ export default function KiBewertungKarte({ eintrag, onPreis, busy }) {
     } finally { setRechnet(false); }
   };
 
-  const status = daten?.status || (kurz ? kurz.status : "laeuft");
+  // Review 26.09.2026 (Nr. 119/120): die Kurzform der Liste weiss, ob die
+  // Bewertung zum heutigen Protokollstand passt — bis die Karte selbst
+  // geladen hat, zeigt sie "veraltet – wird neu berechnet" statt alter Zahlen.
+  const status = daten?.status || (kurz ? (kurz.veraltet ? "veraltet" : kurz.status) : "laeuft");
   const erg = daten?.ergebnis || null;
   const wartetZuLange = kiWartet(status) && Date.now() - start.current > WARTE_MAX_MS;
   const rahmen = { background: "var(--wa-03)", border: "1px solid var(--border-default)" };

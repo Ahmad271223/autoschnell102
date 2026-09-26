@@ -627,23 +627,39 @@ def recherche_auswahl(positionen: List[dict]) -> List[dict]:
 
 
 # ------------------------------------------------ Recherche je Fall
+# Review 26.09.2026 (Nr. 130-132): Die Recherchefrage entsteht NUR aus
+# strukturierten Feldern — Art, Bauteil, die festen Merkmale des Formulars,
+# Modell, Baujahr. Kein Freitext des Fahrers (note): er ginge sonst als
+# Suchanweisung ins Netz, und die Treffer landeten in der eigenen
+# Preisdatenbank. Merkmale nur aus dieser Liste, Werte gekuerzt und einzeilig.
+_FRAGE_MERKMALE = ("groesse", "laenge", "tiefe", "lack", "lage", "anzahl", "umfang", "stelle", "dellengroesse",
+                   "wo", "welches", "funktion", "technik", "nachweis", "qualitaet", "fahrbereit", "airbag",
+                   "bereich", "status", "warnleuchte", "kva")
+_SCHADEN_ARTEN = ("delle", "kratzer", "rost", "steinschlag", "hagelschaden", "beleuchtung", "unfall_repariert",
+                  "unfall_nicht_repariert", "technik")
+
+
+def _einzeilig(w: Any, n: int) -> str:
+    return re.sub(r"[\x00-\x1f\x7f]+|\s+", " ", str(w or "")).strip()[:n]
+
+
 def _fall_frage(art: str, paket: Dict[str, Any], positionen: List[dict]) -> str:
     v = paket.get("vehicle") or {}
-    auto = " ".join(str(x) for x in (v.get("make"), v.get("model"), v.get("variant")) if x).strip()
-    ez = v.get("first_registration") or ""
+    auto = " ".join(_einzeilig(x, 60) for x in (v.get("make"), v.get("model"), v.get("variant")) if x).strip()
+    ez = _einzeilig(v.get("first_registration"), 10)
     km = v.get("mileage_pickup_km") or v.get("mileage_contract_km") or v.get("mileage_km")
     zeilen = []
     for p in recherche_auswahl(positionen):
         sd = p.get("severity_data") or {}
-        merk = ", ".join(f"{k} {w}" for k, w in sd.items() if str(w).lower() != "unbekannt")
-        if p.get("damage_type") or p.get("type") in ("delle", "kratzer", "rost", "steinschlag", "hagelschaden",
-                                                      "beleuchtung", "unfall_repariert", "unfall_nicht_repariert",
-                                                      "technik"):
-            note = str(p.get("note") or "").strip()[:160]
-            zeilen.append(f"- id {p.get('id')}: {p.get('label') or p.get('type')} {p.get('zone') or ''}"
-                          f"{(' (' + merk + ')') if merk else ''}{(': ' + note) if note else ''}")
+        merk = ", ".join(f"{k} {_einzeilig(sd.get(k), 40)}" for k in _FRAGE_MERKMALE
+                         if str(sd.get(k) or "").strip() and str(sd.get(k)).lower() != "unbekannt")
+        typ = p.get("damage_type") or p.get("type")
+        if typ in _SCHADEN_ARTEN:
+            zeilen.append(f"- id {p.get('id')}: {_einzeilig(p.get('label') or typ, 60)} {_einzeilig(p.get('zone'), 60)}"
+                          f"{(' (' + merk + ')') if merk else ''}")
         else:
-            zeilen.append(f"- id {p.get('id')}: {p.get('label')}: erwartet {p.get('expected')}, vor Ort {p.get('actual')}")
+            zeilen.append(f"- id {p.get('id')}: {_einzeilig(p.get('label'), 60)}: erwartet "
+                          f"{_einzeilig(p.get('expected'), 60)}, vor Ort {_einzeilig(p.get('actual'), 60)}")
     if not zeilen:
         return ""
     return (f"Fahrzeug: {auto}, Erstzulassung {ez}, {km or '?'} km. Recherchiere aktuelle Reparatur-/Ersatzkosten "

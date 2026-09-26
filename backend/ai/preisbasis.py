@@ -303,14 +303,15 @@ _TECHNIK_BEREICH = {"motor": "technik_motor", "getriebe": "technik_getriebe", "f
 
 def _bereich_schluessel(bereich: str) -> str:
     b = str(bereich or "").lower()
+    # Klima vor Motor: "Klimaanlage kuehlt nicht" ist Klima, nicht Motor (Review 26.09.2026, Freitext-Abgleich)
+    if _hat(b, "klima", "heiz", "gebläse", "geblaese"):
+        return "klima"
     if _hat(b, "motor", "kühl", "kuehl", "öl", "oel", "turbo", "zahnriemen", "steuerkette"):
         return "motor"
     if _hat(b, "getriebe", "kupplung", "automatik", "dsg", "antrieb"):
         return "getriebe"
     if _hat(b, "fahrwerk", "brems", "lenk", "stoßd", "stossd", "feder", "achse", "radlager"):
         return "fahrwerk"
-    if _hat(b, "klima", "heiz", "gebläse", "geblaese"):
-        return "klima"
     if _hat(b, "fensterheber", "verriegel", "sitz", "spiegel", "komfort", "schloss", "schiebedach"):
         return "komfort"
     if _hat(b, "auspuff", "abgas", "agr", "dpf", "kat", "adblue"):
