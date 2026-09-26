@@ -60,6 +60,17 @@ describe("MarktdatenKarte", () => {
     expect(k.textContent).not.toMatch(/Marktpreis\b/);
   });
 
+  it("zeigt den Hinweis bei unsicherer Sortierung des letzten Abrufs (Review 26.09. Nr. 3)", async () => {
+    api.get.mockResolvedValue({ data: { ...DATEN, sortierung_unsicher: true, datenlage: "unsicher" } });
+    await starten({ vehicleId: "v1", preis: 19400 });
+    expect(el("marktdaten-sortierung").textContent).toContain("Sortierung des letzten Abrufs unsicher");
+    expect(el("marktdaten-datenlage").textContent).toContain("unsicher");
+    await act(async () => { wurzel.unmount(); }); wurzel = null; behaelter?.remove();
+    api.get.mockResolvedValue({ data: { ...DATEN, sortierung_unsicher: false } });
+    await starten({ vehicleId: "v2", preis: 19400 });
+    expect(el("marktdaten-sortierung")).toBeNull();
+  });
+
   it("bleibt bei 404, Timeout oder leeren Daten unsichtbar", async () => {
     const e = new Error("Not found"); e.response = { status: 404 };
     api.get.mockRejectedValue(e);

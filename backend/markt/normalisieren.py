@@ -5,7 +5,7 @@ Verkaeufername (Datenschutz, Auftrag Punkt 33)."""
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from markt.konfig import QUELLE
 
@@ -167,3 +167,64 @@ def listings_aus_items(items: List[Dict[str, Any]], *, beschaedigte_verwerfen: b
 def preise_aufsteigend(listings: List[Dict[str, Any]]) -> bool:
     p = [l["price_gross"] for l in listings]
     return p == sorted(p)
+
+
+# ---------------------------------------------------------------- Segment-Pruefung je Zeile
+_JAHR = re.compile(r"(\d{4})")
+KW_TOLERANZ = 3
+
+
+def ez_jahr(listing: Dict[str, Any]) -> Optional[int]:
+    """Erstzulassungsjahr aus '03/2020', '2020-03', '2020' — None ohne Angabe."""
+    m = _JAHR.search(str(listing.get("first_registration") or ""))
+    return int(m.group(1)) if m else None
+
+
+def getriebe_passt(soll: Optional[str], ist: Optional[str]) -> bool:
+    """DSG/S tronic stehen mal als Automatik, mal als Halbautomatik — beides passt zur Automatik."""
+    if soll == ist:
+        return True
+    return soll == "AUTOMATIC_GEAR" and ist == "SEMIAUTOMATIC_GEAR"
+
+
+def passt_zum_segment(listing: Dict[str, Any], segment: Dict[str, Any], modell: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
+    """Review 26.09.2026 Nr. 2: der Scraper liefert gelegentlich Zeilen, die den
+    Filter der Such-URL nicht erfuellen (mobile.de ignoriert dann still einen
+    Parameter). Jede Zeile wird deshalb gegen ihr Segment und den Suchauftrag
+    geprueft: EZ-Jahr, km, kW (+-3 wie in abfrage), Kraftstoff, Getriebe —
+    jeweils NUR, wenn beide Seiten die Angabe haben. (ok, grund); grund leer bei ok."""
+    modell = modell or {}
+    von, bis = segment.get("year_from"), segment.get("year_to")
+    jahr = ez_jahr(listing)
+    if jahr is not None:
+        if von and jahr < int(von):
+            return False, f"ez {jahr} < {von}"
+        if bis and jahr > int(bis):
+            return False, f"ez {jahr} > {bis}"
+    km = listing.get("mileage_km")
+    if km is not None:
+        mn, mx = segment.get("min_km"), segment.get("max_km")
+        if mn is not None and int(km) < int(mn):
+            return False, f"km {km} < {mn}"
+        if mx is not None and int(km) > int(mx):
+            return False, f"km {km} > {mx}"
+    kw = listing.get("power_kw")
+    if kw:
+        kw_von, kw_bis = modell.get("power_kw_min"), modell.get("power_kw_max")
+        if kw_von and int(kw) < int(kw_von) - KW_TOLERANZ:
+            return False, f"kw {kw} < {kw_von}"
+        if kw_bis and int(kw) > int(kw_bis) + KW_TOLERANZ:
+            return False, f"kw {kw} > {kw_bis}"
+    try:
+        from fahrzeug_codes import getriebe_code, kraftstoff_code
+    except Exception:  # noqa: BLE001
+        return True, ""
+    if modell.get("fuel") and listing.get("fuel"):
+        code = kraftstoff_code(listing.get("fuel"))
+        if code and code != modell["fuel"]:
+            return False, f"kraftstoff {code} != {modell['fuel']}"
+    if modell.get("gearbox") and listing.get("gearbox"):
+        code = getriebe_code(listing.get("gearbox"))
+        if code and not getriebe_passt(modell["gearbox"], code):
+            return False, f"getriebe {code} != {modell['gearbox']}"
+    return True, ""

@@ -36,7 +36,10 @@ vi.mock("@/lib/api", () => ({
         segmente: 24, rows_monat: 29184, kosten_monat_usd: netz.ueberschritten ? 900 : 22.8, budget_usd: 700, ueberschritten: netz.ueberschritten } };
       if (url === "/admin/market/testlauf") return { data: { anzahl: 2, segment: "EZ 2019 · 10–30k km", sortiert: true, alle_ez_ok: true, alle_km_ok: true, usd: 0.0085, actor: "scrapesmith~mobile-de-scraper",
         zeilen: [{ title: "BMW 320d Touring", first_registration: "03/2019", mileage_km: 22000, price_gross: 24900, power_kw: 140, fuel: "Diesel", gearbox: "Automatic", ez_ok: true, km_ok: true },
-                 { title: "BMW 320d Limousine", first_registration: "11/2019", mileage_km: 28000, price_gross: 25500, power_kw: 140, fuel: "Diesel", gearbox: "Automatic", ez_ok: true, km_ok: true }] } };
+                 { title: "BMW 320d Limousine", first_registration: "11/2019", mileage_km: 28000, price_gross: 25500, power_kw: 140, fuel: "Diesel", gearbox: "Automatic", ez_ok: true, km_ok: true }],
+        // Review 26.09. Nr. 39: alle Segmente in einem Lauf
+        segmente: [{ label: "EZ 2019 · 10–30k km", anzahl: 2, ez_ok: true, km_ok: true }, { label: "EZ 2019 · 30–50k km", anzahl: 1, ez_ok: false, km_ok: true },
+                   { label: "EZ 2020 · 10–30k km", anzahl: 0, ez_ok: null, km_ok: null }], leer: 1, segmente_geprueft: 3, segmente_gesamt: 3 } };
       return { data: { ok: true, modell: { id: "neu" } } };
     }),
     put: vi.fn(async (url, body) => { netz.posts.push({ url, body }); return { data: { ok: true } }; }),
@@ -120,6 +123,12 @@ describe("Suchaufträge", () => {
     expect(el("auftrag-testlauf").textContent).toContain("2 Fahrzeuge");
     expect(el("auftrag-testlauf").textContent).toContain("Preis aufsteigend ✓");
     expect(el("auftrag-testlauf").textContent).toContain("BMW 320d Touring");
+    const segTab = el("auftrag-testlauf-segmente");
+    expect(segTab.textContent).toContain("Alle Segmente (3, je bis zu 2 Treffer) · 1 leer");
+    expect(segTab.textContent).toContain("EZ 2019 · 30–50k km");
+    expect(segTab.querySelectorAll("tbody tr")).toHaveLength(3);
+    expect(segTab.querySelectorAll("tbody tr")[1].textContent).toContain("✗");
+    expect(segTab.querySelectorAll("tbody tr")[2].textContent).toContain("—");
     // Aktivieren -> POST models mit status active; bei Budget-Ueberschreitung Rueckfrage
     netz.ueberschritten = true;
     await setzen("auftrag-rows", "40");

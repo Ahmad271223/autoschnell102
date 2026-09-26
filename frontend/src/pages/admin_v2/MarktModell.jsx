@@ -269,7 +269,7 @@ function SegmentAnalyse({ segment, bereich, onBereich, superAdmin }) {
                   <thead><tr className="text-left text-zinc-500 text-[11px] uppercase"><th className="py-1 pr-3">Datum</th><th className="py-1 pr-3 text-right">Fahrzeuge</th><th className="py-1 pr-3 text-right">Min</th><th className="py-1 pr-3 text-right">Median Top-20</th><th className="py-1 pr-3 text-right">Durchschnitt</th><th className="py-1 pr-3 text-right">Max</th><th className="py-1 pr-3 text-right">Veränderung</th></tr></thead>
                   <tbody>{reihe.map((r) => (
                     <tr key={r.date} className="border-t border-white/5 tabular-nums">
-                      <td className="py-1 pr-3 text-zinc-300">{r.date}</td><td className="py-1 pr-3 text-right">{r.sample_size}</td>
+                      <td className="py-1 pr-3 text-zinc-300">{r.date}{(r.laeufe?.length || 0) > 1 && <span className="ml-1 text-[10px] text-zinc-500" data-testid={`markt-laeufe-${r.date}`}>{r.laeufe.length} Läufe</span>}</td><td className="py-1 pr-3 text-right">{r.sample_size}</td>
                       <td className="py-1 pr-3 text-right">{eur(r.min)}</td><td className="py-1 pr-3 text-right text-white">{eur(r.median)}</td>
                       <td className="py-1 pr-3 text-right">{eur(r.avg)}</td><td className="py-1 pr-3 text-right">{eur(r.max)}</td>
                       <td className="py-1 pr-3 text-right" style={{ color: trendFarbe(r.change_eur) }}>{r.change_pct == null ? "—" : pct(r.change_pct)}</td>

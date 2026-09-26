@@ -52,7 +52,8 @@ vi.mock("@/lib/api", () => ({
       if (url.endsWith("/summary")) return { data: { segment: SEG, stats: STATS, letzter_job: { status: "completed" } } };
       if (url.endsWith("/history")) return { data: { reihe: [
         { date: "2026-09-30", sample_size: 20, min: 19100, median: 20500, avg: 20600, max: 21800, p25: 19700, p75: 21100, change_eur: null, change_pct: null },
-        { date: "2026-10-01", sample_size: 20, min: 18900, median: 20250, avg: 20410, max: 21700, p25: 19600, p75: 21000, change_eur: -250, change_pct: -1.22 }],
+        { date: "2026-10-01", sample_size: 20, min: 18900, median: 20250, avg: 20410, max: 21700, p25: 19600, p75: 21000, change_eur: -250, change_pct: -1.22,
+          laeufe: [{ at: "2026-10-01T04:00:00Z", tag: "2026-10-01", median: 20300 }, { at: "2026-10-01T16:00:00Z", tag: "2026-10-01#2", median: 20250 }] }],
         wochen: [{ woche: "2026-W40", median: 20375, tage: 2 }],
         auswertung: { veraenderung_eur: -250, veraenderung_pct: -1.22, groesster_rueckgang: { date: "2026-10-01", change_eur: -250 }, groesster_anstieg: null,
                       tage_fallend: 1, tage_steigend: 0, tage_unveraendert: 0, hoechster_median: 20500, niedrigster_median: 20250, tage: 2 } } };
@@ -159,6 +160,9 @@ describe("Admin Marktanalyse", () => {
     expect(el("markt-wochen").textContent).toContain("2026-W40");
     expect(el("markt-tagestabelle").textContent).toContain("2026-10-01");
     expect(el("markt-tagestabelle").textContent).toContain("-1,2 %");
+    // Review 26.09. Nr. 17: zwei Abrufe am selben Tag -> kleiner Hinweis, nur ein Tageseintrag
+    expect(el("markt-laeufe-2026-10-01").textContent).toBe("2 Läufe");
+    expect(el("markt-laeufe-2026-09-30")).toBeNull();
     // Zeitraum wechseln -> neue Verlaufsabfrage mit range
     await klick("markt-bereich-90d");
     expect(netz.gets.filter((u) => u.endsWith("/history")).length).toBeGreaterThanOrEqual(2);

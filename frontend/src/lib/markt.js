@@ -30,6 +30,7 @@ export const DATENLAGE = {
   niedrig: { text: "Datenlage niedrig (unter 7 Tage)", farbe: "var(--st-rot)" },
   mittel: { text: "Datenlage mittel", farbe: "var(--st-amber)" },
   gut: { text: "Datenlage gut", farbe: "var(--st-gruen)" },
+  unsicher: { text: "Datenlage unsicher (Sortierung)", farbe: "var(--st-amber)" },
   keine: { text: "noch keine Daten", farbe: "var(--text-dim)" },
 };
 

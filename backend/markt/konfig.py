@@ -173,10 +173,18 @@ def kosten_schaetzung_usd(rows: int) -> float:
 
 
 def fenster_von() -> int:
+    """Beginn des Crawl-Fensters (Stunde, deutsche Zeit). Review 26.09.2026 Nr. 18:
+    Das Fenster gilt nur fuer den ERSTEN Abruf eines Tages. Bei crawls_per_day=2 liegt
+    der zweite Abruf ~12 h nach dem ersten (also ~15-21 Uhr) und damit bewusst
+    AUSSERHALB des Fensters — gewollt, damit die beiden Stichproben eines Tages
+    moeglichst weit auseinanderliegen (siehe jobs.tagesplan)."""
     return zahl_env("MARKT_CRAWL_FENSTER_VON", 3, unten=0, oben=23)
 
 
 def fenster_bis() -> int:
+    """Ende des Crawl-Fensters fuer den ERSTEN Abruf je Tag; weitere Abrufe
+    (crawls_per_day > 1) verteilen sich im 24/k-Stunden-Takt ueber den Tag —
+    gewollt, keine Fensterverletzung (Review 26.09.2026 Nr. 18)."""
     return zahl_env("MARKT_CRAWL_FENSTER_BIS", 9, unten=1, oben=24)
 
 

@@ -67,12 +67,23 @@ def datenlage(tage: int, mittlere_groesse: float) -> str:
 
 
 # ---------------------------------------------------------------- Verarbeitung
+LAEUFE_MAX = 4      # Nr. 16/17: hoechstens 4 Laeufe je Tag am Snapshot / Tagesaggregat (crawls_per_day <= 4)
+
+
 async def verarbeiten(db, segment: Dict[str, Any], listings: List[Dict[str, Any]], *,
-                      beobachtet: Optional[datetime] = None, sortiert_bestaetigt: bool = True) -> Dict[str, Any]:
-    """Ein Tages-Sample (Preis aufsteigend) eines Segments einarbeiten."""
+                      beobachtet: Optional[datetime] = None, sortiert_bestaetigt: bool = True,
+                      lauf_tag: Optional[str] = None) -> Dict[str, Any]:
+    """Ein Tages-Sample (Preis aufsteigend) eines Segments einarbeiten.
+
+    sortiert_bestaetigt=False (Review 26.09.2026 Nr. 3): die Zeilen sind dann nicht
+    sicher "die guenstigsten" — Tagesaggregat und Segmentstatistik werden als unsicher
+    markiert, Chancen werden NICHT abgeleitet.
+    lauf_tag (Nr. 16/17): Schluessel des Laufs (z. B. '2026-09-26#2') — bei mehreren
+    Abrufen je Tag bleibt jeder Lauf in 'laeufe' erhalten, die Hauptfelder zeigen den letzten."""
     jetzt = beobachtet or konfig.jetzt()
     jetzt_iso = jetzt.isoformat()
     tag = konfig.heute_tag(jetzt)
+    lauf_schluessel = lauf_tag or tag
     seg_id = segment["id"]
     model_id = segment.get("model_id")
     vorher_stat = await db[TAGESSTATS].find_one({"segment_id": seg_id, "date": {"$lt": tag}}, {"_id": 0},
@@ -90,6 +101,9 @@ async def verarbeiten(db, segment: Dict[str, Any], listings: List[Dict[str, Any]
              "$set": {**felder, "last_seen_at": jetzt_iso, "last_seen_tag": tag, "current_price": preis,
                       "active_state": "seen", "last_segment_id": seg_id, "model_id": model_id, "last_rank": rang,
                       "updated_at": jetzt_iso},
+             # Nr. 14/15: ein Inserat kann in mehreren Segmenten stehen (Automatik-Auftrag
+             # und ueberlappender eigener Auftrag) — alle Segmente/Modelle merken
+             "$addToSet": {"segment_ids": seg_id, **({"model_ids": model_id} if model_id else {})},
              "$unset": {"not_seen_since": ""}},
             upsert=True, return_document=ReturnDocument.BEFORE)
         delta_eur: Optional[float] = None
@@ -120,29 +134,42 @@ async def verarbeiten(db, segment: Dict[str, Any], listings: List[Dict[str, Any]
                       "mobile_modified_at": l.get("mobile_modified_at"), "mobile_renewed_at": l.get("mobile_renewed_at"),
                       "rank_in_sample": rang, "price_change_eur": delta_eur, "price_change_pct": delta_pct,
                       "new_in_sample": neu_im_sample, "rank_yesterday": (letzter_snap or {}).get("rank_in_sample"),
-                      "model_id": model_id, "source": l["source"]}},
+                      "model_id": model_id, "source": l["source"]},
+             # Nr. 16: jeder Lauf des Tages bleibt erhalten (Hauptfelder = letzter Lauf)
+             "$push": {"laeufe": {"$each": [{"at": jetzt_iso, "price": preis, "rank_in_sample": rang, "tag": lauf_schluessel}],
+                                  "$slice": -LAEUFE_MAX}}},
             upsert=True)
         heute.append({"listing": l, "preis": preis, "rang": rang, "neu_im_sample": neu_im_sample,
                       "rang_vorher": (letzter_snap or {}).get("rank_in_sample"), "delta_eur": delta_eur,
                       "delta_pct": delta_pct, "neu_gesamt": vorher is None,
                       "first_price": (vorher or {}).get("first_price", preis)})
-    # nicht mehr im Sample dieses Segments (heute nirgends gesehen): KEIN Verkauf
+    # nicht mehr im Sample dieses Segments: KEIN Verkauf. Nr. 15: NUR Listings, die heute
+    # nirgendwo gesehen wurden (last_seen_tag < heute) — ein Inserat, das heute in einem
+    # anderen, ueberlappenden Segment auftauchte, bleibt "seen".
     await db[LISTINGS].update_many(
-        {"last_segment_id": seg_id, "active_state": "seen", "last_seen_tag": {"$lt": tag}},
+        {"$or": [{"last_segment_id": seg_id}, {"segment_ids": seg_id}],
+         "active_state": "seen", "last_seen_tag": {"$lt": tag}},
         {"$set": {"active_state": "not_seen_in_sample", "not_seen_since": jetzt_iso, "updated_at": jetzt_iso}})
-    # Tagesaggregat
+    # Tagesaggregat (Nr. 17: jeder Lauf des Tages in 'laeufe', Hauptfelder = letzter Lauf)
     kz = kennzahlen([h["preis"] for h in heute])
     reduktionen = sum(1 for h in heute if (h["delta_eur"] or 0) < 0)
     await db[TAGESSTATS].update_one(
         {"segment_id": seg_id, "date": tag},
         {"$set": {**kz, "model_id": model_id, "observed_at": jetzt_iso, "new_in_sample_today": zaehler["neu_im_sample"],
                   "price_reductions_today": reduktionen, "sorted_confirmed": bool(sortiert_bestaetigt),
-                  "listing_ids": [h["listing"]["listing_id"] for h in heute]}},
+                  "listing_ids": [h["listing"]["listing_id"] for h in heute]},
+         "$push": {"laeufe": {"$each": [{"at": jetzt_iso, "tag": lauf_schluessel, "sample_size": kz["sample_size"],
+                                         "min": kz["min_price"], "median": kz["median_price"], "avg": kz["avg_price"],
+                                         "max": kz["max_price"], "sorted_confirmed": bool(sortiert_bestaetigt)}],
+                              "$slice": -LAEUFE_MAX}}},
         upsert=True)
     await segmentstatistik(db, seg_id, tag)
     await db[SEGMENTE].update_one({"id": seg_id}, {"$set": {"last_success_at": jetzt_iso, "last_sample_size": kz["sample_size"]}})
-    zaehler["chancen"] = await chancen_ableiten(db, segment, heute, vorher_stat, tag, jetzt_iso)
+    # Nr. 3: aus einem unsicher sortierten Sample werden KEINE Chancen abgeleitet
+    zaehler["chancen"] = (await chancen_ableiten(db, segment, heute, vorher_stat, tag, jetzt_iso)
+                          if sortiert_bestaetigt else 0)
     zaehler["sample_size"] = kz["sample_size"]
+    zaehler["sortierung_unsicher"] = not sortiert_bestaetigt
     return zaehler
 
 
@@ -184,7 +211,10 @@ async def segmentstatistik(db, seg_id: str, tag: Optional[str] = None) -> Option
             "new_listings_7d": sum(int(d.get("new_in_sample_today") or 0) for d in letzte7),
             "price_reductions_7d": sum(int(d.get("price_reductions_today") or 0) for d in letzte7),
             "beobachtete_tage": len(tage_docs), "mittlere_sample_groesse": round(mittel, 1),
-            "datenlage": datenlage(len(tage_docs), mittel), "updated_at": konfig.jetzt_iso()}
+            "datenlage": datenlage(len(tage_docs), mittel),
+            # Nr. 3: letzter Lauf nicht sicher preis-aufsteigend -> Lesewege zeigen es an
+            "sortierung_unsicher": heute.get("sorted_confirmed") is False,
+            "updated_at": konfig.jetzt_iso()}
     await db[SEGMENTSTATS].update_one({"_id": seg_id}, {"$set": stat}, upsert=True)
     return stat
 

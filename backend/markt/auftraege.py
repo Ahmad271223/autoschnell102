@@ -163,29 +163,74 @@ async def prognose(db, entwurf: Optional[Dict[str, Any]] = None, *, ohne_id: Opt
 
 
 # ---------------------------------------------------------------- Testlauf
+TESTLAUF_SEGMENTE_MAX = 20      # Nr. 39: hoechstens 20 Segmente je Testlauf (1 Start + max. 40 Zeilen)
+TESTLAUF_JE_SEGMENT = 2
+
+
+def _kontext(it: Dict[str, Any]) -> Optional[str]:
+    ctx = it.get("inputContext")
+    if isinstance(ctx, str):
+        return ctx
+    if isinstance(ctx, dict):
+        return ctx.get("url") or ctx.get("startUrl")
+    return None
+
+
+def _zeile(l: Dict[str, Any], seg: Dict[str, Any]) -> Dict[str, Any]:
+    jahr = re.search(r"(\d{4})", l.get("first_registration") or "")
+    return {"title": l.get("title"), "make": l.get("make"), "model": l.get("model"), "variant": l.get("variant"),
+            "first_registration": l.get("first_registration"), "mileage_km": l.get("mileage_km"),
+            "price_gross": l.get("price_gross"), "power_kw": l.get("power_kw"), "fuel": l.get("fuel"),
+            "gearbox": l.get("gearbox"), "url": l.get("url"),
+            "ez_ok": bool(jahr) and int(jahr.group(1)) == seg["year_from"],
+            "km_ok": l.get("mileage_km") is not None and seg["min_km"] <= int(l["mileage_km"]) <= seg["max_km"]}
+
+
 async def testlauf(entwurf: Dict[str, Any], n: int = 5) -> Dict[str, Any]:
-    """Wenige Treffer des ERSTEN Segments (erstes EZ-Jahr, erster km-Bereich) —
-    zeigt, ob der Filter stimmt, bevor einen Monat lang falsche Daten laufen."""
+    """Review 26.09.2026 Nr. 39: EIN Buendel-Lauf ueber ALLE Segmente des Entwurfs
+    (hoechstens 20, sonst die ersten 20) mit je 2 Treffern — zeigt je Segment, ob
+    der Filter stimmt und ob es leer ist, bevor einen Monat lang falsche Daten
+    laufen. `n` begrenzt nur die angezeigten Zeilen des ersten Segments."""
     m = entwurf_pruefen(entwurf)
-    ez = {"year_from": m["ez_years"][0], "year_to": m["ez_years"][0]}
-    b = m["km_buckets"][0]
-    seg = {"id": "test", "min_km": b["min_km"], "max_km": b["max_km"], "year_from": ez["year_from"], "year_to": ez["year_to"]}
-    such = url.such_url(seg, m)
-    r = await apify.lauf([such], max(1, min(int(n), 10)))
-    ls = normalisieren.listings_aus_items(r["items"])
-    zeilen = []
-    for l in ls:
-        jahr = re.search(r"(\d{4})", l.get("first_registration") or "")
-        zeilen.append({"title": l.get("title"), "make": l.get("make"), "model": l.get("model"), "variant": l.get("variant"),
-                       "first_registration": l.get("first_registration"), "mileage_km": l.get("mileage_km"),
-                       "price_gross": l.get("price_gross"), "power_kw": l.get("power_kw"), "fuel": l.get("fuel"),
-                       "gearbox": l.get("gearbox"), "url": l.get("url"),
-                       "ez_ok": bool(jahr) and int(jahr.group(1)) == ez["year_from"],
-                       "km_ok": l.get("mileage_km") is not None and b["min_km"] <= int(l["mileage_km"]) <= b["max_km"]})
-    return {"url": such, "segment": f"EZ {ez['year_from']} · {segmente.km_text(b)}", "anzahl": len(zeilen),
-            "sortiert": normalisieren.preise_aufsteigend(ls), "alle_ez_ok": all(z["ez_ok"] for z in zeilen) if zeilen else None,
-            "alle_km_ok": all(z["km_ok"] for z in zeilen) if zeilen else None, "usd": r.get("usd"), "dauer_ms": r.get("dauer_ms"),
-            "actor": r.get("actor"), "zeilen": zeilen}
+    alle: List[Dict[str, Any]] = []
+    for jahr in m["ez_years"]:
+        for b in m["km_buckets"]:
+            alle.append({"id": f"test:{jahr}:{b['min_km']}-{b['max_km']}", "min_km": b["min_km"], "max_km": b["max_km"],
+                         "year_from": jahr, "year_to": jahr, "label": f"EZ {jahr} · {segmente.km_text(b)}"})
+    segs = alle[:TESTLAUF_SEGMENTE_MAX]
+    urls = [url.such_url(s, m) for s in segs]
+    n_anzeige = max(1, min(int(n), 10))
+    if len(urls) > 1:
+        r = await apify.lauf(urls, TESTLAUF_JE_SEGMENT * len(urls), max_items_per_query=TESTLAUF_JE_SEGMENT)
+    else:
+        r = await apify.lauf(urls, n_anzeige)
+    # Zuordnung Zeile -> Segment wie im Worker: ein Segment = alles, mehrere NUR ueber inputContext
+    je_url: Dict[str, List[dict]] = {u: [] for u in urls}
+    if len(urls) == 1:
+        je_url[urls[0]] = list(r["items"])
+    else:
+        for it in r["items"]:
+            key = _kontext(it)
+            if key in je_url:
+                je_url[key].append(it)
+    ergebnis_segmente = []
+    erste_zeilen: List[Dict[str, Any]] = []
+    erste_ls: List[Dict[str, Any]] = []
+    for i, (s, u) in enumerate(zip(segs, urls)):
+        ls = normalisieren.listings_aus_items(je_url[u])
+        zeilen = [_zeile(l, s) for l in ls]
+        ergebnis_segmente.append({"label": s["label"], "anzahl": len(zeilen),
+                                  "ez_ok": all(z["ez_ok"] for z in zeilen) if zeilen else None,
+                                  "km_ok": all(z["km_ok"] for z in zeilen) if zeilen else None})
+        if i == 0:
+            erste_ls, erste_zeilen = ls[:n_anzeige], zeilen[:n_anzeige]
+    return {"url": urls[0], "segment": segs[0]["label"], "anzahl": len(erste_zeilen),
+            "sortiert": normalisieren.preise_aufsteigend(erste_ls),
+            "alle_ez_ok": all(z["ez_ok"] for z in erste_zeilen) if erste_zeilen else None,
+            "alle_km_ok": all(z["km_ok"] for z in erste_zeilen) if erste_zeilen else None,
+            "usd": r.get("usd"), "dauer_ms": r.get("dauer_ms"), "actor": r.get("actor"), "zeilen": erste_zeilen,
+            "segmente": ergebnis_segmente, "leer": sum(1 for s in ergebnis_segmente if s["anzahl"] == 0),
+            "segmente_geprueft": len(segs), "segmente_gesamt": len(alle)}
 
 
 # ---------------------------------------------------------------- Anlegen / Aendern / Duplizieren / Archivieren

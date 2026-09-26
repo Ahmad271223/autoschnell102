@@ -13,7 +13,7 @@ import statistics
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from markt import budget, jobs, konfig, segmente
+from markt import budget, jobs, konfig, normalisieren, segmente
 from markt.konfig import CHANCEN, JOBS, LISTINGS, MODELLE, SEGMENTE, SEGMENTSTATS, SNAPSHOTS, TAGESSTATS
 
 HINWEIS = ("Beobachtet werden je Segment nur die 20 günstigsten passenden Angebote — "
@@ -46,10 +46,9 @@ def _getriebe_code(v: Dict[str, Any]) -> Optional[str]:
 
 
 def getriebe_passt(soll: str, ist: str) -> bool:
-    """DSG/S tronic stehen mal als Automatik, mal als Halbautomatik — beides passt zur Automatik-Beobachtung."""
-    if soll == ist:
-        return True
-    return soll == "AUTOMATIC_GEAR" and ist == "SEMIAUTOMATIC_GEAR"
+    """DSG/S tronic stehen mal als Automatik, mal als Halbautomatik — beides passt zur
+    Automatik-Beobachtung. Eine Regel fuer Lesewege und Zeilenpruefung (normalisieren)."""
+    return normalisieren.getriebe_passt(soll, ist)
 
 
 def _kw(v: Dict[str, Any]) -> Optional[int]:
@@ -156,7 +155,11 @@ async def karte(db, v: Dict[str, Any], listing_id: Optional[str] = None) -> Opti
         "trend_30d_eur": stat.get("trend_30d_eur"), "trend_30d_pct": stat.get("trend_30d_pct"),
         "datenstand": stat.get("updated_at"), "datum": stat.get("date"), "datenlage": stat.get("datenlage"),
         "beobachtete_tage": stat.get("beobachtete_tage"), "hinweis": HINWEIS, "listing": None,
+        # Review 26.09.2026 Nr. 3: letzter Abruf nicht sicher preis-aufsteigend -> Karte sagt es
+        "sortierung_unsicher": bool(stat.get("sortierung_unsicher")),
     }
+    if raus["sortierung_unsicher"]:
+        raus["datenlage"] = "unsicher"
     if listing_id:
         l = await db[LISTINGS].find_one({"source": konfig.QUELLE, "listing_id": str(listing_id)}, {"_id": 0})
         if l:
@@ -302,7 +305,9 @@ async def segment_verlauf(db, segment_id: str, bereich: str = "30d") -> Dict[str
                       "median": med, "avg": d.get("avg_price"), "max": d.get("max_price"),
                       "p25": d.get("p25_price"), "p75": d.get("p75_price"),
                       "new_in_sample": d.get("new_in_sample_today"), "price_reductions": d.get("price_reductions_today"),
-                      "change_eur": aend_eur, "change_pct": aend_pct})
+                      "change_eur": aend_eur, "change_pct": aend_pct,
+                      # Nr. 17: alle Laeufe des Tages (Hauptwerte = letzter Lauf)
+                      "laeufe": d.get("laeufe") or [], "sorted_confirmed": d.get("sorted_confirmed")})
         vor = med if med is not None else vor
     wochen: Dict[str, List[float]] = {}
     for r in reihe:
@@ -349,7 +354,10 @@ async def listing_verlauf(db, listing_id: str) -> Optional[Dict[str, Any]]:
     if not l:
         return None
     snaps = await db[SNAPSHOTS].find({"listing_id": str(listing_id)}, {"_id": 0}).sort("date", 1).to_list(2000)
-    return {"listing": l, "snapshots": snaps, "hinweis_zustand": ZUSTAND_TEXT.get(l.get("active_state"), "")}
+    # Nr. 14: alle Segmente, in denen das Inserat je gesehen wurde (aeltere Datensaetze: nur last_segment_id)
+    segment_ids = list(l.get("segment_ids") or ([l["last_segment_id"]] if l.get("last_segment_id") else []))
+    return {"listing": l, "snapshots": snaps, "segment_ids": segment_ids,
+            "hinweis_zustand": ZUSTAND_TEXT.get(l.get("active_state"), "")}
 
 
 ZUSTAND_TEXT = {

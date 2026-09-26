@@ -265,12 +265,19 @@ function AuftragFormular({ katalog, formular, superAdmin, onClose, onGespeichert
           <div className="text-white font-semibold">Testlauf: {test.anzahl} Fahrzeuge · {test.segment} · {test.sortiert ? "Preis aufsteigend ✓" : "Sortierung NICHT bestätigt"} · EZ {test.alle_ez_ok ? "✓" : "✗"} · km {test.alle_km_ok ? "✓" : "✗"} · {Number(test.usd || 0).toFixed(3)} $ · {test.actor}</div>
           <table className="w-full mt-1"><thead><tr className="text-left text-zinc-500 text-[11px] uppercase"><th className="pr-2">Fahrzeug</th><th className="pr-2">EZ</th><th className="pr-2 text-right">km</th><th className="pr-2 text-right">Preis</th><th className="pr-2">Motor</th></tr></thead>
             <tbody>{test.zeilen.map((z, i) => <tr key={i} className="border-t border-white/5 tabular-nums"><td className="pr-2 text-zinc-200">{z.title}</td><td className="pr-2" style={{ color: z.ez_ok ? undefined : "var(--st-rot)" }}>{z.first_registration}</td><td className="pr-2 text-right" style={{ color: z.km_ok ? undefined : "var(--st-rot)" }}>{z.mileage_km?.toLocaleString("de-DE")}</td><td className="pr-2 text-right text-white">{eur(z.price_gross)}</td><td className="pr-2">{z.power_kw ? `${z.power_kw} kW ` : ""}{z.fuel} {z.gearbox}</td></tr>)}</tbody></table>
-          <div className="mt-1 text-[11px] text-zinc-500">Stand {datumZeit(new Date().toISOString())} · Der Testlauf prüft nur das erste Segment (erstes EZ-Jahr, erster km-Bereich).</div>
+          {(test.segmente || []).length > 0 && (
+            <div className="mt-2" data-testid="auftrag-testlauf-segmente">
+              <div className="text-[11px] text-zinc-400">Alle Segmente ({test.segmente_geprueft ?? test.segmente.length}{test.segmente_gesamt > (test.segmente_geprueft ?? test.segmente.length) ? ` von ${test.segmente_gesamt}` : ""}, je bis zu 2 Treffer) · {test.leer || 0} leer</div>
+              <table className="w-auto mt-1"><thead><tr className="text-left text-zinc-500 text-[11px] uppercase"><th className="pr-3">Segment</th><th className="pr-3 text-right">Treffer</th><th className="pr-3">EZ</th><th className="pr-3">km</th></tr></thead>
+                <tbody>{test.segmente.map((sg) => <tr key={sg.label} className="border-t border-white/5 tabular-nums" style={{ color: sg.anzahl ? undefined : "var(--text-dim)" }}><td className="pr-3">{sg.label}</td><td className="pr-3 text-right">{sg.anzahl}</td><td className="pr-3" style={{ color: sg.ez_ok === false ? "var(--st-rot)" : undefined }}>{sg.ez_ok == null ? "—" : sg.ez_ok ? "✓" : "✗"}</td><td className="pr-3" style={{ color: sg.km_ok === false ? "var(--st-rot)" : undefined }}>{sg.km_ok == null ? "—" : sg.km_ok ? "✓" : "✗"}</td></tr>)}</tbody></table>
+            </div>
+          )}
+          <div className="mt-1 text-[11px] text-zinc-500">Stand {datumZeit(new Date().toISOString())} · Ein Lauf über alle Segmente des Entwurfs (höchstens 20) mit je 2 Treffern; die Zeilen oben zeigen das erste Segment.</div>
         </div>
       )}
 
       <div className="mt-3 flex flex-wrap gap-2">
-        <Button size="sm" variant="outline" onClick={testlauf} disabled={!superAdmin || !!busy || !w.make || !w.model} data-testid="auftrag-testlauf-knopf"><FlaskConical size={13} /> Testlauf (5 Treffer, kostet Budget)</Button>
+        <Button size="sm" variant="outline" onClick={testlauf} disabled={!superAdmin || !!busy || !w.make || !w.model} data-testid="auftrag-testlauf-knopf"><FlaskConical size={13} /> Testlauf (alle Segmente, je 2 Treffer, kostet Budget)</Button>
         <Button size="sm" variant="outline" onClick={() => speichern("paused")} disabled={!superAdmin || !!busy} data-testid="auftrag-speichern">Speichern (pausiert)</Button>
         <Button size="sm" onClick={() => speichern("active")} disabled={!superAdmin || !!busy} data-testid="auftrag-aktivieren"><Play size={13} /> Aktivieren</Button>
       </div>

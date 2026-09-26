@@ -37,6 +37,11 @@ export default function MarktdatenKarte({ vehicleId, preis }) {
       <div className="text-[11px]" style={{ color: "var(--text-secondary)" }}>
         {daten.km_label}{daten.ez_label ? ` · ${daten.ez_label}` : ""} · {daten.sample_size} günstigste Vergleichsangebote
       </div>
+      {daten.sortierung_unsicher && (
+        <div className="mt-2 text-[11px] rounded-lg px-2 py-1" style={{ color: "var(--st-amber)", background: "var(--wa-06)" }} data-testid="marktdaten-sortierung">
+          Sortierung des letzten Abrufs unsicher — die Werte sind nicht sicher die günstigsten Angebote.
+        </div>
+      )}
       <div className="mt-3 grid grid-cols-3 gap-2 text-[11px]">
         {[["Günstigstes", daten.min_price], ["Median Top-20", daten.median_top20_price], ["Top-20-Spanne", `${eur(daten.min_price)}–${eur(daten.max_top20_price)}`]].map(([k, v]) => (
           <div key={k} className="rounded-lg p-2" style={{ background: "var(--wa-06)" }}>

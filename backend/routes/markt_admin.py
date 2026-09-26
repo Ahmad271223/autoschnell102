@@ -137,7 +137,8 @@ async def admin_market_prognose(body: AuftragIn, ohne_id: Optional[str] = None, 
 
 @router.post("/admin/market/testlauf")
 async def admin_market_testlauf(body: AuftragIn, n: int = 5, admin=Depends(current_super_admin)):
-    """Wenige Treffer des ersten Segments — prueft den Filter, bevor Daten gesammelt werden (kostet Budget)."""
+    """Ein Buendel-Lauf ueber alle Segmente des Entwurfs (hoechstens 20, je 2 Treffer) — prueft
+    Filter und leere Segmente, bevor Daten gesammelt werden (kostet Budget; Review 26.09. Nr. 39)."""
     if not konfig.token():
         raise HTTPException(400, "APIFY_TOKEN fehlt")
     try:

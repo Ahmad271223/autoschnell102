@@ -101,6 +101,12 @@ async def km_buckets_setzen(db, buckets: List[Dict[str, Any]]) -> List[Dict[str,
         sauber.append({"min_km": mn, "max_km": mx})
     if not sauber or len(sauber) > 12:
         raise ValueError("1 bis 12 km-Bereiche")
+    # Review 26.09.2026 Nr. 40: dieselbe Pruefung wie auftraege.km_bereiche_pruefen —
+    # sortiert, keine Ueberschneidung (sonst landet ein Auto in zwei Segmenten)
+    sauber.sort(key=lambda b: b["min_km"])
+    for a, b in zip(sauber, sauber[1:]):
+        if b["min_km"] <= a["max_km"]:
+            raise ValueError(f"km-Bereiche überschneiden sich: {a['min_km']}–{a['max_km']} und {b['min_km']}–{b['max_km']}")
     await db[konfig.KONFIG].update_one({"_id": "km_buckets"}, {"$set": {"buckets": sauber, "updated_at": konfig.jetzt_iso()}},
                                        upsert=True)
     return sauber
