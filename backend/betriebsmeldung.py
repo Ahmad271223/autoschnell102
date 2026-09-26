@@ -1,0 +1,663 @@
+# -*- coding: utf-8 -*-
+"""Betriebsmeldungen per E-Mail (20.09.2026, Wunsch Ahmad).
+
+Bis heute landete jeder Fehler NUR in der Datenbank: ein 500er in
+`error_logs`, ein schwerer Vorgang zusaetzlich als Betriebsalarm. Sichtbar
+war beides auf der Betriebs-Seite und in /api/ready — aber niemand erfuhr
+davon. Ging Samstagnacht etwas kaputt, wusste es bis zum naechsten
+Hinsehen keiner.
+
+Drei Meldungen, alle an BETRIEB_MELDUNG_AN:
+
+  1. SOFORT — sobald ein NEUER Betriebsalarm entsteht. Selten, immer ernst
+     (bezahlt ohne Zugang, Sicherung unvollstaendig, Vertrag ohne
+     Datensatz, Datei nicht loeschbar). Mit Sammelfrist: entstehen zehn
+     Alarme in derselben Minute, kommt EINE Mail mit allen zehn.
+  2. ANFRAGEN — sobald eine neue Freischaltungs-Anfrage eingeht (neue
+     Firma, neuer Zwischenhaendler, Sucher-Abo, Marktplatz-Zugang). Das
+     ist KEIN Fehler, sondern Geschaeft: jemand will zahlen. Die Mail
+     bringt die Kontaktdaten gleich mit, damit Ahmad zurueckrufen kann,
+     ohne sich erst anzumelden.
+  3. TAGESBERICHT — einmal taeglich. Der ist ausdruecklich auch dann
+     faellig, wenn alles in Ordnung ist: eine Plattform, die schweigt,
+     ist von einer toten nicht zu unterscheiden. Bleibt die Mail aus,
+     weiss Ahmad, dass etwas nicht stimmt. Scheitert der Versand, folgen
+     am selben Tag bis zu drei weitere Versuche im Abstand von 45 min
+     (21.09.2026).
+
+Dazu die Testmail per Knopf auf der Betrieb-Seite (testmail_senden,
+POST /api/admin/betrieb/testmail, 21.09.2026).
+
+Zwei Server mit je vier Prozessen — ohne Sperre kaeme jede Meldung
+achtmal. Deshalb laeuft jede Runde unter einer Job-Sperre, und jeder
+gemeldete Alarm bekommt `gemeldet_am`: scheitert der Versand, bleibt die
+Markierung aus und die naechste Runde versucht es erneut.
+
+Umgebung:
+  BETRIEB_MELDUNG_AN            Empfaenger; LEER = alles aus (Standard)
+  BETRIEB_MELDUNG_SOFORT_MIN    Sammelfrist in Minuten (Standard 10)
+  BETRIEB_TAGESBERICHT_STUNDE   Stunde des Tagesberichts (Standard 8);
+                                -1 schaltet nur den Tagesbericht ab
+"""
+import asyncio
+import contextvars
+import logging
+import os
+from datetime import datetime, timedelta, timezone
+
+log = logging.getLogger("autohandel.betriebsmeldung")
+
+#: Hoechstens so viele Alarme stehen einzeln in einer Mail — der Rest wird
+#: gezaehlt. Sonst wird die Mail bei einem Sturm unlesbar.
+MAX_EINZELN = 25
+
+
+def empfaenger() -> str:
+    return os.environ.get("BETRIEB_MELDUNG_AN", "").strip()
+
+
+def sammelfrist_minuten() -> int:
+    try:
+        return max(1, int(os.environ.get("BETRIEB_MELDUNG_SOFORT_MIN", "").strip() or 10))
+    except ValueError:
+        return 10
+
+
+def bericht_stunde() -> int:
+    """Stunde des Tagesberichts; -1 = aus."""
+    try:
+        wert = int(os.environ.get("BETRIEB_TAGESBERICHT_STUNDE", "").strip() or 8)
+    except ValueError:
+        return 8
+    return wert if -1 <= wert <= 23 else 8
+
+
+def _jetzt() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _kurz(wert, laenge: int = 120) -> str:
+    text = str(wert if wert is not None else "")
+    return text if len(text) <= laenge else text[:laenge - 1] + "…"
+
+
+#: Rollenprüfung 22.09.2026 (RP-249/RP-400): Kennzeichnung der Zeiten in
+#: jeder Mail — vorher stand dort die Serverzeit ohne Angabe, und im Image
+#: ohne tzdata war das still UTC (zwei Stunden daneben).
+ZEITZONE_HINWEIS = "Alle Zeiten in deutscher Zeit (MEZ/MESZ)."
+
+
+def _berlin(d: datetime) -> datetime:
+    """Zeitpunkt in deutscher Zeit (Europe/Berlin).
+
+    Rollenprüfung 22.09.2026 (RP-249/RP-400): vorher d.astimezone() — also
+    die Zeitzone des SERVERS. Das Image (python:3.12-slim) bringt kein tzdata
+    mit; TZ=Europe/Berlin aus Compose greift dann nicht, und alle Zeiten der
+    Mails (und die Stunde des Tagesberichts) waren still UTC. Jetzt
+    ausdruecklich Europe/Berlin — mit zoneinfo, und ohne Zeitzonendaten nach
+    der EU-Regel von Hand (wie beweis_pdf._berlin): Sommerzeit vom letzten
+    Sonntag im Maerz bis zum letzten Sonntag im Oktober, jeweils 01:00 UTC."""
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+        return d.astimezone(ZoneInfo("Europe/Berlin"))
+    except Exception:  # noqa: BLE001 — Image ohne tzdata: EU-Regel von Hand
+        u = d.astimezone(timezone.utc)
+
+        def _letzter_sonntag(monat: int) -> datetime:
+            tag = datetime(u.year, monat, 31, 1, tzinfo=timezone.utc)
+            while tag.weekday() != 6:
+                tag -= timedelta(days=1)
+            return tag
+
+        sommer = _letzter_sonntag(3) <= u < _letzter_sonntag(10)
+        return u.astimezone(timezone(timedelta(hours=2 if sommer else 1)))
+
+
+def _jetzt_berlin() -> datetime:
+    return _berlin(_jetzt())
+
+
+def _zeitpunkt(iso) -> str:
+    """ISO-Zeit -> "20.09.2026 13:40" in deutscher Zeit (RP-249).
+
+    Der Rohwert (2026-09-20T11:40:37.754523+00:00) ist fuer einen Bericht
+    unbrauchbar — abgeschnitten erst recht."""
+    try:
+        d = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        return _berlin(d).strftime("%d.%m.%Y %H:%M")
+    except (ValueError, TypeError):
+        return _kurz(iso, 30)
+
+
+# ------------------------------------------------------------ Alarm-Mail
+def alarm_text(alarme: list, gesamt_offen: int) -> tuple:
+    """(Betreff, Text) fuer die Sofortmeldung — rein, damit pruefbar."""
+    n = len(alarme)
+    if n == 1:
+        betreff = f"AutoSchnell: Betriebsalarm — {alarme[0].get('typ')}"
+    else:
+        betreff = f"AutoSchnell: {n} neue Betriebsalarme"
+    zeilen = [
+        "Es " + ("ist ein neuer Betriebsalarm" if n == 1
+                 else f"sind {n} neue Betriebsalarme") + " entstanden.",
+        "",
+    ]
+    for a in alarme[:MAX_EINZELN]:
+        zeilen.append(f"• {a.get('typ')}")
+        if a.get("ref"):
+            zeilen.append(f"    betrifft: {_kurz(a.get('ref'))}")
+        for schluessel, wert in sorted((a.get("details") or {}).items()):
+            zeilen.append(f"    {schluessel}: {_kurz(wert)}")
+        if int(a.get("anzahl") or 1) > 1:
+            zeilen.append(f"    bereits {a['anzahl']}x aufgetreten")
+        zeilen.append(f"    seit: {_zeitpunkt(a.get('created_at'))}")
+        zeilen.append("")
+    if n > MAX_EINZELN:
+        zeilen.append(f"… und {n - MAX_EINZELN} weitere.")
+        zeilen.append("")
+    zeilen += [
+        f"Offene Alarme insgesamt: {gesamt_offen}",
+        ZEITZONE_HINWEIS,
+        "",
+        "Nachsehen und abhaken: Betrieb-Seite im Admin-Bereich.",
+        "Diese Mail kommt nur bei NEUEN Alarmen — ein bereits gemeldeter",
+        "Alarm meldet sich nicht noch einmal, auch wenn er oefter auftritt.",
+    ]
+    return betreff, "\n".join(zeilen)
+
+
+async def _offene_unbemerkte(db, limit: int = 200) -> list:
+    return await db.betriebsalarme.find(
+        {"offen": True, "gemeldet_am": {"$exists": False}},
+        {"_id": 0, "id": 1, "typ": 1, "ref": 1, "details": 1,
+         "anzahl": 1, "created_at": 1},
+        sort=[("created_at", 1)]).to_list(limit)
+
+
+async def neue_alarme_melden(db) -> int:
+    """Eine Mail fuer alle noch nicht gemeldeten offenen Alarme.
+
+    Liefert die Zahl der gemeldeten Alarme (0 = nichts zu tun). Wirft nie —
+    eine Betriebsmeldung darf den Betrieb nicht stoeren."""
+    ziel = empfaenger()
+    if not ziel:
+        return 0
+    try:
+        alarme = await _offene_unbemerkte(db)
+        if not alarme:
+            return 0
+        gesamt = await db.betriebsalarme.count_documents({"offen": True})
+        betreff, text = alarm_text(alarme, gesamt)
+        from email_service import send_email
+        # Idempotenz-Schluessel aus den Alarm-IDs: ein Wiederholungsversuch
+        # nach einem abgebrochenen Versand stellt nicht doppelt zu.
+        import hashlib
+        schluessel = "betriebsalarm-" + hashlib.sha256(
+            ",".join(sorted(str(a.get("id")) for a in alarme)).encode()
+        ).hexdigest()[:24]
+        ok = await send_email(ziel, betreff, text, idempotency_key=schluessel)
+        if not ok:
+            log.error("[betriebsmeldung] Alarm-Mail an %s nicht zugestellt — "
+                      "die Alarme bleiben unmarkiert und werden erneut versucht",
+                      ziel)
+            return 0
+        await db.betriebsalarme.update_many(
+            {"id": {"$in": [a.get("id") for a in alarme]}},
+            {"$set": {"gemeldet_am": _jetzt().isoformat()}})
+        log.info("[betriebsmeldung] %d neue Alarme an %s gemeldet",
+                 len(alarme), ziel)
+        return len(alarme)
+    except Exception:  # noqa: BLE001
+        log.exception("[betriebsmeldung] Alarm-Mail fehlgeschlagen")
+        return 0
+
+
+# ------------------------------------------------------------- Anfragen
+#: Klartext statt Kuerzel — die Mail soll ohne Nachschlagen verstaendlich
+#: sein. (Wunsch Ahmad 20.09.2026: "Anfragen auch direkt an meine Mail".)
+ANFRAGE_ART = {
+    ("zugang", "firma"): "Neue Firma moechte Zugang",
+    ("zugang", "kaeufer"): "Neuer Zwischenhaendler moechte Zugang",
+    ("zugang", None): "Neuer Zugang angefragt",
+    ("sucher_abo", None): "Sucher-Abo angefragt",
+    ("buyer_access", None): "Marktplatz-Zugang angefragt",
+}
+
+
+def anfrage_ueberschrift(a: dict) -> str:
+    typ = str(a.get("type") or "")
+    art = a.get("art")
+    return (ANFRAGE_ART.get((typ, art))
+            or ANFRAGE_ART.get((typ, None))
+            or f"Anfrage ({typ or 'unbekannt'})")
+
+
+def anfrage_text(anfragen: list, gesamt_offen: int) -> tuple:
+    """(Betreff, Text) der Anfragen-Mail — rein, damit pruefbar.
+
+    Eine Anfrage ist KEIN Fehler, sondern Geschaeft: jemand will zahlen.
+    Deshalb eigener Betreff und die Kontaktdaten gleich mit, damit Ahmad
+    direkt zurueckrufen kann, ohne sich erst anzumelden."""
+    n = len(anfragen)
+    if n == 1:
+        wer = (anfragen[0].get("company_name")
+               or anfragen[0].get("sucher_name") or "").strip()
+        betreff = "AutoSchnell: Neue Anfrage" + (f" — {wer}" if wer else "")
+    else:
+        betreff = f"AutoSchnell: {n} neue Anfragen"
+    zeilen = ["Es " + ("ist eine neue Anfrage" if n == 1
+                       else f"sind {n} neue Anfragen") + " eingegangen.", ""]
+    for a in anfragen[:MAX_EINZELN]:
+        zeilen.append(f"• {anfrage_ueberschrift(a)}")
+        for beschriftung, wert in (
+                ("Firma", a.get("company_name")),
+                ("Name", a.get("sucher_name")),
+                ("Kundennummer", a.get("kunden_nr")),
+                ("Kontonummer", a.get("kontonummer")),
+                ("Wunsch", a.get("wanted")),
+                ("Sucher gewuenscht", a.get("sucher_anzahl")),
+                ("USt-IdNr.", a.get("ust_id")),
+                ("E-Mail", a.get("contact_email") or a.get("sucher_email")),
+                ("Telefon", a.get("contact_phone")),
+                ("Nachricht", a.get("message"))):
+            if wert not in (None, "", 0):
+                zeilen.append(f"    {beschriftung}: {_kurz(wert, 200)}")
+        zeilen.append(f"    eingegangen: {_zeitpunkt(a.get('created_at'))}")
+        zeilen.append("")
+    if n > MAX_EINZELN:
+        zeilen += [f"… und {n - MAX_EINZELN} weitere.", ""]
+    zeilen += [
+        f"Offene Anfragen insgesamt: {gesamt_offen}",
+        ZEITZONE_HINWEIS,
+        "",
+        "Bearbeiten: Freischaltungen im Admin-Bereich.",
+    ]
+    return betreff, "\n".join(zeilen)
+
+
+async def neue_anfragen_melden(db) -> int:
+    """Eine Mail fuer alle noch nicht gemeldeten offenen Anfragen.
+
+    Gleiches Muster wie bei den Alarmen: erst senden, dann markieren —
+    scheitert der Versand, bleibt die Markierung aus und die naechste
+    Runde versucht es erneut. Wirft nie."""
+    ziel = empfaenger()
+    if not ziel:
+        return 0
+    try:
+        anfragen = await db.plan_requests.find(
+            {"status": "offen", "gemeldet_am": {"$exists": False}},
+            {"_id": 0}, sort=[("created_at", 1)]).to_list(200)
+        if not anfragen:
+            return 0
+        gesamt = await db.plan_requests.count_documents({"status": "offen"})
+        betreff, text = anfrage_text(anfragen, gesamt)
+        import hashlib
+
+        from email_service import send_email
+        schluessel = "anfragen-" + hashlib.sha256(
+            ",".join(sorted(str(a.get("id")) for a in anfragen)).encode()
+        ).hexdigest()[:24]
+        if not await send_email(ziel, betreff, text, idempotency_key=schluessel):
+            log.error("[betriebsmeldung] Anfragen-Mail an %s nicht zugestellt "
+                      "— wird erneut versucht", ziel)
+            return 0
+        await db.plan_requests.update_many(
+            {"id": {"$in": [a.get("id") for a in anfragen]}},
+            {"$set": {"gemeldet_am": _jetzt().isoformat()}})
+        log.info("[betriebsmeldung] %d neue Anfragen an %s gemeldet",
+                 len(anfragen), ziel)
+        return len(anfragen)
+    except Exception:  # noqa: BLE001
+        log.exception("[betriebsmeldung] Anfragen-Mail fehlgeschlagen")
+        return 0
+
+
+# --------------------------------------------------------- Tagesbericht
+async def tagesbericht_daten(db) -> dict:
+    """Die Zahlen des Berichts — getrennt vom Text, damit pruefbar."""
+    seit = (_jetzt() - timedelta(days=1)).isoformat()
+    daten = {"seit": seit}
+    daten["alarme_offen"] = await db.betriebsalarme.count_documents({"offen": True})
+    daten["alarme_neu"] = await db.betriebsalarme.count_documents(
+        {"offen": True, "created_at": {"$gte": seit}})
+    daten["fehler"] = await db.error_logs.count_documents(
+        {"created_at": {"$gte": seit}})
+    # Welche Wege haben Fehler gemacht? Das sagt mehr als eine blosse Zahl.
+    daten["fehler_wege"] = [
+        {"weg": z["_id"], "anzahl": z["n"]}
+        async for z in db.error_logs.aggregate([
+            {"$match": {"created_at": {"$gte": seit}}},
+            {"$group": {"_id": "$path", "n": {"$sum": 1}}},
+            {"$sort": {"n": -1}}, {"$limit": 5}])]
+    try:
+        from backup_service import letztes_backup_info_global
+        daten["backup"] = await letztes_backup_info_global(db)
+    except Exception as exc:  # noqa: BLE001
+        daten["backup"] = {"hinweis": f"nicht lesbar ({exc})"}
+    # Offene Anfragen gehoeren in den Bericht: so faellt eine auf, die beim
+    # Eingang uebersehen wurde (Wunsch Ahmad 20.09.2026).
+    daten["anfragen_offen"] = await db.plan_requests.count_documents(
+        {"status": "offen"})
+    daten["anfragen_neu"] = await db.plan_requests.count_documents(
+        {"status": "offen", "created_at": {"$gte": seit}})
+    daten["link_jobs_haengend"] = await db.link_jobs.count_documents(
+        {"status": "queued",
+         "created_at": {"$lt": _jetzt() - timedelta(minutes=15)}})
+    return daten
+
+
+def bericht_text(daten: dict, tag: str) -> tuple:
+    """(Betreff, Text) des Tagesberichts — rein, damit pruefbar."""
+    alarme = int(daten.get("alarme_offen") or 0)
+    fehler = int(daten.get("fehler") or 0)
+    b = daten.get("backup") or {}
+    sicherung_ok = bool(b.get("vollstaendig")) and (b.get("alter_stunden") or 99) <= 26
+    anfragen = int(daten.get("anfragen_offen") or 0)
+    # Offene Anfragen sind KEIN Mangel — sie warten nur auf Ahmad. Sie
+    # aendern deshalb nicht den Betreff, stehen aber im Bericht.
+    alles_gut = not alarme and not fehler and sicherung_ok \
+        and not daten.get("link_jobs_haengend")
+
+    kopf = "alles in Ordnung" if alles_gut else "mit Auffaelligkeiten"
+    betreff = f"AutoSchnell Tagesbericht {tag} — {kopf}"
+
+    zeilen = [f"Tagesbericht vom {tag} (letzte 24 Stunden)", ""]
+    if alles_gut:
+        zeilen += ["Alles in Ordnung. Keine Alarme, keine Fehler, "
+                   "Sicherung aktuell."
+                   + (f" {anfragen} Anfrage(n) warten auf dich."
+                      if anfragen else ""), ""]
+
+    zeilen.append(f"Offene Betriebsalarme: {alarme}"
+                  + (f" (davon {daten.get('alarme_neu')} neu)"
+                     if daten.get("alarme_neu") else ""))
+    zeilen.append(f"Fehler bei Nutzern:   {fehler}")
+    zeilen.append(f"Offene Anfragen:      {anfragen}"
+                  + (f" (davon {daten.get('anfragen_neu')} neu)"
+                     if daten.get("anfragen_neu") else ""))
+    for eintrag in (daten.get("fehler_wege") or []):
+        zeilen.append(f"    {eintrag['anzahl']}x  {_kurz(eintrag['weg'], 60)}")
+
+    if b.get("hinweis") and not b.get("vollstaendig"):
+        zeilen.append(f"Sicherung:            {_kurz(b.get('hinweis'), 80)}")
+    else:
+        alter = b.get("alter_stunden")
+        zeilen.append(
+            "Sicherung:            "
+            + (f"vor {alter:.0f} Stunden" if isinstance(alter, (int, float))
+               else "unbekannt")
+            + (", vollstaendig" if b.get("vollstaendig") else ", UNVOLLSTAENDIG")
+            + (", Kopie auswaerts" if b.get("offsite") else ", OHNE Kopie auswaerts"))
+        if b.get("stichtagsgenau") is False:
+            zeilen.append("                      (nicht stichtagsgenau — "
+                          "Replica Set pruefen)")
+    if daten.get("link_jobs_haengend"):
+        zeilen.append(f"Abrufe in der Warteschlange > 15 min: "
+                      f"{daten['link_jobs_haengend']}")
+
+    zeilen += [
+        "",
+        ZEITZONE_HINWEIS,
+        "Bleibt diese Mail einmal aus, stimmt etwas nicht — sie kommt auch",
+        "dann, wenn nichts passiert ist.",
+    ]
+    return betreff, "\n".join(zeilen)
+
+
+async def tagesbericht_senden(db, tag: str = "", versuch: int = 1) -> bool:
+    """Den Tagesbericht verschicken. Wirft nie."""
+    ziel = empfaenger()
+    if not ziel or bericht_stunde() < 0:
+        return False
+    try:
+        # RP-249: der Tag in deutscher Zeit, nicht in der des Servers
+        tag = tag or _jetzt_berlin().strftime("%d.%m.%Y")
+        betreff, text = bericht_text(await tagesbericht_daten(db), tag)
+        from email_service import send_email
+        # Wunsch Ahmad 21.09.2026 (Betrieb): jeder Wiederholungsversuch am
+        # selben Tag bekommt einen eigenen Schluessel. Mit dem alten haette
+        # Resend den neuen Bericht (andere Zahlen = anderer Inhalt) als
+        # Schluessel-Missbrauch abgelehnt, und die SMTP-Idempotenz haette
+        # einen unklaren ersten Versuch fuer den ganzen Tag gesperrt. Ein
+        # doppelter Tagesbericht ist harmlos, ein fehlender nicht.
+        schluessel = f"tagesbericht-{tag}" if versuch <= 1 \
+            else f"tagesbericht-{tag}-v{versuch}"
+        ok = await send_email(ziel, betreff, text,
+                              idempotency_key=schluessel)
+        if ok:
+            log.info("[betriebsmeldung] Tagesbericht %s an %s", tag, ziel)
+        else:
+            log.error("[betriebsmeldung] Tagesbericht %s NICHT zugestellt", tag)
+        return ok
+    except Exception:  # noqa: BLE001
+        log.exception("[betriebsmeldung] Tagesbericht fehlgeschlagen")
+        return False
+
+
+#: Wunsch Ahmad 21.09.2026 (Betrieb): scheiterte der Tagesbericht (Resend
+#: kurz gestoert, Schluessel noch nicht eingetragen), hielt die Tagessperre
+#: trotzdem 20 Stunden — der naechste Versuch kam erst am folgenden Morgen.
+#: Jetzt wird die Sperre nach einem Fehlschlag auf diese Pause verkuerzt,
+#: hoechstens TAGESBERICHT_MAX_VERSUCHE mal am Tag. Nach einem ERFOLG bleibt
+#: die 20-h-Sperre wie bisher: genau ein Bericht je Tag.
+TAGESBERICHT_WIEDERHOLUNG_MIN = 45
+TAGESBERICHT_MAX_VERSUCHE = 4
+
+
+async def _tagesbericht_versuch_zaehlen(db, name: str, token: str) -> int:
+    """Nummer dieses Versuchs am Tag (1, 2, ...).
+
+    Gezaehlt wird am Dokument der Tagessperre selbst: acquire() setzt dort
+    nur seine eigenen Felder und laesst `versuche` stehen, der Name traegt
+    den Tag — morgen beginnt die Zaehlung von vorn."""
+    from pymongo import ReturnDocument
+    try:
+        doc = await db.job_locks.find_one_and_update(
+            {"name": name, "token": token}, {"$inc": {"versuche": 1}},
+            projection={"_id": 0, "versuche": 1},
+            return_document=ReturnDocument.AFTER)
+        return max(1, int((doc or {}).get("versuche") or 1))
+    except Exception:  # noqa: BLE001
+        log.warning("[betriebsmeldung] Versuchszaehler fuer %s nicht lesbar", name)
+        return 1
+
+
+async def tagesbericht_mit_wiederholung(db, name: str, token: str,
+                                        datum: str) -> bool:
+    """Tagesbericht unter der gehaltenen Tagessperre `name` senden.
+
+    Scheitert der Versand, wird die Sperre auf TAGESBERICHT_WIEDERHOLUNG_MIN
+    verkuerzt statt 20 Stunden zu halten — ein spaeterer Durchlauf (auf
+    irgendeinem Server) versucht es dann erneut. Wirft nie."""
+    try:
+        versuch = await _tagesbericht_versuch_zaehlen(db, name, token)
+        if await tagesbericht_senden(db, datum, versuch=versuch):
+            return True
+        if versuch >= TAGESBERICHT_MAX_VERSUCHE:
+            log.error("[betriebsmeldung] Tagesbericht %s nach %d Versuchen "
+                      "aufgegeben — naechster Bericht morgen", datum, versuch)
+            return False
+        from job_lock import verlaengern
+        await verlaengern(db, name, ttl_seconds=TAGESBERICHT_WIEDERHOLUNG_MIN * 60,
+                          token=token)
+        log.warning("[betriebsmeldung] Tagesbericht %s: Versuch %d von %d "
+                    "gescheitert — neuer Versuch in etwa %d min", datum,
+                    versuch, TAGESBERICHT_MAX_VERSUCHE,
+                    TAGESBERICHT_WIEDERHOLUNG_MIN)
+        return False
+    except Exception:  # noqa: BLE001
+        log.exception("[betriebsmeldung] Tagesbericht-Wiederholung fehlgeschlagen")
+        return False
+
+
+# ------------------------------------------------------------- Testmail
+def testmail_text(ziel: str, von: str = "", server: str = "") -> tuple:
+    """(Betreff, Text) der Probe-Mail von der Betrieb-Seite — rein, damit
+    pruefbar. Wunsch Ahmad 21.09.2026: bisher war der Tagesbericht der
+    einzige Test, und der kam erst um 8 Uhr."""
+    # RP-249: deutsche Zeit mit Kennzeichnung statt Serverzeit ohne Angabe
+    jetzt = _jetzt_berlin().strftime("%d.%m.%Y %H:%M") + " Uhr (MEZ/MESZ)"
+    stunde = bericht_stunde()
+    bericht = ("der Tagesbericht ist abgeschaltet (BETRIEB_TAGESBERICHT_STUNDE=-1)"
+               if stunde < 0 else f"der Tagesbericht täglich um {stunde:02d}:00 Uhr")
+    zeilen = [
+        "Das ist eine Testmail von der Betrieb-Seite im Admin-Bereich.",
+        "",
+        "Kommt sie an, erreichen dich auch die echten Betriebsmeldungen:",
+        "Sofortmeldungen bei neuen Betriebsalarmen, neue Anfragen und",
+        f"{bericht}.",
+        "",
+        f"Empfänger (BETRIEB_MELDUNG_AN): {ziel}",
+        f"Ausgelöst: {jetzt}" + (f" von {von}" if von else ""),
+    ]
+    if server:
+        zeilen.append(f"Server: {server}")
+    zeilen += [
+        "",
+        "Liegt diese Mail im Spam-Ordner, bitte als „kein Spam“ markieren —",
+        "sonst landen dort auch die echten Meldungen.",
+    ]
+    return "AutoSchnell: Testmail der Betriebsmeldungen", "\n".join(zeilen)
+
+
+#: Liste der Warn-/Fehlerzeilen des Mailversands im laufenden Testmail-Aufruf
+#: (None = kein Testmail-Aufruf in diesem Kontext).
+_mitschrift: contextvars.ContextVar = contextvars.ContextVar(
+    "betrieb_testmail_mitschrift", default=None)
+
+
+class _Mitschrift(logging.Handler):
+    """Sammelt die Zeilen von email_service NUR aus dem eigenen Aufruf.
+
+    email_service liefert bei einem Fehlschlag nur False und schreibt den
+    Grund (z. B. "Resend lehnt ab (HTTP 403): domain not verified") ins
+    Protokoll. Den braucht die Betrieb-Seite als Antwort. Die Kontextvariable
+    trennt den eigenen Aufruf von gleichzeitigen Vertragsmails anderer Nutzer
+    (asyncio-Aufgaben und asyncio.to_thread tragen den Kontext mit)."""
+
+    def emit(self, record):
+        liste = _mitschrift.get()
+        if liste is None:
+            return
+        try:
+            text = record.getMessage()
+        except Exception:  # noqa: BLE001
+            return
+        if text.startswith("email_service"):
+            liste.append((record.levelno, text.split(":", 1)[-1].strip()))
+
+
+async def testmail_senden(ziel: str, von: str = "") -> tuple:
+    """Probe-Mail an `ziel` ueber denselben Weg wie Alarme und Tagesbericht.
+
+    Liefert (ok, beleg, grund): beleg wie send_email_mit_beleg
+    ("resend:<id>" / "smtp"), grund = was email_service zum Fehlschlag
+    protokolliert hat (leer, wenn nichts). Wirft nie."""
+    import socket
+    import uuid
+
+    import email_service
+    betreff, text = testmail_text(ziel, von=von, server=socket.gethostname())
+    zeilen: list = []
+    marke = _mitschrift.set(zeilen)
+    handler = _Mitschrift(logging.WARNING)
+    email_service.log.addHandler(handler)
+    try:
+        # Eigener Schluessel je Klick: interne Wiederholungen bei Resend sind
+        # damit sicher, ein zweiter Klick verschickt trotzdem eine neue Mail.
+        ok, beleg = await email_service.send_email_mit_beleg(
+            ziel, betreff, text,
+            idempotency_key=f"betrieb-testmail-{uuid.uuid4().hex}")
+    except Exception as exc:  # noqa: BLE001
+        ok, beleg = False, ""
+        zeilen.append((logging.ERROR, f"{exc.__class__.__name__}: {exc}"))
+    finally:
+        email_service.log.removeHandler(handler)
+        _mitschrift.reset(marke)
+    fehler = [t for stufe, t in zeilen if stufe >= logging.ERROR] \
+        or [t for _stufe, t in zeilen]
+    grund = " / ".join(dict.fromkeys(fehler))[:500] if not ok else ""
+    if ok:
+        log.info("[betriebsmeldung] Testmail an %s (%s)", ziel, beleg)
+    else:
+        log.error("[betriebsmeldung] Testmail an %s NICHT zugestellt: %s",
+                  ziel, grund or "ohne Angabe")
+    return ok, beleg, grund
+
+
+# ------------------------------------------------------------- Schleife
+async def run_betriebsmeldung_forever(db) -> None:
+    """Sofortmeldungen im Takt der Sammelfrist, Tagesbericht einmal taeglich.
+
+    Beide unter einer Job-Sperre: zwei Server mit je vier Prozessen wuerden
+    sonst achtmal dasselbe verschicken."""
+    from job_lock import acquire
+    await asyncio.sleep(45)          # Backend erst in Ruhe hochfahren lassen
+    if not empfaenger():
+        # NICHT einfach return: ein beendeter Hintergrundjob zaehlt in
+        # /api/ready als FEHLER, und der Server flaege aus dem
+        # Lastverteiler — nur weil niemand Meldungen haben will.
+        # server.py startet diesen Dienst ohne Adresse gar nicht erst;
+        # das hier ist das zweite Netz.
+        log.info("[betriebsmeldung] BETRIEB_MELDUNG_AN ist leer — keine "
+                 "Meldungen. Fehler bleiben nur auf der Betriebs-Seite "
+                 "sichtbar.")
+        while True:
+            await asyncio.sleep(3600)
+    log.info("[betriebsmeldung] aktiv: Alarme alle %d min, Tagesbericht %s",
+             sammelfrist_minuten(),
+             "aus" if bericht_stunde() < 0 else f"{bericht_stunde():02d}:00 Uhr")
+    while True:
+        takt = sammelfrist_minuten() * 60
+        try:
+            # Pruefbericht 20.09.2026 (N7): auch dieser Dienst schreibt
+            # (gemeldet_am in betriebsalarme und plan_requests) und muss
+            # waehrend einer Schreibpause still sein — sonst aendert sich
+            # die Datenbank mitten im Dump.
+            import wartung as _wartung
+            if await _wartung.aktiv_async(db):
+                await asyncio.sleep(30)
+                continue
+            # Sofortmeldung: die Sperre laeuft mit dem Takt ab, damit nach
+            # einem Ausfall der naechste Prozess uebernimmt.
+            # Rollenprüfung 22.09.2026 (RP-249/RP-400): Die Sperre wurde nach
+            # jeder Runde im finally SOFORT freigegeben. Jeder der 8 Prozesse
+            # wacht zu einem eigenen Zeitpunkt auf, bekam sie also auch —
+            # neue Alarme gingen bis zu achtmal je Sammelfrist raus statt
+            # gesammelt. Jetzt bleibt sie stehen und laeuft nach `takt` von
+            # selbst ab: hoechstens EINE Runde je Sammelfrist, flottenweit.
+            token = await acquire(db, "betriebsmeldung", ttl_seconds=takt)
+            if token:
+                await neue_alarme_melden(db)
+                # Wunsch Ahmad 20.09.2026: Anfragen genauso — sie sind
+                # kein Fehler, sondern Geschaeft, und lagen bisher nur
+                # auf der Freischaltungs-Seite.
+                await neue_anfragen_melden(db)
+        except Exception:  # noqa: BLE001
+            log.exception("[betriebsmeldung] Runde fehlgeschlagen")
+        # Tagesbericht: die Tagessperre allein entscheidet, dass er genau
+        # EINMAL faellt — auf beiden Servern zusammen. Geprueft wird nur,
+        # ob die Stunde schon da ist; wer zuerst die Sperre bekommt,
+        # schickt. Kein Zeitfenster-Rechnen, das man falsch verstehen kann.
+        # Wunsch Ahmad 21.09.2026: scheitert der Versand, verkuerzt
+        # tagesbericht_mit_wiederholung die Sperre (45 min, hoechstens vier
+        # Versuche am Tag) — sonst kam der naechste Versuch erst morgen.
+        try:
+            # RP-249/RP-400: Stunde und Datum in deutscher Zeit — vorher
+            # datetime.now() in der Zeit des Servers (ohne tzdata: UTC, der
+            # "8-Uhr-Bericht" kam um 10 Uhr).
+            jetzt = _jetzt_berlin()
+            if bericht_stunde() >= 0 and jetzt.hour >= bericht_stunde():
+                tag = jetzt.strftime("%Y-%m-%d")
+                bericht_token = await acquire(db, f"tagesbericht-{tag}",
+                                              ttl_seconds=20 * 3600)
+                if bericht_token:
+                    await tagesbericht_mit_wiederholung(
+                        db, f"tagesbericht-{tag}", bericht_token,
+                        jetzt.strftime("%d.%m.%Y"))
+        except Exception:  # noqa: BLE001
+            log.exception("[betriebsmeldung] Tagesbericht-Runde fehlgeschlagen")
+        await asyncio.sleep(takt)

@@ -12,8 +12,11 @@ Strategy:
   `mobile_makes_models.json` (178 makes, 2721 models, sourced from the user's
   verified `allemodellefinal.txt` upload).
 """
+import html as _htmllib
 import json
+import logging
 import os
+import asyncio
 import re
 import unicodedata
 from datetime import datetime, timezone, timedelta
@@ -24,17 +27,86 @@ from urllib.parse import urlencode, quote
 import ssl
 import certifi
 import httpx
+from anbieter_fehler import (ART_AUSFALL, AnbieterFehler, ListingGone,
+                             aus_ausnahme, aus_http_antwort)
 import xmltodict
+
+# Rollenprüfung 22.09.2026 (RP-202): Text fuer ein Inserat, das Apify nicht
+# (mehr) liefert — geht 1:1 an den Sucher (Vergleich 404, Link-Job-Status).
+INSERAT_WEG_MOBILE = ("Das Inserat ist bei mobile.de nicht mehr online "
+                      "(entfernt oder verkauft) oder nicht abrufbar.")
 
 _SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
+from konfig import zahl_env  # noqa: E402
 from owners_extractor import extract_owners_from_text
 from proxy_config import get_proxy_url, random_user_agent
+
+log = logging.getLogger("mobile_service")
+
+# Pruefbericht 20.09.2026 (DP-04): Der Apify-Lauf (run-sync) durfte 180 s
+# dauern — Cloudflare bricht die Anfrage aber nach ~100 s mit 524 ab, der
+# Sucher sah einen nackten Fehler und der Lauf lief weiter. Jetzt hoechstens
+# 85 s (Vorgabe: unter der Cloudflare-Grenze, das Frontend wartet 95 s);
+# bei Zeitueberschreitung eine verstaendliche, wiederholbare Meldung
+# (listing_identity.AbrufDauertZuLange -> 503). Gilt fuer mobile.de UND
+# AutoScout24 (autoscout_service liest denselben Wert).
+APIFY_TIMEOUT_SEKUNDEN = zahl_env("APIFY_TIMEOUT_SEKUNDEN", 85, unten=10, oben=85)
 
 
 MOBILE_BASE = os.environ.get("MOBILE_API_BASE", "https://services.sandbox.mobile.de")
 MOBILE_USER = os.environ.get("MOBILE_API_USER", "")
 MOBILE_PASS = os.environ.get("MOBILE_API_PASS", "")
+# Apify-Scraper als mobile.de-Quelle (memo23/mobile-de-scraper): liest ein
+# einzelnes Inserat ueber die Apify-Plattform aus — kein offizieller
+# API-Zugang noetig. Kostet ca. $0.006 je frischem Abruf; der Cache
+# (vehicle_cache + listings_cache) verhindert Doppelabrufe.
+APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "").strip()
+# Rollenprüfung 22.09.2026 (RP-549): docker-compose setzt die Variable als
+# LEEREN Wert (${APIFY_MOBILE_ACTOR:-}), wenn sie in der .env fehlt. Mit
+# os.environ.get(NAME, Standard) blieb das "" — der Aufruf ging an
+# /v2/acts//run-sync... und JEDER neue mobile.de-Link scheiterte. Leer oder nur
+# Leerzeichen bedeutet jetzt: Standard-Actor.
+APIFY_MOBILE_ACTOR = (os.environ.get("APIFY_MOBILE_ACTOR") or "").strip() \
+    or "memo23~mobile-de-scraper"
+
+
+def apify_lauf_parameter(build_env: str) -> dict:
+    """Query-Parameter fuer run-sync-get-dataset-items (mobile.de UND AutoScout).
+
+    Rollenprüfung 22.09.2026 (RP-553): Speicher und Actor-Version waren nicht
+    festgelegt — der Actor lief mit seinem Standardspeicher, und viele
+    gleichzeitige Laeufe stiessen an Apifys Speichergrenze (402). Beides ist
+    jetzt einstellbar: APIFY_MEMORY_MB (z. B. 1024) und APIFY_MOBILE_BUILD /
+    APIFY_AUTOSCOUT_BUILD. Leer = wie bisher (nichts mitsenden)."""
+    params = {"format": "json", "clean": "1"}
+    speicher = (os.environ.get("APIFY_MEMORY_MB") or "").strip()
+    if speicher.isdigit() and int(speicher) > 0:
+        params["memory"] = speicher
+    build = (os.environ.get(build_env) or "").strip()
+    if build:
+        params["build"] = build
+    return params
+# Sandbox-/Demo-Daten NUR ausliefern, wenn ausdrücklich aktiviert. Sonst würde
+# jeder fehlgeschlagene mobile.de-Abruf still ein erfundenes Fahrzeug liefern
+# (und es 24 h cachen + in Verträge übernehmen). Default: ehrlicher Fehler.
+MOBILE_SANDBOX_MODE = os.environ.get("MOBILE_SANDBOX_MODE", "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+
+
+class MobileUnavailable(RuntimeError):
+    """mobile.de-Fahrzeug konnte nicht echt geladen werden (Route -> HTTP 502)."""
+
+
+def apify_enabled() -> bool:
+    return bool(APIFY_TOKEN)
+
+
+def mobile_quelle_verfuegbar() -> bool:
+    """Ist mobile.de als Quelle nutzbar? (offizielle API, Apify-Scraper
+    oder ausdruecklicher Sandbox-Modus)"""
+    return bool(MOBILE_USER and MOBILE_PASS) or apify_enabled() or MOBILE_SANDBOX_MODE
 
 FUEL_LABELS = {
     "DIESEL": "Diesel", "PETROL": "Benzin", "ELECTRICITY": "Elektro",
@@ -46,13 +118,17 @@ GEAR_LABELS = {
     "MANUAL_GEAR": "Schaltgetriebe", "AUTOMATIC_GEAR": "Automatik",
     "SEMIAUTOMATIC_GEAR": "Halbautomatik",
 }
+# 17.09.2026: EINE Zuordnung fuer Getriebe und Kraftstoff (alle Quellen, beide Portale)
+from fahrzeug_codes import (NAVI_CODE, getriebe_code, hat_navigation,  # noqa: E402
+                            kraftstoff_code, tueren_code, tueren_text)
 CATEGORY_LABELS = {
     "Cabrio": "Cabrio / Roadster", "EstateCar": "Kombi", "Limousine": "Limousine",
     "OffRoad": "SUV / Geländewagen", "OtherCar": "Sonstiges", "SmallCar": "Kleinwagen",
     "SportsCar": "Sportwagen / Coupé", "Van": "Van / Kleinbus",
 }
 
-AD_ID_RE = re.compile(r"(?:id=|details\.html\?id=|/)(\d{6,12})")
+# {6,16}: neuere mobile.de-Inserate haben 14-stellige IDs (z.B. 42196329136896).
+AD_ID_RE = re.compile(r"(?:id=|details\.html\?id=|/)(\d{6,16})")
 
 
 def extract_ad_id(url_or_id: str) -> Optional[str]:
@@ -89,10 +165,18 @@ def _desc(node):
         return None
     d = node.get("resource:local-description")
     if isinstance(d, list):
-        d = next((x for x in d if isinstance(x, dict) and x.get("@xml-lang") == "en"), d[0] if d else None)
+        # Pruefbericht 20.09.2026 (S-18): Deutsch zuerst — der Kaufvertrag ist
+        # deutsch; vorher wurde ausdruecklich die englische Fassung gewaehlt
+        # ("Alloy wheels", "SUV/Off-road Vehicle/Pickup Truck").
+        d = (next((x for x in d if isinstance(x, dict) and x.get("@xml-lang") == "de"), None)
+             or next((x for x in d if isinstance(x, dict) and x.get("@xml-lang") == "en"), None)
+             or (d[0] if d else None))
     if isinstance(d, dict):
         return d.get("#text")
     return d
+
+
+import ausstattung_de as _ausstattung  # noqa: E402
 
 
 def _features_list(vehicle: dict) -> List[str]:
@@ -104,15 +188,54 @@ def _features_list(vehicle: dict) -> List[str]:
     for f in feats_raw or []:
         label = _desc(f) or _attr(f, "key")
         if label:
-            out.append(str(label).replace("_", " ").title() if str(label).isupper() else str(label))
+            out.append(_feature_label(str(label)))
     return out
+
+
+def _feature_label(label: str) -> str:
+    """Schluessel wie ALLOY_WHEELS -> deutsche Bezeichnung (Befund Ahmad
+    26.09.2026: "Alloy Wheels" stand im Kaufvertrag). Unbekannte Schluessel
+    werden lesbar ("Some Key"); Pruefbericht 20.09.2026 (S-27): kurze
+    Abkuerzungen (ABS, ESP, LED, USB — bis 4 Zeichen ohne Unterstrich)
+    bleiben stehen."""
+    from ausstattung_de import uebersetzen
+    if not label.isupper():
+        return uebersetzen(label)
+    if "_" not in label and len(label) <= 4:
+        return uebersetzen(label)
+    return uebersetzen(label.replace("_", " ").title())
+
+
+def _xml_bool(knoten) -> Optional[bool]:
+    """<ad:x value="true|false"/> -> True/False, fehlt/unklar -> None."""
+    wert = str(_attr(knoten or {}, "value") or "").strip().lower()
+    return True if wert == "true" else False if wert == "false" else None
+
+
+def _xml_unfall(vehicle: dict) -> Optional[bool]:
+    """Unfallschaden laut Inserat. ad:accident-damaged ist die eigentliche
+    Angabe; ad:damage-and-unrepaired="true" (beschaedigt und nicht repariert)
+    ist ebenfalls ein Schaden. "false" dort sagt dagegen NICHT "unfallfrei" —
+    ein reparierter Unfall ist auch "nicht unrepariert"."""
+    unfall = _xml_bool(vehicle.get("ad:accident-damaged"))
+    if unfall is not None:
+        return unfall or bool(_xml_bool(vehicle.get("ad:damage-and-unrepaired")))
+    if _xml_bool(vehicle.get("ad:damage-and-unrepaired")) is True:
+        return True
+    return None
 
 
 def _parse_ad_xml(ad: dict) -> Dict[str, Any]:
     """Map a single mobile.de <ad:ad> dict (already parsed by xmltodict) to a flat
     vehicle dict. Looks into <ad:vehicle> + <ad:vehicle><ad:specifics>."""
     vehicle = ad.get("ad:vehicle") or {}
+    if not isinstance(vehicle, dict):
+        vehicle = {}
     specifics = vehicle.get("ad:specifics") or {}
+    # Pruefbericht 20.09.2026 (S-20): ein leeres <ad:specifics/> kommt als
+    # String — .get darauf war ein AttributeError bis zum 500.
+    if not isinstance(specifics, dict):
+        specifics = {}
 
     make_node = vehicle.get("ad:make") or {}
     model_node = vehicle.get("ad:model") or {}
@@ -127,12 +250,27 @@ def _parse_ad_xml(ad: dict) -> Dict[str, Any]:
         fr = f"{fr[5:7]}/{fr[0:4]}"
     cubic = _attr(specifics.get("ad:cubic-capacity") or {}, "value")
     doors = _attr(specifics.get("ad:door-count") or vehicle.get("ad:door-count") or {}, "key")
-    seats = _attr(specifics.get("ad:seats") or vehicle.get("ad:seats") or {}, "value")
+    # Pruefbericht 20.09.2026 (S-07): Das Element heisst ad:num-seats — ad:seats
+    # kommt in den Daten nicht vor, die Sitzzahl blieb immer leer.
+    seats = _attr(specifics.get("ad:num-seats") or specifics.get("ad:seats")
+                  or vehicle.get("ad:num-seats") or vehicle.get("ad:seats") or {}, "value")
+    # S-08: HU steht unter ad:general-inspection ("2027-05" -> "05/2027").
+    hu = _attr(specifics.get("ad:general-inspection") or vehicle.get("ad:general-inspection")
+               or specifics.get("ad:hu") or vehicle.get("ad:hu") or {}, "value")
+    if hu and re.fullmatch(r"\d{4}-\d{2}", str(hu)):
+        hu = f"{hu[5:7]}/{hu[0:4]}"
     color = _desc(specifics.get("ad:exterior-color") or vehicle.get("ad:exterior-color"))
 
     price_node = ad.get("ad:price") or {}
+    if not isinstance(price_node, dict):
+        price_node = {}
     consumer_price = price_node.get("ad:consumer-price-amount") or {}
     list_price = _attr(consumer_price, "value")
+    # Pruefbericht 20.09.2026 (S-09): Preisart (FIXED / NEGOTIABLE = VB) und
+    # ad:vatable (MwSt. ausweisbar — fuer Haendler mit Vorsteuer relevant)
+    # wurden verworfen; jetzt in Vergleich und Beweisdokument sichtbar.
+    price_type = str(_attr(price_node, "type") or "").strip().upper() or None
+    mwst_ausweisbar = _xml_bool(price_node.get("ad:vatable"))
 
     seller_node = ad.get("seller:seller") or {}
     seller_addr = seller_node.get("seller:address") or {}
@@ -184,31 +322,51 @@ def _parse_ad_xml(ad: dict) -> Dict[str, Any]:
         "power_kw": int(kw) if kw else None,
         "power_ps": kw_to_ps(int(kw)) if kw else None,
         "displacement": int(cubic) if cubic else None,
-        "doors": doors,
+        "doors": tueren_text(doors),            # S-19: "FOUR_OR_FIVE" -> "4/5"
         "seats": int(seats) if seats else None,
         "color": color,
         "vin": _attr(vehicle.get("ad:vin") or {}, "value"),
         "license_plate": None,
-        "hu": _attr(specifics.get("ad:hu") or vehicle.get("ad:hu") or {}, "value"),
+        "hu": hu,
         "previous_owners": _attr(specifics.get("ad:previous-owner") or vehicle.get("ad:previous-owner") or {}, "value")
                            or extract_owners_from_text(description),
-        "accident_damaged": (_attr(vehicle.get("ad:accident-damaged") or {}, "value") == "true"),
-        "roadworthy": (_attr(vehicle.get("ad:roadworthy") or {}, "value") != "false"),
+        # Pruefbericht 20.09.2026 (S-01): fehlt die Angabe, bleibt sie None —
+        # vorher wurde daraus "kein Unfallschaden" und "fahrbereit".
+        "accident_damaged": _xml_unfall(vehicle),
+        "roadworthy": _xml_bool(vehicle.get("ad:roadworthy")),
         "features": _features_list(vehicle),
         "description": description,
         "list_price": float(list_price) if list_price else None,
         "currency": _attr(price_node, "currency") or "EUR",
+        "price_type": price_type,
+        "price_negotiable": preis_verhandelbar(price_type),
+        "mwst_ausweisbar": mwst_ausweisbar,
         "seller_name": _attr(seller_node.get("seller:contact-person") or {}, "value")
                        or _attr(seller_node.get("seller:company-name") or {}, "value")
-                       or ("Händler" if _attr(seller_node.get("seller:type") or {}, "commercial") == "true" else "Privatverkäufer"),
+                       or None,
+        # Beweisdokument: gewerblich/privat (privat: Name/Telefon nicht drucken)
+        "seller_type": {"true": "haendler", "false": "privat"}.get(
+            _attr(seller_node.get("seller:type") or {}, "commercial") or ""),
         "seller_address": _attr(seller_addr.get("seller:street") or {}, "value") if isinstance(seller_addr, dict) else None,
         "seller_zip": _attr(seller_addr.get("seller:zipcode") or {}, "value") if isinstance(seller_addr, dict) else None,
         "seller_city": _attr(seller_addr.get("seller:city") or {}, "value") if isinstance(seller_addr, dict) else None,
         "seller_phone": _attr(seller_node.get("seller:phone") or {}, "value"),
         "seller_email": _attr(seller_node.get("seller:email") or {}, "value"),
         "image_urls": image_urls,
+        # S-30: beide Feldnamen wie Apify/AutoScout — Oberflaeche und PDF
+        # lesen mal images, mal image_urls.
+        "images": list(image_urls),
         "image_count": len(image_urls),
     }
+
+
+# Pruefbericht 20.09.2026 (S-09): Preisarten, die "Verhandlungsbasis" bedeuten
+# (mobile.de-XML/Apify price.type; Kleinanzeigen setzt price_negotiable selbst).
+_PREIS_VERHANDELBAR = {"NEGOTIABLE", "VB", "NEGOTIATION_BASIS", "ON_REQUEST_NEGOTIABLE"}
+
+
+def preis_verhandelbar(price_type) -> bool:
+    return str(price_type or "").strip().upper() in _PREIS_VERHANDELBAR
 
 
 # -------------------- Sandbox bundle --------------------
@@ -228,13 +386,20 @@ def _load_sandbox_bundle():
         ads = data.get("search:search-result", {}).get("search:ads", {}).get("ad:ad", [])
         if isinstance(ads, dict):
             ads = [ads]
-        for raw in ads:
-            v = _parse_ad_xml(raw)
-            if v.get("mobile_ad_id"):
-                _SANDBOX_BUNDLE[v["mobile_ad_id"]] = v
-                _SANDBOX_LIST.append(v)
     except Exception as exc:
         print(f"[mobile_service] failed to load sandbox bundle: {exc}")
+        return
+    for raw in ads:
+        # S-20: je Inserat abfangen — vorher brach das erste kaputte Inserat
+        # das Laden aller uebrigen ab.
+        try:
+            v = _parse_ad_xml(raw)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[mobile_service] sandbox ad skipped: {exc}")
+            continue
+        if v.get("mobile_ad_id"):
+            _SANDBOX_BUNDLE[v["mobile_ad_id"]] = v
+            _SANDBOX_LIST.append(v)
 
 
 # Sandbox bundle is loaded LATER, after _load_makes_models() so that
@@ -254,10 +419,12 @@ async def _fetch_from_mobile_api(ad_id: str) -> Optional[dict]:
                                  headers={"Accept": "application/xml",
                                           "User-Agent": random_user_agent()})
             if r.status_code != 200:
+                log.warning("mobile.de-API: HTTP %s fuer %s", r.status_code, ad_id)
                 return None
-            data = xmltodict.parse(r.text)
+            data = await asyncio.to_thread(xmltodict.parse, r.text)
             ad = data.get("ad:ad") or data.get("ad") or {}
             if not ad:
+                log.warning("mobile.de-API: Antwort ohne ad:ad fuer %s", ad_id)
                 return None
             parsed = _parse_ad_xml(ad)
             # Recover real model name when seller picked "Weitere [Brand]".
@@ -266,8 +433,443 @@ async def _fetch_from_mobile_api(ad_id: str) -> Optional[dict]:
             except Exception:
                 pass
             return parsed
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        # S-20: nicht mehr still None — der Betreiber sah sonst nie, warum
+        # der offizielle Weg nicht lieferte (Apify uebernahm kommentarlos).
+        log.warning("mobile.de-API: Abruf %s fehlgeschlagen (%s: %s)",
+                    ad_id, type(exc).__name__, str(exc)[:200])
         return None
+
+
+# -------------------- Apify-Scraper (memo23/mobile-de-scraper) --------------------
+
+# Lokalisierte Actor-Werte -> deutsche Labels der App. Der Actor liefert je
+# nach Proxy-Land Englisch ("Petrol", "Automatic") oder Deutsch ("Benzin");
+# unbekannte Werte gehen unveraendert durch.
+_APIFY_FUEL_DE = {
+    "petrol": "Benzin", "gasoline": "Benzin", "benzin": "Benzin",
+    "diesel": "Diesel", "electric": "Elektro", "elektro": "Elektro",
+    "electricity": "Elektro", "hybrid": "Hybrid",
+    "hybrid (petrol/electric)": "Hybrid (Benzin/Elektro)",
+    "hybrid (diesel/electric)": "Hybrid (Diesel/Elektro)",
+    "lpg": "LPG", "natural gas": "Erdgas (CNG)", "cng": "Erdgas (CNG)",
+    "hydrogen": "Wasserstoff", "other": "Andere",
+}
+_APIFY_GEAR_DE = {
+    "automatic": "Automatik", "automatik": "Automatik",
+    "manual": "Schaltgetriebe", "manual gearbox": "Schaltgetriebe",
+    "schaltgetriebe": "Schaltgetriebe",
+    "semi-automatic": "Halbautomatik", "halbautomatik": "Halbautomatik",
+}
+_APIFY_COLOR_DE = {
+    "white": "Weiß", "black": "Schwarz", "grey": "Grau", "gray": "Grau",
+    "silver": "Silber", "blue": "Blau", "red": "Rot", "green": "Grün",
+    "yellow": "Gelb", "orange": "Orange", "brown": "Braun", "beige": "Beige",
+    "purple": "Violett", "violet": "Violett", "gold": "Gold",
+    "bronze": "Bronze",
+}
+_APIFY_CATEGORY_DE = {
+    "saloon": "Limousine", "sedan": "Limousine",
+    "estate car": "Kombi", "station wagon": "Kombi",
+    "small car": "Kleinwagen", "cabriolet": "Cabrio / Roadster",
+    "convertible": "Cabrio / Roadster", "sports car": "Sportwagen / Coupé",
+    "coupe": "Sportwagen / Coupé", "suv": "SUV / Geländewagen",
+    "off-road vehicle": "SUV / Geländewagen", "van": "Van / Kleinbus",
+    "minibus": "Van / Kleinbus", "other": "Sonstiges",
+}
+
+
+def _apify_attr(item: dict, *tags: str) -> Optional[str]:
+    """Attributwert aus dem Actor-Datensatz. `attributes` ist eine Liste
+    von {label, tag, value}; value kann auch eine Liste sein."""
+    attrs = item.get("attributes") or []
+    if isinstance(attrs, dict):
+        attrs = [{"tag": k, "value": v} for k, v in attrs.items()]
+    wanted = {t.lower() for t in tags}
+    for a in attrs:
+        if not isinstance(a, dict):
+            continue
+        key = str(a.get("tag") or a.get("label") or "").strip().lower()
+        if key in wanted:
+            v = a.get("value")
+            if isinstance(v, list):
+                v = ", ".join(str(x) for x in v)
+            if v not in (None, ""):
+                return str(v).strip()
+    return None
+
+
+_ZAHL_MIT_TRENNER = re.compile(r"\d{1,3}(?:[.,\u00a0\u202f]\d{3})+(?!\d)|\d+")
+_BEREICH = re.compile(r"\d\s*(?:-|–|bis)\s*\d")
+
+
+def _apify_zahl(text) -> Optional[int]:
+    """'111,016 km' / '111.016 km' / '1,984 ccm' -> 111016 / 1984.
+
+    Pruefbericht 20.09.2026 (S-11/S-12): Vorher wurde JEDES Nicht-Ziffern-
+    Zeichen entfernt — aus "12.500,50 km" wurden 1.250.050 km, aus
+    "10.000 - 20.000 km" eine Milliarde und aus "€ 2.000,50" 200.050 €.
+    Jetzt zaehlt die ERSTE Zahl (mit Tausendertrennern), ein Dezimalanteil
+    faellt weg, und eine Spanne ist keine Angabe (None)."""
+    if text is None or isinstance(text, bool):
+        return None
+    if isinstance(text, (int, float)):
+        return int(text) if text >= 0 else None
+    s = str(text).strip()
+    if not s or _BEREICH.search(s):
+        return None
+    m = _ZAHL_MIT_TRENNER.search(s)
+    if not m:
+        return None
+    ziffern = re.sub(r"\D", "", m.group(0))
+    return int(ziffern) if ziffern else None
+
+
+_UNFALL_JA = ("beschädigt", "beschaedigt", "unfallwagen", "unfallfahrzeug",
+              "unfallschaden", "damaged", "accident", "nicht repariert")
+_UNFALL_NEIN = ("unfallfrei", "unbeschädigt", "unbeschaedigt", "not damaged",
+                "accident-free", "accident free", "no accident")
+_FAHRBEREIT_NEIN = ("nicht fahrtauglich", "nicht fahrbereit", "nicht fahrfähig",
+                    "nicht fahrfaehig", "not roadworthy", "not drivable",
+                    "not ready to drive")
+
+
+def zustand_unfall(schadensfall, text: str = "") -> Optional[bool]:
+    """Unfallschaden laut Inserat: True/False nur bei echter Angabe, sonst None.
+
+    Pruefbericht 20.09.2026 (S-03/S-06): Gesucht wurde nur "damaged" und
+    "unfall" — "Beschädigtes Fahrzeug" ergab "kein Unfallschaden". Und ohne
+    jede Angabe wurde ebenfalls "kein Unfallschaden" daraus."""
+    if schadensfall is True:
+        return True
+    t = (text or "").lower()
+    # Verneinungen zuerst entfernen, sonst steckt "beschädigt" in "unbeschädigt".
+    rest = t
+    for wort in _UNFALL_NEIN:
+        rest = rest.replace(wort, " ")
+    if any(w in rest for w in _UNFALL_JA):
+        return True
+    if schadensfall is False or any(w in t for w in _UNFALL_NEIN):
+        return False
+    return None
+
+
+def zustand_fahrbereit(bereit, text: str = "") -> Optional[bool]:
+    """Fahrbereit laut Inserat: True/False nur bei echter Angabe, sonst None
+    (S-04: "Nicht fahrtauglich" im Zustandstext wurde ignoriert)."""
+    t = (text or "").lower()
+    if bereit is False or any(w in t for w in _FAHRBEREIT_NEIN):
+        return False
+    if bereit is True:
+        return True
+    return None
+
+
+def telefon_aus(telefone) -> str:
+    """Telefonnummer aus Listen/Zeichenketten der Anbieter.
+
+    Pruefbericht 20.09.2026 (S-17): Eine Zeichenkette wurde wie eine Liste
+    behandelt (erstes ZEICHEN = "0"), und bei Listen gewann blind der erste
+    Eintrag — auch wenn das die Faxnummer war."""
+    if not telefone:
+        return ""
+    if isinstance(telefone, str):
+        return telefone.strip()
+    if isinstance(telefone, dict):
+        telefone = [telefone]
+    if not isinstance(telefone, list):
+        return ""
+    kandidaten = []
+    for eintrag in telefone:
+        if isinstance(eintrag, dict):
+            nummer = str(eintrag.get("number") or eintrag.get("value") or "").strip()
+            art = str(eintrag.get("type") or "").upper()
+        else:
+            nummer, art = str(eintrag or "").strip(), ""
+        if nummer and "FAX" not in art:
+            kandidaten.append((0 if art in ("MOBILE", "CELL") else 1 if art in ("PHONE", "") else 2,
+                               nummer))
+    kandidaten.sort(key=lambda k: k[0])
+    return kandidaten[0][1] if kandidaten else ""
+
+
+def _apify_leistung(text: Optional[str]) -> Tuple[Optional[int], Optional[int]]:
+    """'213 kW (290 hp)' / '213 kW (290 PS)' -> (213, 290)."""
+    if not text:
+        return None, None
+    kw = ps = None
+    m = re.search(r"(\d[\d.,]*)\s*kW", text, re.I)
+    if m:
+        kw = _apify_zahl(m.group(1))
+    m = re.search(r"(\d[\d.,]*)\s*(?:hp|PS)", text, re.I)
+    if m:
+        ps = _apify_zahl(m.group(1))
+    if kw and not ps:
+        ps = kw_to_ps(kw)
+    if ps and not kw:
+        kw = ps_to_kw(ps)
+    return kw, ps
+
+
+def _apify_bild_url(eintrag) -> Optional[str]:
+    """Bildeintrag -> volle URL. Der Actor liefert {'uri':
+    'img.classistatic.de/api/v1/mo-prod/images/<hash>'} ohne Schema und
+    ohne Groessen-Regel; mobile.de erwartet '?rule=mo-1024.jpg'."""
+    u = eintrag if isinstance(eintrag, str) else (
+        (eintrag or {}).get("uri") or (eintrag or {}).get("src")
+        or (eintrag or {}).get("url"))
+    if not u or not isinstance(u, str):
+        return None
+    u = u.strip()
+    if u.startswith("//"):
+        u = "https:" + u
+    elif not u.startswith("http"):
+        u = "https://" + u
+    letzter = u.rsplit("/", 1)[-1]
+    if "?" not in u and "." not in letzter:
+        u += "?rule=mo-1024.jpg"
+    return u
+
+
+def _apify_html_zu_text(html_text: str) -> str:
+    """htmlDescription -> lesbarer Text (Listenpunkte/Umbrueche erhalten)."""
+    if not html_text:
+        return ""
+    t = re.sub(r"(?i)<\s*(br|/li|/p|/ul|/ol)\s*/?>", "\n", html_text)
+    t = re.sub(r"(?i)<\s*li[^>]*>", "- ", t)
+    t = re.sub(r"<[^>]+>", "", t)
+    t = _htmllib.unescape(t)
+    return re.sub(r"\n{3,}", "\n\n", t).strip()
+
+
+def _parse_apify_item(item: dict, ad_id: str, url: Optional[str] = None) -> Dict[str, Any]:
+    """Ein Datensatz des Actors -> internes Fahrzeug-Schema (wie _parse_ad_xml)."""
+    make_label = ((item.get("make") or {}).get("localized")
+                  if isinstance(item.get("make"), dict) else item.get("make")) \
+                 or item.get("makeKey") or ""
+    model_label = ((item.get("model") or {}).get("localized")
+                   if isinstance(item.get("model"), dict) else item.get("model")) \
+                  or item.get("modelKey") or ""
+
+    preis = None
+    waehrung = None
+    price_type = None
+    mwst_ausweisbar = None
+    p = item.get("price")
+    if isinstance(p, dict):
+        # Pruefbericht 20.09.2026 (S-10): nettoAmount ist KEIN Listenpreis —
+        # vorher stand dann der Nettobetrag (20.042 statt 23.850 €) als Preis
+        # im Vergleich und im Beweisdokument.
+        for knoten in (p.get("grs"), p.get("gross"), p):
+            if isinstance(knoten, dict) and isinstance(
+                    knoten.get("amount"), (int, float)):
+                preis = float(knoten["amount"])
+                # S-25: Waehrung aus dem gewaehlten Preisknoten (vorher fest EUR)
+                waehrung = str(knoten.get("currency") or p.get("currency") or "").strip() or None
+                break
+        # S-09: Preisart (FIXED/NEGOTIABLE) und MwSt-Ausweis, sofern geliefert
+        price_type = str(p.get("type") or "").strip().upper() or None
+        for schluessel in ("vatable", "vatDeductible", "vat_deductible"):
+            if isinstance(p.get(schluessel), bool):
+                mwst_ausweisbar = p[schluessel]
+                break
+    elif isinstance(p, (int, float)):
+        preis = float(p)
+
+    kw, ps = _apify_leistung(_apify_attr(item, "power"))
+    fuel_raw = _apify_attr(item, "fuel") or ""
+    gear_raw = _apify_attr(item, "transmission", "gearbox") or ""
+    cat_raw = str(item.get("category") or _apify_attr(item, "category") or "")
+
+    bilder = [b for b in (_apify_bild_url(e) for e in item.get("images") or [])
+              if b]
+
+    kontakt = item.get("contact") or {}
+    plz = stadt = None
+    # address2 kommt als 'DE-97078 Würzburg' (oder '97078 Würzburg').
+    adr2 = str(kontakt.get("address2") or "")
+    m = re.search(r"(\d{5})\s+(.+)", adr2)
+    if m:
+        plz, stadt = m.group(1), m.group(2).strip()
+    telefon = telefon_aus(kontakt.get("phones"))
+
+    beschreibung = _apify_html_zu_text(item.get("htmlDescription") or "")
+
+    schaden_text = (_apify_attr(item, "damageCondition") or "").lower()
+    unfall = zustand_unfall(item.get("isDamageCase"), schaden_text)
+
+    halter = _apify_zahl(_apify_attr(item, "numberOfPreviousOwners"))
+    erstzulassung, neufahrzeug = apify_erstzulassung(_apify_attr(item, "firstRegistration"))
+
+    return {
+        "mobile_ad_id": str(item.get("id") or ad_id),
+        "detail_url": item.get("url") or url
+                      or f"https://suchen.mobile.de/fahrzeuge/details.html?id={ad_id}",
+        "make": (item.get("makeKey") or make_label or "").upper(),
+        "make_label": make_label,
+        "model": item.get("modelKey") or model_label,
+        "model_label": model_label,
+        "model_description": item.get("subTitle") or item.get("title") or "",
+        "category": cat_raw,
+        "category_label": CATEGORY_LABELS.get(
+            cat_raw, _APIFY_CATEGORY_DE.get(cat_raw.lower(), cat_raw)),
+        # S-23: nur MM/JJJJ; "New"/"Neu" ist ein Neufahrzeug ohne Erstzulassung
+        "first_registration": erstzulassung,
+        "neufahrzeug": neufahrzeug,
+        "mileage": _apify_zahl(_apify_attr(item, "mileage")),
+        # 17.09.2026: mobile.de-Codes speichern (vorher "AUTOMATIC",
+        # "MANUAL GEARBOX", "ELECTRIC" — die kennt der mobile.de-Link nicht).
+        "fuel": kraftstoff_code(fuel_raw) or fuel_raw.upper(),
+        "fuel_label": _APIFY_FUEL_DE.get(fuel_raw.lower(), fuel_raw),
+        "gearbox": getriebe_code(gear_raw) or gear_raw.upper(),
+        "gearbox_label": _APIFY_GEAR_DE.get(
+            gear_raw.lower(), GEAR_LABELS.get(getriebe_code(gear_raw) or "", gear_raw)),
+        "power_kw": kw,
+        "power_ps": ps,
+        "displacement": _apify_zahl(_apify_attr(item, "cubicCapacity")),
+        "doors": tueren_text(_apify_attr(item, "doorCount")),   # S-19
+        "seats": _apify_zahl(_apify_attr(item, "numSeats")),
+        "color": _APIFY_COLOR_DE.get(
+            (_apify_attr(item, "color") or "").lower(),
+            _apify_attr(item, "color") or _apify_attr(item, "manufacturerColorName")),
+        "vin": None,
+        "license_plate": None,
+        "hu": {"new": "Neu"}.get((_apify_attr(item, "hu") or "").lower(),
+                                 _apify_attr(item, "hu")),
+        "previous_owners": str(halter) if halter is not None
+                           else extract_owners_from_text(beschreibung),
+        "accident_damaged": unfall,
+        "roadworthy": zustand_fahrbereit(item.get("readyToDrive"), schaden_text),
+        # Befund Ahmad 26.09.2026: memo23 liefert die Ausstattung englisch
+        # ("Alloy wheels", "Central locking") — hier auf Deutsch, damit sie
+        # im Vertrag, Protokoll und in der Fahrer-App deutsch steht.
+        "features": _ausstattung.liste_uebersetzen(item.get("features") or []),
+        "description": beschreibung,
+        "list_price": preis,
+        "currency": waehrung or "EUR",
+        "price_type": price_type,
+        "price_negotiable": preis_verhandelbar(price_type),
+        "mwst_ausweisbar": mwst_ausweisbar,
+        # Pruefbericht 20.09.2026 (S-16): kein Platzhalter "Händler"/
+        # "Privatverkäufer" als Name — er fuellte im Vertragsdialog das
+        # Pflichtfeld "Name / Firma", der echte Name wurde nie verlangt.
+        # Die Art steht in seller_type.
+        "seller_name": kontakt.get("name")
+                       or ((kontakt.get("person") or {}).get("name") if isinstance(kontakt.get("person"), dict) else None)
+                       or None,
+        # Beweisdokument: gewerblich/privat (privat: Name/Telefon nicht drucken)
+        "seller_type": {"DEALER": "haendler", "PRIVATE": "privat",
+                        "PRIVATE_SELLER": "privat"}.get(
+            str(kontakt.get("enumType") or "").upper()),
+        "seller_address": kontakt.get("address1"),
+        "seller_zip": plz,
+        "seller_city": stadt,
+        "seller_phone": telefon,
+        "seller_email": "",
+        "image_urls": bilder,
+        "images": bilder,
+        "image_count": len(bilder),
+    }
+
+
+_NEUFAHRZEUG = ("new", "neu", "neufahrzeug", "neuwagen")
+
+
+def apify_erstzulassung(roh) -> Tuple[Optional[str], bool]:
+    """(Erstzulassung "MM/JJJJ" oder None, Neufahrzeug?).
+
+    Pruefbericht 20.09.2026 (S-23): der Rohwert wurde uebernommen — "New"
+    blieb als Erstzulassung stehen, der Jahresfilter fiel dann still weg."""
+    s = str(roh or "").strip()
+    if not s:
+        return None, False
+    if s.lower() in _NEUFAHRZEUG:
+        return None, True
+    m = re.fullmatch(r"(\d{1,2})[./-](\d{4})", s)
+    if m:
+        return f"{int(m.group(1)):02d}/{m.group(2)}", False
+    m = re.fullmatch(r"(\d{4})-(\d{1,2})(?:-\d{1,2})?", s)      # 2019-06[-15]
+    if m:
+        return f"{int(m.group(2)):02d}/{m.group(1)}", False
+    if re.fullmatch(r"\d{4}", s):
+        return f"01/{s}", False
+    return None, False
+
+
+async def _fetch_from_apify(ad_id: str, url: Optional[str] = None) -> Optional[dict]:
+    """Einzelnes Inserat ueber den Apify-Actor abrufen (run-sync)."""
+    if not apify_enabled():
+        return None
+    if url and detail_looks_like_listing(url):
+        detail_url = url
+    else:
+        detail_url = f"https://suchen.mobile.de/fahrzeuge/details.html?id={ad_id}"
+    endpoint = (f"https://api.apify.com/v2/acts/{APIFY_MOBILE_ACTOR}"
+                f"/run-sync-get-dataset-items")
+    from listing_identity import ABRUF_ZU_LANGE_TEXT, AbrufDauertZuLange
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(float(APIFY_TIMEOUT_SEKUNDEN), connect=20.0),
+            verify=_SSL_CONTEXT,
+        ) as client:
+            r = await client.post(
+                endpoint,
+                # Token im Header statt als ?token=: sonst landet er ueber
+                # die httpx-Request-Logzeile im Backend-Log.
+                headers={"Authorization": f"Bearer {APIFY_TOKEN}"},
+                params=apify_lauf_parameter("APIFY_MOBILE_BUILD"),
+                json={"startUrls": [{"url": detail_url}], "maxItems": 1},
+            )
+            fehler = aus_http_antwort(r.status_code, r.text, "mobile.de")
+            if fehler is not None:
+                log.warning("Apify mobile.de: HTTP %s fuer %s: %s",
+                            r.status_code, ad_id, r.text[:300])
+                raise fehler
+            items = r.json()
+            if not isinstance(items, list) or (items and not isinstance(items[0], dict)):
+                # Kaputte/unerwartete Antwortform: Stoerung beim Dienst, kein
+                # Beleg fuer ein Offline-Inserat — Wiederholung erlaubt.
+                log.warning("Apify mobile.de: unerwartete Antwort fuer %s", ad_id)
+                raise AnbieterFehler(ART_AUSFALL, "mobile.de", "unerwartete Antwortform")
+            # Rollenprüfung 22.09.2026 (RP-202/RP-353): Leere Liste bzw. ein
+            # Element ohne Inhalt heisst "Inserat nicht (mehr) online". Vorher
+            # kam hier None zurueck -> RuntimeError: drei bezahlte Apify-Laeufe,
+            # das Tageslimit wurde zurueckgebucht (Umgehung) und der Sucher las
+            # "Technischer Fehler". Mit ListingGone zaehlt der Abruf (der Dienst
+            # wurde bezahlt), der Link-Job endet sofort, /mobile/compare
+            # antwortet 404 mit dieser Meldung.
+            if not items:
+                log.warning("Apify mobile.de: leere Antwort fuer %s — Inserat weg", ad_id)
+                raise ListingGone(INSERAT_WEG_MOBILE)
+            v = _parse_apify_item(items[0], ad_id, url=detail_url)
+            # Echter Lauf 09/2026: fuer eine nicht existierende Nummer liefert
+            # Apify EIN Element ohne Inhalt. Daraus wurde ein leeres Fahrzeug
+            # statt "Inserat nicht mehr online". Leer heisst: weg.
+            if not v or not (v.get("make") or v.get("model") or v.get("list_price")):
+                log.warning("Apify mobile.de: Antwort ohne Inhalt fuer %s — Inserat weg", ad_id)
+                raise ListingGone(INSERAT_WEG_MOBILE)
+            return v
+    except (AnbieterFehler, ListingGone):
+        raise
+    except httpx.TimeoutException:
+        # DP-04: Zeitueberschreitung ist ein "bitte gleich nochmal" (503 mit
+        # Retry-After), kein Anbieter-Ausfall (502).
+        log.warning("Apify mobile.de: Zeitueberschreitung (%s s) fuer %s",
+                    APIFY_TIMEOUT_SEKUNDEN, ad_id)
+        raise AbrufDauertZuLange(ABRUF_ZU_LANGE_TEXT)
+    except Exception as exc:
+        # Zeitueberschreitung / Netz / kaputte Antwort: klarer Text statt
+        # "konnte nicht geladen werden" (Audit 09/2026, Punkt 48).
+        log.exception("Apify mobile.de: Abruf fehlgeschlagen fuer %s", ad_id)
+        raise aus_ausnahme(exc, "mobile.de")
+
+
+def detail_looks_like_listing(url: str) -> bool:
+    """True fuer echte mobile.de-Inserats-URLs (nicht Suchseiten) — nur die
+    duerfen 1:1 an den Actor gehen, sonst wuerde eine eingefuegte SUCH-URL
+    hunderte Ergebnisse abrufen (Kosten!)."""
+    return bool(url) and "mobile.de" in url and (
+        "details.html" in url or "/auto-inserat/" in url)
 
 
 # -------------------- Mock fallback --------------------
@@ -293,7 +895,7 @@ def _mock_vehicle(ad_id: str) -> dict:
         "fuel": "DIESEL", "fuel_label": "Diesel",
         "gearbox": "MANUAL_GEAR", "gearbox_label": "Schaltgetriebe",
         "power_kw": 81, "power_ps": 110, "displacement": 1598,
-        "doors": "FOUR_OR_FIVE", "seats": 5, "color": "Weiß",
+        "doors": "4/5", "seats": 5, "color": "Weiß",
         "features": ["Klimaanlage", "Tempomat", "Bluetooth"],
         "description": "Demo-Fahrzeug.", "list_price": 8490.0, "currency": "EUR",
         "seller_name": "Demo Händler", "seller_zip": "10115", "seller_city": "Berlin",
@@ -309,10 +911,15 @@ async def cache_get(db, ad_id: str) -> Optional[dict]:
         return None
     expires_at = doc.get("expires_at")
     if expires_at:
-        ea = datetime.fromisoformat(expires_at) if isinstance(expires_at, str) else expires_at
-        if ea.tzinfo is None:
-            ea = ea.replace(tzinfo=timezone.utc)
-        if ea < datetime.now(timezone.utc):
+        # Pruefbericht 20.09.2026 (B-14): ein unlesbares expires_at warf
+        # ValueError bis zum 500 — jetzt gilt der Eintrag als abgelaufen.
+        try:
+            ea = datetime.fromisoformat(expires_at) if isinstance(expires_at, str) else expires_at
+            if ea.tzinfo is None:
+                ea = ea.replace(tzinfo=timezone.utc)
+            if ea < datetime.now(timezone.utc):
+                return None
+        except (ValueError, TypeError, AttributeError):
             return None
     return doc.get("data")
 
@@ -330,7 +937,7 @@ async def cache_set(db, ad_id: str, data: dict, ttl_minutes: int = 30):
     )
 
 
-async def get_vehicle(db, ad_id: str) -> dict:
+async def get_vehicle(db, ad_id: str, url: Optional[str] = None) -> dict:
     cached = await cache_get(db, ad_id)
     if cached:
         # Run the generic-model recovery on cached entries too — earlier
@@ -341,11 +948,31 @@ async def get_vehicle(db, ad_id: str) -> dict:
             pass
         return {**cached, "_source": "cache"}
     fresh = await _fetch_from_mobile_api(ad_id)
-    if not fresh:
-        fresh = _mock_vehicle(ad_id)
-        fresh["_source"] = "sandbox" if ad_id in _SANDBOX_BUNDLE else "mock"
-    else:
+    if fresh:
         fresh["_source"] = "api"
+    elif apify_enabled():
+        # Kein offizieller API-Zugang (oder Abruf leer): Apify-Scraper.
+        fresh = await _fetch_from_apify(ad_id, url)
+        if fresh:
+            fresh["_source"] = "apify"
+    if not fresh:
+        # Kein echtes Ergebnis. Nur im ausdrücklichen Sandbox-Modus dürfen
+        # Demo-Daten zurückgehen — sonst ehrlicher Fehler statt Fake-Daten.
+        if MOBILE_SANDBOX_MODE:
+            fresh = _mock_vehicle(ad_id)
+            fresh["_source"] = "sandbox" if ad_id in _SANDBOX_BUNDLE else "mock"
+        elif not mobile_quelle_verfuegbar():
+            raise MobileUnavailable(
+                "mobile.de ist nicht angebunden (Zugangsdaten fehlen). Bitte eine "
+                "kleinanzeigen.de-URL verwenden oder APIFY_TOKEN bzw. "
+                "MOBILE_API_USER/MOBILE_API_PASS in der .env setzen. "
+                "(Zum lokalen Testen: MOBILE_SANDBOX_MODE=true)"
+            )
+        else:
+            raise MobileUnavailable(
+                "Fahrzeug konnte bei mobile.de nicht geladen werden — Inserat evtl. "
+                "entfernt oder Abruf vorübergehend nicht möglich."
+            )
     # Defensive — _fetch_from_mobile_api already does this, but applying
     # again on mock/sandbox returns is harmless and keeps behavior uniform.
     try:
@@ -498,16 +1125,14 @@ def _enhance_generic_model(vehicle: Dict[str, Any]) -> Dict[str, Any]:
     if not make_entry:
         return vehicle
 
-    # Build the search text: prefer the listing title (model_description),
-    # then fall back to the first part of the body description.
+    # Pruefbericht 20.09.2026 (B-10): NUR der Titel (model_description) darf
+    # das Modell bestimmen. Ein Treffer in der Beschreibung ("Guenstiger als
+    # jeder Golf!") machte aus "Weitere Volkswagen" das Modell Golf — bis in
+    # Zwischenspeicher, Fahrzeug und Vertragsdialog. Aus der Beschreibung
+    # kommt hoechstens ein Vorschlag (model_vorschlag) fuer den Sucher.
     md = (vehicle.get("model_description") or "").strip()
     desc = (vehicle.get("description") or "").strip()
-    candidates_haystacks = []
-    if md:
-        candidates_haystacks.append(md)
-    if desc:
-        candidates_haystacks.append(desc[:600])
-    if not candidates_haystacks:
+    if not md and not desc:
         return vehicle
 
     raw_models = make_entry.get("models_raw") or []
@@ -528,13 +1153,15 @@ def _enhance_generic_model(vehicle: Dict[str, Any]) -> Dict[str, Any]:
                 return name
         return None
 
-    # Search each haystack in priority order.
-    for hs in candidates_haystacks:
-        matched = _try_match(hs)
-        if matched:
-            vehicle["model_label"] = matched
-            vehicle["model"] = matched.upper()
-            return vehicle
+    matched = _try_match(md) if md else None
+    if matched:
+        vehicle["model_label"] = matched
+        vehicle["model"] = matched.upper()
+        return vehicle
+    if desc:
+        vorschlag = _try_match(desc[:600])
+        if vorschlag:
+            vehicle["model_vorschlag"] = vorschlag
 
     # Fallback: if model_description contains useful info beyond the
     # brand name, surface it as the label even if no catalogue match.
@@ -576,6 +1203,45 @@ def _resolve_make(vehicle: dict) -> Tuple[Optional[str], Optional[Dict[str, Any]
     return None, None
 
 
+# Rollenprüfung 22.09.2026 (RP-419): Modellnamen, die AutoScout24/Kleinanzeigen
+# anders schreiben als der mobile.de-Katalog (normalisiert, je Marke). Ohne
+# Eintrag suchte der mobile.de-Link ueber die GANZE Marke.
+_MODELL_ALIASE = {
+    ("kia", "ceedsw"): "ceedsportswagon",          # AutoScout: "Ceed SW"
+    ("kia", "ceedsw" + "ceedsw"): "ceedsportswagon",  # "Ceed SW / cee'd SW"
+}
+
+# Rollenprüfung 22.09.2026 (RP-421): "T6.1 Multivan" -> "T6 Multivan". Der
+# Katalog kennt keine Facelift-Stufen; normalisiert wurde aus "T6.1" "t61…",
+# die Verkuerzung traf dann die Sammelgruppe "T6 (Alle)" — Transporter,
+# Multivan und California wurden gemeinsam verglichen.
+_GENERATION_PUNKT = re.compile(r"\b(T\d)\.\d\b", re.IGNORECASE)
+
+
+def _modell_kandidaten(vehicle: dict) -> list:
+    """Modellbezeichnungen in der Reihenfolge, in der sie aufgeloest werden:
+    je Feld zuerst die um die Facelift-Stufe vereinfachte Form, dann das
+    Original."""
+    raus: list = []
+    for cand in (vehicle.get("model_label"), vehicle.get("model")):
+        if not cand:
+            continue
+        vereinfacht = _GENERATION_PUNKT.sub(r"\1", str(cand))
+        for c in (vereinfacht, str(cand)):
+            if c not in raus:
+                raus.append(c)
+    return raus
+
+
+def modell_aufgeloest(vehicle: dict) -> Tuple[bool, bool]:
+    """(Marke erkannt, Modell erkannt) im mobile.de-Katalog — fuer die
+    Hinweise im Vergleich (RP-419)."""
+    make_id, make_entry = _resolve_make(vehicle)
+    if not make_id:
+        return False, False
+    return True, bool(_resolve_model(make_entry, vehicle))
+
+
 def _resolve_model(make_entry: Dict[str, Any], vehicle: dict) -> Optional[str]:
     """Return the mobile.de model id for the given vehicle within the
     given make. Tries (1) exact normalized match on model_label / model,
@@ -584,22 +1250,38 @@ def _resolve_model(make_entry: Dict[str, Any], vehicle: dict) -> Optional[str]:
     if not make_entry:
         return None
     models = make_entry.get("models") or {}
-    for cand in (vehicle.get("model_label"), vehicle.get("model")):
-        if not cand:
-            continue
+    marke_norm = _normalize(make_entry.get("raw_name") or "")
+    for cand in _modell_kandidaten(vehicle):
         norm = _normalize(cand)
         if not norm:
             continue
+        # Rollenprüfung 22.09.2026 (RP-419): bekannte Schreibweisen anderer
+        # Portale, die der mobile.de-Katalog anders nennt.
+        norm = _MODELL_ALIASE.get((marke_norm, norm), norm)
         if norm in models:
             return models[norm]
+        # Pruefbericht 20.09.2026 (B-03): zuerst die VOLLE Bezeichnung. Die
+        # Verkuerzung unten begann bei len-1 — 'CLS' wurde so zur CL-Klasse,
+        # 'GLS' zur GL-Klasse, 'Actros' zur A-Klasse, und das still als
+        # "aufgeloest". Jetzt: <Name>-Klasse, dann ein Katalogname, der mit
+        # dem vollen Namen beginnt ('SLS' -> 'SLS AMG').
+        treffer = sorted((n for n in models if n.startswith(norm + "klasse")), key=len)
+        if not treffer and len(norm) >= 3:
+            treffer = sorted((n for n in models if n.startswith(norm)), key=len)
+        if treffer:
+            return models[treffer[0]]
         # Prefix shrink — e.g. mobile.de catalogue has 'C-Klasse' (norm=cklasse)
         # but the ad reports model_label 'C 200' (norm=c200). Try shrinking
         # the candidate one char at a time and look for a model name that
         # *starts with* that prefix.
+        # B-03: die "<x>-Klasse"-Zuordnung nur fuer Typbezeichnungen MIT
+        # Ziffern ('C 200', 'ML 350'); reine Namen ('Passat Variant') nur auf
+        # einen exakt vorhandenen kuerzeren Namen ('Passat').
+        mit_ziffer = bool(re.search(r"\d", norm))
         for length in range(len(norm) - 1, 0, -1):
             prefix = norm[:length]
             for mname_norm, mid in models.items():
-                if mname_norm == prefix or mname_norm.startswith(prefix + "klasse"):
+                if mname_norm == prefix or (mit_ziffer and mname_norm.startswith(prefix + "klasse")):
                     return mid
             # Also try matching a model whose first token equals the prefix
             # (e.g. 'passatvariant' → first try 'passat' which exists).
@@ -620,8 +1302,9 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
     #   pw=MIN:MAX                  power range (kW)
     #   ft=PETROL                   fuel type
     #   tr=MANUAL_GEAR              transmission
-    #   c=OffRoad                   category
     #   dam=0/1                     damaged filter
+    # Runde 24 (11.09.2026): Kategorie (c=…), Navigation (f=NAVIGATION_SYSTEM)
+    # und Klimatisierung (climatisation=…) setzt der Link nicht mehr.
     # Mixing old long names (maxMileage, fuels, …) with `ms=` confuses
     # mobile.de's parser → some filters get silently dropped. So keep
     # everything in compact form.
@@ -649,7 +1332,7 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
 
     # Erstzulassung (compact: fr=YYYY:YYYY or fr=YYYY:)
     fr_year = _parse_first_registration(vehicle.get("first_registration", ""))
-    fr_rule = rules.get("first_registration", {"mode": "older_exact", "years": 1})
+    fr_rule = rules.get("first_registration") or {"mode": "older_exact", "years": 1}
     if fr_rule.get("mode") == "year_range":
         from_y = fr_rule.get("from")
         to_y = fr_rule.get("to")
@@ -666,8 +1349,15 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
 
     # Kilometer (compact: ml=MIN:MAX)
     km = vehicle.get("mileage")
-    km_rule = rules.get("mileage", {"mode": "plus", "value": 30000})
-    if km and km_rule.get("mode") != "ignore":
+    km_rule = rules.get("mileage") or {"mode": "plus", "value": 30000}
+    if km_rule.get("mode") == "custom":
+        # Nachpruefung Runde 10: Ein fester Bereich braucht keinen Fahrzeug-
+        # km — vorher fiel der Filter bei km=0 (falsy) still weg.
+        mn = int(km_rule["min"]) if km_rule.get("min") is not None else ""
+        mx = int(km_rule["max"]) if km_rule.get("max") is not None else ""
+        if mn != "" or mx != "":
+            params.append(("ml", f"{mn}:{mx}"))
+    elif km and km_rule.get("mode") != "ignore":
         mode = km_rule.get("mode")
         v = int(km_rule.get("value", 30000))
         if mode == "exact":
@@ -676,14 +1366,10 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
             params.append(("ml", f":{km + v}"))
         elif mode == "range":
             params.append(("ml", f"{max(0, km - v)}:{km + v}"))
-        elif mode == "custom":
-            mn = int(km_rule["min"]) if km_rule.get("min") is not None else ""
-            mx = int(km_rule["max"]) if km_rule.get("max") is not None else ""
-            params.append(("ml", f"{mn}:{mx}"))
 
     # Leistung (compact: pw=MIN:MAX in kW)
     kw = vehicle.get("power_kw")
-    pwr_rule = rules.get("power", {"mode": "tolerance_ps", "value": 5})
+    pwr_rule = (rules.get("power") or {"mode": "tolerance_ps", "value": 5})
     if kw and pwr_rule.get("mode") != "ignore":
         mode = pwr_rule.get("mode")
         if mode == "exact":
@@ -697,20 +1383,45 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
             mn = ps_to_kw(max(1, cur_ps - v_ps))
             mx = ps_to_kw(cur_ps + v_ps)
             params.append(("pw", f"{mn}:{mx}"))
+        elif mode == "min_ps":
+            # 15.09.2026 (Wunsch Ahmad): "-X PS und aufwaerts" — nur eine
+            # Untergrenze, nach oben offen (pw=MIN: wie fr=YYYY:).
+            v_ps = int(pwr_rule.get("value", 5))
+            cur_ps = vehicle.get("power_ps") or kw_to_ps(kw)
+            mn = ps_to_kw(max(1, int(cur_ps) - v_ps))
+            params.append(("pw", f"{mn}:"))
 
-    # Kraftstoff / Getriebe / Kategorie (compact)
-    if rules.get("fuel", {}).get("mode") == "exact" and vehicle.get("fuel"):
-        params.append(("ft", vehicle["fuel"]))
-    if rules.get("gearbox", {}).get("mode") == "exact" and vehicle.get("gearbox"):
-        params.append(("tr", vehicle["gearbox"]))
-    if rules.get("category", {}).get("mode") == "exact" and vehicle.get("category"):
-        params.append(("c", vehicle["category"]))
-    if rules.get("doors", {}).get("mode") == "exact" and vehicle.get("doors"):
-        params.append(("doors", str(vehicle["doors"])))
+    # Kraftstoff / Getriebe / Tueren (compact). Runde 24 (11.09.2026): keine
+    # Kategorie (c=…) mehr — der Filter ist fuer beide Portale entfallen,
+    # auch wenn gespeicherte Alt-Regeln noch "category" enthalten.
+    # 17.09.2026 (Ahmad: "ab und zu klappt Getriebe 1:1 nicht"): nie den
+    # Rohwert setzen — mobile.de kennt nur seine Codes (AUTOMATIC_GEAR, PETROL
+    # ...). Vorher kamen "AUTOMATIC", "SCHALTGETRIEBE" oder "BENZIN" in den
+    # Link, und mobile.de filterte still ohne Getriebe bzw. Kraftstoff.
+    if (rules.get("fuel") or {}).get("mode") == "exact":
+        ft = kraftstoff_code(vehicle.get("fuel"), vehicle.get("fuel_label"))
+        if ft:
+            params.append(("ft", ft))
+    if (rules.get("gearbox") or {}).get("mode") == "exact":
+        tr = getriebe_code(vehicle.get("gearbox"), vehicle.get("gearbox_label"))
+        if tr:
+            params.append(("tr", tr))
+    # Wunsch Ahmad 18.09.2026: Navi aus dem Inserat mitvergleichen. Der
+    # Parameter kommt aus einem echten, von Ahmad geprueften Suchlink
+    # (fe=NAVIGATION_SYSTEM). Ohne Navi im Inserat bleibt der Filter weg;
+    # wer gar nicht danach filtern will, stellt die Regel auf "ignore".
+    if (rules.get("navi") or {}).get("mode", "wenn_vorhanden") != "ignore" \
+            and hat_navigation(vehicle):
+        params.append(("fe", NAVI_CODE))
+    if (rules.get("doors") or {}).get("mode") == "exact":
+        # S-19: gespeichert ist die Anzeigeform ("4/5"), mobile.de braucht den Code
+        tueren = tueren_code(vehicle.get("doors"))
+        if tueren:
+            params.append(("doors", tueren))
 
     # Hubraum (kept long form — no documented compact equivalent)
     cc = vehicle.get("displacement")
-    cc_rule = rules.get("displacement", {"mode": "ignore"})
+    cc_rule = (rules.get("displacement") or {"mode": "ignore"})
     if cc and cc_rule.get("mode") in ("exact", "tolerance"):
         if cc_rule.get("mode") == "exact":
             params.append(("minCubicCapacity", str(cc)))
@@ -721,11 +1432,11 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
             params.append(("maxCubicCapacity", str(cc + v)))
 
     # Schaden (compact: dam=0 = nicht anzeigen, dam=1 = anzeigen)
-    if rules.get("damage", {}).get("mode") == "no_accident":
+    if (rules.get("damage") or {}).get("mode") == "no_accident":
         params.append(("dam", "0"))
 
     # Anbieter (kept long — no documented compact equivalent)
-    seller_mode = rules.get("seller", {}).get("mode", "all")
+    seller_mode = (rules.get("seller") or {}).get("mode", "all")
     if seller_mode == "dealer":
         params.append(("sellerType", "DEALER"))
     elif seller_mode == "private":
@@ -744,69 +1455,51 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
             if code:
                 params.append(("cn", code))
 
-    # Ausstattungs-Filter: Navigation
-    feats = rules.get("features") or {}
-    vehicle_features = set(
-        (f or "").lower() for f in (vehicle.get("features") or [])
-    )
-    nav_rule = feats.get("navigation") or {}
-    nav_mode = nav_rule.get("mode", "ignore")
-    if nav_mode == "always":
-        params.append(("f", "NAVIGATION_SYSTEM"))
-    elif nav_mode == "exact":
-        if any(("navi" in vf or "navigation" in vf) for vf in vehicle_features):
-            params.append(("f", "NAVIGATION_SYSTEM"))
+    # Runde 24 (11.09.2026): Ausstattung "Navigation" (f=NAVIGATION_SYSTEM)
+    # und Klimatisierung (climatisation=…) filtern nicht mehr — beide gab es
+    # nur bei mobile.de, der AutoScout-Link setzte sie nie um. Gespeicherte
+    # Alt-Regeln mit features.navigation / climatisation werden hier bewusst
+    # NICHT mehr ausgewertet.
 
-    # Klimatisierung – mobile.de Single-Select-Enum unter `climatisation=`.
-    # Werte: AUTOMATIC_CLIMATISATION, MANUAL_CLIMATISATION,
-    # AUTOMATIC_CLIMATISATION_2_ZONES, _3_ZONES, _4_ZONES, NO_CLIMATISATION.
-    climate_rule = rules.get("climatisation") or {}
-    climate_mode = climate_rule.get("mode", "ignore")
-    valid_climate = {
-        "AUTOMATIC_CLIMATISATION",
-        "MANUAL_CLIMATISATION",
-        "AUTOMATIC_CLIMATISATION_2_ZONES",
-        "AUTOMATIC_CLIMATISATION_3_ZONES",
-        "AUTOMATIC_CLIMATISATION_4_ZONES",
-        "NO_CLIMATISATION",
-    }
-    if climate_mode == "always":
-        val = climate_rule.get("value")
-        if val in valid_climate:
-            params.append(("climatisation", val))
-    elif climate_mode == "exact":
-        # Mappt anhand der Ausstattungs-Strings, was das Fahrzeug konkret hat.
-        if any("klimaautomat" in vf or "automatic climat" in vf for vf in vehicle_features):
-            params.append(("climatisation", "AUTOMATIC_CLIMATISATION"))
-        elif any("klimaanl" in vf or "klima" in vf for vf in vehicle_features):
-            params.append(("climatisation", "MANUAL_CLIMATISATION"))
-
-    # Sortierung – billigste zuerst (mobile.de UI uses sb=p&od=up)
-    params.append(("sb", "p"))
-    params.append(("od", "up"))
+    # Sortierung aus dem Regelpaket (Runde 11: vorher immer sb=p&od=up,
+    # obwohl "Kilometer zuerst" o.ae. gespeichert werden konnte).
+    # mobile.de: sb=p Preis, sb=ml Kilometer, sb=fr Erstzulassung, sb=rel
+    # Relevanz; od=up/down.
+    params.extend(_MOBILE_SORT.get(rules.get("sort") or "price_asc", _MOBILE_SORT["price_asc"]))
 
     return f"https://suchen.mobile.de/fahrzeuge/search.html?{urlencode(params, quote_via=quote)}"
 
 
+_MOBILE_SORT = {
+    "price_asc": [("sb", "p"), ("od", "up")],
+    "price_desc": [("sb", "p"), ("od", "down")],
+    "mileage_asc": [("sb", "ml"), ("od", "up")],
+    "mileage_desc": [("sb", "ml"), ("od", "down")],
+    "first_registration_desc": [("sb", "fr"), ("od", "down")],
+    "first_registration_asc": [("sb", "fr"), ("od", "up")],
+    "relevance": [("sb", "rel")],
+}
+
+
+# Runde 24 (11.09.2026): Standard-Regeln ohne Kategorie, Navigation
+# (features) und Klimatisierung — diese Filter gibt es fuer beide Portale
+# nicht mehr (regeln.ENTFERNTE_REGELN / ENTFERNTE_FEATURES).
+# Pruefbericht 20.09.2026 (B-08): result_count entfaellt — kein Link-Bauer
+# und keine Oberflaeche hat die Trefferzahl je ausgewertet (regeln.py
+# verwirft Altwerte still).
 DEFAULT_RULES = {
     "first_registration": {"mode": "older_exact", "years": 1},
     "mileage": {"mode": "plus", "value": 30000},
     "power": {"mode": "tolerance_ps", "value": 5},
     "fuel": {"mode": "exact"},
     "gearbox": {"mode": "exact"},
-    "category": {"mode": "exact"},
+    "navi": {"mode": "wenn_vorhanden"},
     "doors": {"mode": "ignore"},
     "displacement": {"mode": "ignore"},
     "damage": {"mode": "no_accident"},
     "seller": {"mode": "all"},
     "country": {"mode": "exact", "codes": ["DE"]},
-    "radius": {"mode": "country"},
     "sort": "price_asc",
-    "result_count": 4,
-    "features": {
-        "navigation": {"mode": "ignore"},
-    },
-    "climatisation": {"mode": "ignore", "value": "AUTOMATIC_CLIMATISATION"},
 }
 
 
@@ -818,17 +1511,11 @@ DEFAULT_EXPORT_RULES = {
     "power": {"mode": "tolerance_ps", "value": 10},
     "fuel": {"mode": "exact"},
     "gearbox": {"mode": "exact"},
-    "category": {"mode": "exact"},
+    "navi": {"mode": "wenn_vorhanden"},
     "doors": {"mode": "ignore"},
     "displacement": {"mode": "ignore"},
     "damage": {"mode": "ignore"},
     "seller": {"mode": "all"},
     "country": {"mode": "all"},
-    "radius": {"mode": "country"},
     "sort": "price_asc",
-    "result_count": 4,
-    "features": {
-        "navigation": {"mode": "ignore"},
-    },
-    "climatisation": {"mode": "ignore", "value": "AUTOMATIC_CLIMATISATION"},
 }

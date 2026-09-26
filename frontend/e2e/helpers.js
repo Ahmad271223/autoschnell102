@@ -1,0 +1,334 @@
+/*
+ * Hilfsfunktionen der Playwright-E2E-Suite.
+ *
+ * - API-Client auf fetch-Basis (Node >= 18) gegen E2E_API_URL
+ * - Testdaten mit Zufalls-Suffix (E-Mails @e2etest-mail.de), Aufraeumen per API
+ * - Anmeldung im Browser ueber localStorage-Token statt Formular
+ *
+ * Zugangsdaten der geseedeten Konten kommen aus der Umgebung (CI) oder — nur
+ * lokal — aus backend/.env. Sie tauchen weder im Code noch in Ausgaben auf.
+ *
+ * WICHTIG (Single-Session): jede Anmeldung eines Kontos macht dessen fruehere
+ * Tokens ungueltig. Deshalb laeuft die Suite mit EINEM Worker, der Super-Admin-
+ * Token wird gecacht und bei 401 einmal neu geholt. Ein Token, das eine
+ * Browser-Seite benutzt, darf waehrenddessen nicht durch ein neues Login
+ * desselben Kontos ersetzt werden.
+ */
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+
+const API_URL = (process.env.E2E_API_URL || "http://localhost:8002/api").replace(/\/+$/, "");
+const PASSWORD = "E2eTest123!x";           // >= 10 Zeichen, Ziffer + Sonderzeichen
+const MAIL_DOMAIN = "e2etest-mail.de";
+
+function backendEnv() {
+  const file = path.resolve(__dirname, "..", "..", "backend", ".env");
+  const out = {};
+  if (!fs.existsSync(file)) return out;
+  for (const raw of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const m = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+    if (m) out[m[1]] = m[2].trim().replace(/^(['"])(.*)\1$/, "$2");
+  }
+  return out;
+}
+const ENV = backendEnv();
+const cred = (k) => process.env[`E2E_${k}`] || process.env[k] || ENV[k] || "";
+const SUPER_ADMIN = { username: cred("SUPER_ADMIN_USERNAME"), password: cred("SUPER_ADMIN_PASSWORD") };
+
+// ---------- API-Client ----------
+class ApiError extends Error {
+  constructor(method, p, status, body) {
+    super(`${method} ${p} -> ${status}: ${typeof body === "string" ? body : JSON.stringify(body)}`);
+    this.status = status;
+    this.body = body;
+  }
+}
+
+async function api(method, p, { token, body, ok = true } = {}) {
+  const headers = { Accept: "application/json" };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  const res = await fetch(`${API_URL}${p}`, {
+    method, headers, body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await res.text();
+  let data = text;
+  try { data = text ? JSON.parse(text) : null; } catch { /* Klartext */ }
+  if (ok && !res.ok) throw new ApiError(method, p, res.status, data);
+  return { status: res.status, data };
+}
+const get = (p, o) => api("GET", p, o).then((r) => r.data);
+const post = (p, body, o) => api("POST", p, { ...o, body: body ?? {} }).then((r) => r.data);
+const put = (p, body, o) => api("PUT", p, { ...o, body }).then((r) => r.data);
+const del = (p, o) => api("DELETE", p, o).then((r) => r.data);
+
+// Kontonummer (13.09.2026): Anmeldung mit der Kontonummer (Chef '10023',
+// Sucher '10023-2', Kaeufer/Fahrer eigene Nummer) bzw. dem Benutzernamen des
+// Super-Admins. weg: "auth" (App), "buyer" (Marktplatz), "driver" (Fahrer-App).
+const LOGIN_WEG = { auth: "/auth/login", buyer: "/buyer/login", driver: "/driver/login" };
+async function login(kennung, password, weg = "auth") {
+  const d = await post(LOGIN_WEG[weg], { kontonummer: String(kennung), password });
+  return d.token;
+}
+
+// Kontonummer (13.09.2026): Anmeldung ueber das FORMULAR der jeweiligen Maske.
+// konto: Objekt aus createFirma/createSucher/createDriver/createBuyer (Feld
+// kontonummer) oder SUPER_ADMIN (Feld username). Optionen: passwort (z.B.
+// falsches), pfad (z.B. /login?next=…), navigieren=false (Seite ist schon offen).
+const LOGIN_MASKE = {
+  auth: { pfad: "/login", kennung: "login-kontonummer", passwort: "login-password", senden: "login-submit" },
+  driver: { pfad: "/fahrer/login", kennung: "driver-login-kontonummer", passwort: "driver-login-password", senden: "driver-login-submit" },
+  buyer: { pfad: "/markt/login", kennung: "buyer-login-kontonummer", passwort: "buyer-login-password", senden: "buyer-login-submit" },
+};
+async function formLogin(page, bereich, konto, { passwort, pfad, navigieren = true } = {}) {
+  const maske = LOGIN_MASKE[bereich];
+  if (!maske) throw new Error(`Unbekannte Anmeldemaske: ${bereich}`);
+  const kennung = konto.kontonummer ?? konto.username;
+  if (!kennung) throw new Error("formLogin: Konto ohne Kontonummer/Benutzername");
+  if (navigieren) await page.goto(pfad || maske.pfad);
+  await page.getByTestId(maske.kennung).fill(String(kennung));
+  await page.getByTestId(maske.passwort).fill(passwort ?? konto.password);
+  await page.getByTestId(maske.senden).click();
+}
+
+let superToken = null;
+let superLogin = null;     // laufende Anmeldung — gleichzeitige Aufrufer teilen sie sich
+async function superAdmin({ fresh = false } = {}) {
+  if (superToken && !fresh) return superToken;
+  if (!superLogin) {
+    superLogin = (async () => {
+      if (!SUPER_ADMIN.username || !SUPER_ADMIN.password) {
+        throw new Error("SUPER_ADMIN_USERNAME / SUPER_ADMIN_PASSWORD fehlen (Umgebung oder backend/.env)");
+      }
+      superToken = await login(SUPER_ADMIN.username, SUPER_ADMIN.password);
+      return superToken;
+    })().finally(() => { superLogin = null; });
+  }
+  return superLogin;
+}
+
+// Super-Admin-Aufruf; bei 401 (Sitzung anderweitig ersetzt, z.B. durch das
+// Formular-Login im Browser) einmal mit frischem Token wiederholen.
+async function withSuper(fn) {
+  const used = await superAdmin();
+  try {
+    return await fn(used);
+  } catch (e) {
+    if (!(e instanceof ApiError) || e.status !== 401) throw e;
+    const token = superToken !== used ? superToken : await superAdmin({ fresh: true });
+    return fn(token);
+  }
+}
+const superGet = (p) => withSuper((t) => get(p, { token: t }));
+const superPost = (p, body) => withSuper((t) => post(p, body, { token: t }));
+const superPut = (p, body) => withSuper((t) => put(p, body, { token: t }));
+const superDel = (p) => withSuper((t) => del(p, { token: t }));
+
+// ---------- Testdaten ----------
+const suffix = () => crypto.randomBytes(4).toString("hex");
+const mail = (prefix, s) => `${prefix}-${s}@${MAIL_DOMAIN}`;
+
+/** Kalendertag JJJJ-MM-TT in lokaler Zeit (wie die Oberflaeche rechnet). */
+function isoDate(offsetDays = 0) {
+  const d = new Date();
+  d.setDate(d.getDate() + offsetDays);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+// Kontonummer (13.09.2026): Konten legt ausschliesslich der Super-Admin an; die
+// Antwort liefert die Kontonummer, mit der sich das Konto EINMAL anmeldet
+// (Single-Session). Die Kontakt-E-Mail bleibt — sweepLeftovers erkennt Reste
+// weiter am E2E_MAIL-Muster.
+
+/** Firma (Haendler-Hauptaccount) ohne Abo, angelegt vom Super-Admin. */
+async function createFirma({ s = suffix(), companyName } = {}) {
+  const email = mail("e2e-chef", s);
+  const company_name = companyName || `E2E Autohaus ${s}`;
+  const r = await superPost("/admin/users", { email, password: PASSWORD, company_name, plan_type: "none" });
+  const token = await login(r.kontonummer, PASSWORD);
+  return {
+    s, email, kontonummer: r.kontonummer, kundenNr: r.kunden_nr, password: PASSWORD,
+    userId: r.user_id, dealerId: r.dealer_id, companyName: company_name, token,
+  };
+}
+
+/** Sucher der Firma; abo=true schaltet die Sucher-Funktion (Monat) frei. */
+async function createSucher(firma, { s = suffix(), abo = false } = {}) {
+  const email = mail("e2e-sucher", s);
+  const firstName = "Erika";
+  const lastName = `Sucher${s}`;
+  const r = await superPost(`/admin/dealers/${firma.dealerId}/sucher`,
+    { email, password: PASSWORD, first_name: firstName, last_name: lastName });
+  if (abo) await superPost(`/admin/sucher/${r.sucher_id}/abo`, { plan: "monthly" });
+  const token = await login(r.kontonummer, PASSWORD);
+  return {
+    s, email, kontonummer: r.kontonummer, password: PASSWORD, userId: r.sucher_id,
+    dealerId: firma.dealerId, name: `${firstName} ${lastName}`, token,
+  };
+}
+
+// createNormalAdmin gibt es nicht mehr: seit Runde 12 ist die Rolle "admin"
+// nicht vergebbar (Beschluss: nur der Super-Admin ist Betreiber).
+
+/** Fahrer-Konto (Kontonummer + FD-Code), angelegt vom Super-Admin. */
+async function createDriver({ s = suffix() } = {}) {
+  const email = mail("e2e-fahrer", s);
+  const displayName = `Fahrer ${s}`;
+  const r = await superPost("/admin/drivers", { email, password: PASSWORD, display_name: displayName });
+  const token = await login(r.kontonummer, PASSWORD, "driver");
+  return {
+    s, email, kontonummer: r.kontonummer, password: PASSWORD, id: r.driver_id,
+    driverCode: r.driver_code, displayName, token,
+  };
+}
+
+/** Zwischenhaendler (b2b_buyer); access=true schaltet den Marktplatz frei. */
+async function createBuyer({ s = suffix(), access = true } = {}) {
+  const email = mail("e2e-kaeufer", s);
+  const companyName = `E2E Zwischenhandel ${s}`;
+  const r = await superPost("/admin/buyers", {
+    company_name: companyName, contact_name: "Kai Kaeufer", email, password: PASSWORD,
+    phone: "0511 123456", b2b_nachweis: true,
+  });
+  if (access) await superPost(`/admin/buyers/${r.user_id}/access`, { plan: "monthly" });
+  const token = await login(r.kontonummer, PASSWORD, "buyer");
+  return { s, email, kontonummer: r.kontonummer, password: PASSWORD, id: r.user_id, companyName, token };
+}
+
+async function createAppointment(firma, body) {
+  return post("/appointments", { title: "Fahrzeug abholen", status: "offen", pickup_time: "10:00", ...body },
+    { token: firma.token });
+}
+
+/** Manuelles Fahrzeug -> Inserat -> verkaufsbereit -> veroeffentlicht (public). */
+// Regel vom 20.09.2026 (Ahmad): veroeffentlichen geht NUR mit eigenen Fotos —
+// aus dem Portal-Inserat wird keines uebernommen. Der Upload prueft die
+// Magic Bytes, kein echtes Bild noetig (storage_service.validate_image_bytes).
+const TEST_FOTO = (() => {
+  const bytes = Buffer.alloc(4102);
+  bytes.set([0xff, 0xd8, 0xff, 0xe0], 0);           // JPEG-Kennung
+  for (let i = 4; i < 4100; i += 1) bytes[i] = (i * 7) % 256;
+  bytes.set([0xff, 0xd9], 4100);                    // JPEG-Ende
+  return `data:image/jpeg;base64,${bytes.toString("base64")}`;
+})();
+
+async function publishListing(firma, { pricePublic = 19900, priceB2b = 18500 } = {}) {
+  await superPut(`/admin/dealers/${firma.dealerId}/sale-plan`, { tier: "s5" });
+  await put("/dealer/marketplace-profile", { public: true, description: "E2E-Testhaendler" }, { token: firma.token });
+  const v = await post("/vehicles/manual", {
+    make_label: "BMW", model_label: "320d", model_description: `E2E Testwagen ${firma.s}`,
+    first_registration: "03/2019", mileage: 85000, fuel_label: "Diesel", gearbox_label: "Automatik",
+    power_kw: 140, power_ps: 190, color: "Schwarz", purchase_price: 15000,
+  }, { token: firma.token });
+  const draft = await post(`/resale/draft/${v.id}`, {}, { token: firma.token });
+  await put(`/resale/${draft.id}`, { price_public: pricePublic, price_b2b: priceB2b }, { token: firma.token });
+  await post(`/resale/${draft.id}/status`, { status: "verkaufsbereit" }, { token: firma.token });
+  // Ohne eigenes Foto antwortet /publish seit dem 20.09.2026 mit 400.
+  await post(`/resale/${draft.id}/photos`, { photos_b64: [TEST_FOTO] }, { token: firma.token });
+  await post(`/resale/${draft.id}/publish`, { visibility: "public" }, { token: firma.token });
+  return { vehicleId: v.id, listingId: draft.id, title: draft.title };
+}
+
+// ---------- Vergleich gegen den Anbieter-Mock (Pruefbericht 20.09.2026, T-14/T-16/T-25) ----------
+/** Synthetischer Kleinanzeigen-Link — im Mock-Modus (MOCK_PROVIDER_FETCH=true)
+ *  liefert das Backend dafuer ein erfundenes Fahrzeug (vehicle._mock). */
+function mockInseratUrl(tag = "e2e") {
+  const nr = String(Math.floor(Math.random() * 1e8)).padStart(8, "0");
+  return `https://www.kleinanzeigen.de/s-anzeige/${tag}/97${nr}-216-1`;
+}
+
+/** Vergleich per API als Sucher/Chef mit Abo. null, wenn das Backend NICHT im
+ *  Mock-Modus laeuft (dann wuerde ein echter Anbieter-Abruf ausgeloest). */
+async function compareMock(konto, tag = "e2e") {
+  const r = await api("POST", "/mobile/compare", { token: konto.token, body: { url: mockInseratUrl(tag) }, ok: false });
+  if (r.status !== 200 || !r.data?.vehicle?._mock) return null;
+  return { vehicleId: r.data.vehicle_id || r.data.vehicle?.id, antwort: r.data };
+}
+
+// ---------- Aufraeumen (bestmoeglich, Fehler nur als Warnung) ----------
+// Nacheinander, nicht parallel: ein 401 wuerde sonst mehrere gleichzeitige
+// Neu-Anmeldungen ausloesen, die sich gegenseitig die Sitzung wegnehmen.
+async function versuchen(label, fn) {
+  try { await fn(); } catch (e) { console.warn(`[e2e cleanup] ${label}: ${e?.message || e}`); }
+}
+
+async function cleanup({ firmen = [], admins = [], drivers = [], buyers = [] } = {}) {
+  for (const a of admins.filter(Boolean)) {
+    await versuchen(`Admin ${a.email}`, async () => {
+      await superPut(`/admin/users/${a.userId}`, { role: "dealer" });
+      await superDel(`/admin/users/${a.userId}?firma_loeschen=true`);
+    });
+  }
+  for (const f of firmen.filter(Boolean)) {
+    await versuchen(`Firma ${f.email}`, () => superDel(`/admin/users/${f.userId}?firma_loeschen=true`));
+  }
+  for (const d of drivers.filter(Boolean)) {
+    await versuchen(`Fahrer ${d.email}`, () => superDel(`/admin/drivers/${d.id}`));
+  }
+  for (const b of buyers.filter(Boolean)) {
+    await versuchen(`Kaeufer ${b.email}`, () => superDel(`/admin/users/${b.id}`));
+  }
+}
+
+/**
+ * Sicherheitsnetz vor und nach dem Lauf: Reste frueherer (abgebrochener)
+ * Laeufe entfernen — ausschliesslich Konten, die DIESE Suite anlegt
+ * (e2e-chef-/e2e-sucher-/e2e-fahrer-/e2e-kaeufer-<hex>@e2etest-mail.de);
+ * Testdaten der Backend-Pytest-Suiten bleiben unangetastet.
+ */
+const E2E_MAIL = new RegExp(`^e2e-(chef|sucher|fahrer|kaeufer)-[0-9a-f]{8}@${MAIL_DOMAIN.replace(/\./g, "\\.")}$`, "i");
+async function sweepLeftovers() {
+  const users = (await superGet("/admin/users")).filter((u) => E2E_MAIL.test(u.email || "") && !u.is_super_admin);
+  const drivers = (await superGet("/admin/drivers")).filter((d) => E2E_MAIL.test(d.email || ""));
+  const entfernt = [];
+  const firmen = users.filter((u) => u.role === "dealer" || u.role === "admin");
+  for (const u of firmen) {
+    await versuchen(`Rest-Firma ${u.email}`, async () => {
+      if (u.role === "admin") await superPut(`/admin/users/${u.id}`, { role: "dealer" });
+      await superDel(`/admin/users/${u.id}?firma_loeschen=true`);
+      entfernt.push(u.email);
+    });
+  }
+  for (const u of users.filter((u) => !firmen.includes(u))) {          // Sucher, Kaeufer
+    await versuchen(`Rest-Konto ${u.email}`, async () => {
+      try { await superDel(`/admin/users/${u.id}`); entfernt.push(u.email); }
+      catch (e) { if (!(e instanceof ApiError && e.status === 404)) throw e; }   // schon mit der Firma weg
+    });
+  }
+  for (const d of drivers) {
+    await versuchen(`Rest-Fahrer ${d.email}`, async () => { await superDel(`/admin/drivers/${d.id}`); entfernt.push(d.email); });
+  }
+  if (entfernt.length) console.log(`[e2e] Reste frueherer Laeufe entfernt: ${entfernt.join(", ")}`);
+  return entfernt.length;
+}
+
+// ---------- Browser ----------
+const TOKEN_KEY = { app: "ah_token", buyer: "ah_buyer_token", driver: "ah_driver_token" };
+
+/** Token vor jeder Navigation in localStorage legen (kein Formular-Login). */
+async function authPage(page, key, token) {
+  await page.addInitScript(([k, v]) => { window.localStorage.setItem(k, v); }, [TOKEN_KEY[key] || key, token]);
+}
+
+/** Zweite Rolle im selben Test: eigener Browser-Kontext mit Token. */
+async function newAuthedPage(browser, key, token, options = {}) {
+  const context = await browser.newContext(options);
+  await context.addInitScript(([k, v]) => { window.localStorage.setItem(k, v); }, [TOKEN_KEY[key] || key, token]);
+  const page = await context.newPage();
+  return { context, page };
+}
+
+module.exports = {
+  API_URL, PASSWORD, SUPER_ADMIN, ApiError,
+  api, get, post, put, del, login, formLogin, LOGIN_MASKE,
+  superAdmin, superGet, superPost, superPut, superDel,
+  suffix, isoDate,
+  createFirma, createSucher, createDriver, createBuyer,
+  createAppointment, publishListing, cleanup, sweepLeftovers,
+  authPage, newAuthedPage,
+  TEST_FOTO, mockInseratUrl, compareMock,
+};

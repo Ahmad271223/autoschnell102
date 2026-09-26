@@ -15,36 +15,111 @@ from __future__ import annotations
 
 import io
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from xml.sax.saxutils import escape as _xe  # escape user-supplied text in Paragraph HTML
 
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_LEFT, TA_CENTER
+from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
+from reportlab.pdfgen import canvas as _rl_canvas
 from reportlab.platypus import (
-    BaseDocTemplate, Flowable, Frame, KeepTogether, PageBreak, PageTemplate,
-    Paragraph, Spacer, Table, TableStyle,
+    BaseDocTemplate, Flowable, Frame, Image, KeepTogether, PageBreak,
+    PageTemplate, Paragraph, Spacer, Table, TableStyle,
 )
 
-PRIMARY = colors.HexColor("#0A0A0A")
+# Rollenprüfung 22.09.2026 (RP-071/170): Text auf eine Breite kuerzen (mit
+# "…"). Pruefbericht 20.09.2026 (P-08): wohnt jetzt in pdf_schrift, weil der
+# Kaufvertrag dieselbe Kuerzung braucht; der alte Name bleibt fuer Aufrufer.
+from pdf_schrift import auf_breite as _auf_breite
+
+# Einheitliches Design mit dem Kaufvertrag (pdf_service.py):
+# Schwarz/Zinc + roter Akzent, Abschnittsbalken, Fußzeile mit Seitenzahlen.
+PRIMARY = colors.HexColor("#18181B")
 ACCENT = colors.HexColor("#FF3B30")
 GREY = colors.HexColor("#71717A")
 DIVIDER = colors.HexColor("#E4E4E7")
 LIGHT_BG = colors.HexColor("#F4F4F5")
+DARK = colors.HexColor("#0A0A0A")
 
-# Blaues Corporate-Design für das Abholprotokoll (Behörden-/Übergabe-Look).
-BLUE = colors.HexColor("#1E5BB8")          # Header-Bars + Akzente
-BLUE_DARK = colors.HexColor("#164490")     # Hover/Schatten
-BLUE_LINK = colors.HexColor("#1E5BB8")     # Auftrags-Nr + E-Mail
-BLUE_SOFT = colors.HexColor("#EAF1FB")     # Optional Hintergrundtöne
+PAGE_W, PAGE_H = A4
+MARGIN = 1.8 * cm
+CONTENT_W = PAGE_W - 2 * MARGIN
+# Pruefbericht 20.09.2026 (P-32): Der Rahmen (Frame) polstert innen 6 pt je
+# Seite — feste Tabellenbreiten von 17,5 cm ragten rund 3 mm in den rechten
+# Rand. Alle festen Breiten (Checkliste, Bemerkungen, technischer Zustand,
+# Abschnitt 1) leiten sich jetzt anteilig aus dieser Breite ab.
+TABELLEN_B = CONTENT_W - 12
+
+
+def _anteilig(*breiten: float) -> List[float]:
+    """Spaltenbreiten (Verhaeltnis, in cm gedacht) auf TABELLEN_B skalieren."""
+    summe = float(sum(breiten))
+    return [TABELLEN_B * b / summe for b in breiten]
 
 # Damage sketches live in the frontend's public folder. The backend just
 # reads them as static assets. Alle Skizzen sind 1536 × 1024 px (Mai 2026).
-SKETCH_DIR = Path("/app/frontend/public/damage")
+# Pfad relativ zu dieser Datei aufloesen (funktioniert lokal auf Windows UND
+# im Container); /app/... bleibt als Fallback fuer das alte Deployment.
+_LOCAL_SKETCH_DIR = Path(__file__).resolve().parent.parent / "frontend" / "public" / "damage"
+# Befund Ahmad 10.09.2026 ("Fahrer-Protokoll ohne Bilder, wo genau"): Das
+# Backend-Image enthaelt NUR backend/ (Dockerfile: COPY . .) — der Ordner
+# frontend/public/damage existiert im Container nicht, die Skizzen fehlten
+# in JEDEM Abholauftrag und Protokoll in Produktion. Die Skizzen liegen
+# deshalb jetzt zusaetzlich unter backend/assets/damage und werden zuerst
+# dort gesucht.
+_EIGENER_SKETCH_DIR = Path(__file__).resolve().parent / "assets" / "damage"
+if (_EIGENER_SKETCH_DIR / "front.png").exists():
+    SKETCH_DIR = _EIGENER_SKETCH_DIR
+elif _LOCAL_SKETCH_DIR.exists():
+    SKETCH_DIR = _LOCAL_SKETCH_DIR
+else:
+    SKETCH_DIR = Path("/app/frontend/public/damage")
+
+# Fuer das PDF reichen 900px-Skizzen (Druckbreite ~8cm) — die 1536px-
+# Originale wuerden jedes Protokoll ~2MB gross und ~1s langsam machen.
+# Die verkleinerten JPEGs werden EINMAL erzeugt und dann wiederverwendet.
+_SKETCH_CACHE_DIR = Path(__file__).resolve().parent / "assets" / "sketch_pdf_cache"
+_PDF_SKETCH_WIDTH = 900
+
+
+def _pdf_sketch(src_name: str) -> str:
+    src = SKETCH_DIR / src_name
+    cached = _SKETCH_CACHE_DIR / (src_name.rsplit(".", 1)[0] + ".jpg")
+    tmp = None
+    try:
+        if cached.exists() and cached.stat().st_mtime >= src.stat().st_mtime:
+            return str(cached)
+        from PIL import Image as _PILImage
+        _SKETCH_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        im = _PILImage.open(src).convert("RGB")
+        ratio = _PDF_SKETCH_WIDTH / im.width
+        im = im.resize((_PDF_SKETCH_WIDTH, max(1, int(im.height * ratio))),
+                       _PILImage.LANCZOS)
+        # Rollenprüfung 22.09.2026 (RP-170): erst in eine eigene Temp-Datei,
+        # dann atomar umbenennen — vorher schrieben parallele PDF-Laeufe (zwei
+        # Worker, zwei Threads) direkt ins Ziel, und ein dritter las eine halb
+        # geschriebene JPEG-Datei.
+        import tempfile
+        fd, tmp = tempfile.mkstemp(dir=str(_SKETCH_CACHE_DIR), suffix=".tmp")
+        with os.fdopen(fd, "wb") as fh:
+            im.save(fh, "JPEG", quality=82, optimize=True)
+        os.replace(tmp, cached)
+        tmp = None
+        return str(cached)
+    except Exception:
+        # Notfall: Original verwenden (Groesse egal, Hauptsache es rendert)
+        return str(src)
+    finally:
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 SKETCHES = {
     "front": {"src": "front.png", "w": 1536, "h": 1024, "label": "Frontansicht"},
     "rear":  {"src": "rear.png",  "w": 1536, "h": 1024, "label": "Heckansicht"},
@@ -58,13 +133,31 @@ SKETCHES = {
 # Styles
 # ---------------------------------------------------------------------------
 
+def _schrift(helvetica_name: str) -> str:
+    from pdf_schrift import ersatz_fuer
+    return ersatz_fuer(helvetica_name)
+
+
 def _styles() -> Dict[str, ParagraphStyle]:
     base = getSampleStyleSheet()
-    return {
-        "title": ParagraphStyle("title", parent=base["Title"], fontSize=20, leading=24,
-                                textColor=PRIMARY, alignment=TA_LEFT, spaceAfter=4),
-        "subtitle": ParagraphStyle("subtitle", parent=base["Normal"], fontSize=10,
-                                   leading=13, textColor=GREY, spaceAfter=14),
+    # Pruefbericht 20.09.2026 (P-02): Unicode-Schrift statt Helvetica — Namen
+    # neben der Unterschrift erschienen sonst als Kaestchen.
+    from pdf_schrift import styles_anpassen
+    return styles_anpassen({
+        "title": ParagraphStyle("title", parent=base["Title"], fontSize=24, leading=27,
+                                textColor=PRIMARY, alignment=TA_LEFT, spaceAfter=0),
+        "subtitle": ParagraphStyle("subtitle", parent=base["Normal"], fontSize=9,
+                                   leading=12, textColor=GREY),
+        "brand": ParagraphStyle("brand", parent=base["Normal"], fontSize=10, leading=13,
+                                textColor=ACCENT),
+        "meta_label": ParagraphStyle("meta_label", parent=base["Normal"], fontSize=7,
+                                     leading=9, textColor=GREY, alignment=TA_RIGHT),
+        "meta_value": ParagraphStyle("meta_value", parent=base["Normal"], fontSize=10,
+                                     leading=13, textColor=PRIMARY, alignment=TA_RIGHT),
+        "section": ParagraphStyle("section", parent=base["Normal"], fontSize=10,
+                                  leading=13, textColor=PRIMARY),
+        "sig_label": ParagraphStyle("sig_label", parent=base["Normal"], fontSize=8,
+                                    leading=10, textColor=GREY),
         "h2": ParagraphStyle("h2", parent=base["Heading2"], fontSize=11, leading=14,
                              textColor=PRIMARY, spaceBefore=10, spaceAfter=5,
                              textTransform="uppercase"),
@@ -82,7 +175,7 @@ def _styles() -> Dict[str, ParagraphStyle]:
                                       leading=11, textColor=PRIMARY),
         "check_opt": ParagraphStyle("check_opt", parent=base["Normal"], fontSize=8,
                                     leading=10, textColor=PRIMARY, alignment=TA_CENTER),
-    }
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +192,18 @@ def _fmt(v: Any, empty: str = "—") -> str:
     return s if s else empty
 
 
+def _txt(v: Any) -> str:
+    """Runde 24 (11.09.2026): Freitext aus Firmen-/Vertragsdaten als
+    getrimmter String — None (Feld vorhanden, aber leer) und Zahlen (PLZ aus
+    Altdaten) duerfen den Aufbau des Protokolls nicht abbrechen."""
+    return "" if v is None else str(v).strip()
+
+
+def _anzahl(v: Any) -> str:
+    """Anzahl im PDF: 0 wird gedruckt, nur None/"" bleibt eine Linie."""
+    return "_____" if v is None or v == "" else str(v)
+
+
 def _fmt_km(v: Any) -> str:
     if v in (None, "", 0):
         return "—"
@@ -106,6 +211,36 @@ def _fmt_km(v: Any) -> str:
         return f"{int(float(v)):,} km".replace(",", ".")
     except (TypeError, ValueError):
         return str(v)
+
+
+def now_iso_str() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _jetzt_berlin(jetzt: Optional[datetime] = None) -> datetime:
+    """Rollenprüfung 22.09.2026 (RP-071/170): Ort/Datum ueber den
+    Unterschriften stand in UTC (zwischen Mitternacht und 1/2 Uhr der
+    VORTAG), die Fusszeile in der Uhrzeit des Containers — ein Dokument, zwei
+    Zeitzonen. Beides jetzt in deutscher Ortszeit; ohne tzdata im Image die
+    EU-Sommerzeitregel von Hand (wie beweis_pdf)."""
+    from datetime import timedelta, timezone
+    u = (jetzt or datetime.now(timezone.utc))
+    if u.tzinfo is None:
+        u = u.replace(tzinfo=timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+        return u.astimezone(ZoneInfo("Europe/Berlin"))
+    except Exception:  # noqa: BLE001
+        u = u.astimezone(timezone.utc)
+
+        def _letzter_sonntag(monat: int) -> datetime:
+            d = datetime(u.year, monat, 31, 1, tzinfo=timezone.utc)
+            while d.weekday() != 6:
+                d -= timedelta(days=1)
+            return d
+        sommer = _letzter_sonntag(3) <= u < _letzter_sonntag(10)
+        return u.astimezone(timezone(timedelta(hours=2 if sommer else 1)))
 
 
 def _fmt_date(iso: Optional[str]) -> str:
@@ -117,21 +252,84 @@ def _fmt_date(iso: Optional[str]) -> str:
         return str(iso)
 
 
-def _check_row(label: str, value: Any, options: List[str], st, *, bold_value: bool = False) -> List:
+def _sig_faktor(breite: Any, hoehe: Any, w_max: float, h_max: float) -> float:
+    """Rollenprüfung 22.09.2026 (RP-071/170): Skalierungsfaktor, der das
+    Unterschriftsbild in w_max x h_max einpasst, OHNE es zu verzerren."""
+    try:
+        b = float(breite or 0) or 1.0
+        h = float(hoehe or 0) or 1.0
+    except (TypeError, ValueError):
+        b = h = 1.0
+    return min(w_max / b, h_max / h)
+
+
+def _notes_text(wert: Any) -> str:
+    """Bemerkung als Text (None/Zahl robust), Zeilenenden vereinheitlicht."""
+    return str(wert or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+# Rollenprüfung 22.09.2026 (RP-535): so gross wird ein Stueck der Bemerkung
+# hoechstens (Zeilen bzw. Zeichen) — weit unter einer Seitenhoehe.
+_BEMERKUNG_ZEILEN_JE_STUECK = 8
+_BEMERKUNG_ZEICHEN_JE_STUECK = 600
+
+
+def _notes_stuecke(text: str) -> List[str]:
+    """Rollenprüfung 22.09.2026 (RP-535): Bemerkung in Stuecke fuer je eine
+    Tabellenzeile teilen — hoechstens _BEMERKUNG_ZEILEN_JE_STUECK Zeilen bzw.
+    _BEMERKUNG_ZEICHEN_JE_STUECK Zeichen; eine ueberlange Einzelzeile wird an
+    Wortgrenzen geteilt. Zeilenumbrueche bleiben erhalten ("\\n" im Stueck,
+    beim Rendern <br/>). Kein Wort geht verloren — nur das Leerzeichen an einer
+    Trennstelle langer Zeilen entfaellt."""
+    zeilen: List[str] = []
+    for zeile in text.split("\n"):
+        while len(zeile) > _BEMERKUNG_ZEICHEN_JE_STUECK:
+            schnitt = zeile.rfind(" ", 0, _BEMERKUNG_ZEICHEN_JE_STUECK)
+            if schnitt <= 0:
+                schnitt = _BEMERKUNG_ZEICHEN_JE_STUECK
+            zeilen.append(zeile[:schnitt])
+            zeile = zeile[schnitt:].lstrip(" ")
+        zeilen.append(zeile)
+    stuecke: List[str] = []
+    aktuell: List[str] = []
+    laenge = 0
+    for zeile in zeilen:
+        if aktuell and (len(aktuell) >= _BEMERKUNG_ZEILEN_JE_STUECK
+                        or laenge + len(zeile) > _BEMERKUNG_ZEICHEN_JE_STUECK):
+            stuecke.append("\n".join(aktuell))
+            aktuell, laenge = [], 0
+        aktuell.append(zeile)
+        laenge += len(zeile)
+    if aktuell:
+        stuecke.append("\n".join(aktuell))
+    return stuecke
+
+
+def _check_row(label: str, value: Any, options: List[str], st, *,
+               bold_value: bool = False, selected: Any = None) -> List:
     """Builds a row: [label | value | ○ option1 | ○ option2 | ...]."""
     label_style = ParagraphStyle(
-        "rl", parent=st["body"], fontSize=10, leading=13, textColor=BLUE_DARK)
+        "rl", parent=st["body"], fontSize=10, leading=13, textColor=PRIMARY)
     value_style = ParagraphStyle(
         "rv", parent=st["body"], fontSize=10, leading=13, textColor=PRIMARY,
-        fontName="Helvetica-Bold" if bold_value else "Helvetica",
+        fontName=_schrift("Helvetica-Bold") if bold_value else _schrift("Helvetica"),
     )
     opt_style = ParagraphStyle(
         "ro", parent=st["body"], fontSize=10, leading=13,
         textColor=GREY, alignment=TA_LEFT,
     )
+    opt_style_sel = ParagraphStyle(
+        "ros", parent=opt_style, textColor=PRIMARY, fontName=_schrift("Helvetica-Bold"))
     row = [Paragraph(label, label_style), Paragraph(_xe(_fmt(value)), value_style)]
     for opt in options:
-        row.append(Paragraph(f"○  {opt}", opt_style))
+        # "[ ]" statt "○": das Kreis-Zeichen existiert nicht in Helvetica
+        # und wuerde als schwarzes Quadrat gedruckt. Bei ausgefuellten
+        # Protokollen wird die gewaehlte Option mit [X] markiert.
+        picked = (selected is not None
+                  and str(selected).strip().lower() == str(opt).strip().lower())
+        box = "[X]" if picked else "[&nbsp;&nbsp;]"
+        style = opt_style_sel if picked else opt_style
+        row.append(Paragraph(f"{box}&nbsp;{opt}", style))
     return row
 
 
@@ -146,24 +344,44 @@ def _check_table(rows: List[List], col_widths: List[float]) -> Table:
     return t
 
 
-def _checklist(items: List[tuple], st, col_count: int = 2) -> Table:
-    """Renders a grid of ○ Label / ○ Label items. `items` is list of
-    (label, sub_note?) tuples; sub_note is optional gray line."""
+def _checklist(items: List[tuple], st, col_count: int = 2,
+               checked: Optional[Dict[str, bool]] = None) -> Table:
+    """Renders a grid of [ ] Label items. `items` is list of
+    (label, sub_note?) tuples; sub_note is optional gray line.
+    `checked` (Label -> bool) markiert erledigte Punkte mit [X].
+
+    Rollenprüfung 22.09.2026 (RP-068/167): Seit jede Zeile mit Ja ODER Nein
+    beantwortet werden muss, ist ein ausdrueckliches Nein (False) etwas anderes
+    als "nicht beantwortet" — im unterschriebenen PDF sahen beide gleich aus
+    ("[  ]"). Jetzt: True "[X]", False "[–] … nein", fehlend "[  ]"."""
     cells = []
     for item in items:
         label, note = (item if isinstance(item, tuple) else (item, ""))
-        txt = f"○ {_xe(str(label))}"
+        wert = (checked or {}).get(str(label))
+        if wert is False:
+            box = "[–]"
+        elif wert is not None and bool(wert):
+            box = "[X]"
+        else:
+            box = "[&nbsp;&nbsp;]"
+        txt = f"{box}&nbsp;{_xe(str(label))}"
+        if wert is False:
+            txt += " <font color='#71717A'>— nein</font>"
         para_html = f"<font size=9 color='#0A0A0A'>{txt}</font>"
         if note:
             para_html += f"<br/><font size=7 color='#71717A'>{_xe(str(note))}</font>"
         cells.append(Paragraph(para_html, st["body"]))
 
+    # Pruefbericht 20.09.2026 (P-30): ohne Punkte kein Table(rows=[]) —
+    # ReportLab bricht damit mit ValueError ab.
+    if not cells:
+        return Paragraph("—", st["body"])
     # Pad to multiple of col_count so Table stays rectangular
     while len(cells) % col_count:
         cells.append(Paragraph("", st["body"]))
 
     rows = [cells[i:i + col_count] for i in range(0, len(cells), col_count)]
-    col_w = (17.5 * cm) / col_count
+    col_w = TABELLEN_B / col_count   # P-32: innerhalb des Rahmens
     t = Table(rows, colWidths=[col_w] * col_count, hAlign="LEFT")
     t.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
@@ -185,11 +403,12 @@ class CarSketch(Flowable):
                  max_width_cm: float = 8.0, empty: bool = False) -> None:
         Flowable.__init__(self)
         meta = SKETCHES[view_key]
-        self.png_path = str(SKETCH_DIR / meta["src"])
+        self.png_path = _pdf_sketch(meta["src"])
         self.orig_w = meta["w"]
         self.orig_h = meta["h"]
         self.label = meta["label"]
-        self.damages = [d for d in damages if d.get("view") == view_key] if damages else []
+        self.damages = ([d for d in damages if isinstance(d, dict) and d.get("view") == view_key]
+                        if damages else [])
         self.empty = empty
 
         self.max_width = max_width_cm * cm
@@ -204,7 +423,7 @@ class CarSketch(Flowable):
         c = self.canv
         # Label at top
         c.setFillColor(GREY)
-        c.setFont("Helvetica-Bold", 7)
+        c.setFont(_schrift("Helvetica-Bold"), 7)
         c.drawString(0, self.height - 0.4 * cm, self.label.upper())
         # Marker counter on label row
         if self.damages and not self.empty:
@@ -223,7 +442,7 @@ class CarSketch(Flowable):
                 c.setFillColor(LIGHT_BG)
                 c.rect(0, 0, self.width, img_h, stroke=0, fill=1)
                 c.setFillColor(GREY)
-                c.setFont("Helvetica-Oblique", 8)
+                c.setFont(_schrift("Helvetica-Oblique"), 8)
                 c.drawCentredString(self.width / 2, img_h / 2,
                                     f"[Skizze {self.label}]")
         except Exception:
@@ -259,7 +478,7 @@ class CarSketch(Flowable):
             c.setLineWidth(0.8)
             c.circle(x, y, 8, stroke=1, fill=1)
             c.setFillColor(colors.white)
-            c.setFont("Helvetica-Bold", 7)
+            c.setFont(_schrift("Helvetica-Bold"), 7)
             code = d.get("type_abbr") or d.get("abbr") or str(i)
             c.drawCentredString(x, y - 2.2, str(code)[:2])
 
@@ -296,7 +515,18 @@ def _sketch_grid(damages: List[dict], *, empty: bool = False) -> Table:
     return t
 
 
+_FARBE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$")
+
+
+def _sichere_farbe(wert) -> str:
+    """P-26: eine ungueltige Farbe im Schadenseintrag brach den Absatz-Parser
+    von reportlab und damit das ganze PDF — nur echte Hex-Farben zulassen."""
+    s = str(wert or "").strip()
+    return s if _FARBE.match(s) else "#FF3B30"
+
+
 def _damage_legend(damages: List[dict], st) -> Optional[Flowable]:
+    damages = [d for d in (damages or []) if isinstance(d, dict)]
     if not damages:
         return Paragraph(
             "Keine Schäden im Kaufvertrag dokumentiert.", st["small"])
@@ -307,7 +537,7 @@ def _damage_legend(damages: List[dict], st) -> Optional[Flowable]:
         counts.setdefault(key, {
             "label": d.get("type_label") or key,
             "abbr": d.get("type_abbr") or d.get("abbr") or "?",
-            "color": d.get("color") or "#FF3B30",
+            "color": _sichere_farbe(d.get("color")),
             "n": 0,
         })
         counts[key]["n"] += 1
@@ -325,52 +555,122 @@ def _damage_legend(damages: List[dict], st) -> Optional[Flowable]:
 
 
 # ---------------------------------------------------------------------------
-# Page template / header / footer
+# Page template / header / footer  (Design analog Kaufvertrag)
 # ---------------------------------------------------------------------------
 
 def _make_doc(buf: io.BytesIO) -> BaseDocTemplate:
     doc = BaseDocTemplate(
         buf, pagesize=A4,
-        leftMargin=1.8 * cm, rightMargin=1.8 * cm,
-        topMargin=2.6 * cm, bottomMargin=1.6 * cm,  # +1cm wegen blauem Header-Bar
-        title="Abholprotokoll", author="Autohändle",
+        leftMargin=MARGIN, rightMargin=MARGIN,
+        topMargin=1.7 * cm, bottomMargin=2.0 * cm,
+        title="Abholprotokoll", author="Autohändler",
     )
     frame = Frame(doc.leftMargin, doc.bottomMargin,
                   doc.width, doc.height, id="main")
-    doc.addPageTemplates([PageTemplate(id="all", frames=[frame],
-                                       onPage=_draw_chrome)])
+    doc.addPageTemplates([PageTemplate(id="all", frames=[frame])])
     return doc
 
 
-def _draw_chrome(canvas, doc):
-    canvas.saveState()
-    page_w, page_h = A4
-    # ---- Blauer Header-Bar (volle Breite) ----
-    bar_h = 1.7 * cm
-    canvas.setFillColor(BLUE)
-    canvas.rect(0, page_h - bar_h, page_w, bar_h, stroke=0, fill=1)
-    # Titel links, Datum rechts — beides in WEISS auf blau
-    canvas.setFillColor(colors.white)
-    canvas.setFont("Helvetica-Bold", 13)
-    canvas.drawString(1.8 * cm, page_h - bar_h + 0.55 * cm,
-                      "ABHOLPROTOKOLL  ·  ÜBERGABE")
-    canvas.setFont("Helvetica", 9)
-    canvas.drawRightString(page_w - 1.8 * cm, page_h - bar_h + 0.6 * cm,
-                           datetime.now().strftime("%d.%m.%Y · %H:%M"))
 
-    # ---- Footer ----
-    canvas.setFillColor(GREY)
-    canvas.setFont("Helvetica", 7)
-    canvas.drawString(1.8 * cm, 1.0 * cm,
-                      "Dieses Protokoll ist vom Fahrer vor Ort auszufüllen und zu unterschreiben.")
-    canvas.drawRightString(page_w - 1.8 * cm, 1.0 * cm,
-                           f"Seite {doc.page}")
-    canvas.restoreState()
+
+def _numbered_canvas_factory(footer_left: str, footer_center: str):
+    """Canvas mit rotem Akzentbalken oben + Fußzeile 'Seite X von Y' auf
+    jeder Seite — identisch zum Kaufvertrag. Zwei-Pass-Verfahren, damit die
+    Gesamtseitenzahl bekannt ist."""
+
+    class _NumberedCanvas(_rl_canvas.Canvas):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._saved_states = []
+
+        def showPage(self):
+            self._saved_states.append(dict(self.__dict__))
+            self._startPage()
+
+        def save(self):
+            total = len(self._saved_states)
+            for state in self._saved_states:
+                self.__dict__.update(state)
+                self._decorate(total)
+                super().showPage()
+            super().save()
+
+        def _decorate(self, total):
+            self.saveState()
+            # Roter Akzentbalken ganz oben (volle Breite)
+            self.setFillColor(ACCENT)
+            self.rect(0, PAGE_H - 0.14 * cm, PAGE_W, 0.14 * cm, stroke=0, fill=1)
+            # Fußzeile mit Trennlinie
+            y = 1.1 * cm
+            self.setStrokeColor(DIVIDER)
+            self.setLineWidth(0.5)
+            self.line(MARGIN, y + 0.35 * cm, PAGE_W - MARGIN, y + 0.35 * cm)
+            self.setFillColor(GREY)
+            schrift = _schrift("Helvetica")
+            self.setFont(schrift, 7)
+            # Rollenprüfung 22.09.2026 (RP-071/170): ein langer Firmenname lief
+            # in die mittlere Zeile hinein — links nur so viel, wie bis zur Mitte
+            # Platz ist (mit Abstand), sonst mit "…" gekuerzt.
+            mitte_breite = self.stringWidth(footer_center, schrift, 7)
+            links_max = (PAGE_W / 2 - mitte_breite / 2) - MARGIN - 0.4 * cm
+            self.drawString(MARGIN, y, _auf_breite(footer_left, schrift, 7, links_max))
+            self.drawCentredString(PAGE_W / 2, y, footer_center)
+            self.drawRightString(PAGE_W - MARGIN, y,
+                                 f"Seite {self._pageNumber} von {total}")
+            self.restoreState()
+
+    return _NumberedCanvas
+
+
+def _section(title: str, st) -> Table:
+    """Abschnittsbalken: heller Hintergrund + roter Akzentrand links —
+    gleiche Optik wie im Kaufvertrag."""
+    t = Table(
+        [[Paragraph(f"<b>{_xe(title)}</b>", st["section"])]],
+        colWidths=[CONTENT_W],
+    )
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), LIGHT_BG),
+        ("LINEBEFORE", (0, 0), (0, -1), 2.5, ACCENT),
+        ("LEFTPADDING", (0, 0), (-1, -1), 9),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]))
+    return t
+
+
+#: Rollenprüfung 22.09.2026 (RP-067/166): Zeile unter Abschnitt 5.
+SCHAEDEN_BESTAETIGT_TEXT = "Zustand entspricht der Dokumentation (vom Fahrer bestätigt):"
+
+
+def damages_confirmed_zeile(filled: Optional[Dict[str, Any]]) -> str:
+    """Rollenprüfung 22.09.2026 (RP-067/166): Antwort des Fahrers zu
+    Abschnitt 5 als Zeile (Paragraph-Markup). Ausgefuellt: Ja / Nein / "—"
+    (nicht beantwortet); leeres Formular: Kaestchen zum Ankreuzen."""
+    if not filled:
+        return f"<b>{_xe(SCHAEDEN_BESTAETIGT_TEXT)}</b> &nbsp;[&nbsp;&nbsp;] Ja &nbsp;&nbsp;[&nbsp;&nbsp;] Nein"
+    wert = filled.get("damages_confirmed")
+    antwort = "Ja" if wert is True else "Nein" if wert is False else "—"
+    return f"<b>{_xe(SCHAEDEN_BESTAETIGT_TEXT)}</b> {antwort}"
 
 
 # ---------------------------------------------------------------------------
 # Main builder
 # ---------------------------------------------------------------------------
+
+#: Rollenprüfung 22.09.2026 (RP-535): Laenge der Bemerkung im Notfall-Neubau.
+BEMERKUNG_NOTFALL_ZEICHEN = 1500
+BEMERKUNG_GEKUERZT_HINWEIS = ("[… gekürzt — der vollständige Text ist im digitalen "
+                              "Protokoll gespeichert]")
+
+
+def _technik_zeile(d: dict) -> str:
+    """'Getriebe/Kupplung – Automatik ruckelt beim Kaltstart' (XML-sicher)."""
+    zone = _xe(str(d.get("zone") or (d.get("severity_data") or {}).get("bereich") or "?"))
+    note = str(d.get("note") or "").strip()[:200]
+    return f"{zone} – {_xe(note)}" if note else zone
+
 
 def build_pickup_pdf(
     *,
@@ -379,16 +679,82 @@ def build_pickup_pdf(
     contract: Optional[Dict[str, Any]] = None,
     dealer: Optional[Dict[str, Any]] = None,
     driver: Optional[Dict[str, Any]] = None,
+    filled: Optional[Dict[str, Any]] = None,
 ) -> bytes:
-    """Returns PDF bytes for the pickup / handover protocol."""
+    """Returns PDF bytes for the pickup / handover protocol.
+
+    Ohne `filled` entsteht das LEERE Formular zum Ausdrucken (unveraendert).
+    Mit `filled` (aus der Fahrer-App) wird dasselbe Protokoll AUSGEFUELLT
+    gerendert: Haken gesetzt, Werte eingetragen, Unterschriften eingebettet.
+
+    Rollenprüfung 22.09.2026 (RP-535): Scheitert der Seitenumbruch trotzdem
+    (LayoutError — ein Block groesser als eine Seite), wird EINMAL mit
+    gekuerzter Bemerkung und deutlichem Hinweis neu gebaut. Vorher endete
+    jeder Abschluss vor Ort mit 500, und das Protokoll blieb fuer den Fahrer
+    gesperrt."""
+    from reportlab.platypus.doctemplate import LayoutError
+    kw = dict(appointment=appointment, vehicle=vehicle, contract=contract,
+              dealer=dealer, driver=driver)
+    try:
+        return _build_pickup_pdf(**kw, filled=filled)
+    except LayoutError:
+        notes = _notes_text((filled or {}).get("notes"))
+        if not notes:
+            raise
+        import logging
+        logging.getLogger("autohandel").warning(
+            "Abholprotokoll %s: Seitenumbruch gescheitert — Bemerkung (%d Zeichen) "
+            "im PDF gekuerzt", (appointment or {}).get("id"), len(notes))
+        kurz = dict(filled or {})
+        kurz["notes"] = notes[:BEMERKUNG_NOTFALL_ZEICHEN].rstrip() + "\n" + BEMERKUNG_GEKUERZT_HINWEIS
+        return _build_pickup_pdf(**kw, filled=kurz)
+
+
+def _build_pickup_pdf(
+    *,
+    appointment: Dict[str, Any],
+    vehicle: Optional[Dict[str, Any]] = None,
+    contract: Optional[Dict[str, Any]] = None,
+    dealer: Optional[Dict[str, Any]] = None,
+    driver: Optional[Dict[str, Any]] = None,
+    filled: Optional[Dict[str, Any]] = None,
+) -> bytes:
+    """Eigentlicher Aufbau (siehe build_pickup_pdf)."""
     appointment = appointment or {}
     vehicle = vehicle or {}
     contract = contract or {}
     dealer = dealer or {}
     driver = driver or {}
+    filled = filled or {}
+    _fill_docs = filled.get("documents") or {}
+    _fill_feats = filled.get("features") or {}
+    _fill_cond = filled.get("condition") or {}
 
     # Damages: prefer contract.damages, fallback to vehicle.damages
-    damages = (contract.get("damages") or vehicle.get("damages") or [])
+    # Pruefbericht 20.09.2026 (P-03): Das Vertragsmodell erlaubt in der
+    # Schadensliste ausdruecklich auch reinen Text ("Kratzer hinten links").
+    # Hier wurde jeder Eintrag als Objekt gelesen -> AttributeError, der
+    # Abholauftrag lieferte dauerhaft 500 und der Fahrer konnte vor Ort NIE
+    # abschliessen. Skizze/Legende bekommen nur Objekte, der Text wird unten
+    # als Liste gedruckt (nichts geht verloren).
+    # Review 26.09.2026 Nr. 111/116: Vertrag UND Inserat (nicht "oder") — dieselbe
+    # Wahrheit wie Fahrer-App und KI (ai/bekannte_schaeden). Skizze/Legende
+    # bekommen die Original-Objekte (mit Koordinaten), Inserat-Objekte nur, wenn
+    # sie nicht schon im Vertrag stehen; Freitexte und Inserat-Maengel als Liste.
+    from ai import bekannte_schaeden as _bs
+    _c_roh = contract.get("damages") or []
+    _v_roh = vehicle.get("damages") or []
+    _c_roh = _c_roh if isinstance(_c_roh, list) else [_c_roh]
+    _v_roh = _v_roh if isinstance(_v_roh, list) else [_v_roh]
+    damages = [d for d in _c_roh if isinstance(d, dict)]
+    _bekannt = {_bs._schluessel(_bs._aus_dict(d, "vertrag")) for d in damages}
+    for d in _v_roh:
+        if isinstance(d, dict) and _bs._schluessel(_bs._aus_dict(d, "inserat")) not in _bekannt:
+            damages.append(d)
+    freitext_schaeden = [str(d).strip() for d in list(_c_roh) + list(_v_roh)
+                         if isinstance(d, str) and str(d).strip()]
+    freitext_schaeden += [f"Laut Inserat: {str(m).strip()}" for m in (vehicle.get("known_defects") or [])[:40]
+                          if str(m or "").strip()]
 
     buf = io.BytesIO()
     doc = _make_doc(buf)
@@ -406,38 +772,42 @@ def build_pickup_pdf(
     if pickup_time and pickup_date != "—":
         abholung_str = f"{pickup_date} · {pickup_time} Uhr"
 
-    label_top = ParagraphStyle(
-        "label_top", parent=st["body"], fontSize=11, leading=15,
-        textColor=GREY, fontName="Helvetica",
-    )
-    value_top = ParagraphStyle(
-        "value_top", parent=st["body"], fontSize=12, leading=15,
-        textColor=BLUE, fontName="Helvetica-Bold",
-    )
-    value_top_dark = ParagraphStyle(
-        "value_top_dark", parent=st["body"], fontSize=12, leading=15,
-        textColor=PRIMARY, fontName="Helvetica-Bold",
-    )
-
-    head_table = Table(
-        [
-            [Paragraph("Auftragsnummer:", label_top),
-             Paragraph(auftrag_nr, value_top)],
-            [Paragraph("Abholung am:", label_top),
-             Paragraph(abholung_str, value_top_dark)],
-        ],
-        colWidths=[4.0 * cm, 13.5 * cm],
-    )
-    head_table.setStyle(TableStyle([
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    # ---- Briefkopf (analog Kaufvertrag): Firma + Titel links, Meta-Box rechts ----
+    # Runde 24 (11.09.2026, Befund Ahmad): Kopf und Auftraggeber-Karte zeigen
+    # DIESELBE Firma (auftraggeber.auftraggeber_fuer_termin: Kaeufer aus dem
+    # Vertrag bzw. Sucher-Einstellungen). Kein "Autohändler"-Platzhalter
+    # mehr — fehlt wirklich alles, steht wie in der Karte "—".
+    dealer_name = _txt(dealer.get("company_name")) or _txt(dealer.get("name"))
+    company = dealer_name or "—"
+    if dealer_name:
+        doc.author = dealer_name
+    header_left = [
+        Paragraph(f"<b>{_xe(company)}</b>", st["brand"]),
+        Spacer(1, 2),
+        Paragraph("<b>ABHOLPROTOKOLL</b>", st["title"]),
+        Paragraph("Übergabeprotokoll für die Fahrzeugabholung — vom Fahrer "
+                  "vor Ort auszufüllen", st["subtitle"]),
+    ]
+    header_right = [
+        Paragraph("AUFTRAGS-NR.", st["meta_label"]),
+        Paragraph(f"<b>{_xe(auftrag_nr)}</b>", st["meta_value"]),
+        Spacer(1, 5),
+        Paragraph("ABHOLUNG", st["meta_label"]),
+        Paragraph(f"<b>{_xe(abholung_str)}</b>", st["meta_value"]),
+    ]
+    head = Table([[header_left, header_right]],
+                 colWidths=[CONTENT_W - 4.5 * cm, 4.5 * cm])
+    head.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("LEFTPADDING", (0, 0), (-1, -1), 0),
         ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
     ]))
-    story.append(Spacer(1, 0.2 * cm))
-    story.append(head_table)
-    story.append(Spacer(1, 0.6 * cm))
+    story.append(head)
+    story.append(Spacer(1, 8))
+    accent_line = Table([[""]], colWidths=[CONTENT_W], rowHeights=[2])
+    accent_line.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), ACCENT)]))
+    story.append(accent_line)
+    story.append(Spacer(1, 12))
 
     # ---- Zwei Karten: AUFTRAGGEBER · ABHOLORT/VERKÄUFER ----
     seller_lines: List[str] = []
@@ -445,10 +815,16 @@ def build_pickup_pdf(
                    or contract.get("seller_name") or "")
     if seller_name:
         seller_lines.append(f"<b>{_xe(seller_name)}</b>")
+    # Entscheidung Ahmad 22.09.2026 (Ausweisnummer): vom Fahrer vor Ort
+    # nachgetragen (Protokoll-Entwurf), direkt neben dem Verkaeufernamen.
+    seller_id_document = str(filled.get("seller_id_document") or "").strip()
+    if seller_id_document:
+        seller_lines.append(f"Ausweis-Nr.: {_xe(seller_id_document)}")
+    # P-21: ein vorhandenes, aber leeres Feld (None) brach hier mit TypeError.
     addr = (appointment.get("pickup_address")
-            or " ".join([contract.get("seller_address", ""),
-                         contract.get("seller_zip", ""),
-                         contract.get("seller_city", "")]).strip())
+            or " ".join([str(contract.get("seller_address") or ""),
+                         str(contract.get("seller_zip") or ""),
+                         str(contract.get("seller_city") or "")]).strip())
     if addr:
         seller_lines.append(_xe(addr))
     seller_phone = (appointment.get("seller_phone")
@@ -458,28 +834,37 @@ def build_pickup_pdf(
     seller_email = (appointment.get("seller_email")
                     or contract.get("seller_email") or "")
     if seller_email:
-        seller_lines.append(
-            f"<font color='#1E5BB8'>{_xe(seller_email)}</font>"
-        )
+        seller_lines.append(_xe(seller_email))
     seller_block = "<br/>".join(seller_lines) or "—"
 
+    # Runde 24: Auftraggeber-Karte = Firma (fett), Ansprechpartner, Anschrift,
+    # Tel., E-Mail — dieselben Felder wie die Kaeufer-Box im Kaufvertrag.
+    # Vorher brach ein vorhandenes, aber leeres Feld (None) den Aufbau ab.
     dealer_lines: List[str] = []
-    dealer_name = (dealer.get("company_name") or dealer.get("name") or "")
     if dealer_name:
         dealer_lines.append(f"<b>{_xe(dealer_name)}</b>")
-    deal_addr = " ".join([
-        dealer.get("address", ""),
-        dealer.get("zip_code") or dealer.get("zip", ""),
-        dealer.get("city", ""),
-    ]).strip()
-    if deal_addr:
-        dealer_lines.append(_xe(deal_addr))
-    if dealer.get("phone"):
-        dealer_lines.append(f"Tel.: {_xe(str(dealer['phone']))}")
-    if dealer.get("email"):
-        dealer_lines.append(
-            f"<font color='#1E5BB8'>{_xe(str(dealer['email']))}</font>"
-        )
+    kontakt = _txt(dealer.get("contact_person"))
+    if kontakt and kontakt != dealer_name:
+        dealer_lines.append(f"Ansprechpartner: {_xe(kontakt)}")
+    strasse = _txt(dealer.get("address"))
+    if strasse:
+        dealer_lines.append(_xe(strasse))
+    plz_ort = " ".join(x for x in (_txt(dealer.get("zip_code") or dealer.get("zip")),
+                                   _txt(dealer.get("city"))) if x)
+    if plz_ort:
+        dealer_lines.append(_xe(plz_ort))
+    tel = _txt(dealer.get("phone"))
+    if tel:
+        dealer_lines.append(f"Tel.: {_xe(tel)}")
+    mail = _txt(dealer.get("email"))
+    if mail:
+        dealer_lines.append(f"E-Mail: {_xe(mail)}")
+    # Entscheidung Ahmad 22.09.2026: die Vertrags-Kundennummer steht im
+    # Kaufvertrag ("nur unter Vorlage der Kundennummer") — der Fahrer muss
+    # sie vor Ort nennen koennen. Nie die Anmeldenummer (kunden_nr).
+    vertrags_nr = _txt(dealer.get("vertrags_kundennummer"))
+    if vertrags_nr:
+        dealer_lines.append(f"Kundennummer (Vertrag): {_xe(vertrags_nr)}")
     dealer_block = "<br/>".join(dealer_lines) or "—"
 
     card_w = 8.55 * cm
@@ -488,36 +873,31 @@ def build_pickup_pdf(
         textColor=PRIMARY,
     )
 
-    # Header + Body je Card als 2-Zeilen-Tabelle (Header blau, Body weiß)
+    # Header + Body je Card — Optik wie die Parteien-Boxen im Kaufvertrag:
+    # heller Titelbalken, feiner Rahmen, kein Farbblock.
     def _info_card(header: str, body_html: str) -> Table:
-        hdr = Table(
-            [[Paragraph(
-                f"<font color='#FFFFFF'><b>{header}</b></font>",
-                ParagraphStyle("h", parent=st["body"], fontSize=10, leading=12,
-                               fontName="Helvetica-Bold"),
-            )]],
+        t = Table(
+            [
+                [Paragraph(f"<b>{_xe(header)}</b>",
+                           ParagraphStyle("h", parent=st["body"], fontSize=9,
+                                          leading=12, textColor=PRIMARY))],
+                [Paragraph(body_html, card_body_style)],
+            ],
             colWidths=[card_w],
         )
-        hdr.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), BLUE),
-            ("LEFTPADDING", (0, 0), (-1, -1), 12),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 12),
-            ("TOPPADDING", (0, 0), (-1, -1), 8),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-        ]))
-        body = Table(
-            [[Paragraph(body_html, card_body_style)]],
-            colWidths=[card_w],
-        )
-        body.setStyle(TableStyle([
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 12),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 12),
-            ("TOPPADDING", (0, 0), (-1, -1), 12),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 14),
+        t.setStyle(TableStyle([
             ("BOX", (0, 0), (-1, -1), 0.5, DIVIDER),
+            ("BACKGROUND", (0, 0), (0, 0), LIGHT_BG),
+            ("LINEBELOW", (0, 0), (0, 0), 0.5, DIVIDER),
+            ("LEFTPADDING", (0, 0), (-1, -1), 10),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+            ("TOPPADDING", (0, 0), (0, 0), 6),
+            ("BOTTOMPADDING", (0, 0), (0, 0), 6),
+            ("TOPPADDING", (0, 1), (0, 1), 10),
+            ("BOTTOMPADDING", (0, 1), (0, 1), 12),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ]))
-        return Table([[hdr], [body]], colWidths=[card_w])
+        return t
 
     auftrag_card = _info_card("AUFTRAGGEBER", dealer_block)
     abholort_card = _info_card("ABHOLORT / VERKÄUFER", seller_block)
@@ -537,55 +917,78 @@ def build_pickup_pdf(
     story.append(Spacer(1, 0.8 * cm))
 
     # ---- Sektion: FAHRZEUGDATEN — VOR ORT PRÜFEN ----
-    h2_blue = ParagraphStyle(
-        "h2_blue", parent=st["h2"], fontSize=13, leading=16,
-        textColor=BLUE, fontName="Helvetica-Bold",
-        spaceBefore=4, spaceAfter=4,
-    )
-    story.append(Paragraph("FAHRZEUGDATEN — VOR ORT PRÜFEN", h2_blue))
+    story.append(_section("1 · Fahrzeugdaten — vor Ort prüfen", st))
+    story.append(Spacer(1, 4))
     story.append(Paragraph(
         "Bitte Angaben mit dem Vertrag abgleichen und den zutreffenden Kreis ankreuzen.",
         st["small"]))
     story.append(Spacer(1, 0.25 * cm))
 
-    # Gather values from vehicle + contract
-    make = vehicle.get("make") or vehicle.get("brand") or "—"
-    model = vehicle.get("model") or "—"
-    ez = (vehicle.get("ezl") or vehicle.get("first_registration")
-          or vehicle.get("ez") or "—")
-    fin = (vehicle.get("vin") or vehicle.get("fin") or "—")
-    power_kw = vehicle.get("power_kw") or vehicle.get("kw")
-    power_ps = vehicle.get("power_ps") or vehicle.get("ps")
-    if power_ps in (None, "", 0) and power_kw not in (None, "", 0):
-        try:
-            power_ps = round(float(power_kw) * 1.35962)
-        except (TypeError, ValueError):
-            power_ps = None
-    power = f"{_fmt(power_kw)} kW / {_fmt(power_ps)} PS"
-    halter = contract.get("previous_owners") or vehicle.get("previous_owners") or "—"
-    color = vehicle.get("exterior_color") or vehicle.get("color") or "—"
-    fuel = vehicle.get("fuel") or vehicle.get("fuel_type") or "—"
-    hu_val = contract.get("hu_valid") or ""
-    hu_until = contract.get("hu_until") or vehicle.get("hu") or ""
-    hu_disp = f"{hu_val} · gültig bis {hu_until}".strip(" ·") if (hu_val or hu_until) else "—"
-    km = _fmt_km(vehicle.get("km") or vehicle.get("mileage"))
-    commercial = contract.get("commercial_since_ez") or ""
-    accident = contract.get("accident_free") or ""
+    # Runde 33 (Analyse 12.09.2026): Soll-Werte aus dem VERTRAG (die
+    # Ueberschreibungen im Vertrags-Dialog), nicht mehr aus dem Inserat —
+    # dieselben Werte wie in der Fahrer-App und im Freigabe-Kasten.
+    import protokoll_vergleich as PV
+    # Gegenpruefung 12.09.2026: aus dem reinen Modul — das PDF braucht
+    # keine Routen und keine Datenbank.
+    VEHICLE_CHECK_FIELDS = PV.FELDER
+    _werte = PV.vertragswerte(vehicle, contract)
+    _texte = PV.werte_als_text(_werte)
+    make = _texte["make"] or "—"
+    model = _texte["model"] or "—"
+    ez = _texte["first_registration"] or "—"
+    fin = _texte["vin"] or "—"
+    power = _texte["power"] or "— kW / — PS"
+    halter = _texte["previous_owners"] or "—"
+    color = _texte["color"] or "—"
+    fuel = _texte["fuel"] or "—"
+    hu_disp = _texte["hu"] or "—"
+    km = _texte["mileage_contract"] or "—"
+    commercial = _texte["commercial"]
+    accident = _texte["accident_free"]
 
-    col_w = [4.6 * cm, 6.4 * cm, 2.0 * cm, 2.0 * cm, 2.5 * cm]
+    # Fahrer-Eingaben zu Abschnitt 1 (App): pro Zeile "stimmt"/"weicht ab"
+    # plus optionaler Korrekturwert. _vc[key] = {"status": .., "value": ..}
+    _vc = filled.get("vehicle_check") or {}
+    _zeilen = ({z["schluessel"]: z for z in PV.vergleich(
+        VEHICLE_CHECK_FIELDS, _vc, _fill_cond, _werte)} if filled else {})
+
+    def _vrow(key: str, label: str, value, options=None, bold=False):
+        """Zeile mit Fahrer-Auswahl. Nur bei echter Abweichung steht
+        "Vertrag  →  vor Ort" im PDF — ein alter Korrekturwert bei "stimmt"
+        gehoert nicht ins unterschriebene Dokument (Befund 12.09.2026)."""
+        entry = _vc.get(key) or {}
+        if not isinstance(entry, dict):
+            # P-27: ein Eintrag als reiner Text ("stimmt") statt Objekt
+            # fuehrte zum AttributeError und brach das ganze PDF ab.
+            entry = {"status": str(entry)}
+        sel = entry.get("status")
+        zeile = _zeilen.get(key)
+        shown = value
+        # Gegenpruefung 12.09.2026: nur wenn "weicht ab" angekreuzt ist. Bei
+        # "stimmt" stand sonst ein Kilometer-Pfeil (Stand bei Abholung) direkt
+        # neben dem bestaetigten Vertragswert — das Dokument widersprach sich.
+        if (sel == "weicht ab" and zeile and zeile["abweichend"]
+                and zeile["art"] != "ja_nein" and zeile["vor_ort_text"]):
+            shown = f"{_fmt(value)}  →  {zeile['vor_ort_text']}"
+        return _check_row(label, shown, options or ["stimmt", "weicht ab"],
+                          st, bold_value=bold, selected=sel)
+
+    col_w = _anteilig(4.6, 6.4, 2.0, 2.0, 2.5)   # P-32: innerhalb des Rahmens
     check_rows = [
-        _check_row("Marke",           make,   ["stimmt", "weicht ab"], st, bold_value=True),
-        _check_row("Modell",          model,  ["stimmt", "weicht ab"], st, bold_value=True),
-        _check_row("Erstzulassung",   ez,     ["stimmt", "weicht ab"], st),
-        _check_row("FIN (Fahrgestell-Nr.)", fin, ["stimmt", "weicht ab"], st),
-        _check_row("Leistung",        power,  ["stimmt", "weicht ab"], st),
-        _check_row("Halter laut Schein", halter, ["stimmt", "weicht ab"], st),
-        _check_row("Farbe",           color,  ["stimmt", "weicht ab"], st),
-        _check_row("Kraftstoff",      fuel,   ["stimmt", "weicht ab"], st),
-        _check_row("HU",              hu_disp, ["stimmt", "weicht ab"], st),
-        _check_row("KM-Stand laut Vertrag", km, ["stimmt", "weicht ab"], st),
-        _check_row("Gewerbliche Nutzung", commercial, ["Ja", "Nein", "unbekannt"], st),
-        _check_row("Unfallfrei laut Angabe", accident, ["Ja", "Nein", "unbekannt"], st),
+        _vrow("make", "Marke", make, bold=True),
+        _vrow("model", "Modell", model, bold=True),
+        _vrow("first_registration", "Erstzulassung", ez),
+        _vrow("vin", "FIN (Fahrgestell-Nr.)", fin),
+        _vrow("power", "Leistung", power),
+        _vrow("previous_owners", "Halter laut Schein", halter),
+        _vrow("color", "Farbe", color),
+        _vrow("fuel", "Kraftstoff", fuel),
+        _vrow("hu", "HU", hu_disp),
+        _vrow("mileage_contract", "KM-Stand laut Vertrag", km),
+        _vrow("commercial", "Gewerbliche Nutzung", commercial,
+              ["Ja", "Nein", "unbekannt"]),
+        _vrow("accident_free", "Unfallfrei laut Angabe", accident,
+              ["Ja", "Nein", "unbekannt"]),
     ]
     # Normalise to 5 columns (add empty col for 3-option rows via compute)
     norm = []
@@ -600,15 +1003,13 @@ def build_pickup_pdf(
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("LEFTPADDING", (0, 0), (-1, -1), 0),
         ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-        ("TOPPADDING", (0, 0), (-1, -1), 9),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
         # Trenner OBEN über jeder Zeile (= Linie unter der vorherigen)
         ("LINEABOVE", (0, 0), (-1, -1), 0.4, DIVIDER),
         # Letzte Zeile braucht auch unten eine Linie
         ("LINEBELOW", (0, -1), (-1, -1), 0.4, DIVIDER),
-        # Label in dezentem Blau
-        ("TEXTCOLOR", (0, 0), (0, -1), BLUE_DARK),
-        ("FONTNAME", (0, 0), (0, -1), "Helvetica"),
+        ("FONTNAME", (0, 0), (0, -1), _schrift("Helvetica")),
         ("FONTSIZE", (0, 0), (0, -1), 10),
     ]))
     story.append(t)
@@ -618,8 +1019,12 @@ def build_pickup_pdf(
     # -----------------------------------------------------------------
     # PAGE 2 — Dokumente & Ausstattung
     # -----------------------------------------------------------------
-    story.append(Paragraph("DOKUMENTE & ZUBEHÖR", h2_blue))
-    story.append(Paragraph("Vor Ort beim Verkäufer einsammeln und abhaken.", st["small"]))
+    story.append(_section("2 · Dokumente & Zubehör", st))
+    story.append(Spacer(1, 4))
+    story.append(Paragraph(
+        "Vor Ort beim Verkäufer einsammeln und abhaken."
+        # Rollenprüfung 22.09.2026 (RP-068/167): Legende im ausgefuellten Protokoll
+        + (" [X] = ja / vorhanden, [–] = nein / fehlt." if filled else ""), st["small"]))
     story.append(Spacer(1, 0.2 * cm))
 
     docs_items = [
@@ -629,19 +1034,30 @@ def build_pickup_pdf(
         ("Servicebuch / Scheckheft", "gestempelt"),
         ("COC-Papiere (EG-Übereinstimmung)", "falls vorhanden"),
         ("Bedienungsanleitung", ""),
-        ("Schlüssel", "Anzahl: _____ von _____"),
+        # Review 26.09.2026 (Nr. 113/114): 0 Schluessel ist ein Wert (vorher
+        # "_____"); "von" ist der Serverwert aus dem Vertrag (keys_expected).
+        ("Schlüssel", (f"Anzahl: {_anzahl(filled.get('keys_count'))} von "
+                       f"{_anzahl(filled.get('keys_expected'))}")),
         ("Zweitsatz Reifen", "Winter / Sommer / nein"),
         ("Ladekabel / Adapter", "bei E-/Hybrid-Fahrzeugen"),
         ("Werkzeug / Warndreieck / Verbandskasten", ""),
     ]
-    story.append(_checklist(docs_items, st, col_count=2))
+    story.append(_checklist(docs_items, st, col_count=2, checked=_fill_docs))
 
     story.append(Spacer(1, 0.4 * cm))
-    story.append(Paragraph("AUSSTATTUNG LAUT INSERAT — VOR ORT PRÜFEN", h2_blue))
+    story.append(_section("3 · Ausstattung laut Inserat — vor Ort prüfen", st))
+    story.append(Spacer(1, 4))
+    from protokoll_vergleich import AUSSTATTUNG_MAX
     features = vehicle.get("features") or []
-    if features:
-        feat_items = [(str(f), "") for f in features if str(f).strip()]
-    else:
+    if isinstance(features, str):
+        # Import-/Altdaten: Ausstattung als Text — sonst zerfiele sie in Zeichen.
+        features = features.split(",")
+    # Pruefbericht 20.09.2026 (P-30): ERST saeubern, DANN entscheiden — eine
+    # Liste wie ['', ' '] ergab feat_items=[] und ein Table(rows=[]), das
+    # Protokoll-PDF scheiterte mit ValueError.
+    feat_items = [(str(f).strip(), "") for f in features
+                  if f is not None and str(f).strip()][:AUSSTATTUNG_MAX]
+    if not feat_items:
         feat_items = [
             ("Klimaanlage / Klimaautomatik", ""),
             ("Navigationssystem", ""),
@@ -660,29 +1076,59 @@ def build_pickup_pdf(
                                st["small"]))
         story.append(Spacer(1, 0.1 * cm))
 
-    story.append(_checklist(feat_items, st, col_count=2))
+    story.append(_checklist(feat_items, st, col_count=2, checked=_fill_feats))
 
     story.append(Spacer(1, 0.4 * cm))
-    story.append(Paragraph("TECHNISCHER ZUSTAND — FAHRER TRÄGT EIN", h2_blue))
+    story.append(_section("4 · Technischer Zustand — Fahrer trägt ein", st))
+    story.append(Spacer(1, 6))
+    def _opts(field: str, options: List[str]) -> str:
+        """Optionen-Zeile; bei ausgefuelltem Protokoll ist die gewaehlte
+        Option mit [X] markiert (sonst alle leer wie im Papierformular)."""
+        sel = str(_fill_cond.get(field, "") or "").strip().lower()
+        parts = []
+        for o in options:
+            hit = sel and sel == o.strip().lower()
+            parts.append(("<b>[X]</b>" if hit else "[&nbsp;]") + f" {o}")
+        return " &nbsp; ".join(parts)
+
+    def _val(field: str, empty: str, suffix: str = "") -> str:
+        v = _fill_cond.get(field)
+        if v in (None, ""):
+            return empty
+        return f"<b>{_xe(str(v))}{suffix}</b>"
+
+    def _val_km(field: str, empty: str) -> str:
+        """Pruefbericht 20.09.2026 (P-33): '85120 km' -> '85.120 km' — _fmt_km
+        hatte bis dahin keinen Aufrufer. Nicht Lesbares bleibt Text mit ' km'."""
+        v = _fill_cond.get(field)
+        if v in (None, ""):
+            return empty
+        text = _fmt_km(v)
+        if text == "—":
+            text = f"{v} km"
+        elif not text.endswith("km"):
+            text += " km"
+        return f"<b>{_xe(text)}</b>"
+
     tech_rows = [
         [Paragraph("Kilometerstand bei Abholung", st["check_label"]),
-         Paragraph("<u>_____________ km</u>", st["value"]),
+         Paragraph(_val_km("mileage", "<u>_____________ km</u>"), st["value"]),
          Paragraph("Tankfüllstand", st["check_label"]),
-         Paragraph("○ leer &nbsp; ○ ¼ &nbsp; ○ ½ &nbsp; ○ ¾ &nbsp; ○ voll", st["check_opt"])],
+         Paragraph(_opts("fuel_level", ["leer", "1/4", "1/2", "3/4", "voll"]), st["check_opt"])],
         [Paragraph("Reifenprofil VL / VR / HL / HR", st["check_label"]),
-         Paragraph("___ / ___ / ___ / ___ mm", st["value"]),
+         Paragraph(_val("tire_profile", "___ / ___ / ___ / ___ mm", " mm"), st["value"]),
          Paragraph("Fahrverhalten (Probefahrt)", st["check_label"]),
-         Paragraph("○ unauffällig &nbsp; ○ Mängel (Bemerkung)", st["check_opt"])],
+         Paragraph(_opts("driving", ["ok", "Mängel", "nicht gefahren"]), st["check_opt"])],
         [Paragraph("Batterie / Starter", st["check_label"]),
-         Paragraph("○ OK &nbsp; ○ schwach &nbsp; ○ defekt", st["check_opt"]),
+         Paragraph(_opts("battery", ["ok", "schwach", "defekt"]), st["check_opt"]),
          Paragraph("Kontrollleuchten leuchten", st["check_label"]),
-         Paragraph("○ keine &nbsp; ○ ja (Bemerkung)", st["check_opt"])],
+         Paragraph(_opts("warning_lights", ["nein", "ja"]), st["check_opt"])],
         [Paragraph("Sauberkeit Innenraum", st["check_label"]),
-         Paragraph("○ OK &nbsp; ○ mangelhaft", st["check_opt"]),
+         Paragraph(_opts("clean_inside", ["gut", "mittel", "schlecht"]), st["check_opt"]),
          Paragraph("Sauberkeit Außen", st["check_label"]),
-         Paragraph("○ OK &nbsp; ○ mangelhaft", st["check_opt"])],
+         Paragraph(_opts("clean_outside", ["gut", "mittel", "schlecht"]), st["check_opt"])],
     ]
-    tech_t = Table(tech_rows, colWidths=[4.5 * cm, 4.2 * cm, 4.5 * cm, 4.3 * cm])
+    tech_t = Table(tech_rows, colWidths=_anteilig(4.5, 4.2, 4.5, 4.3))   # P-32
     tech_t.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("TOPPADDING", (0, 0), (-1, -1), 4),
@@ -696,16 +1142,37 @@ def build_pickup_pdf(
     # -----------------------------------------------------------------
     # PAGE 3 — Vorbestehende Schäden (aus Kaufvertrag)
     # -----------------------------------------------------------------
-    story.append(Paragraph("VORBESTEHENDE SCHÄDEN LAUT KAUFVERTRAG", h2_blue))
+    story.append(_section("5 · Vorbestehende Schäden laut Kaufvertrag", st))
+    story.append(Spacer(1, 4))
     story.append(Paragraph(
         "Diese Schäden wurden im Kaufvertrag dokumentiert. Der Fahrer prüft "
-        "vor Ort, ob diese vorhanden sind (○ bestätigt / ○ nicht vorhanden / "
-        "○ weicht ab) und markiert ggf. zusätzliche Schäden auf der "
+        "vor Ort, ob diese vorhanden sind (bestätigt / nicht vorhanden / "
+        "weicht ab) und markiert ggf. zusätzliche Schäden auf der "
         "leeren Skizze der nächsten Seite.", st["small"]))
+    story.append(Spacer(1, 0.15 * cm))
+    # Rollenprüfung 22.09.2026 (RP-067/166, Uebergabe Fahrer-App): Die Antwort
+    # des Fahrers zu Abschnitt 5 (damages_confirmed) stand nirgends im PDF —
+    # ein "Nein" war im unterschriebenen Protokoll nicht zu sehen.
+    story.append(Paragraph(damages_confirmed_zeile(filled), st["value"]))
     story.append(Spacer(1, 0.2 * cm))
     legend = _damage_legend(damages, st)
     if legend:
         story.append(legend)
+        story.append(Spacer(1, 0.25 * cm))
+    # Technische Maengel (25.09.2026 abends) haben keinen Skizzenpunkt —
+    # Bereich und Beschreibung im Klartext, sonst blieben sie unsichtbar.
+    _technik_alt = [d for d in damages if isinstance(d, dict) and d.get("view") == "technik"]
+    if _technik_alt:
+        story.append(Paragraph(
+            "<b>Technische Mängel laut Kaufvertrag:</b> "
+            + " &nbsp;·&nbsp; ".join(_technik_zeile(d) for d in _technik_alt[:20]), st["small"]))
+        story.append(Spacer(1, 0.25 * cm))
+    if freitext_schaeden:
+        # P-03: Schaeden, die im Vertrag als Text stehen, gehoeren genauso
+        # auf das Protokoll — sie haben nur keinen Punkt auf der Skizze.
+        story.append(Paragraph(
+            "<b>Weitere Schäden laut Kaufvertrag:</b> "
+            + " &nbsp;·&nbsp; ".join(_xe(t) for t in freitext_schaeden[:40]), st["small"]))
         story.append(Spacer(1, 0.25 * cm))
     story.append(KeepTogether(_sketch_grid(damages, empty=False)))
 
@@ -714,45 +1181,237 @@ def build_pickup_pdf(
     # -----------------------------------------------------------------
     # PAGE 4 — Vor-Ort-Aufnahme, Bemerkungen, Unterschriften
     # -----------------------------------------------------------------
-    story.append(Paragraph("VOR-ORT-AUFNAHME DURCH DEN FAHRER", h2_blue))
-    story.append(Paragraph(
-        "Der Fahrer markiert hier neu entdeckte Beschädigungen mit Kreuzen (✗) "
-        "oder Kreisen (○) und notiert die Art im Feld Bemerkungen.", st["small"]))
-    story.append(Spacer(1, 0.2 * cm))
-    story.append(KeepTogether(_sketch_grid([], empty=True)))
+    story.append(_section("6 · Vor-Ort-Aufnahme durch den Fahrer", st))
+    story.append(Spacer(1, 4))
+    _new_damages = [d for d in (filled.get("new_damages") or []) if isinstance(d, dict)]
+    if _new_damages:
+        # Digital ausgefuellt: die vom Fahrer auf der Skizze markierten
+        # NEUEN Schaeden — gleiche Darstellung wie die Vertrags-Schaeden.
+        story.append(Paragraph(
+            "Vom Fahrer vor Ort neu erfasste Beschädigungen "
+            f"({len(_new_damages)}):", st["small"]))
+        story.append(Spacer(1, 0.2 * cm))
+        nd_legend = _damage_legend(_new_damages, st)
+        if nd_legend:
+            story.append(nd_legend)
+            story.append(Spacer(1, 0.15 * cm))
+        # Klartext-Liste (Art — Bauteil), damit der Nachweis auch ohne
+        # Blick auf die Skizze eindeutig ist.
+        _nd_lines = " &nbsp;·&nbsp; ".join(
+            f"<b>{_xe(str(d.get('type_label') or '?'))}</b>: "
+            f"{_xe(str(d.get('zone') or d.get('view') or '?'))}"
+            + (f" – {_xe(str(d.get('note'))[:200])}" if d.get("view") == "technik" and d.get("note") else "")
+            for d in _new_damages[:20])
+        story.append(Paragraph(_nd_lines, st["small"]))
+        story.append(Spacer(1, 0.25 * cm))
+        story.append(KeepTogether(_sketch_grid(_new_damages, empty=False)))
+    else:
+        if filled:
+            story.append(Paragraph(
+                "Der Fahrer hat vor Ort KEINE neuen Beschädigungen erfasst.",
+                st["small"]))
+            story.append(Spacer(1, 0.2 * cm))
+        else:
+            story.append(Paragraph(
+                "Der Fahrer markiert hier neu entdeckte Beschädigungen mit Kreuz (X) "
+                "oder Kreis (O) und notiert die Art im Feld Bemerkungen.", st["small"]))
+            story.append(Spacer(1, 0.2 * cm))
+            story.append(KeepTogether(_sketch_grid([], empty=True)))
 
     story.append(Spacer(1, 0.3 * cm))
-    story.append(Paragraph("BEMERKUNGEN DES FAHRERS", h2_blue))
-    # Draw 6 empty lines
+    story.append(_section("7 · Bemerkungen des Fahrers", st))
+    story.append(Spacer(1, 4))
+    # Ausgefuellt: echter Text; sonst 6 leere Linien zum Handschreiben.
+    # Rollenprüfung 22.09.2026 (RP-535): Die ganze Bemerkung stand als EIN
+    # Absatz in EINER Tabellenzeile. Tabellenzeilen werden nicht ueber Seiten
+    # geteilt — ab ca. einer Seitenhoehe (z. B. 32 Stichpunkte) brach der Bau
+    # mit LayoutError ab, der Abschluss vor Ort scheiterte bei jedem Versuch
+    # mit 500. Jetzt eine Tabellenzeile je Zeile/Absatz (die Tabelle bricht
+    # zwischen den Zeilen um); ueberlange Einzelzeilen werden in Stuecke
+    # geteilt. Dazu faengt build_pickup_pdf einen LayoutError noch einmal ab.
     bem_lines = []
-    for _ in range(6):
-        bem_lines.append([Paragraph("", st["body"])])
-    bem_t = Table(bem_lines, colWidths=[17.5 * cm])
-    bem_t.setStyle(TableStyle([
-        ("LINEBELOW", (0, 0), (-1, -1), 0.4, DIVIDER),
-        ("TOPPADDING", (0, 0), (-1, -1), 8),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-    ]))
+    _notes = _notes_text(filled.get("notes"))
+    if _notes:
+        for stueck in _notes_stuecke(_notes):
+            bem_lines.append([Paragraph(_xe(stueck).replace("\n", "<br/>")
+                                        if stueck.strip() else "&nbsp;", st["body"])])
+        # zwei leere Linien darunter (Nachtraege von Hand), wie bisher
+        for _ in range(2):
+            bem_lines.append([Paragraph("", st["body"])])
+        bem_style = [("LINEBELOW", (0, -3), (-1, -1), 0.4, DIVIDER),
+                     ("TOPPADDING", (0, 0), (-1, -1), 1),
+                     ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
+                     ("TOPPADDING", (0, 0), (-1, 0), 8),
+                     ("TOPPADDING", (0, -2), (-1, -1), 8),
+                     ("BOTTOMPADDING", (0, -3), (-1, -1), 8)]
+    else:
+        for _ in range(6):
+            bem_lines.append([Paragraph("", st["body"])])
+        bem_style = [("LINEBELOW", (0, 0), (-1, -1), 0.4, DIVIDER),
+                     ("TOPPADDING", (0, 0), (-1, -1), 8),
+                     ("BOTTOMPADDING", (0, 0), (-1, -1), 8)]
+    bem_t = Table(bem_lines, colWidths=[TABELLEN_B])   # P-32
+    bem_t.setStyle(TableStyle(bem_style))
     story.append(bem_t)
 
-    story.append(Spacer(1, 0.4 * cm))
-    story.append(Paragraph("ÜBERGABE-BESTÄTIGUNG", h2_blue))
-    sig_rows = [
-        [Paragraph("Ort, Datum", st["label"]),
-         Paragraph("Unterschrift Verkäufer", st["label"]),
-         Paragraph("Unterschrift Fahrer", st["label"])],
-        [Paragraph("_________________________", st["value"]),
-         Paragraph("_________________________", st["value"]),
-         Paragraph("_________________________", st["value"])],
-    ]
-    sig_t = Table(sig_rows, colWidths=[5.8 * cm, 5.8 * cm, 5.8 * cm])
+    # ---- Unterschriften — umrahmte Boxen, gleiche Optik wie im Kaufvertrag ----
+    sig_col_w = (CONTENT_W - 0.5 * cm) / 2
+
+    def _sig_img(raw: Optional[bytes]):
+        """Gezeichnete Unterschrift als Bild — sonst Leerraum zum Unterschreiben."""
+        if not raw:
+            return Spacer(1, 22)
+        try:
+            # Rollentest 19.09.2026: Das Bild wird hier NUR am Kopf gelesen —
+            # eine abgeschnittene Datei fiel erst beim Zeichnen auf und riss
+            # den ganzen Abschluss mit (500, mitten beim Unterschreiben).
+            # Einmal wirklich lesen; geht das nicht, bleibt die Zeile leer.
+            from storage_service import bild_lesbar_pruefen
+            bild_lesbar_pruefen(raw, wo="Unterschrift")
+            img = Image(io.BytesIO(raw))
+            # Rollenprüfung 22.09.2026 (RP-071/170): proportional skalieren. Vorher
+            # war die Breite fest und nur die Hoehe gedeckelt — eine hohe
+            # Unterschrift (Handy hochkant) wurde gestaucht. Jetzt EIN Faktor fuer
+            # beide Masse (der kleinere aus Breiten- und Hoehengrenze).
+            w_max, h_max = min(sig_col_w - 20, 6.5 * cm), 1.8 * cm
+            faktor = _sig_faktor(img.imageWidth, img.imageHeight, w_max, h_max)
+            img.drawWidth = (img.imageWidth or 1) * faktor
+            img.drawHeight = (img.imageHeight or 1) * faktor
+            img.hAlign = "LEFT"
+            return img
+        except Exception:
+            return Spacer(1, 22)
+
+    def _sig_box(role: str, *, sig: Optional[bytes] = None,
+                 who: str = "", place_date: str = "") -> Table:
+        box = Table([
+            [Paragraph(f"<b>{_xe(role)}</b>" + (f" &nbsp;<font size=8 color='#71717A'>{_xe(who)}</font>" if who else ""),
+                       st["sig_label"])],
+            [Paragraph(_xe(place_date), st["body"]) if place_date else Spacer(1, 34)],
+            [Paragraph("Ort, Datum", st["sig_label"])],
+            [_sig_img(sig)],
+            [Paragraph("Unterschrift", st["sig_label"])],
+        ], colWidths=[sig_col_w])
+        box.setStyle(TableStyle([
+            ("BOX", (0, 0), (-1, -1), 0.5, DIVIDER),
+            ("BACKGROUND", (0, 0), (0, 0), LIGHT_BG),
+            ("LINEBELOW", (0, 0), (0, 0), 0.5, DIVIDER),
+            ("LINEBELOW", (0, 1), (0, 1), 0.5, GREY),   # Ort/Datum-Linie
+            ("LINEBELOW", (0, 3), (0, 3), 0.5, GREY),   # Unterschrift-Linie
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (0, 0), 5),
+            ("BOTTOMPADDING", (0, 0), (0, 0), 5),
+            ("BOTTOMPADDING", (0, -1), (0, -1), 6),
+        ]))
+        return box
+
+    _place_date = ""
+    if filled:
+        _place = filled.get("place") or ""
+        # Rollenprüfung 22.09.2026 (RP-071/170): deutsches Datum (vorher UTC —
+        # nachts bis 1/2 Uhr stand der Vortag ueber den Unterschriften).
+        _date = _jetzt_berlin().strftime("%d.%m.%Y")
+        _place_date = f"{_place}, {_date}" if _place else _date
+    sig_t = Table(
+        [[_sig_box("Verkäufer / Übergebender",
+                   sig=filled.get("signature_seller"),
+                   who=filled.get("seller_name", ""), place_date=_place_date),
+          "",
+          _sig_box("Fahrer (Abholer)",
+                   sig=filled.get("signature_driver"),
+                   who=filled.get("driver_name", ""), place_date=_place_date)]],
+        colWidths=[sig_col_w, 0.5 * cm, sig_col_w],
+    )
     sig_t.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("TOPPADDING", (0, 0), (-1, -1), 6),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 28),
-        ("LINEBELOW", (0, 1), (-1, 1), 0.5, PRIMARY),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
     ]))
-    story.append(sig_t)
+    # ---- Runde 30 (12.09.2026, Wunsch Ahmad): Kaufpreis vor den
+    # Unterschriften. Findet der Fahrer vor Ort Abweichungen, verhandelt der
+    # Haendler nach — unterschrieben wird dann der NEUE Preis. Im leeren
+    # Formular stehen Linien zum Eintragen, im ausgefuellten die Werte.
+    # Rollenprüfung 22.09.2026 (RP-480): "Kaufpreis laut Vertrag" ist der Preis
+    # VOR der Abholung — bei einer Korrektur traegt der Vertrag schon den
+    # verhandelten Preis der Vorversion (neue Fassung), den der Chef bei der
+    # Freigabe gerade auf den Vertragspreis zuruecksetzen kann.
+    _preis_vertrag = contract.get("purchase_price")
+    if contract.get("preis_vor_abholung") is not None:
+        _preis_vertrag = contract.get("preis_vor_abholung")
+    _preis_neu = filled.get("neuer_preis")
+    # Gegenpruefung 12.09.2026: Der Vermerk ist Freitext des Chefs und geht
+    # in einen ReportLab-Absatz — der wird als Mini-XML gelesen. Ein
+    # "<" im Text (z.B. "Bremsen <b> vorn") liess den PDF-Bau abstuerzen,
+    # und der Fahrer konnte vor Ort ueberhaupt nicht mehr abschliessen.
+    _preis_notiz = _xe(_txt(filled.get("preis_notiz")))
 
-    doc.build(story)
+    def _eur_oder_linie(wert) -> str:
+        if wert in (None, ""):
+            return "_______________ €"
+        try:
+            return f"{float(wert):,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
+        except (TypeError, ValueError):
+            return _txt(wert)
+
+    preis_zeilen = [[
+        Paragraph("<b>Kaufpreis laut Vertrag</b>", st["label"]),
+        Paragraph(_eur_oder_linie(_preis_vertrag), st["value"]),
+        Paragraph("<b>Neuer Preis (nach Verhandlung vor Ort)</b>", st["label"]),
+        Paragraph(_eur_oder_linie(_preis_neu), st["value"]),
+    ]]
+    preis_t = Table(preis_zeilen, colWidths=[CONTENT_W * 0.22, CONTENT_W * 0.26,
+                                             CONTENT_W * 0.28, CONTENT_W * 0.24])
+    preis_t.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#d0d0d0")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#e6e6e6")),
+        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f7f7f7")),
+        ("BACKGROUND", (2, 0), (2, -1), colors.HexColor("#f7f7f7")),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    preis_block = [
+        _section("8 · Kaufpreis & Übergabe-Bestätigung", st),
+        Spacer(1, 8),
+        preis_t,
+    ]
+    if _preis_notiz:
+        preis_block += [Spacer(1, 4),
+                        Paragraph(f"Vermerk zur Verhandlung: {_preis_notiz}",
+                                  st["small"])]
+    # Wunsch Ahmad 14.09.2026: vor Ort getroffene Sondervereinbarung steht
+    # ueber den Unterschriften.
+    _sonder = _xe(_txt(filled.get("sondervereinbarung")))
+    if _sonder:
+        preis_block += [Spacer(1, 4),
+                        Paragraph(f"<b>Sondervereinbarung vor Ort:</b> {_sonder}",
+                                  st["small"])]
+    elif _preis_neu in (None, ""):
+        preis_block += [
+            Spacer(1, 3),
+            Paragraph("Wurde vor Ort nachverhandelt, wird der neue Preis hier "
+                      "eingetragen und von beiden Seiten unterschrieben.",
+                      st["small"])]
+
+    story.append(Spacer(1, 0.4 * cm))
+    story.append(KeepTogether(preis_block + [
+        Spacer(1, 10),
+        sig_t,
+        Spacer(1, 4),
+        Paragraph(
+            "Mit ihrer Unterschrift bestätigen beide Parteien die Übergabe des "
+            "Fahrzeugs im dokumentierten Zustand inklusive der aufgeführten "
+            "Dokumente und Schlüssel sowie den oben genannten Kaufpreis.",
+            st["small"]),
+    ]))
+
+    footer_left = dealer_name
+    # Rollenprüfung 22.09.2026 (RP-071/170): deutsche Ortszeit wie ueber den
+    # Unterschriften (vorher die Uhr des Containers, meist UTC).
+    footer_center = (f"Abholprotokoll {auftrag_nr} · erstellt am "
+                     f"{_jetzt_berlin().strftime('%d.%m.%Y · %H:%M')}")
+    doc.build(story, canvasmaker=_numbered_canvas_factory(footer_left, footer_center))
     return buf.getvalue()

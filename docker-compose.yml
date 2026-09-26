@@ -1,0 +1,572 @@
+# AutoSchnell — Produktions-Stack (ein Server).
+# Start:  docker compose up -d --build
+# Der Reverse-Proxy (nginx) terminiert HTTPS, reicht die ECHTE Client-IP
+# an das Backend weiter (X-Forwarded-For) — deshalb greift der Rate-Limiter
+# korrekt (TRUST_PROXY=true im Backend).
+#
+# Audit 09/2026: Ressourcen-Limits je Dienst, weniger Worker/Snapshots als
+# Standard, Host-Allowlist im Proxy (PUBLIC_HOST), alle Betriebs-Schalter
+# aus der .env durchgereicht, Mongo-Verbindungspool begrenzt, Certbot-Volume.
+services:
+  mongo:
+    # 8.2, nicht 8.0: MongoDB 8.0 verweigert den Start auf Linux-Kernen ab
+    # 6.19 (bekannte Unvertraeglichkeit einer Speicherverwaltung, MongoDB-
+    # Ticket SERVER-121912). Ubuntu 26.04 bringt Kernel 7.0 mit. 8.2 laeuft
+    # dort einwandfrei.
+    image: mongo:8.2
+    restart: unless-stopped
+    # Authentifizierung ab dem ERSTEN Start (der Produktions-Check des
+    # Backends verlangt Zugangsdaten in MONGO_URL). Werte in .env setzen.
+    environment:
+      - TZ=${TZ:-Europe/Berlin}
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_USER:?MONGO_USER in .env setzen}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_PASSWORD:?MONGO_PASSWORD in .env setzen}
+    # MONGO_EXTRA_ARGS schaltet das Ein-Knoten-Replica-Set ein (noetig fuer
+    # stimmige Sicherungen — Snapshot statt Collection fuer Collection):
+    #   MONGO_EXTRA_ARGS=--replSet rs0 --keyFile /etc/mongo-keyfile
+    # Einmalig danach:
+    #   rs.initiate({_id:"rs0",members:[{_id:0,host:"mongo:27017"}]})
+    # Der Name "mongo" ist der Dienstname in diesem Netz — er gilt fuer den
+    # Container selbst UND fuer das Backend. Eine Server-IP funktioniert hier
+    # NICHT: der Container erkennt sie nicht als eigene Adresse.
+    #
+    # WICHTIG: argv[0] muss "mongod" bleiben, sonst legt das Image beim ersten
+    # Start den Datenbank-Benutzer nicht an (der Einstiegspunkt prueft darauf).
+    command: mongod --auth --bind_ip_all --wiredTigerCacheSizeGB ${MONGO_CACHE_GB:-1} ${MONGO_EXTRA_ARGS:-}
+    volumes:
+      - mongo_data:/data/db
+      # Schluesseldatei fuer das Replica Set. VOR dem ersten Start anlegen:
+      #   openssl rand -base64 756 > deploy/mongo-keyfile
+      #   chmod 400 deploy/mongo-keyfile && chown 999:999 deploy/mongo-keyfile
+      # (Ohne Replica Set bleibt sie einfach ungenutzt.)
+      - ./deploy/mongo-keyfile:/etc/mongo-keyfile:ro
+    # Kein Port nach aussen — nur intern erreichbar.
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ping:1})"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    mem_limit: ${MONGO_MEM_LIMIT:-2g}
+    cpus: ${MONGO_CPUS:-1.5}
+    logging: &log
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    # Pruefbericht 20.09.2026 (DP-06): Zeit fuer das geordnete Beenden
+    # (uvicorn --timeout-graceful-shutdown 50) — Docker-Standard waren 10 s.
+    stop_grace_period: 60s
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      - TZ=${TZ:-Europe/Berlin}
+      - APP_ENV=production
+      # Runde 31: derselbe Stempel wie im Oberflaechen-Bau — geht als
+      # X-AH-Fassung an jede API-Antwort (server.py).
+      - APP_FASSUNG=${APP_FASSUNG:-}
+      # maxPoolSize begrenzt die Verbindungen JE Worker (Audit 09/2026, Punkt 19)
+      - MONGO_URL=${MONGO_URL:-mongodb://${MONGO_USER}:${MONGO_PASSWORD}@mongo:27017/?authSource=admin&maxPoolSize=20}
+      - DB_NAME=${DB_NAME:-autoschnell}
+      # Verbindungen je Worker. Der Wert in der MONGO_URL ist wirkungslos —
+      # der Code setzt maxPoolSize ausdruecklich aus dieser Variablen.
+      - MONGO_MAX_POOL_SIZE=${MONGO_MAX_POOL_SIZE:-20}
+      - MONGO_MIN_POOL_SIZE=${MONGO_MIN_POOL_SIZE:-5}
+      - WEB_CONCURRENCY=${WEB_CONCURRENCY:-4}
+      # Beweisdokument je Inserat (ohne Browser, ersetzt die Snapshots):
+      # gleichzeitige Erstellungen je Worker, eingebettete Fotos, Aufbewahrung
+      # in Tagen (laenger bei Kaufvertrag, Termin, Inserat oder Bestand),
+      # BEWEIS_PRIVATDATEN=1 druckt Name/Telefon auch privater Anbieter.
+      - BEWEIS_PARALLEL=${BEWEIS_PARALLEL:-1}
+      - BEWEIS_FOTOS_MAX=${BEWEIS_FOTOS_MAX:-20}
+      - BEWEIS_AUFBEWAHRUNG_TAGE=${BEWEIS_AUFBEWAHRUNG_TAGE:-30}
+      - BEWEIS_PRIVATDATEN=${BEWEIS_PRIVATDATEN:-}
+      - TRUST_PROXY=true
+      # Eigene Vermittler (Load Balancer/Proxy) — sonst zaehlen die
+      # Anfragesperren alle Besucher als denselben.
+      - TRUSTED_PROXIES=${TRUSTED_PROXIES:-127.0.0.1,172.16.0.0/12,10.0.0.0/8}
+      - TRUSTED_PROXIES_NUR_LISTE=${TRUSTED_PROXIES_NUR_LISTE:-false}
+      - RATE_LIMIT_EXEMPT_LOOPBACK=false
+      - JWT_SECRET=${JWT_SECRET}
+      # Nachpruefung 20.09.2026: fehlte — ein DATEN_SCHLUESSEL in der .env
+      # blieb wirkungslos, MFA-Geheimnisse und bekannte Anmelde-IPs hingen
+      # weiter an JWT_SECRET (mfa.py, rate_limiter.py).
+      - DATEN_SCHLUESSEL=${DATEN_SCHLUESSEL:-}
+      - SUPER_ADMIN_USERNAME=${SUPER_ADMIN_USERNAME:-}
+      - SUPER_ADMIN_PASSWORD=${SUPER_ADMIN_PASSWORD:-}
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - SMTP_FROM=${SMTP_FROM:-}
+      # E-Mail ueber Resend (bevorzugt). OHNE diese Zeilen erreicht der
+      # Schluessel aus der .env den Container NICHT — die Produktionspruefung
+      # findet dann keinen Versandweg und bricht den Start ab (Exit 78).
+      - RESEND_API_KEY=${RESEND_API_KEY:-}
+      - MAIL_FROM=${MAIL_FROM:-}
+      - MAIL_ABSENDER_NAME=${MAIL_ABSENDER_NAME:-}
+      # Betriebsschalter — ohne Durchreichen wirken Aenderungen in der .env nicht.
+      - ENABLE_DOCS=${ENABLE_DOCS:-false}
+      - MOCK_PROVIDER_FETCH=${MOCK_PROVIDER_FETCH:-false}
+      - MOBILE_SANDBOX_MODE=${MOBILE_SANDBOX_MODE:-false}
+      - RATE_LIMIT_ENABLED=${RATE_LIMIT_ENABLED:-true}
+      # Anbieter-Abrufe: Tageslimits und Gleichzeitigkeit
+      # 0 = kein Limit (Betreiber-Entscheidung 09/2026)
+      - ANBIETER_TAGESLIMIT_JE_FIRMA=${ANBIETER_TAGESLIMIT_JE_FIRMA:-0}
+      - ANBIETER_TAGESLIMIT_GESAMT=${ANBIETER_TAGESLIMIT_GESAMT:-0}
+      # Entscheidung Ahmad 16.09.2026: 400 neue Abrufe je Konto und Tag (alle
+      # Quellen). Bekannte Links aus dem Speicher und Mitwarten kosten nichts.
+      - ANBIETER_TAGESLIMIT_JE_KONTO=${ANBIETER_TAGESLIMIT_JE_KONTO:-400}
+      # Pruefbericht 20.09. (B-04): gleichzeitige Plaetze je Quelle, die EINE Firma
+      # hoechstens belegen darf, sobald eine andere Firma wartet (100 = aus).
+      - ANBIETER_FIRMENANTEIL_PROZENT=${ANBIETER_FIRMENANTEIL_PROZENT:-50}
+      # Pruefung 21.09.2026 (Kapazitaet): erwartet sind 1.000–3.240 Apify-
+      # Abrufe am Tag (30 Sucher) — bei 500 kaeme der Hinweis (und mit
+      # BETRIEB_MELDUNG_AN eine Mail) jeden Tag. Nur ein Hinweis, kein Riegel.
+      - ANBIETER_TAGESWARNUNG=${ANBIETER_TAGESWARNUNG:-5000}
+      - ABRUF_RUECKFALL_TAGESLIMIT=${ABRUF_RUECKFALL_TAGESLIMIT:-25}
+      - LOGIN_IP_LIMIT=${LOGIN_IP_LIMIT:-120}
+      # Kontonummer (13.09.2026): Fehlversuche je Kennung ohne IP (0 = nur Alarm)
+      - LOGIN_KONTO_LIMIT=${LOGIN_KONTO_LIMIT:-30}
+      - LOGIN_KONTO_FENSTER=${LOGIN_KONTO_FENSTER:-900}
+      - LINK_JOB_MAX_OFFEN_JE_KONTO=${LINK_JOB_MAX_OFFEN_JE_KONTO:-20}
+      # N9: 100 war exakt Ahmads Zielgroesse — schon ein aelterer offener
+      # Auftrag liess dann keine vollen 100 mehr zu. Jetzt Luft nach oben.
+      - LINK_JOB_MAX_OFFEN_JE_FIRMA=${LINK_JOB_MAX_OFFEN_JE_FIRMA:-200}
+      - LINK_JOB_KANDIDATEN=${LINK_JOB_KANDIDATEN:-200}
+      - LINK_JOB_HERZSCHLAG_MAX=${LINK_JOB_HERZSCHLAG_MAX:-900}
+      - BILD_PROXY_LIMIT=${BILD_PROXY_LIMIT:-3000}
+      # Pruefbericht 20.09. (B-09): Fehlschlaege des Bild-Proxys so lange merken.
+      - BILD_PROXY_NEGATIV_SEKUNDEN=${BILD_PROXY_NEGATIV_SEKUNDEN:-600}
+      # Pruefbericht 20.09.2026 (SV-10): IP-Limit fuer /api/files
+      - DATEI_LIMIT=${DATEI_LIMIT:-3000}
+      # Weiterverkauf, Regeln vom 20.09.2026 (Ahmad): Beschreibung 500
+      # Zeichen, hoechstens 10 eigene Fotos je Inserat, Laufzeit 3
+      # Wochen — danach verschwindet die Anzeige samt Fotos von selbst
+      # (Kaufvertrag und Fahrzeugakte bleiben unberuehrt).
+      - INSERAT_BESCHREIBUNG_MAX=${INSERAT_BESCHREIBUNG_MAX:-500}
+      - INSERAT_FOTOS_MAX=${INSERAT_FOTOS_MAX:-10}
+      - INSERAT_LAUFZEIT_TAGE=${INSERAT_LAUFZEIT_TAGE:-21}
+      # Nachpruefung 20.09.2026, Nr. 55: /api/ready loest DB-Ping,
+      # Index-, Platten- und Speicherpruefungen aus. Das Ergebnis wird
+      # so viele Sekunden zwischengespeichert (0 = wie frueher, jeder
+      # Aufruf rechnet neu).
+      - READY_CACHE_S=${READY_CACHE_S:-5}
+      # Nachpruefung 20.09.2026: Diese neun standen in .env.example, wurden vom
+      # Code gelesen — und erreichten den Container NIE. Wer sie in der .env
+      # setzte, aenderte nichts. Die Standardwerte hier sind dieselben wie im
+      # Code; ein LEERER Wert waere gefaehrlich (int("") stuerzt ab), deshalb
+      # ueberall ein ausdruecklicher Vorgabewert.
+      - ABRUF_JE_KONTO_MINUTE=${ABRUF_JE_KONTO_MINUTE:-60}
+      - ABRUF_GLEICHZEITIG_JE_KONTO=${ABRUF_GLEICHZEITIG_JE_KONTO:-8}
+      - VERGLEICH_JE_KONTO_MINUTE=${VERGLEICH_JE_KONTO_MINUTE:-120}
+      - VERSAND_JE_KONTO_10MIN=${VERSAND_JE_KONTO_10MIN:-300}
+      - LINK_JOB_SOFORT_MAX=${LINK_JOB_SOFORT_MAX:-4}
+      - LINK_JOB_MAX_ATTEMPTS=${LINK_JOB_MAX_ATTEMPTS:-3}
+      - IMAGE_QUALITY=${IMAGE_QUALITY:-80}
+      - MAX_IMAGE_UPLOAD_BYTES=${MAX_IMAGE_UPLOAD_BYTES:-8388608}
+      - MFA_AUSSTELLER=${MFA_AUSSTELLER:-AutoSchnell}
+      # Betriebsmeldungen per E-Mail (20.09.2026): Mail bei jedem NEUEN
+      # Betriebsalarm und ein Tagesbericht. LEERE Adresse = alles aus,
+      # dann bleiben Fehler nur auf der Betriebs-Seite sichtbar.
+      - BETRIEB_MELDUNG_AN=${BETRIEB_MELDUNG_AN:-}
+      # Pruefbericht 20.09.2026 (AL-04): offene Einzelalarme je Typ, danach
+      # zaehlt ein Sammelalarm; geschlossene Alarme verfallen nach N Tagen
+      - ALARM_JE_TYP_MAX=${ALARM_JE_TYP_MAX:-100}
+      - ALARM_AUFBEWAHRUNG_TAGE=${ALARM_AUFBEWAHRUNG_TAGE:-90}
+      # Sammelfrist in Minuten: zehn Alarme in derselben Minute ergeben
+      # EINE Mail, nicht zehn.
+      - BETRIEB_MELDUNG_SOFORT_MIN=${BETRIEB_MELDUNG_SOFORT_MIN:-10}
+      # Stunde des Tagesberichts (-1 schaltet nur ihn ab).
+      - BETRIEB_TAGESBERICHT_STUNDE=${BETRIEB_TAGESBERICHT_STUNDE:-8}
+      # Nachpruefung 20.09.2026, Nr. 81: WIEDER derselbe Fehler, und mein
+      # Waechter von gestern hat ihn nicht gesehen — er verglich nur Namen
+      # aus .env.example gegen diesen Block. Diese hier stehen aber gar
+      # nicht in .env.example, obwohl der Code sie liest. Der Test sucht
+      # jetzt vom CODE aus (os.environ.get(...)), dann kann keiner mehr
+      # durchrutschen. Standardwerte = die Werte aus dem Code.
+      #
+      # Dokumentierte Schalter, die bisher wirkungslos in der .env standen:
+      - BEWEIS_AUTOMATISCH=${BEWEIS_AUTOMATISCH:-}
+      - BILD_PROXY_HOSTS=${BILD_PROXY_HOSTS:-}
+      - VERTRAG_LINK_TAGE=${VERTRAG_LINK_TAGE:-14}
+      - MOBILE_API_BASE=${MOBILE_API_BASE:-https://services.sandbox.mobile.de}
+      # Feinjustierung, ebenfalls nie angekommen:
+      - CLIENT_INGEST_TTL_HOURS=${CLIENT_INGEST_TTL_HOURS:-24}
+      - CLIENT_CONFIRMED_TTL_HOURS=${CLIENT_CONFIRMED_TTL_HOURS:-168}
+      - LINK_JOB_FINISHED_TTL=${LINK_JOB_FINISHED_TTL:-3600}
+      - MAX_IMAGE_PIXELS=${MAX_IMAGE_PIXELS:-80000000}
+      - PROVIDER_SLOT_TTL=${PROVIDER_SLOT_TTL:-120}
+      - PROVIDER_HEAL_INTERVAL=${PROVIDER_HEAL_INTERVAL:-30}
+      - RESEND_PARALLEL=${RESEND_PARALLEL:-3}
+      - RESEND_VERSUCHE=${RESEND_VERSUCHE:-6}
+      - RESEND_WARTEN_MAX=${RESEND_WARTEN_MAX:-20}
+      # Takt (Nachpruefung 20.09.2026): Anfragen JE SEKUNDE, die Resend fuers
+      # ganze Konto erlaubt, geteilt durch die Zahl der Worker im Verbund
+      # (WEB_CONCURRENCY x Server). Ohne das schickten 46 gleichzeitige
+      # Sendungen rund ein Drittel der Mails in einen endgueltigen 429.
+      # Mehr Server oder mehr Worker? Dann RESEND_PROZESSE mit anheben.
+      - RESEND_RATE=${RESEND_RATE:-10}
+      # Pruefbericht 20.09. (P-18): groessere Anhaenge werden nicht per Mail verschickt.
+      - MAIL_ANHANG_MAX_BYTES=${MAIL_ANHANG_MAX_BYTES:-20971520}
+      # Wunsch Ahmad 25.09.2026: KI-Abholbewertung (Claude). Schluessel nur in
+      # der Server-.env (deploy/env_setzen.sh ANTHROPIC_API_KEY=...). Ohne
+      # Schluessel ist die Funktion still aus.
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - KI_BEWERTUNG_AKTIV=${KI_BEWERTUNG_AKTIV:-true}
+      - KI_MODELL=${KI_MODELL:-claude-sonnet-5}
+      - KI_EFFORT=${KI_EFFORT:-low}
+      - KI_ZEITLIMIT_SEKUNDEN=${KI_ZEITLIMIT_SEKUNDEN:-30}
+      - KI_DENKEN_AUS=${KI_DENKEN_AUS:-true}
+      - KI_RECHERCHE_MODELL=${KI_RECHERCHE_MODELL:-claude-haiku-4-5-20251001}
+      - KI_VERTRAG_MAX_JE_STUNDE=${KI_VERTRAG_MAX_JE_STUNDE:-40}
+      - KI_KALIBRIERUNG_MIN_FAELLE=${KI_KALIBRIERUNG_MIN_FAELLE:-5}
+      - KI_MARKTANALYSE_AKTIV=${KI_MARKTANALYSE_AKTIV:-true}
+      - KI_MARKTDATEN_TAGE=${KI_MARKTDATEN_TAGE:-30}
+      - KI_MARKTANALYSE_ABHOLUNG=${KI_MARKTANALYSE_ABHOLUNG:-true}
+      - KI_MARKTANALYSE_VERTRAG=${KI_MARKTANALYSE_VERTRAG:-true}
+      - KI_BUDGET_MONAT_EUR=${KI_BUDGET_MONAT_EUR:-15}
+      - KI_BUDGET_FAHRER_EUR=${KI_BUDGET_FAHRER_EUR:-10}
+      - KI_KOSTEN_MAX_CT=${KI_KOSTEN_MAX_CT:-15}
+      - KI_KONTEXT_ZEITLIMIT_SEKUNDEN=${KI_KONTEXT_ZEITLIMIT_SEKUNDEN:-2}
+      - KI_KALIBRIERUNG_MIN_FIRMA=${KI_KALIBRIERUNG_MIN_FIRMA:-5}
+      # Review 26.09.2026: abgelegte KI-Ergebnisse gelten hoechstens so viele Tage
+      - KI_CACHE_TAGE=${KI_CACHE_TAGE:-7}
+      # Review 26.09.2026 (Nr. 140/147): KI-Bewertungen verlieren nach so vielen
+      # Tagen ihre Rohdaten (Eingabepaket, Recherchetext, Roh-Antwort) ...
+      - KI_BEWERTUNG_ROHDATEN_TAGE=${KI_BEWERTUNG_ROHDATEN_TAGE:-90}
+      # ... und werden danach geloescht (ausser mit Lernfall)
+      - KI_BEWERTUNG_TAGE=${KI_BEWERTUNG_TAGE:-730}
+      # Market Intelligence (25.09.2026): taegliche mobile.de-Marktbeobachtung
+      # (eigene Warteschlange, eigenes Budget). Standard AUS - erst nach
+      # Freischaltung im Admin und MARKT_AKTIV=true laufen Crawls.
+      - MARKT_AKTIV=${MARKT_AKTIV:-false}
+      - MARKT_CHANCEN_AKTIV=${MARKT_CHANCEN_AKTIV:-false}
+      # Scraper: scrapesmith (0,005 $/Lauf, Probelauf 26.09.2026) als Standard,
+      # sourabhbgp (0,004 + 0,003/Zeile) als automatischer Ersatz bei Fehlern.
+      - MARKT_APIFY_ACTOR=${MARKT_APIFY_ACTOR:-scrapesmith~mobile-de-scraper}
+      - MARKT_APIFY_ACTOR_ERSATZ=${MARKT_APIFY_ACTOR_ERSATZ:-sourabhbgp~mobile-de-scraper}
+      - MARKT_APIFY_URL_FORM=${MARKT_APIFY_URL_FORM:-}
+      - MARKT_APIFY_DETAILS=${MARKT_APIFY_DETAILS:-false}
+      - MARKT_BUENDEL_GROESSE=${MARKT_BUENDEL_GROESSE:-10}
+      - MARKT_BUDGET_MONAT_USD=${MARKT_BUDGET_MONAT_USD:-700}
+      - MARKT_ROWS_JE_SEGMENT=${MARKT_ROWS_JE_SEGMENT:-10}
+      - MARKT_CRAWLS_JE_TAG=${MARKT_CRAWLS_JE_TAG:-2}
+      - MARKT_ROW_USD=${MARKT_ROW_USD:-0.0007}
+      - MARKT_START_USD=${MARKT_START_USD:-0.005}
+      - MARKT_CRAWL_FENSTER_VON=${MARKT_CRAWL_FENSTER_VON:-3}
+      - MARKT_CRAWL_FENSTER_BIS=${MARKT_CRAWL_FENSTER_BIS:-9}
+      - MARKT_CRAWL_INTERVALL_TAGE=${MARKT_CRAWL_INTERVALL_TAGE:-0}
+      - MARKT_JOBS_PARALLEL=${MARKT_JOBS_PARALLEL:-2}
+      - MARKT_LAUF_ZEITLIMIT_SEKUNDEN=${MARKT_LAUF_ZEITLIMIT_SEKUNDEN:-300}
+      - MARKT_JOB_VERSUCHE=${MARKT_JOB_VERSUCHE:-3}
+      - MARKT_JOB_LEASE_SEKUNDEN=${MARKT_JOB_LEASE_SEKUNDEN:-900}
+      - MARKT_ENTFERNUNG_PRUEFEN=${MARKT_ENTFERNUNG_PRUEFEN:-true}
+      - MARKT_ENTFERNUNG_NACH_TAGEN=${MARKT_ENTFERNUNG_NACH_TAGEN:-2}
+      - MARKT_ENTFERNUNG_MAX_JE_TAG=${MARKT_ENTFERNUNG_MAX_JE_TAG:-50}
+      - MARKT_CHANCE_REDUKTION_PROZENT=${MARKT_CHANCE_REDUKTION_PROZENT:-5}
+      - MARKT_CHANCE_REDUKTION_EUR=${MARKT_CHANCE_REDUKTION_EUR:-500}
+      - MARKT_CHANCE_TOP_N=${MARKT_CHANCE_TOP_N:-5}
+      - KI_RECHERCHE_ZEITLIMIT_SEKUNDEN=${KI_RECHERCHE_ZEITLIMIT_SEKUNDEN:-120}
+      - RESEND_PROZESSE=${RESEND_PROZESSE:-8}
+      - SCRAPE_MAX_RETRIES=${SCRAPE_MAX_RETRIES:-3}
+      - ZUSTELLUNG_HAENGT_NACH_SEK=${ZUSTELLUNG_HAENGT_NACH_SEK:-180}
+      - MOCK_PROVIDER_DELAY_MS=${MOCK_PROVIDER_DELAY_MS:-}
+      # Externer Snapshot-Speicher (Altbestand): die Sicherung meldet ihn
+      # als nicht sicherbar, wenn er gesetzt ist — dafuer muss sie ihn sehen.
+      - EMERGENT_LLM_KEY=${EMERGENT_LLM_KEY:-}
+      # Stripe ist am 14.09.2026 entfernt worden. production_check warnt,
+      # wenn noch Reste in der .env stehen ("bitte entfernen") — ohne
+      # Durchreichen war genau diese Warnung wirkungslos.
+      - STRIPE_API_KEY=${STRIPE_API_KEY:-}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
+      # SSL_VERIFY wird BEWUSST NICHT durchgereicht: es schaltet die
+      # Zertifikatspruefung beim Anbieter-Abruf ab und ist nur fuer die
+      # lokale Windows-Entwicklung gedacht. Im Container soll es gar nicht
+      # erst einstellbar sein.
+      # Kleinanzeigen zuerst ueber die API (Runde 29) — ohne Schluessel
+      # unveraendert der eigene Abruf.
+      - KLEINANZEIGEN_API_KEY=${KLEINANZEIGEN_API_KEY:-}
+      - KLEINANZEIGEN_API_URL=${KLEINANZEIGEN_API_URL:-https://api.kleinanzeigen-agent.de/api/v2/kleinanzeigen}
+      - KLEINANZEIGEN_API_TIMEOUT=${KLEINANZEIGEN_API_TIMEOUT:-12}
+      # Gleichzeitige Abrufe je Anbieter (global ueber beide Server) und
+      # Job-Arbeiter je Prozess. Lasttest 16.09.2026: dieselben Vorgaben wie
+      # in .env.example und im Code — vorher 2/2/8 und 2 Jobs, damit warteten
+      # 60 gleichzeitig neue mobile.de-Links bis zu 5 Minuten. Hoehere
+      # Anbieter-Werte nur, wenn der Apify-Plan so viele gleichzeitige
+      # Actor-Laeufe erlaubt.
+      - MAX_CONCURRENT_KLEINANZEIGEN_API=${MAX_CONCURRENT_KLEINANZEIGEN_API:-20}
+      - MAX_CONCURRENT_KLEINANZEIGEN=${MAX_CONCURRENT_KLEINANZEIGEN:-2}
+      # Nachpruefung 20.09.2026: mobile.de und AutoScout24 laufen BEIDE ueber
+      # Apify. Ihre Summe darf APIFY_MAX_PARALLEL nicht uebersteigen — sonst
+      # weist Apify mit 429 ab. Gemessen (scripts/lasttest_apify_grenze.py):
+      # 20+20 gegen einen 32er-Plan -> 8 von 40 Suchern sahen einen Fehler;
+      # 16+16 -> null. Kleinanzeigen zaehlt NICHT mit (eigener Dienst).
+      # Groesserer Apify-Plan? Dann APIFY_MAX_PARALLEL und beide Werte anheben.
+      # Seit dem gemeinsamen Apify-Topf (N9) duerfen beide Quellen bis zum
+      # vollen Plan — zusammen deckelt APIFY_MAX_PARALLEL. Vorher lagen 16
+      # Plaetze brach, wenn nur eine Quelle gefragt war: 100 mobile.de-Links
+      # brauchten 143 s, das Frontend gibt nach 120 s auf.
+      - MAX_CONCURRENT_MOBILE=${MAX_CONCURRENT_MOBILE:-32}
+      - MAX_CONCURRENT_AUTOSCOUT=${MAX_CONCURRENT_AUTOSCOUT:-32}
+      - APIFY_MAX_PARALLEL=${APIFY_MAX_PARALLEL:-32}
+      # Pruefbericht 20.09. (DP-04/A-17/A-06): Apify-Lauf hoechstens 85 s (Cloudflare
+      # bricht bei ~100 s ab), Gesamtfrist je Abruf, Lease-Herzschlag hoechstens 300 s.
+      - APIFY_TIMEOUT_SEKUNDEN=${APIFY_TIMEOUT_SEKUNDEN:-85}
+      - ABRUF_GESAMT_SEKUNDEN=${ABRUF_GESAMT_SEKUNDEN:-90}
+      - LEASE_HERZSCHLAG_MAX=${LEASE_HERZSCHLAG_MAX:-300}
+      # Abstand, bevor ein wegen Tempolimit abgewiesener Abruf erneut startet.
+      # Ohne ihn waren alle drei Versuche in gut einer Sekunde verbraucht.
+      - LINK_JOB_TEMPOLIMIT_WARTEN=${LINK_JOB_TEMPOLIMIT_WARTEN:-5}
+      # Wie lange die Sicherung hoechstens darauf wartet, dass alle
+      # Backend-Prozesse null offene Schreibzugriffe melden (N6). Danach
+      # laeuft sie trotzdem, gilt aber nicht als stichtagsgenau.
+      - BACKUP_AUSLAUFEN_MAX_S=${BACKUP_AUSLAUFEN_MAX_S:-120}
+      # Wie lange nach dem Loeschen eines Suchers noch nachgesehen wird, ob
+      # eine laufende Anfrage Waisendaten hinterlassen hat (Nr. 2).
+      - KONTO_NACHLESE_FENSTER_MIN=${KONTO_NACHLESE_FENSTER_MIN:-30}
+      - LINK_JOB_CONCURRENCY=${LINK_JOB_CONCURRENCY:-32}
+      # Eigenheiten S3-kompatibler Speicher (Cloudflare R2)
+      - S3_SSE=${S3_SSE:-auto}
+      - S3_PRUEFSUMMEN=${S3_PRUEFSUMMEN:-auto}
+      # Verkaufen kostenlos und unbegrenzt (false = Pakete/Kontingent)
+      - VERKAUF_KOSTENLOS=${VERKAUF_KOSTENLOS:-true}
+      # Marktplatz kostenlos und ohne Anmeldung einsehbar
+      - MARKTPLATZ_KOSTENLOS=${MARKTPLATZ_KOSTENLOS:-true}
+      # Entscheidung Ahmad 14.09.2026: Zwei-Faktor fuer den Super-Admin ist Pflicht
+      - MFA_PFLICHT=${MFA_PFLICHT:-true}
+      # Go-Live-Schalter (15.09.2026): Marktplatz + Inserieren aus, bis true
+      # Wunsch Ahmad 20.09.2026: Der Marktplatz ist WIEDER AUF. Der Schalter
+      # bleibt bestehen — auf "false" ist alles mit einem Rollout wieder zu,
+      # ohne Code anzufassen. ACHTUNG: eine ausdrueckliche Zeile in der
+      # Server-.env gewinnt ueber diesen Standard.
+      - MARKTPLATZ_AKTIV=${MARKTPLATZ_AKTIV:-true}
+      - LOG_AUFBEWAHRUNG_TAGE=${LOG_AUFBEWAHRUNG_TAGE:-60}
+      - CORS_ORIGINS=${CORS_ORIGINS:-}
+      - FRONTEND_URL=${FRONTEND_URL:-}
+      - PUBLIC_API_URL=${PUBLIC_API_URL:-}
+      # Aufbewahrung / Loeschung: Vertragsloeschung ist seit 14.09.2026 SCHARF
+      # (Entscheidung Ahmad). Nur-Vorschau: VERTRAG_LOESCHUNG_AKTIV=false.
+      - VERTRAG_AUFBEWAHRUNG_TAGE=${VERTRAG_AUFBEWAHRUNG_TAGE:-60}
+      - VERTRAG_LOESCHUNG_AKTIV=${VERTRAG_LOESCHUNG_AKTIV:-true}
+      - AUTO_DATEN_SCHAEDEN_FREITEXT=${AUTO_DATEN_SCHAEDEN_FREITEXT:-false}
+      - SNAPSHOT_RETENTION_DAYS=${SNAPSHOT_RETENTION_DAYS:-60}
+      - FAHRERFOTO_TAGE=${FAHRERFOTO_TAGE:-60}
+      - LOG_AUFBEWAHRUNG_TAGE=${LOG_AUFBEWAHRUNG_TAGE:-60}
+      - LOG_AUFBEWAHRUNG_TAGE_OFFEN=${LOG_AUFBEWAHRUNG_TAGE_OFFEN:-60}
+      - ERROR_LOG_MAX=${ERROR_LOG_MAX:-20000}
+      - ANFRAGEN_AUFBEWAHRUNG_TAGE=${ANFRAGEN_AUFBEWAHRUNG_TAGE:-60}
+      - LISTING_CACHE_TTL_HOURS=${LISTING_CACHE_TTL_HOURS:-336}
+      - FAHRZEUGPOOL_MAX_VERGLEICHE=${FAHRZEUGPOOL_MAX_VERGLEICHE:-300}
+      - CLIENT_INGEST_PROMOTE_MIN_DEALERS=${CLIENT_INGEST_PROMOTE_MIN_DEALERS:-0}
+      - DATEI_SIGNATUR_PFLICHT=${DATEI_SIGNATUR_PFLICHT:-true}
+      # Nachpruefung 20.09.2026: fehlte — der Container blieb beim
+      # Code-Standard 500 MB, egal was in der .env stand (server.py /ready).
+      - MIN_FREI_MB=${MIN_FREI_MB:-500}
+      # Pruefbericht 20.09.2026 (DP-03): vom Code ueber konfig.zahl_env u. a.
+      # gelesen, erreichten den Container aber nicht (Vorgabewerte = Code)
+      - DATEI_LINK_TTL_SEKUNDEN=${DATEI_LINK_TTL_SEKUNDEN:-3600}
+      # Rollenprüfung 22.09.2026 (RP-098 Nr. 8): Inseratsfotos (resale/) 24 h
+      - DATEI_LINK_TTL_INSERAT_SEKUNDEN=${DATEI_LINK_TTL_INSERAT_SEKUNDEN:-86400}
+      - MAX_IMAGE_EDGE=${MAX_IMAGE_EDGE:-1600}
+      - BEWEIS_FOTO_KANTE_ERSTE=${BEWEIS_FOTO_KANTE_ERSTE:-1000}
+      - BEWEIS_FOTO_KANTE=${BEWEIS_FOTO_KANTE:-640}
+      - BEWEIS_FOTO_QUALITAET_ERSTE=${BEWEIS_FOTO_QUALITAET_ERSTE:-68}
+      - BEWEIS_FOTO_QUALITAET=${BEWEIS_FOTO_QUALITAET:-62}
+      - BILD_PROXY_KANTE=${BILD_PROXY_KANTE:-640}
+      - BILD_PROXY_CACHE=${BILD_PROXY_CACHE:-400}
+      - LINK_JOB_PROCESSING_TTL=${LINK_JOB_PROCESSING_TTL:-240}
+      - LISTING_CACHE_KARENZ_TAGE=${LISTING_CACHE_KARENZ_TAGE:-7}
+      # Backups: lokal im Volume + verschluesselte Offsite-Kopie (S3-kompatibel)
+      - BACKUP_DIR=/backups
+      - BACKUP_HOUR=${BACKUP_HOUR:-3}
+      # Pruefbericht 20.09.2026 (AL-20): sichert dieser Server? (prod2: false)
+      - BACKUP_AKTIV=${BACKUP_AKTIV:-true}
+      # AL-11: Takt der Pruefsummen-Nachrechnung des juengsten guten Backups
+      - BACKUP_PRUEFSUMMEN_TAGE=${BACKUP_PRUEFSUMMEN_TAGE:-7}
+      - BACKUP_S3_BUCKET=${BACKUP_S3_BUCKET:-}
+      # Eigene Adresse, falls der Sicherungs-Bucket in einer anderen Zone
+      # liegt (bei Cloudflare R2 hat die EU-Zone eine eigene Adresse).
+      - BACKUP_S3_ENDPOINT=${BACKUP_S3_ENDPOINT:-}
+      - BACKUP_S3_PREFIX=${BACKUP_S3_PREFIX:-autoschnell-backups/}
+      - BACKUP_S3_OBJECT_LOCK_DAYS=${BACKUP_S3_OBJECT_LOCK_DAYS:-}
+      - BACKUP_S3_KEEP=${BACKUP_S3_KEEP:-14}
+      # 19.09.2026: Diese drei fehlten — der eigene (nur schreibende) Schluessel
+      # fuer den Sicherungs-Bucket stand in der .env, erreichte den Container
+      # aber NIE. Die Sicherung nahm weiter die S3_*-Zugangsdaten, und
+      # /api/ready meldete zu Recht "false" (dasselbe Muster wie frueher bei
+      # RESEND_API_KEY). Fehlen sie in der .env, bleibt alles wie bisher.
+      - BACKUP_S3_ACCESS_KEY=${BACKUP_S3_ACCESS_KEY:-}
+      - BACKUP_S3_SECRET_KEY=${BACKUP_S3_SECRET_KEY:-}
+      - BACKUP_S3_REGION=${BACKUP_S3_REGION:-}
+      # Snapshot-Feinjustierung der Sicherung (Standardwerte im Skript).
+      # BACKUP_SNAPSHOT_PFLICHT wird in backup_bewertung.py gelesen (nicht in
+      # backup_mongo.py) und fehlte deshalb auch nach dem 19.09.-Fix: der
+      # dokumentierte Schalter blieb im Container wirkungslos. Bei einer
+      # MONGO_URL mit replicaSet=... erkennt snapshot_pflicht() die Pflicht
+      # ohnehin selbst — der Schalter ist fuer alle anderen Faelle.
+      - BACKUP_SNAPSHOT_PFLICHT=${BACKUP_SNAPSHOT_PFLICHT:-}
+      # 20.09.2026: Schreibpause waehrend der Sicherung. Standard AUS.
+      # Nur true schaltet sie ein — sie haelt die Plattform fuer die Dauer
+      # des Dumps an (Lesen geht weiter, Schreiben bekommt 503). Wer eine
+      # stichtagsgenaue Sicherung OHNE Unterbrechung will, betreibt Mongo
+      # als Replica Set; /api/ready sagt es, wenn das fehlt.
+      - BACKUP_WARTUNG=${BACKUP_WARTUNG:-}
+      # Wartezeit nach dem Einschalten, bis alle Prozesse die Pause sehen
+      # und laufende Anfragen fertig sind (Sekunden, Standard 30).
+      - BACKUP_WARTUNG_WARTEN_S=${BACKUP_WARTUNG_WARTEN_S:-}
+      # Ablaufzeit des Pause-Merkers in Minuten (Standard 15). Der laufende
+      # Lauf verlaengert sie; stuerzt er ab, laeuft sie von selbst ab und
+      # die Plattform ist wieder frei (statt dauerhaft gesperrt).
+      - BACKUP_WARTUNG_FRIST_MIN=${BACKUP_WARTUNG_FRIST_MIN:-}
+      # Dasselbe aus Sicht des Backends: laenger als das gilt kein
+      # Wartungsmodus ohne Verlaengerung.
+      - WARTUNG_FRIST_MIN=${WARTUNG_FRIST_MIN:-}
+      - BACKUP_SNAPSHOT_VERSUCHE=${BACKUP_SNAPSHOT_VERSUCHE:-}
+      - BACKUP_SNAPSHOT_PAUSE_S=${BACKUP_SNAPSHOT_PAUSE_S:-}
+      # Rollenprüfung 22.09.2026 (RP-552): ab so vielen Sekunden Rueckstand
+      # des Mehrheits-Commitpunkts (prod2 ausgefallen) liest die Sicherung vom
+      # Primary statt aus einem veralteten Snapshot und meldet sich als
+      # INKONSISTENT (Betriebsalarm). Leer = 600 s.
+      - BACKUP_MEHRHEIT_RUECKSTAND_MAX_S=${BACKUP_MEHRHEIT_RUECKSTAND_MAX_S:-}
+      # RP-245: der Restore wartet nach dem Wartungsmodus auf laufende Arbeiten
+      # (mindestens / hoechstens, Sekunden; leer = 6 / 180).
+      - RESTORE_AUSLAUF_MIN_S=${RESTORE_AUSLAUF_MIN_S:-}
+      - RESTORE_AUSLAUF_MAX_S=${RESTORE_AUSLAUF_MAX_S:-}
+      # RP-394: /api/ready warnt, wenn der letzte VOLLSTAENDIGE Aufraeumlauf
+      # laenger als so viele Stunden her ist.
+      - AUFRAEUMLAUF_WARN_H=${AUFRAEUMLAUF_WARN_H:-3}
+      # RP-543: Gnadenfrist (Minuten) ohne Zwei-Faktor fuer den ERSTEN, frisch
+      # angelegten Betreiber — sonst kommt bei einer Neuinstallation niemand
+      # hinein, um den zweiten Faktor einzurichten.
+      - SEED_MFA_FRIST_MIN=${SEED_MFA_FRIST_MIN:-60}
+      # RP-550: Zeitlimits fuer den Objektspeicher (R2/S3) und eigene Threads
+      # fuer Dateizugriffe (Standard 5 s Verbindung, 30 s Lesen, 2 Versuche,
+      # 16 Threads) — ein haengender Speicher blockiert so nicht mehr Anmeldung
+      # und PDF-Erzeugung.
+      - S3_VERBINDUNG_TIMEOUT_S=${S3_VERBINDUNG_TIMEOUT_S:-5}
+      - S3_LESE_TIMEOUT_S=${S3_LESE_TIMEOUT_S:-30}
+      - S3_VERSUCHE=${S3_VERSUCHE:-2}
+      # Rollenpruefung 22.09.2026 (Review): die Sicherungsskripte (Offsite-
+      # Upload, Datei-Sicherung) laufen NICHT mit den knappen Werten oben,
+      # sondern mit eigenen (10 s Verbindung, 120 s Lesen, 5 Wiederholungen).
+      - BACKUP_S3_VERBINDUNG_TIMEOUT_S=${BACKUP_S3_VERBINDUNG_TIMEOUT_S:-10}
+      - BACKUP_S3_LESE_TIMEOUT_S=${BACKUP_S3_LESE_TIMEOUT_S:-120}
+      - BACKUP_S3_VERSUCHE=${BACKUP_S3_VERSUCHE:-5}
+      - SPEICHER_THREADS=${SPEICHER_THREADS:-16}
+      # Datei-Speicher (19.09.2026): Speicher-zu-Speicher in den Sicherungs-
+      # Bucket statt Spiegel auf die Platte (leer = bucket, sobald
+      # BACKUP_S3_BUCKET gesetzt ist).
+      - BACKUP_DATEIEN=${BACKUP_DATEIEN:-}
+      - BACKUP_DATEIEN_BUCKET=${BACKUP_DATEIEN_BUCKET:-}
+      - BACKUP_DATEIEN_PREFIX=${BACKUP_DATEIEN_PREFIX:-dateien/}
+      - BACKUP_DATEIEN_AUFBEWAHRUNG_TAGE=${BACKUP_DATEIEN_AUFBEWAHRUNG_TAGE:-30}
+      # Anbieter-Abrufe (mobile.de + AutoScout24 via Apify; optional
+      # offizielle mobile.de-API; optional Rotations-Proxy fuer
+      # Kleinanzeigen-Server-Abrufe)
+      - APIFY_TOKEN=${APIFY_TOKEN:-}
+      - APIFY_MOBILE_ACTOR=${APIFY_MOBILE_ACTOR:-}
+      - APIFY_AUTOSCOUT_ACTOR=${APIFY_AUTOSCOUT_ACTOR:-}
+      # Rollenpruefung 22.09.2026 (RP-553, mobile_service.apify_lauf_parameter):
+      # Speicher je Actor-Lauf (MB) und feste Actor-Version; leer = wie bisher.
+      - APIFY_MEMORY_MB=${APIFY_MEMORY_MB:-}
+      - APIFY_MOBILE_BUILD=${APIFY_MOBILE_BUILD:-}
+      - APIFY_AUTOSCOUT_BUILD=${APIFY_AUTOSCOUT_BUILD:-}
+      - MOBILE_API_USER=${MOBILE_API_USER:-}
+      - MOBILE_API_PASS=${MOBILE_API_PASS:-}
+      - PROXY_URL=${PROXY_URL:-}
+      - PROXY_ENABLED=${PROXY_ENABLED:-}
+      # Kleinanzeigen ueber die Browser-Erweiterung der Nutzer abrufen
+      - CLIENT_FETCH_KLEINANZEIGEN=${CLIENT_FETCH_KLEINANZEIGEN:-}
+      # Optionaler S3-kompatibler Objektspeicher (sonst lokales Volume)
+      - S3_ENDPOINT=${S3_ENDPOINT:-}
+      - S3_BUCKET=${S3_BUCKET:-}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
+      - S3_REGION=${S3_REGION:-}
+      # Pruefung 14.09.2026: Einzelserver ohne S3 muss das ausdruecklich erlauben
+      # (Produktion mit zwei Servern verlangt gemeinsamen S3/R2-Speicher).
+      - STORAGE_LOKAL_ERLAUBT=${STORAGE_LOKAL_ERLAUBT:-}
+      - BERICHT_AUFBEWAHRUNG_TAGE=${BERICHT_AUFBEWAHRUNG_TAGE:-}
+      - FAHRER_SICHT_ABGEHOLT_TAGE=${FAHRER_SICHT_ABGEHOLT_TAGE:-}
+      - FAHRER_SICHT_GESCHLOSSEN_TAGE=${FAHRER_SICHT_GESCHLOSSEN_TAGE:-}
+    volumes:
+      - uploads_data:/app/uploads         # Fotos/Unterschriften/Protokolle
+      - snapshots_data:/app/local_storage # Alt-Snapshots (lesen bis zum Verfall)
+      - backups_data:/backups             # taegliche Backups (backup_service.py)
+    # Kein Port nach aussen — nur der Proxy spricht mit dem Backend.
+    # Limits an die Servergroesse anpassen (4 Worker, kein Browser mehr).
+    mem_limit: ${BACKEND_MEM_LIMIT:-4g}
+    cpus: ${BACKEND_CPUS:-2.0}
+    logging: *log
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        # LEER lassen: api.js baut daraus `${BACKEND}/api` — mit "/api" hier
+        # wuerde die App /api/api/... aufrufen. Leer = gleiche Herkunft,
+        # der nginx-Proxy leitet /api an das Backend weiter.
+        REACT_APP_BACKEND_URL: ""
+        # Runde 31: Fassungs-Stempel "<Commit-Zeit>-<Kurz-SHA>", gesetzt von
+        # deploy/rollout.sh. Leer = die Oberflaeche zeigt keinen Versionshinweis.
+        APP_FASSUNG: ${APP_FASSUNG:-}
+    restart: unless-stopped
+    # Runde 29 (12.09.2026): Bundle-Dateien des vorherigen Standes. Wer die
+    # App offen hat, laedt nach einem Rollout noch alte Haeppchen nach —
+    # ohne diesen Rueckfall gibt es dafuer 404 (schwarzer Bildschirm bis zum
+    # Neuladen). deploy/rollout.sh fuellt den Ordner vor jedem Bau.
+    volumes:
+      - ./deploy/assets-alt:/usr/share/nginx/html/alt:ro
+    mem_limit: 256m
+    cpus: 0.5
+    logging: *log
+
+  proxy:
+    image: nginx:alpine
+    restart: unless-stopped
+    depends_on: [backend, web]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - TZ=${TZ:-Europe/Berlin}
+      # Audit 09/2026 (Punkt 9): NUR diese Domain wird bedient (Host-Allowlist),
+      # unbekannte Hosts bekommen 444, HTTP leitet fest hierhin um.
+      - PUBLIC_HOST=${PUBLIC_HOST:?PUBLIC_HOST in .env setzen (z.B. app.autoschnell.de)}
+      # Nur fuer die Betriebsart hinter einem Load Balancer: aus diesem Netz
+      # wird X-Forwarded-For geglaubt (privates Netz des Anbieters).
+      - PRIVATES_NETZ=${PRIVATES_NETZ:-127.0.0.1}
+      # Runde 31: Fehlt eine Bundle-Datei, fragt der Proxy beide Server im
+      # privaten Netz (hinter-loadbalancer.conf.template, Port 8081). Ohne
+      # Replikat-Betrieb zeigen beide auf diesen Server selbst.
+      - PROD1_IP=${PROD1_IP:-127.0.0.1}
+      - PROD2_IP=${PROD2_IP:-127.0.0.1}
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+      # Drain-Marker fuer deploy/rollout.sh (Datei deploy/drain/aktiv auf dem
+      # Host): liegt sie, meldet /api/health 503 — auch nach einem Neustart
+      # des Proxy-Containers. Nur die LB-Vorlage wertet sie aus.
+      - ./deploy/drain:/etc/nginx/drain:ro
+      # Pruefbericht 20.09.2026 (DP-14): Sicherheits-Kopfzeilen liegen EINMAL in
+      # deploy/sicherheitskopf.inc; beide Vorlagen binden sie im server-Block
+      # und in jeder Location mit eigenem add_header ein.
+      - ./deploy/sicherheitskopf.inc:/etc/nginx/sicherheitskopf.inc:ro
+      # PROXY_TEMPLATE waehlt die Betriebsart:
+      #   default.conf.template            = nginx macht TLS selbst (ein Server)
+      #   hinter-loadbalancer.conf.template = Load Balancer macht TLS
+      - ./deploy/${PROXY_TEMPLATE:-default.conf.template}:/etc/nginx/templates/default.conf.template:ro
+      - ./deploy/certs:/etc/nginx/certs:ro   # hier landen die TLS-Zertifikate
+      - certbot_www:/var/www/certbot         # ACME-Challenge (Let's Encrypt)
+    mem_limit: 256m
+    cpus: 0.5
+    logging: *log
+
+volumes:
+  mongo_data:
+  uploads_data:
+  snapshots_data:
+  backups_data:
+  certbot_www:

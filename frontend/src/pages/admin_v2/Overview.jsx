@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { api } from "@/lib/api";
 import { PageHeader, StatCard, Card, Spinner, fmtNum } from "./_ui";
 
@@ -43,11 +44,19 @@ export default function AdminOverview() {
         <div className="flex items-center gap-2 text-zinc-500 text-sm"><Spinner /> lade…</div>
       ) : (
         <>
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
+          <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 md:gap-4">
             <StatCard label="Nutzer"           value={fmtNum(stats?.users)}            color="blue" />
             <StatCard label="Aktive Abos"      value={fmtNum(stats?.active_subs)}      color="green" />
             <StatCard label="Verträge gesamt"  value={fmtNum(stats?.contracts)}        color="purple" />
             <StatCard label="Vergleiche heute" value={fmtNum(stats?.comparisons_today)} color="orange" />
+            <Link to="/admin/errors" className="block">
+              <StatCard
+                label="Offene Fehler"
+                value={fmtNum(stats?.open_errors)}
+                hint={stats?.open_errors > 0 ? "Jetzt ansehen →" : "Alles in Ordnung"}
+                color={stats?.open_errors > 0 ? "red" : "gray"}
+              />
+            </Link>
           </div>
 
           {urls && (
@@ -83,14 +92,14 @@ function UrlBars({ data }) {
         return (
           <div key={s.key} className="flex items-center gap-3">
             <div className="w-32 text-[13px] text-zinc-300 truncate">{s.label}</div>
-            <div className="flex-1 h-2 rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,0.08)" }}>
+            <div className="flex-1 h-2 rounded-full overflow-hidden" style={{ background: "var(--wa-08)" }}>
               <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: s.color }} />
             </div>
             <div className="w-14 text-right tabular-nums text-[13px] font-semibold text-white">{v}</div>
           </div>
         );
       })}
-      <div className="pt-2 flex items-center justify-between text-[13px]" style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}>
+      <div className="pt-2 flex items-center justify-between text-[13px]" style={{ borderTop: "1px solid var(--wa-06)" }}>
         <span className="text-zinc-400">Gesamt</span>
         <span className="font-semibold tabular-nums text-white">{data?.total || 0}</span>
       </div>

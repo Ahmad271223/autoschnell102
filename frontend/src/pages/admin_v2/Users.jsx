@@ -1,11 +1,88 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
-import { Search, KeyRound, Lock, Unlock, ChevronRight, Crown, UserPlus, Trash2 } from "lucide-react";
+import { useAuth } from "@/context/AuthContext";
+import { Search, KeyRound, Lock, Unlock, ChevronDown, ChevronRight, Crown, UserPlus, Trash2 } from "lucide-react";
 import { PageHeader, Card, Badge, Button, Spinner, EmptyState, fmtDate } from "./_ui";
+import ZugangsdatenKarte from "@/components/admin/ZugangsdatenKarte";
+import KontoPruefen from "@/components/admin/KontoPruefen";
+import PasswortFeld from "@/components/admin/PasswortFeld";
+import { passwortProblem, sperreHinweis } from "@/lib/passwort";
+
+
+// Kontonummer (13.09.2026): Konten tragen nicht mehr zwingend eine E-Mail —
+// Bestaetigungen nennen Firma bzw. Name UND Kontonummer.
+function kontoName(u) {
+  const person = `${u.first_name || ""} ${u.last_name || ""}`.trim();
+  return u.company_name || person || u.contact_name || u.username || u.email || "Konto";
+}
+function kontoLabel(u) {
+  return u.kontonummer ? `${kontoName(u)} (Kontonummer ${u.kontonummer})` : kontoName(u);
+}
+// Zweite Zeile der Liste hinter der Kontonummer: Sucher-Name, Benutzername, Kontakt-E-Mail.
+function kontoZusatz(u) {
+  const person = u.role === "sucher" ? `${u.first_name || ""} ${u.last_name || ""}`.trim() : "";
+  return [person, u.username, u.email].filter(Boolean).join(" · ");
+}
+
+// Rollenpruefung 22.09.2026 (RP-033/RP-132): Chef ist der eingetragene
+// Hauptaccount der Firma (Server-Feld `ist_chef`), nicht jedes Konto mit
+// Rolle "dealer". Aeltere Server ohne das Feld: Rolle wie bisher.
+export function istChefKonto(u) {
+  if (!u) return false;
+  if (typeof u.ist_chef === "boolean") return u.ist_chef;
+  return u.role === "dealer";
+}
+
+// Pruefbericht 20.09.2026 (AD-24/AD-25): Der Loeschdialog sagte fuer JEDE
+// Rolle "inklusive Haendler-Profil und allen Abos", die Loeschvorschau kam
+// erst im zweiten window.confirm nach der 409. Jetzt: Umfang je Rolle
+// (Server: admin_delete_user), Vorschau fuer den Chef schon im Dialog.
+export function rolleText(u) {
+  if (u?.is_super_admin) return "Super-Admin";
+  if (istChefKonto(u)) return "Händler-Hauptaccount (Chef)";
+  if (u?.role === "dealer") return "weiteres Konto (arbeitet als Sucher)";
+  if (u?.role === "sucher") return "Sucher";
+  if (u?.role === "b2b_buyer") return "Zwischenhändler";
+  if (u?.role === "admin") return "Admin";
+  return u?.role || "—";
+}
+
+export function loeschUmfang(u) {
+  if (istChefKonto(u)) {
+    return "Händler-Hauptaccount — die KOMPLETTE Firma wird gelöscht: Chef, alle Sucher, "
+      + "Fahrzeuge, Termine, Verträge, Inserate und Abos.";
+  }
+  if (u?.role === "sucher" || u?.role === "dealer") {
+    return "nur dieses Konto — Fahrzeuge, Verträge und Termine gehen an den Chef der Firma.";
+  }
+  if (u?.role === "b2b_buyer") {
+    return "nur dieses Zwischenhändler-Konto — Marktplatz-Zugang, Merkliste und Kaufanfragen "
+      + "werden entfernt, reservierte Fahrzeuge freigegeben.";
+  }
+  return "nur dieses Konto.";
+}
+
+/** Text der Loeschvorschau (/admin/dealers/{id}/loeschvorschau). */
+export function vorschauText(data) {
+  const w = data?.wuerde_loeschen || {};
+  return Object.entries(w).filter(([, n]) => n > 0)
+    .map(([k, n]) => `${n} × ${k}`).join(", ") || "keine weiteren Daten";
+}
+
+// Pruefbericht 20.09.2026 (AD-19): ab so vielen Zeichen sucht der SERVER in
+// allen Konten (q) — vorher nur die Oberflaeche in der ersten Seite (1000),
+// aeltere Konten waren unauffindbar.
+export const SUCHE_AB = 3;
+export function serverSuche(q) {
+  const s = String(q ?? "").trim();
+  return s.length >= SUCHE_AB ? s : "";
+}
 
 export default function AdminUsers() {
+  const { user: ich } = useAuth();
+  const superAdmin = !!ich?.is_super_admin;   // Betreiber-Funktionen (Audit 09/2026)
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
@@ -14,27 +91,86 @@ export default function AdminUsers() {
   const [creating, setCreating] = useState(false);
   const [deleteUser, setDeleteUser] = useState(null);
   const [deleting, setDeleting] = useState(false);
+  // Pruefbericht 20.09.2026 (AD-15/AD-16): Ladefehler nicht als "0 Konten /
+  // keine Nutzer gefunden" zeigen; eine gekuerzte Liste als solche kennzeichnen.
+  const [ladeFehler, setLadeFehler] = useState("");
+  const [gekuerzt, setGekuerzt] = useState(false);
+  // AD-19: Seite und "Weitere laden"; nur die juengste Antwort zaehlt (eine
+  // langsame aeltere Suche darf eine neuere nicht ueberschreiben).
+  const [seite, setSeite] = useState(1);
+  const [laedtMehr, setLaedtMehr] = useState(false);
+  const ladeLauf = useRef(0);
+  // AD-24: Loeschvorschau fuer den Chef, geladen beim Oeffnen des Dialogs
+  const [loeschVorschau, setLoeschVorschau] = useState(null);
+  const suche = serverSuche(q);
 
-  const load = async () => {
-    setLoading(true);
+  const load = async ({ suchtext = suche, naechste = 1 } = {}) => {
+    const lauf = ++ladeLauf.current;
+    if (naechste > 1) setLaedtMehr(true); else setLoading(true);
     try {
-      const { data } = await api.get("/admin/users");
-      setUsers(data.users || data || []);
+      const { data, headers } = await api.get("/admin/users",
+        { params: { page: naechste, ...(suchtext ? { q: suchtext } : {}) } });
+      if (lauf !== ladeLauf.current) return;          // ueberholt
+      const neu = data.users || data || [];
+      setUsers((alt) => (naechste > 1 ? [...alt, ...neu] : neu));
+      setSeite(naechste);
+      setGekuerzt(headers?.["x-truncated"] === "1");
+      setLadeFehler("");
     } catch (e) {
+      if (lauf !== ladeLauf.current) return;
+      setLadeFehler(errMsg(e, "Konten konnten nicht geladen werden"));
       toast.error(errMsg(e, "Fehler beim Laden"));
     } finally {
-      setLoading(false);
+      if (lauf === ladeLauf.current) { setLoading(false); setLaedtMehr(false); }
     }
   };
-  useEffect(() => { load(); }, []);
+  // Erstes Laden sofort; eine Server-Suche (ab SUCHE_AB Zeichen) kurz
+  // entprellt, damit nicht jeder Tastendruck eine Abfrage wird.
+  useEffect(() => {
+    const t = setTimeout(() => load({ suchtext: suche, naechste: 1 }), q ? 300 : 0);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [suche]);
 
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase();
     if (!s) return users;
-    return users.filter((u) => [u.email, u.username, u.company_name].join(" ").toLowerCase().includes(s));
+    return users.filter((u) => [u.kontonummer, u.email, u.username, u.company_name,
+      u.first_name, u.last_name, u.contact_name,
+      u.kunden_nr != null ? `#${u.kunden_nr}` : "", String(u.kunden_nr ?? "")]
+      .filter(Boolean).join(" ").toLowerCase().includes(s));
   }, [users, q]);
 
+  // Zwei-Faktor eines AUSGESPERRTEN Admins zurücksetzen. Das eigene Konto
+  // ist ausgenommen; bei einem anderen Super-Admin verlangt der Server das
+  // eigene Passwort und einen Grund (Audit 09/2026).
+  const mfaZuruecksetzen = async (u) => {
+    if (!window.confirm(`Zwei-Faktor von ${kontoLabel(u)} zurücksetzen? Das Konto wird abgemeldet.`)) return;
+    const daten = {};
+    if (u.is_super_admin) {
+      const grund = window.prompt(`${kontoLabel(u)} ist Super-Admin. Bitte einen Grund angeben (wird protokolliert):`);
+      if (!grund) return;
+      const passwort = window.prompt("Zur Bestätigung dein eigenes Passwort:");
+      if (!passwort) return;
+      daten.grund = grund;
+      daten.passwort = passwort;
+    }
+    try {
+      await api.post(`/admin/users/${u.id}/mfa-zuruecksetzen`, daten);
+      toast.success("Zwei-Faktor zurückgesetzt");
+      load();
+    } catch (e) { toast.error(errMsg(e)); }
+  };
+
   const toggleActive = async (u) => {
+    if (u.active) {
+      // RP-033: nur der Hauptchef sperrt die ganze Firma (Server-Regel)
+      const firma = istChefKonto(u);
+      const text = firma
+        ? `Firma "${kontoLabel(u)}" komplett sperren?\n\nDer Chef UND alle Sucher dieser Firma werden sofort abgemeldet und koennen sich nicht mehr anmelden (auch die kostenlosen Bereiche). Das ist etwas anderes als "Abo aufheben" (nur Suche/Vergleich).`
+        : `Konto "${kontoLabel(u)}" sperren?\n\nAnmeldung wird sofort unmoeglich, die Sitzung beendet. "Abo aufheben" (nur Suche/Vergleich) findest du in der Firmenansicht.`;
+      if (!window.confirm(text)) return;
+    }
     try {
       await api.post(`/admin/users/${u.id}/active`, { active: !u.active });
       toast.success(u.active ? "Account gesperrt" : "Account entsperrt");
@@ -43,23 +179,42 @@ export default function AdminUsers() {
   };
 
   const submitReset = async () => {
-    if (!resetUser || !newPw || newPw.length < 8) {
-      toast.error("Passwort muss mind. 8 Zeichen haben");
-      return;
-    }
+    if (!resetUser) return;
+    const problem = passwortProblem(newPw);
+    if (problem) { toast.error(problem); return; }
     try {
-      await api.post(`/admin/users/${resetUser.id}/password`, { new_password: newPw });
-      toast.success("Passwort aktualisiert");
+      const { data } = await api.post(`/admin/users/${resetUser.id}/password`, { new_password: newPw });
+      // 14.09.2026: nur von einer Sperre sprechen, wenn wirklich eine bestand.
+      toast.success(`Passwort aktualisiert — Sitzung beendet.${sperreHinweis(data)}`);
       setResetUser(null); setNewPw("");
     } catch (e) { toast.error(errMsg(e, "Fehler")); }
+  };
+
+  // AD-24: beim Chef die Loeschvorschau des Servers gleich in den Dialog holen
+  const loeschenOeffnen = async (u) => {
+    setDeleteUser(u);
+    setLoeschVorschau(null);
+    if (!istChefKonto(u) || !u.dealer_id) return;
+    try {
+      const { data } = await api.get(`/admin/dealers/${u.dealer_id}/loeschvorschau`);
+      setLoeschVorschau({ text: vorschauText(data) });
+    } catch (e) {
+      setLoeschVorschau({ fehler: errMsg(e, "Löschvorschau nicht verfügbar") });
+    }
   };
 
   const submitDelete = async () => {
     if (!deleteUser) return;
     setDeleting(true);
     try {
-      await api.delete(`/admin/users/${deleteUser.id}`);
-      toast.success(`Account "${deleteUser.company_name || deleteUser.email}" dauerhaft gelöscht`);
+      // AD-24: Der Chef hat Umfang und Vorschau schon im Dialog gesehen —
+      // direkt mit ?firma_loeschen=true. Fuer alle anderen Rollen kommt eine
+      // 409 (z. B. Firma ohne Hauptaccount, AD-09) als echter Grund im Toast.
+      const pfad = istChefKonto(deleteUser)
+        ? `/admin/users/${deleteUser.id}?firma_loeschen=true`
+        : `/admin/users/${deleteUser.id}`;
+      await api.delete(pfad);
+      toast.success(`Account "${kontoLabel(deleteUser)}" dauerhaft gelöscht`);
       setDeleteUser(null);
       load();
     } catch (e) {
@@ -73,46 +228,71 @@ export default function AdminUsers() {
     <div>
       <PageHeader
         title="Nutzer"
-        subtitle={`${users.length} Konten insgesamt`}
+        subtitle={ladeFehler && !users.length ? "Konten konnten nicht geladen werden"
+          : suche ? `${users.length} Treffer für „${suche}“${gekuerzt ? " (gekürzt)" : ""}`
+            : `${users.length} Konten insgesamt${gekuerzt ? " (Liste gekürzt)" : ""}`}
         action={
-          <Button
+          <Button disabled={!superAdmin} title={superAdmin ? "" : "Nur der Super-Admin legt Firmen an"}
             data-testid="admin-create-user-btn"
             onClick={() => setCreating(true)}
             variant="primary"
           >
-            <UserPlus size={14} /> Neuer Nutzer
+            <UserPlus size={14} /> Neue Firma
           </Button>
         }
       />
 
+      {superAdmin && <KontoPruefen />}
+
       <Card padded={false}>
-        <div className="px-4 py-3 flex items-center gap-2" style={{ borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+        <div className="px-4 py-3 flex items-center gap-2" style={{ borderBottom: "1px solid var(--wa-08)" }}>
           <Search size={16} className="text-zinc-500" />
           <input
             data-testid="admin-users-search"
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="Nutzer suchen (E-Mail, Firma, Benutzername)"
+            placeholder="Suchen (Kontonummer, Firma, #Kundennummer, E-Mail) — ab 3 Zeichen in allen Konten"
             className="flex-1 bg-transparent border-0 outline-none text-[14px] text-white placeholder:text-zinc-500"
           />
         </div>
 
+        {gekuerzt && !loading && (
+          <div className="px-4 py-2 text-[12.5px] text-amber-200" data-testid="admin-users-gekuerzt"
+               style={{ borderBottom: "1px solid var(--wa-08)" }}>
+            Liste gekürzt: es gibt weitere Konten — unten „Weitere laden“ oder gezielt suchen
+            (ab 3 Zeichen sucht der Server in allen Konten).
+          </div>
+        )}
         {loading ? (
           <div className="flex items-center justify-center gap-2 py-12 text-zinc-500 text-sm"><Spinner /> lade…</div>
+        ) : ladeFehler && users.length === 0 ? (
+          <div className="px-4 py-10 text-center" data-testid="admin-users-ladefehler">
+            <div className="text-[14px] text-red-300 mb-3">{ladeFehler}</div>
+            <Button size="sm" variant="secondary" onClick={load}>Erneut laden</Button>
+          </div>
         ) : filtered.length === 0 ? (
-          <EmptyState title="Keine Nutzer gefunden" hint="Versuche es mit einer anderen Suche." />
+          <EmptyState title="Keine Nutzer gefunden"
+                      hint={q.trim() ? "Versuche es mit einer anderen Suche." : "Es sind noch keine Konten angelegt."} />
         ) : (
-          <ul className="divide-y" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
+          <ul className="divide-y" style={{ borderColor: "var(--wa-06)" }}>
             {filtered.map((u) => (
               <li key={u.id} data-testid={`user-row-${u.id}`} className="px-4 py-3 hover:bg-white/5 transition-colors">
                 <div className="flex items-center gap-3">
-                  <Avatar text={u.company_name || u.email || u.username} />
+                  <Avatar text={u.company_name || u.username || u.kontonummer || u.email} />
                   <Link to={`/admin/users/${u.id}`} className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-[14.5px] font-semibold text-white truncate">
-                        {u.company_name || u.username || u.email}
+                        {u.company_name || u.username || u.kontonummer || u.email}
                       </span>
+                      {u.kunden_nr != null && <Badge tone="blue">#{u.kunden_nr}</Badge>}
                       {u.role === "admin" && <Badge tone="purple">Admin</Badge>}
+                      {u.role === "sucher" && <Badge>Sucher</Badge>}
+                      {u.role === "dealer" && !istChefKonto(u) && (
+                        <span title="Altbestand: Rolle „dealer“, aber nicht der eingetragene Chef — arbeitet als Sucher">
+                          <Badge>weiteres Konto (Sucher)</Badge>
+                        </span>
+                      )}
+                      {u.role === "b2b_buyer" && <Badge>Zwischenhändler</Badge>}
                       {u.is_super_admin && <Crown size={13} className="text-amber-400" />}
                       {u.active === false ? <Badge tone="red">Gesperrt</Badge> : <Badge tone="green">Aktiv</Badge>}
                       {u.subscription?.plan && (
@@ -122,14 +302,25 @@ export default function AdminUsers() {
                       )}
                     </div>
                     <div className="text-[12.5px] text-zinc-400 truncate mt-0.5">
-                      {u.email}{u.username ? ` · ${u.username}` : ""}
+                      {/* Kontonummer (13.09.2026): erste Kennung, E-Mail nur Kontakt */}
+                      {u.kontonummer && (
+                        <span className="font-mono text-zinc-200" data-testid={`user-kontonummer-${u.id}`}>
+                          Kontonummer {u.kontonummer}
+                        </span>
+                      )}
+                      {u.kontonummer && kontoZusatz(u) ? " · " : ""}
+                      {kontoZusatz(u)}
                     </div>
                     <div className="text-[11.5px] text-zinc-500 mt-0.5">Erstellt: {fmtDate(u.created_at)}</div>
                   </Link>
                   <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                    {!superAdmin && <span className="text-[11px] text-zinc-500">nur lesen</span>}
+                    {superAdmin && (<>
                     <Button data-testid={`user-pw-btn-${u.id}`} variant="outline" size="sm" onClick={() => setResetUser(u)} title="Passwort setzen">
                       <KeyRound size={14} /> Passwort
                     </Button>
+                    </>)}
+                    {superAdmin && (<>
                     <Button
                       data-testid={`user-toggle-active-btn-${u.id}`}
                       variant={u.active ? "outline" : "primary"}
@@ -139,12 +330,26 @@ export default function AdminUsers() {
                     >
                       {u.active ? <><Lock size={14}/>Sperren</> : <><Unlock size={14}/>Entsperren</>}
                     </Button>
-                    {!u.is_super_admin && (
+                    </>)}
+                    {superAdmin && u.role === "admin" && u.mfa_aktiv && u.id !== ich?.id && (
+
+                      <Button variant="outline" size="sm" data-testid={`user-mfa-reset-${u.id}`}
+
+                              title="Zwei-Faktor zurücksetzen (ausgesperrter Admin richtet neu ein)"
+
+                              onClick={() => mfaZuruecksetzen(u)}>
+
+                        2FA zurücksetzen
+
+                      </Button>
+
+                    )}
+                    {superAdmin && !u.is_super_admin && (
                       <Button
                         data-testid={`user-delete-btn-${u.id}`}
                         variant="danger"
                         size="sm"
-                        onClick={() => setDeleteUser(u)}
+                        onClick={() => loeschenOeffnen(u)}
                         title="Account dauerhaft löschen"
                       >
                         <Trash2 size={14} />
@@ -159,33 +364,36 @@ export default function AdminUsers() {
             ))}
           </ul>
         )}
+        {gekuerzt && !loading && !ladeFehler && (
+          // AD-19: die naechste Seite unten anhaengen statt "aeltere unsichtbar"
+          <div className="px-4 py-4 flex justify-center" style={{ borderTop: "1px solid var(--wa-06)" }}>
+            <Button variant="outline" size="sm" onClick={() => load({ naechste: seite + 1 })}
+                    disabled={laedtMehr} data-testid="admin-users-mehr">
+              {laedtMehr ? <Spinner /> : <ChevronDown size={14} />}
+              {laedtMehr ? "lädt…" : "Weitere laden"}
+            </Button>
+          </div>
+        )}
       </Card>
 
-      {/* Passwort-Reset-Modal */}
+      {/* Passwort-setzen-Modal (einziger Weg bei "Passwort vergessen") */}
       {resetUser && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={() => setResetUser(null)}>
           <div
             className="rounded-2xl shadow-2xl w-full max-w-md p-6"
-            style={{ background: "#141416", border: "1px solid rgba(255,255,255,0.10)" }}
+            style={{ background: "var(--bg-elevated)", border: "1px solid var(--wa-10)" }}
             onClick={(e) => e.stopPropagation()}
           >
             <div className="text-[18px] font-semibold tracking-tight text-white">Passwort neu setzen</div>
             <div className="text-[13px] text-zinc-400 mt-1">
-              für {resetUser.company_name || resetUser.email}
+              für {kontoLabel(resetUser)}
             </div>
-            <input
-              data-testid="admin-pw-reset-input"
-              type="text"
-              autoFocus
-              value={newPw}
-              onChange={(e) => setNewPw(e.target.value)}
-              className="mt-4 w-full h-11 px-4 rounded-xl outline-none text-[14px] text-white placeholder:text-zinc-500"
-              style={{
-                background: "rgba(255,255,255,0.05)",
-                border: "1px solid rgba(255,255,255,0.10)",
-              }}
-              placeholder="Neues Passwort (mind. 8 Zeichen)"
-            />
+            <div className="mt-4">
+              <PasswortFeld value={newPw} onChange={setNewPw} testid="admin-pw-reset-input" autoFocus
+                            placeholder="Neues Passwort (mind. 10 Zeichen, Ziffer oder Sonderzeichen)"
+                            className="w-full h-11 px-4 rounded-xl outline-none text-[14px] text-white placeholder:text-zinc-500"
+                            style={{ background: "var(--wa-05)", border: "1px solid var(--wa-10)" }} />
+            </div>
             <div className="flex gap-2 mt-5 justify-end">
               <Button data-testid="admin-pw-reset-cancel" variant="ghost" onClick={() => { setResetUser(null); setNewPw(""); }}>Abbrechen</Button>
               <Button data-testid="admin-pw-reset-submit" onClick={submitReset}>Setzen</Button>
@@ -197,7 +405,7 @@ export default function AdminUsers() {
       {creating && (
         <CreateUserModal
           onClose={() => setCreating(false)}
-          onCreated={() => { setCreating(false); load(); }}
+          onCreated={() => load()}
         />
       )}
 
@@ -209,7 +417,7 @@ export default function AdminUsers() {
         >
           <div
             className="rounded-2xl shadow-2xl w-full max-w-md p-6"
-            style={{ background: "#141416", border: "1px solid rgba(255,69,58,0.30)" }}
+            style={{ background: "var(--bg-elevated)", border: "1px solid rgba(255,69,58,0.30)" }}
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-start gap-3">
@@ -224,10 +432,29 @@ export default function AdminUsers() {
                   Account dauerhaft löschen?
                 </div>
                 <div className="text-[13px] text-zinc-400 mt-1">
-                  Du löschst <b className="text-white">{deleteUser.company_name || deleteUser.email}</b>{" "}
-                  ({deleteUser.email}) inklusive Händler-Profil und allen Abos.
-                  <br />
-                  <span className="text-red-300/80">Dieser Vorgang ist nicht umkehrbar.</span>
+                  {/* AD-24: Umfang je Rolle statt "inklusive Haendler-Profil und allen Abos" */}
+                  Du löschst <b className="text-white">{kontoName(deleteUser)}</b>:{" "}
+                  <span data-testid="admin-delete-user-umfang">{loeschUmfang(deleteUser)}</span>
+                  {/* AD-25: Rolle, Kontonummer, #Kundennummer, E-Mail, Anlagedatum, Konto-ID */}
+                  <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[12.5px]"
+                      data-testid="admin-delete-user-daten">
+                    <dt>Rolle</dt><dd className="text-white">{rolleText(deleteUser)}</dd>
+                    <dt>Kontonummer</dt><dd className="text-white font-mono">{deleteUser.kontonummer || "—"}</dd>
+                    {deleteUser.kunden_nr != null && (<><dt>Kundennummer</dt><dd className="text-white">#{deleteUser.kunden_nr}</dd></>)}
+                    <dt>E-Mail</dt><dd className="text-white break-all">{deleteUser.email || "—"}</dd>
+                    <dt>Erstellt</dt><dd className="text-white">{fmtDate(deleteUser.created_at)}</dd>
+                    <dt>Konto-ID</dt><dd className="text-white font-mono break-all">{deleteUser.id}</dd>
+                  </dl>
+                  {istChefKonto(deleteUser) && (
+                    <div className="mt-2 text-[12.5px]" data-testid="admin-delete-user-vorschau">
+                      {loeschVorschau === null ? "Löschvorschau wird geladen…"
+                        : loeschVorschau.fehler ? <span className="text-amber-300">{loeschVorschau.fehler}</span>
+                          : <>Würde löschen: <span className="text-white">{loeschVorschau.text}</span></>}
+                    </div>
+                  )}
+                  <div className="mt-2">
+                    <span className="text-red-300/80">Dieser Vorgang ist nicht umkehrbar.</span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -245,7 +472,8 @@ export default function AdminUsers() {
                 data-testid="admin-delete-user-confirm"
                 variant="danger"
                 onClick={submitDelete}
-                disabled={deleting}
+                // AD-24: beim Chef erst loeschen, wenn die Vorschau da ist (oder ihr Fehler)
+                disabled={deleting || (istChefKonto(deleteUser) && loeschVorschau === null)}
               >
                 {deleting ? "Lösche…" : "Endgültig löschen"}
               </Button>
@@ -257,32 +485,39 @@ export default function AdminUsers() {
   );
 }
 
+/** Kontonummer (13.09.2026): Firma mit Chef-Konto anlegen. Die Kontonummer
+ *  vergibt das Backend (= Kundennummer der Firma), die E-Mail ist optionale
+ *  Kontaktadresse. Nach der Anlage zeigt der Dialog die Zugangsdaten. */
 function CreateUserModal({ onClose, onCreated }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [companyName, setCompanyName] = useState("");
-  const [planType, setPlanType] = useState("monthly");
+  const [contactPerson, setContactPerson] = useState("");
+  const [phone, setPhone] = useState("");
+  // "none" = Firma ohne Abo (Betreiber-Modell); das Backend kennt kein "lifetime".
+  const [planType, setPlanType] = useState("none");
   const [busy, setBusy] = useState(false);
+  const [ergebnis, setErgebnis] = useState(null);
 
   const submit = async () => {
-    if (!email || !password || !companyName) {
-      toast.error("Bitte alle Pflichtfelder ausfüllen");
+    if (!password || !companyName.trim()) {
+      toast.error("Bitte Firma und Passwort angeben");
       return;
     }
-    if (password.length < 8) {
-      toast.error("Passwort muss mind. 8 Zeichen haben");
-      return;
-    }
+    const problem = passwortProblem(password);
+    if (problem) { toast.error(problem); return; }
     setBusy(true);
     try {
-      await api.post("/admin/users", {
+      const { data } = await api.post("/admin/users", {
         email: email.trim(),
         password,
         company_name: companyName.trim(),
+        contact_person: contactPerson.trim(),
+        phone: phone.trim(),
         plan_type: planType,
       });
-      toast.success(`Nutzer "${companyName}" angelegt`);
-      onCreated?.();
+      setErgebnis({ ...data, name: companyName.trim(), passwort: password });
+      onCreated?.(data);
     } catch (e) {
       toast.error(errMsg(e, "Fehler beim Anlegen"));
     } finally {
@@ -293,38 +528,59 @@ function CreateUserModal({ onClose, onCreated }) {
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
-      onClick={onClose}
+      // Pruefbericht 20.09.2026 (AD-04/O1): Steht die Karte mit dem Passwort,
+      // schliesst ein Klick daneben NICHT mehr — nur "Fertig".
+      onClick={() => { if (!ergebnis) onClose(); }}
       data-testid="admin-create-user-modal"
     >
       <div
         className="rounded-2xl shadow-2xl w-full max-w-md p-6"
-        style={{ background: "#141416", border: "1px solid rgba(255,255,255,0.10)" }}
+        style={{ background: "var(--bg-elevated)", border: "1px solid var(--wa-10)" }}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="text-[18px] font-semibold tracking-tight text-white">Neuen Nutzer anlegen</div>
+        {ergebnis ? (
+          <ZugangsdatenKarte titel="Firma angelegt" name={ergebnis.name} kontonummer={ergebnis.kontonummer}
+                             passwort={ergebnis.passwort}
+                             bereich="app" hinweis="Sucher legst du danach in der Firmenansicht an."
+                             onClose={onClose} />
+        ) : (<>
+        <div className="text-[18px] font-semibold tracking-tight text-white">Neue Firma anlegen</div>
         <div className="text-[13px] text-zinc-400 mt-1">
-          Der Händler kann sich danach direkt mit E-Mail und Passwort anmelden und die Plattform nutzen.
+          Der Chef meldet sich danach mit der Kontonummer der Firma und diesem Passwort an.
+          Die E-Mail ist nur Kontaktadresse und darf leer bleiben.
         </div>
 
         <div className="mt-5 space-y-3">
           <Field label="Firma" testid="create-user-company"
                  value={companyName} onChange={setCompanyName}
                  placeholder="z.B. Cash Car Hannover GmbH" />
-          <Field label="E-Mail" testid="create-user-email" type="email"
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Ansprechpartner (optional)" testid="create-user-contact"
+                   value={contactPerson} onChange={setContactPerson} placeholder="Vor- und Nachname" />
+            <Field label="Telefon (optional)" testid="create-user-phone"
+                   value={phone} onChange={setPhone} placeholder="+49 …" />
+          </div>
+          <Field label="Kontakt-E-Mail (optional)" testid="create-user-email" type="email"
                  value={email} onChange={setEmail}
                  placeholder="haendler@firma.de" />
-          <Field label="Passwort (mind. 8 Zeichen)" testid="create-user-password"
-                 value={password} onChange={setPassword}
-                 placeholder="initiales Passwort" />
+          <div>
+            <label className="block text-[12px] font-medium text-zinc-400 mb-1">
+              Passwort (mind. 10 Zeichen, Ziffer oder Sonderzeichen)
+            </label>
+            <PasswortFeld value={password} onChange={setPassword} testid="create-user-password"
+                          placeholder="Start-Passwort"
+                          className="w-full h-11 px-4 rounded-xl outline-none text-[14px] text-white placeholder:text-zinc-500"
+                          style={{ background: "var(--wa-05)", border: "1px solid var(--wa-10)" }} />
+          </div>
 
           <div>
             <label className="block text-[12px] font-medium text-zinc-400 mb-1.5">Abo-Plan</label>
             <div className="grid grid-cols-4 gap-1.5">
               {[
+                { v: "none",     l: "Ohne Abo" },
                 { v: "trial",    l: "Test (14 T)" },
                 { v: "monthly",  l: "Monat" },
                 { v: "yearly",   l: "Jahr" },
-                { v: "lifetime", l: "Lifetime" },
               ].map((p) => (
                 <button
                   key={p.v}
@@ -337,8 +593,8 @@ function CreateUserModal({ onClose, onCreated }) {
                       : "text-zinc-400 hover:text-white"
                   }`}
                   style={planType !== p.v ? {
-                    background: "rgba(255,255,255,0.03)",
-                    border: "1px solid rgba(255,255,255,0.08)",
+                    background: "var(--wa-03)",
+                    border: "1px solid var(--wa-08)",
                   } : {}}
                 >
                   {p.l}
@@ -353,9 +609,10 @@ function CreateUserModal({ onClose, onCreated }) {
             Abbrechen
           </Button>
           <Button data-testid="admin-create-user-submit" onClick={submit} disabled={busy}>
-            {busy ? "Lege an…" : "Nutzer anlegen"}
+            {busy ? "Lege an…" : "Firma anlegen"}
           </Button>
         </div>
+        </>)}
       </div>
     </div>
   );
@@ -373,8 +630,8 @@ function Field({ label, value, onChange, placeholder, type = "text", testid }) {
         placeholder={placeholder}
         className="w-full h-11 px-4 rounded-xl outline-none text-[14px] text-white placeholder:text-zinc-500"
         style={{
-          background: "rgba(255,255,255,0.05)",
-          border: "1px solid rgba(255,255,255,0.10)",
+          background: "var(--wa-05)",
+          border: "1px solid var(--wa-10)",
         }}
       />
     </div>
