@@ -25,6 +25,7 @@ export default function MarktModell() {
   const { user: ich } = useAuth();
   const superAdmin = !!ich?.is_super_admin;
   const [modell, setModell] = useState(null);
+  const [zeigeInaktiv, setZeigeInaktiv] = useState(false);
   const [fehler, setFehler] = useState("");
   const segmentId = params.get("segment") || "";
   const bereich = params.get("bereich") || "30d";
@@ -47,8 +48,15 @@ export default function MarktModell() {
   if (fehler) return <Card data-testid="markt-modell-fehler"><div className="text-red-300 text-sm">{fehler}</div></Card>;
   if (!modell) return <div className="flex items-center gap-2 text-zinc-500 text-sm py-10"><Spinner /> lade…</div>;
   const segmente = modell.segmente || [];
-  const kmWerte = [...new Map(segmente.map((s) => [`${s.min_km}-${s.max_km}`, s])).values()];
-  const ezWerte = [...new Map(segmente.map((s) => [s.ez_label || "alle", s])).values()];
+  // Befund Ahmad 26.09.2026 abends: nach Umstellungen der Bereiche stehen alte Segmente als
+  // "inaktiv" weiter in der Liste (Historie bleibt) — Auswahl und Tabelle zeigen nur aktive,
+  // die inaktiven auf Wunsch.
+  const aktive = segmente.filter((s) => s.enabled);
+  const basis = aktive.length ? aktive : segmente;
+  const kmWerte = [...new Map(basis.map((s) => [`${s.min_km}-${s.max_km}`, s])).values()].sort((a, b) => (a.min_km || 0) - (b.min_km || 0));
+  const ezWerte = [...new Map(basis.map((s) => [s.ez_label || "alle", s])).values()].sort((a, b) => (a.year_from || 0) - (b.year_from || 0));
+  const inaktive = segmente.length - aktive.length;
+  const tabelle = zeigeInaktiv ? segmente : aktive;
   const aktuell = segmente.find((s) => s.id === segmentId) || null;
 
   return (
@@ -93,15 +101,21 @@ export default function MarktModell() {
 
       {/* Segmentuebersicht des Modells (Auftrag v3) */}
       <Card padded={false} className="mt-4" data-testid="markt-segmentuebersicht">
-        <div className="px-4 py-3 text-[13px] font-semibold text-white" style={{ borderBottom: "1px solid var(--wa-08)" }}>Alle Segmente dieses Modells ({segmente.filter((s) => s.enabled).length} aktiv)</div>
+        <div className="px-4 py-3 text-[13px] font-semibold text-white" style={{ borderBottom: "1px solid var(--wa-08)" }}>Alle Segmente dieses Modells ({aktive.length} aktiv)
+          {inaktive > 0 && (
+            <button type="button" className="ml-3 text-[11px] font-normal text-zinc-400 hover:text-white underline" onClick={() => setZeigeInaktiv((v) => !v)} data-testid="markt-inaktive-schalter">
+              {zeigeInaktiv ? `${inaktive} inaktive ausblenden` : `${inaktive} inaktive (alte Bereiche) anzeigen`}
+            </button>
+          )}
+        </div>
         <div className="overflow-x-auto">
           <table className="w-full text-[12px] min-w-[980px]">
             <thead><tr className="text-left text-zinc-500 text-[11px] uppercase tracking-wide">
               <th className="px-3 py-2">Segment</th><th className="px-3 py-2">Letzter Crawl</th><th className="px-3 py-2">Nächster</th><th className="px-3 py-2 text-right">N</th>
-              <th className="px-3 py-2 text-right">Günstigstes</th><th className="px-3 py-2 text-right">Top-20-Median</th><th className="px-3 py-2 text-right">Ø</th>
+              <th className="px-3 py-2 text-right">Günstigstes</th><th className="px-3 py-2 text-right">Median</th><th className="px-3 py-2 text-right">Ø</th>
               <th className="px-3 py-2 text-right">7 Tage</th><th className="px-3 py-2 text-right">30 Tage</th><th className="px-3 py-2">Status</th>
             </tr></thead>
-            <tbody>{segmente.map((s) => (
+            <tbody>{tabelle.map((s) => (
               <tr key={s.id} className={`border-t border-white/5 tabular-nums ${s.id === segmentId ? "bg-white/5" : ""} ${s.enabled ? "" : "opacity-50"}`} data-testid={`markt-segmentzeile-${s.id}`}>
                 <td className="px-3 py-1.5"><button type="button" className="text-white hover:underline text-left" onClick={() => setzen("segment", s.id)}>{s.ez_label || "alle EZ"} · {s.km_label}</button></td>
                 <td className="px-3 py-1.5 text-zinc-400">{s.last_success_at ? fmtDate(s.last_success_at) : "—"}</td>

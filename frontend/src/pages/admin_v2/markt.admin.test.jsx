@@ -22,6 +22,8 @@ const SEG = { id: "bmw-320d:55001-85000:2019-2021", model_id: "bmw-320d", label:
               km_label: "55–85k km", year_from: 2019, year_to: 2021, ez_label: "EZ 2019–2021", enabled: true,
               last_success_at: "2026-10-01T04:00:00+00:00", stats: { sample_size: 20 } };
 const SEG2 = { ...SEG, id: "bmw-320d:55001-85000:2016-2018", year_from: 2016, year_to: 2018, ez_label: "EZ 2016–2018", stats: null };
+// Befund 26.09. abends: altes, inaktives Segment (frueherer km-Bereich) darf Auswahl und Tabelle nicht aufblaehen
+const SEG_ALT = { ...SEG, id: "bmw-320d:2019-2021:0-50000", min_km: 0, max_km: 50000, km_label: "0–50k km", enabled: false, stats: null };
 const STATS = { sample_size: 20, min_price: 18900, median_price: 20250, avg_price: 20410, max_price: 21700, p25_price: 19600,
                 p75_price: 21000, trend_7d_eur: -420, trend_7d_pct: -2.1, trend_30d_eur: -850, trend_30d_pct: -4.0,
                 new_listings_7d: 14, price_reductions_7d: 9, beobachtete_tage: 31, datenlage: "gut", updated_at: "2026-10-01T05:10:00+00:00",
@@ -48,7 +50,7 @@ vi.mock("@/lib/api", () => ({
                       alarme: [{ typ: "segment_veraltet", text: "3 Segment(e) seit über 48 h nicht erfolgreich aktualisiert", stufe: "warn" }] },
         jobs: { tag: "2026-10-01", completed: 6, running: 0, queued: 0, failed: 0, naechster: null }, km_buckets: [{ min_km: 10000, max_km: 30000 }],
         ez_buckets: [{ year_from: 2019, year_to: 2021 }], einstellungen: { rows_je_segment: 20 } } };
-      if (url === "/admin/market/models/bmw-320d") return { data: { id: "bmw-320d", label: "BMW 320d", fuel: "DIESEL", make_id: "3500", model_id: "10", segmente: [SEG, SEG2] } };
+      if (url === "/admin/market/models/bmw-320d") return { data: { id: "bmw-320d", label: "BMW 320d", fuel: "DIESEL", make_id: "3500", model_id: "10", segmente: [SEG, SEG2, SEG_ALT] } };
       if (url.includes("/listings/449438530/history")) return { data: { listing: { title: "BMW 320d Touring", active_state: "seen", mileage_km: 78000,
         first_registration: "03/2020", postal_code: "30159", city: "Hannover", price_history: [{ at: "2026-09-13T04:00:00Z", price: 19400 }, { at: "2026-10-01T04:00:00Z", price: 18900 }] },
         snapshots: [{ date: "2026-09-13", segment_id: SEG.id, price: 19400, rank_in_sample: 5 }], hinweis_zustand: "" } };
@@ -155,6 +157,13 @@ describe("Admin Marktanalyse", () => {
     await starten("/admin/markt/bmw-320d");
     expect(el("markt-modell-titel").textContent).toBe("BMW 320d");
     expect(el("markt-km-55001").getAttribute("aria-pressed")).toBe("true");
+    // inaktives Segment: kein km-Chip, keine Tabellenzeile — erst nach dem Schalter
+    expect(el("markt-km-0")).toBeNull();
+    expect(el(`markt-segmentzeile-${SEG_ALT.id}`)).toBeNull();
+    expect(el("markt-inaktive-schalter").textContent).toContain("1 inaktive");
+    await klick("markt-inaktive-schalter");
+    expect(el(`markt-segmentzeile-${SEG_ALT.id}`)).toBeTruthy();
+    await klick("markt-inaktive-schalter");
     expect(el("markt-ez-2019").getAttribute("aria-pressed")).toBe("true");
     const kz = el("markt-kennzahlen").textContent;
     for (const t of ["20 Fahrzeuge", "18.900 €", "20.250 €", "20.410 €", "21.700 €", "19.600 € / 21.000 €", "−420 € (-2,1 %)", "−850 € (-4 %)", "14", "9"]) {
