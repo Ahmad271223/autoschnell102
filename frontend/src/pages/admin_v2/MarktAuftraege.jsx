@@ -25,16 +25,20 @@ const KAROSSERIE = { "": "alle", Limousine: "Limousine", EstateCar: "Kombi", Off
                      SportsCar: "Coupé / Sportwagen", SmallCar: "Kleinwagen", Van: "Van" };
 const STATUS_TONE = { active: "green", paused: "yellow", archived: "gray" };
 const STATUS_TEXT = { active: "aktiv", paused: "pausiert", archived: "archiviert" };
+// Master-Auftrag 26.09.2026 (Phase A): Klassifikation der Masterlisten-Migration je Auftrag
+const MASTER_TONE = { UNCHANGED: "gray", CHANGED: "yellow", NEW: "blue", DEPRECATED: "red" };
+const MASTER_TEXT = { UNCHANGED: "Master: unverändert", CHANGED: "Master: geändert", NEW: "Master: neu", DEPRECATED: "Master: entfällt" };
 
 const LEER = { make: "", model: "", variant: "", fuel: "", gearbox: "", body: "", power_kw_min: "", power_kw_max: "", seller_type: "",
                country: "DE", zip: "", radius_km: "", ez_years: [], km_buckets: [], rows: 20, crawls_per_day: 2, label: "",
                testlauf_ok_at: "", testlauf_ok_hash: "" };
-// Reparaturwelle 5 Nr. 65: materielle Merkmale — aendert sich eines, gilt der Testlauf nicht mehr (Aktivieren erst nach neuem Testlauf)
-const MATERIELL = ["make", "model", "fuel", "gearbox", "body", "power_kw_min", "power_kw_max", "seller_type", "country", "zip", "radius_km"];
-// Nr. 65: ein Auftrag darf aktiviert werden, wenn der Testlauf zur aktuellen Definition passt (Startlisten-Seed ausgenommen).
-// Reparaturwelle 6 Nr. 124: der Testlauf prueft die Filter (filter_hash, ohne Zeilenzahl) — die Fassung (definition_hash)
-// enthaelt zusaetzlich die Zeilenzahl; aeltere Antworten ohne filter_hash: definition_hash
-const aktivierbar = (m) => !!(m.seed_version || (m.testlauf_ok_hash && m.testlauf_ok_hash === (m.filter_hash || m.definition_hash)));
+// Reparaturwelle 5 Nr. 65: materielle Merkmale — aendert sich eines, gilt der Testlauf nicht mehr (Aktivieren erst nach neuem Testlauf).
+// Master-Auftrag A1c: auch EZ-Jahre und km-Bereiche — der Testlauf prueft jedes Segment, neue Segmente wurden nie geprueft.
+const MATERIELL = ["make", "model", "fuel", "gearbox", "body", "power_kw_min", "power_kw_max", "seller_type", "country", "zip", "radius_km", "ez_years", "km_buckets"];
+// Nr. 65: ein Auftrag darf aktiviert werden, wenn der Testlauf zur aktuellen Konfiguration passt — Master-Auftrag Phase A:
+// KEINE Ausnahme mehr fuer Seeds/Masterlisten-Auftraege. Reparaturwelle 6 Nr. 124: der Testlauf prueft die Filter
+// (filter_hash, ohne Zeilenzahl, seit Phase A mit EZ/km); aeltere Antworten ohne filter_hash: definition_hash
+const aktivierbar = (m) => !!(m.testlauf_ok_hash && m.testlauf_ok_hash === (m.filter_hash || m.definition_hash));
 
 export default function MarktAuftraege() {
   const { user: ich } = useAuth();
@@ -45,16 +49,24 @@ export default function MarktAuftraege() {
   const [formular, setFormular] = useState(null);       // {modus: "neu"|"bearbeiten"|"duplizieren", id?, werte}
   const [busy, setBusy] = useState("");
   const [archiv, setArchiv] = useState(false);
+  const [nurReview, setNurReview] = useState(false);
 
   const laden = useCallback(async () => {
     try {
-      const [a, k] = await Promise.all([api.get("/admin/market/auftraege", { params: { archiv } }), katalog ? Promise.resolve({ data: katalog }) : api.get("/admin/market/katalog")]);
+      const [a, k] = await Promise.all([api.get("/admin/market/auftraege", { params: { archiv, needs_review: nurReview } }), katalog ? Promise.resolve({ data: katalog }) : api.get("/admin/market/katalog")]);
       setDaten(a.data);
       if (!katalog) setKatalog(k.data);
       setFehler("");
     } catch (e) { setFehler(errMsg(e, "Suchaufträge konnten nicht geladen werden")); }
-  }, [archiv, katalog]);
+  }, [archiv, nurReview, katalog]);
   useEffect(() => { laden(); }, [laden]);
+  // Sammel-Testlauf laeuft im Hintergrund: Stand alle 15 s nachladen, bis er fertig ist
+  const sammelLaeuft = !!daten?.testlauf_alle?.laeuft;
+  useEffect(() => {
+    if (!sammelLaeuft) return undefined;
+    const t = setInterval(() => { laden(); }, 15000);
+    return () => clearInterval(t);
+  }, [sammelLaeuft, laden]);
 
   const aktion = async (name, fn, text) => {
     setBusy(name);
@@ -64,6 +76,25 @@ export default function MarktAuftraege() {
   };
   const status = (m, st) => aktion(`status-${m.id}`, () => api.post(`/admin/market/models/${m.id}/status`, { status: st }),
     st === "active" ? "Aktiviert — Segmente werden ab dem nächsten Tagesplan gecrawlt" : st === "paused" ? "Pausiert" : "Archiviert (Historie bleibt)");
+  // Master-Auftrag Phase A: Masterliste (170 Zeilen) einspielen/nachziehen — idempotent, nie automatisch aktiv
+  const masterImport = () => {
+    if (!window.confirm("Masterliste (170 Zeilen) einspielen?\n\nBestehende Seeds werden zugeordnet (unverändert/geändert/entfällt), neue Zeilen kommen pausiert dazu. Nichts wird automatisch aktiv — Aktivieren erst nach Testlauf.")) return;
+    aktion("master", () => api.post("/admin/market/masterliste/importieren"),
+           (d) => `Masterliste: ${d.new ?? 0} neu · ${d.changed ?? 0} geändert · ${d.unchanged ?? 0} unverändert · ${d.deprecated ?? 0} entfallen · ${d.needs_review ?? 0} zu prüfen`);
+  };
+  // Master-Auftrag Phase A: Sammel-Testlauf — je pausiertem Masterlisten-Auftrag EIN Testlauf ueber alle Segmente,
+  // bestandene werden aktiviert; "zu pruefen"-Zeilen bleiben aussen vor (die prueft der Mensch einzeln)
+  const sammelTestlauf = () => {
+    const s = daten?.testlauf_alle || {};
+    if (!s.kandidaten) { toast.info("Keine pausierten Masterlisten-Aufträge ohne Prüfbedarf"); return; }
+    if (!window.confirm(`Testlauf für ${s.kandidaten} pausierte Masterlisten-Aufträge starten?
+
+Jeder Auftrag bekommt einen Testlauf über alle seine Segmente (zusammen ca. ${Number(s.kosten_schaetzung_usd || 0).toFixed(2)} $ aus dem Marktbudget). Bestandene werden sofort aktiviert, nicht bestandene bleiben pausiert (Grund steht am Auftrag). ${s.kandidaten_review || 0} Aufträge „zu prüfen“ bleiben außen vor.
+
+Das läuft im Hintergrund und kann eine Weile dauern.`)) return;
+    aktion("sammel", () => api.post("/admin/market/masterliste/testlauf-alle", { aktivieren: true, mit_review: false }),
+           "Sammel-Testlauf gestartet — der Stand aktualisiert sich hier automatisch");
+  };
   const neu = () => setFormular({ modus: "neu", werte: { ...LEER, ez_years: katalog?.standard?.ez_years || [], km_buckets: katalog?.standard?.km_buckets || [],
                                                          rows: katalog?.standard?.rows || 20, crawls_per_day: katalog?.standard?.crawls_per_day || 2 } });
   const bearbeiten = (m) => setFormular({ modus: "bearbeiten", id: m.id, werte: ausModell(m) });
@@ -78,6 +109,10 @@ export default function MarktAuftraege() {
       <PageHeader title="Suchaufträge" subtitle="Eigene Marktanalysen anlegen: Modell, EZ-Jahre, km-Bereiche, Zeilen, Abrufe je Tag — mit Kostenprognose und Testlauf."
                   action={<div className="flex gap-2">
                     <Button variant="outline" size="sm" onClick={laden}><RefreshCw size={14} /> Aktualisieren</Button>
+                    <Button variant="outline" size="sm" onClick={masterImport} disabled={!superAdmin || !!busy} data-testid="auftraege-masterliste"
+                            title="Fahrzeug-Masterliste (170 Zeilen) einspielen — idempotent, nichts wird automatisch aktiv">Masterliste importieren</Button>
+                    <Button variant="outline" size="sm" onClick={sammelTestlauf} disabled={!superAdmin || !!busy || sammelLaeuft} data-testid="auftraege-testlauf-alle"
+                            title="Alle pausierten Masterlisten-Aufträge (ohne „zu prüfen“) testen und bestandene aktivieren"><FlaskConical size={14} /> Testlauf für alle</Button>
                     <Button size="sm" onClick={neu} disabled={!superAdmin} data-testid="auftrag-neu"><Plus size={14} /> Neue Marktanalyse</Button>
                   </div>} />
 
@@ -98,15 +133,21 @@ export default function MarktAuftraege() {
         <div className="mt-1 text-[11px] text-zinc-500">Rechnung: Segmente = EZ-Jahre × km-Bereiche · Zeilen/Tag = Segmente × Zeilen × Abrufe · Kosten = Läufe × {p.preise?.start_usd} $ + Zeilen × {p.preise?.row_usd} $ (Bündel zu {p.preise?.buendel}, {p.preise?.actor}). Keine KI.</div>
       </Card>
 
+      {daten.testlauf_alle?.gestartet_at && <SammelStand s={daten.testlauf_alle} />}
+
       {formular && <AuftragFormular katalog={katalog} formular={formular} superAdmin={superAdmin}
                                     onClose={() => setFormular(null)} onGespeichert={() => { setFormular(null); laden(); }} />}
 
       <Card padded={false} data-testid="auftraege-liste">
-        <div className="px-4 py-3 flex items-center justify-between" style={{ borderBottom: "1px solid var(--wa-08)" }}>
-          <span className="text-[13px] text-zinc-400">{daten.auftraege.length} Marktanalysen</span>
-          <label className="text-[12px] text-zinc-400 inline-flex items-center gap-1.5"><input type="checkbox" checked={archiv} onChange={(e) => setArchiv(e.target.checked)} data-testid="auftraege-archiv" /> archivierte zeigen</label>
+        <div className="px-4 py-3 flex items-center justify-between flex-wrap gap-2" style={{ borderBottom: "1px solid var(--wa-08)" }}>
+          <span className="text-[13px] text-zinc-400">{daten.auftraege.length} Marktanalysen
+            {daten.masterliste?.stand && <span className="ml-2 text-[11px] text-zinc-500" data-testid="auftraege-masterliste-stand">Masterliste v{daten.masterliste.seed_version} vom {datumZeit(daten.masterliste.stand)}{daten.masterliste.zaehler?.needs_review ? ` · ${daten.masterliste.zaehler.needs_review} zu prüfen` : ""}</span>}</span>
+          <span className="flex gap-3">
+            <label className="text-[12px] text-zinc-400 inline-flex items-center gap-1.5"><input type="checkbox" checked={nurReview} onChange={(e) => setNurReview(e.target.checked)} data-testid="auftraege-needs-review" /> nur „zu prüfen“ (needs_review)</label>
+            <label className="text-[12px] text-zinc-400 inline-flex items-center gap-1.5"><input type="checkbox" checked={archiv} onChange={(e) => setArchiv(e.target.checked)} data-testid="auftraege-archiv" /> archivierte zeigen</label>
+          </span>
         </div>
-        {daten.auftraege.length === 0 ? <EmptyState title="Noch keine Marktanalysen" hint="„Neue Marktanalyse“ oder auf der Marktanalyse-Seite „Startliste & Segmente aufbauen“ (52 Startmodelle)." /> : (
+        {daten.auftraege.length === 0 ? <EmptyState title="Noch keine Marktanalysen" hint="„Neue Marktanalyse“ oder „Masterliste importieren“ (170 Zeilen, pausiert — Aktivieren erst nach Testlauf)." /> : (
           <div className="overflow-x-auto">
             <table className="w-full text-[12px] min-w-[1100px]">
               <thead><tr className="text-left text-zinc-500 text-[11px] uppercase tracking-wide">
@@ -116,10 +157,18 @@ export default function MarktAuftraege() {
               </tr></thead>
               <tbody>{daten.auftraege.map((m) => (
                 <tr key={m.id} className="border-t border-white/5" data-testid={`auftrag-${m.id}`}>
-                  <td className="px-3 py-2"><Link to={`/admin/markt/${m.id}`} className="text-white font-medium hover:underline">{m.label}</Link><div className="text-[11px] text-zinc-500">{m.make} · {m.model}{m.model_id ? "" : " · keine mobile.de-ID"}</div></td>
+                  <td className="px-3 py-2"><Link to={`/admin/markt/${m.id}`} className="text-white font-medium hover:underline">{m.label}</Link><div className="text-[11px] text-zinc-500">{m.make} · {m.model}{m.model_id ? "" : " · keine mobile.de-ID"}{m.master_row ? ` · Master-Zeile ${m.master_row}` : ""}</div>
+                    {/* Master-Auftrag Phase A: Klassifikation und Pruefbedarf der Masterlisten-Migration */}
+                    {(m.master_status || m.needs_review) && <div className="mt-0.5 flex flex-wrap gap-1" data-testid={`auftrag-master-${m.id}`}>
+                      {m.master_status && <Badge tone={MASTER_TONE[m.master_status] || "gray"}>{MASTER_TEXT[m.master_status] || m.master_status}</Badge>}
+                      {m.needs_review && <Badge tone="yellow">zu prüfen</Badge>}
+                    </div>}
+                    {m.needs_review && m.review_grund && <div className="text-[11px] mt-0.5" style={{ color: "var(--st-amber, #f59e0b)" }} data-testid={`auftrag-review-${m.id}`}>{m.review_grund}</div>}
+                    {m.testlauf_letzter && <div className="text-[11px] mt-0.5" style={{ color: m.testlauf_letzter.bestanden ? "var(--st-gruen, #22c55e)" : "var(--st-rot, #ef4444)" }} data-testid={`auftrag-testlauf-${m.id}`}>
+                      Testlauf {datumZeit(m.testlauf_letzter.at)}: {m.testlauf_letzter.bestanden ? `bestanden (${m.testlauf_letzter.gueltig} Treffer, ${m.testlauf_letzter.leer} leere Segmente)` : `nicht bestanden — ${m.testlauf_letzter.grund || "ohne Grund"}`}</div>}</td>
                   <td className="px-3 py-2 text-zinc-300">{m.variant}<div className="text-[11px] text-zinc-500">{[KRAFTSTOFF[m.fuel] !== "alle" && KRAFTSTOFF[m.fuel], m.gearbox && GETRIEBE[m.gearbox], m.body && (KAROSSERIE[m.body] || m.body), m.power_kw_min || m.power_kw_max ? `${m.power_kw_min || "…"}–${m.power_kw_max || "…"} kW` : null, m.seller_type && (VERKAEUFER[m.seller_type] || VERKAEUFER_ALT[m.seller_type] || m.seller_type), m.zip ? `PLZ ${m.zip} +${m.radius_km} km` : null, (m.version || 1) > 1 ? `Fassung v${m.version}` : null].filter(Boolean).join(" · ")}</div></td>
                   <td className="px-3 py-2 text-zinc-300 tabular-nums">{(m.ez_years || []).join(", ") || "Standard"}</td>
-                  <td className="px-3 py-2 text-zinc-300 tabular-nums">{(m.km_buckets || []).map((b) => `${Math.round(b.min_km / 1000)}–${Math.round(b.max_km / 1000)}k`).join(", ") || "Standard"}</td>
+                  <td className="px-3 py-2 text-zinc-300 tabular-nums">{m.km_profile && <span className="mr-1 text-[10px] text-zinc-500" data-testid={`auftrag-profil-${m.id}`}>Profil {m.km_profile}:</span>}{(m.km_buckets || []).map((b) => `${Math.round(b.min_km / 1000)}–${Math.round(b.max_km / 1000)}k`).join(", ") || "Standard"}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{m.rows || 20}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{m.crawls_per_day || 1}×</td>
                   <td className="px-3 py-2 text-right tabular-nums">{m.prognose?.segmente ?? m.segmente_aktiv}</td>
@@ -145,13 +194,30 @@ export default function MarktAuftraege() {
   );
 }
 
+function SammelStand({ s }) {
+  const fehler = s.fehler || [];
+  return (
+    <Card className="mb-4" data-testid="auftraege-sammel-stand">
+      <div className="text-[12px] text-zinc-300">
+        <b>Sammel-Testlauf</b> {s.laeuft ? "läuft" : `beendet${s.beendet_at ? ` ${datumZeit(s.beendet_at)}` : ""}`} ·
+        {" "}{s.fertig ?? 0} von {s.gesamt ?? 0} geprüft · {s.bestanden ?? 0} bestanden · {s.nicht_bestanden ?? 0} nicht bestanden
+        {!s.laeuft ? ` · ${s.aktiviert ?? 0} aktiviert` : ""} · {Number(s.kosten_usd || 0).toFixed(2)} $
+        {s.abbruch && <span className="text-red-300" data-testid="auftraege-sammel-abbruch"> · abgebrochen: {s.abbruch}</span>}
+        {s.abgebrochen_lease && <span className="text-red-300"> · unterbrochen (Server-Neustart) — erneut starten, Bestandene werden nicht noch einmal bezahlt</span>}
+      </div>
+      {fehler.length > 0 && <details className="mt-1 text-[11px] text-zinc-400"><summary>{fehler.length} nicht bestanden / Fehler</summary>
+        <ul className="mt-1 space-y-0.5">{fehler.slice(-50).map((f, i) => <li key={`${f.id}-${i}`}>{f.label || f.id}: {f.grund}</li>)}</ul></details>}
+    </Card>
+  );
+}
+
 function ausModell(m) {
   return { make: m.make || "", model: m.model || "", variant: m.variant || "", fuel: m.fuel || "", gearbox: m.gearbox || "", body: m.body || "",
            power_kw_min: m.power_kw_min ?? "", power_kw_max: m.power_kw_max ?? "", seller_type: m.seller_type || "", country: m.country || "DE",
            zip: m.zip || "", radius_km: m.radius_km ?? "", ez_years: m.ez_years || [], km_buckets: (m.km_buckets || []).map((b) => ({ ...b })),
            rows: m.rows || 20, crawls_per_day: m.crawls_per_day || 1, label: m.label || "",
-           // Nr. 65: gespeicherter Testlauf gilt weiter, solange die Definition gleich bleibt
-           testlauf_ok_at: aktivierbar(m) ? (m.testlauf_ok_at || "seed") : "", testlauf_ok_hash: m.testlauf_ok_hash || "", seed_version: m.seed_version || null };
+           // Nr. 65: gespeicherter Testlauf gilt weiter, solange Filter, EZ-Jahre und km-Bereiche gleich bleiben (kein Seed-Sonderfall)
+           testlauf_ok_at: aktivierbar(m) ? (m.testlauf_ok_at || "") : "", testlauf_ok_hash: aktivierbar(m) ? (m.testlauf_ok_hash || "") : "", seed_version: m.seed_version || null };
 }
 
 function K({ label, wert, rot }) {
@@ -181,7 +247,7 @@ function AuftragFormular({ katalog, formular, superAdmin, onClose, onGespeichert
 
   const nutzlast = useMemo(() => ({ ...w, seed_version: undefined, ez_years: ezModus === "liste" ? w.ez_years : [], ez_from: ezModus === "vonbis" ? ezVon : "", ez_to: ezModus === "vonbis" ? ezBis : "",
                                      power_kw_min: w.power_kw_min || null, power_kw_max: w.power_kw_max || null, radius_km: w.radius_km || null,
-                                     testlauf_ok_at: w.testlauf_ok_at && w.testlauf_ok_at !== "seed" ? w.testlauf_ok_at : null, testlauf_ok_hash: w.testlauf_ok_hash || null }), [w, ezModus, ezVon, ezBis]);
+                                     testlauf_ok_at: w.testlauf_ok_at || null, testlauf_ok_hash: w.testlauf_ok_hash || null }), [w, ezModus, ezVon, ezBis]);
   const testOk = !!w.testlauf_ok_at;
   // Nr. 5: die Freitext-Variante filtert bei mobile.de nicht — ohne Kraftstoff/Getriebe/kW/Karosserie ist der Auftrag ungueltig
   const ohneFilter = !(w.fuel || w.gearbox || w.body || w.power_kw_min || w.power_kw_max);
@@ -259,7 +325,7 @@ function AuftragFormular({ katalog, formular, superAdmin, onClose, onGespeichert
           {(!!w.zip !== !!w.radius_km) && <div className="text-[11px] mt-1" style={{ color: "var(--st-amber, #f59e0b)" }} data-testid="auftrag-plz-hinweis">PLZ und Radius nur zusammen — eines allein wird nicht gespeichert.</div>}</label>
       </div>
 
-      <div className="mt-3 text-[12px] text-zinc-400">Erstzulassung * <span className="text-zinc-600">(jedes Jahr wird ein eigenes Segment — ein 2019er landet nie in EZ 2020)</span></div>
+      <div className="mt-3 text-[12px] text-zinc-400">Erstzulassung * <span className="text-zinc-600">(jedes Jahr wird ein eigenes Segment — ein 2019er landet nie in EZ 2020; geänderte EZ-Jahre oder km-Bereiche brauchen einen neuen Testlauf)</span></div>
       <div className="mt-1 flex flex-wrap items-center gap-1.5" data-testid="auftrag-ez">
         <Chip aktiv={ezModus === "liste"} onClick={() => setEzModus("liste")}>Jahre wählen</Chip>
         <Chip aktiv={ezModus === "vonbis"} onClick={() => setEzModus("vonbis")}>von – bis</Chip>

@@ -485,14 +485,14 @@ def test_11_segmente_sync_und_ez_bereiche(welt):
     eigen = {**v2, "id": f"test-m17-eigen-{w.s}", "km_buckets": [{"min_km": 0, "max_km": 99000}], "ez_years": [2016], "rows": 7}
     welt.run(db[K.MODELLE].insert_many([dict(v2), dict(eigen)]))
     try:
-        monkeypatch_ids = set(m["id"] for m in _module("markt.katalog").start_modelle())
+        monkeypatch_ids = set(m["id"] for m in _module("markt.katalog").start_modelle_v3())
         assert v2["id"] not in monkeypatch_ids  # Test-IDs sind keine Seed-IDs -> Migration prueft ueber die Seed-Liste
-        alt_start = _module("markt.katalog").start_modelle
-        _module("markt.katalog").start_modelle = lambda: alt_start() + [{"id": v2["id"]}, {"id": eigen["id"]}]
+        alt_start = _module("markt.katalog").start_modelle_v3
+        _module("markt.katalog").start_modelle_v3 = lambda: alt_start() + [{"id": v2["id"]}, {"id": eigen["id"]}]
         try:
             erg = welt.run(MIG.m17_markt_standard_v3(db))
         finally:
-            _module("markt.katalog").start_modelle = alt_start
+            _module("markt.katalog").start_modelle_v3 = alt_start
         assert erg["aktualisiert"] >= 1
         d = welt.run(db[K.MODELLE].find_one({"id": v2["id"]}, {"_id": 0}))
         assert d["km_buckets"] == K.KM_BUCKETS_STANDARD and d["ez_years"] == [2018, 2019, 2020, 2021, 2022] and d["rows"] == 10 and d["seed_version"] == 3
@@ -516,11 +516,15 @@ def test_11_segmente_sync_und_ez_bereiche(welt):
     welt.run(db[K.SEGMENTE].delete_many({"model_id": mid}))
     welt.run(db[K.MODELLE].delete_many({"id": mid}))
     KAT = _module("markt.katalog")
-    ms = KAT.start_modelle()
+    # Master-Auftrag 26.09.2026: start_modelle() ist die Masterliste (170, pausiert); die Startliste v3 (72) bleibt
+    # als Altbestand fuer die Klassifikation (start_modelle_v3) — Details in test_markt_masterliste_20260926
+    master = KAT.start_modelle()
+    assert len(master) == 170 and all(m["seed_version"] == KAT.SEED_VERSION == 4 and m["status"] == "paused" for m in master)
+    ms = KAT.start_modelle_v3()
     # v4 (26.09.2026 abends): 72 Eintraege — JEDER mit Getriebe (nie "alle"), Schalt-/Automatik-Doppel wo ueblich
     assert len(ms) == 72 and sum(1 for m in ms if m["enabled"]) == 72, [m["id"] for m in ms if not m["enabled"]]
     assert len({m["id"] for m in ms}) == 72 and all(m["gearbox"] in ("AUTOMATIC_GEAR", "MANUAL_GEAR") for m in ms)
-    assert all(m["seed_version"] == KAT.SEED_VERSION and m["km_buckets"] == K.KM_BUCKETS_STANDARD for m in ms)
+    assert all(m["seed_version"] == KAT.SEED_VERSION_V3 == 3 and m["km_buckets"] == K.KM_BUCKETS_STANDARD for m in ms)
     b = next(m for m in ms if m["id"] == "bmw-320d")
     assert b["model_id"] == "10" and b["ez_years"] == [2018, 2019, 2020, 2021, 2022] and len(b["km_buckets"]) == 6
     assert b["rows"] == 10 and b["crawls_per_day"] == 2 and b["status"] == "active" and b["gearbox"] == "AUTOMATIC_GEAR"
@@ -748,7 +752,11 @@ def test_14_suchauftraege_pruefung_prognose_und_verwaltung(welt, monkeypatch):
     erwartet = min(12 * 3600, (K.tag_ende(tag) - d0).total_seconds() / 2)
     assert abs((d1 - d0).total_seconds() - erwartet) < 60 and d1 <= K.tag_ende(tag)
     # --- Aendern (km-Bereiche auf 2) -> Segmente 8 aktiv, alte deaktiviert (nicht geloescht)
-    welt.run(A.aendern(db, mid, {"km_buckets": [{"min_km": 0, "max_km": 50000}, {"min_km": 50001, "max_km": 120000}]}))
+    # Master-Auftrag A1c: neue km-Bereiche an einem AKTIVEN Auftrag brauchen einen neuen Testlauf (neue Segmente)
+    with pytest.raises(A.Ungueltig) as ex_km:
+        welt.run(A.aendern(db, mid, {"km_buckets": [{"min_km": 0, "max_km": 50000}, {"min_km": 50001, "max_km": 120000}]}))
+    assert "erst Testlauf" in str(ex_km.value)
+    _aendern_mit_testlauf(welt, A, mid, {"km_buckets": [{"min_km": 0, "max_km": 50000}, {"min_km": 50001, "max_km": 120000}]})
     assert welt.run(db[K.SEGMENTE].count_documents({"model_id": mid, "enabled": True})) == 8
     assert welt.run(db[K.SEGMENTE].count_documents({"model_id": mid})) == 8 + 16
     # --- Duplizieren: gleiche Konfiguration, pausiert, neue ID
@@ -847,7 +855,7 @@ def test_15_getriebe_crawler_schalter_und_seed_v2(welt, monkeypatch):
     # (e) Migration 16: altes Seed-Modell (v1) -> Getriebe, km 0-250k, kW eng, Label; Fremdes bleibt; idempotent
     MIG = _module("migrationen")
     KAT = _module("markt.katalog")
-    alt_seed = next(m for m in KAT.start_modelle() if m["id"] == "vw-touran-20tdi")
+    alt_seed = next(m for m in KAT.start_modelle_v3() if m["id"] == "vw-touran-20tdi")
     sicherung = welt.run(db[K.MODELLE].find_one({"id": "vw-touran-20tdi"}))
     welt.run(db[K.MODELLE].delete_many({"id": "vw-touran-20tdi"}))
     welt.run(db[K.MODELLE].insert_one({**{k: v for k, v in alt_seed.items() if k not in ("gearbox", "seed_version")},
@@ -860,7 +868,7 @@ def test_15_getriebe_crawler_schalter_und_seed_v2(welt, monkeypatch):
         erg = welt.run(MIG.m16_markt_startliste_v2(db))
         assert erg["aktualisiert"] >= 1 and erg["alarme_geschlossen"] >= 1 and erg["segmente"] > 0
         d = welt.run(db[K.MODELLE].find_one({"id": "vw-touran-20tdi"}, {"_id": 0}))
-        assert d["gearbox"] == "AUTOMATIC_GEAR" and d["seed_version"] == KAT.SEED_VERSION and d["label"] == "Volkswagen Touran 2.0 TDI Automatik"
+        assert d["gearbox"] == "AUTOMATIC_GEAR" and d["seed_version"] == KAT.SEED_VERSION_V3 and d["label"] == "Volkswagen Touran 2.0 TDI Automatik"
         assert (d["power_kw_min"], d["power_kw_max"]) == (110, 150) and d["km_buckets"] == K.KM_BUCKETS_STANDARD
         assert welt.run(db[K.MODELLE].find_one({"id": "vw-touran-20tdi-schalt"}, {"_id": 0}))["gearbox"] == "MANUAL_GEAR"
         assert welt.run(db.betriebsalarme.find_one({"id": f"al-{s}"}))["offen"] is False
@@ -1252,10 +1260,12 @@ def test_22_testlauf_ueber_alle_segmente(welt, monkeypatch):
     assert A.TESTLAUF_SEGMENTE_MAX == 40
     assert len(aufrufe[1]["urls"]) == 24 and aufrufe[1]["max_items"] == 48 and erg2["segmente_geprueft"] == 24 and erg2["segmente_gesamt"] == 24
     assert len(erg2["segmente"]) == 24
-    # 42 Segmente -> die ersten 40
+    # 42 Segmente -> Master-Auftrag Phase A: ein Teil-Testlauf kann nie bestehen, deshalb laeuft er gar nicht (kein Budget)
     e3 = {**e2, "ez_years": [2016, 2017, 2018, 2019, 2020, 2021, 2022]}
-    erg3 = welt.run(A.testlauf(e3, n=5))
-    assert erg3["segmente_geprueft"] == 40 and erg3["segmente_gesamt"] == 42 and erg3["segmente_max"] == 40
+    with pytest.raises(A.Ungueltig) as ex3:
+        welt.run(A.testlauf(e3, n=5))
+    assert A.TESTLAUF_UNVOLLSTAENDIG in str(ex3.value) and "42" in str(ex3.value) and len(aufrufe) == 2
+    assert A.testlauf_bestanden({"gueltig_gesamt": 2, "verworfen_gesamt": 0, "sortierung_ungueltig": 0, "segmente_geprueft": 40, "segmente_gesamt": 42}) is False
     # bestanden: nur gueltige Treffer, nichts verworfen -> testlauf_ok_at + Hash
     async def _sauber(urls, max_items, zeitlimit_s=None, actor_name=None, max_items_per_query=None):
         return {"items": [{**_item("q1", 9000, km=20000, ez="03/2019"), "inputContext": urls[0]}], "usd": 0.005, "run_id": "r-ok",
@@ -1920,9 +1930,13 @@ def test_38_karosserie_in_url_validator_und_auftrag():
         A.entwurf_pruefen({**e, "body": "Rakete"})
     assert "Karosserie" in str(ex.value)
     assert list(A.KAROSSERIE) == [""] + list(NORM.KAROSSERIE_CODES)
-    ms = {m["id"]: m for m in KAT.start_modelle()}
+    ms = {m["id"]: m for m in KAT.start_modelle_v3()}          # Altbestand v3 (Master-Auftrag: start_modelle() = Masterliste)
     assert ms["vw-passat-20tdi"]["body"] == "EstateCar" and ms["vw-passat-20tdi-schalt"]["body"] == "EstateCar"
     assert all(m["body"] is None for k, m in ms.items() if not k.startswith("vw-passat"))
+    # Masterliste: Kombi-Zeilen (Golf Variant, Passat Variant, Corolla Touring Sports) tragen EstateCar, alle anderen nichts
+    mm = {m["master_row"]: m for m in KAT.start_modelle()}
+    assert mm[6]["body"] == "EstateCar" and mm[13]["body"] == "EstateCar" and mm[86]["body"] == "EstateCar"
+    assert all(m["body"] is None for nr, m in mm.items() if nr not in (6, 13, 86))
     r = (Path(__file__).resolve().parent.parent / "routes" / "markt_admin.py").read_text(encoding="utf-8")
     assert '"karosserie": list(auftraege.KAROSSERIE)' in r
 
@@ -2841,8 +2855,14 @@ def test_53_konfig_anwenden_und_zwilling(welt, monkeypatch):
         monkeypatch.setattr(A, "aendern", alt_aendern)
         assert mid in erg["ids"] and erg["geaendert"] >= 1
         m = welt.run(db[K.MODELLE].find_one({"id": mid}, {"_id": 0}))
-        # Welle 6 Nr. 124: die Zeilenzahl (10 -> 7) ist materiell -> Fassung 2, ohne neuen Testlauf (Filter gleich)
-        assert m["ez_years"] == [2020, 2021] and m["rows"] == 7 and len(m["km_buckets"]) == 2 and m["version"] == 2 and m["status"] == "active"
+        # Welle 6 Nr. 124: die Zeilenzahl (10 -> 7) ist materiell -> Fassung 2. Master-Auftrag A1c: neue EZ/km
+        # wurden nie per Testlauf geprueft -> der Auftrag wird PAUSIERT (nicht still mit neuen Segmenten weitercrawlen)
+        assert m["ez_years"] == [2020, 2021] and m["rows"] == 7 and len(m["km_buckets"]) == 2 and m["version"] == 2 and m["status"] == "paused"
+        assert mid in erg["pausiert"]
+        assert welt.run(db[K.SEGMENTE].count_documents({"model_id": mid, "enabled": True})) == 0
+        # nach Testlauf fuer die neue Konfiguration: aktivieren -> 4 Segmente der Fassung 2
+        welt.run(db[K.MODELLE].update_one({"id": mid}, {"$set": {"testlauf_ok_at": K.jetzt_iso(), "testlauf_ok_hash": A.filter_hash(m)}}))
+        welt.run(A.status_setzen(db, mid, "active"))
         assert welt.run(db[K.SEGMENTE].count_documents({"model_id": mid, "enabled": True})) == 4
         assert all(x["id"].startswith(f"{mid}:v2:") for x in welt.run(db[K.SEGMENTE].find({"model_id": mid, "enabled": True}, {"_id": 0, "id": 1}).to_list(10)))
         r = (Path(__file__).resolve().parent.parent / "routes" / "markt_admin.py").read_text(encoding="utf-8")
@@ -3756,8 +3776,8 @@ def test_73_testlauf_sortierung_je_segment_und_unzuordenbar(welt, monkeypatch):
     assert erg["segmente"][0]["nachweis"] == "bewiesen" and erg["segmente"][0]["sortiert"] is True
     assert erg["segmente"][1]["nachweis"] == "ungueltig" and "Luecken" in erg["segmente"][1]["nachweis_grund"]
     assert erg["sortierung_ungueltig"] == 1 and erg["bestanden"] is False and erg["testlauf_ok_hash"] is None, "wie im Worker: data_invalid"
-    assert A.testlauf_bestanden({"gueltig_gesamt": 2, "verworfen_gesamt": 0, "sortierung_ungueltig": 0}) is True
-    assert A.testlauf_bestanden({"gueltig_gesamt": 2, "verworfen_gesamt": 0, "sortierung_ungueltig": 1}) is False
+    assert A.testlauf_bestanden({"gueltig_gesamt": 2, "verworfen_gesamt": 0, "sortierung_ungueltig": 0, "segmente_geprueft": 2, "segmente_gesamt": 2}) is True
+    assert A.testlauf_bestanden({"gueltig_gesamt": 2, "verworfen_gesamt": 0, "sortierung_ungueltig": 1, "segmente_geprueft": 2, "segmente_gesamt": 2}) is False
 
 
 def test_74_chancen_nur_private_top3(welt):

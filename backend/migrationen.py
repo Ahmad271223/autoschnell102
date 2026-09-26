@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger("autohandel.migrationen")
 
-ZIEL_VERSION = 17
+ZIEL_VERSION = 18
 _SPERRE = "migration"
 
 
@@ -636,7 +636,9 @@ async def m16_markt_startliste_v2(db) -> dict:
     jetzt = datetime.now(timezone.utc).isoformat()
     z = {"aktualisiert": 0, "neu": 0, "alarme_geschlossen": 0, "segmente": 0}
     geaendert = False
-    for m in katalog.start_modelle():
+    # Master-Auftrag 26.09.2026: die Startliste v3 ist Altbestand (start_modelle_v3) — Migration 16/17
+    # bleiben unveraendert auf ihr; die Masterliste kommt mit Migration 18
+    for m in katalog.start_modelle_v3():
         alt = await db[mk.MODELLE].find_one({"id": m["id"]})
         if not alt:
             await db[mk.MODELLE].insert_one({**m, "created_at": jetzt, "updated_at": jetzt})
@@ -645,7 +647,7 @@ async def m16_markt_startliste_v2(db) -> dict:
             continue
         if alt.get("seed_version"):
             continue
-        setzen = {"seed_version": katalog.SEED_VERSION, "updated_at": jetzt}
+        setzen = {"seed_version": katalog.SEED_VERSION_V3, "updated_at": jetzt}
         if not alt.get("gearbox"):
             setzen["gearbox"] = m["gearbox"]
         km_alt = [{"min_km": int(b.get("min_km") or 0), "max_km": int(b.get("max_km") or 0)} for b in alt.get("km_buckets") or []]
@@ -676,12 +678,12 @@ async def m17_markt_standard_v3(db) -> dict:
     from markt import katalog, konfig as mk, segmente
     jetzt = datetime.now(timezone.utc).isoformat()
     z = {"aktualisiert": 0, "unveraendert": 0, "segmente": 0}
-    seed_ids = {m["id"] for m in katalog.start_modelle()}
+    seed_ids = {m["id"] for m in katalog.start_modelle_v3()}
     geaendert = False
     async for alt in db[mk.MODELLE].find({"id": {"$in": sorted(seed_ids)}}):
-        if int(alt.get("seed_version") or 0) >= katalog.SEED_VERSION:
+        if int(alt.get("seed_version") or 0) >= katalog.SEED_VERSION_V3:
             continue
-        setzen = {"seed_version": katalog.SEED_VERSION, "updated_at": jetzt}
+        setzen = {"seed_version": katalog.SEED_VERSION_V3, "updated_at": jetzt}
         km_alt = [{"min_km": int(b.get("min_km") or 0), "max_km": int(b.get("max_km") or 0)} for b in alt.get("km_buckets") or []]
         if km_alt == mk.KM_BUCKETS_V2 or not km_alt:
             setzen["km_buckets"] = [dict(b) for b in mk.KM_BUCKETS_STANDARD]
@@ -703,6 +705,18 @@ async def m17_markt_standard_v3(db) -> dict:
     if geaendert:
         z["segmente"] = (await segmente.synchronisieren(db)).get("segmente", 0)
     return z
+
+
+async def m18_markt_masterliste_v4(db) -> dict:
+    """Master-Auftrag Ahmad 26.09.2026 (Phase A): Fahrzeug-Masterliste (170 Zeilen, seed_version 4)
+    einspielen. Bestehende Seeds (v1-v3) werden klassifiziert — UNCHANGED (Zuordnung), CHANGED
+    (neue EZ/km/kW/Zeilen als neue Fassung; aktive werden pausiert, weil die neue Konfiguration
+    erst einen Testlauf braucht), DEPRECATED (archiviert, wartende Jobs storniert, Historie bleibt);
+    Masterzeilen ohne Gegenstueck kommen NEU und pausiert dazu — NIE automatisch aktiv.
+    Idempotent (market_models.master_row / master_status); Ergebnis im Log und in
+    market_config/masterliste. Rechnung in markt.masterliste.importieren."""
+    from markt import masterliste
+    return await masterliste.importieren(db)
 
 
 MIGRATIONEN = [
@@ -728,6 +742,8 @@ MIGRATIONEN = [
     (16, "markt_startliste_v2", m16_markt_startliste_v2),
     # Wunsch Ahmad 26.09.2026 abends: 10 Zeilen, EZ 2018-2022, sechs km-Bereiche
     (17, "markt_standard_v3", m17_markt_standard_v3),
+    # Master-Auftrag Ahmad 26.09.2026, Phase A: Masterliste 170 Zeilen
+    (18, "markt_masterliste_v4", m18_markt_masterliste_v4),
 ]
 
 

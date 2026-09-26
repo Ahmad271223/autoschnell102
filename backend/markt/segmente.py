@@ -80,21 +80,14 @@ def km_text(b: Dict[str, Any]) -> str:
     return f"{round(mn / 1000)}–{round(mx / 1000)}k km"
 
 
-async def modelle_einspielen(db, *, nur_fehlende: bool = True) -> Dict[str, int]:
-    """Startliste in market_models — bestehende Eintraege (auch enabled=false
-    des Betreibers) bleiben unangetastet."""
-    neu, vorhanden = 0, 0
-    for m in katalog.start_modelle():
-        alt = await db[konfig.MODELLE].find_one({"id": m["id"]}, {"_id": 1})
-        if alt:
-            vorhanden += 1
-            if nur_fehlende:
-                continue
-            await db[konfig.MODELLE].update_one({"id": m["id"]}, {"$set": {k: v for k, v in m.items() if k != "enabled"}})
-            continue
-        await db[konfig.MODELLE].insert_one({**m, "created_at": konfig.jetzt_iso(), "updated_at": konfig.jetzt_iso()})
-        neu += 1
-    return {"neu": neu, "vorhanden": vorhanden}
+async def modelle_einspielen(db, *, nur_fehlende: bool = True) -> Dict[str, Any]:
+    """Seed in market_models — seit dem Master-Auftrag 26.09.2026 die Masterliste ueber
+    markt.masterliste.importieren (idempotent, klassifiziert den Altbestand, nie automatisch aktiv).
+    Eigene Auftraege des Betreibers bleiben unangetastet. `nur_fehlende` ist nur noch Kompatibilitaet:
+    der Import ueberschreibt nie eigene Werte."""
+    from markt import masterliste
+    z = await masterliste.importieren(db, synchronisieren=False)
+    return {"neu": int(z.get("new") or 0), "vorhanden": int(z.get("schon") or 0) + int(z.get("unchanged") or 0) + int(z.get("changed") or 0), **z}
 
 
 async def km_buckets(db) -> List[Dict[str, Any]]:
@@ -199,9 +192,12 @@ async def _verkaeufer_normalisieren(db, modelle: List[Dict[str, Any]]) -> int:
         if int(m.get("hash_fassung") or 1) >= auftraege.HASH_FASSUNG and not setzen:
             continue
         alt_hash = m.get("definition_hash")
+        alt_filter = m.get("filter_hash")
         setzen.update({"definition_hash": auftraege.definition_hash(m), "filter_hash": auftraege.filter_hash(m),
                        "hash_fassung": auftraege.HASH_FASSUNG})
-        if m.get("testlauf_ok_at") and (not alt_hash or m.get("testlauf_ok_hash") == alt_hash):
+        # Hash-Fassung 3 (EZ/km im filter_hash): ein Testlauf, der fuer die alte Fassung (definition_hash bei
+        # Fassung 1, filter_hash bei Fassung 2) bestanden war, gilt weiter — die Segmente sind dieselben
+        if m.get("testlauf_ok_at") and (not alt_hash or m.get("testlauf_ok_hash") in (alt_hash, alt_filter)):
             setzen["testlauf_ok_hash"] = setzen["filter_hash"]      # der bestandene Testlauf gilt weiter
         await db[konfig.MODELLE].update_one({"id": m["id"]}, {"$set": setzen})
         if alt_hash and alt_hash != setzen["definition_hash"]:

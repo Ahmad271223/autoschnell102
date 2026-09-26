@@ -33,9 +33,13 @@ ROWS_MAX = 100
 FILTER_FELDER = ("make_id", "model_id", "fuel", "gearbox", "body", "power_kw_min", "power_kw_max",
                  "country", "zip", "radius_km", "seller_type")
 DEFINITION_FELDER = FILTER_FELDER + ("rows",)
-# Fassung des Fingerabdrucks (Migration im Sync-Pfad, segmente._hashes_heben): 2 = rows im Hash, Land 'DE'
-# als Vorgabe, Verkaeuferart normalisiert
-HASH_FASSUNG = 2
+# Master-Auftrag 26.09.2026 (Phase A, A1c): der TESTLAUF-Fingerabdruck (filter_hash) enthaelt zusaetzlich
+# EZ-Jahre und km-Bereiche — eine EZ-/km-Aenderung an einem aktiven Auftrag verlangt einen neuen Testlauf
+# (der Testlauf prueft jedes Segment). Die FASSUNG (definition_hash, Versionierung) bleibt davon unberuehrt.
+TESTLAUF_FELDER = FILTER_FELDER + ("ez_years", "km_buckets")
+# Fassung des Fingerabdrucks (Migration im Sync-Pfad, segmente._verkaeufer_normalisieren): 2 = rows im Hash,
+# Land 'DE' als Vorgabe, Verkaeuferart normalisiert; 3 = filter_hash mit EZ-Jahren und km-Bereichen
+HASH_FASSUNG = 3
 
 
 def _fingerabdruck(m: Dict[str, Any], felder: tuple) -> str:
@@ -46,6 +50,11 @@ def _fingerabdruck(m: Dict[str, Any], felder: tuple) -> str:
             werte[k] = (str(w).strip().upper()[:2] if w not in (None, "") else "DE") or "DE"
         elif k == "rows" and w in (None, ""):
             werte[k] = int(konfig.rows_je_segment())         # ohne Angabe gilt die Vorbelegung (wie in synchronisieren)
+        elif k == "ez_years":
+            werte[k] = sorted({int(j) for j in (w or []) if str(j).strip().isdigit()})
+        elif k == "km_buckets":
+            werte[k] = sorted((int(b.get("min_km")), int(b.get("max_km"))) for b in (w or [])
+                              if isinstance(b, dict) and b.get("min_km") is not None and b.get("max_km") is not None)
         elif w in (None, ""):
             werte[k] = None
         elif k in ("power_kw_min", "power_kw_max", "radius_km", "rows"):
@@ -68,9 +77,10 @@ def definition_hash(m: Dict[str, Any]) -> str:
 
 
 def filter_hash(m: Dict[str, Any]) -> str:
-    """Fingerabdruck der FILTER (ohne Zeilenzahl) — dafuer gilt ein bestandener Testlauf (Nr. 65/124):
-    der Testlauf prueft, ob mobile.de die Filter respektiert; die Zeilenzahl aendert daran nichts."""
-    return _fingerabdruck(m, FILTER_FELDER)
+    """Fingerabdruck der FILTER (ohne Zeilenzahl) plus EZ-Jahre und km-Bereiche — dafuer gilt ein
+    bestandener Testlauf (Nr. 65/124, Master-Auftrag A1c): der Testlauf prueft, ob mobile.de die Filter
+    in JEDEM Segment respektiert; die Zeilenzahl aendert daran nichts, neue Segmente schon."""
+    return _fingerabdruck(m, TESTLAUF_FELDER)
 
 
 class Ungueltig(ValueError):
@@ -303,12 +313,18 @@ def _zeile(l: Dict[str, Any], seg: Dict[str, Any], grund: str = "") -> Dict[str,
             "gueltig": not grund, "grund": grund or None}
 
 
+TESTLAUF_UNVOLLSTAENDIG = "Testlauf deckt nicht alle Segmente ab"
+
+
 def testlauf_bestanden(erg: Dict[str, Any]) -> bool:
     """Nr. 65: bestanden = mindestens ein gueltiger Treffer und keine Filterfehler (keine Zeile vom
     Zeilenfilter verworfen). Welle 6 Nr. 79: und in keinem Segment eine ungueltige Sortierung
-    (Positionsnummern mit Luecken — der Worker wuerde den Lauf als 'data_invalid' verwerfen)."""
+    (Positionsnummern mit Luecken — der Worker wuerde den Lauf als 'data_invalid' verwerfen).
+    Master-Auftrag Phase A: und der Lauf hat ALLE Segmente des Auftrags geprueft
+    (segmente_geprueft == segmente_gesamt) — ein Teil-Testlauf ist kein Nachweis."""
+    geprueft, gesamt = int(erg.get("segmente_geprueft") or 0), int(erg.get("segmente_gesamt") or 0)
     return (int(erg.get("gueltig_gesamt") or 0) >= 1 and int(erg.get("verworfen_gesamt") or 0) == 0
-            and int(erg.get("sortierung_ungueltig") or 0) == 0)
+            and int(erg.get("sortierung_ungueltig") or 0) == 0 and geprueft == gesamt and gesamt >= 1)
 
 
 async def testlauf(entwurf: Dict[str, Any], n: int = 5, *, db=None) -> Dict[str, Any]:
@@ -327,6 +343,11 @@ async def testlauf(entwurf: Dict[str, Any], n: int = 5, *, db=None) -> Dict[str,
         for b in m["km_buckets"]:
             alle.append({"id": f"test:{jahr}:{b['min_km']}-{b['max_km']}", "min_km": b["min_km"], "max_km": b["max_km"],
                          "year_from": jahr, "year_to": jahr, "label": f"EZ {jahr} · {segmente.km_text(b)}"})
+    if len(alle) > TESTLAUF_SEGMENTE_MAX:
+        # Master-Auftrag Phase A: ein Testlauf, der nicht alle Segmente prueft, kann nie bestehen — deshalb
+        # gar nicht erst laufen (kostet Budget); Masterliste 4 EZ x 6 km = 24 passt
+        raise Ungueltig(f"{TESTLAUF_UNVOLLSTAENDIG} ({len(alle)} Segmente, hoechstens {TESTLAUF_SEGMENTE_MAX}) — "
+                        f"weniger EZ-Jahre oder km-Bereiche waehlen oder den Auftrag teilen")
     segs = alle[:TESTLAUF_SEGMENTE_MAX]
     urls = [url.such_url(s, m) for s in segs]
     n_anzeige = max(1, min(int(n), 10))
@@ -414,17 +435,17 @@ async def testlauf(entwurf: Dict[str, Any], n: int = 5, *, db=None) -> Dict[str,
 
 
 def _testlauf_pruefen(m: Dict[str, Any], e: Dict[str, Any], alt: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Nr. 65: fuer den aktuellen definition_hash muss ein bestandener Testlauf vorliegen — aus dem
-    Formular (testlauf_ok_at + testlauf_ok_hash) oder schon am Auftrag gespeichert. Startlisten-Seed
-    (seed_version) ist ausgenommen. Liefert die zu speichernden Felder."""
+    """Nr. 65: fuer den aktuellen filter_hash (Filter + EZ-Jahre + km-Bereiche) muss ein bestandener
+    Testlauf vorliegen — aus dem Formular (testlauf_ok_at + testlauf_ok_hash) oder schon am Auftrag
+    gespeichert. Master-Auftrag Phase A: KEINE Ausnahme mehr fuer Seeds (Startliste/Masterliste) — auch
+    Masterlisten-Auftraege brauchen einen bestandenen Testlauf. Liefert die zu speichernden Felder."""
     h = filter_hash(m)          # Nr. 124: die Zeilenzahl braucht keinen neuen Testlauf
     quellen = [e, alt or {}]
     for q in quellen:
         if q.get("testlauf_ok_at") and str(q.get("testlauf_ok_hash") or "") == h:
             return {"testlauf_ok_at": str(q["testlauf_ok_at"]), "testlauf_ok_hash": h}
-    if (alt or {}).get("seed_version"):          # nur der gespeicherte Seed-Vermerk, nie aus dem Formular
-        return {}
-    raise Ungueltig("erst Testlauf — Aktivieren geht nur nach einem bestandenen Testlauf fuer diese Konfiguration (mindestens ein Treffer, keine Filterfehler)")
+    raise Ungueltig("erst Testlauf — Aktivieren geht nur nach einem bestandenen Testlauf fuer diese Konfiguration "
+                    "(alle Segmente geprueft, mindestens ein Treffer, keine Filterfehler)")
 
 
 async def _semantisches_duplikat(db, m: Dict[str, Any], *, ohne_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -501,6 +522,7 @@ async def aendern(db, model_id: str, entwurf: Dict[str, Any]) -> Dict[str, Any]:
     m = entwurf_pruefen({**alt, **entwurf}, bestehend=alt)
     # Nr. 124: ein Fingerabdruck einer aelteren Hash-Fassung (ohne Zeilenzahl) ist nicht vergleichbar -> neu rechnen
     alt_hash = (alt.get("definition_hash") if int(alt.get("hash_fassung") or 1) >= HASH_FASSUNG else None) or definition_hash(alt)
+    alt_filter = (alt.get("filter_hash") if int(alt.get("hash_fassung") or 1) >= HASH_FASSUNG else None) or filter_hash(alt)
     neu_hash = definition_hash(m)
     version = segmente.modell_version(alt)
     testlauf_felder: Dict[str, Any] = {k: entwurf[k] for k in ("testlauf_ok_at", "testlauf_ok_hash") if entwurf.get(k)}
@@ -511,7 +533,9 @@ async def aendern(db, model_id: str, entwurf: Dict[str, Any]) -> Dict[str, Any]:
             raise Ungueltig(f"Ein gleicher Suchauftrag besteht schon: „{zwilling.get('label') or zwilling['id']}“ ({zwilling['id']})")
         if m["status"] == "active":
             testlauf_felder = _testlauf_pruefen(m, entwurf, alt)
-    elif m["status"] == "active" and alt.get("status") != "active":
+    elif m["status"] == "active" and (alt.get("status") != "active" or filter_hash(m) != alt_filter):
+        # Master-Auftrag A1c: auch eine EZ-/km-Aenderung an einem aktiven Auftrag (Fassung bleibt) braucht
+        # einen neuen Testlauf — die neuen Segmente wurden noch nie geprueft
         testlauf_felder = _testlauf_pruefen(m, entwurf, alt)
     # Nr. 130: Compare-and-set auf den gelesenen Stand (updated_at + version) — zwei Admins, die denselben
     # Auftrag gleichzeitig bearbeiten, ueberschreiben sich nicht mehr still; der zweite bekommt 409
@@ -527,19 +551,28 @@ async def aendern(db, model_id: str, entwurf: Dict[str, Any]) -> Dict[str, Any]:
 
 async def konfig_anwenden(db, *, km_buckets: List[Dict[str, Any]], ez_years: List[int], rows: int) -> Dict[str, Any]:
     """Oberflaeche (Welle 5): 'Auf alle aktiven Auftraege anwenden' — die zentralen Vorbelegungen
-    (km-Bereiche, EZ-Jahre, Zeilen) auf jeden aktiven Auftrag ueber aendern() uebertragen (nicht
-    materiell: Fassung bleibt, alte Segmente werden deaktiviert, Historie bleibt)."""
-    geaendert, fehler = [], []
-    async for m in db[MODELLE].find({"status": "active"}, {"_id": 0, "id": 1}):
+    (km-Bereiche, EZ-Jahre, Zeilen) auf jeden aktiven Auftrag ueber aendern() uebertragen (alte
+    Segmente werden deaktiviert, Historie bleibt).
+    Master-Auftrag A1c: neue EZ-Jahre/km-Bereiche wurden noch nie per Testlauf geprueft — ein Auftrag,
+    dessen Segmente sich dadurch aendern, wird PAUSIERT (Liste 'pausiert'); der Admin macht den Testlauf
+    und aktiviert wieder. Bleiben die Segmente gleich (nur Zeilen), bleibt er aktiv."""
+    geaendert, fehler, pausiert = [], [], []
+    async for m in db[MODELLE].find({"status": "active"}, {"_id": 0}):
+        neu = {"km_buckets": [dict(b) for b in km_buckets], "ez_years": list(ez_years), "rows": int(rows)}
         try:
-            await aendern(db, m["id"], {"km_buckets": [dict(b) for b in km_buckets], "ez_years": list(ez_years), "rows": int(rows)})
+            if filter_hash({**m, **neu}) != (m.get("filter_hash") if int(m.get("hash_fassung") or 1) >= HASH_FASSUNG else filter_hash(m)):
+                neu["status"] = "paused"
+                pausiert.append(m["id"])
+            await aendern(db, m["id"], neu)
             geaendert.append(m["id"])
         except Ungueltig as ex:
             fehler.append({"id": m["id"], "fehler": str(ex)})
-    return {"geaendert": len(geaendert), "ids": geaendert, "fehler": fehler}
+    return {"geaendert": len(geaendert), "ids": geaendert, "fehler": fehler, "pausiert": pausiert}
 
 
-async def status_setzen(db, model_id: str, status: str) -> Dict[str, Any]:
+async def status_setzen(db, model_id: str, status: str, *, sync: bool = True) -> Dict[str, Any]:
+    """Status setzen (aktiv/pausiert/archiviert). sync=False (Sammel-Testlauf der Masterliste): die Segmente
+    werden NICHT sofort abgeglichen — der Aufrufer ruft segmente.synchronisieren einmal am Ende."""
     if status not in STATUS:
         raise Ungueltig("Status unbekannt")
     alt = await db[MODELLE].find_one({"id": model_id}, {"_id": 0})
@@ -548,12 +581,14 @@ async def status_setzen(db, model_id: str, status: str) -> Dict[str, Any]:
     if status == "active" and not alt.get("model_id"):
         raise Ungueltig("Modell hat keine mobile.de-ID — kann nicht beobachtet werden")
     if status == "active":
-        # Nr. 65: Aktivieren nur mit bestandenem Testlauf fuer die aktuelle Definition (Seed ausgenommen)
+        # Nr. 65: Aktivieren nur mit bestandenem Testlauf fuer die aktuelle Konfiguration — Master-Auftrag
+        # Phase A: auch fuer Seeds/Masterlisten-Auftraege (keine Ausnahme mehr)
         _testlauf_pruefen({**alt, "status": "active"}, {}, alt)
     await db[MODELLE].update_one({"id": model_id}, {"$set": {"status": status, "enabled": status == "active",
                                                             "updated_at": konfig.jetzt_iso(),
                                                             **({"archived_at": konfig.jetzt_iso()} if status == "archived" else {})}})
-    await segmente.synchronisieren(db)
+    if sync:
+        await segmente.synchronisieren(db)
     if status != "active":
         # wartende Jobs des Modells abbrechen — nichts loeschen, Historie bleibt
         grund = f"Suchauftrag {'pausiert' if status == 'paused' else 'archiviert'}"
@@ -573,7 +608,8 @@ async def duplizieren(db, model_id: str, aenderungen: Optional[Dict[str, Any]] =
         raise Ungueltig("Modell nicht gefunden")
     entwurf = {k: v for k, v in alt.items() if k not in ("id", "created_at", "updated_at", "archived_at", "grund",
                                                           "version", "definition_hash", "filter_hash", "hash_fassung",
-                                                          "testlauf_ok_at", "testlauf_ok_hash", "seed_version")}
+                                                          "testlauf_ok_at", "testlauf_ok_hash", "seed_version",
+                                                          "master_row", "master_status", "needs_review", "review_grund")}
     entwurf.update(aenderungen or {})
     entwurf["status"] = "paused"
     if not (aenderungen or {}).get("label"):

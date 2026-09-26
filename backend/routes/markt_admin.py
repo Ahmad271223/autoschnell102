@@ -143,8 +143,15 @@ async def admin_market_katalog(marke: Optional[str] = None, _=Depends(current_ad
 
 
 @router.get("/admin/market/auftraege")
-async def admin_market_auftraege(archiv: bool = False, _=Depends(current_admin)):
-    return {"auftraege": await abfrage.modelle_uebersicht(db, mit_archiv=archiv), "prognose": await abfrage_prognose(None, None)}
+async def admin_market_auftraege(archiv: bool = False, needs_review: bool = False, _=Depends(current_admin)):
+    """Liste der Suchauftraege (+ Prognose). needs_review=true: nur Masterlisten-Zeilen mit Pruefbedarf."""
+    from markt import masterliste
+    liste = await abfrage.modelle_uebersicht(db, mit_archiv=archiv)
+    if needs_review:
+        liste = [m for m in liste if m.get("needs_review")]
+    stand = await konfig.merker_lesen(db, masterliste.MASTER_DOK)
+    return {"auftraege": liste, "prognose": await abfrage_prognose(None, None), "masterliste": stand or None,
+            "testlauf_alle": await masterliste.testlauf_alle_status(db)}
 
 
 async def abfrage_prognose(entwurf, ohne_id):
@@ -291,10 +298,52 @@ async def admin_market_crawler(body: CrawlerSchalterIn, admin=Depends(current_su
 
 @router.post("/admin/market/sync")
 async def admin_market_sync(admin=Depends(current_super_admin)):
-    """Startliste einspielen (fehlende Modelle) und Segmente aufbauen."""
+    """Masterliste einspielen (idempotent, nie automatisch aktiv) und Segmente aufbauen."""
     m = await segmente.modelle_einspielen(db)
     s = await segmente.synchronisieren(db)
     return {"ok": True, "modelle": m, "segmente": s, "takt": await jobs.intervall(db)}
+
+
+@router.post("/admin/market/masterliste/importieren")
+async def admin_market_masterliste_importieren(admin=Depends(current_super_admin)):
+    """Master-Auftrag Phase A: die Fahrzeug-Masterliste (170 Zeilen) einspielen bzw. nachziehen — ruft
+    dieselbe Migrationsfunktion wie Migration 18 (idempotent; Altbestand klassifiziert UNCHANGED/CHANGED/
+    NEW/DEPRECATED; nichts wird automatisch aktiv, Aktivieren erst nach Testlauf)."""
+    from markt import masterliste
+    z = await masterliste.importieren(db)
+    await log_activity_sicher("", admin["id"], "admin.markt.masterliste.import", meta={k: v for k, v in z.items() if isinstance(v, (int, float))})
+    return {"ok": True, **z, "takt": await jobs.intervall(db)}
+
+
+class TestlaufAlleIn(BaseModel):
+    aktivieren: bool = True
+    mit_review: bool = False
+
+
+_SAMMEL_TASKS: set = set()
+
+
+@router.post("/admin/market/masterliste/testlauf-alle")
+async def admin_market_testlauf_alle(body: TestlaufAlleIn, admin=Depends(current_super_admin)):
+    """Master-Auftrag Phase A: Sammel-Testlauf — jeder pausierte Masterlisten-Auftrag bekommt EINEN Testlauf ueber
+    alle seine Segmente (gegen das Marktbudget); bestandene werden mit aktivieren=true aktiviert. Zeilen 'zu pruefen'
+    nur mit mit_review=true. Laeuft im Hintergrund (Stand in GET /admin/market/auftraege -> testlauf_alle); ein
+    zweiter Start waehrend eines Laufs -> 409."""
+    import asyncio
+    from markt import masterliste
+    if not konfig.token():
+        raise HTTPException(400, "APIFY_TOKEN fehlt")
+    try:
+        lauf_id = await masterliste.testlauf_alle_beanspruchen(db, aktivieren=body.aktivieren, mit_review=body.mit_review, wer=admin["id"])
+    except masterliste.LaeuftSchon as ex:
+        raise HTTPException(409, str(ex))
+    task = asyncio.get_running_loop().create_task(
+        masterliste.testlauf_alle_ausfuehren(db, lauf_id, aktivieren=body.aktivieren, mit_review=body.mit_review))
+    _SAMMEL_TASKS.add(task)
+    task.add_done_callback(_SAMMEL_TASKS.discard)
+    await log_activity_sicher("", admin["id"], "admin.markt.masterliste.testlauf_alle",
+                              meta={"aktivieren": body.aktivieren, "mit_review": body.mit_review})
+    return {"ok": True, "lauf_id": lauf_id, **(await masterliste.testlauf_alle_status(db))}
 
 
 @router.post("/admin/market/plan")

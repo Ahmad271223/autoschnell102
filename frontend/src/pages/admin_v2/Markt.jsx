@@ -125,8 +125,9 @@ export default function Markt() {
               {status.aktiv ? <><Pause size={14} /> Crawler ausschalten</> : <><Play size={14} /> Crawler einschalten</>}
             </Button>
             <Button size="sm" variant="outline" disabled={!!busy} data-testid="markt-sync"
-                    onClick={() => aktion("sync", () => api.post("/admin/market/sync"), (d) => `Modelle: ${d.modelle?.neu ?? 0} neu · Segmente: ${d.segmente?.segmente ?? 0}`)}>
-              Startliste & Segmente aufbauen
+                    onClick={() => aktion("sync", () => api.post("/admin/market/sync"), (d) => `Modelle: ${d.modelle?.neu ?? 0} neu · Segmente: ${d.segmente?.segmente ?? 0}`)}
+                    title="Masterliste (170 Zeilen, pausiert) einspielen und Segmente der aktiven Aufträge aufbauen">
+              Masterliste & Segmente aufbauen
             </Button>
             <Button size="sm" variant="outline" disabled={!!busy || !status.token_vorhanden} data-testid="markt-plan"
                     onClick={() => aktion("plan", () => api.post("/admin/market/plan"), (d) => `${d.neu} Jobs für ${d.tag} geplant`)}>
@@ -160,7 +161,7 @@ export default function Markt() {
         <div className="px-4 py-3 text-[13px] text-zinc-400" style={{ borderBottom: "1px solid var(--wa-08)" }}>
           <BarChart3 size={14} className="inline mr-1" /> {modelle.length} Modelle · Kennzahlen = nur die günstigsten je Segment (Zeilen je Suchauftrag, untere Marktpreisspanne), kein Marktmedian
         </div>
-        {modelle.length === 0 ? <EmptyState title="Noch keine Modelle" hint="„Startliste & Segmente aufbauen“ spielt die 52 Startmodelle ein — oder unter Suchaufträge eigene anlegen." /> : (
+        {modelle.length === 0 ? <EmptyState title="Noch keine Modelle" hint="„Masterliste & Segmente aufbauen“ spielt die 170 Masterlisten-Zeilen pausiert ein — oder unter Suchaufträge eigene anlegen." /> : (
           <div className="overflow-x-auto">
             <table className="w-full text-[13px] min-w-[860px]">
               <thead>

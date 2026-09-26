@@ -26,7 +26,18 @@ vi.mock("@/lib/api", () => ({
         { id: "vw-polo-10tsi", label: "VW Polo 1.0 TSI", make: "Volkswagen", model: "Polo", variant: "1.0 TSI", fuel: "PETROL", seller_type: "PRIVATE", model_id: "27", ez_years: [2020], km_buckets: [{ min_km: 0, max_km: 50000 }],
           rows: 20, crawls_per_day: 1, status: "paused", prognose: { segmente: 1 }, monatsverbrauch_usd: 0, definition_hash: "d-polo", filter_hash: "h-polo", testlauf_ok_hash: "h-polo", testlauf_ok_at: "2026-10-01T05:00:00Z" },
         { id: "opel-astra-ohne", label: "Opel Astra 1.2", make: "Opel", model: "Astra", variant: "1.2 Turbo", fuel: "PETROL", seller_type: "FSBO", model_id: "9", ez_years: [2020], km_buckets: [{ min_km: 0, max_km: 50000 }],
-          rows: 20, crawls_per_day: 1, status: "paused", prognose: { segmente: 1 }, monatsverbrauch_usd: 0, definition_hash: "d-astra", filter_hash: "h-astra", testlauf_ok_hash: "h-alt" }],
+          rows: 20, crawls_per_day: 1, status: "paused", prognose: { segmente: 1 }, monatsverbrauch_usd: 0, definition_hash: "d-astra", filter_hash: "h-astra", testlauf_ok_hash: "h-alt" },
+        // Master-Auftrag Phase A: Masterlisten-Zeile (Seed v4) — ohne Testlauf NICHT aktivierbar (Seed-Ausnahme entfernt), Klassifikation + Pruefbedarf sichtbar
+        { id: "ford-kuga-1-5-ecoboost-auto-neu", label: "Ford Kuga 1.5 EcoBoost Automatik", make: "Ford", model: "Kuga", variant: "1.5 EcoBoost", fuel: "PETROL", gearbox: "AUTOMATIC_GEAR", model_id: "49",
+          seed_version: 4, master_row: 81, master_status: "NEW", needs_review: true, review_grund: "Kuga ab 2020: 1.5 EcoBoost nur mit Schaltgetriebe", km_profile: "K2",
+          ez_years: [2020, 2021, 2022, 2023], km_buckets: [{ min_km: 20000, max_km: 40000 }], rows: 5, crawls_per_day: 1, status: "paused", prognose: { segmente: 4 }, monatsverbrauch_usd: 0,
+          definition_hash: "d-kuga", filter_hash: "h-kuga",
+          testlauf_letzter: { at: "2026-09-26T21:00:00Z", bestanden: false, grund: "2 Zeile(n) verworfen: kw 150 > 115", gueltig: 3, leer: 1 } }],
+        masterliste: { stand: "2026-09-26T20:00:00Z", seed_version: 4, zaehler: { new: 121, changed: 49, unchanged: 0, deprecated: 23, needs_review: 18 } },
+        // Sammel-Testlauf: letzter Stand (beendet) + was ein neuer Lauf pruefen wuerde
+        testlauf_alle: { gestartet_at: "2026-09-26T21:00:00Z", beendet_at: "2026-09-26T21:40:00Z", laeuft: false, gesamt: 150, fertig: 150, bestanden: 140,
+                         nicht_bestanden: 10, aktiviert: 140, kosten_usd: 5.9, abbruch: null, fehler: [{ id: "x", label: "Ford Kuga", grund: "kein einziger gültiger Treffer" }],
+                         kandidaten: 12, kandidaten_review: 18, kosten_schaetzung_usd: 0.47 },
         // Nr. 141: Warnung gegen das verbleibende Budget (Restkosten vs. frei), nicht nur gegen das Monatsbudget
         prognose: { aktive_modelle: 1, segmente: 8, rows_tag: 320, rows_monat: 9728, budget_usd: 700, kosten_monat_usd: 8.6, verbraucht_usd: 690, verbleibend_usd: 10,
                     rest_tage: 5, restkosten_usd: 12.5, ueberschritten: true, ueberschritten_monat: false,
@@ -115,6 +126,31 @@ describe("Suchaufträge", () => {
     const bestaetigen = vi.spyOn(window, "confirm").mockReturnValue(true);
     await klick("auftrag-archivieren-bmw-320d");
     expect(netz.posts[2].body).toEqual({ status: "archived" });
+    // Master-Auftrag Phase A: Seed v4 ohne Testlauf ist NICHT aktivierbar; Masterstatus, Pruefbedarf, Profil und Stand sichtbar
+    const kuga = el("auftrag-ford-kuga-1-5-ecoboost-auto-neu");
+    expect(el("auftrag-aktivieren-ford-kuga-1-5-ecoboost-auto-neu").disabled).toBe(true);
+    expect(el("auftrag-master-ford-kuga-1-5-ecoboost-auto-neu").textContent).toContain("Master: neu");
+    expect(el("auftrag-master-ford-kuga-1-5-ecoboost-auto-neu").textContent).toContain("zu prüfen");
+    expect(el("auftrag-review-ford-kuga-1-5-ecoboost-auto-neu").textContent).toContain("nur mit Schaltgetriebe");
+    expect(el("auftrag-profil-ford-kuga-1-5-ecoboost-auto-neu").textContent).toBe("Profil K2:");
+    expect(kuga.textContent).toContain("Master-Zeile 81");
+    expect(el("auftraege-masterliste-stand").textContent).toContain("Masterliste v4");
+    expect(el("auftraege-masterliste-stand").textContent).toContain("18 zu prüfen");
+    // Filter "nur zu pruefen" -> Liste wird mit needs_review=true nachgeladen; Import-Knopf -> POST masterliste/importieren nach Rueckfrage
+    const { api } = await import("@/lib/api");
+    await klick("auftraege-needs-review");
+    expect(api.get.mock.calls.some(([u, c]) => u === "/admin/market/auftraege" && c?.params?.needs_review === true)).toBe(true);
+    await klick("auftraege-masterliste");
+    expect(netz.posts.some((p) => p.url === "/admin/market/masterliste/importieren")).toBe(true);
+    // Sammel-Testlauf: Stand sichtbar, Ergebnis je Auftrag, Knopf -> Rueckfrage mit Anzahl/Kosten -> POST (aktivieren, ohne "zu pruefen")
+    expect(el("auftraege-sammel-stand").textContent).toContain("150 von 150 geprüft");
+    expect(el("auftraege-sammel-stand").textContent).toContain("140 aktiviert");
+    expect(el("auftrag-testlauf-ford-kuga-1-5-ecoboost-auto-neu").textContent).toContain("nicht bestanden — 2 Zeile(n) verworfen: kw 150 > 115");
+    bestaetigen.mockClear();
+    await klick("auftraege-testlauf-alle");
+    expect(bestaetigen.mock.calls[0][0]).toContain("12 pausierte Masterlisten-Aufträge");
+    expect(bestaetigen.mock.calls[0][0]).toContain("0.47 $");
+    expect(netz.posts.find((p) => p.url === "/admin/market/masterliste/testlauf-alle").body).toEqual({ aktivieren: true, mit_review: false });
     bestaetigen.mockRestore();
   });
 

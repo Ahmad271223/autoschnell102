@@ -1,9 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Startbestand der Marktanalysen (Auftrag v3, 26.09.2026: 52 Modelle) — NUR
-ein Seed. Die Wahrheit ist market_models; der Super-Admin legt im Admin
-(Marktanalyse -> Suchauftraege) beliebige weitere Marktanalysen an, mit
-eigenen EZ-Jahren, km-Bereichen, Zeilen und Frequenz. Nichts davon ist
-im Code verdrahtet.
+"""Startbestand der Marktanalysen — NUR ein Seed. Die Wahrheit ist market_models;
+der Super-Admin legt im Admin (Marktanalyse -> Suchauftraege) beliebige weitere
+Marktanalysen an, mit eigenen EZ-Jahren, km-Bereichen, Zeilen und Frequenz.
+Nichts davon ist im Code verdrahtet.
+
+Master-Auftrag 26.09.2026 (Phase A): der Seed ist jetzt die Fahrzeug-Masterliste
+(markt.masterliste, 170 Zeilen, seed_version 4) — start_modelle() liefert SIE.
+Die alte STARTLISTE (v3, 72 Eintraege) bleibt als Altbestand fuer die Klassifikation
+der Migration (start_modelle_v3) und fuer die aelteren Migrationen 16/17; sie wird
+nicht mehr eingespielt.
 
 Probelaeufe 26.09.2026: mobile.de filtert Freitext-Varianten ("320d") NICHT
 zuverlaessig — eine Variante wird ueber Modell-ID + Kraftstoff (+ kW-Bereich)
@@ -147,7 +152,8 @@ def modell_ids(marke: str, modell: str, katalog: Optional[List[dict]] = None) ->
     return None
 
 
-SEED_VERSION = 3      # v5 (26.09.2026 abends, Ahmad): EZ 2018-2022, sechs km-Bereiche 10-190k, 10 Zeilen
+SEED_VERSION_V3 = 3      # v5 (26.09.2026 abends, Ahmad): EZ 2018-2022, sechs km-Bereiche 10-190k, 10 Zeilen
+SEED_VERSION = 4         # Masterliste (26.09.2026, Master-Auftrag): 170 Zeilen, km-Profile, 5 Zeilen, 1 Abruf/Tag
 
 
 def seed_label(marke: str, modell: str, variante: str, getriebe: Optional[str] = None) -> str:
@@ -156,10 +162,10 @@ def seed_label(marke: str, modell: str, variante: str, getriebe: Optional[str] =
     return (basis.strip() + (f" {text}" if text else "")).strip()
 
 
-def start_modelle() -> List[Dict[str, Any]]:
-    """Die Startliste mit aufgeloesten IDs — fertig fuer market_models.
-    EZ-Jahre, km-Bereiche, Zeilen und Frequenz kommen aus den zentralen
-    Standardwerten (markt.konfig) und sind je Modell im Admin aenderbar."""
+def start_modelle_v3() -> List[Dict[str, Any]]:
+    """ALTBESTAND: die Startliste v3 (72 Eintraege) mit aufgeloesten IDs — nur noch fuer die
+    Klassifikation der Masterlisten-Migration und die aelteren Migrationen 16/17.
+    EZ-Jahre, km-Bereiche, Zeilen und Frequenz kommen aus den zentralen Standardwerten."""
     from markt import konfig
     kat = _katalog()
     raus = []
@@ -170,7 +176,7 @@ def start_modelle() -> List[Dict[str, Any]]:
         # ("Passat Variant" -> Kombi). Codes wie im Vergleich (mobile_service.CATEGORY_LABELS).
         body = "EstateCar" if "variant" in modell.lower() else None
         raus.append({"id": mid, "make": marke, "model": modell, "variant": variante, "fuel": fuel, "gearbox": getriebe, "body": body,
-                     "power_kw_min": kw_von, "power_kw_max": kw_bis, "priority": prio, "label": label, "seed_version": SEED_VERSION,
+                     "power_kw_min": kw_von, "power_kw_max": kw_bis, "priority": prio, "label": label, "seed_version": SEED_VERSION_V3,
                      "enabled": bool(ids), "status": "active" if ids else "paused",
                      "make_id": (ids or {}).get("make_id"), "model_id": (ids or {}).get("model_id"),
                      "ez_years": [b["year_from"] for b in konfig.EZ_BUCKETS_STANDARD],
@@ -178,3 +184,11 @@ def start_modelle() -> List[Dict[str, Any]]:
                      "rows": konfig.rows_je_segment(), "crawls_per_day": konfig.crawls_je_tag_standard(),
                      "grund": "" if ids else "Modell im mobile.de-Katalog nicht gefunden"})
     return raus
+
+
+def start_modelle() -> List[Dict[str, Any]]:
+    """Der Seed = die Masterliste (Master-Auftrag 26.09.2026): 170 Zeilen, seed_version 4,
+    status 'paused' (nie automatisch aktiv — Aktivieren erst nach bestandenem Testlauf).
+    Eingespielt wird sie nur ueber markt.masterliste.importieren (klassifiziert Altbestand)."""
+    from markt import masterliste
+    return masterliste.master_modelle()
