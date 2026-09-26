@@ -3738,3 +3738,34 @@ die im Lauf zu den 3 günstigsten Privatangeboten ihres Segments gehören** (die
 — auch stark reduzierte auf Platz 4/5 — sind keine Chance mehr. Die Chance trägt `privat_rang` (1–3); der Leseweg zeigt ältere
 Chancen ohne Privat-Rang nicht mehr (sie bleiben in der Datenbank). Kein Deploy-Schritt nötig. Achtung beim späteren
 Einschalten von `MARKT_CHANCEN_AKTIV`: die Firmen sähen dann Privatangebote (ohne Namen/Telefon/Koordinaten, nur PLZ/Ort).
+
+**Master-Auftrag Marktanalyse Phase A–C (Ahmad 26.09.2026; Commits 2285a5c (A), 7ebe935 (B/C)):**
+- **Phase A — Masterliste (Migration 18 `markt_masterliste_v4`):** 170 Suchaufträge (119 neu / 51 alt) exakt nach Ahmads
+  Liste, km-Profile K1/K2/D1/D2/D3/E (je 6 Bereiche ab 20.000 km), Getriebe nie „alle“ (DSG/S tronic/DCT/EAT8/EDC/
+  Powershift/S-CVT/XTronic/9G-TRONIC = Automatik), 5 Zeilen, 1 Abruf/Tag, **alle pausiert**. 18 Zeilen „zu prüfen“
+  (needs_review, Grund am Auftrag). Der Altbestand (Startliste v3) wird eingeordnet: **49 geändert** (neue Fassung,
+  **pausiert**, Historie bleibt), **23 entfallen** (archiviert, wartende Jobs storniert, Historie bleibt), **121 neu**.
+  Eigene Aufträge bleiben unangetastet. Stand: `market_config/masterliste`.
+- **Aktivieren nur nach bestandenem Testlauf über ALLE Segmente** — auch für die Masterliste (keine Seed-Ausnahme mehr).
+  EZ- oder km-Änderung an einem aktiven Auftrag braucht einen neuen Testlauf (Hash-Fassung 3: `filter_hash` enthält
+  EZ-Jahre und km-Bereiche). „Auf alle anwenden“ pausiert Aufträge, deren Segmente sich ändern.
+- **Sammel-Testlauf:** Admin → Marktanalyse → Suchaufträge → **„Testlauf für alle“** prüft alle pausierten
+  Masterlisten-Aufträge ohne „zu prüfen“ (je Auftrag ein Lauf über alle 24 Segmente, ≈ 0,04 $, zusammen ≈ 6 $ aus dem
+  Marktbudget) und **aktiviert die bestandenen**. Läuft im Hintergrund (ca. 1–2 h), Stand auf der Seite; zwei Server
+  sicher (Lauf-Merker mit Lease). Nicht bestandene bleiben pausiert, Grund steht am Auftrag.
+- **Phase B (ALL_KM gestrichen):** nur die 6 km-Segmente je EZ; Kostenfelder getrennt (`crawl_cost_exact_km_*`,
+  `crawl_cost_entfernung_usd`, `reporting_cost_* = 0`). Architekturtest: Auswertungen (abfrage, speicher) lösen nie
+  einen Abruf aus.
+- **Phase C — Tagesbasis (Migration 19 `markt_tagesbasis`):** Tagesdokument je Segment/Tag mit Fassung, gültigen/
+  ungültigen/leeren Läufen, Zeilen des Hauptlaufs, aus der Stichprobe gefallenen Inseraten, Preiserhöhungen,
+  Top-3/Top-5-Wechsel, Privat/Händler, Crawl-Kosten. **Datenqualität** (GOOD/MEDIUM/POOR/UNKNOWN: Fremdfahrzeuge,
+  Parserfehler, Top-N-Nachweis, Frische 48 h) **getrennt von der Markttiefe** (FULL/NORMAL/THIN/EMPTY) und der
+  **Vollständigkeit** (UNKNOWN ohne verlässliche Gesamtzahl — die geratenen Feldnamen sind raus). `datenlage` bleibt als
+  Ableitung (fehler/veraltet/dünn/leer/…). Trend-, Chancen- und Private-Deals-Basis nur GOOD/MEDIUM. Ungültige Läufe
+  zählen im Tagesdokument, sind aber keine Marktlücke. Scraper-Feldnamen je Build werden einmal protokolliert
+  (`market_config/actor_meta_<actor>`, nur Namen + Typen, keine Werte; `GET /admin/market/actor-meta`).
+- **Nach dem Deploy (einmal):** Suchaufträge öffnen → „Testlauf für alle“ → abwarten → bestandene laufen ab dem nächsten
+  Tagesplan. **Bis dahin crawlt die Marktanalyse nichts** (alle Masterlisten-Aufträge pausiert).
+- **Kosten (nur Abrufe):** 4.068 Segmente × 1/Tag, 5 Zeilen + Puffer 2 = 7 abgerufen ≈ **668 $/Monat** (+ 9 $
+  Entfernungsprüfung); mit Puffer 1 ≈ 581 $, ohne Puffer ≈ 495 $. Bei 500 $ Budget drosselt der Tagesplan automatisch
+  (≈ 74 % der Segmente je Tag). Berichte/Auswertungen: 0 $.

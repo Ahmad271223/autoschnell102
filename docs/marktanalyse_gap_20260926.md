@@ -31,22 +31,23 @@ Hot Deals, Segment Health, Optimierung in Stufen). Nur Lesung, Zeilenangaben Sta
 | A15 | idempotent/lock-sicher | VOLLSTÄNDIG (Bestand) | Claims, Leases, Segment-Sperre, Merker |
 | A16 | Module/Sammlungen | FEHLT | reporting/health/deals/optimierung existieren nicht |
 
-## Kosten Masterliste (170 Modelle, Ø 3,5 EZ × 6 km-Segmente, 5 Zeilen, 1×/Tag) — NUR Crawls
+## Kosten Masterliste (170 Modelle, 4.068 Segmente, 5 Zeilen, 1×/Tag) — NUR Crawls
 
-| | 3 EZ | 3,5 EZ | 4 EZ |
-|---|---|---|---|
-| Segmente | 3.060 | 3.570 | 4.080 |
-| $/Monat mit Puffer +2 (7 Zeilen) | 502 | 586 | 670 |
-| $/Monat mit Puffer +1 (6 Zeilen) | 437 | 510 | 583 |
-| $/Monat ohne Puffer (5 Zeilen) | 373 | 435 | 497 |
+Nachgerechnet mit der eingebauten Masterliste (fast alle Zeilen haben 4 EZ-Jahre; Aygo X 3):
 
-Dazu Entfernungsprüfung ≈ 9 $/Monat. **Berichte (5/15/Monat), Diagramme, Trends, Hot Deals = 0 Crawls** (nur DB/Rechenarbeit).
-DB-Wachstum ≈ 18 MB/Tag.
+| Abgerufene Zeilen je Segment | $/Tag | $/Monat |
+|---|---|---|
+| 7 (5 + Puffer 2, heutige Einstellung) | 21,97 | 668 |
+| 6 (Puffer 1) | 19,12 | 581 |
+| 5 (ohne Puffer) | 16,27 | 495 |
+
+Dazu Entfernungsprüfung ≈ 9 $/Monat. Sammel-Testlauf einmalig ≈ 6 $. **Berichte (5/15/Monat), Diagramme, Trends,
+Hot Deals = 0 Crawls** (nur DB/Rechenarbeit). Bei 500 $ Budget plant der Tagesplan automatisch ≈ 74 % der Segmente je Tag.
 
 ## Phasen
 
-A Masterliste/Katalog + Migration 18 (needs_review, DEPRECATED = archived) → B (entfällt: ALL_KM gestrichen; nur Architekturtest „Auswertung löst nie Crawls aus“)
-→ C Tagesbasis + data_quality/market_depth/sample_completeness (Migration 20, Actor-Key-Protokoll)
+A Masterliste/Katalog + Migration 18 (needs_review, DEPRECATED = archived) — ERLEDIGT 2285a5c → B (ALL_KM gestrichen; Kostenfelder + Architekturtest) — ERLEDIGT 7ebe935
+→ C Tagesbasis + data_quality/market_depth/sample_completeness (Migration 19, Actor-Key-Protokoll) — ERLEDIGT 7ebe935
 → D Hot Deals (markt/deals.py, market_hot_deals) → E Reporting (markt/reporting.py, market_model_reports)
 → F Health + Proposals OBSERVE (markt/health.py, optimierung.py) → G SAFE_AUTO.
 
