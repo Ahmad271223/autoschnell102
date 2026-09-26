@@ -143,8 +143,13 @@ def hintergrund_abwarten(welt, K):
     """Review 26.09.2026 (Nr. 26): "Neu berechnen" rechnet im Hintergrund —
     die Tests warten die Aufgaben ab, bevor sie das Ergebnis lesen."""
     async def _warten():
+        import asyncio as _a
+        loop = _a.get_running_loop()
         for t in list(K._laufende):
-            await t
+            if t.get_loop() is loop:          # Aufgaben fremder (geschlossener) Loops nie abwarten
+                await t
+            else:
+                K._laufende.discard(t)
     welt.run(_warten())
 
 
@@ -533,7 +538,11 @@ def test_11_ki_freischaltung_je_konto(welt, monkeypatch):
             "severity_data": {"groesse": "2–5 cm", "lack": "nein", "lage": "Fläche"}}]
     erg = welt.run(DP.bewerten(user=w.chef, vehicle_doc=vehicle_doc, damages=dmg, kaufpreis=8000.0, warten=True))
     assert erg["status"] == "freischaltung" and erg.get("vorschau")
-    # Admin schaltet frei (nur Super-Admin; deaktiviertes Konto nicht)
+    # Admin schaltet frei (nur Super-Admin; deaktiviertes Konto nicht).
+    # routes.admin haelt ein eigenes `db` (from deps import db) — an den Loop
+    # DIESER Welt binden, sonst "Event loop is closed", wenn vorher ein anderes
+    # Testmodul mit eigener Welt lief (Reihenfolge-Abhaengigkeit, 26.09.2026).
+    monkeypatch.setattr(A, "db", db, raising=False)
     with pytest.raises(HTTPException) as ex:
         welt.run(A.admin_set_sucher_ki(f"gibtsnicht_{w.s}", A.KiFreischaltenIn(aktiv=True), admin=SA))
     assert ex.value.status_code == 404

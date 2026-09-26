@@ -719,13 +719,26 @@ def bewertung_anstossen(protocol_id: str, dealer_id: str) -> None:
         # (Die Freischaltung prueft bewertung_ausfuehren selbst — hier kein
         # await moeglich, der Aufrufer ist eine laufende Anfrage.)
         aufgabe = loop.create_task(bewertung_ausfuehren(protocol_id, dealer_id))
-        _laufende.add(aufgabe)
-        aufgabe.add_done_callback(_laufende.discard)
+        _laufende_merken(aufgabe)
     except Exception:  # noqa: BLE001
         log.exception("KI-Bewertung fuer %s nicht gestartet", protocol_id)
 
 
 _laufende: set = set()
+
+
+def _laufende_merken(aufgabe) -> None:
+    """Hintergrundlauf merken (fuer Tests/Abwarten). Aufgaben eines inzwischen
+    geschlossenen Loops (Tests bauen je Modul einen neuen) fliegen dabei raus,
+    sonst haengt ein spaeteres Abwarten an einem fremden Loop."""
+    for alt in list(_laufende):
+        try:
+            if alt.done() or alt.get_loop().is_closed():
+                _laufende.discard(alt)
+        except Exception:  # noqa: BLE001
+            _laufende.discard(alt)
+    _laufende.add(aufgabe)
+    aufgabe.add_done_callback(_laufende.discard)
 
 
 async def bewertung_starten(protocol_id: str, dealer_id: str) -> Optional[dict]:
@@ -746,8 +759,7 @@ async def bewertung_starten(protocol_id: str, dealer_id: str) -> Optional[dict]:
     try:
         aufgabe = asyncio.get_running_loop().create_task(
             bewertung_ausfuehren(protocol_id, dealer_id, erzwingen=True))
-        _laufende.add(aufgabe)
-        aufgabe.add_done_callback(_laufende.discard)
+        _laufende_merken(aufgabe)
     except Exception:  # noqa: BLE001
         log.exception("KI-Bewertung fuer %s nicht gestartet", protocol_id)
         return {"status": "fehler", "grund": "Bewertung konnte nicht gestartet werden", "protocol_id": protocol_id,

@@ -3591,3 +3591,22 @@ er ist nur noch die Vorgabe, solange der Knopf nie gedrückt wurde.
   „Schlüssel vereinbart“ blockiert nicht — soll er? (3) Chef-Oberfläche für strukturierte Rückfragen (Optionen/Freitext)
   fehlt noch, es gibt nur „Zurück an den Fahrer“ mit Notiz; (4) Inseratsbilder/-mängel für den Fahrer sichtbar lassen?
 
+**Reparaturwelle Review 26.09.2026 (Freigabe-Schnappschuss, DSGVO/KI-Daten, Indizes — Nr. 136–147; Commit 2e26861):**
+- Nr. 136/137: **Freigabe-Schnappschuss v2** (`freigabe_schnappschuss`, gespeichert als `v2:<sha256>`): Soll-Werte Abschnitt 1,
+  Kaufpreis und Preis vor Abholung, alle bekannten Schäden (Vertrag + Inserat), Inserats-Mängel, Ausstattung,
+  Dokumentpflichten (COC/Servicebuch/Reifensatz/Ladekabel-Herleitung), Servicebuch/Reifen/HU-Rohfelder, Schlüsselanzahl,
+  Sondervereinbarung und Abholdaten des Vertrags. Ändert sich davon etwas nach der Freigabe → Abschluss 409 „Vertrag
+  geändert“, neu freigeben. Alte Freigaben ohne `v2:`-Präfix werden nach dem alten Verfahren geprüft (kein Zwang zur
+  Neufreigabe beim Rollout). Terminänderungen (Datum/Ort am Termin) machen die Freigabe NICHT hinfällig.
+- Nr. 138/139: PII-Bereinigung der Protokolle leert jetzt auch Rückfrage, Antworten, Verlauf und Freitext-Notizen der
+  Schäden; die Nachsuche nach Rest-PII prüft diese Felder; zugehörige `ki_bewertungen` verlieren ihre Rohdaten.
+- Nr. 140/147: **Retention** — Aufräumschritt `ki_bewertungen_retention`: nach `KI_BEWERTUNG_ROHDATEN_TAGE` (90) Eingabe,
+  Rohantwort, Recherchetext/Quellen entfernt (Ergebnis, Status, Kosten, Hashes bleiben); nach `KI_BEWERTUNG_TAGE` (730)
+  gelöscht, außer ein Lernfall hängt daran. Lernfälle speichern keine Fahrer-Freitexte und keine FIN mehr.
+- Nr. 141–145: `ki_bewertungen`, `ki_lernfaelle` in der Firmen-Löschkaskade und Löschvorschau; `ki_budget` (Schlüssel
+  `<art>:<firma|konto>:<JJJJ-MM>`) wird mit der Firma gelöscht, Zähler älter als 3 Monate rotieren (`ki_budget_rotieren`);
+  Sucher-Löschung pseudonymisiert `user_id` in KI-Bewertungen/Lernfällen und löscht die persönlichen Zähler.
+  `ki_reparaturpreise` bleibt systemweit (keine Firmen-/Nutzerkennung, kein Freitext).
+- Nr. 146: `ki_indizes` legt jeden Index einzeln an (Unique hart mit `FEHLENDE_UNIQUE`, Lese-Indizes mit Warnung/Alarm).
+- Neue Umgebungsvariablen (docker-compose.yml, .env.example): `KI_BEWERTUNG_ROHDATEN_TAGE=90`, `KI_BEWERTUNG_TAGE=730`.
+
