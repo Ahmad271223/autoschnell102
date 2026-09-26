@@ -4032,9 +4032,11 @@ async def admin_ki_marktdaten(admin=Depends(current_super_admin)):
     """Stufe 5 (26.09.2026): Markttabelle jetzt neu recherchieren (Websuche,
     ADAC/Smart-Repair) — sonst laeuft das automatisch alle KI_MARKTDATEN_TAGE."""
     from ai import marktdaten
-    erg = await marktdaten.aktualisieren(erzwingen=True)
-    return {k: erg.get(k) for k in ("status", "grund", "stand", "aktualisiert", "positionen", "quellen",
-                                   "zusammenfassung", "suchen", "dauer_ms", "alter_tage") if k in erg}
+    # Befund 26.09.2026 abends: 3-4 Minuten synchron -> 504 am Load Balancer. Jetzt im
+    # Hintergrund; die Betriebsseite fragt GET /admin/ki nach (marktdaten.laeuft).
+    erg = await marktdaten.aktualisieren_im_hintergrund()
+    await log_activity_sicher("", admin["id"], "admin.ki.marktdaten", meta=erg)
+    return erg
 
 
 @router.post("/admin/betrieb/testmail")

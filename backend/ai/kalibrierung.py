@@ -257,6 +257,7 @@ async def _marktdaten_kurz() -> Dict[str, Any]:
         return {"aktiv": marktdaten.aktiv(), "je_fall_abholung": marktdaten.je_fall("abholung"),
                 "je_fall_vertrag": marktdaten.je_fall("vertrag"), "tage": marktdaten.tage(),
                 "stand": (doc or {}).get("stand"), "status": (doc or {}).get("status"),
+                "laeuft": marktdaten.laeuft(doc), "lauf_seit": (doc or {}).get("lauf_seit"),
                 "grund": (doc or {}).get("grund") or "", "alter_tage": marktdaten.alter_tage(doc),
                 "positionen": len((doc or {}).get("positionen") or []),
                 "quellen": [q.get("titel") or q.get("url") for q in ((doc or {}).get("quellen") or [])[:8]],

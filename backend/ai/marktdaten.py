@@ -213,6 +213,70 @@ def frisch(doc: Optional[dict]) -> bool:
 
 
 # ------------------------------------------------ Markttabelle
+LAUF_MAX_MINUTEN = 10           # laenger laeuft kein Tabellen-Lauf; danach gilt der Merker als verwaist
+
+
+async def lauf_markieren(db=None) -> bool:
+    """Merker "Lauf laeuft seit" in der DB (beide Server sehen ihn). False, wenn ein
+    frischer Merker steht (dann laeuft schon jemand). Atomar per Filter."""
+    db = db if db is not None else _db
+    grenze = (datetime.now(timezone.utc) - timedelta(minutes=LAUF_MAX_MINUTEN)).isoformat()
+    jetzt = now_iso()
+    r = await db[SAMMLUNG].update_one(
+        {"_id": DOK_ID, "$or": [{"lauf_seit": {"$exists": False}}, {"lauf_seit": None}, {"lauf_seit": {"$lt": grenze}}]},
+        {"$set": {"lauf_seit": jetzt}})
+    if r.matched_count:
+        return True
+    if not await db[SAMMLUNG].find_one({"_id": DOK_ID}, {"_id": 1}):
+        await db[SAMMLUNG].update_one({"_id": DOK_ID}, {"$setOnInsert": {"lauf_seit": jetzt}}, upsert=True)
+        return True
+    return False
+
+
+async def lauf_beenden(db=None) -> None:
+    db = db if db is not None else _db
+    try:
+        await db[SAMMLUNG].update_one({"_id": DOK_ID}, {"$unset": {"lauf_seit": ""}})
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def laeuft(doc: Optional[dict]) -> bool:
+    seit = (doc or {}).get("lauf_seit")
+    if not seit:
+        return False
+    try:
+        t = datetime.fromisoformat(str(seit).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return (datetime.now(timezone.utc) - t) < timedelta(minutes=LAUF_MAX_MINUTEN)
+
+
+async def aktualisieren_im_hintergrund(db=None) -> dict:
+    """Befund 26.09.2026 abends: der Knopf "Marktdaten jetzt" lief 3-4 Minuten im
+    HTTP-Request und der Load Balancer brach nach ~60 s ab (504). Jetzt: Merker setzen,
+    Lauf als Task starten, sofort antworten; der Stand kommt ueber GET /admin/ki."""
+    import asyncio
+    db = db if db is not None else _db
+    if not await lauf_markieren(db):
+        return {"status": "laeuft", "gestartet": False}
+
+    async def _lauf():
+        try:
+            await aktualisieren(db, erzwingen=True)
+        except Exception:  # noqa: BLE001
+            log.exception("Markttabelle: Hintergrundlauf gescheitert")
+        finally:
+            await lauf_beenden(db)
+    aufgabe = asyncio.get_running_loop().create_task(_lauf())
+    _HINTERGRUND.add(aufgabe)
+    aufgabe.add_done_callback(_HINTERGRUND.discard)
+    return {"status": "gestartet", "gestartet": True}
+
+
+_HINTERGRUND: set = set()
+
+
 async def aktuell(db=None) -> Optional[dict]:
     db = db if db is not None else _db
     try:

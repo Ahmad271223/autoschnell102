@@ -224,7 +224,7 @@ function SegmentAnalyse({ segment, bereich, onBereich, superAdmin }) {
         {reihe.length === 0 ? <div className="text-[12px] text-zinc-500">Noch keine Tagesdaten im gewählten Zeitraum.</div> : (
           <>
             <div style={{ height: 280 }}>
-              <ResponsiveContainer width="100%" height="100%">
+              <ResponsiveContainer width="100%" height="100%" minWidth={0} initialDimension={{ width: 320, height: 200 }}>
                 <ComposedChart data={reihe} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
                   <CartesianGrid stroke="rgba(255,255,255,.06)" vertical={false} />
                   <XAxis dataKey="tag" tick={{ fill: "#a1a1aa", fontSize: 11 }} />
@@ -240,7 +240,7 @@ function SegmentAnalyse({ segment, bereich, onBereich, superAdmin }) {
             <div className="mt-2 text-[11px] text-zinc-500">Grün Billigstes · Rot Median · Gelb Durchschnitt · Blau p25–p75. Fällt nur das Billigste, war es oft ein einzelnes Inserat; fallen alle drei, bewegt sich das ganze günstige Segment.</div>
             <div className="mt-4 text-[13px] font-semibold text-white">Tagesveränderung des Medians</div>
             <div style={{ height: 120 }}>
-              <ResponsiveContainer width="100%" height="100%">
+              <ResponsiveContainer width="100%" height="100%" minWidth={0} initialDimension={{ width: 320, height: 200 }}>
                 <BarChart data={reihe} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
                   <XAxis dataKey="tag" tick={{ fill: "#a1a1aa", fontSize: 10 }} />
                   <YAxis tick={{ fill: "#a1a1aa", fontSize: 10 }} tickFormatter={(v) => `${v}%`} width={40} />

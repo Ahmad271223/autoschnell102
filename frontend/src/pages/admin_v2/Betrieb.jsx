@@ -294,18 +294,29 @@ function KiKarte() {
   const laden = () => api.get("/admin/ki").then((r) => setKi(r.data))
     .catch((e) => setFehler(errMsg(e, "KI-Zahlen nicht ladbar")));
   useEffect(() => { laden(); }, []);
-  // Stufe 5 (26.09.2026): Markttabelle jetzt neu recherchieren (Websuche, 1-2 Minuten)
+  // Stufe 5 (26.09.2026): Markttabelle neu recherchieren. Befund 26.09. abends: der Lauf dauert
+  // 3-4 Minuten, der Load Balancer brach den Request nach ~60 s ab (504) — jetzt startet der
+  // Server den Lauf im Hintergrund, die Seite fragt alle 15 s nach, bis er fertig ist.
   const marktAktualisieren = async () => {
     if (marktLaeuft) return;
     setMarktLaeuft(true);
     try {
       const r = await api.post("/admin/ki/marktdaten");
-      if (r.data?.status === "ok") {
-        toast.success(`Marktdaten aktualisiert: ${(r.data.positionen || []).length} Positionen, ${r.data.suchen ?? 0} Suchen`);
-      } else {
-        toast.error(`Marktdaten nicht aktualisiert: ${r.data?.grund || r.data?.status || "unbekannt"}`, { duration: 12000 });
+      toast.info(r.data?.status === "laeuft" ? "Die Recherche läuft bereits — bitte warten (3–4 Minuten)."
+                                              : "Recherche gestartet — dauert 3 bis 4 Minuten, die Seite lädt den Stand nach.", { duration: 8000 });
+      const start = Date.now();
+      // Nachladen, bis der Lauf-Merker weg ist (hoechstens 10 Minuten)
+      for (;;) {
+        await new Promise((res) => setTimeout(res, 15000));
+        const s = await api.get("/admin/ki");
+        setKi(s.data);
+        const m = s.data?.marktdaten || {};
+        if (!m.laeuft || Date.now() - start > 10 * 60 * 1000) {
+          if (m.status === "ok") toast.success(`Marktdaten aktualisiert: ${m.positionen ?? 0} Positionen (Stand ${m.stand ? new Date(m.stand).toLocaleString("de-DE") : "—"})`);
+          else toast.error(`Marktdaten nicht aktualisiert: ${m.grund || m.status || "unbekannt"}`, { duration: 12000 });
+          break;
+        }
       }
-      await laden();
     } catch (e) { toast.error(errMsg(e, "Marktdaten nicht aktualisiert")); }
     finally { setMarktLaeuft(false); }
   };
@@ -372,9 +383,9 @@ function KiKarte() {
                   <div className="text-[12px] text-zinc-500">Quellen: {md.quellen.join(", ")}</div>
                 )}
               </div>
-              <Button size="sm" variant="outline" onClick={marktAktualisieren} disabled={marktLaeuft || !md.aktiv}
+              <Button size="sm" variant="outline" onClick={marktAktualisieren} disabled={marktLaeuft || md.laeuft || !md.aktiv}
                       data-testid="ki-marktdaten-aktualisieren">
-                <RefreshCw size={14} className={marktLaeuft ? "animate-spin" : ""} /> {marktLaeuft ? "Recherchiert…" : "Marktdaten jetzt"}
+                <RefreshCw size={14} className={marktLaeuft ? "animate-spin" : ""} /> {(marktLaeuft || md.laeuft) ? "Recherchiert… (3–4 Min.)" : "Marktdaten jetzt"}
               </Button>
             </div>
           )}

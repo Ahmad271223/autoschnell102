@@ -6,7 +6,9 @@ Geprueft: Markttabelle (drei Gruppen, Umwandlung, Ablage, Frische,
 Aufraeumschritt), Prompt-Zusatz, Recherche je Fall mit Datenblock ->
 ki_reparaturpreise, eigene Referenzen ersetzen die Suche, Sparmodus,
 Kosten der Websuche, Betriebsseite."""
+import asyncio
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -266,8 +268,19 @@ def test_05_kosten_betriebsseite_und_aufraeumschritt(welt, monkeypatch):
     A = _module("routes.admin")
     erg = welt.run(A.admin_ki(admin={"id": "x"}))
     assert "marktdaten" in erg and "je_fall_abholung" in erg["marktdaten"] and "eigene_preise" in erg
+    # Befund 26.09. abends: der Knopf startet den Lauf im Hintergrund (504 am Load Balancer vorher)
+    monkeypatch.setattr(A, "db", welt.db, raising=False)
     erg = welt.run(A.admin_ki_marktdaten(admin={"id": "x"}))
-    assert erg["status"] == "ok" and erg["aktualisiert"] is True
+    assert erg["status"] == "gestartet" and erg["gestartet"] is True
+
+    MDX = _module("ai.marktdaten")
+
+    async def _abwarten():
+        for t_ in list(MDX._HINTERGRUND):
+            await t_
+    welt.run(_abwarten())
+    doc = welt.run(welt.db.ki_marktdaten.find_one({"_id": "aktuell"}))
+    assert doc["status"] == "ok" and not doc.get("lauf_seit"), "Lauf fertig, Merker weg"
     _tabelle_weg(welt)
     quelle = Path(__file__).resolve().parents[1].joinpath("cleanup_service.py").read_text(encoding="utf-8")
     assert 'await s("ki_marktdaten"' in quelle
@@ -277,3 +290,47 @@ def test_05_kosten_betriebsseite_und_aufraeumschritt(welt, monkeypatch):
     assert "ebay.de" in P.GESPERRTE_DOMAINS and "kleinanzeigen.de" in P.GESPERRTE_DOMAINS
     assert P.KI_MAX_TOKENS <= 3000 and P.ki_denken_aus() is True, "kurze Antwort ohne Denk-Tokens = Kostenbremse"
     assert "haiku" in P.ki_recherche_modell()
+
+
+def test_01c_marktdaten_knopf_laeuft_im_hintergrund(welt, monkeypatch):
+    """Befund Ahmad 26.09.2026 abends: POST /admin/ki/marktdaten lief 3-4 Minuten im Request
+    -> 504 am Load Balancer. Jetzt: Merker lauf_seit in der DB (beide Server sehen ihn),
+    Lauf als Task, sofortige Antwort; zweiter Klick waehrend des Laufs -> "laeuft";
+    nach dem Lauf ist der Merker weg; ein verwaister Merker (> 10 min) blockiert nicht."""
+    MD = _markt_attrappen(monkeypatch)
+    db = welt.db
+    welt.run(asyncio.gather(*list(MD._HINTERGRUND)))     # Reste frueherer Tests abwarten
+    _tabelle_weg(welt)
+    laeufe = []
+
+    async def _aktualisieren(db_, erzwingen=False):
+        laeufe.append(erzwingen)
+        await asyncio.sleep(0.8)          # laenger als die DB-Zugriffe des zweiten Aufrufs
+        return {"status": "ok"}
+    monkeypatch.setattr(MD, "aktualisieren", _aktualisieren)
+
+    async def _ablauf():
+        erg1 = await MD.aktualisieren_im_hintergrund(db)
+        erg2 = await MD.aktualisieren_im_hintergrund(db)      # waehrend des Laufs
+        doc = await db.ki_marktdaten.find_one({"_id": "aktuell"})
+        assert MD.laeuft(doc), "Merker steht waehrend des Laufs"
+        for t_ in list(MD._HINTERGRUND):
+            await t_
+        doc2 = await db.ki_marktdaten.find_one({"_id": "aktuell"})
+        return erg1, erg2, doc2
+    erg1, erg2, doc2 = welt.run(_ablauf())
+    assert erg1 == {"status": "gestartet", "gestartet": True} and erg2 == {"status": "laeuft", "gestartet": False}
+    assert laeufe == [True] and not MD.laeuft(doc2) and not (doc2 or {}).get("lauf_seit")
+    # verwaister Merker (z. B. Prozess abgestuerzt) blockiert nach LAUF_MAX_MINUTEN nicht mehr
+    alt = (datetime.now(timezone.utc) - timedelta(minutes=MD.LAUF_MAX_MINUTEN + 1)).isoformat()
+    welt.run(db.ki_marktdaten.update_one({"_id": "aktuell"}, {"$set": {"lauf_seit": alt}}, upsert=True))
+    assert not MD.laeuft(welt.run(db.ki_marktdaten.find_one({"_id": "aktuell"})))
+    erg3 = welt.run(MD.aktualisieren_im_hintergrund(db))
+    assert erg3["gestartet"] is True
+    welt.run(asyncio.gather(*list(MD._HINTERGRUND)))
+    # Kurzstand fuer die Betriebsseite kennt den Merker
+    KAL = _module("ai.kalibrierung")
+    kurz = welt.run(KAL._marktdaten_kurz())
+    assert "laeuft" in kurz and kurz["laeuft"] is False
+    _tabelle_weg(welt)
+
