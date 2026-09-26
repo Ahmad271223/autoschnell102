@@ -3490,3 +3490,40 @@ Nach dem Rollout: Marktanalyse öffnen, Modelle prüfen (72, viele „…Schaltu
 Taktung/Kosten in der Kachel lesen, dann „Crawler einschalten“. Der Schalter aus der `.env` (`MARKT_AKTIV`) kann bleiben,
 er ist nur noch die Vorgabe, solange der Knopf nie gedrückt wurde.
 
+**Reparaturwelle Review 26.09.2026 (Markt, Nr. 1–3, 10–18, 23, 24, 39, 40; Commits f3d7d11 + 83e496e):**
+- Nr. 1/23/24: die Entfernungsprüfung ignoriert den Unfallfilter (beschädigt ≠ offline); `beschaedigt()` versteht
+  `hasDamage: 1` und Verneinungen („not damaged“, „unfallfrei“).
+- Nr. 2: **Zeilenfilter** — jede gelieferte Zeile wird gegen Segment und Suchauftrag geprüft (EZ-Jahr, km, kW ±3,
+  Kraftstoff, Getriebe; Halbautomatik zählt zur Automatik; fehlt eine Angabe, wird nicht verworfen). Verworfene Zeilen
+  stehen am Job (`verworfen_filter`, `gelieferte_rows`); > 50 % verworfen bei ≥ 3 Zeilen → Betriebsalarm
+  `markt_filter_ignoriert` (mobile.de hat den Filter ignoriert). Kosten rechnen weiter mit gelieferten Zeilen.
+- Nr. 3: unsichere Sortierung → keine Chancen, `sortierung_unsicher` in der Segmentstatistik, Datenlage „unsicher“,
+  Hinweis in der Marktdaten-Karte.
+- Nr. 10/11: Budget reserviert das **Maximum aus Standard- und Ersatz-Scraper** (Ersatz läuft je URL einzeln);
+  Taktung zeigt `ersatz_kosten_je_tag_usd`.
+- Nr. 12/13: Lease = max(900 s, (1 + Bündel) × Zeitlimit + 120 s), Heartbeat vor dem Lauf, Abschluss nur, wenn dieser
+  Worker den Job noch hält (sonst Log-Warnung, nichts überschrieben).
+- Nr. 14/15: Inserate tragen `segment_ids`/`model_ids`; „nicht mehr im Sample“ nur, wenn heute in keinem Segment gesehen.
+- Nr. 16/17: bei 2 Abrufen je Tag bleiben beide erhalten (`laeufe` am Schnappschuss und an der Tagesstatistik,
+  Hauptwerte = letzter Lauf; keine Index-Änderung). Nr. 18: zweiter Abruf bewusst ~12 h nach dem ersten (Kommentar).
+- Nr. 39: **Testlauf prüft alle Segmente** des Entwurfs (max. 20, 2 Treffer je Segment in einem Lauf) und zeigt je
+  Segment Treffer/EZ/km. Nr. 40: zentrale km-Bereiche dürfen sich nicht überschneiden.
+
+**Reparaturwelle Review 26.09.2026 (KI, Nr. 4–9, 19–22, 25–38; Commit f9dc37c):**
+- Nr. 4/5/34/35: KI-Ergebnisse werden nur wiederverwendet, wenn Prompt-Fassung und Modell gleich sind und das Ergebnis
+  höchstens `KI_CACHE_TAGE` (Standard 7, docker-compose.yml) alt ist; sonst neuer Lauf („veraltet“).
+- Nr. 6/92–94: `schemas.positionen_abgleichen` — doppelte `source_id` → erste bleibt, fremde → verworfen, fehlende → Status
+  „fehler“ mit Klartext („KI hat Position … nicht bewertet — bitte erneut starten“); Gesamtsumme nur aus geprüften Positionen.
+- Nr. 7: Lernfall nur, wenn Fahrzeug (und Konto) der Bewertung zum Vertrag passen. Nr. 8/9: KI-Schadennachlass und
+  Marktdaten-Karte nur für das eigene Konto bzw. Fahrzeuge im eigenen Bereich (`fahrzeug_bereich`).
+- Nr. 19/20: eigene Reparaturpreise in Stufen (Marke+Modell+Alter → Marke+Alter → Marke → alle), erst ≥ 5 Werte aus
+  ≥ 2 Quellen ersetzen die Websuche; 120 Tage. Nr. 21: bis 12 Positionen recherchiert, teuerste zuerst.
+- Nr. 22: KI-Budget hat eine Wahrheit (Zähler `ki_budget`), stündlicher Abgleich `ki_budget` im Aufräumlauf holt
+  verwaiste Reservierungen zurück.
+- Nr. 25/27: Abhol-KI mit atomarem Claim (kein Doppellauf, auch nicht bei „Neu berechnen“ während eines Laufs).
+- Nr. 26: „Neu berechnen“ startet im Hintergrund und antwortet sofort „läuft“; die Karte lädt alle 3 s nach.
+- Nr. 28–33: interner Marktvergleich der KI — keine Preis-Deduplizierung, Modell-Matching auf ganzes Modell („C 220 d“
+  trifft nicht „C 180“), Getriebe- und Leistungsfilter, nur Daten ≤ 120 Tage; **Vorrang der Marktbeobachtung**
+  (Market Intelligence) — der grobe Vergleich ist nur noch Ersatz, die KI bekommt eine Marktzahl mit Quellenangabe.
+- Nr. 36–38: Kalibrierung je Art (Abholung/Vertrag), Faktor auf 0,6–1,2 begrenzt und als Orientierung formuliert.
+
