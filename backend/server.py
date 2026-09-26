@@ -1922,6 +1922,16 @@ async def on_start():
     except Exception as exc:
         log.warning("markt worker start failed: %s", exc)
         WORKER_STATUS["markt"] = {"laeuft": False, "neustarts": 0, "letzter_fehler": str(exc)[:300]}
+    # Master-Auftrag Marktanalyse Phase D/E (27.09.2026): Auswertung aus gespeicherten Tageswerten (Hot Deals,
+    # Berichte) — eigener Hintergrundjob, laeuft auch bei ausgeschaltetem Crawler, loest nie einen Abruf aus.
+    # Bewusst OHNE WORKER_TAKT_S: eine langsame Auswertung darf die Instanz nie aus dem Lastverteiler nehmen;
+    # die Schleife faengt jeden Fehler selbst und meldet ihn als Betriebsalarm (markt_auswertung_fehler).
+    try:
+        from markt import auswertung as markt_auswertung
+        _worker_starten("markt_auswertung", lambda: markt_auswertung.worker_forever(db, erfolg=lambda: worker_erfolg("markt_auswertung")))
+    except Exception as exc:
+        log.warning("markt auswertung worker start failed: %s", exc)
+        WORKER_STATUS["markt_auswertung"] = {"laeuft": False, "neustarts": 0, "letzter_fehler": str(exc)[:300]}
     # Cleanup-Loop für Assets nach Abholung (7d) bzw. Nicht-Abholung (14d).
     try:
         _worker_starten("aufraeumen", lambda: run_cleanup_forever(db))

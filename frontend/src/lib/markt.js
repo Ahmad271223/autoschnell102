@@ -158,3 +158,39 @@ export const PRIVATE_SORTIERUNGEN = [
   ["abstand_pct", "größter Abstand zum Segment-Median"], ["neueste", "neueste in der Top-3"], ["preis", "Preis aufsteigend"],
   ["reduzierung", "stärkste Reduzierung"], ["standzeit", "längste Standzeit bei mobile.de"],
 ];
+
+/** Master-Auftrag Phase D (27.09.2026): Hot-Deal-Klassen nach Vorteil gegenüber dem historischen
+ *  Low-Market-Median desselben Segments (DEAL 5–8 %, STRONG 8–12 %, EXTREME ab 12 %). */
+export const HOTDEAL_KLASSE = {
+  EXTREME: { text: "Extrem", tone: "green" },
+  STRONG: { text: "Stark", tone: "blue" },
+  DEAL: { text: "Deal", tone: "yellow" },
+};
+export const HOTDEAL_EREIGNIS = {
+  NEW_HOT_DEAL: "neu im Sample und gleich ein Hot Deal",
+  BECAME_HOT_DEAL: "wurde zum Hot Deal",
+  STILL_HOT: "weiterhin Hot Deal",
+  PRICE_DROP_HOT_DEAL: "Preis gesenkt (weiter Hot Deal)",
+  LEFT_HOT_ZONE: "nicht mehr in der Hot-Deal-Zone",
+  REMOVED: "Inserat nicht mehr online",
+};
+export const HOTDEAL_STATUS = { ACTIVE: "aktiv", LEFT: "verlassen", REMOVED: "entfernt" };
+export const HOTDEAL_GRUND = {
+  ueber_schwelle: "Preis/Referenz — nicht mehr günstig genug",
+  nicht_mehr_im_sample: "nicht mehr unter den günstigsten (kein Verkauf!)",
+  inserat_entfernt: "Inserat nicht mehr online",
+};
+export const HOTDEAL_SORTIERUNGEN = [
+  ["vorteil_pct", "größter Vorteil in %"], ["vorteil_eur", "größter Vorteil in €"], ["neueste", "neueste"], ["privat", "privat zuerst"],
+  ["modell", "Modell"], ["ez", "EZ (neueste zuerst)"], ["km", "km aufsteigend"], ["liquiditaet", "Liquidität"], ["klasse", "Deal-Klasse"],
+];
+/** Liquidität (Abschnitt 56): aus Umschlag und Top-5-Wechsel, nicht nur aus der Anzahl. */
+export const LIQUIDITAET = {
+  HIGH: { text: "hoch", farbe: "var(--st-gruen)" },
+  MEDIUM: { text: "mittel", farbe: "var(--st-amber)" },
+  LOW: { text: "niedrig", farbe: "var(--st-rot)" },
+  UNKNOWN: { text: "unbekannt", farbe: "var(--text-dim)" },
+};
+export function liquiditaetText(stufe) {
+  return (LIQUIDITAET[stufe] || LIQUIDITAET.UNKNOWN).text;
+}

@@ -1043,7 +1043,11 @@ async def markt_indizes(db) -> dict:
             ("market_opportunities", [("listing_id", 1), ("typ", 1), ("date", 1), ("segment_id", 1)], "markt_chance_je_tag"),
             # Private Deals (Ahmad 26.09.2026 abends): ein Dokument je Segment+Listing — Unique, aber NICHT kritisch
             # (fehlt er, laeuft der Crawler weiter; die Ableitung wiederholt einen Upsert-Konflikt einmal)
-            ("market_private_deals", [("segment_id", 1), ("listing_id", 1)], "markt_privat_je_segment")):
+            ("market_private_deals", [("segment_id", 1), ("listing_id", 1)], "markt_privat_je_segment"),
+            # Master-Auftrag Phase D (27.09.2026): Hot Deals — ein Zustand je Segment+Inserat, Ereignisse einmalig je
+            # (Segment, Inserat, Lauf, Typ). Unique, aber NICHT kritisch fuer den Crawler (die Auswertung ist Beiwerk)
+            ("market_hot_deals", [("segment_id", 1), ("listing_id", 1)], "markt_hotdeal_je_segment"),
+            ("market_hot_deal_events", [("segment_id", 1), ("listing_id", 1), ("lauf_key", 1), ("typ", 1)], "markt_hotdeal_ereignis")):
         try:
             ok = await unique_anlegen(db[sammlung], schluessel, name=name, weich=True)
         except Exception as exc:  # noqa: BLE001
@@ -1051,7 +1055,7 @@ async def markt_indizes(db) -> dict:
             ok = False
         if not ok:
             fehler.append(f"{sammlung}.{name}")
-    for sammlung, schluessel, name in (
+    for eintrag in (
             ("market_segments", [("model_id", 1), ("enabled", 1)], "markt_segment_modell"),
             ("market_segments", [("enabled", 1), ("last_planned_tag", 1)], "markt_segment_planung"),
             ("market_listings", [("last_segment_id", 1), ("active_state", 1)], "markt_listing_segment_zustand"),
@@ -1072,10 +1076,21 @@ async def markt_indizes(db) -> dict:
             # Private Deals (Ahmad 26.09.2026 abends): Leseindizes der Liste (aktuell + Abstand) und je Modell — NICHT kritisch
             ("market_private_deals", [("currently_top3", 1), ("difference_to_segment_median_pct", 1)], "markt_privat_aktuell_abstand"),
             ("market_private_deals", [("model_id", 1), ("currently_top3", 1)], "markt_privat_modell"),
-            ("market_private_deals", [("segment_id", 1), ("currently_top3", 1)], "markt_privat_segment")):
+            ("market_private_deals", [("segment_id", 1), ("currently_top3", 1)], "markt_privat_segment"),
+            # Phase D: offene Tagesdokumente fuer die Hot-Deal-Auswertung (Teilindex, nur offene), Tagesdokumente je
+            # Tag (Zusammenfassung "heute geprueft", Berichte), Hot-Deal-Liste und Ereignisse je Tag/Modell
+            ("market_segment_daily_stats", [("hot_deals_offen", 1), ("date", 1)], "markt_tagesstat_hotdeal_offen",
+             {"partialFilterExpression": {"hot_deals_offen": True}}),
+            ("market_segment_daily_stats", [("date", 1)], "markt_tagesstat_datum"),
+            ("market_hot_deals", [("status", 1), ("diff_pct", -1)], "markt_hotdeal_status_vorteil"),
+            ("market_hot_deals", [("model_id", 1), ("status", 1)], "markt_hotdeal_modell"),
+            ("market_hot_deal_events", [("tag", 1), ("typ", 1)], "markt_hotdeal_ereignis_tag"),
+            ("market_hot_deal_events", [("model_id", 1), ("tag", 1)], "markt_hotdeal_ereignis_modell")):
+        sammlung, schluessel, name = eintrag[0], eintrag[1], eintrag[2]
+        optionen = eintrag[3] if len(eintrag) > 3 else {}
         ref = f"{sammlung}.{name}"
         try:
-            await db[sammlung].create_index(schluessel, name=name)
+            await db[sammlung].create_index(schluessel, name=name, **optionen)
         except Exception as exc:  # noqa: BLE001
             log.warning("ensure_indexes: Index %s nicht angelegt — Abfragen laufen ohne ihn langsamer: %s", ref, exc)
             fehler.append(ref)

@@ -67,6 +67,15 @@ def test_b02_architektur_auswertung_loest_nie_crawls_aus():
                ABF.segment_verlauf, ABF.karte, ABF.chancen, ABF.private_deals):
         q = inspect.getsource(fn)
         assert "apify" not in q and "job_sofort" not in q and "tagesplan" not in q and "synchronisieren" not in q, fn.__name__
+    # Master-Auftrag Phase D (27.09.2026): Hot Deals und der Auswertungs-Worker lesen nur gespeicherte Tageswerte —
+    # kein Import und kein Aufruf von Crawl-Funktionen (apify, jobs, entfernung, segmente.synchronisieren, httpx)
+    for datei in ("deals.py", "auswertung.py"):
+        q = (BACKEND / "markt" / datei).read_text(encoding="utf-8")
+        for v in verboten:
+            assert v not in q, f"{datei} ruft {v}"
+        for imp in ("apify", "from markt import jobs", "import jobs", "jobs.", "entfernung", "import segmente", "segmente import",
+                    "httpx", "requests", "urllib"):
+            assert imp not in q, f"{datei} importiert/nutzt {imp}"
     # Firmen-Lesewege (routes/markt.py) rufen keine Crawl-Funktionen
     r = (BACKEND / "routes" / "markt.py").read_text(encoding="utf-8")
     assert "apify" not in r and "job_sofort" not in r and "synchronisieren" not in r

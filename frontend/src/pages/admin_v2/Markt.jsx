@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { BarChart3, RefreshCw, Play, Pause, Settings2, Radar, AlertTriangle, ListPlus, UserRound } from "lucide-react";
+import { BarChart3, RefreshCw, Play, Pause, Settings2, Radar, AlertTriangle, ListPlus, UserRound, Flame } from "lucide-react";
 import { toast } from "sonner";
 import { api, errMsg } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
@@ -30,6 +30,8 @@ export default function Markt() {
   // Private Deals (Ahmad 26.09.2026 abends): nur die Zusammenfassung fuer die Kachel — ein Fehler hier
   // (z. B. kein Super-Admin) laesst die Seite nicht scheitern
   const [privat, setPrivat] = useState(null);
+  // Hot Deals (Master-Auftrag Phase D): nur die Zusammenfassung fuer die Kachel — Fehler lassen die Seite stehen
+  const [hot, setHot] = useState(null);
 
   const laden = async () => {
     try {
@@ -41,6 +43,8 @@ export default function Markt() {
     if (superAdmin) {
       try { const p = await api.get("/admin/market/private-deals", { params: { limit: 1 } }); setPrivat(p.data?.zusammenfassung || null); }
       catch { setPrivat(null); }
+      try { const hd = await api.get("/admin/market/hot-deals", { params: { limit: 1 } }); setHot(hd.data?.zusammenfassung || null); }
+      catch { setHot(null); }
     }
   };
   useEffect(() => { laden(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -70,6 +74,7 @@ export default function Markt() {
                     <Button variant="outline" size="sm" onClick={() => setKonfigOffen((o) => !o)} data-testid="markt-konfig-oeffnen"><Settings2 size={14} /> Bereiche & Budget</Button>
                     <Link to="/admin/markt/chancen" data-testid="markt-chancen-link"><Button variant="outline" size="sm"><Radar size={14} /> Chancen</Button></Link>
                     {superAdmin && <Link to="/admin/markt/private-deals" data-testid="markt-private-deals-link"><Button variant="outline" size="sm"><UserRound size={14} /> Private Deals</Button></Link>}
+                    {superAdmin && <Link to="/admin/markt/hot-deals" data-testid="markt-hot-deals-link"><Button variant="outline" size="sm"><Flame size={14} /> Hot Deals</Button></Link>}
                     <Link to="/admin/markt/auftraege" data-testid="markt-auftraege-link"><Button size="sm"><ListPlus size={14} /> Suchaufträge</Button></Link>
                   </div>} />
 
@@ -152,6 +157,19 @@ export default function Markt() {
               <span className="ml-2 text-[11px] text-zinc-500">({privat.segmente_mit_deals ?? 0} von {privat.segmente_aktiv ?? 0} Segmenten mit Privatangeboten — aus dem vorhandenen Sample, keine Zusatzkosten)</span>
             </div>
             <Link to="/admin/markt/private-deals" data-testid="markt-private-deals-oeffnen"><Button size="sm" variant="outline">öffnen</Button></Link>
+          </div>
+        </Card>
+      )}
+
+      {superAdmin && hot && (
+        <Card className="mb-4" data-testid="markt-hot-deals-kachel">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[13px]">
+            <div>
+              <span className="font-semibold text-white inline-flex items-center gap-1.5"><Flame size={14} /> Hot Deals:</span>
+              <span className="ml-2 text-zinc-300">{hot.aktiv ?? 0} aktiv · {hot.neue_deals_heute ?? 0} heute neu · {hot.extreme ?? 0} extrem · {hot.strong ?? 0} stark · {hot.davon_privat ?? 0} privat</span>
+              <span className="ml-2 text-[11px] text-zinc-500">({hot.modelle_gueltig ?? 0} von {hot.modelle_geprueft ?? 0} heute geprüften Modellen mit gültiger Basis — aus gespeicherten Tageswerten, keine Zusatzkosten)</span>
+            </div>
+            <Link to="/admin/markt/hot-deals" data-testid="markt-hot-deals-oeffnen"><Button size="sm" variant="outline">öffnen</Button></Link>
           </div>
         </Card>
       )}

@@ -124,6 +124,46 @@ async def admin_market_segment_private_deals(segment_id: str, _=Depends(current_
     return d
 
 
+# ---------------------------------------------------------------- Hot Deals (Master-Auftrag Phase D, 27.09.2026)
+# NUR der Super-Admin: auffaellig guenstige Inserate gegenueber dem historischen Low-Market-Median desselben
+# Segments — nur aus gespeicherten Tageswerten (kein Abruf). Nichts davon in /markt/* der Firmen oder der Karte.
+@router.get("/admin/market/hot-deals")
+async def admin_market_hot_deals(status: str = "aktuell", klasse: Optional[str] = None, privat: Optional[bool] = None,
+                                 model_id: Optional[str] = None, make: Optional[str] = None, ez: Optional[int] = None,
+                                 km_min: Optional[int] = None, km_max: Optional[int] = None, segment_id: Optional[str] = None,
+                                 heute_neu: bool = False, sort: str = "vorteil_pct", limit: int = Query(200, ge=1, le=500),
+                                 _=Depends(current_super_admin)):
+    from markt import deals
+    if sort not in deals.SORTIERUNGEN:
+        raise HTTPException(400, f"Unbekannte Sortierung — erlaubt: {', '.join(deals.SORTIERUNGEN)}")
+    if status not in deals.STATUS_FILTER:
+        raise HTTPException(400, f"Unbekannter Status — erlaubt: {', '.join(deals.STATUS_FILTER)}")
+    if klasse and klasse not in deals.KLASSE_RANG:
+        raise HTTPException(400, f"Unbekannte Klasse — erlaubt: {', '.join(deals.KLASSE_RANG)}")
+    return await deals.liste(db, status=status, klasse=klasse, privat=privat, model_id=model_id, make=make, ez=ez,
+                             km_min=km_min, km_max=km_max, segment_id=segment_id, heute_neu=heute_neu, sort=sort, limit=limit)
+
+
+@router.get("/admin/market/hot-deals/ereignisse")
+async def admin_market_hot_deal_ereignisse(segment_id: str, listing_id: str, _=Depends(current_super_admin)):
+    from markt import deals
+    d = await deals.ereignisse(db, segment_id, listing_id)
+    if not d:
+        raise HTTPException(404, "Hot Deal nicht gefunden")
+    return d
+
+
+@router.post("/admin/market/hot-deals/auswerten")
+async def admin_market_hot_deals_auswerten(admin=Depends(current_super_admin)):
+    """Offene Tageswerte jetzt auswerten (sonst alle 5 Minuten im Hintergrund) — liest nur Gespeichertes."""
+    from markt import auswertung
+    erg = await auswertung.durchlauf(db)
+    if erg.get("gesperrt"):
+        raise HTTPException(409, "Die Auswertung läuft gerade in einem anderen Prozess — bitte gleich noch einmal")
+    await log_activity_sicher("", admin["id"], "admin.markt.auswertung", meta={"hot_deals": (erg.get("hot_deals") or {}).get("ausgewertet", 0)})
+    return {"ok": True, **erg}
+
+
 # ---------------------------------------------------------------- Suchauftraege (Auftrag v3)
 class AuftragIn(BaseModel):
     """Freies Formular — Pruefung in markt.auftraege.entwurf_pruefen."""

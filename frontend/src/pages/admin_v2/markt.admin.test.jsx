@@ -88,6 +88,9 @@ vi.mock("@/lib/api", () => ({
                       tage_fallend: 1, tage_steigend: 0, tage_unveraendert: 0, hoechster_median: 20500, niedrigster_median: 20250, tage: 3, tage_ohne_angebot: 1 } } };
       // Private Deals (Ahmad 26.09. abends): Kachel auf der Uebersicht und Block in der Segmentanalyse (nur Super-Admin)
       if (url === "/admin/market/private-deals") return { data: { zusammenfassung: { segmente_aktiv: 16, segmente_mit_deals: 5, aktuelle_top3: 11, heute_neu: 2, heute_reduziert: 1 }, deals: [] } };
+      // Hot Deals (Master-Auftrag Phase D): Kachel auf der Uebersicht (nur Super-Admin, limit 1)
+      if (url === "/admin/market/hot-deals") return { data: { zusammenfassung: { tag: "2026-10-01", modelle_geprueft: 40, modelle_gueltig: 31, neue_deals_heute: 4,
+        aktiv: 9, deal: 5, strong: 3, extreme: 1, davon_privat: 2, neue_privat_heute: 1 }, deals: [] } };
       if (url.endsWith(`/segments/${SEG_ALT.id}/private-deals`)) return { data: { top3: [], historie: [], stand_at: "2026-08-03T04:00:00Z", stale: false, anzahl_im_sample: 0, sample_size: 10 } };
       if (url.endsWith("/private-deals")) return { data: { stand_at: "2026-10-01T04:00:00Z", stale: netz.privatStale, anzahl_im_sample: 2, sample_size: 20, top3: [
         { listing_id: "pr1", current_rank_private: 1, current_price: 18500, title: "BMW 320d Privat", mileage_km: 80000, first_registration: "04/2020", postal_code: "80331", city: "München",
@@ -147,6 +150,12 @@ describe("Admin Marktanalyse", () => {
     expect(el("markt-private-deals-kachel").textContent).toContain("5 von 16 Segmenten");
     expect(el("markt-private-deals-oeffnen").getAttribute("href")).toBe("/admin/markt/private-deals");
     expect(netz.gets.filter((u) => u === "/admin/market/private-deals").length).toBe(1);
+    // Hot Deals (Phase D): Link + Kachel (aktiv, heute neu, extrem, stark, privat; geprüfte/gültige Modelle)
+    expect(el("markt-hot-deals-link").getAttribute("href")).toBe("/admin/markt/hot-deals");
+    expect(el("markt-hot-deals-kachel").textContent).toContain("9 aktiv · 4 heute neu · 1 extrem · 3 stark · 2 privat");
+    expect(el("markt-hot-deals-kachel").textContent).toContain("31 von 40 heute geprüften Modellen");
+    expect(el("markt-hot-deals-oeffnen").getAttribute("href")).toBe("/admin/markt/hot-deals");
+    expect(netz.gets.filter((u) => u === "/admin/market/hot-deals").length).toBe(1);
     const z = el("markt-modell-bmw-320d");
     expect(z.textContent).toContain("BMW 320d");
     expect(z.textContent).toContain("18.900 €");

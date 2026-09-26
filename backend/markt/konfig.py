@@ -28,6 +28,11 @@ BUDGET = "market_crawler_budget"
 PRIVATE_DEALS = "market_private_deals"
 PRIVATE_TOP_N = 3
 PRIVATE_PREISVERLAUF_MAX = 30
+# Master-Auftrag Phase D (27.09.2026): Hot Deals — aktueller Zustand je Segment+Inserat und die Ereignis-
+# Historie GETRENNT (Historie wird nur eingefuegt, nie geaendert); beides nur aus gespeicherten Tageswerten
+HOTDEALS = "market_hot_deals"
+HOTDEAL_EREIGNISSE = "market_hot_deal_events"
+AUSWERTUNG_DOK = "auswertung"      # market_config/auswertung: Stand des Auswertungs-Workers (Hot Deals, Berichte)
 
 QUELLE = "mobile"
 # Wunsch Ahmad 26.09.2026: die Erstzulassung MUSS gleich sein — ein 320d von

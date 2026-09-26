@@ -41,6 +41,10 @@ Master-Auftrag 26.09.2026, Phase C (Tagesbasis):
     Preiserhoehungen (gleiche listing_id), Top-3/Top-5-Wechsel zum Vortag, Privat/Haendler, Crawl-Kosten
   * Trend-, Chancen- und Private-Deals-Basis nur Tage mit Datenqualitaet GOOD/MEDIUM
   * Dieses Modul liest und schreibt nur Tageswerte — es loest NIE einen Abruf aus (Architekturtest)
+
+Master-Auftrag Phase D (27.09.2026): stellt ein Lauf die Hauptwerte des Tages, bekommt das Tagesdokument
+hot_deals_offen=True — der Auswertungs-Worker (markt.deals / markt.auswertung) prueft die Hot Deals danach im
+Hintergrund aus den gespeicherten Tageswerten.
 """
 from __future__ import annotations
 
@@ -546,7 +550,10 @@ async def verarbeiten(db, segment: Dict[str, Any], listings: List[Dict[str, Any]
                        # Nr. 1: Hauptwerte stammen aus diesem Lauf — Top-N-Nachweis mitschreiben
                        "top_n_bewiesen": bool(top_n_bewiesen), "lauf_tag": lauf_schluessel,
                        # Nr. 143/114: Vollstaendigkeit der Stichprobe und Build des Scrapers dieses Laufs
-                       "sample_incomplete": info.get("sample_incomplete"), "actor_build": info.get("actor_build")})
+                       "sample_incomplete": info.get("sample_incomplete"), "actor_build": info.get("actor_build"),
+                       # Phase D: der Tageswert hat sich geaendert -> der Auswertungs-Worker (markt.deals) prueft
+                       # die Hot Deals dieses Tages im Hintergrund; der Crawl-Weg wartet nie darauf
+                       "hot_deals_offen": True})
     await _einmal_wiederholen(lambda: db[TAGESSTATS].update_one(
         {"segment_id": seg_id, "date": tag},
         {"$set": setzen, "$push": {"laeufe": {"$each": [lauf_eintrag], "$slice": -LAEUFE_MAX}},
