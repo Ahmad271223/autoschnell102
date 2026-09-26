@@ -48,8 +48,9 @@ def test_01_alle_ausstattungen_statt_nur_zwanzig():
 
 def test_02_deckel_gilt_auch_im_pdf():
     quelle = (BACKEND / "routes" / "protocols.py").read_text(encoding="utf-8")
-    assert quelle.count('features") or [])[:AUSSTATTUNG_MAX]') == 3, \
-        "Online-Protokoll und beide PDF-Wege"
+    # Review 26.09.2026 Nr. 137: der Freigabe-Schnappschuss deckelt die Ausstattung ebenso
+    assert quelle.count('features") or [])[:AUSSTATTUNG_MAX]') == 4, \
+        "Online-Protokoll, beide PDF-Wege und der Freigabe-Schnappschuss"
     assert 'features") or [])[:20]' not in quelle
 
 
