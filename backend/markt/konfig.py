@@ -23,6 +23,11 @@ TAGESSTATS = "market_segment_daily_stats"
 SEGMENTSTATS = "market_segment_stats"
 CHANCEN = "market_opportunities"
 BUDGET = "market_crawler_budget"
+# Private Deals (Wunsch Ahmad 26.09.2026 abends): die 3 guenstigsten Privatangebote je Segment —
+# abgeleitet aus dem Sample, das die Marktanalyse OHNEHIN abruft (kein eigener Crawl, keine Kosten)
+PRIVATE_DEALS = "market_private_deals"
+PRIVATE_TOP_N = 3
+PRIVATE_PREISVERLAUF_MAX = 30
 
 QUELLE = "mobile"
 # Wunsch Ahmad 26.09.2026: die Erstzulassung MUSS gleich sein — ein 320d von

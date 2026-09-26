@@ -12,10 +12,10 @@ from __future__ import annotations
 import re
 import statistics
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from markt import budget, jobs, konfig, normalisieren, segmente
-from markt.konfig import CHANCEN, JOBS, LISTINGS, MODELLE, SEGMENTE, SEGMENTSTATS, SNAPSHOTS, TAGESSTATS
+from markt.konfig import CHANCEN, JOBS, LISTINGS, MODELLE, PRIVATE_DEALS, SEGMENTE, SEGMENTSTATS, SNAPSHOTS, TAGESSTATS
 
 HINWEIS = ("Beobachtet werden je Segment nur die günstigsten passenden Angebote (Anzahl je Suchauftrag) — "
            "das ist die untere Marktpreisspanne, kein Marktmedian für ganz Deutschland.")
@@ -568,6 +568,140 @@ ZUSTAND_TEXT = {
     "verification_pending": "wird einzeln nachgeprüft — eine leere Antwort reicht nicht, erst eine zweite Prüfung am Folgetag bestätigt die Entfernung",
     "confirmed_removed": "Inserat nicht mehr online (kein Beleg für einen Verkauf)",
 }
+
+
+# ---------------------------------------------------------------- Private Deals (Ahmad 26.09.2026 abends, nur Super-Admin)
+PRIVATE_SORTIERUNGEN = {
+    "abstand_pct": [("difference_to_segment_median_pct", 1), ("current_price", 1)],   # groesste negative Abweichung zuerst
+    "neueste": [("first_entered_top3_at", -1)],
+    "preis": [("current_price", 1)],
+    "reduzierung": [("price_change_since_first_eur", 1), ("current_price", 1)],
+    "standzeit": [("mobile_created_at", 1)],                                         # am laengsten bei mobile.de zuerst
+}
+PRIVATE_LIMIT_MAX = 500
+
+
+def _private_stand(st: Optional[Dict[str, Any]], seg: Optional[Dict[str, Any]], tagesstat_last_run: Optional[str] = None) -> Dict[str, Any]:
+    """Stand der Privat-Top-3 eines Segments aus Segmentstatistik + Segment: stale, wenn nach dem letzten
+    gueltigen Lauf ein Versuch ohne Speicherung (data_invalid: last_attempt_at) oder ein leerer Lauf lag."""
+    from markt import speicher
+    st, seg = st or {}, seg or {}
+    stand = st.get("private_stand_at")
+    stale = bool(st.get("private_stand_stale")) or speicher.private_stand_stale(stand, tagesstat_last_run, seg.get("last_attempt_at"))
+    return {"stand_at": stand, "stand_lauf": st.get("private_stand_lauf"), "stand_tag": st.get("private_stand_tag"),
+            "stale": stale, "anzahl_im_sample": st.get("private_anzahl_im_sample"),
+            "sample_size": st.get("private_stand_sample_size"), "top3_kurz": st.get("private_top3") or []}
+
+
+def _deal_anreichern(d: Dict[str, Any], l: Optional[Dict[str, Any]], seg: Optional[Dict[str, Any]], stand: Dict[str, Any], heute: str) -> Dict[str, Any]:
+    """Nur abgeleitete Felder — keine PII (das Listing liefert Zustand und globalen Preis, sonst nichts)."""
+    seg = seg or {}
+    d["segment_label"] = d.get("segment_label") or seg.get("label")
+    d["km_label"] = d.get("km_label") or seg.get("km_label")
+    d["ez_label"] = d.get("ez_label") or seg.get("ez_label")
+    d["segment_enabled"] = seg.get("enabled")
+    d["active_state"] = (l or {}).get("active_state")
+    d["listing_current_price"] = (l or {}).get("current_price")
+    d["heute_neu"] = d.get("first_entered_top3_tag") == heute
+    d["preis_reduziert"] = float(d.get("price_change_since_first_eur") or 0) < 0
+    d["heute_reduziert"] = d.get("last_reduced_tag") == heute
+    d["stale"] = bool(stand.get("stale"))
+    d["stand_at"] = stand.get("stand_at")
+    return d
+
+
+async def _private_kontext(db, deals: List[Dict[str, Any]]) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+    """Listings, Segmente und Segmentstatistiken der Deals mit je EINER $in-Abfrage (kein N+1)."""
+    ids = sorted({str(d.get("listing_id")) for d in deals if d.get("listing_id")})
+    seg_ids = sorted({str(d.get("segment_id")) for d in deals if d.get("segment_id")})
+    listings: Dict[str, Dict[str, Any]] = {}
+    segs: Dict[str, Dict[str, Any]] = {}
+    stats: Dict[str, Dict[str, Any]] = {}
+    if ids:
+        async for l in db[LISTINGS].find({"source": konfig.QUELLE, "listing_id": {"$in": ids}},
+                                         {"_id": 0, "listing_id": 1, "active_state": 1, "current_price": 1}):
+            listings[str(l["listing_id"])] = l
+    if seg_ids:
+        async for s in db[SEGMENTE].find({"id": {"$in": seg_ids}}, {"_id": 0, "id": 1, "label": 1, "km_label": 1, "ez_label": 1,
+                                                                    "enabled": 1, "last_attempt_at": 1, "model_id": 1}):
+            segs[str(s["id"])] = s
+        async for st in db[SEGMENTSTATS].find({"_id": {"$in": seg_ids}}, {"private_stand_at": 1, "private_stand_stale": 1, "private_stand_lauf": 1,
+                                                                          "private_stand_tag": 1, "private_anzahl_im_sample": 1,
+                                                                          "private_stand_sample_size": 1, "private_top3": 1}):
+            stats[str(st["_id"])] = st
+    return listings, segs, stats
+
+
+async def private_deals(db, *, make: Optional[str] = None, model_id: Optional[str] = None, ez: Optional[int] = None,
+                        km_min: Optional[int] = None, km_max: Optional[int] = None, preis_von: Optional[float] = None,
+                        preis_bis: Optional[float] = None, abstand_pct_max: Optional[float] = None, plz: Optional[str] = None,
+                        nur_aktuell: bool = True, heute_neu: bool = False, preis_reduziert: bool = False,
+                        sort: str = "abstand_pct", limit: int = 200) -> Dict[str, Any]:
+    """Liste der Privat-Top-3 ueber alle Segmente (Standard: nur aktuelle, nach groesster negativer Abweichung
+    zum Segment-Median) plus Zusammenfassung. Nur lesend."""
+    heute = konfig.heute_tag()
+    filt: Dict[str, Any] = {}
+    if nur_aktuell:
+        filt["currently_top3"] = True
+    if make:
+        filt["make"] = {"$regex": f"^{re.escape(str(make).strip())}$", "$options": "i"}
+    if model_id:
+        filt["model_id"] = str(model_id)
+    if ez is not None:
+        filt["ez_year"] = int(ez)
+    if km_min is not None or km_max is not None:
+        filt["mileage_km"] = {**({"$gte": int(km_min)} if km_min is not None else {}), **({"$lte": int(km_max)} if km_max is not None else {})}
+    if preis_von is not None or preis_bis is not None:
+        filt["current_price"] = {**({"$gte": float(preis_von)} if preis_von is not None else {}),
+                                 **({"$lte": float(preis_bis)} if preis_bis is not None else {})}
+    if abstand_pct_max is not None:
+        filt["difference_to_segment_median_pct"] = {"$lte": float(abstand_pct_max)}
+    if plz:
+        filt["postal_code"] = {"$regex": "^" + re.escape(str(plz).strip())}
+    if heute_neu:
+        filt["first_entered_top3_tag"] = heute
+    if preis_reduziert:
+        filt["price_change_since_first_eur"] = {"$lt": 0}
+    sortierung = PRIVATE_SORTIERUNGEN.get(sort) or PRIVATE_SORTIERUNGEN["abstand_pct"]
+    n = max(1, min(int(limit or 200), PRIVATE_LIMIT_MAX))
+    raus = await db[PRIVATE_DEALS].find(filt, {"_id": 0}).sort(sortierung).to_list(n)
+    listings, segs, stats = await _private_kontext(db, raus)
+    for d in raus:
+        sid = str(d.get("segment_id"))
+        _deal_anreichern(d, listings.get(str(d.get("listing_id"))), segs.get(sid), _private_stand(stats.get(sid), segs.get(sid)), heute)
+    aktuell = {"currently_top3": True}
+    zusammen = {"segmente_aktiv": await db[SEGMENTE].count_documents({"enabled": True}),
+                "segmente_mit_deals": len(await db[PRIVATE_DEALS].distinct("segment_id", aktuell)),
+                "aktuelle_top3": await db[PRIVATE_DEALS].count_documents(aktuell),
+                "heute_neu": await db[PRIVATE_DEALS].count_documents({**aktuell, "first_entered_top3_tag": heute}),
+                "heute_reduziert": await db[PRIVATE_DEALS].count_documents({**aktuell, "last_reduced_tag": heute}),
+                "tag": heute}
+    return {"zusammenfassung": zusammen, "deals": raus, "anzahl": len(raus), "gekuerzt": len(raus) >= n, "sort": sort,
+            "nur_aktuell": bool(nur_aktuell), "hinweis": PRIVATE_HINWEIS}
+
+
+PRIVATE_HINWEIS = ("Privatangebote nur aus dem ohnehin abgerufenen Sample (die N günstigsten je Segment) — "
+                   "kein eigener Privat-Crawl, keine Zusatzkosten; nur für den Betreiber sichtbar.")
+
+
+async def segment_private_deals(db, segment_id: str) -> Optional[Dict[str, Any]]:
+    """Segmentblock: aktuelle Privat-Top-3 (in Rangfolge) und die zuletzt herausgefallenen (Historie)."""
+    seg = await db[SEGMENTE].find_one({"id": segment_id}, {"_id": 0})
+    if not seg:
+        return None
+    st = await db[SEGMENTSTATS].find_one({"_id": segment_id}, {"_id": 0})
+    tagesstat = await db[TAGESSTATS].find_one({"segment_id": segment_id}, {"_id": 0, "last_run_at": 1, "sample_size": 1}, sort=[("date", -1)])
+    stand = _private_stand(st, seg, (tagesstat or {}).get("last_run_at"))
+    heute = konfig.heute_tag()
+    aktuelle = await db[PRIVATE_DEALS].find({"segment_id": segment_id, "currently_top3": True}, {"_id": 0}).sort([("current_rank_private", 1)]).to_list(10)
+    historie = await db[PRIVATE_DEALS].find({"segment_id": segment_id, "currently_top3": False}, {"_id": 0}).sort([("left_top3_at", -1)]).to_list(20)
+    listings, _segs, _stats = await _private_kontext(db, aktuelle + historie)
+    for d in aktuelle + historie:
+        _deal_anreichern(d, listings.get(str(d.get("listing_id"))), seg, stand, heute)
+    sample_n = (st or {}).get("sample_size") or 0
+    return {**stand, "segment_id": segment_id, "top3": aktuelle, "historie": historie,
+            "sample_size": sample_n, "keine_privaten": stand.get("stand_at") is not None and not aktuelle,
+            "hinweis": PRIVATE_HINWEIS}
 
 
 async def monitoring(db) -> Dict[str, Any]:

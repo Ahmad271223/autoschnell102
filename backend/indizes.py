@@ -1040,7 +1040,10 @@ async def markt_indizes(db) -> dict:
             ("market_segment_daily_stats", [("segment_id", 1), ("date", -1)], "markt_tagesstat"),
             ("market_crawl_jobs", [("segment_id", 1), ("tag", 1)], "markt_job_je_tag"),
             ("market_crawl_jobs", "id", "markt_job_id"),
-            ("market_opportunities", [("listing_id", 1), ("typ", 1), ("date", 1), ("segment_id", 1)], "markt_chance_je_tag")):
+            ("market_opportunities", [("listing_id", 1), ("typ", 1), ("date", 1), ("segment_id", 1)], "markt_chance_je_tag"),
+            # Private Deals (Ahmad 26.09.2026 abends): ein Dokument je Segment+Listing — Unique, aber NICHT kritisch
+            # (fehlt er, laeuft der Crawler weiter; die Ableitung wiederholt einen Upsert-Konflikt einmal)
+            ("market_private_deals", [("segment_id", 1), ("listing_id", 1)], "markt_privat_je_segment")):
         try:
             ok = await unique_anlegen(db[sammlung], schluessel, name=name, weich=True)
         except Exception as exc:  # noqa: BLE001
@@ -1065,7 +1068,11 @@ async def markt_indizes(db) -> dict:
             ("market_crawl_jobs", [("tag", 1), ("status", 1)], "markt_job_tag_status"),
             ("market_opportunities", [("created_at", -1)], "markt_chance_zeit"),
             ("market_opportunities", [("segment_id", 1), ("created_at", -1)], "markt_chance_segment"),
-            ("market_opportunities", [("model_id", 1), ("created_at", -1)], "markt_chance_modell")):
+            ("market_opportunities", [("model_id", 1), ("created_at", -1)], "markt_chance_modell"),
+            # Private Deals (Ahmad 26.09.2026 abends): Leseindizes der Liste (aktuell + Abstand) und je Modell — NICHT kritisch
+            ("market_private_deals", [("currently_top3", 1), ("difference_to_segment_median_pct", 1)], "markt_privat_aktuell_abstand"),
+            ("market_private_deals", [("model_id", 1), ("currently_top3", 1)], "markt_privat_modell"),
+            ("market_private_deals", [("segment_id", 1), ("currently_top3", 1)], "markt_privat_segment")):
         ref = f"{sammlung}.{name}"
         try:
             await db[sammlung].create_index(schluessel, name=name)

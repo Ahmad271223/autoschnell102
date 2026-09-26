@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
-const netz = vi.hoisted(() => ({ posts: [], gets: [], aktiv: true, stats: null, crawlFehler: null, ohneBudget: false, topN: null }));
+const netz = vi.hoisted(() => ({ posts: [], gets: [], aktiv: true, stats: null, crawlFehler: null, ohneBudget: false, topN: null, privatStale: false }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() } }));
 vi.mock("recharts", () => {
   const Leer = ({ children }) => h("div", { "data-chart": "1" }, children);
@@ -81,6 +81,14 @@ vi.mock("@/lib/api", () => ({
         wochen: [{ woche: "2026-W40", median: 20375, tage: 2 }],
         auswertung: { veraenderung_eur: -250, veraenderung_pct: -1.22, groesster_rueckgang: { date: "2026-10-01", change_eur: -250 }, groesster_anstieg: null,
                       tage_fallend: 1, tage_steigend: 0, tage_unveraendert: 0, hoechster_median: 20500, niedrigster_median: 20250, tage: 3, tage_ohne_angebot: 1 } } };
+      // Private Deals (Ahmad 26.09. abends): Kachel auf der Uebersicht und Block in der Segmentanalyse (nur Super-Admin)
+      if (url === "/admin/market/private-deals") return { data: { zusammenfassung: { segmente_aktiv: 16, segmente_mit_deals: 5, aktuelle_top3: 11, heute_neu: 2, heute_reduziert: 1 }, deals: [] } };
+      if (url.endsWith(`/segments/${SEG_ALT.id}/private-deals`)) return { data: { top3: [], historie: [], stand_at: "2026-08-03T04:00:00Z", stale: false, anzahl_im_sample: 0, sample_size: 10 } };
+      if (url.endsWith("/private-deals")) return { data: { stand_at: "2026-10-01T04:00:00Z", stale: netz.privatStale, anzahl_im_sample: 2, sample_size: 20, top3: [
+        { listing_id: "pr1", current_rank_private: 1, current_price: 18500, title: "BMW 320d Privat", mileage_km: 80000, first_registration: "04/2020", postal_code: "80331", city: "München",
+          difference_to_segment_median_eur: -1750, difference_to_segment_median_pct: -8.64, url: "https://suchen.mobile.de/auto-inserat/pr1.html", heute_neu: true, preis_reduziert: false, currently_top3: true },
+        { listing_id: "pr2", current_rank_private: 2, current_price: 19800, title: "BMW 320d Privat 2", mileage_km: 60000, first_registration: "01/2020", postal_code: "30159", city: "Hannover",
+          difference_to_segment_median_eur: -450, difference_to_segment_median_pct: -2.22, url: "http://nicht-mobile.example/pr2", heute_neu: false, preis_reduziert: true, currently_top3: true }], historie: [] } };
       if (url.endsWith("/listings")) return { data: { date: "2026-10-01", lauf_tag: "2026-10-01#2", top_n_bewiesen: true, listings: [
         { listing_id: "449438530", title: "BMW 320d Touring", price_today: 18900, current_price: 18900, mileage_km: 78000, first_registration: "03/2020",
           power_kw: 140, fuel: "Diesel", gearbox: "Automatik", postal_code: "30159", city: "Hannover", seller_type: "DEALER", price_rating_today: "GOOD_PRICE",
@@ -115,7 +123,7 @@ async function starten(pfad) {
   await warten();
 }
 async function klick(t) { const k = el(t); if (!k) throw new Error(`nicht gefunden: ${t}`); await act(async () => { k.click(); }); await warten(); }
-beforeEach(() => { netz.posts.length = 0; netz.gets.length = 0; netz.aktiv = true; netz.stats = null; netz.crawlFehler = null; netz.crawlStatus = 0; netz.ohneBudget = false; netz.topN = null; });
+beforeEach(() => { netz.posts.length = 0; netz.gets.length = 0; netz.aktiv = true; netz.stats = null; netz.crawlFehler = null; netz.crawlStatus = 0; netz.ohneBudget = false; netz.topN = null; netz.privatStale = false; });
 afterEach(async () => { if (wurzel) await act(async () => { wurzel.unmount(); }); wurzel = null; behaelter?.remove(); });
 
 describe("Admin Marktanalyse", () => {
@@ -127,6 +135,13 @@ describe("Admin Marktanalyse", () => {
     expect(el("markt-monitoring").textContent).toContain("437.50 $");
     expect(el("markt-alarme").textContent).toContain("48 h");
     expect(el("markt-chancen-link")).toBeTruthy();
+    // Private Deals (Ahmad 26.09. abends): Link neben Chancen/Suchauftraegen und Kachel mit Zusammenfassung (nur limit 1 geladen)
+    expect(el("markt-private-deals-link").getAttribute("href")).toBe("/admin/markt/private-deals");
+    expect(el("markt-private-deals-kachel").textContent).toContain("Private Deals:");
+    expect(el("markt-private-deals-kachel").textContent).toContain("11 aktuelle Top-3 · 2 heute neu · 1 heute reduziert");
+    expect(el("markt-private-deals-kachel").textContent).toContain("5 von 16 Segmenten");
+    expect(el("markt-private-deals-oeffnen").getAttribute("href")).toBe("/admin/markt/private-deals");
+    expect(netz.gets.filter((u) => u === "/admin/market/private-deals").length).toBe(1);
     const z = el("markt-modell-bmw-320d");
     expect(z.textContent).toContain("BMW 320d");
     expect(z.textContent).toContain("18.900 €");
@@ -248,6 +263,22 @@ describe("Admin Marktanalyse", () => {
     expect(el("markt-neu-segment-449438530").textContent).toBe("neu in diesem Segment");
     expect(el("markt-listing-449438530").textContent).toContain("(global 13.09.)");
     expect(el("markt-fassung-historisch")).toBeNull();
+    // Private Deals (Ahmad 26.09. abends): Block "Günstigste Privatangebote im Sample" mit #1/#2, "2 von 3", Link nur auf mobile.de
+    expect(netz.gets.some((u) => u.endsWith(`/segments/${SEG.id}/private-deals`))).toBe(true);
+    const pb = el("markt-privat-block");
+    expect(pb.textContent).toContain("Günstigste Privatangebote im Sample");
+    expect(el("markt-privat-anzahl").textContent).toBe("2 von 3");
+    expect(el("markt-privat-pr1").textContent).toContain("#1 PRIVAT");
+    expect(el("markt-privat-pr1").textContent).toContain("18.500 €");
+    expect(el("markt-privat-pr1").textContent).toContain("−1.750 € (-8,6 %) zum Median");
+    expect(el("markt-privat-pr1").textContent).toContain("heute neu");
+    expect(el("markt-privat-link-pr1").getAttribute("href")).toBe("https://suchen.mobile.de/auto-inserat/pr1.html");
+    expect(el("markt-privat-pr2").textContent).toContain("#2 PRIVAT");
+    expect(el("markt-privat-pr2").textContent).toContain("Preis reduziert");
+    expect(el("markt-privat-link-pr2")).toBeNull();
+    expect(el("markt-privat-stale")).toBeNull();
+    expect(pb.textContent).toContain("2 Privatangebot(e) unter den 20 günstigsten");
+    expect(el("markt-privat-alle").getAttribute("href")).toBe("/admin/markt/private-deals");
     // Zeitraum wechseln -> neue Verlaufsabfrage mit range
     await klick("markt-bereich-90d");
     expect(netz.gets.filter((u) => u.endsWith("/history")).length).toBeGreaterThanOrEqual(2);
@@ -293,6 +324,13 @@ describe("Admin Marktanalyse", () => {
     await starten(`/admin/markt/bmw-320d?segment=${encodeURIComponent(SEG_ALT.id)}`);
     expect(el("markt-fassung-historisch").textContent).toContain("Frühere Fassung v1 (Auftrag heute v2)");
     expect(el("markt-fassung-historisch").textContent).toContain("Kraftstoff DIESEL · Getriebe AUTOMATIC_GEAR · 120–145 kW · 10 Zeilen");
+    // Private Deals: Segment mit gueltigem Lauf, aber ohne Privatangebote -> "keine Privatangebote unter den N guenstigsten"
+    expect(el("markt-privat-leer").textContent).toBe("keine Privatangebote unter den 10 günstigsten");
+    await act(async () => { wurzel.unmount(); }); wurzel = null; behaelter?.remove();
+    // Private Deals: nach einem leeren/ungueltigen Lauf ist der Stand 'stale'
+    netz.privatStale = true;
+    await starten("/admin/markt/bmw-320d");
+    expect(el("markt-privat-stale").textContent).toContain("stale (letzter gültiger Lauf");
     await act(async () => { wurzel.unmount(); }); wurzel = null; behaelter?.remove();
     // Nr. 43/44: kein Datensatz in der Toleranz -> trend null -> "—" statt Zahl
     netz.stats = { ...STATS, trend_7d_eur: null, trend_7d_pct: null, trend_7d_basis_date: null, trend_7d_bestand_eur: null, anzahl_gemeinsam: 0 };

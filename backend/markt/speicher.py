@@ -44,7 +44,7 @@ from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 from markt import konfig
-from markt.konfig import CHANCEN, JOBS, LISTINGS, SEGMENTE, SEGMENTSTATS, SNAPSHOTS, TAGESSTATS
+from markt.konfig import CHANCEN, JOBS, LISTINGS, PRIVATE_DEALS, SEGMENTE, SEGMENTSTATS, SNAPSHOTS, TAGESSTATS
 
 ZUSTAENDE = ("seen", "not_seen_in_sample", "verification_pending", "confirmed_removed")
 LISTING_FELDER = ("url", "make", "model", "variant", "title", "category", "first_registration", "mileage_km",
@@ -366,6 +366,10 @@ async def verarbeiten(db, segment: Dict[str, Any], listings: List[Dict[str, Any]
         {"segment_id": seg_id, "date": tag},
         {"$set": setzen, "$push": {"laeufe": {"$each": [lauf_eintrag], "$slice": -LAEUFE_MAX}}},
         upsert=True))
+    # Private Deals (Ahmad 26.09. abends): nur aus einem GUELTIGEN Lauf mit Zeilen und nur, wenn kein
+    # neuerer Lauf dieses Segments bekannt ist — ein leerer Lauf laesst den alten Stand stehen (stale)
+    if not leer and seg_frisch:
+        await private_deals_ableiten(db, segment, heute, kz, tag, jetzt_iso, lauf_schluessel)
     await segmentstatistik(db, seg_id, tag)
     # Welle 5 Nr. 51: last_success_at nur bei einem Lauf MIT Zeilen; ein leerer Lauf setzt last_empty_at
     # (der Stale-Monitor liest last_success_at — eine Marktluecke ist kein Erfolg)
@@ -475,14 +479,19 @@ async def segmentstatistik(db, seg_id: str, tag: Optional[str] = None) -> Option
     # tatsaechlich geplante Jobs des Segments; nur ohne Plan (Altdaten, Tests) Kalendertage x Abrufe je Tag
     erster = min(d["date"] for d in alle_docs) if alle_docs else t
     kalendertage = max(1, (datetime.strptime(t, "%Y-%m-%d") - datetime.strptime(erster, "%Y-%m-%d")).days + 1)
-    seg_doc = await db[SEGMENTE].find_one({"id": seg_id}, {"_id": 0, "crawls_per_day": 1, "max_items": 1}) or {}
+    seg_doc = await db[SEGMENTE].find_one({"id": seg_id}, {"_id": 0, "crawls_per_day": 1, "max_items": 1, "last_attempt_at": 1}) or {}
     k = max(1, min(4, int(seg_doc.get("crawls_per_day") or 1)))
     gueltige_laeufe = sum(_gueltige_laeufe(d) for d in gueltige_docs)
     geplant = await geplante_laeufe(db, seg_id, t)
     erwartete_laeufe = geplant if geplant > 0 else kalendertage * k
     abdeckung = round(min(100.0, gueltige_laeufe / erwartete_laeufe * 100), 1) if erwartete_laeufe else 0.0
     unvollstaendig = heute.get("sample_incomplete") is True
+    # Private Deals: der Stand der Privat-Top-3 kommt aus dem letzten GUELTIGEN Lauf mit Zeilen; gab es danach
+    # einen Lauf ohne Zeilen (oder einen Versuch, der nichts speicherte), ist der Stand 'stale'
+    alt_stat = await db[SEGMENTSTATS].find_one({"_id": seg_id}, {"_id": 0, "private_stand_at": 1}) or {}
+    stale = private_stand_stale(alt_stat.get("private_stand_at"), heute.get("last_run_at"), seg_doc.get("last_attempt_at"))
     stat = {"segment_id": seg_id, "date": t, "model_id": heute.get("model_id"),
+            "private_stand_stale": stale,
             **{k_: heute.get(k_) for k_ in ("sample_size", "min_price", "median_price", "avg_price", "max_price",
                                             "p25_price", "p75_price")},
             # Welle 6 Nr. 137: neutrale Namen (die Stichprobe hat N Zeilen, nicht 20); alte Namen bleiben parallel
@@ -575,3 +584,103 @@ async def chancen_ableiten(db, segment: Dict[str, Any], heute: List[Dict[str, An
                 await db[CHANCEN].update_one({**schluessel, "staerke_eur": {"$lt": staerke}},
                                              {"$set": {**felder, "updated_at": jetzt_iso}})
     return n
+
+
+# ---------------------------------------------------------------- Private Deals (Ahmad 26.09.2026 abends)
+# Die 3 guenstigsten PRIVATangebote je Segment — ausschliesslich aus den Zeilen, die die Marktanalyse
+# ohnehin je Lauf abruft (die N guenstigsten). Kein eigener Crawl, keine neuen Segmente/Jobs/Kosten.
+# Nur der Super-Admin liest sie (routes/markt_admin); nichts davon landet in den Chancen der Firmen
+# oder in der Fahrzeugkarte. KEINE PII: keine seller_*-Felder, keine Koordinaten — nur Ort/PLZ.
+PRIVAT_FAHRZEUGFELDER = ("title", "make", "model", "variant", "first_registration", "mileage_km", "power_kw", "fuel",
+                         "gearbox", "category", "city", "postal_code", "url", "mobile_created_at", "mobile_modified_at",
+                         "mobile_renewed_at", "price_rating")
+
+
+def _ez_jahr(wert: Any) -> Optional[int]:
+    import re
+    m = re.search(r"(\d{4})", str(wert or ""))
+    return int(m.group(1)) if m else None
+
+
+def private_stand_stale(stand_at: Optional[str], letzter_lauf_at: Optional[str], letzter_versuch_at: Optional[str]) -> bool:
+    """Der Privat-Stand ist veraltet, wenn nach dem letzten gueltigen Lauf (stand_at) noch ein Lauf ohne
+    Zeilen (letzter_lauf_at, Tagesstatistik) oder ein Versuch ohne Speicherung (letzter_versuch_at am
+    Segment, z. B. data_invalid) lag. Ohne Stand: nicht 'stale', sondern schlicht kein Stand."""
+    if not stand_at:
+        return False
+    s = str(stand_at)
+    return any(str(x) > s for x in (letzter_lauf_at, letzter_versuch_at) if x)
+
+
+def _privat_fahrzeug(l: Dict[str, Any]) -> Dict[str, Any]:
+    raus = {k: l.get(k) for k in PRIVAT_FAHRZEUGFELDER}
+    pr = raus.get("price_rating")
+    raus["price_rating"] = pr.get("rating") if isinstance(pr, dict) else pr
+    raus["ez_year"] = _ez_jahr(raus.get("first_registration"))
+    return raus
+
+
+def private_top_auswahl(heute: List[Dict[str, Any]], n: int = konfig.PRIVATE_TOP_N) -> Tuple[List[Dict[str, Any]], int]:
+    """(die n guenstigsten Privatangebote des Laufs in Preisreihenfolge, Anzahl Privatangebote im Sample).
+    seller_type muss ausdruecklich 'PRIVATE' sein — unbekannt/leer/DEALER zaehlt nie."""
+    privat = [h for h in heute if str((h.get("listing") or {}).get("seller_type") or "").strip().upper() == "PRIVATE"]
+    privat.sort(key=lambda h: (float(h["preis"]), int(h.get("rang") or 0)))
+    return privat[:max(0, int(n))], len(privat)
+
+
+async def private_deals_ableiten(db, segment: Dict[str, Any], heute: List[Dict[str, Any]], kz: Dict[str, Any],
+                                 tag: str, jetzt_iso: str, lauf_schluessel: str) -> Dict[str, Any]:
+    """Nach einem gueltigen Lauf: Privat-Top-3 des Segments fortschreiben (ein Dokument je Segment+Listing).
+    Wer herausfaellt, bleibt als Historie (currently_top3=False, left_top3_at); eine Preisaenderung eines
+    Top-3-Autos landet in price_history_top3 (hoechstens PRIVATE_PREISVERLAUF_MAX Eintraege).
+    Die Segmentstatistik bekommt private_top3 / private_anzahl_im_sample / private_stand_at."""
+    seg_id = segment["id"]
+    top, anzahl = private_top_auswahl(heute)
+    median = kz.get("median_price")
+    ids = [h["listing"]["listing_id"] for h in top]
+    vorher: Dict[str, Dict[str, Any]] = {}
+    if ids:
+        async for d in db[PRIVATE_DEALS].find({"segment_id": seg_id, "listing_id": {"$in": ids}}, {"_id": 0}):
+            vorher[str(d["listing_id"])] = d
+    zusammenfassung = []
+    for i, h in enumerate(top, 1):
+        l, preis = h["listing"], float(h["preis"])
+        alt = vorher.get(l["listing_id"])
+        alt_preis = float(alt.get("current_price") or 0) if alt else 0.0
+        diff = round(preis - float(median), 2) if median else None
+        pct = round(diff / float(median) * 100, 2) if (diff is not None and median) else None
+        erster = float(alt.get("first_price_top3")) if alt and alt.get("first_price_top3") is not None else preis
+        setzen: Dict[str, Any] = {**_privat_fahrzeug(l), "model_id": segment.get("model_id"), "version": int(segment.get("version") or 1),
+                                  "source": l["source"], "current_rank_private": i, "current_price": preis,
+                                  "last_seen_top3_at": jetzt_iso, "currently_top3": True, "segment_median": median,
+                                  "difference_to_segment_median_eur": diff, "difference_to_segment_median_pct": pct,
+                                  "rank_in_sample": int(h.get("rang") or 0), "observed_at": jetzt_iso, "run_tag": lauf_schluessel,
+                                  "price_change_since_first_eur": round(preis - erster, 2), "updated_at": jetzt_iso,
+                                  "segment_label": segment.get("label"), "km_label": segment.get("km_label"), "ez_label": segment.get("ez_label")}
+        aenderung: Dict[str, Any] = {
+            "$setOnInsert": {"id": uuid.uuid4().hex, "first_price_top3": preis, "first_entered_top3_at": jetzt_iso,
+                             "first_entered_top3_tag": tag, "created_at": jetzt_iso, "price_history_top3": [{"at": jetzt_iso, "price": preis}]},
+            "$set": setzen, "$min": {"best_rank_private": i, "lowest_price_seen": preis},
+            "$unset": {"left_top3_at": ""}}
+        if alt and alt_preis and alt_preis != preis:
+            # $setOnInsert und $push auf demselben Pfad kollidieren (auch ohne Insert) — Verlauf nur anhaengen
+            aenderung["$setOnInsert"].pop("price_history_top3", None)
+            aenderung["$push"] = {"price_history_top3": {"$each": [{"at": jetzt_iso, "price": preis}], "$slice": -konfig.PRIVATE_PREISVERLAUF_MAX}}
+            setzen["last_price_change_at"] = jetzt_iso
+            setzen["last_price_change_eur"] = round(preis - alt_preis, 2)
+            if preis < alt_preis:
+                setzen["last_reduced_at"], setzen["last_reduced_tag"] = jetzt_iso, tag
+        if alt and alt.get("currently_top3") is False:
+            setzen["reentered_top3_at"] = jetzt_iso
+        schl = {"segment_id": seg_id, "listing_id": l["listing_id"]}
+        await _einmal_wiederholen(lambda: db[PRIVATE_DEALS].update_one(schl, aenderung, upsert=True))
+        zusammenfassung.append({"listing_id": l["listing_id"], "price": preis, "rank_private": i})
+    # herausgefallen: bleibt als Historie erhalten
+    await db[PRIVATE_DEALS].update_many({"segment_id": seg_id, "currently_top3": True, "listing_id": {"$nin": ids}},
+                                        {"$set": {"currently_top3": False, "current_rank_private": None, "left_top3_at": jetzt_iso,
+                                                  "updated_at": jetzt_iso}})
+    await db[SEGMENTSTATS].update_one({"_id": seg_id}, {"$set": {"segment_id": seg_id, "private_top3": zusammenfassung,
+                                                                 "private_anzahl_im_sample": anzahl, "private_stand_at": jetzt_iso,
+                                                                 "private_stand_lauf": lauf_schluessel, "private_stand_tag": tag,
+                                                                 "private_stand_sample_size": int(kz.get("sample_size") or 0)}}, upsert=True)
+    return {"top3": zusammenfassung, "anzahl": anzahl}

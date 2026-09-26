@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from deps import current_admin, current_super_admin, db, log_activity_sicher
@@ -95,6 +95,33 @@ async def admin_market_listing(listing_id: str, _=Depends(current_admin)):
 async def admin_market_opportunities(typ: Optional[str] = None, model_id: Optional[str] = None, tage: int = 7,
                                      limit: int = 200, _=Depends(current_admin)):
     return {"chancen": await abfrage.chancen(db, typ=typ, model_id=model_id, tage=tage, limit=limit)}
+
+
+# ---------------------------------------------------------------- Private Deals (Ahmad 26.09.2026 abends)
+# NUR der Super-Admin: die 3 guenstigsten Privatangebote je Segment aus dem ohnehin abgerufenen Sample.
+# Nichts davon in /markt/chancen der Firmen oder in der Fahrzeugkarte.
+@router.get("/admin/market/private-deals")
+async def admin_market_private_deals(make: Optional[str] = None, model_id: Optional[str] = None, ez: Optional[int] = None,
+                                     km_min: Optional[int] = None, km_max: Optional[int] = None,
+                                     preis_von: Optional[float] = None, preis_bis: Optional[float] = None,
+                                     abstand_pct_max: Optional[float] = None, plz: Optional[str] = None,
+                                     nur_aktuell: bool = True, heute_neu: bool = False, preis_reduziert: bool = False,
+                                     sort: str = "abstand_pct", limit: int = Query(200, ge=1, le=500),
+                                     _=Depends(current_super_admin)):
+    if sort not in abfrage.PRIVATE_SORTIERUNGEN:
+        raise HTTPException(400, f"Unbekannte Sortierung — erlaubt: {', '.join(abfrage.PRIVATE_SORTIERUNGEN)}")
+    return await abfrage.private_deals(db, make=make, model_id=model_id, ez=ez, km_min=km_min, km_max=km_max,
+                                       preis_von=preis_von, preis_bis=preis_bis, abstand_pct_max=abstand_pct_max, plz=plz,
+                                       nur_aktuell=nur_aktuell, heute_neu=heute_neu, preis_reduziert=preis_reduziert,
+                                       sort=sort, limit=limit)
+
+
+@router.get("/admin/market/segments/{segment_id}/private-deals")
+async def admin_market_segment_private_deals(segment_id: str, _=Depends(current_super_admin)):
+    d = await abfrage.segment_private_deals(db, segment_id)
+    if not d:
+        raise HTTPException(404, "Segment nicht gefunden")
+    return d
 
 
 # ---------------------------------------------------------------- Suchauftraege (Auftrag v3)

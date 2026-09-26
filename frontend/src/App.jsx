@@ -146,6 +146,7 @@ const AdminMarkt = seite(() => import("@/pages/admin_v2/Markt"));
 const AdminMarktModell = seite(() => import("@/pages/admin_v2/MarktModell"));
 const AdminMarktChancen = seite(() => import("@/pages/admin_v2/MarktChancen"));
 const AdminMarktAuftraege = seite(() => import("@/pages/admin_v2/MarktAuftraege"));
+const AdminMarktPrivateDeals = seite(() => import("@/pages/admin_v2/MarktPrivateDeals"));
 
 import Vergleich from "@/pages/app/Vergleich";
 const ManuelleSuche = seite(() => import("@/pages/app/ManuelleSuche"));
@@ -314,6 +315,8 @@ export default function App() {
               <Route path="markt" element={<AdminMarkt />} />
               <Route path="markt/chancen" element={<AdminMarktChancen />} />
               <Route path="markt/auftraege" element={<AdminMarktAuftraege />} />
+              {/* Private Deals (Ahmad 26.09.2026 abends): nur Super-Admin — vor markt/:modell, sonst faengt der Modellpfad den Namen */}
+              <Route path="markt/private-deals" element={<AdminMarktPrivateDeals />} />
               <Route path="markt/:modell" element={<AdminMarktModell />} />
               <Route path="settings" element={<AdminSettings />} />
             </Route>

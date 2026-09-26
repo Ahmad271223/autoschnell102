@@ -108,3 +108,15 @@ export function seitErstbeobachtung(l) {
 }
 
 export const BEREICHE = [["7d", "7 Tage"], ["30d", "30 Tage"], ["90d", "90 Tage"], ["6m", "6 Monate"], ["1y", "1 Jahr"], ["alle", "Gesamt"]];
+
+/** Private Deals (Ahmad 26.09.2026 abends): Inserat-Link nur, wenn er sicher auf mobile.de (https) zeigt —
+ *  alles andere (leer, http, fremde Domain, "mobile.de.example.com") bekommt keinen Knopf. */
+export function mobileLink(url) {
+  if (!url || typeof url !== "string") return null;
+  return /^https:\/\/([a-z0-9-]+\.)*mobile\.de(\/|$)/i.test(url.trim()) ? url.trim() : null;
+}
+
+export const PRIVATE_SORTIERUNGEN = [
+  ["abstand_pct", "größter Abstand zum Segment-Median"], ["neueste", "neueste in der Top-3"], ["preis", "Preis aufsteigend"],
+  ["reduzierung", "stärkste Reduzierung"], ["standzeit", "längste Standzeit bei mobile.de"],
+];

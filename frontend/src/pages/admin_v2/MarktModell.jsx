@@ -8,7 +8,7 @@ import {
 import { api, errMsg } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { Card, Badge, Button, Spinner, EmptyState, fmtDate } from "./_ui";
-import { BEREICHE, DATENLAGE, bestandText, datumKurz, datumZeit, eur, pct, trendFarbe, trendText, zustandText } from "@/lib/markt";
+import { BEREICHE, DATENLAGE, bestandText, datumKurz, datumZeit, eur, mobileLink, pct, trendFarbe, trendText, zustandText } from "@/lib/markt";
 
 const GETRIEBE_TEXT = { AUTOMATIC_GEAR: "Automatik", MANUAL_GEAR: "Schaltgetriebe", SEMIAUTOMATIC_GEAR: "Halbautomatik" };
 // Review 26.09.2026 abends P1: Job-Status 'data_invalid' = Lauf lieferte unsortierte Daten, nichts gespeichert
@@ -169,6 +169,8 @@ function SegmentAnalyse({ segment, bereich, onBereich, superAdmin }) {
   const [fehler, setFehler] = useState("");
   const [offen, setOffen] = useState(null);       // Listing-Historie
   const [busy, setBusy] = useState(false);
+  // Private Deals (Ahmad 26.09.2026 abends): eigener Block nur fuer den Super-Admin; ein Fehler laesst das Segment stehen
+  const [privat, setPrivat] = useState(null);
 
   useEffect(() => {
     let aktiv = true;
@@ -177,8 +179,12 @@ function SegmentAnalyse({ segment, bereich, onBereich, superAdmin }) {
       api.get(`/admin/market/segments/${segment.id}/listings`),
     ]).then(([z, l]) => { if (aktiv) { setZusammen(z.data); setListings(l.data); setFehler(""); } })
       .catch((e) => { if (aktiv) setFehler(errMsg(e, "Segment konnte nicht geladen werden")); });
+    if (superAdmin) {
+      api.get(`/admin/market/segments/${segment.id}/private-deals`).then((r) => { if (aktiv) setPrivat(r.data); })
+        .catch(() => { if (aktiv) setPrivat(null); });
+    }
     return () => { aktiv = false; };
-  }, [segment.id]);
+  }, [segment.id, superAdmin]);
   useEffect(() => {
     let aktiv = true;
     api.get(`/admin/market/segments/${segment.id}/history`, { params: { range: bereich } })
@@ -251,6 +257,8 @@ function SegmentAnalyse({ segment, bereich, onBereich, superAdmin }) {
         )}
         <div className="mt-2 text-[10px] text-zinc-500">Durchschnitt und Median beziehen sich nur auf die beobachteten {zusammen.stats?.sample_size || segment.max_items || ""} günstigsten Angebote, nicht auf den Gesamtmarkt.</div>
       </Card>
+
+      {superAdmin && privat && <PrivatBlock privat={privat} segment={segment} />}
 
       {/* Zeitreihe */}
       <Card data-testid="markt-verlauf">
@@ -365,6 +373,47 @@ function SegmentAnalyse({ segment, bereich, onBereich, superAdmin }) {
       </Card>
       {offen && <ListingHistorie listingId={offen} onClose={() => setOffen(null)} />}
     </div>
+  );
+}
+
+/** Private Deals (Ahmad 26.09.2026 abends): die günstigsten Privatangebote im Sample dieses Segments —
+ *  "#1 … #2 … #3 …", "2 von 3" oder "keine Privatangebote unter den N günstigsten". Nur Super-Admin. */
+function PrivatBlock({ privat, segment }) {
+  const top = privat.top3 || [];
+  const n = privat.sample_size || segment.max_items || "N";
+  return (
+    <Card data-testid="markt-privat-block">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="text-[13px] font-semibold text-white">Günstigste Privatangebote im Sample
+          {top.length > 0 && top.length < 3 && <span className="ml-2 text-[11px] font-normal text-zinc-400" data-testid="markt-privat-anzahl">{top.length} von 3</span>}
+          {privat.stale && <span className="ml-2 text-[11px] font-normal" style={{ color: "var(--st-amber)" }} data-testid="markt-privat-stale">stale (letzter gültiger Lauf {datumZeit(privat.stand_at)})</span>}
+        </div>
+        <Link to="/admin/markt/private-deals" className="text-[11px] underline text-zinc-400 hover:text-white" data-testid="markt-privat-alle">alle Private Deals</Link>
+      </div>
+      {top.length === 0 ? (
+        <div className="mt-1 text-[12px] text-zinc-500" data-testid="markt-privat-leer">
+          {privat.stand_at ? `keine Privatangebote unter den ${n} günstigsten` : "noch kein gültiger Lauf"}
+        </div>
+      ) : (
+        <ul className="mt-1 space-y-0.5 text-[12px]">
+          {top.map((d) => {
+            const link = mobileLink(d.url);
+            return (
+              <li key={d.listing_id} className="tabular-nums flex flex-wrap items-center gap-x-2" data-testid={`markt-privat-${d.listing_id}`}>
+                <Badge tone={d.current_rank_private === 1 ? "green" : "blue"}>#{d.current_rank_private} PRIVAT</Badge>
+                <span className="text-white">{eur(d.current_price)}</span>
+                <span className="text-zinc-400">{d.title || d.listing_id} · {d.mileage_km?.toLocaleString("de-DE")} km · EZ {d.first_registration} · {[d.postal_code, d.city].filter(Boolean).join(" ")}</span>
+                <span style={{ color: trendFarbe(d.difference_to_segment_median_eur) }}>{d.difference_to_segment_median_eur == null ? "" : `${trendText(d.difference_to_segment_median_eur)} (${pct(d.difference_to_segment_median_pct)}) zum Median`}</span>
+                {d.heute_neu && <Badge tone="green">heute neu</Badge>}
+                {d.preis_reduziert && <Badge tone="yellow">Preis reduziert</Badge>}
+                {link && <a href={link} target="_blank" rel="noopener noreferrer" className="underline text-zinc-300" data-testid={`markt-privat-link-${d.listing_id}`}>Inserat öffnen</a>}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      <div className="mt-1 text-[10px] text-zinc-500">{privat.anzahl_im_sample != null ? `${privat.anzahl_im_sample} Privatangebot(e) unter den ${n} günstigsten · ` : ""}aus dem vorhandenen Sample, kein eigener Crawl.</div>
+    </Card>
   );
 }
 

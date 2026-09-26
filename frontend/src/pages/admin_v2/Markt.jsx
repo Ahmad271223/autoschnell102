@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { BarChart3, RefreshCw, Play, Pause, Settings2, Radar, AlertTriangle, ListPlus } from "lucide-react";
+import { BarChart3, RefreshCw, Play, Pause, Settings2, Radar, AlertTriangle, ListPlus, UserRound } from "lucide-react";
 import { toast } from "sonner";
 import { api, errMsg } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
@@ -26,6 +26,9 @@ export default function Markt() {
   const [fehler, setFehler] = useState("");
   const [busy, setBusy] = useState("");
   const [konfigOffen, setKonfigOffen] = useState(false);
+  // Private Deals (Ahmad 26.09.2026 abends): nur die Zusammenfassung fuer die Kachel — ein Fehler hier
+  // (z. B. kein Super-Admin) laesst die Seite nicht scheitern
+  const [privat, setPrivat] = useState(null);
 
   const laden = async () => {
     try {
@@ -34,8 +37,12 @@ export default function Markt() {
       setStatus(s.data);
       setFehler("");
     } catch (e) { setFehler(errMsg(e, "Marktanalyse konnte nicht geladen werden")); }
+    if (superAdmin) {
+      try { const p = await api.get("/admin/market/private-deals", { params: { limit: 1 } }); setPrivat(p.data?.zusammenfassung || null); }
+      catch { setPrivat(null); }
+    }
   };
-  useEffect(() => { laden(); }, []);
+  useEffect(() => { laden(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const aktion = async (name, fn, erfolg) => {
     setBusy(name);
@@ -61,6 +68,7 @@ export default function Markt() {
                     <Button variant="outline" size="sm" onClick={laden}><RefreshCw size={14} /> Aktualisieren</Button>
                     <Button variant="outline" size="sm" onClick={() => setKonfigOffen((o) => !o)} data-testid="markt-konfig-oeffnen"><Settings2 size={14} /> Bereiche & Budget</Button>
                     <Link to="/admin/markt/chancen" data-testid="markt-chancen-link"><Button variant="outline" size="sm"><Radar size={14} /> Chancen</Button></Link>
+                    {superAdmin && <Link to="/admin/markt/private-deals" data-testid="markt-private-deals-link"><Button variant="outline" size="sm"><UserRound size={14} /> Private Deals</Button></Link>}
                     <Link to="/admin/markt/auftraege" data-testid="markt-auftraege-link"><Button size="sm"><ListPlus size={14} /> Suchaufträge</Button></Link>
                   </div>} />
 
@@ -132,6 +140,19 @@ export default function Markt() {
           </div>
         )}
       </Card>
+
+      {superAdmin && privat && (
+        <Card className="mb-4" data-testid="markt-private-deals-kachel">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[13px]">
+            <div>
+              <span className="font-semibold text-white inline-flex items-center gap-1.5"><UserRound size={14} /> Private Deals:</span>
+              <span className="ml-2 text-zinc-300">{privat.aktuelle_top3 ?? 0} aktuelle Top-3 · {privat.heute_neu ?? 0} heute neu · {privat.heute_reduziert ?? 0} heute reduziert</span>
+              <span className="ml-2 text-[11px] text-zinc-500">({privat.segmente_mit_deals ?? 0} von {privat.segmente_aktiv ?? 0} Segmenten mit Privatangeboten — aus dem vorhandenen Sample, keine Zusatzkosten)</span>
+            </div>
+            <Link to="/admin/markt/private-deals" data-testid="markt-private-deals-oeffnen"><Button size="sm" variant="outline">öffnen</Button></Link>
+          </div>
+        </Card>
+      )}
 
       {konfigOffen && <KonfigKarte status={status} superAdmin={superAdmin} onGespeichert={laden} />}
 
