@@ -7,7 +7,7 @@ import { api } from "@/lib/api";
  * der Aufruf scheitert, gilt "aus" — abgeschaltete Bereiche zeigen
  * "Demnaechst verfuegbar" statt einer halben Seite.
  */
-const STANDARD = { marktplatz: false };
+const STANDARD = { marktplatz: false, markt_chancen: false };
 /** Nach einem Fehlschlag fragt eine offene Seite nach dieser Zeit erneut. */
 export const FEATURES_NEU_VERSUCH_MS = 30000;
 let cache = null;

@@ -6,7 +6,7 @@ import SeiteLaedt from "@/components/SeiteLaedt";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   Car, FileText, Calendar, Users, Settings as SettingsIcon, ShieldCheck,
-  Layers, LogOut, Activity, Search, Warehouse, Inbox, ClipboardCheck,
+  Layers, LogOut, Activity, Search, Warehouse, Inbox, ClipboardCheck, Radar,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { startseite } from "@/lib/rollen";
@@ -21,6 +21,8 @@ import RechtsLinks from "@/components/RechtsLinks";
 const NAV = [
   { to: "/app/vergleich", label: "Vergleich", icon: Activity },
   { to: "/app/suche", label: "Manuelle Suche", icon: Search },
+  // Market Intelligence (25.09.2026): Chancen aus der Marktbeobachtung (Schalter markt_chancen)
+  { to: "/app/markt/chancen", label: "Markt · Chancen", icon: Radar, feature: "markt_chancen" },
   { to: "/app/vertraege", label: "Verträge / PDFs", icon: FileText },
   // Rollenprüfung 22.09.2026 (RP-464): Zahl der Fahrten, die ein Fahrer
   // abgelehnt hat und die noch keinen neuen Fahrer haben (nur Chef).
@@ -59,7 +61,8 @@ export default function AppLayout({ children }) {
   const items = user?.role === "admin"
     ? [{ to: "/admin", label: "Admin", icon: ShieldCheck }]
     : NAV.filter((it) => !(it.haendlerOnly && user?.role === "sucher")
-                         && (it.to !== "/app/anfragen" || features.marktplatz));
+                         && (it.to !== "/app/anfragen" || features.marktplatz)
+                         && (!it.feature || features[it.feature]));
 
   // Runde 33 (Wunsch Ahmad): Warten Fahrer beim Verkaeufer auf die Freigabe,
   // soll man das auf JEDER Seite merken — Zahl im Menue, im Tab-Titel und ein

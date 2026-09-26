@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
+import MarktdatenKarte from "@/components/MarktdatenKarte";
 import { lokalerSpeicher, sitzungsSpeicher } from "@/lib/speicher";
 import { thumbSrc } from "@/lib/bilder";
 import {
@@ -997,6 +998,12 @@ export default function Vergleich() {
               <BeweisCard key={result.beweis?.id || result.cache_key}
                           beweis={result.beweis} cacheKey={result.cache_key}
                           moeglich={result.beweis_moeglich !== false} />
+            )}
+            {/* Market Intelligence (25.09.2026): laedt NACH dem fertigen Vergleich
+                getrennt, kurzes Zeitlimit, verschwindet still ohne Daten. */}
+            {result.vehicle_id && (
+              <MarktdatenKarte key={`markt-${result.cache_key || result.vehicle_id}`}
+                               vehicleId={result.vehicle_id} preis={result.vehicle.list_price} />
             )}
 
             <div className="text-[11px] leading-relaxed px-1" style={{ color: "var(--text-muted)" }}>

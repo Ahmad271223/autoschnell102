@@ -94,7 +94,9 @@ def test_router_und_routen_tragen_den_schalter():
     # Oberflaeche: Schalter-Seiten und Ausblendungen
     front = BACKEND.parent / "frontend" / "src"
     app = (front / "App.jsx").read_text(encoding="utf-8")
-    assert app.count("<FeatureGate ") == 4
+    # 4 Marktplatz-Schalter + 1 Markt-Chancen-Schalter (Market Intelligence, 26.09.2026)
+    assert app.count("<FeatureGate ") == 5
+    assert app.count('feature="markt_chancen"') == 1
     for datei, muster in (("components/AppLayout.jsx", 'it.to !== "/app/anfragen" || features.marktplatz'),
                           ("pages/app/Bestand.jsx", "features.marktplatz && ["),
                           ("pages/app/FahrzeugAkte.jsx", "features.marktplatz && !sucher"),

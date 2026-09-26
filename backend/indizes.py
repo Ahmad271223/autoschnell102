@@ -941,3 +941,37 @@ async def ki_indizes(db) -> dict:
         erg["fehler"] = str(exc)[:200]
         await _index_fehlt(db, "index_fehlt", "ki_bewertungen", fehler=str(exc)[:200])
     return erg
+
+
+async def markt_indizes(db) -> dict:
+    """Market Intelligence (25.09.2026): eigene Sammlungen, eigene Indizes.
+    Listings einmalig je Quelle+ID, ein Snapshot je Listing/Segment/Tag, ein
+    Job je Segment/Tag, Chancen dedupliziert. Idempotent, wirft nie."""
+    erg = {}
+    try:
+        await db.market_models.create_index("id", unique=True, name="markt_modell_id")
+        await db.market_segments.create_index("id", unique=True, name="markt_segment_id")
+        await db.market_segments.create_index([("model_id", 1), ("enabled", 1)], name="markt_segment_modell")
+        await db.market_listings.create_index([("source", 1), ("listing_id", 1)], unique=True, name="markt_listing_quelle_id")
+        await db.market_listings.create_index([("last_segment_id", 1), ("active_state", 1)], name="markt_listing_segment_zustand")
+        await db.market_listings.create_index([("active_state", 1), ("not_seen_since", 1)], name="markt_listing_zustand_zeit")
+        await db.market_listings.create_index("model_id", name="markt_listing_modell")
+        await db.market_listing_snapshots.create_index([("listing_id", 1), ("segment_id", 1), ("date", 1)], unique=True,
+                                                       name="markt_snapshot_je_tag")
+        await db.market_listing_snapshots.create_index([("segment_id", 1), ("date", -1)], name="markt_snapshot_segment_tag")
+        await db.market_listing_snapshots.create_index([("listing_id", 1), ("date", 1)], name="markt_snapshot_listing")
+        await db.market_segment_daily_stats.create_index([("segment_id", 1), ("date", -1)], unique=True, name="markt_tagesstat")
+        await db.market_crawl_jobs.create_index([("segment_id", 1), ("tag", 1)], unique=True, name="markt_job_je_tag")
+        await db.market_crawl_jobs.create_index([("status", 1), ("scheduled_at", 1)], name="markt_job_status_zeit")
+        await db.market_crawl_jobs.create_index("id", unique=True, name="markt_job_id")
+        await db.market_crawl_jobs.create_index([("tag", 1), ("status", 1)], name="markt_job_tag_status")
+        await db.market_opportunities.create_index([("listing_id", 1), ("typ", 1), ("date", 1)], unique=True, name="markt_chance_je_tag")
+        await db.market_opportunities.create_index([("created_at", -1)], name="markt_chance_zeit")
+        await db.market_opportunities.create_index([("segment_id", 1), ("created_at", -1)], name="markt_chance_segment")
+        await db.market_opportunities.create_index([("model_id", 1), ("created_at", -1)], name="markt_chance_modell")
+        erg["ok"] = True
+    except Exception as exc:  # noqa: BLE001
+        erg["fehler"] = str(exc)[:200]
+        await _index_fehlt(db, "index_fehlt", "market_*", fehler=str(exc)[:200])
+    return erg
+

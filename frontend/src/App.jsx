@@ -142,6 +142,10 @@ const AdminSettings = seite(() => import("@/pages/admin_v2/Settings"));
 const AdminAutoDaten = seite(() => import("@/pages/admin_v2/AutoDaten"));
 const AdminFahrer = seite(() => import("@/pages/admin_v2/Fahrer"));
 const AdminBetrieb = seite(() => import("@/pages/admin_v2/Betrieb"));
+const AdminMarkt = seite(() => import("@/pages/admin_v2/Markt"));
+const AdminMarktModell = seite(() => import("@/pages/admin_v2/MarktModell"));
+const AdminMarktChancen = seite(() => import("@/pages/admin_v2/MarktChancen"));
+const AdminMarktAuftraege = seite(() => import("@/pages/admin_v2/MarktAuftraege"));
 
 import Vergleich from "@/pages/app/Vergleich";
 const ManuelleSuche = seite(() => import("@/pages/app/ManuelleSuche"));
@@ -156,6 +160,7 @@ const Team = seite(() => import("@/pages/app/Team"));
 const Einstellungen = seite(() => import("@/pages/app/Einstellungen"));
 const Anfragen = seite(() => import("@/pages/app/Anfragen"));
 const Freigaben = seite(() => import("@/pages/app/Freigaben"));
+const Chancen = seite(() => import("@/pages/app/Chancen"));
 
 const DriverLogin = seite(() => import("@/pages/driver/DriverLogin"));
 const DriverLayout = seite(() => import("@/pages/driver/DriverLayout"));
@@ -269,6 +274,8 @@ export default function App() {
             {/* Go-Live-Schalter (15.09.2026): Marktplatz + Inserieren zeigen "Demnaechst verfuegbar" */}
             <Route path="/app/anfragen" element={<WrapFree><FeatureGate bereich="Der Bereich Kaufanfragen" zurueck="/app/bestand"><Anfragen /></FeatureGate></WrapFree>} />
             <Route path="/app/akte/:id" element={<WrapFree><FahrzeugAkte /></WrapFree>} />
+            {/* Market Intelligence (25.09.2026): Chancen nur mit Schalter MARKT_CHANCEN_AKTIV */}
+            <Route path="/app/markt/chancen" element={<Wrap><FeatureGate feature="markt_chancen" bereich="Der Bereich Markt-Chancen" zurueck="/app/vergleich"><Chancen /></FeatureGate></Wrap>} />
             <Route path="/app/inserat/:id" element={<WrapFree><FeatureGate bereich="Das Inserieren" zurueck="/app/bestand"><Inserat /></FeatureGate></WrapFree>} />
             <Route path="/app/fahrer" element={<WrapFree><Fahrer /></WrapFree>} />
             <Route path="/app/team" element={<WrapFree><Team /></WrapFree>} />
@@ -304,6 +311,10 @@ export default function App() {
               <Route path="freischaltungen" element={<AdminFreischaltungen />} />
               <Route path="auto-daten" element={<AdminAutoDaten />} />
               <Route path="betrieb" element={<AdminBetrieb />} />
+              <Route path="markt" element={<AdminMarkt />} />
+              <Route path="markt/chancen" element={<AdminMarktChancen />} />
+              <Route path="markt/auftraege" element={<AdminMarktAuftraege />} />
+              <Route path="markt/:modell" element={<AdminMarktModell />} />
               <Route path="settings" element={<AdminSettings />} />
             </Route>
 

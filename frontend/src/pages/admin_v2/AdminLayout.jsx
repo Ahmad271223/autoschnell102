@@ -7,7 +7,7 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import {
   LayoutDashboard, Users, GitCompareArrows, Activity, Settings, LogOut,
-  ScrollText, AlertTriangle, KeyRound, Car, Truck,
+  ScrollText, AlertTriangle, KeyRound, Car, Truck, BarChart3,
 } from "lucide-react";
 
 /**
@@ -32,6 +32,8 @@ const NAV = [
   // normale Admins zusätzlich mit 403).
   { to: "/admin/auto-daten",  label: "Auto-Daten",    icon: Car, superOnly: true },
   { to: "/admin/betrieb",     label: "Betrieb",       icon: Activity, superOnly: true },
+  // Market Intelligence (25.09.2026): Marktanalyse der beobachteten Modelle
+  { to: "/admin/markt",       label: "Marktanalyse",  icon: BarChart3, superOnly: true },
   { to: "/admin/settings",    label: "Einstellungen", icon: Settings },
 ];
 

@@ -3,6 +3,7 @@ import { monatJahrFehler } from "@/lib/monatJahr";
 import { useUngespeichert } from "@/lib/ungespeichert";
 import { useEffect, useRef, useState } from "react";
 import { api, errMsg } from "@/lib/api";
+import { useMarktHinweis } from "@/components/MarktdatenKarte";
 import { blobOeffnen } from "@/lib/dateiOeffnen";
 import { toast } from "sonner";
 import { useAuth } from "@/context/AuthContext";
@@ -260,6 +261,8 @@ function anfangsFormular(v, dealer, heute) {
 export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCreated }) {
   const { dealer, refresh, user } = useAuth();
   const v = vehicle || {};
+  // Market Intelligence (25.09.2026): optionaler Hinweis, blockiert nichts
+  const markt = useMarktHinweis(vehicleId, open);
   // Runde 22 (11.09.2026, Nachprüfung): Vorgabe fürs Empfangsdatum einmal
   // beim Öffnen festhalten — set() vergleicht damit (siehe unten).
   const [heute] = useState(todayLocalIso);
@@ -945,6 +948,11 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                   <div className="text-[11px] mt-1 leading-snug" data-testid="contract-price-erkannt"
                        style={{ color: preis.fehler ? "var(--accent-red)" : "var(--text-secondary)" }}>
                     {preis.fehler ? preis.fehler : `= ${preisText(preis.betrag)}`}
+                  </div>
+                )}
+                {markt?.median_top20_price != null && (
+                  <div className="text-[11px] mt-1 leading-snug" data-testid="contract-markt-hinweis" style={{ color: "var(--text-secondary)" }}>
+                    Top-20-Median aktuell {preisText(markt.median_top20_price)} ({markt.km_label}{markt.ez_label ? `, ${markt.ez_label}` : ""}) · günstigstes {preisText(markt.min_price)} · nur Orientierung
                   </div>
                 )}
               </div>

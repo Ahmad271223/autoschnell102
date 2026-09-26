@@ -3359,3 +3359,95 @@ Abo. Der Betreiber macht das in der Firmenansicht (Admin → Nutzer → Firma) i
 - **Fachprüfung sichtbar:** Position zeigt „Fachprüfung erforderlich – Betrag unbekannt, Risiko ggf.
   erheblich“; Gesamtkarte roter Kasten „n Positionen ohne Betrag … die vier Werte und der Zielpreis decken sie
   NICHT ab“; Zielpreis-Zeile trägt „(ohne die Fachprüfungs-Positionen)“.
+
+## Market Intelligence (Auftrag Ahmad 25./26.09.2026) — eigene mobile.de-Marktbeobachtung
+
+**Grundsatz:** vollständig getrennt vom schnellen Hauptweg. Vergleich, Vertrag, PDF, Versand, Fahrer und Freigaben
+lesen höchstens fertige Daten aus den `market_*`-Sammlungen (eine Karte im Vergleich, eine Hinweiszeile im Vertrag)
+und warten nie auf einen Crawl. Fällt Apify, Budget oder Scheduler aus, verschwinden nur die Karten.
+
+**Was beobachtet wird:** je Segment = Modell × EZ-Jahr × km-Bereich (Auftrag v2: Standard 5 einzelne EZ-Jahre 2018–2022, je Modell über `ez_years` überschreibbar, 5 km-Bereiche bis 150.000 km; Segment-ID `bmw-320d:2019:50001-85000`) die **20 günstigsten** passenden Angebote
+(mobile.de-Suche mit Modell-ID, Kraftstoff, optional kW-Bereich, km, EZ, `dam=0`, Preis aufsteigend). Die
+Sortierung wurde im Probelauf bestätigt und wird bei jedem Lauf geprüft (`sorted_confirmed`); ist sie es nicht,
+wird lokal sortiert und ein Alarm `markt_sortierung_unsicher` gesetzt. Kennzahlen heißen deshalb bewusst
+„Top-20-Median“, „günstigstes“, „untere Marktpreisspanne“ — nie „Marktmedian“.
+
+**Scraper (Probeläufe 26.09.2026, gleiche Suche, 20 Treffer):**
+| | scrapesmith~mobile-de-scraper (Standard) | sourabhbgp~mobile-de-scraper (Ersatz) |
+|---|---|---|
+| Kosten je Lauf | 0,019 $ (0,005 Start + 20 × 0,0007; Apify bucht die Zeilen erst kurz NACH dem Lauf — Kosten werden aus `chargedEventCounts` gerechnet) | 0,064 $ (0,004 + 20 × 0,003) |
+| Dauer | 9–12 s | 17–30 s |
+| Eingabe | `startUrls: [{url}]`, `maxItems`, `includeFullDetails` | `startUrls: [url]`, `maxItems` (global!) |
+| Besonderes | searchPosition, makeId/modelId, HSN/TSN, Detailseiten ohne Aufpreis | Preisbewertung mit Schwellen |
+**Bündel (Probe 26.09.2026):** bis zu `MARKT_BUENDEL_GROESSE` (10) Segmente in EINEM Lauf mit `maxItemsPerQuery`; jede Zeile trägt
+`inputContext` = ihre Start-URL, die Zuordnung Zeile → Segment ist damit eindeutig (unbekannte Kontexte werden verworfen,
+Alarm `markt_zuordnung_unklar`). 4 Segmente in einem Lauf: 80 Zeilen, je exakt 20, sortiert, EZ/km exakt, 8,6 s.
+Mit 1.250 Segmenten täglich: 125 Starts + 25.000 Zeilen ≈ 18 $/Tag ≈ 550 $/Monat (Starter-Tarif).
+`MARKT_APIFY_ACTOR` / `MARKT_APIFY_ACTOR_ERSATZ`: scheitert der Standard (Fehler oder 0 Treffer), läuft einmal der
+Ersatz (nicht bei Token-/Guthabenfehlern; Bündel dann je URL einzeln). Detailseiten standardmäßig aus (`MARKT_APIFY_DETAILS`). Der Normalisierer versteht beide Formen. Kostenschätzung je Scraper in
+`markt.konfig.kosten_je_lauf_usd`; abgerechnet werden die echten Kosten des Laufs (`usageTotalUsd`).
+
+**Sammlungen (alle neu):** `market_models` (Startliste aus `markt/katalog.py`, 62 Modelle, mobile.de-IDs aus
+`mobile_makes_models.json`), `market_config` (km-/EZ-Bereiche, Zeilen), `market_segments`, `market_crawl_jobs`
+(Lease/Retry/Dedupe je Segment und Tag), `market_listings` (ein Datensatz je Quelle+ID: first_seen/last_seen,
+first_price/current_price, price_history, Zustand), `market_listing_snapshots` (je Listing/Segment/Tag: Preis,
+Rang, Preisänderung, Bewertung), `market_segment_daily_stats` (Tagesaggregat: min/median/avg/max/p25/p75),
+`market_segment_stats` (aktuell + 7/30-Tage-Trend + Datenlage), `market_opportunities` (Chancen),
+`market_crawler_budget` (je Monat: budget/reserved/used/rows/runs). Indizes: `indizes.markt_indizes`.
+
+**Zustände:** `seen` → `not_seen_in_sample` (heute nicht mehr unter den 20 günstigsten — **kein Verkauf**) →
+nach `MARKT_ENTFERNUNG_NACH_TAGEN` Tagen gezielte Einzelprüfung (`verification_pending`, ein Lauf mit Detail-URL,
+max. `MARKT_ENTFERNUNG_MAX_JE_TAG`/Tag) → `confirmed_removed` („Inserat nicht mehr online“, nie „verkauft“).
+
+**Planung/Taktung:** Worker-Schleife `markt` (nur mit `MARKT_AKTIV=true`, in `server.on_start`), einmal je Tag
+Segmente synchronisieren + Tagesplan (Mongo-Sperre `markt-plan-<tag>`). Die Taktung rechnet sich aus dem Budget:
+`ceil(Segmente × Kosten je Lauf × 30,4 / Budget)` Tage je Segment (`MARKT_CRAWL_INTERVALL_TAGE` > 0 setzt sie
+fest). Die fälligen Segmente (am längsten nicht geplant zuerst) werden über das Fenster
+`MARKT_CRAWL_FENSTER_VON`–`_BIS` (deutsche Zeit) verteilt, `MARKT_JOBS_PARALLEL` gleichzeitig. Mit scrapesmith:
+62 Modelle × 4 km × 4 EZ = ~990 Segmente × 0,005 $ ≈ 5 $/Tag → jedes Segment **täglich** bei 450 $ Budget.
+
+**Chancen (regelbasiert, ohne KI):** neu und unter bisherigem Minimum (`neues_minimum`), neu und unter p25
+(`neu_guenstig`), Reduktion ≥ `MARKT_CHANCE_REDUKTION_PROZENT` oder ≥ `_EUR` (`stark_reduziert`), neu in die
+Top-N (`neu_top5`). Dedupe je Listing/Typ/Tag.
+
+**Routen:** Firmen (nur lesend): `GET /market-intelligence/vehicle/{id}` (Karte; 404 statt Fehler),
+`GET /markt/chancen`, `GET /markt/modelle` (beide nur mit `MARKT_CHANCEN_AKTIV=true`, sonst 404 → „Demnächst“).
+Admin: `GET /admin/market/status|models|models/{id}|segments/{id}/summary|history?range=|listings|listings/{id}/history|opportunities`;
+Super-Admin: `POST /admin/market/models/{id}/enabled`, `PUT /admin/market/config` (km-/EZ-Bereiche, Zeilen,
+Budget), `POST /admin/market/sync`, `POST /admin/market/plan[?sofort=true]`, `POST /admin/market/segments/{id}/crawl-now`,
+`POST /admin/market/worker/einmal` (ein Takt im Vordergrund, auch ohne MARKT_AKTIV), `POST /admin/market/jobs/{id}/cancel`.
+Monitoring (`abfrage.monitoring`, in `/admin/market/status`): Jobs heute, Zeilen/Kosten heute und Monat, Budget übrig, mittlere
+Laufzeit, letzter Erfolg; Alarme: Segment > 48 h nicht aktualisiert, Fehlerquote ≥ 20 %, Budget ≥ 80/95 %, 0-Treffer-Läufe,
+Sortierung unsicher, Token fehlt. Admin → Marktanalyse → Chancen zeigt den Deal Radar (`/admin/market/opportunities`).
+
+**Oberfläche:** Vergleich → rechte Spalte „AutoSchnell Marktdaten“ (lädt getrennt, 8 s Zeitlimit, ohne Daten
+unsichtbar); Vertragsdialog → Zeile „Top-20-Median aktuell …“ unter dem Kaufpreis (nie Pflicht, entscheidet
+nichts); Admin → **Marktanalyse** (Modelle mit Kennzahlen, Status, Budget, Taktung, Konfiguration) → Modell →
+km- und EZ-Segment → Kennzahlen, Zeitreihe (Minimum/Median/Durchschnitt, p25–p75-Band), Tagesveränderung,
+Auswertung (größter Anstieg/Rückgang, Tage fallend/steigend), Wochenmediane, Tagestabelle, aktuelle Top-20,
+Preis-Historie je Listing; App → **Markt · Chancen** (Menüpunkt nur mit `markt_chancen`-Schalter aus `/features`).
+
+**Inbetriebnahme (nach dem Deploy):**
+1. `APIFY_TOKEN` ist gesetzt (derselbe wie für den Vergleich).
+2. Admin → Marktanalyse → „Startliste & Segmente aufbauen“; Modelle prüfen, ggf. pausieren; unter „Bereiche &
+   Budget“ km-/EZ-Bereiche und Monatsbudget setzen.
+3. Testlauf: bei einem Segment „Jetzt crawlen“, dann „Einen Takt jetzt ausführen“ (kostet echtes Budget) — Daten
+   erscheinen sofort in der Segmentanalyse.
+4. Dauerbetrieb: `MARKT_AKTIV=true` (per `deploy/env_setzen.sh`), Container neu starten. Ab dann täglich im Fenster.
+5. Chancen für die Firmen freigeben: `MARKT_CHANCEN_AKTIV=true`.
+
+**Suchaufträge (Auftrag v3, 26.09.2026) — Marktanalysen ohne Entwickler:** Admin → Marktanalyse → **Suchaufträge**.
+Der Super-Admin legt Marktanalysen selbst an: Marke und Modell aus dem mobile.de-Katalog (`GET /admin/market/katalog`),
+Variante, Kraftstoff, Getriebe, kW-Bereich, Verkäuferart, Land, PLZ/Radius; EZ-Jahre (Mehrfachauswahl oder von–bis, jedes
+Jahr ein eigenes Segment), km-Bereiche frei (von < bis, keine Überschneidung), Zeilen je Segment (1–100), Abrufe je Tag
+(1–4, bei 2 ≈ 12 h Abstand). Vor dem Speichern: **Kostenprognose** (`POST /admin/market/prognose`, deterministisch:
+Segmente = EZ × km, Zeilen/Tag = Segmente × Zeilen × Abrufe, Kosten aus Läufen × Start + Zeilen × Zeilenpreis, Vergleich
+mit dem Monatsbudget, rote Warnung + Rückfrage beim Aktivieren) und **Testlauf** (`POST /admin/market/testlauf`, 5 Treffer
+des ersten Segments mit EZ-/km-/Sortierprüfung, kostet Budget). Aktionen: Bearbeiten (`PUT /admin/market/models/{id}`),
+Pausieren/Aktivieren/Archivieren (`POST …/status`; Archivieren bricht wartende Jobs ab und löscht NIE Historie),
+Duplizieren (`POST …/duplicate`, Konfiguration wird übernommen). Jede Marktanalyse trägt ihre eigene Konfiguration
+(`ez_years`, `km_buckets`, `rows`, `crawls_per_day`, `status`), die zentralen Werte sind nur Vorbelegung. Die 52
+Startmodelle (`markt/katalog.py`) sind ein Seed („Startliste & Segmente aufbauen“), keine Grenze. Standard 52 × 4 EZ × 4 km
+× 20 Zeilen × 2 Abrufe ≈ 998.400 Zeilen/Monat ≈ 700 $ (Starter) — der Kostenrechner zeigt es an; `MARKT_CRAWLS_JE_TAG`.
+Segmentanalyse zeigt Datenqualität (Daten seit, Tage, erfolgreiche/erwartete Crawls, Sample-Größe) und die
+Segmentübersicht des Modells (letzter/nächster Crawl, N, Min, Median, Ø, Trends, Fehler).

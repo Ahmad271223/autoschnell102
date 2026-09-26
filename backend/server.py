@@ -62,6 +62,8 @@ from routes import dealer as dealer_routes
 from routes import drivers as drivers_routes
 from routes import listings as listings_routes
 from routes import manual_search as manual_search_routes
+from routes import markt as markt_routes
+from routes import markt_admin as markt_admin_routes
 from routes import protocols as protocols_routes
 from routes import resale as resale_routes
 from routes import team as team_routes
@@ -461,7 +463,8 @@ async def features():
     Oberflaeche blendet abgeschaltete Bereiche aus und zeigt dort
     'Demnaechst verfuegbar' (Go-Live-Schalter 15.09.2026)."""
     from konfig import marktplatz_aktiv
-    return {"marktplatz": marktplatz_aktiv()}
+    from markt import konfig as markt_konfig
+    return {"marktplatz": marktplatz_aktiv(), "markt_chancen": markt_konfig.chancen_aktiv()}
 
 
 @api.get("/health")
@@ -1563,8 +1566,9 @@ async def ensure_indexes():
     from indizes import konto_indizes
     await konto_indizes(db)
     # KI-Bewertung (26.09.2026): ein Eintrag je Protokoll und Stand, Kosten je Monat
-    from indizes import ki_indizes
+    from indizes import ki_indizes, markt_indizes
     await ki_indizes(db)
+    await markt_indizes(db)
     try:
         from kontenanlage import konten_ohne_nummer
         ohne = await konten_ohne_nummer(db)
@@ -1903,6 +1907,18 @@ async def on_start():
     except Exception as exc:
         log.warning("beweis worker start failed: %s", exc)
         WORKER_STATUS["beweise"] = {"laeuft": False, "neustarts": 0, "letzter_fehler": str(exc)[:300]}
+    # Market Intelligence (25.09.2026): taegliche mobile.de-Marktbeobachtung —
+    # eigene Warteschlange, eigenes Budget; laeuft nur mit MARKT_AKTIV=true.
+    # Ein Ausfall hier beruehrt Vergleich, Vertrag, PDF und Versand nicht.
+    try:
+        from markt import jobs as markt_jobs
+        from markt import konfig as markt_konfig
+        if markt_konfig.aktiv():
+            WORKER_TAKT_S["markt"] = 60
+            _worker_starten("markt", lambda: markt_jobs.worker_forever(db, erfolg=lambda: worker_erfolg("markt")))
+    except Exception as exc:
+        log.warning("markt worker start failed: %s", exc)
+        WORKER_STATUS["markt"] = {"laeuft": False, "neustarts": 0, "letzter_fehler": str(exc)[:300]}
     # Cleanup-Loop für Assets nach Abholung (7d) bzw. Nicht-Abholung (14d).
     try:
         _worker_starten("aufraeumen", lambda: run_cleanup_forever(db))
@@ -2109,6 +2125,9 @@ api.include_router(contracts_routes.router)
 api.include_router(appointments_routes.router)
 api.include_router(drivers_routes.router)
 api.include_router(listings_routes.router)
+# Market Intelligence (25.09.2026): nur lesend, getrennt vom Hauptweg
+api.include_router(markt_routes.router)
+api.include_router(markt_admin_routes.router)
 api.include_router(manual_search_routes.router)
 api.include_router(bestand_routes.router)
 api.include_router(resale_routes.router, dependencies=[Depends(marktplatz_freigeschaltet)])
