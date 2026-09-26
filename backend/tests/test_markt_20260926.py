@@ -87,7 +87,11 @@ def test_02_normalisierung_ohne_verkaeuferdaten_und_sortierpruefung():
     items = [_item("t1", 9990), _item("t2", 7190), _item("t2", 7190), {"id": "t3"}, _item("t4", 12000),
              {**_item("t5", 5000), "hasDamage": True}, {**_item("t6", 5100), "isDamageCase": True},
              {**_item("t7", 5200), "condition": "Unfallfahrzeug"}]      # Wunsch Ahmad 26.09.: nie Unfallautos
-    assert NORM.beschaedigt({"hasDamage": "true"}) and not NORM.beschaedigt({"hasDamage": False, "condition": "Used vehicle"})
+    assert NORM.beschaedigt({"hasDamage": "true"}) and NORM.beschaedigt({"hasDamage": 1}) and NORM.beschaedigt({"condition": "Accident damaged"})
+    assert not NORM.beschaedigt({"hasDamage": False, "condition": "Used vehicle"}) and not NORM.beschaedigt({"hasDamage": 0})
+    assert not NORM.beschaedigt({"condition": "not damaged"}) and not NORM.beschaedigt({"condition": "accident free"}) and not NORM.beschaedigt({"condition": "unfallfrei"})
+    # Entfernungspruefung: beschaedigt heisst NICHT "nicht mehr online"
+    assert len(NORM.listings_aus_items([{**_item("t8", 5000), "hasDamage": True}], beschaedigte_verwerfen=False)) == 1
     ls = NORM.listings_aus_items(items)
     assert not any(l["listing_id"] in ("t5", "t6", "t7") for l in ls), "beschaedigte Zeilen verworfen"
     assert [l["listing_id"] for l in ls] == ["t1", "t2", "t4"], "ohne Preis raus, Dublette raus, Reihenfolge bleibt"
@@ -165,6 +169,7 @@ def test_04_entfernung_nur_nach_pruefung(welt, monkeypatch):
     kand = welt.run(ENT.kandidaten(db, 10))
     assert {k["listing_id"] for k in kand} >= {f"t{s}x", f"t{s}y"}
     assert welt.run(ENT.pruefen(db, {"source": "mobile", "listing_id": f"t{s}x", "url": "https://suchen.mobile.de/fahrzeuge/details.html?id=1"})) == "confirmed_removed"
+    antworten["2"] = [{**antworten["2"][0], "hasDamage": True}]      # Review 26.09. Nr. 1: online, aber jetzt beschaedigt
     assert welt.run(ENT.pruefen(db, {"source": "mobile", "listing_id": f"t{s}y", "url": "https://suchen.mobile.de/fahrzeuge/details.html?id=2"})) == "not_seen_in_sample"
     x = welt.run(db[K.LISTINGS].find_one({"listing_id": f"t{s}x"}, {"_id": 0}))
     y = welt.run(db[K.LISTINGS].find_one({"listing_id": f"t{s}y"}, {"_id": 0}))

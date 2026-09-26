@@ -32,7 +32,9 @@ async def pruefen(db, listing: Dict[str, Any]) -> str:
         await db[LISTINGS].update_one({"source": listing["source"], "listing_id": listing["listing_id"]},
                                       {"$set": {"active_state": "not_seen_in_sample", "verification_error": e.art}})
         return "unklar"
-    items = normalisieren.listings_aus_items(r["items"])
+    # Nur die Frage "noch online?" — ein inzwischen als beschaedigt markiertes Inserat ist
+    # trotzdem online (Review 26.09.2026 Nr. 1: sonst faelschlich confirmed_removed).
+    items = normalisieren.listings_aus_items(r["items"], beschaedigte_verwerfen=False)
     await budget.abrechnen(db, res, r.get("usd"), len(items))
     if not items:
         await db[LISTINGS].update_one({"source": listing["source"], "listing_id": listing["listing_id"]},

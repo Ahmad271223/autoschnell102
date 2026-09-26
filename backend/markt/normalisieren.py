@@ -70,13 +70,20 @@ def beschaedigt(item: Dict[str, Any]) -> bool:
     sourabhbgp: damaged/accident, Freitext 'Unfallfahrzeug' im Zustand)."""
     for k in ("hasDamage", "isDamageCase", "damaged", "damageCase", "accident", "accidentDamaged", "isAccidentDamaged"):
         w = item.get(k)
-        if w is True or (isinstance(w, str) and w.strip().lower() in ("true", "yes", "ja", "1")):
+        if w is True or (isinstance(w, (int, float)) and not isinstance(w, bool) and w == 1):
+            return True
+        if isinstance(w, str) and w.strip().lower() in ("true", "yes", "ja", "1"):
             return True
     zustand = str(item.get("condition") or item.get("damageCondition") or "").lower()
+    if not zustand:
+        return False
+    # Verneinungen zuerst ("not damaged", "accident free", "unfallfrei") — sonst falsch positiv
+    if any(v in zustand for v in ("not damaged", "undamaged", "accident free", "accident-free", "unfallfrei", "kein unfall", "no damage")):
+        return False
     return "unfall" in zustand or "damaged" in zustand or "accident" in zustand
 
 
-def listing_aus_item(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def listing_aus_item(item: Dict[str, Any], *, beschaedigte_verwerfen: bool = True) -> Optional[Dict[str, Any]]:
     """None, wenn keine ID oder kein Bruttopreis (dann unbrauchbar).
     Versteht beide Scraper: sourabhbgp (priceGross, power "135 kW (184 PS)",
     fuel/gearbox, seller{type}, zip/location, priceRating{...}) und
@@ -84,9 +91,10 @@ def listing_aus_item(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     "Dealer"/"Private Seller", sellerAddress, priceRating "GOOD_PRICE",
     searchPosition, makeId/modelId, vinHsn/vinTsn)."""
     lid = item.get("id") or item.get("listingId")
-    if beschaedigt(item):
+    if beschaedigte_verwerfen and beschaedigt(item):
         # Wunsch Ahmad 26.09.2026: nie Unfall-/beschaedigte Autos unter den guenstigsten —
         # die URL sagt schon dam=0, das hier ist die zweite Sicherung je Zeile.
+        # NICHT bei der Entfernungspruefung (entfernung.py): dort heisst "Zeile da" nur "noch online".
         return None
     preis = _int(item.get("priceGross"))
     if not preis:
@@ -140,13 +148,13 @@ def listing_aus_item(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     }
 
 
-def listings_aus_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def listings_aus_items(items: List[Dict[str, Any]], *, beschaedigte_verwerfen: bool = True) -> List[Dict[str, Any]]:
     """In Suchreihenfolge (= Preis aufsteigend), Dubletten je ID entfernt.
     Liefert der Scraper eine Positionsnummer (searchPosition — mit Detailseiten
     kommen die Zeilen sonst in Abrufreihenfolge), gilt diese Reihenfolge."""
     raus, gesehen = [], set()
     for it in items or []:
-        l = listing_aus_item(it)
+        l = listing_aus_item(it, beschaedigte_verwerfen=beschaedigte_verwerfen)
         if not l or l["listing_id"] in gesehen:
             continue
         gesehen.add(l["listing_id"])
