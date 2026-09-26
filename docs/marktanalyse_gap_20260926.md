@@ -1,7 +1,7 @@
 # GAP-Analyse Marktanalyse gegen Master-Auftrag (26.09.2026, HEAD 35d7699)
 
 Zielspezifikation: Ahmads Master-Auftrag vom 26.09.2026 abends (Fahrzeug-Masterliste 170 Modelle,
-EXACT_KM + ALL_KM je EZ, Datenqualität ≠ Markttiefe, sample_completeness UNKNOWN, Reporting 5/15/Monat,
+6 km-Segmente je EZ (ALL_KM am 26.09. abends von Ahmad gestrichen), Datenqualität ≠ Markttiefe, sample_completeness UNKNOWN, Reporting 5/15/Monat,
 Hot Deals, Segment Health, Optimierung in Stufen). Nur Lesung, Zeilenangaben Stand 35d7699.
 
 ## Status je Anforderung
@@ -16,7 +16,7 @@ Hot Deals, Segment Health, Optimierung in Stufen). Nur Lesung, Zeilenangaben Sta
 | A3 | Karte: Region/Karosserie nur mit Daten | VOLLSTÄNDIG | abfrage.modelle_fuer_fahrzeug |
 | A4 | sample_completeness UNKNOWN, keine geratenen Felder | FEHLT (Verstoß) | normalisieren.markt_gesamt rät Feldnamen; kein Key-Protokoll |
 | A5a | EZ einzeln, sechs km | VOLLSTÄNDIG | konfig, synchronisieren |
-| A5b | ALL_KM-Referenz je EZ | FEHLT | segment_id/bucket_fuer_km int(None); km_bereiche_pruefen; kein segment_scope |
+| A5b | ALL_KM-Referenz je EZ | GESTRICHEN (Ahmad 26.09. abends) | keine Referenzsegmente, keine ALL_KM-Crawls |
 | A5c | km-Profile je Modell | FEHLT | Seed nimmt KM_BUCKETS_STANDARD für alle |
 | A6 | Reporting 5/15/Monat persistent | FEHLT | nur rollierender segment_verlauf; keine Sammlung, keine Blöcke, keine Confidence |
 | A7 | Hot-Deal-Finder | FEHLT | chancen_ableiten = Tagesvergleich, je Tag neues Dokument, keine Klassen/Events |
@@ -31,19 +31,21 @@ Hot Deals, Segment Health, Optimierung in Stufen). Nur Lesung, Zeilenangaben Sta
 | A15 | idempotent/lock-sicher | VOLLSTÄNDIG (Bestand) | Claims, Leases, Segment-Sperre, Merker |
 | A16 | Module/Sammlungen | FEHLT | reporting/health/deals/optimierung existieren nicht |
 
-## Kosten Masterliste (170 Modelle, Ø 3,5 EZ × 7 Segmente, 5 Zeilen + Puffer 7, 1×/Tag)
+## Kosten Masterliste (170 Modelle, Ø 3,5 EZ × 6 km-Segmente, 5 Zeilen, 1×/Tag) — NUR Crawls
 
 | | 3 EZ | 3,5 EZ | 4 EZ |
 |---|---|---|---|
-| Segmente | 3.570 | 4.165 | 4.760 |
-| $/Monat | 586 | 684 | 781 |
-| davon ALL_KM | 84 | 98 | 112 |
+| Segmente | 3.060 | 3.570 | 4.080 |
+| $/Monat mit Puffer +2 (7 Zeilen) | 502 | 586 | 670 |
+| $/Monat mit Puffer +1 (6 Zeilen) | 437 | 510 | 583 |
+| $/Monat ohne Puffer (5 Zeilen) | 373 | 435 | 497 |
 
-Ohne Puffer (exakt 5 Zeilen) ≈ 506 $ bei 3,5 EZ. DB-Wachstum ≈ 20 MB/Tag. Reporting nur Lesen.
+Dazu Entfernungsprüfung ≈ 9 $/Monat. **Berichte (5/15/Monat), Diagramme, Trends, Hot Deals = 0 Crawls** (nur DB/Rechenarbeit).
+DB-Wachstum ≈ 18 MB/Tag.
 
 ## Phasen
 
-A Masterliste/Katalog + Migration 18 (needs_review, DEPRECATED = archived) → B EXACT_KM/ALL_KM (segment_scope, Migration 19)
+A Masterliste/Katalog + Migration 18 (needs_review, DEPRECATED = archived) → B (entfällt: ALL_KM gestrichen; nur Architekturtest „Auswertung löst nie Crawls aus“)
 → C Tagesbasis + data_quality/market_depth/sample_completeness (Migration 20, Actor-Key-Protokoll)
 → D Hot Deals (markt/deals.py, market_hot_deals) → E Reporting (markt/reporting.py, market_model_reports)
 → F Health + Proposals OBSERVE (markt/health.py, optimierung.py) → G SAFE_AUTO.
