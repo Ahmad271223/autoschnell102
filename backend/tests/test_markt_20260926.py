@@ -84,8 +84,12 @@ def test_01_such_url_preis_aufsteigend_km_ez_kraftstoff(welt):
 
 
 def test_02_normalisierung_ohne_verkaeuferdaten_und_sortierpruefung():
-    items = [_item("t1", 9990), _item("t2", 7190), _item("t2", 7190), {"id": "t3"}, _item("t4", 12000)]
+    items = [_item("t1", 9990), _item("t2", 7190), _item("t2", 7190), {"id": "t3"}, _item("t4", 12000),
+             {**_item("t5", 5000), "hasDamage": True}, {**_item("t6", 5100), "isDamageCase": True},
+             {**_item("t7", 5200), "condition": "Unfallfahrzeug"}]      # Wunsch Ahmad 26.09.: nie Unfallautos
+    assert NORM.beschaedigt({"hasDamage": "true"}) and not NORM.beschaedigt({"hasDamage": False, "condition": "Used vehicle"})
     ls = NORM.listings_aus_items(items)
+    assert not any(l["listing_id"] in ("t5", "t6", "t7") for l in ls), "beschaedigte Zeilen verworfen"
     assert [l["listing_id"] for l in ls] == ["t1", "t2", "t4"], "ohne Preis raus, Dublette raus, Reihenfolge bleibt"
     l = ls[0]
     assert l["price_gross"] == 9990 and l["power_kw"] == 140 and l["power_ps"] == 190 and l["mileage_km"] == 70000

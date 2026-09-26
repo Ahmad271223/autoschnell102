@@ -65,6 +65,17 @@ def _preisbewertung_text(rating: Any, label: Any, offset: Any) -> Optional[Dict[
             "offset": _int(offset) if offset not in (None, "") else None}
 
 
+def beschaedigt(item: Dict[str, Any]) -> bool:
+    """Unfall-/beschaedigtes Fahrzeug laut Scraper (scrapesmith: hasDamage/isDamageCase,
+    sourabhbgp: damaged/accident, Freitext 'Unfallfahrzeug' im Zustand)."""
+    for k in ("hasDamage", "isDamageCase", "damaged", "damageCase", "accident", "accidentDamaged", "isAccidentDamaged"):
+        w = item.get(k)
+        if w is True or (isinstance(w, str) and w.strip().lower() in ("true", "yes", "ja", "1")):
+            return True
+    zustand = str(item.get("condition") or item.get("damageCondition") or "").lower()
+    return "unfall" in zustand or "damaged" in zustand or "accident" in zustand
+
+
 def listing_aus_item(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """None, wenn keine ID oder kein Bruttopreis (dann unbrauchbar).
     Versteht beide Scraper: sourabhbgp (priceGross, power "135 kW (184 PS)",
@@ -73,6 +84,10 @@ def listing_aus_item(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     "Dealer"/"Private Seller", sellerAddress, priceRating "GOOD_PRICE",
     searchPosition, makeId/modelId, vinHsn/vinTsn)."""
     lid = item.get("id") or item.get("listingId")
+    if beschaedigt(item):
+        # Wunsch Ahmad 26.09.2026: nie Unfall-/beschaedigte Autos unter den guenstigsten —
+        # die URL sagt schon dam=0, das hier ist die zweite Sicherung je Zeile.
+        return None
     preis = _int(item.get("priceGross"))
     if not preis:
         p = item.get("price")
