@@ -3732,3 +3732,9 @@ Links nur zu mobile.de), Karte auf der Marktanalyse-Seite, Block „Günstigste 
 Segmentanalyse. Routen `GET /admin/market/private-deals`, `GET /admin/market/segments/{id}/private-deals`. Nichts davon
 in `/markt/chancen` oder der Fahrzeugkarte.
 
+**Chancen nur Privatangebote (Wunsch Ahmad 26.09.2026 spät abends; Commit e10bafe):** Chancen (Deal Radar, Admin →
+Marktanalyse → Chancen und — falls `MARKT_CHANCEN_AKTIV` an — `/markt/chancen`) entstehen nur noch für **Privatangebote,
+die im Lauf zu den 3 günstigsten Privatangeboten ihres Segments gehören** (dieselbe Auswahl wie Private Deals). Händlerautos
+— auch stark reduzierte auf Platz 4/5 — sind keine Chance mehr. Die Chance trägt `privat_rang` (1–3); der Leseweg zeigt ältere
+Chancen ohne Privat-Rang nicht mehr (sie bleiben in der Datenbank). Kein Deploy-Schritt nötig. Achtung beim späteren
+Einschalten von `MARKT_CHANCEN_AKTIV`: die Firmen sähen dann Privatangebote (ohne Namen/Telefon/Koordinaten, nur PLZ/Ort).
