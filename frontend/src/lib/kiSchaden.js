@@ -251,6 +251,34 @@ export function schadenZeile(d) {
   return teile.join(" – ") + (s ? ` – ${s}` : "") + note;
 }
 
+/** Kurzname eines Schadens für Rückfrage-Bezug und Auswahllisten:
+ *  "Delle · Tür vorne links" (wie routes.protocols.schaden_bezeichnung). */
+export function schadenBezeichnung(d) {
+  if (d?.bezeichnung) return String(d.bezeichnung).trim();   // Kurzform aus /protocols/rueckfragen-offen
+  const art = String(d?.type_label || d?.label || d?.type_key || d?.type || "Schaden").trim();
+  const ort = String(d?.zone || d?.part_label || d?.part || "").trim();
+  return ort ? `${art} · ${ort}` : art;
+}
+
+/**
+ * Entscheidung Ahmad 26.09.2026 (Rückfrage-Dialog): Worauf bezieht sich die
+ * Rückfrage des Chefs? Der Server setzt source_label ("Schaden: …" /
+ * "KI-Position: …"); ältere Fragen ohne Text werden aus den Schäden des
+ * Protokolls bzw. den KI-Positionen aufgelöst. Leer = allgemeine Frage.
+ */
+export function rueckfrageBezug(frage, schaeden = [], kiPositionen = []) {
+  if (!frage) return "";
+  const text = String(frage.source_label || "").trim();
+  if (text) return text;
+  const sid = String(frage.source_id || "");
+  if (!sid) return "";
+  const s = (schaeden || []).find((d) => String(d?.id || "") === sid);
+  if (s) return `Schaden: ${schadenBezeichnung(s)}`;
+  const k = (kiPositionen || []).find((it) => String(it?.source_id || "") === sid);
+  if (k) return `KI-Position: ${String(k.title || sid).trim()}`;
+  return sid.startsWith("dev:") ? "KI-Position" : "";
+}
+
 /** Fingerabdruck der Schäden (Art, Bauteil, Zusatzangaben) — ändert er sich
  *  nach einer Bewertung, ist die Karte veraltet. */
 export function schaedenStand(damages) {

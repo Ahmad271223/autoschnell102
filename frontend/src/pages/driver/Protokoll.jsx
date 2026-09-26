@@ -14,7 +14,7 @@ import {
 import SignaturePad from "@/components/SignaturePad";
 import DamageSelector from "@/components/DamageSelector";
 import KiFahrerKarte from "@/components/KiFahrerKarte";
-import { alleVollstaendig, schwereOffen } from "@/lib/kiSchaden";
+import { alleVollstaendig, rueckfrageBezug, schwereOffen } from "@/lib/kiSchaden";
 import {
   LEERER_ENTWURF, entwurfAusServer, entwurfZusammenfuehren, istAnnahmeFehlt, istRevisionsKonflikt,
   nutzlast, nutzlastText, preisVorschlagLesen,
@@ -205,8 +205,16 @@ export default function Protokoll() {
   // Nr. 125: keine erfundenen Knöpfe — ohne Optionen antwortet der Fahrer als Text.
   const rueckfrageOptionen = rueckfrageFrage?.options?.length ? rueckfrageFrage.options : null;
   const rueckfrageVerlauf = Array.isArray(data?.protocol?.rueckfrage_verlauf) ? data.protocol.rueckfrage_verlauf : [];
+  // Entscheidung Ahmad 26.09.2026: Bezug der Frage ("Schaden: Delle · Tür vorne links" /
+  // "KI-Position: …") — vom Server (source_label), sonst aus den eigenen Schäden.
+  const rueckfrageBezugText = rueckfrageBezug(rueckfrageFrage, f.new_damages || []);
   // Review 26.09.2026 (Nr. 101-105): "davon vereinbart" kommt vom Server (Vertrag).
-  const schluesselVereinbart = data?.protocol?.keys_expected ?? data?.template?.keys_expected ?? null;
+  // Altbestand: ein leerer Fahrerwert ("") im Protokoll zählt nicht, dann gilt der Vertrag.
+  const schluesselVereinbart = [data?.protocol?.keys_expected, data?.template?.keys_expected]
+    .find((v) => v !== null && v !== undefined && v !== "") ?? null;
+  // Entscheidung Ahmad 26.09.2026: fehlt der Wert im Vertrag, blockiert nichts —
+  // die App sagt es und der Fahrer trägt nur die erhaltene Anzahl ein.
+  const schluesselFehlt = schluesselVereinbart === null || data?.template?.schluessel_vereinbart_fehlt === true;
   // Rollenprüfung 22.09.2026 (RP-059/RP-158): Ort und Verkäufername friert
   // der Server beim Abschicken ein, der Abschluss nimmt genau diese Werte
   // (protocols.py: doc.place/seller_name vor dem Wert aus der App). Vorher
@@ -820,17 +828,26 @@ export default function Protokoll() {
           </div>
         </div>
       )}
-      {!!rueckfrage && !gesperrt && (
+      {/* Entscheidung Ahmad 26.09.2026: auch eine strukturierte Frage OHNE
+          Notiz zeigt den Kasten (vorher nur bei Notiztext). */}
+      {(!!rueckfrage || !!rueckfrageFrage) && !gesperrt && (
         <div className="mt-4 rounded-xl border px-4 py-3 text-sm flex items-start gap-2"
              data-testid="protokoll-rueckfrage"
              style={{ borderColor: "#ff3b3055", background: "#ff3b3014", color: "var(--st-rot)" }}>
           <AlertTriangle size={16} className="mt-0.5 shrink-0" />
           <div className="flex-1">
-            Der Händler bittet um eine Ergänzung: {rueckfrage}
+            {rueckfrage ? `Der Händler bittet um eine Ergänzung: ${rueckfrage}` : "Der Händler hat eine Rückfrage:"}
             {/* Stufe 3 KI (26.09.2026): Antwort per Knopf statt Freitext */}
             {rueckfrageFrage && (
               <div className="mt-2" data-testid="protokoll-rueckfrage-frage">
                 <div className="font-semibold">{rueckfrageFrage.question}</div>
+                {rueckfrageBezugText && (
+                  // Entscheidung 26.09.2026: "zu Schaden: Delle · Tür vorne links" / "zu KI-Position …"
+                  <div className="text-[12px]" data-testid="protokoll-rueckfrage-bezug"
+                       style={{ color: "var(--text-secondary)" }}>
+                    zu {rueckfrageBezugText}
+                  </div>
+                )}
                 {rueckfrageOptionen ? (
                   <div className="mt-1.5 flex flex-wrap gap-2">
                     {rueckfrageOptionen.map((o) => {
@@ -875,12 +892,15 @@ export default function Protokoll() {
             Frühere Rückfragen des Händlers ({rueckfrageVerlauf.length})
           </summary>
           <ul className="mt-2 space-y-1 text-[12px]">
-            {rueckfrageVerlauf.map((r, i) => (
-              <li key={r?.frage?.frage_id || i}>
-                {r?.frage?.question}{" "}
-                <b>{(r?.antworten || []).map((a) => a?.answer).filter(Boolean).join(", ") || "—"}</b>
-              </li>
-            ))}
+            {rueckfrageVerlauf.map((r, i) => {
+              const bezug = rueckfrageBezug(r?.frage, f.new_damages || []);
+              return (
+                <li key={r?.frage?.frage_id || i}>
+                  {r?.frage?.question}{bezug ? <span className="text-zinc-500"> ({bezug})</span> : null}{" "}
+                  <b>{(r?.antworten || []).map((a) => a?.answer).filter(Boolean).join(", ") || "—"}</b>
+                </li>
+              );
+            })}
           </ul>
         </details>
       )}
@@ -1008,11 +1028,18 @@ export default function Protokoll() {
           <div>
             {/* Review 26.09.2026 (Nr. 101-105): Sollwert aus dem Kaufvertrag — nur Anzeige */}
             <label className="text-[11px] text-zinc-500">laut Vertrag vereinbart</label>
-            <div className={inputCls} style={st} data-testid="protokoll-schluessel-vereinbart">
-              {schluesselVereinbart === null || schluesselVereinbart === "" ? "—" : String(schluesselVereinbart)}
+            <div className={inputCls} data-testid="protokoll-schluessel-vereinbart"
+                 style={schluesselFehlt ? { ...st, color: "var(--st-amber)" } : st}>
+              {schluesselFehlt ? "nicht im Vertrag hinterlegt" : String(schluesselVereinbart)}
             </div>
           </div>
         </div>
+        {schluesselFehlt && (
+          // Entscheidung Ahmad 26.09.2026: kein Blockieren — nur die erhaltene Anzahl eintragen
+          <div className="mt-1.5 text-[12px]" style={{ color: "var(--st-amber)" }} data-testid="protokoll-schluessel-hinweis">
+            Im Kaufvertrag steht keine Schlüsselanzahl — trag nur ein, wie viele du erhalten hast.
+          </div>
+        )}
       </Section>
 
       {/* 3 Ausstattung */}

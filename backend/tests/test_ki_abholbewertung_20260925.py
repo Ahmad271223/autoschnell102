@@ -240,7 +240,7 @@ def test_03_bewertung_wird_abgelegt_bereinigt_und_priorisiert(welt, monkeypatch)
     erg2 = welt.run(K.bewertung_ausfuehren(pid, w.dealer_id))
     assert erg2["input_hash"] == erg["input_hash"] and len(aufrufe) == 1
     gespeichert = welt.run(db.ki_bewertungen.find_one({"protocol_id": pid}, {"_id": 0}))
-    assert gespeichert["status"] == "ok" and gespeichert["prompt_version"] == "abholung_v5"
+    assert gespeichert["status"] == "ok" and gespeichert["prompt_version"] == K.schemas.PROMPT_VERSION
     assert "Vera" not in str(gespeichert.get("eingabe")) and "lease_until" not in gespeichert
     _aufraeumen(welt)
 

@@ -14,7 +14,9 @@ A7  Zustand vs. Technik-Mangel: keine Doppelposition; Ueberlappung gedeckelt (90
 A8  fremde Positionen nie in combined — auch mit Attrappe (92-94)
 A9  "Schaeden bestaetigt = Nein" ohne Details -> Position, niedrig, Hinweis (95/96)
 A10 Reparaturkosten hoechstens 150 % des Preises (97)
-A11 Hash nur mit aktuellen Antworten (99)
+A11 KI sieht ALLE Rueckfragerunden; der Verlauf aendert den Hash, der
+    Zeitstempel nicht (Entscheidung Ahmad 26.09.2026, ersetzt Nr. 99)
+A16 Schluessel ohne Sollwert im Vertrag: kein dev:keys, nur Hinweis (Entscheidung 26.09.)
 A12 Lernfall: vorlaeufig bei Freigabe, endgueltig beim Abschluss, verworfen
     bei Storno, ersetzt bei neuer Fassung, unsicher bei "moeglich" (76-78, 100, 117, 118)
 A13 Fahrer-GET rechnet nie (79/80)
@@ -382,34 +384,84 @@ def test_a10_reparaturkosten_hoechstens_150_prozent():
     assert S.bereinigen(roh, kaufpreis=None)["items"][0]["repair_estimate_eur"] == 25000.0
 
 
-# ------------------------------------------------ A11 Hash nur mit aktuellen Antworten
-def test_a11_hash_nur_aktuelle_antworten(welt, monkeypatch):
+# ------------------------------------------------ A11 KI sieht alle Rueckfragerunden (Entscheidung 26.09.)
+def test_a11_ki_sieht_alle_rueckfragerunden_und_verlauf_aendert_hash(welt, monkeypatch):
+    """Entscheidung Ahmad 26.09.2026 (ersetzt Nr. 99 "nur aktuelle Antworten"):
+    driver_answers = ganzer Verlauf + aktuelle Antworten, chronologisch mit
+    runde; der Verlauf geht in den Hash; nur der Zeitstempel nicht."""
     K = _attrappe(monkeypatch)
     _cid, _tid, _vid, pid = _welt_aufbauen(welt, "a11")
     w, db = welt.w, welt.db
     grund = welt.run(K._grundlagen(pid, w.dealer_id))
     h0 = K.eingabe_hash(K.paket_bauen(*grund))
-    alt = [{"source_id": "d1", "question": "Lack?", "answer": "ja", "frage_id": "f1"}]
-    neu = [{"source_id": "d1", "question": "Lack?", "answer": "nein", "frage_id": "f2"}]
-    # ohne frage_id am Protokoll: die frage_id der letzten Antwort zaehlt
-    welt.run(db.pickup_protocols.update_one({"id": pid}, {"$set": {"rueckfrage_antworten": alt + neu}}))
-    grund = welt.run(K._grundlagen(pid, w.dealer_id))
-    paket = K.paket_bauen(*grund)
-    assert paket["driver_answers"] == [{"source_id": "d1", "question": "Lack?", "answer": "nein"}]
-    h_neu = K.eingabe_hash(paket)
-    # nur die alte Antwort dazu -> derselbe Hash wie mit neu allein
-    welt.run(db.pickup_protocols.update_one({"id": pid}, {"$set": {"rueckfrage_antworten": neu}}))
-    assert K.eingabe_hash(K.paket_bauen(*welt.run(K._grundlagen(pid, w.dealer_id)))) == h_neu != h0
-    # aktuelle frage_id am Protokoll gewinnt
-    welt.run(db.pickup_protocols.update_one({"id": pid}, {"$set": {"rueckfrage_antworten": alt + neu, "rueckfrage_frage_id": "f1"}}))
+    f1 = {"frage_id": "f1", "source_id": "d1", "question": "Lack?", "options": ["ja", "nein"]}
+    f2 = {"frage_id": "f2", "source_id": "d1", "question": "Lack?", "options": ["ja", "nein"]}
+    alt = [{"frage_id": "f1", "source_id": "d1", "question": "Lack?", "answer": "ja", "at": "2026-09-26T10:00:00+00:00"}]
+    neu = [{"frage_id": "f2", "source_id": "d1", "question": "Lack?", "answer": "nein", "at": "2026-09-26T11:00:00+00:00"}]
+    verlauf1 = [{"frage": f1, "antworten": alt, "abgeschickt_am": "2026-09-26T10:05:00+00:00"}]
+    # Runde 1 im Verlauf, Runde 2 (offene Frage) mit Antwort in rueckfrage_antworten
+    welt.run(db.pickup_protocols.update_one({"id": pid}, {"$set": {
+        "rueckfrage_verlauf": verlauf1, "rueckfrage_frage": f2, "rueckfrage_antworten": neu}}))
     paket = K.paket_bauen(*welt.run(K._grundlagen(pid, w.dealer_id)))
-    assert paket["driver_answers"][0]["answer"] == "ja"
-    # ohne frage_ids: je source_id die letzte Antwort
-    welt.run(db.pickup_protocols.update_one({"id": pid}, {"$set": {"rueckfrage_antworten": [
-        {"source_id": "d1", "question": "Lack?", "answer": "ja"}, {"source_id": "d1", "question": "Lack?", "answer": "nein"},
-        {"source_id": "k1", "question": "Tiefe?", "answer": "tief"}]}, "$unset": {"rueckfrage_frage_id": ""}}))
+    assert paket["driver_answers"] == [
+        {"runde": 1, "source_id": "d1", "question": "Lack?", "answer": "ja", "at": "2026-09-26T10:00:00+00:00"},
+        {"runde": 2, "source_id": "d1", "question": "Lack?", "answer": "nein", "at": "2026-09-26T11:00:00+00:00"}]
+    h_beide = K.eingabe_hash(paket)
+    assert h_beide != h0
+    # nur die aktuelle Antwort (ohne Verlauf) -> ANDERER Hash: der Verlauf ist Teil der Wahrheit
+    welt.run(db.pickup_protocols.update_one({"id": pid}, {"$set": {"rueckfrage_verlauf": []}}))
     paket = K.paket_bauen(*welt.run(K._grundlagen(pid, w.dealer_id)))
-    assert [(a["source_id"], a["answer"]) for a in paket["driver_answers"]] == [("d1", "nein"), ("k1", "tief")]
+    assert paket["driver_answers"] == [
+        {"runde": 1, "source_id": "d1", "question": "Lack?", "answer": "nein", "at": "2026-09-26T11:00:00+00:00"}]
+    h_nur_neu = K.eingabe_hash(paket)
+    assert h_nur_neu not in (h0, h_beide)
+    # derselbe Inhalt mit neuem Zeitstempel -> gleicher Hash (erneutes Speichern loest nichts aus)
+    welt.run(db.pickup_protocols.update_one({"id": pid}, {"$set": {
+        "rueckfrage_antworten": [{**neu[0], "at": "2026-09-26T12:00:00+00:00"}]}}))
+    assert K.eingabe_hash(K.paket_bauen(*welt.run(K._grundlagen(pid, w.dealer_id)))) == h_nur_neu
+    # nach dem Abschicken liegt Runde 2 im Verlauf UND in rueckfrage_antworten -> nicht doppelt
+    welt.run(db.pickup_protocols.update_one({"id": pid}, {"$set": {
+        "rueckfrage_verlauf": verlauf1 + [{"frage": f2, "antworten": neu, "abgeschickt_am": "2026-09-26T11:05:00+00:00"}],
+        "rueckfrage_antworten": neu}, "$unset": {"rueckfrage_frage": ""}}))
+    paket = K.paket_bauen(*welt.run(K._grundlagen(pid, w.dealer_id)))
+    assert [(a["runde"], a["answer"]) for a in paket["driver_answers"]] == [(1, "ja"), (2, "nein")]
+    assert K.eingabe_hash(paket) == h_beide
+    # Altbestand ohne frage_ids: alle Antworten chronologisch, Frage/Bezug aus der Runde ergaenzt
+    welt.run(db.pickup_protocols.update_one({"id": pid}, {"$set": {
+        "rueckfrage_verlauf": [{"frage": {"source_id": "d1", "question": "Lack?"},
+                               "antworten": [{"answer": "ja"}], "abgeschickt_am": "2026-09-26T09:00:00+00:00"}],
+        "rueckfrage_antworten": [{"source_id": "d1", "question": "Lack?", "answer": "ja"},
+                                 {"source_id": "d1", "question": "Lack?", "answer": "nein"},
+                                 {"source_id": "k1", "question": "Tiefe?", "answer": "tief"}]}}))
+    paket = K.paket_bauen(*welt.run(K._grundlagen(pid, w.dealer_id)))
+    assert [(a["runde"], a["source_id"], a["answer"]) for a in paket["driver_answers"]] == [
+        (1, "d1", "ja"), (2, "d1", "nein"), (2, "k1", "tief")]
+    assert paket["driver_answers"][0]["at"] == "2026-09-26T09:00:00+00:00"
+    # der Prompt sagt der KI, dass die neueste Antwort je Frage gilt
+    assert "neueste Antwort je Frage gilt" in K.SYSTEM_PROMPT and "driver_answers" in K.SYSTEM_PROMPT
+    _aufraeumen(welt)
+
+
+# ------------------------------------------------ A16 Schluessel ohne Sollwert (Entscheidung 26.09.)
+def test_a16_schluessel_ohne_vertragswert_nur_hinweis(welt, monkeypatch):
+    K = _attrappe(monkeypatch)
+    _cid, _tid, _vid, pid = _welt_aufbauen(welt, "a16")
+    w, db = welt.w, welt.db
+    doc, appt, vehicle, contract = welt.run(K._grundlagen(pid, w.dealer_id))
+    # mit Sollwert: Position dev:keys
+    paket = K.paket_bauen({**doc, "keys_count": 1, "keys_expected": 2},
+                          appt, vehicle, {**contract, "schluessel_anzahl": "2"})
+    assert any(d["id"] == "dev:keys" and d["missing"] == 1 for d in paket["deviations"])
+    assert not any("nicht hinterlegt" in h for h in paket["manual_hints"])
+    # ohne Sollwert (Vertrag und Protokoll): keine Position, nur Hinweis
+    ohne = {k: v for k, v in contract.items() if k != "schluessel_anzahl"}
+    paket = K.paket_bauen({**doc, "keys_count": 1, "keys_expected": None}, appt, vehicle, ohne)
+    assert not any(d["id"] == "dev:keys" for d in paket["deviations"])
+    assert any("Schlüsselanzahl im Vertrag nicht hinterlegt" in h and "erhalten: 1" in h
+               for h in paket["manual_hints"])
+    # ohne Fahrerangabe: gar nichts
+    paket = K.paket_bauen({**doc, "keys_count": None, "keys_expected": None}, appt, vehicle, ohne)
+    assert not any("nicht hinterlegt" in h for h in paket["manual_hints"])
     _aufraeumen(welt)
 
 

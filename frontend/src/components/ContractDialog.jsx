@@ -888,6 +888,28 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                 testid="contract-zulassung"
               />
             </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              {/* Entscheidung Ahmad 26.09.2026: Schlüsselanzahl gehört in den Vertrag —
+                  der Fahrer gleicht vor Ort dagegen ab (Abholprotokoll, KI). Fehlt sie,
+                  nur ein Hinweis, kein Blockieren. */}
+              <div>
+                <Field
+                  label="Schlüssel (Anzahl laut Vertrag)"
+                  type="number"
+                  inputMode="numeric"
+                  value={form.schluessel_anzahl}
+                  onChange={setSchluesselAnzahl}
+                  testid="contract-schluessel-anzahl"
+                  placeholder="z.B. 2"
+                />
+                {!String(form.schluessel_anzahl ?? "").trim() && (
+                  <div className="text-[11px] mt-1 leading-snug" style={{ color: "var(--st-amber)" }}
+                       data-testid="contract-schluessel-hinweis">
+                    Bitte Schlüsselanzahl eintragen — sonst kann der Fahrer fehlende Schlüssel nicht abgleichen.
+                  </div>
+                )}
+              </div>
+            </div>
             {inseratVorschlaege && (inseratVorschlaege.uebernommen.length > 0 || inseratVorschlaege.hinweise.length > 0) && (
               <div className="rounded-lg px-3 py-2 text-[11px] leading-snug" data-testid="contract-inserat-vorschlaege"
                    style={{ background: "var(--wa-03)", color: "var(--text-secondary)" }}>

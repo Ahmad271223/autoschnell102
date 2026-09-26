@@ -181,6 +181,61 @@ describe("Protokoll.jsx: Rückfrage mit Antwortknöpfen", () => {
     expect(el("protokoll-rueckfrage-frage")).toBeNull();
   });
 
+  // Entscheidung Ahmad 26.09.2026 (3): Bezug der Frage — "zu Schaden: …" / "zu KI-Position: …"
+  it("Entscheidung 26.09. (3): zeigt den Bezug der Frage; Kasten auch ohne Notiz des Chefs", async () => {
+    await starten(antwort("entwurf", {
+      rueckfrage: "",
+      rueckfrage_frage: { ...FRAGE, source_label: "Schaden: Delle · Tür vorne links" },
+    }));
+    // ohne Notiz: der Kasten erscheint trotzdem (vorher nur bei Notiztext)
+    expect(el("protokoll-rueckfrage")).toBeTruthy();
+    expect(el("protokoll-rueckfrage").textContent).toContain("Der Händler hat eine Rückfrage:");
+    expect(el("protokoll-rueckfrage-bezug").textContent).toBe("zu Schaden: Delle · Tür vorne links");
+    expect(el("protokoll-rueckfrage-antwort-Ja")).toBeTruthy();
+    await act(async () => { wurzel.unmount(); });
+    wurzel = null; behaelter?.remove();
+    // ältere Frage ohne source_label: Bezug aus den eigenen Schäden des Protokolls
+    await starten(antwort("entwurf", {
+      rueckfrage_frage: { frage_id: "f3", source_id: "s7", question: "Wie tief?", options: ["oberflächlich", "tief"] },
+      new_damages: [{ id: "s7", type_label: "Kratzer", zone: "Motorhaube", view: "front", type_key: "kratzer",
+                      severity_data: {} }],
+      rueckfrage_verlauf: [{ frage: { frage_id: "f1", question: "Lack?", source_label: "KI-Position: Lack" },
+                             antworten: [{ answer: "Ja" }] }],
+    }));
+    expect(el("protokoll-rueckfrage-bezug").textContent).toBe("zu Schaden: Kratzer · Motorhaube");
+    expect(el("protokoll-rueckfrage-verlauf").textContent).toContain("Lack? (KI-Position: Lack) Ja");
+    await act(async () => { wurzel.unmount(); });
+    wurzel = null; behaelter?.remove();
+    // allgemeine Frage: kein Bezug; KI-Position ohne Titel: "KI-Position"
+    await starten(antwort("entwurf", { rueckfrage_frage: { ...FRAGE, source_id: "" } }));
+    expect(el("protokoll-rueckfrage-bezug")).toBeNull();
+    await act(async () => { wurzel.unmount(); });
+    wurzel = null; behaelter?.remove();
+    await starten(antwort("entwurf", { rueckfrage_frage: { ...FRAGE, source_id: "dev:keys" } }));
+    expect(el("protokoll-rueckfrage-bezug").textContent).toBe("zu KI-Position");
+  });
+
+  // Entscheidung Ahmad 26.09.2026 (2): Schlüsselanzahl fehlt im Vertrag -> kein Blockieren
+  it("Entscheidung 26.09. (2): 'nicht im Vertrag hinterlegt' statt Strich, Fahrer trägt nur die erhaltene Anzahl ein", async () => {
+    await starten({ data: { ...antwort("entwurf", { keys_count: 1 }).data,
+                            template: { keys_expected: null, schluessel_vereinbart_fehlt: true } } });
+    expect(el("protokoll-schluessel-vereinbart").textContent).toBe("nicht im Vertrag hinterlegt");
+    expect(el("protokoll-schluessel-hinweis").textContent).toContain("trag nur ein, wie viele du erhalten hast");
+    expect(behaelter.querySelector('input[placeholder="z.B. 2"]').value).toBe("1");
+    await act(async () => { wurzel.unmount(); });
+    wurzel = null; behaelter?.remove();
+    // älteres Backend ohne Merker: leerer Wert heißt ebenfalls "nicht hinterlegt"
+    await starten({ data: { ...antwort("entwurf", {}).data, template: {} } });
+    expect(el("protokoll-schluessel-vereinbart").textContent).toBe("nicht im Vertrag hinterlegt");
+    await act(async () => { wurzel.unmount(); });
+    wurzel = null; behaelter?.remove();
+    // mit Vertragswert: Zahl, kein Hinweis
+    await starten({ data: { ...antwort("entwurf", { keys_expected: 2 }).data,
+                            template: { keys_expected: 2, schluessel_vereinbart_fehlt: false } } });
+    expect(el("protokoll-schluessel-vereinbart").textContent).toBe("2");
+    expect(el("protokoll-schluessel-hinweis")).toBeNull();
+  });
+
   it("KI-Auswertung erst ab 'zur Freigabe' (Wunsch Ahmad 25.09.2026 abends)", async () => {
     await starten(antwort("entwurf", {}));
     expect(el("protokoll-ki-oeffnen")).toBeNull();

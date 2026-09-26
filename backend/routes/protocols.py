@@ -1635,6 +1635,10 @@ async def get_protocol(appt_id: str, driver=Depends(current_driver)):
             # Review 26.09.2026 (Nr. 101-105): vereinbarte Schluessel laut Vertrag —
             # die App zeigt den Wert nur noch an (Server setzt ihn beim Speichern).
             "keys_expected": schluessel_vereinbart(contract),
+            # Entscheidung Ahmad 26.09.2026: fehlt der Wert im Vertrag, sagt die
+            # App "nicht im Vertrag hinterlegt" und der Fahrer traegt nur die
+            # erhaltene Anzahl ein (kein Blockieren).
+            "schluessel_vereinbart_fehlt": schluessel_vereinbart(contract) is None,
             "features": (vehicle_voll.get("features") or [])[:AUSSTATTUNG_MAX],
             "condition_fields": [
                 {"key": k, "label": lb, "options": opts if isinstance(opts, list) else None}
@@ -3108,6 +3112,8 @@ async def protokolle_zur_freigabe(user=Depends(_chef_dep), response: Response = 
                 # der frueher vom Fahrer getippte Text).
                 "schluessel": anzahl_text(d.get("keys_count")),
                 "schluessel_vereinbart": anzahl_text(d.get("keys_expected")),
+                # Entscheidung Ahmad 26.09.2026: Chef-Hinweis "im Vertrag nachtragen"
+                "schluessel_vereinbart_fehlt": anzahl_text(d.get("keys_expected")) == "",
                 "fahrzeugdaten": d.get("vehicle_check") or {},
                 "ort": d.get("place") or "",
                 # Rollenprüfung 22.09.2026 (RP-480): der Preis VOR der Abholung
@@ -3162,6 +3168,72 @@ async def protokolle_zur_freigabe(user=Depends(_chef_dep), response: Response = 
     return raus
 
 
+RUECKFRAGEN_OFFEN_MAX = 200
+
+
+@router.get("/protocols/rueckfragen-offen")
+async def protokolle_rueckfragen_offen(user=Depends(_chef_dep)):
+    """Entscheidung Ahmad 26.09.2026 (Rueckfrage-Dialog): Protokolle, die der
+    Chef an den Fahrer zurueckgeschickt hat und die noch beim Fahrer liegen
+    (Status entwurf mit Rueckfrage) — die Freigabe-Seite zeigt sie als
+    "Rueckfrage gestellt am … — wartet auf Fahrer" mit Frage, Bezug, einer
+    schon gespeicherten Antwort und dem Verlauf. Sobald der Fahrer erneut
+    abschickt, wandert das Protokoll zurueck in die Warteliste."""
+    pipeline: List[Dict[str, Any]] = [
+        {"$match": {"dealer_id": user["dealer_id"], "status": "entwurf", "superseded": {"$ne": True},
+                    "rueckfrage_am": {"$exists": True, "$nin": [None, ""]}}},
+        {"$lookup": {"from": "appointments", "localField": "appointment_id",
+                     "foreignField": "id", "as": "_termin"}},
+        {"$unwind": "$_termin"},
+        {"$match": {"_termin.dealer_id": user["dealer_id"],
+                    "_termin.status": {"$nin": sorted(_ABGESCHLOSSEN)}}},
+        {"$sort": {"rueckfrage_am": -1, "_id": 1}},
+        {"$limit": RUECKFRAGEN_OFFEN_MAX},
+        {"$project": {"_id": 0, "id": 1, "appointment_id": 1, "vehicle_id": 1, "driver_name": 1,
+                      "rueckfrage": 1, "rueckfrage_am": 1, "rueckfrage_von": 1, "rueckfrage_frage": 1,
+                      "rueckfrage_antworten": 1, "rueckfrage_verlauf": 1, "new_damages": 1,
+                      "freigabe_stand": 1, "updated_at": 1, "_termin": 1}},
+    ]
+    docs = await db.pickup_protocols.aggregate(pipeline).to_list(RUECKFRAGEN_OFFEN_MAX)
+    fz_ids = sorted({d.get("vehicle_id") or (d.get("_termin") or {}).get("vehicle_id") for d in docs} - {None, ""})
+    fahrzeuge: Dict[str, dict] = {}
+    if fz_ids:
+        async for v in db.vehicles.find({"id": {"$in": fz_ids}, "dealer_id": user["dealer_id"]},
+                                        {"_id": 0, "id": 1, "data.make": 1, "data.model": 1,
+                                         "data.make_label": 1, "data.model_label": 1}):
+            fahrzeuge[v["id"]] = v.get("data") or {}
+    namen = await besitzer_namen(user["dealer_id"], [d.get("rueckfrage_von") for d in docs])
+    raus = []
+    for d in docs:
+        d = PV.json_sicher(d)
+        appt = d.pop("_termin", None) or {}
+        fahrzeug = fahrzeuge.get(d.get("vehicle_id") or appt.get("vehicle_id")) or {}
+        name = " ".join(str(x) for x in (fahrzeug.get("make_label") or fahrzeug.get("make"),
+                                         fahrzeug.get("model_label") or fahrzeug.get("model")) if x)
+        frage = d.get("rueckfrage_frage") if isinstance(d.get("rueckfrage_frage"), dict) else None
+        raus.append({
+            "protocol_id": d.get("id"),
+            "appointment_id": d.get("appointment_id"),
+            "vehicle_id": d.get("vehicle_id"),
+            "status": "entwurf",
+            "stand": d.get("freigabe_stand") or d.get("updated_at"),
+            "fahrzeug": name,
+            "abholung": " ".join(x for x in (appt.get("pickup_date"), appt.get("pickup_time")) if x),
+            "abholort": appt.get("pickup_address") or "",
+            "fahrer": d.get("driver_name") or "",
+            "rueckfrage": d.get("rueckfrage") or "",
+            "rueckfrage_am": d.get("rueckfrage_am"),
+            "rueckfrage_von_name": namen.get(d.get("rueckfrage_von")) or "",
+            "rueckfrage_frage": frage,
+            # Antwort, die der Fahrer schon gespeichert, aber noch nicht abgeschickt hat
+            "rueckfrage_antworten": [a for a in (d.get("rueckfrage_antworten") or []) if isinstance(a, dict)],
+            "rueckfrage_verlauf": [r for r in (d.get("rueckfrage_verlauf") or []) if isinstance(r, dict)],
+            "neue_schaeden": [{"id": s.get("id"), "bezeichnung": schaden_bezeichnung(s)}
+                              for s in (d.get("new_damages") or []) if isinstance(s, dict)],
+        })
+    return raus
+
+
 async def _freigabe_konflikt(protocol_id: str, user: dict) -> str:
     """Warum ging die Freigabe nicht durch? Mit Name und Preis — damit am
     Telefon niemand einen Preis nennt, den ein Kollege schon ueberschrieben hat."""
@@ -3193,25 +3265,39 @@ async def _freigabe_konflikt(protocol_id: str, user: dict) -> str:
     return "Der Stand hat sich gerade geändert — bitte neu laden."
 
 
-async def _rueckfrage_quelle_pruefen(doc: dict, frage: dict, dealer_id: str) -> None:
+def schaden_bezeichnung(d: dict) -> str:
+    """Kurzname eines Schadens fuer Rueckfrage-Bezug und Freigabe-Karte:
+    "Kratzer · Motorhaube"."""
+    art = str(d.get("type_label") or d.get("label") or d.get("type_key") or d.get("type") or "Schaden").strip()
+    ort = str(d.get("zone") or d.get("part_label") or d.get("part") or "").strip()
+    return f"{art} · {ort}" if ort else art
+
+
+async def _rueckfrage_quelle_pruefen(doc: dict, frage: dict, dealer_id: str) -> str:
     """Review 26.09.2026 (Nr. 126): Worauf zeigt die Frage? Erlaubt sind die
     IDs der neuen Schaeden im Protokoll, die source_ids der Positionen der
     aktuellen KI-Bewertung und "" (allgemeine Frage). Die KI ist Beiwerk:
-    laesst sie sich nicht lesen, zaehlen nur die Schaeden."""
+    laesst sie sich nicht lesen, zaehlen nur die Schaeden.
+    Entscheidung Ahmad 26.09.2026 (Rueckfrage-Dialog): liefert den Bezugstext
+    ("Schaden: Kratzer · Motorhaube" / "KI-Position: …"), den Fahrer-App und
+    Freigabe-Karte anzeigen — der Server setzt ihn, nie der Client."""
     quelle = str(frage.get("source_id") or "")
     if not quelle:
-        return
-    erlaubt = {str(d.get("id")) for d in (doc.get("new_damages") or []) if isinstance(d, dict) and d.get("id")}
+        return ""
+    erlaubt: Dict[str, str] = {str(d.get("id")): "Schaden: " + schaden_bezeichnung(d)
+                               for d in (doc.get("new_damages") or []) if isinstance(d, dict) and d.get("id")}
     try:
         erg = await KI.bewertung_lesen(doc["id"], dealer_id, nachrechnen=False)
         for it in ((erg or {}).get("ergebnis") or {}).get("items") or []:
             if isinstance(it, dict) and it.get("source_id"):
-                erlaubt.add(str(it["source_id"]))
+                erlaubt.setdefault(str(it["source_id"]),
+                                   "KI-Position: " + (str(it.get("title") or "").strip() or str(it["source_id"])))
     except Exception:  # noqa: BLE001
         log.exception("Rueckfrage: KI-Bewertung zu %s nicht lesbar", doc.get("id"))
     if quelle not in erlaubt:
         raise HTTPException(400, "Die Rückfrage verweist auf eine Position, die es in der "
                                  "KI-Bewertung oder bei den neuen Schäden nicht gibt.")
+    return erlaubt[quelle][:160]
 
 
 @router.post("/protocols/{protocol_id}/freigabe")
@@ -3291,11 +3377,12 @@ async def protokoll_freigeben(protocol_id: str, body: FreigabeIn,
             # Review 26.09.2026 (Nr. 126): source_id muss zu einer Position der
             # aktuellen KI-Bewertung oder einem neuen Schaden des Protokolls
             # gehoeren — oder leer sein (allgemeine Frage).
-            await _rueckfrage_quelle_pruefen(doc, body.rueckfrage_frage, user["dealer_id"])
+            bezug = await _rueckfrage_quelle_pruefen(doc, body.rueckfrage_frage, user["dealer_id"])
             # Review 26.09.2026 (Nr. 57/60): Server-ID je Frage; die Antworten
             # der vorigen Runde liegen im Verlauf (submit_protocol) — die neue
-            # Frage beginnt ohne Antworten.
-            setzen_zurueck["rueckfrage_frage"] = {**body.rueckfrage_frage, "frage_id": uuid.uuid4().hex,
+            # Frage beginnt ohne Antworten. source_label = Bezugstext vom Server.
+            setzen_zurueck["rueckfrage_frage"] = {**body.rueckfrage_frage, "source_label": bezug,
+                                                  "frage_id": uuid.uuid4().hex,
                                                   "gestellt_am": jetzt, "gestellt_von": user["id"]}
             setzen_zurueck["rueckfrage_antworten"] = []
         else:

@@ -104,6 +104,17 @@ describe("KiBewertungKarte", () => {
     expect(api.get).toHaveBeenCalledTimes(2);
   });
 
+  it("Entscheidung 26.09.2026 (3): meldet das fertige Ergebnis dem Rahmen (onErgebnis) — für den Bezug der Rückfrage", async () => {
+    const onErgebnis = vi.fn();
+    api.get.mockResolvedValueOnce({ data: LAEUFT });
+    await starten({ onErgebnis });
+    expect(onErgebnis).not.toHaveBeenCalled();
+    api.get.mockResolvedValueOnce({ data: FERTIG });
+    await act(async () => { await vi.advanceTimersByTimeAsync(3100); });
+    expect(onErgebnis).toHaveBeenCalledTimes(1);
+    expect(onErgebnis.mock.calls[0][0].items[0].source_id).toBe("d1");
+  });
+
   it("zeigt 'veraltet – wird neu berechnet', wenn die Kurzform der Liste veraltet=true meldet (Nr. 119/120)", async () => {
     // Der Server antwortet noch nicht — die Karte kennt nur die Kurzform aus der Liste
     api.get.mockReturnValueOnce(new Promise(() => {}));

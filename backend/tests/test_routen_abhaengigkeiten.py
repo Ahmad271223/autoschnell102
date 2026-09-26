@@ -128,6 +128,7 @@ CHEF_ROUTEN = {
     "/api/interessen/{interest_id}/antwort",
     "/api/appointments/fahrer-abgelehnt/anzahl",
     "/api/protocols/zur-freigabe", "/api/protocols/zur-freigabe/anzahl",
+    "/api/protocols/rueckfragen-offen",
     "/api/protocols/{protocol_id}/freigabe",
     "/api/protocols/{protocol_id}/ki-bewertung", "/api/protocols/{protocol_id}/ki-bewertung/neu",   # KI-Abholbewertung (25.09.2026)
 }

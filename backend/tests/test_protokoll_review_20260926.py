@@ -443,3 +443,90 @@ def test_128_fahrer_sieht_keine_verkaeuferdaten_des_inserats(welt):
     assert [d["zone"] for d in out["damages"]] == ["Tür"] and out["damages"][0]["quelle"] == "inserat"
     assert out["appointment"]["seller_name"] == "Vera" and out["appointment"]["pickup_address"] == "Teststr. 1"
     assert P.fahrzeug_fuer_fahrer(None) == {}
+
+
+# ============================================================ Entscheidungen Ahmad 26.09.2026
+def test_e2_schluessel_vereinbart_fehlt_template_und_liste(welt):
+    """Entscheidung 2: fehlt die Schluesselanzahl im Vertrag, blockiert nichts —
+    die Fahrer-App bekommt schluessel_vereinbart_fehlt=True (zeigt "nicht im
+    Vertrag hinterlegt"), die Freigabe-Liste den Merker fuer "bitte nachtragen"."""
+    w = welt
+    P = _m("routes.protocols")
+    t = _abholung(w, proto_status="entwurf")
+    tpl = w.run(P.get_protocol(t.aid, w.driver))["template"]
+    assert tpl["keys_expected"] is None and tpl["schluessel_vereinbart_fehlt"] is True
+    # Fahrer traegt nur die erhaltene Anzahl ein, Abschicken geht
+    _speichern(w, t, keys_count="1")
+    w.run(P.submit_protocol(t.aid, w.driver))
+    doc = _doc(w, "pickup_protocols", t.pid)
+    assert doc["status"] == P.ZUR_FREIGABE and doc["keys_count"] == 1 and doc["keys_expected"] is None
+    e = next(x for x in w.run(P.protokolle_zur_freigabe(user=w.chef)) if x["protocol_id"] == t.pid)
+    assert e["schluessel"] == "1" and e["schluessel_vereinbart"] == "" and e["schluessel_vereinbart_fehlt"] is True
+    # mit Vertragswert: kein Merker
+    w.run(w.db.generated_pdfs.update_one({"id": t.ca}, {"$set": {"contract_data.schluessel_anzahl": "2"}}))
+    assert w.run(P.get_protocol(t.aid, w.driver))["template"]["schluessel_vereinbart_fehlt"] is False
+    w.run(w.db.pickup_protocols.update_one({"id": t.pid}, {"$set": {"keys_expected": 2}}))
+    e = next(x for x in w.run(P.protokolle_zur_freigabe(user=w.chef)) if x["protocol_id"] == t.pid)
+    assert e["schluessel_vereinbart"] == "2" and e["schluessel_vereinbart_fehlt"] is False
+
+
+def test_e3_rueckfrage_bezug_vom_server_und_liste_offener_rueckfragen(welt, monkeypatch):
+    """Entscheidung 3: der Server setzt den Bezugstext (source_label) der
+    Rueckfrage aus Schaden bzw. KI-Position; GET /protocols/rueckfragen-offen
+    zeigt dem Chef, was beim Fahrer liegt — bis der erneut abschickt."""
+    w = welt
+    P = _m("routes.protocols")
+    t = _zur_freigabe(w, new_damages=[_schaden(id="s1", type_label="Delle", zone="Tür vorne links")])
+
+    async def _ki(protocol_id, dealer_id, **_k):
+        return {"status": "ok", "ergebnis": {"items": [{"source_id": "dev:mileage", "title": "Kilometer weichen ab"}]}}
+    monkeypatch.setattr(P.KI, "bewertung_lesen", _ki)
+    assert w.run(P.protokolle_rueckfragen_offen(user=w.chef)) == []
+
+    def frage(sid, **extra):
+        return P.FreigabeIn(zurueck=True, stand=_stand(w, t.pid), notiz="Bitte prüfen",
+                            rueckfrage_frage={"source_id": sid, "question": "Wie tief?",
+                                              "options": ["oberflächlich", "bis aufs Blech"], **extra})
+    w.run(P.protokoll_freigeben(t.pid, frage("s1"), user=w.chef))
+    doc = _doc(w, "pickup_protocols", t.pid)
+    assert doc["rueckfrage_frage"]["source_label"] == "Schaden: Delle · Tür vorne links"
+    # der Client kann den Bezugstext nicht setzen (Validator wirft ihn weg)
+    assert "source_label" not in P.FreigabeIn(zurueck=True, rueckfrage_frage={
+        "question": "x", "options": ["a", "b"], "source_label": "erfunden"}).rueckfrage_frage
+    # Fahrer-App sieht Frage samt Bezug
+    app = w.run(P.get_protocol(t.aid, w.driver))["protocol"]
+    assert app["rueckfrage_frage"]["source_label"] == "Schaden: Delle · Tür vorne links"
+    # Liste offener Rueckfragen: Protokoll liegt beim Fahrer
+    offen = w.run(P.protokolle_rueckfragen_offen(user=w.chef))
+    e = next(x for x in offen if x["protocol_id"] == t.pid)
+    assert e["status"] == "entwurf" and e["rueckfrage"] == "Bitte prüfen" and e["rueckfrage_am"]
+    assert e["rueckfrage_frage"]["question"] == "Wie tief?" and e["rueckfrage_antworten"] == []
+    assert e["neue_schaeden"] == [{"id": "s1", "bezeichnung": "Delle · Tür vorne links"}]
+    assert e["fahrzeug"] == "BMW 320d" and e["fahrer"] == w.driver["display_name"]
+    assert e["rueckfrage_von_name"]
+    # Fahrer speichert die Antwort (noch nicht abgeschickt): Chef sieht sie schon
+    fid = doc["rueckfrage_frage"]["frage_id"]
+    _speichern(w, t, rueckfrage_antworten=[{"frage_id": fid, "answer": "bis aufs Blech"}])
+    e = next(x for x in w.run(P.protokolle_rueckfragen_offen(user=w.chef)) if x["protocol_id"] == t.pid)
+    assert e["rueckfrage_antworten"][0]["answer"] == "bis aufs Blech"
+    # nicht in der Warteliste, aber nach dem Abschicken wieder — und aus der Rueckfragen-Liste raus
+    assert t.pid not in [x["protocol_id"] for x in w.run(P.protokolle_zur_freigabe(user=w.chef))]
+    w.run(P.submit_protocol(t.aid, w.driver))
+    assert t.pid not in [x["protocol_id"] for x in w.run(P.protokolle_rueckfragen_offen(user=w.chef))]
+    e = next(x for x in w.run(P.protokolle_zur_freigabe(user=w.chef)) if x["protocol_id"] == t.pid)
+    assert e["rueckfrage_antworten"][0]["answer"] == "bis aufs Blech"
+    assert e["rueckfrage_verlauf"][0]["frage"]["source_label"] == "Schaden: Delle · Tür vorne links"
+    # KI-Position als Bezug, Freitext-Frage
+    w.run(P.protokoll_freigeben(t.pid, P.FreigabeIn(
+        zurueck=True, stand=_stand(w, t.pid),
+        rueckfrage_frage={"source_id": "dev:mileage", "question": "Was genau?", "freitext": True}), user=w.chef))
+    doc = _doc(w, "pickup_protocols", t.pid)
+    assert doc["rueckfrage_frage"]["source_label"] == "KI-Position: Kilometer weichen ab"
+    # allgemeine Frage: kein Bezug
+    w.run(w.db.pickup_protocols.update_one({"id": t.pid}, {"$set": {"status": P.ZUR_FREIGABE}}))
+    w.run(P.protokoll_freigeben(t.pid, frage(""), user=w.chef))
+    assert _doc(w, "pickup_protocols", t.pid)["rueckfrage_frage"]["source_label"] == ""
+    # geschlossener Termin: faellt aus der Liste
+    w.run(w.db.appointments.update_one({"id": t.aid}, {"$set": {"status": "storniert"}}))
+    assert t.pid not in [x["protocol_id"] for x in w.run(P.protokolle_rueckfragen_offen(user=w.chef))]
+    assert P.schaden_bezeichnung({"type_label": "Kratzer"}) == "Kratzer" and P.schaden_bezeichnung({}) == "Schaden"

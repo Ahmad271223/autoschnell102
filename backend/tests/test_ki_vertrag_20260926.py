@@ -368,7 +368,12 @@ def test_08_rueckfrage_mit_knopf_und_fahrer_antwort(welt, monkeypatch):
                                                                   "revision": 5}}))
     grund = welt.run(KA._grundlagen(pid, w.dealer_id))
     paket = KA.paket_bauen(*grund)
-    assert paket["driver_answers"] == [{"source_id": "d1", "question": frage["question"], "answer": "Nein"}]
+    # Entscheidung Ahmad 26.09.2026: alle Runden mit Rundennummer und Zeitstempel
+    assert len(paket["driver_answers"]) == 1
+    antwort = paket["driver_answers"][0]
+    assert {k: antwort[k] for k in ("runde", "source_id", "question", "answer")} == \
+        {"runde": 1, "source_id": "d1", "question": frage["question"], "answer": "Nein"}
+    assert isinstance(antwort["at"], str)
     assert KA.eingabe_hash(paket) != vorher["input_hash"], "Antwort aendert den Stand -> neue Bewertung"
     welt.run(db.pickup_protocols.update_one({"id": pid}, {"$set": {"status": "zur_freigabe"}}))
     liste = welt.run(P.protokolle_zur_freigabe(user=w.chef))

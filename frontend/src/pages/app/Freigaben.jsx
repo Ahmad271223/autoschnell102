@@ -6,9 +6,12 @@ import { preisAusText, preisText } from "@/lib/preis";
 import { useUngespeichert } from "@/lib/ungespeichert";
 import { toast } from "sonner";
 import KiBewertungKarte from "@/components/KiBewertungKarte";
+import RueckfrageDialog from "@/components/RueckfrageDialog";
+import { rueckfrageBezug, schadenBezeichnung } from "@/lib/kiSchaden";
+import { datumZeit } from "@/lib/markt";
 import {
   AlertTriangle, Check, ChevronDown, ChevronUp, ClipboardCheck, Clock, Euro,
-  Phone, RotateCcw, Undo2,
+  MessageSquare, Phone, RotateCcw, Undo2,
 } from "lucide-react";
 
 /**
@@ -228,6 +231,42 @@ export function entwuerfeAbgleichen(entwurf, ids, gemerkt, jetztMs = Date.now())
   return { entwurf: neu, gemerkt: rest };
 }
 
+/** Entscheidung Ahmad 26.09.2026: Bezug-Auswahl für den Rückfrage-Dialog —
+ *  die neuen Schäden des Protokolls und die Positionen der KI-Einschätzung. */
+export function rueckfrageBezuege(neueSchaeden, kiErgebnis) {
+  const raus = [];
+  for (const s of neueSchaeden || []) {
+    if (s?.id) raus.push({ id: String(s.id), label: `Schaden: ${schadenBezeichnung(s)}` });
+  }
+  for (const it of kiErgebnis?.items || []) {
+    const sid = String(it?.source_id || "");
+    if (sid && !raus.some((b) => b.id === sid)) raus.push({ id: sid, label: `KI-Position: ${it.title || sid}` });
+  }
+  return raus;
+}
+
+/** Review 26.09.2026 (Nr. 60-62/127): frühere Rückfrage-Runden, aufklappbar —
+ *  mit dem Bezug der Frage (Entscheidung 26.09.: „zu Schaden …“). */
+function Verlauf({ verlauf, schaeden, testId }) {
+  if (!verlauf?.length) return null;
+  return (
+    <details className="mt-1 text-[12px]" data-testid={testId}>
+      <summary className="cursor-pointer text-zinc-500">Frühere Rückfragen ({verlauf.length})</summary>
+      <ul className="mt-1 space-y-0.5">
+        {verlauf.map((r, i) => {
+          const bezug = rueckfrageBezug(r?.frage, schaeden);
+          return (
+            <li key={r?.frage?.frage_id || i}>
+              {r?.frage?.question}{bezug ? <span className="text-zinc-500"> ({bezug})</span> : null}{" "}
+              <b>{(r?.antworten || []).map((a) => a?.answer).filter(Boolean).join(", ") || "—"}</b>
+            </li>
+          );
+        })}
+      </ul>
+    </details>
+  );
+}
+
 function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
   const freigegeben = e.status === "freigegeben";
   const meinEntwurf = entwurf[e.protocol_id] || {};
@@ -236,6 +275,12 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
   // "Auf Vertragspreis zuruecksetzen" kennt erst das neue Backend — ein
   // aelteres wuerde den Klick als normale Freigabe mit altem Preis verstehen.
   const kannZuruecksetzen = Array.isArray(e.vergleich);
+  // Entscheidung Ahmad 26.09.2026: strukturierte Rückfrage (Dialog) statt nur
+  // "Zurück an den Fahrer" mit Notiz; die KI-Positionen kommen aus der Karte.
+  const [frageOffen, setFrageOffen] = useState(false);
+  const [kiErgebnis, setKiErgebnis] = useState(null);
+  // Entscheidung 2: Schlüsselanzahl im Vertrag nicht hinterlegt -> Hinweis, kein Blockieren
+  const schluesselFehlt = e.schluessel_vereinbart_fehlt ?? !e.schluessel_vereinbart;
   return (
     <div className="apple-surface-gloss p-4 lg:p-5" data-testid={`freigabe-${e.protocol_id}`}>
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -277,6 +322,13 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
           <div key={k} className="rounded-lg p-2" style={{ background: "var(--wa-03)" }}>
             <div className="text-[11px] text-zinc-500">{k}</div>
             <div className="text-sm">{v}</div>
+            {k === "Schlüssel" && schluesselFehlt && (
+              // Entscheidung Ahmad 26.09.2026: nicht blockieren, aber nachtragen lassen
+              <div className="mt-1 text-[11px] leading-snug" style={{ color: "var(--st-amber)" }}
+                   data-testid={`freigabe-schluessel-hinweis-${e.protocol_id}`}>
+                Schlüsselanzahl im Vertrag nicht hinterlegt — bitte nachtragen.
+              </div>
+            )}
           </div>
         ))}
       </div>
@@ -308,7 +360,7 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
           beratend. "Preis übernehmen" füllt das Feld "Neuer Preis", mehr nicht;
           "Fahrer fragen" = bestehendes "Zurück an den Fahrer" mit der Frage. */}
       {!e.ladefehler && !freigegeben && (
-        <KiBewertungKarte eintrag={e} busy={busy}
+        <KiBewertungKarte eintrag={e} busy={busy} onErgebnis={setKiErgebnis}
           onPreis={(p) => { setzen("preis", preisText(p)); toast.info("Preis ins Feld übernommen — Freigeben bestätigt ihn."); }} />
       )}
       {(e.rueckfrage_antworten || []).length > 0 && (
@@ -320,19 +372,11 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
           ))}
         </div>
       )}
-      {(e.rueckfrage_verlauf || []).length > 0 && (
-        // Review 26.09.2026 (Nr. 60-62/127): alle früheren Runden, aufklappbar
-        <details className="mt-1 text-[12px]" data-testid={`freigabe-verlauf-${e.protocol_id}`}>
-          <summary className="cursor-pointer text-zinc-500">Frühere Rückfragen ({e.rueckfrage_verlauf.length})</summary>
-          <ul className="mt-1 space-y-0.5">
-            {e.rueckfrage_verlauf.map((r, i) => (
-              <li key={r?.frage?.frage_id || i}>
-                {r?.frage?.question}{" "}
-                <b>{(r?.antworten || []).map((a) => a?.answer).filter(Boolean).join(", ") || "—"}</b>
-              </li>
-            ))}
-          </ul>
-        </details>
+      <Verlauf verlauf={e.rueckfrage_verlauf} schaeden={neueSchaeden} testId={`freigabe-verlauf-${e.protocol_id}`} />
+      {frageOffen && (
+        <RueckfrageDialog open onClose={() => setFrageOffen(false)} busy={busy}
+                          bezuege={rueckfrageBezuege(neueSchaeden, kiErgebnis)}
+                          onSenden={(koerper) => senden(e, { zurueck: true, rueckfrage_frage: koerper })} />
       )}
 
       <div className="mt-3 rounded-lg p-3" style={{ background: "var(--wa-03)" }}>
@@ -412,12 +456,68 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
                 className="apple-btn apple-btn-secondary !py-2 disabled:opacity-50">
           <RotateCcw size={14} /> Zurück an den Fahrer
         </button>
+        {/* Entscheidung Ahmad 26.09.2026: strukturierte Rückfrage (Frage, Bezug, Antwortart) */}
+        <button onClick={() => setFrageOffen(true)} disabled={busy}
+                data-testid={`freigabe-rueckfrage-${e.protocol_id}`}
+                className="apple-btn apple-btn-secondary !py-2 disabled:opacity-50">
+          <MessageSquare size={14} /> Rückfrage an den Fahrer
+        </button>
         {e.verkaeufer && !freigegeben && (
           <span className="inline-flex items-center gap-1 text-[11px] text-zinc-500 self-center">
             <Phone size={11} /> Vor der Freigabe beim Verkäufer nachverhandeln
           </span>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Entscheidung Ahmad 26.09.2026: ein Protokoll, das mit Rückfrage beim Fahrer
+ * liegt (GET /protocols/rueckfragen-offen) — „Rückfrage gestellt am … —
+ * wartet auf Fahrer“, mit Frage, Bezug, Antwortart, einer schon gespeicherten
+ * (noch nicht abgeschickten) Antwort und dem Verlauf.
+ */
+function RueckfrageKarte({ eintrag: e }) {
+  const frage = e.rueckfrage_frage || null;
+  const schaeden = e.neue_schaeden || [];
+  const bezug = rueckfrageBezug(frage, schaeden);
+  const antwort = (e.rueckfrage_antworten || []).find((a) => a?.answer && (!frage?.frage_id || a.frage_id === frage.frage_id));
+  return (
+    <div className="apple-surface-gloss p-4 lg:p-5" data-testid={`rueckfrage-offen-${e.protocol_id}`}>
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="font-display font-bold text-lg tracking-tight truncate">{e.fahrzeug || "Fahrzeug"}</div>
+          <div className="text-[12px] text-zinc-500 truncate">{e.abholung} · {e.abholort}</div>
+          <div className="text-[12px] text-zinc-500 truncate">Fahrer: {e.fahrer || "—"}</div>
+        </div>
+        <span className="text-[11px] rounded-full px-2 py-0.5 inline-flex items-center gap-1"
+              style={{ background: "#ff9f0a22", color: "var(--st-amber)" }}
+              data-testid={`rueckfrage-offen-status-${e.protocol_id}`}>
+          <MessageSquare size={11} /> Rückfrage gestellt am {datumZeit(e.rueckfrage_am)} — wartet auf Fahrer
+        </span>
+      </div>
+      {e.rueckfrage && (
+        <div className="mt-2 text-[12px] text-zinc-400">
+          <span className="text-zinc-500">Hinweis an den Fahrer:</span> {e.rueckfrage}
+        </div>
+      )}
+      {frage && (
+        <div className="mt-2 rounded-lg p-2.5 text-[12px]" style={{ background: "var(--wa-03)" }}
+             data-testid={`rueckfrage-offen-frage-${e.protocol_id}`}>
+          <div className="font-semibold">{frage.question}</div>
+          {bezug && <div className="text-zinc-500">Bezug: {bezug}</div>}
+          <div className="text-zinc-500">
+            {frage.options?.length ? `Antwortmöglichkeiten: ${frage.options.join(" · ")}` : "Antwort als Freitext"}
+          </div>
+          {antwort && (
+            <div className="mt-1" data-testid={`rueckfrage-offen-antwort-${e.protocol_id}`}>
+              <span className="text-zinc-500">Antwort des Fahrers (noch nicht abgeschickt):</span> <b>{antwort.answer}</b>
+            </div>
+          )}
+        </div>
+      )}
+      <Verlauf verlauf={e.rueckfrage_verlauf} schaeden={schaeden} testId={`rueckfrage-offen-verlauf-${e.protocol_id}`} />
     </div>
   );
 }
@@ -450,6 +550,8 @@ export default function Freigaben() {
   const [gekuerzt, setGekuerzt] = useState(false);
   const [entwurf, setEntwurf] = useState({});
   const [busy, setBusy] = useState({});
+  // Entscheidung Ahmad 26.09.2026: Protokolle, die mit Rückfrage beim Fahrer liegen
+  const [offeneRueckfragen, setOffeneRueckfragen] = useState([]);
   // Prüfbericht 20.09. U-163: Intervall, Sichtbarwerden und "nach dem Senden"
   // rufen laden() parallel — nur die zuletzt GESTARTETE Anfrage darf die
   // Liste setzen, sonst gewann die zuletzt ankommende (ältere) Antwort.
@@ -459,11 +561,17 @@ export default function Freigaben() {
     if (!chef) { setListe([]); return; }
     const n = ++lauf.current;
     try {
-      const r = await api.get("/protocols/zur-freigabe");
+      // Entscheidung Ahmad 26.09.2026: dazu die Rückfragen, die beim Fahrer
+      // liegen — ein älteres Backend ohne die Route stört die Liste nicht.
+      const [r, rOffen] = await Promise.all([
+        api.get("/protocols/zur-freigabe"),
+        api.get("/protocols/rueckfragen-offen").catch(() => ({ data: [] })),
+      ]);
       if (n !== lauf.current) return;
       const data = r.data;
       const neu = Array.isArray(data) ? data : [];
       setListe(neu);
+      setOffeneRueckfragen(Array.isArray(rOffen?.data) ? rOffen.data : []);
       setGekuerzt(String(r.headers?.["x-truncated"] || "") === "1");
       setLadeFehler("");
       // Gegenpruefung 12.09.2026: Entwuerfe zu Protokollen, die nicht mehr
@@ -554,8 +662,11 @@ export default function Freigaben() {
         else delete n[id];
         return n;
       });
+      return true;
     } catch (err) {
       toast.error(errMsg(err, "Freigabe fehlgeschlagen"));
+      // Entscheidung 26.09.2026: der Rückfrage-Dialog bleibt bei einem Fehler offen
+      return false;
     } finally {
       // Erst den neuen Stand laden, dann die Knoepfe wieder freigeben — ein
       // schneller zweiter Klick schickte sonst den alten Stand.
@@ -596,7 +707,7 @@ export default function Freigaben() {
 
       {chef && liste === null && <div className="mt-8 text-sm text-zinc-500">lädt …</div>}
 
-      {chef && liste !== null && !liste.length && !ladeFehler && (
+      {chef && liste !== null && !liste.length && !offeneRueckfragen.length && !ladeFehler && (
         <div className="mt-10 text-center text-sm text-zinc-500" data-testid="freigaben-leer">
           Gerade wartet kein Fahrer auf eine Freigabe.
         </div>
@@ -621,6 +732,16 @@ export default function Freigaben() {
             <Karte key={e.protocol_id} eintrag={e} entwurf={entwurf} setEntwurf={setEntwurf}
                    busy={Boolean(busy[e.protocol_id])} senden={senden} />
           ))}
+        </div>
+      )}
+
+      {/* Entscheidung Ahmad 26.09.2026: zurückgeschickt, Antwort des Fahrers steht aus */}
+      {chef && offeneRueckfragen.length > 0 && (
+        <div className="mt-8 space-y-4">
+          <div className="text-[12px] uppercase tracking-wider text-zinc-500" data-testid="freigaben-rueckfragen-titel">
+            Rückfrage beim Fahrer ({offeneRueckfragen.length})
+          </div>
+          {offeneRueckfragen.map((e) => <RueckfrageKarte key={e.protocol_id} eintrag={e} />)}
         </div>
       )}
     </div>

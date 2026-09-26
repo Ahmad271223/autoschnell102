@@ -14,7 +14,7 @@ const WARTE_MAX_MS = 160000;   // Websuche + KI: bis zu gut zwei Minuten
  * "Neuer Preis" ein, gibt nie frei. Keine Rückfragen mehr — alles kommt aus
  * dem Fahrer-Formular; vier Geldwerte statt Spanne und Prozent.
  */
-export default function KiBewertungKarte({ eintrag, onPreis, busy }) {
+export default function KiBewertungKarte({ eintrag, onPreis, busy, onErgebnis }) {
   const id = eintrag.protocol_id;
   const kurz = eintrag.ki_bewertung || null;
   const [daten, setDaten] = useState(null);
@@ -22,6 +22,14 @@ export default function KiBewertungKarte({ eintrag, onPreis, busy }) {
   const [rechnet, setRechnet] = useState(false);
   const start = useRef(Date.now());
   const timer = useRef(null);
+
+  // Entscheidung Ahmad 26.09.2026 (Rückfrage-Dialog): die Positionen der
+  // Bewertung stehen dem Rahmen als Bezug ("zu KI-Position …") zur Verfügung.
+  const ergebnisMelden = useRef(onErgebnis);
+  ergebnisMelden.current = onErgebnis;
+  useEffect(() => {
+    if (daten && daten.status === "ok") ergebnisMelden.current?.(daten.ergebnis || null);
+  }, [daten]);
 
   const laden = useCallback(async () => {
     try {

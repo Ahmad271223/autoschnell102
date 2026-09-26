@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-PROMPT_VERSION = "abholung_v5"      # v5: Regel 10 (Freitext = Fahrerangabe), manual_hint, confirmed_by_condition
+PROMPT_VERSION = "abholung_v6"      # v6: Regel 11 (driver_answers = alle Rueckfragerunden, neueste gilt); v5: Regel 10, manual_hint
 PROMPT_VERSION_VERTRAG = "vertrag_v3"
 
 KATEGORIEN = ["damage", "damage_worse", "mileage", "keys", "previous_owners",
