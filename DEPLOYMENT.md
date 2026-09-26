@@ -3527,3 +3527,21 @@ er ist nur noch die Vorgabe, solange der Knopf nie gedrückt wurde.
   (Market Intelligence) — der grobe Vergleich ist nur noch Ersatz, die KI bekommt eine Marktzahl mit Quellenangabe.
 - Nr. 36–38: Kalibrierung je Art (Abholung/Vertrag), Faktor auf 0,6–1,2 begrenzt und als Orientierung formuliert.
 
+**Reparaturwelle 3 Review 26.09.2026 (Markt, Nr. 41–56; Commit ceb5f39):**
+- Nr. 41/42: bei mehreren Abrufen je Tag zählt „neu im Sample“ nur beim ersten Auftauchen; Preisreduktionen und neue
+  Inserate eines Tages werden über alle Läufe vereinigt (`new_in_sample_ids`, `price_reduced_ids`).
+- Nr. 43/44: 7-/30-Tage-Trend nur mit Vergleichstag im Toleranzfenster (7d: −10…−5, 30d: −37…−23 Tage), sonst „—“;
+  `trend_7d_basis_date`/`trend_30d_basis_date` zeigen den echten Vergleichstag.
+- Nr. 45/54: Datenlage berücksichtigt die **Abdeckung** (beobachtete Tage / Kalendertage seit Erstbeobachtung; „gut“ ab
+  70 %, „mittel“ ab 40 %); Tage mit 0 Treffern zählen als beobachtet (`tage_mit_treffern` getrennt).
+- Nr. 46: Chancen „neues Minimum“/„neu günstig“ nur gegen einen höchstens 3 Tage alten Vergleichsstand.
+- Nr. 47: **Budget-Reservierungen mit Ablauf** (`reservierungen` am Monatsdokument, Ablauf = Lease + 60 s); verfallene werden
+  vor jedem Takt und im Aufräumlauf (`markt_reservierungen`) freigegeben — kein „Budget voll“ nach Abstürzen mehr.
+- Nr. 48/51/56: Pausieren/Archivieren während eines Laufs → Ergebnis wird nicht gespeichert, Job „cancelled“ (Kosten
+  gebucht); Ändern eines Auftrags storniert wartende Jobs der alten Segmente.
+- Nr. 49/50: Entfernungsprüfung **zweistufig** (erst `verification_pending`, `confirmed_removed` erst nach zweiter leerer
+  Prüfung ≥ 12 h später); liefert der Scraper ein anderes Inserat als angefragt → „unklar“, nichts geändert.
+- Nr. 52: „Jetzt crawlen“ auf inaktivem Segment → 400 mit Klartext. Nr. 53: Kostenprognose zeigt „bei Ersatz-Scraper bis zu X $“.
+- Nr. 55: **Bestandstrend** („gleiche Autos“): mittlere Preisänderung der Inserate, die an beiden Vergleichstagen im Sample
+  waren — zusätzlich zum Median-Trend, in Segmentanalyse und Marktdaten-Karte.
+
