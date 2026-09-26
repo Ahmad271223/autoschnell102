@@ -28,6 +28,10 @@ class BereichIn(BaseModel):
     year_to: Optional[int] = None
 
 
+class CrawlerSchalterIn(BaseModel):
+    aktiv: bool
+
+
 class KonfigIn(BaseModel):
     km_buckets: Optional[List[BereichIn]] = None
     ez_buckets: Optional[List[BereichIn]] = None
@@ -224,6 +228,17 @@ async def admin_market_config(body: KonfigIn, admin=Depends(current_super_admin)
     erg = await segmente.synchronisieren(db)
     await log_activity_sicher("", admin["id"], "admin.markt.konfig", meta=body.model_dump(exclude_none=True))
     return {"ok": True, **erg, "takt": await jobs.intervall(db)}
+
+
+@router.post("/admin/market/crawler")
+async def admin_market_crawler(body: CrawlerSchalterIn, admin=Depends(current_super_admin)):
+    """Crawler per Knopf an/aus (Wunsch Ahmad 26.09.2026) — gespeichert in market_config,
+    geht vor MARKT_AKTIV. An: alle aktiven Suchauftraege laufen nach Tagesplan von selbst."""
+    if body.aktiv and not konfig.token():
+        raise HTTPException(400, "APIFY_TOKEN fehlt — ohne Scraper-Zugang kann der Crawler nicht laufen")
+    an = await konfig.crawler_schalten(db, body.aktiv, wer=admin["id"])
+    await log_activity_sicher("", admin["id"], "admin.markt.crawler", meta={"aktiv": an})
+    return {"ok": True, "aktiv": an, "takt": await jobs.intervall(db)}
 
 
 @router.post("/admin/market/sync")

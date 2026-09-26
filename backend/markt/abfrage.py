@@ -37,6 +37,21 @@ def _jahr(v: Dict[str, Any]) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
+def _getriebe_code(v: Dict[str, Any]) -> Optional[str]:
+    try:
+        from fahrzeug_codes import getriebe_code
+        return getriebe_code(v.get("gearbox"), v.get("gearbox_label"), v.get("transmission"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def getriebe_passt(soll: str, ist: str) -> bool:
+    """DSG/S tronic stehen mal als Automatik, mal als Halbautomatik — beides passt zur Automatik-Beobachtung."""
+    if soll == ist:
+        return True
+    return soll == "AUTOMATIC_GEAR" and ist == "SEMIAUTOMATIC_GEAR"
+
+
 def _kw(v: Dict[str, Any]) -> Optional[int]:
     try:
         kw = v.get("power_kw")
@@ -58,10 +73,14 @@ async def modelle_fuer_fahrzeug(db, v: Dict[str, Any]) -> List[Dict[str, Any]]:
         return []
     kandidaten = await db[MODELLE].find({"make_id": str(make_id), "model_id": str(model_id), "enabled": True},
                                         {"_id": 0}).sort("priority", 1).to_list(50)
-    fuel, kw = _kraftstoff_code(v), _kw(v)
+    fuel, kw, getriebe = _kraftstoff_code(v), _kw(v), _getriebe_code(v)
     raus = []
     for m in kandidaten:
         if m.get("fuel") and fuel and m["fuel"] != fuel:
+            continue
+        # v4 (26.09.2026): Suchauftraege tragen ein Getriebe — ein Schalter darf nicht mit
+        # der Automatik-Beobachtung verglichen werden (Preise liegen 1-3 T€ auseinander).
+        if m.get("gearbox") and getriebe and not getriebe_passt(m["gearbox"], getriebe):
             continue
         if kw and m.get("power_kw_min") and kw < int(m["power_kw_min"]) - 3:
             continue
@@ -86,15 +105,20 @@ async def segment_fuer_fahrzeug(db, v: Dict[str, Any]) -> Optional[Dict[str, Any
         km = int(km) if km not in (None, "") else None
     except (TypeError, ValueError):
         km = None
-    b = segmente.bucket_fuer_km(await segmente.km_buckets(db), km)
-    if not b:
-        return None
-    ezs = await segmente.ez_buckets(db)
-    ez = segmente.ez_bucket_fuer_jahr(ezs, _jahr(v)) if ezs else None
-    if ezs and not ez:
-        return None
+    # v3/v4: km-Bereiche und EZ-Jahre gelten JE SUCHAUFTRAG (market_models), die
+    # zentralen Listen sind nur die Vorbelegung — sonst findet ein Auftrag mit eigenen
+    # Bereichen nie ein Segment.
+    std_km, std_ez = await segmente.km_buckets(db), await segmente.ez_buckets(db)
+    jahr = _jahr(v)
     erstes = None
     for m in ms:
+        b = segmente.bucket_fuer_km(segmente.km_buckets_fuer_modell(m, std_km), km)
+        if not b:
+            continue
+        ezs = segmente.ez_buckets_fuer_modell(m, std_ez)
+        ez = segmente.ez_bucket_fuer_jahr(ezs, jahr) if ezs else None
+        if ezs and not ez:
+            continue
         seg = await db[SEGMENTE].find_one({"id": segmente.segment_id(m["id"], b, ez), "enabled": True}, {"_id": 0})
         if not seg:
             continue
@@ -370,7 +394,8 @@ async def monitoring(db) -> Dict[str, Any]:
     elif anteil >= 80:
         alarme.append({"typ": "budget_80", "text": f"Budget zu {anteil:.0f} % verbraucht", "stufe": "warn"})
     if null:
-        alarme.append({"typ": "keine_treffer", "text": f"{null} Lauf/Läufe heute mit 0 Treffern", "stufe": "warn"})
+        alarme.append({"typ": "keine_treffer", "stufe": "info",
+                       "text": f"{null} Segment(e) heute ohne Treffer — Marktlücke (z. B. wenig km bei alter EZ), kein Fehler"})
     if unsortiert:
         alarme.append({"typ": "sortierung", "text": f"{unsortiert} Lauf/Läufe heute mit unsicherer Sortierung", "stufe": "rot"})
     if not konfig.token():
@@ -390,6 +415,7 @@ async def status(db) -> Dict[str, Any]:
             "segmente": await db[SEGMENTE].count_documents({"enabled": True}),
             "listings": await db[LISTINGS].count_documents({}),
             "snapshots": await db[SNAPSHOTS].estimated_document_count(),
-            "aktiv": konfig.aktiv(), "chancen_aktiv": konfig.chancen_aktiv(), "actor": konfig.actor(),
+            "aktiv": await konfig.crawler_aktiv(db), "aktiv_quelle": await konfig.crawler_quelle(db),
+            "aktiv_env": konfig.aktiv(), "chancen_aktiv": konfig.chancen_aktiv(), "actor": konfig.actor(),
             "token_vorhanden": bool(konfig.token()), "km_buckets": await segmente.km_buckets(db),
             "ez_buckets": await segmente.ez_buckets(db), "einstellungen": await segmente.einstellungen(db)}

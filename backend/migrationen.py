@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger("autohandel.migrationen")
 
-ZIEL_VERSION = 15
+ZIEL_VERSION = 16
 _SPERRE = "migration"
 
 
@@ -619,6 +619,54 @@ async def m15_ausstattung_deutsch(db) -> dict:
     return zaehler
 
 
+async def m16_markt_startliste_v2(db) -> dict:
+    """Befund Ahmad 26.09.2026 (erster Live-Tag der Marktanalyse): 33 Segmente ohne
+    Treffer (km-Bereiche 10-115k passen nicht zu EZ 2019-2022 im Jahr 2026), Schalt- und
+    Automatikpreise vermischt, Fremdmotoren im kW-Bereich (1.6 TDI im "2.0 TDI"), 32
+    Betriebsalarme "markt_keine_treffer". Bringt die Startlisten-Modelle auf Seed v2
+    (Getriebe, enge kW-Bereiche, km 0-250k, Label mit Getriebe), legt die neuen
+    Schalt-/Automatik-Eintraege an, baut die Segmente neu (alte werden nur deaktiviert,
+    Historie bleibt) und schliesst die alten Alarme. Idempotent ueber seed_version."""
+    from markt import katalog, konfig as mk, segmente
+    alt_km = [{"min_km": 10000, "max_km": 30000}, {"min_km": 30001, "max_km": 50000},
+              {"min_km": 50001, "max_km": 85000}, {"min_km": 85001, "max_km": 115000}]
+    alt_kw = {"vw-touran-20tdi": (85, 150), "vw-golf-20tdi": (85, 115), "skoda-octavia-20tdi": (85, 150),
+              "skoda-superb-20tdi": (90, 150), "vw-passat-20tdi": (90, 150), "vw-tiguan-20tdi": (90, 150),
+              "ford-mondeo-20tdci": (85, 140), "toyota-yaris-hybrid": (80, 100)}
+    jetzt = datetime.now(timezone.utc).isoformat()
+    z = {"aktualisiert": 0, "neu": 0, "alarme_geschlossen": 0, "segmente": 0}
+    geaendert = False
+    for m in katalog.start_modelle():
+        alt = await db[mk.MODELLE].find_one({"id": m["id"]})
+        if not alt:
+            await db[mk.MODELLE].insert_one({**m, "created_at": jetzt, "updated_at": jetzt})
+            z["neu"] += 1
+            geaendert = True
+            continue
+        if alt.get("seed_version"):
+            continue
+        setzen = {"seed_version": katalog.SEED_VERSION, "updated_at": jetzt}
+        if not alt.get("gearbox"):
+            setzen["gearbox"] = m["gearbox"]
+        km_alt = [{"min_km": int(b.get("min_km") or 0), "max_km": int(b.get("max_km") or 0)} for b in alt.get("km_buckets") or []]
+        if km_alt == alt_km or not km_alt:
+            setzen["km_buckets"] = m["km_buckets"]
+        if (alt.get("power_kw_min"), alt.get("power_kw_max")) == alt_kw.get(m["id"], (m["power_kw_min"], m["power_kw_max"])):
+            setzen["power_kw_min"], setzen["power_kw_max"] = m["power_kw_min"], m["power_kw_max"]
+        alt_label = katalog.seed_label(m["make"], m["model"], alt.get("variant") or m["variant"])
+        if (alt.get("label") or "") in (alt_label, m["label"], ""):
+            setzen["label"], setzen["variant"] = m["label"], m["variant"]
+        await db[mk.MODELLE].update_one({"_id": alt["_id"]}, {"$set": setzen})
+        z["aktualisiert"] += 1
+        geaendert = True
+    if geaendert:
+        z["segmente"] = (await segmente.synchronisieren(db)).get("segmente", 0)
+    from betrieb import alarm_schliessen
+    async for a in db.betriebsalarme.find({"typ": "markt_keine_treffer", "offen": True}, {"_id": 0, "ref": 1}):
+        z["alarme_geschlossen"] += await alarm_schliessen(db, "markt_keine_treffer", ref=a.get("ref") or "")
+    return z
+
+
 MIGRATIONEN = [
     (1, "abos_normalisieren", m1_abos_normalisieren),
     (2, "lifecycle_nachziehen", m2_lifecycle),
@@ -638,6 +686,8 @@ MIGRATIONEN = [
     (14, "vertrags_kundennummern", m14_vertrags_kundennummern),
     # Befund Ahmad 26.09.2026: Ausstattung deutsch
     (15, "ausstattung_deutsch", m15_ausstattung_deutsch),
+    # Befund Ahmad 26.09.2026 abends: Marktanalyse erster Live-Tag
+    (16, "markt_startliste_v2", m16_markt_startliste_v2),
 ]
 
 

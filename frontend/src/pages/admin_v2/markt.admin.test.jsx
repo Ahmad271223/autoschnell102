@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
-const netz = vi.hoisted(() => ({ posts: [], gets: [] }));
+const netz = vi.hoisted(() => ({ posts: [], gets: [], aktiv: true }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() } }));
 vi.mock("recharts", () => {
   const Leer = ({ children }) => h("div", { "data-chart": "1" }, children);
@@ -36,7 +36,7 @@ vi.mock("@/lib/api", () => ({
           min_price: 18900, median_top20_mittel: 20250, trend_7d_pct: -2.1, trend_30d_pct: -4.0, crawl_status: "ok" },
         { id: "vw-golf-20tdi", label: "VW Golf 2.0 TDI", fuel: "DIESEL", enabled: false, model_id: "14", segmente_aktiv: 0, segmente_mit_daten: 0,
           listings: 0, min_price: null, median_top20_mittel: null, trend_7d_pct: null, trend_30d_pct: null, crawl_status: "wartet" }] } };
-      if (url === "/admin/market/status") return { data: { aktiv: true, segmente: 16, modelle: 1, listings: 312, snapshots: 4000, token_vorhanden: true,
+      if (url === "/admin/market/status") return { data: { aktiv: netz.aktiv, aktiv_quelle: "env", segmente: 16, modelle: 1, listings: 312, snapshots: 4000, token_vorhanden: true,
         actor: "sourabhbgp~mobile-de-scraper", budget: { _id: "2026-10", budget_usd: 450, used_usd: 12.5, reserved_usd: 0, rows: 4000, runs: 200 },
         takt: { intervall_tage: 3, segmente_je_tag: 6, buendel: 10, kosten_je_tag_usd: 0.38, kosten_je_monat_usd: 11.7, automatisch: true },
         monitoring: { tag: "2026-10-01", geplant: 6, erfolgreich: 6, fehlgeschlagen: 0, wartend: 0, laufend: 0, rows_heute: 120, rows_monat: 4000,
@@ -84,7 +84,7 @@ async function starten(pfad) {
   await warten();
 }
 async function klick(t) { const k = el(t); if (!k) throw new Error(`nicht gefunden: ${t}`); await act(async () => { k.click(); }); await warten(); }
-beforeEach(() => { netz.posts.length = 0; netz.gets.length = 0; });
+beforeEach(() => { netz.posts.length = 0; netz.gets.length = 0; netz.aktiv = true; });
 afterEach(async () => { if (wurzel) await act(async () => { wurzel.unmount(); }); wurzel = null; behaelter?.remove(); });
 
 describe("Admin Marktanalyse", () => {
@@ -116,6 +116,30 @@ describe("Admin Marktanalyse", () => {
     expect(put.body.km_buckets).toEqual([{ min_km: 10000, max_km: 30000 }]);
     expect(put.body.ez_buckets).toEqual([{ year_from: 2019, year_to: 2021 }]);
     expect(put.body.budget_usd).toBe(450);
+  });
+
+  it("Crawler-Knopf: aus -> Rückfrage mit Kosten -> POST aktiv:true; an -> POST aktiv:false ohne Rückfrage", async () => {
+    netz.aktiv = false;
+    await starten("/admin/markt");
+    expect(el("markt-status").textContent).toContain("aus");
+    expect(el("markt-crawler-schalter").textContent).toContain("Crawler einschalten");
+    const frage = vi.spyOn(window, "confirm").mockReturnValue(false);
+    await klick("markt-crawler-schalter");
+    expect(frage.mock.calls[0][0]).toContain("12 $ im Monat");
+    expect(netz.posts.some((p) => p.url === "/admin/market/crawler")).toBe(false);
+    frage.mockReturnValue(true);
+    await klick("markt-crawler-schalter");
+    expect(netz.posts.find((p) => p.url === "/admin/market/crawler").body).toEqual({ aktiv: true });
+    frage.mockRestore();
+    netz.aktiv = true; netz.posts.length = 0;
+    await act(async () => { wurzel.unmount(); });
+    await starten("/admin/markt");
+    expect(el("markt-status").textContent).toContain("läuft automatisch");
+    const keineFrage = vi.spyOn(window, "confirm").mockReturnValue(false);
+    await klick("markt-crawler-schalter");
+    expect(keineFrage).not.toHaveBeenCalled();
+    expect(netz.posts.find((p) => p.url === "/admin/market/crawler").body).toEqual({ aktiv: false });
+    keineFrage.mockRestore();
   });
 
   it("Modellseite: Segmentwahl, Kennzahlen, Verlauf, Auswertung, Tabelle, Top-20 und Listing-Historie", async () => {

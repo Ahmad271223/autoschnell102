@@ -1908,14 +1908,13 @@ async def on_start():
         log.warning("beweis worker start failed: %s", exc)
         WORKER_STATUS["beweise"] = {"laeuft": False, "neustarts": 0, "letzter_fehler": str(exc)[:300]}
     # Market Intelligence (25.09.2026): taegliche mobile.de-Marktbeobachtung —
-    # eigene Warteschlange, eigenes Budget; laeuft nur mit MARKT_AKTIV=true.
+    # eigene Warteschlange, eigenes Budget. Der Worker laeuft immer, crawlt aber nur,
+    # wenn der Schalter an ist (Knopf im Admin, sonst MARKT_AKTIV) UND ein APIFY_TOKEN da ist.
     # Ein Ausfall hier beruehrt Vergleich, Vertrag, PDF und Versand nicht.
     try:
         from markt import jobs as markt_jobs
-        from markt import konfig as markt_konfig
-        if markt_konfig.aktiv():
-            WORKER_TAKT_S["markt"] = 60
-            _worker_starten("markt", lambda: markt_jobs.worker_forever(db, erfolg=lambda: worker_erfolg("markt")))
+        WORKER_TAKT_S["markt"] = 60
+        _worker_starten("markt", lambda: markt_jobs.worker_forever(db, erfolg=lambda: worker_erfolg("markt")))
     except Exception as exc:
         log.warning("markt worker start failed: %s", exc)
         WORKER_STATUS["markt"] = {"laeuft": False, "neustarts": 0, "letzter_fehler": str(exc)[:300]}

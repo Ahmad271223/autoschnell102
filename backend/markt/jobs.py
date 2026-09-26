@@ -260,13 +260,21 @@ async def verarbeiten_buendel(db, jobs_liste: List[Dict[str, Any]]) -> Dict[str,
                 unbekannt += 1
     if unbekannt:
         await _alarm(db, "markt_zuordnung_unklar", ref=str(r.get("run_id") or ""), zeilen=unbekannt)
-    gesamt_rows = 0
     ergebnisse = []
     kosten = r.get("usd")
     start_usd, row_usd = konfig.preise_je_actor(r.get("actor") or konfig.actor())
+    vorbereitet = []
     for p in plan:
         listings = normalisieren.listings_aus_items(je_url[p["url"]])[: p["max_items"]]
-        sortiert = normalisieren.preise_aufsteigend(listings)
+        vorbereitet.append((p, listings, normalisieren.preise_aufsteigend(listings)))
+    gesamt_rows = sum(len(l) for _, l, _ in vorbereitet)
+    # Befund 26.09.2026: Kosten je Job (Start anteilig + Zeilen) und Monatszaehler liefen
+    # auseinander. Beide rechnen jetzt mit derselben Summe: mindestens Start + Zeilen,
+    # hoeher nur, wenn Apify mehr gebucht hat — dann anteilig auf die Jobs verteilt.
+    rechnerisch = round(start_usd + gesamt_rows * row_usd, 4)
+    kosten_gesamt = None if kosten is None else max(float(kosten), rechnerisch)
+    faktor = (kosten_gesamt / rechnerisch) if (kosten_gesamt and rechnerisch) else 1.0
+    for p, listings, sortiert in vorbereitet:
         if not sortiert:
             listings.sort(key=lambda x: x["price_gross"])
             await _alarm(db, "markt_sortierung_unsicher", ref=p["seg"]["id"], job=p["job"]["id"])
@@ -276,20 +284,26 @@ async def verarbeiten_buendel(db, jobs_liste: List[Dict[str, Any]]) -> Dict[str,
             log.exception("Market-Speicher %s gescheitert", p["job"]["id"])
             await _scheitern(db, p["job"], f"Speichern: {e}"[:300], endgueltig=False)
             continue
-        gesamt_rows += len(listings)
+        # 0 Treffer in EINEM Segment ist eine Marktluecke (z. B. EZ 2019 mit 0-50k km), kein
+        # Fehler — Befund 26.09.2026: 32 Betriebsalarme an einem Tag. Wir merken es nur am
+        # Segment (leer_in_folge) und alarmieren erst, wenn ein ganzer Lauf leer bleibt.
         if not listings:
-            await _alarm(db, "markt_keine_treffer", ref=p["seg"]["id"], job=p["job"]["id"])
+            await db[SEGMENTE].update_one({"id": p["seg"]["id"]}, {"$inc": {"leer_in_folge": 1}, "$set": {"last_rows": 0}})
         else:
+            await db[SEGMENTE].update_one({"id": p["seg"]["id"]}, {"$set": {"leer_in_folge": 0, "last_rows": len(listings)}})
             await _alarm_zu(db, "markt_keine_treffer", ref=p["seg"]["id"])
-        anteil = kosten if len(plan) == 1 else (round(start_usd / len(plan) + len(listings) * row_usd, 4) if kosten is not None else None)
+        anteil = None if kosten_gesamt is None else round((start_usd / len(plan) + len(listings) * row_usd) * faktor, 4)
         await _fertig(db, p["job"], actual_rows=len(listings), actual_cost=anteil,
                       actor_run_id=r.get("run_id"), run_id=r.get("run_id"), actor=r.get("actor"),
                       ersatz_grund=r.get("ersatz_grund"), dauer_ms=r.get("dauer_ms"), sorted_confirmed=sortiert,
                       buendel=len(plan), ergebnis=erg)
         await _alarm_zu(db, "markt_crawl_fehlgeschlagen", ref=p["seg"]["id"])
         ergebnisse.append(erg)
-    await budget.abrechnen(db, res, kosten, gesamt_rows)
-    return {"status": "ok", "jobs": len(plan), "rows": gesamt_rows, "usd": kosten, "ergebnisse": ergebnisse}
+    if len(plan) >= 2 and gesamt_rows == 0 and not unbekannt:
+        # Ein ganzer Buendel-Lauf ohne eine einzige Zeile: Scraper/Sperre/URL-Form — das ist ein Fehler.
+        await _alarm(db, "markt_lauf_leer", ref=str(r.get("run_id") or ""), segmente=len(plan), actor=str(r.get("actor") or ""))
+    await budget.abrechnen(db, res, kosten_gesamt, gesamt_rows)
+    return {"status": "ok", "jobs": len(plan), "rows": gesamt_rows, "usd": kosten_gesamt, "ergebnisse": ergebnisse}
 
 
 async def verarbeiten(db, job: Dict[str, Any]) -> Dict[str, Any]:
@@ -329,7 +343,7 @@ async def worker_forever(db, erfolg: Optional[Callable[[], None]] = None, takt_s
         try:
             if erfolg:
                 erfolg()
-            if not konfig.aktiv():
+            if not await konfig.crawler_aktiv(db) or not konfig.token():
                 await asyncio.sleep(60)
                 continue
             try:
@@ -356,7 +370,7 @@ async def worker_forever(db, erfolg: Optional[Callable[[], None]] = None, takt_s
 
 async def uebersicht(db, tag: Optional[str] = None) -> Dict[str, Any]:
     t = tag or konfig.heute_tag()
-    raus: Dict[str, Any] = {"tag": t, "aktiv": konfig.aktiv()}
+    raus: Dict[str, Any] = {"tag": t, "aktiv": await konfig.crawler_aktiv(db)}
     for s in _STATUS:
         raus[s] = await db[JOBS].count_documents({"tag": {"$regex": f"^{t}"}, "status": s})
     naechster = await db[JOBS].find_one({"status": "queued"}, {"_id": 0, "scheduled_at": 1, "segment_id": 1},

@@ -67,7 +67,10 @@ def kosten_aus_lauf(actor_name: str, lauf_doc: Dict[str, Any], items: int) -> Op
     start, row = konfig.preise_je_actor(actor_name)
     z = lauf_doc.get("chargedEventCounts") or {}
     starts = int(z.get("apify-actor-start") or 1)
-    zeilen = int(z.get("apify-default-dataset-item") or z.get("result") or items or 0)
+    # Befund 26.09.2026: direkt nach dem Lauf sind oft erst ein Teil der Zeilen gebucht —
+    # dann fehlte Geld im Monatszaehler (Kosten heute 4,17 $ > Monat 3,41 $). Nie unter den
+    # tatsaechlich gelieferten Zeilen rechnen.
+    zeilen = max(int(z.get("apify-default-dataset-item") or z.get("result") or 0), int(items or 0))
     geschaetzt = round(starts * start + zeilen * row, 4)
     try:
         return round(max(float(usd or 0), geschaetzt), 4)

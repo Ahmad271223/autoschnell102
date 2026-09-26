@@ -31,17 +31,46 @@ QUELLE = "mobile"
 # Auftrag v3 (26.09.2026): Standard 4 EZ-Jahre x 4 km-Bereiche, 20 Zeilen, 2 Abrufe je Tag —
 # nur Vorbelegung; jede Marktanalyse traegt ihre eigenen Werte (market_models).
 EZ_BUCKETS_STANDARD = [{"year_from": j, "year_to": j} for j in (2019, 2020, 2021, 2022)]
+# Befund 26.09.2026 (erster Live-Tag): 33 Segmente ohne Treffer — Autos von 2019-2022
+# stehen 2026 mit 50-200k km im Markt, 10-30k km war fast leer (Probe: 320d EZ 2019
+# 0-50k = 3 Treffer, 50-100k/100-150k/150-250k je 20+). Deshalb vier breitere Bereiche.
 KM_BUCKETS_STANDARD = [
-    {"min_km": 10000, "max_km": 30000},
-    {"min_km": 30001, "max_km": 50000},
-    {"min_km": 50001, "max_km": 85000},
-    {"min_km": 85001, "max_km": 115000},
+    {"min_km": 0, "max_km": 50000},
+    {"min_km": 50001, "max_km": 100000},
+    {"min_km": 100001, "max_km": 150000},
+    {"min_km": 150001, "max_km": 250000},
 ]
+SCHALTER_DOK = "crawler"      # market_config/_id=crawler: {"aktiv": bool} — Knopf im Admin
 
 
 def aktiv() -> bool:
-    """Crawler an? (Planer + Worker). Lesewege haengen nicht daran."""
+    """Crawler laut Umgebung (MARKT_AKTIV). Der Knopf im Admin (crawler_aktiv) geht vor."""
     return schalter_env("MARKT_AKTIV", False)
+
+
+async def crawler_aktiv(db) -> bool:
+    """Crawler an? (Planer + Worker.) Wunsch Ahmad 26.09.2026: ein Knopf im Admin statt
+    Umgebungsvariable — der gespeicherte Schalter (market_config/crawler) geht vor
+    MARKT_AKTIV; fehlt er, gilt die Umgebung. Lesewege haengen nicht daran."""
+    try:
+        doc = await db[KONFIG].find_one({"_id": SCHALTER_DOK}, {"_id": 0, "aktiv": 1})
+    except Exception:  # noqa: BLE001
+        doc = None
+    if doc and "aktiv" in doc:
+        return bool(doc["aktiv"])
+    return aktiv()
+
+
+async def crawler_quelle(db) -> str:
+    """'admin' (Knopf gesetzt) oder 'env' (nur MARKT_AKTIV)."""
+    doc = await db[KONFIG].find_one({"_id": SCHALTER_DOK}, {"_id": 0, "aktiv": 1})
+    return "admin" if doc and "aktiv" in doc else "env"
+
+
+async def crawler_schalten(db, an: bool, wer: str = "") -> bool:
+    await db[KONFIG].update_one({"_id": SCHALTER_DOK},
+                                {"$set": {"aktiv": bool(an), "updated_at": jetzt_iso(), "von": str(wer or "")}}, upsert=True)
+    return bool(an)
 
 
 def chancen_aktiv() -> bool:

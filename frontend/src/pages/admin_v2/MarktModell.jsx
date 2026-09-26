@@ -10,6 +10,8 @@ import { useAuth } from "@/context/AuthContext";
 import { Card, Badge, Button, Spinner, EmptyState, fmtDate } from "./_ui";
 import { BEREICHE, DATENLAGE, datumKurz, datumZeit, eur, pct, trendFarbe, trendText, zustandText } from "@/lib/markt";
 
+const GETRIEBE_TEXT = { AUTOMATIC_GEAR: "Automatik", MANUAL_GEAR: "Schaltgetriebe", SEMIAUTOMATIC_GEAR: "Halbautomatik" };
+
 /**
  * Admin → Marktanalyse → Modell: km-/EZ-Segmente wählen, Kennzahlen,
  * Zeitreihe (Minimum / Median / Durchschnitt der 20 günstigsten je Tag,
@@ -55,7 +57,7 @@ export default function MarktModell() {
       <div className="flex items-start justify-between gap-3 flex-wrap mb-4">
         <div>
           <h1 className="text-[22px] font-semibold text-white" data-testid="markt-modell-titel">{modell.label}</h1>
-          <div className="text-[12px] text-zinc-500">{modell.fuel}{modell.power_kw_min ? ` · ${modell.power_kw_min}–${modell.power_kw_max} kW` : ""} · mobile.de {modell.make_id}/{modell.model_id} · {segmente.filter((s) => s.enabled).length} Segmente</div>
+          <div className="text-[12px] text-zinc-500" data-testid="markt-modell-technik">{modell.fuel}{modell.gearbox ? ` · ${GETRIEBE_TEXT[modell.gearbox] || modell.gearbox}` : " · alle Getriebe (gemischt!)"}{modell.power_kw_min ? ` · ${modell.power_kw_min}–${modell.power_kw_max} kW` : ""} · mobile.de {modell.make_id}/{modell.model_id} · {segmente.filter((s) => s.enabled).length} Segmente</div>
         </div>
         <Button variant="outline" size="sm" onClick={laden}><RefreshCw size={14} /> Aktualisieren</Button>
       </div>

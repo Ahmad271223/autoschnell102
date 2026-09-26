@@ -16,7 +16,7 @@ import { eur, datumZeit } from "@/lib/markt";
  */
 const JAHRE = Array.from({ length: 16 }, (_, i) => new Date().getFullYear() + 1 - i);
 const KRAFTSTOFF = { "": "alle", PETROL: "Benzin", DIESEL: "Diesel", HYBRID: "Hybrid (Benzin)", HYBRID_DIESEL: "Hybrid (Diesel)", ELECTRICITY: "Elektro", LPG: "LPG", CNG: "CNG" };
-const GETRIEBE = { "": "alle", MANUAL_GEAR: "Schaltgetriebe", AUTOMATIC_GEAR: "Automatik", SEMIAUTOMATIC_GEAR: "Halbautomatik" };
+const GETRIEBE = { "": "alle (nicht empfohlen — mischt Schalter und Automatik)", AUTOMATIC_GEAR: "Automatik (auch DSG / S tronic)", MANUAL_GEAR: "Schaltgetriebe", SEMIAUTOMATIC_GEAR: "Halbautomatik" };
 const VERKAEUFER = { "": "alle", DEALER: "Händler", FSBO: "Privat" };
 const STATUS_TONE = { active: "green", paused: "yellow", archived: "gray" };
 const STATUS_TEXT = { active: "aktiv", paused: "pausiert", archived: "archiviert" };
@@ -215,7 +215,8 @@ function AuftragFormular({ katalog, formular, superAdmin, onClose, onGespeichert
         <label>Variante / Motorisierung *
           <input className={feld} style={st} value={w.variant} onChange={(ev) => set("variant", ev.target.value)} placeholder="z. B. 320d" data-testid="auftrag-variante" /></label>
         <label>Kraftstoff<select className={feld} style={st} value={w.fuel} onChange={(ev) => set("fuel", ev.target.value)} data-testid="auftrag-kraftstoff">{Object.entries(KRAFTSTOFF).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
-        <label>Getriebe<select className={feld} style={st} value={w.gearbox} onChange={(ev) => set("gearbox", ev.target.value)}>{Object.entries(GETRIEBE).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
+        <label>Getriebe<select className={feld} style={st} value={w.gearbox} onChange={(ev) => set("gearbox", ev.target.value)} data-testid="auftrag-getriebe">{Object.entries(GETRIEBE).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select>
+          {!w.gearbox && <div className="text-[11px] mt-1" style={{ color: "var(--st-amber, #f59e0b)" }}>Ohne Getriebe mischen sich Schalt- und Automatikpreise (1–3 T€ Unterschied). Für beide Getriebe zwei Aufträge anlegen (Duplizieren).</div>}</label>
         <label>Leistung kW von – bis<div className="flex gap-2"><input className={feld} style={st} inputMode="numeric" value={w.power_kw_min} onChange={(ev) => set("power_kw_min", ev.target.value)} placeholder="von" data-testid="auftrag-kw-von" /><input className={feld} style={st} inputMode="numeric" value={w.power_kw_max} onChange={(ev) => set("power_kw_max", ev.target.value)} placeholder="bis" /></div></label>
         <label>Verkäuferart<select className={feld} style={st} value={w.seller_type} onChange={(ev) => set("seller_type", ev.target.value)}>{Object.entries(VERKAEUFER).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
         <label>Land<input className={feld} style={st} value={w.country} onChange={(ev) => set("country", ev.target.value.toUpperCase().slice(0, 2))} /></label>

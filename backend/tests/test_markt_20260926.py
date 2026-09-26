@@ -8,6 +8,7 @@ Verkauf, Entfernung nur nach Pruefung, Budget parallel, Job-Lease/-Dedupe/
 -Retry, Hauptweg unabhaengig, Lesewege nur lesend, Stichprobengroesse.
 """
 import asyncio
+import inspect
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -277,7 +278,11 @@ def test_07_taktung_nach_budget(welt, monkeypatch):
     n = t["segmente"]
     import math
     b = K.buendel_groesse()
-    je_tag = K.kosten_buendel_usd(K.actor(), math.ceil(n / b) if n else 0, n * K.rows_je_segment())
+    # wie jobs.intervall: Abrufe je Tag und Zeilen je Segment kommen aus den Segmenten (v3: crawls_per_day)
+    segs = welt.run(db[K.SEGMENTE].find({"enabled": True}, {"_id": 0, "max_items": 1, "crawls_per_day": 1}).to_list(50000))
+    laeufe = sum(int(s.get("crawls_per_day") or 1) for s in segs)
+    zeilen = sum(int(s.get("max_items") or K.rows_je_segment()) * int(s.get("crawls_per_day") or 1) for s in segs)
+    je_tag = K.kosten_buendel_usd(K.actor(), math.ceil(laeufe / b) if laeufe else 0, zeilen)
     erwartet = max(1, math.ceil(je_tag * 30.4 / 450)) if n else 1
     assert t["intervall_tage"] == erwartet and t["buendel"] == b
     assert t["kosten_je_monat_usd"] <= 450 + je_tag * 30.4 / max(1, erwartet) + 1
@@ -382,9 +387,10 @@ def test_11_segmente_sync_und_ez_bereiche(welt):
     km, ez = welt.run(SEG.km_buckets(db)), welt.run(SEG.ez_buckets(db))
     eigene = welt.run(db[K.SEGMENTE].find({"model_id": mid}, {"_id": 0}).to_list(100))
     assert len(eigene) == len(km) * max(1, len(ez)) and all(s["enabled"] for s in eigene)
-    assert any(s["id"] == f"{mid}:2019:50001-85000" and s["ez_label"] == "EZ 2019" for s in eigene), [s["id"] for s in eigene][:3]
+    assert any(s["id"] == f"{mid}:2019:50001-100000" and s["ez_label"] == "EZ 2019" for s in eigene), [s["id"] for s in eigene][:3]
     assert len(km) >= 4 and SEG.bucket_fuer_km(km, 70000)["min_km"] == 50001 and SEG.bucket_fuer_km(km, 999999) is None
-    assert len(K.KM_BUCKETS_STANDARD) == 4 and K.KM_BUCKETS_STANDARD[-1]["max_km"] == 115000
+    # v4 (Befund 26.09.2026): 0-250k km, weil Autos von 2019-2022 im Jahr 2026 bei 50-200k km stehen
+    assert len(K.KM_BUCKETS_STANDARD) == 4 and K.KM_BUCKETS_STANDARD[0]["min_km"] == 0 and K.KM_BUCKETS_STANDARD[-1]["max_km"] == 250000
     assert SEG.ez_bucket_fuer_jahr(ez, 2020) == {"year_from": 2020, "year_to": 2020} and SEG.ez_bucket_fuer_jahr(ez, 1999) is None
     # Modell-eigene EZ-Jahre gehen vor
     welt.run(db[K.MODELLE].update_one({"id": mid}, {"$set": {"ez_years": [2015, 2016]}}))
@@ -401,10 +407,20 @@ def test_11_segmente_sync_und_ez_bereiche(welt):
     welt.run(db[K.MODELLE].delete_many({"id": mid}))
     KAT = _module("markt.katalog")
     ms = KAT.start_modelle()
-    assert len(ms) == 52 and sum(1 for m in ms if m["enabled"]) == 52, [m["id"] for m in ms if not m["enabled"]]
+    # v4 (26.09.2026 abends): 72 Eintraege — JEDER mit Getriebe (nie "alle"), Schalt-/Automatik-Doppel wo ueblich
+    assert len(ms) == 72 and sum(1 for m in ms if m["enabled"]) == 72, [m["id"] for m in ms if not m["enabled"]]
+    assert len({m["id"] for m in ms}) == 72 and all(m["gearbox"] in ("AUTOMATIC_GEAR", "MANUAL_GEAR") for m in ms)
+    assert all(m["seed_version"] == KAT.SEED_VERSION and m["km_buckets"] == K.KM_BUCKETS_STANDARD for m in ms)
     b = next(m for m in ms if m["id"] == "bmw-320d")
     assert b["model_id"] == "10" and b["ez_years"] == [2019, 2020, 2021, 2022] and len(b["km_buckets"]) == 4
-    assert b["rows"] == 20 and b["crawls_per_day"] == 2 and b["status"] == "active"
+    assert b["rows"] == 20 and b["crawls_per_day"] == 2 and b["status"] == "active" and b["gearbox"] == "AUTOMATIC_GEAR"
+    assert b["label"] == "BMW 320d Automatik"
+    touran = {m["id"]: m for m in ms if m["id"].startswith("vw-touran")}
+    assert set(touran) == {"vw-touran-20tdi", "vw-touran-20tdi-schalt"}
+    assert touran["vw-touran-20tdi-schalt"]["gearbox"] == "MANUAL_GEAR" and touran["vw-touran-20tdi-schalt"]["label"].endswith("Schaltung")
+    assert (touran["vw-touran-20tdi"]["power_kw_min"], touran["vw-touran-20tdi"]["power_kw_max"]) == (110, 150), "1.6 TDI (85 kW) draussen"
+    assert next(m for m in ms if m["id"] == "skoda-octavia-20tdi")["power_kw_max"] == 140, "RS TDI (147 kW) draussen"
+    assert next(m for m in ms if m["id"] == "toyota-yaris-hybrid")["power_kw_min"] == 70, "EZ 2019 = 74 kW"
     assert next(m for m in ms if m["id"] == "toyota-aygo-x")["model_id"] and next(m for m in ms if m["id"] == "bmw-330e")["fuel"] == "HYBRID"
 
 
@@ -521,11 +537,31 @@ def test_13_buendel_zuordnung_ueber_inputcontext(welt, monkeypatch):
     assert st["sample_size"] == 2 and st["min_price"] == 9000
     b = welt.run(BUD.dokument(db, f"test-{s}"))
     assert round(b["used_usd"], 4) == 0.0091 and round(b["reserved_usd"], 6) == 0 and b["rows"] == 3 and b["runs"] == 1
-    alarme = welt.run(db.betriebsalarme.find({"typ": {"$in": ["markt_keine_treffer", "markt_zuordnung_unklar"]}, "offen": True}, {"_id": 0, "typ": 1, "ref": 1}).to_list(20))
-    assert any(a["typ"] == "markt_keine_treffer" and a["ref"] == segs[2]["id"] for a in alarme)
+    # v4 (Befund 26.09.2026): Kosten je Job summieren sich auf den Monatszaehler (vorher 4,17 $ heute > 3,41 $ Monat)
+    assert abs(sum(float(j["actual_cost"]) for j in jobs.values()) - 0.0091) < 0.0005, "Rundung je Job auf 4 Stellen"
+    alarme = welt.run(db.betriebsalarme.find({"typ": {"$in": ["markt_keine_treffer", "markt_zuordnung_unklar", "markt_lauf_leer"]}, "offen": True}, {"_id": 0, "typ": 1, "ref": 1}).to_list(20))
+    # v4: ein leeres Segment ist eine Marktluecke, KEIN Betriebsalarm mehr (32 Alarme am ersten Tag)
+    assert not any(a["typ"] == "markt_keine_treffer" and a["ref"] == segs[2]["id"] for a in alarme)
+    assert not any(a["typ"] == "markt_lauf_leer" for a in alarme)
     assert any(a["typ"] == "markt_zuordnung_unklar" for a in alarme)
+    seg2 = welt.run(db[K.SEGMENTE].find_one({"id": segs[2]["id"]}, {"_id": 0}))
+    assert seg2["leer_in_folge"] == 1 and seg2["last_rows"] == 0
+    assert welt.run(db[K.SEGMENTE].find_one({"id": segs[0]["id"]}, {"_id": 0}))["last_rows"] == 2
+    # Ein ganzer Buendel-Lauf ohne eine Zeile -> Alarm markt_lauf_leer (Scraper/Sperre), Kosten = Start
+    for seg in segs[:2]:
+        welt.run(JOBS.job_sofort(db, seg["id"]))
+
+    async def _leer(urls, max_items, zeitlimit_s=None, actor_name=None, max_items_per_query=None):
+        return {"items": [], "usd": 0.005, "run_id": "r-leer", "status": "SUCCEEDED", "dauer_ms": 2, "actor": K.actor()}
+    monkeypatch.setattr(APIFY, "lauf", _leer)
+    erg2 = welt.run(JOBS.einmal(db))
+    assert erg2["erledigt"] == 2
+    assert welt.run(db.betriebsalarme.find_one({"typ": "markt_lauf_leer", "ref": "r-leer", "offen": True}))
+    assert welt.run(db[K.SEGMENTE].find_one({"id": segs[0]["id"]}, {"_id": 0}))["leer_in_folge"] == 1
+    b = welt.run(BUD.dokument(db, f"test-{s}"))
+    assert round(b["used_usd"], 4) == round(0.0091 + 0.005, 4) and b["runs"] == 2
     welt.run(db.betriebsalarme.delete_many({"typ": {"$in": ["markt_keine_treffer", "markt_zuordnung_unklar"]}, "ref": {"$regex": s}}))
-    welt.run(db.betriebsalarme.delete_many({"typ": "markt_zuordnung_unklar", "ref": "r-b"}))
+    welt.run(db.betriebsalarme.delete_many({"typ": {"$in": ["markt_zuordnung_unklar", "markt_lauf_leer"]}, "ref": {"$in": ["r-b", "r-leer"]}}))
     welt.run(db[K.BUDGET].delete_many({"_id": f"test-{s}"}))
     # Monitoring liefert die technische Sicht ohne Fehler
     mon = welt.run(ABF.monitoring(db))
@@ -613,4 +649,101 @@ def test_14_suchauftraege_pruefung_prognose_und_verwaltung(welt, monkeypatch):
         welt.run(db[K.SEGMENTE].delete_many({"model_id": x_id})); welt.run(db[K.JOBS].delete_many({"model_id": x_id}))
         welt.run(db[K.MODELLE].delete_many({"id": x_id}))
     _aufraeumen(welt)
+
+
+def test_15_getriebe_crawler_schalter_und_seed_v2(welt, monkeypatch):
+    """v4 (Befund Ahmad 26.09.2026): (a) Getriebe des Suchauftrags steht in der URL (tr=)
+    und ein Fahrzeug wird nur dem passenden Getriebe zugeordnet (DSG als Halbautomatik
+    passt zur Automatik); (b) Segment zum Fahrzeug ueber die Bereiche DES Auftrags, nicht
+    die zentralen; (c) Crawler-Schalter im Admin geht vor MARKT_AKTIV; (d) Zeilen werden
+    bei den Kosten nie unterschaetzt; (e) Migration 16 hebt alte Seed-Modelle auf v2 und
+    ist idempotent."""
+    w, db = welt.w, welt.db
+    _aufraeumen(welt)
+    s = w.s
+    URL = _module("markt.url")
+    # (a) tr= in der URL
+    m_auto = {**_modell(w), "id": f"test-getriebe-{s}", "gearbox": "AUTOMATIC_GEAR", "priority": 1,
+              "km_buckets": [{"min_km": 0, "max_km": 50000}, {"min_km": 50001, "max_km": 100000}], "ez_years": [2019, 2020]}
+    m_schalt = {**m_auto, "id": f"test-getriebe-{s}-schalt", "gearbox": "MANUAL_GEAR", "priority": 2}
+    assert "tr=AUTOMATIC_GEAR" in URL.such_url({"min_km": 0, "max_km": 50000}, m_auto)
+    assert "tr=MANUAL_GEAR" in URL.such_url({"min_km": 0, "max_km": 50000}, m_schalt)
+    welt.run(db[K.MODELLE].insert_many([dict(m_auto), dict(m_schalt)]))
+    welt.run(SEG.synchronisieren(db))
+    assert welt.run(db[K.SEGMENTE].count_documents({"model_id": m_auto["id"], "enabled": True})) == 4, "eigene Bereiche des Auftrags"
+    fremde = welt.run(db[K.MODELLE].update_many({"make_id": "3500", "model_id": "10", "id": {"$not": {"$regex": f"test-getriebe-{s}"}}, "enabled": True},
+                                                {"$set": {"enabled": False, "_test_pausiert": s}}))
+    try:
+        fz = {"make": "BMW", "model": "320d", "fuel": "Diesel", "power_kw": 140, "mileage": 74000, "first_registration": "05/2019"}
+        assert ABF.getriebe_passt("AUTOMATIC_GEAR", "SEMIAUTOMATIC_GEAR") and not ABF.getriebe_passt("MANUAL_GEAR", "AUTOMATIC_GEAR")
+        ms = welt.run(ABF.modelle_fuer_fahrzeug(db, {**fz, "gearbox": "MANUAL_GEAR"}))
+        assert [m["id"] for m in ms] == [m_schalt["id"]], "Schalter nur zum Schalt-Auftrag"
+        ms = welt.run(ABF.modelle_fuer_fahrzeug(db, {**fz, "gearbox": "Halbautomatik"}))
+        assert [m["id"] for m in ms] == [m_auto["id"]], "DSG als Halbautomatik -> Automatik"
+        ms = welt.run(ABF.modelle_fuer_fahrzeug(db, fz))
+        assert {m["id"] for m in ms} == {m_auto["id"], m_schalt["id"]}, "ohne Getriebeangabe beide"
+        # (b) Segment ueber die Bereiche des Auftrags (zentral steht etwas anderes)
+        welt.run(SEG.km_buckets_setzen(db, [{"min_km": 200000, "max_km": 300000}]))
+        seg = welt.run(ABF.segment_fuer_fahrzeug(db, {**fz, "gearbox": "AUTOMATIC_GEAR"}))
+        assert seg and seg["id"] == f"{m_auto['id']}:2019:50001-100000"
+        assert welt.run(ABF.segment_fuer_fahrzeug(db, {**fz, "gearbox": "AUTOMATIC_GEAR", "mileage": 120000})) is None
+    finally:
+        welt.run(db[K.KONFIG].delete_many({"_id": {"$in": ["km_buckets", "ez_buckets"]}}))
+        welt.run(db[K.MODELLE].update_many({"_test_pausiert": s}, {"$set": {"enabled": True}, "$unset": {"_test_pausiert": ""}}))
+    # (c) Crawler-Schalter: Umgebung aus, Knopf an -> an; Knopf aus -> aus trotz Umgebung an
+    welt.run(db[K.KONFIG].delete_many({"_id": K.SCHALTER_DOK}))
+    try:
+        monkeypatch.setenv("MARKT_AKTIV", "false")
+        assert welt.run(K.crawler_aktiv(db)) is False and welt.run(K.crawler_quelle(db)) == "env"
+        assert welt.run(K.crawler_schalten(db, True, wer="test")) is True
+        assert welt.run(K.crawler_aktiv(db)) is True and welt.run(K.crawler_quelle(db)) == "admin"
+        monkeypatch.setenv("MARKT_AKTIV", "true")
+        welt.run(K.crawler_schalten(db, False))
+        assert welt.run(K.crawler_aktiv(db)) is False, "Knopf geht vor Umgebung"
+        st = welt.run(ABF.status(db))
+        assert st["aktiv"] is False and st["aktiv_quelle"] == "admin" and st["aktiv_env"] is True
+        assert welt.run(JOBS.uebersicht(db))["aktiv"] is False
+    finally:
+        welt.run(db[K.KONFIG].delete_many({"_id": K.SCHALTER_DOK}))
+    # Worker-Schleife wartet ohne Schalter/Token, Route nur fuer den Super-Admin
+    q = inspect.getsource(JOBS.worker_forever)
+    assert "await konfig.crawler_aktiv(db)" in q and "konfig.token()" in q
+    r = inspect.getsource(_module("routes.markt_admin"))
+    assert '"/admin/market/crawler"' in r and "current_super_admin" in r.split('"/admin/market/crawler"')[1][:400]
+    sv = (Path(__file__).resolve().parent.parent / "server.py").read_text(encoding="utf-8")
+    assert "if markt_konfig.aktiv():" not in sv, "Worker startet immer, der Schalter entscheidet"
+    # (d) Kosten: Zeilen nie unter den gelieferten
+    assert APIFY.kosten_aus_lauf("scrapesmith~mobile-de-scraper", {"usageTotalUsd": 0.005, "chargedEventCounts": {"apify-actor-start": 1, "apify-default-dataset-item": 40}}, 133) == round(0.005 + 133 * 0.0007, 4)
+    # (e) Migration 16: altes Seed-Modell (v1) -> Getriebe, km 0-250k, kW eng, Label; Fremdes bleibt; idempotent
+    MIG = _module("migrationen")
+    KAT = _module("markt.katalog")
+    alt_seed = next(m for m in KAT.start_modelle() if m["id"] == "vw-touran-20tdi")
+    sicherung = welt.run(db[K.MODELLE].find_one({"id": "vw-touran-20tdi"}))
+    welt.run(db[K.MODELLE].delete_many({"id": "vw-touran-20tdi"}))
+    welt.run(db[K.MODELLE].insert_one({**{k: v for k, v in alt_seed.items() if k not in ("gearbox", "seed_version")},
+                                       "label": "Volkswagen Touran 2.0 TDI", "power_kw_min": 85, "power_kw_max": 150,
+                                       "km_buckets": [{"min_km": 10000, "max_km": 30000}, {"min_km": 30001, "max_km": 50000},
+                                                      {"min_km": 50001, "max_km": 85000}, {"min_km": 85001, "max_km": 115000}],
+                                       "created_at": "x", "updated_at": "x"}))
+    welt.run(db.betriebsalarme.insert_one({"id": f"al-{s}", "typ": "markt_keine_treffer", "ref": f"test-{s}:2019:10000-30000", "offen": True, "anzahl": 1}))
+    try:
+        erg = welt.run(MIG.m16_markt_startliste_v2(db))
+        assert erg["aktualisiert"] >= 1 and erg["alarme_geschlossen"] >= 1 and erg["segmente"] > 0
+        d = welt.run(db[K.MODELLE].find_one({"id": "vw-touran-20tdi"}, {"_id": 0}))
+        assert d["gearbox"] == "AUTOMATIC_GEAR" and d["seed_version"] == KAT.SEED_VERSION and d["label"] == "Volkswagen Touran 2.0 TDI Automatik"
+        assert (d["power_kw_min"], d["power_kw_max"]) == (110, 150) and d["km_buckets"] == K.KM_BUCKETS_STANDARD
+        assert welt.run(db[K.MODELLE].find_one({"id": "vw-touran-20tdi-schalt"}, {"_id": 0}))["gearbox"] == "MANUAL_GEAR"
+        assert welt.run(db.betriebsalarme.find_one({"id": f"al-{s}"}))["offen"] is False
+        erg2 = welt.run(MIG.m16_markt_startliste_v2(db))
+        assert erg2["aktualisiert"] == 0 and erg2["neu"] == 0, "idempotent"
+        assert welt.run(db[K.MODELLE].find_one({"id": m_auto["id"]}, {"_id": 0})).get("seed_version") is None, "eigene Auftraege unangetastet"
+    finally:
+        welt.run(db.betriebsalarme.delete_many({"id": f"al-{s}"}))
+        if sicherung:
+            welt.run(db[K.MODELLE].delete_many({"id": "vw-touran-20tdi"}))
+            welt.run(db[K.MODELLE].insert_one(sicherung))
+        for mid in (m_auto["id"], m_schalt["id"]):
+            welt.run(db[K.SEGMENTE].delete_many({"model_id": mid}))
+            welt.run(db[K.MODELLE].delete_many({"id": mid}))
+        _aufraeumen(welt)
 

@@ -3442,7 +3442,8 @@ Preis-Historie je Listing; App → **Markt · Chancen** (Menüpunkt nur mit `mar
    Budget“ km-/EZ-Bereiche und Monatsbudget setzen.
 3. Testlauf: bei einem Segment „Jetzt crawlen“, dann „Einen Takt jetzt ausführen“ (kostet echtes Budget) — Daten
    erscheinen sofort in der Segmentanalyse.
-4. Dauerbetrieb: `MARKT_AKTIV=true` (per `deploy/env_setzen.sh`), Container neu starten. Ab dann täglich im Fenster.
+4. Dauerbetrieb: Admin → Marktanalyse → **„Crawler einschalten“** (seit v4, siehe unten; ersetzt `MARKT_AKTIV=true`).
+   Ab dann täglich im Fenster, alle aktiven Suchaufträge von selbst — niemand muss einzelne Segmente antippen.
 5. Chancen für die Firmen freigeben: `MARKT_CHANCEN_AKTIV=true`.
 
 **Suchaufträge (Auftrag v3, 26.09.2026) — Marktanalysen ohne Entwickler:** Admin → Marktanalyse → **Suchaufträge**.
@@ -3460,3 +3461,32 @@ Startmodelle (`markt/katalog.py`) sind ein Seed („Startliste & Segmente aufbau
 × 20 Zeilen × 2 Abrufe ≈ 998.400 Zeilen/Monat ≈ 700 $ (Starter) — der Kostenrechner zeigt es an; `MARKT_CRAWLS_JE_TAG`.
 Segmentanalyse zeigt Datenqualität (Daten seit, Tage, erfolgreiche/erwartete Crawls, Sample-Größe) und die
 Segmentübersicht des Modells (letzter/nächster Crawl, N, Min, Median, Ø, Trends, Fehler).
+
+**v4 — Befund Ahmad 26.09.2026 abends (erster Live-Tag; Commit folgt auf a8e3b29):** Nach dem ersten Takt standen
+33 Segmente ohne Treffer und 32 Betriebsalarme `markt_keine_treffer` da, „Kosten heute“ (4,17 $) lag über „Monat“
+(3,41 $), und Schalt-/Automatikpreise waren gemischt. Geprüft mit echten Scraper-Läufen (Touran 2.0 TDI EZ 2019
+0–30k km: 0 Treffer, 50–100k: 20, 100–150k: 20; 320d EZ 2019 0–50k: 3 Treffer, darüber je 20+): die leeren Segmente
+sind **Marktlücken**, kein Scraper-Fehler — Autos von 2019–2022 stehen 2026 mit 50–200k km im Markt, die alten Bereiche
+10–115k km passten nicht. Außerdem zog der kW-Bereich Fremdmotoren mit (1.6 TDI 85 kW im „2.0 TDI“, Octavia RS TDI 147 kW).
+Änderungen:
+- **km-Bereiche Standard** jetzt 0–50k, 50–100k, 100–150k, 150–250k (`KM_BUCKETS_STANDARD`, weiterhin je Auftrag änderbar).
+- **Getriebe je Suchauftrag** (nie „alle“): die Startliste hat 72 Einträge, jeder mit `gearbox` (Automatik = auch DSG/S tronic);
+  wo beide Getriebe im Gebrauchtmarkt üblich sind, zwei Einträge (`…-schalt` bzw. `…-auto`, Label „… Automatik/Schaltung“).
+  Die URL trägt `tr=`, der Vergleich/Vertrag ordnet ein Fahrzeug nur dem Auftrag mit passendem Getriebe zu (Halbautomatik
+  zählt als Automatik); ohne Getriebeangabe am Fahrzeug passen beide. Das Formular warnt bei „alle“.
+- **kW-Bereiche eng**: Touran/Passat/Tiguan/Superb 2.0 TDI 110–150, Golf 2.0 TDI 110–125, Octavia 2.0 TDI 110–140,
+  Mondeo 85–145 („2.0 TDCi / EcoBlue“), Yaris Hybrid 70–100 (EZ 2019 = 74 kW), Aygo (X) 1.0 (Aygo und Aygo X teilen die ID).
+- **Segment zum Fahrzeug** über die Bereiche DES Auftrags (`km_buckets`/`ez_years`), nicht mehr über die zentralen Listen.
+- **Crawler-Knopf** (`POST /admin/market/crawler {aktiv}`, `market_config/crawler`): geht vor `MARKT_AKTIV`; Worker läuft
+  immer, crawlt nur bei Schalter an UND `APIFY_TOKEN`. Kachel zeigt „an — läuft automatisch“ und die Quelle (Knopf/Umgebung).
+- **Alarme**: kein Betriebsalarm mehr je leerem Segment (nur `leer_in_folge`/`last_rows` am Segment und ein grauer Hinweis
+  „Marktlücke“); Alarm `markt_lauf_leer` nur, wenn ein ganzer Bündel-Lauf keine einzige Zeile liefert (Scraper/Sperre).
+- **Kosten**: Zeilen werden nie unter den gelieferten gerechnet (Apify bucht verzögert), Job-Kosten und Monatszähler
+  rechnen mit derselben Summe → „heute“ und „Monat“ passen zusammen.
+- **Migration 16** (`markt_startliste_v2`, läuft beim Rollout): hebt die Startlisten-Modelle ohne `seed_version` auf v2
+  (Getriebe, km 0–250k, enge kW, Label), legt die neuen Schalt-/Automatik-Einträge an, baut Segmente neu (alte nur
+  deaktiviert, Historie bleibt) und schließt die offenen `markt_keine_treffer`-Alarme. Eigene Aufträge bleiben unberührt.
+Nach dem Rollout: Marktanalyse öffnen, Modelle prüfen (72, viele „…Schaltung“ — was nicht gebraucht wird, pausieren),
+Taktung/Kosten in der Kachel lesen, dann „Crawler einschalten“. Der Schalter aus der `.env` (`MARKT_AKTIV`) kann bleiben,
+er ist nur noch die Vorgabe, solange der Knopf nie gedrückt wurde.
+

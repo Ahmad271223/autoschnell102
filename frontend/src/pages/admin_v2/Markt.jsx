@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { BarChart3, RefreshCw, Play, Settings2, Radar, AlertTriangle, ListPlus } from "lucide-react";
+import { BarChart3, RefreshCw, Play, Pause, Settings2, Radar, AlertTriangle, ListPlus } from "lucide-react";
 import { toast } from "sonner";
 import { api, errMsg } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
@@ -65,14 +65,15 @@ export default function Markt() {
         <Card className="mb-4" data-testid="markt-alarme">
           <div className="text-[13px] font-semibold text-white mb-1 inline-flex items-center gap-1.5"><AlertTriangle size={14} className="text-amber-300" /> Hinweise</div>
           <ul className="text-[12px] space-y-0.5">
-            {status.monitoring.alarme.map((a) => <li key={a.typ} className={a.stufe === "rot" ? "text-red-300" : "text-amber-300"}>{a.text}</li>)}
+            {status.monitoring.alarme.map((a) => <li key={a.typ} className={a.stufe === "rot" ? "text-red-300" : a.stufe === "info" ? "text-zinc-400" : "text-amber-300"}>{a.text}</li>)}
           </ul>
         </Card>
       )}
 
       <Card className="mb-4" data-testid="markt-status">
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-[12px]">
-          <Kachel label="Crawler" wert={status.aktiv ? "an" : "aus (MARKT_AKTIV)"} tone={status.aktiv ? "text-emerald-300" : "text-amber-300"} />
+          <Kachel label="Crawler" wert={status.aktiv ? "an — läuft automatisch" : "aus"} tone={status.aktiv ? "text-emerald-300" : "text-amber-300"}
+                  hint={status.aktiv_quelle === "admin" ? "per Knopf gesetzt" : "Vorgabe aus der Umgebung (MARKT_AKTIV)"} />
           <Kachel label="Segmente aktiv" wert={`${status.segmente} · ${status.modelle} Modelle`} />
           <Kachel label="Taktung" wert={`jedes Segment alle ${takt.intervall_tage} Tag(e)`} hint={`${takt.segmente_je_tag} Segmente/Tag in Bündeln zu ${takt.buendel || 1} ≈ ${Number(takt.kosten_je_tag_usd || 0).toFixed(2)} $ · ≈ ${Number(takt.kosten_je_monat_usd || 0).toFixed(0)} $/Monat${takt.automatisch ? " (automatisch aus dem Budget)" : ""}`} />
           <Kachel label={`Budget ${b._id || ""}`} wert={`${Number(b.used_usd || 0).toFixed(2)} $ von ${Number(b.budget_usd || 0).toFixed(0)} $`}
@@ -95,6 +96,16 @@ export default function Markt() {
         )}
         {superAdmin && (
           <div className="mt-3 flex flex-wrap gap-2">
+            {/* Wunsch Ahmad 26.09.2026: EIN Knopf — an heisst: alle aktiven Suchauftraege laufen von selbst nach Tagesplan */}
+            <Button size="sm" variant={status.aktiv ? "outline" : undefined} disabled={!!busy || (!status.aktiv && !status.token_vorhanden)} data-testid="markt-crawler-schalter"
+                    title={status.aktiv ? "Crawler ausschalten — wartende Jobs bleiben liegen, nichts wird gelöscht" : "Crawler einschalten — alle aktiven Suchaufträge laufen automatisch nach Tagesplan"}
+                    onClick={() => {
+                      if (!status.aktiv && !window.confirm(`Crawler einschalten?\n\nAb dann laufen alle aktiven Suchaufträge automatisch nach Tagesplan — etwa ${Number(takt.kosten_je_monat_usd || 0).toFixed(0)} $ im Monat bei ${status.segmente} Segmenten.`)) return;
+                      aktion("crawler", () => api.post("/admin/market/crawler", { aktiv: !status.aktiv }),
+                             (d) => (d.aktiv ? "Crawler an — die Suchaufträge laufen jetzt automatisch" : "Crawler aus"));
+                    }}>
+              {status.aktiv ? <><Pause size={14} /> Crawler ausschalten</> : <><Play size={14} /> Crawler einschalten</>}
+            </Button>
             <Button size="sm" variant="outline" disabled={!!busy} data-testid="markt-sync"
                     onClick={() => aktion("sync", () => api.post("/admin/market/sync"), (d) => `Modelle: ${d.modelle?.neu ?? 0} neu · Segmente: ${d.segmente?.segmente ?? 0}`)}>
               Startliste & Segmente aufbauen
@@ -105,7 +116,7 @@ export default function Markt() {
             </Button>
             <Button size="sm" variant="outline" disabled={!!busy || !status.token_vorhanden} data-testid="markt-worker"
                     onClick={() => aktion("worker", () => api.post("/admin/market/worker/einmal"), (d) => `${d.erledigt} Job(s) im Vordergrund verarbeitet`)}
-                    title="Einen Takt sofort ausführen (auch ohne MARKT_AKTIV) — kostet echtes Apify-Budget">
+                    title="Einen Takt sofort ausführen (auch bei ausgeschaltetem Crawler) — kostet echtes Apify-Budget">
               Einen Takt jetzt ausführen
             </Button>
           </div>
