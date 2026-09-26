@@ -44,6 +44,12 @@ def _item(lid, preis, km=70000, ez="03/2020", created="2026-09-05T11:46:02.000Z"
             "createdAt": created, "modifiedAt": "2026-09-22T14:08:07.000Z", "renewedAt": created, "country": "DE"}
 
 
+def _pi(lid, preis, **kw):
+    """Privatangebot (Ahmad 26.09. abends: Chancen nur fuer die 3 guenstigsten PRIVATangebote je Lauf)."""
+    it = _item(lid, preis, **kw)
+    return {**it, "seller": {**it["seller"], "type": "PRIVATE"}}
+
+
 def _tag(offset=0):
     return K.heute_tag(K.jetzt() + timedelta(days=offset))
 
@@ -117,7 +123,7 @@ def test_03_listing_dedupe_snapshots_preisaenderung_not_seen(welt):
     welt.run(db[K.SEGMENTE].insert_one(dict(seg)))
     s = w.s
     tag1 = K.jetzt() - timedelta(days=1)
-    items1 = NORM.listings_aus_items([_item(f"t{s}a", 18900), _item(f"t{s}b", 19900), _item(f"t{s}c", 21700)])
+    items1 = NORM.listings_aus_items([_pi(f"t{s}a", 18900), _pi(f"t{s}b", 19900), _pi(f"t{s}c", 21700)])
     erg1 = welt.run(SP.verarbeiten(db, seg, items1, beobachtet=tag1))
     assert erg1["sample_size"] == 3 and erg1["neu_gesamt"] == 3 and erg1["neu_im_sample"] == 3
     # derselbe Tag noch einmal: keine zweiten Snapshots, keine Preisaenderung
@@ -125,7 +131,7 @@ def test_03_listing_dedupe_snapshots_preisaenderung_not_seen(welt):
     assert welt.run(db[K.SNAPSHOTS].count_documents({"listing_id": {"$regex": f"^t{s}"}})) == 3
     assert welt.run(db[K.LISTINGS].count_documents({"listing_id": {"$regex": f"^t{s}"}})) == 3
     # Tag 2: a guenstiger (-500), b weg (nicht im Sample!), d neu unter dem bisherigen Minimum
-    items2 = NORM.listings_aus_items([_item(f"t{s}d", 17500), _item(f"t{s}a", 18400), _item(f"t{s}c", 21700)])
+    items2 = NORM.listings_aus_items([_pi(f"t{s}d", 17500), _pi(f"t{s}a", 18400), _pi(f"t{s}c", 21700)])
     erg2 = welt.run(SP.verarbeiten(db, seg, items2, beobachtet=K.jetzt()))
     a = welt.run(db[K.LISTINGS].find_one({"listing_id": f"t{s}a"}, {"_id": 0}))
     assert a["current_price"] == 18400 and a["first_price"] == 18900 and a["price_changes"] == 1 and a["price_reductions"] == 1
@@ -1433,15 +1439,15 @@ def test_27_chance_neues_minimum_nur_gegen_frischen_stand(welt):
     welt.run(db[K.SEGMENTE].insert_one(dict(seg)))
     a, b, d = f"t{s}a", f"t{s}b", f"t{s}d"
     # Stand von vor 5 Tagen, dann heute ein neues Auto unter dem damaligen Minimum -> KEINE Chance
-    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_item(a, 18900), _item(b, 19900)]), beobachtet=K.jetzt() - timedelta(days=5)))
-    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_item(d, 17500), _item(a, 18900), _item(b, 19900)])))
+    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_pi(a, 18900), _pi(b, 19900)]), beobachtet=K.jetzt() - timedelta(days=5)))
+    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_pi(d, 17500), _pi(a, 18900), _pi(b, 19900)])))
     assert welt.run(db[K.CHANCEN].count_documents({"listing_id": d, "typ": {"$in": ["neues_minimum", "neu_guenstig"]}})) == 0
     # Stand von vor 2 Tagen -> Chance
     _aufraeumen(welt)
     welt.run(db[K.MODELLE].insert_one(_modell(w)))
     welt.run(db[K.SEGMENTE].insert_one(dict(seg)))
-    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_item(a, 18900), _item(b, 19900)]), beobachtet=K.jetzt() - timedelta(days=2)))
-    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_item(d, 17500), _item(a, 18900), _item(b, 19900)])))
+    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_pi(a, 18900), _pi(b, 19900)]), beobachtet=K.jetzt() - timedelta(days=2)))
+    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_pi(d, 17500), _pi(a, 18900), _pi(b, 19900)])))
     assert welt.run(db[K.CHANCEN].count_documents({"listing_id": d, "typ": "neues_minimum"})) == 1
     _aufraeumen(welt)
 
@@ -2604,8 +2610,8 @@ def test_50_letzter_lauf_rang_gestern_wiederkehrer_chancen(welt):
     welt.run(db[K.SEGMENTE].insert_one(dict(seg)))
     t = _tag(0)
     a, b, c = f"t{s}a", f"t{s}b", f"t{s}c"
-    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_item(a, 18000), _item(b, 19000), _item(c, 20000)]), lauf_tag=t))
-    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_item(b, 18500), _item(a, 18600)]), lauf_tag=f"{t}#2"))
+    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_pi(a, 18000), _pi(b, 19000), _pi(c, 20000)]), lauf_tag=t))
+    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_pi(b, 18500), _pi(a, 18600)]), lauf_tag=f"{t}#2"))
     liste = welt.run(ABF.segment_listings(db, seg["id"]))
     assert [x["listing_id"] for x in liste["listings"]] == [b, a] and [x["rank_today"] for x in liste["listings"]] == [1, 2]
     assert liste["lauf_tag"] == f"{t}#2" and c not in str(liste["listings"]), "c war nur im Morgenlauf"
@@ -2614,9 +2620,9 @@ def test_50_letzter_lauf_rang_gestern_wiederkehrer_chancen(welt):
     welt.run(db[K.MODELLE].insert_one(_modell(w)))
     welt.run(db[K.SEGMENTE].insert_one(dict(seg)))
     x = f"t{s}x"
-    alt = [_item(f"t{s}{i:02d}", 10000 + i * 100) for i in range(6)] + [_item(x, 30000)]      # x auf Platz 7
+    alt = [_pi(f"t{s}{i:02d}", 10000 + i * 100) for i in range(6)] + [_pi(x, 30000)]      # x auf Platz 7
     welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items(alt), beobachtet=K.jetzt() - timedelta(days=5)))
-    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_item(x, 9000)] + alt[:6])))     # x heute Platz 1
+    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_pi(x, 9000)] + alt[:6])))     # x heute Platz 1
     snap = welt.run(db[K.SNAPSHOTS].find_one({"listing_id": x, "segment_id": seg["id"], "date": t}, {"_id": 0}))
     assert snap["rank_yesterday"] is None and snap["rank_vergleich"] is None and snap["new_in_sample"] is False
     assert welt.run(db[K.CHANCEN].count_documents({"listing_id": x, "typ": {"$regex": "^neu_top"}})) == 0, "5 Tage alt: keine Top-N-Chance"
@@ -2625,7 +2631,7 @@ def test_50_letzter_lauf_rang_gestern_wiederkehrer_chancen(welt):
     welt.run(db[K.MODELLE].insert_one(_modell(w)))
     welt.run(db[K.SEGMENTE].insert_one(dict(seg)))
     welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items(alt), beobachtet=K.jetzt() - timedelta(days=2)))
-    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_item(x, 9000)] + alt[:6])))
+    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_pi(x, 9000)] + alt[:6])))
     snap = welt.run(db[K.SNAPSHOTS].find_one({"listing_id": x, "segment_id": seg["id"], "date": t}, {"_id": 0}))
     assert snap["rank_yesterday"] is None and snap["rank_vergleich"] == 7
     ch = welt.run(db[K.CHANCEN].find_one({"listing_id": x, "typ": {"$regex": "^neu_top"}}, {"_id": 0}))
@@ -2635,16 +2641,16 @@ def test_50_letzter_lauf_rang_gestern_wiederkehrer_chancen(welt):
     welt.run(db[K.MODELLE].insert_one(_modell(w)))
     welt.run(db[K.SEGMENTE].insert_one(dict(seg)))
     welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items(alt), beobachtet=K.jetzt() - timedelta(days=1)))
-    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_item(x, 9000)] + alt[:6])))
+    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_pi(x, 9000)] + alt[:6])))
     snap = welt.run(db[K.SNAPSHOTS].find_one({"listing_id": x, "segment_id": seg["id"], "date": t}, {"_id": 0}))
     assert snap["rank_yesterday"] == 7 and snap["rank_vergleich"] == 7
     # Nr. 47: 14 Tage ohne Schnappschuss -> wieder "neu im Sample" (wiederkehrer), zaehlt in new_in_sample_today
     _aufraeumen(welt)
     welt.run(db[K.MODELLE].insert_one(_modell(w)))
     welt.run(db[K.SEGMENTE].insert_one(dict(seg)))
-    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_item(x, 18000)]), beobachtet=K.jetzt() - timedelta(days=20)))
-    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_item(a, 17000)]), beobachtet=K.jetzt() - timedelta(days=10)))
-    erg = welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_item(x, 16000), _item(a, 17000)])))
+    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_pi(x, 18000)]), beobachtet=K.jetzt() - timedelta(days=20)))
+    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_pi(a, 17000)]), beobachtet=K.jetzt() - timedelta(days=10)))
+    erg = welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_pi(x, 16000), _pi(a, 17000)])))
     assert erg["neu_im_sample"] == 1
     snap = welt.run(db[K.SNAPSHOTS].find_one({"listing_id": x, "segment_id": seg["id"], "date": t}, {"_id": 0}))
     assert snap["new_in_sample"] is True and snap["wiederkehrer"] is True
@@ -2661,20 +2667,20 @@ def test_50_letzter_lauf_rang_gestern_wiederkehrer_chancen(welt):
     gestern = K.jetzt() - timedelta(days=1)
     d = f"t{s}d"
     for sg in (seg, seg_b):
-        welt.run(SP.verarbeiten(db, sg, NORM.listings_aus_items([_item(a, 20000), _item(b, 21000)]), beobachtet=gestern))
+        welt.run(SP.verarbeiten(db, sg, NORM.listings_aus_items([_pi(a, 20000), _pi(b, 21000)]), beobachtet=gestern))
     for sg in (seg, seg_b):
-        welt.run(SP.verarbeiten(db, sg, NORM.listings_aus_items([_item(d, 17500), _item(a, 20000), _item(b, 21000)]), lauf_tag=t))
+        welt.run(SP.verarbeiten(db, sg, NORM.listings_aus_items([_pi(d, 17500), _pi(a, 20000), _pi(b, 21000)]), lauf_tag=t))
     chancen = welt.run(db[K.CHANCEN].find({"listing_id": d, "typ": "neues_minimum", "date": t}, {"_id": 0}).to_list(10))
     assert sorted(c["segment_id"] for c in chancen) == sorted([seg["id"], seg_b["id"]]) and all(c["staerke_eur"] == 2500 for c in chancen), \
         "je Segment eine Chance (vorher: eine, die zweite kollidierte am Index)"
     # Nr. 45: zweite Reduktion am Abend ist staerker -> ersetzt; eine schwaechere danach nicht
-    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_item(d, 17500), _item(a, 19300), _item(b, 21000)]), lauf_tag=f"{t}#2"))    # a -700
+    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_pi(d, 17500), _pi(a, 19300), _pi(b, 21000)]), lauf_tag=f"{t}#2"))    # a -700
     c1 = welt.run(db[K.CHANCEN].find_one({"listing_id": a, "typ": "stark_reduziert", "date": t, "segment_id": seg["id"]}, {"_id": 0}))
     assert c1 and c1["staerke_eur"] == 700 and c1["price"] == 19300
-    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_item(d, 17500), _item(a, 18000), _item(b, 21000)]), lauf_tag=f"{t}#3"))    # a -1300
+    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_pi(d, 17500), _pi(a, 18000), _pi(b, 21000)]), lauf_tag=f"{t}#3"))    # a -1300
     c1 = welt.run(db[K.CHANCEN].find_one({"listing_id": a, "typ": "stark_reduziert", "date": t, "segment_id": seg["id"]}, {"_id": 0}))
     assert c1["price"] == 18000 and c1["delta_eur"] == -1300 and c1["staerke_eur"] == 1300 and c1.get("updated_at")
-    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_item(d, 17500), _item(a, 17400), _item(b, 21000)]), lauf_tag=f"{t}#4"))    # a -600: schwaecher
+    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_pi(d, 17500), _pi(a, 17400), _pi(b, 21000)]), lauf_tag=f"{t}#4"))    # a -600: schwaecher
     c1 = welt.run(db[K.CHANCEN].find_one({"listing_id": a, "typ": "stark_reduziert", "date": t, "segment_id": seg["id"]}, {"_id": 0}))
     assert c1["price"] == 18000 and c1["staerke_eur"] == 1300, "schwaechere Chance ueberschreibt nicht"
     assert welt.run(db[K.CHANCEN].count_documents({"listing_id": a, "typ": "stark_reduziert", "date": t})) == 1
@@ -3527,9 +3533,9 @@ def test_69_preisaenderung_je_segment_und_segmentzustand(welt):
     welt.run(db[K.SEGMENTE].insert_many([dict(seg_a), dict(seg_b)]))
     x, y = f"t{s}x", f"t{s}y"
     gestern = K.jetzt() - timedelta(days=1)
-    welt.run(SP.verarbeiten(db, seg_a, NORM.listings_aus_items([_item(y, 15000), _item(x, 20000)]), beobachtet=gestern))
+    welt.run(SP.verarbeiten(db, seg_a, NORM.listings_aus_items([_pi(y, 15000), _pi(x, 20000)]), beobachtet=gestern))
     # heute zuerst in B (erstmals dort) mit 19000: global -1000, im Segment B keine Basis
-    welt.run(SP.verarbeiten(db, seg_b, NORM.listings_aus_items([_item(x, 19000)])))
+    welt.run(SP.verarbeiten(db, seg_b, NORM.listings_aus_items([_pi(x, 19000)])))
     sb = welt.run(db[K.SNAPSHOTS].find_one({"listing_id": x, "segment_id": seg_b["id"], "date": _tag(0)}, {"_id": 0}))
     assert sb["price_change_eur"] is None and sb["price_change_global_eur"] == -1000 and sb["new_in_sample"] is True
     l = welt.run(db[K.LISTINGS].find_one({"listing_id": x}, {"_id": 0}))
@@ -3538,13 +3544,13 @@ def test_69_preisaenderung_je_segment_und_segmentzustand(welt):
     assert l["segmente"][seg_a["id"]]["first_rank"] == 2 and l["segmente"][seg_a["id"]]["first_seen_at"] == gestern.isoformat()
     assert l["segmente"][seg_a["id"]]["in_letztem_lauf"] is True, "in A zuletzt gesehen"
     # dann in A mit 19000: gegen As Snapshot von gestern (20000) -> -1000 im Segment; global nichts Neues
-    welt.run(SP.verarbeiten(db, seg_a, NORM.listings_aus_items([_item(y, 15000), _item(x, 19000)])))
+    welt.run(SP.verarbeiten(db, seg_a, NORM.listings_aus_items([_pi(y, 15000), _pi(x, 19000)])))
     sa = welt.run(db[K.SNAPSHOTS].find_one({"listing_id": x, "segment_id": seg_a["id"], "date": _tag(0)}, {"_id": 0}))
     assert sa["price_change_eur"] == -1000 and sa["price_change_pct"] == -5.0 and sa["price_change_global_eur"] is None
     assert welt.run(db[K.LISTINGS].find_one({"listing_id": x}, {"_id": 0}))["price_changes"] == 1, "globaler Verlauf einmal"
     assert welt.run(db[K.CHANCEN].count_documents({"listing_id": x, "typ": "stark_reduziert", "segment_id": seg_a["id"]})) == 1
     # Nr. 145: zweiter Lauf in A ohne x -> in A 'nicht im letzten Lauf', global bleibt 'seen' (heute gesehen)
-    welt.run(SP.verarbeiten(db, seg_a, NORM.listings_aus_items([_item(y, 15000)]), lauf_tag=f"{_tag(0)}#2"))
+    welt.run(SP.verarbeiten(db, seg_a, NORM.listings_aus_items([_pi(y, 15000)]), lauf_tag=f"{_tag(0)}#2"))
     l = welt.run(db[K.LISTINGS].find_one({"listing_id": x}, {"_id": 0}))
     assert l["segmente"][seg_a["id"]]["in_letztem_lauf"] is False and l["segmente"][seg_a["id"]]["not_in_run_since"]
     assert l["segmente"][seg_b["id"]]["in_letztem_lauf"] is True and l["active_state"] == "seen"
@@ -3663,10 +3669,10 @@ def test_71_chancen_api_filter_und_gueltigkeit(welt):
     welt.run(db[K.SEGMENTE].insert_many([dict(seg_a), dict(seg_b)]))
     a, b, d = f"t{s}a", f"t{s}b", f"t{s}d"
     gestern = K.jetzt() - timedelta(days=1)
-    welt.run(SP.verarbeiten(db, seg_a, NORM.listings_aus_items([_item(a, 20000), _item(b, 21000)]), beobachtet=gestern))
-    welt.run(SP.verarbeiten(db, seg_b, NORM.listings_aus_items([_item(a, 20000, km=20000)]), beobachtet=gestern))
-    welt.run(SP.verarbeiten(db, seg_a, NORM.listings_aus_items([_item(d, 17500), _item(a, 20000), _item(b, 21000)])))
-    welt.run(SP.verarbeiten(db, seg_b, NORM.listings_aus_items([_item(d, 17500, km=20000), _item(a, 20000, km=20000)])))
+    welt.run(SP.verarbeiten(db, seg_a, NORM.listings_aus_items([_pi(a, 20000), _pi(b, 21000)]), beobachtet=gestern))
+    welt.run(SP.verarbeiten(db, seg_b, NORM.listings_aus_items([_pi(a, 20000, km=20000)]), beobachtet=gestern))
+    welt.run(SP.verarbeiten(db, seg_a, NORM.listings_aus_items([_pi(d, 17500), _pi(a, 20000), _pi(b, 21000)])))
+    welt.run(SP.verarbeiten(db, seg_b, NORM.listings_aus_items([_pi(d, 17500, km=20000), _pi(a, 20000, km=20000)])))
     ch = welt.run(db[K.CHANCEN].find_one({"listing_id": d, "typ": "neues_minimum", "segment_id": seg_a["id"]}, {"_id": 0}))
     assert ch["detected_price"] == 17500 and ch["detected_advantage"] == 2500 and ch["referenz_eur"] == 20000
     # Nr. 134: segment_id + km -> nur das eine Segment (vorher: km ueberschrieb segment_id -> beide)
@@ -3680,7 +3686,7 @@ def test_71_chancen_api_filter_und_gueltigkeit(welt):
     # Nr. 136: Preis unveraendert -> gueltig; nach Aenderung -> historisch
     c = next(x for x in alle if x["listing_id"] == d and x["segment_id"] == seg_a["id"])
     assert c["still_valid"] is True and c["current_price"] == 17500 and c["current_advantage"] == 2500
-    welt.run(SP.verarbeiten(db, seg_a, NORM.listings_aus_items([_item(d, 19000), _item(a, 20000), _item(b, 21000)]), lauf_tag=f"{_tag(0)}#2"))
+    welt.run(SP.verarbeiten(db, seg_a, NORM.listings_aus_items([_pi(d, 19000), _pi(a, 20000), _pi(b, 21000)]), lauf_tag=f"{_tag(0)}#2"))
     c = next(x for x in welt.run(ABF.chancen(db, model_id=seg_a["model_id"], segment_id=seg_a["id"], tage=1)) if x["listing_id"] == d)
     assert c["still_valid"] is False and c["current_price"] == 19000 and c["current_advantage"] == 1000 and c["detected_price"] == 17500
     # Nr. 135: eine Abfrage mit $in
@@ -3752,3 +3758,38 @@ def test_73_testlauf_sortierung_je_segment_und_unzuordenbar(welt, monkeypatch):
     assert erg["sortierung_ungueltig"] == 1 and erg["bestanden"] is False and erg["testlauf_ok_hash"] is None, "wie im Worker: data_invalid"
     assert A.testlauf_bestanden({"gueltig_gesamt": 2, "verworfen_gesamt": 0, "sortierung_ungueltig": 0}) is True
     assert A.testlauf_bestanden({"gueltig_gesamt": 2, "verworfen_gesamt": 0, "sortierung_ungueltig": 1}) is False
+
+
+def test_74_chancen_nur_private_top3(welt):
+    """Ahmad 26.09.2026 abends: Chancen nur fuer Privatangebote, die im Lauf zu den 3 guenstigsten Privatangeboten
+    ihres Segments gehoeren — Haendlerautos (auch stark reduziert) und der 4. Privatwagen nicht; der Leseweg
+    zeigt auch aeltere Chancen ohne Privat-Rang nicht mehr."""
+    w, db = welt.w, welt.db
+    _aufraeumen(welt)
+    s = w.s
+    seg = _segment(w)
+    welt.run(db[K.MODELLE].insert_one(_modell(w)))
+    welt.run(db[K.SEGMENTE].insert_one(dict(seg)))
+    h1, h2, p1, p2, p3, p4 = (f"t{s}{x}" for x in ("h1", "h2", "p1", "p2", "p3", "p4"))
+    gestern = K.jetzt() - timedelta(days=1)
+    vortag = [_item(h1, 15000), _item(h2, 15500), _pi(p1, 16000), _pi(p2, 16500), _pi(p3, 17000), _pi(p4, 17500)]
+    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items(vortag), beobachtet=gestern))
+    # heute: alle um 1.000 EUR reduziert (>= 500 EUR -> stark_reduziert) — nur p1..p3 sind Chancen
+    heute = [_item(h1, 14000), _item(h2, 14500), _pi(p1, 15000), _pi(p2, 15500), _pi(p3, 16000), _pi(p4, 16500)]
+    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items(heute)))
+    ch = welt.run(db[K.CHANCEN].find({"segment_id": seg["id"], "typ": "stark_reduziert"}, {"_id": 0}).to_list(20))
+    assert sorted(c["listing_id"] for c in ch) == sorted([p1, p2, p3]), "Haendler und 4. Privatwagen: keine Chance"
+    assert {c["listing_id"]: c["privat_rang"] for c in ch} == {p1: 1, p2: 2, p3: 3} and all(c["seller_type"] == "PRIVATE" for c in ch)
+    assert SP.chance_erlaubt({"listing": {"seller_type": "PRIVATE"}, "privat_rang": 3}) is True
+    assert SP.chance_erlaubt({"listing": {"seller_type": "PRIVATE"}, "privat_rang": 4}) is False
+    assert SP.chance_erlaubt({"listing": {"seller_type": "DEALER"}, "privat_rang": 1}) is False
+    assert SP.chance_erlaubt({"listing": {"seller_type": "PRIVATE"}}) is False
+    # Leseweg: aeltere Chancen (Haendler / ohne Privat-Rang) erscheinen nicht mehr
+    welt.run(db[K.CHANCEN].insert_many([
+        {"id": f"test-alt-{s}-1", "listing_id": h1, "typ": "stark_reduziert", "date": _tag(0), "segment_id": seg["id"], "model_id": seg["model_id"],
+         "seller_type": "DEALER", "price": 14000, "created_at": K.jetzt_iso()},
+        {"id": f"test-alt-{s}-2", "listing_id": p4, "typ": "neu_guenstig", "date": _tag(0), "segment_id": seg["id"], "model_id": seg["model_id"],
+         "seller_type": "PRIVATE", "price": 16500, "created_at": K.jetzt_iso()}]))
+    gelesen = welt.run(ABF.chancen(db, model_id=seg["model_id"], tage=1))
+    assert sorted(c["listing_id"] for c in gelesen) == sorted([p1, p2, p3])
+    _aufraeumen(welt)

@@ -19,9 +19,11 @@ vi.mock("@/lib/api", () => ({
       { id: "c1", typ: "neues_minimum", label: "Audi A4 40 TDI", km_label: "55–85k km", title: "Audi A4 40 TDI S line", price: 19900,
         referenz_eur: 21100, differenz_eur: -1200, differenz_pct: -5.69, mileage_km: 73000, first_registration: "06/2020", power_kw: 140,
         gearbox: "Automatik", postal_code: "70173", city: "Stuttgart", rang: 1, rang_vorher: null, text: "unter dem bisher günstigsten Angebot",
+        seller_type: "PRIVATE", privat_rang: 1,
         created_at: "2026-10-01T05:00:00Z", mobile_created_at: "2026-09-30T10:00:00Z", url: "https://suchen.mobile.de/x", active_state: "seen" },
       { id: "c2", typ: "stark_reduziert", label: "BMW 320d", km_label: "55–85k km", title: "BMW 320d", price: 20400, delta_eur: -1500, delta_pct: -6.8,
         mileage_km: 60000, first_registration: "01/2019", rang: 3, rang_vorher: 9, text: "deutliche Preisreduzierung", created_at: "2026-10-01T05:00:00Z",
+        seller_type: "PRIVATE", privat_rang: 2,
         first_price: 21900, active_state: "not_seen_in_sample",
         // Reparaturwelle 6 Nr. 136: Preis seit dem Erkennen geaendert -> historisch
         detected_price: 20400, detected_advantage: 1500, current_price: 21000, current_advantage: 900, still_valid: false }], hinweis: "kein Marktmedian" } };
@@ -54,7 +56,12 @@ describe("Chancen", () => {
     expect(el("chance-historisch-c2").textContent).toBe("historisch — Preis geändert (jetzt 21.000 €)");
     expect(el("chance-historisch-c1")).toBeNull();
     expect(el("chancen-page").textContent).not.toMatch(/\b20 günstigsten/);
-    expect(el("chancen-page").textContent).not.toMatch(/Marktpreis/);
+    expect(el("chancen-page").textContent).not.toMatch(/Marktpreis\b/);
+    // Ahmad 26.09. abends: nur Privatangebote (3 günstigste je Segment) — Privat-Rang sichtbar, Hinweis im Kopf
+    expect(el("chance-privat-c1").textContent).toBe("Privat · günstigstes Privatangebot");
+    expect(el("chance-privat-c2").textContent).toBe("Privat · 2. günstigstes Privatangebot");
+    expect(el("chancen-page").textContent).toContain("Nur Privatangebote");
+    expect(el("chancen-page").textContent).toContain("Händlerangebote erscheinen hier nicht");
     // Filter -> neue Abfrage mit Parametern
     await act(async () => {
       const s = el("chancen-typ"); s.value = "stark_reduziert"; s.dispatchEvent(new Event("change", { bubbles: true }));

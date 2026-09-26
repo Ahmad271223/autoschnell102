@@ -40,7 +40,7 @@ export default function Chancen({ pfad = "/markt/chancen", modellePfad = "/markt
       <div className="overline inline-flex items-center gap-1.5"><Radar size={13} /> {admin ? "Marktanalyse" : "Markt"}</div>
       <h1 className="font-display font-black text-2xl tracking-tighter mt-1">Chancen</h1>
       <div className="text-[12px] mt-1" style={{ color: "var(--text-secondary)" }}>
-        Auffällige Angebote aus der täglichen Beobachtung der günstigsten Fahrzeuge je Modell, km- und EZ-Bereich (Anzahl je Suchauftrag). Regelbasiert, kein Marktmedian, keine Kaufempfehlung.
+        Nur Privatangebote: je Segment die 3 günstigsten Privatangebote aus unserem täglichen Abruf (Modell, km- und EZ-Bereich). Händlerangebote erscheinen hier nicht. Regelbasiert, kein Marktmedian, keine Kaufempfehlung.
       </div>
       <div className="mt-4 flex flex-wrap gap-2 items-center" data-testid="chancen-filter">
         <select className={sel} style={st} value={filter.typ} onChange={(e) => setzen("typ", e.target.value)} data-testid="chancen-typ">
@@ -92,6 +92,7 @@ export default function Chancen({ pfad = "/markt/chancen", modellePfad = "/markt
             </div>
             <div className="mt-1.5 text-[11px] flex flex-wrap gap-x-3" style={{ color: "var(--text-dim)" }}>
               <span>{c.text}</span>
+              {c.privat_rang ? <span data-testid={`chance-privat-${c.id}`}>Privat · {c.privat_rang === 1 ? "günstigstes Privatangebot" : `${c.privat_rang}. günstigstes Privatangebot`}</span> : null}
               {c.rang ? <span>heute Platz {c.rang}{c.rang_vorher ? ` (gestern ${c.rang_vorher})` : ""}</span> : null}
               {c.first_price != null && c.first_price !== c.price ? <span>Erstbeobachtung {eur(c.first_price)}</span> : null}
               <span>bei mobile seit {datumKurz(c.mobile_created_at)}</span>

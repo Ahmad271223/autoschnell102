@@ -330,6 +330,12 @@ async def verarbeiten(db, segment: Dict[str, Any], listings: List[Dict[str, Any]
                       "delta_pct": delta_pct, "neu_gesamt": vorher is None,
                       "first_price": (vorher or {}).get("first_price", preis)})
     ids_heute = [h["listing"]["listing_id"] for h in heute]
+    # Ahmad 26.09.2026 abends: Rang unter den PRIVATangeboten dieses Laufs (1 = guenstigstes Privatangebot) —
+    # Chancen gibt es nur noch fuer die PRIVATE_TOP_N guenstigsten Privatangebote (chance_erlaubt)
+    privat_sortiert, _ = private_top_auswahl(heute, n=len(heute))
+    privat_rang = {h["listing"]["listing_id"]: i for i, h in enumerate(privat_sortiert, 1)}
+    for h in heute:
+        h["privat_rang"] = privat_rang.get(h["listing"]["listing_id"])
     # nicht mehr im Sample dieses Segments: KEIN Verkauf. Nr. 15: NUR Listings, die heute
     # nirgendwo gesehen wurden (last_seen_tag < heute) — ein Inserat, das heute in einem
     # anderen, ueberlappenden Segment auftauchte, bleibt "seen". (Global tagesbasiert — Nr. 145.)
@@ -526,12 +532,24 @@ async def segmentstatistik(db, seg_id: str, tag: Optional[str] = None) -> Option
 
 
 # ---------------------------------------------------------------- Chancen
+def chance_erlaubt(h: Dict[str, Any]) -> bool:
+    """Ahmad 26.09.2026 abends: Chancen NUR fuer Privatangebote, die in diesem Lauf zu den PRIVATE_TOP_N (3)
+    guenstigsten Privatangeboten ihres Segments gehoeren — reduzierte, aber immer noch teure Haendlerautos
+    (z. B. Platz 4/5 der guenstigsten) sind keine Chance. Dieselbe Auswahl wie bei den Private Deals."""
+    l = h.get("listing") or {}
+    rang = h.get("privat_rang")
+    return (str(l.get("seller_type") or "").strip().upper() == "PRIVATE" and rang is not None
+            and 1 <= int(rang) <= konfig.PRIVATE_TOP_N)
+
+
 async def chancen_ableiten(db, segment: Dict[str, Any], heute: List[Dict[str, Any]],
                            vorher_stat: Optional[Dict[str, Any]], tag: str, jetzt_iso: str) -> int:
     """Regeln (ohne KI): neues Listing unter bisherigem Minimum / unter p25;
     starke Reduktion (>= Prozent oder >= Betrag); neu in die Top-N gefallen.
     Welle 6 Nr. 136: jede Chance traegt detected_price/detected_advantage (Stand beim Erkennen);
-    der Leseweg rechnet current_price/current_advantage/still_valid dazu."""
+    der Leseweg rechnet current_price/current_advantage/still_valid dazu.
+    Ahmad 26.09.2026 abends: nur Privatangebote unter den 3 guenstigsten Privatangeboten des Laufs
+    (chance_erlaubt); der Privat-Rang steht an der Chance (privat_rang)."""
     n = 0
     top_n = konfig.chance_top_n()
     red_pct, red_eur = konfig.chance_reduktion_pct(), konfig.chance_reduktion_eur()
@@ -540,6 +558,8 @@ async def chancen_ableiten(db, segment: Dict[str, Any], heute: List[Dict[str, An
     vergleichbar = bool(vorher_stat and vorher_stat.get("sample_size")
                         and str(vorher_stat.get("date") or "") >= _tag_minus(tag, CHANCE_VERGLEICH_TAGE))
     for h in heute:
+        if not chance_erlaubt(h):
+            continue
         l, preis = h["listing"], h["preis"]
         treffer: List[Tuple[str, Optional[float], str]] = []
         if h["neu_im_sample"] and vergleichbar:
@@ -570,7 +590,7 @@ async def chancen_ableiten(db, segment: Dict[str, Any], heute: List[Dict[str, An
                       "mileage_km": l.get("mileage_km"), "first_registration": l.get("first_registration"),
                       "power_kw": l.get("power_kw"), "gearbox": l.get("gearbox"), "fuel": l.get("fuel"),
                       "city": l.get("city"), "postal_code": l.get("postal_code"),
-                      "seller_type": l.get("seller_type"),
+                      "seller_type": l.get("seller_type"), "privat_rang": h.get("privat_rang"),
                       "price_rating": (l.get("price_rating") or {}).get("rating"),
                       "mobile_created_at": l.get("mobile_created_at"), "first_price": h.get("first_price"),
                       "text": text, "staerke_eur": staerke}

@@ -303,9 +303,12 @@ async def chancen(db, *, typ: Optional[str] = None, model_id: Optional[str] = No
                   km_min: Optional[int] = None, km_max: Optional[int] = None, tage: int = 7, limit: int = 100) -> List[Dict[str, Any]]:
     """Welle 6 Nr. 134: segment_id UND km-Filter werden geschnitten (vorher ueberschrieb der km-Filter das
     Segment); Nr. 135: die Listing-Zustaende kommen mit EINER Abfrage ($in); Nr. 136: jede Chance sagt,
-    ob ihr Preis noch gilt (still_valid) und wie gross der Vorteil heute ist (current_advantage)."""
+    ob ihr Preis noch gilt (still_valid) und wie gross der Vorteil heute ist (current_advantage).
+    Ahmad 26.09.2026 abends: nur Privatangebote unter den 3 guenstigsten Privatangeboten ihres Laufs
+    (privat_rang 1..PRIVATE_TOP_N) — aeltere Chancen ohne Privat-Rang (Haendler, Platz 4/5) erscheinen nicht mehr."""
     seit = (konfig.jetzt() - timedelta(days=max(1, min(int(tage), 90)))).isoformat()
-    filt: Dict[str, Any] = {"created_at": {"$gte": seit}}
+    filt: Dict[str, Any] = {"created_at": {"$gte": seit}, "seller_type": "PRIVATE",
+                            "privat_rang": {"$gte": 1, "$lte": konfig.PRIVATE_TOP_N}}
     if typ:
         filt["typ"] = typ if not typ.startswith("neu_top") else {"$regex": "^neu_top"}
     if model_id:
