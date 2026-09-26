@@ -45,7 +45,8 @@ log = logging.getLogger("autohandel.ki")
 SAMMLUNG = "ki_marktdaten"
 PREIS_SAMMLUNG = "ki_reparaturpreise"
 DOK_ID = "aktuell"
-MAX_SUCHEN_TABELLE = 8          # je Gruppe (drei Gruppen, siehe _gruppen)
+MAX_SUCHEN_TABELLE = 8          # je Gruppe (vier Gruppen, siehe _gruppen)
+UMWANDLUNG_MAX_TOKENS = 6000    # Tabelle je Gruppe umwandeln, nie abschneiden (Betrieb 26.09.2026)
 MAX_SUCHEN_FALL = 2             # Probelauf 26.09.2026: 4 direkte Suchen = ~140k Tokens = 46 ct
 EIGENE_MIN = 3                  # ab so vielen frischen eigenen Werten keine Suche mehr
 EIGENE_TAGE = 180
@@ -213,6 +214,46 @@ async def aktuell(db=None) -> Optional[dict]:
         return None
 
 
+async def _umwandeln_je_gruppe(gruppen_texte: List[tuple]) -> Dict[str, Any]:
+    """Wandelt jede Recherche-Gruppe getrennt in Tabellenzeilen um und fuegt sie zusammen.
+    Rueckgabe wie json_bewerten: daten.positionen (dedupliziert), daten.zusammenfassung,
+    usage (summiert), dauer_ms (summiert), grund (letzter Fehler), fehlgeschlagen (Gruppen)."""
+    roh: List[dict] = []
+    zusammenfassungen: List[str] = []
+    usage: Dict[str, int] = {}
+    dauer = 0
+    fehler: List[str] = []
+    grund = ""
+    for titel, text, positionen in gruppen_texte:
+        j = await json_bewerten(system=UMWANDLUNG_SYSTEM,
+                                nutzer={"bericht": (f"## {titel}" + chr(10) + text)[:BERICHT_MAX], "positionen": positionen},
+                                schema=MARKT_SCHEMA, max_tokens=UMWANDLUNG_MAX_TOKENS)
+        dauer += int(j.get("dauer_ms") or 0)
+        for k, v in (j.get("usage") or {}).items():
+            usage[k] = int(usage.get(k) or 0) + int(v or 0)
+        if j.get("status") != "ok" or not isinstance(j.get("daten"), dict):
+            grund = j.get("grund") or "Umwandlung fehlgeschlagen"
+            fehler.append(titel)
+            log.warning("Markttabelle: Gruppe %r nicht umgewandelt: %s", titel, grund)
+            continue
+        roh.extend(p for p in (j["daten"].get("positionen") or []) if isinstance(p, dict))
+        z = str(j["daten"].get("zusammenfassung") or "").strip()
+        if z:
+            zusammenfassungen.append(z)
+    gesehen = set()
+    eindeutig: List[dict] = []
+    ok_gruppen = len(gruppen_texte) - len(fehler)
+    for p in roh:
+        key = (str(p.get("typ") or "").strip().lower(), str(p.get("auspraegung") or "").strip().lower())
+        if key in gesehen:
+            continue
+        gesehen.add(key)
+        eindeutig.append(p)
+    return {"status": "ok" if ok_gruppen > 0 else "fehler", "grund": grund,
+            "daten": {"positionen": eindeutig, "zusammenfassung": " ".join(zusammenfassungen)},
+            "usage": usage, "dauer_ms": dauer, "fehlgeschlagen": fehler}
+
+
 async def aktualisieren(db=None, *, erzwingen: bool = False) -> dict:
     """Recherche (Websuche, drei Gruppen) + Umwandlung in die Tabelle; Ablage.
     Eine leere Tabelle ist ein Fehlversuch. Wirft nie."""
@@ -230,6 +271,7 @@ async def aktualisieren(db=None, *, erzwingen: bool = False) -> dict:
         suchen = 0
         dauer = 0
         letzter_status, letzter_grund = "fehler", "keine Antwort"
+        gruppen_texte: List[tuple] = []
         for titel, positionen in _gruppen():
             r = await recherche(system=RECHERCHE_SYSTEM, frage=_frage_tabelle(titel, positionen),
                                 max_suchen=MAX_SUCHEN_TABELLE)
@@ -240,6 +282,7 @@ async def aktualisieren(db=None, *, erzwingen: bool = False) -> dict:
                 usage_r[k] = int(usage_r.get(k) or 0) + int(v or 0)
             if r.get("status") == "ok" and (r.get("text") or "").strip():
                 texte.append(f"## {titel}\n" + r["text"].strip())
+                gruppen_texte.append((titel, r["text"].strip(), positionen))
                 for q in r.get("quellen") or []:
                     if q.get("url"):
                         quellen.setdefault(q["url"], q.get("titel") or "")
@@ -250,9 +293,11 @@ async def aktualisieren(db=None, *, erzwingen: bool = False) -> dict:
             await _alarm(db, eintrag["status"], eintrag["grund"])
             return {"status": eintrag["status"], "grund": eintrag["grund"], "aktualisiert": False}
         bericht = "\n\n".join(texte)
-        j = await json_bewerten(system=UMWANDLUNG_SYSTEM,
-                                nutzer={"bericht": bericht[:BERICHT_MAX], "positionen": _positionen_liste()},
-                                schema=MARKT_SCHEMA)
+        # Betrieb 26.09.2026: EIN Umwandlungs-Aufruf fuer vier Gruppen wurde bei
+        # max_tokens abgeschnitten (Alarm ki_marktdaten_fehlgeschlagen). Jetzt je Gruppe
+        # ein Aufruf mit nur deren Positionen und hoeherer Grenze; scheitert eine
+        # Gruppe, bleibt die Tabelle der anderen erhalten.
+        j = await _umwandeln_je_gruppe(gruppen_texte)
         if j.get("status") != "ok" or not isinstance(j.get("daten"), dict):
             grund = j.get("grund") or "Umwandlung fehlgeschlagen"
             await db[SAMMLUNG].update_one({"_id": DOK_ID}, {"$set": {"stand_versuch": jetzt, "status": "fehler", "grund": grund}},
@@ -274,7 +319,7 @@ async def aktualisieren(db=None, *, erzwingen: bool = False) -> dict:
                "quellen": [{"url": u, "titel": t} for u, t in list(quellen.items())[:20]],
                "bericht": bericht[:BERICHT_MAX],
                "zusammenfassung": str(j["daten"].get("zusammenfassung") or "")[:600],
-               "modell": ki_modell(), "suchen": suchen,
+               "modell": ki_modell(), "suchen": suchen, "gruppen_fehler": list(j.get("fehlgeschlagen") or []),
                "dauer_ms": dauer + int(j.get("dauer_ms") or 0), "usage": usage}
         await db[SAMMLUNG].replace_one({"_id": DOK_ID}, doc, upsert=True)
         try:

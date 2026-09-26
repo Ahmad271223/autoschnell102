@@ -100,7 +100,8 @@ def _system_bloecke(system: str, zusatz: Optional[str]) -> list:
 
 
 async def json_bewerten(*, system: str, nutzer: Dict[str, Any], schema: Dict[str, Any],
-                        zeitlimit: Optional[float] = None, zusatz: Optional[str] = None) -> KiAntwort:
+                        zeitlimit: Optional[float] = None, zusatz: Optional[str] = None,
+                        max_tokens: Optional[int] = None) -> KiAntwort:
     """Ein Aufruf, eine JSON-Antwort. Wirft NIE — jeder Fehler wird zum
     status im Ergebnis (der Vertragsprozess laeuft weiter). `zusatz` ist
     der wechselnde Teil des System-Prompts (26.09.2026: Marktdaten,
@@ -121,7 +122,7 @@ async def json_bewerten(*, system: str, nutzer: Dict[str, Any], schema: Dict[str
             extra["thinking"] = {"type": "disabled"}
         r = await client.messages.create(
             model=ki_modell(),
-            max_tokens=KI_MAX_TOKENS,
+            max_tokens=int(max_tokens or KI_MAX_TOKENS),
             system=_system_bloecke(system, zusatz),
             output_config={"effort": ki_effort(),
                            "format": {"type": "json_schema", "schema": schema}},

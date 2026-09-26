@@ -90,6 +90,49 @@ def test_01_markttabelle_recherche_umwandlung_ablage(welt, monkeypatch):
     _tabelle_weg(welt)
 
 
+def test_01b_umwandlung_je_gruppe_nicht_abgeschnitten(welt, monkeypatch):
+    """Betrieb 26.09.2026: Alarm ki_marktdaten_fehlgeschlagen "Antwort abgeschnitten
+    (max_tokens)" — die Umwandlung aller vier Gruppen in EINEM Aufruf sprengte 2500
+    Tokens. Jetzt: je Gruppe ein Aufruf mit nur deren Positionen und 6000 Tokens;
+    scheitert eine Gruppe, bleibt die Tabelle der anderen; scheitern alle -> Fehler."""
+    MD = _markt_attrappen(monkeypatch)
+    db = welt.db
+    _tabelle_weg(welt)
+    aufrufe = []
+
+    async def _json(**kw):
+        aufrufe.append(kw)
+        if len(aufrufe) == 2:
+            return {"status": "fehler", "grund": "Antwort abgeschnitten (max_tokens)", "daten": None, "dauer_ms": 1,
+                    "modell": "a", "usage": {"output_tokens": 6000}}
+        return {"status": "ok", "grund": "", "daten": {"positionen": [TABELLE["positionen"][0]] if len(aufrufe) < 4 else TABELLE["positionen"],
+                                                        "zusammenfassung": f"Gruppe {len(aufrufe)}."},
+                "dauer_ms": 3, "modell": "a", "usage": {"input_tokens": 100, "output_tokens": 50}}
+    monkeypatch.setattr(MD, "json_bewerten", _json)
+    erg = welt.run(MD.aktualisieren(db, erzwingen=True))
+    assert erg["status"] == "ok" and erg["aktualisiert"] is True
+    assert len(aufrufe) == 4, "je Recherche-Gruppe ein Umwandlungs-Aufruf"
+    assert all(kw["max_tokens"] == MD.UMWANDLUNG_MAX_TOKENS >= 6000 for kw in aufrufe)
+    gruppen = [g for g, _ in MD._gruppen()]
+    for kw, (titel, positionen) in zip(aufrufe, MD._gruppen()):
+        assert kw["nutzer"]["bericht"].startswith(f"## {titel}") and BERICHT.strip() in kw["nutzer"]["bericht"]
+        assert kw["nutzer"]["positionen"] == positionen, "nur die Positionen der eigenen Gruppe"
+    doc = welt.run(db.ki_marktdaten.find_one({"_id": "aktuell"}))
+    assert {p["typ"] for p in doc["positionen"]} == {"delle", "keys"}, "dedupliziert ueber Gruppen"
+    assert doc["gruppen_fehler"] == [gruppen[1]]
+    assert doc["zusammenfassung"] == "Gruppe 1. Gruppe 3. Gruppe 4."
+    assert doc["usage"]["output_tokens"] == 6000 + 3 * 50
+    assert not welt.run(db.betriebsalarme.find_one({"typ": "ki_marktdaten_fehlgeschlagen", "ref": "aktuell", "offen": True}))
+
+    async def _kaputt(**kw):
+        return {"status": "fehler", "grund": "Antwort abgeschnitten (max_tokens)", "daten": None, "dauer_ms": 1, "modell": "a", "usage": {}}
+    monkeypatch.setattr(MD, "json_bewerten", _kaputt)
+    erg = welt.run(MD.aktualisieren(db, erzwingen=True))
+    assert erg["status"] == "fehler" and "abgeschnitten" in erg["grund"]
+    assert welt.run(db.ki_marktdaten.find_one({"_id": "aktuell"}))["positionen"], "alte Tabelle bleibt"
+    _tabelle_weg(welt)
+
+
 def test_02_recherche_scheitert_ohne_absturz_und_wartet(welt, monkeypatch):
     MD = _markt_attrappen(monkeypatch)
     db = welt.db

@@ -3219,6 +3219,15 @@ konnte das Modell im Probelauf nichts anfangen), Handels-, Kleinanzeigen- und Fo
 4 Suchen, ~55 s, ADAC-Zitate für Dellen, Schlüsselpreise je Marke. Ist die Websuche aus, steht die Meldung
 `ki_marktdaten_fehlgeschlagen` in Betrieb, die Bewertung läuft ohne Marktdaten weiter. Die KI bekommt seit
 diesem Stand ausdrücklich Erstzulassung, Alter, PS, Hubraum, Marke, Modell, Variante, Farbe und Klasse.
+**Nachtrag 26.09. abends (Betrieb live: Alarm `ki_marktdaten_fehlgeschlagen` „Antwort abgeschnitten
+(max_tokens)“):** Die Umwandlung der Recherche in die Tabelle lief für alle vier Gruppen in EINEM Aufruf
+mit 2.500 Ausgabe-Tokens – seit der vierten Gruppe (Technik) zu wenig, die Tabelle wurde nie gebaut. Jetzt
+wird **je Gruppe** einzeln umgewandelt (nur die Positionen dieser Gruppe, 6.000 Tokens,
+`UMWANDLUNG_MAX_TOKENS` in marktdaten.py); scheitert eine Gruppe, bleibt die Tabelle der anderen und
+`gruppen_fehler` im Dokument nennt sie, erst wenn alle scheitern steht der Alarm. Probelauf 26.09. abends:
+4 Gruppen, 32 Suchen, 48 Positionen, ~3,5 Minuten, je Gruppe 1.200–1.550 Ausgabe-Tokens (zusammen ~5.200,
+also klar über der alten Grenze), Kosten rund 1,20 € je Monatslauf. Nach dem Rollout einmal „Marktdaten
+jetzt“ drücken und den Alarm quittieren.
 
 **Betrieb:** Ergebnisse liegen in `ki_bewertungen` (je Protokoll und Eingabe-Stand; ändert sich
 das Protokoll, wird neu gerechnet), freigegebene Fälle mit dem tatsächlichen Preis in
