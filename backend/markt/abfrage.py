@@ -431,13 +431,25 @@ async def monitoring(db) -> Dict[str, Any]:
                        "text": f"{unsortiert} Lauf/Läufe heute mit ungültigen Daten (Sortierung unsicher — nichts gespeichert, Kosten gebucht)"})
     if not konfig.token():
         alarme.append({"typ": "token", "text": "APIFY_TOKEN fehlt", "stufe": "rot"})
+    # Reparaturwelle 5 Nr. 39: Rueckstand der Entfernungspruefung (wartende Kandidaten), Alarm ab 500
+    from markt import entfernung
+    rueckstand = await entfernung.rueckstand(db)
+    if rueckstand >= entfernung.RUECKSTAND_ALARM:
+        alarme.append({"typ": "entfernung_rueckstand", "stufe": "warn",
+                       "text": f"Rückstand Entfernungsprüfung: {rueckstand} Inserate warten (max. {konfig.entfernung_max_je_tag()} je Tag — MARKT_ENTFERNUNG_MAX_JE_TAG erhöhen)"})
+    # Nr. 26: fehlende kritische Unique-Indizes — der Worker crawlt nicht
+    indizes_fehlen = await konfig.indizes_fehlen(db)
+    if indizes_fehlen:
+        alarme.append({"typ": "indizes_fehlen", "stufe": "rot",
+                       "text": f"Kritische Unique-Indizes fehlen ({', '.join(indizes_fehlen)}) — der Crawler läuft nicht, bis sie stehen"})
     return {"tag": t, "geplant": gesamt, "erfolgreich": len(fertig), "fehlgeschlagen": fehlgeschlagen, "wartend": _z("queued"),
             "laufend": _z("running"), "ungueltig": unsortiert,
             "rows_heute": rows_heute, "rows_monat": int(b.get("rows") or 0),
             "kosten_heute_usd": kosten_heute, "kosten_monat_usd": round(float(b.get("used_usd") or 0), 4),
             "budget_uebrig_usd": round(float(b.get("frei_usd") or 0), 2), "budget_anteil_pct": round(anteil, 1),
             "mittlere_laufzeit_s": round(sum(dauer) / len(dauer) / 1000, 1) if dauer else None,
-            "letzter_erfolg": letzter, "segmente_veraltet": stale + nie, "alarme": alarme}
+            "letzter_erfolg": letzter, "segmente_veraltet": stale + nie, "alarme": alarme,
+            "rueckstand_entfernung": rueckstand, "indizes_fehlen": indizes_fehlen}
 
 
 async def status(db) -> Dict[str, Any]:

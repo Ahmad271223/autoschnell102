@@ -237,9 +237,10 @@ async def admin_market_crawler(body: CrawlerSchalterIn, admin=Depends(current_su
     geht vor MARKT_AKTIV. An: alle aktiven Suchauftraege laufen nach Tagesplan von selbst."""
     if body.aktiv and not konfig.token():
         raise HTTPException(400, "APIFY_TOKEN fehlt — ohne Scraper-Zugang kann der Crawler nicht laufen")
-    an = await konfig.crawler_schalten(db, body.aktiv, wer=admin["id"])
-    await log_activity_sicher("", admin["id"], "admin.markt.crawler", meta={"aktiv": an})
-    return {"ok": True, "aktiv": an, "takt": await jobs.intervall(db)}
+    # Reparaturwelle 5 Nr. 23: aus = wartende Jobs stornieren; an = frischer Tagesplan fuer heute
+    erg = await jobs.crawler_schalten(db, body.aktiv, wer=admin["id"])
+    await log_activity_sicher("", admin["id"], "admin.markt.crawler", meta={"aktiv": erg["aktiv"], "storniert": erg.get("storniert", 0)})
+    return {"ok": True, **erg, "takt": await jobs.intervall(db)}
 
 
 @router.post("/admin/market/sync")
@@ -252,11 +253,12 @@ async def admin_market_sync(admin=Depends(current_super_admin)):
 
 @router.post("/admin/market/plan")
 async def admin_market_plan(sofort: bool = False, admin=Depends(current_super_admin)):
-    """Tagesplan jetzt anlegen (sofort=true: alle faelligen ab jetzt statt im Fenster)."""
+    """Tagesplan jetzt anlegen (sofort=true: das Tageskontingent ab jetzt statt im Fenster —
+    Reparaturwelle 5 Nr. 32: nie mehr als segmente_je_tag, der Rest wartet; 'hinweis' sagt es)."""
     if not konfig.token():
         raise HTTPException(400, "APIFY_TOKEN fehlt")
     erg = await jobs.tagesplan(db, sofort=sofort)
-    await log_activity_sicher("", admin["id"], "admin.markt.plan", meta=erg)
+    await log_activity_sicher("", admin["id"], "admin.markt.plan", meta={k: v for k, v in erg.items() if k != "hinweis"})
     return {"ok": True, **erg}
 
 
@@ -275,7 +277,9 @@ async def admin_market_crawl_now(segment_id: str, admin=Depends(current_super_ad
 
 @router.post("/admin/market/worker/einmal")
 async def admin_market_worker_einmal(admin=Depends(current_super_admin)):
-    """Einen Worker-Takt im Vordergrund (Betreiber-Test; laeuft auch ohne MARKT_AKTIV)."""
+    """Einen Worker-Takt im Vordergrund (Betreiber-Test; laeuft auch ohne MARKT_AKTIV).
+    Reparaturwelle 5 Nr. 33: hoechstens EIN Buendel je Aufruf, ohne Warten auf Nachzuegler —
+    'wartend' sagt, wie viele faellige Jobs noch liegen."""
     if not konfig.token():
         raise HTTPException(400, "APIFY_TOKEN fehlt")
-    return {"ok": True, **(await jobs.einmal(db))}
+    return {"ok": True, **(await jobs.einmal(db, max_buendel=1, nachzuegler_s=0))}

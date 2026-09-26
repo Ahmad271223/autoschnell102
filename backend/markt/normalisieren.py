@@ -170,6 +170,38 @@ def preise_aufsteigend(listings: List[Dict[str, Any]]) -> bool:
     return p == sorted(p)
 
 
+# Reparaturwelle 5 (Review 26.09.2026 abends, Nr. 1): "sortiert" hiess bisher nur "monoton" —
+# drei Zeilen 9.000/9.500/12.000 sind monoton, auch wenn der Scraper die Plaetze 1, 4 und 9
+# geliefert hat. Der Top-N-Nachweis prueft die Positionsnummer (scrapesmith searchPosition)
+# VOR jedem Zeilenfilter auf den Rohzeilen: mit 1 beginnend und fortlaufend.
+SORTIERUNG_BEWIESEN = "bewiesen"            # searchPosition 1..n lueckenlos
+SORTIERUNG_NUR_MONOTON = "nur_monoton"      # keine Positionsnummer (Ersatz-Scraper) — Statistik ja, Kennzeichen
+SORTIERUNG_UNGUELTIG = "ungueltig"          # Positionsnummern vorhanden, aber mit Luecken -> data_invalid
+
+
+def top_n_nachweis(items_roh: List[Dict[str, Any]]) -> Tuple[str, str]:
+    """(status, grund) fuer die ROHEN Zeilen EINER Suche (vor Normalisierung, Dedupe und Filter).
+    Luecken duerfen nur durch den Zeilenfilter entstehen — deshalb wird hier vor dem Filter
+    geprueft. Beginnt die Nummerierung nicht bei 1 (Buendel eines Scrapers, der global zaehlt),
+    gilt der Lauf als 'nur_monoton' (Daten bleiben, Top-N nicht bewiesen), nicht als ungueltig."""
+    zeilen = [it for it in items_roh or [] if isinstance(it, dict)]
+    if not zeilen:
+        return SORTIERUNG_BEWIESEN, ""
+    positionen = [_int(it.get("searchPosition")) for it in zeilen]
+    vorhanden = [p for p in positionen if p is not None and p > 0]
+    if not vorhanden:
+        return SORTIERUNG_NUR_MONOTON, "keine searchPosition (Top-N nicht bewiesen)"
+    if len(vorhanden) != len(zeilen):
+        return SORTIERUNG_UNGUELTIG, f"searchPosition unvollstaendig ({len(vorhanden)} von {len(zeilen)})"
+    eindeutig = sorted(set(vorhanden))
+    if eindeutig != list(range(eindeutig[0], eindeutig[0] + len(eindeutig))):
+        fehlend = sorted(set(range(eindeutig[0], eindeutig[-1] + 1)) - set(eindeutig))
+        return SORTIERUNG_UNGUELTIG, f"searchPosition mit Luecken (fehlt: {', '.join(str(x) for x in fehlend[:5])})"
+    if eindeutig[0] != 1:
+        return SORTIERUNG_NUR_MONOTON, f"searchPosition beginnt bei {eindeutig[0]} (Top-N nicht bewiesen)"
+    return SORTIERUNG_BEWIESEN, ""
+
+
 # ---------------------------------------------------------------- Segment-Pruefung je Zeile
 _JAHR = re.compile(r"(\d{4})")
 KW_TOLERANZ = 3

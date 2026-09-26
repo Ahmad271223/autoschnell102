@@ -52,6 +52,26 @@ KM_BUCKETS_V2 = [
 ]
 EZ_JAHRE_V2 = [2019, 2020, 2021, 2022]
 SCHALTER_DOK = "crawler"      # market_config/_id=crawler: {"aktiv": bool} — Knopf im Admin
+# Reparaturwelle 5 (Review 26.09.2026 abends, Nr. 24/26/42): Merker in market_config —
+# der Tagesplan/die Entfernungspruefung sind je Tag erledigt (kurze Sperren statt 20 h),
+# und welche kritischen Unique-Indizes fehlen (dann crawlt der Worker nicht).
+TAGESPLAN_DOK = "tagesplan"
+ENTFERNUNG_DOK = "entfernung"
+INDIZES_DOK = "indizes"
+# Nr. 17: nach dem Zeilenfilter fehlen Zeilen ("Top 10" waere sonst Top 7) — deshalb je Segment
+# rows + Puffer abrufen (+30 %, hoechstens +10) und danach auf rows kuerzen. Konstante, keine
+# Umgebungsvariable; Reservierung, Prognose und Taktung rechnen mit dem Puffer.
+PUFFER_FAKTOR = 0.3
+PUFFER_MAX = 10
+# Nr. 25: alle Laeufe eines Tages liegen vor 23:30 Uhr deutscher Zeit
+TAGESENDE_STUNDE, TAGESENDE_MINUTE = 23, 30
+
+
+def zeilen_mit_puffer(rows: int) -> int:
+    """Abgerufene Zeilen je Segment (Nr. 17): rows + min(10, ceil(rows x 0,3))."""
+    import math
+    r = max(1, int(rows or 1))
+    return r + min(PUFFER_MAX, int(math.ceil(r * PUFFER_FAKTOR)))
 
 
 def aktiv() -> bool:
@@ -79,9 +99,28 @@ async def crawler_quelle(db) -> str:
 
 
 async def crawler_schalten(db, an: bool, wer: str = "") -> bool:
+    """Nur der Schalter. Nr. 23: Stornieren wartender Jobs (aus) und frischer Tagesplan (an)
+    liegen in jobs.crawler_schalten — die Admin-Route ruft DEN."""
     await db[KONFIG].update_one({"_id": SCHALTER_DOK},
                                 {"$set": {"aktiv": bool(an), "updated_at": jetzt_iso(), "von": str(wer or "")}}, upsert=True)
     return bool(an)
+
+
+async def merker_lesen(db, dok: str) -> dict:
+    try:
+        return await db[KONFIG].find_one({"_id": dok}, {"_id": 0}) or {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+async def merker_setzen(db, dok: str, **werte) -> None:
+    await db[KONFIG].update_one({"_id": dok}, {"$set": {**werte, "updated_at": jetzt_iso()}}, upsert=True)
+
+
+async def indizes_fehlen(db) -> list:
+    """Nr. 26: fehlende KRITISCHE Unique-Indizes (von indizes.markt_indizes gemerkt) — der
+    Worker crawlt dann nicht, die Hauptapp laeuft weiter."""
+    return list((await merker_lesen(db, INDIZES_DOK)).get("fehlen") or [])
 
 
 def chancen_aktiv() -> bool:
@@ -200,6 +239,9 @@ def fenster_bis() -> int:
 
 
 def jobs_parallel() -> int:
+    """Nr. 34: so viele Buendel verarbeitet ein Worker-Takt GLEICHZEITIG (asyncio.gather);
+    jedes Buendel reserviert sein Budget atomar. Zaehlt bei Apify als parallele Laeufe —
+    zusammen mit Vergleich (mobile/autoscout) unter APIFY_MAX_PARALLEL bleiben."""
     return zahl_env("MARKT_JOBS_PARALLEL", 2, unten=1, oben=16)
 
 
@@ -242,6 +284,14 @@ def entfernung_max_je_tag() -> int:
     return zahl_env("MARKT_ENTFERNUNG_MAX_JE_TAG", 50, unten=0, oben=5000)
 
 
+def entfernung_kosten_je_tag_usd() -> float:
+    """Nr. 38: Obergrenze der Entfernungspruefung je Tag — max. Pruefungen x (Start + 1 Zeile)
+    des Standard-Scrapers; Prognose und Taktung rechnen sie mit ein."""
+    if not entfernung_pruefen() or entfernung_max_je_tag() <= 0:
+        return 0.0
+    return round(entfernung_max_je_tag() * kosten_je_lauf_usd(actor(), 1), 4)
+
+
 def chance_reduktion_pct() -> float:
     return kommazahl_env("MARKT_CHANCE_REDUKTION_PROZENT", 5.0, unten=0.1, oben=90.0)
 
@@ -281,3 +331,16 @@ def fenster_start(tag: str) -> datetime:
 def fenster_dauer() -> timedelta:
     stunden = max(1, fenster_bis() - fenster_von())
     return timedelta(hours=stunden)
+
+
+def tag_ende(tag: str) -> datetime:
+    """Nr. 25: spaetester Zeitpunkt eines Laufs an diesem Tag (23:30 deutsche Zeit) als UTC."""
+    d = datetime.strptime(tag, "%Y-%m-%d").replace(tzinfo=ZEITZONE, hour=TAGESENDE_STUNDE, minute=TAGESENDE_MINUTE)
+    return d.astimezone(timezone.utc)
+
+
+def rest_tage_im_monat(zeit: datetime | None = None) -> int:
+    """Nr. 31: verbleibende Kalendertage des Monats (deutsche Zeit), heute mitgezaehlt (>= 1)."""
+    import calendar
+    d = (zeit or jetzt()).astimezone(ZEITZONE)
+    return max(1, calendar.monthrange(d.year, d.month)[1] - d.day + 1)

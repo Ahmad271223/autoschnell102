@@ -1003,35 +1003,84 @@ async def ki_indizes(db) -> dict:
     return {"ok": not fehler, "fehler": fehler}
 
 
+# Market Intelligence: Unique-Indizes, ohne die der Crawler falsche Daten schreiben wuerde
+# (doppelte Jobs je Tag, doppelte Listings/Snapshots/Tagesstatistiken). Fehlt einer, crawlt der
+# Worker nicht (Merker market_config/indizes + Alarm markt_indizes_fehlen) — die Hauptapp startet.
+MARKT_UNIQUE_KRITISCH = ("market_crawl_jobs.markt_job_je_tag", "market_crawl_jobs.markt_job_id",
+                         "market_listings.markt_listing_quelle_id", "market_listing_snapshots.markt_snapshot_je_tag",
+                         "market_segment_daily_stats.markt_tagesstat")
+
+
 async def markt_indizes(db) -> dict:
     """Market Intelligence (25.09.2026): eigene Sammlungen, eigene Indizes.
     Listings einmalig je Quelle+ID, ein Snapshot je Listing/Segment/Tag, ein
-    Job je Segment/Tag, Chancen dedupliziert. Idempotent, wirft nie."""
-    erg = {}
+    Job je Segment/Tag, Chancen dedupliziert. Idempotent, wirft nie.
+
+    Reparaturwelle 5 (Review 26.09.2026 abends, Nr. 26/27): JEDER Index in eigenem
+    Fehlerfang (Muster ki_indizes) — vorher lief alles in EINEM try, und nach dem
+    ersten Fehler entstand kein weiterer Index, ohne dass jemand es merkte (fail-open).
+    Unique-Indizes ueber unique_anlegen (weich: Alarm, kein Startabbruch der Hauptapp);
+    fehlen KRITISCHE (MARKT_UNIQUE_KRITISCH), steht das im Merker market_config/indizes,
+    und markt.jobs crawlt nicht. Liefert {"ok", "fehler": [refs], "kritisch": [refs]}."""
+    from betrieb import alarm, alarm_schliessen
+    fehler: list = []
+    for sammlung, schluessel, name in (
+            ("market_models", "id", "markt_modell_id"),
+            ("market_segments", "id", "markt_segment_id"),
+            ("market_listings", [("source", 1), ("listing_id", 1)], "markt_listing_quelle_id"),
+            ("market_listing_snapshots", [("listing_id", 1), ("segment_id", 1), ("date", 1)], "markt_snapshot_je_tag"),
+            ("market_segment_daily_stats", [("segment_id", 1), ("date", -1)], "markt_tagesstat"),
+            ("market_crawl_jobs", [("segment_id", 1), ("tag", 1)], "markt_job_je_tag"),
+            ("market_crawl_jobs", "id", "markt_job_id"),
+            ("market_opportunities", [("listing_id", 1), ("typ", 1), ("date", 1)], "markt_chance_je_tag")):
+        try:
+            ok = await unique_anlegen(db[sammlung], schluessel, name=name, weich=True)
+        except Exception as exc:  # noqa: BLE001
+            log.error("ensure_indexes: %s.%s nicht anlegbar: %s", sammlung, name, exc)
+            ok = False
+        if not ok:
+            fehler.append(f"{sammlung}.{name}")
+    for sammlung, schluessel, name in (
+            ("market_segments", [("model_id", 1), ("enabled", 1)], "markt_segment_modell"),
+            ("market_segments", [("enabled", 1), ("last_planned_tag", 1)], "markt_segment_planung"),
+            ("market_listings", [("last_segment_id", 1), ("active_state", 1)], "markt_listing_segment_zustand"),
+            ("market_listings", [("active_state", 1), ("not_seen_since", 1)], "markt_listing_zustand_zeit"),
+            # Nr. 27: Multikey-Index fuer "nicht mehr im Sample" (speicher.verarbeiten) und Nr. 14
+            ("market_listings", [("segment_ids", 1), ("active_state", 1), ("last_seen_tag", 1)], "markt_listing_segmente_zustand"),
+            ("market_listings", "model_id", "markt_listing_modell"),
+            ("market_listing_snapshots", [("segment_id", 1), ("date", -1)], "markt_snapshot_segment_tag"),
+            ("market_listing_snapshots", [("listing_id", 1), ("date", 1)], "markt_snapshot_listing"),
+            ("market_crawl_jobs", [("status", 1), ("scheduled_at", 1)], "markt_job_status_zeit"),
+            ("market_crawl_jobs", [("status", 1), ("max_items", 1), ("scheduled_at", 1)], "markt_job_buendel"),
+            ("market_crawl_jobs", [("tag", 1), ("status", 1)], "markt_job_tag_status"),
+            ("market_opportunities", [("created_at", -1)], "markt_chance_zeit"),
+            ("market_opportunities", [("segment_id", 1), ("created_at", -1)], "markt_chance_segment"),
+            ("market_opportunities", [("model_id", 1), ("created_at", -1)], "markt_chance_modell")):
+        ref = f"{sammlung}.{name}"
+        try:
+            await db[sammlung].create_index(schluessel, name=name)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ensure_indexes: Index %s nicht angelegt — Abfragen laufen ohne ihn langsamer: %s", ref, exc)
+            fehler.append(ref)
+            try:
+                await alarm(db, "index_fehlt", ref=ref, fehler=str(exc)[:300])
+            except Exception:  # noqa: BLE001
+                log.exception("Alarm index_fehlt fuer %s nicht gesetzt", ref)
+        else:
+            try:
+                await alarm_schliessen(db, "index_fehlt", ref=ref)
+            except Exception:  # noqa: BLE001
+                pass
+    kritisch = [r for r in fehler if r in MARKT_UNIQUE_KRITISCH]
     try:
-        await db.market_models.create_index("id", unique=True, name="markt_modell_id")
-        await db.market_segments.create_index("id", unique=True, name="markt_segment_id")
-        await db.market_segments.create_index([("model_id", 1), ("enabled", 1)], name="markt_segment_modell")
-        await db.market_listings.create_index([("source", 1), ("listing_id", 1)], unique=True, name="markt_listing_quelle_id")
-        await db.market_listings.create_index([("last_segment_id", 1), ("active_state", 1)], name="markt_listing_segment_zustand")
-        await db.market_listings.create_index([("active_state", 1), ("not_seen_since", 1)], name="markt_listing_zustand_zeit")
-        await db.market_listings.create_index("model_id", name="markt_listing_modell")
-        await db.market_listing_snapshots.create_index([("listing_id", 1), ("segment_id", 1), ("date", 1)], unique=True,
-                                                       name="markt_snapshot_je_tag")
-        await db.market_listing_snapshots.create_index([("segment_id", 1), ("date", -1)], name="markt_snapshot_segment_tag")
-        await db.market_listing_snapshots.create_index([("listing_id", 1), ("date", 1)], name="markt_snapshot_listing")
-        await db.market_segment_daily_stats.create_index([("segment_id", 1), ("date", -1)], unique=True, name="markt_tagesstat")
-        await db.market_crawl_jobs.create_index([("segment_id", 1), ("tag", 1)], unique=True, name="markt_job_je_tag")
-        await db.market_crawl_jobs.create_index([("status", 1), ("scheduled_at", 1)], name="markt_job_status_zeit")
-        await db.market_crawl_jobs.create_index("id", unique=True, name="markt_job_id")
-        await db.market_crawl_jobs.create_index([("tag", 1), ("status", 1)], name="markt_job_tag_status")
-        await db.market_opportunities.create_index([("listing_id", 1), ("typ", 1), ("date", 1)], unique=True, name="markt_chance_je_tag")
-        await db.market_opportunities.create_index([("created_at", -1)], name="markt_chance_zeit")
-        await db.market_opportunities.create_index([("segment_id", 1), ("created_at", -1)], name="markt_chance_segment")
-        await db.market_opportunities.create_index([("model_id", 1), ("created_at", -1)], name="markt_chance_modell")
-        erg["ok"] = True
-    except Exception as exc:  # noqa: BLE001
-        erg["fehler"] = str(exc)[:200]
-        await _index_fehlt(db, "index_fehlt", "market_*", fehler=str(exc)[:200])
-    return erg
+        from markt import konfig as markt_konfig
+        await markt_konfig.merker_setzen(db, markt_konfig.INDIZES_DOK, fehlen=kritisch, alle_fehler=fehler)
+        if kritisch:
+            log.error("Market-Crawler: kritische Unique-Indizes fehlen (%s) — der Worker crawlt NICHT", ", ".join(kritisch))
+            await alarm(db, "markt_indizes_fehlen", ref="crawler", fehlen=", ".join(kritisch))
+        else:
+            await alarm_schliessen(db, "markt_indizes_fehlen", ref="crawler")
+    except Exception:  # noqa: BLE001
+        log.exception("Markt-Index-Merker nicht geschrieben")
+    return {"ok": not fehler, "fehler": fehler, "kritisch": kritisch}
 

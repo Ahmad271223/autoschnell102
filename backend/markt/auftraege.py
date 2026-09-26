@@ -158,20 +158,25 @@ def entwurf_pruefen(e: Dict[str, Any], *, bestehend: Optional[Dict[str, Any]] = 
 
 # ---------------------------------------------------------------- Prognose
 def prognose_modell(m: Dict[str, Any]) -> Dict[str, Any]:
+    """Reparaturwelle 5 Nr. 17: abgerufen werden rows + Puffer je Segment (konfig.zeilen_mit_puffer),
+    gespeichert hoechstens rows — rows_tag/rows_monat sind die gespeicherten Zeilen, die Kosten
+    rechnen mit den abgerufenen (rows_abruf_tag)."""
     ez = segmente.ez_buckets_fuer_modell_liste(m)
     km = m.get("km_buckets") or konfig.KM_BUCKETS_STANDARD
     rows = int(m.get("rows") or konfig.rows_je_segment())
+    abruf = konfig.zeilen_mit_puffer(rows)
     k = int(m.get("crawls_per_day") or 1)
     seg = len(ez) * len(km)
     rows_tag = seg * rows * k
+    rows_abruf_tag = seg * abruf * k
     laeufe_tag = math.ceil(seg * k / max(1, konfig.buendel_groesse())) if seg else 0
-    kosten_tag = konfig.kosten_buendel_usd(konfig.actor(), laeufe_tag, rows_tag)
+    kosten_tag = konfig.kosten_buendel_usd(konfig.actor(), laeufe_tag, rows_abruf_tag)
     # Review 26.09.2026 Nr. 53: Obergrenze, wenn ALLES ueber den Ersatz-Scraper liefe
     # (der laeuft je URL einzeln: ein Start je Segment-Abruf, teurere Zeilen)
     ersatz = konfig.actor_ersatz()
-    kosten_tag_ersatz = konfig.kosten_buendel_usd(ersatz, seg * k, rows_tag) if ersatz and seg else 0.0
-    return {"segmente": seg, "ez_jahre": len(ez), "km_bereiche": len(km), "rows": rows, "crawls_per_day": k,
-            "rows_tag": rows_tag, "rows_monat": round(rows_tag * 30.4), "laeufe_tag": laeufe_tag,
+    kosten_tag_ersatz = konfig.kosten_buendel_usd(ersatz, seg * k, rows_abruf_tag) if ersatz and seg else 0.0
+    return {"segmente": seg, "ez_jahre": len(ez), "km_bereiche": len(km), "rows": rows, "rows_abruf": abruf, "crawls_per_day": k,
+            "rows_tag": rows_tag, "rows_monat": round(rows_tag * 30.4), "rows_abruf_tag": rows_abruf_tag, "laeufe_tag": laeufe_tag,
             "kosten_tag_usd": round(kosten_tag, 2), "kosten_monat_usd": round(kosten_tag * 30.4, 2),
             "kosten_tag_ersatz_usd": round(kosten_tag_ersatz, 2), "kosten_monat_ersatz_usd": round(kosten_tag_ersatz * 30.4, 2),
             "ersatz_actor": ersatz or None}
@@ -188,19 +193,27 @@ async def prognose(db, entwurf: Optional[Dict[str, Any]] = None, *, ohne_id: Opt
     teile = [prognose_modell(m) for m in aktive]
     e = prognose_modell(entwurf) if entwurf and entwurf.get("status", "active") == "active" else None
     alle = teile + ([e] if e else [])
-    summe = {k: sum(t[k] for t in alle) for k in ("segmente", "rows_tag", "rows_monat", "laeufe_tag", "kosten_tag_usd",
+    summe = {k: sum(t[k] for t in alle) for k in ("segmente", "rows_tag", "rows_monat", "rows_abruf_tag", "laeufe_tag", "kosten_tag_usd",
                                                    "kosten_monat_usd", "kosten_tag_ersatz_usd", "kosten_monat_ersatz_usd")}
+    # Welle 5 Nr. 38: die Entfernungspruefung (max. je Tag x (Start + 1 Zeile)) gehoert zu den Tageskosten
+    entfernung_tag = konfig.entfernung_kosten_je_tag_usd()
+    summe["kosten_tag_usd"] = round(summe["kosten_tag_usd"] + entfernung_tag, 4)
+    summe["kosten_monat_usd"] = round(summe["kosten_monat_usd"] + entfernung_tag * 30.4, 4)
+    summe["kosten_tag_ersatz_usd"] = round(summe["kosten_tag_ersatz_usd"] + entfernung_tag, 4)
+    summe["kosten_monat_ersatz_usd"] = round(summe["kosten_monat_ersatz_usd"] + entfernung_tag * 30.4, 4)
     b = await budget.dokument(db)
     budget_usd = float(b.get("budget_usd") or 0)
     return {"aktive_modelle": len(aktive) + (1 if e else 0), **{k: round(v, 2) for k, v in summe.items()},
             "entwurf": e, "budget_usd": budget_usd, "verbraucht_usd": round(float(b.get("used_usd") or 0), 2),
             "verbleibend_usd": round(float(b.get("frei_usd") or 0), 2),
+            "entfernung_tag_usd": round(entfernung_tag, 2), "entfernung_monat_usd": round(entfernung_tag * 30.4, 2),
             "ueberschritten": budget_usd > 0 and summe["kosten_monat_usd"] > budget_usd,
             # Nr. 53: Ersatz-Scraper wuerde das Budget sprengen (nur Hinweis, kein Sperrgrund)
             "ersatz_ueberschritten": budget_usd > 0 and summe["kosten_monat_ersatz_usd"] > budget_usd,
             "ersatz_actor": konfig.actor_ersatz() or None,
             "preise": {"start_usd": konfig.preise_je_actor(konfig.actor())[0], "row_usd": konfig.preise_je_actor(konfig.actor())[1],
-                       "buendel": konfig.buendel_groesse(), "actor": konfig.actor()}}
+                       "buendel": konfig.buendel_groesse(), "actor": konfig.actor(),
+                       "puffer_faktor": konfig.PUFFER_FAKTOR, "puffer_max": konfig.PUFFER_MAX}}
 
 
 # ---------------------------------------------------------------- Testlauf

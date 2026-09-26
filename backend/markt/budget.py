@@ -62,15 +62,18 @@ async def reservieren(db, est_usd: float, *, ablauf_s: Optional[int] = None) -> 
 
 
 async def abrechnen(db, reservierung: Optional[Dict[str, Any]], tatsaechlich_usd: Optional[float],
-                    rows: int = 0, gelaufen: bool = True) -> None:
+                    rows: int = 0, gelaufen: bool = True, runs: Optional[int] = None) -> None:
     """Reservierung durch echte Kosten ersetzen (None = Schaetzung behalten).
     Loest genau DIESE Reservierung (Nr. 47). Hat der Reaper sie inzwischen freigegeben,
-    wird reserved_usd nicht ein zweites Mal gesenkt — die echten Kosten zaehlen trotzdem."""
+    wird reserved_usd nicht ein zweites Mal gesenkt — die echten Kosten zaehlen trotzdem.
+    Reparaturwelle 5 Nr. 56/57: `runs` = Zahl der ECHTEN Actor-Starts (Standard + Ersatz je URL),
+    `rows` = gelieferte Datensatz-Zeilen (roh, vor Dedupe/Filter) — so, wie Apify sie berechnet."""
     if not reservierung:
         return
     est = float(reservierung.get("est_usd") or 0)
     real = round(float(tatsaechlich_usd if tatsaechlich_usd is not None else (est if gelaufen else 0.0)), 4)
-    verbrauch = {"used_usd": real, "rows": int(rows), "runs": 1 if gelaufen else 0}
+    starts = int(runs) if runs is not None else (1 if gelaufen else 0)
+    verbrauch = {"used_usd": real, "rows": int(rows), "runs": max(0, starts)}
     rid = reservierung.get("id")
     if rid:
         r = await db[konfig.BUDGET].update_one(

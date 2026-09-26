@@ -79,8 +79,29 @@ def datenlage(tage: int, mittlere_groesse: float, abdeckung_pct: float = 100.0) 
 LAEUFE_MAX = 4      # Nr. 16/17: hoechstens 4 Laeufe je Tag am Snapshot / Tagesaggregat (crawls_per_day <= 4)
 
 
+async def preis_aktualisieren(db, schluessel: Dict[str, Any], alt: Optional[float], neu: float, jetzt_iso: str) -> Optional[float]:
+    """Reparaturwelle 5 Nr. 40: EINE Stelle fuer eine beobachtete Preisaenderung (Sample-Lauf
+    UND Entfernungspruefung): price_history anhaengen (hoechstens 120 Eintraege), price_changes /
+    price_reductions hochzaehlen, last_price_change_at setzen. Liefert die Differenz (neu - alt)
+    oder None, wenn sich nichts geaendert hat (oder kein alter Preis bekannt war)."""
+    try:
+        alt_f = float(alt or 0)
+    except (TypeError, ValueError):
+        alt_f = 0.0
+    if not alt_f or alt_f == float(neu):
+        return None
+    delta = round(float(neu) - alt_f, 2)
+    await db[LISTINGS].update_one(
+        schluessel,
+        {"$push": {"price_history": {"$each": [{"at": jetzt_iso, "price": float(neu)}], "$slice": -120}},
+         "$inc": {"price_changes": 1, "price_reductions": 1 if delta < 0 else 0},
+         "$set": {"last_price_change_at": jetzt_iso, "current_price": float(neu)}})
+    return delta
+
+
 async def verarbeiten(db, segment: Dict[str, Any], listings: List[Dict[str, Any]], *,
-                      beobachtet: Optional[datetime] = None, lauf_tag: Optional[str] = None) -> Dict[str, Any]:
+                      beobachtet: Optional[datetime] = None, lauf_tag: Optional[str] = None,
+                      top_n_bewiesen: bool = True) -> Dict[str, Any]:
     """Ein Tages-Sample (Preis aufsteigend, vom Worker bestaetigt) eines Segments einarbeiten.
 
     Review 26.09.2026 abends P1: ein Lauf mit unsicherer Sortierung kommt hier NICHT mehr an —
@@ -90,7 +111,10 @@ async def verarbeiten(db, segment: Dict[str, Any], listings: List[Dict[str, Any]
     P5: die Hauptfelder der Tagesstatistik zeigen den letzten GUELTIGEN Lauf des Tages mit
     Treffern; ein leerer zweiter Lauf wird nur in 'laeufe' protokolliert (leer=True) und
     zerstoert den guten Tageswert nicht. War der Tag bisher leer, ueberschreibt ein Lauf mit
-    Zeilen. Ein Tag, an dem ALLE Laeufe leer waren, bleibt sample_size 0 (echte Marktluecke)."""
+    Zeilen. Ein Tag, an dem ALLE Laeufe leer waren, bleibt sample_size 0 (echte Marktluecke).
+    Reparaturwelle 5 Nr. 1: top_n_bewiesen=False (Scraper ohne Positionsnummer, nur monoton
+    sortiert) wird am Lauf und — wenn der Lauf die Hauptwerte stellt — am Tagesaggregat
+    vermerkt; die Datenqualitaet sagt dann 'Top-N nicht bewiesen'."""
     jetzt = beobachtet or konfig.jetzt()
     jetzt_iso = jetzt.isoformat()
     tag = konfig.heute_tag(jetzt)
@@ -131,14 +155,9 @@ async def verarbeiten(db, segment: Dict[str, Any], listings: List[Dict[str, Any]
             zaehler["neu_gesamt"] += 1
         else:
             alt = float(vorher.get("current_price") or 0)
-            if alt and alt != preis:
-                delta_eur = round(preis - alt, 2)
+            delta_eur = await preis_aktualisieren(db, {"source": l["source"], "listing_id": l["listing_id"]}, alt, preis, jetzt_iso)
+            if delta_eur is not None:
                 delta_pct = round(delta_eur / alt * 100, 2)
-                await db[LISTINGS].update_one(
-                    {"source": l["source"], "listing_id": l["listing_id"]},
-                    {"$push": {"price_history": {"$each": [{"at": jetzt_iso, "price": preis}], "$slice": -120}},
-                     "$inc": {"price_changes": 1, "price_reductions": 1 if delta_eur < 0 else 0},
-                     "$set": {"last_price_change_at": jetzt_iso}})
                 zaehler["preis_gesunken" if delta_eur < 0 else "preis_gestiegen"] += 1
         # Nr. 41: "neu im Sample" = VOR diesem Lauf kein Snapshot in diesem Segment — weder an
         # einem Vortag noch heute frueher (zweiter Lauf des Tages findet das Tagesdokument)
@@ -194,13 +213,15 @@ async def verarbeiten(db, segment: Dict[str, Any], listings: List[Dict[str, Any]
     tageswert_behalten = leer and bisher_heute > 0
     lauf_eintrag = {"at": jetzt_iso, "tag": lauf_schluessel, "sample_size": kz["sample_size"],
                     "min": kz["min_price"], "median": kz["median_price"], "avg": kz["avg_price"],
-                    "max": kz["max_price"], "leer": leer}
+                    "max": kz["max_price"], "leer": leer, "top_n_bewiesen": bool(top_n_bewiesen)}
     setzen: Dict[str, Any] = {"model_id": model_id, "last_run_at": jetzt_iso}
     if not tageswert_behalten:
         setzen.update({**kz, "observed_at": jetzt_iso, "new_in_sample_today": len(neu_ids),
                        "price_reductions_today": len(reduziert_ids),
                        "new_in_sample_ids": sorted(neu_ids), "price_reduced_ids": sorted(reduziert_ids),
-                       "listing_ids": [h["listing"]["listing_id"] for h in heute]})
+                       "listing_ids": [h["listing"]["listing_id"] for h in heute],
+                       # Nr. 1: Hauptwerte stammen aus diesem Lauf — Top-N-Nachweis mitschreiben
+                       "top_n_bewiesen": bool(top_n_bewiesen), "lauf_tag": lauf_schluessel})
     await db[TAGESSTATS].update_one(
         {"segment_id": seg_id, "date": tag},
         {"$set": setzen, "$push": {"laeufe": {"$each": [lauf_eintrag], "$slice": -LAEUFE_MAX}}},
@@ -307,6 +328,8 @@ async def segmentstatistik(db, seg_id: str, tag: Optional[str] = None) -> Option
             # Nr. 3 (nur noch Altdaten vor P1): Tage, die damals unsortiert gespeichert wurden —
             # seit P1 kommt ein unsortierter Lauf nie mehr in die Tagesstatistik (Job 'data_invalid')
             "sortierung_unsicher": heute.get("sorted_confirmed") is False,
+            # Reparaturwelle 5 Nr. 1: der Lauf hinter den Hauptwerten hatte keine Positionsnummern
+            "top_n_bewiesen": heute.get("top_n_bewiesen", True) is not False,
             "updated_at": konfig.jetzt_iso()}
     await db[SEGMENTSTATS].update_one({"_id": seg_id}, {"$set": stat}, upsert=True)
     return stat
