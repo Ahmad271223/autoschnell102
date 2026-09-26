@@ -737,12 +737,24 @@ def _build_pickup_pdf(
     # Abholauftrag lieferte dauerhaft 500 und der Fahrer konnte vor Ort NIE
     # abschliessen. Skizze/Legende bekommen nur Objekte, der Text wird unten
     # als Liste gedruckt (nichts geht verloren).
-    _roh_schaeden = (contract.get("damages") or vehicle.get("damages") or [])
-    if not isinstance(_roh_schaeden, list):
-        _roh_schaeden = [_roh_schaeden]
-    damages = [d for d in _roh_schaeden if isinstance(d, dict)]
-    freitext_schaeden = [str(d).strip() for d in _roh_schaeden
+    # Review 26.09.2026 Nr. 111/116: Vertrag UND Inserat (nicht "oder") — dieselbe
+    # Wahrheit wie Fahrer-App und KI (ai/bekannte_schaeden). Skizze/Legende
+    # bekommen die Original-Objekte (mit Koordinaten), Inserat-Objekte nur, wenn
+    # sie nicht schon im Vertrag stehen; Freitexte und Inserat-Maengel als Liste.
+    from ai import bekannte_schaeden as _bs
+    _c_roh = contract.get("damages") or []
+    _v_roh = vehicle.get("damages") or []
+    _c_roh = _c_roh if isinstance(_c_roh, list) else [_c_roh]
+    _v_roh = _v_roh if isinstance(_v_roh, list) else [_v_roh]
+    damages = [d for d in _c_roh if isinstance(d, dict)]
+    _bekannt = {_bs._schluessel(_bs._aus_dict(d, "vertrag")) for d in damages}
+    for d in _v_roh:
+        if isinstance(d, dict) and _bs._schluessel(_bs._aus_dict(d, "inserat")) not in _bekannt:
+            damages.append(d)
+    freitext_schaeden = [str(d).strip() for d in list(_c_roh) + list(_v_roh)
                          if isinstance(d, str) and str(d).strip()]
+    freitext_schaeden += [f"Laut Inserat: {str(m).strip()}" for m in (vehicle.get("known_defects") or [])[:40]
+                          if str(m or "").strip()]
 
     buf = io.BytesIO()
     doc = _make_doc(buf)

@@ -438,6 +438,8 @@ def test_128_fahrer_sieht_keine_verkaeuferdaten_des_inserats(welt):
               "fuel_label", "gearbox_label", "power_kw", "doors", "features", "damages", "images", "hu",
               "previous_owners", "schluessel_anzahl"):
         assert k in veh, k
-    assert out["template"]["features"] == ["Navi"] and out["damages"] == [{"zone": "Tür"}]
+    assert out["template"]["features"] == ["Navi"]
+    # KI-Welle Nr. 111/116: Schaeden kommen zusammengefuehrt (Vertrag + Inserat, ai.bekannte_schaeden) an
+    assert [d["zone"] for d in out["damages"]] == ["Tür"] and out["damages"][0]["quelle"] == "inserat"
     assert out["appointment"]["seller_name"] == "Vera" and out["appointment"]["pickup_address"] == "Teststr. 1"
     assert P.fahrzeug_fuer_fahrer(None) == {}

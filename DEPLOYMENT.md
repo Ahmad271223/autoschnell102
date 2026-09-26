@@ -3545,3 +3545,49 @@ er ist nur noch die Vorgabe, solange der Knopf nie gedrückt wurde.
 - Nr. 55: **Bestandstrend** („gleiche Autos“): mittlere Preisänderung der Inserate, die an beiden Vergleichstagen im Sample
   waren — zusätzlich zum Median-Trend, in Segmentanalyse und Marktdaten-Karte.
 
+**Reparaturwelle Review 26.09.2026 (Abhol-KI: Schadenabgleich, Paket, Lernen — Nr. 67–132; Commit 2d6bd44):**
+- Nr. 68–75: Vergleichsregeln **je Schadensart** (`ai/schaden_abgleich.py`, Stufen exakt nach `kiSchaden.js`, Test liest
+  die JS-Datei): Unfall (Umfang Blech < Blech+Rahmen, fahrbereit, Airbag), Rost (Umfang, Stelle), Steinschlag (Riss/flächig),
+  Beleuchtung mehrdimensional. Alter Schaden ohne Ausprägung → „möglich“ (nie „bekannt“); „unbekannt“ bei
+  Sicherheitsfeldern → „möglich“; jede Verschlechterung → „schlimmer“ mit Feldangabe.
+- Nr. 81–85/111/116: **bekannte Schäden = Vertrag + Vertrag-Freitext + Inserat + Inserat-Mängel** (`ai/bekannte_schaeden.py`),
+  dedupliziert über Bauteil/Position/Seite (Synonyme: „rechter vorderer Kotflügel“, VR/VL…); Fahrer-App, KI und
+  Abhol-PDF nutzen dieselbe Liste. „Kotflügel vorne links“ ≠ „Kotflügel hinten links“.
+- Nr. 86: Sollwert Schlüssel aus dem Vertrag vor der Fahrerangabe. Nr. 87–89: Ladekabel/COC/Winterreifen nur bei echter
+  Zusage (Verneinungen erkannt), Elektro ohne Nennung → Hinweis statt Position.
+- Nr. 90/91/98: Zustandsangaben (Warnleuchte, Fahrverhalten, Batterie) werden bei passendem Technik-Schaden nicht doppelt
+  gezählt; Überlappungsabzug gedeckelt. Nr. 95/96: „Zustand entspricht nicht der Dokumentation“ ohne Details → Position
+  „manuelle Prüfung“, Datenlage niedrig, Hinweis auf Rückfrage. Nr. 97: Reparaturschätzung ≤ 150 % Kaufpreis.
+- Nr. 99: nur Antworten zur aktuellen Rückfrage im Hash. Nr. 100/117/118: Lernfälle je Termin mit Fassung, ältere werden
+  „ersetzt“, nur „neu/schlimmer“ zählt, unsichere Abgleiche nicht.
+- Nr. 76–78: Lernfall bei Freigabe nur **vorläufig**; endgültig erst mit dem Terminausgang (abgeholt → erzielter Nachlass,
+  storniert/nicht abgeholt → verworfen). Hook in `kaufvorgang.termin_status_uebernehmen`.
+- Nr. 79/80: Fahrer-GET rechnet nie (nur lesen). Nr. 119/120: Freigabeliste zeigt „Bewertung veraltet — wird neu berechnet“.
+- Nr. 130–132: Websuche nur aus strukturierten Feldern (keine Freitexte), Fahrertexte gekürzt/bereinigt und im Prompt als
+  unvertrauenswürdige Angabe gekennzeichnet; Prompt-Fassung `abholung_v5` (alte Bewertungen gelten als veraltet).
+- Nr. 67 (Schadenerkennung auf Fotos) NICHT gebaut — Produktentscheidung (Vision-Vorschlag mit Bestätigung durch den Fahrer).
+- Deploy-Hinweis: der Freigabe-Fingerabdruck enthält jetzt Inserat-/Freitext-Schäden — Protokolle, die beim Deploy
+  „freigegeben, noch nicht unterschrieben“ sind, müssen einmal neu freigegeben werden.
+
+**Reparaturwelle Review 26.09.2026 (Abholprotokoll: Validierung, Rückfragen, Fahrer-Datenschutz — Nr. 57–66, 86,
+101–110, 113–115, 121–129, 133–135; Commit nach 2d6bd44):**
+- Nr. 57/58/134: Fahrerantworten nur zur aktuell gestellten Frage (`frage_id`), Antwort muss eine angebotene Option sein
+  (oder Freitext, wenn erlaubt), Zeitstempel setzt der Server. Nr. 59: „Zur Freigabe schicken“ erst nach Antwort auf die
+  offene Rückfrage (400 mit Klartext). Nr. 60–62/127: genau eine Antwort je Frage, ältere Runden in `rueckfrage_verlauf`
+  (App und Freigabe-Karte zeigen den Verlauf aufklappbar, keine stille Kürzung mehr).
+- Nr. 63–66: **Schäden serverseitig validiert** — Schadensart aus fester Liste, Ansicht (front/rear/left/right/top/technik),
+  Bauteil Pflicht, Koordinaten im Skizzenraum, Schwerefragen nur mit angebotenen Werten (Serverkopie `SCHWERE_FRAGEN`,
+  Quelltext-Test vergleicht mit `kiSchaden.js`); Abschicken/Freigeben verlangt vollständige Schäden.
+- Nr. 86/101–105/113–115: `keys_count` Ganzzahl 0–20, Kilometerstand Ganzzahl; **`keys_expected` kommt nur noch aus dem
+  Vertrag** (Server setzt ihn, Fahrerwert wird ignoriert), Chef-Ansicht, PDF und KI nehmen denselben Wert; 0 wird gedruckt.
+- Nr. 106: Fahrzeug-Abweichungen typgeprüft (km, Halter, EZ MM/JJJJ, HU, FIN 17 ohne I/O/Q, Leistung, Texte ≤ 60).
+- Nr. 107–110: Ausstattung und Dokumente nur mit Schlüsseln aus der Servervorlage — fremde Einträge werden verworfen.
+- Nr. 121–124/135: Korrekturfassung startet ohne alte Rückfrage/Antworten/Verlauf (bleiben in der abgelösten Fassung).
+- Nr. 125/126: Chef-Rückfrage braucht ≥ 2 Optionen oder Freitext; `source_id` muss zu einem Schaden oder einer
+  KI-Position gehören. Die App erfindet keine Ja/Nein/Unklar-Knöpfe mehr.
+- Nr. 128/129/133: **Fahrer-App bekommt nur eine Fahrzeug-Whitelist** (Marke, Modell, EZ, km, Farbe, FIN, Motor, Ausstattung,
+  Schäden, Inserats-Mängel, Bilder, HU, Vorbesitzer, Schlüsselanzahl) — keine `seller_*`-Felder, keine Beschreibung.
+- Offene Entscheidungen (Ahmad): (1) KI nur letzte Rückfragerunde oder ganzer Verlauf; (2) fehlender Vertragswert
+  „Schlüssel vereinbart“ blockiert nicht — soll er? (3) Chef-Oberfläche für strukturierte Rückfragen (Optionen/Freitext)
+  fehlt noch, es gibt nur „Zurück an den Fahrer“ mit Notiz; (4) Inseratsbilder/-mängel für den Fahrer sichtbar lassen?
+
