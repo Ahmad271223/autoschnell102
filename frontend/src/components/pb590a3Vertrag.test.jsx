@@ -178,7 +178,8 @@ describe("M-07 / M-11 / M-12 / M-13 / M-20: Dialoge", () => {
     const formular = VERTRAG.slice(VERTRAG.indexOf("<form onSubmit={submit}"));
     expect(formular).not.toMatch(/className="grid grid-cols-2 gap-3"/);
     expect(formular).not.toMatch(/className="grid grid-cols-3 gap-3"/);
-    expect((formular.match(/grid grid-cols-1 sm:grid-cols-2 gap-3/g) || []).length).toBe(5);
+    // 26.09.2026: +1 durch den Abschnitt „Nummern“ (Vertrags-/Kundennummer)
+    expect((formular.match(/grid grid-cols-1 sm:grid-cols-2 gap-3/g) || []).length).toBe(6);
     expect(formular).toMatch(/grid grid-cols-1 sm:grid-cols-3 gap-3/);
   });
   it("M-20: Versandweg als Reiter", () => {

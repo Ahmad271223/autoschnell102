@@ -917,6 +917,32 @@ async def bestand_lese_indizes(db) -> None:
             await alarm_schliessen(db, "index_fehlt", ref=ref)
 
 
+#: Name des Teil-Unique-Index fuer selbst vergebene Vertragsnummern —
+#: routes.contracts erkennt daran den DuplicateKeyError (-> 409).
+VERTRAGSNUMMER_INDEX = "vertragsnummer_je_firma"
+
+
+async def vertragsnummer_index(db) -> bool:
+    """Wunsch Ahmad 26.09.2026 abends: Die Vertragsnummer (contract_no) darf
+    der Sucher selbst vergeben. Sie ist je Firma eindeutig ueber alle
+    Vertraege — die Fassungen eines Vertrags liegen in generated_pdf_versions,
+    generated_pdfs traegt je Vertrag genau ein Dokument, deshalb reicht der
+    Index auf (dealer_id, contract_no) dort.
+
+    Teilindex NUR ueber selbst vergebene Nummern (contract_no_eigen: true):
+    automatische Nummern (KV-<Datum>-<6 Zeichen der Vertrags-Id>) sind ohne
+    Index praktisch eindeutig, und Altbestand/Testdaten mit gleicher
+    automatischer Nummer koennen die Anlage so nie verhindern. Die Vorpruefung
+    in routes.contracts vergleicht gegen ALLE Nummern der Firma (auch die
+    automatischen); der Index ist der Rennschutz zweier gleichzeitiger
+    Anlagen mit derselben eigenen Nummer. Idempotent, hart (kein Altbestand
+    kann ihn verhindern — das Feld ist neu)."""
+    return await unique_anlegen(
+        db.generated_pdfs, [("dealer_id", 1), ("contract_no", 1)],
+        name=VERTRAGSNUMMER_INDEX,
+        partialFilterExpression={"contract_no_eigen": True})
+
+
 async def ki_indizes(db) -> dict:
     """KI-Bewertung (Umbau 26.09.2026): genau EIN Eintrag je Protokoll und
     Eingabe-Stand (zwei gleichzeitige Aufrufe loesen keine zweite KI-

@@ -189,6 +189,39 @@ async def vertrags_kundennummer_ziehen(db) -> str:
     raise RuntimeError("Vertrags-Kundennummer: keine freie Nummer gefunden")  # pragma: no cover
 
 
+# Wunsch Ahmad 26.09.2026 abends: Die Firma darf ihre Vertrags-Kundennummer
+# selbst waehlen (App -> Einstellungen, Chef UND Sucher wie die uebrigen
+# Angaben der Firmenidentitaet). Regeln: 4-20 Zeichen, Buchstaben/Ziffern/
+# Bindestrich; eindeutig ueber alle Firmen (dealers.vertrags_kundennummer_unique)
+# und nie gleich einer Anmeldenummer (kunden_nr) — dieselbe Regel wie beim
+# zufaelligen Ziehen, sonst liesse sich die Login-Nummer aus dem Vertrag lesen.
+VERTRAGS_KUNDENNUMMER_MIN, VERTRAGS_KUNDENNUMMER_MAX = 4, 20
+_VERTRAGS_KUNDENNUMMER_ZEICHEN = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-")
+VERTRAGS_KUNDENNUMMER_REGEL = (
+    f"Kundennummer: {VERTRAGS_KUNDENNUMMER_MIN}-{VERTRAGS_KUNDENNUMMER_MAX} Zeichen, "
+    "nur Buchstaben, Ziffern und Bindestrich")
+
+
+def vertrags_kundennummer_pruefen(wert) -> str:
+    """Eingabe der Firmen-Kundennummer normieren (getrimmt) und pruefen;
+    ValueError mit Klartext bei Verstoss. Ohne Datenbank."""
+    nr = str(wert or "").strip()
+    if not (VERTRAGS_KUNDENNUMMER_MIN <= len(nr) <= VERTRAGS_KUNDENNUMMER_MAX) \
+            or any(z not in _VERTRAGS_KUNDENNUMMER_ZEICHEN for z in nr):
+        raise ValueError(VERTRAGS_KUNDENNUMMER_REGEL)
+    return nr
+
+
+async def vertrags_kundennummer_belegt(db, nr: str, ausser_dealer_id: str = None) -> bool:
+    """Ist `nr` schon vergeben — als Vertrags-Kundennummer einer ANDEREN Firma
+    oder als Anmeldenummer (kunden_nr) irgendeiner Firma, auch der eigenen?"""
+    oder = [{"vertrags_kundennummer": nr, "id": {"$ne": ausser_dealer_id}}]
+    if nr.isdigit():
+        oder.append({"kunden_nr": int(nr)})
+    return await db.dealers.find_one({"$or": oder}, {"_id": 1}) is not None
+
+
 async def firma_einfuegen(db, doc: dict, nummer_ziehen=None) -> int:
     """Firmenprofil mit frischer Kundennummer einfuegen; bei DuplicateKey auf
     kunden_nr (Rennen mit korrigiertem Zaehler) neue Nummer, max. 3 Versuche.

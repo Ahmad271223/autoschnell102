@@ -112,11 +112,71 @@ def _monat_jahr_normieren(v, art: str) -> str:
     return norm
 
 
+# Wunsch Ahmad 26.09.2026 abends: Vertragsnummer und Kundennummer je Vertrag
+# selbst vergeben. Leer = wie bisher (KV-<Datum>-<6 Zeichen> bzw. die
+# Firmen-Kundennummer dealers.vertrags_kundennummer). Reine Formpruefung hier,
+# ohne Datenbank — die Eindeutigkeit der Vertragsnummer je Firma prueft
+# create_contract (Vorabfrage + Teilindex vertragsnummer_je_firma).
+VERTRAGSNUMMER_MIN, VERTRAGSNUMMER_MAX = 3, 40
+VERTRAGSNUMMER_REGEL = (f"Vertragsnummer: {VERTRAGSNUMMER_MIN}-{VERTRAGSNUMMER_MAX} Zeichen, "
+                        "nur Buchstaben, Ziffern, Leerzeichen und - _ / .")
+_VERTRAGSNUMMER_ZEICHEN = re.compile(r"^[A-Za-z0-9 _./\-]+$")
+VERTRAG_KUNDENNUMMER_MAX = 30
+VERTRAG_KUNDENNUMMER_REGEL = (f"Kundennummer: 1-{VERTRAG_KUNDENNUMMER_MAX} Zeichen, "
+                              "nur Buchstaben, Ziffern und Bindestrich")
+_VERTRAG_KUNDENNUMMER_ZEICHEN = re.compile(r"^[A-Za-z0-9\-]+$")
+
+
+def vertragsnummer_pruefen(wert) -> str:
+    """Eigene Vertragsnummer: getrimmt; leer bleibt leer (= automatisch)."""
+    nr = str(wert or "").strip()
+    if not nr:
+        return ""
+    if not (VERTRAGSNUMMER_MIN <= len(nr) <= VERTRAGSNUMMER_MAX) \
+            or not _VERTRAGSNUMMER_ZEICHEN.match(nr):
+        raise ValueError(VERTRAGSNUMMER_REGEL)
+    return nr
+
+
+def vertrag_kundennummer_pruefen(wert) -> str:
+    """Kundennummer je Vertrag: getrimmt; leer bleibt leer (= Firmenwert)."""
+    nr = str(wert or "").strip()
+    if not nr:
+        return ""
+    if len(nr) > VERTRAG_KUNDENNUMMER_MAX or not _VERTRAG_KUNDENNUMMER_ZEICHEN.match(nr):
+        raise ValueError(VERTRAG_KUNDENNUMMER_REGEL)
+    return nr
+
+
+def kundennummer_einsetzen(contract_dict: dict) -> dict:
+    """Eigene Kundennummer des Vertrags als `vertrags_kundennummer` in die
+    Vertragsdaten — KAEUFER_FELDER traegt sie damit ins Kaeufer-Dokument
+    (PDF-Platzhalter {kundennummer}, Abholauftrag, Versand-Vorlagen); leer
+    = Firmen-Kundennummer wie bisher (kaeufer_einfrieren haelt sie fest)."""
+    eigene = str(contract_dict.get("kundennummer") or "").strip()
+    if eigene:
+        contract_dict["vertrags_kundennummer"] = eigene
+    return contract_dict
+
+
 class ContractIn(BaseModel):
     # Pruefung 14.09.2026 (Liste 3, Nr. 1): Idempotenz je Anlage — ein Doppelklick
     # oder eine verlorene Antwort mit Wiederholung legt keinen zweiten Vertrag an.
     idempotency_key: Optional[str] = Field(default=None, min_length=8, max_length=80,
                                            pattern=r"^[A-Za-z0-9_\-]+$")
+    # Wunsch Ahmad 26.09.2026 abends: eigene Vertrags- und Kundennummer (s. o.).
+    contract_no: Optional[str] = Field(default="", max_length=200)
+    kundennummer: Optional[str] = Field(default="", max_length=200)
+
+    @field_validator("contract_no")
+    @classmethod
+    def _vertragsnummer_pruefen(cls, v):
+        return vertragsnummer_pruefen(v)
+
+    @field_validator("kundennummer")
+    @classmethod
+    def _kundennummer_pruefen(cls, v):
+        return vertrag_kundennummer_pruefen(v)
 
     @field_validator("seller_name")
     @classmethod
@@ -881,6 +941,9 @@ async def preview_contract(body: ContractIn, user=Depends(require_active_sub),
     # Dialog bewusst geleerte Beschreibung ("") bleibt leer.
     if contract_dict.get("vehicle_description") is None:
         contract_dict["vehicle_description"] = vehicle.get("description", "") or ""
+    # Wunsch Ahmad 26.09.2026 abends: eigene Kundennummer auch in der Vorschau
+    # (die eigene Vertragsnummer steht schon als contract_no in den Daten).
+    kundennummer_einsetzen(contract_dict)
     vehicle, dealer = _apply_contract_overrides(
         contract=contract_dict, vehicle=vehicle, dealer=dealer,
     )
@@ -957,6 +1020,25 @@ async def _offener_eigener_vertrag(user: dict, vehicle_id: str) -> Optional[dict
     return None
 
 
+from indizes import VERTRAGSNUMMER_INDEX as _VERTRAGSNUMMER_INDEX  # noqa: E402
+
+
+async def _vertragsnummer_belegt(dealer_id: str, nr: str) -> bool:
+    """Wunsch Ahmad 26.09.2026 abends: Traegt in dieser Firma schon ein Vertrag
+    (gleich ob automatisch oder selbst vergeben, auch einer in laufender
+    Loeschung) diese Nummer? Fassungen liegen in generated_pdf_versions und
+    tragen dieselbe Nummer wie ihr Vertrag — die Eindeutigkeit gilt je
+    Vertrag, nicht je Fassung."""
+    return await db.generated_pdfs.find_one(
+        {"dealer_id": dealer_id, "contract_no": nr}, {"_id": 1}) is not None
+
+
+def _vertragsnummer_konflikt(nr: str) -> HTTPException:
+    return HTTPException(409, f"Vertragsnummer bereits vergeben: „{nr}“ trägt in eurer "
+                              "Firma schon ein anderer Kaufvertrag — bitte eine andere "
+                              "Nummer wählen (oder leer lassen für die automatische).")
+
+
 def _idempotenz_konflikt(vorhanden: dict) -> dict:
     """Pruefbericht 20.09.2026 (U-83): derselbe Idempotenz-Schluessel, anderer
     Inhalt — vorher nur "bitte neu laden" ohne Vertrags-Id und Preis. Der
@@ -1020,6 +1102,11 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
                         f"zweiten Kauf mit eigenem Abholtermin — der erste läuft mit "
                         f"seinem Preis weiter, bis du ihn im Vertragsarchiv löschst."),
             })
+    # Wunsch Ahmad 26.09.2026 abends: eigene Vertragsnummer — Vorpruefung VOR
+    # der PDF-Erzeugung; das Rennen zweier Anlagen faengt der Teilindex ab.
+    eigene_nr = body.contract_no or ""
+    if eigene_nr and await _vertragsnummer_belegt(user["dealer_id"], eigene_nr):
+        raise _vertragsnummer_konflikt(eigene_nr)
     from deps import effective_dealer
     dealer = await effective_dealer(user) or {}
     vehicle = v["data"]
@@ -1065,6 +1152,8 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     # ueberarbeiteter Text gilt fuer diesen Vertrag (Wunsch Ahmad 18.09.2026).
     eigener_text = (contract_dict.get("digital_vertragstext") or "").strip()
     contract_dict["digital_vertragstext"] = eigener_text or digitaler_vertragstext(dealer)
+    # Wunsch Ahmad 26.09.2026 abends: Kundennummer je Vertrag (leer = Firmenwert).
+    kundennummer_einsetzen(contract_dict)
     vehicle, dealer = _apply_contract_overrides(
         contract=contract_dict, vehicle=vehicle, dealer=dealer,
     )
@@ -1081,7 +1170,8 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     # Vertragsnummer VOR der PDF-Erzeugung festlegen, damit sie im Dokument
     # (Kopf + Fußzeile) erscheint und im Archiv wiederauffindbar ist.
     pdf_id = str(uuid.uuid4())
-    contract_no = f"KV-{datetime.now().strftime('%Y%m%d')}-{pdf_id[:6].upper()}"
+    # Wunsch Ahmad 26.09.2026 abends: die eigene Nummer, sonst automatisch.
+    contract_no = eigene_nr or f"KV-{datetime.now().strftime('%Y%m%d')}-{pdf_id[:6].upper()}"
     contract_dict["contract_no"] = contract_no
     # Rollenpruefung 22.09.2026 (RP-494): die erste Fassung — jede neue Fassung
     # (verschobener Termin, Abholung) traegt ihre Nummer im PDF-Kopf.
@@ -1106,6 +1196,11 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     vehicle_image_urls = _vehicle_bild_urls(vehicle)
     doc = {
         "id": pdf_id, "contract_no": contract_no,
+        # Wunsch Ahmad 26.09.2026 abends: selbst vergeben? (Teilindex
+        # vertragsnummer_je_firma greift nur dann) — und die wirksame
+        # Kundennummer dieses Vertrags (eigene, sonst Firmenwert).
+        "contract_no_eigen": bool(eigene_nr),
+        "kundennummer": str(contract_dict.get("vertrags_kundennummer") or ""),
         "dealer_id": user["dealer_id"], "user_id": user["id"],
         "vehicle_id": body.vehicle_id, "mobile_ad_id": v.get("mobile_ad_id"),
         "make": vehicle.get("make_label") or vehicle.get("make"),
@@ -1198,11 +1293,15 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
             # Stufe 3/4 (26.09.2026): KI-Empfehlung gegen den tatsaechlichen
             # Vertragspreis festhalten (anonym, wirft nie).
             await _ki_vertrag.lernfall_speichern(doc, doc.get("ki_bewertung_id"))
-        except DuplicateKeyError:
+        except DuplicateKeyError as dup:
             # Pruefung 14.09.2026 (Liste 3, Nr. 1): paralleler Doppelklick — der
             # andere Aufruf hat den Vertrag mit demselben Schluessel angelegt.
             if auto_daten_neu:
                 await auto_daten.zurueckrollen(db, auto_daten_id)
+            # Wunsch Ahmad 26.09.2026 abends: Rennen zweier Anlagen mit derselben
+            # eigenen Vertragsnummer — der Teilindex meldet es, Antwort 409.
+            if eigene_nr and _VERTRAGSNUMMER_INDEX in str(dup):
+                raise _vertragsnummer_konflikt(eigene_nr)
             vorhanden = await db.generated_pdfs.find_one(
                 {"dealer_id": user["dealer_id"], "user_id": user["id"],
                  "idempotency_key": body.idempotency_key},

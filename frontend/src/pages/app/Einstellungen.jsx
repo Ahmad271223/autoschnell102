@@ -445,19 +445,9 @@ export default function Einstellungen() {
 
               {/* Entscheidung Ahmad 22.09.2026: eigene Kundennummer fuer Vertraege —
                   im Kaufvertrag, in den Vorlagen ({kundennummer}) und im Abholauftrag.
-                  Nicht die Anmeldenummer. Vergibt der Server, nicht aenderbar. */}
-              {dealer?.vertrags_kundennummer && (
-                <div className="rounded-xl border p-3 text-[12.5px] leading-relaxed mb-1"
-                     data-testid="vertrags-kundennummer"
-                     style={{ borderColor: "var(--border-default)", background: "var(--wa-03)" }}>
-                  <span className="font-semibold">Kundennummer für Verträge: </span>
-                  <span className="font-mono text-[14px]">{dealer.vertrags_kundennummer}</span>
-                  <div className="text-[11px] text-zinc-500 mt-1">
-                    Steht im Kaufvertrag („nur unter Vorlage der Kundennummer“), in den Versand-Vorlagen
-                    als {"{kundennummer}"} und im Abholauftrag des Fahrers. Das ist nicht eure Anmeldenummer.
-                  </div>
-                </div>
-              )}
+                  Nicht die Anmeldenummer. Wunsch Ahmad 26.09.2026 abends: die Firma
+                  (Chef UND Sucher) setzt sie selbst — eigene Route, sofort gespeichert. */}
+              <VertragsKundennummerFeld dealer={dealer} refresh={refresh} />
               <div className="grid md:grid-cols-2 gap-3">
                 <AppleField label="Firmenname" value={form.profile.company_name} onChange={(v) => setProfile("company_name", v)} testid="set-company" />
                 <AppleField label="Ansprechpartner" value={form.profile.contact_person} onChange={(v) => setProfile("contact_person", v)} testid="set-contact" />
@@ -856,6 +846,81 @@ function RuleRow({ label, children, last }) {
     <div className={`flex flex-wrap items-center gap-3 py-3 ${last ? "" : "border-b border-white/[0.05]"}`}>
       <div className="w-36 text-sm font-medium text-zinc-300">{label}</div>
       <div className="flex flex-wrap items-center gap-2 flex-1">{children}</div>
+    </div>
+  );
+}
+
+// Wunsch Ahmad 26.09.2026 abends: Die Kundennummer fuer Vertraege setzt die
+// Firma selbst (Chef UND Sucher, wie die uebrigen Angaben der Firmen-
+// identitaet) — firmenweit, ueber PUT /dealer/vertrags-kundennummer, sofort
+// gespeichert (nicht Teil des grossen "Speichern"-Formulars). Der Server
+// prueft Form (4-20 Zeichen, Buchstaben/Ziffern/-) und Eindeutigkeit ueber
+// alle Firmen (409 mit Klartext, steht unter dem Feld). Je Vertrag laesst sich
+// im Vertragsdialog davon abweichen.
+export function VertragsKundennummerFeld({ dealer, refresh }) {
+  const gespeichert = String(dealer?.vertrags_kundennummer || "");
+  const [wert, setWert] = useState(gespeichert);
+  const [fehler, setFehler] = useState("");
+  const [laeuft, setLaeuft] = useState(false);
+  // Frischer Serverstand (anderer Tab, Chef hat geaendert) uebernimmt,
+  // solange hier nichts Abweichendes getippt ist.
+  const letzter = useRef(gespeichert);
+  useEffect(() => {
+    if (gespeichert !== letzter.current) {
+      setWert((w) => (w === letzter.current ? gespeichert : w));
+      letzter.current = gespeichert;
+    }
+  }, [gespeichert]);
+  const eingabe = wert.trim();
+  const geaendert = eingabe !== gespeichert;
+
+  const speichern = async () => {
+    if (laeuft || !geaendert) return;
+    setLaeuft(true);
+    setFehler("");
+    try {
+      await api.put("/dealer/vertrags-kundennummer", { vertrags_kundennummer: eingabe });
+      await refresh?.();
+      toast.success("Kundennummer für Verträge gespeichert");
+    } catch (err) {
+      setFehler(errMsg(err, "Kundennummer konnte nicht gespeichert werden"));
+    } finally {
+      setLaeuft(false);
+    }
+  };
+
+  return (
+    <div className="rounded-xl border p-3 text-[12.5px] leading-relaxed mb-1"
+         data-testid="vertrags-kundennummer"
+         style={{ borderColor: "var(--border-default)", background: "var(--wa-03)" }}>
+      <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider"
+             htmlFor="set-vertrags-kundennummer">
+        Kundennummer für Verträge
+      </label>
+      <div className="flex flex-wrap items-center gap-2 mt-1.5">
+        <input id="set-vertrags-kundennummer" data-testid="set-vertrags-kundennummer"
+               value={wert} maxLength={20} className="apple-input font-mono"
+               style={{ maxWidth: "16rem" }}
+               onChange={(e) => { setWert(e.target.value); setFehler(""); }}
+               onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); speichern(); } }} />
+        <button type="button" onClick={speichern} disabled={laeuft || !geaendert}
+                data-testid="set-vertrags-kundennummer-speichern"
+                className="apple-btn apple-btn-secondary disabled:opacity-50">
+          {laeuft ? "Speichert…" : "Kundennummer speichern"}
+        </button>
+      </div>
+      {fehler && (
+        <div role="alert" data-testid="set-vertrags-kundennummer-fehler"
+             className="text-[12px] mt-1.5" style={{ color: "var(--accent-red)" }}>
+          {fehler}
+        </div>
+      )}
+      <div className="text-[11px] text-zinc-500 mt-1">
+        Steht im Kaufvertrag („nur unter Vorlage der Kundennummer“), in den Versand-Vorlagen
+        als {"{kundennummer}"} und im Abholauftrag des Fahrers. 4–20 Zeichen (Buchstaben, Ziffern,
+        Bindestrich), über alle Firmen einmalig — und nie eure Anmeldenummer. Gilt für die ganze
+        Firma und für neue Verträge; im Vertragsdialog lässt sie sich je Vertrag abweichend eintragen.
+      </div>
     </div>
   );
 }

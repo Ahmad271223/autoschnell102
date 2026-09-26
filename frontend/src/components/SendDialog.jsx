@@ -134,7 +134,9 @@ export default function SendDialog({ open, contract, onClose }) {
       "{vertragsnummer}": contract?.contract_no || cd.contract_no || "",
       // Entscheidung Ahmad 22.09.2026: die Vertrags-Kundennummer, nie die
       // Anmeldenummer (kunden_nr) — dieselbe Regel wie im Backend.
-      "{kundennummer}": String(cd.vertrags_kundennummer || d?.vertrags_kundennummer || ""),
+      // Wunsch Ahmad 26.09.2026 abends: zuerst die je Vertrag selbst vergebene
+      // Kundennummer, dann die beim Vertrag eingefrorene Firmen-Kundennummer.
+      "{kundennummer}": String(cd.kundennummer || cd.vertrags_kundennummer || d?.vertrags_kundennummer || ""),
       "{haendler_name}": cd.dealer_company || d?.company_name || "",
     };
     // Wie im Backend: fehlt eine Angabe, steht dort "____" — nie der

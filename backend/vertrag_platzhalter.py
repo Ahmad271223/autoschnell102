@@ -175,7 +175,11 @@ def werte(vertrag: dict, firma: Optional[dict] = None,
         # Anmeldenummer des Chefs (kunden_nr) — der Verkaeufer bekam sie im
         # Vertrag genannt. Nur die eigene Vertrags-Kundennummer, beim Vertrag
         # eingefroren, sonst aus der Firma; fehlt sie, bleibt die Luecke.
-        "{kundennummer}": (_text(daten.get("vertrags_kundennummer"))
+        # Wunsch Ahmad 26.09.2026 abends: zuerst die je Vertrag selbst
+        # vergebene Kundennummer (ContractIn.kundennummer), dann die beim
+        # Vertrag eingefrorene Firmen-Kundennummer, sonst die heutige der Firma.
+        "{kundennummer}": (_text(daten.get("kundennummer"))
+                           or _text(daten.get("vertrags_kundennummer"))
                            or _text(firma.get("vertrags_kundennummer"))),
         "{telefon}": telefon,
         "{email}": mail,

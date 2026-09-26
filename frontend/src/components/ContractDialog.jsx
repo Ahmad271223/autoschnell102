@@ -177,8 +177,23 @@ export function verkaeuferNameHinweise(vehicle, eingabe = "") {
   return hinweise;
 }
 
-function anfangsFormular(v, dealer, heute) {
+// Wunsch Ahmad 26.09.2026 abends: Der Server meldet eine schon vergebene
+// Vertragsnummer als 409 mit Klartext ("Vertragsnummer bereits vergeben: …").
+// Der Text steht dann direkt unter dem Feld — nicht nur als Toast.
+export function nummernFehlerAusAntwort(err) {
+  const d = err?.response?.data?.detail;
+  if (err?.response?.status === 409 && typeof d === "string" && d.startsWith("Vertragsnummer")) {
+    return d;
+  }
+  return "";
+}
+
+export function anfangsFormular(v, dealer, heute) {
   return {
+    // Wunsch Ahmad 26.09.2026 abends: Vertrags- und Kundennummer selbst
+    // vergeben. Leer = automatisch (KV-<Datum>-…) bzw. die Firmen-Kundennummer.
+    contract_no: "",
+    kundennummer: dealer?.vertrags_kundennummer || "",
     seller_name: v.seller_name || "",
     seller_address: v.seller_address || "",
     seller_zip: v.seller_zip || "",
@@ -269,6 +284,9 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
   const [form, setForm] = useState(() => anfangsFormular(v, dealer, heute));
   const [loading, setLoading] = useState(false);
   const [previewing, setPreviewing] = useState(false);
+  // Wunsch Ahmad 26.09.2026 abends: 409 "Vertragsnummer bereits vergeben"
+  // steht unter dem Feld, bis die Nummer geaendert wird.
+  const [nummernFehler, setNummernFehler] = useState("");
   // Runde 31: rund 60 Felder ohne Zwischenspeicher — solange der Dialog offen
   // ist, fragt der Browser vor dem Neuladen oder Schliessen nach.
   useUngespeichert(Boolean(open));
@@ -420,6 +438,9 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
       additional_terms: dealer.sondervereinbarungen_effektiv
         ?? (dealer.default_special_agreements || ""),
       agb_text: dealer.default_terms || "",
+      // 26.09.2026: die Firmen-Kundennummer folgt dem frischen Stand, solange
+      // der Sucher das Feld nicht selbst angefasst hat.
+      kundennummer: dealer.vertrags_kundennummer || "",
     };
     setForm((f) => {
       const kaeufer = kaeuferAktualisieren(f, dealer, beruehrt.current);
@@ -455,7 +476,10 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
   //  - Ort (Verkäufer) folgt "Verkäufer / Halter → Ort", Ort (Käufer)
   //    folgt "Käufer → Ort" (z.B. Ort im Inserat fehlte und wird nachgetragen).
 
-  const set = (k, v) => setForm((f) => {
+  const set = (k, v) => {
+    // 26.09.2026: eine andere Vertragsnummer loescht den 409-Hinweis.
+    if (k === "contract_no") setNummernFehler("");
+    setForm((f) => {
     bearbeitet.current = true;
     beruehrt.current[k] = true;
     const next = { ...f, [k]: v };
@@ -475,7 +499,8 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
     if (k === "hu_valid" && v !== "Ja") next.hu_until = "";
     if (k === "service_book" && v !== "teilweise") next.service_book_until = "";
     return next;
-  });
+    });
+  };
 
   // Eintippen einer Schlüsselanzahl hakt "KFZ mit __ Schlüssel(n)" gleich an.
   // Nachprüfung: führende Nullen fallen weg — "0" ist keine Anzahl und darf
@@ -638,6 +663,8 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
       }
       onCreated?.(data);
     } catch (err) {
+      // 26.09.2026: vergebene Vertragsnummer auch unter dem Feld zeigen.
+      setNummernFehler(nummernFehlerAusAntwort(err));
       toast.error(errMsg(err, "PDF konnte nicht erstellt werden"));
     } finally {
       setLoading(false);
@@ -669,6 +696,29 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
         </div>
 
         <form onSubmit={submit} className="p-4 sm:p-6 space-y-6 vertrag-formular">
+          {/* Wunsch Ahmad 26.09.2026 abends: Vertragsnummer und Kundennummer
+              selbst vergeben. Leer = automatisch (KV-<Datum>-…) bzw. die
+              Firmen-Kundennummer aus den Einstellungen. Eine schon vergebene
+              Vertragsnummer meldet der Server (409) — Text unter dem Feld. */}
+          <Section title="Nummern" subtitle="Beide Felder dürfen leer bleiben — dann vergibt die App die Vertragsnummer selbst und nimmt die Kundennummer aus den Einstellungen.">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <Field label="Vertragsnummer (leer = automatisch KV-…)" value={form.contract_no}
+                     onChange={(v) => set("contract_no", v)} testid="contract-vertragsnummer"
+                     maxLength={40} placeholder="z. B. AH-2026-0042"
+                     helper="3–40 Zeichen: Buchstaben, Ziffern, Leerzeichen und - _ / . — je Firma nur einmal vergebbar." />
+              <Field label="Kundennummer (Vorbelegung: Firmenwert)" value={form.kundennummer}
+                     onChange={(v) => set("kundennummer", v)} testid="contract-kundennummer"
+                     maxLength={30} placeholder="z. B. 482913"
+                     helper="Steht im Vertrag („nur unter Vorlage der Kundennummer“), in den Vorlagen als {kundennummer} und im Abholauftrag. Darf in mehreren Verträgen gleich sein." />
+            </div>
+            {nummernFehler && (
+              <div role="alert" data-testid="contract-nummern-fehler"
+                   className="text-[12px] leading-snug" style={{ color: "var(--accent-red)" }}>
+                {nummernFehler}
+              </div>
+            )}
+          </Section>
+
           {/* Verkäufer + Käufer side-by-side on lg, stacked on small */}
           <div className="grid lg:grid-cols-2 gap-5">
             <Section title="Verkäufer / Halter">

@@ -1342,6 +1342,10 @@ async def ensure_indexes():
         db.generated_pdfs, [("dealer_id", 1), ("user_id", 1), ("idempotency_key", 1)],
         partialFilterExpression={"idempotency_key": {"$type": "string"}},
         name="vertrag_idempotenz")
+    # Wunsch Ahmad 26.09.2026 abends: selbst vergebene Vertragsnummer je Firma
+    # eindeutig (Teilindex, Rumpf in indizes.vertragsnummer_index).
+    from indizes import vertragsnummer_index as _vertragsnummer_index
+    await _vertragsnummer_index(db)
     # Pruefung 14.09.2026 (Liste 4, Nr. 79): SMTP-Idempotenz — ein Eintrag je
     # Schluessel (parallele Upserts), nach 30 Tagen automatisch weg.
     await unique_anlegen(db.mail_idempotenz, "key", name="mail_schluessel", weich=True)

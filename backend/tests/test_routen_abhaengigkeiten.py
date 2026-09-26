@@ -251,6 +251,19 @@ def test_auth_routen():
             assert "current_user" in deps, pfad
 
 
+def test_vertrags_kundennummer_setzen_fuer_chef_und_sucher():
+    """Wunsch Ahmad 26.09.2026 abends: die Firmen-Kundennummer fuer Vertraege
+    setzt die Firma selbst — Chef UND Sucher (wie die uebrigen Angaben der
+    Firmenidentitaet): current_firma, NICHT Chefsache, PUT."""
+    pfad = "/api/dealer/vertrags-kundennummer"
+    assert pfad in ROUTEN_JE_PFAD, f"{pfad} fehlt"
+    assert pfad not in CHEF_ROUTEN
+    for methoden, deps in ROUTEN_JE_PFAD[pfad]:
+        assert methoden == {"PUT"}, pfad
+        assert "current_firma" in deps, pfad
+        assert not deps & {"current_haendler", "current_chef"}, f"{pfad}: Sucher muessen sie setzen duerfen"
+
+
 def test_ki_freischaltung_nur_super_admin():
     """KI je Konto (25.09.2026) und je Fahrer (Wunsch Ahmad 26.09.2026 abends):
     beide Schalter sind Betreibersache — nur current_super_admin, POST."""

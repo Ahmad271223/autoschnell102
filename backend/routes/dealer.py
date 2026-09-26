@@ -457,6 +457,58 @@ async def settings_zuruecksetzen(body: OverrideZuruecksetzenIn, user=Depends(cur
             "dealer": _mit_digital_standard(_sucher_sicht(await effective_dealer(fresh_user)))}
 
 
+class VertragsKundennummerIn(BaseModel):
+    vertrags_kundennummer: str = Field(max_length=100)
+
+    @field_validator("vertrags_kundennummer")
+    @classmethod
+    def _pruefen(cls, v):
+        from kontenanlage import vertrags_kundennummer_pruefen
+        return vertrags_kundennummer_pruefen(v)
+
+
+VERTRAGS_KUNDENNUMMER_VERGEBEN = (
+    "Kundennummer bereits vergeben — eine andere Firma nutzt sie schon "
+    "(oder sie ist eine Anmeldenummer). Bitte eine andere wählen.")
+
+
+@router.put("/dealer/vertrags-kundennummer")
+async def vertrags_kundennummer_setzen(body: VertragsKundennummerIn,
+                                       user=Depends(current_firma)):
+    """Wunsch Ahmad 26.09.2026 abends: Die Kundennummer fuer Vertraege setzt die
+    Firma selbst — Chef UND Sucher (wie die uebrigen Angaben der Firmen-
+    identitaet), aber immer FIRMENWEIT im dealers-Dokument: ein persoenlicher
+    Sucher-Override (users.settings_override) waere vom Unique-Index
+    dealers.vertrags_kundennummer_unique nicht gedeckt. Wer je Vertrag eine
+    andere Nummer will, traegt sie im Vertragsdialog ein (ContractIn.kundennummer).
+
+    Eindeutig ueber alle Firmen und nie gleich einer Anmeldenummer (kunden_nr)
+    — Vorpruefung plus DuplicateKeyError des Index als Rennschutz -> 409.
+    Audit-Eintrag mit altem und neuem Wert."""
+    from kontenanlage import vertrags_kundennummer_belegt
+    from deps import log_activity_sicher
+    from pymongo.errors import DuplicateKeyError
+    nr = body.vertrags_kundennummer
+    firma = await db.dealers.find_one({"id": user["dealer_id"]},
+                                      {"_id": 0, "vertrags_kundennummer": 1}) or {}
+    vorher = str(firma.get("vertrags_kundennummer") or "")
+    if nr == vorher:
+        return {"vertrags_kundennummer": nr, "geaendert": False}
+    if await vertrags_kundennummer_belegt(db, nr, ausser_dealer_id=user["dealer_id"]):
+        raise HTTPException(409, VERTRAGS_KUNDENNUMMER_VERGEBEN)
+    try:
+        await db.dealers.update_one(
+            {"id": user["dealer_id"]},
+            {"$set": {"vertrags_kundennummer": nr, "updated_at": now_iso()}})
+    except DuplicateKeyError:
+        raise HTTPException(409, VERTRAGS_KUNDENNUMMER_VERGEBEN)
+    await log_activity_sicher(
+        user["dealer_id"], user["id"], "einstellungen.vertrags_kundennummer.geaendert",
+        meta={"vorher": vorher, "nachher": nr,
+              "bereich": "firma", "rolle": user.get("role") or ""})
+    return {"vertrags_kundennummer": nr, "geaendert": True}
+
+
 # Nachpruefung Runde 14 (Nr. 116): 2 MB Bild sind als Base64 ~2,8 MB plus
 # data-URL-Praefix. Alles darueber lehnt Pydantic (422) ab, BEVOR der
 # komplette String dekodiert wird — vorher wurden bis zu 25 MB (nginx-Limit)
