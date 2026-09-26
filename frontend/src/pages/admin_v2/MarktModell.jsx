@@ -186,9 +186,9 @@ function SegmentAnalyse({ segment, bereich, onBereich, superAdmin }) {
           <div className="mt-3 grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-2 text-[12px]" data-testid="markt-kennzahlen">
             <K label="Aktuell beobachtet" wert={`${st.sample_size} Fahrzeuge`} />
             <K label="Billigstes" wert={eur(st.min_price)} />
-            <K label="Top-20-Median" wert={eur(st.median_price)} gross />
-            <K label="Durchschnitt Top-20" wert={eur(st.avg_price)} />
-            <K label="Teuerstes Top-20" wert={eur(st.max_price)} />
+            <K label={`Median Top-${st.sample_size || "N"}`} wert={eur(st.median_price)} gross />
+            <K label={`Durchschnitt Top-${st.sample_size || "N"}`} wert={eur(st.avg_price)} />
+            <K label={`Teuerstes Top-${st.sample_size || "N"}`} wert={eur(st.max_price)} />
             <K label="p25 / p75" wert={`${eur(st.p25_price)} / ${eur(st.p75_price)}`} />
             <K label="7-Tage-Trend Median" wert={trendText(st.trend_7d_eur, st.trend_7d_pct)} farbe={trendFarbe(st.trend_7d_eur)}
                unter={bestandText(st.trend_7d_bestand_eur, st.trend_7d_bestand_pct, st.anzahl_gemeinsam)} testid="markt-trend-7d" />
@@ -210,13 +210,13 @@ function SegmentAnalyse({ segment, bereich, onBereich, superAdmin }) {
             <span style={{ color: dl.farbe }}>{dl.text}</span>
           </div>
         )}
-        <div className="mt-2 text-[10px] text-zinc-500">Durchschnitt und Median beziehen sich nur auf die beobachteten 20 günstigsten Angebote, nicht auf den Gesamtmarkt.</div>
+        <div className="mt-2 text-[10px] text-zinc-500">Durchschnitt und Median beziehen sich nur auf die beobachteten {zusammen.stats?.sample_size || segment.max_items || ""} günstigsten Angebote, nicht auf den Gesamtmarkt.</div>
       </Card>
 
       {/* Zeitreihe */}
       <Card data-testid="markt-verlauf">
         <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-          <div className="text-[13px] font-semibold text-white">Verlauf der 20 günstigsten je Tag</div>
+          <div className="text-[13px] font-semibold text-white">Verlauf der günstigsten je Tag</div>
           <div className="flex flex-wrap gap-1">
             {BEREICHE.map(([k, l]) => <Chip key={k} aktiv={bereich === k} onClick={() => onBereich(k)} testid={`markt-bereich-${k}`}>{l}</Chip>)}
           </div>
@@ -232,13 +232,13 @@ function SegmentAnalyse({ segment, bereich, onBereich, superAdmin }) {
                   <Tooltip contentStyle={{ background: "#18181b", border: "1px solid #3f3f46", fontSize: 12 }} formatter={(v, n) => [Array.isArray(v) ? `${eur(v[0])} – ${eur(v[1])}` : eur(v), n]} />
                   <Area type="monotone" dataKey="band" name="p25–p75" stroke="none" fill="#60a5fa" fillOpacity={0.12} />
                   <Line type="monotone" dataKey="min" name="Billigstes" stroke="#34d399" dot={false} strokeWidth={1.5} />
-                  <Line type="monotone" dataKey="median" name="Median Top-20" stroke="#f87171" dot={false} strokeWidth={2.2} />
-                  <Line type="monotone" dataKey="avg" name="Durchschnitt Top-20" stroke="#fbbf24" dot={false} strokeWidth={1.5} strokeDasharray="4 3" />
+                  <Line type="monotone" dataKey="median" name="Median (günstigste)" stroke="#f87171" dot={false} strokeWidth={2.2} />
+                  <Line type="monotone" dataKey="avg" name="Durchschnitt (günstigste)" stroke="#fbbf24" dot={false} strokeWidth={1.5} strokeDasharray="4 3" />
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
-            <div className="mt-2 text-[11px] text-zinc-500">Grün Billigstes · Rot Median Top-20 · Gelb Durchschnitt Top-20 · Blau p25–p75. Fällt nur das Billigste, war es oft ein einzelnes Inserat; fallen alle drei, bewegt sich das ganze günstige Segment.</div>
-            <div className="mt-4 text-[13px] font-semibold text-white">Tagesveränderung des Top-20-Medians</div>
+            <div className="mt-2 text-[11px] text-zinc-500">Grün Billigstes · Rot Median · Gelb Durchschnitt · Blau p25–p75. Fällt nur das Billigste, war es oft ein einzelnes Inserat; fallen alle drei, bewegt sich das ganze günstige Segment.</div>
+            <div className="mt-4 text-[13px] font-semibold text-white">Tagesveränderung des Medians</div>
             <div style={{ height: 120 }}>
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={reihe} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>

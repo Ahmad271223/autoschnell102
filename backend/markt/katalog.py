@@ -147,7 +147,7 @@ def modell_ids(marke: str, modell: str, katalog: Optional[List[dict]] = None) ->
     return None
 
 
-SEED_VERSION = 2      # v4 (26.09.2026 abends): Getriebe, enge kW-Bereiche, km 0-250k
+SEED_VERSION = 3      # v5 (26.09.2026 abends, Ahmad): EZ 2018-2022, sechs km-Bereiche 10-190k, 10 Zeilen
 
 
 def seed_label(marke: str, modell: str, variante: str, getriebe: Optional[str] = None) -> str:

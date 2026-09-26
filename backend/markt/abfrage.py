@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 from markt import budget, jobs, konfig, normalisieren, segmente
 from markt.konfig import CHANCEN, JOBS, LISTINGS, MODELLE, SEGMENTE, SEGMENTSTATS, SNAPSHOTS, TAGESSTATS
 
-HINWEIS = ("Beobachtet werden je Segment nur die 20 günstigsten passenden Angebote — "
+HINWEIS = ("Beobachtet werden je Segment nur die günstigsten passenden Angebote (Anzahl je Suchauftrag) — "
            "das ist die untere Marktpreisspanne, kein Marktmedian für ganz Deutschland.")
 
 
@@ -373,7 +373,7 @@ async def listing_verlauf(db, listing_id: str) -> Optional[Dict[str, Any]]:
 
 ZUSTAND_TEXT = {
     "seen": "zuletzt im Sample gesehen",
-    "not_seen_in_sample": "zuletzt nicht mehr unter den 20 günstigsten — das heißt NICHT verkauft (kann teurer geworden oder verdrängt worden sein)",
+    "not_seen_in_sample": "zuletzt nicht mehr unter den günstigsten — das heißt NICHT verkauft (kann teurer geworden oder verdrängt worden sein)",
     "verification_pending": "wird einzeln nachgeprüft — eine leere Antwort reicht nicht, erst eine zweite Prüfung am Folgetag bestätigt die Entfernung",
     "confirmed_removed": "Inserat nicht mehr online (kein Beleg für einen Verkauf)",
 }

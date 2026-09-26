@@ -3625,3 +3625,10 @@ er ist nur noch die Vorgabe, solange der Knopf nie gedrückt wurde.
 - Nicht gebaut (Entscheidung Ahmad): Schadenerkennung auf Fotos. Terminverschiebung kippt die Freigabe nicht.
   Inseratsbilder/-mängel bleiben für den Fahrer sichtbar.
 
+**Standardwerte v3 (Wunsch Ahmad 26.09.2026 abends):** je Segment **10 Zeilen** (`MARKT_ROWS_JE_SEGMENT` Standard 10),
+EZ **2018–2022 einzeln**, sechs km-Bereiche **10–30k / 30–55k / 55–80k / 80–110k / 110–140k / 140–190k**. Damit hat jeder
+Startlisten-Auftrag 30 Segmente (72 Aufträge → 2.160 Segmente). **Migration 17** hebt alle Startlisten-Aufträge, die noch
+unverändert auf den alten Werten (km 0–250k, EZ 2019–2022, 20 Zeilen) stehen, auf die neuen; selbst angepasste Werte bleiben;
+Segmente werden neu aufgebaut (alte nur deaktiviert). Die Taktung passt sich automatisch dem Budget an (Kachel „Taktung“
+prüfen). Beschriftungen sagen nicht mehr „Top-20“, sondern nehmen die tatsächliche Stichprobengröße.
+

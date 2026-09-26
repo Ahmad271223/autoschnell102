@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger("autohandel.migrationen")
 
-ZIEL_VERSION = 16
+ZIEL_VERSION = 17
 _SPERRE = "migration"
 
 
@@ -667,6 +667,44 @@ async def m16_markt_startliste_v2(db) -> dict:
     return z
 
 
+async def m17_markt_standard_v3(db) -> dict:
+    """Wunsch Ahmad 26.09.2026 abends: 10 Zeilen je Segment, EZ 2018-2022 einzeln, sechs
+    km-Bereiche 10-30k/30-55k/55-80k/80-110k/110-140k/140-190k. Hebt Startlisten-
+    Auftraege, die noch unveraendert auf Seed v2 stehen (km v2, EZ 2019-2022, 20 Zeilen),
+    auf v3; eigene/angepasste Werte bleiben. Segmente werden neu aufgebaut (alte nur
+    deaktiviert, Historie bleibt). Idempotent ueber seed_version >= 3."""
+    from markt import katalog, konfig as mk, segmente
+    jetzt = datetime.now(timezone.utc).isoformat()
+    z = {"aktualisiert": 0, "unveraendert": 0, "segmente": 0}
+    seed_ids = {m["id"] for m in katalog.start_modelle()}
+    geaendert = False
+    async for alt in db[mk.MODELLE].find({"id": {"$in": sorted(seed_ids)}}):
+        if int(alt.get("seed_version") or 0) >= katalog.SEED_VERSION:
+            continue
+        setzen = {"seed_version": katalog.SEED_VERSION, "updated_at": jetzt}
+        km_alt = [{"min_km": int(b.get("min_km") or 0), "max_km": int(b.get("max_km") or 0)} for b in alt.get("km_buckets") or []]
+        if km_alt == mk.KM_BUCKETS_V2 or not km_alt:
+            setzen["km_buckets"] = [dict(b) for b in mk.KM_BUCKETS_STANDARD]
+        if list(alt.get("ez_years") or []) == mk.EZ_JAHRE_V2 or not alt.get("ez_years"):
+            setzen["ez_years"] = [b["year_from"] for b in mk.EZ_BUCKETS_STANDARD]
+        if int(alt.get("rows") or 0) in (0, 20):
+            setzen["rows"] = mk.rows_je_segment()
+        await db[mk.MODELLE].update_one({"_id": alt["_id"]}, {"$set": setzen})
+        if len(setzen) > 2:
+            z["aktualisiert"] += 1
+            geaendert = True
+        else:
+            z["unveraendert"] += 1
+    # zentrale Vorgabe (market_config/km_buckets, ez_buckets) nur, wenn sie noch auf v2 steht
+    doc = await db[mk.KONFIG].find_one({"_id": "km_buckets"})
+    if doc and [{"min_km": int(b["min_km"]), "max_km": int(b["max_km"])} for b in doc.get("buckets") or []] == mk.KM_BUCKETS_V2:
+        await db[mk.KONFIG].delete_one({"_id": "km_buckets"})
+        geaendert = True
+    if geaendert:
+        z["segmente"] = (await segmente.synchronisieren(db)).get("segmente", 0)
+    return z
+
+
 MIGRATIONEN = [
     (1, "abos_normalisieren", m1_abos_normalisieren),
     (2, "lifecycle_nachziehen", m2_lifecycle),
@@ -688,6 +726,8 @@ MIGRATIONEN = [
     (15, "ausstattung_deutsch", m15_ausstattung_deutsch),
     # Befund Ahmad 26.09.2026 abends: Marktanalyse erster Live-Tag
     (16, "markt_startliste_v2", m16_markt_startliste_v2),
+    # Wunsch Ahmad 26.09.2026 abends: 10 Zeilen, EZ 2018-2022, sechs km-Bereiche
+    (17, "markt_standard_v3", m17_markt_standard_v3),
 ]
 
 

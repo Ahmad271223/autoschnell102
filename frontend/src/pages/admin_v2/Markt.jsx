@@ -53,7 +53,7 @@ export default function Markt() {
   const jobs = status.jobs || {};
   return (
     <div>
-      <PageHeader title="Marktanalyse" subtitle="Eigene historische mobile.de-Beobachtung: je Segment die 20 günstigsten Angebote, täglich."
+      <PageHeader title="Marktanalyse" subtitle={`Eigene historische mobile.de-Beobachtung: je Segment die ${status.einstellungen?.rows_je_segment || 10} günstigsten Angebote, täglich.`}
                   action={<div className="flex gap-2">
                     <Button variant="outline" size="sm" onClick={laden}><RefreshCw size={14} /> Aktualisieren</Button>
                     <Button variant="outline" size="sm" onClick={() => setKonfigOffen((o) => !o)} data-testid="markt-konfig-oeffnen"><Settings2 size={14} /> Bereiche & Budget</Button>
@@ -127,7 +127,7 @@ export default function Markt() {
 
       <Card padded={false} data-testid="markt-modelle">
         <div className="px-4 py-3 text-[13px] text-zinc-400" style={{ borderBottom: "1px solid var(--wa-08)" }}>
-          <BarChart3 size={14} className="inline mr-1" /> {modelle.length} Modelle · Kennzahlen = nur die 20 günstigsten je Segment (untere Marktpreisspanne), kein Marktmedian
+          <BarChart3 size={14} className="inline mr-1" /> {modelle.length} Modelle · Kennzahlen = nur die günstigsten je Segment (Zeilen je Suchauftrag, untere Marktpreisspanne), kein Marktmedian
         </div>
         {modelle.length === 0 ? <EmptyState title="Noch keine Modelle" hint="„Startliste & Segmente aufbauen“ spielt die 52 Startmodelle ein — oder unter Suchaufträge eigene anlegen." /> : (
           <div className="overflow-x-auto">
@@ -139,7 +139,7 @@ export default function Markt() {
                   <th className="px-4 py-2.5 font-medium">Letzter Crawl</th>
                   <th className="px-4 py-2.5 font-medium text-right">Listings</th>
                   <th className="px-4 py-2.5 font-medium text-right">Günstigstes</th>
-                  <th className="px-4 py-2.5 font-medium text-right">Top-20-Median (Ø)</th>
+                  <th className="px-4 py-2.5 font-medium text-right">Median günstigste (Ø)</th>
                   <th className="px-4 py-2.5 font-medium text-right">7 Tage</th>
                   <th className="px-4 py-2.5 font-medium text-right">30 Tage</th>
                   <th className="px-4 py-2.5 font-medium">Status</th>
@@ -189,7 +189,7 @@ function Kachel({ label, wert, hint, tone = "" }) {
 function KonfigKarte({ status, superAdmin, onGespeichert }) {
   const [km, setKm] = useState((status.km_buckets || []).map((b) => `${b.min_km}-${b.max_km}`).join(", "));
   const [ez, setEz] = useState((status.ez_buckets || []).map((b) => `${b.year_from || ""}-${b.year_to || ""}`).join(", "));
-  const [rows, setRows] = useState(String(status.einstellungen?.rows_je_segment || 20));
+  const [rows, setRows] = useState(String(status.einstellungen?.rows_je_segment || 10));
   const [budget, setBudget] = useState(String(status.budget?.budget_usd ?? 450));
   const [busy, setBusy] = useState(false);
   const parse = (text, a, b) => text.split(",").map((t) => t.trim()).filter(Boolean).map((t) => {
@@ -201,7 +201,7 @@ function KonfigKarte({ status, superAdmin, onGespeichert }) {
     try {
       const r = await api.put("/admin/market/config", {
         km_buckets: parse(km, "min_km", "max_km"), ez_buckets: parse(ez, "year_from", "year_to"),
-        rows_je_segment: Number(rows) || 20, budget_usd: Number(budget) || 0,
+        rows_je_segment: Number(rows) || 10, budget_usd: Number(budget) || 0,
       });
       toast.success(`Gespeichert · ${r.data.segmente} Segmente · alle ${r.data.takt?.intervall_tage} Tag(e)`);
       onGespeichert?.();

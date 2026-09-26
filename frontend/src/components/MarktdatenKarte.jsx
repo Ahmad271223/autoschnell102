@@ -43,10 +43,10 @@ export default function MarktdatenKarte({ vehicleId, preis }) {
         </div>
       )}
       <div className="mt-3 grid grid-cols-3 gap-2 text-[11px]">
-        {[["Günstigstes", daten.min_price], ["Median Top-20", daten.median_top20_price], ["Top-20-Spanne", `${eur(daten.min_price)}–${eur(daten.max_top20_price)}`]].map(([k, v]) => (
+        {[["Günstigstes", daten.min_price], ["Median günstigste", daten.median_top20_price], ["Spanne günstigste", `${eur(daten.min_price)}–${eur(daten.max_top20_price)}`]].map(([k, v]) => (
           <div key={k} className="rounded-lg p-2" style={{ background: "var(--wa-06)" }}>
             <div style={{ color: "var(--text-dim)" }}>{k}</div>
-            <div className={k === "Median Top-20" ? "text-base font-semibold" : "text-sm font-semibold"}>{typeof v === "string" ? v : eur(v)}</div>
+            <div className={k === "Median günstigste" ? "text-base font-semibold" : "text-sm font-semibold"}>{typeof v === "string" ? v : eur(v)}</div>
           </div>
         ))}
       </div>

@@ -30,16 +30,27 @@ QUELLE = "mobile"
 # Auftrag v2: EINZELNE EZ-Jahre (5 je Modell, im Modell ueberschreibbar) und 5 km-Bereiche.
 # Auftrag v3 (26.09.2026): Standard 4 EZ-Jahre x 4 km-Bereiche, 20 Zeilen, 2 Abrufe je Tag —
 # nur Vorbelegung; jede Marktanalyse traegt ihre eigenen Werte (market_models).
-EZ_BUCKETS_STANDARD = [{"year_from": j, "year_to": j} for j in (2019, 2020, 2021, 2022)]
+# Wunsch Ahmad 26.09.2026 abends (v3): EZ 2018-2022 einzeln, sechs km-Bereiche, 10 Zeilen.
+EZ_BUCKETS_STANDARD = [{"year_from": j, "year_to": j} for j in (2018, 2019, 2020, 2021, 2022)]
 # Befund 26.09.2026 (erster Live-Tag): 33 Segmente ohne Treffer — Autos von 2019-2022
 # stehen 2026 mit 50-200k km im Markt, 10-30k km war fast leer (Probe: 320d EZ 2019
 # 0-50k = 3 Treffer, 50-100k/100-150k/150-250k je 20+). Deshalb vier breitere Bereiche.
 KM_BUCKETS_STANDARD = [
+    {"min_km": 10000, "max_km": 30000},
+    {"min_km": 30001, "max_km": 55000},
+    {"min_km": 55001, "max_km": 80000},
+    {"min_km": 80001, "max_km": 110000},
+    {"min_km": 110001, "max_km": 140000},
+    {"min_km": 140001, "max_km": 190000},
+]
+# Vorgaenger (v2, 26.09. nachmittags) — die Migration erkennt daran unveraenderte Auftraege
+KM_BUCKETS_V2 = [
     {"min_km": 0, "max_km": 50000},
     {"min_km": 50001, "max_km": 100000},
     {"min_km": 100001, "max_km": 150000},
     {"min_km": 150001, "max_km": 250000},
 ]
+EZ_JAHRE_V2 = [2019, 2020, 2021, 2022]
 SCHALTER_DOK = "crawler"      # market_config/_id=crawler: {"aktiv": bool} — Knopf im Admin
 
 
@@ -154,7 +165,7 @@ def crawl_intervall_tage() -> int:
 
 
 def rows_je_segment() -> int:
-    return zahl_env("MARKT_ROWS_JE_SEGMENT", 20, unten=1, oben=200)
+    return zahl_env("MARKT_ROWS_JE_SEGMENT", 10, unten=1, oben=200)     # Ahmad 26.09. abends: 10
 
 
 def row_usd() -> float:

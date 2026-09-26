@@ -424,11 +424,36 @@ def test_11_segmente_sync_und_ez_bereiche(welt):
     km, ez = welt.run(SEG.km_buckets(db)), welt.run(SEG.ez_buckets(db))
     eigene = welt.run(db[K.SEGMENTE].find({"model_id": mid}, {"_id": 0}).to_list(100))
     assert len(eigene) == len(km) * max(1, len(ez)) and all(s["enabled"] for s in eigene)
-    assert any(s["id"] == f"{mid}:2019:50001-100000" and s["ez_label"] == "EZ 2019" for s in eigene), [s["id"] for s in eigene][:3]
-    assert len(km) >= 4 and SEG.bucket_fuer_km(km, 70000)["min_km"] == 50001 and SEG.bucket_fuer_km(km, 999999) is None
-    # v4 (Befund 26.09.2026): 0-250k km, weil Autos von 2019-2022 im Jahr 2026 bei 50-200k km stehen
-    assert len(K.KM_BUCKETS_STANDARD) == 4 and K.KM_BUCKETS_STANDARD[0]["min_km"] == 0 and K.KM_BUCKETS_STANDARD[-1]["max_km"] == 250000
+    assert any(s["id"] == f"{mid}:2019:55001-80000" and s["ez_label"] == "EZ 2019" for s in eigene), [s["id"] for s in eigene][:3]
+    assert len(km) >= 4 and SEG.bucket_fuer_km(km, 70000)["min_km"] == 55001 and SEG.bucket_fuer_km(km, 999999) is None
+    # v5 (Wunsch Ahmad 26.09.2026 abends): sechs Bereiche 10-190k, EZ 2018-2022, 10 Zeilen
+    assert len(K.KM_BUCKETS_STANDARD) == 6 and K.KM_BUCKETS_STANDARD[0]["min_km"] == 10000 and K.KM_BUCKETS_STANDARD[-1]["max_km"] == 190000
+    assert [b["year_from"] for b in K.EZ_BUCKETS_STANDARD] == [2018, 2019, 2020, 2021, 2022]
     assert SEG.ez_bucket_fuer_jahr(ez, 2020) == {"year_from": 2020, "year_to": 2020} and SEG.ez_bucket_fuer_jahr(ez, 1999) is None
+    # Migration 17: unveraenderte v2-Auftraege wandern auf v3, angepasste bleiben
+    MIG = _module("migrationen")
+    v2 = {**_modell(w), "id": f"test-m17-{w.s}", "seed_version": 2, "km_buckets": [dict(b) for b in K.KM_BUCKETS_V2],
+          "ez_years": list(K.EZ_JAHRE_V2), "rows": 20, "status": "active"}
+    eigen = {**v2, "id": f"test-m17-eigen-{w.s}", "km_buckets": [{"min_km": 0, "max_km": 99000}], "ez_years": [2016], "rows": 7}
+    welt.run(db[K.MODELLE].insert_many([dict(v2), dict(eigen)]))
+    try:
+        monkeypatch_ids = set(m["id"] for m in _module("markt.katalog").start_modelle())
+        assert v2["id"] not in monkeypatch_ids  # Test-IDs sind keine Seed-IDs -> Migration prueft ueber die Seed-Liste
+        alt_start = _module("markt.katalog").start_modelle
+        _module("markt.katalog").start_modelle = lambda: alt_start() + [{"id": v2["id"]}, {"id": eigen["id"]}]
+        try:
+            erg = welt.run(MIG.m17_markt_standard_v3(db))
+        finally:
+            _module("markt.katalog").start_modelle = alt_start
+        assert erg["aktualisiert"] >= 1
+        d = welt.run(db[K.MODELLE].find_one({"id": v2["id"]}, {"_id": 0}))
+        assert d["km_buckets"] == K.KM_BUCKETS_STANDARD and d["ez_years"] == [2018, 2019, 2020, 2021, 2022] and d["rows"] == 10 and d["seed_version"] == 3
+        e = welt.run(db[K.MODELLE].find_one({"id": eigen["id"]}, {"_id": 0}))
+        assert e["km_buckets"] == [{"min_km": 0, "max_km": 99000}] and e["ez_years"] == [2016] and e["rows"] == 7 and e["seed_version"] == 3, "eigene Werte bleiben"
+    finally:
+        for x_id in (v2["id"], eigen["id"]):
+            welt.run(db[K.SEGMENTE].delete_many({"model_id": x_id}))
+            welt.run(db[K.MODELLE].delete_many({"id": x_id}))
     # Modell-eigene EZ-Jahre gehen vor
     welt.run(db[K.MODELLE].update_one({"id": mid}, {"$set": {"ez_years": [2015, 2016]}}))
     welt.run(SEG.synchronisieren(db))
@@ -449,8 +474,8 @@ def test_11_segmente_sync_und_ez_bereiche(welt):
     assert len({m["id"] for m in ms}) == 72 and all(m["gearbox"] in ("AUTOMATIC_GEAR", "MANUAL_GEAR") for m in ms)
     assert all(m["seed_version"] == KAT.SEED_VERSION and m["km_buckets"] == K.KM_BUCKETS_STANDARD for m in ms)
     b = next(m for m in ms if m["id"] == "bmw-320d")
-    assert b["model_id"] == "10" and b["ez_years"] == [2019, 2020, 2021, 2022] and len(b["km_buckets"]) == 4
-    assert b["rows"] == 20 and b["crawls_per_day"] == 2 and b["status"] == "active" and b["gearbox"] == "AUTOMATIC_GEAR"
+    assert b["model_id"] == "10" and b["ez_years"] == [2018, 2019, 2020, 2021, 2022] and len(b["km_buckets"]) == 6
+    assert b["rows"] == 10 and b["crawls_per_day"] == 2 and b["status"] == "active" and b["gearbox"] == "AUTOMATIC_GEAR"
     assert b["label"] == "BMW 320d Automatik"
     touran = {m["id"]: m for m in ms if m["id"].startswith("vw-touran")}
     assert set(touran) == {"vw-touran-20tdi", "vw-touran-20tdi-schalt"}
