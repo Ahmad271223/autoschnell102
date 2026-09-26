@@ -3721,3 +3721,14 @@ löscht die Fahrer-Zähler und pseudonymisiert `driver_id` in den Bewertungen. B
 - Hinweis: `sample_incomplete` hängt davon ab, ob der Scraper eine Marktgröße je Zeile liefert (Feldnamen geraten) —
   am ersten Live-Tag im Job prüfen.
 
+**Private Deals (Wunsch Ahmad 26.09.2026 abends; Commit 35d7699):** Aus den Zeilen, die die Marktanalyse ohnehin je Segment
+abruft (die N günstigsten), werden nach jedem gültigen Lauf die **3 günstigsten Privatangebote** (Verkäuferart PRIVATE; Händler
+oder unbekannt nie) je Segment abgeleitet — **kein eigener Crawl, keine Zusatzkosten**. Sammlung `market_private_deals`
+(ein Dokument je Segment + Inserat, Historie bleibt: `currently_top3`, `left_top3_at`, Preisverlauf, Abstand zum
+Segment-Median), Segmentstatistik trägt `private_top3` und `private_stand_stale` (ungültiger/leerer Lauf lässt den alten
+Stand stehen). Keine Namen, Telefonnummern oder Koordinaten. **Nur Super-Admin:** Seite Admin → Marktanalyse → **Private
+Deals** (Kacheln, Filter Marke/Modell/EZ/km/Preis/Abstand/PLZ, Sortierung nach Abstand zum Median, aktuell/historisch,
+Links nur zu mobile.de), Karte auf der Marktanalyse-Seite, Block „Günstigste Privatangebote im Sample“ in jeder
+Segmentanalyse. Routen `GET /admin/market/private-deals`, `GET /admin/market/segments/{id}/private-deals`. Nichts davon
+in `/markt/chancen` oder der Fahrzeugkarte.
+
