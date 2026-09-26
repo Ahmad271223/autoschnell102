@@ -3632,3 +3632,12 @@ unverändert auf den alten Werten (km 0–250k, EZ 2019–2022, 20 Zeilen) stehe
 Segmente werden neu aufgebaut (alte nur deaktiviert). Die Taktung passt sich automatisch dem Budget an (Kachel „Taktung“
 prüfen). Beschriftungen sagen nicht mehr „Top-20“, sondern nehmen die tatsächliche Stichprobengröße.
 
+**KI je Fahrer (Wunsch Ahmad 26.09.2026 abends; Commit 4ea42ac):** Abhol-KI läuft nur, wenn der Fahrer des Termins
+freigeschaltet ist (`driver_accounts.ki_aktiv`, Standard AUS — bestehende Fahrer sind gesperrt, bis der Super-Admin sie
+unter Admin → Fahrer (Badge „KI“, Knopf) freischaltet; Route `POST /admin/drivers/{id}/ki`). Ohne Freischaltung zeigen Chef-
+und Fahrer-Karte „Fahrer nicht für die KI-Abholbewertung freigeschaltet“. Zusätzlich **Deckel je Fahrer 10 € im Monat**
+(`KI_BUDGET_FAHRER_EUR`, Standard 10, 0 = aus; Zähler `fahrer:<driver_id>:<JJJJ-MM>`) neben dem Firmen-Deckel 15 €:
+Reservierung nur, wenn beide frei sind, Sparmodus ab 80 % des engeren Deckels, Grund nennt den vollen Deckel. Fahrer-Löschung
+löscht die Fahrer-Zähler und pseudonymisiert `driver_id` in den Bewertungen. Betrieb-Kasten zeigt „10 € je Fahrer“.
+**Nach dem Rollout: die Fahrer, die die KI nutzen sollen, unter Admin → Fahrer freischalten.**
+
