@@ -267,7 +267,8 @@ async def admin_market_crawl_now(segment_id: str, admin=Depends(current_super_ad
     try:
         job = await jobs.job_sofort(db, segment_id)
     except ValueError as e:
-        raise HTTPException(404, str(e))
+        # Review 26.09.2026 Nr. 52: inaktives Segment -> 400 mit Klartext (nicht gefunden -> 404)
+        raise HTTPException(404 if "nicht gefunden" in str(e) else 400, str(e))
     await log_activity_sicher("", admin["id"], "admin.markt.crawl_jetzt", ref=segment_id)
     return {"ok": True, "job": job, "hinweis": "Der Worker holt den Job innerhalb einer Minute (MARKT_AKTIV muss an sein)."}
 

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { BarChart3 } from "lucide-react";
 import { api } from "@/lib/api";
-import { DATENLAGE, datumZeit, eur, seitErstbeobachtung, trendFarbe, trendText } from "@/lib/markt";
+import { DATENLAGE, bestandText, datumZeit, eur, seitErstbeobachtung, trendFarbe, trendText } from "@/lib/markt";
 
 const ZEITLIMIT_MS = 8000;
 
@@ -54,6 +54,13 @@ export default function MarktdatenKarte({ vehicleId, preis }) {
         <span>30-Tage-Trend: <b style={{ color: trendFarbe(daten.trend_30d_eur) }} data-testid="marktdaten-trend">{trendText(daten.trend_30d_eur, daten.trend_30d_pct)}</b></span>
         {daten.trend_7d_eur != null && <span>7 Tage: <b style={{ color: trendFarbe(daten.trend_7d_eur) }}>{trendText(daten.trend_7d_eur, daten.trend_7d_pct)}</b></span>}
       </div>
+      {(daten.anzahl_gemeinsam_30d || daten.anzahl_gemeinsam) ? (
+        <div className="text-[11px]" style={{ color: "var(--text-secondary)" }} data-testid="marktdaten-bestand">
+          {daten.anzahl_gemeinsam_30d ? `30 Tage, ${bestandText(daten.trend_30d_bestand_eur, daten.trend_30d_bestand_pct, daten.anzahl_gemeinsam_30d)}` : ""}
+          {daten.anzahl_gemeinsam_30d && daten.anzahl_gemeinsam ? " · " : ""}
+          {daten.anzahl_gemeinsam ? `7 Tage, ${bestandText(daten.trend_7d_bestand_eur, daten.trend_7d_bestand_pct, daten.anzahl_gemeinsam)}` : ""}
+        </div>
+      ) : null}
       {(preis || daten.preis_vs_median_eur != null) && (
         <div className="mt-2 text-[12px]" data-testid="marktdaten-dieses">
           Dieses Inserat: <b>{eur(preis)}</b>

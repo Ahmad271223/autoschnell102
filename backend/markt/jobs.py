@@ -16,6 +16,10 @@ asyncio.create_task fuer Tagesarbeit:
     geprueft (EZ, km, kW, Kraftstoff, Getriebe); > 50 % verworfen = Alarm
   * Zwei Server (Nr. 12/13): Lease deckt die Buendel-Dauer, Heartbeat vor dem
     Lauf, Ergebnis nur schreiben, wenn dieser Worker den Job noch haelt
+  * Nr. 47: verfallene Budgetreservierungen (Worker weg) vor jedem Claim freigeben
+  * Nr. 48/51: nach dem Lauf Segment/Modell und cancel_requested erneut pruefen —
+    inzwischen pausiert/archiviert: nichts speichern, Job 'cancelled', Kosten buchen
+  * Nr. 52: kein Sofort-Job fuer ein inaktives Segment
   * Fehler bleiben hier: Alarm fuer den Betreiber, nie ein Einfluss auf den
     Hauptweg
 """
@@ -141,6 +145,12 @@ async def job_sofort(db, segment_id: str) -> Dict[str, Any]:
     s = await db[SEGMENTE].find_one({"id": segment_id}, {"_id": 0})
     if not s:
         raise ValueError("Segment nicht gefunden")
+    # Review 26.09.2026 Nr. 52: kein Job fuer ein deaktiviertes Segment / pausiertes Modell
+    if not s.get("enabled"):
+        raise ValueError("Segment inaktiv — der Suchauftrag ist pausiert, archiviert oder das Segment wurde entfernt")
+    modell = await db[MODELLE].find_one({"id": s.get("model_id")}, {"_id": 0, "enabled": 1, "status": 1})
+    if not modell or not modell.get("enabled"):
+        raise ValueError("Segment inaktiv — der Suchauftrag ist nicht aktiv")
     doc = _job_doc(s, konfig.heute_tag() + "#" + uuid.uuid4().hex[:6], konfig.jetzt_iso(), "manual")
     await db[JOBS].insert_one(dict(doc))
     doc.pop("_id", None)
@@ -157,9 +167,9 @@ async def abbrechen(db, job_id: str) -> bool:
 def lease_sekunden(buendelgroesse: Optional[int] = None) -> int:
     """Review 26.09.2026 Nr. 12: ein Buendel kann laenger dauern als die feste Lease
     (900 s) — Standardlauf plus Ersatzweg je URL einzeln, jeder bis lauf_zeitlimit_s.
-    Lease = max(MARKT_JOB_LEASE_SEKUNDEN, (1 + Buendelgroesse) x Zeitlimit + 120 s)."""
-    n = int(buendelgroesse if buendelgroesse is not None else konfig.buendel_groesse())
-    return max(konfig.job_lease_s(), (1 + max(1, n)) * konfig.lauf_zeitlimit_s() + 120)
+    Lease = max(MARKT_JOB_LEASE_SEKUNDEN, (1 + Buendelgroesse) x Zeitlimit + 120 s).
+    Rechnung in konfig.lease_sekunden (Nr. 47: auch die Budgetreservierung haengt daran)."""
+    return konfig.lease_sekunden(buendelgroesse)
 
 
 def _lease_bis(buendelgroesse: Optional[int] = None) -> str:
@@ -240,12 +250,41 @@ async def _fertig(db, job: Dict[str, Any], **felder) -> bool:
     return True
 
 
+async def _abbrechen(db, job: Dict[str, Any], grund: str, **felder) -> bool:
+    """Review 26.09.2026 Nr. 48/51: Job nach dem Lauf als 'cancelled' abschliessen (Segment/
+    Modell inzwischen pausiert/archiviert oder cancel_requested) — Kosten werden mitgeschrieben,
+    weil Apify sie berechnet hat; Zeilen wurden NICHT gespeichert."""
+    r = await db[JOBS].update_one(_meiner(job), {"$set": {"status": "cancelled", "finished_at": konfig.jetzt_iso(),
+                                                          "error": grund[:300], **felder},
+                                                "$unset": {"lease_until": ""}})
+    if r.modified_count == 0:
+        log.warning("Job %s inzwischen von anderem Worker uebernommen — Abbruch nicht geschrieben", job["id"])
+        return False
+    return True
+
+
 async def _grundlagen(db, job: Dict[str, Any]):
     seg = await db[SEGMENTE].find_one({"id": job["segment_id"]}, {"_id": 0})
     modell = await db[MODELLE].find_one({"id": (seg or {}).get("model_id")}, {"_id": 0}) if seg else None
     if not seg or not seg.get("enabled") or not modell or not modell.get("enabled"):
         return None
     return seg, modell
+
+
+async def _noch_gewollt(db, job: Dict[str, Any]) -> Optional[str]:
+    """Nach dem Actor-Lauf, vor dem Speichern (Nr. 48/51): ist das Segment/Modell inzwischen
+    deaktiviert, pausiert oder archiviert, oder hat status_setzen cancel_requested gesetzt?
+    None = weiter; sonst der Grund."""
+    j = await db[JOBS].find_one({"id": job["id"]}, {"_id": 0, "cancel_requested": 1, "cancel_grund": 1})
+    if j and j.get("cancel_requested"):
+        return str(j.get("cancel_grund") or "Abbruch angefordert (Suchauftrag pausiert/archiviert)")
+    seg = await db[SEGMENTE].find_one({"id": job["segment_id"]}, {"_id": 0, "enabled": 1, "model_id": 1})
+    if not seg or not seg.get("enabled"):
+        return "Segment während des Laufs deaktiviert"
+    modell = await db[MODELLE].find_one({"id": seg.get("model_id")}, {"_id": 0, "enabled": 1, "status": 1})
+    if not modell or not modell.get("enabled") or (modell.get("status") and modell.get("status") != "active"):
+        return f"Suchauftrag während des Laufs {(modell or {}).get('status') or 'deaktiviert'}"
+    return None
 
 
 FILTER_ALARM_MIN_ZEILEN = 3     # Nr. 2: Alarm erst ab 3 gelieferten Zeilen und > 50 % verworfen
@@ -364,6 +403,16 @@ async def verarbeiten_buendel(db, jobs_liste: List[Dict[str, Any]]) -> Dict[str,
                          gruende="; ".join(gruende[:5]))
         elif verworfen == 0 and geliefert_n:
             await _alarm_zu(db, "markt_filter_ignoriert", ref=p["seg"]["id"])
+        anteil = None if kosten_gesamt is None else round((start_usd / len(plan) + geliefert_n * row_usd) * faktor, 4)
+        # Nr. 48/51: Segment/Modell inzwischen pausiert/archiviert oder Abbruch angefordert ->
+        # Zeilen NICHT speichern, Job 'cancelled' mit Grund; Kosten trotzdem (Apify hat sie berechnet)
+        grund = await _noch_gewollt(db, p["job"])
+        if grund:
+            await _abbrechen(db, p["job"], grund, actual_rows=0, gelieferte_rows=geliefert_n, actual_cost=anteil,
+                             actor_run_id=r.get("run_id"), run_id=r.get("run_id"), actor=r.get("actor"),
+                             dauer_ms=r.get("dauer_ms"), buendel=len(plan))
+            ergebnisse.append({"status": "cancelled", "grund": grund, "sample_size": 0})
+            continue
         if not sortiert:
             listings.sort(key=lambda x: x["price_gross"])
             await _alarm(db, "markt_sortierung_unsicher", ref=p["seg"]["id"], job=p["job"]["id"])
@@ -382,7 +431,6 @@ async def verarbeiten_buendel(db, jobs_liste: List[Dict[str, Any]]) -> Dict[str,
         else:
             await db[SEGMENTE].update_one({"id": p["seg"]["id"]}, {"$set": {"leer_in_folge": 0, "last_rows": len(listings)}})
             await _alarm_zu(db, "markt_keine_treffer", ref=p["seg"]["id"])
-        anteil = None if kosten_gesamt is None else round((start_usd / len(plan) + geliefert_n * row_usd) * faktor, 4)
         await _fertig(db, p["job"], actual_rows=len(listings), gelieferte_rows=geliefert_n, verworfen_filter=verworfen,
                       actual_cost=anteil,
                       actor_run_id=r.get("run_id"), run_id=r.get("run_id"), actor=r.get("actor"),
@@ -406,8 +454,13 @@ async def verarbeiten(db, job: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def einmal(db) -> Dict[str, Any]:
-    """Ein Worker-Takt: Stale zurueck, faellige Jobs in Buendeln verarbeiten (im Vordergrund)."""
+    """Ein Worker-Takt: Stale zurueck, verfallene Budgetreservierungen freigeben (Nr. 47),
+    faellige Jobs in Buendeln verarbeiten (im Vordergrund)."""
     await stale_zurueck(db)
+    try:
+        await budget.verfallene_freigeben(db)
+    except Exception:  # noqa: BLE001
+        log.exception("Budget-Reaper gescheitert")
     erledigt = 0
     while True:
         buendel: List[Dict[str, Any]] = []

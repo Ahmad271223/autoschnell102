@@ -32,7 +32,7 @@ vi.mock("@/lib/api", () => ({
     post: vi.fn(async (url, body) => {
       netz.posts.push({ url, body });
       if (url === "/admin/market/prognose") return { data: { entwurf: body.make ? { segmente: (body.ez_years?.length || 0) * (body.km_buckets?.length || 0), ez_jahre: body.ez_years?.length || 0, km_bereiche: body.km_buckets?.length || 0,
-        rows: body.rows, crawls_per_day: body.crawls_per_day, rows_tag: 640, rows_monat: 19456, kosten_monat_usd: 14.2 } : null,
+        rows: body.rows, crawls_per_day: body.crawls_per_day, rows_tag: 640, rows_monat: 19456, kosten_monat_usd: 14.2, kosten_monat_ersatz_usd: 61.8 } : null,
         segmente: 24, rows_monat: 29184, kosten_monat_usd: netz.ueberschritten ? 900 : 22.8, budget_usd: 700, ueberschritten: netz.ueberschritten } };
       if (url === "/admin/market/testlauf") return { data: { anzahl: 2, segment: "EZ 2019 · 10–30k km", sortiert: true, alle_ez_ok: true, alle_km_ok: true, usd: 0.0085, actor: "scrapesmith~mobile-de-scraper",
         zeilen: [{ title: "BMW 320d Touring", first_registration: "03/2019", mileage_km: 22000, price_gross: 24900, power_kw: 140, fuel: "Diesel", gearbox: "Automatic", ez_ok: true, km_ok: true },
@@ -118,6 +118,8 @@ describe("Suchaufträge", () => {
     expect(prog.body.km_buckets).toHaveLength(2);
     expect(el("auftrag-prognose").textContent).toContain("8 Segmente (4 EZ × 2 km)");
     expect(el("auftrag-prognose").textContent).toContain("14.20 $");
+    // Review 26.09. Nr. 53: Obergrenze bei Ersatz-Scraper als Hinweis
+    expect(el("auftrag-prognose-ersatz").textContent).toContain("bei Ersatz-Scraper bis zu 61.80 $");
     // Testlauf
     await klick("auftrag-testlauf-knopf");
     expect(el("auftrag-testlauf").textContent).toContain("2 Fahrzeuge");

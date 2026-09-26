@@ -57,13 +57,22 @@ def _tag_minus(tag: str, tage: int) -> str:
     return (datetime.strptime(tag, "%Y-%m-%d") - timedelta(days=tage)).strftime("%Y-%m-%d")
 
 
-def datenlage(tage: int, mittlere_groesse: float) -> str:
-    """<7 Tage niedrig; 7-29 mittel; >=30 Tage und regelmaessig 15-20 Listings gut."""
+ABDECKUNG_GUT_PCT = 70.0      # Nr. 45: Anteil beobachteter Tage an den Kalendertagen seit Erstbeobachtung
+ABDECKUNG_MITTEL_PCT = 40.0
+TREND_TOLERANZ = {7: (3, 2), 30: (7, 7)}     # Nr. 43/44: 7-Tage-Basis zwischen t-10 und t-5, 30-Tage zwischen t-37 und t-23
+CHANCE_VERGLEICH_TAGE = 3                   # Nr. 46: neues_minimum/neu_guenstig nur gegen einen hoechstens 3 Tage alten Stand
+
+
+def datenlage(tage: int, mittlere_groesse: float, abdeckung_pct: float = 100.0) -> str:
+    """<7 Tage niedrig; >=30 Tage, regelmaessig 15-20 Listings UND Abdeckung >= 70 % gut;
+    sonst mittel — bei Abdeckung < 40 % (grosse Luecken, Nr. 45) wieder niedrig."""
     if tage < 7:
         return "niedrig"
-    if tage >= 30 and mittlere_groesse >= 15:
+    if tage >= 30 and mittlere_groesse >= 15 and abdeckung_pct >= ABDECKUNG_GUT_PCT:
         return "gut"
-    return "mittel"
+    if abdeckung_pct >= ABDECKUNG_MITTEL_PCT:
+        return "mittel"
+    return "niedrig"
 
 
 # ---------------------------------------------------------------- Verarbeitung
@@ -86,8 +95,14 @@ async def verarbeiten(db, segment: Dict[str, Any], listings: List[Dict[str, Any]
     lauf_schluessel = lauf_tag or tag
     seg_id = segment["id"]
     model_id = segment.get("model_id")
-    vorher_stat = await db[TAGESSTATS].find_one({"segment_id": seg_id, "date": {"$lt": tag}}, {"_id": 0},
-                                                sort=[("date", -1)])
+    vorher_stat = await db[TAGESSTATS].find_one({"segment_id": seg_id, "date": {"$lt": tag}, "sample_size": {"$gt": 0}},
+                                                {"_id": 0}, sort=[("date", -1)])
+    # Nr. 41/42: Tageswerte sind die VEREINIGUNG ueber alle Laeufe des Tages — die Listing-IDs
+    # (neu im Sample / Preis gesenkt) stehen am Tagesaggregat und werden je Lauf ergaenzt
+    heute_stat = await db[TAGESSTATS].find_one({"segment_id": seg_id, "date": tag},
+                                               {"_id": 0, "new_in_sample_ids": 1, "price_reduced_ids": 1}) or {}
+    neu_ids = set(heute_stat.get("new_in_sample_ids") or [])
+    reduziert_ids = set(heute_stat.get("price_reduced_ids") or [])
     zaehler = {"neu_gesamt": 0, "neu_im_sample": 0, "preis_gesunken": 0, "preis_gestiegen": 0, "chancen": 0}
     heute: List[Dict[str, Any]] = []
     for rang, l in enumerate(listings, 1):
@@ -104,7 +119,8 @@ async def verarbeiten(db, segment: Dict[str, Any], listings: List[Dict[str, Any]
              # Nr. 14/15: ein Inserat kann in mehreren Segmenten stehen (Automatik-Auftrag
              # und ueberlappender eigener Auftrag) — alle Segmente/Modelle merken
              "$addToSet": {"segment_ids": seg_id, **({"model_ids": model_id} if model_id else {})},
-             "$unset": {"not_seen_since": ""}},
+             # Nr. 49: wieder im Sample -> eine angefangene Entfernungs-Pruefung ist hinfaellig
+             "$unset": {"not_seen_since": "", "verification_leer_am": "", "leer_zaehler": ""}},
             upsert=True, return_document=ReturnDocument.BEFORE)
         delta_eur: Optional[float] = None
         delta_pct: Optional[float] = None
@@ -121,26 +137,42 @@ async def verarbeiten(db, segment: Dict[str, Any], listings: List[Dict[str, Any]
                      "$inc": {"price_changes": 1, "price_reductions": 1 if delta_eur < 0 else 0},
                      "$set": {"last_price_change_at": jetzt_iso}})
                 zaehler["preis_gesunken" if delta_eur < 0 else "preis_gestiegen"] += 1
+        # Nr. 41: "neu im Sample" = VOR diesem Lauf kein Snapshot in diesem Segment — weder an
+        # einem Vortag noch heute frueher (zweiter Lauf des Tages findet das Tagesdokument)
         letzter_snap = await db[SNAPSHOTS].find_one({"listing_id": l["listing_id"], "segment_id": seg_id,
-                                                     "date": {"$lt": tag}}, {"_id": 0, "rank_in_sample": 1, "date": 1},
+                                                     "date": {"$lte": tag}},
+                                                    {"_id": 0, "rank_in_sample": 1, "date": 1, "rank_yesterday": 1, "new_in_sample": 1},
                                                     sort=[("date", -1)])
         neu_im_sample = letzter_snap is None
+        if letzter_snap and letzter_snap.get("date") == tag:
+            # heute schon gesehen: Rang von gestern bleibt, "neu heute" bleibt, wie es der erste Lauf setzte
+            rang_vorher = letzter_snap.get("rank_yesterday")
+            neu_heute = bool(letzter_snap.get("new_in_sample"))
+        else:
+            rang_vorher = (letzter_snap or {}).get("rank_in_sample")
+            neu_heute = neu_im_sample
         if neu_im_sample:
             zaehler["neu_im_sample"] += 1
+        if neu_heute:
+            neu_ids.add(l["listing_id"])
+        if delta_eur is not None and delta_eur < 0:
+            reduziert_ids.add(l["listing_id"])
         await db[SNAPSHOTS].update_one(
             {"listing_id": l["listing_id"], "segment_id": seg_id, "date": tag},
             {"$set": {"observed_at": jetzt_iso, "price": preis,
                       "price_rating": (l.get("price_rating") or {}).get("rating"),
                       "mobile_modified_at": l.get("mobile_modified_at"), "mobile_renewed_at": l.get("mobile_renewed_at"),
                       "rank_in_sample": rang, "price_change_eur": delta_eur, "price_change_pct": delta_pct,
-                      "new_in_sample": neu_im_sample, "rank_yesterday": (letzter_snap or {}).get("rank_in_sample"),
-                      "model_id": model_id, "source": l["source"]},
+                      "new_in_sample": neu_heute, "rank_yesterday": rang_vorher,
+                      "model_id": model_id, "source": l["source"],
+                      # Nr. 42: einmal am Tag gesenkt bleibt fuer den Tag gesenkt
+                      **({"price_reduced_today": True} if l["listing_id"] in reduziert_ids else {})},
              # Nr. 16: jeder Lauf des Tages bleibt erhalten (Hauptfelder = letzter Lauf)
              "$push": {"laeufe": {"$each": [{"at": jetzt_iso, "price": preis, "rank_in_sample": rang, "tag": lauf_schluessel}],
                                   "$slice": -LAEUFE_MAX}}},
             upsert=True)
         heute.append({"listing": l, "preis": preis, "rang": rang, "neu_im_sample": neu_im_sample,
-                      "rang_vorher": (letzter_snap or {}).get("rank_in_sample"), "delta_eur": delta_eur,
+                      "rang_vorher": rang_vorher, "delta_eur": delta_eur,
                       "delta_pct": delta_pct, "neu_gesamt": vorher is None,
                       "first_price": (vorher or {}).get("first_price", preis)})
     # nicht mehr im Sample dieses Segments: KEIN Verkauf. Nr. 15: NUR Listings, die heute
@@ -151,12 +183,14 @@ async def verarbeiten(db, segment: Dict[str, Any], listings: List[Dict[str, Any]
          "active_state": "seen", "last_seen_tag": {"$lt": tag}},
         {"$set": {"active_state": "not_seen_in_sample", "not_seen_since": jetzt_iso, "updated_at": jetzt_iso}})
     # Tagesaggregat (Nr. 17: jeder Lauf des Tages in 'laeufe', Hauptfelder = letzter Lauf)
+    # Nr. 54: auch ein Lauf mit 0 Treffern schreibt das Tagesaggregat (sample_size 0, ohne Preise) —
+    # der Tag zaehlt als beobachtet. Nr. 41/42: Tageswerte = Vereinigung ueber alle Laeufe des Tages.
     kz = kennzahlen([h["preis"] for h in heute])
-    reduktionen = sum(1 for h in heute if (h["delta_eur"] or 0) < 0)
     await db[TAGESSTATS].update_one(
         {"segment_id": seg_id, "date": tag},
-        {"$set": {**kz, "model_id": model_id, "observed_at": jetzt_iso, "new_in_sample_today": zaehler["neu_im_sample"],
-                  "price_reductions_today": reduktionen, "sorted_confirmed": bool(sortiert_bestaetigt),
+        {"$set": {**kz, "model_id": model_id, "observed_at": jetzt_iso, "new_in_sample_today": len(neu_ids),
+                  "price_reductions_today": len(reduziert_ids), "sorted_confirmed": bool(sortiert_bestaetigt),
+                  "new_in_sample_ids": sorted(neu_ids), "price_reduced_ids": sorted(reduziert_ids),
                   "listing_ids": [h["listing"]["listing_id"] for h in heute]},
          "$push": {"laeufe": {"$each": [{"at": jetzt_iso, "tag": lauf_schluessel, "sample_size": kz["sample_size"],
                                          "min": kz["min_price"], "median": kz["median_price"], "avg": kz["avg_price"],
@@ -175,9 +209,20 @@ async def verarbeiten(db, segment: Dict[str, Any], listings: List[Dict[str, Any]
 
 # ---------------------------------------------------------------- Segmentstatistik
 async def _tagesstat_vor(db, seg_id: str, tag: str, tage: int) -> Optional[Dict[str, Any]]:
+    """Vergleichsbasis fuer den Trend (Nr. 43/44): der Datensatz mit Treffern, der dem Zieltag
+    (tag - tage) am naechsten liegt — aber nur innerhalb der Toleranz (7 Tage: t-10..t-5,
+    30 Tage: t-37..t-23). Liegt dort keiner, gibt es keinen Trend (None), statt einen
+    25 Tage alten Stand als "7-Tage-Trend" auszugeben."""
+    vor, nach = TREND_TOLERANZ.get(tage, (max(1, tage // 3), max(1, tage // 3)))
     ziel = _tag_minus(tag, tage)
-    return await db[TAGESSTATS].find_one({"segment_id": seg_id, "date": {"$lte": ziel}, "sample_size": {"$gt": 0}},
-                                         {"_id": 0}, sort=[("date", -1)])
+    von, bis = _tag_minus(tag, tage + vor), _tag_minus(tag, tage - nach)
+    docs = await db[TAGESSTATS].find({"segment_id": seg_id, "date": {"$gte": von, "$lte": bis}, "sample_size": {"$gt": 0}},
+                                     {"_id": 0}).to_list(100)
+    if not docs:
+        return None
+    ziel_d = datetime.strptime(ziel, "%Y-%m-%d")
+    docs.sort(key=lambda d: (abs((datetime.strptime(d["date"], "%Y-%m-%d") - ziel_d).days), d["date"]))
+    return docs[0]
 
 
 def _trend(aktuell: Optional[float], alt: Optional[float]) -> Tuple[Optional[float], Optional[float]]:
@@ -187,31 +232,71 @@ def _trend(aktuell: Optional[float], alt: Optional[float]) -> Tuple[Optional[flo
     return d, round(d / float(alt) * 100, 2)
 
 
+async def _bestandstrend(db, seg_id: str, heute: Dict[str, Any], alt: Optional[Dict[str, Any]]) -> Tuple[Optional[float], Optional[float], int]:
+    """Nr. 55: mittlere Preisaenderung der Listings, die an BEIDEN Vergleichstagen im Sample
+    waren (Preise aus den Tages-Snapshots) — unabhaengig von der Sample-Fluktuation.
+    (eur, pct, anzahl_gemeinsam); ohne gemeinsame Autos (None, None, 0)."""
+    if not alt:
+        return None, None, 0
+    gemeinsam = set(heute.get("listing_ids") or []) & set(alt.get("listing_ids") or [])
+    if not gemeinsam:
+        return None, None, 0
+    preise: Dict[str, Dict[str, float]] = {heute["date"]: {}, alt["date"]: {}}
+    async for s in db[SNAPSHOTS].find({"segment_id": seg_id, "date": {"$in": [heute["date"], alt["date"]]},
+                                       "listing_id": {"$in": sorted(gemeinsam)}},
+                                      {"_id": 0, "listing_id": 1, "date": 1, "price": 1}):
+        if s.get("price") is not None:
+            preise[s["date"]][s["listing_id"]] = float(s["price"])
+    paare = [(preise[heute["date"]][lid], preise[alt["date"]][lid]) for lid in gemeinsam
+             if lid in preise[heute["date"]] and lid in preise[alt["date"]]]
+    if not paare:
+        return None, None, 0
+    delta = sum(h - a for h, a in paare)
+    alt_summe = sum(a for _, a in paare)
+    return round(delta / len(paare), 2), (round(delta / alt_summe * 100, 2) if alt_summe else None), len(paare)
+
+
 async def segmentstatistik(db, seg_id: str, tag: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """Aktuellen Stand + Trends aus den Tagesaggregaten (nie aus Snapshots) neu rechnen."""
+    """Aktuellen Stand + Trends aus den Tagesaggregaten (nie aus Snapshots — Ausnahme Nr. 55:
+    der Bestandstrend braucht die Preise gleicher Autos) neu rechnen."""
     heute = await db[TAGESSTATS].find_one({"segment_id": seg_id, **({"date": {"$lte": tag}} if tag else {})},
                                           {"_id": 0}, sort=[("date", -1)])
     if not heute:
         return None
     t = heute["date"]
-    tage_docs = await db[TAGESSTATS].find({"segment_id": seg_id, "date": {"$lte": t}, "sample_size": {"$gt": 0}},
+    # Nr. 54: beobachtet = jeder Tag mit erfolgreichem Lauf, auch mit 0 Treffern; getrennt: Tage mit Treffern
+    alle_docs = await db[TAGESSTATS].find({"segment_id": seg_id, "date": {"$lte": t}},
                                           {"_id": 0, "date": 1, "sample_size": 1, "new_in_sample_today": 1,
                                            "price_reductions_today": 1}).to_list(2000)
+    tage_docs = [d for d in alle_docs if int(d.get("sample_size") or 0) > 0]
     vor7, vor30 = await _tagesstat_vor(db, seg_id, t, 7), await _tagesstat_vor(db, seg_id, t, 30)
     t7_eur, t7_pct = _trend(heute.get("median_price"), (vor7 or {}).get("median_price"))
     t30_eur, t30_pct = _trend(heute.get("median_price"), (vor30 or {}).get("median_price"))
-    letzte7 = [d for d in tage_docs if d["date"] > _tag_minus(t, 7)]
-    mittel = (sum(d["sample_size"] for d in tage_docs) / len(tage_docs)) if tage_docs else 0
+    b7_eur, b7_pct, b7_n = await _bestandstrend(db, seg_id, heute, vor7)
+    b30_eur, b30_pct, b30_n = await _bestandstrend(db, seg_id, heute, vor30)
+    letzte7 = [d for d in alle_docs if d["date"] > _tag_minus(t, 7)]
+    mittel = (sum(int(d.get("sample_size") or 0) for d in alle_docs) / len(alle_docs)) if alle_docs else 0
+    # Nr. 45: Abdeckung = beobachtete Tage / Kalendertage seit Erstbeobachtung
+    erster = min(d["date"] for d in alle_docs) if alle_docs else t
+    kalendertage = max(1, (datetime.strptime(t, "%Y-%m-%d") - datetime.strptime(erster, "%Y-%m-%d")).days + 1)
+    abdeckung = round(min(100.0, len(alle_docs) / kalendertage * 100), 1)
     stat = {"segment_id": seg_id, "date": t, "model_id": heute.get("model_id"),
             **{k: heute.get(k) for k in ("sample_size", "min_price", "median_price", "avg_price", "max_price",
                                          "p25_price", "p75_price")},
             "median_top20_price": heute.get("median_price"),
             "trend_7d_eur": t7_eur, "trend_7d_pct": t7_pct, "trend_30d_eur": t30_eur, "trend_30d_pct": t30_pct,
+            # Nr. 43/44: welcher Tag die Basis war (None = kein Datensatz in der Toleranz -> kein Trend)
+            "trend_7d_basis_date": (vor7 or {}).get("date"), "trend_30d_basis_date": (vor30 or {}).get("date"),
+            # Nr. 55: Bestandstrend (gleiche Autos an beiden Tagen)
+            "trend_7d_bestand_eur": b7_eur, "trend_7d_bestand_pct": b7_pct, "anzahl_gemeinsam": b7_n,
+            "trend_30d_bestand_eur": b30_eur, "trend_30d_bestand_pct": b30_pct, "anzahl_gemeinsam_30d": b30_n,
             "new_in_sample_today": heute.get("new_in_sample_today"), "price_reductions_today": heute.get("price_reductions_today"),
             "new_listings_7d": sum(int(d.get("new_in_sample_today") or 0) for d in letzte7),
             "price_reductions_7d": sum(int(d.get("price_reductions_today") or 0) for d in letzte7),
-            "beobachtete_tage": len(tage_docs), "mittlere_sample_groesse": round(mittel, 1),
-            "datenlage": datenlage(len(tage_docs), mittel),
+            "beobachtete_tage": len(alle_docs), "tage_mit_treffern": len(tage_docs),
+            "erste_beobachtung": erster, "kalendertage": kalendertage, "abdeckung_pct": abdeckung,
+            "mittlere_sample_groesse": round(mittel, 1),
+            "datenlage": datenlage(len(alle_docs), mittel, abdeckung),
             # Nr. 3: letzter Lauf nicht sicher preis-aufsteigend -> Lesewege zeigen es an
             "sortierung_unsicher": heute.get("sorted_confirmed") is False,
             "updated_at": konfig.jetzt_iso()}
@@ -227,10 +312,14 @@ async def chancen_ableiten(db, segment: Dict[str, Any], heute: List[Dict[str, An
     n = 0
     top_n = konfig.chance_top_n()
     red_pct, red_eur = konfig.chance_reduktion_pct(), konfig.chance_reduktion_eur()
+    # Nr. 46: "unter bisherigem Minimum/p25" nur gegen einen hoechstens 3 Tage alten Stand —
+    # ein Wochen alter Vergleichstag macht jedes neue Auto zur Schein-Chance
+    vergleichbar = bool(vorher_stat and vorher_stat.get("sample_size")
+                        and str(vorher_stat.get("date") or "") >= _tag_minus(tag, CHANCE_VERGLEICH_TAGE))
     for h in heute:
         l, preis = h["listing"], h["preis"]
         treffer: List[Tuple[str, Optional[float], str]] = []
-        if h["neu_im_sample"] and vorher_stat and vorher_stat.get("sample_size"):
+        if h["neu_im_sample"] and vergleichbar:
             if vorher_stat.get("min_price") is not None and preis < float(vorher_stat["min_price"]):
                 treffer.append(("neues_minimum", float(vorher_stat["min_price"]), "unter dem bisher günstigsten Angebot"))
             elif vorher_stat.get("p25_price") is not None and preis < float(vorher_stat["p25_price"]):

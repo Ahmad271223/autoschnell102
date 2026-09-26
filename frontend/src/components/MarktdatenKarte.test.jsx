@@ -21,6 +21,7 @@ const DATEN = {
   sample_size: 20, min_price: 18900, median_top20_price: 20250, avg_top20_price: 20410, max_top20_price: 21700,
   p25_price: 19600, p75_price: 21000, trend_7d_eur: -300, trend_7d_pct: -1.5, trend_30d_eur: -850, trend_30d_pct: -4.0,
   datenstand: "2026-10-01T05:10:00+00:00", datum: "2026-10-01", datenlage: "gut", beobachtete_tage: 31,
+  trend_30d_bestand_eur: -640, trend_30d_bestand_pct: -3.2, anzahl_gemeinsam_30d: 9, trend_7d_bestand_eur: null, anzahl_gemeinsam: 0,
   hinweis: "kein Marktmedian", preis_vs_median_eur: -850, preis_vs_median_pct: -4.2, unter_top20_min: false,
   listing: { listing_id: "449438530", first_seen_at: "2026-09-13T04:00:00+00:00", first_price: 19900, current_price: 19400,
              change_since_first_eur: -500, price_reductions: 1, price_changes: 1, rank_today: 4, active_state: "seen" },
@@ -50,6 +51,9 @@ describe("MarktdatenKarte", () => {
     expect(k.textContent).toContain("20.250 €");
     expect(k.textContent).toContain("18.900 €–21.700 €");
     expect(el("marktdaten-trend").textContent).toBe("−850 € (-4 %)");
+    // Review 26.09. Nr. 55: Bestandstrend (gleiche Autos) als zweite Zeile; 7 Tage ohne gemeinsame Autos bleibt weg
+    expect(el("marktdaten-bestand").textContent).toContain("30 Tage, gleiche Autos: −640 € (-3,2 %) · 9 Autos");
+    expect(el("marktdaten-bestand").textContent).not.toContain("7 Tage");
     expect(el("marktdaten-dieses").textContent).toContain("19.400 €");
     expect(el("marktdaten-verlauf").textContent).toContain("19.900 € → 19.400 €");
     expect(el("marktdaten-verlauf").textContent).toContain("1 Reduzierung");

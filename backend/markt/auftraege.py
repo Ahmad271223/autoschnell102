@@ -135,9 +135,15 @@ def prognose_modell(m: Dict[str, Any]) -> Dict[str, Any]:
     rows_tag = seg * rows * k
     laeufe_tag = math.ceil(seg * k / max(1, konfig.buendel_groesse())) if seg else 0
     kosten_tag = konfig.kosten_buendel_usd(konfig.actor(), laeufe_tag, rows_tag)
+    # Review 26.09.2026 Nr. 53: Obergrenze, wenn ALLES ueber den Ersatz-Scraper liefe
+    # (der laeuft je URL einzeln: ein Start je Segment-Abruf, teurere Zeilen)
+    ersatz = konfig.actor_ersatz()
+    kosten_tag_ersatz = konfig.kosten_buendel_usd(ersatz, seg * k, rows_tag) if ersatz and seg else 0.0
     return {"segmente": seg, "ez_jahre": len(ez), "km_bereiche": len(km), "rows": rows, "crawls_per_day": k,
             "rows_tag": rows_tag, "rows_monat": round(rows_tag * 30.4), "laeufe_tag": laeufe_tag,
-            "kosten_tag_usd": round(kosten_tag, 2), "kosten_monat_usd": round(kosten_tag * 30.4, 2)}
+            "kosten_tag_usd": round(kosten_tag, 2), "kosten_monat_usd": round(kosten_tag * 30.4, 2),
+            "kosten_tag_ersatz_usd": round(kosten_tag_ersatz, 2), "kosten_monat_ersatz_usd": round(kosten_tag_ersatz * 30.4, 2),
+            "ersatz_actor": ersatz or None}
 
 
 async def prognose(db, entwurf: Optional[Dict[str, Any]] = None, *, ohne_id: Optional[str] = None) -> Dict[str, Any]:
@@ -151,13 +157,17 @@ async def prognose(db, entwurf: Optional[Dict[str, Any]] = None, *, ohne_id: Opt
     teile = [prognose_modell(m) for m in aktive]
     e = prognose_modell(entwurf) if entwurf and entwurf.get("status", "active") == "active" else None
     alle = teile + ([e] if e else [])
-    summe = {k: sum(t[k] for t in alle) for k in ("segmente", "rows_tag", "rows_monat", "laeufe_tag", "kosten_tag_usd", "kosten_monat_usd")}
+    summe = {k: sum(t[k] for t in alle) for k in ("segmente", "rows_tag", "rows_monat", "laeufe_tag", "kosten_tag_usd",
+                                                   "kosten_monat_usd", "kosten_tag_ersatz_usd", "kosten_monat_ersatz_usd")}
     b = await budget.dokument(db)
     budget_usd = float(b.get("budget_usd") or 0)
     return {"aktive_modelle": len(aktive) + (1 if e else 0), **{k: round(v, 2) for k, v in summe.items()},
             "entwurf": e, "budget_usd": budget_usd, "verbraucht_usd": round(float(b.get("used_usd") or 0), 2),
             "verbleibend_usd": round(float(b.get("frei_usd") or 0), 2),
             "ueberschritten": budget_usd > 0 and summe["kosten_monat_usd"] > budget_usd,
+            # Nr. 53: Ersatz-Scraper wuerde das Budget sprengen (nur Hinweis, kein Sperrgrund)
+            "ersatz_ueberschritten": budget_usd > 0 and summe["kosten_monat_ersatz_usd"] > budget_usd,
+            "ersatz_actor": konfig.actor_ersatz() or None,
             "preise": {"start_usd": konfig.preise_je_actor(konfig.actor())[0], "row_usd": konfig.preise_je_actor(konfig.actor())[1],
                        "buendel": konfig.buendel_groesse(), "actor": konfig.actor()}}
 
@@ -273,8 +283,14 @@ async def status_setzen(db, model_id: str, status: str) -> Dict[str, Any]:
     await segmente.synchronisieren(db)
     if status != "active":
         # wartende Jobs des Modells abbrechen — nichts loeschen, Historie bleibt
+        grund = f"Suchauftrag {'pausiert' if status == 'paused' else 'archiviert'}"
         await db[JOBS].update_many({"model_id": model_id, "status": "queued"},
-                                   {"$set": {"status": "cancelled", "finished_at": konfig.jetzt_iso()}})
+                                   {"$set": {"status": "cancelled", "error": grund, "finished_at": konfig.jetzt_iso()}})
+        # Review 26.09.2026 Nr. 48/51: laufende Jobs bekommen cancel_requested — der Worker
+        # prueft das Flag nach dem Actor-Lauf und speichert dann keine Zeilen mehr
+        await db[JOBS].update_many({"model_id": model_id, "status": "running"},
+                                   {"$set": {"cancel_requested": True, "cancel_grund": grund,
+                                             "cancel_requested_at": konfig.jetzt_iso()}})
     return await db[MODELLE].find_one({"id": model_id}, {"_id": 0})
 
 

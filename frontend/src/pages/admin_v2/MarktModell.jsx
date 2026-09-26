@@ -8,7 +8,7 @@ import {
 import { api, errMsg } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { Card, Badge, Button, Spinner, EmptyState, fmtDate } from "./_ui";
-import { BEREICHE, DATENLAGE, datumKurz, datumZeit, eur, pct, trendFarbe, trendText, zustandText } from "@/lib/markt";
+import { BEREICHE, DATENLAGE, bestandText, datumKurz, datumZeit, eur, pct, trendFarbe, trendText, zustandText } from "@/lib/markt";
 
 const GETRIEBE_TEXT = { AUTOMATIC_GEAR: "Automatik", MANUAL_GEAR: "Schaltgetriebe", SEMIAUTOMATIC_GEAR: "Halbautomatik" };
 
@@ -190,8 +190,10 @@ function SegmentAnalyse({ segment, bereich, onBereich, superAdmin }) {
             <K label="Durchschnitt Top-20" wert={eur(st.avg_price)} />
             <K label="Teuerstes Top-20" wert={eur(st.max_price)} />
             <K label="p25 / p75" wert={`${eur(st.p25_price)} / ${eur(st.p75_price)}`} />
-            <K label="7-Tage-Trend Median" wert={trendText(st.trend_7d_eur, st.trend_7d_pct)} farbe={trendFarbe(st.trend_7d_eur)} />
-            <K label="30-Tage-Trend Median" wert={trendText(st.trend_30d_eur, st.trend_30d_pct)} farbe={trendFarbe(st.trend_30d_eur)} />
+            <K label="7-Tage-Trend Median" wert={trendText(st.trend_7d_eur, st.trend_7d_pct)} farbe={trendFarbe(st.trend_7d_eur)}
+               unter={bestandText(st.trend_7d_bestand_eur, st.trend_7d_bestand_pct, st.anzahl_gemeinsam)} testid="markt-trend-7d" />
+            <K label="30-Tage-Trend Median" wert={trendText(st.trend_30d_eur, st.trend_30d_pct)} farbe={trendFarbe(st.trend_30d_eur)}
+               unter={bestandText(st.trend_30d_bestand_eur, st.trend_30d_bestand_pct, st.anzahl_gemeinsam_30d)} testid="markt-trend-30d" />
             <K label="Neue Listings 7 Tage" wert={String(st.new_listings_7d ?? 0)} />
             <K label="Preisreduzierungen 7 Tage" wert={String(st.price_reductions_7d ?? 0)} />
             <K label="Beobachtete Tage" wert={String(st.beobachtete_tage ?? 0)} />
@@ -201,7 +203,8 @@ function SegmentAnalyse({ segment, bereich, onBereich, superAdmin }) {
         {zusammen.qualitaet && (
           <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px]" style={{ color: "var(--text-secondary)" }} data-testid="markt-qualitaet">
             <span>Daten seit {zusammen.qualitaet.daten_seit || "—"}</span>
-            <span>{zusammen.qualitaet.tage_beobachtet} Tage beobachtet</span>
+            <span>{zusammen.qualitaet.tage_beobachtet} Tage beobachtet{zusammen.qualitaet.tage_mit_treffern != null && zusammen.qualitaet.tage_mit_treffern !== zusammen.qualitaet.tage_beobachtet ? ` (${zusammen.qualitaet.tage_mit_treffern} mit Treffern)` : ""}</span>
+            {zusammen.qualitaet.abdeckung_pct != null && <span>Abdeckung {pct(zusammen.qualitaet.abdeckung_pct, false)} der Kalendertage</span>}
             <span>{zusammen.qualitaet.erfolgreiche_crawls} von {zusammen.qualitaet.erwartete_crawls} erwarteten Crawls erfolgreich</span>
             <span>aktuelle Sample-Größe {zusammen.qualitaet.sample_size}</span>
             <span style={{ color: dl.farbe }}>{dl.text}</span>
@@ -320,11 +323,12 @@ function SegmentAnalyse({ segment, bereich, onBereich, superAdmin }) {
   );
 }
 
-function K({ label, wert, farbe, gross }) {
+function K({ label, wert, farbe, gross, unter, testid }) {
   return (
-    <div className="rounded-lg p-2" style={{ background: "var(--wa-06)" }}>
+    <div className="rounded-lg p-2" style={{ background: "var(--wa-06)" }} data-testid={testid}>
       <div className="text-[10px] text-zinc-500">{label}</div>
       <div className={`${gross ? "text-lg" : "text-[13px]"} font-semibold`} style={{ color: farbe || "#fff" }}>{wert}</div>
+      {unter && <div className="text-[10px] text-zinc-500">{unter}</div>}
     </div>
   );
 }

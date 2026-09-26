@@ -255,6 +255,7 @@ function AuftragFormular({ katalog, formular, superAdmin, onClose, onGespeichert
         {prognose?.fehler ? <span className="text-amber-300">{prognose.fehler}</span> : e ? (
           <>
             <b className="text-white">Prognose:</b> {e.segmente} Segmente ({e.ez_jahre} EZ × {e.km_bereiche} km) · Zeilen/Tag {e.rows_tag.toLocaleString("de-DE")} ({e.segmente} × {e.rows} × {e.crawls_per_day}) · Zeilen/30 Tage {e.rows_monat.toLocaleString("de-DE")} · geschätzte Monatskosten <b className="text-white">{Number(e.kosten_monat_usd).toFixed(2)} $</b>
+            {e.kosten_monat_ersatz_usd > 0 && <span className="text-amber-300" data-testid="auftrag-prognose-ersatz"> · bei Ersatz-Scraper bis zu {Number(e.kosten_monat_ersatz_usd).toFixed(2)} $</span>}
             <div className="mt-1 text-zinc-400">Alle aktiven Marktanalysen zusammen: {prognose.segmente} Segmente · {(prognose.rows_monat || 0).toLocaleString("de-DE")} Zeilen/Monat · <span className={prognose.ueberschritten ? "text-red-300 font-semibold" : ""}>{Number(prognose.kosten_monat_usd).toFixed(2)} $ von {Number(prognose.budget_usd).toFixed(0)} $ Budget</span>{prognose.ueberschritten ? " — würde das Monatsbudget überschreiten" : ""}</div>
           </>
         ) : <span className="text-zinc-500">Marke, Modell, EZ-Jahre und km-Bereiche wählen — die Prognose rechnet sofort.</span>}

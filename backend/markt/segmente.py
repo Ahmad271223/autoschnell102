@@ -197,9 +197,18 @@ async def synchronisieren(db) -> Dict[str, int]:
                     upsert=True)
                 if r.upserted_id is not None:
                     neu += 1
+    weg = [s["id"] async for s in db[konfig.SEGMENTE].find({"id": {"$nin": list(gueltig)}, "enabled": True}, {"_id": 0, "id": 1})]
     r = await db[konfig.SEGMENTE].update_many({"id": {"$nin": list(gueltig)}, "enabled": True},
                                               {"$set": {"enabled": False, "updated_at": konfig.jetzt_iso()}})
-    return {"segmente": len(gueltig), "neu": neu, "deaktiviert": r.modified_count}
+    # Review 26.09.2026 Nr. 56: wartende Jobs der deaktivierten Segmente stornieren — sonst
+    # crawlt der Worker Segmente, die es im Suchauftrag nicht mehr gibt (Kosten ohne Nutzen)
+    storniert = 0
+    if weg:
+        j = await db[konfig.JOBS].update_many({"segment_id": {"$in": weg}, "status": "queued"},
+                                              {"$set": {"status": "cancelled", "error": "Segment deaktiviert",
+                                                        "finished_at": konfig.jetzt_iso()}})
+        storniert = j.modified_count
+    return {"segmente": len(gueltig), "neu": neu, "deaktiviert": r.modified_count, "jobs_storniert": storniert}
 
 
 def bucket_fuer_km(buckets: List[Dict[str, Any]], km: Optional[int]) -> Optional[Dict[str, Any]]:

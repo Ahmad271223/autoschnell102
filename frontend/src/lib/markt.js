@@ -21,13 +21,20 @@ export function trendText(eurWert, pctWert) {
   return pctWert === null || pctWert === undefined ? z : `${z} (${pct(pctWert)})`;
 }
 
+/** Review 26.09.2026 Nr. 55 — Bestandstrend: "gleiche Autos: −210 € (−1,1 %) · 14 Autos";
+ *  ohne gemeinsame Autos an beiden Vergleichstagen "gleiche Autos: —". */
+export function bestandText(eurWert, pctWert, anzahl) {
+  if (eurWert === null || eurWert === undefined || !anzahl) return "gleiche Autos: —";
+  return `gleiche Autos: ${trendText(eurWert, pctWert)} · ${anzahl} ${anzahl === 1 ? "Auto" : "Autos"}`;
+}
+
 export function trendFarbe(v) {
   if (v === null || v === undefined) return "var(--text-dim)";
   return Number(v) < 0 ? "var(--st-gruen)" : Number(v) > 0 ? "var(--st-rot)" : "var(--text-secondary)";
 }
 
 export const DATENLAGE = {
-  niedrig: { text: "Datenlage niedrig (unter 7 Tage)", farbe: "var(--st-rot)" },
+  niedrig: { text: "Datenlage niedrig (unter 7 Tage oder Lücken)", farbe: "var(--st-rot)" },
   mittel: { text: "Datenlage mittel", farbe: "var(--st-amber)" },
   gut: { text: "Datenlage gut", farbe: "var(--st-gruen)" },
   unsicher: { text: "Datenlage unsicher (Sortierung)", farbe: "var(--st-amber)" },
@@ -50,7 +57,7 @@ export function chanceTypText(typ) {
 export const ZUSTAND = {
   seen: "im Sample gesehen",
   not_seen_in_sample: "nicht mehr unter den 20 günstigsten (kein Verkauf!)",
-  verification_pending: "wird nachgeprüft",
+  verification_pending: "wird nachgeprüft (zweite Prüfung am Folgetag)",
   confirmed_removed: "Inserat nicht mehr online",
 };
 

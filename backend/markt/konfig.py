@@ -204,6 +204,21 @@ def job_lease_s() -> int:
     return zahl_env("MARKT_JOB_LEASE_SEKUNDEN", 900, unten=60, oben=7200)
 
 
+def lease_sekunden(buendelgroesse: int | None = None) -> int:
+    """Review 26.09.2026 Nr. 12: ein Buendel kann laenger dauern als die feste Lease
+    (900 s) — Standardlauf plus Ersatzweg je URL einzeln, jeder bis lauf_zeitlimit_s.
+    Lease = max(MARKT_JOB_LEASE_SEKUNDEN, (1 + Buendelgroesse) x Zeitlimit + 120 s).
+    Liegt hier (nicht in jobs), weil auch budget.py den Wert braucht (Nr. 47)."""
+    n = int(buendelgroesse if buendelgroesse is not None else buendel_groesse())
+    return max(job_lease_s(), (1 + max(1, n)) * lauf_zeitlimit_s() + 120)
+
+
+def reservierung_ablauf_s(buendelgroesse: int | None = None) -> int:
+    """Nr. 47: eine Budgetreservierung verfaellt, wenn der Worker zwischen Reservieren und
+    Abrechnen stirbt — Ablauf = Lease-Dauer + 60 s (keine eigene Umgebungsvariable)."""
+    return lease_sekunden(buendelgroesse) + 60
+
+
 def entfernung_pruefen() -> bool:
     return schalter_env("MARKT_ENTFERNUNG_PRUEFEN", True)
 

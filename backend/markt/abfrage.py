@@ -153,8 +153,15 @@ async def karte(db, v: Dict[str, Any], listing_id: Optional[str] = None) -> Opti
         "max_top20_price": stat.get("max_price"), "p25_price": stat.get("p25_price"), "p75_price": stat.get("p75_price"),
         "trend_7d_eur": stat.get("trend_7d_eur"), "trend_7d_pct": stat.get("trend_7d_pct"),
         "trend_30d_eur": stat.get("trend_30d_eur"), "trend_30d_pct": stat.get("trend_30d_pct"),
+        # Nr. 43/44: Basis-Tage der Trends (None = kein Trend); Nr. 55: Bestandstrend gleicher Autos
+        "trend_7d_basis_date": stat.get("trend_7d_basis_date"), "trend_30d_basis_date": stat.get("trend_30d_basis_date"),
+        "trend_7d_bestand_eur": stat.get("trend_7d_bestand_eur"), "trend_7d_bestand_pct": stat.get("trend_7d_bestand_pct"),
+        "anzahl_gemeinsam": stat.get("anzahl_gemeinsam") or 0,
+        "trend_30d_bestand_eur": stat.get("trend_30d_bestand_eur"), "trend_30d_bestand_pct": stat.get("trend_30d_bestand_pct"),
+        "anzahl_gemeinsam_30d": stat.get("anzahl_gemeinsam_30d") or 0,
         "datenstand": stat.get("updated_at"), "datum": stat.get("date"), "datenlage": stat.get("datenlage"),
-        "beobachtete_tage": stat.get("beobachtete_tage"), "hinweis": HINWEIS, "listing": None,
+        "beobachtete_tage": stat.get("beobachtete_tage"), "abdeckung_pct": stat.get("abdeckung_pct"),
+        "hinweis": HINWEIS, "listing": None,
         # Review 26.09.2026 Nr. 3: letzter Abruf nicht sicher preis-aufsteigend -> Karte sagt es
         "sortierung_unsicher": bool(stat.get("sortierung_unsicher")),
     }
@@ -265,13 +272,17 @@ async def segment_zusammenfassung(db, segment_id: str) -> Optional[Dict[str, Any
     m = await db[MODELLE].find_one({"id": s.get("model_id")}, {"_id": 0})
     letzter_job = await db[JOBS].find_one({"segment_id": segment_id}, {"_id": 0, "ergebnis": 0}, sort=[("created_at", -1)])
     # Datenqualitaet (Auftrag v3): seit wann, Tage, erfolgreiche vs. erwartete Crawls
-    erster = await db[TAGESSTATS].find_one({"segment_id": segment_id, "sample_size": {"$gt": 0}}, {"_id": 0, "date": 1}, sort=[("date", 1)])
+    # Nr. 54: Erstbeobachtung = erster erfolgreicher Lauf, auch mit 0 Treffern
+    erster = await db[TAGESSTATS].find_one({"segment_id": segment_id}, {"_id": 0, "date": 1}, sort=[("date", 1)])
     erfolgreich = await db[JOBS].count_documents({"segment_id": segment_id, "status": "completed"})
     k = int(s.get("crawls_per_day") or 1)
     tage_seit = 0
     if erster:
         tage_seit = max(1, (datetime.strptime(konfig.heute_tag(), "%Y-%m-%d") - datetime.strptime(erster["date"], "%Y-%m-%d")).days + 1)
     qualitaet = {"daten_seit": (erster or {}).get("date"), "tage_beobachtet": (st or {}).get("beobachtete_tage") or 0,
+                 # Nr. 54/45: Tage mit Treffern getrennt; Abdeckung der Kalendertage seit Erstbeobachtung
+                 "tage_mit_treffern": (st or {}).get("tage_mit_treffern") or 0,
+                 "abdeckung_pct": (st or {}).get("abdeckung_pct"),
                  "erfolgreiche_crawls": erfolgreich, "erwartete_crawls": tage_seit * k if erster else 0,
                  "sample_size": (st or {}).get("sample_size") or 0, "datenlage": (st or {}).get("datenlage") or "keine",
                  "crawls_per_day": k}
@@ -363,7 +374,7 @@ async def listing_verlauf(db, listing_id: str) -> Optional[Dict[str, Any]]:
 ZUSTAND_TEXT = {
     "seen": "zuletzt im Sample gesehen",
     "not_seen_in_sample": "zuletzt nicht mehr unter den 20 günstigsten — das heißt NICHT verkauft (kann teurer geworden oder verdrängt worden sein)",
-    "verification_pending": "wird gerade einzeln nachgeprüft",
+    "verification_pending": "wird einzeln nachgeprüft — eine leere Antwort reicht nicht, erst eine zweite Prüfung am Folgetag bestätigt die Entfernung",
     "confirmed_removed": "Inserat nicht mehr online (kein Beleg für einen Verkauf)",
 }
 

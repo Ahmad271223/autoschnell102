@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
-const netz = vi.hoisted(() => ({ posts: [], gets: [], aktiv: true }));
+const netz = vi.hoisted(() => ({ posts: [], gets: [], aktiv: true, stats: null, crawlFehler: null }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() } }));
 vi.mock("recharts", () => {
   const Leer = ({ children }) => h("div", { "data-chart": "1" }, children);
@@ -24,7 +24,10 @@ const SEG = { id: "bmw-320d:55001-85000:2019-2021", model_id: "bmw-320d", label:
 const SEG2 = { ...SEG, id: "bmw-320d:55001-85000:2016-2018", year_from: 2016, year_to: 2018, ez_label: "EZ 2016–2018", stats: null };
 const STATS = { sample_size: 20, min_price: 18900, median_price: 20250, avg_price: 20410, max_price: 21700, p25_price: 19600,
                 p75_price: 21000, trend_7d_eur: -420, trend_7d_pct: -2.1, trend_30d_eur: -850, trend_30d_pct: -4.0,
-                new_listings_7d: 14, price_reductions_7d: 9, beobachtete_tage: 31, datenlage: "gut", updated_at: "2026-10-01T05:10:00+00:00" };
+                new_listings_7d: 14, price_reductions_7d: 9, beobachtete_tage: 31, datenlage: "gut", updated_at: "2026-10-01T05:10:00+00:00",
+                // Review 26.09. Nr. 55: Bestandstrend (gleiche Autos); Nr. 43/44: 30-Tage-Basis fehlt -> null
+                trend_7d_bestand_eur: -210, trend_7d_bestand_pct: -1.1, anzahl_gemeinsam: 14,
+                trend_30d_bestand_eur: null, trend_30d_bestand_pct: null, anzahl_gemeinsam_30d: 0 };
 vi.mock("@/lib/api", () => ({
   errMsg: (e, s) => e?.message || s,
   api: {
@@ -49,7 +52,8 @@ vi.mock("@/lib/api", () => ({
       if (url.includes("/listings/449438530/history")) return { data: { listing: { title: "BMW 320d Touring", active_state: "seen", mileage_km: 78000,
         first_registration: "03/2020", postal_code: "30159", city: "Hannover", price_history: [{ at: "2026-09-13T04:00:00Z", price: 19400 }, { at: "2026-10-01T04:00:00Z", price: 18900 }] },
         snapshots: [{ date: "2026-09-13", segment_id: SEG.id, price: 19400, rank_in_sample: 5 }], hinweis_zustand: "" } };
-      if (url.endsWith("/summary")) return { data: { segment: SEG, stats: STATS, letzter_job: { status: "completed" } } };
+      if (url.endsWith("/summary")) return { data: { segment: SEG, stats: netz.stats || STATS, letzter_job: { status: "completed" },
+        qualitaet: { daten_seit: "2026-09-01", tage_beobachtet: 31, tage_mit_treffern: 29, abdeckung_pct: 96.9, erfolgreiche_crawls: 60, erwartete_crawls: 62, sample_size: 20, datenlage: "gut", crawls_per_day: 2 } } };
       if (url.endsWith("/history")) return { data: { reihe: [
         { date: "2026-09-30", sample_size: 20, min: 19100, median: 20500, avg: 20600, max: 21800, p25: 19700, p75: 21100, change_eur: null, change_pct: null },
         { date: "2026-10-01", sample_size: 20, min: 18900, median: 20250, avg: 20410, max: 21700, p25: 19600, p75: 21000, change_eur: -250, change_pct: -1.22,
@@ -64,7 +68,11 @@ vi.mock("@/lib/api", () => ({
           price_change_eur: -200, first_price: 19400, price_reductions: 2 }] } };
       return { data: {} };
     }),
-    post: vi.fn(async (url, body) => { netz.posts.push({ url, body }); return { data: { ok: true, neu: 6, tag: "2026-10-01", modelle: { neu: 0 }, segmente: { segmente: 16 }, erledigt: 1 } }; }),
+    post: vi.fn(async (url, body) => {
+      netz.posts.push({ url, body });
+      if (netz.crawlFehler && url.endsWith("/crawl-now")) { const e = new Error(netz.crawlFehler); e.response = { status: 400, data: { detail: netz.crawlFehler } }; throw e; }
+      return { data: { ok: true, neu: 6, tag: "2026-10-01", modelle: { neu: 0 }, segmente: { segmente: 16 }, erledigt: 1 } };
+    }),
     put: vi.fn(async (url, body) => { netz.posts.push({ url, body }); return { data: { ok: true, segmente: 16, takt: { intervall_tage: 3 } } }; }),
   },
 }));
@@ -85,7 +93,7 @@ async function starten(pfad) {
   await warten();
 }
 async function klick(t) { const k = el(t); if (!k) throw new Error(`nicht gefunden: ${t}`); await act(async () => { k.click(); }); await warten(); }
-beforeEach(() => { netz.posts.length = 0; netz.gets.length = 0; netz.aktiv = true; });
+beforeEach(() => { netz.posts.length = 0; netz.gets.length = 0; netz.aktiv = true; netz.stats = null; netz.crawlFehler = null; });
 afterEach(async () => { if (wurzel) await act(async () => { wurzel.unmount(); }); wurzel = null; behaelter?.remove(); });
 
 describe("Admin Marktanalyse", () => {
@@ -182,5 +190,26 @@ describe("Admin Marktanalyse", () => {
     // Crawl jetzt (Super-Admin)
     await klick("markt-crawl-jetzt");
     expect(netz.posts.some((p) => p.url.endsWith("/crawl-now"))).toBe(true);
+  });
+
+  it("Bestandstrend als zweite Zeile, fehlende Trend-Basis als Strich, Abdeckung (Review 26.09. Nr. 43/44/45/55)", async () => {
+    const { toast } = await import("sonner");
+    await starten("/admin/markt/bmw-320d");
+    expect(el("markt-trend-7d").textContent).toContain("−420 €");
+    expect(el("markt-trend-7d").textContent).toContain("gleiche Autos: −210 € (-1,1 %) · 14 Autos");
+    expect(el("markt-trend-30d").textContent).toContain("gleiche Autos: —");
+    expect(el("markt-qualitaet").textContent).toContain("31 Tage beobachtet (29 mit Treffern)");
+    expect(el("markt-qualitaet").textContent).toContain("Abdeckung 96,9 %");
+    // Nr. 52: inaktives Segment -> 400 mit Klartext -> toast.error mit dem Servertext
+    netz.crawlFehler = "Segment inaktiv — der Suchauftrag ist pausiert";
+    await klick("markt-crawl-jetzt");
+    expect(toast.error).toHaveBeenCalledWith(expect.stringContaining("Segment inaktiv"));
+    await act(async () => { wurzel.unmount(); }); wurzel = null; behaelter?.remove();
+    // Nr. 43/44: kein Datensatz in der Toleranz -> trend null -> "—" statt Zahl
+    netz.stats = { ...STATS, trend_7d_eur: null, trend_7d_pct: null, trend_7d_basis_date: null, trend_7d_bestand_eur: null, anzahl_gemeinsam: 0 };
+    await starten("/admin/markt/bmw-320d");
+    const t7 = el("markt-trend-7d").textContent;
+    expect(t7).toContain("—");
+    expect(t7).not.toMatch(/€.*€/);
   });
 });
