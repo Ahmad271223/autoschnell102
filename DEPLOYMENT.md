@@ -3641,3 +3641,19 @@ Reservierung nur, wenn beide frei sind, Sparmodus ab 80 % des engeren Deckels, G
 löscht die Fahrer-Zähler und pseudonymisiert `driver_id` in den Bewertungen. Betrieb-Kasten zeigt „10 € je Fahrer“.
 **Nach dem Rollout: die Fahrer, die die KI nutzen sollen, unter Admin → Fahrer freischalten.**
 
+**Reparaturwelle 4 Review 26.09.2026 abends (Markt; Commit 32e2091):**
+- Unsichere Sortierung → Job **`data_invalid`** („Sortierung unsicher“): Kosten gebucht, aber keine Schnappschüsse, keine
+  Tages-/Segmentstatistik, kein Trend, keine Chance, kein `last_success_at`. Monitoring zählt „Läufe mit ungültigen Daten“,
+  Modellübersicht/Modellseite zeigen „ungültig“.
+- Zeilenfilter mit **Pflichtfeldern** (Inserats-ID, Preis, EZ, km; Kraftstoff/Getriebe/kW, wenn der Auftrag sie setzt) und
+  **harter Marke/Modell-Prüfung** (makeId/modelId; ohne IDs strenger Namensvergleich) → „fehlend: …“ / „fremdes Modell“.
+- **Auftragsfassungen:** `definition_hash` (Marke/Modell-ID, Kraftstoff, Getriebe, Karosserie, kW, Land, PLZ/Radius,
+  Verkäuferart) und `version`; materielle Änderung → neue Fassung, Segment-IDs `<auftrag>:v2:<ez>:<km>`, alte Segmente inaktiv
+  (Historie getrennt). Zeilen/Abrufe/EZ/km/Label ändern die Fassung nicht. Modellseite zeigt „Fassung v1 (aktuell v2)“.
+- **Tageswert = letzter gültiger Lauf** mit Treffern; ein leerer Zweitlauf steht nur in `laeufe`.
+- **Bündel je (Scraper, Zeilenzahl)** — Reservierung exakt.
+- **Karosserie:** mobile.de-Parameter `c=` (Limousine, EstateCar, OffRoad, Cabrio, SportsCar, SmallCar, Van), Validator
+  prüft die gelieferte Kategorie; Formular als Auswahl; Startliste: nur „Passat Variant“ = Kombi (bestehende Aufträge erst
+  beim Bearbeiten).
+- Offen (Ahmad): soll ein `data_invalid`-Lauf am selben Tag automatisch wiederholt werden (heute: erst am Folgetag)?
+
