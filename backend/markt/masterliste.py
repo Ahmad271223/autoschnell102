@@ -409,7 +409,8 @@ async def importieren(db, *, synchronisieren: bool = True, master: Optional[List
         doc = {**m, "master_status": "NEW", "version": 1, "definition_hash": auftraege.definition_hash(m), "filter_hash": auftraege.filter_hash(m),
                "hash_fassung": auftraege.HASH_FASSUNG, "created_at": jetzt, "updated_at": jetzt}
         try:
-            if await db[MODELLE].find_one({"$or": [{"id": m["id"]}, {"master_row": nr}]}, {"_id": 1}):
+            # bestehende_filter grenzt nur im Test ein (dort gibt es die echte Masterliste schon aus Migration 18)
+            if await db[MODELLE].find_one({"$or": [{"id": m["id"]}, {"master_row": nr, **(bestehende_filter or {})}]}, {"_id": 1}):
                 z["schon"] += 1
                 continue
             await db[MODELLE].insert_one(dict(doc))
