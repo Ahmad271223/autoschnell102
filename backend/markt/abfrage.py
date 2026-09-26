@@ -117,8 +117,10 @@ async def modelle_fuer_fahrzeug(db, v: Dict[str, Any], *, gruende: Optional[List
         return []
     if not make_id or not model_id:
         return []
+    # Welle 6 Nr. 89: bis zu 200 Kandidaten lesen (vorher 50 in Prioritaetsreihenfolge — bei vielen
+    # Auftraegen je Modell fiel der passendste heraus), dann die 50 spezifischsten behalten
     kandidaten = await db[MODELLE].find({"make_id": str(make_id), "model_id": str(model_id), "enabled": True},
-                                        {"_id": 0}).sort("priority", 1).to_list(50)
+                                        {"_id": 0}).sort([("priority", 1), ("id", 1)]).to_list(KANDIDATEN_LESEN)
     fuel, kw, getriebe = _kraftstoff_code(v), _kw(v), _getriebe_code(v)
     body = normalisieren.karosserie_code(v.get("category") or v.get("category_label") or v.get("body"))
     verkaeufer = _verkaeufer_code(v)
@@ -149,7 +151,30 @@ async def modelle_fuer_fahrzeug(db, v: Dict[str, Any], *, gruende: Optional[List
         if _ausserhalb_radius(m, v):
             continue
         raus.append(m)
-    return raus
+    # Nr. 90: deterministische Reihenfolge nach Spezifitaet — der Auftrag, der das Fahrzeug am
+    # genauesten beschreibt, gewinnt (nicht der zufaellig zuerst gelesene)
+    raus.sort(key=lambda m: spezifitaet(m, fuel=fuel, getriebe=getriebe))
+    return raus[:KANDIDATEN_MAX]
+
+
+KANDIDATEN_LESEN = 200
+KANDIDATEN_MAX = 50
+
+
+def spezifitaet(m: Dict[str, Any], *, fuel: Optional[str] = None, getriebe: Optional[str] = None) -> tuple:
+    """Nr. 90: Sortierschluessel (kleiner = spezifischer): Kraftstoff exakt, Getriebe exakt, engste
+    kW-Spanne, Region (PLZ+Radius), Karosserie, Prioritaet, ID."""
+    kw_von, kw_bis = m.get("power_kw_min"), m.get("power_kw_max")
+    try:
+        spanne = (int(kw_bis) if kw_bis else 10_000) - (int(kw_von) if kw_von else 0)
+    except (TypeError, ValueError):
+        spanne = 10_000
+    return (0 if (m.get("fuel") and fuel and m["fuel"] == fuel) else 1,
+            0 if (m.get("gearbox") and getriebe and m["gearbox"] == getriebe) else 1,
+            spanne,
+            0 if (m.get("zip") and m.get("radius_km")) else 1,
+            0 if m.get("body") else 1,
+            int(m.get("priority") or 5), str(m.get("id") or ""))
 
 
 async def modell_fuer_fahrzeug(db, v: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -373,12 +398,17 @@ async def segment_zusammenfassung(db, segment_id: str) -> Optional[Dict[str, Any
     tage_seit = 0
     if erster:
         tage_seit = max(1, (datetime.strptime(konfig.heute_tag(), "%Y-%m-%d") - datetime.strptime(erster["date"], "%Y-%m-%d")).days + 1)
+    # Welle 6 Nr. 106/107: erwartet = tatsaechlich geplante Jobs (bis heute); nur ohne Plan die Konfiguration
+    from markt import speicher
+    geplant = await speicher.geplante_laeufe(db, segment_id, konfig.heute_tag())
     top_n = (st or {}).get("top_n_bewiesen", True) is not False
     qualitaet = {"daten_seit": (erster or {}).get("date"), "tage_beobachtet": (st or {}).get("beobachtete_tage") or 0,
                  # Nr. 54/45: Tage mit Treffern getrennt; Abdeckung = gueltige / erwartete Laeufe (Nr. 50)
                  "tage_mit_treffern": (st or {}).get("tage_mit_treffern") or 0,
                  "abdeckung_pct": (st or {}).get("abdeckung_pct"),
-                 "erfolgreiche_crawls": erfolgreich, "erwartete_crawls": tage_seit * k if erster else 0,
+                 "erfolgreiche_crawls": erfolgreich,
+                 "erwartete_crawls": geplant if geplant > 0 else (tage_seit * k if erster else 0),
+                 "erwartete_quelle": "plan" if geplant > 0 else "konfiguration",
                  "laeufe_nur_monoton": nur_monoton, "laeufe_leer": leer,
                  "sample_size": (st or {}).get("sample_size") or 0, "datenlage": (st or {}).get("datenlage") or "keine",
                  "crawls_per_day": k, "top_n_bewiesen": top_n,

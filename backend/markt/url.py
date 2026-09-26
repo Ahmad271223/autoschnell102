@@ -11,6 +11,8 @@ from urllib.parse import urlencode
 from markt.normalisieren import KAROSSERIE_CODES
 
 BASIS = "https://suchen.mobile.de/fahrzeuge/search.html"
+# Nr. 84: Uebersetzung der internen Verkaeuferart (DEALER/PRIVATE) in den mobile.de-Parameter st=
+VERKAEUFER_URL = {"DEALER": "DEALER", "PRIVATE": "FSBO", "FSBO": "FSBO"}
 
 
 def parameter(segment: Dict[str, Any], modell: Dict[str, Any]) -> List[Tuple[str, str]]:
@@ -32,7 +34,8 @@ def parameter(segment: Dict[str, Any], modell: Dict[str, Any]) -> List[Tuple[str
     if modell.get("body") and str(modell["body"]) in KAROSSERIE_CODES:
         p.append(("c", str(modell["body"])))
     if modell.get("seller_type"):
-        p.append(("st", str(modell["seller_type"])))          # DEALER | FSBO (privat)
+        # Reparaturwelle 6 Nr. 84: intern heisst es DEALER | PRIVATE — nur die mobile.de-URL sagt FSBO
+        p.append(("st", VERKAEUFER_URL.get(str(modell["seller_type"]).upper(), str(modell["seller_type"]))))
     if modell.get("zip") and modell.get("radius_km"):
         p.append(("zipr", f"{modell['zip']}:{int(modell['radius_km'])}"))
     if modell.get("country") and str(modell["country"]).upper() != "DE":

@@ -575,6 +575,11 @@ async def _cleanup_once(db, wache=None) -> dict:
         from markt import budget as markt_budget
         return await markt_budget.verfallene_freigeben(db)
     await s("markt_reservierungen", _markt_reservierungen, in_stats=False)
+    # ---- Market Intelligence (Reparaturwelle 6 Nr. 115): Kostenabstimmung mit Apify (Laeufe der letzten 24 h) ----
+    async def _markt_kosten_abgleich():
+        from markt import budget as markt_budget
+        return await markt_budget.kosten_abgleich(db)
+    await s("markt_kosten_abgleich", _markt_kosten_abgleich, in_stats=False)
     # ---- Runde 21: Fahrerfotos FAHRERFOTO_TAGE nach dem Hochladen ----
     await s("berichtsfotos_frist", lambda: berichtsfotos_nach_frist_loeschen(db, now, stats))
     await s("berichte_frist", lambda: berichte_nach_frist_loeschen(db, now, stats))

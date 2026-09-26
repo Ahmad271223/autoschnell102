@@ -98,14 +98,18 @@ async def pruefen(db, listing: Dict[str, Any]) -> str:
                                       {"$set": {"active_state": rueckfall, "verification_error": "id_abweichung",
                                                 "verification_fremde_id": str(l.get("listing_id") or "")[:40]}})
         return "unklar"
-    neu = float(l["price_gross"])
-    setzen = {"active_state": "not_seen_in_sample", "verified_online_at": jetzt, "verified_at": jetzt, "current_price": neu}
+    setzen = {"active_state": "not_seen_in_sample", "verified_online_at": jetzt, "verified_at": jetzt}
+    # Welle 6 Nr. 85: ein unplausibler Preis (Parser/Waehrung) sagt nur "noch online" — der Preis bleibt
+    neu = float(l["price_gross"]) if l.get("price_gross") else None
+    if neu is not None:
+        setzen["current_price"] = neu
     await db[LISTINGS].update_one(_schluessel(listing),
                                   {"$set": setzen, "$unset": {"verification_leer_am": "", "leer_zaehler": "",
                                                               "verification_error": "", "verification_fremde_id": "",
                                                               "unbestaetigt_einzelquelle": ""}})
     # Nr. 40: Preisaenderung mit Historie und Zaehlern — dieselbe Hilfsfunktion wie im Sample-Lauf
-    await speicher.preis_aktualisieren(db, _schluessel(listing), aktuell.get("current_price"), neu, jetzt)
+    if neu is not None:
+        await speicher.preis_aktualisieren(db, _schluessel(listing), aktuell.get("current_price"), neu, jetzt)
     return "not_seen_in_sample"
 
 
@@ -155,22 +159,29 @@ async def taeglich(db) -> Dict[str, Any]:
         return {"geprueft": 0}
     zaehler: Dict[str, Any] = {"geprueft": 0, "confirmed_removed": 0, "verification_pending": 0,
                                "not_seen_in_sample": 0, "unklar": 0}
+    # Welle 6 Nr. 97: die Pruefung schreibt (Zustaende, Preise) — als Hintergrund-Schreiber zaehlen und
+    # bei aktiver Wartung (Sicherung/Restore) aufhoeren, der naechste Takt macht weiter
+    import wartung
     try:
-        for l in await kandidaten(db, konfig.entfernung_max_je_tag()):
-            try:
-                if not await verlaengern(db, name, SPERRE_S, token):
-                    zaehler["sperre_verloren"] = True
+        with wartung.hintergrund_schreibt():
+            for l in await kandidaten(db, konfig.entfernung_max_je_tag()):
+                if await wartung.aktiv_async(db):
+                    zaehler["wartung"] = True
                     break
-            except Exception:  # noqa: BLE001
-                pass            # Datenbank-Stoerung ist kein Besitzerwechsel (job_lock.verlaengern)
-            try:
-                erg = await pruefen(db, l)
-            except Exception:  # noqa: BLE001
-                log.exception("Entfernungs-Pruefung %s gescheitert", l.get("listing_id"))
-                erg = "unklar"
-            zaehler["geprueft"] += 1
-            zaehler[erg] = zaehler.get(erg, 0) + 1
-        if not zaehler.get("sperre_verloren"):
+                try:
+                    if not await verlaengern(db, name, SPERRE_S, token):
+                        zaehler["sperre_verloren"] = True
+                        break
+                except Exception:  # noqa: BLE001
+                    pass            # Datenbank-Stoerung ist kein Besitzerwechsel (job_lock.verlaengern)
+                try:
+                    erg = await pruefen(db, l)
+                except Exception:  # noqa: BLE001
+                    log.exception("Entfernungs-Pruefung %s gescheitert", l.get("listing_id"))
+                    erg = "unklar"
+                zaehler["geprueft"] += 1
+                zaehler[erg] = zaehler.get(erg, 0) + 1
+        if not zaehler.get("sperre_verloren") and not zaehler.get("wartung"):
             await konfig.merker_setzen(db, konfig.ENTFERNUNG_DOK, tag=tag, geprueft=zaehler["geprueft"])
     finally:
         try:

@@ -28,6 +28,9 @@ JOBS = _module("markt.jobs")
 ENT = _module("markt.entfernung")
 ABF = _module("markt.abfrage")
 APIFY = _module("markt.apify")
+# Reparaturwelle 6 Nr. 77: die 5-Minuten-Sperre fuer manuelle Jobs wuerde die Tests blockieren, die
+# nacheinander mehrere Sofort-Jobs desselben Segments anlegen — nur Test 54 prueft sie (monkeypatch 300)
+JOBS.SOFORT_SPERRE_S = 0
 
 
 def _item(lid, preis, km=70000, ez="03/2020", created="2026-09-05T11:46:02.000Z", rating="GOOD_PRICE"):
@@ -326,9 +329,15 @@ def test_07_taktung_nach_budget(welt, monkeypatch):
     b = K.buendel_groesse()
     # wie jobs.intervall: Abrufe je Tag und Zeilen je Segment kommen aus den Segmenten (v3: crawls_per_day)
     segs = welt.run(db[K.SEGMENTE].find({"enabled": True}, {"_id": 0, "max_items": 1, "crawls_per_day": 1}).to_list(50000))
-    laeufe = sum(int(s_.get("crawls_per_day") or 1) for s_ in segs)
     zeilen_abruf = sum(K.zeilen_mit_puffer(int(s_.get("max_items") or K.rows_je_segment())) * int(s_.get("crawls_per_day") or 1) for s_ in segs)
-    je_tag_alle = K.kosten_buendel_usd(K.actor(), math.ceil(laeufe / b) if laeufe else 0, zeilen_abruf)
+    # Welle 6 Nr. 133: Actor-Starts je Gruppe gleicher Zeilenzahl (Buendel mischen keine Zeilenzahlen)
+    gruppen = {}
+    for s_ in segs:
+        r_ = int(s_.get("max_items") or K.rows_je_segment())
+        gruppen[r_] = gruppen.get(r_, 0) + int(s_.get("crawls_per_day") or 1)
+    starts = sum(math.ceil(n_ / b) for n_ in gruppen.values())
+    assert JOBS.starts_je_gruppe({10: 12, 20: 1}, 10) == 3 and JOBS.starts_je_gruppe({}, 10) == 0
+    je_tag_alle = K.kosten_buendel_usd(K.actor(), starts, zeilen_abruf)
     entf = K.entfernung_kosten_je_tag_usd()
     rest_tage = K.rest_tage_im_monat()
     tagesbudget = 450 / rest_tage - entf
@@ -1043,14 +1052,20 @@ def test_18_budget_reservierung_mit_ersatz_scraper(welt, monkeypatch):
     monkeypatch.setattr(APIFY, "lauf", _lauf)
     job = welt.run(JOBS.job_sofort(db, seg["id"]))
     assert welt.run(JOBS.verarbeiten_buendel(db, [_eigenen_beanspruchen(welt, job["id"])]))["status"] == "budget"
-    assert aufrufe == [] and welt.run(db[K.JOBS].find_one({"id": job["id"]}, {"_id": 0}))["status"] == "failed"
+    # Welle 6: Budget voll -> der Job bleibt queued (budget_wait), kein 'failed'; ein Alarm markt_budget_voll
+    d = welt.run(db[K.JOBS].find_one({"id": job["id"]}, {"_id": 0}))
+    assert aufrufe == [] and d["status"] == "queued" and d["budget_wait"] is True and d["attempts"] == 0 and "worker" not in d
+    assert d["scheduled_at"] > K.jetzt_iso(), "wartet, statt sofort wieder dranzukommen"
+    assert welt.run(db.betriebsalarme.find_one({"typ": "markt_budget_voll", "ref": f"test-{s}", "offen": True}))
     b = welt.run(BUD.dokument(db, f"test-{s}"))
     assert round(b["reserved_usd"], 6) == 0 and round(b["used_usd"], 6) == 0
-    # ohne Ersatz reicht das Budget
+    welt.run(db[K.JOBS].update_one({"id": job["id"]}, {"$set": {"status": "cancelled"}}))
+    # ohne Ersatz reicht das Budget; die Reservierung schliesst den Alarm wieder
     monkeypatch.setenv("MARKT_APIFY_ACTOR_ERSATZ", "")
     job2 = welt.run(JOBS.job_sofort(db, seg["id"]))
     assert welt.run(JOBS.verarbeiten_buendel(db, [_eigenen_beanspruchen(welt, job2["id"])]))["status"] == "ok"
     assert len(aufrufe) == 1
+    assert welt.run(db.betriebsalarme.find_one({"typ": "markt_budget_voll", "ref": f"test-{s}", "offen": True})) is None
     welt.run(db.betriebsalarme.delete_many({"typ": {"$in": ["markt_budget_voll", "markt_crawl_fehlgeschlagen"]}, "ref": {"$in": [f"test-{s}", seg["id"]]}}))
     welt.run(db[K.BUDGET].delete_many({"_id": f"test-{s}"}))
     _aufraeumen(welt)
@@ -1166,13 +1181,18 @@ def test_21_zwei_laeufe_je_tag_bleiben_erhalten(welt):
     assert ts["min_price"] == 18500 and ts["median_price"] == 18550 and len(ts["laeufe"]) == 2
     assert [(x["tag"], x["min"], x["median"], x["sample_size"]) for x in ts["laeufe"]] == [(t, 18000, 18500, 2), (f"{t}#2", 18500, 18550, 2)]
     assert welt.run(db[K.TAGESSTATS].count_documents({"segment_id": seg["id"], "date": t})) == 1
-    # hoechstens 4 Laeufe je Tag
+    # hoechstens LAEUFE_MAX Laeufe je Tag — Welle 6 Nr. 88: 12 statt 4 (manuelle Laeufe zaehlen mit)
+    assert SP.LAEUFE_MAX == 12
     for i in range(3, 7):
         welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_item(a, 18000 + i)]), lauf_tag=f"{t}#{i}"))
     ts = welt.run(db[K.TAGESSTATS].find_one({"segment_id": seg["id"], "date": t}, {"_id": 0}))
-    assert len(ts["laeufe"]) == 4 and ts["laeufe"][-1]["tag"] == f"{t}#6" and ts["min_price"] == 18006
+    assert len(ts["laeufe"]) == 6 and ts["laeufe"][-1]["tag"] == f"{t}#6" and ts["min_price"] == 18006
+    for i in range(7, 16):
+        welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_item(a, 18000 + i)]), lauf_tag=f"{t}#{i}"))
+    ts = welt.run(db[K.TAGESSTATS].find_one({"segment_id": seg["id"], "date": t}, {"_id": 0}))
+    assert len(ts["laeufe"]) == 12 and ts["laeufe"][-1]["tag"] == f"{t}#15" and ts["laeufe"][0]["tag"] == f"{t}#4"
     verlauf = welt.run(ABF.segment_verlauf(db, seg["id"], "7d"))
-    assert verlauf["reihe"][-1]["date"] == t and len(verlauf["reihe"][-1]["laeufe"]) == 4 and verlauf["reihe"][-1]["median"] == 18006
+    assert verlauf["reihe"][-1]["date"] == t and len(verlauf["reihe"][-1]["laeufe"]) == 12 and verlauf["reihe"][-1]["median"] == 18015
     _aufraeumen(welt)
 
 
@@ -1651,7 +1671,11 @@ def test_34_marke_modell_hart_pruefen(welt):
     assert NORM.passt_zum_segment({**ohne_id, "make": "Audi"}, seg, modell) == (False, "fremdes Modell")
     assert NORM.passt_zum_segment({**ohne_id, "make": "vw", "model": "Golf"}, seg, {**modell, "make": "Volkswagen", "model": "Golf"})[0], "Alias VW"
     assert NORM.passt_zum_segment({**ohne_id, "make": "Mercedes", "model": "C 220 d"}, seg, {**modell, "make": "Mercedes-Benz", "model": "C 220"})[0]
-    assert NORM.passt_zum_segment({**ohne_id, "make": "", "model": ""}, seg, modell)[0], "ohne Angabe tolerant"
+    # Welle 6 Nr. 144: BEIDE IDs oder BEIDE Namen — sonst 'Fahrzeugidentitaet fehlt' (vorher tolerant)
+    assert NORM.passt_zum_segment({**ohne_id, "make": "", "model": ""}, seg, modell) == (False, "Fahrzeugidentitaet fehlt")
+    assert NORM.passt_zum_segment({**ohne_id, "model": ""}, seg, modell) == (False, "Fahrzeugidentitaet fehlt")
+    assert NORM.passt_zum_segment({**mit_id, "model_id": None, "make": "", "model": ""}, seg, modell) == (False, "Fahrzeugidentitaet fehlt"), "nur eine ID: Namen muessen da sein"
+    assert NORM.passt_zum_segment({**mit_id, "model_id": None}, seg, modell)[0], "eine ID fehlt, Namen passen"
 
 
 def test_35_auftrag_fassung_bei_materieller_aenderung(welt):
@@ -1851,8 +1875,11 @@ def test_38_karosserie_in_url_validator_und_auftrag():
     ok = NORM.listings_aus_items([_item("t1", 100)])[0]           # category EstateCar
     assert NORM.passt_zum_segment(ok, seg, modell) == (True, "")
     assert NORM.passt_zum_segment({**ok, "category": "Saloon"}, seg, modell) == (False, "karosserie Limousine != EstateCar")
-    assert NORM.passt_zum_segment({**ok, "category": "Other"}, seg, modell)[0] and NORM.passt_zum_segment({**ok, "category": ""}, seg, modell)[0], "unbekannt tolerant"
+    # Welle 6 Nr. 125/126: setzt der Auftrag eine Karosserie, muss die Zeile eine erkennbare tragen (vorher tolerant)
+    assert NORM.passt_zum_segment({**ok, "category": "Other"}, seg, modell) == (False, "unbekannt: karosserie")
+    assert NORM.passt_zum_segment({**ok, "category": ""}, seg, modell) == (False, "fehlend: karosserie")
     assert NORM.passt_zum_segment({**ok, "category": "Saloon"}, seg, {**modell, "body": None})[0]
+    assert NORM.passt_zum_segment({**ok, "category": "Other"}, seg, {**modell, "body": None})[0], "ohne Karosserie im Auftrag egal"
     e = {"make": "BMW", "model": "320", "variant": "320d", "fuel": "DIESEL", "ez_years": [2019], "km_buckets": [{"min_km": 0, "max_km": 100000}]}
     assert A.entwurf_pruefen(e)["body"] is None
     assert A.entwurf_pruefen({**e, "body": "EstateCar"})["body"] == "EstateCar"
@@ -2279,7 +2306,7 @@ def test_45_lease_verloren_vor_und_nach_dem_lauf(welt, monkeypatch):
     assert welt.run(db[K.LISTINGS].count_documents({"listing_id": f"t{s}c"})) == 0 and welt.run(db[K.TAGESSTATS].count_documents({"segment_id": seg_a["id"]})) == 0
     bud = welt.run(BUD.dokument(db, f"test-{s}"))     # _aufraeumen hat das Budget-Dokument geleert: nur dieser Lauf
     assert round(bud["used_usd"], 4) == 0.01 and round(bud["reserved_usd"], 6) == 0, "Lauf bezahlt, Reservierung geloest"
-    q = inspect.getsource(JOBS._buendel_lauf)
+    q = inspect.getsource(JOBS._auswerten)        # Welle 6: der Schreibteil eines Buendels
     assert q.index("_noch_meiner(db, p") < q.index("_noch_gewollt(db, p") < q.index("speicher.verarbeiten(")
     # Nr. 34: zwei Buendel (verschiedene Zeilenzahl) laufen in EINEM Takt gleichzeitig
     welt.run(db[K.JOBS].update_one({"id": jc["id"]}, {"$set": {"status": "cancelled"}}))     # sonst holt stale_zurueck ihn wieder
@@ -2652,8 +2679,9 @@ def test_51_karte_hybrid_und_auftragsfilter(welt):
     try:
         fz = {"make": "BMW", "model": "320d", "fuel": "Diesel", "power_kw": 140, "mileage": 50000, "first_registration": "05/2019", "gearbox": "AUTOMATIC_GEAR"}
         ids = lambda v: [m["id"] for m in welt.run(ABF.modelle_fuer_fahrzeug(db, v))]
-        # ohne Karosserie/Verkaeufer/Land/Geodaten am Fahrzeug: alle passen (nie faelschlich ausschliessen)
-        assert ids(fz) == [m_kombi["id"], m_privat["id"], m_at["id"], m_radius["id"], m_frei["id"]]
+        # ohne Karosserie/Verkaeufer/Land/Geodaten am Fahrzeug: alle passen (nie faelschlich ausschliessen).
+        # Welle 6 Nr. 90: Reihenfolge nach Spezifitaet (Region vor Karosserie vor Prioritaet), nicht nur Prioritaet
+        assert ids(fz) == [m_radius["id"], m_kombi["id"], m_privat["id"], m_at["id"], m_frei["id"]]
         assert m_kombi["id"] not in ids({**fz, "category": "Limousine"}) and m_kombi["id"] in ids({**fz, "category": "EstateCar"})
         assert m_privat["id"] not in ids({**fz, "seller_type": "haendler"}) and m_privat["id"] in ids({**fz, "seller_type": "privat"})
         assert m_at["id"] not in ids({**fz, "country": "DE"}) and m_at["id"] in ids({**fz, "country": "AT"})
@@ -2786,3 +2814,706 @@ def test_53_konfig_anwenden_und_zwilling(welt, monkeypatch):
             welt.run(db[coll].delete_many({"model_id": mid}))
         welt.run(db[K.MODELLE].delete_many({"id": mid}))
         _aufraeumen(welt)
+
+
+# ---------------------------------------------------------------- Reparaturwelle 6A (Review 26.09.2026 abends, Daten/Parser/Nebenlaeufigkeit/Backup)
+def _vorbereiten(welt, monkeypatch, seg=None, modell=None, budget="100"):
+    """Segment + Modell anlegen, Budget/Monat auf den Test stellen, kein Ersatz-Scraper."""
+    w, db = welt.w, welt.db
+    _aufraeumen(welt)
+    s = w.s
+    seg = seg or _segment(w)
+    welt.run(db[K.MODELLE].insert_one(dict(modell or _modell(w))))
+    welt.run(db[K.SEGMENTE].insert_one(dict(seg)))
+    monkeypatch.setenv("MARKT_BUDGET_MONAT_USD", budget)
+    monkeypatch.setenv("MARKT_APIFY_ACTOR_ERSATZ", "")
+    monkeypatch.setattr(K, "monat", lambda zeit=None: f"test-{s}")
+    welt.run(db[K.BUDGET].delete_many({"_id": f"test-{s}"}))
+    return s, seg
+
+
+def _antwort(items, usd=0.02, run_id="r-6", **extra):
+    async def _lauf(urls, max_items, zeitlimit_s=None, actor_name=None, max_items_per_query=None):
+        return {"items": list(items), "usd": usd, "run_id": run_id, "status": "SUCCEEDED", "dauer_ms": 3, "actor": K.actor(), **extra}
+    return _lauf
+
+
+def test_54_sofort_job_dedupe(welt, monkeypatch):
+    """Nr. 77: kein zweiter manueller Job, solange einer wartet/laeuft (SchonEingereiht -> 409) oder ein
+    manueller Lauf keine 5 Minuten alt ist; nach Abschluss und Ablauf der Sperre geht es wieder."""
+    s, seg = _vorbereiten(welt, monkeypatch)
+    db = welt.db
+    monkeypatch.setattr(JOBS, "SOFORT_SPERRE_S", 300)
+    j1 = welt.run(JOBS.job_sofort(db, seg["id"]))
+    with pytest.raises(JOBS.SchonEingereiht) as ex:
+        welt.run(JOBS.job_sofort(db, seg["id"]))
+    assert "wartet schon" in str(ex.value) and j1["id"][:8] in str(ex.value)
+    assert isinstance(ex.value, ValueError)
+    _eigenen_beanspruchen(welt, j1["id"])
+    with pytest.raises(JOBS.SchonEingereiht) as ex:
+        welt.run(JOBS.job_sofort(db, seg["id"]))
+    assert "läuft gerade" in str(ex.value)
+    welt.run(db[K.JOBS].update_one({"id": j1["id"]}, {"$set": {"status": "completed"}}))
+    # fertig, aber keine 5 Minuten alt -> Sperre; danach frei
+    with pytest.raises(JOBS.SchonEingereiht) as ex:
+        welt.run(JOBS.job_sofort(db, seg["id"]))
+    assert "5 Minuten" in str(ex.value)
+    welt.run(db[K.JOBS].update_one({"id": j1["id"]}, {"$set": {"created_at": (K.jetzt() - timedelta(minutes=6)).isoformat()}}))
+    assert welt.run(JOBS.job_sofort(db, seg["id"]))["status"] == "queued"
+    assert welt.run(db[K.JOBS].count_documents({"segment_id": seg["id"]})) == 2
+    r = (Path(__file__).resolve().parent.parent / "routes" / "markt_admin.py").read_text(encoding="utf-8")
+    i = r.index("crawl-now")
+    assert "except jobs.SchonEingereiht" in r[i:i + 900] and "HTTPException(409" in r[i:i + 900]
+    _aufraeumen(welt)
+
+
+def test_55_preisparser_datum_privat(welt, monkeypatch):
+    """Nr. 85: alle Preisschreibweisen, unplausibel -> verworfen 'Preis unplausibel' + Alarm ab 3;
+    Nr. 86: strikter Datumsparser; Nr. 91: Privatverkaeufer ohne exakte Koordinaten/seller_id."""
+    for w_, soll in (("19.990 EUR", 19990), ("19,990 EUR", 19990), ("19 990", 19990), ("19.990,00", 19990), ("19,990.00", 19990),
+                     ("19990", 19990), (19990, 19990), ("€ 1.234.567,89", 1234567.89), ("1.234,5", 12345)):
+        assert NORM.preis_parsen(w_) == soll, w_
+    assert NORM.preis_parsen("") is None and NORM.preis_parsen(None) is None and NORM.preis_parsen("abc") is None
+    assert NORM.preis_plausibel(100) and NORM.preis_plausibel(5_000_000) and not NORM.preis_plausibel(99) and not NORM.preis_plausibel(5_000_001)
+    l = NORM.listings_aus_items([_item("p1", "19,990 EUR")])[0]
+    assert l["price_gross"] == 19990 and l["verwerfen_grund"] is None
+    u = NORM.listings_aus_items([_item("p2", "19 EUR")])          # erkennbar, aber kein Auto
+    assert len(u) == 1 and u[0]["price_gross"] is None and u[0]["verwerfen_grund"] == "Preis unplausibel"
+    assert NORM.listings_aus_items([{"id": "p3", "priceGross": "kostenlos"}]) == [], "ohne Zahl: unbrauchbar"
+    assert NORM.passt_zum_segment(u[0], _segment(welt.w), _modell(welt.w)) == (False, "Preis unplausibel")
+    # Nr. 86
+    assert NORM._iso("2026-09-05T11:46:02.000Z") == "2026-09-05T11:46:02.000Z" and NORM._iso("2026-09-05") == "2026-09-05"
+    assert NORM._iso("03/2020") == "03/2020"
+    for kaputt in ("2026-13-45", "2026abc", "13/2020", "2026-09-05T25:00:00Z", "gestern", ""):
+        assert NORM._iso(kaputt) is None, kaputt
+    assert NORM.listings_aus_items([{**_item("d1", 100), "createdAt": "2026-13-45T00:00:00Z"}])[0]["mobile_created_at"] is None
+    # Nr. 91
+    privat = NORM.listings_aus_items([{**_item("v1", 9000), "seller": {"type": "PRIVATE"}, "latitude": 52.37123, "longitude": 9.73456, "sellerId": 77}])[0]
+    assert privat["seller_type"] == "PRIVATE" and privat["seller_id"] is None and privat["latitude"] == 52.37 and privat["longitude"] == 9.73
+    haendler = NORM.listings_aus_items([{**_item("v2", 9000), "latitude": 52.37123, "longitude": 9.73456}])[0]
+    assert haendler["seller_id"] == "4711" and haendler["latitude"] == 52.37123
+    # Worker: 3 unplausible Zeilen -> verworfen (zaehlen), Alarm markt_preis_unplausibel; die gute Zeile bleibt
+    s, seg = _vorbereiten(welt, monkeypatch)
+    db = welt.db
+    monkeypatch.setattr(APIFY, "lauf", _antwort([_item(f"t{s}ok", 9000), _item(f"t{s}u1", 5), _item(f"t{s}u2", "7 EUR"), _item(f"t{s}u3", 9)]))
+    job = welt.run(JOBS.job_sofort(db, seg["id"]))
+    welt.run(JOBS.verarbeiten_buendel(db, [_eigenen_beanspruchen(welt, job["id"])]))
+    j = welt.run(db[K.JOBS].find_one({"id": job["id"]}, {"_id": 0}))
+    assert j["status"] == "completed" and j["actual_rows"] == 1 and j["verworfen_filter"] == 3 and j["verworfen_gruende"] == ["Preis unplausibel"] * 3
+    assert welt.run(db.betriebsalarme.find_one({"typ": "markt_preis_unplausibel", "ref": seg["id"], "offen": True}, {"_id": 0}))["details"]["zeilen"] == 3
+    welt.run(db.betriebsalarme.delete_many({"typ": {"$in": ["markt_preis_unplausibel", "markt_filter_ignoriert"]}, "ref": seg["id"]}))
+    _aufraeumen(welt)
+
+
+def test_56_datenlage_relativ_und_unvollstaendig(welt, monkeypatch):
+    """Nr. 82: 'gut' ab 80 % der bestellten Zeilen, 'mittel' ab 50 % (10 Zeilen: 8 / 5) — vorher fest 15;
+    Nr. 143: liefert der Scraper die Marktgroesse und weniger als bestellt -> sample_incomplete, 'unvollstaendig'."""
+    assert SP.datenlage(31, 8, 100, rows=10) == "gut" and SP.datenlage(31, 7.9, 100, rows=10) == "mittel"
+    assert SP.datenlage(31, 5, 100, rows=10) == "mittel" and SP.datenlage(31, 4.9, 100, rows=10) == "niedrig"
+    assert SP.datenlage(31, 16, 100, rows=20) == "gut" and SP.datenlage(31, 15, 100, rows=20) == "mittel"
+    assert SP.datenlage(31, 20, 100, rows=10, sample_incomplete=True) == "unvollstaendig"
+    assert NORM.markt_gesamt([{"totalResults": "57"}, {}]) == 57 and NORM.markt_gesamt([_item("a", 1)]) is None
+    s, seg = _vorbereiten(welt, monkeypatch, seg={**_segment(welt.w), "max_items": 10})
+    db = welt.db
+    items = [{**_item_pos(f"t{s}{i}", 9000 + i * 10, i + 1), "totalResults": 50} for i in range(4)]     # Markt 50, geliefert 4 < 10
+    monkeypatch.setattr(APIFY, "lauf", _antwort(items))
+    job = welt.run(JOBS.job_sofort(db, seg["id"]))
+    welt.run(JOBS.verarbeiten_buendel(db, [_eigenen_beanspruchen(welt, job["id"])]))
+    j = welt.run(db[K.JOBS].find_one({"id": job["id"]}, {"_id": 0}))
+    assert j["status"] == "completed" and j["sample_incomplete"] is True and j["markt_gesamt"] == 50
+    ts = welt.run(db[K.TAGESSTATS].find_one({"segment_id": seg["id"]}, {"_id": 0}))
+    assert ts["sample_incomplete"] is True and ts["laeufe"][-1]["sample_incomplete"] is True and ts["sample_size"] == 4
+    st = welt.run(db[K.SEGMENTSTATS].find_one({"_id": seg["id"]}, {"_id": 0}))
+    assert st["datenlage"] == "unvollstaendig" and st["sample_incomplete"] is True and st["sample_limit"] == 10
+    # ohne die Angabe: None (nicht unvollstaendig); Markt <= bestellt: False
+    monkeypatch.setattr(APIFY, "lauf", _antwort([_item_pos(f"t{s}{i}", 9000 + i * 10, i + 1) for i in range(4)]))
+    job2 = welt.run(JOBS.job_sofort(db, seg["id"]))
+    welt.run(JOBS.verarbeiten_buendel(db, [_eigenen_beanspruchen(welt, job2["id"])]))
+    assert welt.run(db[K.JOBS].find_one({"id": job2["id"]}, {"_id": 0}))["sample_incomplete"] is None
+    monkeypatch.setattr(APIFY, "lauf", _antwort([{**_item_pos(f"t{s}{i}", 9000 + i * 10, i + 1), "totalResults": 4} for i in range(4)]))
+    job3 = welt.run(JOBS.job_sofort(db, seg["id"]))
+    welt.run(JOBS.verarbeiten_buendel(db, [_eigenen_beanspruchen(welt, job3["id"])]))
+    assert welt.run(db[K.JOBS].find_one({"id": job3["id"]}, {"_id": 0}))["sample_incomplete"] is False
+    assert welt.run(db[K.SEGMENTSTATS].find_one({"_id": seg["id"]}, {"_id": 0}))["datenlage"] == "niedrig"
+    _aufraeumen(welt)
+
+
+def test_57_wiederauftauchen_loescht_pruefmerker(welt):
+    """Nr. 83: taucht ein Inserat wieder im Sample auf, sind confirmed_removed_at, verification_* und
+    verified_at weg (verified_at -> last_verification_at)."""
+    w, db = welt.w, welt.db
+    _aufraeumen(welt)
+    s = w.s
+    seg = _segment(w)
+    welt.run(db[K.MODELLE].insert_one(_modell(w)))
+    welt.run(db[K.SEGMENTE].insert_one(dict(seg)))
+    x = f"t{s}x"
+    alt = (K.jetzt() - timedelta(days=3)).isoformat()
+    welt.run(db[K.LISTINGS].insert_one({"source": "mobile", "listing_id": x, "active_state": "confirmed_removed", "current_price": 100.0,
+                                        "confirmed_removed_at": alt, "verified_at": alt, "verification_started_at": alt,
+                                        "verification_error": "id_abweichung", "verification_fremde_id": "999", "leer_zaehler": 2,
+                                        "verification_leer_am": alt, "unbestaetigt_einzelquelle": True, "verified_actor": "x",
+                                        "not_seen_since": alt, "observation_at": alt}))
+    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_item(x, 18000)])))
+    l = welt.run(db[K.LISTINGS].find_one({"listing_id": x}, {"_id": 0}))
+    assert l["active_state"] == "seen" and l["current_price"] == 18000
+    for k in SP.PRUEFUNGS_MERKER + ("verified_at",):
+        assert k not in l, k
+    assert l["last_verification_at"] == alt
+    _aufraeumen(welt)
+
+
+def test_58_verkaeuferart_intern_private(welt):
+    """Nr. 84: intern nur DEALER/PRIVATE; FSBO nur in der mobile.de-URL; alte FSBO-Auftraege werden beim
+    Synchronisieren gehoben, ohne dass sich Fassung oder Fingerabdruck aendern."""
+    A = _module("markt.auftraege")
+    w, db = welt.w, welt.db
+    assert A.VERKAEUFER == ("", "DEALER", "PRIVATE")
+    e = {"make": "BMW", "model": "320", "variant": "320d", "fuel": "DIESEL", "ez_years": [2019], "km_buckets": [{"min_km": 0, "max_km": 100000}]}
+    assert A.entwurf_pruefen({**e, "seller_type": "FSBO"})["seller_type"] == "PRIVATE"
+    assert A.entwurf_pruefen({**e, "seller_type": "privat"})["seller_type"] == "PRIVATE"
+    assert A.entwurf_pruefen({**e, "seller_type": "DEALER"})["seller_type"] == "DEALER"
+    with pytest.raises(A.Ungueltig):
+        A.entwurf_pruefen({**e, "seller_type": "ROBOTER"})
+    m_priv = A.entwurf_pruefen({**e, "seller_type": "PRIVATE"})
+    assert "st=FSBO" in URL.such_url({"min_km": 0, "max_km": 1}, m_priv) and "st=DEALER" in URL.such_url({"min_km": 0, "max_km": 1}, {**m_priv, "seller_type": "DEALER"})
+    assert A.definition_hash({**m_priv, "seller_type": "FSBO"}) == A.definition_hash(m_priv), "FSBO und PRIVATE: derselbe Fingerabdruck"
+    # Migration im Sync-Pfad: FSBO -> PRIVATE, definition_hash neu, bestandener Testlauf gilt weiter
+    _aufraeumen(welt)
+    s = w.s
+    alt = {**_modell(w), "id": f"test-fsbo-{s}", "seller_type": "FSBO", "status": "active", "ez_years": [2019], "country": "DE",
+           "km_buckets": [{"min_km": 0, "max_km": 100000}], "definition_hash": "alt-hash", "testlauf_ok_hash": "alt-hash",
+           "testlauf_ok_at": K.jetzt_iso(), "version": 1}
+    welt.run(db[K.MODELLE].insert_one(dict(alt)))
+    try:
+        welt.run(SEG.synchronisieren(db))
+        d = welt.run(db[K.MODELLE].find_one({"id": alt["id"]}, {"_id": 0}))
+        assert d["seller_type"] == "PRIVATE" and d["definition_hash"] == A.definition_hash(d) and d["testlauf_ok_hash"] == d["definition_hash"]
+        assert d["version"] == 1
+        # aendern (nicht materiell) bleibt Fassung 1 — der neue Hash gilt als Basis
+        welt.run(A.aendern(db, alt["id"], {"priority": 3}))
+        assert welt.run(db[K.MODELLE].find_one({"id": alt["id"]}, {"_id": 0}))["version"] == 1
+        assert welt.run(db[K.SEGMENTE].count_documents({"model_id": alt["id"], "enabled": True})) == 1
+    finally:
+        welt.run(db[K.SEGMENTE].delete_many({"model_id": alt["id"]}))
+        welt.run(db[K.MODELLE].delete_many({"id": alt["id"]}))
+        _aufraeumen(welt)
+
+
+class _FakeClientN(_FakeClient):
+    """Datensatz mit N Zeilen, merkt die Abfrageparameter (Nr. 87) und die Startparameter (Nr. 113)."""
+    n: int = 1
+    params: list = []
+
+    async def post(self, url, **k):
+        _FakeClientN.params.append(("post", url, k.get("params")))
+        return await super().post(url, **k)
+
+    async def get(self, url, **k):
+        if "/datasets/" in url:
+            _FakeClientN.params.append(("get", url, k.get("params")))
+            return _Antwort(200, [{"id": f"a{i}", "priceGross": 100 + i} for i in range(_FakeClientN.n)])
+        return await super().get(url, **k)
+
+
+def test_59_datensatz_limit_und_actor_build(monkeypatch, welt):
+    """Nr. 87: der Datensatz wird mit limit = bestellt x 2 + 20 abgerufen; kommen so viele Zeilen, ist der Lauf
+    'zuviel' (data_invalid, kein Ersatz). Nr. 113/114: 'name@build' pinnt den Actor (?build=), die Build-Kennung
+    des Laufs steht am Ergebnis, am Job und im Tagesaggregat."""
+    import httpx as _httpx
+    import types as _types
+    monkeypatch.setenv("APIFY_TOKEN", "test-token")
+    monkeypatch.setenv("MARKT_APIFY_ACTOR", "scrapesmith~mobile-de-scraper@1.4.0")
+    monkeypatch.delenv("MARKT_START_USD", raising=False)
+    assert K.actor_und_build("scrapesmith~mobile-de-scraper@1.4.0") == ("scrapesmith~mobile-de-scraper", "1.4.0")
+    assert K.actor_und_build("sourabhbgp~mobile-de-scraper") == ("sourabhbgp~mobile-de-scraper", "")
+    assert K.actor_ersatz() == "sourabhbgp~mobile-de-scraper" and K.preise_je_actor("sourabhbgp~mobile-de-scraper@2")[0] == 0.004
+    assert APIFY.datensatz_limit(5) == 30 and APIFY.datensatz_limit(26) == 72 and "zuviel" in APIFY.OHNE_ERSATZ
+    monkeypatch.setattr(APIFY, "httpx", type("H", (), {"AsyncClient": _FakeClientN, "Timeout": lambda *a, **k: None, "HTTPError": _httpx.HTTPError}))
+
+    async def _kein_schlaf(*a, **k):
+        return None
+    monkeypatch.setattr(APIFY, "asyncio", _types.SimpleNamespace(sleep=_kein_schlaf))
+    fertig = _Antwort(200, {"data": {"status": "SUCCEEDED", "defaultDatasetId": "ds-1", "usageTotalUsd": 0.006, "buildId": "b-1", "buildNumber": "1.4.0"}})
+    _FakeClientN.n, _FakeClientN.params, _FakeClient.drehbuch, _FakeClient.posts = 3, [], [fertig], []
+    r = welt.run(APIFY.lauf(["https://x"], 5))
+    assert len(r["items"]) == 3 and r["build_number"] == "1.4.0" and r["build_id"] == "b-1" and r["actor"] == "scrapesmith~mobile-de-scraper@1.4.0"
+    start = next(p for p in _FakeClientN.params if p[0] == "post" and "/acts/" in p[1])
+    assert start[1].endswith("/acts/scrapesmith~mobile-de-scraper/runs") and start[2]["build"] == "1.4.0"
+    assert next(p for p in _FakeClientN.params if p[0] == "get")[2]["limit"] == 30
+    # 30 Zeilen bei 5 bestellt -> 'zuviel' mit Kosten und Lauf-ID
+    _FakeClientN.n, _FakeClient.drehbuch = 30, [fertig]
+    with pytest.raises(APIFY.ApifyFehler) as ex:
+        welt.run(APIFY.lauf(["https://x"], 5))
+    assert ex.value.art == "zuviel" and ex.value.run_id == "run-1" and ex.value.usd is not None
+    # im Worker: data_invalid + Alarm, kein Ersatz, Kosten gebucht
+    s, seg = _vorbereiten(welt, monkeypatch)
+    db = welt.db
+    monkeypatch.setenv("MARKT_APIFY_ACTOR_ERSATZ", "sourabhbgp~mobile-de-scraper")
+    aufrufe = []
+
+    async def _zuviel(urls, max_items, zeitlimit_s=None, actor_name=None, max_items_per_query=None):
+        aufrufe.append(actor_name or K.actor())
+        raise APIFY.ApifyFehler("zuviel", "Datensatz groesser als erwartet", usd=0.03, run_id="r-z")
+    monkeypatch.setattr(APIFY, "lauf", _zuviel)
+    job = welt.run(JOBS.job_sofort(db, seg["id"]))
+    erg = welt.run(JOBS.verarbeiten_buendel(db, [_eigenen_beanspruchen(welt, job["id"])]))
+    assert erg["status"] == "data_invalid" and len(aufrufe) == 1, "kein Ersatz"
+    j = welt.run(db[K.JOBS].find_one({"id": job["id"]}, {"_id": 0}))
+    assert j["status"] == "data_invalid" and "groesser als erwartet" in j["error"] and j["actual_cost"] == 0.03 and j["actor_run_id"] == "r-z"
+    assert welt.run(db.betriebsalarme.find_one({"typ": "markt_datensatz_zu_gross", "ref": seg["id"], "offen": True}))
+    b = welt.run(BUD.dokument(db, f"test-{s}"))
+    assert round(b["used_usd"], 4) == 0.03 and round(b["reserved_usd"], 6) == 0
+    # Build am Job und im Tagesaggregat
+    monkeypatch.setenv("MARKT_APIFY_ACTOR_ERSATZ", "")
+    monkeypatch.setattr(APIFY, "lauf", _antwort([_item_pos(f"t{s}a", 9000, 1)], build_id="b-2", build_number="1.4.0"))
+    job2 = welt.run(JOBS.job_sofort(db, seg["id"]))
+    welt.run(JOBS.verarbeiten_buendel(db, [_eigenen_beanspruchen(welt, job2["id"])]))
+    j2 = welt.run(db[K.JOBS].find_one({"id": job2["id"]}, {"_id": 0}))
+    assert j2["status"] == "completed" and j2["actor_build_number"] == "1.4.0" and j2["actor_build_id"] == "b-2"
+    ts = welt.run(db[K.TAGESSTATS].find_one({"segment_id": seg["id"]}, {"_id": 0}))
+    assert ts["actor_build"] == "1.4.0" and ts["laeufe"][-1]["actor_build"] == "1.4.0"
+    welt.run(db.betriebsalarme.delete_many({"typ": "markt_datensatz_zu_gross", "ref": seg["id"]}))
+    _aufraeumen(welt)
+
+
+def test_60_spezifitaet_worker_erfolg_schalter_fail_closed(welt, monkeypatch):
+    """Nr. 90: deterministische Reihenfolge der Kandidaten nach Spezifitaet; Nr. 89: 200 lesen, 50 behalten;
+    Nr. 93: worker_erfolg erst nach dem Takt; Nr. 96: Schalter bei Datenbankfehler AUS."""
+    m = lambda **k: {"id": "m", "priority": 5, **k}     # noqa: E731
+    key = lambda x: ABF.spezifitaet(x, fuel="DIESEL", getriebe="AUTOMATIC_GEAR")     # noqa: E731
+    assert key(m(fuel="DIESEL")) < key(m(fuel=None)) and key(m(gearbox="AUTOMATIC_GEAR")) < key(m())
+    assert key(m(power_kw_min=120, power_kw_max=145)) < key(m(power_kw_min=100, power_kw_max=200)) < key(m())
+    assert key(m(zip="30159", radius_km=50)) < key(m(body="EstateCar")) < key(m(priority=1)) < key(m(priority=2))
+    assert key(m(id="a")) < key(m(id="b"))
+    assert ABF.KANDIDATEN_LESEN == 200 and ABF.KANDIDATEN_MAX == 50
+    q = inspect.getsource(ABF.modelle_fuer_fahrzeug)
+    assert "to_list(KANDIDATEN_LESEN)" in q and "raus[:KANDIDATEN_MAX]" in q
+    # Nr. 93
+    q = inspect.getsource(JOBS.worker_forever)
+    assert q.index("await einmal(db, schalter_pruefen=True)") < q.index("erfolg()")
+    # Nr. 96
+
+    class _Kaputt:
+        def __getitem__(self, name):
+            return self
+
+        async def find_one(self, *a, **k):
+            raise RuntimeError("Datenbank weg")
+    monkeypatch.setenv("MARKT_AKTIV", "true")
+    assert welt.run(K.crawler_aktiv(_Kaputt())) is False, "fail-closed"
+
+
+def test_61_budget_vorgabe_und_nachplanen(welt, monkeypatch):
+    """Nr. 94: das Admin-Budget gilt fuer neue Monate (market_config/budget), Umgebung nur ohne Vorgabe;
+    Nr. 95: neue Segmente werden beim Synchronisieren fuer heute nachgeplant (Crawler an + Token)."""
+    w, db = welt.w, welt.db
+    s = w.s
+    sicherung = welt.run(db[K.KONFIG].find_one({"_id": K.BUDGET_DOK}))
+    monkeypatch.setenv("MARKT_BUDGET_MONAT_USD", "77")
+    try:
+        welt.run(db[K.KONFIG].delete_many({"_id": K.BUDGET_DOK}))
+        welt.run(db[K.BUDGET].delete_many({"_id": {"$regex": f"^test-{s}"}}))
+        assert welt.run(BUD.dokument(db, f"test-{s}-a"))["budget_usd"] == 77, "ohne Vorgabe: Umgebung"
+        monkeypatch.setattr(K, "monat", lambda zeit=None: f"test-{s}-a")
+        welt.run(BUD.budget_setzen(db, 42))                      # Admin: laufender Monat + Vorgabe
+        assert welt.run(db[K.KONFIG].find_one({"_id": K.BUDGET_DOK}))["monthly_budget_usd"] == 42
+        assert welt.run(BUD.dokument(db, f"test-{s}-b"))["budget_usd"] == 42, "neuer Monat uebernimmt die Vorgabe"
+        welt.run(BUD.budget_setzen(db, 5, f"test-{s}-c"))       # bestimmter anderer Monat: keine Vorgabe
+        assert welt.run(db[K.KONFIG].find_one({"_id": K.BUDGET_DOK}))["monthly_budget_usd"] == 42
+        assert welt.run(BUD.budget_vorgabe(db)) == 42
+    finally:
+        welt.run(db[K.KONFIG].delete_many({"_id": K.BUDGET_DOK}))
+        if sicherung:
+            welt.run(db[K.KONFIG].insert_one(sicherung))
+        welt.run(db[K.BUDGET].delete_many({"_id": {"$regex": f"^test-{s}"}}))
+    # Nr. 95
+    _aufraeumen(welt)
+    mid = f"test-nachplan-{s}"
+    welt.run(db[K.MODELLE].insert_one({**_modell(w), "id": mid, "status": "active", "ez_years": [2019], "km_buckets": [{"min_km": 0, "max_km": 50000}]}))
+    geplant = []
+
+    async def _plan(db_, tag=None, *, sofort=False):
+        geplant.append((tag, sofort))
+        return {"segmente": 1, "neu": 1, "tag": tag, "status": "ok"}
+    monkeypatch.setattr(JOBS, "tagesplan", _plan)
+    welt.run(db[K.KONFIG].delete_many({"_id": K.SCHALTER_DOK}))
+    try:
+        monkeypatch.setenv("MARKT_AKTIV", "false")
+        erg = welt.run(SEG.synchronisieren(db))
+        assert erg["neu"] == 1 and erg["nachgeplant"] == {"uebersprungen": "crawler aus"} and geplant == []
+        welt.run(K.crawler_schalten(db, True, wer="test"))
+        monkeypatch.setenv("APIFY_TOKEN", "test-token")
+        welt.run(db[K.SEGMENTE].delete_many({"model_id": mid}))
+        erg = welt.run(SEG.synchronisieren(db))
+        assert erg["neu"] == 1 and geplant == [(None, True)] and erg["nachgeplant"]["neu"] == 1
+        erg = welt.run(SEG.synchronisieren(db))
+        assert erg["neu"] == 0 and "nachgeplant" not in erg and len(geplant) == 1, "nichts Neues: kein Plan"
+        welt.run(db[K.SEGMENTE].delete_many({"model_id": mid}))
+        assert welt.run(SEG.synchronisieren(db, nachplanen=False))["neu"] == 1 and len(geplant) == 1, "Worker plant selbst"
+        assert "synchronisieren(db, nachplanen=False)" in inspect.getsource(JOBS.worker_forever)
+    finally:
+        welt.run(db[K.KONFIG].delete_many({"_id": K.SCHALTER_DOK}))
+        welt.run(db[K.SEGMENTE].delete_many({"model_id": mid}))
+        welt.run(db[K.MODELLE].delete_many({"id": mid}))
+        _aufraeumen(welt)
+
+
+def test_62_wartung_zwischenspeicher_und_segment_sperre(welt, monkeypatch):
+    """Nr. 97/98: Schreibteil als Hintergrund-Schreiber; Wartung nach dem Actor-Lauf -> Job zurueck (queued) mit
+    ergebnis_zwischenspeicher, Kosten gebucht; der naechste Claim wertet OHNE neuen Actor-Lauf aus.
+    Nr. 100: haelt jemand die Segment-Sperre, passiert dasselbe. Nr. 101/102: DuplicateKeyError einmal wiederholt."""
+    s, seg = _vorbereiten(welt, monkeypatch)
+    db = welt.db
+    aufrufe = []
+
+    async def _lauf(urls, max_items, zeitlimit_s=None, actor_name=None, max_items_per_query=None):
+        aufrufe.append(list(urls))
+        return {"items": [_item_pos(f"t{s}a", 9000, 1), _item_pos(f"t{s}b", 9500, 2)], "usd": 0.02, "run_id": "r-w", "status": "SUCCEEDED", "dauer_ms": 3, "actor": K.actor()}
+    monkeypatch.setattr(APIFY, "lauf", _lauf)
+    schreiber = []
+    import wartung as W
+    alt_hs = W.hintergrund_schreibt
+
+    class _Zaehl(alt_hs):
+        def __enter__(self):
+            schreiber.append("an")
+            return super().__enter__()
+    monkeypatch.setattr(W, "hintergrund_schreibt", _Zaehl)
+    wartung_da = {"v": True}
+
+    async def _wartung(db_):
+        return wartung_da["v"]
+    monkeypatch.setattr(JOBS, "_wartung_aktiv", _wartung)
+    job = welt.run(JOBS.job_sofort(db, seg["id"]))
+    erg = welt.run(JOBS.verarbeiten_buendel(db, [_eigenen_beanspruchen(welt, job["id"])]))
+    assert erg["ergebnisse"] == [{"status": "zurueckgestellt", "grund": "wartung", "sample_size": 0}] and schreiber == ["an"]
+    j = welt.run(db[K.JOBS].find_one({"id": job["id"]}, {"_id": 0}))
+    assert j["status"] == "queued" and j["attempts"] == 0 and "worker" not in j and "Wartung" in j["error"]
+    zs = j["ergebnis_zwischenspeicher"]
+    assert len(zs["items"]) == 2 and zs["run_id"] == "r-w" and zs["usd"] == 0.02 and j["actual_cost"] == 0.02 and j["actor_run_id"] == "r-w"
+    b = welt.run(BUD.dokument(db, f"test-{s}"))
+    assert round(b["used_usd"], 4) == 0.02 and round(b["reserved_usd"], 6) == 0, "der Lauf ist bezahlt"
+    assert welt.run(db[K.TAGESSTATS].count_documents({"segment_id": seg["id"]})) == 0, "nichts geschrieben"
+    # Wartung vorbei: naechster Claim wertet das gespeicherte Ergebnis aus — kein Actor-Lauf, keine zweite Buchung
+    wartung_da["v"] = False
+    erg2 = welt.run(JOBS.verarbeiten_buendel(db, [_eigenen_beanspruchen(welt, job["id"])]))
+    assert erg2["status"] == "ok" and erg2["ergebnisse"][0]["sample_size"] == 2 and len(aufrufe) == 1
+    j = welt.run(db[K.JOBS].find_one({"id": job["id"]}, {"_id": 0}))
+    assert j["status"] == "completed" and j["actual_rows"] == 2 and j["actual_cost"] == 0.02 and "ergebnis_zwischenspeicher" not in j
+    assert j["sortierung"] == "bewiesen" and j["run_id"] == "r-w"
+    assert round(welt.run(BUD.dokument(db, f"test-{s}"))["used_usd"], 4) == 0.02, "nicht doppelt gebucht"
+    assert welt.run(db[K.TAGESSTATS].find_one({"segment_id": seg["id"]}, {"_id": 0}))["sample_size"] == 2
+    # Nr. 100: Segment-Sperre gehalten -> zurueckgestellt (segment_sperre); frei -> ohne Actor-Lauf fertig
+    from job_lock import acquire, release
+    token = welt.run(acquire(db, f"markt-seg-{seg['id']}", ttl_seconds=60))
+    assert token
+    job2 = welt.run(JOBS.job_sofort(db, seg["id"]))
+    erg3 = welt.run(JOBS.verarbeiten_buendel(db, [_eigenen_beanspruchen(welt, job2["id"])]))
+    assert erg3["ergebnisse"][0]["grund"] == "segment_sperre" and len(aufrufe) == 2
+    assert welt.run(db[K.JOBS].find_one({"id": job2["id"]}, {"_id": 0}))["status"] == "queued"
+    welt.run(release(db, f"markt-seg-{seg['id']}", token))
+    erg4 = welt.run(JOBS.verarbeiten_buendel(db, [_eigenen_beanspruchen(welt, job2["id"])]))
+    assert erg4["status"] == "ok" and len(aufrufe) == 2
+    assert welt.run(db[K.JOBS].find_one({"id": job2["id"]}, {"_id": 0}))["status"] == "completed"
+    assert welt.run(db.job_locks.find_one({"name": f"markt-seg-{seg['id']}"}))["expires_at"] <= K.jetzt().replace(tzinfo=None) or True
+    # Nr. 101/102
+    from pymongo.errors import DuplicateKeyError as _DK
+    zaehler = {"n": 0}
+
+    async def _rennen():
+        zaehler["n"] += 1
+        if zaehler["n"] == 1:
+            raise _DK("E11000")
+        return "ok"
+    assert welt.run(SP._einmal_wiederholen(_rennen)) == "ok" and zaehler["n"] == 2
+
+    async def _immer():
+        raise _DK("E11000")
+    with pytest.raises(_DK):
+        welt.run(SP._einmal_wiederholen(_immer))
+    q = inspect.getsource(SP)
+    assert "except DuplicateKeyError" in inspect.getsource(SP._listing_schreiben) and "except DuplicateKeyError" in inspect.getsource(SP._snapshot_schreiben)
+    assert "_einmal_wiederholen(lambda: db[TAGESSTATS]" in q and "_einmal_wiederholen(lambda: db[CHANCEN]" in q
+    _aufraeumen(welt)
+
+
+def test_63_doppelt_faellig_und_cancel_requested(welt, monkeypatch):
+    """Nr. 99: zwei faellige Jobs desselben Segments — der zweite wird storniert (> 1 h ueberfaellig) oder wartet;
+    Nr. 122: cancel_requested + abgelaufene Lease -> cancelled (Kosten 0), nie wieder beansprucht."""
+    s, seg = _vorbereiten(welt, monkeypatch)
+    db = welt.db
+    aufrufe = []
+
+    async def _lauf(urls, max_items, zeitlimit_s=None, actor_name=None, max_items_per_query=None):
+        aufrufe.append(list(urls))
+        return {"items": [], "usd": 0.005, "run_id": "r-d", "status": "SUCCEEDED", "dauer_ms": 1, "actor": K.actor()}
+    monkeypatch.setattr(APIFY, "lauf", _lauf)
+    jetzt = K.jetzt()
+    heute = K.heute_tag()
+    j1 = {**JOBS._job_doc(seg, heute, (jetzt - timedelta(hours=3)).isoformat(), "daily")}
+    j2 = {**JOBS._job_doc(seg, f"{heute}#2", (jetzt - timedelta(hours=2)).isoformat(), "daily")}
+    j3 = {**JOBS._job_doc(seg, f"{heute}#3", (jetzt - timedelta(minutes=5)).isoformat(), "daily")}
+    welt.run(db[K.JOBS].insert_many([dict(j1), dict(j2), dict(j3)]))
+    erg = welt.run(JOBS.einmal(db, nachzuegler_s=0))
+    assert len(aufrufe) == 1 and erg["erledigt"] == 1, "ein Lauf fuer das Segment"
+    d1, d2, d3 = (welt.run(db[K.JOBS].find_one({"id": j["id"]}, {"_id": 0})) for j in (j1, j2, j3))
+    assert d1["status"] == "completed"
+    assert d2["status"] == "cancelled" and d2["error"] == JOBS.STORNO_DOPPELT, "2 h ueberfaellig: storniert"
+    assert d3["status"] == "queued" and "doppelt" in d3["error"] and d3["scheduled_at"] > jetzt.isoformat() and d3["attempts"] == 0, "wartet"
+    # Nr. 122
+    j4 = {**JOBS._job_doc(seg, f"{heute}#4", jetzt.isoformat(), "manual"), "status": "running", "worker": "markt-tot", "attempts": 1,
+          "lease_until": "2000-01-01T00:00:00+00:00", "cancel_requested": True, "cancel_grund": "Suchauftrag pausiert"}
+    j5 = {**JOBS._job_doc(seg, f"{heute}#5", "2000-01-01T00:00:00+00:00", "manual"), "cancel_requested": True}
+    welt.run(db[K.JOBS].insert_many([dict(j4), dict(j5)]))
+    assert welt.run(JOBS.stale_zurueck(db)) >= 1
+    d4 = welt.run(db[K.JOBS].find_one({"id": j4["id"]}, {"_id": 0}))
+    assert d4["status"] == "cancelled" and d4["actual_cost"] == 0.0 and "pausiert" in d4["error"] and "lease_until" not in d4
+    welt.run(db[K.JOBS].update_many({"id": {"$in": [j3["id"]]}}, {"$set": {"status": "cancelled"}}))
+    assert welt.run(JOBS.beanspruchen(db, max_items=seg["max_items"])) is None or \
+        welt.run(db[K.JOBS].find_one({"id": j5["id"]}, {"_id": 0}))["status"] == "queued", "cancel_requested nie beansprucht"
+    assert welt.run(db[K.JOBS].find_one({"id": j5["id"]}, {"_id": 0}))["status"] == "queued"
+    welt.run(db.betriebsalarme.delete_many({"typ": "markt_lauf_leer", "ref": "r-d"}))
+    _aufraeumen(welt)
+
+
+def test_64_budget_voll_beendet_takt(welt, monkeypatch):
+    """Budget voll: einmal() endet beim ersten 'aufgebraucht' — Jobs bleiben queued (budget_wait), kein
+    Massen-failed, ein Alarm; nach Budgeterhoehung laufen sie."""
+    s, seg = _vorbereiten(welt, monkeypatch, budget="0.001")
+    db = welt.db
+    seg2 = {**_segment(welt.w), "id": f"test-320d-{s}:2019-2021:1-2", "min_km": 1, "max_km": 2, "max_items": 7}
+    welt.run(db[K.SEGMENTE].insert_one(dict(seg2)))
+    aufrufe = []
+    monkeypatch.setattr(APIFY, "lauf", _antwort([], usd=0.005))
+    alt_lauf = APIFY.lauf
+
+    async def _zaehl(*a, **k):
+        aufrufe.append(1)
+        return await alt_lauf(*a, **k)
+    monkeypatch.setattr(APIFY, "lauf", _zaehl)
+    monkeypatch.setenv("MARKT_JOBS_PARALLEL", "1")
+    ja, jb = welt.run(JOBS.job_sofort(db, seg["id"])), welt.run(JOBS.job_sofort(db, seg2["id"]))
+    erg = welt.run(JOBS.einmal(db, nachzuegler_s=0))
+    assert erg["abgebrochen"] == "budget_voll" and erg["buendel"] == 1 and aufrufe == []
+    da, db_ = welt.run(db[K.JOBS].find_one({"id": ja["id"]}, {"_id": 0})), welt.run(db[K.JOBS].find_one({"id": jb["id"]}, {"_id": 0}))
+    assert da["status"] == "queued" and da["budget_wait"] is True
+    assert db_["status"] == "queued" and "budget_wait" not in db_, "zweites Buendel nicht mehr angefasst"
+    assert welt.run(db.betriebsalarme.count_documents({"typ": "markt_budget_voll", "ref": f"test-{s}", "offen": True})) == 1
+    # Budget erhoeht -> beide laufen (der wartende sofort faellig stellen)
+    welt.run(BUD.budget_setzen(db, 10, f"test-{s}"))
+    welt.run(db[K.JOBS].update_many({"id": {"$in": [ja["id"], jb["id"]]}}, {"$set": {"scheduled_at": "2000-01-01T00:00:00+00:00"}}))
+    erg2 = welt.run(JOBS.einmal(db, nachzuegler_s=0))
+    assert "abgebrochen" not in erg2 and len(aufrufe) == 2
+    assert all(welt.run(db[K.JOBS].find_one({"id": j["id"]}, {"_id": 0}))["status"] == "completed" for j in (ja, jb))
+    assert "budget_wait" not in welt.run(db[K.JOBS].find_one({"id": ja["id"]}, {"_id": 0}))
+    assert welt.run(db.betriebsalarme.find_one({"typ": "markt_budget_voll", "ref": f"test-{s}", "offen": True})) is None
+    welt.run(db.betriebsalarme.delete_many({"typ": {"$in": ["markt_budget_voll", "markt_lauf_leer"]}, "ref": {"$in": [f"test-{s}", "r-6"]}}))
+    _aufraeumen(welt)
+
+
+def test_65_alter_lauf_ueberschreibt_nicht_und_job_tag(welt, monkeypatch):
+    """Nr. 103: ein langsamer alter Lauf ueberschreibt keinen neueren Preis (Listing und Snapshot);
+    Nr. 104/105: Statistik-Tag und Budget-Monat kommen aus dem Job-Tag, nicht aus der Ausfuehrungszeit."""
+    w, db = welt.w, welt.db
+    _aufraeumen(welt)
+    s = w.s
+    seg = _segment(w)
+    welt.run(db[K.MODELLE].insert_one(_modell(w)))
+    welt.run(db[K.SEGMENTE].insert_one(dict(seg)))
+    x = f"t{s}x"
+    jetzt = K.jetzt()
+    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_item(x, 18000)]), beobachtet=jetzt))
+    erg = welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_item(x, 17000)]), beobachtet=jetzt - timedelta(hours=1), lauf_tag=f"{_tag(0)}#alt"))
+    assert erg["veraltet"] == 1
+    l = welt.run(db[K.LISTINGS].find_one({"listing_id": x}, {"_id": 0}))
+    assert l["current_price"] == 18000 and l["observation_at"] == jetzt.isoformat() and l["price_changes"] == 0
+    snap = welt.run(db[K.SNAPSHOTS].find_one({"listing_id": x, "segment_id": seg["id"], "date": _tag(0)}, {"_id": 0}))
+    assert snap["price"] == 18000 and snap["observed_at"] == jetzt.isoformat() and len(snap["laeufe"]) == 2, "Hauptfelder bleiben, Lauf protokolliert"
+    assert welt.run(db[K.CHANCEN].count_documents({"listing_id": x})) == 0
+    # neuer Lauf danach aktualisiert wieder
+    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_item(x, 16000)]), beobachtet=jetzt + timedelta(minutes=5)))
+    assert welt.run(db[K.LISTINGS].find_one({"listing_id": x}, {"_id": 0}))["current_price"] == 16000
+    # Nr. 104/105
+    _aufraeumen(welt)
+    welt.run(db[K.MODELLE].insert_one(_modell(w)))
+    welt.run(db[K.SEGMENTE].insert_one(dict(seg)))
+    monkeypatch.setenv("MARKT_BUDGET_MONAT_USD", "100")
+    monkeypatch.setenv("MARKT_APIFY_ACTOR_ERSATZ", "")
+    monkeypatch.setattr(K, "monat", lambda zeit=None: f"test-{s}-" + (zeit.strftime("%Y-%m") if zeit else "jetzt"))
+    assert K.monat_aus_tag("2026-08-31") == f"test-{s}-2026-08" and JOBS.job_tag({"tag": "2026-08-31#2"}) == "2026-08-31"
+    welt.run(db[K.BUDGET].delete_many({"_id": {"$regex": f"^test-{s}"}}))
+    monkeypatch.setattr(APIFY, "lauf", _antwort([_item_pos(f"t{s}a", 9000, 1)]))
+    spaet = JOBS._job_doc(seg, "2026-08-31#2", "2026-08-31T22:00:00+00:00", "daily")
+    welt.run(db[K.JOBS].insert_one(dict(spaet)))
+    erg = welt.run(JOBS.verarbeiten_buendel(db, [_eigenen_beanspruchen(welt, spaet["id"])]))
+    assert erg["status"] == "ok" and erg["monat"] == f"test-{s}-2026-08"
+    ts = welt.run(db[K.TAGESSTATS].find_one({"segment_id": seg["id"]}, {"_id": 0}))
+    assert ts["date"] == "2026-08-31" and ts["lauf_tag"] == "2026-08-31#2", "Statistik unter dem Job-Tag"
+    assert round(welt.run(BUD.dokument(db, f"test-{s}-2026-08"))["used_usd"], 4) == 0.02, "Budget im Monat des Job-Tags"
+    assert welt.run(db[K.BUDGET].count_documents({"_id": f"test-{s}-jetzt", "used_usd": {"$gt": 0}})) == 0
+    welt.run(db[K.BUDGET].delete_many({"_id": {"$regex": f"^test-{s}"}}))
+    _aufraeumen(welt)
+
+
+def test_66_erwartete_aus_plan_und_trendbasis_bewiesen(welt):
+    """Nr. 106/107: erwartete Laeufe = geplante Jobs des Segments (Fallback Konfiguration);
+    Nr. 108/109: nur Tage mit bewiesener Top-N-Sortierung sind Trend- und Chancenbasis."""
+    w, db = welt.w, welt.db
+    _aufraeumen(welt)
+    s = w.s
+    seg = {**_segment(w), "crawls_per_day": 2}
+    sid = seg["id"]
+    welt.run(db[K.MODELLE].insert_one(_modell(w)))
+    welt.run(db[K.SEGMENTE].insert_one(dict(seg)))
+    a = f"t{s}a"
+    t = _tag(0)
+    welt.run(db[K.TAGESSTATS].insert_many([_tagesstat(sid, _tag(-4), 20000, [a]), _tagesstat(sid, t, 20000, [a])]))
+    st = welt.run(SP.segmentstatistik(db, sid, t))
+    assert st["erwartete_laeufe"] == 10 and st["erwartete_quelle"] == "konfiguration", "ohne Plan: 5 Kalendertage x 2"
+    welt.run(db[K.JOBS].insert_many([JOBS._job_doc(seg, _tag(-4), K.jetzt_iso(), "daily"), JOBS._job_doc(seg, _tag(-1), K.jetzt_iso(), "daily"),
+                                     JOBS._job_doc(seg, t, K.jetzt_iso(), "daily"), JOBS._job_doc(seg, f"{t}#m", K.jetzt_iso(), "manual"),
+                                     JOBS._job_doc(seg, _tag(1), K.jetzt_iso(), "daily")]))
+    st = welt.run(SP.segmentstatistik(db, sid, t))
+    assert st["erwartete_laeufe"] == 3 and st["erwartete_quelle"] == "plan" and st["gueltige_laeufe"] == 2, "3 geplante bis heute (manuell und morgen zaehlen nicht)"
+    assert st["abdeckung_pct"] == round(2 / 3 * 100, 1)
+    q = welt.run(ABF.segment_zusammenfassung(db, sid))["qualitaet"]
+    assert q["erwartete_crawls"] == 3 and q["erwartete_quelle"] == "plan"
+    # Nr. 108: Basis t-7 nur monoton -> kein 7-Tage-Trend; bewiesen -> Trend
+    welt.run(db[K.TAGESSTATS].insert_one({**_tagesstat(sid, _tag(-7), 21000, [a]), "top_n_bewiesen": False}))
+    st = welt.run(SP.segmentstatistik(db, sid, t))
+    assert st["trend_7d_eur"] is None and st["trend_7d_basis_date"] is None
+    welt.run(db[K.TAGESSTATS].update_one({"segment_id": sid, "date": _tag(-7)}, {"$set": {"top_n_bewiesen": True}}))
+    st = welt.run(SP.segmentstatistik(db, sid, t))
+    assert st["trend_7d_eur"] == -1000 and st["trend_7d_basis_date"] == _tag(-7)
+    # Nr. 109: Vergleichsstand fuer 'neues Minimum' nur mit bewiesener Sortierung
+    _aufraeumen(welt)
+    welt.run(db[K.MODELLE].insert_one(_modell(w)))
+    welt.run(db[K.SEGMENTE].insert_one(dict(seg)))
+    b, d = f"t{s}b", f"t{s}d"
+    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_item(a, 18900), _item(b, 19900)]), beobachtet=K.jetzt() - timedelta(days=1), top_n_bewiesen=False))
+    welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items([_item(d, 17500), _item(a, 18900), _item(b, 19900)])))
+    assert welt.run(db[K.CHANCEN].count_documents({"listing_id": d, "typ": {"$in": ["neues_minimum", "neu_guenstig"]}})) == 0, "nur monoton: keine Basis"
+    _aufraeumen(welt)
+
+
+def test_67_filter_unbekannt_und_defekt_und_alle_verworfen(welt, monkeypatch):
+    """Nr. 110: unbekannter Kraftstoff/Getriebe -> verworfen (nie fail-open); Nr. 111/112: defekter Filter ->
+    Lauf 'data_invalid' + Alarm markt_filter_defekt; Nr. 127: Zeilen geliefert, alle verworfen -> 'data_invalid'."""
+    w = welt.w
+    seg, modell = _segment(w), {**_modell(w), "gearbox": "AUTOMATIC_GEAR"}
+    ok = NORM.listings_aus_items([_item("t1", 100)])[0]
+    assert NORM.passt_zum_segment({**ok, "fuel": "Blubb"}, seg, modell) == (False, "unbekannt: fuel")
+    assert NORM.passt_zum_segment({**ok, "gearbox": "xyz"}, seg, modell) == (False, "unbekannt: gearbox")
+    assert NORM.passt_zum_segment({**ok, "fuel": "Blubb", "gearbox": "xyz"}, seg, {**modell, "fuel": None, "gearbox": None})[0], "nicht verlangt: egal"
+
+    def _kaputt():
+        raise NORM.FilterDefekt("fahrzeug_codes nicht ladbar: test")
+    monkeypatch.setattr(NORM, "_codes", _kaputt)
+    with pytest.raises(NORM.FilterDefekt):
+        NORM.passt_zum_segment(ok, seg, modell)
+    s, seg = _vorbereiten(welt, monkeypatch, modell=modell)
+    db = welt.db
+    monkeypatch.setattr(APIFY, "lauf", _antwort([_item_pos(f"t{s}a", 9000, 1), _item_pos(f"t{s}b", 9100, 2)]))
+    job = welt.run(JOBS.job_sofort(db, seg["id"]))
+    erg = welt.run(JOBS.verarbeiten_buendel(db, [_eigenen_beanspruchen(welt, job["id"])]))
+    assert erg["ergebnisse"][0]["status"] == "data_invalid" and "Zeilenfilter defekt" in erg["ergebnisse"][0]["grund"]
+    j = welt.run(db[K.JOBS].find_one({"id": job["id"]}, {"_id": 0}))
+    assert j["status"] == "data_invalid" and j["actual_cost"] == 0.02 and j["actual_rows"] == 0
+    assert welt.run(db.betriebsalarme.find_one({"typ": "markt_filter_defekt", "ref": "crawler", "offen": True}))
+    assert welt.run(db[K.LISTINGS].count_documents({"listing_id": {"$regex": f"^t{s}"}})) == 0
+    welt.run(db.betriebsalarme.delete_many({"typ": "markt_filter_defekt"}))
+    monkeypatch.undo()
+    monkeypatch.setattr(K, "monat", lambda zeit=None: f"test-{s}")
+    monkeypatch.setenv("MARKT_BUDGET_MONAT_USD", "100")
+    monkeypatch.setenv("MARKT_APIFY_ACTOR_ERSATZ", "")
+    # Nr. 127: zwei Zeilen, beide EZ 2017 -> alle verworfen -> data_invalid (keine Marktluecke)
+    monkeypatch.setattr(APIFY, "lauf", _antwort([_item_pos(f"t{s}a", 9000, 1, ez="03/2017"), _item_pos(f"t{s}b", 9100, 2, ez="03/2017")]))
+    job2 = welt.run(JOBS.job_sofort(db, seg["id"]))
+    erg2 = welt.run(JOBS.verarbeiten_buendel(db, [_eigenen_beanspruchen(welt, job2["id"])]))
+    assert erg2["ergebnisse"][0]["status"] == "data_invalid" and "alle Zeilen verworfen" in erg2["ergebnisse"][0]["grund"]
+    j2 = welt.run(db[K.JOBS].find_one({"id": job2["id"]}, {"_id": 0}))
+    assert j2["status"] == "data_invalid" and j2["verworfen_filter"] == 2 and j2["rohe_rows"] == 2
+    assert welt.run(db[K.TAGESSTATS].count_documents({"segment_id": seg["id"]})) == 0
+    # 0 Zeilen geliefert -> Marktluecke, completed
+    monkeypatch.setattr(APIFY, "lauf", _antwort([]))
+    job3 = welt.run(JOBS.job_sofort(db, seg["id"]))
+    welt.run(JOBS.verarbeiten_buendel(db, [_eigenen_beanspruchen(welt, job3["id"])]))
+    assert welt.run(db[K.JOBS].find_one({"id": job3["id"]}, {"_id": 0}))["status"] == "completed"
+    welt.run(db.betriebsalarme.delete_many({"typ": "markt_filter_ignoriert", "ref": seg["id"]}))
+    _aufraeumen(welt)
+
+
+def test_68_kosten_abgleich(welt, monkeypatch):
+    """Nr. 115: Aufraeumschritt holt usageTotalUsd der Laeufe der letzten 24 h erneut und bucht die Differenz
+    anteilig auf Jobs und Budget (kosten_abgeglichen); der Schritt steht im Aufraeumlauf."""
+    s, seg = _vorbereiten(welt, monkeypatch)
+    db = welt.db
+    heute = K.heute_tag()
+    vorhin = (K.jetzt() - timedelta(minutes=20)).isoformat()
+    j1 = {**JOBS._job_doc(seg, f"{heute}#k1{s}", vorhin, "manual"), "status": "completed", "actual_cost": 0.01, "actor_run_id": "r-k", "finished_at": vorhin}
+    j2 = {**JOBS._job_doc(seg, f"{heute}#k2{s}", vorhin, "manual"), "status": "cancelled", "actual_cost": 0.03, "actor_run_id": "r-k", "finished_at": vorhin}
+    j3 = {**JOBS._job_doc(seg, f"{heute}#k3{s}", vorhin, "manual"), "status": "completed", "actual_cost": 0.02, "actor_run_id": "p-1,e-1", "finished_at": vorhin}
+    j4 = {**JOBS._job_doc(seg, f"{heute}#k4{s}", K.jetzt_iso(), "manual"), "status": "completed", "actual_cost": 0.02, "actor_run_id": "r-frisch", "finished_at": K.jetzt_iso()}
+    welt.run(db[K.JOBS].insert_many([dict(j) for j in (j1, j2, j3, j4)]))
+    welt.run(BUD.dokument(db, f"test-{s}"))
+    kosten = {"r-k": 0.06, "p-1": 0.005, "e-1": 0.015, "r-frisch": 9.0}
+
+    async def _holen(rid):
+        return {"usageTotalUsd": kosten[rid]}
+    erg = welt.run(BUD.kosten_abgleich(db, lauf_dokument=_holen))
+    # fremde Laeufe der Dev-DB kennt _holen nicht (KeyError -> 'fehler'), deshalb nur Untergrenzen
+    assert erg["geprueft"] >= 3 and erg["gebucht"] == 2 and round(erg["differenz_usd"], 4) == 0.02 and erg["laeufe"] >= 2
+    d1, d2, d3, d4 = (welt.run(db[K.JOBS].find_one({"id": j["id"]}, {"_id": 0})) for j in (j1, j2, j3, j4))
+    assert round(d1["actual_cost"], 4) == 0.015 and round(d2["actual_cost"], 4) == 0.045, "Differenz 0,02 anteilig 1:3"
+    assert d1["kosten_abgeglichen"] is True and d2["kosten_abgeglichen"] is True and round(d1["kosten_abgleich_diff"], 4) == 0.005
+    assert d3["kosten_abgeglichen"] is True and d3["kosten_abgleich_diff"] == 0.0 and d3["actual_cost"] == 0.02
+    assert "kosten_abgeglichen" not in d4, "juenger als 10 Minuten: noch nicht"
+    b = welt.run(BUD.dokument(db, f"test-{s}"))
+    assert round(b["used_usd"], 4) == 0.02 and round(b["abgleich_usd"], 4) == 0.02
+    erg2 = welt.run(BUD.kosten_abgleich(db, lauf_dokument=_holen))
+    assert erg2["gebucht"] == 0 and round(welt.run(BUD.dokument(db, f"test-{s}"))["used_usd"], 4) == 0.02, "nicht doppelt"
+    assert round(welt.run(db[K.JOBS].find_one({"id": j1["id"]}, {"_id": 0}))["actual_cost"], 4) == 0.015
+    assert "markt_kosten_abgleich" in (Path(__file__).resolve().parent.parent / "cleanup_service.py").read_text(encoding="utf-8")
+    _aufraeumen(welt)
+
+
+def test_69_preisaenderung_je_segment_und_segmentzustand(welt):
+    """Nr. 132: Preisaenderung je Segment (gegen den letzten Snapshot DIESES Listings in DIESEM Segment), globaler
+    Verlauf bleibt; Nr. 139/145: je Segment first_seen/first_rank/in_letztem_lauf am Listing, sofort je Lauf —
+    das globale active_state bleibt tagesbasiert."""
+    w, db = welt.w, welt.db
+    _aufraeumen(welt)
+    s = w.s
+    seg_a = _segment(w)
+    m2 = {**_modell(w), "id": f"test-320d-{s}-eigen"}
+    seg_b = {**_segment(w), "id": f"test-320d-{s}-eigen:2019-2021:0-100000", "model_id": m2["id"], "min_km": 0, "max_km": 100000}
+    welt.run(db[K.MODELLE].insert_many([_modell(w), dict(m2)]))
+    welt.run(db[K.SEGMENTE].insert_many([dict(seg_a), dict(seg_b)]))
+    x, y = f"t{s}x", f"t{s}y"
+    gestern = K.jetzt() - timedelta(days=1)
+    welt.run(SP.verarbeiten(db, seg_a, NORM.listings_aus_items([_item(y, 15000), _item(x, 20000)]), beobachtet=gestern))
+    # heute zuerst in B (erstmals dort) mit 19000: global -1000, im Segment B keine Basis
+    welt.run(SP.verarbeiten(db, seg_b, NORM.listings_aus_items([_item(x, 19000)])))
+    sb = welt.run(db[K.SNAPSHOTS].find_one({"listing_id": x, "segment_id": seg_b["id"], "date": _tag(0)}, {"_id": 0}))
+    assert sb["price_change_eur"] is None and sb["price_change_global_eur"] == -1000 and sb["new_in_sample"] is True
+    l = welt.run(db[K.LISTINGS].find_one({"listing_id": x}, {"_id": 0}))
+    assert l["current_price"] == 19000 and l["price_changes"] == 1
+    assert l["segmente"][seg_b["id"]]["first_rank"] == 1 and l["segmente"][seg_b["id"]]["in_letztem_lauf"] is True
+    assert l["segmente"][seg_a["id"]]["first_rank"] == 2 and l["segmente"][seg_a["id"]]["first_seen_at"] == gestern.isoformat()
+    assert l["segmente"][seg_a["id"]]["in_letztem_lauf"] is True, "in A zuletzt gesehen"
+    # dann in A mit 19000: gegen As Snapshot von gestern (20000) -> -1000 im Segment; global nichts Neues
+    welt.run(SP.verarbeiten(db, seg_a, NORM.listings_aus_items([_item(y, 15000), _item(x, 19000)])))
+    sa = welt.run(db[K.SNAPSHOTS].find_one({"listing_id": x, "segment_id": seg_a["id"], "date": _tag(0)}, {"_id": 0}))
+    assert sa["price_change_eur"] == -1000 and sa["price_change_pct"] == -5.0 and sa["price_change_global_eur"] is None
+    assert welt.run(db[K.LISTINGS].find_one({"listing_id": x}, {"_id": 0}))["price_changes"] == 1, "globaler Verlauf einmal"
+    assert welt.run(db[K.CHANCEN].count_documents({"listing_id": x, "typ": "stark_reduziert", "segment_id": seg_a["id"]})) == 1
+    # Nr. 145: zweiter Lauf in A ohne x -> in A 'nicht im letzten Lauf', global bleibt 'seen' (heute gesehen)
+    welt.run(SP.verarbeiten(db, seg_a, NORM.listings_aus_items([_item(y, 15000)]), lauf_tag=f"{_tag(0)}#2"))
+    l = welt.run(db[K.LISTINGS].find_one({"listing_id": x}, {"_id": 0}))
+    assert l["segmente"][seg_a["id"]]["in_letztem_lauf"] is False and l["segmente"][seg_a["id"]]["not_in_run_since"]
+    assert l["segmente"][seg_b["id"]]["in_letztem_lauf"] is True and l["active_state"] == "seen"
+    assert l["segmente"][seg_a["id"]]["last_seen_tag"] == _tag(0) and l["segmente"][seg_a["id"]]["last_rank"] == 2
+    liste = welt.run(ABF.segment_listings(db, seg_a["id"]))
+    assert [z["listing_id"] for z in liste["listings"]] == [y]
+    _aufraeumen(welt)

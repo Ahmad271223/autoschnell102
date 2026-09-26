@@ -19,7 +19,9 @@ from markt.konfig import JOBS, MODELLE
 STATUS = ("active", "paused", "archived")
 KRAFTSTOFFE = ("", "PETROL", "DIESEL", "HYBRID", "HYBRID_DIESEL", "ELECTRICITY", "LPG", "CNG")
 GETRIEBE = ("", "MANUAL_GEAR", "AUTOMATIC_GEAR", "SEMIAUTOMATIC_GEAR")
-VERKAEUFER = ("", "DEALER", "FSBO")
+# Reparaturwelle 6 Nr. 84: intern nur DEALER/PRIVATE (mobile.de-URL uebersetzt PRIVATE -> FSBO in url.py);
+# alte Eingaben/Dokumente mit FSBO werden beim Pruefen und beim Synchronisieren normalisiert
+VERKAEUFER = ("", "DEALER", "PRIVATE")
 # Review 26.09.2026 abends P7: Karosserie als mobile.de-Code (c=), "" = alle
 KAROSSERIE = ("",) + normalisieren.KAROSSERIE_CODES
 ROWS_MAX = 100
@@ -42,6 +44,10 @@ def definition_hash(m: Dict[str, Any]) -> str:
                 werte[k] = int(w)
             except (TypeError, ValueError):
                 werte[k] = str(w)
+        elif k == "seller_type":
+            # Nr. 84: FSBO und PRIVATE sind dieselbe Verkaeuferart — derselbe Fingerabdruck
+            s = str(w).strip().upper()
+            werte[k] = normalisieren.VERKAEUFER_CODES.get(s, s)
         else:
             werte[k] = str(w).strip().upper() if k in ("fuel", "gearbox", "seller_type", "country") else str(w).strip()
     return hashlib.sha256(json.dumps(werte, sort_keys=True, ensure_ascii=True).encode("utf-8")).hexdigest()[:24]
@@ -128,6 +134,7 @@ def entwurf_pruefen(e: Dict[str, Any], *, bestehend: Optional[Dict[str, Any]] = 
     if gearbox not in GETRIEBE:
         raise Ungueltig(f"Getriebe {gearbox} unbekannt")
     seller = str(e.get("seller_type") or "").upper().strip()
+    seller = normalisieren.VERKAEUFER_CODES.get(seller, seller)          # Nr. 84: FSBO/PRIVAT -> PRIVATE, HAENDLER -> DEALER
     if seller not in VERKAEUFER:
         raise Ungueltig("Verkäuferart unbekannt")
     # P7: Karosserie als Code; Beschriftungen aus dem alten Freitextfeld ("Kombi", "SUV") werden zugeordnet

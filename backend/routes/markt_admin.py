@@ -284,6 +284,9 @@ async def admin_market_crawl_now(segment_id: str, admin=Depends(current_super_ad
         raise HTTPException(400, "APIFY_TOKEN fehlt")
     try:
         job = await jobs.job_sofort(db, segment_id)
+    except jobs.SchonEingereiht as e:
+        # Reparaturwelle 6 Nr. 77: Doppelklick / laufender Job -> 409 mit Klartext, kein zweiter Job
+        raise HTTPException(409, str(e))
     except ValueError as e:
         # Review 26.09.2026 Nr. 52: inaktives Segment -> 400 mit Klartext (nicht gefunden -> 404)
         raise HTTPException(404 if "nicht gefunden" in str(e) else 400, str(e))

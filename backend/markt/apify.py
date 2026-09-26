@@ -31,14 +31,20 @@ BASIS = "https://api.apify.com/v2"
 ENDZUSTAENDE = {"SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT", "TIMING-OUT", "ABORTING"}
 POLL_VERSUCHE = 3           # Nr. 67: so oft wird ein fehlgeschlagenes Polling wiederholt
 POLL_BACKOFF_S = (5, 10, 20)
-# Nr. 68: bei diesen Fehlerarten laeuft NIE der Ersatz-Scraper
-OHNE_ERSATZ = ("token", "guthaben", "limit")
+# Nr. 68: bei diesen Fehlerarten laeuft NIE der Ersatz-Scraper. Reparaturwelle 6 Nr. 87: 'zuviel'
+# (Datensatz groesser als bestellt) ist ein Datenfehler des Laufs — kein Ersatz, Job 'data_invalid'
+OHNE_ERSATZ = ("token", "guthaben", "limit", "zuviel")
+DATENSATZ_PUFFER = 20       # Nr. 87: abgerufen wird hoechstens bestellte Zeilen x 2 + 20
+
+
+def datensatz_limit(max_items: int) -> int:
+    return int(max(1, int(max_items or 1)) * 2 + DATENSATZ_PUFFER)
 
 
 class ApifyFehler(RuntimeError):
     def __init__(self, art: str, detail: str = "", *, usd: Optional[float] = None, run_id: Optional[str] = None):
         super().__init__(f"{art}: {detail}"[:300])
-        self.art = art          # token | guthaben | limit | zeit | ausfall | poll | leer
+        self.art = art          # token | guthaben | limit | zeit | ausfall | poll | leer | zuviel
         self.detail = detail[:300]
         # Nr. 14/67: Kosten, die der (abgebrochene) Lauf schon verursacht hat, und seine ID
         self.usd = usd
@@ -62,6 +68,7 @@ def eingabe(actor_name: str, start_urls: List[str], max_items: int,
             max_items_per_query: Optional[int] = None) -> Dict[str, Any]:
     """Actor-Eingabe je Scraper: URL-Form und Zusatzfelder. scrapesmith kann
     mehrere Suchen je Lauf mit Obergrenze je Suche (maxItemsPerQuery)."""
+    actor_name = konfig.actor_und_build(actor_name)[0]
     form = konfig.start_urls_form(actor_name)
     urls = [{"url": u} for u in start_urls] if form == "objekt" else list(start_urls)
     e: Dict[str, Any] = {"startUrls": urls, "maxItems": int(max_items)}
@@ -100,13 +107,32 @@ async def _abbrechen(client: httpx.AsyncClient, run_id: str, kopf: Dict[str, str
         log.warning("Market-Scraper: Lauf %s konnte nicht abgebrochen werden", run_id)
 
 
+async def lauf_dokument(run_id: str) -> Optional[Dict[str, Any]]:
+    """Nr. 115: das Lauf-Dokument (usageTotalUsd, buildNumber, ...) eines Actor-Laufs — fuer die
+    Kostenabstimmung nach dem Lauf. None bei Fehler."""
+    tok = konfig.token()
+    if not tok or not run_id:
+        return None
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=20.0), verify=_SSL) as client:
+        rr = await client.get(f"{BASIS}/actor-runs/{run_id}", headers={"Authorization": f"Bearer {tok}"})
+        if rr.status_code >= 400:
+            raise _fehler_aus_status(rr.status_code, rr.text, run_id=run_id)
+        return (rr.json() or {}).get("data") or None
+
+
 async def lauf(start_urls: List[str], max_items: int, *, zeitlimit_s: Optional[int] = None,
                actor_name: Optional[str] = None, max_items_per_query: Optional[int] = None) -> Dict[str, Any]:
-    """{"items": [...], "usd": float|None, "run_id": str, "status": str, "dauer_ms": int, "actor": str, "laeufe": 1}."""
+    """{"items": [...], "usd": float|None, "run_id": str, "status": str, "dauer_ms": int, "actor": str, "laeufe": 1,
+    "build_id": str|None, "build_number": str|None}.
+    Reparaturwelle 6 Nr. 87: der Datensatz wird mit `limit` (bestellte Zeilen x 2 + 20) abgerufen —
+    kommen so viele Zeilen, hat der Actor die Bestellung ignoriert: ApifyFehler 'zuviel' (der Job
+    endet 'data_invalid', kein Ersatz). Nr. 113/114: 'name@build' pinnt den Actor (?build=), die
+    Build-Kennung des Laufs wird mitgeliefert."""
     tok = konfig.token()
     if not tok:
         raise ApifyFehler("token", "APIFY_TOKEN fehlt")
-    actor_name = actor_name or konfig.actor()
+    actor_voll = actor_name or konfig.actor()
+    actor_name, build = konfig.actor_und_build(actor_voll)
     zeitlimit = int(zeitlimit_s or konfig.lauf_zeitlimit_s())
     kopf = {"Authorization": f"Bearer {tok}"}
     start_usd = konfig.preise_je_actor(actor_name)[0]
@@ -114,7 +140,7 @@ async def lauf(start_urls: List[str], max_items: int, *, zeitlimit_s: Optional[i
     async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=20.0), verify=_SSL) as client:
         # ---- Start: ein Fehler hier hat noch nichts gekostet (kein Lauf) ----
         r = await client.post(f"{BASIS}/acts/{actor_name}/runs",
-                              params={"timeout": zeitlimit}, headers=kopf,
+                              params={"timeout": zeitlimit, **({"build": build} if build else {})}, headers=kopf,
                               json=eingabe(actor_name, start_urls, max_items, max_items_per_query))
         if r.status_code >= 400:
             raise _fehler_aus_status(r.status_code, r.text)
@@ -158,8 +184,9 @@ async def lauf(start_urls: List[str], max_items: int, *, zeitlimit_s: Optional[i
             await asyncio.sleep(POLL_BACKOFF_S[min(poll_fehler - 1, len(POLL_BACKOFF_S) - 1)])
         if status != "SUCCEEDED":
             raise ApifyFehler("ausfall", f"Lauf {run_id} endete mit {status}", usd=start_usd, run_id=run_id)
+        grenze = datensatz_limit(max_items)
         ri = await client.get(f"{BASIS}/datasets/{dataset_id}/items",
-                              params={"clean": "1", "format": "json"}, headers=kopf)
+                              params={"clean": "1", "format": "json", "limit": grenze}, headers=kopf)
         if ri.status_code >= 400:
             raise _fehler_aus_status(ri.status_code, ri.text, usd=start_usd, run_id=run_id)
         items = ri.json()
@@ -167,8 +194,14 @@ async def lauf(start_urls: List[str], max_items: int, *, zeitlimit_s: Optional[i
             raise ApifyFehler("ausfall", "unerwartete Antwortform", usd=start_usd, run_id=run_id)
         items = [i for i in items if isinstance(i, dict)]
         usd = kosten_aus_lauf(actor_name, daten, len(items))
+        if len(items) >= grenze:
+            # Nr. 87: der Actor hat weit mehr geliefert als bestellt (maxItems ignoriert) — der Rest bleibt
+            # bei Apify, nichts davon ist eine gueltige Stichprobe; Kosten sind angefallen
+            raise ApifyFehler("zuviel", f"Lauf {run_id}: Datensatz groesser als erwartet (>= {grenze} Zeilen bei {max_items} bestellt)",
+                              usd=usd, run_id=run_id)
     return {"items": items, "usd": usd, "run_id": run_id, "status": status,
-            "dauer_ms": int((time.perf_counter() - t0) * 1000), "actor": actor_name, "laeufe": 1}
+            "dauer_ms": int((time.perf_counter() - t0) * 1000), "actor": actor_voll, "laeufe": 1,
+            "build_id": daten.get("buildId") or None, "build_number": daten.get("buildNumber") or None}
 
 
 async def lauf_mit_ersatz(start_urls: List[str], max_items: int, *, zeitlimit_s: Optional[int] = None,
@@ -211,6 +244,7 @@ async def lauf_mit_ersatz(start_urls: List[str], max_items: int, *, zeitlimit_s:
     usd = primaer_usd
     run_ids = [primaer_run] if primaer_run else []
     dauer = 0
+    build: Dict[str, Any] = {}
     for u, je in zip(start_urls, je_url):
         rr = await lauf([u], int(je), zeitlimit_s=zeitlimit_s, actor_name=ersatz)
         if len(start_urls) > 1:
@@ -220,6 +254,7 @@ async def lauf_mit_ersatz(start_urls: List[str], max_items: int, *, zeitlimit_s:
         usd += float(rr.get("usd") or 0)
         run_ids.append(str(rr.get("run_id") or ""))
         dauer += int(rr.get("dauer_ms") or 0)
+        build = {"build_id": rr.get("build_id"), "build_number": rr.get("build_number")}
     return {"items": items, "usd": round(usd, 4), "run_id": ",".join(x for x in run_ids if x), "status": "SUCCEEDED",
             "dauer_ms": dauer, "actor": ersatz, "ersatz_grund": erster, "laeufe": primaer_laeufe + len(start_urls),
-            "primaer_usd": round(primaer_usd, 4), "primaer_run_id": primaer_run or None}
+            "primaer_usd": round(primaer_usd, 4), "primaer_run_id": primaer_run or None, **build}

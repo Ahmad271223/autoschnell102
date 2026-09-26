@@ -58,6 +58,9 @@ SCHALTER_DOK = "crawler"      # market_config/_id=crawler: {"aktiv": bool} — K
 TAGESPLAN_DOK = "tagesplan"
 ENTFERNUNG_DOK = "entfernung"
 INDIZES_DOK = "indizes"
+# Reparaturwelle 6 Nr. 94: das im Admin gesetzte Monatsbudget gilt auch fuer KOMMENDE Monate
+# (market_config/budget {monthly_budget_usd}); die Umgebung ist nur die Vorbelegung, wenn nichts gesetzt ist
+BUDGET_DOK = "budget"
 # Nr. 17: nach dem Zeilenfilter fehlen Zeilen ("Top 10" waere sonst Top 7) — deshalb je Segment
 # rows + Puffer abrufen (+30 %, hoechstens +10) und danach auf rows kuerzen. Konstante, keine
 # Umgebungsvariable; Reservierung, Prognose und Taktung rechnen mit dem Puffer.
@@ -82,11 +85,13 @@ def aktiv() -> bool:
 async def crawler_aktiv(db) -> bool:
     """Crawler an? (Planer + Worker.) Wunsch Ahmad 26.09.2026: ein Knopf im Admin statt
     Umgebungsvariable — der gespeicherte Schalter (market_config/crawler) geht vor
-    MARKT_AKTIV; fehlt er, gilt die Umgebung. Lesewege haengen nicht daran."""
+    MARKT_AKTIV; fehlt er, gilt die Umgebung. Lesewege haengen nicht daran.
+    Reparaturwelle 6 Nr. 96: kann der Schalter nicht gelesen werden (Datenbank-Stoerung),
+    gilt AUS — vorher fiel er still auf die Umgebung zurueck (fail-open)."""
     try:
         doc = await db[KONFIG].find_one({"_id": SCHALTER_DOK}, {"_id": 0, "aktiv": 1})
     except Exception:  # noqa: BLE001
-        doc = None
+        return False
     if doc and "aktiv" in doc:
         return bool(doc["aktiv"])
     return aktiv()
@@ -140,11 +145,21 @@ def actor() -> str:
     return (os.environ.get("MARKT_APIFY_ACTOR") or "").strip() or ACTOR_STANDARD
 
 
+def actor_und_build(actor_name: str) -> tuple:
+    """Reparaturwelle 6 Nr. 113: der Scraper darf gepinnt werden — 'name@1.2.3' oder
+    'name@latest' (Build-Tag/-Nummer, Apify ?build=). Liefert (Actor-Pfad, Build oder '')."""
+    s = str(actor_name or "").strip()
+    if "@" in s:
+        name, build = s.split("@", 1)
+        return name.strip(), build.strip()
+    return s, ""
+
+
 def actor_ersatz() -> str:
     """Leer = kein Ersatz. Standard: der andere bekannte Scraper."""
     w = os.environ.get("MARKT_APIFY_ACTOR_ERSATZ")
     if w is None:
-        return ACTOR_ERSATZ if actor() != ACTOR_ERSATZ else ""
+        return ACTOR_ERSATZ if actor_und_build(actor())[0] != ACTOR_ERSATZ else ""
     return w.strip()
 
 
@@ -152,7 +167,7 @@ def start_urls_form(actor_name: str) -> str:
     """'objekt' ({"url": ...}) oder 'text' (nackte URL) — je Scraper verschieden.
     MARKT_APIFY_URL_FORM erzwingt eine Form fuer den Standard-Scraper."""
     erzwungen = (os.environ.get("MARKT_APIFY_URL_FORM") or "").strip().lower()
-    if erzwungen in ("objekt", "text") and actor_name == actor():
+    if erzwungen in ("objekt", "text") and actor_und_build(actor_name)[0] == actor_und_build(actor())[0]:
         return erzwungen
     return "text" if actor_name.startswith("sourabhbgp") else "objekt"
 
@@ -320,6 +335,16 @@ def heute_tag(zeit: datetime | None = None) -> str:
 
 def monat(zeit: datetime | None = None) -> str:
     return (zeit or jetzt()).astimezone(ZEITZONE).strftime("%Y-%m")
+
+
+def monat_aus_tag(tag: str) -> str:
+    """Reparaturwelle 6 Nr. 105: der Budget-Monat eines Jobs kommt aus seinem Tag (YYYY-MM-DD),
+    nicht aus der Ausfuehrungszeit — ein Lauf nach Mitternacht am Monatsende bucht im alten Monat."""
+    try:
+        d = datetime.strptime(str(tag)[:10], "%Y-%m-%d").replace(tzinfo=ZEITZONE, hour=12)
+    except (TypeError, ValueError):
+        return monat()
+    return monat(d)
 
 
 def fenster_start(tag: str) -> datetime:

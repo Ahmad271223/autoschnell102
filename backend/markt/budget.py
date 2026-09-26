@@ -10,9 +10,20 @@ Review 26.09.2026 Nr. 47: jede Reservierung ist ein Eintrag
 reserved_usd ist die Summe der offenen Eintraege ($inc beim Anlegen und
 Loesen). Stirbt der Worker zwischen Reservieren und Abrechnen, gibt
 verfallene_freigeben() den Eintrag nach Ablauf (Lease + 60 s) wieder frei —
-Aufruf vor jedem Claim (jobs.einmal) und im Aufraeumlauf."""
+Aufruf vor jedem Claim (jobs.einmal) und im Aufraeumlauf.
+
+Reparaturwelle 6 (Review 26.09.2026 abends):
+  * Nr. 94: das im Admin gesetzte Budget steht in market_config/budget
+    (monthly_budget_usd) und wird fuer jeden NEUEN Monat uebernommen; die
+    Umgebung (MARKT_BUDGET_MONAT_USD) gilt nur, solange nichts gesetzt ist
+  * Nr. 104/105: reservieren(monat=...) — verspaetete Jobs buchen im Monat
+    ihres Job-Tags, nicht im Monat der Ausfuehrung
+  * Nr. 115: kosten_abgleich — Apify bucht Zeilen erst nach dem Lauf; fuer
+    Laeufe der letzten 24 h wird usageTotalUsd erneut abgerufen und die
+    Differenz auf Budget und Jobs gebucht (kosten_abgeglichen)"""
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import timedelta
 from typing import Any, Dict, List, Optional
@@ -20,13 +31,31 @@ from typing import Any, Dict, List, Optional
 from pymongo import ReturnDocument
 
 from markt import konfig
+from markt.konfig import JOBS
+
+log = logging.getLogger(__name__)
+
+
+async def budget_vorgabe(db) -> float:
+    """Nr. 94: Vorbelegung fuer ein neues Monatsdokument — Admin-Wert vor Umgebung."""
+    try:
+        doc = await db[konfig.KONFIG].find_one({"_id": konfig.BUDGET_DOK}, {"_id": 0, "monthly_budget_usd": 1})
+    except Exception:  # noqa: BLE001
+        doc = None
+    if doc and doc.get("monthly_budget_usd") is not None:
+        try:
+            return float(doc["monthly_budget_usd"])
+        except (TypeError, ValueError):
+            pass
+    return konfig.budget_monat_usd()
 
 
 async def dokument(db, monat: Optional[str] = None) -> Dict[str, Any]:
     m = monat or konfig.monat()
+    vorgabe = await budget_vorgabe(db)
     await db[konfig.BUDGET].update_one(
         {"_id": m},
-        {"$setOnInsert": {"budget_usd": konfig.budget_monat_usd(), "reserved_usd": 0.0, "used_usd": 0.0,
+        {"$setOnInsert": {"budget_usd": vorgabe, "reserved_usd": 0.0, "used_usd": 0.0,
                           "rows": 0, "runs": 0, "reservierungen": [], "angelegt": konfig.jetzt_iso()}},
         upsert=True)
     d = await db[konfig.BUDGET].find_one({"_id": m}) or {}
@@ -36,15 +65,23 @@ async def dokument(db, monat: Optional[str] = None) -> Dict[str, Any]:
 
 
 async def budget_setzen(db, budget_usd: float, monat: Optional[str] = None) -> None:
+    """Budget des Monats setzen UND — ohne ausdruecklichen Monat (Admin: der laufende) — als Vorgabe
+    fuer kommende Monate merken (Nr. 94). Ein Wert fuer einen bestimmten anderen Monat aendert die
+    Vorgabe nicht."""
     await dokument(db, monat)
     await db[konfig.BUDGET].update_one({"_id": monat or konfig.monat()}, {"$set": {"budget_usd": float(budget_usd)}})
+    if monat is None:
+        await db[konfig.KONFIG].update_one({"_id": konfig.BUDGET_DOK},
+                                           {"$set": {"monthly_budget_usd": float(budget_usd), "updated_at": konfig.jetzt_iso()}},
+                                           upsert=True)
 
 
-async def reservieren(db, est_usd: float, *, ablauf_s: Optional[int] = None) -> Optional[Dict[str, Any]]:
+async def reservieren(db, est_usd: float, *, ablauf_s: Optional[int] = None,
+                      monat: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """{"monat", "est_usd", "id", "expires_at"} oder None (Budget voll). Atomar: nur wenn
     used + reserved + est <= budget. ablauf_s: Verfall der Reservierung (Standard
-    konfig.reservierung_ablauf_s = Lease + 60 s)."""
-    m = konfig.monat()
+    konfig.reservierung_ablauf_s = Lease + 60 s). monat (Nr. 105): Monat des Job-Tags."""
+    m = monat or konfig.monat()
     await dokument(db, m)
     est = round(float(est_usd), 4)
     rid = uuid.uuid4().hex
@@ -114,3 +151,70 @@ async def verfallene_freigeben(db) -> Dict[str, Any]:
         r = await db[konfig.BUDGET].update_one({"_id": d["_id"], "reservierungen": offen}, {"$set": {"reserved_usd": summe}})
         korrigiert += int(r.modified_count)
     return {"freigegeben": len(freigegeben), "usd": round(sum(f["usd"] for f in freigegeben), 4), "korrigiert": korrigiert}
+
+
+# ---------------------------------------------------------------- Nr. 115: Kostenabstimmung mit Apify
+ABGLEICH_FENSTER_H = 24         # Laeufe der letzten 24 h
+ABGLEICH_FRUEHESTENS_MIN = 10   # Apify bucht Zeilen erst kurz nach dem Lauf — nicht frueher abgleichen
+ABGLEICH_MAX_JE_LAUF = 200      # hoechstens so viele Jobs je Aufraeumlauf (API-Aufrufe)
+
+
+async def kosten_abgleich(db, *, lauf_dokument=None) -> Dict[str, Any]:
+    """Aufraeumschritt: fuer abgeschlossene Jobs mit actor_run_id (letzte 24 h, noch nicht
+    abgeglichen) usageTotalUsd der Laeufe erneut abrufen; die Differenz zur gebuchten Summe
+    wird anteilig auf die Jobs desselben Laufs verteilt und im Budget (Monat des Job-Tags)
+    nachgebucht. Wirft nie; ohne Token passiert nichts."""
+    from markt import apify
+    holen = lauf_dokument or apify.lauf_dokument
+    if not konfig.token() and lauf_dokument is None:
+        return {"geprueft": 0, "gebucht": 0, "differenz_usd": 0.0, "uebersprungen": "kein Token"}
+    jetzt = konfig.jetzt()
+    seit = (jetzt - timedelta(hours=ABGLEICH_FENSTER_H)).isoformat()
+    bis = (jetzt - timedelta(minutes=ABGLEICH_FRUEHESTENS_MIN)).isoformat()
+    jobs = await db[JOBS].find({"actor_run_id": {"$nin": [None, ""]}, "actual_cost": {"$ne": None},
+                                "kosten_abgeglichen": {"$ne": True}, "finished_at": {"$gte": seit, "$lte": bis},
+                                "status": {"$in": ["completed", "cancelled", "data_invalid", "failed"]}},
+                               {"_id": 0, "id": 1, "actor_run_id": 1, "actual_cost": 1, "tag": 1, "actor": 1}).to_list(ABGLEICH_MAX_JE_LAUF)
+    gruppen: Dict[str, List[Dict[str, Any]]] = {}
+    for j in jobs:
+        gruppen.setdefault(str(j["actor_run_id"]), []).append(j)
+    geprueft = gebucht = 0
+    differenz_gesamt = 0.0
+    fehler = 0
+    for run_ids, liste in gruppen.items():
+        echt = 0.0
+        ok = True
+        for rid in [x for x in run_ids.split(",") if x]:
+            try:
+                d = await holen(rid)
+            except Exception:  # noqa: BLE001
+                ok = False
+                break
+            if not d or d.get("usageTotalUsd") is None:
+                ok = False
+                break
+            echt += float(d.get("usageTotalUsd") or 0)
+        geprueft += len(liste)
+        if not ok:
+            fehler += 1
+            continue
+        bisher = round(sum(float(j.get("actual_cost") or 0) for j in liste), 4)
+        diff = round(echt - bisher, 4)
+        monat = konfig.monat_aus_tag(str(liste[0].get("tag") or konfig.heute_tag()).split("#")[0])
+        if abs(diff) >= 0.0005:
+            # anteilig nach den bisherigen Jobkosten verteilen (Summe der Anteile = diff)
+            basis = bisher or float(len(liste))
+            for j in liste:
+                anteil = round(diff * (float(j.get("actual_cost") or 0) if bisher else 1.0) / basis, 4)
+                await db[JOBS].update_one({"id": j["id"]}, {"$set": {"kosten_abgeglichen": True, "kosten_abgleich_diff": anteil,
+                                                                     "kosten_abgeglichen_at": jetzt.isoformat()},
+                                                            "$inc": {"actual_cost": anteil}})
+            await dokument(db, monat)
+            await db[konfig.BUDGET].update_one({"_id": monat}, {"$inc": {"used_usd": diff, "abgleich_usd": diff}})
+            differenz_gesamt = round(differenz_gesamt + diff, 4)
+            gebucht += len(liste)
+        else:
+            await db[JOBS].update_many({"id": {"$in": [j["id"] for j in liste]}},
+                                       {"$set": {"kosten_abgeglichen": True, "kosten_abgleich_diff": 0.0,
+                                                 "kosten_abgeglichen_at": jetzt.isoformat()}})
+    return {"geprueft": geprueft, "gebucht": gebucht, "differenz_usd": differenz_gesamt, "laeufe": len(gruppen), "fehler": fehler}

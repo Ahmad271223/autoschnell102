@@ -13,6 +13,10 @@ from markt.konfig import QUELLE
 _KW = re.compile(r"(\d{2,4})\s*kW", re.I)
 _PS = re.compile(r"\((\d{2,4})\s*PS\)", re.I)
 _EUR = re.compile(r"\d[\d.]*")
+# Reparaturwelle 6 Nr. 85: Preise kommen als 19.990 / 19,990 / 19 990 / 19.990,00 / 19,990.00 / 19990
+_PREIS_TOKEN = re.compile(r"\d[\d.,\s\xa0]*\d|\d")
+PREIS_MIN, PREIS_MAX = 100, 5_000_000      # Plausibilitaet: sonst 'Preis unplausibel'
+GRUND_PREIS_UNPLAUSIBEL = "Preis unplausibel"
 
 
 def _int(w: Any) -> Optional[int]:
@@ -27,6 +31,32 @@ def _int(w: Any) -> Optional[int]:
         return int(m.group(0).replace(".", ""))
     except ValueError:
         return None
+
+
+def preis_parsen(w: Any) -> Optional[float]:
+    """Nr. 85: robustes Parsen eines Preises. Regel: steht hinter dem LETZTEN Punkt/Komma eine
+    Gruppe mit genau zwei Ziffern, sind das Nachkommastellen; alles andere sind
+    Tausendertrennzeichen. None, wenn keine Zahl erkennbar ist (nicht: unplausibel)."""
+    if w is None or isinstance(w, bool):
+        return None
+    if isinstance(w, (int, float)):
+        return float(w)
+    m = _PREIS_TOKEN.search(str(w))
+    if not m:
+        return None
+    t = re.sub(r"[\s\xa0]", "", m.group(0))
+    idx = max(t.rfind(","), t.rfind("."))
+    try:
+        if idx >= 0 and len(t) - idx - 1 == 2:
+            ganz = re.sub(r"[.,]", "", t[:idx]) or "0"
+            return float(int(ganz)) + int(t[idx + 1:]) / 100.0
+        return float(int(re.sub(r"[.,]", "", t)))
+    except ValueError:
+        return None
+
+
+def preis_plausibel(p: Optional[float]) -> bool:
+    return p is not None and PREIS_MIN <= float(p) <= PREIS_MAX
 
 
 def _leistung(text: Any) -> Dict[str, Optional[int]]:
@@ -44,9 +74,26 @@ def _preisbewertung(pr: Any) -> Optional[Dict[str, Any]]:
             "thresholds": [g for g in grenzen if g is not None] or None}
 
 
+_ISO = re.compile(r"^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:?\d{2})?)?$")
+_MONAT_JAHR = re.compile(r"^(0[1-9]|1[0-2])/(\d{4})$")
+
+
 def _iso(w: Any) -> Optional[str]:
+    """Reparaturwelle 6 Nr. 86: nur ein gueltiger ISO-Zeitstempel (Datum oder Datum+Zeit) oder
+    'MM/JJJJ' — alles andere (kaputte Werte wie '2026-13-45', '2026abc') wird None."""
+    from datetime import datetime as _dt
     s = str(w or "").strip()
-    return s if s and s[:4].isdigit() else None
+    if not s:
+        return None
+    if _MONAT_JAHR.match(s):
+        return s
+    if not _ISO.match(s):
+        return None
+    try:
+        _dt.fromisoformat(s.replace("Z", "+00:00").replace(" ", "T"))
+    except ValueError:
+        return None
+    return s
 
 
 _SELLER_TYP = {"dealer": "DEALER", "haendler": "DEALER", "händler": "DEALER", "private": "PRIVATE",
@@ -97,15 +144,31 @@ def listing_aus_item(item: Dict[str, Any], *, beschaedigte_verwerfen: bool = Tru
         # die URL sagt schon dam=0, das hier ist die zweite Sicherung je Zeile.
         # NICHT bei der Entfernungspruefung (entfernung.py): dort heisst "Zeile da" nur "noch online".
         return None
-    preis = _int(item.get("priceGross"))
-    if not preis:
+    # Reparaturwelle 6 Nr. 85: robuster Preisparser ("19,990 EUR" ergab vorher 19); ein erkennbarer,
+    # aber unplausibler Preis (< 100 oder > 5 Mio.) bleibt als Zeile erhalten und wird vom Zeilenfilter
+    # mit Grund 'Preis unplausibel' verworfen (zaehlt, Alarm ab 3 je Lauf) — ohne jeden Preis: unbrauchbar
+    preis_f = preis_parsen(item.get("priceGross"))
+    if preis_f is None:
         p = item.get("price")
         if isinstance(p, dict):
             p = p.get("gross") or p.get("grossAmount") or p.get("amount")
-        preis = _int(p)
-    if not lid or not preis or preis <= 0:
+        preis_f = preis_parsen(p)
+    if not lid or preis_f is None:
         return None
+    verwerfen_grund = None
+    if preis_plausibel(preis_f):
+        preis: Optional[int] = int(round(preis_f))
+    else:
+        preis = None
+        verwerfen_grund = GRUND_PREIS_UNPLAUSIBEL
     seller = item.get("seller") if isinstance(item.get("seller"), dict) else {}
+    seller_type = _seller_typ(seller.get("type") or item.get("sellerType"))
+    # Nr. 91: Privatverkaeufer — keine exakten Koordinaten (auf ~1 km gerundet), keine seller_id
+    privat = seller_type == "PRIVATE"
+    lat = item.get("latitude") if item.get("latitude") is not None else item.get("sellerLatitude")
+    lon = item.get("longitude") if item.get("longitude") is not None else item.get("sellerLongitude")
+    if privat:
+        lat, lon = _grob(lat), _grob(lon)
     if item.get("powerKw") not in (None, "", 0):
         lst = {"power_kw": _int(item.get("powerKw")), "power_ps": _int(item.get("powerHp")) or None}
     else:
@@ -131,12 +194,11 @@ def listing_aus_item(item: Dict[str, Any], *, beschaedigte_verwerfen: bool = Tru
         "condition": item.get("condition") or "",
         "price_gross": preis, "price_net": _int(item.get("priceNet")), "vat": item.get("vat") if "vat" in item else item.get("priceType"),
         "price_rating": bewertung,
-        "seller_type": _seller_typ(seller.get("type") or item.get("sellerType")),
-        "seller_id": str(item.get("sellerId") or "") or None,
+        "seller_type": seller_type,
+        "seller_id": None if privat else (str(item.get("sellerId") or "") or None),
         "postal_code": plz or None, "city": ort or None,
         "country": item.get("country") or item.get("sellerCountry") or seller.get("country") or None,
-        "latitude": item.get("latitude") if item.get("latitude") is not None else item.get("sellerLatitude"),
-        "longitude": item.get("longitude") if item.get("longitude") is not None else item.get("sellerLongitude"),
+        "latitude": lat, "longitude": lon,
         "mobile_created_at": _iso(item.get("createdAt")), "mobile_modified_at": _iso(item.get("modifiedAt")),
         "mobile_renewed_at": _iso(item.get("renewedAt")), "mobile_scraped_at": _iso(item.get("scrapedAt")),
         "input_context": (item.get("inputContext") if isinstance(item.get("inputContext"), str) else None),
@@ -146,13 +208,39 @@ def listing_aus_item(item: Dict[str, Any], *, beschaedigte_verwerfen: bool = Tru
         "hsn": item.get("vinHsn") or None, "tsn": item.get("vinTsn") or None,
         "search_position": _int(item.get("searchPosition")),
         "previous_owners": _int(item.get("numberOfPreviousOwners")) or None,
+        "verwerfen_grund": verwerfen_grund,
     }
+
+
+def _grob(w: Any) -> Optional[float]:
+    """Nr. 91: Koordinate auf zwei Nachkommastellen (~1 km) — fuer Privatverkaeufer."""
+    try:
+        return round(float(w), 2) if w is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+_MARKT_GESAMT_FELDER = ("totalResults", "resultCount", "totalCount", "numResults", "searchResultCount", "totalItems")
+
+
+def markt_gesamt(items_roh: List[Dict[str, Any]]) -> Optional[int]:
+    """Nr. 143: Gesamtzahl der Treffer der Suche, wenn der Scraper sie je Zeile mitliefert
+    (totalResults/resultCount/...). None, wenn keine Zeile die Angabe traegt."""
+    for it in items_roh or []:
+        if not isinstance(it, dict):
+            continue
+        for k in _MARKT_GESAMT_FELDER:
+            n = _int(it.get(k))
+            if n is not None and n >= 0:
+                return n
+    return None
 
 
 def listings_aus_items(items: List[Dict[str, Any]], *, beschaedigte_verwerfen: bool = True) -> List[Dict[str, Any]]:
     """In Suchreihenfolge (= Preis aufsteigend), Dubletten je ID entfernt.
     Liefert der Scraper eine Positionsnummer (searchPosition — mit Detailseiten
-    kommen die Zeilen sonst in Abrufreihenfolge), gilt diese Reihenfolge."""
+    kommen die Zeilen sonst in Abrufreihenfolge), gilt diese Reihenfolge.
+    Nr. 85: Zeilen mit unplausiblem Preis bleiben (verwerfen_grund), der Zeilenfilter verwirft sie."""
     raus, gesehen = [], set()
     for it in items or []:
         l = listing_aus_item(it, beschaedigte_verwerfen=beschaedigte_verwerfen)
@@ -166,7 +254,7 @@ def listings_aus_items(items: List[Dict[str, Any]], *, beschaedigte_verwerfen: b
 
 
 def preise_aufsteigend(listings: List[Dict[str, Any]]) -> bool:
-    p = [l["price_gross"] for l in listings]
+    p = [l["price_gross"] for l in listings if l.get("price_gross") is not None]
     return p == sorted(p)
 
 
@@ -257,28 +345,47 @@ def _marke_norm(text: Any) -> str:
     return _MARKEN_ALIAS.get(n, n)
 
 
-def modell_passt(listing: Dict[str, Any], modell: Dict[str, Any]) -> bool:
+GRUND_IDENTITAET = "Fahrzeugidentitaet fehlt"
+
+
+def modell_passt(listing: Dict[str, Any], modell: Dict[str, Any]) -> Tuple[bool, str]:
     """Review 26.09.2026 abends P3: Marke/Modell hart pruefen. Hat die Zeile
     make_id/model_id (scrapesmith makeId/modelId), muessen sie dem Suchauftrag gleichen;
     fehlen die IDs, werden die Namen streng normalisiert verglichen (Marke gleich,
     Modellname der Zeile beginnt mit dem Katalog-Modellnamen oder ist gleich).
-    Ohne jede Angabe in der Zeile (weder IDs noch Namen): tolerant."""
+    Reparaturwelle 6 Nr. 144: es muessen BEIDE IDs oder BEIDE Namen da sein — sonst ist
+    die Identitaet des Fahrzeugs unbekannt und die Zeile wird verworfen (vorher tolerant).
+    (ok, grund)."""
     from markt.katalog import _norm
     soll_make, soll_model = modell.get("make_id"), modell.get("model_id")
     ist_make, ist_model = listing.get("make_id"), listing.get("model_id")
     if ist_make and ist_model and soll_make and soll_model:
-        return str(ist_make) == str(soll_make) and str(ist_model) == str(soll_model)
+        return (str(ist_make) == str(soll_make) and str(ist_model) == str(soll_model)), "fremdes Modell"
     name_make, name_model = listing.get("make"), listing.get("model")
-    if not name_make and not name_model:
-        return True
-    if modell.get("make") and name_make and _marke_norm(name_make) != _marke_norm(modell["make"]):
-        return False
-    if modell.get("model") and name_model:
+    if not name_make or not name_model:
+        return False, GRUND_IDENTITAET
+    if modell.get("make") and _marke_norm(name_make) != _marke_norm(modell["make"]):
+        return False, "fremdes Modell"
+    if modell.get("model"):
         soll = _norm(modell["model"])
         ist = _norm(name_model)
         if soll and ist != soll and not ist.startswith(soll):
-            return False
-    return True
+            return False, "fremdes Modell"
+    return True, ""
+
+
+class FilterDefekt(RuntimeError):
+    """Nr. 111/112: der Zeilenfilter kann Kraftstoff/Getriebe nicht pruefen (fahrzeug_codes nicht
+    ladbar) — dann ist KEINE Zeile gueltig; der Worker schliesst den Lauf als 'data_invalid' ab
+    und alarmiert (markt_filter_defekt), statt still alles durchzulassen."""
+
+
+def _codes():
+    try:
+        from fahrzeug_codes import getriebe_code, kraftstoff_code
+    except Exception as e:  # noqa: BLE001
+        raise FilterDefekt(f"fahrzeug_codes nicht ladbar: {e}"[:200])
+    return kraftstoff_code, getriebe_code
 
 
 def passt_zum_segment(listing: Dict[str, Any], segment: Dict[str, Any], modell: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
@@ -291,14 +398,21 @@ def passt_zum_segment(listing: Dict[str, Any], segment: Dict[str, Any], modell: 
     Review 26.09.2026 abends P2 — Pflichtfelder einer gueltigen Statistik-Zeile:
     listing_id, price_gross, EZ-Jahr, km; zusaetzlich Kraftstoff, Getriebe, kW, wenn der
     Suchauftrag sie verlangt. Fehlt eines -> verworfen mit Grund 'fehlend: <feld>'
-    (zaehlt zu verworfen_filter). Nur die Karosserie bleibt tolerant (unbekannt = ok)."""
+    (zaehlt zu verworfen_filter).
+
+    Reparaturwelle 6 Nr. 110/125: verlangt der Auftrag Kraftstoff, Getriebe oder Karosserie,
+    muss der Zeilenwert ERKENNBAR sein ('unbekannt: fuel' statt still durchlassen);
+    Nr. 85: unplausibler Preis -> 'Preis unplausibel'; Nr. 144: Identitaet Pflicht."""
     modell = modell or {}
     if not listing.get("listing_id"):
         return False, "fehlend: listing_id"
+    if listing.get("verwerfen_grund"):
+        return False, str(listing["verwerfen_grund"])
     if not listing.get("price_gross"):
         return False, "fehlend: price_gross"
-    if not modell_passt(listing, modell):
-        return False, "fremdes Modell"
+    ok, grund = modell_passt(listing, modell)
+    if not ok:
+        return False, grund
     von, bis = segment.get("year_from"), segment.get("year_to")
     jahr = ez_jahr(listing)
     if jahr is None:
@@ -341,20 +455,27 @@ def passt_zum_segment(listing: Dict[str, Any], segment: Dict[str, Any], modell: 
     if modell.get("country") and listing.get("country"):
         if str(listing["country"]).strip().upper()[:2] != str(modell["country"]).strip().upper()[:2]:
             return False, f"land {str(listing['country']).upper()[:2]} != {str(modell['country']).upper()[:2]}"
-    try:
-        from fahrzeug_codes import getriebe_code, kraftstoff_code
-    except Exception:  # noqa: BLE001
-        return True, ""
-    if modell.get("fuel") and listing.get("fuel"):
-        code = kraftstoff_code(listing.get("fuel"))
-        if code and code != modell["fuel"]:
-            return False, f"kraftstoff {code} != {modell['fuel']}"
-    if modell.get("gearbox") and listing.get("gearbox"):
-        code = getriebe_code(listing.get("gearbox"))
-        if code and not getriebe_passt(modell["gearbox"], code):
-            return False, f"getriebe {code} != {modell['gearbox']}"
-    if modell.get("body") and listing.get("category"):
+    if modell.get("fuel") or modell.get("gearbox"):
+        kraftstoff_code, getriebe_code = _codes()
+        if modell.get("fuel"):
+            code = kraftstoff_code(listing.get("fuel"))
+            if not code:
+                return False, "unbekannt: fuel"
+            if code != modell["fuel"]:
+                return False, f"kraftstoff {code} != {modell['fuel']}"
+        if modell.get("gearbox"):
+            code = getriebe_code(listing.get("gearbox"))
+            if not code:
+                return False, "unbekannt: gearbox"
+            if not getriebe_passt(modell["gearbox"], code):
+                return False, f"getriebe {code} != {modell['gearbox']}"
+    if modell.get("body"):
+        # Nr. 125/126: setzt der Auftrag eine Karosserie, muss die Zeile eine erkennbare tragen
+        if not listing.get("category"):
+            return False, "fehlend: karosserie"
         code = karosserie_code(listing.get("category"))
-        if code and code != modell["body"]:
+        if not code:
+            return False, "unbekannt: karosserie"
+        if code != modell["body"]:
             return False, f"karosserie {code} != {modell['body']}"
     return True, ""

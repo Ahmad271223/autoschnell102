@@ -33,6 +33,29 @@ asyncio.create_task fuer Tagesarbeit:
   * Welle 5 Nr. 37: Entfernungspruefung als Hintergrundaufgabe je Takt
   * Fehler bleiben hier: Alarm fuer den Betreiber, nie ein Einfluss auf den
     Hauptweg
+
+Reparaturwelle 6 (Review 26.09.2026 abends):
+  * Nr. 77: kein zweiter manueller Job je Segment, solange einer wartet/laeuft
+    oder in den letzten 5 Minuten angelegt wurde (SchonEingereiht -> 409)
+  * Nr. 93: worker_erfolg erst NACH einem erfolgreich beendeten Takt
+  * Nr. 97/98: der Schreibteil nach dem Actor-Lauf zaehlt als Hintergrund-
+    Schreiber (wartung.hintergrund_schreibt); ist die Wartung inzwischen aktiv,
+    geht das bezahlte Ergebnis als 'ergebnis_zwischenspeicher' an den Job
+    zurueck (queued) und wird beim naechsten Claim OHNE neuen Actor-Lauf
+    verarbeitet
+  * Nr. 99: zwei faellige Jobs desselben Segments kommen nie ins selbe Buendel
+    (der zweite: storniert 'doppelt faellig', wenn sein Termin laenger als eine
+    Stunde zurueckliegt, sonst wartet er 30 Minuten)
+  * Nr. 100: Auswertungs-Sperre je Segment (job_lock 'markt-seg-<id>', 5 min)
+    um speicher.verarbeiten — sonst Zwischenspeicher und spaeter erneut
+  * Nr. 104/105: Statistik-Tag UND Budget-Monat aus dem Job-Tag, nicht aus
+    der Ausfuehrungszeit
+  * Nr. 111/112: defekter Zeilenfilter -> Lauf 'data_invalid' + Alarm
+  * Nr. 113/114: Actor 'name@build', Build-Kennung am Job und im Tagesaggregat
+  * Nr. 122: cancel_requested + abgelaufene Lease -> direkt 'cancelled'
+  * Budget voll: Jobs bleiben queued (budget_wait), EIN Alarm, der Takt endet
+  * Nr. 127: Zeilen geliefert, alle verworfen -> 'data_invalid'
+  * Nr. 143: sample_incomplete, wenn der Markt mehr hergibt als geliefert wurde
 """
 from __future__ import annotations
 
@@ -57,8 +80,20 @@ _STATUS = ("queued", "running", "completed", "failed", "cancelled", "data_invali
 NACHZUEGLER_WARTEN_S = 60       # Nr. 22: so lange wartet der Worker auf faellige Jobs, bis ein Buendel voll ist
 TREFFER_TAGE_FUER_ERSATZ = 7    # Nr. 16: Ersatz bei 0 Zeilen nur, wenn ein Segment des Buendels in 7 Tagen Treffer hatte
 PLAN_SPERRE_S = 300             # Nr. 24: Tagesplan-Sperre 5 Minuten (der Plan ist idempotent, Merker in market_config)
+SOFORT_SPERRE_S = 300           # Welle 6 Nr. 77: kein zweiter manueller Job je Segment innerhalb von 5 Minuten
+SEGMENT_SPERRE_S = 300          # Welle 6 Nr. 100: Auswertungs-Sperre je Segment
+DOPPELT_STORNO_S = 3600         # Welle 6 Nr. 99: der zweite Job desselben Segments ist 'doppelt faellig', wenn > 1 h ueberfaellig
+DOPPELT_WARTEN_S = 1800         # ... sonst wartet er 30 Minuten
+BUDGET_WARTEN_S = 900           # Budget voll: Jobs warten 15 Minuten (bleiben queued mit budget_wait)
+ZWISCHEN_WARTEN_S = 60          # Ergebnis zwischengespeichert (Wartung/Segment-Sperre): erneut in 60 s
+PREIS_ALARM_AB = 3              # Nr. 85: Alarm ab 3 Zeilen mit unplausiblem Preis je Lauf
 STORNO_ALT = "Tagesplan veraltet (nie nachtraeglich abgearbeitet)"
 STORNO_AUS = "Crawler ausgeschaltet"
+STORNO_DOPPELT = "doppelt faellig"
+
+
+class SchonEingereiht(ValueError):
+    """Nr. 77: fuer dieses Segment wartet/laeuft schon ein Job oder ein manueller Lauf ist keine 5 Minuten alt."""
 
 
 async def _alarm(db, typ: str, ref: str = "", **details) -> None:
@@ -77,7 +112,36 @@ async def _alarm_zu(db, typ: str, ref: str = "") -> None:
         pass
 
 
+async def _wartung_aktiv(db) -> bool:
+    try:
+        import wartung
+        return bool(await wartung.aktiv_async(db))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _hintergrund_schreibt():
+    """Nr. 97: der Schreibteil zaehlt als Hintergrund-Schreiber (die Sicherung wartet darauf)."""
+    try:
+        import wartung
+        return wartung.hintergrund_schreibt()
+    except Exception:  # noqa: BLE001
+        import contextlib
+        return contextlib.nullcontext()
+
+
+def job_tag(job: Dict[str, Any]) -> str:
+    """Nr. 104: der Kalendertag des Jobs (ohne '#'-Suffix eines zweiten/manuellen Laufs)."""
+    return str(job.get("tag") or konfig.heute_tag()).split("#")[0]
+
+
 # ---------------------------------------------------------------- Taktung
+def starts_je_gruppe(laeufe_je_rows: Dict[int, int], b: int) -> int:
+    """Welle 6 Nr. 133: Buendel enthalten nur Segmente gleicher Zeilenzahl — Actor-Starts je Tag
+    = Summe ueber die Gruppen ceil(Laeufe der Gruppe / Buendelgroesse)."""
+    return sum(math.ceil(n / max(1, b)) for n in laeufe_je_rows.values() if n)
+
+
 async def intervall(db) -> Dict[str, Any]:
     """Wie oft kann jedes Segment gecrawlt werden, ohne das Monatsbudget zu sprengen?
     MARKT_CRAWL_INTERVALL_TAGE > 0 setzt es fest, 0 = automatisch.
@@ -89,11 +153,13 @@ async def intervall(db) -> Dict[str, Any]:
       Nr. 31: Restbudget / verbleibende Tage des Monats bestimmt die Segmente je Tag
               (mindestens 1, hoechstens alle) — Verbrauch und Reservierungen zaehlen mit.
       Nr. 17: Zeilen werden mit Puffer abgerufen (konfig.zeilen_mit_puffer).
-      Nr. 38: die Entfernungspruefung (max. je Tag x (Start + 1 Zeile)) ist Teil der Tageskosten."""
+      Nr. 38: die Entfernungspruefung (max. je Tag x (Start + 1 Zeile)) ist Teil der Tageskosten.
+    Welle 6 Nr. 133: Actor-Starts je Gruppe gleicher Zeilenzahl (starts_je_gruppe)."""
     segs = 0
     laeufe_seg = 0          # Segment-Abrufe je Tag (Segmente x Abrufe je Tag)
     rows_alle = 0           # gespeicherte Zeilen je Tag (rows)
     rows_abruf = 0          # abgerufene Zeilen je Tag (rows + Puffer, Nr. 17)
+    laeufe_je_rows: Dict[int, int] = {}
     async for s in db[SEGMENTE].find({"enabled": True}, {"_id": 0, "max_items": 1, "crawls_per_day": 1}):
         segs += 1
         k = int(s.get("crawls_per_day") or 1)
@@ -101,8 +167,10 @@ async def intervall(db) -> Dict[str, Any]:
         laeufe_seg += k
         rows_alle += rows * k
         rows_abruf += konfig.zeilen_mit_puffer(rows) * k
+        laeufe_je_rows[rows] = laeufe_je_rows.get(rows, 0) + k
     b = max(1, konfig.buendel_groesse())
-    je_tag_alle = konfig.kosten_buendel_usd(konfig.actor(), math.ceil(laeufe_seg / b) if laeufe_seg else 0, rows_abruf)
+    starts = starts_je_gruppe(laeufe_je_rows, b)
+    je_tag_alle = konfig.kosten_buendel_usd(konfig.actor(), starts, rows_abruf)
     entfernung_tag = konfig.entfernung_kosten_je_tag_usd()
     doc = await budget.dokument(db)
     budget_usd = float(doc.get("budget_usd") or 0)
@@ -130,6 +198,7 @@ async def intervall(db) -> Dict[str, Any]:
                      if ersatz and segs and tage else 0.0)
     gesamt_tag = round(kosten_je_tag + entfernung_tag, 4)
     return {"segmente": segs, "intervall_tage": tage, "segmente_je_tag": je_tag, "buendel": b,
+            "starts_je_tag": starts, "zeilen_gruppen": len(laeufe_je_rows),
             "rows_je_tag": round(rows_alle / tage) if (segs and tage) else 0,
             "rows_abruf_je_tag": round(rows_abruf / tage) if (segs and tage) else 0,
             "puffer_faktor": konfig.PUFFER_FAKTOR, "puffer_max": konfig.PUFFER_MAX,
@@ -183,7 +252,9 @@ async def tagesplan(db, tag: Optional[str] = None, *, sofort: bool = False) -> D
     geplanten (Nr. 24/32: zweimal aufrufen plant nicht das doppelte Kontingent; sofort=True
     plant ab jetzt, aber ebenfalls nur das Tageskontingent, der Rest wartet).
     Nr. 21: Jobs in Buendel-Slots (gleiche Zeilenzahl, gleiche scheduled_at), Slots ueber das
-    Fenster verteilt. Nr. 62: Segmente per Cursor, ohne Obergrenze."""
+    Fenster verteilt. Nr. 62: Segmente per Cursor, ohne Obergrenze.
+    Welle 6 Nr. 95: unabhaengig vom Tagesmerker — neue Segmente (Aktivierung/Anlage) werden
+    im Kontingent des Tages nachgeplant (segmente.synchronisieren ruft mit sofort=True)."""
     t = tag or konfig.heute_tag()
     takt = await intervall(db)
     if takt.get("ohne_budget"):
@@ -230,7 +301,9 @@ async def tagesplan(db, tag: Optional[str] = None, *, sofort: bool = False) -> D
 
 
 async def job_sofort(db, segment_id: str) -> Dict[str, Any]:
-    """Betreiber: dieses Segment jetzt crawlen (job_type manuell, eigener Dedupe-Schluessel)."""
+    """Betreiber: dieses Segment jetzt crawlen (job_type manuell, eigener Dedupe-Schluessel).
+    Welle 6 Nr. 77: kein zweiter manueller Job, solange fuer das Segment einer wartet/laeuft oder
+    ein manueller Lauf keine SOFORT_SPERRE_S Sekunden alt ist (Doppelklick = ein Job)."""
     s = await db[SEGMENTE].find_one({"id": segment_id}, {"_id": 0})
     if not s:
         raise ValueError("Segment nicht gefunden")
@@ -240,6 +313,19 @@ async def job_sofort(db, segment_id: str) -> Dict[str, Any]:
     modell = await db[MODELLE].find_one({"id": s.get("model_id")}, {"_id": 0, "enabled": 1, "status": 1})
     if not modell or not modell.get("enabled"):
         raise ValueError("Segment inaktiv — der Suchauftrag ist nicht aktiv")
+    offen = await db[JOBS].find_one({"segment_id": segment_id, "status": {"$in": ["queued", "running"]}},
+                                    {"_id": 0, "id": 1, "status": 1, "job_type": 1, "scheduled_at": 1})
+    if offen:
+        art = "läuft gerade" if offen["status"] == "running" else "wartet schon"
+        raise SchonEingereiht(f"Für dieses Segment {art} ein Job ({'manuell' if offen.get('job_type') == 'manual' else 'Tagesplan'}, "
+                              f"{offen['id'][:8]}) — kein zweiter Lauf, bitte abwarten")
+    if SOFORT_SPERRE_S > 0:
+        seit = (konfig.jetzt() - timedelta(seconds=SOFORT_SPERRE_S)).isoformat()
+        letzter = await db[JOBS].find_one({"segment_id": segment_id, "job_type": "manual", "created_at": {"$gte": seit}},
+                                          {"_id": 0, "created_at": 1})
+        if letzter:
+            raise SchonEingereiht(f"Für dieses Segment wurde vor weniger als {SOFORT_SPERRE_S // 60} Minuten schon ein manueller "
+                                  f"Lauf angelegt ({str(letzter.get('created_at') or '')[11:16]} UTC) — bitte kurz warten")
     doc = _job_doc(s, konfig.heute_tag() + "#" + uuid.uuid4().hex[:6], konfig.jetzt_iso(), "manual")
     await db[JOBS].insert_one(dict(doc))
     doc.pop("_id", None)
@@ -296,14 +382,19 @@ def _lease_bis(buendelgroesse: Optional[int] = None) -> str:
     return (konfig.jetzt() + timedelta(seconds=lease_sekunden(buendelgroesse))).isoformat()
 
 
-async def beanspruchen(db, max_items: Optional[int] = None, bis: Optional[str] = None) -> Optional[Dict[str, Any]]:
+async def beanspruchen(db, max_items: Optional[int] = None, bis: Optional[str] = None,
+                       ohne_segmente: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
     """Naechsten faelligen Job atomar uebernehmen. max_items (P6): nur einen Job mit dieser
     Zeilenzahl — so bleibt ein Buendel bei einer Zeilenzahl. bis: faellig bis zu diesem Zeitpunkt
-    (Standard jetzt)."""
+    (Standard jetzt). ohne_segmente (Nr. 99): Segmente, die im Buendel schon vertreten sind.
+    Nr. 122: ein Job mit cancel_requested wird nie (wieder) uebernommen."""
     jetzt = konfig.jetzt()
-    filt: Dict[str, Any] = {"status": "queued", "scheduled_at": {"$lte": bis or jetzt.isoformat()}}
+    filt: Dict[str, Any] = {"status": "queued", "scheduled_at": {"$lte": bis or jetzt.isoformat()},
+                            "cancel_requested": {"$ne": True}}
     if max_items is not None:
         filt["max_items"] = int(max_items)
+    if ohne_segmente:
+        filt["segment_id"] = {"$nin": list(ohne_segmente)}
     return await db[JOBS].find_one_and_update(
         filt,
         {"$set": {"status": "running", "claimed_at": jetzt.isoformat(), "worker": WORKER,
@@ -322,12 +413,19 @@ async def lease_verlaengern(db, job_ids: List[str], buendelgroesse: Optional[int
 
 
 async def stale_zurueck(db) -> int:
-    """Abgelaufene Leases: zurueck in die Warteschlange oder endgueltig gescheitert."""
+    """Abgelaufene Leases: zurueck in die Warteschlange oder endgueltig gescheitert.
+    Welle 6 Nr. 122: mit cancel_requested direkt 'cancelled' (Kosten 0) — nie erneut laufen."""
     jetzt = konfig.jetzt_iso()
     n = 0
     async for j in db[JOBS].find({"status": "running", "lease_until": {"$lt": jetzt}},
-                                 {"_id": 0, "id": 1, "attempts": 1, "lease_until": 1, "max_attempts": 1}):
-        if int(j.get("attempts") or 0) >= int(j.get("max_attempts") or konfig.job_versuche()):
+                                 {"_id": 0, "id": 1, "attempts": 1, "lease_until": 1, "max_attempts": 1, "cancel_requested": 1,
+                                  "cancel_grund": 1}):
+        if j.get("cancel_requested"):
+            r = await db[JOBS].update_one({"id": j["id"], "status": "running", "lease_until": j["lease_until"]},
+                                          {"$set": {"status": "cancelled", "finished_at": jetzt, "actual_cost": 0.0, "actual_rows": 0,
+                                                    "error": str(j.get("cancel_grund") or "Abbruch angefordert") + " (Lease abgelaufen)"},
+                                           "$unset": {"lease_until": ""}})
+        elif int(j.get("attempts") or 0) >= int(j.get("max_attempts") or konfig.job_versuche()):
             r = await db[JOBS].update_one({"id": j["id"], "status": "running", "lease_until": j["lease_until"]},
                                           {"$set": {"status": "failed", "error": "Lease abgelaufen (Prozess weg?)",
                                                     "finished_at": jetzt}})
@@ -375,7 +473,7 @@ async def _scheitern(db, job: Dict[str, Any], grund: str, *, endgueltig: bool) -
 async def _fertig(db, job: Dict[str, Any], **felder) -> bool:
     r = await db[JOBS].update_one(_meiner(job), {"$set": {"status": "completed", "finished_at": konfig.jetzt_iso(),
                                                           "error": None, **felder},
-                                                "$unset": {"lease_until": ""}})
+                                                "$unset": {"lease_until": "", "ergebnis_zwischenspeicher": "", "budget_wait": ""}})
     if r.modified_count == 0:
         log.warning("Job %s inzwischen von anderem Worker uebernommen — Ergebnis nicht ueberschrieben", job["id"])
         return False
@@ -388,7 +486,7 @@ async def _abbrechen(db, job: Dict[str, Any], grund: str, **felder) -> bool:
     werden mitgeschrieben, weil Apify sie berechnet hat; Zeilen wurden NICHT gespeichert."""
     r = await db[JOBS].update_one(_meiner(job), {"$set": {"status": "cancelled", "finished_at": konfig.jetzt_iso(),
                                                           "error": grund[:300], **felder},
-                                                "$unset": {"lease_until": ""}})
+                                                "$unset": {"lease_until": "", "ergebnis_zwischenspeicher": ""}})
     if r.modified_count == 0:
         log.warning("Job %s inzwischen von anderem Worker uebernommen — Abbruch nicht geschrieben", job["id"])
         return False
@@ -401,9 +499,26 @@ async def _ungueltig(db, job: Dict[str, Any], grund: str, **felder) -> bool:
     Segmentstatistik, kein Trend, keine Chancen, kein last_success_at (last_attempt_at ja)."""
     r = await db[JOBS].update_one(_meiner(job), {"$set": {"status": "data_invalid", "finished_at": konfig.jetzt_iso(),
                                                           "error": grund[:300], **felder},
-                                                "$unset": {"lease_until": ""}})
+                                                "$unset": {"lease_until": "", "ergebnis_zwischenspeicher": ""}})
     if r.modified_count == 0:
         log.warning("Job %s inzwischen von anderem Worker uebernommen — 'data_invalid' nicht geschrieben", job["id"])
+        return False
+    return True
+
+
+async def _zurueckstellen(db, job: Dict[str, Any], grund: str, warte_s: int, zwischen: Optional[Dict[str, Any]] = None,
+                          **felder) -> bool:
+    """Welle 6 Nr. 98/100: Job zurueck in die Warteschlange, OHNE den Versuch zu verbrauchen — mit
+    dem bezahlten Actor-Ergebnis als 'ergebnis_zwischenspeicher' (naechster Claim verarbeitet es
+    ohne neuen Lauf). Auch fuer 'Budget voll' (budget_wait, ohne Zwischenspeicher)."""
+    setzen: Dict[str, Any] = {"status": "queued", "error": grund[:300],
+                              "scheduled_at": (konfig.jetzt() + timedelta(seconds=int(warte_s))).isoformat(), **felder}
+    if zwischen is not None:
+        setzen["ergebnis_zwischenspeicher"] = {**zwischen, "gespeichert_at": konfig.jetzt_iso()}
+    r = await db[JOBS].update_one(_meiner(job), {"$set": setzen, "$inc": {"attempts": -1},
+                                                "$unset": {"lease_until": "", "claimed_at": "", "worker": ""}})
+    if r.modified_count == 0:
+        log.warning("Job %s inzwischen von anderem Worker uebernommen — nicht zurueckgestellt", job["id"])
         return False
     return True
 
@@ -492,8 +607,10 @@ async def _treffer_kuerzlich(db, segment_ids: List[str]) -> bool:
 async def verarbeiten_buendel(db, jobs_liste: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Mehrere Jobs (Segmente) in EINEM Actor-Lauf. Jede Zeile wird ueber
     inputContext (= Start-URL) genau ihrem Segment zugeordnet. P6: Segmente mit
-    verschiedener Zeilenzahl laufen in getrennten Buendeln (je Buendel exakte Reservierung)."""
+    verschiedener Zeilenzahl laufen in getrennten Buendeln (je Buendel exakte Reservierung).
+    Welle 6 Nr. 98: Jobs mit 'ergebnis_zwischenspeicher' werden einzeln OHNE Actor-Lauf ausgewertet."""
     plan: List[Dict[str, Any]] = []
+    zwischen: List[Dict[str, Any]] = []
     for job in jobs_liste:
         g = await _grundlagen(db, job)
         if not g:
@@ -501,27 +618,40 @@ async def verarbeiten_buendel(db, jobs_liste: List[Dict[str, Any]]) -> Dict[str,
             continue
         seg, modell = g
         rows = int(seg.get("max_items") or konfig.rows_je_segment())
-        plan.append({"job": job, "seg": seg, "modell": modell, "url": url.such_url(seg, modell),
-                     "max_items": rows, "abruf": konfig.zeilen_mit_puffer(rows), **_auftrag_fassung(modell)})
-    if not plan:
+        p = {"job": job, "seg": seg, "modell": modell, "url": url.such_url(seg, modell),
+             "max_items": rows, "abruf": konfig.zeilen_mit_puffer(rows), **_auftrag_fassung(modell)}
+        (zwischen if job.get("ergebnis_zwischenspeicher") else plan).append(p)
+    if not plan and not zwischen:
         return {"status": "uebersprungen", "jobs": len(jobs_liste)}
+    teile: List[Dict[str, Any]] = []
+    for p in zwischen:
+        teile.append(await _buendel_lauf(db, [p], zwischen=p["job"]["ergebnis_zwischenspeicher"]))
     gruppen: Dict[tuple, List[Dict[str, Any]]] = {}
     for p in plan:
         gruppen.setdefault(buendel_schluessel(p["max_items"]), []).append(p)
-    if len(gruppen) == 1:
-        return await _buendel_lauf(db, plan)
-    teile = [await _buendel_lauf(db, g) for g in gruppen.values()]
+    for g in gruppen.values():
+        teile.append(await _buendel_lauf(db, g))
+    if len(teile) == 1:
+        return teile[0]
     return {"status": "ok" if any(t.get("status") == "ok" for t in teile) else teile[0].get("status"),
-            "jobs": len(plan), "buendel": len(teile),
+            "jobs": len(plan) + len(zwischen), "buendel": len(teile),
             "rows": sum(int(t.get("rows") or 0) for t in teile),
             "usd": (round(sum(float(t.get("usd") or 0) for t in teile), 4) if any(t.get("usd") is not None for t in teile) else None),
             "ergebnisse": [e for t in teile for e in (t.get("ergebnisse") or [])], "teile": teile}
 
 
-async def _buendel_lauf(db, plan: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _zwischen_paket(p: Dict[str, Any], roh: List[dict], r: Dict[str, Any], anteil: Optional[float], unbekannt: int) -> Dict[str, Any]:
+    """Nr. 98: das bezahlte Actor-Ergebnis EINES Jobs fuer den Zwischenspeicher."""
+    return {"items": list(roh), "usd": anteil, "run_id": r.get("run_id"), "actor": r.get("actor"), "laeufe": int(r.get("laeufe") or 1),
+            "ersatz_grund": r.get("ersatz_grund"), "dauer_ms": r.get("dauer_ms"), "build_id": r.get("build_id"),
+            "build_number": r.get("build_number"), "unbekannt": int(unbekannt), "buendel": int(p.get("buendel_n") or 1)}
+
+
+async def _buendel_lauf(db, plan: List[Dict[str, Any]], zwischen: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """EIN Actor-Lauf fuer ein Buendel gleicher Zeilenzahl (P6): max_items = Segmente x Abruf-
     zeilen (rows + Puffer, Nr. 17), maxItemsPerQuery = Abrufzeilen — die Reservierung deckt
-    genau dieses Buendel (Standard + Ersatz, Nr. 13)."""
+    genau dieses Buendel (Standard + Ersatz, Nr. 13). Mit `zwischen` (Nr. 98): kein Actor-Lauf,
+    keine Reservierung — das gespeicherte Ergebnis wird ausgewertet (Kosten sind schon gebucht)."""
     jetzt = konfig.jetzt_iso()
     for p in plan:
         await db[SEGMENTE].update_one({"id": p["seg"]["id"]}, {"$set": {"last_attempt_at": jetzt}})
@@ -538,40 +668,67 @@ async def _buendel_lauf(db, plan: List[Dict[str, Any]]) -> Dict[str, Any]:
         plan = [p for p in plan if p["job"]["id"] in meine]
         if not plan:
             return {"status": "verloren", "jobs": len(verloren)}
+    # Nr. 105: der Budget-Monat und (Nr. 104) der Statistik-Tag kommen aus dem Job-Tag
+    monat = konfig.monat_aus_tag(job_tag(plan[0]["job"]))
     rows_gesamt = sum(p["abruf"] for p in plan)
     je_query = max(p["abruf"] for p in plan)
-    res = await budget.reservieren(db, reservierung_usd(len(plan), rows_gesamt))
-    if res is None:
-        for p in plan:
-            await _scheitern(db, p["job"], "Monatsbudget des Market-Crawlers aufgebraucht", endgueltig=True)
-        b = await budget.dokument(db)
-        await _alarm(db, "markt_budget_voll", ref=konfig.monat(), budget=float(b.get("budget_usd") or 0))
-        return {"status": "budget", "jobs": len(plan)}
-    ersatz_bei_leer = await _treffer_kuerzlich(db, [p["seg"]["id"] for p in plan])
-    try:
-        r = await apify.lauf_mit_ersatz([p["url"] for p in plan], rows_gesamt,
-                                        max_items_per_query=je_query if len(plan) > 1 else None,
-                                        rows_je_url=[p["abruf"] for p in plan], ersatz_bei_leer=ersatz_bei_leer)
-    except apify.ApifyFehler as e:
-        gelaufen = e.art in ("zeit", "ausfall", "poll")
-        await budget.abrechnen(db, res, (e.usd if (gelaufen and e.usd is not None) else (None if gelaufen else 0.0)), 0,
-                               gelaufen=gelaufen, runs=1 if (gelaufen and e.run_id) else 0)
-        for p in plan:
-            await _scheitern(db, p["job"], f"Apify {e.art}: {e.detail}", endgueltig=e.art in ("token", "guthaben"))
-        if e.art in ("token", "guthaben"):
-            await _alarm(db, "markt_apify_" + e.art, ref="crawler", detail=e.detail[:200])
-        return {"status": "fehler", "art": e.art, "jobs": len(plan)}
-    except Exception as e:  # noqa: BLE001
-        log.exception("Market-Buendel gescheitert")
-        await budget.abrechnen(db, res, None, 0)
-        for p in plan:
-            await _scheitern(db, p["job"], f"Fehler: {e}"[:300], endgueltig=False)
-        return {"status": "fehler", "jobs": len(plan)}
+    res = None
+    if zwischen is None:
+        res = await budget.reservieren(db, reservierung_usd(len(plan), rows_gesamt), monat=monat)
+        if res is None:
+            # Budget voll: Jobs bleiben queued (budget_wait) — kein Massen-'failed'; EIN Alarm; der Takt endet
+            for p in plan:
+                await _zurueckstellen(db, p["job"], "Monatsbudget des Market-Crawlers aufgebraucht — wartet", BUDGET_WARTEN_S,
+                                      budget_wait=True)
+            b = await budget.dokument(db, monat)
+            await _alarm(db, "markt_budget_voll", ref=monat, budget=float(b.get("budget_usd") or 0), jobs=len(plan))
+            return {"status": "budget", "jobs": len(plan)}
+        await _alarm_zu(db, "markt_budget_voll", ref=monat)
+        ersatz_bei_leer = await _treffer_kuerzlich(db, [p["seg"]["id"] for p in plan])
+        try:
+            r = await apify.lauf_mit_ersatz([p["url"] for p in plan], rows_gesamt,
+                                            max_items_per_query=je_query if len(plan) > 1 else None,
+                                            rows_je_url=[p["abruf"] for p in plan], ersatz_bei_leer=ersatz_bei_leer)
+        except apify.ApifyFehler as e:
+            gelaufen = e.art in ("zeit", "ausfall", "poll", "zuviel")
+            await budget.abrechnen(db, res, (e.usd if (gelaufen and e.usd is not None) else (None if gelaufen else 0.0)), 0,
+                                   gelaufen=gelaufen, runs=1 if (gelaufen and e.run_id) else 0)
+            if e.art == "zuviel":
+                # Nr. 87: der Actor lieferte weit mehr als bestellt — keine gueltige Stichprobe, Lauf bezahlt
+                anteil = None if e.usd is None else round(float(e.usd) / len(plan), 4)
+                for p in plan:
+                    await _alarm(db, "markt_datensatz_zu_gross", ref=p["seg"]["id"], job=p["job"]["id"], detail=e.detail[:200])
+                    await _ungueltig(db, p["job"], f"Datensatz groesser als erwartet: {e.detail}"[:300], actual_rows=0,
+                                     actual_cost=anteil, actor_run_id=e.run_id, run_id=e.run_id)
+                return {"status": "data_invalid", "art": e.art, "jobs": len(plan)}
+            for p in plan:
+                await _scheitern(db, p["job"], f"Apify {e.art}: {e.detail}", endgueltig=e.art in ("token", "guthaben"))
+            if e.art in ("token", "guthaben"):
+                await _alarm(db, "markt_apify_" + e.art, ref="crawler", detail=e.detail[:200])
+            return {"status": "fehler", "art": e.art, "jobs": len(plan)}
+        except Exception as e:  # noqa: BLE001
+            log.exception("Market-Buendel gescheitert")
+            await budget.abrechnen(db, res, None, 0)
+            for p in plan:
+                await _scheitern(db, p["job"], f"Fehler: {e}"[:300], endgueltig=False)
+            return {"status": "fehler", "jobs": len(plan)}
+    else:
+        r = {"items": list(zwischen.get("items") or []), "usd": zwischen.get("usd"), "run_id": zwischen.get("run_id"),
+             "actor": zwischen.get("actor"), "laeufe": int(zwischen.get("laeufe") or 1), "ersatz_grund": zwischen.get("ersatz_grund"),
+             "dauer_ms": zwischen.get("dauer_ms"), "build_id": zwischen.get("build_id"), "build_number": zwischen.get("build_number")}
+    with _hintergrund_schreibt():
+        return await _auswerten(db, plan, r, res, monat, zwischen)
+
+
+async def _auswerten(db, plan: List[Dict[str, Any]], r: Dict[str, Any], res: Optional[Dict[str, Any]], monat: str,
+                     zwischen: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Der Schreibteil eines Buendels: Zuordnung, Zeilenfilter, Nachweise, Speichern, Abrechnung."""
     # Zuordnung Zeile -> Segment: ein Segment = alles; mehrere = NUR ueber inputContext == Start-URL
     je_url: Dict[str, List[dict]] = {p["url"]: [] for p in plan}
     unbekannt = 0
     if len(plan) == 1:
         je_url[plan[0]["url"]] = list(r["items"])
+        unbekannt = int((zwischen or {}).get("unbekannt") or 0)
     else:
         for it in r["items"]:
             key = _kontext(it)
@@ -579,12 +736,13 @@ async def _buendel_lauf(db, plan: List[Dict[str, Any]]) -> Dict[str, Any]:
                 je_url[key].append(it)
             else:
                 unbekannt += 1
-    if unbekannt:
+    if unbekannt and zwischen is None:
         await _alarm(db, "markt_zuordnung_unklar", ref=str(r.get("run_id") or ""), zeilen=unbekannt)
     ergebnisse = []
     kosten = r.get("usd")
     start_usd, row_usd = konfig.preise_je_actor(r.get("actor") or konfig.actor())
     laeufe = int(r.get("laeufe") or 1)
+    buendel_n = int((zwischen or {}).get("buendel") or len(plan))
     vorbereitet = []
     for p in plan:
         roh = je_url[p["url"]]
@@ -594,15 +752,27 @@ async def _buendel_lauf(db, plan: List[Dict[str, Any]]) -> Dict[str, Any]:
         # Review 26.09.2026 Nr. 2: jede Zeile gegen Segment + Suchauftrag pruefen (EZ, km, kW,
         # Kraftstoff, Getriebe) — unpassende verwerfen, nie als "guenstigstes Angebot" fuehren.
         listings, gruende = [], []
-        for l in geliefert:
-            ok, grund = normalisieren.passt_zum_segment(l, p["seg"], p["modell"])
-            if ok:
-                listings.append(l)
-            else:
-                gruende.append(grund)
+        filter_defekt = ""
+        try:
+            for l in geliefert:
+                ok, grund = normalisieren.passt_zum_segment(l, p["seg"], p["modell"])
+                if ok:
+                    listings.append(l)
+                else:
+                    gruende.append(grund)
+        except normalisieren.FilterDefekt as e:
+            # Nr. 111/112: der Filter selbst ist kaputt — keine Zeile ist gueltig
+            filter_defekt = str(e)
+            listings, gruende = [], [f"Zeilenfilter defekt: {e}"]
         # Nr. 17: mit Puffer abgerufen, jetzt auf die bestellten Zeilen kuerzen
         listings = listings[: p["max_items"]]
-        vorbereitet.append((p, listings, normalisieren.preise_aufsteigend(listings), len(geliefert), gruende, len(roh), nachweis, nachweis_grund))
+        # Nr. 143: liefert der Scraper die Marktgroesse, ist eine kleinere Lieferung als bestellt 'unvollstaendig'
+        markt_n = normalisieren.markt_gesamt(roh)
+        sample_incomplete = None if markt_n is None else bool(markt_n > p["max_items"] and len(roh) < p["max_items"])
+        vorbereitet.append({"p": p, "listings": listings, "sortiert": normalisieren.preise_aufsteigend(listings),
+                            "geliefert_n": len(geliefert), "gruende": gruende, "roh": roh, "roh_n": len(roh),
+                            "nachweis": nachweis, "nachweis_grund": nachweis_grund, "filter_defekt": filter_defekt,
+                            "sample_incomplete": sample_incomplete, "markt_n": markt_n})
     # Kosten rechnen mit den GELIEFERTEN Rohzeilen (Apify bucht auch verworfene und unbekannte, Nr. 57)
     gesamt_rows = len(r["items"])
     # Befund 26.09.2026: Kosten je Job (Start anteilig + Zeilen) und Monatszaehler liefen
@@ -610,24 +780,41 @@ async def _buendel_lauf(db, plan: List[Dict[str, Any]]) -> Dict[str, Any]:
     # hoeher nur, wenn Apify mehr gebucht hat — anteilig auf die Jobs verteilt, sodass die
     # Summe der Jobkosten genau der Buendelsumme entspricht.
     rechnerisch = round(laeufe * start_usd + gesamt_rows * row_usd, 4)
-    kosten_gesamt = None if kosten is None else max(float(kosten), rechnerisch)
+    if zwischen is not None:
+        kosten_gesamt = None if kosten is None else float(kosten)          # schon gebucht, nur der Anteil dieses Jobs
+    else:
+        kosten_gesamt = None if kosten is None else max(float(kosten), rechnerisch)
     je_job_unbekannt = unbekannt / len(plan)
-    basis = [start_usd * laeufe / len(plan) + (roh_n + je_job_unbekannt) * row_usd for (_, _, _, _, _, roh_n, _, _) in vorbereitet]
+    basis = [start_usd * laeufe / len(plan) + (v["roh_n"] + je_job_unbekannt) * row_usd for v in vorbereitet]
     basis_summe = sum(basis) or 1.0
-    for (p, listings, sortiert, geliefert_n, gruende, roh_n, nachweis, nachweis_grund), b_i in zip(vorbereitet, basis):
+    wartung_da: Optional[bool] = None
+    for v, b_i in zip(vorbereitet, basis):
+        p, listings, sortiert, geliefert_n, gruende, roh_n = v["p"], v["listings"], v["sortiert"], v["geliefert_n"], v["gruende"], v["roh_n"]
+        nachweis, nachweis_grund = v["nachweis"], v["nachweis_grund"]
+        seg_id = p["seg"]["id"]
         verworfen = len(gruende)
-        if geliefert_n >= FILTER_ALARM_MIN_ZEILEN and verworfen * 2 > geliefert_n:
+        if v["filter_defekt"]:
+            await _alarm(db, "markt_filter_defekt", ref="crawler", detail=v["filter_defekt"][:200], job=p["job"]["id"])
+        elif geliefert_n >= FILTER_ALARM_MIN_ZEILEN and verworfen * 2 > geliefert_n:
             # mehr als die Haelfte passt nicht zum Segment: mobile.de hat den Filter ignoriert
-            await _alarm(db, "markt_filter_ignoriert", ref=p["seg"]["id"], actor=str(r.get("actor") or ""),
+            await _alarm(db, "markt_filter_ignoriert", ref=seg_id, actor=str(r.get("actor") or ""),
                          verworfen=verworfen, geliefert=geliefert_n, job=p["job"]["id"],
                          gruende="; ".join(gruende[:5]))
         elif verworfen == 0 and geliefert_n:
-            await _alarm_zu(db, "markt_filter_ignoriert", ref=p["seg"]["id"])
+            await _alarm_zu(db, "markt_filter_ignoriert", ref=seg_id)
+        unplausibel = sum(1 for g in gruende if g == normalisieren.GRUND_PREIS_UNPLAUSIBEL)
+        if unplausibel >= PREIS_ALARM_AB:
+            # Nr. 85: der Scraper liefert Preise, die kein Auto sind (Parser/Waehrung) — Betreiber muss hinsehen
+            await _alarm(db, "markt_preis_unplausibel", ref=seg_id, zeilen=unplausibel, job=p["job"]["id"], actor=str(r.get("actor") or ""))
         anteil = None if kosten_gesamt is None else round(kosten_gesamt * b_i / basis_summe, 4)
         lauf_felder = dict(actor_run_id=r.get("run_id"), run_id=r.get("run_id"), actor=r.get("actor"),
-                           ersatz_grund=r.get("ersatz_grund"), dauer_ms=r.get("dauer_ms"), buendel=len(plan),
+                           ersatz_grund=r.get("ersatz_grund"), dauer_ms=r.get("dauer_ms"), buendel=buendel_n,
                            gelieferte_rows=geliefert_n, rohe_rows=roh_n, abruf_rows=p["abruf"], actual_cost=anteil,
-                           sortierung=nachweis, sortierung_grund=nachweis_grund or None)
+                           sortierung=nachweis, sortierung_grund=nachweis_grund or None,
+                           # Nr. 114: Build des Scrapers am Job; Nr. 143: Stichprobe vollstaendig?
+                           actor_build_id=r.get("build_id"), actor_build_number=r.get("build_number"),
+                           sample_incomplete=v["sample_incomplete"], markt_gesamt=v["markt_n"],
+                           verworfen_gruende=gruende[:20])
         # Welle 5 Nr. 36: VOR dem Speichern — gehoert der Job noch uns (running, worker, Lease gueltig)?
         if not await _noch_meiner(db, p["job"]):
             log.warning("Job %s: Lease verloren/abgelaufen — Ergebnis nicht gespeichert, Kosten gebucht", p["job"]["id"])
@@ -640,40 +827,79 @@ async def _buendel_lauf(db, plan: List[Dict[str, Any]]) -> Dict[str, Any]:
             await _abbrechen(db, p["job"], grund, actual_rows=0, **lauf_felder)
             ergebnisse.append({"status": "cancelled", "grund": grund, "sample_size": 0})
             continue
+        if v["filter_defekt"]:
+            grund_f = f"Zeilenfilter defekt: {v['filter_defekt']}"[:300]
+            await _ungueltig(db, p["job"], grund_f, actual_rows=0, verworfen_filter=verworfen, sorted_confirmed=sortiert, **lauf_felder)
+            ergebnisse.append({"status": "data_invalid", "grund": grund_f, "sample_size": 0})
+            continue
         if not sortiert or nachweis == normalisieren.SORTIERUNG_UNGUELTIG:
             # P1: unsortierte Actor-Ergebnisse sind KEINE "guenstigsten Angebote" — nichts speichern,
             # Job 'data_invalid' (Kosten gebucht), Alarm bleibt; kein last_success_at am Segment.
             # Welle 5 Nr. 1: auch Positionsnummern mit Luecken (Top-N nicht vollstaendig).
             grund_u = "Sortierung unsicher" if not sortiert else f"Sortierung unsicher: {nachweis_grund}"
-            await _alarm(db, "markt_sortierung_unsicher", ref=p["seg"]["id"], job=p["job"]["id"], grund=grund_u[:200])
+            await _alarm(db, "markt_sortierung_unsicher", ref=seg_id, job=p["job"]["id"], grund=grund_u[:200])
             await _ungueltig(db, p["job"], grund_u, actual_rows=0, verworfen_filter=verworfen, sorted_confirmed=False, **lauf_felder)
             ergebnisse.append({"status": "data_invalid", "grund": grund_u, "sample_size": 0})
             continue
-        await _alarm_zu(db, "markt_sortierung_unsicher", ref=p["seg"]["id"])
+        await _alarm_zu(db, "markt_sortierung_unsicher", ref=seg_id)
+        if roh_n > 0 and not listings:
+            # Nr. 127: der Actor lieferte Zeilen, aber keine einzige taugt — das ist keine Marktluecke
+            grund_a = f"alle Zeilen verworfen ({verworfen} von {roh_n}: {'; '.join(gruende[:3])})"[:300]
+            await _ungueltig(db, p["job"], grund_a, actual_rows=0, verworfen_filter=verworfen, sorted_confirmed=True, **lauf_felder)
+            ergebnisse.append({"status": "data_invalid", "grund": grund_a, "sample_size": 0})
+            continue
+        # Nr. 98: ist inzwischen die Wartung (Sicherung/Restore) aktiv, wird nichts geschrieben — das bezahlte
+        # Ergebnis geht mit dem Job zurueck in die Warteschlange und wird beim naechsten Claim ausgewertet
+        if wartung_da is None:
+            wartung_da = await _wartung_aktiv(db)
+        if wartung_da:
+            zs = _zwischen_paket({**p, "buendel_n": buendel_n}, v["roh"], r, anteil, unbekannt)
+            await _zurueckstellen(db, p["job"], "Wartung aktiv — Ergebnis zwischengespeichert", ZWISCHEN_WARTEN_S, zs,
+                                  actual_cost=anteil, actor_run_id=r.get("run_id"))
+            ergebnisse.append({"status": "zurueckgestellt", "grund": "wartung", "sample_size": 0})
+            continue
+        # Nr. 100: Auswertungs-Sperre je Segment — zwei Laeufe desselben Segments schreiben nie gleichzeitig
+        from job_lock import acquire, release
+        sperre = f"markt-seg-{seg_id}"
+        token = await acquire(db, sperre, ttl_seconds=SEGMENT_SPERRE_S)
+        if not token:
+            zs = _zwischen_paket({**p, "buendel_n": buendel_n}, v["roh"], r, anteil, unbekannt)
+            await _zurueckstellen(db, p["job"], "Segment wird gerade ausgewertet — Ergebnis zwischengespeichert", ZWISCHEN_WARTEN_S, zs,
+                                  actual_cost=anteil, actor_run_id=r.get("run_id"))
+            ergebnisse.append({"status": "zurueckgestellt", "grund": "segment_sperre", "sample_size": 0})
+            continue
         top_n_bewiesen = nachweis == normalisieren.SORTIERUNG_BEWIESEN
         try:
-            erg = await speicher.verarbeiten(db, p["seg"], listings, lauf_tag=p["job"].get("tag"), top_n_bewiesen=top_n_bewiesen)
-        except Exception as e:  # noqa: BLE001
-            log.exception("Market-Speicher %s gescheitert", p["job"]["id"])
-            await _scheitern(db, p["job"], f"Speichern: {e}"[:300], endgueltig=False)
-            continue
-        # 0 Treffer in EINEM Segment ist eine Marktluecke (z. B. EZ 2019 mit 0-50k km), kein
-        # Fehler — Befund 26.09.2026: 32 Betriebsalarme an einem Tag. Wir merken es nur am
-        # Segment (leer_in_folge) und alarmieren erst, wenn ein ganzer Lauf leer bleibt.
-        if not listings:
-            await db[SEGMENTE].update_one({"id": p["seg"]["id"]}, {"$inc": {"leer_in_folge": 1}, "$set": {"last_rows": 0}})
-        else:
-            await db[SEGMENTE].update_one({"id": p["seg"]["id"]}, {"$set": {"leer_in_folge": 0, "last_rows": len(listings)}})
-            await _alarm_zu(db, "markt_keine_treffer", ref=p["seg"]["id"])
-        await _fertig(db, p["job"], actual_rows=len(listings), verworfen_filter=verworfen, sorted_confirmed=sortiert,
-                      top_n_bewiesen=top_n_bewiesen, ergebnis=erg, **lauf_felder)
-        await _alarm_zu(db, "markt_crawl_fehlgeschlagen", ref=p["seg"]["id"])
+            try:
+                erg = await speicher.verarbeiten(db, p["seg"], listings, lauf_tag=p["job"].get("tag"), top_n_bewiesen=top_n_bewiesen,
+                                                 tag=job_tag(p["job"]),
+                                                 lauf_info={"actor_build": r.get("build_number") or r.get("build_id"),
+                                                            "sample_incomplete": v["sample_incomplete"], "run_id": r.get("run_id")})
+            except Exception as e:  # noqa: BLE001
+                log.exception("Market-Speicher %s gescheitert", p["job"]["id"])
+                await _scheitern(db, p["job"], f"Speichern: {e}"[:300], endgueltig=False)
+                continue
+            # 0 Treffer in EINEM Segment ist eine Marktluecke (z. B. EZ 2019 mit 0-50k km), kein
+            # Fehler — Befund 26.09.2026: 32 Betriebsalarme an einem Tag. Wir merken es nur am
+            # Segment (leer_in_folge) und alarmieren erst, wenn ein ganzer Lauf leer bleibt.
+            if not listings:
+                await db[SEGMENTE].update_one({"id": seg_id}, {"$inc": {"leer_in_folge": 1}, "$set": {"last_rows": 0}})
+            else:
+                await db[SEGMENTE].update_one({"id": seg_id}, {"$set": {"leer_in_folge": 0, "last_rows": len(listings)}})
+                await _alarm_zu(db, "markt_keine_treffer", ref=seg_id)
+            await _fertig(db, p["job"], actual_rows=len(listings), verworfen_filter=verworfen, sorted_confirmed=sortiert,
+                          top_n_bewiesen=top_n_bewiesen, ergebnis=erg, **lauf_felder)
+        finally:
+            await release(db, sperre, token)
+        await _alarm_zu(db, "markt_crawl_fehlgeschlagen", ref=seg_id)
         ergebnisse.append({**erg, "sortierung": nachweis})
     if len(plan) >= 2 and gesamt_rows == 0 and not unbekannt:
         # Ein ganzer Buendel-Lauf ohne eine einzige Zeile: Scraper/Sperre/URL-Form — das ist ein Fehler.
         await _alarm(db, "markt_lauf_leer", ref=str(r.get("run_id") or ""), segmente=len(plan), actor=str(r.get("actor") or ""))
-    await budget.abrechnen(db, res, kosten_gesamt, gesamt_rows, runs=laeufe)
-    return {"status": "ok", "jobs": len(plan), "rows": gesamt_rows, "usd": kosten_gesamt, "laeufe": laeufe, "ergebnisse": ergebnisse}
+    if res is not None:
+        await budget.abrechnen(db, res, kosten_gesamt, gesamt_rows, runs=laeufe)
+    return {"status": "ok", "jobs": len(plan), "rows": gesamt_rows, "usd": kosten_gesamt, "laeufe": laeufe, "ergebnisse": ergebnisse,
+            "monat": monat}
 
 
 async def verarbeiten(db, job: Dict[str, Any]) -> Dict[str, Any]:
@@ -684,10 +910,26 @@ async def verarbeiten(db, job: Dict[str, Any]) -> Dict[str, Any]:
     return erg
 
 
+async def _doppelt(db, job: Dict[str, Any]) -> None:
+    """Nr. 99: ein zweiter faelliger Job desselben Segments — storniert ('doppelt faellig'), wenn sein
+    Termin laenger als DOPPELT_STORNO_S zurueckliegt, sonst wartet er DOPPELT_WARTEN_S."""
+    jetzt = konfig.jetzt()
+    try:
+        faellig = datetime.fromisoformat(str(job.get("scheduled_at")))
+    except (TypeError, ValueError):
+        faellig = jetzt
+    if (jetzt - faellig).total_seconds() > DOPPELT_STORNO_S:
+        await db[JOBS].update_one(_meiner(job), {"$set": {"status": "cancelled", "error": STORNO_DOPPELT, "finished_at": jetzt.isoformat()},
+                                                "$unset": {"lease_until": "", "claimed_at": "", "worker": ""}})
+    else:
+        await _zurueckstellen(db, job, f"{STORNO_DOPPELT} — wartet", DOPPELT_WARTEN_S)
+
+
 async def _buendel_sammeln(db, nachzuegler_s: int) -> List[Dict[str, Any]]:
     """Nr. 22: faellige Jobs bis Buendelgroesse einsammeln (gleiche Zeilenzahl wie der erste);
     ist das Buendel nicht voll, hoechstens nachzuegler_s Sekunden auf Jobs warten, die in
-    diesem Zeitraum faellig werden — sonst startet fuer 1-2 Jobs ein eigener Actor-Lauf."""
+    diesem Zeitraum faellig werden — sonst startet fuer 1-2 Jobs ein eigener Actor-Lauf.
+    Nr. 99: je Segment nur ein Job im Buendel."""
     erster = await beanspruchen(db)
     if not erster:
         return []
@@ -695,15 +937,21 @@ async def _buendel_sammeln(db, nachzuegler_s: int) -> List[Dict[str, Any]]:
     rows = int(erster.get("max_items") or konfig.rows_je_segment())
     groesse = konfig.buendel_groesse()
     frist = konfig.jetzt() + timedelta(seconds=max(0, int(nachzuegler_s)))
+    segmente_drin = {erster["segment_id"]}
     while len(buendel) < groesse:
         job = await beanspruchen(db, max_items=rows)
         if job:
+            if job["segment_id"] in segmente_drin:
+                await _doppelt(db, job)
+                continue
+            segmente_drin.add(job["segment_id"])
             buendel.append(job)
             continue
         jetzt = konfig.jetzt()
         if jetzt >= frist:
             break
-        naechster = await db[JOBS].find_one({"status": "queued", "max_items": rows, "scheduled_at": {"$lte": frist.isoformat()}},
+        naechster = await db[JOBS].find_one({"status": "queued", "max_items": rows, "scheduled_at": {"$lte": frist.isoformat()},
+                                             "cancel_requested": {"$ne": True}},
                                             {"_id": 0, "scheduled_at": 1}, sort=[("scheduled_at", 1)])
         if not naechster:
             break
@@ -723,7 +971,8 @@ async def einmal(db, *, max_buendel: Optional[int] = None, schalter_pruefen: boo
     jobs_parallel() Buendel gleichzeitig (Nr. 34), je Buendel eine atomare Reservierung.
     Nr. 26: fehlen kritische Unique-Indizes, wird nicht gecrawlt.
     Nr. 33: schalter_pruefen=True (Worker-Schleife) prueft vor jedem Buendel den Crawler-Schalter;
-    die Admin-Route ruft mit max_buendel=1 (ein Buendel je Aufruf, Antwort sagt, wie viele warten)."""
+    die Admin-Route ruft mit max_buendel=1 (ein Buendel je Aufruf, Antwort sagt, wie viele warten).
+    Welle 6: beim ersten 'Budget aufgebraucht' endet der Takt (Jobs bleiben queued, budget_wait)."""
     await stale_zurueck(db)
     try:
         await alte_stornieren(db)
@@ -758,11 +1007,17 @@ async def einmal(db, *, max_buendel: Optional[int] = None, schalter_pruefen: boo
         if not buendel:
             break
         ergebnisse = await asyncio.gather(*[verarbeiten_buendel(db, b) for b in buendel], return_exceptions=True)
+        budget_voll = False
         for b, e in zip(buendel, ergebnisse):
             if isinstance(e, BaseException):
                 log.error("Market-Buendel (%d Jobs) mit Ausnahme: %s", len(b), e)
+            elif isinstance(e, dict) and (e.get("status") == "budget" or any(t.get("status") == "budget" for t in (e.get("teile") or []))):
+                budget_voll = True
         erledigt += sum(len(b) for b in buendel)
         buendel_n += len(buendel)
+        if budget_voll:
+            grund = "budget_voll"
+            break
     raus: Dict[str, Any] = {"erledigt": erledigt, "buendel": buendel_n, "wartend": await _wartend(db)}
     if grund:
         raus["abgebrochen"] = grund
@@ -797,23 +1052,19 @@ def _entfernung_starten(db) -> bool:
 async def worker_forever(db, erfolg: Optional[Callable[[], None]] = None, takt_s: int = 20) -> None:
     """Dauerschleife je Prozess (Claims sind atomar, mehrere Prozesse sind ok).
     Tagesplan einmal je Tag ueber eine kurze Mongo-Sperre + Merker (Nr. 24); Entfernungs-
-    Pruefung als Hintergrundaufgabe (Nr. 37); Crawler-Schalter vor jedem Buendel (Nr. 33)."""
+    Pruefung als Hintergrundaufgabe (Nr. 37); Crawler-Schalter vor jedem Buendel (Nr. 33).
+    Welle 6 Nr. 93: `erfolg` (worker_erfolg in server.py) erst nach einem erfolgreich
+    beendeten Takt — nicht mehr am Anfang."""
     await asyncio.sleep(15)
     geplant_fuer = ""
     while True:
         try:
-            if erfolg:
-                erfolg()
             if not await konfig.crawler_aktiv(db) or not konfig.token():
                 await asyncio.sleep(60)
                 continue
-            try:
-                import wartung
-                if await wartung.aktiv_async(db):
-                    await asyncio.sleep(60)
-                    continue
-            except Exception:  # noqa: BLE001
-                pass
+            if await _wartung_aktiv(db):
+                await asyncio.sleep(60)
+                continue
             tag = konfig.heute_tag()
             if geplant_fuer != tag:
                 if (await konfig.merker_lesen(db, konfig.TAGESPLAN_DOK)).get("tag") == tag:
@@ -822,11 +1073,13 @@ async def worker_forever(db, erfolg: Optional[Callable[[], None]] = None, takt_s
                     from job_lock import acquire
                     token = await acquire(db, f"markt-plan-{tag}", ttl_seconds=PLAN_SPERRE_S)
                     if token:
-                        await segmente.synchronisieren(db)
+                        await segmente.synchronisieren(db, nachplanen=False)
                         await tagesplan(db, tag)
                         geplant_fuer = tag
             await einmal(db, schalter_pruefen=True)
             _entfernung_starten(db)
+            if erfolg:
+                erfolg()
         except Exception:  # noqa: BLE001
             log.exception("Market-Worker-Takt gescheitert")
         await asyncio.sleep(takt_s)
@@ -840,9 +1093,10 @@ async def uebersicht(db, tag: Optional[str] = None) -> Dict[str, Any]:
     naechster = await db[JOBS].find_one({"status": "queued"}, {"_id": 0, "scheduled_at": 1, "segment_id": 1},
                                         sort=[("scheduled_at", 1)])
     raus["naechster"] = naechster
-    raus["letzte"] = await db[JOBS].find({"status": {"$in": ["completed", "failed", "data_invalid"]}}, {"_id": 0, "ergebnis": 0})\
+    raus["letzte"] = await db[JOBS].find({"status": {"$in": ["completed", "failed", "data_invalid"]}}, {"_id": 0, "ergebnis": 0, "ergebnis_zwischenspeicher": 0})\
         .sort("finished_at", -1).to_list(10)
     raus["fehler_offen"] = raus["failed"]
+    raus["budget_wartend"] = await db[JOBS].count_documents({"status": "queued", "budget_wait": True})
     raus["indizes_fehlen"] = await konfig.indizes_fehlen(db)
     raus["tagesplan"] = await konfig.merker_lesen(db, konfig.TAGESPLAN_DOK)
     return raus

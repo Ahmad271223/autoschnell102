@@ -180,13 +180,50 @@ async def einstellungen_setzen(db, **werte) -> Dict[str, Any]:
     return await einstellungen(db)
 
 
-async def synchronisieren(db) -> Dict[str, int]:
+async def _verkaeufer_normalisieren(db, modelle: List[Dict[str, Any]]) -> int:
+    """Reparaturwelle 6 Nr. 84: Auftraege, die noch 'FSBO' tragen, werden auf 'PRIVATE' gehoben — der
+    definition_hash aendert sich dadurch NICHT (er normalisiert die Verkaeuferart), also keine neue Fassung."""
+    from markt import auftraege
+    n = 0
+    for m in modelle:
+        s = str(m.get("seller_type") or "").upper()
+        if s and s != "DEALER" and s != "PRIVATE":
+            neu = "PRIVATE" if s in ("FSBO", "PRIVAT") else ("DEALER" if s == "HAENDLER" else None)
+            if not neu:
+                continue
+            alt_hash = m.get("definition_hash")
+            m["seller_type"] = neu
+            setzen = {"seller_type": neu, "definition_hash": auftraege.definition_hash(m)}
+            if alt_hash and m.get("testlauf_ok_hash") == alt_hash:
+                setzen["testlauf_ok_hash"] = setzen["definition_hash"]      # der bestandene Testlauf gilt weiter
+            await db[konfig.MODELLE].update_one({"id": m["id"]}, {"$set": setzen})
+            m.update(setzen)
+            n += 1
+    return n
+
+
+async def _nachplanen(db) -> Dict[str, Any]:
+    """Reparaturwelle 6 Nr. 95: neue Segmente (Aktivierung/Anlage/Aenderung) bekommen heute noch Jobs im
+    Tageskontingent — sonst erst am Folgetag. Nur bei laufendem Crawler und vorhandenem Token; wirft nie."""
+    try:
+        if not await konfig.crawler_aktiv(db) or not konfig.token():
+            return {"uebersprungen": "crawler aus"}
+        from markt import jobs
+        return await jobs.tagesplan(db, sofort=True)
+    except Exception as e:  # noqa: BLE001
+        return {"fehler": str(e)[:200]}
+
+
+async def synchronisieren(db, *, nachplanen: bool = True) -> Dict[str, Any]:
     """Segmente aus (aktive Modelle x km-Bereiche) anlegen/aktualisieren;
-    alles andere deaktivieren (nichts loeschen — Historie bleibt)."""
+    alles andere deaktivieren (nichts loeschen — Historie bleibt).
+    nachplanen (Welle 6 Nr. 95): entstehen neue Segmente, werden fuer heute Jobs nachgeplant
+    (der Worker ruft mit nachplanen=False, weil er den Tagesplan selbst anlegt)."""
     buckets = await km_buckets(db)
     ezs = await ez_buckets(db) or [None]
     einst = await einstellungen(db)
     modelle = await db[konfig.MODELLE].find({}, {"_id": 0}).to_list(2000)
+    await _verkaeufer_normalisieren(db, modelle)
     gueltig = set()
     neu = 0
     for m in modelle:
@@ -224,7 +261,10 @@ async def synchronisieren(db) -> Dict[str, int]:
                                               {"$set": {"status": "cancelled", "error": "Segment deaktiviert",
                                                         "finished_at": konfig.jetzt_iso()}})
         storniert = j.modified_count
-    return {"segmente": len(gueltig), "neu": neu, "deaktiviert": r.modified_count, "jobs_storniert": storniert}
+    erg: Dict[str, Any] = {"segmente": len(gueltig), "neu": neu, "deaktiviert": r.modified_count, "jobs_storniert": storniert}
+    if nachplanen and neu:
+        erg["nachgeplant"] = await _nachplanen(db)
+    return erg
 
 
 def bucket_fuer_km(buckets: List[Dict[str, Any]], km: Optional[int]) -> Optional[Dict[str, Any]]:
