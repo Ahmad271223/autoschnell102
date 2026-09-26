@@ -15,14 +15,19 @@
  */
 import { preisAusText } from "@/lib/preis";
 
+// Review 26.09.2026 (Nr. 101-105): keys_expected ("davon vereinbart") ist kein
+// Eingabefeld mehr — der Server setzt es aus dem Kaufvertrag; die App zeigt
+// den Serverwert nur an (Protokoll.jsx).
 export const LEERER_ENTWURF = Object.freeze({
-  documents: {}, features: {}, condition: {}, keys_count: "", keys_expected: "",
+  documents: {}, features: {}, condition: {}, keys_count: "",
   notes: "", place: "", damages_confirmed: null, new_damages: [],
   vehicle_check: {}, preis_vorschlag: "", sondervereinbarung: "",
   // Entscheidung Ahmad 22.09.2026 (Ausweisnummer): vor Ort nachgetragen,
   // Teil des Entwurfs (Autosave, Zusammenführung, Sicherung wie alle Felder).
   seller_id_document: "",
-  // Stufe 3 KI (26.09.2026): Antworten auf Rückfragen des Chefs (Knopf Ja/Nein/Unklar)
+  // Stufe 3 KI (26.09.2026): Antwort auf die Rückfrage des Chefs — genau eine
+  // je Frage (frage_id), Review 26.09.2026 (Nr. 60-62/127): der Verlauf
+  // früherer Runden liegt beim Server (protocol.rueckfrage_verlauf).
   rueckfrage_antworten: [],
 });
 
@@ -39,8 +44,8 @@ export function entwurfAusServer(p) {
     documents: x.documents || {},
     features: x.features || {},
     condition: x.condition || {},
-    keys_count: x.keys_count || "",
-    keys_expected: x.keys_expected || "",
+    // Review 26.09.2026 (Nr. 113): 0 Schlüssel ist ein Wert (vorher wurde 0 zu "").
+    keys_count: x.keys_count ?? "",
     notes: x.notes || "",
     place: x.place || "",
     // RP-067: nicht beantwortet bleibt null (vorher !! -> false = "Nein").

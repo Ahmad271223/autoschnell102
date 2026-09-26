@@ -312,13 +312,27 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
           onPreis={(p) => { setzen("preis", preisText(p)); toast.info("Preis ins Feld übernommen — Freigeben bestätigt ihn."); }} />
       )}
       {(e.rueckfrage_antworten || []).length > 0 && (
-        // Stufe 3 KI (26.09.2026): was der Fahrer per Knopf geantwortet hat
+        // Stufe 3 KI (26.09.2026): was der Fahrer auf die letzte Frage geantwortet hat
         <div className="mt-2 text-[12px]" data-testid={`freigabe-antworten-${e.protocol_id}`}>
-          <span className="text-zinc-500">Antworten des Fahrers:</span>{" "}
+          <span className="text-zinc-500">Antwort des Fahrers:</span>{" "}
           {e.rueckfrage_antworten.map((a, i) => (
-            <span key={i}>{i > 0 ? " · " : ""}{a.question} <b>{a.answer}</b></span>
+            <span key={a.frage_id || i}>{i > 0 ? " · " : ""}{a.question} <b>{a.answer}</b></span>
           ))}
         </div>
+      )}
+      {(e.rueckfrage_verlauf || []).length > 0 && (
+        // Review 26.09.2026 (Nr. 60-62/127): alle früheren Runden, aufklappbar
+        <details className="mt-1 text-[12px]" data-testid={`freigabe-verlauf-${e.protocol_id}`}>
+          <summary className="cursor-pointer text-zinc-500">Frühere Rückfragen ({e.rueckfrage_verlauf.length})</summary>
+          <ul className="mt-1 space-y-0.5">
+            {e.rueckfrage_verlauf.map((r, i) => (
+              <li key={r?.frage?.frage_id || i}>
+                {r?.frage?.question}{" "}
+                <b>{(r?.antworten || []).map((a) => a?.answer).filter(Boolean).join(", ") || "—"}</b>
+              </li>
+            ))}
+          </ul>
+        </details>
       )}
 
       <div className="mt-3 rounded-lg p-3" style={{ background: "var(--wa-03)" }}>
@@ -495,9 +509,11 @@ export default function Freigaben() {
       // Stufe 3 KI (26.09.2026): die konkrete Frage geht strukturiert mit —
       // der Fahrer antwortet per Knopf.
       if (zurueck && rueckfrage_frage?.question) {
+        // Review 26.09.2026 (Nr. 125): >= 2 Optionen oder freitext — der Server prüft.
         koerper.rueckfrage_frage = { source_id: rueckfrage_frage.source_id || "",
                                      question: rueckfrage_frage.question,
-                                     options: rueckfrage_frage.options || [] };
+                                     options: rueckfrage_frage.options || [],
+                                     freitext: !!rueckfrage_frage.freitext };
       }
       if (preis_zuruecksetzen) koerper.preis_zuruecksetzen = true;
       const eigener = entwurf[id] || {};

@@ -16,11 +16,12 @@ import base64
 import logging
 import math
 import hashlib
+import re
 import uuid
 from typing import Any, Dict, List, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Response
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pymongo.errors import DuplicateKeyError
 
 import betrieb
@@ -96,6 +97,309 @@ FELD_MAX = AUSSTATTUNG_MAX + 20
 FELDNAME_MAX = 500
 
 
+# --------------------------------------------------------------------------
+# Review 26.09.2026 (Nr. 63-66): Schaeden der Vor-Ort-Aufnahme werden
+# serverseitig geprueft. Die Listen sind KOPIEN der Frontend-Konstanten —
+# beide Seiten muessen synchron bleiben:
+#   * SCHADEN_ARTEN      <- DamageSelector.jsx DAMAGE_TYPES + kiSchaden.js TECHNIK_TYP
+#   * SCHADEN_ANSICHTEN  <- DamageSelector.jsx VIEW_LABELS
+#   * SKIZZE_BREITE/HOEHE <- DamageSelector.jsx IMG_W / IMG_H
+#   * TECHNIK_BEREICHE   <- kiSchaden.js TECHNIK_BEREICHE
+#   * SCHWERE_FRAGEN     <- kiSchaden.js SCHWERE_FRAGEN (Pflichtfragen je Art)
+# tests/test_protokoll_review_20260926.py liest die JS-Dateien und vergleicht.
+SCHADEN_ARTEN = ("unfall_repariert", "unfall_nicht_repariert", "hagelschaden", "steinschlag",
+                 "delle", "kratzer", "rost", "beleuchtung", "technik")
+SCHADEN_ANSICHTEN = ("front", "rear", "left", "right", "top")
+SCHADEN_ANSICHT_TECHNIK = "technik"
+SKIZZE_BREITE, SKIZZE_HOEHE = 1536, 1024
+ZONE_MAX = 60
+TECHNIK_BEREICHE = (
+    "Motor", "Getriebe/Kupplung", "Fahrwerk/Bremsen/Lenkung", "Elektrik/Elektronik", "Klima/Heizung",
+    "Fensterheber/Verriegelung/Sitze", "Auspuff/Abgas", "Batterie/Start", "Innenraum",
+)
+_DIAGNOSE = "Werkstatt hat Diagnose bestätigt"
+SCHWERE_FRAGEN: Dict[str, List[Dict[str, Any]]] = {
+    "delle": [
+        {"key": "groesse", "label": "Größe", "options": ["bis 2 cm", "2–5 cm", "5–10 cm", "über 10 cm", "unbekannt"]},
+        {"key": "lack", "label": "Lack beschädigt?", "options": ["nein", "ja", "unbekannt"]},
+        {"key": "lage", "label": "Lage", "options": ["Fläche", "Kante/Sicke", "unbekannt"]},
+    ],
+    "kratzer": [
+        {"key": "laenge", "label": "Länge", "options": ["bis 5 cm", "5–15 cm", "15–30 cm", "über 30 cm", "unbekannt"]},
+        {"key": "tiefe", "label": "Tiefe", "options": ["oberflächlich", "bis Grundierung", "bis Blech", "unbekannt"]},
+        {"key": "anzahl", "label": "Anzahl", "options": ["einzeln", "mehrere", "unbekannt"]},
+    ],
+    "rost": [
+        {"key": "umfang", "label": "Umfang", "options": ["oberflächlich", "Blasen", "durchgerostet", "unbekannt"]},
+        {"key": "groesse", "label": "Größe", "options": ["bis 5 cm", "5–15 cm", "über 15 cm", "unbekannt"]},
+        {"key": "stelle", "label": "Stelle", "options": ["Fläche", "Kante/Falz", "tragendes Teil", "unbekannt"]},
+    ],
+    "hagelschaden": [
+        {"key": "umfang", "label": "Umfang",
+         "options": ["wenige (unter 10)", "viele (10–30)", "sehr viele (über 30)", "ganzes Fahrzeug"]},
+        {"key": "dellengroesse", "label": "Dellengröße",
+         "options": ["klein (bis 1 cm)", "mittel (1–3 cm)", "groß", "unbekannt"]},
+        {"key": "lack", "label": "Lack beschädigt?", "options": ["nein", "ja", "unbekannt"]},
+    ],
+    "steinschlag": [
+        {"key": "wo", "label": "Wo?", "options": ["Lack", "Windschutzscheibe", "andere Scheibe"]},
+        {"key": "umfang", "label": "Umfang", "options": ["einzeln", "mehrere", "Riss/flächig"]},
+        {"key": "tiefe", "label": "Tiefe", "options": ["nur Deckschicht", "bis Grundierung/Blech", "unbekannt"]},
+    ],
+    "beleuchtung": [
+        {"key": "welches", "label": "Welches Licht?", "options": ["Scheinwerfer", "Rückleuchte", "Blinker/Nebel", "andere"]},
+        {"key": "funktion", "label": "Funktion",
+         "options": ["eingeschränkt", "komplett ausgefallen", "Gehäuse beschädigt", "unbekannt"]},
+        {"key": "technik", "label": "Technik", "options": ["Halogen", "Xenon", "LED", "unbekannt"]},
+    ],
+    "unfall_repariert": [
+        {"key": "nachweis", "label": "Reparatur belegt?", "options": ["Rechnung vorhanden", "kein Beleg", "unbekannt"]},
+        {"key": "umfang", "label": "Umfang", "options": ["Blech", "Blech + Rahmen", "unbekannt"]},
+        {"key": "qualitaet", "label": "Ausführung", "options": ["fachgerecht", "sichtbare Mängel", "unbekannt"]},
+    ],
+    "unfall_nicht_repariert": [
+        {"key": "umfang", "label": "Umfang", "options": ["Blech", "Blech + Rahmen", "unbekannt"]},
+        {"key": "fahrbereit", "label": "Fahrbereit?", "options": ["ja", "nein", "unbekannt"]},
+        {"key": "airbag", "label": "Airbag", "options": ["nicht ausgelöst", "ausgelöst", "unbekannt"]},
+    ],
+    "technik": [
+        {"key": "status", "label": "Stand", "options": ["nur Symptom bemerkt", _DIAGNOSE, "unbekannt"]},
+        {"key": "fahrbereit", "label": "Fahrbereit?", "options": ["ja", "eingeschränkt", "nein", "unbekannt"]},
+        {"key": "warnleuchte", "label": "Warnleuchte", "options": ["keine", "leuchtet", "unbekannt"]},
+        {"key": "umfang", "label": "Umfang lt. Werkstatt", "nur_wenn": {"status": _DIAGNOSE},
+         "options": ["Kleinteil/Einstellung", "Bauteil tauschen", "Instandsetzung/Überholung",
+                     "Austauschaggregat", "unbekannt"]},
+        {"key": "kva", "label": "Kostenvoranschlag", "nur_wenn": {"status": _DIAGNOSE},
+         "options": ["liegt vor", "keiner", "unbekannt"], "betrag_bei": "liegt vor", "betrag_key": "kva_eur"},
+    ],
+}
+# Der technische Mangel traegt zusaetzlich seinen Bereich in severity_data
+# (kiSchaden.js technikSchaden: severity_data = {bereich}).
+_SEVERITY_ZUSATZ = {"technik": {"bereich": TECHNIK_BEREICHE}}
+
+
+def schaden_fragen(d: dict) -> List[Dict[str, Any]]:
+    """Fragen zum aktuellen Stand eines Schadens (kiSchaden.fragenFuer):
+    Folgefragen nur, wenn ihre Bedingung erfuellt ist."""
+    sd = d.get("severity_data") or {}
+    raus = []
+    for f in SCHWERE_FRAGEN.get(str(d.get("type_key") or ""), []):
+        bed = f.get("nur_wenn") or {}
+        if all(sd.get(k) == v for k, v in bed.items()):
+            raus.append(f)
+    return raus
+
+
+def schaden_offen(d: dict) -> List[str]:
+    """Noch nicht beantwortete Pflichtfragen (kiSchaden.schwereOffen);
+    "unbekannt" gilt als Antwort. Unbekannte Arten haben keine Fragen."""
+    sd = d.get("severity_data") or {}
+    offen = [f["label"] for f in schaden_fragen(d) if not str(sd.get(f["key"]) or "").strip()]
+    for f in schaden_fragen(d):
+        if f.get("betrag_bei") and sd.get(f["key"]) == f["betrag_bei"] \
+                and not str(sd.get(f["betrag_key"]) or "").strip():
+            offen.append("Betrag")
+    return offen
+
+
+def _severity_pruefen(type_key: str, sd: Optional[Dict[str, str]]) -> None:
+    """Nur bekannte Schluessel je Art, nur angebotene Werte (Betrag: Ziffern)."""
+    if not sd:
+        return
+    erlaubt: Dict[str, Any] = {}
+    for f in SCHWERE_FRAGEN.get(type_key, []):
+        erlaubt[f["key"]] = f["options"]
+        if f.get("betrag_key"):
+            erlaubt[f["betrag_key"]] = "betrag"
+    erlaubt.update(_SEVERITY_ZUSATZ.get(type_key, {}))
+    for k, w in sd.items():
+        if k not in erlaubt:
+            raise ValueError(f"Schaden {type_key}: unbekanntes Merkmal '{k}'")
+        if erlaubt[k] == "betrag":
+            if not re.fullmatch(r"\d{1,6}", str(w)):
+                raise ValueError(f"Schaden {type_key}: Betrag '{k}' nur als Zahl")
+        elif w not in erlaubt[k]:
+            raise ValueError(f"Schaden {type_key}: '{w}' ist keine angebotene Antwort fuer '{k}'")
+
+
+class ProtokollSchadenIn(DamageIn):
+    """Review 26.09.2026 (Nr. 63-66): ein Schaden der Vor-Ort-Aufnahme — wie
+    DamageIn, aber nur mit den Werten, die die Skizze wirklich erzeugt:
+    bekannte Art, bekannte Ansicht, Bauteil nicht leer, Koordinaten im
+    Skizzenraum, Zusatzmerkmale nur aus den angebotenen Antworten. Vorher
+    landete jeder beliebige type_key/zone/severity_data im Protokoll und
+    damit in der KI-Bewertung."""
+
+    @model_validator(mode="after")
+    def _skizze_pruefen(self):
+        art = str(self.type_key or "").strip()
+        if art not in SCHADEN_ARTEN:
+            raise ValueError(f"Schaden: unbekannte Schadensart '{art[:40]}'")
+        zone = str(self.zone or "").strip()
+        if not zone or len(zone) > ZONE_MAX:
+            raise ValueError(f"Schaden {art}: Bauteil fehlt oder ist laenger als {ZONE_MAX} Zeichen")
+        self.zone = zone
+        if art == "technik":
+            if (self.view or SCHADEN_ANSICHT_TECHNIK) != SCHADEN_ANSICHT_TECHNIK:
+                raise ValueError("Technischer Mangel: Ansicht muss 'technik' sein")
+            if zone not in TECHNIK_BEREICHE:
+                raise ValueError(f"Technischer Mangel: unbekannter Bereich '{zone}'")
+            self.view = SCHADEN_ANSICHT_TECHNIK
+        else:
+            if self.view not in SCHADEN_ANSICHTEN:
+                raise ValueError(f"Schaden {art}: unbekannte Ansicht '{str(self.view or '')[:20]}'")
+            if self.x is None or self.y is None:
+                raise ValueError(f"Schaden {art}: Position auf der Skizze fehlt")
+            if not (0 <= self.x <= SKIZZE_BREITE and 0 <= self.y <= SKIZZE_HOEHE):
+                raise ValueError(f"Schaden {art}: Position ausserhalb der Skizze")
+        _severity_pruefen(art, self.severity_data)
+        return self
+
+
+def schaeden_vollstaendig_pruefen(schaeden: Optional[List[dict]]) -> None:
+    """Review 26.09.2026 (Nr. 66): beim Abschicken muss jeder neue Schaden
+    alle Pflichtfragen beantwortet haben ("unbekannt" zaehlt). Vorher
+    pruefte das nur die App."""
+    offen = []
+    for d in schaeden or []:
+        if not isinstance(d, dict):
+            continue
+        fehlt = schaden_offen(d)
+        if fehlt:
+            name = " ".join(x for x in (d.get("type_label") or d.get("type_key"), d.get("zone")) if x)
+            offen.append(f"{name}: {', '.join(fehlt)}")
+    if offen:
+        raise HTTPException(400, "Bitte bei jedem neuen Schaden alle Angaben wählen (\"unbekannt\" "
+                                 "geht auch): " + " · ".join(offen))
+
+
+# --------------------------------------------------------------------------
+# Review 26.09.2026 (Nr. 86/101-105/113-115): Schluessel und Kilometer als Zahlen.
+SCHLUESSEL_MAX = 20
+KM_MAX = 5_000_000
+
+
+def _ganzzahl(wert: Any, name: str, maximum: int) -> Optional[int]:
+    """None/"" -> None; Ganzzahl, reine Ziffern (auch '86.000 km') -> int;
+    alles andere ist ein Fehler."""
+    if wert is None or (isinstance(wert, str) and not wert.strip()):
+        return None
+    if isinstance(wert, bool):
+        raise ValueError(f"{name}: bitte eine ganze Zahl (0-{maximum})")
+    n = PV.zahl(wert)
+    if n is None or (isinstance(wert, float) and wert != int(wert)):
+        raise ValueError(f"{name}: bitte eine ganze Zahl (0-{maximum})")
+    if not (0 <= n <= maximum):
+        raise ValueError(f"{name}: nur 0 bis {maximum}")
+    return n
+
+
+def schluessel_vereinbart(contract: Optional[dict]) -> Optional[int]:
+    """Review 26.09.2026 (Nr. 101-105): die VEREINBARTE Schluesselzahl kommt
+    aus dem Kaufvertrag (contract_data.schluessel_anzahl), nicht mehr vom
+    Fahrer. Ohne Angabe im Vertrag None."""
+    try:
+        return _ganzzahl((contract or {}).get("schluessel_anzahl"), "Schlüssel", 99)
+    except ValueError:
+        return None
+
+
+def anzahl_text(wert: Any) -> str:
+    """Anzeige einer Anzahl: 0 ist ein Wert, None/"" nicht (vorher machte
+    `or ""` aus 0 Schluesseln ein leeres Feld)."""
+    return "" if wert is None or wert == "" else str(wert)
+
+
+# --------------------------------------------------------------------------
+# Review 26.09.2026 (Nr. 106): Abschnitt 1 — Typpruefung der "weicht ab"-Werte.
+_FIN_MUSTER = re.compile(r"[A-HJ-NPR-Z0-9]{17}")
+_LEISTUNG_MUSTER = re.compile(r"(\d{1,4})\s*(kw|ps)?(?:\s*/\s*(\d{1,4})\s*(kw|ps)?)?", re.IGNORECASE)
+_HU_WORTE = ("neu", "keine", "keine hu", "abgelaufen")
+TEXT_MAX = 60
+
+
+def abweichung_pruefen(schluessel: str, label: str, wert: Any) -> Optional[str]:
+    """Fehlertext, wenn der vor Ort eingetragene Wert nicht zur Zeile passt
+    (km/Halter ganze Zahl, EZ MM/JJJJ, Leistung kW/PS ganze Zahl, Texte
+    max. 60 Zeichen, FIN 17 Zeichen ohne I/O/Q). None = in Ordnung."""
+    art = PV.ARTEN.get(schluessel, "text")
+    s = str(wert if wert is not None else "").strip()
+    if art == "km":
+        n = PV.zahl(s)
+        if n is None or not (0 <= n <= KM_MAX):
+            return f"{label}: bitte den Kilometerstand als ganze Zahl eintragen"
+    elif art == "anzahl":
+        if not re.fullmatch(r"\d{1,2}", s):
+            return f"{label}: bitte als ganze Zahl (0-99) eintragen"
+    elif art == "monat_jahr":
+        if not re.fullmatch(r"(0[1-9]|1[0-2])/(19|20)\d{2}", PV.monat_jahr_text(s, "ez", kurzes_jahr=False)):
+            return f"{label}: bitte als MM/JJJJ eintragen"
+    elif art == "hu":
+        if s.lower() not in _HU_WORTE and not re.fullmatch(
+                r"(0[1-9]|1[0-2])/(19|20)\d{2}", PV.monat_jahr_text(s, "hu", kurzes_jahr=False)):
+            return f"{label}: bitte als MM/JJJJ eintragen (oder \"keine HU\")"
+    elif art == "fin":
+        if not _FIN_MUSTER.fullmatch(re.sub(r"\s+", "", s).upper()):
+            return f"{label}: 17 Zeichen, ohne I, O und Q"
+    elif art == "leistung":
+        if not _LEISTUNG_MUSTER.fullmatch(s):
+            return f"{label}: bitte als ganze Zahl in kW oder PS eintragen (z. B. 110 kW)"
+    elif art == "ja_nein":
+        return None
+    else:
+        if not s or len(s) > TEXT_MAX:
+            return f"{label}: Text bis {TEXT_MAX} Zeichen"
+    return None
+
+
+# --------------------------------------------------------------------------
+# Review 26.09.2026 (Nr. 57-62/134): Antworten des Fahrers sind an die
+# aktuell gestellte Rueckfrage gebunden (frage_id vom Server beim Stellen).
+def antwort_passt(frage: Optional[dict], a: Any) -> bool:
+    """Gehoert die Antwort zur Frage? Neue Fragen ueber frage_id, aeltere
+    (ohne frage_id) ueber source_id + question."""
+    if not isinstance(frage, dict) or not isinstance(a, dict):
+        return False
+    if frage.get("frage_id"):
+        return a.get("frage_id") == frage["frage_id"]
+    return (str(a.get("source_id") or "") == str(frage.get("source_id") or "")
+            and str(a.get("question") or "") == str(frage.get("question") or ""))
+
+
+def aktuelle_antwort(doc: dict) -> Optional[dict]:
+    frage = doc.get("rueckfrage_frage")
+    for a in doc.get("rueckfrage_antworten") or []:
+        if antwort_passt(frage, a) and str(a.get("answer") or "").strip():
+            return a
+    return None
+
+
+def antworten_zur_frage(frage: dict, antworten: Optional[List[dict]]) -> List[dict]:
+    """Aus dem, was die App schickt, genau EINE gueltige Antwort auf die
+    aktuelle Frage (die letzte gewinnt) — mit Server-Zeitstempel. Antworten
+    zu anderen Fragen werden verworfen; eine Antwort, die nicht zu den
+    angebotenen Moeglichkeiten passt, ist ein Fehler."""
+    passend = [a for a in (antworten or []) if antwort_passt(frage, a)]
+    if not passend:
+        return []
+    a = passend[-1]
+    antwort = str(a.get("answer") or "").strip()
+    if not antwort:
+        return []
+    optionen = [str(o) for o in (frage.get("options") or [])]
+    if optionen and antwort not in optionen and not frage.get("freitext"):
+        raise HTTPException(400, "Die Antwort passt nicht zu den angebotenen Möglichkeiten: "
+                                 + ", ".join(optionen))
+    return [{"frage_id": frage.get("frage_id") or "",
+             "source_id": str(frage.get("source_id") or ""),
+             "question": str(frage.get("question") or ""),
+             "answer": antwort[:300], "at": now_iso()}]
+
+
+RUECKFRAGE_OFFEN = "Bitte zuerst die Rückfrage des Chefs beantworten."
+RUECKFRAGE_VERLAUF_MAX = 50
+
+
 class ProtocolIn(BaseModel):
     """Alle Felder optional — der Fahrer speichert laufend Zwischenstände."""
     vehicle_check: Optional[Dict[str, Any]] = None      # Abschnitt 1 (Korrekturen)
@@ -145,8 +449,17 @@ class ProtocolIn(BaseModel):
             out[_name(k, FELDNAME_MAX)] = _wert(k, w)
         return out
     documents: Optional[Dict[str, bool]] = None         # Abschnitt 2
-    keys_count: Optional[str] = Field(default=None, max_length=20)
-    keys_expected: Optional[str] = Field(default=None, max_length=20)
+    # Review 26.09.2026 (Nr. 86/113): erhaltene Schluessel als Ganzzahl 0-20
+    # (vorher freier Text bis 20 Zeichen). Reine Ziffern werden gewandelt.
+    # keys_expected (vereinbart) nimmt der Server NICHT mehr vom Fahrer an —
+    # er setzt es aus dem Kaufvertrag (schluessel_vereinbart); ein von einer
+    # aelteren App geschicktes Feld wird ignoriert (extra="ignore").
+    keys_count: Optional[int] = Field(default=None, ge=0, le=SCHLUESSEL_MAX)
+
+    @field_validator("keys_count", mode="before")
+    @classmethod
+    def _schluessel_zahl(cls, v):
+        return _ganzzahl(v, "Schlüssel erhalten", SCHLUESSEL_MAX)
     # Umbau 26.09.2026 (KI): True/False wie bisher; bei Abweichung zusaetzlich
     # "fehlt" | "defekt" | "anders" (False = fehlt, aeltere App).
     features: Optional[Dict[str, Union[bool, str]]] = None   # Abschnitt 3
@@ -167,12 +480,25 @@ class ProtocolIn(BaseModel):
                 raus[k] = w
         return raus
     condition: Optional[Dict[str, Any]] = None          # Abschnitt 4
+
+    @field_validator("condition", mode="after")
+    @classmethod
+    def _kilometer_zahl(cls, v):
+        """Review 26.09.2026 (Nr. 114/115): Kilometerstand bei Abholung als
+        Ganzzahl 0-5.000.000 (vorher nur "nicht leer"). Leer bleibt leer
+        (laufender Entwurf), reine Ziffern werden gewandelt."""
+        if v and "mileage" in v:
+            v["mileage"] = _ganzzahl(v.get("mileage"), "Kilometerstand bei Abholung", KM_MAX)
+            if v["mileage"] is None:
+                v["mileage"] = ""
+        return v
     damages_confirmed: Optional[bool] = None            # Abschnitt 5
     # Abschnitt 6: neu entdeckte Schaeden, per Tipp auf die Fahrzeug-Skizze
     # markiert (gleiches Format wie die Kaufvertrag-Schaeden: view/zone/x/y/...)
     # Runde 17 (Nr. 10): typisiert wie die Vertrags-Schaeden (vorher freie
     # Dicts — ein String-Element liess pickup_pdf_service abstuerzen).
-    new_damages: Optional[List[DamageIn]] = Field(default=None, max_length=40)
+    # Review 26.09.2026 (Nr. 63-65): nur bekannte Art/Ansicht/Bauteil/Merkmale.
+    new_damages: Optional[List[ProtokollSchadenIn]] = Field(default=None, max_length=40)
     notes: Optional[str] = Field(default=None, max_length=5000)   # Abschnitt 7
     place: Optional[str] = Field(default=None, max_length=200)    # Ort (Abschnitt 8)
     # Rollenprüfung 22.09.2026 (RP-058/157/074/173): Verkaeufername wie Ort im
@@ -194,7 +520,11 @@ class ProtocolIn(BaseModel):
     preis_vorschlag: Optional[float] = Field(default=None, ge=0, le=10_000_000)
     sondervereinbarung: Optional[str] = Field(default=None, max_length=2000)
     # Stufe 3 KI (26.09.2026): Antworten des Fahrers auf die Rueckfrage des
-    # Chefs (Ja/Nein/Unklar-Knopf) — je Eintrag source_id, question, answer.
+    # Chefs — je Eintrag frage_id, source_id, question, answer.
+    # Review 26.09.2026 (Nr. 57/58/134): Was hier ankommt, ist nur ein
+    # Angebot der App. save_protocol behaelt genau die Antwort, die zur
+    # aktuell gestellten Frage passt (antworten_zur_frage), und setzt den
+    # Zeitstempel "at" selbst — ein Client-Zeitstempel wird verworfen.
     rueckfrage_antworten: Optional[List[Dict[str, Any]]] = Field(default=None, max_length=10)
 
     @field_validator("rueckfrage_antworten", mode="before")
@@ -208,10 +538,10 @@ class ProtocolIn(BaseModel):
         for a in v:
             if not isinstance(a, dict):
                 raise ValueError("rueckfrage_antworten: ungueltiger Eintrag")
-            out.append({"source_id": str(a.get("source_id") or "")[:200],
+            out.append({"frage_id": str(a.get("frage_id") or "")[:40],
+                        "source_id": str(a.get("source_id") or "")[:200],
                         "question": str(a.get("question") or "")[:300],
-                        "answer": str(a.get("answer") or "")[:100],
-                        "at": str(a.get("at") or "")[:40]})
+                        "answer": str(a.get("answer") or "")[:300]})
         return out
     # Phase 2 (2.9, B26): Revisionsnummer des Entwurfs, wie die App ihn geladen
     # bzw. zuletzt gespeichert hat — zwei Tabs desselben Fahrers ueberschreiben
@@ -285,6 +615,10 @@ class FreigabeIn(BaseModel):
     @field_validator("rueckfrage_frage", mode="before")
     @classmethod
     def _frage_pruefen(cls, v):
+        """Review 26.09.2026 (Nr. 125): mindestens zwei Antwortmoeglichkeiten
+        ODER ausdruecklich Freitext (freitext=True) — die Fahrer-App erfindet
+        keine Ja/Nein/Unklar-Knoepfe mehr. frage_id und gestellt_am vergibt
+        der Server beim Stellen (protokoll_freigeben)."""
         if v is None:
             return v
         if not isinstance(v, dict) or not str(v.get("question") or "").strip():
@@ -292,9 +626,18 @@ class FreigabeIn(BaseModel):
         opts = v.get("options") or []
         if not isinstance(opts, list) or len(opts) > 6:
             raise ValueError("rueckfrage_frage: hoechstens 6 Antwortmoeglichkeiten")
+        sauber: List[str] = []
+        for o in opts:
+            t = str(o or "").strip()[:60]
+            if t and t not in sauber:
+                sauber.append(t)
+        freitext = bool(v.get("freitext"))
+        if len(sauber) < 2 and not freitext:
+            raise ValueError("rueckfrage_frage: mindestens zwei Antwortmoeglichkeiten "
+                             "oder freitext=true")
         return {"source_id": str(v.get("source_id") or "")[:200],
                 "question": str(v["question"]).strip()[:300],
-                "options": [str(o)[:60] for o in opts if str(o or "").strip()]}
+                "options": sauber, "freitext": freitext}
     # Runde 33 (Gegenpruefung 12.09.2026): Den Stand mitschicken, den der
     # Bearbeiter gesehen hat (updated_at aus der Liste). Geben Chef und Sucher
     # gleichzeitig mit verschiedenen Preisen frei, gewann vorher stillschweigend
@@ -1167,26 +1510,39 @@ async def preis_nachholen(appt: dict) -> None:
     await _preis_uebernehmen(appt, doc, nachholen=True)
 
 
+# Review 26.09.2026 (Nr. 128/129/133): Was der Fahrer vom Fahrzeug sieht.
+# Vorher ging das komplette vehicle.data an die App — mit seller_name,
+# seller_address, seller_phone, seller_email aus dem Inserat. Der Fahrer
+# braucht nur die Fahrzeugdaten fuer Abschnitt 1/3/5 und die Kopfzeile; die
+# Abholadresse und der Verkaeufername kommen weiter aus dem Termin.
+FAHRER_FAHRZEUG_FELDER = (
+    "make", "make_label", "model", "model_label", "model_description", "variant",
+    "category", "category_label", "first_registration", "ezl", "ez", "mileage", "km",
+    "color", "exterior_color", "vin", "fin", "license_plate",
+    "fuel", "fuel_label", "fuel_type", "gearbox", "gearbox_label", "transmission",
+    "power_kw", "kw", "power_ps", "ps", "displacement", "doors", "seats",
+    "features", "damages", "known_defects", "images", "image_urls", "image_count",
+    "hu", "previous_owners", "accident_damaged", "roadworthy", "schluessel_anzahl",
+)
+
+
+def fahrzeug_fuer_fahrer(vehicle: Optional[dict]) -> Dict[str, Any]:
+    """Whitelist — nie ein Feld, das mit "seller" beginnt, keine Inserats-
+    Kontaktdaten, keine Beschreibung (Freitext mit Telefonnummern)."""
+    v = vehicle or {}
+    return {k: v.get(k) for k in FAHRER_FAHRZEUG_FELDER if k in v}
+
+
 @router.get("/driver/appointments/{appt_id}/protocol")
 async def get_protocol(appt_id: str, driver=Depends(current_driver)):
     """Aktuellen Entwurf (oder das abgeschlossene Protokoll) + Vorlage laden."""
     appt = await _appt_or_404(appt_id, driver)
     doc = await _current(appt_id)
-    vehicle: Dict[str, Any] = {}
-    if appt.get("vehicle_id"):
-        # WICHTIG: zusaetzlich ueber dealer_id. Fahrzeug-IDs sind
-        # vorhersehbar (v_<Inserats-ID>) und nur MIT dealer_id eindeutig —
-        # sonst koennte das Fahrzeug eines fremden Haendlers geladen werden.
-        v = await db.vehicles.find_one(
-            {"id": appt["vehicle_id"], "dealer_id": appt.get("dealer_id")},
-            {"_id": 0}) or {}
-        vehicle = dict(v.get("data") or {})
-    contract: Dict[str, Any] = {}
-    if appt.get("contract_id"):
-        c = await db.generated_pdfs.find_one(
-            {"id": appt["contract_id"], "dealer_id": appt.get("dealer_id")},
-            {"_id": 0, "contract_data": 1}) or {}
-        contract = dict(c.get("contract_data") or {})
+    # Fahrzeug und Vertrag zusaetzlich ueber dealer_id (Fahrzeug-IDs sind
+    # vorhersehbar, v_<Inserats-ID>, und nur MIT dealer_id eindeutig).
+    vehicle_voll, contract = await _fahrzeug_und_vertrag(appt)
+    # Review 26.09.2026 (Nr. 128): an die App geht nur die Whitelist.
+    vehicle = fahrzeug_fuer_fahrer(vehicle_voll)
     return {
         # Gegenpruefung 12.09.2026: Infinity/NaN aus Altdaten nicht ans JSON geben.
         "protocol": PV.json_sicher(doc),
@@ -1195,12 +1551,15 @@ async def get_protocol(appt_id: str, driver=Depends(current_driver)):
                 {"key": k, "label": lb, "options": opts}
                 for k, lb, opts in VEHICLE_CHECK_FIELDS
             ],
-            "vehicle_check_values": _vehicle_check_values(vehicle, contract),
+            "vehicle_check_values": _vehicle_check_values(vehicle_voll, contract),
             # Runde 33: Eingabeart je Zeile — Erstzulassung und HU als MM/JJJJ
             # mit Zifferntastatur, Kilometer und Halter nur Ziffern.
             "vehicle_check_art": dict(PV.ARTEN),
             "documents": DOCUMENT_ITEMS,
-            "features": (vehicle.get("features") or [])[:AUSSTATTUNG_MAX],
+            # Review 26.09.2026 (Nr. 101-105): vereinbarte Schluessel laut Vertrag —
+            # die App zeigt den Wert nur noch an (Server setzt ihn beim Speichern).
+            "keys_expected": schluessel_vereinbart(contract),
+            "features": (vehicle_voll.get("features") or [])[:AUSSTATTUNG_MAX],
             "condition_fields": [
                 {"key": k, "label": lb, "options": opts if isinstance(opts, list) else None}
                 for k, lb, opts in CONDITION_FIELDS
@@ -1301,6 +1660,28 @@ async def _vertrag_nicht_in_loeschung(appt: dict) -> None:
                                  "es kann kein Protokoll mehr begonnen werden.")
 
 
+def vorlage_filtern(payload: Dict[str, Any], vehicle: dict, appt_id: str = "") -> None:
+    """Review 26.09.2026 (Nr. 107-110): documents nur mit DOCUMENT_ITEMS,
+    features nur mit den Ausstattungen des Fahrzeugs (dieselbe Liste wie in
+    der Vorlage von get_protocol). Fremde Schluessel werden verworfen — kein
+    Fehler (aeltere App, Fahrzeugwechsel am Termin), aber eine Logzeile."""
+    if isinstance(payload.get("documents"), dict):
+        erlaubt = set(DOCUMENT_ITEMS)
+        fremd = [k for k in payload["documents"] if k not in erlaubt]
+        if fremd:
+            log.warning("Protokoll %s: %d fremde Dokument-Zeilen verworfen (%s)", appt_id,
+                        len(fremd), ", ".join(str(k)[:40] for k in fremd[:5]))
+            payload["documents"] = {k: v for k, v in payload["documents"].items() if k in erlaubt}
+    if isinstance(payload.get("features"), dict):
+        vorlage = vehicle.get("features") or []
+        erlaubt = {str(f) for f in vorlage[:AUSSTATTUNG_MAX]}
+        fremd = [k for k in payload["features"] if k not in erlaubt]
+        if fremd:
+            log.warning("Protokoll %s: %d fremde Ausstattungs-Zeilen verworfen (%s)", appt_id,
+                        len(fremd), ", ".join(str(k)[:40] for k in fremd[:5]))
+            payload["features"] = {k: v for k, v in payload["features"].items() if k in erlaubt}
+
+
 @router.put("/driver/appointments/{appt_id}/protocol")
 async def save_protocol(appt_id: str, body: ProtocolIn,
                         driver=Depends(current_driver)):
@@ -1314,6 +1695,23 @@ async def save_protocol(appt_id: str, body: ProtocolIn,
     payload = {k: v for k, v in body.model_dump(exclude_none=True).items()}
     revision = payload.pop("revision", None)
     revision_filt = {"revision": int(revision)} if revision is not None else {}
+    vehicle, contract = await _fahrzeug_und_vertrag(appt)
+    # Review 26.09.2026 (Nr. 107-110): nur die Zeilen der Servervorlage —
+    # ein fremder Schluessel ("Panoramadach: fehlt", das es im Inserat nicht
+    # gibt) wuerde sonst als Abweichung in die KI-Bewertung wandern.
+    vorlage_filtern(payload, vehicle, appt_id)
+    # Review 26.09.2026 (Nr. 101-105): vereinbarte Schluessel aus dem Vertrag,
+    # nie vom Fahrer (das Modell kennt keys_expected nicht mehr).
+    payload["keys_expected"] = schluessel_vereinbart(contract)
+    # Review 26.09.2026 (Nr. 57/58/60/134): Antworten nur zur aktuell
+    # gestellten Frage, eine je Frage, Zeitstempel vom Server. Ohne offene
+    # Frage bleibt das Feld unangetastet (die letzte Antwort ist Historie).
+    if "rueckfrage_antworten" in payload:
+        frage = (doc or {}).get("rueckfrage_frage")
+        if isinstance(frage, dict) and frage.get("question"):
+            payload["rueckfrage_antworten"] = antworten_zur_frage(frage, payload["rueckfrage_antworten"])
+        else:
+            payload.pop("rueckfrage_antworten")
     if "seller_name" in payload:
         # Rollenprüfung 22.09.2026 (RP-058/157): wie der Ort — getrimmt.
         payload["seller_name"] = str(payload["seller_name"]).strip()
@@ -1431,18 +1829,26 @@ def _pflichtfelder_pruefen(doc: dict, appt: dict, *,
     # vorher genuegte irgendein Text ("x"), und "weicht ab" ohne den
     # tatsaechlichen Wert stand als leere Abweichung im unterschriebenen PDF.
     vc = doc.get("vehicle_check") or {}
-    fehlend, ungueltig, ohne_wert = [], [], []
+    fehlend, ungueltig, ohne_wert, falscher_typ = [], [], [], []
     for key, label, opts in VEHICLE_CHECK_FIELDS:
         eintrag = vc.get(key)
         status = str((eintrag or {}).get("status") if isinstance(eintrag, dict)
                      else eintrag or "").strip()
+        wert = str((eintrag or {}).get("value") if isinstance(eintrag, dict) else "").strip()
         if not status:
             fehlend.append(label)
         elif status not in opts:
             ungueltig.append(label)
-        elif status == "weicht ab" and not str(
-                (eintrag or {}).get("value") if isinstance(eintrag, dict) else "").strip():
+        elif status == "weicht ab" and not wert:
             ohne_wert.append(label)
+        elif status == "weicht ab" and vollstaendig:
+            # Review 26.09.2026 (Nr. 106): der Wert muss zur Zeile passen
+            # (vorher genuegte "irgendetwas eingetragen"). Nur beim Abschicken
+            # und bei der Freigabe — ein schon freigegebenes Altprotokoll
+            # scheitert nicht nachtraeglich beim Unterschreiben.
+            fehler = abweichung_pruefen(key, label, wert)
+            if fehler:
+                falscher_typ.append(fehler)
     if fehlend:
         raise HTTPException(422, "Abschnitt 1 unvollständig — bitte noch "
                                  "ankreuzen: " + ", ".join(fehlend))
@@ -1453,11 +1859,17 @@ def _pflichtfelder_pruefen(doc: dict, appt: dict, *,
     if ohne_wert:
         raise HTTPException(422, "Abschnitt 1: bei \"weicht ab\" bitte den tatsächlichen "
                                  "Wert eintragen: " + ", ".join(ohne_wert))
+    if falscher_typ:
+        raise HTTPException(400, "Abschnitt 1: " + "; ".join(falscher_typ))
     cond = doc.get("condition") or {}
-    if not str(cond.get("mileage") or "").strip():
+    # Review 26.09.2026 (Nr. 114/115): 0 ist ein Wert — nur None/"" fehlt.
+    if cond.get("mileage") is None or str(cond.get("mileage")).strip() == "":
         raise HTTPException(422, "Bitte den Kilometerstand bei Abholung "
                                  "eintragen (Abschnitt 4).")
-    if not str(doc.get("keys_count") or "").strip():
+    if vollstaendig and PV.zahl(cond.get("mileage")) is None:
+        raise HTTPException(400, "Kilometerstand bei Abholung: bitte eine ganze Zahl eintragen "
+                                 "(Abschnitt 4).")
+    if doc.get("keys_count") is None or str(doc.get("keys_count")).strip() == "":
         raise HTTPException(422, "Bitte die Anzahl der übergebenen "
                                  "Schlüssel eintragen (Abschnitt 2).")
     if doc.get("damages_confirmed") is None:
@@ -1493,9 +1905,11 @@ def _alle_abschnitte_pruefen(doc: dict, ausstattung: List[str]) -> None:
     if offen:
         raise HTTPException(422, "Abschnitt 2: bitte bei jedem Dokument Ja oder Nein "
                                  "angeben: " + ", ".join(offen))
-    if not str(doc.get("keys_expected") or "").strip():
-        raise HTTPException(422, "Bitte die Anzahl der vereinbarten Schlüssel "
-                                 "eintragen (Abschnitt 2).")
+    # Review 26.09.2026 (Nr. 101-105): "vereinbart" kommt aus dem Vertrag
+    # (schluessel_vereinbart) — der Fahrer traegt es nicht mehr ein, also ist
+    # es hier keine Pflicht mehr (ohne Angabe im Vertrag bleibt es leer).
+    # Review 26.09.2026 (Nr. 66): jeder neue Schaden vollstaendig beschrieben.
+    schaeden_vollstaendig_pruefen(doc.get("new_damages"))
     merkmale = doc.get("features") or {}
     # Umbau 26.09.2026: "fehlt"/"defekt"/"anders" gelten als beantwortet (Nein + Art)
     offen = [f for f in ausstattung
@@ -1526,6 +1940,11 @@ async def submit_protocol(appt_id: str, driver=Depends(current_driver)):
         # Netzabbruch keine Fehlermeldung erzeugt.
         return {"ok": True, "status": doc["status"],
                 "protocol_id": doc["id"], "bereits": True}
+    # Review 26.09.2026 (Nr. 59): eine offene Rueckfrage des Chefs muss
+    # beantwortet sein, sonst kaeme das Protokoll ohne Antwort zurueck.
+    frage = doc.get("rueckfrage_frage")
+    if isinstance(frage, dict) and frage.get("question") and not aktuelle_antwort(doc):
+        raise HTTPException(400, RUECKFRAGE_OFFEN)
     # Vollstaendig ausgefuellt? Wunsch Ahmad 14.09.2026: ALLE Abschnitte,
     # dazu Ort und Verkaeufername (P2) — der Chef sieht das ganze Protokoll.
     vehicle, contract = await _fahrzeug_und_vertrag(appt)
@@ -1540,7 +1959,19 @@ async def submit_protocol(appt_id: str, driver=Depends(current_driver)):
                               # den der Chef freigibt — der Abschluss prueft
                               # dagegen (vertragsstand_pruefen).
                               "vertragswerte_stand": vertragswerte_stand(vehicle, contract),
+                              # Review 26.09.2026 (Nr. 101-105): Serverwert aus dem Vertrag
+                              "keys_expected": schluessel_vereinbart(contract),
                               "seller_name": (doc.get("seller_name") or appt.get("seller_name") or "").strip()}
+    aenderung: Dict[str, Any] = {"$set": setzen,
+                                 "$unset": {"rueckfrage": "", "rueckfrage_am": "", "rueckfrage_frage": ""}}
+    if isinstance(frage, dict) and frage.get("question"):
+        # Review 26.09.2026 (Nr. 60-62): die Runde wandert in den Verlauf;
+        # rueckfrage_antworten behaelt nur die Antwort auf diese (letzte)
+        # Frage — fuer Freigabe-Karte und KI.
+        aenderung["$push"] = {"rueckfrage_verlauf": {
+            "$each": [{"frage": frage, "antworten": doc.get("rueckfrage_antworten") or [],
+                       "abgeschickt_am": jetzt}],
+            "$slice": -RUECKFRAGE_VERLAUF_MAX}}
     if doc.get("place"):
         setzen["place"] = str(doc["place"]).strip()
     # Runde 33: Die Freigabe-Liste sortiert nach dem ERSTEN Abschicken — ein
@@ -1554,10 +1985,7 @@ async def submit_protocol(appt_id: str, driver=Depends(current_driver)):
     submit_filt: Dict[str, Any] = {"id": doc["id"], "status": "entwurf"}
     if doc.get("revision") is not None:
         submit_filt["revision"] = doc["revision"]
-    res = await db.pickup_protocols.update_one(
-        submit_filt,
-        {"$set": setzen,
-         "$unset": {"rueckfrage": "", "rueckfrage_am": "", "rueckfrage_frage": ""}})
+    res = await db.pickup_protocols.update_one(submit_filt, aenderung)
     if not res.matched_count:
         # Zwischen Lesen und Schreiben hat sich der Stand geaendert.
         akt = await db.pickup_protocols.find_one({"id": doc["id"]},
@@ -1686,7 +2114,12 @@ async def start_correction(appt_id: str, driver=Depends(current_driver)):
                             # "wartet seit 50 Std." ganz oben.
                             "abgeschickt_am", "abgeschickt_von", "erstmals_abgeschickt_am",
                             "freigegeben_am", "freigegeben_von", "freigabe_stand",
-                            "rueckfrage", "rueckfrage_am", "rueckfrage_von")}
+                            "rueckfrage", "rueckfrage_am", "rueckfrage_von",
+                            # Review 26.09.2026 (Nr. 121-124/135): die Rueckfrage-
+                            # Kommunikation (Frage, Antworten, Verlauf) bleibt
+                            # Historie der alten Version — die Korrektur beginnt
+                            # ohne offene Frage und ohne fremde Antworten.
+                            "rueckfrage_frage", "rueckfrage_antworten", "rueckfrage_verlauf")}
     # Pruefung 14.09.2026 (C3): NICHT "aktuelle + 1" — nach einer verworfenen
     # Korrektur (Version 2 verworfen, Version 1 wieder aktuell) kollidierte die
     # naechste Korrektur mit der verworfenen 2 (Unique-Index) und lief in 409.
@@ -2591,8 +3024,11 @@ async def protokolle_zur_freigabe(user=Depends(_chef_dep), response: Response = 
                 "dokumente": d.get("documents") or {},
                 "ausstattung": d.get("features") or {},
                 "zustand": d.get("condition") or {},
-                "schluessel": d.get("keys_count") or "",
-                "schluessel_vereinbart": d.get("keys_expected") or "",
+                # Review 26.09.2026 (Nr. 101-105/113): Zahlen (0 ist ein Wert);
+                # "vereinbart" ist der Serverwert aus dem Vertrag (Altbestand:
+                # der frueher vom Fahrer getippte Text).
+                "schluessel": anzahl_text(d.get("keys_count")),
+                "schluessel_vereinbart": anzahl_text(d.get("keys_expected")),
                 "fahrzeugdaten": d.get("vehicle_check") or {},
                 "ort": d.get("place") or "",
                 # Rollenprüfung 22.09.2026 (RP-480): der Preis VOR der Abholung
@@ -2611,8 +3047,11 @@ async def protokolle_zur_freigabe(user=Depends(_chef_dep), response: Response = 
                 "sondervereinbarung": d.get("sondervereinbarung") or "",
                 "freigegeben_von_name": namen.get(d.get("freigegeben_von")) or "",
                 "rueckfrage_von_name": namen.get(d.get("rueckfrage_von")) or "",
-                # Stufe 3 KI (26.09.2026): Antworten des Fahrers auf Rueckfragen
-                "rueckfrage_antworten": [a for a in (d.get("rueckfrage_antworten") or []) if isinstance(a, dict)][:10],
+                # Stufe 3 KI (26.09.2026): Antworten des Fahrers auf die letzte
+                # Rueckfrage; Review 26.09.2026 (Nr. 60-62/127): dazu der ganze
+                # Verlauf frueherer Runden (keine stille Grenze mehr).
+                "rueckfrage_antworten": [a for a in (d.get("rueckfrage_antworten") or []) if isinstance(a, dict)],
+                "rueckfrage_verlauf": [r for r in (d.get("rueckfrage_verlauf") or []) if isinstance(r, dict)],
             })
         except Exception:  # noqa: BLE001
             log.exception("Freigaben: Protokoll %s liess sich nicht aufbereiten", d.get("id"))
@@ -2673,6 +3112,27 @@ async def _freigabe_konflikt(protocol_id: str, user: dict) -> str:
     if status == "entwurf":
         return f"Inzwischen hat {wer} das Protokoll an den Fahrer zurückgeschickt."
     return "Der Stand hat sich gerade geändert — bitte neu laden."
+
+
+async def _rueckfrage_quelle_pruefen(doc: dict, frage: dict, dealer_id: str) -> None:
+    """Review 26.09.2026 (Nr. 126): Worauf zeigt die Frage? Erlaubt sind die
+    IDs der neuen Schaeden im Protokoll, die source_ids der Positionen der
+    aktuellen KI-Bewertung und "" (allgemeine Frage). Die KI ist Beiwerk:
+    laesst sie sich nicht lesen, zaehlen nur die Schaeden."""
+    quelle = str(frage.get("source_id") or "")
+    if not quelle:
+        return
+    erlaubt = {str(d.get("id")) for d in (doc.get("new_damages") or []) if isinstance(d, dict) and d.get("id")}
+    try:
+        erg = await KI.bewertung_lesen(doc["id"], dealer_id, nachrechnen=False)
+        for it in ((erg or {}).get("ergebnis") or {}).get("items") or []:
+            if isinstance(it, dict) and it.get("source_id"):
+                erlaubt.add(str(it["source_id"]))
+    except Exception:  # noqa: BLE001
+        log.exception("Rueckfrage: KI-Bewertung zu %s nicht lesbar", doc.get("id"))
+    if quelle not in erlaubt:
+        raise HTTPException(400, "Die Rückfrage verweist auf eine Position, die es in der "
+                                 "KI-Bewertung oder bei den neuen Schäden nicht gibt.")
 
 
 @router.post("/protocols/{protocol_id}/freigabe")
@@ -2749,7 +3209,16 @@ async def protokoll_freigeben(protocol_id: str, body: FreigabeIn,
         # Stufe 3 KI (26.09.2026): strukturierte Frage fuer den Antwort-Knopf
         # der Fahrer-App; ohne Frage wird eine alte entfernt.
         if body.rueckfrage_frage:
-            setzen_zurueck["rueckfrage_frage"] = body.rueckfrage_frage
+            # Review 26.09.2026 (Nr. 126): source_id muss zu einer Position der
+            # aktuellen KI-Bewertung oder einem neuen Schaden des Protokolls
+            # gehoeren — oder leer sein (allgemeine Frage).
+            await _rueckfrage_quelle_pruefen(doc, body.rueckfrage_frage, user["dealer_id"])
+            # Review 26.09.2026 (Nr. 57/60): Server-ID je Frage; die Antworten
+            # der vorigen Runde liegen im Verlauf (submit_protocol) — die neue
+            # Frage beginnt ohne Antworten.
+            setzen_zurueck["rueckfrage_frage"] = {**body.rueckfrage_frage, "frage_id": uuid.uuid4().hex,
+                                                  "gestellt_am": jetzt, "gestellt_von": user["id"]}
+            setzen_zurueck["rueckfrage_antworten"] = []
         else:
             entfernen_zurueck["rueckfrage_frage"] = ""
         res = await db.pickup_protocols.update_one(

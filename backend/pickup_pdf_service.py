@@ -199,6 +199,11 @@ def _txt(v: Any) -> str:
     return "" if v is None else str(v).strip()
 
 
+def _anzahl(v: Any) -> str:
+    """Anzahl im PDF: 0 wird gedruckt, nur None/"" bleibt eine Linie."""
+    return "_____" if v is None or v == "" else str(v)
+
+
 def _fmt_km(v: Any) -> str:
     if v in (None, "", 0):
         return "—"
@@ -1017,8 +1022,10 @@ def _build_pickup_pdf(
         ("Servicebuch / Scheckheft", "gestempelt"),
         ("COC-Papiere (EG-Übereinstimmung)", "falls vorhanden"),
         ("Bedienungsanleitung", ""),
-        ("Schlüssel", (f"Anzahl: {filled.get('keys_count') or '_____'} von "
-                       f"{filled.get('keys_expected') or '_____'}")),
+        # Review 26.09.2026 (Nr. 113/114): 0 Schluessel ist ein Wert (vorher
+        # "_____"); "von" ist der Serverwert aus dem Vertrag (keys_expected).
+        ("Schlüssel", (f"Anzahl: {_anzahl(filled.get('keys_count'))} von "
+                       f"{_anzahl(filled.get('keys_expected'))}")),
         ("Zweitsatz Reifen", "Winter / Sommer / nein"),
         ("Ladekabel / Adapter", "bei E-/Hybrid-Fahrzeugen"),
         ("Werkzeug / Warndreieck / Verbandskasten", ""),

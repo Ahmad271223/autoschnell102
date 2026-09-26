@@ -193,12 +193,20 @@ export default function Protokoll() {
   } = protokollZustand(data?.protocol?.status);
   const neuerPreis = data?.protocol?.neuer_preis ?? null;
   const rueckfrage = data?.protocol?.rueckfrage || "";
-  // Stufe 3 KI (26.09.2026): strukturierte Rückfrage (Frage + Antwortknöpfe)
+  // Stufe 3 KI (26.09.2026): strukturierte Rückfrage (Frage + Antwortknöpfe).
+  // Review 26.09.2026 (Nr. 57/60-62): Zuordnung über die Server-ID der Frage
+  // (frage_id); ältere Fragen ohne ID über source_id + question.
   const rueckfrageFrage = data?.protocol?.rueckfrage_frage || null;
-  const istAntwortZu = (a) => rueckfrageFrage
-    && a.source_id === (rueckfrageFrage.source_id || "") && a.question === rueckfrageFrage.question;
+  const istAntwortZu = (a) => !!rueckfrageFrage && (rueckfrageFrage.frage_id
+    ? a.frage_id === rueckfrageFrage.frage_id
+    : a.source_id === (rueckfrageFrage.source_id || "") && a.question === rueckfrageFrage.question);
   const rueckfrageAntwort = rueckfrageFrage
     ? ((f.rueckfrage_antworten || []).find(istAntwortZu)?.answer || "") : "";
+  // Nr. 125: keine erfundenen Knöpfe — ohne Optionen antwortet der Fahrer als Text.
+  const rueckfrageOptionen = rueckfrageFrage?.options?.length ? rueckfrageFrage.options : null;
+  const rueckfrageVerlauf = Array.isArray(data?.protocol?.rueckfrage_verlauf) ? data.protocol.rueckfrage_verlauf : [];
+  // Review 26.09.2026 (Nr. 101-105): "davon vereinbart" kommt vom Server (Vertrag).
+  const schluesselVereinbart = data?.protocol?.keys_expected ?? data?.template?.keys_expected ?? null;
   // Rollenprüfung 22.09.2026 (RP-059/RP-158): Ort und Verkäufername friert
   // der Server beim Abschicken ein, der Abschluss nimmt genau diese Werte
   // (protocols.py: doc.place/seller_name vor dem Wert aus der App). Vorher
@@ -504,14 +512,16 @@ export default function Protokoll() {
     upd((s) => ({ documents: { ...s.documents, [name]: wert } }));
   // Stufe 3 KI: Antwort auf die Rückfrage des Chefs — gespeichert wie jede
   // andere Eingabe (Autosave), danach schickt der Fahrer erneut zur Freigabe.
+  // Review 26.09.2026 (Nr. 57/127/134): genau eine Antwort zur aktuellen Frage,
+  // keine stille Grenze (.slice) mehr, den Zeitstempel setzt der Server.
   const rueckfrageAntworten = (o) => {
     if (!rueckfrageFrage) return;
     upd((s) => ({
       rueckfrage_antworten: [
         ...(s.rueckfrage_antworten || []).filter((a) => !istAntwortZu(a)),
-        { source_id: rueckfrageFrage.source_id || "", question: rueckfrageFrage.question,
-          answer: o, at: new Date().toISOString() },
-      ].slice(-10),
+        { frage_id: rueckfrageFrage.frage_id || "", source_id: rueckfrageFrage.source_id || "",
+          question: rueckfrageFrage.question, answer: o },
+      ],
     }));
   };
   const setFeat = (name, wert) =>
@@ -554,6 +564,12 @@ export default function Protokoll() {
   // Runde 30: Schritt 1 — ausgefülltes Protokoll an den Händler schicken.
   // Er prüft die Abweichungen, ruft ggf. den Verkäufer an und gibt frei.
   const zurFreigabe = async () => {
+    // Review 26.09.2026 (Nr. 59): erst die Rückfrage des Chefs beantworten
+    // (der Server lehnt sonst mit 400 ab).
+    if (rueckfrageFrage && !String(rueckfrageAntwort || "").trim()) {
+      toast.error("Bitte zuerst die Rückfrage des Chefs beantworten (oben).");
+      return;
+    }
     // Umbau KI 26.09.2026: jeder neue Schaden braucht alle Angaben (Groesse,
     // Lack, Tiefe ... — "unbekannt" ist erlaubt); die KI stellt keine
     // Rueckfragen mehr, sie bekommt alles aus dem Formular.
@@ -815,21 +831,31 @@ export default function Protokoll() {
             {rueckfrageFrage && (
               <div className="mt-2" data-testid="protokoll-rueckfrage-frage">
                 <div className="font-semibold">{rueckfrageFrage.question}</div>
-                <div className="mt-1.5 flex flex-wrap gap-2">
-                  {(rueckfrageFrage.options?.length ? rueckfrageFrage.options : ["Ja", "Nein", "Unklar"]).map((o) => {
-                    const aktiv = rueckfrageAntwort === o;
-                    return (
-                      <button key={o} type="button" onClick={() => rueckfrageAntworten(o)}
-                              data-testid={`protokoll-rueckfrage-antwort-${o}`}
-                              className="min-h-[40px] px-3 rounded-lg text-sm font-semibold border"
-                              style={aktiv
-                                ? { background: "var(--accent-red)", color: "#fff", borderColor: "var(--accent-red)" }
-                                : { borderColor: "var(--border-default)", color: "var(--text-primary)", background: "var(--wa-03)" }}>
-                        {o}
-                      </button>
-                    );
-                  })}
-                </div>
+                {rueckfrageOptionen ? (
+                  <div className="mt-1.5 flex flex-wrap gap-2">
+                    {rueckfrageOptionen.map((o) => {
+                      const aktiv = rueckfrageAntwort === o;
+                      return (
+                        <button key={o} type="button" onClick={() => rueckfrageAntworten(o)}
+                                data-testid={`protokoll-rueckfrage-antwort-${o}`}
+                                className="min-h-[40px] px-3 rounded-lg text-sm font-semibold border"
+                                style={aktiv
+                                  ? { background: "var(--accent-red)", color: "#fff", borderColor: "var(--accent-red)" }
+                                  : { borderColor: "var(--border-default)", color: "var(--text-primary)", background: "var(--wa-03)" }}>
+                          {o}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  // Nr. 125: Freitext-Frage des Chefs (oder ältere Frage ohne Optionen)
+                  <input value={rueckfrageAntwort} maxLength={300}
+                         onChange={(e) => rueckfrageAntworten(e.target.value)}
+                         data-testid="protokoll-rueckfrage-freitext"
+                         className="mt-1.5 w-full rounded-lg border bg-transparent px-3 py-2 text-sm outline-none"
+                         style={{ borderColor: "var(--border-default)", color: "var(--text-primary)" }}
+                         placeholder="Deine Antwort" />
+                )}
                 {rueckfrageAntwort && (
                   <div className="mt-1.5 text-[12px]" data-testid="protokoll-rueckfrage-gespeichert"
                        style={{ color: "var(--text-primary)" }}>
@@ -840,6 +866,23 @@ export default function Protokoll() {
             )}
           </div>
         </div>
+      )}
+      {/* Review 26.09.2026 (Nr. 60-62/127): frühere Rückfrage-Runden — alle, aufklappbar */}
+      {rueckfrageVerlauf.length > 0 && (
+        <details className="mt-3 rounded-xl border px-4 py-2 text-sm" data-testid="protokoll-rueckfrage-verlauf"
+                 style={{ borderColor: "var(--border-default)" }}>
+          <summary className="cursor-pointer text-xs text-zinc-500">
+            Frühere Rückfragen des Händlers ({rueckfrageVerlauf.length})
+          </summary>
+          <ul className="mt-2 space-y-1 text-[12px]">
+            {rueckfrageVerlauf.map((r, i) => (
+              <li key={r?.frage?.frage_id || i}>
+                {r?.frage?.question}{" "}
+                <b>{(r?.antworten || []).map((a) => a?.answer).filter(Boolean).join(", ") || "—"}</b>
+              </li>
+            ))}
+          </ul>
+        </details>
       )}
       {isFinal && (
         <div className="mt-4 rounded-xl border px-4 py-3 text-sm flex items-start gap-2"
@@ -963,10 +1006,11 @@ export default function Protokoll() {
                    className={inputCls} style={st} placeholder="z.B. 2" />
           </div>
           <div>
-            <label className="text-[11px] text-zinc-500">davon vereinbart</label>
-            <input type="number" inputMode="numeric" value={f.keys_expected} disabled={gesperrt}
-                   onChange={(e) => upd({ keys_expected: e.target.value })}
-                   className={inputCls} style={st} placeholder="z.B. 2" />
+            {/* Review 26.09.2026 (Nr. 101-105): Sollwert aus dem Kaufvertrag — nur Anzeige */}
+            <label className="text-[11px] text-zinc-500">laut Vertrag vereinbart</label>
+            <div className={inputCls} style={st} data-testid="protokoll-schluessel-vereinbart">
+              {schluesselVereinbart === null || schluesselVereinbart === "" ? "—" : String(schluesselVereinbart)}
+            </div>
           </div>
         </div>
       </Section>
@@ -1023,7 +1067,7 @@ export default function Protokoll() {
                   ))}
                 </div>
               ) : (
-                <input value={f.condition[fld.key] || ""} disabled={gesperrt}
+                <input value={f.condition[fld.key] ?? ""} disabled={gesperrt}
                        inputMode={fld.key === "mileage" ? "numeric" : undefined}
                        onChange={(e) => setCond(fld.key, fld.key === "mileage"
                          ? e.target.value.replace(/[^0-9]/g, "") : e.target.value)}

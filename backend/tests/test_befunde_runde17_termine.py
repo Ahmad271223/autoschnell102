@@ -713,8 +713,13 @@ def test_10_new_damages_typisiert(welt):
         P.ProtocolIn(new_damages=[{"zone": "x"}] * 41)
     with pytest.raises(ValidationError):
         P.ProtocolIn(new_damages=[{"zone": "z" * 501}])
+    # Review 26.09.2026 (Nr. 63-65): Schadensart, Ansicht und Bauteil sind Pflicht
+    # (Whitelist) — ohne type_key wird der Schaden abgelehnt.
+    with pytest.raises(ValidationError):
+        P.ProtocolIn(new_damages=[{"view": "front", "zone": "tuer_vl", "x": 10, "y": 20,
+                                   "type_label": "Kratzer"}])
     p = P.ProtocolIn(new_damages=[{"view": "front", "zone": "tuer_vl", "x": 10, "y": 20,
-                                   "type_label": "Kratzer", "unbekannt": "weg"}])
+                                   "type_key": "kratzer", "type_label": "Kratzer", "unbekannt": "weg"}])
     assert isinstance(p.new_damages[0], DamageIn)
     aid = f"a_{w.s}"
 
@@ -726,7 +731,7 @@ def test_10_new_damages_typisiert(welt):
 
     doc = welt.run(lauf())
     assert doc["new_damages"] == [{"view": "front", "zone": "tuer_vl", "x": 10.0, "y": 20.0,
-                                   "type_label": "Kratzer", "type_key": ""}]
+                                   "type_label": "Kratzer", "type_key": "kratzer"}]
 
 
 # ================================================= Nr. 11: Korrektur verwerfen

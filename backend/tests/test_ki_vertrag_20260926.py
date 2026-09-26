@@ -354,7 +354,9 @@ def test_08_rueckfrage_mit_knopf_und_fahrer_antwort(welt, monkeypatch):
                         rueckfrage_frage=frage, stand=stand.get("freigabe_stand") or stand.get("updated_at"))
     welt.run(P.protokoll_freigeben(pid, body, user=w.chef))
     doc = welt.run(db.pickup_protocols.find_one({"id": pid}, {"_id": 0}))
-    assert doc["status"] == "entwurf" and doc["rueckfrage_frage"] == frage
+    # Review 26.09.2026 (Nr. 57/125): der Server ergaenzt frage_id/gestellt_am/freitext
+    assert doc["status"] == "entwurf" and {k: doc["rueckfrage_frage"][k] for k in frage} == frage
+    assert doc["rueckfrage_frage"]["frage_id"] and doc["rueckfrage_frage"]["freitext"] is False
     ein = P.ProtocolIn(rueckfrage_antworten=[{"source_id": "d1", "question": frage["question"], "answer": "Nein",
                                               "at": _jetzt()}])
     assert ein.rueckfrage_antworten[0]["answer"] == "Nein"

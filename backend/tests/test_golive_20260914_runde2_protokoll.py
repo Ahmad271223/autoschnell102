@@ -50,7 +50,9 @@ def test_alle_abschnitte_pflicht_beim_abschicken(welt):
     voll = vollstaendig(P)
     faelle = [
         ({"documents": {**voll["documents"], P.DOCUMENT_ITEMS[0]: None}}, "Abschnitt 2"),
-        ({"keys_expected": ""}, "vereinbarten"),
+        # Review 26.09.2026 (Nr. 101-105): keys_expected kommt vom Server (Vertrag),
+        # ist keine Fahrer-Pflicht mehr — dafuer keys_count als Zahl Pflicht.
+        ({"keys_count": None}, "Schlüssel"),
         ({"condition": {**voll["condition"], "battery": ""}}, "Abschnitt 4"),
         ({"condition": {**voll["condition"], "battery": "kaputt"}}, "ungültige"),
         ({"place": ""}, "Ort"),

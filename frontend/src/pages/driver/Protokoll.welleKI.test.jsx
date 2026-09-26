@@ -29,7 +29,8 @@ vi.mock("@/components/KiFahrerKarte", () => ({
 const { default: Protokoll } = await import("./Protokoll");
 const { LEERER_ENTWURF, entwurfAusServer } = await import("./protokollEntwurf");
 
-const FRAGE = { source_id: "d1", question: "Ist der Lack beschädigt?", options: ["Ja", "Nein", "Unklar"] };
+// Review 26.09.2026 (Nr. 57): der Server vergibt je Frage eine frage_id.
+const FRAGE = { frage_id: "f1", source_id: "d1", question: "Ist der Lack beschädigt?", options: ["Ja", "Nein", "Unklar"] };
 
 function antwort(status = "entwurf", protokoll = {}) {
   return {
@@ -106,14 +107,66 @@ describe("Protokoll.jsx: Rückfrage mit Antwortknöpfen", () => {
     expect(api.put).toHaveBeenCalled();
     const letzte = putAufrufe()[putAufrufe().length - 1];
     expect(letzte.rueckfrage_antworten).toHaveLength(1);
-    expect(letzte.rueckfrage_antworten[0]).toMatchObject({ source_id: "d1", question: FRAGE.question, answer: "Unklar" });
-    expect(typeof letzte.rueckfrage_antworten[0].at).toBe("string");
+    expect(letzte.rueckfrage_antworten[0]).toMatchObject({ frage_id: "f1", source_id: "d1", question: FRAGE.question, answer: "Unklar" });
+    // Review 26.09.2026 (Nr. 134): den Zeitstempel setzt der Server, nicht die App
+    expect(letzte.rueckfrage_antworten[0].at).toBeUndefined();
+    // Nr. 101-105: "davon vereinbart" ist kein Feld mehr, das die App schickt
+    expect("keys_expected" in letzte).toBe(false);
+  });
+
+  it("Review 26.09.2026 (Nr. 125): ohne Optionen keine erfundenen Knöpfe, sondern Freitext", async () => {
+    await starten(antwort("entwurf", { rueckfrage_frage: { frage_id: "f2", question: "Was genau?", options: [], freitext: true } }));
+    for (const o of ["Ja", "Nein", "Unklar"]) expect(el(`protokoll-rueckfrage-antwort-${o}`)).toBeNull();
+    const feld = el("protokoll-rueckfrage-freitext");
+    expect(feld).toBeTruthy();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+    await act(async () => {
+      setter.call(feld, "Kratzer bis aufs Blech");
+      feld.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(el("protokoll-rueckfrage-gespeichert").textContent).toContain("Kratzer bis aufs Blech");
+    await act(async () => { await vi.advanceTimersByTimeAsync(1300); });
+    const letzte = putAufrufe()[putAufrufe().length - 1];
+    expect(letzte.rueckfrage_antworten).toEqual([{ frage_id: "f2", source_id: "", question: "Was genau?", answer: "Kratzer bis aufs Blech" }]);
+  });
+
+  it("Review 26.09.2026 (Nr. 60-62): Zuordnung über frage_id; Verlauf komplett aufklappbar", async () => {
+    const verlauf = Array.from({ length: 12 }, (_, i) => ({
+      frage: { frage_id: `alt${i}`, question: `Frage ${i}?` }, antworten: [{ answer: i % 2 ? "Ja" : "Nein" }] }));
+    await starten(antwort("entwurf", {
+      rueckfrage_frage: FRAGE,
+      // Antwort auf eine ALTE Frage mit gleichem Text zählt nicht als Antwort auf f1
+      rueckfrage_antworten: [{ frage_id: "alt0", source_id: "d1", question: FRAGE.question, answer: "Ja" }],
+      rueckfrage_verlauf: verlauf,
+    }));
+    expect(el("protokoll-rueckfrage-gespeichert")).toBeNull();
+    const v = el("protokoll-rueckfrage-verlauf");
+    expect(v.textContent).toContain("Frühere Rückfragen des Händlers (12)");
+    expect(v.querySelectorAll("li")).toHaveLength(12);
+    expect(v.textContent).toContain("Frage 11?");
+  });
+
+  it("Review 26.09.2026 (Nr. 59): 'Zur Freigabe schicken' verlangt die Antwort", async () => {
+    await starten(antwort("entwurf", { rueckfrage_frage: FRAGE }));
+    const knopf = [...behaelter.querySelectorAll("button")].find((b) => /Zur Freigabe/.test(b.textContent));
+    expect(knopf).toBeTruthy();
+    await act(async () => { knopf.click(); });
+    expect(toastMock.error).toHaveBeenCalledWith(expect.stringContaining("Rückfrage des Chefs beantworten"));
+    expect(api.post).not.toHaveBeenCalled();
+  });
+
+  it("Review 26.09.2026 (Nr. 101-105): Schlüssel 'vereinbart' nur Anzeige vom Server", async () => {
+    await starten({ data: { ...antwort("entwurf", { keys_expected: 3, keys_count: 0 }).data,
+                            template: { keys_expected: 3 } } });
+    expect(el("protokoll-schluessel-vereinbart").textContent).toBe("3");
+    expect(behaelter.querySelector('input[placeholder="z.B. 2"]').value).toBe("0");
   });
 
   it("zeigt eine gespeicherte Antwort beim Wiederöffnen und ohne Frage nur den Text", async () => {
     await starten(antwort("entwurf", {
       rueckfrage_frage: FRAGE,
-      rueckfrage_antworten: [{ source_id: "d1", question: FRAGE.question, answer: "Ja", at: "2026-09-26T10:00:00Z" }],
+      rueckfrage_antworten: [{ frage_id: "f1", source_id: "d1", question: FRAGE.question, answer: "Ja", at: "2026-09-26T10:00:00Z" }],
     }));
     expect(el("protokoll-rueckfrage-gespeichert").textContent).toContain("Ja");
     await act(async () => { wurzel.unmount(); });
