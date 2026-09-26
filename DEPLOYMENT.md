@@ -3657,3 +3657,12 @@ löscht die Fahrer-Zähler und pseudonymisiert `driver_id` in den Bewertungen. B
   beim Bearbeiten).
 - Offen (Ahmad): soll ein `data_invalid`-Lauf am selben Tag automatisch wiederholt werden (heute: erst am Folgetag)?
 
+**Kundennummer und Vertragsnummer selbst vergebbar (Wunsch Ahmad 26.09.2026 abends; Commit d55a352):**
+- Vertragsdialog, Abschnitt „Nummern“: **Vertragsnummer** (leer = automatisch `KV-<Datum>-<Kürzel>`; eigene Nummer 3–40 Zeichen,
+  eindeutig je Firma → 409 „Vertragsnummer bereits vergeben“) und **Kundennummer** (vorbelegt mit der Firmen-Kundennummer,
+  je Vertrag änderbar; gilt in PDF, Vorlagen-Platzhalter `{kundennummer}` und Abholauftrag). Neue Fassungen behalten die Nummern.
+- App → Einstellungen: die **Kundennummer für Verträge** ist jetzt editierbar (Chef und Sucher, firmenweit, 4–20 Zeichen,
+  eindeutig über alle Firmen und nie gleich einer Anmeldenummer → 409), Audit-Eintrag.
+- Neuer Teilindex `generated_pdfs.vertragsnummer_je_firma` (nur selbst vergebene Nummern) entsteht beim Start.
+- Offen (Ahmad): Firmen-Kundennummer nur Chefsache? Vertragsnummer Groß-/Kleinschreibung normieren?
+
