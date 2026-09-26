@@ -3666,3 +3666,30 @@ löscht die Fahrer-Zähler und pseudonymisiert `driver_id` in den Bewertungen. B
 - Neuer Teilindex `generated_pdfs.vertragsnummer_je_firma` (nur selbst vergebene Nummern) entsteht beim Start.
 - Offen (Ahmad): Firmen-Kundennummer nur Chefsache? Vertragsnummer Groß-/Kleinschreibung normieren?
 
+**Reparaturwelle 5 Review 26.09.2026 abends (Markt, Nr. 1–68; Commits 461952d + bd410bd):**
+- **Top-N-Nachweis:** Sortierung gilt nur als bewiesen, wenn `searchPosition` 1…n lückenlos ist (Lücken → `data_invalid`; ohne
+  Positionsnummer → „nur monoton“, in Datenqualität und Karte als „Top-N nicht bewiesen“ gekennzeichnet).
+- **Auftragsfassung am Job:** Jobs tragen Hash/Version; nach dem Lauf wird verglichen — bei zwischenzeitlicher Änderung
+  „cancelled: Auftrag geändert“, nichts gespeichert, Kosten gebucht.
+- **Ersatz-Scraper:** Reservierung = Standard + Ersatz; Kosten des leeren Primärlaufs zählen mit; Zeilen je URL; Ersatz nur,
+  wenn ein Segment des Bündels in 7 Tagen Treffer hatte (sonst Marktlücke). Poll-Fehler: 3× Backoff, dann Abbruch des
+  Primärlaufs vor dem Ersatz; 429 → nie Ersatz. **Puffer** +30 % (max +10) Zeilen, danach Kürzung auf die Zeilenzahl.
+- **Planung:** Tagesplan in Bündel-Slots, Worker sammelt Nachzügler bis 60 s; Sperre 5 min mit Merker; zweiter Abruf vor
+  23:30; Crawler aus → wartende Jobs storniert, an → Tagesplan; alte Jobs (Vortage) werden nie nachgeholt; „Einen Takt jetzt“
+  = ein Bündel; bis zu `MARKT_JOBS_PARALLEL` Bündel gleichzeitig (mit `APIFY_MAX_PARALLEL` abstimmen!).
+- **Budget:** Admin-Budget hat Vorrang vor der Umgebung; Budget 0 → „ohne Budget pausiert“; Restbudget/Resttage bestimmt
+  Segmente je Tag; Entfernungsprüfungen in Taktung und Prognose; `runs` = echte Actor-Starts, `rows` = Rohzeilen.
+- **Zwei Server:** verlorene Leases fliegen vor dem Lauf aus dem Plan; Besitzprüfung vor dem Speichern. Kritische Unique-Indizes
+  fehlen → Crawler crawlt nicht (Alarm `markt_indizes_fehlen`); Multikey-Index `segment_ids`.
+- **Entfernung:** im Hintergrund (Detail 45 s), Rückstand im Monitoring (Alarm ab 500), Preis mit Historie, zweite Prüfung über
+  Ersatz-Scraper, 5-min-Sperre.
+- **Aufträge:** Variante Pflicht + mindestens Kraftstoff/Getriebe/kW/Karosserie; Verkäuferart/Land je Zeile geprüft;
+  semantische Zwillinge abgelehnt; **Aktivieren nur nach bestandenem Testlauf** (Seed ausgenommen; Bestandsaufträge ohne
+  Vermerk einmal Bearbeiten → Testlauf); Testlauf gegen Budget, 40 Segmente, mit Produktionsfilter.
+- **Auswertung:** Listings des letzten gültigen Laufs; Chancen je Segment (Index neu), stärkere Chance ersetzt; `rank_yesterday`
+  nur vom Vortag; Wiederkehrer nach 14 Tagen wieder „neu“; „erfolgreich“ nur gültig+bewiesen; Abdeckung je Lauf;
+  `last_success_at` nur mit Zeilen; Fehlerquote/Kosten korrekt; Verlauf mit 0-Tagen; Trends gewichtet; Karte: Hybrid erkannt,
+  Getriebe unbekannt → kein exaktes Segment.
+- **Oberfläche:** „Bereiche & Budget“ mit echter Kostenformel, Hinweis „nur Vorbelegung“, Knopf „Auf alle aktiven Aufträge
+  anwenden“; Taktung-Kachel mit Restbudget.
+
