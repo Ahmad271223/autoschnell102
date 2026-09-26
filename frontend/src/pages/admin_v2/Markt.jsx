@@ -78,7 +78,13 @@ export default function Markt() {
           <Kachel label="Crawler" wert={status.aktiv ? "an — läuft automatisch" : "aus"} tone={status.aktiv ? "text-emerald-300" : "text-amber-300"}
                   hint={status.aktiv_quelle === "admin" ? "per Knopf gesetzt" : "Vorgabe aus der Umgebung (MARKT_AKTIV)"} />
           <Kachel label="Segmente aktiv" wert={`${status.segmente} · ${status.modelle} Modelle`} />
-          <Kachel label="Taktung" wert={`jedes Segment alle ${takt.intervall_tage} Tag(e)`} hint={`${takt.segmente_je_tag} Segmente/Tag in Bündeln zu ${takt.buendel || 1} ≈ ${Number(takt.kosten_je_tag_usd || 0).toFixed(2)} $ · ≈ ${Number(takt.kosten_je_monat_usd || 0).toFixed(0)} $/Monat${takt.automatisch ? " (automatisch aus dem Budget)" : ""}`} />
+          {/* Reparaturwelle 5 Nr. 30/31/38: "ohne Budget pausiert", Restbudget fuer die verbleibenden Tage, Entfernungsprüfung als Kostenteil */}
+          <Kachel label="Taktung" tone={takt.ohne_budget ? "text-amber-300" : ""} data-testid="markt-taktung"
+                  wert={takt.ohne_budget ? "ohne Budget pausiert" : `an Crawl-Tagen ${status.crawls_je_tag_standard || 2}×; jedes Segment alle ${takt.intervall_tage} Tag(e)`}
+                  hint={takt.ohne_budget ? "Monatsbudget ist 0 — keine Planung, keine Jobs (unter „Bereiche & Budget“ setzen)"
+                    : `${takt.segmente_je_tag} Segmente/Tag in Bündeln zu ${takt.buendel || 1} ≈ ${Number(takt.kosten_je_tag_usd || 0).toFixed(2)} $ · ≈ ${Number(takt.kosten_je_monat_usd || 0).toFixed(0)} $/Monat${takt.automatisch ? " (automatisch aus dem Budget)" : ""}`
+                      + ` · Restbudget ${Number(takt.restbudget_usd ?? takt.budget_usd ?? 0).toFixed(2)} $ für ${takt.rest_tage ?? "—"} Tage`
+                      + (takt.entfernung_je_tag_usd ? ` · davon Entfernungsprüfung bis ${Number(takt.entfernung_je_tag_usd).toFixed(2)} $/Tag` : "")} />
           <Kachel label={`Budget ${b._id || ""}`} wert={`${Number(b.used_usd || 0).toFixed(2)} $ von ${Number(b.budget_usd || 0).toFixed(0)} $`}
                   hint={`reserviert ${Number(b.reserved_usd || 0).toFixed(2)} $ · ${b.rows || 0} Zeilen · ${b.runs || 0} Läufe`} />
           <Kachel label={`Jobs heute (${jobs.tag || ""})`} wert={`${jobs.completed || 0} fertig · ${jobs.running || 0} laufen · ${jobs.queued || 0} warten`}
@@ -180,9 +186,9 @@ export default function Markt() {
   );
 }
 
-function Kachel({ label, wert, hint, tone = "" }) {
+function Kachel({ label, wert, hint, tone = "", ...rest }) {
   return (
-    <div className="rounded-lg p-2.5" style={{ background: "var(--wa-06)" }}>
+    <div className="rounded-lg p-2.5" style={{ background: "var(--wa-06)" }} {...rest}>
       <div className="text-[11px] text-zinc-500">{label}</div>
       <div className={`text-[13px] font-semibold text-white ${tone}`}>{wert}</div>
       {hint && <div className="text-[11px] text-zinc-500 mt-0.5">{hint}</div>}
@@ -196,6 +202,7 @@ function KonfigKarte({ status, superAdmin, onGespeichert }) {
   const [rows, setRows] = useState(String(status.einstellungen?.rows_je_segment || 10));
   const [budget, setBudget] = useState(String(status.budget?.budget_usd ?? 450));
   const [busy, setBusy] = useState(false);
+  const takt = status.takt || {};
   const parse = (text, a, b) => text.split(",").map((t) => t.trim()).filter(Boolean).map((t) => {
     const [x, y] = t.split("-").map((v) => v.trim());
     return { [a]: x ? Number(x) : null, [b]: y ? Number(y) : null };
@@ -212,11 +219,28 @@ function KonfigKarte({ status, superAdmin, onGespeichert }) {
     } catch (e) { toast.error(errMsg(e, "Speichern fehlgeschlagen")); }
     finally { setBusy(false); }
   };
+  // Reparaturwelle 5 (Oberflaeche): die Werte hier sind nur die Vorbelegung fuer NEUE Auftraege — dieser
+  // Knopf traegt km-Bereiche, EZ-Jahre und Zeilen auf alle aktiven Auftraege (Fassung bleibt, Historie bleibt)
+  const anwenden = async () => {
+    if (!window.confirm("km-Bereiche, EZ-Jahre und Zeilen je Segment auf ALLE aktiven Suchaufträge übertragen?\n\nDie Aufträge behalten Kraftstoff/Getriebe/kW; alte Segmente werden deaktiviert (Historie bleibt).")) return;
+    setBusy(true);
+    try {
+      const r = await api.post("/admin/market/config/anwenden");
+      toast.success(`${r.data.geaendert} Auftrag/Aufträge angepasst${r.data.fehler?.length ? ` · ${r.data.fehler.length} nicht (${r.data.fehler[0]?.fehler || ""})` : ""}`);
+      onGespeichert?.();
+    } catch (e) { toast.error(errMsg(e, "Anwenden fehlgeschlagen")); }
+    finally { setBusy(false); }
+  };
   const feld = "w-full rounded-lg px-2.5 py-1.5 text-[13px] outline-none";
   const st = { background: "var(--bg-input-solid)", color: "var(--text-primary)", border: "1px solid var(--wa-12)" };
+  const startUsd = takt.start_usd != null ? Number(takt.start_usd).toLocaleString("de-DE", { maximumFractionDigits: 4 }) : "—";
+  const rowUsd = takt.row_usd != null ? Number(takt.row_usd).toLocaleString("de-DE", { maximumFractionDigits: 4 }) : "—";
   return (
     <Card className="mb-4" data-testid="markt-konfig">
       <div className="text-[15px] font-semibold text-white mb-2">Bereiche & Budget</div>
+      <div className="mb-2 text-[12px] text-amber-300" data-testid="markt-konfig-hinweis">
+        Diese Werte sind nur die Vorbelegung für NEUE Aufträge — bestehende Aufträge behalten ihre eigenen (Suchaufträge → Bearbeiten).
+      </div>
       <div className="grid md:grid-cols-2 gap-3 text-[12px] text-zinc-400">
         <label>km-Bereiche (min-max, Komma-getrennt)
           <input className={feld} style={st} value={km} onChange={(e) => setKm(e.target.value)} data-testid="markt-konfig-km" /></label>
@@ -227,10 +251,14 @@ function KonfigKarte({ status, superAdmin, onGespeichert }) {
         <label>Monatsbudget (US-Dollar, Apify)
           <input className={feld} style={st} value={budget} onChange={(e) => setBudget(e.target.value)} inputMode="decimal" data-testid="markt-konfig-budget" /></label>
       </div>
-      <div className="mt-2 text-[11px] text-zinc-500">
-        Segmente = Modelle × km-Bereiche × EZ-Bereiche. Ein Lauf kostet ≈ 0,004 $ + Zeilen × 0,003 $. Die Taktung (alle N Tage) ergibt sich aus dem Budget.
+      <div className="mt-2 text-[11px] text-zinc-500" data-testid="markt-konfig-formel">
+        Segmente = Modelle × km-Bereiche × EZ-Bereiche. Ein Bündel-Lauf kostet ≈ {startUsd} $ + Zeilen × {rowUsd} $ ({takt.actor || status.actor || "Scraper"}; je Segment werden Zeilen + Puffer abgerufen, {takt.puffer_faktor != null ? `+${Math.round(takt.puffer_faktor * 100)} %, höchstens +${takt.puffer_max}` : "+30 %"}). Die Taktung (alle N Tage) ergibt sich aus Restbudget und Restmonat.
       </div>
-      <Button size="sm" className="mt-3" onClick={speichern} disabled={busy || !superAdmin} data-testid="markt-konfig-speichern">Speichern</Button>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <Button size="sm" onClick={speichern} disabled={busy || !superAdmin} data-testid="markt-konfig-speichern">Speichern</Button>
+        <Button size="sm" variant="outline" onClick={anwenden} disabled={busy || !superAdmin} data-testid="markt-konfig-anwenden"
+                title="km-Bereiche, EZ-Jahre und Zeilen auf alle aktiven Suchaufträge übertragen">Auf alle aktiven Aufträge anwenden</Button>
+      </div>
     </Card>
   );
 }

@@ -115,6 +115,9 @@ def entwurf_pruefen(e: Dict[str, Any], *, bestehend: Optional[Dict[str, Any]] = 
     variante = str(e.get("variant") or e.get("variante") or "").strip()[:80]
     if not marke or not modell:
         raise Ungueltig("Marke und Modell sind Pflicht")
+    # Reparaturwelle 5 Nr. 66: die Variante ist Pflicht (sie ist der Anzeigename der Marktanalyse)
+    if not variante:
+        raise Ungueltig("Variante / Motorisierung ist Pflicht (z. B. 320d)")
     ids = katalog.modell_ids(marke, modell)
     if not ids:
         raise Ungueltig(f"Modell „{modell}“ der Marke „{marke}“ nicht im mobile.de-Katalog — bitte aus der Liste wählen")
@@ -136,6 +139,11 @@ def entwurf_pruefen(e: Dict[str, Any], *, bestehend: Optional[Dict[str, Any]] = 
     kw_bis = _int(e["power_kw_max"], "kW bis", 1, 2000) if e.get("power_kw_max") not in (None, "") else None
     if kw_von and kw_bis and kw_bis < kw_von:
         raise Ungueltig("kW bis liegt unter kW von")
+    # Nr. 5: die Freitext-Variante filtert bei mobile.de NICHTS (Probelaeufe 26.09.2026) — sie ist nur
+    # Beschriftung. Ohne Kraftstoff, Getriebe, kW-Bereich oder Karosserie waere "320d" ein Auftrag
+    # ueber ALLE 3er. Deshalb mindestens eine einschraenkende Angabe.
+    if not (fuel or gearbox or kw_von or kw_bis or body):
+        raise Ungueltig("Variante braucht Kraftstoff/Getriebe/kW/Karosserie als Filter — die Variante allein filtert bei mobile.de nicht")
     jahre = ez_jahre_pruefen(e.get("ez_years"), e.get("ez_from"), e.get("ez_to"))
     km = km_bereiche_pruefen(e.get("km_buckets") or [])
     rows = _int(e.get("rows") or konfig.rows_je_segment(), "Zeilen je Segment", 1, ROWS_MAX)
@@ -217,7 +225,8 @@ async def prognose(db, entwurf: Optional[Dict[str, Any]] = None, *, ohne_id: Opt
 
 
 # ---------------------------------------------------------------- Testlauf
-TESTLAUF_SEGMENTE_MAX = 20      # Nr. 39: hoechstens 20 Segmente je Testlauf (1 Start + max. 40 Zeilen)
+# Welle 5 Nr. 19: 40 Segmente je Testlauf — die 30 Standard-Segmente (5 EZ x 6 km) passen in EINEN Lauf
+TESTLAUF_SEGMENTE_MAX = 40
 TESTLAUF_JE_SEGMENT = 2
 
 
@@ -230,21 +239,33 @@ def _kontext(it: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _zeile(l: Dict[str, Any], seg: Dict[str, Any]) -> Dict[str, Any]:
+def _zeile(l: Dict[str, Any], seg: Dict[str, Any], grund: str = "") -> Dict[str, Any]:
     jahr = re.search(r"(\d{4})", l.get("first_registration") or "")
     return {"title": l.get("title"), "make": l.get("make"), "model": l.get("model"), "variant": l.get("variant"),
             "first_registration": l.get("first_registration"), "mileage_km": l.get("mileage_km"),
             "price_gross": l.get("price_gross"), "power_kw": l.get("power_kw"), "fuel": l.get("fuel"),
             "gearbox": l.get("gearbox"), "url": l.get("url"),
             "ez_ok": bool(jahr) and int(jahr.group(1)) == seg["year_from"],
-            "km_ok": l.get("mileage_km") is not None and seg["min_km"] <= int(l["mileage_km"]) <= seg["max_km"]}
+            "km_ok": l.get("mileage_km") is not None and seg["min_km"] <= int(l["mileage_km"]) <= seg["max_km"],
+            "gueltig": not grund, "grund": grund or None}
 
 
-async def testlauf(entwurf: Dict[str, Any], n: int = 5) -> Dict[str, Any]:
+def testlauf_bestanden(erg: Dict[str, Any]) -> bool:
+    """Nr. 65: bestanden = mindestens ein gueltiger Treffer und keine Filterfehler (keine Zeile vom
+    Zeilenfilter verworfen)."""
+    return int(erg.get("gueltig_gesamt") or 0) >= 1 and int(erg.get("verworfen_gesamt") or 0) == 0
+
+
+async def testlauf(entwurf: Dict[str, Any], n: int = 5, *, db=None) -> Dict[str, Any]:
     """Review 26.09.2026 Nr. 39: EIN Buendel-Lauf ueber ALLE Segmente des Entwurfs
-    (hoechstens 20, sonst die ersten 20) mit je 2 Treffern — zeigt je Segment, ob
-    der Filter stimmt und ob es leer ist, bevor einen Monat lang falsche Daten
-    laufen. `n` begrenzt nur die angezeigten Zeilen des ersten Segments."""
+    (hoechstens TESTLAUF_SEGMENTE_MAX) mit je 2 Treffern — zeigt je Segment, ob der Filter
+    stimmt und ob es leer ist, bevor einen Monat lang falsche Daten laufen. `n` begrenzt
+    nur die angezeigten Zeilen des ersten Segments.
+    Welle 5 Nr. 18: mit `db` wird der Lauf gegen das Marktbudget reserviert und abgerechnet.
+    Nr. 20: derselbe Zeilenfilter wie im Worker (passt_zum_segment) — je Segment
+    geliefert/gueltig/verworfen (mit Grund). Nr. 65: testlauf_ok_at/testlauf_ok_hash, wenn
+    bestanden — das Formular schickt sie beim Aktivieren mit."""
+    from markt import budget
     m = entwurf_pruefen(entwurf)
     alle: List[Dict[str, Any]] = []
     for jahr in m["ez_years"]:
@@ -254,10 +275,28 @@ async def testlauf(entwurf: Dict[str, Any], n: int = 5) -> Dict[str, Any]:
     segs = alle[:TESTLAUF_SEGMENTE_MAX]
     urls = [url.such_url(s, m) for s in segs]
     n_anzeige = max(1, min(int(n), 10))
-    if len(urls) > 1:
-        r = await apify.lauf(urls, TESTLAUF_JE_SEGMENT * len(urls), max_items_per_query=TESTLAUF_JE_SEGMENT)
-    else:
-        r = await apify.lauf(urls, n_anzeige)
+    max_items = TESTLAUF_JE_SEGMENT * len(urls) if len(urls) > 1 else n_anzeige
+    res = None
+    if db is not None:
+        res = await budget.reservieren(db, konfig.kosten_je_lauf_usd(konfig.actor(), max_items))
+        if res is None:
+            raise Ungueltig("Monatsbudget des Market-Crawlers aufgebraucht — kein Testlauf")
+    try:
+        if len(urls) > 1:
+            r = await apify.lauf(urls, max_items, max_items_per_query=TESTLAUF_JE_SEGMENT)
+        else:
+            r = await apify.lauf(urls, n_anzeige)
+    except apify.ApifyFehler as e:
+        if res is not None:
+            gelaufen = e.art in ("zeit", "ausfall", "poll")
+            await budget.abrechnen(db, res, (e.usd if gelaufen else 0.0), 0, gelaufen=gelaufen, runs=1 if (gelaufen and e.run_id) else 0)
+        raise
+    except Exception:
+        if res is not None:
+            await budget.abrechnen(db, res, None, 0)
+        raise
+    if res is not None:
+        await budget.abrechnen(db, res, r.get("usd"), len(r.get("items") or []), runs=int(r.get("laeufe") or 1))
     # Zuordnung Zeile -> Segment wie im Worker: ein Segment = alles, mehrere NUR ueber inputContext
     je_url: Dict[str, List[dict]] = {u: [] for u in urls}
     if len(urls) == 1:
@@ -270,33 +309,94 @@ async def testlauf(entwurf: Dict[str, Any], n: int = 5) -> Dict[str, Any]:
     ergebnis_segmente = []
     erste_zeilen: List[Dict[str, Any]] = []
     erste_ls: List[Dict[str, Any]] = []
+    gueltig_gesamt = verworfen_gesamt = geliefert_gesamt = 0
     for i, (s, u) in enumerate(zip(segs, urls)):
         ls = normalisieren.listings_aus_items(je_url[u])
-        zeilen = [_zeile(l, s) for l in ls]
-        ergebnis_segmente.append({"label": s["label"], "anzahl": len(zeilen),
+        zeilen, gueltige, gruende = [], [], []
+        for l in ls:
+            ok, grund = normalisieren.passt_zum_segment(l, s, m)
+            zeilen.append(_zeile(l, s, "" if ok else grund))
+            if ok:
+                gueltige.append(l)
+            else:
+                gruende.append(grund)
+        geliefert_gesamt += len(ls)
+        gueltig_gesamt += len(gueltige)
+        verworfen_gesamt += len(gruende)
+        ergebnis_segmente.append({"label": s["label"], "anzahl": len(zeilen), "geliefert": len(ls), "gueltig": len(gueltige),
+                                  "verworfen": len(gruende), "gruende": gruende[:3],
                                   "ez_ok": all(z["ez_ok"] for z in zeilen) if zeilen else None,
                                   "km_ok": all(z["km_ok"] for z in zeilen) if zeilen else None})
         if i == 0:
             erste_ls, erste_zeilen = ls[:n_anzeige], zeilen[:n_anzeige]
-    return {"url": urls[0], "segment": segs[0]["label"], "anzahl": len(erste_zeilen),
-            "sortiert": normalisieren.preise_aufsteigend(erste_ls),
-            "alle_ez_ok": all(z["ez_ok"] for z in erste_zeilen) if erste_zeilen else None,
-            "alle_km_ok": all(z["km_ok"] for z in erste_zeilen) if erste_zeilen else None,
-            "usd": r.get("usd"), "dauer_ms": r.get("dauer_ms"), "actor": r.get("actor"), "zeilen": erste_zeilen,
-            "segmente": ergebnis_segmente, "leer": sum(1 for s in ergebnis_segmente if s["anzahl"] == 0),
-            "segmente_geprueft": len(segs), "segmente_gesamt": len(alle)}
+    erg = {"url": urls[0], "segment": segs[0]["label"], "anzahl": len(erste_zeilen),
+           "sortiert": normalisieren.preise_aufsteigend(erste_ls),
+           "alle_ez_ok": all(z["ez_ok"] for z in erste_zeilen) if erste_zeilen else None,
+           "alle_km_ok": all(z["km_ok"] for z in erste_zeilen) if erste_zeilen else None,
+           "usd": r.get("usd"), "dauer_ms": r.get("dauer_ms"), "actor": r.get("actor"), "zeilen": erste_zeilen,
+           "segmente": ergebnis_segmente, "leer": sum(1 for s in ergebnis_segmente if s["anzahl"] == 0),
+           "segmente_geprueft": len(segs), "segmente_gesamt": len(alle), "segmente_max": TESTLAUF_SEGMENTE_MAX,
+           "geliefert_gesamt": geliefert_gesamt, "gueltig_gesamt": gueltig_gesamt, "verworfen_gesamt": verworfen_gesamt,
+           "definition_hash": definition_hash(m)}
+    erg["bestanden"] = testlauf_bestanden(erg)
+    erg["testlauf_ok_at"] = konfig.jetzt_iso() if erg["bestanden"] else None
+    erg["testlauf_ok_hash"] = erg["definition_hash"] if erg["bestanden"] else None
+    return erg
+
+
+def _testlauf_pruefen(m: Dict[str, Any], e: Dict[str, Any], alt: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Nr. 65: fuer den aktuellen definition_hash muss ein bestandener Testlauf vorliegen — aus dem
+    Formular (testlauf_ok_at + testlauf_ok_hash) oder schon am Auftrag gespeichert. Startlisten-Seed
+    (seed_version) ist ausgenommen. Liefert die zu speichernden Felder."""
+    h = definition_hash(m)
+    quellen = [e, alt or {}]
+    for q in quellen:
+        if q.get("testlauf_ok_at") and str(q.get("testlauf_ok_hash") or "") == h:
+            return {"testlauf_ok_at": str(q["testlauf_ok_at"]), "testlauf_ok_hash": h}
+    if (alt or {}).get("seed_version"):          # nur der gespeicherte Seed-Vermerk, nie aus dem Formular
+        return {}
+    raise Ungueltig("erst Testlauf — Aktivieren geht nur nach einem bestandenen Testlauf fuer diese Konfiguration (mindestens ein Treffer, keine Filterfehler)")
+
+
+async def _semantisches_duplikat(db, m: Dict[str, Any], *, ohne_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Nr. 64: gleicher definition_hash UND gleiche EZ-Jahre/km-Bereiche bei einem nicht archivierten
+    Auftrag -> der neue waere nur eine zweite Rechnung fuer dieselben Segmente."""
+    h = definition_hash(m)
+    filt: Dict[str, Any] = {"status": {"$ne": "archived"}}
+    if ohne_id:
+        filt["id"] = {"$ne": ohne_id}
+    async for d in db[MODELLE].find(filt, {"_id": 0, "id": 1, "label": 1, "ez_years": 1, "km_buckets": 1, "definition_hash": 1,
+                                           "make_id": 1, "model_id": 1, "fuel": 1, "gearbox": 1, "body": 1, "power_kw_min": 1,
+                                           "power_kw_max": 1, "country": 1, "zip": 1, "radius_km": 1, "seller_type": 1}):
+        if (d.get("definition_hash") or definition_hash(d)) != h:
+            continue
+        if sorted(int(j) for j in (d.get("ez_years") or [])) != sorted(m["ez_years"]):
+            continue
+        km_alt = [(int(b.get("min_km")), int(b.get("max_km"))) for b in (d.get("km_buckets") or [])]
+        if sorted(km_alt) != sorted((b["min_km"], b["max_km"]) for b in m["km_buckets"]):
+            continue
+        return d
+    return None
 
 
 # ---------------------------------------------------------------- Anlegen / Aendern / Duplizieren / Archivieren
 async def anlegen(db, entwurf: Dict[str, Any]) -> Dict[str, Any]:
     m = entwurf_pruefen(entwurf)
+    # Welle 5 Nr. 64: semantisch identischer Auftrag (Definition + EZ + km) darf nicht doppelt laufen
+    zwilling = await _semantisches_duplikat(db, m)
+    if zwilling:
+        raise Ungueltig(f"Ein gleicher Suchauftrag besteht schon: „{zwilling.get('label') or zwilling['id']}“ ({zwilling['id']}) — "
+                        f"bitte den bestehenden aktivieren oder aendern")
+    # Nr. 65: aktiv nur nach bestandenem Testlauf (Formular schickt testlauf_ok_at/_hash mit)
+    testlauf_felder = _testlauf_pruefen(m, entwurf) if m["status"] == "active" else {
+        k: entwurf[k] for k in ("testlauf_ok_at", "testlauf_ok_hash") if entwurf.get(k)}
     basis = slug(m["make"], m["variant"] or m["model"])
     mid = basis
     i = 2
     while await db[MODELLE].find_one({"id": mid}, {"_id": 1}):
         mid = f"{basis}-{i}"
         i += 1
-    doc = {**m, "id": mid, "version": 1, "definition_hash": definition_hash(m),
+    doc = {**m, **testlauf_felder, "id": mid, "version": 1, "definition_hash": definition_hash(m),
            "created_at": konfig.jetzt_iso(), "updated_at": konfig.jetzt_iso()}
     await db[MODELLE].insert_one(dict(doc))
     await segmente.synchronisieren(db)
@@ -308,7 +408,9 @@ async def aendern(db, model_id: str, entwurf: Dict[str, Any]) -> Dict[str, Any]:
     """P4: aendern sich materielle Merkmale (definition_hash), steigt die Fassung — die
     Segmente der neuen Fassung bekommen eigene IDs, die alten werden von synchronisieren
     deaktiviert (nichts geloescht). rows/crawls_per_day/ez_years/km_buckets/label/status/
-    notiz/priority aendern die Fassung NICHT."""
+    notiz/priority aendern die Fassung NICHT.
+    Welle 5 Nr. 65: eine materielle Aenderung eines AKTIVEN Auftrags braucht einen bestandenen
+    Testlauf fuer die neue Definition (sonst 'erst Testlauf'); Nr. 64: kein Zwilling."""
     alt = await db[MODELLE].find_one({"id": model_id}, {"_id": 0})
     if not alt:
         raise Ungueltig("Modell nicht gefunden")
@@ -316,12 +418,34 @@ async def aendern(db, model_id: str, entwurf: Dict[str, Any]) -> Dict[str, Any]:
     alt_hash = alt.get("definition_hash") or definition_hash(alt)
     neu_hash = definition_hash(m)
     version = segmente.modell_version(alt)
+    testlauf_felder: Dict[str, Any] = {k: entwurf[k] for k in ("testlauf_ok_at", "testlauf_ok_hash") if entwurf.get(k)}
     if neu_hash != alt_hash:
         version += 1
-    await db[MODELLE].update_one({"id": model_id}, {"$set": {**m, "version": version, "definition_hash": neu_hash,
+        zwilling = await _semantisches_duplikat(db, m, ohne_id=model_id)
+        if zwilling:
+            raise Ungueltig(f"Ein gleicher Suchauftrag besteht schon: „{zwilling.get('label') or zwilling['id']}“ ({zwilling['id']})")
+        if m["status"] == "active":
+            testlauf_felder = _testlauf_pruefen(m, entwurf, alt)
+    elif m["status"] == "active" and alt.get("status") != "active":
+        testlauf_felder = _testlauf_pruefen(m, entwurf, alt)
+    await db[MODELLE].update_one({"id": model_id}, {"$set": {**m, **testlauf_felder, "version": version, "definition_hash": neu_hash,
                                                             "updated_at": konfig.jetzt_iso()}})
     await segmente.synchronisieren(db)
     return await db[MODELLE].find_one({"id": model_id}, {"_id": 0})
+
+
+async def konfig_anwenden(db, *, km_buckets: List[Dict[str, Any]], ez_years: List[int], rows: int) -> Dict[str, Any]:
+    """Oberflaeche (Welle 5): 'Auf alle aktiven Auftraege anwenden' — die zentralen Vorbelegungen
+    (km-Bereiche, EZ-Jahre, Zeilen) auf jeden aktiven Auftrag ueber aendern() uebertragen (nicht
+    materiell: Fassung bleibt, alte Segmente werden deaktiviert, Historie bleibt)."""
+    geaendert, fehler = [], []
+    async for m in db[MODELLE].find({"status": "active"}, {"_id": 0, "id": 1}):
+        try:
+            await aendern(db, m["id"], {"km_buckets": [dict(b) for b in km_buckets], "ez_years": list(ez_years), "rows": int(rows)})
+            geaendert.append(m["id"])
+        except Ungueltig as ex:
+            fehler.append({"id": m["id"], "fehler": str(ex)})
+    return {"geaendert": len(geaendert), "ids": geaendert, "fehler": fehler}
 
 
 async def status_setzen(db, model_id: str, status: str) -> Dict[str, Any]:
@@ -332,6 +456,9 @@ async def status_setzen(db, model_id: str, status: str) -> Dict[str, Any]:
         raise Ungueltig("Modell nicht gefunden")
     if status == "active" and not alt.get("model_id"):
         raise Ungueltig("Modell hat keine mobile.de-ID — kann nicht beobachtet werden")
+    if status == "active":
+        # Nr. 65: Aktivieren nur mit bestandenem Testlauf fuer die aktuelle Definition (Seed ausgenommen)
+        _testlauf_pruefen({**alt, "status": "active"}, {}, alt)
     await db[MODELLE].update_one({"id": model_id}, {"$set": {"status": status, "enabled": status == "active",
                                                             "updated_at": konfig.jetzt_iso(),
                                                             **({"archived_at": konfig.jetzt_iso()} if status == "archived" else {})}})
@@ -354,7 +481,8 @@ async def duplizieren(db, model_id: str, aenderungen: Optional[Dict[str, Any]] =
     if not alt:
         raise Ungueltig("Modell nicht gefunden")
     entwurf = {k: v for k, v in alt.items() if k not in ("id", "created_at", "updated_at", "archived_at", "grund",
-                                                          "version", "definition_hash")}
+                                                          "version", "definition_hash", "testlauf_ok_at", "testlauf_ok_hash",
+                                                          "seed_version")}
     entwurf.update(aenderungen or {})
     entwurf["status"] = "paused"
     if not (aenderungen or {}).get("label"):
@@ -365,8 +493,8 @@ async def duplizieren(db, model_id: str, aenderungen: Optional[Dict[str, Any]] =
 async def monatsverbrauch_je_modell(db) -> Dict[str, float]:
     m = konfig.monat()
     raus: Dict[str, float] = {}
-    # P1: auch Laeufe mit ungueltigen Daten (data_invalid) haben Geld gekostet
-    async for row in db[JOBS].aggregate([{"$match": {"status": {"$in": ["completed", "data_invalid"]}, "tag": {"$regex": f"^{m}"}}},
+    # P1 + Welle 5 Nr. 55: JEDER Job mit actual_cost hat Geld gekostet — auch cancelled/failed/data_invalid
+    async for row in db[JOBS].aggregate([{"$match": {"actual_cost": {"$ne": None}, "tag": {"$regex": f"^{m}"}}},
                                          {"$group": {"_id": "$model_id", "usd": {"$sum": {"$ifNull": ["$actual_cost", 0]}},
                                                      "rows": {"$sum": {"$ifNull": ["$actual_rows", 0]}}}}]):
         raus[row["_id"]] = round(float(row["usd"] or 0), 4)

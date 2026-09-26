@@ -223,10 +223,12 @@ function SegmentAnalyse({ segment, bereich, onBereich, superAdmin }) {
           <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px]" style={{ color: "var(--text-secondary)" }} data-testid="markt-qualitaet">
             <span>Daten seit {zusammen.qualitaet.daten_seit || "—"}</span>
             <span>{zusammen.qualitaet.tage_beobachtet} Tage beobachtet{zusammen.qualitaet.tage_mit_treffern != null && zusammen.qualitaet.tage_mit_treffern !== zusammen.qualitaet.tage_beobachtet ? ` (${zusammen.qualitaet.tage_mit_treffern} mit Treffern)` : ""}</span>
-            {zusammen.qualitaet.abdeckung_pct != null && <span>Abdeckung {pct(zusammen.qualitaet.abdeckung_pct, false)} der Kalendertage</span>}
-            <span>{zusammen.qualitaet.erfolgreiche_crawls} von {zusammen.qualitaet.erwartete_crawls} erwarteten Crawls erfolgreich</span>
+            {zusammen.qualitaet.abdeckung_pct != null && <span>Abdeckung {pct(zusammen.qualitaet.abdeckung_pct, false)} der erwarteten Läufe</span>}
+            <span>{zusammen.qualitaet.erfolgreiche_crawls} von {zusammen.qualitaet.erwartete_crawls} erwarteten Crawls gültig{zusammen.qualitaet.laeufe_nur_monoton ? ` (${zusammen.qualitaet.laeufe_nur_monoton} nur monoton sortiert)` : ""}</span>
             <span>aktuelle Sample-Größe {zusammen.qualitaet.sample_size}</span>
             <span style={{ color: dl.farbe }}>{dl.text}</span>
+            {/* Reparaturwelle 5 Nr. 1: Scraper ohne Positionsnummer — die Werte sind monoton sortiert, aber nicht bewiesen die Top-N */}
+            {zusammen.qualitaet.top_n_hinweis && <span style={{ color: "var(--st-amber)" }} data-testid="markt-top-n-hinweis">{zusammen.qualitaet.top_n_hinweis}</span>}
           </div>
         )}
         <div className="mt-2 text-[10px] text-zinc-500">Durchschnitt und Median beziehen sich nur auf die beobachteten {zusammen.stats?.sample_size || segment.max_items || ""} günstigsten Angebote, nicht auf den Gesamtmarkt.</div>
@@ -256,7 +258,7 @@ function SegmentAnalyse({ segment, bereich, onBereich, superAdmin }) {
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
-            <div className="mt-2 text-[11px] text-zinc-500">Grün Billigstes · Rot Median · Gelb Durchschnitt · Blau p25–p75. Fällt nur das Billigste, war es oft ein einzelnes Inserat; fallen alle drei, bewegt sich das ganze günstige Segment.</div>
+            <div className="mt-2 text-[11px] text-zinc-500">Grün Billigstes · Rot Median · Gelb Durchschnitt · Blau p25–p75. Fällt nur das Billigste, war es oft ein einzelnes Inserat; fallen alle drei, bewegt sich das ganze günstige Segment.{aw.tage_ohne_angebot ? ` Lücken = Tage ohne Angebot (${aw.tage_ohne_angebot}).` : ""}</div>
             <div className="mt-4 text-[13px] font-semibold text-white">Tagesveränderung des Medians</div>
             <div style={{ height: 120 }}>
               <ResponsiveContainer width="100%" height="100%" minWidth={0} initialDimension={{ width: 320, height: 200 }}>
@@ -290,8 +292,10 @@ function SegmentAnalyse({ segment, bereich, onBereich, superAdmin }) {
                 <table className="w-full text-[12px] min-w-[620px]" data-testid="markt-tagestabelle">
                   <thead><tr className="text-left text-zinc-500 text-[11px] uppercase"><th className="py-1 pr-3">Datum</th><th className="py-1 pr-3 text-right">Fahrzeuge</th><th className="py-1 pr-3 text-right">Min</th><th className="py-1 pr-3 text-right">Median Top-20</th><th className="py-1 pr-3 text-right">Durchschnitt</th><th className="py-1 pr-3 text-right">Max</th><th className="py-1 pr-3 text-right">Veränderung</th></tr></thead>
                   <tbody>{reihe.map((r) => (
-                    <tr key={r.date} className="border-t border-white/5 tabular-nums">
-                      <td className="py-1 pr-3 text-zinc-300">{r.date}{(r.laeufe?.length || 0) > 1 && <span className="ml-1 text-[10px] text-zinc-500" data-testid={`markt-laeufe-${r.date}`}>{r.laeufe.length} Läufe</span>}</td><td className="py-1 pr-3 text-right">{r.sample_size}</td>
+                    <tr key={r.date} className="border-t border-white/5 tabular-nums" style={r.kein_angebot ? { color: "var(--text-dim)" } : undefined}>
+                      <td className="py-1 pr-3 text-zinc-300">{r.date}{(r.laeufe?.length || 0) > 1 && <span className="ml-1 text-[10px] text-zinc-500" data-testid={`markt-laeufe-${r.date}`}>{r.laeufe.length} Läufe</span>}
+                        {/* Nr. 58: Tag mit 0 Treffern als Marker, nicht als Sprung */}
+                        {r.kein_angebot && <span className="ml-1 text-[10px]" style={{ color: "var(--st-amber)" }} data-testid={`markt-kein-angebot-${r.date}`}>kein Angebot</span>}</td><td className="py-1 pr-3 text-right">{r.sample_size}</td>
                       <td className="py-1 pr-3 text-right">{eur(r.min)}</td><td className="py-1 pr-3 text-right text-white">{eur(r.median)}</td>
                       <td className="py-1 pr-3 text-right">{eur(r.avg)}</td><td className="py-1 pr-3 text-right">{eur(r.max)}</td>
                       <td className="py-1 pr-3 text-right" style={{ color: trendFarbe(r.change_eur) }}>{r.change_pct == null ? "—" : pct(r.change_pct)}</td>
@@ -306,7 +310,8 @@ function SegmentAnalyse({ segment, bereich, onBereich, superAdmin }) {
       {/* Aktuelle Top-20 */}
       <Card padded={false} data-testid="markt-listings">
         <div className="px-4 py-3 text-[13px] font-semibold text-white" style={{ borderBottom: "1px solid var(--wa-08)" }}>
-          Aktuell {listings?.listings?.length || 0} günstigste Fahrzeuge {listings?.date ? `(Stand ${listings.date})` : ""}
+          Aktuell {listings?.listings?.length || 0} günstigste Fahrzeuge {listings?.date ? `(Stand ${listings.date}${listings.lauf_tag && listings.lauf_tag.includes("#") ? `, letzter Lauf ${listings.lauf_tag.split("#")[1]}` : ""})` : ""}
+          {listings?.top_n_bewiesen === false && <span className="ml-2 text-[11px] font-normal" style={{ color: "var(--st-amber)" }}>Top-N nicht bewiesen</span>}
         </div>
         {!listings?.listings?.length ? <EmptyState title="Noch keine Fahrzeuge" /> : (
           <div className="overflow-x-auto">
@@ -378,7 +383,7 @@ function ListingHistorie({ listingId, onClose }) {
             <ul className="mt-1 text-[13px] space-y-0.5" data-testid="markt-preisverlauf">
               {(l?.price_history || []).map((p, i) => <li key={i} className="tabular-nums">{datumKurz(p.at)} <b className="text-white">{eur(p.price)}</b></li>)}
             </ul>
-            <div className="mt-3 text-[12px] text-zinc-400">Beobachtungen ({d.snapshots?.length || 0})</div>
+            <div className="mt-3 text-[12px] text-zinc-400">Beobachtungen ({d.snapshots?.length || 0}){d.gekuerzt ? <span className="ml-1" style={{ color: "var(--st-amber)" }} data-testid="markt-historie-gekuerzt">— gekürzt auf die ersten {d.snapshots?.length || 0}</span> : null}</div>
             <div className="overflow-x-auto">
               <table className="w-full text-[12px] min-w-[420px]"><thead><tr className="text-left text-zinc-500 text-[11px] uppercase"><th className="py-1 pr-3">Datum</th><th className="py-1 pr-3">Segment</th><th className="py-1 pr-3 text-right">Preis</th><th className="py-1 pr-3 text-right">Platz</th><th className="py-1 pr-3">Bewertung</th></tr></thead>
                 <tbody>{(d.snapshots || []).map((s, i) => <tr key={i} className="border-t border-white/5 tabular-nums"><td className="py-1 pr-3">{s.date}</td><td className="py-1 pr-3 text-zinc-400">{s.segment_id}</td><td className="py-1 pr-3 text-right">{eur(s.price)}</td><td className="py-1 pr-3 text-right">{s.rank_in_sample}</td><td className="py-1 pr-3">{s.price_rating || "—"}</td></tr>)}</tbody></table>

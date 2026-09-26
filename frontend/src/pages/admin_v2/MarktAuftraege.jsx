@@ -25,7 +25,12 @@ const STATUS_TONE = { active: "green", paused: "yellow", archived: "gray" };
 const STATUS_TEXT = { active: "aktiv", paused: "pausiert", archived: "archiviert" };
 
 const LEER = { make: "", model: "", variant: "", fuel: "", gearbox: "", body: "", power_kw_min: "", power_kw_max: "", seller_type: "",
-               country: "DE", zip: "", radius_km: "", ez_years: [], km_buckets: [], rows: 20, crawls_per_day: 2, label: "" };
+               country: "DE", zip: "", radius_km: "", ez_years: [], km_buckets: [], rows: 20, crawls_per_day: 2, label: "",
+               testlauf_ok_at: "", testlauf_ok_hash: "" };
+// Reparaturwelle 5 Nr. 65: materielle Merkmale — aendert sich eines, gilt der Testlauf nicht mehr (Aktivieren erst nach neuem Testlauf)
+const MATERIELL = ["make", "model", "fuel", "gearbox", "body", "power_kw_min", "power_kw_max", "seller_type", "country", "zip", "radius_km"];
+// Nr. 65: ein Auftrag darf aktiviert werden, wenn der Testlauf zur aktuellen Definition passt (Startlisten-Seed ausgenommen)
+const aktivierbar = (m) => !!(m.seed_version || (m.testlauf_ok_hash && m.testlauf_ok_hash === m.definition_hash));
 
 export default function MarktAuftraege() {
   const { user: ich } = useAuth();
@@ -58,7 +63,7 @@ export default function MarktAuftraege() {
   const neu = () => setFormular({ modus: "neu", werte: { ...LEER, ez_years: katalog?.standard?.ez_years || [], km_buckets: katalog?.standard?.km_buckets || [],
                                                          rows: katalog?.standard?.rows || 20, crawls_per_day: katalog?.standard?.crawls_per_day || 2 } });
   const bearbeiten = (m) => setFormular({ modus: "bearbeiten", id: m.id, werte: ausModell(m) });
-  const duplizieren = (m) => setFormular({ modus: "duplizieren", id: m.id, werte: { ...ausModell(m), label: "", variant: m.variant || "" } });
+  const duplizieren = (m) => setFormular({ modus: "duplizieren", id: m.id, werte: { ...ausModell(m), label: "", variant: m.variant || "", testlauf_ok_at: "", testlauf_ok_hash: "", seed_version: null } });
 
   if (fehler) return <Card data-testid="auftraege-fehler"><div className="text-red-300 text-sm">{fehler}</div><Button size="sm" className="mt-2" onClick={laden}><RefreshCw size={14} /> Erneut laden</Button></Card>;
   if (!daten || !katalog) return <div className="flex items-center gap-2 text-zinc-500 text-sm py-10"><Spinner /> lade…</div>;
@@ -119,7 +124,8 @@ export default function MarktAuftraege() {
                     <Button size="sm" variant="ghost" disabled={!superAdmin || !!busy} onClick={() => duplizieren(m)} title="Duplizieren" data-testid={`auftrag-duplizieren-${m.id}`}><Copy size={13} /></Button>
                     {m.status === "active"
                       ? <Button size="sm" variant="ghost" disabled={!superAdmin || !!busy} onClick={() => status(m, "paused")} title="Pausieren" data-testid={`auftrag-pausieren-${m.id}`}><Pause size={13} /></Button>
-                      : <Button size="sm" variant="ghost" disabled={!superAdmin || !!busy || !m.model_id} onClick={() => status(m, "active")} title="Aktivieren" data-testid={`auftrag-aktivieren-${m.id}`}><Play size={13} /></Button>}
+                      : <Button size="sm" variant="ghost" disabled={!superAdmin || !!busy || !m.model_id || !aktivierbar(m)} onClick={() => status(m, "active")}
+                                title={aktivierbar(m) ? "Aktivieren" : "erst Testlauf — Bearbeiten → Testlauf (mindestens ein Treffer, keine Filterfehler)"} data-testid={`auftrag-aktivieren-${m.id}`}><Play size={13} /></Button>}
                     {m.status !== "archived" && <Button size="sm" variant="ghost" disabled={!superAdmin || !!busy} title="Archivieren (Historie bleibt)" data-testid={`auftrag-archivieren-${m.id}`}
                                                          onClick={() => { if (window.confirm(`${m.label} archivieren? Es werden keine neuen Daten gesammelt, die Historie bleibt erhalten.`)) status(m, "archived"); }}><Archive size={13} /></Button>}
                   </td>
@@ -136,7 +142,9 @@ function ausModell(m) {
   return { make: m.make || "", model: m.model || "", variant: m.variant || "", fuel: m.fuel || "", gearbox: m.gearbox || "", body: m.body || "",
            power_kw_min: m.power_kw_min ?? "", power_kw_max: m.power_kw_max ?? "", seller_type: m.seller_type || "", country: m.country || "DE",
            zip: m.zip || "", radius_km: m.radius_km ?? "", ez_years: m.ez_years || [], km_buckets: (m.km_buckets || []).map((b) => ({ ...b })),
-           rows: m.rows || 20, crawls_per_day: m.crawls_per_day || 1, label: m.label || "" };
+           rows: m.rows || 20, crawls_per_day: m.crawls_per_day || 1, label: m.label || "",
+           // Nr. 65: gespeicherter Testlauf gilt weiter, solange die Definition gleich bleibt
+           testlauf_ok_at: aktivierbar(m) ? (m.testlauf_ok_at || "seed") : "", testlauf_ok_hash: m.testlauf_ok_hash || "", seed_version: m.seed_version || null };
 }
 
 function K({ label, wert, rot }) {
@@ -156,15 +164,20 @@ function AuftragFormular({ katalog, formular, superAdmin, onClose, onGespeichert
   const [ezVon, setEzVon] = useState("");
   const [ezBis, setEzBis] = useState("");
   const timer = useRef(null);
-  const set = (k, v) => setW((x) => ({ ...x, [k]: v }));
+  // Nr. 65: eine materielle Aenderung macht den Testlauf ungueltig — Aktivieren erst nach neuem Testlauf
+  const set = (k, v) => setW((x) => (MATERIELL.includes(k) && x[k] !== v ? { ...x, [k]: v, testlauf_ok_at: "", testlauf_ok_hash: "", seed_version: null } : { ...x, [k]: v }));
 
   useEffect(() => {
     if (!w.make) { setModelle([]); return; }
     api.get("/admin/market/katalog", { params: { marke: w.make } }).then((r) => setModelle(r.data.modelle || [])).catch(() => setModelle([]));
   }, [w.make]);
 
-  const nutzlast = useMemo(() => ({ ...w, ez_years: ezModus === "liste" ? w.ez_years : [], ez_from: ezModus === "vonbis" ? ezVon : "", ez_to: ezModus === "vonbis" ? ezBis : "",
-                                     power_kw_min: w.power_kw_min || null, power_kw_max: w.power_kw_max || null, radius_km: w.radius_km || null }), [w, ezModus, ezVon, ezBis]);
+  const nutzlast = useMemo(() => ({ ...w, seed_version: undefined, ez_years: ezModus === "liste" ? w.ez_years : [], ez_from: ezModus === "vonbis" ? ezVon : "", ez_to: ezModus === "vonbis" ? ezBis : "",
+                                     power_kw_min: w.power_kw_min || null, power_kw_max: w.power_kw_max || null, radius_km: w.radius_km || null,
+                                     testlauf_ok_at: w.testlauf_ok_at && w.testlauf_ok_at !== "seed" ? w.testlauf_ok_at : null, testlauf_ok_hash: w.testlauf_ok_hash || null }), [w, ezModus, ezVon, ezBis]);
+  const testOk = !!w.testlauf_ok_at;
+  // Nr. 5: die Freitext-Variante filtert bei mobile.de nicht — ohne Kraftstoff/Getriebe/kW/Karosserie ist der Auftrag ungueltig
+  const ohneFilter = !(w.fuel || w.gearbox || w.body || w.power_kw_min || w.power_kw_max);
   // Prognose live (Kostenrechner), 400 ms nach der letzten Eingabe
   useEffect(() => {
     clearTimeout(timer.current);
@@ -195,7 +208,13 @@ function AuftragFormular({ katalog, formular, superAdmin, onClose, onGespeichert
   };
   const testlauf = async () => {
     setBusy("test");
-    try { const r = await api.post("/admin/market/testlauf", nutzlast, { params: { n: 5 }, timeout: 120000 }); setTest(r.data); }
+    try {
+      const r = await api.post("/admin/market/testlauf", nutzlast, { params: { n: 5 }, timeout: 120000 });
+      setTest(r.data);
+      // Nr. 65: bestanden -> Aktivieren frei (testlauf_ok_at/_hash gehen beim Speichern mit)
+      setW((x) => ({ ...x, testlauf_ok_at: r.data.bestanden ? (r.data.testlauf_ok_at || "") : "", testlauf_ok_hash: r.data.bestanden ? (r.data.testlauf_ok_hash || "") : "" }));
+      if (!r.data.bestanden) toast.warning(r.data.gueltig_gesamt ? `Testlauf nicht bestanden: ${r.data.verworfen_gesamt} Zeile(n) vom Filter verworfen` : "Testlauf nicht bestanden: kein gültiger Treffer");
+    }
     catch (e) { toast.error(errMsg(e, "Testlauf fehlgeschlagen")); }
     finally { setBusy(""); }
   };
@@ -216,7 +235,11 @@ function AuftragFormular({ katalog, formular, superAdmin, onClose, onGespeichert
             <option value="">— wählen —</option>{modelle.map((m) => <option key={m.model_id} value={m.name}>{m.name}</option>)}
           </select></label>
         <label>Variante / Motorisierung *
-          <input className={feld} style={st} value={w.variant} onChange={(ev) => set("variant", ev.target.value)} placeholder="z. B. 320d" data-testid="auftrag-variante" /></label>
+          <input className={feld} style={st} value={w.variant} onChange={(ev) => set("variant", ev.target.value)} placeholder="z. B. 320d" data-testid="auftrag-variante" />
+          <div className="text-[11px] mt-1" style={{ color: ohneFilter ? "var(--st-amber, #f59e0b)" : "var(--text-dim)" }} data-testid="auftrag-variante-hinweis">
+            {ohneFilter ? "Die Variante ist nur Beschriftung — mobile.de filtert danach nicht. Mindestens Kraftstoff, Getriebe, kW oder Karosserie wählen."
+              : "Nur Beschriftung — gefiltert wird über Kraftstoff, Getriebe, kW und Karosserie."}
+          </div></label>
         <label>Kraftstoff<select className={feld} style={st} value={w.fuel} onChange={(ev) => set("fuel", ev.target.value)} data-testid="auftrag-kraftstoff">{Object.entries(KRAFTSTOFF).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
         <label>Getriebe<select className={feld} style={st} value={w.gearbox} onChange={(ev) => set("gearbox", ev.target.value)} data-testid="auftrag-getriebe">{Object.entries(GETRIEBE).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select>
           {!w.gearbox && <div className="text-[11px] mt-1" style={{ color: "var(--st-amber, #f59e0b)" }}>Ohne Getriebe mischen sich Schalt- und Automatikpreise (1–3 T€ Unterschied). Für beide Getriebe zwei Aufträge anlegen (Duplizieren).</div>}</label>
@@ -251,7 +274,7 @@ function AuftragFormular({ katalog, formular, superAdmin, onClose, onGespeichert
 
       <div className="mt-3 grid md:grid-cols-3 gap-3 text-[12px] text-zinc-400">
         <label>Max. Ergebnisse je Segment (die N günstigsten)<input className={feld} style={st} inputMode="numeric" value={w.rows} onChange={(ev) => set("rows", Number(String(ev.target.value).replace(/[^0-9]/g, "")) || "")} data-testid="auftrag-rows" /></label>
-        <label>Abrufe je Tag<select className={feld} style={st} value={w.crawls_per_day} onChange={(ev) => set("crawls_per_day", Number(ev.target.value))} data-testid="auftrag-frequenz">{[1, 2, 3, 4].map((n) => <option key={n} value={n}>{n}× täglich{n === 2 ? " (≈ 12 h Abstand)" : ""}</option>)}</select></label>
+        <label>Abrufe je Tag<select className={feld} style={st} value={w.crawls_per_day} onChange={(ev) => set("crawls_per_day", Number(ev.target.value))} data-testid="auftrag-frequenz">{[1, 2, 3, 4].map((n) => <option key={n} value={n}>{n}× täglich{n === 2 ? " (≈ 12 h Abstand)" : n > 2 ? " (gleichmäßig, alle vor 23:30)" : ""}</option>)}</select></label>
         <label>Anzeigename (optional)<input className={feld} style={st} value={w.label} onChange={(ev) => set("label", ev.target.value)} placeholder="automatisch: Marke + Variante" /></label>
       </div>
 
@@ -268,23 +291,32 @@ function AuftragFormular({ katalog, formular, superAdmin, onClose, onGespeichert
       {test && (
         <div className="mt-3 rounded-lg p-3 text-[12px]" style={{ background: "var(--wa-06)" }} data-testid="auftrag-testlauf">
           <div className="text-white font-semibold">Testlauf: {test.anzahl} Fahrzeuge · {test.segment} · {test.sortiert ? "Preis aufsteigend ✓" : "Sortierung NICHT bestätigt"} · EZ {test.alle_ez_ok ? "✓" : "✗"} · km {test.alle_km_ok ? "✓" : "✗"} · {Number(test.usd || 0).toFixed(3)} $ · {test.actor}</div>
-          <table className="w-full mt-1"><thead><tr className="text-left text-zinc-500 text-[11px] uppercase"><th className="pr-2">Fahrzeug</th><th className="pr-2">EZ</th><th className="pr-2 text-right">km</th><th className="pr-2 text-right">Preis</th><th className="pr-2">Motor</th></tr></thead>
-            <tbody>{test.zeilen.map((z, i) => <tr key={i} className="border-t border-white/5 tabular-nums"><td className="pr-2 text-zinc-200">{z.title}</td><td className="pr-2" style={{ color: z.ez_ok ? undefined : "var(--st-rot)" }}>{z.first_registration}</td><td className="pr-2 text-right" style={{ color: z.km_ok ? undefined : "var(--st-rot)" }}>{z.mileage_km?.toLocaleString("de-DE")}</td><td className="pr-2 text-right text-white">{eur(z.price_gross)}</td><td className="pr-2">{z.power_kw ? `${z.power_kw} kW ` : ""}{z.fuel} {z.gearbox}</td></tr>)}</tbody></table>
+          {/* Nr. 65: bestanden = mindestens ein gueltiger Treffer, nichts verworfen */}
+          <div className="text-[12px] mt-0.5" style={{ color: test.bestanden ? "var(--st-gruen)" : "var(--st-amber, #f59e0b)" }} data-testid="auftrag-testlauf-ergebnis">
+            {test.bestanden ? `Bestanden — ${test.gueltig_gesamt} gültige Treffer, nichts verworfen. Aktivieren ist frei.`
+              : `Nicht bestanden — ${test.gueltig_gesamt ?? 0} gültig, ${test.verworfen_gesamt ?? 0} verworfen (Filter). Aktivieren erst nach bestandenem Testlauf.`}
+          </div>
+          <table className="w-full mt-1"><thead><tr className="text-left text-zinc-500 text-[11px] uppercase"><th className="pr-2">Fahrzeug</th><th className="pr-2">EZ</th><th className="pr-2 text-right">km</th><th className="pr-2 text-right">Preis</th><th className="pr-2">Motor</th><th className="pr-2">Filter</th></tr></thead>
+            <tbody>{test.zeilen.map((z, i) => <tr key={i} className="border-t border-white/5 tabular-nums"><td className="pr-2 text-zinc-200">{z.title}</td><td className="pr-2" style={{ color: z.ez_ok ? undefined : "var(--st-rot)" }}>{z.first_registration}</td><td className="pr-2 text-right" style={{ color: z.km_ok ? undefined : "var(--st-rot)" }}>{z.mileage_km?.toLocaleString("de-DE")}</td><td className="pr-2 text-right text-white">{eur(z.price_gross)}</td><td className="pr-2">{z.power_kw ? `${z.power_kw} kW ` : ""}{z.fuel} {z.gearbox}</td><td className="pr-2" style={{ color: z.gueltig === false ? "var(--st-rot)" : undefined }}>{z.gueltig === false ? `verworfen: ${z.grund}` : "gültig"}</td></tr>)}</tbody></table>
           {(test.segmente || []).length > 0 && (
             <div className="mt-2" data-testid="auftrag-testlauf-segmente">
               <div className="text-[11px] text-zinc-400">Alle Segmente ({test.segmente_geprueft ?? test.segmente.length}{test.segmente_gesamt > (test.segmente_geprueft ?? test.segmente.length) ? ` von ${test.segmente_gesamt}` : ""}, je bis zu 2 Treffer) · {test.leer || 0} leer</div>
-              <table className="w-auto mt-1"><thead><tr className="text-left text-zinc-500 text-[11px] uppercase"><th className="pr-3">Segment</th><th className="pr-3 text-right">Treffer</th><th className="pr-3">EZ</th><th className="pr-3">km</th></tr></thead>
-                <tbody>{test.segmente.map((sg) => <tr key={sg.label} className="border-t border-white/5 tabular-nums" style={{ color: sg.anzahl ? undefined : "var(--text-dim)" }}><td className="pr-3">{sg.label}</td><td className="pr-3 text-right">{sg.anzahl}</td><td className="pr-3" style={{ color: sg.ez_ok === false ? "var(--st-rot)" : undefined }}>{sg.ez_ok == null ? "—" : sg.ez_ok ? "✓" : "✗"}</td><td className="pr-3" style={{ color: sg.km_ok === false ? "var(--st-rot)" : undefined }}>{sg.km_ok == null ? "—" : sg.km_ok ? "✓" : "✗"}</td></tr>)}</tbody></table>
+              {/* Nr. 20: je Segment geliefert / gueltig / verworfen (Grund) — derselbe Zeilenfilter wie im Worker */}
+              <table className="w-auto mt-1"><thead><tr className="text-left text-zinc-500 text-[11px] uppercase"><th className="pr-3">Segment</th><th className="pr-3 text-right">geliefert</th><th className="pr-3 text-right">gültig</th><th className="pr-3">verworfen (Grund)</th><th className="pr-3">EZ</th><th className="pr-3">km</th></tr></thead>
+                <tbody>{test.segmente.map((sg) => <tr key={sg.label} className="border-t border-white/5 tabular-nums" style={{ color: sg.anzahl ? undefined : "var(--text-dim)" }}><td className="pr-3">{sg.label}</td><td className="pr-3 text-right">{sg.geliefert ?? sg.anzahl}</td><td className="pr-3 text-right">{sg.gueltig ?? sg.anzahl}</td><td className="pr-3" style={{ color: sg.verworfen ? "var(--st-rot)" : undefined }}>{sg.verworfen ? `${sg.verworfen}${sg.gruende?.length ? ` (${sg.gruende.join("; ")})` : ""}` : "0"}</td><td className="pr-3" style={{ color: sg.ez_ok === false ? "var(--st-rot)" : undefined }}>{sg.ez_ok == null ? "—" : sg.ez_ok ? "✓" : "✗"}</td><td className="pr-3" style={{ color: sg.km_ok === false ? "var(--st-rot)" : undefined }}>{sg.km_ok == null ? "—" : sg.km_ok ? "✓" : "✗"}</td></tr>)}</tbody></table>
             </div>
           )}
-          <div className="mt-1 text-[11px] text-zinc-500">Stand {datumZeit(new Date().toISOString())} · Ein Lauf über alle Segmente des Entwurfs (höchstens 20) mit je 2 Treffern; die Zeilen oben zeigen das erste Segment.</div>
+          <div className="mt-1 text-[11px] text-zinc-500">Stand {datumZeit(new Date().toISOString())} · Ein Lauf über alle Segmente des Entwurfs (höchstens {test.segmente_max || 40}) mit je 2 Treffern; die Zeilen oben zeigen das erste Segment. Der Lauf wird gegen das Marktbudget abgerechnet.</div>
         </div>
       )}
 
       <div className="mt-3 flex flex-wrap gap-2">
         <Button size="sm" variant="outline" onClick={testlauf} disabled={!superAdmin || !!busy || !w.make || !w.model} data-testid="auftrag-testlauf-knopf"><FlaskConical size={13} /> Testlauf (alle Segmente, je 2 Treffer, kostet Budget)</Button>
         <Button size="sm" variant="outline" onClick={() => speichern("paused")} disabled={!superAdmin || !!busy} data-testid="auftrag-speichern">Speichern (pausiert)</Button>
-        <Button size="sm" onClick={() => speichern("active")} disabled={!superAdmin || !!busy} data-testid="auftrag-aktivieren"><Play size={13} /> Aktivieren</Button>
+        {/* Nr. 65: Aktivieren erst nach bestandenem Testlauf fuer diese Definition */}
+        <Button size="sm" onClick={() => speichern("active")} disabled={!superAdmin || !!busy || !testOk} data-testid="auftrag-aktivieren"
+                title={testOk ? "Aktivieren" : "erst Testlauf — Aktivieren geht nur nach einem bestandenen Testlauf für diese Konfiguration"}><Play size={13} /> Aktivieren</Button>
+        {!testOk && <span className="text-[11px] self-center" style={{ color: "var(--text-dim)" }} data-testid="auftrag-aktivieren-hinweis">erst Testlauf</span>}
       </div>
     </Card>
   );

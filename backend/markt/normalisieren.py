@@ -222,6 +222,9 @@ def getriebe_passt(soll: Optional[str], ist: Optional[str]) -> bool:
 
 # mobile.de-Karosseriecodes (Parameter c=) — dieselben wie im Vergleich (mobile_service.CATEGORY_LABELS)
 KAROSSERIE_CODES = ("Limousine", "EstateCar", "OffRoad", "Cabrio", "SportsCar", "SmallCar", "Van")
+# Verkaeuferart: der Auftrag sagt DEALER/FSBO (mobile.de st=), die Zeile DEALER/PRIVATE (normalisiert),
+# der Vergleich "haendler"/"privat" — alles auf DEALER/PRIVATE abgebildet
+VERKAEUFER_CODES = {"DEALER": "DEALER", "HAENDLER": "DEALER", "FSBO": "PRIVATE", "PRIVATE": "PRIVATE", "PRIVAT": "PRIVATE"}
 
 
 def karosserie_code(text: Any) -> Optional[str]:
@@ -325,6 +328,19 @@ def passt_zum_segment(listing: Dict[str, Any], segment: Dict[str, Any], modell: 
         return False, "fehlend: fuel"
     if modell.get("gearbox") and not listing.get("gearbox"):
         return False, "fehlend: gearbox"
+    # Reparaturwelle 5 Nr. 7: Verkaeuferart und Land nachvalidieren, wenn der Auftrag sie setzt und
+    # die Zeile sie traegt (fehlt die Angabe in der Zeile: tolerant — kein Pflichtfeld der Statistik).
+    # PLZ/Radius werden NICHT geprueft: die ersten zwei PLZ-Stellen sagen nichts Verlaessliches
+    # ueber die Entfernung (Radius 50 km um 30159 reicht in 31xxx und 38xxx), und Geodaten je
+    # PLZ gibt es hier nicht — die URL (zipr=) bleibt die einzige Radiusfilterung.
+    if modell.get("seller_type") and listing.get("seller_type"):
+        soll = VERKAEUFER_CODES.get(str(modell["seller_type"]).upper(), str(modell["seller_type"]).upper())
+        ist = VERKAEUFER_CODES.get(str(listing["seller_type"]).upper(), str(listing["seller_type"]).upper())
+        if ist != soll:
+            return False, f"verkaeufer {ist} != {soll}"
+    if modell.get("country") and listing.get("country"):
+        if str(listing["country"]).strip().upper()[:2] != str(modell["country"]).strip().upper()[:2]:
+            return False, f"land {str(listing['country']).upper()[:2]} != {str(modell['country']).upper()[:2]}"
     try:
         from fahrzeug_codes import getriebe_code, kraftstoff_code
     except Exception:  # noqa: BLE001

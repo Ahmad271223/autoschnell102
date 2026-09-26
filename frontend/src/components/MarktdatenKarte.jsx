@@ -19,11 +19,20 @@ export default function MarktdatenKarte({ vehicleId, preis }) {
     let aktiv = true;
     const abbruch = new AbortController();
     api.get(`/market-intelligence/vehicle/${vehicleId}`, { timeout: ZEITLIMIT_MS, signal: abbruch.signal })
-      .then((r) => { if (aktiv && r?.data?.sample_size) setDaten(r.data); })
+      .then((r) => { if (aktiv && (r?.data?.sample_size || r?.data?.kein_segment_grund)) setDaten(r.data); })
       .catch(() => { /* still: keine Marktdaten, keine Karte */ });
     return () => { aktiv = false; abbruch.abort(); };
   }, [vehicleId]);
   if (!daten) return null;
+  if (!daten.sample_size && daten.kein_segment_grund) {
+    // Reparaturwelle 5 Nr. 28: kein exaktes Segment (z. B. Getriebe am Fahrzeug unbekannt) — sagen statt verschwinden
+    return (
+      <div className="apple-surface p-4" data-testid="marktdaten-karte-hinweis">
+        <div className="overline inline-flex items-center gap-1.5"><BarChart3 size={13} /> AutoSchnell Marktdaten</div>
+        <div className="mt-1 text-[12px]" style={{ color: "var(--text-secondary)" }}>{daten.kein_segment_grund}</div>
+      </div>
+    );
+  }
   const dl = DATENLAGE[daten.datenlage] || DATENLAGE.keine;
   const l = daten.listing;
   return (
@@ -40,6 +49,11 @@ export default function MarktdatenKarte({ vehicleId, preis }) {
       {daten.sortierung_unsicher && (
         <div className="mt-2 text-[11px] rounded-lg px-2 py-1" style={{ color: "var(--st-amber)", background: "var(--wa-06)" }} data-testid="marktdaten-sortierung">
           Sortierung des letzten Abrufs unsicher — die Werte sind nicht sicher die günstigsten Angebote.
+        </div>
+      )}
+      {daten.top_n_bewiesen === false && !daten.sortierung_unsicher && (
+        <div className="mt-2 text-[11px] rounded-lg px-2 py-1" style={{ color: "var(--st-amber)", background: "var(--wa-06)" }} data-testid="marktdaten-top-n">
+          Top-N nicht bewiesen — der letzte Abruf kam ohne Positionsnummern (nur monoton sortiert).
         </div>
       )}
       <div className="mt-3 grid grid-cols-3 gap-2 text-[11px]">

@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
-const netz = vi.hoisted(() => ({ posts: [], gets: [], aktiv: true, stats: null, crawlFehler: null }));
+const netz = vi.hoisted(() => ({ posts: [], gets: [], aktiv: true, stats: null, crawlFehler: null, ohneBudget: false, topN: null }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() } }));
 vi.mock("recharts", () => {
   const Leer = ({ children }) => h("div", { "data-chart": "1" }, children);
@@ -49,7 +49,11 @@ vi.mock("@/lib/api", () => ({
           listings: 80, min_price: 21000, median_top20_mittel: 24000, trend_7d_pct: null, trend_30d_pct: null, crawl_status: "ungueltig" }] } };
       if (url === "/admin/market/status") return { data: { aktiv: netz.aktiv, aktiv_quelle: "env", segmente: 16, modelle: 1, listings: 312, snapshots: 4000, token_vorhanden: true,
         actor: "sourabhbgp~mobile-de-scraper", budget: { _id: "2026-10", budget_usd: 450, used_usd: 12.5, reserved_usd: 0, rows: 4000, runs: 200 },
-        takt: { intervall_tage: 3, segmente_je_tag: 6, buendel: 10, kosten_je_tag_usd: 0.38, kosten_je_monat_usd: 11.7, automatisch: true },
+        // Reparaturwelle 5 Nr. 30/31/38 + Oberflaeche: Restbudget/Resttage, Entfernungskosten, Preise fuer die Kostenformel, "ohne Budget pausiert"
+        takt: { intervall_tage: 3, segmente_je_tag: 6, buendel: 10, kosten_je_tag_usd: 0.38, kosten_je_monat_usd: 11.7, automatisch: true,
+                restbudget_usd: 437.5, rest_tage: 5, entfernung_je_tag_usd: 0.29, start_usd: 0.005, row_usd: 0.0007, actor: "scrapesmith~mobile-de-scraper",
+                puffer_faktor: 0.3, puffer_max: 10, ohne_budget: netz.ohneBudget, status: netz.ohneBudget ? "ohne Budget pausiert" : "ok" },
+        crawls_je_tag_standard: 2,
         monitoring: { tag: "2026-10-01", geplant: 6, erfolgreich: 6, fehlgeschlagen: 0, wartend: 0, laufend: 0, rows_heute: 120, rows_monat: 4000,
                       kosten_heute_usd: 0.11, kosten_monat_usd: 12.5, budget_uebrig_usd: 437.5, budget_anteil_pct: 2.8, mittlere_laufzeit_s: 9.4,
                       letzter_erfolg: { finished_at: "2026-10-01T05:10:00Z", segment_id: "bmw-320d:2019:50001-85000" },
@@ -59,17 +63,20 @@ vi.mock("@/lib/api", () => ({
       if (url === "/admin/market/models/bmw-320d") return { data: { id: "bmw-320d", label: "BMW 320d", fuel: "DIESEL", make_id: "3500", model_id: "10", version: 2, segmente: [{ ...SEG, version: 2 }, SEG2, SEG_ALT] } };
       if (url.includes("/listings/449438530/history")) return { data: { listing: { title: "BMW 320d Touring", active_state: "seen", mileage_km: 78000,
         first_registration: "03/2020", postal_code: "30159", city: "Hannover", price_history: [{ at: "2026-09-13T04:00:00Z", price: 19400 }, { at: "2026-10-01T04:00:00Z", price: 18900 }] },
-        snapshots: [{ date: "2026-09-13", segment_id: SEG.id, price: 19400, rank_in_sample: 5 }], hinweis_zustand: "" } };
+        snapshots: [{ date: "2026-09-13", segment_id: SEG.id, price: 19400, rank_in_sample: 5 }], hinweis_zustand: "", gekuerzt: true } };   // Nr. 61
       if (url.endsWith("/summary")) return { data: { segment: SEG, stats: netz.stats || STATS, letzter_job: { status: "completed" },
-        qualitaet: { daten_seit: "2026-09-01", tage_beobachtet: 31, tage_mit_treffern: 29, abdeckung_pct: 96.9, erfolgreiche_crawls: 60, erwartete_crawls: 62, sample_size: 20, datenlage: "gut", crawls_per_day: 2 } } };
+        qualitaet: { daten_seit: "2026-09-01", tage_beobachtet: 31, tage_mit_treffern: 29, abdeckung_pct: 96.9, erfolgreiche_crawls: 60, erwartete_crawls: 62, sample_size: 20, datenlage: "gut", crawls_per_day: 2,
+                     laeufe_nur_monoton: 0, top_n_bewiesen: !netz.topN, top_n_hinweis: netz.topN } } };
+      // Nr. 58: ein Tag mit 0 Treffern kommt mit (Luecke statt Sprung)
       if (url.endsWith("/history")) return { data: { reihe: [
-        { date: "2026-09-30", sample_size: 20, min: 19100, median: 20500, avg: 20600, max: 21800, p25: 19700, p75: 21100, change_eur: null, change_pct: null },
+        { date: "2026-09-29", sample_size: 20, min: 19100, median: 20500, avg: 20600, max: 21800, p25: 19700, p75: 21100, change_eur: null, change_pct: null },
+        { date: "2026-09-30", sample_size: 0, min: null, median: null, avg: null, max: null, p25: null, p75: null, change_eur: null, change_pct: null, kein_angebot: true },
         { date: "2026-10-01", sample_size: 20, min: 18900, median: 20250, avg: 20410, max: 21700, p25: 19600, p75: 21000, change_eur: -250, change_pct: -1.22,
           laeufe: [{ at: "2026-10-01T04:00:00Z", tag: "2026-10-01", median: 20300 }, { at: "2026-10-01T16:00:00Z", tag: "2026-10-01#2", median: 20250 }] }],
         wochen: [{ woche: "2026-W40", median: 20375, tage: 2 }],
         auswertung: { veraenderung_eur: -250, veraenderung_pct: -1.22, groesster_rueckgang: { date: "2026-10-01", change_eur: -250 }, groesster_anstieg: null,
-                      tage_fallend: 1, tage_steigend: 0, tage_unveraendert: 0, hoechster_median: 20500, niedrigster_median: 20250, tage: 2 } } };
-      if (url.endsWith("/listings")) return { data: { date: "2026-10-01", listings: [
+                      tage_fallend: 1, tage_steigend: 0, tage_unveraendert: 0, hoechster_median: 20500, niedrigster_median: 20250, tage: 3, tage_ohne_angebot: 1 } } };
+      if (url.endsWith("/listings")) return { data: { date: "2026-10-01", lauf_tag: "2026-10-01#2", top_n_bewiesen: true, listings: [
         { listing_id: "449438530", title: "BMW 320d Touring", price_today: 18900, current_price: 18900, mileage_km: 78000, first_registration: "03/2020",
           power_kw: 140, fuel: "Diesel", gearbox: "Automatik", postal_code: "30159", city: "Hannover", seller_type: "DEALER", price_rating_today: "GOOD_PRICE",
           mobile_created_at: "2026-09-05T11:46:02.000Z", first_seen_at: "2026-09-13T04:00:00+00:00", change_since_first_eur: -500, rank_today: 1, rank_yesterday: 3,
@@ -101,7 +108,7 @@ async function starten(pfad) {
   await warten();
 }
 async function klick(t) { const k = el(t); if (!k) throw new Error(`nicht gefunden: ${t}`); await act(async () => { k.click(); }); await warten(); }
-beforeEach(() => { netz.posts.length = 0; netz.gets.length = 0; netz.aktiv = true; netz.stats = null; netz.crawlFehler = null; });
+beforeEach(() => { netz.posts.length = 0; netz.gets.length = 0; netz.aktiv = true; netz.stats = null; netz.crawlFehler = null; netz.ohneBudget = false; netz.topN = null; });
 afterEach(async () => { if (wurzel) await act(async () => { wurzel.unmount(); }); wurzel = null; behaelter?.remove(); });
 
 describe("Admin Marktanalyse", () => {
@@ -129,14 +136,37 @@ describe("Admin Marktanalyse", () => {
     expect(netz.posts[0]).toEqual({ url: "/admin/market/models/vw-golf-20tdi/enabled", body: { enabled: true } });
     await klick("markt-plan");
     expect(netz.posts[1].url).toBe("/admin/market/plan");
+    // Reparaturwelle 5 Nr. 31/38: Taktung sagt "an Crawl-Tagen 2x", Restbudget fuer Resttage, Entfernungskosten
+    expect(el("markt-taktung").textContent).toContain("an Crawl-Tagen 2×; jedes Segment alle 3 Tag(e)");
+    expect(el("markt-taktung").textContent).toContain("Restbudget 437.50 $ für 5 Tage");
+    expect(el("markt-taktung").textContent).toContain("Entfernungsprüfung bis 0.29 $/Tag");
     await klick("markt-konfig-oeffnen");
     expect(el("markt-konfig-km").value).toBe("10000-30000");
     expect(el("markt-konfig-ez").value).toBe("2019-2021");
+    // Oberflaeche: Kostenformel aus status.takt (nicht mehr hart 0,004 + 0,003), Hinweis "nur Vorbelegung", Knopf "anwenden"
+    expect(el("markt-konfig-formel").textContent).toContain("0,005 $ + Zeilen × 0,0007 $");
+    expect(el("markt-konfig-formel").textContent).not.toContain("0,004");
+    expect(el("markt-konfig-formel").textContent).toContain("+30 %, höchstens +10");
+    expect(el("markt-konfig-hinweis").textContent).toContain("nur die Vorbelegung für NEUE Aufträge");
     await klick("markt-konfig-speichern");
     const put = netz.posts.find((p) => p.url === "/admin/market/config");
     expect(put.body.km_buckets).toEqual([{ min_km: 10000, max_km: 30000 }]);
     expect(put.body.ez_buckets).toEqual([{ year_from: 2019, year_to: 2021 }]);
     expect(put.body.budget_usd).toBe(450);
+    const frage = vi.spyOn(window, "confirm").mockReturnValue(false);
+    await klick("markt-konfig-anwenden");
+    expect(netz.posts.some((p) => p.url === "/admin/market/config/anwenden")).toBe(false);
+    frage.mockReturnValue(true);
+    await klick("markt-konfig-anwenden");
+    expect(netz.posts.some((p) => p.url === "/admin/market/config/anwenden")).toBe(true);
+    frage.mockRestore();
+  });
+
+  it("Taktung: Budget 0 -> 'ohne Budget pausiert' (Reparaturwelle 5 Nr. 30)", async () => {
+    netz.ohneBudget = true;
+    await starten("/admin/markt");
+    expect(el("markt-taktung").textContent).toContain("ohne Budget pausiert");
+    expect(el("markt-taktung").textContent).toContain("keine Planung, keine Jobs");
   });
 
   it("Crawler-Knopf: aus -> Rückfrage mit Kosten -> POST aktiv:true; an -> POST aktiv:false ohne Rückfrage", async () => {
@@ -195,6 +225,11 @@ describe("Admin Marktanalyse", () => {
     // Review 26.09. Nr. 17: zwei Abrufe am selben Tag -> kleiner Hinweis, nur ein Tageseintrag
     expect(el("markt-laeufe-2026-10-01").textContent).toBe("2 Läufe");
     expect(el("markt-laeufe-2026-09-30")).toBeNull();
+    // Welle 5 Nr. 58: Tag ohne Angebot als Marker in der Tabelle und Hinweis am Diagramm
+    expect(el("markt-kein-angebot-2026-09-30").textContent).toBe("kein Angebot");
+    expect(el("markt-kein-angebot-2026-10-01")).toBeNull();
+    expect(el("markt-verlauf").textContent).toContain("Lücken = Tage ohne Angebot (1)");
+    expect(el("markt-listings").textContent).toContain("letzter Lauf 2");
     // Zeitraum wechseln -> neue Verlaufsabfrage mit range
     await klick("markt-bereich-90d");
     expect(netz.gets.filter((u) => u.endsWith("/history")).length).toBeGreaterThanOrEqual(2);
@@ -211,6 +246,7 @@ describe("Admin Marktanalyse", () => {
     expect(el("markt-listing-historie")).toBeTruthy();
     expect(el("markt-preisverlauf").textContent).toContain("19.400 €");
     expect(el("markt-preisverlauf").textContent).toContain("18.900 €");
+    expect(el("markt-historie-gekuerzt").textContent).toContain("gekürzt");          // Welle 5 Nr. 61
     // Crawl jetzt (Super-Admin)
     await klick("markt-crawl-jetzt");
     expect(netz.posts.some((p) => p.url.endsWith("/crawl-now"))).toBe(true);
@@ -223,7 +259,9 @@ describe("Admin Marktanalyse", () => {
     expect(el("markt-trend-7d").textContent).toContain("gleiche Autos: −210 € (-1,1 %) · 14 Autos");
     expect(el("markt-trend-30d").textContent).toContain("gleiche Autos: —");
     expect(el("markt-qualitaet").textContent).toContain("31 Tage beobachtet (29 mit Treffern)");
-    expect(el("markt-qualitaet").textContent).toContain("Abdeckung 96,9 %");
+    expect(el("markt-qualitaet").textContent).toContain("Abdeckung 96,9 % der erwarteten Läufe");
+    expect(el("markt-qualitaet").textContent).toContain("60 von 62 erwarteten Crawls gültig");
+    expect(el("markt-top-n-hinweis")).toBeNull();
     // Nr. 52: inaktives Segment -> 400 mit Klartext -> toast.error mit dem Servertext
     netz.crawlFehler = "Segment inaktiv — der Suchauftrag ist pausiert";
     await klick("markt-crawl-jetzt");
@@ -231,9 +269,12 @@ describe("Admin Marktanalyse", () => {
     await act(async () => { wurzel.unmount(); }); wurzel = null; behaelter?.remove();
     // Nr. 43/44: kein Datensatz in der Toleranz -> trend null -> "—" statt Zahl
     netz.stats = { ...STATS, trend_7d_eur: null, trend_7d_pct: null, trend_7d_basis_date: null, trend_7d_bestand_eur: null, anzahl_gemeinsam: 0 };
+    // Welle 5 Nr. 1: Top-N nicht bewiesen -> Hinweis in der Datenqualitaet
+    netz.topN = "Top-N nicht bewiesen (Scraper ohne Positionsnummer — nur monoton sortiert)";
     await starten("/admin/markt/bmw-320d");
     const t7 = el("markt-trend-7d").textContent;
     expect(t7).toContain("—");
     expect(t7).not.toMatch(/€.*€/);
+    expect(el("markt-top-n-hinweis").textContent).toContain("Top-N nicht bewiesen");
   });
 });

@@ -75,6 +75,18 @@ describe("MarktdatenKarte", () => {
     expect(el("marktdaten-sortierung")).toBeNull();
   });
 
+  it("sagt 'kein exaktes Segment' bei unbekanntem Getriebe und 'Top-N nicht bewiesen' (Reparaturwelle 5 Nr. 28/1)", async () => {
+    api.get.mockResolvedValue({ data: { sample_size: 0, kein_segment_grund: "Getriebe am Fahrzeug unbekannt — kein exaktes Segment" } });
+    await starten({ vehicleId: "v1", preis: 19400 });
+    expect(el("marktdaten-karte")).toBeNull();
+    expect(el("marktdaten-karte-hinweis").textContent).toContain("Getriebe am Fahrzeug unbekannt — kein exaktes Segment");
+    await act(async () => { wurzel.unmount(); }); wurzel = null; behaelter?.remove();
+    api.get.mockResolvedValue({ data: { ...DATEN, top_n_bewiesen: false } });
+    await starten({ vehicleId: "v2", preis: 19400 });
+    expect(el("marktdaten-top-n").textContent).toContain("Top-N nicht bewiesen");
+    expect(el("marktdaten-karte").textContent).toContain("18.900 €");
+  });
+
   it("bleibt bei 404, Timeout oder leeren Daten unsichtbar", async () => {
     const e = new Error("Not found"); e.response = { status: 404 };
     api.get.mockRejectedValue(e);

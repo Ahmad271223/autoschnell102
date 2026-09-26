@@ -1024,6 +1024,14 @@ async def markt_indizes(db) -> dict:
     und markt.jobs crawlt nicht. Liefert {"ok", "fehler": [refs], "kritisch": [refs]}."""
     from betrieb import alarm, alarm_schliessen
     fehler: list = []
+    # Welle 5 Nr. 44: Chancen-Dedupe je Listing/Typ/Tag/SEGMENT — der alte Index ohne Segment
+    # (markt_chance_je_tag) wird ersetzt, sonst kollidieren ueberlappende Auftraege
+    try:
+        alt = await db.market_opportunities.index_information()
+        if "markt_chance_je_tag" in alt and [k for k, _ in alt["markt_chance_je_tag"]["key"]] != ["listing_id", "typ", "date", "segment_id"]:
+            await db.market_opportunities.drop_index("markt_chance_je_tag")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("ensure_indexes: alter Chancen-Index nicht entfernt: %s", exc)
     for sammlung, schluessel, name in (
             ("market_models", "id", "markt_modell_id"),
             ("market_segments", "id", "markt_segment_id"),
@@ -1032,7 +1040,7 @@ async def markt_indizes(db) -> dict:
             ("market_segment_daily_stats", [("segment_id", 1), ("date", -1)], "markt_tagesstat"),
             ("market_crawl_jobs", [("segment_id", 1), ("tag", 1)], "markt_job_je_tag"),
             ("market_crawl_jobs", "id", "markt_job_id"),
-            ("market_opportunities", [("listing_id", 1), ("typ", 1), ("date", 1)], "markt_chance_je_tag")):
+            ("market_opportunities", [("listing_id", 1), ("typ", 1), ("date", 1), ("segment_id", 1)], "markt_chance_je_tag")):
         try:
             ok = await unique_anlegen(db[sammlung], schluessel, name=name, weich=True)
         except Exception as exc:  # noqa: BLE001
@@ -1048,6 +1056,8 @@ async def markt_indizes(db) -> dict:
             # Nr. 27: Multikey-Index fuer "nicht mehr im Sample" (speicher.verarbeiten) und Nr. 14
             ("market_listings", [("segment_ids", 1), ("active_state", 1), ("last_seen_tag", 1)], "markt_listing_segmente_zustand"),
             ("market_listings", "model_id", "markt_listing_modell"),
+            # Welle 5 Nr. 43: Zaehlung je Auftrag ueber model_ids[] (Inserat in mehreren Auftraegen)
+            ("market_listings", "model_ids", "markt_listing_modelle"),
             ("market_listing_snapshots", [("segment_id", 1), ("date", -1)], "markt_snapshot_segment_tag"),
             ("market_listing_snapshots", [("listing_id", 1), ("date", 1)], "markt_snapshot_listing"),
             ("market_crawl_jobs", [("status", 1), ("scheduled_at", 1)], "markt_job_status_zeit"),

@@ -142,12 +142,13 @@ async def admin_market_testlauf(body: AuftragIn, n: int = 5, admin=Depends(curre
     if not konfig.token():
         raise HTTPException(400, "APIFY_TOKEN fehlt")
     try:
-        erg = await auftraege.testlauf(body.model_dump(), n=n)
+        erg = await auftraege.testlauf(body.model_dump(), n=n, db=db)      # Welle 5 Nr. 18: gegen das Marktbudget
     except auftraege.Ungueltig as ex:
         raise HTTPException(400, str(ex))
     except Exception as ex:  # noqa: BLE001
         raise HTTPException(502, f"Testlauf gescheitert: {str(ex)[:200]}")
-    await log_activity_sicher("", admin["id"], "admin.markt.testlauf", meta={"url": erg.get("url"), "anzahl": erg.get("anzahl")})
+    await log_activity_sicher("", admin["id"], "admin.markt.testlauf", meta={"url": erg.get("url"), "anzahl": erg.get("anzahl"),
+                                                                              "bestanden": erg.get("bestanden"), "usd": erg.get("usd")})
     return erg
 
 
@@ -228,6 +229,21 @@ async def admin_market_config(body: KonfigIn, admin=Depends(current_super_admin)
         await budget.budget_setzen(db, body.budget_usd)
     erg = await segmente.synchronisieren(db)
     await log_activity_sicher("", admin["id"], "admin.markt.konfig", meta=body.model_dump(exclude_none=True))
+    return {"ok": True, **erg, "takt": await jobs.intervall(db)}
+
+
+@router.post("/admin/market/config/anwenden")
+async def admin_market_config_anwenden(admin=Depends(current_super_admin)):
+    """Welle 5 (Oberflaeche): die zentralen Vorbelegungen (km-Bereiche, EZ-Jahre, Zeilen) auf ALLE
+    aktiven Suchauftraege uebertragen — bestehende Auftraege behalten sonst ihre eigenen Werte."""
+    km = await segmente.km_buckets(db)
+    ez = sorted({j for b in (await segmente.ez_buckets(db)) if b.get("year_from")
+                 for j in range(int(b["year_from"]), int(b.get("year_to") or b["year_from"]) + 1)})
+    rows = (await segmente.einstellungen(db))["rows_je_segment"]
+    if not ez:
+        raise HTTPException(400, "Zentrale EZ-Bereiche sind leer — Aufträge brauchen mindestens ein EZ-Jahr")
+    erg = await auftraege.konfig_anwenden(db, km_buckets=km, ez_years=ez, rows=rows)
+    await log_activity_sicher("", admin["id"], "admin.markt.konfig.anwenden", meta={"geaendert": erg["geaendert"], "fehler": len(erg["fehler"])})
     return {"ok": True, **erg, "takt": await jobs.intervall(db)}
 
 

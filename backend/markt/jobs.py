@@ -140,7 +140,9 @@ async def intervall(db) -> Dict[str, Any]:
             "budget_usd": budget_usd, "budget_monat": doc.get("_id"), "restbudget_usd": round(rest, 2), "rest_tage": rest_tage,
             "verbraucht_usd": round(float(doc.get("used_usd") or 0), 2), "reserviert_usd": round(float(doc.get("reserved_usd") or 0), 2),
             "ohne_budget": ohne_budget, "status": "ohne Budget pausiert" if ohne_budget else "ok",
-            "automatisch": fest == 0}
+            # fuer die Kostenformel in der Oberflaeche (nie mehr hart "0,004 $ + Zeilen x 0,003 $")
+            "start_usd": konfig.preise_je_actor(konfig.actor())[0], "row_usd": konfig.preise_je_actor(konfig.actor())[1],
+            "actor": konfig.actor(), "automatisch": fest == 0}
 
 
 # ---------------------------------------------------------------- Tagesplan
