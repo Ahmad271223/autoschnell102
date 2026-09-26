@@ -5,7 +5,8 @@
   * Chancen (Deal Radar) mit Filtern
   * Admin-Marktanalyse: Modelle, Modell-Detail, Segment-Zusammenfassung,
     Verlauf aus Tagesaggregaten (nie aus Snapshots), Listings, Listing-Verlauf
-Alle Zahlen heissen bewusst "Top-20" / "guenstiges Segment" — kein Marktmedian."""
+Alle Zahlen heissen bewusst "die N guenstigsten" / "guenstiges Segment" — kein Marktmedian
+(Welle 6 Nr. 137: N = Zeilen des Suchauftrags, sample_limit; nie fest 20)."""
 from __future__ import annotations
 
 import re
@@ -217,15 +218,24 @@ async def segment_fuer_fahrzeug(db, v: Dict[str, Any], *, gruende: Optional[List
     return erstes
 
 
-def _listing_kurz(l: Dict[str, Any], heute_snap: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def _listing_kurz(l: Dict[str, Any], heute_snap: Optional[Dict[str, Any]], segment_id: Optional[str] = None,
+                  tag: Optional[str] = None) -> Dict[str, Any]:
     first = float(l.get("first_price") or 0) or None
     cur = float(l.get("current_price") or 0) or None
+    # Welle 6 Nr. 139/145: Zustand des Inserats IN DIESEM SEGMENT (erstmals/zuletzt gesehen, erster Rang,
+    # im letzten Lauf dabei) — 'neu in diesem Segment', wenn das erste Sehen im Segment am Stichtag liegt
+    seg = ((l.get("segmente") or {}).get(segment_id) or {}) if segment_id else {}
+    seg_first = seg.get("first_seen_at")
     return {"listing_id": l.get("listing_id"), "first_seen_at": l.get("first_seen_at"), "first_price": first,
             "current_price": cur, "change_since_first_eur": round(cur - first, 2) if first and cur else None,
             "price_reductions": l.get("price_reductions") or 0, "price_changes": l.get("price_changes") or 0,
             "mobile_created_at": l.get("mobile_created_at"), "active_state": l.get("active_state"),
             "last_seen_at": l.get("last_seen_at"), "rank_today": (heute_snap or {}).get("rank_in_sample"),
-            "price_history": (l.get("price_history") or [])[-30:]}
+            "price_history": (l.get("price_history") or [])[-30:],
+            "segment_first_seen_at": seg_first, "segment_last_seen_at": seg.get("last_seen_at"),
+            "segment_first_rank": seg.get("first_rank"), "segment_first_price": seg.get("first_price"),
+            "in_letztem_lauf": seg.get("in_letztem_lauf"),
+            "neu_im_segment": bool(seg_first and tag and konfig.heute_tag(datetime.fromisoformat(seg_first)) == tag) if seg_first else False}
 
 
 async def karte(db, v: Dict[str, Any], listing_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -244,6 +254,10 @@ async def karte(db, v: Dict[str, Any], listing_id: Optional[str] = None) -> Opti
     raus: Dict[str, Any] = {
         "segment_id": seg["id"], "label": seg.get("label"), "km_label": seg.get("km_label"), "ez_label": seg.get("ez_label"),
         "sample_size": stat.get("sample_size"), "min_price": stat.get("min_price"),
+        # Welle 6 Nr. 137/138: neutrale Namen (die Stichprobe hat N Zeilen je Auftrag, nicht 20) — alte parallel
+        "sample_limit": int(seg.get("max_items") or 0) or None,
+        "median_sample_price": stat.get("median_price"), "avg_sample_price": stat.get("avg_price"),
+        "max_sample_price": stat.get("max_price"),
         "median_top20_price": stat.get("median_price"), "avg_top20_price": stat.get("avg_price"),
         "max_top20_price": stat.get("max_price"), "p25_price": stat.get("p25_price"), "p75_price": stat.get("p75_price"),
         "trend_7d_eur": stat.get("trend_7d_eur"), "trend_7d_pct": stat.get("trend_7d_pct"),
@@ -269,40 +283,59 @@ async def karte(db, v: Dict[str, Any], listing_id: Optional[str] = None) -> Opti
         if l:
             snap = await db[SNAPSHOTS].find_one({"listing_id": str(listing_id), "segment_id": seg["id"], "date": stat.get("date")},
                                                 {"_id": 0, "rank_in_sample": 1})
-            raus["listing"] = _listing_kurz(l, snap)
+            raus["listing"] = _listing_kurz(l, snap, seg["id"], stat.get("date"))
     preis = v.get("list_price")
     try:
         preis = float(preis) if preis not in (None, "") else None
     except (TypeError, ValueError):
         preis = None
-    if preis and raus["median_top20_price"]:
-        raus["preis_vs_median_eur"] = round(preis - float(raus["median_top20_price"]), 2)
-        raus["preis_vs_median_pct"] = round((preis - float(raus["median_top20_price"])) / float(raus["median_top20_price"]) * 100, 1)
-        raus["unter_top20_min"] = preis < float(raus["min_price"] or 0)
+    # Nr. 146: nur Rueckfall — die Karte rechnet die Differenz selbst aus dem Preis, den der Vergleich kennt
+    if preis and raus["median_sample_price"]:
+        raus["preis_vs_median_eur"] = round(preis - float(raus["median_sample_price"]), 2)
+        raus["preis_vs_median_pct"] = round((preis - float(raus["median_sample_price"])) / float(raus["median_sample_price"]) * 100, 1)
+        raus["unter_sample_min"] = preis < float(raus["min_price"] or 0)
+        raus["unter_top20_min"] = raus["unter_sample_min"]
     return raus
 
 
 # ---------------------------------------------------------------- Chancen
 async def chancen(db, *, typ: Optional[str] = None, model_id: Optional[str] = None, segment_id: Optional[str] = None,
                   km_min: Optional[int] = None, km_max: Optional[int] = None, tage: int = 7, limit: int = 100) -> List[Dict[str, Any]]:
+    """Welle 6 Nr. 134: segment_id UND km-Filter werden geschnitten (vorher ueberschrieb der km-Filter das
+    Segment); Nr. 135: die Listing-Zustaende kommen mit EINER Abfrage ($in); Nr. 136: jede Chance sagt,
+    ob ihr Preis noch gilt (still_valid) und wie gross der Vorteil heute ist (current_advantage)."""
     seit = (konfig.jetzt() - timedelta(days=max(1, min(int(tage), 90)))).isoformat()
     filt: Dict[str, Any] = {"created_at": {"$gte": seit}}
     if typ:
         filt["typ"] = typ if not typ.startswith("neu_top") else {"$regex": "^neu_top"}
     if model_id:
         filt["model_id"] = model_id
-    if segment_id:
-        filt["segment_id"] = segment_id
     if km_min is not None or km_max is not None:
         segs = await db[SEGMENTE].find({"min_km": {"$gte": int(km_min or 0)}, "max_km": {"$lte": int(km_max or 10**7)}},
                                        {"_id": 0, "id": 1}).to_list(5000)
-        filt["segment_id"] = {"$in": [s["id"] for s in segs]}
+        erlaubt = [s["id"] for s in segs]
+        filt["segment_id"] = {"$in": [x for x in erlaubt if x == segment_id]} if segment_id else {"$in": erlaubt}
+    elif segment_id:
+        filt["segment_id"] = segment_id
     raus = await db[CHANCEN].find(filt, {"_id": 0}).sort("created_at", -1).to_list(max(1, min(int(limit), 500)))
+    ids = sorted({str(c.get("listing_id")) for c in raus if c.get("listing_id")})
+    zustand: Dict[str, Dict[str, Any]] = {}
+    if ids:
+        async for l in db[LISTINGS].find({"source": konfig.QUELLE, "listing_id": {"$in": ids}},
+                                         {"_id": 0, "listing_id": 1, "active_state": 1, "current_price": 1}):
+            zustand[str(l["listing_id"])] = l
     for c in raus:
-        l = await db[LISTINGS].find_one({"source": c.get("source") or konfig.QUELLE, "listing_id": c.get("listing_id")},
-                                        {"_id": 0, "active_state": 1, "current_price": 1})
+        l = zustand.get(str(c.get("listing_id")))
         c["active_state"] = (l or {}).get("active_state")
-        c["current_price"] = (l or {}).get("current_price")
+        cur = (l or {}).get("current_price")
+        c["current_price"] = cur
+        erkannt = c.get("detected_price", c.get("price"))
+        c.setdefault("detected_price", erkannt)
+        referenz = c.get("referenz_eur")
+        c.setdefault("detected_advantage", round(float(referenz) - float(erkannt), 2) if (referenz is not None and erkannt is not None) else None)
+        c["current_advantage"] = (round(float(referenz) - float(cur), 2) if (referenz is not None and cur is not None) else None)
+        c["still_valid"] = (cur is not None and erkannt is not None and float(cur) == float(erkannt)
+                            and c.get("active_state") != "confirmed_removed")
     return raus
 
 
@@ -334,15 +367,19 @@ async def modelle_uebersicht(db, *, mit_archiv: bool = False) -> List[Dict[str, 
         st = [stats[s["id"]] for s in aktive if s["id"] in stats and stats[s["id"]].get("sample_size")]
         mins = [float(s["min_price"]) for s in st if s.get("min_price") is not None]
         meds = [float(s["median_price"]) for s in st if s.get("median_price") is not None]
-        letzte = max((s.get("last_success_at") or "" for s in eigene), default="") or None
-        # Welle 5 Nr. 43: ein Inserat kann in mehreren Auftraegen stehen (model_ids[]) — beide Felder zaehlen
-        anzahl = await db[LISTINGS].count_documents({"$or": [{"model_id": m["id"]}, {"model_ids": m["id"]}]})
+        # Welle 6 Nr. 128/129/140: letzter Crawl und Listings NUR aus der aktuellen Fassung (aktive Segmente);
+        # die Gesamtzahl ueber alle Fassungen (model_id/model_ids, Welle 5 Nr. 43) getrennt als 'historisch'
+        letzte = max((s.get("last_success_at") or "" for s in aktive), default="") or None
+        aktive_ids = [s["id"] for s in aktive]
+        anzahl = await db[LISTINGS].count_documents({"segment_ids": {"$in": aktive_ids}}) if aktive_ids else 0
+        historisch = await db[LISTINGS].count_documents({"$or": [{"model_id": m["id"]}, {"model_ids": m["id"]}]})
         raus.append({**m, "status": m.get("status") or ("active" if m.get("enabled") else "paused"),
                      "prognose": auftraege.prognose_modell(m), "monatsverbrauch_usd": verbrauch.get(m["id"], 0.0),
                      "segmente_aktiv": len(aktive), "segmente_mit_daten": len(st),
-                     "last_success_at": letzte, "listings": anzahl,
+                     "last_success_at": letzte, "listings": anzahl, "listings_historisch": historisch,
                      "min_price": min(mins) if mins else None,
                      "median_top20_mittel": round(statistics.median(meds), 2) if meds else None,
+                     "median_sample_mittel": round(statistics.median(meds), 2) if meds else None,
                      # Welle 5 Nr. 60: Modell-Trend nach Sample-Groesse gewichtet (ein 3er-Segment zieht
                      # nicht so stark wie ein 20er)
                      "trend_7d_pct": _gewichtet(st, "trend_7d_pct"), "trend_30d_pct": _gewichtet(st, "trend_30d_pct"),
@@ -414,7 +451,12 @@ async def segment_zusammenfassung(db, segment_id: str) -> Optional[Dict[str, Any
                  "crawls_per_day": k, "top_n_bewiesen": top_n,
                  "top_n_hinweis": None if top_n else "Top-N nicht bewiesen (Scraper ohne Positionsnummer — nur monoton sortiert)",
                  "last_empty_at": s.get("last_empty_at")}
-    return {"segment": s, "modell": m, "stats": st, "letzter_job": letzter_job, "qualitaet": qualitaet, "hinweis": HINWEIS}
+    # Welle 6 Nr. 123/124: eine frühere Fassung zeigt IHRE Definition (Schnappschuss am Segment), nicht den
+    # heutigen Auftrag — historisch = die Fassung des Segments ist nicht mehr die des Auftrags
+    historisch = bool(m) and int(s.get("version") or 1) != segmente.modell_version(m)
+    fassung = s.get("definition") or (segmente.definition_schnappschuss(m) if (m and not historisch) else None)
+    return {"segment": s, "modell": m, "stats": st, "letzter_job": letzter_job, "qualitaet": qualitaet, "hinweis": HINWEIS,
+            "historisch": historisch, "fassung": fassung, "fassung_version": int(s.get("version") or 1)}
 
 
 _BEREICHE = {"7d": 7, "30d": 30, "90d": 90, "6m": 183, "1y": 366, "alle": 36500}
@@ -495,7 +537,7 @@ async def segment_listings(db, segment_id: str) -> Dict[str, Any]:
         l = await db[LISTINGS].find_one({"source": s.get("source") or konfig.QUELLE, "listing_id": lid}, {"_id": 0, "price_history": 0})
         if not l:
             continue
-        raus.append({**l, **_listing_kurz(l, s), "price_today": s.get("price"), "rank_today": rang,
+        raus.append({**l, **_listing_kurz(l, s, segment_id, letzte["date"]), "price_today": s.get("price"), "rank_today": rang,
                      "rank_yesterday": s.get("rank_yesterday"), "price_change_eur": s.get("price_change_eur"),
                      "price_change_pct": s.get("price_change_pct"), "price_rating_today": s.get("price_rating"),
                      "wiederkehrer": bool(s.get("wiederkehrer"))})

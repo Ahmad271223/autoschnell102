@@ -2,8 +2,10 @@
  * Market Intelligence (25.09.2026) — MarktdatenKarte im Vergleich:
  *  - laedt getrennt per GET mit kurzem Zeitlimit, NACH dem Vergleich
  *  - 404 / Timeout / leere Antwort: keine Karte, kein Fehler, kein Toast
- *  - mit Daten: "20 guenstigste Vergleichsangebote", Top-20-Median, Trend,
+ *  - mit Daten: "N guenstigste Vergleichsangebote", Median der N guenstigsten, Trend,
  *    Stichprobengroesse und Datenstand, nie das Wort "Marktmedian" als Wert
+ *  - Reparaturwelle 6 Nr. 137/146: neutrale Feldnamen (median_sample_price), N aus den Daten,
+ *    Differenz zum Median aus dem uebergebenen Preis gerechnet
  */
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
@@ -18,11 +20,12 @@ const { default: MarktdatenKarte } = await import("./MarktdatenKarte");
 
 const DATEN = {
   segment_id: "bmw-320d:55001-85000:2019-2021", label: "BMW 320d", km_label: "55–85k km", ez_label: "EZ 2019–2021",
-  sample_size: 20, min_price: 18900, median_top20_price: 20250, avg_top20_price: 20410, max_top20_price: 21700,
+  sample_size: 20, sample_limit: 20, min_price: 18900, median_sample_price: 20250, avg_sample_price: 20410, max_sample_price: 21700,
   p25_price: 19600, p75_price: 21000, trend_7d_eur: -300, trend_7d_pct: -1.5, trend_30d_eur: -850, trend_30d_pct: -4.0,
   datenstand: "2026-10-01T05:10:00+00:00", datum: "2026-10-01", datenlage: "gut", beobachtete_tage: 31,
   trend_30d_bestand_eur: -640, trend_30d_bestand_pct: -3.2, anzahl_gemeinsam_30d: 9, trend_7d_bestand_eur: null, anzahl_gemeinsam: 0,
-  hinweis: "kein Marktmedian", preis_vs_median_eur: -850, preis_vs_median_pct: -4.2, unter_top20_min: false,
+  // Backend-Differenz absichtlich FALSCH (anderer Preis) — die Karte muss selbst rechnen (Nr. 146)
+  hinweis: "kein Marktmedian", preis_vs_median_eur: -9999, preis_vs_median_pct: -40, unter_sample_min: true,
   listing: { listing_id: "449438530", first_seen_at: "2026-09-13T04:00:00+00:00", first_price: 19900, current_price: 19400,
              change_since_first_eur: -500, price_reductions: 1, price_changes: 1, rank_today: 4, active_state: "seen" },
 };
@@ -38,7 +41,7 @@ beforeEach(() => { api.get.mockReset(); });
 afterEach(async () => { if (wurzel) await act(async () => { wurzel.unmount(); }); wurzel = null; behaelter?.remove(); });
 
 describe("MarktdatenKarte", () => {
-  it("zeigt die Top-20-Werte, Trend, dieses Inserat und den Datenstand", async () => {
+  it("zeigt die Werte der N günstigsten, Trend, dieses Inserat und den Datenstand", async () => {
     api.get.mockResolvedValue({ data: DATEN });
     await starten({ vehicleId: "v1", preis: 19400 });
     expect(api.get).toHaveBeenCalledTimes(1);
@@ -48,13 +51,19 @@ describe("MarktdatenKarte", () => {
     expect(k).toBeTruthy();
     expect(k.textContent).toContain("20 günstigste Vergleichsangebote");
     expect(k.textContent).toContain("18.900 €");
-    expect(k.textContent).toContain("20.250 €");
+    expect(el("marktdaten-median").textContent).toBe("20.250 €");
+    expect(k.textContent).toContain("Median der 20 günstigsten");
+    expect(k.textContent).not.toMatch(/Top-20/);
     expect(k.textContent).toContain("18.900 €–21.700 €");
     expect(el("marktdaten-trend").textContent).toBe("−850 € (-4 %)");
     // Review 26.09. Nr. 55: Bestandstrend (gleiche Autos) als zweite Zeile; 7 Tage ohne gemeinsame Autos bleibt weg
     expect(el("marktdaten-bestand").textContent).toContain("30 Tage, gleiche Autos: −640 € (-3,2 %) · 9 Autos");
     expect(el("marktdaten-bestand").textContent).not.toContain("7 Tage");
     expect(el("marktdaten-dieses").textContent).toContain("19.400 €");
+    // Nr. 146: Differenz aus dem uebergebenen Preis (19.400 - 20.250 = -850, -4,2 %), nicht die (falsche) Backend-Differenz
+    expect(el("marktdaten-differenz").textContent).toBe(" · −850 € (-4,2 %) zum Median der 20 günstigsten");
+    expect(el("marktdaten-dieses").textContent).not.toContain("9.999");
+    expect(el("marktdaten-dieses").textContent).not.toContain("unter dem günstigsten"), "19.400 liegt ueber dem Minimum 18.900";
     expect(el("marktdaten-verlauf").textContent).toContain("19.900 € → 19.400 €");
     expect(el("marktdaten-verlauf").textContent).toContain("1 Reduzierung");
     expect(el("marktdaten-verlauf").textContent).toContain("Platz 4 von 20");
@@ -105,5 +114,20 @@ describe("MarktdatenKarte", () => {
   it("ohne Fahrzeug-ID kein Aufruf", async () => {
     await starten({ vehicleId: "", preis: 1 });
     expect(api.get).not.toHaveBeenCalled();
+  });
+
+  it("N aus der Stichprobe (10 Zeilen), alte Feldnamen als Rückfall, ohne Preis die Backend-Differenz (Nr. 137/146)", async () => {
+    api.get.mockResolvedValue({ data: { ...DATEN, sample_size: 10, median_sample_price: undefined, median_top20_price: 20250, max_sample_price: undefined, max_top20_price: 21700,
+                                        preis_vs_median_eur: -1250, preis_vs_median_pct: -6.2, unter_sample_min: true, datenlage: "unvollstaendig" } });
+    await starten({ vehicleId: "v1", preis: 18000 });
+    expect(el("marktdaten-karte").textContent).toContain("Median der 10 günstigsten");
+    expect(el("marktdaten-median").textContent).toBe("20.250 €");
+    expect(el("marktdaten-differenz").textContent).toBe(" · −2.250 € (-11,1 %) zum Median der 10 günstigsten");
+    expect(el("marktdaten-dieses").textContent).toContain("unter dem günstigsten beobachteten Angebot");
+    expect(el("marktdaten-datenlage").textContent).toContain("unvollständig");
+    await act(async () => { wurzel.unmount(); }); wurzel = null; behaelter?.remove();
+    api.get.mockResolvedValue({ data: { ...DATEN, preis_vs_median_eur: -1250, preis_vs_median_pct: -6.2, unter_sample_min: false } });
+    await starten({ vehicleId: "v2", preis: null });
+    expect(el("marktdaten-differenz").textContent).toContain("−1.250 € (-6,2 %)");
   });
 });

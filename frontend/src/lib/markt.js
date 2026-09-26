@@ -1,6 +1,8 @@
 // Market Intelligence (Auftrag Ahmad 25./26.09.2026): reine Hilfsfunktionen.
-// Wortwahl bewusst: "20 günstigste Vergleichsangebote", "Top-20-Median",
-// "untere Marktpreisspanne" — nie "Marktpreis" oder "Marktmedian".
+// Wortwahl bewusst: "N günstigste Vergleichsangebote", "Median der N günstigsten",
+// "untere Marktpreisspanne" — nie "Marktpreis" oder "Marktmedian". Reparaturwelle 6
+// Nr. 137/138: die Zahl N kommt immer aus den Daten (sample_size / sample_limit),
+// nie fest "20" — jeder Suchauftrag hat seine eigene Zeilenzahl.
 
 export function eur(n) {
   if (n === null || n === undefined || Number.isNaN(Number(n))) return "—";
@@ -38,8 +40,24 @@ export const DATENLAGE = {
   mittel: { text: "Datenlage mittel", farbe: "var(--st-amber)" },
   gut: { text: "Datenlage gut", farbe: "var(--st-gruen)" },
   unsicher: { text: "Datenlage unsicher (Sortierung)", farbe: "var(--st-amber)" },
+  // Reparaturwelle 6 Nr. 143: der Markt hat mehr Angebote, als der letzte Abruf lieferte
+  unvollstaendig: { text: "Datenlage unvollständig (weniger geliefert als bestellt)", farbe: "var(--st-amber)" },
   keine: { text: "noch keine Daten", farbe: "var(--text-dim)" },
 };
+
+/** Nr. 137: "Median der 10 günstigsten" — N aus den Daten (Stichprobe), nie fest. */
+export function medianLabel(n) {
+  return n ? `Median der ${n} günstigsten` : "Median der günstigsten";
+}
+
+/** Nr. 137/146: Median aus dem neuen Feld, alte Feldnamen nur als Rückfall. */
+export function medianSample(d) {
+  const v = d?.median_sample_price ?? d?.median_top20_price;
+  return v === null || v === undefined ? null : Number(v);
+}
+
+/** Nr. 136: eine Chance, deren Preis sich seit dem Erkennen geändert hat, ist nur noch historisch. */
+export const CHANCE_HISTORISCH = "historisch — Preis geändert";
 
 export const CHANCE_TYP = {
   neu_guenstig: "Neu & günstig",
@@ -56,7 +74,7 @@ export function chanceTypText(typ) {
 
 export const ZUSTAND = {
   seen: "im Sample gesehen",
-  not_seen_in_sample: "nicht mehr unter den 20 günstigsten (kein Verkauf!)",
+  not_seen_in_sample: "nicht mehr unter den günstigsten (kein Verkauf!)",
   verification_pending: "wird nachgeprüft (zweite Prüfung am Folgetag)",
   confirmed_removed: "Inserat nicht mehr online",
 };

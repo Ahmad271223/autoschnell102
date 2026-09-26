@@ -166,6 +166,9 @@ async def admin_market_model_create(body: AuftragIn, admin=Depends(current_super
 async def admin_market_model_update(model_id: str, body: AuftragIn, admin=Depends(current_super_admin)):
     try:
         doc = await auftraege.aendern(db, model_id, body.model_dump())
+    except auftraege.Konflikt as ex:
+        # Reparaturwelle 6 Nr. 130: gleichzeitig geaendert (CAS) -> 409, nichts ueberschrieben
+        raise HTTPException(409, str(ex))
     except auftraege.Ungueltig as ex:
         raise HTTPException(400 if "nicht gefunden" not in str(ex) else 404, str(ex))
     await log_activity_sicher("", admin["id"], "admin.markt.auftrag.geaendert", ref=model_id)

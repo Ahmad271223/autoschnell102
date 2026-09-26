@@ -1022,9 +1022,10 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                     {preis.fehler ? preis.fehler : `= ${preisText(preis.betrag)}`}
                   </div>
                 )}
-                {markt?.median_top20_price != null && (
+                {(markt?.median_sample_price ?? markt?.median_top20_price) != null && (
                   <div className="text-[11px] mt-1 leading-snug" data-testid="contract-markt-hinweis" style={{ color: "var(--text-secondary)" }}>
-                    Top-20-Median aktuell {preisText(markt.median_top20_price)} ({markt.km_label}{markt.ez_label ? `, ${markt.ez_label}` : ""}) · günstigstes {preisText(markt.min_price)} · nur Orientierung
+                    {/* Reparaturwelle 6 Nr. 137: N aus der Stichprobe, nie fest "20" */}
+                    Median der {markt.sample_size} günstigsten aktuell {preisText(markt.median_sample_price ?? markt.median_top20_price)} ({markt.km_label}{markt.ez_label ? `, ${markt.ez_label}` : ""}) · günstigstes {preisText(markt.min_price)} · nur Orientierung
                   </div>
                 )}
               </div>

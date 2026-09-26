@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Radar, RefreshCw } from "lucide-react";
 import { api, errMsg } from "@/lib/api";
-import { chanceTypText, datumKurz, datumZeit, eur, trendFarbe, trendText, zustandText } from "@/lib/markt";
+import { CHANCE_HISTORISCH, chanceTypText, datumKurz, datumZeit, eur, trendFarbe, trendText, zustandText } from "@/lib/markt";
 
 const TYPEN = [["", "alle"], ["neu_guenstig", "neu & günstig"], ["stark_reduziert", "stark reduziert"], ["neu_top5", "neues Top-5-Angebot"], ["neues_minimum", "neues günstigstes Fahrzeug"]];
 
@@ -40,7 +40,7 @@ export default function Chancen({ pfad = "/markt/chancen", modellePfad = "/markt
       <div className="overline inline-flex items-center gap-1.5"><Radar size={13} /> {admin ? "Marktanalyse" : "Markt"}</div>
       <h1 className="font-display font-black text-2xl tracking-tighter mt-1">Chancen</h1>
       <div className="text-[12px] mt-1" style={{ color: "var(--text-secondary)" }}>
-        Auffällige Angebote aus der täglichen Beobachtung der 20 günstigsten Fahrzeuge je Modell, km- und EZ-Bereich. Regelbasiert, kein Marktmedian, keine Kaufempfehlung.
+        Auffällige Angebote aus der täglichen Beobachtung der günstigsten Fahrzeuge je Modell, km- und EZ-Bereich (Anzahl je Suchauftrag). Regelbasiert, kein Marktmedian, keine Kaufempfehlung.
       </div>
       <div className="mt-4 flex flex-wrap gap-2 items-center" data-testid="chancen-filter">
         <select className={sel} style={st} value={filter.typ} onChange={(e) => setzen("typ", e.target.value)} data-testid="chancen-typ">
@@ -82,6 +82,12 @@ export default function Chancen({ pfad = "/markt/chancen", modellePfad = "/markt
                   <div className="text-[12px]" style={{ color: trendFarbe(c.differenz_eur) }}>{trendText(c.differenz_eur, c.differenz_pct)} zu {eur(c.referenz_eur)}</div>
                 )}
                 {c.typ === "stark_reduziert" && c.delta_eur != null && <div className="text-[12px]" style={{ color: trendFarbe(c.delta_eur) }}>{trendText(c.delta_eur, c.delta_pct)} gegenüber Vortag</div>}
+                {/* Reparaturwelle 6 Nr. 136: der Preis ist seit dem Erkennen anders — die Chance ist nur noch historisch */}
+                {c.still_valid === false && (
+                  <div className="text-[11px] rounded-full px-2 py-0.5 inline-block mt-0.5" style={{ color: "var(--st-amber)", border: "1px solid var(--st-amber)" }} data-testid={`chance-historisch-${c.id}`}>
+                    {CHANCE_HISTORISCH}{c.current_price != null ? ` (jetzt ${eur(c.current_price)})` : ""}
+                  </div>
+                )}
               </div>
             </div>
             <div className="mt-1.5 text-[11px] flex flex-wrap gap-x-3" style={{ color: "var(--text-dim)" }}>

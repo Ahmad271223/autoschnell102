@@ -17,7 +17,9 @@ import { eur, datumZeit } from "@/lib/markt";
 const JAHRE = Array.from({ length: 16 }, (_, i) => new Date().getFullYear() + 1 - i);
 const KRAFTSTOFF = { "": "alle", PETROL: "Benzin", DIESEL: "Diesel", HYBRID: "Hybrid (Benzin)", HYBRID_DIESEL: "Hybrid (Diesel)", ELECTRICITY: "Elektro", LPG: "LPG", CNG: "CNG" };
 const GETRIEBE = { "": "alle (nicht empfohlen — mischt Schalter und Automatik)", AUTOMATIC_GEAR: "Automatik (auch DSG / S tronic)", MANUAL_GEAR: "Schaltgetriebe", SEMIAUTOMATIC_GEAR: "Halbautomatik" };
-const VERKAEUFER = { "": "alle", DEALER: "Händler", FSBO: "Privat" };
+// Reparaturwelle 6 Nr. 84: intern DEALER/PRIVATE (FSBO nur in der mobile.de-URL; alte Werte werden angezeigt)
+const VERKAEUFER = { "": "alle", DEALER: "Händler", PRIVATE: "Privat" };
+const VERKAEUFER_ALT = { FSBO: "Privat" };
 // Review 26.09.2026 abends P7: Karosserie als mobile.de-Code (c=…), dieselben Codes wie im Vergleich
 const KAROSSERIE = { "": "alle", Limousine: "Limousine", EstateCar: "Kombi", OffRoad: "SUV / Geländewagen", Cabrio: "Cabrio",
                      SportsCar: "Coupé / Sportwagen", SmallCar: "Kleinwagen", Van: "Van" };
@@ -29,8 +31,10 @@ const LEER = { make: "", model: "", variant: "", fuel: "", gearbox: "", body: ""
                testlauf_ok_at: "", testlauf_ok_hash: "" };
 // Reparaturwelle 5 Nr. 65: materielle Merkmale — aendert sich eines, gilt der Testlauf nicht mehr (Aktivieren erst nach neuem Testlauf)
 const MATERIELL = ["make", "model", "fuel", "gearbox", "body", "power_kw_min", "power_kw_max", "seller_type", "country", "zip", "radius_km"];
-// Nr. 65: ein Auftrag darf aktiviert werden, wenn der Testlauf zur aktuellen Definition passt (Startlisten-Seed ausgenommen)
-const aktivierbar = (m) => !!(m.seed_version || (m.testlauf_ok_hash && m.testlauf_ok_hash === m.definition_hash));
+// Nr. 65: ein Auftrag darf aktiviert werden, wenn der Testlauf zur aktuellen Definition passt (Startlisten-Seed ausgenommen).
+// Reparaturwelle 6 Nr. 124: der Testlauf prueft die Filter (filter_hash, ohne Zeilenzahl) — die Fassung (definition_hash)
+// enthaelt zusaetzlich die Zeilenzahl; aeltere Antworten ohne filter_hash: definition_hash
+const aktivierbar = (m) => !!(m.seed_version || (m.testlauf_ok_hash && m.testlauf_ok_hash === (m.filter_hash || m.definition_hash)));
 
 export default function MarktAuftraege() {
   const { user: ich } = useAuth();
@@ -87,7 +91,10 @@ export default function MarktAuftraege() {
           <K label="Prognostizierte Nutzung" wert={`${Number(p.kosten_monat_usd || 0).toFixed(2)} $`} rot={p.ueberschritten} />
           <K label="Verbraucht / verbleibend" wert={`${Number(p.verbraucht_usd || 0).toFixed(2)} $ / ${Number(p.verbleibend_usd || 0).toFixed(2)} $`} />
         </div>
-        {p.ueberschritten && <div className="mt-2 text-[12px] text-red-300" data-testid="auftraege-budget-warnung">Die aktive Konfiguration würde das Monatsbudget voraussichtlich überschreiten. Das harte Budgetlimit im Worker bleibt bestehen — Läufe stoppen, wenn es erreicht ist.</div>}
+        {/* Reparaturwelle 6 Nr. 141: Warnung gegen das VERBLEIBENDE Budget (Restkosten des Monats vs. frei), nicht nur gegen das Monatsbudget */}
+        {p.ueberschritten && <div className="mt-2 text-[12px] text-red-300" data-testid="auftraege-budget-warnung">
+          Die aktive Konfiguration würde das verbleibende Monatsbudget voraussichtlich überschreiten
+          {p.restkosten_usd != null ? ` (noch ${Number(p.restkosten_usd).toFixed(2)} $ für ${p.rest_tage ?? "—"} Tage bei ${Number(p.verbleibend_usd || 0).toFixed(2)} $ frei)` : ""}. Das harte Budgetlimit im Worker bleibt bestehen — Läufe warten, wenn es erreicht ist.</div>}
         <div className="mt-1 text-[11px] text-zinc-500">Rechnung: Segmente = EZ-Jahre × km-Bereiche · Zeilen/Tag = Segmente × Zeilen × Abrufe · Kosten = Läufe × {p.preise?.start_usd} $ + Zeilen × {p.preise?.row_usd} $ (Bündel zu {p.preise?.buendel}, {p.preise?.actor}). Keine KI.</div>
       </Card>
 
@@ -110,7 +117,7 @@ export default function MarktAuftraege() {
               <tbody>{daten.auftraege.map((m) => (
                 <tr key={m.id} className="border-t border-white/5" data-testid={`auftrag-${m.id}`}>
                   <td className="px-3 py-2"><Link to={`/admin/markt/${m.id}`} className="text-white font-medium hover:underline">{m.label}</Link><div className="text-[11px] text-zinc-500">{m.make} · {m.model}{m.model_id ? "" : " · keine mobile.de-ID"}</div></td>
-                  <td className="px-3 py-2 text-zinc-300">{m.variant}<div className="text-[11px] text-zinc-500">{[KRAFTSTOFF[m.fuel] !== "alle" && KRAFTSTOFF[m.fuel], m.gearbox && GETRIEBE[m.gearbox], m.body && (KAROSSERIE[m.body] || m.body), m.power_kw_min || m.power_kw_max ? `${m.power_kw_min || "…"}–${m.power_kw_max || "…"} kW` : null, m.seller_type && VERKAEUFER[m.seller_type], m.zip ? `PLZ ${m.zip} +${m.radius_km} km` : null, (m.version || 1) > 1 ? `Fassung v${m.version}` : null].filter(Boolean).join(" · ")}</div></td>
+                  <td className="px-3 py-2 text-zinc-300">{m.variant}<div className="text-[11px] text-zinc-500">{[KRAFTSTOFF[m.fuel] !== "alle" && KRAFTSTOFF[m.fuel], m.gearbox && GETRIEBE[m.gearbox], m.body && (KAROSSERIE[m.body] || m.body), m.power_kw_min || m.power_kw_max ? `${m.power_kw_min || "…"}–${m.power_kw_max || "…"} kW` : null, m.seller_type && (VERKAEUFER[m.seller_type] || VERKAEUFER_ALT[m.seller_type] || m.seller_type), m.zip ? `PLZ ${m.zip} +${m.radius_km} km` : null, (m.version || 1) > 1 ? `Fassung v${m.version}` : null].filter(Boolean).join(" · ")}</div></td>
                   <td className="px-3 py-2 text-zinc-300 tabular-nums">{(m.ez_years || []).join(", ") || "Standard"}</td>
                   <td className="px-3 py-2 text-zinc-300 tabular-nums">{(m.km_buckets || []).map((b) => `${Math.round(b.min_km / 1000)}–${Math.round(b.max_km / 1000)}k`).join(", ") || "Standard"}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{m.rows || 20}</td>
@@ -245,9 +252,11 @@ function AuftragFormular({ katalog, formular, superAdmin, onClose, onGespeichert
           {!w.gearbox && <div className="text-[11px] mt-1" style={{ color: "var(--st-amber, #f59e0b)" }}>Ohne Getriebe mischen sich Schalt- und Automatikpreise (1–3 T€ Unterschied). Für beide Getriebe zwei Aufträge anlegen (Duplizieren).</div>}</label>
         <label>Karosserie<select className={feld} style={st} value={w.body} onChange={(ev) => set("body", ev.target.value)} data-testid="auftrag-karosserie">{Object.entries(KAROSSERIE).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
         <label>Leistung kW von – bis<div className="flex gap-2"><input className={feld} style={st} inputMode="numeric" value={w.power_kw_min} onChange={(ev) => set("power_kw_min", ev.target.value)} placeholder="von" data-testid="auftrag-kw-von" /><input className={feld} style={st} inputMode="numeric" value={w.power_kw_max} onChange={(ev) => set("power_kw_max", ev.target.value)} placeholder="bis" /></div></label>
-        <label>Verkäuferart<select className={feld} style={st} value={w.seller_type} onChange={(ev) => set("seller_type", ev.target.value)}>{Object.entries(VERKAEUFER).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
+        <label>Verkäuferart<select className={feld} style={st} value={w.seller_type === "FSBO" ? "PRIVATE" : w.seller_type} onChange={(ev) => set("seller_type", ev.target.value)} data-testid="auftrag-verkaeufer">{Object.entries(VERKAEUFER).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
         <label>Land<input className={feld} style={st} value={w.country} onChange={(ev) => set("country", ev.target.value.toUpperCase().slice(0, 2))} /></label>
-        <label>PLZ + Radius (km)<div className="flex gap-2"><input className={feld} style={st} value={w.zip} onChange={(ev) => set("zip", ev.target.value)} placeholder="PLZ" /><input className={feld} style={st} inputMode="numeric" value={w.radius_km} onChange={(ev) => set("radius_km", ev.target.value)} placeholder="Radius" /></div></label>
+        <label>PLZ + Radius (km)<div className="flex gap-2"><input className={feld} style={st} value={w.zip} onChange={(ev) => set("zip", ev.target.value)} placeholder="PLZ" data-testid="auftrag-plz" /><input className={feld} style={st} inputMode="numeric" value={w.radius_km} onChange={(ev) => set("radius_km", ev.target.value)} placeholder="Radius" data-testid="auftrag-radius" /></div>
+          {/* Reparaturwelle 6 Nr. 142: beides oder nichts — sonst 400 vom Server */}
+          {(!!w.zip !== !!w.radius_km) && <div className="text-[11px] mt-1" style={{ color: "var(--st-amber, #f59e0b)" }} data-testid="auftrag-plz-hinweis">PLZ und Radius nur zusammen — eines allein wird nicht gespeichert.</div>}</label>
       </div>
 
       <div className="mt-3 text-[12px] text-zinc-400">Erstzulassung * <span className="text-zinc-600">(jedes Jahr wird ein eigenes Segment — ein 2019er landet nie in EZ 2020)</span></div>
@@ -283,7 +292,8 @@ function AuftragFormular({ katalog, formular, superAdmin, onClose, onGespeichert
           <>
             <b className="text-white">Prognose:</b> {e.segmente} Segmente ({e.ez_jahre} EZ × {e.km_bereiche} km) · Zeilen/Tag {e.rows_tag.toLocaleString("de-DE")} ({e.segmente} × {e.rows} × {e.crawls_per_day}) · Zeilen/30 Tage {e.rows_monat.toLocaleString("de-DE")} · geschätzte Monatskosten <b className="text-white">{Number(e.kosten_monat_usd).toFixed(2)} $</b>
             {e.kosten_monat_ersatz_usd > 0 && <span className="text-amber-300" data-testid="auftrag-prognose-ersatz"> · bei Ersatz-Scraper bis zu {Number(e.kosten_monat_ersatz_usd).toFixed(2)} $</span>}
-            <div className="mt-1 text-zinc-400">Alle aktiven Marktanalysen zusammen: {prognose.segmente} Segmente · {(prognose.rows_monat || 0).toLocaleString("de-DE")} Zeilen/Monat · <span className={prognose.ueberschritten ? "text-red-300 font-semibold" : ""}>{Number(prognose.kosten_monat_usd).toFixed(2)} $ von {Number(prognose.budget_usd).toFixed(0)} $ Budget</span>{prognose.ueberschritten ? " — würde das Monatsbudget überschreiten" : ""}</div>
+            <div className="mt-1 text-zinc-400">Alle aktiven Marktanalysen zusammen: {prognose.segmente} Segmente · {(prognose.rows_monat || 0).toLocaleString("de-DE")} Zeilen/Monat · <span className={prognose.ueberschritten ? "text-red-300 font-semibold" : ""}>{Number(prognose.kosten_monat_usd).toFixed(2)} $ von {Number(prognose.budget_usd).toFixed(0)} $ Budget</span>
+              {prognose.ueberschritten ? ` — würde das verbleibende Budget überschreiten${prognose.restkosten_usd != null ? ` (noch ${Number(prognose.restkosten_usd).toFixed(2)} $ für ${prognose.rest_tage ?? "—"} Tage, ${Number(prognose.verbleibend_usd || 0).toFixed(2)} $ frei)` : ""}` : ""}</div>
           </>
         ) : <span className="text-zinc-500">Marke, Modell, EZ-Jahre und km-Bereiche wählen — die Prognose rechnet sofort.</span>}
       </div>
@@ -300,10 +310,13 @@ function AuftragFormular({ katalog, formular, superAdmin, onClose, onGespeichert
             <tbody>{test.zeilen.map((z, i) => <tr key={i} className="border-t border-white/5 tabular-nums"><td className="pr-2 text-zinc-200">{z.title}</td><td className="pr-2" style={{ color: z.ez_ok ? undefined : "var(--st-rot)" }}>{z.first_registration}</td><td className="pr-2 text-right" style={{ color: z.km_ok ? undefined : "var(--st-rot)" }}>{z.mileage_km?.toLocaleString("de-DE")}</td><td className="pr-2 text-right text-white">{eur(z.price_gross)}</td><td className="pr-2">{z.power_kw ? `${z.power_kw} kW ` : ""}{z.fuel} {z.gearbox}</td><td className="pr-2" style={{ color: z.gueltig === false ? "var(--st-rot)" : undefined }}>{z.gueltig === false ? `verworfen: ${z.grund}` : "gültig"}</td></tr>)}</tbody></table>
           {(test.segmente || []).length > 0 && (
             <div className="mt-2" data-testid="auftrag-testlauf-segmente">
-              <div className="text-[11px] text-zinc-400">Alle Segmente ({test.segmente_geprueft ?? test.segmente.length}{test.segmente_gesamt > (test.segmente_geprueft ?? test.segmente.length) ? ` von ${test.segmente_gesamt}` : ""}, je bis zu 2 Treffer) · {test.leer || 0} leer</div>
-              {/* Nr. 20: je Segment geliefert / gueltig / verworfen (Grund) — derselbe Zeilenfilter wie im Worker */}
-              <table className="w-auto mt-1"><thead><tr className="text-left text-zinc-500 text-[11px] uppercase"><th className="pr-3">Segment</th><th className="pr-3 text-right">geliefert</th><th className="pr-3 text-right">gültig</th><th className="pr-3">verworfen (Grund)</th><th className="pr-3">EZ</th><th className="pr-3">km</th></tr></thead>
-                <tbody>{test.segmente.map((sg) => <tr key={sg.label} className="border-t border-white/5 tabular-nums" style={{ color: sg.anzahl ? undefined : "var(--text-dim)" }}><td className="pr-3">{sg.label}</td><td className="pr-3 text-right">{sg.geliefert ?? sg.anzahl}</td><td className="pr-3 text-right">{sg.gueltig ?? sg.anzahl}</td><td className="pr-3" style={{ color: sg.verworfen ? "var(--st-rot)" : undefined }}>{sg.verworfen ? `${sg.verworfen}${sg.gruende?.length ? ` (${sg.gruende.join("; ")})` : ""}` : "0"}</td><td className="pr-3" style={{ color: sg.ez_ok === false ? "var(--st-rot)" : undefined }}>{sg.ez_ok == null ? "—" : sg.ez_ok ? "✓" : "✗"}</td><td className="pr-3" style={{ color: sg.km_ok === false ? "var(--st-rot)" : undefined }}>{sg.km_ok == null ? "—" : sg.km_ok ? "✓" : "✗"}</td></tr>)}</tbody></table>
+              <div className="text-[11px] text-zinc-400">Alle Segmente ({test.segmente_geprueft ?? test.segmente.length}{test.segmente_gesamt > (test.segmente_geprueft ?? test.segmente.length) ? ` von ${test.segmente_gesamt}` : ""}, je bis zu 2 Treffer) · {test.leer || 0} leer
+                {/* Reparaturwelle 6 Nr. 81: Zeilen, deren inputContext zu keinem Segment passt */}
+                {test.nicht_zuordenbar ? <span style={{ color: "var(--st-amber, #f59e0b)" }} data-testid="auftrag-testlauf-unzuordenbar"> · nicht zuordenbar: {test.nicht_zuordenbar}</span> : null}</div>
+              {/* Nr. 20: je Segment geliefert / gueltig / verworfen (Grund) — derselbe Zeilenfilter wie im Worker; Nr. 79: Sortierung/Top-N je Segment */}
+              <table className="w-auto mt-1"><thead><tr className="text-left text-zinc-500 text-[11px] uppercase"><th className="pr-3">Segment</th><th className="pr-3 text-right">geliefert</th><th className="pr-3 text-right">gültig</th><th className="pr-3">verworfen (Grund)</th><th className="pr-3">EZ</th><th className="pr-3">km</th><th className="pr-3">Sortierung</th></tr></thead>
+                <tbody>{test.segmente.map((sg) => <tr key={sg.label} className="border-t border-white/5 tabular-nums" style={{ color: sg.anzahl ? undefined : "var(--text-dim)" }}><td className="pr-3">{sg.label}</td><td className="pr-3 text-right">{sg.geliefert ?? sg.anzahl}</td><td className="pr-3 text-right">{sg.gueltig ?? sg.anzahl}</td><td className="pr-3" style={{ color: sg.verworfen ? "var(--st-rot)" : undefined }}>{sg.verworfen ? `${sg.verworfen}${sg.gruende?.length ? ` (${sg.gruende.join("; ")})` : ""}` : "0"}</td><td className="pr-3" style={{ color: sg.ez_ok === false ? "var(--st-rot)" : undefined }}>{sg.ez_ok == null ? "—" : sg.ez_ok ? "✓" : "✗"}</td><td className="pr-3" style={{ color: sg.km_ok === false ? "var(--st-rot)" : undefined }}>{sg.km_ok == null ? "—" : sg.km_ok ? "✓" : "✗"}</td>
+                  <td className="pr-3" style={{ color: sg.nachweis === "ungueltig" || sg.sortiert === false ? "var(--st-rot)" : sg.nachweis === "nur_monoton" ? "var(--st-amber, #f59e0b)" : undefined }}>{sg.anzahl ? (sg.nachweis === "ungueltig" ? `ungültig (${sg.nachweis_grund || "Lücken"})` : sg.sortiert === false ? "nicht aufsteigend" : sg.nachweis === "nur_monoton" ? "monoton (Top-N nicht bewiesen)" : sg.nachweis === "bewiesen" ? "Top-N bewiesen" : "—") : "—"}</td></tr>)}</tbody></table>
             </div>
           )}
           <div className="mt-1 text-[11px] text-zinc-500">Stand {datumZeit(new Date().toISOString())} · Ein Lauf über alle Segmente des Entwurfs (höchstens {test.segmente_max || 40}) mit je 2 Treffern; die Zeilen oben zeigen das erste Segment. Der Lauf wird gegen das Marktbudget abgerechnet.</div>

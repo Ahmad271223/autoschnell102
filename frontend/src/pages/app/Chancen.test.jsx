@@ -22,7 +22,9 @@ vi.mock("@/lib/api", () => ({
         created_at: "2026-10-01T05:00:00Z", mobile_created_at: "2026-09-30T10:00:00Z", url: "https://suchen.mobile.de/x", active_state: "seen" },
       { id: "c2", typ: "stark_reduziert", label: "BMW 320d", km_label: "55–85k km", title: "BMW 320d", price: 20400, delta_eur: -1500, delta_pct: -6.8,
         mileage_km: 60000, first_registration: "01/2019", rang: 3, rang_vorher: 9, text: "deutliche Preisreduzierung", created_at: "2026-10-01T05:00:00Z",
-        first_price: 21900, active_state: "not_seen_in_sample" }], hinweis: "kein Marktmedian" } };
+        first_price: 21900, active_state: "not_seen_in_sample",
+        // Reparaturwelle 6 Nr. 136: Preis seit dem Erkennen geaendert -> historisch
+        detected_price: 20400, detected_advantage: 1500, current_price: 21000, current_advantage: 900, still_valid: false }], hinweis: "kein Marktmedian" } };
   }) },
 }));
 
@@ -48,6 +50,10 @@ describe("Chancen", () => {
     expect(el("chance-c2").textContent).toContain("gestern 9");
     expect(el("chance-c2").textContent).toContain("kein Verkauf");
     expect(el("chancen-page").textContent).toContain("kein Marktmedian");
+    // Reparaturwelle 6 Nr. 136: c2 ist historisch (Preis geaendert), c1 nicht; Nr. 138: keine feste "20"
+    expect(el("chance-historisch-c2").textContent).toBe("historisch — Preis geändert (jetzt 21.000 €)");
+    expect(el("chance-historisch-c1")).toBeNull();
+    expect(el("chancen-page").textContent).not.toMatch(/\b20 günstigsten/);
     expect(el("chancen-page").textContent).not.toMatch(/Marktpreis/);
     // Filter -> neue Abfrage mit Parametern
     await act(async () => {

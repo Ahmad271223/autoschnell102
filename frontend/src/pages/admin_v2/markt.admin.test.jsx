@@ -1,7 +1,7 @@
 /**
  * Admin → Marktanalyse (25.09.2026): Modellliste mit Kennzahlen, Status,
  * Klick auf Modell → Segmentwahl (km × EZ) → Kennzahlen, Verlauf aus den
- * Tagesaggregaten, Auswertung, Tagestabelle, Top-20-Liste, Listing-Historie.
+ * Tagesaggregaten, Auswertung, Tagestabelle, Top-N-Liste, Listing-Historie.
  * Alles nur lesend; Super-Admin-Knoepfe rufen die Schreibrouten.
  */
 import { act, createElement as h } from "react";
@@ -39,14 +39,15 @@ vi.mock("@/lib/api", () => ({
     get: vi.fn(async (url) => {
       netz.gets.push(url);
       if (url === "/admin/market/models") return { data: { modelle: [
+        // Reparaturwelle 6 Nr. 128/140: listings = aktuelle Fassung, listings_historisch = alle Fassungen; median_sample_mittel statt median_top20_mittel
         { id: "bmw-320d", label: "BMW 320d", fuel: "DIESEL", power_kw_min: 120, power_kw_max: 145, enabled: true, model_id: "10",
-          segmente_aktiv: 16, segmente_mit_daten: 4, last_success_at: "2026-10-01T04:00:00+00:00", listings: 312,
-          min_price: 18900, median_top20_mittel: 20250, trend_7d_pct: -2.1, trend_30d_pct: -4.0, crawl_status: "ok" },
+          segmente_aktiv: 16, segmente_mit_daten: 4, last_success_at: "2026-10-01T04:00:00+00:00", listings: 312, listings_historisch: 450,
+          min_price: 18900, median_sample_mittel: 20250, trend_7d_pct: -2.1, trend_30d_pct: -4.0, crawl_status: "ok" },
         { id: "vw-golf-20tdi", label: "VW Golf 2.0 TDI", fuel: "DIESEL", enabled: false, model_id: "14", segmente_aktiv: 0, segmente_mit_daten: 0,
-          listings: 0, min_price: null, median_top20_mittel: null, trend_7d_pct: null, trend_30d_pct: null, crawl_status: "wartet" },
+          listings: 0, listings_historisch: 0, min_price: null, median_sample_mittel: null, trend_7d_pct: null, trend_30d_pct: null, crawl_status: "wartet" },
         // P1: heute ein Lauf mit ungueltigen Daten (data_invalid) -> eigener Status, kein "fehler"
         { id: "audi-a4-40tdi", label: "Audi A4 40 TDI", fuel: "DIESEL", enabled: true, model_id: "9", segmente_aktiv: 30, segmente_mit_daten: 12,
-          listings: 80, min_price: 21000, median_top20_mittel: 24000, trend_7d_pct: null, trend_30d_pct: null, crawl_status: "ungueltig" }] } };
+          listings: 80, listings_historisch: 80, min_price: 21000, median_top20_mittel: 24000, trend_7d_pct: null, trend_30d_pct: null, crawl_status: "ungueltig" }] } };
       if (url === "/admin/market/status") return { data: { aktiv: netz.aktiv, aktiv_quelle: "env", segmente: 16, modelle: 1, listings: 312, snapshots: 4000, token_vorhanden: true,
         actor: "sourabhbgp~mobile-de-scraper", budget: { _id: "2026-10", budget_usd: 450, used_usd: 12.5, reserved_usd: 0, rows: 4000, runs: 200 },
         // Reparaturwelle 5 Nr. 30/31/38 + Oberflaeche: Restbudget/Resttage, Entfernungskosten, Preise fuer die Kostenformel, "ohne Budget pausiert"
@@ -64,7 +65,11 @@ vi.mock("@/lib/api", () => ({
       if (url.includes("/listings/449438530/history")) return { data: { listing: { title: "BMW 320d Touring", active_state: "seen", mileage_km: 78000,
         first_registration: "03/2020", postal_code: "30159", city: "Hannover", price_history: [{ at: "2026-09-13T04:00:00Z", price: 19400 }, { at: "2026-10-01T04:00:00Z", price: 18900 }] },
         snapshots: [{ date: "2026-09-13", segment_id: SEG.id, price: 19400, rank_in_sample: 5 }], hinweis_zustand: "", gekuerzt: true } };   // Nr. 61
-      if (url.endsWith("/summary")) return { data: { segment: SEG, stats: netz.stats || STATS, letzter_job: { status: "completed" },
+      // Reparaturwelle 6 Nr. 123: das v1-Segment ist eine fruehere Fassung -> historisch mit eigener Definition (Diesel, 10 Zeilen)
+      if (url.endsWith(`/segments/${SEG_ALT.id}/summary`)) return { data: { segment: SEG_ALT, modell: { version: 2, fuel: "PETROL" }, stats: null, letzter_job: null, historisch: true, fassung_version: 1,
+        fassung: { fuel: "DIESEL", gearbox: "AUTOMATIC_GEAR", body: null, power_kw_min: 120, power_kw_max: 145, country: "DE", zip: null, radius_km: null, seller_type: null, rows: 10 },
+        qualitaet: { daten_seit: "2026-08-01", tage_beobachtet: 3, tage_mit_treffern: 3, abdeckung_pct: 50, erfolgreiche_crawls: 3, erwartete_crawls: 6, sample_size: 0, datenlage: "keine", crawls_per_day: 2 } } };
+      if (url.endsWith("/summary")) return { data: { segment: SEG, stats: netz.stats || STATS, letzter_job: { status: "completed" }, historisch: false,
         qualitaet: { daten_seit: "2026-09-01", tage_beobachtet: 31, tage_mit_treffern: 29, abdeckung_pct: 96.9, erfolgreiche_crawls: 60, erwartete_crawls: 62, sample_size: 20, datenlage: "gut", crawls_per_day: 2,
                      laeufe_nur_monoton: 0, top_n_bewiesen: !netz.topN, top_n_hinweis: netz.topN } } };
       // Nr. 58: ein Tag mit 0 Treffern kommt mit (Luecke statt Sprung)
@@ -80,12 +85,14 @@ vi.mock("@/lib/api", () => ({
         { listing_id: "449438530", title: "BMW 320d Touring", price_today: 18900, current_price: 18900, mileage_km: 78000, first_registration: "03/2020",
           power_kw: 140, fuel: "Diesel", gearbox: "Automatik", postal_code: "30159", city: "Hannover", seller_type: "DEALER", price_rating_today: "GOOD_PRICE",
           mobile_created_at: "2026-09-05T11:46:02.000Z", first_seen_at: "2026-09-13T04:00:00+00:00", change_since_first_eur: -500, rank_today: 1, rank_yesterday: 3,
-          price_change_eur: -200, first_price: 19400, price_reductions: 2 }] } };
+          price_change_eur: -200, first_price: 19400, price_reductions: 2,
+          // Reparaturwelle 6 Nr. 139: in DIESEM Segment erst heute gesehen (global seit 13.09.)
+          segment_first_seen_at: "2026-10-01T04:00:00+00:00", segment_first_rank: 1, in_letztem_lauf: true, neu_im_segment: true }] } };
       return { data: {} };
     }),
     post: vi.fn(async (url, body) => {
       netz.posts.push({ url, body });
-      if (netz.crawlFehler && url.endsWith("/crawl-now")) { const e = new Error(netz.crawlFehler); e.response = { status: 400, data: { detail: netz.crawlFehler } }; throw e; }
+      if (netz.crawlFehler && url.endsWith("/crawl-now")) { const e = new Error(netz.crawlFehler); e.response = { status: netz.crawlStatus || 400, data: { detail: netz.crawlFehler } }; throw e; }
       return { data: { ok: true, neu: 6, tag: "2026-10-01", modelle: { neu: 0 }, segmente: { segmente: 16 }, erledigt: 1 } };
     }),
     put: vi.fn(async (url, body) => { netz.posts.push({ url, body }); return { data: { ok: true, segmente: 16, takt: { intervall_tage: 3 } } }; }),
@@ -108,7 +115,7 @@ async function starten(pfad) {
   await warten();
 }
 async function klick(t) { const k = el(t); if (!k) throw new Error(`nicht gefunden: ${t}`); await act(async () => { k.click(); }); await warten(); }
-beforeEach(() => { netz.posts.length = 0; netz.gets.length = 0; netz.aktiv = true; netz.stats = null; netz.crawlFehler = null; netz.ohneBudget = false; netz.topN = null; });
+beforeEach(() => { netz.posts.length = 0; netz.gets.length = 0; netz.aktiv = true; netz.stats = null; netz.crawlFehler = null; netz.crawlStatus = 0; netz.ohneBudget = false; netz.topN = null; });
 afterEach(async () => { if (wurzel) await act(async () => { wurzel.unmount(); }); wurzel = null; behaelter?.remove(); });
 
 describe("Admin Marktanalyse", () => {
@@ -126,6 +133,10 @@ describe("Admin Marktanalyse", () => {
     expect(z.textContent).toContain("20.250 €");
     expect(z.textContent).toContain("-4 %");
     expect(z.textContent).toContain("4/16");
+    // Reparaturwelle 6 Nr. 128/140: Listings der aktuellen Fassung, Historie getrennt; alter Feldname als Rueckfall
+    expect(el("markt-historisch-bmw-320d").textContent).toBe(" (450 historisch)");
+    expect(el("markt-historisch-audi-a4-40tdi")).toBeNull();
+    expect(el("markt-modell-audi-a4-40tdi").textContent).toContain("24.000 €");
     expect(el("markt-modell-vw-golf-20tdi").textContent).toContain("pausiert");
     // P1: ungueltiger Lauf heute -> Status "ungültig" (nicht "fehler"), Kachel zaehlt ihn getrennt
     expect(el("markt-modell-audi-a4-40tdi").textContent).toContain("ungültig");
@@ -193,7 +204,7 @@ describe("Admin Marktanalyse", () => {
     keineFrage.mockRestore();
   });
 
-  it("Modellseite: Segmentwahl, Kennzahlen, Verlauf, Auswertung, Tabelle, Top-20 und Listing-Historie", async () => {
+  it("Modellseite: Segmentwahl, Kennzahlen, Verlauf, Auswertung, Tabelle, Top-N und Listing-Historie", async () => {
     await starten("/admin/markt/bmw-320d");
     expect(el("markt-modell-titel").textContent).toBe("BMW 320d");
     expect(el("markt-km-55001").getAttribute("aria-pressed")).toBe("true");
@@ -230,13 +241,20 @@ describe("Admin Marktanalyse", () => {
     expect(el("markt-kein-angebot-2026-10-01")).toBeNull();
     expect(el("markt-verlauf").textContent).toContain("Lücken = Tage ohne Angebot (1)");
     expect(el("markt-listings").textContent).toContain("letzter Lauf 2");
+    // Nr. 137/138: keine feste "20" mehr in Ueberschriften (die Kennzahlen sagen "Top-N" mit N = sample_size)
+    expect(el("markt-tagestabelle").textContent).not.toMatch(/Top-20/);
+    expect(el("markt-kennzahlen").textContent).toContain("Median Top-20");
+    // Nr. 139: "neu in diesem Segment" mit globalem Erstdatum daneben
+    expect(el("markt-neu-segment-449438530").textContent).toBe("neu in diesem Segment");
+    expect(el("markt-listing-449438530").textContent).toContain("(global 13.09.)");
+    expect(el("markt-fassung-historisch")).toBeNull();
     // Zeitraum wechseln -> neue Verlaufsabfrage mit range
     await klick("markt-bereich-90d");
     expect(netz.gets.filter((u) => u.endsWith("/history")).length).toBeGreaterThanOrEqual(2);
     // EZ wechseln -> anderes Segment
     await klick("markt-ez-2016");
     expect(el("markt-ez-2016").getAttribute("aria-pressed")).toBe("true");
-    // Top-20 und Historie
+    // Top-N und Historie
     const zeile = el("markt-listing-449438530");
     expect(zeile.textContent).toContain("BMW 320d Touring");
     expect(zeile.textContent).toContain("Händler");
@@ -266,6 +284,15 @@ describe("Admin Marktanalyse", () => {
     netz.crawlFehler = "Segment inaktiv — der Suchauftrag ist pausiert";
     await klick("markt-crawl-jetzt");
     expect(toast.error).toHaveBeenCalledWith(expect.stringContaining("Segment inaktiv"));
+    // Reparaturwelle 6 Nr. 77: Doppelklick -> 409 mit Klartext, kein zweiter Job
+    netz.crawlFehler = "Für dieses Segment wartet schon ein Job (manuell, 1a2b3c4d) — kein zweiter Lauf, bitte abwarten"; netz.crawlStatus = 409;
+    await klick("markt-crawl-jetzt");
+    expect(toast.error).toHaveBeenLastCalledWith(expect.stringContaining("wartet schon ein Job"));
+    await act(async () => { wurzel.unmount(); }); wurzel = null; behaelter?.remove();
+    // Nr. 123/124: historische Fassung zeigt ihre eigene Definition
+    await starten(`/admin/markt/bmw-320d?segment=${encodeURIComponent(SEG_ALT.id)}`);
+    expect(el("markt-fassung-historisch").textContent).toContain("Frühere Fassung v1 (Auftrag heute v2)");
+    expect(el("markt-fassung-historisch").textContent).toContain("Kraftstoff DIESEL · Getriebe AUTOMATIC_GEAR · 120–145 kW · 10 Zeilen");
     await act(async () => { wurzel.unmount(); }); wurzel = null; behaelter?.remove();
     // Nr. 43/44: kein Datensatz in der Toleranz -> trend null -> "—" statt Zahl
     netz.stats = { ...STATS, trend_7d_eur: null, trend_7d_pct: null, trend_7d_basis_date: null, trend_7d_bestand_eur: null, anzahl_gemeinsam: 0 };

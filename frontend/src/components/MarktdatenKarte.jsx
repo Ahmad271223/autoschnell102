@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { BarChart3 } from "lucide-react";
 import { api } from "@/lib/api";
-import { DATENLAGE, bestandText, datumZeit, eur, seitErstbeobachtung, trendFarbe, trendText } from "@/lib/markt";
+import { DATENLAGE, bestandText, datumZeit, eur, medianLabel, medianSample, seitErstbeobachtung, trendFarbe, trendText } from "@/lib/markt";
 
 const ZEITLIMIT_MS = 8000;
 
@@ -9,9 +9,21 @@ const ZEITLIMIT_MS = 8000;
  * Karte "AutoSchnell Marktdaten" im Vergleich (Auftrag Ahmad 25.09.2026).
  * Lädt NACH dem fertigen Vergleich getrennt (GET /market-intelligence/vehicle/{id}),
  * kurzes Zeitlimit, und verschwindet still bei 404/Timeout/Fehler — der
- * Vergleich bleibt in jedem Fall vollständig benutzbar. Nur die 20 günstigsten
- * Vergleichsangebote, kein Marktmedian.
+ * Vergleich bleibt in jedem Fall vollständig benutzbar. Nur die N günstigsten
+ * Vergleichsangebote (N je Suchauftrag), kein Marktmedian.
+ * Reparaturwelle 6 Nr. 146: die Differenz "dieses Inserat zum Median" rechnet die
+ * Karte selbst aus dem übergebenen Preis (der Vergleich kennt den aktuellen Preis);
+ * die Backend-Differenz ist nur der Rückfall ohne Preis.
  */
+function differenz(preis, median, minPreis, daten) {
+  const p = Number(preis);
+  if (preis && median && Number.isFinite(p)) {
+    const d = Math.round((p - median) * 100) / 100;
+    return { eur: d, pct: Math.round((d / median) * 1000) / 10, unterMin: minPreis != null && p < Number(minPreis) };
+  }
+  if (daten?.preis_vs_median_eur == null) return null;
+  return { eur: daten.preis_vs_median_eur, pct: daten.preis_vs_median_pct, unterMin: !!(daten.unter_sample_min ?? daten.unter_top20_min) };
+}
 export default function MarktdatenKarte({ vehicleId, preis }) {
   const [daten, setDaten] = useState(null);
   useEffect(() => {
@@ -35,6 +47,9 @@ export default function MarktdatenKarte({ vehicleId, preis }) {
   }
   const dl = DATENLAGE[daten.datenlage] || DATENLAGE.keine;
   const l = daten.listing;
+  const median = medianSample(daten);
+  const maxPreis = daten.max_sample_price ?? daten.max_top20_price;
+  const diff = differenz(preis, median, daten.min_price, daten);
   return (
     <div className="apple-surface p-5" data-testid="marktdaten-karte">
       <div className="flex items-center justify-between gap-2">
@@ -57,10 +72,10 @@ export default function MarktdatenKarte({ vehicleId, preis }) {
         </div>
       )}
       <div className="mt-3 grid grid-cols-3 gap-2 text-[11px]">
-        {[["Günstigstes", daten.min_price], ["Median günstigste", daten.median_top20_price], ["Spanne günstigste", `${eur(daten.min_price)}–${eur(daten.max_top20_price)}`]].map(([k, v]) => (
+        {[["Günstigstes", daten.min_price], [medianLabel(daten.sample_size), median], ["Spanne günstigste", `${eur(daten.min_price)}–${eur(maxPreis)}`]].map(([k, v], i) => (
           <div key={k} className="rounded-lg p-2" style={{ background: "var(--wa-06)" }}>
             <div style={{ color: "var(--text-dim)" }}>{k}</div>
-            <div className={k === "Median günstigste" ? "text-base font-semibold" : "text-sm font-semibold"}>{typeof v === "string" ? v : eur(v)}</div>
+            <div className={i === 1 ? "text-base font-semibold" : "text-sm font-semibold"} data-testid={i === 1 ? "marktdaten-median" : undefined}>{typeof v === "string" ? v : eur(v)}</div>
           </div>
         ))}
       </div>
@@ -75,13 +90,13 @@ export default function MarktdatenKarte({ vehicleId, preis }) {
           {daten.anzahl_gemeinsam ? `7 Tage, ${bestandText(daten.trend_7d_bestand_eur, daten.trend_7d_bestand_pct, daten.anzahl_gemeinsam)}` : ""}
         </div>
       ) : null}
-      {(preis || daten.preis_vs_median_eur != null) && (
+      {(preis || diff) && (
         <div className="mt-2 text-[12px]" data-testid="marktdaten-dieses">
           Dieses Inserat: <b>{eur(preis)}</b>
-          {daten.preis_vs_median_eur != null && (
-            <span style={{ color: trendFarbe(daten.preis_vs_median_eur) }}> · {trendText(daten.preis_vs_median_eur, daten.preis_vs_median_pct)} zum Top-20-Median</span>
+          {diff && (
+            <span style={{ color: trendFarbe(diff.eur) }} data-testid="marktdaten-differenz"> · {trendText(diff.eur, diff.pct)} zum {medianLabel(daten.sample_size)}</span>
           )}
-          {daten.unter_top20_min && <span style={{ color: "var(--st-gruen)" }}> · unter dem günstigsten beobachteten Angebot</span>}
+          {diff?.unterMin && <span style={{ color: "var(--st-gruen)" }}> · unter dem günstigsten beobachteten Angebot</span>}
         </div>
       )}
       {l && (

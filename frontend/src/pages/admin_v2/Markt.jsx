@@ -165,9 +165,10 @@ export default function Markt() {
                     </td>
                     <td className="px-4 py-2.5 text-zinc-300">{m.segmente_mit_daten}/{m.segmente_aktiv}</td>
                     <td className="px-4 py-2.5 text-zinc-400">{m.last_success_at ? fmtDate(m.last_success_at) : "—"}</td>
-                    <td className="px-4 py-2.5 text-right tabular-nums text-zinc-300">{m.listings}</td>
+                    {/* Reparaturwelle 6 Nr. 128/140: Listings der aktuellen Fassung; die Historie aller Fassungen getrennt */}
+                    <td className="px-4 py-2.5 text-right tabular-nums text-zinc-300">{m.listings}{m.listings_historisch != null && m.listings_historisch !== m.listings ? <span className="text-[10px] text-zinc-500" data-testid={`markt-historisch-${m.id}`}> ({m.listings_historisch} historisch)</span> : null}</td>
                     <td className="px-4 py-2.5 text-right tabular-nums text-zinc-200">{eur(m.min_price)}</td>
-                    <td className="px-4 py-2.5 text-right tabular-nums text-zinc-200">{eur(m.median_top20_mittel)}</td>
+                    <td className="px-4 py-2.5 text-right tabular-nums text-zinc-200">{eur(m.median_sample_mittel ?? m.median_top20_mittel)}</td>
                     <td className="px-4 py-2.5 text-right tabular-nums" style={{ color: trendFarbe(m.trend_7d_pct) }}>{pct(m.trend_7d_pct)}</td>
                     <td className="px-4 py-2.5 text-right tabular-nums" style={{ color: trendFarbe(m.trend_30d_pct) }}>{pct(m.trend_30d_pct)}</td>
                     <td className="px-4 py-2.5"><Badge tone={m.enabled ? STATUS_TONE[m.crawl_status] || "gray" : "gray"}>{m.enabled ? STATUS_TEXT[m.crawl_status] || m.crawl_status : "pausiert"}</Badge></td>

@@ -22,12 +22,15 @@ vi.mock("@/lib/api", () => ({
           ez_years: [2019, 2020, 2021, 2022], km_buckets: [{ min_km: 10000, max_km: 30000 }, { min_km: 30001, max_km: 50000 }], rows: 20, crawls_per_day: 2,
           status: "active", prognose: { segmente: 8 }, last_success_at: "2026-10-01T04:00:00Z", monatsverbrauch_usd: 1.23, crawl_status: "ok" },
         // Welle 5 Nr. 65: Polo hat einen bestandenen Testlauf fuer seine Definition -> Aktivieren frei; Astra ohne -> gesperrt
-        { id: "vw-polo-10tsi", label: "VW Polo 1.0 TSI", make: "Volkswagen", model: "Polo", variant: "1.0 TSI", fuel: "PETROL", model_id: "27", ez_years: [2020], km_buckets: [{ min_km: 0, max_km: 50000 }],
-          rows: 20, crawls_per_day: 1, status: "paused", prognose: { segmente: 1 }, monatsverbrauch_usd: 0, definition_hash: "h-polo", testlauf_ok_hash: "h-polo", testlauf_ok_at: "2026-10-01T05:00:00Z" },
-        { id: "opel-astra-ohne", label: "Opel Astra 1.2", make: "Opel", model: "Astra", variant: "1.2 Turbo", fuel: "PETROL", model_id: "9", ez_years: [2020], km_buckets: [{ min_km: 0, max_km: 50000 }],
-          rows: 20, crawls_per_day: 1, status: "paused", prognose: { segmente: 1 }, monatsverbrauch_usd: 0, definition_hash: "h-astra", testlauf_ok_hash: "h-alt" }],
-        prognose: { aktive_modelle: 1, segmente: 8, rows_tag: 320, rows_monat: 9728, budget_usd: 700, kosten_monat_usd: 8.6, verbraucht_usd: 1.23, verbleibend_usd: 698.77,
-                    ueberschritten: false, preise: { start_usd: 0.005, row_usd: 0.0007, buendel: 10, actor: "scrapesmith~mobile-de-scraper" } } } };
+        // Reparaturwelle 6 Nr. 124: der Testlauf-Nachweis gilt fuer den filter_hash (ohne Zeilenzahl); definition_hash enthaelt die Zeilenzahl
+        { id: "vw-polo-10tsi", label: "VW Polo 1.0 TSI", make: "Volkswagen", model: "Polo", variant: "1.0 TSI", fuel: "PETROL", seller_type: "PRIVATE", model_id: "27", ez_years: [2020], km_buckets: [{ min_km: 0, max_km: 50000 }],
+          rows: 20, crawls_per_day: 1, status: "paused", prognose: { segmente: 1 }, monatsverbrauch_usd: 0, definition_hash: "d-polo", filter_hash: "h-polo", testlauf_ok_hash: "h-polo", testlauf_ok_at: "2026-10-01T05:00:00Z" },
+        { id: "opel-astra-ohne", label: "Opel Astra 1.2", make: "Opel", model: "Astra", variant: "1.2 Turbo", fuel: "PETROL", seller_type: "FSBO", model_id: "9", ez_years: [2020], km_buckets: [{ min_km: 0, max_km: 50000 }],
+          rows: 20, crawls_per_day: 1, status: "paused", prognose: { segmente: 1 }, monatsverbrauch_usd: 0, definition_hash: "d-astra", filter_hash: "h-astra", testlauf_ok_hash: "h-alt" }],
+        // Nr. 141: Warnung gegen das verbleibende Budget (Restkosten vs. frei), nicht nur gegen das Monatsbudget
+        prognose: { aktive_modelle: 1, segmente: 8, rows_tag: 320, rows_monat: 9728, budget_usd: 700, kosten_monat_usd: 8.6, verbraucht_usd: 690, verbleibend_usd: 10,
+                    rest_tage: 5, restkosten_usd: 12.5, ueberschritten: true, ueberschritten_monat: false,
+                    preise: { start_usd: 0.005, row_usd: 0.0007, buendel: 10, actor: "scrapesmith~mobile-de-scraper" } } } };
       if (url === "/admin/market/katalog" && cfg?.params?.marke) return { data: { modelle: [{ name: "320", model_id: "10" }, { name: "520", model_id: "17" }] } };
       if (url === "/admin/market/katalog") return { data: { marken: [{ name: "BMW", make_id: "3500" }, { name: "Volkswagen", make_id: "25200" }],
         standard: { ez_years: [2019, 2020, 2021, 2022], km_buckets: [{ min_km: 10000, max_km: 30000 }, { min_km: 30001, max_km: 50000 }], rows: 20, crawls_per_day: 2 } } };
@@ -37,16 +40,18 @@ vi.mock("@/lib/api", () => ({
       netz.posts.push({ url, body });
       if (url === "/admin/market/prognose") return { data: { entwurf: body.make ? { segmente: (body.ez_years?.length || 0) * (body.km_buckets?.length || 0), ez_jahre: body.ez_years?.length || 0, km_bereiche: body.km_buckets?.length || 0,
         rows: body.rows, crawls_per_day: body.crawls_per_day, rows_tag: 640, rows_monat: 19456, kosten_monat_usd: 14.2, kosten_monat_ersatz_usd: 61.8 } : null,
-        segmente: 24, rows_monat: 29184, kosten_monat_usd: netz.ueberschritten ? 900 : 22.8, budget_usd: 700, ueberschritten: netz.ueberschritten } };
+        segmente: 24, rows_monat: 29184, kosten_monat_usd: netz.ueberschritten ? 900 : 22.8, budget_usd: 700, ueberschritten: netz.ueberschritten,
+        rest_tage: 5, restkosten_usd: netz.ueberschritten ? 150 : 3.8, verbleibend_usd: 100 } };
       if (url === "/admin/market/testlauf") return { data: { anzahl: 2, segment: "EZ 2019 · 10–30k km", sortiert: true, alle_ez_ok: true, alle_km_ok: true, usd: 0.0085, actor: "scrapesmith~mobile-de-scraper",
         zeilen: [{ title: "BMW 320d Touring", first_registration: "03/2019", mileage_km: 22000, price_gross: 24900, power_kw: 140, fuel: "Diesel", gearbox: "Automatic", ez_ok: true, km_ok: true, gueltig: true, grund: null },
                  { title: "BMW 320d Limousine", first_registration: "11/2019", mileage_km: 28000, price_gross: 25500, power_kw: 140, fuel: "Diesel", gearbox: "Automatic", ez_ok: true, km_ok: true, gueltig: true, grund: null }],
         // Review 26.09. Nr. 39: alle Segmente in einem Lauf; Welle 5 Nr. 20: geliefert/gueltig/verworfen (Grund) je Segment; Nr. 65: bestanden -> testlauf_ok
-        segmente: [{ label: "EZ 2019 · 10–30k km", anzahl: 2, geliefert: 2, gueltig: 2, verworfen: 0, gruende: [], ez_ok: true, km_ok: true },
-                   { label: "EZ 2019 · 30–50k km", anzahl: 1, geliefert: 1, gueltig: 0, verworfen: 1, gruende: ["ez 2021 > 2019"], ez_ok: false, km_ok: true },
-                   { label: "EZ 2020 · 10–30k km", anzahl: 0, geliefert: 0, gueltig: 0, verworfen: 0, gruende: [], ez_ok: null, km_ok: null }], leer: 1, segmente_geprueft: 3, segmente_gesamt: 3,
-        segmente_max: 40, geliefert_gesamt: 3, gueltig_gesamt: 2, verworfen_gesamt: netz.verworfen, bestanden: netz.verworfen === 0,
-        definition_hash: "h-neu", testlauf_ok_at: netz.verworfen === 0 ? "2026-10-01T05:00:00Z" : null, testlauf_ok_hash: netz.verworfen === 0 ? "h-neu" : null } };
+        // Welle 6 Nr. 79/81: Sortierung/Top-N je Segment, nicht zuordenbare Zeilen
+        segmente: [{ label: "EZ 2019 · 10–30k km", anzahl: 2, geliefert: 2, gueltig: 2, verworfen: 0, gruende: [], ez_ok: true, km_ok: true, sortiert: true, nachweis: "bewiesen", nachweis_grund: null },
+                   { label: "EZ 2019 · 30–50k km", anzahl: 1, geliefert: 1, gueltig: 0, verworfen: 1, gruende: ["ez 2021 > 2019"], ez_ok: false, km_ok: true, sortiert: true, nachweis: "nur_monoton", nachweis_grund: "keine searchPosition (Top-N nicht bewiesen)" },
+                   { label: "EZ 2020 · 10–30k km", anzahl: 0, geliefert: 0, gueltig: 0, verworfen: 0, gruende: [], ez_ok: null, km_ok: null, sortiert: null, nachweis: null, nachweis_grund: null }], leer: 1, segmente_geprueft: 3, segmente_gesamt: 3,
+        segmente_max: 40, geliefert_gesamt: 3, gueltig_gesamt: 2, verworfen_gesamt: netz.verworfen, bestanden: netz.verworfen === 0, nicht_zuordenbar: netz.verworfen ? 2 : 0, sortierung_ungueltig: 0,
+        definition_hash: "d-neu", filter_hash: "h-neu", testlauf_ok_at: netz.verworfen === 0 ? "2026-10-01T05:00:00Z" : null, testlauf_ok_hash: netz.verworfen === 0 ? "h-neu" : null } };
       return { data: { ok: true, modell: { id: "neu" } } };
     }),
     put: vi.fn(async (url, body) => { netz.posts.push({ url, body }); return { data: { ok: true } }; }),
@@ -84,6 +89,12 @@ describe("Suchaufträge", () => {
     await starten();
     expect(el("auftraege-kosten").textContent).toContain("9.728");
     expect(el("auftraege-kosten").textContent).toContain("8.60 $");
+    // Nr. 141: Warnung nennt Restkosten, Resttage und freies Budget
+    expect(el("auftraege-budget-warnung").textContent).toContain("verbleibende Monatsbudget");
+    expect(el("auftraege-budget-warnung").textContent).toContain("noch 12.50 $ für 5 Tage bei 10.00 $ frei");
+    // Nr. 84: PRIVATE und (alt) FSBO werden beide als "Privat" gezeigt
+    expect(el("auftrag-vw-polo-10tsi").textContent).toContain("Privat");
+    expect(el("auftrag-opel-astra-ohne").textContent).toContain("Privat");
     const z = el("auftrag-bmw-320d");
     expect(z.textContent).toContain("2019, 2020, 2021, 2022");
     expect(z.textContent).toContain("10–30k, 30–50k");
@@ -161,21 +172,39 @@ describe("Suchaufträge", () => {
     expect(segTab.querySelectorAll("tbody tr")[1].textContent).toContain("1 (ez 2021 > 2019)");
     expect(segTab.querySelectorAll("tbody tr")[1].textContent).toContain("✗");
     expect(segTab.querySelectorAll("tbody tr")[2].textContent).toContain("—");
+    // Welle 6 Nr. 79/81: Sortierung je Segment und nicht zuordenbare Zeilen
+    expect(segTab.textContent).toContain("Sortierung");
+    expect(segTab.querySelectorAll("tbody tr")[0].textContent).toContain("Top-N bewiesen");
+    expect(segTab.querySelectorAll("tbody tr")[1].textContent).toContain("monoton (Top-N nicht bewiesen)");
+    expect(el("auftrag-testlauf-unzuordenbar").textContent).toBe(" · nicht zuordenbar: 2");
     expect(el("auftrag-testlauf").textContent).toContain("höchstens 40");
+    // Nr. 142: PLZ ohne Radius -> Hinweis, mit Radius weg
+    await setzen("auftrag-plz", "30159");
+    expect(el("auftrag-plz-hinweis").textContent).toContain("nur zusammen");
+    await setzen("auftrag-radius", "50");
+    expect(el("auftrag-plz-hinweis")).toBeNull();
+    await setzen("auftrag-plz", "");
+    await setzen("auftrag-radius", "");
     // bestanden -> Aktivieren frei; eine materielle Aenderung (Getriebe) sperrt wieder, rows nicht
     netz.verworfen = 0;
     await klick("auftrag-testlauf-knopf");
     expect(el("auftrag-testlauf-ergebnis").textContent).toContain("Bestanden");
+    expect(el("auftrag-testlauf-unzuordenbar")).toBeNull();
+    expect(el("auftrag-aktivieren").disabled).toBe(false);
+    // Nr. 124: die Zeilenzahl ist keine Filteraenderung — der Testlauf gilt weiter; das Getriebe schon
+    await setzen("auftrag-rows", "35");
     expect(el("auftrag-aktivieren").disabled).toBe(false);
     await setzen("auftrag-getriebe", "MANUAL_GEAR");
     expect(el("auftrag-aktivieren").disabled).toBe(true);
     await klick("auftrag-testlauf-knopf");
     expect(el("auftrag-aktivieren").disabled).toBe(false);
+    // Nr. 84: Verkaeuferart als PRIVATE (nie FSBO) im Formular
+    expect([...el("auftrag-verkaeufer").options].map((o) => o.value)).toEqual(["", "DEALER", "PRIVATE"]);
     // Aktivieren -> POST models mit status active (+ Testlauf-Nachweis); bei Budget-Ueberschreitung Rueckfrage
     netz.ueberschritten = true;
     await setzen("auftrag-rows", "40");
     await prognoseAbwarten();
-    expect(el("auftrag-prognose").textContent).toContain("überschreiten");
+    expect(el("auftrag-prognose").textContent).toContain("würde das verbleibende Budget überschreiten (noch 150.00 $ für 5 Tage, 100.00 $ frei)");
     expect(el("auftrag-aktivieren").disabled).toBe(false);
     const bestaetigen = vi.spyOn(window, "confirm").mockReturnValue(false);
     await klick("auftrag-aktivieren");

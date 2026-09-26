@@ -181,25 +181,48 @@ async def einstellungen_setzen(db, **werte) -> Dict[str, Any]:
 
 
 async def _verkaeufer_normalisieren(db, modelle: List[Dict[str, Any]]) -> int:
-    """Reparaturwelle 6 Nr. 84: Auftraege, die noch 'FSBO' tragen, werden auf 'PRIVATE' gehoben — der
-    definition_hash aendert sich dadurch NICHT (er normalisiert die Verkaeuferart), also keine neue Fassung."""
+    """Reparaturwelle 6 Nr. 84 + Nr. 124: Auftraege werden auf die aktuelle Hash-Fassung gehoben —
+    'FSBO' -> 'PRIVATE', Fingerabdruck mit Zeilenzahl (definition_hash) und Filter-Fingerabdruck
+    (filter_hash). Die Fassung (version) aendert sich dabei NICHT; ein bestandener Testlauf gilt
+    weiter (testlauf_ok_hash -> filter_hash); laufende/wartende Jobs bekommen den neuen auftrag_hash,
+    damit der Worker sie nicht als 'Auftrag geaendert' abbricht."""
     from markt import auftraege
     n = 0
     for m in modelle:
         s = str(m.get("seller_type") or "").upper()
+        setzen: Dict[str, Any] = {}
         if s and s != "DEALER" and s != "PRIVATE":
             neu = "PRIVATE" if s in ("FSBO", "PRIVAT") else ("DEALER" if s == "HAENDLER" else None)
-            if not neu:
-                continue
-            alt_hash = m.get("definition_hash")
-            m["seller_type"] = neu
-            setzen = {"seller_type": neu, "definition_hash": auftraege.definition_hash(m)}
-            if alt_hash and m.get("testlauf_ok_hash") == alt_hash:
-                setzen["testlauf_ok_hash"] = setzen["definition_hash"]      # der bestandene Testlauf gilt weiter
-            await db[konfig.MODELLE].update_one({"id": m["id"]}, {"$set": setzen})
-            m.update(setzen)
-            n += 1
+            if neu:
+                m["seller_type"] = neu
+                setzen["seller_type"] = neu
+        if int(m.get("hash_fassung") or 1) >= auftraege.HASH_FASSUNG and not setzen:
+            continue
+        alt_hash = m.get("definition_hash")
+        setzen.update({"definition_hash": auftraege.definition_hash(m), "filter_hash": auftraege.filter_hash(m),
+                       "hash_fassung": auftraege.HASH_FASSUNG})
+        if m.get("testlauf_ok_at") and (not alt_hash or m.get("testlauf_ok_hash") == alt_hash):
+            setzen["testlauf_ok_hash"] = setzen["filter_hash"]      # der bestandene Testlauf gilt weiter
+        await db[konfig.MODELLE].update_one({"id": m["id"]}, {"$set": setzen})
+        if alt_hash and alt_hash != setzen["definition_hash"]:
+            await db[konfig.JOBS].update_many({"model_id": m["id"], "status": {"$in": ["queued", "running"]}, "auftrag_hash": alt_hash},
+                                              {"$set": {"auftrag_hash": setzen["definition_hash"]}})
+        m.update(setzen)
+        n += 1
     return n
+
+
+DEFINITION_FELDER_SEGMENT = ("make_id", "model_id", "fuel", "gearbox", "body", "power_kw_min", "power_kw_max",
+                             "country", "zip", "radius_km", "seller_type", "rows")
+
+
+def definition_schnappschuss(m: Dict[str, Any]) -> Dict[str, Any]:
+    """Nr. 92/123: was der Suchauftrag zur Zeit dieser Fassung verlangte — unveraenderlich am Segment,
+    damit eine historische Fassung ihre eigene Definition zeigt (nicht den heutigen Auftrag)."""
+    d = {k: m.get(k) for k in DEFINITION_FELDER_SEGMENT}
+    d["rows"] = int(m.get("rows") or konfig.rows_je_segment())
+    d["country"] = (str(m.get("country") or "DE").upper()[:2]) or "DE"
+    return d
 
 
 async def _nachplanen(db) -> Dict[str, Any]:
@@ -230,6 +253,7 @@ async def synchronisieren(db, *, nachplanen: bool = True) -> Dict[str, Any]:
         if not modell_aktiv(m) or not m.get("model_id"):
             continue
         fassung = modell_version(m)
+        definition = definition_schnappschuss(m)
         for b in km_buckets_fuer_modell(m, buckets):
             for ez in (ez_buckets_fuer_modell(m, ezs) or [None]):
                 # P4: Segment-IDs tragen die Fassung des Auftrags — aeltere Fassungen fallen
@@ -245,11 +269,19 @@ async def synchronisieren(db, *, nachplanen: bool = True) -> Dict[str, Any]:
                               "max_items": int(m.get("rows") or einst["rows_je_segment"]),
                               "crawls_per_day": int(m.get("crawls_per_day") or 1), "sort": "price_asc",
                               "enabled": True, "priority": int(m.get("priority") or 5), "updated_at": konfig.jetzt_iso()},
-                     "$setOnInsert": {"fuel": None, "gearbox": None, "body": None,
+                     # Nr. 92/123: unveraenderlicher Definitions-Schnappschuss der Fassung (nur beim Anlegen)
+                     "$setOnInsert": {"fuel": definition["fuel"], "gearbox": definition["gearbox"], "body": definition["body"],
+                                      "definition": definition, "definition_hash": m.get("definition_hash"),
                                       "last_success_at": None, "last_planned_tag": None, "created_at": konfig.jetzt_iso()}},
                     upsert=True)
                 if r.upserted_id is not None:
                     neu += 1
+                else:
+                    # Altbestand ohne Schnappschuss: das aktive Segment gehoert zur aktuellen Fassung -> nachtragen
+                    await db[konfig.SEGMENTE].update_one({"id": sid, "definition": {"$exists": False}},
+                                                         {"$set": {"definition": definition, "definition_hash": m.get("definition_hash"),
+                                                                   "fuel": definition["fuel"], "gearbox": definition["gearbox"],
+                                                                   "body": definition["body"]}})
     weg = [s["id"] async for s in db[konfig.SEGMENTE].find({"id": {"$nin": list(gueltig)}, "enabled": True}, {"_id": 0, "id": 1})]
     r = await db[konfig.SEGMENTE].update_many({"id": {"$nin": list(gueltig)}, "enabled": True},
                                               {"$set": {"enabled": False, "updated_at": konfig.jetzt_iso()}})

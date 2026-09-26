@@ -17,11 +17,23 @@ const jobStatusText = (st) => JOB_STATUS_TEXT[st] || st;
 
 /**
  * Admin → Marktanalyse → Modell: km-/EZ-Segmente wählen, Kennzahlen,
- * Zeitreihe (Minimum / Median / Durchschnitt der 20 günstigsten je Tag,
+ * Zeitreihe (Minimum / Median / Durchschnitt der N günstigsten je Tag,
  * p25–p75 als Band), Tagesveränderung, Wochenmediane, Tagestabelle,
- * aktuelle Top-20 mit Preis-Historie je Listing. Alle Diagrammdaten kommen
- * aus den Tagesaggregaten (30 Tage = 30 Dokumente).
+ * aktuelle Top-N mit Preis-Historie je Listing. Alle Diagrammdaten kommen
+ * aus den Tagesaggregaten (30 Tage = 30 Dokumente). N = Zeilen des Suchauftrags.
  */
+const FASSUNG_TEXT = { fuel: "Kraftstoff", gearbox: "Getriebe", body: "Karosserie", seller_type: "Verkäufer", country: "Land" };
+/** Reparaturwelle 6 Nr. 123: die Definition einer (auch historischen) Fassung als Kurztext. */
+function fassungText(d) {
+  if (!d) return "";
+  const teile = [];
+  for (const k of ["fuel", "gearbox", "body", "seller_type"]) if (d[k]) teile.push(`${FASSUNG_TEXT[k]} ${d[k]}`);
+  if (d.country && d.country !== "DE") teile.push(`${FASSUNG_TEXT.country} ${d.country}`);
+  if (d.power_kw_min || d.power_kw_max) teile.push(`${d.power_kw_min || "…"}–${d.power_kw_max || "…"} kW`);
+  if (d.zip) teile.push(`PLZ ${d.zip} +${d.radius_km} km`);
+  if (d.rows) teile.push(`${d.rows} Zeilen`);
+  return teile.join(" · ");
+}
 export default function MarktModell() {
   const { modell: modellId } = useParams();
   const [params, setParams] = useSearchParams();
@@ -195,6 +207,12 @@ function SegmentAnalyse({ segment, bereich, onBereich, superAdmin }) {
             <div className="text-[15px] font-semibold text-white">{segment.label} · {segment.km_label}{segment.ez_label ? ` · ${segment.ez_label}` : ""}</div>
             <div className="text-[11px] text-zinc-500">{st.sample_size || 0} günstigste Vergleichsangebote · letzter Crawl {segment.last_success_at ? fmtDate(segment.last_success_at) : "—"}
               {zusammen.letzter_job ? ` · letzter Job ${jobStatusText(zusammen.letzter_job.status)}${zusammen.letzter_job.error && zusammen.letzter_job.status !== "data_invalid" ? ` (${zusammen.letzter_job.error})` : ""}` : ""}</div>
+            {/* Reparaturwelle 6 Nr. 123/124: eine frühere Fassung zeigt IHRE Definition, nicht den heutigen Auftrag */}
+            {zusammen.historisch && (
+              <div className="text-[11px] mt-0.5" style={{ color: "var(--st-amber)" }} data-testid="markt-fassung-historisch">
+                Frühere Fassung v{zusammen.segment?.version || 1} (Auftrag heute v{zusammen.modell?.version || 1}) — beobachtet mit: {fassungText(zusammen.fassung) || "Definition nicht gespeichert"}
+              </div>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <span className="text-[11px] rounded-full px-2 py-0.5 border" style={{ color: dl.farbe, borderColor: dl.farbe }} data-testid="markt-segment-datenlage">{dl.text}</span>
@@ -290,7 +308,7 @@ function SegmentAnalyse({ segment, bereich, onBereich, superAdmin }) {
               <summary className="text-[12px] text-zinc-400 cursor-pointer">Tagestabelle ({reihe.length} Tage)</summary>
               <div className="overflow-x-auto mt-2">
                 <table className="w-full text-[12px] min-w-[620px]" data-testid="markt-tagestabelle">
-                  <thead><tr className="text-left text-zinc-500 text-[11px] uppercase"><th className="py-1 pr-3">Datum</th><th className="py-1 pr-3 text-right">Fahrzeuge</th><th className="py-1 pr-3 text-right">Min</th><th className="py-1 pr-3 text-right">Median Top-20</th><th className="py-1 pr-3 text-right">Durchschnitt</th><th className="py-1 pr-3 text-right">Max</th><th className="py-1 pr-3 text-right">Veränderung</th></tr></thead>
+                  <thead><tr className="text-left text-zinc-500 text-[11px] uppercase"><th className="py-1 pr-3">Datum</th><th className="py-1 pr-3 text-right">Fahrzeuge</th><th className="py-1 pr-3 text-right">Min</th><th className="py-1 pr-3 text-right">Median günstigste</th><th className="py-1 pr-3 text-right">Durchschnitt</th><th className="py-1 pr-3 text-right">Max</th><th className="py-1 pr-3 text-right">Veränderung</th></tr></thead>
                   <tbody>{reihe.map((r) => (
                     <tr key={r.date} className="border-t border-white/5 tabular-nums" style={r.kein_angebot ? { color: "var(--text-dim)" } : undefined}>
                       <td className="py-1 pr-3 text-zinc-300">{r.date}{(r.laeufe?.length || 0) > 1 && <span className="ml-1 text-[10px] text-zinc-500" data-testid={`markt-laeufe-${r.date}`}>{r.laeufe.length} Läufe</span>}
@@ -307,7 +325,7 @@ function SegmentAnalyse({ segment, bereich, onBereich, superAdmin }) {
         )}
       </Card>
 
-      {/* Aktuelle Top-20 */}
+      {/* Aktuelle Top-N (die N günstigsten des letzten gültigen Laufs) */}
       <Card padded={false} data-testid="markt-listings">
         <div className="px-4 py-3 text-[13px] font-semibold text-white" style={{ borderBottom: "1px solid var(--wa-08)" }}>
           Aktuell {listings?.listings?.length || 0} günstigste Fahrzeuge {listings?.date ? `(Stand ${listings.date}${listings.lauf_tag && listings.lauf_tag.includes("#") ? `, letzter Lauf ${listings.lauf_tag.split("#")[1]}` : ""})` : ""}
@@ -334,7 +352,10 @@ function SegmentAnalyse({ segment, bereich, onBereich, superAdmin }) {
                   <td className="px-3 py-1.5">{l.seller_type === "DEALER" ? "Händler" : l.seller_type === "PRIVATE" ? "Privat" : l.seller_type}</td>
                   <td className="px-3 py-1.5">{l.price_rating_today || l.price_rating?.rating || "—"}</td>
                   <td className="px-3 py-1.5">{datumKurz(l.mobile_created_at)}</td>
-                  <td className="px-3 py-1.5">{datumKurz(l.first_seen_at)}</td>
+                  {/* Reparaturwelle 6 Nr. 139: erstmals gesehen IN DIESEM SEGMENT (global kann es älter sein) */}
+                  <td className="px-3 py-1.5">{datumKurz(l.segment_first_seen_at || l.first_seen_at)}
+                    {l.neu_im_segment && <span className="ml-1 text-[10px]" style={{ color: "var(--st-gruen)" }} data-testid={`markt-neu-segment-${l.listing_id}`}>neu in diesem Segment</span>}
+                    {l.segment_first_seen_at && l.first_seen_at && l.segment_first_seen_at.slice(0, 10) !== l.first_seen_at.slice(0, 10) ? <span className="ml-1 text-[10px] text-zinc-500" title="erstmals in irgendeinem Segment">(global {datumKurz(l.first_seen_at)})</span> : null}</td>
                   <td className="px-3 py-1.5 text-right" style={{ color: trendFarbe(l.change_since_first_eur) }}>{l.change_since_first_eur ? trendText(l.change_since_first_eur) : "—"}</td>
                   <td className="px-3 py-1.5 text-right text-zinc-400">{l.rank_yesterday ?? "neu"}</td>
                 </tr>))}</tbody>
