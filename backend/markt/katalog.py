@@ -166,7 +166,10 @@ def start_modelle() -> List[Dict[str, Any]]:
     for (mid, marke, modell, variante, fuel, kw_von, kw_bis, prio, getriebe) in STARTLISTE:
         ids = modell_ids(marke, modell, kat)
         label = seed_label(marke, modell, variante, getriebe)
-        raus.append({"id": mid, "make": marke, "model": modell, "variant": variante, "fuel": fuel, "gearbox": getriebe,
+        # Review 26.09.2026 abends P7: Karosserie leer (alle), ausser die Variante sagt es
+        # ("Passat Variant" -> Kombi). Codes wie im Vergleich (mobile_service.CATEGORY_LABELS).
+        body = "EstateCar" if "variant" in modell.lower() else None
+        raus.append({"id": mid, "make": marke, "model": modell, "variant": variante, "fuel": fuel, "gearbox": getriebe, "body": body,
                      "power_kw_min": kw_von, "power_kw_max": kw_bis, "priority": prio, "label": label, "seed_version": SEED_VERSION,
                      "enabled": bool(ids), "status": "active" if ids else "paused",
                      "make_id": (ids or {}).get("make_id"), "model_id": (ids or {}).get("model_id"),

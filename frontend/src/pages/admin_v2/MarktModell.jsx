@@ -11,6 +11,9 @@ import { Card, Badge, Button, Spinner, EmptyState, fmtDate } from "./_ui";
 import { BEREICHE, DATENLAGE, bestandText, datumKurz, datumZeit, eur, pct, trendFarbe, trendText, zustandText } from "@/lib/markt";
 
 const GETRIEBE_TEXT = { AUTOMATIC_GEAR: "Automatik", MANUAL_GEAR: "Schaltgetriebe", SEMIAUTOMATIC_GEAR: "Halbautomatik" };
+// Review 26.09.2026 abends P1: Job-Status 'data_invalid' = Lauf lieferte unsortierte Daten, nichts gespeichert
+const JOB_STATUS_TEXT = { completed: "fertig", failed: "Fehler", data_invalid: "ungültig (Sortierung unsicher, nichts gespeichert)", cancelled: "abgebrochen" };
+const jobStatusText = (st) => JOB_STATUS_TEXT[st] || st;
 
 /**
  * Admin → Marktanalyse → Modell: km-/EZ-Segmente wählen, Kennzahlen,
@@ -104,7 +107,7 @@ export default function MarktModell() {
         <div className="px-4 py-3 text-[13px] font-semibold text-white" style={{ borderBottom: "1px solid var(--wa-08)" }}>Alle Segmente dieses Modells ({aktive.length} aktiv)
           {inaktive > 0 && (
             <button type="button" className="ml-3 text-[11px] font-normal text-zinc-400 hover:text-white underline" onClick={() => setZeigeInaktiv((v) => !v)} data-testid="markt-inaktive-schalter">
-              {zeigeInaktiv ? `${inaktive} inaktive ausblenden` : `${inaktive} inaktive (alte Bereiche) anzeigen`}
+              {zeigeInaktiv ? `${inaktive} inaktive ausblenden` : `${inaktive} inaktive (alte Bereiche / frühere Fassungen) anzeigen`}
             </button>
           )}
         </div>
@@ -117,7 +120,9 @@ export default function MarktModell() {
             </tr></thead>
             <tbody>{tabelle.map((s) => (
               <tr key={s.id} className={`border-t border-white/5 tabular-nums ${s.id === segmentId ? "bg-white/5" : ""} ${s.enabled ? "" : "opacity-50"}`} data-testid={`markt-segmentzeile-${s.id}`}>
-                <td className="px-3 py-1.5"><button type="button" className="text-white hover:underline text-left" onClick={() => setzen("segment", s.id)}>{s.ez_label || "alle EZ"} · {s.km_label}</button></td>
+                <td className="px-3 py-1.5"><button type="button" className="text-white hover:underline text-left" onClick={() => setzen("segment", s.id)}>{s.ez_label || "alle EZ"} · {s.km_label}</button>
+                  {/* P4: alte Fassung des Auftrags (materielle Merkmale wurden geaendert) — Historie bleibt getrennt */}
+                  {(s.version || 1) !== (modell.version || 1) && <span className="ml-1 text-[10px] text-zinc-500" data-testid={`markt-fassung-${s.id}`}>Fassung v{s.version || 1} (aktuell v{modell.version || 1})</span>}</td>
                 <td className="px-3 py-1.5 text-zinc-400">{s.last_success_at ? fmtDate(s.last_success_at) : "—"}</td>
                 <td className="px-3 py-1.5 text-zinc-400">{s.naechster_crawl ? datumZeit(s.naechster_crawl) : "—"}</td>
                 <td className="px-3 py-1.5 text-right">{s.stats?.sample_size ?? "—"}</td>
@@ -126,7 +131,7 @@ export default function MarktModell() {
                 <td className="px-3 py-1.5 text-right">{eur(s.stats?.avg_price)}</td>
                 <td className="px-3 py-1.5 text-right" style={{ color: trendFarbe(s.stats?.trend_7d_pct) }}>{pct(s.stats?.trend_7d_pct)}</td>
                 <td className="px-3 py-1.5 text-right" style={{ color: trendFarbe(s.stats?.trend_30d_pct) }}>{pct(s.stats?.trend_30d_pct)}</td>
-                <td className="px-3 py-1.5">{!s.enabled ? <Badge tone="gray">inaktiv</Badge> : s.letzter_job?.status === "failed" ? <Badge tone="red">Fehler</Badge> : s.stats?.sample_size ? <Badge tone="green">ok</Badge> : <Badge tone="gray">wartet</Badge>}</td>
+                <td className="px-3 py-1.5">{!s.enabled ? <Badge tone="gray">inaktiv</Badge> : s.letzter_job?.status === "failed" ? <Badge tone="red">Fehler</Badge> : s.letzter_job?.status === "data_invalid" ? <Badge tone="yellow">ungültig</Badge> : s.stats?.sample_size ? <Badge tone="green">ok</Badge> : <Badge tone="gray">wartet</Badge>}</td>
               </tr>))}</tbody>
           </table>
         </div>
@@ -189,7 +194,7 @@ function SegmentAnalyse({ segment, bereich, onBereich, superAdmin }) {
           <div>
             <div className="text-[15px] font-semibold text-white">{segment.label} · {segment.km_label}{segment.ez_label ? ` · ${segment.ez_label}` : ""}</div>
             <div className="text-[11px] text-zinc-500">{st.sample_size || 0} günstigste Vergleichsangebote · letzter Crawl {segment.last_success_at ? fmtDate(segment.last_success_at) : "—"}
-              {zusammen.letzter_job ? ` · letzter Job ${zusammen.letzter_job.status}${zusammen.letzter_job.error ? ` (${zusammen.letzter_job.error})` : ""}` : ""}</div>
+              {zusammen.letzter_job ? ` · letzter Job ${jobStatusText(zusammen.letzter_job.status)}${zusammen.letzter_job.error && zusammen.letzter_job.status !== "data_invalid" ? ` (${zusammen.letzter_job.error})` : ""}` : ""}</div>
           </div>
           <div className="flex items-center gap-2">
             <span className="text-[11px] rounded-full px-2 py-0.5 border" style={{ color: dl.farbe, borderColor: dl.farbe }} data-testid="markt-segment-datenlage">{dl.text}</span>

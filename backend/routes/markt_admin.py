@@ -109,7 +109,7 @@ async def admin_market_katalog(marke: Optional[str] = None, _=Depends(current_ad
     if marke:
         return {"modelle": katalog.modelle_der_marke(marke)}
     return {"marken": katalog.marken(), "kraftstoffe": list(auftraege.KRAFTSTOFFE), "getriebe": list(auftraege.GETRIEBE),
-            "verkaeufer": list(auftraege.VERKAEUFER),
+            "verkaeufer": list(auftraege.VERKAEUFER), "karosserie": list(auftraege.KAROSSERIE),
             "standard": {"ez_years": [b["year_from"] for b in konfig.EZ_BUCKETS_STANDARD],
                          "km_buckets": [dict(b) for b in konfig.KM_BUCKETS_STANDARD],
                          "rows": konfig.rows_je_segment(), "crawls_per_day": konfig.crawls_je_tag_standard()}}

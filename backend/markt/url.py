@@ -8,6 +8,8 @@ from __future__ import annotations
 from typing import Any, Dict, List, Tuple
 from urllib.parse import urlencode
 
+from markt.normalisieren import KAROSSERIE_CODES
+
 BASIS = "https://suchen.mobile.de/fahrzeuge/search.html"
 
 
@@ -25,6 +27,10 @@ def parameter(segment: Dict[str, Any], modell: Dict[str, Any]) -> List[Tuple[str
         p.append(("pw", f"{kw_von or ''}:{kw_bis or ''}"))
     if modell.get("gearbox"):
         p.append(("tr", str(modell["gearbox"])))
+    # Review 26.09.2026 abends P7: Karosserie (c=) — dieselben Codes wie der Vergleich
+    # (Limousine, EstateCar, OffRoad, Cabrio, SportsCar, SmallCar, Van); nur bekannte Codes
+    if modell.get("body") and str(modell["body"]) in KAROSSERIE_CODES:
+        p.append(("c", str(modell["body"])))
     if modell.get("seller_type"):
         p.append(("st", str(modell["seller_type"])))          # DEALER | FSBO (privat)
     if modell.get("zip") and modell.get("radius_km"):

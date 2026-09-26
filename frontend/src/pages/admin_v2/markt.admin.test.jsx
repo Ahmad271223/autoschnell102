@@ -21,9 +21,12 @@ vi.mock("recharts", () => {
 const SEG = { id: "bmw-320d:55001-85000:2019-2021", model_id: "bmw-320d", label: "BMW 320d", min_km: 55001, max_km: 85000,
               km_label: "55–85k km", year_from: 2019, year_to: 2021, ez_label: "EZ 2019–2021", enabled: true,
               last_success_at: "2026-10-01T04:00:00+00:00", stats: { sample_size: 20 } };
-const SEG2 = { ...SEG, id: "bmw-320d:55001-85000:2016-2018", year_from: 2016, year_to: 2018, ez_label: "EZ 2016–2018", stats: null };
-// Befund 26.09. abends: altes, inaktives Segment (frueherer km-Bereich) darf Auswahl und Tabelle nicht aufblaehen
-const SEG_ALT = { ...SEG, id: "bmw-320d:2019-2021:0-50000", min_km: 0, max_km: 50000, km_label: "0–50k km", enabled: false, stats: null };
+// Review 26.09. abends P1: letzter Lauf lieferte unsortierte Daten -> Job 'data_invalid' -> Status "ungültig"
+const SEG2 = { ...SEG, id: "bmw-320d:55001-85000:2016-2018", year_from: 2016, year_to: 2018, ez_label: "EZ 2016–2018", stats: null, version: 2,
+               letzter_job: { status: "data_invalid", error: "Sortierung unsicher" } };
+// Befund 26.09. abends: altes, inaktives Segment (frueherer km-Bereich) darf Auswahl und Tabelle nicht aufblaehen;
+// P4: es stammt aus Fassung 1, der Auftrag steht auf Fassung 2 -> Hinweis
+const SEG_ALT = { ...SEG, id: "bmw-320d:2019-2021:0-50000", min_km: 0, max_km: 50000, km_label: "0–50k km", enabled: false, stats: null, version: 1 };
 const STATS = { sample_size: 20, min_price: 18900, median_price: 20250, avg_price: 20410, max_price: 21700, p25_price: 19600,
                 p75_price: 21000, trend_7d_eur: -420, trend_7d_pct: -2.1, trend_30d_eur: -850, trend_30d_pct: -4.0,
                 new_listings_7d: 14, price_reductions_7d: 9, beobachtete_tage: 31, datenlage: "gut", updated_at: "2026-10-01T05:10:00+00:00",
@@ -40,7 +43,10 @@ vi.mock("@/lib/api", () => ({
           segmente_aktiv: 16, segmente_mit_daten: 4, last_success_at: "2026-10-01T04:00:00+00:00", listings: 312,
           min_price: 18900, median_top20_mittel: 20250, trend_7d_pct: -2.1, trend_30d_pct: -4.0, crawl_status: "ok" },
         { id: "vw-golf-20tdi", label: "VW Golf 2.0 TDI", fuel: "DIESEL", enabled: false, model_id: "14", segmente_aktiv: 0, segmente_mit_daten: 0,
-          listings: 0, min_price: null, median_top20_mittel: null, trend_7d_pct: null, trend_30d_pct: null, crawl_status: "wartet" }] } };
+          listings: 0, min_price: null, median_top20_mittel: null, trend_7d_pct: null, trend_30d_pct: null, crawl_status: "wartet" },
+        // P1: heute ein Lauf mit ungueltigen Daten (data_invalid) -> eigener Status, kein "fehler"
+        { id: "audi-a4-40tdi", label: "Audi A4 40 TDI", fuel: "DIESEL", enabled: true, model_id: "9", segmente_aktiv: 30, segmente_mit_daten: 12,
+          listings: 80, min_price: 21000, median_top20_mittel: 24000, trend_7d_pct: null, trend_30d_pct: null, crawl_status: "ungueltig" }] } };
       if (url === "/admin/market/status") return { data: { aktiv: netz.aktiv, aktiv_quelle: "env", segmente: 16, modelle: 1, listings: 312, snapshots: 4000, token_vorhanden: true,
         actor: "sourabhbgp~mobile-de-scraper", budget: { _id: "2026-10", budget_usd: 450, used_usd: 12.5, reserved_usd: 0, rows: 4000, runs: 200 },
         takt: { intervall_tage: 3, segmente_je_tag: 6, buendel: 10, kosten_je_tag_usd: 0.38, kosten_je_monat_usd: 11.7, automatisch: true },
@@ -48,9 +54,9 @@ vi.mock("@/lib/api", () => ({
                       kosten_heute_usd: 0.11, kosten_monat_usd: 12.5, budget_uebrig_usd: 437.5, budget_anteil_pct: 2.8, mittlere_laufzeit_s: 9.4,
                       letzter_erfolg: { finished_at: "2026-10-01T05:10:00Z", segment_id: "bmw-320d:2019:50001-85000" },
                       alarme: [{ typ: "segment_veraltet", text: "3 Segment(e) seit über 48 h nicht erfolgreich aktualisiert", stufe: "warn" }] },
-        jobs: { tag: "2026-10-01", completed: 6, running: 0, queued: 0, failed: 0, naechster: null }, km_buckets: [{ min_km: 10000, max_km: 30000 }],
+        jobs: { tag: "2026-10-01", completed: 6, running: 0, queued: 0, failed: 0, data_invalid: 1, naechster: null }, km_buckets: [{ min_km: 10000, max_km: 30000 }],
         ez_buckets: [{ year_from: 2019, year_to: 2021 }], einstellungen: { rows_je_segment: 20 } } };
-      if (url === "/admin/market/models/bmw-320d") return { data: { id: "bmw-320d", label: "BMW 320d", fuel: "DIESEL", make_id: "3500", model_id: "10", segmente: [SEG, SEG2, SEG_ALT] } };
+      if (url === "/admin/market/models/bmw-320d") return { data: { id: "bmw-320d", label: "BMW 320d", fuel: "DIESEL", make_id: "3500", model_id: "10", version: 2, segmente: [{ ...SEG, version: 2 }, SEG2, SEG_ALT] } };
       if (url.includes("/listings/449438530/history")) return { data: { listing: { title: "BMW 320d Touring", active_state: "seen", mileage_km: 78000,
         first_registration: "03/2020", postal_code: "30159", city: "Hannover", price_history: [{ at: "2026-09-13T04:00:00Z", price: 19400 }, { at: "2026-10-01T04:00:00Z", price: 18900 }] },
         snapshots: [{ date: "2026-09-13", segment_id: SEG.id, price: 19400, rank_in_sample: 5 }], hinweis_zustand: "" } };
@@ -114,6 +120,10 @@ describe("Admin Marktanalyse", () => {
     expect(z.textContent).toContain("-4 %");
     expect(z.textContent).toContain("4/16");
     expect(el("markt-modell-vw-golf-20tdi").textContent).toContain("pausiert");
+    // P1: ungueltiger Lauf heute -> Status "ungültig" (nicht "fehler"), Kachel zaehlt ihn getrennt
+    expect(el("markt-modell-audi-a4-40tdi").textContent).toContain("ungültig");
+    expect(el("markt-modell-audi-a4-40tdi").textContent).not.toContain("fehler");
+    expect(el("markt-status").textContent).toContain("1 ungültig (Sortierung unsicher, nichts gespeichert)");
     expect(el("markt-modelle").textContent).toContain("kein Marktmedian");
     await klick("markt-modell-schalten-vw-golf-20tdi");
     expect(netz.posts[0]).toEqual({ url: "/admin/market/models/vw-golf-20tdi/enabled", body: { enabled: true } });
@@ -163,6 +173,11 @@ describe("Admin Marktanalyse", () => {
     expect(el("markt-inaktive-schalter").textContent).toContain("1 inaktive");
     await klick("markt-inaktive-schalter");
     expect(el(`markt-segmentzeile-${SEG_ALT.id}`)).toBeTruthy();
+    // P4: das inaktive Segment stammt aus Fassung 1, der Auftrag steht auf v2 -> Hinweis; aktuelle ohne Hinweis
+    expect(el(`markt-fassung-${SEG_ALT.id}`).textContent).toBe("Fassung v1 (aktuell v2)");
+    expect(el(`markt-fassung-${SEG.id}`)).toBeNull();
+    // P1: Segment mit letztem Job 'data_invalid' -> Badge "ungültig" statt "wartet"
+    expect(el(`markt-segmentzeile-${SEG2.id}`).textContent).toContain("ungültig");
     await klick("markt-inaktive-schalter");
     expect(el("markt-ez-2019").getAttribute("aria-pressed")).toBe("true");
     const kz = el("markt-kennzahlen").textContent;

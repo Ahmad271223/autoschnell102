@@ -118,7 +118,9 @@ async def segment_fuer_fahrzeug(db, v: Dict[str, Any]) -> Optional[Dict[str, Any
         ez = segmente.ez_bucket_fuer_jahr(ezs, jahr) if ezs else None
         if ezs and not ez:
             continue
-        seg = await db[SEGMENTE].find_one({"id": segmente.segment_id(m["id"], b, ez), "enabled": True}, {"_id": 0})
+        # P4: immer die aktuelle Fassung des Auftrags (aeltere Fassungen sind deaktiviert)
+        seg = await db[SEGMENTE].find_one({"id": segmente.segment_id(m["id"], b, ez, segmente.modell_version(m)), "enabled": True},
+                                          {"_id": 0})
         if not seg:
             continue
         erstes = erstes or seg
@@ -218,7 +220,9 @@ async def modelle_uebersicht(db, *, mit_archiv: bool = False) -> List[Dict[str, 
     segs = await db[SEGMENTE].find({}, {"_id": 0}).to_list(20000)
     stats = {s["segment_id"]: s async for s in db[SEGMENTSTATS].find({}, {"_id": 0})}
     heute = konfig.heute_tag()
-    fehler_heute = {j["segment_id"] async for j in db[JOBS].find({"tag": heute, "status": "failed"}, {"_id": 0, "segment_id": 1})}
+    fehler_heute = {j["segment_id"] async for j in db[JOBS].find({"tag": {"$regex": f"^{heute}"}, "status": "failed"}, {"_id": 0, "segment_id": 1})}
+    # P1: Laeufe mit ungueltigen Daten (Sortierung unsicher) getrennt von Fehlern
+    ungueltig_heute = {j["segment_id"] async for j in db[JOBS].find({"tag": {"$regex": f"^{heute}"}, "status": "data_invalid"}, {"_id": 0, "segment_id": 1})}
     raus = []
     for m in modelle:
         eigene = [s for s in segs if s.get("model_id") == m["id"]]
@@ -238,7 +242,9 @@ async def modelle_uebersicht(db, *, mit_archiv: bool = False) -> List[Dict[str, 
                      "median_top20_mittel": round(statistics.median(meds), 2) if meds else None,
                      "trend_7d_pct": round(sum(t7) / len(t7), 2) if t7 else None,
                      "trend_30d_pct": round(sum(t30) / len(t30), 2) if t30 else None,
+                     "version": segmente.modell_version(m),
                      "crawl_status": ("fehler" if any(s["id"] in fehler_heute for s in aktive)
+                                      else "ungueltig" if any(s["id"] in ungueltig_heute for s in aktive)
                                       else "ok" if letzte else "wartet")})
     return raus
 
@@ -253,12 +259,15 @@ async def modell_detail(db, model_id: str) -> Optional[Dict[str, Any]]:
         s["stats"] = st
         s["datenlage"] = (st or {}).get("datenlage") or "keine"
         naechster = await db[JOBS].find_one({"segment_id": s["id"], "status": "queued"}, {"_id": 0, "scheduled_at": 1}, sort=[("scheduled_at", 1)])
-        letzter = await db[JOBS].find_one({"segment_id": s["id"], "status": {"$in": ["completed", "failed"]}},
+        letzter = await db[JOBS].find_one({"segment_id": s["id"], "status": {"$in": ["completed", "failed", "data_invalid"]}},
                                           {"_id": 0, "status": 1, "error": 1, "finished_at": 1, "actual_rows": 1}, sort=[("finished_at", -1)])
         s["naechster_crawl"] = (naechster or {}).get("scheduled_at")
         s["letzter_job"] = letzter
+        # P4: Segmente ohne Fassung stammen aus Fassung 1 (altes ID-Format)
+        s["version"] = int(s.get("version") or 1)
     from markt import auftraege
     return {**m, "status": m.get("status") or ("active" if m.get("enabled") else "paused"), "segmente": segs,
+            "version": segmente.modell_version(m),
             "prognose": auftraege.prognose_modell(m),
             "km_buckets": segmente.km_buckets_fuer_modell(m, await segmente.km_buckets(db)),
             "ez_buckets": segmente.ez_buckets_fuer_modell(m, await segmente.ez_buckets(db))}
@@ -317,8 +326,8 @@ async def segment_verlauf(db, segment_id: str, bereich: str = "30d") -> Dict[str
                       "p25": d.get("p25_price"), "p75": d.get("p75_price"),
                       "new_in_sample": d.get("new_in_sample_today"), "price_reductions": d.get("price_reductions_today"),
                       "change_eur": aend_eur, "change_pct": aend_pct,
-                      # Nr. 17: alle Laeufe des Tages (Hauptwerte = letzter Lauf)
-                      "laeufe": d.get("laeufe") or [], "sorted_confirmed": d.get("sorted_confirmed")})
+                      # Nr. 17: alle Laeufe des Tages (P5: Hauptwerte = letzter gueltiger Lauf mit Treffern)
+                      "laeufe": d.get("laeufe") or []})
         vor = med if med is not None else vor
     wochen: Dict[str, List[float]] = {}
     for r in reihe:
@@ -385,12 +394,14 @@ async def monitoring(db) -> Dict[str, Any]:
     t = konfig.heute_tag()
     m = konfig.monat()
     jobs_heute = await db[JOBS].find({"tag": {"$regex": f"^{t}"}}, {"_id": 0, "status": 1, "actual_rows": 1, "actual_cost": 1,
-                                                                  "dauer_ms": 1, "sorted_confirmed": 1, "finished_at": 1}).to_list(50000)
+                                                                  "dauer_ms": 1, "finished_at": 1}).to_list(50000)
     def _z(st):
         return sum(1 for j in jobs_heute if j.get("status") == st)
     fertig = [j for j in jobs_heute if j.get("status") == "completed"]
+    # P1: Laeufe mit ungueltigen Daten haben Geld gekostet (Kosten heute), liefern aber keine Zeilen
+    ungueltig = [j for j in jobs_heute if j.get("status") == "data_invalid"]
     rows_heute = sum(int(j.get("actual_rows") or 0) for j in fertig)
-    kosten_heute = round(sum(float(j.get("actual_cost") or 0) for j in fertig), 4)
+    kosten_heute = round(sum(float(j.get("actual_cost") or 0) for j in fertig + ungueltig), 4)
     dauer = [int(j.get("dauer_ms") or 0) for j in fertig if j.get("dauer_ms")]
     b = await budget.dokument(db, m)
     letzter = await db[JOBS].find_one({"status": "completed"}, {"_id": 0, "finished_at": 1, "segment_id": 1}, sort=[("finished_at", -1)])
@@ -399,7 +410,7 @@ async def monitoring(db) -> Dict[str, Any]:
     nie = await db[SEGMENTE].count_documents({"enabled": True, "last_success_at": None,
                                               "created_at": {"$lt": stale_grenze}})
     null = sum(1 for j in fertig if int(j.get("actual_rows") or 0) == 0)
-    unsortiert = sum(1 for j in fertig if j.get("sorted_confirmed") is False)
+    unsortiert = len(ungueltig)
     fehlgeschlagen, gesamt = _z("failed"), len(jobs_heute)
     quote = round(fehlgeschlagen / gesamt * 100, 1) if gesamt else 0.0
     anteil = (float(b.get("used_usd") or 0) + float(b.get("reserved_usd") or 0)) / float(b.get("budget_usd") or 1) * 100 if b.get("budget_usd") else 0.0
@@ -416,11 +427,13 @@ async def monitoring(db) -> Dict[str, Any]:
         alarme.append({"typ": "keine_treffer", "stufe": "info",
                        "text": f"{null} Segment(e) heute ohne Treffer — Marktlücke (z. B. wenig km bei alter EZ), kein Fehler"})
     if unsortiert:
-        alarme.append({"typ": "sortierung", "text": f"{unsortiert} Lauf/Läufe heute mit unsicherer Sortierung", "stufe": "rot"})
+        alarme.append({"typ": "sortierung", "stufe": "rot",
+                       "text": f"{unsortiert} Lauf/Läufe heute mit ungültigen Daten (Sortierung unsicher — nichts gespeichert, Kosten gebucht)"})
     if not konfig.token():
         alarme.append({"typ": "token", "text": "APIFY_TOKEN fehlt", "stufe": "rot"})
     return {"tag": t, "geplant": gesamt, "erfolgreich": len(fertig), "fehlgeschlagen": fehlgeschlagen, "wartend": _z("queued"),
-            "laufend": _z("running"), "rows_heute": rows_heute, "rows_monat": int(b.get("rows") or 0),
+            "laufend": _z("running"), "ungueltig": unsortiert,
+            "rows_heute": rows_heute, "rows_monat": int(b.get("rows") or 0),
             "kosten_heute_usd": kosten_heute, "kosten_monat_usd": round(float(b.get("used_usd") or 0), 4),
             "budget_uebrig_usd": round(float(b.get("frei_usd") or 0), 2), "budget_anteil_pct": round(anteil, 1),
             "mittlere_laufzeit_s": round(sum(dauer) / len(dauer) / 1000, 1) if dauer else None,

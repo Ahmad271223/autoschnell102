@@ -17,7 +17,8 @@ vi.mock("@/lib/api", () => ({
   api: {
     get: vi.fn(async (url, cfg) => {
       if (url === "/admin/market/auftraege") return { data: { auftraege: [
-        { id: "bmw-320d", label: "BMW 320d", make: "BMW", model: "320", variant: "320d", fuel: "DIESEL", power_kw_min: 120, power_kw_max: 145, model_id: "10",
+        // Review 26.09. abends P7: Karosserie als Code; P4: Fassung 2 nach materieller Aenderung
+        { id: "bmw-320d", label: "BMW 320d", make: "BMW", model: "320", variant: "320d", fuel: "DIESEL", body: "EstateCar", version: 2, power_kw_min: 120, power_kw_max: 145, model_id: "10",
           ez_years: [2019, 2020, 2021, 2022], km_buckets: [{ min_km: 10000, max_km: 30000 }, { min_km: 30001, max_km: 50000 }], rows: 20, crawls_per_day: 2,
           status: "active", prognose: { segmente: 8 }, last_success_at: "2026-10-01T04:00:00Z", monatsverbrauch_usd: 1.23, crawl_status: "ok" },
         { id: "vw-polo-10tsi", label: "VW Polo 1.0 TSI", make: "Volkswagen", model: "Polo", variant: "1.0 TSI", model_id: "27", ez_years: [2020], km_buckets: [{ min_km: 0, max_km: 50000 }],
@@ -82,6 +83,9 @@ describe("Suchaufträge", () => {
     expect(z.textContent).toContain("10–30k, 30–50k");
     expect(z.textContent).toContain("2×");
     expect(z.textContent).toContain("aktiv");
+    expect(z.textContent).toContain("Kombi");              // P7: Karosserie in der Liste
+    expect(z.textContent).toContain("Fassung v2");          // P4: geaenderte Fassung sichtbar
+    expect(el("auftrag-vw-polo-10tsi").textContent).not.toContain("Fassung");
     expect(z.textContent).toContain("1.23 $");
     await klick("auftrag-pausieren-bmw-320d");
     expect(netz.posts[0]).toEqual({ url: "/admin/market/models/bmw-320d/status", body: { status: "paused" } });
@@ -101,6 +105,10 @@ describe("Suchaufträge", () => {
     await setzen("auftrag-modell", "320");
     await setzen("auftrag-variante", "320d");
     await setzen("auftrag-kraftstoff", "DIESEL");
+    // P7: Karosserie als Auswahl (Code), kein Freitext
+    expect(el("auftrag-karosserie").tagName).toBe("SELECT");
+    expect([...el("auftrag-karosserie").options].map((o) => o.value)).toEqual(["", "Limousine", "EstateCar", "OffRoad", "Cabrio", "SportsCar", "SmallCar", "Van"]);
+    await setzen("auftrag-karosserie", "EstateCar");
     // EZ: Standard 4 Jahre vorbelegt, 2022 abwählen, 2018 dazu
     expect(el("auftrag-ez-2019").getAttribute("aria-pressed")).toBe("true");
     await klick("auftrag-ez-2022");
@@ -113,7 +121,7 @@ describe("Suchaufträge", () => {
     await setzen("auftrag-frequenz", "1");
     await prognoseAbwarten();
     const prog = netz.posts.filter((p) => p.url === "/admin/market/prognose").pop();
-    expect(prog.body).toMatchObject({ make: "BMW", model: "320", variant: "320d", fuel: "DIESEL", rows: 30, crawls_per_day: 1, status: "active" });
+    expect(prog.body).toMatchObject({ make: "BMW", model: "320", variant: "320d", fuel: "DIESEL", body: "EstateCar", rows: 30, crawls_per_day: 1, status: "active" });
     expect(prog.body.ez_years).toEqual([2018, 2019, 2020, 2021]);
     expect(prog.body.km_buckets).toHaveLength(2);
     expect(el("auftrag-prognose").textContent).toContain("8 Segmente (4 EZ × 2 km)");
@@ -150,6 +158,7 @@ describe("Suchaufträge", () => {
     await starten();
     await klick("auftrag-duplizieren-bmw-320d");
     expect(el("auftrag-marke").value).toBe("BMW");
+    expect(el("auftrag-karosserie").value).toBe("EstateCar");
     expect(el("auftrag-ez-2019").getAttribute("aria-pressed")).toBe("true");
     await setzen("auftrag-modell", "520");
     await setzen("auftrag-variante", "520d");

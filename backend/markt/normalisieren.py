@@ -5,6 +5,7 @@ Verkaeufername (Datenschutz, Auftrag Punkt 33)."""
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Any, Dict, List, Optional, Tuple
 
 from markt.konfig import QUELLE
@@ -187,34 +188,111 @@ def getriebe_passt(soll: Optional[str], ist: Optional[str]) -> bool:
     return soll == "AUTOMATIC_GEAR" and ist == "SEMIAUTOMATIC_GEAR"
 
 
+# mobile.de-Karosseriecodes (Parameter c=) — dieselben wie im Vergleich (mobile_service.CATEGORY_LABELS)
+KAROSSERIE_CODES = ("Limousine", "EstateCar", "OffRoad", "Cabrio", "SportsCar", "SmallCar", "Van")
+
+
+def karosserie_code(text: Any) -> Optional[str]:
+    """mobile.de-Karosseriecode aus Code oder Beschriftung (scrapesmith 'Estate car',
+    'Saloon', 'SUV/Off-road', 'Small car', 'Sports car', 'Cabrio', 'Van'; sourabhbgp
+    'EstateCar'; Formular 'Kombi', 'SUV', 'Coupe'). None = unbekannt (tolerant)."""
+    n = re.sub(r"[^a-z0-9]", "", unicodedata.normalize("NFKD", str(text or "")).encode("ascii", "ignore").decode().lower())
+    if not n:
+        return None
+    if any(t in n for t in ("kombi", "estate", "station", "touring", "variant")):
+        return "EstateCar"
+    if any(t in n for t in ("suv", "offroad", "gelande")):
+        return "OffRoad"
+    if any(t in n for t in ("cabrio", "convertible", "roadster")):
+        return "Cabrio"
+    if any(t in n for t in ("coupe", "sport")):
+        return "SportsCar"
+    if any(t in n for t in ("kleinwagen", "smallcar", "small")):
+        return "SmallCar"
+    if any(t in n for t in ("van", "minibus", "kleinbus", "bus")):
+        return "Van"
+    if any(t in n for t in ("limousine", "saloon", "sedan")):
+        return "Limousine"
+    return None
+
+
+def _marke_norm(text: Any) -> str:
+    from markt.katalog import _MARKEN_ALIAS, _norm
+    n = _norm(text)
+    return _MARKEN_ALIAS.get(n, n)
+
+
+def modell_passt(listing: Dict[str, Any], modell: Dict[str, Any]) -> bool:
+    """Review 26.09.2026 abends P3: Marke/Modell hart pruefen. Hat die Zeile
+    make_id/model_id (scrapesmith makeId/modelId), muessen sie dem Suchauftrag gleichen;
+    fehlen die IDs, werden die Namen streng normalisiert verglichen (Marke gleich,
+    Modellname der Zeile beginnt mit dem Katalog-Modellnamen oder ist gleich).
+    Ohne jede Angabe in der Zeile (weder IDs noch Namen): tolerant."""
+    from markt.katalog import _norm
+    soll_make, soll_model = modell.get("make_id"), modell.get("model_id")
+    ist_make, ist_model = listing.get("make_id"), listing.get("model_id")
+    if ist_make and ist_model and soll_make and soll_model:
+        return str(ist_make) == str(soll_make) and str(ist_model) == str(soll_model)
+    name_make, name_model = listing.get("make"), listing.get("model")
+    if not name_make and not name_model:
+        return True
+    if modell.get("make") and name_make and _marke_norm(name_make) != _marke_norm(modell["make"]):
+        return False
+    if modell.get("model") and name_model:
+        soll = _norm(modell["model"])
+        ist = _norm(name_model)
+        if soll and ist != soll and not ist.startswith(soll):
+            return False
+    return True
+
+
 def passt_zum_segment(listing: Dict[str, Any], segment: Dict[str, Any], modell: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
     """Review 26.09.2026 Nr. 2: der Scraper liefert gelegentlich Zeilen, die den
     Filter der Such-URL nicht erfuellen (mobile.de ignoriert dann still einen
     Parameter). Jede Zeile wird deshalb gegen ihr Segment und den Suchauftrag
-    geprueft: EZ-Jahr, km, kW (+-3 wie in abfrage), Kraftstoff, Getriebe —
-    jeweils NUR, wenn beide Seiten die Angabe haben. (ok, grund); grund leer bei ok."""
+    geprueft: Marke/Modell (P3), EZ-Jahr, km, kW (+-3 wie in abfrage), Kraftstoff,
+    Getriebe, Karosserie (P7). (ok, grund); grund leer bei ok.
+
+    Review 26.09.2026 abends P2 — Pflichtfelder einer gueltigen Statistik-Zeile:
+    listing_id, price_gross, EZ-Jahr, km; zusaetzlich Kraftstoff, Getriebe, kW, wenn der
+    Suchauftrag sie verlangt. Fehlt eines -> verworfen mit Grund 'fehlend: <feld>'
+    (zaehlt zu verworfen_filter). Nur die Karosserie bleibt tolerant (unbekannt = ok)."""
     modell = modell or {}
+    if not listing.get("listing_id"):
+        return False, "fehlend: listing_id"
+    if not listing.get("price_gross"):
+        return False, "fehlend: price_gross"
+    if not modell_passt(listing, modell):
+        return False, "fremdes Modell"
     von, bis = segment.get("year_from"), segment.get("year_to")
     jahr = ez_jahr(listing)
-    if jahr is not None:
-        if von and jahr < int(von):
-            return False, f"ez {jahr} < {von}"
-        if bis and jahr > int(bis):
-            return False, f"ez {jahr} > {bis}"
+    if jahr is None:
+        return False, "fehlend: ez"
+    if von and jahr < int(von):
+        return False, f"ez {jahr} < {von}"
+    if bis and jahr > int(bis):
+        return False, f"ez {jahr} > {bis}"
     km = listing.get("mileage_km")
-    if km is not None:
-        mn, mx = segment.get("min_km"), segment.get("max_km")
-        if mn is not None and int(km) < int(mn):
-            return False, f"km {km} < {mn}"
-        if mx is not None and int(km) > int(mx):
-            return False, f"km {km} > {mx}"
+    if km is None:
+        return False, "fehlend: km"
+    mn, mx = segment.get("min_km"), segment.get("max_km")
+    if mn is not None and int(km) < int(mn):
+        return False, f"km {km} < {mn}"
+    if mx is not None and int(km) > int(mx):
+        return False, f"km {km} > {mx}"
     kw = listing.get("power_kw")
+    kw_von, kw_bis = modell.get("power_kw_min"), modell.get("power_kw_max")
+    if (kw_von or kw_bis) and not kw:
+        return False, "fehlend: power_kw"
     if kw:
-        kw_von, kw_bis = modell.get("power_kw_min"), modell.get("power_kw_max")
         if kw_von and int(kw) < int(kw_von) - KW_TOLERANZ:
             return False, f"kw {kw} < {kw_von}"
         if kw_bis and int(kw) > int(kw_bis) + KW_TOLERANZ:
             return False, f"kw {kw} > {kw_bis}"
+    if modell.get("fuel") and not listing.get("fuel"):
+        return False, "fehlend: fuel"
+    if modell.get("gearbox") and not listing.get("gearbox"):
+        return False, "fehlend: gearbox"
     try:
         from fahrzeug_codes import getriebe_code, kraftstoff_code
     except Exception:  # noqa: BLE001
@@ -227,4 +305,8 @@ def passt_zum_segment(listing: Dict[str, Any], segment: Dict[str, Any], modell: 
         code = getriebe_code(listing.get("gearbox"))
         if code and not getriebe_passt(modell["gearbox"], code):
             return False, f"getriebe {code} != {modell['gearbox']}"
+    if modell.get("body") and listing.get("category"):
+        code = karosserie_code(listing.get("category"))
+        if code and code != modell["body"]:
+            return False, f"karosserie {code} != {modell['body']}"
     return True, ""

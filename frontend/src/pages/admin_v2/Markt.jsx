@@ -7,7 +7,10 @@ import { useAuth } from "@/context/AuthContext";
 import { PageHeader, Card, Badge, Button, Spinner, EmptyState, fmtDate } from "./_ui";
 import { DATENLAGE, datumZeit, eur, pct, trendFarbe } from "@/lib/markt";
 
-const STATUS_TONE = { ok: "green", fehler: "red", wartet: "gray" };
+// Review 26.09.2026 abends P1: "ungueltig" = letzter Lauf lieferte unsortierte Daten (data_invalid) —
+// nichts gespeichert, Kosten gebucht; getrennt von "fehler"
+const STATUS_TONE = { ok: "green", fehler: "red", ungueltig: "yellow", wartet: "gray" };
+const STATUS_TEXT = { ok: "ok", fehler: "fehler", ungueltig: "ungültig", wartet: "wartet" };
 
 /**
  * Admin → Marktanalyse (Auftrag Ahmad 25.09.2026, Teil von Phase 1):
@@ -79,7 +82,8 @@ export default function Markt() {
           <Kachel label={`Budget ${b._id || ""}`} wert={`${Number(b.used_usd || 0).toFixed(2)} $ von ${Number(b.budget_usd || 0).toFixed(0)} $`}
                   hint={`reserviert ${Number(b.reserved_usd || 0).toFixed(2)} $ · ${b.rows || 0} Zeilen · ${b.runs || 0} Läufe`} />
           <Kachel label={`Jobs heute (${jobs.tag || ""})`} wert={`${jobs.completed || 0} fertig · ${jobs.running || 0} laufen · ${jobs.queued || 0} warten`}
-                  hint={jobs.failed ? `${jobs.failed} fehlgeschlagen` : "keine Fehler"} tone={jobs.failed ? "text-red-300" : ""} />
+                  hint={[jobs.failed ? `${jobs.failed} fehlgeschlagen` : "keine Fehler", jobs.data_invalid ? `${jobs.data_invalid} ungültig (Sortierung unsicher, nichts gespeichert)` : ""].filter(Boolean).join(" · ")}
+                  tone={jobs.failed ? "text-red-300" : jobs.data_invalid ? "text-amber-300" : ""} />
           <Kachel label="Nächster Lauf" wert={jobs.naechster ? datumZeit(jobs.naechster.scheduled_at) : "—"} hint={jobs.naechster?.segment_id || ""} />
           <Kachel label="Listings / Snapshots" wert={`${(status.listings || 0).toLocaleString("de-DE")} / ${(status.snapshots || 0).toLocaleString("de-DE")}`} />
           <Kachel label="Scraper" wert={status.token_vorhanden ? "Token vorhanden" : "APIFY_TOKEN fehlt"} hint={status.actor} tone={status.token_vorhanden ? "" : "text-red-300"} />
@@ -160,7 +164,7 @@ export default function Markt() {
                     <td className="px-4 py-2.5 text-right tabular-nums text-zinc-200">{eur(m.median_top20_mittel)}</td>
                     <td className="px-4 py-2.5 text-right tabular-nums" style={{ color: trendFarbe(m.trend_7d_pct) }}>{pct(m.trend_7d_pct)}</td>
                     <td className="px-4 py-2.5 text-right tabular-nums" style={{ color: trendFarbe(m.trend_30d_pct) }}>{pct(m.trend_30d_pct)}</td>
-                    <td className="px-4 py-2.5"><Badge tone={m.enabled ? STATUS_TONE[m.crawl_status] || "gray" : "gray"}>{m.enabled ? m.crawl_status : "pausiert"}</Badge></td>
+                    <td className="px-4 py-2.5"><Badge tone={m.enabled ? STATUS_TONE[m.crawl_status] || "gray" : "gray"}>{m.enabled ? STATUS_TEXT[m.crawl_status] || m.crawl_status : "pausiert"}</Badge></td>
                     <td className="px-4 py-2.5 text-right">
                       <Button size="sm" variant="ghost" disabled={!superAdmin || !!busy || (!m.enabled && !m.model_id)} onClick={() => schalten(m)}
                               data-testid={`markt-modell-schalten-${m.id}`}>{m.enabled ? "Pausieren" : "Beobachten"}</Button>

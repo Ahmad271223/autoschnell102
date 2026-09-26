@@ -6,6 +6,8 @@ Kostenprognose (keine KI), Testlauf mit wenigen Treffern, Anlegen/Aendern/
 Duplizieren/Archivieren. Archivieren loescht NIE Historie."""
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import re
 import uuid
@@ -18,7 +20,31 @@ STATUS = ("active", "paused", "archived")
 KRAFTSTOFFE = ("", "PETROL", "DIESEL", "HYBRID", "HYBRID_DIESEL", "ELECTRICITY", "LPG", "CNG")
 GETRIEBE = ("", "MANUAL_GEAR", "AUTOMATIC_GEAR", "SEMIAUTOMATIC_GEAR")
 VERKAEUFER = ("", "DEALER", "FSBO")
+# Review 26.09.2026 abends P7: Karosserie als mobile.de-Code (c=), "" = alle
+KAROSSERIE = ("",) + normalisieren.KAROSSERIE_CODES
 ROWS_MAX = 100
+# P4: materielle Merkmale eines Suchauftrags — aendert sich eines, mischen sich alte und neue
+# Historie; deshalb bekommt der Auftrag eine neue Fassung (version) mit eigenen Segment-IDs.
+# NICHT materiell: rows, crawls_per_day, ez_years, km_buckets, label, status, notiz, priority.
+DEFINITION_FELDER = ("make_id", "model_id", "fuel", "gearbox", "body", "power_kw_min", "power_kw_max",
+                     "country", "zip", "radius_km", "seller_type")
+
+
+def definition_hash(m: Dict[str, Any]) -> str:
+    """Stabiler Fingerabdruck der materiellen Merkmale (leer und None gleich)."""
+    werte = {}
+    for k in DEFINITION_FELDER:
+        w = m.get(k)
+        if w in (None, ""):
+            werte[k] = None
+        elif k in ("power_kw_min", "power_kw_max", "radius_km"):
+            try:
+                werte[k] = int(w)
+            except (TypeError, ValueError):
+                werte[k] = str(w)
+        else:
+            werte[k] = str(w).strip().upper() if k in ("fuel", "gearbox", "seller_type", "country") else str(w).strip()
+    return hashlib.sha256(json.dumps(werte, sort_keys=True, ensure_ascii=True).encode("utf-8")).hexdigest()[:24]
 
 
 class Ungueltig(ValueError):
@@ -101,6 +127,11 @@ def entwurf_pruefen(e: Dict[str, Any], *, bestehend: Optional[Dict[str, Any]] = 
     seller = str(e.get("seller_type") or "").upper().strip()
     if seller not in VERKAEUFER:
         raise Ungueltig("Verkäuferart unbekannt")
+    # P7: Karosserie als Code; Beschriftungen aus dem alten Freitextfeld ("Kombi", "SUV") werden zugeordnet
+    body_roh = str(e.get("body") or "").strip()
+    body = body_roh if body_roh in KAROSSERIE else (normalisieren.karosserie_code(body_roh) or "?")
+    if body not in KAROSSERIE:
+        raise Ungueltig(f"Karosserie „{body_roh}“ unbekannt — Limousine, Kombi, SUV, Cabrio, Coupé, Kleinwagen oder Van")
     kw_von = _int(e["power_kw_min"], "kW von", 1, 2000) if e.get("power_kw_min") not in (None, "") else None
     kw_bis = _int(e["power_kw_max"], "kW bis", 1, 2000) if e.get("power_kw_max") not in (None, "") else None
     if kw_von and kw_bis and kw_bis < kw_von:
@@ -117,7 +148,7 @@ def entwurf_pruefen(e: Dict[str, Any], *, bestehend: Optional[Dict[str, Any]] = 
     label = str(e.get("label") or "").strip() or f"{ids['make_name']} {variante or ids['model_name']}".strip()
     return {"make": ids["make_name"], "model": ids["model_name"], "variant": variante, "label": label[:120],
             "make_id": ids["make_id"], "model_id": ids["model_id"], "fuel": fuel or None, "gearbox": gearbox or None,
-            "body": (str(e.get("body") or "").strip()[:40] or None), "seller_type": seller or None,
+            "body": body or None, "seller_type": seller or None,
             "country": (str(e.get("country") or "DE").strip().upper()[:2] or "DE"), "zip": zip_code or None,
             "radius_km": radius, "power_kw_min": kw_von, "power_kw_max": kw_bis,
             "ez_years": jahre, "km_buckets": km, "rows": rows, "crawls_per_day": crawls,
@@ -252,7 +283,8 @@ async def anlegen(db, entwurf: Dict[str, Any]) -> Dict[str, Any]:
     while await db[MODELLE].find_one({"id": mid}, {"_id": 1}):
         mid = f"{basis}-{i}"
         i += 1
-    doc = {**m, "id": mid, "created_at": konfig.jetzt_iso(), "updated_at": konfig.jetzt_iso()}
+    doc = {**m, "id": mid, "version": 1, "definition_hash": definition_hash(m),
+           "created_at": konfig.jetzt_iso(), "updated_at": konfig.jetzt_iso()}
     await db[MODELLE].insert_one(dict(doc))
     await segmente.synchronisieren(db)
     doc.pop("_id", None)
@@ -260,11 +292,21 @@ async def anlegen(db, entwurf: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def aendern(db, model_id: str, entwurf: Dict[str, Any]) -> Dict[str, Any]:
+    """P4: aendern sich materielle Merkmale (definition_hash), steigt die Fassung — die
+    Segmente der neuen Fassung bekommen eigene IDs, die alten werden von synchronisieren
+    deaktiviert (nichts geloescht). rows/crawls_per_day/ez_years/km_buckets/label/status/
+    notiz/priority aendern die Fassung NICHT."""
     alt = await db[MODELLE].find_one({"id": model_id}, {"_id": 0})
     if not alt:
         raise Ungueltig("Modell nicht gefunden")
     m = entwurf_pruefen({**alt, **entwurf}, bestehend=alt)
-    await db[MODELLE].update_one({"id": model_id}, {"$set": {**m, "updated_at": konfig.jetzt_iso()}})
+    alt_hash = alt.get("definition_hash") or definition_hash(alt)
+    neu_hash = definition_hash(m)
+    version = segmente.modell_version(alt)
+    if neu_hash != alt_hash:
+        version += 1
+    await db[MODELLE].update_one({"id": model_id}, {"$set": {**m, "version": version, "definition_hash": neu_hash,
+                                                            "updated_at": konfig.jetzt_iso()}})
     await segmente.synchronisieren(db)
     return await db[MODELLE].find_one({"id": model_id}, {"_id": 0})
 
@@ -298,7 +340,8 @@ async def duplizieren(db, model_id: str, aenderungen: Optional[Dict[str, Any]] =
     alt = await db[MODELLE].find_one({"id": model_id}, {"_id": 0})
     if not alt:
         raise Ungueltig("Modell nicht gefunden")
-    entwurf = {k: v for k, v in alt.items() if k not in ("id", "created_at", "updated_at", "archived_at", "grund")}
+    entwurf = {k: v for k, v in alt.items() if k not in ("id", "created_at", "updated_at", "archived_at", "grund",
+                                                          "version", "definition_hash")}
     entwurf.update(aenderungen or {})
     entwurf["status"] = "paused"
     if not (aenderungen or {}).get("label"):
@@ -309,7 +352,8 @@ async def duplizieren(db, model_id: str, aenderungen: Optional[Dict[str, Any]] =
 async def monatsverbrauch_je_modell(db) -> Dict[str, float]:
     m = konfig.monat()
     raus: Dict[str, float] = {}
-    async for row in db[JOBS].aggregate([{"$match": {"status": "completed", "tag": {"$regex": f"^{m}"}}},
+    # P1: auch Laeufe mit ungueltigen Daten (data_invalid) haben Geld gekostet
+    async for row in db[JOBS].aggregate([{"$match": {"status": {"$in": ["completed", "data_invalid"]}, "tag": {"$regex": f"^{m}"}}},
                                          {"$group": {"_id": "$model_id", "usd": {"$sum": {"$ifNull": ["$actual_cost", 0]}},
                                                      "rows": {"$sum": {"$ifNull": ["$actual_rows", 0]}}}}]):
         raus[row["_id"]] = round(float(row["usd"] or 0), 4)

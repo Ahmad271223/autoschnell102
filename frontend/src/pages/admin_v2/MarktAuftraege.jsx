@@ -18,10 +18,13 @@ const JAHRE = Array.from({ length: 16 }, (_, i) => new Date().getFullYear() + 1 
 const KRAFTSTOFF = { "": "alle", PETROL: "Benzin", DIESEL: "Diesel", HYBRID: "Hybrid (Benzin)", HYBRID_DIESEL: "Hybrid (Diesel)", ELECTRICITY: "Elektro", LPG: "LPG", CNG: "CNG" };
 const GETRIEBE = { "": "alle (nicht empfohlen — mischt Schalter und Automatik)", AUTOMATIC_GEAR: "Automatik (auch DSG / S tronic)", MANUAL_GEAR: "Schaltgetriebe", SEMIAUTOMATIC_GEAR: "Halbautomatik" };
 const VERKAEUFER = { "": "alle", DEALER: "Händler", FSBO: "Privat" };
+// Review 26.09.2026 abends P7: Karosserie als mobile.de-Code (c=…), dieselben Codes wie im Vergleich
+const KAROSSERIE = { "": "alle", Limousine: "Limousine", EstateCar: "Kombi", OffRoad: "SUV / Geländewagen", Cabrio: "Cabrio",
+                     SportsCar: "Coupé / Sportwagen", SmallCar: "Kleinwagen", Van: "Van" };
 const STATUS_TONE = { active: "green", paused: "yellow", archived: "gray" };
 const STATUS_TEXT = { active: "aktiv", paused: "pausiert", archived: "archiviert" };
 
-const LEER = { make: "", model: "", variant: "", fuel: "", gearbox: "", power_kw_min: "", power_kw_max: "", seller_type: "",
+const LEER = { make: "", model: "", variant: "", fuel: "", gearbox: "", body: "", power_kw_min: "", power_kw_max: "", seller_type: "",
                country: "DE", zip: "", radius_km: "", ez_years: [], km_buckets: [], rows: 20, crawls_per_day: 2, label: "" };
 
 export default function MarktAuftraege() {
@@ -102,7 +105,7 @@ export default function MarktAuftraege() {
               <tbody>{daten.auftraege.map((m) => (
                 <tr key={m.id} className="border-t border-white/5" data-testid={`auftrag-${m.id}`}>
                   <td className="px-3 py-2"><Link to={`/admin/markt/${m.id}`} className="text-white font-medium hover:underline">{m.label}</Link><div className="text-[11px] text-zinc-500">{m.make} · {m.model}{m.model_id ? "" : " · keine mobile.de-ID"}</div></td>
-                  <td className="px-3 py-2 text-zinc-300">{m.variant}<div className="text-[11px] text-zinc-500">{[KRAFTSTOFF[m.fuel] !== "alle" && KRAFTSTOFF[m.fuel], m.gearbox && GETRIEBE[m.gearbox], m.power_kw_min || m.power_kw_max ? `${m.power_kw_min || "…"}–${m.power_kw_max || "…"} kW` : null, m.seller_type && VERKAEUFER[m.seller_type], m.zip ? `PLZ ${m.zip} +${m.radius_km} km` : null].filter(Boolean).join(" · ")}</div></td>
+                  <td className="px-3 py-2 text-zinc-300">{m.variant}<div className="text-[11px] text-zinc-500">{[KRAFTSTOFF[m.fuel] !== "alle" && KRAFTSTOFF[m.fuel], m.gearbox && GETRIEBE[m.gearbox], m.body && (KAROSSERIE[m.body] || m.body), m.power_kw_min || m.power_kw_max ? `${m.power_kw_min || "…"}–${m.power_kw_max || "…"} kW` : null, m.seller_type && VERKAEUFER[m.seller_type], m.zip ? `PLZ ${m.zip} +${m.radius_km} km` : null, (m.version || 1) > 1 ? `Fassung v${m.version}` : null].filter(Boolean).join(" · ")}</div></td>
                   <td className="px-3 py-2 text-zinc-300 tabular-nums">{(m.ez_years || []).join(", ") || "Standard"}</td>
                   <td className="px-3 py-2 text-zinc-300 tabular-nums">{(m.km_buckets || []).map((b) => `${Math.round(b.min_km / 1000)}–${Math.round(b.max_km / 1000)}k`).join(", ") || "Standard"}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{m.rows || 20}</td>
@@ -130,7 +133,7 @@ export default function MarktAuftraege() {
 }
 
 function ausModell(m) {
-  return { make: m.make || "", model: m.model || "", variant: m.variant || "", fuel: m.fuel || "", gearbox: m.gearbox || "",
+  return { make: m.make || "", model: m.model || "", variant: m.variant || "", fuel: m.fuel || "", gearbox: m.gearbox || "", body: m.body || "",
            power_kw_min: m.power_kw_min ?? "", power_kw_max: m.power_kw_max ?? "", seller_type: m.seller_type || "", country: m.country || "DE",
            zip: m.zip || "", radius_km: m.radius_km ?? "", ez_years: m.ez_years || [], km_buckets: (m.km_buckets || []).map((b) => ({ ...b })),
            rows: m.rows || 20, crawls_per_day: m.crawls_per_day || 1, label: m.label || "" };
@@ -217,6 +220,7 @@ function AuftragFormular({ katalog, formular, superAdmin, onClose, onGespeichert
         <label>Kraftstoff<select className={feld} style={st} value={w.fuel} onChange={(ev) => set("fuel", ev.target.value)} data-testid="auftrag-kraftstoff">{Object.entries(KRAFTSTOFF).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
         <label>Getriebe<select className={feld} style={st} value={w.gearbox} onChange={(ev) => set("gearbox", ev.target.value)} data-testid="auftrag-getriebe">{Object.entries(GETRIEBE).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select>
           {!w.gearbox && <div className="text-[11px] mt-1" style={{ color: "var(--st-amber, #f59e0b)" }}>Ohne Getriebe mischen sich Schalt- und Automatikpreise (1–3 T€ Unterschied). Für beide Getriebe zwei Aufträge anlegen (Duplizieren).</div>}</label>
+        <label>Karosserie<select className={feld} style={st} value={w.body} onChange={(ev) => set("body", ev.target.value)} data-testid="auftrag-karosserie">{Object.entries(KAROSSERIE).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
         <label>Leistung kW von – bis<div className="flex gap-2"><input className={feld} style={st} inputMode="numeric" value={w.power_kw_min} onChange={(ev) => set("power_kw_min", ev.target.value)} placeholder="von" data-testid="auftrag-kw-von" /><input className={feld} style={st} inputMode="numeric" value={w.power_kw_max} onChange={(ev) => set("power_kw_max", ev.target.value)} placeholder="bis" /></div></label>
         <label>Verkäuferart<select className={feld} style={st} value={w.seller_type} onChange={(ev) => set("seller_type", ev.target.value)}>{Object.entries(VERKAEUFER).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
         <label>Land<input className={feld} style={st} value={w.country} onChange={(ev) => set("country", ev.target.value.toUpperCase().slice(0, 2))} /></label>

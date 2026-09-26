@@ -80,15 +80,17 @@ LAEUFE_MAX = 4      # Nr. 16/17: hoechstens 4 Laeufe je Tag am Snapshot / Tagesa
 
 
 async def verarbeiten(db, segment: Dict[str, Any], listings: List[Dict[str, Any]], *,
-                      beobachtet: Optional[datetime] = None, sortiert_bestaetigt: bool = True,
-                      lauf_tag: Optional[str] = None) -> Dict[str, Any]:
-    """Ein Tages-Sample (Preis aufsteigend) eines Segments einarbeiten.
+                      beobachtet: Optional[datetime] = None, lauf_tag: Optional[str] = None) -> Dict[str, Any]:
+    """Ein Tages-Sample (Preis aufsteigend, vom Worker bestaetigt) eines Segments einarbeiten.
 
-    sortiert_bestaetigt=False (Review 26.09.2026 Nr. 3): die Zeilen sind dann nicht
-    sicher "die guenstigsten" — Tagesaggregat und Segmentstatistik werden als unsicher
-    markiert, Chancen werden NICHT abgeleitet.
+    Review 26.09.2026 abends P1: ein Lauf mit unsicherer Sortierung kommt hier NICHT mehr an —
+    der Worker schliesst ihn als 'data_invalid' ab, ohne Snapshots, Tagesstatistik, Chancen.
     lauf_tag (Nr. 16/17): Schluessel des Laufs (z. B. '2026-09-26#2') — bei mehreren
-    Abrufen je Tag bleibt jeder Lauf in 'laeufe' erhalten, die Hauptfelder zeigen den letzten."""
+    Abrufen je Tag bleibt jeder Lauf in 'laeufe' erhalten.
+    P5: die Hauptfelder der Tagesstatistik zeigen den letzten GUELTIGEN Lauf des Tages mit
+    Treffern; ein leerer zweiter Lauf wird nur in 'laeufe' protokolliert (leer=True) und
+    zerstoert den guten Tageswert nicht. War der Tag bisher leer, ueberschreibt ein Lauf mit
+    Zeilen. Ein Tag, an dem ALLE Laeufe leer waren, bleibt sample_size 0 (echte Marktluecke)."""
     jetzt = beobachtet or konfig.jetzt()
     jetzt_iso = jetzt.isoformat()
     tag = konfig.heute_tag(jetzt)
@@ -100,7 +102,8 @@ async def verarbeiten(db, segment: Dict[str, Any], listings: List[Dict[str, Any]
     # Nr. 41/42: Tageswerte sind die VEREINIGUNG ueber alle Laeufe des Tages — die Listing-IDs
     # (neu im Sample / Preis gesenkt) stehen am Tagesaggregat und werden je Lauf ergaenzt
     heute_stat = await db[TAGESSTATS].find_one({"segment_id": seg_id, "date": tag},
-                                               {"_id": 0, "new_in_sample_ids": 1, "price_reduced_ids": 1}) or {}
+                                               {"_id": 0, "new_in_sample_ids": 1, "price_reduced_ids": 1, "sample_size": 1}) or {}
+    bisher_heute = int(heute_stat.get("sample_size") or 0)
     neu_ids = set(heute_stat.get("new_in_sample_ids") or [])
     reduziert_ids = set(heute_stat.get("price_reduced_ids") or [])
     zaehler = {"neu_gesamt": 0, "neu_im_sample": 0, "preis_gesunken": 0, "preis_gestiegen": 0, "chancen": 0}
@@ -182,28 +185,32 @@ async def verarbeiten(db, segment: Dict[str, Any], listings: List[Dict[str, Any]
         {"$or": [{"last_segment_id": seg_id}, {"segment_ids": seg_id}],
          "active_state": "seen", "last_seen_tag": {"$lt": tag}},
         {"$set": {"active_state": "not_seen_in_sample", "not_seen_since": jetzt_iso, "updated_at": jetzt_iso}})
-    # Tagesaggregat (Nr. 17: jeder Lauf des Tages in 'laeufe', Hauptfelder = letzter Lauf)
-    # Nr. 54: auch ein Lauf mit 0 Treffern schreibt das Tagesaggregat (sample_size 0, ohne Preise) —
+    # Tagesaggregat (Nr. 17: jeder Lauf des Tages in 'laeufe'; P5: Hauptfelder = letzter
+    # gueltiger Lauf des Tages MIT Treffern). Nr. 54: auch ein Lauf mit 0 Treffern schreibt das
+    # Tagesaggregat (sample_size 0, ohne Preise), wenn der Tag noch keinen Treffer hatte —
     # der Tag zaehlt als beobachtet. Nr. 41/42: Tageswerte = Vereinigung ueber alle Laeufe des Tages.
     kz = kennzahlen([h["preis"] for h in heute])
+    leer = kz["sample_size"] == 0
+    tageswert_behalten = leer and bisher_heute > 0
+    lauf_eintrag = {"at": jetzt_iso, "tag": lauf_schluessel, "sample_size": kz["sample_size"],
+                    "min": kz["min_price"], "median": kz["median_price"], "avg": kz["avg_price"],
+                    "max": kz["max_price"], "leer": leer}
+    setzen: Dict[str, Any] = {"model_id": model_id, "last_run_at": jetzt_iso}
+    if not tageswert_behalten:
+        setzen.update({**kz, "observed_at": jetzt_iso, "new_in_sample_today": len(neu_ids),
+                       "price_reductions_today": len(reduziert_ids),
+                       "new_in_sample_ids": sorted(neu_ids), "price_reduced_ids": sorted(reduziert_ids),
+                       "listing_ids": [h["listing"]["listing_id"] for h in heute]})
     await db[TAGESSTATS].update_one(
         {"segment_id": seg_id, "date": tag},
-        {"$set": {**kz, "model_id": model_id, "observed_at": jetzt_iso, "new_in_sample_today": len(neu_ids),
-                  "price_reductions_today": len(reduziert_ids), "sorted_confirmed": bool(sortiert_bestaetigt),
-                  "new_in_sample_ids": sorted(neu_ids), "price_reduced_ids": sorted(reduziert_ids),
-                  "listing_ids": [h["listing"]["listing_id"] for h in heute]},
-         "$push": {"laeufe": {"$each": [{"at": jetzt_iso, "tag": lauf_schluessel, "sample_size": kz["sample_size"],
-                                         "min": kz["min_price"], "median": kz["median_price"], "avg": kz["avg_price"],
-                                         "max": kz["max_price"], "sorted_confirmed": bool(sortiert_bestaetigt)}],
-                              "$slice": -LAEUFE_MAX}}},
+        {"$set": setzen, "$push": {"laeufe": {"$each": [lauf_eintrag], "$slice": -LAEUFE_MAX}}},
         upsert=True)
     await segmentstatistik(db, seg_id, tag)
-    await db[SEGMENTE].update_one({"id": seg_id}, {"$set": {"last_success_at": jetzt_iso, "last_sample_size": kz["sample_size"]}})
-    # Nr. 3: aus einem unsicher sortierten Sample werden KEINE Chancen abgeleitet
-    zaehler["chancen"] = (await chancen_ableiten(db, segment, heute, vorher_stat, tag, jetzt_iso)
-                          if sortiert_bestaetigt else 0)
+    await db[SEGMENTE].update_one({"id": seg_id}, {"$set": {"last_success_at": jetzt_iso,
+                                                            "last_sample_size": bisher_heute if tageswert_behalten else kz["sample_size"]}})
+    zaehler["chancen"] = await chancen_ableiten(db, segment, heute, vorher_stat, tag, jetzt_iso)
     zaehler["sample_size"] = kz["sample_size"]
-    zaehler["sortierung_unsicher"] = not sortiert_bestaetigt
+    zaehler["tageswert_behalten"] = tageswert_behalten
     return zaehler
 
 
@@ -297,7 +304,8 @@ async def segmentstatistik(db, seg_id: str, tag: Optional[str] = None) -> Option
             "erste_beobachtung": erster, "kalendertage": kalendertage, "abdeckung_pct": abdeckung,
             "mittlere_sample_groesse": round(mittel, 1),
             "datenlage": datenlage(len(alle_docs), mittel, abdeckung),
-            # Nr. 3: letzter Lauf nicht sicher preis-aufsteigend -> Lesewege zeigen es an
+            # Nr. 3 (nur noch Altdaten vor P1): Tage, die damals unsortiert gespeichert wurden —
+            # seit P1 kommt ein unsortierter Lauf nie mehr in die Tagesstatistik (Job 'data_invalid')
             "sortierung_unsicher": heute.get("sorted_confirmed") is False,
             "updated_at": konfig.jetzt_iso()}
     await db[SEGMENTSTATS].update_one({"_id": seg_id}, {"$set": stat}, upsert=True)

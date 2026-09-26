@@ -19,9 +19,22 @@ def ez_kurz(ez: Optional[Dict[str, Any]]) -> str:
     return f"{von or ''}-{bis or ''}"
 
 
-def segment_id(model_id: str, bucket: Dict[str, Any], ez: Optional[Dict[str, Any]] = None) -> str:
-    """Stabile ID, Auftrag v2: bmw-320d:2019:50001-85000 (Bereichs-EZ: bmw-320d:2019-2021:…)."""
-    return f"{model_id}:{ez_kurz(ez)}:{int(bucket['min_km'])}-{int(bucket['max_km'])}"
+def modell_version(modell: Optional[Dict[str, Any]]) -> int:
+    """Fassung des Suchauftrags (Review 26.09.2026 abends P4): Start 1; steigt nur, wenn
+    materielle Merkmale (Marke/Modell, Kraftstoff, Getriebe, Karosserie, kW, Land, PLZ/Radius,
+    Verkaeuferart) geaendert werden — siehe auftraege.definition_hash."""
+    try:
+        return max(1, int((modell or {}).get("version") or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def segment_id(model_id: str, bucket: Dict[str, Any], ez: Optional[Dict[str, Any]] = None, version: int = 1) -> str:
+    """Stabile ID, Auftrag v2: bmw-320d:2019:50001-85000 (Bereichs-EZ: bmw-320d:2019-2021:…).
+    P4: ab Fassung 2 traegt die ID die Fassung (bmw-320d:v2:2019:50001-85000) — alte IDs und
+    Daten der Fassung 1 bleiben unveraendert, neue Fassungen mischen sich nicht mit ihnen."""
+    fassung = f"v{int(version)}:" if int(version or 1) >= 2 else ""
+    return f"{model_id}:{fassung}{ez_kurz(ez)}:{int(bucket['min_km'])}-{int(bucket['max_km'])}"
 
 
 def ez_text(ez: Optional[Dict[str, Any]]) -> str:
@@ -179,13 +192,16 @@ async def synchronisieren(db) -> Dict[str, int]:
     for m in modelle:
         if not modell_aktiv(m) or not m.get("model_id"):
             continue
+        fassung = modell_version(m)
         for b in km_buckets_fuer_modell(m, buckets):
             for ez in (ez_buckets_fuer_modell(m, ezs) or [None]):
-                sid = segment_id(m["id"], b, ez)
+                # P4: Segment-IDs tragen die Fassung des Auftrags — aeltere Fassungen fallen
+                # unten unter "deaktivieren" (nichts loeschen, Historie bleibt)
+                sid = segment_id(m["id"], b, ez, fassung)
                 gueltig.add(sid)
                 r = await db[konfig.SEGMENTE].update_one(
                     {"id": sid},
-                    {"$set": {"model_id": m["id"], "label": m.get("label"), "make": m.get("make"), "model": m.get("model"),
+                    {"$set": {"model_id": m["id"], "version": fassung, "label": m.get("label"), "make": m.get("make"), "model": m.get("model"),
                               "variant": m.get("variant"), "min_km": b["min_km"], "max_km": b["max_km"],
                               "km_label": km_text(b), "year_from": (ez or {}).get("year_from"),
                               "year_to": (ez or {}).get("year_to"), "ez_label": ez_text(ez),
