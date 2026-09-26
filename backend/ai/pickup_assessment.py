@@ -39,7 +39,7 @@ import protokoll_vergleich as PV
 from deps import db, now_iso
 
 from ai import (bekannte_schaeden, budget, freischaltung, kalibrierung, kontext, marktdaten, preisbasis,
-                schaden_abgleich, schemas)
+                retention, schaden_abgleich, schemas)
 from ai.bekannte_schaeden import ascii_norm, freitext
 from ai.provider import ergebnis_gueltig, json_bewerten, ki_aktiv, ki_modell
 
@@ -878,8 +878,12 @@ async def lernfall_speichern(protocol_id: str, dealer_id: str, *, chef_preis: Op
                 "appointment_id": appt_id, "protocol_version": (proto or {}).get("version"),
                 "protocol_revision": bew.get("protocol_revision"),
                 "created_at": now_iso(), "modell": bew.get("modell"), "prompt_version": bew.get("prompt_version"),
-                "fahrzeug": eingabe.get("vehicle"), "abweichungen": eingabe.get("deviations"),
-                "neue_schaeden": gelernt, "abgleich_unsicher": unsicher, "datenlage": bew.get("datenlage"),
+                # Review 26.09.2026 (Nr. 147): Lernfaelle bleiben dauerhaft — ohne
+                # Fahrer-Freitext und ohne FIN (ai.retention.lernfall_ohne_klartext)
+                "fahrzeug": eingabe.get("vehicle"),
+                "abweichungen": retention.lernfall_ohne_klartext(eingabe.get("deviations")),
+                "neue_schaeden": retention.lernfall_ohne_klartext(gelernt),
+                "abgleich_unsicher": unsicher, "datenlage": bew.get("datenlage"),
                 "vertragspreis": kp,
                 "ki_nachlass": comb.get("fair_discount_eur"),
                 "ki_bereich": [comb.get("minimum_justified_eur"), comb.get("best_realistic_eur")],

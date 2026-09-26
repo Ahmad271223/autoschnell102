@@ -212,3 +212,66 @@ async def abgleichen(db=None) -> Dict[str, Any]:
         import logging
         logging.getLogger("autohandel.ki").exception("KI-Budget nicht abgeglichen")
         return {"schluessel": len(soll), "geaendert": 0, "fehler": True}
+
+
+# ------------------------------------------------ Loeschung / Rotation
+# Review 26.09.2026 (Nr. 141-145): die Zaehler tragen KEIN dealer_id-Feld —
+# die Kennung steht im Schluessel "<art>:<dealer_id|user_id>:<JJJJ-MM>".
+def schluessel_filter(dealer_id: Optional[str] = None, user_ids=()) -> Optional[Dict[str, Any]]:
+    """Mongo-Filter auf alle Zaehler einer Firma (Abholung: dealer_id) und
+    ihrer Konten (Vertrag: user_id). None, wenn es nichts zu filtern gibt."""
+    import re
+    kennungen = [k for k in (dealer_id, *user_ids) if isinstance(k, str) and k]
+    if not kennungen:
+        return None
+    return {"_id": {"$regex": "^[a-z_]+:(" + "|".join(re.escape(k) for k in kennungen) + "):"}}
+
+
+async def zaehler_loeschen(dealer_id: Optional[str] = None, user_ids=(), db=None) -> int:
+    """Zaehler einer Firma/ihrer Konten loeschen (Firmenloeschung, Sucher-
+    Loeschung). Liefert die Zahl geloeschter Dokumente; wirft nie."""
+    db = db if db is not None else _db
+    filt = schluessel_filter(dealer_id, user_ids)
+    if not filt:
+        return 0
+    try:
+        r = await db[ZAEHLER].delete_many(filt)
+        return int(r.deleted_count)
+    except Exception:  # noqa: BLE001
+        import logging
+        logging.getLogger("autohandel.ki").exception("KI-Budgetzaehler nicht geloescht")
+        return 0
+
+
+async def zaehler_zaehlen(dealer_id: Optional[str] = None, user_ids=(), db=None) -> int:
+    """Fuer die Loeschvorschau: wie viele Zaehler die Firmenloeschung entfernt."""
+    db = db if db is not None else _db
+    filt = schluessel_filter(dealer_id, user_ids)
+    return await db[ZAEHLER].count_documents(filt) if filt else 0
+
+
+ZAEHLER_MONATE = 3
+
+
+async def alte_zaehler_loeschen(db=None, now: Optional[datetime] = None, monate: int = ZAEHLER_MONATE) -> int:
+    """Review 26.09.2026 (Nr. 144): Zaehler haben keinen TTL — Monate, die
+    aelter als `monate` sind, werden im Aufraeumlauf geloescht (der Monat
+    steht am Ende des Schluessels). Wirft nie."""
+    import re
+    db = db if db is not None else _db
+    now = now or datetime.now(timezone.utc)
+    jahr, monat = now.year, now.month - monate
+    while monat <= 0:
+        jahr, monat = jahr - 1, monat + 12
+    grenze = f"{jahr:04d}-{monat:02d}"          # Monate < grenze fliegen raus
+    n = 0
+    try:
+        async for z in db[ZAEHLER].find({"_id": {"$regex": r":\d{4}-\d{2}$"}}, {"_id": 1}):
+            m = re.search(r":(\d{4}-\d{2})$", str(z["_id"]))
+            if m and m.group(1) < grenze:
+                r = await db[ZAEHLER].delete_one({"_id": z["_id"]})
+                n += int(r.deleted_count)
+    except Exception:  # noqa: BLE001
+        import logging
+        logging.getLogger("autohandel.ki").exception("alte KI-Budgetzaehler nicht geloescht")
+    return n

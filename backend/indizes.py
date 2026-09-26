@@ -921,26 +921,60 @@ async def ki_indizes(db) -> dict:
     """KI-Bewertung (Umbau 26.09.2026): genau EIN Eintrag je Protokoll und
     Eingabe-Stand (zwei gleichzeitige Aufrufe loesen keine zweite KI-
     Bewertung aus), Kostenabfragen je Monat/Nutzer/Firma, eigene
-    Preisdatenbank je Referenzschluessel. Idempotent, wirft nie."""
-    erg = {}
-    try:
-        await db.ki_bewertungen.create_index(
-            [("protocol_id", 1), ("input_hash", 1)], unique=True, name="ki_bewertung_je_protokoll_stand",
-            partialFilterExpression={"protocol_id": {"$type": "string"}})
-        # Review 25.09.2026 abends: auch der Vertrag hat genau EINEN laufenden Lauf je Firma und Stand
-        await db.ki_bewertungen.create_index(
-            [("dealer_id", 1), ("input_hash", 1)], unique=True, name="ki_vertrag_laeuft_je_stand",
-            partialFilterExpression={"art": "vertrag", "status": "laeuft"})
-        await db.ki_bewertungen.create_index([("dealer_id", 1), ("created_at", -1)], name="ki_bewertung_firma_zeit")
-        await db.ki_bewertungen.create_index([("user_id", 1), ("created_at", -1)], name="ki_bewertung_nutzer_zeit")
-        await db.ki_bewertungen.create_index("id", name="ki_bewertung_id")
-        await db.ki_reparaturpreise.create_index([("key", 1), ("stand", -1)], name="ki_reparaturpreis_key_stand")
-        await db.ki_lernfaelle.create_index([("art", 1), ("fahrzeug.make", 1)], name="ki_lernfall_art_marke")
-        erg["ok"] = True
-    except Exception as exc:  # noqa: BLE001
-        erg["fehler"] = str(exc)[:200]
-        await _index_fehlt(db, "index_fehlt", "ki_bewertungen", fehler=str(exc)[:200])
-    return erg
+    Preisdatenbank je Referenzschluessel. Idempotent, wirft nie.
+
+    Review 26.09.2026 (Nr. 146): JEDER Index in eigenem Fehlerfang. Vorher
+    standen alle in EINEM try — scheiterte der erste Unique-Index an Alt-
+    Dubletten, entstanden die uebrigen (Lese-Indizes, Vertrags-Unique) nie.
+    Unique-Indizes laufen ueber unique_anlegen (klare Meldung, Alarm,
+    FEHLENDE_UNIQUE wie die uebrigen Unique-Indizes der Datei); die
+    Lese-Indizes melden nur Warnung + Alarm index_fehlt (wie
+    bestand_lese_indizes). Liefert {"ok": alle stehen, "fehler": [refs]}."""
+    from betrieb import alarm, alarm_schliessen
+    fehler: list = []
+    # ---- Unique-Indizes (Nr. 146: einzeln, ueber den gemeinsamen Weg) ----
+    for schluessel, name, partial in (
+            ([("protocol_id", 1), ("input_hash", 1)], "ki_bewertung_je_protokoll_stand",
+             {"protocol_id": {"$type": "string"}}),
+            # Review 25.09.2026 abends: auch der Vertrag hat genau EINEN laufenden Lauf je Firma und Stand
+            ([("dealer_id", 1), ("input_hash", 1)], "ki_vertrag_laeuft_je_stand",
+             {"art": "vertrag", "status": "laeuft"})):
+        try:
+            ok = await unique_anlegen(db.ki_bewertungen, schluessel, name=name,
+                                      partialFilterExpression=partial)
+        except Exception as exc:  # noqa: BLE001
+            log.error("ensure_indexes: ki_bewertungen.%s nicht anlegbar: %s", name, exc)
+            ok = False
+        if not ok:
+            fehler.append(f"ki_bewertungen.{name}")
+    # ---- Lese-Indizes: nicht unique, Altdaten koennen sie nicht verhindern ----
+    for sammlung, schluessel, name in (
+            ("ki_bewertungen", [("dealer_id", 1), ("created_at", -1)], "ki_bewertung_firma_zeit"),
+            ("ki_bewertungen", [("user_id", 1), ("created_at", -1)], "ki_bewertung_nutzer_zeit"),
+            ("ki_bewertungen", "id", "ki_bewertung_id"),
+            # Review 26.09.2026 (Nr. 140): Frist-Loeschung und Rohdaten-Frist lesen created_at
+            ("ki_bewertungen", [("created_at", 1)], "ki_bewertung_zeit"),
+            ("ki_reparaturpreise", [("key", 1), ("stand", -1)], "ki_reparaturpreis_key_stand"),
+            ("ki_lernfaelle", [("art", 1), ("fahrzeug.make", 1)], "ki_lernfall_art_marke"),
+            ("ki_lernfaelle", [("protocol_id", 1), ("input_hash", 1)], "ki_lernfall_protokoll_stand"),
+            ("ki_lernfaelle", "ki_bewertung_id", "ki_lernfall_bewertung")):
+        ref = f"{sammlung}.{name}"
+        try:
+            await db[sammlung].create_index(schluessel, name=name)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ensure_indexes: Index %s nicht angelegt — Abfragen "
+                        "laufen ohne ihn langsamer: %s", ref, exc)
+            fehler.append(ref)
+            try:
+                await alarm(db, "index_fehlt", ref=ref, fehler=str(exc)[:300])
+            except Exception:  # noqa: BLE001
+                log.exception("Alarm index_fehlt fuer %s nicht gesetzt", ref)
+        else:
+            try:
+                await alarm_schliessen(db, "index_fehlt", ref=ref)
+            except Exception:  # noqa: BLE001
+                pass
+    return {"ok": not fehler, "fehler": fehler}
 
 
 async def markt_indizes(db) -> dict:

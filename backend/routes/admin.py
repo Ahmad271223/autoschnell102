@@ -1295,6 +1295,12 @@ _COMPANY_COLLECTIONS = (
     # Runde 18: Kaufvorgaenge (Umbau 09.09.2026) tragen dealer_id, Sucher,
     # Vertrag, Fahrzeug und Kaufpreis — blieben bei der Firmenloeschung liegen.
     "kaufvorgaenge",
+    # Review 26.09.2026 (Nr. 141/142): KI-Bewertungen (Eingabepakete, Ergebnisse)
+    # und Lernfaelle der Firma tragen dealer_id — blieben bei der Firmen-
+    # loeschung liegen. ki_budget hat KEIN dealer_id-Feld (Kennung im
+    # Schluessel) und laeuft ueber ai.budget.zaehler_loeschen; ki_reparatur-
+    # preise ist systemweit ohne Firmen-/Nutzerbezug und bleibt.
+    "ki_bewertungen", "ki_lernfaelle",
     # Go-Live 14.09.2026 (B6): users steht NICHT mehr im Tupel. Als letzter
     # Eintrag der Schleife lief users.delete_many noch VOR Snapshots, Dateien
     # und dealers.delete_many — brach einer dieser Schritte ab, fand der
@@ -1316,6 +1322,10 @@ async def admin_delete_preview(dealer_id: str, admin=Depends(current_admin)):
         counts[coll] = await db[coll].count_documents({"dealer_id": dealer_id})
     # Go-Live 14.09.2026 (B6): users nicht mehr in _COMPANY_COLLECTIONS
     counts["users"] = await db.users.count_documents({"dealer_id": dealer_id})
+    # Review 26.09.2026 (Nr. 142/145): KI-Budgetzaehler der Firma und ihrer Konten
+    from ai import budget as ki_budget
+    konten = await db.users.distinct("id", {"dealer_id": dealer_id})
+    counts["ki_budget"] = await ki_budget.zaehler_zaehlen(dealer_id, konten, db=db)
     return {"dealer_id": dealer_id,
             "hinweis": "Beweis-Snapshots werden NICHT geloescht (haendler"
                        "neutral geteilt, verfallen ueber die Aufbewahrungs"
@@ -1471,6 +1481,15 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
         await db.zugang_grants.update_many(
             {"user_id": user_id},
             {"$set": {"user_id": pseudonym, "pseudonymisiert_at": jetzt}})
+        # Review 26.09.2026 (Nr. 143): KI-Bewertungen/Lernfaelle des Kontos
+        # (Vertragsbewertungen tragen user_id) auf dasselbe Pseudonym; die
+        # persoenlichen Budgetzaehler (vertrag:<user_id>:<Monat>) fallen weg.
+        try:
+            from ai import budget as ki_budget, retention as ki_retention
+            await ki_retention.nutzer_pseudonymisieren(db, user_id, pseudonym)
+            await ki_budget.zaehler_loeschen(None, [user_id], db=db)
+        except Exception:  # noqa: BLE001 — Loeschung darf daran nie scheitern
+            log.exception("KI-Spuren von %s nicht pseudonymisiert", user_id)
         # Runde 8 (15.09.2026, Liste 3 Nr. 6): Anmelde-Eintraege (E-Mail bzw.
         # Kontonummer, IP, Geraet) und Admin-Aktionen mit diesem Konto als ref
         # blieben bisher unveraendert im Audit-Log.
@@ -1564,6 +1583,18 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
             res = await db[coll].delete_many({"dealer_id": dealer_id})
             if res.deleted_count:
                 geloescht[coll] = res.deleted_count
+        # Review 26.09.2026 (Nr. 141/145): KI-Budgetzaehler (Kennung im
+        # Schluessel, kein dealer_id-Feld) — Firma UND ihre Konten, solange
+        # die Konten noch stehen (users faellt erst als letzter Schritt).
+        try:
+            from ai import budget as ki_budget
+            konten = await db.users.distinct("id", {"dealer_id": dealer_id})
+            n_budget = await ki_budget.zaehler_loeschen(dealer_id, konten, db=db)
+            if n_budget:
+                geloescht["ki_budget"] = n_budget
+        except Exception as exc:  # noqa: BLE001 — Loeschung nie daran scheitern
+            log.warning("Firmenloeschung %s: KI-Budgetzaehler nicht bereinigt: %s",
+                        dealer_id, exc)
         # (Kontonummer 13.09.2026, Schritt 5: password_resets gibt es nicht
         # mehr — Runde 14 Befund 12 entfaellt.)
         # Runde 13: B8 — die Snapshot-Zeilen bleiben (Beweiszweck), aber die

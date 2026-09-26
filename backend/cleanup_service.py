@@ -557,6 +557,19 @@ async def _cleanup_once(db, wache=None) -> dict:
         from ai import budget as ki_budget
         return await ki_budget.abgleichen(db)
     await s("ki_budget", _ki_budget)
+    # ---- Review 26.09.2026 (Nr. 140/147): Rohdaten der KI-Bewertungen nach
+    # KI_BEWERTUNG_ROHDATEN_TAGE weg, Bewertungen nach KI_BEWERTUNG_TAGE
+    # geloescht (ausser mit Lernfall); Nr. 144: Budgetzaehler aelter 3 Monate ----
+    async def _ki_bewertungen_retention():
+        from ai import retention as ki_retention
+        erg = await ki_retention.ki_bewertungen_retention(db, now)
+        return int(erg.get("rohdaten_entfernt", 0)) + int(erg.get("geloescht", 0))
+    await s("ki_bewertungen_retention", _ki_bewertungen_retention)
+
+    async def _ki_budget_rotieren():
+        from ai import budget as ki_budget
+        return await ki_budget.alte_zaehler_loeschen(db, now)
+    await s("ki_budget_rotieren", _ki_budget_rotieren)
     # ---- Market Intelligence (Review 26.09.2026 Nr. 47): verwaiste Budgetreservierungen ----
     async def _markt_reservierungen():
         from markt import budget as markt_budget
@@ -888,10 +901,12 @@ async def _protokolle_pii_entfernen(db, termin_ids: list, dealer_id,
         oder.append({"contract_id": contract_id})
     if not oder:
         return
+    protokoll_ids: list = []
     async for p in db.pickup_protocols.find(
             {"$or": oder},
             {"_id": 0, "id": 1, "pdf_path": 1, "signature_driver_key": 1,
-             "signature_seller_key": 1}):
+             "signature_seller_key": 1, "new_damages": 1}):
+        protokoll_ids.append(p["id"])
         unset, offen = {}, {}
         for feld in ("pdf_path", "signature_driver_key", "signature_seller_key"):
             key = p.get(feld)
@@ -918,15 +933,43 @@ async def _protokolle_pii_entfernen(db, termin_ids: list, dealer_id,
         # Name, Telefon oder Absprachen mit dem Verkaeufer.
         # Entscheidung Ahmad 22.09.2026 (Ausweisnummer): auch die vor Ort
         # nachgetragene Ausweisnummer des Verkaeufers (seller_id_document).
+        # Review 26.09.2026 (Nr. 138/139): auch die Rueckfrage-Kommunikation
+        # (Frage des Chefs, Antworten des Fahrers, Verlauf) — dort stehen
+        # Namen und Telefonnummern — und die Freitext-Notizen der Schaeden.
         upd = {"$set": {"seller_name": "", "seller_id_document": "", "place": "",
                         "pickup_address": "",
                         "notes": "", "sondervereinbarung": "", "preis_notiz": "",
+                        "rueckfrage_frage": None, "rueckfrage_antworten": [],
+                        "rueckfrage_verlauf": [],
                         "pii_geloescht_at": jetzt, "vertrag_geloescht": True, **offen}}
+        if isinstance(p.get("new_damages"), list):
+            upd["$set"]["new_damages"] = schaeden_ohne_freitext(p["new_damages"])
         unset = {**unset, "contract_id": "", "kaufvorgang_id": ""}
         if contract_id:
             upd["$set"]["vertrag_geloescht_ref"] = contract_id
         upd["$unset"] = unset
         await db.pickup_protocols.update_one({"id": p["id"]}, upd)
+    # Review 26.09.2026 (Nr. 140): die KI-Bewertungen dieser Protokolle tragen
+    # das komplette Eingabepaket (Fahrernotizen, Antworten, FIN) — mit dem
+    # Protokoll verlieren sie ihre Rohdaten; Ergebnis und Kosten bleiben.
+    if protokoll_ids:
+        try:
+            from ai.retention import rohdaten_entfernen
+            await rohdaten_entfernen(db, {"protocol_id": {"$in": protokoll_ids}}, jetzt)
+        except Exception:  # noqa: BLE001 — Loeschung nie daran scheitern
+            log.exception("KI-Rohdaten zu %d Protokollen nicht entfernt", len(protokoll_ids))
+
+
+def schaeden_ohne_freitext(schaeden) -> list:
+    """Review 26.09.2026 (Nr. 139): Schadensliste ohne die Freitext-Notiz des
+    Fahrers (note/text) — Art, Zone und Auspraegung bleiben (technischer
+    Zustandsteil des Protokolls)."""
+    raus = []
+    for d in (schaeden or []):
+        if isinstance(d, dict):
+            d = {k: v for k, v in d.items() if k not in ("note", "text")}
+        raus.append(d)
+    return raus
 
 
 #: Sammlung mit den Grabsteinen geloeschter Sucher (Nr. 2).
@@ -2427,7 +2470,14 @@ async def termine_ohne_vertrag_bereinigen(db, now: datetime, frist_tage: int = 0
                      # Entscheidung Ahmad 22.09.2026 (Ausweisnummer)
                      {"seller_id_document": {"$nin": [None, ""]}},
                      {"pdf_path": {"$type": "string"}},
-                     {"signature_seller_key": {"$type": "string"}}]},
+                     {"signature_seller_key": {"$type": "string"}},
+                     # Review 26.09.2026 (Nr. 138/139): Rueckfrage-Kommunikation
+                     # und Freitexte zaehlen ebenfalls als verbliebene PII
+                     {"rueckfrage_frage.question": {"$type": "string"}},
+                     {"rueckfrage_antworten.0": {"$exists": True}},
+                     {"rueckfrage_verlauf.0": {"$exists": True}},
+                     {"notes": {"$nin": [None, ""]}},
+                     {"sondervereinbarung": {"$nin": [None, ""]}}]},
             {"_id": 0, "appointment_id": 1}).batch_size(500):
         aid = p.get("appointment_id")
         if not aid or aid in gesehen:
@@ -2488,6 +2538,12 @@ async def firmengrabsteine_bereinigen(db) -> int:
             except Exception as exc:  # noqa: BLE001
                 log.warning("firmengrabsteine: %s fuer %s nicht bereinigt: %s",
                             coll, grab["id"], exc)
+        # Review 26.09.2026 (Nr. 141): KI-Budgetzaehler der Firma (Kennung im Schluessel)
+        try:
+            from ai import budget as ki_budget
+            n += await ki_budget.zaehler_loeschen(grab["id"], db=db)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("firmengrabsteine: ki_budget fuer %s nicht bereinigt: %s", grab["id"], exc)
     if n:
         log.info("firmengrabsteine_bereinigen: %d Reste geloeschter Firmen entfernt", n)
     return n

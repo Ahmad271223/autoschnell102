@@ -730,17 +730,93 @@ async def _fahrzeug_und_vertrag(appt: dict):
     return vehicle, contract
 
 
-def vertragswerte_stand(vehicle: dict, contract: dict) -> str:
-    """Pruefung 14.09.2026 (P1): Fingerabdruck des Standes, den der Chef
-    freigibt — Soll-Werte aus Abschnitt 1, Vertragspreis, Schaeden. Aendert
-    sich davon etwas nach der Freigabe, ist die Freigabe hinfaellig."""
+#: Review 26.09.2026 (Nr. 136/137): Fassung des Freigabe-Standes. Der
+#: gespeicherte Wert traegt sie als Praefix ("v2:<sha256>"); ein Wert ohne
+#: Praefix stammt aus der ersten Fassung (nur Abschnitt 1, Preis, Schaeden).
+FREIGABE_STAND_FASSUNG = 2
+
+
+def _stand_hash(daten: Dict[str, Any]) -> str:
     import json
-    daten = {"werte": PV.werte_als_text(PV.vertragswerte(vehicle, contract)),
-             "preis": contract.get("purchase_price"),
-             # Review 26.09.2026 (Nr. 111/116): dieselbe Liste wie Fahrer-App und KI
-             "schaeden": KI.bekannte_schaeden.zusammenfuehren(contract, vehicle)}
     return hashlib.sha256(json.dumps(daten, sort_keys=True, default=str,
                                      ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def freigabe_schnappschuss(contract: Optional[dict], vehicle: Optional[dict]) -> Dict[str, Any]:
+    """Review 26.09.2026 (Nr. 136/137): der KANONISCHE Stand, den der Chef
+    freigibt — alles, wovon Fahrer-App, Protokoll-PDF und KI-Bewertung
+    abhaengen. Vorher deckte der Fingerabdruck nur Abschnitt 1, den Preis
+    und die Schaeden; Reifensatz, Scheckheft, Ausstattung, bekannte Maengel,
+    Schluesselzahl, Sondervereinbarung oder Abholtermin konnten nach der
+    Freigabe geaendert werden, ohne dass die Freigabe hinfaellig wurde.
+
+    Inhalt (nur lesend, dieselben Hilfsfunktionen wie die KI):
+      - Fahrzeugidentitaet und Soll-Werte aus Abschnitt 1 (FIN, Marke,
+        Modell, EZ, km, ...; PV.vertragswerte)
+      - Vertragspreis(e): purchase_price und preis_vor_abholung
+      - alle bekannten Schaeden (ai.bekannte_schaeden.zusammenfuehren) und
+        die rohen bekannten Maengel des Inserats (known_defects)
+      - Ausstattung (features, dieselbe Liste wie die Vorlage der Fahrer-App)
+      - Dokumentpflichten je DOCUMENT_ITEMS (ai.pickup_assessment.
+        _unterlage_vereinbart: Servicebuch/Reifen/HU/COC/Ladekabel — hergeleitet
+        aus contract.service_book/tires/hu_valid und Beschreibung/Ausstattung)
+        plus die rohen Vertragsfelder dahinter
+      - vereinbarte Schluesselzahl (schluessel_vereinbart)
+      - Vertragsbedingungen: Sondervereinbarung (additional_terms),
+        Abholtermin/-zeit/-ort laut Vertrag
+    Die Beschreibung des Inserats geht nur ueber die hergeleiteten
+    Dokumentpflichten ein — eine reine Textkorrektur, die keine Zusage
+    aendert, macht die Freigabe nicht hinfaellig."""
+    c = contract if isinstance(contract, dict) else {}
+    v = vehicle if isinstance(vehicle, dict) else {}
+    from ai.pickup_assessment import _unterlage_vereinbart
+    ausstattung = [str(f) for f in (v.get("features") or [])[:AUSSTATTUNG_MAX]]
+    return {
+        "v": FREIGABE_STAND_FASSUNG,
+        "werte": PV.werte_als_text(PV.vertragswerte(v, c)),
+        "preise": {"purchase_price": c.get("purchase_price"),
+                   "preis_vor_abholung": c.get("preis_vor_abholung")},
+        # Review 26.09.2026 (Nr. 111/116): dieselbe Liste wie Fahrer-App und KI
+        "schaeden": KI.bekannte_schaeden.zusammenfuehren(c, v),
+        "known_defects": [str(m) for m in (v.get("known_defects") or [])[:40] if str(m or "").strip()],
+        "ausstattung": sorted(ausstattung),
+        "unterlagen": {name: _unterlage_vereinbart(name, c, v) for name in DOCUMENT_ITEMS},
+        "unterlagen_roh": {k: c.get(k) for k in ("service_book", "service_book_until", "tires", "hu_valid", "hu_until")},
+        "schluessel_anzahl": schluessel_vereinbart(c),
+        "bedingungen": {k: c.get(k) for k in ("additional_terms", "pickup_date", "pickup_time", "pickup_address")},
+    }
+
+
+def _vertragswerte_stand_v1(vehicle: dict, contract: dict) -> str:
+    """Erste Fassung (Pruefung 14.09.2026, P1) — nur noch fuer Protokolle,
+    die VOR der Umstellung freigegeben wurden (vertragswerte_stand_gleich)."""
+    return _stand_hash({"werte": PV.werte_als_text(PV.vertragswerte(vehicle, contract)),
+                        "preis": contract.get("purchase_price"),
+                        "schaeden": KI.bekannte_schaeden.zusammenfuehren(contract, vehicle)})
+
+
+def vertragswerte_stand(vehicle: dict, contract: dict) -> str:
+    """Pruefung 14.09.2026 (P1): Fingerabdruck des Standes, den der Chef
+    freigibt. Aendert sich davon etwas nach der Freigabe, ist die Freigabe
+    hinfaellig. Seit Review 26.09.2026 (Nr. 136/137) ueber den kanonischen
+    Schnappschuss (freigabe_schnappschuss), mit Fassungs-Praefix."""
+    return f"v{FREIGABE_STAND_FASSUNG}:" + _stand_hash(freigabe_schnappschuss(contract, vehicle))
+
+
+def vertragswerte_stand_gleich(gespeichert: Any, vehicle: dict, contract: dict) -> bool:
+    """Stimmt der gespeicherte Freigabe-Stand noch mit Vertrag/Fahrzeug
+    ueberein? Ein Stand der ersten Fassung (ohne Praefix, Protokolle vor der
+    Umstellung) wird EINMAL nach dem alten Verfahren nachgerechnet — der
+    Abschluss eines laufenden Vorgangs scheitert nicht an der Umstellung,
+    eine echte Aenderung an Preis/Abschnitt 1/Schaeden faellt weiter auf.
+    Ein unbekanntes Format zaehlt als geaendert (neu freigeben)."""
+    if not isinstance(gespeichert, str) or not gespeichert:
+        return False
+    if gespeichert.startswith(f"v{FREIGABE_STAND_FASSUNG}:"):
+        return vertragswerte_stand(vehicle, contract) == gespeichert
+    if ":" not in gespeichert:
+        return _vertragswerte_stand_v1(vehicle, contract) == gespeichert
+    return False
 
 
 async def _appt_or_404(appt_id: str, driver: dict) -> dict:
@@ -2336,9 +2412,12 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
     # Fahrzeugstand freigegeben. Wurde er seitdem geaendert (Vertrag im
     # Buero bearbeitet, Fahrzeugdaten korrigiert), gilt die Freigabe nicht:
     # zurueck in den Entwurf mit Rueckfrage — der Fahrer schickt neu ab.
+    # Review 26.09.2026 (Nr. 136/137): kanonischer Schnappschuss (auch
+    # Reifen, Scheckheft, Ausstattung, Maengel, Schluessel, Bedingungen);
+    # ein Stand der ersten Fassung wird nach dem alten Verfahren geprueft.
     if doc.get("vertragswerte_stand"):
         vehicle_jetzt, contract_jetzt = await _fahrzeug_und_vertrag(appt)
-        if vertragswerte_stand(vehicle_jetzt, contract_jetzt) != doc["vertragswerte_stand"]:
+        if not vertragswerte_stand_gleich(doc["vertragswerte_stand"], vehicle_jetzt, contract_jetzt):
             jetzt_ = now_iso()
             await db.pickup_protocols.update_one(
                 {"id": doc["id"], "status": FREIGEGEBEN},

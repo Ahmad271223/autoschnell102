@@ -233,6 +233,11 @@ services:
       - KI_KALIBRIERUNG_MIN_FIRMA=${KI_KALIBRIERUNG_MIN_FIRMA:-5}
       # Review 26.09.2026: abgelegte KI-Ergebnisse gelten hoechstens so viele Tage
       - KI_CACHE_TAGE=${KI_CACHE_TAGE:-7}
+      # Review 26.09.2026 (Nr. 140/147): KI-Bewertungen verlieren nach so vielen
+      # Tagen ihre Rohdaten (Eingabepaket, Recherchetext, Roh-Antwort) ...
+      - KI_BEWERTUNG_ROHDATEN_TAGE=${KI_BEWERTUNG_ROHDATEN_TAGE:-90}
+      # ... und werden danach geloescht (ausser mit Lernfall)
+      - KI_BEWERTUNG_TAGE=${KI_BEWERTUNG_TAGE:-730}
       # Market Intelligence (25.09.2026): taegliche mobile.de-Marktbeobachtung
       # (eigene Warteschlange, eigenes Budget). Standard AUS - erst nach
       # Freischaltung im Admin und MARKT_AKTIV=true laufen Crawls.

@@ -34,7 +34,7 @@ import protokoll_vergleich as PV
 from deps import db, now_iso
 from konfig import zahl_env
 
-from ai import budget, freischaltung, kalibrierung, kontext, marktdaten, preisbasis, schemas
+from ai import budget, freischaltung, kalibrierung, kontext, marktdaten, preisbasis, retention, schemas
 from ai.pickup_assessment import LEASE_S, _alter_jahre, _kosten_pruefen, _lease_abgelaufen
 from ai.provider import ergebnis_gueltig, json_bewerten, ki_aktiv, ki_modell
 
@@ -472,7 +472,9 @@ async def lernfall_speichern(contract: dict, ki_bewertung_id: Optional[str]) -> 
                 "art": ART, "dealer_id": contract.get("dealer_id"), "contract_id": contract.get("id"),
                 "ki_bewertung_id": ki_bewertung_id, "input_hash": bew.get("input_hash"),
                 "created_at": now_iso(), "modell": bew.get("modell"), "prompt_version": bew.get("prompt_version"),
-                "fahrzeug": eingabe.get("vehicle"), "schaeden": eingabe.get("damages"),
+                # Review 26.09.2026 (Nr. 147): dauerhaft, deshalb ohne Freitext-Notizen
+                "fahrzeug": eingabe.get("vehicle"),
+                "schaeden": retention.lernfall_ohne_klartext(eingabe.get("damages")),
                 "datenlage": bew.get("datenlage"),
                 "inseratspreis": inserat, "preis_vor_maengelverhandlung": vorher, "vertragspreis": kaufpreis,
                 "ki_nachlass": comb.get("fair_discount_eur"),
