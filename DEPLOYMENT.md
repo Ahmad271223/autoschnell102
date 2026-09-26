@@ -3610,3 +3610,18 @@ er ist nur noch die Vorgabe, solange der Knopf nie gedrückt wurde.
 - Nr. 146: `ki_indizes` legt jeden Index einzeln an (Unique hart mit `FEHLENDE_UNIQUE`, Lese-Indizes mit Warnung/Alarm).
 - Neue Umgebungsvariablen (docker-compose.yml, .env.example): `KI_BEWERTUNG_ROHDATEN_TAGE=90`, `KI_BEWERTUNG_TAGE=730`.
 
+**Entscheidungen Ahmad 26.09.2026 (Commit 7ed3b9c):**
+- **KI sieht alle Rückfragerunden:** `driver_answers` = ganzer `rueckfrage_verlauf` + aktuelle Antworten, chronologisch mit
+  Runde; alle Runden gehen in den Eingabe-Hash (nur der Zeitstempel nicht). Prompt-Fassung `abholung_v6` — bestehende
+  Abhol-Bewertungen gelten nach dem Deploy als veraltet und werden einmal neu gerechnet.
+- **Schlüsselanzahl im Vertrag fehlt → Warnung, keine Sperre:** Vertragsdialog hat wieder ein Feld „Schlüssel (Anzahl laut
+  Vertrag)“ mit gelbem Hinweis (das Feld war seit 24.09. verwaist); Fahrer-App zeigt „nicht im Vertrag hinterlegt“;
+  Freigabe-Karte mahnt das Nachtragen an; die KI setzt ohne Sollwert keine Position, nur einen Hinweis.
+- **Rückfrage-Dialog für den Chef:** Knopf „Rückfrage an den Fahrer“ (Frage ≤ 300 Zeichen, Bezug allgemein / Schaden /
+  KI-Position, Antwortart Optionen 2–6 oder Freitext) über `rueckfrage_frage`; der Server setzt `source_label`. Neue
+  Chef-Route `GET /protocols/rueckfragen-offen`; Freigabe-Seite zeigt „Rückfrage beim Fahrer (N)“ mit Frage, Bezug, Antwort
+  und Verlauf. Fahrer-App zeigt den Bezug („zu Schaden: …“) und den Verlauf; eine strukturierte Frage ohne Notiz war
+  vorher unsichtbar (behoben).
+- Nicht gebaut (Entscheidung Ahmad): Schadenerkennung auf Fotos. Terminverschiebung kippt die Freigabe nicht.
+  Inseratsbilder/-mängel bleiben für den Fahrer sichtbar.
+
