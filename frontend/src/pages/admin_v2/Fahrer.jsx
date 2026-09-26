@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
-import { ChevronDown, KeyRound, Lock, LockOpen, Search, Trash2, Truck, UserPlus } from "lucide-react";
+import { ChevronDown, KeyRound, Lock, LockOpen, Search, Sparkles, Trash2, Truck, UserPlus } from "lucide-react";
 import { PageHeader, Card, Badge, Button, Spinner, EmptyState, fmtDate } from "./_ui";
+import { useAuth } from "@/context/AuthContext";
 import FahrerAnlegenDialog from "@/components/admin/FahrerAnlegenDialog";
 import KontoPruefen from "@/components/admin/KontoPruefen";
 import PasswortFeld from "@/components/admin/PasswortFeld";
@@ -15,7 +16,9 @@ import { passwortProblem, sperreHinweis } from "@/lib/passwort";
  * werden die verknüpften Händler und die Terminzahl angezeigt. Aktionen:
  * anlegen (Kontonummer 13.09.2026: nur der Betreiber legt Fahrer an),
  * sperren/entsperren (beendet die Sitzung), Passwort setzen, löschen
- * (DSGVO: Verknüpfungen weg, offene Termine getrennt).
+ * (DSGVO: Verknüpfungen weg, offene Termine getrennt), KI-Abholbewertung
+ * je Fahrer freischalten (Wunsch Ahmad 26.09.2026 abends: ohne Fahrer-
+ * Freischaltung "allgemein nein"; nur Super-Admin).
  */
 const fahrerLabel = (r) => [r.display_name || "Fahrer", r.kontonummer ? `Kontonummer ${r.kontonummer}` : ""]
   .filter(Boolean).join(" · ");
@@ -29,6 +32,8 @@ export function serverSuche(q) {
 }
 
 export default function AdminFahrer() {
+  const { user: ich } = useAuth();
+  const superAdmin = !!ich?.is_super_admin;   // KI-Freischaltung ist Betreibersache
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
@@ -95,6 +100,20 @@ export default function AdminFahrer() {
       toast.success(r.active ? "Fahrer gesperrt" : "Fahrer entsperrt");
       await load();
     } catch (e) { toast.error(errMsg(e)); }
+    finally { freigeben(); }
+  };
+
+  // Wunsch Ahmad 26.09.2026 abends: KI-Abholbewertung je Fahrer freischalten
+  // (wie bei den Sucher-Konten). Sperren fragt nach; danach Liste neu laden.
+  const toggleKi = async (r) => {
+    const aktiv = !r.ki_aktiv;
+    if (!aktiv && !window.confirm(`KI-Abholbewertung für ${fahrerLabel(r)} sperren?`)) return;
+    if (!sperren(r.id)) return;
+    try {
+      await api.post(`/admin/drivers/${r.id}/ki`, { aktiv });
+      toast.success(aktiv ? "KI-Abholbewertung freigeschaltet" : "KI-Abholbewertung gesperrt");
+      await load();
+    } catch (e) { toast.error(errMsg(e, "KI-Freischaltung fehlgeschlagen")); }
     finally { freigeben(); }
   };
 
@@ -179,6 +198,9 @@ export default function AdminFahrer() {
                     )}
                     {r.driver_code && r.driver_code !== r.kontonummer && <Badge tone="blue">{r.driver_code}</Badge>}
                     <Badge tone={r.active ? "green" : "red"}>{r.active ? "Aktiv" : "Gesperrt"}</Badge>
+                    <span data-testid={`fahrer-ki-${r.id}`}>
+                      <Badge tone={r.ki_aktiv ? "green" : "gray"}>{r.ki_aktiv ? "KI: ja" : "KI: nein"}</Badge>
+                    </span>
                   </div>
                   <div className="text-[12px] text-zinc-500 truncate">
                     {r.email ? `${r.email} · ` : ""}seit {fmtDate(r.created_at)}
@@ -187,6 +209,14 @@ export default function AdminFahrer() {
                   </div>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
+                  <Button size="sm" variant="ghost" data-testid={`fahrer-ki-schalten-${r.id}`}
+                          disabled={busy === r.id || !superAdmin}
+                          title={superAdmin
+                            ? "KI-Abholbewertung für diesen Fahrer (zusätzlich zur Firma; 10 € je Fahrer und Monat)"
+                            : "Nur der Super-Admin"}
+                          onClick={() => toggleKi(r)}>
+                    <Sparkles size={13} /> {r.ki_aktiv ? "KI sperren" : "KI freischalten"}
+                  </Button>
                   <Button size="sm" variant="secondary" data-testid={`fahrer-pw-btn-${r.id}`}
                           disabled={busy === r.id}
                           onClick={() => { setResetDriver(r); setNewPw(""); }}>

@@ -249,3 +249,13 @@ def test_auth_routen():
     for pfad in ("/api/auth/logout", "/api/auth/me"):
         for _, deps in ROUTEN_JE_PFAD[pfad]:
             assert "current_user" in deps, pfad
+
+
+def test_ki_freischaltung_nur_super_admin():
+    """KI je Konto (25.09.2026) und je Fahrer (Wunsch Ahmad 26.09.2026 abends):
+    beide Schalter sind Betreibersache — nur current_super_admin, POST."""
+    for pfad in ("/api/admin/sucher/{sucher_id}/ki", "/api/admin/drivers/{driver_id}/ki"):
+        assert pfad in ROUTEN_JE_PFAD, f"{pfad} fehlt"
+        for methoden, deps in ROUTEN_JE_PFAD[pfad]:
+            assert methoden == {"POST"}, pfad
+            assert "current_super_admin" in deps, f"{pfad}: nicht durch current_super_admin gesperrt"

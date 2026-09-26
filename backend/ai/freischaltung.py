@@ -11,6 +11,10 @@ Wer zaehlt wofuer:
 - Abholung (Freigabe beim Chef, Fahrer-Ansicht, Start beim Abschicken):
   das Hauptchef-Konto der Firma (dealers.user_id) — die Abholung ist eine
   Firmenfunktion, der Fahrer hat kein eigenes Konto dafuer.
+- Abholung ZUSAETZLICH (Wunsch Ahmad 26.09.2026 abends): der Fahrer des
+  Termins muss selbst freigeschaltet sein (driver_accounts.ki_aktiv) —
+  "wenn ein Fahrer keine KI-Abholung freigeschaltet hat, dann allgemein
+  nein". Beides muss gelten; die Sperre wird nie abgelegt.
 """
 from __future__ import annotations
 
@@ -20,6 +24,7 @@ from deps import db as _db
 
 STATUS = "freischaltung"
 GRUND = "KI-Bewertung für dieses Konto nicht freigeschaltet"
+GRUND_FAHRER = "Fahrer nicht für die KI-Abholbewertung freigeschaltet"
 
 
 async def konto_freigeschaltet(user_id: Optional[str], db=None) -> bool:
@@ -52,6 +57,20 @@ async def firma_freigeschaltet(dealer_id: Optional[str], db=None) -> bool:
         return False
 
 
-def gesperrt(**extra: Any) -> Dict[str, Any]:
-    """Antwort fuer die Karten (gleiche Form wie 'aus')."""
-    return {"status": STATUS, "grund": GRUND, "ergebnis": None, **extra}
+async def fahrer_freigeschaltet(driver_id: Optional[str], db=None) -> bool:
+    """driver_accounts.ki_aktiv des Fahrers (nur True zaehlt). Wirft nie.
+    Ohne Fahrer (kein driver_id) gilt: nicht freigeschaltet."""
+    if not driver_id:
+        return False
+    db = db if db is not None else _db
+    try:
+        d = await db.driver_accounts.find_one({"id": driver_id}, {"_id": 0, "ki_aktiv": 1})
+        return bool(d and d.get("ki_aktiv") is True)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def gesperrt(grund: str = GRUND, **extra: Any) -> Dict[str, Any]:
+    """Antwort fuer die Karten (gleiche Form wie 'aus'). `grund` nennt, WER
+    nicht freigeschaltet ist (Konto/Firma oder Fahrer)."""
+    return {"status": STATUS, "grund": grund, "ergebnis": None, **extra}

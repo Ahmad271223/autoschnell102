@@ -75,7 +75,12 @@ export default function KiBewertungKarte({ eintrag, onPreis, busy, onErgebnis })
     // (z. B. "KI hat Position … nicht bewertet — bitte erneut starten").
     const grundServer = ["fehler", "zeitlimit", "ueberlastet", "abgelehnt"].includes(status) && daten?.grund
       ? ` ${daten.grund}` : "";
-    const text = wartetZuLange ? "KI-Einschätzung momentan nicht verfügbar." : (fehler || (kiStatusText(status) + grundServer));
+    // Freischaltung/Budget (26.09.2026 abends): der Server sagt, WER nicht
+    // freigeschaltet bzw. WESSEN Deckel voll ist (Firma oder Fahrer) — sein
+    // Grund ersetzt den allgemeinen Text.
+    const grundStattText = ["freischaltung", "budget"].includes(status) && daten?.grund ? daten.grund : "";
+    const text = wartetZuLange ? "KI-Einschätzung momentan nicht verfügbar."
+      : (fehler || grundStattText || (kiStatusText(status) + grundServer));
     if (!text) return null;
     return (
       <div className="mt-3 rounded-lg p-3 text-[12px] flex flex-wrap items-center gap-2" style={rahmen}

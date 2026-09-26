@@ -85,7 +85,7 @@ export default function KiFahrerKarte({ apptId, preisVertrag, preisVorschlag }) 
       {!erg ? (
         <div className="mt-2 text-[12px] text-zinc-400" data-testid="protokoll-ki-status">
           {wartetZuLange ? "KI-Auswertung momentan nicht verfügbar — später noch einmal „Aktualisieren“ tippen."
-            : (fehler || (status === "keine" && daten?.grund) || kiStatusText(status))}
+            : (fehler || (["keine", "freischaltung"].includes(status) && daten?.grund) || kiStatusText(status))}
           {kiWartet(status) && !wartetZuLange ? " Mit Marktrecherche dauert das bis zu zwei Minuten." : ""}
         </div>
       ) : (

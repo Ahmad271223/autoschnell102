@@ -491,6 +491,14 @@ async def _grundlagen(protocol_id: str, dealer_id: str) -> Optional[Tuple[dict, 
     return doc, appt, vehicle, contract
 
 
+def _fahrer_id(doc: Optional[dict], appt: Optional[dict]) -> str:
+    """Der Fahrer, fuer den die Abholbewertung zaehlt (Wunsch Ahmad
+    26.09.2026 abends): der Fahrer des Termins (appointment.driver_id); ist
+    der Termin nicht mehr zugeteilt, der Fahrer, der das Protokoll
+    geschrieben hat (driver_account_id). Leer = kein Fahrer bekannt."""
+    return str((appt or {}).get("driver_id") or (doc or {}).get("driver_account_id") or "")
+
+
 def _oeffentlich(doc: dict) -> dict:
     """Was die Oberflaeche bekommt (ohne Roh-Antwort und Eingabepaket)."""
     return {
@@ -563,7 +571,9 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
         kontext.eigene_anwenden(paket, eigene)
         h = eingabe_hash(paket)
         jetzt = now_iso()
+        fahrer_id = _fahrer_id(doc, appt)
         basis = {"id": str(uuid.uuid4()), "art": "abholung", "dealer_id": dealer_id, "protocol_id": protocol_id,
+                 "driver_id": fahrer_id or None,           # Fahrer-Deckel: Abgleich zaehlt je Fahrer
                  "appointment_id": doc.get("appointment_id"), "protocol_revision": doc.get("revision"),
                  "input_hash": h, "prompt_version": schemas.PROMPT_VERSION, "modell": ki_modell(),
                  "created_at": jetzt, "kaufpreis": paket["prices"].get("contract_price_eur")}
@@ -593,8 +603,13 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
         # schaltet der Betreiber frei, rechnet der naechste Aufruf sofort.
         if not await freischaltung.firma_freigeschaltet(dealer_id):
             return _oeffentlich({**basis, **freischaltung.gesperrt(), "dauer_ms": 0})
-        # Kostenbremse (Wunsch Ahmad 26.09.2026): Monatsbudget je Firma, Sparmodus
-        bud = await budget.pruefen(user_id=None, dealer_id=dealer_id, art="abholung")
+        # Wunsch Ahmad 26.09.2026 abends: auch der Fahrer des Termins muss
+        # freigeschaltet sein — sonst "allgemein nein". Ebenfalls nicht ablegen.
+        if not await freischaltung.fahrer_freigeschaltet(fahrer_id):
+            return _oeffentlich({**basis, **freischaltung.gesperrt(freischaltung.GRUND_FAHRER), "dauer_ms": 0})
+        # Kostenbremse (Wunsch Ahmad 26.09.2026): Monatsbudget je Firma UND je
+        # Fahrer (10 EUR, 26.09. abends), Sparmodus ab 80 % des engeren Deckels
+        bud = await budget.pruefen(user_id=None, dealer_id=dealer_id, art="abholung", driver_id=fahrer_id)
         if not bud["erlaubt"]:
             eintrag = {**basis, "status": "budget", "grund": bud["grund"], "ergebnis": None, "dauer_ms": 0,
                        "budget": bud}
@@ -611,9 +626,14 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
         if fremd is not None:
             return _oeffentlich(fremd)
         # Budget atomar reservieren — erst wenn dieser Aufruf den Lauf wirklich haelt
-        res = await budget.reservieren(user_id=None, dealer_id=dealer_id, art="abholung")
+        res = await budget.reservieren(user_id=None, dealer_id=dealer_id, art="abholung", driver_id=fahrer_id)
         if res is None:
-            eintrag = {**basis, "status": "budget", "grund": bud["grund"] or "Monatsbudget für KI-Bewertungen aufgebraucht.",
+            # Welcher Deckel war es (Firma oder Fahrer)? pruefen liess den Lauf
+            # noch zu (bud["grund"] waere hoechstens der Sparmodus-Hinweis), die
+            # Reservierung rechnet die Einzelgrenze dazu.
+            grund_voll = await budget.grund_voll(user_id=None, dealer_id=dealer_id, art="abholung",
+                                                 driver_id=fahrer_id)
+            eintrag = {**basis, "status": "budget", "grund": grund_voll,
                        "ergebnis": None, "dauer_ms": 0, "budget": bud}
             await db[SAMMLUNG].update_one({"protocol_id": protocol_id, "input_hash": h},
                                           {"$set": eintrag, "$unset": {"lease_until": ""}})
@@ -645,7 +665,8 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
                 usage[k] = int(usage.get(k) or 0) + int(v or 0)
         eintrag = {**basis, "dauer_ms": int(antwort.get("dauer_ms") or 0) + int((fall or {}).get("dauer_ms") or 0),
                    "usage": usage, "kosten_ct": kosten, "modell": antwort.get("modell") or basis["modell"],
-                   "datenlage": lage, "budget": {k: bud.get(k) for k in ("verbraucht_ct", "grenze_ct", "sparmodus")},
+                   "datenlage": lage, "budget": {k: bud.get(k) for k in ("verbraucht_ct", "grenze_ct", "sparmodus",
+                                                                          "fahrer_verbraucht_ct", "fahrer_grenze_ct")},
                    "recherche": ({"status": fall.get("status"), "suchen": fall.get("suchen"),
                                   "quellen": fall.get("quellen"), "text": fall.get("text"),
                                   "gelernt": gelernt} if fall else None)}
@@ -786,13 +807,19 @@ async def bewertung_starten(protocol_id: str, dealer_id: str) -> Optional[dict]:
     Protokoll (None -> 404), KI aus, Konto nicht freigeschaltet. Ein Lauf
     mit gueltigem Lease wird nicht doppelt gestartet (bewertung_ausfuehren
     prueft das atomar). Wirft nie."""
-    doc = await db.pickup_protocols.find_one({"id": protocol_id, "dealer_id": dealer_id}, {"_id": 1})
+    doc = await db.pickup_protocols.find_one({"id": protocol_id, "dealer_id": dealer_id},
+                                             {"_id": 0, "appointment_id": 1, "driver_account_id": 1})
     if not doc:
         return None
     if not ki_aktiv():
         return {"status": "aus", "grund": "KI-Bewertung nicht aktiv", "protocol_id": protocol_id, "ergebnis": None}
     if not await freischaltung.firma_freigeschaltet(dealer_id):
         return freischaltung.gesperrt(protocol_id=protocol_id)
+    # Fahrer des Termins freigeschaltet? (26.09.2026 abends) — sofort entscheidbar
+    appt = await db.appointments.find_one({"id": doc.get("appointment_id"), "dealer_id": dealer_id},
+                                          {"_id": 0, "driver_id": 1})
+    if not await freischaltung.fahrer_freigeschaltet(_fahrer_id(doc, appt)):
+        return freischaltung.gesperrt(freischaltung.GRUND_FAHRER, protocol_id=protocol_id)
     try:
         aufgabe = asyncio.get_running_loop().create_task(
             bewertung_ausfuehren(protocol_id, dealer_id, erzwingen=True))
@@ -832,6 +859,8 @@ async def bewertung_lesen(protocol_id: str, dealer_id: str, *, nachrechnen: bool
                 "input_hash": h, "ergebnis": None}
     if not await freischaltung.firma_freigeschaltet(dealer_id):
         return freischaltung.gesperrt(protocol_id=protocol_id, input_hash=h)
+    if not await freischaltung.fahrer_freigeschaltet(_fahrer_id(doc, appt)):
+        return freischaltung.gesperrt(freischaltung.GRUND_FAHRER, protocol_id=protocol_id, input_hash=h)
     if nachrechnen:
         bewertung_anstossen(protocol_id, dealer_id)
     if passend and not abgelaufen:

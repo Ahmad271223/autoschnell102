@@ -104,6 +104,21 @@ describe("KiBewertungKarte", () => {
     expect(api.get).toHaveBeenCalledTimes(2);
   });
 
+  it("zeigt bei 'freischaltung' und 'budget' den Grund des Servers (Fahrer-Freischaltung/-Deckel, 26.09.2026 abends)", async () => {
+    api.get.mockResolvedValueOnce({ data: { status: "freischaltung", protocol_id: "p1", ergebnis: null,
+                                            grund: "Fahrer nicht für die KI-Abholbewertung freigeschaltet" } });
+    await starten({});
+    expect(el("ki-karte-p1").dataset.status).toBe("freischaltung");
+    expect(el("ki-karte-p1").textContent).toContain("Fahrer nicht für die KI-Abholbewertung freigeschaltet");
+    expect(el("ki-neu-p1")).toBeNull();
+    await act(async () => { wurzel.unmount(); });
+    behaelter.remove();
+    api.get.mockResolvedValueOnce({ data: { status: "budget", protocol_id: "p1", ergebnis: null,
+                                            grund: "Monatsbudget des Fahrers (10 €) aufgebraucht (10.00 €) — ab dem 1. des nächsten Monats wieder verfügbar." } });
+    await starten({});
+    expect(el("ki-karte-p1").textContent).toContain("Monatsbudget des Fahrers (10 €)");
+  });
+
   it("Entscheidung 26.09.2026 (3): meldet das fertige Ergebnis dem Rahmen (onErgebnis) — für den Bezug der Rückfrage", async () => {
     const onErgebnis = vi.fn();
     api.get.mockResolvedValueOnce({ data: LAEUFT });

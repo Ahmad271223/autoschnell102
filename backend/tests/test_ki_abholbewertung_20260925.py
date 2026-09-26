@@ -128,6 +128,12 @@ def _welt_aufbauen(welt, suffix, **contract_extra):
         await db.pickup_protocols.insert_one(_protokoll(w, pid, tid, vid))
         # KI je Konto freigeschaltet (25.09.2026 abends) — Chef und Sucher der Testfirma
         await db.users.update_many({"id": {"$in": [w.chef["id"], w.sucher["id"]]}}, {"$set": {"ki_aktiv": True}})
+        # ... und der Testfahrer (Wunsch Ahmad 26.09.2026 abends: ohne Fahrer-
+        # Freischaltung "allgemein nein"). Das Protokoll traegt driver_account_id;
+        # das Fahrer-Konto legt die Welt sonst nicht an (Haendler-Link setzen die Tests selbst).
+        if not await db.driver_accounts.find_one({"id": w.driver_id}, {"_id": 1}):
+            await w.fahrer_anlegen(db, verknuepfen=False)
+        await db.driver_accounts.update_one({"id": w.driver_id}, {"$set": {"ki_aktiv": True}})
     welt.run(lauf())
     return cid, tid, vid, pid
 
@@ -136,7 +142,7 @@ def _aufraeumen(welt):
     db, w = welt.db, welt.w
     welt.run(db.ki_bewertungen.delete_many({"dealer_id": w.dealer_id}))
     welt.run(db.ki_lernfaelle.delete_many({"dealer_id": w.dealer_id}))
-    welt.run(db.ki_budget.delete_many({"_id": {"$regex": f":{w.dealer_id}:"}}))
+    welt.run(db.ki_budget.delete_many({"_id": {"$regex": f":({w.dealer_id}|{w.driver_id}):"}}))
 
 
 def hintergrund_abwarten(welt, K):
@@ -656,3 +662,139 @@ def test_12_haertung_reservierung_dedupe_risiko_kva(welt, monkeypatch):
     assert not MD.wert_plausibel({"min_eur": 5000, "max_eur": 20000}, ref)
     assert MD.wert_plausibel({"min_eur": 5, "max_eur": 50}, {})
 
+
+
+def test_13_ki_freischaltung_je_fahrer(welt, monkeypatch):
+    """Wunsch Ahmad 26.09.2026 abends: ohne driver_accounts.ki_aktiv des Fahrers
+    des Termins "allgemein nein" — Status 'freischaltung' mit Fahrer-Grund an
+    allen drei Wegen (automatisch nach 'zur Freigabe', Chef 'Neu berechnen',
+    Fahrer-GET), kein Aufruf, nichts abgelegt; Admin schaltet frei -> rechnet."""
+    from fastapi import HTTPException
+    aufrufe = []
+    K = _attrappe(monkeypatch, zaehler=aufrufe)
+    P = _module("routes.protocols")
+    A = _module("routes.admin")
+    F = _module("ai.freischaltung")
+    _cid, tid, _vid, pid = _welt_aufbauen(welt, "13")
+    w, db = welt.w, welt.db
+    SA = {"id": f"sa_kf_{w.s}", "role": "admin", "is_super_admin": True, "username": "sa", "dealer_id": ""}
+    welt.run(db.dealers.update_one({"id": w.dealer_id}, {"$set": {"user_id": w.chef["id"]}}))
+    link_neu = not welt.run(db.dealer_drivers.find_one({"dealer_id": w.dealer_id, "driver_account_id": w.driver_id}))
+    if link_neu:
+        welt.run(db.dealer_drivers.insert_one(w.link()))
+    welt.run(db.appointments.update_one({"id": tid}, {"$set": {"driver_id": w.driver_id, "zuteilung": "angenommen"}}))
+    # Firma frei, Fahrer NICHT
+    welt.run(db.driver_accounts.update_one({"id": w.driver_id}, {"$unset": {"ki_aktiv": ""}}))
+    assert welt.run(F.firma_freigeschaltet(w.dealer_id)) is True
+    assert welt.run(F.fahrer_freigeschaltet(w.driver_id)) is False
+    assert welt.run(F.fahrer_freigeschaltet("")) is False and welt.run(F.fahrer_freigeschaltet(None)) is False
+    erg = welt.run(K.bewertung_ausfuehren(pid, w.dealer_id))             # automatischer Weg
+    assert erg["status"] == "freischaltung" and erg["grund"] == F.GRUND_FAHRER
+    erg = welt.run(P.protokoll_ki_bewertung_neu(pid, user=w.chef))       # Chef "Neu berechnen"
+    assert erg["status"] == "freischaltung" and "Fahrer" in erg["grund"]
+    erg = welt.run(P.protokoll_ki_bewertung(pid, user=w.chef))           # Chef liest
+    assert erg["status"] == "freischaltung" and "Fahrer" in erg["grund"]
+    erg = welt.run(P.fahrer_ki_bewertung(tid, driver=w.driver))          # Fahrer-GET
+    assert erg["status"] == "freischaltung" and "Fahrer" in erg["grund"]
+    assert aufrufe == [] and welt.run(db.ki_bewertungen.find_one({"protocol_id": pid})) is None
+    # Termin ohne driver_id: der Fahrer des Protokolls (driver_account_id) zaehlt
+    welt.run(db.appointments.update_one({"id": tid}, {"$unset": {"driver_id": ""}}))
+    assert welt.run(K.bewertung_ausfuehren(pid, w.dealer_id))["status"] == "freischaltung"
+    welt.run(db.appointments.update_one({"id": tid}, {"$set": {"driver_id": w.driver_id}}))
+    # Admin: nur ueber die Route (404 unbekannt, 400 gesperrter Fahrer), Audit-Log, Liste zeigt ki_aktiv
+    monkeypatch.setattr(A, "db", db, raising=False)
+    with pytest.raises(HTTPException) as ex:
+        welt.run(A.admin_set_driver_ki(f"gibtsnicht_{w.s}", A.KiFreischaltenIn(aktiv=True), admin=SA))
+    assert ex.value.status_code == 404
+    welt.run(db.driver_accounts.update_one({"id": w.driver_id}, {"$set": {"active": False}}))
+    with pytest.raises(HTTPException) as ex:
+        welt.run(A.admin_set_driver_ki(w.driver_id, A.KiFreischaltenIn(aktiv=True), admin=SA))
+    assert ex.value.status_code == 400
+    welt.run(db.driver_accounts.update_one({"id": w.driver_id}, {"$set": {"active": True}}))
+    r = welt.run(A.admin_set_driver_ki(w.driver_id, A.KiFreischaltenIn(aktiv=True, grund="Test"), admin=SA))
+    assert r == {"ok": True, "ki_aktiv": True}
+    assert welt.run(F.fahrer_freigeschaltet(w.driver_id)) is True
+    zeile = next(f for f in welt.run(A.admin_list_drivers(_Antwort(), _=SA, q=w.driver_id[-8:])) if f["id"] == w.driver_id)
+    assert zeile["ki_aktiv"] is True
+    log_eintrag = welt.run(db.activity_logs.find_one({"action": "admin.fahrer.ki.freigeschaltet", "ref": w.driver_id}))
+    assert log_eintrag is not None and log_eintrag["meta"]["grund"] == "Test"
+    # jetzt rechnet die Bewertung — und traegt die driver_id
+    erg = welt.run(K.bewertung_ausfuehren(pid, w.dealer_id))
+    assert erg["status"] == "ok" and len(aufrufe) == 1
+    assert welt.run(db.ki_bewertungen.find_one({"protocol_id": pid}))["driver_id"] == w.driver_id
+    assert welt.run(P.fahrer_ki_bewertung(tid, driver=w.driver))["status"] == "ok"
+    # sperren: Ergebnis bleibt lesbar, neue Laeufe nicht
+    welt.run(A.admin_set_driver_ki(w.driver_id, A.KiFreischaltenIn(aktiv=False), admin=SA))
+    assert welt.run(P.protokoll_ki_bewertung(pid, user=w.chef))["status"] == "ok"
+    welt.run(db.ki_bewertungen.delete_many({"protocol_id": pid}))
+    assert welt.run(P.protokoll_ki_bewertung(pid, user=w.chef))["status"] == "freischaltung"
+    assert welt.run(db.activity_logs.find_one({"action": "admin.fahrer.ki.gesperrt", "ref": w.driver_id})) is not None
+    if link_neu:
+        welt.run(db.dealer_drivers.delete_many({"dealer_id": w.dealer_id, "driver_account_id": w.driver_id}))
+    welt.run(db.activity_logs.delete_many({"ref": w.driver_id, "action": {"$regex": "^admin.fahrer.ki"}}))
+    _aufraeumen(welt)
+
+
+def test_14_fahrer_deckel_zehn_euro(welt, monkeypatch):
+    """Wunsch Ahmad 26.09.2026 abends: Deckel je Fahrer (KI_BUDGET_FAHRER_EUR, 10)
+    zusaetzlich zum Firmen-Deckel — Reservierung nur, wenn beide frei sind;
+    Abrechnung auf beide Zaehler; Abgleich stellt den Fahrer-Zaehler her;
+    Sparmodus ab 80 % des engeren Deckels; Fahrer-Loeschung raeumt auf."""
+    K = _attrappe(monkeypatch)
+    B = _module("ai.budget")
+    _cid, tid, _vid, pid = _welt_aufbauen(welt, "14")
+    w, db = welt.w, welt.db
+    welt.run(db.appointments.update_one({"id": tid}, {"$set": {"driver_id": w.driver_id}}))
+    monkeypatch.setenv("KI_BUDGET_MONAT_EUR", "15")
+    monkeypatch.setenv("KI_BUDGET_FAHRER_EUR", "10")
+    monkeypatch.setenv("KI_KOSTEN_MAX_CT", "15")
+    assert B.budget_fahrer_eur() == 10.0
+    fk = B._fahrer_schluessel(w.driver_id)
+    assert fk.startswith(f"fahrer:{w.driver_id}:")
+    # Abgleich: eine alte Abhol-Bewertung MIT driver_id fuellt Firmen- UND Fahrer-Zaehler
+    welt.run(db.ki_bewertungen.insert_one({"id": f"alt14_{w.s}", "art": "abholung", "dealer_id": w.dealer_id,
+                                          "driver_id": w.driver_id, "protocol_id": f"p_alt14_{w.s}",
+                                          "input_hash": "x", "status": "ok", "created_at": _jetzt(), "kosten_ct": 990.0}))
+    welt.run(B.abgleichen(db))
+    assert welt.run(B.zaehler_ct(user_id=None, dealer_id=w.dealer_id, art="abholung")) == 990.0
+    assert welt.run(B.fahrer_zaehler_ct(w.driver_id)) == 990.0
+    # 9,90 EUR von 10: pruefen erlaubt (unter der Grenze), aber Sparmodus (>= 80 % des Fahrer-Deckels);
+    # Firma bei 15 EUR erst bei 66 % -> der engere Deckel entscheidet
+    bud = welt.run(B.pruefen(user_id=None, dealer_id=w.dealer_id, art="abholung", driver_id=w.driver_id))
+    assert bud["erlaubt"] is True and bud["sparmodus"] is True
+    assert bud["fahrer_verbraucht_ct"] == 990.0 and bud["fahrer_grenze_ct"] == 1000.0 and bud["grenze_ct"] == 1500.0
+    # Reservierung (15 ct) passt nicht mehr in den Fahrer-Deckel -> None, Firmen-Zaehler unveraendert (zurueckgenommen)
+    assert welt.run(B.reservieren(user_id=None, dealer_id=w.dealer_id, art="abholung", driver_id=w.driver_id)) is None
+    assert welt.run(B.zaehler_ct(user_id=None, dealer_id=w.dealer_id, art="abholung")) == 990.0
+    grund = welt.run(B.grund_voll(user_id=None, dealer_id=w.dealer_id, art="abholung", driver_id=w.driver_id))
+    assert "Monatsbudget des Fahrers (10 €)" in grund
+    erg = welt.run(K.bewertung_ausfuehren(pid, w.dealer_id))
+    assert erg["status"] == "budget" and "des Fahrers (10 €)" in erg["grund"] and erg["ergebnis"] is None
+    # Fahrer voll (>= Grenze): pruefen sagt nein mit Fahrer-Grund, Firma waere noch frei
+    welt.run(db.ki_budget.update_one({"_id": fk}, {"$set": {"ct": 1000.0}}))
+    bud = welt.run(B.pruefen(user_id=None, dealer_id=w.dealer_id, art="abholung", driver_id=w.driver_id))
+    assert bud["erlaubt"] is False and "des Fahrers (10 €)" in bud["grund"]
+    assert welt.run(B.pruefen(user_id=None, dealer_id=w.dealer_id, art="abholung"))["erlaubt"] is True, "Firma frei"
+    # Ohne Fahrer-Deckel (0) zaehlt nur die Firma
+    monkeypatch.setenv("KI_BUDGET_FAHRER_EUR", "0")
+    bud = welt.run(B.pruefen(user_id=None, dealer_id=w.dealer_id, art="abholung", driver_id=w.driver_id))
+    assert bud["erlaubt"] is True and bud["fahrer_grenze_ct"] == 0.0
+    monkeypatch.setenv("KI_BUDGET_FAHRER_EUR", "10")
+    # Frischer Monat: ein echter Lauf reserviert auf beiden Zaehlern und rechnet auf beiden ab
+    welt.run(db.ki_bewertungen.delete_many({"dealer_id": w.dealer_id}))
+    welt.run(db.ki_budget.delete_many({"_id": {"$regex": f":({w.dealer_id}|{w.driver_id}):"}}))
+    erg = welt.run(K.bewertung_ausfuehren(pid, w.dealer_id))
+    assert erg["status"] == "ok"
+    kosten = welt.run(db.ki_bewertungen.find_one({"protocol_id": pid}))["kosten_ct"]
+    assert kosten > 0
+    assert welt.run(B.zaehler_ct(user_id=None, dealer_id=w.dealer_id, art="abholung")) == round(kosten, 2)
+    assert welt.run(B.fahrer_zaehler_ct(w.driver_id)) == round(kosten, 2)
+    # Abgleich stellt einen verstellten Fahrer-Zaehler aus den Bewertungen wieder her
+    welt.run(db.ki_budget.update_one({"_id": fk}, {"$set": {"ct": 777.0}}))
+    welt.run(B.abgleichen(db))
+    assert welt.run(B.fahrer_zaehler_ct(w.driver_id)) == round(kosten, 2)
+    # Loeschfilter erfasst Fahrer-Schluessel; Fahrer-Loeschung nimmt sie mit
+    assert welt.run(db.ki_budget.count_documents(B.schluessel_filter(None, [w.driver_id]))) == 1
+    assert welt.run(B.zaehler_loeschen(None, [w.driver_id], db=db)) == 1
+    assert welt.run(B.fahrer_zaehler_ct(w.driver_id)) == 0.0
+    _aufraeumen(welt)

@@ -352,7 +352,8 @@ function KiKarte() {
           </div>
           {ki.budget && (
             <div data-testid="ki-betrieb-budget">
-              Kostenbremse: höchstens {ki.budget.monat_eur} € je Nutzer/Firma und Monat, {ki.budget.lauf_max_ct} ct je Lauf
+              Kostenbremse: höchstens {ki.budget.monat_eur} € je Nutzer/Firma und Monat
+              {ki.budget.fahrer_eur > 0 ? `, ${ki.budget.fahrer_eur} € je Fahrer (Abholung)` : ""}, {ki.budget.lauf_max_ct} ct je Lauf
               {ki.kosten_median_ct != null ? ` · Median je Lauf ${ki.kosten_median_ct} ct` : ""}
               {ki.eigene_preise ? ` · eigene Preisdatenbank: ${ki.eigene_preise.werte ?? 0} Werte (${ki.eigene_preise.frisch ?? 0} frisch, ${ki.eigene_preise.schluessel ?? 0} Schadensarten)` : ""}
             </div>

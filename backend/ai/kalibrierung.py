@@ -227,7 +227,9 @@ async def statistik(tage: int = 30) -> Dict[str, Any]:
         "erfahrungswerte": await erfahrungswerte(),
         "marktdaten": await _marktdaten_kurz(),
         "eigene_preise": await _eigene_kurz(),
-        "budget": {"monat_eur": _budget().budget_monat_eur(), "lauf_max_ct": _budget().kosten_max_ct()},
+        "budget": {"monat_eur": _budget().budget_monat_eur(), "lauf_max_ct": _budget().kosten_max_ct(),
+                   # Fahrer-Deckel (Wunsch Ahmad 26.09.2026 abends) fuer den Betrieb-Kasten
+                   "fahrer_eur": _budget().budget_fahrer_eur()},
         "kosten_median_ct": _median_kosten(kosten_liste),
     }
 

@@ -115,4 +115,13 @@ describe("KiFahrerKarte", () => {
     await klick("protokoll-ki-aktualisieren");
     expect(el("protokoll-ki-status").textContent).toContain("Netz weg");
   });
+
+  it("zeigt bei 'freischaltung' den Grund des Servers (Fahrer nicht freigeschaltet, 26.09.2026 abends)", async () => {
+    driverApi.get.mockResolvedValueOnce({ data: { status: "freischaltung", ergebnis: null,
+                                                  grund: "Fahrer nicht für die KI-Abholbewertung freigeschaltet" } });
+    await starten({});
+    await klick("protokoll-ki-oeffnen");
+    expect(el("protokoll-ki-karte").dataset.status).toBe("freischaltung");
+    expect(el("protokoll-ki-status").textContent).toContain("Fahrer nicht für die KI-Abholbewertung freigeschaltet");
+  });
 });

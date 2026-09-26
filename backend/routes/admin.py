@@ -1824,6 +1824,8 @@ async def admin_list_drivers(response: Response, limit: int = 2000, seite: int =
     ]):
         termine[row["_id"]] = row
     return [{**f,
+             # KI-Abholbewertung je Fahrer freigeschaltet? (Wunsch Ahmad 26.09.2026 abends)
+             "ki_aktiv": f.get("ki_aktiv") is True,
              "firmen": sorted(namen.get(d, d[:8])
                               for d in (links.get(f["id"], {}).get("dealer_ids") or [])),
              "verknuepfungen": links.get(f["id"], {}).get("n", 0),
@@ -1980,6 +1982,16 @@ async def admin_delete_driver(driver_id: str, admin=Depends(current_super_admin)
     anonym = await fahrer_konto_anonymisieren(db, driver_id)
     links = type("R", (), {"deleted_count": anonym.get("dealer_drivers", 0)})()
     getrennt = type("R", (), {"modified_count": anonym.get("appointments", 0)})()
+    # Fahrer-Deckel (Wunsch Ahmad 26.09.2026 abends): Abhol-Bewertungen tragen
+    # driver_id -> Pseudonym; die Fahrer-Budgetzaehler (fahrer:<id>:<Monat>)
+    # fallen weg. Loeschung darf daran nie scheitern.
+    try:
+        from ai import budget as ki_budget
+        await db.ki_bewertungen.update_many({"driver_id": driver_id},
+                                            {"$set": {"driver_id": anonym.get("pseudonym") or "geloescht"}})
+        await ki_budget.zaehler_loeschen(None, [driver_id], db=db)
+    except Exception:  # noqa: BLE001
+        log.exception("KI-Spuren des Fahrers %s nicht bereinigt", driver_id)
     await db.driver_accounts.delete_one({"id": driver_id})
     # Konto ist geloescht — ein Audit-Fehler darf keinen 500 mit 404-Retry
     # ("Fahrer nicht gefunden") mehr ausloesen.
@@ -2538,6 +2550,32 @@ async def admin_set_sucher_ki(sucher_id: str, body: KiFreischaltenIn,
     await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
                               "admin.sucher.ki." + ("freigeschaltet" if body.aktiv else "gesperrt"),
                               ref=sucher_id, meta={"grund": body.grund or "", "dealer_id": sucher.get("dealer_id")})
+    return {"ok": True, "ki_aktiv": bool(body.aktiv)}
+
+
+@router.post("/admin/drivers/{driver_id}/ki")
+async def admin_set_driver_ki(driver_id: str, body: KiFreischaltenIn,
+                              admin=Depends(current_super_admin)):
+    """KI-Abholbewertung fuer einen Fahrer freischalten oder sperren (Wunsch
+    Ahmad 26.09.2026 abends: "wenn ein Fahrer keine KI-Abholung freigeschaltet
+    hat, dann allgemein nein"). NUR Super-Admin. Zusaetzlich zur Firma: die
+    Abholbewertung rechnet nur, wenn Chef-Konto UND Fahrer des Termins
+    freigeschaltet sind. Wirkt sofort — die Karten fragen bei jedem Aufruf nach."""
+    d = await db.driver_accounts.find_one({"id": driver_id},
+                                          {"_id": 0, "id": 1, "active": 1, "ki_aktiv": 1, "loeschung": 1})
+    if not d:
+        raise HTTPException(404, "Fahrer nicht gefunden")
+    if body.aktiv and d.get("active") is False:
+        raise HTTPException(400, "Dieser Fahrer ist gesperrt — erst das Konto wieder entsperren.")
+    if body.aktiv and (d.get("loeschung") or {}).get("status") == "laeuft":
+        raise HTTPException(409, "Dieser Fahrer wird gerade gelöscht — keine Freischaltung mehr.")
+    await db.driver_accounts.update_one({"id": driver_id},
+                                        {"$set": {"ki_aktiv": bool(body.aktiv),
+                                                  "ki_aktiv_seit": now_iso() if body.aktiv else None,
+                                                  "ki_aktiv_von": _handelnder(admin), "updated_at": now_iso()}})
+    await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
+                              "admin.fahrer.ki." + ("freigeschaltet" if body.aktiv else "gesperrt"),
+                              ref=driver_id, meta={"grund": body.grund or ""})
     return {"ok": True, "ki_aktiv": bool(body.aktiv)}
 
 
