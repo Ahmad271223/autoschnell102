@@ -58,9 +58,13 @@ async def acquire(db, name: str, ttl_seconds: int = 3600,
     until = now + timedelta(seconds=ttl_seconds)
     token = uuid.uuid4().hex
     try:
+        # CI-Befund 27.09.2026: release() setzt expires_at = jetzt, MongoDB speichert Zeiten aber nur auf die
+        # Millisekunde genau (abgeschnitten). Griff jemand in DERSELBEN Millisekunde neu zu, war die freigegebene
+        # Sperre mit $lt noch "gueltig" -> Upsert -> DuplicateKeyError -> None ("gesperrt"). $lte: abgelaufen ist,
+        # was nicht mehr SPAETER als jetzt ablaeuft — genau das Gegenstueck zu gehalten() ($gt).
         doc = await db.job_locks.find_one_and_update(
             {"name": name,
-             "$or": [{"expires_at": {"$lt": now}}, {"expires_at": None}]},
+             "$or": [{"expires_at": {"$lte": now}}, {"expires_at": None}]},
             {"$set": {"name": name, "owner": OWNER, "token": token,
                       "acquired_at": now, "expires_at": until}},
             upsert=True, return_document=ReturnDocument.AFTER,

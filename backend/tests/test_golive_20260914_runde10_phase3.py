@@ -67,6 +67,31 @@ def wegwerf(monkeypatch):
 
 
 # ============================================================ 3.1
+def test_31b_freigeben_und_sofort_neu_greifen_in_derselben_millisekunde(wegwerf, monkeypatch):
+    """CI-Befund 27.09.2026 (test_31 und test_markt_health test_12 zeitweise rot): release() setzt expires_at =
+    jetzt, MongoDB speichert nur Millisekunden. Ein neuer Griff in derselben Millisekunde bekam None, weil die
+    freigegebene Sperre mit $lt noch als gueltig galt. Die Uhr steht hier fest (Mikrosekunden != 0) — ohne
+    Korrektur scheitert der zweite Griff jedes Mal."""
+    db, run = wegwerf.db, wegwerf.run
+    run(JL.ensure_lock_index(db))
+    fest = datetime(2026, 9, 27, 12, 0, 0, 400, tzinfo=timezone.utc)
+
+    class Uhr(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fest if tz else fest.replace(tzinfo=None)
+
+    monkeypatch.setattr(JL, "datetime", Uhr)
+    t1 = run(JL.acquire(db, "probe-ms", 60))
+    assert t1
+    run(JL.release(db, "probe-ms", token=t1))
+    assert run(JL.gehalten(db, "probe-ms")) is False
+    t2 = run(JL.acquire(db, "probe-ms", 60))
+    assert t2 and t2 != t1, "freigegebene Sperre muss in derselben Millisekunde wieder greifbar sein"
+    assert run(JL.acquire(db, "probe-ms", 60)) is None, "die neue Sperre haelt weiter"
+
+
+# ============================================================ 3.1
 def test_31_sperre_mit_token_und_heartbeat(wegwerf):
     db, run = wegwerf.db, wegwerf.run
     run(JL.ensure_lock_index(db))
