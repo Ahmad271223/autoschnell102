@@ -553,6 +553,8 @@ describe("Admin Berichte — Schlussrunde (Beschriftungen)", () => {
     expect(el("bericht-vorab-2028-02-01").getAttribute("title")).not.toContain("rückwärts verkettet");
     expect(el("bericht-vorab-lange-2028-02-01").textContent).toContain("3 Segm. seit über 14 Tagen nicht abgerufen");
     expect(el("bericht-abgelaufen-2028-02-01").getAttribute("title")).toContain("4 nach einem Stillstand");
+    // Schlussrunde 2: laut Tagesplan-Protokoll normales Intervall ohne Stillstand-Tag = Pause des Auftrags
+    expect(el("bericht-abgelaufen-2028-02-01").getAttribute("title")).toContain("Planausfall oder Pause — Intervall normal");
     expect(el("bericht-abgelaufen-2028-02-01").getAttribute("title")).not.toContain("mit Intervall über 14 Tage");
     const planung = el("bericht-planung").textContent;
     expect(planung).toContain("2 Segment-Tag(e) noch nicht beobachtet");

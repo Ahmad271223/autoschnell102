@@ -252,7 +252,7 @@ export function abgelaufenTitel(t) {
   const alle = Number(t?.abgelaufene_segmente || 0);
   const teile = [];
   if (alle - still > 0) teile.push(`${alle - still} mit Intervall über 14 Tage`);
-  if (still > 0) teile.push(`${still} nach einem Stillstand (Budget, Crawler aus, Planausfall — Intervall normal)`);
+  if (still > 0) teile.push(`${still} nach einem Stillstand (Budget, Crawler aus, Planausfall oder Pause — Intervall normal)`);
   return `Letzter geplanter Lauf älter als 14 Tage (${teile.join(", ")}) — keine technische Lücke, aber der Wert fehlt im Korb (über 5 % fehlend: kein Anker)`;
 }
 export const BERICHT_ALT_TEXT = "nach älterer Rechenregel erstellt";

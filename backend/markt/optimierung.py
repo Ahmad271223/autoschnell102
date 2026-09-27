@@ -955,12 +955,14 @@ async def safe_auto_anwenden(db, *, tag: Optional[str] = None, jetzt_iso: Option
                                            "letzter_treffer_tag": 1, "letzter_gueltiger_tag": 1, "tag": 1})} if seg_ids else {}
     abgelehnt = await abgelehnte_familien(db, list(segs.values()))       # auch fruehere Fassungen desselben Bereichs
     sperren = await sperren_je_segment(db, list(segs.values()), tag)
-    z["zurueckgehalten"] = 0
+    z["zurueckgehalten"] = z["zurueckgehalten_erledigt"] = 0
+    gehalten: set = set()           # Aenderungen, die in DIESEM Lauf etwas zurueckhalten
 
     async def _zurueckhalten(a: Dict[str, Any], grund_neu: str) -> None:
         """Mindestverweildauer: die gewuenschte Aenderung steht am Protokolleintrag (nachvollziehbar), sie wird nicht
         ausgefuehrt. Nur schreiben, wenn sich etwas aendert (kein taeglicher Schreib-Churn)."""
         z["zurueckgehalten"] += 1
+        gehalten.add(a["id"])
         eintrag = {"tag": tag, "grund": grund_neu, "bis": verweil_bis(a)}
         alt = a.get("zurueckgehalten") or {}
         if alt.get("grund") != grund_neu or alt.get("bis") != eintrag["bis"]:
@@ -1044,6 +1046,16 @@ async def safe_auto_anwenden(db, *, tag: Optional[str] = None, jetzt_iso: Option
         elif erg == "aktualisiert":
             z["aktualisiert"] += 1
         beruehrt.add(seg["id"])
+    # Schlussrunde 2 (Pruefer): ein zurueckgehaltener Wunsch gilt nur, solange er besteht — faellt sein Grund weg (die
+    # Daten widersprechen nicht mehr, die Empfehlung ist wieder das bestehende Ziel), verschwindet der Eintrag. Sonst
+    # stand bis haelt_bis ein laengst ueberholter Grund als 'ausstehende Aenderung' am Protokoll. Bedingt auf den
+    # gelesenen Eintrag (zwei Server: ein inzwischen neu geschriebener Wunsch bleibt stehen); idempotent.
+    for a in bleibt.values():
+        alt_eintrag = a.get("zurueckgehalten")
+        if alt_eintrag and a["id"] not in gehalten:
+            r = await db[AENDERUNGEN].update_one({"id": a["id"], "status": AKTIV, "zurueckgehalten": alt_eintrag},
+                                                 {"$unset": {"zurueckgehalten": ""}})
+            z["zurueckgehalten_erledigt"] += int(r.modified_count or 0)
     for sid in beruehrt:
         await _wirkung_neu(db, sid)
     return z

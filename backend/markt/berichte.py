@@ -114,7 +114,8 @@ HOT_TOP_MAX = 10
 #      ('vorab'), Start/Ende ueber die wirksamen Werte, Budget-Storno ganzer Tage, Protokoll-Luecke mit Job-Beleg;
 #      Schlussrunde (vor der Auslieferung, gleiche Nummer): als leer bekannte Segmente (SAFE_AUTO-Pause EMPTY, letzter
 #      gueltiger Lauf ohne Treffer) nicht im Preiskorb, Serienstart/'lange nicht abgerufen'/Stillstand getrennt
-#      beschriftet, 'vorab' und 'kein Ankertag' als Confidence-Einschraenkung
+#      beschriftet, 'vorab' und 'kein Ankertag' als Confidence-Einschraenkung; Schlussrunde 2 (gleiche Nummer): diese
+#      Beschriftung nach dem Intervall laut Tagesplan-Protokoll (mehrere Auftraege teilen das Kontingent)
 # Die Oberflaeche kennzeichnet aeltere Berichte ("nach aelterer Rechenregel erstellt") — Vergleiche ueber Perioden
 # sollen die Definitionen nicht unbemerkt mischen.
 SCHEMA = 4
@@ -161,13 +162,16 @@ ANKER_MIN_ABDECKUNG = 0.95
 # Ausfall, wird nichts getragen (eine Luecke wird nie aufgefuellt); ist er aelter (Budget reicht nicht fuer 14 Tage,
 # SAFE_AUTO-Ruhe), fehlt sein Wert an diesem Tag (keine technische Luecke, aber nicht gedeckt; Hinweis).
 TRAGEN_MAX_TAGE = VORLAUF_TAGE
-# Schlussrunde (Beschriftungen): 'Serienstart' nur, wenn die Serie im geladenen Fenster wirklich (neu) beginnt — das
-# Segment ist darin angelegt, oder die ganze Fassung hatte mindestens SERIE_RUHT_TAGE Tage keinen einzigen geplanten
-# Abruf (neu, wieder eingeschaltet, Neustart nach Stillstand). Eine Woche: unter Budget-Rotation plant der Tagesplan
-# jeden Tag die am laengsten wartenden Segmente — selbst 5 Segmente mit Intervall 30 ergeben hoechstens ~6 Tage ohne
-# Abruf der Fassung. Ein einzelnes, laenger als TRAGEN_MAX_TAGE nicht abgerufenes Segment einer laufenden Serie ist kein
-# Serienstart ('seit mehr als 14 Tagen nicht abgerufen'); ebenso heisst ein abgelaufener Wert nach einem Stillstand
-# nicht 'Intervall ueber 14 Tage'.
+# Schlussrunde (Beschriftungen) / Schlussrunde 2: ob ein Segment ohne Wert zu einer laufenden Serie mit Intervall ueber
+# 14 Tagen gehoert ('seit mehr als 14 Tagen nicht abgerufen' bzw. abgelaufen 'Intervall ueber 14 Tage') oder zu einem
+# Serienstart/Neustart bzw. Stillstand, entscheidet in erster Linie das Tagesplan-Protokoll: es haelt je Tag das
+# Intervall der Budget-Rotation fest (intervall_tage, budget_grund 'budget_reicht_nicht'). Das Kontingent gilt fuer ALLE
+# Auftraege gemeinsam und der Tagesplan sortiert nach (last_planned_tag, priority, id) — die Segmente einer Fassung
+# laufen deshalb in Bloecken und ruhen dazwischen laenger als eine Woche (Pruefer: 2 Auftraege x 24, Intervall 24:
+# 12 Tage an, 12 Tage aus). Die Ruhe der Fassung sagt darum nichts ueber das Intervall. Nur ohne Protokollangabe zum
+# Intervall (Altdaten, reine Rechnung ohne Protokoll) gilt ersatzweise: ein Stillstand (Budget, Crawler aus,
+# Planausfall) in den TRAGEN_MAX_TAGE Tagen davor oder mindestens SERIE_RUHT_TAGE Tage ohne Abruf der Fassung heisst
+# Neustart/Stillstand — fuer einen einzelnen Auftrag ruht eine laufende Fassung nie eine Woche.
 SERIE_RUHT_TAGE = 7
 JOB_TAG_INDEX = "markt_job_tag_status"     # (tag, status) — Altdaten: gab es an einem Tag irgendeinen Tagesplan-Job?
 # Abruf-Jobs, die als geplant gelten: jeder Status ausser 'cancelled'; storniert nur, wenn der Tagesplan veraltet war
@@ -514,6 +518,15 @@ class _Daten:
         planung = planung or {}
         self.tag_status: Dict[str, str] = dict(planung.get("tage") or {}) if geplant is not None else {}
         self.budget_storno: Dict[str, set] = {str(k): set(v) for k, v in (planung.get("budget") or {}).items()}
+        # Schlussrunde 2: Intervall der Budget-Rotation je Kalendertag laut Tagesplan-Protokoll (nur Tage, an denen der
+        # Plan lief) — Beschriftung 'Intervall ueber 14 Tage' vs. Serienstart/Stillstand (siehe SERIE_RUHT_TAGE)
+        self.intervall: Dict[str, int] = {}
+        if geplant is not None:
+            for k, v in (planung.get("intervall") or {}).items():
+                try:
+                    self.intervall[str(k)] = int(v)
+                except (TypeError, ValueError):
+                    continue
         # erster Job je Segment (Runde 4 #4: schon angelegt/eingeschaltet?) — reine Rechnung: erster geplanter Tag
         self.erster_job: Dict[str, str] = dict(planung.get("erster") or {}) or {sid: min(g) for sid, g in (geplant or {}).items() if g}
         letzter_job: Dict[str, str] = {str(k): str(v) for k, v in (planung.get("letzter") or {}).items() if v}
@@ -688,15 +701,58 @@ class _Daten:
         ok_at = speicher._zeitpunkt(seg.get("last_success_at")) if seg.get("last_success_at") else None
         return leer_at is not None and (ok_at is None or leer_at > ok_at)
 
+    def intervall_lang(self, tag: str) -> Optional[bool]:
+        """Schlussrunde 2: lag das Intervall der Budget-Rotation laut Tagesplan-Protokoll an einem der TRAGEN_MAX_TAGE
+        Tage vor 'tag' (oder an 'tag') ueber konfig.MAX_INTERVALL_TAGE? None = das Protokoll sagt dazu nichts (Altdaten,
+        Protokoll gescheitert, reine Rechnung ohne Protokoll). Nur Tage, an denen der Plan lief (an Budget-Tagen steht
+        dort das Notintervall 'ein Segment je Tag' — das ist der Stillstand, nicht das Intervall)."""
+        i = self.pos.get(tag)
+        if i is None:
+            return None
+        werte = [self.intervall[t] for t in self.alle_tage[max(0, i - TRAGEN_MAX_TAGE):i + 1]
+                 if t in self.intervall and self.tag_status.get(t, PLAN_LIEF) == PLAN_LIEF]
+        if not werte:
+            return None
+        return any(n > konfig.MAX_INTERVALL_TAGE for n in werte)
+
+    def _stillstand_tage(self, sid: str, tag: str) -> bool:
+        """Liegt in den TRAGEN_MAX_TAGE Tagen vor 'tag' ein Stillstand-Tag (Budget, Crawler aus, Planausfall) oder ein
+        Budget-Storno des Segments?"""
+        i = self.pos.get(tag)
+        if i is None:
+            return False
+        return any(self.tag_status.get(t) in (PLAN_BUDGET, PLAN_AUS, PLAN_AUSFALL) or t in self.budget_storno.get(sid, ())
+                   for t in self.alle_tage[max(0, i - TRAGEN_MAX_TAGE):i])
+
+    def _fassung_ruhte(self, tag: str) -> bool:
+        """Ersatzregel ohne Protokollangabe: mindestens SERIE_RUHT_TAGE Tage am Stueck ohne Abruf der Fassung in den
+        TRAGEN_MAX_TAGE Tagen vor 'tag' (gilt nur fuer einen einzelnen Auftrag, siehe SERIE_RUHT_TAGE)."""
+        i = self.pos.get(tag)
+        if i is None:
+            return False
+        ruht = 0
+        for t in self.alle_tage[max(0, i - TRAGEN_MAX_TAGE):i]:
+            ruht = 0 if t in self.fassung_plan_tage else ruht + 1
+            if ruht >= SERIE_RUHT_TAGE:
+                return True
+        return False
+
     def serienstart(self, sid: str, tag: str) -> bool:
-        """Schlussrunde (#7): ist ein 'vorab' fehlendes Segment an diesem Tag ein echter Serienstart? Ja, wenn es im
-        geladenen Fenster angelegt wurde, oder die ganze Fassung vor ihrem ersten geplanten Abruf im Fenster mindestens
-        SERIE_RUHT_TAGE ruhte (neu, wieder eingeschaltet, Neustart nach Stillstand) und der Tag hoechstens
-        TRAGEN_MAX_TAGE danach liegt. Sonst lief die Serie, nur dieses Segment wurde seit mehr als 14 Tagen nicht
-        abgerufen (Intervall ueber 14 Tage)."""
+        """Schlussrunde (#7) / Schlussrunde 2: ist ein 'vorab' fehlendes Segment an diesem Tag ein (Neu-)Start seiner
+        Serie — oder gehoert es zu einer laufenden Serie mit Intervall ueber 14 Tagen ('seit mehr als 14 Tagen nicht
+        abgerufen')? Serienstart, wenn das Segment im geladenen Fenster angelegt wurde. Sonst nach dem Tagesplan-Protokoll:
+        Intervall ueber MAX_INTERVALL_TAGE in den 14 Tagen davor -> kein Serienstart; Intervall laut Protokoll normal ->
+        das Segment lief laenger nicht, weil es nicht lief (neu eingeschaltet, Neustart nach Stillstand/Pause) ->
+        Serienstart. Ohne Protokollangabe: Stillstand-Tag in den 14 Tagen davor -> Neustart (Pruefer: nicht 'Intervall
+        ueber 14 Tage'); sonst die Ersatzregel (Fassung ruhte vor ihrem ersten Abruf im Fenster SERIE_RUHT_TAGE)."""
         start = self.alle_tage[0] if self.alle_tage else self.von
         angelegt = _tag_aus_zeit((self.segs.get(sid) or {}).get("created_at"))
         if angelegt and angelegt >= start:
+            return True
+        lang = self.intervall_lang(tag)
+        if lang is not None:
+            return not lang
+        if self._stillstand_tage(sid, tag):
             return True
         s0 = self.fassung_erster_plan
         if not s0:
@@ -704,21 +760,17 @@ class _Daten:
         return s0 >= _plus(start, SERIE_RUHT_TAGE) and tag < _plus(s0, TRAGEN_MAX_TAGE)
 
     def stillstand(self, sid: str, tag: str) -> bool:
-        """Schlussrunde (#7): liegt in den TRAGEN_MAX_TAGE Tagen vor 'tag' ein Stillstand (Budget, Crawler aus,
-        Planausfall, Budget-Storno des Segments oder mindestens SERIE_RUHT_TAGE Tage ohne jeden Abruf der Fassung)? Dann
-        ist ein abgelaufener Wert die Folge des Stillstands, nicht eines Intervalls ueber 14 Tage."""
-        i = self.pos.get(tag)
-        if i is None:
+        """Schlussrunde (#7) / Schlussrunde 2: ist ein abgelaufener Wert (letzter Abruf aelter als TRAGEN_MAX_TAGE) die
+        Folge eines Stillstands bzw. einer Pause statt eines Intervalls ueber 14 Tage? Intervall laut Protokoll ueber 14
+        Tage -> nein (das allein laesst den Wert ablaufen). Sonst ja bei einem Stillstand-Tag (Budget, Crawler aus,
+        Planausfall, Budget-Storno) in den 14 Tagen davor, ebenso bei einem laut Protokoll normalen Intervall (dann ruhte
+        das Segment, z. B. pausierter Auftrag). Ohne Protokollangabe die Ersatzregel (Fassung ruhte SERIE_RUHT_TAGE)."""
+        lang = self.intervall_lang(tag)
+        if lang:
             return False
-        vorher = self.alle_tage[max(0, i - TRAGEN_MAX_TAGE):i]
-        if any(self.tag_status.get(t) in (PLAN_BUDGET, PLAN_AUS, PLAN_AUSFALL) or t in self.budget_storno.get(sid, ()) for t in vorher):
+        if self._stillstand_tage(sid, tag) or lang is False:
             return True
-        ruht = 0
-        for t in vorher:
-            ruht = 0 if t in self.fassung_plan_tage else ruht + 1
-            if ruht >= SERIE_RUHT_TAGE:
-                return True
-        return False
+        return self._fassung_ruhte(tag)
 
     def _wegen_budget(self, sid: str, tag: str) -> bool:
         """Runde 4 (#1): nicht geplant wegen Budget — Tagesplan mit erschoepftem/keinem Budget oder der Job des Tages
@@ -1438,7 +1490,7 @@ def bericht_rechnen(modell: Dict[str, Any], segs: Dict[str, Dict[str, Any]], doc
                                    f"{round((1 - ANKER_MIN_ABDECKUNG) * 100)} % des Korbgewichts, ist der Tag kein Anker")
     if kz["abgelaufene_stillstand_segment_tage"]:
         bericht["hinweise"].append(f"{kz['abgelaufene_stillstand_segment_tage']} Segment-Tag(e) ohne tragbaren Wert nach einem "
-                                   f"Stillstand (Budget, Crawler aus oder Planausfall; letzter Abruf älter als {TRAGEN_MAX_TAGE} Tage, "
+                                   f"Stillstand (Budget, Crawler aus, Planausfall oder pausierter Auftrag; letzter Abruf älter als {TRAGEN_MAX_TAGE} Tage, "
                                    "das Intervall selbst war normal) — keine technische Lücke, aber ihr Wert fehlt im Korb, bis das "
                                    "Segment wieder abgerufen ist")
     if kz["startwert"] is None and kz["start_ende_korb_pct"] is not None and kz["delta_pct"] is not None:
@@ -1554,7 +1606,8 @@ async def _job_am_tag(db, tag: str) -> bool:
         return bool(await db[konfig.JOBS].find_one({"tag": tag}, {"_id": 0, "tag": 1}))
 
 
-async def _protokoll_laden(db, von: str, bis: str, heute: Optional[str], plan_tage: set) -> Dict[str, str]:
+async def _protokoll_laden(db, von: str, bis: str, heute: Optional[str], plan_tage: set,
+                          intervalle: Optional[Dict[str, int]] = None) -> Dict[str, str]:
     """Pruefung Runde 4 (#1): Planungsstand je Kalendertag des geladenen Zeitraums (Vorlauf + Periode) aus dem
     Tagesplan-Protokoll (konfig.TAGESPLAN_LOG, nur lesen): eine Bereichsabfrage + der erste Protokolltag (beides ueber
     den Unique-Index auf 'tag'); nur fuer Tage ohne Protokoll und ohne Job dieses Modells je ein Index-Treffer in
@@ -1579,6 +1632,16 @@ async def _protokoll_laden(db, von: str, bis: str, heute: Optional[str], plan_ta
         p = protokoll.get(t) or {}
         if p.get("lief_at"):
             status[t] = PLAN_BUDGET if p.get("budget_grund") in BUDGET_GRUENDE else PLAN_LIEF
+            if intervalle is not None:
+                # Schlussrunde 2: Intervall der Rotation an diesem Tag (Beschriftung Intervall vs. Serienstart/Stillstand)
+                try:
+                    iv = int(p["intervall_tage"]) if p.get("intervall_tage") is not None else None
+                except (TypeError, ValueError):
+                    iv = None
+                if p.get("budget_grund") == konfig.BUDGET_GRUND_REICHT_NICHT:
+                    iv = max(iv or 0, konfig.MAX_INTERVALL_TAGE + 1)
+                if iv is not None:
+                    intervalle[t] = iv
         elif t in plan_tage:
             status[t] = PLAN_LIEF
         elif p.get("crawler_aus_at"):
@@ -1605,8 +1668,10 @@ async def _planung_laden(db, seg_ids: List[str], von: str, bis: str, heute: Opti
     jobs = await _jobs_laden(db, seg_ids, von, bis, konfig.heute_tag())
     if jobs is None:
         return None, None
-    tage = await _protokoll_laden(db, von, bis, heute, jobs["plan"])
-    return jobs["geplant"], {"tage": tage, "budget": jobs["budget"], "erster": jobs["erster"], "letzter": jobs["letzter"]}
+    intervalle: Dict[str, int] = {}
+    tage = await _protokoll_laden(db, von, bis, heute, jobs["plan"], intervalle)
+    return jobs["geplant"], {"tage": tage, "budget": jobs["budget"], "erster": jobs["erster"], "letzter": jobs["letzter"],
+                             "intervall": intervalle}
 
 
 async def bericht_berechnen(db, model_id: str, typ: str, von: str, bis: str, *, heute: Optional[str] = None) -> Optional[Dict[str, Any]]:
