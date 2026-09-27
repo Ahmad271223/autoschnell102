@@ -37,6 +37,32 @@ class KonfigIn(BaseModel):
     ez_buckets: Optional[List[BereichIn]] = None
     rows_je_segment: Optional[int] = Field(default=None, ge=1, le=200)
     budget_usd: Optional[float] = Field(default=None, ge=0, le=1000000)
+    # Startpruefung 27.09.2026 (G3): ein Monatsbudget ueber 0 und unter BUDGET_PLAUSIBEL_AB $ ist fast
+    # immer ein Lesefehler ("1.000" -> 1) — nur mit ausdruecklicher Bestaetigung speichern
+    bestaetigt: bool = False
+
+
+# Startpruefung 27.09.2026 (G3 + Zusatzfund "Budget als Dauer-Vorgabe"): budget_setzen merkt den Wert auch
+# als Vorgabe fuer alle Folgemonate. 0 bleibt erlaubt (bewusst pausieren); 0 < Wert < 5 $ nur bestaetigt.
+BUDGET_PLAUSIBEL_AB = 5.0
+
+
+def _usd_deutsch(wert: float) -> str:
+    """1000 -> '1.000', 1.5 -> '1,5' (Anzeige in der Rueckfrage)."""
+    text = f"{wert:,.2f}".rstrip("0").rstrip(".")
+    return text.replace(",", "_").replace(".", ",").replace("_", ".")
+
+
+def budget_unplausibel(budget_usd: Optional[float], bestaetigt: bool) -> Optional[str]:
+    """Fehlertext fuer ein unplausibel kleines Monatsbudget oder None (in Ordnung)."""
+    if budget_usd is None or bestaetigt:
+        return None
+    if 0 < float(budget_usd) < BUDGET_PLAUSIBEL_AB:
+        vorschlag = _usd_deutsch(round(float(budget_usd) * 1000, 2))
+        return (f"Monatsbudget {_usd_deutsch(float(budget_usd))} $ ist unplausibel klein — meinten Sie {vorschlag} $? "
+                f"0 $ pausiert die Marktbeobachtung bewusst; einen Betrag unter {_usd_deutsch(BUDGET_PLAUSIBEL_AB)} $ "
+                "bitte ausdrücklich bestätigen.")
+    return None
 
 
 @router.get("/admin/market/status")
@@ -539,6 +565,10 @@ async def admin_market_model_enabled(model_id: str, body: ModellSchalterIn, admi
 
 @router.put("/admin/market/config")
 async def admin_market_config(body: KonfigIn, admin=Depends(current_super_admin)):
+    # G3: VOR jeder Aenderung pruefen — sonst waeren km-/EZ-Bereiche schon gespeichert, das Budget nicht
+    unplausibel = budget_unplausibel(body.budget_usd, body.bestaetigt)
+    if unplausibel:
+        raise HTTPException(422, unplausibel)
     try:
         if body.km_buckets is not None:
             await segmente.km_buckets_setzen(db, [b.model_dump() for b in body.km_buckets])

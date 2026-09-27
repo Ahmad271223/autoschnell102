@@ -3489,7 +3489,16 @@ async def admin_list_dealer_sucher(dealer_id: str, response: Response, limit: in
         letzte = await db.manual_payments.find_one(
             {"subject_user_id": s["id"]}, {"_id": 0},
             sort=[("created_at", -1)])
+        # Startpruefung 27.09.2026 (H9): nimmt PATCH .../abo-gueltig-bis ein neues Datum an? Aktiv: ja.
+        # Nur per Datum abgelaufen (status weiter 'active', z. B. vertipptes Jahr): ebenfalls ja — die
+        # Oberflaeche zeigte dann nur die Bezahl-Knoepfe. Aufgehoben ('cancelled'): nein (dort 404).
+        # Dieselbe Auswahl wie der PATCH, damit Knopf und Server nie auseinanderlaufen.
+        korrigierbar = bool(sub.get("active"))
+        if not korrigierbar and sub.get("status") == "expired":
+            korrigierbar = bool(await _massgebliches_abo(s["id"], dealer_id, ist_chef,
+                                                         auch_abgelaufen=True))
         out.append({**s, "ist_chef": ist_chef,
+                    "ablauf_korrigierbar": korrigierbar,
                     # KI-Bewertung je Konto freigeschaltet? (25.09.2026 abends, wie Abo)
                     "ki_aktiv": s.get("ki_aktiv") is True,
                     # liegengebliebenes zweites dealer-Konto: arbeitet als Sucher

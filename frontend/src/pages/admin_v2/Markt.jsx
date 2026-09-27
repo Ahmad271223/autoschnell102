@@ -6,6 +6,7 @@ import { api, errMsg } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { PageHeader, Card, Badge, Button, Spinner, EmptyState, fmtDate } from "./_ui";
 import { DATENLAGE, datumZeit, eur, pct, trendFarbe } from "@/lib/markt";
+import { kmAusText, preisAusText } from "@/lib/preis";
 import { QualitaetZaehler } from "@/components/MarktQualitaet";
 
 // Review 26.09.2026 abends P1: "ungueltig" = letzter Lauf lieferte unsortierte Daten (data_invalid) —
@@ -260,25 +261,85 @@ function Kachel({ label, wert, hint, tone = "", ...rest }) {
   );
 }
 
+// Startpruefung 27.09.2026 (G3): ab diesem Betrag gilt ein Monatsbudget als plausibel (wie der Server);
+// darunter (ausser genau 0) fragt die Oberflaeche nach und schickt dann bestaetigt=true
+export const BUDGET_PLAUSIBEL_AB = 5;
+
+/** Betrag deutsch mit zwei Nachkommastellen: 1000.5 -> "1.000,50". */
+export const usdText = (v) => Number(v).toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+/**
+ * Startpruefung 27.09.2026 (G3): Formularwerte der Karte "Bereiche & Budget" lesen und pruefen.
+ * Vorher: `budget_usd: Number(budget) || 0` — aus "700,00" wurde still 0 $ (Planung pausiert), aus
+ * "1.000" wurde 1 $ (Budget sofort erschoepft), und der Wert galt auch fuer alle Folgemonate.
+ * Jetzt deutsche Schreibweise (lib/preis), und Unlesbares wird NICHT gespeichert:
+ *   { fehler: "…" }  oder  { werte: { km_buckets, ez_buckets, rows_je_segment, budget_usd } }
+ * Dieselbe Strenge fuer die Nachbarfelder: "10.000-30.000" wurde als 10–30 km gespeichert,
+ * "abc" Zeilen still als 10.
+ */
+export function konfigLesen({ km, ez, rows, budget }) {
+  const budgetUsd = preisAusText(String(budget ?? "").replace(/\$|US-?Dollar|USD/gi, ""));
+  if (budgetUsd === null) {
+    return { fehler: `Monatsbudget „${String(budget ?? "").trim()}“ ist kein gültiger Betrag — bitte z. B. 700 oder 1.000,50 eingeben (0 = pausieren).` };
+  }
+  const zeilenText = String(rows ?? "").trim();
+  const zeilen = /^\d+$/.test(zeilenText) ? Number(zeilenText) : NaN;
+  if (!Number.isInteger(zeilen) || zeilen < 1 || zeilen > 200) {
+    return { fehler: `Zeilen je Segment „${zeilenText}“ ist ungültig — erlaubt sind ganze Zahlen von 1 bis 200.` };
+  }
+  const bereiche = (text, a, b, lesen, name) => {
+    const liste = [];
+    for (const teil of String(text || "").split(",").map((t) => t.trim()).filter(Boolean)) {
+      const [x, y] = teil.split("-").map((v) => v.trim());
+      const von = x ? lesen(x) : null;
+      const bis = y ? lesen(y) : null;
+      if (Number.isNaN(von) || Number.isNaN(bis)) return { fehler: `${name} „${teil}“ ist ungültig.` };
+      liste.push({ [a]: von, [b]: bis });
+    }
+    return { liste };
+  };
+  const jahr = (t) => (/^\d{4}$/.test(t) ? Number(t) : NaN);
+  const kmWert = (t) => { const z = kmAusText(t); return z === null ? NaN : z; };
+  const kmB = bereiche(km, "min_km", "max_km", kmWert, "km-Bereich");
+  if (kmB.fehler) return { fehler: kmB.fehler };
+  const ezB = bereiche(ez, "year_from", "year_to", jahr, "EZ-Bereich");
+  if (ezB.fehler) return { fehler: ezB.fehler };
+  return { werte: { km_buckets: kmB.liste, ez_buckets: ezB.liste, rows_je_segment: zeilen, budget_usd: budgetUsd } };
+}
+
 function KonfigKarte({ status, superAdmin, onGespeichert }) {
   const [km, setKm] = useState((status.km_buckets || []).map((b) => `${b.min_km}-${b.max_km}`).join(", "));
   const [ez, setEz] = useState((status.ez_buckets || []).map((b) => `${b.year_from || ""}-${b.year_to || ""}`).join(", "));
   const [rows, setRows] = useState(String(status.einstellungen?.rows_je_segment || 10));
-  const [budget, setBudget] = useState(String(status.budget?.budget_usd ?? 450));
+  // G3: deutsch vorbelegen ("12,5" statt "12.5"; ohne Tausenderpunkt), damit das Zuruecklesen eindeutig ist
+  const [budget, setBudget] = useState(Number(status.budget?.budget_usd ?? 450)
+    .toLocaleString("de-DE", { maximumFractionDigits: 2, useGrouping: false }));
+  const [eingabeFehler, setEingabeFehler] = useState("");
   const [busy, setBusy] = useState(false);
   const takt = status.takt || {};
-  const parse = (text, a, b) => text.split(",").map((t) => t.trim()).filter(Boolean).map((t) => {
-    const [x, y] = t.split("-").map((v) => v.trim());
-    return { [a]: x ? Number(x) : null, [b]: y ? Number(y) : null };
-  });
   const speichern = async () => {
+    const gelesen = konfigLesen({ km, ez, rows, budget });
+    if (gelesen.fehler) {
+      setEingabeFehler(gelesen.fehler);
+      toast.error(`Nicht gespeichert: ${gelesen.fehler}`);
+      return;
+    }
+    setEingabeFehler("");
+    const { werte } = gelesen;
+    const betrag = werte.budget_usd;
+    let bestaetigt = false;
+    if (betrag > 0 && betrag < BUDGET_PLAUSIBEL_AB) {
+      // Ein so kleiner Betrag ist fast immer ein Tippfehler ("1.000" gemeint) — und gilt auch fuer die Folgemonate
+      if (!window.confirm(`Monatsbudget ${usdText(betrag)} $ ist unplausibel klein — meinten Sie ${usdText(betrag * 1000)} $?\n\n`
+        + `OK = trotzdem ${usdText(betrag)} $ speichern (gilt auch für die Folgemonate).`)) return;
+      bestaetigt = true;
+    } else if (betrag === 0 && Number(status.budget?.budget_usd || 0) !== 0) {
+      if (!window.confirm("Monatsbudget 0 $ pausiert die Marktbeobachtung — auch in den Folgemonaten, bis wieder ein Betrag eingetragen wird.\n\nWirklich 0 $ speichern?")) return;
+    }
     setBusy(true);
     try {
-      const r = await api.put("/admin/market/config", {
-        km_buckets: parse(km, "min_km", "max_km"), ez_buckets: parse(ez, "year_from", "year_to"),
-        rows_je_segment: Number(rows) || 10, budget_usd: Number(budget) || 0,
-      });
-      toast.success(`Gespeichert · ${r.data.segmente} Segmente · alle ${r.data.takt?.intervall_tage} Tag(e)`);
+      const r = await api.put("/admin/market/config", { ...werte, ...(bestaetigt ? { bestaetigt: true } : {}) });
+      toast.success(`Gespeichert · Monatsbudget ${usdText(betrag)} $ · ${r.data.segmente} Segmente · alle ${r.data.takt?.intervall_tage} Tag(e)`);
       onGespeichert?.();
     } catch (e) { toast.error(errMsg(e, "Speichern fehlgeschlagen")); }
     finally { setBusy(false); }
@@ -313,8 +374,10 @@ function KonfigKarte({ status, superAdmin, onGespeichert }) {
         <label>Zeilen je Segment (die N günstigsten)
           <input className={feld} style={st} value={rows} onChange={(e) => setRows(e.target.value)} inputMode="numeric" /></label>
         <label>Monatsbudget (US-Dollar, Apify)
-          <input className={feld} style={st} value={budget} onChange={(e) => setBudget(e.target.value)} inputMode="decimal" data-testid="markt-konfig-budget" /></label>
+          <input className={feld} style={st} value={budget} onChange={(e) => { setBudget(e.target.value); setEingabeFehler(""); }} inputMode="decimal"
+                 placeholder="z. B. 700 oder 1.000,50" data-testid="markt-konfig-budget" /></label>
       </div>
+      {eingabeFehler && <div className="mt-2 text-[12px] text-red-300" role="alert" data-testid="markt-konfig-fehler">{eingabeFehler}</div>}
       <div className="mt-2 text-[11px] text-zinc-500" data-testid="markt-konfig-formel">
         Segmente = Modelle × km-Bereiche × EZ-Bereiche. Ein Bündel-Lauf kostet ≈ {startUsd} $ + Zeilen × {rowUsd} $ ({takt.actor || status.actor || "Scraper"}; je Segment werden Zeilen + Puffer abgerufen, {takt.puffer_faktor != null ? `+${Math.round(takt.puffer_faktor * 100)} %, höchstens +${takt.puffer_max}` : "+30 %"}). Die Taktung (alle N Tage) ergibt sich aus Restbudget und Restmonat.
       </div>

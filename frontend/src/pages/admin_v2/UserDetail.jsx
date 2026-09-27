@@ -50,6 +50,17 @@ export function istHauptchef(u) {
   return u.role === "dealer";
 }
 
+// Startpruefung 27.09.2026 (H9-Kern): "Speichern" (nur Datum, keine Zahlung) stand nur bei aktivem Abo.
+// Ein per DATUM abgelaufenes Abo (z. B. vertipptes Jahr) liess sich in der Oberflaeche nur neu BUCHEN,
+// obwohl PATCH /admin/sucher/{id}/abo-gueltig-bis es annimmt (auch_abgelaufen). Der Server sagt je
+// Konto, ob er das Datum annimmt (ablauf_korrigierbar — aufgehobene Abos nicht); aeltere Server ohne
+// das Feld: jedes per Datum abgelaufene Abo.
+export function ablaufKorrigierbar(s) {
+  if (s?.subscription?.active) return true;
+  if (typeof s?.ablauf_korrigierbar === "boolean") return s.ablauf_korrigierbar;
+  return s?.subscription?.status === "expired";
+}
+
 export default function AdminUserDetail() {
   const { user: ich } = useAuth();
   const superAdmin = !!ich?.is_super_admin;   // Betreiber-Funktionen (Audit 09/2026)
@@ -77,15 +88,24 @@ export default function AdminUserDetail() {
   const sperren = (id) => { if (busyRef.current) return false; busyRef.current = id; setBusy(id); return true; };
   const freigeben = () => { busyRef.current = null; setBusy(null); };
 
+  // Startpruefung 27.09.2026 (H10): Netzfehler, 500 oder Zeitueberschreitung zeigten dauerhaft "Nutzer
+  // nicht gefunden" (nur ein kurzer Toast) — wie ein echtes 404. Jetzt getrennt: 404 = nicht gefunden,
+  // alles andere = Ladefehler mit Knopf "Erneut versuchen".
+  const [ladeFehler, setLadeFehler] = useState(null);   // null | { nichtGefunden: bool, text }
+
   const load = async () => {
     setLoading(true);
     try {
       const r = await api.get(`/admin/users/${id}/contracts`, { params: { seite: 1 } });
       setData(r.data);
+      setLadeFehler(null);
       setMehr([]);
       setSeite(1);
     } catch (e) {
-      toast.error(errMsg(e, "Fehler beim Laden"));
+      // Kein alter Stand (ggf. eines ANDEREN Nutzers) stehen lassen
+      setData(null);
+      if (e?.response?.status === 404) setLadeFehler({ nichtGefunden: true, text: "" });
+      else setLadeFehler({ nichtGefunden: false, text: errMsg(e, "Fehler beim Laden") });
     } finally {
       setLoading(false);
     }
@@ -123,7 +143,19 @@ export default function AdminUserDetail() {
   useEffect(() => { loadFirma(); }, [loadFirma]);
 
   if (loading) return <div className="flex items-center gap-2 text-zinc-500 text-sm py-10"><Spinner /> lade…</div>;
-  if (!data) return <EmptyState title="Nutzer nicht gefunden" />;
+  if (!data) {
+    if (ladeFehler && !ladeFehler.nichtGefunden) {
+      return (
+        <Card className="max-w-xl" data-testid="nutzer-ladefehler">
+          <div className="text-[15px] font-semibold text-white">Konnte nicht geladen werden</div>
+          <div className="mt-1 text-[13px] text-red-300">{ladeFehler.text}</div>
+          <div className="mt-1 text-[12px] text-zinc-500">Der Nutzer existiert vermutlich — nur das Laden ist gescheitert (Netz oder Server).</div>
+          <Button size="sm" className="mt-3" onClick={load} data-testid="nutzer-erneut-laden">Erneut versuchen</Button>
+        </Card>
+      );
+    }
+    return <EmptyState title="Nutzer nicht gefunden" />;
+  }
   const u = data.user || {};
   const contracts = [...(data.contracts || []), ...mehr];
   const gesamt = data.gesamt != null ? data.gesamt : contracts.length;
@@ -510,14 +542,18 @@ export default function AdminUserDetail() {
                                    data-testid={`gueltig-bis-${s.id}`}
                                    title={s.subscription?.active
                                      ? "Neues Ablaufdatum — Speichern ändert NUR das Datum (keine neue Zahlung)"
-                                     : "Optional: gilt beim Freischalten als Ablaufdatum"}
+                                     : (ablaufKorrigierbar(s)
+                                       ? "Neues Ablaufdatum — „Speichern“ korrigiert NUR das Datum (keine Zahlung); die Bezahl-Knöpfe buchen dagegen neu"
+                                       : "Optional: gilt beim Freischalten als Ablaufdatum")}
                                    className="h-8 px-2 rounded-lg text-[12px] outline-none"
                                    style={{ background: "var(--bg-input-solid)", color: "var(--text-primary)",
                                             border: "1px solid var(--wa-12)", colorScheme: "var(--scheme)" }} />
-                            {s.subscription?.active && (
+                            {ablaufKorrigierbar(s) && (
                               <Button size="sm" variant="ghost" onClick={() => saveGueltigBis(s)} disabled={busy === s.id || !superAdmin}
                                       data-testid={`gueltig-bis-speichern-${s.id}`}
-                                      title="Ablaufdatum speichern — danach automatisch gesperrt">
+                                      title={s.subscription?.active
+                                        ? "Ablaufdatum speichern — danach automatisch gesperrt"
+                                        : "Vertipptes Ablaufdatum korrigieren — ohne neue Zahlung; ein Datum in der Zukunft gibt den Zugang zurück"}>
                                 Speichern
                               </Button>
                             )}
@@ -526,7 +562,8 @@ export default function AdminUserDetail() {
                             {s.subscription?.active
                               ? <>gültig bis {fmtTag(s.naechste_zahlung_am)} · danach automatisch gesperrt</>
                               : (s.subscription?.status === "expired" && s.subscription?.expires_at
-                                ? <span className="text-red-300">abgelaufen am {fmtTag(s.subscription.expires_at)} · automatisch gesperrt</span>
+                                ? <span className="text-red-300" data-testid={`abo-abgelaufen-${s.id}`}>abgelaufen am {fmtTag(s.subscription.expires_at)} · automatisch gesperrt
+                                    {ablaufKorrigierbar(s) ? " · Datum vertippt? Neues Datum wählen und „Speichern“ (keine Zahlung)" : ""}</span>
                                 : "—")}
                           </div>
                         </td>
