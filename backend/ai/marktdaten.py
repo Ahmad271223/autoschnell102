@@ -38,7 +38,7 @@ from deps import db as _db, now_iso
 from konfig import schalter_env, zahl_env
 
 from ai import preisbasis
-from ai.provider import json_bewerten, ki_aktiv, ki_modell, ki_recherche_modell, recherche
+from ai.provider import LaufUebernommen, json_bewerten, ki_aktiv, ki_modell, ki_recherche_modell, recherche
 
 log = logging.getLogger("autohandel.ki")
 
@@ -745,10 +745,11 @@ async def fall_recherche(art: str, paket: Dict[str, Any], *, sparmodus: bool = F
     suchen, dauer_ms, usage, status, modell}.
 
     Kostendeckel (27.09.2026): mit `kasse` (ai.kostenkasse, die Bewertung ist
-    dort schon eingeplant) bekommt die Websuche nur den Rest bis zum ZIEL je
-    Lauf — Zahl der Suchen und max_tokens so, dass die Anfrage hineinpasst.
-    Reicht der Rest nicht fuer eine Suche, entfaellt sie (status
-    "kostendeckel", Hinweis wie im Sparmodus)."""
+    dort schon eingeplant) laeuft die Websuche in RUNDEN mit je einer Suche
+    (Nachbesserung 27.09.2026, siehe _fall_runden) — jede Runde nur, wenn
+    ihre erwarteten Kosten in den Rest bis zum ZIEL und ihre Obergrenze in
+    den Rest bis HART passen. Reicht der Rest nicht einmal fuer die erste,
+    entfaellt die Websuche (status "kostendeckel", Hinweis wie im Sparmodus)."""
     if sparmodus or not aktiv() or not je_fall(art) or not ki_aktiv():
         return None
     offen = recherche_noetig(paket, art, eigene or {})
@@ -758,35 +759,110 @@ async def fall_recherche(art: str, paket: Dict[str, Any], *, sparmodus: bool = F
     if not frage:
         return None
     modell = ki_recherche_modell()
-    extra: Dict[str, Any] = {}
     if kasse is not None:
-        from ai import kostenkasse
-        basis = kasse.recherche_basis_tokens(RECHERCHE_SYSTEM, frage)
-        plan = kasse.recherche_plan(basis, MAX_SUCHEN_FALL, modell)
-        if plan is None:
-            kasse.hinweis(kostenkasse.HINWEIS_WEBSUCHE_ENTFALLEN)
-            return {"text": "", "quellen": [], "suchen": 0, "dauer_ms": 0, "usage": {}, "modell": modell,
-                    "status": "kostendeckel", "grund": kostenkasse.HINWEIS_WEBSUCHE_ENTFALLEN}
-        frage = _fall_frage(art, paket, offen, suchen=plan["max_uses"])
-        extra = {"max_tokens": plan["max_tokens"], "kasse": kasse, "basis_tokens": basis, "plan": plan}
+        return await _fall_runden(art, paket, offen, kasse, modell)
     try:
-        r = await recherche(system=RECHERCHE_SYSTEM, frage=frage,
-                            max_suchen=int((extra.get("plan") or {}).get("max_uses") or MAX_SUCHEN_FALL), **extra)
+        r = await recherche(system=RECHERCHE_SYSTEM, frage=frage, max_suchen=MAX_SUCHEN_FALL)
+    except LaufUebernommen:
+        raise                            # Lauf gehoert einem anderen Aufruf: nichts mehr bezahlen
     except Exception:  # noqa: BLE001
         log.exception("Fall-Recherche gescheitert")
         return None
     # Pruefung 27.09.2026 (F2): das Recherche-Modell steht IMMER im Ergebnis —
     # sonst rechnete die Kostenschaetzung Haiku-Tokens zum Sonnet-Preis.
     modell = r.get("modell") or modell
-    if kasse is not None and not r.get("gebucht"):
-        # Recherche ohne eigene Buchung (z. B. Attrappe): hier abrechnen
-        kasse.recherche_buchen(modell, r.get("usage") or {}, extra.get("plan"), 1)
     if r.get("status") != "ok" or not (r.get("text") or "").strip():
         return {"text": "", "quellen": [], "suchen": int(r.get("suchen") or 0), "dauer_ms": r.get("dauer_ms"),
                 "usage": r.get("usage") or {}, "status": r.get("status"), "modell": modell}
     return {"text": (r.get("text") or "")[:FALL_RECHERCHE_TEXT_MAX], "quellen": list(r.get("quellen") or [])[:10],
             "suchen": int(r.get("suchen") or 0), "dauer_ms": r.get("dauer_ms"), "usage": r.get("usage") or {},
             "modell": modell, "status": "ok",
+            "positionen": [str(p.get("id")) for p in recherche_auswahl(offen)]}
+
+
+HINWEIS_RUNDE_ENTFALLEN = "Weitere Websuche entfallen — Kostendeckel je Lauf"
+
+
+async def _fall_runden(art: str, paket: Dict[str, Any], offen: List[dict], kasse, modell: str) -> dict:
+    """Websuche unter dem Kostendeckel (Nachbesserung 27.09.2026): bis zu
+    MAX_SUCHEN_FALL Runden mit je EINER Suche statt einer Anfrage mit zwei.
+
+    Warum: in einer Anfrage liest die Server-Schleife jedes Suchergebnis in
+    jeder weiteren Runde erneut — bei zwei Suchen zaehlt ein Ergebnis bis zu
+    dreifach (n(n+1)/2). Ein groesser als erwartetes Ergebnis sprengte so die
+    harte Grenze schon in der Recherche (Eigenschaftstest: 4x
+    SUCHE_TOKENS_MAX -> 34 ct). In getrennten Runden zaehlt es einfach, und
+    die zweite Runde wird erst nach den ECHTEN Kosten der ersten geplant.
+    Runde 2 sucht nur noch fuer die Positionen, zu denen Runde 1 keinen Wert
+    im ###DATEN-Block geliefert hat."""
+    from ai import kostenkasse
+    rest = list(recherche_auswahl(offen))
+    runden: List[dict] = []
+    for nr in range(1, MAX_SUCHEN_FALL + 1):
+        if not rest:
+            break
+        frage = _fall_frage(art, paket, rest, suchen=1)
+        basis = kasse.recherche_basis_tokens(RECHERCHE_SYSTEM, frage)
+        plan = kasse.recherche_plan(basis, 1, modell)
+        if plan is None:
+            if not runden:
+                kasse.hinweis(kostenkasse.HINWEIS_WEBSUCHE_ENTFALLEN)
+                return {"text": "", "quellen": [], "suchen": 0, "dauer_ms": 0, "usage": {}, "modell": modell,
+                        "status": "kostendeckel", "grund": kostenkasse.HINWEIS_WEBSUCHE_ENTFALLEN}
+            kasse.hinweis(HINWEIS_RUNDE_ENTFALLEN)
+            break
+        try:
+            r = await recherche(system=RECHERCHE_SYSTEM, frage=frage, max_suchen=1, max_tokens=plan["max_tokens"],
+                                kasse=kasse, basis_tokens=basis, plan=plan, runde=nr)
+        except LaufUebernommen:
+            raise                        # Lauf gehoert einem anderen Aufruf: nichts mehr bezahlen
+        except Exception:  # noqa: BLE001
+            log.exception("Fall-Recherche (Runde %d) gescheitert", nr)
+            break
+        if not r.get("gebucht"):
+            # Recherche ohne eigene Buchung (z. B. Attrappe): hier abrechnen
+            kasse.recherche_buchen(r.get("modell") or modell, r.get("usage") or {}, plan, nr)
+        runden.append(r)
+        if r.get("status") != "ok" or not (r.get("text") or "").strip() or not int(r.get("suchen") or 0):
+            break                        # Fehler, leer oder ohne Suche: keine weitere Runde
+        gefunden = {z["id"] for z in _daten_parsen(r.get("text") or "")}
+        rest = [p for p in rest if str(p.get("id")) not in gefunden]
+    usage: Dict[str, int] = {}
+    for r in runden:
+        for k, v in (r.get("usage") or {}).items():
+            usage[k] = int(usage.get(k) or 0) + int(v or 0)
+    modell = next((r.get("modell") for r in runden if r.get("modell")), modell)
+    dauer = sum(int(r.get("dauer_ms") or 0) for r in runden)
+    suchen = sum(int(r.get("suchen") or 0) for r in runden)
+    gut = [r for r in runden if r.get("status") == "ok" and (r.get("text") or "").strip()]
+    if not gut:
+        letzte = runden[-1] if runden else {}
+        return {"text": "", "quellen": [], "suchen": suchen, "dauer_ms": dauer, "usage": usage,
+                "status": letzte.get("status") or "fehler", "modell": modell}
+    vor = [(r.get("text") or "").split(DATEN_MARKER, 1)[0].strip() for r in gut]
+    # ein ###DATEN-Block fuer alle Runden; eine spaetere Runde liefert nur
+    # Werte zu Positionen, die noch keinen hatten (sonst doppelt gelernt)
+    daten: List[str] = []
+    schon: set = set()
+    for r in gut:
+        t = r.get("text") or ""
+        if DATEN_MARKER not in t:
+            continue
+        neu = set()
+        for zeile in t.split(DATEN_MARKER, 1)[1].splitlines():
+            pid = zeile.strip().strip("|").split("|", 1)[0].strip().strip("`* ")
+            if zeile.strip() and pid not in schon:
+                daten.append(zeile.strip())
+                neu.add(pid)
+        schon |= neu
+    block = ("\n" + DATEN_MARKER + "\n" + "\n".join(daten))[:3000] if daten else ""
+    text = "\n\n".join(v for v in vor if v)[:max(0, FALL_RECHERCHE_TEXT_MAX - len(block))].rstrip() + block
+    quellen: Dict[str, dict] = {}
+    for r in gut:
+        for q in r.get("quellen") or []:
+            quellen.setdefault(q.get("url"), q)
+    return {"text": text, "quellen": list(quellen.values())[:10], "suchen": suchen, "dauer_ms": dauer,
+            "usage": usage, "modell": modell, "status": "ok", "runden": len(runden),
             "positionen": [str(p.get("id")) for p in recherche_auswahl(offen)]}
 
 

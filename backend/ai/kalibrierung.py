@@ -164,8 +164,19 @@ def zuruecksetzen() -> None:
 
 
 # ------------------------------------------------ Betriebszahlen (/admin/ki)
+def _preis_je_mio(modell: str) -> tuple:
+    """Preis je Million Tokens. Modell ohne Eintrag: der TEUERSTE bekannte
+    Preis — dieselbe Regel wie der Kostendeckel (ai.kostenkasse), sonst
+    buchte die Abrechnung ein unbekanntes Modell zum Sonnet-Preis, waehrend
+    die Obergrenze mit Opus rechnet (Nachbesserung 27.09.2026). Aufgerufen
+    wird ein Modell ohne Preis unter dem Deckel ohnehin nie."""
+    if modell in PREIS_JE_MIO:
+        return PREIS_JE_MIO[modell]
+    return max(p[0] for p in PREIS_JE_MIO.values()), max(p[1] for p in PREIS_JE_MIO.values())
+
+
 def _kosten_usd(modell: str, usage: Dict[str, Any]) -> float:
-    ein, aus = PREIS_JE_MIO.get(modell or "", PREIS_JE_MIO["claude-sonnet-5"])
+    ein, aus = _preis_je_mio(modell or "")
     e = float(usage.get("input_tokens") or 0) + float(usage.get("cache_creation_input_tokens") or 0) * 1.25 \
         + float(usage.get("cache_read_input_tokens") or 0) * 0.1
     a = float(usage.get("output_tokens") or 0)

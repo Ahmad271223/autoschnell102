@@ -35,7 +35,7 @@ from deps import db, now_iso
 from konfig import zahl_env
 
 from ai import budget, freischaltung, kalibrierung, kontext, kostenkasse, marktdaten, preisbasis, retention, schemas
-from ai.pickup_assessment import LEASE_S, _alter_jahre, _lease_abgelaufen
+from ai.pickup_assessment import LEASE_S, _alter_jahre, _lease_abgelaufen, kosten_sichern, lease_halter
 from ai.provider import KI_MAX_TOKENS, ergebnis_gueltig, json_bewerten, ki_aktiv, ki_modell
 
 log = logging.getLogger("autohandel.ki")
@@ -334,7 +334,7 @@ async def _rechnen(basis: dict, paket: dict, vorl: dict, bud: dict, eigene: dict
     sichere Obergrenze gegen die HARTE Grenze (20 ct) geprueft."""
     kasse = None
     try:
-        kasse = kostenkasse.Kostenkasse(art=ART, ref=str(vehicle_doc.get("id") or ""))
+        kasse = kostenkasse.Kostenkasse(art=ART, ref=str(vehicle_doc.get("id") or ""), lease=lease_halter(basis["id"]))
         zusatz_teile = [marktdaten.als_text(marktdoc), await kalibrierung.prompt_zusatz(basis["dealer_id"], ART)]
         await kasse.bewertung_einplanen(json_bewerten, modell=basis["modell"], system=SYSTEM_PROMPT, nutzer=paket,
                                         schema=schemas.ANTWORT_SCHEMA, zusatz_teile=zusatz_teile,
@@ -403,18 +403,20 @@ async def _rechnen(basis: dict, paket: dict, vorl: dict, bud: dict, eigene: dict
                                         status=eintrag["status"], grund=eintrag["grund"][:200], art=ART)
                 except Exception:  # noqa: BLE001
                     pass
-        await db[SAMMLUNG].update_one({"id": basis["id"]}, {"$set": eintrag, "$unset": {"lease_until": ""}})
+        await db[SAMMLUNG].update_one({"id": basis["id"]}, {"$set": eintrag, "$unset": {"lease_until": ""},
+                                                            "$inc": {"kosten_summe_ct": round(float(kosten or 0), 4)}})
         return _oeffentlich(eintrag)
     except Exception:  # noqa: BLE001
         log.exception("KI-Schadennachlass-Lauf %s gescheitert", basis.get("id"))
         # Reservierung durch das schon Ausgegebene ersetzen (vorher 0 — bezahlte
         # Aufrufe fielen aus dem Monatsbudget)
-        await budget.abrechnen(res, kasse.kosten_ct if kasse is not None else 0)
+        await budget.abrechnen(res, kasse.abrechnung_ct if kasse is not None else 0)
         eintrag = {**basis, "status": "fehler", "grund": "interner Fehler", "ergebnis": None, "vorschau": vorl}
-        try:
-            await db[SAMMLUNG].update_one({"id": basis["id"]}, {"$set": eintrag, "$unset": {"lease_until": ""}})
-        except Exception:  # noqa: BLE001
-            pass
+        if kasse is not None:
+            # Nachbesserung 27.09.2026: kosten_ct + Bericht auch hier — sonst
+            # nahm der stuendliche budget.abgleichen die Kosten wieder heraus
+            eintrag.update(kosten_ct=kasse.abrechnung_ct, kostendeckel=kasse.bericht())
+        await kosten_sichern({"id": basis["id"]}, {"id": basis["id"]}, kasse, eintrag=eintrag)
         return _oeffentlich(eintrag)
 
 

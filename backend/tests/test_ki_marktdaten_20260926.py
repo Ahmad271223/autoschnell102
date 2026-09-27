@@ -189,13 +189,19 @@ def test_03_abholung_recherche_je_fall_lernt_und_quellen(welt, monkeypatch):
     _cid, _tid, _vid, pid = _welt_aufbauen(welt, "m3")
     erg = welt.run(K.bewertung_ausfuehren(pid, w.dealer_id))
     assert erg["status"] == "ok"
-    assert len(recherchen) == 1 and "id d1" in recherchen[0]["frage"] and "BMW" in recherchen[0]["frage"]
+    # Kostendeckel-Nachbesserung 27.09.2026: Runden mit je einer Suche — Runde 2
+    # nur fuer Positionen, zu denen Runde 1 keinen Wert geliefert hat
+    assert len(recherchen) == 2 and "id d1" in recherchen[0]["frage"] and "BMW" in recherchen[0]["frage"]
     assert "id dev:keys" in recherchen[0]["frage"] and MD.DATEN_MARKER in recherchen[0]["frage"]
+    assert "id d1" not in recherchen[1]["frage"] and "id dev:keys" not in recherchen[1]["frage"]
+    assert [r["max_suchen"] for r in recherchen] == [1, 1]
     z = gesehen["zusatz"]
     assert "Aktuelle Marktpreise" in z and "Marktrecherche zu diesem Fall" in z and MD.DATEN_MARKER not in z
     assert erg["ergebnis"]["quellen"] == QUELLEN
     doc = welt.run(welt.db.ki_bewertungen.find_one({"protocol_id": pid}, {"_id": 0}))
-    assert doc["recherche"]["suchen"] == 2 and doc["recherche"]["gelernt"] == 2 and doc["usage"]["web_search_requests"] == 2
+    # die Attrappe meldet je Aufruf 2 Suchen (2 Runden -> 4); gelernt wird je
+    # Position nur der Wert der ersten Runde (Runde 2 wiederholt d1/dev:keys)
+    assert doc["recherche"]["suchen"] == 4 and doc["recherche"]["gelernt"] == 2 and doc["usage"]["web_search_requests"] == 4
     # eigene Preisdatenbank hat gelernt
     preise = welt.run(welt.db.ki_reparaturpreise.find({"marke": "bmw"}, {"_id": 0}).to_list(50))
     keys = {p["key"]: p for p in preise}
@@ -247,11 +253,13 @@ def test_04_vertrag_recherche_standard_an_und_datenblock(welt, monkeypatch):
     w = welt.w
     fz = _fahrzeug(welt, f"v_km4_{w.s}")
     erg = welt.run(D.bewerten(user=w.sucher, vehicle_doc=fz, damages=SCHAEDEN))
-    assert erg["status"] == "ok" and len(recherchen) == 1 and erg["ergebnis"]["quellen"] == QUELLEN
+    # zwei Runden (Kostendeckel-Nachbesserung 27.09.2026): Runde 2 nur fuer d2
+    assert erg["status"] == "ok" and len(recherchen) == 2 and erg["ergebnis"]["quellen"] == QUELLEN
+    assert "id d2" in recherchen[1]["frage"] and "id d1" not in recherchen[1]["frage"]
     assert welt.run(welt.db.ki_reparaturpreise.count_documents({"key": "delle_klein", "marke": "bmw"})) == 1
     monkeypatch.setenv("KI_MARKTANALYSE_VERTRAG", "false")
     erg = welt.run(D.bewerten(user=w.sucher, vehicle_doc=fz, damages=[dict(SCHAEDEN[0], zone="Tür vorne links")]))
-    assert erg["status"] == "ok" and len(recherchen) == 1 and erg["ergebnis"]["quellen"] == []
+    assert erg["status"] == "ok" and len(recherchen) == 2 and erg["ergebnis"]["quellen"] == []
     # Datenblock-Parser
     zeilen = MD._daten_parsen("Text\n###DATEN\nd1|300|100|150|ADAC|https://a\nkaputt\n| dev:keys | 80 | 700 | 200 | ADAC |")
     assert zeilen[0] == {"id": "d1", "min_eur": 100.0, "max_eur": 300.0, "typisch_eur": 150.0, "quelle": "ADAC", "url": "https://a"}

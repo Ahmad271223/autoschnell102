@@ -166,8 +166,13 @@ async def json_bewerten(*, system: str, nutzer: Dict[str, Any], schema: Dict[str
     status im Ergebnis (der Vertragsprozess laeuft weiter). `zusatz` ist
     der wechselnde Teil des System-Prompts (26.09.2026: Marktdaten,
     Erfahrungswerte, Recherche je Fall) — getrennt vom gecachten Teil.
-    max_retries=0 (Kostendeckel 27.09.2026): kein zweiter, womoeglich
-    bezahlter Versuch des SDK."""
+    max_retries=0 (Kostendeckel 27.09.2026): kein Wiederholversuch des SDK —
+    der koennte nach einem Zeitlimit oder Abbruch mitten in der Antwort ein
+    zweites Mal bezahlt werden. Nachbesserung 27.09.2026: Antworten, die
+    nie berechnet werden (429, 529/5xx, Verbindungsaufbau gescheitert),
+    wiederholen wir dann selbst EINMAL (wie vorher das SDK mit
+    max_retries=1); scheitert es trotzdem, traegt das Ergebnis
+    nicht_berechnet=True (die Kostenkasse bindet dann nichts)."""
     t0 = time.perf_counter()
     antwort = KiAntwort(status="fehler", grund="", daten=None, dauer_ms=0,
                         modell=ki_modell(), usage={})
@@ -175,7 +180,6 @@ async def json_bewerten(*, system: str, nutzer: Dict[str, Any], schema: Dict[str
         antwort.update(status="aus", grund="KI-Bewertung nicht aktiv")
         return antwort
     try:
-        import anthropic
         client = _klient()
         optionen: Dict[str, Any] = {}
         if zeitlimit:
@@ -184,10 +188,9 @@ async def json_bewerten(*, system: str, nutzer: Dict[str, Any], schema: Dict[str
             optionen["max_retries"] = int(max_retries)
         if optionen:
             client = client.with_options(**optionen)
-        r = await client.messages.create(
-            max_tokens=int(max_tokens or KI_MAX_TOKENS),
-            **_bewerten_parameter(system, zusatz, nutzer, schema),
-        )
+        versuche = 1 + (UNBERECHNET_WIEDERHOLUNGEN if max_retries == 0 else 0)
+        r = await _senden(client, versuche, max_tokens=int(max_tokens or KI_MAX_TOKENS),
+                          **_bewerten_parameter(system, zusatz, nutzer, schema))
         antwort["usage"] = _usage(r)
         if r.stop_reason == "refusal":
             antwort.update(status="abgelehnt",
@@ -202,6 +205,8 @@ async def json_bewerten(*, system: str, nutzer: Dict[str, Any], schema: Dict[str
         antwort.update(status="fehler", grund=f"kein gueltiges JSON: {exc}")
     except Exception as exc:  # noqa: BLE001 — bewusst breit: die KI ist Beiwerk
         antwort.update(status=_status_aus_ausnahme(exc), grund=f"{type(exc).__name__}: {str(exc)[:200]}")
+        if nicht_berechnet(exc):
+            antwort["nicht_berechnet"] = True
         log.warning("KI-Aufruf gescheitert: %s", antwort["grund"])
     finally:
         antwort["dauer_ms"] = int((time.perf_counter() - t0) * 1000)
@@ -214,12 +219,92 @@ async def json_bewerten(*, system: str, nutzer: Dict[str, Any], schema: Dict[str
 json_bewerten.zaehlen = eingabe_tokens_zaehlen  # type: ignore[attr-defined]
 
 
+# ------------------------------------------------ Wiederholen ohne Kosten
+# Nachbesserung Kostendeckel 27.09.2026: unter der Kostenkasse laeuft das SDK
+# mit max_retries=0 (ein Zeitlimit oder ein Abbruch mitten in der Antwort
+# kann berechnet sein — ein automatischer zweiter Versuch waere dann doppelt
+# bezahlt). Antworten mit HTTP-Status (429 Rate-Limit, 529 ueberlastet, 5xx)
+# und ein gescheiterter Verbindungsaufbau werden aber NIE berechnet: die
+# wiederholen wir selbst, einmal, wie vorher das SDK (max_retries=1).
+UNBERECHNET_WIEDERHOLUNGEN = 1
+WIEDERHOLEN_WARTEN_S = 1.0          # Standard-Pause vor dem zweiten Versuch
+WIEDERHOLEN_WARTEN_MAX_S = 5.0      # retry-after des Servers, hoechstens so lange
+_WIEDERHOLEN_STATUS = (429, 500, 502, 503, 504, 529)
+
+
+class LaufUebernommen(Exception):
+    """Der Lauf hat sein Lease verloren (ein anderer Aufruf hat denselben
+    Stand uebernommen) — kein weiterer bezahlter Aufruf (ai.kostenkasse)."""
+
+
+def _nicht_gesendet(exc: BaseException) -> bool:
+    """Verbindungsaufbau gescheitert (die Anfrage ist nie beim Server
+    angekommen) — ConnectError/ConnectTimeout irgendwo in der Kette."""
+    gesehen = set()
+    c: Optional[BaseException] = exc
+    while c is not None and id(c) not in gesehen:
+        gesehen.add(id(c))
+        if type(c).__name__ in ("ConnectError", "ConnectTimeout"):
+            return True
+        c = c.__cause__ or c.__context__
+    return False
+
+
+def nicht_berechnet(exc: BaseException) -> bool:
+    """Kostet dieser Fehlschlag sicher nichts? Jede Antwort mit HTTP-Status
+    (4xx/5xx) wird nicht berechnet, ein nie gesendeter Aufruf auch. Zeitlimit
+    und Abbruch mitten in der Antwort bleiben 'unsicher'."""
+    try:
+        import anthropic
+        if isinstance(exc, anthropic.APIStatusError):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    return _nicht_gesendet(exc)
+
+
+def _wiederholbar(exc: BaseException) -> bool:
+    try:
+        import anthropic
+        if isinstance(exc, anthropic.APIStatusError):
+            return int(getattr(exc, "status_code", 0) or 0) in _WIEDERHOLEN_STATUS
+    except Exception:  # noqa: BLE001
+        pass
+    return _nicht_gesendet(exc)
+
+
+def _warten_s(exc: BaseException) -> float:
+    try:
+        wert = float(getattr(getattr(exc, "response", None), "headers", {}).get("retry-after"))
+        return max(0.0, min(wert, WIEDERHOLEN_WARTEN_MAX_S))
+    except (TypeError, ValueError, AttributeError):
+        return WIEDERHOLEN_WARTEN_S
+
+
+async def _senden(client, versuche: int, **parameter):
+    """messages.create mit hoechstens `versuche` Versuchen — wiederholt NUR
+    Fehlschlaege, die nie berechnet werden (siehe oben)."""
+    import asyncio
+    for nr in range(max(1, int(versuche))):
+        try:
+            return await client.messages.create(**parameter)
+        except Exception as exc:  # noqa: BLE001
+            if nr + 1 >= versuche or not _wiederholbar(exc):
+                raise
+            log.info("KI-Aufruf: %s — kostenloser zweiter Versuch", type(exc).__name__)
+            await asyncio.sleep(_warten_s(exc))
+
+
 def _status_aus_ausnahme(exc: Exception) -> str:
     try:
         import anthropic
         if isinstance(exc, anthropic.APITimeoutError):
             return "zeitlimit"
         if isinstance(exc, anthropic.RateLimitError):
+            return "ueberlastet"
+        # Nachbesserung 27.09.2026: 529 (overloaded_error) und 5xx sind eine
+        # Ueberlastung bei Anthropic, kein Fehler unseres Aufrufs
+        if isinstance(exc, anthropic.APIStatusError) and int(getattr(exc, "status_code", 0) or 0) >= 500:
             return "ueberlastet"
         if isinstance(exc, anthropic.AuthenticationError):
             return "schluessel"
@@ -265,7 +350,7 @@ HINWEIS_FORTSETZUNG_ENTFALLEN = "Fortsetzung der Websuche entfallen — Kostende
 async def recherche(*, system: str, frage: str, max_suchen: int = 6,
                     zeitlimit: Optional[float] = None, max_tokens: int = RECHERCHE_MAX_TOKENS,
                     kasse=None, basis_tokens: Optional[int] = None,
-                    plan: Optional[Dict[str, Any]] = None) -> KiAntwort:
+                    plan: Optional[Dict[str, Any]] = None, runde: Optional[int] = None) -> KiAntwort:
     """Wunsch Ahmad 26.09.2026 (Marktanalyse): ein Aufruf MIT Websuche,
     Antwort als Text plus Quellen (Zitate). Kein JSON-Schema — Zitate und
     strukturierte Ausgabe schliessen sich aus; die Umwandlung macht danach
@@ -276,8 +361,19 @@ async def recherche(*, system: str, frage: str, max_suchen: int = 6,
     (`plan`: max_uses, max_tokens, Obergrenze), VOR jeder Fortsetzung nach
     pause_turn plant die Kasse neu — passt sie nicht mehr, endet die
     Recherche mit dem bis dahin gefundenen Text. Kein SDK-Wiederholversuch
-    (max_retries=0). Auch bei einem Fehler mitten in der Schleife bleibt die
-    bis dahin summierte usage im Ergebnis (vorher ging sie verloren)."""
+    (max_retries=0) — nur nie berechnete Fehlschlaege (429/529/5xx,
+    Verbindungsaufbau) werden einmal selbst wiederholt. Auch bei einem
+    Fehler mitten in der Schleife bleibt die bis dahin summierte usage im
+    Ergebnis (vorher ging sie verloren).
+
+    Nachbesserung 27.09.2026: eine Fortsetzung darf auch OHNE weitere Suche
+    laufen (max_uses bleibt, tool_choice "none") — dann nur der Verlauf plus
+    die Antwort, das passt meist noch in den Rest; ausser die Pause steht
+    vor einer schon angestossenen Suche (letzter Block server_tool_use).
+    Scheitert eine Fortsetzung, bleibt der bis dahin gefundene Text (status
+    ok). Vor jeder Anfrage verlaengert die Kasse das Lease des Laufs; hat
+    ein anderer Aufruf den Lauf uebernommen, endet die Recherche sofort
+    (LaufUebernommen), ohne weitere Anfrage."""
     t0 = time.perf_counter()
     antwort = KiAntwort(status="fehler", grund="", text="", quellen=[], suchen=0, dauer_ms=0,
                         modell=ki_recherche_modell(), usage={})
@@ -287,10 +383,17 @@ async def recherche(*, system: str, frage: str, max_suchen: int = 6,
     usage: Dict[str, int] = {}
     aktuell: Dict[str, Any] = dict(plan or {"max_uses": int(max_suchen), "max_tokens": int(max_tokens)})
     offen_nr = 0                       # Anfrage gesendet, aber noch nicht abgerechnet
+    anfrage_nr = 0                     # laufende Anfrage (1 = erste, >1 = Fortsetzung)
+    texte: list = []
+    zitiert: Dict[str, str] = {}
+    gefunden: Dict[str, str] = {}
+    sekunden = float(zeitlimit or KI_RECHERCHE_ZEITLIMIT)
     try:
-        optionen: Dict[str, Any] = {"timeout": float(zeitlimit or KI_RECHERCHE_ZEITLIMIT)}
+        optionen: Dict[str, Any] = {"timeout": sekunden}
+        versuche = 1
         if kasse is not None:
             optionen["max_retries"] = 0
+            versuche = 1 + UNBERECHNET_WIEDERHOLUNGEN
             antwort["gebucht"] = True      # die Kasse bucht je Anfrage selbst
         client = _klient().with_options(**optionen)
         # Probelauf 26.09.2026: mit der Vorfilterung (Code-Ausfuehrung) meldete
@@ -303,30 +406,40 @@ async def recherche(*, system: str, frage: str, max_suchen: int = 6,
                   "blocked_domains": list(GESPERRTE_DOMAINS),
                   "user_location": {"type": "approximate", "country": "DE", "timezone": "Europe/Berlin"}}]
         messages: list = [{"role": "user", "content": frage}]
-        texte: list = []
-        zitiert: Dict[str, str] = {}
-        gefunden: Dict[str, str] = {}
+        suche_offen = False                # Pause vor einer angestossenen Suche?
+        suchen_plan = int(aktuell.get("max_uses") or max_suchen)
         for i in range(_PAUSEN_MAX):
+            anfrage_nr = i + 1
             if kasse is not None and i > 0:
                 # Fortsetzung: der ganze Verlauf geht erneut mit — nur wenn sie
-                # noch in den Rest bis zum Ziel passt
+                # noch in den Rest passt (auch ohne weitere Suche, s. o.)
                 neu = kasse.recherche_plan(kasse.fortsetzung_basis(int(basis_tokens or 0), usage),
-                                           int(aktuell.get("max_uses") or max_suchen), ki_recherche_modell())
+                                           suchen_plan, ki_recherche_modell(),
+                                           min_suchen=1 if suche_offen else 0)
                 if neu is None:
                     kasse.hinweis(HINWEIS_FORTSETZUNG_ENTFALLEN)
                     break
                 aktuell = neu
-            tools[0]["max_uses"] = int(aktuell.get("max_uses") or max_suchen)
+            parameter: Dict[str, Any] = {}
+            if int(aktuell.get("max_uses") or 0) > 0 or kasse is None:
+                tools[0]["max_uses"] = int(aktuell.get("max_uses") or max_suchen)
+            else:
+                parameter["tool_choice"] = {"type": "none"}      # Fortsetzung ohne weitere Suche
+            if kasse is not None:
+                # Lease verlaengern (Zeitlimit x Versuche) — oder abbrechen,
+                # wenn ein anderer Aufruf den Lauf inzwischen haelt
+                await kasse.halten(sekunden * versuche + WIEDERHOLEN_WARTEN_MAX_S)
             offen_nr = i + 1
-            r = await client.messages.create(
-                model=ki_recherche_modell(), max_tokens=int(aktuell.get("max_tokens") or max_tokens),
-                system=_system_bloecke(system, None),
-                tools=tools, messages=messages,
-            )
+            # Posten-Name: recherche#<Runde> (Fortsetzungen .2, .3 ...) bzw. ohne Runde recherche#<Anfrage>
+            posten = (f"{int(runde)}" + (f".{i + 1}" if i else "")) if runde else f"{i + 1}"
+            r = await _senden(client, versuche,
+                              model=ki_recherche_modell(), max_tokens=int(aktuell.get("max_tokens") or max_tokens),
+                              system=_system_bloecke(system, None),
+                              tools=tools, messages=messages, **parameter)
             u_r = _usage(r)
             _usage_addieren(usage, u_r)
             if kasse is not None:
-                kasse.recherche_buchen(ki_recherche_modell(), u_r, aktuell, i + 1)
+                kasse.recherche_buchen(ki_recherche_modell(), u_r, aktuell, posten)
             offen_nr = 0
             for b in r.content:
                 art = getattr(b, "type", "")
@@ -344,26 +457,48 @@ async def recherche(*, system: str, frage: str, max_suchen: int = 6,
                             if url:
                                 gefunden.setdefault(url, getattr(e, "title", "") or "")
             if r.stop_reason == "pause_turn":
+                inhalt = list(r.content or [])
+                suche_offen = bool(inhalt) and getattr(inhalt[-1], "type", "") == "server_tool_use"
                 messages.append({"role": "assistant",
-                                 "content": [b.model_dump(exclude_none=True) for b in r.content]})
+                                 "content": [b.model_dump(exclude_none=True) for b in inhalt]})
                 continue
             if r.stop_reason == "refusal":
                 antwort.update(status="abgelehnt", grund="abgelehnt")
                 antwort["usage"] = usage
                 return antwort
             break
-        quellen = zitiert or gefunden
-        antwort.update(status="ok", text="\n".join(t for t in texte if t).strip(),
-                       quellen=[{"url": u, "titel": t[:120]} for u, t in list(quellen.items())[:20]],
-                       suchen=int(usage.get("web_search_requests") or 0), usage=usage)
+        _recherche_ok(antwort, texte, zitiert, gefunden, usage)
+    except LaufUebernommen:
+        antwort.update(status="fehler", grund="Lauf von einem anderen Aufruf übernommen", usage=usage,
+                       suchen=int(usage.get("web_search_requests") or 0))
+        raise
     except Exception as exc:  # noqa: BLE001 — Beiwerk, nie ein 500
-        antwort.update(status=_status_aus_ausnahme(exc), grund=f"{type(exc).__name__}: {str(exc)[:200]}",
-                       usage=usage, suchen=int(usage.get("web_search_requests") or 0))
-        if kasse is not None and offen_nr:
+        grund = f"{type(exc).__name__}: {str(exc)[:200]}"
+        if kasse is not None and offen_nr and not nicht_berechnet(exc):
             # die gescheiterte Anfrage: ob berechnet, ist offen -> zur Obergrenze gebunden
-            kasse.unsicher_buchen(f"recherche#{offen_nr}", float(aktuell.get("obergrenze_ct") or 0),
-                                  antwort["grund"])
-        log.warning("KI-Recherche gescheitert: %s", antwort["grund"])
+            kasse.unsicher_buchen(f"recherche#{posten}", float(aktuell.get("obergrenze_ct") or 0), grund)
+        if anfrage_nr > 1 and any(t.strip() for t in texte):
+            # Nachbesserung 27.09.2026: eine gescheiterte FORTSETZUNG verwirft
+            # nicht, was die erste(n) Anfrage(n) schon gefunden haben
+            _recherche_ok(antwort, texte, zitiert, gefunden, usage)
+            antwort["grund"] = f"Fortsetzung gescheitert ({grund})"
+            if kasse is not None:
+                kasse.hinweis(HINWEIS_FORTSETZUNG_GESCHEITERT)
+        else:
+            antwort.update(status=_status_aus_ausnahme(exc), grund=grund, usage=usage,
+                           suchen=int(usage.get("web_search_requests") or 0))
+        log.warning("KI-Recherche gescheitert: %s", grund)
     finally:
         antwort["dauer_ms"] = int((time.perf_counter() - t0) * 1000)
     return antwort
+
+
+HINWEIS_FORTSETZUNG_GESCHEITERT = "Fortsetzung der Websuche gescheitert — Ergebnis bis dahin verwendet"
+
+
+def _recherche_ok(antwort: KiAntwort, texte: list, zitiert: Dict[str, str], gefunden: Dict[str, str],
+                  usage: Dict[str, int]) -> None:
+    quellen = zitiert or gefunden
+    antwort.update(status="ok", text="\n".join(t for t in texte if t).strip(),
+                   quellen=[{"url": u, "titel": t[:120]} for u, t in list(quellen.items())[:20]],
+                   suchen=int(usage.get("web_search_requests") or 0), usage=usage)

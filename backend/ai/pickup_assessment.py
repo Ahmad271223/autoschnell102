@@ -537,6 +537,41 @@ def _lease_abgelaufen(doc: Optional[dict]) -> bool:
         return True
 
 
+def lease_halter(doc_id: str, sammlung: str = SAMMLUNG):
+    """Lease-Verlaengerung fuer die Kostenkasse (Nachbesserung 27.09.2026):
+    ein Lauf kann laenger dauern als LEASE_S (Recherche bis 120 s je Anfrage,
+    Fortsetzungen, Bewertung) — ohne Verlaengerung uebernahm der naechste
+    Aufruf (Karte fragt alle 3 s nach) den noch laufenden Lauf und startete
+    einen ZWEITEN bezahlten Lauf fuer denselben Stand. Vor jedem bezahlten
+    Aufruf setzt die Kasse lease_until auf jetzt + Zeitlimit des Aufrufs (+
+    Puffer), mindestens LEASE_S. False = das Dokument gehoert nicht mehr
+    diesem Lauf (andere id oder nicht mehr "laeuft") -> die Kasse bricht ab."""
+    async def halten(sekunden: float) -> bool:
+        bis = (datetime.now(timezone.utc) + timedelta(seconds=max(float(LEASE_S), float(sekunden)))).isoformat()
+        r = await db[sammlung].update_one({"id": doc_id, "status": "laeuft"}, {"$set": {"lease_until": bis}})
+        return r.matched_count == 1
+    return halten
+
+
+async def kosten_sichern(stabil: dict, eigen: dict, kasse, *, eintrag: Optional[dict] = None,
+                         sammlung: str = SAMMLUNG) -> None:
+    """Ausnahmepfad eines Laufs (Nachbesserung 27.09.2026): das schon
+    Ausgegebene bleibt am Dokument (kosten_summe_ct, $inc am stabilen
+    Schluessel), sonst setzte der stuendliche budget.abgleichen den Zaehler
+    ohne diese Kosten neu. Gehoert das Dokument noch diesem Lauf (`eigen`),
+    wird es zusaetzlich mit `eintrag` (status fehler, kosten_ct, Bericht der
+    Kasse) abgeschlossen. Wirft nie."""
+    try:
+        betrag = float(kasse.abrechnung_ct) if kasse is not None else 0.0
+        if betrag > 0:
+            await db[sammlung].update_one(stabil, {"$inc": {"kosten_summe_ct": round(betrag, 4)}})
+        if eintrag is not None:
+            await db[sammlung].update_one({**eigen, "status": "laeuft"},
+                                          {"$set": eintrag, "$unset": {"lease_until": ""}})
+    except Exception:  # noqa: BLE001
+        log.exception("KI-Lauf: Kosten im Ausnahmepfad nicht gesichert")
+
+
 # ------------------------------------------------ Bewertung ausfuehren
 async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: bool = False) -> Optional[dict]:
     """Rechnet die Bewertung fuer den aktuellen Stand des Protokolls und legt
@@ -629,7 +664,7 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
         # Kostendeckel je Lauf (27.09.2026, ai.kostenkasse): Bewertung zuerst
         # einplanen (laengster Fall-Text), Websuche nur im Rest bis zum ZIEL,
         # vor jedem Aufruf die sichere Obergrenze gegen die HARTE Grenze.
-        kasse = kostenkasse.Kostenkasse(art="abholung", ref=protocol_id)
+        kasse = kostenkasse.Kostenkasse(art="abholung", ref=protocol_id, lease=lease_halter(basis["id"]))
         zusatz_teile = [marktdaten.als_text(ktx.get("marktdoc")),
                         await kalibrierung.prompt_zusatz(dealer_id, "abholung")]
         await kasse.bewertung_einplanen(json_bewerten, modell=basis["modell"], system=SYSTEM_PROMPT, nutzer=paket,
@@ -702,16 +737,28 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
                                         status=eintrag["status"], grund=eintrag["grund"][:200])
                 except Exception:  # noqa: BLE001
                     pass
+        # kosten_summe_ct: alle Laeufe dieses Stands (ein "Neu berechnen"
+        # ueberschreibt kosten_ct) — daraus rechnet budget.abgleichen
         await db[SAMMLUNG].update_one({"protocol_id": protocol_id, "input_hash": h},
-                                      {"$set": eintrag, "$unset": {"lease_until": ""}}, upsert=True)
+                                      {"$set": eintrag, "$unset": {"lease_until": ""},
+                                       "$inc": {"kosten_summe_ct": round(float(kosten or 0), 4)}}, upsert=True)
         return _oeffentlich(eintrag)
     except Exception:  # noqa: BLE001 — die KI ist Beiwerk, nie ein 500
         log.exception("KI-Bewertung %s gescheitert", protocol_id)
         try:
             # Reservierung durch das schon Ausgegebene ersetzen (vorher 0)
-            await budget.abrechnen(res, kasse.kosten_ct if kasse is not None else 0)
+            await budget.abrechnen(res, kasse.abrechnung_ct if kasse is not None else 0)
         except Exception:  # noqa: BLE001
             pass
+        if kasse is not None:
+            # Nachbesserung 27.09.2026: Kosten am Dokument sichern und — wenn es
+            # noch diesem Lauf gehoert — mit "fehler" abschliessen (vorher blieb
+            # es "laeuft": abgleichen zaehlte nach dem Lease 0, und der naechste
+            # Abruf der Karte startete ohne Klick einen neuen bezahlten Lauf)
+            await kosten_sichern({"protocol_id": protocol_id, "input_hash": h}, {"id": basis["id"]}, kasse,
+                                 eintrag={"status": "fehler", "grund": "interner Fehler — bitte neu berechnen",
+                                          "ergebnis": None, "kosten_ct": kasse.abrechnung_ct,
+                                          "kostendeckel": kasse.bericht()})
         return None
 
 

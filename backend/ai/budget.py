@@ -288,6 +288,20 @@ def _lease_gueltig(doc: Dict[str, Any]) -> bool:
         return False
 
 
+def _gezahlt_ct(d: Dict[str, Any]) -> float:
+    """Schon ausgegebene Kosten eines Bewertungsdokuments. Nachbesserung
+    27.09.2026: kosten_summe_ct (per $inc, alle abgeschlossenen UND im
+    Ausnahmepfad abgebrochenen Laeufe dieses Dokuments — ein "Neu
+    berechnen" der Abholung ueberschreibt kosten_ct, die Summe bleibt) geht
+    vor; aeltere Dokumente ohne Summe: kosten_ct, solange sie nicht mehr
+    "laeuft" (ein laufender Lauf hat noch nichts abgerechnet)."""
+    for feld in ("kosten_summe_ct",) + (("kosten_ct",) if d.get("status") != "laeuft" else ()):
+        w = d.get(feld)
+        if isinstance(w, (int, float)) and not isinstance(w, bool):
+            return max(0.0, float(w))
+    return 0.0
+
+
 async def abgleichen(db=None) -> Dict[str, Any]:
     """Review 26.09.2026 (Nr. 22): Zaehler je Schluessel des laufenden Monats
     aus den Bewertungen neu setzen — Summe kosten_ct der abgeschlossenen
@@ -302,17 +316,13 @@ async def abgleichen(db=None) -> Dict[str, Any]:
     try:
         cursor = db[SAMMLUNG].find({"created_at": {"$gte": monat}},
                                    {"_id": 0, "art": 1, "user_id": 1, "dealer_id": 1, "driver_id": 1, "status": 1,
-                                    "kosten_ct": 1, "est_ct": 1, "lease_until": 1}).limit(20000)
+                                    "kosten_ct": 1, "kosten_summe_ct": 1, "est_ct": 1, "lease_until": 1}).limit(20000)
         async for d in cursor:
             art = d.get("art") or "abholung"
             key = _schluessel(d.get("user_id"), d.get("dealer_id"), art)
-            if d.get("status") == "laeuft":
-                betrag = float(d.get("est_ct") or 0) if _lease_gueltig(d) else 0.0
-            else:
-                try:
-                    betrag = float(d.get("kosten_ct") or 0)
-                except (TypeError, ValueError):
-                    betrag = 0.0
+            betrag = _gezahlt_ct(d)
+            if d.get("status") == "laeuft" and _lease_gueltig(d):
+                betrag += float(d.get("est_ct") or 0)       # laufende Reservierung
             soll[key] = round(soll.get(key, 0.0) + max(0.0, betrag), 2)
             # Fahrer-Deckel (26.09.2026 abends): Abhol-Bewertungen tragen driver_id
             if art == "abholung" and d.get("driver_id"):

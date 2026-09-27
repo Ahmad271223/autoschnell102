@@ -7,6 +7,7 @@
 (a) Alarm-Szenario nachgestellt: geplant <= 15 ct, tatsaechlich <= 20 ct,
     kein Alarm zwischen 15 und 20 (Zaehler "ueber dem Ziel" statt Alarm)
 (b) Fortsetzung nach pause_turn entfaellt, wenn sie nicht mehr passt
+    (auch nicht ohne weitere Suche)
 (c) Suchergebnisse groesser als SUCHE_TOKENS_MAX -> Bewertung gekuerzt oder
     ausgelassen, nie ueber der Grenze, Alarm ki_kostendeckel_gegriffen
 (d) count_tokens scheitert -> sichere Schaetzung, nie ueber der Grenze
@@ -174,7 +175,8 @@ def test_a_alarm_szenario_geplant_ziel_nie_ueber_hart(welt, ki):
     assert kd["geplant_ct"] <= 15.0, kd
     assert kd["kosten_ct"] <= 20.0 and kd["ueber_ziel"] is True and kd["ueber_hart"] is False
     assert kd["bewertung"] == "voll", "Bewertung unveraendert — der Puffer bis 20 ct reicht"
-    # geplant war EINE Suche (zwei passen nicht in den Rest bis 15 ct)
+    # je Runde EINE Suche; nach 12 ct in Runde 1 passt keine zweite Runde
+    # mehr (Nachbesserung 27.09.2026: Runden statt zwei Suchen in einer Anfrage)
     assert len(kl.recherchen) == 1 and kl.recherchen[0]["tools"][0]["max_uses"] == 1
     assert "hoechstens 1 Suchen" in kl.recherchen[0]["messages"][0]["content"]
     assert len(kl.bewertungen) == 1 and kl.bewertungen[0]["max_tokens"] == _module("ai.provider").KI_MAX_TOKENS
@@ -238,6 +240,7 @@ def _recherche_lauf(kasse, klient_antworten, reserve_ct=6.0):
     P = _module("ai.provider")
     MD = _module("ai.marktdaten")
     kasse.bewertung_reserve_ct = reserve_ct
+    kasse.bewertung_erwartet_ct = reserve_ct
     frage = "Fahrzeug: BMW. Recherchiere ...\n- id d1: Delle Kotfluegel\n" + MD.DATEN_ANWEISUNG
     basis = kasse.recherche_basis_tokens(MD.RECHERCHE_SYSTEM, frage)
     plan = kasse.recherche_plan(basis, MD.MAX_SUCHEN_FALL, HAIKU)
@@ -248,15 +251,17 @@ def _recherche_lauf(kasse, klient_antworten, reserve_ct=6.0):
 
 
 def test_b_fortsetzung_entfaellt_wenn_sie_nicht_passt(ki):
-    antworten = iter([_antwort("Teil 1: Delle 120-200 EUR (ADAC)", _usage(ein=30000, aus=1500, suchen=1), stop="pause_turn"),
+    """Selbst eine Fortsetzung OHNE weitere Suche (Verlauf ~93.000 Tokens)
+    passt nicht mehr in den Rest -> sie entfaellt, der Text bleibt."""
+    antworten = iter([_antwort("Teil 1: Delle 120-200 EUR (ADAC)", _usage(ein=90000, aus=1500, suchen=1), stop="pause_turn"),
                       _antwort("Teil 2", _usage(ein=1000, aus=100, suchen=0))])
     kl = ki(Klient(recherche=lambda kw: next(antworten)))
     kasse = _kasse()
     r, plan = _recherche_lauf(kasse, None)
-    assert len(kl.recherchen) == 1, "Fortsetzung haette den Rest bis zum Ziel gesprengt"
+    assert len(kl.recherchen) == 1, "Fortsetzung haette den Rest gesprengt"
     assert r["status"] == "ok" and "Teil 1" in r["text"], "mit dem bis dahin gefundenen Text weiter"
     assert any("Fortsetzung der Websuche entfallen" in h for h in kasse.hinweise)
-    assert kasse.recherche_rest_ct() >= 0 and kasse.geplant_max_ct <= 15
+    assert kasse.geplant_max_ct <= 15 and kasse.obergrenze_max_ct <= kasse.hart_budget_ct
     assert r["gebucht"] is True and kasse.posten[0]["schritt"] == "recherche#1"
     assert kasse.posten[0]["tokens_je_suche"] is not None, "Tokens je Suche werden protokolliert"
     assert {"max_retries": 0} in [{k: v for k, v in o.items() if k == "max_retries"} for o in kl.optionen]
@@ -275,7 +280,9 @@ def test_b2_kleine_fortsetzung_passt_und_laeuft(ki):
 
 def test_b3_fehler_mitten_in_der_schleife_verliert_keine_kosten(ki):
     """F3: bricht die zweite Anfrage ab, bleiben die Kosten der ersten im
-    Ergebnis; die abgebrochene zaehlt zur Obergrenze (unsicher)."""
+    Ergebnis; die abgebrochene zaehlt zur Obergrenze (unsicher).
+    Nachbesserung 27.09.2026: auch der Text der ersten Anfrage bleibt (status
+    ok) — eine gescheiterte Fortsetzung verwirft das Gefundene nicht mehr."""
     def _antworten():
         yield _antwort("Teil 1", _usage(ein=3000, aus=200, suchen=1), stop="pause_turn")
         raise RuntimeError("Verbindung weg")
@@ -283,8 +290,16 @@ def test_b3_fehler_mitten_in_der_schleife_verliert_keine_kosten(ki):
     ki(Klient(recherche=lambda kw: next(gen)))
     kasse = _kasse()
     r, _plan = _recherche_lauf(kasse, None)
-    assert r["status"] == "fehler" and r["usage"]["input_tokens"] == 3000 and r["suchen"] == 1
+    assert r["status"] == "ok" and r["text"] == "Teil 1" and "Fortsetzung gescheitert" in r["grund"]
+    assert r["usage"]["input_tokens"] == 3000 and r["suchen"] == 1
     assert kasse.kosten_ct > 0 and kasse.unsicher_ct > 0
+    # scheitert schon die ERSTE Anfrage, bleibt es ein Fehler
+    def _sofort(kw):
+        raise RuntimeError("Verbindung weg")
+    ki(Klient(recherche=_sofort))
+    kasse2 = _kasse()
+    r2, _ = _recherche_lauf(kasse2, None)
+    assert r2["status"] == "fehler" and kasse2.unsicher_ct > 0
 
 
 # ------------------------------------------------ (c) groessere Suchergebnisse
@@ -436,8 +451,12 @@ def test_e_normalfall_vertrag_unveraendert(welt, ki):
     fz = _fahrzeug(welt, vid)
     erg = welt.run(D.bewerten(user=w.sucher, vehicle_doc=fz, damages=SCHAEDEN))
     assert erg["status"] == "ok"
-    # gleiche Aufrufe: eine Recherche, eine Bewertung mit vollem max_tokens und vollem Fall-Text
-    assert len(kl.recherchen) == 1 and len(kl.bewertungen) == 1
+    # Nachbesserung 27.09.2026: ZWEI Suchen wie vor dem Deckel — als zwei Runden
+    # mit je einer Suche; Runde 2 nur fuer d2 (d1 hat Runde 1 schon beantwortet)
+    assert len(kl.recherchen) == 2 and len(kl.bewertungen) == 1
+    assert [r["tools"][0]["max_uses"] for r in kl.recherchen] == [1, 1]
+    assert "id d2" in kl.recherchen[1]["messages"][0]["content"]
+    assert "id d1" not in kl.recherchen[1]["messages"][0]["content"]
     b = kl.bewertungen[0]
     assert b["max_tokens"] == P.KI_MAX_TOKENS and b["model"] == SONNET
     assert b["system"][0]["text"] == D.SYSTEM_PROMPT and b["system"][0]["cache_control"] == {"type": "ephemeral"}
@@ -473,7 +492,8 @@ def test_e2_normalfall_abholung_unveraendert(welt, ki):
     _cid, _tid, _vid, pid = _welt_aufbauen(welt, "kde2")
     erg = welt.run(K.bewertung_ausfuehren(pid, w.dealer_id))
     assert erg["status"] == "ok"
-    assert len(kl.recherchen) == 1 and len(kl.bewertungen) == 1 and kl.bewertungen[0]["max_tokens"] == P.KI_MAX_TOKENS
+    # zwei Runden mit je einer Suche (Nachbesserung 27.09.2026)
+    assert len(kl.recherchen) == 2 and len(kl.bewertungen) == 1 and kl.bewertungen[0]["max_tokens"] == P.KI_MAX_TOKENS
     assert "Delle Smart-Repair 120-200 EUR" in kl.bewertungen[0]["system"][1]["text"]
     doc = welt.run(welt.db.ki_bewertungen.find_one({"protocol_id": pid, "status": "ok"}, {"_id": 0}))
     assert doc["kostendeckel"]["bewertung"] == "voll" and doc["kostendeckel"]["geplant_ct"] <= 15
@@ -520,7 +540,9 @@ def test_f_eigenschaft_500_faelle_nie_ueber_hart_plan_nie_ueber_ziel(ki):
         def _recherche(kw, kontext=kontext):
             kontext["nr"] += 1
             m, n = kw["max_tokens"], kw["tools"][0]["max_uses"]
-            if kontext["ctx"] is None:
+            if (kw.get("tool_choice") or {}).get("type") == "none":
+                n = 0                      # Fortsetzung ohne weitere Suche
+            if kontext["ctx"] is None or len(kw["messages"]) == 1:      # neue Anfrage (Runde), keine Fortsetzung
                 basis_echt = int((len(kw["system"][0]["text"].encode()) + len(kw["messages"][0]["content"].encode())) / 3.2) + 600
                 kontext["ctx"] = basis_echt
             k = rnd.randint(0, n)
@@ -559,8 +581,9 @@ def test_f_eigenschaft_500_faelle_nie_ueber_hart_plan_nie_ueber_ziel(ki):
         assert kasse.bewertung_reserve_ct <= 15.0, info
         assert kasse.obergrenze_max_ct <= kasse.hart_budget_ct + 1e-9, info
         if not gross:
+            # Nachbesserung 27.09.2026: ZIEL = erwartete Kosten, die sichere
+            # Obergrenze gilt gegen HART (oben) — Bewertung bleibt voll
             assert kasse.geplant_max_ct <= 15.0 + 1e-9, info
-            assert kasse.obergrenze_max_ct <= 15.0 + 1e-9, info
             assert antwort["status"] == "ok" and kasse.bewertung_stufe == "voll", info
         assert not [a for a in kasse.alarme if a[0] == "ki_kosten_ueberschritten"], info
     loop.close()

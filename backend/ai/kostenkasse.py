@@ -36,6 +36,32 @@ Attribut zaehlt nie gegen die echte API). Die Recherche laesst sich NICHT
 zaehlen (count_tokens lehnt Server-Werkzeuge wie web_search ab) — dort
 rechnen wir sicher nach oben aus der Laenge.
 
+Nachbesserung 27.09.2026 (Pruefer-Runde):
+
+* ZIEL = erwartete Kosten, HART = Obergrenze. Eine Recherche-Anfrage
+  laeuft nur, wenn (a) ihre sichere Obergrenze (Cache-Schreiben 1,25x,
+  SUCHE_TOKENS_MAX je Ergebnis) plus die eingeplante Bewertung unter der
+  HARTEN Grenze bleibt UND (b) ihre erwarteten Kosten (1,0x,
+  SUCHE_TOKENS_ERWARTET je Ergebnis) plus die erwartete Bewertung unter
+  dem ZIEL bleiben. Die Fall-Recherche laeuft dazu in bis zu zwei RUNDEN
+  mit je EINER Suche (marktdaten._fall_runden); Runde 2 wird erst nach den
+  echten Kosten von Runde 1 geplant. Vorher musste schon die Obergrenze
+  unter das Ziel — im Normalfall blieb nur EINE Suche und ~7 ct je Lauf
+  ("versuchen 15 ct" wurde zu "hoechstens 7 ct"); jetzt wieder zwei Suchen
+  wie vor dem Deckel, gerechnet ~11-14 ct, sicher unter 20 ct.
+* Fortsetzung nach pause_turn auch ohne weitere Suche (min_suchen=0).
+* Unsichere Aufrufe (Zeitlimit/Abbruch) zaehlen auch fuer Abrechnung,
+  Alarm und Statistik (kosten_ct = sicher + unsicher); Fehlschlaege mit
+  HTTP-Status (429/529/5xx) oder ohne Verbindung kosten sicher nichts und
+  binden nichts.
+* Modell ohne Preis in kalibrierung.PREIS_JE_MIO: kein Aufruf (Status
+  "kostendeckel", Alarm ki_modell_ohne_preis) — mit einem geschaetzten
+  Preis liesse sich die harte Grenze nicht zusichern.
+* Lease: vor jedem bezahlten Aufruf verlaengert die Kasse das Lease des
+  Laufs (`lease`, siehe pickup_assessment.lease_halter); haelt ein anderer
+  Aufruf den Lauf inzwischen, bricht sie ab (LaufUebernommen) — nie zwei
+  bezahlte Laeufe fuer denselben Stand.
+
 Die KI bleibt beratend: ein Deckel stoppt nur die KI, nie Vertrag/Freigabe.
 """
 from __future__ import annotations
@@ -46,6 +72,8 @@ import math
 from typing import Any, Callable, Dict, List, Optional
 
 from ai import budget, kalibrierung
+from ai.provider import KI_ZEITLIMIT_SEKUNDEN, UNBERECHNET_WIEDERHOLUNGEN, \
+    WIEDERHOLEN_WARTEN_MAX_S, LaufUebernommen  # noqa: F401 — LaufUebernommen auch fuer Aufrufer
 
 log = logging.getLogger("autohandel.ki")
 
@@ -79,6 +107,9 @@ BYTES_JE_TOKEN_MIN = 2.0
 # Anfrage stehen im Bericht (posten[].tokens_je_suche) und im Log — damit
 # laesst sich die Konstante spaeter nachschaerfen.
 SUCHE_TOKENS_MAX = 20000
+# ... und was wir ERWARTEN (Planung gegen das Ziel): der Messwert selbst,
+# ~13.000 Tokens je Ergebnis (140.000 Tokens bei vier Suchen, siehe oben).
+SUCHE_TOKENS_ERWARTET = 13000
 SUCHE_CT = 1.0
 # Das Websuch-Werkzeug bringt einen eigenen System-Teil mit (Haiku 4.5: 496
 # Tokens laut Preisliste) plus die Werkzeugdefinition (gesperrte Domains,
@@ -87,7 +118,7 @@ WERKZEUG_TOKENS = 1000
 # Recherche: erlaubte Ausgabe je Anfrage in dieser Reihenfolge probieren. Bei
 # zwei Suchen nicht unter 2.000 (sonst reicht es nicht fuer die Werte samt
 # Datenblock), bei einer Suche bis 1.500 (Kostenkarte: typisch ~1.500).
-RECHERCHE_MAX_TOKENS = {2: (3000, 2000), 1: (3000, 2000, 1500)}
+RECHERCHE_MAX_TOKENS = {2: (3000, 2000), 1: (3000, 2000, 1500), 0: (3000, 2000, 1500)}
 # Bewertung: max_tokens nur bis zu dieser Untergrenze senken — der Probelauf
 # 26.09.2026 schnitt die JSON-Antwort bei 1.600 schon ab.
 BEWERTUNG_MAX_TOKENS_MIN = 1800
@@ -95,11 +126,20 @@ BEWERTUNG_MAX_TOKENS_MIN = 1800
 FALL_ANTEILE = (1.0, 0.5, 0.0)
 
 HINWEIS_WEBSUCHE_ENTFALLEN = "Websuche entfallen — Kostendeckel je Lauf"
+HINWEIS_LAUF_UEBERNOMMEN = "Lauf von einem anderen Aufruf übernommen — abgebrochen"
+# Lease: jeder bezahlte Aufruf bekommt sein Zeitlimit plus diesen Puffer
+# (Datenbank, Pause vor dem kostenlosen zweiten Versuch, Nacharbeit).
+LEASE_PUFFER_S = 60
+
+
+def preis_bekannt(modell: str) -> bool:
+    return bool(modell) and modell in kalibrierung.PREIS_JE_MIO
 
 
 def _preis_ct_je_token(modell: str) -> tuple:
-    """(Eingabe, Ausgabe) in Cent je Token. Unbekanntes Modell: fuer die
-    Obergrenze der TEUERSTE bekannte Preis (sicher nach oben)."""
+    """(Eingabe, Ausgabe) in Cent je Token. Unbekanntes Modell: der TEUERSTE
+    bekannte Preis — nur als Rechengroesse; aufgerufen wird ein Modell ohne
+    Preis nie (preis_bekannt), die harte Grenze liesse sich nicht zusichern."""
     preise = kalibrierung.PREIS_JE_MIO
     if modell in preise:
         ein, aus = preise[modell]
@@ -127,7 +167,7 @@ def eingabe_gesamt(usage: Dict[str, Any]) -> int:
         + int(u.get("cache_read_input_tokens") or 0)
 
 
-def recherche_eingabe_max(basis_tokens: int, suchen: int, max_tokens: int) -> int:
+def recherche_eingabe_max(basis_tokens: int, suchen: int, max_tokens: int, je_suche: int = SUCHE_TOKENS_MAX) -> int:
     """Hoechstmenge Eingabe-Tokens einer Recherche-Anfrage mit bis zu `suchen`
     Suchen: hoechstens suchen+1 Runden der Server-Schleife, jede liest die
     Basis (System + Frage + Werkzeug) erneut; die bis dahin erzeugte Ausgabe
@@ -135,7 +175,7 @@ def recherche_eingabe_max(basis_tokens: int, suchen: int, max_tokens: int) -> in
     Suchergebnis wird in allen folgenden Runden gelesen -> SUCHE_TOKENS_MAX x
     suchen x (suchen+1) / 2."""
     n = max(0, int(suchen))
-    return (n + 1) * int(basis_tokens) + n * int(max_tokens) + SUCHE_TOKENS_MAX * n * (n + 1) // 2
+    return (n + 1) * int(basis_tokens) + n * int(max_tokens) + int(je_suche) * n * (n + 1) // 2
 
 
 def _kurz(usage: Dict[str, Any]) -> Dict[str, int]:
@@ -147,7 +187,7 @@ class Kostenkasse:
     Grenze gehen und fuehrt die Einzelposten (fuer Abrechnung und Alarm)."""
 
     def __init__(self, *, art: str, ref: str = "", ziel_ct: Optional[float] = None,
-                 hart_ct: Optional[float] = None):
+                 hart_ct: Optional[float] = None, lease: Optional[Callable] = None):
         hart = float(hart_ct if hart_ct is not None else budget.kosten_max_ct())
         ziel = float(ziel_ct if ziel_ct is not None else budget.ziel_ct())
         self.art, self.ref = art, ref
@@ -159,11 +199,14 @@ class Kostenkasse:
         self.posten: List[Dict[str, Any]] = []
         self.unsicher_ct = 0.0          # Aufrufe mit unbekanntem Ausgang (Zeitlimit/Abbruch), zur Obergrenze
         self.bewertung_reserve_ct = 0.0  # eingeplante Obergrenze der Bewertung (laengster Fall-Text)
-        self.geplant_max_ct = 0.0        # Plan (gegen das ZIEL): Bewertung eingeplant + Websuche
+        self.bewertung_erwartet_ct = 0.0  # ... und ihre erwarteten Kosten (1,0x statt 1,25x)
+        self.geplant_max_ct = 0.0        # Plan (gegen das ZIEL): erwartete Kosten Bewertung + Websuche
         self.obergrenze_max_ct = 0.0     # vor einem Aufruf: gebunden + dessen Obergrenze (gegen HART)
         self.hinweise: List[str] = []
         self.bewertung_stufe: Optional[str] = None
         self.gegriffen = False           # Bewertung wegen des Deckels entfallen
+        self.lease = lease               # async (sekunden) -> bool: Lease des Laufs verlaengern
+        self.verloren = False            # Lauf von einem anderen Aufruf uebernommen
 
     # -------------------------------------------- Stand
     @property
@@ -176,6 +219,26 @@ class Kostenkasse:
         """Fuer den Deckel: tatsaechlich + unsichere Aufrufe (zur Obergrenze)."""
         return round(self.kosten_ct + self.unsicher_ct, 4)
 
+    async def halten(self, sekunden: float) -> None:
+        """Vor einem bezahlten Aufruf: das Lease des Laufs auf das Zeitlimit
+        dieses Aufrufs (+ Puffer) verlaengern. Haelt ein anderer Aufruf den
+        Lauf inzwischen (Lease abgelaufen und uebernommen), keinen weiteren
+        Aufruf: LaufUebernommen."""
+        if self.verloren:
+            raise LaufUebernommen(self.ref)
+        if self.lease is None:
+            return
+        try:
+            ok = await self.lease(float(sekunden) + LEASE_PUFFER_S)
+        except Exception as exc:  # noqa: BLE001 — Datenbank weg: weiterrechnen statt abbrechen
+            log.warning("KI-Lauf %s: Lease nicht verlaengert (%s)", self.ref, type(exc).__name__)
+            return
+        if not ok:
+            self.verloren = True
+            self.hinweis(HINWEIS_LAUF_UEBERNOMMEN)
+            log.warning("KI-Lauf %s (%s): von einem anderen Aufruf uebernommen — abgebrochen", self.ref, self.art)
+            raise LaufUebernommen(self.ref)
+
     def hinweis(self, text: str) -> None:
         if text and text not in self.hinweise:
             self.hinweise.append(text)
@@ -186,9 +249,10 @@ class Kostenkasse:
     def _vor_aufruf(self, obergrenze_ct: float) -> None:
         self.obergrenze_max_ct = round(max(self.obergrenze_max_ct, self.gebunden_ct + obergrenze_ct), 4)
 
-    def obergrenze_ct(self, modell: str, eingabe_tokens: int, max_tokens: int, suchen: int = 0) -> float:
+    def obergrenze_ct(self, modell: str, eingabe_tokens: int, max_tokens: int, suchen: int = 0,
+                      faktor: float = CACHE_FAKTOR) -> float:
         ein, aus = _preis_ct_je_token(modell)
-        return round(eingabe_tokens * CACHE_FAKTOR * ein + int(max_tokens) * aus + suchen * SUCHE_CT, 4)
+        return round(eingabe_tokens * faktor * ein + int(max_tokens) * aus + suchen * SUCHE_CT, 4)
 
     # -------------------------------------------- Buchen
     def buchen(self, schritt: str, modell: str, usage: Dict[str, Any], *, obergrenze_ct: Optional[float] = None,
@@ -214,23 +278,36 @@ class Kostenkasse:
         return tokens_schaetzen(system, frage) + WERKZEUG_TOKENS
 
     def recherche_rest_ct(self) -> float:
-        """Was die Websuche noch ausgeben darf: bis zum ZIEL, abzueglich der
-        eingeplanten Bewertung und allem, was schon gebunden ist."""
-        return round(self.ziel_budget_ct - self.bewertung_reserve_ct - self.gebunden_ct, 4)
+        """Was die Websuche noch ausgeben darf (erwartet): bis zum ZIEL,
+        abzueglich der erwarteten Bewertung und allem, was schon gebunden ist."""
+        return round(self.ziel_budget_ct - self.bewertung_erwartet_ct - self.gebunden_ct, 4)
 
-    def recherche_plan(self, basis_tokens: int, max_suchen: int, modell: str) -> Optional[Dict[str, Any]]:
+    def recherche_rest_hart_ct(self) -> float:
+        """Obergrenze, die die Websuche hoechstens binden darf: bis zur HARTEN
+        Grenze, abzueglich der eingeplanten Bewertung (Obergrenze)."""
+        return round(self.hart_budget_ct - self.bewertung_reserve_ct - self.gebunden_ct, 4)
+
+    def recherche_plan(self, basis_tokens: int, max_suchen: int, modell: str,
+                       min_suchen: int = 1) -> Optional[Dict[str, Any]]:
         """Groesste Anfrage (Suchen, dann max_tokens), deren Obergrenze in den
-        Rest passt. None = keine Anfrage mehr (Websuche entfaellt/endet)."""
-        rest = self.recherche_rest_ct()
-        for n in range(max(0, int(max_suchen)), 0, -1):
+        Rest bis HART und deren erwartete Kosten in den Rest bis zum ZIEL
+        passen. min_suchen=0 (Fortsetzung): notfalls ohne weitere Suche.
+        None = keine Anfrage mehr (Websuche entfaellt/endet)."""
+        if not preis_bekannt(modell):
+            self.hinweis(f"Websuche entfallen — kein Preis für Modell {modell or '?'} hinterlegt")
+            return None
+        rest_ziel, rest_hart = self.recherche_rest_ct(), self.recherche_rest_hart_ct()
+        for n in range(max(0, int(max_suchen)), max(0, int(min_suchen)) - 1, -1):
             for m in RECHERCHE_MAX_TOKENS.get(n, RECHERCHE_MAX_TOKENS[2]):
                 eingabe = recherche_eingabe_max(basis_tokens, n, m)
                 b = self.obergrenze_ct(modell, eingabe, m, suchen=n)
-                if b <= rest:
-                    self._geplant(self.gebunden_ct + self.bewertung_reserve_ct + b)
+                erw = self.obergrenze_ct(modell, recherche_eingabe_max(basis_tokens, n, m, SUCHE_TOKENS_ERWARTET), m,
+                                         suchen=n, faktor=1.0)
+                if b <= rest_hart and erw <= rest_ziel:
+                    self._geplant(self.gebunden_ct + self.bewertung_erwartet_ct + erw)
                     self._vor_aufruf(b)
-                    return {"max_uses": n, "max_tokens": m, "obergrenze_ct": b, "basis_tokens": int(basis_tokens),
-                            "eingabe_max": eingabe}
+                    return {"max_uses": n, "max_tokens": m, "obergrenze_ct": b, "erwartet_ct": erw,
+                            "basis_tokens": int(basis_tokens), "eingabe_max": eingabe}
         return None
 
     @staticmethod
@@ -240,7 +317,7 @@ class Kostenkasse:
         ist hoechstens die Summe ihrer Eingabe plus ihrer Ausgabe."""
         return int(basis_tokens) + eingabe_gesamt(usage_bisher) + int((usage_bisher or {}).get("output_tokens") or 0)
 
-    def recherche_buchen(self, modell: str, usage: Dict[str, Any], plan: Optional[Dict[str, Any]], nr: int) -> float:
+    def recherche_buchen(self, modell: str, usage: Dict[str, Any], plan: Optional[Dict[str, Any]], nr: Any) -> float:
         """Eine Recherche-Anfrage abrechnen und die tatsaechlichen Tokens je
         Suche festhalten (zum Nachschaerfen von SUCHE_TOKENS_MAX)."""
         suchen = int((usage or {}).get("web_search_requests") or 0)
@@ -282,11 +359,18 @@ class Kostenkasse:
         """VOR der Recherche: Obergrenze der Bewertung mit dem laengstmoeglichen
         Fall-Text reservieren (Zeichen/2 als Tokens — sicher nach oben fuer
         Text, Quellen-Titel und Adressen)."""
+        if self.verloren:
+            raise LaufUebernommen(self.ref)
+        if not preis_bekannt(modell):
+            # kein Preis -> keine Bewertung (bewerten); die Websuche bekommt nichts
+            self.bewertung_reserve_ct = self.bewertung_erwartet_ct = self.hart_budget_ct
+            return self.bewertung_reserve_ct
         zusatz = _zusatz(zusatz_teile, "")
         e = await self._bewertung_eingabe(aufruf, system=system, zusatz=zusatz, nutzer=nutzer, schema=schema)
         fall_tokens = int(math.ceil(fall_text_max_zeichen / BYTES_JE_TOKEN_MIN))
         self.bewertung_reserve_ct = self.obergrenze_ct(modell, e["tokens"] + fall_tokens, max_tokens)
-        self._geplant(self.gebunden_ct + self.bewertung_reserve_ct)
+        self.bewertung_erwartet_ct = self.obergrenze_ct(modell, e["tokens"] + fall_tokens, max_tokens, faktor=1.0)
+        self._geplant(self.gebunden_ct + self.bewertung_erwartet_ct)
         return self.bewertung_reserve_ct
 
     async def bewerten(self, aufruf: Callable, *, modell: str, system: str, nutzer: Any, schema: Dict[str, Any],
@@ -294,6 +378,18 @@ class Kostenkasse:
         """Die Bewertung nur aufrufen, wenn ihre Obergrenze in den Rest bis zur
         HARTEN Grenze passt. Stufen: voller Fall-Text -> gekuerzt -> ohne ->
         max_tokens bis BEWERTUNG_MAX_TOKENS_MIN senken -> entfallen."""
+        if self.verloren:
+            raise LaufUebernommen(self.ref)
+        if not preis_bekannt(modell):
+            self.gegriffen = True
+            self.bewertung_stufe = "entfallen"
+            grund = (f"KI-Bewertung entfallen: für das Modell {modell or '?'} ist kein Preis hinterlegt — der "
+                     f"Kostendeckel je Lauf ({self.hart_ct:g} ct) ließe sich nicht zusichern. Der Vorgang läuft "
+                     "normal weiter.")
+            self.hinweis(grund)
+            await self._alarm("ki_modell_ohne_preis", modell=modell or "", grund=grund)
+            return {"status": "kostendeckel", "grund": grund, "daten": None, "dauer_ms": 0, "modell": modell,
+                    "usage": {}}
         rest = round(self.hart_budget_ct - self.gebunden_ct, 4)
         ein, aus = _preis_ct_je_token(modell)
         gewaehlt = None
@@ -336,24 +432,38 @@ class Kostenkasse:
                           "max_tokens_gesenkt": "Antwortlänge der Bewertung begrenzt — Kostendeckel je Lauf"}
                          [gewaehlt["stufe"]])
         self._vor_aufruf(gewaehlt["obergrenze_ct"])
+        # Lease fuer die Bewertung (+ kostenloser zweiter Versuch)
+        await self.halten((1 + UNBERECHNET_WIEDERHOLUNGEN) * KI_ZEITLIMIT_SEKUNDEN + WIEDERHOLEN_WARTEN_MAX_S)
         antwort = await aufruf(system=system, nutzer=nutzer, schema=schema, zusatz=gewaehlt["zusatz"] or None,
                                max_tokens=gewaehlt["max_tokens"], max_retries=0)
         usage = antwort.get("usage") or {}
         if usage:
             self.buchen("bewertung", antwort.get("modell") or modell, usage, obergrenze_ct=gewaehlt["obergrenze_ct"],
                         gezaehlt=gewaehlt["gezaehlt"], max_tokens=gewaehlt["max_tokens"])
-        elif antwort.get("status") not in ("aus",):
+        elif antwort.get("status") not in ("aus",) and not antwort.get("nicht_berechnet"):
+            # Zeitlimit/Abbruch: ob berechnet, ist offen -> zur Obergrenze gebunden.
+            # Fehlschlaege mit HTTP-Status (429/529/5xx) kosten nichts.
             self.unsicher_buchen("bewertung", gewaehlt["obergrenze_ct"], antwort.get("grund") or "")
         return antwort
 
     # -------------------------------------------- Abschluss
+    @property
+    def abrechnung_ct(self) -> float:
+        """Was der Lauf fuer Budget, Statistik und Alarm kostet: die aus usage
+        gerechneten Kosten PLUS unsichere Aufrufe zur Obergrenze (Zeitlimit
+        oder Abbruch ohne usage koennen berechnet sein — lieber zu viel
+        gezaehlt als ein Monatsbudget, das zu wenig sieht)."""
+        return round(self.kosten_ct + self.unsicher_ct, 2)
+
     async def abschliessen(self) -> float:
-        """Tatsaechliche Kosten; darueber hinaus nur die letzte Sicherung:
-        Alarm ki_kosten_ueberschritten, wenn die HARTE Grenze doch gerissen
-        wurde (darf praktisch nie kommen) — mit den Einzelposten."""
-        kosten = self.kosten_ct
+        """Kosten des Laufs (abrechnung_ct: sicher + unsicher); darueber
+        hinaus nur die letzte Sicherung: Alarm ki_kosten_ueberschritten, wenn
+        die HARTE Grenze doch gerissen wurde (darf praktisch nie kommen) —
+        mit den Einzelposten, sicher und unsicher getrennt."""
+        kosten = self.abrechnung_ct
         if kosten > self.hart_ct:
-            await self._alarm("ki_kosten_ueberschritten", kosten_ct=kosten, grenze_ct=self.hart_ct,
+            await self._alarm("ki_kosten_ueberschritten", kosten_ct=kosten, kosten_sicher_ct=self.kosten_ct,
+                              unsicher_ct=round(self.unsicher_ct, 2), grenze_ct=self.hart_ct,
                               ziel_ct=self.ziel_ct, posten=self.posten_text())
         elif kosten > self.ziel_ct:
             log.info("KI-Lauf %s (%s) ueber dem Ziel: %.2f ct (Ziel %.2f, hart %.2f) — %s", self.ref, self.art,
@@ -373,11 +483,13 @@ class Kostenkasse:
         return "; ".join(teile)[:480]
 
     def bericht(self) -> Dict[str, Any]:
-        kosten = self.kosten_ct
+        kosten = self.abrechnung_ct
         return {"ziel_ct": self.ziel_ct, "hart_ct": self.hart_ct, "geplant_ct": round(self.geplant_max_ct, 2),
                 "obergrenze_ct": round(self.obergrenze_max_ct, 2),
-                "bewertung_reserve_ct": round(self.bewertung_reserve_ct, 2), "kosten_ct": kosten,
-                "unsicher_ct": round(self.unsicher_ct, 2), "ueber_ziel": kosten > self.ziel_ct,
+                "bewertung_reserve_ct": round(self.bewertung_reserve_ct, 2),
+                "bewertung_erwartet_ct": round(self.bewertung_erwartet_ct, 2), "kosten_ct": kosten,
+                "kosten_sicher_ct": self.kosten_ct, "unsicher_ct": round(self.unsicher_ct, 2),
+                "uebernommen": self.verloren, "ueber_ziel": kosten > self.ziel_ct,
                 "ueber_hart": kosten > self.hart_ct, "bewertung": self.bewertung_stufe, "gegriffen": self.gegriffen,
                 "hinweise": list(self.hinweise), "posten": list(self.posten)}
 

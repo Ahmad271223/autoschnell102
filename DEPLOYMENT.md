@@ -3382,8 +3382,9 @@ wurde bis dahin erst **nach** dem Lauf geprüft; das Geld war schon ausgegeben. 
   `ai/kostenkasse.py` die höchstmöglichen Kosten dieses Aufrufs aus. Passen sie nicht mehr in den Rest,
   wird der Aufruf nicht gemacht. Das Monatsbudget reserviert je Lauf genau diese 20 ct.
 - **Ziel: `KI_KOSTEN_ZIEL_CT` = 15 ct** (neu). So wird geplant. Zuerst wird die Bewertung (Sonnet) mit dem
-  längstmöglichen Recherche-Text eingeplant. Die Websuche bekommt nur, was bis 15 ct übrig bleibt. Die
-  5 ct zwischen Ziel und harter Grenze sind Puffer, falls Suchergebnisse größer ausfallen als eingeplant.
+  längstmöglichen Recherche-Text eingeplant. Eine Suche läuft nur, wenn ihre **erwarteten** Kosten
+  (1,0 × Preis, 13.000 Tokens je Suchergebnis) plus die erwartete Bewertung bis 15 ct passen **und** ihre
+  **höchstmöglichen** Kosten plus die eingeplante Bewertung unter 20 ct bleiben (Nachbesserung 27.09.).
 
 **So wird gerechnet (sicher nach oben):** Eingabe-Tokens × Preis × 1,25 (teuerster Fall: Cache-Schreiben)
 + höchste Ausgabe (`max_tokens`) × Preis + 1 ct je erlaubter Suche + je Suche 20.000 Tokens Ergebnis
@@ -3393,11 +3394,17 @@ der Länge gerechnet (1 Token je 2 Byte, sicher zu hoch).
 
 **Was passiert wann:**
 
-- Normalfall: Bewertung ≈ 5–6 ct eingeplant, für die Websuche bleiben ≈ 9–10 ct → **eine** Suche je Lauf
-  (zwei bräuchten ≈ 12 ct). Tatsächlich kostet ein Lauf damit meist 6–8 ct.
+- Normalfall: die Websuche läuft in bis zu **zwei Runden mit je einer Suche**. Runde 2 wird erst nach den
+  echten Kosten von Runde 1 geplant und fragt nur noch nach den Positionen, zu denen Runde 1 keinen Wert
+  geliefert hat. Nachgerechnet (Test n1): 4 ct + 4 ct Suche + 3,3 ct Bewertung = 11,3 ct, geplant 13,2 ct,
+  höchstens 12,1 ct gebunden. Eine einzige Anfrage mit zwei Suchen gibt es unter dem Deckel nicht mehr:
+  dort zählt jedes Suchergebnis bis zu dreifach, ein großes Ergebnis hätte die 20 ct schon in der Suche
+  gesprengt.
 - Reicht der Rest nicht für eine Suche: Websuche entfällt (wie Sparmodus), Hinweis „Websuche entfallen —
   Kostendeckel je Lauf“ am Lauf.
-- Fortsetzung der Suche (`pause_turn`) nur, wenn sie noch in den Rest bis 15 ct passt.
+- Fortsetzung der Suche (`pause_turn`) nur, wenn sie noch passt — notfalls **ohne weitere Suche**
+  (`tool_choice: none`), damit der Datenblock noch geschrieben wird. Scheitert eine Fortsetzung, bleibt
+  der bis dahin gefundene Text.
 - War die Suche teurer als eingeplant: die Bewertung wird gegen die **harte** Grenze geprüft. Passt sie,
   läuft sie unverändert. Sonst erst Recherche-Text kürzen/weglassen, dann Antwortlänge senken (nicht unter
   1.800 Tokens). Passt es dann immer noch nicht, entfällt die Bewertung: Status `kostendeckel`,
@@ -3407,6 +3414,21 @@ der Länge gerechnet (1 Token je 2 Byte, sicher zu hoch).
 - `ki_kosten_ueberschritten` bleibt als letzte Sicherung (über 20 ct, darf praktisch nie kommen) und nennt
   jetzt die Einzelposten (Recherche-Anfragen, Bewertung, Tokens, Obergrenzen).
 - Kein zweiter, womöglich bezahlter Versuch des SDK mehr (`max_retries=0` für Bewertung und Recherche).
+  Antworten, die nie berechnet werden (429, 529 „overloaded“, 5xx, Verbindungsaufbau gescheitert), werden
+  **einmal selbst** wiederholt; scheitern sie wieder, heißt der Status `ueberlastet` und es wird nichts
+  gebunden. Ein Zeitlimit wird nicht wiederholt und zählt mit seiner Obergrenze („unsicher“) — auch fürs
+  Monatsbudget, `kosten_ct` und den Alarm (Bericht: `kosten_sicher_ct` + `unsicher_ct`).
+- Modell ohne Eintrag in der Preisliste (`KI_MODELL`/`KI_RECHERCHE_MODELL` auf etwas Neues gestellt): kein
+  Aufruf, Status `kostendeckel`, Betriebsalarm `ki_modell_ohne_preis` — erst den Preis in
+  `ai/kalibrierung.PREIS_JE_MIO` eintragen.
+- Ein Lauf verlängert vor jedem bezahlten Aufruf sein Lease (Zeitlimit des Aufrufs + 60 s). Vorher lief ein
+  langer Lauf über die 150 s hinaus, und das Nachfragen der Karte startete einen **zweiten bezahlten** Lauf
+  für denselben Stand. Hat ein anderer Aufruf den Lauf doch übernommen, bricht der alte vor dem nächsten
+  Aufruf ab.
+- Bricht ein Lauf mit einem Fehler ab, bleiben die schon ausgegebenen Kosten am Dokument
+  (`kosten_summe_ct`, auch über mehrere „Neu berechnen“ derselben Abholung); der stündliche Abgleich des
+  Monatsbudgets rechnet damit. Eine abgebrochene Abholung steht danach auf `fehler` (vorher blieb sie
+  „läuft“ und startete nach 150 s ohne Klick neu).
 - Preisliste korrigiert: Sonnet 5 kostet 2 $/10 $ je Million Tokens (vorher mit 3 $/15 $ gerechnet),
   Opus 5 5 $/25 $.
 - Jeder Lauf trägt in `ki_bewertungen` den Bericht `kostendeckel` (Ziel, hart, geplant, Obergrenze, Kosten,
