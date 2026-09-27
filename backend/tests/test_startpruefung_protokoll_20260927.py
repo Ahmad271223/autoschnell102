@@ -41,7 +41,7 @@ def test_k5_checklist_texte_sind_nein_mit_grund():
     items = [(k, "") for k in FEATURES] + [("Standheizung", "")]
     t = PDF._checklist(items, PDF._styles(), col_count=1, checked=FEATURES)
     zeilen = {k: zeile[0].text for k, zeile in zip([k for k, _ in items], t._cellvalues)}
-    for name, grund in (("Sitzheizung", "fehlt komplett"), ("Navigationssystem", "vorhanden, defekt"),
+    for name, grund in (("Sitzheizung", "fehlt"), ("Navigationssystem", "defekt"),
                         ("Tempomat", "anders als beschrieben")):
         assert "[X]" not in zeilen[name], zeilen[name]
         assert zeilen[name].startswith("<font size=9 color='#0A0A0A'>[–]"), zeilen[name]
@@ -55,7 +55,7 @@ def test_k5_checklist_texte_sind_nein_mit_grund():
 
 @pytest.mark.parametrize("wert, erwartet", [
     (True, ("ja", "")), (False, ("nein", "")), (None, ("offen", "")), ("", ("offen", "")),
-    ("fehlt", ("nein", "fehlt komplett")), (" Defekt ", ("nein", "vorhanden, defekt")),
+    ("fehlt", ("nein", "fehlt")), (" Defekt ", ("nein", "defekt")),
     ("ANDERS", ("nein", "anders als beschrieben")),
     # alles andere ist NIE "vorhanden" (vorher bool(wert) -> [X])
     ("ja", ("offen", "")), ("irgendwas", ("offen", "")), (1, ("offen", "")), ({}, ("offen", "")),
@@ -86,8 +86,8 @@ def test_k5_echtes_pdf_druckt_fehlende_ausstattung_als_nein():
     text = _pdf_text(pdf)
     for name in ("Sitzheizung", "Navigationssystem", "Tempomat"):
         assert f"[X] {name}" not in text, text
-    assert "[–] Sitzheizung — nein (fehlt komplett)" in text, text
-    assert "[–] Navigationssystem — nein (vorhanden, defekt)" in text, text
+    assert "[–] Sitzheizung — nein (fehlt)" in text, text
+    assert "[–] Navigationssystem — nein (defekt)" in text, text
     assert "[–] Tempomat — nein (anders als beschrieben)" in text, text
     assert "[X] Klimaanlage" in text, text
     assert "[–] Alufelgen — nein" in text, text

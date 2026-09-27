@@ -55,8 +55,9 @@ const Section = ({ n, title, children, hint }) => (
 // Preisvorschlag, Abschnitt 5 und Nutzlast: siehe ./protokollEntwurf.js
 // (Rollenprüfung 22.09.2026, RP-060/RP-067). Der frühere Einzel-Haken für
 // Abschnitt 5 ist durch JaNein ersetzt.
-// Umbau KI 26.09.2026: Art eines „Nein“ bei der Ausstattung (dieselben Texte
-// druckt pickup_pdf_service.NEIN_GRUENDE ins Abholprotokoll).
+// Umbau KI 26.09.2026: Art eines „Nein“ bei der Ausstattung. Das
+// Abholprotokoll druckt seit 28.09.2026 die Kurzform hinter dem „nein“
+// (pickup_pdf_service.NEIN_GRUENDE: fehlt / defekt / anders als beschrieben).
 const AUSSTATTUNG_NEIN = {
   fehlt: "fehlt komplett",
   defekt: "vorhanden, defekt",

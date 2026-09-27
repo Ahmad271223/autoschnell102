@@ -763,11 +763,76 @@ def empfang_kaestchen_leeren(contract: dict) -> dict:
     oder aus dem Inserat uebernommene Schluesselanzahl) und stand dann
     angekreuzt im gedruckten Vertrag — "KFZ mit 2 Schluessel(n) erhalten",
     bevor irgendetwas uebergeben war. Angekreuzt wird von Hand bei der
-    Uebergabe. Neue Fassungen eines bestehenden Vertrags laufen nicht hier
-    durch und behalten ihren Stand."""
+    Uebergabe. Neue Fassungen eines bestehenden Vertrags laufen seit
+    28.09.2026 ebenfalls hier durch, solange die Uebergabe noch nicht
+    stattgefunden hat (regenerate_contract_for_pickup, uebergabe_erfolgt)."""
     for feld in EMPFANG_KAESTCHEN:
         contract[feld] = False
     return contract
+
+
+def empfang_kaestchen_gesetzt(contract: dict) -> list:
+    """Die angekreuzten Empfangs-Kaestchen eines Vertragsstands (Feldnamen)."""
+    from vertrag_felder import als_wahrheitswert
+    return [f for f in EMPFANG_KAESTCHEN if als_wahrheitswert((contract or {}).get(f))]
+
+
+#: Pruefer-Restpunkt 28.09.2026: Vermerk am Vertrag, wenn automatisch gesetzte
+#: Empfangs-Kaestchen nachtraeglich geleert wurden (Migration 21 bzw. neue
+#: Fassung vor der Uebergabe).
+EMPFANG_GELEERT_HINWEIS = ("Empfangs-Kaestchen waren automatisch angekreuzt (Schluesselanzahl "
+                           "eingetippt oder aus dem Inserat) und wurden geleert — "
+                           "angekreuzt wird von Hand bei der Uebergabe.")
+
+
+def empfang_geleert_vermerk(felder: list, quelle: str) -> dict:
+    return {"am": now_iso(), "quelle": quelle, "felder": list(felder),
+            "hinweis": EMPFANG_GELEERT_HINWEIS}
+
+
+async def uebergabe_erfolgt(datenbank, doc: dict) -> bool:
+    """Pruefer-Restpunkt 28.09.2026: Hat die Uebergabe zu diesem Vertrag schon
+    stattgefunden? Die Anwendung setzt die Empfangs-Kaestchen bei der
+    Uebergabe NIE selbst (angekreuzt wird von Hand auf dem Papier) — ein
+    Vertrag nach der Uebergabe bleibt trotzdem, wie er ist: die Fassung, die
+    beide Seiten bei der Uebergabe in der Hand hatten, wird nicht
+    nachtraeglich umgeschrieben. Uebergabe heisst hier:
+      * Vertrag traegt schon eine Fassung nach der Abholung
+        (nach_abholung_protokoll_id / vertrag_vor_abholung),
+      * ein Termin zum Vertrag ist abgeholt/erledigt,
+      * ein finales Abholprotokoll zum Vertrag (oder zu einem seiner Termine),
+      * der Kaufvorgang zum Vertrag steht auf "abgeholt".
+    Im Zweifel (Datenbankfehler) True — dann bleibt der Vertrag unberuehrt."""
+    if not doc or not doc.get("id"):
+        return True
+    if doc.get("nach_abholung_protokoll_id") or isinstance(doc.get("vertrag_vor_abholung"), dict):
+        return True
+    from routes.appointments import AUSGANG_ABGEHOLT
+    cid, dealer_id = doc["id"], doc.get("dealer_id")
+    try:
+        termin_ids = []
+        async for t in datenbank.appointments.find(
+                {"contract_id": cid, "dealer_id": dealer_id},
+                {"_id": 0, "id": 1, "status": 1}):
+            if t.get("status") in AUSGANG_ABGEHOLT:
+                return True
+            if t.get("id"):
+                termin_ids.append(t["id"])
+        oder = [{"contract_id": cid}]
+        if termin_ids:
+            # Ein Protokoll, das ausdruecklich an einem ANDEREN Vertrag haengt, zaehlt nicht.
+            oder.append({"appointment_id": {"$in": termin_ids},
+                         "contract_id": {"$in": [None, cid]}})
+        if await datenbank.pickup_protocols.count_documents(
+                {"status": "final", "superseded": {"$ne": True}, "$or": oder}, limit=1):
+            return True
+        if await datenbank.kaufvorgaenge.count_documents(
+                {"contract_id": cid, "dealer_id": dealer_id, "status": "abgeholt"}, limit=1):
+            return True
+    except Exception:  # noqa: BLE001 — im Zweifel nichts anfassen
+        log.exception("Uebergabe zu Vertrag %s nicht pruefbar", cid)
+        return True
+    return False
 
 
 # Gesperrt bleibt NUR, was schon immer gesperrt war (Runde 17, Nr. 270):
@@ -3484,6 +3549,18 @@ async def regenerate_contract_for_pickup(
                 contract_dict.pop(feld, None)
     else:
         contract_dict = dict(cd_aktuell)
+    # Pruefer-Restpunkt 28.09.2026: Vertraege vom 24.-27.09. tragen ein
+    # automatisch gesetztes Kreuz (Schluesselanzahl eingetippt oder aus dem
+    # Inserat). Die neue Fassung VOR der Uebergabe (Termin verschoben,
+    # Verkaeufer korrigiert) uebernahm es aus contract_data — jetzt wie beim
+    # Anlegen leer. Nach der Uebergabe (und bei der Abholung selbst) bleibt
+    # der Stand, siehe uebergabe_erfolgt.
+    empfang_geleert: list = []
+    if not abholung and basis is None:
+        gesetzt = empfang_kaestchen_gesetzt(contract_dict)
+        if gesetzt and not await uebergabe_erfolgt(db, doc):
+            empfang_kaestchen_leeren(contract_dict)
+            empfang_geleert = gesetzt
     alt_preis = contract_dict.get("purchase_price")
     sonder = (sondervereinbarung or "").strip()
     preis_neu = neuer_preis is not None and (
@@ -3601,6 +3678,10 @@ async def regenerate_contract_for_pickup(
             pass
     elif preis_neu:
         kopf["purchase_price"] = float(neuer_preis)
+    if empfang_geleert:
+        # Vermerk am Vertrag (wie Migration 21): welche Kaestchen geleert wurden.
+        kopf["empfang_kaestchen_geleert"] = empfang_geleert_vermerk(
+            empfang_geleert, f"neue_fassung:{grund}")
     if abholung and not isinstance(doc.get("vertrag_vor_abholung"), dict):
         # RP-479: Stand vor der (ersten) Abholung festhalten — Grundlage jeder
         # weiteren Neuerzeugung fuer eine Abholung.

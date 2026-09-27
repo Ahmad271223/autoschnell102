@@ -347,11 +347,17 @@ def _check_table(rows: List[List], col_widths: List[float]) -> Table:
 #: Startpruefung 27.09.2026 (K5): Seit dem KI-Umbau speichert die Fahrer-App
 #: jedes "Nein" bei der Ausstattung als Text mit Grund (routes/protocols.py,
 #: ProtocolIn.features). Der Grund steht im PDF hinter dem "nein".
+#: Pruefer-Restpunkt 28.09.2026: kurz und ohne Widerspruch — vorher stand
+#: "nein (vorhanden, defekt)" im Protokoll, also "nein" UND "vorhanden" in
+#: einer Zeile. Die Fahrer-App behaelt ihre ausfuehrlichen Knopftexte.
 NEIN_GRUENDE = {
-    "fehlt": "fehlt komplett",
-    "defekt": "vorhanden, defekt",
+    "fehlt": "fehlt",
+    "defekt": "defekt",
     "anders": "anders als beschrieben",
 }
+
+#: Legende ueber Dokumenten und Ausstattung im ausgefuellten Protokoll.
+CHECK_LEGENDE = " [X] = ja / vorhanden, [–] = nein / fehlt / defekt / anders."
 
 
 def _checkwert(wert) -> tuple:
@@ -388,7 +394,8 @@ def _checklist(items: List[tuple], st, col_count: int = 2,
     als "nicht beantwortet" — im unterschriebenen PDF sahen beide gleich aus
     ("[  ]"). Jetzt: True "[X]", False "[–] … nein", fehlend "[  ]".
     Startpruefung 27.09.2026 (K5): "fehlt"/"defekt"/"anders" sind ein Nein mit
-    Grund ("[–] … nein (fehlt komplett)"), siehe _checkwert."""
+    Grund ("[–] … nein (fehlt)", "… nein (defekt)", "… nein (anders als
+    beschrieben)"), siehe _checkwert."""
     cells = []
     for item in items:
         label, note = (item if isinstance(item, tuple) else (item, ""))
@@ -1060,7 +1067,7 @@ def _build_pickup_pdf(
     story.append(Paragraph(
         "Vor Ort beim Verkäufer einsammeln und abhaken."
         # Rollenprüfung 22.09.2026 (RP-068/167): Legende im ausgefuellten Protokoll
-        + (" [X] = ja / vorhanden, [–] = nein / fehlt." if filled else ""), st["small"]))
+        + (CHECK_LEGENDE if filled else ""), st["small"]))
     story.append(Spacer(1, 0.2 * cm))
 
     docs_items = [

@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger("autohandel.migrationen")
 
-ZIEL_VERSION = 20
+ZIEL_VERSION = 21
 _SPERRE = "migration"
 
 
@@ -780,6 +780,59 @@ async def m20_markt_land_alarme_schliessen(db) -> dict:
     return z
 
 
+#: Pruefer-Restpunkt 28.09.2026: ab hier fragte der Vertragsdialog die
+#: Empfangs-Kaestchen nicht mehr ab (Kreuze kamen nur noch automatisch).
+#: 24.09.2026 00:00 Uhr deutscher Zeit = 23.09.2026 22:00 UTC (created_at ist UTC).
+EMPFANG_AUTOMATIK_AB = "2026-09-23T22:00"
+_M21_BEISPIELE_MAX = 200
+
+
+async def m21_empfang_kaestchen_leeren(db) -> dict:
+    """Pruefer-Restpunkt 28.09.2026 (Nachtrag zu K4): Vertraege vom 24. bis
+    27.09.2026 tragen ein automatisch gesetztes Empfangs-Kreuz (meist
+    empfang_schluessel=True, weil eine Schluesselanzahl eingetippt oder aus
+    dem Inserat uebernommen wurde). empfang_kaestchen_leeren griff nur beim
+    Anlegen und in der Vorschau — jede neue Fassung uebernahm das Kreuz aus
+    contract_data.
+
+    Einmalig: fuer Vertraege ab 24.09.2026, deren Uebergabe noch NICHT
+    stattgefunden hat (routes.contracts.uebergabe_erfolgt), werden die
+    Kaestchen in contract_data auf False gesetzt; der Vertrag bekommt den
+    Vermerk empfang_kaestchen_geleert (wann, welche Felder). Das gespeicherte
+    PDF bleibt unveraendert (Archiv = was verschickt wurde); die naechste neue
+    Fassung druckt die Kaestchen leer. Vertraege nach der Uebergabe bleiben,
+    wie sie sind. Idempotent (danach ist kein Kaestchen mehr gesetzt)."""
+    from routes.contracts import (EMPFANG_KAESTCHEN, empfang_geleert_vermerk,
+                                  empfang_kaestchen_gesetzt, uebergabe_erfolgt)
+    z = {"geprueft": 0, "geleert": 0, "nach_uebergabe": 0, "vertraege": []}
+    gesetzt_filter = [{f"contract_data.{f}": {"$in": [True, "True", "true", 1]}}
+                      for f in EMPFANG_KAESTCHEN]
+    async for doc in db.generated_pdfs.find(
+            {"created_at": {"$gte": EMPFANG_AUTOMATIK_AB}, "$or": gesetzt_filter},
+            {"_id": 0, "id": 1, "dealer_id": 1, "version": 1, "contract_data": 1,
+             "nach_abholung_protokoll_id": 1, "vertrag_vor_abholung": 1}):
+        z["geprueft"] += 1
+        felder = empfang_kaestchen_gesetzt(doc.get("contract_data") or {})
+        if not felder:
+            continue
+        if await uebergabe_erfolgt(db, doc):
+            z["nach_uebergabe"] += 1
+            continue
+        r = await db.generated_pdfs.update_one(
+            # Compare-and-Set: nur, solange niemand eine neue Fassung geschrieben hat
+            {"id": doc["id"], "version": doc.get("version"), "$or": gesetzt_filter},
+            {"$set": {**{f"contract_data.{f}": False for f in EMPFANG_KAESTCHEN},
+                      "empfang_kaestchen_geleert": empfang_geleert_vermerk(
+                          felder, "migration_21")}})
+        if r.modified_count:
+            z["geleert"] += 1
+            if len(z["vertraege"]) < _M21_BEISPIELE_MAX:
+                z["vertraege"].append(doc["id"])
+    log.info("Migration 21 (Empfangs-Kaestchen): geprueft=%s geleert=%s nach_uebergabe=%s",
+             z["geprueft"], z["geleert"], z["nach_uebergabe"])
+    return z
+
+
 MIGRATIONEN = [
     (1, "abos_normalisieren", m1_abos_normalisieren),
     (2, "lifecycle_nachziehen", m2_lifecycle),
@@ -809,6 +862,8 @@ MIGRATIONEN = [
     (19, "markt_tagesbasis", m19_markt_tagesbasis),
     # Live-Befund 27.09.2026: Alarme aus dem Land-Fehler (country "GERMANY" -> "GE") einmalig schliessen
     (20, "markt_land_alarme_schliessen", m20_markt_land_alarme_schliessen),
+    # Pruefer-Restpunkt 28.09.2026: automatische Empfangs-Kreuze (24.-27.09.) vor der Uebergabe leeren
+    (21, "empfang_kaestchen_leeren", m21_empfang_kaestchen_leeren),
 ]
 
 
