@@ -3769,3 +3769,70 @@ Einschalten von `MARKT_CHANCEN_AKTIV`: die Firmen sähen dann Privatangebote (oh
 - **Kosten (nur Abrufe):** 4.068 Segmente × 1/Tag, 5 Zeilen + Puffer 2 = 7 abgerufen ≈ **668 $/Monat** (+ 9 $
   Entfernungsprüfung); mit Puffer 1 ≈ 581 $, ohne Puffer ≈ 495 $. Bei 500 $ Budget drosselt der Tagesplan automatisch
   (≈ 74 % der Segmente je Tag). Berichte/Auswertungen: 0 $.
+
+**Master-Auftrag Marktanalyse Phase D–E (Ahmad 27.09.2026; Commits 84efe4d (D), e6e7c1d (E), Prüfrunden 8831f7c,
+789e3a6, bd1905a, 6ed86e0, d2d66db):**
+- **Keine Migration, keine neue Umgebungsvariable, kein neuer Container.** Neue Sammlungen (`market_hot_deals`,
+  `market_hot_deal_events`, `market_model_reports`) und ihre Indizes entstehen beim Start (`indizes.markt_indizes`).
+  Der neue Hintergrundjob `markt_auswertung` läuft im Backend-Prozess mit (Worker-Status in der Systemübersicht,
+  Betriebsalarm `markt_auswertung_fehler` bei Fehlern), alle 5 Minuten, beide Server sicher (Sperre `markt-auswertung`).
+  Er rechnet **nur aus gespeicherten Tageswerten — nie ein Abruf, 0 $**.
+- **Phase D — Hot Deals** (Admin → Marktanalyse → Hot Deals, nur Super-Admin): auffällig günstiges Inserat gegenüber
+  dem 30-Tage-Median desselben Segments (gleiche Fassung, nur GOOD/MEDIUM, Basis mindestens 7 Tage und 5 Inserate).
+  Klassen DEAL ab 5 %, STRONG ab 8 %, EXTREME ab 12 %, jeweils plus Mindestbetrag 400/600/750 €. Zustand je Inserat
+  (aktiv/verlassen/entfernt) getrennt vom Verlauf (nur Einfügen). „Nicht mehr in der Stichprobe“ heißt **nicht**
+  verkauft. Ein Tag, dessen Auswertung 6-mal **und** über mindestens 6 Stunden scheitert (nur wenn andere Segmente im
+  selben Durchlauf klappen), wird aufgegeben und steht als Hinweis im Bericht.
+- **Phase E — Berichte 5/15/Monat** (Admin → Marktanalyse → Berichte): Perioden 01–05 … 26–Monatsende, 01–15 und
+  16–Monatsende, ganzer Monat (Europe/Berlin). **Eingefroren** 6 h nach Periodenende (bei offener Hot-Deal-Auswertung
+  bis zu 24 h später, dann mit Hinweis); ein eingefrorener Bericht wird nie geändert. Die laufende Periode ist
+  **vorläufig** (live). Knopf „Berichte jetzt erstellen“ (Super-Admin) holt fällige Perioden sofort nach (62 Tage).
+- **Wie gerechnet wird (Schema 4, Runden 3–4b c878e4d/1822fd8):** Kennzahlen nur aus GOOD/MEDIUM, nie Fassungen
+  gemischt, keine Interpolation. Neues **Tagesplan-Protokoll** je Kalendertag (`market_tagesplan_log`, Unique je Tag,
+  geschrieben vom Tagesplan und vom Worker, wenn der Crawler bewusst aus ist): Ein Segment-Tag **ohne** Abruf-Job gilt
+  nur dann als **nicht geplant** (Budget-Drosselung, Crawler bewusst aus, später SAFE_AUTO), wenn der Tagesplan an dem
+  Tag nachweislich lief. Lief er nicht (Token fehlt, ganztägige Wartung, Absturz, beide Server aus), ist der Tag eine
+  **sichtbare Lücke** („Tagesplan lief nicht“). Budget vor oder nach dem Plan erschöpft zählt einheitlich als „nicht
+  geplant wegen Budget“. Der Korbwert rechnet über die an zwei Tagen gemeinsamen Segmente weiter. Ein Anker-Tag braucht
+  95 % Korbgewicht, auch am Serienanfang (neuer Auftrag, neue Fassung, Wieder-Einschalten) und am Serienende (Pause
+  unter Budget-Drosselung). Sonst bleibt der Wert leer (mit Hinweis) statt geschätzt. Confidence HIGH erst ab 3 gültigen
+  Tagen und 50 % der Kalendertage, MEDIUM ab 2 Tagen. Ältere Berichte (Schema 1–3) zeigen „nach älterer Rechenregel“.
+- **Taktung höchstens alle 14 Tage je Segment:** `MARKT_CRAWL_INTERVALL_TAGE` ist auf 14 begrenzt. Reicht das Budget
+  nicht einmal dafür, bleibt das automatische Intervall ehrlich länger (das Budget reicht so bis Monatsende), und
+  Admin → Marktanalyse zeigt in der Taktungs-Kachel eine Warnung „Budget reicht nicht“. Werte, die älter als 14 Tage
+  sind, fehlen dann in den Berichten (Euro-Niveau leer, mit Hinweis). Bei 500 $ Budget und der Masterliste sind es
+  etwa 2 Tage — weit darunter.
+- **Erster Einfrier-Termin:** Am **1.10.2026** um ca. 6 Uhr friert der erste Bericht ein (5 Tage 26.–30.09. und
+  16.–30.09., Monat September). Bis dahin muss dieser Stand live sein.
+
+**Marktdaten für Firmen erst nach Freischaltung (Wunsch Ahmad 27.09.2026; Commits 903a55a, 5d1cd39):**
+- Chef, Sucher und Fahrer sehen **keine** Marktdaten, bis der Super-Admin sie freischaltet: Admin → Marktanalyse →
+  Knopf **„Für Firmen freischalten“** (Kachel „Für Firmen sichtbar: nein — nur Admin“). Standard **aus**
+  (`market_config/sichtbarkeit`). Bei einer Störung beim Lesen des Schalters bleibt es ausgeblendet.
+- Betroffen: Marktdaten-Karte im Vergleich, Hinweis im Vertragsdialog, Chancen-Seite, `/markt/karte` (404
+  „Keine Marktdaten“), `/features` (`marktdaten`, `markt_chancen`) und die KI-Zeile „Marktbeobachtung“ in
+  Schadennachlass/Abholbewertung. Die KI **rechnet intern weiter** mit der Beobachtung, zeigt die Werte nur nicht an.
+  Die Admin-Marktanalyse ist nicht betroffen. Umschalten wird protokolliert.
+- **Leer-Alarm `markt_lauf_leer` verfeinert:** meldet nur noch, wenn mindestens 2 Segmente, die in den letzten
+  7 Tagen Treffer hatten, zusammen mindestens 3 Zeilen verloren haben. Neue oder dauerhaft leere Kombinationen
+  (z. B. Astra 1.2 Turbo Automatik EZ 2020/21) lösen keinen Alarm mehr aus. Die zwei offenen Alarme vom 27.09. waren
+  echte Marktlücken und können quittiert werden.
+
+**Master-Auftrag Marktanalyse Phase F–G (Ahmad 27.09.2026; Commits 0f37cee (F), 98227a2 (G), Prüfrunden ff54d68, 513c222):**
+- **Keine Migration, keine neue Umgebungsvariable.** Neue Sammlungen `market_segment_health`,
+  `market_segment_health_history`, `market_model_health`, `market_optimization_proposals`,
+  `market_optimization_changes`; Indizes entstehen beim Start. Rechnet nur aus gespeicherten Tageswerten (0 $), einmal
+  täglich nach dem Crawl-Fenster im Auswertungs-Worker; Knopf „Health jetzt berechnen“ (Super-Admin) setzt den
+  Tagesmerker des automatischen Laufs nicht.
+- **Phase F — Segment-Health** (Admin → Marktanalyse → Segment-Optimierung, Badge auf der Modellseite nur für die
+  aktuelle Fassung): je Segment HOT/HEALTHY/NORMAL/THIN/EMPTY/UNSTABLE/STALE/UNKNOWN über 30 Tage, Score, Confidence.
+  **Vorschläge** (Frequenz senken, EMPTY pausieren, HOT zuerst, Zusammenlegen, Aufteilen) mit geschätzter Wirkung.
+  Ist das Budget die Grenze (Drosselung aktiv), steht dort „Läufe frei für andere Segmente“ statt Dollar-Ersparnis.
+  Listen mit Filter, Seiten und „x von y“.
+- **Phase G — SAFE_AUTO:** Modus-Schalter auf derselben Seite. **Standard bleibt OBSERVE** (nur Vorschläge, keine
+  Wirkung). SAFE_AUTO wendet nur Senkungen an (Frequenz senken, EMPTY pausieren mit Nachprüfung, HOT zuerst ohne
+  Mehrkosten), ab Confidence MEDIUM. Eine angewendete Wirkung bleibt, bis die Daten ihr widersprechen. Ablehnen oder
+  Zurücknehmen gilt dauerhaft für dieses Segment und diese Art (auch über neue Fassungen), bis der Super-Admin
+  „Ablehnung aufheben“ drückt. Zusammenlegen/Aufteilen nur per „Übernehmen“ durch den Super-Admin (neue Fassung).
+- **Einschalten frühestens**, wenn die aktiven Aufträge mindestens 14 Tage gültige Läufe haben — vorher sind die
+  Vorschläge nicht MEDIUM und SAFE_AUTO tut nichts.
