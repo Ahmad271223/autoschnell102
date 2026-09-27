@@ -123,16 +123,17 @@ def test_p04_p09_leere_felder_brechen_den_vertrag_nicht():
 @pytest.mark.parametrize("wert, zeile", [(None, False), (True, True), (False, True)])
 def test_s01_zustandszeilen_nur_bei_echter_angabe(wert, zeile):
     from pdf_service import generate_contract_pdf
-    # Seit 27.09.2026 (Go-Live-Pruefung K7) nur, wenn der Dialogwert dazu
-    # passt — hier passend gesetzt; Abweichung/leer: test_inserat_vorbelegung_20260927.
+    # Seit 28.09.2026 (Entscheidung Auftraggeber) nur die NEGATIVE
+    # Offenlegung: Unfallschaden True / fahrbereit False — Einzelfaelle:
+    # test_inserat_vorbelegung_20260927, test_inserat_verneinung_20260928.
     roh = generate_contract_pdf(
         dealer={"company_name": "Autohaus Test"},
         vehicle={"make_label": "BMW", "accident_damaged": wert, "roadworthy": wert},
         contract=_vertrag(accident_free="Nein" if wert else "Ja",
                           drivable="Ja" if wert else "Nein"))
     text = _text(roh)
-    assert ("Unfallschaden (Inserat)" in text) is zeile
-    assert ("Fahrbereit (Inserat)" in text) is zeile
+    assert ("Unfallschaden (Inserat)" in text) is (zeile and wert is True)
+    assert ("Fahrbereit (Inserat)" in text) is (zeile and wert is False)
 
 
 def _png(bild) -> bytes:

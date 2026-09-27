@@ -16,10 +16,13 @@ korrigiert ihn im Vertragsdialog wie jeden anderen Wert.
 Go-Live-Pruefung 27.09.2026 (K1/K2/K6/K7): Die Vorbelegung darf dem
 Verkaeufer NIE eine Zusicherung unterschieben, die das Inserat nicht klar
 hergibt.
-  * Verneinungen im Umkreis (bis 4 Woerter davor, im selben Satzteil):
-    "nicht mehr unfallfrei", "war nie unfallfrei", "nicht lueckenlos
-    scheckheftgepflegt" -> "Nein" bzw. nichts; "bedingt/eingeschraenkt
-    fahrbereit" oder "Unfallfrei? ..." ohne klare Antwort -> nichts.
+  * Verneinungen AM Stichwort (Nachpruefung 28.09.2026: unmittelbar davor
+    oder nur durch Fuellwoerter getrennt): "nicht mehr unfallfrei", "war nie
+    unfallfrei", "nicht lueckenlos scheckheftgepflegt" -> "Nein" bzw.
+    nichts. Gehoert die Verneinung zu einem anderen Wort ("keine Maengel
+    unfallfrei", "ohne Rost unfallfrei"), zaehlt sie nicht. "bedingt/
+    eingeschraenkt fahrbereit" oder "Unfallfrei? ..." ohne klare Antwort
+    -> nichts.
   * "Ja" aus dem Freitext nur ohne jeden Widerspruch im Text (ein
     Hagelschaden neben "kein Unfallschaden" ist strittig -> nichts).
   * Portalfelder (accident_damaged=False, "Unbeschaedigtes Fahrzeug",
@@ -74,7 +77,24 @@ def _heute_berlin() -> date:
 # fahrbereit" — das "nicht" gehoert zur Klima, nicht zu "fahrbereit".
 _GRENZE = re.compile(r"[.!?;,:()\[\]\n–—/]|\s-\s"
                      r"|\b(?:aber|jedoch|sondern|doch|trotzdem|dennoch|und|sowie|oder|bzw)\b")
-_HART = re.compile(r"\b(?:nicht|nie|niemals|nimmer|kein\w*|ohne|nein)\b")
+_HART_WORT = re.compile(r"(?:nicht|nie|niemals|nimmer|kein(?:e|en|em|er|es)?|ohne|nein)")
+# Nachpruefung 28.09.2026 (inserat2, Nr. 1): Eine Verneinung gilt nur fuer das
+# Stichwort, wenn zwischen ihr und dem Stichwort hoechstens Fuellwoerter
+# stehen ("nicht mehr ganz unfallfrei", "nicht zu 100 % unfallfrei"). Ein
+# anderes Inhaltswort dazwischen ("keine Maengel unfallfrei", "ohne Rost
+# unfallfrei", "kein Tausch fahrbereit") heisst: die Verneinung gehoert zu
+# DIESEM Wort, nicht zum Stichwort.
+_FUELL_WORT = re.compile(
+    r"(?:mehr|ganz|so|sehr|wirklich|komplett|v[öo]e?llig|voll|vollst[äa]e?ndig|g[äa]e?nzlich|total|absolut"
+    r"|richtig|unbedingt|immer|leider|zu|100|100%|%|prozent|hundertprozentig|100-?prozentig|durchgehend"
+    r"|l[üu]e?ckenlos|einwandfrei|ist|war|sind|waren|es|er|sie|das|der|die|den|dem|des"
+    r"|ein|eine|einen|einem|einer|eines|jemals)")
+# Nur vor Nomen-Stichwoertern (Unfall, Schaden, HU): Beiwoerter der
+# Verneinung ("kein groesserer Unfallschaden", "ohne nennenswerte Unfaelle").
+_NP_BEIWORT = re.compile(
+    r"(?:gr[öo]e?(?:ß|ss)|nennenswert|bekannt|schwer|klein|erheblich|sichtbar|weiter|sonstig|ander"
+    r"|relevant|gravierend|leicht|echt|wesentlich|richtig|dokumentiert|gemeldet)"
+    r"(?:er)?(?:e|en|er|es|em)?")                      # auch Steigerung: "groesserer"
 _WEICH = re.compile(r"\b(?:bedingt|eingeschr[äa]e?nkt\w*|teilweise|teils|fast|nahezu|weitgehend"
                     r"|weitestgehend|eher|angeblich|vermutlich|wahrscheinlich|laut|soweit|eventuell"
                     r"|evtl|vielleicht|m[öo]e?glicherweise|halbwegs|kaum|bedingungsweise|einigerma[ßs]+en)\b")
@@ -82,7 +102,10 @@ _WEICH = re.compile(r"\b(?:bedingt|eingeschr[äa]e?nkt\w*|teilweise|teils|fast|n
 _NACH_NEIN = re.compile(r"\s*[:?!(\-–]?\s*(?:leider\s+|eher\s+|definitiv\s+|nat[üu]e?rlich\s+)?"
                         r"(?:nein|no)\b|\s*:\s*keine?r?s?\b")
 _NACH_JA = re.compile(r"\s*[:?!(\-–]?\s*(?:ja|yes|jawohl)\b")
-_NACH_NICHT = re.compile(r"\s*[:?!(\-–]?\s*(?:leider\s+)?(?:nicht|nie)\b")
+_NACH_NICHT = re.compile(r"\s*[:?!(\-–]?\s*(?:leider\s+)?(?:nicht|nie)\b"
+                         # "unfallfrei ist er (leider) nicht" — nachgestellte Verneinung
+                         r"|\s+(?:ist|war)\s+(?:es\s+|er\s+|sie\s+|das\s+auto\s+|der\s+wagen\s+"
+                         r"|das\s+fahrzeug\s+)?(?:leider\s+)?(?:nicht|nie|keine?s?)\b")
 _NACH_WEICH = re.compile(r"\s*[:?!(\-–,]?\s*(?:nur\s+)?(?:bedingt|eingeschr|mit\s+einschr|teilweise"
                          r"|laut\s|angeblich|soweit|vermutlich|unter\s+vorbehalt)")
 
@@ -102,15 +125,42 @@ def _nachher(t: str, ende: int) -> str:
     return stueck[:m.start()] if m else stueck
 
 
-def _art(t: str, m: "re.Match", positiv: bool = True) -> str:
+_ZEICHEN_RAND = "\"'„“”‚‘’»«*·•"
+
+
+def _verneint(vor: str, nomen: bool = False) -> bool:
+    """Bezieht sich eine Verneinung vor dem Stichwort auf das Stichwort?
+    Rueckwaerts vom Stichwort: Fuellwoerter (und vor Nomen hoechstens zwei
+    Beiwoerter wie "groesserer") ueberspringen; die erste harte Verneinung
+    zaehlt, jedes andere Wort beendet die Suche ("keine Maengel unfallfrei":
+    "maengel" -> die Verneinung gehoert nicht zu "unfallfrei").
+    "nicht nur unfallfrei" -> "nur" ist kein Fuellwort -> keine Verneinung."""
+    worte = [w.strip(_ZEICHEN_RAND) for w in vor.split()]
+    beiwoerter = 0
+    for w in reversed([w for w in worte if w]):
+        if _HART_WORT.fullmatch(w):
+            return True
+        if _FUELL_WORT.fullmatch(w):
+            continue
+        if nomen and beiwoerter < 2 and _NP_BEIWORT.fullmatch(w):
+            beiwoerter += 1
+            continue
+        return False
+    return False
+
+
+def _art(t: str, m: "re.Match", positiv: bool = True, nomen: bool = False) -> str:
     """Wie steht das Stichwort da? "ja" (bejaht), "nein" (verneint) oder
     "unklar" (eingeschraenkt/unsicher). positiv=True fuer Zusicherungs-
     Stichwoerter ("unfallfrei", "fahrbereit", "lueckenlos"): dort macht auch
-    ein "nicht" direkt danach oder eine offene Frage die Stelle unklar."""
+    ein "nicht" direkt danach oder eine offene Frage die Stelle unklar.
+    nomen=True fuer Nomen-Stichwoerter (Unfall, Schaden, HU): dort darf
+    zwischen "kein/ohne" und dem Stichwort ein Beiwort stehen."""
     vor = _vorher(t, m.start())
-    vor_ohne = re.sub(r"\bnicht\s+nur\b", " ", vor)       # "nicht nur unfallfrei, sondern ..."
     nach = _nachher(t, m.end())
-    if _HART.search(vor_ohne):
+    # Nachpruefung 28.09.2026 (inserat2, Nr. 1): nur eine Verneinung, die
+    # sich auf das Stichwort bezieht — nicht jede im Umkreis von 4 Woertern.
+    if _verneint(_vorher(t, m.start(), woerter=8), nomen):
         return "nein"
     if _WEICH.search(vor):
         return "unklar"
@@ -126,8 +176,8 @@ def _art(t: str, m: "re.Match", positiv: bool = True) -> str:
     return "ja"
 
 
-def _stellen(t: str, muster: str, positiv: bool) -> List[Tuple["re.Match", str]]:
-    return [(m, _art(t, m, positiv)) for m in re.finditer(muster, t)]
+def _stellen(t: str, muster: str, positiv: bool, nomen: bool = False) -> List[Tuple["re.Match", str]]:
+    return [(m, _art(t, m, positiv, nomen)) for m in re.finditer(muster, t)]
 
 
 # ------------------------------------------------ einzelne Regeln
@@ -157,10 +207,17 @@ def schluessel(v: dict, text: str) -> Optional[Dict[str, Any]]:
 _HU_WORT = r"(?:hu|t[üu]e?v|hauptuntersuchung)"
 # "keine HU", "ohne TUEV", "abgelaufener TUEV", "HU abgelaufen",
 # "TUEV/AU 05/2026 abgelaufen", "TUEV seit 05.2026 abgelaufen"
+# Nachpruefung 28.09.2026 (inserat2, Nr. 2): Zwischen HU-Wort und
+# "abgelaufen" nur Datum, AU, "ist/seit/leider" und Satzzeichen ohne Komma —
+# "TUEV 10/2027 Bremsbelaege abgelaufen" betrifft die Bremsbelaege.
+_MONAT = (r"(?:januar|jan|februar|feb|m[äa]e?rz|mrz|april|apr|mai|juni|jun|juli|jul|august|aug"
+          r"|september|sept|sep|oktober|okt|november|nov|dezember|dez)\.?")
+_HU_ZWISCHEN = (r"(?:/|&|:|-|–|\(|\)|au\b|und\s+au\b|\d{1,2}\s*[./-]\s*(?:\d{4}|\d{2})\b|\d{4}\b"
+                r"|" + _MONAT + r"(?=\s|$|[:/)(\-–])|ist\b|war\b|seit\b|leider\b|bereits\b|schon\b)")
 _HU_NEIN = re.compile(
-    r"\b(?:keine?|ohne)\s+(?:g[üu]e?ltige[nrs]?\s+|aktuelle[nrs]?\s+)?" + _HU_WORT + r"\b"
+    r"\b(?:kein(?:e|en)?|ohne)\s+(?:g[üu]e?ltige[nrs]?\s+|aktuelle[nrs]?\s+)?" + _HU_WORT + r"\b"
     r"|\babgelaufene[nrs]?\s+" + _HU_WORT + r"\b"
-    r"|\b" + _HU_WORT + r"\b(?:[^.!?;,\n]|(?<=\d)\.(?=\d)){0,30}?\babgelaufen")
+    r"|\b" + _HU_WORT + r"\b(?:\s*" + _HU_ZWISCHEN + r"){0,8}\s*abgelaufen")
 _HU_DATUM = re.compile(
     r"\b" + _HU_WORT + r"\s*(?:/\s*au|&\s*au|und\s+au)?\s*(?:neu\s*)?(?:ist\s+)?"
     r"(?:bis|:|gültig\s+bis|gueltig\s+bis)?\s*(?:zum\s+)?(\d{1,2})\s*[./-]\s*(\d{4}|\d{2})\b")
@@ -212,7 +269,7 @@ def hu(v: dict, text: str, heute: Optional[date] = None) -> Tuple[Dict[str, Dict
         return raus, hinweise
 
     for m in _HU_DATUM.finditer(t):
-        if _art(t, m, positiv=False) != "ja":
+        if _art(t, m, positiv=False, nomen=True) != "ja":
             continue
         mj = PV.monat_jahr_text(f"{m.group(1)}/{m.group(2)}", "hu")
         if not re.fullmatch(r"\d{2}/\d{4}", mj):
@@ -224,7 +281,7 @@ def hu(v: dict, text: str, heute: Optional[date] = None) -> Tuple[Dict[str, Dict
         raus["hu_until"] = _eintrag(mj, "listing_description", _fund(text, m))
         return raus, hinweise
     for m in _HU_NEU.finditer(t):
-        if _art(t, m, positiv=True) == "ja":
+        if _art(t, m, positiv=True, nomen=True) == "ja":
             raus["hu_valid"] = _eintrag("Ja", "listing_description", _fund(text, m))
             return raus, hinweise
     return raus, hinweise
@@ -297,8 +354,8 @@ def unfall(v: dict, text: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]
     """Liefert (eintrag, hinweis) — hoechstens eins von beiden."""
     t = text.lower()
     frei = _stellen(t, _UNFALLFREI, positiv=True)
-    schaden = _stellen(t, _UNFALL, positiv=False)
-    anders = _stellen(t, _ANDERER_SCHADEN, positiv=False)
+    schaden = _stellen(t, _UNFALL, positiv=False, nomen=True)
+    anders = _stellen(t, _ANDERER_SCHADEN, positiv=False, nomen=True)
     ja = [m for m, a in frei if a == "ja"] + [m for m, a in schaden if a == "nein"]
     nein = [m for m, a in frei if a == "nein"] + [m for m, a in schaden if a == "ja"]
     unklar = [m for m, a in frei + schaden if a == "unklar"]
@@ -356,7 +413,7 @@ def fahrbereit(v: dict, text: str) -> Tuple[Optional[Dict[str, Any]], Optional[s
     t = text.lower()
     bereit = _stellen(t, _FAHRBEREIT, positiv=True)
     untuechtig = _stellen(t, _FAHR_NEIN, positiv=False)
-    anders = _stellen(t, _FAHR_ANDERS, positiv=False)
+    anders = _stellen(t, _FAHR_ANDERS, positiv=False, nomen=True)
     ja = [m for m, a in bereit if a == "ja"] + [m for m, a in untuechtig if a == "nein"]
     nein = [m for m, a in bereit if a == "nein"] + [m for m, a in untuechtig if a == "ja"]
     unklar = [m for m, a in bereit + untuechtig if a == "unklar"]

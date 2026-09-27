@@ -291,19 +291,22 @@ def _ja_nein_oder_nichts(wert) -> str:
     return "—"
 
 
-def _inserat_zustand(inserat, dialog, *, gleich: bool) -> str:
-    """Inseratsangabe fuer den Zusicherungsblock — nur, wenn sie zum Wert im
-    Dialog passt, sonst "—" (Zeile faellt weg).
+def _inserat_zustand(inserat, *, offenlegung: bool) -> str:
+    """Inseratsangabe fuer den Zusicherungsblock — NUR als negative
+    Offenlegung, sonst "—" (Zeile faellt weg).
 
-    gleich=True: Inserat True passt zu "Ja" (fahrbereit <-> Fahrtauglich).
-    gleich=False: Inserat True passt zu "Nein" (Unfallschaden <-> Unfallfrei)."""
-    if not isinstance(inserat, bool):
+    Entscheidung Auftraggeber (28.09.2026): Eine negative Portalangabe
+    ("Unfallschaden: Ja", "Fahrbereit: Nein") schuetzt den Verkaeufer — der
+    Mangel war offengelegt — und steht deshalb IMMER im Vertrag, egal was im
+    Dialog gewaehlt ist. Eine positive Portalangabe ("Unfallschaden: Nein",
+    "Fahrbereit: Ja") ist keine Zusicherung des Verkaeufers, kann dem
+    Dialogwert widersprechen und wird deshalb nie gedruckt.
+
+    offenlegung: der Portalwert, der einen Mangel offenlegt (Unfallschaden:
+    True, fahrbereit: False)."""
+    if not isinstance(inserat, bool) or inserat is not offenlegung:
         return "—"
-    wert = _yn(dialog)
-    if wert not in ("Ja", "Nein"):
-        return "—"
-    passend = "Ja" if inserat is gleich else "Nein"
-    return _ja_nein_oder_nichts(inserat) if wert == passend else "—"
+    return _ja_nein_oder_nichts(inserat)
 
 
 def _ohne_leere(rows):
@@ -1003,10 +1006,11 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         # Dialog dazu PASST — sonst widersprach sich der Abschnitt
         # ("Fahrtauglich: Nein" neben "Fahrbereit (Inserat): Ja"), und der
         # Sucher konnte die Zeile nicht entfernen. Leer im Dialog -> weg.
-        ("Unfallschaden (Inserat)", _inserat_zustand(vehicle.get("accident_damaged"),
-                                                     contract.get("accident_free"), gleich=False)),
-        ("Fahrbereit (Inserat)", _inserat_zustand(vehicle.get("roadworthy"),
-                                                  contract.get("drivable"), gleich=True)),
+        # Entscheidung Auftraggeber 28.09.2026: nur noch die NEGATIVE
+        # Offenlegung des Portals, dann aber immer (schuetzt den Verkaeufer);
+        # positive Portalangaben nie. Gilt fuer jede Neuerzeugung.
+        ("Unfallschaden (Inserat)", _inserat_zustand(vehicle.get("accident_damaged"), offenlegung=True)),
+        ("Fahrbereit (Inserat)", _inserat_zustand(vehicle.get("roadworthy"), offenlegung=False)),
     ]
     zus_rows = _ohne_leere(zus_rows)
     if zus_rows:

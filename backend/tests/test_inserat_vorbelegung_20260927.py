@@ -224,13 +224,15 @@ def test_k2_abgelaufen_muster(text):
     assert werte == {"hu_valid": "Nein"}, (text, erg)
 
 
-# ------------------------------------------------ PDF: keine Widersprueche im Abschnitt
+# ------------------------------------------------ PDF: Portalzeilen
+# Entscheidung Auftraggeber 28.09.2026 (ersetzt "nur passend" vom 27.09.):
+# negative Offenlegung des Portals steht IMMER im Vertrag, positive nie.
 @pytest.mark.parametrize("inserat, dialog, sichtbar", [
-    (False, "Ja", True),        # passt: kein Unfallschaden <-> unfallfrei
-    (True, "Nein", True),       # passt: Unfallschaden <-> nicht unfallfrei
-    (False, "Nein", False),     # Widerspruch -> Zeile weg
-    (True, "Ja", False),
-    (False, "", False),         # im Dialog leer -> Zeile weg
+    (False, "Ja", False),       # positive Portalangabe -> nie
+    (True, "Nein", True),       # Offenlegung Unfallschaden -> immer
+    (False, "Nein", False),
+    (True, "Ja", True),         # Offenlegung bleibt, auch gegen den Dialogwert
+    (False, "", False),
     (None, "Ja", False),        # keine Portalangabe
 ])
 def test_pdf_unfallschaden_inserat_nur_passend(inserat, dialog, sichtbar):
@@ -243,8 +245,8 @@ def test_pdf_unfallschaden_inserat_nur_passend(inserat, dialog, sichtbar):
 
 
 @pytest.mark.parametrize("inserat, dialog, sichtbar", [
-    (True, "Ja", True), (False, "Nein", True),
-    (True, "Nein", False), (False, "Ja", False), (True, "", False), (True, None, False),
+    (True, "Ja", False), (False, "Nein", True),
+    (True, "Nein", False), (False, "Ja", True), (True, "", False), (True, None, False),
 ])
 def test_pdf_fahrbereit_inserat_nur_passend(inserat, dialog, sichtbar):
     from pdf_service import generate_contract_pdf

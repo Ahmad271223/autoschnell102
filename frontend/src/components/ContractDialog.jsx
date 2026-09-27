@@ -10,7 +10,8 @@ import { useAuth } from "@/context/AuthContext";
 import { X, Eye, FileText, Loader2, AlertTriangle, ExternalLink } from "lucide-react";
 import DamageSelector, { damagesToText } from "./DamageSelector";
 import KiSchadenKarte from "./KiSchadenKarte";
-import { ungepruefteUebernahmen, vorschlaegeAnwenden } from "@/lib/kiSchaden";
+import { uebernahmenAusEntwurf, uebernahmenZusammenfuehren, ungepruefteUebernahmen,
+         vorschlaegeAnwenden } from "@/lib/kiSchaden";
 import { fehlendeKaeuferfelder, kaeuferAktualisieren, kaeuferAusProfil } from "@/lib/kaeuferdaten";
 import { kmAusText, preisAusText, preisText } from "@/lib/preis";
 import { openContractPdf } from "@/lib/pdf";
@@ -330,16 +331,29 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
   // Der Idempotenz-Schlüssel kommt mit: ging die Antwort auf "PDF erstellen"
   // verloren, bekommt die Wiederholung denselben Vertrag statt eines zweiten.
   const entwurfGeprueft = useRef(null);
+  // Nachprüfung 28.09.2026 (inserat2, Nr. 3): Übernahmen aus dem Inserat, die
+  // im Entwurf standen — sonst fehlten nach dem Neuöffnen die Rückfrage vor
+  // "PDF erstellen" und der Kasten "Aus dem Inserat übernommen".
+  const uebernommenEntwurf = useRef([]);
+  const vorschlaegeDaten = useRef(null);
+  const [inseratVorschlaege, setInseratVorschlaege] = useState(null);
   useEffect(() => {
     if (!open) { entwurfGeprueft.current = null; return; }
     if (entwurfGeprueft.current === entwurfKey) return;
     entwurfGeprueft.current = entwurfKey;
+    uebernommenEntwurf.current = [];
     const e = entwurfLesen(entwurfKey);
     if (!e) return;
     setForm((f) => ({ ...f, ...e.form }));
     beruehrt.current = { ...(e.beruehrt || {}) };
     bearbeitet.current = true;
     if (e.idempotenz) idempotenz.current = e.idempotenz;
+    const alt = uebernahmenAusEntwurf(e);
+    uebernommenEntwurf.current = alt;
+    if (alt.length) {
+      setInseratVorschlaege((s) => ({ uebernommen: uebernahmenZusammenfuehren(alt, s?.uebernommen),
+                                      hinweise: s?.hinweise || [] }));
+    }
     toast.info("Dein angefangener Kaufvertrag wurde wiederhergestellt.", {
       duration: 12000,
       action: {
@@ -349,7 +363,19 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
           beruehrt.current = {};
           bearbeitet.current = false;
           idempotenz.current = neuerIdempotenzSchluessel();
-          setForm(anfangsFormular(v, dealer, heute));
+          uebernommenEntwurf.current = [];
+          // Frisches Formular — Inserat-Vorschläge wie beim ersten Öffnen
+          // wieder vorbelegen (mit Kasten und Rückfrage).
+          const frisch = anfangsFormular(v, dealer, heute);
+          const daten = vorschlaegeDaten.current;
+          if (daten) {
+            const erg = vorschlaegeAnwenden(frisch, daten, {});
+            setForm(erg.form);
+            setInseratVorschlaege({ uebernommen: erg.uebernommen, hinweise: erg.hinweise });
+          } else {
+            setForm(frisch);
+            setInseratVorschlaege(null);
+          }
         },
       },
     });
@@ -359,12 +385,15 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
   // wenn die Seite in den Hintergrund geht (dort verwirft das Handy sie).
   const formRef = useRef(form);
   formRef.current = form;
+  // Nachprüfung 28.09.2026 (inserat2, Nr. 3): die Übernahmeliste geht mit.
+  const uebernommenRef = useRef([]);
+  uebernommenRef.current = inseratVorschlaege?.uebernommen || [];
   useEffect(() => {
     if (!open) return undefined;
     const sichern = () => {
       if (!bearbeitet.current) return;
       entwurfSpeichern(entwurfKey, { form: formRef.current, beruehrt: beruehrt.current,
-                                     idempotenz: idempotenz.current });
+                                     idempotenz: idempotenz.current, uebernommen: uebernommenRef.current });
     };
     const timer = window.setTimeout(sichern, 800);
     const versteckt = () => { if (document.visibilityState === "hidden") sichern(); };
@@ -375,24 +404,31 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
       document.removeEventListener("visibilitychange", versteckt);
       window.removeEventListener("pagehide", sichern);
     };
-  }, [open, form, entwurfKey]);
+  }, [open, form, entwurfKey, inseratVorschlaege]);
 
   // Stufe 3 KI (Wunsch Ahmad 25.09.2026): eindeutige Angaben aus dem Inserat
   // (Schlüssel, HU, Scheckheft nur bei "lückenlos"/"kein", Unfallfrei …)
   // füllen NUR leere, nicht angefasste Felder — sichtbar mit Fundstelle.
   // Dazu die KI-Schadenbewertung, die der Sucher vor dem Erstellen sah
   // (Steuerfeld ki_bewertung_id für den Lernfall).
-  const [inseratVorschlaege, setInseratVorschlaege] = useState(null);
   const kiBewertungRef = useRef(null);
   const schaedenRef = useRef(null);
   useEffect(() => {
-    if (!open || !vehicleId) { setInseratVorschlaege(null); kiBewertungRef.current = null; return undefined; }
+    if (!open || !vehicleId) {
+      setInseratVorschlaege(null); kiBewertungRef.current = null; vorschlaegeDaten.current = null;
+      return undefined;
+    }
     let aktiv = true;
     api.get(`/contracts/vorschlaege/${vehicleId}`)
       .then((r) => {
         if (!aktiv || !r?.data) return;
+        vorschlaegeDaten.current = r.data;
         const erg = vorschlaegeAnwenden(formRef.current, r.data, beruehrt.current);
-        setInseratVorschlaege({ uebernommen: erg.uebernommen, hinweise: erg.hinweise });
+        // Nachprüfung 28.09.2026 (inserat2, Nr. 3): Übernahmen aus dem
+        // wiederhergestellten Entwurf bleiben stehen (die Felder sind dort
+        // schon gefüllt, vorschlaegeAnwenden findet sie nicht mehr).
+        setInseratVorschlaege({ uebernommen: uebernahmenZusammenfuehren(uebernommenEntwurf.current, erg.uebernommen),
+                                hinweise: erg.hinweise });
         if (erg.uebernommen.length) {
           setForm((f) => vorschlaegeAnwenden(f, r.data, beruehrt.current).form);
         }
@@ -641,7 +677,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
         idempotenz.current = neuerIdempotenzSchluessel();
         if (bearbeitet.current) {
           entwurfSpeichern(entwurfKey, { form: formRef.current, beruehrt: beruehrt.current,
-                                         idempotenz: idempotenz.current });
+                                         idempotenz: idempotenz.current, uebernommen: uebernommenRef.current });
         }
         if (!window.confirm(idempotenzKonfliktFrage(d))) {
           const preis = Number(d?.purchase_price);

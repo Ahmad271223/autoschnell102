@@ -272,6 +272,25 @@ export function ungepruefteUebernahmen(uebernommen, form, beruehrt = {}) {
     && String(form?.[u.feld] ?? "") === String(u.roh ?? ""));
 }
 
+/** Nachprüfung 28.09.2026 (inserat2, Nr. 3): Die Übernahmeliste geht mit dem
+ *  Entwurf in den sessionStorage. Beim Wiederherstellen zählen nur Felder,
+ *  deren Wert im Entwurf noch dem übernommenen entspricht — sonst fehlten
+ *  nach dem Neuöffnen Rückfrage und Kasten „Aus dem Inserat übernommen“. */
+export function uebernahmenAusEntwurf(entwurf) {
+  const form = entwurf?.form;
+  if (!form || typeof form !== "object" || !Array.isArray(entwurf?.uebernommen)) return [];
+  return entwurf.uebernommen.filter((u) => u && typeof u === "object"
+    && typeof u.feld === "string" && u.feld in form
+    && String(u.roh ?? "") !== ""
+    && String(form[u.feld] ?? "") === String(u.roh));
+}
+
+/** Übernahmen aus dem Entwurf + neu übernommene (neu gewinnt je Feld). */
+export function uebernahmenZusammenfuehren(ausEntwurf, neu) {
+  const felder = new Set((neu || []).map((u) => u.feld));
+  return [...(ausEntwurf || []).filter((u) => !felder.has(u.feld)), ...(neu || [])];
+}
+
 /** Eine Zeile je Schaden für "Sind das alle Schäden?" */
 export function schadenZeile(d) {
   const teile = [d?.type_label || d?.type_key || "Schaden", d?.zone].filter(Boolean);
