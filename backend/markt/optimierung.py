@@ -24,8 +24,14 @@ und wird nie mit der neuen vermischt), der Auftrag wird PAUSIERT — Aktivieren 
 (Testlauf-Pflicht, filter_hash enthaelt die km-Bereiche). Dabei entsteht kein Abruf.
 
 Modi (Abschnitt 31, market_config/optimierung):
-  OBSERVE    Standard (Phase F) — nur Health und Vorschlaege, der Tagesplan bleibt unveraendert
-  SAFE_AUTO  folgt mit Phase G
+  OBSERVE    Standard — nur Health und Vorschlaege, der Tagesplan bleibt unveraendert
+  SAFE_AUTO  darf NUR: Frequenz je Segment senken (REDUCE_FREQUENCY), EMPTY pausieren mit Nachpruefung
+             (PAUSE_EMPTY), HOT vorziehen (PRIORITIZE_HOT). Nie km-Bereiche, EZ, Zeilen oder Filter (keine neue
+             Fassung), nie mehr Abrufe als der Auftrag vorsieht (also nie ueber das Budget). Wirkung ueber das Feld
+             'safe_auto' am Segment, das der Tagesplan des Crawlers nur im Modus SAFE_AUTO liest. Jede Aenderung steht
+             im Protokoll (market_optimization_changes: wer = 'safe_auto', alt -> neu, Grund) und ist einzeln
+             ruecknehmbar (Ruecknahme = Vorschlag abgelehnt + 30 Tage Ruhe fuer das Segment). Neue Aenderungen nur ab
+             Confidence MEDIUM. Zurueck auf OBSERVE hebt alle Wirkungen auf (spaetestens am naechsten Tagesplan).
   FULL_AUTO  gesperrt (nur Anzeige).
 
 Zeitplan: einmal taeglich im Auswertungs-Worker (markt.auswertung, nach Hot Deals und Berichten) nach dem Ende des
@@ -45,7 +51,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from pymongo.errors import DuplicateKeyError
 
 from markt import health, konfig
-from markt.konfig import KONFIG, MODELL_HEALTH, MODELLE, SEGMENTE, VORSCHLAEGE
+from markt.konfig import AENDERUNGEN, KONFIG, MODELL_HEALTH, MODELLE, SEGMENTE, VORSCHLAEGE
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +66,8 @@ STRUKTUR_TYPEN = (MERGE, SPLIT)                  # nur der Super-Admin per "Uebe
 PROPOSED, ACCEPTED, REJECTED, APPLIED, OBSOLETE = "PROPOSED", "ACCEPTED", "REJECTED", "APPLIED", "OBSOLETE"
 STATUS = (PROPOSED, ACCEPTED, REJECTED, APPLIED, OBSOLETE)
 OFFEN = (PROPOSED, ACCEPTED)
+AKTIV, ZURUECKGENOMMEN, AUFGEHOBEN = "aktiv", "zurueckgenommen", "aufgehoben"
+WER_AUTO = "safe_auto"
 
 # ---------------------------------------------------------------- Schwellen (Konstanten mit Begruendung)
 # Zusammenlegen (Abschnitt 32): beide Bereiche in JEDEM EZ-Jahr des Auftrags THIN oder EMPTY (die km-Bereiche gelten
@@ -78,6 +86,9 @@ SPLIT_VOLL_ANTEIL = 0.9
 SPLIT_STREUUNG_PCT = 15.0
 SPLIT_MIN_BREITE_KM = 30000
 SPLIT_RASTER_KM = 5000
+# SAFE_AUTO: neue Wirkungen erst ab Confidence MEDIUM (>= 14 gueltige Laeufe); nach einer Ruecknahme 30 Tage Ruhe
+SAFE_MIN_CONFIDENCE = "MEDIUM"
+RUECKNAHME_SPERRE_TAGE = 30
 MONAT_TAGE = health.MONAT_TAGE
 # Taeglicher Lauf erst nach dem Crawl-Fenster (konfig.fenster_bis, deutsche Zeit) + 1 h: dann sind die Laeufe des
 # Tages gespeichert; die Wirkung gilt ab dem naechsten Tagesplan (kurz nach Mitternacht)
@@ -354,6 +365,28 @@ async def einstellungen(db) -> Dict[str, Any]:
             "frequenz_von": doc.get("frequenz_von"), "modus_verlauf": list(doc.get("modus_verlauf") or [])[-10:]}
 
 
+async def modus_setzen(db, modus: str, *, wer: str = "") -> Dict[str, Any]:
+    """Nur OBSERVE/SAFE_AUTO; FULL_AUTO ist gesperrt. Zurueck auf OBSERVE hebt sofort alle SAFE_AUTO-Wirkungen auf
+    (der Tagesplan liest zusaetzlich den Modus); SAFE_AUTO wendet die vorhandenen Vorschlaege sofort an."""
+    neu = str(modus or "").strip().upper()
+    if neu in MODI_GESPERRT:
+        raise Ungueltig("FULL_AUTO ist gesperrt — km-Bereiche zusammenlegen/aufteilen nur als Vorschlag mit Übernahme durch den Super-Admin")
+    if neu not in (OBSERVE, SAFE_AUTO):
+        raise Ungueltig(f"Unbekannter Modus — erlaubt: {OBSERVE}, {SAFE_AUTO}")
+    alt = (await einstellungen(db))["modus"]
+    jetzt_iso = konfig.jetzt_iso()
+    await db[KONFIG].update_one({"_id": konfig.OPTIMIERUNG_DOK},
+                                {"$set": {"modus": neu, "modus_seit": jetzt_iso, "modus_von": str(wer or ""), "updated_at": jetzt_iso},
+                                 "$push": {"modus_verlauf": {"$each": [{"alt": alt, "neu": neu, "at": jetzt_iso, "von": str(wer or "")}],
+                                                             "$slice": -50}}}, upsert=True)
+    erg: Dict[str, Any] = {"modus": neu, "vorher": alt}
+    if neu == OBSERVE:
+        erg["aufgehoben"] = await alle_aufheben(db, grund="Modus OBSERVE", wer=str(wer or ""))
+    else:
+        erg["safe_auto"] = await safe_auto_anwenden(db, tag=konfig.heute_tag(), jetzt_iso=jetzt_iso)
+    return erg
+
+
 async def frequenz_setzen(db, roh: Dict[str, Any], *, wer: str = "") -> Dict[str, Any]:
     cfg = health.frequenz_pruefen(roh)
     jetzt_iso = konfig.jetzt_iso()
@@ -390,9 +423,11 @@ async def _vorschlaege_speichern(db, liste: List[Dict[str, Any]], *, lauf_id: st
 
 async def _ueberholte_markieren(db, *, lauf_id: str, jetzt_iso: str, grund: str, model_ids: Optional[List[str]] = None,
                                 ausser_model_ids: Optional[List[str]] = None) -> int:
-    """Vorschlaege, die dieser Lauf nicht mehr erzeugt hat, werden OBSOLETE (nie geloescht). Betrifft offene;
-    uebernommene MERGE/SPLIT und abgelehnte bleiben, wie sie sind."""
-    filt: Dict[str, Any] = {"lauf_id": {"$ne": lauf_id}, "status": {"$in": list(OFFEN)}}
+    """Vorschlaege, die dieser Lauf nicht mehr erzeugt hat, werden OBSOLETE (nie geloescht). Betrifft offene und die
+    von SAFE_AUTO angewendeten (deren Wirkung hebt safe_auto_anwenden danach auf); vom Admin uebernommene MERGE/SPLIT
+    und abgelehnte bleiben, wie sie sind."""
+    filt: Dict[str, Any] = {"lauf_id": {"$ne": lauf_id},
+                            "$or": [{"status": {"$in": list(OFFEN)}}, {"status": APPLIED, "angewendet_von": WER_AUTO}]}
     if model_ids is not None:
         filt["model_id"] = {"$in": list(model_ids)}
     elif ausser_model_ids is not None:
@@ -402,9 +437,180 @@ async def _ueberholte_markieren(db, *, lauf_id: str, jetzt_iso: str, grund: str,
     return int(r.modified_count)
 
 
+# ---------------------------------------------------------------- SAFE_AUTO (Phase G)
+async def _wirkung_neu(db, seg_id: str) -> Optional[Dict[str, Any]]:
+    """Das Feld 'safe_auto' am Segment aus den AKTIVEN Aenderungen neu bilden (Quelle der Wahrheit ist das Protokoll).
+    Ohne aktive Aenderung wird es entfernt — der Tagesplan plant das Segment dann wie vom Auftrag vorgesehen."""
+    aktive = await db[AENDERUNGEN].find({"segment_id": seg_id, "status": AKTIV}, {"_id": 0}).to_list(20)
+    if not aktive:
+        await db[SEGMENTE].update_one({"id": seg_id}, {"$unset": {"safe_auto": ""}})
+        return None
+    w: Dict[str, Any] = {"intervall_tage": 1, "crawls_per_day": None, "hot": False, "pausiert": False,
+                         "aenderung_ids": [], "seit": min(str(a.get("at") or "") for a in aktive)}
+    for a in aktive:
+        neu = a.get("neu") or {}
+        if neu.get("intervall_tage"):
+            w["intervall_tage"] = max(int(w["intervall_tage"]), int(neu["intervall_tage"]))
+        if neu.get("crawls_per_day"):
+            w["crawls_per_day"] = min(int(w["crawls_per_day"] or 99), int(neu["crawls_per_day"]))
+        if neu.get("prioritaet") == "HOT":
+            w["hot"] = True
+        if neu.get("pausiert"):
+            w["pausiert"] = True
+        w["aenderung_ids"].append(a["id"])
+    await db[SEGMENTE].update_one({"id": seg_id}, {"$set": {"safe_auto": w}})
+    return w
+
+
+async def _beenden(db, a: Dict[str, Any], *, status: str, grund: str, wer: str, jetzt_iso: str) -> bool:
+    r = await db[AENDERUNGEN].update_one({"id": a["id"], "status": AKTIV},
+                                         {"$set": {"status": status, "beendet_at": jetzt_iso, "beendet_von": wer, "beendet_grund": grund}})
+    return r.modified_count == 1
+
+
+def _neu_aus_vorschlag(v: Dict[str, Any]) -> Dict[str, Any]:
+    pd = v.get("proposed_definition") or {}
+    if v["typ"] == REDUCE:
+        return {"intervall_tage": int(pd.get("intervall_tage") or 1), "crawls_per_day": int(pd.get("crawls_per_day") or 1)}
+    if v["typ"] == PAUSE:
+        return {"intervall_tage": int(pd.get("nachpruefung_tage") or pd.get("intervall_tage") or 7), "crawls_per_day": 1, "pausiert": True}
+    return {"prioritaet": "HOT"}
+
+
+def _alt_von(seg: Dict[str, Any]) -> Dict[str, Any]:
+    w = seg.get("safe_auto") if isinstance(seg.get("safe_auto"), dict) else {}
+    return {"intervall_tage": int(w.get("intervall_tage") or 1),
+            "crawls_per_day": int(w.get("crawls_per_day") or seg.get("crawls_per_day") or 1),
+            "prioritaet": "HOT" if w.get("hot") else "normal", "pausiert": bool(w.get("pausiert"))}
+
+
+async def _anwenden(db, v: Dict[str, Any], seg: Dict[str, Any], *, tag: str, jetzt_iso: str) -> bool:
+    """Einen SAFE-Vorschlag als Aenderung eintragen (Protokoll) — REDUCE und PAUSE schliessen sich aus. Rennfest ueber
+    den Teil-Unique-Index (segment_id, typ) der aktiven Aenderungen."""
+    typ = v["typ"]
+    gegenteil = {REDUCE: PAUSE, PAUSE: REDUCE}.get(typ)
+    async for a in db[AENDERUNGEN].find({"segment_id": seg["id"], "status": AKTIV}, {"_id": 0}):
+        if a.get("typ") == gegenteil:
+            await _beenden(db, a, status=AUFGEHOBEN, grund=f"ersetzt durch {typ}", wer=WER_AUTO, jetzt_iso=jetzt_iso)
+        elif a.get("typ") == typ and a.get("vorschlag_id") != v["id"]:
+            await _beenden(db, a, status=AUFGEHOBEN, grund="Empfehlung geändert", wer=WER_AUTO, jetzt_iso=jetzt_iso)
+        elif a.get("typ") == typ:
+            await db[VORSCHLAEGE].update_one({"id": v["id"], "status": {"$in": list(OFFEN)}},
+                                             {"$set": {"status": APPLIED, "angewendet_von": WER_AUTO, "angewendet_at": jetzt_iso}})
+            return False                 # schon aktiv
+    await _wirkung_neu(db, seg["id"])    # 'alt' = Stand nach dem Aufheben der ersetzten Wirkung
+    seg_neu = await db[SEGMENTE].find_one({"id": seg["id"]}, {"_id": 0}) or seg
+    doc = {"id": uuid.uuid4().hex, "segment_id": seg["id"], "model_id": seg.get("model_id"), "typ": typ, "vorschlag_id": v["id"],
+           "schluessel": v["schluessel"], "wer": WER_AUTO, "alt": _alt_von(seg_neu), "neu": _neu_aus_vorschlag(v),
+           "grund": v.get("reason"), "health": v.get("health"), "activity_score": v.get("activity_score"),
+           "confidence": v.get("confidence"), "estimated_monthly_saving_usd": v.get("estimated_monthly_saving_usd"),
+           "label": seg.get("label"), "ez_label": seg.get("ez_label"), "km_label": seg.get("km_label"),
+           "status": AKTIV, "at": jetzt_iso, "tag": tag}
+    try:
+        await db[AENDERUNGEN].insert_one(dict(doc))
+    except DuplicateKeyError:
+        return False                     # ein anderer Lauf hat dieselbe Wirkung eben eingetragen
+    await db[VORSCHLAEGE].update_one({"id": v["id"], "status": {"$in": list(OFFEN)}},
+                                     {"$set": {"status": APPLIED, "angewendet_von": WER_AUTO, "angewendet_at": jetzt_iso,
+                                               "aenderung_id": doc["id"]}})
+    await _wirkung_neu(db, seg["id"])
+    return True
+
+
+async def safe_auto_anwenden(db, *, tag: Optional[str] = None, jetzt_iso: Optional[str] = None,
+                             model_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+    """SAFE_AUTO: (1) aktive Wirkungen aufheben, deren Grundlage entfallen ist (Vorschlag ueberholt/abgelehnt, Segment
+    inaktiv) — oder alle, wenn der Modus nicht SAFE_AUTO ist; (2) offene SAFE-Vorschlaege (ab Confidence MEDIUM, kein
+    gesperrtes Segment) anwenden. Aendert nur das Feld 'safe_auto' am Segment — nie Suchauftrag, km, EZ, Zeilen."""
+    tag = tag or konfig.heute_tag()
+    jetzt_iso = jetzt_iso or konfig.jetzt_iso()
+    modus = (await einstellungen(db))["modus"]
+    z: Dict[str, Any] = {"modus": modus, "angewendet": 0, "aufgehoben": 0}
+    scope: Dict[str, Any] = {"model_id": {"$in": list(model_ids)}} if model_ids is not None else {}
+    beruehrt: set = set()
+    async for a in db[AENDERUNGEN].find({"status": AKTIV, **scope}, {"_id": 0}):
+        grund = None
+        if modus != SAFE_AUTO:
+            grund = "Modus OBSERVE"
+        else:
+            v = await db[VORSCHLAEGE].find_one({"id": a.get("vorschlag_id")}, {"_id": 0, "status": 1})
+            seg = await db[SEGMENTE].find_one({"id": a["segment_id"]}, {"_id": 0, "enabled": 1})
+            if not seg or not seg.get("enabled"):
+                grund = "Segment inaktiv (Auftrag pausiert/geändert)"
+            elif not v or v.get("status") == OBSOLETE:
+                grund = "Empfehlung entfallen"
+            elif v.get("status") == REJECTED:
+                grund = "Vorschlag abgelehnt"
+        if grund and await _beenden(db, a, status=AUFGEHOBEN, grund=grund, wer=WER_AUTO, jetzt_iso=jetzt_iso):
+            z["aufgehoben"] += 1
+            beruehrt.add(a["segment_id"])
+    if modus != SAFE_AUTO:
+        for sid in beruehrt:
+            await _wirkung_neu(db, sid)
+        await db[VORSCHLAEGE].update_many({"status": APPLIED, "angewendet_von": WER_AUTO, **scope},
+                                          {"$set": {"status": PROPOSED, "updated_at": jetzt_iso},
+                                           "$unset": {"angewendet_von": "", "angewendet_at": "", "aenderung_id": ""}})
+        return z
+    mindest = health.CONFIDENCE_RANG[SAFE_MIN_CONFIDENCE]
+    offene = await db[VORSCHLAEGE].find({"typ": {"$in": list(SAFE_TYPEN)}, "status": {"$in": list(OFFEN)}, **scope}, {"_id": 0})\
+        .sort([("typ", 1), ("segment_id", 1)]).to_list(20000)
+    for v in offene:
+        if health.CONFIDENCE_RANG.get(v.get("confidence") or "LOW", 1) < mindest:
+            continue
+        seg = await db[SEGMENTE].find_one({"id": v.get("segment_id")}, {"_id": 0})
+        if not seg or not seg.get("enabled") or int(seg.get("version") or 1) != int(v.get("version") or 1):
+            continue
+        if str(seg.get("safe_auto_sperre_bis") or "") >= tag:
+            continue                     # nach einer Ruecknahme: Ruhe fuer dieses Segment
+        if await _anwenden(db, v, seg, tag=tag, jetzt_iso=jetzt_iso):
+            z["angewendet"] += 1
+        beruehrt.add(seg["id"])
+    for sid in beruehrt:
+        await _wirkung_neu(db, sid)
+    return z
+
+
+async def alle_aufheben(db, *, grund: str, wer: str) -> int:
+    """Modus zurueck auf OBSERVE: alle aktiven Wirkungen aufheben, die angewendeten Vorschlaege wieder offen."""
+    jetzt_iso = konfig.jetzt_iso()
+    n = 0
+    segs: set = set()
+    async for a in db[AENDERUNGEN].find({"status": AKTIV}, {"_id": 0}):
+        if await _beenden(db, a, status=AUFGEHOBEN, grund=grund, wer=wer or WER_AUTO, jetzt_iso=jetzt_iso):
+            n += 1
+            segs.add(a["segment_id"])
+    for sid in segs:
+        await _wirkung_neu(db, sid)
+    # auch verwaiste Felder (z. B. nach einer Wiederherstellung) entfernen
+    await db[SEGMENTE].update_many({"safe_auto": {"$exists": True}}, {"$unset": {"safe_auto": ""}})
+    await db[VORSCHLAEGE].update_many({"status": APPLIED, "angewendet_von": WER_AUTO},
+                                      {"$set": {"status": PROPOSED, "updated_at": jetzt_iso},
+                                       "$unset": {"angewendet_von": "", "angewendet_at": "", "aenderung_id": ""}})
+    return n
+
+
+async def aenderung_zuruecknehmen(db, aenderung_id: str, *, wer: str) -> Dict[str, Any]:
+    """Eine SAFE_AUTO-Aenderung einzeln zuruecknehmen: Wirkung weg, Vorschlag abgelehnt (SAFE_AUTO wendet ihn nie
+    wieder an), Segment 30 Tage ohne neue SAFE_AUTO-Wirkung."""
+    a = await db[AENDERUNGEN].find_one({"id": str(aenderung_id)}, {"_id": 0})
+    if not a:
+        raise NichtGefunden("Änderung nicht gefunden")
+    jetzt_iso = konfig.jetzt_iso()
+    if not await _beenden(db, a, status=ZURUECKGENOMMEN, grund="Rücknahme durch den Betreiber", wer=wer, jetzt_iso=jetzt_iso):
+        raise Konflikt("Die Änderung ist nicht mehr aktiv")
+    await db[VORSCHLAEGE].update_one({"id": a.get("vorschlag_id")},
+                                     {"$set": {"status": REJECTED, "entschieden_von": wer, "entschieden_at": jetzt_iso,
+                                               "entscheidung_grund": "SAFE_AUTO-Änderung zurückgenommen", "updated_at": jetzt_iso}})
+    sperre = _tag_plus(konfig.heute_tag(), RUECKNAHME_SPERRE_TAGE)
+    await db[SEGMENTE].update_one({"id": a["segment_id"]}, {"$set": {"safe_auto_sperre_bis": sperre}})
+    await _wirkung_neu(db, a["segment_id"])
+    return {**(await db[AENDERUNGEN].find_one({"id": a["id"]}, {"_id": 0})), "sperre_bis": sperre}
+
+
 # ---------------------------------------------------------------- Entscheiden / Uebernehmen (Super-Admin)
 async def vorschlag_entscheiden(db, vorschlag_id: str, aktion: str, *, wer: str) -> Dict[str, Any]:
-    """annehmen: PROPOSED -> ACCEPTED (Merker). ablehnen: offen -> REJECTED (bleibt abgelehnt)."""
+    """annehmen: PROPOSED -> ACCEPTED (Merker; SAFE-Typen wendet SAFE_AUTO ohnehin an). ablehnen: offen oder von
+    SAFE_AUTO angewendet -> REJECTED (bleibt abgelehnt); eine aktive Wirkung wird zurueckgenommen."""
     v = await db[VORSCHLAEGE].find_one({"id": str(vorschlag_id)}, {"_id": 0})
     if not v:
         raise NichtGefunden("Vorschlag nicht gefunden")
@@ -416,10 +622,19 @@ async def vorschlag_entscheiden(db, vorschlag_id: str, aktion: str, *, wer: str)
     else:
         raise Ungueltig("Aktion unbekannt — annehmen oder ablehnen")
     filt: Dict[str, Any] = {"id": v["id"], "status": {"$in": erlaubt}}
+    if aktion == "ablehnen":
+        filt = {"id": v["id"], "$or": [{"status": {"$in": erlaubt}}, {"status": APPLIED, "angewendet_von": WER_AUTO}]}
     r = await db[VORSCHLAEGE].update_one(filt, {"$set": {"status": neu, "entschieden_von": wer, "entschieden_at": jetzt_iso,
                                                          "updated_at": jetzt_iso}})
     if r.modified_count == 0:
         raise Konflikt(f"Vorschlag steht auf {v.get('status')} — so nicht (mehr) möglich")
+    if aktion == "ablehnen":
+        segs = set()
+        async for a in db[AENDERUNGEN].find({"vorschlag_id": v["id"], "status": AKTIV}, {"_id": 0}):
+            if await _beenden(db, a, status=ZURUECKGENOMMEN, grund="Vorschlag abgelehnt", wer=wer, jetzt_iso=jetzt_iso):
+                segs.add(a["segment_id"])
+        for sid in segs:
+            await _wirkung_neu(db, sid)
     return await db[VORSCHLAEGE].find_one({"id": v["id"]}, {"_id": 0})
 
 
@@ -486,14 +701,17 @@ def _schreiber():
 async def _modell_zaehler(db, model_id: str) -> Dict[str, Any]:
     offen = await db[VORSCHLAEGE].find({"model_id": model_id, "status": {"$in": list(OFFEN)}},
                                        {"_id": 0, "estimated_monthly_saving_usd": 1}).to_list(5000)
+    aktiv = await db[AENDERUNGEN].count_documents({"model_id": model_id, "status": AKTIV})
     return {"vorschlaege_offen": len(offen),
             "ersparnis_offen_usd": round(sum(float(v.get("estimated_monthly_saving_usd") or 0) for v in offen
-                                             if float(v.get("estimated_monthly_saving_usd") or 0) > 0), 2)}
+                                             if float(v.get("estimated_monthly_saving_usd") or 0) > 0), 2),
+            "safe_auto_aktiv": int(aktiv)}
 
 
 async def berechnen(db, *, stichtag: Optional[str] = None, model_ids: Optional[List[str]] = None,
                     jetzt: Optional[datetime] = None) -> Dict[str, Any]:
-    """Health + Vorschlaege fuer alle Suchauftraege mit aktiven Segmenten (model_ids grenzt ein — Tests/Admin). Ein Fehler in einem Auftrag haelt die anderen nicht auf (Zaehler 'fehler' ->
+    """Health + Vorschlaege fuer alle Suchauftraege mit aktiven Segmenten (model_ids grenzt ein — Tests/Admin), danach
+    SAFE_AUTO (nur im Modus SAFE_AUTO; sonst werden stehengebliebene Wirkungen aufgehoben). Ein Fehler in einem Auftrag haelt die anderen nicht auf (Zaehler 'fehler' ->
     Betriebsalarm im Worker). Schreibpause: sofort anhalten ('wartung'), nichts halb Fertiges als ueberholt markieren."""
     jetzt = jetzt or konfig.jetzt()
     jetzt_iso = jetzt.isoformat()
@@ -533,6 +751,7 @@ async def berechnen(db, *, stichtag: Optional[str] = None, model_ids: Optional[L
     if model_ids is None:
         z["ueberholt"] += await _ueberholte_markieren(db, lauf_id=lauf_id, jetzt_iso=jetzt_iso, ausser_model_ids=[m["id"] for m in modelle],
                                                       grund="Suchauftrag ohne aktive Segmente (pausiert, archiviert oder geändert)")
+    z["safe_auto"] = await safe_auto_anwenden(db, tag=tag, jetzt_iso=jetzt_iso, model_ids=model_ids)
     for mid in erfolgreich:
         await db[MODELL_HEALTH].update_one({"model_id": mid}, {"$set": await _modell_zaehler(db, mid)})
     return z
@@ -588,7 +807,7 @@ async def jetzt_berechnen(db, *, wer: str = "", jetzt: Optional[datetime] = None
 # ---------------------------------------------------------------- Lesen (Admin)
 MODI_ANZEIGE = [
     {"modus": OBSERVE, "text": "Beobachten — nur Empfehlungen, der Tagesplan bleibt unverändert", "gesperrt": False},
-    {"modus": SAFE_AUTO, "text": "Sicher automatisch — Frequenz senken, EMPTY pausieren (mit Nachprüfung), HOT vorziehen; nie km/EZ/Zeilen (folgt)", "gesperrt": True},
+    {"modus": SAFE_AUTO, "text": "Sicher automatisch — Frequenz senken, EMPTY pausieren (mit Nachprüfung), HOT vorziehen; nie km/EZ/Zeilen", "gesperrt": False},
     {"modus": FULL_AUTO, "text": "Voll automatisch — km-Bereiche zusammenlegen/aufteilen (gesperrt, nur nach ausdrücklicher Freigabe)", "gesperrt": True},
 ]
 
@@ -596,12 +815,13 @@ MODI_ANZEIGE = [
 def schwellen() -> Dict[str, Any]:
     return {**health.schwellen(), "merge_min_laeufe": MERGE_MIN_LAEUFE, "merge_luecke_max_km": MERGE_LUECKE_MAX_KM,
             "split_voll_anteil": SPLIT_VOLL_ANTEIL, "split_streuung_pct": SPLIT_STREUUNG_PCT, "split_min_breite_km": SPLIT_MIN_BREITE_KM,
+            "safe_min_confidence": SAFE_MIN_CONFIDENCE, "ruecknahme_sperre_tage": RUECKNAHME_SPERRE_TAGE,
             "taeglich_ab_stunde": taeglich_ab_stunde()}
 
 
 async def uebersicht(db) -> Dict[str, Any]:
     """Modus, Frequenz-Zuordnung, Schwellen, Stand, Zaehler je Health-Status, Modell-Health der aktiven Auftraege,
-    Vorschlaege je Status/Typ, geschaetzte Ersparnis der offenen Vorschlaege. Nur lesen."""
+    Vorschlaege je Status/Typ, geschaetzte Ersparnis (offen und durch aktive SAFE_AUTO-Wirkungen). Nur lesen."""
     einst = await einstellungen(db)
     aktive = {str(m) for m in await db[SEGMENTE].distinct("model_id", {"enabled": True}) if m}
     modelle = [d async for d in db[MODELL_HEALTH].find({"model_id": {"$in": sorted(aktive)}}, {"_id": 0})]
@@ -616,11 +836,16 @@ async def uebersicht(db) -> Dict[str, Any]:
     offen_spar = [g async for g in db[VORSCHLAEGE].aggregate([
         {"$match": {"status": {"$in": list(OFFEN)}, "estimated_monthly_saving_usd": {"$gt": 0}}},
         {"$group": {"_id": None, "usd": {"$sum": "$estimated_monthly_saving_usd"}}}])]
+    aktiv_spar = [g async for g in db[AENDERUNGEN].aggregate([
+        {"$match": {"status": AKTIV, "estimated_monthly_saving_usd": {"$gt": 0}}},
+        {"$group": {"_id": None, "usd": {"$sum": "$estimated_monthly_saving_usd"}}}])]
     return {"modus": einst["modus"], "modi": MODI_ANZEIGE, "frequenz": einst["frequenz"], "frequenz_standard": einst["frequenz_standard"],
             "modus_seit": einst["modus_seit"], "modus_von": einst["modus_von"], "modus_verlauf": einst["modus_verlauf"],
             "schwellen": schwellen(), "stand": await konfig.merker_lesen(db, konfig.HEALTH_DOK), "zaehler": zaehler,
             "modelle": modelle, "vorschlaege_je_status": je_status, "vorschlaege_offen_je_typ": je_typ,
             "ersparnis_offen_usd": round(float(offen_spar[0]["usd"]), 2) if offen_spar else 0.0,
+            "ersparnis_safe_auto_usd": round(float(aktiv_spar[0]["usd"]), 2) if aktiv_spar else 0.0,
+            "safe_auto_aktiv": await db[AENDERUNGEN].count_documents({"status": AKTIV}),
             "hinweis": ("Health und Vorschläge entstehen nur aus gespeicherten Tageswerten — keine Zusatzabrufe, keine Kosten. "
                         "Health (Marktaktivität) ist getrennt von der technischen Datenqualität.")}
 
@@ -645,6 +870,19 @@ async def vorschlaege_liste(db, *, status: str = "offen", typ: Optional[str] = N
     rang = {s: i for i, s in enumerate((PROPOSED, ACCEPTED, APPLIED, REJECTED, OBSOLETE))}
     liste.sort(key=lambda v: (rang.get(v.get("status"), 9), -(float(v.get("estimated_monthly_saving_usd") or 0)), str(v.get("schluessel"))))
     return {"vorschlaege": liste, "anzahl": len(liste), "gekuerzt": len(liste) >= n, "status": status}
+
+
+async def aenderungen_liste(db, *, status: str = "alle", model_id: Optional[str] = None, limit: int = 300) -> Dict[str, Any]:
+    filt: Dict[str, Any] = {}
+    if status in (AKTIV, ZURUECKGENOMMEN, AUFGEHOBEN):
+        filt["status"] = status
+    elif status != "alle":
+        raise Ungueltig("Unbekannter Status — erlaubt: alle, aktiv, zurueckgenommen, aufgehoben")
+    if model_id:
+        filt["model_id"] = str(model_id)
+    n = max(1, min(int(limit or 300), LIMIT_MAX))
+    liste = await db[AENDERUNGEN].find(filt, {"_id": 0}).sort([("at", -1)]).to_list(n)
+    return {"aenderungen": liste, "anzahl": len(liste), "gekuerzt": len(liste) >= n}
 
 
 async def modell_ansicht(db, model_id: str) -> Optional[Dict[str, Any]]:

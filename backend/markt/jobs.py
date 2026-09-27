@@ -61,6 +61,9 @@ Master-Auftrag 26.09.2026, Phase C: der Worker gibt je Lauf Fremdfahrzeuge/Parse
 Tagesbasis (speicher), vermerkt 'data_invalid'-Laeufe im Tagesdokument und protokolliert einmal je Actor-Build
 die Feldnamen + Typen der Zeilen (market_config/actor_meta_<actor>) — nie Werte. Nur dieses Modul (mit apify)
 loest externe Marktabrufe aus; Auswertungen (speicher, abfrage) lesen nur Tageswerte.
+
+Master-Auftrag Phase G (SAFE_AUTO): der Tagesplan liest den Modus (market_config/optimierung) und nur im Modus
+SAFE_AUTO die Wirkung 'safe_auto' am Segment (ruhen bis Intervall, HOT zuerst, Abrufe je Tag nur senken).
 """
 from __future__ import annotations
 
@@ -235,9 +238,15 @@ def _job_doc(s: Dict[str, Any], tag: str, geplant_iso: str, job_type: str) -> Di
             "finished_at": None}
 
 
-def _slots(segs: List[Dict[str, Any]], b: int) -> List[List[Dict[str, Any]]]:
+def _slots(segs: List[Dict[str, Any]], b: int, zuerst: Optional[set] = None) -> List[List[Dict[str, Any]]]:
     """Nr. 21: Buendel-Slots — Gruppen gleicher Zeilenzahl (der Scraper ist global), je Slot
-    hoechstens b Segmente; alle Jobs eines Slots bekommen dieselbe scheduled_at."""
+    hoechstens b Segmente; alle Jobs eines Slots bekommen dieselbe scheduled_at.
+    Master-Auftrag Phase G (SAFE_AUTO): 'zuerst' (IDs der HOT-Segmente) bekommen die vorderen Slots —
+    sie werden im Fenster zuerst abgerufen; an der Zahl der Jobs aendert das nichts."""
+    if zuerst:
+        vorne = [s for s in segs if s["id"] in zuerst]
+        if vorne:
+            return _slots(vorne, b) + _slots([s for s in segs if s["id"] not in zuerst], b)
     gruppen: Dict[int, List[Dict[str, Any]]] = {}
     for s in segs:
         gruppen.setdefault(int(s.get("max_items") or konfig.rows_je_segment()), []).append(s)
@@ -246,6 +255,34 @@ def _slots(segs: List[Dict[str, Any]], b: int) -> List[List[Dict[str, Any]]]:
         for i in range(0, len(liste), max(1, b)):
             slots.append(liste[i:i + max(1, b)])
     return slots
+
+
+async def _safe_auto_an(db) -> bool:
+    """Master-Auftrag Phase G: die SAFE_AUTO-Wirkung am Segment (Feld 'safe_auto', gesetzt von markt.optimierung)
+    gilt NUR im Modus SAFE_AUTO (market_config/optimierung). Unlesbarer oder fehlender Modus = OBSERVE — dann plant
+    der Tagesplan genau wie ohne Optimierung (zurueck auf OBSERVE hebt die Wirkung am naechsten Tagesplan auf)."""
+    return (await konfig.merker_lesen(db, konfig.OPTIMIERUNG_DOK)).get("modus") == konfig.MODUS_SAFE_AUTO
+
+
+def _wirkung(s: Dict[str, Any]) -> Dict[str, Any]:
+    w = s.get("safe_auto")
+    return w if isinstance(w, dict) else {}
+
+
+def _ruht(s: Dict[str, Any], tag: str) -> bool:
+    """SAFE_AUTO: ein Segment mit Intervall n Tagen (seltener / EMPTY pausiert mit Nachpruefung) wird erst wieder
+    geplant, wenn seit dem letzten Plan mindestens n Tage vergangen sind (last_planned_tag + n)."""
+    try:
+        n = int(_wirkung(s).get("intervall_tage") or 1)
+    except (TypeError, ValueError):
+        return False
+    letzter = s.get("last_planned_tag")
+    if n <= 1 or not letzter:
+        return False
+    try:
+        return (datetime.strptime(tag, "%Y-%m-%d") - datetime.strptime(str(letzter)[:10], "%Y-%m-%d")).days < n
+    except ValueError:
+        return False
 
 
 def _abstand(geplant: datetime, ende: datetime, k: int) -> timedelta:
@@ -263,7 +300,12 @@ async def tagesplan(db, tag: Optional[str] = None, *, sofort: bool = False) -> D
     Nr. 21: Jobs in Buendel-Slots (gleiche Zeilenzahl, gleiche scheduled_at), Slots ueber das
     Fenster verteilt. Nr. 62: Segmente per Cursor, ohne Obergrenze.
     Welle 6 Nr. 95: unabhaengig vom Tagesmerker — neue Segmente (Aktivierung/Anlage) werden
-    im Kontingent des Tages nachgeplant (segmente.synchronisieren ruft mit sofort=True)."""
+    im Kontingent des Tages nachgeplant (segmente.synchronisieren ruft mit sofort=True).
+    Master-Auftrag Phase G (nur im Modus SAFE_AUTO, sonst unveraendert): Segmente mit SAFE_AUTO-Intervall
+    (seltener / EMPTY pausiert mit Nachpruefung) ruhen bis last_planned_tag + Intervall; HOT-Segmente kommen
+    zuerst (vor allen anderen faelligen und in die vorderen Slots); weniger Abrufe je Tag nur als Senkung
+    (min mit crawls_per_day des Auftrags). Nie mehr Jobs als ohne SAFE_AUTO — das Kontingent aus dem
+    Budget bleibt die Obergrenze."""
     t = tag or konfig.heute_tag()
     takt = await intervall(db)
     if takt.get("ohne_budget"):
@@ -274,10 +316,19 @@ async def tagesplan(db, tag: Optional[str] = None, *, sofort: bool = False) -> D
     alle.sort(key=lambda s: (s.get("last_planned_tag") or "", int(s.get("priority") or 5), s["id"]))
     schon = sum(1 for s in alle if (s.get("last_planned_tag") or "") == t)
     faellig = [s for s in alle if (s.get("last_planned_tag") or "") < t]
+    safe_auto = await _safe_auto_an(db)
+    ruhend = 0
+    hot: set = set()
+    if safe_auto:
+        vorher = len(faellig)
+        faellig = [s for s in faellig if not _ruht(s, t)]
+        ruhend = vorher - len(faellig)
+        hot = {s["id"] for s in faellig if _wirkung(s).get("hot")}
+        faellig.sort(key=lambda s: 0 if s["id"] in hot else 1)      # stabil: sonst bleibt die Reihenfolge
     kontingent = max(0, int(takt["segmente_je_tag"]) - schon)
     segs = faellig[:kontingent]
     wartend = len(faellig) - len(segs)
-    slots = _slots(segs, konfig.buendel_groesse())
+    slots = _slots(segs, konfig.buendel_groesse(), zuerst=hot or None)
     n = max(1, len(slots))
     start = konfig.jetzt() if sofort else konfig.fenster_start(t)
     dauer = timedelta(seconds=0) if sofort else konfig.fenster_dauer()
@@ -287,6 +338,8 @@ async def tagesplan(db, tag: Optional[str] = None, *, sofort: bool = False) -> D
         geplant = start + dauer * (i / n)
         for s in slot:
             k = max(1, min(4, int(s.get("crawls_per_day") or 1)))
+            if safe_auto and _wirkung(s).get("crawls_per_day"):
+                k = max(1, min(k, int(_wirkung(s)["crawls_per_day"])))      # Phase G: nur senken, nie erhoehen
             # 2x taeglich = ~12 h auseinander. Review 26.09.2026 Nr. 18: nur der ERSTE Abruf liegt
             # im Fenster; der zweite faellt bewusst auf den Nachmittag/Abend. Welle 5 Nr. 25: alle
             # Abrufe eines Tages bleiben vor 23:30 Uhr (Abstand hoechstens Restfenster/k).
@@ -302,7 +355,7 @@ async def tagesplan(db, tag: Optional[str] = None, *, sofort: bool = False) -> D
     await konfig.merker_setzen(db, konfig.TAGESPLAN_DOK, tag=t, segmente=len(segs) + schon, neu=neu, sofort=bool(sofort))
     erg = {"segmente": len(segs), "neu": neu, "tag": t, "intervall_tage": takt["intervall_tage"],
            "segmente_gesamt": takt["segmente"], "slots": len(slots), "schon_geplant": schon, "wartend": wartend,
-           "status": "ok"}
+           "status": "ok", "safe_auto": safe_auto, "ruhend": ruhend, "hot_zuerst": len(hot)}
     if wartend:
         erg["hinweis"] = (f"{wartend} Segment(e) warten — das Tageskontingent ({takt['segmente_je_tag']}) ist ausgeschoepft; "
                           f"sie kommen an den naechsten Tagen dran (jedes Segment alle {takt['intervall_tage']} Tag(e)).")

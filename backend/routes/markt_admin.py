@@ -331,6 +331,49 @@ async def admin_market_vorschlag_uebernehmen(vorschlag_id: str, admin=Depends(cu
     return {"ok": True, **erg}
 
 
+# ---------------------------------------------------------------- SAFE_AUTO (Master-Auftrag Phase G, 27.09.2026)
+class ModusIn(BaseModel):
+    modus: str = Field(..., min_length=1, max_length=20)
+
+
+@router.put("/admin/market/optimierung/modus")
+async def admin_market_optimierung_modus(body: ModusIn, admin=Depends(current_super_admin)):
+    """OBSERVE <-> SAFE_AUTO (FULL_AUTO gesperrt). Zurueck auf OBSERVE hebt alle SAFE_AUTO-Wirkungen auf."""
+    from markt import optimierung
+    try:
+        erg = await optimierung.modus_setzen(db, body.modus, wer=admin["id"])
+    except optimierung.Ungueltig as ex:
+        raise HTTPException(400, str(ex))
+    await log_activity_sicher("", admin["id"], "admin.markt.optimierung.modus",
+                              meta={"modus": erg["modus"], "vorher": erg["vorher"], "aufgehoben": erg.get("aufgehoben"),
+                                    "angewendet": (erg.get("safe_auto") or {}).get("angewendet")})
+    return {"ok": True, **erg}
+
+
+@router.get("/admin/market/optimierung/aenderungen")
+async def admin_market_optimierung_aenderungen(status: str = "alle", model_id: Optional[str] = None,
+                                               limit: int = Query(300, ge=1, le=1000), _=Depends(current_admin)):
+    """Protokoll der SAFE_AUTO-Aenderungen (wer, alt -> neu, Grund, Status) — nur lesen."""
+    from markt import optimierung
+    try:
+        return await optimierung.aenderungen_liste(db, status=status, model_id=model_id, limit=limit)
+    except optimierung.Ungueltig as ex:
+        raise HTTPException(400, str(ex))
+
+
+@router.post("/admin/market/optimierung/aenderungen/{aenderung_id}/zuruecknehmen")
+async def admin_market_aenderung_zuruecknehmen(aenderung_id: str, admin=Depends(current_super_admin)):
+    """Eine SAFE_AUTO-Aenderung einzeln zuruecknehmen (Vorschlag abgelehnt, Segment 30 Tage ohne neue Wirkung)."""
+    from markt import optimierung
+    try:
+        a = await optimierung.aenderung_zuruecknehmen(db, aenderung_id, wer=admin["id"])
+    except optimierung.Ungueltig as ex:
+        raise _optimierung_fehler(ex)
+    await log_activity_sicher("", admin["id"], "admin.markt.safe_auto.zurueck", ref=aenderung_id,
+                              meta={"typ": a.get("typ"), "segment_id": a.get("segment_id")})
+    return {"ok": True, "aenderung": a}
+
+
 @router.get("/admin/market/health/models/{model_id}")
 async def admin_market_health_modell(model_id: str, _=Depends(current_admin)):
     """Modell-Health (Aggregat), Health je Segment und offene Vorschlaege eines Suchauftrags — nur lesen."""

@@ -333,3 +333,21 @@ export const OPTIMIERUNG_MODUS = {
   SAFE_AUTO: "Sicher automatisch",
   FULL_AUTO: "Voll automatisch (gesperrt)",
 };
+
+/** Master-Auftrag Phase G (SAFE_AUTO): Protokoll der automatischen Änderungen — aktiv, vom Betreiber
+ *  zurückgenommen oder automatisch aufgehoben (Empfehlung entfallen, Modus OBSERVE, Segment inaktiv). */
+export const AENDERUNG_STATUS = {
+  aktiv: { text: "aktiv", tone: "green" },
+  zurueckgenommen: { text: "zurückgenommen", tone: "yellow" },
+  aufgehoben: { text: "aufgehoben", tone: "gray" },
+};
+/** Wirkung einer SAFE_AUTO-Änderung als Text ("alle 7 Tage (pausiert, Nachprüfung)", "zuerst geplant (HOT)"). */
+export function wirkungText(w) {
+  if (!w) return "—";
+  if (w.prioritaet === "HOT" || w.hot) return "zuerst geplant (HOT)";
+  const n = Number(w.intervall_tage || 1);
+  const k = Number(w.crawls_per_day || 1);
+  if (w.pausiert) return `pausiert · Nachprüfung alle ${n} Tage`;
+  if (n > 1) return `alle ${n} Tage`;
+  return k > 1 ? `${k}× täglich` : "täglich";
+}

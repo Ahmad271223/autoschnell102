@@ -1057,7 +1057,9 @@ async def markt_indizes(db) -> dict:
             ("market_model_health", "model_id", "markt_health_modell"),
             ("market_segment_health_history", [("segment_id", 1), ("tag", 1), ("von", 1), ("nach", 1)], "markt_health_wechsel"),
             ("market_optimization_proposals", "schluessel", "markt_vorschlag_schluessel"),
-            ("market_optimization_proposals", "id", "markt_vorschlag_id")):
+            ("market_optimization_proposals", "id", "markt_vorschlag_id"),
+            # Phase G: SAFE_AUTO-Protokoll — Eintraege einmalig je id
+            ("market_optimization_changes", "id", "markt_aenderung_id")):
         try:
             ok = await unique_anlegen(db[sammlung], schluessel, name=name, weich=True)
         except Exception as exc:  # noqa: BLE001
@@ -1104,7 +1106,10 @@ async def markt_indizes(db) -> dict:
             ("market_segment_health", [("model_id", 1), ("health", 1)], "markt_health_modell_status"),
             ("market_segment_health_history", [("model_id", 1), ("tag", -1)], "markt_health_wechsel_modell"),
             ("market_optimization_proposals", [("status", 1), ("typ", 1)], "markt_vorschlag_status_typ"),
-            ("market_optimization_proposals", [("model_id", 1), ("status", 1)], "markt_vorschlag_modell")):
+            ("market_optimization_proposals", [("model_id", 1), ("status", 1)], "markt_vorschlag_modell"),
+            # Phase G: Protokoll-Liste (Status, Zeit) und je Vorschlag (Ablehnen nimmt die Wirkung zurueck)
+            ("market_optimization_changes", [("status", 1), ("at", -1)], "markt_aenderung_status_zeit"),
+            ("market_optimization_changes", [("vorschlag_id", 1), ("status", 1)], "markt_aenderung_vorschlag")):
         sammlung, schluessel, name = eintrag[0], eintrag[1], eintrag[2]
         optionen = eintrag[3] if len(eintrag) > 3 else {}
         ref = f"{sammlung}.{name}"
@@ -1122,6 +1127,16 @@ async def markt_indizes(db) -> dict:
                 await alarm_schliessen(db, "index_fehlt", ref=ref)
             except Exception:  # noqa: BLE001
                 pass
+    # Phase G: hoechstens EINE aktive SAFE_AUTO-Wirkung je (Segment, Typ) — zwei Server legen dieselbe Wirkung nie
+    # doppelt an (Teil-Unique-Index nur ueber aktive Eintraege; zurueckgenommene/aufgehobene bleiben als Protokoll)
+    try:
+        ok = await unique_anlegen(db["market_optimization_changes"], [("segment_id", 1), ("typ", 1)], name="markt_aenderung_aktiv",
+                                  weich=True, partialFilterExpression={"status": "aktiv"})
+    except Exception as exc:  # noqa: BLE001
+        log.error("ensure_indexes: market_optimization_changes.markt_aenderung_aktiv nicht anlegbar: %s", exc)
+        ok = False
+    if not ok:
+        fehler.append("market_optimization_changes.markt_aenderung_aktiv")
     kritisch = [r for r in fehler if r in MARKT_UNIQUE_KRITISCH]
     try:
         from markt import konfig as markt_konfig

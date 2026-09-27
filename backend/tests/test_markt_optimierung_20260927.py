@@ -6,8 +6,13 @@ Je Regel ein Test: MERGE_KM_BUCKETS (benachbarte duenne km-Bereiche in allen EZ-
 Ersparnis aus den echten Crawl-Kosten; SPLIT_KM_BUCKET (staendig voll + grosse Preisstreuung, Mehrkosten);
 REDUCE_FREQUENCY / PAUSE_EMPTY / PRIORITIZE_HOT; OBSERVE aendert nichts am Tagesplan; Vorschlag idempotent (ein
 Dokument je Schluessel, ueberholt statt geloescht, wieder offen); Annehmen/Ablehnen (abgelehnt bleibt abgelehnt);
-Uebernehmen erzeugt eine neue Fassung und pausiert den Auftrag (Testlauf-Pflicht), ohne Abruf. Testdaten test-/t<hex>.
+Uebernehmen erzeugt eine neue Fassung und pausiert den Auftrag (Testlauf-Pflicht), ohne Abruf.
+Phase G (SAFE_AUTO): plant seltene/pausierte Segmente seltener und HOT zuerst, aendert nie km/EZ/Zeilen/Fassung und nie
+mehr Abrufe; Nachpruefung pausierter EMPTY-Segmente; Ruecknahme; zurueck auf OBSERVE hebt alles auf; FULL_AUTO gesperrt;
+zwei Server; Routen. Testdaten test-/t<hex>.
 """
+import asyncio
+import inspect
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -353,3 +358,272 @@ def test_08_health_reihenfolge_bleibt_fuer_vorschlaege_massgeblich():
     ohne_kosten = OPT.vorschlaege_segment(seg, {**basis, "kosten_je_lauf_usd": None, "health": "NORMAL", "empfehlung": H.empfehlung("NORMAL", 30)})
     assert ohne_kosten[0]["estimated_monthly_saving_usd"] is None, "keine erfundene Ersparnis ohne Kostendaten"
     assert OPT.frequenz_text({"intervall_tage": 1, "crawls_per_day": 2}) == "2× täglich" and OPT.frequenz_text({"intervall_tage": 3}) == "alle 3 Tage"
+
+
+# ---------------------------------------------------------------- Phase G: SAFE_AUTO
+def _modus_merken(welt):
+    return welt.run(welt.db[K.KONFIG].find_one({"_id": K.OPTIMIERUNG_DOK}))
+
+
+def _modus_zurueck(welt, alt):
+    if alt:
+        welt.run(welt.db[K.KONFIG].replace_one({"_id": K.OPTIMIERUNG_DOK}, alt, upsert=True))
+    else:
+        welt.run(welt.db[K.KONFIG].delete_one({"_id": K.OPTIMIERUNG_DOK}))
+
+
+def _plan_umgebung(welt, monkeypatch, buendel="1"):
+    s = welt.w.s
+    monkeypatch.setenv("MARKT_BUDGET_MONAT_USD", "1000")
+    monkeypatch.setenv("MARKT_CRAWL_INTERVALL_TAGE", "1")
+    monkeypatch.setenv("MARKT_APIFY_ACTOR_ERSATZ", "")
+    monkeypatch.setenv("MARKT_BUENDEL_GROESSE", buendel)
+    monkeypatch.setattr(K, "monat", lambda zeit=None: f"test-{s}")
+    return f"2099-0{int(s[:1], 16) % 5 + 1}-01"
+
+
+def _plus(tag, n):
+    return (datetime.strptime(tag, "%Y-%m-%d") + timedelta(days=n)).strftime("%Y-%m-%d")
+
+
+def _jobs(welt, ids, tag):
+    return welt.run(welt.db[K.JOBS].find({"segment_id": {"$in": ids}, "tag": {"$regex": f"^{tag}"}}, {"_id": 0}).sort("scheduled_at", 1).to_list(50))
+
+
+def _drei_safe(welt):
+    """EMPTY (-> pausieren), HOT (-> vorziehen), ruhig (-> alle 2 Tage) in einem Auftrag, EZ 2020."""
+    _aufraeumen(welt)
+    welt.run(_module("indizes").markt_indizes(welt.db))
+    _modell_anlegen(welt, km=KM3, ez=(2020,))
+    leer, heiss, ruhig = _seg(welt, km=KM3[0]), _seg(welt, km=KM3[1]), _seg(welt, km=KM3[2])
+    _reihe(welt, leer, 20, [0])
+    for i in range(20):
+        _doc(welt, heiss, _t(i), 5, neu=2, weg=2, red=1, top3=True, top5=True, praefix=f"h{i}")
+    _reihe(welt, ruhig, 20, [5])
+    return leer, heiss, ruhig
+
+
+def test_09_safe_auto_plant_seltener_hot_zuerst_nie_km_ez_zeilen(welt, monkeypatch):
+    """SAFE_AUTO darf NUR: Frequenz je Segment senken, EMPTY pausieren (mit Nachpruefung), HOT vorziehen. Der Tagesplan
+    plant pausierte/seltene Segmente nicht jeden Tag und HOT zuerst — mit nie mehr Abrufen als der Auftrag vorsieht.
+    Suchauftrag, km-Bereiche, EZ, Zeilen, Fassung und Filter bleiben unveraendert. Jede Aenderung steht im Protokoll."""
+    alt = _modus_merken(welt)
+    leer, heiss, ruhig = _drei_safe(welt)
+    db = welt.db
+    ids = [leer["id"], heiss["id"], ruhig["id"]]
+    modell_vorher = welt.run(db[K.MODELLE].find_one({"id": _mid(welt)}, {"_id": 0}))
+    segs_vorher = {s["id"]: s for s in welt.run(db[K.SEGMENTE].find({"id": {"$in": ids}}, {"_id": 0}).to_list(10))}
+    try:
+        welt.run(OPT.modus_setzen(db, "SAFE_AUTO", wer="test-admin"))
+        erg = _rechnen(welt)
+        assert erg["safe_auto"]["modus"] == "SAFE_AUTO" and erg["safe_auto"]["angewendet"] == 3
+        w = {s["id"]: s.get("safe_auto") for s in welt.run(db[K.SEGMENTE].find({"id": {"$in": ids}}, {"_id": 0}).to_list(10))}
+        assert w[leer["id"]]["intervall_tage"] == 7 and w[leer["id"]]["pausiert"] is True
+        assert w[ruhig["id"]]["intervall_tage"] == 2 and w[ruhig["id"]]["pausiert"] is False and w[ruhig["id"]]["crawls_per_day"] == 1
+        assert w[heiss["id"]]["hot"] is True and w[heiss["id"]]["intervall_tage"] == 1
+        # nie km/EZ/Zeilen/Fassung/Filter
+        assert welt.run(db[K.MODELLE].find_one({"id": _mid(welt)}, {"_id": 0})) == modell_vorher
+        for s in welt.run(db[K.SEGMENTE].find({"id": {"$in": ids}}, {"_id": 0}).to_list(10)):
+            v = segs_vorher[s["id"]]
+            for k in ("min_km", "max_km", "year_from", "year_to", "max_items", "version", "definition_hash", "crawls_per_day", "enabled"):
+                assert s.get(k) == v.get(k), (s["id"], k)
+        # Protokoll: wer = safe_auto, alt -> neu, Grund; Vorschlaege APPLIED
+        log = welt.run(db[K.AENDERUNGEN].find({"model_id": _mid(welt)}, {"_id": 0}).to_list(10))
+        assert len(log) == 3 and all(a["wer"] == "safe_auto" and a["status"] == "aktiv" and a["grund"] for a in log)
+        pause = next(a for a in log if a["typ"] == "PAUSE_EMPTY")
+        assert pause["alt"] == {"intervall_tage": 1, "crawls_per_day": 1, "prioritaet": "normal", "pausiert": False}
+        assert pause["neu"] == {"intervall_tage": 7, "crawls_per_day": 1, "pausiert": True} and pause["estimated_monthly_saving_usd"] == 0.26
+        assert all(v["status"] == "APPLIED" and v["angewendet_von"] == "safe_auto" for v in _vorschlaege(welt) if v["typ"] in OPT.SAFE_TYPEN)
+        assert [v["status"] for v in _vorschlaege(welt) if v["typ"] in OPT.STRUKTUR_TYPEN] in ([], ["PROPOSED"]), "MERGE/SPLIT nie automatisch"
+        # zweiter Lauf: nichts doppelt
+        assert _rechnen(welt)["safe_auto"]["angewendet"] == 0
+        assert welt.run(db[K.AENDERUNGEN].count_documents({"model_id": _mid(welt), "status": "aktiv"})) == 3
+        # Tagesplan: Tag 1 alle (HOT zuerst), Tag 2 nur HOT, Tag 3 HOT + ruhig, Tag 8 wieder alle (Nachpruefung EMPTY)
+        tag = _plan_umgebung(welt, monkeypatch)
+        welt.run(db[K.SEGMENTE].update_many({"id": {"$in": ids}}, {"$unset": {"last_planned_tag": ""}}))
+        p1 = welt.run(JOBS.tagesplan(db, tag))
+        j1 = _jobs(welt, ids, tag)
+        assert len(j1) == 3 and j1[0]["segment_id"] == heiss["id"], "HOT zuerst (fruehester Slot)"
+        assert p1["safe_auto"] is True and p1["ruhend"] == 0
+        assert len({j["scheduled_at"] for j in j1}) == 3
+        erwartet = {1: [heiss["id"]], 2: [heiss["id"], ruhig["id"]], 3: [heiss["id"]], 7: [heiss["id"], leer["id"]]}
+        for n in range(1, 8):
+            t = _plus(tag, n)
+            welt.run(JOBS.tagesplan(db, t))
+            geplant = sorted(j["segment_id"] for j in _jobs(welt, ids, t))
+            soll = sorted(erwartet.get(n, [heiss["id"]] + ([ruhig["id"]] if n % 2 == 0 else [])))
+            assert geplant == soll, (n, geplant)
+        # nie mehr Abrufe als vorgesehen: je Segment und Tag hoechstens ein Job (crawls_per_day 1, HOT bleibt 1x)
+        alle = welt.run(db[K.JOBS].find({"segment_id": {"$in": ids}}, {"_id": 0, "segment_id": 1, "tag": 1}).to_list(200))
+        assert all("#" not in j["tag"] for j in alle) and len(alle) == len({(j["segment_id"], j["tag"]) for j in alle})
+    finally:
+        welt.run(db[K.BUDGET].delete_many({"_id": f"test-{welt.w.s}"}))
+        welt.run(db[K.KONFIG].delete_many({"_id": K.TAGESPLAN_DOK, "tag": {"$regex": "^2099"}}))
+        _modus_zurueck(welt, alt)
+        _aufraeumen(welt)
+
+
+def test_10_safe_auto_senkt_nur_und_nachpruefung_bestaetigt_oder_hebt_auf(welt, monkeypatch):
+    """HOT mit 2x-Empfehlung erhoeht nie die Abrufe (Auftrag 1x taeglich bleibt 1x). Pausierte EMPTY-Segmente werden
+    in festen Abstaenden nachgeprueft: bleiben die Nachpruefungen leer, bleibt EMPTY (auch mit wenigen Laeufen im
+    Fenster) und die Pause steht; findet eine Nachpruefung Autos, entfaellt die Pause (Protokoll: aufgehoben)."""
+    alt = _modus_merken(welt)
+    leer, heiss, ruhig = _drei_safe(welt)
+    db = welt.db
+    try:
+        welt.run(OPT.modus_setzen(db, "SAFE_AUTO", wer="test-admin"))
+        _rechnen(welt)
+        assert welt.run(db[K.SEGMENTE].find_one({"id": heiss["id"]}))["safe_auto"].get("crawls_per_day") is None, "nie mehr Abrufe"
+        # nur noch Nachpruefungen alle 7 Tage im Fenster (4 leere Laeufe) -> EMPTY bleibt bestaetigt
+        welt.run(db[K.TAGESSTATS].delete_many({"segment_id": leer["id"]}))
+        for i in (0, 7, 14, 21):
+            _doc(welt, leer, _t(i), 0)
+        _rechnen(welt)
+        h = welt.run(db[K.HEALTH].find_one({"segment_id": leer["id"]}, {"_id": 0}))
+        assert h["health"] == "EMPTY" and h["valid_runs"] == 4 and h["erwarteter_abstand_tage"] == 7 and h["health"] != "STALE"
+        assert H.min_laeufe(H.MIN_LAEUFE_EMPTY, {"intervall_tage": 7}) == 4 and H.min_laeufe(H.MIN_LAEUFE_EMPTY, None) == 14
+        assert welt.run(db[K.AENDERUNGEN].count_documents({"segment_id": leer["id"], "status": "aktiv"})) == 1
+        # Nachpruefung findet Autos -> nicht mehr EMPTY -> Pause aufgehoben (wer safe_auto, Grund)
+        _doc(welt, leer, _t(0), 3)
+        _doc(welt, leer, _t(7), 2)
+        _rechnen(welt)
+        a = welt.run(db[K.AENDERUNGEN].find_one({"segment_id": leer["id"], "typ": "PAUSE_EMPTY"}, {"_id": 0}))
+        assert a["status"] == "aufgehoben" and a["beendet_von"] == "safe_auto" and a["beendet_grund"] == "Empfehlung entfallen"
+        seg = welt.run(db[K.SEGMENTE].find_one({"id": leer["id"]}, {"_id": 0}))
+        assert not (seg.get("safe_auto") or {}).get("pausiert")
+    finally:
+        _modus_zurueck(welt, alt)
+        _aufraeumen(welt)
+
+
+def test_11_ruecknahme_einzeln(welt):
+    """Jede SAFE_AUTO-Aenderung ist einzeln ruecknehmbar: Wirkung weg, Vorschlag abgelehnt (wird nie wieder
+    angewendet), Segment 30 Tage ohne neue SAFE_AUTO-Wirkung; das Protokoll behaelt den Eintrag (zurueckgenommen)."""
+    alt = _modus_merken(welt)
+    leer, heiss, ruhig = _drei_safe(welt)
+    db = welt.db
+    try:
+        welt.run(OPT.modus_setzen(db, "SAFE_AUTO", wer="test-admin"))
+        _rechnen(welt)
+        a = welt.run(db[K.AENDERUNGEN].find_one({"segment_id": ruhig["id"], "status": "aktiv"}, {"_id": 0}))
+        erg = welt.run(OPT.aenderung_zuruecknehmen(db, a["id"], wer="test-admin"))
+        assert erg["status"] == "zurueckgenommen" and erg["beendet_von"] == "test-admin" and erg["sperre_bis"]
+        seg = welt.run(db[K.SEGMENTE].find_one({"id": ruhig["id"]}, {"_id": 0}))
+        assert "safe_auto" not in seg and seg["safe_auto_sperre_bis"] == erg["sperre_bis"]
+        assert welt.run(db[K.VORSCHLAEGE].find_one({"id": a["vorschlag_id"]}, {"_id": 0}))["status"] == "REJECTED"
+        _rechnen(welt)
+        assert welt.run(db[K.AENDERUNGEN].count_documents({"segment_id": ruhig["id"], "status": "aktiv"})) == 0, "nicht wieder angewendet"
+        assert welt.run(db[K.AENDERUNGEN].count_documents({"segment_id": ruhig["id"]})) == 1, "Protokoll bleibt"
+        with pytest.raises(OPT.Konflikt):
+            welt.run(OPT.aenderung_zuruecknehmen(db, a["id"], wer="test-admin"))
+        with pytest.raises(OPT.NichtGefunden):
+            welt.run(OPT.aenderung_zuruecknehmen(db, "gibt-es-nicht", wer="test-admin"))
+        # Ablehnen eines angewendeten Vorschlags nimmt die Wirkung ebenfalls zurueck
+        v_hot = next(v for v in _vorschlaege(welt) if v["typ"] == "PRIORITIZE_HOT")
+        welt.run(OPT.vorschlag_entscheiden(db, v_hot["id"], "ablehnen", wer="test-admin"))
+        assert "safe_auto" not in welt.run(db[K.SEGMENTE].find_one({"id": heiss["id"]}, {"_id": 0}))
+        assert welt.run(db[K.AENDERUNGEN].find_one({"segment_id": heiss["id"]}, {"_id": 0}))["status"] == "zurueckgenommen"
+    finally:
+        _modus_zurueck(welt, alt)
+        _aufraeumen(welt)
+
+
+def test_12_zurueck_auf_observe_hebt_alle_wirkungen_auf(welt, monkeypatch):
+    """Zurueck auf OBSERVE hebt alle SAFE_AUTO-Wirkungen auf (Protokoll: aufgehoben, Vorschlaege wieder offen) — und
+    der Tagesplan beachtet eine Wirkung am Segment ohnehin nur im Modus SAFE_AUTO (naechster Tagesplan wie vorher)."""
+    alt = _modus_merken(welt)
+    leer, heiss, ruhig = _drei_safe(welt)
+    db = welt.db
+    ids = [leer["id"], heiss["id"], ruhig["id"]]
+    try:
+        welt.run(OPT.modus_setzen(db, "SAFE_AUTO", wer="test-admin"))
+        _rechnen(welt)
+        tag = _plan_umgebung(welt, monkeypatch, buendel="10")
+        welt.run(JOBS.tagesplan(db, tag))
+        assert len(_jobs(welt, ids, _plus(tag, 0))) == 3
+        welt.run(JOBS.tagesplan(db, _plus(tag, 1)))
+        assert [j["segment_id"] for j in _jobs(welt, ids, _plus(tag, 1))] == [heiss["id"]]
+        erg = welt.run(OPT.modus_setzen(db, "OBSERVE", wer="test-admin"))
+        assert erg["modus"] == "OBSERVE" and erg["vorher"] == "SAFE_AUTO" and erg["aufgehoben"] >= 3
+        assert welt.run(db[K.SEGMENTE].count_documents({"id": {"$in": ids}, "safe_auto": {"$exists": True}})) == 0
+        assert welt.run(db[K.AENDERUNGEN].count_documents({"model_id": _mid(welt), "status": "aktiv"})) == 0
+        assert all(a["beendet_grund"] == "Modus OBSERVE" for a in welt.run(db[K.AENDERUNGEN].find({"model_id": _mid(welt)}).to_list(10)))
+        assert all(v["status"] == "PROPOSED" for v in _vorschlaege(welt) if v["typ"] in OPT.SAFE_TYPEN)
+        welt.run(JOBS.tagesplan(db, _plus(tag, 2)))
+        assert len(_jobs(welt, ids, _plus(tag, 2))) == 3, "naechster Tagesplan wie ohne SAFE_AUTO"
+        # Gating: eine (z. B. nach einer Wiederherstellung) stehengebliebene Wirkung zaehlt in OBSERVE nicht
+        welt.run(db[K.SEGMENTE].update_one({"id": leer["id"]}, {"$set": {"safe_auto": {"intervall_tage": 30, "pausiert": True}}}))
+        welt.run(JOBS.tagesplan(db, _plus(tag, 3)))
+        assert leer["id"] in [j["segment_id"] for j in _jobs(welt, ids, _plus(tag, 3))]
+        # OBSERVE rechnet weiter Empfehlungen, wendet aber nichts an
+        erg = _rechnen(welt)
+        assert erg["safe_auto"]["angewendet"] == 0 and erg["safe_auto"]["modus"] == "OBSERVE"
+    finally:
+        welt.run(db[K.BUDGET].delete_many({"_id": f"test-{welt.w.s}"}))
+        welt.run(db[K.KONFIG].delete_many({"_id": K.TAGESPLAN_DOK, "tag": {"$regex": "^2099"}}))
+        _modus_zurueck(welt, alt)
+        _aufraeumen(welt)
+
+
+def test_13_full_auto_gesperrt_zwei_server_und_routen(welt, monkeypatch):
+    """FULL_AUTO ist gesperrt; neue Wirkungen nur ab Confidence MEDIUM; zwei gleichzeitige Anwendungen legen jede
+    Wirkung nur einmal an (Teil-Unique-Index); Routen: Modus/Ruecknahme nur Super-Admin mit Protokoll, Lesen Admin."""
+    from fastapi import HTTPException
+    MA = _module("routes.markt_admin")
+    monkeypatch.setattr(MA, "db", welt.db)
+    alt = _modus_merken(welt)
+    leer, heiss, ruhig = _drei_safe(welt)
+    db = welt.db
+    admin = {"id": "test-admin"}
+    try:
+        with pytest.raises(OPT.Ungueltig):
+            welt.run(OPT.modus_setzen(db, "FULL_AUTO", wer="test-admin"))
+        with pytest.raises(HTTPException) as ex:
+            welt.run(MA.admin_market_optimierung_modus(MA.ModusIn(modus="FULL_AUTO"), admin=admin))
+        assert ex.value.status_code == 400
+        info = welt.run(db[K.AENDERUNGEN].index_information())
+        assert info["markt_aenderung_aktiv"].get("unique") and info["markt_aenderung_aktiv"]["partialFilterExpression"] == {"status": "aktiv"}
+        _rechnen(welt)                                     # OBSERVE: nur Vorschlaege
+        welt.run(db[K.KONFIG].update_one({"_id": K.OPTIMIERUNG_DOK}, {"$set": {"modus": "SAFE_AUTO"}}, upsert=True))
+
+        async def _zwei():
+            return await asyncio.gather(*[OPT.safe_auto_anwenden(db, tag=_t(0), model_ids=[_mid(welt)]) for _ in range(2)])
+        welt.run(_zwei())
+        assert welt.run(db[K.AENDERUNGEN].count_documents({"model_id": _mid(welt), "status": "aktiv"})) == 3
+        # Confidence LOW -> keine neue Wirkung
+        welt.run(OPT.alle_aufheben(db, grund="Test", wer="test"))
+        welt.run(db[K.VORSCHLAEGE].update_many({"model_id": _mid(welt)}, {"$set": {"confidence": "LOW", "status": "PROPOSED"}}))
+        assert welt.run(OPT.safe_auto_anwenden(db, tag=_t(0), model_ids=[_mid(welt)]))["angewendet"] == 0
+        # Routen
+        r = welt.run(MA.admin_market_optimierung_modus(MA.ModusIn(modus="SAFE_AUTO"), admin=admin))
+        assert r["modus"] == "SAFE_AUTO"
+        welt.run(db[K.VORSCHLAEGE].update_many({"model_id": _mid(welt)}, {"$set": {"confidence": "MEDIUM"}}))
+        welt.run(OPT.safe_auto_anwenden(db, tag=_t(0), model_ids=[_mid(welt)]))
+        liste = welt.run(MA.admin_market_optimierung_aenderungen(status="aktiv", model_id=_mid(welt), limit=50, _=admin))
+        assert liste["anzahl"] == 3
+        zur = welt.run(MA.admin_market_aenderung_zuruecknehmen(liste["aenderungen"][0]["id"], admin=admin))
+        assert zur["aenderung"]["status"] == "zurueckgenommen"
+        with pytest.raises(HTTPException) as ex:
+            welt.run(MA.admin_market_aenderung_zuruecknehmen(liste["aenderungen"][0]["id"], admin=admin))
+        assert ex.value.status_code == 409
+        with pytest.raises(HTTPException) as ex:
+            welt.run(MA.admin_market_aenderung_zuruecknehmen("gibt-es-nicht", admin=admin))
+        assert ex.value.status_code == 404
+        u = welt.run(MA.admin_market_optimierung(_=admin))
+        assert u["modus"] == "SAFE_AUTO" and u["modi"][1]["gesperrt"] is False and u["modi"][2]["gesperrt"] is True
+        aktiv = welt.run(db[K.AENDERUNGEN].find({"status": "aktiv"}, {"_id": 0}).to_list(100))
+        assert u["safe_auto_aktiv"] == len(aktiv) == 2
+        assert u["ersparnis_safe_auto_usd"] == round(sum(float(a.get("estimated_monthly_saving_usd") or 0) for a in aktiv
+                                                         if float(a.get("estimated_monthly_saving_usd") or 0) > 0), 2)
+        src = (Path(__file__).resolve().parent.parent / "routes" / "markt_admin.py").read_text(encoding="utf-8")
+        for pfad in ('@router.put("/admin/market/optimierung/modus")', '@router.post("/admin/market/optimierung/aenderungen/{aenderung_id}/zuruecknehmen")'):
+            kopf = src.split(pfad)[1].split("\n\n")[0]
+            assert "current_super_admin" in kopf and "log_activity_sicher" in kopf, pfad
+        kopf = src.split('@router.get("/admin/market/optimierung/aenderungen")')[1].split("\n\n")[0]
+        assert "Depends(current_admin)" in kopf
+        # der Tagesplan liest den Modus (ohne lesbaren Modus: OBSERVE)
+        q = inspect.getsource(JOBS.tagesplan)
+        assert "_safe_auto_an(db)" in q and "MODUS_SAFE_AUTO" in inspect.getsource(JOBS._safe_auto_an)
+    finally:
+        _modus_zurueck(welt, alt)
+        _aufraeumen(welt)

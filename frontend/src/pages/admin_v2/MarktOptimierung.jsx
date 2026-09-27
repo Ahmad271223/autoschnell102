@@ -7,7 +7,8 @@ import { useAuth } from "@/context/AuthContext";
 import { PageHeader, Card, Badge, Button, Spinner, EmptyState } from "./_ui";
 import { HealthBadge, HealthZaehler } from "@/components/MarktHealth";
 import {
-  DATENQUALITAET, OPTIMIERUNG_MODUS, VORSCHLAG_STATUS, VORSCHLAG_TYP, datumZeit, ersparnisText, frequenzText, healthInfo, pct,
+  AENDERUNG_STATUS, DATENQUALITAET, OPTIMIERUNG_MODUS, VORSCHLAG_STATUS, VORSCHLAG_TYP, datumZeit, ersparnisText, frequenzText, healthInfo, pct,
+  wirkungText,
 } from "@/lib/markt";
 
 /**
@@ -16,7 +17,13 @@ import {
  * konfigurierbare Zuordnung Activity Score → empfohlene Frequenz, Optimierungsvorschläge mit Annehmen/Ablehnen/
  * Übernehmen (Zusammenlegen/Aufteilen nur per Übernahme durch den Super-Admin: neue Fassung, Auftrag pausiert,
  * danach Testlauf), geschätzte Ersparnis aus den echten Crawl-Kosten. Lesen: Admin; Schreiben: Super-Admin.
+ * Phase G: Modus-Schalter OBSERVE ↔ SAFE_AUTO (FULL_AUTO gesperrt, mit Rückfrage) und das Protokoll der
+ * SAFE_AUTO-Änderungen (wer, alt → neu, Grund) mit Rücknahme je Eintrag.
  */
+const MODUS_FRAGE = {
+  SAFE_AUTO: "SAFE_AUTO einschalten?\n\nDas System darf dann NUR:\n• die Abruf-Frequenz einzelner Segmente senken,\n• EMPTY-Segmente pausieren (Nachprüfung in festen Abständen),\n• HOT-Segmente im Tagesplan zuerst planen.\n\nNie km-Bereiche, EZ-Jahre, Zeilen oder Filter ändern, nie mehr Abrufe als der Suchauftrag vorsieht. Jede Änderung steht im Protokoll und ist einzeln rücknehmbar.",
+  OBSERVE: "Zurück auf OBSERVE?\n\nAlle SAFE_AUTO-Wirkungen werden aufgehoben — ab dem nächsten Tagesplan wird wieder jedes Segment wie vom Suchauftrag vorgesehen geplant. Die Empfehlungen bleiben sichtbar.",
+};
 const STATUS_FILTER = [["offen", "offen"], ["alle", "alle"], ["PROPOSED", "vorgeschlagen"], ["ACCEPTED", "angenommen"],
   ["APPLIED", "übernommen"], ["REJECTED", "abgelehnt"], ["OBSOLETE", "überholt"]];
 const STRUKTUR = ["MERGE_KM_BUCKETS", "SPLIT_KM_BUCKET"];
@@ -63,7 +70,15 @@ export default function MarktOptimierung() {
   const [filter, setFilter] = useState({ status: "offen", typ: "" });
   const [fehler, setFehler] = useState("");
   const [busy, setBusy] = useState("");
+  const [aenderungen, setAenderungen] = useState(null);
+  const [protokollStatus, setProtokollStatus] = useState("alle");
 
+  const ladenAenderungen = useCallback(async (st) => {
+    try {
+      const r = await api.get("/admin/market/optimierung/aenderungen", { params: { status: st, limit: 200 } });
+      setAenderungen(r.data?.aenderungen || []);
+    } catch (e) { setAenderungen([]); toast.error(errMsg(e, "SAFE_AUTO-Protokoll konnte nicht geladen werden")); }
+  }, []);
   const ladenVorschlaege = useCallback(async (f) => {
     try {
       const p = { status: f.status, limit: 300 };
@@ -72,22 +87,33 @@ export default function MarktOptimierung() {
       setVorschlaege(r.data?.vorschlaege || []);
     } catch (e) { setVorschlaege([]); toast.error(errMsg(e, "Vorschläge konnten nicht geladen werden")); }
   }, []);
-  const laden = useCallback(async (f) => {
+  const laden = useCallback(async (f, st) => {
     try {
       const r = await api.get("/admin/market/optimierung");
       setDaten(r.data);
       setFehler("");
     } catch (e) { setFehler(errMsg(e, "Segment-Optimierung konnte nicht geladen werden")); }
     await ladenVorschlaege(f);
-  }, [ladenVorschlaege]);
-  useEffect(() => { laden({ status: "offen", typ: "" }); }, [laden]);
+    await ladenAenderungen(st);
+  }, [ladenVorschlaege, ladenAenderungen]);
+  useEffect(() => { laden({ status: "offen", typ: "" }, "alle"); }, [laden]);
 
   const filterSetzen = (k, v) => { const f = { ...filter, [k]: v }; setFilter(f); ladenVorschlaege(f); };
+  const protokollSetzen = (st) => { setProtokollStatus(st); ladenAenderungen(st); };
   const aktion = async (name, fn, erfolg) => {
     setBusy(name);
-    try { const r = await fn(); toast.success(typeof erfolg === "function" ? erfolg(r.data) : erfolg); await laden(filter); }
+    try { const r = await fn(); toast.success(typeof erfolg === "function" ? erfolg(r.data) : erfolg); await laden(filter, protokollStatus); }
     catch (e) { toast.error(errMsg(e, "Aktion fehlgeschlagen")); }
     finally { setBusy(""); }
+  };
+  const modusSetzen = (modus) => {
+    if (!window.confirm(MODUS_FRAGE[modus] || `Modus ${modus} setzen?`)) return;
+    aktion(`modus-${modus}`, () => api.put("/admin/market/optimierung/modus", { modus }),
+      (d) => (d.modus === "SAFE_AUTO" ? `SAFE_AUTO an — ${d.safe_auto?.angewendet ?? 0} Änderung(en) angewendet` : `OBSERVE — ${d.aufgehoben ?? 0} Wirkung(en) aufgehoben`));
+  };
+  const zuruecknehmen = (a) => {
+    if (!window.confirm(`Diese SAFE_AUTO-Änderung zurücknehmen?\n\n${a.label || a.model_id} · ${[a.ez_label, a.km_label].filter(Boolean).join(" · ")}\n${wirkungText(a.alt)} → ${wirkungText(a.neu)}\n\nDer Vorschlag gilt dann als abgelehnt; SAFE_AUTO lässt das Segment 30 Tage in Ruhe.`)) return;
+    aktion(`zurueck-${a.id}`, () => api.post(`/admin/market/optimierung/aenderungen/${a.id}/zuruecknehmen`), "Änderung zurückgenommen");
   };
   const berechnen = () => aktion("berechnen", () => api.post("/admin/market/optimierung/berechnen"),
     (d) => `Health berechnet: ${d.segmente ?? 0} Segmente in ${d.modelle ?? 0} Aufträgen · ${d.vorschlaege_neu ?? 0} neue Vorschläge`);
@@ -102,7 +128,7 @@ export default function MarktOptimierung() {
 
   if (fehler) {
     return <Card data-testid="opt-fehler"><div className="text-red-300 text-sm">{fehler}</div>
-      <Button size="sm" className="mt-2" onClick={() => laden(filter)}><RefreshCw size={14} /> Erneut laden</Button></Card>;
+      <Button size="sm" className="mt-2" onClick={() => laden(filter, protokollStatus)}><RefreshCw size={14} /> Erneut laden</Button></Card>;
   }
   if (!daten) return <div className="flex items-center gap-2 text-zinc-500 text-sm py-10"><Spinner /> lade…</div>;
   const stand = daten.stand || {};
@@ -111,7 +137,7 @@ export default function MarktOptimierung() {
       <Link to="/admin/markt" className="inline-flex items-center gap-1.5 text-xs text-zinc-400 hover:text-white mb-2"><ArrowLeft size={14} /> Marktanalyse</Link>
       <PageHeader title="Segment-Optimierung" subtitle="Wie sinnvoll ist jedes Segment? Health, empfohlene Frequenz und Vorschläge — nur aus gespeicherten Tageswerten, keine Zusatzabrufe, keine Kosten."
                   action={<div className="flex gap-2">
-                    <Button variant="outline" size="sm" onClick={() => laden(filter)}><RefreshCw size={14} /> Aktualisieren</Button>
+                    <Button variant="outline" size="sm" onClick={() => laden(filter, protokollStatus)}><RefreshCw size={14} /> Aktualisieren</Button>
                     {superAdmin && <Button size="sm" onClick={berechnen} disabled={!!busy} data-testid="opt-berechnen"
                                            title="Sonst einmal täglich nach dem Crawl-Fenster im Hintergrund"><Play size={14} /> Health jetzt berechnen</Button>}
                   </div>} />
@@ -133,20 +159,25 @@ export default function MarktOptimierung() {
                    style={{ background: aktiv ? "var(--wa-12)" : "var(--wa-06)", border: `1px solid ${aktiv ? "var(--st-gruen)" : "var(--wa-08)"}` }}>
                 <div className="font-semibold text-white inline-flex items-center gap-1">{m.gesperrt && <Lock size={12} />}{m.modus}{aktiv ? " · aktiv" : ""}</div>
                 <div className="text-zinc-400 mt-0.5">{m.text}</div>
+                {/* Phase G: Umschalten nur Super-Admin, mit Rückfrage und Protokoll; FULL_AUTO bleibt gesperrt */}
+                {superAdmin && !aktiv && !m.gesperrt && (
+                  <Button size="sm" variant="outline" className="mt-2" disabled={!!busy} onClick={() => modusSetzen(m.modus)} data-testid={`opt-modus-setzen-${m.modus}`}>
+                    {m.modus === "OBSERVE" ? "Zurück auf OBSERVE" : `${m.modus} einschalten`}</Button>
+                )}
               </div>
             );
           })}
         </div>
       </Card>
 
-      <FrequenzKarte daten={daten} superAdmin={superAdmin} onGespeichert={() => laden(filter)} />
+      <FrequenzKarte daten={daten} superAdmin={superAdmin} onGespeichert={() => laden(filter, protokollStatus)} />
 
       <Card className="mb-4" data-testid="opt-uebersicht">
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-[12px]">
           <Kachel label="Segmente je Health" wert={<HealthZaehler zaehler={daten.zaehler} testid="opt-zaehler" />} />
           <Kachel label="Offene Vorschläge" wert={String((daten.vorschlaege_je_status?.PROPOSED || 0) + (daten.vorschlaege_je_status?.ACCEPTED || 0))} />
           <Kachel label="Geschätzte Ersparnis (offene Vorschläge)" wert={ersparnisText(daten.ersparnis_offen_usd)} testid="opt-ersparnis" />
-          <Kachel label="Auswertung" wert="0 $ — nur gespeicherte Tageswerte" />
+          <Kachel label={`Ersparnis durch SAFE_AUTO (${daten.safe_auto_aktiv ?? 0} aktive Änderungen)`} wert={ersparnisText(daten.ersparnis_safe_auto_usd)} testid="opt-ersparnis-safe-auto" />
         </div>
         {daten.schwellen && <div className="mt-2 text-[11px] text-zinc-500" data-testid="opt-schwellen">
           Fenster {daten.schwellen.fenster_tage} Tage · EMPTY ab {daten.schwellen.min_laeufe_empty} gültigen Läufen mit ≥ {Math.round(daten.schwellen.empty_anteil * 100)} % ohne Treffer ·
@@ -217,6 +248,43 @@ export default function MarktOptimierung() {
             </div>
           )}
       </Card>
+
+      <Card padded={false} className="mb-4" data-testid="opt-protokoll">
+        <div className="px-4 py-3 flex flex-wrap items-center gap-2 text-[13px]" style={{ borderBottom: "1px solid var(--wa-08)" }}>
+          <span className="font-semibold text-white">Protokoll der SAFE_AUTO-Änderungen</span>
+          <select className="rounded-lg px-2 py-1 text-[12px]" style={{ background: "var(--bg-input-solid)", color: "var(--text-primary)", border: "1px solid var(--wa-12)" }}
+                  value={protokollStatus} onChange={(e) => protokollSetzen(e.target.value)} data-testid="opt-protokoll-status">
+            <option value="alle">alle</option>
+            {Object.entries(AENDERUNG_STATUS).map(([k, v]) => <option key={k} value={k}>{v.text}</option>)}
+          </select>
+          <span className="text-[11px] text-zinc-500">SAFE_AUTO ändert nur die Planung (seltener, pausiert mit Nachprüfung, HOT zuerst) — nie km-Bereiche, EZ, Zeilen oder Filter.</span>
+        </div>
+        {!aenderungen ? <div className="flex items-center gap-2 text-zinc-500 text-sm p-4"><Spinner /> lade…</div>
+          : aenderungen.length === 0 ? <EmptyState title="Keine SAFE_AUTO-Änderungen" hint={daten.modus === "SAFE_AUTO" ? "SAFE_AUTO ist an — es gab noch keinen Anlass für eine Änderung." : "Im Modus OBSERVE ändert das System nichts, es gibt nur Empfehlungen."} /> : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-[12px] min-w-[1000px]">
+                <thead><tr className="text-left text-zinc-500 text-[11px] uppercase tracking-wide">
+                  <th className="px-3 py-2">Zeit</th><th className="px-3 py-2">Wer</th><th className="px-3 py-2">Segment</th><th className="px-3 py-2">alt → neu</th>
+                  <th className="px-3 py-2">Grund</th><th className="px-3 py-2 text-right">Ersparnis</th><th className="px-3 py-2">Status</th><th className="px-3 py-2 text-right">Aktion</th>
+                </tr></thead>
+                <tbody>{aenderungen.map((a) => (
+                  <tr key={a.id} className="border-t border-white/5 align-top" data-testid={`opt-aenderung-${a.id}`}>
+                    <td className="px-3 py-1.5 whitespace-nowrap">{datumZeit(a.at)}</td>
+                    <td className="px-3 py-1.5">{a.wer === "safe_auto" ? "SAFE_AUTO" : a.wer}</td>
+                    <td className="px-3 py-1.5"><Link to={`/admin/markt/${a.model_id}?segment=${encodeURIComponent(a.segment_id)}`} className="text-white hover:underline">{a.label || a.model_id}</Link>
+                      <div className="text-[10px] text-zinc-500">{[a.ez_label, a.km_label].filter(Boolean).join(" · ")} · {VORSCHLAG_TYP[a.typ] || a.typ}</div></td>
+                    <td className="px-3 py-1.5 whitespace-nowrap" data-testid={`opt-aenderung-wirkung-${a.id}`}>{wirkungText(a.alt)} → {wirkungText(a.neu)}</td>
+                    <td className="px-3 py-1.5 text-zinc-300">{a.grund}{a.status !== "aktiv" && a.beendet_grund && <div className="text-[10px] text-zinc-500">beendet {datumZeit(a.beendet_at)} von {a.beendet_von === "safe_auto" ? "SAFE_AUTO" : a.beendet_von}: {a.beendet_grund}</div>}</td>
+                    <td className="px-3 py-1.5 text-right whitespace-nowrap">{ersparnisText(a.estimated_monthly_saving_usd)}</td>
+                    <td className="px-3 py-1.5"><Badge tone={(AENDERUNG_STATUS[a.status] || {}).tone || "gray"}>{(AENDERUNG_STATUS[a.status] || {}).text || a.status}</Badge></td>
+                    <td className="px-3 py-1.5 text-right">{superAdmin && a.status === "aktiv" && (
+                      <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => zuruecknehmen(a)} data-testid={`opt-zuruecknehmen-${a.id}`}>Zurücknehmen</Button>)}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+          )}
+      </Card>
     </div>
   );
 }
@@ -252,7 +320,7 @@ function ModellZeile({ m }) {
                 <thead><tr className="text-left text-zinc-500">
                   <th className="px-2 py-1">Segment</th><th className="px-2 py-1">Health</th><th className="px-2 py-1 text-right">Score</th><th className="px-2 py-1">Empfohlen</th>
                   <th className="px-2 py-1 text-right">gültige Läufe</th><th className="px-2 py-1 text-right">Ø Autos</th><th className="px-2 py-1 text-right">leer</th>
-                  <th className="px-2 py-1">Qualität</th><th className="px-2 py-1">Confidence</th><th className="px-2 py-1">Grund</th>
+                  <th className="px-2 py-1">Qualität</th><th className="px-2 py-1">Confidence</th><th className="px-2 py-1">Grund</th><th className="px-2 py-1">SAFE_AUTO</th>
                 </tr></thead>
                 <tbody>{(detail.segmente || []).map((s) => (
                   <tr key={s.segment_id} className={`border-t border-white/5 tabular-nums ${s.enabled ? "" : "opacity-50"}`} data-testid={`opt-segment-${s.segment_id}`}>
@@ -266,6 +334,7 @@ function ModellZeile({ m }) {
                     <td className="px-2 py-1" style={{ color: (DATENQUALITAET[s.data_quality] || DATENQUALITAET.UNKNOWN).farbe }}>{(DATENQUALITAET[s.data_quality] || DATENQUALITAET.UNKNOWN).zaehler}</td>
                     <td className="px-2 py-1">{s.confidence || "—"}</td>
                     <td className="px-2 py-1 text-zinc-400">{s.health_text || ""}</td>
+                    <td className="px-2 py-1" data-testid={`opt-segment-wirkung-${s.segment_id}`}>{s.safe_auto_wirkung ? wirkungText(s.safe_auto_wirkung) : "—"}</td>
                   </tr>
                 ))}</tbody>
               </table>
@@ -296,7 +365,7 @@ function FrequenzKarte({ daten, superAdmin, onGespeichert }) {
   return (
     <Card className="mb-4" data-testid="opt-frequenz">
       <div className="text-[13px] font-semibold text-white mb-1">Frequenz-Zuordnung (Activity Score → empfohlene Frequenz)</div>
-      <div className="text-[11px] text-zinc-500 mb-2">Nur eine Empfehlung — im Modus OBSERVE ändert sie nichts am Tagesplan. EMPTY: pausiert mit Nachprüfung.</div>
+      <div className="text-[11px] text-zinc-500 mb-2">Im Modus OBSERVE nur eine Empfehlung; in SAFE_AUTO wird damit nur gesenkt (nie häufiger als der Suchauftrag vorsieht). EMPTY: pausiert mit Nachprüfung.</div>
       <table className="text-[12px]">
         <thead><tr className="text-left text-zinc-500 text-[11px]"><th className="pr-3 py-1">ab Score</th><th className="pr-3 py-1">Abrufe je Tag</th><th className="pr-3 py-1">alle … Tage</th><th className="pr-3 py-1">bis … Tage (Spanne)</th></tr></thead>
         <tbody>{stufen.map((s, i) => (
