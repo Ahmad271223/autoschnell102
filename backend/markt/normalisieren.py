@@ -197,7 +197,9 @@ def listing_aus_item(item: Dict[str, Any], *, beschaedigte_verwerfen: bool = Tru
         "seller_type": seller_type,
         "seller_id": None if privat else (str(item.get("sellerId") or "") or None),
         "postal_code": plz or None, "city": ort or None,
-        "country": item.get("country") or item.get("sellerCountry") or seller.get("country") or None,
+        # Live-Befund 27.09.2026: Verkaeuferland zuerst (scrapesmith: country = Marktplatz "GERMANY")
+        "country": (land_code(item.get("sellerCountry")) or land_code(seller.get("country"))
+                    or land_code(item.get("country"))),
         "latitude": lat, "longitude": lon,
         "mobile_created_at": _iso(item.get("createdAt")), "mobile_modified_at": _iso(item.get("modifiedAt")),
         "mobile_renewed_at": _iso(item.get("renewedAt")), "mobile_scraped_at": _iso(item.get("scrapedAt")),
@@ -337,6 +339,53 @@ KAROSSERIE_CODES = ("Limousine", "EstateCar", "OffRoad", "Cabrio", "SportsCar", 
 # der Vergleich "haendler"/"privat" — alles auf DEALER/PRIVATE abgebildet
 VERKAEUFER_CODES = {"DEALER": "DEALER", "HAENDLER": "DEALER", "FSBO": "PRIVATE", "PRIVATE": "PRIVATE", "PRIVAT": "PRIVATE"}
 
+# Live-Befund 27.09.2026 (Betriebsalarm markt_filter_ignoriert 447x "land GE != DE"): scrapesmith liefert je Zeile
+# country "GERMANY" (das Land des MARKTPLATZES mobile.de, bei jeder Zeile gleich) und sellerCountry "DE"/"IT" (das Land
+# des VERKAEUFERS). Die Zeile nahm zuerst country, und [:2] machte aus GERMANY "GE" — jede Zeile fiel durch die
+# Land-Pruefung, kein Lauf lieferte Daten. Jetzt: Verkaeuferland zuerst, Laendernamen/ISO3/Kfz-Kennzeichen -> ISO-2.
+# Unbekannte Angaben ergeben None (tolerant wie eine fehlende Angabe) — nie ein abgeschnittener Name.
+LAENDER_CODES = {
+    "DE": "DE", "D": "DE", "DEU": "DE", "GERMANY": "DE", "DEUTSCHLAND": "DE",
+    "AT": "AT", "A": "AT", "AUT": "AT", "AUSTRIA": "AT", "OESTERREICH": "AT", "ÖSTERREICH": "AT",
+    "CH": "CH", "CHE": "CH", "SWITZERLAND": "CH", "SCHWEIZ": "CH",
+    "IT": "IT", "I": "IT", "ITA": "IT", "ITALY": "IT", "ITALIEN": "IT",
+    "FR": "FR", "F": "FR", "FRA": "FR", "FRANCE": "FR", "FRANKREICH": "FR",
+    "BE": "BE", "B": "BE", "BEL": "BE", "BELGIUM": "BE", "BELGIEN": "BE",
+    "NL": "NL", "NLD": "NL", "NETHERLANDS": "NL", "THE NETHERLANDS": "NL", "NIEDERLANDE": "NL", "HOLLAND": "NL",
+    "LU": "LU", "L": "LU", "LUX": "LU", "LUXEMBOURG": "LU", "LUXEMBURG": "LU",
+    "PL": "PL", "POL": "PL", "POLAND": "PL", "POLEN": "PL",
+    "CZ": "CZ", "CZE": "CZ", "CZECHIA": "CZ", "CZECH REPUBLIC": "CZ", "TSCHECHIEN": "CZ",
+    "DK": "DK", "DNK": "DK", "DENMARK": "DK", "DAENEMARK": "DK", "DÄNEMARK": "DK",
+    "ES": "ES", "E": "ES", "ESP": "ES", "SPAIN": "ES", "SPANIEN": "ES",
+    "SE": "SE", "S": "SE", "SWE": "SE", "SWEDEN": "SE", "SCHWEDEN": "SE",
+    "HU": "HU", "HUN": "HU", "HUNGARY": "HU", "UNGARN": "HU",
+    "SK": "SK", "SVK": "SK", "SLOVAKIA": "SK", "SLOWAKEI": "SK",
+    "SI": "SI", "SVN": "SI", "SLOVENIA": "SI", "SLOWENIEN": "SI",
+    "HR": "HR", "HRV": "HR", "CROATIA": "HR", "KROATIEN": "HR",
+    "RO": "RO", "ROU": "RO", "ROMANIA": "RO", "RUMAENIEN": "RO", "RUMÄNIEN": "RO",
+    "BG": "BG", "BGR": "BG", "BULGARIA": "BG", "BULGARIEN": "BG",
+    "PT": "PT", "P": "PT", "PRT": "PT", "PORTUGAL": "PT",
+    "GB": "GB", "GBR": "GB", "UK": "GB", "UNITED KINGDOM": "GB", "GROSSBRITANNIEN": "GB",
+    "LT": "LT", "LTU": "LT", "LITHUANIA": "LT", "LITAUEN": "LT",
+    "LV": "LV", "LVA": "LV", "LATVIA": "LV", "LETTLAND": "LV",
+    "EE": "EE", "EST": "EE", "ESTONIA": "EE", "ESTLAND": "EE",
+    "GR": "GR", "GRC": "GR", "GREECE": "GR", "GRIECHENLAND": "GR",
+}
+
+
+def land_code(wert: Any) -> Optional[str]:
+    """Laenderangabe -> ISO-2 ("GERMANY", "Deutschland", "DEU", "D", "de" -> "DE"); unbekannt/leer -> None.
+    Ein unbekannter Zweibuchstaben-Code bleibt, wie er ist (ISO-2 ist die Normalform); laengere unbekannte Namen
+    werden NIE abgeschnitten (aus GERMANY wurde so "GE")."""
+    s = " ".join(str(wert or "").strip().upper().replace("_", " ").split())
+    if not s:
+        return None
+    if s in LAENDER_CODES:
+        return LAENDER_CODES[s]
+    if len(s) == 2 and s.isalpha():
+        return s
+    return None
+
 
 def karosserie_code(text: Any) -> Optional[str]:
     """mobile.de-Karosseriecode aus Code oder Beschriftung (scrapesmith 'Estate car',
@@ -475,9 +524,9 @@ def passt_zum_segment(listing: Dict[str, Any], segment: Dict[str, Any], modell: 
         ist = VERKAEUFER_CODES.get(str(listing["seller_type"]).upper(), str(listing["seller_type"]).upper())
         if ist != soll:
             return False, f"verkaeufer {ist} != {soll}"
-    if modell.get("country") and listing.get("country"):
-        if str(listing["country"]).strip().upper()[:2] != str(modell["country"]).strip().upper()[:2]:
-            return False, f"land {str(listing['country']).upper()[:2]} != {str(modell['country']).upper()[:2]}"
+    soll_land, ist_land = land_code(modell.get("country")), land_code(listing.get("country"))
+    if soll_land and ist_land and ist_land != soll_land:      # unbekannte Angabe in der Zeile: tolerant
+        return False, f"land {ist_land} != {soll_land}"
     if modell.get("fuel") or modell.get("gearbox"):
         kraftstoff_code, getriebe_code = _codes()
         if modell.get("fuel"):

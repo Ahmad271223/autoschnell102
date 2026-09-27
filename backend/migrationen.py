@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger("autohandel.migrationen")
 
-ZIEL_VERSION = 19
+ZIEL_VERSION = 20
 _SPERRE = "migration"
 
 
@@ -752,6 +752,30 @@ async def m19_markt_tagesbasis(db) -> dict:
     return z
 
 
+LAND_FEHLER_GRUND = "land GE != DE"
+
+
+async def m20_markt_land_alarme_schliessen(db) -> dict:
+    """Live-Befund 27.09.2026: scrapesmith liefert country "GERMANY" (Marktplatz), die Zeile schnitt daraus "GE" ab —
+    jede Zeile fiel durch die Land-Pruefung, der Sammel-Testlauf erzeugte 447x markt_filter_ignoriert (100 Einzel-
+    alarme + Sammelalarm). Die Ursache ist behoben (normalisieren.land_code). Geschlossen werden NUR offene Alarme
+    dieses Typs, deren Gruende ausschliesslich 'land GE != DE' sind (Einzelalarme und der Sammelalarm) — echte
+    Filterprobleme (andere Gruende) bleiben offen. Idempotent."""
+    from betrieb import _loeschen_ab, _now
+    z = {"geschlossen": 0, "geprueft": 0}
+    async for a in db.betriebsalarme.find({"typ": "markt_filter_ignoriert", "offen": True}, {"_id": 1, "details": 1}):
+        z["geprueft"] += 1
+        gruende = [g.strip() for g in str((a.get("details") or {}).get("gruende") or "").split(";") if g.strip()]
+        if gruende and all(g == LAND_FEHLER_GRUND for g in gruende):
+            r = await db.betriebsalarme.update_one(
+                {"_id": a["_id"], "offen": True},
+                {"$set": {"offen": False, "quittiert_am": _now(), "loeschen_ab": _loeschen_ab(),
+                          "quittiert_von": "system:behoben (Land GERMANY -> DE, 27.09.2026)"}})
+            z["geschlossen"] += r.modified_count
+    log.info("Migration 20 (Land-Alarme): %s", z)
+    return z
+
+
 MIGRATIONEN = [
     (1, "abos_normalisieren", m1_abos_normalisieren),
     (2, "lifecycle_nachziehen", m2_lifecycle),
@@ -779,6 +803,8 @@ MIGRATIONEN = [
     (18, "markt_masterliste_v4", m18_markt_masterliste_v4),
     # Master-Auftrag Phase C: Tagesbasis (Datenqualitaet/Markttiefe/Vollstaendigkeit, Fassung) fuer Altdaten
     (19, "markt_tagesbasis", m19_markt_tagesbasis),
+    # Live-Befund 27.09.2026: Alarme aus dem Land-Fehler (country "GERMANY" -> "GE") einmalig schliessen
+    (20, "markt_land_alarme_schliessen", m20_markt_land_alarme_schliessen),
 ]
 
 

@@ -556,6 +556,7 @@ def _item2(lid, preis, pos=1):
             "inspectionStatus": "11/2027", "color": "Black", "images": ["https://img/1"], "numImages": 11,
             "sellerType": "Dealer", "sellerId": "17536211", "sellerName": "GEHEIM GmbH", "sellerPhone": "+49 170 0", "sellerWhatsapp": "+49 170 0",
             "sellerAddress": "Hamburger Straße 273, 22083 Hamburg", "sellerCountry": "DE", "sellerLatitude": 53.58, "sellerLongitude": 10.03,
+            "country": "GERMANY",           # Live-Befund 27.09.2026: so liefert scrapesmith jede Zeile (Land des Marktplatzes)
             "createdAt": "2026-09-25T13:10:04.000Z", "modifiedAt": "2026-09-25T13:10:04.000Z", "renewedAt": "2026-09-25T13:10:04.000Z",
             "searchPosition": pos, "vinHsn": "0005", "vinTsn": "CCT", "isNew": True}
 

@@ -299,7 +299,7 @@ def test_c05_migration_altdaten_und_frische(welt):
     assert all(d["version"] == 3 and d["definition_hash"] == "d3" and d["valid_runs"] == 1 and d["last_valid_run_at"] for d in docs.values())
     assert welt.run(MIG.m19_markt_tagesbasis(db))["tagesstats"] == 0, "idempotent"
     nummern = {n: name for n, name, _ in MIG.MIGRATIONEN}
-    assert nummern[19] == "markt_tagesbasis" and MIG.ZIEL_VERSION == 19
+    assert nummern[19] == "markt_tagesbasis" and MIG.ZIEL_VERSION >= 19
     # Frische: der letzte gueltige Lauf (Tag -1, vor 20 h) ist frisch -> leerer Markt 'leer'; 72 h alt -> 'veraltet'
     st = welt.run(SP.segmentstatistik(db, seg["id"]))
     assert st["data_quality"] == "GOOD" and st["market_depth"] == "EMPTY" and st["datenlage"] == "leer"

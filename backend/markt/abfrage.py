@@ -125,7 +125,8 @@ async def modelle_fuer_fahrzeug(db, v: Dict[str, Any], *, gruende: Optional[List
     fuel, kw, getriebe = _kraftstoff_code(v), _kw(v), _getriebe_code(v)
     body = normalisieren.karosserie_code(v.get("category") or v.get("category_label") or v.get("body"))
     verkaeufer = _verkaeufer_code(v)
-    land = str(v.get("country") or v.get("seller_country") or "").strip().upper()[:2] or None
+    # Live-Befund 27.09.2026: Laendernamen ("GERMANY") nie auf zwei Buchstaben abschneiden; Verkaeuferland zuerst
+    land = normalisieren.land_code(v.get("seller_country")) or normalisieren.land_code(v.get("country"))
     raus = []
     for m in kandidaten:
         if m.get("fuel") and fuel and m["fuel"] != fuel:
@@ -147,7 +148,7 @@ async def modelle_fuer_fahrzeug(db, v: Dict[str, Any], *, gruende: Optional[List
             continue
         if m.get("seller_type") and verkaeufer and normalisieren.VERKAEUFER_CODES.get(str(m["seller_type"]).upper()) != verkaeufer:
             continue
-        if m.get("country") and land and str(m["country"]).upper()[:2] != land:
+        if m.get("country") and land and normalisieren.land_code(m["country"]) not in (None, land):
             continue
         if _ausserhalb_radius(m, v):
             continue

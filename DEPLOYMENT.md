@@ -3836,3 +3836,24 @@ Einschalten von `MARKT_CHANCEN_AKTIV`: die Firmen sähen dann Privatangebote (oh
   „Ablehnung aufheben“ drückt. Zusammenlegen/Aufteilen nur per „Übernehmen“ durch den Super-Admin (neue Fassung).
 - **Einschalten frühestens**, wenn die aktiven Aufträge mindestens 14 Tage gültige Läufe haben — vorher sind die
   Vorschläge nicht MEDIUM und SAFE_AUTO tut nichts.
+
+**Live-Befund 27.09.2026: Land „GE“ statt „DE“ — jeder Marktlauf verworfen (Migration 20):**
+- Nach dem Deploy meldete der Sammel-Testlauf 447× `markt_filter_ignoriert` mit Grund `land GE != DE`. Ursache:
+  scrapesmith liefert je Zeile `country: "GERMANY"` (Land des Marktplatzes) und `sellerCountry: "DE"/"IT"` (Land des
+  Verkäufers); die Land-Prüfung (seit 26.09. abends) nahm `country` und schnitt es auf zwei Buchstaben: „GE“.
+  Jede Zeile fiel durch, kein Testlauf bestand, alle Aufträge blieben pausiert.
+- Behoben: `normalisieren.land_code` — Verkäuferland zuerst, Ländernamen/ISO-3/Kfz-Kennzeichen → ISO-2, unbekannte
+  Angaben tolerant (nie abgeschnitten). Dieselbe Korrektur bei der Zuordnung Fahrzeug → Suchauftrag (`abfrage.py`).
+- **Migration 20** schließt beim Start einmalig genau die offenen `markt_filter_ignoriert`-Alarme, deren einziger
+  Grund `land GE != DE` war (auch den Sammelalarm „*weitere*“); echte Filterprobleme bleiben offen.
+- **Nach dem Deploy:** Admin → Marktanalyse → Suchaufträge → **„Testlauf für alle“ erneut** drücken (≈ 6 $). Der erste
+  Lauf vom 27.09. nachmittags ist wegen des Fehlers vollständig durchgefallen.
+
+**Apify-Plan „Scale“ (Ahmad 27.09.2026): 128 gleichzeitige Läufe, 256 GB, Silver-Rabatt:**
+- Werte auf BEIDEN Servern setzen (vor dem nächsten Rollout, dann wirken sie mit dem Neustart):
+  `sh deploy/env_setzen.sh APIFY_MAX_PARALLEL=100 MAX_CONCURRENT_MOBILE=100 MAX_CONCURRENT_AUTOSCOUT=100 MARKT_ROW_USD=0.0006`
+- Warum 100 und nicht 128: der Markt-Crawler zählt nicht im gemeinsamen Topf, läuft aber auch über Apify
+  (`MARKT_JOBS_PARALLEL` 2 × 4 Prozesse × 2 Server = bis zu 16 Läufe, dazu Sammel-Testlauf und Entfernungsprüfung).
+  100 + ~20 bleibt unter 128. Speicher: scrapesmith braucht 1 GB je Lauf, 128 × 1 GB passt in 256 GB.
+- `MARKT_ROW_USD=0.0006`: Silver-Preis je Zeile bei scrapesmith (Bronze 0,0007); der Start bleibt 0,005 $. Die
+  Marktkosten-Schätzung sinkt damit um gut 10 %, die Budget-Drosselung plant entsprechend mehr Segmente je Tag.
