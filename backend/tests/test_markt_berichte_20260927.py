@@ -619,13 +619,21 @@ def test_18_berichtsrechnung_blockiert_den_event_loop_nicht(welt, monkeypatch):
     import time
     segs = [_seg_daten(welt, f"{i * 1000}-{i * 1000 + 999}") for i in range(180)]
     von, bis = _t(1), _t(29)
+    # Pruefung Runde 3: Budget-Rotation wie im Betrieb (jeder 4. Segment-Tag nicht geplant, ~75 % je Tag) — die Rechnung
+    # mit getragenen Werten der nicht geplanten Segmente laeuft ebenfalls im Hilfsthread
+    geplant = {s["id"]: {B._plus(von, d) for d in range(-B.VORLAUF_TAGE, 29) if (i + d) % 4} for i, s in enumerate(segs)}
     docs = [_doc_daten(welt, s, B._plus(von, d), 20000 + (d % 7) * 50, red=("a",) if d % 3 == 0 else ())
-            for s in segs for d in range(-B.VORLAUF_TAGE, 29)]
+            for i, s in enumerate(segs) for d in range(-B.VORLAUF_TAGE, 29) if (i + d) % 4]
     modell = {"id": f"test-320d-{welt.w.s}"}
 
     async def _laden(db, model_id, v, b):
         return modell, {s["id"]: s for s in segs}, docs, []
+
+    async def _geplant_laden(db, seg_ids, v, b):
+        assert sorted(seg_ids) == sorted(geplant) and (v, b) == (von, bis)
+        return geplant
     monkeypatch.setattr(B, "_laden", _laden)
+    monkeypatch.setattr(B, "_geplant_laden", _geplant_laden)
     im_loop = []
     echt = B.bericht_rechnen
 
@@ -658,6 +666,8 @@ def test_18_berichtsrechnung_blockiert_den_event_loop_nicht(welt, monkeypatch):
         return ber, dauer, max(luecken)
     ber, dauer, luecke = welt.run(_messen())
     assert ber and ber["kennzahlen"]["segmente_gesamt"] == 180 and len(ber["tage"]) == 29
+    k = ber["kennzahlen"]
+    assert k["planung"] == "jobs" and k["getragene_segment_tage"] == 29 * 45 and k["niveau_tage"] == 29 and k["teilabgedeckte_tage"] == 0
     assert im_loop == [False], "die reine Rechnung laeuft im Hilfsthread, nie im Event-Loop"
     assert luecke < 0.25, f"Event-Loop {luecke:.3f} s am Stueck blockiert (Rechnung {dauer:.3f} s)"
 
@@ -850,28 +860,252 @@ def test_23_zu_und_abschalten_ist_keine_datenluecke(welt):
     assert B._tag_aus_zeit("2028-04-14T23:30:00+00:00") == _a(15) and B._tag_aus_zeit("kaputt") is None
 
 
-def test_24_schema_2_im_bericht_und_in_den_listen(welt):
-    """Pruefung Runde 2 #3: die Bedeutung mehrerer gespeicherter Kennzahlen hat sich geaendert (B3-B7, Runde 2) —
-    SCHEMA 2 steht in jedem neu eingefrorenen Bericht, in der Uebersichtszeile und in der Berichtsliste des Modells;
-    ein frueher eingefrorener Bericht behaelt Schema 1 (nie veraendert) und ist so unterscheidbar."""
+def test_24_schema_im_bericht_und_in_den_listen(welt):
+    """Pruefung Runde 2 #3 / Runde 3: die Bedeutung mehrerer gespeicherter Kennzahlen hat sich geaendert (B3-B7, Runde 2;
+    Abdeckung und Korbwert in Runde 3) — SCHEMA 3 steht in jedem neu eingefrorenen Bericht, in der Uebersichtszeile und
+    in der Berichtsliste des Modells; frueher eingefrorene Berichte behalten Schema 1 bzw. 2 (nie veraendert) und sind
+    so unterscheidbar."""
     mid = _start(welt)
     seg = _seg(welt)
     db = welt.db
     try:
-        for d in range(1, 11):
+        for d in range(1, 16):
             _doc(welt, seg, _t(d), 20000)
-        assert B.SCHEMA == 2
+        assert B.SCHEMA == 3
         assert welt.run(B.finalisieren(db, mid, "FIVE_DAY", _t(1), _t(5), jetzt=_nach(_t(5)))) == "erstellt"
         neu = _bericht(welt, mid, "FIVE_DAY", _t(1), _t(5))
-        assert neu["schema"] == 2
-        alt = {**neu, "id": "test-alt", "periode_von": _t(6), "periode_bis": _t(10), "schema": 1}
-        welt.run(db[K.BERICHTE].insert_one(dict(alt)))
-        assert welt.run(B.finalisieren(db, mid, "FIVE_DAY", _t(6), _t(10), jetzt=_nach(_t(10)))) == "vorhanden"
-        for von, bis, schema in ((_t(1), _t(5), 2), (_t(6), _t(10), 1)):
+        assert neu["schema"] == 3
+        for von, bis, schema in ((_t(6), _t(10), 1), (_t(11), _t(15), 2)):
+            welt.run(db[K.BERICHTE].insert_one({**neu, "id": f"test-alt-{schema}", "periode_von": von, "periode_bis": bis, "schema": schema}))
+            assert welt.run(B.finalisieren(db, mid, "FIVE_DAY", von, bis, jetzt=_nach(bis))) == "vorhanden"
+        for von, bis, schema in ((_t(1), _t(5), 3), (_t(6), _t(10), 1), (_t(11), _t(15), 2)):
             zeile = next(z for z in welt.run(B.uebersicht(db, "FIVE_DAY", von, bis))["zeilen"] if z["model_id"] == mid)
             assert zeile["schema"] == schema
             assert welt.run(B.modell_bericht(db, mid, "FIVE_DAY", von, bis))["schema"] == schema
         liste = welt.run(B.modell_berichte(db, mid))["final"]
-        assert sorted((x["periode_von"], x["schema"]) for x in liste) == [(_t(1), 2), (_t(6), 1)]
+        assert sorted((x["periode_von"], x["schema"]) for x in liste) == [(_t(1), 3), (_t(6), 1), (_t(11), 2)]
+    finally:
+        _aufraeumen(welt)
+
+
+# ---------------------------------------------------------------- Pruefung Runde 3 (27.09.2026)
+def _rotation_korb(welt):
+    """24 Segmente, 12.000-35.000 EUR (wahres Niveau 23.500), je 5 Inserate — wie im Befund nachgerechnet."""
+    segs = [_seg_daten(welt, f"{i * 10000}-{i * 10000 + 9999}") for i in range(24)]
+    preis = {s["id"]: 12000 + 23000 * i / 23 for i, s in enumerate(segs)}
+    return segs, preis
+
+
+def _rotation(welt, segs, preis, geplant_fn, faktor=lambda k: 1.0):
+    """Tage k = -3..28 (01. = k 0, drei Vorlauftage): Tagesdokument nur, wenn geplant_fn(i, k) — sonst kein Lauf.
+    Liefert (docs, Jobs wie die Rotation sie plant: Segment -> Tage)."""
+    docs, geplant = [], {s["id"]: set() for s in segs}
+    for k in range(-3, 29):
+        tag = B._plus(_t(1), k)
+        for i, s in enumerate(segs):
+            if geplant_fn(i, k):
+                geplant[s["id"]].add(tag)
+                docs.append(_doc_daten(welt, s, tag, preis[s["id"]] * faktor(k)))
+    return docs, geplant
+
+
+def test_25_runde3_rotation_ist_keine_luecke_und_kein_teilkorb_niveau(welt):
+    """Pruefung Runde 3 #0 (mittel): bei knappem Budget plant der Tagesplan nur einen Teil der Segmente je Tag
+    (rotierend) — ein Segment ohne Abruf-Job ist NICHT GEPLANT, weder Luecke noch technischer Ausfall. Beide
+    Rechenbeispiele des Befunds (24 Segmente, wahres Niveau 23.500 EUR):
+      (a) die teure und die guenstige Haelfte laufen abwechselnd (keine gemeinsamen Segmente an Nachbartagen) — vorher
+          Median = Mittel = Min = Max = 29.500 EUR allein aus dem 01.
+      (b) 12 Segmente taeglich, 6 an geraden und 6 an ungeraden Tagen ausgelassen, Preise -0,1 % je Tag — vorher alle
+          Periodenwerte ~20.500 statt 23.500 EUR (-12,8 %).
+    Mit den Jobs der Rotation: plausible Werte nahe dem wahren Niveau (nicht geplante Segmente mit ihrem letzten
+    geplanten Wert), keine Teilabdeckung, alle Segment-Tage abgedeckt. Ohne Jobs bzw. mit Jobs fuer jedes Segment an
+    jedem Tag (dann sind die fehlenden technische Ausfaelle): kein Anker mit Mindestabdeckung -> ehrliche Luecke."""
+    segs, preis = _rotation_korb(welt)
+    wahr = sum(preis.values()) / 24
+    alle = {s["id"]: {B._plus(_t(1), k) for k in range(-3, 29)} for s in segs}
+    # (a) abwechselnde Haelften: ungerader Kalendertag (k gerade) die teure Haelfte, gerader die guenstige
+    docs, geplant = _rotation(welt, segs, preis, lambda i, k: (i >= 12) == (k % 2 == 0))
+    ber = _rechnen(welt, segs, docs, "MONTHLY", _t(1), _t(29), geplant=geplant)
+    k = ber["kennzahlen"]
+    for wert in (k["median_periode"], k["mittelwert_periode"], k["minimum"]["wert"], k["maximum"]["wert"]):
+        assert abs(wert - wahr) <= 1, (wert, wahr)
+    assert abs(k["sample_market_change_eur"]) <= 1 and k["niveau_tage"] == 29 and k["anker_tage"] == 29
+    assert (k["teilabgedeckte_tage"], k["segment_luecken"], k["segment_tage_gueltig"], k["segment_tage_erwartet"]) == (0, 0, 29 * 12, 29 * 12)
+    assert (k["expected_days"], k["coverage_days"], k["nicht_geplante_segment_tage"], k["getragene_segment_tage"]) == (29, 29, 29 * 12, 29 * 12)
+    assert not any("Segmentabdeckung" in g or "Abdeckung" in g for g in k["confidence_gruende"]), k["confidence_gruende"]
+    assert k["planung"] == "jobs" and any("Budget-Rotation" in h for h in ber["hinweise"]), ber["hinweise"]
+    tag1 = ber["tage"][0]
+    assert tag1["median"] == 29500 and abs(tag1["median_korb"] - wahr) <= 1, "roher Tageswert bleibt die gelaufene Haelfte"
+    assert (tag1["nicht_geplante_segmente"], tag1["teilabdeckung"], tag1["korb_abdeckung_pct"], tag1["anker"]) == (12, False, 100.0, True)
+    for plan, name in ((None, "ohne Jobs"), (alle, "Jobs fuer alle: technischer Ausfall")):
+        ber = _rechnen(welt, segs, docs, "MONTHLY", _t(1), _t(29), geplant=plan)
+        k = ber["kennzahlen"]
+        assert (k["median_periode"], k["mittelwert_periode"], k["minimum"], k["maximum"]) == (None, None, None, None), name
+        assert (k["sample_market_change_eur"], k["niveau_tage"], k["anker_tage"]) == (None, 0, 0), name
+        assert k["teilabgedeckte_tage"] == 29 and all(r["median_korb"] is None for r in ber["tage"]), name
+        assert any("Kein Tag mit ausreichender Korbabdeckung" in h for h in ber["hinweise"]), name
+        assert k["guenstigstes_angebot"] is not None and k["startwert"] is not None, "echte Einzelwerte bleiben"
+    # (b) 12 taeglich, 6 an geraden, 6 an ungeraden Kalendertagen ausgelassen; Preise -0,1 % je Tag
+    def plan_b(i, k):
+        return i < 12 or (12 <= i < 18 and k % 2 == 0) or (i >= 18 and k % 2 == 1)
+    docs, geplant = _rotation(welt, segs, preis, plan_b, faktor=lambda k: 1 - 0.001 * k)
+    soll = {_t(d): wahr * (1 - 0.001 * (d - 1)) for d in range(1, 30)}
+    ber = _rechnen(welt, segs, docs, "MONTHLY", _t(1), _t(29), geplant=geplant)
+    k = ber["kennzahlen"]
+    grenze = wahr * 0.001                        # getragene Werte sind hoechstens einen Tag alt: < 0,1 %
+    assert k["maximum"]["date"] == _t(1) and k["minimum"]["date"] == _t(29), (k["maximum"], k["minimum"])
+    for ist, s in ((k["maximum"]["wert"], soll[_t(1)]), (k["minimum"]["wert"], soll[_t(29)]), (k["median_periode"], soll[_t(15)]),
+                   (k["mittelwert_periode"], statistics.mean(soll.values()))):
+        assert abs(ist - s) <= grenze, (ist, s)
+    korb = [r["median_korb"] for r in ber["tage"]]
+    assert all(b < a for a, b in zip(korb, korb[1:])), "faellt Tag fuer Tag wie der Markt"
+    assert (k["teilabgedeckte_tage"], k["segment_luecken"], k["niveau_tage"]) == (0, 0, 29)
+    for plan, name in ((None, "ohne Jobs"), (alle, "Jobs fuer alle: technischer Ausfall")):
+        k = _rechnen(welt, segs, docs, "MONTHLY", _t(1), _t(29), geplant=plan)["kennzahlen"]
+        assert (k["median_periode"], k["minimum"], k["maximum"], k["niveau_tage"]) == (None, None, None, 0), name
+        assert k["teilabgedeckte_tage"] == 29, name
+
+
+def test_26_runde3_anker_nur_mit_mindestabdeckung(welt):
+    """Pruefung Runde 3 #0: gibt es keinen vollstaendigen Tag, wird der am besten abgedeckte Tag nur Anker, wenn ihm
+    hoechstens 5 % des Korbgewichts technisch fehlen (ANKER_MIN_ABDECKUNG). 40 Segmente: fehlt je Tag eines (2,5 %),
+    stehen Periodenwerte (Fehler hoechstens der Mix des einen Segments); fehlen je Tag drei (7,5 %), bleiben sie leer
+    — vorher wurde der Tag mit den wenigsten fehlenden Segmenten Anker, egal wie viele fehlten."""
+    assert B.ANKER_MIN_ABDECKUNG == 0.95 and B.TRAGEN_MAX_TAGE == B.VORLAUF_TAGE
+    segs = [_seg_daten(welt, f"{i * 10000}-{i * 10000 + 9999}") for i in range(40)]
+    preis = {s["id"]: 15000 + 250 * i for i, s in enumerate(segs)}
+    wahr = sum(preis.values()) / 40
+
+    def docs_mit(ausfall):
+        docs = [_doc_daten(welt, s, "2028-01-31", preis[s["id"]]) for s in segs]
+        for d in range(1, 6):
+            weg = {(d * 7 + j * 13) % 40 for j in range(ausfall)}
+            docs += [_ungueltig_daten(s, _t(d)) if i in weg else _doc_daten(welt, s, _t(d), preis[s["id"]]) for i, s in enumerate(segs)]
+        return docs
+    ber = _rechnen(welt, segs, docs_mit(1))
+    k = ber["kennzahlen"]
+    assert (k["anker_tage"], k["anker_abdeckung_pct"], k["niveau_tage"], k["teilabgedeckte_tage"]) == (1, 97.5, 5, 5)
+    assert abs(k["median_periode"] - wahr) <= wahr * 0.025 * 0.5 and not any("Korbabdeckung" in h for h in ber["hinweise"])
+    ber = _rechnen(welt, segs, docs_mit(3))
+    k = ber["kennzahlen"]
+    assert (k["anker_tage"], k["anker_abdeckung_pct"], k["niveau_tage"], k["median_periode"], k["minimum"]) == (0, None, 0, None, None)
+    assert [r["korb_abdeckung_pct"] for r in ber["tage"]] == [92.5] * 5 and not any(r["anker"] for r in ber["tage"])
+    assert any("mindestens 95 % des Korbgewichts" in h for h in ber["hinweise"]), ber["hinweise"]
+
+
+def _job_db(welt, seg, tag, status, error=None):
+    welt.run(welt.db[K.JOBS].insert_one({"id": f"test-job-{seg['id']}-{tag}", "segment_id": seg["id"], "model_id": seg["model_id"], "tag": tag,
+                                         "status": status, "error": error, "job_type": "daily", "attempts": 1}))
+
+
+def test_27_runde3_technisch_fehlend_nur_mit_abruf_job(welt):
+    """Pruefung Runde 3 #0 ueber die Datenbank: bericht_berechnen liest die Abruf-Jobs (market_crawl_jobs, nur lesend,
+    gebuendelt je Modell und Zeitraum ueber den Unique-Index (segment_id, tag)). Technisch fehlend nur mit Job fuer
+    (Segment, Tag): failed, data_invalid, 'Tagesplan veraltet' storniert (nie gelaufen). Kein Job, 'Crawler
+    ausgeschaltet', 'doppelt faellig' = nicht geplant; war der letzte geplante Tag ein Ausfall, wird nichts getragen.
+    Gibt es fuer das Modell gar keine Jobs (Altdaten), rechnet der Bericht wie bisher."""
+    JOBS_MOD = JOBS
+    assert JOBS_MOD.STORNO_ALT.startswith(B.STORNO_TECHNISCH), "Text im Crawl-Modul geaendert — STORNO_TECHNISCH nachziehen"
+    assert not JOBS_MOD.STORNO_AUS.startswith(B.STORNO_TECHNISCH) and not JOBS_MOD.STORNO_DOPPELT.startswith(B.STORNO_TECHNISCH)
+    mid = _start(welt)
+    a, b, c = _seg(welt, "20000-40000"), _seg(welt, "40001-60000"), _seg(welt, "60001-80000")
+    db = welt.db
+    try:
+        for s, preis in ((a, 12000), (b, 35000), (c, 23500)):
+            _doc(welt, s, "2028-01-31", preis)
+        for d in range(1, 6):
+            _doc(welt, a, _t(d), 12000)
+            _job_db(welt, a, _t(d), "completed")
+        for d in (1, 2, 5):
+            _doc(welt, b, _t(d), 35000)
+            _job_db(welt, b, _t(d), "completed")
+        _job_db(welt, b, _t(3), "failed", "Apify-Lauf gescheitert")          # 03.: Ausfall; 04.: kein Job (Rotation)
+        for d in (1, 2, 3):
+            _doc(welt, c, _t(d), 23500)
+            _job_db(welt, c, _t(d), "completed")
+        _job_db(welt, c, _t(4), "cancelled", JOBS_MOD.STORNO_ALT)            # geplant, nie gelaufen: technisch
+        _job_db(welt, c, _t(5), "cancelled", JOBS_MOD.STORNO_AUS)            # Crawler aus: nicht geplant
+        _job_db(welt, c, _t(5) + "#2", "cancelled", JOBS_MOD.STORNO_DOPPELT)
+        geplant = welt.run(B._geplant_laden(db, sorted([a["id"], b["id"], c["id"]]), _t(1), _t(5)))
+        assert geplant[b["id"]] == {_t(1), _t(2), _t(3), _t(5)} and geplant[c["id"]] == {_t(1), _t(2), _t(3), _t(4)}
+        ber = welt.run(B.bericht_berechnen(db, mid, "FIVE_DAY", _t(1), _t(5)))
+        tage = {r["date"]: r for r in ber["tage"]}
+        k = ber["kennzahlen"]
+        assert k["planung"] == "jobs"
+        assert [(tage[_t(d)]["fehlende_segmente"], tage[_t(d)]["nicht_geplante_segmente"]) for d in range(1, 6)] == [(0, 0), (0, 0), (1, 0), (1, 1), (0, 1)]
+        assert [tage[_t(d)]["anker"] for d in range(1, 6)] == [True, True, False, False, False]
+        # b am 04. (nicht geplant, letzter geplanter Tag 03. = Ausfall) und c am 05. (nicht geplant nach Ausfall 04.): nichts getragen
+        assert k["getragene_segment_tage"] == 0 and k["nicht_geplante_segment_tage"] == 2
+        assert (k["segment_tage_gueltig"], k["segment_tage_erwartet"], k["segment_luecken"], k["teilabgedeckte_tage"]) == (11, 13, 2, 2)
+        detail = {x["segment_id"]: x for x in ber["segmente"]}
+        assert [detail[s["id"]]["erwartete_tage"] for s in (a, b, c)] == [5, 4, 4]
+        wahr = (12000 + 35000 + 23500) / 3
+        assert all(abs(r["median_korb"] - wahr) <= 1 for r in ber["tage"]), [r["median_korb"] for r in ber["tage"]]
+        # Abfrage ueber den Unique-Index (segment_id, tag), nie ein Sammlungs-Scan
+        plan = welt.run(db.command({"explain": {"aggregate": K.JOBS, "pipeline": B._jobs_pipeline([a["id"], b["id"]], _t(1), _t(5)),
+                                                "cursor": {}, "hint": B.JOB_INDEX}, "verbosity": "queryPlanner"}))
+        assert B.JOB_INDEX in str(plan) and "COLLSCAN" not in str(plan)
+        # ohne jeden Job (Altdaten): wie bisher — jeder fehlende Segment-Tag eines eingeschalteten Segments ist ein Ausfall
+        welt.run(db[K.JOBS].delete_many({"model_id": mid}))
+        assert welt.run(B._geplant_laden(db, [a["id"], b["id"], c["id"]], _t(1), _t(5))) is None
+        k = welt.run(B.bericht_berechnen(db, mid, "FIVE_DAY", _t(1), _t(5)))["kennzahlen"]
+        assert (k["planung"], k["segment_tage_erwartet"], k["segment_luecken"], k["nicht_geplante_segment_tage"]) == ("unbekannt", 15, 4, 0)
+    finally:
+        _aufraeumen(welt)
+
+
+def test_28_runde3_tage_ohne_erwartetes_segment_zaehlen_nicht(welt):
+    """Pruefung Runde 3 #1 (niedrig): expected_days/Abdeckung zaehlt keine Kalendertage, an denen kein Segment erwartet
+    war. April: ein am 10. pausierter Suchauftrag (alle 24 Segmente enabled=False, letzter Lauf 09.) hat 216/216
+    Segment-Tage — vorher 'Abdeckung 9/30 Tage' (LOW); ein am 15. neu angelegter 384/384 — vorher 16/30 (MEDIUM). Mit
+    bekannter Planung zaehlt ein Tag ohne jeden Job fuer das Modell ebenfalls nicht (Budget-Rotation ueber Modelle,
+    Crawler aus)."""
+    def _a(d):
+        return _t(d, 4)
+    segs = [{**_seg_daten(welt, f"{i * 10000}-{i * 10000 + 9999}"), "enabled": False} for i in range(24)]
+    docs = [_doc_daten(welt, s, "2028-03-31", 20000, n=12) for s in segs]
+    docs += [_doc_daten(welt, s, _a(d), 20000, n=12) for s in segs for d in range(1, 10)]
+    ber = _rechnen(welt, segs, docs, "MONTHLY", _a(1), _a(30))
+    k = ber["kennzahlen"]
+    assert (k["coverage_days"], k["expected_days"], k["tage_ohne_plan"]) == (9, 9, 21)
+    assert (k["segment_tage_gueltig"], k["segment_tage_erwartet"]) == (216, 216) and not any("Abdeckung" in g for g in k["confidence_gruende"])
+    assert k["confidence"] == "HIGH" and not any("gültige Tage" in h for h in ber["hinweise"])
+    assert any("21 Kalendertag(e) ohne geplanten Abruf" in h for h in ber["hinweise"]), ber["hinweise"]
+    neu = [{**_seg_daten(welt, f"{i * 10000}-{i * 10000 + 9999}"), "created_at": "2028-04-14T23:30:00+00:00"} for i in range(24)]
+    ber = _rechnen(welt, neu, [_doc_daten(welt, s, _a(d), 20000, n=12) for s in neu for d in range(15, 31)], "MONTHLY", _a(1), _a(30))
+    k = ber["kennzahlen"]
+    assert (k["coverage_days"], k["expected_days"], k["segment_tage_gueltig"], k["segment_tage_erwartet"]) == (16, 16, 384, 384)
+    assert k["confidence"] == "HIGH" and k["tage_ohne_plan"] == 14
+    # bekannte Planung: am 03. hatte das Modell keinen einzigen Job (kein Tagesdokument) — kein erwarteter Tag
+    seg = _seg_daten(welt)
+    docs = [_doc_daten(welt, seg, _t(d), 20000) for d in (1, 2, 4, 5)]
+    geplant = {seg["id"]: {_t(d) for d in (1, 2, 4, 5)}}
+    k = _rechnen(welt, [seg], docs, geplant=geplant)["kennzahlen"]
+    assert (k["coverage_days"], k["expected_days"], k["tage_ohne_plan"], k["segment_tage_erwartet"]) == (4, 4, 1, 4)
+    # derselbe Tag mit gescheitertem Job ist eine echte Luecke
+    k = _rechnen(welt, [seg], docs, geplant={seg["id"]: {_t(d) for d in range(1, 6)}})["kennzahlen"]
+    assert (k["coverage_days"], k["expected_days"], k["tage_ohne_plan"]) == (4, 5, 0)
+
+
+def test_29_runde3_aufgegebener_hot_deal_tag_steht_im_finalen_bericht(welt):
+    """Pruefung Runde 3 hotdeals#0 (mittel): ein Tag, dessen Hot-Deal-Auswertung nach wiederholten Fehlern aufgegeben
+    wurde (hot_deals.grund 'auswertung_fehler', kein hot_deals_offen mehr), fror vorher still in den finalen Bericht
+    ein — die Hot Deals des Tages fehlen dort unbemerkt, und ein eingefrorener Bericht wird nie mehr geaendert. Jetzt:
+    Hinweis im Bericht (und Kennzahl), der Bericht wartet deshalb nicht."""
+    mid = _start(welt)
+    seg = _seg(welt)
+    try:
+        for d in range(1, 6):
+            _doc(welt, seg, _t(d), 20000)
+        welt.run(welt.db[K.TAGESSTATS].update_one({"segment_id": seg["id"], "date": _t(3)}, {"$set": {"hot_deals": {
+            "ausgewertet_at": "2028-02-04T00:10:00+00:00", "grund": D.GRUND_AUSWERTUNG_FEHLER, "basis_ok": False, "fehlversuche": 6,
+            "fehler": "ValueError"}}}))
+        assert welt.run(B._hot_deals_offen(welt.db, [seg["id"]], _t(1), _t(5))) == 0
+        assert welt.run(B.finalisieren(welt.db, mid, "FIVE_DAY", _t(1), _t(5), jetzt=_nach(_t(5)))) == "erstellt"
+        b = _bericht(welt, mid, "FIVE_DAY", _t(1), _t(5))
+        assert (b["kennzahlen"]["hot_deal_tage_aufgegeben"], b["kennzahlen"]["hot_deal_tage_offen"]) == (1, 0)
+        assert any("1 Tageswert(e) ohne Hot-Deal-Auswertung" in h and "aufgegeben" in h for h in b["hinweise"]), b["hinweise"]
+        vorl = welt.run(B.bericht_berechnen(welt.db, mid, "FIVE_DAY", _t(1), _t(5), heute=_t(5)))
+        assert any("ohne Hot-Deal-Auswertung" in h for h in vorl["hinweise"]), "auch vorlaeufig sichtbar"
     finally:
         _aufraeumen(welt)

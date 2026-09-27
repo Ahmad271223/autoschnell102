@@ -29,7 +29,7 @@ const ZEILEN = [
   { model_id: "audi-a4", label: "Audi A4 40 TDI", fuel: "DIESEL", gearbox: "AUTOMATIC_GEAR", richtung: "STABLE", delta_eur: 20, delta_pct: 0.1, listings: 60,
     preissenkungen: 4, preiserhoehungen: 4, hot_deals: 5, private_hot_deals: 2, liquiditaet: "MEDIUM", data_quality: "MEDIUM", health: null, kosten_usd: 0.4,
     empty_segmente: 1, confidence: "MEDIUM", coverage_days: 27, expected_days: 29 },
-].map((z) => ({ ...z, schema: 2 }));
+].map((z) => ({ ...z, schema: 3 }));
 const TAGE = [
   { date: "2028-02-01", median: 20000, min: 19600, p25: 19800, p75: 20200, listings: 5, segmente: 1, delta_vortag_eur: null, delta_vortag_pct: null, richtung: null,
     neue: 0, preissenkungen: 0, preiserhoehungen: 0, hot_deals: 0, data_quality: "GOOD", gueltig: true, leer: false, nur_ungueltig: false, andere_fassung: false },
@@ -43,7 +43,7 @@ const TAGE = [
     neue: 0, preissenkungen: 0, preiserhoehungen: 1, hot_deals: 0, data_quality: "MEDIUM", gueltig: true, leer: false, nur_ungueltig: false, andere_fassung: false },
 ];
 const BERICHT = {
-  model_id: "bmw-320d", typ: "MONTHLY", periode_von: "2028-02-01", periode_bis: "2028-02-29", status: "FINAL", revision: 1, schema: 2, erstellt_at: "2028-03-01T05:10:00Z",
+  model_id: "bmw-320d", typ: "MONTHLY", periode_von: "2028-02-01", periode_bis: "2028-02-29", status: "FINAL", revision: 1, schema: 3, erstellt_at: "2028-03-01T05:10:00Z",
   faellig_ab: "2028-03-01T05:00:00Z", stabil_zone_pct: 0.5, modell: { label: "BMW 320d", fuel: "DIESEL", gearbox: "AUTOMATIC_GEAR" },
   fassung: { version: 2, definition_hash: "h2", ab: "2028-02-01" },
   kennzahlen: { startwert: 20000, endwert: 19800, delta_eur: -200, delta_pct: -1, richtung: "FALLING", korb_segmente: 1, median_periode: 19900, mittelwert_periode: 19950,
@@ -105,7 +105,7 @@ vi.mock("@/lib/api", () => ({
         return { data: { zeilen, anzahl: 3, hinweis: "Beobachtet wird je Segment nur die günstige Marktzone." } };
       }
       if (url === "/admin/market/reports/model/bmw-320d/list") {
-        return { data: { final: netz.ohneFinal ? [] : [{ typ: "MONTHLY", periode_von: "2028-02-01", periode_bis: "2028-02-29", status: "FINAL", schema: netz.schemaAlt ? 1 : 2 }],
+        return { data: { final: netz.ohneFinal ? [] : [{ typ: "MONTHLY", periode_von: "2028-02-01", periode_bis: "2028-02-29", status: "FINAL", schema: netz.schemaAlt ? 1 : 3 }],
                          laufend: [{ typ: "FIVE_DAY", von: "2028-03-01", bis: "2028-03-05", faellig_ab: "2028-03-06T05:00:00Z" },
                                    { typ: "FIFTEEN_DAY", von: "2028-03-01", bis: "2028-03-15", faellig_ab: "2028-03-16T05:00:00Z" },
                                    { typ: "MONTHLY", von: "2028-03-01", bis: "2028-03-31", faellig_ab: "2028-04-01T04:00:00Z" }] } };
@@ -431,7 +431,44 @@ describe("Admin Berichte — Prüfung Runde 2 (Korbwert, laufender Tag, Rechenre
     expect(el("bericht-schema-alt-vw-golf").textContent).toBe("ältere Rechenregel");
     expect(el("bericht-schema-alt-bmw-320d")).toBeNull();
     expect(el("berichte-schema-hinweis").textContent).toContain("1 Bericht(e) nach älterer Rechenregel erstellt");
-    expect([berichtAltesSchema({ schema: 1 }), berichtAltesSchema({}), berichtAltesSchema({ schema: 2 }), berichtAltesSchema(null)])
-      .toEqual([true, true, false, false]);
+    expect([berichtAltesSchema({ schema: 1 }), berichtAltesSchema({}), berichtAltesSchema({ schema: 2 }), berichtAltesSchema({ schema: 3 }), berichtAltesSchema(null)])
+      .toEqual([true, true, true, false, false]);
+  });
+});
+
+describe("Admin Berichte — Prüfung Runde 3 (geplant vs. ausgefallen, Rechenregel 3)", () => {
+  it("nicht geplante Segmente (Budget-Rotation) sind markiert, keine Teilabdeckung; P25/P75 des Teilkorbs → Lücke; Schema 2 gilt als älter", async () => {
+    const tage = [
+      { ...TAGE[0], date: "2028-03-01", median: 29500, median_korb: 23500, p25: 29300, p75: 29700, teilabdeckung: false, fehlende_segmente: 0,
+        ausstehende_segmente: 0, nicht_geplante_segmente: 12, korb_abdeckung_pct: 100, anker: true, offen: false },
+      { ...TAGE[1], date: "2028-03-02", median: 23500, median_korb: 23480, p25: 23300, p75: 23700, teilabdeckung: false, fehlende_segmente: 0,
+        ausstehende_segmente: 0, nicht_geplante_segmente: 0, korb_abdeckung_pct: 100, anker: true, offen: false },
+      { ...OFFEN, date: "2028-03-03", median_korb: null, ausstehende_segmente: 0, nicht_geplante_segmente: 0 },
+    ];
+    netz.bericht = { ...vorlaeufig({ typ: "MONTHLY", von: "2028-03-01", bis: "2028-03-31" }), offen_ab: "2028-03-03", tage, schema: 3,
+                     hinweise: ["Budget-Rotation: 12 Segment-Tag(e) ohne geplanten Abruf — keine Lücke"] };
+    await starten("/admin/markt/berichte/bmw-320d?typ=MONTHLY&von=2028-03-01&bis=2028-03-31");
+    const reihe = netz.diagramme.at(-1);
+    // Korbwert statt Teilkorb (29.500 € wäre die gelaufene teure Hälfte); P25/P75 gelten nur für die gelaufenen Segmente
+    expect(reihe.find((x) => x.date === "2028-03-01")).toMatchObject({ median: 23500, p25: null, p75: null });
+    expect(reihe.find((x) => x.date === "2028-03-02")).toMatchObject({ median: 23480, p25: 23300, p75: 23700 });
+    const marke = el("bericht-nichtgeplant-2028-03-01");
+    expect(marke.textContent).toContain("12 Segm. nicht geplant");
+    expect(marke.getAttribute("title")).toContain("keine Lücke");
+    expect(marke.getAttribute("title")).toContain("23.500 €");
+    expect(el("bericht-teil-2028-03-01")).toBeNull();
+    expect(el("bericht-nichtgeplant-2028-03-02")).toBeNull();
+    expect(el("bericht-tag-2028-03-01").querySelectorAll("td")[1].getAttribute("style")).toContain("--text-dim");
+    expect(el("bericht-legende").textContent).toContain("Budget-Rotation");
+    expect(el("bericht-hinweise").textContent).toContain("Budget-Rotation");
+    expect(el("bericht-schema-alt")).toBeNull();
+    await act(async () => { wurzel.unmount(); }); wurzel = null; behaelter?.remove();
+    // ein unter Schema 2 eingefrorener Bericht ist jetzt „ältere Rechenregel“
+    netz.bericht = { ...BERICHT, schema: 2 };
+    await starten("/admin/markt/berichte/bmw-320d?typ=MONTHLY&von=2028-02-01&bis=2028-02-29");
+    expect(el("bericht-schema-alt").textContent).toBe("nach älterer Rechenregel erstellt");
+    expect(el("bericht-schema-hinweis").textContent).toContain("Schema 2");
+    expect(el("bericht-schema-hinweis").textContent).toContain("Budget-Rotation");
+    expect(berichtDiagrammPunkt({ median: 1, median_korb: 2, p25: 1, p75: 3, nicht_geplante_segmente: 1 })).toMatchObject({ median: 2, p25: null, p75: null });
   });
 });

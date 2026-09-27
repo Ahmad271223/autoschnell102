@@ -21,10 +21,11 @@ Wahl des Zeitpunkts (Auftrag: "nach jedem gueltigen Lauf ODER in einem taegliche
       (Pruefbefund B0, Runde 2: ein Lauf, der vor Mitternacht startet, liefert noch danach Treffer mit tag=D)
     * nachholbar und idempotent: faellt der Worker aus, bleibt das Tagesdokument offen und wird spaeter
       ausgewertet (aeltere Tage zuerst, ein aelterer Tag nie nach einem neueren — scheitert ein Tag oder wartet
-      sein leerer Tageswert noch, bleiben die neueren Tage desselben Segments offen; scheitert ein Tag dauerhaft,
-      wird er nach AUFGEBEN_NACH_VERSUCHEN Fehlversuchen bzw. AUFGEBEN_NACH_STUNDEN mit grund='auswertung_fehler'
-      abgeschlossen und bleibt als eigener Betriebsalarm offen); dieselbe Auswertung zweimal erzeugt kein
-      Ereignis doppelt (Stand je Inserat + Unique-Index der Ereignisse)
+      sein leerer Tageswert noch, bleiben die neueren Tage desselben Segments offen; scheitert ein Tag dauerhaft
+      und nur fuer dieses Segment, wird er nach AUFGEBEN_NACH_VERSUCHEN gezaehlten Fehlversuchen UND
+      AUFGEBEN_NACH_STUNDEN mit grund='auswertung_fehler' abgeschlossen und bleibt als eigener Betriebsalarm offen;
+      ein segmentuebergreifender Fehler zaehlt nicht und wird nach dem Hotfix nachgeholt); dieselbe Auswertung
+      zweimal erzeugt kein Ereignis doppelt (Stand je Inserat + Unique-Index der Ereignisse)
     * Schreibpause (Sicherung/Restore): der Durchlauf haelt vor jedem Tagesdokument an, der Rest bleibt offen
     * zwei Server: ein Durchlauf haelt die Sperre markt-auswertung (job_lock, siehe markt.auswertung)
   Dieses Modul liest nur gespeicherte Tageswerte (dazu nur lesend den Status der Abrufe eines Tages, siehe
@@ -89,10 +90,17 @@ ENTFERNT_NACHSCHAU_TAGE = 30                        # so lange wird ein herausge
 AUSWERTUNG_MAX_JE_LAUF = 3000                       # offene Tagesdokumente je Durchlauf (Rest im naechsten)
 # Pruefbefund Runde 2 (B2): ein Tag, dessen Auswertung immer wieder scheitert (z. B. deterministisch an einem kaputten
 # Feld), hielte sonst alle neueren Tage des Segments fuer immer zurueck (Hot Deals eingefroren, Berichte warten).
-# Je Tageswert (observed_at) werden die Fehlversuche gezaehlt; nach 6 Durchlaeufen mit Fehler (Takt 5 Minuten, also
-# rund eine halbe Stunde — ein kurzer Aussetzer wie eine Wahl im Replikat-Set heilt in der Zeit) oder 6 Stunden nach
-# dem ersten Fehlversuch (falls selten ein Durchlauf dazukam, z. B. Schreibpausen) wird der Tag mit
-# grund='auswertung_fehler' abgeschlossen; die neueren Tage laufen weiter, der Tag bleibt als Betriebsalarm offen.
+# Je Tageswert (observed_at) werden die Fehlversuche gezaehlt und der Tag mit grund='auswertung_fehler' abgeschlossen
+# (die neueren Tage laufen weiter, der Tag bleibt als Betriebsalarm offen, der Bericht nennt ihn) — Pruefung Runde 3
+# (hotdeals#1) erst, wenn BEIDES erreicht ist: mindestens AUFGEBEN_NACH_VERSUCHEN gezaehlte Fehlversuche UND
+# AUFGEBEN_NACH_STUNDEN seit dem ersten. Die Anzahl allein ist keine Zeit: der Auswertungs-Worker laeuft auf beiden
+# Servern (die Sperre verhindert nur gleichzeitige Durchlaeufe) und jeder Klick auf 'Jetzt auswerten'/'Berichte jetzt
+# erstellen' loest einen weiteren aus — mit ODER war nach ~12 Minuten oder 6 Klicks aufgegeben. 6 Stunden lassen Zeit
+# fuer einen Hotfix; ein aufgegebener Tag ist endgueltig (Hot Deals und Ereignisse des Tages fehlen fuer immer).
+# Gezaehlt wird ein Fehlversuch nur, wenn im SELBEN Durchlauf ein anderes Segment vollstaendig ausgewertet wurde
+# (status 'ausgewertet' — ein fruehes Ende ohne Basis beweist nicht, dass die Auswertung selbst funktioniert). Scheitern
+# alle, ist es ein segmentuebergreifender Fehler (z. B. ein Deploy): nichts wird gezaehlt, der Tag bleibt offen und wird
+# nach der Korrektur nachgeholt; der Durchlauf meldet die Fehler weiter (Betriebsalarm markt_auswertung_fehler).
 AUFGEBEN_NACH_VERSUCHEN = 6
 AUFGEBEN_NACH_STUNDEN = 6
 GRUND_AUSWERTUNG_FEHLER = "auswertung_fehler"
@@ -527,8 +535,10 @@ async def _alarm_tag(db, seg_id: str, tag: str, **details) -> None:
 async def _fehlversuch(db, d: Dict[str, Any], fehler: BaseException, jetzt: Optional[datetime]) -> bool:
     """Pruefbefund Runde 2 (B2): einen Fehlversuch am Tagesdokument zaehlen — je Tageswert (observed_at): ersetzt ein
     neuerer Lauf den Tageswert, beginnt die Zaehlung neu. True = Tag aufgegeben und abgeschlossen (grund=
-    'auswertung_fehler', hot_deals_offen weg) — die neueren Tage des Segments duerfen jetzt drankommen. Am Dokument und
-    im Alarm steht nur die Fehlerart (keine Inseratsdaten); der volle Fehler steht im Protokoll."""
+    'auswertung_fehler', hot_deals_offen weg) — erst, wenn AUFGEBEN_NACH_VERSUCHEN gezaehlte Versuche UND
+    AUFGEBEN_NACH_STUNDEN seit dem ersten erreicht sind (Runde 3); die neueren Tage des Segments duerfen danach
+    drankommen. Aufgerufen nur fuer segmentbezogene Fehler (auswerten_faellige). Am Dokument und im Alarm steht nur die
+    Fehlerart (keine Inseratsdaten); der volle Fehler steht im Protokoll."""
     try:
         jetzt_dt = jetzt or konfig.jetzt()
         seg_id, tag, obs = str(d["segment_id"]), str(d["date"]), d.get("observed_at")
@@ -544,7 +554,7 @@ async def _fehlversuch(db, d: Dict[str, Any], fehler: BaseException, jetzt: Opti
         filt: Dict[str, Any] = {"segment_id": seg_id, "date": tag, "hot_deals_offen": True}
         if obs is not None:
             filt["observed_at"] = obs
-        if versuche < AUFGEBEN_NACH_VERSUCHEN and stunden < AUFGEBEN_NACH_STUNDEN:
+        if versuche < AUFGEBEN_NACH_VERSUCHEN or stunden < AUFGEBEN_NACH_STUNDEN:
             await db[TAGESSTATS].update_one(filt, {"$set": {"hot_deals_fehler": {"observed_at": obs, "versuche": versuche,
                                                                                  "seit": seit, "fehler": art}}})
             return False
@@ -572,7 +582,11 @@ async def auswerten_faellige(db, *, limit: int = AUSWERTUNG_MAX_JE_LAUF, segment
     """Alle offenen Tagesdokumente (hot_deals_offen) in Tagesreihenfolge auswerten. segment_ids grenzt ein
     (Tests, Admin). Ein Fehler in einem Segment haelt die anderen nicht auf. Leere Tageswerte des laufenden Tages
     warten bis nach Tagesende (Pruefbefund B0) und werden hier gar nicht erst geladen; ein leerer Tageswert eines
-    vergangenen Tages wartet, solange ein Abruf dieses Tages noch laeuft (_leer_wartet)."""
+    vergangenen Tages wartet, solange ein Abruf dieses Tages noch laeuft (_leer_wartet).
+    Runde 3 (hotdeals#1): die Fehlversuche werden erst am Ende des Durchlaufs gezaehlt — und nur, wenn in diesem
+    Durchlauf ein ANDERES Segment vollstaendig ausgewertet wurde (sonst 'fehler_uebergreifend', nichts gezaehlt: ein
+    Fehler fuer alle Segmente wird nach der Korrektur nachgeholt statt verworfen). Ein aufgegebener Tag gibt die
+    neueren Tage seines Segments ab dem naechsten Durchlauf frei."""
     filt: Dict[str, Any] = {"hot_deals_offen": True, "$nor": [{"sample_size": 0, "date": {"$gte": konfig.heute_tag(jetzt)}}]}
     if segment_ids is not None:
         filt["segment_id"] = {"$in": [str(s) for s in segment_ids]}
@@ -580,6 +594,8 @@ async def auswerten_faellige(db, *, limit: int = AUSWERTUNG_MAX_JE_LAUF, segment
         .sort([("date", 1), ("segment_id", 1)]).to_list(max(1, int(limit)))
     z: Dict[str, Any] = {"offen": len(offene), "ausgewertet": 0, "ohne_basis": 0, "fehler": 0, "ereignisse": 0}
     halten: set = set()          # Segmente, deren neuere Tage in diesem Durchlauf warten
+    gescheitert: List[Tuple[Dict[str, Any], BaseException]] = []
+    gelungen: set = set()        # Segmente mit vollstaendiger Auswertung in diesem Durchlauf (Runde 3)
     for d in offene:
         if str(d["segment_id"]) in halten:
             # Pruefbefund B2: ein aelterer Tag dieses Segments ist eben gescheitert (oder sein leerer Tageswert wartet
@@ -599,11 +615,9 @@ async def auswerten_faellige(db, *, limit: int = AUSWERTUNG_MAX_JE_LAUF, segment
         except Exception as e:  # noqa: BLE001
             log.exception("Hot-Deal-Auswertung %s %s gescheitert", d.get("segment_id"), d.get("date"))
             z["fehler"] += 1
-            if await _fehlversuch(db, d, e, jetzt):
-                # Pruefbefund Runde 2 (B2): dauerhaft gescheitert — abgeschlossen, die neueren Tage laufen weiter
-                z["aufgegeben"] = z.get("aufgegeben", 0) + 1
-            else:
-                halten.add(str(d["segment_id"]))
+            # Runde 3: gezaehlt wird erst am Ende (nur segmentbezogene Fehler); bis dahin warten die neueren Tage
+            gescheitert.append((d, e))
+            halten.add(str(d["segment_id"]))
             continue
         if r.get("status") == "leer_vorlaeufig":
             # Runde 2 (B0): leerer Tageswert wartet noch auf einen Lauf desselben Tages — neuere Tage des Segments danach
@@ -613,8 +627,19 @@ async def auswerten_faellige(db, *, limit: int = AUSWERTUNG_MAX_JE_LAUF, segment
         if r.get("status") == "ausgewertet":
             z["ausgewertet"] += 1
             z["ereignisse"] += sum((r.get("ereignisse") or {}).values())
+            gelungen.add(str(d["segment_id"]))
         elif r.get("status") == "ohne_basis":
             z["ohne_basis"] += 1
+    if gescheitert and not z.get("wartung"):
+        for d, e in gescheitert:
+            if not (gelungen - {str(d["segment_id"])}):
+                # kein anderes Segment lief in diesem Durchlauf fehlerfrei durch: segmentuebergreifend (z. B. Deploy) —
+                # nicht zaehlen, der Tag bleibt offen und wird nach der Korrektur nachgeholt
+                z["fehler_uebergreifend"] = z.get("fehler_uebergreifend", 0) + 1
+            elif await _fehlversuch(db, d, e, jetzt):
+                # dauerhaft und nur in diesem Segment gescheitert — abgeschlossen, die neueren Tage laufen ab dem
+                # naechsten Durchlauf weiter
+                z["aufgegeben"] = z.get("aufgegeben", 0) + 1
     return z
 
 
@@ -648,9 +673,11 @@ async def _anzahl_deals(db, filt: Dict[str, Any]) -> int:
 
 async def zusammenfassung(db) -> Dict[str, Any]:
     """Abschnitt 26: heute gepruefte / gueltige Modelle, neue Deals heute, aktive nach Klasse, davon privat.
-    'Aktiv' nur in aktiven Segmenten (Deals einer frueheren Fassung zaehlen nicht mehr)."""
+    'Aktiv' nur in aktiven Segmenten (Deals einer frueheren Fassung zaehlen nicht mehr). Runde 3 (hotdeals#0): ein
+    nach wiederholten Fehlern aufgegebener Tag (grund 'auswertung_fehler') ist nicht 'geprueft'."""
     heute = konfig.heute_tag()
-    geprueft = [m for m in await db[TAGESSTATS].distinct("model_id", {"date": heute, "hot_deals.ausgewertet_at": {"$exists": True}}) if m]
+    geprueft = [m for m in await db[TAGESSTATS].distinct("model_id", {"date": heute, "hot_deals.ausgewertet_at": {"$exists": True},
+                                                                      "hot_deals.grund": {"$ne": GRUND_AUSWERTUNG_FEHLER}}) if m]
     gueltig = [m for m in await db[TAGESSTATS].distinct("model_id", {"date": heute, "hot_deals.basis_ok": True}) if m]
     aktiv = {"status": AKTIV, "segment_id": {"$in": await _aktive_segmente(db)}}
     neu = {"tag": heute, "typ": {"$in": [NEW, BECAME]}}

@@ -12,9 +12,10 @@ Eigener Hintergrundjob in server.py ('markt_auswertung'), getrennt vom Crawl-Wor
   * Fehler: Protokoll + EIN Betriebsalarm 'markt_auswertung_fehler' — nie ein Einfluss auf Vergleich,
     Vertrag, PDF, Versand oder Fahrer; der Alarm schliesst sich nach dem naechsten fehlerfreien Durchlauf,
     gleich in welchem Prozess (auch Admin-Knopf) — ohne prozesslokalen Merker (Pruefbefund B11). Scheitert ein
-    Tagesdokument dauerhaft, schliesst markt.deals es nach einigen Fehlversuchen ab (neuere Tage laufen weiter)
-    und legt dafuer einen eigenen Alarm (ref 'hot-deals:<Segment>:<Tag>') an, den kein Durchlauf schliesst
-    (Pruefbefund Runde 2, B2)
+    Tagesdokument dauerhaft und nur in seinem Segment, schliesst markt.deals es nach gezaehlten Fehlversuchen UND
+    einer Mindestdauer ab (neuere Tage laufen weiter; ein segmentuebergreifender Fehler zaehlt nicht, Runde 3) und
+    legt dafuer einen eigenen Alarm (ref 'hot-deals:<Segment>:<Tag>') an, den kein Durchlauf schliesst (Pruefbefund
+    Runde 2, B2); der eingefrorene Bericht nennt solche Tage
 Dieses Modul loest NIE einen Marktabruf aus (Architekturtest test_b02) — Kosten der Auswertung: 0.
 """
 from __future__ import annotations

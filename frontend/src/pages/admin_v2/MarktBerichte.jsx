@@ -155,8 +155,8 @@ export default function MarktBerichte() {
           )}
         {alteZeilen > 0 && (
           <div className="px-4 pt-2 text-[11px]" style={{ color: "var(--st-amber)" }} data-testid="berichte-schema-hinweis">
-            {alteZeilen} Bericht(e) {BERICHT_ALT_TEXT} („ältere Rechenregel“) — Periodenwerte, Tagesbewegung, Kosten je Einheit und
-            Segmentabdeckung sind dort anders definiert; beim Vergleich mit neueren Berichten beachten.
+            {alteZeilen} Bericht(e) {BERICHT_ALT_TEXT} („ältere Rechenregel“) — Periodenwerte, Tagesbewegung, Kosten je Einheit,
+            Abdeckung und Segmentabdeckung sind dort anders definiert; beim Vergleich mit neueren Berichten beachten.
           </div>
         )}
         <div className="px-4 py-2 text-[11px] text-zinc-500">{daten?.hinweis || ""} Δ = gleicher Segmentkorb (je Segment erster und letzter gültiger Tag), gewichtet nach Stichprobe. Grün = Preis fällt, Rot = steigt. Kosten = Abrufkosten des Zeitraums (Berichte selbst kosten nichts).</div>

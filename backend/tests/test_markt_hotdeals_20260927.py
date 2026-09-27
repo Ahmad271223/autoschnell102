@@ -793,44 +793,69 @@ def _durchlauf_nur_test(monkeypatch, seg, berichte_echt=True):
     monkeypatch.setattr(BER, "faellige_finalisieren", _b)
 
 
+def _zweites_segment(welt, seg):
+    """Zweites Segment desselben Modells (anderer km-Bereich) — liefert die 'fehlerfrei ausgewerteten' Segmente."""
+    b = {**seg, "id": f"{seg['id']}-b", "min_km": 85001, "max_km": 120000, "km_label": "85–120k km"}
+    welt.run(welt.db[K.SEGMENTE].insert_one(dict(b)))
+    return b
+
+
 def test_21_runde2_b2_dauerhaft_scheiternder_tag_wird_aufgegeben(welt, monkeypatch):
     """Pruefbefund Runde 2 (B2): scheitert (S, D) dauerhaft (deterministisch, z. B. kaputtes Feld), bleiben die neueren
     Tage nicht fuer immer zurueckgestellt (vorher: Hot Deals des Segments eingefroren, Berichte warten 24 h). Die
-    Fehlversuche werden je Tageswert gezaehlt; nach AUFGEBEN_NACH_VERSUCHEN Durchlaeufen wird D mit
-    grund='auswertung_fehler' abgeschlossen und D+1 im selben Durchlauf ausgewertet. Der Betriebsalarm des Tages
-    bleibt offen, auch nach einem fehlerfreien Durchlauf. AUFGEBEN_NACH_STUNDEN seit dem ersten Fehlversuch reicht
-    ebenfalls; ein neuer Tageswert (anderes observed_at) beginnt die Zaehlung neu."""
+    Fehlversuche werden je Tageswert gezaehlt; D wird mit grund='auswertung_fehler' abgeschlossen, D+1 danach
+    ausgewertet. Der Betriebsalarm des Tages bleibt offen, auch nach einem fehlerfreien Durchlauf; ein neuer Tageswert
+    (anderes observed_at) beginnt die Zaehlung neu.
+    Pruefung Runde 3 (hotdeals#1): aufgegeben erst, wenn BEIDES erreicht ist — AUFGEBEN_NACH_VERSUCHEN gezaehlte
+    Fehlversuche UND AUFGEBEN_NACH_STUNDEN seit dem ersten (zwei Server und Admin-Klicks liefern 6 Durchlaeufe in
+    wenigen Minuten; vorher nach 6 Durchlaeufen ODER 6 Stunden). Gezaehlt nur, wenn im selben Durchlauf ein anderes
+    Segment vollstaendig ausgewertet wurde (hier Segment B mit jedem Durchlauf einem neuen Tageswert)."""
     BER = _module("markt.berichte")
     seg = _start(welt)
+    seg_b = _zweites_segment(welt, seg)
     db = welt.db
     refs = [f"hot-deals:{seg['id']}:{_t(i)}" for i in (7, 9)]
     merker_vorher = welt.run(db[K.KONFIG].find_one({"_id": K.AUSWERTUNG_DOK}))
     alarme_vorher = welt.run(db.betriebsalarme.find({"typ": AUS.ALARM, "ref": "auswertung"}).to_list(100))
     try:
         _basis(welt, seg, tage=7)
+        _basis(welt, seg_b, tage=7)
         _doc(welt, seg, 7, BASIS[:4] + (("x", 17000),), neu=("x",))
         _doc(welt, seg, 8, BASIS[:4] + (("x", 17000),))
         echt = D.segment_tag_auswerten
-        kaputt = {_t(7), _t(9)}
+        kaputt = {(seg["id"], _t(7)), (seg["id"], _t(9))}
 
         async def _immer_kaputt(db, seg_id, tag, **kw):
-            if tag in kaputt:
+            if (seg_id, tag) in kaputt:
                 raise ValueError("kaputtes Feld (Test)")
             return await echt(db, seg_id, tag, **kw)
         monkeypatch.setattr(D, "segment_tag_auswerten", _immer_kaputt)
+        b_tag = [7]
+        auswerten = D.auswerten_faellige                 # vor _durchlauf_nur_test (das grenzt spaeter auf Segment A ein)
+
+        def lauf(zeit):
+            _doc(welt, seg_b, b_tag[0], BASIS)           # Segment B bekommt einen neuen Tageswert und laeuft fehlerfrei durch
+            b_tag[0] += 1
+            return welt.run(auswerten(db, segment_ids=[seg["id"], seg_b["id"]], jetzt=zeit))
         jetzt = datetime(2026, 3, 10, 12, 0, tzinfo=timezone.utc)
-        for n in range(1, D.AUFGEBEN_NACH_VERSUCHEN):
-            z = welt.run(D.auswerten_faellige(db, segment_ids=[seg["id"]], jetzt=jetzt + timedelta(minutes=5 * n)))
-            assert z["fehler"] == 1 and z.get("zurueckgestellt") == 1 and "aufgegeben" not in z, (n, z)
+        # sechs Durchlaeufe in 25 Minuten (zwei Server, Klicks auf 'Jetzt auswerten'): gezaehlt, aber NICHT aufgegeben
+        for n in range(1, D.AUFGEBEN_NACH_VERSUCHEN + 1):
+            z = lauf(jetzt + timedelta(minutes=5 * (n - 1)))
+            assert z["fehler"] == 1 and z.get("zurueckgestellt") == 1 and z["ausgewertet"] == 1 and "aufgegeben" not in z, (n, z)
             t7 = _tagesdoc(welt, seg, 7)
             assert t7["hot_deals_offen"] is True and t7["hot_deals_fehler"]["versuche"] == n and t7["hot_deals_fehler"]["fehler"] == "ValueError"
-            assert _tagesdoc(welt, seg, 8)["hot_deals_offen"] is True
-        z = welt.run(D.auswerten_faellige(db, segment_ids=[seg["id"]], jetzt=jetzt + timedelta(minutes=5 * D.AUFGEBEN_NACH_VERSUCHEN)))
-        assert z["aufgegeben"] == 1 and z["fehler"] == 1 and z["ausgewertet"] == 1 and "zurueckgestellt" not in z, z
+            assert t7["hot_deals_fehler"]["seit"] == jetzt.isoformat() and _tagesdoc(welt, seg, 8)["hot_deals_offen"] is True
+        # 6 h nach dem ersten gezaehlten Fehlversuch (und >= 6 Versuche): aufgegeben — D+1 im naechsten Durchlauf
+        z = lauf(jetzt + timedelta(hours=D.AUFGEBEN_NACH_STUNDEN))
+        assert z["aufgegeben"] == 1 and z["fehler"] == 1 and z.get("zurueckgestellt") == 1, z
         t7, t8 = _tagesdoc(welt, seg, 7), _tagesdoc(welt, seg, 8)
         assert "hot_deals_offen" not in t7 and "hot_deals_fehler" not in t7
-        assert t7["hot_deals"]["grund"] == "auswertung_fehler" and t7["hot_deals"]["fehlversuche"] == D.AUFGEBEN_NACH_VERSUCHEN
+        assert t7["hot_deals"]["grund"] == "auswertung_fehler" and t7["hot_deals"]["fehlversuche"] == D.AUFGEBEN_NACH_VERSUCHEN + 1
         assert t7["hot_deals"]["fehler"] == "ValueError" and t7["hot_deals"]["basis_ok"] is False
+        assert t8["hot_deals_offen"] is True
+        z = lauf(jetzt + timedelta(hours=D.AUFGEBEN_NACH_STUNDEN, minutes=5))
+        assert z["ausgewertet"] == 2 and z["fehler"] == 0 and "zurueckgestellt" not in z, z
+        t8 = _tagesdoc(welt, seg, 8)
         assert "hot_deals_offen" not in t8 and t8["hot_deals"]["basis_ok"] is True, "D+1 laeuft weiter"
         assert _deal(welt, seg, "x")["status"] == "ACTIVE" and [e["tag"] for e in _ereignisse(welt, seg, "x")] == [_t(8)]
         assert welt.run(BER._hot_deals_offen(db, [seg["id"]], _t(0), _t(8))) == 0, "die Berichte warten nicht mehr auf D"
@@ -838,24 +863,28 @@ def test_21_runde2_b2_dauerhaft_scheiternder_tag_wird_aufgegeben(welt, monkeypat
         assert alarm and "ValueError" in alarm["details"]["fehler"] and "kaputtes Feld" not in str(alarm), alarm
         # ein fehlerfreier Durchlauf schliesst den Durchlauf-Alarm, der Alarm des aufgegebenen Tages bleibt offen
         _durchlauf_nur_test(monkeypatch, seg, berichte_echt=False)
-        erg = welt.run(AUS.durchlauf(db, jetzt=jetzt + timedelta(hours=1)))
+        erg = welt.run(AUS.durchlauf(db, jetzt=jetzt + timedelta(hours=7)))
         assert AUS.fehler_anzahl(erg) == 0 and erg["hot_deals"]["offen"] == 0
         assert welt.run(db.betriebsalarme.count_documents({"typ": AUS.ALARM, "ref": refs[0], "offen": True})) == 1
-        # Zeitgrenze: Tag 9 scheitert; ein alter Zaehlerstand eines ANDEREN Tageswerts zaehlt nicht mit
+        # Tag 9 scheitert; ein alter Zaehlerstand eines ANDEREN Tageswerts zaehlt nicht mit
         doc9 = _doc(welt, seg, 9, BASIS[:4] + (("x", 17000),))
         spaeter = jetzt + timedelta(days=1)
         welt.run(db[K.TAGESSTATS].update_one({"segment_id": seg["id"], "date": _t(9)}, {"$set": {"hot_deals_fehler": {
             "observed_at": "2026-03-10T04:00:00+00:00", "versuche": D.AUFGEBEN_NACH_VERSUCHEN - 1,
             "seit": (spaeter - timedelta(hours=30)).isoformat(), "fehler": "ValueError"}}}))
-        z = welt.run(D.auswerten_faellige(db, jetzt=spaeter))           # nur Testsegment (_durchlauf_nur_test)
+        z = lauf(spaeter)
         assert z["fehler"] == 1 and "aufgegeben" not in z, z
         f9 = _tagesdoc(welt, seg, 9)["hot_deals_fehler"]
         assert f9["versuche"] == 1 and f9["observed_at"] == doc9["observed_at"] and f9["seit"] == spaeter.isoformat()
-        # derselbe Tageswert, erster Fehlversuch vor mehr als AUFGEBEN_NACH_STUNDEN: aufgegeben, obwohl erst 2 Versuche
-        z = welt.run(D.auswerten_faellige(db, jetzt=spaeter + timedelta(hours=D.AUFGEBEN_NACH_STUNDEN)))
+        # derselbe Tageswert, erster Fehlversuch vor mehr als AUFGEBEN_NACH_STUNDEN, aber erst 2 Versuche: NICHT aufgegeben
+        z = lauf(spaeter + timedelta(hours=D.AUFGEBEN_NACH_STUNDEN))
+        assert "aufgegeben" not in z and _tagesdoc(welt, seg, 9)["hot_deals_fehler"]["versuche"] == 2, z
+        # ... erst mit genug Versuchen UND genug Zeit
+        welt.run(db[K.TAGESSTATS].update_one({"segment_id": seg["id"], "date": _t(9)}, {"$set": {"hot_deals_fehler.versuche": D.AUFGEBEN_NACH_VERSUCHEN - 1}}))
+        z = lauf(spaeter + timedelta(hours=D.AUFGEBEN_NACH_STUNDEN, minutes=5))
         assert z.get("aufgegeben") == 1, z
         t9 = _tagesdoc(welt, seg, 9)
-        assert t9["hot_deals"]["grund"] == "auswertung_fehler" and t9["hot_deals"]["fehlversuche"] == 2 and "hot_deals_offen" not in t9
+        assert t9["hot_deals"]["grund"] == "auswertung_fehler" and t9["hot_deals"]["fehlversuche"] == D.AUFGEBEN_NACH_VERSUCHEN and "hot_deals_offen" not in t9
         assert welt.run(db.betriebsalarme.count_documents({"typ": AUS.ALARM, "ref": refs[1], "offen": True})) == 1
         assert welt.run(db.betriebsalarme.count_documents({"typ": AUS.ALARM, "ref": refs[0], "offen": True})) == 1
     finally:
@@ -950,4 +979,71 @@ def test_23_runde2_b0_obergrenze_berichtsfrist_und_bericht_wartet(welt, monkeypa
             welt.run(db[K.KONFIG].replace_one({"_id": K.AUSWERTUNG_DOK}, merker_vorher, upsert=True))
         else:
             welt.run(db[K.KONFIG].delete_one({"_id": K.AUSWERTUNG_DOK}))
+        _aufraeumen(welt)
+
+
+# ---------------------------------------------------------------- Pruefung Runde 3 (27.09.2026)
+def test_24_runde3_segmentuebergreifender_fehler_wird_nicht_gezaehlt(welt, monkeypatch):
+    """Pruefung Runde 3 (hotdeals#1): ein Deploy bringt einen Fehler, der fuer ALLE Segmente greift, und ist nach einer
+    Stunde per Hotfix behoben. Vorher: nach ~12 Minuten (zwei Server) bzw. 6 Klicks waren die offenen Tage aller
+    Segmente mit grund='auswertung_fehler' geschlossen — Hot Deals und Ereignisse dieser Tage endgueltig verloren, bis
+    zu 100 Tagesalarme. Jetzt zaehlt ein Fehlversuch nur, wenn im selben Durchlauf ein anderes Segment vollstaendig
+    ausgewertet wurde; ein fruehes Ende ohne Basis zaehlt nicht als Beweis. Nach dem Hotfix werden die Tage nachgeholt."""
+    seg = _start(welt)
+    seg_b = _zweites_segment(welt, seg)
+    seg_c = {**seg, "id": f"{seg['id']}-c", "min_km": 120001, "max_km": 150000}
+    welt.run(welt.db[K.SEGMENTE].insert_one(dict(seg_c)))
+    db = welt.db
+    alarme_vorher = welt.run(db.betriebsalarme.count_documents({"typ": AUS.ALARM, "ref": {"$regex": "^hot-deals:"}}))
+    try:
+        _basis(welt, seg, tage=7)
+        _basis(welt, seg_b, tage=7)
+        _basis(welt, seg_c, tage=3)                                        # C: zu wenig Basistage -> 'ohne_basis'
+        _doc(welt, seg, 7, BASIS[:4] + (("x", 17000),), neu=("x",))
+        _doc(welt, seg_b, 7, BASIS[:4] + (("y", 17000),), neu=("y",))
+        echt = D.segment_tag_auswerten
+        deploy = {"kaputt": True}
+
+        async def _deploy_fehler(db, seg_id, tag, **kw):
+            if deploy["kaputt"] and seg_id != seg_c["id"]:
+                raise KeyError("Deploy-Fehler (Test)")                     # greift fuer jede vollstaendige Auswertung
+            return await echt(db, seg_id, tag, **kw)
+        monkeypatch.setattr(D, "segment_tag_auswerten", _deploy_fehler)
+        jetzt = datetime(2026, 3, 10, 12, 0, tzinfo=timezone.utc)
+        ids = [seg["id"], seg_b["id"], seg_c["id"]]
+        for n in range(12):                                                # eine Stunde, beide Server, dazu Klicks
+            _doc(welt, seg_c, 3 + n, BASIS, dq="POOR")                     # C laeuft durch, aber ohne Basis (POOR)
+            z = welt.run(D.auswerten_faellige(db, segment_ids=ids, jetzt=jetzt + timedelta(minutes=5 * n)))
+            assert z["fehler"] == 2 and z["fehler_uebergreifend"] == 2 and "aufgegeben" not in z and z["ohne_basis"] == 1, (n, z)
+        z = welt.run(D.auswerten_faellige(db, segment_ids=ids, jetzt=jetzt + timedelta(hours=7)))
+        assert z["fehler_uebergreifend"] == 2 and "aufgegeben" not in z, z
+        for s in (seg, seg_b):
+            td = _tagesdoc(welt, s, 7)
+            assert td["hot_deals_offen"] is True and "hot_deals_fehler" not in td and "hot_deals" not in td, "nichts gezaehlt"
+        assert welt.run(db.betriebsalarme.count_documents({"typ": AUS.ALARM, "ref": {"$regex": "^hot-deals:"}})) == alarme_vorher
+        # Hotfix: der naechste Durchlauf holt beide Tage nach — Hot Deals und Ereignisse sind da
+        deploy["kaputt"] = False
+        z = welt.run(D.auswerten_faellige(db, segment_ids=ids, jetzt=jetzt + timedelta(hours=8)))
+        assert z["ausgewertet"] == 2 and z["fehler"] == 0 and z["ereignisse"] == 2, z
+        assert [e["typ"] for e in _ereignisse(welt, seg, "x")] == ["NEW_HOT_DEAL"] and [e["typ"] for e in _ereignisse(welt, seg_b, "y")] == ["NEW_HOT_DEAL"]
+    finally:
+        _aufraeumen(welt)
+
+
+def test_25_runde3_aufgegebener_tag_ist_kein_gepruefter_tag(welt, monkeypatch):
+    """Pruefung Runde 3 (hotdeals#0, Nebenbefund): deals.zusammenfassung zaehlte einen aufgegebenen Tag (hot_deals mit
+    ausgewertet_at, grund 'auswertung_fehler') als 'Modell geprueft'. Ein regulaer ausgewerteter Tag zaehlt weiter."""
+    seg = _start(welt)
+    heute = _t(9)
+    monkeypatch.setattr(K, "heute_tag", lambda zeit=None: heute)
+    db = welt.db
+    try:
+        vorher = welt.run(D.zusammenfassung(db))["modelle_geprueft"]
+        _doc(welt, seg, 9, BASIS, offen=False)
+        welt.run(db[K.TAGESSTATS].update_one({"segment_id": seg["id"], "date": heute}, {"$set": {"hot_deals": {
+            "ausgewertet_at": f"{heute}T06:00:00+00:00", "grund": D.GRUND_AUSWERTUNG_FEHLER, "basis_ok": False, "fehlversuche": 6}}}))
+        assert welt.run(D.zusammenfassung(db))["modelle_geprueft"] == vorher, "aufgegeben ist nicht geprueft"
+        welt.run(db[K.TAGESSTATS].update_one({"segment_id": seg["id"], "date": heute}, {"$set": {"hot_deals.grund": "zu_wenig_tage"}}))
+        assert welt.run(D.zusammenfassung(db))["modelle_geprueft"] == vorher + 1
+    finally:
         _aufraeumen(welt)

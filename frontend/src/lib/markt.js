@@ -222,10 +222,12 @@ export const CONFIDENCE = {
   MEDIUM: { text: "mittel", farbe: "var(--st-amber)" },
   LOW: { text: "niedrig", farbe: "var(--st-rot)" },
 };
-/** Prüfung Runde 2 (#3): Rechenregel der Berichte (backend berichte.SCHEMA). Ein eingefrorener Bericht behält seine
- *  Nummer — Schema 1 (oder ohne Angabe) ist nach einer älteren Rechenregel entstanden; Kennzahlen wie Periodenwerte,
- *  Tagesbewegung, Kosten je Einheit und Segmentabdeckung sind dort anders definiert. */
-export const BERICHT_SCHEMA = 2;
+/** Prüfung Runde 2 (#3) / Runde 3: Rechenregel der Berichte (backend berichte.SCHEMA). Ein eingefrorener Bericht behält
+ *  seine Nummer — Schema 1 (oder ohne Angabe) und 2 sind nach einer älteren Rechenregel entstanden; Kennzahlen wie
+ *  Periodenwerte, Tagesbewegung, Kosten je Einheit, Abdeckung und Segmentabdeckung sind dort anders definiert (Schema 2:
+ *  nicht geplante Segmente der Budget-Rotation zählten als fehlend, ohne vollständigen Tag konnte ein Teilkorb das
+ *  Niveau stellen). */
+export const BERICHT_SCHEMA = 3;
 export const BERICHT_ALT_TEXT = "nach älterer Rechenregel erstellt";
 export function berichtAltesSchema(b) {
   if (!b) return false;
@@ -234,12 +236,13 @@ export function berichtAltesSchema(b) {
 }
 /** Diagrammpunkt eines Berichtstags. Schema 2: die Medianlinie ist der Korbwert (median_korb — an Tagen mit
  *  Teilabdeckung über die an beiden Vergleichstagen vorhandenen Segmente verkettet, kein Scheineinbruch); P25/P75
- *  eines teilabgedeckten oder heute noch laufenden Tages gelten nur für die vorhandenen Segmente → Lücke; das
- *  Tagesminimum ist ein echtes Angebot und bleibt. Ältere Berichte ohne median_korb: Teilabdeckung = ganze Lücke. */
+ *  eines teilabgedeckten, heute noch laufenden oder (Schema 3) wegen Budget-Rotation nur teilweise geplanten Tages
+ *  gelten nur für die gelaufenen Segmente → Lücke; das Tagesminimum ist ein echtes Angebot und bleibt. Ältere Berichte
+ *  ohne median_korb: Teilabdeckung = ganze Lücke. */
 export function berichtDiagrammPunkt(r) {
   if (!r) return r;
   if (r.median_korb !== undefined) {
-    const teil = r.teilabdeckung || Number(r.ausstehende_segmente || 0) > 0;
+    const teil = r.teilabdeckung || Number(r.ausstehende_segmente || 0) > 0 || Number(r.nicht_geplante_segmente || 0) > 0;
     return { ...r, median: r.median_korb, ...(teil ? { p25: null, p75: null } : {}) };
   }
   return r.teilabdeckung ? { ...r, median: null, min: null, p25: null, p75: null } : r;

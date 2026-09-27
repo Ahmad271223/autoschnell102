@@ -142,8 +142,9 @@ export default function MarktBericht() {
             {altesSchema && (
               <div className="mt-2 text-[11px]" style={{ color: "var(--st-amber)" }} data-testid="bericht-schema-hinweis">
                 Dieser Bericht wurde {BERICHT_ALT_TEXT} (Schema {bericht.schema ?? 1}): Periodenwerte (Median, Minimum, Maximum,
-                Stichprobe), Tagesbewegung, Kosten je Einheit und Segmentabdeckung sind dort anders definiert — mit neueren Berichten
-                nur eingeschränkt vergleichbar. Eingefrorene Berichte werden nie neu gerechnet.
+                Stichprobe), Tagesbewegung, Kosten je Einheit, Abdeckung und Segmentabdeckung sind dort anders definiert (z. B.
+                zählten nicht geplante Segmente der Budget-Rotation als Lücke) — mit neueren Berichten nur eingeschränkt
+                vergleichbar. Eingefrorene Berichte werden nie neu gerechnet.
               </div>
             )}
             {(bericht.hinweise || []).length > 0 && (
@@ -202,7 +203,7 @@ export default function MarktBericht() {
               </ResponsiveContainer>
             </div>
             <div className="mt-1 text-[11px] text-zinc-500" data-testid="bericht-legende">{mitKorb
-              ? "Rot Tagesmedian — an Tagen mit Teilabdeckung (ein Segment ohne gültigen Lauf) über die an beiden Vergleichstagen vorhandenen Segmente verkettet, kein Scheineinbruch · Grün Tagesminimum · Blau gestrichelt P25/P75 (nur wenn jedes Segment des Tages genug Angebote hat). Tage ohne gültige Daten bleiben Lücken — nichts wird interpoliert."
+              ? "Rot Tagesmedian — an Tagen mit Teilabdeckung (ein Segment ohne gültigen Lauf) über die an beiden Vergleichstagen vorhandenen Segmente verkettet, kein Scheineinbruch; nicht geplante Segmente (Budget-Rotation) mit ihrem letzten geplanten Wert · Grün Tagesminimum · Blau gestrichelt P25/P75 (nur wenn jedes Segment des Tages gelaufen ist und genug Angebote hat). Tage ohne gültige Daten bleiben Lücken — nichts wird interpoliert."
               : "Rot Tagesmedian · Grün Tagesminimum · Blau gestrichelt P25/P75 (nur wenn jedes Segment des Tages genug Angebote hat). Tage ohne gültige Daten und Tage mit Teilabdeckung (ein Segment ohne gültigen Lauf) bleiben Lücken — nichts wird interpoliert."}</div>
             <div className="mt-3 flex flex-wrap items-center gap-1">
               {ZWEITE.map(([key, l]) => <Chip key={key} aktiv={zweite === key} onClick={() => setZweite(key)} testid={`bericht-zweite-${key}`}>{l}</Chip>)}
@@ -269,8 +270,9 @@ export default function MarktBericht() {
                 <th className="px-3 py-2 text-right">Erhöhungen</th><th className="px-3 py-2 text-right">Hot Deals</th><th className="px-3 py-2">Datenqualität</th></tr></thead>
               <tbody>{tabelle.map((t) => {
                 const dq = t.data_quality ? DATENQUALITAET[t.data_quality] || DATENQUALITAET.UNKNOWN : null;
-                // roher Tageswert ohne fehlende / heute noch laufende Segmente: gedimmt (die Periodenwerte nutzen den Korbwert)
-                const gedimmt = t.teilabdeckung || t.ausstehende_segmente > 0;
+                // roher Tageswert ohne fehlende / heute noch laufende / nicht geplante Segmente: gedimmt (die Periodenwerte
+                // nutzen den Korbwert)
+                const gedimmt = t.teilabdeckung || t.ausstehende_segmente > 0 || t.nicht_geplante_segmente > 0;
                 const teilTitel = t.median_korb !== undefined
                   ? `Tageswert ohne diese Segmente — für Median, Minimum und Maximum der Periode zählt der verkettete Korbwert ${eur(t.median_korb)}`
                   : "Tageswert ohne diese Segmente — zählt nicht für Median, Minimum und Maximum der Periode";
@@ -284,6 +286,9 @@ export default function MarktBericht() {
                                                                       title={teilTitel}>Teilabdeckung ({t.fehlende_segmente} Segm. ohne gültigen Lauf)</span>}
                       {!t.andere_fassung && t.ausstehende_segmente > 0 && <span className="ml-1 text-[10px] text-zinc-500" data-testid={`bericht-ausstehend-${t.date}`}
                                                                                  title="Die Läufe verteilen sich über den Tag — ausstehende Segmente sind keine Lücke">läuft noch ({t.ausstehende_segmente} Segm. ausstehend)</span>}
+                      {!t.andere_fassung && t.nicht_geplante_segmente > 0 && <span className="ml-1 text-[10px] text-zinc-500" data-testid={`bericht-nichtgeplant-${t.date}`}
+                                                                                    title={`Budget-Rotation: an diesem Tag kein Abruf geplant — keine Lücke; im Korbwert${t.median_korb != null ? ` ${eur(t.median_korb)}` : ""} mit dem letzten geplanten Wert`}>
+                        {t.nicht_geplante_segmente} Segm. nicht geplant</span>}
                       {!t.andere_fassung && !t.gueltig && !t.nur_ungueltig && <span className="ml-1 text-[10px] text-zinc-500" data-testid={`bericht-luecke-${t.date}`}>keine Daten</span>}</td>
                     <td className={`px-3 py-1 text-right${gedimmt ? "" : " text-white"}`} style={gedimmt ? { color: "var(--text-dim)" } : undefined}>{eur(t.median)}</td>
                     <td className="px-3 py-1 text-right" style={{ color: richtungFarbe(t.richtung) }}>{t.delta_vortag_eur == null ? "—" : trendText(t.delta_vortag_eur)}</td>
