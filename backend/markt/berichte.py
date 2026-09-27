@@ -37,8 +37,12 @@ Grundsaetze:
     Budget vor dem Plan erschoepft und Budget danach erschoepft (Storno mit budget_wait) sind einheitlich 'nicht geplant
     wegen Budget'. Serienende auf Ebene der Fassung (aktiv bis zum letzten Plan irgendeines Segments bzw. bis zum
     Abschalten, Jobs bis heute), Serienstart: schon angelegte, noch nicht beobachtete Segmente fehlen (kein Teilkorb-
-    Anker). Ein Anker braucht IMMER die Mindestabdeckung gegen den vollen Korb; ein nicht geplantes Segment ohne
-    tragbaren Wert (Intervall > TRAGEN_MAX_TAGE) faellt aus dem wirksamen Korb, ohne als Luecke zu zaehlen
+    Anker) — auch laengst angelegte (Neustart, Wieder-Einschalten) und solche ohne Basistag im Zeitraum (Serienstart am
+    letzten Periodentag). Ein Anker braucht IMMER die Mindestabdeckung gegen den vollen Korb; ein nicht geplantes Segment
+    ohne tragbaren Wert (Intervall > TRAGEN_MAX_TAGE) ist keine technische Luecke, sein Wert fehlt aber (Nenner der
+    Abdeckung) — bei laengeren Intervallen bleibt das Euro-Niveau ehrlich leer. Start/Ende ueber die wirksamen Werte
+    (beobachtet oder getragen) je Korb-Segment, in Euro nur ab ANKER_MIN_ABDECKUNG des Korbgewichts. Fehlt das
+    Protokoll eines Tages ab Einfuehrung, belegt irgendein Tagesplan-Job an dem Tag den Plan (Protokoll gescheitert)
   * getrennt ausgewiesen (Abschnitt 54): sample_market_change (Aenderung der taeglichen Stichprobe inkl. Mix) und
     same_listing_price_change (Preisaenderung derselben Inserate); Preissenkungen/-erhoehungen nur je listing_id
   * eingefroren (Abschnitte 35/36): ein finaler Bericht wird einmal gespeichert (market_model_reports, Unique je
@@ -105,7 +109,9 @@ HOT_TOP_MAX = 10
 #   4  Pruefung Runde 4: Tagesplan-Protokoll (ganztaegiger Ausfall des Plans = Luecke, nicht 'nicht geplant'), Budget
 #      einheitlich 'nicht geplant wegen Budget', Korb an Serienanfang/-ende (Fassungsebene, schon angelegte Segmente
 #      fehlen), Anker immer mit Mindestabdeckung gegen den vollen Korb, Korb inkl. tragbarer Vorlauf-Segmente,
-#      abgelaufene Werte fallen aus dem wirksamen Korb, Confidence mit Mindesttagen
+#      abgelaufene Werte fallen aus dem wirksamen Korb, Confidence mit Mindesttagen; Runde 4b (vor der Auslieferung,
+#      gleiche Nummer): abgelaufene Werte fehlen (Nenner), laengst angelegte bzw. nie beobachtete Segmente fehlen
+#      ('vorab'), Start/Ende ueber die wirksamen Werte, Budget-Storno ganzer Tage, Protokoll-Luecke mit Job-Beleg
 # Die Oberflaeche kennzeichnet aeltere Berichte ("nach aelterer Rechenregel erstellt") — Vergleiche ueber Perioden
 # sollen die Definitionen nicht unbemerkt mischen.
 SCHEMA = 4
@@ -141,14 +147,16 @@ ABGELAUFEN = "abgelaufen"          # _getragen: letzter geplanter Tag aelter als
 # Tag ohne technisch fehlendes Segment ist nur Anker, wenn er diese Grenze gegen den VOLLEN Korb erreicht (am
 # Serienanfang/-ende fielen sonst Segmente still aus dem Korb, und der Rest wurde Anker); ohne solchen Tag hoechstens
 # EIN Tag (der am besten abgedeckte), und nur ab dieser Grenze. Nicht geplante Segmente ohne tragbaren Wert (abgelaufen,
-# Intervall > TRAGEN_MAX_TAGE) zaehlen dabei nicht zum Korb — ein laengeres Intervall allein nimmt nie jeden Anker.
+# Intervall > TRAGEN_MAX_TAGE) zaehlen dabei als nicht gedeckt (Runde 4b: aus dem Nenner genommen wurde der beste Tag
+# Ersatz-Anker mit Teilkorb-Niveau, Intervall 21: +2,8 %, Kette bis -8,7 %, HIGH) — ein laengeres Intervall laesst das
+# Euro-Niveau ehrlich leer (Hinweis, nicht HIGH); die Taktung plant bei knappem Budget ehrlich seltener (Warnung).
 ANKER_MIN_ABDECKUNG = 0.95
 # Ein nicht geplantes Segment steht im Korbwert mit dem Wert seines letzten GEPLANTEN Tages, hoechstens so viele Tage
 # zurueck wie der geladene Vorlauf (VORLAUF_TAGE): die Rotation plant jedes Segment spaetestens alle
 # konfig.MAX_INTERVALL_TAGE = 14 Tage (Runde 4 #2: die Taktung im Crawl-Modul und MARKT_CRAWL_INTERVALL_TAGE sind darauf begrenzt)
 # — bei 14 Tagen weicht der Gebrauchtwagenmarkt typisch unter 1 % ab. War der letzte geplante Lauf ein technischer
-# Ausfall, wird nichts getragen (eine Luecke wird nie aufgefuellt); ist er aelter (erzwungenes laengeres Intervall),
-# faellt das Segment an diesem Tag aus dem wirksamen Korb (keine Luecke, Hinweis).
+# Ausfall, wird nichts getragen (eine Luecke wird nie aufgefuellt); ist er aelter (Budget reicht nicht fuer 14 Tage,
+# SAFE_AUTO-Ruhe), fehlt sein Wert an diesem Tag (keine technische Luecke, aber nicht gedeckt; Hinweis).
 TRAGEN_MAX_TAGE = VORLAUF_TAGE
 JOB_TAG_INDEX = "markt_job_tag_status"     # (tag, status) — Altdaten: gab es an einem Tag irgendeinen Tagesplan-Job?
 # Abruf-Jobs, die als geplant gelten: jeder Status ausser 'cancelled'; storniert nur, wenn der Tagesplan veraltet war
@@ -181,10 +189,14 @@ class Korbwerte(NamedTuple):
     # Runde 4
     korb_n: int                          # Segmente im wirksamen Korb des Zeitraums
     budget: Dict[str, int]               # davon nicht geplant wegen Budget (Budget-Tag bzw. Storno mit budget_wait)
-    abgelaufen: Dict[str, int]           # nicht geplant, letzter geplanter Wert zu alt -> aus dem wirksamen Korb
+    abgelaufen: Dict[str, int]           # nicht geplant, letzter geplanter Wert zu alt -> Wert fehlt (nicht gedeckt, keine Luecke)
     vorab: Dict[str, int]                # schon angelegt/eingeschaltet, noch nie beobachtet, nicht geplant -> fehlt
     kandidaten: List[str]                # Tage ohne ausstehende Laeufe (moegliche Anker)
     tragbar: Dict[str, float]            # Tage OHNE Basis-Segment: Anteil des Korbgewichts mit tragbarem Wert
+    # Runde 4b: je Tag mit Basis-Segment die wirksamen Werte (Segment -> beobachtetes oder getragenes Tagesdokument) und
+    # das Korbgewicht je Segment — Start-/Endwert ueber denselben Korb (kennzahlen)
+    wirksam: Dict[str, Dict[str, Dict[str, Any]]]
+    gewicht: Dict[str, float]
 
 
 class Fehlende(NamedTuple):
@@ -381,7 +393,7 @@ def _tiefe_zusammen(z: Dict[str, int]) -> str:
 def confidence(abdeckung: int, erwartet: int, dq: Dict[str, int], tiefe: Dict[str, int], inserate: int,
                segment_tage: Optional[int] = None, segment_tage_erwartet: Optional[int] = None, *,
                kalendertage: Optional[int] = None, tage_mit_wert: Optional[int] = None,
-               tage_ohne_plan: int = 0) -> Tuple[str, List[str]]:
+               tage_ohne_plan: int = 0, einschraenkungen: Optional[List[str]] = None) -> Tuple[str, List[str]]:
     """Abschnitt 53, regelbasiert: HIGH ohne Einschraenkung; MEDIUM bei >= 50 % Abdeckung (Kalendertage UND
     Segment-Tage), >= 70 % brauchbarer Qualitaet und >= 5 Inseraten; sonst LOW. Die Gruende stehen dabei.
     Segment-Tage (Befund B5): gueltige Segment-Tage / (Segmente der Fassung x erwartete Tage) — ein Tag, an dem
@@ -389,7 +401,9 @@ def confidence(abdeckung: int, erwartet: int, dq: Dict[str, int], tiefe: Dict[st
     Runde 4 (#6): HIGH erst ab CONF_HOCH_MIN_TAGE gueltigen Tagen (abdeckung) UND CONF_HOCH_KALENDER_ANTEIL der
     Kalendertage (kalendertage, bis heute) mit gueltigem Lauf oder gueltig getragenem Wert (tage_mit_wert); MEDIUM erst
     ab CONF_MITTEL_MIN_TAGE gueltigen Tagen. Scheitert eine der beiden Mindestgrenzen, steht auch die Zahl der Tage
-    ohne Plan als Grund dabei (Budget-Rotation, Pause, Crawler aus — erklaert, warum es so wenige Tage sind)."""
+    ohne Plan als Grund dabei (Budget-Rotation, Pause, Crawler aus — erklaert, warum es so wenige Tage sind).
+    einschraenkungen (Runde 4b): weitere Gruende aus dem Korb (Segment-Tage ohne tragbaren Wert, kein Ankertag) — mit
+    ihnen nie HIGH."""
     anteil = abdeckung / erwartet if erwartet else 0.0
     mit_wert = abdeckung if tage_mit_wert is None else tage_mit_wert
     kal_anteil = (mit_wert / kalendertage) if kalendertage else None
@@ -418,6 +432,7 @@ def confidence(abdeckung: int, erwartet: int, dq: Dict[str, int], tiefe: Dict[st
         gruende.append("wenige verschiedene Inserate")
     if duenn >= 0.5:
         gruende.append("überwiegend dünner/leerer Markt")
+    gruende += list(einschraenkungen or [])
     if not gruende:
         return "HIGH", []
     if (abdeckung >= CONF_MITTEL_MIN_TAGE and anteil >= 0.5 and (seg_anteil is None or seg_anteil >= SEGMENT_ABDECKUNG_MITTEL)
@@ -619,19 +634,21 @@ class _Daten:
 
     def _existiert(self, sid: str, tag: str) -> bool:
         """Runde 4 (#4): war das Segment an diesem Tag schon angelegt bzw. eingeschaltet (nur mit bekannter Planung)?
-        Erster Job <= Tag; sonst Anlage (created_at) im geladenen Zeitraum <= Tag; ohne created_at der Beginn der Fassung
-        im geladenen Zeitraum <= Tag. Ein laengst angelegtes Segment, dessen erster Job erst spaeter kommt, wurde erst
-        dann (wieder) eingeschaltet — bis dahin neu (Mix)."""
+        Erster Job <= Tag; sonst Anlage (created_at) <= Tag; ohne created_at der Beginn der Fassung im geladenen Zeitraum
+        <= Tag. Runde 4b: auch ein LAENGST angelegtes Segment (created_at vor dem geladenen Fenster), dessen erster Job
+        erst spaeter kommt, existiert — Neustart nach mehr als VORLAUF_TAGE ohne Plan (Budget, Crawler aus, Planausfall),
+        Wieder-Einschalten eines pausierten Auftrags oder Intervall ueber TRAGEN_MAX_TAGE: sein Wert fehlt ('vorab'),
+        der Tag ist kein Anker. Vorher galt es als neu (Mix) — der Teilkorb des ersten Tages wurde still zum Niveau.
+        Neu (Mix) ist nur ein Segment, das an diesem Tag nachweislich noch nicht angelegt war."""
         if self.geplant is None:
             return False
         erster = self.erster_job.get(sid)
         if erster and erster <= tag:
             return True
-        start = self.alle_tage[0]
         angelegt = _tag_aus_zeit((self.segs.get(sid) or {}).get("created_at"))
         if angelegt:
-            return start < angelegt <= tag
-        return bool(self.fassung_start) and start < self.fassung_start <= tag
+            return angelegt <= tag
+        return bool(self.fassung_start) and self.fassung_start <= tag
 
     def _wegen_budget(self, sid: str, tag: str) -> bool:
         """Runde 4 (#1): nicht geplant wegen Budget — Tagesplan mit erschoepftem/keinem Budget oder der Job des Tages
@@ -698,13 +715,24 @@ class _Daten:
                     g = self._getragen(sid, erster)
                     if isinstance(g, tuple) and g[0] == "basis":
                         k.add(sid)
+            # Runde 4b: auch Segmente der Fassung OHNE Wert — schon angelegt und laufend an einem Tag des Zeitraums, aber
+            # im geladenen Fenster nie mit Preisen beobachtet (Serienstart am letzten Periodentag, Neustart, Intervall
+            # ueber TRAGEN_MAX_TAGE) oder mit einem Ausfall als letztem geplanten Lauf. Sie fehlen dann im Korb ('vorab'
+            # bzw. ohne tragbaren Wert) — sonst deckte der Rest 100 % eines Teilkorbs und wuerde Anker. Nur gueltig LEER
+            # beobachtete Segmente (EMPTY, Marktinformation) bleiben wie bisher draussen.
+            for sid in self.segmente_fassung - k:
+                if self.gueltig_je_seg.get(sid) and not any(deals.ist_basis(d) for d in (self.idx.get(sid) or {}).values()):
+                    continue
+                if any(self._noch_aktiv(sid, t) and self._existiert(sid, t) for t in tage_set if not self.offen(t)):
+                    k.add(sid)
         return k
 
     def fehlende_ids(self, tag: str, korb: set) -> Fehlende:
         """Korb-Segmente ohne gueltigen Lauf an diesem Tag nach Grund (Befund B3, Runde 3/4). Betrachtet werden Segmente,
         die vorher schon gueltig beobachtet wurden (auch im Vorlauf); EMPTY ist eine gueltige Beobachtung und fehlt nie;
         ein neu hinzukommendes Segment (vorher nie gueltig) ist Mix, keine Luecke — Runde 4 (#4): mit bekannter Planung
-        nur, wenn es an diesem Tag noch nicht angelegt/eingeschaltet war (_existiert).
+        nur, wenn es an diesem Tag noch nicht angelegt war (_existiert; Runde 4b: ein laengst angelegtes, im geladenen
+        Fenster nie beobachtetes Segment ist nie neu, sondern fehlt).
           * technisch fehlend: fuer (Segment, Tag) war ein Abruf geplant (Job bzw. Tagesdokument; Runde 4: auch jedes
             laufende Segment an einem Tag ohne Tagesplan) — kein Tagesdokument oder nur ungueltig/POOR. Ohne bekannte
             Planung wie bisher: noch aktiv (eingeschaltet oder spaeter noch ein Tagesdokument)
@@ -761,11 +789,12 @@ class _Daten:
             (Runde 3: bei Budget-Rotation laeuft ein Teil der Segmente nur jeden zweiten, dritten ... Tag — ohne das
             waere jeder Tag ein anderer Teilkorb, z. B. abwechselnd die teure und die guenstige Haelfte)
           * nicht geplante Segmente ohne tragbaren Wert (Runde 4 #2: letzter Plan aelter als TRAGEN_MAX_TAGE) fallen aus
-            dem wirksamen Korb: auf beiden Seiten des Vergleichs heraus, nicht im Korbgewicht dieses Tages — keine Luecke
-          * Anker (Runde 4 #3) = Tag ohne technisch fehlendes/ausstehendes/vorab fehlendes Segment, dessen Wert mindestens
-            ANKER_MIN_ABDECKUNG des VOLLEN Korbgewichts deckt (neue, noch nicht angelegte oder schon abgeschaltete Segmente
-            zaehlen als nicht gedeckt, abgelaufene nicht) — Niveau des wirksamen Korbs (ohne Ausfaelle und ohne Rotation
-            exakt das beobachtete Tagesniveau)
+            dem wirksamen Korb: auf beiden Seiten des Vergleichs heraus — keine technische Luecke; Runde 4b: ihr Gewicht
+            bleibt im Nenner der Abdeckung (Wert fehlt)
+          * Anker (Runde 4 #3) = Tag ohne technisch fehlendes/ausstehendes/vorab fehlendes/abgelaufenes Segment, dessen
+            Wert mindestens ANKER_MIN_ABDECKUNG des VOLLEN Korbgewichts deckt (neue, noch nicht angelegte, schon
+            abgeschaltete und abgelaufene Segmente zaehlen als nicht gedeckt) — Niveau des wirksamen Korbs (ohne Ausfaelle
+            und ohne Rotation exakt das beobachtete Tagesniveau)
           * sonst Wert des vorigen Tages mit Wert x Verhaeltnis der Niveaus beider Tage ueber die Segmente, die an
             BEIDEN Tagen einen wirksamen Wert haben (ein technisch fehlendes faellt auf beiden Seiten heraus: kein
             Scheineinbruch, nichts aufgefuellt); vor dem ersten Anker rueckwaerts vom naechsten Tag mit Wert
@@ -783,11 +812,20 @@ class _Daten:
         # Korbgewicht je Segment: mittlere Stichprobe seiner Basistage im Zeitraum (wie das Niveau gewichtet); ein nur
         # getragenes Segment (Runde 4 #5) mit der mittleren Stichprobe seiner geladenen Basistage
         gewicht: Dict[str, float] = {}
+        ohne_n: List[str] = []
         for sid in korb:
             s = self.idx.get(sid, {})
             ns = ([_n(d) for t, d in s.items() if t in tage_set and deals.ist_basis(d)]
                   or [_n(d) for d in s.values() if deals.ist_basis(d)])
-            gewicht[sid] = (sum(ns) / len(ns)) if ns else 1.0
+            if ns:
+                gewicht[sid] = sum(ns) / len(ns)
+            else:
+                ohne_n.append(sid)
+        # Runde 4b: ein Korb-Segment ohne jede Preisbeobachtung (Serienstart, Neustart) zaehlt mit dem mittleren Gewicht
+        # der uebrigen — mit 1,0 fiele sein Fehlen bei grossen Stichproben unter die Grenze von 5 %
+        mittel = (sum(gewicht.values()) / len(gewicht)) if gewicht else 1.0
+        for sid in ohne_n:
+            gewicht[sid] = mittel
         wirksam: Dict[str, Dict[str, Dict[str, Any]]] = {}
         weg: Dict[str, set] = {}
         luecke: Dict[str, bool] = {}
@@ -821,9 +859,11 @@ class _Daten:
             fehlend[t], ausstehend[t], nicht_geplant[t], getragen[t] = len(f.tech), len(f.aus), len(f.ng), n_getragen
             budget[t], abgelaufen[t], vorab[t] = len(f.budget), len(raus), len(f.vorab)
             wirksam[t], weg[t], luecke[t] = eff, ohne | raus, bool(ohne)
-            # voller Korb (Runde 4 #3): alle Korb-Segmente ausser den abgelaufenen — neu/abgeschaltet zaehlen als nicht gedeckt
+            # voller Korb (Runde 4 #3): alle Korb-Segmente — neu/abgeschaltet zaehlen als nicht gedeckt. Runde 4b: auch
+            # abgelaufene (Intervall > TRAGEN_MAX_TAGE) bleiben im Nenner — ihr Wert fehlt; ohne sie im Nenner wurde der
+            # am besten abgedeckte Tag Ersatz-Anker mit einem Teilkorb-Niveau (Intervall 21: +2,8 %, Kette bis -8,7 %)
             w_da = sum(gewicht[sid] for sid in da)
-            w_voll = sum(w for sid, w in gewicht.items() if sid not in raus)
+            w_voll = sum(gewicht.values())
             abdeckung[t] = (w_da / w_voll) if w_voll > 0 else 0.0
 
         def _niveau(t: str, ohne: set) -> Optional[float]:
@@ -864,8 +904,20 @@ class _Daten:
                     continue
                 w = sum(gewicht[sid] for sid in korb if self._noch_aktiv(sid, t) and isinstance(self._getragen(sid, t), tuple))
                 tragbar[t] = w / w_korb
+        # Runde 4b (Budget danach, ganzer Tag): auch an Tagen OHNE Basis-Segment die Segmente, die wegen Budget nicht
+        # geplant waren (Storno mit budget_wait bzw. Budget-Tag) — sonst stand ein ganztaegiger Budget-Storno nirgends
+        if self.geplant is not None:
+            for t in tage:
+                if basis[t] or self.offen(t):
+                    continue
+                n = sum(1 for sid in korb | self.segmente_fassung
+                        if t not in self.gueltig_je_seg.get(sid, ()) and self._noch_aktiv(sid, t) and self._wegen_budget(sid, t)
+                        and (self.erster_gueltig.get(sid, "9999") < t or self._existiert(sid, t)) and not self.ist_geplant(sid, t))
+                if n:
+                    budget[t] = n
         return Korbwerte({t: wert.get(t) for t in tage}, fehlend, ausstehend, nicht_geplant, getragen, abdeckung,
-                         [t for t in anker if t in wert], mit, len(korb), budget, abgelaufen, vorab, kandidaten, tragbar)
+                         [t for t in anker if t in wert], mit, len(korb), budget, abgelaufen, vorab, kandidaten, tragbar,
+                         wirksam, gewicht)
 
 
 def _ausschnitt(kw: Korbwerte, tage: List[str]) -> Korbwerte:
@@ -878,7 +930,7 @@ def _ausschnitt(kw: Korbwerte, tage: List[str]) -> Korbwerte:
         return {t: v for t, v in x.items() if t in ts}
     return Korbwerte(_d(kw.werte), _d(kw.fehlend), _d(kw.ausstehend), _d(kw.nicht_geplant), _d(kw.getragen), _d(kw.abdeckung),
                      [t for t in kw.anker if t in ts], [t for t in kw.mit if t in ts], kw.korb_n, _d(kw.budget), _d(kw.abgelaufen),
-                     _d(kw.vorab), [t for t in kw.kandidaten if t in ts], _d(kw.tragbar))
+                     _d(kw.vorab), [t for t in kw.kandidaten if t in ts], _d(kw.tragbar), _d(kw.wirksam), kw.gewicht)
 
 
 def _preisaenderungen(daten: _Daten, tage: List[str], feld: str) -> Tuple[int, int, Optional[float]]:
@@ -908,6 +960,7 @@ def kennzahlen(daten: _Daten, tage: List[str], kosten_docs: List[Dict[str, Any]]
     docs = [d for s in daten.idx.values() for t, d in s.items() if t in tage_set]
     gueltig = [d for d in docs if deals.ist_gueltig(d)]
     basis = [d for d in gueltig if deals.ist_basis(d)]
+    kw = korbwerte if korbwerte is not None else daten.korbwerte(tage, daten.korb(tage_set))
     # Segmentkorb: je Segment erster und letzter gueltiger Tag im Zeitraum (mind. zwei verschiedene Tage)
     korb = []
     for seg_id, tage_docs in daten.idx.items():
@@ -915,11 +968,28 @@ def kennzahlen(daten: _Daten, tage: List[str], kosten_docs: List[Dict[str, Any]]
         if len(bt) >= 2:
             w = sum(_n(tage_docs[t]) for t in bt) / len(bt)
             korb.append((tage_docs[bt[0]], tage_docs[bt[-1]], w))
-    start = _gewichtet([(float(a["median_price"]), w) for a, _, w in korb])
-    ende = _gewichtet([(float(b["median_price"]), w) for _, b, w in korb])
+    # Runde 4b: mit bekannter Planung Start/Ende ueber die WIRKSAMEN Werte (beobachtet oder getragen, wie der Korbwert):
+    # je Korb-Segment der wirksame Wert am ersten und letzten Tag, an dem es einen hat (mind. zwei Tage mit Wert). Nur
+    # beobachtete Basistage liessen unter Rotation/SAFE_AUTO-Intervallen (>= 3 Tage) die selten abgerufenen Segmente
+    # heraus — Start/Ende waren ein Teilkorb (24 Segmente, 10 im Start-/Endkorb: 17.900 statt 23.500 EUR)
+    wkorb = []
+    if daten.geplant is not None:
+        for sid, w in kw.gewicht.items():
+            wt = [t for t in tage if sid in kw.wirksam.get(t, {})]
+            if len(wt) >= 2:
+                wkorb.append((kw.wirksam[wt[0]][sid], kw.wirksam[wt[-1]][sid], w))
+    sk = wkorb if daten.geplant is not None else korb
+    start = _gewichtet([(float(a["median_price"]), w) for a, _, w in sk])
+    ende = _gewichtet([(float(b["median_price"]), w) for _, b, w in sk])
     delta_eur = (ende - start) if (start is not None and ende is not None) else None
     delta_pct = (delta_eur / start * 100) if (delta_eur is not None and start) else None
-    # gleiche Inserate (Abschnitt 54): Preis am ersten und letzten gueltigen Tag desselben Segments
+    # deckt der Start-/Endkorb weniger als ANKER_MIN_ABDECKUNG des Korbgewichts (Serienstart, Intervall ueber
+    # TRAGEN_MAX_TAGE), waeren Start/Ende in Euro ein Teilkorb-Niveau: leer; die Aenderung in % (derselbe Korb an
+    # beiden Enden) und die Richtung bleiben
+    w_ges = sum(kw.gewicht.values())
+    start_ende_anteil = (sum(w for _, _, w in wkorb) / w_ges) if (daten.geplant is not None and w_ges > 0) else None
+    start_ende_teilkorb = start_ende_anteil is not None and start is not None and start_ende_anteil < ANKER_MIN_ABDECKUNG
+    # gleiche Inserate (Abschnitt 54): Preis am ersten und letzten gueltigen (beobachteten) Tag desselben Segments
     paare = []
     for a, b, _ in korb:
         pa, pb = _preise(a), _preise(b)
@@ -931,7 +1001,6 @@ def kennzahlen(daten: _Daten, tage: List[str], kosten_docs: List[Dict[str, Any]]
     # ueber die an beiden Vergleichstagen vorhandenen Segmente verkettet — weder Scheineinbruch noch verworfener Tag.
     # Runde 3 #0: nicht geplante Segmente (Rotation) mit ihrem letzten geplanten Wert; ohne Anker mit Mindestabdeckung
     # bleiben alle Euro-Niveauwerte leer. Teilabgedeckte Tage bleiben in der Tagestabelle markiert (roh + Korbwert).
-    kw = korbwerte if korbwerte is not None else daten.korbwerte(tage, daten.korb(tage_set))
     werte_korb, fehlend = kw.werte, kw.fehlend
     teil = {t for t, n in fehlend.items() if n}
     mit = [(t, werte_korb[t]) for t in tage if werte_korb.get(t) is not None]
@@ -990,13 +1059,25 @@ def kennzahlen(daten: _Daten, tage: List[str], kosten_docs: List[Dict[str, Any]]
     kalender = daten.erwartete_tage(tage)
     getragene_tage = [t for t, n in je_tag.items() if n == 0 and kw.tragbar.get(t, 0.0) >= ANKER_MIN_ABDECKUNG]
     tage_mit_wert = len(abgedeckt) + len(getragene_tage)
+    # Runde 4b: mit Segment-Tagen ohne tragbaren Wert (Intervall ueber TRAGEN_MAX_TAGE) ist der Bericht nie 'hoch' —
+    # vorher HIGH ohne Gruende neben einem Teilkorb-Niveau
+    einschraenkungen = []
+    if sum(kw.abgelaufen.values()):
+        einschraenkungen.append(f"{sum(kw.abgelaufen.values())} Segment-Tag(e) ohne tragbaren Wert (Intervall über "
+                                f"{TRAGEN_MAX_TAGE} Tage)")
     conf, conf_gruende = confidence(len(abgedeckt), erwartet, dq, tiefe, len(inserate), segment_tage, segment_tage_erwartet,
-                                    kalendertage=len(kalender), tage_mit_wert=tage_mit_wert, tage_ohne_plan=tage_ohne_plan)
+                                    kalendertage=len(kalender), tage_mit_wert=tage_mit_wert, tage_ohne_plan=tage_ohne_plan,
+                                    einschraenkungen=einschraenkungen)
     # Runde 4 (#1): Planungsstand der Kalendertage (nur mit bekannter Planung). Ausfall/unbekannt zaehlen nur, wenn an
     # dem Tag ein Segment dieses Modells erwartet war (sonst lief das Modell ohnehin nicht — keine Luecke)
     status = [st for t in kalender if t != daten.heute
               for st in [daten.tag_status.get(t, PLAN_LIEF)]
               if st not in (PLAN_AUSFALL, PLAN_UNBEKANNT) or je_tag.get(t, 0) > 0] if daten.geplant is not None else []
+    # Runde 4b: ganztaegig wegen Budget nicht geplant — Budget vor dem Plan (PLAN_BUDGET) ODER der Plan lief, aber kein
+    # Segment des Modells war erwartet und die Jobs des Tages scheiterten am Budget (Storno mit budget_wait)
+    tage_budget = sum(1 for t in kalender if t != daten.heute and daten.geplant is not None
+                      and (daten.tag_status.get(t, PLAN_LIEF) == PLAN_BUDGET
+                           or (je_tag.get(t, 0) == 0 and daten.tag_status.get(t, PLAN_LIEF) == PLAN_LIEF and kw.budget.get(t, 0) > 0)))
     segs_mit = {d["segment_id"] for d in gueltig}
     leere_segmente = sum(1 for s in segs_mit if not any(d["segment_id"] == s for d in basis))
     kosten = round(sum(float(d.get("crawl_cost_usd") or 0) for d in kosten_docs if d["date"] in tage_set), 4)
@@ -1009,8 +1090,10 @@ def kennzahlen(daten: _Daten, tage: List[str], kosten_docs: List[Dict[str, Any]]
     # fehlen im Bericht (die Berichte warten auf solche Tage nicht mehr)
     hot_aufgegeben = sum(1 for d in docs if (d.get("hot_deals") or {}).get("grund") == deals.GRUND_AUSWERTUNG_FEHLER)
     return {
-        "startwert": _r(start), "endwert": _r(ende), "delta_eur": _r(delta_eur), "delta_pct": _r(delta_pct, 3),
-        "richtung": richtung(delta_pct, zone), "korb_segmente": len(korb),
+        "startwert": None if start_ende_teilkorb else _r(start), "endwert": None if start_ende_teilkorb else _r(ende),
+        "delta_eur": None if start_ende_teilkorb else _r(delta_eur), "delta_pct": _r(delta_pct, 3),
+        "richtung": richtung(delta_pct, zone), "korb_segmente": len(sk),
+        "start_ende_korb_pct": _r(start_ende_anteil * 100, 1) if start_ende_anteil is not None else None,
         "sample_market_change_eur": smc_eur, "sample_market_change_pct": smc_pct,
         "same_listing_price_change_eur": gleich_eur, "same_listing_price_change_pct": gleich_pct, "same_listing_anzahl": len(paare),
         "median_periode": _r(statistics.median(werte)) if werte else None, "mittelwert_periode": _r(sum(werte) / len(werte)) if werte else None,
@@ -1038,7 +1121,7 @@ def kennzahlen(daten: _Daten, tage: List[str], kosten_docs: List[Dict[str, Any]]
         "hot_deal_tage_aufgegeben": hot_aufgegeben,
         # Runde 4: Tagesplan-Protokoll, Budget, Korb am Serienanfang, abgelaufene Werte, Kalendertage mit Wert
         "tage_tagesplan_ausfall": status.count(PLAN_AUSFALL), "tage_planung_unbekannt": status.count(PLAN_UNBEKANNT),
-        "tage_crawler_aus": status.count(PLAN_AUS), "tage_budget": status.count(PLAN_BUDGET),
+        "tage_crawler_aus": status.count(PLAN_AUS), "tage_budget": tage_budget,
         "budget_segment_tage": sum(kw.budget.values()), "abgelaufene_segment_tage": sum(kw.abgelaufen.values()),
         "vorab_segment_tage": sum(kw.vorab.values()), "korb_wirksam_segmente": kw.korb_n,
         "kalendertage": len(kalender), "tage_mit_wert": tage_mit_wert, "getragene_tage": len(getragene_tage),
@@ -1247,9 +1330,13 @@ def bericht_rechnen(modell: Dict[str, Any], segs: Dict[str, Dict[str, Any]], doc
                                    f"Segment-Tage, höchstens {TRAGEN_MAX_TAGE} Tage alt), technische Ausfälle werden nie aufgefüllt")
     if kz["abgelaufene_segment_tage"]:
         bericht["hinweise"].append(f"{kz['abgelaufene_segment_tage']} Segment-Tag(e) ohne tragbaren Wert (letzter geplanter Lauf älter "
-                                   f"als {TRAGEN_MAX_TAGE} Tage, Intervall über {konfig.MAX_INTERVALL_TAGE} Tage) — an diesen Tagen aus "
-                                   "dem wirksamen Korb genommen (keine technische Lücke); das Euro-Niveau des Ankertags stammt dann "
-                                   "nur aus den übrigen Segmenten")
+                                   f"als {TRAGEN_MAX_TAGE} Tage, Intervall über {konfig.MAX_INTERVALL_TAGE} Tage — z. B. weil das "
+                                   "Budget nicht für jedes Segment alle 14 Tage reicht) — keine technische Lücke, aber ihr Wert fehlt "
+                                   "im Korb: fehlt mehr als "
+                                   f"{round((1 - ANKER_MIN_ABDECKUNG) * 100)} % des Korbgewichts, ist der Tag kein Anker")
+    if kz["startwert"] is None and kz["start_ende_korb_pct"] is not None and kz["delta_pct"] is not None:
+        bericht["hinweise"].append(f"Start-/Endwert nur über {kz['start_ende_korb_pct']} % des Korbgewichts — die Euro-Werte bleiben "
+                                   "leer (Teilkorb), die Änderung in % und die Richtung beziehen sich auf diesen Teilkorb")
     if kz["vorab_segment_tage"]:
         bericht["hinweise"].append(f"Serienstart: {kz['vorab_segment_tage']} Segment-Tag(e) von schon angelegten, aber noch nicht "
                                    "beobachteten Segmenten — diese Tage sind kein Anker, ihr Wert ist vom Folgetag rückwärts verkettet")
@@ -1355,14 +1442,15 @@ async def _job_am_tag(db, tag: str) -> bool:
 async def _protokoll_laden(db, von: str, bis: str, heute: Optional[str], plan_tage: set) -> Dict[str, str]:
     """Pruefung Runde 4 (#1): Planungsstand je Kalendertag des geladenen Zeitraums (Vorlauf + Periode) aus dem
     Tagesplan-Protokoll (konfig.TAGESPLAN_LOG, nur lesen): eine Bereichsabfrage + der erste Protokolltag (beides ueber
-    den Unique-Index auf 'tag'); nur fuer Altdaten-Tage ohne Protokoll und ohne Job dieses Modells je ein Index-Treffer
-    in market_crawl_jobs (gebuendelt in einem gather).
+    den Unique-Index auf 'tag'); nur fuer Tage ohne Protokoll und ohne Job dieses Modells je ein Index-Treffer in
+    market_crawl_jobs (gebuendelt in einem gather — im Normalbetrieb keiner).
       * Protokoll 'lief' -> PLAN_LIEF (bzw. PLAN_BUDGET, wenn das Budget nichts/kaum etwas zuliess)
       * ein Tagesplan-Job dieses Modells an dem Tag -> PLAN_LIEF (der Plan lief nachweislich)
       * Protokoll 'Crawler bewusst aus' -> PLAN_AUS
       * heute (vorlaeufig) ohne Protokoll -> PLAN_OFFEN (der Plan kommt noch)
-      * ohne Protokoll ab dessen Einfuehrung (erster Protokolltag) -> PLAN_AUSFALL (technischer Ausfall des Plans)
-      * davor (Altdaten): irgendein Tagesplan-Job an dem Tag -> PLAN_LIEF, sonst PLAN_UNBEKANNT"""
+      * sonst irgendein Tagesplan-Job an dem Tag -> PLAN_LIEF (Runde 4b: auch ab Einfuehrung — Protokoll gescheitert)
+      * ohne Job ab Einfuehrung des Protokolls (erster Protokolltag) -> PLAN_AUSFALL (technischer Ausfall des Plans),
+        davor (Altdaten) PLAN_UNBEKANNT"""
     start = _plus(von, -VORLAUF_TAGE)
     protokoll = {str(d.get("tag")): d for d in await db[konfig.TAGESPLAN_LOG].find(
         {"tag": {"$gte": start, "$lte": bis}}, {"_id": 0}).to_list(None)}
@@ -1382,14 +1470,16 @@ async def _protokoll_laden(db, von: str, bis: str, heute: Optional[str], plan_ta
             status[t] = PLAN_AUS
         elif heute and t == heute:
             status[t] = PLAN_OFFEN
-        elif eingefuehrt and t >= eingefuehrt:
-            status[t] = PLAN_AUSFALL
         else:
             alt.append(t)
     if alt:
+        # Runde 4b: auch ab Einfuehrung zuerst der Job-Beleg — das Protokoll wird nach dem Tagesmerker geschrieben und
+        # darf scheitern (Failover, Prozessende dazwischen, Rollback auf eine Fassung ohne Protokoll). Irgendein
+        # Tagesplan-Job an dem Tag heisst: der Plan lief — sonst galt jedes Modell ohne eigenen Job (Rotation) als
+        # technisch ausgefallen, und die Schein-Luecke wurde eingefroren. Ohne Job: ab Einfuehrung Ausfall, davor unbekannt
         treffer = await asyncio.gather(*[_job_am_tag(db, t) for t in alt])
         for t, ok in zip(alt, treffer):
-            status[t] = PLAN_LIEF if ok else PLAN_UNBEKANNT
+            status[t] = PLAN_LIEF if ok else PLAN_AUSFALL if (eingefuehrt and t >= eingefuehrt) else PLAN_UNBEKANNT
     return status
 
 

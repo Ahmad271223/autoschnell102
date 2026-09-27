@@ -157,14 +157,15 @@ def test_32_runde4_serienstart_schon_angelegte_segmente_fehlen(welt):
 def test_33_runde4_rotation_im_intervall_14_und_21(welt):
     """Runde 4 #2 (mittel): jedes Segment wird alle n Tage geplant, versetzt (Segment i an Tagen k mit (k - i) % n == 0).
     n = 14 (Obergrenze konfig.MAX_INTERVALL_TAGE): jeder nicht geplante Wert ist hoechstens 13 Tage alt und wird
-    getragen — jeder Tag vollstaendig, Anker, 23.500 EUR. n = 21 (erzwungen): an jedem Tag sind ~7/21 der Segmente
-    aelter als 14 Tage — vorher als FEHLENDES Gewicht gezaehlt (~71 % Abdeckung, kein Anker: alle Euro-Niveauwerte None,
-    'Kein Tag mit ausreichender Korbabdeckung', trotzdem HIGH). Jetzt fallen sie aus dem wirksamen Korb (Hinweis): es
-    gibt einen Anker und Periodenwerte, keine technische Luecke."""
+    getragen — jeder Tag vollstaendig, Anker, 23.500 EUR. n = 21/30 (Budget reicht nicht, SAFE_AUTO-Ruhe): an jedem Tag
+    fehlt ~1/3 der Werte (aelter als 14 Tage bzw. im Fenster noch nie beobachtet). Runde 4b: 8831027 nahm die
+    abgelaufenen aus dem Nenner und wertete die noch nie beobachteten als neu (Mix) — Ersatz-Anker 07. mit 24.166,67
+    (18 von 24), Maximum 26.475,40, Stichproben-Aenderung -8,72 %, HIGH ohne Gruende (n = 30: Median 18.842,98). Jetzt
+    bleibt ihr Wert fehlend: kein Anker, alle Euro-Niveauwerte None mit Hinweis, keine technische Luecke, nicht HIGH."""
     assert K.MAX_INTERVALL_TAGE == 14 and B.TRAGEN_MAX_TAGE == B.VORLAUF_TAGE >= K.MAX_INTERVALL_TAGE
     segs, preis = _rotation_korb(welt)
     wahr = sum(preis.values()) / 24
-    for n in (14, 21):
+    for n in (14, 21, 30):
         plan, docs = {}, []
         for k in range(-14, 29):
             for i, s in enumerate(segs):
@@ -174,23 +175,27 @@ def test_33_runde4_rotation_im_intervall_14_und_21(welt):
         ber = _rechnen(welt, segs, docs, "MONTHLY", _t(1), _t(29), geplant=plan)
         k = ber["kennzahlen"]
         assert (k["teilabgedeckte_tage"], k["segment_luecken"]) == (0, 0), n
-        assert k["median_periode"] is not None and k["anker_tage"] >= 1, n
-        assert not any("Kein Tag mit ausreichender Korbabdeckung" in h for h in ber["hinweise"]), (n, ber["hinweise"])
         if n == 14:
             assert (k["anker_tage"], k["abgelaufene_segment_tage"], k["niveau_tage"]) == (29, 0, 29)
             assert all(abs(r["median_korb"] - wahr) <= 1 for r in ber["tage"])
-            assert k["confidence"] == "HIGH"
+            assert k["confidence"] == "HIGH" and abs(k["startwert"] - wahr) <= 1 and abs(k["endwert"] - wahr) <= 1
+            assert not any("Kein Tag mit ausreichender Korbabdeckung" in h for h in ber["hinweise"])
         else:
-            assert k["abgelaufene_segment_tage"] > 0 and k["anker_tage"] == 1, k
+            assert k["abgelaufene_segment_tage"] > 0 and k["anker_tage"] == 0, (n, k)
+            assert (k["median_periode"], k["mittelwert_periode"], k["minimum"], k["maximum"], k["sample_market_change_pct"]) == (
+                None, None, None, None, None), n
+            assert all(r["median_korb"] is None for r in ber["tage"]), n
             assert any("ohne tragbaren Wert" in h and "Intervall über 14 Tage" in h for h in ber["hinweise"]), ber["hinweise"]
-            assert all(12000 <= r["median_korb"] <= 35000 for r in ber["tage"])
+            assert any("Kein Tag mit ausreichender Korbabdeckung" in h for h in ber["hinweise"]), ber["hinweise"]
+            assert k["confidence"] != "HIGH" and any("ohne tragbaren Wert" in g for g in k["confidence_gruende"]), k["confidence_gruende"]
             assert any(r["abgelaufene_segmente"] for r in ber["tage"])
 
 
 def test_34_runde4_intervall_hoechstens_14_tage(welt, monkeypatch):
-    """Runde 4 #2: MARKT_CRAWL_INTERVALL_TAGE hoechstens 14 (vorher 30); jobs.intervall begrenzt das automatische
-    Intervall auf 14 Tage und setzt 'budget_reicht_nicht', wenn das Budget dafuer nicht reicht; ist das Restbudget
-    aufgebraucht, 'budget_erschoepft' (1 Segment je Tag wie bisher)."""
+    """Runde 4 #2: MARKT_CRAWL_INTERVALL_TAGE hoechstens 14 (vorher 30); jobs.intervall setzt 'budget_reicht_nicht', wenn
+    das Budget nicht fuer jedes Segment alle 14 Tage reicht — Runde 4b: das automatische Intervall bleibt dann am
+    Budget (ehrlich ueber 14, kein hoeheres Kontingent, siehe test_48); ist das Restbudget aufgebraucht,
+    'budget_erschoepft' (1 Segment je Tag wie bisher)."""
     db = welt.db
     s = welt.w.s
     _aufraeumen(welt)
@@ -213,7 +218,8 @@ def test_34_runde4_intervall_hoechstens_14_tage(welt, monkeypatch):
             assert (t["intervall_tage"], t["budget_reicht_nicht"], t["budget_erschoepft"]) == (1, False, False)
         welt.run(BUD.budget_setzen(db, 0.3, f"test-{s}"))                  # 0,03 $ je Tag: 1 Segment -> >= 30 Tage
         t = welt.run(JOBS.intervall(db))
-        assert (t["intervall_tage"], t["segmente_je_tag"], t["budget_reicht_nicht"], t["budget_erschoepft"]) == (14, -(-gesamt // 14), True, False), t
+        assert (t["budget_reicht_nicht"], t["budget_erschoepft"]) == (True, False) and t["segmente_je_tag"] < -(-gesamt // 14), t
+        assert t["intervall_tage"] == -(-gesamt // t["segmente_je_tag"]) > 14, t
         welt.run(db[K.BUDGET].update_one({"_id": f"test-{s}"}, {"$set": {"used_usd": 0.3}}))
         t = welt.run(JOBS.intervall(db))
         assert (t["segmente_je_tag"], t["budget_erschoepft"], t["budget_reicht_nicht"]) == (1, True, True), t

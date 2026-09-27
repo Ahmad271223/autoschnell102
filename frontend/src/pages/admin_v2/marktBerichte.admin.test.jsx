@@ -521,4 +521,19 @@ describe("Admin Berichte — Prüfung Runde 4 (Tagesplan-Protokoll, Serienanfang
     expect(el("bericht-schema-hinweis").textContent).toContain("ganztägiger Ausfall des Tagesplans");
     expect(berichtDiagrammPunkt({ median: 1, median_korb: 2, p25: 1, p75: 3, vorab_segmente: 2 })).toMatchObject({ median: 2, p25: null, p75: null });
   });
+
+  it("Runde 4b: Start-/Endkorb unter 95 % — Euro leer, Differenz nur in % mit Kennzeichnung (Teilkorb)", async () => {
+    netz.bericht = { ...BERICHT, schema: 4,
+                     kennzahlen: { ...BERICHT.kennzahlen, startwert: null, endwert: null, delta_eur: null, delta_pct: -1.25, richtung: "FALLING",
+                                   korb_segmente: 20, start_ende_korb_pct: 80.5 } };
+    await starten("/admin/markt/berichte/bmw-320d?typ=MONTHLY&von=2028-02-01&bis=2028-02-29");
+    expect(el("bericht-delta").textContent).toContain("-1,3 % (Teilkorb)");
+    expect(el("bericht-delta").textContent).toContain("gleicher Segmentkorb (20 Segmente, nur 80,5 % des Korbgewichts)");
+    expect(el("bericht-kennzahlen").textContent).toContain("Startwert—");
+    await act(async () => { wurzel.unmount(); }); wurzel = null; behaelter?.remove();
+    netz.bericht = { ...BERICHT, schema: 4, kennzahlen: { ...BERICHT.kennzahlen, start_ende_korb_pct: 100 } };
+    await starten("/admin/markt/berichte/bmw-320d?typ=MONTHLY&von=2028-02-01&bis=2028-02-29");
+    expect(el("bericht-delta").textContent).toContain("−200 € (-1 %)");
+    expect(el("bericht-delta").textContent).not.toContain("Korbgewichts");
+  });
 });

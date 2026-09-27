@@ -186,9 +186,12 @@ async def intervall(db) -> Dict[str, Any]:
     rest_tage = konfig.rest_tage_im_monat()
     fest = konfig.crawl_intervall_tage()
     ohne_budget = budget_usd <= 0
-    # Pruefung Runde 4 (#2): jedes Segment hoechstens alle konfig.MAX_INTERVALL_TAGE Tage — reicht das Budget dafuer
-    # nicht, wird trotzdem so geplant und 'budget_reicht_nicht' gesetzt (Warnung in der Uebersicht; Jobs, die am
-    # Budget scheitern, gelten in den Berichten als 'nicht geplant wegen Budget'). Restbudget aufgebraucht:
+    # Pruefung Runde 4 (#2): ein fest eingestelltes Intervall hoechstens konfig.MAX_INTERVALL_TAGE. Das automatische
+    # Intervall bleibt am Budget (Runde 4b): reicht das Budget nicht fuer jedes Segment alle MAX_INTERVALL_TAGE Tage,
+    # wird 'budget_reicht_nicht' gesetzt (Warnung in der Uebersicht), aber NICHT mehr geplant, als das Tagesbudget
+    # (Rest / Resttage) zulaesst — das Budget wird nur je Monat reserviert, ein hoeheres Kontingent verbrauchte das
+    # Monatsbudget nach ~2/3 des Monats, danach lief bis Monatsende kein einziger Abruf. Die Berichte werten Werte,
+    # die aelter als 14 Tage sind, als fehlend (ehrliche Luecke statt Teilkorb). Restbudget aufgebraucht:
     # 'budget_erschoepft' (1 Segment je Tag wie bisher — mehr Jobs scheiterten nur am Budget).
     budget_erschoepft = budget_reicht_nicht = False
     if ohne_budget:
@@ -204,11 +207,7 @@ async def intervall(db) -> Dict[str, Any]:
         je_tag = int(math.floor(segs * tagesbudget / je_tag_alle)) if tagesbudget > 0 else 1
         je_tag = max(1, min(segs, je_tag))
         tage = math.ceil(segs / je_tag)
-        if tage > konfig.MAX_INTERVALL_TAGE:
-            budget_reicht_nicht = True
-            if not budget_erschoepft:
-                tage = konfig.MAX_INTERVALL_TAGE
-                je_tag = math.ceil(segs / tage)
+        budget_reicht_nicht = tage > konfig.MAX_INTERVALL_TAGE
     kosten_je_tag = round(je_tag_alle / tage, 4) if (segs and tage) else 0.0
     # Review 26.09.2026 Nr. 10/11: nur Anzeige — was ein Tag kostet, wenn ALLES ueber den
     # (teureren) Ersatz-Scraper liefe (der Ersatz laeuft je URL einzeln, also ein Start je Segment-Abruf).

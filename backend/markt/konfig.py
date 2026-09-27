@@ -96,11 +96,13 @@ TAGESPLAN_DOK = "tagesplan"
 TAGESPLAN_LOG = "market_tagesplan_log"
 BUDGET_GRUND_OHNE = "ohne_budget"                  # Monatsbudget 0: keine Planung
 BUDGET_GRUND_ERSCHOEPFT = "budget_erschoepft"      # Restbudget aufgebraucht: 1 Segment je Tag
-BUDGET_GRUND_REICHT_NICHT = "budget_reicht_nicht"  # Intervall auf MAX_INTERVALL_TAGE begrenzt, das Budget reicht dafuer nicht
-# Pruefung Runde 4 (#2): ein Segment wird hoechstens alle 14 Tage geplant. Die Berichte tragen den Wert eines nicht
-# geplanten Segments hoechstens so lange (berichte.TRAGEN_MAX_TAGE = VORLAUF_TAGE = 14) — ein laengeres Intervall
-# liesse Segmente regelmaessig ohne tragbaren Wert. Grenze fuer MARKT_CRAWL_INTERVALL_TAGE und jobs.intervall; die
-# SAFE_AUTO-Stufen (markt.health/optimierung) sollen dieselbe Grenze nutzen (Konstante hier, keine Umgebungsvariable).
+BUDGET_GRUND_REICHT_NICHT = "budget_reicht_nicht"  # das Budget reicht nicht fuer jedes Segment alle MAX_INTERVALL_TAGE Tage
+# Pruefung Runde 4 (#2): Soll-Grenze fuer das Intervall eines Segments. Die Berichte tragen den Wert eines nicht
+# geplanten Segments hoechstens so lange (berichte.TRAGEN_MAX_TAGE = VORLAUF_TAGE = 14) — bei einem laengeren Intervall
+# fehlen Werte, das Euro-Niveau bleibt dann ehrlich leer. Obergrenze fuer MARKT_CRAWL_INTERVALL_TAGE; das automatische
+# Intervall (jobs.intervall) bleibt am Budget (Runde 4b: eine Begrenzung darueber verbrauchte das Monatsbudget vor
+# Monatsende) und warnt mit 'budget_reicht_nicht'. Die SAFE_AUTO-Stufen (markt.health/optimierung, Ruhe bis 30 Tage)
+# sollen dieselbe Grenze nutzen (Konstante hier, keine Umgebungsvariable) — bis dahin fangen die Berichte sie ab.
 MAX_INTERVALL_TAGE = 14
 ENTFERNUNG_DOK = "entfernung"
 INDIZES_DOK = "indizes"
@@ -209,7 +211,8 @@ async def tagesplan_protokollieren(db, tag: str, *, lief: bool, **felder) -> boo
     intervall_tage, segmente_je_tag); lief=False (Worker, Crawler bewusst aus) setzt nur crawler_aus_at ($min) —
     ein spaeterer Tagesplan am selben Tag (Crawler wieder an) behaelt beide Angaben. Zwei Server: der Upsert-Wettlauf
     auf den Unique-Index (DuplicateKeyError) wird einmal wiederholt (dann als Update). Wirft nie: scheitert das
-    Schreiben, fehlt das Protokoll — der Bericht wertet den Tag dann ehrlich als technischen Ausfall."""
+    Schreiben, fehlt das Protokoll — der Bericht wertet den Tag dann nach den Abruf-Jobs: gab es an dem Tag irgendeinen
+    Tagesplan-Job, lief der Plan (berichte._protokoll_laden), sonst technischer Ausfall."""
     from pymongo.errors import DuplicateKeyError
     zeit = jetzt_iso()
     if lief:

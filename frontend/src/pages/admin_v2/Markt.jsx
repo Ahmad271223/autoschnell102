@@ -95,12 +95,12 @@ export default function Markt() {
                   hint={status.aktiv_quelle === "admin" ? "per Knopf gesetzt" : "Vorgabe aus der Umgebung (MARKT_AKTIV)"} />
           <Kachel label="Segmente aktiv" wert={`${status.segmente} · ${status.modelle} Modelle`} />
           {/* Reparaturwelle 5 Nr. 30/31/38: "ohne Budget pausiert", Restbudget fuer die verbleibenden Tage, Entfernungsprüfung als Kostenteil */}
-          {/* Prüfung Runde 4 (#2): jedes Segment höchstens alle 14 Tage — reicht das Budget dafür nicht, Warnung */}
+          {/* Prüfung Runde 4 (#2/4b): reicht das Budget nicht für jedes Segment alle 14 Tage, Warnung (geplant wird weiter nach dem Budget) */}
           <Kachel label="Taktung" tone={takt.ohne_budget || takt.budget_reicht_nicht ? "text-amber-300" : ""} data-testid="markt-taktung"
                   wert={takt.ohne_budget ? "ohne Budget pausiert" : `an Crawl-Tagen ${status.crawls_je_tag_standard || 2}×; jedes Segment alle ${takt.intervall_tage} Tag(e)`}
                   hint={takt.ohne_budget ? "Monatsbudget ist 0 — keine Planung, keine Jobs (unter „Bereiche & Budget“ setzen)"
                     : (takt.budget_erschoepft ? "Achtung: Restbudget aufgebraucht — nur 1 Segment je Tag, die übrigen gelten in den Berichten als „nicht geplant wegen Budget“ · "
-                      : takt.budget_reicht_nicht ? `Achtung: das Budget reicht nicht, um jedes Segment spätestens alle ${takt.max_intervall_tage || 14} Tage abzurufen — geplant wird trotzdem so oft, Läufe über dem Budget gelten in den Berichten als „nicht geplant wegen Budget“ · ` : "")
+                      : takt.budget_reicht_nicht ? `Achtung: das Budget reicht nicht, um jedes Segment spätestens alle ${takt.max_intervall_tage || 14} Tage abzurufen — geplant wird nur, was das Tagesbudget zulässt (jedes Segment alle ${takt.intervall_tage} Tage, das Budget reicht bis Monatsende); Werte älter als ${takt.max_intervall_tage || 14} Tage fehlen in den Berichten (Euro-Niveau dann leer) — Budget erhöhen oder Segmente reduzieren · ` : "")
                     + `${takt.segmente_je_tag} Segmente/Tag in Bündeln zu ${takt.buendel || 1} ≈ ${Number(takt.kosten_je_tag_usd || 0).toFixed(2)} $ · ≈ ${Number(takt.kosten_je_monat_usd || 0).toFixed(0)} $/Monat${takt.automatisch ? " (automatisch aus dem Budget)" : ""}`
                       + ` · Restbudget ${Number(takt.restbudget_usd ?? takt.budget_usd ?? 0).toFixed(2)} $ für ${takt.rest_tage ?? "—"} Tage`
                       + (takt.entfernung_je_tag_usd ? ` · davon Entfernungsprüfung bis ${Number(takt.entfernung_je_tag_usd).toFixed(2)} $/Tag` : "")} />

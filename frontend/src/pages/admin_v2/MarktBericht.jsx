@@ -168,7 +168,9 @@ export default function MarktBericht() {
             <div className="mt-3 grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-2 text-[12px]" data-testid="bericht-kennzahlen">
               <K label="Startwert" wert={eur(k.startwert)} />
               <K label="Endwert" wert={eur(k.endwert)} />
-              <K label="Differenz" wert={trendText(k.delta_eur, k.delta_pct)} farbe={r.farbe} unter={`gleicher Segmentkorb (${k.korb_segmente ?? 0} Segmente)`} testid="bericht-delta" />
+              {/* Prüfung Runde 4b: deckt der Start-/Endkorb weniger als 95 % des Korbgewichts, bleiben die Euro-Werte leer (Teilkorb) — die Änderung in % bleibt */}
+              <K label="Differenz" wert={k.delta_eur == null && k.delta_pct != null ? `${pct(k.delta_pct)} (Teilkorb)` : trendText(k.delta_eur, k.delta_pct)} farbe={r.farbe}
+                 unter={`gleicher Segmentkorb (${k.korb_segmente ?? 0} Segmente${k.start_ende_korb_pct != null && k.start_ende_korb_pct < 95 ? `, nur ${pct(k.start_ende_korb_pct, false)} des Korbgewichts` : ""})`} testid="bericht-delta" />
               <K label="Median der Periode / Ø" wert={`${eur(k.median_periode)} / ${eur(k.mittelwert_periode)}`} />
               <K label="Niedrigster / höchster Tageswert" wert={`${eur(k.minimum?.wert)} / ${eur(k.maximum?.wert)}`}
                  unter={k.minimum ? `${datumKurz(k.minimum.date)} / ${datumKurz(k.maximum?.date)}` : ""} />
@@ -308,7 +310,7 @@ export default function MarktBericht() {
                                                                                     title={`Budget-Rotation: an diesem Tag kein Abruf geplant — keine Lücke; im Korbwert${t.median_korb != null ? ` ${eur(t.median_korb)}` : ""} mit dem letzten geplanten Wert`}>
                         {t.nicht_geplante_segmente} Segm. nicht geplant{t.budget_segmente > 0 ? ` (${t.budget_segmente} wegen Budget)` : ""}</span>}
                       {!t.andere_fassung && t.abgelaufene_segmente > 0 && <span className="ml-1 text-[10px] text-zinc-500" data-testid={`bericht-abgelaufen-${t.date}`}
-                                                                                 title="Letzter geplanter Lauf älter als 14 Tage (Intervall über 14 Tage) — an diesem Tag aus dem Korb genommen, keine technische Lücke">
+                                                                                 title="Letzter geplanter Lauf älter als 14 Tage (Intervall über 14 Tage) — keine technische Lücke, aber der Wert fehlt im Korb (über 5 % fehlend: kein Anker)">
                         {t.abgelaufene_segmente} Segm. ohne tragbaren Wert</span>}
                       {!t.andere_fassung && t.vorab_segmente > 0 && <span className="ml-1 text-[10px]" style={{ color: "var(--st-amber)" }} data-testid={`bericht-vorab-${t.date}`}
                                                                           title="Serienstart: schon angelegt, aber noch nicht beobachtet — der Tag ist kein Anker, sein Wert ist vom Folgetag rückwärts verkettet">

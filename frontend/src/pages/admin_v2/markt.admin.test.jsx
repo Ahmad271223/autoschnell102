@@ -224,7 +224,10 @@ describe("Admin Marktanalyse", () => {
     netz.budgetReichtNicht = true;
     await starten("/admin/markt");
     expect(el("markt-taktung").textContent).toContain("das Budget reicht nicht, um jedes Segment spätestens alle 14 Tage abzurufen");
-    expect(el("markt-taktung").textContent).toContain("nicht geplant wegen Budget");
+    // Runde 4b: nicht mehr 'geplant wird trotzdem so oft' — das Monatsbudget waere nach ~2/3 des Monats leer
+    expect(el("markt-taktung").textContent).toContain("geplant wird nur, was das Tagesbudget zulässt");
+    expect(el("markt-taktung").textContent).toContain("Werte älter als 14 Tage fehlen in den Berichten");
+    expect(el("markt-taktung").textContent).not.toContain("geplant wird trotzdem so oft");
   });
 
   it("Crawler-Knopf: aus -> Rückfrage mit Kosten -> POST aktiv:true; an -> POST aktiv:false ohne Rückfrage", async () => {
