@@ -21,12 +21,20 @@ Status (Abschnitte 27-29, Pruefreihenfolge):
   NORMAL    alles andere mit genug Daten
 
 Activity Score 0-100 (Abschnitt 30) aus Trefferquote, neuen Listings, Top-N-Wechseln, Preisaenderungen und
-Liquiditaet — alle Raten JE KALENDERTAG (Abstand zum Vergleichstag), damit ein seltener geplantes Segment nicht
-kuenstlich aktiver aussieht (sonst schaukelte SAFE_AUTO die Frequenz hoch und runter).
+Liquiditaet. Pruefbefund F2 (27.09.2026): jede Kennzahl so normiert, dass derselbe Markt bei jedem Abrufabstand
+denselben Score ergibt — sonst senkte eine SAFE_AUTO-Reduktion den Score selbst weiter:
+  - Top-N-Wechsel (ja/nein je Vergleich) JE GUELTIGEM LAUFVERGLEICH: ein Ja/Nein-Wert saettigt — ueber 3 Tage
+    kann sich die Top-5 nur einmal "aendern"; je Kalendertag geteilt fiele die Komponente bei Intervall n auf 1/n.
+  - Zaehler (neue/verschwundene Inserate, Preisaenderungen) JE KALENDERTAG: sie sammeln sich ueber den Abstand an
+    (3 Tage = ~3x so viele Ereignisse im Vergleich); je Vergleich stiege der Score mit der Reduktion.
 
 Empfohlene Frequenz aus der KONFIGURIERBAREN Zuordnung (market_config/optimierung.frequenz, Admin): Standard
 75-100 -> 2x taeglich, 45-74 -> 1x taeglich, 20-44 -> alle 2 Tage, 0-19 -> alle 3-7 Tage, EMPTY -> pausiert mit
 Nachpruefung alle 7 Tage. Die Empfehlung wirkt nur in SAFE_AUTO (markt.optimierung) und dort nur als Reduktion.
+Pruefbefund F1/F6: die Zielstufe ist die Zuordnung EXAKT; die Hysterese (5 Punkte) haelt nur die aktuelle Stufe,
+solange der Score weniger als 5 Punkte jenseits der Grenze zur Zielstufe liegt (empfehlung(aktuell=...)).
+Pruefbefund F0/F5: unter einer SAFE_AUTO-Wirkung messen Mindestlaufzahl und Confidence gegen die bei der aktuellen
+Frequenz erwartbaren Laeufe (mit Puffer fuer Ausfaelle), nicht gegen feste 14/24 Laeufe (erwartete_laeufe/schwelle).
 
 Sammlungen:
   market_segment_health          aktueller Stand je Segment (Abschnitt 42) — ein Dokument je Segment
@@ -109,9 +117,18 @@ LIQ_DUENN_DECKEL = 0.2
 LIQ_MIN_TAGE = 3
 # Frequenz: THIN nie taeglich (Abschnitt 29 "muss nicht taeglich teuer gecrawlt werden") — mindestens alle 2 Tage.
 THIN_MIN_INTERVALL_TAGE = 2
-# Hysterese: ist eine SAFE_AUTO-Reduktion aktiv, muss der Score 5 Punkte ueber einer Stufengrenze liegen, bevor die
-# Empfehlung wieder haeufiger wird — sonst pendelt ein Segment an der Grenze taeglich hin und her.
+# Hysterese (Pruefbefund F1/F6): ist eine SAFE_AUTO-Reduktion aktiv, wechselt die Empfehlung von der aktuellen Stufe
+# erst, wenn der Score mindestens 5 Punkte jenseits der Grenze zur Zielstufe liegt (in beide Richtungen) — sonst
+# pendelte ein Segment an der Grenze taeglich. Die Zielstufe selbst ist immer die konfigurierte Zuordnung EXAKT.
+# 5 Punkte = die Tagesschwankung eines ruhigen Segments (ein neues Inserat mehr oder weniger je Woche bewegt den Score
+# um 2-4 Punkte); groesser liesse echte Marktaenderungen wochenlang liegen.
 HYSTERESE_PUNKTE = 5
+# Unter einer SAFE_AUTO-Wirkung (Pruefbefund F0/F5): Mindestlaufzahl/Confidence gegen die bei der AKTUELLEN Frequenz
+# erwartbaren Laeufe im Fenster (Laeufe vor der Reduktion zaehlen mit). Puffer: hoechstens 75 % der erwarteten Laeufe
+# bzw. erwartete minus eins — ein einzelner Ausfall (Apify-Fehler, POOR, Wartung) kippt kein Urteil. Nie unter 3
+# gueltige Laeufe: darunter entscheidet ein einzelner Lauf (dann bleibt die Wirkung per Bestandsschutz stehen).
+ERWARTET_PUFFER_ANTEIL = 0.75
+MIN_LAEUFE_UNTER_WIRKUNG = 3
 MONAT_TAGE = 30.4
 
 # Standard-Zuordnung Score -> Frequenz (Abschnitt 30); im Admin aenderbar, gespeichert in market_config/optimierung
@@ -202,14 +219,57 @@ def laeufe_aus_doc(doc: Dict[str, Any], rows: Optional[int] = None) -> List[Tupl
     return raus
 
 
-def min_laeufe(basis: int, wirkung: Optional[Dict[str, Any]]) -> int:
-    """Mindestzahl gueltiger Laeufe fuer ein Urteil. Plant SAFE_AUTO ein Segment seltener (Intervall n Tage), passen
-    in 30 Tage nur ~30/n Laeufe — dann genuegen so viele (mindestens 3), sonst verloere ein pausiertes EMPTY-Segment
-    nach ein paar Wochen sein Urteil, wuerde wieder taeglich geplant und zwei Wochen spaeter erneut pausiert."""
-    n = int((wirkung or {}).get("intervall_tage") or 1)
-    if n <= 1:
+def _wirkung_rate(wirkung: Optional[Dict[str, Any]], crawls_per_day: int) -> float:
+    """Abrufe je Tag unter einer SAFE_AUTO-Wirkung (Intervall n Tage, ggf. weniger Abrufe je Tag)."""
+    w = wirkung or {}
+    n = max(1, int(w.get("intervall_tage") or 1))
+    cpd = max(1, int(crawls_per_day or 1))
+    k = min(cpd, int(w["crawls_per_day"])) if w.get("crawls_per_day") else cpd
+    return max(1, k) / n
+
+
+def erwartete_laeufe(wirkung: Optional[Dict[str, Any]], *, stichtag: str, crawls_per_day: int = 1,
+                     erster_tag: Optional[str] = None, typischer_abstand: int = 1) -> Optional[int]:
+    """Pruefbefund F0/F5: wie viele Laeufe sind im 30-Tage-Fenster bei der AKTUELLEN Frequenz zu erwarten?
+    None ohne Reduktion (dann gelten die festen Schwellen 7/14/24 des Auftrags). Unter einer Reduktion seit
+    'reduziert_seit' (Tag der ersten Reduktion der laufenden Kette): Tage davor mit den Abrufen des Auftrags (die Laeufe
+    vor der Reduktion zaehlen mit), danach mit der reduzierten Rate. Liegt die ganze Beobachtung unter der Wirkung,
+    die garantierte Mindestzahl floor(30 x Rate) — mit dem beobachteten typischen Abstand, falls die Budget-Rotation das
+    Segment noch seltener plant."""
+    cpd = max(1, int(crawls_per_day or 1))
+    if not reduktion_aktiv(wirkung, cpd):
+        return None
+    w = wirkung or {}
+    rate_n = _wirkung_rate(w, cpd)
+    von = _tag_minus(stichtag, FENSTER_TAGE - 1)
+    seit = str(w.get("reduziert_seit") or w.get("seit") or "")[:10] or None
+    start = max(von, str(erster_tag)[:10]) if erster_tag else von
+    if not seit or seit <= start:
+        n = max(1, int(w.get("intervall_tage") or 1))
+        n_eff = max(n, int(typischer_abstand or 1)) if n > 1 else n
+        return int(FENSTER_TAGE * rate_n * n / n_eff + 1e-9)
+    if seit > stichtag:
+        return None
+    tage_vor = _tage_zwischen(start, seit) + 1          # inkl. Tag der Anwendung (die Laeufe liefen vorher)
+    tage_nach = _tage_zwischen(seit, stichtag)
+    return int(tage_vor * cpd + tage_nach * rate_n + 1e-9)
+
+
+def schwelle(basis: int, erwartet: Optional[int]) -> int:
+    """Mindestzahl gueltiger Laeufe: ohne Wirkung die feste Schwelle (basis); unter einer Wirkung hoechstens 75 % der
+    erwarteten Laeufe bzw. erwartete minus eins (ein Ausfall kippt nichts), nie unter MIN_LAEUFE_UNTER_WIRKUNG."""
+    if erwartet is None:
         return basis
-    return max(3, min(basis, FENSTER_TAGE // n))
+    puffer = min(int(erwartet) - 1, int(ERWARTET_PUFFER_ANTEIL * int(erwartet)))
+    return max(MIN_LAEUFE_UNTER_WIRKUNG, min(basis, puffer))
+
+
+def min_laeufe(basis: int, wirkung: Optional[Dict[str, Any]], erwartet: Optional[int] = None) -> int:
+    """Mindestzahl gueltiger Laeufe fuer ein Urteil (siehe schwelle). Ohne ausdrueckliche Erwartung: die ganze
+    Beobachtung liegt unter der Wirkung (z. B. alle 7 Tage -> 4 erwartete Laeufe -> 3 genuegen)."""
+    if erwartet is None and reduktion_aktiv(wirkung, 1):
+        erwartet = int(FENSTER_TAGE * _wirkung_rate(wirkung, 1) + 1e-9)
+    return schwelle(basis, erwartet)
 
 
 # ---------------------------------------------------------------- Kennzahlen (reine Rechnung)
@@ -241,7 +301,8 @@ def kennzahlen(docs: List[Dict[str, Any]], *, rows_soll: int, stichtag: str, cra
     inserate: set = set()
     for d in gueltige_tage:
         inserate |= {str(x) for x in (d.get("listing_ids_alle") or d.get("listing_ids") or [])}
-    # Vergleichstage (Tageswerte mit gueltigem Vortag): Raten je KALENDERTAG (Abstand zum Vergleichstag, hoechstens 7)
+    # Vergleichstage (Tageswerte mit gueltigem Vortag): Zaehler je KALENDERTAG (Abstand zum Vergleichstag, hoechstens
+    # 7), Top-N-Wechsel (ja/nein) je VERGLEICH — Begruendung im Modulkopf (Pruefbefund F2)
     vergleich = [d for d in gueltige_tage if d.get("vergleich_vortag")]
     luecken = 0
     neu = weg = senk = erhoeh = 0
@@ -286,7 +347,13 @@ def kennzahlen(docs: List[Dict[str, Any]], *, rows_soll: int, stichtag: str, cra
     erster = str(docs[0]["date"]) if docs else None
     beob_tage = (_tage_zwischen(erster, stichtag) + 1) if erster else 0
     laeufe_gesamt = valid + invalid
+    # Pruefbefund F0/F5: Schwellen unter einer SAFE_AUTO-Wirkung gegen die erwartbaren Laeufe
+    erw_laeufe = erwartete_laeufe(wirkung, stichtag=stichtag, crawls_per_day=crawls_per_day, erster_tag=erster,
+                                  typischer_abstand=typisch)
+    top_n = len(t3) + len(t5)
     return {
+        "erwartete_laeufe": erw_laeufe, "min_laeufe_bewertung": schwelle(MIN_LAEUFE_BEWERTUNG, erw_laeufe),
+        "min_laeufe_empty": schwelle(MIN_LAEUFE_EMPTY, erw_laeufe), "confidence_hoch_ab": schwelle(CONFIDENCE_HOCH_TAGE, erw_laeufe),
         "window_days": FENSTER_TAGE, "stichtag": stichtag, "rows_soll": rows,
         "valid_runs": valid, "invalid_runs": invalid, "poor_runs": poor, "data_invalid_runs": ungueltig, "empty_runs": leer,
         "empty_rate": _r(leer / valid, 3) if valid else None,
@@ -299,7 +366,7 @@ def kennzahlen(docs: List[Dict[str, Any]], *, rows_soll: int, stichtag: str, cra
         "unique_listings": len(inserate), "new_listings": neu, "disappeared_listings": weg,
         "price_drop_events": senk, "price_increase_events": erhoeh,
         "top3_turnover_rate": _r(sum(t3) / len(t3), 3) if t3 else None, "top5_turnover_rate": _r(sum(t5) / len(t5), 3) if t5 else None,
-        "_top_je_tag": ((sum(t3) + sum(t5)) / 2 / luecken) if (luecken and (t3 or t5)) else 0.0,
+        "_top_anteil": ((sum(t3) + sum(t5)) / top_n) if top_n else 0.0,
         "median_price_change_pct": _r(aenderung_pct, 2), "price_volatility_pct": _r(vola, 2),
         "preis_streuung_pct": _r(statistics.median(streuung_tage), 2) if streuung_tage else None,
         "letzter_gueltiger_tag": letzter, "letzter_lauf_alter_tage": alter, "erwarteter_abstand_tage": erwartet,
@@ -327,7 +394,7 @@ def activity(m: Dict[str, Any]) -> Tuple[int, Dict[str, float], str]:
         liq_k = min(liq_k, LIQ_DUENN_DECKEL)
     k = {"treffer": min(1.0, mittel / rows),
          "neu": min(1.0, float(m.get("_neu_je_tag") or 0) / (rows * NEU_VOLL_ANTEIL)),
-         "top": min(1.0, float(m.get("_top_je_tag") or 0) / TOP_VOLL),
+         "top": min(1.0, float(m.get("_top_anteil", m.get("_top_je_tag")) or 0) / TOP_VOLL),
          "preis": min(1.0, float(m.get("_preis_je_tag") or 0) / (rows * PREIS_VOLL_ANTEIL)),
          "liquiditaet": liq_k}
     if int(m.get("vergleich_tage") or 0) < LIQ_MIN_TAGE:
@@ -350,10 +417,13 @@ def health_bestimmen(m: Dict[str, Any], score: int, *, wirkung: Optional[Dict[st
     if invalid >= UNSTABLE_UNGUELTIG_MIN and float(m.get("ungueltig_anteil") or 0) >= UNSTABLE_UNGUELTIG_ANTEIL:
         return UNSTABLE, "viele_ungueltige_laeufe"
     leer = float(m.get("empty_rate") or 0) >= EMPTY_ANTEIL
-    if valid < min_laeufe(MIN_LAEUFE_BEWERTUNG, wirkung):
+    erw = m.get("erwartete_laeufe")
+    min_bew = int(m["min_laeufe_bewertung"]) if m.get("min_laeufe_bewertung") else min_laeufe(MIN_LAEUFE_BEWERTUNG, wirkung, erw)
+    min_empty = int(m["min_laeufe_empty"]) if m.get("min_laeufe_empty") else min_laeufe(MIN_LAEUFE_EMPTY, wirkung, erw)
+    if valid < min_bew:
         return UNKNOWN, ("empty_kandidat" if valid and leer else "zu_wenig_laeufe")
     if leer:
-        if valid >= min_laeufe(MIN_LAEUFE_EMPTY, wirkung):
+        if valid >= min_empty:
             return EMPTY, "ueberwiegend_leer"
         return UNKNOWN, "empty_kandidat"
     if float(m.get("avg_valid_rows") or 0) < THIN_MAX_ZEILEN:
@@ -368,11 +438,20 @@ def health_bestimmen(m: Dict[str, Any], score: int, *, wirkung: Optional[Dict[st
 
 
 def confidence_bestimmen(m: Dict[str, Any], status: str, stichtag: str) -> str:
-    if status == UNKNOWN or int(m.get("valid_runs") or 0) < MIN_LAEUFE_EMPTY:
+    """LOW / MEDIUM / HIGH (Abschnitt 53). Ohne Wirkung: MEDIUM ab 14, HIGH ab 24 gueltigen Tagen ueber das ganze
+    Fenster. Unter einer SAFE_AUTO-Wirkung (Pruefbefund F0/F5) dieselben Stufen gemessen an den erwartbaren Laeufen
+    (schwelle) — sonst waere jede Wirkung ab Intervall 3 dauerhaft LOW und nie mehr anpassbar."""
+    min_empty = int(m.get("min_laeufe_empty") or MIN_LAEUFE_EMPTY)
+    hoch_ab = int(m.get("confidence_hoch_ab") or CONFIDENCE_HOCH_TAGE)
+    if status == UNKNOWN or int(m.get("valid_runs") or 0) < min_empty:
         return "LOW"
     erster = m.get("erster_tag_im_fenster")
     ganzes_fenster = bool(erster) and _tage_zwischen(erster, stichtag) >= FENSTER_TAGE - 1
-    if int(m.get("valid_days") or 0) >= CONFIDENCE_HOCH_TAGE and ganzes_fenster:
+    if m.get("erwartete_laeufe") is not None:
+        # unter einer Wirkung beginnt das Fenster mit dem ersten geplanten Lauf — 'ganzes Fenster' = erster Lauf
+        # hoechstens ein Intervall nach dem Fensterbeginn
+        ganzes_fenster = bool(erster) and _tage_zwischen(erster, stichtag) >= FENSTER_TAGE - 1 - int(m.get("erwarteter_abstand_tage") or 1)
+    if int(m.get("valid_days") or 0) >= hoch_ab and ganzes_fenster:
         return "HIGH"
     return "MEDIUM"
 
@@ -442,16 +521,44 @@ def frequenz_pruefen(roh: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def empfehlung(status: str, score: int, cfg: Optional[Dict[str, Any]] = None, *,
-               reduktion_aktiv: bool = False) -> Optional[Dict[str, Any]]:
+               aktuell: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """Empfohlene Frequenz. None fuer UNKNOWN/STALE/UNSTABLE (erst Daten/Technik pruefen, keine Frequenzaenderung).
-    frequency_days: 0.5 = 2x taeglich, 1 = taeglich, n = alle n Tage."""
+    frequency_days: 0.5 = 2x taeglich, 1 = taeglich, n = alle n Tage.
+    Zielstufe = konfigurierte Zuordnung EXAKT (Pruefbefund F1/F6). aktuell = die gerade wirkende SAFE_AUTO-Reduktion
+    ({intervall_tage, crawls_per_day}): die Hysterese haelt sie nur, solange der Score weniger als HYSTERESE_PUNKTE
+    jenseits der Grenze zur Zielstufe liegt — sie verschiebt nie die Zielstufe selbst."""
     cfg = cfg or FREQUENZ_STANDARD
+    ziel = _zuordnung(status, score, cfg)
+    if not ziel or ziel.get("pausiert") or not aktuell or aktuell.get("pausiert"):
+        return ziel
+    jetzt = (int(aktuell.get("intervall_tage") or 1), int(aktuell.get("crawls_per_day") or 1))
+    r_jetzt = jetzt[1] / max(1, jetzt[0])
+    r_ziel = rate(ziel) or 0.0
+    if abs(r_ziel - r_jetzt) < 1e-9:
+        return ziel
+    # Die Zuordnung ist monoton (hoeherer Score -> haeufiger). Der Score liegt mindestens HYSTERESE_PUNKTE jenseits
+    # der Grenze der aktuellen Stufe, wenn auch der um HYSTERESE_PUNKTE zurueckgeschobene Score schon jenseits liegt
+    # (Rate echt groesser bzw. kleiner als die aktuelle) — sonst bleibt die aktuelle Stufe. Auch im linearen Band
+    # (3-7 Tage, jede Tagesstufe nur ~5 Punkte breit) haelt das die Stufe, bis der Score die Grenze klar ueberschreitet.
+    haeufiger = r_ziel > r_jetzt
+    verschoben = max(0, min(100, int(score) + (-HYSTERESE_PUNKTE if haeufiger else HYSTERESE_PUNKTE)))
+    r_zurueck = rate(_zuordnung(status, verschoben, cfg)) or 0.0
+    jenseits = r_zurueck > r_jetzt + 1e-9 if haeufiger else r_zurueck < r_jetzt - 1e-9
+    if not jenseits:
+        return {"pausiert": False, "intervall_tage": jetzt[0], "crawls_per_day": jetzt[1],
+                "frequency_days": round(jetzt[0] / max(1, jetzt[1]), 2), "stufe_ab": ziel.get("stufe_ab"),
+                "hysterese": True, "ziel_exakt": ziel}
+    return ziel
+
+
+def _zuordnung(status: str, score: int, cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Die konfigurierte Zuordnung Score -> Frequenz, exakt (ohne Hysterese)."""
     if status == EMPTY:
         n = int(cfg.get("empty_nachpruefung_tage") or 7)
         return {"pausiert": True, "intervall_tage": n, "crawls_per_day": 1, "frequency_days": float(n), "stufe_ab": None}
     if status not in MIT_EMPFEHLUNG:
         return None
-    s = max(0, int(score) - (HYSTERESE_PUNKTE if reduktion_aktiv else 0))
+    s = max(0, int(score))
     stufen = cfg.get("stufen") or FREQUENZ_STANDARD["stufen"]
     wahl, n, cpd = stufen[-1], int(stufen[-1]["intervall_tage"]), 1
     for i, st in enumerate(stufen):
@@ -499,7 +606,11 @@ def segment_health(seg: Dict[str, Any], docs: List[Dict[str, Any]], *, stichtag:
     score, komponenten, liq = activity(m)
     status, grund = health_bestimmen(m, score, wirkung=wirkung)
     reduziert = reduktion_aktiv(wirkung, cpd)
-    emp = empfehlung(status, score, cfg, reduktion_aktiv=reduziert)
+    aktuell = None
+    if reduziert and not (wirkung or {}).get("pausiert"):
+        aktuell = {"intervall_tage": int(wirkung.get("intervall_tage") or 1),
+                   "crawls_per_day": min(cpd, int(wirkung.get("crawls_per_day") or cpd))}
+    emp = empfehlung(status, score, cfg, aktuell=aktuell)
     doc = {k: v for k, v in m.items() if not k.startswith("_")}
     doc.update({
         "segment_id": seg["id"], "model_id": seg.get("model_id"), "version": fass[0], "definition_hash": fass[1],
@@ -672,4 +783,5 @@ def schwellen() -> Dict[str, Any]:
             "unstable_volatilitaet_pct": UNSTABLE_VOLATILITAET_PCT, "stale_puffer_tage": STALE_PUFFER_TAGE,
             "hot_ab_score": HOT_AB_SCORE, "healthy_ab_score": HEALTHY_AB_SCORE, "healthy_min_fuellung": HEALTHY_MIN_FUELLUNG,
             "gewichte": dict(GEWICHTE), "thin_min_intervall_tage": THIN_MIN_INTERVALL_TAGE, "hysterese_punkte": HYSTERESE_PUNKTE,
-            "confidence_hoch_tage": CONFIDENCE_HOCH_TAGE}
+            "confidence_hoch_tage": CONFIDENCE_HOCH_TAGE, "erwartet_puffer_anteil": ERWARTET_PUFFER_ANTEIL,
+            "min_laeufe_unter_wirkung": MIN_LAEUFE_UNTER_WIRKUNG}

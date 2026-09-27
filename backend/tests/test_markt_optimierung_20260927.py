@@ -431,7 +431,8 @@ def test_09_safe_auto_plant_seltener_hot_zuerst_nie_km_ez_zeilen(welt, monkeypat
         log = welt.run(db[K.AENDERUNGEN].find({"model_id": _mid(welt)}, {"_id": 0}).to_list(10))
         assert len(log) == 3 and all(a["wer"] == "safe_auto" and a["status"] == "aktiv" and a["grund"] for a in log)
         pause = next(a for a in log if a["typ"] == "PAUSE_EMPTY")
-        assert pause["alt"] == {"intervall_tage": 1, "crawls_per_day": 1, "prioritaet": "normal", "pausiert": False}
+        assert pause["alt"] == {"intervall_tage": 1, "crawls_per_day": 1, "pausiert": False}, "nur die Groesse, die die Aenderung betrifft (F17)"
+        assert next(a for a in log if a["typ"] == "PRIORITIZE_HOT")["alt"] == {"prioritaet": "normal"}
         assert pause["neu"] == {"intervall_tage": 7, "crawls_per_day": 1, "pausiert": True} and pause["estimated_monthly_saving_usd"] == 0.26
         assert all(v["status"] == "APPLIED" and v["angewendet_von"] == "safe_auto" for v in _vorschlaege(welt) if v["typ"] in OPT.SAFE_TYPEN)
         assert [v["status"] for v in _vorschlaege(welt) if v["typ"] in OPT.STRUKTUR_TYPEN] in ([], ["PROPOSED"]), "MERGE/SPLIT nie automatisch"
@@ -474,21 +475,26 @@ def test_10_safe_auto_senkt_nur_und_nachpruefung_bestaetigt_oder_hebt_auf(welt, 
         welt.run(OPT.modus_setzen(db, "SAFE_AUTO", wer="test-admin"))
         _rechnen(welt)
         assert welt.run(db[K.SEGMENTE].find_one({"id": heiss["id"]}))["safe_auto"].get("crawls_per_day") is None, "nie mehr Abrufe"
-        # nur noch Nachpruefungen alle 7 Tage im Fenster (4 leere Laeufe) -> EMPTY bleibt bestaetigt
+        # nur noch Nachpruefungen alle 7 Tage im Fenster (4 leere Laeufe) -> EMPTY bleibt bestaetigt (die Pause laeuft
+        # seit ueber 30 Tagen: reduziert_seit liegt vor dem Fenster)
+        welt.run(db[K.AENDERUNGEN].update_many({"segment_id": leer["id"], "status": "aktiv"}, {"$set": {"reduziert_seit": _t(40)}}))
+        welt.run(db[K.SEGMENTE].update_one({"id": leer["id"]}, {"$set": {"safe_auto.reduziert_seit": _t(40)}}))
         welt.run(db[K.TAGESSTATS].delete_many({"segment_id": leer["id"]}))
         for i in (0, 7, 14, 21):
             _doc(welt, leer, _t(i), 0)
         _rechnen(welt)
         h = welt.run(db[K.HEALTH].find_one({"segment_id": leer["id"]}, {"_id": 0}))
         assert h["health"] == "EMPTY" and h["valid_runs"] == 4 and h["erwarteter_abstand_tage"] == 7 and h["health"] != "STALE"
-        assert H.min_laeufe(H.MIN_LAEUFE_EMPTY, {"intervall_tage": 7}) == 4 and H.min_laeufe(H.MIN_LAEUFE_EMPTY, None) == 14
+        assert h["erwartete_laeufe"] == 4 and h["min_laeufe_empty"] == 3 and h["confidence"] in ("MEDIUM", "HIGH")
+        # Pruefbefund F0/F5: Puffer fuer einen Ausfall (4 erwartete Laeufe -> 3 genuegen); ohne Wirkung die festen 14
+        assert H.min_laeufe(H.MIN_LAEUFE_EMPTY, {"intervall_tage": 7}) == 3 and H.min_laeufe(H.MIN_LAEUFE_EMPTY, None) == 14
         assert welt.run(db[K.AENDERUNGEN].count_documents({"segment_id": leer["id"], "status": "aktiv"})) == 1
-        # Nachpruefung findet Autos -> nicht mehr EMPTY -> Pause aufgehoben (wer safe_auto, Grund)
+        # Nachpruefung findet Autos -> nicht mehr EMPTY -> Pause aufgehoben (wer safe_auto, Grund: Daten widersprechen)
         _doc(welt, leer, _t(0), 3)
         _doc(welt, leer, _t(7), 2)
         _rechnen(welt)
         a = welt.run(db[K.AENDERUNGEN].find_one({"segment_id": leer["id"], "typ": "PAUSE_EMPTY"}, {"_id": 0}))
-        assert a["status"] == "aufgehoben" and a["beendet_von"] == "safe_auto" and a["beendet_grund"] == "Empfehlung entfallen"
+        assert a["status"] == "aufgehoben" and a["beendet_von"] == "safe_auto" and a["beendet_grund"].startswith("Daten widersprechen: THIN statt EMPTY")
         seg = welt.run(db[K.SEGMENTE].find_one({"id": leer["id"]}, {"_id": 0}))
         assert not (seg.get("safe_auto") or {}).get("pausiert")
     finally:
@@ -572,6 +578,7 @@ def test_13_full_auto_gesperrt_zwei_server_und_routen(welt, monkeypatch):
     MA = _module("routes.markt_admin")
     monkeypatch.setattr(MA, "db", welt.db)
     alt = _modus_merken(welt)
+    plan_alt = welt.run(welt.db[K.KONFIG].find_one({"_id": K.TAGESPLAN_DOK}))
     leer, heiss, ruhig = _drei_safe(welt)
     db = welt.db
     admin = {"id": "test-admin"}
@@ -609,12 +616,14 @@ def test_13_full_auto_gesperrt_zwei_server_und_routen(welt, monkeypatch):
         with pytest.raises(HTTPException) as ex:
             welt.run(MA.admin_market_aenderung_zuruecknehmen("gibt-es-nicht", admin=admin))
         assert ex.value.status_code == 404
+        # Pruefbefund F8: ohne Budgetgrenze (Tagesplan-Merker von heute, niemand wartet) Dollar, sonst frei werdende Laeufe
+        welt.run(K.merker_setzen(db, K.TAGESPLAN_DOK, tag=K.heute_tag(), segmente_je_tag=10, segmente_gesamt=10, ruhend=0, wartend=0))
         u = welt.run(MA.admin_market_optimierung(_=admin))
         assert u["modus"] == "SAFE_AUTO" and u["modi"][1]["gesperrt"] is False and u["modi"][2]["gesperrt"] is True
         aktiv = welt.run(db[K.AENDERUNGEN].find({"status": "aktiv"}, {"_id": 0}).to_list(100))
-        assert u["safe_auto_aktiv"] == len(aktiv) == 2
-        assert u["ersparnis_safe_auto_usd"] == round(sum(float(a.get("estimated_monthly_saving_usd") or 0) for a in aktiv
-                                                         if float(a.get("estimated_monthly_saving_usd") or 0) > 0), 2)
+        assert u["safe_auto_aktiv"] == len(aktiv) == 2 and u["budget_grenze"] is False
+        assert abs(u["ersparnis_safe_auto_usd"] - sum(float(a.get("estimated_monthly_saving_usd") or 0) for a in aktiv
+                                                      if float(a.get("estimated_monthly_saving_usd") or 0) > 0)) <= 0.011
         src = (Path(__file__).resolve().parent.parent / "routes" / "markt_admin.py").read_text(encoding="utf-8")
         for pfad in ('@router.put("/admin/market/optimierung/modus")', '@router.post("/admin/market/optimierung/aenderungen/{aenderung_id}/zuruecknehmen")'):
             kopf = src.split(pfad)[1].split("\n\n")[0]
@@ -624,6 +633,11 @@ def test_13_full_auto_gesperrt_zwei_server_und_routen(welt, monkeypatch):
         # der Tagesplan liest den Modus (ohne lesbaren Modus: OBSERVE)
         q = inspect.getsource(JOBS.tagesplan)
         assert "_safe_auto_an(db)" in q and "MODUS_SAFE_AUTO" in inspect.getsource(JOBS._safe_auto_an)
+        assert "wartend=int(wartend)" in q, "Pruefbefund F8: der Tagesplan meldet die heutige Drosselung"
     finally:
         _modus_zurueck(welt, alt)
+        if plan_alt:
+            welt.run(db[K.KONFIG].replace_one({"_id": K.TAGESPLAN_DOK}, plan_alt, upsert=True))
+        else:
+            welt.run(db[K.KONFIG].delete_one({"_id": K.TAGESPLAN_DOK}))
         _aufraeumen(welt)

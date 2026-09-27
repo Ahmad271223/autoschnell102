@@ -12,7 +12,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
-const netz = vi.hoisted(() => ({ gets: [], posts: [], puts: [], superAdmin: true, fehler: null }));
+const netz = vi.hoisted(() => ({ gets: [], posts: [], puts: [], superAdmin: true, fehler: null, warten: {}, postWarten: null, viele: false,
+  detailFehler: 0, modellHealth: null, uebersicht: null, segmentWirkung: null }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 vi.mock("recharts", () => {
   const Leer = ({ children }) => h("div", { "data-chart": "1" }, children);
@@ -49,6 +50,15 @@ const VORSCHLAEGE = [
     ez_label: "EZ 2020", km_label: "20–40k km", health: "NORMAL", reason: "Activity Score 25 (NORMAL) — alle 2 Tage statt täglich reicht", confidence: "HIGH",
     estimated_monthly_saving_usd: 0.15, evidence: { days: 28, valid_runs: 28, avg_rows: 5, empty_rate: 0, activity_score: 25 } },
 ];
+// Prüfbefunde F/G: angewendet durch SAFE_AUTO (Rücknahme auch hier) und abgelehnt (Ablehnung aufheben)
+const EXTRA_VORSCHLAEGE = [
+  { id: "v4", typ: "PAUSE_EMPTY", status: "APPLIED", angewendet_von: "safe_auto", aenderung_id: "a1", model_id: "bmw-320d", segment_id: "bmw-320d:v2:2020:3",
+    label: "BMW 320d", version: 2, ez_label: "EZ 2020", km_label: "30–40k km", health: "EMPTY", reason: "EMPTY — pausieren", confidence: "HIGH",
+    estimated_monthly_saving_usd: 0, laeufe_frei_monat: 10.9, ersparnis_budget_grenze: true, evidence: { days: 30, valid_runs: 4 } },
+  { id: "v5", typ: "REDUCE_FREQUENCY", status: "REJECTED", entscheidung_grund: "Familie abgelehnt", model_id: "bmw-320d", segment_id: "bmw-320d:v2:2020:6",
+    label: "BMW 320d", version: 2, ez_label: "EZ 2020", km_label: "60–70k km", reason: "alle 4 Tage statt täglich", confidence: "MEDIUM",
+    estimated_monthly_saving_usd: 0.2, evidence: {} },
+];
 const SEGMENTE = [["HOT", "var(--st-lila)"], ["HEALTHY", "var(--st-gruen)"], ["THIN", "var(--st-gelb)"], ["EMPTY", "var(--st-grau)"],
   ["UNSTABLE", "var(--st-rot)"], ["STALE", "var(--st-amber)"], ["NORMAL", "var(--text-secondary)"], ["UNKNOWN", "var(--text-dim)"]].map(([st], i) => ({
   segment_id: `bmw-320d:v2:2020:${i}`, ez_label: "EZ 2020", km_label: `${i}0–${i + 1}0k km`, health: st, health_text: `Grund ${st}`, activity_score: 90 - i * 10,
@@ -76,18 +86,31 @@ vi.mock("@/lib/api", () => ({
   api: {
     get: vi.fn(async (url, opts) => {
       netz.gets.push({ url, params: opts?.params });
-      if (url === "/admin/market/optimierung") { if (netz.fehler) throw new Error(netz.fehler); return { data: UEBERSICHT }; }
+      const warte = netz.warten[`${url}|${opts?.params?.status ?? ""}`];
+      if (warte) await warte;
+      if (url === "/admin/market/optimierung") { if (netz.fehler) throw new Error(netz.fehler); return { data: netz.uebersicht || UEBERSICHT }; }
       if (url === "/admin/market/optimierung/vorschlaege") {
         const p = opts?.params || {};
-        const liste = VORSCHLAEGE.filter((v) => (!p.typ || v.typ === p.typ) && (p.status === "alle" || p.status === "offen" ? true : v.status === p.status));
-        return { data: { vorschlaege: liste, anzahl: liste.length } };
+        if (netz.viele) {
+          const alle = Array.from({ length: 150 }, (_, i) => ({ ...VORSCHLAEGE[2], id: `n${i}`, segment_id: `bmw-320d:v2:2020:${i}` }));
+          const teil = alle.slice(p.offset || 0, (p.offset || 0) + p.limit);
+          return { data: { vorschlaege: teil, anzahl: teil.length, gesamt: 150, weitere: (p.offset || 0) + teil.length < 150 } };
+        }
+        const liste = [...VORSCHLAEGE, ...EXTRA_VORSCHLAEGE].filter((v) => (!p.typ || v.typ === p.typ) && (!p.model_id || v.model_id === p.model_id)
+          && (p.status === "alle" ? true : p.status === "offen" ? ["PROPOSED", "ACCEPTED"].includes(v.status) : v.status === p.status));
+        return { data: { vorschlaege: liste, anzahl: liste.length, gesamt: liste.length, weitere: false } };
       }
       if (url === "/admin/market/optimierung/aenderungen") {
         const st = opts?.params?.status;
-        const liste = AENDERUNGEN.filter((a) => !st || st === "alle" || a.status === st);
-        return { data: { aenderungen: liste, anzahl: liste.length } };
+        const liste = AENDERUNGEN.filter((a) => (!st || st === "alle" || a.status === st) && (!opts?.params?.model_id || a.model_id === opts.params.model_id));
+        return { data: { aenderungen: liste, anzahl: liste.length, gesamt: liste.length, weitere: false } };
       }
-      if (url === "/admin/market/health/models/bmw-320d") return { data: { model_id: "bmw-320d", modell: UEBERSICHT.modelle[0], segmente: SEGMENTE, vorschlaege: [] } };
+      if (url === "/admin/market/health/models/bmw-320d") {
+        if (netz.detailFehler > 0) { netz.detailFehler -= 1; throw new Error("Segmente: Serverfehler"); }
+        if (netz.modellHealth) return { data: netz.modellHealth };
+        const segmente = netz.segmentWirkung ? SEGMENTE.map((s, i) => (i === 3 ? { ...s, safe_auto_wirkung: netz.segmentWirkung } : s)) : SEGMENTE;
+        return { data: { model_id: "bmw-320d", modell: UEBERSICHT.modelle[0], segmente, vorschlaege: [], aktuell: true } };
+      }
       if (url === "/admin/market/models/bmw-320d") return { data: { id: "bmw-320d", label: "BMW 320d", fuel: "DIESEL", version: 2, segmente: [
         { id: "bmw-320d:v2:2020:0", model_id: "bmw-320d", min_km: 0, max_km: 10000, km_label: "0–10k km", year_from: 2020, ez_label: "EZ 2020", enabled: true, version: 2 },
         { id: "bmw-320d:v2:2020:2", model_id: "bmw-320d", min_km: 20000, max_km: 30000, km_label: "20–30k km", year_from: 2020, ez_label: "EZ 2020", enabled: true, version: 2 }] } };
@@ -99,6 +122,7 @@ vi.mock("@/lib/api", () => ({
     }),
     post: vi.fn(async (url) => {
       netz.posts.push(url);
+      if (netz.postWarten) await netz.postWarten;
       if (url.endsWith("/uebernehmen")) return { data: { ok: true, modell: { version: 2 } } };
       return { data: { ok: true, segmente: 12, modelle: 2, vorschlaege_neu: 1 } };
     }),
@@ -134,7 +158,10 @@ async function tippen(t, wert) {
   await warten();
 }
 const vorschlagParams = () => netz.gets.filter((g) => g.url === "/admin/market/optimierung/vorschlaege").at(-1).params;
-beforeEach(() => { netz.gets.length = 0; netz.posts.length = 0; netz.puts.length = 0; netz.superAdmin = true; netz.fehler = null; });
+beforeEach(() => {
+  netz.gets.length = 0; netz.posts.length = 0; netz.puts.length = 0; netz.superAdmin = true; netz.fehler = null; netz.warten = {};
+  netz.postWarten = null; netz.viele = false; netz.detailFehler = 0; netz.modellHealth = null; netz.uebersicht = null; netz.segmentWirkung = null;
+});
 afterEach(async () => { if (wurzel) await act(async () => { wurzel.unmount(); }); wurzel = null; behaelter?.remove(); });
 
 describe("Admin Segment-Optimierung", () => {
@@ -150,7 +177,7 @@ describe("Admin Segment-Optimierung", () => {
     expect(el("opt-zaehler").textContent).toBe("1 HOT3 HEALTHY2 THIN1 EMPTY4 offen");
     expect(el("opt-ersparnis").textContent).toContain("−1,84 $/Monat");
     expect(el("opt-uebersicht").textContent).toContain("Offene Vorschläge4");
-    expect(vorschlagParams()).toEqual({ status: "offen", limit: 300 });
+    expect(vorschlagParams()).toEqual({ status: "offen", limit: 100, offset: 0 });
   });
 
   it("Health je Suchauftrag und Segment in den Farben aus Abschnitt 47 (nur CSS-Variablen, HOT hervorgehoben)", async () => {
@@ -207,9 +234,9 @@ describe("Admin Segment-Optimierung", () => {
   it("Filter Status/Typ als GET-Parameter", async () => {
     await starten();
     await tippen("opt-filter-status", "alle");
-    expect(vorschlagParams()).toEqual({ status: "alle", limit: 300 });
+    expect(vorschlagParams()).toEqual({ status: "alle", limit: 100, offset: 0 });
     await tippen("opt-filter-typ", "SPLIT_KM_BUCKET");
-    expect(vorschlagParams()).toEqual({ status: "alle", limit: 300, typ: "SPLIT_KM_BUCKET" });
+    expect(vorschlagParams()).toEqual({ status: "alle", limit: 100, offset: 0, typ: "SPLIT_KM_BUCKET" });
     expect(el("opt-vorschlag-v1")).toBeNull();
     expect(el("opt-vorschlag-v2")).toBeTruthy();
   });
@@ -286,12 +313,12 @@ describe("Admin Segment-Optimierung", () => {
 
   it("Phase G: Protokoll der SAFE_AUTO-Änderungen (wer, alt → neu, Grund, Status), Rücknahme mit Rückfrage, Filter", async () => {
     await starten();
-    expect(netz.gets.find((g) => g.url === "/admin/market/optimierung/aenderungen").params).toEqual({ status: "alle", limit: 200 });
+    expect(netz.gets.find((g) => g.url === "/admin/market/optimierung/aenderungen").params).toEqual({ status: "alle", limit: 100, offset: 0 });
     const a1 = el("opt-aenderung-a1").textContent;
     for (const t of ["SAFE_AUTO", "BMW 320d", "EZ 2020 · 30–40k km", "pausieren (EMPTY, mit Nachprüfung)", "100 % ohne Treffer", "−0,26 $/Monat", "aktiv"]) expect(a1).toContain(t);
     expect(el("opt-aenderung-wirkung-a1").textContent).toBe("täglich → pausiert · Nachprüfung alle 7 Tage");
     expect(el("opt-aenderung-wirkung-a2").textContent).toBe("täglich → alle 2 Tage");
-    expect(el("opt-aenderung-wirkung-a3").textContent).toBe("täglich → zuerst geplant (HOT)");
+    expect(el("opt-aenderung-wirkung-a3").textContent).toBe("normal geplant → zuerst geplant (HOT)");
     expect(el("opt-aenderung-a2").textContent).toContain("zurückgenommen");
     expect(el("opt-aenderung-a2").textContent).toContain("von sa: Rücknahme durch den Betreiber");
     expect(el("opt-aenderung-a3").textContent).toContain("von SAFE_AUTO: Modus OBSERVE");
@@ -306,7 +333,7 @@ describe("Admin Segment-Optimierung", () => {
     expect(confirm.mock.calls[1][0]).toContain("täglich → pausiert · Nachprüfung alle 7 Tage");
     confirm.mockRestore();
     await tippen("opt-protokoll-status", "aktiv");
-    expect(netz.gets.filter((g) => g.url === "/admin/market/optimierung/aenderungen").at(-1).params).toEqual({ status: "aktiv", limit: 200 });
+    expect(netz.gets.filter((g) => g.url === "/admin/market/optimierung/aenderungen").at(-1).params).toEqual({ status: "aktiv", limit: 100, offset: 0 });
     expect(el("opt-aenderung-a2")).toBeNull();
     expect(el("opt-aenderung-a1")).toBeTruthy();
     // Wirkung je Segment in der Health-Tabelle
@@ -331,5 +358,129 @@ describe("Admin Segment-Optimierung", () => {
     expect(markt.healthStil("gibt-es-nicht").color).toBe("var(--text-dim)");
     expect(markt.HEALTH_REIHE).toEqual(["HOT", "HEALTHY", "NORMAL", "THIN", "EMPTY", "UNSTABLE", "STALE", "UNKNOWN"]);
     for (const st of markt.HEALTH_REIHE) expect(markt.HEALTH[st].farbe.startsWith("var(--")).toBe(true);
+  });
+
+  // ---------------------------------------------------------------- Prüfbefunde Phase F/G (27.09.2026)
+  it("F11: Wettlauf — nur die Antwort der letzten Anfrage zählt; Neuladen nach einer Aktion mit dem AKTUELLEN Filter", async () => {
+    await starten();
+    // langsame Antwort für „alle“, danach schnell „abgelehnt“: die späte „alle“-Antwort überschreibt nichts
+    let loesen;
+    netz.warten["/admin/market/optimierung/vorschlaege|alle"] = new Promise((r) => { loesen = r; });
+    await tippen("opt-filter-status", "alle");
+    await tippen("opt-filter-status", "REJECTED");
+    expect(el("opt-vorschlag-v5")).toBeTruthy();
+    await act(async () => { loesen(); });
+    await warten();
+    expect(el("opt-vorschlag-v1")).toBeNull();
+    expect(el("opt-vorschlag-v5")).toBeTruthy();
+    expect(el("opt-filter-status").value).toBe("REJECTED");
+    // „Health jetzt berechnen“ dauert; währenddessen Filter auf „alle“ — neu geladen wird mit „alle“, nicht „REJECTED“
+    let fertig;
+    netz.postWarten = new Promise((r) => { fertig = r; });
+    const k = el("opt-berechnen");
+    await act(async () => { k.click(); });
+    await tippen("opt-filter-status", "alle");
+    netz.postWarten = null;
+    await act(async () => { fertig(); });
+    await warten();
+    expect(vorschlagParams()).toEqual({ status: "alle", limit: 100, offset: 0 });
+    expect(el("opt-vorschlag-v1")).toBeTruthy();
+  });
+
+  it("F10/F12: „x von y“, weitere laden (offset), Auftragsfilter; Rücknahme auch in der Vorschlagsliste, Ablehnung aufheben", async () => {
+    netz.viele = true;
+    await starten();
+    expect(el("opt-vorschlaege-zahl").textContent).toContain("100 von 150");
+    await klick("opt-vorschlaege-weitere");
+    expect(vorschlagParams()).toEqual({ status: "offen", limit: 100, offset: 100 });
+    expect(el("opt-vorschlaege-zahl").textContent).toContain("150 von 150");
+    expect(el("opt-vorschlaege-weitere")).toBeNull();
+    expect(el("opt-vorschlag-n0")).toBeTruthy();
+    expect(el("opt-vorschlag-n149")).toBeTruthy();
+    netz.viele = false;
+    await tippen("opt-filter-auftrag", "bmw-320d");
+    expect(vorschlagParams()).toEqual({ status: "offen", limit: 100, offset: 0, model_id: "bmw-320d" });
+    await tippen("opt-protokoll-auftrag", "bmw-320d");
+    expect(netz.gets.filter((g) => g.url === "/admin/market/optimierung/aenderungen").at(-1).params).toEqual({ status: "alle", limit: 100, offset: 0, model_id: "bmw-320d" });
+    await tippen("opt-filter-status", "alle");
+    expect(el("opt-ersparnis-v4").textContent).toBe("10,9 Läufe/Monat frei");
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    await klick("opt-vorschlag-zuruecknehmen-v4");
+    expect(netz.posts.at(-1)).toBe("/admin/market/optimierung/aenderungen/a1/zuruecknehmen");
+    expect(el("opt-aufheben-v4")).toBeNull();
+    await klick("opt-aufheben-v5");
+    expect(netz.posts.at(-1)).toBe("/admin/market/optimierung/vorschlaege/v5/ablehnung-aufheben");
+    expect(confirm.mock.calls.at(-1)[0]).toContain("Ablehnung aufheben?");
+    confirm.mockRestore();
+    expect(el("opt-vorschlag-zuruecknehmen-v1")).toBeNull();
+  });
+
+  it("F10/F12/F15: Ladefehler der Listen und der Segmenttabelle mit „Erneut versuchen“; aufgeklappte Tabelle lädt nach Aktionen neu", async () => {
+    netz.detailFehler = 1;
+    await starten();
+    await klick("opt-modell-segmente-bmw-320d");
+    expect(el("opt-modell-detail-fehler-bmw-320d").textContent).toContain("Serverfehler");
+    await klick("opt-modell-detail-erneut-bmw-320d");
+    expect(el("opt-modell-detail-fehler-bmw-320d")).toBeNull();
+    expect(el(`opt-segment-wirkung-${SEGMENTE[3].segment_id}`).textContent).toBe("pausiert · Nachprüfung alle 7 Tage");
+    // Rücknahme im Protokoll -> die aufgeklappte Segmenttabelle lädt neu und zeigt den neuen Stand
+    const vorher = netz.gets.filter((g) => g.url === "/admin/market/health/models/bmw-320d").length;
+    netz.segmentWirkung = null;
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    netz.segmentWirkung = { intervall_tage: 1, crawls_per_day: null, hot: false, pausiert: false };
+    await klick("opt-zuruecknehmen-a1");
+    confirm.mockRestore();
+    expect(netz.gets.filter((g) => g.url === "/admin/market/health/models/bmw-320d").length).toBe(vorher + 1);
+    expect(el(`opt-segment-wirkung-${SEGMENTE[3].segment_id}`).textContent).toBe("täglich");
+    // Listenfehler: sichtbar mit „Erneut versuchen“
+    netz.warten["/admin/market/optimierung/vorschlaege|PROPOSED"] = Promise.reject(new Error("Vorschläge: Zeitüberschreitung"));
+    netz.warten["/admin/market/optimierung/vorschlaege|PROPOSED"].catch(() => {});
+    await tippen("opt-filter-status", "PROPOSED");
+    expect(el("opt-vorschlaege-fehler").textContent).toContain("Zeitüberschreitung");
+    delete netz.warten["/admin/market/optimierung/vorschlaege|PROPOSED"];
+    await klick("opt-vorschlaege-erneut");
+    expect(el("opt-vorschlaege-fehler")).toBeNull();
+    expect(el("opt-vorschlag-v3")).toBeTruthy();
+  });
+
+  it("F8/F9: Budgetgrenze -> frei werdende Läufe statt Dollar; Stand von Knopf und täglichem Lauf getrennt", async () => {
+    netz.uebersicht = { ...UEBERSICHT, budget_grenze: true, laeufe_frei_offen_monat: 52.1, laeufe_frei_safe_auto_monat: 10.9,
+                        ersparnis_offen_usd: 0, ersparnis_safe_auto_usd: 0,
+                        stand: { letzter_lauf_at: "2026-10-01T05:30:00Z", quelle: "admin", taeglich_lauf_at: "2026-09-30T08:30:00Z", fehler: 0 } };
+    await starten();
+    expect(el("opt-ersparnis").textContent).toContain("52,1 Läufe/Monat frei");
+    expect(el("opt-ersparnis").textContent).toContain("keine Dollar-Ersparnis");
+    expect(el("opt-ersparnis-safe-auto").textContent).toContain("10,9 Läufe/Monat frei");
+    expect(el("opt-budget-grenze").textContent).toContain("Monatsbudget ist die Grenze");
+    expect(el("opt-stand").textContent).toContain("per Knopf");
+    expect(el("opt-stand").textContent).toContain("täglicher Lauf");
+  });
+
+  it("F17: Frequenzsenkung bleibt neben HOT sichtbar; Protokoll zeigt je Änderung nur die betroffene Größe", () => {
+    expect(markt.wirkungText({ hot: true, intervall_tage: 1, crawls_per_day: 2, pausiert: false })).toBe("2× täglich · zuerst geplant (HOT)");
+    expect(markt.wirkungText({ hot: true, intervall_tage: 1, crawls_per_day: null, pausiert: false })).toBe("zuerst geplant (HOT)");
+    expect(markt.wirkungText({ hot: false, intervall_tage: 3, crawls_per_day: 1, pausiert: false })).toBe("alle 3 Tage");
+    // alter Protokolleintrag: 'alt' trug die HOT-Priorität mit — die Frequenzsenkung zeigt „4× täglich → 2× täglich“
+    const alt = { intervall_tage: 1, crawls_per_day: 4, prioritaet: "HOT", pausiert: false };
+    expect(`${markt.wirkungText(alt, "REDUCE_FREQUENCY")} → ${markt.wirkungText({ intervall_tage: 1, crawls_per_day: 2 }, "REDUCE_FREQUENCY")}`).toBe("4× täglich → 2× täglich");
+    expect(markt.wirkungText({ prioritaet: "normal" }, "PRIORITIZE_HOT")).toBe("normal geplant");
+    expect(markt.wirkungText({ prioritaet: "HOT" })).toBe("zuerst geplant (HOT)");
+    expect(markt.laeufeText(-12.5)).toBe("12,5 Läufe/Monat zusätzlich");
+    expect(markt.wirkungGeldText(0.26, 26.1, false)).toBe("−0,26 $/Monat");
+  });
+
+  it("F18: Modellseite — pausierter Auftrag bzw. neue Fassung: kein altes Badge, Grund und Stichtag sichtbar", async () => {
+    netz.modellHealth = { model_id: "bmw-320d", modell: UEBERSICHT.modelle[0], segmente: SEGMENTE, vorschlaege: [], aktuell: false,
+                          nicht_aktuell_grund: "pausiert", auftrag_status: "paused", auftrag_version: 2, health_tag: "2026-09-01", health_version: 2 };
+    await starten("/admin/markt/bmw-320d");
+    expect(el("markt-modell-health")).toBeNull();
+    expect(el("markt-segment-health-bmw-320d:v2:2020:2")).toBeNull();
+    expect(el("markt-modell-health-veraltet").textContent).toContain("pausiert");
+    expect(el("markt-modell-health-veraltet").textContent).toContain("2026-09-01");
+    await act(async () => { wurzel.unmount(); }); wurzel = null; behaelter?.remove();
+    netz.modellHealth = { ...netz.modellHealth, nicht_aktuell_grund: "neue_fassung", auftrag_status: "active", auftrag_version: 3 };
+    await starten("/admin/markt/bmw-320d");
+    expect(el("markt-modell-health")).toBeNull();
+    expect(el("markt-modell-health-veraltet").textContent).toContain("neue Fassung v3 noch nicht bewertet");
   });
 });

@@ -273,8 +273,11 @@ def test_06_activity_score_und_frequenzzuordnung_konfigurierbar(welt):
     assert e("EMPTY", 0) == {"pausiert": True, "intervall_tage": 7, "crawls_per_day": 1, "frequency_days": 7.0, "stufe_ab": None}
     assert e("UNKNOWN", 80) is None and e("STALE", 80) is None and e("UNSTABLE", 80) is None
     assert e("THIN", 60)["intervall_tage"] == 2, "THIN nie taeglich"
-    # Hysterese: mit aktiver Reduktion erst 5 Punkte ueber der Grenze wieder haeufiger
-    assert e("NORMAL", 47)["intervall_tage"] == 1 and e("NORMAL", 47, reduktion_aktiv=True)["intervall_tage"] == 2
+    # Hysterese (Pruefbefund F1/F6): mit aktiver Reduktion (alle 2 Tage) erst 5 Punkte ueber der Grenze wieder haeufiger;
+    # die Zielstufe selbst bleibt die Zuordnung exakt (Score 22 unter Wirkung 2 Tage bleibt 2 Tage, nie 3)
+    zwei = {"intervall_tage": 2, "crawls_per_day": 1}
+    assert e("NORMAL", 47)["intervall_tage"] == 1 and e("NORMAL", 47, aktuell=zwei)["intervall_tage"] == 2
+    assert e("NORMAL", 50, aktuell=zwei)["intervall_tage"] == 1 and e("NORMAL", 22, aktuell=zwei)["intervall_tage"] == 2
     # Gewichte summieren sich zu 100; je Kalendertag normiert: ein Vergleich ueber 3 Tage zaehlt wie 3 Tage
     assert sum(H.GEWICHTE.values()) == 100
     m1 = {"rows_soll": 5, "valid_runs": 10, "vergleich_tage": 9, "_mittel": 5.0, "_neu_je_tag": 1.5, "_weg_je_tag": 1.5, "_top_je_tag": 0.7, "_preis_je_tag": 0.75}

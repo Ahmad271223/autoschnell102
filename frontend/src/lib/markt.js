@@ -344,13 +344,36 @@ export const AENDERUNG_STATUS = {
   zurueckgenommen: { text: "zurückgenommen", tone: "yellow" },
   aufgehoben: { text: "aufgehoben", tone: "gray" },
 };
-/** Wirkung einer SAFE_AUTO-Änderung als Text ("alle 7 Tage (pausiert, Nachprüfung)", "zuerst geplant (HOT)"). */
-export function wirkungText(w) {
+/** Wirkung einer SAFE_AUTO-Änderung als Text ("pausiert · Nachprüfung alle 7 Tage", "zuerst geplant (HOT)").
+ *  Prüfbefund F17: typ = Art der Änderung im Protokoll — eine Frequenzsenkung (REDUCE/PAUSE) zeigt nur die Frequenz
+ *  (auch wenn der alte Eintrag die HOT-Priorität mitführt), HOT nur die Priorität. Ohne typ (Wirkung am Segment) zeigt
+ *  der Text beides: „2× täglich · zuerst geplant (HOT)“ — eine Senkung wird neben HOT nie verdeckt. */
+export function wirkungText(w, typ) {
   if (!w) return "—";
-  if (w.prioritaet === "HOT" || w.hot) return "zuerst geplant (HOT)";
+  const hot = w.prioritaet === "HOT" || w.hot === true;
+  const nurPrio = typ === "PRIORITIZE_HOT"
+    || (typ === undefined && w.prioritaet !== undefined && w.intervall_tage === undefined && w.crawls_per_day === undefined && w.pausiert === undefined);
+  if (nurPrio) return hot ? "zuerst geplant (HOT)" : "normal geplant";
   const n = Number(w.intervall_tage || 1);
   const k = Number(w.crawls_per_day || 1);
-  if (w.pausiert) return `pausiert · Nachprüfung alle ${n} Tage`;
-  if (n > 1) return `alle ${n} Tage`;
-  return k > 1 ? `${k}× täglich` : "täglich";
+  let frequenz;
+  if (w.pausiert) frequenz = `pausiert · Nachprüfung alle ${n} Tage`;
+  else if (n > 1) frequenz = `alle ${n} Tage`;
+  else frequenz = k > 1 ? `${k}× täglich` : "täglich";
+  if (typ === "REDUCE_FREQUENCY" || typ === "PAUSE_EMPTY" || !hot) return frequenz;
+  const gesenkt = !!w.pausiert || n > 1 || (w.crawls_per_day !== null && w.crawls_per_day !== undefined);
+  return gesenkt ? `${frequenz} · zuerst geplant (HOT)` : "zuerst geplant (HOT)";
+}
+/** Prüfbefund F8: frei werdende (positiv) bzw. zusätzlich nötige (negativ) Abrufe je Monat. */
+export function laeufeText(n) {
+  if (n === null || n === undefined || Number.isNaN(Number(n))) return "—";
+  const v = Number(n);
+  const z = Math.abs(v).toLocaleString("de-DE", { maximumFractionDigits: 1 });
+  if (v === 0) return "keine Läufe frei";
+  return v > 0 ? `${z} Läufe/Monat frei` : `${z} Läufe/Monat zusätzlich`;
+}
+/** Wirkung eines Vorschlags/einer Änderung: Dollar nur ohne Budgetgrenze, sonst frei werdende Läufe für andere Segmente. */
+export function wirkungGeldText(usd, laeufe, budgetGrenze) {
+  if (budgetGrenze) return `${laeufeText(laeufe)} (Budget ist die Grenze — keine Dollar-Ersparnis)`;
+  return ersparnisText(usd);
 }

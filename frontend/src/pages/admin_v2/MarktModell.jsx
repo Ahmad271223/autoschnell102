@@ -67,7 +67,10 @@ export default function MarktModell() {
     api.get(`/admin/market/health/models/${modellId}`).then((r) => { if (aktiv) setHealth(r.data || null); }).catch(() => { if (aktiv) setHealth(null); });
     return () => { aktiv = false; };
   }, [modellId]);
-  const healthJeSegment = useMemo(() => Object.fromEntries((health?.segmente || []).map((s) => [s.segment_id, s])), [health]);
+  // Prüfbefund F18: Badges nur, wenn der Health-Stand zur AKTUELLEN Fassung eines aktiven Auftrags gehört — sonst kein
+  // altes Badge, sondern „pausiert“ bzw. „neue Fassung noch nicht bewertet“ mit Stichtag
+  const healthAktuell = health?.aktuell === true;
+  const healthJeSegment = useMemo(() => (health?.aktuell === true ? Object.fromEntries((health?.segmente || []).map((s) => [s.segment_id, s])) : {}), [health]);
 
   const setzen = (k, v) => setParams((p) => { const n = new URLSearchParams(p); n.set(k, v); return n; });
 
@@ -92,11 +95,21 @@ export default function MarktModell() {
         <div>
           <h1 className="text-[22px] font-semibold text-white" data-testid="markt-modell-titel">{modell.label}</h1>
           {/* Master-Auftrag Phase F: Modell-Health (Aggregat der Segmente, getrennt von der Datenqualität) */}
-          {health?.modell?.health && (
+          {health?.modell?.health && healthAktuell && (
             <div className="my-1 inline-flex flex-wrap items-center gap-2 text-[11px]" data-testid="markt-modell-health-zeile">
               <Link to="/admin/markt/optimierung" data-testid="markt-modell-health-link"><HealthBadge health={health.modell.health} testid="markt-modell-health" /></Link>
               <HealthZaehler zaehler={health.modell.zaehler} testid="markt-modell-health-zaehler" />
+              <span className="text-zinc-500" data-testid="markt-modell-health-stand">Stand {health.modell.tag || "—"}</span>
               {health.modell.vorschlaege_offen ? <span className="text-zinc-500">{health.modell.vorschlaege_offen} Vorschlag/Vorschläge offen</span> : null}
+            </div>
+          )}
+          {health?.modell?.health && !healthAktuell && (
+            <div className="my-1 text-[11px] text-zinc-500" data-testid="markt-modell-health-veraltet">
+              {health.nicht_aktuell_grund === "neue_fassung"
+                ? `Health: neue Fassung v${health.auftrag_version} noch nicht bewertet (letzter Stand Fassung v${health.health_version ?? "?"} vom ${health.health_tag || "—"})`
+                : health.nicht_aktuell_grund === "pausiert"
+                  ? `Health: Suchauftrag pausiert — letzter Stand vom ${health.health_tag || "—"} (Fassung v${health.health_version ?? "?"}), wird erst nach dem Aktivieren neu bewertet`
+                  : `Health: keine aktiven Segmente — letzter Stand vom ${health.health_tag || "—"}`}
             </div>
           )}
           <div className="text-[12px] text-zinc-500" data-testid="markt-modell-technik">{modell.fuel}{modell.gearbox ? ` · ${GETRIEBE_TEXT[modell.gearbox] || modell.gearbox}` : " · alle Getriebe (gemischt!)"}{modell.power_kw_min ? ` · ${modell.power_kw_min}–${modell.power_kw_max} kW` : ""} · mobile.de {modell.make_id}/{modell.model_id} · {segmente.filter((s) => s.enabled).length} Segmente</div>

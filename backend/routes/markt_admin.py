@@ -286,10 +286,13 @@ async def admin_market_optimierung_berechnen(admin=Depends(current_super_admin))
 
 @router.get("/admin/market/optimierung/vorschlaege")
 async def admin_market_vorschlaege(status: str = "offen", typ: Optional[str] = None, model_id: Optional[str] = None,
-                                   limit: int = Query(300, ge=1, le=1000), _=Depends(current_admin)):
+                                   limit: int = Query(100, ge=1, le=1000), offset: int = 0, sortierung: str = "wirkung",
+                                   _=Depends(current_admin)):
+    """Pruefbefund F10/F12: gefiltert und seitenweise (limit/offset) mit Gesamtzahl — nie still gekuerzt."""
     from markt import optimierung
     try:
-        return await optimierung.vorschlaege_liste(db, status=status, typ=typ, model_id=model_id, limit=limit)
+        return await optimierung.vorschlaege_liste(db, status=status, typ=typ, model_id=model_id, limit=limit, offset=offset,
+                                                   sortierung=sortierung)
     except optimierung.Ungueltig as ex:
         raise HTTPException(400, str(ex))
 
@@ -313,6 +316,20 @@ async def admin_market_vorschlag_ablehnen(vorschlag_id: str, admin=Depends(curre
     except optimierung.Ungueltig as ex:
         raise _optimierung_fehler(ex)
     await log_activity_sicher("", admin["id"], "admin.markt.vorschlag.ablehnen", ref=vorschlag_id, meta={"typ": v.get("typ")})
+    return {"ok": True, "vorschlag": v}
+
+
+@router.post("/admin/market/optimierung/vorschlaege/{vorschlag_id}/ablehnung-aufheben")
+async def admin_market_vorschlag_ablehnung_aufheben(vorschlag_id: str, admin=Depends(current_super_admin)):
+    """Pruefbefund F3/F7/F13: eine Ablehnung (Familie: Typ + Segment, auch alte Schluessel) ausdruecklich aufheben —
+    danach darf SAFE_AUTO die Familie wieder anwenden (eine Ruhezeit nach Ruecknahme bleibt)."""
+    from markt import optimierung
+    try:
+        v = await optimierung.ablehnung_aufheben(db, vorschlag_id, wer=admin["id"])
+    except optimierung.Ungueltig as ex:
+        raise _optimierung_fehler(ex)
+    await log_activity_sicher("", admin["id"], "admin.markt.vorschlag.ablehnung_aufheben", ref=vorschlag_id,
+                              meta={"typ": v.get("typ"), "segment_id": v.get("segment_id"), "status": v.get("status")})
     return {"ok": True, "vorschlag": v}
 
 
@@ -352,11 +369,12 @@ async def admin_market_optimierung_modus(body: ModusIn, admin=Depends(current_su
 
 @router.get("/admin/market/optimierung/aenderungen")
 async def admin_market_optimierung_aenderungen(status: str = "alle", model_id: Optional[str] = None,
-                                               limit: int = Query(300, ge=1, le=1000), _=Depends(current_admin)):
-    """Protokoll der SAFE_AUTO-Aenderungen (wer, alt -> neu, Grund, Status) — nur lesen."""
+                                               limit: int = Query(100, ge=1, le=1000), offset: int = 0, typ: Optional[str] = None,
+                                               _=Depends(current_admin)):
+    """Protokoll der SAFE_AUTO-Aenderungen (wer, alt -> neu, Grund, Status) — nur lesen; gefiltert und seitenweise."""
     from markt import optimierung
     try:
-        return await optimierung.aenderungen_liste(db, status=status, model_id=model_id, limit=limit)
+        return await optimierung.aenderungen_liste(db, status=status, model_id=model_id, typ=typ, limit=limit, offset=offset)
     except optimierung.Ungueltig as ex:
         raise HTTPException(400, str(ex))
 

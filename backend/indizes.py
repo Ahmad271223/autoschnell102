@@ -1109,7 +1109,11 @@ async def markt_indizes(db) -> dict:
             ("market_optimization_proposals", [("model_id", 1), ("status", 1)], "markt_vorschlag_modell"),
             # Phase G: Protokoll-Liste (Status, Zeit) und je Vorschlag (Ablehnen nimmt die Wirkung zurueck)
             ("market_optimization_changes", [("status", 1), ("at", -1)], "markt_aenderung_status_zeit"),
-            ("market_optimization_changes", [("vorschlag_id", 1), ("status", 1)], "markt_aenderung_vorschlag")):
+            ("market_optimization_changes", [("vorschlag_id", 1), ("status", 1)], "markt_aenderung_vorschlag"),
+            # Pruefbefunde F/G: Familie (Typ + Segment) — abgelehnt bleibt abgelehnt, auch unter alten Schluesseln;
+            # Protokoll je Suchauftrag (Filter + Seiten)
+            ("market_optimization_proposals", [("segment_id", 1), ("typ", 1), ("status", 1)], "markt_vorschlag_familie"),
+            ("market_optimization_changes", [("model_id", 1), ("at", -1)], "markt_aenderung_modell_zeit")):
         sammlung, schluessel, name = eintrag[0], eintrag[1], eintrag[2]
         optionen = eintrag[3] if len(eintrag) > 3 else {}
         ref = f"{sammlung}.{name}"

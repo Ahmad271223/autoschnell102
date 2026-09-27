@@ -352,7 +352,11 @@ async def tagesplan(db, tag: Optional[str] = None, *, sofort: bool = False) -> D
                 except DuplicateKeyError:
                     continue
             await db[SEGMENTE].update_one({"id": s["id"]}, {"$set": {"last_planned_tag": t}})
-    await konfig.merker_setzen(db, konfig.TAGESPLAN_DOK, tag=t, segmente=len(segs) + schon, neu=neu, sofort=bool(sofort))
+    # Pruefbefund F8 (Phase G): die heutige Drosselung fuer die ehrliche Ersparnis der Segment-Optimierung — warten
+    # faellige Segmente (Budget-Rotation), senkt eine SAFE_AUTO-Wirkung die Kosten nicht, sie macht Plaetze frei
+    await konfig.merker_setzen(db, konfig.TAGESPLAN_DOK, tag=t, segmente=len(segs) + schon, neu=neu, sofort=bool(sofort),
+                               segmente_je_tag=int(takt["segmente_je_tag"]), segmente_gesamt=int(takt["segmente"]),
+                               ruhend=int(ruhend), wartend=int(wartend))
     erg = {"segmente": len(segs), "neu": neu, "tag": t, "intervall_tage": takt["intervall_tage"],
            "segmente_gesamt": takt["segmente"], "slots": len(slots), "schon_geplant": schon, "wartend": wartend,
            "status": "ok", "safe_auto": safe_auto, "ruhend": ruhend, "hot_zuerst": len(hot)}
