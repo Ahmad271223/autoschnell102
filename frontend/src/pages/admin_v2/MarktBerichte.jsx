@@ -6,7 +6,8 @@ import { api, errMsg } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { PageHeader, Card, Badge, Button, Spinner, EmptyState } from "./_ui";
 import {
-  BERICHT_SORTIERUNGEN, BERICHT_TYP, CONFIDENCE, DATENQUALITAET, LIQUIDITAET, RICHTUNG, berichtSortieren, datumZeit, pct, periodeText, trendText,
+  BERICHT_ALT_TEXT, BERICHT_SORTIERUNGEN, BERICHT_TYP, CONFIDENCE, DATENQUALITAET, LIQUIDITAET, RICHTUNG, berichtAltesSchema, berichtSortieren,
+  datumZeit, pct, periodeText, trendText,
 } from "@/lib/markt";
 
 /**
@@ -63,6 +64,7 @@ export default function MarktBerichte() {
   };
 
   const zeilen = useMemo(() => berichtSortieren(daten?.zeilen || [], sort), [daten, sort]);
+  const alteZeilen = zeilen.filter((z) => berichtAltesSchema(z)).length;
   const [von, bis] = wahl ? wahl.split("|") : ["", ""];
   const feld = "rounded-lg px-2.5 py-1.5 text-[12px] outline-none";
   const st = { background: "var(--bg-input-solid)", color: "var(--text-primary)", border: "1px solid var(--wa-12)" };
@@ -129,7 +131,9 @@ export default function MarktBerichte() {
                   const conf = CONFIDENCE[z.confidence];
                   return (
                     <tr key={z.model_id} className="border-t border-white/5 tabular-nums" data-testid={`bericht-zeile-${z.model_id}`}>
-                      <td className="px-3 py-1.5"><Link to={`/admin/markt/berichte/${z.model_id}?typ=${typ}&von=${von}&bis=${bis}`} className="text-white hover:underline" data-testid={`bericht-link-${z.model_id}`}>{z.label}</Link></td>
+                      <td className="px-3 py-1.5"><Link to={`/admin/markt/berichte/${z.model_id}?typ=${typ}&von=${von}&bis=${bis}`} className="text-white hover:underline" data-testid={`bericht-link-${z.model_id}`}>{z.label}</Link>
+                        {berichtAltesSchema(z) && <span className="ml-1 text-[10px]" style={{ color: "var(--st-amber)" }} data-testid={`bericht-schema-alt-${z.model_id}`}
+                                                        title={`Eingefroren ${BERICHT_ALT_TEXT} — mit neueren Berichten nur eingeschränkt vergleichbar`}>ältere Rechenregel</span>}</td>
                       <td className="px-3 py-1.5">{z.fuel || "—"}</td><td className="px-3 py-1.5">{z.gearbox || "—"}</td>
                       <td className="px-3 py-1.5"><Badge tone={r.tone}>{r.text}</Badge></td>
                       <td className="px-3 py-1.5 text-right" style={{ color: r.farbe }}>{z.delta_eur == null ? "—" : trendText(z.delta_eur)}</td>
@@ -149,6 +153,12 @@ export default function MarktBerichte() {
               </table>
             </div>
           )}
+        {alteZeilen > 0 && (
+          <div className="px-4 pt-2 text-[11px]" style={{ color: "var(--st-amber)" }} data-testid="berichte-schema-hinweis">
+            {alteZeilen} Bericht(e) {BERICHT_ALT_TEXT} („ältere Rechenregel“) — Periodenwerte, Tagesbewegung, Kosten je Einheit und
+            Segmentabdeckung sind dort anders definiert; beim Vergleich mit neueren Berichten beachten.
+          </div>
+        )}
         <div className="px-4 py-2 text-[11px] text-zinc-500">{daten?.hinweis || ""} Δ = gleicher Segmentkorb (je Segment erster und letzter gültiger Tag), gewichtet nach Stichprobe. Grün = Preis fällt, Rot = steigt. Kosten = Abrufkosten des Zeitraums (Berichte selbst kosten nichts).</div>
       </Card>
     </div>

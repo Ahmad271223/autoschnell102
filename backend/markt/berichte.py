@@ -14,8 +14,13 @@ Grundsaetze:
     gewichteter Mittelwert der Segment-Mediane; Start/Ende und Differenz ueber denselben Segmentkorb (je Segment
     erster und letzter gueltiger Tag im Zeitraum); Tagesbewegung nur ueber Segmente mit gueltigem Wert an BEIDEN
     aufeinanderfolgenden Kalendertagen — keine doppelte Interpretation fehlender Tage, keine Interpolation; fehlt an
-    einem Tag ein Segment des Korbs technisch (ungueltiger oder kein Lauf), ist der Tag 'Teilabdeckung' und zaehlt
-    nicht fuer Median/Mittel/Minimum/Maximum der Periode (sonst waere ein Ausfall ein Markteinbruch)
+    einem Tag ein Segment des Korbs technisch (ungueltiger oder kein Lauf), ist der Tag 'Teilabdeckung'. Median/
+    Mittel/Minimum/Maximum der Periode und sample_market_change rechnen mit dem Korbwert je Tag (Schema 2, Pruefung
+    Runde 2): vollstaendige Tage = beobachtetes Niveau, Teilabdeckung = verkettet ueber die Segmente, die an beiden
+    Vergleichstagen vorhanden sind (technisch fehlende fallen auf BEIDEN Seiten heraus) — ein Ausfall ist so weder
+    Markteinbruch noch verworfener Tag; Marktinformation (EMPTY, neue oder abgeschaltete Segmente) bleibt im Wert
+  * erwartet wird je Segment nur, solange es eingeschaltet war (Zu-/Abschalten ist keine Datenluecke), im
+    vorlaeufigen Bericht heute nur, wenn es heute schon gelaufen ist
   * getrennt ausgewiesen (Abschnitt 54): sample_market_change (Aenderung der taeglichen Stichprobe inkl. Mix) und
     same_listing_price_change (Preisaenderung derselben Inserate); Preissenkungen/-erhoehungen nur je listing_id
   * eingefroren (Abschnitte 35/36): ein finaler Bericht wird einmal gespeichert (market_model_reports, Unique je
@@ -68,11 +73,22 @@ PERZENTIL_MIN_STICHPROBE = 4       # P25/P75 nur, wenn ALLE Basis-Segmente des T
 SEGMENT_ABDECKUNG_HOCH = 0.8       # Confidence HIGH erst ab 80 % gueltiger Segment-Tage (Abschnitte 52/53, Befund B5)
 SEGMENT_ABDECKUNG_MITTEL = 0.5
 HOT_TOP_MAX = 10
-SCHEMA = 1
+# Rechenregel der gespeicherten Kennzahlen — steht in jedem Bericht (eingefrorene Berichte behalten ihre Nummer):
+#   1  Phase E (27.09.2026) — vor UND nach der ersten Pruefrunde (789e3a6 hat die Bedeutung von Tagesbewegung/
+#      Volatilitaet, cost_per_*, Periodenwerten, P25/P75 und Confidence geaendert, ohne die Nummer zu erhoehen;
+#      beide Staende sind deshalb nicht unterscheidbar und gelten gemeinsam als 'aeltere Rechenregel')
+#   2  Pruefung Runde 2: alle Regeln der ersten Pruefrunde (B3-B7) plus Periodenwerte aus dem verketteten Korbwert
+#      (Teilabdeckung verwirft keinen Tag mehr), Segmentabdeckung mit Einschaltfenstern je Segment und im
+#      vorlaeufigen Bericht heute nur gelaufene Segmente
+# Die Oberflaeche kennzeichnet aeltere Berichte ("nach aelterer Rechenregel erstellt") — Vergleiche ueber Perioden
+# sollen die Definitionen nicht unbemerkt mischen.
+SCHEMA = 2
 BERICHTE_DOK = "berichte"          # market_config/berichte: erledigte Perioden + letzter Lauf
 INDEX_REF = "market_model_reports.markt_bericht_je_periode"
 PERIODEN_INDEX = "markt_bericht_periode"   # (typ, periode_von, periode_bis) — deckt die Periodenliste ab (Befunde B12/B13)
 RICHTUNGEN = ("FALLING", "RISING", "STABLE", "UNKNOWN")
+# _Daten.korbwerte: (Korbwert je Tag, technisch fehlende Segmente je Tag, heute noch ausstehende Segmente je Tag)
+Korbwerte = Tuple[Dict[str, Optional[float]], Dict[str, int], Dict[str, int]]
 HINWEIS = ("Beobachtet wird je Segment nur die günstige Marktzone (die N günstigsten Angebote) — kein Marktwert. "
            "Modellwerte sind nach Stichprobengröße gewichtete Mittel der Segment-Mediane derselben Fassung; Lücken werden "
            "nicht aufgefüllt. Aus gespeicherten Tageswerten, keine Zusatzabrufe.")
@@ -89,6 +105,17 @@ def _datum(tag: str) -> datetime:
 
 def _plus(tag: str, tage: int) -> str:
     return (_datum(tag) + timedelta(days=tage)).strftime("%Y-%m-%d")
+
+
+def _tag_aus_zeit(wert: Any) -> Optional[str]:
+    """Deutscher Kalendertag eines Zeitstempels (ISO-Text oder datetime, ohne Zone = UTC); None, wenn unlesbar."""
+    if not wert:
+        return None
+    try:
+        z = wert if isinstance(wert, datetime) else datetime.fromisoformat(str(wert).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return konfig.heute_tag(z if z.tzinfo else z.replace(tzinfo=timezone.utc))
 
 
 def tage_zwischen(von: str, bis: str) -> List[str]:
@@ -348,6 +375,7 @@ class _Daten:
                                  if deals.fassung({}, s) == self.haupt and s.get("enabled")} | mit_daten
         # Befund B17: im vorlaeufigen Bericht (heute gesetzt) sind kuenftige Tage 'offen' — weder erwartet noch
         # Luecke. Heute zaehlt erst, wenn fuer heute schon ein Lauf gespeichert ist (Laeufe verteilen sich ueber den Tag).
+        self.heute = heute
         self.offen_ab: Optional[str] = None
         if heute:
             self.offen_ab = _plus(heute, 1) if any(d["date"] == heute for d in im_zeitraum) else heute
@@ -356,6 +384,32 @@ class _Daten:
         self.gueltig_je_seg = {sid: {t for t, d in s.items() if deals.ist_gueltig(d)} for sid, s in self.idx.items()}
         self.erster_gueltig = {sid: min(g) for sid, g in self.gueltig_je_seg.items() if g}
         self.letzter_doc = {sid: max(s) for sid, s in self.idx.items() if s}
+        # Pruefung Runde 2 (#2): Einschaltfenster je Segment der Fassung — erwartet nur, solange es eingeschaltet war
+        self.fenster = {sid: self._fenster(sid) for sid in self.segmente_fassung}
+
+    def _fenster(self, sid: str) -> Tuple[str, str]:
+        """(erster, letzter) Tag, an dem das Segment im Zeitraum eingeschaltet war. Eine Einschalt-Historie gibt es
+        nicht (market_segments kennt nur 'enabled' und 'created_at'), die Grenzen kommen deshalb aus belegbaren Daten:
+        Beginn — hat das Segment schon VOR dem Zeitraum ein Tagesdokument dieser Fassung (Vorlauf), lief es schon: kein
+        Einschnitt. Sonst ist es im Zeitraum dazugekommen: ab dem Anlagetag (created_at, deutsche Zeit), wenn er im
+        Zeitraum liegt — ein neues Segment, dessen erste Laeufe scheitern, bleibt so eine Luecke —, sonst ab dem ersten
+        Tagesdokument (wieder eingeschaltet: der erste Lauf ist der frueheste belegbare Einschalttag). Ein eingeschaltetes
+        Segment ohne jedes Tagesdokument bleibt fuer alle Tage ab Anlage erwartet (nie gelaufen = Betriebsproblem, B5).
+        Ende — ist das Segment heute abgeschaltet, bis zu seinem letzten Tagesdokument: beim Abschalten werden wartende
+        Jobs storniert und der Worker prueft 'enabled' vor jedem Lauf, danach entsteht kein Lauf mehr. Ausfaelle direkt
+        vor dem Abschalten sind davon nicht zu unterscheiden und zaehlen als abgeschaltet (keine Schein-Luecke)."""
+        s = self.idx.get(sid) or {}
+        seg = self.segs.get(sid) or {}
+        im = sorted(t for t in s if self.von <= t <= self.bis)
+        ab, bis = self.von, self.bis
+        angelegt = _tag_aus_zeit(seg.get("created_at"))
+        if im and not any(t < self.von for t in s):
+            ab = angelegt if angelegt and self.von <= angelegt <= im[0] else im[0]
+        elif not im and angelegt and angelegt > self.von:
+            ab = angelegt
+        if im and not seg.get("enabled"):
+            bis = im[-1]
+        return ab, bis
 
     def fassung(self, d: Dict[str, Any]) -> Tuple[int, Optional[str]]:
         return deals.fassung(d, self.segs.get(d["segment_id"]))
@@ -373,17 +427,36 @@ class _Daten:
         """Erwartete Kalendertage: ab Beginn der gerechneten Fassung, ohne offene (kuenftige) Tage."""
         return [t for t in tage if t >= self.erwartet_ab and not self.offen(t)]
 
+    def seg_erwartet(self, sid: str, tag: str) -> bool:
+        """Wird das Segment an diesem (erwarteten) Kalendertag erwartet? Nur im Einschaltfenster (#2); heute im
+        vorlaeufigen Bericht nur, wenn es heute schon ein Tagesdokument hat (#1: die Laeufe verteilen sich ueber den
+        Tag — ein noch ausstehender Lauf ist weder fehlend noch Teilabdeckung)."""
+        ab, bis = self.fenster.get(sid, (self.von, self.bis))
+        return ab <= tag <= bis and (tag != self.heute or tag in self.idx.get(sid, {}))
+
+    def erwartete_tage_seg(self, sid: str, tage: List[str]) -> List[str]:
+        return [t for t in self.erwartete_tage(tage) if self.seg_erwartet(sid, t)]
+
+    def erwartet_je_tag(self, tage: List[str]) -> Dict[str, int]:
+        """Erwartete Kalendertage -> Anzahl erwarteter Segmente an diesem Tag."""
+        return {t: sum(1 for sid in self.segmente_fassung if self.seg_erwartet(sid, t)) for t in self.erwartete_tage(tage)}
+
     def korb(self, tage_set: set) -> set:
         """Fester Segmentkorb eines Zeitraums: Segmente der Fassung mit mindestens einem Basistag darin."""
         return {sid for sid, s in self.idx.items() if any(t in tage_set and deals.ist_basis(d) for t, d in s.items())}
 
-    def fehlende(self, tag: str, korb: set) -> int:
-        """Segmente des Korbs, die an diesem Tag TECHNISCH fehlen (Befund B3): vorher schon gueltig beobachtet (auch
-        im Vorlauf), noch aktiv (eingeschaltet oder spaeter noch ein Tagesdokument) und heute ohne gueltigen Lauf —
-        kein Tagesdokument (endgueltig gescheiterter Abruf) oder nur ungueltig/POOR. EMPTY ist eine gueltige
-        Beobachtung und fehlt nie; ein neu hinzukommendes Segment (vorher nie gueltig) ist Mix, keine Luecke."""
-        n = 0
-        for sid in korb:
+    def fehlende_ids(self, tag: str, korb: set) -> Tuple[set, set]:
+        """(technisch fehlend, ausstehend) fuer Segmente des Korbs (Befund B3). Technisch fehlend: vorher schon gueltig
+        beobachtet (auch im Vorlauf), noch aktiv (eingeschaltet oder spaeter noch ein Tagesdokument) und an diesem Tag
+        ohne gueltigen Lauf — kein Tagesdokument (endgueltig gescheiterter Abruf) oder nur ungueltig/POOR. EMPTY ist
+        eine gueltige Beobachtung und fehlt nie; ein neu hinzukommendes Segment (vorher nie gueltig) ist Mix, keine
+        Luecke. Ausstehend (#1): im vorlaeufigen Bericht HEUTE ohne jedes Tagesdokument — der Lauf kommt evtl. noch;
+        keine Teilabdeckung, fuer den Korbwert aber wie ein Ausfall aus dem Vergleich genommen (sonst waere der
+        Tageswert um 08:00 der Mix der ersten drei gelaufenen Segmente). Ausstehend kann heute jedes Segment der
+        Fassung sein, das vorher schon gueltig lief — am 01. hat noch keines einen Basistag im Zeitraum (Korb)."""
+        tech, aus = set(), set()
+        heute = tag == self.heute
+        for sid in (korb | self.segmente_fassung) if heute else korb:
             if tag in self.gueltig_je_seg.get(sid, ()):
                 continue
             erster = self.erster_gueltig.get(sid)
@@ -391,8 +464,74 @@ class _Daten:
                 continue
             if not (self.segs.get(sid) or {}).get("enabled") and self.letzter_doc.get(sid, "") < tag:
                 continue
-            n += 1
-        return n
+            if heute and tag not in self.idx.get(sid, {}):
+                aus.add(sid)
+            elif sid in korb:
+                tech.add(sid)
+        return tech, aus
+
+    def fehlende(self, tag: str, korb: set) -> int:
+        return len(self.fehlende_ids(tag, korb)[0])
+
+    def korbwerte(self, tage: List[str], korb: set) -> Korbwerte:
+        """Korbwert je Tag (Pruefung Runde 2, #0) und je Tag mit Tageswert die Zahl der technisch fehlenden und der
+        (heute) noch ausstehenden Segmente.
+
+        Die fruehere Regel 'Teilabdeckung zaehlt nicht' skaliert nicht: bei 2 % Ausfall je Segment-Tag ist bei 180
+        Segmenten fast jeder Tag teilabgedeckt, Minimum/Maximum/Stichproben-Aenderung kaemen aus 0-2 Tagen. Eine
+        Quote ('Tag zaehlt ab 80 % des Korbgewichts') verwirft zwar keine Tage mehr, holt aber den Mix-Effekt zurueck
+        (fehlt das teuerste von 24 Segmenten, sinkt das Niveau um ~2 % — das Monatsminimum waere der Tag mit dem
+        unguenstigsten Ausfall). Deshalb ein verketteter Index:
+          * vollstaendiger Tag (kein Segment technisch fehlend/ausstehend) = beobachtetes Niveau (Anker, unveraendert
+            wie bisher — ohne Ausfaelle ist der Korbwert exakt das Tagesniveau)
+          * sonst Wert des vorigen Tages mit Wert x Verhaeltnis der Niveaus beider Tage ueber die Segmente, die an
+            BEIDEN Tagen nicht technisch fehlen (das fehlende faellt auf beiden Seiten heraus: kein Scheineinbruch,
+            nichts aufgefuellt); vor dem ersten Anker rueckwaerts vom naechsten Tag mit Wert
+          * Marktinformation bleibt im Verhaeltnis: ein EMPTY-, neues oder abgeschaltetes Segment steht nur auf einer
+            Seite (sample_market_change bleibt die Aenderung der Stichprobe inkl. Mix, Abschnitt 54)
+          * gibt es keinen vollstaendigen Tag (180 Segmente: 0,98^180 ~ 3 % je Tag), ist der Tag mit den wenigsten
+            fehlenden Segmenten der Anker — sein Niveau ist um deren Gewichtsanteil unsicher, Verlauf/Minimum-Tag nicht;
+            ein Tag mit noch ausstehenden Laeufen (heute) ist nie Anker (um 08:00 waere das der Mix der ersten Segmente)
+        Tage ohne Tageswert bleiben Luecken (nicht interpoliert); ein Tag ohne vergleichbares Segment bleibt ohne Wert."""
+        basis = {t: self.basis_tag(t) for t in tage}
+        mit = [t for t in tage if basis[t]]
+        weg: Dict[str, set] = {}
+        fehlend: Dict[str, int] = {}
+        ausstehend: Dict[str, int] = {}
+        for t in mit:
+            tech, aus = self.fehlende_ids(t, korb)
+            fehlend[t], ausstehend[t] = len(tech), len(aus)
+            weg[t] = tech | aus
+
+        def _niveau(t: str, ohne: set) -> Optional[float]:
+            return _gewichtet([(float(d["median_price"]), _n(d)) for sid, d in basis[t].items() if sid not in ohne])
+
+        def _faktor(a: str, b: str) -> Optional[float]:
+            ohne = weg[a] | weg[b]
+            x, y = _niveau(a, ohne), _niveau(b, ohne)
+            return (y / x) if x and y is not None else None
+        anker = [t for t in mit if not weg[t]]
+        if not anker:
+            kandidaten = [t for t in mit if not ausstehend[t]]
+            anker = [min(kandidaten, key=lambda t: (len(weg[t]), t))] if kandidaten else []
+        wert: Dict[str, float] = {}
+        for t in anker:
+            v = _niveau(t, set())
+            if v is not None:
+                wert[t] = v
+        for i in range(1, len(mit)):                    # vorwaerts vom letzten Tag mit Wert
+            t, vor = mit[i], mit[i - 1]
+            if t not in wert and vor in wert:
+                f = _faktor(vor, t)
+                if f is not None:
+                    wert[t] = wert[vor] * f
+        for i in range(len(mit) - 2, -1, -1):           # vor dem ersten Anker: rueckwaerts
+            t, nach = mit[i], mit[i + 1]
+            if t not in wert and nach in wert:
+                f = _faktor(t, nach)
+                if f:
+                    wert[t] = wert[nach] / f
+        return {t: wert.get(t) for t in tage}, fehlend, ausstehend
 
 
 def _preisaenderungen(daten: _Daten, tage: List[str], feld: str) -> Tuple[int, int, Optional[float]]:
@@ -414,8 +553,10 @@ def _preisaenderungen(daten: _Daten, tage: List[str], feld: str) -> Tuple[int, i
     return ereignisse, len(inserate), (_r(sum(betraege) / len(betraege)) if betraege else None)
 
 
-def kennzahlen(daten: _Daten, tage: List[str], kosten_docs: List[Dict[str, Any]], zone: float = STABIL_PCT) -> Dict[str, Any]:
-    """Kennzahlen eines Zeitraums (Periode oder 5-Tage-Block) — nur Tage der gerechneten Fassung."""
+def kennzahlen(daten: _Daten, tage: List[str], kosten_docs: List[Dict[str, Any]], zone: float = STABIL_PCT,
+               korbwerte: Optional[Korbwerte] = None) -> Dict[str, Any]:
+    """Kennzahlen eines Zeitraums (Periode oder 5-Tage-Block) — nur Tage der gerechneten Fassung. korbwerte: schon
+    gerechnetes Ergebnis von daten.korbwerte fuer genau diese Tage (spart die zweite Rechnung)."""
     tage_set = set(tage)
     docs = [d for s in daten.idx.values() for t, d in s.items() if t in tage_set]
     gueltig = [d for d in docs if deals.ist_gueltig(d)]
@@ -438,22 +579,24 @@ def kennzahlen(daten: _Daten, tage: List[str], kosten_docs: List[Dict[str, Any]]
         paare += [(pa[lid], pb[lid]) for lid in set(pa) & set(pb)]
     gleich_eur = _r(sum(y - x for x, y in paare) / len(paare)) if paare else None
     gleich_pct = _r(sum(y - x for x, y in paare) / sum(x for x, _ in paare) * 100, 3) if paare and sum(x for x, _ in paare) else None
-    # Tagesniveaus (Mix inkl.) fuer Median/Mittel/Min/Max und sample_market_change — nur Tage mit vollem
-    # Segmentkorb (Befund B3): fehlt ein Segment technisch (ungueltiger oder kein Lauf), ist der Tageswert ein
-    # anderer Segment-Mix und kein Marktsignal. Solche Tage bleiben in der Tagestabelle (markiert), zaehlen hier nicht.
-    korb_ids = daten.korb(tage_set)
-    niveaus = [(t, niveau(list(daten.basis_tag(t).values()))) for t in tage]
-    alle_mit = [(t, n) for t, n in niveaus if n["median"] is not None]
-    teil = {t for t, _ in alle_mit if daten.fehlende(t, korb_ids)}
-    mit = [(t, n) for t, n in alle_mit if t not in teil]
-    werte = [n["median"] for _, n in mit]
-    smc_eur = _r(mit[-1][1]["median"] - mit[0][1]["median"]) if len(mit) >= 2 else None
-    smc_pct = _r((mit[-1][1]["median"] - mit[0][1]["median"]) / mit[0][1]["median"] * 100, 3) if len(mit) >= 2 and mit[0][1]["median"] else None
-    tief = min(mit, key=lambda x: x[1]["median"]) if mit else None
-    hoch = max(mit, key=lambda x: x[1]["median"]) if mit else None
+    # Tageswerte (Mix inkl.) fuer Median/Mittel/Min/Max und sample_market_change aus dem Korbwert (Befund B3,
+    # Pruefung Runde 2 #0): vollstaendige Tage = beobachtetes Niveau; fehlt ein Segment technisch, ist der Tageswert
+    # ueber die an beiden Vergleichstagen vorhandenen Segmente verkettet — weder Scheineinbruch noch verworfener Tag.
+    # Teilabgedeckte Tage bleiben in der Tagestabelle markiert (roher Tageswert + Korbwert).
+    werte_korb, fehlend, _ = korbwerte if korbwerte is not None else daten.korbwerte(tage, daten.korb(tage_set))
+    teil = {t for t, n in fehlend.items() if n}
+    mit = [(t, werte_korb[t]) for t in tage if werte_korb.get(t) is not None]
+    werte = [v for _, v in mit]
+    smc_eur = _r(mit[-1][1] - mit[0][1]) if len(mit) >= 2 else None
+    smc_pct = _r((mit[-1][1] - mit[0][1]) / mit[0][1] * 100, 3) if len(mit) >= 2 and mit[0][1] else None
+    tief = min(mit, key=lambda x: x[1]) if mit else None
+    hoch = max(mit, key=lambda x: x[1]) if mit else None
     # guenstigstes Angebot = echte Einzelbeobachtung, auch an teilabgedeckten Tagen (ein fehlendes Segment verbirgt
-    # hoechstens ein Angebot, erfindet keins)
-    billig = min(((t, n["min"]) for t, n in alle_mit if n["min"] is not None), key=lambda x: x[1], default=None)
+    # hoechstens ein Angebot, erfindet keins); bei Gleichstand der fruehere Tag
+    billig: Optional[Tuple[str, float]] = None
+    for d in basis:
+        if d.get("min_price") is not None and (billig is None or (float(d["min_price"]), d["date"]) < (billig[1], billig[0])):
+            billig = (d["date"], float(d["min_price"]))
     # Markt-Aktivitaet (nur gueltige Tage; neu/verschwunden nur mit Vergleichstag)
     mit_vergleich = [d for d in gueltig if d.get("vergleich_vortag")]
     neu = set().union(*[_ids(d, "new_in_sample_ids") for d in mit_vergleich]) if mit_vergleich else set()
@@ -474,11 +617,19 @@ def kennzahlen(daten: _Daten, tage: List[str], kosten_docs: List[Dict[str, Any]]
         t = speicher.qualitaet_aus_doc(d)["market_depth"]
         tiefe[t] = tiefe.get(t, 0) + 1
     abgedeckt = sorted({d["date"] for d in gueltig})
-    erwartete = set(daten.erwartete_tage(tage))
-    erwartet = len(erwartete)
-    # Segmentabdeckung (Befund B5): gueltige Segment-Tage gegen Segmente der Fassung x erwartete Tage
-    segment_tage = sum(1 for d in gueltig if d["date"] in erwartete)
-    segment_tage_erwartet = len(daten.segmente_fassung) * erwartet
+    # Segmentabdeckung (Befund B5): gueltige Segment-Tage gegen erwartete Segment-Tage. Erwartet wird je Segment nur
+    # in seinem Einschaltfenster (Pruefung Runde 2 #2: bewusstes Zu-/Abschalten ist keine Datenluecke) und heute im
+    # vorlaeufigen Bericht nur, wenn es schon gelaufen ist (#1)
+    je_tag = daten.erwartet_je_tag(tage)
+    erwartet = len(je_tag)
+    gueltig_je_tag: Dict[str, int] = {}
+    for d in gueltig:
+        if d["date"] in je_tag:
+            gueltig_je_tag[d["date"]] = gueltig_je_tag.get(d["date"], 0) + 1
+    segment_tage = sum(gueltig_je_tag.values())
+    segment_tage_erwartet = sum(je_tag.values())
+    # fehlende Segment-Tage an Tagen, an denen das Modell Daten hat (ganze Luecken-Tage stehen schon in der Abdeckung)
+    segment_luecken = sum(max(0, je_tag[t] - n) for t, n in gueltig_je_tag.items())
     conf, conf_gruende = confidence(len(abgedeckt), erwartet, dq, tiefe, len(inserate), segment_tage, segment_tage_erwartet)
     segs_mit = {d["segment_id"] for d in gueltig}
     leere_segmente = sum(1 for s in segs_mit if not any(d["segment_id"] == s for d in basis))
@@ -494,8 +645,8 @@ def kennzahlen(daten: _Daten, tage: List[str], kosten_docs: List[Dict[str, Any]]
         "sample_market_change_eur": smc_eur, "sample_market_change_pct": smc_pct,
         "same_listing_price_change_eur": gleich_eur, "same_listing_price_change_pct": gleich_pct, "same_listing_anzahl": len(paare),
         "median_periode": _r(statistics.median(werte)) if werte else None, "mittelwert_periode": _r(sum(werte) / len(werte)) if werte else None,
-        "minimum": {"date": tief[0], "wert": tief[1]["median"]} if tief else None,
-        "maximum": {"date": hoch[0], "wert": hoch[1]["median"]} if hoch else None,
+        "minimum": {"date": tief[0], "wert": _r(tief[1])} if tief else None,
+        "maximum": {"date": hoch[0], "wert": _r(hoch[1])} if hoch else None,
         "guenstigstes_angebot": {"date": billig[0], "preis": billig[1]} if billig else None,
         "neue_listings": len(neu), "verschwundene_listings": weg_n,
         "preissenkungen": senk_n, "reduzierte_listings": senk_inserate, "mittlere_senkung_eur": senk_mittel,
@@ -508,8 +659,8 @@ def kennzahlen(daten: _Daten, tage: List[str], kosten_docs: List[Dict[str, Any]]
         "market_depth": _tiefe_zusammen(tiefe), "market_depth_zaehler": tiefe,
         "liquiditaet": deals.liquiditaet_bewerten(gueltig).get("stufe"),
         "coverage_days": len(abgedeckt), "expected_days": erwartet, "confidence": conf, "confidence_gruende": conf_gruende,
-        "segment_tage_gueltig": segment_tage, "segment_tage_erwartet": segment_tage_erwartet,
-        "teilabgedeckte_tage": len(teil),
+        "segment_tage_gueltig": segment_tage, "segment_tage_erwartet": segment_tage_erwartet, "segment_luecken": segment_luecken,
+        "teilabgedeckte_tage": len(teil), "niveau_tage": len(mit),
         "segmente_mit_daten": len(segs_mit), "segmente_gesamt": len(daten.segmente_fassung), "empty_segmente": leere_segmente,
         "gueltige_beobachtungen": beobachtungen, "kosten_usd": kosten, "kosten_fassung_usd": kosten_fassung,
         "cost_per_valid_observation": round(kosten_fassung / beobachtungen, 4) if beobachtungen else None,
@@ -518,10 +669,11 @@ def kennzahlen(daten: _Daten, tage: List[str], kosten_docs: List[Dict[str, Any]]
     }
 
 
-def _tageszeilen(daten: _Daten, tage: List[str], kosten_docs: List[Dict[str, Any]], zone: float) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+def _tageszeilen(daten: _Daten, tage: List[str], kosten_docs: List[Dict[str, Any]], zone: float,
+                 korbwerte: Korbwerte) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     bewegungen: Dict[str, Optional[Dict[str, Any]]] = {}
     zeilen = []
-    korb = daten.korb(set(tage))
+    werte_korb, fehlend_je_tag, ausstehend_je_tag = korbwerte
     for t in tage:
         docs = daten.docs_tag(t)
         basis = daten.basis_tag(t)
@@ -530,15 +682,16 @@ def _tageszeilen(daten: _Daten, tage: List[str], kosten_docs: List[Dict[str, Any
         b = tagesbewegung(basis, vortag) if basis and vortag else None
         bewegungen[t] = b
         nv = niveau(list(basis.values()))
-        # Befund B3: Tageswert mit technisch fehlenden Segmenten = Teilabdeckung (Diagramm: Luecke, keine Kennzahl)
-        fehlend = daten.fehlende(t, korb) if nv["median"] is not None else 0
+        # Befund B3: Tageswert mit technisch fehlenden Segmenten = Teilabdeckung; median bleibt der rohe Tageswert,
+        # median_korb ist der verkettete Korbwert (Periodenkennzahlen, Diagrammlinie — Schema 2)
+        fehlend = fehlend_je_tag.get(t, 0)
         mit_vergleich = [d for d in gueltig if d.get("vergleich_vortag")]
         dq: Dict[str, int] = {}
         for d in docs:
             q = deals.qualitaet(d)
             dq[q] = dq.get(q, 0) + 1
         zeilen.append({
-            "date": t, **nv, "delta_vortag_eur": (b or {}).get("eur"), "delta_vortag_pct": (b or {}).get("pct"),
+            "date": t, **nv, "median_korb": _r(werte_korb.get(t)), "delta_vortag_eur": (b or {}).get("eur"), "delta_vortag_pct": (b or {}).get("pct"),
             "vergleich_segmente": (b or {}).get("segmente"), "richtung": richtung((b or {}).get("pct"), zone) if b else None,
             "neue": len(set().union(*[_ids(d, "new_in_sample_ids") for d in mit_vergleich])) if mit_vergleich else 0,
             "verschwundene": sum(int(d.get("disappeared_count") or 0) for d in mit_vergleich),
@@ -552,6 +705,8 @@ def _tageszeilen(daten: _Daten, tage: List[str], kosten_docs: List[Dict[str, Any
             "gueltig": bool(gueltig), "leer": bool(gueltig) and not basis, "nur_ungueltig": bool(docs) and not gueltig,
             "andere_fassung": daten.wechsel and t < daten.fassung_ab,
             "teilabdeckung": fehlend > 0, "fehlende_segmente": fehlend, "offen": daten.offen(t),
+            # nur vorlaeufig, heute: Segmente ohne Lauf, die heute noch laufen koennen (keine Teilabdeckung, #1)
+            "ausstehende_segmente": ausstehend_je_tag.get(t, 0),
             "kosten_usd": round(sum(float(d.get("crawl_cost_usd") or 0) for d in kosten_docs if d["date"] == t), 4)})
     return zeilen, bewegungen
 
@@ -580,7 +735,7 @@ def _segmentdetail(daten: _Daten, tage: List[str], kosten_docs: List[Dict[str, A
                      "enabled": seg.get("enabled"), "version": daten.haupt[0] if daten.haupt else None,
                      "aktueller_median": float(im[basis[-1]]["median_price"]) if basis else None,
                      "delta_eur": _r(delta), "delta_pct": _r(delta / float(a["median_price"]) * 100, 3) if (delta is not None and float(a["median_price"])) else None,
-                     "gueltige_tage": len(gueltig), "erwartete_tage": len(daten.erwartete_tage(tage)),
+                     "gueltige_tage": len(gueltig), "erwartete_tage": len(daten.erwartete_tage_seg(seg_id, tage)),
                      "listings": len(inserate), "hot_deals": len(set().union(*[_hot_ids(d) for d in im.values()])),
                      "private_hot_deals": len(set().union(*[_hot_privat_ids(d) for d in im.values()])),
                      "market_depth": speicher.qualitaet_aus_doc(letzter)["market_depth"] if letzter else "UNKNOWN",
@@ -602,8 +757,9 @@ def bericht_rechnen(modell: Dict[str, Any], segs: Dict[str, Dict[str, Any]], doc
         return None
     tage = tage_zwischen(von, bis)
     kosten_docs = [d for d in docs if von <= d["date"] <= bis]          # Kosten ueber ALLE Fassungen (reale Ausgaben)
-    zeilen, bewegungen = _tageszeilen(daten, tage, kosten_docs, zone)
-    kz = kennzahlen(daten, tage, kosten_docs, zone)
+    korbwerte = daten.korbwerte(tage, daten.korb(set(tage)))            # einmal fuer Tagestabelle und Periodenkennzahlen
+    zeilen, bewegungen = _tageszeilen(daten, tage, kosten_docs, zone, korbwerte)
+    kz = kennzahlen(daten, tage, kosten_docs, zone, korbwerte)
     bericht: Dict[str, Any] = {
         "id": uuid.uuid4().hex, "model_id": modell.get("id"), "typ": typ, "periode_von": von, "periode_bis": bis, "revision": 1,
         "schema": SCHEMA, "stabil_zone_pct": zone, "faellig_ab": faellig_ab(bis).isoformat(),
@@ -660,12 +816,14 @@ def bericht_rechnen(modell: Dict[str, Any], segs: Dict[str, Dict[str, Any]], doc
     bericht["hot_deals_top"] = sorted(beste.values(), key=lambda x: -float(x["diff_pct"]))[:HOT_TOP_MAX]
     if kz["coverage_days"] < kz["expected_days"]:
         bericht["hinweise"].append(f"{kz['coverage_days']} / {kz['expected_days']} gültige Tage — Lücken werden nicht aufgefüllt")
-    if kz["segment_tage_gueltig"] < kz["segmente_gesamt"] * kz["coverage_days"]:
+    # nur echte Segment-Luecken an Tagen mit Daten (nicht abgeschaltete, nicht heute noch ausstehende Segmente)
+    if kz["segment_luecken"]:
         bericht["hinweise"].append(f"{kz['segment_tage_gueltig']} / {kz['segment_tage_erwartet']} gültige Segment-Tage "
                                    f"({kz['segmente_gesamt']} Segmente) — fehlende Segmente werden nicht aufgefüllt")
     if kz["teilabgedeckte_tage"]:
-        bericht["hinweise"].append(f"{kz['teilabgedeckte_tage']} Tag(e) mit Teilabdeckung (Segmente ohne gültigen Lauf) — "
-                                   "zählen nicht für Median, Minimum, Maximum und Stichproben-Änderung der Periode")
+        bericht["hinweise"].append(f"{kz['teilabgedeckte_tage']} Tag(e) mit Teilabdeckung (Segmente ohne gültigen Lauf) — für "
+                                   "Median, Minimum, Maximum und Stichproben-Änderung der Periode ist ihr Tageswert über die an "
+                                   "beiden Vergleichstagen vorhandenen Segmente verkettet (kein Scheineinbruch, nichts aufgefüllt)")
     if daten.offen_ab is not None and daten.offen_ab <= bis:
         bericht["offen_ab"] = daten.offen_ab
     return bericht
@@ -798,7 +956,7 @@ def uebersicht_zeile(b: Dict[str, Any]) -> Dict[str, Any]:
             "data_quality": k.get("data_quality"), "health": None, "kosten_usd": k.get("kosten_usd"), "empty_segmente": k.get("empty_segmente"),
             "confidence": k.get("confidence"), "coverage_days": k.get("coverage_days"), "expected_days": k.get("expected_days"),
             "segmente_mit_daten": k.get("segmente_mit_daten"), "segmente_gesamt": k.get("segmente_gesamt"),
-            "status": b.get("status"), "erstellt_at": b.get("erstellt_at")}
+            "status": b.get("status"), "erstellt_at": b.get("erstellt_at"), "schema": b.get("schema")}
 
 
 async def uebersicht(db, typ: str, von: str, bis: str) -> Dict[str, Any]:
@@ -852,7 +1010,7 @@ async def modell_bericht(db, model_id: str, typ: str, von: str, bis: str) -> Opt
 
 async def modell_berichte(db, model_id: str) -> Dict[str, Any]:
     final = await db[BERICHTE].find({"model_id": model_id}, {"_id": 0, "typ": 1, "periode_von": 1, "periode_bis": 1, "erstellt_at": 1,
-                                                             "status": 1, "kennzahlen.richtung": 1, "kennzahlen.delta_pct": 1})\
+                                                             "status": 1, "schema": 1, "kennzahlen.richtung": 1, "kennzahlen.delta_pct": 1})\
         .sort([("periode_von", -1), ("typ", 1)]).to_list(1000)
     vorhanden = {(b["typ"], b["periode_von"], b["periode_bis"]) for b in final}
     laufend = [p for p in laufende_perioden() if (p["typ"], p["von"], p["bis"]) not in vorhanden]

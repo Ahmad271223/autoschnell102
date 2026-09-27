@@ -6,8 +6,8 @@ import { api, errMsg } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { Card, Badge, Spinner, EmptyState } from "./_ui";
 import {
-  BERICHT_TYP, CONFIDENCE, DATENQUALITAET, HOTDEAL_KLASSE, LIQUIDITAET, MARKTTIEFE, RICHTUNG,
-  datumKurz, datumZeit, eur, pct, periodeText, richtungAusPct, richtungFarbe, trendText,
+  BERICHT_ALT_TEXT, BERICHT_TYP, CONFIDENCE, DATENQUALITAET, HOTDEAL_KLASSE, LIQUIDITAET, MARKTTIEFE, RICHTUNG,
+  berichtAltesSchema, berichtDiagrammPunkt, datumKurz, datumZeit, eur, pct, periodeText, richtungAusPct, richtungFarbe, trendText,
 } from "@/lib/markt";
 
 /**
@@ -23,8 +23,6 @@ const GETRIEBE = { AUTOMATIC_GEAR: "Automatik", MANUAL_GEAR: "Schaltung", SEMIAU
 const ACHSE = { fill: "var(--text-secondary)" };
 const TOOLTIP_STIL = { background: "var(--bg-surface)", border: "1px solid var(--wa-12)", color: "var(--text-primary)", fontSize: 12 };
 const TOOLTIP_LABEL = { color: "var(--text-primary)" };
-// Teilabdeckung (ein Segment ohne gültigen Lauf): im Diagramm eine Lücke, kein Scheineinbruch
-const LUECKE = { median: null, min: null, p25: null, p75: null };
 
 export default function MarktBericht() {
   const { modell: modellId } = useParams();
@@ -78,7 +76,8 @@ export default function MarktBericht() {
   }, [modellId, typ, von, bis]);
 
   const optionen = useMemo(() => [
-    ...(liste?.final || []).map((b) => ({ wert: `${b.typ}|${b.periode_von}|${b.periode_bis}`, text: `${BERICHT_TYP[b.typ]} ${periodeText(b.periode_von, b.periode_bis)} · final` })),
+    ...(liste?.final || []).map((b) => ({ wert: `${b.typ}|${b.periode_von}|${b.periode_bis}`,
+                                          text: `${BERICHT_TYP[b.typ]} ${periodeText(b.periode_von, b.periode_bis)} · final${berichtAltesSchema(b) ? ` · ${BERICHT_ALT_TEXT}` : ""}` })),
     ...(liste?.laufend || []).map((p) => ({ wert: `${p.typ}|${p.von}|${p.bis}`, text: `${BERICHT_TYP[p.typ]} ${periodeText(p.von, p.bis)} · vorläufig` })),
   ], [liste]);
   const waehlen = (wert) => { const [t, a, b] = wert.split("|"); setParams(new URLSearchParams({ typ: t, von: a, bis: b })); };
@@ -89,8 +88,11 @@ export default function MarktBericht() {
     const [a, b] = block.split("|");
     return alle.filter((r) => r.date >= a && r.date <= b);
   }, [bericht, block]);
-  const reihe = useMemo(() => tage.map((r) => ({ ...r, ...(r.teilabdeckung ? LUECKE : {}), tag: datumKurz(r.date),
+  // Medianlinie = Korbwert (Schema 2: an Teilabdeckungstagen verkettet); ältere Berichte: Teilabdeckung = Lücke
+  const reihe = useMemo(() => tage.map((r) => ({ ...berichtDiagrammPunkt(r), tag: datumKurz(r.date),
                                                   preis: (r.preissenkungen || 0) + (r.preiserhoehungen || 0) })), [tage]);
+  const mitKorb = (bericht?.tage || []).some((t) => t.median_korb !== undefined);
+  const altesSchema = berichtAltesSchema(bericht);
   // Tagestabelle: offene (künftige) Tage eines vorläufigen Berichts sind keine Lücke — sie werden nur gezählt
   const tabelle = useMemo(() => tage.filter((t) => !t.offen), [tage]);
 
@@ -135,7 +137,15 @@ export default function MarktBericht() {
                 : <Badge tone="yellow">vorläufig · Stand {datumZeit(bericht.stand_at)} · final ab {datumZeit(bericht.faellig_ab)}</Badge>}</span>
               {bericht.revision > 1 && <Badge tone="purple">Revision {bericht.revision}</Badge>}
               <Badge tone={r.tone}>{r.text}</Badge>
+              {altesSchema && <span data-testid="bericht-schema-alt"><Badge tone="orange">{BERICHT_ALT_TEXT}</Badge></span>}
             </div>
+            {altesSchema && (
+              <div className="mt-2 text-[11px]" style={{ color: "var(--st-amber)" }} data-testid="bericht-schema-hinweis">
+                Dieser Bericht wurde {BERICHT_ALT_TEXT} (Schema {bericht.schema ?? 1}): Periodenwerte (Median, Minimum, Maximum,
+                Stichprobe), Tagesbewegung, Kosten je Einheit und Segmentabdeckung sind dort anders definiert — mit neueren Berichten
+                nur eingeschränkt vergleichbar. Eingefrorene Berichte werden nie neu gerechnet.
+              </div>
+            )}
             {(bericht.hinweise || []).length > 0 && (
               <ul className="mt-2 text-[11px] space-y-0.5" style={{ color: "var(--st-amber)" }} data-testid="bericht-hinweise">
                 {bericht.hinweise.map((h) => <li key={h}>{h}</li>)}
@@ -191,7 +201,9 @@ export default function MarktBericht() {
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
-            <div className="mt-1 text-[11px] text-zinc-500">Rot Tagesmedian · Grün Tagesminimum · Blau gestrichelt P25/P75 (nur wenn jedes Segment des Tages genug Angebote hat). Tage ohne gültige Daten und Tage mit Teilabdeckung (ein Segment ohne gültigen Lauf) bleiben Lücken — nichts wird interpoliert.</div>
+            <div className="mt-1 text-[11px] text-zinc-500" data-testid="bericht-legende">{mitKorb
+              ? "Rot Tagesmedian — an Tagen mit Teilabdeckung (ein Segment ohne gültigen Lauf) über die an beiden Vergleichstagen vorhandenen Segmente verkettet, kein Scheineinbruch · Grün Tagesminimum · Blau gestrichelt P25/P75 (nur wenn jedes Segment des Tages genug Angebote hat). Tage ohne gültige Daten bleiben Lücken — nichts wird interpoliert."
+              : "Rot Tagesmedian · Grün Tagesminimum · Blau gestrichelt P25/P75 (nur wenn jedes Segment des Tages genug Angebote hat). Tage ohne gültige Daten und Tage mit Teilabdeckung (ein Segment ohne gültigen Lauf) bleiben Lücken — nichts wird interpoliert."}</div>
             <div className="mt-3 flex flex-wrap items-center gap-1">
               {ZWEITE.map(([key, l]) => <Chip key={key} aktiv={zweite === key} onClick={() => setZweite(key)} testid={`bericht-zweite-${key}`}>{l}</Chip>)}
             </div>
@@ -257,6 +269,11 @@ export default function MarktBericht() {
                 <th className="px-3 py-2 text-right">Erhöhungen</th><th className="px-3 py-2 text-right">Hot Deals</th><th className="px-3 py-2">Datenqualität</th></tr></thead>
               <tbody>{tabelle.map((t) => {
                 const dq = t.data_quality ? DATENQUALITAET[t.data_quality] || DATENQUALITAET.UNKNOWN : null;
+                // roher Tageswert ohne fehlende / heute noch laufende Segmente: gedimmt (die Periodenwerte nutzen den Korbwert)
+                const gedimmt = t.teilabdeckung || t.ausstehende_segmente > 0;
+                const teilTitel = t.median_korb !== undefined
+                  ? `Tageswert ohne diese Segmente — für Median, Minimum und Maximum der Periode zählt der verkettete Korbwert ${eur(t.median_korb)}`
+                  : "Tageswert ohne diese Segmente — zählt nicht für Median, Minimum und Maximum der Periode";
                 return (
                   <tr key={t.date} className="border-t border-white/5 tabular-nums" data-testid={`bericht-tag-${t.date}`} style={t.gueltig ? undefined : { color: "var(--text-dim)" }}>
                     <td className="px-3 py-1 text-zinc-300">{t.date}
@@ -264,9 +281,11 @@ export default function MarktBericht() {
                       {!t.andere_fassung && t.nur_ungueltig && <span className="ml-1 text-[10px]" style={{ color: "var(--st-rot)" }}>nur ungültige Läufe</span>}
                       {!t.andere_fassung && t.leer && <span className="ml-1 text-[10px] text-zinc-500">leer (Marktlücke)</span>}
                       {!t.andere_fassung && t.teilabdeckung && <span className="ml-1 text-[10px]" style={{ color: "var(--st-amber)" }} data-testid={`bericht-teil-${t.date}`}
-                                                                      title="Tageswert ohne diese Segmente — zählt nicht für Median, Minimum und Maximum der Periode">Teilabdeckung ({t.fehlende_segmente} Segm. ohne gültigen Lauf)</span>}
+                                                                      title={teilTitel}>Teilabdeckung ({t.fehlende_segmente} Segm. ohne gültigen Lauf)</span>}
+                      {!t.andere_fassung && t.ausstehende_segmente > 0 && <span className="ml-1 text-[10px] text-zinc-500" data-testid={`bericht-ausstehend-${t.date}`}
+                                                                                 title="Die Läufe verteilen sich über den Tag — ausstehende Segmente sind keine Lücke">läuft noch ({t.ausstehende_segmente} Segm. ausstehend)</span>}
                       {!t.andere_fassung && !t.gueltig && !t.nur_ungueltig && <span className="ml-1 text-[10px] text-zinc-500" data-testid={`bericht-luecke-${t.date}`}>keine Daten</span>}</td>
-                    <td className={`px-3 py-1 text-right${t.teilabdeckung ? "" : " text-white"}`} style={t.teilabdeckung ? { color: "var(--text-dim)" } : undefined}>{eur(t.median)}</td>
+                    <td className={`px-3 py-1 text-right${gedimmt ? "" : " text-white"}`} style={gedimmt ? { color: "var(--text-dim)" } : undefined}>{eur(t.median)}</td>
                     <td className="px-3 py-1 text-right" style={{ color: richtungFarbe(t.richtung) }}>{t.delta_vortag_eur == null ? "—" : trendText(t.delta_vortag_eur)}</td>
                     <td className="px-3 py-1 text-right" style={{ color: richtungFarbe(t.richtung) }}>{pct(t.delta_vortag_pct)}</td>
                     <td className="px-3 py-1 text-right">{eur(t.min)}</td>

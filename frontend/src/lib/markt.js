@@ -222,6 +222,28 @@ export const CONFIDENCE = {
   MEDIUM: { text: "mittel", farbe: "var(--st-amber)" },
   LOW: { text: "niedrig", farbe: "var(--st-rot)" },
 };
+/** Prüfung Runde 2 (#3): Rechenregel der Berichte (backend berichte.SCHEMA). Ein eingefrorener Bericht behält seine
+ *  Nummer — Schema 1 (oder ohne Angabe) ist nach einer älteren Rechenregel entstanden; Kennzahlen wie Periodenwerte,
+ *  Tagesbewegung, Kosten je Einheit und Segmentabdeckung sind dort anders definiert. */
+export const BERICHT_SCHEMA = 2;
+export const BERICHT_ALT_TEXT = "nach älterer Rechenregel erstellt";
+export function berichtAltesSchema(b) {
+  if (!b) return false;
+  const s = Number(b.schema ?? 1);
+  return Number.isNaN(s) || s < BERICHT_SCHEMA;
+}
+/** Diagrammpunkt eines Berichtstags. Schema 2: die Medianlinie ist der Korbwert (median_korb — an Tagen mit
+ *  Teilabdeckung über die an beiden Vergleichstagen vorhandenen Segmente verkettet, kein Scheineinbruch); P25/P75
+ *  eines teilabgedeckten oder heute noch laufenden Tages gelten nur für die vorhandenen Segmente → Lücke; das
+ *  Tagesminimum ist ein echtes Angebot und bleibt. Ältere Berichte ohne median_korb: Teilabdeckung = ganze Lücke. */
+export function berichtDiagrammPunkt(r) {
+  if (!r) return r;
+  if (r.median_korb !== undefined) {
+    const teil = r.teilabdeckung || Number(r.ausstehende_segmente || 0) > 0;
+    return { ...r, median: r.median_korb, ...(teil ? { p25: null, p75: null } : {}) };
+  }
+  return r.teilabdeckung ? { ...r, median: null, min: null, p25: null, p75: null } : r;
+}
 /** "01.09.–05.09.2026" */
 export function periodeText(von, bis) {
   const t = (s) => (s ? `${s.slice(8, 10)}.${s.slice(5, 7)}.` : "");

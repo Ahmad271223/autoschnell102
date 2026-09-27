@@ -13,6 +13,7 @@ Routen. Alle Tage und "jetzt" werden ausdruecklich uebergeben (kein Mitternachts
 """
 import asyncio
 import inspect
+import random
 import statistics
 import sys
 from datetime import datetime, timedelta, timezone
@@ -723,5 +724,154 @@ def test_20_vorlaeufiger_bericht_zaehlt_kuenftige_tage_nicht_als_luecke(welt, mo
         assert vorl["status"] == "VORLAEUFIG" and vorl["offen_ab"] == _t(4)
         assert (vorl["kennzahlen"]["coverage_days"], vorl["kennzahlen"]["expected_days"]) == (3, 3)
         assert welt.run(welt.db[K.BERICHTE].count_documents({"model_id": mid})) == 0
+    finally:
+        _aufraeumen(welt)
+
+
+# ---------------------------------------------------------------- Pruefung Runde 2 (27.09.2026)
+def _korb_monat(welt, anzahl, seed):
+    """anzahl Segmente mit sehr verschiedenem Preisniveau (12.000-35.000 EUR, je 5 Inserate). Alle Preise fallen
+    gleichmaessig um 0,1 % je Tag: das wahre Niveau faellt streng, Maximum am 01., Minimum am 29. Je Segment-Tag 2 %
+    technische Ausfaelle (Haelfte ohne Tagesdokument, Haelfte nur ungueltig), auch im Vorlauf (drei Tage wie im
+    Betrieb) — deterministisch per Seed."""
+    rnd = random.Random(seed)
+    segs = [_seg_daten(welt, f"{i * 1000}-{i * 1000 + 999}") for i in range(anzahl)]
+    preis = {s["id"]: 12000 + 23000 * i / (anzahl - 1) for i, s in enumerate(segs)}
+    docs = []
+    for d in range(-3, 29):
+        tag, faktor = B._plus(_t(1), d), 1 - 0.001 * d
+        for s in segs:
+            if rnd.random() < 0.02:
+                if rnd.random() < 0.5:
+                    docs.append(_ungueltig_daten(s, tag))
+                continue
+            docs.append(_doc_daten(welt, s, tag, preis[s["id"]] * faktor))
+    mittel = sum(preis.values()) / anzahl
+    return segs, docs, {_t(d): mittel * (1 - 0.001 * (d - 1)) for d in range(1, 30)}
+
+
+def test_21_teilabdeckung_verwirft_keine_tage_und_bringt_keinen_mix_effekt(welt):
+    """Pruefung Runde 2 #0 (Befund B3): 'Teilabdeckung zaehlt nicht' skaliert nicht — bei 2 % Ausfall je Segment-Tag
+    sind bei 24 Segmenten ~38 %, bei 180 Segmenten ~97 % der Tage teilabgedeckt; Minimum/Maximum/Stichproben-Aenderung
+    kaemen aus 0-2 Tagen, die Diagrammlinie waere fast nur Luecke (und eingefroren bleibt das so). Der verkettete
+    Korbwert nutzt jeden Tag mit Daten, ohne den Mix-Effekt zurueckzuholen: Minimum/Maximum/Median/Mittel treffen das
+    wahre Niveau (24 Segmente auf 1 EUR; 180 Segmente — ggf. ohne vollstaendigen Tag als Anker — auf 0,5 %) und die
+    richtigen Tage, die Korbwerte fallen Tag fuer Tag wie der Markt."""
+    for anzahl, toleranz in ((24, 1.0), (180, None)):
+        segs, docs, wahr = _korb_monat(welt, anzahl, 20260927)
+        ber = _rechnen(welt, segs, docs, "MONTHLY", _t(1), _t(29))
+        k, tage = ber["kennzahlen"], ber["tage"]
+        assert k["teilabgedeckte_tage"] >= (8 if anzahl == 24 else 25), (anzahl, k["teilabgedeckte_tage"])
+        assert (k["maximum"] or {}).get("date") == _t(1) and (k["minimum"] or {}).get("date") == _t(29), (anzahl, k["maximum"], k["minimum"])
+        grenze = toleranz or wahr[_t(15)] * 0.005
+        for ist, soll in ((k["maximum"]["wert"], wahr[_t(1)]), (k["minimum"]["wert"], wahr[_t(29)]),
+                          (k["median_periode"], wahr[_t(15)]), (k["mittelwert_periode"], statistics.mean(wahr.values()))):
+            assert abs(ist - soll) <= grenze, (anzahl, ist, soll)
+        assert abs(k["sample_market_change_pct"] - (-2.8)) <= 0.01, (anzahl, k["sample_market_change_pct"])
+        assert k["niveau_tage"] == 29 and all(r["median_korb"] is not None for r in tage), anzahl
+        korb = [r["median_korb"] for r in tage]
+        assert all(b < a for a, b in zip(korb, korb[1:])), (anzahl, "kein Scheineinbruch/-anstieg an Ausfalltagen")
+        assert any(r["teilabdeckung"] and abs(r["median"] - r["median_korb"]) > 5 for r in tage), "roher Tageswert bleibt daneben sichtbar"
+        assert any("verkettet" in h for h in ber["hinweise"]), anzahl
+
+
+def test_22_vorlaeufig_heute_zaehlen_nur_gelaufene_segmente(welt):
+    """Pruefung Runde 2 #1 (Befunde B5/B17): die Laeufe verteilen sich ueber den Tag. Am 03. um 08:00 sind erst 3 von
+    24 Segmenten gelaufen — die 21 ausstehenden sind weder fehlende Segment-Tage (51/51 statt 51/72, Confidence
+    bleibt HIGH, kein Hinweis) noch Teilabdeckung, und der Korbwert von heute ist nicht der Mix der drei guenstigsten
+    Segmente. Ein heute schon gescheiterter Lauf zaehlt dagegen als fehlend. Am 01. um 08:00 (3 von 24) gibt es
+    3/3 Segment-Tage und noch keinen Periodenwert aus dem Mix der ersten drei."""
+    segs = [_seg_daten(welt, f"{i * 10000}-{i * 10000 + 9999}") for i in range(24)]
+    preis = {s["id"]: 12000.0 + 1000 * i for i, s in enumerate(segs)}
+    voll = sum(preis.values()) / 24                                            # 23.500
+    vormonat = [_doc_daten(welt, s, "2028-01-31", preis[s["id"]], n=12) for s in segs]
+    docs = vormonat + [_doc_daten(welt, s, _t(d), preis[s["id"]], n=12) for s in segs for d in (1, 2)]
+    frueh = [_doc_daten(welt, s, _t(3), preis[s["id"]], n=12) for s in segs[:3]]
+    ber = _rechnen(welt, segs, docs + frueh, "MONTHLY", _t(1), _t(29), heute=_t(3))
+    k = ber["kennzahlen"]
+    assert (k["segment_tage_gueltig"], k["segment_tage_erwartet"]) == (51, 51) and k["segment_luecken"] == 0
+    assert (k["confidence"], k["confidence_gruende"], k["teilabgedeckte_tage"]) == ("HIGH", [], 0)
+    assert not any("Segment-Tage" in h or "Teilabdeckung" in h for h in ber["hinweise"]), ber["hinweise"]
+    tag3 = next(r for r in ber["tage"] if r["date"] == _t(3))
+    assert (tag3["teilabdeckung"], tag3["fehlende_segmente"], tag3["ausstehende_segmente"]) == (False, 0, 21)
+    assert tag3["median"] == 13000 and tag3["median_korb"] == voll, "roher Tageswert = Mix der ersten drei, Korbwert nicht"
+    assert (k["minimum"]["wert"], k["maximum"]["wert"], k["sample_market_change_eur"], k["niveau_tage"]) == (voll, voll, 0, 3)
+    assert ber["segmente"][0]["erwartete_tage"] == 3 and ber["segmente"][5]["erwartete_tage"] == 2
+    # ein heute schon gescheiterter Lauf ist ein echter Ausfall (Teilabdeckung, fehlender Segment-Tag)
+    k = _rechnen(welt, segs, docs + frueh + [_ungueltig_daten(segs[5], _t(3))], "MONTHLY", _t(1), _t(29), heute=_t(3))["kennzahlen"]
+    assert (k["segment_tage_gueltig"], k["segment_tage_erwartet"], k["teilabgedeckte_tage"], k["segment_luecken"]) == (51, 52, 1, 1)
+    # 01. um 08:00: Monat und neuer 5-Tage-Block
+    erst = [_doc_daten(welt, s, _t(1), preis[s["id"]], n=12) for s in segs[:3]]
+    for typ, bis in (("MONTHLY", _t(29)), ("FIVE_DAY", _t(5))):
+        ber = _rechnen(welt, segs, vormonat + erst, typ, _t(1), bis, heute=_t(1))
+        k = ber["kennzahlen"]
+        assert (k["segment_tage_gueltig"], k["segment_tage_erwartet"], k["confidence"]) == (3, 3, "HIGH"), typ
+        assert (k["minimum"], k["median_periode"], k["niveau_tage"]) == (None, None, 0), typ
+        assert ber["tage"][0]["median_korb"] is None and ber["tage"][0]["ausstehende_segmente"] == 21, typ
+        assert not any("Segment-Tage" in h for h in ber["hinweise"]), typ
+
+
+def test_23_zu_und_abschalten_ist_keine_datenluecke(welt):
+    """Pruefung Runde 2 #2 (Befund B5): April (30 Tage), 24 Segmente liefen schon im Maerz. Am 10. werden 12 davon
+    abgeschaltet (letzter Lauf am 09.), die uebrigen liefern jeden Tag — eine Einstellung, keine Datenluecke: 468/468
+    Segment-Tage statt 468/720 (65 % -> MEDIUM 'Segmentabdeckung'), Confidence HIGH, kein Hinweis. Zugeschaltet:
+    ein im Zeitraum angelegtes Segment (created_at 15.04. 01:30 deutscher Zeit; die ersten Laeufe scheitern ohne
+    Dokument, erster Lauf 18.04.) wird ab Anlage erwartet — die drei gescheiterten Tage bleiben Luecke; ein wieder
+    eingeschaltetes (alt angelegt, ohne Vorlauf) ab seinem ersten Lauf; ein angelegtes, nie gelaufenes ab Anlage."""
+    def _a(d):
+        return _t(d, 4)
+    segs = [_seg_daten(welt, f"{i * 10000}-{i * 10000 + 9999}") for i in range(24)]
+    for s in segs[12:]:
+        s["enabled"] = False
+    docs = [_doc_daten(welt, s, "2028-03-31", 20000, n=12) for s in segs]
+    docs += [_doc_daten(welt, s, _a(d), 20000, n=12) for s in segs for d in range(1, 31) if s["enabled"] or d < 10]
+    ber = _rechnen(welt, segs, docs, "MONTHLY", _a(1), _a(30))
+    k = ber["kennzahlen"]
+    assert (k["segment_tage_gueltig"], k["segment_tage_erwartet"]) == (468, 468) and k["segment_luecken"] == 0
+    assert (k["confidence"], k["confidence_gruende"], k["segmente_gesamt"], k["teilabgedeckte_tage"]) == ("HIGH", [], 24, 0)
+    assert not any("Segment-Tage" in h for h in ber["hinweise"])
+    detail = {x["segment_id"]: x for x in ber["segmente"]}
+    assert (detail[segs[12]["id"]]["gueltige_tage"], detail[segs[12]["id"]]["erwartete_tage"]) == (9, 9)
+    assert (detail[segs[0]["id"]]["gueltige_tage"], detail[segs[0]["id"]]["erwartete_tage"]) == (30, 30)
+    # zugeschaltet
+    neu = {**_seg_daten(welt, "900000-909999"), "created_at": "2028-04-14T23:30:00+00:00"}
+    wieder = {**_seg_daten(welt, "910000-919999"), "created_at": "2027-06-01T08:00:00+00:00"}
+    zusatz = [_doc_daten(welt, neu, _a(d), 20000, n=12) for d in range(18, 31)]
+    zusatz += [_doc_daten(welt, wieder, _a(d), 20000, n=12) for d in range(20, 31)]
+    ber = _rechnen(welt, segs + [neu, wieder], docs + zusatz, "MONTHLY", _a(1), _a(30))
+    k = ber["kennzahlen"]
+    assert (k["segment_tage_gueltig"], k["segment_tage_erwartet"]) == (468 + 13 + 11, 468 + 16 + 11) and k["segment_luecken"] == 3
+    assert k["confidence"] == "HIGH" and any(f"{468 + 13 + 11} / {468 + 16 + 11} gültige Segment-Tage" in h for h in ber["hinweise"])
+    detail = {x["segment_id"]: x for x in ber["segmente"]}
+    assert (detail[neu["id"]]["erwartete_tage"], detail[wieder["id"]]["erwartete_tage"]) == (16, 11)
+    nie = {**_seg_daten(welt, "920000-929999"), "created_at": "2028-04-26T08:00:00+00:00"}
+    k = _rechnen(welt, segs + [nie], docs, "MONTHLY", _a(1), _a(30))["kennzahlen"]
+    assert (k["segment_tage_gueltig"], k["segment_tage_erwartet"], k["segmente_gesamt"]) == (468, 468 + 5, 25)
+    assert B._tag_aus_zeit("2028-04-14T23:30:00+00:00") == _a(15) and B._tag_aus_zeit("kaputt") is None
+
+
+def test_24_schema_2_im_bericht_und_in_den_listen(welt):
+    """Pruefung Runde 2 #3: die Bedeutung mehrerer gespeicherter Kennzahlen hat sich geaendert (B3-B7, Runde 2) —
+    SCHEMA 2 steht in jedem neu eingefrorenen Bericht, in der Uebersichtszeile und in der Berichtsliste des Modells;
+    ein frueher eingefrorener Bericht behaelt Schema 1 (nie veraendert) und ist so unterscheidbar."""
+    mid = _start(welt)
+    seg = _seg(welt)
+    db = welt.db
+    try:
+        for d in range(1, 11):
+            _doc(welt, seg, _t(d), 20000)
+        assert B.SCHEMA == 2
+        assert welt.run(B.finalisieren(db, mid, "FIVE_DAY", _t(1), _t(5), jetzt=_nach(_t(5)))) == "erstellt"
+        neu = _bericht(welt, mid, "FIVE_DAY", _t(1), _t(5))
+        assert neu["schema"] == 2
+        alt = {**neu, "id": "test-alt", "periode_von": _t(6), "periode_bis": _t(10), "schema": 1}
+        welt.run(db[K.BERICHTE].insert_one(dict(alt)))
+        assert welt.run(B.finalisieren(db, mid, "FIVE_DAY", _t(6), _t(10), jetzt=_nach(_t(10)))) == "vorhanden"
+        for von, bis, schema in ((_t(1), _t(5), 2), (_t(6), _t(10), 1)):
+            zeile = next(z for z in welt.run(B.uebersicht(db, "FIVE_DAY", von, bis))["zeilen"] if z["model_id"] == mid)
+            assert zeile["schema"] == schema
+            assert welt.run(B.modell_bericht(db, mid, "FIVE_DAY", von, bis))["schema"] == schema
+        liste = welt.run(B.modell_berichte(db, mid))["final"]
+        assert sorted((x["periode_von"], x["schema"]) for x in liste) == [(_t(1), 2), (_t(6), 1)]
     finally:
         _aufraeumen(welt)

@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
-const netz = vi.hoisted(() => ({ gets: [], posts: [], fehler: null, ohneFinal: false, modellFehler: null, bericht: null, tooltips: [], diagramme: [] }));
+const netz = vi.hoisted(() => ({ gets: [], posts: [], fehler: null, ohneFinal: false, modellFehler: null, bericht: null, tooltips: [], diagramme: [], schemaAlt: false }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 vi.mock("recharts", () => {
   const Leer = ({ children }) => h("div", { "data-chart": "1" }, children);
@@ -29,7 +29,7 @@ const ZEILEN = [
   { model_id: "audi-a4", label: "Audi A4 40 TDI", fuel: "DIESEL", gearbox: "AUTOMATIC_GEAR", richtung: "STABLE", delta_eur: 20, delta_pct: 0.1, listings: 60,
     preissenkungen: 4, preiserhoehungen: 4, hot_deals: 5, private_hot_deals: 2, liquiditaet: "MEDIUM", data_quality: "MEDIUM", health: null, kosten_usd: 0.4,
     empty_segmente: 1, confidence: "MEDIUM", coverage_days: 27, expected_days: 29 },
-];
+].map((z) => ({ ...z, schema: 2 }));
 const TAGE = [
   { date: "2028-02-01", median: 20000, min: 19600, p25: 19800, p75: 20200, listings: 5, segmente: 1, delta_vortag_eur: null, delta_vortag_pct: null, richtung: null,
     neue: 0, preissenkungen: 0, preiserhoehungen: 0, hot_deals: 0, data_quality: "GOOD", gueltig: true, leer: false, nur_ungueltig: false, andere_fassung: false },
@@ -43,7 +43,7 @@ const TAGE = [
     neue: 0, preissenkungen: 0, preiserhoehungen: 1, hot_deals: 0, data_quality: "MEDIUM", gueltig: true, leer: false, nur_ungueltig: false, andere_fassung: false },
 ];
 const BERICHT = {
-  model_id: "bmw-320d", typ: "MONTHLY", periode_von: "2028-02-01", periode_bis: "2028-02-29", status: "FINAL", revision: 1, erstellt_at: "2028-03-01T05:10:00Z",
+  model_id: "bmw-320d", typ: "MONTHLY", periode_von: "2028-02-01", periode_bis: "2028-02-29", status: "FINAL", revision: 1, schema: 2, erstellt_at: "2028-03-01T05:10:00Z",
   faellig_ab: "2028-03-01T05:00:00Z", stabil_zone_pct: 0.5, modell: { label: "BMW 320d", fuel: "DIESEL", gearbox: "AUTOMATIC_GEAR" },
   fassung: { version: 2, definition_hash: "h2", ab: "2028-02-01" },
   kennzahlen: { startwert: 20000, endwert: 19800, delta_eur: -200, delta_pct: -1, richtung: "FALLING", korb_segmente: 1, median_periode: 19900, mittelwert_periode: 19950,
@@ -100,9 +100,12 @@ vi.mock("@/lib/api", () => ({
                          laufend: [{ typ: t, von: "2028-03-01", bis: "2028-03-31", faellig_ab: "2028-04-01T04:00:00Z" }],
                          stand: { letzter_lauf_at: "2028-03-02T08:00:00Z" }, karenz_stunden: 6, stabil_zone_pct: 0.5 } };
       }
-      if (url === "/admin/market/reports") return { data: { zeilen: ZEILEN, anzahl: 3, hinweis: "Beobachtet wird je Segment nur die günstige Marktzone." } };
+      if (url === "/admin/market/reports") {
+        const zeilen = netz.schemaAlt ? ZEILEN.map((z) => (z.model_id === "vw-golf" ? { ...z, schema: 1 } : z)) : ZEILEN;
+        return { data: { zeilen, anzahl: 3, hinweis: "Beobachtet wird je Segment nur die günstige Marktzone." } };
+      }
       if (url === "/admin/market/reports/model/bmw-320d/list") {
-        return { data: { final: netz.ohneFinal ? [] : [{ typ: "MONTHLY", periode_von: "2028-02-01", periode_bis: "2028-02-29", status: "FINAL" }],
+        return { data: { final: netz.ohneFinal ? [] : [{ typ: "MONTHLY", periode_von: "2028-02-01", periode_bis: "2028-02-29", status: "FINAL", schema: netz.schemaAlt ? 1 : 2 }],
                          laufend: [{ typ: "FIVE_DAY", von: "2028-03-01", bis: "2028-03-05", faellig_ab: "2028-03-06T05:00:00Z" },
                                    { typ: "FIFTEEN_DAY", von: "2028-03-01", bis: "2028-03-15", faellig_ab: "2028-03-16T05:00:00Z" },
                                    { typ: "MONTHLY", von: "2028-03-01", bis: "2028-03-31", faellig_ab: "2028-04-01T04:00:00Z" }] } };
@@ -127,7 +130,7 @@ vi.mock("@/context/AuthContext", () => ({ useAuth: () => ({ user: { id: "sa", is
 
 const { default: MarktBerichte } = await import("./MarktBerichte");
 const { default: MarktBericht } = await import("./MarktBericht");
-const { berichtSortieren, periodeText, richtungAusPct } = await import("@/lib/markt");
+const { berichtAltesSchema, berichtDiagrammPunkt, berichtSortieren, periodeText, richtungAusPct } = await import("@/lib/markt");
 
 let wurzel; let behaelter; let ort = null;
 function Ort() { ort = useLocation(); return null; }
@@ -151,7 +154,7 @@ async function waehlen(t, wert) {
 const reihenfolge = () => [...behaelter.querySelectorAll("[data-testid^='bericht-zeile-']")].map((e) => e.getAttribute("data-testid").replace("bericht-zeile-", ""));
 beforeEach(() => {
   netz.gets.length = 0; netz.posts.length = 0; netz.fehler = null; netz.ohneFinal = false; ort = null;
-  netz.modellFehler = null; netz.bericht = null; netz.tooltips.length = 0; netz.diagramme.length = 0;
+  netz.modellFehler = null; netz.bericht = null; netz.tooltips.length = 0; netz.diagramme.length = 0; netz.schemaAlt = false;
 });
 afterEach(async () => { if (wurzel) await act(async () => { wurzel.unmount(); }); wurzel = null; behaelter?.remove(); });
 
@@ -172,6 +175,7 @@ describe("Admin Berichte — Übersicht aller Modelle", () => {
     expect(el("bericht-zeile-vw-golf").textContent).toContain("schlecht");
     expect(el("bericht-link-bmw-320d").getAttribute("href")).toBe("/admin/markt/berichte/bmw-320d?typ=MONTHLY&von=2028-02-01&bis=2028-02-29");
     expect(reihenfolge()).toEqual(["bmw-320d", "audi-a4", "vw-golf"]);        // größter Preisrückgang zuerst
+    expect(el("berichte-schema-hinweis")).toBeNull();                           // alle nach aktueller Rechenregel
   });
 
   it("Sortierungen nach Abschnitt 37 (UI und reine Funktion)", async () => {
@@ -372,5 +376,62 @@ describe("Admin Berichte — Übersicht lädt nach Aktualisieren/Erstellen neu",
     expect(netz.gets.filter((g) => g.url === "/admin/market/reports").at(-1).params).toEqual({ typ: "MONTHLY", von: "2028-02-01", bis: "2028-02-29" });
     await klick("berichte-erstellen");
     expect(zaehlen()).toBe(3);
+  });
+});
+
+describe("Admin Berichte — Prüfung Runde 2 (Korbwert, laufender Tag, Rechenregel)", () => {
+  it("Schema 2: Medianlinie = Korbwert (Teilabdeckung verkettet statt Lücke), heute noch laufende Segmente markiert", async () => {
+    const tage = [
+      { ...TAGE[0], date: "2028-03-01", median_korb: 20000, teilabdeckung: false, fehlende_segmente: 0, ausstehende_segmente: 0, offen: false },
+      { ...TAGE[1], date: "2028-03-02", median: 12000, median_korb: 19950, p25: 11800, p75: 12200, teilabdeckung: true, fehlende_segmente: 1,
+        ausstehende_segmente: 0, offen: false },
+      { ...TAGE[1], date: "2028-03-03", median: 13000, median_korb: 19900, p25: 12800, p75: 13200, teilabdeckung: false, fehlende_segmente: 0,
+        ausstehende_segmente: 21, offen: false },
+      { ...OFFEN, date: "2028-03-04", median_korb: null, ausstehende_segmente: 0 },
+    ];
+    netz.bericht = { ...vorlaeufig({ typ: "MONTHLY", von: "2028-03-01", bis: "2028-03-31" }), offen_ab: "2028-03-04", tage };
+    await starten("/admin/markt/berichte/bmw-320d?typ=MONTHLY&von=2028-03-01&bis=2028-03-31");
+    const reihe = netz.diagramme.at(-1);
+    expect(reihe.find((x) => x.date === "2028-03-01")).toMatchObject({ median: 20000, p25: 19800 });
+    // Teilabdeckung: kein Scheineinbruch auf 12.000 € und keine Lücke — der verkettete Korbwert; das echte Minimum bleibt
+    expect(reihe.find((x) => x.date === "2028-03-02")).toMatchObject({ median: 19950, min: 19400, p25: null, p75: null });
+    expect(reihe.find((x) => x.date === "2028-03-03")).toMatchObject({ median: 19900, p25: null, p75: null });
+    expect(reihe.find((x) => x.date === "2028-03-04").median).toBeNull();
+    expect(el("bericht-teil-2028-03-02").getAttribute("title")).toContain("verkettete Korbwert 19.950 €");
+    expect(el("bericht-ausstehend-2028-03-03").textContent).toContain("läuft noch (21 Segm. ausstehend)");
+    expect(el("bericht-teil-2028-03-03")).toBeNull();
+    expect(el("bericht-tag-2028-03-03").querySelectorAll("td")[1].getAttribute("style")).toContain("--text-dim");
+    expect(el("bericht-tag-2028-03-01").querySelectorAll("td")[1].getAttribute("style")).toBeNull();
+    expect(el("bericht-legende").textContent).toContain("verkettet");
+    expect(el("bericht-schema-alt")).toBeNull();
+    // reine Funktion: ältere Berichte ohne Korbwert — Teilabdeckung bleibt eine ganze Lücke
+    expect(berichtDiagrammPunkt({ median: 12000, min: 11000, p25: 1, p75: 2, teilabdeckung: true })).toMatchObject({ median: null, min: null, p25: null, p75: null });
+    expect(berichtDiagrammPunkt({ median: 12000, min: 11000, teilabdeckung: false })).toMatchObject({ median: 12000, min: 11000 });
+  });
+
+  it("Schema 1: eingefrorener Bericht nach älterer Rechenregel ist gekennzeichnet (Kopf, Periodenwahl, Übersicht)", async () => {
+    netz.schemaAlt = true;
+    netz.bericht = { ...BERICHT, schema: 1 };
+    await starten("/admin/markt/berichte/bmw-320d?typ=MONTHLY&von=2028-02-01&bis=2028-02-29");
+    expect(el("bericht-schema-alt").textContent).toBe("nach älterer Rechenregel erstellt");
+    expect(el("bericht-schema-hinweis").textContent).toContain("Schema 1");
+    const option = [...el("bericht-periode").querySelectorAll("option")].find((o) => o.value === "MONTHLY|2028-02-01|2028-02-29");
+    expect(option.textContent).toContain("final · nach älterer Rechenregel erstellt");
+    expect(el("bericht-legende").textContent).toContain("bleiben Lücken");
+    await act(async () => { wurzel.unmount(); }); wurzel = null; behaelter?.remove();
+    netz.schemaAlt = false; netz.bericht = null;
+    await starten("/admin/markt/berichte/bmw-320d?typ=MONTHLY&von=2028-02-01&bis=2028-02-29");
+    expect(el("bericht-schema-alt")).toBeNull();
+    expect(el("bericht-schema-hinweis")).toBeNull();
+    expect([...el("bericht-periode").querySelectorAll("option")].find((o) => o.value === "MONTHLY|2028-02-01|2028-02-29").textContent).not.toContain("älterer");
+    await act(async () => { wurzel.unmount(); }); wurzel = null; behaelter?.remove();
+    // Übersicht: nur die Zeile mit Schema 1 ist markiert, die Fußnote zählt sie
+    netz.schemaAlt = true;
+    await starten("/admin/markt/berichte");
+    expect(el("bericht-schema-alt-vw-golf").textContent).toBe("ältere Rechenregel");
+    expect(el("bericht-schema-alt-bmw-320d")).toBeNull();
+    expect(el("berichte-schema-hinweis").textContent).toContain("1 Bericht(e) nach älterer Rechenregel erstellt");
+    expect([berichtAltesSchema({ schema: 1 }), berichtAltesSchema({}), berichtAltesSchema({ schema: 2 }), berichtAltesSchema(null)])
+      .toEqual([true, true, false, false]);
   });
 });
