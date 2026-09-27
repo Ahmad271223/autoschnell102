@@ -124,8 +124,26 @@ export default function AdminUserDetail() {
 
   const dealerId = istHauptchef(data?.user) ? data.user.dealer_id : null;
 
+  // Go-Live-Pruefung 28.09.2026 (admin4): loadFirma und die Zahlungen hatten keine Wache. Chef A
+  // oeffnen, dessen Sucherliste haengt, zu Chef B wechseln, B laedt — danach kam A's Antwort und die
+  // Freischaltungstabelle zeigte Firma A unter Firma B; Freischalten/Speichern/Aufheben trafen Konten
+  // der falschen Firma. Jetzt: laufende Nummer wie bei load(), dazu die Firma, fuer die gerade die
+  // Seite steht (firmaRef). Jede Liste merkt sich, zu welcher Firma sie gehoert (sucherFirma,
+  // zahlungenFirma) — angezeigt und bedient wird sie nur, wenn das die Firma der Seite ist.
+  const firmaNr = useRef(0);
+  const firmaRef = useRef(null);
+  firmaRef.current = dealerId;
+  const [sucherFirma, setSucherFirma] = useState(null);
+  const [zahlungenFirma, setZahlungenFirma] = useState(null);
+  const [zahlungenFehler, setZahlungenFehler] = useState("");
+
   const loadFirma = useCallback(async () => {
     if (!dealerId) return;
+    // Ein Neuladen aus einer Aktion, die noch fuer die VORIGE Firma lief: nichts tun — und vor allem
+    // keine neue Nummer ziehen, sonst wuerde die laufende Anfrage der jetzigen Firma verworfen.
+    if (firmaRef.current !== dealerId) return;
+    const nr = ++firmaNr.current;
+    const aktuell = () => nr === firmaNr.current && firmaRef.current === dealerId;
     // AD-01/O4: Die Liste endete bei 200 Konten (aelteste zuerst) — neue
     // Sucher ab Nr. 201 waren unsichtbar und damit nie freischaltbar. Jetzt
     // seitenweise ALLE Konten; getrennt von den Zahlungen, damit ein Fehler
@@ -134,22 +152,60 @@ export default function AdminUserDetail() {
       const alle = [];
       for (let seite = 1; seite <= 50; seite += 1) {
         const r = await api.get(`/admin/dealers/${dealerId}/sucher`, { params: { limit: 2000, seite } });
+        if (!aktuell()) return;
         alle.push(...(Array.isArray(r.data) ? r.data : []));
         if (String(r.headers?.["x-truncated"] || "") !== "1") break;
       }
       setSucher(alle);
+      setSucherFirma(dealerId);
       setFirmaFehler("");
     } catch (e) {
+      if (!aktuell()) return;             // Fehler einer veralteten Anfrage: weder Karte noch Toast
       setFirmaFehler(errMsg(e, "Chef und Sucher konnten nicht geladen werden"));
     }
+    if (!aktuell()) return;
     try {
       const z = await api.get(`/admin/dealers/${dealerId}/zahlungen`);
-      setZahlungen(z.data);
+      if (!aktuell()) return;
+      setZahlungen(Array.isArray(z.data) ? z.data : []);
+      setZahlungenFirma(dealerId);
+      setZahlungenFehler("");
     } catch (e) {
-      toast.error(errMsg(e, "Zahlungen konnten nicht geladen werden"));
+      if (!aktuell()) return;
+      const text = errMsg(e, "Zahlungen konnten nicht geladen werden");
+      setZahlungenFehler(text);
+      toast.error(text);
     }
   }, [dealerId]);
-  useEffect(() => { loadFirma(); }, [loadFirma]);
+  useEffect(() => {
+    // Andere Firma: nichts von der vorigen stehen lassen (Liste, Fehler, offener Anlege-Dialog).
+    setSucher(null);
+    setSucherFirma(null);
+    setZahlungen(null);
+    setZahlungenFirma(null);
+    setFirmaFehler("");
+    setZahlungenFehler("");
+    setShowAdd(false);
+    setGueltigBis({});
+    loadFirma();
+  }, [loadFirma]);
+
+  // Nur die Liste der Firma, fuer die die Seite gerade steht (sonst "lade…").
+  const sucherListe = dealerId && sucherFirma === dealerId ? sucher : null;
+  const zahlungenListe = dealerId && zahlungenFirma === dealerId ? zahlungen : null;
+
+  // Vor jedem Senden: gehoert die angezeigte Tabelle (und die Zeile) zur Firma dieser Seite?
+  const firmaStimmt = (s) => {
+    const ok = !!dealerId && firmaRef.current === dealerId && sucherFirma === dealerId
+      && (!s?.dealer_id || s.dealer_id === dealerId);
+    if (!ok) toast.error("Die angezeigte Liste gehört nicht zu dieser Firma — bitte die Seite neu laden. Nichts gesendet.");
+    return ok;
+  };
+  const zahlungenStimmen = () => {
+    const ok = !!dealerId && firmaRef.current === dealerId && zahlungenFirma === dealerId;
+    if (!ok) toast.error("Die Zahlungen dieser Firma sind nicht geladen — bitte neu laden. Nichts erfasst.");
+    return ok;
+  };
 
   if (loading) return <div className="flex items-center gap-2 text-zinc-500 text-sm py-10"><Spinner /> lade…</div>;
   if (!data) {
@@ -182,7 +238,9 @@ export default function AdminUserDetail() {
       // "weitere" kommt vom Server mit — so weiss die Oberflaeche, wann
       // der Knopf verschwinden muss, ohne selbst zu rechnen.
       setData((d) => ({ ...d, weitere: r.data?.weitere, gesamt: r.data?.gesamt }));
-    } catch (e) { toast.error(errMsg(e, "Weitere Verträge konnten nicht geladen werden")); }
+    } catch (e) {
+      if (nr === ladeNr.current) toast.error(errMsg(e, "Weitere Verträge konnten nicht geladen werden"));
+    }
     finally { setLaedtMehr(false); }
   };
 
@@ -209,13 +267,14 @@ export default function AdminUserDetail() {
   const planText = (plan, feld) => (PLAENE[plan] || {})[feld] || plan || "—";
 
   const grantAbo = async (s, plan) => {
+    if (!firmaStimmt(s)) return;
     const probe = !!PLAENE[plan]?.probe;
     // Rollenpruefung 22.09.2026 (RP-050/RP-224): eine weitere Probe fuer ein
     // Konto, das schon eine hatte, nur nach ausdruecklicher Rueckfrage.
     if (probe && s.probe_vergeben_am && !window.confirm(
       `${sucherLabel(s)} hatte bereits ein Probe-Abo (vergeben am ${fmtTag(s.probe_vergeben_am)}).\n\n`
       + "Wirklich noch eine kostenlose Probe vergeben?")) return;
-    if (!sperren(s.id)) return;             // zweiter Klick waehrend der Anfrage: ignorieren
+    if (!firmaStimmt(s) || !sperren(s.id)) return;             // zweiter Klick waehrend der Anfrage: ignorieren
     const schluesselName = `${s.id}:${plan}`;
     if (!schluesselRef.current[schluesselName]) schluesselRef.current[schluesselName] = neuerSchluessel();
     try {
@@ -243,7 +302,7 @@ export default function AdminUserDetail() {
   const saveGueltigBis = async (s) => {
     const datum = (gueltigBis[s.id] || "").trim();
     if (!datum) { toast.error("Bitte ein Datum wählen"); return; }
-    if (!sperren(s.id)) return;
+    if (!firmaStimmt(s) || !sperren(s.id)) return;
     try {
       // Der Server verlangt seit dem Audit 09/2026 einen Grund — die
       // Änderung ohne Zahlung landet unveränderbar im Zugangsverlauf.
@@ -257,8 +316,9 @@ export default function AdminUserDetail() {
     finally { freigeben(); }
   };
   const revokeAbo = async (s) => {
+    if (!firmaStimmt(s)) return;
     if (!window.confirm(`Sucher-Funktion (Suche & Vergleich) von ${sucherLabel(s)} aufheben?\n\nDas Konto bleibt aktiv: Anmelden, Bestand, Vertraege und Termine gehen weiter. Zum kompletten Sperren "Konto sperren" bzw. in der Nutzerliste "Firma sperren" verwenden.`)) return;
-    if (!sperren(s.id)) return;
+    if (!firmaStimmt(s) || !sperren(s.id)) return;
     try {
       const { data: erg } = await api.post(`/admin/sucher/${s.id}/abo`, { plan: null });
       // Rollenpruefung 22.09.2026 (RP-229/RP-380): der Server meldet den
@@ -280,12 +340,13 @@ export default function AdminUserDetail() {
   // nur per API. Der bisherige Chef wird dabei zum Sucher (seine Sitzung
   // endet), der neue meldet sich mit seiner bisherigen Kontonummer an.
   const zumChefMachen = async (s) => {
-    const alt = sucher?.find((x) => x.ist_chef);
+    if (!firmaStimmt(s)) return;
+    const alt = sucherListe?.find((x) => x.ist_chef);
     if (!window.confirm(
       `${sucherLabel(s)} zum neuen Chef dieser Firma machen?\n\n`
       + `Der bisherige Chef${alt?.kontonummer ? ` (Kontonummer ${alt.kontonummer})` : ""} wird dabei zum Sucher. `
       + "Beide werden abgemeldet; die Kontonummern bleiben, wie sie sind.")) return;
-    if (!sperren(s.id)) return;
+    if (!firmaStimmt(s) || !sperren(s.id)) return;
     try {
       await api.put(`/admin/users/${s.id}`, { role: "dealer", chef_wechsel: true });
       toast.success(`${sucherLabel(s)} ist jetzt Chef der Firma`);
@@ -303,8 +364,10 @@ export default function AdminUserDetail() {
   // grantAbo: Zeile bis nach dem Neuladen gesperrt.
   // Wunsch Ahmad 25.09.2026 abends: KI-Bewertung je Konto freischalten (wie Abo).
   const toggleKi = async (s) => {
+    if (!firmaStimmt(s)) return;
     const aktiv = !s.ki_aktiv;
     if (!aktiv && !window.confirm(`KI-Bewertung für ${sucherLabel(s)} sperren?`)) return;
+    if (!firmaStimmt(s)) return;
     setBusy(s.id);
     try {
       await api.post(`/admin/sucher/${s.id}/ki`, { aktiv });
@@ -316,8 +379,9 @@ export default function AdminUserDetail() {
   };
 
   const toggleSucherActive = async (s) => {
+    if (!firmaStimmt(s)) return;
     if (s.active && !window.confirm(`Konto ${sucherLabel(s)} komplett sperren?\n\nAnmeldung sofort unmoeglich (nicht nur die Sucher-Funktion).`)) return;
-    if (!sperren(s.id)) return;
+    if (!firmaStimmt(s) || !sperren(s.id)) return;
     try {
       await api.post(`/admin/users/${s.id}/active`, { active: !s.active });
       toast.success(s.active ? "Sucher gesperrt" : "Sucher entsperrt");
@@ -326,13 +390,17 @@ export default function AdminUserDetail() {
     finally { freigeben(); }
   };
   const removeSucher = async (s) => {
+    if (!firmaStimmt(s)) return;
     if (!window.confirm(`Sucher ${sucherLabel(s)} endgültig löschen?`)) return;
-    if (!sperren(s.id)) return;
+    if (!firmaStimmt(s) || !sperren(s.id)) return;
     try { await api.delete(`/admin/users/${s.id}`); toast.success("Sucher gelöscht"); await loadFirma(); }
     catch (e) { toast.error(errMsg(e)); }
     finally { freigeben(); }
   };
   const addZahlung = async () => {
+    // admin4: nur, wenn die angezeigten Zahlungen zu DIESER Firma gehoeren — und noch einmal direkt
+    // vor dem Senden (nach den Rueckfragen)
+    if (!zahlungenStimmen()) return;
     const betrag = window.prompt("Betrag in € (z. B. 1.500 oder 150,00):");
     if (!betrag) return;
     // Rollenpruefung 22.09.2026: deutsche Schreibweise ueber preisAusText —
@@ -344,6 +412,7 @@ export default function AdminUserDetail() {
     // landete sonst still in der Zahlungshistorie.
     if (!window.confirm(`Zahlung über ${preisText(amount)} erfassen?`)) return;
     const note = window.prompt("Notiz (optional, z.B. Rechnungsnummer):") || "";
+    if (!zahlungenStimmen()) return;
     try {
       await api.post(`/admin/dealers/${dealerId}/zahlungen`,
         { amount, note });
@@ -452,10 +521,10 @@ export default function AdminUserDetail() {
             <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: "1px solid var(--wa-08)" }}>
               <div className="flex items-center gap-2">
                 <span className="text-[15px] font-semibold text-white">Chef & Sucher — Freischaltung</span>
-                <Badge>{fmtNum((sucher || []).length)}</Badge>
+                <Badge>{fmtNum((sucherListe || []).length)}</Badge>
               </div>
               <Button size="sm" onClick={() => setShowAdd(true)} data-testid="admin-add-sucher"
-                      disabled={!superAdmin || !!firmaFehler || sucher === null}
+                      disabled={!superAdmin || !!firmaFehler || sucherListe === null}
                       title={!superAdmin ? "Nur der Super-Admin" : firmaFehler ? "Erst die Liste laden — sonst drohen doppelte Konten" : ""}>
                 <UserPlus size={14} /> Sucher anlegen
               </Button>
@@ -467,9 +536,9 @@ export default function AdminUserDetail() {
                   Erneut laden
                 </button>
               </div>
-            ) : sucher === null ? (
+            ) : sucherListe === null ? (
               <div className="flex items-center gap-2 text-zinc-500 text-sm px-5 py-6"><Spinner /> lade…</div>
-            ) : !sucher.length ? (
+            ) : !sucherListe.length ? (
               <EmptyState title="Noch keine Sucher" hint="Lege die Zugänge an — die Kontonummer vergibt das System, das Passwort vergibst du hier." />
             ) : (
               <div className="overflow-x-auto">
@@ -485,7 +554,7 @@ export default function AdminUserDetail() {
                     </tr>
                   </thead>
                   <tbody>
-                    {sucher.map((s) => (
+                    {sucherListe.map((s) => (
                       <tr key={s.id} className="border-t border-white/5">
                         <td className="px-4 py-2.5">
                           <div className="text-white font-medium flex items-center gap-1.5">
@@ -631,14 +700,24 @@ export default function AdminUserDetail() {
                 <Euro size={15} className="text-zinc-500" />
                 <span className="text-[15px] font-semibold text-white">Zahlungen</span>
               </div>
-              <Button size="sm" variant="outline" onClick={addZahlung} disabled={!superAdmin}>Nachtragen</Button>
+              <Button size="sm" variant="outline" onClick={addZahlung} disabled={!superAdmin || zahlungenListe === null}
+                      data-testid="zahlung-nachtragen">Nachtragen</Button>
             </div>
-            {!zahlungen?.length ? (
+            {zahlungenFehler ? (
+              <div className="px-5 py-6 text-[13px] text-red-300" role="alert" data-testid="admin-zahlungen-ladefehler">
+                {zahlungenFehler} — die Liste ist NICHT leer, sie konnte nur nicht geladen werden.{" "}
+                <button type="button" onClick={loadFirma} className="underline underline-offset-2 font-semibold text-white">
+                  Erneut laden
+                </button>
+              </div>
+            ) : zahlungenListe === null ? (
+              <div className="flex items-center gap-2 text-zinc-500 text-sm px-5 py-6"><Spinner /> lade…</div>
+            ) : !zahlungenListe.length ? (
               <EmptyState title="Noch keine Zahlungen" hint="Beim Freischalten eines Abos wird die Zahlung automatisch erfasst." />
             ) : (
               <ul className="divide-y" style={{ borderColor: "var(--wa-06)" }}>
-                {zahlungen.slice(0, 20).map((z) => (
-                  <li key={z.id} className="px-5 py-3">
+                {zahlungenListe.slice(0, 20).map((z) => (
+                  <li key={z.id} className="px-5 py-3" data-testid={`zahlung-${z.id}`}>
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-white font-semibold tabular-nums">
                         {Number(z.amount).toLocaleString("de-DE", { minimumFractionDigits: 2 })} €

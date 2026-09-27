@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { ArrowLeft, RefreshCw, Play, X, FileBarChart } from "lucide-react";
 import { toast } from "sonner";
@@ -47,18 +47,29 @@ export default function MarktModell() {
   const segmentId = params.get("segment") || "";
   const bereich = params.get("bereich") || "30d";
 
+  // Go-Live-Pruefung 28.09.2026 (admin4): Wechsel zu einem anderen Modell, waehrend die Anfrage fuer
+  // das vorige noch lief — deren spaete Antwort ueberschrieb das neue Modell (samt Segment-Vorwahl in
+  // der URL), "Jetzt crawlen" (kostet Apify-Laeufe) traf dann ein Segment des falschen Modells; ein
+  // spaeter Fehler zeigte die Fehlerkarte ueber dem neuen. Jetzt: laufende Nummer, nur die juengste
+  // Anfrage schreibt; angezeigt wird ein Modell nur, wenn es zur Id in der URL gehoert.
+  const ladeNr = useRef(0);
   const laden = useCallback(async () => {
+    const nr = ++ladeNr.current;
     try {
       const r = await api.get(`/admin/market/models/${modellId}`);
+      if (nr !== ladeNr.current) return;
       setModell(r.data);
       setFehler("");
       if (!params.get("segment") && r.data.segmente?.length) {
         const erstes = r.data.segmente.find((s) => s.stats?.sample_size) || r.data.segmente[0];
         setParams((p) => { const n = new URLSearchParams(p); n.set("segment", erstes.id); return n; }, { replace: true });
       }
-    } catch (e) { setFehler(errMsg(e, "Modell konnte nicht geladen werden")); }
+    } catch (e) {
+      if (nr !== ladeNr.current) return;
+      setFehler(errMsg(e, "Modell konnte nicht geladen werden"));
+    }
   }, [modellId]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { laden(); }, [laden]);
+  useEffect(() => { setFehler(""); laden(); }, [laden]);
   // Master-Auftrag Phase F: Health des Modells und seiner Segmente — eigene Anfrage; ohne Berechnung (404) oder bei
   // einem Fehler bleibt die Seite unveraendert (keine Health-Anzeige)
   const [health, setHealth] = useState(null);
@@ -75,7 +86,8 @@ export default function MarktModell() {
   const setzen = (k, v) => setParams((p) => { const n = new URLSearchParams(p); n.set(k, v); return n; });
 
   if (fehler) return <Card data-testid="markt-modell-fehler"><div className="text-red-300 text-sm">{fehler}</div></Card>;
-  if (!modell) return <div className="flex items-center gap-2 text-zinc-500 text-sm py-10"><Spinner /> lade…</div>;
+  // admin4: ein Modell mit anderer Id als in der URL (vorige Seite) nie anzeigen — sonst "lade…"
+  if (!modell || (modell.id && modell.id !== modellId)) return <div className="flex items-center gap-2 text-zinc-500 text-sm py-10"><Spinner /> lade…</div>;
   const segmente = modell.segmente || [];
   // Befund Ahmad 26.09.2026 abends: nach Umstellungen der Bereiche stehen alte Segmente als
   // "inaktiv" weiter in der Liste (Historie bleibt) — Auswahl und Tabelle zeigen nur aktive,
@@ -477,7 +489,13 @@ function ListingHistorie({ listingId, onClose }) {
   const [d, setD] = useState(null);
   const [fehler, setFehler] = useState("");
   useEffect(() => {
-    api.get(`/admin/market/listings/${listingId}/history`).then((r) => setD(r.data)).catch((e) => setFehler(errMsg(e, "Historie nicht ladbar")));
+    let aktiv = true;   // admin4: Antwort eines vorigen Inserats verwerfen
+    setD(null);
+    setFehler("");
+    api.get(`/admin/market/listings/${listingId}/history`)
+      .then((r) => { if (aktiv) setD(r.data); })
+      .catch((e) => { if (aktiv) setFehler(errMsg(e, "Historie nicht ladbar")); });
+    return () => { aktiv = false; };
   }, [listingId]);
   const l = d?.listing;
   return (
