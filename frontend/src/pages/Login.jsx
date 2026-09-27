@@ -76,8 +76,11 @@ export default function Login() {
       <div className="bleibt-dunkel hidden lg:block lg:w-1/2 relative" data-theme="dark"
            style={{ background: "#0c0c0c" }}>
         {/* Rollenprüfung 22.09.2026 (RP-566): kein Bild mehr von einem fremden
-            Server (emergentagent.com, nicht in der Datenschutzerklärung) —
-            ein reiner Verlauf, jeder Aufruf bleibt auf dem eigenen Server. */}
+            Server (emergentagent.com, nicht in der Datenschutzerklärung).
+            Wunsch Ahmad 27.09.2026: das Startbild ist wieder da — als eigene
+            Datei (frontend/public/img), jeder Aufruf bleibt auf dem eigenen Server. */}
+        <div className="absolute inset-0 opacity-30 bg-cover bg-center" data-testid="login-bild"
+             style={{ backgroundImage: "url(/img/startbild.webp)" }} />
         <div className="absolute inset-0 opacity-60"
              style={{ backgroundImage: "radial-gradient(ellipse at 70% 20%, rgba(255,59,48,0.35), transparent 55%), "
                         + "radial-gradient(ellipse at 15% 90%, rgba(10,132,255,0.18), transparent 50%)" }} />

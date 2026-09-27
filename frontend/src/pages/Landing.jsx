@@ -1,17 +1,20 @@
 import { Link, useNavigate } from "react-router-dom";
 import { useEffect, useState } from "react";
-import { ArrowRight, Bolt, Car, Check, FileText, KeyRound, Send, Calendar, ShieldCheck, Sparkles, Menu, X } from "lucide-react";
+import { ArrowRight, Bolt, Check, FileText, KeyRound, Send, Calendar, ShieldCheck, Sparkles, Menu, X } from "lucide-react";
 import { api } from "../lib/api";
 import { useFeatures } from "../lib/features";
 
 // Rollenprüfung 22.09.2026 (RP-566): Die Hintergrundbilder kamen von
 // static.prod-images.emergentagent.com und images.pexels.com. Jeder Besuch
 // der Startseite schickte damit IP-Adresse und Zeitpunkt an zwei fremde
-// Server, die in der Datenschutzerklärung nicht stehen (und der erste ist
-// ein Überbleibsel der Entwicklungsumgebung, der jederzeit verschwinden
-// kann). Jetzt reine CSS-Verläufe ohne fremden Abruf. Eigene Fotos können
-// später unter frontend/public/img liegen und hier als url(/img/…) vor den
-// Verlauf gesetzt werden.
+// Server, die in der Datenschutzerklärung nicht stehen.
+// Wunsch Ahmad 27.09.2026: die Bilder sind wieder da — jetzt als eigene Dateien
+// (frontend/public/img, verkleinert als WebP), also vom eigenen Server, ohne
+// fremden Abruf. Der Verlauf dahinter bleibt als Rückfall, falls ein Bild fehlt.
+// Das Schlüsselbild fehlt noch (Verlauf + Symbol, bis Ahmad es nachliefert).
+const HERO_IMG = "url(/img/startbild.webp)";
+const SECTION_IMG = "url(/img/hintergrund.webp)";
+const CAR_IMG = "url(/img/auto.webp)";
 const HERO_BG = "radial-gradient(ellipse at 75% 15%, rgba(255,59,48,0.32), transparent 55%), "
   + "radial-gradient(ellipse at 10% 85%, rgba(10,132,255,0.16), transparent 50%), "
   + "linear-gradient(180deg, #17171a 0%, #0a0a0a 100%)";
@@ -178,7 +181,7 @@ export default function Landing() {
       <section className="relative pt-32 pb-24 overflow-hidden">
         <div
           className="absolute inset-0 opacity-50 bg-cover bg-center"
-          style={{ backgroundImage: HERO_BG }}
+          style={{ backgroundImage: `${HERO_IMG}, ${HERO_BG}` }}
         />
         <div className="absolute inset-0" style={{ background: "linear-gradient(180deg, rgba(10,10,10,0.55) 0%, rgba(10,10,10,0.95) 100%)" }} />
         <div className="relative max-w-7xl mx-auto px-6">
@@ -243,10 +246,8 @@ export default function Landing() {
             <div className="lg:col-span-5 hidden lg:block">
               <div className="relative">
                 <div className="aspect-[4/5] rounded-lg overflow-hidden bg-cover bg-center relative"
-                     style={{ backgroundImage: CAR_BG }}>
-                  <Car size={160} strokeWidth={1} aria-hidden="true"
-                       className="absolute left-1/2 top-[38%] -translate-x-1/2 -translate-y-1/2"
-                       style={{ color: "rgba(255,255,255,0.22)" }} />
+                     data-testid="landing-auto-bild"
+                     style={{ backgroundImage: `${CAR_IMG}, ${CAR_BG}` }}>
                   <div className="relative w-full h-full" style={{ background: "linear-gradient(180deg, transparent 50%, rgba(10,10,10,0.85) 100%)" }} />
                 </div>
                 <div className="absolute -bottom-6 -left-6 tactical-card p-4 w-64">
@@ -293,7 +294,7 @@ export default function Landing() {
       {/* FEATURES */}
       <section id="features" className="py-24 relative">
         <div className="absolute inset-0 opacity-20 bg-cover bg-center"
-             style={{ backgroundImage: SECTION_BG }} />
+             style={{ backgroundImage: `${SECTION_IMG}, ${SECTION_BG}` }} />
         <div className="relative max-w-7xl mx-auto px-6">
           <div className="grid lg:grid-cols-12 gap-6">
             <div className="lg:col-span-12 mb-4">

@@ -348,6 +348,31 @@ def test_10_keine_bilder_von_fremden_servern():
     assert not treffer, treffer
 
 
+def test_10b_bilder_der_startseite_liegen_auf_dem_eigenen_server():
+    """Wunsch Ahmad 27.09.2026: Startseite und Anmeldung zeigen ihre Bilder wieder — als eigene Dateien unter
+    frontend/public/img. Jede url(...) im Frontend-Quelltext zeigt auf einen eigenen Pfad (/...), nie auf einen
+    fremden Server, und jede referenzierte /img-Datei existiert (sonst stuende nur der Verlauf da)."""
+    oeffentlich = FRONTEND_SRC.parent / "public"
+    fremd, fehlt, eigene = [], [], set()
+    for p in FRONTEND_SRC.rglob("*.js*"):
+        if ".test." in p.name:
+            continue
+        text = p.read_text(encoding="utf-8", errors="ignore")
+        for ziel in re.findall(r"url\(\s*['\"]?([^)'\"]+)", text):
+            if ziel.startswith(("http:", "https:", "//")):
+                fremd.append(f"{p.relative_to(FRONTEND_SRC).as_posix()}: {ziel}")
+            elif ziel.startswith("/img/"):
+                eigene.add(ziel)
+                if not (oeffentlich / ziel.lstrip("/")).is_file():
+                    fehlt.append(ziel)
+    assert not fremd, fremd
+    assert not fehlt, fehlt
+    assert {"/img/startbild.webp", "/img/hintergrund.webp", "/img/auto.webp"} <= eigene, eigene
+    for name in ("startbild.webp", "hintergrund.webp", "auto.webp"):
+        groesse = (oeffentlich / "img" / name).stat().st_size
+        assert 0 < groesse <= 300 * 1024, (name, groesse)      # verkleinert — die Startseite laedt schnell
+
+
 def test_11_hsl_tripel_nie_direkt_als_farbe():
     """RP-024/RP-274: --card, --border, --accent … sind HSL-Tripel
     ("0 0% 8%") für shadcn. var(--card) direkt als Farbe ist ungültiges CSS
