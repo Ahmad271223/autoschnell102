@@ -554,17 +554,18 @@ def lease_halter(doc_id: str, sammlung: str = SAMMLUNG):
 
 
 async def kosten_sichern(stabil: dict, eigen: dict, kasse, *, eintrag: Optional[dict] = None,
-                         sammlung: str = SAMMLUNG) -> None:
+                         sammlung: str = SAMMLUNG, monat: Optional[str] = None) -> None:
     """Ausnahmepfad eines Laufs (Nachbesserung 27.09.2026): das schon
     Ausgegebene bleibt am Dokument (kosten_summe_ct, $inc am stabilen
     Schluessel), sonst setzte der stuendliche budget.abgleichen den Zaehler
     ohne diese Kosten neu. Gehoert das Dokument noch diesem Lauf (`eigen`),
     wird es zusaetzlich mit `eintrag` (status fehler, kosten_ct, Bericht der
-    Kasse) abgeschlossen. Wirft nie."""
+    Kasse) abgeschlossen. `monat` (JJJJ-MM, Runde 3): Monat des Laufs fuer
+    kosten_monat (budget.kosten_inc). Wirft nie."""
     try:
         betrag = float(kasse.abrechnung_ct) if kasse is not None else 0.0
         if betrag > 0:
-            await db[sammlung].update_one(stabil, {"$inc": {"kosten_summe_ct": round(betrag, 4)}})
+            await db[sammlung].update_one(stabil, {"$inc": budget.kosten_inc(betrag, monat)})
         if eintrag is not None:
             await db[sammlung].update_one({**eigen, "status": "laeuft"},
                                           {"$set": eintrag, "$unset": {"lease_until": ""}})
@@ -576,14 +577,17 @@ async def kosten_sichern(stabil: dict, eigen: dict, kasse, *, eintrag: Optional[
 async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: bool = False) -> Optional[dict]:
     """Rechnet die Bewertung fuer den aktuellen Stand des Protokolls und legt
     sie ab. Liefert das gespeicherte Dokument (oeffentliche Form) oder None,
-    wenn das Protokoll fehlt. Wirft nie."""
+    wenn das Protokoll fehlt oder ein interner Fehler auftrat. Wirft nie
+    (Runde 3, 27.09.2026: res/kasse stehen VOR dem ersten await - vorher
+    las der Ausnahmepfad `kasse`, bevor es gesetzt war, und warf
+    UnboundLocalError, wenn schon _grundlagen scheiterte)."""
+    res = None                           # Budget-Reservierung (Review 25.09.2026)
+    kasse = None                         # Kostendeckel je Lauf (27.09.2026)
     try:
         grund = await _grundlagen(protocol_id, dealer_id)
         if not grund:
             return None
         doc, appt, vehicle, contract = grund
-        res = None                       # Budget-Reservierung (Review 25.09.2026)
-        kasse = None                     # Kostendeckel je Lauf (27.09.2026)
         ktx = await kontext.sammeln(vehicle, "abholung", eigene_id=str(appt.get("vehicle_id") or ""))
         paket = paket_bauen(doc, appt, vehicle, contract, ktx.get("marktdoc"))
         eigene = await marktdaten.eigene_referenzen(paket, "abholung")
@@ -641,6 +645,8 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
         # abgestuerzter Lauf verfaellt nach LEASE_S Sekunden.
         lease = (datetime.now(timezone.utc) + timedelta(seconds=LEASE_S)).isoformat()
         start = {**basis, "status": "laeuft", "grund": "", "ergebnis": None, "lease_until": lease, "est_ct": 0.0}
+        # Runde 3: Altdokument (Summe ohne Monatsaufteilung) vor dem neuen Lauf umstellen
+        await budget.altbestand_aufteilen(vorhanden)
         fremd = await _lauf_beanspruchen(protocol_id, h, start)
         if fremd is not None:
             return _oeffentlich(fremd)
@@ -738,10 +744,12 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
                 except Exception:  # noqa: BLE001
                     pass
         # kosten_summe_ct: alle Laeufe dieses Stands (ein "Neu berechnen"
-        # ueberschreibt kosten_ct) — daraus rechnet budget.abgleichen
+        # ueberschreibt kosten_ct); kosten_monat (Runde 3): dieselben Kosten
+        # je Monat des Laufs - budget.abgleichen zaehlt nur den laufenden Monat
         await db[SAMMLUNG].update_one({"protocol_id": protocol_id, "input_hash": h},
                                       {"$set": eintrag, "$unset": {"lease_until": ""},
-                                       "$inc": {"kosten_summe_ct": round(float(kosten or 0), 4)}}, upsert=True)
+                                       "$inc": budget.kosten_inc(kosten, budget.monat_von(basis["created_at"]))},
+                                      upsert=True)
         return _oeffentlich(eintrag)
     except Exception:  # noqa: BLE001 — die KI ist Beiwerk, nie ein 500
         log.exception("KI-Bewertung %s gescheitert", protocol_id)
@@ -758,7 +766,8 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
             await kosten_sichern({"protocol_id": protocol_id, "input_hash": h}, {"id": basis["id"]}, kasse,
                                  eintrag={"status": "fehler", "grund": "interner Fehler — bitte neu berechnen",
                                           "ergebnis": None, "kosten_ct": kasse.abrechnung_ct,
-                                          "kostendeckel": kasse.bericht()})
+                                          "kostendeckel": kasse.bericht()},
+                                 monat=budget.monat_von(basis["created_at"]))
         return None
 
 

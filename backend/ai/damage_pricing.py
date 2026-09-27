@@ -314,14 +314,30 @@ async def _lauf_beanspruchen(start: dict, dealer_id: str, h: str) -> Optional[di
     fremd = await db[SAMMLUNG].find_one(filt, {"_id": 0})
     if fremd and not _lease_abgelaufen(fremd):
         return fremd
-    # abgelaufen: atomar uebernehmen (nur wer den alten Lease trifft, gewinnt)
+    if not fremd:
+        # kein laufender Lauf mehr (gerade fertig geworden) - wie bisher
+        return await db[SAMMLUNG].find_one(filt, {"_id": 0})
+    # abgelaufen: atomar uebernehmen (nur wer den alten Lease trifft, gewinnt).
+    # Runde 3 (27.09.2026): die id des alten Laufs wandert nach frueher_ids -
+    # bucht er danach noch Kosten (Ausnahmepfad oder Abschluss nach der
+    # Uebernahme), treffen sie dieses Dokument (_stabil), und
+    # budget.abgleichen zaehlt beide Laeufe. Vorher gingen sie ins Leere.
+    await budget.altbestand_aufteilen(fremd)
     uebernommen = await db[SAMMLUNG].find_one_and_update(
-        {**filt, "lease_until": {"$lt": datetime.now(timezone.utc).isoformat()}},
-        {"$set": {k: v for k, v in start.items() if k != "_id"}},
+        {**filt, "id": fremd.get("id"), "lease_until": {"$lt": datetime.now(timezone.utc).isoformat()}},
+        {"$set": {k: v for k, v in start.items() if k != "_id"},
+         "$addToSet": {"frueher_ids": fremd.get("id")}},
         projection={"_id": 0}, return_document=ReturnDocument.AFTER)
     if uebernommen is not None:
         return None
     return await db[SAMMLUNG].find_one(filt, {"_id": 0}) or fremd
+
+
+def _stabil(lauf_id: str) -> dict:
+    """Filter auf das Dokument eines Laufs - auch nach einer Uebernahme
+    (Runde 3, 27.09.2026: _lauf_beanspruchen setzt eine neue id und fuehrt
+    die alte in frueher_ids)."""
+    return {"$or": [{"id": lauf_id}, {"frueher_ids": lauf_id}]}
 
 
 async def _rechnen(basis: dict, paket: dict, vorl: dict, bud: dict, eigene: dict, vehicle_doc: dict,
@@ -403,8 +419,14 @@ async def _rechnen(basis: dict, paket: dict, vorl: dict, bud: dict, eigene: dict
                                         status=eintrag["status"], grund=eintrag["grund"][:200], art=ART)
                 except Exception:  # noqa: BLE001
                     pass
-        await db[SAMMLUNG].update_one({"id": basis["id"]}, {"$set": eintrag, "$unset": {"lease_until": ""},
-                                                            "$inc": {"kosten_summe_ct": round(float(kosten or 0), 4)}})
+        monat = budget.monat_von(basis.get("created_at"))
+        r = await db[SAMMLUNG].update_one({"id": basis["id"]}, {"$set": eintrag, "$unset": {"lease_until": ""},
+                                                                "$inc": budget.kosten_inc(kosten, monat)})
+        if not r.matched_count and float(kosten or 0) > 0:
+            # Runde 3: Lauf wurde waehrend der Bewertung uebernommen - das
+            # Ergebnis gehoert dem neuen Lauf, die bezahlten Kosten bleiben
+            # am Dokument (frueher_ids), sonst verloere abgleichen sie
+            await db[SAMMLUNG].update_one({"frueher_ids": basis["id"]}, {"$inc": budget.kosten_inc(kosten, monat)})
         return _oeffentlich(eintrag)
     except Exception:  # noqa: BLE001
         log.exception("KI-Schadennachlass-Lauf %s gescheitert", basis.get("id"))
@@ -416,7 +438,10 @@ async def _rechnen(basis: dict, paket: dict, vorl: dict, bud: dict, eigene: dict
             # Nachbesserung 27.09.2026: kosten_ct + Bericht auch hier — sonst
             # nahm der stuendliche budget.abgleichen die Kosten wieder heraus
             eintrag.update(kosten_ct=kasse.abrechnung_ct, kostendeckel=kasse.bericht())
-        await kosten_sichern({"id": basis["id"]}, {"id": basis["id"]}, kasse, eintrag=eintrag)
+        # Runde 3: stabiler Schluessel - die eigene id ODER, nach einer
+        # Uebernahme, das Dokument, das sie in frueher_ids fuehrt
+        await kosten_sichern(_stabil(basis["id"]), {"id": basis["id"]}, kasse, eintrag=eintrag,
+                             monat=budget.monat_von(basis.get("created_at")))
         return _oeffentlich(eintrag)
 
 

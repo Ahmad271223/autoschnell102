@@ -370,6 +370,9 @@ async def recherche(*, system: str, frage: str, max_suchen: int = 6,
     laufen (max_uses bleibt, tool_choice "none") — dann nur der Verlauf plus
     die Antwort, das passt meist noch in den Rest; ausser die Pause steht
     vor einer schon angestossenen Suche (letzter Block server_tool_use).
+    Endet die Pause mit Suchergebnissen, die noch keine Runde gelesen hat
+    (letzte Bloecke web_search_tool_result), rechnet die Basis der
+    Fortsetzung je Ergebnis SUCHE_TOKENS_MAX dazu (Runde 3, 27.09.2026).
     Scheitert eine Fortsetzung, bleibt der bis dahin gefundene Text (status
     ok). Vor jeder Anfrage verlaengert die Kasse das Lease des Laufs; hat
     ein anderer Aufruf den Lauf uebernommen, endet die Recherche sofort
@@ -407,13 +410,14 @@ async def recherche(*, system: str, frage: str, max_suchen: int = 6,
                   "user_location": {"type": "approximate", "country": "DE", "timezone": "Europe/Berlin"}}]
         messages: list = [{"role": "user", "content": frage}]
         suche_offen = False                # Pause vor einer angestossenen Suche?
+        ungelesen = 0                      # Suchergebnisse nach der letzten Sampling-Runde (Runde 3)
         suchen_plan = int(aktuell.get("max_uses") or max_suchen)
         for i in range(_PAUSEN_MAX):
             anfrage_nr = i + 1
             if kasse is not None and i > 0:
                 # Fortsetzung: der ganze Verlauf geht erneut mit — nur wenn sie
                 # noch in den Rest passt (auch ohne weitere Suche, s. o.)
-                neu = kasse.recherche_plan(kasse.fortsetzung_basis(int(basis_tokens or 0), usage),
+                neu = kasse.recherche_plan(kasse.fortsetzung_basis(int(basis_tokens or 0), usage, ungelesen),
                                            suchen_plan, ki_recherche_modell(),
                                            min_suchen=1 if suche_offen else 0)
                 if neu is None:
@@ -459,6 +463,14 @@ async def recherche(*, system: str, frage: str, max_suchen: int = 6,
             if r.stop_reason == "pause_turn":
                 inhalt = list(r.content or [])
                 suche_offen = bool(inhalt) and getattr(inhalt[-1], "type", "") == "server_tool_use"
+                # Runde 3 (27.09.2026): Ergebnisse am Ende (nach dem letzten
+                # vom Modell erzeugten Block) hat noch keine Runde gelesen -
+                # sie stecken in keiner usage, die Fortsetzung liest sie
+                ungelesen = 0
+                for blk in reversed(inhalt):
+                    if getattr(blk, "type", "") != "web_search_tool_result":
+                        break
+                    ungelesen += 1
                 messages.append({"role": "assistant",
                                  "content": [b.model_dump(exclude_none=True) for b in inhalt]})
                 continue

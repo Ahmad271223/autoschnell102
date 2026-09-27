@@ -311,11 +311,19 @@ class Kostenkasse:
         return None
 
     @staticmethod
-    def fortsetzung_basis(basis_tokens: int, usage_bisher: Dict[str, Any]) -> int:
+    def fortsetzung_basis(basis_tokens: int, usage_bisher: Dict[str, Any], ungelesene_ergebnisse: int = 0) -> int:
         """Basis einer Fortsetzung nach pause_turn: der ganze Verlauf geht
         erneut mit. Sicher nach oben: der Kontext am Ende der vorigen Anfragen
-        ist hoechstens die Summe ihrer Eingabe plus ihrer Ausgabe."""
-        return int(basis_tokens) + eingabe_gesamt(usage_bisher) + int((usage_bisher or {}).get("output_tokens") or 0)
+        ist hoechstens die Summe ihrer Eingabe plus ihrer Ausgabe.
+
+        Runde 3 (27.09.2026): Suchergebnisse, die NACH der letzten Sampling-
+        Runde angehaengt wurden (pause_turn direkt nach einem
+        web_search_tool_result), stecken in keiner usage - die Fortsetzung
+        liest sie aber. Je ungelesenem Ergebnis kommt SUCHE_TOKENS_MAX dazu,
+        sonst lag die Obergrenze des Aufrufs darunter (nachgestellt: 2,05 ct
+        Obergrenze, 4,22 ct tatsaechlich)."""
+        return int(basis_tokens) + eingabe_gesamt(usage_bisher) + int((usage_bisher or {}).get("output_tokens") or 0) \
+            + max(0, int(ungelesene_ergebnisse or 0)) * SUCHE_TOKENS_MAX
 
     def recherche_buchen(self, modell: str, usage: Dict[str, Any], plan: Optional[Dict[str, Any]], nr: Any) -> float:
         """Eine Recherche-Anfrage abrechnen und die tatsaechlichen Tokens je

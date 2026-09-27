@@ -288,17 +288,73 @@ def _lease_gueltig(doc: Dict[str, Any]) -> bool:
         return False
 
 
-def _gezahlt_ct(d: Dict[str, Any]) -> float:
-    """Schon ausgegebene Kosten eines Bewertungsdokuments. Nachbesserung
-    27.09.2026: kosten_summe_ct (per $inc, alle abgeschlossenen UND im
-    Ausnahmepfad abgebrochenen Laeufe dieses Dokuments — ein "Neu
-    berechnen" der Abholung ueberschreibt kosten_ct, die Summe bleibt) geht
-    vor; aeltere Dokumente ohne Summe: kosten_ct, solange sie nicht mehr
-    "laeuft" (ein laufender Lauf hat noch nichts abgerechnet)."""
+def monat_von(iso: Optional[str] = None) -> str:
+    """"JJJJ-MM" eines ISO-Zeitpunkts (created_at eines Laufs); ohne oder
+    mit unlesbarem Wert der laufende Monat (UTC)."""
+    s = str(iso or "")
+    if len(s) >= 7 and s[:4].isdigit() and s[4] == "-" and s[5:7].isdigit():
+        return s[:7]
+    return _monatsanfang()[:7]
+
+
+def kosten_inc(betrag_ct: float, monat: Optional[str] = None) -> Dict[str, float]:
+    """$inc-Teil fuer die Kosten eines Laufs (Runde 3, 27.09.2026): die
+    Gesamtsumme (kosten_summe_ct) UND die Summe je Monat (kosten_monat.<JJJJ-MM>,
+    Monat des Laufs = Monat seiner Reservierung). budget.abgleichen zaehlt nur
+    den laufenden Monat — vorher wuchs kosten_summe_ct am stabilen Schluessel
+    ueber Monate, und jeder neue Lauf zog mit seinem created_at alle alten
+    Laeufe in den neuen Monat (Sparmodus/Monatsdeckel griffen zu frueh)."""
+    b = round(float(betrag_ct or 0), 4)
+    return {"kosten_summe_ct": b, f"kosten_monat.{monat or monat_von()}": b}
+
+
+async def altbestand_aufteilen(doc: Optional[Dict[str, Any]], db=None) -> None:
+    """Altdokument (kosten_summe_ct ohne kosten_monat, Staende 6ab9e65/9038a80)
+    VOR einem neuen Lauf auf denselben Stand umstellen: die bisherige Summe
+    gehoert dem Monat seines created_at. Sonst legte der erste $inc des neuen
+    Laufs kosten_monat nur mit dem neuen Monat an, und die alten Kosten fielen
+    aus einem Abgleich im selben Monat heraus. Bedingt (nur ohne kosten_monat)
+    und damit wiederholbar. Wirft nie."""
+    if not doc or not doc.get("id") or isinstance(doc.get("kosten_monat"), dict):
+        return
+    w = doc.get("kosten_summe_ct")
+    if not isinstance(w, (int, float)) or isinstance(w, bool) or w <= 0:
+        return
+    db = db if db is not None else _db
+    try:
+        await db[SAMMLUNG].update_one({"id": doc["id"], "kosten_monat": {"$exists": False}},
+                                      {"$set": {"kosten_monat": {monat_von(doc.get("created_at")): float(w)}}})
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _zahl_oder_none(w: Any) -> Optional[float]:
+    if isinstance(w, (int, float)) and not isinstance(w, bool):
+        return max(0.0, float(w))
+    return None
+
+
+def _gezahlt_ct(d: Dict[str, Any], monat: Optional[str] = None) -> float:
+    """Schon ausgegebene Kosten eines Bewertungsdokuments IM MONAT `monat`
+    (Standard: der laufende).
+
+    Runde 3 (27.09.2026): Dokumente mit kosten_monat {JJJJ-MM: ct} zaehlen
+    nur den Eintrag dieses Monats — ein "Neu berechnen" im Folgemonat nimmt
+    die alten Laeufe nicht mehr mit. Altdokumente ohne Monatsaufteilung: wie
+    bisher kosten_summe_ct (alle Laeufe, Nachbesserung 27.09.2026), noch
+    aelter kosten_ct, solange sie nicht mehr "laeuft" — beides nur, wenn
+    created_at in diesem Monat liegt (die Summe gehoert dem Monat, in dem das
+    Dokument angelegt bzw. zuletzt neu gestartet wurde)."""
+    monat = monat or _monatsanfang()[:7]
+    km = d.get("kosten_monat")
+    if isinstance(km, dict):
+        return _zahl_oder_none(km.get(monat)) or 0.0
+    if monat_von(d.get("created_at")) != monat:
+        return 0.0
     for feld in ("kosten_summe_ct",) + (("kosten_ct",) if d.get("status") != "laeuft" else ()):
-        w = d.get(feld)
-        if isinstance(w, (int, float)) and not isinstance(w, bool):
-            return max(0.0, float(w))
+        w = _zahl_oder_none(d.get(feld))
+        if w is not None:
+            return w
     return 0.0
 
 
@@ -309,20 +365,28 @@ async def abgleichen(db=None) -> Dict[str, Any]:
     "laeuft" sind und einen gueltigen Lease haben. Eine Reservierung, deren
     Lauf abgestuerzt ist (nie abgerechnet), verfaellt so beim naechsten
     Aufraeumlauf statt bis Monatsende zu blockieren. Schritt im stuendlichen
-    Aufraeumlauf ("ki_budget"). Wirft nie."""
+    Aufraeumlauf ("ki_budget"). Runde 3 (27.09.2026): je Dokument zaehlen
+    nur die Kosten des laufenden Monats (kosten_monat, siehe _gezahlt_ct).
+    Wirft nie."""
     db = db if db is not None else _db
     monat = _monatsanfang()
+    jjjj_mm = monat[:7]
     soll: Dict[str, float] = {}
     try:
-        cursor = db[SAMMLUNG].find({"created_at": {"$gte": monat}},
+        # Runde 3 (27.09.2026): auch Dokumente, die VOR diesem Monat angelegt
+        # wurden, aber Kosten in diesem Monat tragen (Lauf ueber den
+        # Monatswechsel) — gezaehlt wird je Dokument nur dieser Monat
+        cursor = db[SAMMLUNG].find({"$or": [{"created_at": {"$gte": monat}},
+                                            {f"kosten_monat.{jjjj_mm}": {"$gt": 0}}]},
                                    {"_id": 0, "art": 1, "user_id": 1, "dealer_id": 1, "driver_id": 1, "status": 1,
-                                    "kosten_ct": 1, "kosten_summe_ct": 1, "est_ct": 1, "lease_until": 1}).limit(20000)
+                                    "kosten_ct": 1, "kosten_summe_ct": 1, "kosten_monat": 1, "est_ct": 1,
+                                    "lease_until": 1, "created_at": 1}).limit(20000)
         async for d in cursor:
             art = d.get("art") or "abholung"
             key = _schluessel(d.get("user_id"), d.get("dealer_id"), art)
-            betrag = _gezahlt_ct(d)
-            if d.get("status") == "laeuft" and _lease_gueltig(d):
-                betrag += float(d.get("est_ct") or 0)       # laufende Reservierung
+            betrag = _gezahlt_ct(d, jjjj_mm)
+            if d.get("status") == "laeuft" and _lease_gueltig(d) and monat_von(d.get("created_at")) == jjjj_mm:
+                betrag += float(d.get("est_ct") or 0)       # laufende Reservierung (auf den Monat ihres Starts)
             soll[key] = round(soll.get(key, 0.0) + max(0.0, betrag), 2)
             # Fahrer-Deckel (26.09.2026 abends): Abhol-Bewertungen tragen driver_id
             if art == "abholung" and d.get("driver_id"):
