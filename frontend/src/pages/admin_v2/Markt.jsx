@@ -108,6 +108,9 @@ export default function Markt() {
           <Kachel label="Nächster Lauf" wert={jobs.naechster ? datumZeit(jobs.naechster.scheduled_at) : "—"} hint={jobs.naechster?.segment_id || ""} />
           <Kachel label="Listings / Snapshots" wert={`${(status.listings || 0).toLocaleString("de-DE")} / ${(status.snapshots || 0).toLocaleString("de-DE")}`} />
           <Kachel label="Scraper" wert={status.token_vorhanden ? "Token vorhanden" : "APIFY_TOKEN fehlt"} hint={status.actor} tone={status.token_vorhanden ? "" : "text-red-300"} />
+          {/* Wunsch Ahmad 27.09.2026: Marktdaten fuer Chef/Sucher erst nach Freischaltung (Standard aus) */}
+          <Kachel label="Für Firmen sichtbar" wert={status.firmen_sichtbar ? "ja — Chef und Sucher sehen Marktdaten" : "nein — nur Admin"}
+                  tone={status.firmen_sichtbar ? "text-emerald-300" : ""} hint="Karte im Vergleich, Hinweis im Vertrag, Chancen" />
         </div>
         {status.monitoring && (
           <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-3 text-[12px]" data-testid="markt-monitoring">
@@ -130,6 +133,17 @@ export default function Markt() {
                              (d) => (d.aktiv ? "Crawler an — die Suchaufträge laufen jetzt automatisch" : "Crawler aus"));
                     }}>
               {status.aktiv ? <><Pause size={14} /> Crawler ausschalten</> : <><Play size={14} /> Crawler einschalten</>}
+            </Button>
+            <Button size="sm" variant="outline" disabled={!!busy} data-testid="markt-firmen-schalter"
+                    title={status.firmen_sichtbar ? "Marktdaten für Chef und Sucher wieder ausblenden" : "Marktdaten für Chef und Sucher freischalten (Karte im Vergleich, Hinweis im Vertrag, Chancen)"}
+                    onClick={() => {
+                      const an = !status.firmen_sichtbar;
+                      if (!window.confirm(an ? "Marktdaten für alle Firmen freischalten?\n\nChef und Sucher sehen dann die Marktdaten-Karte im Vergleich und den Hinweis im Vertrag."
+                                             : "Marktdaten für alle Firmen ausblenden?\n\nChef und Sucher sehen sie dann nicht mehr — die Admin-Marktanalyse bleibt.")) return;
+                      aktion("sichtbarkeit", () => api.post("/admin/market/sichtbarkeit", { firmen: an }),
+                             (d) => (d.firmen_sichtbar ? "Marktdaten für Firmen freigeschaltet" : "Marktdaten für Firmen ausgeblendet"));
+                    }}>
+              {status.firmen_sichtbar ? "Für Firmen ausblenden" : "Für Firmen freischalten"}
             </Button>
             <Button size="sm" variant="outline" disabled={!!busy} data-testid="markt-sync"
                     onClick={() => aktion("sync", () => api.post("/admin/market/sync"), (d) => `Modelle: ${d.modelle?.neu ?? 0} neu · Segmente: ${d.segmente?.segmente ?? 0}`)}

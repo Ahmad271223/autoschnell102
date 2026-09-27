@@ -41,7 +41,21 @@ class KonfigIn(BaseModel):
 
 @router.get("/admin/market/status")
 async def admin_market_status(_=Depends(current_admin)):
-    return await abfrage.status(db)
+    # Wunsch Ahmad 27.09.2026: Stand des Schalters "Marktdaten fuer Firmen sichtbar"
+    return {**(await abfrage.status(db)), "firmen_sichtbar": await konfig.firmen_sichtbar(db)}
+
+
+class SichtbarkeitIn(BaseModel):
+    firmen: bool
+
+
+@router.post("/admin/market/sichtbarkeit")
+async def admin_market_sichtbarkeit(body: SichtbarkeitIn, admin=Depends(current_super_admin)):
+    """Wunsch Ahmad 27.09.2026: Marktdaten (Karte im Vergleich, Hinweis im Vertrag, Chancen) fuer Chef und
+    Sucher freischalten oder wieder ausblenden. Standard aus — die Admin-Marktanalyse bleibt immer sichtbar."""
+    an = await konfig.firmen_sichtbar_setzen(db, body.firmen, wer=admin["id"])
+    await log_activity_sicher("", admin["id"], "admin.markt.sichtbarkeit", meta={"firmen": an})
+    return {"ok": True, "firmen_sichtbar": an}
 
 
 @router.get("/admin/market/models")

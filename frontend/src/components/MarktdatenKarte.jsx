@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { BarChart3 } from "lucide-react";
 import { api } from "@/lib/api";
+import { useFeatures } from "@/lib/features";
 import { DATENLAGE, bestandText, datumZeit, eur, medianLabel, medianSample, seitErstbeobachtung, trendFarbe, trendText } from "@/lib/markt";
 import MarktQualitaet from "@/components/MarktQualitaet";
 
@@ -27,16 +28,18 @@ function differenz(preis, median, minPreis, daten) {
 }
 export default function MarktdatenKarte({ vehicleId, preis }) {
   const [daten, setDaten] = useState(null);
+  // Wunsch Ahmad 27.09.2026: Marktdaten sehen Chef und Sucher erst nach Freischaltung im Admin
+  const { marktdaten } = useFeatures();
   useEffect(() => {
-    if (!vehicleId) return undefined;
+    if (!vehicleId || !marktdaten) return undefined;
     let aktiv = true;
     const abbruch = new AbortController();
     api.get(`/market-intelligence/vehicle/${vehicleId}`, { timeout: ZEITLIMIT_MS, signal: abbruch.signal })
       .then((r) => { if (aktiv && (r?.data?.sample_size || r?.data?.kein_segment_grund)) setDaten(r.data); })
       .catch(() => { /* still: keine Marktdaten, keine Karte */ });
     return () => { aktiv = false; abbruch.abort(); };
-  }, [vehicleId]);
-  if (!daten) return null;
+  }, [vehicleId, marktdaten]);
+  if (!daten || !marktdaten) return null;
   if (!daten.sample_size && daten.kein_segment_grund) {
     // Reparaturwelle 5 Nr. 28: kein exaktes Segment (z. B. Getriebe am Fahrzeug unbekannt) — sagen statt verschwinden
     return (
@@ -118,13 +121,14 @@ export default function MarktdatenKarte({ vehicleId, preis }) {
 /** Kleiner Hinweis für den Vertragsdialog (nur lesend, nie Pflicht). */
 export function useMarktHinweis(vehicleId, offen) {
   const [daten, setDaten] = useState(null);
+  const { marktdaten } = useFeatures();
   useEffect(() => {
-    if (!offen || !vehicleId) { setDaten(null); return undefined; }
+    if (!offen || !vehicleId || !marktdaten) { setDaten(null); return undefined; }
     let aktiv = true;
     api.get(`/market-intelligence/vehicle/${vehicleId}`, { timeout: ZEITLIMIT_MS })
       .then((r) => { if (aktiv && r?.data?.sample_size) setDaten(r.data); })
       .catch(() => {});
     return () => { aktiv = false; };
-  }, [vehicleId, offen]);
-  return daten;
+  }, [vehicleId, offen, marktdaten]);
+  return marktdaten ? daten : null;
 }

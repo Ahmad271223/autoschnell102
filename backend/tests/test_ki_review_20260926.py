@@ -212,6 +212,10 @@ def test_05_marktdaten_karte_nur_eigener_bereich(welt, monkeypatch):
     async def _karte(db_, daten, listing_id=None):
         return {"sample_size": 3, "median_top20_price": 18400}
     monkeypatch.setattr(M.abfrage, "karte", _karte)
+
+    async def _sichtbar(db_):
+        return True
+    monkeypatch.setattr(M.konfig, "firmen_sichtbar", _sichtbar)      # Wunsch Ahmad 27.09.: nur nach Freischaltung
     assert welt.run(M.markt_karte(vid, user=w.chef))["sample_size"] == 3
     assert welt.run(M.markt_karte(vid, user=w.sucher))["sample_size"] == 3
     with pytest.raises(HTTPException) as ex:

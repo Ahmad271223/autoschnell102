@@ -124,6 +124,27 @@ async def crawler_schalten(db, an: bool, wer: str = "") -> bool:
     return bool(an)
 
 
+SICHTBARKEIT_DOK = "sichtbarkeit"     # market_config/_id=sichtbarkeit: {"firmen": bool} — Knopf im Admin
+
+
+async def firmen_sichtbar(db) -> bool:
+    """Wunsch Ahmad 27.09.2026: Chef und Sucher sehen die Marktanalyse (Karte im Vergleich, Hinweis im
+    Vertrag, Chancen) erst, wenn der Super-Admin sie freischaltet — "die kommen erst nach ein paar Monaten
+    dazu". Standard AUS; kann der Schalter nicht gelesen werden (Datenbank-Stoerung), gilt AUS (fail-closed).
+    Die Admin-Marktanalyse und die interne Nutzung (Crawler, Berichte, KI-Kontext) haengen NICHT daran."""
+    try:
+        doc = await db[KONFIG].find_one({"_id": SICHTBARKEIT_DOK}, {"_id": 0, "firmen": 1})
+    except Exception:  # noqa: BLE001
+        return False
+    return bool((doc or {}).get("firmen"))
+
+
+async def firmen_sichtbar_setzen(db, an: bool, wer: str = "") -> bool:
+    await db[KONFIG].update_one({"_id": SICHTBARKEIT_DOK},
+                                {"$set": {"firmen": bool(an), "updated_at": jetzt_iso(), "von": str(wer or "")}}, upsert=True)
+    return bool(an)
+
+
 async def merker_lesen(db, dok: str) -> dict:
     try:
         return await db[KONFIG].find_one({"_id": dok}, {"_id": 0}) or {}

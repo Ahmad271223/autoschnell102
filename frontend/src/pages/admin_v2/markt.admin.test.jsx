@@ -238,6 +238,17 @@ describe("Admin Marktanalyse", () => {
     expect(keineFrage).not.toHaveBeenCalled();
     expect(netz.posts.find((p) => p.url === "/admin/market/crawler").body).toEqual({ aktiv: false });
     keineFrage.mockRestore();
+    // Wunsch Ahmad 27.09.2026: Marktdaten fuer Firmen — Standard "nur Admin", Freischalten nur nach Rueckfrage
+    expect(el("markt-status").textContent).toContain("nein — nur Admin");
+    expect(el("markt-firmen-schalter").textContent).toBe("Für Firmen freischalten");
+    const frage2 = vi.spyOn(window, "confirm").mockReturnValue(false);
+    await klick("markt-firmen-schalter");
+    expect(netz.posts.some((p) => p.url === "/admin/market/sichtbarkeit")).toBe(false);
+    frage2.mockReturnValue(true);
+    await klick("markt-firmen-schalter");
+    expect(frage2.mock.calls[0][0]).toContain("Marktdaten für alle Firmen freischalten?");
+    expect(netz.posts.find((p) => p.url === "/admin/market/sichtbarkeit").body).toEqual({ firmen: true });
+    frage2.mockRestore();
   });
 
   it("Modellseite: Segmentwahl, Kennzahlen, Verlauf, Auswertung, Tabelle, Top-N und Listing-Historie", async () => {

@@ -22,7 +22,11 @@ router = APIRouter()
 async def markt_karte(vehicle_id: str, user=Depends(current_firma)):
     """Karte 'AutoSchnell Marktdaten' zum Fahrzeug des Vergleichs (nur lesen).
     Review 26.09.2026 (Nr. 9): Fahrzeug nur im Bereich des Kontos (Chef =
-    Firma, Sucher = eigene/mitbearbeitete) — wie bei Vertrag und Termin."""
+    Firma, Sucher = eigene/mitbearbeitete) — wie bei Vertrag und Termin.
+    Wunsch Ahmad 27.09.2026: solange die Marktdaten fuer Firmen nicht freigeschaltet sind
+    (konfig.firmen_sichtbar), gibt es keine Karte — still 404 wie ohne Daten."""
+    if not await konfig.firmen_sichtbar(db):
+        raise HTTPException(404, "Keine Marktdaten")
     try:
         v = await db.vehicles.find_one({"id": vehicle_id, **fahrzeug_bereich(user)}, {"_id": 0, "data": 1, "mobile_ad_id": 1})
         if not v:
@@ -44,7 +48,7 @@ async def markt_karte(vehicle_id: str, user=Depends(current_firma)):
 async def markt_chancen(typ: Optional[str] = None, model_id: Optional[str] = None, segment_id: Optional[str] = None,
                         km_min: Optional[int] = None, km_max: Optional[int] = None, tage: int = 7, limit: int = 100,
                         user=Depends(current_firma)):
-    if not konfig.chancen_aktiv():
+    if not konfig.chancen_aktiv() or not await konfig.firmen_sichtbar(db):
         raise HTTPException(404, "Demnächst verfügbar")
     try:
         return {"chancen": await abfrage.chancen(db, typ=typ, model_id=model_id, segment_id=segment_id, km_min=km_min,
@@ -58,7 +62,7 @@ async def markt_chancen(typ: Optional[str] = None, model_id: Optional[str] = Non
 @router.get("/markt/modelle")
 async def markt_modelle(user=Depends(current_firma)):
     """Filterlisten fuer Chancen: aktive Modelle, km- und EZ-Bereiche."""
-    if not konfig.chancen_aktiv():
+    if not konfig.chancen_aktiv() or not await konfig.firmen_sichtbar(db):
         raise HTTPException(404, "Demnächst verfügbar")
     modelle = await db[konfig.MODELLE].find({"enabled": True}, {"_id": 0, "id": 1, "label": 1, "make": 1, "model": 1,
                                                                "variant": 1}).sort("label", 1).to_list(2000)

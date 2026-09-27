@@ -16,7 +16,9 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const api = vi.hoisted(() => ({ get: vi.fn() }));
 vi.mock("@/lib/api", () => ({ api, errMsg: (e, s) => e?.message || s }));
 
-const { default: MarktdatenKarte } = await import("./MarktdatenKarte");
+const { default: MarktdatenKarte, useMarktHinweis } = await import("./MarktdatenKarte");
+// Wunsch Ahmad 27.09.2026: Marktdaten fuer Firmen nur nach Freischaltung (Schalter "marktdaten" aus /features)
+const { featuresSetzen } = await import("@/lib/features");
 
 const DATEN = {
   segment_id: "bmw-320d:55001-85000:2019-2021", label: "BMW 320d", km_label: "55–85k km", ez_label: "EZ 2019–2021",
@@ -39,10 +41,23 @@ async function starten(props) {
   await act(async () => { wurzel.render(createElement(MarktdatenKarte, props)); });
   await act(async () => { for (let i = 0; i < 5; i += 1) await Promise.resolve(); });
 }
-beforeEach(() => { api.get.mockReset(); });
+beforeEach(() => { api.get.mockReset(); featuresSetzen({ marktdaten: true }); });
 afterEach(async () => { if (wurzel) await act(async () => { wurzel.unmount(); }); wurzel = null; behaelter?.remove(); });
 
 describe("MarktdatenKarte", () => {
+  it("ohne Freischaltung für Firmen: kein Aufruf, keine Karte, kein Hinweis im Vertrag (Wunsch Ahmad 27.09.)", async () => {
+    featuresSetzen({ marktdaten: false });
+    api.get.mockResolvedValue({ data: { sample_size: 12, min_price: 18900, median_sample_price: 20250 } });
+    behaelter = document.createElement("div"); document.body.appendChild(behaelter); wurzel = createRoot(behaelter);
+    let hinweis = "leer";
+    function Hinweis() { hinweis = useMarktHinweis("v1", true); return null; }
+    await act(async () => { wurzel.render(createElement("div", null, createElement(MarktdatenKarte, { vehicleId: "v1", preis: 19000 }), createElement(Hinweis))); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(api.get.mock.calls.some(([u]) => String(u).includes("market-intelligence"))).toBe(false);
+    expect(behaelter.querySelector('[data-testid="marktdaten-karte"]')).toBeNull();
+    expect(hinweis).toBeNull();
+  });
+
   it("zeigt die Werte der N günstigsten, Trend, dieses Inserat und den Datenstand", async () => {
     api.get.mockResolvedValue({ data: DATEN });
     await starten({ vehicleId: "v1", preis: 19400 });

@@ -452,6 +452,10 @@ def test_10_karte_route_faengt_fehler(welt, monkeypatch):
     async def _kaputt(*a, **k):
         raise RuntimeError("Scheduler tot")
     monkeypatch.setattr(ABF, "karte", _kaputt)
+
+    async def _sichtbar(db_):
+        return True
+    monkeypatch.setattr(K, "firmen_sichtbar", _sichtbar)      # Wunsch Ahmad 27.09.: Karte nur nach Freischaltung
     with pytest.raises(HTTPException) as ex:
         welt.run(R.markt_karte(vid, user=w.chef))
     assert ex.value.status_code == 404
@@ -666,7 +670,8 @@ def test_13_buendel_zuordnung_ueber_inputcontext(welt, monkeypatch):
     seg2 = welt.run(db[K.SEGMENTE].find_one({"id": segs[2]["id"]}, {"_id": 0}))
     assert seg2["leer_in_folge"] == 1 and seg2["last_rows"] == 0
     assert welt.run(db[K.SEGMENTE].find_one({"id": segs[0]["id"]}, {"_id": 0}))["last_rows"] == 2
-    # Ein ganzer Buendel-Lauf ohne eine Zeile -> Alarm markt_lauf_leer (Scraper/Sperre), Kosten = Start
+    # Ein ganzer Buendel-Lauf ohne eine Zeile, obwohl die Segmente vorher gefuellt waren (last_rows 2 + 1)
+    # -> Alarm markt_lauf_leer (Scraper/Sperre), Kosten = Start
     for seg in segs[:2]:
         welt.run(JOBS.job_sofort(db, seg["id"]))
 

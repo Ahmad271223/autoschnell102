@@ -464,7 +464,10 @@ async def features():
     'Demnaechst verfuegbar' (Go-Live-Schalter 15.09.2026)."""
     from konfig import marktplatz_aktiv
     from markt import konfig as markt_konfig
-    return {"marktplatz": marktplatz_aktiv(), "markt_chancen": markt_konfig.chancen_aktiv()}
+    # Wunsch Ahmad 27.09.2026: Marktdaten fuer Firmen erst nach Freischaltung im Admin (Standard aus)
+    marktdaten = await markt_konfig.firmen_sichtbar(db)
+    return {"marktplatz": marktplatz_aktiv(), "marktdaten": marktdaten,
+            "markt_chancen": markt_konfig.chancen_aktiv() and marktdaten}
 
 
 @api.get("/health")

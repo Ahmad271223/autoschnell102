@@ -609,6 +609,18 @@ async def _noch_gewollt(db, job: Dict[str, Any], fassung: Optional[Dict[str, Any
 
 
 FILTER_ALARM_MIN_ZEILEN = 3     # Nr. 2: Alarm erst ab 3 gelieferten Zeilen und > 50 % verworfen
+# Befund 27.09.2026 (zwei Alarme markt_lauf_leer, beide Marktluecken: Astra 1.2 Turbo Automatik EZ 2020/21 gibt es
+# kaum; Q5/Octavia EZ 2020 mit 10-30k km — mobile.de meldete selbst 0): ein leerer Buendel-Lauf ist nur dann ein
+# Hinweis auf Scraper/Sperre/URL-Form, wenn DIESELBEN Segmente beim letzten Lauf nennenswert Treffer hatten —
+# mindestens die Haelfte der Segmente mit Zeilen UND zusammen mindestens LAUF_LEER_ALARM_AB_ZEILEN Zeilen.
+LAUF_LEER_ALARM_AB_ZEILEN = 3
+
+
+def lauf_leer_verdaechtig(segmente: List[Dict[str, Any]]) -> bool:
+    """Waren die Segmente eines leer gebliebenen Buendels vorher gefuellt (last_rows am Segment)?"""
+    zeilen = [int(s.get("last_rows") or 0) for s in segmente]
+    mit_treffern = sum(1 for z in zeilen if z > 0)
+    return bool(zeilen) and mit_treffern * 2 >= len(zeilen) and sum(zeilen) >= LAUF_LEER_ALARM_AB_ZEILEN
 
 
 def reservierung_usd(laeufe_plan: int, rows_gesamt: int) -> float:
@@ -951,9 +963,11 @@ async def _auswerten(db, plan: List[Dict[str, Any]], r: Dict[str, Any], res: Opt
             await release(db, sperre, token)
         await _alarm_zu(db, "markt_crawl_fehlgeschlagen", ref=seg_id)
         ergebnisse.append({**erg, "sortierung": nachweis})
-    if len(plan) >= 2 and gesamt_rows == 0 and not unbekannt:
-        # Ein ganzer Buendel-Lauf ohne eine einzige Zeile: Scraper/Sperre/URL-Form — das ist ein Fehler.
-        await _alarm(db, "markt_lauf_leer", ref=str(r.get("run_id") or ""), segmente=len(plan), actor=str(r.get("actor") or ""))
+    if len(plan) >= 2 and gesamt_rows == 0 and not unbekannt and lauf_leer_verdaechtig([p["seg"] for p in plan]):
+        # Ein ganzer Buendel-Lauf ohne eine einzige Zeile, obwohl dieselben Segmente vorher gefuellt waren:
+        # Scraper/Sperre/URL-Form. Sonst Marktluecke (leer_in_folge am Segment), kein Betriebsalarm.
+        await _alarm(db, "markt_lauf_leer", ref=str(r.get("run_id") or ""), segmente=len(plan), actor=str(r.get("actor") or ""),
+                     zeilen_vorher=sum(int(p["seg"].get("last_rows") or 0) for p in plan))
     if res is not None:
         await budget.abrechnen(db, res, kosten_gesamt, gesamt_rows, runs=laeufe)
     return {"status": "ok", "jobs": len(plan), "rows": gesamt_rows, "usd": kosten_gesamt, "laeufe": laeufe, "ergebnisse": ergebnisse,
