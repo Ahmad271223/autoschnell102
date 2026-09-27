@@ -7,7 +7,8 @@ import { useAuth } from "@/context/AuthContext";
 import { Card, Badge, Spinner, EmptyState } from "./_ui";
 import {
   BERICHT_ALT_TEXT, BERICHT_TYP, CONFIDENCE, DATENQUALITAET, HOTDEAL_KLASSE, LIQUIDITAET, MARKTTIEFE, PLAN_STATUS, RICHTUNG,
-  berichtAltesSchema, berichtDiagrammPunkt, datumKurz, datumZeit, eur, pct, periodeText, richtungAusPct, richtungFarbe, trendText,
+  abgelaufenTitel, berichtAltesSchema, berichtDiagrammPunkt, datumKurz, datumZeit, eur, pct, periodeText, richtungAusPct, richtungFarbe,
+  trendText, vorabTeile,
 } from "@/lib/markt";
 
 /**
@@ -115,7 +116,8 @@ export default function MarktBericht() {
     k.budget_segment_tage ? `${k.budget_segment_tage} Segment-Tag(e) wegen Budget nicht geplant` : "",
     k.tage_ohne_plan ? `${k.tage_ohne_plan} Tag(e) ohne Plan` : "",
     k.abgelaufene_segment_tage ? `${k.abgelaufene_segment_tage} Segment-Tag(e) ohne tragbaren Wert` : "",
-    k.vorab_segment_tage ? `${k.vorab_segment_tage} Segment-Tag(e) noch nicht beobachtet` : "",
+    vorabTeile(k, true).neu ? `${vorabTeile(k, true).neu} Segment-Tag(e) noch nicht beobachtet` : "",
+    vorabTeile(k, true).lange ? `${vorabTeile(k, true).lange} Segment-Tag(e) seit über 14 Tagen nicht abgerufen` : "",
   ].filter(Boolean);
   const mitPlanung = k.planung === "jobs" && k.kalendertage != null;
   return (
@@ -310,11 +312,14 @@ export default function MarktBericht() {
                                                                                     title={`Budget-Rotation: an diesem Tag kein Abruf geplant — keine Lücke; im Korbwert${t.median_korb != null ? ` ${eur(t.median_korb)}` : ""} mit dem letzten geplanten Wert`}>
                         {t.nicht_geplante_segmente} Segm. nicht geplant{t.budget_segmente > 0 ? ` (${t.budget_segmente} wegen Budget)` : ""}</span>}
                       {!t.andere_fassung && t.abgelaufene_segmente > 0 && <span className="ml-1 text-[10px] text-zinc-500" data-testid={`bericht-abgelaufen-${t.date}`}
-                                                                                 title="Letzter geplanter Lauf älter als 14 Tage (Intervall über 14 Tage) — keine technische Lücke, aber der Wert fehlt im Korb (über 5 % fehlend: kein Anker)">
+                                                                                 title={abgelaufenTitel(t)}>
                         {t.abgelaufene_segmente} Segm. ohne tragbaren Wert</span>}
-                      {!t.andere_fassung && t.vorab_segmente > 0 && <span className="ml-1 text-[10px]" style={{ color: "var(--st-amber)" }} data-testid={`bericht-vorab-${t.date}`}
-                                                                          title="Serienstart: schon angelegt, aber noch nicht beobachtet — der Tag ist kein Anker, sein Wert ist vom Folgetag rückwärts verkettet">
-                        {t.vorab_segmente} Segm. noch nicht beobachtet</span>}
+                      {!t.andere_fassung && vorabTeile(t).neu > 0 && <span className="ml-1 text-[10px]" style={{ color: "var(--st-amber)" }} data-testid={`bericht-vorab-${t.date}`}
+                                                                          title={`Serienstart: schon angelegt, aber noch nicht beobachtet — der Tag ist kein Anker${t.median_korb != null ? ", sein Wert ist vom Folgetag rückwärts verkettet" : ""}`}>
+                        {vorabTeile(t).neu} Segm. noch nicht beobachtet</span>}
+                      {!t.andere_fassung && vorabTeile(t).lange > 0 && <span className="ml-1 text-[10px]" style={{ color: "var(--st-amber)" }} data-testid={`bericht-vorab-lange-${t.date}`}
+                                                                            title="Das Segment wurde seit mehr als 14 Tagen nicht abgerufen (Intervall über 14 Tage) — sein Wert fehlt, der Tag ist kein Anker">
+                        {vorabTeile(t).lange} Segm. seit über 14 Tagen nicht abgerufen</span>}
                       {!t.andere_fassung && plan && <span className="ml-1 text-[10px]" style={{ color: plan.farbe }} data-testid={`bericht-plan-${t.date}`}
                                                           title={plan.titel}>{plan.text}</span>}
                       {!t.andere_fassung && !t.gueltig && !t.nur_ungueltig && <span className="ml-1 text-[10px] text-zinc-500" data-testid={`bericht-luecke-${t.date}`}>keine Daten</span>}</td>

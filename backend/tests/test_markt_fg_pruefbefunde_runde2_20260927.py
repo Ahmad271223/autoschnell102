@@ -24,7 +24,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_befunde_runde17_termine import _module, welt  # noqa: E402,F401
-from test_markt_20260926 import K, SP  # noqa: E402
+from test_markt_20260926 import JOBS, K, SP  # noqa: E402
 from test_markt_fg_pruefbefunde_20260927 import KM2, _aktive, _keine_rotation, _Merker, _modus, _protokoll, _start, _v  # noqa: E402
 from test_markt_health_20260927 import H, OPT, STICHTAG, _aufraeumen, _doc, _mid, _rechnen, _reihe, _seg, _t  # noqa: E402
 
@@ -165,31 +165,48 @@ def test_r2_pause_mit_nachpruefung_20_tage_endet_bei_treffern(welt):
     """Admin stellt die EMPTY-Nachpruefung auf 20 Tage; SAFE_AUTO pausiert. Im Fenster liegen nur 1-2 Laeufe:
     weiter leer -> EMPTY (nicht UNKNOWN), Pause bleibt; die Nachpruefung findet 4 Autos -> 'Daten widersprechen',
     Pause aufgehoben — aber keine neue Wirkung aus 2 Laeufen (Confidence LOW), das Segment laeuft wieder taeglich.
-    Vorher: UNKNOWN fuer immer, die Pause blieb trotz Autos stehen."""
+    Vorher: UNKNOWN fuer immer, die Pause blieb trotz Autos stehen.
+    Schlussrunde: die Nachpruefung ist jetzt hoechstens 14 Tage (frequenz_pruefen lehnt 20 ab, ein gespeicherter Wert 20
+    wird beim Lesen auf 14 begrenzt); eine vor der Begrenzung angewendete Pause mit 20 Tagen (Altbestand) bleibt
+    beurteilbar, der Tagesplan plant sie hoechstens alle 14 Tage, und sie endet mit einem NEUEN Treffer-Lauf."""
     merker = _Merker(welt)
     _start(welt)
     db = welt.db
     try:
         _modus(welt, "SAFE_AUTO")
         _keine_rotation(welt)
-        welt.run(OPT.frequenz_setzen(db, dict(H.FREQUENZ_STANDARD, empty_nachpruefung_tage=20), wer="test"))
+        with pytest.raises(H.Ungueltig):
+            welt.run(OPT.frequenz_setzen(db, dict(H.FREQUENZ_STANDARD, empty_nachpruefung_tage=20), wer="test"))
+        welt.run(db[K.KONFIG].update_one({"_id": K.OPTIMIERUNG_DOK},
+                                         {"$set": {"frequenz": dict(H.FREQUENZ_STANDARD, empty_nachpruefung_tage=20)}}))
+        einst = welt.run(OPT.einstellungen(db))
+        assert einst["frequenz"]["empty_nachpruefung_tage"] == 14 and einst["frequenz_begrenzt"] is True
         seg = _seg(welt)
         _reihe(welt, seg, 20, [0])
         _rechnen(welt)
-        assert [a["neu"] for a in _aktive(welt, seg["id"])] == [{"intervall_tage": 20, "crawls_per_day": 1, "pausiert": True}]
-        # die Pause laeuft seit Monaten: nur noch Nachpruefungen alle 20 Tage
-        welt.run(db[K.AENDERUNGEN].update_many({"segment_id": seg["id"], "status": "aktiv"}, {"$set": {"reduziert_seit": _t(120)}}))
-        welt.run(db[K.SEGMENTE].update_one({"id": seg["id"]}, {"$set": {"safe_auto.reduziert_seit": _t(120)}}))
+        assert [a["neu"] for a in _aktive(welt, seg["id"])] == [{"intervall_tage": 14, "crawls_per_day": 1, "pausiert": True}]
+        # Altbestand: die Pause mit 20 Tagen laeuft seit Monaten: nur noch Nachpruefungen alle 20 Tage
+        welt.run(db[K.AENDERUNGEN].update_many({"segment_id": seg["id"], "status": "aktiv"},
+                                               {"$set": {"reduziert_seit": _t(120), "tag": _t(120), "geprueft_bis": _t(120),
+                                                         "neu.intervall_tage": 20}}))
+        welt.run(db[K.SEGMENTE].update_one({"id": seg["id"]}, {"$set": {"safe_auto.reduziert_seit": _t(120), "safe_auto.intervall_tage": 20,
+                                                                        "safe_auto.pause_geprueft_bis": _t(120)}}))
         welt.run(db[K.TAGESSTATS].delete_many({"segment_id": seg["id"]}))
         for i in (40, 20, 0):
             _doc(welt, seg, _t(i), 0, praefix=f"l{i}")
-        _rechnen(welt)
+        erg = _rechnen(welt)
         h = welt.run(db[K.HEALTH].find_one({"segment_id": seg["id"]}, {"_id": 0}))
         assert h["valid_runs"] == 2 and h["erwartete_laeufe"] == 1 and h["health"] == "EMPTY", h["health"]
-        assert len(_aktive(welt, seg["id"], "PAUSE_EMPTY")) == 1
-        # die Nachpruefung findet wieder Autos
-        _doc(welt, seg, _t(0), 4, praefix="treffer")
-        erg = _rechnen(welt)
+        aktiv = _aktive(welt, seg["id"], "PAUSE_EMPTY")
+        # 2 Laeufe: Confidence LOW -> keine neue Wirkung (die alte bleibt, Bestandsschutz); der Tagesplan begrenzt ihr
+        # Intervall beim Lesen auf 14 Tage (ohne Migration)
+        assert len(aktiv) == 1 and aktiv[0]["neu"]["intervall_tage"] == 20 and erg["safe_auto"]["aufgehoben"] == 0
+        plan = {"safe_auto": {"intervall_tage": 20, "pausiert": True}, "last_planned_tag": STICHTAG}
+        assert JOBS._ruht(plan, OPT._tag_plus(STICHTAG, 13)) is True and JOBS._ruht(plan, OPT._tag_plus(STICHTAG, 14)) is False
+        # die naechste Nachpruefung (14 Tage spaeter) findet wieder Autos — ein NEUER Lauf mit Treffern
+        spaeter = OPT._tag_plus(STICHTAG, 14)
+        _doc(welt, seg, spaeter, 4, praefix="treffer")
+        erg = _rechnen(welt, stichtag=spaeter)
         h = welt.run(db[K.HEALTH].find_one({"segment_id": seg["id"]}, {"_id": 0}))
         assert h["health"] not in ("UNKNOWN", "EMPTY") and h["confidence"] == "LOW", (h["health"], h["confidence"])
         assert erg["safe_auto"]["aufgehoben"] == 1 and _aktive(welt, seg["id"]) == []

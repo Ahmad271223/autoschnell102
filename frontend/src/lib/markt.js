@@ -237,6 +237,24 @@ export const PLAN_STATUS = {
   crawler_aus: { text: "Crawler aus", titel: "Crawler bewusst ausgeschaltet — nicht geplant, keine Datenlücke", farbe: "var(--text-dim)" },
   budget: { text: "Budget erschöpft", titel: "Monatsbudget aufgebraucht bzw. 0 — nicht geplant wegen Budget, keine technische Lücke", farbe: "var(--text-dim)" },
 };
+/** Schlussrunde: „noch nicht beobachtet“ nur für einen echten Serienstart; Segmente einer laufenden Serie, die seit
+ *  mehr als 14 Tagen nicht abgerufen wurden, stehen getrennt. x = Tageszeile (vorab_segmente, vorab_lange_segmente)
+ *  oder, mit kennzahlen = true, die Kennzahlen des Berichts (…_segment_tage). Ältere Berichte ohne Aufteilung: alles
+ *  wie bisher „noch nicht beobachtet“. */
+export function vorabTeile(x, kennzahlen = false) {
+  const gesamt = Number((kennzahlen ? x?.vorab_segment_tage : x?.vorab_segmente) || 0);
+  const lange = Math.min(gesamt, Number((kennzahlen ? x?.vorab_lange_segment_tage : x?.vorab_lange_segmente) || 0));
+  return { neu: gesamt - lange, lange };
+}
+/** Schlussrunde: Titel „ohne tragbaren Wert“ mit dem wahren Grund (Stillstand oder Intervall über 14 Tage). */
+export function abgelaufenTitel(t) {
+  const still = Number(t?.abgelaufene_stillstand_segmente || 0);
+  const alle = Number(t?.abgelaufene_segmente || 0);
+  const teile = [];
+  if (alle - still > 0) teile.push(`${alle - still} mit Intervall über 14 Tage`);
+  if (still > 0) teile.push(`${still} nach einem Stillstand (Budget, Crawler aus, Planausfall — Intervall normal)`);
+  return `Letzter geplanter Lauf älter als 14 Tage (${teile.join(", ")}) — keine technische Lücke, aber der Wert fehlt im Korb (über 5 % fehlend: kein Anker)`;
+}
 export const BERICHT_ALT_TEXT = "nach älterer Rechenregel erstellt";
 export function berichtAltesSchema(b) {
   if (!b) return false;

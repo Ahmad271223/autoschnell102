@@ -81,10 +81,13 @@ def _v(welt, seg_id, typ):
 
 
 def _lange_pause(welt, seg, tage=(0, 7, 14, 21), n=0, poor=()):
-    """Die Pause laeuft seit ueber 30 Tagen: nur noch Nachpruefungen alle 7 Tage im Fenster."""
+    """Die Pause laeuft seit ueber 30 Tagen: nur noch Nachpruefungen alle 7 Tage im Fenster. Schlussrunde: die Wirkung
+    wurde vor 60 Tagen angewendet (Mindestverweildauer vorbei), die neu geschriebenen Laeufe sind noch nicht geprueft."""
     db = welt.db
-    welt.run(db[K.AENDERUNGEN].update_many({"segment_id": seg["id"], "status": "aktiv"}, {"$set": {"reduziert_seit": _t(60)}}))
-    welt.run(db[K.SEGMENTE].update_one({"id": seg["id"], "safe_auto": {"$exists": True}}, {"$set": {"safe_auto.reduziert_seit": _t(60)}}))
+    welt.run(db[K.AENDERUNGEN].update_many({"segment_id": seg["id"], "status": "aktiv"},
+                                           {"$set": {"reduziert_seit": _t(60), "tag": _t(60), "geprueft_bis": _t(60)}}))
+    welt.run(db[K.SEGMENTE].update_one({"id": seg["id"], "safe_auto": {"$exists": True}},
+                                       {"$set": {"safe_auto.reduziert_seit": _t(60), "safe_auto.pause_geprueft_bis": _t(60)}}))
     welt.run(db[K.TAGESSTATS].delete_many({"segment_id": seg["id"]}))
     for i in tage:
         _doc(welt, seg, _t(i), n, dq="POOR" if i in poor else "GOOD", praefix=f"l{i}")

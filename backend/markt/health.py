@@ -80,6 +80,14 @@ FENSTER_TAGE = 30
 MIN_LAEUFE_BEWERTUNG = 7
 MIN_LAEUFE_EMPTY = 14
 EMPTY_ANTEIL = 0.8                    # Abschnitt 28: >= 80 % der gueltigen Laeufe ohne echten Treffer
+# Hysterese an der EMPTY-Grenze (Schlussrunde 27.09.2026): unter einer SAFE_AUTO-Pause liegen nur 4-5 Nachpruefungen im
+# Fenster — faellt ein alter leerer Lauf heraus, springt die Leerquote von 4/5 = 0,8 auf 3/4 = 0,75, ohne dass sich der
+# Markt geaendert hat (vorher: EMPTY -> THIN -> Pause aufgehoben -> eine Woche spaeter wieder pausiert). Unter einer Pause
+# bleibt der Status deshalb EMPTY, bis die Leerquote unter 60 % faellt ODER ein NEUER gueltiger Lauf seit der letzten
+# Pruefung der Pause Treffer hatte (dann gilt wieder die normale Grenze 80 %). 60 % = bei 4-5 Nachpruefungen mindestens
+# zwei Laeufe mit Treffern mehr als an der Grenze — eine einzelne Beobachtung (Zu- oder Abgang aus dem Fenster)
+# verschiebt die Quote um 0,05-0,25 und reicht nie allein.
+EMPTY_AUFHEBEN_ANTEIL = 0.6
 THIN_MAX_ZEILEN = 2.0                 # Abschnitt 29: im Mittel weniger als ca. 2 gueltige Fahrzeuge je Lauf
 # UNSTABLE: ab 30 % ungueltiger Laeufe (POOR/ungueltig, mindestens 3) — dann fehlen an fast jedem dritten Tag
 # verlaessliche Werte, die Zeitreihe ist technisch nicht tragfaehig; einzelne Ausfaelle (Wartung, Scraper-Schluckauf)
@@ -115,6 +123,13 @@ NEU_VOLL_ANTEIL = 0.3                 # neue Inserate je Tag relativ zu den best
 TOP_VOLL = 0.7                        # Anteil der Tage mit Top-3/Top-5-Wechsel
 PREIS_VOLL_ANTEIL = 0.15              # Preisaenderungen (gleiche listing_id) je Tag relativ zu den Zeilen
 LUECKE_MAX_TAGE = 7                   # Abstand zum Vergleichstag wird hoechstens mit 7 Tagen gerechnet
+# Obergrenzen der konfigurierbaren Zuordnung (Schlussrunde 27.09.2026): die Tagesrate rechnet mit hoechstens
+# LUECKE_MAX_TAGE Abstand, und ein Inserat gilt nach speicher.WIEDERKEHRER_TAGE (14) wieder als 'neu im Sample' — ein
+# Intervall ueber 7 Tage verfaelschte den Activity Score (n=14: 74 statt 30) und liess SAFE_AUTO mit eigener Zuordnung
+# pendeln. Deshalb Frequenzstufen hoechstens 7 Tage; die EMPTY-Nachpruefung (keine Score-Rechnung, nur 'wieder Treffer?')
+# hoechstens konfig.MAX_INTERVALL_TAGE (14) — laenger liesse die Berichte ohne tragbaren Wert (TRAGEN_MAX_TAGE).
+FREQUENZ_MAX_INTERVALL_TAGE = LUECKE_MAX_TAGE
+NACHPRUEFUNG_MAX_TAGE = konfig.MAX_INTERVALL_TAGE
 # Liquiditaet (Abschnitt 56): Umschlag (neue + verschwundene je Tag relativ zur mittleren Stichprobe) — dieselben
 # Stufen wie die Hot Deals (deals.LIQ_HOCH_UMSCHLAG / LIQ_MITTEL_UMSCHLAG), aber je Kalendertag; im Mittel unter
 # 2 Autos hoechstens LOW (ein Markt mit 1 Auto ist nicht liquide, auch wenn es wechselt).
@@ -155,6 +170,7 @@ GRUND_TEXT = {
     "keine_laeufe": "noch keine Läufe", "letzter_lauf_zu_alt": "letzter gültiger Lauf zu alt",
     "viele_ungueltige_laeufe": "viele ungültige Läufe", "zu_wenig_laeufe": "noch zu wenig gültige Läufe",
     "empty_kandidat": "fast immer leer — noch zu wenig Läufe für EMPTY", "ueberwiegend_leer": "überwiegend ohne Treffer",
+    "leer_pause_haelt": "überwiegend ohne Treffer — Pause hält (kein neuer Lauf mit Treffern, Leerquote noch ab 60 %)",
     "wenige_fahrzeuge": "im Mittel unter 2 Fahrzeuge je Lauf", "stark_schwankend": "Low-Market-Median schwankt stark",
     "sehr_aktiv": "sehr aktiver Markt", "aktiv_und_gefuellt": "aktiv und gut gefüllt", "": "",
 }
@@ -329,11 +345,14 @@ def kennzahlen(docs: List[Dict[str, Any]], *, rows_soll: int, stichtag: str, cra
     medium = poor = ungueltig = 0
     gueltige_tage: List[Dict[str, Any]] = []
     kosten = 0.0
+    treffer_tage: List[str] = []
     for d in docs:
         for art, n, dq in laeufe_aus_doc(d, rows):
             if art == "gueltig":
                 zeilen.append(n)
                 medium += 1 if dq == "MEDIUM" else 0
+                if n > 0:
+                    treffer_tage.append(str(d["date"]))
             elif art == "poor":
                 poor += 1
             else:
@@ -413,6 +432,12 @@ def kennzahlen(docs: List[Dict[str, Any]], *, rows_soll: int, stichtag: str, cra
     erw_laeufe = erwartete_laeufe(wirkung, stichtag=stichtag, crawls_per_day=crawls_per_day, erster_tag=erster,
                                   typischer_abstand=typisch)
     k_vergl = len(vergleich)
+    # Schlussrunde (PAUSE_EMPTY): letzter gueltiger Lauf MIT Treffern und ob er NEU ist — nach der letzten Pruefung der
+    # Pause (pause_geprueft_bis an der Wirkung, gesetzt von markt.optimierung bei jeder Bestaetigung der Pause)
+    letzter_treffer = max(treffer_tage) if treffer_tage else None
+    w_ = wirkung or {}
+    geprueft_bis = str(w_.get("pause_geprueft_bis") or w_.get("seit") or "")[:10] if w_.get("pausiert") else ""
+    neuer_treffer = bool(letzter_treffer and geprueft_bis and letzter_treffer > geprueft_bis)
     r_t3, r_t5 = tagesrate(b_t3), tagesrate(b_t5)
     top_n = len(b_t3) + len(b_t5)
     top_rate = (((r_t3 or 0.0) * len(b_t3) + (r_t5 or 0.0) * len(b_t5)) / top_n) if top_n else 0.0
@@ -444,7 +469,9 @@ def kennzahlen(docs: List[Dict[str, Any]], *, rows_soll: int, stichtag: str, cra
                        "preisaenderungen_je_tag": _r(preis_tag, 3), "vergleiche": k_vergl} if k_vergl else None,
         "median_price_change_pct": _r(aenderung_pct, 2), "price_volatility_pct": _r(vola, 2),
         "preis_streuung_pct": _r(statistics.median(streuung_tage), 2) if streuung_tage else None,
-        "letzter_gueltiger_tag": letzter, "letzter_lauf_alter_tage": alter, "erwarteter_abstand_tage": erwartet,
+        "letzter_gueltiger_tag": letzter, "letzter_treffer_tag": letzter_treffer,
+        "pause_geprueft_bis": geprueft_bis or None, "pause_neuer_treffer": neuer_treffer,
+        "letzter_lauf_alter_tage": alter, "erwarteter_abstand_tage": erwartet,
         "stale_grenze_tage": stale_grenze, "stale": alter is not None and alter > stale_grenze,
         "erster_tag_im_fenster": erster, "beobachtungs_tage": beob_tage, "laeufe_gesamt": laeufe_gesamt,
         "crawl_cost_usd_fenster": round(kosten, 4),
@@ -490,7 +517,12 @@ def health_bestimmen(m: Dict[str, Any], score: int, *, wirkung: Optional[Dict[st
         return STALE, "letzter_lauf_zu_alt"
     if invalid >= UNSTABLE_UNGUELTIG_MIN and float(m.get("ungueltig_anteil") or 0) >= UNSTABLE_UNGUELTIG_ANTEIL:
         return UNSTABLE, "viele_ungueltige_laeufe"
-    leer = float(m.get("empty_rate") or 0) >= EMPTY_ANTEIL
+    quote = float(m.get("empty_rate") or 0)
+    leer = quote >= EMPTY_ANTEIL
+    hyst = False
+    if (not leer and (wirkung or {}).get("pausiert") and not m.get("pause_neuer_treffer")
+            and quote >= EMPTY_AUFHEBEN_ANTEIL):
+        leer = hyst = True    # Hysterese unter der Pause: ohne neuen Treffer-Lauf haelt EMPTY bis unter 60 %
     erw = m.get("erwartete_laeufe")
     min_bew = int(m["min_laeufe_bewertung"]) if m.get("min_laeufe_bewertung") else min_laeufe(MIN_LAEUFE_BEWERTUNG, wirkung, erw)
     min_empty = int(m["min_laeufe_empty"]) if m.get("min_laeufe_empty") else min_laeufe(MIN_LAEUFE_EMPTY, wirkung, erw)
@@ -498,7 +530,7 @@ def health_bestimmen(m: Dict[str, Any], score: int, *, wirkung: Optional[Dict[st
         return UNKNOWN, ("empty_kandidat" if valid and leer else "zu_wenig_laeufe")
     if leer:
         if valid >= min_empty:
-            return EMPTY, "ueberwiegend_leer"
+            return EMPTY, ("leer_pause_haelt" if hyst else "ueberwiegend_leer")
         return UNKNOWN, "empty_kandidat"
     if float(m.get("avg_valid_rows") or 0) < THIN_MAX_ZEILEN:
         return THIN, "wenige_fahrzeuge"
@@ -560,30 +592,33 @@ def data_quality_zusammen(m: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------- Frequenz-Zuordnung (konfigurierbar)
 def frequenz_pruefen(roh: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Zuordnung Score -> Frequenz pruefen und normalisieren. 1-6 Stufen, 'ab' streng fallend, letzte Stufe ab 0;
-    2x taeglich (crawls_per_day > 1) nur mit Intervall 1 Tag; Intervalle 1-30 Tage; 'bis' (Spanne wie 3-7) >= von;
-    EMPTY-Nachpruefung 1-60 Tage."""
+    2x taeglich (crawls_per_day > 1) nur mit Intervall 1 Tag; Intervalle 1-FREQUENZ_MAX_INTERVALL_TAGE (7) Tage;
+    'bis' (Spanne wie 3-7) >= von; EMPTY-Nachpruefung 1-NACHPRUEFUNG_MAX_TAGE (14) Tage (Schlussrunde: Begruendung
+    bei den Konstanten)."""
     roh = roh or {}
     stufen_roh = roh.get("stufen")
     if not isinstance(stufen_roh, list) or not 1 <= len(stufen_roh) <= 6:
         raise Ungueltig("1 bis 6 Frequenzstufen")
 
-    def _zahl(w: Any, name: str, unten: int, oben: int) -> int:
+    def _zahl(w: Any, name: str, unten: int, oben: int, warum: str = "") -> int:
         try:
             z = int(w)
         except (TypeError, ValueError):
             raise Ungueltig(f"{name}: keine Zahl")
         if z < unten or z > oben:
-            raise Ungueltig(f"{name}: {z} liegt außerhalb {unten}–{oben}")
+            raise Ungueltig(f"{name}: {z} liegt außerhalb {unten}–{oben}{warum}")
         return z
+    warum_n = (f" (höchstens {FREQUENZ_MAX_INTERVALL_TAGE} Tage: der Activity Score vergleicht Läufe höchstens "
+               f"{LUECKE_MAX_TAGE} Tage auseinander — seltener verfälscht ihn)")
     stufen = []
     for i, s in enumerate(stufen_roh, 1):
         if not isinstance(s, dict):
             raise Ungueltig(f"Stufe {i}: ungültig")
         ab = _zahl(s.get("ab"), f"Stufe {i} ab Score", 0, 100)
         cpd = _zahl(s.get("crawls_per_day") or 1, f"Stufe {i} Abrufe je Tag", 1, 4)
-        n = _zahl(s.get("intervall_tage") or 1, f"Stufe {i} Intervall", 1, 30)
+        n = _zahl(s.get("intervall_tage") or 1, f"Stufe {i} Intervall", 1, FREQUENZ_MAX_INTERVALL_TAGE, warum_n)
         bis = s.get("intervall_tage_bis")
-        bis = None if bis in (None, "", 0) else _zahl(bis, f"Stufe {i} Intervall bis", 1, 30)
+        bis = None if bis in (None, "", 0) else _zahl(bis, f"Stufe {i} Intervall bis", 1, FREQUENZ_MAX_INTERVALL_TAGE, warum_n)
         if bis is not None and bis < n:
             raise Ungueltig(f"Stufe {i}: Intervall bis ({bis}) liegt unter von ({n})")
         if cpd > 1 and (n > 1 or (bis or 1) > 1):
@@ -594,8 +629,30 @@ def frequenz_pruefen(roh: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             raise Ungueltig("Stufen: 'ab Score' muss von oben nach unten streng fallen")
     if stufen[-1]["ab"] != 0:
         raise Ungueltig("die letzte Stufe muss bei Score 0 beginnen")
-    nach = _zahl(roh.get("empty_nachpruefung_tage") or 7, "EMPTY-Nachprüfung", 1, 60)
+    nach = _zahl(roh.get("empty_nachpruefung_tage") or 7, "EMPTY-Nachprüfung", 1, NACHPRUEFUNG_MAX_TAGE,
+                 f" (höchstens {NACHPRUEFUNG_MAX_TAGE} Tage: ältere Werte tragen die Berichte nicht mehr)")
     return {"stufen": stufen, "empty_nachpruefung_tage": nach}
+
+
+def frequenz_begrenzen(roh: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Schlussrunde: GESPEICHERTE Zuordnung beim Lesen auf die Obergrenzen begrenzen (kein Migrationszwang) — ein vor
+    der Begrenzung gespeichertes 'alle 30 Tage' wird zu 7 Tagen, eine Nachpruefung 30 zu 14. Danach normal geprueft
+    (frequenz_pruefen); ungueltig bleibt ungueltig (der Aufrufer faellt auf den Standard zurueck)."""
+    if not isinstance(roh, dict):
+        return frequenz_pruefen(roh)
+
+    def _deckel(w: Any, oben: int) -> Any:
+        try:
+            return min(int(w), oben) if w not in (None, "") else w
+        except (TypeError, ValueError):
+            return w
+    stufen = roh.get("stufen")
+    if isinstance(stufen, list):
+        stufen = [({**s, "intervall_tage": _deckel(s.get("intervall_tage"), FREQUENZ_MAX_INTERVALL_TAGE),
+                    "intervall_tage_bis": _deckel(s.get("intervall_tage_bis"), FREQUENZ_MAX_INTERVALL_TAGE)}
+                   if isinstance(s, dict) else s) for s in stufen]
+    return frequenz_pruefen({**roh, "stufen": stufen,
+                             "empty_nachpruefung_tage": _deckel(roh.get("empty_nachpruefung_tage"), NACHPRUEFUNG_MAX_TAGE)})
 
 
 def empfehlung(status: str, score: int, cfg: Optional[Dict[str, Any]] = None, *,
@@ -632,7 +689,7 @@ def empfehlung(status: str, score: int, cfg: Optional[Dict[str, Any]] = None, *,
 def _zuordnung(status: str, score: int, cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Die konfigurierte Zuordnung Score -> Frequenz, exakt (ohne Hysterese)."""
     if status == EMPTY:
-        n = int(cfg.get("empty_nachpruefung_tage") or 7)
+        n = max(1, min(NACHPRUEFUNG_MAX_TAGE, int(cfg.get("empty_nachpruefung_tage") or 7)))
         return {"pausiert": True, "intervall_tage": n, "crawls_per_day": 1, "frequency_days": float(n), "stufe_ab": None}
     if status not in MIT_EMPFEHLUNG:
         return None
@@ -642,8 +699,8 @@ def _zuordnung(status: str, score: int, cfg: Dict[str, Any]) -> Optional[Dict[st
     for i, st in enumerate(stufen):
         if s >= int(st["ab"]):
             wahl = st
-            n = int(st["intervall_tage"])
-            bis = int(st.get("intervall_tage_bis") or n)
+            n = min(FREQUENZ_MAX_INTERVALL_TAGE, int(st["intervall_tage"]))
+            bis = min(FREQUENZ_MAX_INTERVALL_TAGE, int(st.get("intervall_tage_bis") or n))
             if bis > n:
                 oben = int(stufen[i - 1]["ab"]) - 1 if i > 0 else 100
                 anteil = (s - int(st["ab"])) / max(1, oben - int(st["ab"]))
@@ -754,6 +811,33 @@ _PROJEKTION = {"_id": 0, "listings": 0, "disappeared_ids": 0, "price_reduced_ids
                "hot_deals": 0, "hot_deal_ids_tag": 0, "hot_deal_privat_ids_tag": 0, "hot_deal_neu_ids": 0}
 
 
+def _segmente_rechnen(segs: List[Dict[str, Any]], je_seg: Dict[str, List[Dict[str, Any]]], alt: Dict[str, Dict[str, Any]],
+                      ausserhalb: Dict[str, Optional[str]], *, mid: str, stichtag: str, cfg: Dict[str, Any],
+                      jetzt_iso: str) -> Tuple[Dict[str, Dict[str, Any]], List[UpdateOne], List[UpdateOne]]:
+    """Reine Rechnung (ohne Datenbank, laeuft im Hilfsthread): Health-Dokumente je Segment, Schreib-Operationen fuer
+    die Health-Dokumente und die Status-WECHSEL (Historie)."""
+    docs: Dict[str, Dict[str, Any]] = {}
+    ops: List[UpdateOne] = []
+    hist: List[UpdateOne] = []
+    for s in segs:
+        letzter_aussen = ausserhalb.get(s["id"])
+        if letzter_aussen and letzter_aussen > stichtag:
+            letzter_aussen = None           # Stichtag in der Vergangenheit: spaetere Laeufe zaehlen nicht
+        h = segment_health(s, je_seg.get(s["id"]) or [], stichtag=stichtag, cfg=cfg,
+                           letzter_gueltiger_tag_ausserhalb=letzter_aussen, jetzt_iso=jetzt_iso)
+        docs[s["id"]] = h
+        vorher = alt.get(s["id"]) or {}
+        if vorher.get("health") != h["health"]:
+            h["health_seit"] = stichtag
+            h["health_vorher"] = vorher.get("health")
+            hist.append(UpdateOne({"segment_id": s["id"], "tag": stichtag, "von": vorher.get("health"), "nach": h["health"]},
+                                  {"$setOnInsert": {"model_id": mid, "version": h["version"], "activity_score": h["activity_score"],
+                                                    "grund": h["health_grund"], "confidence": h["confidence"], "at": jetzt_iso}},
+                                  upsert=True))
+        ops.append(UpdateOne({"segment_id": s["id"]}, {"$set": h}, upsert=True))
+    return docs, ops, hist
+
+
 async def modell_berechnen(db, modell: Dict[str, Any], *, stichtag: str, cfg: Dict[str, Any],
                            jetzt_iso: Optional[str] = None) -> Dict[str, Any]:
     """Health aller aktiven Segmente eines Suchauftrags (aktuelle Fassung) aus den gespeicherten Tageswerten rechnen,
@@ -775,24 +859,11 @@ async def modell_berechnen(db, modell: Dict[str, Any], *, stichtag: str, cfg: Di
             lauf = st.get("letzter_gueltiger_lauf_at")
             z = speicher._zeitpunkt(lauf) if lauf else None
             ausserhalb[st["_id"]] = konfig.heute_tag(z) if z else None
-    docs: Dict[str, Dict[str, Any]] = {}
-    ops, hist = [], []
-    for s in segs:
-        letzter_aussen = ausserhalb.get(s["id"])
-        if letzter_aussen and letzter_aussen > stichtag:
-            letzter_aussen = None           # Stichtag in der Vergangenheit: spaetere Laeufe zaehlen nicht
-        h = segment_health(s, je_seg.get(s["id"]) or [], stichtag=stichtag, cfg=cfg,
-                           letzter_gueltiger_tag_ausserhalb=letzter_aussen, jetzt_iso=jetzt_iso)
-        docs[s["id"]] = h
-        vorher = alt.get(s["id"]) or {}
-        if vorher.get("health") != h["health"]:
-            h["health_seit"] = stichtag
-            h["health_vorher"] = vorher.get("health")
-            hist.append(UpdateOne({"segment_id": s["id"], "tag": stichtag, "von": vorher.get("health"), "nach": h["health"]},
-                                  {"$setOnInsert": {"model_id": mid, "version": h["version"], "activity_score": h["activity_score"],
-                                                    "grund": h["health_grund"], "confidence": h["confidence"], "at": jetzt_iso}},
-                                  upsert=True))
-        ops.append(UpdateOne({"segment_id": s["id"]}, {"$set": h}, upsert=True))
+    # Schlussrunde (Regel 4, Event-Loop): die reine Rechnung aller Segmente eines Auftrags laeuft im Hilfsthread
+    # (asyncio.to_thread) — mit der Tagesrate ~1,7 ms je Segment, bei 144 Segmenten sonst ~150-250 ms Blockade am Stueck.
+    # Lesen und Schreiben bleiben async (Motor) im Event-Loop.
+    docs, ops, hist = await asyncio.to_thread(_segmente_rechnen, segs, je_seg, alt, ausserhalb, mid=mid, stichtag=stichtag,
+                                              cfg=cfg, jetzt_iso=jetzt_iso)
     if ops:
         await db[HEALTH].bulk_write(ops, ordered=False)
     if hist:
@@ -862,4 +933,5 @@ def schwellen() -> Dict[str, Any]:
             "hot_ab_score": HOT_AB_SCORE, "healthy_ab_score": HEALTHY_AB_SCORE, "healthy_min_fuellung": HEALTHY_MIN_FUELLUNG,
             "gewichte": dict(GEWICHTE), "thin_min_intervall_tage": THIN_MIN_INTERVALL_TAGE, "hysterese_punkte": HYSTERESE_PUNKTE,
             "confidence_hoch_tage": CONFIDENCE_HOCH_TAGE, "erwartet_puffer_anteil": ERWARTET_PUFFER_ANTEIL,
-            "min_laeufe_unter_wirkung": MIN_LAEUFE_UNTER_WIRKUNG}
+            "min_laeufe_unter_wirkung": MIN_LAEUFE_UNTER_WIRKUNG, "empty_aufheben_anteil": EMPTY_AUFHEBEN_ANTEIL,
+            "frequenz_max_intervall_tage": FREQUENZ_MAX_INTERVALL_TAGE, "nachpruefung_max_tage": NACHPRUEFUNG_MAX_TAGE}

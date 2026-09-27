@@ -285,7 +285,9 @@ def _ruht(s: Dict[str, Any], tag: str) -> bool:
     """SAFE_AUTO: ein Segment mit Intervall n Tagen (seltener / EMPTY pausiert mit Nachpruefung) wird erst wieder
     geplant, wenn seit dem letzten Plan mindestens n Tage vergangen sind (last_planned_tag + n)."""
     try:
-        n = int(_wirkung(s).get("intervall_tage") or 1)
+        # Schlussrunde: hoechstens konfig.MAX_INTERVALL_TAGE — eine vor der Begrenzung gespeicherte Wirkung (z. B.
+        # Nachpruefung alle 30 Tage) wird beim Lesen begrenzt, ohne Migration
+        n = min(int(_wirkung(s).get("intervall_tage") or 1), konfig.MAX_INTERVALL_TAGE)
     except (TypeError, ValueError):
         return False
     letzter = s.get("last_planned_tag")
@@ -330,12 +332,16 @@ async def tagesplan(db, tag: Optional[str] = None, *, sofort: bool = False) -> D
     schon = sum(1 for s in alle if (s.get("last_planned_tag") or "") == t)
     faellig = [s for s in alle if (s.get("last_planned_tag") or "") < t]
     safe_auto = await _safe_auto_an(db)
-    ruhend = 0
+    ruhend = ruhend_abrufe = 0
     hot: set = set()
     if safe_auto:
         vorher = len(faellig)
+        ruhende = [s for s in faellig if _ruht(s, t)]
         faellig = [s for s in faellig if not _ruht(s, t)]
         ruhend = vorher - len(faellig)
+        # Schlussrunde (Ersparnis je Abruf): Abrufe je Tag des Auftrags der ruhenden Segmente — ein frei gebliebener
+        # Platz spart so viele Laeufe (markt.optimierung.aktive_wirkung_deckeln)
+        ruhend_abrufe = sum(max(1, min(4, int(s.get("crawls_per_day") or 1))) for s in ruhende)
         hot = {s["id"] for s in faellig if _wirkung(s).get("hot")}
         faellig.sort(key=lambda s: 0 if s["id"] in hot else 1)      # stabil: sonst bleibt die Reihenfolge
     kontingent = max(0, int(takt["segmente_je_tag"]) - schon)
@@ -369,7 +375,7 @@ async def tagesplan(db, tag: Optional[str] = None, *, sofort: bool = False) -> D
     # faellige Segmente (Budget-Rotation), senkt eine SAFE_AUTO-Wirkung die Kosten nicht, sie macht Plaetze frei
     await konfig.merker_setzen(db, konfig.TAGESPLAN_DOK, tag=t, segmente=len(segs) + schon, neu=neu, sofort=bool(sofort),
                                segmente_je_tag=int(takt["segmente_je_tag"]), segmente_gesamt=int(takt["segmente"]),
-                               ruhend=int(ruhend), wartend=int(wartend))
+                               ruhend=int(ruhend), wartend=int(wartend), ruhend_abrufe=int(ruhend_abrufe))
     await _plan_protokollieren(db, t, takt, len(segs) + schon)
     erg = {"segmente": len(segs), "neu": neu, "tag": t, "intervall_tage": takt["intervall_tage"],
            "segmente_gesamt": takt["segmente"], "slots": len(slots), "schon_geplant": schon, "wartend": wartend,

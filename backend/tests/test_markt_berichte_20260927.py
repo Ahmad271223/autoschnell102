@@ -853,7 +853,10 @@ def test_23_zu_und_abschalten_ist_keine_datenluecke(welt):
     ber = _rechnen(welt, segs + [neu, wieder], docs + zusatz, "MONTHLY", _a(1), _a(30))
     k = ber["kennzahlen"]
     assert (k["segment_tage_gueltig"], k["segment_tage_erwartet"]) == (468 + 13 + 11, 468 + 16 + 11) and k["segment_luecken"] == 3
-    assert k["confidence"] == "HIGH" and any(f"{468 + 13 + 11} / {468 + 16 + 11} gültige Segment-Tage" in h for h in ber["hinweise"])
+    # Schlussrunde: ohne Ankertag (am 10. fallen 12 von 26 Korb-Segmenten weg, vorher fehlen die zwei neuen — nie 95 %)
+    # bleibt das Euro-Niveau leer; daneben ist der Bericht nie 'hoch' (vorher HIGH neben leerem Euro-Niveau)
+    assert (k["niveau_tage"], k["confidence"], k["confidence_gruende"]) == (0, "MEDIUM", ["kein Ankertag (Euro-Niveau leer)"]), k
+    assert any(f"{468 + 13 + 11} / {468 + 16 + 11} gültige Segment-Tage" in h for h in ber["hinweise"])
     detail = {x["segment_id"]: x for x in ber["segmente"]}
     assert (detail[neu["id"]]["erwartete_tage"], detail[wieder["id"]]["erwartete_tage"]) == (16, 11)
     nie = {**_seg_daten(welt, "920000-929999"), "created_at": "2028-04-26T08:00:00+00:00"}

@@ -130,7 +130,7 @@ vi.mock("@/context/AuthContext", () => ({ useAuth: () => ({ user: { id: "sa", is
 
 const { default: MarktBerichte } = await import("./MarktBerichte");
 const { default: MarktBericht } = await import("./MarktBericht");
-const { berichtAltesSchema, berichtDiagrammPunkt, berichtSortieren, periodeText, richtungAusPct } = await import("@/lib/markt");
+const { abgelaufenTitel, berichtAltesSchema, berichtDiagrammPunkt, berichtSortieren, periodeText, richtungAusPct, vorabTeile } = await import("@/lib/markt");
 
 let wurzel; let behaelter; let ort = null;
 function Ort() { ort = useLocation(); return null; }
@@ -535,5 +535,31 @@ describe("Admin Berichte — Prüfung Runde 4 (Tagesplan-Protokoll, Serienanfang
     await starten("/admin/markt/berichte/bmw-320d?typ=MONTHLY&von=2028-02-01&bis=2028-02-29");
     expect(el("bericht-delta").textContent).toContain("−200 € (-1 %)");
     expect(el("bericht-delta").textContent).not.toContain("Korbgewichts");
+  });
+});
+
+describe("Admin Berichte — Schlussrunde (Beschriftungen)", () => {
+  it("Serienstart nur für echte Serienanfänge; lange nicht abgerufene Segmente und Stillstand mit dem wahren Grund", async () => {
+    const tage = [
+      { ...TAGE[0], date: "2028-02-01", median: 19882, median_korb: null, teilabdeckung: false, fehlende_segmente: 0, ausstehende_segmente: 0,
+        nicht_geplante_segmente: 0, vorab_segmente: 5, vorab_lange_segmente: 3, abgelaufene_segmente: 4, abgelaufene_stillstand_segmente: 4,
+        budget_segmente: 0, korb_abdeckung_pct: 80, anker: false, plan_status: "lief", offen: false },
+    ];
+    netz.bericht = { ...BERICHT, schema: 4, tage,
+                     kennzahlen: { ...BERICHT.kennzahlen, planung: "jobs", kalendertage: 29, tage_mit_wert: 20, vorab_segment_tage: 5, vorab_lange_segment_tage: 3,
+                                   abgelaufene_segment_tage: 4, confidence: "LOW", confidence_gruende: ["kein Ankertag (Euro-Niveau leer)"] } };
+    await starten("/admin/markt/berichte/bmw-320d?typ=MONTHLY&von=2028-02-01&bis=2028-02-29");
+    expect(el("bericht-vorab-2028-02-01").textContent).toContain("2 Segm. noch nicht beobachtet");
+    expect(el("bericht-vorab-2028-02-01").getAttribute("title")).not.toContain("rückwärts verkettet");
+    expect(el("bericht-vorab-lange-2028-02-01").textContent).toContain("3 Segm. seit über 14 Tagen nicht abgerufen");
+    expect(el("bericht-abgelaufen-2028-02-01").getAttribute("title")).toContain("4 nach einem Stillstand");
+    expect(el("bericht-abgelaufen-2028-02-01").getAttribute("title")).not.toContain("mit Intervall über 14 Tage");
+    const planung = el("bericht-planung").textContent;
+    expect(planung).toContain("2 Segment-Tag(e) noch nicht beobachtet");
+    expect(planung).toContain("3 Segment-Tag(e) seit über 14 Tagen nicht abgerufen");
+    // Hilfsfunktionen (ältere Berichte ohne Aufteilung: alles „noch nicht beobachtet“)
+    expect(vorabTeile({ vorab_segmente: 7 })).toEqual({ neu: 7, lange: 0 });
+    expect(vorabTeile({ vorab_segment_tage: 24, vorab_lange_segment_tage: 24 }, true)).toEqual({ neu: 0, lange: 24 });
+    expect(abgelaufenTitel({ abgelaufene_segmente: 3 })).toContain("3 mit Intervall über 14 Tage");
   });
 });

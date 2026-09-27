@@ -294,9 +294,10 @@ def test_06_activity_score_und_frequenzzuordnung_konfigurierbar(welt):
                         "data_quality": "GOOD", "valid_runs": 1}], rows_soll=5, stichtag="2031-01-10")
     assert k1["_neu_je_tag"] == 1.0, "taeglich: genau Ereignisse je Tag (Kalibrierung unveraendert)"
     # Konfiguration: pruefen + speichern + wirkt auf die Empfehlung
+    # Schlussrunde: Intervalle hoechstens 7 Tage (LUECKE_MAX_TAGE), Nachpruefung hoechstens 14 (vorher bis 30/60)
     cfg = H.frequenz_pruefen({"stufen": [{"ab": 80, "crawls_per_day": 2, "intervall_tage": 1}, {"ab": 30, "intervall_tage": 1},
-                                         {"ab": 0, "intervall_tage": 4, "intervall_tage_bis": 10}], "empty_nachpruefung_tage": 14})
-    assert e("NORMAL", 29, cfg)["intervall_tage"] == 4 and e("NORMAL", 0, cfg)["intervall_tage"] == 10 and e("EMPTY", 0, cfg)["intervall_tage"] == 14
+                                         {"ab": 0, "intervall_tage": 4, "intervall_tage_bis": 7}], "empty_nachpruefung_tage": 14})
+    assert e("NORMAL", 29, cfg)["intervall_tage"] == 4 and e("NORMAL", 0, cfg)["intervall_tage"] == 7 and e("EMPTY", 0, cfg)["intervall_tage"] == 14
     for falsch in ({"stufen": [{"ab": 50}, {"ab": 60}, {"ab": 0}]}, {"stufen": [{"ab": 50}, {"ab": 10}]},
                    {"stufen": [{"ab": 0, "crawls_per_day": 2, "intervall_tage": 2}]}, {"stufen": [{"ab": 0, "intervall_tage": 5, "intervall_tage_bis": 3}]},
                    {"stufen": []}, {"stufen": [{"ab": 0}], "empty_nachpruefung_tage": 99}):

@@ -69,7 +69,8 @@ const SEGMENTE = [["HOT", "var(--st-lila)"], ["HEALTHY", "var(--st-gruen)"], ["T
 const AENDERUNGEN = [
   { id: "a1", segment_id: "bmw-320d:v2:2020:3", model_id: "bmw-320d", label: "BMW 320d", ez_label: "EZ 2020", km_label: "30–40k km", typ: "PAUSE_EMPTY", wer: "safe_auto",
     alt: { intervall_tage: 1, crawls_per_day: 1, prioritaet: "normal", pausiert: false }, neu: { intervall_tage: 7, crawls_per_day: 1, pausiert: true },
-    grund: "EZ 2020 · 30–40k km: 20 gültige Läufe, davon 100 % ohne Treffer (EMPTY)", status: "aktiv", at: "2026-10-01T09:00:00Z", estimated_monthly_saving_usd: 0.26 },
+    grund: "EZ 2020 · 30–40k km: 20 gültige Läufe, davon 100 % ohne Treffer (EMPTY)", status: "aktiv", at: "2026-10-01T09:00:00Z", estimated_monthly_saving_usd: 0.26,
+    haelt_bis: "2099-01-01", zurueckgehalten: { tag: "2098-12-28", grund: "Frequenz senken: alle 2 Tage", bis: "2099-01-01" } },
   { id: "a2", segment_id: "bmw-320d:v2:2020:6", model_id: "bmw-320d", label: "BMW 320d", ez_label: "EZ 2020", km_label: "60–70k km", typ: "REDUCE_FREQUENCY", wer: "safe_auto",
     alt: { intervall_tage: 1, crawls_per_day: 1, prioritaet: "normal", pausiert: false }, neu: { intervall_tage: 2, crawls_per_day: 1 },
     grund: "Activity Score 25 (NORMAL) — alle 2 Tage statt täglich reicht", status: "zurueckgenommen", at: "2026-09-30T09:00:00Z", beendet_at: "2026-10-01T10:00:00Z",
@@ -135,7 +136,7 @@ vi.mock("@/lib/api", () => ({
 }));
 vi.mock("@/context/AuthContext", () => ({ useAuth: () => ({ user: { id: "sa", is_super_admin: netz.superAdmin, role: "admin" } }) }));
 
-const { default: MarktOptimierung, stufenZuFormular, formularZuFrequenz } = await import("./MarktOptimierung");
+const { default: MarktOptimierung, stufenZuFormular, formularZuFrequenz, frequenzGrenzenFehler, verweilText } = await import("./MarktOptimierung");
 const { default: MarktModell } = await import("./MarktModell");
 const markt = await import("@/lib/markt");
 
@@ -244,14 +245,21 @@ describe("Admin Segment-Optimierung", () => {
   it("Frequenz-Zuordnung bearbeiten: PUT mit Zahlen, ungültige Eingabe wird nie gesendet, Standard wiederherstellen", async () => {
     await starten();
     await tippen("opt-frequenz-ab-2", "25");
+    // Schlussrunde: Spanne höchstens 7 Tage, Nachprüfung höchstens 14 — darüber wird nie gesendet
     await tippen("opt-frequenz-bis-3", "10");
+    expect(el("opt-frequenz-grenze").textContent).toContain("höchstens alle 7 Tage");
+    expect(el("opt-frequenz-speichern").disabled).toBe(true);
+    await tippen("opt-frequenz-bis-3", "6");
+    await tippen("opt-frequenz-nach", "15");
+    expect(el("opt-frequenz-grenze").textContent).toContain("höchstens alle 14 Tage");
     await tippen("opt-frequenz-nach", "14");
+    expect(el("opt-frequenz-grenze")).toBeNull();
     await klick("opt-frequenz-speichern");
     expect(netz.puts).toHaveLength(1);
     expect(netz.puts[0].url).toBe("/admin/market/optimierung/frequenz");
     expect(netz.puts[0].body).toEqual({ stufen: [{ ab: 75, crawls_per_day: 2, intervall_tage: 1, intervall_tage_bis: null },
       { ab: 45, crawls_per_day: 1, intervall_tage: 1, intervall_tage_bis: null }, { ab: 25, crawls_per_day: 1, intervall_tage: 2, intervall_tage_bis: null },
-      { ab: 0, crawls_per_day: 1, intervall_tage: 3, intervall_tage_bis: 10 }], empty_nachpruefung_tage: 14 });
+      { ab: 0, crawls_per_day: 1, intervall_tage: 3, intervall_tage_bis: 6 }], empty_nachpruefung_tage: 14 });
     await tippen("opt-frequenz-n-1", "1,5");
     expect(el("opt-frequenz-ungueltig").textContent).toContain("nur ganze Zahlen");
     expect(el("opt-frequenz-speichern").disabled).toBe(true);
@@ -528,5 +536,39 @@ describe("Admin Segment-Optimierung", () => {
     await klick("opt-vorschlaege-erneut");
     expect(el("opt-vorschlag-v5")).toBeTruthy();
     expect(el("opt-vorschlag-v1")).toBeNull();
+  });
+});
+
+describe("Schlussrunde: Obergrenzen, Mindestverweildauer, Pause mit Hysterese", () => {
+  it("Grenzen der Zuordnung sichtbar, gespeicherte Altwerte als begrenzt markiert, Schwellen mit Hysterese und Verweildauer", async () => {
+    netz.uebersicht = { ...UEBERSICHT, frequenz_begrenzt: true, frequenz_grenzen: { intervall_max_tage: 7, nachpruefung_max_tage: 14 },
+                        schwellen: { ...UEBERSICHT.schwellen, empty_aufheben_anteil: 0.6, min_verweil_tage: 7 } };
+    await starten();
+    expect(el("opt-frequenz-grenzen").textContent).toContain("Intervall höchstens 7 Tage");
+    expect(el("opt-frequenz-grenzen").textContent).toContain("Nachprüfung höchstens 14 Tage");
+    expect(el("opt-frequenz-begrenzt").textContent).toContain("über einer Grenze");
+    expect(el("opt-frequenz").textContent).toContain("(max. 14)");
+    expect(el("opt-schwellen").textContent).toContain("eine Pause endet erst nach einem neuen Lauf mit Treffern (EMPTY hält bis unter 60 %)");
+    expect(el("opt-schwellen").textContent).toContain("Mindestverweildauer 7 Tage je Änderung");
+  });
+
+  it("Protokoll: aktive Änderung „hält bis <Datum> (Mindestverweildauer)“ mit zurückgehaltener Änderung; beendete ohne Hinweis", async () => {
+    await starten();
+    expect(el("opt-aenderung-verweil-a1").textContent).toBe("hält bis 01.01.2099 (Mindestverweildauer) — zurückgehalten: Frequenz senken: alle 2 Tage");
+    expect(el("opt-aenderung-verweil-a2")).toBeNull();
+    expect(verweilText({ status: "aktiv", haelt_bis: "2031-03-08" }, "2031-03-07")).toBe("hält bis 08.03.2031 (Mindestverweildauer)");
+    expect(verweilText({ status: "aktiv", haelt_bis: "2031-03-08" }, "2031-03-08")).toBe("");
+    expect(verweilText({ status: "aufgehoben", haelt_bis: "2031-03-08" }, "2031-03-01")).toBe("");
+    expect(verweilText({ status: "aktiv" }, "2031-03-01")).toBe("");
+  });
+
+  it("frequenzGrenzenFehler: Intervall/Spanne höchstens 7, Nachprüfung höchstens 14 (Server-Grenzen gehen vor)", () => {
+    const ok = formularZuFrequenz(stufenZuFormular(STANDARD), "14");
+    expect(frequenzGrenzenFehler(ok)).toBe("");
+    expect(frequenzGrenzenFehler(null)).toBe("");
+    expect(frequenzGrenzenFehler({ ...ok, empty_nachpruefung_tage: 15 })).toContain("höchstens alle 14 Tage");
+    const weit = { ...ok, stufen: ok.stufen.map((s, i) => (i === 3 ? { ...s, intervall_tage_bis: 8 } : s)) };
+    expect(frequenzGrenzenFehler(weit)).toBe("Stufe 4: höchstens alle 7 Tage — seltener verfälscht den Activity Score.");
+    expect(frequenzGrenzenFehler(weit, { intervall_max_tage: 10 })).toBe("");
   });
 });

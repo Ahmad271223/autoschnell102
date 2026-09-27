@@ -489,9 +489,13 @@ def test_10_safe_auto_senkt_nur_und_nachpruefung_bestaetigt_oder_hebt_auf(welt, 
         # Pruefbefund F0/F5: Puffer fuer einen Ausfall (4 erwartete Laeufe -> 3 genuegen); ohne Wirkung die festen 14
         assert H.min_laeufe(H.MIN_LAEUFE_EMPTY, {"intervall_tage": 7}) == 3 and H.min_laeufe(H.MIN_LAEUFE_EMPTY, None) == 14
         assert welt.run(db[K.AENDERUNGEN].count_documents({"segment_id": leer["id"], "status": "aktiv"})) == 1
-        # Nachpruefung findet Autos -> nicht mehr EMPTY -> Pause aufgehoben (wer safe_auto, Grund: Daten widersprechen)
+        # Nachpruefung findet Autos -> nicht mehr EMPTY -> Pause aufgehoben (wer safe_auto, Grund: Daten widersprechen).
+        # Schlussrunde: nur NEUE Laeufe (nach der letzten Pruefung der Pause) heben sie auf — die beiden Nachpruefungen
+        # am _t(7) und _t(0) kamen nach der Pruefung am _t(8); die Pause wurde vor 40 Tagen angewendet
         _doc(welt, leer, _t(0), 3)
         _doc(welt, leer, _t(7), 2)
+        welt.run(db[K.AENDERUNGEN].update_many({"segment_id": leer["id"], "status": "aktiv"}, {"$set": {"tag": _t(40), "geprueft_bis": _t(8)}}))
+        welt.run(db[K.SEGMENTE].update_one({"id": leer["id"]}, {"$set": {"safe_auto.pause_geprueft_bis": _t(8)}}))
         _rechnen(welt)
         a = welt.run(db[K.AENDERUNGEN].find_one({"segment_id": leer["id"], "typ": "PAUSE_EMPTY"}, {"_id": 0}))
         assert a["status"] == "aufgehoben" and a["beendet_von"] == "safe_auto" and a["beendet_grund"].startswith("Daten widersprechen: THIN statt EMPTY")

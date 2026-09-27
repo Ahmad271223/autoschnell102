@@ -39,6 +39,18 @@ Pruefbefunde F/G (27.09.2026):
     Wirkungen wird zur Lesezeit auf (Kontingent - heute geplant) gedeckelt (aktive_wirkung_deckeln) — hat SAFE_AUTO
     selbst die Budgetgrenze aufgehoben, sinken die Jobs nur bis zum Kontingent.
 
+Schlussrunde (27.09.2026):
+  Ersparnis je Abruf: Kontingent und 'geplant' sind SEGMENT-Plaetze, die Ersparnis sind LAEUFE. Weniger Abrufe je Tag
+    (2x -> 1x) sparen immer echte Laeufe (das Segment belegt weiter seinen Platz) und werden nie gedeckelt
+    (laeufe_takt); nur Intervall-Senkungen/Pausen unter Budget-Rotation (Kontingent < Segmente) werden auf die frei
+    gebliebenen Segment-Plaetze gedeckelt, gewichtet mit den Abrufen je Tag der ruhenden Segmente (ruhend_abrufe).
+  Pause mit Hysterese: eine PAUSE_EMPTY endet nur, wenn ein NEUER gueltiger Lauf seit der letzten Pruefung der Pause
+    Treffer hatte (geprueft_bis an der Aenderung) — nie, weil ein alter leerer Lauf aus dem Fenster faellt; der Status
+    haelt unter der Pause EMPTY bis unter 60 % (markt.health.EMPTY_AUFHEBEN_ANTEIL).
+  Mindestverweildauer (Produktentscheidung): eine angewendete Wirkung wird fruehestens nach MIN_VERWEIL_TAGE geaendert
+    (Ziel aktualisiert, ersetzt oder aufgehoben) — ausser Aufhebung einer Pause nach neuem Treffer-Lauf (nie blind) und
+    Entscheidungen des Betreibers (Ruecknahme, Ablehnung, Modus OBSERVE, Auftrag pausiert/geaendert).
+
 MERGE/SPLIT werden NIE automatisch angewendet. "Uebernehmen" (nur Super-Admin) aendert den Suchauftrag ueber
 auftraege.aendern: neue km-Bereiche, NEUE FASSUNG (version + 1, neue Segment-IDs, alte Historie bleibt unveraendert
 und wird nie mit der neuen vermischt), der Auftrag wird PAUSIERT — Aktivieren erst nach einem neuen Testlauf
@@ -110,6 +122,12 @@ SPLIT_RASTER_KM = 5000
 # SAFE_AUTO: neue Wirkungen erst ab Confidence MEDIUM (>= 14 gueltige Laeufe); nach einer Ruecknahme 30 Tage Ruhe
 SAFE_MIN_CONFIDENCE = "MEDIUM"
 RUECKNAHME_SPERRE_TAGE = 30
+# Mindestverweildauer (Produktentscheidung Ahmad, Schlussrunde 27.09.2026): eine angewendete SAFE_AUTO-Wirkung eines
+# Segments wird fruehestens nach 7 Tagen geaendert. Eine Woche = mindestens eine Nachpruefung (Standard alle 7 Tage)
+# bzw. 3-7 Laeufe unter einer Reduktion — erst dann liegt ueberhaupt ein neuer Messpunkt vor; kuerzere Wechsel waeren
+# Rauschen und fuellten das Protokoll (Befund: bis zu 33 Eintraege je Segment). Ausnahmen: Aufhebung einer Pause nach
+# einem neuen Treffer-Lauf (Schutz gegen Blindheit) und alle Entscheidungen des Betreibers.
+MIN_VERWEIL_TAGE = 7
 MONAT_TAGE = health.MONAT_TAGE
 # Taeglicher Lauf erst nach dem Crawl-Fenster (konfig.fenster_bis, deutsche Zeit) + 1 h: dann sind die Laeufe des
 # Tages gespeichert; die Wirkung gilt ab dem naechsten Tagesplan (kurz nach Mitternacht)
@@ -190,28 +208,44 @@ def rotation_aus_merker(doc: Optional[Dict[str, Any]], stichtag: str) -> Dict[st
     aktiv = int(doc.get("wartend") or 0) > 0
     planbar = max(1, int(doc.get("segmente_gesamt") or 1) - int(doc.get("ruhend") or 0))
     faktor = min(1.0, int(doc.get("segmente_je_tag") or 0) / planbar) if aktiv else 1.0
+    ruhend = int(doc.get("ruhend") or 0)
     return {"bekannt": True, "aktiv": aktiv, "faktor": round(faktor, 4), "tag": tag,
             "segmente_je_tag": int(doc.get("segmente_je_tag") or 0), "segmente_gesamt": int(doc.get("segmente_gesamt") or 0),
-            "wartend": int(doc.get("wartend") or 0),
+            "wartend": int(doc.get("wartend") or 0), "ruhend": ruhend,
+            # Schlussrunde: Abrufe je Tag (des Auftrags) der ruhenden Segmente — Gewicht eines frei gebliebenen Platzes
+            "ruhend_abrufe": int(doc["ruhend_abrufe"]) if doc.get("ruhend_abrufe") is not None else None,
             "geplant": int(doc["segmente"]) if doc.get("segmente") is not None else None}
 
 
 def aktive_wirkung_deckeln(summe: Dict[str, Any], rotation: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Runde 2 (Ersparnis durch SAFE_AUTO): die gespeicherten Wirkungen der aktiven Aenderungen wurden am Tag der
-    Anwendung mit dem DAMALIGEN Rotationsfaktor gerechnet. Hat SAFE_AUTO selbst die Budgetgrenze aufgehoben (heute
-    wartet niemand mehr), sinken die Jobs nur bis zum Kontingent: ohne die Wirkungen plante der Tagesplan hoechstens
-    'Kontingent' Segmente, mit ihnen 'geplant'. Die echte Ersparnis ist also hoechstens (Kontingent - geplant) je Tag —
-    daran wird die Summe zur Lesezeit gedeckelt (Dollar anteilig). Budgetgrenze aktiv: 0 $ (schon so). Ohne frischen
-    Tagesplan-Merker: unveraendert (die Lage ist unbekannt)."""
+    """Ersparnis durch SAFE_AUTO zur Lesezeit (Runde 2, Schlussrunde). Die gespeicherten Wirkungen wurden am Tag der
+    Anwendung mit dem DAMALIGEN Rotationsfaktor gerechnet. Kontingent und 'geplant' des Tagesplans sind SEGMENT-Plaetze,
+    die Summe sind LAEUFE — verglichen wird deshalb nur, was wirklich Plaetze betrifft:
+      * weniger Abrufe je Tag (laeufe_takt, z. B. 2x -> 1x taeglich): das Segment wird weiter geplant und laeuft seltener
+        je Tag — immer echte Laeufe und Dollar, nie gedeckelt
+      * Intervall-Senkungen und Pausen (der Rest): ohne Budget-Rotation (Kontingent >= alle Segmente) ist jeder ruhende
+        Tag ein gesparter Lauf — nicht gedeckelt. Unter Budget-Rotation (Kontingent < Segmente) und ohne wartende
+        Segmente hat SAFE_AUTO selbst die Budgetgrenze aufgehoben: ohne die Wirkungen haette der Tagesplan 'Kontingent'
+        Segmente geplant, mit ihnen 'geplant' — hoechstens (Kontingent - geplant) Plaetze je Tag sind frei geworden,
+        jeder mit den Abrufen je Tag der ruhenden Segmente (ruhend_abrufe / ruhend; ohne Angabe 1)
+    Dollar anteilig. Budgetgrenze aktiv: 0 $ (schon so). Ohne frischen Tagesplan-Merker: unveraendert."""
     rot = rotation or {}
     if not rot.get("bekannt") or rot.get("aktiv") or rot.get("geplant") is None:
         return summe
-    frei_max = max(0, int(rot.get("segmente_je_tag") or 0) - int(rot["geplant"])) * MONAT_TAGE
     laeufe = float(summe.get("laeufe") or 0)
-    if laeufe <= frei_max + 1e-9:
+    takt = min(laeufe, max(0.0, float(summe.get("laeufe_takt") or 0)))
+    intervall = laeufe - takt
+    je_tag, gesamt = int(rot.get("segmente_je_tag") or 0), int(rot.get("segmente_gesamt") or 0)
+    if je_tag >= gesamt:
+        return {**summe, "gedeckelt": False}               # keine Budget-Rotation: jeder ruhende Tag spart echt
+    ruhend, abrufe = int(rot.get("ruhend") or 0), rot.get("ruhend_abrufe")
+    gewicht = (float(abrufe) / ruhend) if (ruhend and abrufe) else 1.0
+    frei_max = max(0, je_tag - int(rot["geplant"])) * gewicht * MONAT_TAGE
+    if intervall <= frei_max + 1e-9:
         return {**summe, "gedeckelt": False}
-    anteil = frei_max / laeufe if laeufe else 0.0
-    return {**summe, "laeufe": round(frei_max, 1), "usd": round(float(summe.get("usd") or 0) * anteil, 2), "gedeckelt": True,
+    neu = takt + frei_max
+    anteil = neu / laeufe if laeufe else 0.0
+    return {**summe, "laeufe": round(neu, 1), "usd": round(float(summe.get("usd") or 0) * anteil, 2), "gedeckelt": True,
             "laeufe_ungedeckelt": round(laeufe, 1)}
 
 
@@ -235,18 +269,33 @@ def laeufe_heute(h: Dict[str, Any], rotation: Optional[Dict[str, Any]] = None, *
 
 
 def wirkung_schaetzen(h: Dict[str, Any], rate_neu: float, rotation: Optional[Dict[str, Any]] = None, *,
-                      wirkung_aktiv: bool = False, anteil: float = 1.0) -> Dict[str, Any]:
+                      wirkung_aktiv: bool = False, anteil: float = 1.0, ziel: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Pruefbefund F8: frei werdende Laeufe je Monat = (geplant heute - geplant mit Vorschlag) x 30,4; Dollar nur,
     wenn das Budget NICHT die Grenze ist (sonst plant der Tagesplan andere Segmente in die frei werdenden Plaetze, die
     Rechnung bleibt gleich). usd_voll = Dollarwert ohne Budgetgrenze (fuer die Summen je Segment). anteil: MERGE
-    verteilt die Wirkung eines weggefallenen Segments je zur Haelfte auf die beiden Bereiche."""
+    verteilt die Wirkung eines weggefallenen Segments je zur Haelfte auf die beiden Bereiche.
+    Schlussrunde: mit ziel ({intervall_tage, crawls_per_day} der Wirkung) getrennt nach Plaetzen und Abrufen — das
+    Segment belegt heute p0 Plaetze je Tag (Rotationsfaktor, sonst die beobachtete Rate), mit der Wirkung hoechstens 1/n;
+    je belegtem Platz laufen k statt der Abrufe des Auftrags. laeufe_takt = (Abrufe des Auftrags - k) x Plaetze mit
+    Wirkung: weniger Abrufe je Tag sparen immer echte Laeufe (auch unter Rotation, nie gedeckelt, siehe
+    aktive_wirkung_deckeln); der Rest (ruhende Plaetze x Abrufe des Auftrags) ist die Intervall-Wirkung."""
     rot = rotation or ROTATION_UNBEKANNT
     r0 = laeufe_heute(h, rot, wirkung_aktiv=wirkung_aktiv)
-    frei = (r0 - min(r0, max(0.0, float(rate_neu)))) * float(anteil)
+    takt = 0.0
+    if ziel:
+        konf = max(1.0, float(h.get("laeufe_je_tag_konfig") or 1))
+        n = max(1, int(ziel.get("intervall_tage") or 1))
+        k = min(konf, float(max(1, int(ziel.get("crawls_per_day") or 1))))
+        p0 = r0 / konf
+        p1 = min(p0, 1.0 / n)
+        takt = (konf - k) * p1 * float(anteil)
+        frei = (r0 - k * p1) * float(anteil)
+    else:
+        frei = (r0 - min(r0, max(0.0, float(rate_neu)))) * float(anteil)
     kj = h.get("kosten_je_lauf_usd")
     usd_voll = None if kj is None else float(kj) * frei * MONAT_TAGE
-    return {"laeufe": frei * MONAT_TAGE, "usd_voll": usd_voll, "budget_grenze": bool(rot.get("aktiv")),
-            "usd": 0.0 if rot.get("aktiv") else usd_voll}
+    return {"laeufe": frei * MONAT_TAGE, "laeufe_takt": takt * MONAT_TAGE, "usd_voll": usd_voll,
+            "budget_grenze": bool(rot.get("aktiv")), "usd": 0.0 if rot.get("aktiv") else usd_voll}
 
 
 def _wirkung_felder(teile: List[Tuple[str, Dict[str, Any]]], *, vorzeichen: float = 1.0) -> Dict[str, Any]:
@@ -254,7 +303,8 @@ def _wirkung_felder(teile: List[Tuple[str, Dict[str, Any]]], *, vorzeichen: floa
     None ohne Kostendaten), laeufe_frei_monat, ersparnis_budget_grenze, wirkung_je_segment (fuer die Summen ohne
     Doppelzaehlung), wirkung_betrag (Sortierung)."""
     je_seg = [{"segment_id": sid, "usd_voll": None if w["usd_voll"] is None else round(vorzeichen * w["usd_voll"], 4),
-               "laeufe": round(vorzeichen * w["laeufe"], 2)} for sid, w in teile]
+               "laeufe": round(vorzeichen * w["laeufe"], 2), "laeufe_takt": round(vorzeichen * float(w.get("laeufe_takt") or 0), 2)}
+              for sid, w in teile]
     grenze = any(w["budget_grenze"] for _, w in teile)
     usd_teile = [w["usd"] for _, w in teile if w["usd"] is not None]
     laeufe = round(vorzeichen * sum(w["laeufe"] for _, w in teile), 1)
@@ -318,7 +368,8 @@ def vorschlaege_segment(seg: Dict[str, Any], h: Dict[str, Any], rotation: Option
                      "proposed_definition": {"pausiert": True, "nachpruefung_tage": n, "intervall_tage": n, "crawls_per_day": 1},
                      "reason": (f"{ort}: {h.get('valid_runs')} gültige Läufe, davon {_pct(h.get('empty_rate'))} ohne Treffer (EMPTY) — "
                                 f"pausieren mit Nachprüfung alle {n} Tage; nichts wird gelöscht, die Historie bleibt"),
-                     **_wirkung_felder([(seg["id"], wirkung_schaetzen(h, 1.0 / n, rotation, wirkung_aktiv=aktiv))])})
+                     **_wirkung_felder([(seg["id"], wirkung_schaetzen(h, 1.0 / n, rotation, wirkung_aktiv=aktiv,
+                                                                       ziel={"intervall_tage": n, "crawls_per_day": 1}))])})
     elif status in (health.HOT, health.HEALTHY, health.NORMAL, health.THIN) and emp and not emp.get("pausiert"):
         r_neu = health.rate(emp) or 0.0
         if r_neu < health.rate(konf) - 1e-9 and int(h.get("valid_runs") or 0) >= _min_laeufe_empty(h, wirkung):
@@ -329,7 +380,8 @@ def vorschlaege_segment(seg: Dict[str, Any], h: Dict[str, Any], rotation: Option
                                                  "vorher": frequenz_text(konf), "hysterese": bool(emp.get("hysterese"))},
                          "reason": (f"{ort}: Activity Score {h.get('activity_score')} ({status}) — {frequenz_text(emp)} statt "
                                     f"{frequenz_text(konf)} reicht{hyst}"),
-                         **_wirkung_felder([(seg["id"], wirkung_schaetzen(h, r_neu, rotation, wirkung_aktiv=aktiv))])})
+                         **_wirkung_felder([(seg["id"], wirkung_schaetzen(h, r_neu, rotation, wirkung_aktiv=aktiv,
+                                                                           ziel={"intervall_tage": n, "crawls_per_day": k}))])})
     if status == health.HOT:
         raus.append({**basis, "typ": HOT_PRIO, "schluessel": familien_schluessel(HOT_PRIO, seg["id"]),
                      "proposed_definition": {"prioritaet": "HOT"},
@@ -495,10 +547,20 @@ async def einstellungen(db) -> Dict[str, Any]:
     doc = await konfig.merker_lesen(db, konfig.OPTIMIERUNG_DOK)
     modus = doc.get("modus") if doc.get("modus") in (OBSERVE, SAFE_AUTO) else OBSERVE
     try:
-        frequenz = health.frequenz_pruefen(doc["frequenz"]) if doc.get("frequenz") else copy.deepcopy(health.FREQUENZ_STANDARD)
+        # Schlussrunde: gespeicherte Werte ueber den Obergrenzen (vor der Begrenzung gespeichert) beim Lesen begrenzt
+        frequenz = health.frequenz_begrenzen(doc["frequenz"]) if doc.get("frequenz") else copy.deepcopy(health.FREQUENZ_STANDARD)
     except health.Ungueltig:
         frequenz = copy.deepcopy(health.FREQUENZ_STANDARD)
+    begrenzt = False
+    if doc.get("frequenz"):
+        try:
+            health.frequenz_pruefen(doc["frequenz"])
+        except health.Ungueltig:
+            begrenzt = True             # gespeicherter Wert lag ueber einer Obergrenze (oder war ungueltig)
     return {"modus": modus, "frequenz": frequenz, "frequenz_standard": copy.deepcopy(health.FREQUENZ_STANDARD),
+            "frequenz_grenzen": {"intervall_max_tage": health.FREQUENZ_MAX_INTERVALL_TAGE,
+                                 "nachpruefung_max_tage": health.NACHPRUEFUNG_MAX_TAGE},
+            "frequenz_begrenzt": begrenzt,
             "modus_seit": doc.get("modus_seit"), "modus_von": doc.get("modus_von"), "frequenz_seit": doc.get("frequenz_seit"),
             "frequenz_von": doc.get("frequenz_von"), "modus_verlauf": list(doc.get("modus_verlauf") or [])[-10:]}
 
@@ -675,6 +737,8 @@ async def _wirkung_neu(db, seg_id: str) -> Optional[Dict[str, Any]]:
             w["hot"] = True
         if neu.get("pausiert"):
             w["pausiert"] = True
+            # Schlussrunde: bis wann die Laeufe unter der Pause geprueft sind (markt.health: neuer Treffer-Lauf?)
+            w["pause_geprueft_bis"] = pause_geprueft_bis(a)
         if a.get("typ") in (REDUCE, PAUSE):
             rs = _reduziert_seit(a)
             w["reduziert_seit"] = min(w["reduziert_seit"] or rs, rs)
@@ -709,10 +773,41 @@ def _alt_von(seg: Dict[str, Any], typ: Optional[str] = None) -> Dict[str, Any]:
             "pausiert": bool(w.get("pausiert"))}
 
 
-def widerspruch(typ: str, h: Optional[Dict[str, Any]], seg: Optional[Dict[str, Any]] = None) -> Optional[str]:
+def aenderung_tag(a: Dict[str, Any]) -> str:
+    """Tag, an dem eine Aenderung angewendet wurde (Altbestand ohne 'tag': Datum aus 'at')."""
+    return str(a.get("tag") or str(a.get("at") or "")[:10])
+
+
+def verweil_bis(a: Dict[str, Any]) -> str:
+    """Schlussrunde (Mindestverweildauer): erster Tag, an dem die Wirkung geaendert werden darf."""
+    t = aenderung_tag(a)
+    return _tag_plus(t, MIN_VERWEIL_TAGE) if t else ""
+
+
+def verweil_haelt(a: Optional[Dict[str, Any]], tag: str) -> bool:
+    return bool(a) and bool(verweil_bis(a)) and str(tag) < verweil_bis(a)
+
+
+def pause_geprueft_bis(a: Dict[str, Any]) -> str:
+    """Bis zu welchem Tag die Laeufe unter einer Pause schon geprueft sind (Beginn: Tag der Anwendung)."""
+    return str(a.get("geprueft_bis") or aenderung_tag(a))[:10]
+
+
+def neuer_treffer_lauf(a: Optional[Dict[str, Any]], h: Optional[Dict[str, Any]]) -> bool:
+    """Schlussrunde: hatte ein NEUER gueltiger Lauf (nach der letzten Pruefung der Pause) Treffer?"""
+    if not a or not h:
+        return False
+    lt = str(h.get("letzter_treffer_tag") or "")[:10]
+    return bool(lt) and lt > pause_geprueft_bis(a)
+
+
+def widerspruch(typ: str, h: Optional[Dict[str, Any]], seg: Optional[Dict[str, Any]] = None,
+                a: Optional[Dict[str, Any]] = None) -> Optional[str]:
     """Pruefbefund F0/F5 (Bestandsschutz): widersprechen die Daten einer aktiven Wirkung? Grund oder None.
     Nur Status mit Datengrundlage zaehlen; UNKNOWN/STALE/UNSTABLE, fehlende Daten oder eine andere Fassung nie.
-      PAUSE_EMPTY       das Segment ist nicht mehr EMPTY (wieder Treffer: >= 20 % der gueltigen Laeufe mit Autos)
+      PAUSE_EMPTY       das Segment ist nicht mehr EMPTY (wieder Treffer: >= 20 % der gueltigen Laeufe mit Autos) UND
+                        (Schlussrunde, mit der aktiven Aenderung a) ein NEUER gueltiger Lauf seit der letzten Pruefung
+                        der Pause hatte Treffer — nie allein, weil ein alter leerer Lauf aus dem Fenster faellt
       REDUCE_FREQUENCY  die Empfehlung (mit Hysterese an der Grenze) verlangt wieder die Frequenz des Auftrags
       PRIORITIZE_HOT    nicht mehr HOT und der Score liegt klar unter der HOT-Stufe (75 - 5 Punkte) oder THIN/EMPTY
     Alle drei sind das genaue Gegenteil der Bedingung, unter der SAFE_AUTO die Wirkung anwendet — kein Wert erfuellt
@@ -727,8 +822,10 @@ def widerspruch(typ: str, h: Optional[Dict[str, Any]], seg: Optional[Dict[str, A
     score = h.get("activity_score")
     if typ == PAUSE:
         if st != health.EMPTY:
+            if a is not None and not neuer_treffer_lauf(a, h):
+                return None                  # kein neuer Lauf mit Treffern seit der letzten Pruefung: die Pause haelt
             return (f"Daten widersprechen: {st} statt EMPTY — wieder Treffer ({_pct(h.get('empty_rate'))} der Läufe leer, "
-                    f"Ø {h.get('avg_valid_rows')} Autos)")
+                    f"Ø {h.get('avg_valid_rows')} Autos, neuer Lauf mit Treffern am {h.get('letzter_treffer_tag') or '—'})")
         return None
     if typ == REDUCE:
         emp = h.get("empfehlung") or {}
@@ -803,7 +900,10 @@ async def _anwenden(db, v: Dict[str, Any], seg: Dict[str, Any], *, tag: str, jet
            "wirkung_je_segment": v.get("wirkung_je_segment"),
            "reduziert_seit": (kette or tag) if typ in (REDUCE, PAUSE) else None,
            "label": seg.get("label"), "ez_label": seg.get("ez_label"), "km_label": seg.get("km_label"),
-           "status": AKTIV, "at": jetzt_iso, "tag": tag}
+           "status": AKTIV, "at": jetzt_iso, "tag": tag,
+           # Schlussrunde: Mindestverweildauer (fruehestens an diesem Tag aenderbar) und, bei einer Pause, bis wann ihre
+           # Laeufe geprueft sind (Beginn = Tag der Anwendung; ein neuer Treffer-Lauf muss danach liegen)
+           "haelt_bis": _tag_plus(tag, MIN_VERWEIL_TAGE), **({"geprueft_bis": tag} if typ == PAUSE else {})}
     try:
         await db[AENDERUNGEN].insert_one(dict(doc))
     except DuplicateKeyError:
@@ -851,22 +951,46 @@ async def safe_auto_anwenden(db, *, tag: Optional[str] = None, jetzt_iso: Option
     segs = {s["id"]: s async for s in db[SEGMENTE].find({"id": {"$in": seg_ids}}, {"_id": 0})} if seg_ids else {}
     healths = {h["segment_id"]: h async for h in db[konfig.HEALTH].find(
         {"segment_id": {"$in": seg_ids}}, {"_id": 0, "segment_id": 1, "health": 1, "activity_score": 1, "empfehlung": 1,
-                                           "crawls_per_day": 1, "version": 1, "empty_rate": 1, "avg_valid_rows": 1})} if seg_ids else {}
+                                           "crawls_per_day": 1, "version": 1, "empty_rate": 1, "avg_valid_rows": 1,
+                                           "letzter_treffer_tag": 1, "letzter_gueltiger_tag": 1, "tag": 1})} if seg_ids else {}
     abgelehnt = await abgelehnte_familien(db, list(segs.values()))       # auch fruehere Fassungen desselben Bereichs
     sperren = await sperren_je_segment(db, list(segs.values()), tag)
+    z["zurueckgehalten"] = 0
+
+    async def _zurueckhalten(a: Dict[str, Any], grund_neu: str) -> None:
+        """Mindestverweildauer: die gewuenschte Aenderung steht am Protokolleintrag (nachvollziehbar), sie wird nicht
+        ausgefuehrt. Nur schreiben, wenn sich etwas aendert (kein taeglicher Schreib-Churn)."""
+        z["zurueckgehalten"] += 1
+        eintrag = {"tag": tag, "grund": grund_neu, "bis": verweil_bis(a)}
+        alt = a.get("zurueckgehalten") or {}
+        if alt.get("grund") != grund_neu or alt.get("bis") != eintrag["bis"]:
+            await db[AENDERUNGEN].update_one({"id": a["id"], "status": AKTIV}, {"$set": {"zurueckgehalten": eintrag}})
+            a["zurueckgehalten"] = eintrag
     # (1) bestehende Wirkungen
     bleibt: Dict[Tuple[str, str], Dict[str, Any]] = {}
     kette_vorher: Dict[str, str] = {}
     for a in aktive:
         seg = segs.get(a["segment_id"])
         grund, obsolet = None, False
+        h = healths.get(a["segment_id"])
         if not seg or not seg.get("enabled"):
             grund, obsolet = "Segment inaktiv (Auftrag pausiert/geändert)", True
         elif (a["segment_id"], a.get("typ")) in abgelehnt:
             grund = "Vorschlag abgelehnt"
         else:
-            grund = widerspruch(a.get("typ"), healths.get(a["segment_id"]), seg)
+            grund = widerspruch(a.get("typ"), h, seg, a)
             obsolet = bool(grund)
+            # Mindestverweildauer: nur die Aufhebung einer Pause nach einem neuen Treffer-Lauf darf frueher
+            if grund and verweil_haelt(a, tag) and not (a.get("typ") == PAUSE and neuer_treffer_lauf(a, h)):
+                await _zurueckhalten(a, grund)
+                grund, obsolet = None, False
+        if not grund and a.get("typ") == PAUSE and seg and h and str(h.get("tag") or "") == tag:
+            # die Pause bleibt: alle Laeufe bis heute sind geprueft — ein spaeterer Treffer-Lauf ist dann 'neu'
+            lg = str(h.get("letzter_gueltiger_tag") or "")[:10]
+            if lg and lg > pause_geprueft_bis(a) and lg <= tag:
+                await db[AENDERUNGEN].update_one({"id": a["id"], "status": AKTIV}, {"$set": {"geprueft_bis": lg}})
+                a["geprueft_bis"] = lg
+                beruehrt.add(a["segment_id"])
         if grund:
             if await _beenden(db, a, status=AUFGEHOBEN, grund=grund, wer=WER_AUTO, jetzt_iso=jetzt_iso):
                 z["aufgehoben"] += 1
@@ -897,6 +1021,19 @@ async def safe_auto_anwenden(db, *, tag: Optional[str] = None, jetzt_iso: Option
             continue                     # LOW: nichts Neues — eine bestehende Wirkung bleibt (Bestandsschutz)
         if sperren.get(seg["id"], "") >= tag:
             continue                     # nach einer Ruecknahme: Ruhe fuer diesen Bereich (auch ueber Fassungen)
+        gegen = bleibt.get((seg["id"], {REDUCE: PAUSE, PAUSE: REDUCE}.get(v["typ"], "")))
+        if v["typ"] == REDUCE and gegen:
+            continue                     # Schlussrunde: eine bestehende Pause endet nur ueber widerspruch (neuer Treffer-Lauf)
+        halter = None
+        if a and (a.get("neu") or {}) != _neu_aus_vorschlag(v) and verweil_haelt(a, tag):
+            halter = a
+        elif gegen and verweil_haelt(gegen, tag):
+            halter = gegen
+        if halter is not None:
+            # Mindestverweildauer: Ziel aktualisieren bzw. ersetzen erst ab haelt_bis
+            await _zurueckhalten(halter, f"{TYP_TEXT[v['typ']]}: {frequenz_text(_neu_aus_vorschlag(v))}"
+                                 if v["typ"] != HOT_PRIO else TYP_TEXT[v["typ"]])
+            continue
         if v.get("status") == APPLIED:
             frisch = await db[VORSCHLAEGE].find_one({"id": v["id"]}, {"_id": 0, "status": 1})
             if not frisch or frisch.get("status") != APPLIED:
@@ -1106,14 +1243,20 @@ def _wirkung_pipeline(match: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Pruefbefund F16: Summe der Wirkungen OHNE Doppelzaehlung — je Segment nur die groesste Wirkung (MERGE und
     REDUCE/PAUSE derselben Segmente schliessen sich aus). Altdokumente ohne wirkung_je_segment zaehlen mit ihrer
     geschaetzten Ersparnis unter ihrem Segment bzw. Schluessel."""
+    # Schlussrunde: laeufe_takt (weniger Abrufe je Tag, nie gedeckelt). Altdokumente ohne das Feld: eine reine
+    # Frequenzsenkung ohne Intervall (REDUCE mit intervall_tage 1) ist ganz 'Takt', alles andere Intervall/Pause.
+    nur_takt = {"$and": [{"$eq": ["$typ", REDUCE]}, {"$lte": [{"$ifNull": ["$neu.intervall_tage",
+                                                                           {"$ifNull": ["$proposed_definition.intervall_tage", 1]}]}, 1]}]}
     return [{"$match": match},
-            {"$project": {"_id": 0, "w": {"$ifNull": ["$wirkung_je_segment", [{
+            {"$project": {"_id": 0, "nur_takt": nur_takt, "w": {"$ifNull": ["$wirkung_je_segment", [{
                 "segment_id": {"$ifNull": ["$segment_id", "$schluessel"]}, "usd_voll": "$estimated_monthly_saving_usd",
                 "laeufe": {"$literal": None}}]]}}},
             {"$unwind": "$w"},
-            {"$group": {"_id": "$w.segment_id", "usd": {"$max": "$w.usd_voll"}, "laeufe": {"$max": "$w.laeufe"}}},
+            {"$group": {"_id": "$w.segment_id", "usd": {"$max": "$w.usd_voll"}, "laeufe": {"$max": "$w.laeufe"},
+                        "takt": {"$max": {"$ifNull": ["$w.laeufe_takt", {"$cond": ["$nur_takt", "$w.laeufe", 0]}]}}}},
             {"$group": {"_id": None, "usd": {"$sum": {"$cond": [{"$gt": ["$usd", 0]}, "$usd", 0]}},
-                        "laeufe": {"$sum": {"$cond": [{"$gt": ["$laeufe", 0]}, "$laeufe", 0]}}}}]
+                        "laeufe": {"$sum": {"$cond": [{"$gt": ["$laeufe", 0]}, "$laeufe", 0]}},
+                        "takt": {"$sum": {"$cond": [{"$gt": ["$takt", 0]}, "$takt", 0]}}}}]
 
 
 async def wirkung_summe(db, sammlung: str, match: Dict[str, Any], rotation: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1121,8 +1264,9 @@ async def wirkung_summe(db, sammlung: str, match: Dict[str, Any], rotation: Opti
     erg = [g async for g in db[sammlung].aggregate(_wirkung_pipeline(match))]
     usd_voll = round(float(erg[0].get("usd") or 0), 2) if erg else 0.0
     laeufe = round(float(erg[0].get("laeufe") or 0), 1) if erg else 0.0
+    takt = round(min(laeufe, float(erg[0].get("takt") or 0)), 1) if erg else 0.0
     grenze = bool((rotation or {}).get("aktiv"))
-    return {"usd": 0.0 if grenze else usd_voll, "usd_voll": usd_voll, "laeufe": laeufe, "budget_grenze": grenze}
+    return {"usd": 0.0 if grenze else usd_voll, "usd_voll": usd_voll, "laeufe": laeufe, "laeufe_takt": takt, "budget_grenze": grenze}
 
 
 async def _modell_zaehler(db, model_id: str, rotation: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -1264,7 +1408,7 @@ def schwellen() -> Dict[str, Any]:
     return {**health.schwellen(), "merge_min_laeufe": MERGE_MIN_LAEUFE, "merge_luecke_max_km": MERGE_LUECKE_MAX_KM,
             "split_voll_anteil": SPLIT_VOLL_ANTEIL, "split_streuung_pct": SPLIT_STREUUNG_PCT, "split_min_breite_km": SPLIT_MIN_BREITE_KM,
             "safe_min_confidence": SAFE_MIN_CONFIDENCE, "ruecknahme_sperre_tage": RUECKNAHME_SPERRE_TAGE,
-            "taeglich_ab_stunde": taeglich_ab_stunde()}
+            "min_verweil_tage": MIN_VERWEIL_TAGE, "taeglich_ab_stunde": taeglich_ab_stunde()}
 
 
 async def uebersicht(db) -> Dict[str, Any]:
@@ -1286,6 +1430,8 @@ async def uebersicht(db) -> Dict[str, Any]:
     offen = await wirkung_summe(db, VORSCHLAEGE, {"status": {"$in": list(OFFEN)}}, rotation)
     aktiv = aktive_wirkung_deckeln(await wirkung_summe(db, AENDERUNGEN, {"status": AKTIV}, rotation), rotation)
     return {"modus": einst["modus"], "modi": MODI_ANZEIGE, "frequenz": einst["frequenz"], "frequenz_standard": einst["frequenz_standard"],
+            "frequenz_grenzen": einst["frequenz_grenzen"], "frequenz_begrenzt": einst["frequenz_begrenzt"],
+            "laeufe_frei_safe_auto_takt_monat": aktiv.get("laeufe_takt", 0.0),
             "modus_seit": einst["modus_seit"], "modus_von": einst["modus_von"], "modus_verlauf": einst["modus_verlauf"],
             "schwellen": schwellen(), "stand": await konfig.merker_lesen(db, konfig.HEALTH_DOK), "zaehler": zaehler,
             "modelle": modelle, "vorschlaege_je_status": je_status, "vorschlaege_offen_je_typ": je_typ,

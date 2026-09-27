@@ -111,7 +111,10 @@ HOT_TOP_MAX = 10
 #      fehlen), Anker immer mit Mindestabdeckung gegen den vollen Korb, Korb inkl. tragbarer Vorlauf-Segmente,
 #      abgelaufene Werte fallen aus dem wirksamen Korb, Confidence mit Mindesttagen; Runde 4b (vor der Auslieferung,
 #      gleiche Nummer): abgelaufene Werte fehlen (Nenner), laengst angelegte bzw. nie beobachtete Segmente fehlen
-#      ('vorab'), Start/Ende ueber die wirksamen Werte, Budget-Storno ganzer Tage, Protokoll-Luecke mit Job-Beleg
+#      ('vorab'), Start/Ende ueber die wirksamen Werte, Budget-Storno ganzer Tage, Protokoll-Luecke mit Job-Beleg;
+#      Schlussrunde (vor der Auslieferung, gleiche Nummer): als leer bekannte Segmente (SAFE_AUTO-Pause EMPTY, letzter
+#      gueltiger Lauf ohne Treffer) nicht im Preiskorb, Serienstart/'lange nicht abgerufen'/Stillstand getrennt
+#      beschriftet, 'vorab' und 'kein Ankertag' als Confidence-Einschraenkung
 # Die Oberflaeche kennzeichnet aeltere Berichte ("nach aelterer Rechenregel erstellt") — Vergleiche ueber Perioden
 # sollen die Definitionen nicht unbemerkt mischen.
 SCHEMA = 4
@@ -158,6 +161,14 @@ ANKER_MIN_ABDECKUNG = 0.95
 # Ausfall, wird nichts getragen (eine Luecke wird nie aufgefuellt); ist er aelter (Budget reicht nicht fuer 14 Tage,
 # SAFE_AUTO-Ruhe), fehlt sein Wert an diesem Tag (keine technische Luecke, aber nicht gedeckt; Hinweis).
 TRAGEN_MAX_TAGE = VORLAUF_TAGE
+# Schlussrunde (Beschriftungen): 'Serienstart' nur, wenn die Serie im geladenen Fenster wirklich (neu) beginnt — das
+# Segment ist darin angelegt, oder die ganze Fassung hatte mindestens SERIE_RUHT_TAGE Tage keinen einzigen geplanten
+# Abruf (neu, wieder eingeschaltet, Neustart nach Stillstand). Eine Woche: unter Budget-Rotation plant der Tagesplan
+# jeden Tag die am laengsten wartenden Segmente — selbst 5 Segmente mit Intervall 30 ergeben hoechstens ~6 Tage ohne
+# Abruf der Fassung. Ein einzelnes, laenger als TRAGEN_MAX_TAGE nicht abgerufenes Segment einer laufenden Serie ist kein
+# Serienstart ('seit mehr als 14 Tagen nicht abgerufen'); ebenso heisst ein abgelaufener Wert nach einem Stillstand
+# nicht 'Intervall ueber 14 Tage'.
+SERIE_RUHT_TAGE = 7
 JOB_TAG_INDEX = "markt_job_tag_status"     # (tag, status) — Altdaten: gab es an einem Tag irgendeinen Tagesplan-Job?
 # Abruf-Jobs, die als geplant gelten: jeder Status ausser 'cancelled'; storniert nur, wenn der Tagesplan veraltet war
 # (Job nie gelaufen: Worker-Ausfall, Wartung, Budget voll — ein geplanter Tag ohne Lauf, also technisch). Andere
@@ -197,6 +208,10 @@ class Korbwerte(NamedTuple):
     # das Korbgewicht je Segment — Start-/Endwert ueber denselben Korb (kennzahlen)
     wirksam: Dict[str, Dict[str, Dict[str, Any]]]
     gewicht: Dict[str, float]
+    # Schlussrunde (Beschriftungen): davon vorab, weil seit mehr als TRAGEN_MAX_TAGE nicht abgerufen (kein Serienstart),
+    # und abgelaufen nach einem Stillstand (Budget, Crawler aus, Planausfall — das Intervall war normal)
+    vorab_lange: Dict[str, int] = {}
+    abgelaufen_stillstand: Dict[str, int] = {}
 
 
 class Fehlende(NamedTuple):
@@ -555,6 +570,14 @@ class _Daten:
         self.letzter_doc = {sid: max(s) for sid, s in self.idx.items() if s}
         # Pruefung Runde 2 (#2): Einschaltfenster je Segment der Fassung — erwartet nur, solange es eingeschaltet war
         self.fenster = {sid: self._fenster(sid) for sid in self.segmente_fassung}
+        # Schlussrunde: Kalendertage (geladenes Fenster) mit mindestens einem echt geplanten Abruf der Fassung und der
+        # erste davon — Serienstart vs. 'lange nicht abgerufen', Stillstand vs. Intervall (nur mit bekannter Planung)
+        self.fassung_plan_tage: set = set()
+        if geplant is not None:
+            for sid in self.segmente_fassung:
+                self.fassung_plan_tage |= {t for t in (geplant.get(sid) or ()) if t in self.pos}
+                self.fassung_plan_tage |= {t for t in (self.idx.get(sid) or {}) if t in self.pos}
+        self.fassung_erster_plan = min(self.fassung_plan_tage) if self.fassung_plan_tage else ""
 
     def _fenster(self, sid: str) -> Tuple[str, str]:
         """(erster, letzter) Tag, an dem das Segment im Zeitraum eingeschaltet war. Eine Einschalt-Historie gibt es
@@ -650,6 +673,53 @@ class _Daten:
             return angelegt <= tag
         return bool(self.fassung_start) and self.fassung_start <= tag
 
+    def leer_bekannt(self, sid: str) -> bool:
+        """Schlussrunde (#6): ist das Segment als LEER bekannt, auch wenn seine letzte gueltige Beobachtung VOR dem
+        geladenen Fenster liegt? Nur Felder am Segmentdokument (keine Zusatzabfrage): SAFE_AUTO hat es als EMPTY
+        pausiert (safe_auto.pausiert), oder sein letzter gueltiger Lauf hatte keine Treffer (speicher.verarbeiten setzt
+        last_empty_at bei einem leeren, last_success_at bei einem Lauf mit Zeilen). Ein solches Segment gehoert NICHT in
+        den Preiskorb und ist nie 'vorab' — EMPTY ist Marktinformation (wie eine gueltig leere Beobachtung im Fenster);
+        mit PAUSE_EMPTY liegen Nachpruefungen oft mehr als VORLAUF_TAGE auseinander."""
+        seg = self.segs.get(sid) or {}
+        w = seg.get("safe_auto")
+        if isinstance(w, dict) and w.get("pausiert"):
+            return True
+        leer_at = speicher._zeitpunkt(seg.get("last_empty_at")) if seg.get("last_empty_at") else None
+        ok_at = speicher._zeitpunkt(seg.get("last_success_at")) if seg.get("last_success_at") else None
+        return leer_at is not None and (ok_at is None or leer_at > ok_at)
+
+    def serienstart(self, sid: str, tag: str) -> bool:
+        """Schlussrunde (#7): ist ein 'vorab' fehlendes Segment an diesem Tag ein echter Serienstart? Ja, wenn es im
+        geladenen Fenster angelegt wurde, oder die ganze Fassung vor ihrem ersten geplanten Abruf im Fenster mindestens
+        SERIE_RUHT_TAGE ruhte (neu, wieder eingeschaltet, Neustart nach Stillstand) und der Tag hoechstens
+        TRAGEN_MAX_TAGE danach liegt. Sonst lief die Serie, nur dieses Segment wurde seit mehr als 14 Tagen nicht
+        abgerufen (Intervall ueber 14 Tage)."""
+        start = self.alle_tage[0] if self.alle_tage else self.von
+        angelegt = _tag_aus_zeit((self.segs.get(sid) or {}).get("created_at"))
+        if angelegt and angelegt >= start:
+            return True
+        s0 = self.fassung_erster_plan
+        if not s0:
+            return True
+        return s0 >= _plus(start, SERIE_RUHT_TAGE) and tag < _plus(s0, TRAGEN_MAX_TAGE)
+
+    def stillstand(self, sid: str, tag: str) -> bool:
+        """Schlussrunde (#7): liegt in den TRAGEN_MAX_TAGE Tagen vor 'tag' ein Stillstand (Budget, Crawler aus,
+        Planausfall, Budget-Storno des Segments oder mindestens SERIE_RUHT_TAGE Tage ohne jeden Abruf der Fassung)? Dann
+        ist ein abgelaufener Wert die Folge des Stillstands, nicht eines Intervalls ueber 14 Tage."""
+        i = self.pos.get(tag)
+        if i is None:
+            return False
+        vorher = self.alle_tage[max(0, i - TRAGEN_MAX_TAGE):i]
+        if any(self.tag_status.get(t) in (PLAN_BUDGET, PLAN_AUS, PLAN_AUSFALL) or t in self.budget_storno.get(sid, ()) for t in vorher):
+            return True
+        ruht = 0
+        for t in vorher:
+            ruht = 0 if t in self.fassung_plan_tage else ruht + 1
+            if ruht >= SERIE_RUHT_TAGE:
+                return True
+        return False
+
     def _wegen_budget(self, sid: str, tag: str) -> bool:
         """Runde 4 (#1): nicht geplant wegen Budget — Tagesplan mit erschoepftem/keinem Budget oder der Job des Tages
         wurde storniert, nachdem er am Budget gewartet hatte (budget_wait). Beides einheitlich, kein technischer Ausfall."""
@@ -722,6 +792,10 @@ class _Daten:
             # beobachtete Segmente (EMPTY, Marktinformation) bleiben wie bisher draussen.
             for sid in self.segmente_fassung - k:
                 if self.gueltig_je_seg.get(sid) and not any(deals.ist_basis(d) for d in (self.idx.get(sid) or {}).values()):
+                    continue
+                # Schlussrunde (#6): als leer bekannt (SAFE_AUTO-Pause EMPTY bzw. letzter gueltiger Lauf ohne Treffer,
+                # auch vor dem geladenen Fenster) — Marktinformation, nie ein fehlender Korbwert
+                if not self.gueltig_je_seg.get(sid) and self.leer_bekannt(sid):
                     continue
                 if any(self._noch_aktiv(sid, t) and self._existiert(sid, t) for t in tage_set if not self.offen(t)):
                     k.add(sid)
@@ -837,8 +911,11 @@ class _Daten:
         abgelaufen: Dict[str, int] = {}
         vorab: Dict[str, int] = {}
         abdeckung: Dict[str, float] = {}
+        vorab_lange: Dict[str, int] = {}
+        abgelaufen_still: Dict[str, int] = {}
         for t in mit:
             f = self.fehlende_ids(t, korb)
+            vorab_lange[t] = sum(1 for sid in f.vorab if not self.serienstart(sid, t))
             eff = dict(basis[t])
             ohne = f.tech | f.aus | f.vorab
             da = {sid for sid in korb if t in self.gueltig_je_seg.get(sid, ())}       # beobachtet (Basis oder EMPTY)
@@ -858,6 +935,7 @@ class _Daten:
                     n_getragen += 1
             fehlend[t], ausstehend[t], nicht_geplant[t], getragen[t] = len(f.tech), len(f.aus), len(f.ng), n_getragen
             budget[t], abgelaufen[t], vorab[t] = len(f.budget), len(raus), len(f.vorab)
+            abgelaufen_still[t] = sum(1 for sid in raus if self.stillstand(sid, t))
             wirksam[t], weg[t], luecke[t] = eff, ohne | raus, bool(ohne)
             # voller Korb (Runde 4 #3): alle Korb-Segmente — neu/abgeschaltet zaehlen als nicht gedeckt. Runde 4b: auch
             # abgelaufene (Intervall > TRAGEN_MAX_TAGE) bleiben im Nenner — ihr Wert fehlt; ohne sie im Nenner wurde der
@@ -917,7 +995,7 @@ class _Daten:
                     budget[t] = n
         return Korbwerte({t: wert.get(t) for t in tage}, fehlend, ausstehend, nicht_geplant, getragen, abdeckung,
                          [t for t in anker if t in wert], mit, len(korb), budget, abgelaufen, vorab, kandidaten, tragbar,
-                         wirksam, gewicht)
+                         wirksam, gewicht, vorab_lange, abgelaufen_still)
 
 
 def _ausschnitt(kw: Korbwerte, tage: List[str]) -> Korbwerte:
@@ -930,7 +1008,8 @@ def _ausschnitt(kw: Korbwerte, tage: List[str]) -> Korbwerte:
         return {t: v for t, v in x.items() if t in ts}
     return Korbwerte(_d(kw.werte), _d(kw.fehlend), _d(kw.ausstehend), _d(kw.nicht_geplant), _d(kw.getragen), _d(kw.abdeckung),
                      [t for t in kw.anker if t in ts], [t for t in kw.mit if t in ts], kw.korb_n, _d(kw.budget), _d(kw.abgelaufen),
-                     _d(kw.vorab), [t for t in kw.kandidaten if t in ts], _d(kw.tragbar), _d(kw.wirksam), kw.gewicht)
+                     _d(kw.vorab), [t for t in kw.kandidaten if t in ts], _d(kw.tragbar), _d(kw.wirksam), kw.gewicht,
+                     _d(kw.vorab_lange), _d(kw.abgelaufen_stillstand))
 
 
 def _preisaenderungen(daten: _Daten, tage: List[str], feld: str) -> Tuple[int, int, Optional[float]]:
@@ -1062,9 +1141,22 @@ def kennzahlen(daten: _Daten, tage: List[str], kosten_docs: List[Dict[str, Any]]
     # Runde 4b: mit Segment-Tagen ohne tragbaren Wert (Intervall ueber TRAGEN_MAX_TAGE) ist der Bericht nie 'hoch' —
     # vorher HIGH ohne Gruende neben einem Teilkorb-Niveau
     einschraenkungen = []
-    if sum(kw.abgelaufen.values()):
-        einschraenkungen.append(f"{sum(kw.abgelaufen.values())} Segment-Tag(e) ohne tragbaren Wert (Intervall über "
+    # Schlussrunde (#7): der Grund steht dabei — nach einem Stillstand (Budget, Crawler aus, Planausfall) war das
+    # Intervall normal; nur sonst ist es 'Intervall ueber 14 Tage'
+    abg_still = sum(kw.abgelaufen_stillstand.values())
+    abg_intervall = sum(kw.abgelaufen.values()) - abg_still
+    if abg_intervall:
+        einschraenkungen.append(f"{abg_intervall} Segment-Tag(e) ohne tragbaren Wert (Intervall über {TRAGEN_MAX_TAGE} Tage)")
+    if abg_still:
+        einschraenkungen.append(f"{abg_still} Segment-Tag(e) ohne tragbaren Wert (letzter Abruf vor einem Stillstand, älter als "
                                 f"{TRAGEN_MAX_TAGE} Tage)")
+    # Schlussrunde (#6, Pruefer): noch nicht beobachtete Segmente und ein Zeitraum ohne Ankertag (Euro-Niveau leer) sind
+    # Einschraenkungen — nie HIGH neben einem leeren Euro-Niveau
+    if sum(kw.vorab.values()):
+        einschraenkungen.append(f"{sum(kw.vorab.values())} Segment-Tag(e) ohne Wert (noch nicht beobachtet bzw. seit mehr als "
+                                f"{TRAGEN_MAX_TAGE} Tagen nicht abgerufen)")
+    if kw.mit and not kw.anker:
+        einschraenkungen.append("kein Ankertag (Euro-Niveau leer)")
     conf, conf_gruende = confidence(len(abgedeckt), erwartet, dq, tiefe, len(inserate), segment_tage, segment_tage_erwartet,
                                     kalendertage=len(kalender), tage_mit_wert=tage_mit_wert, tage_ohne_plan=tage_ohne_plan,
                                     einschraenkungen=einschraenkungen)
@@ -1124,6 +1216,11 @@ def kennzahlen(daten: _Daten, tage: List[str], kosten_docs: List[Dict[str, Any]]
         "tage_crawler_aus": status.count(PLAN_AUS), "tage_budget": tage_budget,
         "budget_segment_tage": sum(kw.budget.values()), "abgelaufene_segment_tage": sum(kw.abgelaufen.values()),
         "vorab_segment_tage": sum(kw.vorab.values()), "korb_wirksam_segmente": kw.korb_n,
+        # Schlussrunde (#7): vorab getrennt nach Serienstart und 'seit mehr als 14 Tagen nicht abgerufen', abgelaufen
+        # nach einem Stillstand
+        "vorab_lange_segment_tage": sum(kw.vorab_lange.values()),
+        "vorab_neu_segment_tage": sum(kw.vorab.values()) - sum(kw.vorab_lange.values()),
+        "abgelaufene_stillstand_segment_tage": abg_still,
         "kalendertage": len(kalender), "tage_mit_wert": tage_mit_wert, "getragene_tage": len(getragene_tage),
         "anker_kandidaten": len(kw.kandidaten), "tage_heute_ausstehend": sum(1 for t in kw.mit if kw.ausstehend.get(t)),
         "segmente_mit_daten": len(segs_mit), "segmente_gesamt": len(daten.segmente_fassung), "empty_segmente": leere_segmente,
@@ -1183,6 +1280,10 @@ def _tageszeilen(daten: _Daten, tage: List[str], kosten_docs: List[Dict[str, Any
             "plan_status": (daten.tag_status.get(t, PLAN_LIEF) if daten.geplant is not None and not daten.offen(t) else None),
             "budget_segmente": korbwerte.budget.get(t, 0), "abgelaufene_segmente": korbwerte.abgelaufen.get(t, 0),
             "vorab_segmente": korbwerte.vorab.get(t, 0),
+            # Schlussrunde (#7): davon seit mehr als 14 Tagen nicht abgerufen (kein Serienstart) bzw. abgelaufen nach
+            # einem Stillstand
+            "vorab_lange_segmente": korbwerte.vorab_lange.get(t, 0),
+            "abgelaufene_stillstand_segmente": korbwerte.abgelaufen_stillstand.get(t, 0),
             "kosten_usd": round(sum(float(d.get("crawl_cost_usd") or 0) for d in kosten_docs if d["date"] == t), 4)})
     return zeilen, bewegungen
 
@@ -1328,18 +1429,32 @@ def bericht_rechnen(modell: Dict[str, Any], segs: Dict[str, Dict[str, Any]], doc
         bericht["hinweise"].append(f"Budget-Rotation: {kz['nicht_geplante_segment_tage']} Segment-Tag(e) ohne geplanten Abruf — keine "
                                    f"Lücke; im Korbwert steht dort der letzte geplante Wert des Segments ({kz['getragene_segment_tage']} "
                                    f"Segment-Tage, höchstens {TRAGEN_MAX_TAGE} Tage alt), technische Ausfälle werden nie aufgefüllt")
-    if kz["abgelaufene_segment_tage"]:
-        bericht["hinweise"].append(f"{kz['abgelaufene_segment_tage']} Segment-Tag(e) ohne tragbaren Wert (letzter geplanter Lauf älter "
+    abg_intervall = kz["abgelaufene_segment_tage"] - kz["abgelaufene_stillstand_segment_tage"]
+    if abg_intervall:
+        bericht["hinweise"].append(f"{abg_intervall} Segment-Tag(e) ohne tragbaren Wert (letzter geplanter Lauf älter "
                                    f"als {TRAGEN_MAX_TAGE} Tage, Intervall über {konfig.MAX_INTERVALL_TAGE} Tage — z. B. weil das "
                                    "Budget nicht für jedes Segment alle 14 Tage reicht) — keine technische Lücke, aber ihr Wert fehlt "
                                    "im Korb: fehlt mehr als "
                                    f"{round((1 - ANKER_MIN_ABDECKUNG) * 100)} % des Korbgewichts, ist der Tag kein Anker")
+    if kz["abgelaufene_stillstand_segment_tage"]:
+        bericht["hinweise"].append(f"{kz['abgelaufene_stillstand_segment_tage']} Segment-Tag(e) ohne tragbaren Wert nach einem "
+                                   f"Stillstand (Budget, Crawler aus oder Planausfall; letzter Abruf älter als {TRAGEN_MAX_TAGE} Tage, "
+                                   "das Intervall selbst war normal) — keine technische Lücke, aber ihr Wert fehlt im Korb, bis das "
+                                   "Segment wieder abgerufen ist")
     if kz["startwert"] is None and kz["start_ende_korb_pct"] is not None and kz["delta_pct"] is not None:
         bericht["hinweise"].append(f"Start-/Endwert nur über {kz['start_ende_korb_pct']} % des Korbgewichts — die Euro-Werte bleiben "
                                    "leer (Teilkorb), die Änderung in % und die Richtung beziehen sich auf diesen Teilkorb")
-    if kz["vorab_segment_tage"]:
-        bericht["hinweise"].append(f"Serienstart: {kz['vorab_segment_tage']} Segment-Tag(e) von schon angelegten, aber noch nicht "
-                                   "beobachteten Segmenten — diese Tage sind kein Anker, ihr Wert ist vom Folgetag rückwärts verkettet")
+    # Schlussrunde (#7): 'Serienstart' nur fuer Segmente, deren Serie im Fenster wirklich beginnt; 'rueckwaerts verkettet'
+    # nur, wenn es einen Anker gibt (sonst bleiben die Euro-Werte leer, und nichts wird verkettet)
+    verkettet = ("ihr Wert ist vom Folgetag rückwärts verkettet" if kz["anker_tage"]
+                 else "die Euro-Niveauwerte bleiben ohne Ankertag leer")
+    if kz["vorab_neu_segment_tage"]:
+        bericht["hinweise"].append(f"Serienstart: {kz['vorab_neu_segment_tage']} Segment-Tag(e) von schon angelegten, aber noch nicht "
+                                   f"beobachteten Segmenten — diese Tage sind kein Anker, {verkettet}")
+    if kz["vorab_lange_segment_tage"]:
+        bericht["hinweise"].append(f"{kz['vorab_lange_segment_tage']} Segment-Tag(e) von Segmenten, die seit mehr als "
+                                   f"{TRAGEN_MAX_TAGE} Tagen nicht abgerufen wurden (Intervall über {konfig.MAX_INTERVALL_TAGE} Tage) "
+                                   f"— ihr Wert fehlt, diese Tage sind kein Anker, {verkettet}")
     if kz["tage_mit_basis"] and not kz["anker_tage"]:
         # Runde 4 (#5): stehen nur noch Laeufe von heute aus, ist das der Grund — nicht die Korbabdeckung
         if kz["tage_heute_ausstehend"]:

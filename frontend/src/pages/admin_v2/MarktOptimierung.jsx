@@ -51,6 +51,35 @@ export function formularZuFrequenz(stufen, nachpruefung) {
   return { stufen: raus, empty_nachpruefung_tage: nach };
 }
 
+/** Schlussrunde: Obergrenzen der Zuordnung (vom Server, sonst 7 / 14) — Intervalle höchstens 7 Tage (der Activity Score
+ * vergleicht Läufe höchstens 7 Tage auseinander), Nachprüfung höchstens 14 Tage. Text der ersten Verletzung oder "". */
+export const FREQUENZ_GRENZEN_STANDARD = { intervall_max_tage: 7, nachpruefung_max_tage: 14 };
+export function frequenzGrenzenFehler(anfrage, grenzen) {
+  if (!anfrage) return "";
+  const g = { ...FREQUENZ_GRENZEN_STANDARD, ...(grenzen || {}) };
+  for (const [i, s] of anfrage.stufen.entries()) {
+    if (s.intervall_tage > g.intervall_max_tage || (s.intervall_tage_bis ?? 0) > g.intervall_max_tage) {
+      return `Stufe ${i + 1}: höchstens alle ${g.intervall_max_tage} Tage — seltener verfälscht den Activity Score.`;
+    }
+  }
+  if (anfrage.empty_nachpruefung_tage > g.nachpruefung_max_tage) {
+    return `EMPTY-Nachprüfung höchstens alle ${g.nachpruefung_max_tage} Tage — ältere Werte tragen die Berichte nicht mehr.`;
+  }
+  return "";
+}
+
+/** Heutiger Kalendertag in deutscher Zeit ("JJJJ-MM-TT", wie die Tage im Backend). */
+function heuteTag() {
+  return new Intl.DateTimeFormat("sv-SE", { timeZone: "Europe/Berlin" }).format(new Date());
+}
+
+/** Schlussrunde (Mindestverweildauer): Hinweis am Protokolleintrag einer aktiven Änderung. heute = "JJJJ-MM-TT". */
+export function verweilText(a, heute) {
+  if (!a || a.status !== "aktiv" || !a.haelt_bis || !heute || a.haelt_bis <= heute) return "";
+  const [j, m, t] = a.haelt_bis.split("-");
+  return `hält bis ${t}.${m}.${j} (Mindestverweildauer)`;
+}
+
 function evidenzText(v) {
   const e = v.evidence || {};
   if (v.typ === "MERGE_KM_BUCKETS") {
@@ -245,6 +274,8 @@ export default function MarktOptimierung() {
           UNSTABLE ab {Math.round(daten.schwellen.unstable_ungueltig_anteil * 100)} % ungültigen Läufen oder {daten.schwellen.unstable_volatilitaet_pct} % Schwankung ·
           STALE nach erwartetem Abstand + {daten.schwellen.stale_puffer_tage} Tage · Zusammenlegen ab {daten.schwellen.merge_min_laeufe} Läufen · Aufteilen ab {Math.round(daten.schwellen.split_voll_anteil * 100)} % voll und {daten.schwellen.split_streuung_pct} % Preisstreuung
           {daten.schwellen.erwartet_puffer_anteil ? ` · unter SAFE_AUTO gemessen an den erwartbaren Läufen (mindestens ${Math.round(daten.schwellen.erwartet_puffer_anteil * 100)} %, ein Ausfall zählt nicht)` : ""}
+          {daten.schwellen.empty_aufheben_anteil ? ` · eine Pause endet erst nach einem neuen Lauf mit Treffern (EMPTY hält bis unter ${Math.round(daten.schwellen.empty_aufheben_anteil * 100)} %)` : ""}
+          {daten.schwellen.min_verweil_tage ? ` · Mindestverweildauer ${daten.schwellen.min_verweil_tage} Tage je Änderung` : ""}
         </div>}
       </Card>
 
@@ -355,7 +386,9 @@ export default function MarktOptimierung() {
                     <td className="px-3 py-1.5"><Link to={`/admin/markt/${a.model_id}?segment=${encodeURIComponent(a.segment_id)}`} className="text-white hover:underline">{a.label || a.model_id}</Link>
                       <div className="text-[10px] text-zinc-500">{[a.ez_label, a.km_label].filter(Boolean).join(" · ")} · {VORSCHLAG_TYP[a.typ] || a.typ}</div></td>
                     <td className="px-3 py-1.5 whitespace-nowrap" data-testid={`opt-aenderung-wirkung-${a.id}`}>{wirkungText(a.alt, a.typ)} → {wirkungText(a.neu, a.typ)}</td>
-                    <td className="px-3 py-1.5 text-zinc-300">{a.grund}{a.status !== "aktiv" && a.beendet_grund && <div className="text-[10px] text-zinc-500">beendet {datumZeit(a.beendet_at)} von {a.beendet_von === "safe_auto" ? "SAFE_AUTO" : a.beendet_von}: {a.beendet_grund}</div>}</td>
+                    <td className="px-3 py-1.5 text-zinc-300">{a.grund}{a.status !== "aktiv" && a.beendet_grund && <div className="text-[10px] text-zinc-500">beendet {datumZeit(a.beendet_at)} von {a.beendet_von === "safe_auto" ? "SAFE_AUTO" : a.beendet_von}: {a.beendet_grund}</div>}
+                      {verweilText(a, heuteTag()) && <div className="text-[10px]" style={{ color: "var(--st-amber)" }} data-testid={`opt-aenderung-verweil-${a.id}`}>
+                        {verweilText(a, heuteTag())}{a.zurueckgehalten?.grund ? ` — zurückgehalten: ${a.zurueckgehalten.grund}` : ""}</div>}</td>
                     <td className="px-3 py-1.5 text-right whitespace-nowrap">{a.ersparnis_budget_grenze ? laeufeText(a.laeufe_frei_monat) : ersparnisText(a.estimated_monthly_saving_usd)}</td>
                     <td className="px-3 py-1.5"><Badge tone={(AENDERUNG_STATUS[a.status] || {}).tone || "gray"}>{(AENDERUNG_STATUS[a.status] || {}).text || a.status}</Badge></td>
                     <td className="px-3 py-1.5 text-right">{superAdmin && a.status === "aktiv" && (
@@ -468,9 +501,11 @@ function FrequenzKarte({ daten, superAdmin, onGespeichert }) {
   const [nach, setNach] = useState(String(daten.frequenz?.empty_nachpruefung_tage ?? 7));
   const [busy, setBusy] = useState(false);
   const anfrage = formularZuFrequenz(stufen, nach);
+  const grenzen = { ...FREQUENZ_GRENZEN_STANDARD, ...(daten.frequenz_grenzen || {}) };
+  const grenzFehler = frequenzGrenzenFehler(anfrage, grenzen);
   const setzen = (i, k, v) => setStufen((alt) => alt.map((s, j) => (j === i ? { ...s, [k]: v } : s)));
   const speichern = async () => {
-    if (!anfrage) return;
+    if (!anfrage || grenzFehler) return;
     setBusy(true);
     try { await api.put("/admin/market/optimierung/frequenz", anfrage); toast.success("Frequenz-Zuordnung gespeichert — wirkt ab der nächsten Berechnung"); onGespeichert?.(); }
     catch (e) { toast.error(errMsg(e, "Speichern fehlgeschlagen")); }
@@ -482,9 +517,13 @@ function FrequenzKarte({ daten, superAdmin, onGespeichert }) {
   return (
     <Card className="mb-4" data-testid="opt-frequenz">
       <div className="text-[13px] font-semibold text-white mb-1">Frequenz-Zuordnung (Activity Score → empfohlene Frequenz)</div>
-      <div className="text-[11px] text-zinc-500 mb-2">Im Modus OBSERVE nur eine Empfehlung; in SAFE_AUTO wird damit nur gesenkt (nie häufiger als der Suchauftrag vorsieht). EMPTY: pausiert mit Nachprüfung.</div>
+      <div className="text-[11px] text-zinc-500 mb-2">Im Modus OBSERVE nur eine Empfehlung; in SAFE_AUTO wird damit nur gesenkt (nie häufiger als der Suchauftrag vorsieht). EMPTY: pausiert mit Nachprüfung.
+        {" "}<span data-testid="opt-frequenz-grenzen">Grenzen: Intervall höchstens {grenzen.intervall_max_tage} Tage (der Activity Score vergleicht Läufe höchstens {grenzen.intervall_max_tage} Tage auseinander), Nachprüfung höchstens {grenzen.nachpruefung_max_tage} Tage.</span></div>
+      {daten.frequenz_begrenzt && <div className="mb-2 text-[11px]" style={{ color: "var(--st-amber)" }} data-testid="opt-frequenz-begrenzt">
+        Die gespeicherte Zuordnung lag über einer Grenze — sie wird mit den begrenzten Werten angewendet (unten angezeigt). Bitte einmal speichern.
+      </div>}
       <table className="text-[12px]">
-        <thead><tr className="text-left text-zinc-500 text-[11px]"><th className="pr-3 py-1">ab Score</th><th className="pr-3 py-1">Abrufe je Tag</th><th className="pr-3 py-1">alle … Tage</th><th className="pr-3 py-1">bis … Tage (Spanne)</th></tr></thead>
+        <thead><tr className="text-left text-zinc-500 text-[11px]"><th className="pr-3 py-1">ab Score</th><th className="pr-3 py-1">Abrufe je Tag</th><th className="pr-3 py-1">alle … Tage (max. {grenzen.intervall_max_tage})</th><th className="pr-3 py-1">bis … Tage (Spanne, max. {grenzen.intervall_max_tage})</th></tr></thead>
         <tbody>{stufen.map((s, i) => (
           <tr key={i}>
             <td className="pr-3 py-1"><input className={feld} style={st} value={s.ab} disabled={!superAdmin} onChange={(e) => setzen(i, "ab", e.target.value)} data-testid={`opt-frequenz-ab-${i}`} /></td>
@@ -493,12 +532,13 @@ function FrequenzKarte({ daten, superAdmin, onGespeichert }) {
             <td className="pr-3 py-1"><input className={feld} style={st} value={s.intervall_tage_bis} disabled={!superAdmin} onChange={(e) => setzen(i, "intervall_tage_bis", e.target.value)} data-testid={`opt-frequenz-bis-${i}`} /></td>
           </tr>
         ))}
-          <tr><td className="pr-3 py-1 text-zinc-400">EMPTY</td><td colSpan={3} className="pr-3 py-1 text-zinc-400">pausiert, Nachprüfung alle <input className={feld} style={st} value={nach} disabled={!superAdmin} onChange={(e) => setNach(e.target.value)} data-testid="opt-frequenz-nach" /> Tage</td></tr>
+          <tr><td className="pr-3 py-1 text-zinc-400">EMPTY</td><td colSpan={3} className="pr-3 py-1 text-zinc-400">pausiert, Nachprüfung alle <input className={feld} style={st} value={nach} disabled={!superAdmin} onChange={(e) => setNach(e.target.value)} data-testid="opt-frequenz-nach" /> Tage (max. {grenzen.nachpruefung_max_tage})</td></tr>
         </tbody>
       </table>
       {!anfrage && <div className="mt-1 text-[11px]" style={{ color: "var(--st-rot)" }} role="alert" data-testid="opt-frequenz-ungueltig">Bitte nur ganze Zahlen eingeben.</div>}
+      {grenzFehler && <div className="mt-1 text-[11px]" style={{ color: "var(--st-rot)" }} role="alert" data-testid="opt-frequenz-grenze">{grenzFehler}</div>}
       {superAdmin && <div className="mt-2 flex gap-2">
-        <Button size="sm" onClick={speichern} disabled={busy || !anfrage} data-testid="opt-frequenz-speichern">Speichern</Button>
+        <Button size="sm" onClick={speichern} disabled={busy || !anfrage || !!grenzFehler} data-testid="opt-frequenz-speichern">Speichern</Button>
         <Button size="sm" variant="ghost" onClick={standard} disabled={busy} data-testid="opt-frequenz-standard">Standard (75/45/20/0)</Button>
       </div>}
     </Card>
