@@ -19,6 +19,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_befunde_runde17_termine import _module, welt  # noqa: E402,F401
 from test_markt_20260926 import APIFY, ENT, JOBS, K, SEG, SP, _aufraeumen as _aufraeumen_markt, _modell  # noqa: E402
+from test_markt_hotdeals_20260927 import eigene_auswertungssperre  # noqa: E402,F401 — eigene Sperre je Testprozess (CI)
 
 H = _module("markt.health")
 OPT = _module("markt.optimierung")

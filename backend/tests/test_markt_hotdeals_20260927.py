@@ -9,9 +9,12 @@ keine Crawl-Funktion wird aufgerufen; Routen nur Super-Admin. Testdaten nur mit 
 am Ende. Alle Tage werden ausdruecklich uebergeben (kein Mitternachts-Effekt)."""
 import asyncio
 import inspect
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_befunde_runde17_termine import _module, welt  # noqa: E402,F401
@@ -21,6 +24,17 @@ from test_markt_20260926 import (  # noqa: E402
 
 D = _module("markt.deals")
 AUS = _module("markt.auswertung")
+
+
+@pytest.fixture(autouse=True)
+def eigene_auswertungssperre(monkeypatch):
+    """CI (Befund 27.09.2026, test_markt_health test_12): der in der CI mitlaufende Server (uvicorn auf derselben DB)
+    wertet alle 5 Minuten mit der Sperre 'markt-auswertung' aus. Hielt er sie gerade, antworteten durchlauf/
+    jetzt_berechnen im Test {'gesperrt': True}. Jeder Testprozess nimmt deshalb eine eigene Sperre — Auswertung und
+    Segment-Optimierung behalten untereinander dieselbe (OPT.SPERRE == AUS.SPERRE)."""
+    name = f"markt-auswertung-test-{os.getpid()}"
+    monkeypatch.setattr(_module("markt.auswertung"), "SPERRE", name)
+    monkeypatch.setattr(_module("markt.optimierung"), "SPERRE", name)
 BACKEND = Path(__file__).resolve().parent.parent
 START = datetime(2026, 3, 1)
 # Grundbestand: Median 20.000 EUR, guenstigstes 19.200 (4 % unter der Referenz -> kein Deal)
