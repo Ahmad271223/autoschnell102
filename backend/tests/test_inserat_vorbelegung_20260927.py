@@ -210,11 +210,20 @@ def test_k2_portalfeld_abgelaufen():
     assert "HU abgelaufen (08/2026)" in erg["hinweise"][0]
 
 
-@pytest.mark.parametrize("hu_feld", ["08/2026", "08/2028", "Neu"])
-def test_k2_text_abgelaufen_hat_vorrang_vor_portalfeld(hu_feld):
+@pytest.mark.parametrize("hu_feld, erwartet", [
+    ("08/2026", "Nein"),
+    # Runde inserat3 (28.09.2026, Vorgabe Auftraggeber): Widersprechen sich
+    # Text ("abgelaufen") und ein GUELTIGES Portalfeld, bleibt das Feld leer
+    # mit Hinweis "Inserat widersprüchlich" — vorher "Nein". Nie "Ja".
+    ("08/2028", None),
+    ("Neu", None),
+])
+def test_k2_text_abgelaufen_hat_vorrang_vor_portalfeld(hu_feld, erwartet):
     werte, erg = _werte({"hu": hu_feld, "description": "HU abgelaufen, wird neu gemacht"})
     assert werte.get("hu_valid") != "Ja" and "hu_until" not in werte, erg
-    assert werte.get("hu_valid") == "Nein"
+    assert werte.get("hu_valid") == erwartet
+    if erwartet is None:
+        assert any("widersprüchlich" in h for h in erg["hinweise"]), erg
 
 
 @pytest.mark.parametrize("text", ["TÜV/AU 05/2026 abgelaufen", "TÜV seit 05.2026 abgelaufen",

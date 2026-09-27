@@ -52,9 +52,16 @@ def test_verneinung_eines_anderen_wortes_macht_kein_nein(text, erwartet):
     assert "Nein" not in (werte.get("accident_free"), werte.get("drivable")), (text, erg)
 
 
-def test_tuev_neu_keine_maengel_hu_bleibt_ja():
-    werte, _ = _werte({"description": "TÜV neu keine Mängel unfallfrei fahrbereit"})
-    assert werte.get("hu_valid") == "Ja"
+def test_tuev_neu_keine_maengel_hu_leer_mit_hinweis():
+    # Runde inserat3 (28.09.2026, Vorgabe Auftraggeber): Im Satzteil von
+    # "TUEV neu" steht NACH dem Stichwort "keine" — die Nomen-Ausnahme gilt nur
+    # fuer Verneinungen VOR dem Stichwort, also "unklar" -> leer mit Hinweis
+    # (vorher "Ja"). Mit Komma ("TUEV neu, keine Maengel") bleibt es "Ja".
+    werte, erg = _werte({"description": "TÜV neu keine Mängel unfallfrei fahrbereit"})
+    assert "hu_valid" not in werte, erg
+    assert any("HU" in h for h in erg["hinweise"]), erg
+    werte, _ = _werte({"description": "TÜV neu, keine Mängel, unfallfrei, fahrbereit"})
+    assert werte == {"hu_valid": "Ja", "accident_free": "Ja", "drivable": "Ja"}
 
 
 # ------------------------------------------------ (1) Verneinung am Stichwort bleibt "Nein"
@@ -66,9 +73,7 @@ def test_tuev_neu_keine_maengel_hu_bleibt_ja():
     ("Das Auto war nie unfallfrei.", "accident_free"),
     ("nicht zu 100 % unfallfrei", "accident_free"),
     ("nicht 100% unfallfrei", "accident_free"),
-    ("nicht wirklich fahrbereit", "drivable"),
     ("Fahrzeug ist leider nicht mehr fahrbereit", "drivable"),
-    ("nicht komplett fahrbereit", "drivable"),
     ("Fahrbereit: nein", "drivable"),
 ])
 def test_verneinung_am_stichwort_bleibt_nein(text, feld):
@@ -76,16 +81,35 @@ def test_verneinung_am_stichwort_bleibt_nein(text, feld):
     assert werte.get(feld) == "Nein", (text, erg)
 
 
+# Runde inserat3 (28.09.2026, Vorgabe Auftraggeber): "Nein" nur bei nicht/nie/
+# keinesfalls/keineswegs + mehr/ganz/zu 100 %. "wirklich"/"komplett" stehen
+# nicht auf dieser Liste; "nicht komplett fahrbereit" kann "teilweise" heissen
+# -> vorher "Nein", jetzt leer mit Hinweis (nie "Ja").
+@pytest.mark.parametrize("text", ["nicht wirklich fahrbereit", "nicht komplett fahrbereit"])
+def test_verneinung_mit_anderem_gradwort_leer(text):
+    werte, erg = _werte({"description": text})
+    assert "drivable" not in werte, (text, erg)
+    assert any("Fahrbereitschaft" in h for h in erg["hinweise"]), (text, erg)
+
+
 @pytest.mark.parametrize("text", [
     "kein Unfall, unfallfrei",
     "keine Unfälle, scheckheftgepflegt",
-    "Hatte nie einen Unfall",
     "kein größerer Unfallschaden",
     "ohne Unfall",
 ])
 def test_verneinter_unfall_ist_unfallfrei(text):
     werte, erg = _werte({"description": text})
     assert werte.get("accident_free") == "Ja", (text, erg)
+
+
+def test_nie_einen_unfall_ist_kein_positivmuster():
+    # Runde inserat3 (28.09.2026, Vorgabe Auftraggeber): Positivmuster fuer
+    # Unfall-Nomen nur mit kein/keine/keinen/keinerlei/ohne. "nie einen Unfall"
+    # gehoert nicht dazu -> vorher "Ja", jetzt leer mit Hinweis.
+    werte, erg = _werte({"description": "Hatte nie einen Unfall"})
+    assert "accident_free" not in werte, erg
+    assert any("Unfallfreiheit" in h for h in erg["hinweise"]), erg
 
 
 def test_keine_unfaelle_scheckheftgepflegt_ja_fuer_beide():

@@ -88,7 +88,9 @@ def _ki_aufraeumen(welt):
      {"schluessel_anzahl": "2", "hu_valid": "Ja", "hu_until": "07/2028", "accident_free": "Ja"}),
     ({"description": "lückenlos scheckheftgepflegt bei BMW"}, {"service_book": "ja"}),
     ({"description": "Vollständiges Scheckheft vorhanden"}, {"service_book": "ja"}),
-    ({"description": "Scheckheft komplett, TÜV neu"}, {"service_book": "ja", "hu_valid": "Ja"}),
+    # Runde inserat3 (28.09.2026, Vorgabe Auftraggeber): "Ja, lueckenlos" nur bei
+    # "lueckenlos"/"vollstaendig" — "komplett" ist nur noch ein Hinweis.
+    ({"description": "Scheckheft komplett, TÜV neu"}, {"hu_valid": "Ja"}),
     ({"description": "Kein Scheckheft vorhanden"}, {"service_book": "nein"}),
     ({"description": "Nur ein Schlüssel vorhanden"}, {"schluessel_anzahl": "1"}),
     ({"description": "Zweitschlüssel fehlt leider"}, {"schluessel_anzahl": "1"}),
