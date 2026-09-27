@@ -207,6 +207,16 @@ export const RICHTUNG = {
 export function richtungFarbe(r) {
   return (RICHTUNG[r] || RICHTUNG.UNKNOWN).farbe;
 }
+/** Richtung aus einer %-Änderung mit derselben Stabilitätszone wie das Backend (berichte.richtung): innerhalb
+ *  ±zone stabil (neutral), darunter fallend (grün), darüber steigend (rot), ohne Wert unbekannt. Für Werte, die
+ *  der Bericht ohne eigene Richtung speichert (Segmentdetail, Stichprobe inkl. Mix). */
+export function richtungAusPct(p, zone = 0.5) {
+  if (p === null || p === undefined || p === "" || Number.isNaN(Number(p))) return "UNKNOWN";
+  const z = zone === null || zone === undefined || Number.isNaN(Number(zone)) ? 0.5 : Number(zone);
+  if (Number(p) < -z) return "FALLING";
+  if (Number(p) > z) return "RISING";
+  return "STABLE";
+}
 export const CONFIDENCE = {
   HIGH: { text: "hoch", farbe: "var(--st-gruen)" },
   MEDIUM: { text: "mittel", farbe: "var(--st-amber)" },

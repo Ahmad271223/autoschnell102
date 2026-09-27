@@ -34,12 +34,17 @@ def _t(tag, monat=2, jahr=2028):
     return f"{jahr:04d}-{monat:02d}-{tag:02d}"
 
 
-def _seg(welt, name="20000-40000", *, version=1, dh="h1", enabled=True, praefix=""):
+def _seg_daten(welt, name="20000-40000", *, version=1, dh="h1", enabled=True, praefix=""):
+    """Segment wie in market_segments — nur das Dokument (reine Rechnung ohne Datenbank)."""
     s = welt.w.s
     lo, hi = name.split("-")
-    seg = {"id": f"test-320d-{s}:{praefix}2020:{name}", "model_id": f"test-320d-{s}", "label": "BMW 320d (Test)", "min_km": int(lo),
-           "max_km": int(hi), "km_label": f"{int(lo) // 1000}–{int(hi) // 1000}k km", "year_from": 2020, "year_to": 2020, "ez_label": "EZ 2020",
-           "max_items": 5, "enabled": enabled, "version": version, "definition_hash": dh}
+    return {"id": f"test-320d-{s}:{praefix}2020:{name}", "model_id": f"test-320d-{s}", "label": "BMW 320d (Test)", "min_km": int(lo),
+            "max_km": int(hi), "km_label": f"{int(lo) // 1000}–{int(hi) // 1000}k km", "year_from": 2020, "year_to": 2020, "ez_label": "EZ 2020",
+            "max_items": 5, "enabled": enabled, "version": version, "definition_hash": dh}
+
+
+def _seg(welt, name="20000-40000", **kw):
+    seg = _seg_daten(welt, name, **kw)
     welt.run(welt.db[K.SEGMENTE].insert_one(dict(seg)))
     return seg
 
@@ -51,9 +56,16 @@ def _start(welt):
     return f"test-320d-{welt.w.s}"
 
 
-def _doc(welt, seg, tag, median, *, n=5, dq="GOOD", neu=(), weg=(), red=(), inc=(), top3=False, top5=False, hot=(), hot_privat=(),
-         hot_neu=(), kosten=0.01, version=None, dh=None, vergleich=True, offen=False):
-    """Tagesdokument wie speicher.verarbeiten (Phase C/D): Stichprobe symmetrisch um den Median (Inserate a, b, c ...)."""
+def _doc(welt, seg, tag, median, **kw):
+    doc = _doc_daten(welt, seg, tag, median, **kw)
+    welt.run(welt.db[K.TAGESSTATS].update_one({"segment_id": seg["id"], "date": tag}, {"$set": doc}, upsert=True))
+    return doc
+
+
+def _doc_daten(welt, seg, tag, median, *, n=5, dq="GOOD", neu=(), weg=(), red=(), inc=(), top3=False, top5=False, hot=(), hot_privat=(),
+               hot_neu=(), kosten=0.01, version=None, dh=None, vergleich=True, offen=False):
+    """Tagesdokument wie speicher.verarbeiten (Phase C/D): Stichprobe symmetrisch um den Median (Inserate a, b, c ...);
+    n=0 ist ein gueltiger leerer Lauf (EMPTY)."""
     s = welt.w.s
     schritt = 200
     versatz = [(i - (n - 1) / 2) * schritt for i in range(n)]
@@ -65,7 +77,7 @@ def _doc(welt, seg, tag, median, *, n=5, dq="GOOD", neu=(), weg=(), red=(), inc=
            "new_in_sample_ids": [f"t{s}{x}" for x in neu], "disappeared_ids": [f"t{s}{x}" for x in weg], "disappeared_count": len(weg),
            "price_reduced_ids": [f"t{s}{x}" for x in red], "price_reductions_today": len(red),
            "price_increase_ids": [f"t{s}{x}" for x in inc], "price_increases_today": len(inc),
-           "top3_changed": top3, "top5_changed": top5, "data_quality": dq, "market_depth": "FULL" if n >= 5 else "THIN",
+           "top3_changed": top3, "top5_changed": top5, "data_quality": dq, "market_depth": "FULL" if n >= 5 else "THIN" if n else "EMPTY",
            "sample_completeness": "COMPLETE", "version": version or seg["version"], "definition_hash": dh or seg["definition_hash"],
            "observed_at": f"{tag}T05:00:00+00:00", "rows_soll": 5, "valid_runs": 1, "crawl_cost_usd": kosten,
            "vergleich_vortag": "x" if vergleich else None, "top_n_bewiesen": True,
@@ -73,15 +85,17 @@ def _doc(welt, seg, tag, median, *, n=5, dq="GOOD", neu=(), weg=(), red=(), inc=
            "hot_deal_neu_ids": [f"t{s}{x}" for x in hot_neu]}
     if offen:
         doc["hot_deals_offen"] = True
-    welt.run(welt.db[K.TAGESSTATS].update_one({"segment_id": seg["id"], "date": tag}, {"$set": doc}, upsert=True))
     return doc
 
 
+def _ungueltig_daten(seg, tag, kosten=0.02):
+    return {"segment_id": seg["id"], "date": tag, "model_id": seg["model_id"], "invalid_runs": 1, "valid_runs": 0, "data_quality": "POOR",
+            "data_quality_grund": "ungueltig", "market_depth": "UNKNOWN", "version": seg["version"], "definition_hash": seg["definition_hash"],
+            "crawl_cost_usd": kosten}
+
+
 def _ungueltig(welt, seg, tag, kosten=0.02):
-    welt.run(welt.db[K.TAGESSTATS].insert_one({"segment_id": seg["id"], "date": tag, "model_id": seg["model_id"], "invalid_runs": 1,
-                                               "valid_runs": 0, "data_quality": "POOR", "data_quality_grund": "ungueltig",
-                                               "market_depth": "UNKNOWN", "version": seg["version"], "definition_hash": seg["definition_hash"],
-                                               "crawl_cost_usd": kosten}))
+    welt.run(welt.db[K.TAGESSTATS].insert_one(_ungueltig_daten(seg, tag, kosten)))
 
 
 def _nach(bis, stunden=1):
@@ -489,4 +503,225 @@ def test_12_uebersicht_aller_modelle_perioden_und_routen(welt):
         assert K.BERICHTE == "market_model_reports" and "berichte.faellige_finalisieren" in inspect.getsource(AUS.durchlauf)
     finally:
         welt.run(db[K.MODELLE].delete_many({"id": mid2}))
+        _aufraeumen(welt)
+
+
+# ---------------------------------------------------------------- Pruefbefunde Phase E (27.09.2026)
+def _rechnen(welt, segs, docs, typ="FIVE_DAY", von=None, bis=None, **kw):
+    """Reine Rechnung ohne Datenbank (bericht_rechnen) mit Segment-Dokumenten aus _seg_daten."""
+    modell = {"id": f"test-320d-{welt.w.s}", "label": "BMW 320d (Test)"}
+    return B.bericht_rechnen(modell, {s["id"]: s for s in segs}, docs, typ, von or _t(1), bis or _t(5), **kw)
+
+
+def test_13_technischer_ausfall_ist_teilabdeckung_kein_markteinbruch(welt):
+    """Befund B3: EZ 2018 (12.000 EUR) und EZ 2023 (35.000 EUR), je 5 Inserate, alle Preise stabil. Faellt ein Segment
+    an einem Tag technisch aus (ungueltiger Lauf oder gar kein Tagesdokument), ist der Tageswert ein anderer
+    Segment-Mix — Teilabdeckung, kein Einbruch um 49 %: Minimum/Maximum/Median/Mittel der Periode und die
+    Stichproben-Aenderung kommen nur aus Tagen mit vollem Korb. EMPTY (gueltig leer), neue und abgeschaltete Segmente
+    bleiben Markt- bzw. Mix-Information."""
+    a, b = _seg_daten(welt, "20000-40000"), _seg_daten(welt, "40001-60000")
+    voll = 23500.0
+
+    def reihe(tage_b, extra=()):
+        docs = [_doc_daten(welt, a, _t(d), 12000) for d in range(1, 6)]
+        return docs + [_doc_daten(welt, b, _t(d), 35000) for d in tage_b] + list(extra)
+    for ausfall, docs in (("ungueltig", reihe((1, 2, 4, 5), [_ungueltig_daten(b, _t(3))])), ("kein Dokument", reihe((1, 2, 4, 5)))):
+        ber = _rechnen(welt, [a, b], docs)
+        tage = {r["date"]: r for r in ber["tage"]}
+        assert tage[_t(3)]["teilabdeckung"] is True and tage[_t(3)]["fehlende_segmente"] == 1, ausfall
+        assert tage[_t(3)]["median"] == 12000 and tage[_t(2)]["teilabdeckung"] is False and tage[_t(3)]["delta_vortag_eur"] == 0
+        k = ber["kennzahlen"]
+        assert k["minimum"] == {"date": _t(1), "wert": voll} and k["maximum"]["wert"] == voll, ausfall
+        assert (k["median_periode"], k["mittelwert_periode"], k["sample_market_change_eur"], k["delta_eur"]) == (voll, voll, 0, 0), ausfall
+        assert k["teilabgedeckte_tage"] == 1 and any("Teilabdeckung" in h for h in ber["hinweise"]), ausfall
+        assert k["guenstigstes_angebot"] == {"date": _t(1), "preis": 12000 - 400}, "echtes Angebot zaehlt weiter"
+    # Ausfall am letzten Tag: keine Stichproben-Aenderung, die es im Markt nicht gab
+    k = _rechnen(welt, [a, b], reihe((1, 2, 3, 4)))["kennzahlen"]
+    assert (k["sample_market_change_eur"], k["sample_market_change_pct"], k["minimum"]["wert"], k["teilabgedeckte_tage"]) == (0, 0, voll, 1)
+    # EMPTY ist Marktinformation (gueltig leer) — kein technischer Ausfall
+    k = _rechnen(welt, [a, b], reihe((1, 2, 4, 5), [_doc_daten(welt, b, _t(3), 0, n=0)]))["kennzahlen"]
+    assert k["teilabgedeckte_tage"] == 0 and k["minimum"] == {"date": _t(3), "wert": 12000}
+    # abgeschaltetes Segment (danach kein Lauf mehr) und neues Segment (vorher nie gueltig): Mix, keine Luecke
+    k = _rechnen(welt, [a, {**b, "enabled": False}], reihe((1, 2, 3)))["kennzahlen"]
+    assert k["teilabgedeckte_tage"] == 0 and k["sample_market_change_eur"] == 12000 - voll
+    k = _rechnen(welt, [a, b], reihe((3, 4, 5)))["kennzahlen"]
+    assert k["teilabgedeckte_tage"] == 0 and k["sample_market_change_eur"] == voll - 12000
+
+
+def test_14_tagesbewegung_eur_und_prozent_aus_einem_aggregat():
+    """Befund B4: A 10.000 -> 10.500 (+5 %), B 40.000 -> 39.000 (-2,5 %), je 5 Inserate. Getrennt gewichtet waere das
+    -250 EUR bei +1,25 % ('steigend', aber in den Abwaertsbewegungen und als 'staerkster Rueckgang +1,25 %'). Aus
+    demselben Aggregat: -250 EUR / -1 %, fallend, kein Anstieg."""
+    gestern = {"A": {"median_price": 10000.0, "sample_size": 5}, "B": {"median_price": 40000.0, "sample_size": 5}}
+    heute = {"A": {"median_price": 10500.0, "sample_size": 5}, "B": {"median_price": 39000.0, "sample_size": 5}}
+    b = B.tagesbewegung(heute, gestern)
+    assert b == {"eur": -250.0, "pct": -1.0, "segmente": 2}
+    bw = B.bewegung_statistik(["t2"], {"t2": b})
+    assert (bw["fallend"], bw["steigend"], bw["summe_negativ_eur"], bw["summe_positiv_eur"]) == (1, 0, -250.0, 0)
+    assert bw["staerkster_rueckgang_pct"] == {"date": "t2", "eur": -250.0, "pct": -1.0} and bw["staerkster_anstieg_pct"] is None
+    # Extreme in % nur aus Tagen mit passendem %-Vorzeichen
+    bw = B.bewegung_statistik(["t2"], {"t2": {"eur": -250.0, "pct": 1.25, "segmente": 2}})
+    assert bw["staerkster_rueckgang_pct"] is None and bw["staerkster_anstieg_pct"]["pct"] == 1.25
+
+
+def test_15_confidence_beruecksichtigt_die_segmentabdeckung(welt):
+    """Befund B5 (Abschnitte 52/53): 24 Segmente, nur eines liefert taeglich (GOOD, FULL, 12 Inserate), die uebrigen
+    23 wurden nie abgerufen — das ist kein 'hoch' abgesicherter Modellwert: 5/120 Segment-Tage -> LOW mit Grund und
+    Hinweis. Liefern alle 24, bleibt es HIGH."""
+    segs = [_seg_daten(welt, f"{i * 10000}-{i * 10000 + 9999}") for i in range(24)]
+    ber = _rechnen(welt, segs, [_doc_daten(welt, segs[0], _t(d), 20000, n=12) for d in range(1, 6)])
+    k = ber["kennzahlen"]
+    assert (k["coverage_days"], k["expected_days"], k["segmente_mit_daten"], k["segmente_gesamt"]) == (5, 5, 1, 24)
+    assert (k["segment_tage_gueltig"], k["segment_tage_erwartet"]) == (5, 120)
+    assert k["confidence"] == "LOW" and "Segmentabdeckung 5/120 Segment-Tage" in k["confidence_gruende"]
+    assert any("5 / 120 gültige Segment-Tage" in h for h in ber["hinweise"])
+    ber = _rechnen(welt, segs, [_doc_daten(welt, s, _t(d), 20000, n=12) for s in segs for d in range(1, 6)])
+    k = ber["kennzahlen"]
+    assert (k["segment_tage_gueltig"], k["segment_tage_erwartet"], k["confidence"], k["confidence_gruende"]) == (120, 120, "HIGH", [])
+    assert not any("Segment-Tage" in h for h in ber["hinweise"])
+
+
+def test_16_p25_p75_ueber_dieselbe_segmentmenge_wie_der_median():
+    """Befund B6: Segment mit 3 Angeboten (12.000) und Segment mit 5 (35.000, P25 34.000) — ueber verschiedene Mengen
+    laege die 'untere Preiszone' bei 34.000 ueber dem Median 26.375. Dann keine Zonen (Luecke)."""
+    duenn = {"median_price": 12000.0, "p25_price": 11800.0, "p75_price": 12200.0, "min_price": 11800.0, "sample_size": 3}
+    voll = {"median_price": 35000.0, "p25_price": 34000.0, "p75_price": 36000.0, "min_price": 33500.0, "sample_size": 5}
+    nv = B.niveau([duenn, voll])
+    assert (nv["median"], nv["p25"], nv["p75"], nv["min"]) == (26375.0, None, None, 11800.0)
+    nv = B.niveau([{**duenn, "sample_size": 4}, voll])
+    assert nv["p25"] is not None and nv["p25"] <= nv["median"] <= nv["p75"]
+
+
+def test_17_kosteneffizienz_zaehler_und_nenner_auf_derselben_basis(welt):
+    """Befund B7 (Abschnitt 38): Fassung 1 an den Tagen 1-25, Fassung 2 an 26-29, je 0,10 $. kosten_usd bleibt die
+    reale Ausgabe (2,90 $), die Kennzahlen je Einheit rechnen mit den Kosten der gerechneten Fassung (0,40 $ / 4
+    Beobachtungen = 0,10 $ statt 0,725 $). Gueltige EMPTY-Tage sind gueltige Beobachtungen (deals.ist_gueltig)."""
+    alt, neu = _seg_daten(welt, enabled=False), _seg_daten(welt, version=2, dh="h2", praefix="v2:")
+    docs = [_doc_daten(welt, alt, _t(d), 20000, kosten=0.10) for d in range(1, 26)]
+    docs += [_doc_daten(welt, neu, _t(d), 25000, kosten=0.10) for d in range(26, 30)]
+    k = _rechnen(welt, [alt, neu], docs, "MONTHLY", _t(1), _t(29))["kennzahlen"]
+    assert (k["kosten_usd"], k["kosten_fassung_usd"], k["gueltige_beobachtungen"]) == (2.9, 0.4, 4)
+    assert (k["cost_per_valid_observation"], k["cost_per_unique_listing"]) == (0.1, 0.08)
+    a, leer = _seg_daten(welt, "20000-40000"), _seg_daten(welt, "40001-60000")
+    docs = [_doc_daten(welt, a, _t(d), 20000, kosten=0.10) for d in range(1, 6)]
+    docs += [_doc_daten(welt, leer, _t(d), 0, n=0, kosten=0.10) for d in range(1, 6)]
+    k = _rechnen(welt, [a, leer], docs)["kennzahlen"]
+    assert (k["gueltige_beobachtungen"], k["kosten_usd"], k["cost_per_valid_observation"]) == (10, 1.0, 0.1)
+    k = _rechnen(welt, [leer], [_doc_daten(welt, leer, _t(d), 0, n=0, kosten=0.10) for d in range(1, 6)])["kennzahlen"]
+    assert (k["gueltige_beobachtungen"], k["cost_per_valid_observation"]) == (5, 0.1), "nur leere Tage: trotzdem Kosten je Beobachtung"
+
+
+def test_18_berichtsrechnung_blockiert_den_event_loop_nicht(welt, monkeypatch):
+    """Befund B9 (Abschnitt 49): ein Monatsbericht mit 180 Segmenten (15 EZ x 12 km, Grenze der Suchauftraege) braucht
+    ueber eine Sekunde CPU. Die reine Rechnung laeuft im Hilfsthread — der Event-Loop des Web-Prozesses (Vergleich,
+    Vertrag, Versand) steht dabei nie laenger als einen Bruchteil davon."""
+    import time
+    segs = [_seg_daten(welt, f"{i * 1000}-{i * 1000 + 999}") for i in range(180)]
+    von, bis = _t(1), _t(29)
+    docs = [_doc_daten(welt, s, B._plus(von, d), 20000 + (d % 7) * 50, red=("a",) if d % 3 == 0 else ())
+            for s in segs for d in range(-B.VORLAUF_TAGE, 29)]
+    modell = {"id": f"test-320d-{welt.w.s}"}
+
+    async def _laden(db, model_id, v, b):
+        return modell, {s["id"]: s for s in segs}, docs, []
+    monkeypatch.setattr(B, "_laden", _laden)
+    im_loop = []
+    echt = B.bericht_rechnen
+
+    def _pruefen(*a, **kw):
+        try:
+            asyncio.get_running_loop()
+            im_loop.append(True)
+        except RuntimeError:
+            im_loop.append(False)
+        return echt(*a, **kw)
+    monkeypatch.setattr(B, "bericht_rechnen", _pruefen)
+
+    async def _messen():
+        luecken, fertig = [0.0], asyncio.Event()
+
+        async def puls():
+            letzte = time.perf_counter()
+            while not fertig.is_set():
+                await asyncio.sleep(0.001)
+                jetzt = time.perf_counter()
+                luecken.append(jetzt - letzte)
+                letzte = jetzt
+        p = asyncio.ensure_future(puls())
+        await asyncio.sleep(0.02)
+        t0 = time.perf_counter()
+        ber = await B.bericht_berechnen(None, modell["id"], "MONTHLY", von, bis)
+        dauer = time.perf_counter() - t0
+        fertig.set()
+        await p
+        return ber, dauer, max(luecken)
+    ber, dauer, luecke = welt.run(_messen())
+    assert ber and ber["kennzahlen"]["segmente_gesamt"] == 180 and len(ber["tage"]) == 29
+    assert im_loop == [False], "die reine Rechnung laeuft im Hilfsthread, nie im Event-Loop"
+    assert luecke < 0.25, f"Event-Loop {luecke:.3f} s am Stueck blockiert (Rechnung {dauer:.3f} s)"
+
+
+def test_19_periodenliste_liest_keine_berichtsdokumente(welt):
+    """Befunde B12/B13: eingefrorene Berichte werden nie geloescht; die Periodenliste (jedes Oeffnen der Seite
+    'Berichte', jeder Typwechsel) gruppiert deshalb als abgedeckter Index-Scan ueber markt_bericht_periode — mit und
+    ohne Typ wird kein einziges Berichtsdokument gelesen (Profiler: docsExamined 0)."""
+    mid = _start(welt)
+    seg = _seg(welt)
+    db = welt.db
+    try:
+        for d in range(1, 6):
+            _doc(welt, seg, _t(d), 20000)
+        assert welt.run(B.finalisieren(db, mid, "FIVE_DAY", _t(1), _t(5), jetzt=_nach(_t(5)))) == "erstellt"
+        welt.run(db.command("profile", 0))
+        welt.run(db["system.profile"].drop())
+        welt.run(db.command("profile", 2))
+        try:
+            mit_typ = welt.run(B.perioden_liste(db, "FIVE_DAY"))
+            ohne_typ = welt.run(B.perioden_liste(db))
+        finally:
+            welt.run(db.command("profile", 0))
+        ops = welt.run(db["system.profile"].find({"ns": f"{db.name}.{K.BERICHTE}", "command.aggregate": K.BERICHTE}).to_list(None))
+        welt.run(db["system.profile"].drop())
+        assert len(ops) == 2
+        for op in ops:
+            assert op.get("docsExamined") == 0 and op.get("keysExamined", 0) >= 1, op.get("planSummary")
+        for pl in (mit_typ, ohne_typ):
+            treffer = [p for p in pl["final"] if (p["typ"], p["von"], p["bis"]) == ("FIVE_DAY", _t(1), _t(5))]
+            assert treffer and treffer[0]["anzahl"] >= 1
+    finally:
+        _aufraeumen(welt)
+
+
+def test_20_vorlaeufiger_bericht_zaehlt_kuenftige_tage_nicht_als_luecke(welt, monkeypatch):
+    """Befund B17 (Abschnitte 52/53): am 03.02. zeigt der vorlaeufige Monatsbericht 3/3 statt 3/29 Tage — kuenftige
+    Tage und Bloecke sind 'offen', keine Datenluecke, und senken die Confidence nicht. Heute ohne Lauf ist ebenfalls
+    offen; ein echter fehlender Tag vor heute bleibt eine Luecke; finale Berichte zaehlen jeden Kalendertag."""
+    seg = _seg_daten(welt)
+    docs = [_doc_daten(welt, seg, _t(d), 20000 - d * 10) for d in range(1, 4)]
+    ber = _rechnen(welt, [seg], docs, "MONTHLY", _t(1), _t(29), heute=_t(3))
+    k = ber["kennzahlen"]
+    assert (k["coverage_days"], k["expected_days"]) == (3, 3) and not any("Abdeckung" in g for g in k["confidence_gruende"])
+    assert ber["offen_ab"] == _t(4) and not any("gültige Tage" in h for h in ber["hinweise"])
+    tage = {r["date"]: r for r in ber["tage"]}
+    assert tage[_t(3)]["offen"] is False and tage[_t(4)]["offen"] is True and tage[_t(29)]["offen"] is True
+    assert [x["offen"] for x in ber["bloecke"]] == [False, True, True, True, True, True]
+    assert ber["bloecke"][0]["expected_days"] == 3 and ber["segmente"][0]["erwartete_tage"] == 3
+    k = _rechnen(welt, [seg], docs, "MONTHLY", _t(1), _t(29), heute=_t(4))["kennzahlen"]
+    assert (k["coverage_days"], k["expected_days"]) == (3, 3), "heute noch ohne Lauf"
+    k = _rechnen(welt, [seg], docs[:1] + docs[2:], "MONTHLY", _t(1), _t(29), heute=_t(3))["kennzahlen"]
+    assert (k["coverage_days"], k["expected_days"]) == (2, 3), "echte Luecke vor heute"
+    final = _rechnen(welt, [seg], docs, "MONTHLY", _t(1), _t(29))
+    assert final["kennzahlen"]["expected_days"] == 29 and "offen_ab" not in final and not any(r["offen"] for r in final["tage"])
+    # ueber modell_bericht: laufende Periode mit dem deutschen Kalendertag
+    mid = _start(welt)
+    welt.run(welt.db[K.SEGMENTE].insert_one(dict(seg)))
+    try:
+        for d in range(1, 4):
+            _doc(welt, seg, _t(d), 20000 - d * 10)
+        monkeypatch.setattr(K, "jetzt", lambda: datetime(2028, 2, 3, 22, 30, tzinfo=timezone.utc))      # 23:30 deutscher Zeit
+        vorl = welt.run(B.modell_bericht(welt.db, mid, "MONTHLY", _t(1), _t(29)))
+        assert vorl["status"] == "VORLAEUFIG" and vorl["offen_ab"] == _t(4)
+        assert (vorl["kennzahlen"]["coverage_days"], vorl["kennzahlen"]["expected_days"]) == (3, 3)
+        assert welt.run(welt.db[K.BERICHTE].count_documents({"model_id": mid})) == 0
+    finally:
         _aufraeumen(welt)

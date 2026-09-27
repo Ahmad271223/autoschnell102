@@ -7,7 +7,7 @@ import { useAuth } from "@/context/AuthContext";
 import { Card, Badge, Spinner, EmptyState } from "./_ui";
 import {
   BERICHT_TYP, CONFIDENCE, DATENQUALITAET, HOTDEAL_KLASSE, LIQUIDITAET, MARKTTIEFE, RICHTUNG,
-  datumKurz, datumZeit, eur, pct, periodeText, richtungFarbe, trendText,
+  datumKurz, datumZeit, eur, pct, periodeText, richtungAusPct, richtungFarbe, trendText,
 } from "@/lib/markt";
 
 /**
@@ -19,6 +19,12 @@ import {
  */
 const ZWEITE = [["listings", "Anzahl Listings"], ["neue", "neue Listings"], ["preis", "Preisänderungen"]];
 const GETRIEBE = { AUTOMATIC_GEAR: "Automatik", MANUAL_GEAR: "Schaltung", SEMIAUTOMATIC_GEAR: "Halbautomatik" };
+// Diagramm-Farben über Tokens, damit die helle Ansicht lesbar bleibt (keine festen Dunkel-Werte)
+const ACHSE = { fill: "var(--text-secondary)" };
+const TOOLTIP_STIL = { background: "var(--bg-surface)", border: "1px solid var(--wa-12)", color: "var(--text-primary)", fontSize: 12 };
+const TOOLTIP_LABEL = { color: "var(--text-primary)" };
+// Teilabdeckung (ein Segment ohne gültigen Lauf): im Diagramm eine Lücke, kein Scheineinbruch
+const LUECKE = { median: null, min: null, p25: null, p75: null };
 
 export default function MarktBericht() {
   const { modell: modellId } = useParams();
@@ -28,6 +34,7 @@ export default function MarktBericht() {
   const [liste, setListe] = useState(null);
   const [bericht, setBericht] = useState(null);
   const [fehler, setFehler] = useState("");
+  const [leer, setLeer] = useState(false);
   const [zweite, setZweite] = useState("listings");
   const [block, setBlock] = useState("");
   const typ = params.get("typ") || "";
@@ -40,8 +47,11 @@ export default function MarktBericht() {
       if (!aktiv) return;
       setListe(r.data);
       if (!params.get("typ")) {
+        // Vorwahl: neuester finaler Bericht, sonst der laufende MONAT (die meisten Tage — der laufende 5-Tage-Block
+        // ist vor dem ersten Tagesabruf oft noch leer), sonst die erste laufende Periode
         const f = r.data?.final?.[0];
-        const l = r.data?.laufend?.[0];
+        const lauf = r.data?.laufend || [];
+        const l = lauf.find((p) => p.typ === "MONTHLY") || lauf[0];
         const ziel = f ? { typ: f.typ, von: f.periode_von, bis: f.periode_bis } : l ? { typ: l.typ, von: l.von, bis: l.bis } : null;
         if (ziel) setParams(new URLSearchParams(ziel), { replace: true });
       }
@@ -54,9 +64,16 @@ export default function MarktBericht() {
     let aktiv = true;
     setBericht(null);
     setBlock("");
+    setFehler("");
+    setLeer(false);
     api.get(`/admin/market/reports/model/${modellId}`, { params: { typ, von, bis }, timeout: 20000 })
       .then((r) => { if (aktiv) { setBericht(r.data); setFehler(""); } })
-      .catch((e) => { if (aktiv) setFehler(errMsg(e, "Bericht konnte nicht geladen werden")); });
+      .catch((e) => {
+        if (!aktiv) return;
+        // 404 = in dieser Periode noch kein Tageswert: leerer Zustand, kein Fehler (Periodenwahl bleibt bedienbar)
+        if (e?.response?.status === 404) setLeer(true);
+        else setFehler(errMsg(e, "Bericht konnte nicht geladen werden"));
+      });
     return () => { aktiv = false; };
   }, [modellId, typ, von, bis]);
 
@@ -72,17 +89,21 @@ export default function MarktBericht() {
     const [a, b] = block.split("|");
     return alle.filter((r) => r.date >= a && r.date <= b);
   }, [bericht, block]);
-  const reihe = useMemo(() => tage.map((r) => ({ ...r, tag: datumKurz(r.date), preis: (r.preissenkungen || 0) + (r.preiserhoehungen || 0) })), [tage]);
+  const reihe = useMemo(() => tage.map((r) => ({ ...r, ...(r.teilabdeckung ? LUECKE : {}), tag: datumKurz(r.date),
+                                                  preis: (r.preissenkungen || 0) + (r.preiserhoehungen || 0) })), [tage]);
+  // Tagestabelle: offene (künftige) Tage eines vorläufigen Berichts sind keine Lücke — sie werden nur gezählt
+  const tabelle = useMemo(() => tage.filter((t) => !t.offen), [tage]);
 
-  if (fehler && !bericht) {
-    return <Card data-testid="bericht-fehler"><div className="text-red-300 text-sm">{fehler}</div>
-      <Link to="/admin/markt/berichte" className="text-[12px] underline text-zinc-300">zur Berichtsübersicht</Link></Card>;
-  }
   const k = bericht?.kennzahlen || {};
   const m = bericht?.modell || {};
   const r = RICHTUNG[k.richtung] || RICHTUNG.UNKNOWN;
   const bw = bericht?.bewegung || {};
   const final = bericht?.status === "FINAL";
+  const zone = bericht?.stabil_zone_pct ?? 0.5;
+  const segmentUnter = [k.segment_tage_erwartet != null ? `${k.segment_tage_gueltig ?? 0}/${k.segment_tage_erwartet} Segment-Tage` : "",
+                        k.empty_segmente ? `${k.empty_segmente} nur leer` : ""].filter(Boolean).join(" · ");
+  const kostenBasis = k.kosten_fassung_usd != null && k.kosten_fassung_usd !== k.kosten_usd
+    ? ` (Basis: Kosten der gerechneten Fassung ${Number(k.kosten_fassung_usd).toFixed(2)} $)` : "";
   return (
     <div data-testid="bericht-seite">
       <Link to="/admin/markt/berichte" className="inline-flex items-center gap-1.5 text-xs text-zinc-400 hover:text-white mb-2"><ArrowLeft size={14} /> Berichte</Link>
@@ -99,7 +120,12 @@ export default function MarktBericht() {
         </select>
       </div>
 
-      {!bericht ? (!typ ? <EmptyState title="Noch kein Bericht" hint="Für dieses Modell gibt es noch keine Tagesdaten in einer Berichtsperiode." />
+      {fehler && !bericht ? (
+        <Card data-testid="bericht-fehler"><div className="text-red-300 text-sm">{fehler}</div>
+          <Link to="/admin/markt/berichte" className="text-[12px] underline text-zinc-300">zur Berichtsübersicht</Link></Card>
+      ) : !bericht ? (!typ ? <EmptyState title="Noch kein Bericht" hint="Für dieses Modell gibt es noch keine Tagesdaten in einer Berichtsperiode." />
+        : leer ? <div data-testid="bericht-leer"><EmptyState title="Keine Tagesdaten in dieser Periode"
+                   hint={`Für ${BERICHT_TYP[typ] || typ} ${periodeText(von, bis)} liegt noch kein gültiger Tageswert vor — oben eine andere Periode wählen (z. B. den Monat).`} /></div>
         : <div className="flex items-center gap-2 text-zinc-500 text-sm py-10"><Spinner /> lade Bericht…</div>) : (
         <div className="space-y-4">
           <Card data-testid="bericht-kopf">
@@ -123,7 +149,7 @@ export default function MarktBericht() {
               <K label="Niedrigster / höchster Tageswert" wert={`${eur(k.minimum?.wert)} / ${eur(k.maximum?.wert)}`}
                  unter={k.minimum ? `${datumKurz(k.minimum.date)} / ${datumKurz(k.maximum?.date)}` : ""} />
               <K label="Günstigstes Angebot" wert={eur(k.guenstigstes_angebot?.preis)} unter={k.guenstigstes_angebot ? datumKurz(k.guenstigstes_angebot.date) : ""} />
-              <K label="Stichprobe (inkl. Mix)" wert={trendText(k.sample_market_change_eur, k.sample_market_change_pct)} farbe={richtungFarbe(k.sample_market_change_eur < 0 ? "FALLING" : k.sample_market_change_eur > 0 ? "RISING" : "STABLE")} unter="Änderung des täglichen Samples" />
+              <K label="Stichprobe (inkl. Mix)" wert={trendText(k.sample_market_change_eur, k.sample_market_change_pct)} farbe={richtungFarbe(richtungAusPct(k.sample_market_change_pct, zone))} unter="Änderung des täglichen Samples" testid="bericht-stichprobe" />
               <K label="Gleiche Inserate" wert={trendText(k.same_listing_price_change_eur, k.same_listing_price_change_pct)} unter={`${k.same_listing_anzahl ?? 0} Preispaare`} />
               <K label="Neue / verschwundene Listings" wert={`${k.neue_listings ?? 0} / ${k.verschwundene_listings ?? 0}`} unter="verschwunden ≠ verkauft" />
               <K label="Preissenkungen / -erhöhungen" wert={`${k.preissenkungen ?? 0} / ${k.preiserhoehungen ?? 0}`}
@@ -133,10 +159,10 @@ export default function MarktBericht() {
               <K label="Hot Deals / privat" wert={`${k.hot_deals ?? 0} / ${k.private_hot_deals ?? 0}`} unter={`${k.hot_deals_neu ?? 0} neu im Zeitraum`} testid="bericht-hot" />
               <K label="Datenqualität" wert={(DATENQUALITAET[k.data_quality] || DATENQUALITAET.UNKNOWN).kurz} farbe={(DATENQUALITAET[k.data_quality] || DATENQUALITAET.UNKNOWN).farbe} />
               <K label="Markttiefe / Liquidität" wert={`${(MARKTTIEFE[k.market_depth] || MARKTTIEFE.UNKNOWN).zaehler} / ${(LIQUIDITAET[k.liquiditaet] || LIQUIDITAET.UNKNOWN).text}`} />
-              <K label="Abdeckung" wert={`${k.coverage_days ?? 0} / ${k.expected_days ?? 0} Tage`} unter={`Confidence ${(CONFIDENCE[k.confidence] || {}).text || "—"}${(k.confidence_gruende || []).length ? `: ${k.confidence_gruende.join(", ")}` : ""}`} testid="bericht-abdeckung" />
-              <K label="Segmente mit Daten" wert={`${k.segmente_mit_daten ?? 0} / ${k.segmente_gesamt ?? 0}`} unter={k.empty_segmente ? `${k.empty_segmente} nur leer` : ""} />
+              <K label="Abdeckung" wert={`${k.coverage_days ?? 0} / ${k.expected_days ?? 0} Tage`} unter={`Confidence ${(CONFIDENCE[k.confidence] || {}).text || "—"}${(k.confidence_gruende || []).length ? `: ${k.confidence_gruende.join(", ")}` : ""}${bericht.offen_ab ? ` · ab ${datumKurz(bericht.offen_ab)} noch offen` : ""}`} testid="bericht-abdeckung" />
+              <K label="Segmente mit Daten" wert={`${k.segmente_mit_daten ?? 0} / ${k.segmente_gesamt ?? 0}`} unter={segmentUnter} testid="bericht-segmentabdeckung" />
               <K label="Crawl-Kosten" wert={`${Number(k.kosten_usd || 0).toFixed(2)} $`}
-                 unter={`je Beobachtung ${k.cost_per_valid_observation ?? "—"} $ · je Inserat ${k.cost_per_unique_listing ?? "—"} $ · je Hot Deal ${k.cost_per_hot_deal ?? "—"} $`} testid="bericht-kosten" />
+                 unter={`je Beobachtung ${k.cost_per_valid_observation ?? "—"} $ · je Inserat ${k.cost_per_unique_listing ?? "—"} $ · je Hot Deal ${k.cost_per_hot_deal ?? "—"} $${kostenBasis}`} testid="bericht-kosten" />
             </div>
             <div className="mt-2 text-[10px] text-zinc-500">{bericht.hinweis}</div>
           </Card>
@@ -154,10 +180,10 @@ export default function MarktBericht() {
             <div style={{ height: 280 }}>
               <ResponsiveContainer width="100%" height="100%" minWidth={0} initialDimension={{ width: 320, height: 200 }}>
                 <ComposedChart data={reihe} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
-                  <CartesianGrid stroke="rgba(255,255,255,.06)" vertical={false} />
-                  <XAxis dataKey="tag" tick={{ fill: "#a1a1aa", fontSize: 11 }} />
-                  <YAxis tick={{ fill: "#a1a1aa", fontSize: 11 }} tickFormatter={(v) => `${Math.round(v / 1000)}k`} domain={["auto", "auto"]} width={40} />
-                  <Tooltip contentStyle={{ background: "#18181b", border: "1px solid #3f3f46", fontSize: 12 }} formatter={(v, n) => [eur(v), n]} />
+                  <CartesianGrid stroke="var(--wa-06)" vertical={false} />
+                  <XAxis dataKey="tag" tick={{ ...ACHSE, fontSize: 11 }} />
+                  <YAxis tick={{ ...ACHSE, fontSize: 11 }} tickFormatter={(v) => `${Math.round(v / 1000)}k`} domain={["auto", "auto"]} width={40} />
+                  <Tooltip contentStyle={TOOLTIP_STIL} labelStyle={TOOLTIP_LABEL} formatter={(v, n) => [eur(v), n]} />
                   <Line type="monotone" dataKey="p25" name="untere Preiszone (P25)" stroke="#60a5fa" dot={false} strokeWidth={1} strokeDasharray="3 3" connectNulls={false} />
                   <Line type="monotone" dataKey="p75" name="P75" stroke="#60a5fa" dot={false} strokeWidth={1} strokeDasharray="3 3" connectNulls={false} />
                   <Line type="monotone" dataKey="min" name="Tagesminimum" stroke="#34d399" dot={false} strokeWidth={1.5} connectNulls={false} />
@@ -165,16 +191,16 @@ export default function MarktBericht() {
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
-            <div className="mt-1 text-[11px] text-zinc-500">Rot Tagesmedian · Grün Tagesminimum · Blau gestrichelt P25/P75 (nur bei ausreichender Stichprobe). Tage ohne gültige Daten bleiben Lücken — nichts wird interpoliert.</div>
+            <div className="mt-1 text-[11px] text-zinc-500">Rot Tagesmedian · Grün Tagesminimum · Blau gestrichelt P25/P75 (nur wenn jedes Segment des Tages genug Angebote hat). Tage ohne gültige Daten und Tage mit Teilabdeckung (ein Segment ohne gültigen Lauf) bleiben Lücken — nichts wird interpoliert.</div>
             <div className="mt-3 flex flex-wrap items-center gap-1">
               {ZWEITE.map(([key, l]) => <Chip key={key} aktiv={zweite === key} onClick={() => setZweite(key)} testid={`bericht-zweite-${key}`}>{l}</Chip>)}
             </div>
             <div style={{ height: 140 }}>
               <ResponsiveContainer width="100%" height="100%" minWidth={0} initialDimension={{ width: 320, height: 140 }}>
                 <BarChart data={reihe} margin={{ top: 4, right: 12, left: 0, bottom: 0 }}>
-                  <XAxis dataKey="tag" tick={{ fill: "#a1a1aa", fontSize: 10 }} />
-                  <YAxis tick={{ fill: "#a1a1aa", fontSize: 10 }} width={40} allowDecimals={false} />
-                  <Tooltip contentStyle={{ background: "#18181b", border: "1px solid #3f3f46", fontSize: 12 }} />
+                  <XAxis dataKey="tag" tick={{ ...ACHSE, fontSize: 10 }} />
+                  <YAxis tick={{ ...ACHSE, fontSize: 10 }} width={40} allowDecimals={false} />
+                  <Tooltip contentStyle={TOOLTIP_STIL} labelStyle={TOOLTIP_LABEL} />
                   <Bar dataKey={zweite} name={(ZWEITE.find(([x]) => x === zweite) || [])[1]} fill="#60a5fa" />
                 </BarChart>
               </ResponsiveContainer>
@@ -210,10 +236,10 @@ export default function MarktBericht() {
                       <td className="px-3 py-1.5 text-zinc-300">{periodeText(b.von, b.bis)}</td>
                       <td className="px-3 py-1.5 text-right">{eur(b.startwert)}</td><td className="px-3 py-1.5 text-right">{eur(b.endwert)}</td>
                       <td className="px-3 py-1.5 text-right" style={{ color: rb.farbe }}>{trendText(b.delta_eur, b.delta_pct)}</td>
-                      <td className="px-3 py-1.5"><Badge tone={rb.tone}>{rb.text}</Badge></td>
+                      <td className="px-3 py-1.5">{b.offen ? <span className="text-zinc-500" data-testid={`bericht-block-offen-${b.von}`}>noch offen</span> : <Badge tone={rb.tone}>{rb.text}</Badge>}</td>
                       <td className="px-3 py-1.5 text-right">{b.preissenkungen ?? 0} / {b.preiserhoehungen ?? 0}</td>
                       <td className="px-3 py-1.5 text-right">{b.hot_deals ?? 0}{b.private_hot_deals ? ` (${b.private_hot_deals} privat)` : ""}</td>
-                      <td className="px-3 py-1.5">{b.coverage_days}/{b.expected_days}</td>
+                      <td className="px-3 py-1.5">{b.offen ? "—" : `${b.coverage_days}/${b.expected_days}`}</td>
                     </tr>
                   );
                 })}</tbody>
@@ -222,13 +248,14 @@ export default function MarktBericht() {
           )}
 
           <Card padded={false}>
-            <div className="px-4 py-3 text-[13px] font-semibold text-white" style={{ borderBottom: "1px solid var(--wa-08)" }}>Tagestabelle ({tage.length} Tage)</div>
+            <div className="px-4 py-3 text-[13px] font-semibold text-white" style={{ borderBottom: "1px solid var(--wa-08)" }} data-testid="bericht-tagestabelle-titel">
+              Tagestabelle ({tabelle.length} Tage{tage.length > tabelle.length ? ` · ${tage.length - tabelle.length} noch offen` : ""})</div>
             <div className="overflow-x-auto"><table className="w-full text-[12px] min-w-[900px]" data-testid="bericht-tagestabelle">
               <thead><tr className="text-left text-zinc-500 text-[11px] uppercase"><th className="px-3 py-2">Datum</th><th className="px-3 py-2 text-right">Median</th>
                 <th className="px-3 py-2 text-right">Δ Vortag €</th><th className="px-3 py-2 text-right">Δ Vortag %</th><th className="px-3 py-2 text-right">Minimum</th>
                 <th className="px-3 py-2 text-right">gültige Listings</th><th className="px-3 py-2 text-right">neue</th><th className="px-3 py-2 text-right">Senkungen</th>
                 <th className="px-3 py-2 text-right">Erhöhungen</th><th className="px-3 py-2 text-right">Hot Deals</th><th className="px-3 py-2">Datenqualität</th></tr></thead>
-              <tbody>{tage.map((t) => {
+              <tbody>{tabelle.map((t) => {
                 const dq = t.data_quality ? DATENQUALITAET[t.data_quality] || DATENQUALITAET.UNKNOWN : null;
                 return (
                   <tr key={t.date} className="border-t border-white/5 tabular-nums" data-testid={`bericht-tag-${t.date}`} style={t.gueltig ? undefined : { color: "var(--text-dim)" }}>
@@ -236,8 +263,10 @@ export default function MarktBericht() {
                       {t.andere_fassung && <span className="ml-1 text-[10px] text-zinc-500">andere Fassung</span>}
                       {!t.andere_fassung && t.nur_ungueltig && <span className="ml-1 text-[10px]" style={{ color: "var(--st-rot)" }}>nur ungültige Läufe</span>}
                       {!t.andere_fassung && t.leer && <span className="ml-1 text-[10px] text-zinc-500">leer (Marktlücke)</span>}
+                      {!t.andere_fassung && t.teilabdeckung && <span className="ml-1 text-[10px]" style={{ color: "var(--st-amber)" }} data-testid={`bericht-teil-${t.date}`}
+                                                                      title="Tageswert ohne diese Segmente — zählt nicht für Median, Minimum und Maximum der Periode">Teilabdeckung ({t.fehlende_segmente} Segm. ohne gültigen Lauf)</span>}
                       {!t.andere_fassung && !t.gueltig && !t.nur_ungueltig && <span className="ml-1 text-[10px] text-zinc-500" data-testid={`bericht-luecke-${t.date}`}>keine Daten</span>}</td>
-                    <td className="px-3 py-1 text-right text-white">{eur(t.median)}</td>
+                    <td className={`px-3 py-1 text-right${t.teilabdeckung ? "" : " text-white"}`} style={t.teilabdeckung ? { color: "var(--text-dim)" } : undefined}>{eur(t.median)}</td>
                     <td className="px-3 py-1 text-right" style={{ color: richtungFarbe(t.richtung) }}>{t.delta_vortag_eur == null ? "—" : trendText(t.delta_vortag_eur)}</td>
                     <td className="px-3 py-1 text-right" style={{ color: richtungFarbe(t.richtung) }}>{pct(t.delta_vortag_pct)}</td>
                     <td className="px-3 py-1 text-right">{eur(t.min)}</td>
@@ -264,7 +293,7 @@ export default function MarktBericht() {
                   <tr key={s.segment_id} className="border-t border-white/5 tabular-nums" data-testid={`bericht-segment-${s.segment_id}`}>
                     <td className="px-3 py-1.5"><Link to={`/admin/markt/${modellId}?segment=${encodeURIComponent(s.segment_id)}`} className="text-white hover:underline">{s.ez_label || "alle EZ"} · {s.km_label}</Link></td>
                     <td className="px-3 py-1.5 text-right">{eur(s.aktueller_median)}</td>
-                    <td className="px-3 py-1.5 text-right" style={{ color: richtungFarbe(s.delta_eur < 0 ? "FALLING" : s.delta_eur > 0 ? "RISING" : "STABLE") }}>{trendText(s.delta_eur, s.delta_pct)}</td>
+                    <td className="px-3 py-1.5 text-right" style={{ color: richtungFarbe(richtungAusPct(s.delta_pct, zone)) }} data-testid={`bericht-segment-delta-${s.segment_id}`}>{trendText(s.delta_eur, s.delta_pct)}</td>
                     <td className="px-3 py-1.5">{s.gueltige_tage}/{s.erwartete_tage}</td>
                     <td className="px-3 py-1.5 text-right">{s.listings}</td><td className="px-3 py-1.5 text-right">{s.hot_deals}</td>
                     <td className="px-3 py-1.5" style={{ color: tiefe.farbe }}>{tiefe.zaehler}</td>
@@ -323,7 +352,7 @@ function Chip({ aktiv, onClick, children, testid }) {
   return (
     <button type="button" onClick={onClick} data-testid={testid} aria-pressed={!!aktiv}
             className="rounded-full px-3 py-1 text-[11px] border transition-colors"
-            style={{ borderColor: aktiv ? "var(--accent-red)" : "var(--wa-12)", background: aktiv ? "rgba(255,59,48,.15)" : "transparent", color: aktiv ? "#fff" : "var(--text-secondary)" }}>
+            style={{ borderColor: aktiv ? "var(--accent-red)" : "var(--wa-12)", background: aktiv ? "rgba(255,59,48,.15)" : "transparent", color: aktiv ? "var(--text-primary)" : "var(--text-secondary)" }}>
       {children}
     </button>
   );

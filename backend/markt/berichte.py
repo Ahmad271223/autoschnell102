@@ -13,7 +13,9 @@ Grundsaetze:
   * Modellwerte nie ungewichtet ueber alle Segmente (Abschnitt 12): Tagesniveau = mit der Stichprobengroesse
     gewichteter Mittelwert der Segment-Mediane; Start/Ende und Differenz ueber denselben Segmentkorb (je Segment
     erster und letzter gueltiger Tag im Zeitraum); Tagesbewegung nur ueber Segmente mit gueltigem Wert an BEIDEN
-    aufeinanderfolgenden Kalendertagen — keine doppelte Interpretation fehlender Tage, keine Interpolation
+    aufeinanderfolgenden Kalendertagen — keine doppelte Interpretation fehlender Tage, keine Interpolation; fehlt an
+    einem Tag ein Segment des Korbs technisch (ungueltiger oder kein Lauf), ist der Tag 'Teilabdeckung' und zaehlt
+    nicht fuer Median/Mittel/Minimum/Maximum der Periode (sonst waere ein Ausfall ein Markteinbruch)
   * getrennt ausgewiesen (Abschnitt 54): sample_market_change (Aenderung der taeglichen Stichprobe inkl. Mix) und
     same_listing_price_change (Preisaenderung derselben Inserate); Preissenkungen/-erhoehungen nur je listing_id
   * eingefroren (Abschnitte 35/36): ein finaler Bericht wird einmal gespeichert (market_model_reports, Unique je
@@ -37,6 +39,7 @@ bis zu HOTDEAL_WARTEN_STUNDEN weiter und friert danach mit Hinweis ein.
 """
 from __future__ import annotations
 
+import asyncio
 import calendar
 import logging
 import statistics
@@ -44,7 +47,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from pymongo.errors import DuplicateKeyError
+from pymongo.errors import DuplicateKeyError, OperationFailure
 
 from markt import deals, konfig, speicher
 from markt.konfig import BERICHTE, HOTDEAL_EREIGNISSE, MODELLE, SEGMENTE, TAGESSTATS
@@ -61,11 +64,14 @@ BERICHT_KARENZ_STUNDEN = 6
 HOTDEAL_WARTEN_STUNDEN = 24
 NACHHOL_TAGE = 62                  # faellige Perioden der letzten ~2 Monate werden nachgeholt (Worker-Ausfall)
 VORLAUF_TAGE = 14                  # Tage vor Periodenbeginn: Vortag des ersten Tages, Vorpreise fuer Preisaenderungen
-PERZENTIL_MIN_STICHPROBE = 4       # P25/P75 nur aus Segmenten mit mindestens 4 Angeboten (Abschnitt 15)
+PERZENTIL_MIN_STICHPROBE = 4       # P25/P75 nur, wenn ALLE Basis-Segmente des Tages mind. 4 Angebote haben (Abschnitt 15)
+SEGMENT_ABDECKUNG_HOCH = 0.8       # Confidence HIGH erst ab 80 % gueltiger Segment-Tage (Abschnitte 52/53, Befund B5)
+SEGMENT_ABDECKUNG_MITTEL = 0.5
 HOT_TOP_MAX = 10
 SCHEMA = 1
 BERICHTE_DOK = "berichte"          # market_config/berichte: erledigte Perioden + letzter Lauf
 INDEX_REF = "market_model_reports.markt_bericht_je_periode"
+PERIODEN_INDEX = "markt_bericht_periode"   # (typ, periode_von, periode_bis) — deckt die Periodenliste ab (Befunde B12/B13)
 RICHTUNGEN = ("FALLING", "RISING", "STABLE", "UNKNOWN")
 HINWEIS = ("Beobachtet wird je Segment nur die günstige Marktzone (die N günstigsten Angebote) — kein Marktwert. "
            "Modellwerte sind nach Stichprobengröße gewichtete Mittel der Segment-Mediane derselben Fassung; Lücken werden "
@@ -189,33 +195,38 @@ def _preise(d: Optional[Dict[str, Any]]) -> Dict[str, float]:
 
 def niveau(basis: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Modellwert eines Tages aus den gueltigen Segmenten: Median-Niveau gewichtet mit der Stichprobe, Minimum =
-    guenstigstes beobachtetes Angebot, P25/P75 nur aus Segmenten mit ausreichender Stichprobe."""
+    guenstigstes beobachtetes Angebot. P25/P75 ueber DIESELBE Segmentmenge und dieselben Gewichte wie der Median
+    (Befund B6): erfuellt ein Basis-Segment die Mindeststichprobe nicht, bleiben beide leer (Luecke) — sonst
+    beziehen sich Median und Quartile auf verschiedene Fahrzeugmengen und P25 kann ueber dem Median liegen."""
     if not basis:
         return {"median": None, "min": None, "p25": None, "p75": None, "listings": 0, "segmente": 0}
     med = _gewichtet([(float(d["median_price"]), _n(d)) for d in basis])
-    p = [d for d in basis if _n(d) >= PERZENTIL_MIN_STICHPROBE and d.get("p25_price") is not None and d.get("p75_price") is not None]
+    zonen = all(_n(d) >= PERZENTIL_MIN_STICHPROBE and d.get("p25_price") is not None and d.get("p75_price") is not None for d in basis)
     mins = [float(d["min_price"]) for d in basis if d.get("min_price") is not None]
     return {"median": _r(med), "min": min(mins) if mins else None,
-            "p25": _r(_gewichtet([(float(d["p25_price"]), _n(d)) for d in p])) if p else None,
-            "p75": _r(_gewichtet([(float(d["p75_price"]), _n(d)) for d in p])) if p else None,
+            "p25": _r(_gewichtet([(float(d["p25_price"]), _n(d)) for d in basis])) if zonen else None,
+            "p75": _r(_gewichtet([(float(d["p75_price"]), _n(d)) for d in basis])) if zonen else None,
             "listings": sum(_n(d) for d in basis), "segmente": len(basis)}
 
 
 def tagesbewegung(heute: Dict[str, Dict[str, Any]], gestern: Dict[str, Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Bewegung zum VORTAG nur ueber Segmente mit gueltigem Wert an beiden Tagen (gewichtet) — ohne gemeinsame
-    Segmente keine Bewegung (None)."""
+    Segmente keine Bewegung (None). EUR und % kommen aus DEMSELBEN Aggregat (Befund B4): eur = Summe w*(b-a) /
+    Summe w, pct = Summe w*(b-a) / Summe w*a — beide haben damit immer dasselbe Vorzeichen (Klasse, Summen,
+    Extreme und Farbe widersprechen sich nie, auch bei Segmenten mit sehr verschiedenem Preisniveau)."""
     gemeinsam = sorted(set(heute) & set(gestern))
-    paare_eur, paare_pct = [], []
+    paare = []
     for s in gemeinsam:
         a, b = float(gestern[s]["median_price"]), float(heute[s]["median_price"])
         if not a:
             continue
-        w = (_n(gestern[s]) + _n(heute[s])) / 2
-        paare_eur.append((b - a, w))
-        paare_pct.append(((b - a) / a * 100, w))
-    if not paare_eur:
+        paare.append((b - a, a, (_n(gestern[s]) + _n(heute[s])) / 2))
+    gewicht = sum(w for _, _, w in paare)
+    grundwert = sum(a * w for _, a, w in paare)
+    if not paare or gewicht <= 0 or grundwert <= 0:
         return None
-    return {"eur": _r(_gewichtet(paare_eur)), "pct": _r(_gewichtet(paare_pct), 3), "segmente": len(paare_eur)}
+    diff = sum(d * w for d, _, w in paare)
+    return {"eur": _r(diff / gewicht), "pct": _r(diff / grundwert * 100, 3), "segmente": len(paare)}
 
 
 def _qualitaet_zusammen(z: Dict[str, int]) -> str:
@@ -238,10 +249,14 @@ def _tiefe_zusammen(z: Dict[str, int]) -> str:
     return max(z.items(), key=lambda kv: (kv[1], TIEFE_SCHWERE.get(kv[0], 0)))[0]
 
 
-def confidence(abdeckung: int, erwartet: int, dq: Dict[str, int], tiefe: Dict[str, int], inserate: int) -> Tuple[str, List[str]]:
-    """Abschnitt 53, regelbasiert: HIGH ohne Einschraenkung; MEDIUM bei >= 50 % Abdeckung, >= 70 % brauchbarer
-    Qualitaet und >= 5 Inseraten; sonst LOW. Die Gruende stehen dabei."""
+def confidence(abdeckung: int, erwartet: int, dq: Dict[str, int], tiefe: Dict[str, int], inserate: int,
+               segment_tage: Optional[int] = None, segment_tage_erwartet: Optional[int] = None) -> Tuple[str, List[str]]:
+    """Abschnitt 53, regelbasiert: HIGH ohne Einschraenkung; MEDIUM bei >= 50 % Abdeckung (Kalendertage UND
+    Segment-Tage), >= 70 % brauchbarer Qualitaet und >= 5 Inseraten; sonst LOW. Die Gruende stehen dabei.
+    Segment-Tage (Befund B5): gueltige Segment-Tage / (Segmente der Fassung x erwartete Tage) — ein Tag, an dem
+    nur eines von 24 Segmenten geliefert hat, ist kein voll abgedeckter Modelltag."""
     anteil = abdeckung / erwartet if erwartet else 0.0
+    seg_anteil = (segment_tage or 0) / segment_tage_erwartet if segment_tage_erwartet else None
     n = sum(dq.values()) or 1
     brauchbar = (dq.get("GOOD", 0) + dq.get("MEDIUM", 0)) / n
     gut = dq.get("GOOD", 0) / n
@@ -249,6 +264,8 @@ def confidence(abdeckung: int, erwartet: int, dq: Dict[str, int], tiefe: Dict[st
     gruende = []
     if anteil < 0.8:
         gruende.append(f"Abdeckung {abdeckung}/{erwartet} Tage")
+    if seg_anteil is not None and seg_anteil < SEGMENT_ABDECKUNG_HOCH:
+        gruende.append(f"Segmentabdeckung {segment_tage or 0}/{segment_tage_erwartet} Segment-Tage")
     if brauchbar < 0.9 or gut < 0.7:
         gruende.append("Datenqualität eingeschränkt")
     if inserate < 10:
@@ -257,7 +274,7 @@ def confidence(abdeckung: int, erwartet: int, dq: Dict[str, int], tiefe: Dict[st
         gruende.append("überwiegend dünner/leerer Markt")
     if not gruende:
         return "HIGH", []
-    if anteil >= 0.5 and brauchbar >= 0.7 and inserate >= 5:
+    if anteil >= 0.5 and (seg_anteil is None or seg_anteil >= SEGMENT_ABDECKUNG_MITTEL) and brauchbar >= 0.7 and inserate >= 5:
         return "MEDIUM", gruende
     return "LOW", gruende
 
@@ -272,6 +289,9 @@ def bewegung_statistik(tage: List[str], bewegungen: Dict[str, Optional[Dict[str,
     zaehler = {k: sum(1 for v in klassen.values() if v == k) for k in ("FALLING", "RISING", "STABLE")}
     neg = [(t, b) for t, b in werte if b["eur"] < 0]
     pos = [(t, b) for t, b in werte if b["eur"] > 0]
+    # Extreme in % nur aus Tagen mit passendem %-Vorzeichen (Befund B4: ein 'staerkster Rueckgang' ist nie positiv)
+    neg_pct = [(t, b) for t, b in werte if b["pct"] is not None and b["pct"] < 0]
+    pos_pct = [(t, b) for t, b in werte if b["pct"] is not None and b["pct"] > 0]
 
     def _extrem(liste, feld, fn):
         if not liste:
@@ -296,8 +316,8 @@ def bewegung_statistik(tage: List[str], bewegungen: Dict[str, Optional[Dict[str,
             "summe_negativ_eur": _r(sum(b["eur"] for _, b in neg)) if n else None,
             "summe_positiv_eur": _r(sum(b["eur"] for _, b in pos)) if n else None,
             "netto_eur": _r(sum(b["eur"] for _, b in werte)) if n else None,
-            "staerkster_rueckgang_eur": _extrem(neg, "eur", min), "staerkster_rueckgang_pct": _extrem(neg, "pct", min),
-            "staerkster_anstieg_eur": _extrem(pos, "eur", max), "staerkster_anstieg_pct": _extrem(pos, "pct", max),
+            "staerkster_rueckgang_eur": _extrem(neg, "eur", min), "staerkster_rueckgang_pct": _extrem(neg_pct, "pct", min),
+            "staerkster_anstieg_eur": _extrem(pos, "eur", max), "staerkster_anstieg_pct": _extrem(pos_pct, "pct", max),
             "laengste_fallserie": _serie("FALLING"), "laengste_steigeserie": _serie("RISING"),
             "volatilitaet_pct": _r(statistics.pstdev(pcts), 3) if len(pcts) >= 2 else None}
 
@@ -305,7 +325,7 @@ def bewegung_statistik(tage: List[str], bewegungen: Dict[str, Optional[Dict[str,
 class _Daten:
     """Tagesdokumente eines Modells, nach Fassung getrennt und je Segment/Tag indiziert."""
 
-    def __init__(self, segs: Dict[str, Dict[str, Any]], docs: List[Dict[str, Any]], von: str, bis: str):
+    def __init__(self, segs: Dict[str, Dict[str, Any]], docs: List[Dict[str, Any]], von: str, bis: str, heute: Optional[str] = None):
         self.segs, self.von, self.bis = segs, von, bis
         self.alle = docs
         im_zeitraum = [d for d in docs if von <= d["date"] <= bis]
@@ -326,6 +346,16 @@ class _Daten:
         mit_daten = {sid for sid, s in self.idx.items() if any(von <= t <= bis for t in s)}
         self.segmente_fassung = {sid for sid, s in segs.items()
                                  if deals.fassung({}, s) == self.haupt and s.get("enabled")} | mit_daten
+        # Befund B17: im vorlaeufigen Bericht (heute gesetzt) sind kuenftige Tage 'offen' — weder erwartet noch
+        # Luecke. Heute zaehlt erst, wenn fuer heute schon ein Lauf gespeichert ist (Laeufe verteilen sich ueber den Tag).
+        self.offen_ab: Optional[str] = None
+        if heute:
+            self.offen_ab = _plus(heute, 1) if any(d["date"] == heute for d in im_zeitraum) else heute
+        # Befund B3 (fester Segmentkorb): je Segment die Tage mit gueltiger Beobachtung (inkl. EMPTY und Vorlauf),
+        # der erste davon und der letzte Tag mit irgendeinem Tagesdokument — fuer fehlende()
+        self.gueltig_je_seg = {sid: {t for t, d in s.items() if deals.ist_gueltig(d)} for sid, s in self.idx.items()}
+        self.erster_gueltig = {sid: min(g) for sid, g in self.gueltig_je_seg.items() if g}
+        self.letzter_doc = {sid: max(s) for sid, s in self.idx.items() if s}
 
     def fassung(self, d: Dict[str, Any]) -> Tuple[int, Optional[str]]:
         return deals.fassung(d, self.segs.get(d["segment_id"]))
@@ -335,6 +365,34 @@ class _Daten:
 
     def basis_tag(self, tag: str) -> Dict[str, Dict[str, Any]]:
         return {d["segment_id"]: d for d in self.docs_tag(tag) if deals.ist_basis(d)}
+
+    def offen(self, tag: str) -> bool:
+        return self.offen_ab is not None and tag >= self.offen_ab
+
+    def erwartete_tage(self, tage: List[str]) -> List[str]:
+        """Erwartete Kalendertage: ab Beginn der gerechneten Fassung, ohne offene (kuenftige) Tage."""
+        return [t for t in tage if t >= self.erwartet_ab and not self.offen(t)]
+
+    def korb(self, tage_set: set) -> set:
+        """Fester Segmentkorb eines Zeitraums: Segmente der Fassung mit mindestens einem Basistag darin."""
+        return {sid for sid, s in self.idx.items() if any(t in tage_set and deals.ist_basis(d) for t, d in s.items())}
+
+    def fehlende(self, tag: str, korb: set) -> int:
+        """Segmente des Korbs, die an diesem Tag TECHNISCH fehlen (Befund B3): vorher schon gueltig beobachtet (auch
+        im Vorlauf), noch aktiv (eingeschaltet oder spaeter noch ein Tagesdokument) und heute ohne gueltigen Lauf —
+        kein Tagesdokument (endgueltig gescheiterter Abruf) oder nur ungueltig/POOR. EMPTY ist eine gueltige
+        Beobachtung und fehlt nie; ein neu hinzukommendes Segment (vorher nie gueltig) ist Mix, keine Luecke."""
+        n = 0
+        for sid in korb:
+            if tag in self.gueltig_je_seg.get(sid, ()):
+                continue
+            erster = self.erster_gueltig.get(sid)
+            if erster is None or erster >= tag:
+                continue
+            if not (self.segs.get(sid) or {}).get("enabled") and self.letzter_doc.get(sid, "") < tag:
+                continue
+            n += 1
+        return n
 
 
 def _preisaenderungen(daten: _Daten, tage: List[str], feld: str) -> Tuple[int, int, Optional[float]]:
@@ -380,15 +438,22 @@ def kennzahlen(daten: _Daten, tage: List[str], kosten_docs: List[Dict[str, Any]]
         paare += [(pa[lid], pb[lid]) for lid in set(pa) & set(pb)]
     gleich_eur = _r(sum(y - x for x, y in paare) / len(paare)) if paare else None
     gleich_pct = _r(sum(y - x for x, y in paare) / sum(x for x, _ in paare) * 100, 3) if paare and sum(x for x, _ in paare) else None
-    # Tagesniveaus (Mix inkl.) fuer Median/Mittel/Min/Max und sample_market_change
+    # Tagesniveaus (Mix inkl.) fuer Median/Mittel/Min/Max und sample_market_change — nur Tage mit vollem
+    # Segmentkorb (Befund B3): fehlt ein Segment technisch (ungueltiger oder kein Lauf), ist der Tageswert ein
+    # anderer Segment-Mix und kein Marktsignal. Solche Tage bleiben in der Tagestabelle (markiert), zaehlen hier nicht.
+    korb_ids = daten.korb(tage_set)
     niveaus = [(t, niveau(list(daten.basis_tag(t).values()))) for t in tage]
-    mit = [(t, n) for t, n in niveaus if n["median"] is not None]
+    alle_mit = [(t, n) for t, n in niveaus if n["median"] is not None]
+    teil = {t for t, _ in alle_mit if daten.fehlende(t, korb_ids)}
+    mit = [(t, n) for t, n in alle_mit if t not in teil]
     werte = [n["median"] for _, n in mit]
     smc_eur = _r(mit[-1][1]["median"] - mit[0][1]["median"]) if len(mit) >= 2 else None
     smc_pct = _r((mit[-1][1]["median"] - mit[0][1]["median"]) / mit[0][1]["median"] * 100, 3) if len(mit) >= 2 and mit[0][1]["median"] else None
     tief = min(mit, key=lambda x: x[1]["median"]) if mit else None
     hoch = max(mit, key=lambda x: x[1]["median"]) if mit else None
-    billig = min(((t, n["min"]) for t, n in mit if n["min"] is not None), key=lambda x: x[1], default=None)
+    # guenstigstes Angebot = echte Einzelbeobachtung, auch an teilabgedeckten Tagen (ein fehlendes Segment verbirgt
+    # hoechstens ein Angebot, erfindet keins)
+    billig = min(((t, n["min"]) for t, n in alle_mit if n["min"] is not None), key=lambda x: x[1], default=None)
     # Markt-Aktivitaet (nur gueltige Tage; neu/verschwunden nur mit Vergleichstag)
     mit_vergleich = [d for d in gueltig if d.get("vergleich_vortag")]
     neu = set().union(*[_ids(d, "new_in_sample_ids") for d in mit_vergleich]) if mit_vergleich else set()
@@ -409,12 +474,20 @@ def kennzahlen(daten: _Daten, tage: List[str], kosten_docs: List[Dict[str, Any]]
         t = speicher.qualitaet_aus_doc(d)["market_depth"]
         tiefe[t] = tiefe.get(t, 0) + 1
     abgedeckt = sorted({d["date"] for d in gueltig})
-    erwartet = len([t for t in tage if t >= daten.erwartet_ab])
-    conf, conf_gruende = confidence(len(abgedeckt), erwartet, dq, tiefe, len(inserate))
+    erwartete = set(daten.erwartete_tage(tage))
+    erwartet = len(erwartete)
+    # Segmentabdeckung (Befund B5): gueltige Segment-Tage gegen Segmente der Fassung x erwartete Tage
+    segment_tage = sum(1 for d in gueltig if d["date"] in erwartete)
+    segment_tage_erwartet = len(daten.segmente_fassung) * erwartet
+    conf, conf_gruende = confidence(len(abgedeckt), erwartet, dq, tiefe, len(inserate), segment_tage, segment_tage_erwartet)
     segs_mit = {d["segment_id"] for d in gueltig}
     leere_segmente = sum(1 for s in segs_mit if not any(d["segment_id"] == s for d in basis))
     kosten = round(sum(float(d.get("crawl_cost_usd") or 0) for d in kosten_docs if d["date"] in tage_set), 4)
-    beobachtungen = len(basis)
+    # Kosteneffizienz (Abschnitt 38, Befund B7): Zaehler und Nenner auf derselben Basis — Kosten der gerechneten
+    # Fassung (inkl. ihrer ungueltigen Laeufe) je gueltiger Beobachtung (inkl. EMPTY wie deals.ist_gueltig), je
+    # Inserat und je Hot Deal derselben Fassung. kosten_usd bleibt die reale Ausgabe ueber alle Fassungen.
+    kosten_fassung = round(sum(float(d.get("crawl_cost_usd") or 0) for d in docs), 4)
+    beobachtungen = len(gueltig)
     return {
         "startwert": _r(start), "endwert": _r(ende), "delta_eur": _r(delta_eur), "delta_pct": _r(delta_pct, 3),
         "richtung": richtung(delta_pct, zone), "korb_segmente": len(korb),
@@ -435,17 +508,20 @@ def kennzahlen(daten: _Daten, tage: List[str], kosten_docs: List[Dict[str, Any]]
         "market_depth": _tiefe_zusammen(tiefe), "market_depth_zaehler": tiefe,
         "liquiditaet": deals.liquiditaet_bewerten(gueltig).get("stufe"),
         "coverage_days": len(abgedeckt), "expected_days": erwartet, "confidence": conf, "confidence_gruende": conf_gruende,
+        "segment_tage_gueltig": segment_tage, "segment_tage_erwartet": segment_tage_erwartet,
+        "teilabgedeckte_tage": len(teil),
         "segmente_mit_daten": len(segs_mit), "segmente_gesamt": len(daten.segmente_fassung), "empty_segmente": leere_segmente,
-        "gueltige_beobachtungen": beobachtungen, "kosten_usd": kosten,
-        "cost_per_valid_observation": round(kosten / beobachtungen, 4) if beobachtungen else None,
-        "cost_per_unique_listing": round(kosten / len(inserate), 4) if inserate else None,
-        "cost_per_hot_deal": round(kosten / len(hot), 4) if hot else None,
+        "gueltige_beobachtungen": beobachtungen, "kosten_usd": kosten, "kosten_fassung_usd": kosten_fassung,
+        "cost_per_valid_observation": round(kosten_fassung / beobachtungen, 4) if beobachtungen else None,
+        "cost_per_unique_listing": round(kosten_fassung / len(inserate), 4) if inserate else None,
+        "cost_per_hot_deal": round(kosten_fassung / len(hot), 4) if hot else None,
     }
 
 
 def _tageszeilen(daten: _Daten, tage: List[str], kosten_docs: List[Dict[str, Any]], zone: float) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     bewegungen: Dict[str, Optional[Dict[str, Any]]] = {}
     zeilen = []
+    korb = daten.korb(set(tage))
     for t in tage:
         docs = daten.docs_tag(t)
         basis = daten.basis_tag(t)
@@ -454,6 +530,8 @@ def _tageszeilen(daten: _Daten, tage: List[str], kosten_docs: List[Dict[str, Any
         b = tagesbewegung(basis, vortag) if basis and vortag else None
         bewegungen[t] = b
         nv = niveau(list(basis.values()))
+        # Befund B3: Tageswert mit technisch fehlenden Segmenten = Teilabdeckung (Diagramm: Luecke, keine Kennzahl)
+        fehlend = daten.fehlende(t, korb) if nv["median"] is not None else 0
         mit_vergleich = [d for d in gueltig if d.get("vergleich_vortag")]
         dq: Dict[str, int] = {}
         for d in docs:
@@ -473,6 +551,7 @@ def _tageszeilen(daten: _Daten, tage: List[str], kosten_docs: List[Dict[str, Any
             "data_quality": _qualitaet_zusammen(dq) if docs else None,
             "gueltig": bool(gueltig), "leer": bool(gueltig) and not basis, "nur_ungueltig": bool(docs) and not gueltig,
             "andere_fassung": daten.wechsel and t < daten.fassung_ab,
+            "teilabdeckung": fehlend > 0, "fehlende_segmente": fehlend, "offen": daten.offen(t),
             "kosten_usd": round(sum(float(d.get("crawl_cost_usd") or 0) for d in kosten_docs if d["date"] == t), 4)})
     return zeilen, bewegungen
 
@@ -501,7 +580,7 @@ def _segmentdetail(daten: _Daten, tage: List[str], kosten_docs: List[Dict[str, A
                      "enabled": seg.get("enabled"), "version": daten.haupt[0] if daten.haupt else None,
                      "aktueller_median": float(im[basis[-1]]["median_price"]) if basis else None,
                      "delta_eur": _r(delta), "delta_pct": _r(delta / float(a["median_price"]) * 100, 3) if (delta is not None and float(a["median_price"])) else None,
-                     "gueltige_tage": len(gueltig), "erwartete_tage": len([t for t in tage if t >= daten.erwartet_ab]),
+                     "gueltige_tage": len(gueltig), "erwartete_tage": len(daten.erwartete_tage(tage)),
                      "listings": len(inserate), "hot_deals": len(set().union(*[_hot_ids(d) for d in im.values()])),
                      "private_hot_deals": len(set().union(*[_hot_privat_ids(d) for d in im.values()])),
                      "market_depth": speicher.qualitaet_aus_doc(letzter)["market_depth"] if letzter else "UNKNOWN",
@@ -514,9 +593,11 @@ def _segmentdetail(daten: _Daten, tage: List[str], kosten_docs: List[Dict[str, A
 
 
 def bericht_rechnen(modell: Dict[str, Any], segs: Dict[str, Dict[str, Any]], docs: List[Dict[str, Any]], typ: str, von: str, bis: str,
-                    ereignisse: Optional[List[Dict[str, Any]]] = None, *, zone: float = STABIL_PCT) -> Optional[Dict[str, Any]]:
-    """Reine Rechnung (ohne Datenbank) — derselbe Code fuer finale und vorlaeufige Berichte. None ohne Tagesdaten."""
-    daten = _Daten(segs, docs, von, bis)
+                    ereignisse: Optional[List[Dict[str, Any]]] = None, *, zone: float = STABIL_PCT,
+                    heute: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Reine Rechnung (ohne Datenbank) — derselbe Code fuer finale und vorlaeufige Berichte. None ohne Tagesdaten.
+    heute (nur vorlaeufig, deutscher Kalendertag): spaetere Tage sind 'offen' statt fehlend (Befund B17)."""
+    daten = _Daten(segs, docs, von, bis, heute)
     if not daten.im_zeitraum or daten.haupt is None:
         return None
     tage = tage_zwischen(von, bis)
@@ -539,10 +620,11 @@ def bericht_rechnen(modell: Dict[str, Any], segs: Dict[str, Dict[str, Any]], doc
                 continue
             bt = tage_zwischen(bv, bb)
             k = kennzahlen(daten, bt, kosten_docs, zone)
-            bloecke.append({"von": bv, "bis": bb, **{f: k[f] for f in ("startwert", "endwert", "delta_eur", "delta_pct", "richtung",
-                                                                       "neue_listings", "verschwundene_listings", "preissenkungen",
-                                                                       "preiserhoehungen", "hot_deals", "private_hot_deals",
-                                                                       "coverage_days", "expected_days", "data_quality", "kosten_usd")},
+            bloecke.append({"von": bv, "bis": bb, "offen": all(daten.offen(t) for t in bt),
+                            **{f: k[f] for f in ("startwert", "endwert", "delta_eur", "delta_pct", "richtung",
+                                                 "neue_listings", "verschwundene_listings", "preissenkungen",
+                                                 "preiserhoehungen", "hot_deals", "private_hot_deals",
+                                                 "coverage_days", "expected_days", "data_quality", "kosten_usd")},
                             "bewegung": {f: v for f, v in bewegung_statistik(bt[1:], bewegungen, zone).items()
                                          if f in ("fallend", "steigend", "stabil", "netto_eur")}})
         bericht["bloecke"] = bloecke
@@ -578,6 +660,14 @@ def bericht_rechnen(modell: Dict[str, Any], segs: Dict[str, Dict[str, Any]], doc
     bericht["hot_deals_top"] = sorted(beste.values(), key=lambda x: -float(x["diff_pct"]))[:HOT_TOP_MAX]
     if kz["coverage_days"] < kz["expected_days"]:
         bericht["hinweise"].append(f"{kz['coverage_days']} / {kz['expected_days']} gültige Tage — Lücken werden nicht aufgefüllt")
+    if kz["segment_tage_gueltig"] < kz["segmente_gesamt"] * kz["coverage_days"]:
+        bericht["hinweise"].append(f"{kz['segment_tage_gueltig']} / {kz['segment_tage_erwartet']} gültige Segment-Tage "
+                                   f"({kz['segmente_gesamt']} Segmente) — fehlende Segmente werden nicht aufgefüllt")
+    if kz["teilabgedeckte_tage"]:
+        bericht["hinweise"].append(f"{kz['teilabgedeckte_tage']} Tag(e) mit Teilabdeckung (Segmente ohne gültigen Lauf) — "
+                                   "zählen nicht für Median, Minimum, Maximum und Stichproben-Änderung der Periode")
+    if daten.offen_ab is not None and daten.offen_ab <= bis:
+        bericht["offen_ab"] = daten.offen_ab
     return bericht
 
 
@@ -595,10 +685,13 @@ async def _laden(db, model_id: str, von: str, bis: str) -> Tuple[Dict[str, Any],
     return modell, segs, docs, ereignisse
 
 
-async def bericht_berechnen(db, model_id: str, typ: str, von: str, bis: str) -> Optional[Dict[str, Any]]:
-    """Bericht aus den gespeicherten Daten rechnen — schreibt nichts."""
+async def bericht_berechnen(db, model_id: str, typ: str, von: str, bis: str, *, heute: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Bericht aus den gespeicherten Daten rechnen — schreibt nichts. Die reine Rechnung laeuft in einem
+    Hilfsthread (Abschnitt 49, Befund B9): ein Monatsbericht mit 180 Segmenten braucht ueber 1 s CPU, und der
+    Event-Loop dieses Web-Prozesses bedient gleichzeitig Vergleich, Vertrag und Versand — er darf nie stehen.
+    bericht_rechnen liest nur seine Argumente (keine Datenbank, kein geteilter Zustand)."""
     modell, segs, docs, ereignisse = await _laden(db, model_id, von, bis)
-    return bericht_rechnen(modell, segs, docs, typ, von, bis, ereignisse)
+    return await asyncio.to_thread(bericht_rechnen, modell, segs, docs, typ, von, bis, ereignisse, heute=heute)
 
 
 async def _hot_deals_offen(db, segment_ids: List[str], von: str, bis: str) -> int:
@@ -681,6 +774,7 @@ async def faellige_finalisieren(db, *, jetzt: Optional[datetime] = None, model_i
             elif r == "wartet_auf_hot_deals":
                 z["wartet"] += 1
                 komplett = False
+            await asyncio.sleep(0)          # zwischen den Modellen den Loop freigeben (Abschnitt 49)
         if komplett and nur is None:
             erledigt[schluessel] = jetzt.isoformat()
     if nur is None:
@@ -716,14 +810,21 @@ async def uebersicht(db, typ: str, von: str, bis: str) -> Dict[str, Any]:
 
 
 async def perioden_liste(db, typ: Optional[str] = None) -> Dict[str, Any]:
+    """Finale Perioden mit Anzahl der Modelle. Befunde B12/B13: die eingefrorenen Berichte werden nie geloescht
+    (rund 1.500 Dokumente zu 15-100 KB je Monat) — die Gruppierung nutzt deshalb NUR die Felder des Index
+    markt_bericht_periode (typ, periode_von, periode_bis) und laeuft als abgedeckter Index-Scan, ohne ein einziges
+    Berichtsdokument zu lesen (kein Cache-Verdraengen auf dem gemeinsamen Primary)."""
     match: Dict[str, Any] = {"typ": typ} if typ else {}
-    gruppen = await db[BERICHTE].aggregate([
-        {"$match": match},
-        {"$group": {"_id": {"typ": "$typ", "von": "$periode_von", "bis": "$periode_bis"}, "anzahl": {"$sum": 1},
-                    "erstellt_at": {"$max": "$erstellt_at"}}},
-        {"$sort": {"_id.von": -1, "_id.typ": 1}}, {"$limit": 400}]).to_list(400)
-    final = [{"typ": g["_id"]["typ"], "von": g["_id"]["von"], "bis": g["_id"]["bis"], "anzahl": g["anzahl"], "erstellt_at": g.get("erstellt_at")}
-             for g in gruppen]
+    pipeline = [{"$match": match},
+                {"$group": {"_id": {"typ": "$typ", "von": "$periode_von", "bis": "$periode_bis"}, "anzahl": {"$sum": 1}}},
+                {"$sort": {"_id.von": -1, "_id.typ": 1}}, {"$limit": 400}]
+    try:
+        gruppen = await db[BERICHTE].aggregate(pipeline, hint=PERIODEN_INDEX).to_list(400)
+    except OperationFailure:
+        # Index fehlt (Anlage gescheitert, steht im Merker market_config/indizes) — dann eben ohne Hinweis
+        log.warning("Berichte: Index %s fehlt — Periodenliste ohne abgedeckten Index-Scan", PERIODEN_INDEX)
+        gruppen = await db[BERICHTE].aggregate(pipeline).to_list(400)
+    final = [{"typ": g["_id"]["typ"], "von": g["_id"]["von"], "bis": g["_id"]["bis"], "anzahl": g["anzahl"]} for g in gruppen]
     laufend = [p for p in laufende_perioden() if not typ or p["typ"] == typ]
     return {"final": final, "laufend": laufend, "stand": await konfig.merker_lesen(db, BERICHTE_DOK),
             "karenz_stunden": BERICHT_KARENZ_STUNDEN, "stabil_zone_pct": STABIL_PCT}
@@ -737,7 +838,8 @@ async def modell_bericht(db, model_id: str, typ: str, von: str, bis: str) -> Opt
     b = await db[BERICHTE].find_one({"model_id": model_id, "typ": typ, "periode_von": von, "periode_bis": bis}, {"_id": 0})
     if b:
         return b
-    b = await bericht_berechnen(db, model_id, typ, von, bis)
+    # Befund B17: kuenftige Tage der laufenden Periode sind 'offen', nicht fehlend (Abdeckung/Confidence nur bis heute)
+    b = await bericht_berechnen(db, model_id, typ, von, bis, heute=konfig.heute_tag())
     if not b:
         return None
     b["status"] = "VORLAEUFIG"

@@ -11,12 +11,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
-const netz = vi.hoisted(() => ({ gets: [], posts: [], fehler: null, ohneFinal: false }));
+const netz = vi.hoisted(() => ({ gets: [], posts: [], fehler: null, ohneFinal: false, modellFehler: null, bericht: null, tooltips: [], diagramme: [] }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 vi.mock("recharts", () => {
   const Leer = ({ children }) => h("div", { "data-chart": "1" }, children);
-  return { ResponsiveContainer: Leer, ComposedChart: Leer, BarChart: Leer, Line: () => null, Area: () => null, Bar: () => null,
-           XAxis: () => null, YAxis: () => null, Tooltip: () => null, CartesianGrid: () => null };
+  const Verlauf = ({ children, data }) => { netz.diagramme.push(data); return h("div", { "data-chart": "1" }, children); };
+  return { ResponsiveContainer: Leer, ComposedChart: Verlauf, BarChart: Leer, Line: () => null, Area: () => null, Bar: () => null,
+           XAxis: () => null, YAxis: () => null, Tooltip: (p) => { netz.tooltips.push(p); return null; }, CartesianGrid: () => null };
 });
 const ZEILEN = [
   { model_id: "bmw-320d", label: "BMW 320d", fuel: "DIESEL", gearbox: "AUTOMATIC_GEAR", richtung: "FALLING", delta_eur: -400, delta_pct: -2.1, listings: 40,
@@ -69,6 +70,23 @@ const BERICHT = {
   hinweise: ["Fassungswechsel im Zeitraum — gerechnet wird nur die aktuelle Fassung ab 2028-02-04"],
   hinweis: "Beobachtet wird je Segment nur die günstige Marktzone",
 };
+// laufender März (vorläufig, Stand 02.03.): 01.03. voll, 02.03. Teilabdeckung (ein Segment ohne gültigen Lauf), ab 03.03. offen
+const OFFEN = { median: null, min: null, listings: 0, segmente: 0, delta_vortag_eur: null, richtung: null, neue: 0, preissenkungen: 0, preiserhoehungen: 0,
+                hot_deals: 0, data_quality: null, gueltig: false, leer: false, nur_ungueltig: false, andere_fassung: false, offen: true };
+const VORL_TAGE = [
+  { ...TAGE[0], date: "2028-03-01", teilabdeckung: false, fehlende_segmente: 0, offen: false },
+  { ...TAGE[1], date: "2028-03-02", median: 12000, teilabdeckung: true, fehlende_segmente: 1, offen: false },
+  { ...OFFEN, date: "2028-03-03" }, { ...OFFEN, date: "2028-03-04" },
+];
+function vorlaeufig(p) {
+  return { ...BERICHT, typ: p.typ, periode_von: p.von, periode_bis: p.bis, status: "VORLAEUFIG", stand_at: "2028-03-02T08:00:00Z", faellig_ab: "2028-03-06T05:00:00Z",
+           offen_ab: "2028-03-03", tage: VORL_TAGE,
+           kennzahlen: { ...BERICHT.kennzahlen, coverage_days: 2, expected_days: 2, segment_tage_gueltig: 3, segment_tage_erwartet: 4, confidence_gruende: [] },
+           bloecke: p.typ === "MONTHLY" ? [{ ...BERICHT.bloecke[0], von: "2028-03-01", bis: "2028-03-05", offen: false, coverage_days: 2, expected_days: 2 },
+                                           { ...BERICHT.bloecke[1], von: "2028-03-06", bis: "2028-03-10", offen: true, richtung: "UNKNOWN", startwert: null, endwert: null,
+                                             delta_eur: null, delta_pct: null, coverage_days: 0, expected_days: 0 }] : undefined,
+           fruehere_fassungen: [], hinweise: ["vorläufig — live gerechnet"] };
+}
 vi.mock("@/lib/api", () => ({
   errMsg: (e, s) => e?.message || s,
   api: {
@@ -85,12 +103,19 @@ vi.mock("@/lib/api", () => ({
       if (url === "/admin/market/reports") return { data: { zeilen: ZEILEN, anzahl: 3, hinweis: "Beobachtet wird je Segment nur die günstige Marktzone." } };
       if (url === "/admin/market/reports/model/bmw-320d/list") {
         return { data: { final: netz.ohneFinal ? [] : [{ typ: "MONTHLY", periode_von: "2028-02-01", periode_bis: "2028-02-29", status: "FINAL" }],
-                         laufend: [{ typ: "FIVE_DAY", von: "2028-03-01", bis: "2028-03-05", faellig_ab: "2028-03-06T05:00:00Z" }] } };
+                         laufend: [{ typ: "FIVE_DAY", von: "2028-03-01", bis: "2028-03-05", faellig_ab: "2028-03-06T05:00:00Z" },
+                                   { typ: "FIFTEEN_DAY", von: "2028-03-01", bis: "2028-03-15", faellig_ab: "2028-03-16T05:00:00Z" },
+                                   { typ: "MONTHLY", von: "2028-03-01", bis: "2028-03-31", faellig_ab: "2028-04-01T04:00:00Z" }] } };
       }
       if (url === "/admin/market/reports/model/bmw-320d") {
         const p = opts?.params || {};
-        if (p.typ === "FIVE_DAY") return { data: { ...BERICHT, typ: "FIVE_DAY", periode_von: p.von, periode_bis: p.bis, status: "VORLAEUFIG", stand_at: "2028-03-02T08:00:00Z",
-                                                   faellig_ab: "2028-03-06T05:00:00Z", bloecke: undefined, fruehere_fassungen: [], hinweise: ["vorläufig — live gerechnet"] } };
+        if (netz.modellFehler) {
+          const e = new Error(netz.modellFehler.message || "Keine Tagesdaten für dieses Modell im Zeitraum");
+          e.response = { status: netz.modellFehler.status };
+          throw e;
+        }
+        if (netz.bericht) return { data: netz.bericht };
+        if (p.von === "2028-03-01") return { data: vorlaeufig(p) };
         return { data: BERICHT };
       }
       return { data: {} };
@@ -102,7 +127,7 @@ vi.mock("@/context/AuthContext", () => ({ useAuth: () => ({ user: { id: "sa", is
 
 const { default: MarktBerichte } = await import("./MarktBerichte");
 const { default: MarktBericht } = await import("./MarktBericht");
-const { berichtSortieren, periodeText } = await import("@/lib/markt");
+const { berichtSortieren, periodeText, richtungAusPct } = await import("@/lib/markt");
 
 let wurzel; let behaelter; let ort = null;
 function Ort() { ort = useLocation(); return null; }
@@ -124,7 +149,10 @@ async function waehlen(t, wert) {
   await warten();
 }
 const reihenfolge = () => [...behaelter.querySelectorAll("[data-testid^='bericht-zeile-']")].map((e) => e.getAttribute("data-testid").replace("bericht-zeile-", ""));
-beforeEach(() => { netz.gets.length = 0; netz.posts.length = 0; netz.fehler = null; netz.ohneFinal = false; ort = null; });
+beforeEach(() => {
+  netz.gets.length = 0; netz.posts.length = 0; netz.fehler = null; netz.ohneFinal = false; ort = null;
+  netz.modellFehler = null; netz.bericht = null; netz.tooltips.length = 0; netz.diagramme.length = 0;
+});
 afterEach(async () => { if (wurzel) await act(async () => { wurzel.unmount(); }); wurzel = null; behaelter?.remove(); });
 
 describe("Admin Berichte — Übersicht aller Modelle", () => {
@@ -249,14 +277,100 @@ describe("Admin Berichte — Modellbericht", () => {
     expect(el("bericht-fassungen")).toBeNull();
   });
 
-  it("ohne finalen Bericht nimmt die Seite die laufende Periode; Ladefehler zeigt Rückweg", async () => {
+  it("ohne finalen Bericht nimmt die Seite den laufenden Monat (nicht den oft noch leeren 5-Tage-Block); Ladefehler zeigt Rückweg", async () => {
     netz.ohneFinal = true;
     await starten("/admin/markt/berichte/bmw-320d");
-    expect(ort.search).toBe("?typ=FIVE_DAY&von=2028-03-01&bis=2028-03-05");
+    expect(ort.search).toBe("?typ=MONTHLY&von=2028-03-01&bis=2028-03-31");
     expect(el("bericht-status").textContent).toContain("vorläufig");
     await act(async () => { wurzel.unmount(); }); wurzel = null; behaelter?.remove();
-    netz.fehler = "Keine Tagesdaten für dieses Modell im Zeitraum";
+    netz.fehler = "Serverfehler";
     await starten("/admin/markt/berichte/bmw-320d?typ=MONTHLY&von=2028-02-01&bis=2028-02-29");
-    expect(el("bericht-fehler").textContent).toContain("Keine Tagesdaten");
+    expect(el("bericht-fehler").textContent).toContain("Serverfehler");
+    expect(el("bericht-fehler").querySelector("a").getAttribute("href")).toBe("/admin/markt/berichte");
+  });
+
+  it("Periode ohne Tagesdaten (404): leerer Zustand statt Fehlerkarte, Periodenwahl bleibt; Fehler verschwindet beim Wechsel", async () => {
+    netz.modellFehler = { status: 404 };
+    await starten("/admin/markt/berichte/bmw-320d?typ=FIVE_DAY&von=2028-03-01&bis=2028-03-05");
+    expect(el("bericht-leer").textContent).toContain("Keine Tagesdaten in dieser Periode");
+    expect(el("bericht-fehler")).toBeNull();
+    expect(el("bericht-periode")).not.toBeNull();
+    netz.modellFehler = null;
+    await waehlen("bericht-periode", "MONTHLY|2028-03-01|2028-03-31");
+    expect(el("bericht-leer")).toBeNull();
+    expect(el("bericht-status").textContent).toContain("vorläufig");
+    // anderer Fehler: rote Karte, aber die Periodenwahl bleibt — ein Wechsel lädt neu und räumt den Fehler weg
+    netz.modellFehler = { status: 500, message: "Serverfehler" };
+    await waehlen("bericht-periode", "FIVE_DAY|2028-03-01|2028-03-05");
+    expect(el("bericht-fehler").textContent).toContain("Serverfehler");
+    expect(el("bericht-periode")).not.toBeNull();
+    netz.modellFehler = null;
+    await waehlen("bericht-periode", "MONTHLY|2028-02-01|2028-02-29");
+    expect(el("bericht-fehler")).toBeNull();
+    expect(el("bericht-status").textContent).toContain("final");
+  });
+
+  it("vorläufiger Monat: künftige Tage sind offen (keine Lücke), Teilabdeckung ist eine Diagrammlücke, Segment-Tage sichtbar", async () => {
+    await starten("/admin/markt/berichte/bmw-320d?typ=MONTHLY&von=2028-03-01&bis=2028-03-31");
+    expect(el("bericht-status").textContent).toContain("vorläufig");
+    expect([...behaelter.querySelectorAll("[data-testid^='bericht-tag-']")].map((e) => e.getAttribute("data-testid"))).toEqual(["bericht-tag-2028-03-01", "bericht-tag-2028-03-02"]);
+    expect(el("bericht-tagestabelle-titel").textContent).toContain("2 Tage · 2 noch offen");
+    expect(el("bericht-luecke-2028-03-03")).toBeNull();
+    expect(el("bericht-abdeckung").textContent).toContain("2 / 2 Tage");
+    expect(el("bericht-abdeckung").textContent).toContain("noch offen");
+    expect(el("bericht-block-offen-2028-03-06").textContent).toBe("noch offen");
+    expect(el("bericht-block-offen-2028-03-01")).toBeNull();
+    expect(el("bericht-segmentabdeckung").textContent).toContain("3/4 Segment-Tage");
+    // Teilabdeckung: Zeile markiert, im Diagramm eine Lücke (kein Scheineinbruch auf 12.000 €)
+    expect(el("bericht-teil-2028-03-02").textContent).toContain("Teilabdeckung (1 Segm.");
+    const reihe = netz.diagramme.at(-1);
+    expect(reihe.find((x) => x.date === "2028-03-02")).toMatchObject({ median: null, min: null, p25: null, p75: null });
+    expect(reihe.find((x) => x.date === "2028-03-01").median).toBe(20000);
+  });
+
+  it("Farbe von Stichprobe und Segmentdetail folgt der Stabilitätszone (±0,5 %), nicht nur dem Vorzeichen", async () => {
+    netz.bericht = { ...BERICHT, kennzahlen: { ...BERICHT.kennzahlen, sample_market_change_eur: -40, sample_market_change_pct: -0.2, kosten_fassung_usd: 0.1 },
+                     segmente: [{ ...BERICHT.segmente[0], segment_id: "s-klein", delta_eur: -60, delta_pct: -0.24 },
+                                { ...BERICHT.segmente[0], segment_id: "s-plus", delta_eur: 20, delta_pct: 0.1 },
+                                { ...BERICHT.segmente[0], segment_id: "s-fallend", delta_eur: -200, delta_pct: -1 },
+                                { ...BERICHT.segmente[0], segment_id: "s-steigend", delta_eur: 300, delta_pct: 1.5 }] };
+    await starten("/admin/markt/berichte/bmw-320d?typ=MONTHLY&von=2028-02-01&bis=2028-02-29");
+    expect(el("bericht-stichprobe").innerHTML).toContain("--text-secondary");
+    expect(el("bericht-stichprobe").innerHTML).not.toContain("--st-gruen");
+    expect(el("bericht-segment-delta-s-klein").getAttribute("style")).toContain("--text-secondary");
+    expect(el("bericht-segment-delta-s-plus").getAttribute("style")).toContain("--text-secondary");
+    expect(el("bericht-segment-delta-s-fallend").getAttribute("style")).toContain("--st-gruen");
+    expect(el("bericht-segment-delta-s-steigend").getAttribute("style")).toContain("--st-rot");
+    expect(el("bericht-kosten").textContent).toContain("Basis: Kosten der gerechneten Fassung 0.10 $");
+    expect([richtungAusPct(-0.5), richtungAusPct(-0.51), richtungAusPct(0.6), richtungAusPct(null), richtungAusPct(1, 2)])
+      .toEqual(["STABLE", "FALLING", "RISING", "UNKNOWN", "STABLE"]);
+  });
+
+  it("helle Ansicht: aktiver Chip ohne feste weiße Schrift, Tooltips und Achsen über Tokens", async () => {
+    await starten("/admin/markt/berichte/bmw-320d?typ=MONTHLY&von=2028-02-01&bis=2028-02-29");
+    await klick("bericht-blockwahl-2028-02-06");
+    const stil = el("bericht-blockwahl-2028-02-06").getAttribute("style");
+    expect(stil).toContain("color: var(--text-primary)");
+    expect(stil).not.toMatch(/#fff|rgb\(255, 255, 255\)/);
+    expect(el("bericht-zweite-listings").getAttribute("style")).toContain("color: var(--text-primary)");
+    expect(el("bericht-zweite-neue").getAttribute("style")).toContain("color: var(--text-secondary)");
+    expect(netz.tooltips.length).toBeGreaterThanOrEqual(2);
+    for (const t of netz.tooltips) {
+      expect(t.contentStyle).toMatchObject({ background: "var(--bg-surface)", color: "var(--text-primary)" });
+      expect(t.labelStyle).toMatchObject({ color: "var(--text-primary)" });
+    }
+  });
+});
+
+describe("Admin Berichte — Übersicht lädt nach Aktualisieren/Erstellen neu", () => {
+  it("gleiche neueste Periode: Aktualisieren und Berichte jetzt erstellen laden die Tabelle trotzdem neu", async () => {
+    await starten("/admin/markt/berichte");
+    const zaehlen = () => netz.gets.filter((g) => g.url === "/admin/market/reports").length;
+    expect(zaehlen()).toBe(1);
+    await klick("berichte-aktualisieren");
+    expect(zaehlen()).toBe(2);
+    expect(netz.gets.filter((g) => g.url === "/admin/market/reports").at(-1).params).toEqual({ typ: "MONTHLY", von: "2028-02-01", bis: "2028-02-29" });
+    await klick("berichte-erstellen");
+    expect(zaehlen()).toBe(3);
   });
 });

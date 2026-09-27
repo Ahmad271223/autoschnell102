@@ -25,6 +25,9 @@ export default function MarktBerichte() {
   const [sort, setSort] = useState("rueckgang");
   const [fehler, setFehler] = useState("");
   const [busy, setBusy] = useState(false);
+  // Neu-Laden der Tabelle erzwingen: bleibt die neueste Periode nach „Aktualisieren“ / „Berichte jetzt erstellen“
+  // dieselbe, ändert sich wahl nicht — die Zeilen müssen trotzdem neu kommen (neu eingefrorene Modelle)
+  const [ladeZaehler, setLadeZaehler] = useState(0);
 
   const periodenLaden = useCallback(async (t) => {
     try {
@@ -32,6 +35,7 @@ export default function MarktBerichte() {
       setPerioden(r.data);
       const erste = r.data?.final?.[0];
       setWahl(erste ? `${erste.von}|${erste.bis}` : "");
+      setLadeZaehler((n) => n + 1);
       setFehler("");
     } catch (e) { setFehler(errMsg(e, "Berichtsperioden konnten nicht geladen werden")); }
   }, []);
@@ -45,7 +49,7 @@ export default function MarktBerichte() {
       .then((r) => { if (aktiv) { setDaten(r.data); setFehler(""); } })
       .catch((e) => { if (aktiv) setFehler(errMsg(e, "Übersicht konnte nicht geladen werden")); });
     return () => { aktiv = false; };
-  }, [typ, wahl]);
+  }, [typ, wahl, ladeZaehler]);
 
   const erstellen = async () => {
     setBusy(true);
@@ -68,7 +72,7 @@ export default function MarktBerichte() {
       <Link to="/admin/markt" className="inline-flex items-center gap-1.5 text-xs text-zinc-400 hover:text-white mb-2"><ArrowLeft size={14} /> Marktanalyse</Link>
       <PageHeader title="Berichte" subtitle="Eingefrorene 5-Tage-, 15-Tage- und Monatsberichte je Marktmodell — aus gespeicherten Tageswerten, keine Zusatzabrufe."
                   action={<div className="flex gap-2">
-                    <Button variant="outline" size="sm" onClick={() => periodenLaden(typ)}><RefreshCw size={14} /> Aktualisieren</Button>
+                    <Button variant="outline" size="sm" onClick={() => periodenLaden(typ)} data-testid="berichte-aktualisieren"><RefreshCw size={14} /> Aktualisieren</Button>
                     {superAdmin && <Button size="sm" onClick={erstellen} disabled={busy} data-testid="berichte-erstellen"
                                            title="Nur fällige Perioden (Periodenende + Karenz) werden eingefroren — laufende nie"><Lock size={14} /> Berichte jetzt erstellen</Button>}
                   </div>} />
