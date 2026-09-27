@@ -629,11 +629,11 @@ def test_18_berichtsrechnung_blockiert_den_event_loop_nicht(welt, monkeypatch):
     async def _laden(db, model_id, v, b):
         return modell, {s["id"]: s for s in segs}, docs, []
 
-    async def _geplant_laden(db, seg_ids, v, b):
+    async def _planung_laden(db, seg_ids, v, b, heute=None):
         assert sorted(seg_ids) == sorted(geplant) and (v, b) == (von, bis)
-        return geplant
+        return geplant, {"tage": {t: B.PLAN_LIEF for t in B.tage_zwischen(B._plus(von, -B.VORLAUF_TAGE), bis)}}
     monkeypatch.setattr(B, "_laden", _laden)
-    monkeypatch.setattr(B, "_geplant_laden", _geplant_laden)
+    monkeypatch.setattr(B, "_planung_laden", _planung_laden)
     im_loop = []
     echt = B.bericht_rechnen
 
@@ -810,12 +810,13 @@ def test_22_vorlaeufig_heute_zaehlen_nur_gelaufene_segmente(welt):
     # ein heute schon gescheiterter Lauf ist ein echter Ausfall (Teilabdeckung, fehlender Segment-Tag)
     k = _rechnen(welt, segs, docs + frueh + [_ungueltig_daten(segs[5], _t(3))], "MONTHLY", _t(1), _t(29), heute=_t(3))["kennzahlen"]
     assert (k["segment_tage_gueltig"], k["segment_tage_erwartet"], k["teilabgedeckte_tage"], k["segment_luecken"]) == (51, 52, 1, 1)
-    # 01. um 08:00: Monat und neuer 5-Tage-Block
+    # 01. um 08:00: Monat und neuer 5-Tage-Block — Runde 4 (#6): aus einem einzigen Tag ist die Confidence nie hoch
     erst = [_doc_daten(welt, s, _t(1), preis[s["id"]], n=12) for s in segs[:3]]
     for typ, bis in (("MONTHLY", _t(29)), ("FIVE_DAY", _t(5))):
         ber = _rechnen(welt, segs, vormonat + erst, typ, _t(1), bis, heute=_t(1))
         k = ber["kennzahlen"]
-        assert (k["segment_tage_gueltig"], k["segment_tage_erwartet"], k["confidence"]) == (3, 3, "HIGH"), typ
+        assert (k["segment_tage_gueltig"], k["segment_tage_erwartet"], k["confidence"]) == (3, 3, "LOW"), typ
+        assert "nur 1 gültige(r) Tag(e) (hoch ab 3)" in k["confidence_gruende"], typ
         assert (k["minimum"], k["median_periode"], k["niveau_tage"]) == (None, None, 0), typ
         assert ber["tage"][0]["median_korb"] is None and ber["tage"][0]["ausstehende_segmente"] == 21, typ
         assert not any("Segment-Tage" in h for h in ber["hinweise"]), typ
@@ -869,21 +870,22 @@ def test_24_schema_im_bericht_und_in_den_listen(welt):
     seg = _seg(welt)
     db = welt.db
     try:
-        for d in range(1, 16):
+        for d in range(1, 21):
             _doc(welt, seg, _t(d), 20000)
-        assert B.SCHEMA == 3
+        assert B.SCHEMA == 4, "Runde 4: Tagesplan-Protokoll, Korb an Serienanfang/-ende, Confidence mit Mindesttagen"
         assert welt.run(B.finalisieren(db, mid, "FIVE_DAY", _t(1), _t(5), jetzt=_nach(_t(5)))) == "erstellt"
         neu = _bericht(welt, mid, "FIVE_DAY", _t(1), _t(5))
-        assert neu["schema"] == 3
-        for von, bis, schema in ((_t(6), _t(10), 1), (_t(11), _t(15), 2)):
+        assert neu["schema"] == 4
+        alt = ((_t(6), _t(10), 1), (_t(11), _t(15), 2), (_t(16), _t(20), 3))
+        for von, bis, schema in alt:
             welt.run(db[K.BERICHTE].insert_one({**neu, "id": f"test-alt-{schema}", "periode_von": von, "periode_bis": bis, "schema": schema}))
             assert welt.run(B.finalisieren(db, mid, "FIVE_DAY", von, bis, jetzt=_nach(bis))) == "vorhanden"
-        for von, bis, schema in ((_t(1), _t(5), 3), (_t(6), _t(10), 1), (_t(11), _t(15), 2)):
+        for von, bis, schema in ((_t(1), _t(5), 4),) + alt:
             zeile = next(z for z in welt.run(B.uebersicht(db, "FIVE_DAY", von, bis))["zeilen"] if z["model_id"] == mid)
             assert zeile["schema"] == schema
             assert welt.run(B.modell_bericht(db, mid, "FIVE_DAY", von, bis))["schema"] == schema
         liste = welt.run(B.modell_berichte(db, mid))["final"]
-        assert sorted((x["periode_von"], x["schema"]) for x in liste) == [(_t(1), 3), (_t(6), 1), (_t(11), 2)]
+        assert sorted((x["periode_von"], x["schema"]) for x in liste) == [(_t(1), 4), (_t(6), 1), (_t(11), 2), (_t(16), 3)]
     finally:
         _aufraeumen(welt)
 
@@ -1069,7 +1071,9 @@ def test_28_runde3_tage_ohne_erwartetes_segment_zaehlen_nicht(welt):
     k = ber["kennzahlen"]
     assert (k["coverage_days"], k["expected_days"], k["tage_ohne_plan"]) == (9, 9, 21)
     assert (k["segment_tage_gueltig"], k["segment_tage_erwartet"]) == (216, 216) and not any("Abdeckung" in g for g in k["confidence_gruende"])
-    assert k["confidence"] == "HIGH" and not any("gültige Tage" in h for h in ber["hinweise"])
+    # Runde 4 (#6): 9 von 30 Kalendertagen mit Wert — der Bericht beschreibt weniger als die Haelfte des Monats: mittel
+    assert k["confidence"] == "MEDIUM" and not any("gültige Tage" in h for h in ber["hinweise"])
+    assert k["confidence_gruende"] == ["9/30 Kalendertage mit gültigem Wert (hoch ab 50 %)", "21 Tage ohne Plan"], k["confidence_gruende"]
     assert any("21 Kalendertag(e) ohne geplanten Abruf" in h for h in ber["hinweise"]), ber["hinweise"]
     neu = [{**_seg_daten(welt, f"{i * 10000}-{i * 10000 + 9999}"), "created_at": "2028-04-14T23:30:00+00:00"} for i in range(24)]
     ber = _rechnen(welt, neu, [_doc_daten(welt, s, _a(d), 20000, n=12) for s in neu for d in range(15, 31)], "MONTHLY", _a(1), _a(30))

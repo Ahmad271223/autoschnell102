@@ -186,18 +186,29 @@ async def intervall(db) -> Dict[str, Any]:
     rest_tage = konfig.rest_tage_im_monat()
     fest = konfig.crawl_intervall_tage()
     ohne_budget = budget_usd <= 0
+    # Pruefung Runde 4 (#2): jedes Segment hoechstens alle konfig.MAX_INTERVALL_TAGE Tage — reicht das Budget dafuer
+    # nicht, wird trotzdem so geplant und 'budget_reicht_nicht' gesetzt (Warnung in der Uebersicht; Jobs, die am
+    # Budget scheitern, gelten in den Berichten als 'nicht geplant wegen Budget'). Restbudget aufgebraucht:
+    # 'budget_erschoepft' (1 Segment je Tag wie bisher — mehr Jobs scheiterten nur am Budget).
+    budget_erschoepft = budget_reicht_nicht = False
     if ohne_budget:
         tage, je_tag = 0, 0
     elif fest > 0:
-        tage = fest
+        tage = min(fest, konfig.MAX_INTERVALL_TAGE)
         je_tag = math.ceil(segs / tage) if segs else 0
     elif segs == 0 or je_tag_alle <= 0:
         tage, je_tag = 1, segs
     else:
         tagesbudget = max(0.0, rest) / rest_tage - entfernung_tag
+        budget_erschoepft = tagesbudget <= 0
         je_tag = int(math.floor(segs * tagesbudget / je_tag_alle)) if tagesbudget > 0 else 1
         je_tag = max(1, min(segs, je_tag))
         tage = math.ceil(segs / je_tag)
+        if tage > konfig.MAX_INTERVALL_TAGE:
+            budget_reicht_nicht = True
+            if not budget_erschoepft:
+                tage = konfig.MAX_INTERVALL_TAGE
+                je_tag = math.ceil(segs / tage)
     kosten_je_tag = round(je_tag_alle / tage, 4) if (segs and tage) else 0.0
     # Review 26.09.2026 Nr. 10/11: nur Anzeige — was ein Tag kostet, wenn ALLES ueber den
     # (teureren) Ersatz-Scraper liefe (der Ersatz laeuft je URL einzeln, also ein Start je Segment-Abruf).
@@ -217,6 +228,8 @@ async def intervall(db) -> Dict[str, Any]:
             "budget_usd": budget_usd, "budget_monat": doc.get("_id"), "restbudget_usd": round(rest, 2), "rest_tage": rest_tage,
             "verbraucht_usd": round(float(doc.get("used_usd") or 0), 2), "reserviert_usd": round(float(doc.get("reserved_usd") or 0), 2),
             "ohne_budget": ohne_budget, "status": "ohne Budget pausiert" if ohne_budget else "ok",
+            "budget_erschoepft": budget_erschoepft, "budget_reicht_nicht": budget_reicht_nicht,
+            "max_intervall_tage": konfig.MAX_INTERVALL_TAGE,
             # fuer die Kostenformel in der Oberflaeche (nie mehr hart "0,004 $ + Zeilen x 0,003 $")
             "start_usd": konfig.preise_je_actor(konfig.actor())[0], "row_usd": konfig.preise_je_actor(konfig.actor())[1],
             "actor": konfig.actor(), "automatisch": fest == 0,
@@ -310,6 +323,7 @@ async def tagesplan(db, tag: Optional[str] = None, *, sofort: bool = False) -> D
     takt = await intervall(db)
     if takt.get("ohne_budget"):
         # Nr. 30: ohne Budget keine Jobs (vorher: Intervall 1 Tag -> Jobflut, die am Budget scheitert)
+        await _plan_protokollieren(db, t, takt, 0)
         return {"segmente": 0, "neu": 0, "tag": t, "intervall_tage": 0, "segmente_gesamt": takt["segmente"],
                 "status": "ohne Budget pausiert", "hinweis": "Monatsbudget ist 0 — keine Planung, keine Jobs."}
     alle = [s async for s in db[SEGMENTE].find({"enabled": True}, {"_id": 0})]
@@ -357,6 +371,7 @@ async def tagesplan(db, tag: Optional[str] = None, *, sofort: bool = False) -> D
     await konfig.merker_setzen(db, konfig.TAGESPLAN_DOK, tag=t, segmente=len(segs) + schon, neu=neu, sofort=bool(sofort),
                                segmente_je_tag=int(takt["segmente_je_tag"]), segmente_gesamt=int(takt["segmente"]),
                                ruhend=int(ruhend), wartend=int(wartend))
+    await _plan_protokollieren(db, t, takt, len(segs) + schon)
     erg = {"segmente": len(segs), "neu": neu, "tag": t, "intervall_tage": takt["intervall_tage"],
            "segmente_gesamt": takt["segmente"], "slots": len(slots), "schon_geplant": schon, "wartend": wartend,
            "status": "ok", "safe_auto": safe_auto, "ruhend": ruhend, "hot_zuerst": len(hot)}
@@ -1190,6 +1205,16 @@ def _entfernung_starten(db) -> bool:
     return True
 
 
+async def _plan_protokollieren(db, tag: str, takt: Dict[str, Any], segmente_geplant: int) -> None:
+    """Pruefung Runde 4 (#1): der Tagesplan dieses Kalendertags ist gelaufen (konfig.TAGESPLAN_LOG, atomarer Upsert)
+    — auch wenn das Budget 0 Segmente zuliess (budget_grund). Die Berichte werten einen Tag ohne dieses Protokoll als
+    technischen Ausfall des Plans; nur mit Protokoll ist ein Segment ohne Job 'nicht geplant'."""
+    grund = (konfig.BUDGET_GRUND_OHNE if takt.get("ohne_budget") else konfig.BUDGET_GRUND_ERSCHOEPFT if takt.get("budget_erschoepft")
+             else konfig.BUDGET_GRUND_REICHT_NICHT if takt.get("budget_reicht_nicht") else None)
+    await konfig.tagesplan_protokollieren(db, tag, lief=True, segmente_geplant=int(segmente_geplant), budget_grund=grund,
+                                          intervall_tage=takt.get("intervall_tage"), segmente_je_tag=takt.get("segmente_je_tag"))
+
+
 async def worker_forever(db, erfolg: Optional[Callable[[], None]] = None, takt_s: int = 20) -> None:
     """Dauerschleife je Prozess (Claims sind atomar, mehrere Prozesse sind ok).
     Tagesplan einmal je Tag ueber eine kurze Mongo-Sperre + Merker (Nr. 24); Entfernungs-
@@ -1201,6 +1226,7 @@ async def worker_forever(db, erfolg: Optional[Callable[[], None]] = None, takt_s
     while True:
         try:
             if not await konfig.crawler_aktiv(db) or not konfig.token():
+                await konfig.crawler_aus_protokollieren(db)     # Runde 4 #1: nur 'bewusst aus', nie 'Token fehlt'
                 await asyncio.sleep(60)
                 continue
             if await _wartung_aktiv(db):

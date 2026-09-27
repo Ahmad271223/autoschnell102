@@ -29,7 +29,7 @@ const ZEILEN = [
   { model_id: "audi-a4", label: "Audi A4 40 TDI", fuel: "DIESEL", gearbox: "AUTOMATIC_GEAR", richtung: "STABLE", delta_eur: 20, delta_pct: 0.1, listings: 60,
     preissenkungen: 4, preiserhoehungen: 4, hot_deals: 5, private_hot_deals: 2, liquiditaet: "MEDIUM", data_quality: "MEDIUM", health: null, kosten_usd: 0.4,
     empty_segmente: 1, confidence: "MEDIUM", coverage_days: 27, expected_days: 29 },
-].map((z) => ({ ...z, schema: 3 }));
+].map((z) => ({ ...z, schema: 4 }));
 const TAGE = [
   { date: "2028-02-01", median: 20000, min: 19600, p25: 19800, p75: 20200, listings: 5, segmente: 1, delta_vortag_eur: null, delta_vortag_pct: null, richtung: null,
     neue: 0, preissenkungen: 0, preiserhoehungen: 0, hot_deals: 0, data_quality: "GOOD", gueltig: true, leer: false, nur_ungueltig: false, andere_fassung: false },
@@ -43,7 +43,7 @@ const TAGE = [
     neue: 0, preissenkungen: 0, preiserhoehungen: 1, hot_deals: 0, data_quality: "MEDIUM", gueltig: true, leer: false, nur_ungueltig: false, andere_fassung: false },
 ];
 const BERICHT = {
-  model_id: "bmw-320d", typ: "MONTHLY", periode_von: "2028-02-01", periode_bis: "2028-02-29", status: "FINAL", revision: 1, schema: 3, erstellt_at: "2028-03-01T05:10:00Z",
+  model_id: "bmw-320d", typ: "MONTHLY", periode_von: "2028-02-01", periode_bis: "2028-02-29", status: "FINAL", revision: 1, schema: 4, erstellt_at: "2028-03-01T05:10:00Z",
   faellig_ab: "2028-03-01T05:00:00Z", stabil_zone_pct: 0.5, modell: { label: "BMW 320d", fuel: "DIESEL", gearbox: "AUTOMATIC_GEAR" },
   fassung: { version: 2, definition_hash: "h2", ab: "2028-02-01" },
   kennzahlen: { startwert: 20000, endwert: 19800, delta_eur: -200, delta_pct: -1, richtung: "FALLING", korb_segmente: 1, median_periode: 19900, mittelwert_periode: 19950,
@@ -105,7 +105,7 @@ vi.mock("@/lib/api", () => ({
         return { data: { zeilen, anzahl: 3, hinweis: "Beobachtet wird je Segment nur die günstige Marktzone." } };
       }
       if (url === "/admin/market/reports/model/bmw-320d/list") {
-        return { data: { final: netz.ohneFinal ? [] : [{ typ: "MONTHLY", periode_von: "2028-02-01", periode_bis: "2028-02-29", status: "FINAL", schema: netz.schemaAlt ? 1 : 3 }],
+        return { data: { final: netz.ohneFinal ? [] : [{ typ: "MONTHLY", periode_von: "2028-02-01", periode_bis: "2028-02-29", status: "FINAL", schema: netz.schemaAlt ? 1 : 4 }],
                          laufend: [{ typ: "FIVE_DAY", von: "2028-03-01", bis: "2028-03-05", faellig_ab: "2028-03-06T05:00:00Z" },
                                    { typ: "FIFTEEN_DAY", von: "2028-03-01", bis: "2028-03-15", faellig_ab: "2028-03-16T05:00:00Z" },
                                    { typ: "MONTHLY", von: "2028-03-01", bis: "2028-03-31", faellig_ab: "2028-04-01T04:00:00Z" }] } };
@@ -431,8 +431,8 @@ describe("Admin Berichte — Prüfung Runde 2 (Korbwert, laufender Tag, Rechenre
     expect(el("bericht-schema-alt-vw-golf").textContent).toBe("ältere Rechenregel");
     expect(el("bericht-schema-alt-bmw-320d")).toBeNull();
     expect(el("berichte-schema-hinweis").textContent).toContain("1 Bericht(e) nach älterer Rechenregel erstellt");
-    expect([berichtAltesSchema({ schema: 1 }), berichtAltesSchema({}), berichtAltesSchema({ schema: 2 }), berichtAltesSchema({ schema: 3 }), berichtAltesSchema(null)])
-      .toEqual([true, true, true, false, false]);
+    expect([berichtAltesSchema({ schema: 1 }), berichtAltesSchema({}), berichtAltesSchema({ schema: 2 }), berichtAltesSchema({ schema: 3 }), berichtAltesSchema({ schema: 4 }), berichtAltesSchema(null)])
+      .toEqual([true, true, true, true, false, false]);
   });
 });
 
@@ -445,7 +445,7 @@ describe("Admin Berichte — Prüfung Runde 3 (geplant vs. ausgefallen, Rechenre
         ausstehende_segmente: 0, nicht_geplante_segmente: 0, korb_abdeckung_pct: 100, anker: true, offen: false },
       { ...OFFEN, date: "2028-03-03", median_korb: null, ausstehende_segmente: 0, nicht_geplante_segmente: 0 },
     ];
-    netz.bericht = { ...vorlaeufig({ typ: "MONTHLY", von: "2028-03-01", bis: "2028-03-31" }), offen_ab: "2028-03-03", tage, schema: 3,
+    netz.bericht = { ...vorlaeufig({ typ: "MONTHLY", von: "2028-03-01", bis: "2028-03-31" }), offen_ab: "2028-03-03", tage, schema: 4,
                      hinweise: ["Budget-Rotation: 12 Segment-Tag(e) ohne geplanten Abruf — keine Lücke"] };
     await starten("/admin/markt/berichte/bmw-320d?typ=MONTHLY&von=2028-03-01&bis=2028-03-31");
     const reihe = netz.diagramme.at(-1);
@@ -470,5 +470,55 @@ describe("Admin Berichte — Prüfung Runde 3 (geplant vs. ausgefallen, Rechenre
     expect(el("bericht-schema-hinweis").textContent).toContain("Schema 2");
     expect(el("bericht-schema-hinweis").textContent).toContain("Budget-Rotation");
     expect(berichtDiagrammPunkt({ median: 1, median_korb: 2, p25: 1, p75: 3, nicht_geplante_segmente: 1 })).toMatchObject({ median: 2, p25: null, p75: null });
+  });
+});
+
+describe("Admin Berichte — Prüfung Runde 4 (Tagesplan-Protokoll, Serienanfang/-ende, Rechenregel 4)", () => {
+  it("Planungsstand je Tag (Tagesplan lief nicht / Crawler aus / Budget), noch nicht beobachtete und abgelaufene Segmente, Planungs-Kachel; Schema 3 gilt als älter", async () => {
+    const tage = [
+      { ...TAGE[0], date: "2028-02-01", median: 19882, median_korb: 22750, teilabdeckung: false, fehlende_segmente: 0, ausstehende_segmente: 0,
+        nicht_geplante_segmente: 0, vorab_segmente: 7, abgelaufene_segmente: 0, budget_segmente: 0, korb_abdeckung_pct: 70.8, anker: false, plan_status: "lief", offen: false },
+      { ...TAGE[2], date: "2028-02-02", median_korb: null, teilabdeckung: false, fehlende_segmente: 0, plan_status: "ausfall", offen: false },
+      { ...TAGE[2], date: "2028-02-03", median_korb: null, plan_status: "crawler_aus", offen: false },
+      { ...TAGE[1], date: "2028-02-04", median: 20000, median_korb: 22750, p25: 19900, p75: 20100, teilabdeckung: false, fehlende_segmente: 0,
+        ausstehende_segmente: 0, nicht_geplante_segmente: 6, budget_segmente: 6, abgelaufene_segmente: 2, vorab_segmente: 0, korb_abdeckung_pct: 100,
+        anker: true, plan_status: "budget", offen: false },
+    ];
+    netz.bericht = { ...BERICHT, schema: 4, tage,
+                     kennzahlen: { ...BERICHT.kennzahlen, planung: "jobs", kalendertage: 29, tage_mit_wert: 27, tage_tagesplan_ausfall: 1, tage_crawler_aus: 1,
+                                   tage_budget: 1, tage_planung_unbekannt: 0, budget_segment_tage: 6, tage_ohne_plan: 2, abgelaufene_segment_tage: 2,
+                                   vorab_segment_tage: 7, confidence: "LOW", confidence_gruende: ["nur 1 gültige(r) Tag(e) (hoch ab 3)", "2 Tage ohne Plan"] },
+                     hinweise: ["Tagesplan lief nicht: 1 Kalendertag(e) ohne Tagesplan-Protokoll — technischer Ausfall"] };
+    await starten("/admin/markt/berichte/bmw-320d?typ=MONTHLY&von=2028-02-01&bis=2028-02-29");
+    expect(el("bericht-plan-2028-02-02").textContent).toBe("Tagesplan lief nicht");
+    expect(el("bericht-plan-2028-02-02").getAttribute("title")).toContain("technischer Ausfall");
+    expect(el("bericht-plan-2028-02-03").textContent).toBe("Crawler aus");
+    expect(el("bericht-plan-2028-02-04").textContent).toBe("Budget erschöpft");
+    expect(el("bericht-plan-2028-02-01")).toBeNull();                              // „lief“ ist der Normalfall
+    expect(el("bericht-vorab-2028-02-01").textContent).toContain("7 Segm. noch nicht beobachtet");
+    expect(el("bericht-vorab-2028-02-01").getAttribute("title")).toContain("rückwärts verkettet");
+    expect(el("bericht-nichtgeplant-2028-02-04").textContent).toContain("6 Segm. nicht geplant (6 wegen Budget)");
+    expect(el("bericht-abgelaufen-2028-02-04").textContent).toContain("2 Segm. ohne tragbaren Wert");
+    expect(el("bericht-tag-2028-02-01").querySelectorAll("td")[1].getAttribute("style")).toContain("--text-dim");
+    const planung = el("bericht-planung").textContent;
+    expect(planung).toContain("27 / 29 Kalendertage mit Wert");
+    for (const teil of ["1 Tag(e) Tagesplan lief nicht (Lücke)", "1 Tag(e) Crawler bewusst aus", "1 Tag(e) Budget erschöpft",
+      "6 Segment-Tag(e) wegen Budget nicht geplant", "2 Tag(e) ohne Plan", "2 Segment-Tag(e) ohne tragbaren Wert", "7 Segment-Tag(e) noch nicht beobachtet"]) {
+      expect(planung).toContain(teil);
+    }
+    expect(el("bericht-abdeckung").textContent).toContain("nur 1 gültige(r) Tag(e) (hoch ab 3), 2 Tage ohne Plan");
+    expect(el("bericht-hinweise").textContent).toContain("Tagesplan lief nicht");
+    expect(el("bericht-schema-alt")).toBeNull();
+    const reihe = netz.diagramme.at(-1);
+    expect(reihe.find((x) => x.date === "2028-02-01")).toMatchObject({ median: 22750, p25: null, p75: null });
+    await act(async () => { wurzel.unmount(); }); wurzel = null; behaelter?.remove();
+    // Bericht ohne bekannte Planung (Altdaten): keine Planungs-Kachel; ein unter Schema 3 eingefrorener Bericht ist „älter“
+    netz.bericht = { ...BERICHT, schema: 3 };
+    await starten("/admin/markt/berichte/bmw-320d?typ=MONTHLY&von=2028-02-01&bis=2028-02-29");
+    expect(el("bericht-planung")).toBeNull();
+    expect(el("bericht-schema-alt").textContent).toBe("nach älterer Rechenregel erstellt");
+    expect(el("bericht-schema-hinweis").textContent).toContain("Schema 3");
+    expect(el("bericht-schema-hinweis").textContent).toContain("ganztägiger Ausfall des Tagesplans");
+    expect(berichtDiagrammPunkt({ median: 1, median_korb: 2, p25: 1, p75: 3, vorab_segmente: 2 })).toMatchObject({ median: 2, p25: null, p75: null });
   });
 });

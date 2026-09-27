@@ -226,8 +226,17 @@ export const CONFIDENCE = {
  *  seine Nummer — Schema 1 (oder ohne Angabe) und 2 sind nach einer älteren Rechenregel entstanden; Kennzahlen wie
  *  Periodenwerte, Tagesbewegung, Kosten je Einheit, Abdeckung und Segmentabdeckung sind dort anders definiert (Schema 2:
  *  nicht geplante Segmente der Budget-Rotation zählten als fehlend, ohne vollständigen Tag konnte ein Teilkorb das
- *  Niveau stellen). */
-export const BERICHT_SCHEMA = 3;
+ *  Niveau stellen; Schema 3: ein ganztägiger Ausfall des Tagesplans galt als „nicht geplant“, am Serienanfang/-ende
+ *  konnte ein Teilkorb Anker sein, HIGH schon ab einem Tag). */
+export const BERICHT_SCHEMA = 4;
+/** Prüfung Runde 4: Planungsstand eines Berichtstags (backend berichte.PLAN_*, aus dem Tagesplan-Protokoll). „lief“
+ *  ist der Normalfall und wird nicht markiert. */
+export const PLAN_STATUS = {
+  ausfall: { text: "Tagesplan lief nicht", titel: "Kein Tagesplan-Protokoll: technischer Ausfall (z. B. Token fehlte, Wartung, Fehler, Server aus) — zählt als erwarteter Tag (Lücke)", farbe: "var(--st-rot)" },
+  unbekannt: { text: "Planung unbekannt", titel: "Altdaten vor dem Tagesplan-Protokoll ohne jeden Tagesplan-Job — zählt als erwarteter Tag", farbe: "var(--st-amber)" },
+  crawler_aus: { text: "Crawler aus", titel: "Crawler bewusst ausgeschaltet — nicht geplant, keine Datenlücke", farbe: "var(--text-dim)" },
+  budget: { text: "Budget erschöpft", titel: "Monatsbudget aufgebraucht bzw. 0 — nicht geplant wegen Budget, keine technische Lücke", farbe: "var(--text-dim)" },
+};
 export const BERICHT_ALT_TEXT = "nach älterer Rechenregel erstellt";
 export function berichtAltesSchema(b) {
   if (!b) return false;
@@ -242,7 +251,8 @@ export function berichtAltesSchema(b) {
 export function berichtDiagrammPunkt(r) {
   if (!r) return r;
   if (r.median_korb !== undefined) {
-    const teil = r.teilabdeckung || Number(r.ausstehende_segmente || 0) > 0 || Number(r.nicht_geplante_segmente || 0) > 0;
+    const teil = r.teilabdeckung || Number(r.ausstehende_segmente || 0) > 0 || Number(r.nicht_geplante_segmente || 0) > 0
+      || Number(r.vorab_segmente || 0) > 0;
     return { ...r, median: r.median_korb, ...(teil ? { p25: null, p75: null } : {}) };
   }
   return r.teilabdeckung ? { ...r, median: null, min: null, p25: null, p75: null } : r;

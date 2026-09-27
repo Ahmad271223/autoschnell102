@@ -1059,7 +1059,11 @@ async def markt_indizes(db) -> dict:
             ("market_optimization_proposals", "schluessel", "markt_vorschlag_schluessel"),
             ("market_optimization_proposals", "id", "markt_vorschlag_id"),
             # Phase G: SAFE_AUTO-Protokoll — Eintraege einmalig je id
-            ("market_optimization_changes", "id", "markt_aenderung_id")):
+            ("market_optimization_changes", "id", "markt_aenderung_id"),
+            # Pruefung Runde 4 (27.09.2026): Tagesplan-Protokoll — ein Dokument je Kalendertag (atomarer Upsert von zwei
+            # Servern); traegt auch die Bereichsabfrage der Berichte und die Suche nach dem ersten Protokolltag. Nicht
+            # kritisch fuer den Crawler (fehlt der Index, koennte ein Tag doppelt stehen — die Berichte lesen je Tag)
+            ("market_tagesplan_log", "tag", "markt_tagesplan_tag")):
         try:
             ok = await unique_anlegen(db[sammlung], schluessel, name=name, weich=True)
         except Exception as exc:  # noqa: BLE001

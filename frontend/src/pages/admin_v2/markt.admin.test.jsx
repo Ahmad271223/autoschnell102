@@ -55,7 +55,8 @@ vi.mock("@/lib/api", () => ({
         // Reparaturwelle 5 Nr. 30/31/38 + Oberflaeche: Restbudget/Resttage, Entfernungskosten, Preise fuer die Kostenformel, "ohne Budget pausiert"
         takt: { intervall_tage: 3, segmente_je_tag: 6, buendel: 10, kosten_je_tag_usd: 0.38, kosten_je_monat_usd: 11.7, automatisch: true,
                 restbudget_usd: 437.5, rest_tage: 5, entfernung_je_tag_usd: 0.29, start_usd: 0.005, row_usd: 0.0007, actor: "scrapesmith~mobile-de-scraper",
-                puffer_faktor: 0.3, puffer_max: 10, ohne_budget: netz.ohneBudget, status: netz.ohneBudget ? "ohne Budget pausiert" : "ok" },
+                puffer_faktor: 0.3, puffer_max: 10, ohne_budget: netz.ohneBudget, status: netz.ohneBudget ? "ohne Budget pausiert" : "ok",
+                budget_reicht_nicht: !!netz.budgetReichtNicht, budget_erschoepft: false, max_intervall_tage: 14 },
         crawls_je_tag_standard: 2,
         monitoring: { tag: "2026-10-01", geplant: 6, erfolgreich: 6, fehlgeschlagen: 0, wartend: 0, laufend: 0, rows_heute: 120, rows_monat: 4000,
                       kosten_heute_usd: 0.11, kosten_monat_usd: 12.5, budget_uebrig_usd: 437.5, budget_anteil_pct: 2.8, mittlere_laufzeit_s: 9.4,
@@ -131,7 +132,7 @@ async function starten(pfad) {
   await warten();
 }
 async function klick(t) { const k = el(t); if (!k) throw new Error(`nicht gefunden: ${t}`); await act(async () => { k.click(); }); await warten(); }
-beforeEach(() => { netz.posts.length = 0; netz.gets.length = 0; netz.aktiv = true; netz.stats = null; netz.crawlFehler = null; netz.crawlStatus = 0; netz.ohneBudget = false; netz.topN = null; netz.privatStale = false; });
+beforeEach(() => { netz.posts.length = 0; netz.gets.length = 0; netz.aktiv = true; netz.stats = null; netz.crawlFehler = null; netz.crawlStatus = 0; netz.ohneBudget = false; netz.topN = null; netz.privatStale = false; netz.budgetReichtNicht = false; });
 afterEach(async () => { if (wurzel) await act(async () => { wurzel.unmount(); }); wurzel = null; behaelter?.remove(); });
 
 describe("Admin Marktanalyse", () => {
@@ -214,6 +215,16 @@ describe("Admin Marktanalyse", () => {
     await starten("/admin/markt");
     expect(el("markt-taktung").textContent).toContain("ohne Budget pausiert");
     expect(el("markt-taktung").textContent).toContain("keine Planung, keine Jobs");
+  });
+
+  it("Taktung: Budget reicht nicht für höchstens 14 Tage je Segment -> Warnung (Prüfung Runde 4 #2)", async () => {
+    await starten("/admin/markt");
+    expect(el("markt-taktung").textContent).not.toContain("Budget reicht nicht");
+    await act(async () => { wurzel.unmount(); }); wurzel = null; behaelter?.remove();
+    netz.budgetReichtNicht = true;
+    await starten("/admin/markt");
+    expect(el("markt-taktung").textContent).toContain("das Budget reicht nicht, um jedes Segment spätestens alle 14 Tage abzurufen");
+    expect(el("markt-taktung").textContent).toContain("nicht geplant wegen Budget");
   });
 
   it("Crawler-Knopf: aus -> Rückfrage mit Kosten -> POST aktiv:true; an -> POST aktiv:false ohne Rückfrage", async () => {

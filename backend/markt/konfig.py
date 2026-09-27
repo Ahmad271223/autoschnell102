@@ -85,6 +85,23 @@ SCHALTER_DOK = "crawler"      # market_config/_id=crawler: {"aktiv": bool} — K
 # der Tagesplan/die Entfernungspruefung sind je Tag erledigt (kurze Sperren statt 20 h),
 # und welche kritischen Unique-Indizes fehlen (dann crawlt der Worker nicht).
 TAGESPLAN_DOK = "tagesplan"
+# Pruefung Runde 4 (27.09.2026): Tagesplan-Protokoll je Kalendertag (ein Dokument je Tag, Unique-Index auf 'tag',
+# atomarer Upsert — zwei Server schreiben dasselbe Dokument). Der Merker TAGESPLAN_DOK kennt nur den LETZTEN Tag;
+# die Berichte muessen fuer jeden vergangenen Tag wissen, ob nachweislich entschieden wurde, was (nicht) geplant wird:
+#   lief_at        der Tagesplan lief (auch wenn das Budget 0 Segmente zuliess: budget_grund)
+#   crawler_aus_at der Worker fand den Crawler BEWUSST ausgeschaltet (Admin-Knopf bzw. MARKT_AKTIV ohne Knopf) —
+#                  nicht bei fehlendem Token oder Wartung: das ist ein technischer Ausfall
+# Ein Tag OHNE Protokoll (ab der Einfuehrung) ist ein technischer Ausfall des Plans (Token fehlt, ganztaegige Wartung,
+# Exception in synchronisieren/tagesplan, beide Server aus). Gelesen wird nur in markt.berichte (lesend, gebuendelt).
+TAGESPLAN_LOG = "market_tagesplan_log"
+BUDGET_GRUND_OHNE = "ohne_budget"                  # Monatsbudget 0: keine Planung
+BUDGET_GRUND_ERSCHOEPFT = "budget_erschoepft"      # Restbudget aufgebraucht: 1 Segment je Tag
+BUDGET_GRUND_REICHT_NICHT = "budget_reicht_nicht"  # Intervall auf MAX_INTERVALL_TAGE begrenzt, das Budget reicht dafuer nicht
+# Pruefung Runde 4 (#2): ein Segment wird hoechstens alle 14 Tage geplant. Die Berichte tragen den Wert eines nicht
+# geplanten Segments hoechstens so lange (berichte.TRAGEN_MAX_TAGE = VORLAUF_TAGE = 14) — ein laengeres Intervall
+# liesse Segmente regelmaessig ohne tragbaren Wert. Grenze fuer MARKT_CRAWL_INTERVALL_TAGE und jobs.intervall; die
+# SAFE_AUTO-Stufen (markt.health/optimierung) sollen dieselbe Grenze nutzen (Konstante hier, keine Umgebungsvariable).
+MAX_INTERVALL_TAGE = 14
 ENTFERNUNG_DOK = "entfernung"
 INDIZES_DOK = "indizes"
 # Reparaturwelle 6 Nr. 94: das im Admin gesetzte Monatsbudget gilt auch fuer KOMMENDE Monate
@@ -170,6 +187,63 @@ async def merker_lesen(db, dok: str) -> dict:
 
 async def merker_setzen(db, dok: str, **werte) -> None:
     await db[KONFIG].update_one({"_id": dok}, {"$set": {**werte, "updated_at": jetzt_iso()}}, upsert=True)
+
+
+async def crawler_bewusst_aus(db) -> bool:
+    """Pruefung Runde 4 (#1): ist der Crawler BEWUSST ausgeschaltet? Nur, wenn der Schalter lesbar ist und aus steht
+    (Admin-Knopf; ohne Knopf MARKT_AKTIV=false). Ein Lesefehler ist KEINE bewusste Entscheidung (crawler_aktiv gilt
+    dann fail-closed als aus — fuer das Protokoll waere das ein stiller 'nicht geplant'-Tag)."""
+    try:
+        doc = await db[KONFIG].find_one({"_id": SCHALTER_DOK}, {"_id": 0, "aktiv": 1})
+    except Exception:  # noqa: BLE001
+        return False
+    if doc and "aktiv" in doc:
+        return not bool(doc["aktiv"])
+    return not aktiv()
+
+
+async def tagesplan_protokollieren(db, tag: str, *, lief: bool, **felder) -> bool:
+    """Pruefung Runde 4 (#1): Tagesplan-Protokoll des Kalendertags schreiben (market_tagesplan_log, ein Dokument je
+    Tag, Unique-Index auf 'tag'). Atomarer Upsert, idempotent: lief=True (jobs.tagesplan, jeder Aufruf) setzt lief_at
+    (fruehester Lauf, $min), zuletzt_at, crawler_aktiv=True, laeufe+1 und die Felder (segmente_geplant, budget_grund,
+    intervall_tage, segmente_je_tag); lief=False (Worker, Crawler bewusst aus) setzt nur crawler_aus_at ($min) —
+    ein spaeterer Tagesplan am selben Tag (Crawler wieder an) behaelt beide Angaben. Zwei Server: der Upsert-Wettlauf
+    auf den Unique-Index (DuplicateKeyError) wird einmal wiederholt (dann als Update). Wirft nie: scheitert das
+    Schreiben, fehlt das Protokoll — der Bericht wertet den Tag dann ehrlich als technischen Ausfall."""
+    from pymongo.errors import DuplicateKeyError
+    zeit = jetzt_iso()
+    if lief:
+        aenderung = {"$set": {**felder, "crawler_aktiv": True, "zuletzt_at": zeit}, "$min": {"lief_at": zeit}, "$inc": {"laeufe": 1}}
+    else:
+        aenderung = {"$min": {"crawler_aus_at": zeit}, "$setOnInsert": {"crawler_aktiv": False}}
+    for versuch in (1, 2):
+        try:
+            await db[TAGESPLAN_LOG].update_one({"tag": str(tag)}, aenderung, upsert=True)
+            return True
+        except DuplicateKeyError:
+            if versuch == 2:
+                break
+        except Exception:  # noqa: BLE001
+            break
+    import logging
+    logging.getLogger(__name__).warning("Tagesplan-Protokoll fuer %s nicht geschrieben", tag)
+    return False
+
+
+_AUS_PROTOKOLLIERT = {"tag": ""}
+
+
+async def crawler_aus_protokollieren(db) -> bool:
+    """Pruefung Runde 4 (#1): der Worker ruft das, wenn er nicht plant, weil der Crawler aus ist oder der Token fehlt.
+    Protokolliert wird NUR ein bewusst ausgeschalteter Crawler (crawler_bewusst_aus) — fehlender Token und Wartung
+    bleiben ohne Protokoll (technischer Ausfall). Je Prozess einmal je Tag (der Upsert waere auch wiederholt harmlos)."""
+    tag = heute_tag()
+    if _AUS_PROTOKOLLIERT["tag"] == tag or not await crawler_bewusst_aus(db):
+        return False
+    if await tagesplan_protokollieren(db, tag, lief=False):
+        _AUS_PROTOKOLLIERT["tag"] = tag
+        return True
+    return False
 
 
 async def indizes_fehlen(db) -> list:
@@ -264,8 +338,9 @@ def buendel_groesse() -> int:
 
 
 def crawl_intervall_tage() -> int:
-    """0 = automatisch aus Segmentanzahl, Kosten und Monatsbudget (siehe jobs.intervall)."""
-    return zahl_env("MARKT_CRAWL_INTERVALL_TAGE", 0, unten=0, oben=30)
+    """0 = automatisch aus Segmentanzahl, Kosten und Monatsbudget (siehe jobs.intervall). Pruefung Runde 4 (#2):
+    hoechstens MAX_INTERVALL_TAGE (vorher 30) — laengere Werte werden mit Warnung begrenzt."""
+    return zahl_env("MARKT_CRAWL_INTERVALL_TAGE", 0, unten=0, oben=MAX_INTERVALL_TAGE)
 
 
 def rows_je_segment() -> int:

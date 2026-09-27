@@ -6,7 +6,7 @@ import { api, errMsg } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { Card, Badge, Spinner, EmptyState } from "./_ui";
 import {
-  BERICHT_ALT_TEXT, BERICHT_TYP, CONFIDENCE, DATENQUALITAET, HOTDEAL_KLASSE, LIQUIDITAET, MARKTTIEFE, RICHTUNG,
+  BERICHT_ALT_TEXT, BERICHT_TYP, CONFIDENCE, DATENQUALITAET, HOTDEAL_KLASSE, LIQUIDITAET, MARKTTIEFE, PLAN_STATUS, RICHTUNG,
   berichtAltesSchema, berichtDiagrammPunkt, datumKurz, datumZeit, eur, pct, periodeText, richtungAusPct, richtungFarbe, trendText,
 } from "@/lib/markt";
 
@@ -106,6 +106,18 @@ export default function MarktBericht() {
                         k.empty_segmente ? `${k.empty_segmente} nur leer` : ""].filter(Boolean).join(" · ");
   const kostenBasis = k.kosten_fassung_usd != null && k.kosten_fassung_usd !== k.kosten_usd
     ? ` (Basis: Kosten der gerechneten Fassung ${Number(k.kosten_fassung_usd).toFixed(2)} $)` : "";
+  // Prüfung Runde 4: Planung laut Tagesplan-Protokoll (nur Berichte ab Schema 4 mit bekannten Abruf-Jobs)
+  const planungTeile = [
+    k.tage_tagesplan_ausfall ? `${k.tage_tagesplan_ausfall} Tag(e) Tagesplan lief nicht (Lücke)` : "",
+    k.tage_planung_unbekannt ? `${k.tage_planung_unbekannt} Tag(e) Planung unbekannt` : "",
+    k.tage_crawler_aus ? `${k.tage_crawler_aus} Tag(e) Crawler bewusst aus` : "",
+    k.tage_budget ? `${k.tage_budget} Tag(e) Budget erschöpft` : "",
+    k.budget_segment_tage ? `${k.budget_segment_tage} Segment-Tag(e) wegen Budget nicht geplant` : "",
+    k.tage_ohne_plan ? `${k.tage_ohne_plan} Tag(e) ohne Plan` : "",
+    k.abgelaufene_segment_tage ? `${k.abgelaufene_segment_tage} Segment-Tag(e) ohne tragbaren Wert` : "",
+    k.vorab_segment_tage ? `${k.vorab_segment_tage} Segment-Tag(e) noch nicht beobachtet` : "",
+  ].filter(Boolean);
+  const mitPlanung = k.planung === "jobs" && k.kalendertage != null;
   return (
     <div data-testid="bericht-seite">
       <Link to="/admin/markt/berichte" className="inline-flex items-center gap-1.5 text-xs text-zinc-400 hover:text-white mb-2"><ArrowLeft size={14} /> Berichte</Link>
@@ -142,9 +154,10 @@ export default function MarktBericht() {
             {altesSchema && (
               <div className="mt-2 text-[11px]" style={{ color: "var(--st-amber)" }} data-testid="bericht-schema-hinweis">
                 Dieser Bericht wurde {BERICHT_ALT_TEXT} (Schema {bericht.schema ?? 1}): Periodenwerte (Median, Minimum, Maximum,
-                Stichprobe), Tagesbewegung, Kosten je Einheit, Abdeckung und Segmentabdeckung sind dort anders definiert (z. B.
-                zählten nicht geplante Segmente der Budget-Rotation als Lücke) — mit neueren Berichten nur eingeschränkt
-                vergleichbar. Eingefrorene Berichte werden nie neu gerechnet.
+                Stichprobe), Tagesbewegung, Kosten je Einheit, Abdeckung, Segmentabdeckung und Confidence sind dort anders
+                definiert (z. B. zählten nicht geplante Segmente der Budget-Rotation als Lücke, ein ganztägiger Ausfall des
+                Tagesplans dagegen als „nicht geplant“, und „hoch“ gab es schon ab einem Tag) — mit neueren Berichten nur
+                eingeschränkt vergleichbar. Eingefrorene Berichte werden nie neu gerechnet.
               </div>
             )}
             {(bericht.hinweise || []).length > 0 && (
@@ -172,6 +185,10 @@ export default function MarktBericht() {
               <K label="Markttiefe / Liquidität" wert={`${(MARKTTIEFE[k.market_depth] || MARKTTIEFE.UNKNOWN).zaehler} / ${(LIQUIDITAET[k.liquiditaet] || LIQUIDITAET.UNKNOWN).text}`} />
               <K label="Abdeckung" wert={`${k.coverage_days ?? 0} / ${k.expected_days ?? 0} Tage`} unter={`Confidence ${(CONFIDENCE[k.confidence] || {}).text || "—"}${(k.confidence_gruende || []).length ? `: ${k.confidence_gruende.join(", ")}` : ""}${bericht.offen_ab ? ` · ab ${datumKurz(bericht.offen_ab)} noch offen` : ""}`} testid="bericht-abdeckung" />
               <K label="Segmente mit Daten" wert={`${k.segmente_mit_daten ?? 0} / ${k.segmente_gesamt ?? 0}`} unter={segmentUnter} testid="bericht-segmentabdeckung" />
+              {mitPlanung && (
+                <K label="Planung (Tagesplan-Protokoll)" wert={`${k.tage_mit_wert ?? 0} / ${k.kalendertage} Kalendertage mit Wert`}
+                   unter={planungTeile.length ? planungTeile.join(" · ") : "jeder Tag planmäßig"} testid="bericht-planung" />
+              )}
               <K label="Crawl-Kosten" wert={`${Number(k.kosten_usd || 0).toFixed(2)} $`}
                  unter={`je Beobachtung ${k.cost_per_valid_observation ?? "—"} $ · je Inserat ${k.cost_per_unique_listing ?? "—"} $ · je Hot Deal ${k.cost_per_hot_deal ?? "—"} $${kostenBasis}`} testid="bericht-kosten" />
             </div>
@@ -272,7 +289,8 @@ export default function MarktBericht() {
                 const dq = t.data_quality ? DATENQUALITAET[t.data_quality] || DATENQUALITAET.UNKNOWN : null;
                 // roher Tageswert ohne fehlende / heute noch laufende / nicht geplante Segmente: gedimmt (die Periodenwerte
                 // nutzen den Korbwert)
-                const gedimmt = t.teilabdeckung || t.ausstehende_segmente > 0 || t.nicht_geplante_segmente > 0;
+                const gedimmt = t.teilabdeckung || t.ausstehende_segmente > 0 || t.nicht_geplante_segmente > 0 || t.vorab_segmente > 0;
+                const plan = PLAN_STATUS[t.plan_status];
                 const teilTitel = t.median_korb !== undefined
                   ? `Tageswert ohne diese Segmente — für Median, Minimum und Maximum der Periode zählt der verkettete Korbwert ${eur(t.median_korb)}`
                   : "Tageswert ohne diese Segmente — zählt nicht für Median, Minimum und Maximum der Periode";
@@ -288,7 +306,15 @@ export default function MarktBericht() {
                                                                                  title="Die Läufe verteilen sich über den Tag — ausstehende Segmente sind keine Lücke">läuft noch ({t.ausstehende_segmente} Segm. ausstehend)</span>}
                       {!t.andere_fassung && t.nicht_geplante_segmente > 0 && <span className="ml-1 text-[10px] text-zinc-500" data-testid={`bericht-nichtgeplant-${t.date}`}
                                                                                     title={`Budget-Rotation: an diesem Tag kein Abruf geplant — keine Lücke; im Korbwert${t.median_korb != null ? ` ${eur(t.median_korb)}` : ""} mit dem letzten geplanten Wert`}>
-                        {t.nicht_geplante_segmente} Segm. nicht geplant</span>}
+                        {t.nicht_geplante_segmente} Segm. nicht geplant{t.budget_segmente > 0 ? ` (${t.budget_segmente} wegen Budget)` : ""}</span>}
+                      {!t.andere_fassung && t.abgelaufene_segmente > 0 && <span className="ml-1 text-[10px] text-zinc-500" data-testid={`bericht-abgelaufen-${t.date}`}
+                                                                                 title="Letzter geplanter Lauf älter als 14 Tage (Intervall über 14 Tage) — an diesem Tag aus dem Korb genommen, keine technische Lücke">
+                        {t.abgelaufene_segmente} Segm. ohne tragbaren Wert</span>}
+                      {!t.andere_fassung && t.vorab_segmente > 0 && <span className="ml-1 text-[10px]" style={{ color: "var(--st-amber)" }} data-testid={`bericht-vorab-${t.date}`}
+                                                                          title="Serienstart: schon angelegt, aber noch nicht beobachtet — der Tag ist kein Anker, sein Wert ist vom Folgetag rückwärts verkettet">
+                        {t.vorab_segmente} Segm. noch nicht beobachtet</span>}
+                      {!t.andere_fassung && plan && <span className="ml-1 text-[10px]" style={{ color: plan.farbe }} data-testid={`bericht-plan-${t.date}`}
+                                                          title={plan.titel}>{plan.text}</span>}
                       {!t.andere_fassung && !t.gueltig && !t.nur_ungueltig && <span className="ml-1 text-[10px] text-zinc-500" data-testid={`bericht-luecke-${t.date}`}>keine Daten</span>}</td>
                     <td className={`px-3 py-1 text-right${gedimmt ? "" : " text-white"}`} style={gedimmt ? { color: "var(--text-dim)" } : undefined}>{eur(t.median)}</td>
                     <td className="px-3 py-1 text-right" style={{ color: richtungFarbe(t.richtung) }}>{t.delta_vortag_eur == null ? "—" : trendText(t.delta_vortag_eur)}</td>
