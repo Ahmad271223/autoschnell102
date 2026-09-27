@@ -612,15 +612,25 @@ FILTER_ALARM_MIN_ZEILEN = 3     # Nr. 2: Alarm erst ab 3 gelieferten Zeilen und 
 # Befund 27.09.2026 (zwei Alarme markt_lauf_leer, beide Marktluecken: Astra 1.2 Turbo Automatik EZ 2020/21 gibt es
 # kaum; Q5/Octavia EZ 2020 mit 10-30k km — mobile.de meldete selbst 0): ein leerer Buendel-Lauf ist nur dann ein
 # Hinweis auf Scraper/Sperre/URL-Form, wenn DIESELBEN Segmente beim letzten Lauf nennenswert Treffer hatten —
-# mindestens die Haelfte der Segmente mit Zeilen UND zusammen mindestens LAUF_LEER_ALARM_AB_ZEILEN Zeilen.
+# mindestens LAUF_LEER_ALARM_AB_SEGMENTEN Segmente hatten in den letzten TREFFER_TAGE_FUER_ERSATZ Tagen Zeilen
+# (last_filled_rows + last_success_at — ein leerer Lauf ueberschreibt diese Basis NICHT, sonst meldete sich ein
+# anhaltender Ausfall nur am ersten Tag) UND zusammen mindestens LAUF_LEER_ALARM_AB_ZEILEN Zeilen.
 LAUF_LEER_ALARM_AB_ZEILEN = 3
+LAUF_LEER_ALARM_AB_SEGMENTEN = 2
 
 
-def lauf_leer_verdaechtig(segmente: List[Dict[str, Any]]) -> bool:
-    """Waren die Segmente eines leer gebliebenen Buendels vorher gefuellt (last_rows am Segment)?"""
-    zeilen = [int(s.get("last_rows") or 0) for s in segmente]
+def lauf_leer_verdaechtig(segmente: List[Dict[str, Any]], jetzt: Optional[datetime] = None) -> bool:
+    """Waren die Segmente eines leer gebliebenen Buendels vor Kurzem gefuellt? Gezaehlt wird der letzte Lauf
+    MIT Zeilen (last_filled_rows; Altbestand: last_rows), nur wenn er hoechstens TREFFER_TAGE_FUER_ERSATZ Tage
+    zurueckliegt (last_success_at)."""
+    grenze = ((jetzt or konfig.jetzt()) - timedelta(days=TREFFER_TAGE_FUER_ERSATZ)).isoformat()
+    zeilen = []
+    for s in segmente:
+        frisch = str(s.get("last_success_at") or "") >= grenze
+        basis = s.get("last_filled_rows") if s.get("last_filled_rows") is not None else s.get("last_rows")
+        zeilen.append(int(basis or 0) if frisch else 0)
     mit_treffern = sum(1 for z in zeilen if z > 0)
-    return bool(zeilen) and mit_treffern * 2 >= len(zeilen) and sum(zeilen) >= LAUF_LEER_ALARM_AB_ZEILEN
+    return mit_treffern >= LAUF_LEER_ALARM_AB_SEGMENTEN and sum(zeilen) >= LAUF_LEER_ALARM_AB_ZEILEN
 
 
 def reservierung_usd(laeufe_plan: int, rows_gesamt: int) -> float:
@@ -955,7 +965,9 @@ async def _auswerten(db, plan: List[Dict[str, Any]], r: Dict[str, Any], res: Opt
             if not listings:
                 await db[SEGMENTE].update_one({"id": seg_id}, {"$inc": {"leer_in_folge": 1}, "$set": {"last_rows": 0}})
             else:
-                await db[SEGMENTE].update_one({"id": seg_id}, {"$set": {"leer_in_folge": 0, "last_rows": len(listings)}})
+                # last_filled_rows: Basis des Leer-Alarms — nur ein Lauf MIT Zeilen setzt sie (lauf_leer_verdaechtig)
+                await db[SEGMENTE].update_one({"id": seg_id}, {"$set": {"leer_in_folge": 0, "last_rows": len(listings),
+                                                                        "last_filled_rows": len(listings)}})
                 await _alarm_zu(db, "markt_keine_treffer", ref=seg_id)
             await _fertig(db, p["job"], actual_rows=len(listings), verworfen_filter=verworfen, sorted_confirmed=sortiert,
                           top_n_bewiesen=top_n_bewiesen, ergebnis=erg, **lauf_felder)
@@ -967,7 +979,7 @@ async def _auswerten(db, plan: List[Dict[str, Any]], r: Dict[str, Any], res: Opt
         # Ein ganzer Buendel-Lauf ohne eine einzige Zeile, obwohl dieselben Segmente vorher gefuellt waren:
         # Scraper/Sperre/URL-Form. Sonst Marktluecke (leer_in_folge am Segment), kein Betriebsalarm.
         await _alarm(db, "markt_lauf_leer", ref=str(r.get("run_id") or ""), segmente=len(plan), actor=str(r.get("actor") or ""),
-                     zeilen_vorher=sum(int(p["seg"].get("last_rows") or 0) for p in plan))
+                     zeilen_vorher=sum(int(p["seg"].get("last_filled_rows") or p["seg"].get("last_rows") or 0) for p in plan))
     if res is not None:
         await budget.abrechnen(db, res, kosten_gesamt, gesamt_rows, runs=laeufe)
     return {"status": "ok", "jobs": len(plan), "rows": gesamt_rows, "usd": kosten_gesamt, "laeufe": laeufe, "ergebnisse": ergebnisse,

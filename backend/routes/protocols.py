@@ -3486,7 +3486,9 @@ async def protokoll_ki_bewertung(protocol_id: str, user=Depends(_chef_dep)):
     erg = await KI.bewertung_lesen(protocol_id, user["dealer_id"])
     if erg is None:
         raise HTTPException(404, "Protokoll nicht gefunden")
-    return erg
+    from ai.kontext import markt_fuer_firmen
+    # Wunsch Ahmad 27.09.2026: keine Marktbeobachtungs-Werte an Firmen, solange nicht freigeschaltet
+    return await markt_fuer_firmen(db, erg)
 
 
 @router.get("/driver/appointments/{appt_id}/ki-bewertung")
@@ -3504,7 +3506,8 @@ async def fahrer_ki_bewertung(appt_id: str, driver=Depends(current_driver)):
     erg = await KI.bewertung_lesen(doc["id"], appt.get("dealer_id", ""), nachrechnen=False)
     if erg is None:
         return {"status": "keine", "grund": "Keine Bewertung vorhanden", "ergebnis": None}
-    return KI.fuer_fahrer(erg, preis_vorschlag=doc.get("preis_vorschlag"))
+    from ai.kontext import markt_fuer_firmen
+    return await markt_fuer_firmen(db, KI.fuer_fahrer(erg, preis_vorschlag=doc.get("preis_vorschlag")))
 
 
 @router.post("/protocols/{protocol_id}/ki-bewertung/neu")
@@ -3515,7 +3518,8 @@ async def protokoll_ki_bewertung_neu(protocol_id: str, user=Depends(_chef_dep)):
     erg = await KI.bewertung_starten(protocol_id, user["dealer_id"])
     if erg is None:
         raise HTTPException(404, "Protokoll nicht gefunden")
-    return erg
+    from ai.kontext import markt_fuer_firmen
+    return await markt_fuer_firmen(db, erg)
 
 
 @router.get("/protocols/{protocol_id}.pdf")

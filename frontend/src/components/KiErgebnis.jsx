@@ -134,7 +134,10 @@ export default function KiErgebnis({ erg, kaufpreis, basisText, testPrefix, onPr
         )}
         {erg?.market?.median_price_eur && (
           <div className="mt-1.5 text-[11px]" style={{ color: "var(--text-dim)" }} data-testid={`${testPrefix}-markt`}>
-            Marktvergleich: {erg.market.comparable_count} ähnliche Fahrzeuge, Median {eur(erg.market.median_price_eur)}
+            {/* Pruefbefund 27.09.: aus der Marktbeobachtung ist es der Median der N guenstigsten, kein Marktmedian */}
+            {erg.market.source === "marktbeobachtung"
+              ? <>Marktbeobachtung: Median der {erg.market.comparable_count} günstigsten Angebote {eur(erg.market.median_price_eur)}</>
+              : <>Marktvergleich: {erg.market.comparable_count} ähnliche Fahrzeuge, Median {eur(erg.market.median_price_eur)}</>}
             {erg.market.agreed_vs_median_percent != null ? ` (Preis ${erg.market.agreed_vs_median_percent > 0 ? "+" : ""}${erg.market.agreed_vs_median_percent} %)` : ""}
           </div>
         )}

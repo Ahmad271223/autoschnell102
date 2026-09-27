@@ -79,20 +79,32 @@ def test_02_schalter_fail_closed_und_nur_super_admin(welt):
     kopf = r[i:i + 400]
     assert "current_super_admin" in kopf and "log_activity_sicher" in r[i:i + 900]
     assert '"firmen_sichtbar": await konfig.firmen_sichtbar(db)' in r
-    # die Admin-Marktanalyse und die interne Nutzung haengen NICHT am Schalter
-    for datei in ("markt/abfrage.py", "markt/jobs.py", "ai/kontext.py"):
+    # die Admin-Marktanalyse und die interne Nutzung (KI-Kontext rechnet weiter mit der Beobachtung) haengen NICHT am Schalter
+    for datei in ("markt/abfrage.py", "markt/jobs.py"):
         assert "firmen_sichtbar" not in (BACKEND / datei).read_text(encoding="utf-8"), datei
+    KX = _module("ai.kontext")
+    assert "firmen_sichtbar" not in inspect.getsource(KX._marktbeobachtung) and "firmen_sichtbar" in inspect.getsource(KX.markt_fuer_firmen)
     q = inspect.getsource(R.markt_karte)
     assert q.index("firmen_sichtbar") < q.index("db.vehicles.find_one"), "Schalter vor jedem Fahrzeuglesen"
 
 
 def test_03_lauf_leer_alarm_nur_bei_vorher_gefuellten_segmenten(welt, monkeypatch):
+    from datetime import timedelta
     v = JOBS.lauf_leer_verdaechtig
-    assert v([{"last_rows": 2}, {"last_rows": 1}]) is True
-    assert v([{"last_rows": 0}] * 10) is False, "Astra-Fall 27.09.: nie Treffer -> Marktluecke"
-    assert v([{"last_rows": 1}, {}]) is False, "Q5/Octavia-Fall: kaum Treffer -> Marktluecke"
-    assert v([{"last_rows": 5}, {"last_rows": 0}, {"last_rows": 0}]) is False, "weniger als die Haelfte gefuellt"
-    assert v([]) is False
+    jetzt = K.jetzt()
+    frisch = (jetzt - timedelta(days=1)).isoformat()
+    alt = (jetzt - timedelta(days=JOBS.TREFFER_TAGE_FUER_ERSATZ + 1)).isoformat()
+    assert v([{"last_filled_rows": 2, "last_success_at": frisch}, {"last_filled_rows": 1, "last_success_at": frisch}], jetzt) is True
+    assert v([{"last_rows": 0}] * 10, jetzt) is False, "Astra-Fall 27.09.: nie Treffer -> Marktluecke"
+    assert v([{"last_filled_rows": 1, "last_success_at": frisch}, {}], jetzt) is False, "Q5/Octavia-Fall: kaum Treffer -> Marktluecke"
+    # Pruefbefund: auch wenn weniger als die Haelfte gefuellt war, ist ein Totalausfall verdaechtig
+    zehn = [{"last_filled_rows": 5, "last_success_at": frisch}] * 3 + [{"last_rows": 0}] * 7
+    assert v(zehn, jetzt) is True
+    # Pruefbefund: ein leerer Lauf (last_rows 0) nimmt die Basis NICHT weg — der Ausfall meldet sich weiter ...
+    assert v([{"last_rows": 0, "last_filled_rows": 4, "last_success_at": frisch}] * 2, jetzt) is True
+    # ... aber nur bis TREFFER_TAGE_FUER_ERSATZ Tage nach dem letzten gefuellten Lauf
+    assert v([{"last_rows": 0, "last_filled_rows": 4, "last_success_at": alt}] * 2, jetzt) is False
+    assert v([], jetzt) is False
     # im Worker: leeres Buendel aus nie gefuellten Segmenten -> kein Alarm
     s, seg = _vorbereiten(welt, monkeypatch)
     db = welt.db
@@ -103,5 +115,45 @@ def test_03_lauf_leer_alarm_nur_bei_vorher_gefuellten_segmenten(welt, monkeypatc
     welt.run(JOBS.verarbeiten_buendel(db, [_eigenen_beanspruchen(welt, j["id"]) for j in jobs]))
     assert welt.run(db.betriebsalarme.find_one({"typ": "markt_lauf_leer", "ref": f"r-leer-{s}"})) is None
     assert all(welt.run(db[K.SEGMENTE].find_one({"id": x["id"]}, {"_id": 0}))["leer_in_folge"] == 1 for x in (seg, seg_b))
+    # anhaltender Ausfall: Segmente, die vor Kurzem gefuellt waren, bleiben bei jedem leeren Lauf verdaechtig
+    for x in (seg, seg_b):
+        welt.run(db[K.SEGMENTE].update_one({"id": x["id"]}, {"$set": {"last_filled_rows": 4, "last_success_at": K.jetzt_iso(), "last_rows": 0}}))
+    for nr in (2, 3):
+        monkeypatch.setattr(APIFY, "lauf", _antwort([], usd=0.005, run_id=f"r-leer-{s}-{nr}"))
+        jobs = [welt.run(JOBS.job_sofort(db, x["id"])) for x in (seg, seg_b)]
+        welt.run(JOBS.verarbeiten_buendel(db, [_eigenen_beanspruchen(welt, j["id"]) for j in jobs]))
+        assert welt.run(db.betriebsalarme.find_one({"typ": "markt_lauf_leer", "ref": f"r-leer-{s}-{nr}"})), f"Leerlauf {nr} meldet sich"
+    assert welt.run(db[K.SEGMENTE].find_one({"id": seg["id"]}, {"_id": 0}))["last_filled_rows"] == 4, "leerer Lauf ueberschreibt die Basis nicht"
     welt.run(db.betriebsalarme.delete_many({"typ": "markt_lauf_leer", "ref": {"$regex": f"^r-leer-{s}"}}))
+
+
+def test_04_ki_marktzeile_nur_mit_freischaltung(welt):
+    """Pruefbefund zu 903a55a: KI-Ergebnisse an Chef/Sucher/Fahrer zeigen keine Werte der Marktbeobachtung,
+    solange die Marktdaten fuer Firmen nicht freigeschaltet sind — beim Lesen gefiltert, auch fuer alte Ergebnisse."""
+    db = welt.db
+    sicherung = welt.run(db[K.KONFIG].find_one({"_id": K.SICHTBARKEIT_DOK}))
+    welt.run(db[K.KONFIG].delete_one({"_id": K.SICHTBARKEIT_DOK}))
+    beob = {"status": "ok", "ergebnis": {"combined": {"x": 1}, "market": {"source": "marktbeobachtung", "comparable_count": 20, "median_price_eur": 18400}}}
+    grob = {"status": "ok", "ergebnis": {"market": {"source": "eigene_fahrzeuge", "comparable_count": 4, "median_price_eur": 17000}}}
+    try:
+        aus = welt.run(_module("ai.kontext").markt_fuer_firmen(db, beob))
+        assert aus["ergebnis"]["market"] is None and aus["ergebnis"]["combined"] == {"x": 1}, "nur die Marktzeile faellt weg"
+        assert beob["ergebnis"]["market"]["median_price_eur"] == 18400, "Original unveraendert (kein Seiteneffekt)"
+        assert welt.run(_module("ai.kontext").markt_fuer_firmen(db, grob)) == grob, "grober Vergleich bleibt"
+        assert welt.run(_module("ai.kontext").markt_fuer_firmen(db, {"status": "laeuft", "ergebnis": None}))["ergebnis"] is None
+        welt.run(K.firmen_sichtbar_setzen(db, True))
+        assert welt.run(_module("ai.kontext").markt_fuer_firmen(db, beob))["ergebnis"]["market"]["median_price_eur"] == 18400
+    finally:
+        welt.run(db[K.KONFIG].delete_one({"_id": K.SICHTBARKEIT_DOK}))
+        if sicherung:
+            welt.run(db[K.KONFIG].insert_one(sicherung))
+    # alle Firmen- und Fahrer-Lesewege der KI laufen durch den Filter
+    c = (BACKEND / "routes" / "contracts.py").read_text(encoding="utf-8")
+    pr = (BACKEND / "routes" / "protocols.py").read_text(encoding="utf-8")
+    for quelle, pfad, n in ((c, '"/contracts/ki-schadennachlass"', 1), (c, '"/contracts/ki-schadennachlass/{bewertung_id}"', 1),
+                            (pr, '"/protocols/{protocol_id}/ki-bewertung"', 1), (pr, '"/driver/appointments/{appt_id}/ki-bewertung"', 1),
+                            (pr, '"/protocols/{protocol_id}/ki-bewertung/neu"', 1)):
+        i = quelle.index(pfad)
+        rumpf = quelle[i:quelle.index("@router.", i + 10)]
+        assert rumpf.count("markt_fuer_firmen(db, ") == n, pfad
     _aufraeumen(welt)

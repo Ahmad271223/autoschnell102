@@ -877,9 +877,11 @@ async def vertrag_ki_schadennachlass(body: KiSchadenIn, user=Depends(require_act
     v = await _fahrzeug_fuer_vertrag(user, body.vehicle_id)
     if not v:
         raise HTTPException(404, FAHRZEUG_NICHT_IM_BEREICH)
-    return await _ki_vertrag.bewerten(user=user, vehicle_doc=v,
-                                      damages=[d.model_dump() for d in body.damages],
-                                      kaufpreis=body.purchase_price, warten=False)
+    from ai.kontext import markt_fuer_firmen
+    # Wunsch Ahmad 27.09.2026: keine Marktbeobachtungs-Werte an Firmen, solange nicht freigeschaltet
+    return await markt_fuer_firmen(db, await _ki_vertrag.bewerten(
+        user=user, vehicle_doc=v, damages=[d.model_dump() for d in body.damages],
+        kaufpreis=body.purchase_price, warten=False))
 
 
 @router.post("/contracts/ki-schadennachlass/vorschau")
@@ -902,7 +904,8 @@ async def vertrag_ki_schadennachlass_stand(bewertung_id: str, user=Depends(curre
     erg = await _ki_vertrag.lesen(bewertung_id, user["dealer_id"], user)
     if erg is None:
         raise HTTPException(404, "Bewertung nicht gefunden")
-    return erg
+    from ai.kontext import markt_fuer_firmen
+    return await markt_fuer_firmen(db, erg)
 
 
 @router.post("/contracts/preview")

@@ -117,6 +117,29 @@ def _frische_filter(sammlung: str) -> Dict[str, Any]:
                     {"fetched_at": {"$gte": seit}}, {"created_at": {"$gte": seit}}]}
 
 
+async def markt_fuer_firmen(db, antwort):
+    """Wunsch Ahmad 27.09.2026 / Pruefbefund zu 903a55a: Die KI rechnet intern weiter mit der Marktbeobachtung,
+    zeigt Chef, Sucher und Fahrer aber keine Werte daraus (ergebnis.market mit source 'marktbeobachtung'),
+    solange die Marktdaten fuer Firmen nicht freigeschaltet sind (markt.konfig.firmen_sichtbar). Wird beim
+    LESEN angewendet — auch auf schon gespeicherte Ergebnisse. Die Firmen-Routen rufen diesen Filter aus dem
+    KI-Teil auf, damit der Hauptweg nie das Markt-Modul importiert. Stoerung beim Lesen des Schalters:
+    ausblenden (fail-closed)."""
+    if not isinstance(antwort, dict):
+        return antwort
+    erg = antwort.get("ergebnis")
+    markt = erg.get("market") if isinstance(erg, dict) else None
+    if not isinstance(markt, dict) or markt.get("source") != "marktbeobachtung":
+        return antwort
+    try:
+        from markt import konfig as markt_konfig
+        sichtbar = await markt_konfig.firmen_sichtbar(db)
+    except Exception:  # noqa: BLE001
+        sichtbar = False
+    if sichtbar:
+        return antwort
+    return {**antwort, "ergebnis": {**erg, "market": None}}
+
+
 async def _marktbeobachtung(vehicle: dict, db) -> Optional[Dict[str, Any]]:
     """Review 26.09.2026 (Nr. 33): Liegt zum Fahrzeug ein beobachtetes
     Marktsegment (Market Intelligence, mobile.de-Top-20) mit Daten vor, hat
