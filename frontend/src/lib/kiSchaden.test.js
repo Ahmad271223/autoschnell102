@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   SCHWERE_FRAGEN, alleVollstaendig, argumenteText, eur, kiStatusText, kiWartet, mitAntwort, nachPrioritaet,
   schadenZeile, schaedenStand, schwereFragen, schwereOffen, schwereText, vierText, vorschlaegeAnwenden, fragenFuer, mitBetrag,
+  ungepruefteUebernahmen,
 } from "./kiSchaden";
 
 // Wunsch Ahmad 25./26.09.2026: KI-Schadennachlass — feste Fragen je Schadensart
@@ -102,6 +103,49 @@ describe("kiSchaden", () => {
       { felder: { hu_until: { value: "07/2028" } } });
     expect(nurDatum.form.hu_until).toBe("");
     expect(vorschlaegeAnwenden(form, null).uebernommen).toEqual([]);
+  });
+
+  // Go-Live-Prüfung 27.09.2026 (K2): abgelaufene HU nie als "HU: Ja" vorbelegen
+  it("belegt eine abgelaufene HU nicht vor, sondern zeigt den Hinweis", () => {
+    const heute = new Date(2026, 8, 27);
+    const form = { hu_valid: "", hu_until: "", accident_free: "" };
+    const vs = { felder: {
+      hu_valid: { value: "Ja", source_text: "HU 08/2026" },
+      hu_until: { value: "08/2026", source_text: "HU 08/2026" },
+      accident_free: { value: "Ja", source_text: "unfallfrei" },
+    }, hinweise: [] };
+    const erg = vorschlaegeAnwenden(form, vs, {}, { heute });
+    expect(erg.form.hu_valid).toBe("");
+    expect(erg.form.hu_until).toBe("");
+    expect(erg.form.accident_free).toBe("Ja");
+    expect(erg.hinweise.join(" ")).toContain("HU abgelaufen (08/2026)");
+    // der Server hat den Hinweis schon geschickt -> nicht doppelt
+    const doppelt = vorschlaegeAnwenden(form, { ...vs, hinweise: ["HU abgelaufen (08/2026) laut Inserat"] }, {}, { heute });
+    expect(doppelt.hinweise.filter((h) => h.includes("HU abgelaufen"))).toHaveLength(1);
+    // laufender Monat gilt noch
+    const gueltig = vorschlaegeAnwenden(form, { felder: {
+      hu_valid: { value: "Ja" }, hu_until: { value: "09/2026" } } }, {}, { heute });
+    expect(gueltig.form.hu_valid).toBe("Ja");
+    expect(gueltig.form.hu_until).toBe("09/2026");
+  });
+
+  it("findet vorbelegte Zusicherungen, die niemand angefasst hat", () => {
+    const form = { hu_valid: "", accident_free: "", drivable: "", schluessel_anzahl: "", tires: "" };
+    const vs = { felder: {
+      accident_free: { value: "Ja", source_text: "unfallfrei" },
+      drivable: { value: "Nein", source_text: "nicht fahrbereit" },
+      schluessel_anzahl: { value: "2", source_text: "2 Schlüssel" },
+      tires: { value: "8-fach", source_text: "Winterreifen dabei" },
+    } };
+    const erg = vorschlaegeAnwenden(form, vs, {}, { heute: new Date(2026, 8, 27) });
+    const offen = ungepruefteUebernahmen(erg.uebernommen, erg.form, {});
+    expect(offen.map((u) => u.feld)).toEqual(["accident_free", "drivable"]);
+    // angefasst (auch mit demselben Wert) oder geändert -> geprüft
+    expect(ungepruefteUebernahmen(erg.uebernommen, erg.form, { accident_free: true }).map((u) => u.feld))
+      .toEqual(["drivable"]);
+    expect(ungepruefteUebernahmen(erg.uebernommen, { ...erg.form, drivable: "Ja" }, {}).map((u) => u.feld))
+      .toEqual(["accident_free"]);
+    expect(ungepruefteUebernahmen(undefined, erg.form, {})).toEqual([]);
   });
 
   it("beschreibt Schaeden und erkennt Aenderungen", () => {

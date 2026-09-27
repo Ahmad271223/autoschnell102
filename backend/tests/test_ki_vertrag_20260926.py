@@ -100,7 +100,9 @@ def _ki_aufraeumen(welt):
     ({"description": "TÜV abgelaufen, Bastlerfahrzeug"}, {"hu_valid": "Nein"}),
     ({"description": "HU/AU bis 3/2027"}, {"hu_valid": "Ja", "hu_until": "03/2027"}),
     ({"accident_damaged": True}, {"accident_free": "Nein"}),
-    ({"accident_damaged": False}, {"accident_free": "Ja"}),
+    # Go-Live-Pruefung 27.09.2026 (K6): Portalfeld "kein Unfallschaden"
+    # heisst NICHT "unfallfrei" — nur noch ein Hinweis, kein "Ja".
+    ({"accident_damaged": False}, {}),
     ({"description": "Unfallschaden vorne links, fahrbereit"}, {"accident_free": "Nein", "drivable": "Ja"}),
     ({"description": "kein Unfallschaden"}, {"accident_free": "Ja"}),
     ({"roadworthy": False}, {"drivable": "Nein"}),
@@ -111,7 +113,10 @@ def _ki_aufraeumen(welt):
 ])
 def test_01_inserat_regeln_eindeutige_werte(v, erwartet):
     R = _module("ai.inserat_regeln")
-    erg = R.vorschlaege(v)
+    # 27.09.2026: HU-Daten werden gegen "heute" geprueft — fester Tag,
+    # damit "HU 07/2028" nicht irgendwann als abgelaufen gilt.
+    from datetime import date
+    erg = R.vorschlaege(v, heute=date(2026, 9, 27))
     werte = {k: e["value"] for k, e in erg["felder"].items()}
     assert werte == erwartet, erg
     for e in erg["felder"].values():

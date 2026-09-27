@@ -4,6 +4,8 @@
 // sie stellt keine Rückfragen mehr) und die Aufbereitung der Antwort mit
 // vier Geldwerten (Mindestens / Fair / Sehr gut / Verhandlungsstart).
 
+import { monatJahrPruefen } from "./monatJahr";
+
 /** Feste Fragen je Schadensart der Skizze (type_key aus DamageSelector). */
 export const SCHWERE_FRAGEN = {
   delle: [
@@ -225,8 +227,21 @@ export function vorschlagWertText(feld, wert) {
  * angefasst hat (gesperrt). Liefert das neue Formular und die Liste dessen,
  * was übernommen wurde (mit Fundstelle), damit der Dialog es zeigt.
  */
-export function vorschlaegeAnwenden(form, vorschlaege, gesperrt = {}) {
-  const felder = vorschlaege?.felder || {};
+export function vorschlaegeAnwenden(form, vorschlaege, gesperrt = {}, { heute = new Date() } = {}) {
+  let felder = vorschlaege?.felder || {};
+  const hinweise = [...(vorschlaege?.hinweise || [])];
+  // Go-Live-Prüfung 27.09.2026 (K2): eine abgelaufene HU nie als "HU: Ja"
+  // vorbelegen — auch wenn der Server (Monatswechsel, alter Stand) sie noch
+  // schickt. Stattdessen der Hinweis "HU abgelaufen (MM/JJJJ)".
+  const huBis = String(felder.hu_until?.value ?? "");
+  if (huBis && monatJahrPruefen(huBis, { art: "hu", heute }).hinweis === "HU abgelaufen") {
+    felder = Object.fromEntries(Object.entries(felder)
+      .filter(([feld]) => feld !== "hu_valid" && feld !== "hu_until"));
+    const text = `HU abgelaufen (${huBis})`;
+    if (!hinweise.some((h) => String(h).includes(text))) {
+      hinweise.push(`${text} laut Inserat — „HU/AU vorhanden“ bitte beim Verkäufer erfragen und selbst wählen.`);
+    }
+  }
   const neu = { ...form };
   const uebernommen = [];
   for (const [feld, v] of Object.entries(felder)) {
@@ -239,11 +254,22 @@ export function vorschlaegeAnwenden(form, vorschlaege, gesperrt = {}) {
     }
     neu[feld] = String(v.value);
     uebernommen.push({ feld, label: FELD_LABEL[feld] || feld, wert: vorschlagWertText(feld, v.value),
-                       fund: v.source_text || "" });
+                       roh: String(v.value), fund: v.source_text || "" });
   }
   // Startprüfung 27.09.2026 (K4): Eine übernommene Schlüsselanzahl hakt die
   // Empfangsbestätigung nicht an — die Kästchen bleiben für die Übergabe leer.
-  return { form: neu, uebernommen, hinweise: vorschlaege?.hinweise || [] };
+  return { form: neu, uebernommen, hinweise };
+}
+
+/** Zusicherungen, die das Inserat vorbelegt hat und die seitdem niemand
+ *  angesehen/geändert hat (Go-Live-Prüfung 27.09.2026): vor "PDF erstellen"
+ *  fragt der Dialog einmal nach, ob sie mit dem Verkäufer geklärt sind. */
+export const ZUSICHERUNG_FELDER = ["hu_valid", "hu_until", "service_book", "accident_free", "drivable", "eu_import"];
+
+export function ungepruefteUebernahmen(uebernommen, form, beruehrt = {}) {
+  return (uebernommen || []).filter((u) => ZUSICHERUNG_FELDER.includes(u.feld)
+    && !beruehrt[u.feld]
+    && String(form?.[u.feld] ?? "") === String(u.roh ?? ""));
 }
 
 /** Eine Zeile je Schaden für "Sind das alle Schäden?" */

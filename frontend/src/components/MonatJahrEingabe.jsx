@@ -78,6 +78,12 @@ export default function MonatJahrEingabe({
   };
 
   const ungueltig = Boolean(wert) && getippt && !monatJahrPruefen(wert, { art }).ok;
+  // Go-Live-Prüfung 27.09.2026 (K2): "HU abgelaufen" auch für Werte, die
+  // niemand getippt hat (aus dem Inserat vorbelegt, aus dem Entwurf geladen)
+  // — vorher erschien der Hinweis nur nach Tippen oder Verlassen des Feldes.
+  const dauerHinweis = art === "hu" && /^\d{2}\/\d{4}$/.test(wert)
+    ? monatJahrPruefen(wert, { art }).hinweis : "";
+  const angezeigt = hinweis || dauerHinweis;
 
   return (
     <span className="block">
@@ -102,10 +108,10 @@ export default function MonatJahrEingabe({
         className={className}
         style={style}
       />
-      {hinweis && (
+      {angezeigt && (
         <span className="block text-[11px] mt-1" style={{ color: "var(--tx-amber)" }}
               data-testid={testid ? `${testid}-hinweis` : undefined}>
-          {hinweis}
+          {angezeigt}
         </span>
       )}
     </span>

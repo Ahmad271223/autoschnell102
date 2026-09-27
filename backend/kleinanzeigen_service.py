@@ -575,6 +575,11 @@ def _zustand_unfall(text) -> Optional[bool]:
     return zustand_unfall(None, str(text or ""))
 
 
+def _zustand_portal(text) -> Optional[str]:
+    from mobile_service import zustand_portal_text
+    return zustand_portal_text("Kleinanzeigen", text)
+
+
 # Obergrenze der Ausstattungsliste (wie kleinanzeigen_api.MAX_MERKMALE).
 MAX_AUSSTATTUNG = 150
 
@@ -1093,6 +1098,8 @@ def parse_kleinanzeigen_html(url: str, html_text: str) -> Dict[str, Any]:
         "previous_owners": halter,
         # Pruefbericht 20.09.2026 (S-05/S-06): nur echte Angaben, sonst None.
         "accident_damaged": _zustand_unfall(structured.get("Fahrzeugzustand")),
+        # Go-Live-Pruefung 27.09.2026 (K6): echter Portalwert fuer die Fundstelle
+        "zustand_portal": _zustand_portal(structured.get("Fahrzeugzustand")),
         "roadworthy": None,
         "features": _parse_equipment(visible),
         "description": _parse_description(visible) or _meta(soup, "og:description", "description"),

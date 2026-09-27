@@ -331,7 +331,7 @@ def fahrzeug_aus_api(ad: Dict[str, Any], url: str,
     # "Unbeschaedigtes Fahrzeug" / "Beschaedigtes Fahrzeug"
     zustand = (tabelle.get("Fahrzeugzustand") or "").lower()
     # Pruefbericht 20.09.2026 (S-06): ohne Angabe None statt "kein Unfall".
-    from mobile_service import zustand_fahrbereit, zustand_unfall
+    from mobile_service import zustand_fahrbereit, zustand_portal_text, zustand_unfall
     unfall = zustand_unfall(None, zustand)
     # S-22/A-11: Tabellenwert 0 zaehlt; nur 0-15 gilt als Halterzahl.
     halter = _halter(tabelle.get("Anzahl der Fahrzeughalter"))
@@ -368,6 +368,8 @@ def fahrzeug_aus_api(ad: Dict[str, Any], url: str,
         "hu": tabelle.get("HU bis"),
         "previous_owners": halter,
         "accident_damaged": unfall,
+        # Go-Live-Pruefung 27.09.2026 (K6): echter Portalwert fuer die Fundstelle
+        "zustand_portal": zustand_portal_text("Kleinanzeigen", tabelle.get("Fahrzeugzustand")),
         # S-05: Kleinanzeigen kennt keine Fahrbereit-Angabe — nichts erfinden.
         "roadworthy": zustand_fahrbereit(None, zustand),
         "features": _alle_merkmale(tabelle, beschreibung),

@@ -10,7 +10,7 @@ import { useAuth } from "@/context/AuthContext";
 import { X, Eye, FileText, Loader2, AlertTriangle, ExternalLink } from "lucide-react";
 import DamageSelector, { damagesToText } from "./DamageSelector";
 import KiSchadenKarte from "./KiSchadenKarte";
-import { vorschlaegeAnwenden } from "@/lib/kiSchaden";
+import { ungepruefteUebernahmen, vorschlaegeAnwenden } from "@/lib/kiSchaden";
 import { fehlendeKaeuferfelder, kaeuferAktualisieren, kaeuferAusProfil } from "@/lib/kaeuferdaten";
 import { kmAusText, preisAusText, preisText } from "@/lib/preis";
 import { openContractPdf } from "@/lib/pdf";
@@ -596,6 +596,19 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
         return;
       }
     }
+    // Go-Live-Prüfung 27.09.2026 (K1/K6): Aus dem Inserat vorbelegte
+    // Zusicherungen, die seitdem niemand angefasst hat, einmal bestätigen
+    // lassen — der Verkäufer unterschreibt sie als seine Zusicherung.
+    const offenUebernommen = ungepruefteUebernahmen(inseratVorschlaege?.uebernommen, form, beruehrt.current);
+    if (offenUebernommen.length > 0 && !window.confirm(
+      "Aus dem Inserat vorbelegt und noch nicht geprüft:\n"
+      + offenUebernommen.map((u) => `• ${u.label}: ${u.wert}`).join("\n")
+      + "\n\nSind diese Angaben mit dem Verkäufer geklärt? Sie stehen so als Zusicherung im Vertrag.",
+    )) {
+      return;
+    }
+    // bestätigt = geprüft: beim nächsten Versuch (z. B. nach 409) nicht erneut fragen
+    for (const u of offenUebernommen) beruehrt.current[u.feld] = true;
     setLoading(true);
     try {
       // Pruefung 14.09.2026: Idempotenz — Doppelklick oder Wiederholung nach

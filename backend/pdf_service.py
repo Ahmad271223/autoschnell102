@@ -291,6 +291,21 @@ def _ja_nein_oder_nichts(wert) -> str:
     return "—"
 
 
+def _inserat_zustand(inserat, dialog, *, gleich: bool) -> str:
+    """Inseratsangabe fuer den Zusicherungsblock — nur, wenn sie zum Wert im
+    Dialog passt, sonst "—" (Zeile faellt weg).
+
+    gleich=True: Inserat True passt zu "Ja" (fahrbereit <-> Fahrtauglich).
+    gleich=False: Inserat True passt zu "Nein" (Unfallschaden <-> Unfallfrei)."""
+    if not isinstance(inserat, bool):
+        return "—"
+    wert = _yn(dialog)
+    if wert not in ("Ja", "Nein"):
+        return "—"
+    passend = "Ja" if inserat is gleich else "Nein"
+    return _ja_nein_oder_nichts(inserat) if wert == passend else "—"
+
+
 def _ohne_leere(rows):
     """Wunsch Ahmad (16.09.2026): nicht ausgefuellte Punkte (z. B. E-Mail, Bereifung)
     erscheinen im Vertrag gar nicht — statt einer Zeile mit Strich."""
@@ -984,8 +999,14 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         # ein fehlendes Feld) "Unfallschaden: Nein" und "Fahrbereit: Ja" — bei
         # AutoScout sogar "Fahrbereit: Nein". Beides stand als Zusicherung im
         # Kaufvertrag, obwohl das Inserat nichts dazu sagte.
-        ("Unfallschaden (Inserat)", _ja_nein_oder_nichts(vehicle.get("accident_damaged"))),
-        ("Fahrbereit (Inserat)", _ja_nein_oder_nichts(vehicle.get("roadworthy"))),
+        # Go-Live-Pruefung 27.09.2026 (K7/Zusatz): nur, wenn der Wert im
+        # Dialog dazu PASST — sonst widersprach sich der Abschnitt
+        # ("Fahrtauglich: Nein" neben "Fahrbereit (Inserat): Ja"), und der
+        # Sucher konnte die Zeile nicht entfernen. Leer im Dialog -> weg.
+        ("Unfallschaden (Inserat)", _inserat_zustand(vehicle.get("accident_damaged"),
+                                                     contract.get("accident_free"), gleich=False)),
+        ("Fahrbereit (Inserat)", _inserat_zustand(vehicle.get("roadworthy"),
+                                                  contract.get("drivable"), gleich=True)),
     ]
     zus_rows = _ohne_leere(zus_rows)
     if zus_rows:

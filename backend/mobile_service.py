@@ -549,9 +549,22 @@ def zustand_unfall(schadensfall, text: str = "") -> Optional[bool]:
         rest = rest.replace(wort, " ")
     if any(w in rest for w in _UNFALL_JA):
         return True
+    # Go-Live-Pruefung 27.09.2026 (K6): mobile.de "Repaired"/"Repariert" ist
+    # ein reparierter Unfallwagen — das ist KEIN "kein Unfallschaden", auch
+    # wenn isDamageCase=False (dort zaehlen nur unreparierte Schaeden).
+    if re.search(r"\brepariert|\brepaired|\binstand\s*gesetzt", rest):
+        return None
     if schadensfall is False or any(w in t for w in _UNFALL_NEIN):
         return False
     return None
+
+
+def zustand_portal_text(portal: str, roh) -> Optional[str]:
+    """Echter Zustandswert des Portals mit Portalname, z. B.
+    "Kleinanzeigen: Unbeschädigtes Fahrzeug" — nur zum Anzeigen als
+    Fundstelle; None ohne Angabe."""
+    s = " ".join(str(roh or "").split())[:120]
+    return f"{portal}: {s}" if s else None
 
 
 def zustand_fahrbereit(bereit, text: str = "") -> Optional[bool]:
@@ -739,6 +752,9 @@ def _parse_apify_item(item: dict, ad_id: str, url: Optional[str] = None) -> Dict
         "previous_owners": str(halter) if halter is not None
                            else extract_owners_from_text(beschreibung),
         "accident_damaged": unfall,
+        # Go-Live-Pruefung 27.09.2026 (K6): der ECHTE Portalwert fuer die
+        # Fundstelle im Vertragsdialog (statt "unfallfrei laut Inserat").
+        "zustand_portal": zustand_portal_text("mobile.de", _apify_attr(item, "damageCondition")),
         "roadworthy": zustand_fahrbereit(item.get("readyToDrive"), schaden_text),
         # Befund Ahmad 26.09.2026: memo23 liefert die Ausstattung englisch
         # ("Alloy wheels", "Central locking") — hier auf Deutsch, damit sie
