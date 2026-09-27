@@ -16,16 +16,20 @@ Wahl des Zeitpunkts (Auftrag: "nach jedem gueltigen Lauf ODER in einem taegliche
     * der Crawl-Weg (Worker, Budget, Leases) wartet nie auf die Auswertung und scheitert nie an ihr (Abschnitt 49)
     * Grundlage ist der Tageswert (letzter gueltiger Lauf mit Treffern) — ein leerer oder POOR-Zweitlauf
       erzeugt keine Schein-Ereignisse; Tage mit nur ungueltigen Laeufen werden nie ausgewertet; ein LEERER
-      Tageswert (Marktluecke) wird erst nach Tagesende ausgewertet, weil ein spaeterer Lauf desselben Tages mit
-      Treffern ihn noch ersetzt (Pruefbefund B0)
+      Tageswert (Marktluecke) wird erst ausgewertet, wenn ihn kein spaeterer Lauf desselben Tages mehr ersetzen
+      kann: nach Tagesende UND ohne wartenden/laufenden Abruf (Segment, Tag) — hoechstens bis zur Berichtsfrist
+      (Pruefbefund B0, Runde 2: ein Lauf, der vor Mitternacht startet, liefert noch danach Treffer mit tag=D)
     * nachholbar und idempotent: faellt der Worker aus, bleibt das Tagesdokument offen und wird spaeter
-      ausgewertet (aeltere Tage zuerst, ein aelterer Tag nie nach einem neueren — scheitert ein Tag, bleiben die
-      neueren Tage desselben Segments bis zum naechsten Durchlauf offen); dieselbe Auswertung zweimal
-      erzeugt kein Ereignis doppelt (Stand je Inserat + Unique-Index der Ereignisse)
+      ausgewertet (aeltere Tage zuerst, ein aelterer Tag nie nach einem neueren — scheitert ein Tag oder wartet
+      sein leerer Tageswert noch, bleiben die neueren Tage desselben Segments offen; scheitert ein Tag dauerhaft,
+      wird er nach AUFGEBEN_NACH_VERSUCHEN Fehlversuchen bzw. AUFGEBEN_NACH_STUNDEN mit grund='auswertung_fehler'
+      abgeschlossen und bleibt als eigener Betriebsalarm offen); dieselbe Auswertung zweimal erzeugt kein
+      Ereignis doppelt (Stand je Inserat + Unique-Index der Ereignisse)
     * Schreibpause (Sicherung/Restore): der Durchlauf haelt vor jedem Tagesdokument an, der Rest bleibt offen
     * zwei Server: ein Durchlauf haelt die Sperre markt-auswertung (job_lock, siehe markt.auswertung)
-  Dieses Modul liest nur gespeicherte Tageswerte und schreibt nur Hot-Deal-Daten — es loest NIE einen
-  Marktabruf aus (Architekturtest test_b02); Kosten fuer die Auswertung: 0.
+  Dieses Modul liest nur gespeicherte Tageswerte (dazu nur lesend den Status der Abrufe eines Tages, siehe
+  _leer_wartet) und schreibt nur Hot-Deal-Daten — es loest NIE einen Marktabruf aus (Architekturtest test_b02);
+  Kosten fuer die Auswertung: 0.
 
 Sammlungen:
   market_hot_deals        aktueller Zustand je (segment_id, listing_id): Status ACTIVE / LEFT / REMOVED, Klasse,
@@ -50,7 +54,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from pymongo.errors import DuplicateKeyError
 
 from markt import konfig, speicher
-from markt.konfig import HOTDEAL_EREIGNISSE, HOTDEALS, LISTINGS, SEGMENTE, TAGESSTATS
+from markt.konfig import HOTDEAL_EREIGNISSE, HOTDEALS, JOBS, LISTINGS, SEGMENTE, TAGESSTATS
 
 log = logging.getLogger(__name__)
 
@@ -83,6 +87,15 @@ GRUND_AUS_STICHPROBE = "nicht_mehr_im_sample"       # nicht mehr unter den N gue
 GRUND_ENTFERNT = "inserat_entfernt"                 # Entfernungspruefung bestaetigt: Inserat nicht mehr online
 ENTFERNT_NACHSCHAU_TAGE = 30                        # so lange wird ein herausgefallener Deal auf "entfernt" geprueft
 AUSWERTUNG_MAX_JE_LAUF = 3000                       # offene Tagesdokumente je Durchlauf (Rest im naechsten)
+# Pruefbefund Runde 2 (B2): ein Tag, dessen Auswertung immer wieder scheitert (z. B. deterministisch an einem kaputten
+# Feld), hielte sonst alle neueren Tage des Segments fuer immer zurueck (Hot Deals eingefroren, Berichte warten).
+# Je Tageswert (observed_at) werden die Fehlversuche gezaehlt; nach 6 Durchlaeufen mit Fehler (Takt 5 Minuten, also
+# rund eine halbe Stunde — ein kurzer Aussetzer wie eine Wahl im Replikat-Set heilt in der Zeit) oder 6 Stunden nach
+# dem ersten Fehlversuch (falls selten ein Durchlauf dazukam, z. B. Schreibpausen) wird der Tag mit
+# grund='auswertung_fehler' abgeschlossen; die neueren Tage laufen weiter, der Tag bleibt als Betriebsalarm offen.
+AUFGEBEN_NACH_VERSUCHEN = 6
+AUFGEBEN_NACH_STUNDEN = 6
+GRUND_AUSWERTUNG_FEHLER = "auswertung_fehler"
 # Pruefbefund B14: die Liste 'alle' zeigt die Historie der letzten 90 Tage (nach letztem Ereignis, Index
 # markt_hotdeal_letztes_ereignis) — verlassene/entfernte Zustaende werden nie geloescht, ohne Fenster wuerde
 # jeder Klick die ganze, stetig wachsende Sammlung lesen und sortieren
@@ -274,14 +287,41 @@ async def _abschliessen(db, seg_id: str, tag: str, doc: Dict[str, Any], zus: Dic
     filt: Dict[str, Any] = {"segment_id": seg_id, "date": tag}
     if doc.get("observed_at") is not None:
         filt["observed_at"] = doc["observed_at"]
-    await db[TAGESSTATS].update_one(filt, {"$set": {"hot_deals": zus}, "$unset": {"hot_deals_offen": ""}})
+    await db[TAGESSTATS].update_one(filt, {"$set": {"hot_deals": zus}, "$unset": {"hot_deals_offen": "", "hot_deals_fehler": ""}})
     return {"status": "ausgewertet" if zus.get("basis_ok") else "ohne_basis", **zus}
 
 
 # ---------------------------------------------------------------- Auswertung eines Tages
-def _leer_vorlaeufig(doc: Dict[str, Any], tag: str, jetzt: Optional[datetime]) -> bool:
-    """Leerer Tageswert (gueltiger Lauf, 0 Treffer) eines Tages, der noch laeuft (deutsche Zeit)."""
-    return int(doc.get("sample_size") or 0) == 0 and str(tag) >= konfig.heute_tag(jetzt)
+def leer_frist(tag: str) -> datetime:
+    """Spaetester Zeitpunkt (UTC), bis zu dem ein leerer Tageswert des Tages auf einen noch wartenden oder laufenden
+    Abruf desselben Tages wartet: Folgetag 00:00 deutscher Zeit + BERICHT_KARENZ_STUNDEN — genau der Zeitpunkt, ab
+    dem die Berichte, die mit diesem Tag enden, final werden (berichte.faellig_ab). Der Durchlauf wertet die Hot Deals
+    vor den Berichten aus, deshalb ist der Tag dann ausgewertet, bevor der Bericht einfriert; bis dahin zaehlt er als
+    offen (berichte._hot_deals_offen) und der Bericht wartet."""
+    from markt import berichte          # spaet: berichte importiert deals
+    return berichte.faellig_ab(tag)
+
+
+async def _leer_wartet(db, doc: Dict[str, Any], seg_id: str, tag: str, jetzt: Optional[datetime]) -> bool:
+    """Leerer Tageswert (gueltiger Lauf, 0 Treffer), den ein spaeterer Lauf desselben Tages noch ersetzen kann.
+
+    Pruefbefund B0 (Runde 2): Kalendertag vorbei reicht nicht — ein Lauf, der vor 23:30 startet, darf bis zur Lease-
+    Grenze laufen und liefert nach 00:00 noch Treffer mit tag=D. Wartende Abrufe vergangener Tage storniert der
+    Crawl-Worker vor jedem Claim (alte_stornieren), sie liefern nichts mehr; solange einer von ihnen noch 'queued' steht,
+    zaehlt er trotzdem (Rennen um Mitternacht). Gewaehlt statt einer festen Karenz (z. B. 6 h nach Tagesende): das
+    Crawl-Fenster beginnt um 03:00 — bei 6 h Karenz waeren die Laeufe von D+1 vor dem leeren Tag D dran, und ob die
+    Marktluecke D ein LEFT erzeugt, hinge von der Uhrzeit des Folgelaufs ab. Ohne offenen Abruf wird der leere Tag
+    kurz nach Mitternacht ausgewertet, vor den Laeufen von D+1. Obergrenze leer_frist(tag): ein haengengebliebener
+    Abruf (Prozess weg, keine Lease-Bereinigung) haelt nichts laenger auf als bis zur Berichtsfrist."""
+    if int(doc.get("sample_size") or 0) != 0:
+        return False
+    if str(tag) >= konfig.heute_tag(jetzt):
+        return True                     # der Tag laeuft noch (deutsche Zeit)
+    if (jetzt or konfig.jetzt()) >= leer_frist(tag):
+        return False
+    offen = await db[JOBS].find_one({"segment_id": seg_id, "tag": {"$regex": f"^{re.escape(str(tag))}(#|$)"},
+                                     "status": {"$in": ["queued", "running"]}}, {"_id": 0, "id": 1})
+    return offen is not None
 
 
 async def wartung_aktiv(db) -> bool:
@@ -304,17 +344,18 @@ async def segment_tag_auswerten(db, seg_id: str, tag: str, *, jetzt: Optional[da
       nicht heiss, ACTIVE       -> LEFT   (LEFT_HOT_ZONE: ueber der Schwelle oder nicht mehr im Sample)
       nicht im Sample, entfernt -> REMOVED (REMOVED, nur mit bestaetigter Entfernungspruefung)
     Kein Ereignis, wenn: Tag mit Datenqualitaet POOR/UNKNOWN, Basis zu duenn, Altdaten ohne Preiszeilen, oder ein
-    neuerer Tag desselben Segments ist schon ausgewertet (Reihenfolge). Ein leerer Tageswert des laufenden Tages
-    wird noch gar nicht ausgewertet ('leer_vorlaeufig', Merker bleibt)."""
+    neuerer Tag desselben Segments ist schon ausgewertet (Reihenfolge). Ein leerer Tageswert, den ein spaeterer Lauf
+    desselben Tages noch ersetzen kann, wird noch gar nicht ausgewertet ('leer_vorlaeufig', Merker bleibt)."""
     jetzt_iso = (jetzt or konfig.jetzt()).isoformat()
     doc = await db[TAGESSTATS].find_one({"segment_id": seg_id, "date": tag}, {"_id": 0, "laeufe": 0})
     if not doc or doc.get("sample_size") is None:
         return {"status": "kein_tageswert"}
-    if _leer_vorlaeufig(doc, tag, jetzt):
+    if await _leer_wartet(db, doc, seg_id, tag, jetzt):
         # Pruefbefund B0: ein leerer erster Lauf stellt nur vorlaeufig den Tageswert — ein spaeterer Lauf desselben
         # Tages mit Treffern ersetzt ihn (P5). Frueher ausgewertet, verliessen aktive Deals morgens die Zone und
         # kamen nachmittags als neue heisse Phase zurueck (dauerhaftes LEFT/BECAME-Paar, Schein-'heute neu').
-        # Erst nach Tagesende gilt der leere Tag als Marktluecke; der Merker bleibt bis dahin stehen.
+        # Erst wenn kein Lauf des Tages mehr kommen kann, gilt der leere Tag als Marktluecke; bis dahin bleibt der
+        # Merker stehen (Runde 2: auch nach Mitternacht, solange ein Abruf des Tages noch laeuft oder wartet).
         return {"status": "leer_vorlaeufig"}
     seg = await db[SEGMENTE].find_one({"id": seg_id}, {"_id": 0}) or {"id": seg_id}
     seg.setdefault("id", seg_id)
@@ -472,23 +513,79 @@ async def segment_tag_auswerten(db, seg_id: str, tag: str, *, jetzt: Optional[da
     return await _abschliessen(db, seg_id, tag, doc, zus, heiss, heiss_privat, neu_heute)
 
 
+async def _alarm_tag(db, seg_id: str, tag: str, **details) -> None:
+    """Eigener Betriebsalarm je aufgegebenem Tag (ref hot-deals:<Segment>:<Tag>): den schliesst kein fehlerfreier
+    Durchlauf (der schliesst nur ref 'auswertung') — er bleibt offen, bis ihn jemand quittiert."""
+    try:
+        from betrieb import alarm
+        from markt.auswertung import ALARM
+        await alarm(db, ALARM, ref=f"hot-deals:{seg_id}:{tag}", **details)
+    except Exception:  # noqa: BLE001
+        log.exception("Betriebsalarm fuer aufgegebene Hot-Deal-Auswertung %s %s nicht angelegt", seg_id, tag)
+
+
+async def _fehlversuch(db, d: Dict[str, Any], fehler: BaseException, jetzt: Optional[datetime]) -> bool:
+    """Pruefbefund Runde 2 (B2): einen Fehlversuch am Tagesdokument zaehlen — je Tageswert (observed_at): ersetzt ein
+    neuerer Lauf den Tageswert, beginnt die Zaehlung neu. True = Tag aufgegeben und abgeschlossen (grund=
+    'auswertung_fehler', hot_deals_offen weg) — die neueren Tage des Segments duerfen jetzt drankommen. Am Dokument und
+    im Alarm steht nur die Fehlerart (keine Inseratsdaten); der volle Fehler steht im Protokoll."""
+    try:
+        jetzt_dt = jetzt or konfig.jetzt()
+        seg_id, tag, obs = str(d["segment_id"]), str(d["date"]), d.get("observed_at")
+        alt = d.get("hot_deals_fehler") or {}
+        gleich = bool(alt) and alt.get("observed_at") == obs
+        versuche = (int(alt.get("versuche") or 0) if gleich else 0) + 1
+        seit = str((alt.get("seit") if gleich else None) or jetzt_dt.isoformat())
+        try:
+            stunden = (jetzt_dt - datetime.fromisoformat(seit)).total_seconds() / 3600
+        except (TypeError, ValueError):
+            stunden = 0.0
+        art = type(fehler).__name__
+        filt: Dict[str, Any] = {"segment_id": seg_id, "date": tag, "hot_deals_offen": True}
+        if obs is not None:
+            filt["observed_at"] = obs
+        if versuche < AUFGEBEN_NACH_VERSUCHEN and stunden < AUFGEBEN_NACH_STUNDEN:
+            await db[TAGESSTATS].update_one(filt, {"$set": {"hot_deals_fehler": {"observed_at": obs, "versuche": versuche,
+                                                                                 "seit": seit, "fehler": art}}})
+            return False
+        doc = await db[TAGESSTATS].find_one(filt, {"_id": 0, "observed_at": 1, "lauf_tag": 1, "version": 1, "definition_hash": 1})
+        if not doc:
+            return False                # inzwischen ersetzt oder ausgewertet: der naechste Durchlauf sieht den neuen Stand
+        fass = fassung(doc)
+        zus = {"ausgewertet_at": jetzt_dt.isoformat(), "observed_at": doc.get("observed_at"), "lauf_tag": doc.get("lauf_tag"),
+               "version": fass[0], "definition_hash": fass[1], "basis_ok": False, "grund": GRUND_AUSWERTUNG_FEHLER,
+               "ids": [], "privat_ids": [], "klassen": {}, "ereignisse": {}, "fehlversuche": versuche, "fehler": art,
+               "fehler_seit": seit}
+        await _abschliessen(db, seg_id, tag, doc, zus, [], [], [])
+        log.error("Hot-Deal-Auswertung %s %s nach %d Fehlversuchen aufgegeben (%s) — neuere Tage laufen weiter",
+                  seg_id, tag, versuche, art)
+        await _alarm_tag(db, seg_id, tag, fehler=f"Hot-Deal-Auswertung nach {versuche} Fehlversuchen aufgegeben ({art}) — "
+                                                 "Hot Deals dieses Tages fehlen, Protokoll pruefen", versuche=versuche)
+        return True
+    except Exception:  # noqa: BLE001
+        log.exception("Fehlversuch der Hot-Deal-Auswertung %s %s nicht gezaehlt", d.get("segment_id"), d.get("date"))
+        return False
+
+
 async def auswerten_faellige(db, *, limit: int = AUSWERTUNG_MAX_JE_LAUF, segment_ids: Optional[List[str]] = None,
                              jetzt: Optional[datetime] = None) -> Dict[str, Any]:
     """Alle offenen Tagesdokumente (hot_deals_offen) in Tagesreihenfolge auswerten. segment_ids grenzt ein
     (Tests, Admin). Ein Fehler in einem Segment haelt die anderen nicht auf. Leere Tageswerte des laufenden Tages
-    warten bis nach Tagesende (Pruefbefund B0) und werden hier gar nicht erst geladen."""
+    warten bis nach Tagesende (Pruefbefund B0) und werden hier gar nicht erst geladen; ein leerer Tageswert eines
+    vergangenen Tages wartet, solange ein Abruf dieses Tages noch laeuft (_leer_wartet)."""
     filt: Dict[str, Any] = {"hot_deals_offen": True, "$nor": [{"sample_size": 0, "date": {"$gte": konfig.heute_tag(jetzt)}}]}
     if segment_ids is not None:
         filt["segment_id"] = {"$in": [str(s) for s in segment_ids]}
-    offene = await db[TAGESSTATS].find(filt, {"_id": 0, "segment_id": 1, "date": 1}).sort([("date", 1), ("segment_id", 1)])\
-        .to_list(max(1, int(limit)))
+    offene = await db[TAGESSTATS].find(filt, {"_id": 0, "segment_id": 1, "date": 1, "observed_at": 1, "hot_deals_fehler": 1})\
+        .sort([("date", 1), ("segment_id", 1)]).to_list(max(1, int(limit)))
     z: Dict[str, Any] = {"offen": len(offene), "ausgewertet": 0, "ohne_basis": 0, "fehler": 0, "ereignisse": 0}
-    gescheitert: set = set()
+    halten: set = set()          # Segmente, deren neuere Tage in diesem Durchlauf warten
     for d in offene:
-        if str(d["segment_id"]) in gescheitert:
-            # Pruefbefund B2: ein aelterer Tag dieses Segments ist eben gescheitert — die neueren Tage bleiben offen
-            # und kommen im naechsten Durchlauf NACH ihm dran (sonst schloesse die Reihenfolge-Sperre den aelteren
-            # Tag danach ohne Ereignisse, 'ein aelterer Tag nie nach einem neueren')
+        if str(d["segment_id"]) in halten:
+            # Pruefbefund B2: ein aelterer Tag dieses Segments ist eben gescheitert (oder sein leerer Tageswert wartet
+            # noch auf einen Lauf desselben Tages) — die neueren Tage bleiben offen und kommen in einem spaeteren
+            # Durchlauf NACH ihm dran (sonst schloesse die Reihenfolge-Sperre den aelteren Tag danach ohne Ereignisse,
+            # 'ein aelterer Tag nie nach einem neueren')
             z["zurueckgestellt"] = z.get("zurueckgestellt", 0) + 1
             continue
         if await wartung_aktiv(db):
@@ -499,10 +596,19 @@ async def auswerten_faellige(db, *, limit: int = AUSWERTUNG_MAX_JE_LAUF, segment
             break
         try:
             r = await segment_tag_auswerten(db, d["segment_id"], d["date"], jetzt=jetzt)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
             log.exception("Hot-Deal-Auswertung %s %s gescheitert", d.get("segment_id"), d.get("date"))
             z["fehler"] += 1
-            gescheitert.add(str(d["segment_id"]))
+            if await _fehlversuch(db, d, e, jetzt):
+                # Pruefbefund Runde 2 (B2): dauerhaft gescheitert — abgeschlossen, die neueren Tage laufen weiter
+                z["aufgegeben"] = z.get("aufgegeben", 0) + 1
+            else:
+                halten.add(str(d["segment_id"]))
+            continue
+        if r.get("status") == "leer_vorlaeufig":
+            # Runde 2 (B0): leerer Tageswert wartet noch auf einen Lauf desselben Tages — neuere Tage des Segments danach
+            z["leer_wartet"] = z.get("leer_wartet", 0) + 1
+            halten.add(str(d["segment_id"]))
             continue
         if r.get("status") == "ausgewertet":
             z["ausgewertet"] += 1

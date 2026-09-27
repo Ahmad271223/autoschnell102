@@ -200,10 +200,14 @@ describe("Admin Hot Deals", () => {
     expect(el("hd-filter-km-min").getAttribute("aria-invalid")).toBe("false");
     expect(el("hd-filter-anwenden").disabled).toBe(true);
     await klick("hd-filter-anwenden");
-    await tippen("hd-filter-klasse", "STRONG");                       // sofort ladende Auswahl: auch dann nichts senden
+    // sofort ladende Auswahl: gesperrt, solange die Zahl ungültig ist (Prüfbefund Runde 2) — nichts senden, nichts umstellen
+    expect(el("hd-filter-klasse").disabled).toBe(true);
+    await tippen("hd-filter-klasse", "STRONG");
+    expect(el("hd-filter-klasse").value).toBe("");
     expect(netz.gets.filter((g) => g.url === "/admin/market/hot-deals").length).toBe(vorher);
     await tippen("hd-filter-km-max", "150.000");
-    await klick("hd-filter-anwenden");
+    expect(el("hd-filter-klasse").disabled).toBe(false);
+    await tippen("hd-filter-klasse", "STRONG");                       // lädt sofort, mit den gültigen km-Werten
     expect(letzteParams()).toMatchObject({ km_min: 50000, km_max: 150000, klasse: "STRONG" });
     expect(hotDealParams({ km_min: "50.000", km_max: "abc", ez: "03.2020" })).toEqual({ sort: "vorteil_pct", status: "aktuell", limit: 300, km_min: 50000 });
     expect(zahlFeld("ez", " 2021 ")).toEqual({ zahl: 2021 });
@@ -239,6 +243,40 @@ describe("Admin Hot Deals", () => {
     expect(el("hd-deal-h3")).toBeNull();
     expect(el("hd-deal-h4")).toBeNull();
     expect(el("hot-deals-liste").textContent).toContain("2 Hot Deals");
+    expect(el("hot-deals-liste").textContent).not.toContain("lädt");
+  });
+
+  it("Prüfbefund Runde 2: bei ungültiger Zahl passen Umschalter und Liste zusammen; eine laufende gültige Antwort bleibt gültig", async () => {
+    await starten();
+    const ladungen = () => netz.gets.filter((g) => g.url === "/admin/market/hot-deals").length;
+    // (a) Umschalter und sofort ladende Auswahlen gesperrt: „alle“ bleibt aus, solange die Liste „aktuell“ zeigt
+    await tippen("hd-filter-km-min", "50,5");
+    const vorher = ladungen();
+    for (const t of ["hd-umschalter-alle", "hd-umschalter-aktuell", "hd-filter-klasse", "hd-filter-privat", "hd-filter-modell",
+      "hd-filter-sort", "hd-filter-heute-neu", "hd-aktualisieren", "hd-filter-anwenden"]) {
+      expect(el(t).disabled, t).toBe(true);
+    }
+    expect(el("hd-filter-make").disabled).toBe(false);                // Textfelder bleiben bedienbar
+    await klick("hd-umschalter-alle");
+    expect(el("hd-umschalter-alle").getAttribute("aria-pressed")).toBe("false");
+    expect(el("hd-umschalter-aktuell").getAttribute("aria-pressed")).toBe("true");
+    expect(el("hd-deal-h3")).toBeNull();
+    expect(ladungen()).toBe(vorher);
+    expect(el("hd-filter-ungueltig").textContent).toContain("gesperrt");
+    // (b) ein Nicht-Aufruf (ungültige Zahl) verwirft keine laufende gültige Antwort mehr
+    await tippen("hd-filter-km-min", "");
+    expect(el("hd-umschalter-alle").disabled).toBe(false);
+    netz.halten = { status: "alle" };
+    await klick("hd-umschalter-alle");                                // Antwort für 'alle' hängt noch
+    expect(typeof netz.halten.freigeben).toBe("function");
+    await tippen("hd-filter-km-min", "abc");
+    await klick("hd-auswerten");                                      // lädt danach neu — mit dieser Eingabe nicht
+    expect(netz.posts).toEqual(["/admin/market/hot-deals/auswerten"]);
+    await act(async () => { netz.halten.freigeben(); });
+    await warten();
+    expect(el("hd-umschalter-alle").getAttribute("aria-pressed")).toBe("true");
+    expect(el("hd-deal-h3")).toBeTruthy();                            // Liste „alle“ — passend zum Umschalter
+    expect(el("hot-deals-liste").textContent).toContain("Historie seit");
     expect(el("hot-deals-liste").textContent).not.toContain("lädt");
   });
 });

@@ -86,8 +86,10 @@ export default function MarktHotDeals() {
   const laufNr = useRef(0);
 
   const laden = useCallback(async (f) => {
+    // ungültige Zahl: nichts senden, Hinweis am Feld. Prüfbefund Runde 2: VOR der Laufnummer prüfen — sonst verwarf
+    // dieser Nicht-Aufruf eine gerade laufende gültige Antwort, und die Liste blieb auf einem älteren Stand stehen
+    if (ungueltigeFelder(f).length) return;
     const nr = ++laufNr.current;
-    if (ungueltigeFelder(f).length) { setLaedt(false); return; }   // ungültige Zahl: nichts senden, Hinweis am Feld
     setLaedt(true);
     try {
       const r = await api.get("/admin/market/hot-deals", { params: hotDealParams(f), timeout: 15000 });
@@ -101,7 +103,14 @@ export default function MarktHotDeals() {
   useEffect(() => { api.get("/admin/market/models").then((r) => setModelle(r.data?.modelle || [])).catch(() => {}); }, []);
 
   const sofort = ["status", "klasse", "privat", "model_id", "sort", "heute_neu"];
-  const setzen = (k, v) => { const f = { ...filter, [k]: v }; setFilter(f); if (sofort.includes(k)) laden(f); };
+  // Prüfbefund Runde 2: solange ein Zahlenfeld ungültig ist, sind die sofort ladenden Auswahlen und der Umschalter
+  // gesperrt — sonst zeigte der Umschalter „alle“, die Liste aber weiter „aktuell“ (mit dieser Eingabe wird nicht geladen)
+  const ungueltig = ungueltigeFelder(filter);
+  const gesperrt = ungueltig.length > 0;
+  const setzen = (k, v) => {
+    if (gesperrt && sofort.includes(k)) return;
+    const f = { ...filter, [k]: v }; setFilter(f); if (sofort.includes(k)) laden(f);
+  };
   const zuruecksetzen = () => { setFilter(FILTER_LEER); laden(FILTER_LEER); };
   const auswerten = async () => {
     setBusy(true);
@@ -114,9 +123,9 @@ export default function MarktHotDeals() {
     finally { setBusy(false); }
   };
 
-  const feld = "rounded-lg px-2.5 py-1.5 text-[12px] outline-none w-full";
+  const feld = "rounded-lg px-2.5 py-1.5 text-[12px] outline-none w-full disabled:cursor-not-allowed disabled:opacity-50";
   const st = { background: "var(--bg-input-solid)", color: "var(--text-primary)", border: "1px solid var(--wa-12)" };
-  const ungueltig = ungueltigeFelder(filter);
+  const sperrTitel = gesperrt ? "Erst die Zahl im roten Feld korrigieren — bis dahin wird nicht geladen" : undefined;
   const zahlSt = (k) => (ungueltig.includes(k) ? { ...st, border: "1px solid var(--st-rot)" } : st);
   const z = daten?.zusammenfassung || {};
   const deals = daten?.deals || [];
@@ -125,7 +134,7 @@ export default function MarktHotDeals() {
       <Link to="/admin/markt" className="inline-flex items-center gap-1.5 text-xs text-zinc-400 hover:text-white mb-2"><ArrowLeft size={14} /> Marktanalyse</Link>
       <PageHeader title="Hot Deals" subtitle="Auffällig günstige Inserate gegenüber dem historischen Low-Market-Median desselben Segments — aus gespeicherten Tageswerten, keine Zusatzabrufe. Nur für den Betreiber."
                   action={<div className="flex gap-2">
-                    <Button variant="outline" size="sm" onClick={() => laden(filter)} disabled={laedt}><RefreshCw size={14} /> Aktualisieren</Button>
+                    <Button variant="outline" size="sm" onClick={() => laden(filter)} disabled={laedt || gesperrt} title={sperrTitel} data-testid="hd-aktualisieren"><RefreshCw size={14} /> Aktualisieren</Button>
                     <Button variant="outline" size="sm" onClick={auswerten} disabled={busy} data-testid="hd-auswerten" title="Neue Tageswerte jetzt auswerten (sonst alle 5 Minuten im Hintergrund) — liest nur Gespeichertes, kostet nichts"><Play size={14} /> Jetzt auswerten</Button>
                   </div>} />
 
@@ -151,16 +160,16 @@ export default function MarktHotDeals() {
       <Card className="mb-4" data-testid="hot-deals-filter">
         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-2 text-[11px] text-zinc-400">
           <label>Klasse
-            <select className={feld} style={st} value={filter.klasse} onChange={(e) => setzen("klasse", e.target.value)} data-testid="hd-filter-klasse">
+            <select className={feld} style={st} value={filter.klasse} onChange={(e) => setzen("klasse", e.target.value)} disabled={gesperrt} title={sperrTitel} data-testid="hd-filter-klasse">
               <option value="">alle</option>
               {Object.entries(HOTDEAL_KLASSE).map(([k, v]) => <option key={k} value={k}>{v.text}</option>)}
             </select></label>
           <label>Verkäufer
-            <select className={feld} style={st} value={filter.privat} onChange={(e) => setzen("privat", e.target.value)} data-testid="hd-filter-privat">
+            <select className={feld} style={st} value={filter.privat} onChange={(e) => setzen("privat", e.target.value)} disabled={gesperrt} title={sperrTitel} data-testid="hd-filter-privat">
               <option value="">alle</option><option value="privat">nur privat</option><option value="haendler">nur Händler/unbekannt</option>
             </select></label>
           <label>Suchauftrag
-            <select className={feld} style={st} value={filter.model_id} onChange={(e) => setzen("model_id", e.target.value)} data-testid="hd-filter-modell">
+            <select className={feld} style={st} value={filter.model_id} onChange={(e) => setzen("model_id", e.target.value)} disabled={gesperrt} title={sperrTitel} data-testid="hd-filter-modell">
               <option value="">alle</option>
               {modelle.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
             </select></label>
@@ -169,23 +178,25 @@ export default function MarktHotDeals() {
           <label>km von<input className={feld} style={zahlSt("km_min")} value={filter.km_min} onChange={(e) => setzen("km_min", e.target.value)} inputMode="numeric" placeholder="z. B. 50.000" aria-invalid={ungueltig.includes("km_min")} data-testid="hd-filter-km-min" /></label>
           <label>km bis<input className={feld} style={zahlSt("km_max")} value={filter.km_max} onChange={(e) => setzen("km_max", e.target.value)} inputMode="numeric" placeholder="z. B. 150.000" aria-invalid={ungueltig.includes("km_max")} data-testid="hd-filter-km-max" /></label>
           <label>Sortierung
-            <select className={feld} style={st} value={filter.sort} onChange={(e) => setzen("sort", e.target.value)} data-testid="hd-filter-sort">
+            <select className={feld} style={st} value={filter.sort} onChange={(e) => setzen("sort", e.target.value)} disabled={gesperrt} title={sperrTitel} data-testid="hd-filter-sort">
               {HOTDEAL_SORTIERUNGEN.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
             </select></label>
         </div>
         {ungueltig.length > 0 && (
           <div className="mt-2 text-[11px]" style={{ color: "var(--st-rot)" }} role="alert" data-testid="hd-filter-ungueltig">
-            Bitte nur ganze Zahlen eingeben — km z. B. 150000 oder 150.000, EZ als Jahr z. B. 2020. Mit dieser Eingabe wird nicht geladen.
+            Bitte nur ganze Zahlen eingeben — km z. B. 150000 oder 150.000, EZ als Jahr z. B. 2020. Mit dieser Eingabe wird nicht geladen; Auswahlen und Umschalter sind bis dahin gesperrt.
           </div>
         )}
         <div className="mt-2 flex flex-wrap items-center gap-2">
-          <Button size="sm" onClick={() => laden(filter)} disabled={laedt || ungueltig.length > 0} data-testid="hd-filter-anwenden">Filter anwenden</Button>
+          <Button size="sm" onClick={() => laden(filter)} disabled={laedt || gesperrt} data-testid="hd-filter-anwenden">Filter anwenden</Button>
           <Button size="sm" variant="ghost" onClick={zuruecksetzen} disabled={laedt}>Zurücksetzen</Button>
-          <label className="inline-flex items-center gap-1.5 text-[11px] text-zinc-400"><input type="checkbox" checked={filter.heute_neu} onChange={(e) => setzen("heute_neu", e.target.checked)} data-testid="hd-filter-heute-neu" /> nur heute neu</label>
+          <label className="inline-flex items-center gap-1.5 text-[11px] text-zinc-400"><input type="checkbox" checked={filter.heute_neu} onChange={(e) => setzen("heute_neu", e.target.checked)} disabled={gesperrt} title={sperrTitel} data-testid="hd-filter-heute-neu" /> nur heute neu</label>
           <span className="ml-auto inline-flex rounded-full overflow-hidden text-[11px]" style={{ border: "1px solid var(--wa-12)" }} data-testid="hd-umschalter">
-            <button type="button" className="px-3 py-1" aria-pressed={filter.status === "aktuell"} data-testid="hd-umschalter-aktuell"
+            <button type="button" className="px-3 py-1 disabled:cursor-not-allowed disabled:opacity-50" aria-pressed={filter.status === "aktuell"} data-testid="hd-umschalter-aktuell"
+                    disabled={gesperrt} title={sperrTitel}
                     style={{ background: filter.status === "aktuell" ? "var(--wa-12)" : "transparent", color: "var(--text-primary)" }} onClick={() => setzen("status", "aktuell")}>aktuell</button>
-            <button type="button" className="px-3 py-1" aria-pressed={filter.status === "alle"} data-testid="hd-umschalter-alle"
+            <button type="button" className="px-3 py-1 disabled:cursor-not-allowed disabled:opacity-50" aria-pressed={filter.status === "alle"} data-testid="hd-umschalter-alle"
+                    disabled={gesperrt} title={sperrTitel}
                     style={{ background: filter.status === "alle" ? "var(--wa-12)" : "transparent", color: "var(--text-primary)" }} onClick={() => setzen("status", "alle")}>alle (auch verlassene)</button>
           </span>
         </div>

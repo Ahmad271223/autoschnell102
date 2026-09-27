@@ -762,3 +762,192 @@ def test_20_b14_liste_alle_nur_im_zeitfenster_mit_index(welt, monkeypatch):
         assert "COLLSCAN" not in str(plan["queryPlanner"]["winningPlan"]) and "markt_hotdeal_letztes_ereignis" in str(plan)
     finally:
         _aufraeumen(welt)
+
+
+# ---------------------------------------------------------------- Pruefbefunde Runde 2 (27.09.2026)
+def _mez(tag, stunde, minute=0):
+    """Uhrzeit deutscher Zeit (Maerz 2026 vor dem 29.: MEZ = UTC+1) als UTC-Zeitpunkt."""
+    return datetime.strptime(tag, "%Y-%m-%d").replace(tzinfo=K.ZEITZONE, hour=stunde, minute=minute).astimezone(timezone.utc)
+
+
+def _job(welt, seg, tag, status):
+    """Abruf (Segment, Tag) mit Status — wie ihn der Crawl-Worker fuehrt; hier nur als Datensatz (kein Abruf)."""
+    welt.run(welt.db[K.JOBS].update_one({"segment_id": seg["id"], "tag": tag}, {"$set": {
+        "id": f"test-job-{welt.w.s}-{tag}", "model_id": seg["model_id"], "status": status, "job_type": "daily", "attempts": 1}},
+        upsert=True))
+
+
+def _durchlauf_nur_test(monkeypatch, seg, berichte_echt=True):
+    """AUS.durchlauf nur fuer das Testsegment/-modell (Hot Deals und Berichte)."""
+    BER = _module("markt.berichte")
+    echt_d, echt_b = D.auswerten_faellige, BER.faellige_finalisieren
+
+    async def _d(db, **kw):
+        return await echt_d(db, segment_ids=[seg["id"]], **{k: v for k, v in kw.items() if k != "segment_ids"})
+
+    async def _b(db, **kw):
+        if not berichte_echt:
+            return {"perioden": 0, "fehler": 0}
+        return await echt_b(db, model_ids=[seg["model_id"]], **{k: v for k, v in kw.items() if k != "model_ids"})
+    monkeypatch.setattr(D, "auswerten_faellige", _d)
+    monkeypatch.setattr(BER, "faellige_finalisieren", _b)
+
+
+def test_21_runde2_b2_dauerhaft_scheiternder_tag_wird_aufgegeben(welt, monkeypatch):
+    """Pruefbefund Runde 2 (B2): scheitert (S, D) dauerhaft (deterministisch, z. B. kaputtes Feld), bleiben die neueren
+    Tage nicht fuer immer zurueckgestellt (vorher: Hot Deals des Segments eingefroren, Berichte warten 24 h). Die
+    Fehlversuche werden je Tageswert gezaehlt; nach AUFGEBEN_NACH_VERSUCHEN Durchlaeufen wird D mit
+    grund='auswertung_fehler' abgeschlossen und D+1 im selben Durchlauf ausgewertet. Der Betriebsalarm des Tages
+    bleibt offen, auch nach einem fehlerfreien Durchlauf. AUFGEBEN_NACH_STUNDEN seit dem ersten Fehlversuch reicht
+    ebenfalls; ein neuer Tageswert (anderes observed_at) beginnt die Zaehlung neu."""
+    BER = _module("markt.berichte")
+    seg = _start(welt)
+    db = welt.db
+    refs = [f"hot-deals:{seg['id']}:{_t(i)}" for i in (7, 9)]
+    merker_vorher = welt.run(db[K.KONFIG].find_one({"_id": K.AUSWERTUNG_DOK}))
+    alarme_vorher = welt.run(db.betriebsalarme.find({"typ": AUS.ALARM, "ref": "auswertung"}).to_list(100))
+    try:
+        _basis(welt, seg, tage=7)
+        _doc(welt, seg, 7, BASIS[:4] + (("x", 17000),), neu=("x",))
+        _doc(welt, seg, 8, BASIS[:4] + (("x", 17000),))
+        echt = D.segment_tag_auswerten
+        kaputt = {_t(7), _t(9)}
+
+        async def _immer_kaputt(db, seg_id, tag, **kw):
+            if tag in kaputt:
+                raise ValueError("kaputtes Feld (Test)")
+            return await echt(db, seg_id, tag, **kw)
+        monkeypatch.setattr(D, "segment_tag_auswerten", _immer_kaputt)
+        jetzt = datetime(2026, 3, 10, 12, 0, tzinfo=timezone.utc)
+        for n in range(1, D.AUFGEBEN_NACH_VERSUCHEN):
+            z = welt.run(D.auswerten_faellige(db, segment_ids=[seg["id"]], jetzt=jetzt + timedelta(minutes=5 * n)))
+            assert z["fehler"] == 1 and z.get("zurueckgestellt") == 1 and "aufgegeben" not in z, (n, z)
+            t7 = _tagesdoc(welt, seg, 7)
+            assert t7["hot_deals_offen"] is True and t7["hot_deals_fehler"]["versuche"] == n and t7["hot_deals_fehler"]["fehler"] == "ValueError"
+            assert _tagesdoc(welt, seg, 8)["hot_deals_offen"] is True
+        z = welt.run(D.auswerten_faellige(db, segment_ids=[seg["id"]], jetzt=jetzt + timedelta(minutes=5 * D.AUFGEBEN_NACH_VERSUCHEN)))
+        assert z["aufgegeben"] == 1 and z["fehler"] == 1 and z["ausgewertet"] == 1 and "zurueckgestellt" not in z, z
+        t7, t8 = _tagesdoc(welt, seg, 7), _tagesdoc(welt, seg, 8)
+        assert "hot_deals_offen" not in t7 and "hot_deals_fehler" not in t7
+        assert t7["hot_deals"]["grund"] == "auswertung_fehler" and t7["hot_deals"]["fehlversuche"] == D.AUFGEBEN_NACH_VERSUCHEN
+        assert t7["hot_deals"]["fehler"] == "ValueError" and t7["hot_deals"]["basis_ok"] is False
+        assert "hot_deals_offen" not in t8 and t8["hot_deals"]["basis_ok"] is True, "D+1 laeuft weiter"
+        assert _deal(welt, seg, "x")["status"] == "ACTIVE" and [e["tag"] for e in _ereignisse(welt, seg, "x")] == [_t(8)]
+        assert welt.run(BER._hot_deals_offen(db, [seg["id"]], _t(0), _t(8))) == 0, "die Berichte warten nicht mehr auf D"
+        alarm = welt.run(db.betriebsalarme.find_one({"typ": AUS.ALARM, "ref": refs[0], "offen": True}, {"_id": 0}))
+        assert alarm and "ValueError" in alarm["details"]["fehler"] and "kaputtes Feld" not in str(alarm), alarm
+        # ein fehlerfreier Durchlauf schliesst den Durchlauf-Alarm, der Alarm des aufgegebenen Tages bleibt offen
+        _durchlauf_nur_test(monkeypatch, seg, berichte_echt=False)
+        erg = welt.run(AUS.durchlauf(db, jetzt=jetzt + timedelta(hours=1)))
+        assert AUS.fehler_anzahl(erg) == 0 and erg["hot_deals"]["offen"] == 0
+        assert welt.run(db.betriebsalarme.count_documents({"typ": AUS.ALARM, "ref": refs[0], "offen": True})) == 1
+        # Zeitgrenze: Tag 9 scheitert; ein alter Zaehlerstand eines ANDEREN Tageswerts zaehlt nicht mit
+        doc9 = _doc(welt, seg, 9, BASIS[:4] + (("x", 17000),))
+        spaeter = jetzt + timedelta(days=1)
+        welt.run(db[K.TAGESSTATS].update_one({"segment_id": seg["id"], "date": _t(9)}, {"$set": {"hot_deals_fehler": {
+            "observed_at": "2026-03-10T04:00:00+00:00", "versuche": D.AUFGEBEN_NACH_VERSUCHEN - 1,
+            "seit": (spaeter - timedelta(hours=30)).isoformat(), "fehler": "ValueError"}}}))
+        z = welt.run(D.auswerten_faellige(db, jetzt=spaeter))           # nur Testsegment (_durchlauf_nur_test)
+        assert z["fehler"] == 1 and "aufgegeben" not in z, z
+        f9 = _tagesdoc(welt, seg, 9)["hot_deals_fehler"]
+        assert f9["versuche"] == 1 and f9["observed_at"] == doc9["observed_at"] and f9["seit"] == spaeter.isoformat()
+        # derselbe Tageswert, erster Fehlversuch vor mehr als AUFGEBEN_NACH_STUNDEN: aufgegeben, obwohl erst 2 Versuche
+        z = welt.run(D.auswerten_faellige(db, jetzt=spaeter + timedelta(hours=D.AUFGEBEN_NACH_STUNDEN)))
+        assert z.get("aufgegeben") == 1, z
+        t9 = _tagesdoc(welt, seg, 9)
+        assert t9["hot_deals"]["grund"] == "auswertung_fehler" and t9["hot_deals"]["fehlversuche"] == 2 and "hot_deals_offen" not in t9
+        assert welt.run(db.betriebsalarme.count_documents({"typ": AUS.ALARM, "ref": refs[1], "offen": True})) == 1
+        assert welt.run(db.betriebsalarme.count_documents({"typ": AUS.ALARM, "ref": refs[0], "offen": True})) == 1
+    finally:
+        welt.run(db.betriebsalarme.delete_many({"typ": AUS.ALARM, "ref": {"$in": refs + ["auswertung"]}}))
+        if alarme_vorher:
+            welt.run(db.betriebsalarme.insert_many(alarme_vorher))
+        if merker_vorher:
+            welt.run(db[K.KONFIG].replace_one({"_id": K.AUSWERTUNG_DOK}, merker_vorher, upsert=True))
+        else:
+            welt.run(db[K.KONFIG].delete_one({"_id": K.AUSWERTUNG_DOK}))
+        _aufraeumen(welt)
+
+
+def test_22_runde2_b0_spaeter_lauf_nach_mitternacht_ersetzt_den_leeren_tag(welt):
+    """Pruefbefund B0 (Runde 2): ein Lauf von Tag D, der vor 23:30 startet, liefert nach 00:00 noch Treffer mit tag=D.
+    Solange fuer (Segment, D) ein Abruf laeuft oder wartet, wird der leere Tageswert von D auch nach Mitternacht nicht
+    ausgewertet — vorher um 00:05 LEFT und nach dem spaeten Lauf BECAME (dauerhaftes LEFT/BECAME-Paar an Tag D).
+    Ein Sofort-Lauf von D+1 wartet dahinter (aelterer Tag nie nach neuerem). Ist der Abruf fertig, wird D mit dem
+    Tageswert des spaeten Laufs ausgewertet. Echter Weg ueber speicher.verarbeiten, Tage und Uhrzeiten ausdruecklich."""
+    seg = _start(welt)
+    s, db = welt.w.s, welt.db
+    try:
+        _basis(welt, seg, tage=13)
+        _doc(welt, seg, 13, BASIS[:4] + (("x", 17500),), neu=("x",))
+        assert _auswerten(welt, seg, 13)["ereignisse"] == {"NEW_HOT_DEAL": 1}
+        d = _t(14)                                                         # 2026-03-15
+        welt.run(SP.verarbeiten(db, seg, [], beobachtet=_mez(d, 8), tag=d))  # leerer erster Lauf um 08:00
+        _job(welt, seg, f"{d}#2", "running")                              # zweiter Lauf, 23:25 gestartet, laeuft noch
+        um_0005 = _mez(_t(15), 0, 5)
+        assert K.heute_tag(um_0005) == _t(15), "Kalendertag D ist vorbei"
+        z = welt.run(D.auswerten_faellige(db, segment_ids=[seg["id"]], jetzt=um_0005))
+        assert z["offen"] == 1 and z.get("leer_wartet") == 1 and z["ereignisse"] == 0, z
+        assert welt.run(D.segment_tag_auswerten(db, seg["id"], d, jetzt=um_0005)) == {"status": "leer_vorlaeufig"}
+        assert _deal(welt, seg, "x")["status"] == "ACTIVE" and _tagesdoc(welt, seg, 14)["hot_deals_offen"] is True
+        assert [e["typ"] for e in _ereignisse(welt, seg, "x")] == ["NEW_HOT_DEAL"]
+        # Sofort-Lauf von D+1 kurz nach Mitternacht: bleibt offen, bis D ausgewertet ist
+        _doc(welt, seg, 15, BASIS[:4] + (("x", 17500),))
+        z = welt.run(D.auswerten_faellige(db, segment_ids=[seg["id"]], jetzt=_mez(_t(15), 0, 20)))
+        assert z.get("leer_wartet") == 1 and z.get("zurueckgestellt") == 1 and z["ausgewertet"] == 0, z
+        assert _tagesdoc(welt, seg, 15)["hot_deals_offen"] is True
+        # 00:30: der spaete Lauf von D liefert Treffer (x weiter heiss) und ist fertig
+        spaet = _mez(_t(15), 0, 30)
+        items = [_item(f"t{s}{x}", p) for x, p in BASIS[:4]] + [_item(f"t{s}x", 17500)]
+        welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items(sorted(items, key=lambda it: it["priceGross"])), beobachtet=spaet,
+                                tag=d, lauf_tag=f"{d}#2"))
+        _job(welt, seg, f"{d}#2", "completed")
+        z = welt.run(D.auswerten_faellige(db, segment_ids=[seg["id"]], jetzt=spaet + timedelta(minutes=5)))
+        assert z["ausgewertet"] == 2 and z["ereignisse"] == 2 and "leer_wartet" not in z and "zurueckgestellt" not in z, z
+        assert [(e["typ"], e["tag"]) for e in _ereignisse(welt, seg, "x")] == [("NEW_HOT_DEAL", _t(13)), ("STILL_HOT", d), ("STILL_HOT", _t(15))]
+        dl = _deal(welt, seg, "x")
+        assert dl["status"] == "ACTIVE" and dl["hot_phasen"] == 1 and dl["hot_seit_tag"] == _t(13), "kein LEFT/BECAME-Paar"
+        assert f"t{s}x" in _tagesdoc(welt, seg, 14)["hot_deal_ids_tag"]
+    finally:
+        _aufraeumen(welt)
+
+
+def test_23_runde2_b0_obergrenze_berichtsfrist_und_bericht_wartet(welt, monkeypatch):
+    """Pruefbefund B0 (Runde 2): ein haengengebliebener Abruf (Status bleibt 'running', Prozess weg) haelt den leeren
+    Tageswert hoechstens bis zur Berichtsfrist auf (leer_frist = berichte.faellig_ab: Folgetag 00:00 + 6 h deutscher
+    Zeit). Bis dahin zaehlt der Tag als offen (berichte._hot_deals_offen) und der Bericht, der mit ihm endet, ist noch
+    nicht faellig; im Durchlauf zur Frist wertet die Auswertung erst die Hot Deals aus (Marktluecke -> LEFT) und friert
+    danach den Bericht ein — ohne Hinweis auf fehlende Hot Deals und ohne 24 h Wartezeit."""
+    BER = _module("markt.berichte")
+    seg = _start(welt)
+    db = welt.db
+    mid = seg["model_id"]
+    merker_vorher = welt.run(db[K.KONFIG].find_one({"_id": K.AUSWERTUNG_DOK}))
+    try:
+        _basis(welt, seg, tage=13)
+        _doc(welt, seg, 13, BASIS[:4] + (("x", 17500),), neu=("x",))
+        _auswerten(welt, seg, 13)
+        d, von = _t(14), _t(10)                                            # 5-Tage-Block 11.-15.03.2026
+        welt.run(SP.verarbeiten(db, seg, [], beobachtet=_mez(d, 8), tag=d))
+        _job(welt, seg, f"{d}#2", "running")
+        frist = BER.faellig_ab(d)
+        assert D.leer_frist(d) == frist == _mez(_t(15), 6)
+        for jetzt in (_mez(_t(15), 0, 30), frist - timedelta(minutes=1)):
+            z = welt.run(D.auswerten_faellige(db, segment_ids=[seg["id"]], jetzt=jetzt))
+            assert z.get("leer_wartet") == 1 and _deal(welt, seg, "x")["status"] == "ACTIVE", z
+            assert welt.run(BER._hot_deals_offen(db, [seg["id"]], von, d)) == 1
+        assert welt.run(BER.finalisieren(db, mid, "FIVE_DAY", von, d, jetzt=frist - timedelta(minutes=1))) == "nicht_faellig"
+        _durchlauf_nur_test(monkeypatch, seg)
+        erg = welt.run(AUS.durchlauf(db, jetzt=frist))
+        assert erg["hot_deals"]["ausgewertet"] == 1 and "leer_wartet" not in erg["hot_deals"] and AUS.fehler_anzahl(erg) == 0, erg
+        dl = _deal(welt, seg, "x")
+        assert dl["status"] == "LEFT" and dl["left_tag"] == d and dl["left_grund"] == "nicht_mehr_im_sample"
+        bericht = welt.run(db[K.BERICHTE].find_one({"model_id": mid, "typ": "FIVE_DAY", "periode_von": von, "periode_bis": d}, {"_id": 0}))
+        assert bericht and bericht["status"] == "FINAL", erg["berichte"]
+        assert not any("ohne Hot-Deal-Auswertung" in h for h in bericht.get("hinweise") or []), bericht.get("hinweise")
+    finally:
+        if merker_vorher:
+            welt.run(db[K.KONFIG].replace_one({"_id": K.AUSWERTUNG_DOK}, merker_vorher, upsert=True))
+        else:
+            welt.run(db[K.KONFIG].delete_one({"_id": K.AUSWERTUNG_DOK}))
+        _aufraeumen(welt)
