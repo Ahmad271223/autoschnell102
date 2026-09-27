@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { ArrowLeft, ExternalLink, BarChart3, RefreshCw, UserRound } from "lucide-react";
 import { api, errMsg } from "@/lib/api";
+import { kmAusText, preisAusText } from "@/lib/preis";
 import { PageHeader, Card, Badge, Button, Spinner, EmptyState } from "./_ui";
 import { PRIVATE_SORTIERUNGEN, datumKurz, datumZeit, eur, mobileLink, pct, trendFarbe, trendText } from "@/lib/markt";
 
@@ -14,15 +15,42 @@ import { PRIVATE_SORTIERUNGEN, datumKurz, datumZeit, eur, mobileLink, pct, trend
 const FILTER_LEER = { make: "", model_id: "", ez: "", km_min: "", km_max: "", preis_von: "", preis_bis: "", abstand_pct_max: "", plz: "",
                       heute_neu: false, preis_reduziert: false, sort: "abstand_pct", nur_aktuell: true };
 
-export function filterParams(f) {
-  const p = { sort: f.sort || "abstand_pct", limit: 300, nur_aktuell: f.nur_aktuell !== false };
+// Startpruefung 28.09.2026: die Zahlenfelder liefen durch Number(v) — "km von 15.000" wurde 15 km,
+// "Preis bis 20.000" 20 €, "abc" ging als NaN an den Server. Jetzt dieselben Helfer wie Markt-Budget und
+// km-Bereiche (lib/preis): deutsche Schreibweise, Unlesbares wird gemeldet statt still gesendet.
+function prozentAusText(v) {
+  const t = String(v).replace(/[%\s  ]/g, "").replace(/^−/, "-").replace(",", ".");
+  return /^[-+]?\d+(\.\d+)?$/.test(t) ? Number(t) : NaN;
+}
+const ZAHL_FELDER = {
+  ez: { label: "EZ (Jahr)", lesen: (v) => (/^\d{4}$/.test(v) ? Number(v) : NaN) },
+  km_min: { label: "km von", lesen: kmAusText },
+  km_max: { label: "km bis", lesen: kmAusText },
+  preis_von: { label: "Preis von", lesen: (v) => preisAusText(v) ?? NaN },
+  preis_bis: { label: "Preis bis", lesen: (v) => preisAusText(v) ?? NaN },
+  abstand_pct_max: { label: "Abstand zum Median", lesen: prozentAusText },
+};
+
+/** Filter -> GET-Parameter; `fehler` nennt jedes Zahlenfeld, das sich nicht lesen laesst (dann nicht laden). */
+export function filterLesen(f) {
+  const params = { sort: f.sort || "abstand_pct", limit: 300, nur_aktuell: f.nur_aktuell !== false };
+  const fehler = [];
   for (const k of ["make", "model_id", "ez", "km_min", "km_max", "preis_von", "preis_bis", "abstand_pct_max", "plz"]) {
     const v = String(f[k] ?? "").trim();
-    if (v !== "") p[k] = ["make", "plz", "model_id"].includes(k) ? v : Number(v);
+    if (v === "") continue;
+    const zahl = ZAHL_FELDER[k];
+    if (!zahl) { params[k] = v; continue; }
+    const n = zahl.lesen(v);
+    if (typeof n === "number" && Number.isFinite(n)) params[k] = n;
+    else fehler.push(`${zahl.label}: „${v}“ ist keine gültige Angabe`);
   }
-  if (f.heute_neu) p.heute_neu = true;
-  if (f.preis_reduziert) p.preis_reduziert = true;
-  return p;
+  if (f.heute_neu) params.heute_neu = true;
+  if (f.preis_reduziert) params.preis_reduziert = true;
+  return { params, fehler };
+}
+
+export function filterParams(f) {
+  return filterLesen(f).params;
 }
 
 export default function MarktPrivateDeals() {
@@ -33,9 +61,11 @@ export default function MarktPrivateDeals() {
   const [laedt, setLaedt] = useState(false);
 
   const laden = useCallback(async (f) => {
+    const { params, fehler: unlesbar } = filterLesen(f);
+    if (unlesbar.length) { setFehler(`Filter nicht übernommen — ${unlesbar.join("; ")}.`); return; }
     setLaedt(true);
     try {
-      const r = await api.get("/admin/market/private-deals", { params: filterParams(f), timeout: 15000 });
+      const r = await api.get("/admin/market/private-deals", { params, timeout: 15000 });
       setDaten(r.data);
       setFehler("");
     } catch (e) { setFehler(errMsg(e, "Private Deals konnten nicht geladen werden")); }
@@ -44,7 +74,9 @@ export default function MarktPrivateDeals() {
   useEffect(() => { laden(FILTER_LEER); }, [laden]);
   useEffect(() => { api.get("/admin/market/models").then((r) => setModelle(r.data?.modelle || [])).catch(() => {}); }, []);
 
-  const setzen = (k, v) => { const f = { ...filter, [k]: v }; setFilter(f); if (typeof v === "boolean" || k === "sort" || k === "model_id" || k === "ez") laden(f); };
+  // EZ laedt beim Tippen sofort — aber erst, wenn das Jahr vollstaendig (oder das Feld leer) ist.
+  const ezFertig = (v) => /^(\d{4})?$/.test(String(v).trim());
+  const setzen = (k, v) => { const f = { ...filter, [k]: v }; setFilter(f); if (typeof v === "boolean" || k === "sort" || k === "model_id" || (k === "ez" && ezFertig(v))) laden(f); };
   const anwenden = () => laden(filter);
   const zuruecksetzen = () => { setFilter(FILTER_LEER); laden(FILTER_LEER); };
 

@@ -17,6 +17,7 @@ import { passwortProblem } from "@/lib/passwort";
 // Nur der Kalendertag (aus dem ISO-String, ohne Zeitzonen-Verschiebung):
 // "2026-12-31T23:59:59+01:00" -> "31.12.2026"
 const fmtTag = (iso) => (iso ? String(iso).slice(0, 10).split("-").reverse().join(".") : "—");
+const istIsoTag = (v) => typeof v === "string" && /^\d{4}-\d{2}-\d{2}/.test(v);
 
 // Kontonummer (13.09.2026): Sucher haben nicht immer eine E-Mail — Dialoge
 // nennen Name und Kontonummer.
@@ -93,21 +94,29 @@ export default function AdminUserDetail() {
   // alles andere = Ladefehler mit Knopf "Erneut versuchen".
   const [ladeFehler, setLadeFehler] = useState(null);   // null | { nichtGefunden: bool, text }
 
+  // Startpruefung 28.09.2026: Wechsel zu einem anderen Nutzer, waehrend die Anfrage fuer den vorigen noch
+  // laeuft — scheiterte die alte spaet, leerte ihr setData(null) den schon geladenen NEUEN Nutzer (bzw. ihre
+  // Antwort ueberschrieb ihn). Jede Anfrage bekommt eine laufende Nummer; nur die juengste darf schreiben.
+  const ladeNr = useRef(0);
   const load = async () => {
+    const nr = ++ladeNr.current;
+    const aktuell = () => nr === ladeNr.current;
     setLoading(true);
     try {
       const r = await api.get(`/admin/users/${id}/contracts`, { params: { seite: 1 } });
+      if (!aktuell()) return;
       setData(r.data);
       setLadeFehler(null);
       setMehr([]);
       setSeite(1);
     } catch (e) {
+      if (!aktuell()) return;
       // Kein alter Stand (ggf. eines ANDEREN Nutzers) stehen lassen
       setData(null);
       if (e?.response?.status === 404) setLadeFehler({ nichtGefunden: true, text: "" });
       else setLadeFehler({ nichtGefunden: false, text: errMsg(e, "Fehler beim Laden") });
     } finally {
-      setLoading(false);
+      if (aktuell()) setLoading(false);
     }
   };
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -163,9 +172,11 @@ export default function AdminUserDetail() {
   const weitereLaden = async () => {
     if (laedtMehr) return;
     setLaedtMehr(true);
+    const nr = ladeNr.current;           // inzwischen anderer Nutzer/neu geladen -> Antwort verwerfen
     try {
       const naechste = seite + 1;
       const r = await api.get(`/admin/users/${id}/contracts`, { params: { seite: naechste } });
+      if (nr !== ladeNr.current) return;
       setMehr((m) => [...m, ...(r.data?.contracts || [])]);
       setSeite(naechste);
       // "weitere" kommt vom Server mit — so weiss die Oberflaeche, wann
@@ -564,7 +575,15 @@ export default function AdminUserDetail() {
                               : (s.subscription?.status === "expired" && s.subscription?.expires_at
                                 ? <span className="text-red-300" data-testid={`abo-abgelaufen-${s.id}`}>abgelaufen am {fmtTag(s.subscription.expires_at)} · automatisch gesperrt
                                     {ablaufKorrigierbar(s) ? " · Datum vertippt? Neues Datum wählen und „Speichern“ (keine Zahlung)" : ""}</span>
-                                : "—")}
+                                // Startpruefung 28.09.2026 (H9-Rest): Chef mit eigenem, abgelaufenem Abo ohne
+                                // Firmen-Abo (Anzeige 'none') oder Abo ohne/mit unlesbarem Datum ('ungueltig').
+                                : (ablaufKorrigierbar(s)
+                                  ? <span className="text-red-300" data-testid={`abo-datum-korrigierbar-${s.id}`}>
+                                      {istIsoTag(s.ablauf_abo_bis)
+                                        ? `abgelaufen am ${fmtTag(s.ablauf_abo_bis)}`
+                                        : "Ablaufdatum fehlt oder ist unlesbar"}
+                                      {" · automatisch gesperrt · neues Datum wählen und „Speichern“ (keine Zahlung)"}</span>
+                                  : "—"))}
                           </div>
                         </td>
                         <td className="px-4 py-2.5">

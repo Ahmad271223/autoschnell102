@@ -3493,12 +3493,25 @@ async def admin_list_dealer_sucher(dealer_id: str, response: Response, limit: in
         # Nur per Datum abgelaufen (status weiter 'active', z. B. vertipptes Jahr): ebenfalls ja — die
         # Oberflaeche zeigte dann nur die Bezahl-Knoepfe. Aufgehoben ('cancelled'): nein (dort 404).
         # Dieselbe Auswahl wie der PATCH, damit Knopf und Server nie auseinanderlaufen.
+        # Startpruefung 28.09.2026 (H9-Rest): NICHT am angezeigten Status festmachen. Beim Hauptchef
+        # mit eigenem, abgelaufenem Abo und ohne Firmen-Abo liefert subscription_for den Firmen-Rueckfall
+        # (status 'none'), bei fehlendem/unlesbarem Datum 'ungueltig' — der PATCH nimmt das Datum
+        # trotzdem an. Also fuer JEDES inaktive Konto den PATCH selbst fragen.
         korrigierbar = bool(sub.get("active"))
-        if not korrigierbar and sub.get("status") == "expired":
-            korrigierbar = bool(await _massgebliches_abo(s["id"], dealer_id, ist_chef,
-                                                         auch_abgelaufen=True))
+        # Ablauf genau DES Abos, das der PATCH aendern wuerde — beim Chef steht in "subscription" sonst
+        # nur der Firmen-Rueckfall ('none'), die Oberflaeche koennte "abgelaufen am ..." nicht nennen.
+        ablauf_abo_bis = None
+        if not korrigierbar:
+            abo = await _massgebliches_abo(s["id"], dealer_id, ist_chef, auch_abgelaufen=True)
+            korrigierbar = bool(abo)
+            ablauf_abo_bis = (abo or {}).get("expires_at")
+            if isinstance(ablauf_abo_bis, datetime):        # Altwert als datetime
+                ablauf_abo_bis = ablauf_abo_bis.isoformat()
+            elif ablauf_abo_bis is not None and not isinstance(ablauf_abo_bis, str):
+                ablauf_abo_bis = None                           # unlesbar -> wie fehlend
         out.append({**s, "ist_chef": ist_chef,
                     "ablauf_korrigierbar": korrigierbar,
+                    "ablauf_abo_bis": ablauf_abo_bis,
                     # KI-Bewertung je Konto freigeschaltet? (25.09.2026 abends, wie Abo)
                     "ki_aktiv": s.get("ki_aktiv") is True,
                     # liegengebliebenes zweites dealer-Konto: arbeitet als Sucher

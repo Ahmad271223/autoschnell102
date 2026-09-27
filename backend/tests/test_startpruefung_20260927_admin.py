@@ -147,3 +147,69 @@ def test_04_sucherliste_ablauf_korrigierbar_wie_der_patch(welt, monkeypatch):
         assert welt.run(db.manual_payments.count_documents({"subject_user_id": w.sucher["id"]})) == 0
     finally:
         welt.run(aufraeumen())
+
+
+# ================================================= H9-Rest (28.09.2026): auch beim Hauptchef / ohne Datum
+def _liste(welt):
+    return {z["id"]: z for z in welt.run(
+        A.admin_list_dealer_sucher(welt.w.dealer_id, Response(), limit=200, seite=1, _=ADMIN))}
+
+
+def _patch_ok(welt, konto_id, neu):
+    r = welt.run(A.admin_set_abo_gueltig_bis(konto_id, {"gueltig_bis": neu, "grund": "Datum korrigiert"},
+                                             admin=ADMIN))
+    return r["ok"] is True and r["expires_at"].startswith(neu)
+
+
+def test_05_chef_mit_vertipptem_datum_ohne_firmen_abo(welt, monkeypatch):
+    """Die Freischaltung schreibt beim Chef ein PERSOENLICHES Abo. Ist es nur per Datum abgelaufen und gibt
+    es kein Firmen-Abo, zeigt subscription_for den Firmen-Rueckfall (status 'none'). Die Liste sagte deshalb
+    'nicht korrigierbar', obwohl der PATCH das Datum annimmt."""
+    w, db = welt.w, welt.db
+    monkeypatch.setattr(A, "db", db)
+    chef = w.chef["id"]
+    welt.run(db.subscriptions.insert_one(
+        {"id": f"abo_chef_{w.s}", "subject_user_id": chef, "dealer_id": w.dealer_id, "plan": "yearly",
+         "status": "active", "expires_at": _iso(-365), "created_at": _iso(-1)}))
+    try:
+        z = _liste(welt)[chef]
+        assert z["ist_chef"] is True and z["subscription"]["active"] is False
+        assert z["subscription"]["status"] == "none", "Anzeige: Firmen-Rueckfall ohne Firmen-Abo"
+        assert z["ablauf_korrigierbar"] is True, "Chef: vertipptes Datum muss per 'Speichern' korrigierbar sein"
+        assert z["ablauf_abo_bis"][:10] == _iso(-365)[:10], "Liste nennt den Ablauf des eigenen Abos"
+        # Gegenprobe am Server: der PATCH nimmt genau dieses Datum an
+        neu = (datetime.now(timezone.utc) + timedelta(days=30)).date().isoformat()
+        assert _patch_ok(welt, chef, neu)
+        assert _liste(welt)[chef]["subscription"]["active"] is True
+    finally:
+        welt.run(db.subscriptions.delete_many({"subject_user_id": chef}))
+        welt.run(db.zugangs_aenderungen.delete_many({"subject_user_id": chef}))
+        welt.run(db.activity_logs.delete_many({"ref": chef}))
+
+
+def test_06_fehlendes_datum_ist_korrigierbar_chef_und_sucher(welt, monkeypatch):
+    """Ablaufdatum fehlt (status 'ungueltig' bzw. beim Chef 'none'): der PATCH setzt ein Datum — die Liste
+    muss dasselbe sagen. Aufgehobene Abos bleiben weiter aussen vor (siehe test_04)."""
+    w, db = welt.w, welt.db
+    monkeypatch.setattr(A, "db", db)
+    chef, su = w.chef["id"], w.sucher["id"]
+    welt.run(db.subscriptions.insert_many([
+        {"id": f"abo_chef_nd_{w.s}", "subject_user_id": chef, "dealer_id": w.dealer_id, "plan": "monthly",
+         "status": "active", "created_at": _iso(-1)},
+        {"id": f"abo_su_nd_{w.s}", "subject_user_id": su, "dealer_id": w.dealer_id, "plan": "monthly",
+         "status": "active", "expires_at": "irgendwann", "created_at": _iso(-1)}]))
+    try:
+        zeilen = _liste(welt)
+        assert zeilen[su]["subscription"]["status"] == "ungueltig"
+        assert zeilen[su]["ablauf_korrigierbar"] is True, "Sucher mit unlesbarem Datum: korrigierbar"
+        assert zeilen[chef]["subscription"]["active"] is False
+        assert zeilen[chef]["ablauf_korrigierbar"] is True, "Chef ohne Datum: korrigierbar"
+        assert zeilen[chef]["ablauf_abo_bis"] is None
+        neu = (datetime.now(timezone.utc) + timedelta(days=10)).date().isoformat()
+        assert _patch_ok(welt, chef, neu) and _patch_ok(welt, su, neu)
+        zeilen = _liste(welt)
+        assert zeilen[chef]["subscription"]["active"] is True and zeilen[su]["subscription"]["active"] is True
+    finally:
+        welt.run(db.subscriptions.delete_many({"subject_user_id": {"$in": [chef, su]}}))
+        welt.run(db.zugangs_aenderungen.delete_many({"subject_user_id": {"$in": [chef, su]}}))
+        welt.run(db.activity_logs.delete_many({"ref": {"$in": [chef, su]}}))
