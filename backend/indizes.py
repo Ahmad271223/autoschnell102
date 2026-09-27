@@ -1087,6 +1087,8 @@ async def markt_indizes(db) -> dict:
             ("market_segment_daily_stats", [("date", 1)], "markt_tagesstat_datum"),
             ("market_hot_deals", [("status", 1), ("diff_pct", -1)], "markt_hotdeal_status_vorteil"),
             ("market_hot_deals", [("model_id", 1), ("status", 1)], "markt_hotdeal_modell"),
+            # Pruefbefund B14: Hot-Deal-Liste 'alle' nur ueber das Zeitfenster der letzten Ereignisse (kein Vollscan)
+            ("market_hot_deals", [("last_event_tag", -1)], "markt_hotdeal_letztes_ereignis"),
             ("market_hot_deal_events", [("tag", 1), ("typ", 1)], "markt_hotdeal_ereignis_tag"),
             ("market_hot_deal_events", [("model_id", 1), ("tag", 1)], "markt_hotdeal_ereignis_modell"),
             # Phase E: Periodenliste/Uebersicht aller Modelle je Periode

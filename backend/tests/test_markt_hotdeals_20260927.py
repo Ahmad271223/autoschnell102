@@ -503,3 +503,262 @@ def test_13_routen_nur_super_admin_und_getrennt_vom_hauptweg():
     assert K.HOTDEALS == "market_hot_deals" and K.HOTDEAL_EREIGNISSE == "market_hot_deal_events"
     # Ereignisse werden nur eingefuegt ($setOnInsert), nie geaendert
     assert '"$setOnInsert"' in inspect.getsource(D._ereignis) and "$set\"" not in inspect.getsource(D._ereignis)
+
+
+# ---------------------------------------------------------------- Pruefbefunde Phase D/E (27.09.2026)
+def _tagesdoc(welt, seg, i):
+    return welt.run(welt.db[K.TAGESSTATS].find_one({"segment_id": seg["id"], "date": _t(i)}, {"_id": 0, "laeufe": 0}))
+
+
+def test_14_b0_leerer_erstlauf_des_laufenden_tages_schliesst_keine_deals(welt):
+    """Pruefbefund B0: ein leerer ERSTER Lauf des laufenden Tages stellt nur vorlaeufig den Tageswert (ein spaeterer
+    Lauf mit Treffern ersetzt ihn, P5). Er schliesst keine aktiven Deals — kein dauerhaftes LEFT/BECAME-Paar, keine
+    zweite heisse Phase, kein Schein-'heute neu'. Nach Tagesende gilt ein leer gebliebener Tag weiter als Marktluecke
+    (LEFT_HOT_ZONE, wie test_04). Echter Weg ueber speicher.verarbeiten, Tage und Uhrzeiten ausdruecklich."""
+    seg = _start(welt)
+    s, db = welt.w.s, welt.db
+    try:
+        _basis(welt, seg, tage=12)
+        _doc(welt, seg, 12, BASIS[:4] + (("x", 17500),), neu=("x",))
+        assert _auswerten(welt, seg, 12)["ereignisse"] == {"NEW_HOT_DEAL": 1}
+        # Tag 13 (2026-03-14), 08:00 deutscher Zeit: gueltiger, aber leerer erster Lauf (Aussetzer der Buendel-URL)
+        acht = datetime(2026, 3, 14, 7, 0, tzinfo=timezone.utc)
+        assert K.heute_tag(acht) == _t(13)
+        welt.run(SP.verarbeiten(db, seg, [], beobachtet=acht, tag=_t(13)))
+        td = _tagesdoc(welt, seg, 13)
+        assert td["sample_size"] == 0 and td["hot_deals_offen"] is True and td["data_quality"] == "GOOD"
+        z = welt.run(D.auswerten_faellige(db, segment_ids=[seg["id"]], jetzt=acht + timedelta(minutes=5)))
+        assert z["offen"] == 0 and z["ereignisse"] == 0, "leerer Tageswert des laufenden Tages wartet"
+        assert welt.run(D.segment_tag_auswerten(db, seg["id"], _t(13), jetzt=acht + timedelta(minutes=5))) == {"status": "leer_vorlaeufig"}
+        assert _deal(welt, seg, "x")["status"] == "ACTIVE" and _tagesdoc(welt, seg, 13)["hot_deals_offen"] is True
+        assert "hot_deals" not in _tagesdoc(welt, seg, 13)
+        # 10:00: zweiter Lauf desselben Tages mit Treffern stellt jetzt den Tageswert
+        zehn = acht + timedelta(hours=2)
+        items = [_item(f"t{s}{x}", p) for x, p in BASIS[:4]] + [_item(f"t{s}x", 17500)]
+        welt.run(SP.verarbeiten(db, seg, NORM.listings_aus_items(sorted(items, key=lambda it: it["priceGross"])), beobachtet=zehn,
+                                tag=_t(13), lauf_tag=f"{_t(13)}#2"))
+        z = welt.run(D.auswerten_faellige(db, segment_ids=[seg["id"]], jetzt=zehn + timedelta(minutes=5)))
+        assert z["ausgewertet"] == 1 and z["ereignisse"] == 1
+        assert [e["typ"] for e in _ereignisse(welt, seg, "x")] == ["NEW_HOT_DEAL", "STILL_HOT"], "kein LEFT/BECAME-Paar"
+        d = _deal(welt, seg, "x")
+        assert d["status"] == "ACTIVE" and d["hot_phasen"] == 1 and d["hot_seit_tag"] == _t(12) and d["last_event"] == "STILL_HOT"
+        td = _tagesdoc(welt, seg, 13)
+        assert "hot_deals_offen" not in td and f"t{s}x" in td["hot_deal_ids_tag"] and f"t{s}x" not in (td.get("hot_deal_neu_ids") or [])
+        # Tag 14 bleibt leer: waehrend des Tages vorlaeufig, nach Mitternacht Marktluecke -> LEFT (nicht mehr im Sample)
+        tag14 = datetime(2026, 3, 15, 7, 0, tzinfo=timezone.utc)
+        welt.run(SP.verarbeiten(db, seg, [], beobachtet=tag14, tag=_t(14)))
+        assert welt.run(D.auswerten_faellige(db, segment_ids=[seg["id"]], jetzt=tag14 + timedelta(hours=8)))["offen"] == 0
+        assert _deal(welt, seg, "x")["status"] == "ACTIVE"
+        nach_mitternacht = datetime(2026, 3, 15, 23, 10, tzinfo=timezone.utc)      # 00:10 am 16.03. deutscher Zeit
+        z = welt.run(D.auswerten_faellige(db, segment_ids=[seg["id"]], jetzt=nach_mitternacht))
+        assert z["offen"] == 1 and z["ereignisse"] == 1
+        d = _deal(welt, seg, "x")
+        assert d["status"] == "LEFT" and d["left_grund"] == "nicht_mehr_im_sample" and d["left_tag"] == _t(14)
+        assert [e["typ"] for e in _ereignisse(welt, seg, "x")] == ["NEW_HOT_DEAL", "STILL_HOT", "LEFT_HOT_ZONE"]
+    finally:
+        _aufraeumen(welt)
+
+
+def test_15_b0_neue_deals_heute_zaehlt_deals_nicht_ereignisse(welt, monkeypatch):
+    """Pruefbefund B0 (Zusatz): 'Neue Deals heute' zaehlt verschiedene Deals (Segment, Inserat) — eine zweite heisse
+    Phase desselben Inserats am selben Tag ist kein zweiter neuer Deal."""
+    seg = _start(welt)
+    heute = _t(9)
+    monkeypatch.setattr(K, "heute_tag", lambda zeit=None: heute)
+    s, db = welt.w.s, welt.db
+    try:
+        vorher = welt.run(D.zusammenfassung(db))
+        basis = {"segment_id": seg["id"], "model_id": seg["model_id"], "tag": heute, "privat": True}
+        welt.run(db[K.HOTDEAL_EREIGNISSE].insert_many([
+            {**basis, "id": "e1", "listing_id": f"t{s}x", "typ": "BECAME_HOT_DEAL", "lauf_key": f"{heute}T05:00:00+00:00"},
+            {**basis, "id": "e2", "listing_id": f"t{s}x", "typ": "LEFT_HOT_ZONE", "lauf_key": f"{heute}T09:00:00+00:00"},
+            {**basis, "id": "e3", "listing_id": f"t{s}x", "typ": "BECAME_HOT_DEAL", "lauf_key": f"{heute}T15:00:00+00:00"},
+            {**basis, "id": "e4", "listing_id": f"t{s}y", "typ": "NEW_HOT_DEAL", "lauf_key": f"{heute}T05:00:00+00:00", "privat": False}]))
+        nachher = welt.run(D.zusammenfassung(db))
+        assert nachher["neue_deals_heute"] - vorher["neue_deals_heute"] == 2, "x zweimal heiss geworden = ein Deal, dazu y"
+        assert nachher["neue_privat_heute"] - vorher["neue_privat_heute"] == 1
+    finally:
+        _aufraeumen(welt)
+
+
+def test_16_b1_liquiditaet_nur_aus_gueltigen_tagen(welt):
+    """Pruefbefund B1: die Liquiditaet am Deal (und damit die Sortierung 'Liquiditaet') rechnet nur mit gueltigen
+    Tagen (GOOD/MEDIUM) wie die Berichte — POOR-Tage mit Mini-Stichprobe und vielen 'verschwundenen' Inseraten
+    taeuschen sonst Umschlag vor (hier LOW statt HIGH)."""
+    seg = _start(welt)
+    db = welt.db
+    try:
+        _basis(welt, seg, tage=7)                                  # immer dieselben 5 Autos: nicht liquide
+        for i in (7, 8, 9):
+            _doc(welt, seg, i, ((f"p{i}", 19000),), neu=(f"p{i}",), dq="POOR", offen=False)
+            welt.run(db[K.TAGESSTATS].update_one({"segment_id": seg["id"], "date": _t(i)},
+                                                 {"$set": {"disappeared_count": 4, "top5_changed": True}}))
+        ref = welt.run(D.referenz_berechnen(db, seg, _t(10), (1, "h1")))
+        assert ref["basis_tage"] == 7 and ref["basis_ok"] is True
+        assert ref["liquiditaet"]["stufe"] == "LOW" and ref["liquiditaet"]["tage"] == 7, ref["liquiditaet"]
+        assert D.liquiditaet_bewerten([_tagesdoc(welt, seg, i) for i in range(10)])["stufe"] == "HIGH", "mit POOR-Tagen waere es HIGH"
+        _doc(welt, seg, 10, BASIS[:4] + (("x", 17000),), neu=("x",))
+        _auswerten(welt, seg, 10)
+        d = _deal(welt, seg, "x")
+        assert d["liquiditaet"] == "LOW" and d["liquiditaet_rang"] == D.LIQ_RANG["LOW"]
+    finally:
+        _aufraeumen(welt)
+
+
+def test_17_b2_fehler_eines_tages_stellt_neuere_tage_desselben_segments_zurueck(welt, monkeypatch):
+    """Pruefbefund B2: scheitert (S, D) kurz (z. B. Wahl im Replikat-Set), bleibt (S, D+1) im selben Durchlauf offen
+    und kommt im naechsten Durchlauf NACH D dran — D wird nicht als 'neuerer_tag_ausgewertet' ohne Ereignisse
+    geschlossen, NEW bleibt NEW am richtigen Tag."""
+    seg = _start(welt)
+    s = welt.w.s
+    try:
+        _basis(welt, seg, tage=7)
+        _doc(welt, seg, 7, BASIS[:4] + (("x", 17000),), neu=("x",))
+        _doc(welt, seg, 8, BASIS[:4] + (("x", 17000),))
+        echt = D.segment_tag_auswerten
+        aufrufe = []
+
+        async def _einmal_gestoert(db, seg_id, tag, **kw):
+            aufrufe.append(tag)
+            if tag == _t(7) and aufrufe.count(_t(7)) == 1:
+                raise RuntimeError("NotPrimary (Test)")
+            return await echt(db, seg_id, tag, **kw)
+        monkeypatch.setattr(D, "segment_tag_auswerten", _einmal_gestoert)
+        z = welt.run(D.auswerten_faellige(welt.db, segment_ids=[seg["id"]]))
+        assert z["fehler"] == 1 and z.get("zurueckgestellt") == 1 and z["ausgewertet"] == 0 and aufrufe == [_t(7)]
+        t8 = _tagesdoc(welt, seg, 8)
+        assert t8["hot_deals_offen"] is True and "hot_deals" not in t8
+        z = welt.run(D.auswerten_faellige(welt.db, segment_ids=[seg["id"]]))
+        assert z["ausgewertet"] == 2 and z["fehler"] == 0 and "zurueckgestellt" not in z
+        assert [e["typ"] for e in _ereignisse(welt, seg, "x")] == ["NEW_HOT_DEAL", "STILL_HOT"]
+        assert _deal(welt, seg, "x")["deal_first_detected_tag"] == _t(7)
+        t7 = _tagesdoc(welt, seg, 7)
+        assert t7["hot_deals"]["grund"] == "" and t7["hot_deal_ids_tag"] == [f"t{s}x"] and t7["hot_deal_neu_ids"] == [f"t{s}x"]
+    finally:
+        _aufraeumen(welt)
+
+
+def test_18_b10_schreibpause_haelt_auswertung_und_berichte_an(welt, monkeypatch):
+    """Pruefbefund B10: beginnt eine Schreibpause (Sicherung/Restore) waehrend des Durchlaufs, haelt die Auswertung
+    vor dem naechsten Tagesdokument an (Rest bleibt offen), friert keine Berichte ein und schreibt keinen Stand-Merker."""
+    WART = _module("wartung")
+    BER = _module("markt.berichte")
+    seg = _start(welt)
+    merker_vorher = welt.run(welt.db[K.KONFIG].find_one({"_id": K.AUSWERTUNG_DOK}))
+    try:
+        _basis(welt, seg, tage=7)
+        _doc(welt, seg, 7, BASIS[:4] + (("x", 17000),), neu=("x",))
+        _doc(welt, seg, 8, BASIS[:4] + (("x", 17000),))
+        pruefungen = []
+
+        async def _pause_ab_zweiter_pruefung(db, methode="POST"):
+            pruefungen.append(methode)
+            return len(pruefungen) >= 2
+        monkeypatch.setattr(WART, "aktiv_async", _pause_ab_zweiter_pruefung)
+        z = welt.run(D.auswerten_faellige(welt.db, segment_ids=[seg["id"]]))
+        assert z.get("wartung") is True and z["ausgewertet"] == 1 and len(pruefungen) == 2
+        assert _tagesdoc(welt, seg, 8)["hot_deals_offen"] is True and "hot_deals" not in _tagesdoc(welt, seg, 8)
+        # Durchlauf (Worker/Admin-Knopf): Pause -> keine Berichte, kein Merker
+        echt = D.auswerten_faellige
+
+        async def _nur_test(db, **kw):
+            return await echt(db, segment_ids=[seg["id"]], **{k: v for k, v in kw.items() if k != "segment_ids"})
+        monkeypatch.setattr(D, "auswerten_faellige", _nur_test)
+        berichte_aufrufe = []
+
+        async def _berichte(db, **kw):
+            berichte_aufrufe.append(kw)
+            return {"perioden": 0, "fehler": 0}
+        monkeypatch.setattr(BER, "faellige_finalisieren", _berichte)
+
+        async def _immer_pause(db, methode="POST"):
+            return True
+        monkeypatch.setattr(WART, "aktiv_async", _immer_pause)
+        erg = welt.run(AUS.durchlauf(welt.db))
+        assert erg.get("wartung") is True and "berichte" not in erg and berichte_aufrufe == []
+        assert erg["hot_deals"]["ausgewertet"] == 0 and _tagesdoc(welt, seg, 8)["hot_deals_offen"] is True
+        assert welt.run(welt.db[K.KONFIG].find_one({"_id": K.AUSWERTUNG_DOK})) == merker_vorher, "kein Stand-Merker in der Pause"
+        # nach der Pause macht der naechste Durchlauf weiter
+        monkeypatch.setattr(WART, "aktiv_async", lambda db, methode="POST": _nie_pause())
+        erg = welt.run(AUS.durchlauf(welt.db))
+        assert erg["hot_deals"]["ausgewertet"] == 1 and len(berichte_aufrufe) == 1 and "wartung" not in erg
+    finally:
+        if merker_vorher:
+            welt.run(welt.db[K.KONFIG].replace_one({"_id": K.AUSWERTUNG_DOK}, merker_vorher, upsert=True))
+        else:
+            welt.run(welt.db[K.KONFIG].delete_one({"_id": K.AUSWERTUNG_DOK}))
+        _aufraeumen(welt)
+
+
+async def _nie_pause():
+    return False
+
+
+def test_19_b11_fehlerfreier_durchlauf_schliesst_alarm_prozessunabhaengig(welt, monkeypatch):
+    """Pruefbefund B11: den Alarm 'markt_auswertung_fehler' schliesst jeder fehlerfreie Durchlauf — auch in einem
+    anderen Prozess oder nach einem Neustart (vorher nur der Prozess mit dem lokalen Merker). Ein Durchlauf mit
+    Fehlern schliesst ihn nicht."""
+    BET = _module("betrieb")
+    BER = _module("markt.berichte")
+    seg = _start(welt)
+    db = welt.db
+    alt = welt.run(db.betriebsalarme.find({"typ": AUS.ALARM, "ref": "auswertung"}).to_list(100))
+    merker_vorher = welt.run(db[K.KONFIG].find_one({"_id": K.AUSWERTUNG_DOK}))
+    offen = lambda: welt.run(db.betriebsalarme.count_documents({"typ": AUS.ALARM, "ref": "auswertung", "offen": True}))  # noqa: E731
+    try:
+        welt.run(db.betriebsalarme.delete_many({"typ": AUS.ALARM, "ref": "auswertung"}))
+        welt.run(BET.alarm(db, AUS.ALARM, ref="auswertung", fehler="Test: frueherer Prozess vor dem Neustart"))
+        assert offen() == 1
+        echt = D.auswerten_faellige
+
+        async def _nur_test(db, **kw):
+            return await echt(db, segment_ids=[seg["id"]], **{k: v for k, v in kw.items() if k != "segment_ids"})
+        monkeypatch.setattr(D, "auswerten_faellige", _nur_test)
+        ber_fehler = {"n": 1}
+
+        async def _berichte(db, **kw):
+            return {"perioden": 1, "fehler": ber_fehler["n"]}
+        monkeypatch.setattr(BER, "faellige_finalisieren", _berichte)
+        erg = welt.run(AUS.durchlauf(db))                          # mit Fehler: Alarm bleibt offen
+        assert AUS.fehler_anzahl(erg) == 1 and offen() == 1
+        ber_fehler["n"] = 0
+        erg = welt.run(AUS.durchlauf(db))                          # fehlerfrei (dieser "Prozess" hat keinen Merker)
+        assert AUS.fehler_anzahl(erg) == 0 and offen() == 0
+        assert "alarm_offen" not in inspect.getsource(AUS.worker_forever)
+    finally:
+        welt.run(db.betriebsalarme.delete_many({"typ": AUS.ALARM, "ref": "auswertung"}))
+        if alt:
+            welt.run(db.betriebsalarme.insert_many(alt))
+        if merker_vorher:
+            welt.run(db[K.KONFIG].replace_one({"_id": K.AUSWERTUNG_DOK}, merker_vorher, upsert=True))
+        else:
+            welt.run(db[K.KONFIG].delete_one({"_id": K.AUSWERTUNG_DOK}))
+        _aufraeumen(welt)
+
+
+def test_20_b14_liste_alle_nur_im_zeitfenster_mit_index(welt, monkeypatch):
+    """Pruefbefund B14: 'alle (auch verlassene)' liest nur Zustaende mit letztem Ereignis in den letzten
+    ALLE_FENSTER_TAGE Tagen — ueber den Index markt_hotdeal_letztes_ereignis statt Vollscan der nie bereinigten
+    Historie. 'aktuell' bleibt unveraendert."""
+    seg = _start(welt)
+    heute = "2026-09-27"
+    monkeypatch.setattr(K, "heute_tag", lambda zeit=None: heute)
+    s, db = welt.w.s, welt.db
+    try:
+        info = welt.run(db[K.HOTDEALS].index_information())
+        assert info["markt_hotdeal_letztes_ereignis"]["key"] == [("last_event_tag", -1)]
+        gemeinsam = {"segment_id": seg["id"], "model_id": seg["model_id"], "diff_pct": 10.0, "diff_eur": 2000.0}
+        welt.run(db[K.HOTDEALS].insert_many([
+            {**gemeinsam, "listing_id": f"t{s}alt", "status": "LEFT", "last_event_tag": "2026-03-01"},
+            {**gemeinsam, "listing_id": f"t{s}neu", "status": "LEFT", "last_event_tag": "2026-09-20"},
+            {**gemeinsam, "listing_id": f"t{s}akt", "status": "ACTIVE", "last_event_tag": "2026-09-27", "diff_pct": 12.0}]))
+        r = welt.run(D.liste(db, status="alle", model_id=seg["model_id"]))
+        assert [d["listing_id"][11:] for d in r["deals"]] == ["akt", "neu"] and r["fenster_von"] == "2026-06-29"
+        assert [d["listing_id"][11:] for d in welt.run(D.liste(db, status="aktuell", model_id=seg["model_id"]))["deals"]] == ["akt"]
+        assert welt.run(D.liste(db, status="aktuell"))["fenster_von"] is None
+        # ohne Modell/Segment: Indexbereich statt Vollscan (Standardsortierung Vorteil %)
+        plan = welt.run(db.command("explain", {"find": K.HOTDEALS, "filter": {"last_event_tag": {"$gte": "2026-06-29"}},
+                                               "sort": {"diff_pct": -1, "diff_eur": -1}, "limit": 300}, verbosity="queryPlanner"))
+        assert "COLLSCAN" not in str(plan["queryPlanner"]["winningPlan"]) and "markt_hotdeal_letztes_ereignis" in str(plan)
+    finally:
+        _aufraeumen(welt)

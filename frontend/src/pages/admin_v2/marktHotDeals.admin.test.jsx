@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
-const netz = vi.hoisted(() => ({ gets: [], posts: [], fehler: null }));
+const netz = vi.hoisted(() => ({ gets: [], posts: [], fehler: null, halten: null }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 const DEALS = [
   { segment_id: "bmw-320d:2020:55001-80000", model_id: "bmw-320d", segment_label: "BMW 320d", km_label: "55–80k km", ez_label: "EZ 2020", listing_id: "h1",
@@ -26,6 +26,9 @@ const DEALS = [
 ];
 const VERLASSEN = { ...DEALS[1], listing_id: "h3", title: "BMW 320d alt", status: "LEFT", left_grund: "nicht_mehr_im_sample", klasse: "STRONG",
                     url: "https://www.mobile.de.example.com/h3", heute_neu: false, stand_alter_tage: 1 };
+// Prüfbefund B19: über der Schwelle verlassen — Preis 20.400 € liegt 2 % ÜBER der Referenz 20.000 €
+const TEURER = { ...DEALS[0], listing_id: "h4", title: "BMW 320d teurer", status: "LEFT", left_grund: "ueber_schwelle", klasse: "EXTREME",
+                 current_price: 20400, reference_price: 20000, diff_eur: -400, diff_pct: -2, heute_neu: false, stand_alter_tage: 0 };
 vi.mock("@/lib/api", () => ({
   errMsg: (e, s) => e?.message || s,
   api: {
@@ -35,16 +38,23 @@ vi.mock("@/lib/api", () => ({
       if (url === "/admin/market/hot-deals") {
         if (netz.fehler) throw new Error(netz.fehler);
         const p = opts?.params || {};
-        const deals = p.status === "alle" ? [...DEALS, VERLASSEN] : DEALS;
+        // Prüfbefund B23: eine Antwort zurückhalten, bis der Test sie freigibt (spät eintreffende ältere Antwort)
+        if (netz.halten && netz.halten.status === p.status) await new Promise((r) => { netz.halten.freigeben = r; });
+        const deals = p.status === "alle" ? [...DEALS, VERLASSEN, TEURER] : DEALS;
         return { data: { zusammenfassung: { tag: "2026-10-01", modelle_geprueft: 40, modelle_gueltig: 31, neue_deals_heute: 4, aktiv: 9, deal: 5, strong: 3,
                                             extreme: 1, davon_privat: 2, neue_privat_heute: 1 },
-                         deals, anzahl: deals.length, gekuerzt: false, sort: p.sort, status: p.status,
+                         deals, anzahl: deals.length, gekuerzt: false, sort: p.sort, status: p.status, fenster_von: p.status === "alle" ? "2026-07-03" : null,
                          hinweis: "Hot Deal heißt nur: auffällig günstiges Inserat gegenüber unserer beobachteten Vergleichsgruppe — nicht automatisch unfallfrei, technisch gut, seriös oder ein guter Kauf.",
                          schwellen: { referenz_fenster_tage: 30, min_basis_tage: 7, min_basis_inserate: 5,
                                       klassen: [{ klasse: "EXTREME", ab_pct: 12 }, { klasse: "STRONG", ab_pct: 8 }, { klasse: "DEAL", ab_pct: 5 }],
                                       mindest_eur_staffel: [{ ab_referenz_eur: 15000, mindest_eur: 750 }, { ab_referenz_eur: 10000, mindest_eur: 600 }, { ab_referenz_eur: 0, mindest_eur: 400 }] } } };
       }
       if (url === "/admin/market/hot-deals/ereignisse") {
+        if (opts?.params?.listing_id === "h4") {
+          return { data: { ereignisse: [
+            { typ: "NEW_HOT_DEAL", lauf_key: "a", lauf_at: "2026-09-28T05:00:00Z", klasse: "EXTREME", price: 17500, diff_pct: 12.5, reference_price: 20000 },
+            { typ: "LEFT_HOT_ZONE", lauf_key: "b", lauf_at: "2026-10-01T05:00:00Z", price: 20400, diff_pct: -2, reference_price: 20000, grund: "ueber_schwelle" }] } };
+        }
         return { data: { ereignisse: [
           { typ: "NEW_HOT_DEAL", lauf_key: "a", lauf_at: "2026-09-28T05:00:00Z", klasse: "EXTREME", price: 18000, diff_pct: 10, reference_price: 20000 },
           { typ: "PRICE_DROP_HOT_DEAL", lauf_key: "b", lauf_at: "2026-10-01T05:00:00Z", klasse: "EXTREME", price: 17500, diff_pct: 12.5, reference_price: 20000 }] } };
@@ -56,7 +66,7 @@ vi.mock("@/lib/api", () => ({
 }));
 vi.mock("@/context/AuthContext", () => ({ useAuth: () => ({ user: { id: "sa", is_super_admin: true, role: "admin" } }) }));
 
-const { default: MarktHotDeals, hotDealParams } = await import("./MarktHotDeals");
+const { default: MarktHotDeals, hotDealParams, zahlFeld, vorteilText } = await import("./MarktHotDeals");
 
 let wurzel; let behaelter;
 const el = (t) => behaelter.querySelector(`[data-testid="${t}"]`);
@@ -77,7 +87,7 @@ async function tippen(t, wert) {
   await warten();
 }
 const letzteParams = () => netz.gets.filter((g) => g.url === "/admin/market/hot-deals").at(-1).params;
-beforeEach(() => { netz.gets.length = 0; netz.posts.length = 0; netz.fehler = null; });
+beforeEach(() => { netz.gets.length = 0; netz.posts.length = 0; netz.fehler = null; netz.halten = null; });
 afterEach(async () => { if (wurzel) await act(async () => { wurzel.unmount(); }); wurzel = null; behaelter?.remove(); });
 
 describe("Admin Hot Deals", () => {
@@ -144,9 +154,11 @@ describe("Admin Hot Deals", () => {
   it("Umschalter aktuell/alle zeigt verlassene Deals mit Grund; Verlauf je Deal", async () => {
     await starten();
     expect(el("hd-deal-h3")).toBeNull();
+    expect(el("hot-deals-liste").textContent).not.toContain("Historie seit");
     await klick("hd-umschalter-alle");
     expect(letzteParams().status).toBe("alle");
     expect(el("hd-umschalter-alle").getAttribute("aria-pressed")).toBe("true");
+    expect(el("hot-deals-liste").textContent).toContain("Historie seit 03.07. (letztes Ereignis)");   // Prüfbefund B14
     const z3 = el("hd-deal-h3");
     expect(z3.textContent).toContain("verlassen");
     expect(z3.textContent).toContain("nicht mehr unter den günstigsten (kein Verkauf!)");
@@ -172,5 +184,61 @@ describe("Admin Hot Deals", () => {
     await starten();
     expect(el("hot-deals-fehler").textContent).toContain("Super-Admin");
     expect(el("hot-deals-filter")).toBeTruthy();
+  });
+
+  it("Prüfbefund B15/B22: km mit Tausenderpunkt wie in der Tabelle; ungültige Zahl wird nie gesendet, Hinweis am Feld", async () => {
+    await starten();
+    await tippen("hd-filter-km-min", "50.000");
+    await tippen("hd-filter-km-max", "150 000");
+    await klick("hd-filter-anwenden");
+    expect(letzteParams()).toEqual({ sort: "vorteil_pct", status: "aktuell", limit: 300, km_min: 50000, km_max: 150000 });
+    expect(el("hd-filter-ungueltig")).toBeNull();
+    const vorher = netz.gets.filter((g) => g.url === "/admin/market/hot-deals").length;
+    await tippen("hd-filter-km-max", "150,000");
+    expect(el("hd-filter-ungueltig").textContent).toContain("nur ganze Zahlen");
+    expect(el("hd-filter-km-max").getAttribute("aria-invalid")).toBe("true");
+    expect(el("hd-filter-km-min").getAttribute("aria-invalid")).toBe("false");
+    expect(el("hd-filter-anwenden").disabled).toBe(true);
+    await klick("hd-filter-anwenden");
+    await tippen("hd-filter-klasse", "STRONG");                       // sofort ladende Auswahl: auch dann nichts senden
+    expect(netz.gets.filter((g) => g.url === "/admin/market/hot-deals").length).toBe(vorher);
+    await tippen("hd-filter-km-max", "150.000");
+    await klick("hd-filter-anwenden");
+    expect(letzteParams()).toMatchObject({ km_min: 50000, km_max: 150000, klasse: "STRONG" });
+    expect(hotDealParams({ km_min: "50.000", km_max: "abc", ez: "03.2020" })).toEqual({ sort: "vorteil_pct", status: "aktuell", limit: 300, km_min: 50000 });
+    expect(zahlFeld("ez", " 2021 ")).toEqual({ zahl: 2021 });
+    expect(zahlFeld("km_max", "-5")).toEqual({ ungueltig: true });
+  });
+
+  it("Prüfbefund B19: Preis über der Referenz ist kein grüner Vorteil, der Verlauf sagt 'über'", async () => {
+    await starten();
+    expect(el("hd-vorteil-h1").style.color).toBe("var(--st-gruen)");
+    await klick("hd-umschalter-alle");
+    const v = el("hd-vorteil-h4");
+    expect(v.textContent).toBe("400 € (2 %) über Referenz");
+    expect(v.style.color).not.toBe("var(--st-gruen)");
+    await klick("hd-verlauf-h4");
+    const ev = el("hd-ereignisse-h4").textContent;
+    expect(ev).toContain("20.400 € (2 % über 20.000 €)");
+    expect(ev).toContain("17.500 € (12,5 % unter 20.000 €)");
+    expect(ev).not.toContain("-2 %");
+    expect(vorteilText(null, null)).toBe("—");
+  });
+
+  it("Prüfbefund B23: eine spät eintreffende Antwort eines älteren Filters überschreibt die Liste nicht", async () => {
+    await starten();
+    netz.halten = { status: "alle" };
+    await klick("hd-umschalter-alle");                                // Antwort für 'alle' hängt noch
+    expect(typeof netz.halten.freigeben).toBe("function");
+    netz.halten = { ...netz.halten, status: "nie" };
+    await klick("hd-umschalter-aktuell");                             // neuere Antwort kommt sofort
+    expect(el("hd-deal-h3")).toBeNull();
+    await act(async () => { netz.halten.freigeben(); });              // jetzt erst die ältere Antwort
+    await warten();
+    expect(el("hd-umschalter-aktuell").getAttribute("aria-pressed")).toBe("true");
+    expect(el("hd-deal-h3")).toBeNull();
+    expect(el("hd-deal-h4")).toBeNull();
+    expect(el("hot-deals-liste").textContent).toContain("2 Hot Deals");
+    expect(el("hot-deals-liste").textContent).not.toContain("lädt");
   });
 });

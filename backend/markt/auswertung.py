@@ -6,10 +6,12 @@ Eigener Hintergrundjob in server.py ('markt_auswertung'), getrennt vom Crawl-Wor
   * Hot Deals: offene Tagesdokumente (hot_deals_offen) auswerten (markt.deals)
   * Berichte (Phase E): faellige Perioden (Periodenende + Karenz) einfrieren (markt.berichte) — idempotent,
     ein Bericht je Modell/Periode (Unique-Index), laufende Perioden nie
-  * haelt waehrend einer Schreibpause (Sicherung/Restore) an: wartung.aktiv_async(db)
+  * haelt waehrend einer Schreibpause (Sicherung/Restore) an: wartung.aktiv_async(db) vor dem Durchlauf, vor
+    jedem Tagesdokument (markt.deals) und vor den Berichten (Pruefbefund B10)
   * zwei Server: ein Durchlauf haelt die Sperre 'markt-auswertung' (job_lock); der andere wartet
   * Fehler: Protokoll + EIN Betriebsalarm 'markt_auswertung_fehler' — nie ein Einfluss auf Vergleich,
-    Vertrag, PDF, Versand oder Fahrer; der Alarm schliesst sich nach dem naechsten erfolgreichen Durchlauf
+    Vertrag, PDF, Versand oder Fahrer; der Alarm schliesst sich nach dem naechsten fehlerfreien Durchlauf,
+    gleich in welchem Prozess (auch Admin-Knopf) — ohne prozesslokalen Merker (Pruefbefund B11)
 Dieses Modul loest NIE einen Marktabruf aus (Architekturtest test_b02) — Kosten der Auswertung: 0.
 """
 from __future__ import annotations
@@ -65,10 +67,20 @@ async def durchlauf(db, *, jetzt: Optional[datetime] = None) -> Dict[str, Any]:
     try:
         with _schreiber():
             erg: Dict[str, Any] = {"hot_deals": await deals.auswerten_faellige(db, jetzt=jetzt)}
+            if erg["hot_deals"].get("wartung") or await deals.wartung_aktiv(db):
+                # Pruefbefund B10: Schreibpause begann waehrend des Durchlaufs — keine Berichte, kein Stand-Merker;
+                # der naechste Takt nach der Pause macht weiter (offene Tage/Perioden bleiben offen)
+                erg["wartung"] = True
+                return erg
             # Phase E: erst die Hot Deals (die Berichte frieren die Hot Deals des Zeitraums mit ein), dann die
             # faelligen Berichte — laufende Perioden werden nie final gespeichert
             erg["berichte"] = await berichte.faellige_finalisieren(db, jetzt=jetzt)
             await konfig.merker_setzen(db, konfig.AUSWERTUNG_DOK, letzter_lauf_at=konfig.jetzt_iso(), ergebnis=erg)
+        if not fehler_anzahl(erg):
+            # Pruefbefund B11: ein fehlerfreier Durchlauf schliesst den Alarm, egal welcher Prozess (oder der
+            # Admin-Knopf) ihn oeffnete — der fruehere prozesslokale Merker ging bei Neustart/Deploy verloren,
+            # der Alarm blieb offen und unterdrueckte die Mail beim naechsten echten Ausfall
+            await _alarm_zu(db, ALARM, ref="auswertung")
         return erg
     finally:
         await release(db, SPERRE, token)
@@ -86,26 +98,20 @@ async def worker_forever(db, erfolg: Optional[Callable[[], None]] = None, takt_s
     """Dauerschleife je Prozess. Wirft nie nach aussen (ein Fehler wird gemeldet, der naechste Takt versucht es
     erneut) — der Job bleibt 'laeuft' und nimmt die Instanz nie aus dem Lastverteiler."""
     await asyncio.sleep(30)
-    alarm_offen = False
     while True:
         try:
             import wartung
             if await wartung.aktiv_async(db):
                 await asyncio.sleep(60)
                 continue
-            erg = await durchlauf(db)
+            erg = await durchlauf(db)          # schliesst den Alarm selbst nach einem fehlerfreien Durchlauf
             fehler_n = fehler_anzahl(erg)
             if fehler_n:
                 # einzelne Segmente/Modelle scheiterten (die anderen liefen weiter) — ein Alarm, kein Abbruch
                 await _alarm(db, ALARM, ref="auswertung", fehler=f"{fehler_n} Auswertung(en) gescheitert — Protokoll pruefen")
-                alarm_offen = True
-            elif alarm_offen and not erg.get("gesperrt"):
-                await _alarm_zu(db, ALARM, ref="auswertung")
-                alarm_offen = False
             if erfolg:
                 erfolg()
         except Exception as e:  # noqa: BLE001
             log.exception("Markt-Auswertung gescheitert")
             await _alarm(db, ALARM, ref="auswertung", fehler=str(e)[:300])
-            alarm_offen = True
         await asyncio.sleep(takt_s)

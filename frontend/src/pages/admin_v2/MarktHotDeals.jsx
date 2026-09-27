@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { ArrowLeft, ExternalLink, BarChart3, RefreshCw, Flame, History, Play } from "lucide-react";
 import { toast } from "sonner";
@@ -17,17 +17,54 @@ import {
  * Chancen der Firmen oder in der Fahrzeugkarte. Links nur auf mobile.de.
  */
 const FILTER_LEER = { status: "aktuell", klasse: "", privat: "", model_id: "", make: "", ez: "", km_min: "", km_max: "", heute_neu: false, sort: "vorteil_pct" };
+const ZAHL_FELDER = ["ez", "km_min", "km_max"];
+
+/**
+ * Prüfbefund B15/B22: km so lesen, wie die Tabelle sie zeigt („150.000“ = 150000 — Tausenderpunkte und
+ * Leerzeichen fallen weg), EZ als vierstelliges Jahr. Alles andere (Komma, Text, Minus) ist ungültig und
+ * wird NIE gesendet — vorher wurde „150.000“ still zu 150 km und die Liste war ohne Hinweis leer.
+ */
+export function zahlFeld(k, wert) {
+  const v = String(wert ?? "").trim();
+  if (v === "") return { leer: true };
+  const s = k === "ez" ? v.replace(/\s/g, "") : v.replace(/[.\s]/g, "");
+  const ok = k === "ez" ? /^\d{4}$/.test(s) : /^\d+$/.test(s);
+  return ok ? { zahl: Number(s) } : { ungueltig: true };
+}
+
+export function ungueltigeFelder(f) {
+  return ZAHL_FELDER.filter((k) => zahlFeld(k, f[k]).ungueltig);
+}
 
 export function hotDealParams(f) {
   const p = { sort: f.sort || "vorteil_pct", status: f.status || "aktuell", limit: 300 };
-  for (const k of ["klasse", "model_id", "make", "ez", "km_min", "km_max"]) {
+  for (const k of ["klasse", "model_id", "make"]) {
     const v = String(f[k] ?? "").trim();
-    if (v !== "") p[k] = ["ez", "km_min", "km_max"].includes(k) ? Number(v) : v;
+    if (v !== "") p[k] = v;
+  }
+  for (const k of ZAHL_FELDER) {
+    const z = zahlFeld(k, f[k]);
+    if (z.zahl !== undefined) p[k] = z.zahl;
   }
   if (f.privat === "privat") p.privat = true;
   if (f.privat === "haendler") p.privat = false;
   if (f.heute_neu) p.heute_neu = true;
   return p;
+}
+
+/**
+ * Prüfbefund B19: ein verlassener Deal trägt den Stand beim Verlassen — liegt der Preis ÜBER der Referenz, ist
+ * der Vorteil negativ. Dann nicht grün und nicht „−400 € (−2 %)“ als Vorteil, sondern „400 € (2 %) über Referenz“.
+ */
+export function vorteilText(diffEur, diffPct) {
+  if (diffEur == null) return "—";
+  if (Number(diffEur) < 0) return `${eur(Math.abs(diffEur))} (${pct(Math.abs(diffPct), false)}) über Referenz`;
+  return `${eur(diffEur)} (${pct(diffPct, false)})`;
+}
+
+export function abstandText(diffPct, referenz) {
+  const p = Number(diffPct);
+  return `${pct(Math.abs(p), false)} ${p < 0 ? "über" : "unter"} ${eur(referenz)}`;
 }
 
 function schwellenText(s) {
@@ -44,15 +81,21 @@ export default function MarktHotDeals() {
   const [fehler, setFehler] = useState("");
   const [laedt, setLaedt] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Prüfbefund B23: nur die Antwort des NEUESTEN Aufrufs zählt — eine spät eintreffende Antwort eines älteren
+  // Filters (zwei Server hinter dem Lastverteiler) überschreibt die Liste nicht mehr
+  const laufNr = useRef(0);
 
   const laden = useCallback(async (f) => {
+    const nr = ++laufNr.current;
+    if (ungueltigeFelder(f).length) { setLaedt(false); return; }   // ungültige Zahl: nichts senden, Hinweis am Feld
     setLaedt(true);
     try {
       const r = await api.get("/admin/market/hot-deals", { params: hotDealParams(f), timeout: 15000 });
+      if (nr !== laufNr.current) return;
       setDaten(r.data);
       setFehler("");
-    } catch (e) { setFehler(errMsg(e, "Hot Deals konnten nicht geladen werden")); }
-    finally { setLaedt(false); }
+    } catch (e) { if (nr === laufNr.current) setFehler(errMsg(e, "Hot Deals konnten nicht geladen werden")); }
+    finally { if (nr === laufNr.current) setLaedt(false); }
   }, []);
   useEffect(() => { laden(FILTER_LEER); }, [laden]);
   useEffect(() => { api.get("/admin/market/models").then((r) => setModelle(r.data?.modelle || [])).catch(() => {}); }, []);
@@ -73,6 +116,8 @@ export default function MarktHotDeals() {
 
   const feld = "rounded-lg px-2.5 py-1.5 text-[12px] outline-none w-full";
   const st = { background: "var(--bg-input-solid)", color: "var(--text-primary)", border: "1px solid var(--wa-12)" };
+  const ungueltig = ungueltigeFelder(filter);
+  const zahlSt = (k) => (ungueltig.includes(k) ? { ...st, border: "1px solid var(--st-rot)" } : st);
   const z = daten?.zusammenfassung || {};
   const deals = daten?.deals || [];
   return (
@@ -120,16 +165,21 @@ export default function MarktHotDeals() {
               {modelle.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
             </select></label>
           <label>Marke<input className={feld} style={st} value={filter.make} onChange={(e) => setzen("make", e.target.value)} placeholder="z. B. BMW" data-testid="hd-filter-make" /></label>
-          <label>EZ (Jahr)<input className={feld} style={st} value={filter.ez} onChange={(e) => setzen("ez", e.target.value)} inputMode="numeric" placeholder="2020" data-testid="hd-filter-ez" /></label>
-          <label>km von<input className={feld} style={st} value={filter.km_min} onChange={(e) => setzen("km_min", e.target.value)} inputMode="numeric" data-testid="hd-filter-km-min" /></label>
-          <label>km bis<input className={feld} style={st} value={filter.km_max} onChange={(e) => setzen("km_max", e.target.value)} inputMode="numeric" data-testid="hd-filter-km-max" /></label>
+          <label>EZ (Jahr)<input className={feld} style={zahlSt("ez")} value={filter.ez} onChange={(e) => setzen("ez", e.target.value)} inputMode="numeric" placeholder="2020" aria-invalid={ungueltig.includes("ez")} data-testid="hd-filter-ez" /></label>
+          <label>km von<input className={feld} style={zahlSt("km_min")} value={filter.km_min} onChange={(e) => setzen("km_min", e.target.value)} inputMode="numeric" placeholder="z. B. 50.000" aria-invalid={ungueltig.includes("km_min")} data-testid="hd-filter-km-min" /></label>
+          <label>km bis<input className={feld} style={zahlSt("km_max")} value={filter.km_max} onChange={(e) => setzen("km_max", e.target.value)} inputMode="numeric" placeholder="z. B. 150.000" aria-invalid={ungueltig.includes("km_max")} data-testid="hd-filter-km-max" /></label>
           <label>Sortierung
             <select className={feld} style={st} value={filter.sort} onChange={(e) => setzen("sort", e.target.value)} data-testid="hd-filter-sort">
               {HOTDEAL_SORTIERUNGEN.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
             </select></label>
         </div>
+        {ungueltig.length > 0 && (
+          <div className="mt-2 text-[11px]" style={{ color: "var(--st-rot)" }} role="alert" data-testid="hd-filter-ungueltig">
+            Bitte nur ganze Zahlen eingeben — km z. B. 150000 oder 150.000, EZ als Jahr z. B. 2020. Mit dieser Eingabe wird nicht geladen.
+          </div>
+        )}
         <div className="mt-2 flex flex-wrap items-center gap-2">
-          <Button size="sm" onClick={() => laden(filter)} disabled={laedt} data-testid="hd-filter-anwenden">Filter anwenden</Button>
+          <Button size="sm" onClick={() => laden(filter)} disabled={laedt || ungueltig.length > 0} data-testid="hd-filter-anwenden">Filter anwenden</Button>
           <Button size="sm" variant="ghost" onClick={zuruecksetzen} disabled={laedt}>Zurücksetzen</Button>
           <label className="inline-flex items-center gap-1.5 text-[11px] text-zinc-400"><input type="checkbox" checked={filter.heute_neu} onChange={(e) => setzen("heute_neu", e.target.checked)} data-testid="hd-filter-heute-neu" /> nur heute neu</label>
           <span className="ml-auto inline-flex rounded-full overflow-hidden text-[11px]" style={{ border: "1px solid var(--wa-12)" }} data-testid="hd-umschalter">
@@ -143,7 +193,7 @@ export default function MarktHotDeals() {
 
       <Card padded={false} data-testid="hot-deals-liste">
         <div className="px-4 py-3 text-[13px] text-zinc-400" style={{ borderBottom: "1px solid var(--wa-08)" }}>
-          <Flame size={14} className="inline mr-1" /> {deals.length} Hot Deal{deals.length === 1 ? "" : "s"}{daten?.gekuerzt ? " (gekürzt — Filter enger setzen)" : ""}{laedt ? " · lädt…" : ""}
+          <Flame size={14} className="inline mr-1" /> {deals.length} Hot Deal{deals.length === 1 ? "" : "s"}{daten?.gekuerzt ? " (gekürzt — Filter enger setzen)" : ""}{daten?.fenster_von ? ` · Historie seit ${datumKurz(daten.fenster_von)} (letztes Ereignis)` : ""}{laedt ? " · lädt…" : ""}
         </div>
         {!daten && !fehler ? <div className="flex items-center gap-2 text-zinc-500 text-sm p-4"><Spinner /> lade…</div>
           : deals.length === 0 ? <EmptyState title="Keine Hot Deals" hint="Zu diesen Filtern liegt gerade kein Inserat deutlich unter dem historischen Low-Market-Median seines Segments — oder die Basis ist noch zu dünn (mindestens 7 gültige Tage)." /> : (
@@ -190,7 +240,7 @@ function DealZeile({ d }) {
         <td className="px-3 py-1.5 text-right text-white">{eur(d.current_price)}
           {d.price_change_since_detection_eur ? <div className="text-[10px]" style={{ color: trendFarbe(d.price_change_since_detection_eur) }}>{trendText(d.price_change_since_detection_eur)} seit Erkennung</div> : null}</td>
         <td className="px-3 py-1.5 text-right">{eur(d.reference_price)}<div className="text-[10px] text-zinc-500">{d.basis_tage ? `${d.basis_tage} Tage Basis` : ""}</div></td>
-        <td className="px-3 py-1.5 text-right" style={{ color: "var(--st-gruen)" }} data-testid={`hd-vorteil-${d.listing_id}`}>{d.diff_eur == null ? "—" : `${eur(d.diff_eur)} (${pct(d.diff_pct, false)})`}</td>
+        <td className="px-3 py-1.5 text-right" style={{ color: Number(d.diff_eur) > 0 ? "var(--st-gruen)" : "var(--text-secondary)" }} data-testid={`hd-vorteil-${d.listing_id}`}>{vorteilText(d.diff_eur, d.diff_pct)}</td>
         <td className="px-3 py-1.5">{d.privat ? <Badge tone="purple">privat</Badge> : <span className="text-zinc-400">{d.seller_type === "DEALER" ? "Händler" : "unbekannt"}</span>}</td>
         <td className="px-3 py-1.5">{d.first_registration || d.ez_year || "—"}</td>
         <td className="px-3 py-1.5 text-right">{d.mileage_km != null ? Number(d.mileage_km).toLocaleString("de-DE") : "—"}</td>
@@ -221,7 +271,7 @@ function DealZeile({ d }) {
                   <li key={`${e.typ}:${e.lauf_key}`} className="text-zinc-300">
                     <span className="text-zinc-500">{datumZeit(e.lauf_at)}</span> · <b>{HOTDEAL_EREIGNIS[e.typ] || e.typ}</b>
                     {e.klasse ? ` · ${(HOTDEAL_KLASSE[e.klasse] || {}).text || e.klasse}` : ""}
-                    {e.price != null ? ` · ${eur(e.price)}` : ""}{e.diff_pct != null ? ` (${pct(e.diff_pct, false)} unter ${eur(e.reference_price)})` : ""}
+                    {e.price != null ? ` · ${eur(e.price)}` : ""}{e.diff_pct != null ? ` (${abstandText(e.diff_pct, e.reference_price)})` : ""}
                     {e.grund ? ` · ${HOTDEAL_GRUND[e.grund] || e.grund}` : ""}
                   </li>
                 ))}

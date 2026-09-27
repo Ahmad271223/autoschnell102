@@ -15,10 +15,14 @@ Wahl des Zeitpunkts (Auftrag: "nach jedem gueltigen Lauf ODER in einem taegliche
     * Aktualitaet wie "nach jedem Lauf" (Minuten statt einen Tag spaeter) — Privatangebote sind schnell weg
     * der Crawl-Weg (Worker, Budget, Leases) wartet nie auf die Auswertung und scheitert nie an ihr (Abschnitt 49)
     * Grundlage ist der Tageswert (letzter gueltiger Lauf mit Treffern) — ein leerer oder POOR-Zweitlauf
-      erzeugt keine Schein-Ereignisse; Tage mit nur ungueltigen Laeufen werden nie ausgewertet
+      erzeugt keine Schein-Ereignisse; Tage mit nur ungueltigen Laeufen werden nie ausgewertet; ein LEERER
+      Tageswert (Marktluecke) wird erst nach Tagesende ausgewertet, weil ein spaeterer Lauf desselben Tages mit
+      Treffern ihn noch ersetzt (Pruefbefund B0)
     * nachholbar und idempotent: faellt der Worker aus, bleibt das Tagesdokument offen und wird spaeter
-      ausgewertet (aeltere Tage zuerst, ein aelterer Tag nie nach einem neueren); dieselbe Auswertung zweimal
+      ausgewertet (aeltere Tage zuerst, ein aelterer Tag nie nach einem neueren — scheitert ein Tag, bleiben die
+      neueren Tage desselben Segments bis zum naechsten Durchlauf offen); dieselbe Auswertung zweimal
       erzeugt kein Ereignis doppelt (Stand je Inserat + Unique-Index der Ereignisse)
+    * Schreibpause (Sicherung/Restore): der Durchlauf haelt vor jedem Tagesdokument an, der Rest bleibt offen
     * zwei Server: ein Durchlauf haelt die Sperre markt-auswertung (job_lock, siehe markt.auswertung)
   Dieses Modul liest nur gespeicherte Tageswerte und schreibt nur Hot-Deal-Daten — es loest NIE einen
   Marktabruf aus (Architekturtest test_b02); Kosten fuer die Auswertung: 0.
@@ -79,6 +83,10 @@ GRUND_AUS_STICHPROBE = "nicht_mehr_im_sample"       # nicht mehr unter den N gue
 GRUND_ENTFERNT = "inserat_entfernt"                 # Entfernungspruefung bestaetigt: Inserat nicht mehr online
 ENTFERNT_NACHSCHAU_TAGE = 30                        # so lange wird ein herausgefallener Deal auf "entfernt" geprueft
 AUSWERTUNG_MAX_JE_LAUF = 3000                       # offene Tagesdokumente je Durchlauf (Rest im naechsten)
+# Pruefbefund B14: die Liste 'alle' zeigt die Historie der letzten 90 Tage (nach letztem Ereignis, Index
+# markt_hotdeal_letztes_ereignis) — verlassene/entfernte Zustaende werden nie geloescht, ohne Fenster wuerde
+# jeder Klick die ganze, stetig wachsende Sammlung lesen und sortieren
+ALLE_FENSTER_TAGE = 90
 
 # Liquiditaet (Abschnitt 56): nicht nur Anzahl, sondern Umschlag (neue + verschwundene je Tag relativ zur
 # Stichprobe) und Top-5-Wechsel. Ab 3 Tagen mit Vergleichstag; darunter UNKNOWN.
@@ -201,10 +209,12 @@ async def referenz_berechnen(db, seg: Dict[str, Any], tag: str, fass: Tuple[int,
     inserate: set = set()
     for d in basis:
         inserate |= {str(x) for x in (d.get("listing_ids_alle") or d.get("listing_ids") or [])}
+    # Pruefbefund B1: Liquiditaet nur aus gueltigen Tagen (GOOD/MEDIUM) wie die Berichte — ein POOR-Tag mit
+    # kleiner Stichprobe und vielen 'verschwundenen' Inseraten taeuschte sonst Umschlag vor
     raus: Dict[str, Any] = {"basis_tage": len(basis), "basis_inserate": len(inserate), "fenster_von": von,
                             "fenster_bis": _tag_minus(tag, 1), "andere_fassung_tage": len(docs) - len(gleich),
                             "basis_ok": False, "grund": "", "referenz_eur": None, "mindest_eur": None,
-                            "liquiditaet": liquiditaet_bewerten(gleich)}
+                            "liquiditaet": liquiditaet_bewerten([d for d in gleich if ist_gueltig(d)])}
     if len(basis) < MIN_BASIS_TAGE:
         raus["grund"] = "zu_wenig_tage"
         return raus
@@ -269,6 +279,20 @@ async def _abschliessen(db, seg_id: str, tag: str, doc: Dict[str, Any], zus: Dic
 
 
 # ---------------------------------------------------------------- Auswertung eines Tages
+def _leer_vorlaeufig(doc: Dict[str, Any], tag: str, jetzt: Optional[datetime]) -> bool:
+    """Leerer Tageswert (gueltiger Lauf, 0 Treffer) eines Tages, der noch laeuft (deutsche Zeit)."""
+    return int(doc.get("sample_size") or 0) == 0 and str(tag) >= konfig.heute_tag(jetzt)
+
+
+async def wartung_aktiv(db) -> bool:
+    """Schreibpause (Sicherung/Restore) aktiv? Eine Stoerung gilt wie in wartung.aktiv_async als 'keine Pause'."""
+    try:
+        import wartung
+        return bool(await wartung.aktiv_async(db))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 async def segment_tag_auswerten(db, seg_id: str, tag: str, *, jetzt: Optional[datetime] = None) -> Dict[str, Any]:
     """Hot Deals eines Segments fuer einen Tag aus dem gespeicherten Tageswert (Hauptwerte = letzter gueltiger
     Lauf mit Treffern). Liest Tagesdokumente, schreibt Zustand/Ereignisse/Zusammenfassung — kein Abruf.
@@ -280,11 +304,18 @@ async def segment_tag_auswerten(db, seg_id: str, tag: str, *, jetzt: Optional[da
       nicht heiss, ACTIVE       -> LEFT   (LEFT_HOT_ZONE: ueber der Schwelle oder nicht mehr im Sample)
       nicht im Sample, entfernt -> REMOVED (REMOVED, nur mit bestaetigter Entfernungspruefung)
     Kein Ereignis, wenn: Tag mit Datenqualitaet POOR/UNKNOWN, Basis zu duenn, Altdaten ohne Preiszeilen, oder ein
-    neuerer Tag desselben Segments ist schon ausgewertet (Reihenfolge)."""
+    neuerer Tag desselben Segments ist schon ausgewertet (Reihenfolge). Ein leerer Tageswert des laufenden Tages
+    wird noch gar nicht ausgewertet ('leer_vorlaeufig', Merker bleibt)."""
     jetzt_iso = (jetzt or konfig.jetzt()).isoformat()
     doc = await db[TAGESSTATS].find_one({"segment_id": seg_id, "date": tag}, {"_id": 0, "laeufe": 0})
     if not doc or doc.get("sample_size") is None:
         return {"status": "kein_tageswert"}
+    if _leer_vorlaeufig(doc, tag, jetzt):
+        # Pruefbefund B0: ein leerer erster Lauf stellt nur vorlaeufig den Tageswert — ein spaeterer Lauf desselben
+        # Tages mit Treffern ersetzt ihn (P5). Frueher ausgewertet, verliessen aktive Deals morgens die Zone und
+        # kamen nachmittags als neue heisse Phase zurueck (dauerhaftes LEFT/BECAME-Paar, Schein-'heute neu').
+        # Erst nach Tagesende gilt der leere Tag als Marktluecke; der Merker bleibt bis dahin stehen.
+        return {"status": "leer_vorlaeufig"}
     seg = await db[SEGMENTE].find_one({"id": seg_id}, {"_id": 0}) or {"id": seg_id}
     seg.setdefault("id", seg_id)
     lauf_at = str(doc.get("observed_at") or doc.get("last_run_at") or "")
@@ -444,19 +475,34 @@ async def segment_tag_auswerten(db, seg_id: str, tag: str, *, jetzt: Optional[da
 async def auswerten_faellige(db, *, limit: int = AUSWERTUNG_MAX_JE_LAUF, segment_ids: Optional[List[str]] = None,
                              jetzt: Optional[datetime] = None) -> Dict[str, Any]:
     """Alle offenen Tagesdokumente (hot_deals_offen) in Tagesreihenfolge auswerten. segment_ids grenzt ein
-    (Tests, Admin). Ein Fehler in einem Segment haelt die anderen nicht auf."""
-    filt: Dict[str, Any] = {"hot_deals_offen": True}
+    (Tests, Admin). Ein Fehler in einem Segment haelt die anderen nicht auf. Leere Tageswerte des laufenden Tages
+    warten bis nach Tagesende (Pruefbefund B0) und werden hier gar nicht erst geladen."""
+    filt: Dict[str, Any] = {"hot_deals_offen": True, "$nor": [{"sample_size": 0, "date": {"$gte": konfig.heute_tag(jetzt)}}]}
     if segment_ids is not None:
         filt["segment_id"] = {"$in": [str(s) for s in segment_ids]}
     offene = await db[TAGESSTATS].find(filt, {"_id": 0, "segment_id": 1, "date": 1}).sort([("date", 1), ("segment_id", 1)])\
         .to_list(max(1, int(limit)))
     z: Dict[str, Any] = {"offen": len(offene), "ausgewertet": 0, "ohne_basis": 0, "fehler": 0, "ereignisse": 0}
+    gescheitert: set = set()
     for d in offene:
+        if str(d["segment_id"]) in gescheitert:
+            # Pruefbefund B2: ein aelterer Tag dieses Segments ist eben gescheitert — die neueren Tage bleiben offen
+            # und kommen im naechsten Durchlauf NACH ihm dran (sonst schloesse die Reihenfolge-Sperre den aelteren
+            # Tag danach ohne Ereignisse, 'ein aelterer Tag nie nach einem neueren')
+            z["zurueckgestellt"] = z.get("zurueckgestellt", 0) + 1
+            continue
+        if await wartung_aktiv(db):
+            # Pruefbefund B10: Schreibpause (Sicherung/Restore) — sofort anhalten, der Rest bleibt offen; der naechste
+            # Takt nach der Pause macht weiter (idempotent). Die Sicherung wartet sonst bis zu 120/180 s und laeuft
+            # dann trotzdem, waehrend hier weiter geschrieben wuerde.
+            z["wartung"] = True
+            break
         try:
             r = await segment_tag_auswerten(db, d["segment_id"], d["date"], jetzt=jetzt)
         except Exception:  # noqa: BLE001
             log.exception("Hot-Deal-Auswertung %s %s gescheitert", d.get("segment_id"), d.get("date"))
             z["fehler"] += 1
+            gescheitert.add(str(d["segment_id"]))
             continue
         if r.get("status") == "ausgewertet":
             z["ausgewertet"] += 1
@@ -486,6 +532,14 @@ async def _aktive_segmente(db) -> List[str]:
     return [str(x) for x in await db[SEGMENTE].distinct("id", {"enabled": True})]
 
 
+async def _anzahl_deals(db, filt: Dict[str, Any]) -> int:
+    """Anzahl VERSCHIEDENER Deals (Segment, Inserat) mit passenden Ereignissen — eine zweite heisse Phase am
+    selben Tag ist kein zweiter neuer Deal (Pruefbefund B0: vorher zaehlte die Kachel Ereignisse)."""
+    erg = await db[HOTDEAL_EREIGNISSE].aggregate([{"$match": filt}, {"$group": {"_id": {"s": "$segment_id", "l": "$listing_id"}}},
+                                                  {"$count": "n"}]).to_list(1)
+    return int(erg[0]["n"]) if erg else 0
+
+
 async def zusammenfassung(db) -> Dict[str, Any]:
     """Abschnitt 26: heute gepruefte / gueltige Modelle, neue Deals heute, aktive nach Klasse, davon privat.
     'Aktiv' nur in aktiven Segmenten (Deals einer frueheren Fassung zaehlen nicht mehr)."""
@@ -495,8 +549,8 @@ async def zusammenfassung(db) -> Dict[str, Any]:
     aktiv = {"status": AKTIV, "segment_id": {"$in": await _aktive_segmente(db)}}
     neu = {"tag": heute, "typ": {"$in": [NEW, BECAME]}}
     return {"tag": heute, "modelle_geprueft": len(geprueft), "modelle_gueltig": len(gueltig),
-            "neue_deals_heute": await db[HOTDEAL_EREIGNISSE].count_documents(neu),
-            "neue_privat_heute": await db[HOTDEAL_EREIGNISSE].count_documents({**neu, "privat": True}),
+            "neue_deals_heute": await _anzahl_deals(db, neu),
+            "neue_privat_heute": await _anzahl_deals(db, {**neu, "privat": True}),
             "aktiv": await db[HOTDEALS].count_documents(aktiv),
             "deal": await db[HOTDEALS].count_documents({**aktiv, "klasse": "DEAL"}),
             "strong": await db[HOTDEALS].count_documents({**aktiv, "klasse": "STRONG"}),
@@ -509,15 +563,21 @@ async def liste(db, *, status: str = "aktuell", klasse: Optional[str] = None, pr
                 km_min: Optional[int] = None, km_max: Optional[int] = None, segment_id: Optional[str] = None,
                 heute_neu: bool = False, sort: str = "vorteil_pct", limit: int = 200) -> Dict[str, Any]:
     """Hot-Deal-Liste (Abschnitt 26) — nur lesend. status 'aktuell' = ACTIVE in aktiven Segmenten, 'alle' = auch
-    verlassene/entfernte (Historie). privat True = nur Privatangebote, False = Haendler/unbekannt."""
+    verlassene/entfernte (Historie der letzten ALLE_FENSTER_TAGE nach letztem Ereignis). privat True = nur
+    Privatangebote, False = Haendler/unbekannt."""
     heute = konfig.heute_tag()
     filt: Dict[str, Any] = {}
+    fenster_von: Optional[str] = None
     if status == "aktuell":
         segs = await _aktive_segmente(db)
         filt["status"] = AKTIV
         filt["segment_id"] = {"$in": [s for s in segs if s == segment_id] if segment_id else segs}
-    elif segment_id:
-        filt["segment_id"] = segment_id
+    else:
+        # Pruefbefund B14: Zeitfenster mit Index statt Vollscan samt Sortierung ueber die nie bereinigte Historie
+        fenster_von = _tag_minus(heute, ALLE_FENSTER_TAGE)
+        filt["last_event_tag"] = {"$gte": fenster_von}
+        if segment_id:
+            filt["segment_id"] = segment_id
     if klasse:
         filt["klasse"] = klasse
     if privat is True:
@@ -543,7 +603,7 @@ async def liste(db, *, status: str = "aktuell", klasse: Optional[str] = None, pr
             d["stand_alter_tage"] = None
         d["heute_neu"] = d.get("hot_seit_tag") == heute and d.get("status") == AKTIV
     return {"zusammenfassung": await zusammenfassung(db), "deals": deals, "anzahl": len(deals), "gekuerzt": len(deals) >= n,
-            "sort": sort, "status": status, "hinweis": HINWEIS, "schwellen": schwellen()}
+            "sort": sort, "status": status, "fenster_von": fenster_von, "hinweis": HINWEIS, "schwellen": schwellen()}
 
 
 async def ereignisse(db, segment_id: str, listing_id: str) -> Optional[Dict[str, Any]]:
