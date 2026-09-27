@@ -3857,3 +3857,14 @@ Einschalten von `MARKT_CHANCEN_AKTIV`: die Firmen sähen dann Privatangebote (oh
   100 + ~20 bleibt unter 128. Speicher: scrapesmith braucht 1 GB je Lauf, 128 × 1 GB passt in 256 GB.
 - `MARKT_ROW_USD=0.0006`: Silver-Preis je Zeile bei scrapesmith (Bronze 0,0007); der Start bleibt 0,005 $. Die
   Marktkosten-Schätzung sinkt damit um gut 10 %, die Budget-Drosselung plant entsprechend mehr Segmente je Tag.
+
+**Schlussrunde Marktanalyse (27.09.2026; Commits 12c08fd → cherry-pick, 83b07bc → 9be581e) — nur SAFE_AUTO/Berichte, keine Migration:**
+- SAFE_AUTO (bleibt aus, Modus OBSERVE): eine angewendete Wirkung hält mindestens **7 Tage** (Mindestverweildauer;
+  Ausnahme: eine Pause endet sofort, wenn ein neuer Lauf wieder Treffer hat). Leere Segmente werden erst unter 60 %
+  leeren Läufen wieder freigegeben (Hysterese, vorher Pendeln an der 80-%-Grenze). Die Frequenz-Zuordnung geht
+  höchstens bis „alle 7 Tage“, die Nachprüfung pausierter Segmente höchstens bis 14 Tage (höhere gespeicherte Werte
+  werden beim Lesen begrenzt). Die Ersparnis „2× → 1× täglich“ zählt immer als echte Ersparnis.
+- Berichte: von SAFE_AUTO leer pausierte Segmente gehören nicht in den Preiskorb; „Serienstart“ / „seit mehr als
+  14 Tagen nicht abgerufen“ / „Stillstand“ richten sich nach dem Tagesplan-Protokoll. Bekannte Restkleinigkeit:
+  ist „HOT zuerst“ aktiv und das Budget knapp, kann ein Hinweis „Serienstart“ statt „Intervall über 14 Tage“ lauten
+  (nur die Beschriftung, die Werte stimmen) — tritt nur mit eingeschaltetem SAFE_AUTO auf.
