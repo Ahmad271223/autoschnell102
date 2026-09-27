@@ -432,11 +432,18 @@ def empfang_drucken(contract, dealer=None) -> bool:
     """Wunsch Ahmad 24.09.2026: Steht die Empfangsbestaetigung (Kaestchen
     Zulassungsbescheinigung/Schluessel/Kaufpreis) im gedruckten Vertrag?
     Beim Erstellen eingefroren (contract_data.empfang_drucken, KAEUFER_FELDER),
-    sonst die Firmeneinstellung; fehlt beides: an (wie bisher)."""
+    sonst die Firmeneinstellung; fehlt beides: an (wie bisher).
+
+    Startpruefung 27.09.2026 (K3): Vertraege vom 24.09. bis zur Korrektur
+    tragen den Schalter als TEXT ("False"/"True") — frueher galt jeder Text
+    als "an". Jetzt versteht die Pruefung gespeicherte Texte ("False",
+    "false", "0", "nein", "aus" = aus); unbekannter Text zaehlt nicht."""
+    from vertrag_felder import als_wahrheitswert
     for quelle in ((contract or {}).get("empfang_drucken"),
                    (dealer or {}).get("empfang_drucken")):
-        if quelle is not None:
-            return quelle is not False
+        wert = als_wahrheitswert(quelle)
+        if wert is not None:
+            return wert
     return True
 
 

@@ -241,7 +241,8 @@ export function vorschlaegeAnwenden(form, vorschlaege, gesperrt = {}) {
     uebernommen.push({ feld, label: FELD_LABEL[feld] || feld, wert: vorschlagWertText(feld, v.value),
                        fund: v.source_text || "" });
   }
-  if (uebernommen.some((u) => u.feld === "schluessel_anzahl")) neu.empfang_schluessel = true;
+  // Startprüfung 27.09.2026 (K4): Eine übernommene Schlüsselanzahl hakt die
+  // Empfangsbestätigung nicht an — die Kästchen bleiben für die Übergabe leer.
   return { form: neu, uebernommen, hinweise: vorschlaege?.hinweise || [] };
 }
 

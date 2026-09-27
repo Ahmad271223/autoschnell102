@@ -29,6 +29,57 @@ KAEUFER_FELDER = {
     "empfang_drucken": "empfang_drucken",
 }
 
+# Startpruefung 27.09.2026 (K3): Kaeuferfelder mit Wahrheitswert. Frueher
+# machte das Einfrieren aus jedem Wert Text — aus False wurde das WORT
+# "False", und der Druck hielt jeden Text fuer "an". Der Empfangsblock stand
+# damit in jedem seit 24.09. angelegten Vertrag, auch bei Einstellung "aus".
+# Seitdem bleibt ein bool ein bool; gespeicherte Texte versteht
+# als_wahrheitswert (Vertraege vom 24.09. bis zu dieser Korrektur).
+KAEUFER_WAHRHEITSFELDER = frozenset({"empfang_drucken"})
+
+# Empfangsbestaetigung (Kaestchen im Abschnitt "Unterschriften"). Seit 24.09.
+# fragt der Dialog sie nicht mehr ab; sie bleiben im Vertrag leer und werden
+# bei der Uebergabe von Hand angekreuzt (Startpruefung 27.09.2026, K4).
+EMPFANG_KAESTCHEN = ("empfang_zulassungsbescheinigung", "empfang_schluessel",
+                     "empfang_kaufpreis")
+
+_WAHR = frozenset({"true", "1", "ja", "an", "yes", "on", "x"})
+_FALSCH = frozenset({"false", "0", "nein", "aus", "no", "off"})
+
+
+def als_wahrheitswert(wert) -> Optional[bool]:
+    """bool bleibt bool; gespeicherte Texte ('False', 'false', '0', 'nein',
+    'aus' = aus; 'True', 'true', '1', 'ja', 'an' = an) werden verstanden.
+    None, leerer oder unbekannter Text: None (= nicht festgelegt)."""
+    if wert is None:
+        return None
+    if isinstance(wert, bool):
+        return wert
+    if isinstance(wert, (int, float)):
+        return bool(wert)
+    s = str(wert).strip().lower()
+    if s in _WAHR:
+        return True
+    if s in _FALSCH:
+        return False
+    return None
+
+
+def kaeufer_wert(feld: str, wert):
+    """Wert eines Kaeuferfelds so, wie er im Vertrag eingefroren wird:
+    Wahrheitsfelder als bool (None = nicht festgelegt), alle anderen als
+    getrimmter Text ("" = nicht festgelegt)."""
+    if feld in KAEUFER_WAHRHEITSFELDER:
+        return als_wahrheitswert(wert)
+    return str(wert).strip() if wert is not None else ""
+
+
+def kaeufer_wert_fehlt(feld: str, wert) -> bool:
+    """True, wenn kaeufer_wert nichts Festgelegtes liefert (None bzw. "").
+    Ein eingefrorenes False ist festgelegt — es heisst "aus"."""
+    w = kaeufer_wert(feld, wert)
+    return w is None or w == ""
+
 
 def _apply_contract_overrides(*, contract: dict, vehicle: dict, dealer: dict) -> tuple[dict, dict]:
     """Mergt die im Vertrags-Dialog editierten Fahrzeug- & Händler-Werte
@@ -93,7 +144,10 @@ def _apply_contract_overrides(*, contract: dict, vehicle: dict, dealer: dict) ->
 
     # --- Kaeufer-Mappings (Override → Dealer-Dict) ---
     for src, ziel in KAEUFER_FELDER.items():
-        val = take(src)
+        # Startpruefung 27.09.2026 (K3): Wahrheitsfelder bleiben bool — take()
+        # machte aus einem eingefrorenen False den Text "False".
+        val = (als_wahrheitswert(contract.get(src)) if src in KAEUFER_WAHRHEITSFELDER
+               else take(src))
         if val is None:
             continue
         d[ziel] = val

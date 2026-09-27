@@ -23,8 +23,18 @@ describe("ContractDialog: Schlüsselanzahl (Entscheidung 26.09.2026)", () => {
     // nicht blockierend: kein required am Feld
     expect(block).not.toMatch(/required/);
   });
-  it("führende Nullen fallen weg, Empfang wird angehakt (bestehende Regel bleibt)", () => {
+  it("führende Nullen fallen weg", () => {
     expect(VERTRAG).toMatch(/const n = cleanIntStr\(raw\)\.replace\(\/\^0\+\/, ""\);/);
-    expect(VERTRAG).toMatch(/empfang_schluessel: n \? true : f\.empfang_schluessel/);
+  });
+  // Startprüfung 27.09.2026 (K4): Die Empfangsbestätigung wird seit 24.09.
+  // nicht mehr abgefragt — kein Weg im Dialog darf sie automatisch ankreuzen.
+  it("Schlüsselanzahl hakt die Empfangsbestätigung nicht an", () => {
+    const fn = VERTRAG.slice(VERTRAG.indexOf("const setSchluesselAnzahl"),
+                             VERTRAG.indexOf("const preis = kaufpreisPruefen"));
+    expect(fn).toMatch(/schluessel_anzahl: n/);
+    expect(fn).not.toMatch(/empfang_/);
+    // Nirgends im Dialog wird ein Empfangs-Kästchen auf true gesetzt.
+    expect(VERTRAG).not.toMatch(/empfang_(schluessel|zulassungsbescheinigung|kaufpreis)\s*[:=]\s*(true|n \?)/);
+    expect(VERTRAG).toMatch(/empfang_schluessel: false,/);
   });
 });

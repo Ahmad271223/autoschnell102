@@ -713,6 +713,8 @@ async def _freigabe_link(contract_id: str, bereich: dict, user: dict) -> tuple[s
 # (ohne Datenbank), damit das Abholprotokoll-PDF nicht den ganzen Routen-Stack
 # braucht. Die Namen hier bleiben gueltig.
 from vertrag_felder import KAEUFER_FELDER, _apply_contract_overrides  # noqa: E402,F401
+from vertrag_felder import (EMPFANG_KAESTCHEN, kaeufer_wert,  # noqa: E402
+                            kaeufer_wert_fehlt)
 from ai import damage_pricing as _ki_vertrag  # noqa: E402
 
 
@@ -741,12 +743,30 @@ def kaeufer_einfrieren(contract: dict, dealer: dict) -> dict:
     Abholprotokoll erneut auf die HEUTIGEN Einstellungen zu: Aendert der
     Sucher seine Firmendaten, stand im Protokoll ein anderer Auftraggeber
     als im Kaufvertrag. Idempotent; leere Werte werden nicht gesetzt.
+
+    Startpruefung 27.09.2026 (K3): Wahrheitswerte (empfang_drucken) bleiben
+    bool — vorher wurde aus False das Wort "False", und der Druck zeigte die
+    Empfangsbestaetigung trotz Einstellung "aus".
     """
     for feld, ziel in KAEUFER_FELDER.items():
         wert = (dealer or {}).get(ziel)
-        wert = str(wert).strip() if wert is not None else ""
-        if wert:
-            contract[feld] = wert
+        if kaeufer_wert_fehlt(feld, wert):
+            continue
+        contract[feld] = kaeufer_wert(feld, wert)
+    return contract
+
+
+def empfang_kaestchen_leeren(contract: dict) -> dict:
+    """Startpruefung 27.09.2026 (K4): Beim Anlegen (und in der Vorschau) sind
+    die Kaestchen der Empfangsbestaetigung leer. Der Dialog fragt sie seit
+    24.09. nicht mehr ab; ein Haekchen kam nur noch automatisch (eingetippte
+    oder aus dem Inserat uebernommene Schluesselanzahl) und stand dann
+    angekreuzt im gedruckten Vertrag — "KFZ mit 2 Schluessel(n) erhalten",
+    bevor irgendetwas uebergeben war. Angekreuzt wird von Hand bei der
+    Uebergabe. Neue Fassungen eines bestehenden Vertrags laufen nicht hier
+    durch und behalten ihren Stand."""
+    for feld in EMPFANG_KAESTCHEN:
+        contract[feld] = False
     return contract
 
 
@@ -925,6 +945,8 @@ async def preview_contract(body: ContractIn, user=Depends(require_active_sub),
     dealer = await effective_dealer(user) or {}
     vehicle = v["data"]
     contract_dict = body.model_dump(exclude={"zweiter_vertrag_bestaetigt", "ki_bewertung_id"})
+    # Startpruefung 27.09.2026 (K4): wie beim Anlegen — Kaestchen leer.
+    empfang_kaestchen_leeren(contract_dict)
     if not (contract_dict.get("additional_terms") or "").strip():
         # Wunsch Ahmad 20.09.2026: unser Standardsatz (falls eingeschaltet)
         # UND der eigene Text der Firma — nicht mehr nur das Freitextfeld.
@@ -950,6 +972,10 @@ async def preview_contract(body: ContractIn, user=Depends(require_active_sub),
     vehicle, dealer = _apply_contract_overrides(
         contract=contract_dict, vehicle=vehicle, dealer=dealer,
     )
+    # Startpruefung 27.09.2026 (K3): dieselben eingefrorenen Kaeuferdaten wie
+    # beim Anlegen — die Vorschau zeigte die Empfangsbestaetigung sonst anders
+    # als der gespeicherte Vertrag.
+    kaeufer_einfrieren(contract_dict, dealer)
     # Rollenpruefung 22.09.2026 (RP-452): die Vorschau zeigt das Logo, das
     # beim Erstellen festgehalten wuerde.
     contract_dict["logo_key"] = logo_schluessel(dealer)
@@ -1139,6 +1165,9 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     # special_agreements and agb_text now support a per-contract override
     # (otherwise we still fall back to the dealer's saved defaults).
     contract_dict = body.model_dump(exclude={"zweiter_vertrag_bestaetigt", "ki_bewertung_id"})
+    # Startpruefung 27.09.2026 (K4): Empfangs-Kaestchen leer — angekreuzt wird
+    # von Hand bei der Uebergabe, nie schon beim Anlegen.
+    empfang_kaestchen_leeren(contract_dict)
     if not (contract_dict.get("additional_terms") or "").strip():
         # Wunsch Ahmad 20.09.2026: unser Standardsatz (falls eingeschaltet)
         # UND der eigene Text der Firma — nicht mehr nur das Freitextfeld.

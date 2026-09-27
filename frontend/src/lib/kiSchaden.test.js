@@ -90,7 +90,11 @@ describe("kiSchaden", () => {
     expect(erg.form.accident_free).toBe("Nein");
     expect(erg.form.tires).toBe("");
     expect(erg.form.schluessel_anzahl).toBe("2");
-    expect(erg.form.empfang_schluessel).toBe(true);
+    // Startprüfung 27.09.2026 (K4): die übernommene Anzahl hakt die
+    // Empfangsbestätigung NICHT an (Kästchen bleiben für die Übergabe leer).
+    expect(erg.form.empfang_schluessel).toBe(false);
+    expect(vorschlaegeAnwenden({ schluessel_anzahl: "" },
+      { felder: { schluessel_anzahl: { value: "2" } } }).form).toEqual({ schluessel_anzahl: "2" });
     expect(erg.uebernommen.map((u) => u.feld)).toEqual(["hu_valid", "hu_until", "service_book", "schluessel_anzahl"]);
     expect(erg.uebernommen.find((u) => u.feld === "service_book").wert).toBe("Ja, lückenlos");
     expect(erg.hinweise).toEqual(["Hinweis A"]);

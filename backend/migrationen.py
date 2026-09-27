@@ -296,6 +296,7 @@ async def m7_kaeuferdaten_einfrieren(db) -> dict:
     kaeufer_nachtraeglich_eingefroren. Idempotent.
     """
     from routes.contracts import KAEUFER_FELDER
+    from vertrag_felder import kaeufer_wert, kaeufer_wert_fehlt
 
     stats = {"eingefroren": 0, "schon_gesetzt": 0, "ohne_quelle": 0}
     dealers: dict = {}
@@ -332,8 +333,10 @@ async def m7_kaeuferdaten_einfrieren(db) -> dict:
         daten = doc.get("contract_data")
         if not isinstance(daten, dict):
             continue
+        # Startpruefung 27.09.2026 (K3): ein eingefrorenes False (Schalter
+        # empfang_drucken "aus") ist festgelegt, nicht fehlend.
         fehlend = [f for f in KAEUFER_FELDER
-                   if not str(daten.get(f) or "").strip()]
+                   if kaeufer_wert_fehlt(f, daten.get(f))]
         if not fehlend:
             stats["schon_gesetzt"] += 1
             continue
@@ -353,10 +356,11 @@ async def m7_kaeuferdaten_einfrieren(db) -> dict:
             quelle = await firma_doc(dealer_id)
         neu = {}
         for feld in fehlend:
+            # Startpruefung 27.09.2026 (K3): Wahrheitswerte bleiben bool —
+            # vorher wurde aus False der Text "False" (galt im Druck als "an").
             wert = quelle.get(KAEUFER_FELDER[feld])
-            wert = str(wert).strip() if wert is not None else ""
-            if wert:
-                neu[f"contract_data.{feld}"] = wert
+            if not kaeufer_wert_fehlt(feld, wert):
+                neu[f"contract_data.{feld}"] = kaeufer_wert(feld, wert)
         if not neu:
             # Nichts nachzutragen: entweder stehen die Kaeuferdaten schon im
             # Vertrag (es fehlen nur Felder, die auch in den Einstellungen

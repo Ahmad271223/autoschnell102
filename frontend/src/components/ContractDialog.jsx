@@ -502,17 +502,15 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
     });
   };
 
-  // Eintippen einer Schlüsselanzahl hakt "KFZ mit __ Schlüssel(n)" gleich an.
-  // Nachprüfung: führende Nullen fallen weg — "0" ist keine Anzahl und darf
-  // nicht "KFZ mit 0 Schlüssel(n)" angekreuzt ins PDF bringen.
+  // Schlüsselanzahl (Zusicherung). Nachprüfung: führende Nullen fallen weg —
+  // "0" ist keine Anzahl. Startprüfung 27.09.2026 (K4): Die Anzahl hakt die
+  // Empfangsbestätigung "KFZ mit __ Schlüssel(n)" NICHT mehr an — der Block
+  // wird seit 24.09. nicht abgefragt, das Häkchen war unsichtbar und stand
+  // trotzdem im gedruckten Vertrag. Angekreuzt wird von Hand bei der Übergabe.
   const setSchluesselAnzahl = (raw) => {
     const n = cleanIntStr(raw).replace(/^0+/, "");
     bearbeitet.current = true;
-    setForm((f) => ({
-      ...f,
-      schluessel_anzahl: n,
-      empfang_schluessel: n ? true : f.empfang_schluessel,
-    }));
+    setForm((f) => ({ ...f, schluessel_anzahl: n }));
   };
 
   // Rollenprüfung 22.09.2026 (RP-402): Kaufpreis und Kilometerstand in
