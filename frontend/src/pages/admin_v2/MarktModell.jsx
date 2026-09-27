@@ -10,6 +10,7 @@ import { useAuth } from "@/context/AuthContext";
 import { Card, Badge, Button, Spinner, EmptyState, fmtDate } from "./_ui";
 import { BEREICHE, DATENLAGE, bestandText, datumKurz, datumZeit, eur, lowMarketLabel, mobileLink, pct, trendFarbe, trendText, zustandText } from "@/lib/markt";
 import MarktQualitaet from "@/components/MarktQualitaet";
+import { HealthBadge, HealthZaehler } from "@/components/MarktHealth";
 
 const GETRIEBE_TEXT = { AUTOMATIC_GEAR: "Automatik", MANUAL_GEAR: "Schaltgetriebe", SEMIAUTOMATIC_GEAR: "Halbautomatik" };
 // Review 26.09.2026 abends P1: Job-Status 'data_invalid' = Lauf lieferte unsortierte Daten, nichts gespeichert
@@ -58,6 +59,15 @@ export default function MarktModell() {
     } catch (e) { setFehler(errMsg(e, "Modell konnte nicht geladen werden")); }
   }, [modellId]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { laden(); }, [laden]);
+  // Master-Auftrag Phase F: Health des Modells und seiner Segmente — eigene Anfrage; ohne Berechnung (404) oder bei
+  // einem Fehler bleibt die Seite unveraendert (keine Health-Anzeige)
+  const [health, setHealth] = useState(null);
+  useEffect(() => {
+    let aktiv = true;
+    api.get(`/admin/market/health/models/${modellId}`).then((r) => { if (aktiv) setHealth(r.data || null); }).catch(() => { if (aktiv) setHealth(null); });
+    return () => { aktiv = false; };
+  }, [modellId]);
+  const healthJeSegment = useMemo(() => Object.fromEntries((health?.segmente || []).map((s) => [s.segment_id, s])), [health]);
 
   const setzen = (k, v) => setParams((p) => { const n = new URLSearchParams(p); n.set(k, v); return n; });
 
@@ -81,6 +91,14 @@ export default function MarktModell() {
       <div className="flex items-start justify-between gap-3 flex-wrap mb-4">
         <div>
           <h1 className="text-[22px] font-semibold text-white" data-testid="markt-modell-titel">{modell.label}</h1>
+          {/* Master-Auftrag Phase F: Modell-Health (Aggregat der Segmente, getrennt von der Datenqualität) */}
+          {health?.modell?.health && (
+            <div className="my-1 inline-flex flex-wrap items-center gap-2 text-[11px]" data-testid="markt-modell-health-zeile">
+              <Link to="/admin/markt/optimierung" data-testid="markt-modell-health-link"><HealthBadge health={health.modell.health} testid="markt-modell-health" /></Link>
+              <HealthZaehler zaehler={health.modell.zaehler} testid="markt-modell-health-zaehler" />
+              {health.modell.vorschlaege_offen ? <span className="text-zinc-500">{health.modell.vorschlaege_offen} Vorschlag/Vorschläge offen</span> : null}
+            </div>
+          )}
           <div className="text-[12px] text-zinc-500" data-testid="markt-modell-technik">{modell.fuel}{modell.gearbox ? ` · ${GETRIEBE_TEXT[modell.gearbox] || modell.gearbox}` : " · alle Getriebe (gemischt!)"}{modell.power_kw_min ? ` · ${modell.power_kw_min}–${modell.power_kw_max} kW` : ""} · mobile.de {modell.make_id}/{modell.model_id} · {segmente.filter((s) => s.enabled).length} Segmente</div>
         </div>
         <div className="flex gap-2">
@@ -133,7 +151,7 @@ export default function MarktModell() {
             <thead><tr className="text-left text-zinc-500 text-[11px] uppercase tracking-wide">
               <th className="px-3 py-2">Segment</th><th className="px-3 py-2">Letzter Crawl</th><th className="px-3 py-2">Nächster</th><th className="px-3 py-2 text-right">N</th>
               <th className="px-3 py-2 text-right">Günstigstes</th><th className="px-3 py-2 text-right">Median</th><th className="px-3 py-2 text-right">Ø</th>
-              <th className="px-3 py-2 text-right">7 Tage</th><th className="px-3 py-2 text-right">30 Tage</th><th className="px-3 py-2">Qualität / Tiefe</th><th className="px-3 py-2">Status</th>
+              <th className="px-3 py-2 text-right">7 Tage</th><th className="px-3 py-2 text-right">30 Tage</th><th className="px-3 py-2">Qualität / Tiefe</th><th className="px-3 py-2">Health</th><th className="px-3 py-2">Status</th>
             </tr></thead>
             <tbody>{tabelle.map((s) => (
               <tr key={s.id} className={`border-t border-white/5 tabular-nums ${s.id === segmentId ? "bg-white/5" : ""} ${s.enabled ? "" : "opacity-50"}`} data-testid={`markt-segmentzeile-${s.id}`}>
@@ -149,6 +167,8 @@ export default function MarktModell() {
                 <td className="px-3 py-1.5 text-right" style={{ color: trendFarbe(s.stats?.trend_7d_pct) }}>{pct(s.stats?.trend_7d_pct)}</td>
                 <td className="px-3 py-1.5 text-right" style={{ color: trendFarbe(s.stats?.trend_30d_pct) }}>{pct(s.stats?.trend_30d_pct)}</td>
                 <td className="px-3 py-1.5"><MarktQualitaet q={s.qualitaet} klein testid={`markt-segment-qualitaet-${s.id}`} /></td>
+                {/* Master-Auftrag Phase F: Health des Segments (getrennt von der Datenqualität) */}
+                <td className="px-3 py-1.5">{healthJeSegment[s.id] ? <HealthBadge health={healthJeSegment[s.id].health} klein titel={healthJeSegment[s.id].health_text || undefined} testid={`markt-segment-health-${s.id}`} /> : <span className="text-zinc-600">—</span>}</td>
                 <td className="px-3 py-1.5">{!s.enabled ? <Badge tone="gray">inaktiv</Badge> : s.letzter_job?.status === "failed" ? <Badge tone="red">Fehler</Badge> : s.letzter_job?.status === "data_invalid" ? <Badge tone="yellow">ungültig</Badge> : s.stats?.sample_size ? <Badge tone="green">ok</Badge> : <Badge tone="gray">wartet</Badge>}</td>
               </tr>))}</tbody>
           </table>

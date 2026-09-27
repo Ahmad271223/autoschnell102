@@ -150,6 +150,7 @@ const AdminMarktPrivateDeals = seite(() => import("@/pages/admin_v2/MarktPrivate
 const AdminMarktHotDeals = seite(() => import("@/pages/admin_v2/MarktHotDeals"));
 const AdminMarktBerichte = seite(() => import("@/pages/admin_v2/MarktBerichte"));
 const AdminMarktBericht = seite(() => import("@/pages/admin_v2/MarktBericht"));
+const AdminMarktOptimierung = seite(() => import("@/pages/admin_v2/MarktOptimierung"));
 
 import Vergleich from "@/pages/app/Vergleich";
 const ManuelleSuche = seite(() => import("@/pages/app/ManuelleSuche"));
@@ -325,6 +326,8 @@ export default function App() {
               {/* Master-Auftrag Phase E (27.09.2026): Berichte 5 Tage / 15 Tage / Monat — Übersicht und Modellbericht */}
               <Route path="markt/berichte" element={<AdminMarktBerichte />} />
               <Route path="markt/berichte/:modell" element={<AdminMarktBericht />} />
+              {/* Master-Auftrag Phase F (27.09.2026): Segment-Optimierung — Health, Frequenz-Zuordnung, Vorschläge */}
+              <Route path="markt/optimierung" element={<AdminMarktOptimierung />} />
               <Route path="markt/:modell" element={<AdminMarktModell />} />
               <Route path="settings" element={<AdminSettings />} />
             </Route>

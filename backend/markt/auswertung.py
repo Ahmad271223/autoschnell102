@@ -24,7 +24,7 @@ import logging
 from datetime import datetime
 from typing import Any, Callable, Dict, Optional
 
-from markt import berichte, deals, konfig
+from markt import berichte, deals, konfig, optimierung
 
 log = logging.getLogger(__name__)
 
@@ -78,6 +78,7 @@ async def durchlauf(db, *, jetzt: Optional[datetime] = None) -> Dict[str, Any]:
             # Phase E: erst die Hot Deals (die Berichte frieren die Hot Deals des Zeitraums mit ein), dann die
             # faelligen Berichte — laufende Perioden werden nie final gespeichert
             erg["berichte"] = await berichte.faellige_finalisieren(db, jetzt=jetzt)
+            erg["health"] = await optimierung.taeglich(db, jetzt=jetzt)      # Phase F: einmal je Tag, nach Hot Deals und Berichten
             await konfig.merker_setzen(db, konfig.AUSWERTUNG_DOK, letzter_lauf_at=konfig.jetzt_iso(), ergebnis=erg)
         if not fehler_anzahl(erg):
             # Pruefbefund B11: ein fehlerfreier Durchlauf schliesst den Alarm, egal welcher Prozess (oder der

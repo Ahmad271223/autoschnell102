@@ -69,7 +69,8 @@ def test_b02_architektur_auswertung_loest_nie_crawls_aus():
         assert "apify" not in q and "job_sofort" not in q and "tagesplan" not in q and "synchronisieren" not in q, fn.__name__
     # Master-Auftrag Phase D/E (27.09.2026): Hot Deals, Berichte und der Auswertungs-Worker lesen nur gespeicherte
     # Tageswerte — kein Import und kein Aufruf von Crawl-Funktionen (apify, jobs, entfernung, segmente.synchronisieren, httpx)
-    for datei in ("deals.py", "auswertung.py", "berichte.py"):
+    # Phase F/G: Segment-Health und Optimierung ebenso (Laufzeittest: test_markt_health_20260927.py::test_12)
+    for datei in ("deals.py", "auswertung.py", "berichte.py", "health.py", "optimierung.py"):
         q = (BACKEND / "markt" / datei).read_text(encoding="utf-8")
         for v in verboten:
             assert v not in q, f"{datei} ruft {v}"

@@ -228,6 +228,126 @@ async def admin_market_reports_finalize(admin=Depends(current_super_admin)):
     return {"ok": True, **erg}
 
 
+# ---------------------------------------------------------------- Segment-Health + Optimierung (Master-Auftrag Phase F, 27.09.2026)
+# Lesen: current_admin; Schreiben (Frequenz-Zuordnung, Health jetzt berechnen, Vorschlaege entscheiden/uebernehmen):
+# current_super_admin. Health und Vorschlaege entstehen nur aus gespeicherten Tageswerten (kein Abruf).
+class FrequenzStufeIn(BaseModel):
+    ab: int = Field(..., ge=0, le=100)
+    crawls_per_day: int = Field(1, ge=1, le=4)
+    intervall_tage: int = Field(1, ge=1, le=30)
+    intervall_tage_bis: Optional[int] = Field(default=None, ge=1, le=30)
+
+
+class FrequenzIn(BaseModel):
+    stufen: List[FrequenzStufeIn] = Field(..., min_length=1, max_length=6)
+    empty_nachpruefung_tage: int = Field(7, ge=1, le=60)
+
+
+def _optimierung_fehler(ex: Exception) -> HTTPException:
+    from markt import optimierung
+    if isinstance(ex, optimierung.NichtGefunden):
+        return HTTPException(404, str(ex))
+    if isinstance(ex, (optimierung.Konflikt, auftraege.Konflikt)):
+        return HTTPException(409, str(ex))
+    return HTTPException(400, str(ex))
+
+
+@router.get("/admin/market/optimierung")
+async def admin_market_optimierung(_=Depends(current_admin)):
+    """Admin -> Marktanalyse -> Segment-Optimierung: Modus, Frequenz-Zuordnung, Schwellen, Health je Modell, Ersparnis."""
+    from markt import optimierung
+    return await optimierung.uebersicht(db)
+
+
+@router.put("/admin/market/optimierung/frequenz")
+async def admin_market_optimierung_frequenz(body: FrequenzIn, admin=Depends(current_super_admin)):
+    """Zuordnung Activity Score -> empfohlene Frequenz (Abschnitt 30) — konfigurierbar, wirkt nur als Empfehlung."""
+    from markt import health, optimierung
+    try:
+        cfg = await optimierung.frequenz_setzen(db, body.model_dump(), wer=admin["id"])
+    except health.Ungueltig as ex:
+        raise HTTPException(400, str(ex))
+    await log_activity_sicher("", admin["id"], "admin.markt.optimierung.frequenz", meta={"stufen": [s["ab"] for s in cfg["stufen"]],
+                                                                                        "empty_nachpruefung_tage": cfg["empty_nachpruefung_tage"]})
+    return {"ok": True, "frequenz": cfg}
+
+
+@router.post("/admin/market/optimierung/berechnen")
+async def admin_market_optimierung_berechnen(admin=Depends(current_super_admin)):
+    """'Health jetzt berechnen' — sonst einmal taeglich im Auswertungs-Worker; liest nur Gespeichertes, kostet nichts."""
+    from markt import optimierung
+    erg = await optimierung.jetzt_berechnen(db, wer=admin["id"])
+    if erg.get("gesperrt"):
+        raise HTTPException(409, "Die Auswertung läuft gerade in einem anderen Prozess — bitte gleich noch einmal")
+    await log_activity_sicher("", admin["id"], "admin.markt.optimierung.berechnen",
+                              meta={k: v for k, v in erg.items() if isinstance(v, (int, str)) and k != "stichtag"})
+    return {"ok": True, **erg}
+
+
+@router.get("/admin/market/optimierung/vorschlaege")
+async def admin_market_vorschlaege(status: str = "offen", typ: Optional[str] = None, model_id: Optional[str] = None,
+                                   limit: int = Query(300, ge=1, le=1000), _=Depends(current_admin)):
+    from markt import optimierung
+    try:
+        return await optimierung.vorschlaege_liste(db, status=status, typ=typ, model_id=model_id, limit=limit)
+    except optimierung.Ungueltig as ex:
+        raise HTTPException(400, str(ex))
+
+
+@router.post("/admin/market/optimierung/vorschlaege/{vorschlag_id}/annehmen")
+async def admin_market_vorschlag_annehmen(vorschlag_id: str, admin=Depends(current_super_admin)):
+    from markt import optimierung
+    try:
+        v = await optimierung.vorschlag_entscheiden(db, vorschlag_id, "annehmen", wer=admin["id"])
+    except optimierung.Ungueltig as ex:
+        raise _optimierung_fehler(ex)
+    await log_activity_sicher("", admin["id"], "admin.markt.vorschlag.annehmen", ref=vorschlag_id, meta={"typ": v.get("typ")})
+    return {"ok": True, "vorschlag": v}
+
+
+@router.post("/admin/market/optimierung/vorschlaege/{vorschlag_id}/ablehnen")
+async def admin_market_vorschlag_ablehnen(vorschlag_id: str, admin=Depends(current_super_admin)):
+    from markt import optimierung
+    try:
+        v = await optimierung.vorschlag_entscheiden(db, vorschlag_id, "ablehnen", wer=admin["id"])
+    except optimierung.Ungueltig as ex:
+        raise _optimierung_fehler(ex)
+    await log_activity_sicher("", admin["id"], "admin.markt.vorschlag.ablehnen", ref=vorschlag_id, meta={"typ": v.get("typ")})
+    return {"ok": True, "vorschlag": v}
+
+
+@router.post("/admin/market/optimierung/vorschlaege/{vorschlag_id}/uebernehmen")
+async def admin_market_vorschlag_uebernehmen(vorschlag_id: str, admin=Depends(current_super_admin)):
+    """MERGE/SPLIT uebernehmen: neue Fassung des Suchauftrags (alte Historie bleibt), Auftrag pausiert — danach Testlauf."""
+    from markt import optimierung
+    try:
+        erg = await optimierung.vorschlag_uebernehmen(db, vorschlag_id, wer=admin["id"])
+    except (optimierung.Ungueltig, auftraege.Ungueltig) as ex:
+        raise _optimierung_fehler(ex)
+    v = erg["vorschlag"]
+    await log_activity_sicher("", admin["id"], "admin.markt.vorschlag.uebernehmen", ref=vorschlag_id,
+                              meta={"typ": v.get("typ"), "model_id": v.get("model_id"), "alte_version": v.get("alte_version"),
+                                    "neue_version": v.get("neue_version")})
+    return {"ok": True, **erg}
+
+
+@router.get("/admin/market/health/models/{model_id}")
+async def admin_market_health_modell(model_id: str, _=Depends(current_admin)):
+    """Modell-Health (Aggregat), Health je Segment und offene Vorschlaege eines Suchauftrags — nur lesen."""
+    from markt import optimierung
+    d = await optimierung.modell_ansicht(db, model_id)
+    if not d:
+        raise HTTPException(404, "Noch keine Health-Berechnung für diesen Suchauftrag")
+    return d
+
+
+@router.get("/admin/market/health/segments/{segment_id}/history")
+async def admin_market_health_historie(segment_id: str, _=Depends(current_admin)):
+    """Status-Wechsel eines Segments (nur Wechsel, kein Tagesdokument je Tag)."""
+    from markt import health
+    return {"segment_id": segment_id, "wechsel": await health.historie(db, segment_id)}
+
+
 # ---------------------------------------------------------------- Suchauftraege (Auftrag v3)
 class AuftragIn(BaseModel):
     """Freies Formular — Pruefung in markt.auftraege.entwurf_pruefen."""

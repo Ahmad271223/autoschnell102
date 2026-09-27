@@ -1050,7 +1050,14 @@ async def markt_indizes(db) -> dict:
             ("market_hot_deal_events", [("segment_id", 1), ("listing_id", 1), ("lauf_key", 1), ("typ", 1)], "markt_hotdeal_ereignis"),
             # Phase E (27.09.2026): ein eingefrorener Bericht je Modell/Typ/Periode — zwei Server erzeugen nie zwei
             # Berichte; fehlt der Index, friert markt.berichte nichts ein (nicht kritisch fuer den Crawler)
-            ("market_model_reports", [("model_id", 1), ("typ", 1), ("periode_von", 1), ("periode_bis", 1)], "markt_bericht_je_periode")):
+            ("market_model_reports", [("model_id", 1), ("typ", 1), ("periode_von", 1), ("periode_bis", 1)], "markt_bericht_je_periode"),
+            # Phase F (27.09.2026): Health je Segment/Modell, Status-Wechsel einmalig je (Segment, Tag, von, nach), Vorschlaege
+            # einmalig je fachlichem Schluessel (derselbe Vorschlag entsteht nie taeglich neu). Nicht kritisch fuer den Crawler.
+            ("market_segment_health", "segment_id", "markt_health_segment"),
+            ("market_model_health", "model_id", "markt_health_modell"),
+            ("market_segment_health_history", [("segment_id", 1), ("tag", 1), ("von", 1), ("nach", 1)], "markt_health_wechsel"),
+            ("market_optimization_proposals", "schluessel", "markt_vorschlag_schluessel"),
+            ("market_optimization_proposals", "id", "markt_vorschlag_id")):
         try:
             ok = await unique_anlegen(db[sammlung], schluessel, name=name, weich=True)
         except Exception as exc:  # noqa: BLE001
@@ -1092,7 +1099,12 @@ async def markt_indizes(db) -> dict:
             ("market_hot_deal_events", [("tag", 1), ("typ", 1)], "markt_hotdeal_ereignis_tag"),
             ("market_hot_deal_events", [("model_id", 1), ("tag", 1)], "markt_hotdeal_ereignis_modell"),
             # Phase E: Periodenliste/Uebersicht aller Modelle je Periode
-            ("market_model_reports", [("typ", 1), ("periode_von", -1), ("periode_bis", 1)], "markt_bericht_periode")):
+            ("market_model_reports", [("typ", 1), ("periode_von", -1), ("periode_bis", 1)], "markt_bericht_periode"),
+            # Phase F: Health je Modell (Modellseite), Wechsel-Historie je Modell, Vorschlagslisten
+            ("market_segment_health", [("model_id", 1), ("health", 1)], "markt_health_modell_status"),
+            ("market_segment_health_history", [("model_id", 1), ("tag", -1)], "markt_health_wechsel_modell"),
+            ("market_optimization_proposals", [("status", 1), ("typ", 1)], "markt_vorschlag_status_typ"),
+            ("market_optimization_proposals", [("model_id", 1), ("status", 1)], "markt_vorschlag_modell")):
         sammlung, schluessel, name = eintrag[0], eintrag[1], eintrag[2]
         optionen = eintrag[3] if len(eintrag) > 3 else {}
         ref = f"{sammlung}.{name}"

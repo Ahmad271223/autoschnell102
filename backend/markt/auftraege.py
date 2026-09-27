@@ -517,13 +517,16 @@ async def anlegen(db, entwurf: Dict[str, Any]) -> Dict[str, Any]:
     return doc
 
 
-async def aendern(db, model_id: str, entwurf: Dict[str, Any]) -> Dict[str, Any]:
+async def aendern(db, model_id: str, entwurf: Dict[str, Any], *, fassung_erhoehen: bool = False) -> Dict[str, Any]:
     """P4: aendern sich materielle Merkmale (definition_hash), steigt die Fassung — die
     Segmente der neuen Fassung bekommen eigene IDs, die alten werden von synchronisieren
     deaktiviert (nichts geloescht). rows/crawls_per_day/ez_years/km_buckets/label/status/
     notiz/priority aendern die Fassung NICHT.
     Welle 5 Nr. 65: eine materielle Aenderung eines AKTIVEN Auftrags braucht einen bestandenen
-    Testlauf fuer die neue Definition (sonst 'erst Testlauf'); Nr. 64: kein Zwilling."""
+    Testlauf fuer die neue Definition (sonst 'erst Testlauf'); Nr. 64: kein Zwilling.
+    Master-Auftrag Phase F (Abschnitte 32-34): fassung_erhoehen=True (Uebernahme eines Optimierungsvorschlags
+    MERGE/SPLIT der km-Bereiche) erhoeht die Fassung auch ohne geaenderten definition_hash — die Segmente der neuen
+    Fassung sind eine neue Zeitreihe, die alte Historie bleibt unveraendert und wird nie mit ihr vermischt."""
     alt = await db[MODELLE].find_one({"id": model_id}, {"_id": 0})
     if not alt:
         raise Ungueltig("Modell nicht gefunden")
@@ -534,7 +537,7 @@ async def aendern(db, model_id: str, entwurf: Dict[str, Any]) -> Dict[str, Any]:
     neu_hash = definition_hash(m)
     version = segmente.modell_version(alt)
     testlauf_felder: Dict[str, Any] = {k: entwurf[k] for k in ("testlauf_ok_at", "testlauf_ok_hash") if entwurf.get(k)}
-    if neu_hash != alt_hash:
+    if neu_hash != alt_hash or fassung_erhoehen:
         version += 1
         zwilling = await _semantisches_duplikat(db, m, ohne_id=model_id)
         if zwilling:

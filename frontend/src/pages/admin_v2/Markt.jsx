@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { BarChart3, RefreshCw, Play, Pause, Settings2, Radar, AlertTriangle, ListPlus, UserRound, Flame, FileBarChart } from "lucide-react";
+import { BarChart3, RefreshCw, Play, Pause, Settings2, Radar, AlertTriangle, ListPlus, UserRound, Flame, FileBarChart, Gauge } from "lucide-react";
 import { toast } from "sonner";
 import { api, errMsg } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
@@ -76,6 +76,7 @@ export default function Markt() {
                     {superAdmin && <Link to="/admin/markt/private-deals" data-testid="markt-private-deals-link"><Button variant="outline" size="sm"><UserRound size={14} /> Private Deals</Button></Link>}
                     {superAdmin && <Link to="/admin/markt/hot-deals" data-testid="markt-hot-deals-link"><Button variant="outline" size="sm"><Flame size={14} /> Hot Deals</Button></Link>}
                     <Link to="/admin/markt/berichte" data-testid="markt-berichte-link"><Button variant="outline" size="sm"><FileBarChart size={14} /> Berichte</Button></Link>
+                    <Link to="/admin/markt/optimierung" data-testid="markt-optimierung-link"><Button variant="outline" size="sm"><Gauge size={14} /> Segment-Optimierung</Button></Link>
                     <Link to="/admin/markt/auftraege" data-testid="markt-auftraege-link"><Button size="sm"><ListPlus size={14} /> Suchaufträge</Button></Link>
                   </div>} />
 

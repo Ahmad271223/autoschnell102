@@ -36,6 +36,22 @@ AUSWERTUNG_DOK = "auswertung"      # market_config/auswertung: Stand des Auswert
 # Master-Auftrag Phase E (27.09.2026): eingefrorene Modellberichte (5 Tage / 15 Tage / Monat), ein Dokument je
 # Modell und Periode, nach dem Einfrieren nie mehr geaendert
 BERICHTE = "market_model_reports"
+# Master-Auftrag Phase F/G (27.09.2026): Segment-Health (aktueller Stand je Segment, nur Status-WECHSEL als Historie,
+# Aggregat je Suchauftrag), Optimierungsvorschlaege und das Protokoll der SAFE_AUTO-Aenderungen — alles nur aus
+# gespeicherten Tageswerten (markt.health / markt.optimierung), nie ein Abruf
+HEALTH = "market_segment_health"
+HEALTH_HISTORIE = "market_segment_health_history"
+MODELL_HEALTH = "market_model_health"
+VORSCHLAEGE = "market_optimization_proposals"
+AENDERUNGEN = "market_optimization_changes"
+OPTIMIERUNG_DOK = "optimierung"    # market_config/optimierung: Modus (OBSERVE/SAFE_AUTO) + Frequenz-Zuordnung
+HEALTH_DOK = "health"              # market_config/health: Tag der letzten taeglichen Health-Berechnung + Stand
+# Modi der Auto-Optimierung (Abschnitt 31): OBSERVE (Standard, nur Empfehlungen), SAFE_AUTO (nur Frequenz senken,
+# EMPTY pausieren mit Nachpruefung, HOT vorziehen). FULL_AUTO ist gesperrt (nur Anzeige). Der Tagesplan liest den
+# Modus; ohne lesbaren Modus gilt OBSERVE (keine Automatik).
+MODUS_OBSERVE = "OBSERVE"
+MODUS_SAFE_AUTO = "SAFE_AUTO"
+MODUS_FULL_AUTO = "FULL_AUTO"
 
 QUELLE = "mobile"
 # Wunsch Ahmad 26.09.2026: die Erstzulassung MUSS gleich sein — ein 320d von

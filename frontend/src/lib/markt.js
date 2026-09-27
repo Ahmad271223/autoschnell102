@@ -275,3 +275,61 @@ export function berichtSortieren(zeilen, sort) {
     return x - y || String(a.label || "").localeCompare(String(b.label || ""), "de");
   });
 }
+
+/** Master-Auftrag Phase F (27.09.2026): Segment-Health — getrennt von der technischen Datenqualität.
+ *  Farben nach Abschnitt 47 (nur CSS-Variablen, helle und dunkle Ansicht): HOT deutlich hervorgehoben,
+ *  HEALTHY grün, THIN gelb, EMPTY grau, UNSTABLE rot, STALE orange; UNKNOWN = noch zu wenig Läufe. */
+export const HEALTH = {
+  HOT: { text: "HOT — sehr aktiv", kurz: "HOT", farbe: "var(--st-lila)", hervorheben: true },
+  HEALTHY: { text: "gesund", kurz: "HEALTHY", farbe: "var(--st-gruen)" },
+  NORMAL: { text: "normal", kurz: "NORMAL", farbe: "var(--text-secondary)" },
+  THIN: { text: "dünn (im Mittel unter 2 Autos)", kurz: "THIN", farbe: "var(--st-gelb)" },
+  EMPTY: { text: "leer (fast immer ohne Treffer)", kurz: "EMPTY", farbe: "var(--st-grau)" },
+  UNSTABLE: { text: "instabil (ungültige Läufe / starke Schwankung)", kurz: "UNSTABLE", farbe: "var(--st-rot)" },
+  STALE: { text: "veraltet (letzter gültiger Lauf zu alt)", kurz: "STALE", farbe: "var(--st-amber)" },
+  UNKNOWN: { text: "noch nicht bewertet (zu wenig Läufe)", kurz: "—", farbe: "var(--text-dim)" },
+};
+export const HEALTH_REIHE = ["HOT", "HEALTHY", "NORMAL", "THIN", "EMPTY", "UNSTABLE", "STALE", "UNKNOWN"];
+export function healthInfo(h) {
+  return HEALTH[h] || HEALTH.UNKNOWN;
+}
+/** Stil einer Health-Kennzeichnung: Rahmen + Schrift in der Statusfarbe; HOT zusätzlich fett und hinterlegt. */
+export function healthStil(h) {
+  const i = healthInfo(h);
+  return { color: i.farbe, borderColor: i.farbe, ...(i.hervorheben ? { fontWeight: 700, background: "var(--wa-08)" } : {}) };
+}
+export const VORSCHLAG_TYP = {
+  MERGE_KM_BUCKETS: "km-Bereiche zusammenlegen",
+  SPLIT_KM_BUCKET: "km-Bereich aufteilen",
+  REDUCE_FREQUENCY: "seltener abrufen",
+  PAUSE_EMPTY: "pausieren (EMPTY, mit Nachprüfung)",
+  PRIORITIZE_HOT: "zuerst planen (HOT)",
+};
+export const VORSCHLAG_STATUS = {
+  PROPOSED: { text: "vorgeschlagen", tone: "blue" },
+  ACCEPTED: { text: "angenommen", tone: "green" },
+  REJECTED: { text: "abgelehnt", tone: "red" },
+  APPLIED: { text: "übernommen", tone: "purple" },
+  OBSOLETE: { text: "überholt", tone: "gray" },
+};
+/** Empfohlene Frequenz: 0,5 = 2× täglich, 1 = täglich, n = alle n Tage; pausiert = EMPTY mit Nachprüfung. */
+export function frequenzText(tage, pausiert = false) {
+  if (tage === null || tage === undefined || Number.isNaN(Number(tage))) return "—";
+  const t = Number(tage);
+  if (pausiert) return `pausiert · Nachprüfung alle ${Math.round(t)} Tage`;
+  if (t < 1) return `${Math.round(1 / t)}× täglich`;
+  if (t === 1) return "täglich";
+  return `alle ${Math.round(t)} Tage`;
+}
+/** Geschätzte Monatsersparnis: positiv = Ersparnis, negativ = Mehrkosten (z. B. Aufteilen). */
+export function ersparnisText(usd) {
+  if (usd === null || usd === undefined || Number.isNaN(Number(usd))) return "—";
+  const v = Number(usd);
+  const z = `${Math.abs(v).toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} $/Monat`;
+  return v < 0 ? `+${z} Mehrkosten` : v === 0 ? "keine Kostenänderung" : `−${z}`;
+}
+export const OPTIMIERUNG_MODUS = {
+  OBSERVE: "Beobachten (nur Empfehlungen)",
+  SAFE_AUTO: "Sicher automatisch",
+  FULL_AUTO: "Voll automatisch (gesperrt)",
+};
