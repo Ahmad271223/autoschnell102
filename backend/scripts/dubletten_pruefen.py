@@ -97,6 +97,29 @@ def doppelte_fahrzeuge(db) -> int:
     return n
 
 
+def doppelte_ids(db) -> int:
+    """Startpruefung 27.09.2026 (H1): doppelte id in appointments bzw.
+    pickup_protocols (auch mehrere Dokumente OHNE id). Sie verhindern, dass
+    indizes.id_lese_indizes den Index termin_id/protokoll_id EINDEUTIG anlegt
+    (er entsteht dann nicht eindeutig, Betriebsalarm id_nicht_eindeutig).
+    Bereinigen von Hand, danach Backend neu starten. Loescht NICHTS."""
+    n = 0
+    for coll in ("appointments", "pickup_protocols"):
+        for d in db[coll].aggregate([
+                {"$group": {"_id": "$id", "n": {"$sum": 1},
+                            "docs": {"$push": {"_id": "$_id", "dealer_id": "$dealer_id",
+                                               "status": "$status",
+                                               "created_at": "$created_at"}}}},
+                {"$match": {"n": {"$gt": 1}}}]):
+            n += 1
+            wert = "OHNE id" if d["_id"] is None else repr(d["_id"])
+            print(f"{coll}.id = {wert}: {d['n']}x")
+            for e in d["docs"][:20]:
+                print(f"    _id={e.get('_id')}  dealer_id={e.get('dealer_id')}"
+                      f"  status={e.get('status')}  created_at={e.get('created_at')}")
+    return n
+
+
 def main(db=None) -> int:
     if db is None:
         db = MongoClient(MONGO_URL, serverSelectionTimeoutMS=10000)[DB_NAME]
@@ -114,6 +137,7 @@ def main(db=None) -> int:
     gefunden += kreuz_dubletten(db)
     gefunden += doppelte_offene_termine(db)
     gefunden += doppelte_fahrzeuge(db)
+    gefunden += doppelte_ids(db)
     print("Keine Dubletten." if not gefunden else f"{gefunden} doppelte Werte — bitte bereinigen.")
     return 0 if not gefunden else 1
 

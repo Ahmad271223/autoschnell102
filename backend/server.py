@@ -1487,6 +1487,12 @@ async def ensure_indexes():
     # Anmeldung, jede Berechtigungspruefung) — bisher ohne eigenen Index.
     await db.users.create_index("id", name="by_user_id")
     await db.dealers.create_index("id", name="by_dealer_id")
+    # Startpruefung 27.09.2026 (H1): dasselbe fuer Termine und Abholprotokolle
+    # ($lookup der Freigaben-Liste/-Zaehler, find_one({"id": ...}) ohne Firma).
+    # Eindeutig, wenn keine Dubletten; sonst nicht eindeutig + Alarm. Nicht
+    # kritisch, wirft nie (Rumpf in indizes.id_lese_indizes).
+    from indizes import id_lese_indizes
+    await id_lese_indizes(db)
     await db.appointments.create_index([("dealer_id", 1), ("contract_id", 1)])
     # Runde 17: Vertragszeiger je Termin (idempotente Nachfuehrung beim PUT)
     await db.generated_pdfs.create_index([("dealer_id", 1), ("appointment_id", 1)])

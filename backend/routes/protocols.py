@@ -2972,7 +2972,10 @@ async def _wartende_protokolle(user, felder: Optional[Dict[str, int]] = None) ->
     pipeline: List[Dict[str, Any]] = [
         {"$match": {"dealer_id": user["dealer_id"], "status": {"$in": _FREIGABE_STATI},
                     "superseded": {"$ne": True}}},
-        # localField/foreignField nutzt den Index appointments.id.
+        # localField/foreignField nutzt den Index appointments.id ("termin_id",
+        # seit Startpruefung 27.09.2026 H1 — vorher stand er nur in diesem
+        # Kommentar; angelegt in indizes.id_lese_indizes, schlicht, weil
+        # MongoDB im $lookup keinen sparse-/Teilindex nutzt).
         {"$lookup": {"from": "appointments", "localField": "appointment_id",
                      "foreignField": "id", "as": "_termin"}},
         {"$unwind": "$_termin"},           # ohne Termin (geloescht): weg

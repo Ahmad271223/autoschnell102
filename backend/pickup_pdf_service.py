@@ -344,29 +344,65 @@ def _check_table(rows: List[List], col_widths: List[float]) -> Table:
     return t
 
 
+#: Startpruefung 27.09.2026 (K5): Seit dem KI-Umbau speichert die Fahrer-App
+#: jedes "Nein" bei der Ausstattung als Text mit Grund (routes/protocols.py,
+#: ProtocolIn.features). Der Grund steht im PDF hinter dem "nein".
+NEIN_GRUENDE = {
+    "fehlt": "fehlt komplett",
+    "defekt": "vorhanden, defekt",
+    "anders": "anders als beschrieben",
+}
+
+
+def _checkwert(wert) -> tuple:
+    """Startpruefung 27.09.2026 (K5): EIN Wert einer Ja/Nein-Zeile -> (Zustand,
+    Grund). Zustand "ja" | "nein" | "offen".
+
+    Vorher galt jeder nicht leere Wert als vorhanden (bool(wert)) — die Texte
+    "fehlt"/"defekt"/"anders" der Fahrer-App standen damit im unterschriebenen
+    Abholprotokoll als "[X]" (vorhanden), also das Gegenteil dessen, was der
+    Fahrer festgestellt hat. Jetzt:
+      True               -> ja (vorhanden)
+      False              -> nein (aeltere App, ohne Grund)
+      "fehlt"/"defekt"/"anders" (Gross/Klein, Leerzeichen egal) -> nein + Grund
+      None, "" und alles andere -> offen (nicht geprueft) — nie "vorhanden"."""
+    if wert is True:
+        return "ja", ""
+    if wert is False:
+        return "nein", ""
+    if isinstance(wert, str):
+        grund = NEIN_GRUENDE.get(wert.strip().lower())
+        if grund:
+            return "nein", grund
+    return "offen", ""
+
+
 def _checklist(items: List[tuple], st, col_count: int = 2,
-               checked: Optional[Dict[str, bool]] = None) -> Table:
+               checked: Optional[Dict[str, Any]] = None) -> Table:
     """Renders a grid of [ ] Label items. `items` is list of
     (label, sub_note?) tuples; sub_note is optional gray line.
-    `checked` (Label -> bool) markiert erledigte Punkte mit [X].
+    `checked` (Label -> Wert) markiert erledigte Punkte mit [X].
 
     Rollenprüfung 22.09.2026 (RP-068/167): Seit jede Zeile mit Ja ODER Nein
     beantwortet werden muss, ist ein ausdrueckliches Nein (False) etwas anderes
     als "nicht beantwortet" — im unterschriebenen PDF sahen beide gleich aus
-    ("[  ]"). Jetzt: True "[X]", False "[–] … nein", fehlend "[  ]"."""
+    ("[  ]"). Jetzt: True "[X]", False "[–] … nein", fehlend "[  ]".
+    Startpruefung 27.09.2026 (K5): "fehlt"/"defekt"/"anders" sind ein Nein mit
+    Grund ("[–] … nein (fehlt komplett)"), siehe _checkwert."""
     cells = []
     for item in items:
         label, note = (item if isinstance(item, tuple) else (item, ""))
-        wert = (checked or {}).get(str(label))
-        if wert is False:
+        zustand, grund = _checkwert((checked or {}).get(str(label)))
+        if zustand == "nein":
             box = "[–]"
-        elif wert is not None and bool(wert):
+        elif zustand == "ja":
             box = "[X]"
         else:
             box = "[&nbsp;&nbsp;]"
         txt = f"{box}&nbsp;{_xe(str(label))}"
-        if wert is False:
-            txt += " <font color='#71717A'>— nein</font>"
+        if zustand == "nein":
+            txt += (" <font color='#71717A'>— nein"
+                    + (f" ({_xe(grund)})" if grund else "") + "</font>")
         para_html = f"<font size=9 color='#0A0A0A'>{txt}</font>"
         if note:
             para_html += f"<br/><font size=7 color='#71717A'>{_xe(str(note))}</font>"

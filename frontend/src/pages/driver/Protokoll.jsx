@@ -55,6 +55,14 @@ const Section = ({ n, title, children, hint }) => (
 // Preisvorschlag, Abschnitt 5 und Nutzlast: siehe ./protokollEntwurf.js
 // (Rollenprüfung 22.09.2026, RP-060/RP-067). Der frühere Einzel-Haken für
 // Abschnitt 5 ist durch JaNein ersetzt.
+// Umbau KI 26.09.2026: Art eines „Nein“ bei der Ausstattung (dieselben Texte
+// druckt pickup_pdf_service.NEIN_GRUENDE ins Abholprotokoll).
+const AUSSTATTUNG_NEIN = {
+  fehlt: "fehlt komplett",
+  defekt: "vorhanden, defekt",
+  anders: "anders als beschrieben",
+};
+
 const JaNein = ({ wert, onChange, disabled, children, testId }) => {
   const knopf = (label, ziel, farbe) => (
     <button type="button" disabled={disabled} onClick={() => onChange(ziel)}
@@ -1055,9 +1063,17 @@ export default function Protokoll() {
                         onChange={(w) => setFeat(ft, w ? true : "fehlt")}>{ft}</JaNein>
                 {/* Umbau KI 26.09.2026: bei "Nein" die Art — fehlt komplett, vorhanden
                     aber defekt, anders als beschrieben — fuer den Geldwert entscheidend. */}
+                {/* Startprüfung 27.09.2026 (K5): gesperrt (ab „zur Freigabe“) steht der
+                    Grund als Text — wie im PDF, das unterschrieben wird. */}
+                {gesperrt && typeof wert === "string" && AUSSTATTUNG_NEIN[art] && (
+                  <div className="pb-2 -mt-1 text-[11px]" style={{ color: "var(--st-rot)" }}
+                       data-testid={`protokoll-ausstattung-grund-${ft}`}>
+                    Nein — {AUSSTATTUNG_NEIN[art]}
+                  </div>
+                )}
                 {nein && !gesperrt && (
                   <div className="flex flex-wrap gap-1.5 pb-2 -mt-1" data-testid={`protokoll-ausstattung-art-${ft}`}>
-                    {[["fehlt", "fehlt komplett"], ["defekt", "vorhanden, defekt"], ["anders", "anders als beschrieben"]].map(([k, l]) => (
+                    {Object.entries(AUSSTATTUNG_NEIN).map(([k, l]) => (
                       <button key={k} type="button" onClick={() => setFeat(ft, k)}
                               data-testid={`protokoll-ausstattung-${ft}-${k}`}
                               className="px-2.5 min-h-[32px] rounded-lg text-[11px] border"

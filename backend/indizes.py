@@ -917,6 +917,101 @@ async def bestand_lese_indizes(db) -> None:
             await alarm_schliessen(db, "index_fehlt", ref=ref)
 
 
+#: Startpruefung 27.09.2026 (H1): Lese-Indizes auf der eigenen id von Terminen
+#: und Abholprotokollen (Sammlung -> Indexname).
+ID_LESE_INDIZES = (("appointments", "termin_id"), ("pickup_protocols", "protokoll_id"))
+
+
+async def _id_dubletten(coll) -> list:
+    """Bis zu 5 Beispiele doppelter id-Werte. Dokumente OHNE id zaehlen als
+    ein Wert (null): ein schlichter Unique-Index nimmt auch sie auf, zwei
+    davon verhindern ihn genauso wie zwei gleiche ids."""
+    return await coll.aggregate([
+        {"$group": {"_id": "$id", "n": {"$sum": 1}}},
+        {"$match": {"n": {"$gt": 1}}}, {"$limit": 5}]).to_list(5)
+
+
+async def id_lese_indizes(db) -> dict:
+    """Startpruefung 27.09.2026 (H1): Index auf appointments.id und
+    pickup_protocols.id. Es gab keinen — jeder $lookup auf den Termin
+    (Freigaben-Zaehler alle 20 s je Chef-Tab, Freigabe-Liste und offene
+    Rueckfragen alle 15 s, Aufraeumlauf) und jedes find_one({"id": ...}) ohne
+    dealer_id las die ganze Sammlung (50 wartende Protokolle x 2000 Termine =
+    100.000 gelesene Termine je Abfrage).
+
+    Schlicht (nicht sparse, nicht partiell): nur so nutzt MongoDB ihn im
+    $lookup (localField/foreignField) — mit sparse oder Teilfilter liest der
+    $lookup weiter die ganze Sammlung (gemessen auf MongoDB 8.2).
+
+    Eindeutig, wenn es keine Dubletten gibt (die id vergibt der Server per
+    uuid4, doppelte ids waeren ein Datenfehler). Gibt es Dubletten (oder
+    mehrere Dokumente ohne id), entsteht derselbe Index NICHT eindeutig —
+    die Abfragen werden trotzdem schnell — und es gibt den Betriebsalarm
+    id_nicht_eindeutig mit Beispielen. Beim naechsten Start nach dem
+    Bereinigen (python scripts/dubletten_pruefen.py bzw. von Hand) wird er
+    eindeutig ersetzt (_index_sicher_ersetzen).
+
+    NICHT kritisch: Dubletten oder ein Fehler brechen den Start nie ab und
+    landen nicht in FEHLENDE_UNIQUE (ohne Index laufen die Abfragen nur
+    langsamer, wie vor dem 27.09.). Scheitert die Anlage ganz: Warnung +
+    Betriebsalarm index_fehlt (Muster bestand_lese_indizes/ki_indizes).
+    Idempotent, wirft nie. Liefert {Sammlung: "eindeutig" | "nicht_eindeutig"
+    | "fehlt"}."""
+    from betrieb import alarm, alarm_schliessen
+    ergebnis: dict = {}
+    for sammlung, name in ID_LESE_INDIZES:
+        coll = db[sammlung]
+        ref = f"{sammlung}.{name}"
+        stand = "fehlt"
+        try:
+            # Steht er schon eindeutig (jeder Start nach dem ersten), keine
+            # Dublettenzaehlung ueber die ganze Sammlung
+            vorhanden = (await coll.index_information()).get(name) or {}
+            steht_eindeutig = (bool(vorhanden.get("unique")) and not vorhanden.get("sparse")
+                               and not vorhanden.get("partialFilterExpression")
+                               and [(f, int(r)) for f, r in vorhanden.get("key", [])] == [("id", 1)])
+            dubletten = [] if steht_eindeutig else await _id_dubletten(coll)
+            if not dubletten:
+                # abbruch_in_produktion=False: auch ein Rennen (Dublette zwischen
+                # Pruefung und Anlage) haelt den Start nicht an, siehe unten
+                if await _index_sicher_ersetzen(coll, "id", name, unique=True,
+                                                abbruch_in_produktion=False):
+                    stand = "eindeutig"
+                else:
+                    # _index_sicher_ersetzen hat den Index als "fehlender Unique"
+                    # gemeldet — fuer diesen Lese-Index nicht gewollt: zuruecknehmen
+                    FEHLENDE_UNIQUE.discard(ref)
+                    await alarm_schliessen(db, "unique_index_fehlt", ref=ref)
+                    dubletten = await _id_dubletten(coll)
+            if stand != "eindeutig":
+                beispiele = ", ".join("ohne id" if d["_id"] is None else str(d["_id"])
+                                      for d in dubletten) or "unbekannt"
+                log.warning("ensure_indexes: %s: doppelte id-Werte (%s) — Index NICHT "
+                            "eindeutig angelegt. Bereinigen: python scripts/"
+                            "dubletten_pruefen.py; beim naechsten Start wird er eindeutig.",
+                            ref, beispiele)
+                await alarm(db, "id_nicht_eindeutig", ref=ref, beispiele=beispiele)
+                await _index_sicher_ersetzen(coll, "id", name, unique=False,
+                                             abbruch_in_produktion=False)
+                stand = "nicht_eindeutig"
+            else:
+                await alarm_schliessen(db, "id_nicht_eindeutig", ref=ref)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ensure_indexes: Index %s nicht angelegt — Abfragen "
+                        "laufen ohne ihn langsamer: %s", ref, exc)
+            try:
+                await alarm(db, "index_fehlt", ref=ref, fehler=str(exc)[:300])
+            except Exception:  # noqa: BLE001
+                log.exception("Alarm index_fehlt fuer %s nicht gesetzt", ref)
+        else:
+            try:
+                await alarm_schliessen(db, "index_fehlt", ref=ref)
+            except Exception:  # noqa: BLE001
+                pass
+        ergebnis[sammlung] = stand
+    return ergebnis
+
+
 #: Name des Teil-Unique-Index fuer selbst vergebene Vertragsnummern —
 #: routes.contracts erkennt daran den DuplicateKeyError (-> 409).
 VERTRAGSNUMMER_INDEX = "vertragsnummer_je_firma"
