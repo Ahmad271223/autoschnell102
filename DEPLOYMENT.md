@@ -3269,7 +3269,8 @@ Begriffe bleiben stehen – bitte melden, dann kommen sie in die Tabelle.
   viele Eingabe-Tokens), Bewertung weiter mit `KI_MODELL` (Sonnet), Denken aus (`KI_DENKEN_AUS=true`).
   Probelauf 26.09.: 29 s, ≈ 11 ct je Abholung mit Suche; ohne Suche ≈ 3 ct.
 - **Kostenbremse** (`ai/budget.py`): `KI_BUDGET_MONAT_EUR` (15) je Sucher-Konto (Vertrag) bzw. Firma
-  (Abholung) und Monat, `KI_KOSTEN_MAX_CT` (15) je Lauf. Ab 80 % des Budgets oder nach einem zu teuren
+  (Abholung) und Monat, `KI_KOSTEN_MAX_CT` (15; seit 27.09.2026 20 ct hart + Ziel 15 ct, siehe
+  „KI-Kostendeckel je Lauf“) je Lauf. Ab 80 % des Budgets oder nach einem zu teuren
   Lauf: Sparmodus (keine Websuche); Budget voll: Status „budget“, keine KI bis Monatsanfang, Vertrag und
   Freigabe laufen normal. Alarm `ki_kosten_ueberschritten`.
 - **Vertrag läuft im Hintergrund:** `POST /contracts/ki-schadennachlass` antwortet sofort mit `id`, Status
@@ -3368,6 +3369,56 @@ Abo. Der Betreiber macht das in der Firmenansicht (Admin → Nutzer → Firma) i
 - **Fachprüfung sichtbar:** Position zeigt „Fachprüfung erforderlich – Betrag unbekannt, Risiko ggf.
   erheblich“; Gesamtkarte roter Kasten „n Positionen ohne Betrag … die vier Werte und der Zielpreis decken sie
   NICHT ab“; Zielpreis-Zeile trägt „(ohne die Fachprüfungs-Positionen)“.
+
+### KI-Kostendeckel je Lauf (27.09.2026)
+
+Anlass: Betriebsalarm am 27.09. um 11:10 — ein Vertrag kostete 15,31 ct, die Grenze war 15 ct. Die Grenze
+wurde bis dahin erst **nach** dem Lauf geprüft; das Geld war schon ausgegeben. Vorgabe Ahmad: „mach maximum
+20ct aber versuchen 15ct“.
+
+**Zwei Grenzen je Lauf** (Vertrag und Abholung):
+
+- **Hart: `KI_KOSTEN_MAX_CT` = 20 ct.** Kein Lauf kostet mehr. Vor **jedem** Aufruf an Claude rechnet
+  `ai/kostenkasse.py` die höchstmöglichen Kosten dieses Aufrufs aus. Passen sie nicht mehr in den Rest,
+  wird der Aufruf nicht gemacht. Das Monatsbudget reserviert je Lauf genau diese 20 ct.
+- **Ziel: `KI_KOSTEN_ZIEL_CT` = 15 ct** (neu). So wird geplant. Zuerst wird die Bewertung (Sonnet) mit dem
+  längstmöglichen Recherche-Text eingeplant. Die Websuche bekommt nur, was bis 15 ct übrig bleibt. Die
+  5 ct zwischen Ziel und harter Grenze sind Puffer, falls Suchergebnisse größer ausfallen als eingeplant.
+
+**So wird gerechnet (sicher nach oben):** Eingabe-Tokens × Preis × 1,25 (teuerster Fall: Cache-Schreiben)
++ höchste Ausgabe (`max_tokens`) × Preis + 1 ct je erlaubter Suche + je Suche 20.000 Tokens Ergebnis
+(`SUCHE_TOKENS_MAX`). Die Bewertung wird vorher mit `count_tokens` exakt gezählt (kostenlos). Die Websuche
+lässt sich nicht zählen; dort wird aus der Textlänge gerechnet. Scheitert das Zählen, wird ebenfalls aus
+der Länge gerechnet (1 Token je 2 Byte, sicher zu hoch).
+
+**Was passiert wann:**
+
+- Normalfall: Bewertung ≈ 5–6 ct eingeplant, für die Websuche bleiben ≈ 9–10 ct → **eine** Suche je Lauf
+  (zwei bräuchten ≈ 12 ct). Tatsächlich kostet ein Lauf damit meist 6–8 ct.
+- Reicht der Rest nicht für eine Suche: Websuche entfällt (wie Sparmodus), Hinweis „Websuche entfallen —
+  Kostendeckel je Lauf“ am Lauf.
+- Fortsetzung der Suche (`pause_turn`) nur, wenn sie noch in den Rest bis 15 ct passt.
+- War die Suche teurer als eingeplant: die Bewertung wird gegen die **harte** Grenze geprüft. Passt sie,
+  läuft sie unverändert. Sonst erst Recherche-Text kürzen/weglassen, dann Antwortlänge senken (nicht unter
+  1.800 Tokens). Passt es dann immer noch nicht, entfällt die Bewertung: Status `kostendeckel`,
+  Betriebsalarm `ki_kostendeckel_gegriffen`. Vertrag und Freigabe laufen immer normal weiter.
+- Läufe zwischen 15 und 20 ct lösen **keinen** Alarm aus. Die Betriebsseite zählt sie („N Läufe über dem Ziel
+  von 15 ct“), der nächste Lauf desselben Kontos/derselben Firma läuft ohne Websuche (Sparmodus).
+- `ki_kosten_ueberschritten` bleibt als letzte Sicherung (über 20 ct, darf praktisch nie kommen) und nennt
+  jetzt die Einzelposten (Recherche-Anfragen, Bewertung, Tokens, Obergrenzen).
+- Kein zweiter, womöglich bezahlter Versuch des SDK mehr (`max_retries=0` für Bewertung und Recherche).
+- Preisliste korrigiert: Sonnet 5 kostet 2 $/10 $ je Million Tokens (vorher mit 3 $/15 $ gerechnet),
+  Opus 5 5 $/25 $.
+- Jeder Lauf trägt in `ki_bewertungen` den Bericht `kostendeckel` (Ziel, hart, geplant, Obergrenze, Kosten,
+  Einzelposten, Tokens je Suche). Mit „Tokens je Suche“ lässt sich `SUCHE_TOKENS_MAX` später nachschärfen.
+- Nicht betroffen: die monatliche Markttabelle (`ai/marktdaten.aktualisieren`, ≈ 1,20 € je Lauf) hat weiter
+  keine eigene Grenze — offene Entscheidung.
+
+**Auf dem Server:** Steht in der `.env` noch `KI_KOSTEN_MAX_CT=15` (ausdrücklich gesetzt), gilt weiter
+15 ct als harte Grenze und das Ziel wird automatisch auf 15 ct begrenzt. Also auf 20 setzen, auf **beiden**
+Servern, dann Rollout:
+
+    sh deploy/env_setzen.sh KI_KOSTEN_MAX_CT=20 KI_KOSTEN_ZIEL_CT=15
 
 ## Market Intelligence (Auftrag Ahmad 25./26.09.2026) — eigene mobile.de-Marktbeobachtung
 

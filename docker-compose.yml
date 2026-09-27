@@ -229,7 +229,10 @@ services:
       - KI_MARKTANALYSE_VERTRAG=${KI_MARKTANALYSE_VERTRAG:-true}
       - KI_BUDGET_MONAT_EUR=${KI_BUDGET_MONAT_EUR:-15}
       - KI_BUDGET_FAHRER_EUR=${KI_BUDGET_FAHRER_EUR:-10}
-      - KI_KOSTEN_MAX_CT=${KI_KOSTEN_MAX_CT:-15}
+      # Kostendeckel je Lauf (27.09.2026): hart 20 ct (nie mehr, vor jedem
+      # Aufruf geprueft), Ziel 15 ct (so wird geplant, Websuche nur im Rest)
+      - KI_KOSTEN_MAX_CT=${KI_KOSTEN_MAX_CT:-20}
+      - KI_KOSTEN_ZIEL_CT=${KI_KOSTEN_ZIEL_CT:-15}
       - KI_KONTEXT_ZEITLIMIT_SEKUNDEN=${KI_KONTEXT_ZEITLIMIT_SEKUNDEN:-2}
       - KI_KALIBRIERUNG_MIN_FIRMA=${KI_KALIBRIERUNG_MIN_FIRMA:-5}
       # Review 26.09.2026: abgelegte KI-Ergebnisse gelten hoechstens so viele Tage

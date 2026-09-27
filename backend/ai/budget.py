@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 """Kostenbremse fuer die KI (Wunsch Ahmad 26.09.2026): jeder Nutzer darf
 hoechstens KI_BUDGET_MONAT_EUR (15) im Monat verursachen, ein einzelner Lauf
-hoechstens KI_KOSTEN_MAX_CT (15 ct).
+hoechstens KI_KOSTEN_MAX_CT (seit 27.09.2026: 20 ct, HART — ai.kostenkasse
+prueft VOR jedem Aufruf) und soll KI_KOSTEN_ZIEL_CT (15 ct) nicht
+ueberschreiten (so wird geplant; "mach maximum 20ct aber versuchen 15ct").
 
 Beim Vertrag zaehlt das Konto des Suchers (user_id), bei der Abholung die
 Firma (dealer_id — der Chef loest die Bewertung aus). Ab 80 % des Monats-
-budgets oder nach einem Lauf ueber der Einzelgrenze schaltet die naechste
+budgets oder nach einem Lauf ueber dem ZIEL je Lauf schaltet die naechste
 Bewertung in den Sparmodus (keine Websuche je Fall, nur eigene Daten und
 Markttabelle); ist das Budget aufgebraucht, gibt es bis Monatsanfang keine
 KI-Bewertung mehr (Status "budget"), der Vertrag/die Freigabe laufen normal.
@@ -34,7 +36,18 @@ def budget_monat_eur() -> float:
 
 
 def kosten_max_ct() -> float:
-    return kommazahl_env("KI_KOSTEN_MAX_CT", 15.0, unten=0.5, oben=10000.0)
+    """HARTE Grenze je Lauf (Cent): kein Lauf kostet je mehr — ai.kostenkasse
+    prueft sie VOR jedem Aufruf; reserviert wird genau dieser Betrag.
+    Vorgabe Ahmad 27.09.2026: "maximum 20ct" (vorher 15 ct, nur hinterher
+    geprueft)."""
+    return kommazahl_env("KI_KOSTEN_MAX_CT", 20.0, unten=0.5, oben=10000.0)
+
+
+def ziel_ct() -> float:
+    """ZIEL je Lauf (Cent, KI_KOSTEN_ZIEL_CT, Standard 15): so wird geplant —
+    Bewertung zuerst, die Websuche nur im Rest bis hierher. Nie ueber der
+    harten Grenze (sonst auf sie begrenzt)."""
+    return min(kommazahl_env("KI_KOSTEN_ZIEL_CT", 15.0, unten=0.5, oben=10000.0), kosten_max_ct())
 
 
 def budget_fahrer_eur() -> float:
@@ -106,7 +119,8 @@ async def reservieren(*, user_id: Optional[str], dealer_id: Optional[str], art: 
     """Review 25.09.2026 abends: das Budget wird VOR dem Lauf atomar reserviert
     (Zaehler je Konto/Firma und Monat, ein find_one_and_update mit $expr) —
     zwei gleichzeitige Laeufe koennen die Grenze nicht mehr gemeinsam
-    ueberschreiten. Reserviert wird die Einzelgrenze (KI_KOSTEN_MAX_CT),
+    ueberschreiten. Reserviert wird die HARTE Einzelgrenze (KI_KOSTEN_MAX_CT,
+    20 ct) — mehr kann ein Lauf seit 27.09.2026 nicht kosten (ai.kostenkasse);
     `abrechnen` ersetzt sie nach dem Lauf durch die echten Kosten.
     None = Budget voll. Ohne Grenze oder bei DB-Fehler: offen (wie pruefen).
 
@@ -213,14 +227,15 @@ async def pruefen(*, user_id: Optional[str], dealer_id: Optional[str], art: str,
     erlaubt = firma_ok and fahrer_ok
     sparmodus = (grenze > 0 and verbraucht >= grenze * SPARMODUS_AB) \
         or (grenze_fahrer > 0 and fahrer_verbraucht >= grenze_fahrer * SPARMODUS_AB) \
-        or v["letzter_lauf_ct"] > kosten_max_ct()
+        or v["letzter_lauf_ct"] > ziel_ct()          # 27.09.2026: ueber dem ZIEL -> naechster ohne Websuche
     grund = ""
     if not fahrer_ok:
         grund = grund_fahrer_voll(fahrer_verbraucht, grenze_fahrer)
     elif not firma_ok:
         grund = grund_firma_voll(verbraucht, grenze)
     elif sparmodus:
-        grund = "Sparmodus: keine Websuche je Fall (Budget fast erreicht oder letzter Lauf zu teuer)."
+        grund = ("Sparmodus: keine Websuche je Fall (Budget fast erreicht oder letzter Lauf über dem Ziel "
+                 f"von {ziel_ct():g} ct).")
     return {"erlaubt": erlaubt, "sparmodus": sparmodus, "verbraucht_ct": verbraucht,
             "letzter_lauf_ct": v["letzter_lauf_ct"], "grenze_ct": grenze, "grund": grund,
             "fahrer_verbraucht_ct": fahrer_verbraucht if grenze_fahrer > 0 else None,

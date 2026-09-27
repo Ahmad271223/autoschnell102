@@ -353,8 +353,21 @@ function KiKarte() {
           {ki.budget && (
             <div data-testid="ki-betrieb-budget">
               Kostenbremse: höchstens {ki.budget.monat_eur} € je Nutzer/Firma und Monat
-              {ki.budget.fahrer_eur > 0 ? `, ${ki.budget.fahrer_eur} € je Fahrer (Abholung)` : ""}, {ki.budget.lauf_max_ct} ct je Lauf
+              {ki.budget.fahrer_eur > 0 ? `, ${ki.budget.fahrer_eur} € je Fahrer (Abholung)` : ""},{" "}
+              {/* Kostendeckel je Lauf (27.09.2026): Ziel (so wird geplant) und harte Grenze (nie mehr) */}
+              {ki.budget.lauf_ziel_ct != null
+                ? `Ziel ${ki.budget.lauf_ziel_ct} ct je Lauf (höchstens ${ki.budget.lauf_max_ct} ct)`
+                : `${ki.budget.lauf_max_ct} ct je Lauf`}
               {ki.kosten_median_ct != null ? ` · Median je Lauf ${ki.kosten_median_ct} ct` : ""}
+              {ki.budget.ueber_ziel != null && (
+                <span data-testid="ki-betrieb-ueber-ziel">
+                  {` · ${ki.budget.ueber_ziel} ${ki.budget.ueber_ziel === 1 ? "Lauf" : "Läufe"} über dem Ziel von ${ki.budget.lauf_ziel_ct} ct`}
+                </span>
+              )}
+              {ki.budget.deckel_gegriffen > 0 ? ` · Kostendeckel griff ${ki.budget.deckel_gegriffen}×` : ""}
+              {ki.budget.ueber_hart > 0 && (
+                <span className="text-red-300">{` · ${ki.budget.ueber_hart} über der harten Grenze!`}</span>
+              )}
               {ki.eigene_preise ? ` · eigene Preisdatenbank: ${ki.eigene_preise.werte ?? 0} Werte (${ki.eigene_preise.frisch ?? 0} frisch, ${ki.eigene_preise.schluessel ?? 0} Schadensarten)` : ""}
             </div>
           )}

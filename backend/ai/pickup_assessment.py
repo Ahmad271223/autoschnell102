@@ -38,10 +38,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import protokoll_vergleich as PV
 from deps import db, now_iso
 
-from ai import (bekannte_schaeden, budget, freischaltung, kalibrierung, kontext, marktdaten, preisbasis,
-                retention, schaden_abgleich, schemas)
+from ai import (bekannte_schaeden, budget, freischaltung, kalibrierung, kontext, kostenkasse, marktdaten,
+                preisbasis, retention, schaden_abgleich, schemas)
 from ai.bekannte_schaeden import ascii_norm, freitext
-from ai.provider import ergebnis_gueltig, json_bewerten, ki_aktiv, ki_modell
+from ai.provider import KI_MAX_TOKENS, ergebnis_gueltig, json_bewerten, ki_aktiv, ki_modell
 
 log = logging.getLogger("autohandel.ki")
 
@@ -537,23 +537,6 @@ def _lease_abgelaufen(doc: Optional[dict]) -> bool:
         return True
 
 
-async def _kosten_pruefen(usage: Dict[str, Any], modell: str, ref: str, art: str,
-                          fall: Optional[dict] = None) -> float:
-    """Kosten in Cent schaetzen (Bewertung mit KI_MODELL, Recherche mit dem
-    Recherche-Modell); ueber KI_KOSTEN_MAX_CT -> Betriebsalarm."""
-    ct = round(kalibrierung._kosten_usd(modell, usage or {}) * 100, 2)
-    if fall:
-        ct = round(ct + kalibrierung._kosten_usd(fall.get("modell") or "", fall.get("usage") or {}) * 100, 2)
-    if ct > budget.kosten_max_ct():
-        try:
-            import betrieb
-            await betrieb.alarm(db, "ki_kosten_ueberschritten", ref=ref, art=art, kosten_ct=ct,
-                                grenze_ct=budget.kosten_max_ct())
-        except Exception:  # noqa: BLE001
-            pass
-    return ct
-
-
 # ------------------------------------------------ Bewertung ausfuehren
 async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: bool = False) -> Optional[dict]:
     """Rechnet die Bewertung fuer den aktuellen Stand des Protokolls und legt
@@ -565,6 +548,7 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
             return None
         doc, appt, vehicle, contract = grund
         res = None                       # Budget-Reservierung (Review 25.09.2026)
+        kasse = None                     # Kostendeckel je Lauf (27.09.2026)
         ktx = await kontext.sammeln(vehicle, "abholung", eigene_id=str(appt.get("vehicle_id") or ""))
         paket = paket_bauen(doc, appt, vehicle, contract, ktx.get("marktdoc"))
         eigene = await marktdaten.eigene_referenzen(paket, "abholung")
@@ -642,7 +626,17 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
         paket["market"] = kontext.marktposition(ktx.get("markt"), listing=paket["prices"].get("listing_price_eur"),
                                                 agreed=paket["prices"].get("contract_price_eur"))
         paket["history"] = ktx.get("historie")
-        fall = await marktdaten.fall_recherche("abholung", paket, sparmodus=bud["sparmodus"], eigene=eigene)
+        # Kostendeckel je Lauf (27.09.2026, ai.kostenkasse): Bewertung zuerst
+        # einplanen (laengster Fall-Text), Websuche nur im Rest bis zum ZIEL,
+        # vor jedem Aufruf die sichere Obergrenze gegen die HARTE Grenze.
+        kasse = kostenkasse.Kostenkasse(art="abholung", ref=protocol_id)
+        zusatz_teile = [marktdaten.als_text(ktx.get("marktdoc")),
+                        await kalibrierung.prompt_zusatz(dealer_id, "abholung")]
+        await kasse.bewertung_einplanen(json_bewerten, modell=basis["modell"], system=SYSTEM_PROMPT, nutzer=paket,
+                                        schema=schemas.ANTWORT_SCHEMA, zusatz_teile=zusatz_teile,
+                                        max_tokens=KI_MAX_TOKENS, fall_text_max_zeichen=marktdaten.FALL_TEXT_MAX_ZEICHEN)
+        fall = await marktdaten.fall_recherche("abholung", paket, sparmodus=bud["sparmodus"], eigene=eigene,
+                                               kasse=kasse)
         gelernt = await marktdaten.lernen_aus_recherche(fall, paket, "abholung")
         if gelernt:
             eigene = await marktdaten.eigene_referenzen(paket, "abholung")
@@ -650,13 +644,11 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
         lage = kontext.datenlage(paket)
         if paket.get("damages_unconfirmed"):
             lage = "niedrig"                 # Nr. 95/96: Abweichung ohne Details
-        zusatz = "\n\n".join(t for t in (marktdaten.als_text(ktx.get("marktdoc")),
-                                          await kalibrierung.prompt_zusatz(dealer_id, "abholung"),
-                                          marktdaten.fall_als_text(fall)) if t)
-        antwort = await json_bewerten(system=SYSTEM_PROMPT, nutzer=paket, schema=schemas.ANTWORT_SCHEMA,
-                                      zusatz=zusatz or None)
-        kosten = await _kosten_pruefen(antwort.get("usage") or {}, antwort.get("modell") or basis["modell"],
-                                       protocol_id, "abholung", fall)
+        antwort = await kasse.bewerten(json_bewerten, modell=basis["modell"], system=SYSTEM_PROMPT, nutzer=paket,
+                                       schema=schemas.ANTWORT_SCHEMA, zusatz_teile=zusatz_teile,
+                                       fall_texte=[marktdaten.fall_als_text(fall, a) for a in kostenkasse.FALL_ANTEILE],
+                                       max_tokens=KI_MAX_TOKENS)
+        kosten = await kasse.abschliessen()
         await budget.abrechnen(res, kosten)
         res = None
         usage = dict(antwort.get("usage") or {})
@@ -669,7 +661,8 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
                                                                           "fahrer_verbraucht_ct", "fahrer_grenze_ct")},
                    "recherche": ({"status": fall.get("status"), "suchen": fall.get("suchen"),
                                   "quellen": fall.get("quellen"), "text": fall.get("text"),
-                                  "gelernt": gelernt} if fall else None)}
+                                  "gelernt": gelernt} if fall else None),
+                   "kostendeckel": kasse.bericht()}
         # Review 26.09.2026 (Nr. 6): genau eine Position je Abweichung — doppelte
         # und fremde fliegen raus, eine fehlende bricht den Lauf ab.
         if antwort.get("status") == "ok" and isinstance(antwort.get("daten"), dict):
@@ -701,19 +694,22 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
         else:
             eintrag.update(status=antwort.get("status") or "fehler", grund=antwort.get("grund") or "",
                            ergebnis=None, eingabe=paket)
-            try:
-                import betrieb
-                await betrieb.alarm(db, "ki_bewertung_fehlgeschlagen", ref=protocol_id,
-                                    status=eintrag["status"], grund=eintrag["grund"][:200])
-            except Exception:  # noqa: BLE001
-                pass
+            # Kostendeckel gegriffen: die Kasse hat schon ki_kostendeckel_gegriffen gemeldet
+            if eintrag["status"] != "kostendeckel":
+                try:
+                    import betrieb
+                    await betrieb.alarm(db, "ki_bewertung_fehlgeschlagen", ref=protocol_id,
+                                        status=eintrag["status"], grund=eintrag["grund"][:200])
+                except Exception:  # noqa: BLE001
+                    pass
         await db[SAMMLUNG].update_one({"protocol_id": protocol_id, "input_hash": h},
                                       {"$set": eintrag, "$unset": {"lease_until": ""}}, upsert=True)
         return _oeffentlich(eintrag)
     except Exception:  # noqa: BLE001 — die KI ist Beiwerk, nie ein 500
         log.exception("KI-Bewertung %s gescheitert", protocol_id)
         try:
-            await budget.abrechnen(res, 0)       # Reservierung freigeben
+            # Reservierung durch das schon Ausgegebene ersetzen (vorher 0)
+            await budget.abrechnen(res, kasse.kosten_ct if kasse is not None else 0)
         except Exception:  # noqa: BLE001
             pass
         return None

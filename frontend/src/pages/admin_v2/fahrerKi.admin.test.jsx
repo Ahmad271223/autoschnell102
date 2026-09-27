@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
-const netz = vi.hoisted(() => ({ posts: [], superAdmin: true, kiF1: false }));
+const netz = vi.hoisted(() => ({ posts: [], superAdmin: true, kiF1: false, kiBudget: null }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() } }));
 vi.mock("@/lib/api", () => ({
   errMsg: (e, s) => e?.message || s,
@@ -29,7 +29,7 @@ vi.mock("@/lib/api", () => ({
       if (url === "/admin/ki") {
         return { data: { aktiv: true, modell: "claude-sonnet", zeitraum_tage: 30, bewertungen: 3, je_art: {}, je_status: { ok: 3 },
                          dauer_median_ms: 1200, dauer_p95_ms: 4000, kosten_usd_geschaetzt: 0.12, tokens: {},
-                         budget: { monat_eur: 15, lauf_max_ct: 15, fahrer_eur: 10 }, lernfaelle: { gesamt: 0 },
+                         budget: netz.kiBudget || { monat_eur: 15, lauf_max_ct: 15, fahrer_eur: 10 }, lernfaelle: { gesamt: 0 },
                          erfahrungswerte: {}, letzte_fehler: [] } };
       }
       if (url === "/admin/betrieb") {
@@ -73,7 +73,7 @@ async function klick(t) {
   await warten();
 }
 
-beforeEach(() => { netz.posts.length = 0; netz.superAdmin = true; netz.kiF1 = false; vi.clearAllMocks(); });
+beforeEach(() => { netz.posts.length = 0; netz.superAdmin = true; netz.kiF1 = false; netz.kiBudget = null; vi.clearAllMocks(); });
 afterEach(async () => { if (wurzel) await act(async () => { wurzel.unmount(); }); wurzel = null; behaelter?.remove(); });
 
 describe("KI-Freischaltung je Fahrer (Admin → Fahrer)", () => {
@@ -113,5 +113,18 @@ describe("Fahrer-Deckel im Betrieb-Kasten", () => {
     expect(text).toMatch(/15 € je Nutzer\/Firma und Monat/);
     expect(text).toMatch(/10 € je Fahrer/);
     expect(text).toMatch(/15 ct je Lauf/);
+  });
+});
+
+describe("Kostendeckel je Lauf im Betrieb-Kasten (27.09.2026)", () => {
+  it("nennt Ziel und harte Grenze und zaehlt Laeufe ueber dem Ziel", async () => {
+    netz.kiBudget = { monat_eur: 15, lauf_max_ct: 20, lauf_ziel_ct: 15, fahrer_eur: 10, ueber_ziel: 3, ueber_hart: 0,
+                      deckel_gegriffen: 1 };
+    await starten(AdminBetrieb);
+    const text = el("ki-betrieb-budget").textContent;
+    expect(text).toMatch(/Ziel 15 ct je Lauf \(höchstens 20 ct\)/);
+    expect(el("ki-betrieb-ueber-ziel").textContent).toMatch(/3 Läufe über dem Ziel von 15 ct/);
+    expect(text).toMatch(/Kostendeckel griff 1×/);
+    expect(text).not.toMatch(/harten Grenze/);
   });
 });

@@ -66,6 +66,7 @@ describe("kiSchaden", () => {
     expect(kiStatusText("zeitlimit")).toMatch(/nicht verfügbar/);
     expect(kiStatusText("limit")).toMatch(/Stundenlimit/);
     expect(kiStatusText("budget")).toMatch(/Monatsbudget/);
+    expect(kiStatusText("kostendeckel")).toMatch(/Kostendeckel je Lauf/);   // 27.09.2026
     expect(kiStatusText("netz")).toMatch(/Verbindung/);
     expect(kiStatusText("ok")).toBe("");
   });

@@ -128,13 +128,46 @@ def _system_bloecke(system: str, zusatz: Optional[str]) -> list:
     return bloecke
 
 
+def _bewerten_parameter(system: str, zusatz: Optional[str], nutzer: Dict[str, Any],
+                        schema: Dict[str, Any]) -> Dict[str, Any]:
+    """Alle Parameter der Bewertung ausser max_tokens — EINE Quelle fuer den
+    echten Aufruf und fuer count_tokens (Kostendeckel 27.09.2026: gezaehlt
+    wird exakt, was gesendet wird)."""
+    p: Dict[str, Any] = {
+        "model": ki_modell(),
+        "system": _system_bloecke(system, zusatz),
+        "output_config": {"effort": ki_effort(), "format": {"type": "json_schema", "schema": schema}},
+        "messages": [{"role": "user", "content": json.dumps(nutzer, ensure_ascii=False, sort_keys=True)}],
+    }
+    if ki_denken_aus() and ki_effort() in ("low", "medium", "high"):
+        p["thinking"] = {"type": "disabled"}
+    return p
+
+
+KI_ZAEHL_ZEITLIMIT = 10.0
+
+
+async def eingabe_tokens_zaehlen(*, system: str, zusatz: Optional[str], nutzer: Dict[str, Any],
+                                 schema: Dict[str, Any]) -> int:
+    """Eingabe-Tokens der Bewertung per messages.count_tokens (kostenlos,
+    eigenes Anfragelimit) mit denselben Parametern wie json_bewerten.
+    Wirft bei Fehlern — der Kostendeckel schaetzt dann sicher nach oben."""
+    if not ki_aktiv():
+        raise RuntimeError("KI nicht aktiv")
+    client = _klient().with_options(timeout=KI_ZAEHL_ZEITLIMIT, max_retries=0)
+    r = await client.messages.count_tokens(**_bewerten_parameter(system, zusatz, nutzer, schema))
+    return int(getattr(r, "input_tokens", 0) or 0)
+
+
 async def json_bewerten(*, system: str, nutzer: Dict[str, Any], schema: Dict[str, Any],
                         zeitlimit: Optional[float] = None, zusatz: Optional[str] = None,
-                        max_tokens: Optional[int] = None) -> KiAntwort:
+                        max_tokens: Optional[int] = None, max_retries: Optional[int] = None) -> KiAntwort:
     """Ein Aufruf, eine JSON-Antwort. Wirft NIE — jeder Fehler wird zum
     status im Ergebnis (der Vertragsprozess laeuft weiter). `zusatz` ist
     der wechselnde Teil des System-Prompts (26.09.2026: Marktdaten,
-    Erfahrungswerte, Recherche je Fall) — getrennt vom gecachten Teil."""
+    Erfahrungswerte, Recherche je Fall) — getrennt vom gecachten Teil.
+    max_retries=0 (Kostendeckel 27.09.2026): kein zweiter, womoeglich
+    bezahlter Versuch des SDK."""
     t0 = time.perf_counter()
     antwort = KiAntwort(status="fehler", grund="", daten=None, dauer_ms=0,
                         modell=ki_modell(), usage={})
@@ -144,20 +177,16 @@ async def json_bewerten(*, system: str, nutzer: Dict[str, Any], schema: Dict[str
     try:
         import anthropic
         client = _klient()
+        optionen: Dict[str, Any] = {}
         if zeitlimit:
-            client = client.with_options(timeout=float(zeitlimit))
-        extra: Dict[str, Any] = {}
-        if ki_denken_aus() and ki_effort() in ("low", "medium", "high"):
-            extra["thinking"] = {"type": "disabled"}
+            optionen["timeout"] = float(zeitlimit)
+        if max_retries is not None:
+            optionen["max_retries"] = int(max_retries)
+        if optionen:
+            client = client.with_options(**optionen)
         r = await client.messages.create(
-            model=ki_modell(),
             max_tokens=int(max_tokens or KI_MAX_TOKENS),
-            system=_system_bloecke(system, zusatz),
-            output_config={"effort": ki_effort(),
-                           "format": {"type": "json_schema", "schema": schema}},
-            messages=[{"role": "user",
-                       "content": json.dumps(nutzer, ensure_ascii=False, sort_keys=True)}],
-            **extra,
+            **_bewerten_parameter(system, zusatz, nutzer, schema),
         )
         antwort["usage"] = _usage(r)
         if r.stop_reason == "refusal":
@@ -177,6 +206,12 @@ async def json_bewerten(*, system: str, nutzer: Dict[str, Any], schema: Dict[str
     finally:
         antwort["dauer_ms"] = int((time.perf_counter() - t0) * 1000)
     return antwort
+
+
+# Der Kostendeckel (ai.kostenkasse) zaehlt die Eingabe ueber die Funktion, die
+# er aufruft: nur die ECHTE Bewertung traegt einen Zaehler. Eine Attrappe im
+# Test hat keinen und wird nie gegen die echte API gezaehlt.
+json_bewerten.zaehlen = eingabe_tokens_zaehlen  # type: ignore[attr-defined]
 
 
 def _status_aus_ausnahme(exc: Exception) -> str:
@@ -223,22 +258,41 @@ GESPERRTE_DOMAINS = ("ebay.de", "ebay.com", "ebay-kleinanzeigen.de", "kleinanzei
                      "reddit.com", "facebook.com", "youtube.com", "pinterest.com", "myhammer.de", "kamux.de")
 KI_RECHERCHE_ZEITLIMIT = kommazahl_env("KI_RECHERCHE_ZEITLIMIT_SEKUNDEN", 120.0, unten=10.0, oben=300.0)
 _PAUSEN_MAX = 4
+RECHERCHE_MAX_TOKENS = 3000
+HINWEIS_FORTSETZUNG_ENTFALLEN = "Fortsetzung der Websuche entfallen — Kostendeckel je Lauf"
 
 
 async def recherche(*, system: str, frage: str, max_suchen: int = 6,
-                    zeitlimit: Optional[float] = None) -> KiAntwort:
+                    zeitlimit: Optional[float] = None, max_tokens: int = RECHERCHE_MAX_TOKENS,
+                    kasse=None, basis_tokens: Optional[int] = None,
+                    plan: Optional[Dict[str, Any]] = None) -> KiAntwort:
     """Wunsch Ahmad 26.09.2026 (Marktanalyse): ein Aufruf MIT Websuche,
     Antwort als Text plus Quellen (Zitate). Kein JSON-Schema — Zitate und
     strukturierte Ausgabe schliessen sich aus; die Umwandlung macht danach
-    json_bewerten. Wirft nie; status ok | fehler | zeitlimit | ... ."""
+    json_bewerten. Wirft nie; status ok | fehler | zeitlimit | ... .
+
+    Kostendeckel (27.09.2026): mit `kasse` (ai.kostenkasse) wird jede
+    Anfrage einzeln abgerechnet; die erste laeuft mit dem Plan des Aufrufers
+    (`plan`: max_uses, max_tokens, Obergrenze), VOR jeder Fortsetzung nach
+    pause_turn plant die Kasse neu — passt sie nicht mehr, endet die
+    Recherche mit dem bis dahin gefundenen Text. Kein SDK-Wiederholversuch
+    (max_retries=0). Auch bei einem Fehler mitten in der Schleife bleibt die
+    bis dahin summierte usage im Ergebnis (vorher ging sie verloren)."""
     t0 = time.perf_counter()
     antwort = KiAntwort(status="fehler", grund="", text="", quellen=[], suchen=0, dauer_ms=0,
                         modell=ki_recherche_modell(), usage={})
     if not ki_aktiv():
         antwort.update(status="aus", grund="KI-Bewertung nicht aktiv")
         return antwort
+    usage: Dict[str, int] = {}
+    aktuell: Dict[str, Any] = dict(plan or {"max_uses": int(max_suchen), "max_tokens": int(max_tokens)})
+    offen_nr = 0                       # Anfrage gesendet, aber noch nicht abgerechnet
     try:
-        client = _klient().with_options(timeout=float(zeitlimit or KI_RECHERCHE_ZEITLIMIT))
+        optionen: Dict[str, Any] = {"timeout": float(zeitlimit or KI_RECHERCHE_ZEITLIMIT)}
+        if kasse is not None:
+            optionen["max_retries"] = 0
+            antwort["gebucht"] = True      # die Kasse bucht je Anfrage selbst
+        client = _klient().with_options(**optionen)
         # Probelauf 26.09.2026: mit der Vorfilterung (Code-Ausfuehrung) meldete
         # das Modell "Suchergebnisse nicht verwertbar" und verbrauchte alle
         # Suchen — deshalb direkte Suche, Ergebnisse als Text im Kontext.
@@ -252,14 +306,28 @@ async def recherche(*, system: str, frage: str, max_suchen: int = 6,
         texte: list = []
         zitiert: Dict[str, str] = {}
         gefunden: Dict[str, str] = {}
-        usage: Dict[str, int] = {}
-        for _ in range(_PAUSEN_MAX):
+        for i in range(_PAUSEN_MAX):
+            if kasse is not None and i > 0:
+                # Fortsetzung: der ganze Verlauf geht erneut mit — nur wenn sie
+                # noch in den Rest bis zum Ziel passt
+                neu = kasse.recherche_plan(kasse.fortsetzung_basis(int(basis_tokens or 0), usage),
+                                           int(aktuell.get("max_uses") or max_suchen), ki_recherche_modell())
+                if neu is None:
+                    kasse.hinweis(HINWEIS_FORTSETZUNG_ENTFALLEN)
+                    break
+                aktuell = neu
+            tools[0]["max_uses"] = int(aktuell.get("max_uses") or max_suchen)
+            offen_nr = i + 1
             r = await client.messages.create(
-                model=ki_recherche_modell(), max_tokens=3000,
+                model=ki_recherche_modell(), max_tokens=int(aktuell.get("max_tokens") or max_tokens),
                 system=_system_bloecke(system, None),
                 tools=tools, messages=messages,
             )
-            _usage_addieren(usage, _usage(r))
+            u_r = _usage(r)
+            _usage_addieren(usage, u_r)
+            if kasse is not None:
+                kasse.recherche_buchen(ki_recherche_modell(), u_r, aktuell, i + 1)
+            offen_nr = 0
             for b in r.content:
                 art = getattr(b, "type", "")
                 if art == "text":
@@ -289,7 +357,12 @@ async def recherche(*, system: str, frage: str, max_suchen: int = 6,
                        quellen=[{"url": u, "titel": t[:120]} for u, t in list(quellen.items())[:20]],
                        suchen=int(usage.get("web_search_requests") or 0), usage=usage)
     except Exception as exc:  # noqa: BLE001 — Beiwerk, nie ein 500
-        antwort.update(status=_status_aus_ausnahme(exc), grund=f"{type(exc).__name__}: {str(exc)[:200]}")
+        antwort.update(status=_status_aus_ausnahme(exc), grund=f"{type(exc).__name__}: {str(exc)[:200]}",
+                       usage=usage, suchen=int(usage.get("web_search_requests") or 0))
+        if kasse is not None and offen_nr:
+            # die gescheiterte Anfrage: ob berechnet, ist offen -> zur Obergrenze gebunden
+            kasse.unsicher_buchen(f"recherche#{offen_nr}", float(aktuell.get("obergrenze_ct") or 0),
+                                  antwort["grund"])
         log.warning("KI-Recherche gescheitert: %s", antwort["grund"])
     finally:
         antwort["dauer_ms"] = int((time.perf_counter() - t0) * 1000)

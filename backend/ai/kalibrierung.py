@@ -29,10 +29,14 @@ MIN_FIRMA = zahl_env("KI_KALIBRIERUNG_MIN_FIRMA", 5, unten=1, oben=10000)
 CACHE_SEKUNDEN = 600
 LERN_SAMMLUNG = "ki_lernfaelle"
 BEWERTUNGEN = "ki_bewertungen"
-# Richtwerte je Million Tokens (USD, Listenpreise 09/2026) — nur fuer die
-# Kostenschaetzung auf der Betriebsseite, nicht fuer die Abrechnung.
-PREIS_JE_MIO = {"claude-opus-5": (15.0, 75.0), "claude-sonnet-5": (3.0, 15.0),
-                "claude-haiku-4-5-20251001": (1.0, 5.0)}
+# Listenpreise je Million Tokens (USD, Eingabe/Ausgabe). Grundlage der
+# Kostenschaetzung (Betriebsseite, Budget) UND seit 27.09.2026 des
+# Kostendeckels je Lauf (ai.kostenkasse). Korrektur 27.09.2026: Sonnet 5
+# kostet 2 $/10 $ (Anthropic-Preisliste; die angekuendigte Erhoehung auf
+# 3/15 zum 01.09.2026 findet nicht statt), Opus 5 5 $/25 $ — vorher standen
+# hier 3/15 bzw. 15/75, der Sonnet-Anteil jedes Laufs war 1,5x zu hoch.
+PREIS_JE_MIO = {"claude-opus-5": (5.0, 25.0), "claude-sonnet-5": (2.0, 10.0),
+                "claude-haiku-4-5-20251001": (1.0, 5.0), "claude-haiku-4-5": (1.0, 5.0)}
 
 _cache: Dict[str, Any] = {"bis": 0.0, "werte": None}
 NUR_ENDGUELTIG = {"vorlaeufig": {"$ne": True}, "verworfen": {"$ne": True}, "ersetzt": {"$ne": True},
@@ -181,12 +185,17 @@ async def statistik(tage: int = 30) -> Dict[str, Any]:
               "web_search_requests": 0}
     kosten = 0.0
     kosten_liste: List[float] = []
+    # Kostendeckel je Lauf (27.09.2026): Laeufe ueber dem Ziel / der harten
+    # Grenze und Laeufe, bei denen der Deckel gegriffen hat
+    ziel, hart = _budget().ziel_ct(), _budget().kosten_max_ct()
+    ueber_ziel = ueber_hart = gegriffen = 0
     fehler: List[Dict[str, Any]] = []
     n = 0
     try:
         cursor = db[BEWERTUNGEN].find({"created_at": {"$gte": seit}},
                                       {"_id": 0, "status": 1, "art": 1, "dauer_ms": 1, "usage": 1, "modell": 1,
-                                       "grund": 1, "created_at": 1, "protocol_id": 1, "vehicle_id": 1}
+                                       "grund": 1, "created_at": 1, "protocol_id": 1, "vehicle_id": 1,
+                                       "kosten_ct": 1, "kostendeckel.gegriffen": 1, "kostendeckel.bewertung": 1}
                                       ).sort("created_at", -1).limit(5000)
         async for d in cursor:
             n += 1
@@ -199,11 +208,22 @@ async def statistik(tage: int = 30) -> Dict[str, Any]:
             u = d.get("usage") or {}
             for k in tokens:
                 tokens[k] += int(u.get(k) or 0)
-            if u:
-                k_usd = _kosten_usd(d.get("modell") or "", u)
-                kosten += k_usd
+            # kosten_ct (seit 27.09.2026 aus den Einzelposten, Recherche mit dem
+            # Recherche-Modell) geht vor; aeltere Eintraege: aus usage geschaetzt
+            k_ct = d.get("kosten_ct")
+            if not isinstance(k_ct, (int, float)) or (not k_ct and u):
+                k_ct = _kosten_usd(d.get("modell") or "", u) * 100 if u else None
+            if k_ct is not None:
+                kosten += float(k_ct) / 100
                 if st == "ok":
-                    kosten_liste.append(round(k_usd * 100, 2))
+                    kosten_liste.append(round(float(k_ct), 2))
+                if float(k_ct) > hart:
+                    ueber_hart += 1
+                elif float(k_ct) > ziel:
+                    ueber_ziel += 1
+            kd = d.get("kostendeckel") or {}
+            if kd.get("gegriffen") or kd.get("bewertung") not in (None, "voll"):
+                gegriffen += 1
             if st in ("fehler", "zeitlimit", "ueberlastet", "schluessel", "abgelehnt") and len(fehler) < 10:
                 fehler.append({"status": st, "grund": (d.get("grund") or "")[:160], "am": d.get("created_at"),
                                "art": art, "ref": d.get("protocol_id") or d.get("vehicle_id") or ""})
@@ -227,7 +247,9 @@ async def statistik(tage: int = 30) -> Dict[str, Any]:
         "erfahrungswerte": await erfahrungswerte(),
         "marktdaten": await _marktdaten_kurz(),
         "eigene_preise": await _eigene_kurz(),
-        "budget": {"monat_eur": _budget().budget_monat_eur(), "lauf_max_ct": _budget().kosten_max_ct(),
+        "budget": {"monat_eur": _budget().budget_monat_eur(), "lauf_max_ct": hart, "lauf_ziel_ct": ziel,
+                   # Kostendeckel je Lauf (27.09.2026): Zaehler fuer die Betriebsseite
+                   "ueber_ziel": ueber_ziel, "ueber_hart": ueber_hart, "deckel_gegriffen": gegriffen,
                    # Fahrer-Deckel (Wunsch Ahmad 26.09.2026 abends) fuer den Betrieb-Kasten
                    "fahrer_eur": _budget().budget_fahrer_eur()},
         "kosten_median_ct": _median_kosten(kosten_liste),

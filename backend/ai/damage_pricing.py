@@ -34,9 +34,9 @@ import protokoll_vergleich as PV
 from deps import db, now_iso
 from konfig import zahl_env
 
-from ai import budget, freischaltung, kalibrierung, kontext, marktdaten, preisbasis, retention, schemas
-from ai.pickup_assessment import LEASE_S, _alter_jahre, _kosten_pruefen, _lease_abgelaufen
-from ai.provider import ergebnis_gueltig, json_bewerten, ki_aktiv, ki_modell
+from ai import budget, freischaltung, kalibrierung, kontext, kostenkasse, marktdaten, preisbasis, retention, schemas
+from ai.pickup_assessment import LEASE_S, _alter_jahre, _lease_abgelaufen
+from ai.provider import KI_MAX_TOKENS, ergebnis_gueltig, json_bewerten, ki_aktiv, ki_modell
 
 log = logging.getLogger("autohandel.ki")
 
@@ -326,21 +326,30 @@ async def _lauf_beanspruchen(start: dict, dealer_id: str, h: str) -> Optional[di
 
 async def _rechnen(basis: dict, paket: dict, vorl: dict, bud: dict, eigene: dict, vehicle_doc: dict,
                    *, marktdoc: Optional[dict], res: Optional[dict] = None) -> dict:
-    """Der eigentliche Lauf: Websuche (wenn noetig), Lernen, KI, Ablage."""
+    """Der eigentliche Lauf: Websuche (wenn noetig), Lernen, KI, Ablage.
+
+    Kostendeckel je Lauf (27.09.2026, ai.kostenkasse): zuerst wird die
+    Bewertung mit dem laengstmoeglichen Fall-Text eingeplant, die Websuche
+    bekommt nur den Rest bis zum ZIEL (15 ct); vor jedem Aufruf wird eine
+    sichere Obergrenze gegen die HARTE Grenze (20 ct) geprueft."""
+    kasse = None
     try:
-        fall = await marktdaten.fall_recherche(ART, paket, sparmodus=bud["sparmodus"], eigene=eigene)
+        kasse = kostenkasse.Kostenkasse(art=ART, ref=str(vehicle_doc.get("id") or ""))
+        zusatz_teile = [marktdaten.als_text(marktdoc), await kalibrierung.prompt_zusatz(basis["dealer_id"], ART)]
+        await kasse.bewertung_einplanen(json_bewerten, modell=basis["modell"], system=SYSTEM_PROMPT, nutzer=paket,
+                                        schema=schemas.ANTWORT_SCHEMA, zusatz_teile=zusatz_teile,
+                                        max_tokens=KI_MAX_TOKENS, fall_text_max_zeichen=marktdaten.FALL_TEXT_MAX_ZEICHEN)
+        fall = await marktdaten.fall_recherche(ART, paket, sparmodus=bud["sparmodus"], eigene=eigene, kasse=kasse)
         gelernt = await marktdaten.lernen_aus_recherche(fall, paket, ART)
         if gelernt:
             eigene = await marktdaten.eigene_referenzen(paket, ART)
             kontext.eigene_anwenden(paket, eigene)
         lage = kontext.datenlage(paket)
-        zusatz = "\n\n".join(t for t in (marktdaten.als_text(marktdoc),
-                                          await kalibrierung.prompt_zusatz(basis["dealer_id"], ART),
-                                          marktdaten.fall_als_text(fall)) if t)
-        antwort = await json_bewerten(system=SYSTEM_PROMPT, nutzer=paket, schema=schemas.ANTWORT_SCHEMA,
-                                      zusatz=zusatz or None)
-        kosten = await _kosten_pruefen(antwort.get("usage") or {}, antwort.get("modell") or basis["modell"],
-                                       str(vehicle_doc.get("id") or ""), ART, fall)
+        antwort = await kasse.bewerten(json_bewerten, modell=basis["modell"], system=SYSTEM_PROMPT, nutzer=paket,
+                                       schema=schemas.ANTWORT_SCHEMA, zusatz_teile=zusatz_teile,
+                                       fall_texte=[marktdaten.fall_als_text(fall, a) for a in kostenkasse.FALL_ANTEILE],
+                                       max_tokens=KI_MAX_TOKENS)
+        kosten = await kasse.abschliessen()
         await budget.abrechnen(res, kosten)
         res = None
         usage = dict(antwort.get("usage") or {})
@@ -353,7 +362,8 @@ async def _rechnen(basis: dict, paket: dict, vorl: dict, bud: dict, eigene: dict
                    "budget": {k: bud.get(k) for k in ("verbraucht_ct", "grenze_ct", "sparmodus")},
                    "recherche": ({"status": fall.get("status"), "suchen": fall.get("suchen"),
                                   "quellen": fall.get("quellen"), "text": fall.get("text"),
-                                  "gelernt": gelernt} if fall else None)}
+                                  "gelernt": gelernt} if fall else None),
+                   "kostendeckel": kasse.bericht()}
         # Review 26.09.2026 (Nr. 6): genau eine Position je Schaden — doppelte
         # und fremde fliegen raus, eine fehlende bricht den Lauf ab.
         if antwort.get("status") == "ok" and isinstance(antwort.get("daten"), dict):
@@ -385,17 +395,21 @@ async def _rechnen(basis: dict, paket: dict, vorl: dict, bud: dict, eigene: dict
         else:
             eintrag.update(status=antwort.get("status") or "fehler", grund=antwort.get("grund") or "",
                            ergebnis=None)
-            try:
-                import betrieb
-                await betrieb.alarm(db, "ki_bewertung_fehlgeschlagen", ref=vehicle_doc.get("id") or "",
-                                    status=eintrag["status"], grund=eintrag["grund"][:200], art=ART)
-            except Exception:  # noqa: BLE001
-                pass
+            # Kostendeckel gegriffen: die Kasse hat schon ki_kostendeckel_gegriffen gemeldet
+            if eintrag["status"] != "kostendeckel":
+                try:
+                    import betrieb
+                    await betrieb.alarm(db, "ki_bewertung_fehlgeschlagen", ref=vehicle_doc.get("id") or "",
+                                        status=eintrag["status"], grund=eintrag["grund"][:200], art=ART)
+                except Exception:  # noqa: BLE001
+                    pass
         await db[SAMMLUNG].update_one({"id": basis["id"]}, {"$set": eintrag, "$unset": {"lease_until": ""}})
         return _oeffentlich(eintrag)
     except Exception:  # noqa: BLE001
         log.exception("KI-Schadennachlass-Lauf %s gescheitert", basis.get("id"))
-        await budget.abrechnen(res, 0)           # Reservierung freigeben
+        # Reservierung durch das schon Ausgegebene ersetzen (vorher 0 — bezahlte
+        # Aufrufe fielen aus dem Monatsbudget)
+        await budget.abrechnen(res, kasse.kosten_ct if kasse is not None else 0)
         eintrag = {**basis, "status": "fehler", "grund": "interner Fehler", "ergebnis": None, "vorschau": vorl}
         try:
             await db[SAMMLUNG].update_one({"id": basis["id"]}, {"$set": eintrag, "$unset": {"lease_until": ""}})

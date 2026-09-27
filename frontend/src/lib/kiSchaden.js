@@ -187,6 +187,8 @@ export function kiStatusText(status) {
     case "fehler": return "KI-Einschätzung momentan nicht verfügbar.";
     case "limit": return "Stundenlimit für KI-Bewertungen erreicht – bitte später erneut.";
     case "budget": return "Monatsbudget für KI-Bewertungen aufgebraucht – ab dem 1. wieder verfügbar.";
+    // Kostendeckel je Lauf (27.09.2026): die Bewertung wäre teurer geworden als erlaubt
+    case "kostendeckel": return "KI-Bewertung entfallen – Kostendeckel je Lauf erreicht. Der Vorgang läuft normal weiter.";
     case "netz": return "Keine Verbindung zum Server – bitte erneut versuchen.";
     default: return "";
   }

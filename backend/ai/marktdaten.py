@@ -38,7 +38,7 @@ from deps import db as _db, now_iso
 from konfig import schalter_env, zahl_env
 
 from ai import preisbasis
-from ai.provider import json_bewerten, ki_aktiv, ki_modell, recherche
+from ai.provider import json_bewerten, ki_aktiv, ki_modell, ki_recherche_modell, recherche
 
 log = logging.getLogger("autohandel.ki")
 
@@ -59,6 +59,11 @@ EIGENE_STUFEN = ("marke_modell_alter", "marke_alter", "marke", "alle")
 RECHERCHE_POSITIONEN_MAX = 12
 DATEN_MARKER = "###DATEN"
 BERICHT_MAX = 12000
+# Kostendeckel 27.09.2026: der Fall-Text im Prompt der Bewertung ist
+# hoechstens so lang (Recherchetext bis 6.000 Zeichen + Quellenzeile) — mit
+# dieser Laenge plant die Kostenkasse die Bewertung VOR der Recherche ein.
+FALL_RECHERCHE_TEXT_MAX = 6000
+FALL_TEXT_MAX_ZEICHEN = 8000
 # Probelauf 26.09.2026: mit EINER Anfrage fuer alle Positionen verbrauchte die
 # KI alle Suchen, bevor sie einen Wert notiert hatte, und gab dann auf.
 # Deshalb kleine Gruppen und die Anweisung, Werte sofort aufzuschreiben.
@@ -707,7 +712,7 @@ def _einzeilig(w: Any, n: int) -> str:
     return re.sub(r"[\x00-\x1f\x7f]+|\s+", " ", str(w or "")).strip()[:n]
 
 
-def _fall_frage(art: str, paket: Dict[str, Any], positionen: List[dict]) -> str:
+def _fall_frage(art: str, paket: Dict[str, Any], positionen: List[dict], suchen: int = MAX_SUCHEN_FALL) -> str:
     v = paket.get("vehicle") or {}
     auto = " ".join(_einzeilig(x, 60) for x in (v.get("make"), v.get("model"), v.get("variant")) if x).strip()
     ez = _einzeilig(v.get("first_registration"), 10)
@@ -730,14 +735,20 @@ def _fall_frage(art: str, paket: Dict[str, Any], positionen: List[dict]) -> str:
             "(Deutschland, inkl. MwSt.) fuer genau diese Punkte; nutze je Punkt die passenden Quellen (Karosserie: "
             "ADAC/ATU/FairGarage; Scheiben: Carglass; Technik: FairGarage, Autobutler, Bosch Car Service; "
             "Schluessel/Teile: Markenangaben). Je Punkt: Spanne, typischer Wert, Quelle. Knapp antworten:\n"
-            + "\n".join(zeilen) + "\n\n" + SUCH_ANWEISUNG.format(n=MAX_SUCHEN_FALL) + "\n" + DATEN_ANWEISUNG)
+            + "\n".join(zeilen) + "\n\n" + SUCH_ANWEISUNG.format(n=int(suchen)) + "\n" + DATEN_ANWEISUNG)
 
 
 async def fall_recherche(art: str, paket: Dict[str, Any], *, sparmodus: bool = False,
-                         eigene: Optional[Dict[str, Dict[str, Any]]] = None) -> Optional[dict]:
+                         eigene: Optional[Dict[str, Dict[str, Any]]] = None, kasse=None) -> Optional[dict]:
     """Gezielte Websuche zu den Positionen, fuer die eigene Daten nicht reichen.
     None, wenn aus, Sparmodus oder nichts zu suchen; sonst {text, quellen,
-    suchen, dauer_ms, usage, status}."""
+    suchen, dauer_ms, usage, status, modell}.
+
+    Kostendeckel (27.09.2026): mit `kasse` (ai.kostenkasse, die Bewertung ist
+    dort schon eingeplant) bekommt die Websuche nur den Rest bis zum ZIEL je
+    Lauf — Zahl der Suchen und max_tokens so, dass die Anfrage hineinpasst.
+    Reicht der Rest nicht fuer eine Suche, entfaellt sie (status
+    "kostendeckel", Hinweis wie im Sparmodus)."""
     if sparmodus or not aktiv() or not je_fall(art) or not ki_aktiv():
         return None
     offen = recherche_noetig(paket, art, eigene or {})
@@ -746,28 +757,53 @@ async def fall_recherche(art: str, paket: Dict[str, Any], *, sparmodus: bool = F
     frage = _fall_frage(art, paket, offen)
     if not frage:
         return None
+    modell = ki_recherche_modell()
+    extra: Dict[str, Any] = {}
+    if kasse is not None:
+        from ai import kostenkasse
+        basis = kasse.recherche_basis_tokens(RECHERCHE_SYSTEM, frage)
+        plan = kasse.recherche_plan(basis, MAX_SUCHEN_FALL, modell)
+        if plan is None:
+            kasse.hinweis(kostenkasse.HINWEIS_WEBSUCHE_ENTFALLEN)
+            return {"text": "", "quellen": [], "suchen": 0, "dauer_ms": 0, "usage": {}, "modell": modell,
+                    "status": "kostendeckel", "grund": kostenkasse.HINWEIS_WEBSUCHE_ENTFALLEN}
+        frage = _fall_frage(art, paket, offen, suchen=plan["max_uses"])
+        extra = {"max_tokens": plan["max_tokens"], "kasse": kasse, "basis_tokens": basis, "plan": plan}
     try:
-        r = await recherche(system=RECHERCHE_SYSTEM, frage=frage, max_suchen=MAX_SUCHEN_FALL)
+        r = await recherche(system=RECHERCHE_SYSTEM, frage=frage,
+                            max_suchen=int((extra.get("plan") or {}).get("max_uses") or MAX_SUCHEN_FALL), **extra)
     except Exception:  # noqa: BLE001
         log.exception("Fall-Recherche gescheitert")
         return None
+    # Pruefung 27.09.2026 (F2): das Recherche-Modell steht IMMER im Ergebnis —
+    # sonst rechnete die Kostenschaetzung Haiku-Tokens zum Sonnet-Preis.
+    modell = r.get("modell") or modell
+    if kasse is not None and not r.get("gebucht"):
+        # Recherche ohne eigene Buchung (z. B. Attrappe): hier abrechnen
+        kasse.recherche_buchen(modell, r.get("usage") or {}, extra.get("plan"), 1)
     if r.get("status") != "ok" or not (r.get("text") or "").strip():
         return {"text": "", "quellen": [], "suchen": int(r.get("suchen") or 0), "dauer_ms": r.get("dauer_ms"),
-                "usage": r.get("usage") or {}, "status": r.get("status")}
-    return {"text": (r.get("text") or "")[:6000], "quellen": list(r.get("quellen") or [])[:10],
+                "usage": r.get("usage") or {}, "status": r.get("status"), "modell": modell}
+    return {"text": (r.get("text") or "")[:FALL_RECHERCHE_TEXT_MAX], "quellen": list(r.get("quellen") or [])[:10],
             "suchen": int(r.get("suchen") or 0), "dauer_ms": r.get("dauer_ms"), "usage": r.get("usage") or {},
-            "modell": r.get("modell"), "status": "ok",
+            "modell": modell, "status": "ok",
             "positionen": [str(p.get("id")) for p in recherche_auswahl(offen)]}
 
 
-def fall_als_text(fall: Optional[dict]) -> str:
-    if not fall or not fall.get("text"):
+def fall_als_text(fall: Optional[dict], anteil: float = 1.0) -> str:
+    """Recherche fuer den Prompt der Bewertung. `anteil` < 1 kuerzt den Text
+    (Kostendeckel: Bewertung passt sonst nicht mehr in die harte Grenze);
+    insgesamt nie laenger als FALL_TEXT_MAX_ZEICHEN (damit plant die Kasse)."""
+    if not fall or not fall.get("text") or anteil <= 0:
         return ""
     text = fall["text"].split(DATEN_MARKER, 1)[0].strip()
-    return ("Marktrecherche zu diesem Fall (Websuche, Quellen unten; geht vor Tabelle und "
+    if anteil < 1:
+        text = text[:int(len(text) * anteil)].rstrip() + " …"
+    voll = ("Marktrecherche zu diesem Fall (Websuche, Quellen unten; geht vor Tabelle und "
             "Ausgangswerten):\n" + text
             + ("\nQuellen: " + "; ".join(f"{q.get('titel') or ''} {q.get('url')}".strip() for q in fall.get("quellen") or [])
                if fall.get("quellen") else ""))
+    return voll[:FALL_TEXT_MAX_ZEICHEN]
 
 
 async def statistik_eigene(db=None) -> Dict[str, Any]:
