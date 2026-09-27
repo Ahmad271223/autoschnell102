@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Auswertungs-Worker der Marktanalyse (Master-Auftrag Ahmad 26.09.2026, Phase D; Abschnitte 39, 49, 50).
+"""Auswertungs-Worker der Marktanalyse (Master-Auftrag Ahmad 26.09.2026, Phase D/E; Abschnitte 39, 49, 50).
 
 Eigener Hintergrundjob in server.py ('markt_auswertung'), getrennt vom Crawl-Worker ('markt'):
   * laeuft auch bei ausgeschaltetem Crawler — er liest nur, was schon gespeichert ist
   * Hot Deals: offene Tagesdokumente (hot_deals_offen) auswerten (markt.deals)
+  * Berichte (Phase E): faellige Perioden (Periodenende + Karenz) einfrieren (markt.berichte) — idempotent,
+    ein Bericht je Modell/Periode (Unique-Index), laufende Perioden nie
   * haelt waehrend einer Schreibpause (Sicherung/Restore) an: wartung.aktiv_async(db)
   * zwei Server: ein Durchlauf haelt die Sperre 'markt-auswertung' (job_lock); der andere wartet
   * Fehler: Protokoll + EIN Betriebsalarm 'markt_auswertung_fehler' — nie ein Einfluss auf Vergleich,
@@ -17,7 +19,7 @@ import logging
 from datetime import datetime
 from typing import Any, Callable, Dict, Optional
 
-from markt import deals, konfig
+from markt import berichte, deals, konfig
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +65,9 @@ async def durchlauf(db, *, jetzt: Optional[datetime] = None) -> Dict[str, Any]:
     try:
         with _schreiber():
             erg: Dict[str, Any] = {"hot_deals": await deals.auswerten_faellige(db, jetzt=jetzt)}
+            # Phase E: erst die Hot Deals (die Berichte frieren die Hot Deals des Zeitraums mit ein), dann die
+            # faelligen Berichte — laufende Perioden werden nie final gespeichert
+            erg["berichte"] = await berichte.faellige_finalisieren(db, jetzt=jetzt)
             await konfig.merker_setzen(db, konfig.AUSWERTUNG_DOK, letzter_lauf_at=konfig.jetzt_iso(), ergebnis=erg)
         return erg
     finally:

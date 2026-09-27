@@ -164,6 +164,56 @@ async def admin_market_hot_deals_auswerten(admin=Depends(current_super_admin)):
     return {"ok": True, **erg}
 
 
+# ---------------------------------------------------------------- Berichte 5/15/Monat (Master-Auftrag Phase E, 27.09.2026)
+# Lesen: current_admin; Einfrieren (nur faellige Perioden): current_super_admin. Alles aus gespeicherten Tageswerten —
+# ein finaler Bericht wird unveraendert ausgeliefert, eine laufende Periode nur vorlaeufig live gerechnet (nie gespeichert).
+@router.get("/admin/market/reports/periods")
+async def admin_market_report_periods(typ: Optional[str] = None, _=Depends(current_admin)):
+    from markt import berichte
+    if typ and typ not in berichte.TYPEN:
+        raise HTTPException(400, f"Unbekannter Berichtstyp — erlaubt: {', '.join(berichte.TYPEN)}")
+    return await berichte.perioden_liste(db, typ)
+
+
+@router.get("/admin/market/reports")
+async def admin_market_reports(typ: str, von: str, bis: str, _=Depends(current_admin)):
+    """Abschnitt 37: Uebersicht aller Modelle einer Periode (aus den eingefrorenen Berichten)."""
+    from markt import berichte
+    if not berichte.periode_gueltig(typ, von, bis):
+        raise HTTPException(400, "Keine gültige Berichtsperiode (5 Tage: 01–05 … 26–Monatsende, 15 Tage: 01–15 / 16–Monatsende, Monat)")
+    return await berichte.uebersicht(db, typ, von, bis)
+
+
+@router.get("/admin/market/reports/model/{model_id}")
+async def admin_market_model_report(model_id: str, typ: str, von: str, bis: str, _=Depends(current_admin)):
+    from markt import berichte
+    try:
+        b = await berichte.modell_bericht(db, model_id, typ, von, bis)
+    except ValueError as ex:
+        raise HTTPException(400, str(ex))
+    if not b:
+        raise HTTPException(404, "Keine Tagesdaten für dieses Modell im Zeitraum")
+    return b
+
+
+@router.get("/admin/market/reports/model/{model_id}/list")
+async def admin_market_model_report_list(model_id: str, _=Depends(current_admin)):
+    from markt import berichte
+    return await berichte.modell_berichte(db, model_id)
+
+
+@router.post("/admin/market/reports/finalize")
+async def admin_market_reports_finalize(admin=Depends(current_super_admin)):
+    """'Berichte jetzt erstellen': derselbe Durchlauf wie der Hintergrundjob — Hot Deals auswerten, dann NUR die
+    faelligen Perioden (Periodenende + Karenz) einfrieren; laufende Perioden nie. Idempotent."""
+    from markt import auswertung
+    erg = await auswertung.durchlauf(db)
+    if erg.get("gesperrt"):
+        raise HTTPException(409, "Die Auswertung läuft gerade in einem anderen Prozess — bitte gleich noch einmal")
+    await log_activity_sicher("", admin["id"], "admin.markt.berichte", meta={k: v for k, v in (erg.get("berichte") or {}).items() if isinstance(v, int)})
+    return {"ok": True, **erg}
+
+
 # ---------------------------------------------------------------- Suchauftraege (Auftrag v3)
 class AuftragIn(BaseModel):
     """Freies Formular — Pruefung in markt.auftraege.entwurf_pruefen."""

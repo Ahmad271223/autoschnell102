@@ -156,6 +156,8 @@ describe("Admin Marktanalyse", () => {
     expect(el("markt-hot-deals-kachel").textContent).toContain("31 von 40 heute geprüften Modellen");
     expect(el("markt-hot-deals-oeffnen").getAttribute("href")).toBe("/admin/markt/hot-deals");
     expect(netz.gets.filter((u) => u === "/admin/market/hot-deals").length).toBe(1);
+    // Berichte (Phase E): Link auf die Berichtsübersicht
+    expect(el("markt-berichte-link").getAttribute("href")).toBe("/admin/markt/berichte");
     const z = el("markt-modell-bmw-320d");
     expect(z.textContent).toContain("BMW 320d");
     expect(z.textContent).toContain("18.900 €");
@@ -241,6 +243,7 @@ describe("Admin Marktanalyse", () => {
   it("Modellseite: Segmentwahl, Kennzahlen, Verlauf, Auswertung, Tabelle, Top-N und Listing-Historie", async () => {
     await starten("/admin/markt/bmw-320d");
     expect(el("markt-modell-titel").textContent).toBe("BMW 320d");
+    expect(el("markt-modell-berichte").getAttribute("href")).toBe("/admin/markt/berichte/bmw-320d");
     expect(el("markt-km-55001").getAttribute("aria-pressed")).toBe("true");
     // inaktives Segment: kein km-Chip, keine Tabellenzeile — erst nach dem Schalter
     expect(el("markt-km-0")).toBeNull();

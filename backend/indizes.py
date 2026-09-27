@@ -1047,7 +1047,10 @@ async def markt_indizes(db) -> dict:
             # Master-Auftrag Phase D (27.09.2026): Hot Deals — ein Zustand je Segment+Inserat, Ereignisse einmalig je
             # (Segment, Inserat, Lauf, Typ). Unique, aber NICHT kritisch fuer den Crawler (die Auswertung ist Beiwerk)
             ("market_hot_deals", [("segment_id", 1), ("listing_id", 1)], "markt_hotdeal_je_segment"),
-            ("market_hot_deal_events", [("segment_id", 1), ("listing_id", 1), ("lauf_key", 1), ("typ", 1)], "markt_hotdeal_ereignis")):
+            ("market_hot_deal_events", [("segment_id", 1), ("listing_id", 1), ("lauf_key", 1), ("typ", 1)], "markt_hotdeal_ereignis"),
+            # Phase E (27.09.2026): ein eingefrorener Bericht je Modell/Typ/Periode — zwei Server erzeugen nie zwei
+            # Berichte; fehlt der Index, friert markt.berichte nichts ein (nicht kritisch fuer den Crawler)
+            ("market_model_reports", [("model_id", 1), ("typ", 1), ("periode_von", 1), ("periode_bis", 1)], "markt_bericht_je_periode")):
         try:
             ok = await unique_anlegen(db[sammlung], schluessel, name=name, weich=True)
         except Exception as exc:  # noqa: BLE001
@@ -1085,7 +1088,9 @@ async def markt_indizes(db) -> dict:
             ("market_hot_deals", [("status", 1), ("diff_pct", -1)], "markt_hotdeal_status_vorteil"),
             ("market_hot_deals", [("model_id", 1), ("status", 1)], "markt_hotdeal_modell"),
             ("market_hot_deal_events", [("tag", 1), ("typ", 1)], "markt_hotdeal_ereignis_tag"),
-            ("market_hot_deal_events", [("model_id", 1), ("tag", 1)], "markt_hotdeal_ereignis_modell")):
+            ("market_hot_deal_events", [("model_id", 1), ("tag", 1)], "markt_hotdeal_ereignis_modell"),
+            # Phase E: Periodenliste/Uebersicht aller Modelle je Periode
+            ("market_model_reports", [("typ", 1), ("periode_von", -1), ("periode_bis", 1)], "markt_bericht_periode")):
         sammlung, schluessel, name = eintrag[0], eintrag[1], eintrag[2]
         optionen = eintrag[3] if len(eintrag) > 3 else {}
         ref = f"{sammlung}.{name}"

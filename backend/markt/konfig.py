@@ -33,6 +33,9 @@ PRIVATE_PREISVERLAUF_MAX = 30
 HOTDEALS = "market_hot_deals"
 HOTDEAL_EREIGNISSE = "market_hot_deal_events"
 AUSWERTUNG_DOK = "auswertung"      # market_config/auswertung: Stand des Auswertungs-Workers (Hot Deals, Berichte)
+# Master-Auftrag Phase E (27.09.2026): eingefrorene Modellberichte (5 Tage / 15 Tage / Monat), ein Dokument je
+# Modell und Periode, nach dem Einfrieren nie mehr geaendert
+BERICHTE = "market_model_reports"
 
 QUELLE = "mobile"
 # Wunsch Ahmad 26.09.2026: die Erstzulassung MUSS gleich sein — ein 320d von

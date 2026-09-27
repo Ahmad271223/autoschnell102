@@ -34,7 +34,7 @@ def _t(i):
 def _aufraeumen(welt):
     _aufraeumen_markt(welt)
     muster = {"$regex": "^(test|dbg)-"}
-    for coll in (K.HOTDEALS, K.HOTDEAL_EREIGNISSE, K.PRIVATE_DEALS):
+    for coll in (K.HOTDEALS, K.HOTDEAL_EREIGNISSE, K.PRIVATE_DEALS, K.BERICHTE):
         welt.run(welt.db[coll].delete_many({"$or": [{"segment_id": muster}, {"model_id": muster}]}))
 
 
@@ -389,6 +389,13 @@ def test_10_keine_crawl_funktion_wird_aufgerufen(welt, monkeypatch):
         async def _nur_test(db, **kw):
             return await echt(db, segment_ids=[seg["id"]], **{k: v for k, v in kw.items() if k != "segment_ids"})
         monkeypatch.setattr(D, "auswerten_faellige", _nur_test)
+        # Phase E: der Durchlauf friert danach die faelligen Berichte ein — im Test nur fuer das Testmodell
+        BER = _module("markt.berichte")
+        echt_ber = BER.faellige_finalisieren
+
+        async def _nur_test_ber(db, **kw):
+            return await echt_ber(db, model_ids=[seg["model_id"]], **{k: v for k, v in kw.items() if k != "model_ids"})
+        monkeypatch.setattr(BER, "faellige_finalisieren", _nur_test_ber)
         erg = welt.run(AUS.durchlauf(welt.db))
         assert erg["hot_deals"]["ausgewertet"] == 1 and AUS.fehler_anzahl(erg) == 0
         assert welt.run(D.liste(welt.db, model_id=seg["model_id"]))["anzahl"] == 1

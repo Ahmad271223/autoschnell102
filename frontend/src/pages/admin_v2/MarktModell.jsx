@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
-import { ArrowLeft, RefreshCw, Play, X } from "lucide-react";
+import { ArrowLeft, RefreshCw, Play, X, FileBarChart } from "lucide-react";
 import { toast } from "sonner";
 import {
   Area, Bar, BarChart, CartesianGrid, ComposedChart, Line, ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -83,7 +83,11 @@ export default function MarktModell() {
           <h1 className="text-[22px] font-semibold text-white" data-testid="markt-modell-titel">{modell.label}</h1>
           <div className="text-[12px] text-zinc-500" data-testid="markt-modell-technik">{modell.fuel}{modell.gearbox ? ` · ${GETRIEBE_TEXT[modell.gearbox] || modell.gearbox}` : " · alle Getriebe (gemischt!)"}{modell.power_kw_min ? ` · ${modell.power_kw_min}–${modell.power_kw_max} kW` : ""} · mobile.de {modell.make_id}/{modell.model_id} · {segmente.filter((s) => s.enabled).length} Segmente</div>
         </div>
-        <Button variant="outline" size="sm" onClick={laden}><RefreshCw size={14} /> Aktualisieren</Button>
+        <div className="flex gap-2">
+          {/* Master-Auftrag Phase E: 5-Tage-, 15-Tage- und Monatsberichte dieses Modells (eingefroren bzw. vorläufig) */}
+          <Link to={`/admin/markt/berichte/${modell.id || modellId}`} data-testid="markt-modell-berichte"><Button variant="outline" size="sm"><FileBarChart size={14} /> Berichte</Button></Link>
+          <Button variant="outline" size="sm" onClick={laden}><RefreshCw size={14} /> Aktualisieren</Button>
+        </div>
       </div>
 
       {/* Segmentwahl: km-Bereich x EZ-Bereich */}

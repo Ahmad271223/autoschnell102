@@ -148,6 +148,8 @@ const AdminMarktChancen = seite(() => import("@/pages/admin_v2/MarktChancen"));
 const AdminMarktAuftraege = seite(() => import("@/pages/admin_v2/MarktAuftraege"));
 const AdminMarktPrivateDeals = seite(() => import("@/pages/admin_v2/MarktPrivateDeals"));
 const AdminMarktHotDeals = seite(() => import("@/pages/admin_v2/MarktHotDeals"));
+const AdminMarktBerichte = seite(() => import("@/pages/admin_v2/MarktBerichte"));
+const AdminMarktBericht = seite(() => import("@/pages/admin_v2/MarktBericht"));
 
 import Vergleich from "@/pages/app/Vergleich";
 const ManuelleSuche = seite(() => import("@/pages/app/ManuelleSuche"));
@@ -320,6 +322,9 @@ export default function App() {
               <Route path="markt/private-deals" element={<AdminMarktPrivateDeals />} />
               {/* Master-Auftrag Phase D (27.09.2026): Hot Deals — nur Super-Admin (Server: current_super_admin) */}
               <Route path="markt/hot-deals" element={<AdminMarktHotDeals />} />
+              {/* Master-Auftrag Phase E (27.09.2026): Berichte 5 Tage / 15 Tage / Monat — Übersicht und Modellbericht */}
+              <Route path="markt/berichte" element={<AdminMarktBerichte />} />
+              <Route path="markt/berichte/:modell" element={<AdminMarktBericht />} />
               <Route path="markt/:modell" element={<AdminMarktModell />} />
               <Route path="settings" element={<AdminSettings />} />
             </Route>

@@ -194,3 +194,52 @@ export const LIQUIDITAET = {
 export function liquiditaetText(stufe) {
   return (LIQUIDITAET[stufe] || LIQUIDITAET.UNKNOWN).text;
 }
+
+/** Master-Auftrag Phase E (27.09.2026): Berichte 5 Tage / 15 Tage / Monat. Farblogik (Abschnitte 14/47):
+ *  Preis fällt = grün, steigt = rot, stabil (±0,5 %) = neutral. */
+export const BERICHT_TYP = { FIVE_DAY: "5 Tage", FIFTEEN_DAY: "15 Tage", MONTHLY: "Monat" };
+export const RICHTUNG = {
+  FALLING: { text: "fallend", farbe: "var(--st-gruen)", tone: "green" },
+  RISING: { text: "steigend", farbe: "var(--st-rot)", tone: "red" },
+  STABLE: { text: "stabil", farbe: "var(--text-secondary)", tone: "gray" },
+  UNKNOWN: { text: "unbekannt", farbe: "var(--text-dim)", tone: "gray" },
+};
+export function richtungFarbe(r) {
+  return (RICHTUNG[r] || RICHTUNG.UNKNOWN).farbe;
+}
+export const CONFIDENCE = {
+  HIGH: { text: "hoch", farbe: "var(--st-gruen)" },
+  MEDIUM: { text: "mittel", farbe: "var(--st-amber)" },
+  LOW: { text: "niedrig", farbe: "var(--st-rot)" },
+};
+/** "01.09.–05.09.2026" */
+export function periodeText(von, bis) {
+  const t = (s) => (s ? `${s.slice(8, 10)}.${s.slice(5, 7)}.` : "");
+  return von && bis ? `${t(von)}–${t(bis)}${bis.slice(0, 4)}` : "";
+}
+/** Abschnitt 37: Sortierungen der Übersicht aller Modelle. */
+export const BERICHT_SORTIERUNGEN = [
+  ["rueckgang", "größter Preisrückgang"], ["anstieg", "größter Anstieg"], ["deals", "meiste Deals"], ["privat", "meiste private Deals"],
+  ["liquiditaet", "höchste Liquidität"], ["qualitaet", "schlechteste Qualität"], ["leer", "meisten EMPTY-Segmente"], ["kosten", "höchste Kosten"],
+  ["modell", "Modell (A–Z)"],
+];
+const QUALITAET_SCHLECHT = { POOR: 3, UNKNOWN: 2, MEDIUM: 1, GOOD: 0 };
+const LIQ_RANG = { HIGH: 3, MEDIUM: 2, LOW: 1, UNKNOWN: 0 };
+export function berichtSortieren(zeilen, sort) {
+  const zahl = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) ? null : Number(v));
+  const schluessel = {
+    rueckgang: (z) => zahl(z.delta_pct), anstieg: (z) => (zahl(z.delta_pct) === null ? null : -zahl(z.delta_pct)),
+    deals: (z) => -(zahl(z.hot_deals) || 0), privat: (z) => -(zahl(z.private_hot_deals) || 0),
+    liquiditaet: (z) => -(LIQ_RANG[z.liquiditaet] ?? 0), qualitaet: (z) => -(QUALITAET_SCHLECHT[z.data_quality] ?? 2),
+    leer: (z) => -(zahl(z.empty_segmente) || 0), kosten: (z) => -(zahl(z.kosten_usd) || 0),
+  }[sort];
+  const liste = [...(zeilen || [])];
+  if (!schluessel) return liste.sort((a, b) => String(a.label || "").localeCompare(String(b.label || ""), "de"));
+  return liste.sort((a, b) => {
+    const x = schluessel(a); const y = schluessel(b);
+    if (x === null && y === null) return String(a.label || "").localeCompare(String(b.label || ""), "de");
+    if (x === null) return 1;
+    if (y === null) return -1;
+    return x - y || String(a.label || "").localeCompare(String(b.label || ""), "de");
+  });
+}
