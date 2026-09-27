@@ -21,7 +21,11 @@ Pruefbefunde F/G (27.09.2026):
   Schluessel = FAMILIE (F3/F7/F13): REDUCE_FREQUENCY:<segment>, PAUSE_EMPTY:<segment>, PRIORITIZE_HOT:<segment> —
     ohne Ziel-Intervall (das ist ein Feld, das sich aendern darf); MERGE/SPLIT je Auftrag + Fassung + Bereiche.
     Abgelehnt oder zurueckgenommen = diese Familie wird fuer dieses Segment NIE mehr automatisch angewendet, bis der
-    Super-Admin die Ablehnung ausdruecklich aufhebt (ablehnung_aufheben, mit Protokoll). Alte Schluessel mit Intervall
+    Super-Admin die Ablehnung ausdruecklich aufhebt (ablehnung_aufheben, mit Protokoll; Runde 2: der Vorschlag wird
+    dann ueberholt und im naechsten Lauf mit aktuellen Daten neu bewertet — nie mit dem Ziel von damals). Runde 2: die
+    Ablehnung und die 30-Tage-Ruhe gelten fuer denselben Bereich (Auftrag + EZ + km-Grenzen, bereich_schluessel) auch
+    in einer neuen Fassung; SAFE_AUTO beansprucht den Vorschlag nach dem Eintragen der Aenderung (Rennen mit Ablehnen
+    waehrend des Laufs: die Aenderung endet sofort). Alte Schluessel mit Intervall
     (REDUCE_FREQUENCY:<seg>:<n>t:<k>x, PAUSE_EMPTY:<seg>:<n>t) wirken per Lese-Kompatibilitaet weiter: eine
     Ablehnung gilt fuer (typ, segment_id), egal unter welchem Schluessel — keine Migration.
   Bestandsschutz (F0/F5): eine angewendete SAFE_AUTO-Wirkung bleibt, solange die Daten ihr nicht WIDERSPRECHEN
@@ -31,7 +35,9 @@ Pruefbefunde F/G (27.09.2026):
   Ersparnis ehrlich (F8/F16): Wirkung = geplante Laeufe unter der heutigen Drosselung (Tagesplan-Merker: Kontingent,
     wartende Segmente) minus geplante Laeufe mit Vorschlag. Ist das Budget die Grenze (Rotation: Segmente warten),
     sinken die Kosten nicht — dann 0 $ und "frei werdende Laeufe fuer andere Segmente". Summen je Segment nur die
-    groesste Wirkung (MERGE und REDUCE/PAUSE derselben Segmente nicht doppelt).
+    groesste Wirkung (MERGE und REDUCE/PAUSE derselben Segmente nicht doppelt). Runde 2: die Summe der AKTIVEN
+    Wirkungen wird zur Lesezeit auf (Kontingent - heute geplant) gedeckelt (aktive_wirkung_deckeln) — hat SAFE_AUTO
+    selbst die Budgetgrenze aufgehoben, sinken die Jobs nur bis zum Kontingent.
 
 MERGE/SPLIT werden NIE automatisch angewendet. "Uebernehmen" (nur Super-Admin) aendert den Suchauftrag ueber
 auftraege.aendern: neue km-Bereiche, NEUE FASSUNG (version + 1, neue Segment-IDs, alte Historie bleibt unveraendert
@@ -186,7 +192,27 @@ def rotation_aus_merker(doc: Optional[Dict[str, Any]], stichtag: str) -> Dict[st
     faktor = min(1.0, int(doc.get("segmente_je_tag") or 0) / planbar) if aktiv else 1.0
     return {"bekannt": True, "aktiv": aktiv, "faktor": round(faktor, 4), "tag": tag,
             "segmente_je_tag": int(doc.get("segmente_je_tag") or 0), "segmente_gesamt": int(doc.get("segmente_gesamt") or 0),
-            "wartend": int(doc.get("wartend") or 0)}
+            "wartend": int(doc.get("wartend") or 0),
+            "geplant": int(doc["segmente"]) if doc.get("segmente") is not None else None}
+
+
+def aktive_wirkung_deckeln(summe: Dict[str, Any], rotation: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Runde 2 (Ersparnis durch SAFE_AUTO): die gespeicherten Wirkungen der aktiven Aenderungen wurden am Tag der
+    Anwendung mit dem DAMALIGEN Rotationsfaktor gerechnet. Hat SAFE_AUTO selbst die Budgetgrenze aufgehoben (heute
+    wartet niemand mehr), sinken die Jobs nur bis zum Kontingent: ohne die Wirkungen plante der Tagesplan hoechstens
+    'Kontingent' Segmente, mit ihnen 'geplant'. Die echte Ersparnis ist also hoechstens (Kontingent - geplant) je Tag —
+    daran wird die Summe zur Lesezeit gedeckelt (Dollar anteilig). Budgetgrenze aktiv: 0 $ (schon so). Ohne frischen
+    Tagesplan-Merker: unveraendert (die Lage ist unbekannt)."""
+    rot = rotation or {}
+    if not rot.get("bekannt") or rot.get("aktiv") or rot.get("geplant") is None:
+        return summe
+    frei_max = max(0, int(rot.get("segmente_je_tag") or 0) - int(rot["geplant"])) * MONAT_TAGE
+    laeufe = float(summe.get("laeufe") or 0)
+    if laeufe <= frei_max + 1e-9:
+        return {**summe, "gedeckelt": False}
+    anteil = frei_max / laeufe if laeufe else 0.0
+    return {**summe, "laeufe": round(frei_max, 1), "usd": round(float(summe.get("usd") or 0) * anteil, 2), "gedeckelt": True,
+            "laeufe_ungedeckelt": round(laeufe, 1)}
 
 
 async def rotation_lesen(db, stichtag: str) -> Dict[str, Any]:
@@ -510,23 +536,70 @@ async def frequenz_setzen(db, roh: Dict[str, Any], *, wer: str = "") -> Dict[str
 
 
 # ---------------------------------------------------------------- Vorschlaege speichern (idempotent)
-async def abgelehnte_familien(db, segment_ids: List[str]) -> Dict[Tuple[str, str], Dict[str, Any]]:
+def bereich_schluessel(d: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Runde 2: derselbe Bereich ueber Fassungen hinweg — Suchauftrag + EZ-Jahr + km-Grenzen. Ab Fassung 2 traegt jede
+    Segment-ID die Fassung ('<mid>:v2:<ez>:<km>'), auch fuer Bereiche, die ein MERGE/SPLIT gar nicht beruehrt; eine
+    Ablehnung/Ruhezeit haengt deshalb zusaetzlich an diesem Schluessel (Segment oder Vorschlag, gleiche Felder)."""
+    d = d or {}
+    if not d.get("model_id") or (d.get("min_km") is None and d.get("max_km") is None and d.get("year_from") is None):
+        return None
+    return f"{d['model_id']}|{d.get('year_from')}|{d.get('min_km')}|{d.get('max_km')}"
+
+
+async def abgelehnte_familien(db, segmente: List[Dict[str, Any]]) -> Dict[Tuple[str, str], Dict[str, Any]]:
     """Pruefbefund F3/F7/F13 (Lese-Kompatibilitaet): abgelehnte SAFE-Familien (segment_id, typ) — egal ob unter dem
-    Familien-Schluessel oder einem alten Schluessel mit Intervall (REDUCE_FREQUENCY:<seg>:<n>t:<k>x) abgelehnt."""
-    ids = sorted({str(s) for s in segment_ids if s})
-    if not ids:
+    Familien-Schluessel oder einem alten Schluessel mit Intervall (REDUCE_FREQUENCY:<seg>:<n>t:<k>x) abgelehnt, und
+    (Runde 2) auch, wenn dieselbe Familie fuer denselben Bereich in einer frueheren Fassung abgelehnt wurde.
+    segmente: Segmente ('id') oder Vorschlaege ('segment_id') mit model_id, year_from, min_km, max_km."""
+    segs = [s for s in segmente or [] if s and (s.get("segment_id") or s.get("id"))]
+    if not segs:
         return {}
-    raus: Dict[Tuple[str, str], Dict[str, Any]] = {}
-    async for d in db[VORSCHLAEGE].find({"segment_id": {"$in": ids}, "typ": {"$in": list(SAFE_TYPEN)}, "status": REJECTED},
+    ids = sorted({str(s.get("segment_id") or s.get("id")) for s in segs})
+    mids = sorted({str(s["model_id"]) for s in segs if s.get("model_id")})
+    oder: List[Dict[str, Any]] = [{"segment_id": {"$in": ids}}] + ([{"model_id": {"$in": mids}}] if mids else [])
+    je_seg: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    je_bereich: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    async for d in db[VORSCHLAEGE].find({"typ": {"$in": list(SAFE_TYPEN)}, "status": REJECTED, "$or": oder},
                                         {"_id": 0, "id": 1, "segment_id": 1, "typ": 1, "schluessel": 1, "entschieden_von": 1,
-                                         "entschieden_at": 1}):
-        raus.setdefault((d["segment_id"], d["typ"]), d)
+                                         "entschieden_at": 1, "model_id": 1, "year_from": 1, "min_km": 1, "max_km": 1, "version": 1}):
+        if d.get("segment_id"):
+            je_seg.setdefault((d["segment_id"], d["typ"]), d)
+        b = bereich_schluessel(d)
+        if b:
+            je_bereich.setdefault((b, d["typ"]), d)
+    raus: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for s in segs:
+        sid, b = str(s.get("segment_id") or s.get("id")), bereich_schluessel(s)
+        for typ in SAFE_TYPEN:
+            d = je_seg.get((sid, typ)) or (je_bereich.get((b, typ)) if b else None)
+            if d:
+                raus[(sid, typ)] = d
+    return raus
+
+
+async def sperren_je_segment(db, segs: List[Dict[str, Any]], tag: str) -> Dict[str, str]:
+    """Runde 2: Ruhezeit nach einer Ruecknahme (safe_auto_sperre_bis) je Segment — auch aus einer frueheren Fassung
+    desselben Bereichs (sonst endete die 30-Tage-Ruhe mit jedem Fassungswechsel). Gebuendelt, Index markt_segment_modell."""
+    mids = sorted({str(s["model_id"]) for s in segs if s.get("model_id")})
+    raus = {s["id"]: str(s.get("safe_auto_sperre_bis") or "") for s in segs if str(s.get("safe_auto_sperre_bis") or "") >= tag}
+    if not mids:
+        return raus
+    je_bereich: Dict[str, str] = {}
+    async for s in db[SEGMENTE].find({"model_id": {"$in": mids}, "safe_auto_sperre_bis": {"$gte": tag}},
+                                     {"_id": 0, "id": 1, "model_id": 1, "year_from": 1, "min_km": 1, "max_km": 1, "safe_auto_sperre_bis": 1}):
+        b = bereich_schluessel(s)
+        if b:
+            je_bereich[b] = max(je_bereich.get(b, ""), str(s["safe_auto_sperre_bis"]))
+    for s in segs:
+        b = bereich_schluessel(s)
+        if b and je_bereich.get(b):
+            raus[s["id"]] = max(raus.get(s["id"], ""), je_bereich[b])
     return raus
 
 
 async def _vorschlaege_speichern(db, liste: List[Dict[str, Any]], *, lauf_id: str, tag: str, jetzt_iso: str) -> Dict[str, int]:
     z = {"neu": 0, "fortgeschrieben": 0, "wieder_offen": 0}
-    abgelehnt = await abgelehnte_familien(db, [v.get("segment_id") for v in liste if v.get("typ") in SAFE_TYPEN])
+    abgelehnt = await abgelehnte_familien(db, [v for v in liste if v.get("typ") in SAFE_TYPEN])
     for v in liste:
         schl = {"schluessel": v["schluessel"]}
         fest = {k: v.get(k) for k in FESTE_FELDER}
@@ -679,10 +752,13 @@ async def _vorschlag_obsolet(db, vorschlag_id: Optional[str], grund: str, jetzt_
                                           "$unset": {"angewendet_von": "", "aenderung_id": ""}})
 
 
-async def _vorschlag_angewendet(db, vorschlag_id: str, aenderung_id: str, jetzt_iso: str) -> None:
-    await db[VORSCHLAEGE].update_one({"id": vorschlag_id, "status": {"$in": [PROPOSED, ACCEPTED, APPLIED]}},
-                                     {"$set": {"status": APPLIED, "angewendet_von": WER_AUTO, "angewendet_at": jetzt_iso,
-                                               "aenderung_id": aenderung_id, "updated_at": jetzt_iso}})
+async def _vorschlag_angewendet(db, vorschlag_id: str, aenderung_id: str, jetzt_iso: str) -> bool:
+    """Vorschlag als angewendet beanspruchen — atomar nur, solange er offen oder angewendet ist. False: er wurde
+    inzwischen abgelehnt/ueberholt (Ablehnen waehrend des laufenden SAFE_AUTO, zweiter Server)."""
+    r = await db[VORSCHLAEGE].update_one({"id": vorschlag_id, "status": {"$in": [PROPOSED, ACCEPTED, APPLIED]}},
+                                         {"$set": {"status": APPLIED, "angewendet_von": WER_AUTO, "angewendet_at": jetzt_iso,
+                                                   "aenderung_id": aenderung_id, "updated_at": jetzt_iso}})
+    return r.matched_count == 1
 
 
 async def _anwenden(db, v: Dict[str, Any], seg: Dict[str, Any], *, tag: str, jetzt_iso: str,
@@ -732,7 +808,13 @@ async def _anwenden(db, v: Dict[str, Any], seg: Dict[str, Any], *, tag: str, jet
         await db[AENDERUNGEN].insert_one(dict(doc))
     except DuplicateKeyError:
         return None                      # ein anderer Lauf hat dieselbe Wirkung eben eingetragen
-    await _vorschlag_angewendet(db, v["id"], doc["id"], jetzt_iso)
+    if not await _vorschlag_angewendet(db, v["id"], doc["id"], jetzt_iso):
+        # Runde 2 (Rennen Ablehnen <-> laufendes SAFE_AUTO): der Vorschlag wurde nach dem Lesen der Kandidaten abgelehnt.
+        # Der Status des Vorschlags wird NACH dem Eintragen geprueft — wer zuerst schreibt, egal: entweder beendet das
+        # Ablehnen (_familie_ablehnen) die schon eingetragene Aenderung, oder diese Pruefung sieht REJECTED und beendet sie.
+        await _beenden(db, doc, status=AUFGEHOBEN, grund="Vorschlag inzwischen abgelehnt", wer=WER_AUTO, jetzt_iso=jetzt_iso)
+        await _wirkung_neu(db, seg["id"])
+        return None
     await _wirkung_neu(db, seg["id"])
     return "aktualisiert" if ersetzt else "neu"
 
@@ -770,7 +852,8 @@ async def safe_auto_anwenden(db, *, tag: Optional[str] = None, jetzt_iso: Option
     healths = {h["segment_id"]: h async for h in db[konfig.HEALTH].find(
         {"segment_id": {"$in": seg_ids}}, {"_id": 0, "segment_id": 1, "health": 1, "activity_score": 1, "empfehlung": 1,
                                            "crawls_per_day": 1, "version": 1, "empty_rate": 1, "avg_valid_rows": 1})} if seg_ids else {}
-    abgelehnt = await abgelehnte_familien(db, seg_ids)
+    abgelehnt = await abgelehnte_familien(db, list(segs.values()))       # auch fruehere Fassungen desselben Bereichs
+    sperren = await sperren_je_segment(db, list(segs.values()), tag)
     # (1) bestehende Wirkungen
     bleibt: Dict[Tuple[str, str], Dict[str, Any]] = {}
     kette_vorher: Dict[str, str] = {}
@@ -803,14 +886,18 @@ async def safe_auto_anwenden(db, *, tag: Optional[str] = None, jetzt_iso: Option
             continue
         if (seg["id"], v["typ"]) in abgelehnt:
             continue                     # abgelehnt bleibt abgelehnt — fuer die ganze Familie (auch alte Schluessel)
+        a = bleibt.get((seg["id"], v["typ"]))
+        if v.get("status") == APPLIED and a and a.get("vorschlag_id") == v["id"] and (a.get("neu") or {}) == _neu_aus_vorschlag(v):
+            if v.get("aenderung_id") != a["id"]:
+                # Runde 2: unter d2d66db angewendete Vorschlaege tragen kein aenderung_id (der Knopf 'Zuruecknehmen'
+                # in der Vorschlagsliste fehlte dauerhaft) — hier nachtragen
+                await _vorschlag_angewendet(db, v["id"], a["id"], jetzt_iso)
+            continue                     # unveraendert
         if health.CONFIDENCE_RANG.get(v.get("confidence") or "LOW", 1) < mindest:
             continue                     # LOW: nichts Neues — eine bestehende Wirkung bleibt (Bestandsschutz)
-        if str(seg.get("safe_auto_sperre_bis") or "") >= tag:
-            continue                     # nach einer Ruecknahme: Ruhe fuer dieses Segment
-        a = bleibt.get((seg["id"], v["typ"]))
+        if sperren.get(seg["id"], "") >= tag:
+            continue                     # nach einer Ruecknahme: Ruhe fuer diesen Bereich (auch ueber Fassungen)
         if v.get("status") == APPLIED:
-            if a and a.get("vorschlag_id") == v["id"] and (a.get("neu") or {}) == _neu_aus_vorschlag(v):
-                continue                 # unveraendert
             frisch = await db[VORSCHLAEGE].find_one({"id": v["id"]}, {"_id": 0, "status": 1})
             if not frisch or frisch.get("status") != APPLIED:
                 continue                 # inzwischen ersetzt/ueberholt (z. B. PAUSE ersetzte REDUCE in diesem Lauf)
@@ -925,32 +1012,30 @@ async def vorschlag_entscheiden(db, vorschlag_id: str, aktion: str, *, wer: str)
 
 async def ablehnung_aufheben(db, vorschlag_id: str, *, wer: str) -> Dict[str, Any]:
     """Pruefbefund F3/F7/F13: die Ablehnung einer Familie ausdruecklich aufheben (nur Super-Admin, Protokoll).
-    Der Vorschlag unter dem Familien-Schluessel wird wieder offen; Ablehnungen unter alten Schluesseln (mit Intervall)
-    werden OBSOLETE — der naechste Lauf legt die Familie dann neu an. Eine Ruhezeit nach einer Ruecknahme
-    (safe_auto_sperre_bis) bleibt bestehen; die Wirkung entsteht erst beim naechsten SAFE_AUTO-Lauf."""
+    Runde 2: ALLE abgelehnten Vorschlaege der Familie (Familien-Schluessel, alte Schluessel mit Intervall und dieselbe
+    Familie in frueheren Fassungen desselben Bereichs, bereich_schluessel) werden OBSOLETE — nie wieder PROPOSED mit dem
+    Ziel und der Confidence von damals: solange ein Vorschlag abgelehnt war, wurden seine Werte nicht fortgeschrieben,
+    und ein sofort eingeschaltetes SAFE_AUTO haette das veraltete Ziel angewendet. Der naechste Lauf (Tageslauf oder
+    "Health jetzt berechnen") oeffnet die Familie mit den aktuellen Daten neu — nur wenn die Bedingung dann noch gilt.
+    Eine Ruhezeit nach einer Ruecknahme (safe_auto_sperre_bis) bleibt bestehen."""
     v = await db[VORSCHLAEGE].find_one({"id": str(vorschlag_id)}, {"_id": 0})
     if not v:
         raise NichtGefunden("Vorschlag nicht gefunden")
     jetzt_iso = konfig.jetzt_iso()
-    grund = "Ablehnung aufgehoben"
-    familie_schl = familien_schluessel(v["typ"], v["segment_id"]) if v.get("typ") in SAFE_TYPEN and v.get("segment_id") else v["schluessel"]
-    neu_status = PROPOSED if v["schluessel"] == familie_schl else OBSOLETE
-    r = await db[VORSCHLAEGE].update_one({"id": v["id"], "status": REJECTED},
-                                         {"$set": {"status": neu_status, "ablehnung_aufgehoben_von": wer, "ablehnung_aufgehoben_at": jetzt_iso,
-                                                   "updated_at": jetzt_iso, **({"obsolet_at": jetzt_iso, "obsolet_grund": f"{grund} (alter Schlüssel)"}
-                                                                               if neu_status == OBSOLETE else {})},
-                                          "$unset": {"entscheidung_grund": ""}, **_verlauf("ablehnung_aufgehoben", wer, jetzt_iso)})
+    grund = "Ablehnung aufgehoben — wird im nächsten Lauf mit aktuellen Daten neu bewertet"
+    aufheben = {"$set": {"status": OBSOLETE, "ablehnung_aufgehoben_von": wer, "ablehnung_aufgehoben_at": jetzt_iso, "updated_at": jetzt_iso,
+                         "obsolet_at": jetzt_iso, "obsolet_grund": grund},
+                "$unset": {"entscheidung_grund": ""}, **_verlauf("ablehnung_aufgehoben", wer, jetzt_iso)}
+    r = await db[VORSCHLAEGE].update_one({"id": v["id"], "status": REJECTED}, aufheben)
     if r.modified_count == 0:
         raise Konflikt(f"Vorschlag steht auf {v.get('status')} — keine Ablehnung zum Aufheben")
     if v.get("typ") in SAFE_TYPEN and v.get("segment_id"):
-        async for d in db[VORSCHLAEGE].find({"typ": v["typ"], "segment_id": v["segment_id"], "status": REJECTED, "id": {"$ne": v["id"]}},
-                                            {"_id": 0, "id": 1, "schluessel": 1}):
-            st = PROPOSED if d["schluessel"] == familie_schl else OBSOLETE
-            await db[VORSCHLAEGE].update_one({"id": d["id"], "status": REJECTED},
-                                             {"$set": {"status": st, "ablehnung_aufgehoben_von": wer, "ablehnung_aufgehoben_at": jetzt_iso,
-                                                       "updated_at": jetzt_iso, **({"obsolet_at": jetzt_iso, "obsolet_grund": f"{grund} (alter Schlüssel)"}
-                                                                                   if st == OBSOLETE else {})},
-                                              "$unset": {"entscheidung_grund": ""}, **_verlauf("ablehnung_aufgehoben", wer, jetzt_iso)})
+        filt: Dict[str, Any] = {"typ": v["typ"], "status": REJECTED, "id": {"$ne": v["id"]}}
+        bereich = bereich_schluessel(v)
+        filt["$or"] = [{"segment_id": v["segment_id"]}] + ([{"model_id": v.get("model_id")}] if bereich else [])
+        async for d in db[VORSCHLAEGE].find(filt, {"_id": 0}):
+            if d.get("segment_id") == v["segment_id"] or (bereich and bereich_schluessel(d) == bereich):
+                await db[VORSCHLAEGE].update_one({"id": d["id"], "status": REJECTED}, aufheben)
     await zaehler_nachrechnen(db, [v.get("model_id")])
     return await db[VORSCHLAEGE].find_one({"id": v["id"]}, {"_id": 0})
 
@@ -1199,7 +1284,7 @@ async def uebersicht(db) -> Dict[str, Any]:
     je_typ = {g["_id"]: g["n"] async for g in db[VORSCHLAEGE].aggregate([{"$match": {"status": {"$in": list(OFFEN)}}},
                                                                          {"$group": {"_id": "$typ", "n": {"$sum": 1}}}])}
     offen = await wirkung_summe(db, VORSCHLAEGE, {"status": {"$in": list(OFFEN)}}, rotation)
-    aktiv = await wirkung_summe(db, AENDERUNGEN, {"status": AKTIV}, rotation)
+    aktiv = aktive_wirkung_deckeln(await wirkung_summe(db, AENDERUNGEN, {"status": AKTIV}, rotation), rotation)
     return {"modus": einst["modus"], "modi": MODI_ANZEIGE, "frequenz": einst["frequenz"], "frequenz_standard": einst["frequenz_standard"],
             "modus_seit": einst["modus_seit"], "modus_von": einst["modus_von"], "modus_verlauf": einst["modus_verlauf"],
             "schwellen": schwellen(), "stand": await konfig.merker_lesen(db, konfig.HEALTH_DOK), "zaehler": zaehler,
@@ -1207,7 +1292,7 @@ async def uebersicht(db) -> Dict[str, Any]:
             "ersparnis_offen_usd": offen["usd"], "ersparnis_offen_usd_ohne_grenze": offen["usd_voll"],
             "laeufe_frei_offen_monat": offen["laeufe"],
             "ersparnis_safe_auto_usd": aktiv["usd"], "ersparnis_safe_auto_usd_ohne_grenze": aktiv["usd_voll"],
-            "laeufe_frei_safe_auto_monat": aktiv["laeufe"],
+            "laeufe_frei_safe_auto_monat": aktiv["laeufe"], "ersparnis_safe_auto_gedeckelt": bool(aktiv.get("gedeckelt")),
             "budget_grenze": bool(rotation.get("aktiv")), "rotation": rotation,
             "safe_auto_aktiv": await db[AENDERUNGEN].count_documents({"status": AKTIV}),
             "hinweis": ("Health und Vorschläge entstehen nur aus gespeicherten Tageswerten — keine Zusatzabrufe, keine Kosten. "

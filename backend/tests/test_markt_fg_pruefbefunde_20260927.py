@@ -256,16 +256,19 @@ def _markt_mit_abstand(welt, seg, n, tage=30):
 
 
 def test_f2_activity_score_unabhaengig_vom_abrufabstand(welt):
-    """Identischer Markt, Abstand 1-4 Tage: derselbe Score (vorher 77/71/66/64 — die Top-N-Komponente fiel mit 1/n)."""
+    """Top-5 wechselt jeden Tag: die Top-Komponente bleibt bei jedem Abstand voll (vorher fiel sie mit 1/n) und der Markt
+    bleibt HOT. Runde 2: die Unabhaengigkeit des GANZEN Scores vom Abstand gilt fuer gedaechtnislose (stochastische)
+    Maerkte und ist in test_markt_fg_pruefbefunde_runde2_20260927 an Zufallsmaerkten belegt — dieser feste Markt
+    (jedes Auto genau 5 Tage) sammelt Ereignisse linear an und ist dafuer kein Massstab mehr."""
     seg = {"id": "s", "model_id": "m", "version": 1, "definition_hash": "h1", "max_items": 5, "crawls_per_day": 1}
     scores = {}
     for n in (1, 2, 3, 4):
         s = {**seg, "safe_auto": {"intervall_tage": n, "reduziert_seit": _t(60)}} if n > 1 else seg
         h = H.segment_health(s, _markt_mit_abstand(welt, seg, n), stichtag=STICHTAG, cfg=H.FREQUENZ_STANDARD)
         scores[n] = h["activity_score"]
-        assert h["activity_komponenten"]["top"] == 1.0, n
-    assert max(scores.values()) - min(scores.values()) <= 1, scores
-    assert scores[1] >= 75
+        assert h["activity_komponenten"]["top"] == 1.0 and h["tagesraten"]["top_wechsel"] == 1.0, n
+        assert h["health"] == "HOT", (n, h["health"])
+    assert min(scores.values()) >= 75, scores
 
 
 # ---------------------------------------------------------------- F3 / F7 / F13
@@ -292,9 +295,10 @@ def test_f3_f7_f13_familie_abgelehnt_bleibt_abgelehnt(welt):
         assert _aktive(welt, seg["id"]) == [], "abgelehnte Familie nie angewendet"
         v = _v(welt, seg["id"], "REDUCE_FREQUENCY")
         assert len(v) == 1 and v[0]["status"] == "REJECTED"
-        # Ablehnung aufheben -> offen (Protokoll im Verlauf) -> SAFE_AUTO wendet an (Ziel: exakt alle 4 Tage)
+        # Ablehnung aufheben -> ueberholt (Runde 2: nie mit dem alten Ziel wieder offen; Protokoll im Verlauf) -> der
+        # naechste Lauf oeffnet die Familie mit aktuellen Daten -> SAFE_AUTO wendet an (Ziel: exakt alle 4 Tage)
         auf = welt.run(OPT.ablehnung_aufheben(db, v[0]["id"], wer="test-admin"))
-        assert auf["status"] == "PROPOSED" and auf["ablehnung_aufgehoben_von"] == "test-admin"
+        assert auf["status"] == "OBSOLETE" and auf["ablehnung_aufgehoben_von"] == "test-admin" and "neu bewertet" in auf["obsolet_grund"]
         assert [x["aktion"] for x in auf["verlauf"]] == ["abgelehnt", "ablehnung_aufgehoben"]
         with pytest.raises(OPT.Konflikt):
             welt.run(OPT.ablehnung_aufheben(db, v[0]["id"], wer="test-admin"))
@@ -333,10 +337,13 @@ def test_f3_alte_schluessel_mit_intervall_wirken_weiter(welt):
         assert _aktive(welt, seg["id"]) == []
         fam = [x for x in _v(welt, seg["id"], "REDUCE_FREQUENCY") if x["id"] != alt_id]
         assert len(fam) == 1 and fam[0]["status"] == "REJECTED" and "Familie abgelehnt" in fam[0]["entscheidung_grund"]
-        # Aufheben ueber den ALTEN Eintrag: alter -> OBSOLETE, Familie -> offen
+        # Aufheben ueber den ALTEN Eintrag: beide ueberholt (Runde 2), der naechste Lauf oeffnet die Familie neu
         welt.run(OPT.ablehnung_aufheben(db, alt_id, wer="test-admin"))
         st = {x["id"]: x["status"] for x in _v(welt, seg["id"], "REDUCE_FREQUENCY")}
-        assert st == {alt_id: "OBSOLETE", fam[0]["id"]: "PROPOSED"}
+        assert st == {alt_id: "OBSOLETE", fam[0]["id"]: "OBSOLETE"}
+        _rechnen(welt)
+        st = {x["id"]: x["status"] for x in _v(welt, seg["id"], "REDUCE_FREQUENCY")}
+        assert st == {alt_id: "OBSOLETE", fam[0]["id"]: "APPLIED"} and len(_aktive(welt, seg["id"])) == 1
         # aktive Wirkung unter einem alten Schluessel: verknuepfen statt aufheben + neu anlegen
         seg2 = _seg(welt, km=KM2[1])
         _reihe(welt, seg2, 20, [2])
@@ -536,6 +543,8 @@ def test_f14_zaehler_je_auftrag_sofort_nachgerechnet(welt):
         welt.run(OPT.vorschlag_entscheiden(db, pause["id"], "ablehnen", wer="test"))
         assert mh()["vorschlaege_offen"] == vor - 1
         welt.run(OPT.ablehnung_aufheben(db, pause["id"], wer="test"))
+        assert mh()["vorschlaege_offen"] == vor - 1, "Runde 2: ueberholt, bis der naechste Lauf neu bewertet"
+        _rechnen(welt)
         assert mh()["vorschlaege_offen"] == vor
         welt.run(OPT.modus_setzen(db, "SAFE_AUTO", wer="test"))
         assert mh()["safe_auto_aktiv"] >= 1
@@ -590,7 +599,8 @@ def test_routen_ablehnung_aufheben_und_listen(welt, monkeypatch):
         assert ex.value.status_code == 409
         welt.run(MA.admin_market_vorschlag_ablehnen(v["id"], admin=admin))
         r = welt.run(MA.admin_market_vorschlag_ablehnung_aufheben(v["id"], admin=admin))
-        assert r["vorschlag"]["status"] == "PROPOSED"
+        assert r["vorschlag"]["status"] == "OBSOLETE"
+        _rechnen(welt)                                  # der naechste Lauf oeffnet die Familie mit aktuellen Daten
         with pytest.raises(HTTPException) as ex:
             welt.run(MA.admin_market_vorschlag_ablehnung_aufheben("gibt-es-nicht", admin=admin))
         assert ex.value.status_code == 404

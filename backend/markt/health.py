@@ -21,12 +21,18 @@ Status (Abschnitte 27-29, Pruefreihenfolge):
   NORMAL    alles andere mit genug Daten
 
 Activity Score 0-100 (Abschnitt 30) aus Trefferquote, neuen Listings, Top-N-Wechseln, Preisaenderungen und
-Liquiditaet. Pruefbefund F2 (27.09.2026): jede Kennzahl so normiert, dass derselbe Markt bei jedem Abrufabstand
-denselben Score ergibt — sonst senkte eine SAFE_AUTO-Reduktion den Score selbst weiter:
-  - Top-N-Wechsel (ja/nein je Vergleich) JE GUELTIGEM LAUFVERGLEICH: ein Ja/Nein-Wert saettigt — ueber 3 Tage
-    kann sich die Top-5 nur einmal "aendern"; je Kalendertag geteilt fiele die Komponente bei Intervall n auf 1/n.
-  - Zaehler (neue/verschwundene Inserate, Preisaenderungen) JE KALENDERTAG: sie sammeln sich ueber den Abstand an
-    (3 Tage = ~3x so viele Ereignisse im Vergleich); je Vergleich stiege der Score mit der Reduktion.
+Liquiditaet. Pruefbefund F2 (27.09.2026, Runde 2): jede Kennzahl ist eine TAGESRATE, geschaetzt aus Vergleichen mit
+beliebigem Abstand (tagesrate) — derselbe Markt ergibt bei jedem Abrufabstand denselben Score, sonst verschoebe eine
+SAFE_AUTO-Reduktion den Score selbst und SAFE_AUTO pendelte:
+  - Ein Vergleich ueber n Tage sieht nur, OB sich etwas geaendert hat (Top-N: ja/nein; neue Inserate hoechstens die
+    Stichprobe; Preisaenderung je Inserat einmal). Das saettigt: P(Wechsel in n Tagen) = 1-(1-p)^n. Weder "je
+    Vergleich" (steigt mit n) noch "je Kalendertag" (faellt mit n) ist unabhaengig vom Abstand.
+  - Tagesrate p aus allen Vergleichen gemeinsam: Summe Bestand x (1-p)^n = Summe unveraendert (gedaechtnisloser
+    Markt: Zu-/Abgaenge und Preisaenderungen unabhaengig vom Beobachtungstag). Bei taeglichen Abrufen ist das exakt
+    die bisherige Rechnung (Ereignisse / Bestand), die Kalibrierung der Gewichte bleibt.
+  Nachgerechnet an stochastischen Maerkten (Poisson-Zugaenge, geometrische Abgaenge, guenstigste 5 als Stichprobe,
+  24 Marktarten x 30 Seeds): Verschiebung des Scores bei Abstand 2-4 Tagen hoechstens 2,6 Punkte (vorher bis 8,8) —
+  klar unter der Hysterese (5 Punkte).
 
 Empfohlene Frequenz aus der KONFIGURIERBAREN Zuordnung (market_config/optimierung.frequenz, Admin): Standard
 75-100 -> 2x taeglich, 45-74 -> 1x taeglich, 20-44 -> alle 2 Tage, 0-19 -> alle 3-7 Tage, EMPTY -> pausiert mit
@@ -126,7 +132,10 @@ HYSTERESE_PUNKTE = 5
 # Unter einer SAFE_AUTO-Wirkung (Pruefbefund F0/F5): Mindestlaufzahl/Confidence gegen die bei der AKTUELLEN Frequenz
 # erwartbaren Laeufe im Fenster (Laeufe vor der Reduktion zaehlen mit). Puffer: hoechstens 75 % der erwarteten Laeufe
 # bzw. erwartete minus eins — ein einzelner Ausfall (Apify-Fehler, POOR, Wartung) kippt kein Urteil. Nie unter 3
-# gueltige Laeufe: darunter entscheidet ein einzelner Lauf (dann bleibt die Wirkung per Bestandsschutz stehen).
+# gueltige Laeufe: darunter entscheidet ein einzelner Lauf (dann bleibt die Wirkung per Bestandsschutz stehen) —
+# AUSSER es sind gar nicht mehr als 1-2 Laeufe im Fenster zu erwarten (Nachpruefung ab 11 Tagen, Admin bis 60 Tage):
+# dann genuegen die erwartbaren (mindestens 1), sonst bliebe der Status fuer immer UNKNOWN und die Pause haelt auch
+# bei wieder vorhandenen Autos ewig (Pruefbefund Runde 2). Neue Wirkungen verlangen trotzdem 3 Laeufe (Confidence).
 ERWARTET_PUFFER_ANTEIL = 0.75
 MIN_LAEUFE_UNTER_WIRKUNG = 3
 MONAT_TAGE = 30.4
@@ -257,11 +266,15 @@ def erwartete_laeufe(wirkung: Optional[Dict[str, Any]], *, stichtag: str, crawls
 
 def schwelle(basis: int, erwartet: Optional[int]) -> int:
     """Mindestzahl gueltiger Laeufe: ohne Wirkung die feste Schwelle (basis); unter einer Wirkung hoechstens 75 % der
-    erwarteten Laeufe bzw. erwartete minus eins (ein Ausfall kippt nichts), nie unter MIN_LAEUFE_UNTER_WIRKUNG."""
+    erwarteten Laeufe bzw. erwartete minus eins (ein Ausfall kippt nichts), nie unter MIN_LAEUFE_UNTER_WIRKUNG — aber
+    auch nie ueber den erwarteten Laeufen selbst (Pruefbefund Runde 2: bei einer Nachpruefung ab 15 Tagen liegen nur
+    1-2 Laeufe im Fenster; eine Untergrenze 3 liesse den Status fuer immer UNKNOWN und die Pause unaufhebbar).
+    Mindestens 1 gueltiger Lauf."""
     if erwartet is None:
         return basis
     puffer = min(int(erwartet) - 1, int(ERWARTET_PUFFER_ANTEIL * int(erwartet)))
-    return max(MIN_LAEUFE_UNTER_WIRKUNG, min(basis, puffer))
+    untergrenze = max(1, min(MIN_LAEUFE_UNTER_WIRKUNG, int(erwartet)))
+    return max(untergrenze, min(basis, puffer))
 
 
 def min_laeufe(basis: int, wirkung: Optional[Dict[str, Any]], erwartet: Optional[int] = None) -> int:
@@ -273,6 +286,39 @@ def min_laeufe(basis: int, wirkung: Optional[Dict[str, Any]], erwartet: Optional
 
 
 # ---------------------------------------------------------------- Kennzahlen (reine Rechnung)
+def tagesrate(beob: Iterable[Tuple[float, float, int]]) -> Optional[float]:
+    """Pruefbefund F2 (Runde 2): Tageswahrscheinlichkeit r, mit der sich eine Einheit (ein Inserat der Stichprobe, ein
+    Preis, die Top-N als Ganzes) aendert — aus Vergleichen mit verschiedenem Abstand. beob = (Bestand, davon geaendert,
+    Abstand n Tage). Ueber n Tage bleibt eine Einheit mit (1-r)^n unveraendert (gedaechtnislos: Zugaenge, Abgaenge und
+    Preisaenderungen treten unabhaengig vom Beobachtungstag auf). Momentenschaetzer ueber alle Vergleiche gemeinsam:
+    Summe Bestand x (1-r)^n = Summe unveraendert. Bei taeglichen Vergleichen exakt geaendert/Bestand (wie bisher);
+    bei gleichem Abstand geschlossen 1-(unveraendert/Bestand)^(1/n); sonst Bisektion (monoton, 40 Schritte).
+    Ein Ja/Nein-Wert (Top-N) oder ein gedeckelter Zaehler (neue Inserate hoechstens die Stichprobe) saettigt mit dem
+    Abstand — erst diese Rate ist unabhaengig davon, wie oft abgerufen wird. None ohne Bestand."""
+    b = [(float(x), min(float(x), max(0.0, float(e))), max(1, int(n))) for x, e, n in beob if x and float(x) > 0]
+    if not b:
+        return None
+    gesamt = sum(x for x, _, _ in b)
+    bleibt = sum(x - e for x, e, _ in b)
+    if bleibt >= gesamt - 1e-12:
+        return 0.0
+    if bleibt <= 1e-12:
+        return 1.0
+    abstaende = {n for _, _, n in b}
+    if abstaende == {1}:
+        return (gesamt - bleibt) / gesamt              # taeglich: exakt Ereignisse / Bestand (wie vor Runde 2)
+    if len(abstaende) == 1:
+        return 1.0 - (bleibt / gesamt) ** (1.0 / abstaende.pop())
+    lo, hi = 0.0, 1.0
+    for _ in range(40):
+        mitte = (lo + hi) / 2
+        if sum(x * (1.0 - mitte) ** n for x, _, n in b) > bleibt:
+            lo = mitte
+        else:
+            hi = mitte
+    return (lo + hi) / 2
+
+
 def kennzahlen(docs: List[Dict[str, Any]], *, rows_soll: int, stichtag: str, crawls_per_day: int = 1,
                letzter_gueltiger_tag_ausserhalb: Optional[str] = None,
                wirkung: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -301,27 +347,43 @@ def kennzahlen(docs: List[Dict[str, Any]], *, rows_soll: int, stichtag: str, cra
     inserate: set = set()
     for d in gueltige_tage:
         inserate |= {str(x) for x in (d.get("listing_ids_alle") or d.get("listing_ids") or [])}
-    # Vergleichstage (Tageswerte mit gueltigem Vortag): Zaehler je KALENDERTAG (Abstand zum Vergleichstag, hoechstens
-    # 7), Top-N-Wechsel (ja/nein) je VERGLEICH — Begruendung im Modulkopf (Pruefbefund F2)
+    # Vergleichstage (Tageswerte mit gueltigem Vortag): je Vergleich (Abstand n Tage, hoechstens 7) die Anteile, die
+    # sich seitdem geaendert haben -> TAGESRATE je Kennzahl (tagesrate, Pruefbefund F2 Runde 2 — Begruendung im Modulkopf)
     vergleich = [d for d in gueltige_tage if d.get("vergleich_vortag")]
     luecken = 0
     neu = weg = senk = erhoeh = 0
     t3: List[bool] = []
     t5: List[bool] = []
+    b_neu: List[Tuple[float, float, int]] = []
+    b_weg: List[Tuple[float, float, int]] = []
+    b_preis: List[Tuple[float, float, int]] = []
+    b_t3: List[Tuple[float, float, int]] = []
+    b_t5: List[Tuple[float, float, int]] = []
     for d in vergleich:
         try:
             abstand = max(1, min(LUECKE_MAX_TAGE, _tage_zwischen(str(d["vergleich_vortag"]), str(d["date"]))))
         except (TypeError, ValueError):
             abstand = 1
         luecken += abstand
-        neu += len(d.get("new_in_sample_ids") or []) or int(d.get("new_in_sample_today") or 0)
-        weg += int(d.get("disappeared_count") or 0)
+        n_neu = len(d.get("new_in_sample_ids") or []) or int(d.get("new_in_sample_today") or 0)
+        n_weg = int(d.get("disappeared_count") or 0)
+        n_preis = int(d.get("price_reductions_today") or 0) + int(d.get("price_increases_today") or 0)
+        neu += n_neu
+        weg += n_weg
         senk += int(d.get("price_reductions_today") or 0)
         erhoeh += int(d.get("price_increases_today") or 0)
+        # Bestand heute (Vereinigung der Laeufe des Tages), davon schon beim Vergleich dabei, Bestand beim Vergleich
+        s = max(int(d.get("sample_size") or 0), len(d.get("listing_ids_alle") or d.get("listing_ids") or []), n_neu)
+        dabei = max(0, s - n_neu)
+        b_neu.append((s, n_neu, abstand))
+        b_weg.append((dabei + n_weg, n_weg, abstand))
+        b_preis.append((dabei, n_preis, abstand))
         if d.get("top3_changed") is not None:
             t3.append(bool(d["top3_changed"]))
+            b_t3.append((1, 1 if d["top3_changed"] else 0, abstand))
         if d.get("top5_changed") is not None:
             t5.append(bool(d["top5_changed"]))
+            b_t5.append((1, 1 if d["top5_changed"] else 0, abstand))
     mittel = (sum(zeilen) / valid) if valid else 0.0
     medians = [(str(d["date"]), float(d["median_price"])) for d in gueltige_tage
                if int(d.get("sample_size") or 0) > 0 and d.get("median_price") is not None]
@@ -350,7 +412,17 @@ def kennzahlen(docs: List[Dict[str, Any]], *, rows_soll: int, stichtag: str, cra
     # Pruefbefund F0/F5: Schwellen unter einer SAFE_AUTO-Wirkung gegen die erwartbaren Laeufe
     erw_laeufe = erwartete_laeufe(wirkung, stichtag=stichtag, crawls_per_day=crawls_per_day, erster_tag=erster,
                                   typischer_abstand=typisch)
-    top_n = len(t3) + len(t5)
+    k_vergl = len(vergleich)
+    r_t3, r_t5 = tagesrate(b_t3), tagesrate(b_t5)
+    top_n = len(b_t3) + len(b_t5)
+    top_rate = (((r_t3 or 0.0) * len(b_t3) + (r_t5 or 0.0) * len(b_t5)) / top_n) if top_n else 0.0
+
+    def _je_tag(beob: List[Tuple[float, float, int]]) -> float:
+        # Tagesrate x mittlerer Bestand der Vergleiche = Ereignisse je Tag (bei taeglichen Abrufen exakt Summe/Tage)
+        if not beob:
+            return 0.0
+        return (tagesrate(beob) or 0.0) * (sum(b for b, _, _ in beob) / len(beob))
+    neu_tag, weg_tag, preis_tag = _je_tag(b_neu), _je_tag(b_weg), _je_tag(b_preis)
     return {
         "erwartete_laeufe": erw_laeufe, "min_laeufe_bewertung": schwelle(MIN_LAEUFE_BEWERTUNG, erw_laeufe),
         "min_laeufe_empty": schwelle(MIN_LAEUFE_EMPTY, erw_laeufe), "confidence_hoch_ab": schwelle(CONFIDENCE_HOCH_TAGE, erw_laeufe),
@@ -366,7 +438,10 @@ def kennzahlen(docs: List[Dict[str, Any]], *, rows_soll: int, stichtag: str, cra
         "unique_listings": len(inserate), "new_listings": neu, "disappeared_listings": weg,
         "price_drop_events": senk, "price_increase_events": erhoeh,
         "top3_turnover_rate": _r(sum(t3) / len(t3), 3) if t3 else None, "top5_turnover_rate": _r(sum(t5) / len(t5), 3) if t5 else None,
-        "_top_anteil": ((sum(t3) + sum(t5)) / top_n) if top_n else 0.0,
+        "_top_anteil": top_rate,
+        # Tagesraten (Pruefbefund F2 Runde 2) — zur Nachvollziehbarkeit gespeichert, Grundlage des Activity Scores
+        "tagesraten": {"top_wechsel": _r(top_rate, 3), "neu_je_tag": _r(neu_tag, 3), "weg_je_tag": _r(weg_tag, 3),
+                       "preisaenderungen_je_tag": _r(preis_tag, 3), "vergleiche": k_vergl} if k_vergl else None,
         "median_price_change_pct": _r(aenderung_pct, 2), "price_volatility_pct": _r(vola, 2),
         "preis_streuung_pct": _r(statistics.median(streuung_tage), 2) if streuung_tage else None,
         "letzter_gueltiger_tag": letzter, "letzter_lauf_alter_tage": alter, "erwarteter_abstand_tage": erwartet,
@@ -377,8 +452,7 @@ def kennzahlen(docs: List[Dict[str, Any]], *, rows_soll: int, stichtag: str, cra
         "laeufe_je_tag": _r(laeufe_gesamt / beob_tage, 3) if beob_tage else None,
         "laeufe_je_tag_konfig": max(1, min(4, int(crawls_per_day or 1))),
         "monatskosten_usd": round(kosten / beob_tage * MONAT_TAGE, 2) if (beob_tage and kosten > 0) else None,
-        "_neu_je_tag": (neu / luecken) if luecken else 0.0, "_weg_je_tag": (weg / luecken) if luecken else 0.0,
-        "_preis_je_tag": ((senk + erhoeh) / luecken) if luecken else 0.0, "_mittel": mittel,
+        "_neu_je_tag": neu_tag, "_weg_je_tag": weg_tag, "_preis_je_tag": preis_tag, "_mittel": mittel,
     }
 
 
@@ -444,6 +518,10 @@ def confidence_bestimmen(m: Dict[str, Any], status: str, stichtag: str) -> str:
     min_empty = int(m.get("min_laeufe_empty") or MIN_LAEUFE_EMPTY)
     hoch_ab = int(m.get("confidence_hoch_ab") or CONFIDENCE_HOCH_TAGE)
     if status == UNKNOWN or int(m.get("valid_runs") or 0) < min_empty:
+        return "LOW"
+    if m.get("erwartete_laeufe") is not None and int(m.get("valid_runs") or 0) < MIN_LAEUFE_UNTER_WIRKUNG:
+        # Runde 2: bei langer Nachpruefung (1-2 Laeufe im Fenster) darf ein einzelner Lauf ein Urteil tragen (die
+        # Pause endet bei Treffern), aber keine NEUE SAFE_AUTO-Wirkung — dafuer gilt weiter: mindestens 3 Laeufe
         return "LOW"
     erster = m.get("erster_tag_im_fenster")
     ganzes_fenster = bool(erster) and _tage_zwischen(erster, stichtag) >= FENSTER_TAGE - 1

@@ -81,7 +81,10 @@ function useSeitenListe(url, feld, parameter, fehlerText) {
                          weitere: !!r.data?.weitere, fehler: "", laedt: false, jeTyp: r.data?.je_typ }));
     } catch (e) {
       if (nr !== laufNr.current) return;
-      setStand((s) => ({ ...s, liste: anhaengen ? s.liste : (s.liste || null), fehler: errMsg(e, fehlerText), laedt: false }));
+      // Prüfbefund Runde 2: scheitert eine NEUE Liste (Filterwechsel, Neuladen), bleibt nie die alte stehen — sonst
+      // zeigte "abgelehnt" die offenen Vorschläge mit "Annehmen". Nur "Weitere laden" behält die schon geladenen Seiten.
+      setStand((s) => ({ ...s, liste: anhaengen ? s.liste : null, gesamt: anhaengen ? s.gesamt : 0, weitere: anhaengen ? s.weitere : false,
+                         fehler: errMsg(e, fehlerText), laedt: false }));
     }
   }, [url, feld, parameter, fehlerText]);
   return [stand, laden];
@@ -162,7 +165,7 @@ export default function MarktOptimierung() {
     { id: v.aenderung_id, label: v.label, model_id: v.model_id, ez_label: v.ez_label, km_label: v.km_label, typ: v.typ },
     `${VORSCHLAG_TYP[v.typ] || v.typ}: ${v.reason || ""}`);
   const ablehnungAufheben = (v) => {
-    if (!window.confirm(`Ablehnung aufheben?\n\n${VORSCHLAG_TYP[v.typ] || v.typ} · ${v.label || v.model_id} ${[v.ez_label, v.km_label].filter(Boolean).join(" · ")}\n\nDanach darf SAFE_AUTO diese Art Änderung für das Segment wieder anwenden (ab dem nächsten Lauf; eine Ruhezeit nach einer Rücknahme bleibt).`)) return;
+    if (!window.confirm(`Ablehnung aufheben?\n\n${VORSCHLAG_TYP[v.typ] || v.typ} · ${v.label || v.model_id} ${[v.ez_label, v.km_label].filter(Boolean).join(" · ")}\n\nDer Vorschlag wird im nächsten Lauf (täglich oder „Health jetzt berechnen") mit aktuellen Daten neu bewertet; erst danach darf SAFE_AUTO diese Art Änderung für das Segment wieder anwenden. Eine Ruhezeit nach einer Rücknahme bleibt.`)) return;
     aktion(`aufheben-${v.id}`, () => api.post(`/admin/market/optimierung/vorschlaege/${v.id}/ablehnung-aufheben`), "Ablehnung aufgehoben");
   };
   const berechnen = () => aktion("berechnen", () => api.post("/admin/market/optimierung/berechnen"),
@@ -394,11 +397,19 @@ function ModellZeile({ m, neuLaden }) {
     }
   }, [m.model_id]);
   // Prüfbefund F15: eine aufgeklappte Tabelle lädt nach jeder Aktion (Rücknahme, Moduswechsel, Berechnung) neu
-  useEffect(() => { if (offen) ladenDetail(); }, [neuLaden]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Runde 2: eine ZUGEKLAPPTE Tabelle gilt nach einer Aktion als veraltet — sie zeigt beim Aufklappen nie den alten Stand
+  const veraltet = useRef(false);
+  useEffect(() => { if (offen) ladenDetail(); else veraltet.current = true; }, [neuLaden]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Prüfbefund F15 (Runde 2): beim Aufklappen IMMER neu laden — auch eine zwischendurch zugeklappte Tabelle zeigt nach
+  // Rücknahme/Moduswechsel/Berechnung den aktuellen Stand
   const umschalten = () => {
     const neu = !offen;
     setOffen(neu);
-    if (neu && (!detail || fehler)) ladenDetail();
+    if (neu) {
+      if (veraltet.current) setDetail(null);
+      veraltet.current = false;
+      ladenDetail();
+    }
   };
   return (
     <Fragment>

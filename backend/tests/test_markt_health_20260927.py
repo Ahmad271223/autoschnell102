@@ -286,7 +286,12 @@ def test_06_activity_score_und_frequenzzuordnung_konfigurierbar(welt):
     assert H.activity(m2) == (25, {"treffer": 1.0, "neu": 0.0, "top": 0.0, "preis": 0.0, "liquiditaet": 0.0}, "LOW")
     k = H.kennzahlen([{"date": "2031-01-10", "sample_size": 5, "median_price": 1, "vergleich_vortag": "2031-01-07", "new_in_sample_today": 3,
                        "data_quality": "GOOD", "valid_runs": 1}], rows_soll=5, stichtag="2031-01-10")
-    assert k["vergleich_kalendertage"] == 3 and k["_neu_je_tag"] == 1.0, "3 neue in 3 Tagen = 1 je Tag"
+    # Runde 2 (Tagesrate, gedaechtnislos): 3 von 5 neu nach 3 Tagen -> je Inserat und Tag 1-(2/5)^(1/3) = 26,3 %
+    # -> 1,32 neue je Tag (3 Tage lang je 1 neues ergaebe erwartet nur 1-(4/5)^3 = 49 % = 2,4 von 5)
+    assert k["vergleich_kalendertage"] == 3 and abs(k["_neu_je_tag"] - 5 * (1 - 0.4 ** (1 / 3))) < 1e-9, "3 von 5 neu in 3 Tagen"
+    k1 = H.kennzahlen([{"date": "2031-01-10", "sample_size": 5, "median_price": 1, "vergleich_vortag": "2031-01-09", "new_in_sample_today": 1,
+                        "data_quality": "GOOD", "valid_runs": 1}], rows_soll=5, stichtag="2031-01-10")
+    assert k1["_neu_je_tag"] == 1.0, "taeglich: genau Ereignisse je Tag (Kalibrierung unveraendert)"
     # Konfiguration: pruefen + speichern + wirkt auf die Empfehlung
     cfg = H.frequenz_pruefen({"stufen": [{"ab": 80, "crawls_per_day": 2, "intervall_tage": 1}, {"ab": 30, "intervall_tage": 1},
                                          {"ab": 0, "intervall_tage": 4, "intervall_tage_bis": 10}], "empty_nachpruefung_tage": 14})

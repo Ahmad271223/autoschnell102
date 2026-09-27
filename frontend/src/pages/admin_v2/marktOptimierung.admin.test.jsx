@@ -483,4 +483,50 @@ describe("Admin Segment-Optimierung", () => {
     expect(el("markt-modell-health")).toBeNull();
     expect(el("markt-modell-health-veraltet").textContent).toContain("neue Fassung v3 noch nicht bewertet");
   });
+
+  // ---------------------------------------------------------------- Prüfbefunde Runde 2 (27.09.2026)
+  it("F15 Runde 2: eine zwischendurch ZUGEKLAPPTE Segmenttabelle lädt beim Aufklappen neu und zeigt nie den alten Stand", async () => {
+    await starten();
+    const gets = () => netz.gets.filter((g) => g.url === "/admin/market/health/models/bmw-320d").length;
+    await klick("opt-modell-segmente-bmw-320d");
+    expect(el(`opt-segment-wirkung-${SEGMENTE[3].segment_id}`).textContent).toBe("pausiert · Nachprüfung alle 7 Tage");
+    await klick("opt-modell-segmente-bmw-320d");                 // zuklappen
+    expect(el(`opt-segment-wirkung-${SEGMENTE[3].segment_id}`)).toBeNull();
+    const vorher = gets();
+    netz.segmentWirkung = { intervall_tage: 1, crawls_per_day: null, hot: false, pausiert: false };
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    await klick("opt-zuruecknehmen-a1");
+    confirm.mockRestore();
+    expect(gets()).toBe(vorher);                                 // zugeklappt: kein Laden im Hintergrund
+    // langsame Antwort: bis sie da ist, steht NICHT der alte Stand da ("lade…"), danach der neue
+    let loesen;
+    netz.warten["/admin/market/health/models/bmw-320d|"] = new Promise((r) => { loesen = r; });
+    await klick("opt-modell-segmente-bmw-320d");
+    expect(gets()).toBe(vorher + 1);
+    expect(el(`opt-segment-wirkung-${SEGMENTE[3].segment_id}`)).toBeNull();
+    await act(async () => { loesen(); });
+    await warten();
+    expect(el(`opt-segment-wirkung-${SEGMENTE[3].segment_id}`).textContent).toBe("täglich");
+    // ohne Aktion dazwischen: Aufklappen lädt trotzdem den aktuellen Stand
+    delete netz.warten["/admin/market/health/models/bmw-320d|"];
+    await klick("opt-modell-segmente-bmw-320d");
+    await klick("opt-modell-segmente-bmw-320d");
+    expect(gets()).toBe(vorher + 2);
+  });
+
+  it("Runde 2: scheitert die Liste nach einem Filterwechsel, bleibt die ALTE Liste nie mit Knöpfen stehen", async () => {
+    await starten();
+    expect(el("opt-vorschlag-v1")).toBeTruthy();
+    netz.warten["/admin/market/optimierung/vorschlaege|REJECTED"] = Promise.reject(new Error("Vorschläge: Zeitüberschreitung"));
+    netz.warten["/admin/market/optimierung/vorschlaege|REJECTED"].catch(() => {});
+    await tippen("opt-filter-status", "REJECTED");
+    expect(el("opt-filter-status").value).toBe("REJECTED");
+    expect(el("opt-vorschlaege-fehler").textContent).toContain("Zeitüberschreitung");
+    for (const id of ["v1", "v2", "v3"]) expect(el(`opt-vorschlag-${id}`)).toBeNull();
+    expect(behaelter.textContent).not.toContain("Annehmen");
+    delete netz.warten["/admin/market/optimierung/vorschlaege|REJECTED"];
+    await klick("opt-vorschlaege-erneut");
+    expect(el("opt-vorschlag-v5")).toBeTruthy();
+    expect(el("opt-vorschlag-v1")).toBeNull();
+  });
 });

@@ -321,8 +321,9 @@ async def admin_market_vorschlag_ablehnen(vorschlag_id: str, admin=Depends(curre
 
 @router.post("/admin/market/optimierung/vorschlaege/{vorschlag_id}/ablehnung-aufheben")
 async def admin_market_vorschlag_ablehnung_aufheben(vorschlag_id: str, admin=Depends(current_super_admin)):
-    """Pruefbefund F3/F7/F13: eine Ablehnung (Familie: Typ + Segment, auch alte Schluessel) ausdruecklich aufheben —
-    danach darf SAFE_AUTO die Familie wieder anwenden (eine Ruhezeit nach Ruecknahme bleibt)."""
+    """Pruefbefund F3/F7/F13: eine Ablehnung (Familie: Typ + Segment, auch alte Schluessel und fruehere Fassungen
+    desselben Bereichs) ausdruecklich aufheben — der Vorschlag wird ueberholt und im naechsten Lauf mit aktuellen Daten
+    neu bewertet; erst dann darf SAFE_AUTO die Familie wieder anwenden (eine Ruhezeit nach Ruecknahme bleibt)."""
     from markt import optimierung
     try:
         v = await optimierung.ablehnung_aufheben(db, vorschlag_id, wer=admin["id"])
