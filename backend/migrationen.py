@@ -809,8 +809,9 @@ async def m21_empfang_kaestchen_leeren(db) -> dict:
                       for f in EMPFANG_KAESTCHEN]
     async for doc in db.generated_pdfs.find(
             {"created_at": {"$gte": EMPFANG_AUTOMATIK_AB}, "$or": gesetzt_filter},
-            {"_id": 0, "id": 1, "dealer_id": 1, "version": 1, "contract_data": 1,
-             "nach_abholung_protokoll_id": 1, "vertrag_vor_abholung": 1}):
+            {"_id": 0, "id": 1, "dealer_id": 1, "vehicle_id": 1, "version": 1,
+             "contract_data": 1, "nach_abholung_protokoll_id": 1,
+             "vertrag_vor_abholung": 1}):
         z["geprueft"] += 1
         felder = empfang_kaestchen_gesetzt(doc.get("contract_data") or {})
         if not felder:

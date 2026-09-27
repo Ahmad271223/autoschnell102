@@ -790,6 +790,12 @@ def empfang_geleert_vermerk(felder: list, quelle: str) -> dict:
             "hinweis": EMPFANG_GELEERT_HINWEIS}
 
 
+#: Nachtrag 28.09.2026 (empfang3): Lebenszyklus-Stufen, die nur NACH der
+#: Abholung erreicht werden (abgeholt -> bestand -> archiviert, verkauft) —
+#: das Auto ist uebergeben, der Vertrag bleibt, wie er ist.
+FAHRZEUG_UEBERGEBEN = frozenset({"abgeholt", "bestand", "verkauft", "archiviert"})
+
+
 async def uebergabe_erfolgt(datenbank, doc: dict) -> bool:
     """Pruefer-Restpunkt 28.09.2026: Hat die Uebergabe zu diesem Vertrag schon
     stattgefunden? Die Anwendung setzt die Empfangs-Kaestchen bei der
@@ -802,6 +808,20 @@ async def uebergabe_erfolgt(datenbank, doc: dict) -> bool:
       * ein Termin zum Vertrag ist abgeholt/erledigt,
       * ein finales Abholprotokoll zum Vertrag (oder zu einem seiner Termine),
       * der Kaufvorgang zum Vertrag steht auf "abgeholt".
+    Nachtrag 28.09.2026 (empfang3): contract_id ist am Termin optional
+    (AppointmentIn) — ein Termin, der nur das Fahrzeug traegt, blieb unerkannt,
+    und die Migration haette den Vertrag eines uebergebenen Autos geleert.
+    Deshalb zaehlen zusaetzlich (ueber vehicle_id des Vertrags):
+      * ein Termin am Fahrzeug, abgeholt/erledigt, ohne Vertrag oder mit
+        diesem Vertrag,
+      * ein finales Abholprotokoll am Fahrzeug bzw. an einem dieser Termine,
+      * ein Kaufvorgang am Fahrzeug auf "abgeholt",
+      * der Lebenszyklus des Fahrzeugs (abgeholt, Bestand, verkauft,
+        archiviert) oder ein festgehaltener Abhol-Vorgang
+        (abgeholt_kaufvorgang_id).
+    Ein Termin/Protokoll, das ausdruecklich an einem ANDEREN Vertrag haengt,
+    zaehlt nicht (das Fahrzeug selbst verraet die Abholung dann ueber den
+    Lebenszyklus).
     Im Zweifel (Datenbankfehler) True — dann bleibt der Vertrag unberuehrt."""
     if not doc or not doc.get("id"):
         return True
@@ -809,10 +829,23 @@ async def uebergabe_erfolgt(datenbank, doc: dict) -> bool:
         return True
     from routes.appointments import AUSGANG_ABGEHOLT
     cid, dealer_id = doc["id"], doc.get("dealer_id")
+    vid = doc.get("vehicle_id") or None
+    ohne_oder_dieser = {"$in": [None, "", cid]}
     try:
+        if vid:
+            v = await datenbank.vehicles.find_one(
+                {"id": vid, "dealer_id": dealer_id},
+                {"_id": 0, "lifecycle": 1, "abgeholt_kaufvorgang_id": 1})
+            if v and (v.get("lifecycle") in FAHRZEUG_UEBERGEBEN
+                      or v.get("abgeholt_kaufvorgang_id")):
+                return True
+        termin_filter: dict = {"contract_id": cid}
+        if vid:
+            termin_filter = {"$or": [{"contract_id": cid},
+                                     {"vehicle_id": vid, "contract_id": ohne_oder_dieser}]}
         termin_ids = []
         async for t in datenbank.appointments.find(
-                {"contract_id": cid, "dealer_id": dealer_id},
+                {**termin_filter, "dealer_id": dealer_id},
                 {"_id": 0, "id": 1, "status": 1}):
             if t.get("status") in AUSGANG_ABGEHOLT:
                 return True
@@ -823,11 +856,17 @@ async def uebergabe_erfolgt(datenbank, doc: dict) -> bool:
             # Ein Protokoll, das ausdruecklich an einem ANDEREN Vertrag haengt, zaehlt nicht.
             oder.append({"appointment_id": {"$in": termin_ids},
                          "contract_id": {"$in": [None, cid]}})
+        if vid:
+            oder.append({"vehicle_id": vid, "dealer_id": dealer_id,
+                         "contract_id": ohne_oder_dieser})
         if await datenbank.pickup_protocols.count_documents(
                 {"status": "final", "superseded": {"$ne": True}, "$or": oder}, limit=1):
             return True
+        kv_oder = [{"contract_id": cid}]
+        if vid:
+            kv_oder.append({"vehicle_id": vid, "contract_id": ohne_oder_dieser})
         if await datenbank.kaufvorgaenge.count_documents(
-                {"contract_id": cid, "dealer_id": dealer_id, "status": "abgeholt"}, limit=1):
+                {"$or": kv_oder, "dealer_id": dealer_id, "status": "abgeholt"}, limit=1):
             return True
     except Exception:  # noqa: BLE001 — im Zweifel nichts anfassen
         log.exception("Uebergabe zu Vertrag %s nicht pruefbar", cid)
