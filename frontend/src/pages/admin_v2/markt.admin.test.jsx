@@ -189,6 +189,10 @@ describe("Admin Marktanalyse", () => {
     expect(el("markt-taktung").textContent).toContain("Restbudget 437.50 $ für 5 Tage");
     expect(el("markt-taktung").textContent).toContain("Entfernungsprüfung bis 0.29 $/Tag");
     await klick("markt-konfig-oeffnen");
+    // Ahmad 28.09.2026 („Knopf klappt nicht“): die Karte steht direkt unter den Knöpfen, VOR der Status-Kachel
+    // (vorher hinter Status/Deals weit unten), der Knopf zeigt den Zustand
+    expect(el("markt-konfig").compareDocumentPosition(el("markt-status")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(el("markt-konfig-oeffnen").getAttribute("aria-expanded")).toBe("true");
     expect(el("markt-konfig-km").value).toBe("10000-30000");
     expect(el("markt-konfig-ez").value).toBe("2019-2021");
     // Oberflaeche: Kostenformel aus status.takt (nicht mehr hart 0,004 + 0,003), Hinweis "nur Vorbelegung", Knopf "anwenden"

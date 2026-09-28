@@ -72,7 +72,10 @@ export default function Markt() {
       <PageHeader title="Marktanalyse" subtitle={`Eigene historische mobile.de-Beobachtung: je Segment die ${status.einstellungen?.rows_je_segment || 10} günstigsten Angebote, täglich.`}
                   action={<div className="flex gap-2">
                     <Button variant="outline" size="sm" onClick={laden}><RefreshCw size={14} /> Aktualisieren</Button>
-                    <Button variant="outline" size="sm" onClick={() => setKonfigOffen((o) => !o)} data-testid="markt-konfig-oeffnen"><Settings2 size={14} /> Bereiche & Budget</Button>
+                    {/* Ahmad 28.09.2026 („Knopf klappt nicht“): die Karte stand weit unten hinter Status/Deals — jetzt direkt
+                        unter den Knöpfen, Knopf zeigt den Zustand, die Seite rollt zur Karte */}
+                    <Button variant={konfigOffen ? undefined : "outline"} size="sm" aria-expanded={konfigOffen}
+                            onClick={() => setKonfigOffen((o) => !o)} data-testid="markt-konfig-oeffnen"><Settings2 size={14} /> Bereiche & Budget</Button>
                     <Link to="/admin/markt/chancen" data-testid="markt-chancen-link"><Button variant="outline" size="sm"><Radar size={14} /> Chancen</Button></Link>
                     {superAdmin && <Link to="/admin/markt/private-deals" data-testid="markt-private-deals-link"><Button variant="outline" size="sm"><UserRound size={14} /> Private Deals</Button></Link>}
                     {superAdmin && <Link to="/admin/markt/hot-deals" data-testid="markt-hot-deals-link"><Button variant="outline" size="sm"><Flame size={14} /> Hot Deals</Button></Link>}
@@ -80,6 +83,8 @@ export default function Markt() {
                     <Link to="/admin/markt/optimierung" data-testid="markt-optimierung-link"><Button variant="outline" size="sm"><Gauge size={14} /> Segment-Optimierung</Button></Link>
                     <Link to="/admin/markt/auftraege" data-testid="markt-auftraege-link"><Button size="sm"><ListPlus size={14} /> Suchaufträge</Button></Link>
                   </div>} />
+
+      {konfigOffen && <KonfigKarte status={status} superAdmin={superAdmin} onGespeichert={laden} />}
 
       {(status.monitoring?.alarme || []).length > 0 && (
         <Card className="mb-4" data-testid="markt-alarme">
@@ -193,8 +198,6 @@ export default function Markt() {
           </div>
         </Card>
       )}
-
-      {konfigOffen && <KonfigKarte status={status} superAdmin={superAdmin} onGespeichert={laden} />}
 
       <Card padded={false} data-testid="markt-modelle">
         <div className="px-4 py-3 text-[13px] text-zinc-400" style={{ borderBottom: "1px solid var(--wa-08)" }}>
