@@ -4014,3 +4014,15 @@ alle ~4.068 Segmente in ~30 Minuten, das Fenster lässt Reserve für Wiederholun
 z. B. „Sortierung unsicher“), je Segment mit „ZULETZT GESCHEITERT“ (jüngster Lauf kaputt) oder „inzwischen ok“,
 gruppiert je Suchauftrag, plus die häufigsten Gründe. Liest nur, löst keinen Abruf aus. Steckt im Image — nach einem
 `git pull` ohne Rollout per `docker compose cp backend/scripts/markt_fehlversuche.py backend:/app/scripts/` kopieren.
+Erster Live-Befund 28.09. abends: 570 ungültige Läufe in 551 Segmenten, alle „land IT/NL/AT/BE/DK != DE“ (vor dem
+Filter `cn=DE`), 0 technische Fehler; nach dem Rollout lief bis Mitternacht kein Lauf mehr — der Beweis für den
+Filter ist der Tagesplan vom 29.09. `--seit "JJJJ-MM-TT HH:MM"` zeigt daneben die erfolgreichen Läufe im selben
+Zeitraum (Gegenprobe).
+
+**Alle aktiven Segmente jetzt einmal crawlen (Wunsch Ahmad 28.09.2026, „Testlauf für alle Autos“):**
+`docker compose exec backend python -X utf8 scripts/markt_alle_jetzt.py` zeigt die Vorschau (Segmente, Läufe,
+geschätzte Kosten, Crawler an/aus), `--ja` legt je aktivem Segment einen Sofort-Lauf an — derselbe Weg wie der Knopf
+„jetzt crawlen“ am Segment (`markt.jobs.job_sofort`, manueller Job `heute#xxxxxx`, fällig ab jetzt). Kein Doppel-Lauf
+(wartende/laufende Jobs und manuelle Läufe der letzten 5 Minuten werden übersprungen), der Tagesplan bleibt unberührt
+(`last_planned_tag` unverändert — morgen läuft der normale Plan). Abbruch bei Crawler AUS oder Budget 0. Auswerten
+danach mit `markt_fehlversuche.py --seit "<Startzeit>"` oder der Kachel „Heute gecrawlt“.
