@@ -2,7 +2,8 @@
 """Beweisdokument je Inserat (ersetzt die Snapshots, 10.09.2026):
 Warteschlange, Erzeugung, Aufbewahrung, Zugriff, sicherer Foto-Abruf.
 
-Laeuft gegen die lokale MongoDB (eigene Kennungen, raeumt auf); Fotos und
+Laeuft gegen die lokale MongoDB, je Test in einer eigenen Wegwerf-Datenbank
+(nie DB_NAME — dort arbeitet in der CI ein echter Server mit); Fotos und
 Portal werden ersetzt — kein Netz."""
 import asyncio
 import io
@@ -20,7 +21,6 @@ from pypdf import PdfReader
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 MONGO_URL = os.environ.get("MONGO_URL") or "mongodb://127.0.0.1:27017"
-DB_NAME = os.environ.get("DB_NAME") or "autoschnell"
 
 
 def _jetzt():
@@ -56,7 +56,14 @@ def welt(monkeypatch):
     w.loop = asyncio.new_event_loop()
     asyncio.set_event_loop(w.loop)
     w.client = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=5000)
-    w.db = w.client[DB_NAME]
+    # CI-Wackler 27.09.2026 (test_11, 409 "noch nicht fertig"): In der CI
+    # laeuft waehrend pytest ein echter Server auf DB_NAME — mit Beweis-Worker
+    # (beansprucht alle 5 s die aelteste offene Zeile) und Aufraeumlauf
+    # (beweise_verfallen). Er griff sich die frisch vorgemerkte Testzeile
+    # zwischen _vormerken und _durchlaufen; umgekehrt beanspruchte
+    # _durchlaufen die aelteste offene Zeile ANDERER Tests. Jede Welt bekommt
+    # deshalb eine eigene Wegwerf-Datenbank (wie test_befunde_runde23_beweis).
+    w.db = w.client[f"autoschnell_bew_{w.s}"]
     for m in mods:
         m.db = w.db
     w.run = lambda coro: w.loop.run_until_complete(coro)
@@ -88,26 +95,18 @@ def welt(monkeypatch):
     monkeypatch.setattr(bild_proxy, "laden_fuer_pdf", _foto)
     yield w
     try:
-        rx = {"$regex": f"^(mobile|kleinanzeigen|autoscout24):bew{w.s}"}
-        for d in w.run(w.db.inserat_beweise.find({"cache_key": rx}, {"pdf_key": 1}).to_list(100)):
-            if d.get("pdf_key"):
-                w.keys.append(d["pdf_key"])
-        for d in w.run(w.db.inserat_beweise.find({"cache_key": rx}, {"alle_keys": 1}).to_list(100)):
-            w.keys.extend(d.get("alle_keys") or [])
-        w.run(w.db.inserat_beweise.delete_many({"cache_key": rx}))
-        w.run(w.db.betriebsalarme.delete_many({"ref": rx}))
-        w.run(w.db.listings_cache.delete_many({"cache_key": rx}))
-        for c in ("vehicles", "vehicle_comparisons", "generated_pdfs", "appointments",
-                  "dealer_drivers", "storage_delete_retry"):
-            w.run(w.db[c].delete_many({"dealer_id": {"$in": [w.dealer_id, w.anderer]}}))
-        w.run(w.db.storage_delete_retry.delete_many({"ref.collection": "inserat_beweise",
-                                                      "key": {"$in": w.keys}}))
+        # Die Datenbank gehoert nur dieser Welt: alle Dateien ihrer Zeilen
+        # aus dem Datei-Speicher (der ist geteilt), dann die ganze DB weg.
+        for d in w.run(w.db.inserat_beweise.find({}, {"pdf_key": 1, "alle_keys": 1})
+                       .to_list(1000)):
+            w.keys.extend([d.get("pdf_key")] + list(d.get("alle_keys") or []))
         from storage_service import delete_async
-        for k in set(w.keys):
+        for k in {k for k in w.keys if k}:
             try:
                 w.run(delete_async(k))
             except Exception:
                 pass
+        w.run(w.client.drop_database(w.db.name))
     finally:
         for m, d in alt:
             if d is not None:
