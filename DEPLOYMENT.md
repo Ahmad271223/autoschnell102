@@ -4003,4 +4003,14 @@ Servern `sh deploy/env_setzen.sh MARKT_CRAWL_FENSTER_VON=9 MARKT_CRAWL_FENSTER_B
 (`MARKT_ABRUF2_UHRZEITEN=12,18`, Bündel bis 30 Minuten gestaffelt) — vorher „~12 h nach dem ersten“. Das
 Nachplanen direkt nach einer Aktivierung bleibt „ab jetzt“. Gilt ab dem nächsten Tagesplan (kurz nach Mitternacht).
 Nach dem Länderfilter (`cn=DE`, Commit cdb5894) schließen sich die Alarme `markt_filter_ignoriert` „land IT != DE“
-beim nächsten sauberen Lauf von selbst.
+beim nächsten sauberen Lauf von selbst. **Tatsächlich gesetzt am 28.09.2026 abends (beide Server):**
+`MARKT_CRAWL_FENSTER_VON=9 MARKT_CRAWL_FENSTER_BIS=11` — Ahmad wollte alle 1×-Segmente innerhalb von zwei
+Stunden („warum geht eigentlich nicht alle innerhalb 2 st“); mit 16 parallelen Apify-Läufen und Budget 600 $ passen
+alle ~4.068 Segmente in ~30 Minuten, das Fenster lässt Reserve für Wiederholungen.
+
+**Fehlversuche je Marke/Modell/Segment (Frage Ahmad 28.09.2026):**
+`docker compose exec backend python -X utf8 scripts/markt_fehlversuche.py` (`--tage 7` nur die letzten Tage,
+`--alle` auch Segmente mit nur einem Fehlversuch). Zählt Jobs `failed` (Technik) und `data_invalid` (Daten unbrauchbar,
+z. B. „Sortierung unsicher“), je Segment mit „ZULETZT GESCHEITERT“ (jüngster Lauf kaputt) oder „inzwischen ok“,
+gruppiert je Suchauftrag, plus die häufigsten Gründe. Liest nur, löst keinen Abruf aus. Steckt im Image — nach einem
+`git pull` ohne Rollout per `docker compose cp backend/scripts/markt_fehlversuche.py backend:/app/scripts/` kopieren.
