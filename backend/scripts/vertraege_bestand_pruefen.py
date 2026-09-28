@@ -90,28 +90,42 @@ def pruefen(db) -> dict:
     }
 
 
+SPERRE = "auto-daten-reparatur"
+
+
 def reparieren() -> int:
     """--reparieren: den Reparaturlauf des stuendlichen Aufraeumjobs
-    (cleanup_service.auto_daten_reparieren) einmal sofort ausfuehren — unter
-    derselben Sperre wie der Lauf, damit nichts parallel aufraeumt. Liefert die
-    Zahl der reparierten Vertraege, -1 wenn gerade ein Lauf die Sperre haelt."""
+    (cleanup_service.auto_daten_reparieren) einmal sofort ausfuehren.
+
+    Eigene, kurze Sperre — NICHT die des Aufraeumlaufs: der haelt seine Sperre
+    'cleanup-cycle' bewusst die ganze Stunde (ein Lauf je Stunde ueber beide
+    Server), die erste Fassung vom 28.09.2026 bekam sie deshalb auf prod2 nie
+    ("Ein Aufraeumlauf laeuft gerade"). Parallel zum Stundenlauf ist die
+    Reparatur ungefaehrlich: jeder Schritt ist gegen den alten Verweis bzw.
+    "kein Verweis" abgesichert, ein doppelt angelegter Datensatz wird
+    zurueckgerollt. Waehrend einer Schreibpause (Sicherung/Restore) laeuft
+    nichts. Liefert die Zahl der reparierten Vertraege, -1 wenn gerade eine
+    Reparatur laeuft, -2 bei Schreibpause."""
     import asyncio
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from motor.motor_asyncio import AsyncIOMotorClient
     import cleanup_service
     import job_lock
+    import wartung
 
     async def lauf() -> int:
         client = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=10000)
         try:
             db = client[DB_NAME]
-            token = await job_lock.acquire(db, "cleanup-cycle", ttl_seconds=1800)
+            if await wartung.aktiv_async(db):
+                return -2
+            token = await job_lock.acquire(db, SPERRE, ttl_seconds=600)
             if not token:
                 return -1
             try:
                 return await cleanup_service.auto_daten_reparieren(db)
             finally:
-                await job_lock.release(db, "cleanup-cycle", token=token)
+                await job_lock.release(db, SPERRE, token=token)
         finally:
             client.close()
 
@@ -125,8 +139,12 @@ def main(argv=None) -> int:
         return 2
     if argv:
         n = reparieren()
+        if n == -2:
+            print("Schreibpause: gerade laeuft eine Sicherung oder ein Restore — "
+                  "bitte danach erneut versuchen.")
+            return 3
         if n < 0:
-            print("Ein Aufraeumlauf laeuft gerade (Sperre 'cleanup-cycle') — "
+            print(f"Eine Reparatur laeuft gerade (Sperre '{SPERRE}') — "
                   "bitte in ein paar Minuten erneut versuchen.")
             return 3
         print(f"Reparaturlauf: {n} Vertraege repariert (Auto-Datensatz nachgetragen "

@@ -51,6 +51,9 @@ def _bestand(db):
     """Der Live-Befund im Kleinen: ein gueltiger Verweis, zwei Verweise ins Leere
     auf dasselbe Auto, ein bewusst entfernter Datensatz, ein Grabstein, ein
     Vertrag ohne Vertragsfassung."""
+    # wie in Produktion (job_lock legt den Unique-Index beim Start an): ohne ihn legt
+    # acquire() eine zweite Sperre gleichen Namens an, statt "besetzt" zu melden
+    db.job_locks.create_index("name", unique=True)
     db.admin_vehicle_data.insert_one({"id": "avd-ok", "purchase_date": "2026-09-01",
                                       "purchase_price_cents": 100})
     db.generated_pdfs.insert_many([
@@ -61,6 +64,21 @@ def _bestand(db):
         _vertrag("c-laeuft", "weg-4", vehicle="v4", loeschung={"status": "laeuft"}),
         _vertrag("c-leer", "weg-5", vehicle="v5", contract_data={}),
     ])
+
+
+def _sperre_halten(db_name: str, name: str) -> None:
+    """Eine job_lock-Sperre so setzen, wie sie ein laufender Prozess haelt
+    (nicht freigegeben, TTL 10 Minuten)."""
+    from motor.motor_asyncio import AsyncIOMotorClient
+    import job_lock
+
+    async def _lauf():
+        client = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=5000)
+        try:
+            assert await job_lock.acquire(client[db_name], name, ttl_seconds=600)
+        finally:
+            client.close()
+    asyncio.run(_lauf())
 
 
 @pytest.fixture
@@ -130,13 +148,20 @@ def test_02_pruefskript_vermerk_kein_hindernis_und_reparieren(sync_db, monkeypat
     aus = capsys.readouterr().out
     assert "NICHT bereit: 3 Vertraege" in aus and "--reparieren" in aus
     assert "Datensatz vom Betreiber entfernt (Vermerk, kein Hindernis): 1" in aus
-    # --reparieren fuehrt den Reparaturlauf sofort aus; der Vertrag ohne
+    # --reparieren fuehrt den Reparaturlauf sofort aus — auch waehrend der
+    # stuendliche Aufraeumlauf seine Stundensperre haelt (prod2 28.09.: unter
+    # derselben Sperre kam das Skript nie dran); der Vertrag ohne
     # Vertragsfassung bleibt das einzige Hindernis
+    _sperre_halten(sync_db.name, "cleanup-cycle")
     assert VBP.main(["--reparieren"]) == 1
     aus = capsys.readouterr().out
     assert "Reparaturlauf: 2 Vertraege repariert" in aus
     assert "NICHT bereit: 1 Vertraege" in aus
     assert VBP.pruefen(sync_db)["haengende_verweise"] == ["weg-5"]
+    # laeuft schon eine Reparatur (eigene Sperre), wartet das Skript — kein zweiter Lauf
+    _sperre_halten(sync_db.name, VBP.SPERRE)
+    assert VBP.main(["--reparieren"]) == 3
+    assert "Eine Reparatur laeuft gerade" in capsys.readouterr().out
     sync_db.generated_pdfs.delete_one({"id": "c-leer"})
     assert VBP.main([]) == 0
     assert "Bereit:" in capsys.readouterr().out

@@ -1287,8 +1287,13 @@ Verträge desselben Autos teilen ihn); vom Betreiber bewusst entfernte
 Datensätze (Vermerk) und laufende Löschungen bleiben unangetastet und zählen
 in der Prüfung nicht als Hindernis. Sofort statt auf den Stundenlauf warten:
 `docker compose exec backend python -X utf8 scripts/vertraege_bestand_pruefen.py --reparieren`
-(nimmt dieselbe Sperre wie der Aufräumlauf, prüft danach erneut). Bleibt ein
-Vertrag hängen, fehlt ihm die Vertragsfassung (`contract_data`).
+(eigene kurze Sperre `auto-daten-reparatur`, prüft danach erneut — der
+Aufräumlauf hält seine Sperre `cleanup-cycle` bewusst die ganze Stunde, unter
+ihr käme das Skript fast nie dran; während einer Schreibpause läuft nichts).
+Bleibt ein Vertrag hängen, fehlt ihm die Vertragsfassung (`contract_data`).
+Das Skript steckt im Image: nach einem `git pull` ohne Rollout mit
+`docker compose cp backend/scripts/vertraege_bestand_pruefen.py backend:/app/scripts/`
+in den laufenden Container kopieren.
 
 ### Dateien
 Fahrzeugfotos werden nur noch über kurzlebige signierte Links ausgeliefert
