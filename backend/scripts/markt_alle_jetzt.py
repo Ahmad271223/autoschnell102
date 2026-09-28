@@ -2,15 +2,20 @@
 """Alle aktiven Segmente der Marktbeobachtung JETZT einmal crawlen (Wunsch Ahmad 28.09.2026: "ein Testlauf,
 wo alle Autos jetzt einmalig gecrawlt werden; ab morgen wieder zu den normalen Uhrzeiten").
 
-    python -X utf8 scripts/markt_alle_jetzt.py          # Vorschau: wie viele Segmente, geschaetzte Kosten — legt NICHTS an
-    python -X utf8 scripts/markt_alle_jetzt.py --ja     # legt je aktivem Segment einen Sofort-Lauf an (kostet Apify-Budget)
+    python -X utf8 scripts/markt_alle_jetzt.py          # Vorschau: Segmente, geschaetzte Kosten — legt NICHTS an
+    python -X utf8 scripts/markt_alle_jetzt.py --ja     # startet (kostet Apify-Budget)
 
-Derselbe Weg wie der Knopf "jetzt crawlen" am Segment (markt.jobs.job_sofort): manueller Job mit eigenem
-Schluessel (heute#xxxxxx), faellig ab jetzt; der Worker holt ihn innerhalb einer Minute, wenn der Crawler an
-ist. Der Tagesplan bleibt unberuehrt (last_planned_tag wird nicht angefasst) — morgen laeuft der normale Plan
-im eingestellten Fenster. Segmente, fuer die schon ein Job wartet oder laeuft, oder die in den letzten
-5 Minuten einen manuellen Lauf bekamen, werden uebersprungen (kein Doppel-Lauf). Segmente pausierter
-Auftraege sind nicht aktiv und kommen nicht vor.
+Was --ja tut, in dieser Reihenfolge:
+  1. Tagesplan von heute sicherstellen (markt.jobs.tagesplan, idempotent — legt nur an, was noch fehlt).
+  2. Die wartenden ERSTEN Laeufe des heutigen Tagesplans (Schluessel = heute, faellig im Fenster 9-11 Uhr)
+     auf "jetzt" vorziehen — kein zweiter Lauf, derselbe Job laeuft nur frueher. Zweite Laeufe des Tages
+     (heute#2, 18 Uhr) bleiben, wo sie sind.
+  3. Segmente, fuer die heute kein Job mehr wartet (z. B. schon gelaufen), bekommen einen Sofort-Lauf —
+     derselbe Weg wie der Knopf "jetzt crawlen" am Segment (markt.jobs.job_sofort, manueller Job heute#xxxxxx).
+Der Worker holt faellige Jobs innerhalb einer Minute, wenn der Crawler an ist. last_planned_tag bleibt
+unberuehrt — morgen laeuft der normale Plan im eingestellten Fenster. Kein Doppel-Lauf: Segmente mit wartendem
+oder laufendem Job und manuelle Laeufe der letzten 5 Minuten werden uebersprungen. Segmente pausierter
+Auftraege sind nicht aktiv und kommen nicht vor. Abbruch bei Crawler AUS oder Budget 0.
 
 Danach auswerten: Kachel "Heute gecrawlt" im Admin, oder
     python -X utf8 scripts/markt_fehlversuche.py --seit "<Startzeit>"
@@ -47,12 +52,24 @@ def kosten(segs: List[Dict[str, Any]]) -> float:
                for s in segs)
 
 
+def _wartend_heute(heute: str, jetzt: str) -> Dict[str, Any]:
+    """Erste Laeufe des heutigen Tagesplans, die noch auf ihr Fenster warten."""
+    return {"status": "queued", "job_type": "daily", "tag": heute, "scheduled_at": {"$gt": jetzt}}
+
+
 async def ausfuehren(db, ja: bool) -> Dict[str, Any]:
-    """Vorschau (ja=False) oder Anlage (ja=True). Liefert Zaehler; 'grund' erklaert einen Abbruch."""
+    """Vorschau (ja=False) oder Start (ja=True). Liefert Zaehler; 'grund' erklaert einen Abbruch."""
+    heute, jetzt = konfig.heute_tag(), konfig.jetzt_iso()
     segs = await kandidaten(db)
+    ids = [s["id"] for s in segs]
+    offen = {j["segment_id"] async for j in db[konfig.JOBS].find(
+        {"status": {"$in": ["queued", "running"]}, "segment_id": {"$in": ids}}, {"_id": 0, "segment_id": 1})}
     erg: Dict[str, Any] = {"segmente": len(segs), "kosten_usd": round(kosten(segs), 2),
                            "laeufe": math.ceil(len(segs) / max(1, konfig.buendel_groesse())),
-                           "crawler_an": await konfig.crawler_aktiv(db), "neu": 0, "uebersprungen": 0, "fehler": 0,
+                           "crawler_an": await konfig.crawler_aktiv(db),
+                           "vorziehbar": await db[konfig.JOBS].count_documents(_wartend_heute(heute, jetzt)),
+                           "ohne_job": sum(1 for i in ids if i not in offen),
+                           "plan_neu": 0, "vorgezogen": 0, "neu": 0, "uebersprungen": 0, "fehler": 0,
                            "angelegt": False, "grund": None}
     takt = await jobs.intervall(db)
     if takt.get("ohne_budget"):
@@ -66,6 +83,14 @@ async def ausfuehren(db, ja: bool) -> Dict[str, Any]:
     if not erg["crawler_an"]:
         erg["grund"] = "Crawler ist AUS (Admin-Knopf / MARKT_AKTIV) — die Jobs wuerden nur warten. Erst einschalten."
         return erg
+    # 1. heutiger Tagesplan (idempotent) — sonst kaeme er spaeter obendrauf und alles liefe heute doppelt
+    plan = await jobs.tagesplan(db)
+    erg["plan_neu"] = int(plan.get("neu") or 0)
+    # 2. erste Laeufe von heute vorziehen (derselbe Job, nur frueher)
+    jetzt = konfig.jetzt_iso()
+    r = await db[konfig.JOBS].update_many(_wartend_heute(heute, jetzt), {"$set": {"scheduled_at": jetzt}})
+    erg["vorgezogen"] = int(r.modified_count)
+    # 3. Rest: Sofort-Lauf, wo heute nichts mehr wartet
     beispiele: List[str] = []
     for s in segs:
         try:
@@ -107,17 +132,21 @@ def main(argv: Optional[List[str]] = None) -> int:
           f"(Buendel je {konfig.buendel_groesse()}), geschaetzte Kosten {e['kosten_usd']:.2f} $")
     print(f"Crawler: {'AN' if e['crawler_an'] else 'AUS'}")
     if e["grund"]:
-        print(f"\nNICHT angelegt: {e['grund']}")
+        print(f"\nNICHT gestartet: {e['grund']}")
         return 1
     if not e["angelegt"]:
-        print("\nVorschau — nichts angelegt. Zum Starten:  python -X utf8 scripts/markt_alle_jetzt.py --ja")
+        print(f"Wartende Plan-Jobs von heute, die vorgezogen wuerden: {e['vorziehbar']}   "
+              f"Segmente ohne wartenden Job (bekaemen einen Sofort-Lauf): {e['ohne_job']}")
+        print("\nVorschau — nichts gestartet. Zum Starten:  python -X utf8 scripts/markt_alle_jetzt.py --ja")
         return 0
-    print(f"\nAngelegt: {e['neu']} Sofort-Laeufe   uebersprungen (wartet/laeuft schon oder < 5 Min.): {e['uebersprungen']}"
-          f"   Fehler: {e['fehler']}")
+    print(f"\nTagesplan ergaenzt: {e['plan_neu']} Jobs   vorgezogen (erster Lauf von heute ab jetzt): {e['vorgezogen']}   "
+          f"zusaetzliche Sofort-Laeufe: {e['neu']}   uebersprungen (wartet/laeuft schon): {e['uebersprungen']}   "
+          f"Fehler: {e['fehler']}")
     for b in e.get("beispiele_fehler") or []:
         print(f"    {b}")
     zeit = start.astimezone(BERLIN).strftime("%Y-%m-%d %H:%M")
-    print("\nDer Worker holt die Jobs innerhalb einer Minute. Fortschritt: Kachel 'Heute gecrawlt' im Admin.")
+    print("\nDer Worker holt die Jobs innerhalb einer Minute. Zweite Laeufe von heute (2x-Autos) bleiben um 18 Uhr.")
+    print("Fortschritt: Kachel 'Heute gecrawlt' im Admin.")
     print(f"Auswerten, sobald durch:  python -X utf8 scripts/markt_fehlversuche.py --seit \"{zeit}\" --alle")
     return 0
 
