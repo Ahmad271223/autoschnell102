@@ -53,14 +53,16 @@ def test_02_tagesstand_je_modell_und_gesamt(welt):
         st = welt.run(ABF.tages_stand(db, heute))
         j = st["je_modell"]
         # autos_soll = bestellte Zeilen (max_items 5) je geplantem Abruf — Ahmad: "wie viele haetten geladen werden muessen"
-        assert j[m_ok] == {"geplant": 3, "ok": 3, "fehler": 0, "ungueltig": 0, "offen": 0, "autos": 9, "autos_soll": 15, "symbol": "✓"}
-        assert j[m_teil] == {"geplant": 3, "ok": 1, "fehler": 1, "ungueltig": 1, "offen": 1, "autos": 3, "autos_soll": 15, "symbol": "O"}
-        assert j[m_fehl] == {"geplant": 2, "ok": 0, "fehler": 2, "ungueltig": 1, "offen": 0, "autos": 0, "autos_soll": 10, "symbol": "✗"}
-        assert j[m_offen] == {"geplant": 2, "ok": 0, "fehler": 0, "ungueltig": 0, "offen": 2, "autos": 0, "autos_soll": 10, "symbol": "-"}
+        # ok_mit_treffern = fertige Laeufe mit mindestens einem Auto (m_ok: 5 und 4 ja, 0 nein)
+        assert j[m_ok] == {"geplant": 3, "ok": 3, "ok_mit_treffern": 2, "fehler": 0, "ungueltig": 0, "offen": 0, "autos": 9, "autos_soll": 15, "symbol": "✓"}
+        assert j[m_teil] == {"geplant": 3, "ok": 1, "ok_mit_treffern": 1, "fehler": 1, "ungueltig": 1, "offen": 1, "autos": 3, "autos_soll": 15, "symbol": "O"}
+        assert j[m_fehl] == {"geplant": 2, "ok": 0, "ok_mit_treffern": 0, "fehler": 2, "ungueltig": 1, "offen": 0, "autos": 0, "autos_soll": 10, "symbol": "✗"}
+        assert j[m_offen] == {"geplant": 2, "ok": 0, "ok_mit_treffern": 0, "fehler": 0, "ungueltig": 0, "offen": 2, "autos": 0, "autos_soll": 10, "symbol": "-"}
         g = st["gesamt"]
         eigene = {k: v for k, v in j.items() if k.startswith("test-")}
         assert sum(z["geplant"] for z in eigene.values()) == 10 and sum(z["autos"] for z in eigene.values()) == 12
         assert sum(z["autos_soll"] for z in eigene.values()) == 50 and g["autos_soll"] >= 50
+        assert sum(z["ok_mit_treffern"] for z in eigene.values()) == 3 and g["ok_mit_treffern"] >= 3
         assert g["geplant"] >= 10 and g["autos"] >= 12 and g["modelle_ok"] >= 1 and g["modelle_teil"] >= 1 and g["modelle_fehler"] >= 1
         # Modelluebersicht und Status tragen den Stand mit
         welt.run(db[K.MODELLE].insert_many([{**_modell(w), "id": m, "label": m} for m in (m_ok, m_teil, m_fehl, m_offen)]))
