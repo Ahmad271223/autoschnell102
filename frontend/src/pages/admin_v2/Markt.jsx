@@ -97,6 +97,14 @@ export default function Markt() {
 
       <Card className="mb-4" data-testid="markt-status">
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-[12px]">
+          {/* Wunsch Ahmad 28.09.2026: "wie viele Autos heute gecrawlt — immer mit Haken oder X" */}
+          {status.heute && (
+            <Kachel label={`Heute gecrawlt (${jobs.tag || ""})`} data-testid="markt-heute"
+                    tone={SYMBOL_TONE[status.heute.symbol] || ""}
+                    wert={`${status.heute.symbol} ${status.heute.ok.toLocaleString("de-DE")} von ${status.heute.geplant.toLocaleString("de-DE")} Segmenten · ${status.heute.autos.toLocaleString("de-DE")} Autos`}
+                    hint={[status.heute.fehler ? `✗ ${status.heute.fehler} fehlgeschlagen/ungültig` : "", status.heute.offen ? `– ${status.heute.offen} ausstehend` : "",
+                           `Aufträge: ✓ ${status.heute.modelle_ok || 0} · O ${status.heute.modelle_teil || 0} · ✗ ${status.heute.modelle_fehler || 0}`].filter(Boolean).join(" · ")} />
+          )}
           <Kachel label="Crawler" wert={status.aktiv ? "an — läuft automatisch" : "aus"} tone={status.aktiv ? "text-emerald-300" : "text-amber-300"}
                   hint={status.aktiv_quelle === "admin" ? "per Knopf gesetzt" : "Vorgabe aus der Umgebung (MARKT_AKTIV)"} />
           <Kachel label="Segmente aktiv" wert={`${status.segmente} · ${status.modelle} Modelle`} />
@@ -202,6 +210,9 @@ export default function Markt() {
       <Card padded={false} data-testid="markt-modelle">
         <div className="px-4 py-3 text-[13px] text-zinc-400" style={{ borderBottom: "1px solid var(--wa-08)" }}>
           <BarChart3 size={14} className="inline mr-1" /> {modelle.length} Modelle · Kennzahlen = nur die günstigsten je Segment (Zeilen je Suchauftrag, untere Marktpreisspanne), kein Marktmedian
+          <div className="mt-1 text-[11px] text-zinc-500" data-testid="markt-heute-legende">
+            Spalte „Heute“: <span className="text-emerald-300">✓</span> alle Segmente gecrawlt · <span className="text-amber-300">O</span> nur ein Teil · <span className="text-red-300">✗</span> keins geklappt · – noch ausstehend oder heute nicht dran
+          </div>
         </div>
         {modelle.length === 0 ? <EmptyState title="Noch keine Modelle" hint="„Masterliste & Segmente aufbauen“ spielt die 170 Masterlisten-Zeilen pausiert ein — oder unter Suchaufträge eigene anlegen." /> : (
           <div className="overflow-x-auto">
@@ -209,6 +220,7 @@ export default function Markt() {
               <thead>
                 <tr className="text-left text-zinc-500 text-[11px] uppercase tracking-wide">
                   <th className="px-4 py-2.5 font-medium">Modell</th>
+                  <th className="px-4 py-2.5 font-medium">Heute</th>
                   <th className="px-4 py-2.5 font-medium">Segmente</th>
                   <th className="px-4 py-2.5 font-medium">Letzter Crawl</th>
                   <th className="px-4 py-2.5 font-medium text-right">Listings</th>
@@ -228,6 +240,8 @@ export default function Markt() {
                       <Link to={`/admin/markt/${m.id}`} className="text-white font-medium hover:underline" data-testid={`markt-modell-link-${m.id}`}>{m.label}</Link>
                       <div className="text-[11px] text-zinc-500">{m.fuel}{m.power_kw_min ? ` · ${m.power_kw_min}–${m.power_kw_max} kW` : ""}{m.model_id ? "" : " · keine mobile.de-ID"}</div>
                     </td>
+                    <td className={`px-4 py-2.5 tabular-nums whitespace-nowrap ${SYMBOL_TONE[(m.heute || {}).symbol] || "text-zinc-500"}`} data-testid={`markt-heute-${m.id}`}
+                        title={heuteTitel(m.heute)}>{heuteText(m.heute)}</td>
                     <td className="px-4 py-2.5 text-zinc-300">{m.segmente_mit_daten}/{m.segmente_aktiv}</td>
                     <td className="px-4 py-2.5 text-zinc-400">{m.last_success_at ? fmtDate(m.last_success_at) : "—"}</td>
                     {/* Reparaturwelle 6 Nr. 128/140: Listings der aktuellen Fassung; die Historie aller Fassungen getrennt */}
@@ -252,6 +266,24 @@ export default function Markt() {
       </Card>
     </div>
   );
+}
+
+// Wunsch Ahmad 28.09.2026: Tagesstand je Suchauftrag — ✓ alle Segmente heute gecrawlt, O ein Teil,
+// ✗ keins geklappt, – ausstehend / heute nicht dran (Symbol kommt vom Server: abfrage.tages_symbol)
+const SYMBOL_TONE = { "✓": "text-emerald-300", O: "text-amber-300", "✗": "text-red-300", "-": "text-zinc-500" };
+
+export function heuteText(h) {
+  if (!h || !h.geplant) return "– heute nicht dran";
+  const teile = [`${h.symbol} ${h.ok}/${h.geplant}`];
+  if (h.autos) teile.push(`${h.autos.toLocaleString("de-DE")} Autos`);
+  if (h.fehler) teile.push(`✗ ${h.fehler}`);
+  if (h.offen) teile.push(`– ${h.offen}`);
+  return teile.join(" · ");
+}
+
+function heuteTitel(h) {
+  if (!h || !h.geplant) return "Heute kein Abruf geplant (Budget-Rotation oder pausiert)";
+  return `${h.ok} von ${h.geplant} Segment-Abrufen geklappt · ${h.autos} Autos gespeichert · ${h.fehler} fehlgeschlagen/ungültig (${h.ungueltig} ungültig) · ${h.offen} ausstehend`;
 }
 
 function Kachel({ label, wert, hint, tone = "", ...rest }) {

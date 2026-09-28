@@ -43,13 +43,17 @@ vi.mock("@/lib/api", () => ({
         { id: "bmw-320d", label: "BMW 320d", fuel: "DIESEL", power_kw_min: 120, power_kw_max: 145, enabled: true, model_id: "10",
           segmente_aktiv: 16, segmente_mit_daten: 4, last_success_at: "2026-10-01T04:00:00+00:00", listings: 312, listings_historisch: 450,
           min_price: 18900, median_sample_mittel: 20250, trend_7d_pct: -2.1, trend_30d_pct: -4.0, crawl_status: "ok",
+          // Wunsch Ahmad 28.09.2026: Tagesstand mit Symbol
+          heute: { geplant: 16, ok: 16, fehler: 0, ungueltig: 0, offen: 0, autos: 78, symbol: "✓" },
           // Master-Auftrag Phase C: Datenqualitaet und Markttiefe je Modell als Zaehler ueber die aktiven Segmente
           qualitaet_zaehler: { GOOD: 14, MEDIUM: 1, POOR: 1 }, tiefe_zaehler: { FULL: 10, THIN: 4, EMPTY: 2 } },
         { id: "vw-golf-20tdi", label: "VW Golf 2.0 TDI", fuel: "DIESEL", enabled: false, model_id: "14", segmente_aktiv: 0, segmente_mit_daten: 0,
-          listings: 0, listings_historisch: 0, min_price: null, median_sample_mittel: null, trend_7d_pct: null, trend_30d_pct: null, crawl_status: "wartet" },
+          listings: 0, listings_historisch: 0, min_price: null, median_sample_mittel: null, trend_7d_pct: null, trend_30d_pct: null, crawl_status: "wartet",
+          heute: { geplant: 0, ok: 0, fehler: 0, ungueltig: 0, offen: 0, autos: 0, symbol: "-" } },
         // P1: heute ein Lauf mit ungueltigen Daten (data_invalid) -> eigener Status, kein "fehler"
         { id: "audi-a4-40tdi", label: "Audi A4 40 TDI", fuel: "DIESEL", enabled: true, model_id: "9", segmente_aktiv: 30, segmente_mit_daten: 12,
-          listings: 80, listings_historisch: 80, min_price: 21000, median_top20_mittel: 24000, trend_7d_pct: null, trend_30d_pct: null, crawl_status: "ungueltig" }] } };
+          listings: 80, listings_historisch: 80, min_price: 21000, median_top20_mittel: 24000, trend_7d_pct: null, trend_30d_pct: null, crawl_status: "ungueltig",
+          heute: { geplant: 30, ok: 12, fehler: 1, ungueltig: 1, offen: 17, autos: 60, symbol: "O" } }] } };
       if (url === "/admin/market/status") return { data: { aktiv: netz.aktiv, aktiv_quelle: "env", segmente: 16, modelle: 1, listings: 312, snapshots: 4000, token_vorhanden: true,
         actor: "sourabhbgp~mobile-de-scraper", budget: { _id: "2026-10", budget_usd: 450, used_usd: 12.5, reserved_usd: 0, rows: 4000, runs: 200 },
         // Reparaturwelle 5 Nr. 30/31/38 + Oberflaeche: Restbudget/Resttage, Entfernungskosten, Preise fuer die Kostenformel, "ohne Budget pausiert"
@@ -58,6 +62,7 @@ vi.mock("@/lib/api", () => ({
                 puffer_faktor: 0.3, puffer_max: 10, ohne_budget: netz.ohneBudget, status: netz.ohneBudget ? "ohne Budget pausiert" : "ok",
                 budget_reicht_nicht: !!netz.budgetReichtNicht, budget_erschoepft: false, max_intervall_tage: 14 },
         crawls_je_tag_standard: 2,
+        heute: { geplant: 46, ok: 28, fehler: 1, ungueltig: 1, offen: 17, autos: 138, symbol: "O", modelle_ok: 1, modelle_teil: 1, modelle_fehler: 0 },
         monitoring: { tag: "2026-10-01", geplant: 6, erfolgreich: 6, fehlgeschlagen: 0, wartend: 0, laufend: 0, rows_heute: 120, rows_monat: 4000,
                       kosten_heute_usd: 0.11, kosten_monat_usd: 12.5, budget_uebrig_usd: 437.5, budget_anteil_pct: 2.8, mittlere_laufzeit_s: 9.4,
                       letzter_erfolg: { finished_at: "2026-10-01T05:10:00Z", segment_id: "bmw-320d:2019:50001-85000" },
@@ -179,6 +184,13 @@ describe("Admin Marktanalyse", () => {
     expect(el("markt-modell-audi-a4-40tdi").textContent).toContain("ungültig");
     expect(el("markt-modell-audi-a4-40tdi").textContent).not.toContain("fehler");
     expect(el("markt-status").textContent).toContain("1 ungültig (Sortierung unsicher, nichts gespeichert)");
+    // Wunsch Ahmad 28.09.2026: Kachel "Heute gecrawlt" mit Symbol + Autos, Spalte "Heute" je Auftrag, Legende
+    expect(el("markt-heute").textContent).toContain("O 28 von 46 Segmenten · 138 Autos");
+    expect(el("markt-heute").textContent).toContain("✗ 1 fehlgeschlagen/ungültig · – 17 ausstehend · Aufträge: ✓ 1 · O 1 · ✗ 0");
+    expect(el("markt-heute-bmw-320d").textContent).toBe("✓ 16/16 · 78 Autos");
+    expect(el("markt-heute-audi-a4-40tdi").textContent).toBe("O 12/30 · 60 Autos · ✗ 1 · – 17");
+    expect(el("markt-heute-vw-golf-20tdi").textContent).toBe("– heute nicht dran");
+    expect(el("markt-heute-legende").textContent).toContain("✓ alle Segmente gecrawlt");
     expect(el("markt-modelle").textContent).toContain("kein Marktmedian");
     await klick("markt-modell-schalten-vw-golf-20tdi");
     expect(netz.posts[0]).toEqual({ url: "/admin/market/models/vw-golf-20tdi/enabled", body: { enabled: true } });

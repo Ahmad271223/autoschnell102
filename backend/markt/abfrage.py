@@ -357,6 +357,61 @@ def _gewichtet(stats: List[Dict[str, Any]], feld: str) -> Optional[float]:
     return round(sum(v * n for v, n in paare) / gewicht, 2)
 
 
+# Wunsch Ahmad 28.09.2026: "wo sehe ich, wie viele Autos heute gecrawlt wurden — immer mit Haken oder X":
+# Tagesstand je Suchauftrag aus den Jobs des Tages. Symbol: ✓ alle Segmente heute gecrawlt, O ein Teil,
+# ✗ keins geklappt (fehlgeschlagen/ungueltig), – noch ausstehend oder heute nicht dran. Abgebrochene Jobs
+# (Auftrag pausiert/geaendert, Tagesplan veraltet) zaehlen nicht als geplant. "Autos" = gespeicherte Zeilen
+# (actual_rows) der fertigen Laeufe.
+STAND_LEER = {"geplant": 0, "ok": 0, "fehler": 0, "ungueltig": 0, "offen": 0, "autos": 0, "symbol": "-"}
+
+
+def tages_symbol(z: Dict[str, Any]) -> str:
+    if int(z.get("geplant") or 0) == 0:
+        return "-"
+    if int(z.get("ok") or 0) >= int(z["geplant"]):
+        return "✓"
+    if int(z.get("ok") or 0) > 0:
+        return "O"
+    if int(z.get("offen") or 0) > 0:
+        return "-"
+    return "✗"
+
+
+async def tages_stand(db, heute: Optional[str] = None) -> Dict[str, Any]:
+    """{tag, je_modell: {model_id: {geplant, ok, fehler, ungueltig, offen, autos, symbol}}, gesamt: {...}} —
+    eine Aggregation ueber die Jobs des Tages (Index markt_job_tag_status)."""
+    heute = heute or konfig.heute_tag()
+    pipe = [{"$match": {"tag": {"$regex": f"^{heute}"}, "status": {"$ne": "cancelled"}}},
+            {"$group": {"_id": {"m": "$model_id", "s": "$status"}, "n": {"$sum": 1},
+                        "autos": {"$sum": {"$cond": [{"$eq": ["$status", "completed"]}, {"$ifNull": ["$actual_rows", 0]}, 0]}}}}]
+    je_modell: Dict[str, Dict[str, Any]] = {}
+    async for r in db[JOBS].aggregate(pipe):
+        m = str(r["_id"].get("m") or "")
+        st = str(r["_id"].get("s") or "")
+        n = int(r.get("n") or 0)
+        z = je_modell.setdefault(m, dict(STAND_LEER))
+        z["geplant"] += n
+        if st == "completed":
+            z["ok"] += n
+            z["autos"] += int(r.get("autos") or 0)
+        elif st in ("queued", "running"):
+            z["offen"] += n
+        else:
+            z["fehler"] += n
+            if st == "data_invalid":
+                z["ungueltig"] += n
+    gesamt = dict(STAND_LEER)
+    for z in je_modell.values():
+        z["symbol"] = tages_symbol(z)
+        for k in ("geplant", "ok", "fehler", "ungueltig", "offen", "autos"):
+            gesamt[k] += z[k]
+    gesamt["symbol"] = tages_symbol(gesamt)
+    gesamt["modelle_ok"] = sum(1 for z in je_modell.values() if z["symbol"] == "✓")
+    gesamt["modelle_teil"] = sum(1 for z in je_modell.values() if z["symbol"] == "O")
+    gesamt["modelle_fehler"] = sum(1 for z in je_modell.values() if z["symbol"] == "✗")
+    return {"tag": heute, "je_modell": je_modell, "gesamt": gesamt}
+
+
 async def modelle_uebersicht(db, *, mit_archiv: bool = False) -> List[Dict[str, Any]]:
     from markt import auftraege
     filt = {} if mit_archiv else {"status": {"$ne": "archived"}}
@@ -368,6 +423,7 @@ async def modelle_uebersicht(db, *, mit_archiv: bool = False) -> List[Dict[str, 
     fehler_heute = {j["segment_id"] async for j in db[JOBS].find({"tag": {"$regex": f"^{heute}"}, "status": "failed"}, {"_id": 0, "segment_id": 1})}
     # P1: Laeufe mit ungueltigen Daten (Sortierung unsicher) getrennt von Fehlern
     ungueltig_heute = {j["segment_id"] async for j in db[JOBS].find({"tag": {"$regex": f"^{heute}"}, "status": "data_invalid"}, {"_id": 0, "segment_id": 1})}
+    stand_heute = (await tages_stand(db, heute))["je_modell"]
     raus = []
     for m in modelle:
         eigene = [s for s in segs if s.get("model_id") == m["id"]]
@@ -403,7 +459,9 @@ async def modelle_uebersicht(db, *, mit_archiv: bool = False) -> List[Dict[str, 
                      "version": segmente.modell_version(m),
                      "crawl_status": ("fehler" if any(s["id"] in fehler_heute for s in aktive)
                                       else "ungueltig" if any(s["id"] in ungueltig_heute for s in aktive)
-                                      else "ok" if letzte else "wartet")})
+                                      else "ok" if letzte else "wartet"),
+                     # Wunsch Ahmad 28.09.2026: Tagesstand mit Symbol (✓ / O / ✗ / –) und Autos heute
+                     "heute": stand_heute.get(m["id"]) or dict(STAND_LEER)})
     return raus
 
 
@@ -812,6 +870,8 @@ async def monitoring(db) -> Dict[str, Any]:
 async def status(db) -> Dict[str, Any]:
     return {"budget": await budget.dokument(db), "jobs": await jobs.uebersicht(db), "takt": await jobs.intervall(db),
             "monitoring": await monitoring(db),
+            # Wunsch Ahmad 28.09.2026: "wie viele Autos heute gecrawlt" mit Symbol — Kachel ganz vorn
+            "heute": (await tages_stand(db))["gesamt"],
             "modelle": await db[MODELLE].count_documents({"enabled": True}),
             "segmente": await db[SEGMENTE].count_documents({"enabled": True}),
             "listings": await db[LISTINGS].count_documents({}),
