@@ -31,9 +31,14 @@ def _fahrzeug_roh(w, vid, lifecycle="vertrag_erstellt", dealer_id=None, **extra)
 
 
 # =============================================================== (1) uebergabe_erfolgt
+# empfang4: "bestand"/"verkauft"/"archiviert" allein zaehlen nicht mehr
+# (Weiterverkauf vor der Abholung) — nur mit dem EIGENEN festgehaltenen
+# Abhol-Vorgang; abgeholt_kaufvorgang_id zaehlt nur, wenn er der eigene ist
+# (Faelle ohne Nachweis: test_empfang_uebergabe_vorgang_20260928.py).
 FAELLE_JA = ["termin_abgeholt", "termin_erledigt", "termin_leere_contract_id",
              "protokoll_am_fahrzeug", "protokoll_am_fahrzeugtermin", "kaufvorgang_am_fahrzeug",
              "lc_abgeholt", "lc_bestand", "lc_verkauft", "lc_archiviert", "abhol_vorgang_fest"]
+MIT_EIGENEM_VORGANG = {"lc_bestand", "lc_verkauft", "lc_archiviert", "abhol_vorgang_fest"}
 
 
 @pytest.mark.parametrize("fall", FAELLE_JA)
@@ -45,7 +50,7 @@ def test_e3_uebergabe_ueber_das_fahrzeug(welt, fall):
     cid, vid = f"k_{fall}_{s}", f"v_{fall}_{s}"
     lc = fall[3:] if fall.startswith("lc_") else "abholung_geplant"
     _fahrzeug_roh(w, vid, lifecycle=lc,
-                  **({"abgeholt_kaufvorgang_id": "kv_x"} if fall == "abhol_vorgang_fest" else {}))
+                  **({"abgeholt_kaufvorgang_id": "kv_x"} if fall in MIT_EIGENEM_VORGANG else {}))
     if fall.startswith("termin_"):
         termin = {"id": f"t_{s}", "dealer_id": w.dealer_id, "vehicle_id": vid,
                   "status": "erledigt" if fall == "termin_erledigt" else "abgeholt"}
@@ -67,6 +72,8 @@ def test_e3_uebergabe_ueber_das_fahrzeug(welt, fall):
         w.run(w.db.kaufvorgaenge.insert_one({"id": f"kv_{s}", "dealer_id": w.dealer_id,
                                              "vehicle_id": vid, "status": "abgeholt"}))
     doc = {"id": cid, "dealer_id": w.dealer_id, "vehicle_id": vid}
+    if fall in MIT_EIGENEM_VORGANG:
+        doc["kaufvorgang_id"] = "kv_x"
     assert w.run(C.uebergabe_erfolgt(w.db, doc)) is True, fall
 
 
@@ -120,7 +127,10 @@ def test_e3_keine_uebergabe_bleibt_false(welt, fall):
 def test_e3_migration_21_laesst_uebergebenes_auto_stehen(welt):
     """Migration 21 liest vehicle_id mit: ein Vertrag, dessen Auto ueber einen
     Termin OHNE contract_id abgeholt wurde, und einer, dessen Auto schon
-    verkauft ist, behalten das Kreuz. Vorher: beide geleert."""
+    verkauft ist, behalten das Kreuz. Vorher: beide geleert.
+    empfang4: "verkauft" zaehlt nur mit dem eigenen Abhol-Vorgang am Fahrzeug
+    (abgeholt_kaufvorgang_id = kaufvorgang_id des Vertrags) — dafuer liest die
+    Migration kaufvorgang_id mit."""
     M = _module("migrationen")
     w = welt
     s = w.s
@@ -128,8 +138,8 @@ def test_e3_migration_21_laesst_uebergebenes_auto_stehen(welt):
     w.run(w.db.appointments.insert_one({"id": f"t1_{s}", "dealer_id": w.dealer_id,
                                         "vehicle_id": f"v1_{s}", "status": "abgeholt"}))
     _roh(w, f"k_termin_{s}", vehicle_id=f"v1_{s}")
-    _fahrzeug_roh(w, f"v2_{s}", lifecycle="verkauft")
-    _roh(w, f"k_verkauft_{s}", vehicle_id=f"v2_{s}")
+    _fahrzeug_roh(w, f"v2_{s}", lifecycle="verkauft", abgeholt_kaufvorgang_id=f"kv2_{s}")
+    _roh(w, f"k_verkauft_{s}", vehicle_id=f"v2_{s}", kaufvorgang_id=f"kv2_{s}")
     _fahrzeug_roh(w, f"v3_{s}", lifecycle="abholung_geplant")
     _roh(w, f"k_offen_{s}", vehicle_id=f"v3_{s}")
 

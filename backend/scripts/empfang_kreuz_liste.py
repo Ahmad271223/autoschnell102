@@ -19,7 +19,9 @@ Geprueft wird die AKTUELLE Druckfassung (generated_pdfs.pdf_b64): steht im
 Empfangs-Kasten des Kaeufers vor "KFZ mit ... Schluessel(n)" ein Haken?
 Die digitale Ausfertigung (pdf_digital_b64) hat keinen Empfangs-Kasten.
 Standardmaessig nur Vertraege, deren Uebergabe noch NICHT stattgefunden hat
-(routes.contracts.uebergabe_erfolgt, mit Fahrzeug-Nachweis); mit
+(routes.contracts.uebergabe_erfolgt, mit Fahrzeug-Nachweis nur fuer den
+EIGENEN Kaufvorgang — Vertrag B am Auto, das Sucher A abgeholt hat, und ein
+vor der Abholung weiterverkauftes Auto gelten als offen); mit
 --mit-uebergabe auch die uebrigen (Spalte "Uebergabe").
 
 Das Skript schreibt NICHTS: keine neue Fassung, kein Vermerk, kein Log.

@@ -790,10 +790,26 @@ def empfang_geleert_vermerk(felder: list, quelle: str) -> dict:
             "hinweis": EMPFANG_GELEERT_HINWEIS}
 
 
-#: Nachtrag 28.09.2026 (empfang3): Lebenszyklus-Stufen, die nur NACH der
-#: Abholung erreicht werden (abgeholt -> bestand -> archiviert, verkauft) —
-#: das Auto ist uebergeben, der Vertrag bleibt, wie er ist.
-FAHRZEUG_UEBERGEBEN = frozenset({"abgeholt", "bestand", "verkauft", "archiviert"})
+#: Nachtrag 28.09.2026 (empfang3): abgeholt/bestand/verkauft/archiviert
+#: zaehlten allein als Uebergabe (FAHRZEUG_UEBERGEBEN, entfallen).
+#: Nachtrag 28.09.2026 (empfang4): Nur "abgeholt" wird AUSSCHLIESSLICH ueber
+#: die Abholung erreicht (gekauft/abholung_geplant -> abgeholt). "bestand",
+#: "verkauft" und "archiviert" gibt es auch OHNE Abholung — Weiterverkauf ist
+#: ab vertrag_erstellt erlaubt (vertrag_erstellt -> verkaufsentwurf ->
+#: verkaufsbereit -> verkauft -> archiviert, verkaufsentwurf -> bestand).
+#: Dort zaehlt der Lebenszyklus allein nicht; noetig ist zusaetzlich der
+#: eigene festgehaltene Abhol-Vorgang oder ein abgeholter Vorgang/Termin.
+FAHRZEUG_ABGEHOLT = frozenset({"abgeholt"})
+
+
+def _leer_oder(*werte) -> dict:
+    """Mongo-Bedingung: Feld fehlt, ist None/"" oder hat einen dieser Werte."""
+    return {"$in": [None, "", *[w for w in werte if w]]}
+
+
+def _nicht_leer_und_nicht(*werte) -> dict:
+    """Gegenstueck zu _leer_oder: Feld traegt einen ANDEREN Wert."""
+    return {"$nin": [None, "", *[w for w in werte if w]]}
 
 
 async def uebergabe_erfolgt(datenbank, doc: dict) -> bool:
@@ -805,23 +821,26 @@ async def uebergabe_erfolgt(datenbank, doc: dict) -> bool:
     nachtraeglich umgeschrieben. Uebergabe heisst hier:
       * Vertrag traegt schon eine Fassung nach der Abholung
         (nach_abholung_protokoll_id / vertrag_vor_abholung),
-      * ein Termin zum Vertrag ist abgeholt/erledigt,
-      * ein finales Abholprotokoll zum Vertrag (oder zu einem seiner Termine),
-      * der Kaufvorgang zum Vertrag steht auf "abgeholt".
+      * der eigene Kaufvorgang (contract_id bzw. kaufvorgang_id des Vertrags)
+        steht auf "abgeholt",
+      * ein Termin zum Vertrag bzw. zum eigenen Kaufvorgang ist
+        abgeholt/erledigt,
+      * ein finales Abholprotokoll zum Vertrag (oder zu einem seiner Termine).
     Nachtrag 28.09.2026 (empfang3): contract_id ist am Termin optional
-    (AppointmentIn) — ein Termin, der nur das Fahrzeug traegt, blieb unerkannt,
-    und die Migration haette den Vertrag eines uebergebenen Autos geleert.
-    Deshalb zaehlen zusaetzlich (ueber vehicle_id des Vertrags):
-      * ein Termin am Fahrzeug, abgeholt/erledigt, ohne Vertrag oder mit
-        diesem Vertrag,
-      * ein finales Abholprotokoll am Fahrzeug bzw. an einem dieser Termine,
-      * ein Kaufvorgang am Fahrzeug auf "abgeholt",
-      * der Lebenszyklus des Fahrzeugs (abgeholt, Bestand, verkauft,
-        archiviert) oder ein festgehaltener Abhol-Vorgang
-        (abgeholt_kaufvorgang_id).
-    Ein Termin/Protokoll, das ausdruecklich an einem ANDEREN Vertrag haengt,
-    zaehlt nicht (das Fahrzeug selbst verraet die Abholung dann ueber den
-    Lebenszyklus).
+    (AppointmentIn) — deshalb zaehlen zusaetzlich Nachweise am FAHRZEUG
+    (vehicle_id des Vertrags): Termin/Protokoll/Kaufvorgang ohne Vertrag,
+    der Lebenszyklus und der festgehaltene Abhol-Vorgang.
+    Nachtrag 28.09.2026 (empfang4): vehicles ist je Firma GEMEINSAM, es gibt
+    einen Kaufvorgang je Vertrag (kaufvorgang.py). Hat Sucher A das Auto
+    abgeholt, steht der Lebenszyklus auf "abgeholt" — Vertrag B von Sucher B
+    am selben Auto ist deshalb noch lange nicht uebergeben. Fahrzeug-Nachweise
+    zaehlen darum nur, wenn
+      * abgeholt_kaufvorgang_id leer ist oder ein EIGENER Vorgang ist, und
+      * kein abgeholter Kaufvorgang eines ANDEREN Vertrags am Fahrzeug steht,
+    und Termine/Protokolle am Fahrzeug nur, wenn sie keinem anderen Vertrag
+    gehoeren (contract_id, kaufvorgang_id am Termin, Protokoll an einem
+    Termin eines anderen Vertrags). "bestand"/"verkauft"/"archiviert" allein
+    reichen nicht (Weiterverkauf vor der Abholung, FAHRZEUG_ABGEHOLT).
     Im Zweifel (Datenbankfehler) True — dann bleibt der Vertrag unberuehrt."""
     if not doc or not doc.get("id"):
         return True
@@ -830,43 +849,96 @@ async def uebergabe_erfolgt(datenbank, doc: dict) -> bool:
     from routes.appointments import AUSGANG_ABGEHOLT
     cid, dealer_id = doc["id"], doc.get("dealer_id")
     vid = doc.get("vehicle_id") or None
-    ohne_oder_dieser = {"$in": [None, "", cid]}
+    kv_zeiger = doc.get("kaufvorgang_id") or None
     try:
-        if vid:
-            v = await datenbank.vehicles.find_one(
-                {"id": vid, "dealer_id": dealer_id},
-                {"_id": 0, "lifecycle": 1, "abgeholt_kaufvorgang_id": 1})
-            if v and (v.get("lifecycle") in FAHRZEUG_UEBERGEBEN
-                      or v.get("abgeholt_kaufvorgang_id")):
+        # (1) Eigener Kaufvorgang. Der Zeiger am Vertrag zaehlt nur, solange
+        # der Vorgang nicht ausdruecklich einem anderen Vertrag gehoert.
+        eigene_kv: list = [kv_zeiger] if kv_zeiger else []
+        kv_oder: list = [{"contract_id": cid}]
+        if kv_zeiger:
+            kv_oder.append({"id": kv_zeiger})
+        async for kv in datenbank.kaufvorgaenge.find(
+                {"$or": kv_oder, "dealer_id": dealer_id},
+                {"_id": 0, "id": 1, "status": 1, "contract_id": 1}):
+            if (kv.get("contract_id") or None) not in (None, cid):
+                if kv.get("id") in eigene_kv:
+                    eigene_kv.remove(kv["id"])      # fremder Zeiger
+                continue
+            if kv.get("id") and kv["id"] not in eigene_kv:
+                eigene_kv.append(kv["id"])
+            if kv.get("status") == "abgeholt":
                 return True
-        termin_filter: dict = {"contract_id": cid}
-        if vid:
-            termin_filter = {"$or": [{"contract_id": cid},
-                                     {"vehicle_id": vid, "contract_id": ohne_oder_dieser}]}
-        termin_ids = []
+        # (2) Termine zum Vertrag bzw. zum eigenen Vorgang
+        t_oder: list = [{"contract_id": cid}]
+        if eigene_kv:
+            t_oder.append({"kaufvorgang_id": {"$in": eigene_kv},
+                           "contract_id": _leer_oder(cid)})
+        termin_ids: list = []
         async for t in datenbank.appointments.find(
-                {**termin_filter, "dealer_id": dealer_id},
-                {"_id": 0, "id": 1, "status": 1}):
+                {"$or": t_oder, "dealer_id": dealer_id}, {"_id": 0, "id": 1, "status": 1}):
             if t.get("status") in AUSGANG_ABGEHOLT:
                 return True
             if t.get("id"):
                 termin_ids.append(t["id"])
-        oder = [{"contract_id": cid}]
+        # (3) Finales Protokoll zum Vertrag / zu diesen Terminen. Ein
+        # Protokoll, das ausdruecklich an einem ANDEREN Vertrag haengt, zaehlt nicht.
+        oder: list = [{"contract_id": cid}]
         if termin_ids:
-            # Ein Protokoll, das ausdruecklich an einem ANDEREN Vertrag haengt, zaehlt nicht.
             oder.append({"appointment_id": {"$in": termin_ids},
-                         "contract_id": {"$in": [None, cid]}})
-        if vid:
-            oder.append({"vehicle_id": vid, "dealer_id": dealer_id,
-                         "contract_id": ohne_oder_dieser})
+                         "contract_id": _leer_oder(cid)})
         if await datenbank.pickup_protocols.count_documents(
                 {"status": "final", "superseded": {"$ne": True}, "$or": oder}, limit=1):
             return True
-        kv_oder = [{"contract_id": cid}]
-        if vid:
-            kv_oder.append({"vehicle_id": vid, "contract_id": ohne_oder_dieser})
+        if not vid:
+            return False
+        # (4) Nachweise am FAHRZEUG — nur, wenn die Abholung nicht einem
+        # anderen Vorgang gehoert (empfang4).
+        v = await datenbank.vehicles.find_one(
+            {"id": vid, "dealer_id": dealer_id},
+            {"_id": 0, "lifecycle": 1, "abgeholt_kaufvorgang_id": 1}) or {}
+        fest = v.get("abgeholt_kaufvorgang_id") or None
+        if fest and fest not in eigene_kv:
+            return False
         if await datenbank.kaufvorgaenge.count_documents(
-                {"$or": kv_oder, "dealer_id": dealer_id, "status": "abgeholt"}, limit=1):
+                {"vehicle_id": vid, "dealer_id": dealer_id, "status": "abgeholt",
+                 "id": {"$nin": eigene_kv}, "contract_id": _nicht_leer_und_nicht(cid)},
+                limit=1):
+            return False
+        if fest or v.get("lifecycle") in FAHRZEUG_ABGEHOLT:
+            return True
+        # Termine am Fahrzeug, die keinem anderen Vertrag/Vorgang gehoeren
+        fz_termine: list = []
+        async for t in datenbank.appointments.find(
+                {"vehicle_id": vid, "dealer_id": dealer_id,
+                 "contract_id": _leer_oder(cid), "kaufvorgang_id": _leer_oder(*eigene_kv)},
+                {"_id": 0, "id": 1, "status": 1}):
+            if t.get("status") in AUSGANG_ABGEHOLT:
+                return True
+            if t.get("id") and t["id"] not in termin_ids:
+                fz_termine.append(t["id"])
+        if fz_termine and await datenbank.pickup_protocols.count_documents(
+                {"status": "final", "superseded": {"$ne": True},
+                 "appointment_id": {"$in": fz_termine}, "contract_id": _leer_oder(cid)},
+                limit=1):
+            return True
+        # Protokolle am Fahrzeug ohne Vertrag: nicht, wenn ihr Termin einem
+        # anderen Vertrag bzw. einem fremden Vorgang gehoert.
+        async for prot in datenbank.pickup_protocols.find(
+                {"vehicle_id": vid, "dealer_id": dealer_id, "status": "final",
+                 "superseded": {"$ne": True}, "contract_id": _leer_oder(cid)},
+                {"_id": 0, "appointment_id": 1}):
+            aid = prot.get("appointment_id")
+            if not aid or aid in termin_ids or aid in fz_termine:
+                return True
+            if not await datenbank.appointments.count_documents(
+                    {"id": aid, "$or": [{"contract_id": _nicht_leer_und_nicht(cid)},
+                                        {"kaufvorgang_id": _nicht_leer_und_nicht(*eigene_kv)}]},
+                    limit=1):
+                return True
+        # Kaufvorgang am Fahrzeug ohne Vertrag
+        if await datenbank.kaufvorgaenge.count_documents(
+                {"vehicle_id": vid, "dealer_id": dealer_id, "contract_id": _leer_oder(),
+                 "status": "abgeholt"}, limit=1):
             return True
     except Exception:  # noqa: BLE001 — im Zweifel nichts anfassen
         log.exception("Uebergabe zu Vertrag %s nicht pruefbar", cid)
