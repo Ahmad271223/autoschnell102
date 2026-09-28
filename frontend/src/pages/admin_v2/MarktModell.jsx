@@ -75,6 +75,9 @@ export default function MarktModell() {
   const [health, setHealth] = useState(null);
   useEffect(() => {
     let aktiv = true;
+    // Go-Live-Pruefung 28.09.2026 (admin5): beim Modellwechsel die Health des vorigen Modells sofort
+    // verwerfen — sonst stand bis zur (haengenden) Antwort Badge/Zaehler/Stand von A unter dem Titel von B
+    setHealth(null);
     api.get(`/admin/market/health/models/${modellId}`).then((r) => { if (aktiv) setHealth(r.data || null); }).catch(() => { if (aktiv) setHealth(null); });
     return () => { aktiv = false; };
   }, [modellId]);

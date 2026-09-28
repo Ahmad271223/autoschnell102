@@ -42,6 +42,13 @@ export default function MarktBericht() {
 
   useEffect(() => {
     let aktiv = true;
+    // Go-Live-Pruefung 28.09.2026 (admin5): beim Modellwechsel Liste, Fehler und Bericht des vorigen
+    // Modells verwerfen — sonst blieb A's Fehlerkarte (oder A's Bericht) ueber B stehen, wenn B keine
+    // Periode in der URL bekommt, und die Periodenwahl bot bis zur Antwort A's Perioden an
+    setListe(null);
+    setFehler("");
+    setBericht(null);
+    setLeer(false);
     api.get(`/admin/market/reports/model/${modellId}/list`).then((r) => {
       if (!aktiv) return;
       setListe(r.data);

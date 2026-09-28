@@ -190,21 +190,45 @@ export default function AdminUsers() {
     } catch (e) { toast.error(errMsg(e, "Fehler")); }
   };
 
-  // AD-24: beim Chef die Loeschvorschau des Servers gleich in den Dialog holen
+  // AD-24: beim Chef die Loeschvorschau des Servers gleich in den Dialog holen.
+  // Go-Live-Pruefung 28.09.2026 (admin5): Dialog Chef A oeffnen, Vorschau haengt,
+  // Abbrechen, Dialog Chef B oeffnen — A's spaete Antwort stand dann als
+  // "Wuerde loeschen" im Dialog von B und gab "Endgueltig loeschen" frei, Firma B
+  // wurde mit ?firma_loeschen=true geloescht, obwohl der Umfang von A angezeigt war.
+  // Jetzt: laufende Nummer (nur die juengste Anfrage schreibt, Antwort UND Fehler)
+  // und die Vorschau traegt Firma + Konto, fuer die sie geholt wurde.
+  const loeschNr = useRef(0);
   const loeschenOeffnen = async (u) => {
+    const nr = ++loeschNr.current;
     setDeleteUser(u);
     setLoeschVorschau(null);
     if (!istChefKonto(u) || !u.dealer_id) return;
+    const zu = { dealerId: u.dealer_id, userId: u.id };
     try {
       const { data } = await api.get(`/admin/dealers/${u.dealer_id}/loeschvorschau`);
-      setLoeschVorschau({ text: vorschauText(data) });
+      if (nr !== loeschNr.current) return;            // ueberholt (anderer Dialog / geschlossen)
+      setLoeschVorschau({ ...zu, text: vorschauText(data) });
     } catch (e) {
-      setLoeschVorschau({ fehler: errMsg(e, "Löschvorschau nicht verfügbar") });
+      if (nr !== loeschNr.current) return;
+      setLoeschVorschau({ ...zu, fehler: errMsg(e, "Löschvorschau nicht verfügbar") });
     }
   };
+  const loeschenSchliessen = () => {
+    loeschNr.current += 1;                            // laufende Vorschau verwerfen
+    setDeleteUser(null);
+    setLoeschVorschau(null);
+  };
+  // admin5: nur eine Vorschau, die zur Firma UND zum Konto im Dialog gehoert, zaehlt
+  const vorschauPasst = (u, v) => !!(u && v && u.dealer_id && v.dealerId === u.dealer_id && v.userId === u.id);
+  const vorschau = vorschauPasst(deleteUser, loeschVorschau) ? loeschVorschau : null;
 
   const submitDelete = async () => {
     if (!deleteUser) return;
+    // admin5: Chef nur loeschen, wenn die angezeigte Vorschau zu genau dieser Firma gehoert
+    if (istChefKonto(deleteUser) && !vorschauPasst(deleteUser, loeschVorschau)) {
+      toast.error("Die Löschvorschau gehört nicht zu dieser Firma — bitte den Dialog neu öffnen.");
+      return;
+    }
     setDeleting(true);
     try {
       // AD-24: Der Chef hat Umfang und Vorschau schon im Dialog gesehen —
@@ -215,7 +239,7 @@ export default function AdminUsers() {
         : `/admin/users/${deleteUser.id}`;
       await api.delete(pfad);
       toast.success(`Account "${kontoLabel(deleteUser)}" dauerhaft gelöscht`);
-      setDeleteUser(null);
+      loeschenSchliessen();
       load();
     } catch (e) {
       toast.error(errMsg(e, "Löschen fehlgeschlagen"));
@@ -412,7 +436,7 @@ export default function AdminUsers() {
       {deleteUser && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
-          onClick={() => !deleting && setDeleteUser(null)}
+          onClick={() => !deleting && loeschenSchliessen()}
           data-testid="admin-delete-user-modal"
         >
           <div
@@ -447,9 +471,10 @@ export default function AdminUsers() {
                   </dl>
                   {istChefKonto(deleteUser) && (
                     <div className="mt-2 text-[12.5px]" data-testid="admin-delete-user-vorschau">
-                      {loeschVorschau === null ? "Löschvorschau wird geladen…"
-                        : loeschVorschau.fehler ? <span className="text-amber-300">{loeschVorschau.fehler}</span>
-                          : <>Würde löschen: <span className="text-white">{loeschVorschau.text}</span></>}
+                      {/* admin5: nur die Vorschau DIESER Firma zeigen, sonst "wird geladen" */}
+                      {vorschau === null ? "Löschvorschau wird geladen…"
+                        : vorschau.fehler ? <span className="text-amber-300">{vorschau.fehler}</span>
+                          : <>Würde löschen: <span className="text-white">{vorschau.text}</span></>}
                     </div>
                   )}
                   <div className="mt-2">
@@ -463,7 +488,7 @@ export default function AdminUsers() {
               <Button
                 data-testid="admin-delete-user-cancel"
                 variant="ghost"
-                onClick={() => setDeleteUser(null)}
+                onClick={loeschenSchliessen}
                 disabled={deleting}
               >
                 Abbrechen
@@ -472,8 +497,9 @@ export default function AdminUsers() {
                 data-testid="admin-delete-user-confirm"
                 variant="danger"
                 onClick={submitDelete}
-                // AD-24: beim Chef erst loeschen, wenn die Vorschau da ist (oder ihr Fehler)
-                disabled={deleting || (istChefKonto(deleteUser) && loeschVorschau === null)}
+                // AD-24: beim Chef erst loeschen, wenn die Vorschau da ist (oder ihr Fehler);
+                // admin5: und nur, wenn sie zu genau dieser Firma gehoert
+                disabled={deleting || (istChefKonto(deleteUser) && vorschau === null)}
               >
                 {deleting ? "Lösche…" : "Endgültig löschen"}
               </Button>
