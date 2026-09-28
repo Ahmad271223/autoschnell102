@@ -94,3 +94,16 @@ def test_06_migration_20_schliesst_nur_die_land_alarme(welt):
         assert nochmal == offen
     finally:
         welt.run(db.betriebsalarme.delete_many({"id": {"$regex": f"-{s}$"}}))
+
+
+def test_07_such_url_sendet_immer_das_land():
+    """Live-Befund 28.09.2026: ohne cn= lieferte mobile.de Haendler aus IT/NL/DK/PL/EE (28 Alarme
+    'land IT != DE', 25 Laeufe 'Sortierung unsicher' durch Luecken in den Positionsnummern). Wie der
+    Vergleich sendet die Markt-URL jetzt IMMER das Land — Vorgabe DE."""
+    URL = _module("markt.url")
+    seg = {"min_km": 0, "max_km": 30000}
+    assert "&cn=DE&" in URL.such_url(seg, {"make_id": "3500", "model_id": "10"}) + "&"
+    assert "&cn=DE&" in URL.such_url(seg, {"make_id": "3500", "model_id": "10", "country": None}) + "&"
+    assert "&cn=DE&" in URL.such_url(seg, {"make_id": "3500", "model_id": "10", "country": "de"}) + "&"
+    assert "&cn=AT&" in URL.such_url(seg, {"make_id": "3500", "model_id": "10", "country": "AT"}) + "&"
+    assert URL.such_url(seg, {"make_id": "3500", "model_id": "10"}).count("cn=") == 1

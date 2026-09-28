@@ -38,8 +38,11 @@ def parameter(segment: Dict[str, Any], modell: Dict[str, Any]) -> List[Tuple[str
         p.append(("st", VERKAEUFER_URL.get(str(modell["seller_type"]).upper(), str(modell["seller_type"]))))
     if modell.get("zip") and modell.get("radius_km"):
         p.append(("zipr", f"{modell['zip']}:{int(modell['radius_km'])}"))
-    if modell.get("country") and str(modell["country"]).upper() != "DE":
-        p.append(("cn", str(modell["country"]).upper()))
+    # Live-Befund 28.09.2026 (28x markt_filter_ignoriert "land IT != DE", 25 Laeufe "Sortierung unsicher"):
+    # ohne cn= liefert mobile.de auch Haendler aus IT/NL/DK/PL/EE. Die verworfenen Zeilen kosteten Geld,
+    # rissen Luecken in die Positionsnummern (Top-N nicht vollstaendig -> Lauf ungueltig) und loesten den
+    # Filter-Alarm aus. Wie der Vergleich (mobile_service: cn=DE als Vorgabe) IMMER das Land senden.
+    p.append(("cn", (str(modell.get("country") or "DE").strip().upper()[:2] or "DE")))
     mn, mx = segment.get("min_km"), segment.get("max_km")
     if mn is not None or mx is not None:
         p.append(("ml", f"{'' if mn is None else int(mn)}:{'' if mx is None else int(mx)}"))
