@@ -101,7 +101,7 @@ export default function Markt() {
           {status.heute && (
             <Kachel label={`Heute gecrawlt (${jobs.tag || ""})`} data-testid="markt-heute"
                     tone={SYMBOL_TONE[status.heute.symbol] || ""}
-                    wert={`${status.heute.symbol} ${status.heute.ok.toLocaleString("de-DE")} von ${status.heute.geplant.toLocaleString("de-DE")} Segmenten · ${status.heute.autos.toLocaleString("de-DE")} Autos`}
+                    wert={`${status.heute.symbol} ${status.heute.ok.toLocaleString("de-DE")} von ${status.heute.geplant.toLocaleString("de-DE")} Segmenten · ${status.heute.autos.toLocaleString("de-DE")} von ${(status.heute.autos_soll || 0).toLocaleString("de-DE")} Autos`}
                     hint={[status.heute.fehler ? `✗ ${status.heute.fehler} fehlgeschlagen/ungültig` : "", status.heute.offen ? `– ${status.heute.offen} ausstehend` : "",
                            `Aufträge: ✓ ${status.heute.modelle_ok || 0} · O ${status.heute.modelle_teil || 0} · ✗ ${status.heute.modelle_fehler || 0}`].filter(Boolean).join(" · ")} />
           )}
@@ -275,7 +275,8 @@ const SYMBOL_TONE = { "✓": "text-emerald-300", O: "text-amber-300", "✗": "te
 export function heuteText(h) {
   if (!h || !h.geplant) return "– heute nicht dran";
   const teile = [`${h.symbol} ${h.ok}/${h.geplant}`];
-  if (h.autos) teile.push(`${h.autos.toLocaleString("de-DE")} Autos`);
+  // Soll = bestellte Zeilen der geplanten Abrufe; weniger = Marktluecke (kein Fehler) oder Ausfall
+  if (h.autos_soll || h.autos) teile.push(`${(h.autos || 0).toLocaleString("de-DE")}/${(h.autos_soll || 0).toLocaleString("de-DE")} Autos`);
   if (h.fehler) teile.push(`✗ ${h.fehler}`);
   if (h.offen) teile.push(`– ${h.offen}`);
   return teile.join(" · ");
@@ -283,7 +284,7 @@ export function heuteText(h) {
 
 function heuteTitel(h) {
   if (!h || !h.geplant) return "Heute kein Abruf geplant (Budget-Rotation oder pausiert)";
-  return `${h.ok} von ${h.geplant} Segment-Abrufen geklappt · ${h.autos} Autos gespeichert · ${h.fehler} fehlgeschlagen/ungültig (${h.ungueltig} ungültig) · ${h.offen} ausstehend`;
+  return `${h.ok} von ${h.geplant} Segment-Abrufen geklappt · ${h.autos} von ${h.autos_soll || 0} bestellten Autos bekommen (weniger = Marktlücke oder Ausfall) · ${h.fehler} fehlgeschlagen/ungültig (${h.ungueltig} ungültig) · ${h.offen} ausstehend`;
 }
 
 function Kachel({ label, wert, hint, tone = "", ...rest }) {

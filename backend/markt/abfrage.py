@@ -362,7 +362,7 @@ def _gewichtet(stats: List[Dict[str, Any]], feld: str) -> Optional[float]:
 # ✗ keins geklappt (fehlgeschlagen/ungueltig), – noch ausstehend oder heute nicht dran. Abgebrochene Jobs
 # (Auftrag pausiert/geaendert, Tagesplan veraltet) zaehlen nicht als geplant. "Autos" = gespeicherte Zeilen
 # (actual_rows) der fertigen Laeufe.
-STAND_LEER = {"geplant": 0, "ok": 0, "fehler": 0, "ungueltig": 0, "offen": 0, "autos": 0, "symbol": "-"}
+STAND_LEER = {"geplant": 0, "ok": 0, "fehler": 0, "ungueltig": 0, "offen": 0, "autos": 0, "autos_soll": 0, "symbol": "-"}
 
 
 def tages_symbol(z: Dict[str, Any]) -> str:
@@ -383,7 +383,10 @@ async def tages_stand(db, heute: Optional[str] = None) -> Dict[str, Any]:
     heute = heute or konfig.heute_tag()
     pipe = [{"$match": {"tag": {"$regex": f"^{heute}"}, "status": {"$ne": "cancelled"}}},
             {"$group": {"_id": {"m": "$model_id", "s": "$status"}, "n": {"$sum": 1},
-                        "autos": {"$sum": {"$cond": [{"$eq": ["$status", "completed"]}, {"$ifNull": ["$actual_rows", 0]}, 0]}}}}]
+                        "autos": {"$sum": {"$cond": [{"$eq": ["$status", "completed"]}, {"$ifNull": ["$actual_rows", 0]}, 0]}},
+                        # Wunsch Ahmad 28.09.: "wie viele Autos haetten heute geladen werden muessen" = bestellte
+                        # Zeilen je geplantem Segment-Abruf (max_items); weniger = Marktluecke oder Ausfall
+                        "autos_soll": {"$sum": {"$ifNull": ["$max_items", 0]}}}}]
     je_modell: Dict[str, Dict[str, Any]] = {}
     async for r in db[JOBS].aggregate(pipe):
         m = str(r["_id"].get("m") or "")
@@ -391,6 +394,7 @@ async def tages_stand(db, heute: Optional[str] = None) -> Dict[str, Any]:
         n = int(r.get("n") or 0)
         z = je_modell.setdefault(m, dict(STAND_LEER))
         z["geplant"] += n
+        z["autos_soll"] += int(r.get("autos_soll") or 0)
         if st == "completed":
             z["ok"] += n
             z["autos"] += int(r.get("autos") or 0)
@@ -403,7 +407,7 @@ async def tages_stand(db, heute: Optional[str] = None) -> Dict[str, Any]:
     gesamt = dict(STAND_LEER)
     for z in je_modell.values():
         z["symbol"] = tages_symbol(z)
-        for k in ("geplant", "ok", "fehler", "ungueltig", "offen", "autos"):
+        for k in ("geplant", "ok", "fehler", "ungueltig", "offen", "autos", "autos_soll"):
             gesamt[k] += z[k]
     gesamt["symbol"] = tages_symbol(gesamt)
     gesamt["modelle_ok"] = sum(1 for z in je_modell.values() if z["symbol"] == "✓")

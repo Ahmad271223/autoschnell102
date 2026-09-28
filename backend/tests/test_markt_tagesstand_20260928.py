@@ -28,7 +28,7 @@ def test_01_symbol_regeln():
 
 def _job(model_id, seg, tag, status, rows=None):
     return {"id": uuid.uuid4().hex, "segment_id": seg, "model_id": model_id, "tag": tag, "job_type": "daily",
-            "status": status, "actual_rows": rows, "scheduled_at": "2026-01-01T00:00:00+00:00"}
+            "status": status, "actual_rows": rows, "max_items": 5, "scheduled_at": "2026-01-01T00:00:00+00:00"}
 
 
 def test_02_tagesstand_je_modell_und_gesamt(welt):
@@ -52,13 +52,15 @@ def test_02_tagesstand_je_modell_und_gesamt(welt):
     try:
         st = welt.run(ABF.tages_stand(db, heute))
         j = st["je_modell"]
-        assert j[m_ok] == {"geplant": 3, "ok": 3, "fehler": 0, "ungueltig": 0, "offen": 0, "autos": 9, "symbol": "✓"}
-        assert j[m_teil] == {"geplant": 3, "ok": 1, "fehler": 1, "ungueltig": 1, "offen": 1, "autos": 3, "symbol": "O"}
-        assert j[m_fehl] == {"geplant": 2, "ok": 0, "fehler": 2, "ungueltig": 1, "offen": 0, "autos": 0, "symbol": "✗"}
-        assert j[m_offen] == {"geplant": 2, "ok": 0, "fehler": 0, "ungueltig": 0, "offen": 2, "autos": 0, "symbol": "-"}
+        # autos_soll = bestellte Zeilen (max_items 5) je geplantem Abruf — Ahmad: "wie viele haetten geladen werden muessen"
+        assert j[m_ok] == {"geplant": 3, "ok": 3, "fehler": 0, "ungueltig": 0, "offen": 0, "autos": 9, "autos_soll": 15, "symbol": "✓"}
+        assert j[m_teil] == {"geplant": 3, "ok": 1, "fehler": 1, "ungueltig": 1, "offen": 1, "autos": 3, "autos_soll": 15, "symbol": "O"}
+        assert j[m_fehl] == {"geplant": 2, "ok": 0, "fehler": 2, "ungueltig": 1, "offen": 0, "autos": 0, "autos_soll": 10, "symbol": "✗"}
+        assert j[m_offen] == {"geplant": 2, "ok": 0, "fehler": 0, "ungueltig": 0, "offen": 2, "autos": 0, "autos_soll": 10, "symbol": "-"}
         g = st["gesamt"]
         eigene = {k: v for k, v in j.items() if k.startswith("test-")}
         assert sum(z["geplant"] for z in eigene.values()) == 10 and sum(z["autos"] for z in eigene.values()) == 12
+        assert sum(z["autos_soll"] for z in eigene.values()) == 50 and g["autos_soll"] >= 50
         assert g["geplant"] >= 10 and g["autos"] >= 12 and g["modelle_ok"] >= 1 and g["modelle_teil"] >= 1 and g["modelle_fehler"] >= 1
         # Modelluebersicht und Status tragen den Stand mit
         welt.run(db[K.MODELLE].insert_many([{**_modell(w), "id": m, "label": m} for m in (m_ok, m_teil, m_fehl, m_offen)]))
