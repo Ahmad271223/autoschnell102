@@ -3941,3 +3941,39 @@ Einschalten von `MARKT_CHANCEN_AKTIV`: die Firmen sähen dann Privatangebote (oh
   14 Tagen nicht abgerufen“ / „Stillstand“ richten sich nach dem Tagesplan-Protokoll. Bekannte Restkleinigkeit:
   ist „HOT zuerst“ aktiv und das Budget knapp, kann ein Hinweis „Serienstart“ statt „Intervall über 14 Tage“ lauten
   (nur die Beschriftung, die Werte stimmen) — tritt nur mit eingeschaltetem SAFE_AUTO auf.
+
+### Startprüfung 27./28.09.2026 — externer Bericht gegengeprüft, echte Fehler behoben (Migration 21)
+
+Ein externer Bericht (Stand 6c253b4) nannte 30 „Blocker“. Nachgeprüft am Code: ein Teil war schon behoben, ein
+Teil übertrieben, die folgenden waren echt. Alles in Commits 300e71e … b1e894d (+ Nachzüge).
+
+- **Abholprotokoll-PDF (Blocker, live seit 25.09.):** Als „fehlt“, „defekt“ oder „anders“ markierte Ausstattung wurde
+  im unterschriebenen PDF als **vorhanden [X]** gedruckt. Jetzt: „[–] Sitzheizung — nein (fehlt)“. In der Datenbank
+  waren die Werte immer richtig, nur der Druck war falsch. **Betroffene PDFs finden** (nur lesen, `mongosh`):
+  `db.pickup_protocols.aggregate([{$match:{status:"final",features:{$type:"object"}}},{$addFields:{_nein:{$filter:{input:{$objectToArray:"$features"},cond:{$in:["$$this.v",["fehlt","defekt","anders"]]}}}}},{$match:{"_nein.0":{$exists:true}}},{$project:{_id:0,id:1,dealer_id:1,appointment_id:1,finalized_at:1,falsch_gedruckt:"$_nein.k"}},{$sort:{finalized_at:1}}])`
+  Die unterschriebenen PDFs werden **nicht** überschrieben — mit dem Anwalt klären, ob eine berichtigte Fassung nötig ist.
+- **Empfangsbestätigung im Kaufvertrag:** Der Schalter „aus“ wirkte nicht (Wert war als Text „False“ gespeichert),
+  und „KFZ mit n Schlüssel(n)“ war automatisch angekreuzt, sobald eine Schlüsselanzahl eingetragen war. Jetzt: Schalter
+  wirkt, Vorschau = Vertrag, Kästchen bleiben beim Anlegen leer. **Migration 21** (`empfang_kaestchen_leeren`, beim Start)
+  entfernt das automatische Kreuz in den Vertragsdaten der Verträge ab 24.09., die noch nicht übergeben wurden. Die schon
+  erzeugten PDFs bleiben. **Liste der Verträge, deren aktuelles PDF das Kreuz noch zeigt** (nur lesen):
+  `cd /opt/autoschnell/backend && python -X utf8 scripts/empfang_kreuz_liste.py` (Optionen `--firma <id>`, `--json`).
+  Für diese bei Bedarf eine neue Fassung erzeugen (Termin verschieben/Verkäuferkorrektur) — nicht automatisch.
+- **Zusicherungen aus dem Inserat nur noch als Vorschlag:** Unfallfrei, Fahrtauglich, Scheckheft, HU, EU-Import werden
+  im Vertragsdialog **nie mehr automatisch** eingetragen. Der Dialog zeigt je Feld den Vorschlag mit Fundstelle (echter
+  Inseratstext bzw. Portalwert) und einen Knopf „Übernehmen“. Grund: „Leider nicht mehr unfallfrei“ ergab vorher
+  „Unfallfrei: Ja“; „unbeschädigt“ (Kleinanzeigen) bzw. „kein Schadensfall“ (mobile.de) heißt nicht „unfallfrei“.
+  Negative Portalangaben („Unfallschaden laut Inserat: Ja“, „nicht fahrbereit“) stehen weiter immer im Vertrag,
+  positive nicht mehr. Abgelaufene HU wird nie als gültig vorgeschlagen.
+- **Zwei fehlende Indizes** (`appointments.id`, `pickup_protocols.id`) entstehen beim Start. Meldet ein Betriebsalarm
+  `id_nicht_eindeutig`: `python -X utf8 scripts/dubletten_pruefen.py` (liest nur), Dubletten bereinigen, neu starten.
+- **Admin:** Beträge im Markt-Budget in deutscher Schreibweise („700,00“, „1.000“) werden richtig gelesen, unlesbare
+  Eingaben nicht gespeichert; Werte unter 5 $ (außer 0) nur nach Rückfrage. Kontoseite: Ladefehler heißt nicht mehr
+  „Nutzer nicht gefunden“. Ablaufdatum eines Abos auch nach Ablauf korrigierbar (auch beim Chef). Nach schnellem
+  Firmenwechsel bleibt keine Tabelle/Löschvorschau der falschen Firma stehen.
+- **Nach dem Deploy einmal prüfen:** Marktanalyse → Budget (steht ein versehentlich als 0 oder 1 gespeicherter Wert?);
+  Betriebsalarme (`id_nicht_eindeutig`?); Liste `empfang_kreuz_liste.py`.
+- **Noch offen (kein Code):** Rechtstexte — Datenschutz (Anthropic/USA, Verantwortlicher + Kontakt, kleinanzeigen-agent.de,
+  Ausweisnummer, WhatsApp), AGB (keine automatische Verlängerung, 400 Abrufe/Tag statt „unbegrenzt“, Marktplatz-Ablauf,
+  Vertrag braucht Abo), Vertragstext (ein Gewährleistungsausschluss statt drei). Einstellung: `MARKT_CRAWL_FENSTER_VON=4`,
+  damit Crawler und Sicherung nicht beide um 3 Uhr starten. Marktdaten haben noch keine Löschfrist.
