@@ -841,6 +841,12 @@ async def uebergabe_erfolgt(datenbank, doc: dict) -> bool:
     gehoeren (contract_id, kaufvorgang_id am Termin, Protokoll an einem
     Termin eines anderen Vertrags). "bestand"/"verkauft"/"archiviert" allein
     reichen nicht (Weiterverkauf vor der Abholung, FAHRZEUG_ABGEHOLT).
+    Nachtrag 28.09.2026 (rest5): Eine fremde Abholung zaehlt auch dann, wenn
+    sie nur in einem Termin (contract_id bzw. kaufvorgang_id eines anderen
+    Vertrags, abgeholt/erledigt) oder einem finalen Protokoll (anderer
+    Vertrag bzw. Termin eines anderen Vertrags) steckt — auch bei leerem
+    abgeholt_kaufvorgang_id. Ein Zeiger auf einen Vorgang ohne contract_id
+    zaehlt nur am Fahrzeug des Vertrags (wie kaufvorgang._passt).
     Im Zweifel (Datenbankfehler) True — dann bleibt der Vertrag unberuehrt."""
     if not doc or not doc.get("id"):
         return True
@@ -859,8 +865,13 @@ async def uebergabe_erfolgt(datenbank, doc: dict) -> bool:
             kv_oder.append({"id": kv_zeiger})
         async for kv in datenbank.kaufvorgaenge.find(
                 {"$or": kv_oder, "dealer_id": dealer_id},
-                {"_id": 0, "id": 1, "status": 1, "contract_id": 1}):
-            if (kv.get("contract_id") or None) not in (None, cid):
+                {"_id": 0, "id": 1, "status": 1, "contract_id": 1, "vehicle_id": 1}):
+            kv_cid = kv.get("contract_id") or None
+            # rest5 (P4): ein Zeiger auf einen Vorgang OHNE Vertrag zaehlt nur
+            # am Fahrzeug des Vertrags — wie kaufvorgang._passt.
+            fremdes_auto = (kv_cid is None and kv.get("id") == kv_zeiger and vid
+                            and (kv.get("vehicle_id") or None) != vid)
+            if kv_cid not in (None, cid) or fremdes_auto:
                 if kv.get("id") in eigene_kv:
                     eigene_kv.remove(kv["id"])      # fremder Zeiger
                 continue
@@ -903,6 +914,28 @@ async def uebergabe_erfolgt(datenbank, doc: dict) -> bool:
                 {"vehicle_id": vid, "dealer_id": dealer_id, "status": "abgeholt",
                  "id": {"$nin": eigene_kv}, "contract_id": _nicht_leer_und_nicht(cid)},
                 limit=1):
+            return False
+        # rest5 (P1/P2): fremde Abholung ueber Termin oder Protokoll — auch
+        # bei leerem abgeholt_kaufvorgang_id (Altbestand vor Runde 18, oder
+        # der Vorgang von A wurde zurueckgesetzt).
+        fremde_termine: list = []
+        async for t in datenbank.appointments.find(
+                {"vehicle_id": vid, "dealer_id": dealer_id, "id": {"$nin": termin_ids},
+                 "$or": [{"contract_id": _nicht_leer_und_nicht(cid)},
+                         {"contract_id": _leer_oder(),
+                          "kaufvorgang_id": _nicht_leer_und_nicht(*eigene_kv)}]},
+                {"_id": 0, "id": 1, "status": 1}):
+            if t.get("status") in AUSGANG_ABGEHOLT:
+                return False
+            if t.get("id"):
+                fremde_termine.append(t["id"])
+        prot_oder: list = [{"vehicle_id": vid, "contract_id": _nicht_leer_und_nicht(cid)}]
+        if fremde_termine:
+            prot_oder.append({"appointment_id": {"$in": fremde_termine},
+                              "contract_id": _leer_oder()})
+        if await datenbank.pickup_protocols.count_documents(
+                {"dealer_id": dealer_id, "status": "final", "superseded": {"$ne": True},
+                 "$or": prot_oder}, limit=1):
             return False
         if fest or v.get("lifecycle") in FAHRZEUG_ABGEHOLT:
             return True

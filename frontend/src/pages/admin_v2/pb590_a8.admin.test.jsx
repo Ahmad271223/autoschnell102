@@ -215,7 +215,7 @@ describe("AD-19: Nutzerliste sucht ab 3 Zeichen auf dem Server", () => {
 // ------------------------------------------------------------------ AD-24 / AD-25
 describe("AD-24/AD-25: Löschdialog", () => {
   it("Umfang und Rolle je Konto", () => {
-    expect(loeschUmfang({ role: "dealer", ist_chef: true })).toMatch(/KOMPLETTE Firma/);
+    expect(loeschUmfang({ role: "dealer", ist_chef: true, dealer_id: "d1" })).toMatch(/KOMPLETTE Firma/);
     expect(loeschUmfang({ role: "sucher" })).toMatch(/nur dieses Konto.*an den Chef/);
     expect(loeschUmfang({ role: "dealer", ist_chef: false })).toMatch(/nur dieses Konto/);
     expect(loeschUmfang({ role: "b2b_buyer" })).toMatch(/Zwischenhändler-Konto/);

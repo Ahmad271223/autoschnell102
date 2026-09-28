@@ -35,6 +35,31 @@ export function istChefKonto(u) {
   return u.role === "dealer";
 }
 
+// Pruefung Runde 4 (rest5): Chef-Konto OHNE dealer_id (z. B. aelterer Server
+// ohne `ist_chef`, Rolle dealer ohne Firma). Es gibt keine Firma, also keine
+// Loeschvorschau — vorher stand dauerhaft "wird geladen" und "Endgueltig
+// loeschen" blieb gesperrt. Der Server loescht so ein Konto wie ein einzelnes
+// Konto (admin_delete_user: kein Hauptchef ohne dealer_id), ohne firma_loeschen.
+export function chefOhneFirma(u) {
+  return istChefKonto(u) && !u.dealer_id;
+}
+
+/** admin5: gehoert die Vorschau zu genau dieser Firma UND diesem Konto? */
+export function vorschauPasst(u, v) {
+  return !!(u && v && u.dealer_id && v.dealerId === u.dealer_id && v.userId === u.id);
+}
+
+/**
+ * Pfad fuer das DELETE — oder null, wenn nicht geloescht werden darf.
+ * admin5: Chef mit Firma nur, wenn die Vorschau zu genau dieser Firma gehoert
+ * (dann mit ?firma_loeschen=true). rest5: Chef ohne Firma wie ein einzelnes Konto.
+ */
+export function loeschPfad(u, v) {
+  if (!u?.id) return null;
+  if (!istChefKonto(u) || chefOhneFirma(u)) return `/admin/users/${u.id}`;
+  return vorschauPasst(u, v) ? `/admin/users/${u.id}?firma_loeschen=true` : null;
+}
+
 // Pruefbericht 20.09.2026 (AD-24/AD-25): Der Loeschdialog sagte fuer JEDE
 // Rolle "inklusive Haendler-Profil und allen Abos", die Loeschvorschau kam
 // erst im zweiten window.confirm nach der 409. Jetzt: Umfang je Rolle
@@ -50,6 +75,9 @@ export function rolleText(u) {
 }
 
 export function loeschUmfang(u) {
+  if (chefOhneFirma(u)) {
+    return "nur dieses Konto — es gehört zu keiner Firma, es wird keine Firma gelöscht.";
+  }
   if (istChefKonto(u)) {
     return "Händler-Hauptaccount — die KOMPLETTE Firma wird gelöscht: Chef, alle Sucher, "
       + "Fahrzeuge, Termine, Verträge, Inserate und Abos.";
@@ -219,24 +247,23 @@ export default function AdminUsers() {
     setLoeschVorschau(null);
   };
   // admin5: nur eine Vorschau, die zur Firma UND zum Konto im Dialog gehoert, zaehlt
-  const vorschauPasst = (u, v) => !!(u && v && u.dealer_id && v.dealerId === u.dealer_id && v.userId === u.id);
   const vorschau = vorschauPasst(deleteUser, loeschVorschau) ? loeschVorschau : null;
+  // rest5: Chef ohne Firma — keine Vorschau, Loeschen wie ein einzelnes Konto
+  const ohneFirma = chefOhneFirma(deleteUser);
 
   const submitDelete = async () => {
     if (!deleteUser) return;
+    // AD-24: Der Chef hat Umfang und Vorschau schon im Dialog gesehen —
+    // direkt mit ?firma_loeschen=true. Fuer alle anderen Rollen kommt eine
+    // 409 (z. B. Firma ohne Hauptaccount, AD-09) als echter Grund im Toast.
     // admin5: Chef nur loeschen, wenn die angezeigte Vorschau zu genau dieser Firma gehoert
-    if (istChefKonto(deleteUser) && !vorschauPasst(deleteUser, loeschVorschau)) {
+    const pfad = loeschPfad(deleteUser, loeschVorschau);
+    if (!pfad) {
       toast.error("Die Löschvorschau gehört nicht zu dieser Firma — bitte den Dialog neu öffnen.");
       return;
     }
     setDeleting(true);
     try {
-      // AD-24: Der Chef hat Umfang und Vorschau schon im Dialog gesehen —
-      // direkt mit ?firma_loeschen=true. Fuer alle anderen Rollen kommt eine
-      // 409 (z. B. Firma ohne Hauptaccount, AD-09) als echter Grund im Toast.
-      const pfad = istChefKonto(deleteUser)
-        ? `/admin/users/${deleteUser.id}?firma_loeschen=true`
-        : `/admin/users/${deleteUser.id}`;
       await api.delete(pfad);
       toast.success(`Account "${kontoLabel(deleteUser)}" dauerhaft gelöscht`);
       loeschenSchliessen();
@@ -472,7 +499,8 @@ export default function AdminUsers() {
                   {istChefKonto(deleteUser) && (
                     <div className="mt-2 text-[12.5px]" data-testid="admin-delete-user-vorschau">
                       {/* admin5: nur die Vorschau DIESER Firma zeigen, sonst "wird geladen" */}
-                      {vorschau === null ? "Löschvorschau wird geladen…"
+                      {ohneFirma ? <span className="text-amber-300">Konto ohne Firma — keine Vorschau möglich.</span>
+                        : vorschau === null ? "Löschvorschau wird geladen…"
                         : vorschau.fehler ? <span className="text-amber-300">{vorschau.fehler}</span>
                           : <>Würde löschen: <span className="text-white">{vorschau.text}</span></>}
                     </div>
@@ -498,8 +526,9 @@ export default function AdminUsers() {
                 variant="danger"
                 onClick={submitDelete}
                 // AD-24: beim Chef erst loeschen, wenn die Vorschau da ist (oder ihr Fehler);
-                // admin5: und nur, wenn sie zu genau dieser Firma gehoert
-                disabled={deleting || (istChefKonto(deleteUser) && vorschau === null)}
+                // admin5: und nur, wenn sie zu genau dieser Firma gehoert;
+                // rest5: Chef ohne Firma hat keine Vorschau und wartet auf keine
+                disabled={deleting || (istChefKonto(deleteUser) && !ohneFirma && vorschau === null)}
               >
                 {deleting ? "Lösche…" : "Endgültig löschen"}
               </Button>
