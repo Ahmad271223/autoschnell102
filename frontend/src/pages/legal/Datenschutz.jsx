@@ -26,8 +26,9 @@ export default function Datenschutz() {
             Telefonnummer, E-Mail-Adresse (optional, als Kontaktadresse),
             Passwort (verschlüsselt als Hash gespeichert)</li>
         <li><b>Geschäftsdaten:</b> Fahrzeugdaten, Kaufverträge, Verkäuferdaten
-            (Name, Adresse, Kontaktdaten der Fahrzeugverkäufer), Termine,
-            Abholberichte inkl. Fotos</li>
+            (Name, Adresse, Kontaktdaten und — soweit im Kaufvertrag erfasst —
+            die Ausweisnummer der Fahrzeugverkäufer), Termine, Abholberichte
+            inkl. Fotos und Ausstattungs-Befund des Fahrers</li>
         <li><b>Marktplatz-Anfragen:</b> Kaufinteressen zwischen Käufern und
             Händlern inkl. Preisangebot, Gegenangebot und mitgeschickter
             Nachricht (kein allgemeiner Chat — die Nachrichten gehören zur
@@ -93,10 +94,50 @@ export default function Datenschutz() {
             Abrufdienst der Apify Technologies s.r.o., Vodičkova 704/36,
             110 00 Prag, Tschechien (EU). Übermittelt werden nur die
             Inserats-URL bzw. die Suchparameter — keine Daten unserer Nutzer.
-            Inserate von kleinanzeigen.de werden je nach Konfiguration von
+            Zusätzlich beobachten wir für die Marktanalyse regelmäßig öffentliche
+            Inserate von mobile.de über denselben Dienst; gespeichert werden
+            Fahrzeug- und Preisdaten sowie bei privaten Anbietern nur Postleitzahl
+            und Ort — keine Namen, Telefonnummern oder Daten unserer Nutzer.
+            Inserate von kleinanzeigen.de holt unser Server zuerst über den
+            Abrufdienst kleinanzeigen-agent.de ({/* BETREIBER-HINWEIS: Betreiber
+            und Anschrift des Dienstes eintragen */}Betreiber und Anschrift werden
+            ergänzt); übermittelt wird nur die Anzeigen-ID des öffentlichen
+            Inserats, zurück kommen dessen öffentliche Angaben (bei gewerblichen
+            Anbietern der Name, bei privaten das Pseudonym, dazu Postleitzahl
+            und Ort). Ist dieser Dienst nicht verfügbar, wird das Inserat von
             unserem Server oder direkt aus dem Browser des Nutzers abgerufen.</li>
+        {/* BETREIBER-HINWEIS (im Browser unsichtbar): KI-Bewertung seit 25./26.09.2026
+            (backend/ai/*): Empfaenger Anthropic (USA). Auftragsverarbeitungsvertrag/DPA
+            mit Anthropic abschliessen (Standardvertragsklauseln) — ohne den darf die
+            KI fuer Kunden nicht freigeschaltet werden. Fristen: ai/retention.py
+            KI_BEWERTUNG_ROHDATEN_TAGE=90, KI_BEWERTUNG_TAGE=730 — weicht von der
+            60-Tage-Linie ab (Entscheidung Ahmad 14.09.); rechtliche Pruefung steht aus. */}
+        <li><b>KI-Bewertung (nur wenn für die Firma freigeschaltet):</b> Zur
+            Einschätzung von Preisabschlägen bei Schäden und bei der Abholung
+            nutzen wir das Sprachmodell Claude der Anthropic, PBC, 548 Market
+            St, PMB 90375, San Francisco, CA 94104, USA. Übermittelt werden
+            Fahrzeugdaten des Inserats (Marke, Modell, Erstzulassung,
+            Kilometerstand, Ausstattung, Preis), die Liste der festgestellten
+            Schäden mit den Notizen des Fahrers bzw. Suchers, die Antworten auf
+            Rückfragen zum Zustand und — nur bei einer Abweichung — die
+            Fahrgestellnummer. <b>Nicht</b> übermittelt werden Name, Anschrift,
+            Telefonnummer oder Ausweisnummer des Verkäufers und keine Daten
+            unserer Nutzer. Grundlage für die Übermittlung in die USA sind
+            EU-Standardvertragsklauseln (Art.&nbsp;46 DSGVO) im Rahmen eines
+            Auftragsverarbeitungsvertrags; nach den Nutzungsbedingungen der
+            Schnittstelle werden die Daten nicht zum Training des Modells
+            verwendet. Datenschutzhinweise: anthropic.com/legal/privacy. Die
+            KI-Einschätzung ist eine Entscheidungshilfe; die Entscheidung trifft
+            immer der Händler.</li>
+        <li><b>Versand per WhatsApp (auf Wunsch des Händlers):</b> Der Händler
+            kann den Link zum Kaufvertrag statt per E-Mail über sein eigenes
+            WhatsApp an den Verkäufer senden. Dabei öffnet sein Gerät WhatsApp
+            mit der Telefonnummer des Verkäufers und dem Nachrichtentext; die
+            Übermittlung an WhatsApp (Meta Platforms Ireland Ltd.) erfolgt durch
+            den Händler selbst, unser Server sendet nichts an Meta. Der
+            Vertragslink ist zeitlich begrenzt gültig.</li>
         <li><b>Dateispeicher:</b> Fotos, Abholberichte, Vertrags-PDFs und
-            die verschlüsselten Datensicherungen liegen im Objektspeicher
+            die Datensicherungen (vom Anbieter verschlüsselt gespeichert) liegen im Objektspeicher
             Cloudflare R2. Vertragspartner ist die Cloudflare Germany GmbH,
             Rosental 7, 80331 München, Deutschland, für die Cloudflare, Inc.,
             101 Townsend St., San Francisco, CA 94107, USA. Grundlage für die
@@ -179,7 +220,11 @@ export default function Datenschutz() {
         erledigten Terminen 7 Tage, bei nicht abgeholten oder stornierten
         Terminen 14 Tage nach dem Abschluss des Termins gelöscht, sofern das
         Fahrzeug nicht in den Bestand oder Verkauf übernommen wurde.
-        Bestandsfahrzeug-Daten werden nach 50 Tagen archiviert.
+        Fahrerfotos, die der Händler in ein eigenes Verkaufsinserat
+        übernimmt, folgen dem Inserat: Sie werden mit dem Inserat gelöscht
+        (veröffentlichte Inserate nach 3 Wochen); bei als verkauft
+        gekennzeichneten Fahrzeugen bleiben Inserat und Fotos als Beleg
+        gespeichert. Bestandsfahrzeug-Daten werden nach 50 Tagen archiviert.
         Beweisdokumente zu Inseraten löschen wir 30 Tage nach ihrer
         Erstellung, außer zu dem Inserat besteht bei einem Händler noch ein
         Kaufvertrag, ein Abholtermin, ein Verkaufsinserat oder ein
@@ -192,10 +237,17 @@ export default function Datenschutz() {
         <li>Zugangs- und Abo-Anfragen (erledigt oder abgelehnt): 60 Tage</li>
         <li>Fehlerprotokolle: max. 60 Tage</li>
         <li>Marktplatz-Anfragen: 60 Tage nach Abschluss</li>
+        <li>KI-Bewertung: die Eingabedaten (Schadensliste, Notizen, Antworten)
+            90 Tage; das Ergebnis der Bewertung ohne diese Eingabedaten bis zu
+            2 Jahre, um spätere Einschätzungen zu verbessern</li>
+        <li>Marktbeobachtung: öffentliche Inseratsdaten ohne Personenbezug (bei
+            privaten Anbietern nur Postleitzahl und Ort) ohne feste Frist;
+            Preisverläufe fließen in Berichte ein</li>
         <li>Inserats-Cache (zwischengespeicherte Inseratsdaten): max. 21 Tage; zu einem Kaufvertrag gehörende Inseratsdaten so lange wie der Vertrag</li>
         <li>Backups: täglich; auf unseren Servern die letzten 14 Sicherungen
             (die jüngste vollständige bleibt stets erhalten), zusätzlich
-            verschlüsselt außer Haus die letzten 14 Sicherungen; im
+            außer Haus die letzten 14 Sicherungen (dort vom Speicheranbieter
+            verschlüsselt); im
             Datei-Speicher gelöschte Dateien bleiben bis zu 30 Tage in der
             Dateisicherung, danach werden sie auch dort entfernt</li>
       </ul>
@@ -205,7 +257,11 @@ export default function Datenschutz() {
         Du hast das Recht auf Auskunft (Art. 15), Berichtigung (Art. 16),
         Löschung (Art. 17), Einschränkung der Verarbeitung (Art. 18),
         Datenübertragbarkeit (Art. 20) und Widerspruch (Art. 21 DSGVO).
-        Wende dich dazu an die oben genannte E-Mail-Adresse. Außerdem hast du
+        Wende dich dazu an den unter 1. genannten Verantwortlichen. Das gilt
+        auch für Fahrzeugverkäufer, deren Daten ein Händler auf der Plattform
+        erfasst hat: Wir verarbeiten diese Daten im Auftrag des Händlers und
+        leiten dein Anliegen an ihn weiter bzw. beantworten es gemeinsam mit
+        ihm. Außerdem hast du
         ein Beschwerderecht bei einer Datenschutz-Aufsichtsbehörde — für uns
         zuständig: Die Landesbeauftragte für den Datenschutz Niedersachsen,
         Prinzenstraße 5, 30159 Hannover.

@@ -83,8 +83,13 @@ export default function AGB() {
             (30 Tage) oder 1.500 € / Jahr (365 Tage) — jeweils netto zzgl.
             gesetzlicher Umsatzsteuer, Abrechnung per Rechnung; die
             Freischaltung erfolgt nach Zahlungseingang durch den Anbieter.
-            Innerhalb des Abos ist die Zahl der Abrufe und Vergleiche nicht
-            begrenzt.</li>
+            Innerhalb des Abos ist die Zahl der Vergleiche nicht begrenzt;
+            neue Inserats-Abrufe bei den Portalen sind zum Schutz vor
+            Missbrauch auf 400 je Nutzer und Kalendertag begrenzt (bereits
+            abgerufene Inserate zählen nicht mit).</li>
+        <li>Das Erstellen, die Vorschau und der Versand von
+            Kaufvertrags-Dokumenten setzen ein aktives Sucher-Abo (des Nutzers
+            oder seiner Firma) voraus.</li>
         <li>Rechnungen weisen die Umsatzsteuer gesondert aus. Die aktuell
             gültigen Preise werden in der Anwendung angezeigt. Kostenlose
             Leistungen können mit einer Ankündigungsfrist von einem Monat
@@ -93,14 +98,23 @@ export default function AGB() {
       </ul>
 
       <H2>5. Laufzeit und Kündigung</H2>
+      {/* BETREIBER-HINWEIS (im Browser unsichtbar): Startpruefung 27.09.2026 (R6) —
+          es gibt im Code keine automatische Verlaengerung (Abo endet mit expires_at,
+          Verlaengerung nur per Anfrage + Freischaltung, Kuendigung des Chefs per
+          POST /dealer/subscription/cancel). Text entsprechend angeglichen;
+          rechtliche Pruefung steht aus. */}
       <p>
-        Monats-Abos verlängern sich jeweils um einen Monat und sind zum Ende
-        des laufenden Abrechnungsmonats kündbar. Jahres-Abos verlängern sich
-        um ein weiteres Jahr, wenn sie nicht spätestens vier Wochen vor
-        Laufzeitende gekündigt werden. Kostenlose Accounts können jederzeit
-        gelöscht werden. Die Kündigung ist formlos in Textform (z. B. per
-        E-Mail) möglich. Das Recht zur außerordentlichen
-        Kündigung aus wichtigem Grund bleibt unberührt.
+        Sucher-Abos laufen für die gebuchte Laufzeit (30 bzw. 365 Tage) und
+        enden mit deren Ablauf automatisch; eine stillschweigende
+        Verlängerung findet nicht statt. Eine Verlängerung kann jederzeit in
+        der Anwendung oder formlos in Textform (z. B. per E-Mail) angefragt
+        werden und wird nach Zahlungseingang durch den Anbieter
+        freigeschaltet; sie schließt an die Restlaufzeit an. Der
+        Händler-Hauptaccount kann ein laufendes Abo in der Anwendung zum
+        Laufzeitende kündigen; bereits gezahlte Entgelte werden nicht
+        erstattet. Kostenlose Accounts können jederzeit gelöscht werden. Das
+        Recht zur außerordentlichen Kündigung aus wichtigem Grund bleibt
+        unberührt.
       </p>
 
       <H2>6. Pflichten der Nutzer</H2>
@@ -118,10 +132,20 @@ export default function AGB() {
       </ul>
 
       <H2>7. B2B-Marktplatz</H2>
+      {/* BETREIBER-HINWEIS (im Browser unsichtbar): Startpruefung 27.09.2026 (R8) —
+          der Code (routes/marketplace.py) fuehrt Anfrage/Gegenangebot/Annahme mit
+          Reservierung und agreed_price; ob die Annahme schon ein Kaufvertrag ist,
+          muss der Anwalt festlegen. Marktplatz ist per MARKTPLATZ_AKTIV derzeit aus. */}
       <p>
         Inserate auf dem Marktplatz richten sich ausschließlich an gewerbliche
-        Käufer. Die Kontaktaufnahme erfolgt direkt (telefonisch) zwischen
-        Käufer und anbietendem Händler. Der Anbieter übernimmt keine Gewähr
+        Käufer. Der Käufer stellt über die Plattform eine Kaufanfrage — mit
+        oder ohne eigenes Preisangebot; beide Seiten können Gegenangebote
+        machen. Nimmt der anbietende Händler eine Anfrage an, wird das
+        Fahrzeug für diesen Käufer zum vereinbarten Preis reserviert; wurde
+        kein Preis angeboten, gilt der im Inserat für die Käuferstufe
+        angezeigte Preis. Die Annahme ist eine verbindliche Reservierung
+        zwischen Käufer und Händler; den Kaufvertrag schließen Käufer und
+        Händler unmittelbar miteinander. Der Anbieter übernimmt keine Gewähr
         für Zustand, Verfügbarkeit oder Eigenschaften der angebotenen
         Fahrzeuge und ist an den Kaufverträgen nicht beteiligt.
       </p>
