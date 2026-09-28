@@ -76,6 +76,7 @@ def test_01_bericht_zaehlt_segmente_und_ordnet_je_modell(sync_db):
     _bestand(sync_db)
     b = MF.bericht(sync_db)
     assert b["laeufe"] == 6 and b["laeufe_failed"] == 2 and b["laeufe_invalid"] == 4
+    assert b["erfolge"] == 2                                              # Gegenprobe: s-a (Tag 6) und s-c (heute)
     assert b["segmente_aktiv"] == 3 and b["segmente_mit_fehler"] == 3
     assert b["mehrfach"] == 2 and b["dreifach"] == 1
     # s-b (juengster Lauf ungueltig) und s-d (einziger Lauf ein Fehler) sind "zuletzt gescheitert", s-a hat sich erholt
@@ -106,7 +107,9 @@ def test_01_bericht_zaehlt_segmente_und_ordnet_je_modell(sync_db):
     # --seit grenzt ueber das Laufende (deutsche Zeit) ein: ab gestern 00:00 -> die zwei juengsten s-b-Laeufe
     bs = MF.bericht(sync_db, seit=f"{T(1)} 00:00")
     assert bs["laeufe"] == 2 and bs["segmente_mit_fehler"] == 1 and bs["seit"] == f"{T(1)} 00:00"
-    assert MF.bericht(sync_db, seit=f"{T(0)} 23:59")["laeufe"] == 0
+    assert bs["erfolge"] == 1 and b3["erfolge"] == 1                      # nur s-c (heute) im Zeitraum
+    leer = MF.bericht(sync_db, seit=f"{T(0)} 23:59")
+    assert leer["laeufe"] == 0 and leer["erfolge"] == 0
 
 
 def test_02_ausgabe_und_parameter(sync_db, monkeypatch, capsys):
@@ -116,7 +119,7 @@ def test_02_ausgabe_und_parameter(sync_db, monkeypatch, capsys):
     assert MF.main([]) == 0
     aus = capsys.readouterr().out
     assert "Zeitraum: alle Tage" in aus
-    assert "Fehlversuche: 6 Laeufe in 3 Segmenten (von 3 aktiven)" in aus
+    assert "Fehlversuche: 6 Laeufe in 3 Segmenten (von 3 aktiven)   —   erfolgreiche Laeufe im selben Zeitraum: 2" in aus
     assert "mehrfach (>= 2): 2 Segmente, >= 3: 1" in aus
     assert "zuletzt gescheitert (juengster Lauf kaputt): 2   inzwischen ok: 1" in aus
     assert f"je Tag: {T(18)}: 1, {T(8)}: 1" in aus and f"{T(0)}: 1" in aus

@@ -81,6 +81,8 @@ def bericht(db, tage: Optional[int] = None, seit: Optional[str] = None) -> Dict[
     seit_iso = seit_utc(seit) if seit else None
     if seit_iso:
         filt["finished_at"] = {"$gte": seit_iso}
+    # Gegenprobe: erfolgreiche Laeufe im selben Zeitraum — "0 Fehlversuche" sagt nichts, wenn gar nichts lief
+    erfolge = db.market_crawl_jobs.count_documents({**filt, "status": "completed"})
     je_seg: Dict[str, Dict[str, Any]] = {}
     gruende: Counter = Counter()
     land_laeufe: Counter = Counter()
@@ -139,6 +141,7 @@ def bericht(db, tage: Optional[int] = None, seit: Optional[str] = None) -> Dict[
     return {
         "ab_tag": ab, "seit": lokal(seit_iso) if seit_iso else None,
         "laeufe": sum(laeufe.values()), "laeufe_failed": laeufe.get("failed", 0), "laeufe_invalid": laeufe.get("data_invalid", 0),
+        "erfolge": erfolge,
         "je_tag": sorted(je_tag.items()),
         "segmente_aktiv": db.market_segments.count_documents({"enabled": True}),
         "segmente_mit_fehler": len(werte),
@@ -201,7 +204,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         zeitraum.append(f"Laeufe beendet seit {b['seit']} Uhr")
     print(f"Datenbank: {DB_NAME}   Zeitraum: {' und '.join(zeitraum) or 'alle Tage'}")
     print(f"Fehlversuche: {b['laeufe']} Laeufe in {b['segmente_mit_fehler']} Segmenten "
-          f"(von {b['segmente_aktiv']} aktiven)")
+          f"(von {b['segmente_aktiv']} aktiven)   —   erfolgreiche Laeufe im selben Zeitraum: {b['erfolge']}")
     print(f"  mehrfach (>= 2): {b['mehrfach']} Segmente, >= 3: {b['dreifach']}")
     print(f"  zuletzt gescheitert (juengster Lauf kaputt): {b['zuletzt_gescheitert']}   "
           f"inzwischen ok: {b['inzwischen_ok']}")
