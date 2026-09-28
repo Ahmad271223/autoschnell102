@@ -306,7 +306,9 @@ def test_regel_ausfall_wird_protokolliert(monkeypatch, caplog):
         werte, _ = _werte({"description": "unfallfrei, TÜV neu"})
     assert werte == {U: "Ja"}
     treffer = [r for r in caplog.records if "Inserat-Vorschlag" in r.getMessage()]
-    assert treffer and treffer[0].exc_info is not None, "Ausfall muss mit Stacktrace im Log stehen"
+    # CI 28.09.2026: ist server.py im selben Prozess importiert, hat der RedaktionsFilter (redaktion.py) den
+    # Stacktrace schon redigiert nach exc_text verschoben und exc_info geleert — beides zaehlt als Stacktrace.
+    assert treffer and (treffer[0].exc_info is not None or treffer[0].exc_text), "Ausfall muss mit Stacktrace im Log stehen"
 
 
 # ------------------------------------------------ Laufzeit
