@@ -10,8 +10,8 @@ import { useAuth } from "@/context/AuthContext";
 import { X, Eye, FileText, Loader2, AlertTriangle, ExternalLink } from "lucide-react";
 import DamageSelector, { damagesToText } from "./DamageSelector";
 import KiSchadenKarte from "./KiSchadenKarte";
-import { uebernahmenAusEntwurf, uebernahmenZusammenfuehren, ungepruefteUebernahmen,
-         vorschlaegeAnwenden } from "@/lib/kiSchaden";
+import { offeneVorschlaege, uebernahmenAusEntwurf, uebernahmenZusammenfuehren, vorschlaegeAnwenden,
+         vorschlagSetzen, zusicherungenOhneWahlLeeren } from "@/lib/kiSchaden";
 import { fehlendeKaeuferfelder, kaeuferAktualisieren, kaeuferAusProfil } from "@/lib/kaeuferdaten";
 import { kmAusText, preisAusText, preisText } from "@/lib/preis";
 import { openContractPdf } from "@/lib/pdf";
@@ -332,8 +332,8 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
   // verloren, bekommt die Wiederholung denselben Vertrag statt eines zweiten.
   const entwurfGeprueft = useRef(null);
   // Nachprüfung 28.09.2026 (inserat2, Nr. 3): Übernahmen aus dem Inserat, die
-  // im Entwurf standen — sonst fehlten nach dem Neuöffnen die Rückfrage vor
-  // "PDF erstellen" und der Kasten "Aus dem Inserat übernommen".
+  // im Entwurf standen — sonst fehlte nach dem Neuöffnen der Kasten "Aus dem
+  // Inserat übernommen". Seit inserat4 nur noch Nicht-Zusicherungen.
   const uebernommenEntwurf = useRef([]);
   const vorschlaegeDaten = useRef(null);
   const [inseratVorschlaege, setInseratVorschlaege] = useState(null);
@@ -344,7 +344,10 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
     uebernommenEntwurf.current = [];
     const e = entwurfLesen(entwurfKey);
     if (!e) return;
-    setForm((f) => ({ ...f, ...e.form }));
+    // inserat4: Zusicherungen, die im Entwurf ohne bewusste Wahl stehen
+    // (automatisch vorbelegt, alter Stand), setzt das Wiederherstellen nicht —
+    // sie erscheinen wieder als Vorschlag mit „Übernehmen“.
+    setForm((f) => zusicherungenOhneWahlLeeren({ ...f, ...e.form }, e.beruehrt || {}));
     beruehrt.current = { ...(e.beruehrt || {}) };
     bearbeitet.current = true;
     if (e.idempotenz) idempotenz.current = e.idempotenz;
@@ -352,7 +355,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
     uebernommenEntwurf.current = alt;
     if (alt.length) {
       setInseratVorschlaege((s) => ({ uebernommen: uebernahmenZusammenfuehren(alt, s?.uebernommen),
-                                      hinweise: s?.hinweise || [] }));
+                                      hinweise: s?.hinweise || [], zusicherungen: s?.zusicherungen || [] }));
     }
     toast.info("Dein angefangener Kaufvertrag wurde wiederhergestellt.", {
       duration: 12000,
@@ -365,13 +368,14 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
           idempotenz.current = neuerIdempotenzSchluessel();
           uebernommenEntwurf.current = [];
           // Frisches Formular — Inserat-Vorschläge wie beim ersten Öffnen
-          // wieder vorbelegen (mit Kasten und Rückfrage).
+          // (Nicht-Zusicherungen vorbelegt, Zusicherungen nur als Vorschlag).
           const frisch = anfangsFormular(v, dealer, heute);
           const daten = vorschlaegeDaten.current;
           if (daten) {
             const erg = vorschlaegeAnwenden(frisch, daten, {});
             setForm(erg.form);
-            setInseratVorschlaege({ uebernommen: erg.uebernommen, hinweise: erg.hinweise });
+            setInseratVorschlaege({ uebernommen: erg.uebernommen, hinweise: erg.hinweise,
+                                    zusicherungen: erg.zusicherungen });
           } else {
             setForm(frisch);
             setInseratVorschlaege(null);
@@ -406,9 +410,11 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
     };
   }, [open, form, entwurfKey, inseratVorschlaege]);
 
-  // Stufe 3 KI (Wunsch Ahmad 25.09.2026): eindeutige Angaben aus dem Inserat
-  // (Schlüssel, HU, Scheckheft nur bei "lückenlos"/"kein", Unfallfrei …)
-  // füllen NUR leere, nicht angefasste Felder — sichtbar mit Fundstelle.
+  // Stufe 3 KI (Wunsch Ahmad 25.09.2026): eindeutige Angaben aus dem Inserat.
+  // Entscheidung 28.09.2026 (inserat4): Nicht-Zusicherungen (Schlüssel,
+  // Bereifung) füllen NUR leere, nicht angefasste Felder; Zusicherungen (HU,
+  // Scheckheft, Unfallfrei, Fahrtauglich, EU-Import) nur als Vorschlag mit
+  // Fundstelle und Knopf „Übernehmen“ — nie automatisch.
   // Dazu die KI-Schadenbewertung, die der Sucher vor dem Erstellen sah
   // (Steuerfeld ki_bewertung_id für den Lernfall).
   const kiBewertungRef = useRef(null);
@@ -428,7 +434,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
         // wiederhergestellten Entwurf bleiben stehen (die Felder sind dort
         // schon gefüllt, vorschlaegeAnwenden findet sie nicht mehr).
         setInseratVorschlaege({ uebernommen: uebernahmenZusammenfuehren(uebernommenEntwurf.current, erg.uebernommen),
-                                hinweise: erg.hinweise });
+                                hinweise: erg.hinweise, zusicherungen: erg.zusicherungen });
         if (erg.uebernommen.length) {
           setForm((f) => vorschlaegeAnwenden(f, r.data, beruehrt.current).form);
         }
@@ -549,6 +555,19 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
     setForm((f) => ({ ...f, schluessel_anzahl: n }));
   };
 
+  // Entscheidung 28.09.2026 (inserat4): Zusicherungen aus dem Inserat nur auf
+  // Klick. Übernommen = bewusst gewählt (beruehrt) — eine Rückfrage vor
+  // "PDF erstellen" braucht es dafür nicht mehr.
+  const offeneZusicherungen = offeneVorschlaege(inseratVorschlaege?.zusicherungen, form);
+  const vorschlaegeUebernehmen = (liste) => {
+    if (!liste.length) return;
+    bearbeitet.current = true;
+    for (const z of liste) {
+      for (const k of Object.keys(z.setzt || {})) beruehrt.current[k] = true;
+    }
+    setForm((f) => liste.reduce((neu, z) => vorschlagSetzen(neu, z), f));
+  };
+
   // Rollenprüfung 22.09.2026 (RP-402): Kaufpreis und Kilometerstand in
   // deutscher Schreibweise lesen (lib/preis.js) — nie Number() auf
   // getippten Text ("15.000" wurde zu 15 €).
@@ -632,19 +651,10 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
         return;
       }
     }
-    // Go-Live-Prüfung 27.09.2026 (K1/K6): Aus dem Inserat vorbelegte
-    // Zusicherungen, die seitdem niemand angefasst hat, einmal bestätigen
-    // lassen — der Verkäufer unterschreibt sie als seine Zusicherung.
-    const offenUebernommen = ungepruefteUebernahmen(inseratVorschlaege?.uebernommen, form, beruehrt.current);
-    if (offenUebernommen.length > 0 && !window.confirm(
-      "Aus dem Inserat vorbelegt und noch nicht geprüft:\n"
-      + offenUebernommen.map((u) => `• ${u.label}: ${u.wert}`).join("\n")
-      + "\n\nSind diese Angaben mit dem Verkäufer geklärt? Sie stehen so als Zusicherung im Vertrag.",
-    )) {
-      return;
-    }
-    // bestätigt = geprüft: beim nächsten Versuch (z. B. nach 409) nicht erneut fragen
-    for (const u of offenUebernommen) beruehrt.current[u.feld] = true;
+    // Go-Live-Prüfung 27.09.2026 (K1/K6) fragte hier nach vorbelegten
+    // Zusicherungen. Seit inserat4 (28.09.2026) belegt der Dialog keine
+    // Zusicherung mehr ungesehen vor — jede steht nur nach eigener Wahl oder
+    // Klick auf „Übernehmen“ im Vertrag, die Rückfrage entfällt.
     setLoading(true);
     try {
       // Pruefung 14.09.2026: Idempotenz — Doppelklick oder Wiederholung nach
@@ -1007,8 +1017,9 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                 )}
               </div>
             </div>
-            {inseratVorschlaege && (inseratVorschlaege.uebernommen.length > 0 || inseratVorschlaege.hinweise.length > 0) && (
-              <div className="rounded-lg px-3 py-2 text-[11px] leading-snug" data-testid="contract-inserat-vorschlaege"
+            {inseratVorschlaege && (inseratVorschlaege.uebernommen.length > 0 || inseratVorschlaege.hinweise.length > 0
+                                    || offeneZusicherungen.length > 0) && (
+              <div className="rounded-lg px-3 py-2 text-[11px] leading-snug space-y-1.5" data-testid="contract-inserat-vorschlaege"
                    style={{ background: "var(--wa-03)", color: "var(--text-secondary)" }}>
                 {inseratVorschlaege.uebernommen.length > 0 && (
                   <div>
@@ -1017,7 +1028,43 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                       .map((u) => `${u.label}: ${u.wert}${u.fund ? ` („${u.fund}“)` : ""}`).join(" · ")}
                   </div>
                 )}
-                {inseratVorschlaege.hinweise.map((h, i) => <div key={i} className="mt-0.5">{h}</div>)}
+                {/* Entscheidung 28.09.2026 (inserat4): Zusicherungen nur als
+                    Vorschlag — erst der Klick trägt sie in den Vertrag ein. */}
+                {offeneZusicherungen.length > 0 && (
+                  <div data-testid="contract-zusicherung-vorschlaege">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-semibold" style={{ color: "var(--text-primary)" }}>
+                        Vorschläge aus dem Inserat — stehen erst nach „Übernehmen“ im Vertrag:
+                      </span>
+                      {offeneZusicherungen.length > 1 && (
+                        <button type="button" data-testid="contract-vorschlaege-alle"
+                                onClick={() => vorschlaegeUebernehmen(offeneZusicherungen)}
+                                className="apple-btn apple-btn-secondary !py-1 !px-2.5 !text-[12px]">
+                          Alle Vorschläge übernehmen
+                        </button>
+                      )}
+                    </div>
+                    <ul className="mt-1.5 space-y-1.5">
+                      {offeneZusicherungen.map((z) => (
+                        <li key={z.feld} data-testid={`contract-vorschlag-${z.feld}`}
+                            className="flex flex-col sm:flex-row sm:items-center gap-1.5 sm:gap-3 rounded-md border px-2.5 py-1.5"
+                            style={{ borderColor: "var(--border-default)" }}>
+                          <div className="flex-1 min-w-0 break-words">
+                            <span className="font-semibold" style={{ color: "var(--text-primary)" }}>{z.label}: {z.wert}</span>
+                            {z.fund && <span className="block">{z.quelle}: „{z.fund}“</span>}
+                          </div>
+                          <button type="button" data-testid={`contract-vorschlag-uebernehmen-${z.feld}`}
+                                  onClick={() => vorschlaegeUebernehmen([z])}
+                                  aria-label={`${z.label}: ${z.wert} übernehmen`}
+                                  className="apple-btn apple-btn-secondary !py-1 !px-2.5 !text-[12px] self-start sm:self-center shrink-0">
+                            Übernehmen
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {inseratVorschlaege.hinweise.map((h, i) => <div key={i} data-testid="contract-inserat-hinweis">{h}</div>)}
               </div>
             )}
           </Section>

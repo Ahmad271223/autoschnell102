@@ -221,17 +221,27 @@ export function vorschlagWertText(feld, wert) {
   return String(wert);
 }
 
+/** Zusicherungen im Kaufvertrag. Entscheidung 28.09.2026 (inserat4): Freitext
+ *  ist zu vielfältig, um sie sicher automatisch einzutragen — der Dialog setzt
+ *  sie NIE selbst (weder beim Öffnen noch beim Wiederherstellen eines
+ *  Entwurfs). Er zeigt je Feld den Vorschlag aus dem Inserat mit Fundstelle
+ *  und einem Knopf „Übernehmen“; erst der Klick setzt den Wert. */
+export const ZUSICHERUNG_FELDER = ["hu_valid", "hu_until", "service_book", "accident_free", "drivable", "eu_import"];
+
+const QUELLE_TEXT = { listing_field: "Portalfeld", listing_description: "Inseratstext" };
+
 /**
- * Vorschläge aus dem Inserat (GET /contracts/vorschlaege/{id}) in das Formular
- * übernehmen — NUR in leere Felder, nie in Felder, die der Nutzer schon
- * angefasst hat (gesperrt). Liefert das neue Formular und die Liste dessen,
- * was übernommen wurde (mit Fundstelle), damit der Dialog es zeigt.
+ * Vorschläge aus dem Inserat (GET /contracts/vorschlaege/{id}) auswerten.
+ *  - Nicht-Zusicherungen (Schlüsselanzahl, Bereifung) wie bisher NUR in leere,
+ *    nicht angefasste Felder (gesperrt) eintragen — sichtbar in `uebernommen`.
+ *  - Zusicherungen nur als Vorschlag zurückgeben (`zusicherungen`), das
+ *    Formular bleibt dort unverändert. HU/AU und „gültig bis“ sind EIN Vorschlag.
  */
 export function vorschlaegeAnwenden(form, vorschlaege, gesperrt = {}, { heute = new Date() } = {}) {
   let felder = vorschlaege?.felder || {};
   const hinweise = [...(vorschlaege?.hinweise || [])];
   // Go-Live-Prüfung 27.09.2026 (K2): eine abgelaufene HU nie als "HU: Ja"
-  // vorbelegen — auch wenn der Server (Monatswechsel, alter Stand) sie noch
+  // anbieten — auch wenn der Server (Monatswechsel, alter Stand) sie noch
   // schickt. Stattdessen der Hinweis "HU abgelaufen (MM/JJJJ)".
   const huBis = String(felder.hu_until?.value ?? "");
   if (huBis && monatJahrPruefen(huBis, { art: "hu", heute }).hinweis === "HU abgelaufen") {
@@ -242,45 +252,76 @@ export function vorschlaegeAnwenden(form, vorschlaege, gesperrt = {}, { heute = 
       hinweise.push(`${text} laut Inserat — „HU/AU vorhanden“ bitte beim Verkäufer erfragen und selbst wählen.`);
     }
   }
+  const hat = (v) => v && v.value !== undefined && v.value !== null && v.value !== "";
   const neu = { ...form };
   const uebernommen = [];
   for (const [feld, v] of Object.entries(felder)) {
-    if (!v || v.value === undefined || v.value === null || v.value === "") continue;
+    if (ZUSICHERUNG_FELDER.includes(feld) || !hat(v)) continue;
     if (!(feld in form) || gesperrt[feld]) continue;
     if (String(form[feld] ?? "").trim() !== "") continue;
-    if (feld === "hu_until") {
-      const hu = String(neu.hu_valid || "");
-      if (hu !== "Ja") continue;
-    }
     neu[feld] = String(v.value);
     uebernommen.push({ feld, label: FELD_LABEL[feld] || feld, wert: vorschlagWertText(feld, v.value),
                        roh: String(v.value), fund: v.source_text || "" });
   }
   // Startprüfung 27.09.2026 (K4): Eine übernommene Schlüsselanzahl hakt die
   // Empfangsbestätigung nicht an — die Kästchen bleiben für die Übergabe leer.
-  return { form: neu, uebernommen, hinweise };
+  const zusicherungen = [];
+  for (const feld of ZUSICHERUNG_FELDER) {
+    const v = felder[feld];
+    if (feld === "hu_until" || !hat(v) || !(feld in form)) continue;
+    const setzt = { [feld]: String(v.value) };
+    let wert = vorschlagWertText(feld, v.value);
+    if (feld === "hu_valid" && String(v.value) === "Ja" && hat(felder.hu_until) && "hu_until" in form) {
+      setzt.hu_until = String(felder.hu_until.value);
+      wert = `Ja, gültig bis ${setzt.hu_until}`;
+    }
+    zusicherungen.push({ feld, label: FELD_LABEL[feld] || feld, wert, setzt, fund: v.source_text || "",
+                         quelle: QUELLE_TEXT[v.source] || "Inserat" });
+  }
+  return { form: neu, uebernommen, hinweise, zusicherungen };
 }
 
-/** Zusicherungen, die das Inserat vorbelegt hat und die seitdem niemand
- *  angesehen/geändert hat (Go-Live-Prüfung 27.09.2026): vor "PDF erstellen"
- *  fragt der Dialog einmal nach, ob sie mit dem Verkäufer geklärt sind. */
-export const ZUSICHERUNG_FELDER = ["hu_valid", "hu_until", "service_book", "accident_free", "drivable", "eu_import"];
+/** Vorschläge, die noch nicht dem Formular entsprechen (sonst nicht erneut anbieten). */
+export function offeneVorschlaege(zusicherungen, form) {
+  return (zusicherungen || []).filter((z) => z && z.setzt
+    && Object.entries(z.setzt).some(([k, w]) => String(form?.[k] ?? "") !== String(w)));
+}
 
-export function ungepruefteUebernahmen(uebernommen, form, beruehrt = {}) {
-  return (uebernommen || []).filter((u) => ZUSICHERUNG_FELDER.includes(u.feld)
-    && !beruehrt[u.feld]
-    && String(form?.[u.feld] ?? "") === String(u.roh ?? ""));
+/** Einen Vorschlag ins Formular übernehmen (nur auf Klick). Abhängige Felder
+ *  wie beim Auswählen von Hand: ohne „HU: Ja“ kein Datum, ohne „teilweise“
+ *  kein „Scheckheft bis“. */
+export function vorschlagSetzen(form, vorschlag) {
+  const neu = { ...form, ...(vorschlag?.setzt || {}) };
+  if ("hu_valid" in (vorschlag?.setzt || {}) && neu.hu_valid !== "Ja") neu.hu_until = "";
+  if ("service_book" in (vorschlag?.setzt || {}) && neu.service_book !== "teilweise") neu.service_book_until = "";
+  return neu;
+}
+
+/** Entwurf wiederherstellen (inserat4): Zusicherungen, die niemand bewusst
+ *  gewählt hat (Entwurf aus der Zeit der automatischen Vorbelegung), werden
+ *  geleert — sie erscheinen wieder als Vorschlag mit „Übernehmen“. */
+export function zusicherungenOhneWahlLeeren(form, beruehrt = {}) {
+  const neu = { ...form };
+  for (const feld of ZUSICHERUNG_FELDER) {
+    if (feld === "hu_until" || beruehrt?.[feld] || String(neu[feld] ?? "") === "") continue;
+    neu[feld] = "";
+    if (feld === "hu_valid") neu.hu_until = "";
+    if (feld === "service_book") neu.service_book_until = "";
+  }
+  if (neu.hu_valid !== "Ja" && String(neu.hu_until ?? "") !== "" && !beruehrt?.hu_valid) neu.hu_until = "";
+  return neu;
 }
 
 /** Nachprüfung 28.09.2026 (inserat2, Nr. 3): Die Übernahmeliste geht mit dem
  *  Entwurf in den sessionStorage. Beim Wiederherstellen zählen nur Felder,
- *  deren Wert im Entwurf noch dem übernommenen entspricht — sonst fehlten
- *  nach dem Neuöffnen Rückfrage und Kasten „Aus dem Inserat übernommen“. */
+ *  deren Wert im Entwurf noch dem übernommenen entspricht — und seit
+ *  inserat4 keine Zusicherungen mehr (die setzt nur ein Klick). */
 export function uebernahmenAusEntwurf(entwurf) {
   const form = entwurf?.form;
   if (!form || typeof form !== "object" || !Array.isArray(entwurf?.uebernommen)) return [];
   return entwurf.uebernommen.filter((u) => u && typeof u === "object"
     && typeof u.feld === "string" && u.feld in form
+    && !ZUSICHERUNG_FELDER.includes(u.feld)
     && String(u.roh ?? "") !== ""
     && String(form[u.feld] ?? "") === String(u.roh));
 }

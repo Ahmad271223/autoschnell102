@@ -95,12 +95,22 @@ def test_verneinung_mit_anderem_gradwort_leer(text):
 @pytest.mark.parametrize("text", [
     "kein Unfall, unfallfrei",
     "keine Unfälle, scheckheftgepflegt",
-    "kein größerer Unfallschaden",
     "ohne Unfall",
 ])
 def test_verneinter_unfall_ist_unfallfrei(text):
     werte, erg = _werte({"description": text})
     assert werte.get("accident_free") == "Ja", (text, erg)
+
+
+# Runde inserat4 (28.09.2026, Pruefung Runde 3): "kein größerer Unfallschaden"
+# war hier "Ja" — die Formulierung legt aber kleinere Unfaelle nahe. Jetzt
+# leer mit Hinweis "deutet auf kleinere Unfälle".
+@pytest.mark.parametrize("text", ["kein größerer Unfallschaden", "Keine größeren Unfälle",
+                                  "Keine nennenswerten Unfallschäden"])
+def test_kein_groesserer_unfall_ist_nicht_unfallfrei(text):
+    werte, erg = _werte({"description": text})
+    assert "accident_free" not in werte, (text, erg)
+    assert any("kleinere Unfälle" in h for h in erg["hinweise"]), (text, erg)
 
 
 def test_nie_einen_unfall_ist_kein_positivmuster():

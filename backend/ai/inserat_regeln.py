@@ -49,17 +49,47 @@ Weiter gilt (Go-Live-Pruefung 27.09.2026, K1/K2/K6/K7):
     "Inserat widersprüchlich"; nie "Ja".
   * Scheckheft: "Ja, lueckenlos" nur bei "lueckenlos"/"vollstaendig" ohne
     Verneinung, sonst Hinweis.
+
+Runde inserat4 (28.09.2026, Entscheidung Auftraggeber): Die Zusicherungen
+(HU, Scheckheft, unfallfrei, fahrbereit, EU-Import) sind im Vertragsdialog
+nur noch VORSCHLAEGE mit Fundstelle und "Übernehmen"-Knopf — der Dialog setzt
+sie nie selbst. Die Regeln bleiben so genau wie moeglich:
+  * Umgangssprache/Formular ("nö", "nee", "net", "k.A.", "❌", "ausgeschlossen",
+    "Fehlanzeige"); nach "<Stichwort>:" ist nur ja/x/✓ ein "ja".
+  * Ein Folgesatzteil ohne eigenes Stichwort, der nur einen Vorbehalt traegt
+    ("Unfallfrei, laut Vorbesitzer", ", soweit bekannt", ", leider nicht"),
+    gehoert zum Stichwort davor.
+  * Hoerensagen (sagt/meinte/gemaess/Vorbesitzer) und Zeitraeume ("seit 2019",
+    "bis letztes Jahr", "bei uns"; nicht "seit Erstzulassung") -> unklar.
+  * Unfall-Komposita ("Auffahrunfall") widersprechen "unfallfrei";
+    "keine groesseren Unfaelle" deutet auf kleinere -> unklar mit Hinweis.
+  * fahrbereit in Vergangenheit/Bedingung (war, waere, wenn, nach) -> unklar.
+  * HU: "TÜV neu" als Angebot ("auf Wunsch", "gegen Aufpreis") und "TÜV neu
+    gemacht 09/2024" -> unklar; "fällig" mit Zeitangabe -> unklar;
+    "TÜV-relevante Mängel" ist kein HU-Stichwort.
+  * Laufzeit: jeder Satzteil wird einmal zerlegt (vorher quadratisch),
+    Texte werden auf 20.000 Zeichen begrenzt.
 """
 from __future__ import annotations
 
+import bisect
+import logging
 import re
 from datetime import date, datetime, timezone
+from functools import lru_cache
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 import protokoll_vergleich as PV
 
+log = logging.getLogger("autohandel")
+
 _ZAHLWORT = {"ein": 1, "einen": 1, "einem": 1, "1": 1, "zwei": 2, "2": 2, "drei": 3, "3": 3,
              "vier": 4, "4": 4}
+
+
+# inserat4 (Laufzeit): laengere Texte werden abgeschnitten — ein echtes Inserat
+# ist deutlich kuerzer, und die Vorschlaege sind nur Beiwerk.
+_MAX_TEXT = 20_000
 
 
 def _text(v: dict) -> str:
@@ -68,7 +98,7 @@ def _text(v: dict) -> str:
     teile = [str(v.get("description") or "")]
     teile += [str(x) for x in (v.get("features") or []) if x]
     teile += [str(x) for x in (v.get("known_defects") or []) if x]
-    return "\n".join(teile)
+    return "\n".join(teile)[:_MAX_TEXT]
 
 
 def _fund(text: str, m: "re.Match", rand: int = 28) -> str:
@@ -103,16 +133,28 @@ _STOER = re.compile(
     r"|scheinbar|anscheinend|offenbar|offensichtlich|au(?:ß|ss)er|abgesehen|ausgenommen|bald"
     r"|demn(?:ä|ae|a)chst|besitz"
     # Hoerensagen / Einschraenkung: "als unfallfrei gekauft", "Kratzer, sonst unfallfrei"
-    r"|gekauft|erworben|gesagt|erz(?:ä|ae|a)hlt|versichert|sonst|ansonsten)")
+    r"|gekauft|erworben|gesagt|erz(?:ä|ae|a)hlt|versichert|sonst|ansonsten"
+    # inserat4 (Pruefung Runde 3): Umgangssprache und Formular ("Unfallfrei: nö",
+    # "net fahrbereit", "k.A.", "❌", "EU-Import ausgeschlossen")
+    r"|n(?:ö|oe)|nee|ne|jein|net|ned|nich|garnicht|garnich|k\.a|fehlanzeige|ausgeschlossen|❌|✗|✘|✖"
+    # Hoerensagen: "sagt der Vorbesitzer", "gemäß Vorbesitzer", "Vorbesitzer meinte"
+    r"|sagt|sagte|sagen|meint|meinte|meinten|gem(?:ä|ae|a)(?:ß|ss)|gem|vorbesitz[\w-]*|vorhalter[\w-]*)")
+# Stoerwoerter, die Nomen sind (gross geschrieben ist hier normal, keine Titelschrift)
+_STOER_NOMEN = re.compile(r"(?:vorbesitz|vorhalter|fehlanzeige)[\w-]*")
 # Mehrwort-Vorbehalte im Satzteil
 _STOER_PHRASE = re.compile(
     r"\bbis\s+auf\b|\bbei\s+mir\b|\bso\s+gut\s+wie\b|\bmehr\s+oder\s+weniger\b"
     r"|\bim\s+(?:grunde|prinzip|wesentlichen|gro(?:ß|ss)en\s+und\s+ganzen)\b|\bnur\s+(?:mit|noch|kurz\w*)\b"
-    r"|\bseit\s+ich\b|\bin\s+meine[mr]\s+(?:besitz|zeit)\b|\bmeine[rs]?\s+(?:meinung|zeit)\b", re.I)
+    r"|\bseit\s+ich\b|\bin\s+meine[mr]\s+(?:besitz|zeit|hand)\b|\bmeine[rs]?\s+(?:meinung|zeit)\b"
+    # inserat4: "Bei uns unfallfrei", "nach Angaben", "so der Verkäufer"
+    r"|\bbei\s+uns\b|\bnach\s+angabe|\bso\s+(?:der|die)\s+(?:vorbesitz\w*|verk(?:ä|ae|a)ufer\w*|halter\w*"
+    r"|besitzer\w*|h(?:ä|ae|a)ndler\w*)", re.I)
 # Diese Verneinungen koennen zu einem ANDEREN Nomen gehoeren ("keine Maengel")
 _NEG_ANH = frozenset({"nicht", "kein", "keine", "keinen", "keinem", "keiner", "keines", "keinerlei", "ohne"})
 # Negativmuster direkt vor dem Stichwort + erlaubte Fuellwoerter dazwischen
-_NEG_MUSTER = frozenset({"nicht", "nie", "niemals", "keinesfalls", "keineswegs"})
+_NEG_MUSTER = frozenset({"nicht", "nie", "niemals", "keinesfalls", "keineswegs",
+                         # inserat4: Umgangssprache wie "nicht" ("net fahrbereit")
+                         "nich", "net", "ned", "garnicht", "garnich"})
 _FUELL = frozenset({"mehr", "ganz", "zu", "100", "100%", "%", "prozent"})
 # "Preis nicht verhandelbar unfallfrei": das "nicht" gehoert zu diesem Aussagewort
 _PRAEDIKAT = frozenset({
@@ -157,6 +199,7 @@ class _Tok(NamedTuple):
     start: int
     klammer: bool   # ganz in Klammern: "(nicht)"
     strich: str     # "-" / "–" wenn das Wort auf einen Strich endet ("nicht-")
+    ende: int = -1  # Ende des Worts im Text (inserat4: Satzteil einmal zerlegen)
 
 
 _WORT = re.compile(r"[^\s/|•]+")
@@ -174,12 +217,13 @@ def _tokens(t: str, a: int, b: int) -> List[_Tok]:
             roh = roh.rstrip("".join(_STRICH)).strip(_RAND)
         roh = roh.lstrip("".join(_STRICH))
         if not roh:
-            out.append(_Tok("-", "-", m.start(), klammer, strich or "-"))
+            out.append(_Tok("-", "-", m.start(), klammer, strich or "-", m.end()))
             continue
-        out.append(_Tok(roh, roh.lower(), m.start(), klammer, strich))
+        out.append(_Tok(roh, roh.lower(), m.start(), klammer, strich, m.end()))
     return out
 
 
+@lru_cache(maxsize=8192)
 def _ist_stoer(w: str) -> bool:
     return bool(_STOER.fullmatch(w))
 
@@ -194,7 +238,7 @@ def _titelschrift(alle: List[_Tok]) -> bool:
     """Titelschreibung ("Nicht Wirklich Unfallfrei"): Gross-/Kleinschreibung
     sagt nichts ueber Nomen -> Nomen-Ausnahme aus."""
     return any(tk.roh[:1].isupper() and tk.klein not in _WERBEWORT
-               and (tk.klein in _KEIN_NOMEN or _ist_stoer(tk.klein))
+               and (tk.klein in _KEIN_NOMEN or (_ist_stoer(tk.klein) and not _STOER_NOMEN.fullmatch(tk.klein)))
                for tk in alle[1:])
 
 
@@ -212,16 +256,17 @@ def _nomen(tk: _Tok, titel: bool) -> bool:
 
 
 # ================================================ Satzteile
-_TRENN = frozenset(",;!|•\n\r")
 _ABKUERZUNG = frozenset({"lt", "ca", "inkl", "evtl", "ggf", "bzw", "zb", "z", "b", "u", "a", "nr", "usw",
                          "etc", "gem", "d", "bj", "ez", "vs"})
+# Moegliche Satzteil-Grenzen (inserat4: nur diese Zeichen ansehen statt jedes Zeichens)
+_GRENZ_KANDIDAT = re.compile(r"[,;!|•\n\r()\[\]….]")
 
 
 def _hat_stoerwort(s: str) -> bool:
     return bool(_STOER_PHRASE.search(s)) or any(_ist_stoer(w.strip(_RAND).lower()) for w in _WORT.findall(s))
 
 
-def _satzteile(t: str) -> List[Tuple[int, int]]:
+def _satzteile_berechnen(t: str) -> List[Tuple[int, int]]:
     """Satzteil-Grenzen. Eine kurze Klammer MIT Verneinungs-/Vorbehaltswort
     ("unfallfrei (laut Vorbesitzer)", "(nicht) fahrbereit") gehoert zum
     Satzteil, sonst trennt die Klammer. Punkt zwischen Ziffern ("05.2026")
@@ -232,38 +277,222 @@ def _satzteile(t: str) -> List[Tuple[int, int]]:
             bleibt.update((m.start(), m.end() - 1))
     spans: List[Tuple[int, int]] = []
     a = 0
-    for i, ch in enumerate(t):
-        grenze = False
-        if ch in _TRENN:
-            grenze = True
-        elif ch in "()[]":
+    n = len(t)
+    for m in _GRENZ_KANDIDAT.finditer(t):
+        i = m.start()
+        ch = t[i]
+        if ch in "()[]":
             grenze = i not in bleibt
-        elif ch == "…":
-            grenze = True
         elif ch == ".":
-            if 0 < i < len(t) - 1 and t[i - 1].isdigit() and t[i + 1].isdigit():
+            if 0 < i < n - 1 and t[i - 1].isdigit() and t[i + 1].isdigit():
                 grenze = False
             else:
-                wm = re.search(r"([A-Za-zÄÖÜäöüß]+)$", t[a:i])
-                grenze = not (wm and wm.group(1).lower() in _ABKUERZUNG)
+                # Wort direkt vor dem Punkt (rueckwaerts, nur Buchstaben)
+                j = i
+                while j > a and (t[j - 1].isascii() and t[j - 1].isalpha() or t[j - 1] in "ÄÖÜäöüß"):
+                    j -= 1
+                wort = t[j:i].lower()
+                grenze = not (j < i and (wort in _ABKUERZUNG or (wort == "k" and t[i + 1:i + 2] in ("A", "a"))))
+        else:
+            grenze = True
         if grenze:
             spans.append((a, i))
             a = i + 1
-    spans.append((a, len(t)))
+    spans.append((a, n))
     return spans
 
 
-def _satzteil_von(spans: List[Tuple[int, int]], pos: int) -> Tuple[int, int]:
-    for s, e in spans:
-        if s <= pos <= e:
-            return s, e
-    return 0, 0
+class _Satz:
+    """Ein Satzteil, EINMAL zerlegt (inserat4, Laufzeit): Woerter, Titelschrift,
+    Vorbehalts-Phrase und — je Feld (hu, extra) — vorberechnete Stellen der
+    Verneinungs-/Vorbehaltswoerter. Damit kostet jedes Stichwort-Vorkommen
+    nur noch eine Binaersuche statt eines Durchlaufs durch den Satzteil
+    (vorher wuchs die Laufzeit quadratisch mit der Textlaenge)."""
+
+    def __init__(self, t: str, s: int, e: int):
+        self.t, self.s, self.e = t, s, e
+        self.toks = _tokens(t, s, e)
+        self.starts = [tk.start for tk in self.toks]
+        self.titel = _titelschrift(self.toks)
+        self.phrase = bool(_STOER_PHRASE.search(t, s, e))
+        self._vor_info: Dict[Any, Any] = {}
+        self._nach_max: Dict[Any, int] = {}
+        self._naechst: Optional[Tuple[List[int], List[int]]] = None
+        self.zeitraum: Optional[bool] = None
+
+    # --- Woerter vor / nach einer Textstelle
+    def k_vor(self, a: int) -> Optional[int]:
+        """Anzahl Woerter des Satzteils vor Position a — None, wenn a mitten in
+        einem Wort liegt ("nicht-unfallfrei"): dann zerlegt der Aufrufer selbst."""
+        k = bisect.bisect_left(self.starts, a)
+        if k and self.toks[k - 1].ende > a:
+            return None
+        return k
+
+    def j_nach(self, b: int) -> Optional[int]:
+        j = bisect.bisect_left(self.starts, b)
+        if j and self.toks[j - 1].ende > b:
+            return None
+        return j
+
+    def vor(self, a: int) -> Tuple[List[_Tok], Optional[int]]:
+        k = self.k_vor(a)
+        if k is None:
+            return _tokens(self.t, self.s, a), None
+        return self.toks[:k], k
+
+    def sv(self, vor: List[_Tok], k: Optional[int], n: int, hu: bool = False,
+           extra: frozenset = frozenset()) -> bool:
+        """_stoer_vor auf vor[:n] (vor aus self.vor)."""
+        if n <= 0:
+            return False
+        if k is not None:
+            return self.stoer_vor(n, hu, extra)
+        return _stoer_vor(vor[:n], self.titel, hu, extra)
+
+    def sv_pos(self, a: int, hu: bool = False, extra: frozenset = frozenset()) -> bool:
+        vor, k = self.vor(a)
+        return self.sv(vor, k, len(vor), hu, extra)
+
+    def sn_pos(self, b: int, hu: bool = False, extra: frozenset = frozenset()) -> bool:
+        """_stoer_nach auf die Woerter von b bis zum Satzteil-Ende."""
+        j = self.j_nach(b)
+        if j is None:
+            return _stoer_nach(_tokens(self.t, b, self.e), hu, extra)
+        return self.stoer_nach(j, hu, extra)
+
+    # --- vorberechnet
+    def _noch_mitte_ok(self, i: int) -> bool:
+        """"noch" an Stelle i mit einem Folgewort, das es zur HU-Angabe macht."""
+        if i + 1 >= len(self.toks):
+            return False
+        n = self.toks[i + 1].klein
+        return n in ("bis", "gültig", "gueltig") or bool(_HU_RE.fullmatch(n)) or bool(re.match(r"\d", n))
+
+    def _naechste(self) -> Tuple[List[int], List[int]]:
+        """Je Stelle: naechstes Nomen bzw. naechstes Nomen-oder-Aussagewort rechts davon."""
+        if self._naechst is None:
+            n = len(self.toks)
+            nomen = [n] * (n + 1)
+            nom_praed = [n] * (n + 1)
+            for i in range(n - 1, -1, -1):
+                tk = self.toks[i]
+                ist_nomen = _nomen(tk, self.titel)
+                nomen[i] = i if ist_nomen else nomen[i + 1]
+                nom_praed[i] = i if (ist_nomen or tk.klein in _PRAEDIKAT) else nom_praed[i + 1]
+            self._naechst = (nomen, nom_praed)
+        return self._naechst
+
+    def _vor_daten(self, hu: bool, extra: frozenset):
+        key = (hu, extra)
+        d = self._vor_info.get(key)
+        if d is not None:
+            return d
+        n = len(self.toks)
+        immer = n            # kleinste Stelle, die "Stoerwort davor" immer ausloest
+        noch_schlecht = n    # kleinste Stelle eines "noch", das nur am Ende erlaubt ist
+        g_nicht: List[int] = []
+        g_andere: List[int] = []
+        for i, tk in enumerate(self.toks):
+            st = _ist_stoer(tk.klein)
+            if tk.strich and tk.strich != "-" and tk.klein != "-" and st:
+                immer = min(immer, i)          # "nicht–unfallfrei"
+                continue
+            if not st and tk.klein not in extra:
+                continue
+            if hu and tk.klein == "noch":
+                if not self._noch_mitte_ok(i):
+                    noch_schlecht = min(noch_schlecht, i)
+                continue
+            if tk.klein in _NEG_ANH and not tk.klammer:
+                (g_nicht if tk.klein == "nicht" else g_andere).append(i)
+                continue
+            immer = min(immer, i)
+        d = (immer, noch_schlecht, g_nicht, g_andere)
+        self._vor_info[key] = d
+        return d
+
+    def stoer_vor(self, k: int, hu: bool = False, extra: frozenset = frozenset()) -> bool:
+        """Wie _stoer_vor(self.toks[:k]) — ohne Durchlauf."""
+        if k <= 0:
+            return False
+        immer, noch_schlecht, g_nicht, g_andere = self._vor_daten(hu, extra)
+        if immer < k or noch_schlecht < k - 1:
+            return True
+        binde = self.toks[k - 1].klein in _BINDE
+        if not (g_nicht or g_andere):
+            return False
+        nomen, nom_praed = self._naechste()
+        for liste, naechst in ((g_andere, nomen), (g_nicht, nom_praed)):
+            p = bisect.bisect_left(liste, k) - 1
+            if p >= 0:
+                # die rechteste Verneinung vor k hat den kuerzesten Abstand: hat
+                # sie kein eigenes Nomen dahinter, hat es keine weiter links
+                if binde or naechst[liste[p] + 1] >= k:
+                    return True
+        return False
+
+    def stoer_nach(self, j: int, hu: bool = False, extra: frozenset = frozenset()) -> bool:
+        """Wie _stoer_nach(self.toks[j:]) — ohne Durchlauf."""
+        key = (hu, extra)
+        mx = self._nach_max.get(key)
+        if mx is None:
+            mx = -1
+            for i, tk in enumerate(self.toks):
+                if _ist_stoer(tk.klein) or tk.klein in extra:
+                    if hu and tk.klein == "noch" and self._noch_mitte_ok(i):
+                        continue
+                    mx = i
+            self._nach_max[key] = mx
+        return mx >= j
+
+
+class _Analyse:
+    """Satzteile eines Texts und ihre Zerlegung — je Text einmal (inserat4)."""
+
+    def __init__(self, t: str):
+        self.t = t
+        self.spans = _satzteile_berechnen(t)
+        self._anf = [s for s, _ in self.spans]
+        self._saetze: Dict[Tuple[int, int], _Satz] = {}
+        self.folge: Dict[Any, bool] = {}
+
+    def span(self, pos: int) -> Tuple[int, int]:
+        i = bisect.bisect_right(self._anf, pos) - 1
+        if i < 0:
+            return 0, 0
+        s, e = self.spans[i]
+        return (s, e) if s <= pos <= e else (0, 0)
+
+    def satz(self, s: int, e: int) -> _Satz:
+        x = self._saetze.get((s, e))
+        if x is None:
+            x = self._saetze[(s, e)] = _Satz(self.t, s, e)
+        return x
+
+
+@lru_cache(maxsize=4)
+def _analyse(t: str) -> _Analyse:
+    return _Analyse(t)
+
+
+def _satzteile(t: str) -> List[Tuple[int, int]]:
+    return _analyse(t).spans
+
+
+def _satzteil_von(t: str, pos: int) -> Tuple[int, int]:
+    return _analyse(t).span(pos)
+
+
+def _satz(t: str, s: int, e: int) -> _Satz:
+    return _analyse(t).satz(s, e)
 
 
 # ================================================ Urteil je Vorkommen
 def _stoer_vor(vor: List[_Tok], titel: bool, hu: bool = False, extra: frozenset = frozenset()) -> bool:
     """Steht vor dem Stichwort ein Verneinungs-/Vorbehaltswort, das NICHT zu
-    einem anderen Nomen gehoert?"""
+    einem anderen Nomen gehoert? (Listenform — nur noch fuer Stellen mitten
+    in einem Wort; sonst _Satz.stoer_vor.)"""
     for i, tk in enumerate(vor):
         if tk.strich and tk.strich != "-" and tk.klein != "-" and _ist_stoer(tk.klein):
             return True                       # "nicht–unfallfrei"
@@ -294,50 +523,120 @@ def _stoer_nach(nach: List[_Tok], hu: bool = False, extra: frozenset = frozenset
 def _stoer_rest(t: str, s: int, e: int, a: int, b: int, hu: bool = False,
                 extra: frozenset = frozenset()) -> bool:
     """Verneinungs-/Vorbehaltswort im Satzteil ausserhalb der Stelle [a, b)?"""
-    titel = _titelschrift(_tokens(t, s, e))
-    return (bool(_STOER_PHRASE.search(t, s, e)) or _stoer_vor(_tokens(t, s, a), titel, hu, extra)
-            or _stoer_nach(_tokens(t, b, e), hu, extra))
+    sz = _satz(t, s, e)
+    return sz.phrase or sz.sv_pos(a, hu, extra) or sz.sn_pos(b, hu, extra)
 
 
 _NACH_JA_NEIN = re.compile(r"\s*[:?]\s*(?:leider\s+)?(nein|ja|jawohl)\b", re.I)
+# inserat4: nach "<Stichwort>:" zaehlt nur ein ausdrueckliches ja / x / ✓ als "ja"
+_NACH_JA_ZEICHEN = re.compile(r"\s*:\s*(?:x|✓|✔|✅|☑)(?!\w)", re.I)
+_NACH_DOPPELPUNKT = re.compile(r"\s*:")
+_FRAGE = re.compile(r"\s*\?")
+
+# inserat4: Zeitraum-Vorbehalt ("Seit 2019 unfallfrei", "Bis letztes Jahr unfallfrei").
+# "seit Erstzulassung/EZ/neu" ist kein Vorbehalt, "TÜV (noch) bis" auch nicht.
+_ZEIT_WORT_RX = re.compile(
+    r"\bseit\b(?!\s+(?:der\s+|dem\s+)?(?:erstzulassung|erstzul\w*|ez|werk|auslieferung|neukauf|neu|neuwagen)\b)"
+    r"|\bbis\b", re.I)
+_BIS_ERLAUBT_DAVOR = re.compile(r"(?:hu|t(?:ü|ue|u)v|au|hu/au|t(?:ü|ue|u)v/au|noch|g(?:ü|ue|u)ltig)[:.]?")
 
 
-def _urteil_adj(t: str, a: int, b: int, s: int, e: int, extra: frozenset = frozenset()) -> str:
+def _zeitraum(sz: "_Satz") -> bool:
+    """Zeitraum-/Besitzvorbehalt im Satzteil — je Satzteil einmal berechnet."""
+    if sz.zeitraum is None:
+        sz.zeitraum = False
+        for m in _ZEIT_WORT_RX.finditer(sz.t, sz.s, sz.e):
+            if m.group(0).lower() == "bis":
+                k = sz.k_vor(m.start())
+                if k and _BIS_ERLAUBT_DAVOR.fullmatch(sz.toks[k - 1].klein):
+                    continue                   # "TÜV bis 05/2027", "TÜV noch bis ..."
+            sz.zeitraum = True
+            break
+    return sz.zeitraum
+
+
+# Stoerwoerter, die im FOLGENDEN Satzteil nichts ueber das Stichwort sagen
+# ("TÜV neu, sonst top", "fahrbereit, noch angemeldet")
+_FOLGE_NEUTRAL = frozenset({"sonst", "ansonsten", "noch"})
+
+
+def _folge_vorbehalt(t: str, s: int, e: int, extra: frozenset = frozenset(), zeit: bool = False) -> bool:
+    """inserat4 (Pruefung Runde 3, "Unfallfrei, laut Vorbesitzer"): Ein Satzteil
+    direkt danach OHNE eigenes Stichwort, der nur einen Vorbehalt oder eine
+    Verneinung traegt (", soweit bekannt", ", vermutlich", ", leider nicht",
+    ", so der Vorbesitzer", "(seit Kauf)"), gehoert zum Stichwort davor."""
+    an = _analyse(t)
+    key = (s, e, extra, zeit)
+    if key in an.folge:
+        return an.folge[key]
+    erg = False
+    i = bisect.bisect_right(an._anf, s) - 1
+    for s2, e2 in an.spans[i + 1:i + 4]:
+        if not t[s2:e2].strip():
+            continue                            # leerer Satzteil zwischen ")" und ","
+        sz = an.satz(s2, e2)
+        if _IRGENDEIN_STICHWORT.search(t, s2, e2):
+            break
+        toks = sz.toks
+        treffer = []
+        for j, tk in enumerate(toks):
+            if not (_ist_stoer(tk.klein) or tk.klein in extra) or tk.klein in _FOLGE_NEUTRAL:
+                continue
+            if tk.klein in _NEG_ANH and j + 1 < len(toks) and not tk.klammer \
+                    and not (_ist_stoer(toks[j + 1].klein) or toks[j + 1].klein in _KEIN_NOMEN):
+                continue                        # "keine Tiere", "nicht verhandelbar"
+            if tk.klein == "nicht" and j > 0 and toks[j - 1].klein in _VERB_VOR_NICHT:
+                continue                        # "Klima geht nicht"
+            treffer.append(j)
+        vorbehalt = sz.phrase or (zeit and _zeitraum(sz))
+        nomen, _ = sz._naechste()
+        hat_nomen = nomen[0] < len(toks)
+        erg = bool(vorbehalt or (treffer and (not hat_nomen or treffer[0] == 0)))
+        break
+    an.folge[key] = erg
+    return erg
+
+
+def _urteil_adj(t: str, a: int, b: int, s: int, e: int, extra: frozenset = frozenset(),
+                zeit: bool = False) -> str:
     """Urteil fuer ein Zusicherungs-Stichwort (Adjektiv: unfallfrei,
     fahrbereit, lueckenlos, EU-Import) an [a, b) im Satzteil [s, e).
-    extra: weitere Vorbehaltswoerter nur fuer dieses Feld."""
-    titel = _titelschrift(_tokens(t, s, e))
+    extra: weitere Vorbehaltswoerter nur fuer dieses Feld; zeit: Zeitraum-
+    Vorbehalt ("seit 2019", "bis letztes Jahr") zaehlt."""
+    sz = _satz(t, s, e)
+    vor, k = sz.vor(a)
+    n = len(vor)
 
-    def sv(toks: List[_Tok]) -> bool:
-        return _stoer_vor(toks, titel, extra=extra)
+    def sv(bis: int) -> bool:
+        return sz.sv(vor, k, bis, extra=extra)
 
-    def sn(toks: List[_Tok]) -> bool:
-        return _stoer_nach(toks, extra=extra)
+    def sn(pos: int) -> bool:
+        return sz.sn_pos(pos, extra=extra)
 
-    phrase = bool(_STOER_PHRASE.search(t, s, e))
-    vor = _tokens(t, s, a)
-    nach = _tokens(t, b, e)
+    phrase = sz.phrase or (zeit and _zeitraum(sz))
     # "<Stichwort>: nein" / "<Stichwort>? (leider) nein" / "<Stichwort>: ja"
-    m = _NACH_JA_NEIN.match(t, b, e)
+    m = _NACH_JA_NEIN.match(t, b, e) or _NACH_JA_ZEICHEN.match(t, b, e)
     if m:
-        if phrase or sv(vor) or sn(_tokens(t, m.end(), e)):
+        if phrase or sv(n) or sn(m.end()):
             return "unklar"
-        return "nein" if m.group(1).lower() == "nein" else "ja"
-    if re.match(r"\s*\?", t[b:e]):
+        return "nein" if m.lastindex and m.group(1).lower() == "nein" else "ja"
+    if _NACH_DOPPELPUNKT.match(t, b, e):
+        return "unklar"                        # "Unfallfrei: nö", "Unfallfrei: -", "Unfallfrei: k.A."
+    if _FRAGE.match(t, b, e):
         return "unklar"                        # "Unfallfrei?" — offene Frage
     # "nicht-unfallfrei" (Bindestrich); "nicht–unfallfrei" bleibt unklar
     if vor and vor[-1].strich == "-" and vor[-1].klein == "nicht" and not vor[-1].klammer:
-        if phrase or sv(vor[:-1]) or sn(nach):
+        if phrase or sv(n - 1) or sn(b):
             return "unklar"
         return "nein"
     # "nicht nur unfallfrei" (Positivmuster)
-    if len(vor) >= 2 and vor[-2].klein == "nicht" and vor[-1].klein == "nur" \
+    if n >= 2 and vor[-2].klein == "nicht" and vor[-1].klein == "nur" \
             and not (vor[-2].strich or vor[-1].strich or vor[-2].klammer):
-        if phrase or sv(vor[:-2]) or sn(nach):
+        if phrase or sv(n - 2) or sn(b):
             return "unklar"
         return "ja"
     # Negativmuster: nicht|nie|keinesfalls|keineswegs (+ mehr/ganz/zu 100 %) direkt davor
-    i = len(vor)
+    i = n
     while i > 0 and vor[i - 1].klein in _FUELL and not vor[i - 1].strich and not vor[i - 1].klammer:
         i -= 1
     if i > 0:
@@ -345,26 +644,32 @@ def _urteil_adj(t: str, a: int, b: int, s: int, e: int, extra: frozenset = froze
         if tk.klein in _NEG_MUSTER and not tk.strich and not tk.klammer:
             if tk.klein == "nicht" and i >= 2 and vor[i - 2].klein in _VERB_VOR_NICHT:
                 return "unklar"                # "Klima geht nicht fahrbereit"
-            if phrase or sv(vor[:i - 1]) or sn(nach):
+            if phrase or sv(i - 1) or sn(b):
                 return "unklar"
             return "nein"
-    if phrase or sv(vor) or sn(nach):
+    if phrase or sv(n) or sn(b):
         return "unklar"
     return "ja"
 
 
-def _stellen_adj(t: str, rx: "re.Pattern", extra: frozenset = frozenset()) -> List[Tuple["re.Match", str]]:
-    spans = _satzteile(t)
+def _stellen_adj(t: str, rx: "re.Pattern", extra: frozenset = frozenset(),
+                 zeit: bool = False, folge_extra: Optional[frozenset] = None) -> List[Tuple["re.Match", str]]:
+    an = _analyse(t)
+    folge_extra = extra if folge_extra is None else folge_extra
     out = []
     for m in rx.finditer(t):
-        s, e = _satzteil_von(spans, m.start())
-        out.append((m, _urteil_adj(t, m.start(), m.end(), s, e, extra)))
+        s, e = an.span(m.start())
+        u = _urteil_adj(t, m.start(), m.end(), s, e, extra, zeit)
+        if u != "unklar" and _folge_vorbehalt(t, s, e, folge_extra, zeit):
+            u = "unklar"                        # "Unfallfrei, laut Vorbesitzer"
+        out.append((m, u))
     return out
 
 
 # Positivmuster fuer Nomen: "kein/keine/keinen/keinerlei/ohne [Beiwort] <Nomen>"
 _POS_NEG = frozenset({"kein", "keine", "keinen", "keinerlei", "ohne"})
-_POS_BEIWORT = re.compile(r"(?:jeglich|irgendwelch|einzig|nennenswert|gr(?:ö|oe|o)(?:ß|ss)er|bekannt)\w*")
+# inserat4: "keine größeren/nennenswerten Unfälle" deutet auf kleinere -> kein Positivmuster
+_POS_BEIWORT = re.compile(r"(?:jeglich|irgendwelch|einzig|bekannt)\w*")
 
 
 def _positivmuster(vor: List[_Tok], neg: frozenset = _POS_NEG) -> int:
@@ -378,17 +683,16 @@ def _positivmuster(vor: List[_Tok], neg: frozenset = _POS_NEG) -> int:
     return 0 if any(tk.klammer or tk.strich for tk in vor[-n:]) else n
 
 
-def _nomen_verneint_sauber(t: str, m: "re.Match", spans, neg: frozenset = _POS_NEG) -> bool:
+def _nomen_verneint_sauber(t: str, m: "re.Match", neg: frozenset = _POS_NEG) -> bool:
     """Ist das Nomen an m sauber verneint ("kein Hagelschaden") — ohne
     weiteren Vorbehalt im Satzteil?"""
-    s, e = _satzteil_von(spans, m.start())
-    vor = _tokens(t, s, m.start())
+    s, e = _satzteil_von(t, m.start())
+    sz = _satz(t, s, e)
+    vor, k = sz.vor(m.start())
     n = _positivmuster(vor, neg)
     if not n:
         return False
-    titel = _titelschrift(_tokens(t, s, e))
-    return not (_STOER_PHRASE.search(t, s, e) or _stoer_vor(vor[:-n], titel)
-                or _stoer_nach(_tokens(t, m.end(), e)))
+    return not (sz.phrase or sz.sv(vor, k, len(vor) - n) or sz.sn_pos(m.end()))
 
 
 # ------------------------------------------------ einzelne Regeln
@@ -416,22 +720,30 @@ def schluessel(v: dict, text: str) -> Optional[Dict[str, Any]]:
 
 
 # ------------------------------------------------ HU
-_HU_WORT = r"(?:hu|t(?:ü|ue|u)v|hauptuntersuchung)"
-_HU_RE = re.compile(r"\b" + _HU_WORT + r"\b", re.I)
+# inserat4: "TÜV-relevante Mängel", "HU/AU-Bericht" — das HU-Wort vor einem
+# Bindestrich ist Teil eines anderen Worts, kein HU-Stichwort.
+_HU_WORT = r"(?:hu|t(?:ü|ue|u)v|hauptuntersuchung)\b(?!-|\s*/\s*au-)"
+_HU_RE = re.compile(r"\b" + _HU_WORT, re.I)
 _AU = r"(?:\s*/\s*au|\s*&\s*au|\s+und\s+au)?"
 _HU_KEIN = re.compile(r"\b(?:kein|keine|keinen|ohne)\s+(?:g(?:ü|ue|u)ltige[nrs]?\s+|aktuelle[nrs]?\s+)?"
-                      + _HU_WORT + r"\b" + _AU, re.I)
-_HU_ABGEL_VOR = re.compile(r"\b(?:abgelaufene[nrs]?|(?:ü|ue|u)berzogene[nrs]?)\s+" + _HU_WORT + r"\b" + _AU, re.I)
-_HU_NEIN_NACH = re.compile(r"\b" + _HU_WORT + r"\b" + _AU + r"\s*[:?]\s*(?:leider\s+)?nein\b", re.I)
+                      + _HU_WORT + _AU + r"(?!-)", re.I)
+_HU_ABGEL_VOR = re.compile(r"\b(?:abgelaufene[nrs]?|(?:ü|ue|u)berzogene[nrs]?)\s+" + _HU_WORT + _AU, re.I)
+_HU_NEIN_NACH = re.compile(r"\b" + _HU_WORT + _AU + r"\s*[:?]\s*(?:leider\s+)?nein\b", re.I)
 _ABGEL = re.compile(r"\b(?:abgelaufen|abgel|(?:ü|ue|u)berzogen|(?:ü|ue|u)berf(?:ä|ae|a)llig|f(?:ä|ae|a)llig)\b", re.I)
 _HU_DATUM = re.compile(
-    r"\b" + _HU_WORT + r"\b" + _AU + r"\s*(?:neu\s*)?(?:ist\s+)?(?:noch\s+)?(?:g(?:ü|ue|u)ltig\s+)?(?:bis\s*)?"
+    r"\b" + _HU_WORT + _AU + r"\s*(?:neu\s*)?(?:ist\s+)?(?:noch\s+)?(?:g(?:ü|ue|u)ltig\s+)?(?:bis\s*)?"
     r"(?::\s*)?(?:zum\s+)?(?:(\d{1,2})\s*\.\s*)?(\d{1,2})\s*[./-]\s*(\d{4}|\d{2})(?![./-]?\d)", re.I)
-_HU_NEU = re.compile(r"\b" + _HU_WORT + r"\b" + _AU + r"\s*(?:ist\s+)?(?:ganz\s+)?neu\b"
-                     r"|\b(?:neue[rs]?|frische[rs]?)\s+" + _HU_WORT + r"\b", re.I)
+_HU_NEU = re.compile(r"\b" + _HU_WORT + _AU + r"\s*(?:ist\s+)?(?:ganz\s+)?neu\b"
+                     r"|\b(?:neue[rs]?|frische[rs]?)\s+" + _HU_WORT, re.I)
 # Nur bei der HU: "TUEV neu machen", "HU muss neu" -> kein "Ja"
 _HU_STOER = frozenset({"machen", "werden", "wird", "muss", "müssen", "muessen", "nötig", "noetig", "notwendig",
-                       "erforderlich", "ansteht", "anstehend"})
+                       "erforderlich", "ansteht", "anstehend",
+                       # inserat4: "TÜV neu" als Angebot oder Plan ("auf Wunsch", "gegen Aufpreis")
+                       "wunsch", "aufpreis", "möglich", "moeglich", "moglich", "absprache", "kommt", "kommen",
+                       "geplant", "beantragt", "angefragt", "anfrage", "optional", "gegen", "kann", "können",
+                       "koennen", "würde", "wuerde", "machbar", "übergabe", "uebergabe"})
+# ... und im Satzteil danach ("TÜV neu, auf Wunsch")
+_HU_FOLGE = frozenset({"wunsch", "aufpreis", "absprache", "geplant", "beantragt", "möglich", "moeglich"})
 # Nur beim HU-DATUM: "HU 09/2026 neu gemacht" ist das Pruefdatum, nicht "gueltig bis"
 _HU_PRUEFDATUM = _HU_STOER | frozenset({"gemacht", "durchgeführt", "durchgefuehrt", "erneuert", "bestanden",
                                         "vom", "abgenommen", "seit"})
@@ -443,6 +755,13 @@ _MONAT = re.compile(r"(?:januar|jan|februar|feb|m(?:ä|ae|a)rz|mrz|april|apr|mai
 _ZEIT_WORT = frozenset({"tag", "tage", "tagen", "woche", "wochen", "monat", "monate", "monaten", "jahr", "jahre",
                         "jahren", "ende", "anfang", "mitte", "kurzem", "langem", "sommer", "winter", "frühjahr",
                         "fruehjahr", "herbst", "letzten", "letztes", "letzte", "vorjahr", "au"})
+# inserat4: "TÜV im Oktober fällig" — "fällig" mit Zeitangabe heisst: gilt noch
+_FAELLIG_ZUKUNFT = frozenset({"im", "ab", "in", "zum", "bis", "ende", "anfang", "mitte", "kommenden", "kommender",
+                              "kommendes", "kommend", "nächsten", "nächste", "nächster", "nächstes", "naechsten",
+                              "naechste", "naechster", "naechstes", "diesen", "dieses", "diesem", "jahresende",
+                              "monatsende"})
+# irgendein Datum im Satzteil (auch NACH "abgelaufen/fällig")
+_DATUM_IRGENDWO = re.compile(r"(?<![\d.,/])(?:(\d{1,2})\s*\.\s*)?(\d{1,2})\s*[./-]\s*(\d{4}|\d{2})(?![./-]?\d)")
 # Andere Dinge, die "abgelaufen" sein koennen (auch fuer klein geschriebene Texte)
 _FREMD_ABLAUF = ("bremsbel", "bremsscheib", "bremse", "garantie", "gewährleist", "gewaehrleist", "leasing",
                  "reifen", "versicherung", "batterie", "akku", "vertrag", "zahnriemen", "inspektion", "service",
@@ -499,9 +818,11 @@ def _hu_befunde(t: str, heute: date) -> List[_HuBefund]:
     for s, e in _satzteile(t):
         if not _HU_RE.search(t, s, e):
             continue
-        titel = _titelschrift(_tokens(t, s, e))
+        sz = _satz(t, s, e)
+        titel = sz.titel
         daten = [(m, _hu_mj(m)) for m in _HU_DATUM.finditer(t, s, e)]
         daten = [(m, mj) for m, mj in daten if mj]
+        alle_daten = [mj for mj in (_hu_mj(m) for m in _DATUM_IRGENDWO.finditer(t, s, e)) if mj]
         # --- Nein: "keine HU", "abgelaufener TUEV", "TUEV: nein"
         nein_m = None
         for rx in (_HU_KEIN, _HU_ABGEL_VOR, _HU_NEIN_NACH):
@@ -513,7 +834,7 @@ def _hu_befunde(t: str, heute: date) -> List[_HuBefund]:
         if not nein_m:
             # --- "abgelaufen/ueberzogen/faellig" im Satzteil des HU-Worts
             for m in _ABGEL.finditer(t, s, e):
-                vor = _tokens(t, s, m.start())
+                vor, _ = sz.vor(m.start())
                 j = len(vor)
                 while j > 0 and vor[j - 1].klein in _HU_KOPULA:
                     j -= 1
@@ -522,6 +843,12 @@ def _hu_befunde(t: str, heute: date) -> List[_HuBefund]:
                     continue                   # "Bremsbelaege abgelaufen" — nur das Datum zaehlt
                 if davor is not None and davor.klein in _NEG_MUSTER:
                     unklar_m = m               # "noch nicht abgelaufen"
+                    break
+                if re.fullmatch(r"f(?:ä|ae|a)llig", m.group(0), re.I) and any(
+                        tk.klein in _FAELLIG_ZUKUNFT or _MONAT.fullmatch(tk.klein.rstrip("."))
+                        for tk in sz.toks) or re.fullmatch(r"f(?:ä|ae|a)llig", m.group(0), re.I) and any(
+                        not _abgelaufen(mj, heute) for mj in alle_daten):
+                    unklar_m = m               # "TÜV im Oktober fällig", "HU fällig 10/2026"
                     break
                 hu_m = [h for h in _HU_RE.finditer(t, s, e)]
                 a = min([h.start() for h in hu_m] + [m.start()])
@@ -532,29 +859,36 @@ def _hu_befunde(t: str, heute: date) -> List[_HuBefund]:
             out.append(_HuBefund("unklar", "", unklar_m))
             continue
         if nein_m:
+            stelle = _tokens(t, a, b)
             if _stoer_rest(t, s, e, a, b, hu=True, extra=_HU_STOER) or any(
-                    _ist_stoer(tk.klein) and not _hu_noch_ok(_tokens(t, a, b), i)
-                    for i, tk in enumerate(_tokens(t, a, b))
+                    _ist_stoer(tk.klein) and not _hu_noch_ok(stelle, i)
+                    for i, tk in enumerate(stelle)
                     if not (nein_m.start() <= tk.start < nein_m.end())):
                 out.append(_HuBefund("unklar", "", nein_m))
-            elif any(not _abgelaufen(mj, heute) for _, mj in daten):
-                # "TUEV 10/2027 abgelaufen" — Datum gueltig, Text abgelaufen
+            elif any(not _abgelaufen(mj, heute) for mj in alle_daten):
+                # "TUEV 10/2027 abgelaufen", "TÜV abgelaufen 10/2027" — Datum gueltig, Text abgelaufen
+                out.append(_HuBefund("unklar", "", nein_m))
+            elif _folge_vorbehalt(t, s, e, _HU_FOLGE):
                 out.append(_HuBefund("unklar", "", nein_m))
             else:
                 out.append(_HuBefund("nein", "", nein_m))
             continue
         # --- Ja-Kandidaten: Datum / "neu"
+        folge = _folge_vorbehalt(t, s, e, _HU_FOLGE)
         for m, mj in daten:
-            frage = re.match(r"\s*\?", t[m.end():e])
-            if frage or _stoer_rest(t, s, e, m.start(), m.end(), hu=True, extra=_HU_PRUEFDATUM):
+            frage = _FRAGE.match(t, m.end(), e)
+            if frage or folge or _stoer_rest(t, s, e, m.start(), m.end(), hu=True, extra=_HU_PRUEFDATUM):
                 out.append(_HuBefund("unklar", mj, m))
             elif _abgelaufen(mj, heute):
                 out.append(_HuBefund("vergangen", mj, m))
             else:
                 out.append(_HuBefund("ja", mj, m))
+        # inserat4: "TÜV neu gemacht 09/2024", "TÜV neu seit 08/2024" — mit einem Datum
+        # im Satzteil sind gemacht/seit/vom ... ein Pruefdatum, kein "neu = gueltig"
+        neu_extra = _HU_PRUEFDATUM if alle_daten else _HU_STOER
         for m in _HU_NEU.finditer(t, s, e):
-            frage = re.match(r"\s*\?", t[m.end():e])
-            if frage or _stoer_rest(t, s, e, m.start(), m.end(), hu=True, extra=_HU_STOER):
+            frage = _FRAGE.match(t, m.end(), e)
+            if frage or folge or _stoer_rest(t, s, e, m.start(), m.end(), hu=True, extra=neu_extra):
                 out.append(_HuBefund("unklar", "", m))
             else:
                 out.append(_HuBefund("ja", "", m))
@@ -642,20 +976,40 @@ _SCHECK_KEIN = re.compile(r"\b(?:kein|keine|keinen|keines|ohne)\s+" + _SCHECK
 _SCHECK_LUECKE = re.compile(r"\b" + _SCHECK + r"\s+(?:ist\s+)?(?:unvollst\w*|l(?:ü|ue|u)ckenhaft\w*)"
                             r"|\b(?:unvollst(?:ä|ae|a)ndige?[nrsm]?|l(?:ü|ue|u)ckenhafte?[nrsm]?)\s+" + _SCHECK, re.I)
 # "lueckenlos scheckheftgepflegt bis 2019" -> danach Luecke, also kein "Ja, lueckenlos"
-_SCHECK_VORBEHALT = frozenset({"bis", "damals", "anfangs", "früher", "frueher", "anfänglich", "anfaenglich"})
+_SCHECK_VORBEHALT = frozenset({"bis", "damals", "anfangs", "früher", "frueher", "anfänglich", "anfaenglich",
+                               # inserat4: "ab 2019 freie Werkstatt", "die letzten 3 Jahre",
+                               # "letzte Inspektion fehlt", "Scheckheft leider verloren"
+                               "ab", "letzte", "letzten", "letztes", "fehlt", "fehlen", "fehlend", "fehlende",
+                               "fehlenden", "verloren", "verlegt"})
+# ... und im Satzteil danach (ohne "letzte": "Scheckheft lückenlos, letzte Inspektion 2024")
+_SCHECK_FOLGE = _SCHECK_VORBEHALT - {"letzte", "letzten", "letztes"}
 _SCHECK_NUR = re.compile(r"\bscheckheft\s+gepflegt\w*|\b" + _SCHECK, re.I)
+
+
+def _scheck_folge(t: str, m: "re.Match") -> bool:
+    an = _analyse(t)
+    s, _ = an.span(m.start())
+    i = bisect.bisect_right(an._anf, s) - 1
+    for s2, e2 in an.spans[i + 1:i + 4]:
+        if not t[s2:e2].strip():
+            continue
+        sz = an.satz(s2, e2)
+        return any(tk.klein in _SCHECK_FOLGE for tk in sz.toks) or _zeitraum(sz)
+    return False
 
 
 def scheckheft(text: str) -> Dict[str, Any]:
     """Liefert {"wert": ..} oder {"hinweis": ..} oder {}."""
     t = text
-    spans = _satzteile(t)
-    voll = _stellen_adj(t, _SCHECK_VOLL, _SCHECK_VORBEHALT)
+    voll = _stellen_adj(t, _SCHECK_VOLL, _SCHECK_VORBEHALT, zeit=True, folge_extra=_SCHECK_FOLGE)
+    # inserat4: Einschraenkung im Folgesatzteil zaehlt auch MIT eigenem Stichwort
+    # ("Lückenlos scheckheftgepflegt, Scheckheft leider verloren", "(bis 2019)")
+    voll = [(m, "unklar" if u == "ja" and _scheck_folge(t, m) else u) for m, u in voll]
     voll_ja = [m for m, u in voll if u == "ja"]
     voll_nicht = [m for m, u in voll if u != "ja"]
     kein_sauber, kein_unklar = [], []
     for m in _SCHECK_KEIN.finditer(t):
-        s, e = _satzteil_von(spans, m.start())
+        s, e = _satzteil_von(t, m.start())
         (kein_unklar if _stoer_rest(t, s, e, m.start(), m.end()) else kein_sauber).append(m)
     luecke = list(_SCHECK_LUECKE.finditer(t))
     nur = _SCHECK_NUR.search(t)
@@ -693,20 +1047,32 @@ _ANDERER_SCHADEN = re.compile(
     r"|lack)?sch(?:ä|ae|a)den\b|\bhagel\w*|\bbesch(?:ä|ae|a)digt\w*|\binstand\s*gesetzt\w*|\bcrash\w*"
     r"|\bparkrempler\w*", re.I)
 _NEG_SCHADEN = _POS_NEG | {"nicht", "keinem", "keiner", "keines"}
+# inserat4: Unfall-Komposita ("Auffahrunfall", "Wildunfall", "Unfallreparatur") — Gegenstimme zu "unfallfrei"
+_UNFALL_KOMPOSITUM = re.compile(r"\b\w*unf(?:ä|ae|a)ll\w*", re.I)
+_UNFALL_KLEINER = re.compile(r"\b(?:kein\w*|ohne)\s+(?:nennenswert\w*|gr(?:ö|oe|o)(?:ß|ss)er\w*|schwer\w*"
+                             r"|gravierend\w*|erheblich\w*)\s+unf(?:ä|ae|a)ll\w*", re.I)
 _REPARIERT = re.compile(r"\brepariert|\brepaired|\binstand\s*gesetzt")
 
 
-def _urteil_unfall_nomen(t: str, m: "re.Match", spans) -> str:
+_UNFALL_EXTRA: frozenset = frozenset()
+
+
+def _urteil_unfall_nomen(t: str, m: "re.Match") -> str:
     """Urteil fuer das FELD "unfallfrei" aus einem Unfall-Nomen."""
-    s, e = _satzteil_von(spans, m.start())
-    vor = _tokens(t, s, m.start())
+    s, e = _satzteil_von(t, m.start())
+    sz = _satz(t, s, e)
+    vor, k = sz.vor(m.start())
     n = _positivmuster(vor)
     if n:
-        titel = _titelschrift(_tokens(t, s, e))
-        if _STOER_PHRASE.search(t, s, e) or _stoer_vor(vor[:-n], titel) or _stoer_nach(_tokens(t, m.end(), e)):
+        if sz.phrase or _zeitraum(sz) or sz.sv(vor, k, len(vor) - n, extra=_UNFALL_EXTRA) \
+                or sz.sn_pos(m.end(), extra=_UNFALL_EXTRA) or _folge_vorbehalt(t, s, e, _UNFALL_EXTRA, True):
             return "unklar"
         return "ja"                            # "kein Unfall", "keinerlei Unfallschaeden"
     if _UNFALL_NEGATIV.fullmatch(m.group(0)):
+        # inserat4: "Unfallschaden? Nö", "Unfallschaden: -" — nach "?"/":" nur "ja" ist eine Aussage
+        if (_FRAGE.match(t, m.end(), e) or _NACH_DOPPELPUNKT.match(t, m.end(), e)) \
+                and not re.match(r"\s*[:?]\s*(?:ja|jawohl|x|✓|✔|✅)(?!\w)", t[m.end():e], re.I):
+            return "unklar"
         if _stoer_rest(t, s, e, m.start(), m.end()):
             return "unklar"                    # "Unfallschaden: nicht bekannt"
         return "nein"                          # "Unfallwagen", "Unfallschaden hinten"
@@ -751,17 +1117,25 @@ def _zusammen(urteile: List[Tuple["re.Match", str]],
 def unfall(v: dict, text: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """Liefert (eintrag, hinweis) — hoechstens eins von beiden."""
     t = text
-    spans = _satzteile(t)
-    urteile = _stellen_adj(t, _UNFALLFREI)
-    urteile += [(m, _urteil_unfall_nomen(t, m, spans)) for m in _UNFALL.finditer(t)]
+    urteile = _stellen_adj(t, _UNFALLFREI, _UNFALL_EXTRA, zeit=True)
+    urteile += [(m, _urteil_unfall_nomen(t, m)) for m in _UNFALL.finditer(t)]
     urteile.sort(key=lambda x: x[0].start())
-    anderer = [m for m in _ANDERER_SCHADEN.finditer(t) if not _nomen_verneint_sauber(t, m, spans, _NEG_SCHADEN)]
+    anderer = [m for m in _ANDERER_SCHADEN.finditer(t) if not _nomen_verneint_sauber(t, m, _NEG_SCHADEN)]
+    anderer += [m for m in _UNFALL_KOMPOSITUM.finditer(t)
+                if not (_UNFALLFREI.fullmatch(m.group(0)) or _UNFALL.fullmatch(m.group(0))
+                        or re.match(r"[-\s]?frei", t[m.end():m.end() + 6], re.I))
+                and not _nomen_verneint_sauber(t, m, _NEG_SCHADEN)]
+    anderer.sort(key=lambda x: x.start())
     text_wert, fund = _zusammen(urteile, anderer)
 
     portal, portal_text = _portal_unfall(v)
     bitte = "„Unfallfrei“ bitte beim Verkäufer erfragen und selbst wählen."
 
     if text_wert == "unklar":
+        klein = _UNFALL_KLEINER.search(t)
+        if klein:
+            return None, (f"Inserat: „{_fund(text, klein)}“ — deutet auf kleinere Unfälle hin, also nicht "
+                          f"sicher unfallfrei. {bitte}")
         return None, f"Inserat zur Unfallfreiheit nicht eindeutig („{_fund(text, fund)}“) — {bitte}"
     if portal == "schaden":
         if text_wert == "Ja":
@@ -788,20 +1162,26 @@ _FAHRBEREIT = re.compile(r"\bfahr(?:bereit|tauglich|f(?:ä|ae|a)hig|t(?:ü|ue|u)
 _FAHR_NEIN = re.compile(r"\bfahr(?:unt(?:ü|ue|u)chtig|unf(?:ä|ae|a)hig|untauglich)(?:e[nrsm]?)?\b", re.I)
 # Kein klares "Nein", aber ein Widerspruch zu "Fahrtauglich: Ja"
 _FAHR_ANDERS = re.compile(
-    r"\b(?:motor|getriebe|kupplungs|zahnriemen)schaden\b|\b(?:motor|getriebe|kupplung)\s+(?:ist\s+)?defekt"
+    r"\b(?:motor|getriebe|kupplungs|zahnriemen)schaden\b"
+    r"|\b(?:motor|getriebe|kupplung|turbo|zylinderkopf|lenkung|bremse|bremsen)\s+(?:ist\s+|sind\s+)?(?:defekt|kaputt)"
     r"|\bspringt\s+nicht\s+(?:mehr\s+)?an|\bl(?:ä|ae|a)uft\s+nicht\b|\babschlepp\w*|\bbastler\w*"
     r"|\bnur\s+(?:f(?:ü|ue|u)r\s+|als\s+)?(?:export|teilespender|trailer)", re.I)
+
+
+# inserat4: fahrbereit in der Vergangenheit oder unter Bedingung ("war beim Abstellen
+# fahrbereit", "Wäre fahrbereit wenn ...", "Nach Batteriewechsel fahrbereit")
+_FAHR_EXTRA = frozenset({"war", "waren", "wäre", "waere", "wären", "waeren", "gewesen", "wenn", "falls", "sobald",
+                         "nach", "zuletzt", "damals", "vorher", "früher", "frueher"})
 
 
 def fahrbereit(v: dict, text: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """Liefert (eintrag, hinweis)."""
     t = text
-    spans = _satzteile(t)
-    urteile = _stellen_adj(t, _FAHRBEREIT)
+    urteile = _stellen_adj(t, _FAHRBEREIT, _FAHR_EXTRA, zeit=True)
     # "fahruntuechtig" ohne Vorbehalt = ausdrueckliches Nein; verneint/eingeschraenkt = unklar
     urteile += [(m, "nein" if u == "ja" else "unklar") for m, u in _stellen_adj(t, _FAHR_NEIN)]
     urteile.sort(key=lambda x: x[0].start())
-    anderer = [m for m in _FAHR_ANDERS.finditer(t) if not _nomen_verneint_sauber(t, m, spans, _NEG_SCHADEN)]
+    anderer = [m for m in _FAHR_ANDERS.finditer(t) if not _nomen_verneint_sauber(t, m, _NEG_SCHADEN)]
     text_wert, fund = _zusammen(urteile, anderer)
 
     bitte = "„Fahrtauglich“ bitte selbst prüfen und wählen."
@@ -834,6 +1214,13 @@ def eu_import(text: str) -> Optional[Dict[str, Any]]:
     if not stellen or any(u != "ja" for _, u in stellen):
         return None
     return _eintrag("Ja", "listing_description", _fund(text, stellen[0][0]))
+
+
+# Irgendein Zusicherungs-Stichwort (fuer _folge_vorbehalt: ein Folgesatzteil MIT
+# eigenem Stichwort gehoert nicht zum vorigen)
+_IRGENDEIN_STICHWORT = re.compile("|".join(
+    rx.pattern for rx in (_UNFALLFREI, _UNFALL, _UNFALL_KOMPOSITUM, _FAHRBEREIT, _FAHR_NEIN, _HU_RE, _EU_IMPORT))
+    + r"|\b" + _SCHECK, re.I)
 
 
 def bereifung(text: str) -> Optional[Dict[str, Any]]:
@@ -902,7 +1289,7 @@ def vorschlaege(v: dict, heute: Optional[date] = None) -> Dict[str, Any]:
     for regel in (_schluessel, _hu, _scheckheft, _unfall, _fahrbereit, _eu, _reifen):
         try:
             regel()
-        except Exception:  # noqa: BLE001 — Vorschlaege sind Beiwerk
-            pass
+        except Exception:  # noqa: BLE001 — Vorschlaege sind Beiwerk; inserat4: aber nie stumm
+            log.exception("Inserat-Vorschlag: Regel %s fehlgeschlagen", regel.__name__.lstrip("_"))
     return {"felder": felder, "hinweise": hinweise,
             "bekannte_maengel": [str(m)[:200] for m in (v.get("known_defects") or []) if str(m or "").strip()][:20]}

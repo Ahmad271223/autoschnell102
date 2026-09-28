@@ -983,12 +983,16 @@ async def vertrag_vorschlaege(vehicle_id: str, user=Depends(current_firma)):
     """Stufe 3 (Wunsch Ahmad 25.09.2026): eindeutige Vertragsangaben aus dem
     Inserat — regelbasiert, ohne KI (Schluessel, HU, Scheckheft nur bei
     "lueckenlos"/"kein", Unfallfreiheit, fahrbereit, EU-Import, Bereifung).
-    Der Dialog fuellt damit NUR leere Felder und zeigt die Fundstelle."""
+    Der Dialog belegt damit nur Nicht-Zusicherungen vor (Schluessel, Bereifung);
+    Zusicherungen zeigt er als Vorschlag mit Fundstelle und "Übernehmen"-Knopf
+    (Entscheidung 28.09.2026, inserat4).
+    inserat4: die Regeln laufen in einem Thread — ein langes Inserat blockiert
+    sonst den Event-Loop des ganzen Workers."""
     v = await _fahrzeug_fuer_vertrag(user, vehicle_id)
     if not v:
         raise HTTPException(404, FAHRZEUG_NICHT_IM_BEREICH)
     from ai import inserat_regeln
-    return inserat_regeln.vorschlaege(v.get("data") or {})
+    return await asyncio.to_thread(inserat_regeln.vorschlaege, v.get("data") or {})
 
 
 @router.post("/contracts/ki-schadennachlass")
