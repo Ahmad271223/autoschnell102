@@ -3977,3 +3977,12 @@ Teil übertrieben, die folgenden waren echt. Alles in Commits 300e71e … b1e894
   Ausweisnummer, WhatsApp), AGB (keine automatische Verlängerung, 400 Abrufe/Tag statt „unbegrenzt“, Marktplatz-Ablauf,
   Vertrag braucht Abo), Vertragstext (ein Gewährleistungsausschluss statt drei). Einstellung: `MARKT_CRAWL_FENSTER_VON=4`,
   damit Crawler und Sicherung nicht beide um 3 Uhr starten. Marktdaten haben noch keine Löschfrist.
+
+**Abrufzeiten der Marktanalyse (Entscheidung Ahmad 28.09.2026):** Abrufe tagsüber statt nachts. Auf beiden
+Servern `sh deploy/env_setzen.sh MARKT_CRAWL_FENSTER_VON=9 MARKT_CRAWL_FENSTER_BIS=18` (1×-Segmente verteilen sich
+9–18 Uhr; die Sicherung um 3 Uhr hat den Server dann für sich; Health-Tageslauf ab 19 Uhr). Segmente mit
+**2 Abrufen je Tag** laufen seit diesem Stand zu **festen Uhrzeiten**, Vorgabe **12 und 18 Uhr** deutscher Zeit
+(`MARKT_ABRUF2_UHRZEITEN=12,18`, Bündel bis 30 Minuten gestaffelt) — vorher „~12 h nach dem ersten“. Das
+Nachplanen direkt nach einer Aktivierung bleibt „ab jetzt“. Gilt ab dem nächsten Tagesplan (kurz nach Mitternacht).
+Nach dem Länderfilter (`cn=DE`, Commit cdb5894) schließen sich die Alarme `markt_filter_ignoriert` „land IT != DE“
+beim nächsten sauberen Lauf von selbst.

@@ -363,10 +363,18 @@ async def tagesplan(db, tag: Optional[str] = None, *, sofort: bool = False) -> D
             # im Fenster; der zweite faellt bewusst auf den Nachmittag/Abend. Welle 5 Nr. 25: alle
             # Abrufe eines Tages bleiben vor 23:30 Uhr (Abstand hoechstens Restfenster/k).
             abstand = _abstand(geplant, ende, k)
+            # Entscheidung Ahmad 28.09.2026: 2x taeglich = feste Uhrzeiten (Vorgabe 12 und 18 Uhr deutscher Zeit),
+            # nur im regulaeren Tagesplan; die Buendel bleiben ueber 30 Minuten gestaffelt (Slot-Reihenfolge),
+            # damit nicht alle Laeufe zur selben Sekunde starten
+            feste = konfig.abruf2_uhrzeiten() if (k == 2 and not sofort) else None
             for lauf_nr in range(k):
                 schluessel = t if lauf_nr == 0 else f"{t}#{lauf_nr + 1}"
+                if feste:
+                    wann = konfig.uhrzeit(t, feste[lauf_nr]) + timedelta(minutes=30) * (i / n)
+                else:
+                    wann = geplant + abstand * lauf_nr
                 try:
-                    await db[JOBS].insert_one(_job_doc(s, schluessel, (geplant + abstand * lauf_nr).isoformat(), "daily"))
+                    await db[JOBS].insert_one(_job_doc(s, schluessel, wann.isoformat(), "daily"))
                     neu += 1
                 except DuplicateKeyError:
                     continue

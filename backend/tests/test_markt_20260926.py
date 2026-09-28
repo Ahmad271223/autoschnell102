@@ -756,9 +756,10 @@ def test_14_suchauftraege_pruefung_prognose_und_verwaltung(welt, monkeypatch):
     jobs = welt.run(db[K.JOBS].find({"segment_id": eigene[0]["id"]}, {"_id": 0}).sort("scheduled_at", 1).to_list(10))
     assert len(jobs) == 2 and jobs[0]["tag"] == tag and jobs[1]["tag"] == f"{tag}#2"
     d0, d1 = datetime.fromisoformat(jobs[0]["scheduled_at"]), datetime.fromisoformat(jobs[1]["scheduled_at"])
-    # Welle 5 Nr. 25: Abstand = min(12 h, Restfenster bis 23:30 / 2) — beide Laeufe vor 23:30 deutscher Zeit
-    erwartet = min(12 * 3600, (K.tag_ende(tag) - d0).total_seconds() / 2)
-    assert abs((d1 - d0).total_seconds() - erwartet) < 60 and d1 <= K.tag_ende(tag)
+    # Entscheidung Ahmad 28.09.2026: 2 Abrufe je Tag zu festen Uhrzeiten (Vorgabe 12 und 18 Uhr deutscher Zeit),
+    # Buendel bis 30 Minuten gestaffelt; vorher (Welle 5 Nr. 25): Abstand min(12 h, Restfenster / 2)
+    assert timedelta(0) <= d0 - K.uhrzeit(tag, 12) < timedelta(minutes=30) and (d1 - d0) == timedelta(hours=6)
+    assert d1 <= K.tag_ende(tag)
     # --- Aendern (km-Bereiche auf 2) -> Segmente 8 aktiv, alte deaktiviert (nicht geloescht)
     # Master-Auftrag A1c: neue km-Bereiche an einem AKTIVEN Auftrag brauchen einen neuen Testlauf (neue Segmente)
     with pytest.raises(A.Ungueltig) as ex_km:

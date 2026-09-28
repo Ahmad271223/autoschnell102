@@ -492,6 +492,30 @@ def tag_ende(tag: str) -> datetime:
     return d.astimezone(timezone.utc)
 
 
+# Entscheidung Ahmad 28.09.2026: Segmente mit 2 Abrufen je Tag laufen zu FESTEN Uhrzeiten (deutsche Zeit),
+# Vorgabe 12 und 18 Uhr — unabhaengig vom Crawl-Fenster, das nur den einen Abruf der 1x-Segmente verteilt.
+# MARKT_ABRUF2_UHRZEITEN="12,18" (zwei Stunden 0-23, leer/ungueltig -> Vorgabe). Gilt nur im regulaeren
+# Tagesplan; bei sofort=True (Nachplanen nach Aktivierung) bleibt "jetzt + Abstand", damit der Tag nicht
+# verloren geht. 3 und 4 Abrufe je Tag folgen weiter der Abstandsregel (jobs._abstand).
+ABRUF2_UHRZEITEN_VORGABE = (12, 18)
+
+
+def abruf2_uhrzeiten() -> tuple:
+    roh = (os.environ.get("MARKT_ABRUF2_UHRZEITEN") or "").strip()
+    try:
+        stunden = tuple(sorted({int(x) for x in roh.split(",") if x.strip()}))
+    except ValueError:
+        stunden = ()
+    if len(stunden) != 2 or not all(0 <= h <= 23 for h in stunden):
+        return ABRUF2_UHRZEITEN_VORGABE
+    return stunden
+
+
+def uhrzeit(tag: str, stunde: int) -> datetime:
+    """Volle Stunde deutscher Zeit an diesem Tag als UTC-Zeitpunkt."""
+    return datetime.strptime(tag, "%Y-%m-%d").replace(tzinfo=ZEITZONE, hour=int(stunde)).astimezone(timezone.utc)
+
+
 def rest_tage_im_monat(zeit: datetime | None = None) -> int:
     """Nr. 31: verbleibende Kalendertage des Monats (deutsche Zeit), heute mitgezaehlt (>= 1)."""
     import calendar
