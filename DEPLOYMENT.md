@@ -1277,6 +1277,19 @@ dann schreibt der Lauf eine Löschvorschau (`system_reports`, typ
 Gelöscht wird nur, wenn der dauerhafte Auto-Datensatz nachweislich
 existiert; sonst Alarm `vertrag_ohne_auto_daten`.
 
+Bestandsprüfung 28.09.2026 (vor dem Scharfschalten, prod2): 16 von 17
+Live-Verträgen zeigten auf Auto-Datensätze, die es nicht mehr gab (ohne
+Vermerk `auto_daten_entfernt_am`) — das Skript meldete „NICHT bereit“, und
+der stündliche Aufräumjob ließ solche Verträge liegen (er reparierte nur
+Verträge ganz ohne Verweis). Seitdem legt `auto_daten_reparieren` den
+Datensatz aus der Vertragsfassung neu an (jüngster Vertrag zuerst, ältere
+Verträge desselben Autos teilen ihn); vom Betreiber bewusst entfernte
+Datensätze (Vermerk) und laufende Löschungen bleiben unangetastet und zählen
+in der Prüfung nicht als Hindernis. Sofort statt auf den Stundenlauf warten:
+`docker compose exec backend python -X utf8 scripts/vertraege_bestand_pruefen.py --reparieren`
+(nimmt dieselbe Sperre wie der Aufräumlauf, prüft danach erneut). Bleibt ein
+Vertrag hängen, fehlt ihm die Vertragsfassung (`contract_data`).
+
 ### Dateien
 Fahrzeugfotos werden nur noch über kurzlebige signierte Links ausgeliefert
 (`DATEI_SIGNATUR_PFLICHT=true`, `DATEI_LINK_TTL_SEKUNDEN`). Firmenlogos

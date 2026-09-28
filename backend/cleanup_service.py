@@ -2392,6 +2392,50 @@ async def auto_daten_reparieren(db, limit: int = 500) -> int:
                 repariert += 1
         except Exception:  # noqa: BLE001
             log.exception("Nachfuehrung der Auto-Daten fuer Vertrag %s fehlgeschlagen", c.get("id"))
+    # Bestandspruefung 28.09.2026 (Scharfschalten der Fristloeschung): 16 von 17
+    # Live-Vertraegen zeigten auf Auto-Datensaetze, die es nicht mehr gab — ohne
+    # Vermerk auto_daten_entfernt_am. Dieser Lauf reparierte bisher nur
+    # Vertraege OHNE Verweis und solche mit Merker; ein Verweis ins Leere blieb
+    # bis zur Fristloeschung stehen (dort repariert Nr. 41 an Ort und Stelle),
+    # und scripts/vertraege_bestand_pruefen.py meldete "NICHT bereit". Jetzt:
+    # Datensatz aus der Vertragsfassung neu anlegen (auto_daten.nachfuehren) —
+    # juengster Vertrag zuerst, damit aeltere Vertraege desselben Autos den
+    # neuen Datensatz teilen (ein Auto = ein Datensatz, 15.09.2026) statt je
+    # einen eigenen zu bekommen. Bewusst entfernte Datensaetze (Vermerk) und
+    # laufende Loeschungen bleiben unangetastet.
+    haengend = [c async for c in db.generated_pdfs.aggregate([
+        {"$match": {"admin_vehicle_data_id": {"$type": "string", "$ne": ""},
+                    "auto_daten_entfernt_am": {"$exists": False},
+                    "loeschung.status": {"$ne": "laeuft"}}},
+        {"$sort": {"created_at": -1}},
+        {"$lookup": {"from": auto_daten.COLLECTION,
+                     "let": {"avd": "$admin_vehicle_data_id"},
+                     "pipeline": [{"$match": {"$expr": {"$eq": ["$id", "$$avd"]}}},
+                                  {"$limit": 1}, {"$project": {"_id": 1}}],
+                     "as": "datensatz"}},
+        {"$match": {"datensatz": []}},
+        {"$limit": limit},
+        {"$project": {**projektion, "admin_vehicle_data_id": 1}},
+    ])]
+    for c in haengend:
+        if not c.get("contract_data"):      # ohne Vertragsfassung gibt es nichts zu retten
+            log.warning("Vertrag %s: Verweis ins Leere (Auto-Datensatz %s), aber keine "
+                        "Vertragsfassung — bleibt; die Fristloeschung meldet ihn als Alarm",
+                        c.get("id"), c.get("admin_vehicle_data_id"))
+            continue
+        try:
+            geteilt = await auto_daten.bestehenden_datensatz(
+                db, c.get("dealer_id"), c.get("vehicle_id"))
+            if geteilt and geteilt != c["admin_vehicle_data_id"]:
+                r = await db.generated_pdfs.update_one(
+                    {"id": c["id"], "admin_vehicle_data_id": c["admin_vehicle_data_id"]},
+                    {"$set": {"admin_vehicle_data_id": geteilt}})
+                repariert += r.modified_count
+            elif await auto_daten.nachfuehren(db, c):
+                repariert += 1
+        except Exception:  # noqa: BLE001
+            log.exception("Vertrag %s: Verweis ins Leere (Auto-Datensatz %s) nicht reparierbar",
+                          c.get("id"), c.get("admin_vehicle_data_id"))
     # Rollenprüfung 22.09.2026 (RP-250/RP-401): Vorher wurden in JEDEM Lauf
     # ALLE Datensaetze ohne purchase_date als Liste geladen. Datensaetze, deren
     # Vertrag schon geloescht ist, bekommen nie mehr ein Datum (genau das ist

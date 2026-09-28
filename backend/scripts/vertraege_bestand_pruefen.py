@@ -3,21 +3,33 @@
 (VERTRAG_LOESCHUNG_AKTIV=true) — Go-Live-Audit 09/2026.
 
     python -X utf8 scripts/vertraege_bestand_pruefen.py
+    python -X utf8 scripts/vertraege_bestand_pruefen.py --reparieren
 
 Zaehlt Kaufvertraege gesamt, aelter als VERTRAG_AUFBEWAHRUNG_TAGE, ohne
 admin_vehicle_data_id, mit haengendem Verweis (Auto-Datensatz fehlt),
 doppelte Verweise auf denselben Datensatz sowie die Auto-Datensaetze
-selbst. Loescht und aendert NICHTS.
+selbst. Ohne --reparieren loescht und aendert das Skript NICHTS.
 
 Exit-Code 1, sobald Vertraege ohne oder mit haengendem Verweis existieren:
-dann zuerst den Aufraeumjob laufen lassen (cleanup_service.auto_daten_reparieren
-traegt fehlende Datensaetze nach) bzw. haengende Verweise klaeren. Der
-Loeschjob wuerde solche Vertraege ueberspringen und je Vertrag einen
-Betriebsalarm `vertrag_ohne_auto_daten` ausloesen.
+dann den Reparaturlauf des stuendlichen Aufraeumjobs abwarten oder mit
+--reparieren sofort ausfuehren (cleanup_service.auto_daten_reparieren traegt
+fehlende Datensaetze nach und legt Datensaetze fuer Verweise ins Leere aus
+der Vertragsfassung neu an). Der Loeschjob wuerde solche Vertraege sonst
+ueberspringen und je Vertrag einen Betriebsalarm `vertrag_ohne_auto_daten`
+ausloesen.
+
+Bestandspruefung 28.09.2026 (Ahmad, prod2): 16 von 17 Live-Vertraegen
+zeigten auf Datensaetze, die es nicht mehr gab. Seitdem zaehlen Vertraege,
+deren Datensatz der Betreiber bewusst entfernt hat (Vermerk
+auto_daten_entfernt_am — die Fristloeschung verlangt dann keinen Datensatz),
+und Vertraege, deren Loeschung gerade laeuft (Grabstein), NICHT als
+Hindernis; sie werden getrennt ausgewiesen.
 """
 import os
+import sys
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from pymongo import MongoClient
 
@@ -35,11 +47,23 @@ def pruefen(db) -> dict:
     alt_filter = {"created_at": {"$lte": cutoff}}
     zaehler: Counter = Counter()
     alt_mit_verweis = set()
+    bewusst_entfernt = bewusst_entfernt_alt = 0
     for c in db.generated_pdfs.find(
             {"admin_vehicle_data_id": {"$exists": True, "$nin": [None, ""]}},
-            {"_id": 0, "id": 1, "admin_vehicle_data_id": 1, "created_at": 1}):
+            {"_id": 0, "id": 1, "admin_vehicle_data_id": 1, "created_at": 1,
+             "auto_daten_entfernt_am": 1, "loeschung": 1}):
+        alt = (c.get("created_at") or "") <= cutoff
+        if c.get("auto_daten_entfernt_am"):
+            # Betreiber hat den Datensatz bewusst entfernt (auto_daten.entfernen):
+            # die Fristloeschung verlangt keinen Datensatz, die Reparatur legt
+            # keinen neuen an — kein Hindernis.
+            bewusst_entfernt += 1
+            bewusst_entfernt_alt += alt
+            continue
+        if (c.get("loeschung") or {}).get("status") == "laeuft":
+            continue                      # Grabstein: wird ohnehin zu Ende geloescht
         zaehler[c["admin_vehicle_data_id"]] += 1
-        if (c.get("created_at") or "") <= cutoff:
+        if alt:
             alt_mit_verweis.add(c["admin_vehicle_data_id"])
     ids = list(zaehler)
     vorhanden = set()
@@ -57,6 +81,8 @@ def pruefen(db) -> dict:
         "haengende_verweise": haengend,
         "haengende_verweise_aelter_als_frist": [
             i for i in haengend if i in alt_mit_verweis],
+        "datensatz_bewusst_entfernt": bewusst_entfernt,
+        "datensatz_bewusst_entfernt_aelter_als_frist": bewusst_entfernt_alt,
         "doppelte_verweise": {i: n for i, n in zaehler.items() if n > 1},
         "auto_datensaetze": db[AVD].count_documents({}),
         "loeschung_laeuft": db.generated_pdfs.count_documents(
@@ -64,7 +90,47 @@ def pruefen(db) -> dict:
     }
 
 
-def main() -> int:
+def reparieren() -> int:
+    """--reparieren: den Reparaturlauf des stuendlichen Aufraeumjobs
+    (cleanup_service.auto_daten_reparieren) einmal sofort ausfuehren — unter
+    derselben Sperre wie der Lauf, damit nichts parallel aufraeumt. Liefert die
+    Zahl der reparierten Vertraege, -1 wenn gerade ein Lauf die Sperre haelt."""
+    import asyncio
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from motor.motor_asyncio import AsyncIOMotorClient
+    import cleanup_service
+    import job_lock
+
+    async def lauf() -> int:
+        client = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=10000)
+        try:
+            db = client[DB_NAME]
+            token = await job_lock.acquire(db, "cleanup-cycle", ttl_seconds=1800)
+            if not token:
+                return -1
+            try:
+                return await cleanup_service.auto_daten_reparieren(db)
+            finally:
+                await job_lock.release(db, "cleanup-cycle", token=token)
+        finally:
+            client.close()
+
+    return asyncio.run(lauf())
+
+
+def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv and argv != ["--reparieren"]:
+        print(__doc__)
+        return 2
+    if argv:
+        n = reparieren()
+        if n < 0:
+            print("Ein Aufraeumlauf laeuft gerade (Sperre 'cleanup-cycle') — "
+                  "bitte in ein paar Minuten erneut versuchen.")
+            return 3
+        print(f"Reparaturlauf: {n} Vertraege repariert (Auto-Datensatz nachgetragen "
+              f"oder neu angelegt).\n")
     db = MongoClient(MONGO_URL, serverSelectionTimeoutMS=10000)[DB_NAME]
     e = pruefen(db)
     print(f"Datenbank: {DB_NAME}   Frist: {AUFBEWAHRUNG_TAGE} Tage "
@@ -80,6 +146,9 @@ def main() -> int:
           f"{len(e['haengende_verweise_aelter_als_frist'])})")
     for i in e["haengende_verweise"][:20]:
         print(f"      admin_vehicle_data_id={i}")
+    print(f"  Datensatz vom Betreiber entfernt (Vermerk, kein Hindernis): "
+          f"{e['datensatz_bewusst_entfernt']}"
+          f"   (davon aelter als Frist: {e['datensatz_bewusst_entfernt_aelter_als_frist']})")
     print(f"  doppelte Verweise auf einen Datensatz:  "
           f"{len(e['doppelte_verweise'])}")
     for i, n in list(e["doppelte_verweise"].items())[:20]:
@@ -89,11 +158,15 @@ def main() -> int:
     probleme = e["ohne_verweis"] + len(e["haengende_verweise"])
     if probleme:
         print(f"\nNICHT bereit: {probleme} Vertraege ohne gueltigen Auto-Datensatz. "
-              "Erst Aufraeumjob laufen lassen (POST /api/admin/cleanup/run oder "
-              "stuendlicher Lauf) und erneut pruefen; danach "
-              "VERTRAG_LOESCHUNG_AKTIV=true setzen.")
+              "Der stuendliche Aufraeumjob traegt fehlende Datensaetze nach und legt "
+              "Datensaetze fuer Verweise ins Leere aus der Vertragsfassung neu an — "
+              "sofort mit\n    python -X utf8 scripts/vertraege_bestand_pruefen.py --reparieren\n"
+              "danach erneut pruefen; erst dann VERTRAG_LOESCHUNG_AKTIV=true setzen. "
+              "Bleibt ein Vertrag haengen, fehlt ihm die Vertragsfassung (contract_data) — "
+              "den meldet die Fristloeschung als Alarm vertrag_ohne_auto_daten.")
         return 1
-    print("\nBereit: jeder Vertrag verweist auf einen vorhandenen Auto-Datensatz.")
+    print("\nBereit: jeder Vertrag verweist auf einen vorhandenen Auto-Datensatz "
+          "(oder der Betreiber hat ihn bewusst entfernt).")
     return 0
 
 

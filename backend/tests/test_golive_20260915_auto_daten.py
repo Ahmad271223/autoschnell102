@@ -179,9 +179,14 @@ def test_fristloeschung_und_reparatur_respektieren_den_vermerk(wegwerf):
         _vertrag("c_repariert", "avd_weg2", created_at=alt),
     ]))
     assert run(auto_daten.entfernen(db, "avd1")) is True
-    # Reparatur legt fuer den bewusst entfernten Datensatz nichts Neues an
-    assert run(CS.auto_daten_reparieren(db)) == 0
-    assert run(db.admin_vehicle_data.count_documents({})) == 0
+    # Reparatur legt fuer den bewusst entfernten Datensatz nichts Neues an —
+    # den Verweis ins Leere MIT Vertragsdaten repariert sie seit 28.09.2026 selbst
+    # (Bestandspruefung prod2: 16 solche Vertraege blockierten das Scharfschalten)
+    assert run(CS.auto_daten_reparieren(db)) == 1
+    assert run(db.admin_vehicle_data.count_documents({})) == 1
+    assert run(db.generated_pdfs.find_one({"id": "c_repariert"}))["admin_vehicle_data_id"] != "avd_weg2"
+    assert run(db.generated_pdfs.find_one({"id": "c_entfernt"}))["admin_vehicle_data_id"] == "avd1"
+    assert run(db.generated_pdfs.find_one({"id": "c_fehlt"}))["admin_vehicle_data_id"] == "avd_weg"
     n = run(CS.vertraege_nach_frist_loeschen(db, datetime.now(timezone.utc), aktiv=True))
     assert n == 2
     assert run(db.generated_pdfs.find_one({"id": "c_entfernt"})) is None
