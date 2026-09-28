@@ -69,6 +69,21 @@ sie nie selbst. Die Regeln bleiben so genau wie moeglich:
     "TÜV-relevante Mängel" ist kein HU-Stichwort.
   * Laufzeit: jeder Satzteil wird einmal zerlegt (vorher quadratisch),
     Texte werden auf 20.000 Zeichen begrenzt.
+
+Runde inserat5 (28.09.2026, Regel Auftraggeber): AUS DEM INSERAT WIRD NICHTS
+MEHR UNGEFRAGT IN DEN VERTRAG GESCHRIEBEN — auch Bereifung und
+Schluesselanzahl sind nur noch Vorschlaege. Dazu:
+  * Bereifung/Schluessel beachten Frage und Verneinung ("Keine Winterreifen
+    dabei", "Winterreifen dabei? Nein", "Reifen gesucht", "2 Schlüssel? Nein,
+    nur einer"); "4-fach"/"8-fach" nur mit Reifen-Bezug ("4-fach Airbags").
+  * HU-Angebot im Folgesatzteil mit Praeposition (", auf Wunsch", ", gegen
+    Aufpreis", ", nach Absprache") und "TÜV neu vor 2 Jahren/bei Abholung/mit
+    Mängelbericht" -> unklar.
+  * Kappung je Teil (Beschreibung 20.000, Ausstattung/Maengel je 5.000),
+    ueberlange Teile behalten Anfang und Ende.
+  * Symbol-Verneinungen (🚫 👎 ☐ "[ ]" "(?)"), "scheint", "theoretisch",
+    "naja", "wer weiß"; Antriebsmangel ("Zahnriemen gerissen", "Notlauf")
+    widerspricht "fahrbereit".
 """
 from __future__ import annotations
 
@@ -89,16 +104,30 @@ _ZAHLWORT = {"ein": 1, "einen": 1, "einem": 1, "1": 1, "zwei": 2, "2": 2, "drei"
 
 # inserat4 (Laufzeit): laengere Texte werden abgeschnitten — ein echtes Inserat
 # ist deutlich kuerzer, und die Vorschlaege sind nur Beiwerk.
-_MAX_TEXT = 20_000
+# inserat5 (Pruefung Runde 4): JE TEIL gekappt, nicht der zusammengesetzte
+# Text — sonst fiel ein Mangel am Ende (known_defects, Schluss der
+# Beschreibung: "Unfallfrei … Unfallschaden vorne") still weg. Ein zu langer
+# Teil behaelt Anfang UND Ende (dort stehen Maengel und Einschraenkungen).
+_MAX_TEXT = 20_000          # Beschreibung
+_MAX_LISTE = 5_000          # Ausstattung, bekannte Maengel (je Liste)
+
+
+def _kappen(s: str, n: int) -> str:
+    if len(s) <= n:
+        return s
+    ende = n // 4
+    return s[:n - ende] + "\n…\n" + s[-ende:]
 
 
 def _text(v: dict) -> str:
     """Beschreibung + Ausstattungsliste + bekannte Maengel (Originalschreibung —
     die Gross-/Kleinschreibung braucht die Nomen-Ausnahme)."""
-    teile = [str(v.get("description") or "")]
-    teile += [str(x) for x in (v.get("features") or []) if x]
-    teile += [str(x) for x in (v.get("known_defects") or []) if x]
-    return "\n".join(teile)[:_MAX_TEXT]
+    teile = [_kappen(str(v.get("description") or ""), _MAX_TEXT)]
+    for liste in ("features", "known_defects"):
+        eintraege = "\n".join(str(x) for x in (v.get(liste) or []) if x)
+        if eintraege:
+            teile.append(_kappen(eintraege, _MAX_LISTE))
+    return "\n".join(teile)
 
 
 def _fund(text: str, m: "re.Match", rand: int = 28) -> str:
@@ -138,7 +167,10 @@ _STOER = re.compile(
     # "net fahrbereit", "k.A.", "❌", "EU-Import ausgeschlossen")
     r"|n(?:ö|oe)|nee|ne|jein|net|ned|nich|garnicht|garnich|k\.a|fehlanzeige|ausgeschlossen|❌|✗|✘|✖"
     # Hoerensagen: "sagt der Vorbesitzer", "gemäß Vorbesitzer", "Vorbesitzer meinte"
-    r"|sagt|sagte|sagen|meint|meinte|meinten|gem(?:ä|ae|a)(?:ß|ss)|gem|vorbesitz[\w-]*|vorhalter[\w-]*)")
+    r"|sagt|sagte|sagen|meint|meinte|meinten|gem(?:ä|ae|a)(?:ß|ss)|gem|vorbesitz[\w-]*|vorhalter[\w-]*"
+    # inserat5 (Pruefung Runde 4): "Scheint unfallfrei", "Theoretisch fahrbereit",
+    # "Unfallfrei … naja", Symbol-Verneinungen ("Unfallfrei 🚫", "👎", "☐")
+    r"|scheint|scheinen|theoretisch|naja|🚫|👎[\U0001F3FB-\U0001F3FF]?|⛔|☐|□)")
 # Stoerwoerter, die Nomen sind (gross geschrieben ist hier normal, keine Titelschrift)
 _STOER_NOMEN = re.compile(r"(?:vorbesitz|vorhalter|fehlanzeige)[\w-]*")
 # Mehrwort-Vorbehalte im Satzteil
@@ -148,7 +180,9 @@ _STOER_PHRASE = re.compile(
     r"|\bseit\s+ich\b|\bin\s+meine[mr]\s+(?:besitz|zeit|hand)\b|\bmeine[rs]?\s+(?:meinung|zeit)\b"
     # inserat4: "Bei uns unfallfrei", "nach Angaben", "so der Verkäufer"
     r"|\bbei\s+uns\b|\bnach\s+angabe|\bso\s+(?:der|die)\s+(?:vorbesitz\w*|verk(?:ä|ae|a)ufer\w*|halter\w*"
-    r"|besitzer\w*|h(?:ä|ae|a)ndler\w*)", re.I)
+    r"|besitzer\w*|h(?:ä|ae|a)ndler\w*)"
+    # inserat5: "Unfallfrei - aber wer weiß das schon"
+    r"|\bwer\s+wei(?:ß|ss)\b", re.I)
 # Diese Verneinungen koennen zu einem ANDEREN Nomen gehoeren ("keine Maengel")
 _NEG_ANH = frozenset({"nicht", "kein", "keine", "keinen", "keinem", "keiner", "keines", "keinerlei", "ohne"})
 # Negativmuster direkt vor dem Stichwort + erlaubte Fuellwoerter dazwischen
@@ -532,6 +566,10 @@ _NACH_JA_NEIN = re.compile(r"\s*[:?]\s*(?:leider\s+)?(nein|ja|jawohl)\b", re.I)
 _NACH_JA_ZEICHEN = re.compile(r"\s*:\s*(?:x|✓|✔|✅|☑)(?!\w)", re.I)
 _NACH_DOPPELPUNKT = re.compile(r"\s*:")
 _FRAGE = re.compile(r"\s*\?")
+# inserat5: leeres Kaestchen / Fragezeichen in Klammern direkt nach dem Stichwort
+# ("Unfallfrei [ ]", "Unfallfrei (?)", "Unfallfrei ☐") — Klammern trennen sonst
+# den Satzteil, der Rest waere leer.
+_NACH_KAESTCHEN = re.compile(r"\s*(?:\[\s*[?_]*\s*\]|\(\s*\?+\s*\)|\(\s*\)|☐|□|🚫|👎|⛔)")
 
 # inserat4: Zeitraum-Vorbehalt ("Seit 2019 unfallfrei", "Bis letztes Jahr unfallfrei").
 # "seit Erstzulassung/EZ/neu" ist kein Vorbehalt, "TÜV (noch) bis" auch nicht.
@@ -624,6 +662,8 @@ def _urteil_adj(t: str, a: int, b: int, s: int, e: int, extra: frozenset = froze
         return "unklar"                        # "Unfallfrei: nö", "Unfallfrei: -", "Unfallfrei: k.A."
     if _FRAGE.match(t, b, e):
         return "unklar"                        # "Unfallfrei?" — offene Frage
+    if _NACH_KAESTCHEN.match(t, b):
+        return "unklar"                        # "Unfallfrei [ ]", "Unfallfrei (?)" — ueber die Satzteilgrenze
     # "nicht-unfallfrei" (Bindestrich); "nicht–unfallfrei" bleibt unklar
     if vor and vor[-1].strich == "-" and vor[-1].klein == "nicht" and not vor[-1].klammer:
         if phrase or sv(n - 1) or sn(b):
@@ -696,27 +736,60 @@ def _nomen_verneint_sauber(t: str, m: "re.Match", neg: frozenset = _POS_NEG) -> 
 
 
 # ------------------------------------------------ einzelne Regeln
-def schluessel(v: dict, text: str) -> Optional[Dict[str, Any]]:
+_SCHL_EINS = re.compile(
+    r"nur\s+(?:ein|einen|1)\s+(?:funk|fahrzeug)?schl(?:ü|ue|u)e?ssel|kein(?:en)?\s+zweitschl(?:ü|ue|u)e?ssel"
+    r"|ohne\s+zweitschl(?:ü|ue|u)e?ssel|zweitschl(?:ü|ue|u)e?ssel\s+(?:fehlt|nicht\s+vorhanden|ist\s+nicht\s+dabei)",
+    re.I)
+_SCHL_ZWEI = re.compile(
+    r"zweitschl(?:ü|ue|u)e?ssel\s+(?:vorhanden|dabei|ist\s+dabei|inklusive|inkl\.?)"
+    r"|(?:mit|inkl\.?|inklusive)\s+zweitschl(?:ü|ue|u)e?ssel|beide\s+schl(?:ü|ue|u)e?ssel", re.I)
+_SCHL_ZAHL = re.compile(r"\b(ein|einen|zwei|drei|vier|[1-4])\s*(?:x\s*)?(?:original|originale|originalen)?\s*"
+                        r"(?:funk|fahrzeug)?schl(?:ü|ue|u)e?ssel", re.I)
+# inserat5: Vorbehalte nur bei Schluesseln/Reifen ("Ein Schlüssel fehlt", "Winterreifen gesucht")
+_SACH_EXTRA = frozenset({"fehlt", "fehlen", "verloren", "gesucht", "suche", "suchen", "defekt", "kaputt",
+                         "separat", "extra", "aufpreis", "wunsch", "optional", "nachmachen", "nachgemacht"})
+
+
+def _sach_urteil(t: str, m: "re.Match", innen_ok: bool = False) -> str:
+    """inserat5: Urteil fuer eine Sachangabe (Schluessel, Bereifung) — "ja"
+    oder "unklar". Unklar bei Frage ("2 Schlüssel? Nein, nur einer",
+    "Winterreifen dabei?"), Verneinung/Vorbehalt im Satzteil ("Keine
+    Winterreifen dabei", "Winterreifen gesucht") oder im Folgesatzteil
+    (", leider nicht"). innen_ok: die Verneinung steckt im Muster selbst
+    ("kein Zweitschlüssel") und zaehlt dort nicht."""
+    s, e = _satzteil_von(t, m.start())
+    if _FRAGE.match(t, m.end(), e) or _NACH_KAESTCHEN.match(t, m.end()):
+        return "unklar"
+    if _stoer_rest(t, s, e, m.start(), m.end(), extra=_SACH_EXTRA):
+        return "unklar"
+    if not innen_ok and any(_ist_stoer(tk.klein) for tk in _tokens(t, m.start(), m.end())):
+        return "unklar"
+    if _folge_vorbehalt(t, s, e, _SACH_EXTRA):
+        return "unklar"
+    return "ja"
+
+
+def schluessel(v: dict, text: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Liefert (eintrag, hinweis). inserat5: Frage/Verneinung beachten —
+    "2 Schlüssel? Nein, nur einer" ergab vorher 2."""
     strukturiert = v.get("keys_count")
     if strukturiert not in (None, ""):
         z = PV.zahl(strukturiert)
         if z is not None and 1 <= z <= 9:
-            return _eintrag(str(int(z)), "listing_field", f"Schlüssel: {int(z)}")
-    t = text.lower()
-    # "nur ein Schluessel", "kein Zweitschluessel", "Zweitschluessel fehlt" -> 1
-    m = re.search(r"(nur\s+(?:ein|einen|1)\s+(?:funk|fahrzeug)?schl[üu]e?ssel|kein(?:en)?\s+zweitschl[üu]e?ssel"
-                  r"|ohne\s+zweitschl[üu]e?ssel|zweitschl[üu]e?ssel\s+(?:fehlt|nicht\s+vorhanden|ist\s+nicht\s+dabei))", t)
-    if m:
-        return _eintrag("1", "listing_description", _fund(text, m))
-    m = re.search(r"(zweitschl[üu]e?ssel\s+(?:vorhanden|dabei|ist\s+dabei|inklusive|inkl\.?)"
-                  r"|(?:mit|inkl\.?|inklusive)\s+zweitschl[üu]e?ssel|beide\s+schl[üu]e?ssel)", t)
-    if m:
-        return _eintrag("2", "listing_description", _fund(text, m))
-    m = re.search(r"\b(ein|einen|zwei|drei|vier|[1-4])\s*(?:x\s*)?(?:original|originale|originalen)?\s*"
-                  r"(?:funk|fahrzeug)?schl[üu]e?ssel", t)
-    if m and m.group(1) in _ZAHLWORT:
-        return _eintrag(str(_ZAHLWORT[m.group(1)]), "listing_description", _fund(text, m))
-    return None
+            return _eintrag(str(int(z)), "listing_field", f"Schlüssel: {int(z)}"), None
+    t = text
+    # Reihenfolge wie bisher: "nur ein / kein Zweitschluessel" -> 1, "mit Zweitschluessel" -> 2, Zahl
+    for rx, wert, innen_ok in ((_SCHL_EINS, "1", True), (_SCHL_ZWEI, "2", False), (_SCHL_ZAHL, None, False)):
+        treffer = [m for m in rx.finditer(t) if wert or m.group(1).lower() in _ZAHLWORT]
+        if not treffer:
+            continue
+        unklar = [m for m in treffer if _sach_urteil(t, m, innen_ok) != "ja"]
+        if unklar:
+            return None, (f"Schlüsselanzahl im Inserat nicht eindeutig („{_fund(text, unklar[0])}“) — "
+                          "bitte beim Verkäufer erfragen und selbst eintragen.")
+        m = treffer[0]
+        return _eintrag(wert or str(_ZAHLWORT[m.group(1).lower()]), "listing_description", _fund(text, m)), None
+    return None, None
 
 
 # ------------------------------------------------ HU
@@ -744,6 +817,53 @@ _HU_STOER = frozenset({"machen", "werden", "wird", "muss", "müssen", "muessen",
                        "koennen", "würde", "wuerde", "machbar", "übergabe", "uebergabe"})
 # ... und im Satzteil danach ("TÜV neu, auf Wunsch")
 _HU_FOLGE = frozenset({"wunsch", "aufpreis", "absprache", "geplant", "beantragt", "möglich", "moeglich"})
+# inserat5 (Pruefung Runde 4): "TÜV neu" als Angebot, Bedingung oder altes
+# Pruefdatum — im selben Satzteil ("TÜV neu bei Abholung", "TÜV neu vor 2
+# Jahren", "TÜV neu nur bei Übernahme der Kosten", "TÜV neu mit Mängelbericht",
+# "TÜV neu wenn gewünscht") ...
+_HU_NEU_VORBEHALT = frozenset({
+    "wenn", "falls", "sofern", "sobald", "gewünscht", "gewuenscht", "erwünscht", "erwuenscht", "anfrage",
+    "abholung", "übernahme", "uebernahme", "kosten", "käufer", "kaeufer", "käuferseite", "mängelbericht",
+    "maengelbericht", "prüfbericht", "pruefbericht", "vor", "letzte", "letzten", "letztes", "vorjahr",
+    "dafür", "dafuer", "zzgl", "zuzüglich", "zuzueglich", "extra", "aufpreis", "wunsch", "absprache"})
+# ... und im Satzteil danach, auch MIT Praeposition davor und Nomen dahinter
+# (", auf Wunsch", ", gegen Aufpreis", ", nach Absprache", ", wenn gewünscht",
+# ", dafür Aufpreis", "(letztes Jahr)"). Anders als _folge_vorbehalt zaehlt
+# das Wort auch mitten im Folgesatzteil — solange dort kein ANDERES Nomen
+# steht (", Probefahrt nach Absprache", ", Abholung gegen Aufpreis" betreffen
+# nicht die HU und lassen sie eindeutig).
+_HU_FOLGE_ANGEBOT = frozenset({
+    "wunsch", "aufpreis", "absprache", "geplant", "beantragt", "wenn", "falls", "sofern", "sobald",
+    "gewünscht", "gewuenscht", "erwünscht", "erwuenscht", "anfrage", "angefragt", "übernahme", "uebernahme",
+    "mängelbericht", "maengelbericht", "prüfbericht", "pruefbericht", "dafür", "dafuer", "zzgl", "zuzüglich",
+    "zuzueglich", "gegen", "optional", "machbar"})
+# Nomen, die im Folgesatzteil zum HU-Angebot gehoeren duerfen ("Übernahme der Kosten", "sofern Käufer zahlt")
+_HU_FOLGE_NOMEN_OK = _HU_FOLGE_ANGEBOT | frozenset({"kosten", "käufer", "kaeufer", "käufers", "kaeufers",
+                                                    "kunden", "kunde", "euro", "eur", "jahr", "jahren", "jahre"})
+# Zeitangaben nur in einem KURZEN Folgesatzteil ("(letztes Jahr)", ", vor 2 Jahren")
+# — "TÜV neu, letzte Inspektion bei 90.000 km" bleibt eindeutig.
+_HU_FOLGE_ZEIT = frozenset({"letzte", "letzten", "letztes", "vorjahr", "vor"})
+
+
+def _hu_folge_angebot(t: str, s: int, e: int) -> bool:
+    """inserat5: Folgesatzteil ohne eigenes Stichwort mit einem Angebots-,
+    Bedingungs- oder Zeitwort (und ohne fremdes Nomen) -> die HU-Angabe
+    davor ist unklar."""
+    an = _analyse(t)
+    i = bisect.bisect_right(an._anf, s) - 1
+    for s2, e2 in an.spans[i + 1:i + 4]:
+        if not t[s2:e2].strip():
+            continue
+        if _IRGENDEIN_STICHWORT.search(t, s2, e2):
+            return False
+        sz = an.satz(s2, e2)
+        toks = [tk for tk in sz.toks if tk.klein != "-"]
+        if len(toks) <= 3 and any(tk.klein in _HU_FOLGE_ZEIT for tk in toks):
+            return True
+        if not any(tk.klein in _HU_FOLGE_ANGEBOT for tk in toks):
+            return False
+        return not any(_nomen(tk, sz.titel) and tk.klein not in _HU_FOLGE_NOMEN_OK for tk in toks)
+    return False
 # Nur beim HU-DATUM: "HU 09/2026 neu gemacht" ist das Pruefdatum, nicht "gueltig bis"
 _HU_PRUEFDATUM = _HU_STOER | frozenset({"gemacht", "durchgeführt", "durchgefuehrt", "erneuert", "bestanden",
                                         "vom", "abgenommen", "seit"})
@@ -762,6 +882,9 @@ _FAELLIG_ZUKUNFT = frozenset({"im", "ab", "in", "zum", "bis", "ende", "anfang", 
                               "monatsende"})
 # irgendein Datum im Satzteil (auch NACH "abgelaufen/fällig")
 _DATUM_IRGENDWO = re.compile(r"(?<![\d.,/])(?:(\d{1,2})\s*\.\s*)?(\d{1,2})\s*[./-]\s*(\d{4}|\d{2})(?![./-]?\d)")
+# inserat5: "TÜV neu" mit Angebots-/Bedingungs-/Zeitwort im selben Satzteil
+_HU_NEU_EXTRA = _HU_STOER | _HU_NEU_VORBEHALT
+_HU_NEU_EXTRA_DATUM = _HU_PRUEFDATUM | _HU_NEU_VORBEHALT
 # Andere Dinge, die "abgelaufen" sein koennen (auch fuer klein geschriebene Texte)
 _FREMD_ABLAUF = ("bremsbel", "bremsscheib", "bremse", "garantie", "gewährleist", "gewaehrleist", "leasing",
                  "reifen", "versicherung", "batterie", "akku", "vertrag", "zahnriemen", "inspektion", "service",
@@ -874,7 +997,7 @@ def _hu_befunde(t: str, heute: date) -> List[_HuBefund]:
                 out.append(_HuBefund("nein", "", nein_m))
             continue
         # --- Ja-Kandidaten: Datum / "neu"
-        folge = _folge_vorbehalt(t, s, e, _HU_FOLGE)
+        folge = _folge_vorbehalt(t, s, e, _HU_FOLGE) or _hu_folge_angebot(t, s, e)
         for m, mj in daten:
             frage = _FRAGE.match(t, m.end(), e)
             if frage or folge or _stoer_rest(t, s, e, m.start(), m.end(), hu=True, extra=_HU_PRUEFDATUM):
@@ -885,7 +1008,7 @@ def _hu_befunde(t: str, heute: date) -> List[_HuBefund]:
                 out.append(_HuBefund("ja", mj, m))
         # inserat4: "TÜV neu gemacht 09/2024", "TÜV neu seit 08/2024" — mit einem Datum
         # im Satzteil sind gemacht/seit/vom ... ein Pruefdatum, kein "neu = gueltig"
-        neu_extra = _HU_PRUEFDATUM if alle_daten else _HU_STOER
+        neu_extra = _HU_NEU_EXTRA_DATUM if alle_daten else _HU_NEU_EXTRA
         for m in _HU_NEU.finditer(t, s, e):
             frage = _FRAGE.match(t, m.end(), e)
             if frage or folge or _stoer_rest(t, s, e, m.start(), m.end(), hu=True, extra=neu_extra):
@@ -1163,7 +1286,11 @@ _FAHR_NEIN = re.compile(r"\bfahr(?:unt(?:ü|ue|u)chtig|unf(?:ä|ae|a)hig|untaugl
 # Kein klares "Nein", aber ein Widerspruch zu "Fahrtauglich: Ja"
 _FAHR_ANDERS = re.compile(
     r"\b(?:motor|getriebe|kupplungs|zahnriemen)schaden\b"
-    r"|\b(?:motor|getriebe|kupplung|turbo|zylinderkopf|lenkung|bremse|bremsen)\s+(?:ist\s+|sind\s+)?(?:defekt|kaputt)"
+    r"|\b(?:motor|getriebe|kupplung|turbo|zylinderkopf|lenkung|bremse|bremsen|zahnriemen|steuerkette)"
+    r"\s+(?:ist\s+|sind\s+)?(?:defekt|kaputt"
+    # inserat5 (Pruefung Runde 4): "Zahnriemen gerissen", "Getriebe hinüber", "Bremsen fest"
+    r"|gerissen|hin(?:ü|ue|u)ber|fest(?:gerostet|gefressen)?\b)"
+    r"|\bnotlauf\w*"
     r"|\bspringt\s+nicht\s+(?:mehr\s+)?an|\bl(?:ä|ae|a)uft\s+nicht\b|\babschlepp\w*|\bbastler\w*"
     r"|\bnur\s+(?:f(?:ü|ue|u)r\s+|als\s+)?(?:export|teilespender|trailer)", re.I)
 
@@ -1223,16 +1350,37 @@ _IRGENDEIN_STICHWORT = re.compile("|".join(
     + r"|\b" + _SCHECK, re.I)
 
 
-def bereifung(text: str) -> Optional[Dict[str, Any]]:
-    t = text.lower()
-    m = re.search(r"8[- ]?fach|2\s*(?:satz|sätze|saetze)\s+(?:reifen|räder|raeder)|zweiter\s+(?:rad|reifen)satz|zweitsatz"
-                  r"|sommer-?\s*(?:und|\+|&)\s*winterreifen|winterreifen\s+(?:dabei|inklusive|inkl\.?|vorhanden)|winterr[äa]der\s+(?:dabei|inklusive|inkl\.?|vorhanden)", t)
-    if m:
-        return _eintrag("8-fach", "listing_description", _fund(text, m))
-    m = re.search(r"4[- ]?fach\s+bereift|4[- ]?fach\b", t)
-    if m:
-        return _eintrag("4-fach", "listing_description", _fund(text, m))
-    return None
+# inserat5 (Pruefung Runde 4): "4-fach"/"8-fach" nur mit Reifen-Bezug ("4-fach
+# Airbags", "8-fach verstellbare Sitze" sind keine Bereifung).
+_REIFEN_BEZUG = r"[\s-]*(?:bereift\w*|bereifung\w*|\w*reifen\w*|\w*r(?:ä|ae|a)der\w*|auf\s+alu\w*)"
+_REIFEN_8 = re.compile(
+    r"\b8[- ]?fach(?=" + _REIFEN_BEZUG + r")|\b(?:bereifung|reifen)\s*:?\s*8[- ]?fach\b"
+    r"|\b2\s*(?:satz|s(?:ä|ae|a)tze)\s+(?:\w*reifen|\w*r(?:ä|ae|a)der)|\bzweite[rn]?\s+(?:rad|reifen)satz\b"
+    r"|\bzweitsatz\b|\bsommer-?\s*(?:und|\+|&)\s*winter(?:reifen|r(?:ä|ae|a)der|kompletträder)"
+    r"|\bwinter(?:reifen|r(?:ä|ae|a)der|kompletträder)\s+(?:sind\s+)?(?:mit\s+)?(?:dabei|inklusive|inkl\.?|vorhanden)",
+    re.I)
+_REIFEN_4 = re.compile(r"\b4[- ]?fach(?=" + _REIFEN_BEZUG + r")|\b(?:bereifung|reifen)\s*:?\s*4[- ]?fach\b", re.I)
+
+
+def bereifung(text: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Liefert (eintrag, hinweis). inserat5: Verneinung und Frage beachten
+    ("Keine Winterreifen dabei", "Winterreifen dabei? Nein", "Sommer- und
+    Winterreifen gesucht" ergaben vorher 8-fach)."""
+    t = text
+    stellen = [(m, "8-fach") for m in _REIFEN_8.finditer(t)] + [(m, "4-fach") for m in _REIFEN_4.finditer(t)]
+    if not stellen:
+        return None, None
+    stellen.sort(key=lambda x: x[0].start())
+    bitte = "„Bereifung“ bitte beim Verkäufer erfragen und selbst wählen."
+    unklar = [m for m, _ in stellen if _sach_urteil(t, m) != "ja"]
+    if unklar:
+        return None, f"Inserat zur Bereifung nicht eindeutig („{_fund(text, unklar[0])}“) — {bitte}"
+    werte = {w for _, w in stellen}
+    if len(werte) > 1:
+        return None, (f"Inserat widersprüchlich zur Bereifung („{_fund(text, stellen[0][0])}“ / "
+                      f"„{_fund(text, stellen[-1][0])}“) — {bitte}")
+    m, wert = stellen[0]
+    return _eintrag(wert, "listing_description", _fund(text, m)), None
 
 
 # ------------------------------------------------ alles zusammen
@@ -1246,9 +1394,11 @@ def vorschlaege(v: dict, heute: Optional[date] = None) -> Dict[str, Any]:
     hinweise: List[str] = []
 
     def _schluessel():
-        s = schluessel(v, text)
+        s, s_hinweis = schluessel(v, text)
         if s:
             felder["schluessel_anzahl"] = s
+        if s_hinweis:
+            hinweise.append(s_hinweis)
 
     def _hu():
         hu_felder, hu_hinweise = hu(v, text, heute)
@@ -1282,9 +1432,11 @@ def vorschlaege(v: dict, heute: Optional[date] = None) -> Dict[str, Any]:
             felder["eu_import"] = e
 
     def _reifen():
-        b = bereifung(text)
+        b, b_hinweis = bereifung(text)
         if b:
             felder["tires"] = b
+        if b_hinweis:
+            hinweise.append(b_hinweis)
 
     for regel in (_schluessel, _hu, _scheckheft, _unfall, _fahrbereit, _eu, _reifen):
         try:

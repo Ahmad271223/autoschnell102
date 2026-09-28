@@ -215,9 +215,11 @@ export const FELD_LABEL = {
 };
 
 const WERT_TEXT = { ja: "Ja, lückenlos", nein: "Nein", teilweise: "Teilweise" };
+const REIFEN_TEXT = { "4-fach": "4-fach (1 Satz)", "8-fach": "8-fach (Sommer + Winter)", keine: "Keine / nicht enthalten" };
 
 export function vorschlagWertText(feld, wert) {
   if (feld === "service_book") return WERT_TEXT[String(wert).toLowerCase()] || String(wert);
+  if (feld === "tires") return REIFEN_TEXT[String(wert)] || String(wert);
   return String(wert);
 }
 
@@ -228,18 +230,28 @@ export function vorschlagWertText(feld, wert) {
  *  und einem Knopf „Übernehmen“; erst der Klick setzt den Wert. */
 export const ZUSICHERUNG_FELDER = ["hu_valid", "hu_until", "service_book", "accident_free", "drivable", "eu_import"];
 
+/** Regel ab inserat5 (28.09.2026): AUS DEM INSERAT WIRD NICHTS MEHR UNGEFRAGT
+ *  IN DEN VERTRAG GESCHRIEBEN. Auch Bereifung (steht im PDF unter
+ *  „Zusicherungen & Zustand“) und Schlüsselanzahl sind nur noch Vorschläge
+ *  mit Fundstelle und „Übernehmen“. Reihenfolge wie im Dialog. */
+export const INSERAT_FELDER = ["tires", "hu_valid", "hu_until", "service_book", "accident_free", "drivable",
+                               "eu_import", "schluessel_anzahl"];
+/** Werte, die ältere Fassungen OHNE Klick eingetragen haben (vor inserat5) —
+ *  beim Wiederherstellen eines alten Entwurfs werden sie wieder zum Vorschlag. */
+const FRUEHER_AUTOMATISCH = ["tires", "schluessel_anzahl"];
+
 const QUELLE_TEXT = { listing_field: "Portalfeld", listing_description: "Inseratstext" };
 
 /**
  * Vorschläge aus dem Inserat (GET /contracts/vorschlaege/{id}) auswerten.
- *  - Nicht-Zusicherungen (Schlüsselanzahl, Bereifung) wie bisher NUR in leere,
- *    nicht angefasste Felder (gesperrt) eintragen — sichtbar in `uebernommen`.
- *  - Zusicherungen nur als Vorschlag zurückgeben (`zusicherungen`), das
- *    Formular bleibt dort unverändert. HU/AU und „gültig bis“ sind EIN Vorschlag.
+ * inserat5: Das Formular wird NIE verändert — jedes Feld (Bereifung, HU/AU,
+ * Scheckheft, Unfallfrei, Fahrtauglich, EU-Import, Schlüsselanzahl) kommt
+ * nur als Vorschlag zurück (`vorschlaege`). HU/AU und „gültig bis“ sind EIN
+ * Vorschlag.
  */
-export function vorschlaegeAnwenden(form, vorschlaege, gesperrt = {}, { heute = new Date() } = {}) {
-  let felder = vorschlaege?.felder || {};
-  const hinweise = [...(vorschlaege?.hinweise || [])];
+export function vorschlaegeAuswerten(serverDaten, form, { heute = new Date() } = {}) {
+  let felder = serverDaten?.felder || {};
+  const hinweise = [...(serverDaten?.hinweise || [])];
   // Go-Live-Prüfung 27.09.2026 (K2): eine abgelaufene HU nie als "HU: Ja"
   // anbieten — auch wenn der Server (Monatswechsel, alter Stand) sie noch
   // schickt. Stattdessen der Hinweis "HU abgelaufen (MM/JJJJ)".
@@ -253,38 +265,55 @@ export function vorschlaegeAnwenden(form, vorschlaege, gesperrt = {}, { heute = 
     }
   }
   const hat = (v) => v && v.value !== undefined && v.value !== null && v.value !== "";
-  const neu = { ...form };
-  const uebernommen = [];
-  for (const [feld, v] of Object.entries(felder)) {
-    if (ZUSICHERUNG_FELDER.includes(feld) || !hat(v)) continue;
-    if (!(feld in form) || gesperrt[feld]) continue;
-    if (String(form[feld] ?? "").trim() !== "") continue;
-    neu[feld] = String(v.value);
-    uebernommen.push({ feld, label: FELD_LABEL[feld] || feld, wert: vorschlagWertText(feld, v.value),
-                       roh: String(v.value), fund: v.source_text || "" });
-  }
   // Startprüfung 27.09.2026 (K4): Eine übernommene Schlüsselanzahl hakt die
   // Empfangsbestätigung nicht an — die Kästchen bleiben für die Übergabe leer.
-  const zusicherungen = [];
-  for (const feld of ZUSICHERUNG_FELDER) {
+  const vorschlaege = [];
+  for (const feld of INSERAT_FELDER) {
     const v = felder[feld];
-    if (feld === "hu_until" || !hat(v) || !(feld in form)) continue;
+    if (feld === "hu_until" || !hat(v) || !(feld in (form || {}))) continue;
     const setzt = { [feld]: String(v.value) };
     let wert = vorschlagWertText(feld, v.value);
     if (feld === "hu_valid" && String(v.value) === "Ja" && hat(felder.hu_until) && "hu_until" in form) {
       setzt.hu_until = String(felder.hu_until.value);
       wert = `Ja, gültig bis ${setzt.hu_until}`;
     }
-    zusicherungen.push({ feld, label: FELD_LABEL[feld] || feld, wert, setzt, fund: v.source_text || "",
-                         quelle: QUELLE_TEXT[v.source] || "Inserat" });
+    vorschlaege.push({ feld, label: FELD_LABEL[feld] || feld, wert, setzt, fund: v.source_text || "",
+                       quelle: QUELLE_TEXT[v.source] || "Inserat" });
   }
-  return { form: neu, uebernommen, hinweise, zusicherungen };
+  return { hinweise, vorschlaege };
 }
 
 /** Vorschläge, die noch nicht dem Formular entsprechen (sonst nicht erneut anbieten). */
-export function offeneVorschlaege(zusicherungen, form) {
-  return (zusicherungen || []).filter((z) => z && z.setzt
+export function offeneVorschlaege(vorschlaege, form) {
+  return (vorschlaege || []).filter((z) => z && z.setzt
     && Object.entries(z.setzt).some(([k, w]) => String(form?.[k] ?? "") !== String(w)));
+}
+
+/** inserat5 (Prüfung Runde 4): Hat der Sucher dieses Feld selbst gewählt und
+ *  weicht seine Wahl vom Vorschlag ab? Dann nimmt „Alle Vorschläge
+ *  übernehmen“ den Vorschlag NICHT mit — nur der einzelne Knopf überschreibt
+ *  bewusst. Leere Felder zählen nicht als Wahl. Seit inserat5 trägt der Dialog
+ *  in diese Felder nichts mehr selbst ein (alte Entwurfswerte leert
+ *  zusicherungenOhneWahlLeeren) — jeder Wert darin ist also die eigene Wahl,
+ *  auch aus einem Entwurf, in dem sie noch nicht als „angefasst“ vermerkt war
+ *  (die Schlüsselanzahl wurde bis inserat5 nicht vermerkt). */
+export function vorschlagWeichtAb(vorschlag, form) {
+  return Object.entries(vorschlag?.setzt || {}).some(([k, w]) => String(form?.[k] ?? "").trim() !== ""
+    && String(form?.[k] ?? "") !== String(w));
+}
+
+/** Die eigene Wahl im Feld eines Vorschlags als Text ("Nein", "Ja, gültig bis 05/2027"). */
+export function eigeneWahlText(vorschlag, form) {
+  const feld = vorschlag?.feld;
+  const w = String(form?.[feld] ?? "");
+  if (feld === "hu_valid" && w === "Ja" && String(form?.hu_until ?? "")) return `Ja, gültig bis ${form.hu_until}`;
+  if (feld === "hu_valid" && !w && String(form?.hu_until ?? "")) return `gültig bis ${form.hu_until}`;
+  return w ? vorschlagWertText(feld, w) : "—";
+}
+
+/** Die Vorschläge für „Alle Vorschläge übernehmen“: offen und nicht gegen die eigene Wahl. */
+export function vorschlaegeFuerAlle(vorschlaege, form) {
+  return offeneVorschlaege(vorschlaege, form).filter((z) => !vorschlagWeichtAb(z, form));
 }
 
 /** Einen Vorschlag ins Formular übernehmen (nur auf Klick). Abhängige Felder
@@ -297,25 +326,40 @@ export function vorschlagSetzen(form, vorschlag) {
   return neu;
 }
 
-/** Entwurf wiederherstellen (inserat4): Zusicherungen, die niemand bewusst
+/** Entwurf wiederherstellen (inserat4/5): Zusicherungen, die niemand bewusst
  *  gewählt hat (Entwurf aus der Zeit der automatischen Vorbelegung), werden
- *  geleert — sie erscheinen wieder als Vorschlag mit „Übernehmen“. */
-export function zusicherungenOhneWahlLeeren(form, beruehrt = {}) {
+ *  geleert — sie erscheinen wieder als Vorschlag mit „Übernehmen“.
+ *  inserat5: ein von Hand getipptes „HU gültig bis“ (beruehrt.hu_until)
+ *  bleibt stehen, auch wenn „HU/AU vorhanden“ geleert wird; Bereifung und
+ *  Schlüsselanzahl, die eine ältere Fassung ohne Klick eingetragen hat
+ *  (`uebernommen` aus dem alten Entwurf, Wert unverändert), werden ebenfalls
+ *  geleert. */
+export function zusicherungenOhneWahlLeeren(form, beruehrt = {}, uebernommen = []) {
   const neu = { ...form };
   for (const feld of ZUSICHERUNG_FELDER) {
     if (feld === "hu_until" || beruehrt?.[feld] || String(neu[feld] ?? "") === "") continue;
     neu[feld] = "";
-    if (feld === "hu_valid") neu.hu_until = "";
-    if (feld === "service_book") neu.service_book_until = "";
+    if (feld === "hu_valid" && !beruehrt?.hu_until) neu.hu_until = "";
+    if (feld === "service_book" && !beruehrt?.service_book_until) neu.service_book_until = "";
   }
-  if (neu.hu_valid !== "Ja" && String(neu.hu_until ?? "") !== "" && !beruehrt?.hu_valid) neu.hu_until = "";
+  if (neu.hu_valid !== "Ja" && String(neu.hu_until ?? "") !== "" && !beruehrt?.hu_valid && !beruehrt?.hu_until) {
+    neu.hu_until = "";
+  }
+  for (const u of uebernommen || []) {
+    if (FRUEHER_AUTOMATISCH.includes(u?.feld) && !beruehrt?.[u.feld]
+        && String(neu[u.feld] ?? "") === String(u.roh ?? "")) {
+      neu[u.feld] = "";
+    }
+  }
   return neu;
 }
 
-/** Nachprüfung 28.09.2026 (inserat2, Nr. 3): Die Übernahmeliste geht mit dem
- *  Entwurf in den sessionStorage. Beim Wiederherstellen zählen nur Felder,
- *  deren Wert im Entwurf noch dem übernommenen entspricht — und seit
- *  inserat4 keine Zusicherungen mehr (die setzt nur ein Klick). */
+/** Nachprüfung 28.09.2026 (inserat2, Nr. 3): Entwürfe älterer Fassungen
+ *  enthalten die Liste der ohne Klick eingetragenen Werte. Es zählen nur
+ *  Felder, deren Wert im Entwurf noch dem eingetragenen entspricht — und seit
+ *  inserat4 keine Zusicherungen (die setzte schon damals nur ein Klick).
+ *  Seit inserat5 dient die Liste nur noch dazu, diese Werte beim
+ *  Wiederherstellen zu leeren (zusicherungenOhneWahlLeeren). */
 export function uebernahmenAusEntwurf(entwurf) {
   const form = entwurf?.form;
   if (!form || typeof form !== "object" || !Array.isArray(entwurf?.uebernommen)) return [];
@@ -324,12 +368,6 @@ export function uebernahmenAusEntwurf(entwurf) {
     && !ZUSICHERUNG_FELDER.includes(u.feld)
     && String(u.roh ?? "") !== ""
     && String(form[u.feld] ?? "") === String(u.roh));
-}
-
-/** Übernahmen aus dem Entwurf + neu übernommene (neu gewinnt je Feld). */
-export function uebernahmenZusammenfuehren(ausEntwurf, neu) {
-  const felder = new Set((neu || []).map((u) => u.feld));
-  return [...(ausEntwurf || []).filter((u) => !felder.has(u.feld)), ...(neu || [])];
 }
 
 /** Eine Zeile je Schaden für "Sind das alle Schäden?" */

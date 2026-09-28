@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   SCHWERE_FRAGEN, alleVollstaendig, argumenteText, eur, kiStatusText, kiWartet, mitAntwort, nachPrioritaet,
-  schadenZeile, schaedenStand, schwereFragen, schwereOffen, schwereText, vierText, vorschlaegeAnwenden, fragenFuer, mitBetrag,
-  ZUSICHERUNG_FELDER, offeneVorschlaege, vorschlagSetzen, zusicherungenOhneWahlLeeren,
+  schadenZeile, schaedenStand, schwereFragen, schwereOffen, schwereText, vierText, vorschlaegeAuswerten, fragenFuer, mitBetrag,
+  INSERAT_FELDER, eigeneWahlText, offeneVorschlaege, vorschlaegeFuerAlle, vorschlagSetzen, vorschlagWeichtAb,
+  zusicherungenOhneWahlLeeren,
 } from "./kiSchaden";
 
 // Wunsch Ahmad 25./26.09.2026: KI-Schadennachlass — feste Fragen je Schadensart
@@ -72,11 +73,12 @@ describe("kiSchaden", () => {
     expect(kiStatusText("ok")).toBe("");
   });
 
-  // Stufe 3 (26.09.2026) / inserat4 (28.09.2026): Nicht-Zusicherungen nur in
-  // leere Felder; Zusicherungen NIE ins Formular, nur als Vorschlag.
-  it("belegt nur Nicht-Zusicherungen vor, Zusicherungen kommen als Vorschlag", () => {
+  // Stufe 3 (26.09.2026) / inserat4 / inserat5 (28.09.2026): NICHTS aus dem
+  // Inserat ins Formular — auch Bereifung und Schlüsselanzahl nur als Vorschlag.
+  it("schreibt nichts ins Formular, jedes Feld kommt als Vorschlag", () => {
     const form = { hu_valid: "", hu_until: "", service_book: "", accident_free: "Nein", schluessel_anzahl: "",
                    empfang_schluessel: false, tires: "", drivable: "", eu_import: "" };
+    const vorher = { ...form };
     const vs = { felder: {
       hu_valid: { value: "Ja", source: "listing_description", source_text: "HU 07/2028" },
       hu_until: { value: "07/2028", source: "listing_description", source_text: "HU 07/2028" },
@@ -86,29 +88,32 @@ describe("kiSchaden", () => {
       schluessel_anzahl: { value: "2", source_text: "2 Schlüssel" },
       tires: { value: "8-fach", source_text: "Winterreifen dabei" },
     }, hinweise: ["Hinweis A"] };
-    const erg = vorschlaegeAnwenden(form, vs, { tires: true });
-    // Zusicherungen bleiben, wie sie waren
-    for (const feld of ZUSICHERUNG_FELDER) expect(erg.form[feld]).toBe(form[feld]);
-    expect(erg.form.tires).toBe("");
-    expect(erg.form.schluessel_anzahl).toBe("2");
-    // Startprüfung 27.09.2026 (K4): die übernommene Anzahl hakt die
-    // Empfangsbestätigung NICHT an (Kästchen bleiben für die Übergabe leer).
-    expect(erg.form.empfang_schluessel).toBe(false);
-    expect(erg.uebernommen.map((u) => u.feld)).toEqual(["schluessel_anzahl"]);
+    const erg = vorschlaegeAuswerten(vs, form);
+    // das Formular bleibt unverändert (kein form im Ergebnis, Eingabe nicht verändert)
+    expect(erg.form).toBeUndefined();
+    expect(erg.uebernommen).toBeUndefined();
+    expect(form).toEqual(vorher);
     expect(erg.hinweise).toEqual(["Hinweis A"]);
-    // Vorschläge: HU mit Datum als EIN Vorschlag, Scheckheft als Klartext, Quelle sichtbar
-    expect(erg.zusicherungen.map((z) => z.feld)).toEqual(["hu_valid", "service_book", "accident_free", "drivable"]);
-    const hu = erg.zusicherungen[0];
+    // Vorschläge in Dialog-Reihenfolge: Bereifung, HU (mit Datum als EIN Vorschlag),
+    // Scheckheft als Klartext, …, Schlüsselanzahl zuletzt
+    expect(erg.vorschlaege.map((z) => z.feld))
+      .toEqual(["tires", "hu_valid", "service_book", "accident_free", "drivable", "schluessel_anzahl"]);
+    expect(INSERAT_FELDER).toEqual(["tires", "hu_valid", "hu_until", "service_book", "accident_free", "drivable",
+                                    "eu_import", "schluessel_anzahl"]);
+    const hu = erg.vorschlaege[1];
     expect(hu.setzt).toEqual({ hu_valid: "Ja", hu_until: "07/2028" });
     expect(hu.wert).toBe("Ja, gültig bis 07/2028");
     expect(hu.quelle).toBe("Inseratstext");
-    expect(erg.zusicherungen[1].wert).toBe("Ja, lückenlos");
-    expect(erg.zusicherungen[3].quelle).toBe("Portalfeld");
-    expect(erg.zusicherungen[3].fund).toContain("fahrbereit");
-    expect(vorschlaegeAnwenden({ schluessel_anzahl: "" },
-      { felder: { schluessel_anzahl: { value: "2" } } }).form).toEqual({ schluessel_anzahl: "2" });
-    expect(vorschlaegeAnwenden(form, null).uebernommen).toEqual([]);
-    expect(vorschlaegeAnwenden(form, null).zusicherungen).toEqual([]);
+    expect(erg.vorschlaege[0]).toMatchObject({ setzt: { tires: "8-fach" }, wert: "8-fach (Sommer + Winter)",
+                                               fund: "Winterreifen dabei" });
+    expect(erg.vorschlaege[2].wert).toBe("Ja, lückenlos");
+    expect(erg.vorschlaege[4].quelle).toBe("Portalfeld");
+    expect(erg.vorschlaege[4].fund).toContain("fahrbereit");
+    // Startprüfung 27.09.2026 (K4): die Schlüsselanzahl setzt nur schluessel_anzahl,
+    // nie das Kästchen der Empfangsbestätigung
+    expect(erg.vorschlaege[5].setzt).toEqual({ schluessel_anzahl: "2" });
+    expect(vorschlagSetzen(form, erg.vorschlaege[5]).empfang_schluessel).toBe(false);
+    expect(vorschlaegeAuswerten(null, form)).toEqual({ hinweise: [], vorschlaege: [] });
   });
 
   // Go-Live-Prüfung 27.09.2026 (K2): abgelaufene HU nie als "HU: Ja" anbieten
@@ -120,27 +125,25 @@ describe("kiSchaden", () => {
       hu_until: { value: "08/2026", source_text: "HU 08/2026" },
       accident_free: { value: "Ja", source_text: "unfallfrei" },
     }, hinweise: [] };
-    const erg = vorschlaegeAnwenden(form, vs, {}, { heute });
-    expect(erg.form).toEqual(form);
-    expect(erg.zusicherungen.map((z) => z.feld)).toEqual(["accident_free"]);
+    const erg = vorschlaegeAuswerten(vs, form, { heute });
+    expect(erg.vorschlaege.map((z) => z.feld)).toEqual(["accident_free"]);
     expect(erg.hinweise.join(" ")).toContain("HU abgelaufen (08/2026)");
     // der Server hat den Hinweis schon geschickt -> nicht doppelt
-    const doppelt = vorschlaegeAnwenden(form, { ...vs, hinweise: ["HU abgelaufen (08/2026) laut Inserat"] }, {}, { heute });
+    const doppelt = vorschlaegeAuswerten({ ...vs, hinweise: ["HU abgelaufen (08/2026) laut Inserat"] }, form, { heute });
     expect(doppelt.hinweise.filter((h) => h.includes("HU abgelaufen"))).toHaveLength(1);
     // laufender Monat gilt noch
-    const gueltig = vorschlaegeAnwenden(form, { felder: {
-      hu_valid: { value: "Ja" }, hu_until: { value: "09/2026" } } }, {}, { heute });
-    expect(gueltig.zusicherungen[0].setzt).toEqual({ hu_valid: "Ja", hu_until: "09/2026" });
-    expect(gueltig.form.hu_valid).toBe("");
+    const gueltig = vorschlaegeAuswerten({ felder: {
+      hu_valid: { value: "Ja" }, hu_until: { value: "09/2026" } } }, form, { heute });
+    expect(gueltig.vorschlaege[0].setzt).toEqual({ hu_valid: "Ja", hu_until: "09/2026" });
   });
 
   it("Vorschlag übernehmen, bereits passende nicht erneut anbieten, Entwurf ohne Wahl leeren", () => {
     const form = { hu_valid: "", hu_until: "", service_book: "teilweise", service_book_until: "05/2020",
                    accident_free: "", drivable: "Ja", eu_import: "" };
-    const { zusicherungen } = vorschlaegeAnwenden(form, { felder: {
+    const { vorschlaege: zusicherungen } = vorschlaegeAuswerten({ felder: {
       hu_valid: { value: "Ja" }, hu_until: { value: "07/2028" },
       service_book: { value: "ja" }, drivable: { value: "Ja" }, accident_free: { value: "Nein" },
-    } });
+    } }, form);
     // "Fahrtauglich: Ja" steht schon so im Formular -> kein Vorschlag
     expect(offeneVorschlaege(zusicherungen, form).map((z) => z.feld))
       .toEqual(["hu_valid", "service_book", "accident_free"]);
@@ -163,6 +166,53 @@ describe("kiSchaden", () => {
     expect(zusicherungenOhneWahlLeeren(entwurf, { hu_valid: true, hu_until: true, accident_free: true,
                                                   drivable: true, service_book: true, eu_import: true }))
       .toEqual(entwurf);
+  });
+
+  // inserat5 (Prüfung Runde 4, Nr. 5): ein von Hand getipptes „HU gültig bis“
+  // bleibt stehen, nur „HU/AU vorhanden“ wird geleert.
+  it("Entwurf: getipptes HU-Datum bleibt, nur hu_valid wird geleert", () => {
+    const entwurf = { hu_valid: "Ja", hu_until: "05/2027", accident_free: "" };
+    expect(zusicherungenOhneWahlLeeren(entwurf, { hu_until: true })).toEqual({ ...entwurf, hu_valid: "" });
+    // ohne eigene Eingabe geht das Datum mit
+    expect(zusicherungenOhneWahlLeeren(entwurf, {})).toEqual({ ...entwurf, hu_valid: "", hu_until: "" });
+    // Datum ohne HU-Wahl, aber getippt: bleibt
+    expect(zusicherungenOhneWahlLeeren({ hu_valid: "", hu_until: "05/2027" }, { hu_until: true }))
+      .toEqual({ hu_valid: "", hu_until: "05/2027" });
+  });
+
+  // inserat5 (Nr. 1): alte Entwürfe mit ohne Klick eingetragener Bereifung/Schlüsselanzahl
+  it("Entwurf: früher automatisch eingetragene Bereifung/Schlüssel werden wieder Vorschlag", () => {
+    const entwurf = { tires: "8-fach", schluessel_anzahl: "2", accident_free: "" };
+    const alt = [{ feld: "tires", roh: "8-fach" }, { feld: "schluessel_anzahl", roh: "2" }];
+    expect(zusicherungenOhneWahlLeeren(entwurf, {}, alt)).toEqual({ tires: "", schluessel_anzahl: "", accident_free: "" });
+    // selbst gewählt oder inzwischen geändert: bleibt
+    expect(zusicherungenOhneWahlLeeren(entwurf, { tires: true, schluessel_anzahl: true }, alt)).toEqual(entwurf);
+    expect(zusicherungenOhneWahlLeeren({ ...entwurf, schluessel_anzahl: "3" }, {}, alt))
+      .toEqual({ tires: "", schluessel_anzahl: "3", accident_free: "" });
+    // ohne Liste (kein Hinweis auf automatische Eintragung) bleibt alles
+    expect(zusicherungenOhneWahlLeeren(entwurf, {})).toEqual(entwurf);
+  });
+
+  // inserat5 (Nr. 2): „Alle Vorschläge übernehmen“ respektiert die eigene Wahl
+  it("von Hand abweichend gewählte Felder gehören nicht zu „Alle“", () => {
+    const { vorschlaege } = vorschlaegeAuswerten({ felder: {
+      accident_free: { value: "Ja" }, drivable: { value: "Ja" }, tires: { value: "8-fach" },
+      hu_valid: { value: "Ja" }, hu_until: { value: "07/2028" },
+    } }, { accident_free: "", drivable: "", tires: "", hu_valid: "", hu_until: "" });
+    const form = { accident_free: "Nein", drivable: "", tires: "", hu_valid: "Ja", hu_until: "05/2027" };
+    const [reifen, hu, unfall, fahr] = vorschlaege;
+    // seit inserat5 trägt nichts mehr automatisch ein: jeder Wert ist eigene Wahl
+    expect(vorschlagWeichtAb(unfall, form)).toBe(true);
+    expect(vorschlagWeichtAb(hu, form)).toBe(true);               // anderes Datum getippt
+    expect(vorschlagWeichtAb(fahr, form)).toBe(false);            // leer = keine Wahl
+    expect(vorschlagWeichtAb(reifen, form)).toBe(false);
+    expect(vorschlagWeichtAb(hu, { hu_valid: "Ja", hu_until: "" })).toBe(false);   // Datum ergänzt nur
+    expect(vorschlaegeFuerAlle(vorschlaege, form).map((z) => z.feld)).toEqual(["tires", "drivable"]);
+    expect(offeneVorschlaege(vorschlaege, form).map((z) => z.feld))
+      .toEqual(["tires", "hu_valid", "accident_free", "drivable"]);
+    expect(eigeneWahlText(unfall, form)).toBe("Nein");
+    expect(eigeneWahlText(hu, form)).toBe("Ja, gültig bis 05/2027");
+    expect(eigeneWahlText(reifen, form)).toBe("—");
   });
 
   it("beschreibt Schaeden und erkennt Aenderungen", () => {

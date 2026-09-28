@@ -5,7 +5,12 @@
  * beim Öffnen noch beim Wiederherstellen eines Entwurfs. Er zeigt je Feld den
  * Vorschlag aus dem Inserat mit Fundstelle und einem Knopf „Übernehmen“ (dazu
  * „Alle Vorschläge übernehmen“); erst der Klick setzt den Wert. Die Rückfrage
- * vor "PDF erstellen" entfällt. Schlüsselanzahl/Bereifung bleiben automatisch.
+ * vor "PDF erstellen" entfällt.
+ *
+ * inserat5 (Prüfung Runde 4): AUS DEM INSERAT WIRD NICHTS MEHR UNGEFRAGT IN
+ * DEN VERTRAG GESCHRIEBEN — auch Bereifung und Schlüsselanzahl sind nur
+ * Vorschläge. „Alle Vorschläge übernehmen“ lässt selbst anders gewählte Felder
+ * stehen; beim Fahrzeugwechsel verschwinden die alten Vorschläge sofort.
  */
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
@@ -68,12 +73,12 @@ async function warten() {
 }
 const el = (id) => behaelter.querySelector(`[data-testid="${id}"]`);
 
-async function oeffnen() {
+async function oeffnen(vehicleId = "V1", vehicle = FAHRZEUG) {
   behaelter = document.createElement("div");
   document.body.appendChild(behaelter);
   wurzel = createRoot(behaelter);
   await act(async () => {
-    wurzel.render(createElement(ContractDialog, { open: true, onClose: () => {}, vehicle: FAHRZEUG, vehicleId: "V1" }));
+    wurzel.render(createElement(ContractDialog, { open: true, onClose: () => {}, vehicle, vehicleId }));
   });
   await warten();
 }
@@ -129,15 +134,20 @@ afterEach(async () => {
 });
 
 describe("Zusicherungen aus dem Inserat nur als Vorschlag", () => {
-  it("beim Öffnen ist KEIN Zusicherungsfeld gesetzt — Schlüssel/Bereifung wie bisher", async () => {
+  it("beim Öffnen ist KEIN Feld aus dem Inserat gesetzt — auch Schlüssel/Bereifung nicht (inserat5)", async () => {
     await oeffnen();
     expect(zusicherungswerte()).toEqual(LEER);
     expect(el("contract-hu-until").value).toBe("");
-    expect(el("contract-schluessel-anzahl").value).toBe("2");
-    expect(el("contract-tires").value).toBe("8-fach");
+    expect(el("contract-schluessel-anzahl").value).toBe("");
+    expect(el("contract-tires").value).toBe("");
     const kasten = el("contract-inserat-vorschlaege");
-    expect(kasten.textContent).toContain("Aus dem Inserat übernommen (bitte prüfen):");
-    expect(kasten.textContent).toContain("Schlüssel: 2");
+    expect(kasten.textContent).not.toContain("Aus dem Inserat übernommen");
+    // Bereifung und Schlüssel als Vorschlag mit Fundstelle und Knopf
+    expect(el("contract-vorschlag-tires").textContent).toContain("Bereifung: 8-fach (Sommer + Winter)");
+    expect(el("contract-vorschlag-tires").textContent).toContain("Inseratstext: „Winterreifen dabei“");
+    expect(el("contract-vorschlag-schluessel_anzahl").textContent).toContain("Schlüssel: 2");
+    expect(el("contract-vorschlag-uebernehmen-tires").textContent).toBe("Übernehmen");
+    expect(el("contract-vorschlag-uebernehmen-schluessel_anzahl").textContent).toBe("Übernehmen");
     // je Zusicherung ein Vorschlag mit Fundstelle, Quelle und Knopf
     for (const feld of Object.keys(FELD_TESTID)) {
       expect(el(`contract-vorschlag-${feld}`), feld).toBeTruthy();
@@ -147,7 +157,17 @@ describe("Zusicherungen aus dem Inserat nur als Vorschlag", () => {
     expect(el("contract-vorschlag-accident_free").textContent).toContain("Inseratstext: „Unfallfrei, Nichtraucher“");
     expect(el("contract-vorschlag-service_book").textContent).toContain("Ja, lückenlos");
     expect(el("contract-vorschlaege-alle").textContent).toBe("Alle Vorschläge übernehmen");
-    expect(kasten.textContent).not.toContain("Aus dem Inserat übernommen (bitte prüfen): Unfallfrei");
+  });
+
+  it("Bereifung/Schlüssel stehen erst nach „Übernehmen“ im Formular", async () => {
+    await oeffnen();
+    await klicken("contract-vorschlag-uebernehmen-tires");
+    expect(el("contract-tires").value).toBe("8-fach");
+    expect(el("contract-schluessel-anzahl").value).toBe("");
+    expect(el("contract-vorschlag-tires")).toBeNull();
+    await klicken("contract-vorschlag-uebernehmen-schluessel_anzahl");
+    expect(el("contract-schluessel-anzahl").value).toBe("2");
+    expect(zusicherungswerte()).toEqual(LEER);
   });
 
   it("ein unklarer Vorschlag zeigt nur den Hinweis, ohne Knopf", async () => {
@@ -179,6 +199,8 @@ describe("Zusicherungen aus dem Inserat nur als Vorschlag", () => {
     expect(zusicherungswerte()).toEqual({ hu_valid: "Ja", service_book: "ja", accident_free: "Ja",
                                           drivable: "Ja", eu_import: "Ja" });
     expect(el("contract-hu-until").value).toBe("07/2028");
+    expect(el("contract-tires").value).toBe("8-fach");
+    expect(el("contract-schluessel-anzahl").value).toBe("2");
     expect(el("contract-zusicherung-vorschlaege")).toBeNull();
     expect(el("contract-vorschlaege-alle")).toBeNull();
   });
@@ -190,6 +212,58 @@ describe("Zusicherungen aus dem Inserat nur als Vorschlag", () => {
     // ein anderer Wert von Hand: der Vorschlag bleibt sichtbar (Knopf überschreibt bewusst)
     await eingeben("contract-drivable", "Nein");
     expect(el("contract-vorschlag-drivable")).toBeTruthy();
+  });
+
+  // inserat5 (Prüfung Runde 4, Nr. 2): „Alle“ überschrieb „Unfallfrei: Nein“ mit „Ja“
+  it("„Alle übernehmen“ lässt von Hand abweichend Gewähltes stehen — Einzelknopf überschreibt bewusst", async () => {
+    await oeffnen();
+    await eingeben("contract-accident-free", "Nein");
+    await eingeben("contract-drivable", "Nein");
+    await eingeben("contract-schluessel-anzahl", "3");
+    // Kennzeichnung an der Zeile, Knopf bleibt
+    expect(el("contract-vorschlag-abweichung-accident_free").textContent)
+      .toContain("Weicht von deiner Wahl ab (du: Nein)");
+    expect(el("contract-vorschlag-abweichung-schluessel_anzahl").textContent).toContain("(du: 3)");
+    expect(el("contract-vorschlag-abweichung-hu_valid")).toBeNull();
+    expect(el("contract-vorschlag-uebernehmen-accident_free")).toBeTruthy();
+    await klicken("contract-vorschlaege-alle");
+    expect(el("contract-accident-free").value).toBe("Nein");
+    expect(el("contract-drivable").value).toBe("Nein");
+    expect(el("contract-schluessel-anzahl").value).toBe("3");
+    // der Rest ist übernommen
+    expect(el("contract-hu-valid").value).toBe("Ja");
+    expect(el("contract-eu-import").value).toBe("Ja");
+    expect(el("contract-tires").value).toBe("8-fach");
+    // die abweichenden Zeilen bleiben stehen, „Alle“ gibt es nicht mehr (nichts mehr für „Alle“)
+    expect(el("contract-vorschlag-accident_free")).toBeTruthy();
+    expect(el("contract-vorschlag-drivable")).toBeTruthy();
+    expect(el("contract-vorschlaege-alle")).toBeNull();
+    // bewusster Einzelklick überschreibt
+    await klicken("contract-vorschlag-uebernehmen-accident_free");
+    expect(el("contract-accident-free").value).toBe("Ja");
+    expect(el("contract-vorschlag-accident_free")).toBeNull();
+  });
+
+  // inserat5 (Nr. 4): Fahrzeugwechsel bei offenem Dialog — scheitert die neue
+  // Anfrage, standen die Vorschläge des alten Inserats samt „Übernehmen“ da.
+  it("Fahrzeugwechsel: alte Vorschläge verschwinden sofort, auch wenn die neue Anfrage scheitert", async () => {
+    await oeffnen();
+    expect(el("contract-vorschlag-accident_free")).toBeTruthy();
+    let antworten;
+    api.get.mockImplementation((url) => (String(url) === "/contracts/vorschlaege/V2"
+      ? new Promise((_, reject) => { antworten = () => reject(new Error("Netz")); })
+      : Promise.resolve({ data: {} })));
+    await act(async () => {
+      wurzel.render(createElement(ContractDialog, { open: true, onClose: () => {},
+                                                     vehicle: { id: "V2", make_label: "VW" }, vehicleId: "V2" }));
+    });
+    // schon VOR der Antwort weg
+    expect(el("contract-inserat-vorschlaege")).toBeNull();
+    expect(el("contract-vorschlag-accident_free")).toBeNull();
+    await act(async () => { antworten(); });
+    await warten();
+    expect(el("contract-inserat-vorschlaege")).toBeNull();
+    expect(api.get).toHaveBeenCalledWith("/contracts/vorschlaege/V2");
   });
 
   it("PDF-Payload enthält nur bewusst gesetzte Zusicherungen — ohne Rückfrage", async () => {
@@ -204,7 +278,9 @@ describe("Zusicherungen aus dem Inserat nur als Vorschlag", () => {
     for (const feld of ["hu_valid", "hu_until", "service_book", "accident_free", "eu_import"]) {
       expect(payload[feld], feld).toBe("");
     }
-    expect(payload.schluessel_anzahl).toBe("2");
+    // inserat5: auch Schlüssel/Bereifung nicht ohne Klick
+    expect(payload.schluessel_anzahl).toBe("");
+    expect(payload.tires).toBe("");
   });
 
   it("ohne Klick geht keine Zusicherung aus dem Inserat in den Vertrag", async () => {
@@ -212,7 +288,8 @@ describe("Zusicherungen aus dem Inserat nur als Vorschlag", () => {
     await pdfErstellen();
     expect(window.confirm).not.toHaveBeenCalled();
     const payload = api.post.mock.calls[0][1];
-    for (const feld of ["hu_valid", "hu_until", "service_book", "accident_free", "drivable", "eu_import"]) {
+    for (const feld of ["hu_valid", "hu_until", "service_book", "accident_free", "drivable", "eu_import",
+                        "tires", "schluessel_anzahl"]) {
       expect(payload[feld], feld).toBe("");
     }
   });
@@ -222,20 +299,39 @@ describe("Zusicherungen aus dem Inserat nur als Vorschlag", () => {
     // Inserat eingetragen (nicht angefasst), Fahrtauglich bewusst gewählt.
     entwurfSpeichern(SCHLUESSEL, {
       form: { accident_free: "Ja", hu_valid: "Ja", hu_until: "07/2028", drivable: "Nein", schluessel_anzahl: "2",
-              purchase_price: "15000", payment_method: "Bar" },
+              tires: "8-fach", purchase_price: "15000", payment_method: "Bar" },
       beruehrt: { drivable: true, purchase_price: true, payment_method: true },
       uebernommen: [{ feld: "accident_free", label: "Unfallfrei", wert: "Ja", roh: "Ja", fund: "unfallfrei" },
-                    { feld: "schluessel_anzahl", label: "Schlüssel", wert: "2", roh: "2", fund: "2 Schlüssel" }],
+                    { feld: "schluessel_anzahl", label: "Schlüssel", wert: "2", roh: "2", fund: "2 Schlüssel" },
+                    { feld: "tires", label: "Bereifung", wert: "8-fach", roh: "8-fach", fund: "Winterreifen dabei" }],
     });
     await oeffnen();
     expect(zusicherungswerte()).toEqual({ ...LEER, drivable: "Nein" });
     expect(el("contract-hu-until").value).toBe("");
-    // wieder als Vorschlag da, Schlüssel bleibt „übernommen“
+    // inserat5: auch die früher ohne Klick eingetragene Bereifung/Schlüsselanzahl ist wieder nur Vorschlag
+    expect(el("contract-schluessel-anzahl").value).toBe("");
+    expect(el("contract-tires").value).toBe("");
     expect(el("contract-vorschlag-accident_free")).toBeTruthy();
     expect(el("contract-vorschlag-hu_valid")).toBeTruthy();
-    const kasten = el("contract-inserat-vorschlaege").textContent;
-    expect(kasten).toContain("Aus dem Inserat übernommen (bitte prüfen): Schlüssel: 2");
-    expect(kasten).not.toContain("übernommen (bitte prüfen): Unfallfrei");
+    expect(el("contract-vorschlag-schluessel_anzahl")).toBeTruthy();
+    expect(el("contract-vorschlag-tires")).toBeTruthy();
+    expect(el("contract-inserat-vorschlaege").textContent).not.toContain("Aus dem Inserat übernommen");
+  });
+
+  // inserat5 (Nr. 5): ein von Hand getipptes „HU gültig bis“ überlebt das Wiederherstellen
+  it("Entwurf: getipptes HU-Datum bleibt, nur die unberührte HU-Wahl wird geleert", async () => {
+    entwurfSpeichern(SCHLUESSEL, {
+      form: { hu_valid: "Ja", hu_until: "05/2027" },
+      beruehrt: { hu_until: true },
+    });
+    await oeffnen();
+    expect(el("contract-hu-valid").value).toBe("");
+    expect(el("contract-hu-until").value).toBe("05/2027");
+    // der HU-Vorschlag weicht vom getippten Datum ab: gekennzeichnet, nicht in „Alle“
+    expect(el("contract-vorschlag-abweichung-hu_valid").textContent).toContain("du: gültig bis 05/2027");
+    await klicken("contract-vorschlaege-alle");
+    expect(el("contract-hu-until").value).toBe("05/2027");
+    expect(el("contract-hu-valid").value).toBe("");
   });
 
   it("übernommene Zusicherung bleibt nach Entwurf und Neuöffnen stehen (bewusst gewählt)", async () => {

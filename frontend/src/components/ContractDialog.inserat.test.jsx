@@ -30,4 +30,16 @@ describe("ContractDialog: Zusicherungen nur per Klick", () => {
     expect(perKlick).toHaveLength(2);
     expect(uebernehmen).toHaveLength(perKlick.length);
   });
+
+  // inserat5 (28.09.2026): auch Bereifung/Schlüsselanzahl nie automatisch —
+  // die Auswertung der Serverantwort landet nur im Vorschlags-Zustand.
+  it("die Serverantwort geht nie direkt ins Formular", () => {
+    expect(VERTRAG).not.toMatch(/vorschlaegeAnwenden/);
+    const aufrufe = VERTRAG.match(/vorschlaegeAuswerten\([^)]*\)/g) || [];
+    expect(aufrufe.length).toBeGreaterThan(0);
+    for (const zeile of VERTRAG.split("\n").filter((z) => z.includes("vorschlaegeAuswerten("))) {
+      expect(zeile).not.toMatch(/setForm/);
+    }
+    expect(VERTRAG).not.toContain("Aus dem Inserat übernommen (bitte prüfen)");
+  });
 });

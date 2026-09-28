@@ -335,11 +335,16 @@ def test_laufzeit_linear_ohne_satzzeichen(stueck):
 
 
 def test_text_wird_begrenzt():
+    # inserat5: je Teil gekappt, Anfang UND Ende bleiben (Maengel stehen oft am
+    # Schluss) — nur die Mitte eines ueberlangen Texts faellt weg.
+    mitte = "Top Zustand " * 1400 + "unfallfrei " + "Top Zustand " * 700   # ~25.000 Zeichen
+    werte, _ = _werte({"description": mitte})
+    assert U not in werte, "Mitte eines Texts ueber 20.000 Zeichen zaehlt nicht"
     fuell = "Top Zustand " * 2000                    # 24.000 Zeichen
-    werte, _ = _werte({"description": fuell + "unfallfrei"})
-    assert U not in werte, "Text nach 20.000 Zeichen zaehlt nicht"
     werte, _ = _werte({"description": "unfallfrei " + fuell})
     assert werte.get(U) == "Ja"
+    werte, _ = _werte({"description": fuell + "unfallfrei"})
+    assert werte.get(U) == "Ja", "das Ende eines langen Texts zaehlt (inserat5)"
 
 
 def test_route_rechnet_im_thread(monkeypatch):
