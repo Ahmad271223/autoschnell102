@@ -825,8 +825,15 @@ async def monitoring(db) -> Dict[str, Any]:
     b = await budget.dokument(db, m)
     letzter = await db[JOBS].find_one({"status": "completed"}, {"_id": 0, "finished_at": 1, "segment_id": 1}, sort=[("finished_at", -1)])
     stale_grenze = (konfig.jetzt() - timedelta(hours=48)).isoformat()
-    stale = await db[SEGMENTE].count_documents({"enabled": True, "last_success_at": {"$ne": None, "$lt": stale_grenze}})
-    nie = await db[SEGMENTE].count_documents({"enabled": True, "last_success_at": None,
+    # Live-Befund 29.09.2026 (Ahmad: "469 Segmente seit ueber 48 h nicht erfolgreich aktualisiert" — am Tag des
+    # Komplettlaufs): last_success_at wird nur bei einem Lauf MIT Zeilen gesetzt (Nr. 51), ein leerer Lauf setzt
+    # last_empty_at. Segmente der frisch aktivierten Masterlisten-Auftraege (angelegt am 27.09., heute sauber
+    # gelaufen, aber ohne Angebot = Marktluecke) galten deshalb als "nie erfolgreich". Ein gueltiger Lauf ist
+    # auch ein leerer — "veraltet" heisst jetzt: seit 48 h WEDER Treffer NOCH leerer Lauf (und aelter als 48 h).
+    _alt_oder_nie = lambda feld: {"$or": [{feld: None}, {feld: {"$lt": stale_grenze}}]}  # noqa: E731
+    stale = await db[SEGMENTE].count_documents({"enabled": True, "last_success_at": {"$ne": None, "$lt": stale_grenze},
+                                                **_alt_oder_nie("last_empty_at")})
+    nie = await db[SEGMENTE].count_documents({"enabled": True, "last_success_at": None, **_alt_oder_nie("last_empty_at"),
                                               "created_at": {"$lt": stale_grenze}})
     null = sum(1 for j in fertig if int(j.get("actual_rows") or 0) == 0)
     unsortiert = len(ungueltig)
@@ -838,7 +845,8 @@ async def monitoring(db) -> Dict[str, Any]:
     anteil = (float(b.get("used_usd") or 0) + float(b.get("reserved_usd") or 0)) / float(b.get("budget_usd") or 1) * 100 if b.get("budget_usd") else 0.0
     alarme = []
     if stale + nie:
-        alarme.append({"typ": "segment_veraltet", "text": f"{stale + nie} Segment(e) seit über 48 h nicht erfolgreich aktualisiert", "stufe": "warn"})
+        alarme.append({"typ": "segment_veraltet", "stufe": "warn",
+                       "text": f"{stale + nie} Segment(e) seit über 48 h ohne gültigen Lauf (weder Treffer noch leer)"})
     if beendet >= 5 and quote >= 20:
         alarme.append({"typ": "fehlerquote", "text": f"Fehlerquote heute {quote} % ({fehlgeschlagen} von {beendet} beendeten)", "stufe": "rot"})
     if anteil >= 95:
