@@ -4038,22 +4038,31 @@ des Chefs) plus Zeitstempel/Name/Herkunftsadresse → Sucher und Chef sehen „K
 (Menüpunkt Meldungen, Zähler, Hinweis). Keine E-Mails (Entscheidung Ahmad). Code: `backend/routes/kundenportal.py`,
 `frontend/src/pages/firma/FirmenSeite.jsx`, Einstellungen → „Firmenseite & Kundenportal“, `KundenportalDialog.jsx`.
 
-**Adressen (DNS):**
+**Adressen (DNS) — Entscheidung Ahmad 29.09.2026: „Weg A“, der Betreiber holt und verwaltet die Domains:**
 - Unterdomain `<adresse>.auto-schnellkauf.de` — funktioniert, sobald bei Cloudflare ein Wildcard-Eintrag
   `*.auto-schnellkauf.de` (CNAME auf `app.auto-schnellkauf.de`, Proxy an) existiert; das Universal-Zertifikat von
   Cloudflare deckt eine Ebene Wildcard ab. Der Proxy muss die Hosts kennen: auf beiden Servern
   `sh deploy/env_setzen.sh 'FIRMEN_HOSTS=*.auto-schnellkauf.de'` und `docker compose up -d --force-recreate --no-deps proxy`
   (bzw. der nächste Rollout, der die geänderte Vorlage selbst erkennt). Lokal (localhost) gibt es keine Unterdomains —
   dort gilt der Pfad `/firma/<adresse>` (auch produktiv als Zweitadresse).
-- Eigene Kundendomain (z. B. `kfz-mueller.de`): der Chef trägt sie in den Einstellungen ein, der Kunde setzt bei
-  seinem Domain-Anbieter einen CNAME `kfz-mueller.de` bzw. `www.kfz-mueller.de` → `app.auto-schnellkauf.de`
-  (Apex-Domain: ALIAS/ANAME oder A auf die Cloudflare-Adressen). Bei Cloudflare unter **SSL/TLS → Custom
-  Hostnames (Cloudflare for SaaS)** die Domain als Custom Hostname anlegen (Fallback-Origin `app.auto-schnellkauf.de`;
-  die ersten 100 Hostnames sind kostenlos, Zertifikat kommt automatisch). Dann die Domain zu `FIRMEN_HOSTS` ergänzen
-  (`sh deploy/env_setzen.sh 'FIRMEN_HOSTS=*.auto-schnellkauf.de kfz-mueller.de www.kfz-mueller.de'`) und den Proxy neu
-  erzeugen. Ohne diese drei Schritte antwortet die Adresse nicht (444) — die Unterdomain gilt immer.
-- Backend: `FIRMEN_DOMAIN` (leer = aus `FRONTEND_URL` ohne `app.`), `PORTAL_CODE_TAGE`. Die Oberfläche erkennt eine
-  Firmenadresse selbst (`lib/firmenHost.js` → `GET /api/public/firma?host=…`) und zeigt dann nur die Firmenseite.
+- Eigene Kundendomain, je Kunde einmal (≈ 15 Minuten):
+  1. Domain kaufen (INWX, IONOS, Hetzner — `.de` gibt es bei Cloudflare Registrar nicht).
+  2. In Ahmads Cloudflare-Konto „Website hinzufügen“ (Free-Plan) → die zwei Cloudflare-Nameserver beim
+     Domain-Anbieter eintragen.
+  3. DNS in Cloudflare: `@` und `www` jeweils **CNAME auf `app.auto-schnellkauf.de`, Proxy an**; SSL/TLS-Modus
+     **„Full“** (nicht „Full (strict)“ — das Origin-Zertifikat am Load Balancer gilt nur für app.auto-schnellkauf.de).
+  4. Auf beiden Servern: `sh deploy/env_setzen.sh 'FIRMEN_HOSTS=*.auto-schnellkauf.de kfz-mueller.de www.kfz-mueller.de'`
+     und `docker compose up -d --force-recreate --no-deps proxy` (FIRMEN_HOSTS geht auch ans Backend — für die Prüfung).
+  5. Admin → Nutzer → Firma → **„Firmenseite & Kundenportal“**: Adresse, einschalten, Text, Bilder, Domain eintragen,
+     Unterschrift des Chefs hochladen, speichern → **„Domain prüfen“** (DNS → Proxy → HTTPS → Firmenseite; sagt in
+     Klartext, was noch fehlt). Dieselbe Karte hat der Chef in seinen Einstellungen (prüft nur eigene Domains).
+  Hat der Kunde schon eine Domain, übernimmt er entweder die Verwaltung an Cloudflare (Nameserver umstellen → ab
+  Schritt 3) — oder er setzt selbst nur einen CNAME, dann braucht es zusätzlich Cloudflare for SaaS (Custom Hostname,
+  Fallback-Origin `app.auto-schnellkauf.de`); das ist der Ausnahmeweg.
+- Backend: `FIRMEN_DOMAIN` (leer = aus `FRONTEND_URL` ohne `app.`), `PORTAL_CODE_TAGE`, `FIRMEN_HOSTS` (Prüfung). Die
+  Oberfläche erkennt eine Firmenadresse selbst (`lib/firmenHost.js` → `GET /api/public/firma?host=…`) und zeigt dann nur
+  die Firmenseite. Admin-Routen: `/admin/dealers/{id}/webseite` (GET/PUT), `/webseite/bilder`, `/unterschrift`,
+  `/webseite/domain-pruefung?domain=…` (nur Super-Admin).
 
 **Sicherheit:** Code je Firma eindeutig (Unique-Index nur auf offene Codes), Ablauf, an die Vertragsfassung gebunden
 (Neuerzeugung/Korrektur = neuer Code nötig), zurückziehbar; falsche Eingaben je Besucheradresse 10/10 min

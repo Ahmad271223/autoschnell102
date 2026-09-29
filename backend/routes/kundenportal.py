@@ -19,6 +19,10 @@ Ablauf:
      Zeitstempel, Name und Herkunftsadresse als Nachweis; Sucher und Chef bekommen eine
      Meldung in der App ("Kaufvertrag bestaetigt"). Keine E-Mails (Entscheidung Ahmad).
 
+Einrichtung (Entscheidung Ahmad 29.09.2026, "Weg A"): der Betreiber holt und verwaltet die
+Kundendomains selbst und richtet die Firmenseite im Admin ein — dieselben Funktionen wie
+fuer den Chef, plus "Domain pruefen" (DNS -> Proxy -> HTTPS -> Firmenseite).
+
 Sicherheit: Codes sind je Firma eindeutig (Unique-Index, nur offene), laufen ab, gelten nur
 fuer die aktuelle Fassung (eine Neuerzeugung macht den Code ungueltig), ein zurueckgezogener
 Code ist tot. Falsche Eingaben werden je Besucheradresse (fail-closed) und je Firma gezaehlt.
@@ -32,6 +36,7 @@ import logging
 import os
 import re
 import secrets
+import socket
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
@@ -42,7 +47,7 @@ from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
 
 import auth as _auth
-from deps import current_firma, db, ist_haupt_chef, log_activity_sicher, now_iso
+from deps import current_firma, current_super_admin, db, ist_haupt_chef, log_activity_sicher, now_iso
 from konfig import zahl_env
 from rate_limiter import SlidingWindowRateLimiter, client_ip
 
@@ -67,6 +72,7 @@ BILDER_MAX = 6
 DOMAINS_MAX = 5
 UNTERSCHRIFT_B64_MAX = 3_000_000
 MELDUNG_TAGE = 90
+PRUEFUNG_ZEITLIMIT_S = 8
 
 # Falsche Codes: je Besucheradresse hart (fail-closed — ohne Datenbank lieber sperren als raten
 # lassen), je Firma weich (ein Buero mit vielen Kunden hinter einer Adresse bleibt arbeitsfaehig).
@@ -125,6 +131,25 @@ def host_normalisieren(host: Optional[str]) -> str:
     return (host or "").strip().lower().split(":")[0].strip(".")[:253]
 
 
+def proxy_hosts() -> List[str]:
+    """FIRMEN_HOSTS (dieselbe Liste wie im Proxy): Wildcards und Domains, Leerzeichen-getrennt."""
+    return [h.strip().lower() for h in (os.environ.get("FIRMEN_HOSTS") or "").replace(",", " ").split() if h.strip()]
+
+
+def proxy_kennt(host: str) -> bool:
+    """Bedient der Proxy diese Adresse? Exakt oder per Wildcard (*.domain = genau eine Ebene)."""
+    h = host_normalisieren(host)
+    haupt = (urlparse(_hauptadresse()).hostname or "").lower()
+    if h == haupt:
+        return True
+    for eintrag in proxy_hosts():
+        if eintrag == h:
+            return True
+        if eintrag.startswith("*.") and h.endswith(eintrag[1:]) and "." not in h[:-len(eintrag[1:])]:
+            return True
+    return False
+
+
 # ---------------------------------------------------------------- Firma (oeffentlich)
 _FIRMA_FELDER = {"_id": 0, "id": 1, "user_id": 1, "company_name": 1, "logo_url": 1, "address": 1,
                  "zip_code": 1, "city": 1, "phone": 1, "email": 1, "opening_hours": 1,
@@ -181,7 +206,7 @@ async def public_firma(host: Optional[str] = None, slug: Optional[str] = None):
     return firma_oeffentlich(d)
 
 
-# ---------------------------------------------------------------- Firmenseite (Chef)
+# ---------------------------------------------------------------- Firmenseite (Chef / Betreiber)
 class WebseiteIn(BaseModel):
     slug: Optional[str] = Field(default=None, max_length=60)
     aktiv: Optional[bool] = None
@@ -210,6 +235,9 @@ def _webseite_antwort(d: dict, ist_chef: bool) -> dict:
         "unterdomain_moeglich": unterdomain_moeglich(),
         "unterschrift_vorhanden": bool(d.get("unterschrift_key")),
         "ist_chef": ist_chef,
+        "firma": d.get("company_name") or "",
+        "slug_vorschlag": slug_vorschlag(d.get("company_name") or ""),
+        "proxy_hosts": proxy_hosts(),
         "bilder_max": BILDER_MAX, "domains_max": DOMAINS_MAX, "code_tage": PORTAL_CODE_TAGE,
     }
 
@@ -226,14 +254,11 @@ def slug_vorschlag(name: str) -> str:
     return t
 
 
-@router.get("/dealer/webseite")
-async def get_webseite(user=Depends(current_firma)):
-    d = await db.dealers.find_one({"id": user["dealer_id"]}, {**_FIRMA_FELDER, "company_name": 1})
+async def _firma_dok(dealer_id: str) -> dict:
+    d = await db.dealers.find_one({"id": dealer_id}, _FIRMA_FELDER)
     if not d:
         raise HTTPException(404, "Firma nicht gefunden")
-    antwort = _webseite_antwort(d, await ist_haupt_chef(user))
-    antwort["slug_vorschlag"] = slug_vorschlag(d.get("company_name") or "")
-    return antwort
+    return d
 
 
 async def _nur_chef(user) -> None:
@@ -241,10 +266,8 @@ async def _nur_chef(user) -> None:
         raise HTTPException(403, "Die Firmenseite ändert nur der Chef.")
 
 
-@router.put("/dealer/webseite")
-async def put_webseite(body: WebseiteIn, user=Depends(current_firma)):
-    """Slug, Ein/Aus, Ueber-uns-Text und Kundendomains — nur der Hauptchef."""
-    await _nur_chef(user)
+async def _webseite_setzen(dealer_id: str, body: WebseiteIn, wer: str) -> dict:
+    """Slug, Ein/Aus, Ueber-uns-Text und Kundendomains setzen (Chef ueber /dealer, Betreiber ueber /admin)."""
     setzen: Dict[str, Any] = {}
     if body.slug is not None:
         s = body.slug.strip().lower()
@@ -273,7 +296,7 @@ async def put_webseite(body: WebseiteIn, user=Depends(current_firma)):
                                          f"aus der Adresse (<name>.{basis}).")
             if h not in doms:
                 doms.append(h)
-        fremd = await db.dealers.find_one({"webseite.domains": {"$in": doms}, "id": {"$ne": user["dealer_id"]}},
+        fremd = await db.dealers.find_one({"webseite.domains": {"$in": doms}, "id": {"$ne": dealer_id}},
                                           {"_id": 0, "webseite.domains": 1}) if doms else None
         if fremd:
             belegt = [x for x in (fremd.get("webseite") or {}).get("domains") or [] if x in doms]
@@ -283,16 +306,15 @@ async def put_webseite(body: WebseiteIn, user=Depends(current_firma)):
         raise HTTPException(400, "Nichts zu ändern")
     setzen["webseite.aktualisiert_am"] = now_iso()
     try:
-        r = await db.dealers.update_one({"id": user["dealer_id"]}, {"$set": setzen})
+        r = await db.dealers.update_one({"id": dealer_id}, {"$set": setzen})
     except DuplicateKeyError:
         raise HTTPException(409, "Diese Adresse ist schon vergeben — bitte eine andere wählen.")
     if not r.matched_count:
         raise HTTPException(404, "Firma nicht gefunden")
-    await log_activity_sicher(user["dealer_id"], user["id"], "firma.webseite.geaendert",
+    await log_activity_sicher(dealer_id, wer, "firma.webseite.geaendert",
                               meta={k.split(".")[-1]: (v if k != "webseite.ueber_uns" else len(v))
                                     for k, v in setzen.items() if k != "webseite.aktualisiert_am"})
-    d = await db.dealers.find_one({"id": user["dealer_id"]}, _FIRMA_FELDER)
-    return _webseite_antwort(d or {}, True)
+    return await _firma_dok(dealer_id)
 
 
 def _bild_bytes(b64: str, wo: str, max_bytes: int) -> bytes:
@@ -313,41 +335,59 @@ def _bild_bytes(b64: str, wo: str, max_bytes: int) -> bytes:
     return raw
 
 
-@router.post("/dealer/webseite/bilder")
-async def bild_hochladen(body: BildIn, user=Depends(current_firma)):
+async def _bild_hochladen(dealer_id: str, b64: str) -> dict:
     """Ein Bild fuer die Firmenseite (hoechstens BILDER_MAX, JPEG verkleinert, oeffentlich)."""
-    await _nur_chef(user)
     from storage_service import StorageError, bild_verkleinern, make_key, save_async, loeschen_oder_vormerken
-    raw = _bild_bytes(body.bild_b64, "Bild", 8 * 1024 * 1024)
+    raw = _bild_bytes(b64, "Bild", 8 * 1024 * 1024)
     try:
         raw = await asyncio.to_thread(bild_verkleinern, raw, "Bild", "JPEG")
-        key = make_key("firma", user["dealer_id"], "bild.jpg")
+        key = make_key("firma", dealer_id, "bild.jpg")
         await save_async(key, raw)
     except StorageError as exc:
         raise HTTPException(400, str(exc))
     r = await db.dealers.update_one(
-        {"id": user["dealer_id"],
+        {"id": dealer_id,
          "$expr": {"$lt": [{"$size": {"$ifNull": ["$webseite.bilder", []]}}, BILDER_MAX]}},
         {"$push": {"webseite.bilder": key}, "$set": {"webseite.aktualisiert_am": now_iso()}})
     if not r.modified_count:
-        await loeschen_oder_vormerken(db, key=key, grund="firmenseite_bild_zu_viele", dealer_id=user["dealer_id"])
+        await loeschen_oder_vormerken(db, key=key, grund="firmenseite_bild_zu_viele", dealer_id=dealer_id)
         raise HTTPException(400, f"Höchstens {BILDER_MAX} Bilder — erst eines entfernen.")
-    d = await db.dealers.find_one({"id": user["dealer_id"]}, _FIRMA_FELDER)
-    return _webseite_antwort(d or {}, True)
+    return await _firma_dok(dealer_id)
+
+
+async def _bild_entfernen(dealer_id: str, key: str) -> dict:
+    if not key.startswith(f"firma/{dealer_id}/"):
+        raise HTTPException(404, "Bild nicht gefunden")
+    r = await db.dealers.update_one({"id": dealer_id},
+                                    {"$pull": {"webseite.bilder": key}, "$set": {"webseite.aktualisiert_am": now_iso()}})
+    if r.modified_count:
+        from storage_service import loeschen_oder_vormerken
+        await loeschen_oder_vormerken(db, key=key, grund="firmenseite_bild_entfernt", dealer_id=dealer_id)
+    return await _firma_dok(dealer_id)
+
+
+@router.get("/dealer/webseite")
+async def get_webseite(user=Depends(current_firma)):
+    return _webseite_antwort(await _firma_dok(user["dealer_id"]), await ist_haupt_chef(user))
+
+
+@router.put("/dealer/webseite")
+async def put_webseite(body: WebseiteIn, user=Depends(current_firma)):
+    """Slug, Ein/Aus, Ueber-uns-Text und Kundendomains — nur der Hauptchef."""
+    await _nur_chef(user)
+    return _webseite_antwort(await _webseite_setzen(user["dealer_id"], body, user["id"]), True)
+
+
+@router.post("/dealer/webseite/bilder")
+async def bild_hochladen(body: BildIn, user=Depends(current_firma)):
+    await _nur_chef(user)
+    return _webseite_antwort(await _bild_hochladen(user["dealer_id"], body.bild_b64), True)
 
 
 @router.delete("/dealer/webseite/bilder/{key:path}")
 async def bild_entfernen(key: str, user=Depends(current_firma)):
     await _nur_chef(user)
-    if not key.startswith(f"firma/{user['dealer_id']}/"):
-        raise HTTPException(404, "Bild nicht gefunden")
-    r = await db.dealers.update_one({"id": user["dealer_id"]},
-                                    {"$pull": {"webseite.bilder": key}, "$set": {"webseite.aktualisiert_am": now_iso()}})
-    if r.modified_count:
-        from storage_service import loeschen_oder_vormerken
-        await loeschen_oder_vormerken(db, key=key, grund="firmenseite_bild_entfernt", dealer_id=user["dealer_id"])
-    d = await db.dealers.find_one({"id": user["dealer_id"]}, _FIRMA_FELDER)
-    return _webseite_antwort(d or {}, True)
+    return _webseite_antwort(await _bild_entfernen(user["dealer_id"], key), True)
 
 
 # ---------------------------------------------------------------- Unterschrift des Chefs
@@ -360,52 +400,66 @@ def _unterschrift_pruefen(raw: bytes, wo: str) -> None:
         raise HTTPException(400, f"{wo} zu groß (max. 2 MB)")
 
 
-@router.post("/dealer/unterschrift")
-async def unterschrift_hochladen(body: UnterschriftIn, user=Depends(current_firma)):
-    """Bild der Unterschrift des Chefs (PNG) — landet im Kasten "Kaeufer / Haendler" jedes ueber
-    das Kundenportal unterschriebenen Vertrags. Nur der Hauptchef."""
-    await _nur_chef(user)
+async def _unterschrift_setzen(dealer_id: str, b64: str, wer: str) -> None:
     from storage_service import StorageError, bild_verkleinern, make_key, save_async, loeschen_oder_vormerken
-    raw = _bild_bytes(body.bild_b64, "Unterschrift", 2 * 1024 * 1024)
+    raw = _bild_bytes(b64, "Unterschrift", 2 * 1024 * 1024)
     _unterschrift_pruefen(raw, "Unterschrift")
     try:
         raw = await asyncio.to_thread(bild_verkleinern, raw, "Unterschrift", "PNG")
-        key = make_key("unterschrift", user["dealer_id"], "unterschrift.png")
+        key = make_key("unterschrift", dealer_id, "unterschrift.png")
         await save_async(key, raw)
     except StorageError as exc:
         raise HTTPException(400, str(exc))
-    alt = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0, "unterschrift_key": 1})
-    await db.dealers.update_one({"id": user["dealer_id"]},
-                                {"$set": {"unterschrift_key": key, "unterschrift_am": now_iso()}})
-    if (alt or {}).get("unterschrift_key") and alt["unterschrift_key"] != key:
+    alt = await db.dealers.find_one({"id": dealer_id}, {"_id": 0, "unterschrift_key": 1})
+    if alt is None:
+        await loeschen_oder_vormerken(db, key=key, grund="chef_unterschrift_ohne_firma", dealer_id=dealer_id)
+        raise HTTPException(404, "Firma nicht gefunden")
+    await db.dealers.update_one({"id": dealer_id}, {"$set": {"unterschrift_key": key, "unterschrift_am": now_iso()}})
+    if alt.get("unterschrift_key") and alt["unterschrift_key"] != key:
         await loeschen_oder_vormerken(db, key=alt["unterschrift_key"], grund="chef_unterschrift_ersetzt",
-                                      dealer_id=user["dealer_id"])
-    await log_activity_sicher(user["dealer_id"], user["id"], "firma.unterschrift.hochgeladen")
-    return {"ok": True, "unterschrift_vorhanden": True}
+                                      dealer_id=dealer_id)
+    await log_activity_sicher(dealer_id, wer, "firma.unterschrift.hochgeladen")
 
 
-@router.delete("/dealer/unterschrift")
-async def unterschrift_entfernen(user=Depends(current_firma)):
-    await _nur_chef(user)
-    d = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0, "unterschrift_key": 1})
+async def _unterschrift_loeschen(dealer_id: str) -> None:
+    d = await db.dealers.find_one({"id": dealer_id}, {"_id": 0, "unterschrift_key": 1})
     key = (d or {}).get("unterschrift_key")
-    await db.dealers.update_one({"id": user["dealer_id"]}, {"$unset": {"unterschrift_key": "", "unterschrift_am": ""}})
+    await db.dealers.update_one({"id": dealer_id}, {"$unset": {"unterschrift_key": "", "unterschrift_am": ""}})
     if key:
         from storage_service import loeschen_oder_vormerken
-        await loeschen_oder_vormerken(db, key=key, grund="chef_unterschrift_entfernt", dealer_id=user["dealer_id"])
-    return {"ok": True, "unterschrift_vorhanden": False}
+        await loeschen_oder_vormerken(db, key=key, grund="chef_unterschrift_entfernt", dealer_id=dealer_id)
 
 
-@router.get("/dealer/unterschrift")
-async def unterschrift_anzeigen(user=Depends(current_firma)):
-    """Vorschau fuer die Einstellungen (Chef und Sucher der Firma) — nie ueber /api/files."""
-    d = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0, "unterschrift_key": 1})
+async def _unterschrift_antwort(dealer_id: str) -> Response:
+    d = await db.dealers.find_one({"id": dealer_id}, {"_id": 0, "unterschrift_key": 1})
     key = (d or {}).get("unterschrift_key")
     daten = await _datei_bytes(key) if key else None
     if not daten:
         raise HTTPException(404, "Keine Unterschrift hinterlegt")
     return Response(content=daten, media_type="image/png",
                     headers={"Cache-Control": "private, no-store", "X-Robots-Tag": "noindex"})
+
+
+@router.post("/dealer/unterschrift")
+async def unterschrift_hochladen(body: UnterschriftIn, user=Depends(current_firma)):
+    """Bild der Unterschrift des Chefs (PNG) — landet im Kasten "Kaeufer / Haendler" jedes ueber
+    das Kundenportal unterschriebenen Vertrags. Nur der Hauptchef."""
+    await _nur_chef(user)
+    await _unterschrift_setzen(user["dealer_id"], body.bild_b64, user["id"])
+    return {"ok": True, "unterschrift_vorhanden": True}
+
+
+@router.delete("/dealer/unterschrift")
+async def unterschrift_entfernen(user=Depends(current_firma)):
+    await _nur_chef(user)
+    await _unterschrift_loeschen(user["dealer_id"])
+    return {"ok": True, "unterschrift_vorhanden": False}
+
+
+@router.get("/dealer/unterschrift")
+async def unterschrift_anzeigen(user=Depends(current_firma)):
+    """Vorschau fuer die Einstellungen (Chef und Sucher der Firma) — nie ueber /api/files."""
+    return await _unterschrift_antwort(user["dealer_id"])
 
 
 async def _datei_bytes(key: Optional[str]) -> Optional[bytes]:
@@ -418,6 +472,148 @@ async def _datei_bytes(key: Optional[str]) -> Optional[bytes]:
     except Exception as exc:  # noqa: BLE001
         log.info("Datei %s nicht ladbar: %s", key, exc)
         return None
+
+
+# ---------------------------------------------------------------- Domain pruefen (Weg A)
+async def _dns(host: str) -> List[str]:
+    infos = await asyncio.wait_for(asyncio.to_thread(socket.getaddrinfo, host, 443, type=socket.SOCK_STREAM),
+                                   PRUEFUNG_ZEITLIMIT_S)
+    return sorted({i[4][0] for i in infos})
+
+
+async def _https_firma(host: str) -> Dict[str, Any]:
+    """GET https://<host>/api/public/firma?host=<host> wie ein Besucher — Status, Cloudflare-Kopf, Slug."""
+    import httpx
+    async with httpx.AsyncClient(timeout=PRUEFUNG_ZEITLIMIT_S, follow_redirects=False,
+                                 headers={"User-Agent": "AutoSchnell-Domainpruefung/1.0"}) as client:
+        r = await client.get(f"https://{host}/api/public/firma", params={"host": host})
+    slug = None
+    if r.status_code == 200:
+        try:
+            slug = (r.json() or {}).get("slug")
+        except ValueError:
+            slug = None
+    return {"status": r.status_code, "cloudflare": bool(r.headers.get("cf-ray")) or "cloudflare" in (r.headers.get("server") or "").lower(),
+            "slug": slug}
+
+
+async def domain_pruefen(domain: str, slug: str) -> Dict[str, Any]:
+    """Weg A, Schritt fuer Schritt: DNS (zeigt die Domain irgendwohin?) -> Proxy (FIRMEN_HOSTS) ->
+    HTTPS (Zertifikat, Verbindung, Cloudflare) -> Firmenseite (antwortet die Plattform mit DIESER Firma?).
+    Jeder Schritt mit ok/Text; 'naechster_schritt' sagt in Klartext, was als Naechstes zu tun ist."""
+    h = host_normalisieren(domain)
+    if not HOST_RE.match(h) or re.fullmatch(r"[0-9.]+", h) or h.endswith(".localhost") or h == "localhost":
+        raise HTTPException(400, "Keine gültige Domain (z. B. kfz-mueller.de).")
+    haupt = (urlparse(_hauptadresse()).hostname or "app.auto-schnellkauf.de")
+    schritte: List[Dict[str, Any]] = []
+    naechster = ""
+    # 1. DNS
+    try:
+        ips = await _dns(h)
+        schritte.append({"schritt": "dns", "ok": bool(ips), "text": f"Domain zeigt auf {', '.join(ips)}" if ips else "Domain zeigt nirgendwohin"})
+    except Exception as exc:  # noqa: BLE001
+        ips = []
+        schritte.append({"schritt": "dns", "ok": False, "text": f"Domain nicht auflösbar ({type(exc).__name__})"})
+    if not ips:
+        naechster = (f"DNS: bei Cloudflare für {h} die Einträge @ und www als CNAME auf {haupt} anlegen (Proxy an) "
+                     "— oder die Nameserver der Domain zuerst auf Cloudflare umstellen.")
+    # 2. Proxy
+    bekannt = proxy_kennt(h)
+    schritte.append({"schritt": "proxy", "ok": bekannt,
+                     "text": "Proxy kennt die Domain (FIRMEN_HOSTS)" if bekannt else "Proxy kennt die Domain noch nicht"})
+    if not naechster and not bekannt:
+        naechster = (f"Proxy: auf beiden Servern  sh deploy/env_setzen.sh 'FIRMEN_HOSTS=<bisher> {h}'  und danach "
+                     "docker compose up -d --force-recreate --no-deps proxy  — bis dahin antwortet die Domain nicht (444).")
+    # 3. HTTPS + 4. Firmenseite (nur wenn DNS steht)
+    https: Dict[str, Any] = {}
+    if ips:
+        try:
+            https = await _https_firma(h)
+            ok = 200 <= https["status"] < 500
+            schritte.append({"schritt": "https", "ok": ok,
+                             "text": f"HTTPS antwortet (Status {https['status']}{', über Cloudflare' if https['cloudflare'] else ''})"
+                             if ok else f"HTTPS antwortet mit Status {https['status']}"})
+        except Exception as exc:  # noqa: BLE001
+            schritte.append({"schritt": "https", "ok": False, "text": f"HTTPS-Verbindung scheitert ({type(exc).__name__}: {str(exc)[:120]})"})
+            if not naechster:
+                naechster = ("HTTPS: Zertifikat/Verbindung — bei Cloudflare den Proxy (orange Wolke) einschalten und unter "
+                             "SSL/TLS den Modus „Full“ wählen; ein paar Minuten warten.")
+        if https:
+            if https["status"] == 200 and https.get("slug") == slug:
+                schritte.append({"schritt": "firmenseite", "ok": True, "text": f"Firmenseite antwortet für „{slug}“"})
+            elif https["status"] == 200:
+                schritte.append({"schritt": "firmenseite", "ok": False, "text": f"Domain gehört zu einer anderen Firma („{https.get('slug')}“)"})
+                naechster = naechster or "Die Domain ist bei einer anderen Firma eingetragen — dort entfernen."
+            elif https["status"] == 404:
+                schritte.append({"schritt": "firmenseite", "ok": False, "text": "Plattform kennt die Domain nicht (404)"})
+                naechster = naechster or "Domain in der Firmenseite eintragen, speichern und die Firmenseite einschalten."
+            elif https["status"] in (444, 403, 421):
+                schritte.append({"schritt": "firmenseite", "ok": False, "text": f"Proxy weist die Domain ab ({https['status']})"})
+                naechster = naechster or "Proxy: FIRMEN_HOSTS ergänzen und den Proxy neu erzeugen (siehe oben)."
+            else:
+                schritte.append({"schritt": "firmenseite", "ok": False, "text": f"Unerwartete Antwort ({https['status']})"})
+                naechster = naechster or "Unerwartete Antwort — Betriebsseite und Proxy-Log prüfen."
+    alles_ok = bool(schritte) and all(s["ok"] for s in schritte)
+    return {"domain": h, "ok": alles_ok, "schritte": schritte,
+            "naechster_schritt": "" if alles_ok else naechster,
+            "url": f"https://{h}", "geprueft_am": now_iso()}
+
+
+@router.get("/dealer/webseite/domain-pruefung")
+async def dealer_domain_pruefung(domain: str, user=Depends(current_firma)):
+    """Der Chef prueft nur seine eigenen Domains (keine Abfragen fremder Adressen ueber uns)."""
+    d = await _firma_dok(user["dealer_id"])
+    w = d.get("webseite") or {}
+    h = host_normalisieren(domain)
+    if h not in (w.get("domains") or []) and slug_aus_host(h) != (w.get("slug") or "-"):
+        raise HTTPException(400, "Bitte zuerst die Domain in der Firmenseite eintragen und speichern.")
+    return await domain_pruefen(h, w.get("slug") or "")
+
+
+# ---------------------------------------------------------------- Betreiber (Weg A: Ahmad richtet ein)
+@router.get("/admin/dealers/{dealer_id}/webseite")
+async def admin_get_webseite(dealer_id: str, admin=Depends(current_super_admin)):
+    return _webseite_antwort(await _firma_dok(dealer_id), True)
+
+
+@router.put("/admin/dealers/{dealer_id}/webseite")
+async def admin_put_webseite(dealer_id: str, body: WebseiteIn, admin=Depends(current_super_admin)):
+    return _webseite_antwort(await _webseite_setzen(dealer_id, body, admin["id"]), True)
+
+
+@router.post("/admin/dealers/{dealer_id}/webseite/bilder")
+async def admin_bild_hochladen(dealer_id: str, body: BildIn, admin=Depends(current_super_admin)):
+    await _firma_dok(dealer_id)
+    return _webseite_antwort(await _bild_hochladen(dealer_id, body.bild_b64), True)
+
+
+@router.delete("/admin/dealers/{dealer_id}/webseite/bilder/{key:path}")
+async def admin_bild_entfernen(dealer_id: str, key: str, admin=Depends(current_super_admin)):
+    return _webseite_antwort(await _bild_entfernen(dealer_id, key), True)
+
+
+@router.post("/admin/dealers/{dealer_id}/unterschrift")
+async def admin_unterschrift_hochladen(dealer_id: str, body: UnterschriftIn, admin=Depends(current_super_admin)):
+    await _unterschrift_setzen(dealer_id, body.bild_b64, admin["id"])
+    return {"ok": True, "unterschrift_vorhanden": True}
+
+
+@router.delete("/admin/dealers/{dealer_id}/unterschrift")
+async def admin_unterschrift_entfernen(dealer_id: str, admin=Depends(current_super_admin)):
+    await _firma_dok(dealer_id)
+    await _unterschrift_loeschen(dealer_id)
+    return {"ok": True, "unterschrift_vorhanden": False}
+
+
+@router.get("/admin/dealers/{dealer_id}/unterschrift")
+async def admin_unterschrift_anzeigen(dealer_id: str, admin=Depends(current_super_admin)):
+    return await _unterschrift_antwort(dealer_id)
+
+
+@router.get("/admin/dealers/{dealer_id}/webseite/domain-pruefung")
+async def admin_domain_pruefung(dealer_id: str, domain: str, admin=Depends(current_super_admin)):
+    d = await _firma_dok(dealer_id)
+    return await domain_pruefen(domain, ((d.get("webseite") or {}).get("slug")) or "")
 
 
 # ---------------------------------------------------------------- Code-Freigabe (Sucher/Chef)
@@ -454,7 +650,7 @@ def _portal_antwort(c: dict, slug: str) -> dict:
             "laeuft_ab": p.get("laeuft_ab"), "version": p.get("version"), "aktuelle_version": version,
             "unterschrieben_am": p.get("unterschrieben_am"), "name": p.get("name"),
             "url": firmen_url(slug) if slug else "", "slug": slug,
-            "pdf_signiert": bool(c.get("pdf_signiert_b64"))}
+            "pdf_signiert": bool(c.get("pdf_signiert_b64")), "code_tage": PORTAL_CODE_TAGE}
 
 
 async def _vertrag_und_slug(contract_id: str, user: dict) -> tuple:
@@ -523,10 +719,8 @@ async def portal_zurueckziehen(contract_id: str, user=Depends(current_firma)):
         {"id": contract_id, **_vertrag_bereich(user), "portal.status": "offen"},
         {"$set": {"portal.status": "zurueckgezogen", "portal.zurueckgezogen_am": now_iso(),
                   "portal.zurueckgezogen_von": user.get("id")}})
-    if not r.matched_count:
-        c, slug, _aktiv = await _vertrag_und_slug(contract_id, user)
-        return _portal_antwort(c, slug)
-    await log_activity_sicher(user["dealer_id"], user["id"], "vertrag.portal.zurueckgezogen", ref=contract_id)
+    if r.matched_count:
+        await log_activity_sicher(user["dealer_id"], user["id"], "vertrag.portal.zurueckgezogen", ref=contract_id)
     c, slug, _aktiv = await _vertrag_und_slug(contract_id, user)
     return _portal_antwort(c, slug)
 

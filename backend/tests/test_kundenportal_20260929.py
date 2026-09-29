@@ -7,6 +7,7 @@ import asyncio
 import base64
 import io
 import os
+import socket
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -350,3 +351,84 @@ def test_06_pdf_mit_unterschriften():
     kaputt = generate_contract_pdf(dealer=dealer, vehicle={}, contract=cd,
                                    unterschriften={"verkaeufer": b"kein bild", "verkaeufer_text": "x"})
     assert kaputt[:4] == b"%PDF"
+
+
+# ------------------------------------------------------------------ Weg A: Betreiber richtet ein, Domain pruefen
+SUPER = {"id": "sa", "role": "admin", "is_super_admin": True}
+
+
+def test_07_betreiber_richtet_firmenseite_ein(welt):
+    w = welt
+    st = _lauf(KP.admin_get_webseite(w.dealer_id, admin=SUPER))
+    assert st["ist_chef"] is True and st["firma"] == "KFZ Müller GmbH" and st["slug_vorschlag"] == "kfz-mueller-gmbh"
+    st = _lauf(KP.admin_put_webseite(w.dealer_id, KP.WebseiteIn(slug="kfz-mueller", aktiv=True, ueber_uns="Hallo",
+                                                                  domains=["kfz-mueller.de"]), admin=SUPER))
+    assert st["webseite"]["slug"] == "kfz-mueller" and st["webseite"]["domains"] == ["kfz-mueller.de"]
+    assert _fehler(KP.admin_put_webseite("gibt-es-nicht", KP.WebseiteIn(slug="x-y-z"), admin=SUPER)).status_code == 404
+    st = _lauf(KP.admin_bild_hochladen(w.dealer_id, KP.BildIn(bild_b64=_b64(_png())), admin=SUPER))
+    assert len(st["webseite"]["bilder"]) == 1
+    st = _lauf(KP.admin_bild_entfernen(w.dealer_id, st["webseite"]["bilder"][0]["key"], admin=SUPER))
+    assert st["webseite"]["bilder"] == []
+    assert _lauf(KP.admin_unterschrift_hochladen(w.dealer_id, KP.UnterschriftIn(bild_b64=_b64(_png())), admin=SUPER))["unterschrift_vorhanden"]
+    assert _lauf(KP.admin_unterschrift_anzeigen(w.dealer_id, admin=SUPER)).media_type == "image/png"
+    assert _lauf(KP.admin_unterschrift_entfernen(w.dealer_id, admin=SUPER))["unterschrift_vorhanden"] is False
+    assert _fehler(KP.admin_unterschrift_hochladen("gibt-es-nicht", KP.UnterschriftIn(bild_b64=_b64(_png())), admin=SUPER)).status_code == 404
+    # das Audit nennt den Betreiber als Verursacher
+    a = w.run(w.db.activity_logs.find_one({"dealer_id": w.dealer_id, "action": "firma.webseite.geaendert"}, {"_id": 0}))
+    assert a and a.get("user_id") == "sa"
+    # oeffentlich sichtbar wie vom Chef eingerichtet
+    assert _lauf(KP.public_firma(host="kfz-mueller.de"))["ueber_uns"] == "Hallo"
+
+
+def test_08_proxy_hosts_und_domain_pruefung(welt, monkeypatch):
+    w = welt
+    monkeypatch.setenv("FIRMEN_HOSTS", "*.auto-schnellkauf.de kfz-mueller.de, www.kfz-mueller.de")
+    assert KP.proxy_hosts() == ["*.auto-schnellkauf.de", "kfz-mueller.de", "www.kfz-mueller.de"]
+    assert KP.proxy_kennt("kfz-mueller.auto-schnellkauf.de") and KP.proxy_kennt("KFZ-Mueller.de:443")
+    assert KP.proxy_kennt("app.auto-schnellkauf.de")                      # Hauptadresse immer
+    assert not KP.proxy_kennt("a.b.auto-schnellkauf.de") and not KP.proxy_kennt("andere.de")
+    _lauf(KP.put_webseite(KP.WebseiteIn(slug="kfz-mueller", aktiv=True, domains=["kfz-mueller.de", "neu.example"]), user=w.chef))
+    # DNS/HTTPS werden ersetzt — keine echten Netzaufrufe im Test
+    antworten = {}
+
+    async def dns(host):
+        if host in antworten.get("dns", {}):
+            return antworten["dns"][host]
+        raise socket.gaierror("kein Eintrag")
+
+    async def https(host):
+        return antworten["https"][host]
+    monkeypatch.setattr(KP, "_dns", dns)
+    monkeypatch.setattr(KP, "_https_firma", https)
+    # 1) DNS fehlt -> erster Schritt rot, Proxy kennt sie nicht -> naechster Schritt = DNS
+    antworten = {"dns": {}, "https": {}}
+    e = _lauf(KP.admin_domain_pruefung(w.dealer_id, "neu.example", admin=SUPER))
+    assert e["ok"] is False and [s["ok"] for s in e["schritte"]] == [False, False]
+    assert e["naechster_schritt"].startswith("DNS:") and "CNAME auf app.auto-schnellkauf.de" in e["naechster_schritt"]
+    # 2) DNS ok, Proxy kennt sie nicht, Plattform antwortet 444 -> naechster Schritt = Proxy
+    antworten = {"dns": {"neu.example": ["104.21.6.253"]}, "https": {"neu.example": {"status": 444, "cloudflare": True, "slug": None}}}
+    e = _lauf(KP.admin_domain_pruefung(w.dealer_id, "neu.example", admin=SUPER))
+    assert [s["schritt"] for s in e["schritte"]] == ["dns", "proxy", "https", "firmenseite"]
+    assert e["naechster_schritt"].startswith("Proxy:") and "FIRMEN_HOSTS" in e["naechster_schritt"]
+    # 3) alles steht, aber die Domain ist bei einer anderen Firma eingetragen
+    antworten = {"dns": {"kfz-mueller.de": ["104.21.6.253"]}, "https": {"kfz-mueller.de": {"status": 200, "cloudflare": True, "slug": "andere"}}}
+    e = _lauf(KP.admin_domain_pruefung(w.dealer_id, "kfz-mueller.de", admin=SUPER))
+    assert e["ok"] is False and "anderen Firma" in e["schritte"][-1]["text"]
+    # 4) alles gut
+    antworten["https"]["kfz-mueller.de"] = {"status": 200, "cloudflare": True, "slug": "kfz-mueller"}
+    e = _lauf(KP.admin_domain_pruefung(w.dealer_id, "kfz-mueller.de", admin=SUPER))
+    assert e["ok"] is True and e["naechster_schritt"] == "" and e["url"] == "https://kfz-mueller.de"
+    assert all(s["ok"] for s in e["schritte"]) and "über Cloudflare" in e["schritte"][2]["text"]
+    # 5) HTTPS scheitert (Zertifikat) -> Hinweis auf Cloudflare-Proxy / SSL Full
+    async def https_kaputt(host):
+        raise ConnectionError("certificate verify failed")
+    monkeypatch.setattr(KP, "_https_firma", https_kaputt)
+    e = _lauf(KP.admin_domain_pruefung(w.dealer_id, "kfz-mueller.de", admin=SUPER))
+    assert e["schritte"][2]["ok"] is False and e["naechster_schritt"].startswith("HTTPS:")
+    # Chef prueft nur eigene Domains; ungueltige Domain -> 400
+    monkeypatch.setattr(KP, "_https_firma", https)
+    assert _fehler(KP.dealer_domain_pruefung("fremde.example", user=w.chef)).status_code == 400
+    assert _lauf(KP.dealer_domain_pruefung("kfz-mueller.de", user=w.chef))["ok"] is True
+    assert _lauf(KP.dealer_domain_pruefung("kfz-mueller.auto-schnellkauf.de", user=w.chef))["schritte"][1]["ok"] is True
+    assert _fehler(KP.admin_domain_pruefung(w.dealer_id, "127.0.0.1", admin=SUPER)).status_code == 400
+    assert _fehler(KP.admin_domain_pruefung(w.dealer_id, "kein host", admin=SUPER)).status_code == 400

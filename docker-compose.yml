@@ -354,6 +354,8 @@ services:
       # app./www.), Gueltigkeit der 6-stelligen Codes in Tagen
       - FIRMEN_DOMAIN=${FIRMEN_DOMAIN:-}
       - PORTAL_CODE_TAGE=${PORTAL_CODE_TAGE:-7}
+      # dieselbe Liste wie beim Proxy — "Domain pruefen" im Admin sagt damit, ob der Proxy die Domain kennt
+      - FIRMEN_HOSTS=${FIRMEN_HOSTS:-}
       - FRONTEND_URL=${FRONTEND_URL:-}
       - PUBLIC_API_URL=${PUBLIC_API_URL:-}
       # Aufbewahrung / Loeschung: Vertragsloeschung ist seit 14.09.2026 SCHARF

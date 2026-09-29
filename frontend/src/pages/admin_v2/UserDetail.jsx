@@ -12,6 +12,7 @@ import {
 import { PageHeader, Card, Badge, Button, Spinner, EmptyState, fmtDate, fmtNum } from "./_ui";
 import ZugangsdatenKarte from "@/components/admin/ZugangsdatenKarte";
 import PasswortFeld from "@/components/admin/PasswortFeld";
+import FirmenseiteEinstellungen from "@/components/FirmenseiteEinstellungen";
 import { passwortProblem } from "@/lib/passwort";
 
 // Nur der Kalendertag (aus dem ISO-String, ohne Zeitzonen-Verschiebung):
@@ -735,6 +736,14 @@ export default function AdminUserDetail() {
               </ul>
             )}
           </Card>
+        </div>
+      )}
+
+      {/* Kundenportal (29.09.2026, Weg A): der Betreiber richtet die Firmenseite fuer den Kunden ein —
+          Adresse, Ein/Aus, Ueber uns, Bilder, Domains (mit "Domain pruefen") und die Unterschrift des Chefs */}
+      {dealerId && (
+        <div className="mt-4" data-testid="admin-firmenseite">
+          <FirmenseiteEinstellungen adminDealerId={dealerId} />
         </div>
       )}
 

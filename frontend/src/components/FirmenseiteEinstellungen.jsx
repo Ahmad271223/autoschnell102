@@ -1,15 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
-import { Copy, ExternalLink, Globe, ImagePlus, PenLine, Trash2 } from "lucide-react";
+import { CheckCircle2, Copy, ExternalLink, Globe, ImagePlus, PenLine, SearchCheck, Trash2, XCircle } from "lucide-react";
 import { toast } from "sonner";
 import { api, errMsg } from "@/lib/api";
 import { inZwischenablage } from "@/components/KundenportalDialog";
 
 /**
- * Einstellungen → "Firmenseite & Kundenportal" (Wunsch Ahmad 29.09.2026): Jede Firma bekommt
- * eine eigene Seite (Adresse per DNS), auf der Kunden mit einem 6-stelligen Code ihren Kaufvertrag
- * öffnen und digital unterschreiben. Hier pflegt der Chef: Adresse (Unterdomain), Ein/Aus,
- * "Über uns", bis zu sechs Bilder, eigene Kundendomains und das Bild seiner Unterschrift
- * (landet im Kasten "Käufer / Händler" jedes über das Portal unterschriebenen Vertrags).
+ * "Firmenseite & Kundenportal" (Wunsch Ahmad 29.09.2026): Jede Firma bekommt eine eigene Seite
+ * (Adresse per DNS), auf der Kunden mit einem 6-stelligen Code ihren Kaufvertrag öffnen und digital
+ * unterschreiben. Gepflegt werden: Adresse (Unterdomain), Ein/Aus, „Über uns“, bis zu sechs Bilder,
+ * eigene Kundendomains (mit „Domain prüfen“) und das Bild der Unterschrift des Chefs.
+ *
+ * Zwei Einsatzorte, derselbe Baustein:
+ *   - Einstellungen der Firma (Chef pflegt, Sucher sieht nur)      -> /dealer/…
+ *   - Admin → Firma (Weg A: der Betreiber richtet für den Kunden ein) -> /admin/dealers/<id>/… (adminDealerId)
  */
 function dateiAlsDataUrl(file) {
   return new Promise((res, rej) => {
@@ -22,12 +25,14 @@ function dateiAlsDataUrl(file) {
 
 const BACKEND = process.env.REACT_APP_BACKEND_URL || "";
 
-export default function FirmenseiteEinstellungen({ user }) {
+export default function FirmenseiteEinstellungen({ adminDealerId = null }) {
+  const basis = adminDealerId ? `/admin/dealers/${adminDealerId}` : "/dealer";
   const [stand, setStand] = useState(null);
   const [form, setForm] = useState({ slug: "", aktiv: false, ueber_uns: "", domains: "" });
   const [fehler, setFehler] = useState("");
   const [busy, setBusy] = useState(false);
   const [unterschriftUrl, setUnterschriftUrl] = useState(null);
+  const [pruefung, setPruefung] = useState({});          // domain -> Ergebnis | {laeuft: true}
 
   const uebernehmen = useCallback((data) => {
     setStand(data);
@@ -36,13 +41,13 @@ export default function FirmenseiteEinstellungen({ user }) {
   }, []);
   const laden = useCallback(async () => {
     try {
-      const { data } = await api.get("/dealer/webseite");
+      const { data } = await api.get(`${basis}/webseite`);
       if (data) uebernehmen(data);
       setFehler("");
     } catch (e) {
       setFehler(errMsg(e, "Firmenseite konnte nicht geladen werden"));
     }
-  }, [uebernehmen]);
+  }, [basis, uebernehmen]);
   useEffect(() => { laden(); }, [laden]);
 
   // Unterschrift-Vorschau: privater Pfad, nur angemeldet — als Blob laden
@@ -52,19 +57,19 @@ export default function FirmenseiteEinstellungen({ user }) {
     (async () => {
       if (!stand?.unterschrift_vorhanden) { setUnterschriftUrl(null); return; }
       try {
-        const { data } = await api.get("/dealer/unterschrift", { responseType: "blob" });
+        const { data } = await api.get(`${basis}/unterschrift`, { responseType: "blob" });
         url = URL.createObjectURL(data);
         if (aktiv) setUnterschriftUrl(url);
       } catch { if (aktiv) setUnterschriftUrl(null); }
     })();
     return () => { aktiv = false; if (url) URL.revokeObjectURL(url); };
-  }, [stand?.unterschrift_vorhanden]);
+  }, [basis, stand?.unterschrift_vorhanden]);
 
-  const istChef = !!stand?.ist_chef;
+  const istChef = !!adminDealerId || !!stand?.ist_chef;
   const speichern = async () => {
     setBusy(true);
     try {
-      const { data } = await api.put("/dealer/webseite", {
+      const { data } = await api.put(`${basis}/webseite`, {
         slug: form.slug.trim().toLowerCase(), aktiv: form.aktiv, ueber_uns: form.ueber_uns,
         domains: form.domains.split(/\r?\n|,/).map((d) => d.trim()).filter(Boolean),
       });
@@ -80,7 +85,7 @@ export default function FirmenseiteEinstellungen({ user }) {
     if (file.size > 8 * 1024 * 1024) { toast.error("Bild zu groß (max. 8 MB)"); return; }
     setBusy(true);
     try {
-      const { data } = await api.post("/dealer/webseite/bilder", { bild_b64: await dateiAlsDataUrl(file) });
+      const { data } = await api.post(`${basis}/webseite/bilder`, { bild_b64: await dateiAlsDataUrl(file) });
       uebernehmen(data);
       toast.success("Bild hochgeladen");
     } catch (e) { toast.error(errMsg(e, "Bild konnte nicht hochgeladen werden")); } finally { setBusy(false); }
@@ -88,7 +93,7 @@ export default function FirmenseiteEinstellungen({ user }) {
   const bildEntfernen = async (key) => {
     setBusy(true);
     try {
-      const { data } = await api.delete(`/dealer/webseite/bilder/${key}`);
+      const { data } = await api.delete(`${basis}/webseite/bilder/${key}`);
       uebernehmen(data);
     } catch (e) { toast.error(errMsg(e, "Bild konnte nicht entfernt werden")); } finally { setBusy(false); }
   };
@@ -97,7 +102,7 @@ export default function FirmenseiteEinstellungen({ user }) {
     if (file.size > 2 * 1024 * 1024) { toast.error("Unterschrift zu groß (max. 2 MB)"); return; }
     setBusy(true);
     try {
-      await api.post("/dealer/unterschrift", { bild_b64: await dateiAlsDataUrl(file) });
+      await api.post(`${basis}/unterschrift`, { bild_b64: await dateiAlsDataUrl(file) });
       setStand((s) => ({ ...(s || {}), unterschrift_vorhanden: true }));
       toast.success("Unterschrift hinterlegt");
     } catch (e) { toast.error(errMsg(e, "Unterschrift konnte nicht hochgeladen werden")); } finally { setBusy(false); }
@@ -105,7 +110,7 @@ export default function FirmenseiteEinstellungen({ user }) {
   const unterschriftEntfernen = async () => {
     setBusy(true);
     try {
-      await api.delete("/dealer/unterschrift");
+      await api.delete(`${basis}/unterschrift`);
       setStand((s) => ({ ...(s || {}), unterschrift_vorhanden: false }));
     } catch (e) { toast.error(errMsg(e, "Unterschrift konnte nicht entfernt werden")); } finally { setBusy(false); }
   };
@@ -113,17 +118,29 @@ export default function FirmenseiteEinstellungen({ user }) {
     if (await inZwischenablage(text)) toast.success("Adresse kopiert");
     else toast.error("Konnte nicht kopieren");
   };
+  // Weg A: Domain Schritt für Schritt prüfen (DNS → Proxy → HTTPS → Firmenseite) — nur gespeicherte Domains
+  const domainPruefen = async (domain) => {
+    setPruefung((p) => ({ ...p, [domain]: { laeuft: true } }));
+    try {
+      const { data } = await api.get(`${basis}/webseite/domain-pruefung`, { params: { domain } });
+      setPruefung((p) => ({ ...p, [domain]: data }));
+    } catch (e) {
+      setPruefung((p) => ({ ...p, [domain]: { ok: false, schritte: [], naechster_schritt: errMsg(e, "Prüfung fehlgeschlagen") } }));
+    }
+  };
 
   const bilder = stand?.webseite?.bilder || [];
+  const gespeicherteDomains = stand?.webseite?.domains || [];
   const bildSrc = (url) => (url?.startsWith("http") ? url : `${BACKEND}${url}`);
 
   return (
     <div className="apple-surface p-6 mt-4" data-testid="firmenseite-einstellungen">
       <div className="mb-4">
-        <h2 className="font-display font-bold text-xl tracking-tight flex items-center gap-2"><Globe size={18} /> Firmenseite &amp; Kundenportal</h2>
+        <h2 className="font-display font-bold text-xl tracking-tight flex items-center gap-2"><Globe size={18} /> Firmenseite &amp; Kundenportal{adminDealerId && stand?.firma ? ` — ${stand.firma}` : ""}</h2>
         <p className="text-sm text-zinc-500 mt-1">
-          Eure eigene Seite mit Logo, „Über uns“, Bildern und dem Kundenportal: Kunden geben dort den 6-stelligen Code
-          aus der App ein, sehen ihren Kaufvertrag und unterschreiben digital — ihr bekommt die Bestätigung als Meldung.
+          {adminDealerId
+            ? "Du richtest die Firmenseite für diese Firma ein: Adresse, Text, Bilder, Kundendomain und die Unterschrift des Chefs. Kunden geben dort den Code aus der App ein und unterschreiben ihren Kaufvertrag digital."
+            : "Eure eigene Seite mit Logo, „Über uns“, Bildern und dem Kundenportal: Kunden geben dort den 6-stelligen Code aus der App ein, sehen ihren Kaufvertrag und unterschreiben digital — ihr bekommt die Bestätigung als Meldung."}
         </p>
       </div>
       {fehler && <div className="text-sm text-red-400 mb-3" data-testid="firmenseite-fehler">{fehler}</div>}
@@ -198,22 +215,57 @@ export default function FirmenseiteEinstellungen({ user }) {
             ) : <div className="text-[12px] text-zinc-500 mt-1">Noch keine Bilder — z. B. Hof, Team, Ankauf vor Ort.</div>}
           </div>
 
-          {/* Eigene Domains */}
+          {/* Eigene Domains + Prüfung (Weg A) */}
           <div>
             <label className="text-[12px] font-semibold text-zinc-400">Eigene Kundendomains (optional, eine je Zeile)</label>
             <textarea value={form.domains} onChange={(e) => setForm({ ...form, domains: e.target.value })} disabled={!istChef}
                       rows={2} className="apple-input w-full mt-1 font-mono text-[13px]" placeholder="kfz-mueller.de" data-testid="firmenseite-domains" />
             <div className="text-[11.5px] text-zinc-500 mt-1">
-              Damit eine eigene Domain funktioniert, muss sie per DNS (CNAME) auf die Plattform zeigen und beim Betreiber
-              freigeschaltet werden — bitte nach dem Speichern kurz Bescheid geben. Bis dahin gilt die Unterdomain.
+              {adminDealerId
+                ? "Weg A: Domain kaufen → bei Cloudflare als Website hinzufügen (Nameserver umstellen) → @ und www als CNAME auf die Plattform (Proxy an, SSL „Full“) → FIRMEN_HOSTS auf beiden Servern → hier speichern und prüfen."
+                : "Damit eine eigene Domain funktioniert, richtet der Betreiber sie ein (DNS und Freischaltung) — nach dem Speichern bitte kurz Bescheid geben. Bis dahin gilt die Unterdomain."}
             </div>
+            {gespeicherteDomains.length > 0 && (
+              <div className="mt-2 space-y-2" data-testid="firmenseite-domain-pruefungen">
+                {gespeicherteDomains.map((d) => {
+                  const p = pruefung[d];
+                  return (
+                    <div key={d} className="rounded-xl px-3 py-2" style={{ background: "var(--wa-05)", border: "1px solid var(--divider)" }} data-testid={`domain-${d}`}>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-mono text-[13px]">{d}</span>
+                        <button type="button" onClick={() => domainPruefen(d)} disabled={!!p?.laeuft}
+                                className="inline-flex items-center gap-1.5 text-[12px] font-semibold px-3 py-1.5 rounded-full disabled:opacity-60"
+                                style={{ background: "var(--apple-btn-secondary-bg)" }} data-testid={`domain-pruefen-${d}`}>
+                          <SearchCheck size={13} /> {p?.laeuft ? "prüft…" : "Domain prüfen"}
+                        </button>
+                      </div>
+                      {p && !p.laeuft && (
+                        <div className="mt-2 space-y-1 text-[12.5px]" data-testid={`domain-ergebnis-${d}`}>
+                          {(p.schritte || []).map((s) => (
+                            <div key={s.schritt} className="flex items-start gap-2">
+                              {s.ok ? <CheckCircle2 size={14} className="mt-0.5 shrink-0" style={{ color: "#30d158" }} /> : <XCircle size={14} className="mt-0.5 shrink-0" style={{ color: "var(--tx-rot, #ff6b6b)" }} />}
+                              <span>{s.text}</span>
+                            </div>
+                          ))}
+                          {p.ok
+                            ? <div className="font-semibold" style={{ color: "#30d158" }}>Alles gut — Firmenseite unter {p.url} erreichbar.</div>
+                            : <div className="mt-1 rounded-lg px-2.5 py-1.5" style={{ background: "rgba(255,159,10,0.12)", color: "var(--tx-amber, #ffb340)" }}>
+                                <b>Nächster Schritt:</b> {p.naechster_schritt}
+                              </div>}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           {/* Unterschrift des Chefs */}
           <div className="rounded-2xl p-4" style={{ background: "var(--wa-05)", border: "1px solid var(--divider)" }}>
             <div className="flex items-center gap-2 font-semibold text-sm"><PenLine size={15} /> Unterschrift des Chefs</div>
             <div className="text-[12px] text-zinc-500 mt-1">
-              Ein Bild eurer Unterschrift (Foto oder Scan, weißer Hintergrund). Sie steht im Kasten „Käufer / Händler“ jedes
+              Ein Bild der Unterschrift (Foto oder Scan, weißer Hintergrund). Sie steht im Kasten „Käufer / Händler“ jedes
               Vertrags, den ein Kunde über das Portal unterschreibt — der Vertrag ist damit von beiden Seiten unterschrieben.
             </div>
             <div className="flex items-center gap-4 mt-3">
