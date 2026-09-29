@@ -100,7 +100,11 @@ server {
   set $backend_up http://backend:8001;
   set $web_up http://web:80;
   listen 80;
-  server_name ${PUBLIC_HOST};
+  # Kundenportal (29.09.2026): zusaetzlich die Firmenseiten — FIRMEN_HOSTS in der .env, durch
+  # Leerzeichen getrennt, z. B. "*.auto-schnellkauf.de kfz-mueller.de" (Unterdomains per Wildcard,
+  # eigene Kundendomains einzeln). Leer = nur die Hauptadresse. Nach einer Aenderung den Proxy
+  # neu erzeugen: docker compose up -d --force-recreate --no-deps proxy
+  server_name ${PUBLIC_HOST} ${FIRMEN_HOSTS};
   if ($direktzugriff) { return 444; }
 
   # Echte Besucher-Adresse: Der Load Balancer traegt sie in X-Forwarded-For

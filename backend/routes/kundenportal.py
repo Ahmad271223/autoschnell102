@@ -1,0 +1,793 @@
+# -*- coding: utf-8 -*-
+"""Firmenseite + Kundenportal (Wunsch Ahmad 29.09.2026).
+
+Jede Firma bekommt eine eigene oeffentliche Seite — erreichbar ueber ihre Adresse
+(Unterdomain <slug>.<FIRMEN_DOMAIN>, eine eigene Kundendomain per DNS/CNAME oder als
+Rueckfall /firma/<slug> auf der Hauptadresse): Logo, kurzer "Ueber uns"-Text, ein paar
+Bilder, Kontakt/Impressum und unten der Kasten "Kundenportal".
+
+Ablauf:
+  1. Sucher oder Chef gibt in der App einen Kaufvertrag frei (POST /contracts/{id}/portal):
+     das System erzeugt einen 6-stelligen Code (ohne verwechselbare Zeichen), gebunden an
+     GENAU diese Vertragsfassung, gueltig PORTAL_CODE_TAGE Tage; der Sucher gibt ihn dem Kunden.
+  2. Der Kunde gibt den Code auf der Firmenseite ein (POST /public/portal/oeffnen) — je Adresse
+     und je Firma gedrosselt (raten ist damit praktisch unmoeglich) — bekommt eine kurze
+     Sitzung, sieht den Vertrag (GET .../pdf) und unterschreibt mit Finger oder Maus
+     (POST .../unterschreiben).
+  3. Die Unterschrift wird ins Vertrags-PDF gesetzt (Druckfassung, Kasten "Verkaeufer";
+     im Kasten "Kaeufer" die in den Einstellungen hinterlegte Unterschrift des Chefs), mit
+     Zeitstempel, Name und Herkunftsadresse als Nachweis; Sucher und Chef bekommen eine
+     Meldung in der App ("Kaufvertrag bestaetigt"). Keine E-Mails (Entscheidung Ahmad).
+
+Sicherheit: Codes sind je Firma eindeutig (Unique-Index, nur offene), laufen ab, gelten nur
+fuer die aktuelle Fassung (eine Neuerzeugung macht den Code ungueltig), ein zurueckgezogener
+Code ist tot. Falsche Eingaben werden je Besucheradresse (fail-closed) und je Firma gezaehlt.
+Der oeffentliche PDF-Abruf traegt Cache-Control: no-store und noindex. Die Sitzung ist ein
+kurzlebiges signiertes Token (JWT, 45 Minuten) — nie der Code selbst in der Adresse.
+"""
+import asyncio
+import base64
+import hashlib
+import logging
+import os
+import re
+import secrets
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
+
+import jwt
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from pydantic import BaseModel, Field
+from pymongo.errors import DuplicateKeyError
+
+import auth as _auth
+from deps import current_firma, db, ist_haupt_chef, log_activity_sicher, now_iso
+from konfig import zahl_env
+from rate_limiter import SlidingWindowRateLimiter, client_ip
+
+log = logging.getLogger("autohandel.kundenportal")
+router = APIRouter()
+
+# ---------------------------------------------------------------- Einstellungen
+PORTAL_CODE_TAGE = zahl_env("PORTAL_CODE_TAGE", 7, unten=1, oben=90)
+PORTAL_SITZUNG_MINUTEN = 45
+CODE_LAENGE = 6
+# ohne 0/O und 1/I — am Telefon und auf dem Zettel nicht zu verwechseln
+CODE_ZEICHEN = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{1,38}[a-z0-9])$")
+HOST_RE = re.compile(r"^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+# Unterdomains, die nie eine Firma sein duerfen (Betrieb, Technik, Verwechslung)
+RESERVIERTE_SLUGS = frozenset({
+    "app", "www", "api", "admin", "mail", "smtp", "imap", "ftp", "static", "cdn", "kunden", "login",
+    "fahrer", "markt", "status", "help", "hilfe", "support", "dev", "test", "staging", "ns1", "ns2",
+    "autodiscover", "webmail", "portal", "firma", "auto-schnellkauf", "autoschnell"})
+UEBER_UNS_MAX = 2000
+BILDER_MAX = 6
+DOMAINS_MAX = 5
+UNTERSCHRIFT_B64_MAX = 3_000_000
+MELDUNG_TAGE = 90
+
+# Falsche Codes: je Besucheradresse hart (fail-closed — ohne Datenbank lieber sperren als raten
+# lassen), je Firma weich (ein Buero mit vielen Kunden hinter einer Adresse bleibt arbeitsfaehig).
+_code_limiter_ip = SlidingWindowRateLimiter(max_attempts=10, window_seconds=600,
+                                            name="portal_code_ip", fail_closed=True)
+_code_limiter_firma = SlidingWindowRateLimiter(max_attempts=200, window_seconds=600,
+                                               name="portal_code_firma")
+_unterschrift_limiter = SlidingWindowRateLimiter(max_attempts=20, window_seconds=600,
+                                                 name="portal_unterschrift")
+
+
+# ---------------------------------------------------------------- Adressen
+def firmen_domain() -> str:
+    """Basisdomain der Firmen-Unterdomains: FIRMEN_DOMAIN, sonst die Hauptadresse (FRONTEND_URL)
+    ohne fuehrendes app./www. — aus app.auto-schnellkauf.de wird auto-schnellkauf.de."""
+    d = (os.environ.get("FIRMEN_DOMAIN") or "").strip().lower().strip(".")
+    if d:
+        return d
+    host = (urlparse(os.environ.get("FRONTEND_URL") or "http://localhost:3000").hostname or "localhost").lower()
+    for praefix in ("app.", "www."):
+        if host.startswith(praefix):
+            host = host[len(praefix):]
+    return host
+
+
+def _hauptadresse() -> str:
+    return (os.environ.get("FRONTEND_URL") or "http://localhost:3000").split("?")[0].rstrip("/")
+
+
+def unterdomain_moeglich() -> bool:
+    """Lokal (localhost, IP) gibt es keine Unterdomains — dann zaehlt nur der Pfad."""
+    d = firmen_domain()
+    return "." in d and not re.fullmatch(r"[0-9.]+", d) and d != "localhost"
+
+
+def firmen_url(slug: str) -> str:
+    """Adresse der Firmenseite: https://<slug>.<domain>, lokal <FRONTEND_URL>/firma/<slug>."""
+    if unterdomain_moeglich():
+        return f"https://{slug}.{firmen_domain()}"
+    return f"{_hauptadresse()}/firma/{slug}"
+
+
+def slug_aus_host(host: Optional[str]) -> Optional[str]:
+    """<slug>.<firmen_domain> -> slug; Hauptadresse, reservierte Namen und fremde Hosts -> None."""
+    h = (host or "").strip().lower().split(":")[0].strip(".")
+    basis = firmen_domain()
+    if not h or not basis or not h.endswith("." + basis):
+        return None
+    sub = h[:-(len(basis) + 1)]
+    if not sub or "." in sub or sub in RESERVIERTE_SLUGS or not SLUG_RE.match(sub):
+        return None
+    return sub
+
+
+def host_normalisieren(host: Optional[str]) -> str:
+    return (host or "").strip().lower().split(":")[0].strip(".")[:253]
+
+
+# ---------------------------------------------------------------- Firma (oeffentlich)
+_FIRMA_FELDER = {"_id": 0, "id": 1, "user_id": 1, "company_name": 1, "logo_url": 1, "address": 1,
+                 "zip_code": 1, "city": 1, "phone": 1, "email": 1, "opening_hours": 1,
+                 "webseite": 1, "unterschrift_key": 1, "active": 1}
+
+
+async def firma_laden(*, host: Optional[str] = None, slug: Optional[str] = None) -> Optional[dict]:
+    """Firma zur Adresse: erst der Pfad-Slug, dann die Unterdomain, dann eine eingetragene
+    Kundendomain. Nur aktive Firmenseiten (webseite.aktiv) gesperrter Firmen bleiben aus."""
+    filt: Optional[Dict[str, Any]] = None
+    if slug:
+        s = slug.strip().lower()
+        if SLUG_RE.match(s):
+            filt = {"webseite.slug": s}
+    elif host:
+        h = host_normalisieren(host)
+        s = slug_aus_host(h)
+        if s:
+            filt = {"webseite.slug": s}
+        elif HOST_RE.match(h):
+            filt = {"webseite.domains": h}
+    if not filt:
+        return None
+    d = await db.dealers.find_one({**filt, "webseite.aktiv": True}, _FIRMA_FELDER)
+    if not d or d.get("active") is False:
+        return None
+    return d
+
+
+def firma_oeffentlich(d: dict) -> dict:
+    w = d.get("webseite") or {}
+    return {
+        "slug": w.get("slug"),
+        "firma": d.get("company_name") or "",
+        "logo_url": d.get("logo_url") or "",
+        "ueber_uns": w.get("ueber_uns") or "",
+        "bilder": [f"/api/files/{k}" for k in (w.get("bilder") or []) if isinstance(k, str)],
+        "kontakt": {"adresse": d.get("address") or "", "plz": d.get("zip_code") or "",
+                    "ort": d.get("city") or "", "telefon": d.get("phone") or "",
+                    "email": d.get("email") or "", "oeffnungszeiten": d.get("opening_hours") or ""},
+        "url": firmen_url(w.get("slug") or ""),
+        "portal_aktiv": True,
+    }
+
+
+@router.get("/public/firma")
+async def public_firma(host: Optional[str] = None, slug: Optional[str] = None):
+    """Oeffentliche Firmendaten fuer die Firmenseite (ohne Anmeldung). 404, wenn es zu der
+    Adresse keine aktive Firmenseite gibt — bewusst ohne Unterschied zwischen 'gibt es nicht'
+    und 'abgeschaltet'."""
+    d = await firma_laden(host=host, slug=slug)
+    if not d:
+        raise HTTPException(404, "Zu dieser Adresse gibt es keine Firmenseite.")
+    return firma_oeffentlich(d)
+
+
+# ---------------------------------------------------------------- Firmenseite (Chef)
+class WebseiteIn(BaseModel):
+    slug: Optional[str] = Field(default=None, max_length=60)
+    aktiv: Optional[bool] = None
+    ueber_uns: Optional[str] = Field(default=None, max_length=UEBER_UNS_MAX)
+    domains: Optional[List[str]] = Field(default=None, max_length=DOMAINS_MAX)
+
+
+class BildIn(BaseModel):
+    bild_b64: str = Field(max_length=12_000_000)      # ~8 MB Bild als Base64 (data-URL erlaubt)
+
+
+class UnterschriftIn(BaseModel):
+    bild_b64: str = Field(max_length=UNTERSCHRIFT_B64_MAX)
+
+
+def _webseite_antwort(d: dict, ist_chef: bool) -> dict:
+    w = dict(d.get("webseite") or {})
+    slug = w.get("slug") or ""
+    return {
+        "webseite": {"slug": slug, "aktiv": bool(w.get("aktiv")), "ueber_uns": w.get("ueber_uns") or "",
+                     "bilder": [{"key": k, "url": f"/api/files/{k}"} for k in (w.get("bilder") or [])],
+                     "domains": list(w.get("domains") or [])},
+        "url": firmen_url(slug) if slug else "",
+        "url_pfad": f"{_hauptadresse()}/firma/{slug}" if slug else "",
+        "firmen_domain": firmen_domain(),
+        "unterdomain_moeglich": unterdomain_moeglich(),
+        "unterschrift_vorhanden": bool(d.get("unterschrift_key")),
+        "ist_chef": ist_chef,
+        "bilder_max": BILDER_MAX, "domains_max": DOMAINS_MAX, "code_tage": PORTAL_CODE_TAGE,
+    }
+
+
+def slug_vorschlag(name: str) -> str:
+    """Firmenname -> Vorschlag fuer die Unterdomain (kfz-mueller-gmbh)."""
+    t = (name or "").lower()
+    for a, b in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss")):
+        t = t.replace(a, b)
+    t = re.sub(r"[^a-z0-9]+", "-", t).strip("-")
+    t = re.sub(r"-{2,}", "-", t)[:40].strip("-")
+    if len(t) < 3:
+        t = (t + "-firma")[:40]
+    return t
+
+
+@router.get("/dealer/webseite")
+async def get_webseite(user=Depends(current_firma)):
+    d = await db.dealers.find_one({"id": user["dealer_id"]}, {**_FIRMA_FELDER, "company_name": 1})
+    if not d:
+        raise HTTPException(404, "Firma nicht gefunden")
+    antwort = _webseite_antwort(d, await ist_haupt_chef(user))
+    antwort["slug_vorschlag"] = slug_vorschlag(d.get("company_name") or "")
+    return antwort
+
+
+async def _nur_chef(user) -> None:
+    if not await ist_haupt_chef(user):
+        raise HTTPException(403, "Die Firmenseite ändert nur der Chef.")
+
+
+@router.put("/dealer/webseite")
+async def put_webseite(body: WebseiteIn, user=Depends(current_firma)):
+    """Slug, Ein/Aus, Ueber-uns-Text und Kundendomains — nur der Hauptchef."""
+    await _nur_chef(user)
+    setzen: Dict[str, Any] = {}
+    if body.slug is not None:
+        s = body.slug.strip().lower()
+        if not SLUG_RE.match(s):
+            raise HTTPException(400, "Adresse: 3–40 Zeichen, nur Kleinbuchstaben, Ziffern und Bindestrich "
+                                     "(nicht am Anfang oder Ende), z. B. kfz-mueller")
+        if s in RESERVIERTE_SLUGS:
+            raise HTTPException(400, "Diese Adresse ist reserviert — bitte eine andere wählen.")
+        setzen["webseite.slug"] = s
+    if body.aktiv is not None:
+        setzen["webseite.aktiv"] = bool(body.aktiv)
+    if body.ueber_uns is not None:
+        setzen["webseite.ueber_uns"] = body.ueber_uns.strip()
+    if body.domains is not None:
+        doms: List[str] = []
+        basis = firmen_domain()
+        haupt = (urlparse(_hauptadresse()).hostname or "").lower()
+        for roh in body.domains:
+            h = host_normalisieren(roh)
+            if not h:
+                continue
+            if not HOST_RE.match(h):
+                raise HTTPException(400, f"„{roh}“ ist keine gültige Domain (z. B. kfz-mueller.de).")
+            if h == basis or h == haupt or h.endswith("." + basis):
+                raise HTTPException(400, f"„{h}“ gehört zur Plattform — Unterdomains entstehen automatisch "
+                                         f"aus der Adresse (<name>.{basis}).")
+            if h not in doms:
+                doms.append(h)
+        fremd = await db.dealers.find_one({"webseite.domains": {"$in": doms}, "id": {"$ne": user["dealer_id"]}},
+                                          {"_id": 0, "webseite.domains": 1}) if doms else None
+        if fremd:
+            belegt = [x for x in (fremd.get("webseite") or {}).get("domains") or [] if x in doms]
+            raise HTTPException(409, f"Domain schon vergeben: {', '.join(belegt)}")
+        setzen["webseite.domains"] = doms
+    if not setzen:
+        raise HTTPException(400, "Nichts zu ändern")
+    setzen["webseite.aktualisiert_am"] = now_iso()
+    try:
+        r = await db.dealers.update_one({"id": user["dealer_id"]}, {"$set": setzen})
+    except DuplicateKeyError:
+        raise HTTPException(409, "Diese Adresse ist schon vergeben — bitte eine andere wählen.")
+    if not r.matched_count:
+        raise HTTPException(404, "Firma nicht gefunden")
+    await log_activity_sicher(user["dealer_id"], user["id"], "firma.webseite.geaendert",
+                              meta={k.split(".")[-1]: (v if k != "webseite.ueber_uns" else len(v))
+                                    for k, v in setzen.items() if k != "webseite.aktualisiert_am"})
+    d = await db.dealers.find_one({"id": user["dealer_id"]}, _FIRMA_FELDER)
+    return _webseite_antwort(d or {}, True)
+
+
+def _bild_bytes(b64: str, wo: str, max_bytes: int) -> bytes:
+    try:
+        raw = base64.b64decode(b64.split(",")[-1], validate=False)
+    except (ValueError, TypeError):
+        raise HTTPException(400, f"{wo} konnte nicht gelesen werden")
+    if not raw:
+        raise HTTPException(400, f"{wo}: leere Datei")
+    if len(raw) > max_bytes:
+        raise HTTPException(400, f"{wo} zu groß (max. {max_bytes // (1024 * 1024)} MB)")
+    from storage_service import StorageError, bild_lesbar_pruefen, validate_image_bytes
+    try:
+        validate_image_bytes(raw, wo=wo)
+        bild_lesbar_pruefen(raw, wo=wo)
+    except StorageError as exc:
+        raise HTTPException(400, str(exc))
+    return raw
+
+
+@router.post("/dealer/webseite/bilder")
+async def bild_hochladen(body: BildIn, user=Depends(current_firma)):
+    """Ein Bild fuer die Firmenseite (hoechstens BILDER_MAX, JPEG verkleinert, oeffentlich)."""
+    await _nur_chef(user)
+    from storage_service import StorageError, bild_verkleinern, make_key, save_async, loeschen_oder_vormerken
+    raw = _bild_bytes(body.bild_b64, "Bild", 8 * 1024 * 1024)
+    try:
+        raw = await asyncio.to_thread(bild_verkleinern, raw, "Bild", "JPEG")
+        key = make_key("firma", user["dealer_id"], "bild.jpg")
+        await save_async(key, raw)
+    except StorageError as exc:
+        raise HTTPException(400, str(exc))
+    r = await db.dealers.update_one(
+        {"id": user["dealer_id"],
+         "$expr": {"$lt": [{"$size": {"$ifNull": ["$webseite.bilder", []]}}, BILDER_MAX]}},
+        {"$push": {"webseite.bilder": key}, "$set": {"webseite.aktualisiert_am": now_iso()}})
+    if not r.modified_count:
+        await loeschen_oder_vormerken(db, key=key, grund="firmenseite_bild_zu_viele", dealer_id=user["dealer_id"])
+        raise HTTPException(400, f"Höchstens {BILDER_MAX} Bilder — erst eines entfernen.")
+    d = await db.dealers.find_one({"id": user["dealer_id"]}, _FIRMA_FELDER)
+    return _webseite_antwort(d or {}, True)
+
+
+@router.delete("/dealer/webseite/bilder/{key:path}")
+async def bild_entfernen(key: str, user=Depends(current_firma)):
+    await _nur_chef(user)
+    if not key.startswith(f"firma/{user['dealer_id']}/"):
+        raise HTTPException(404, "Bild nicht gefunden")
+    r = await db.dealers.update_one({"id": user["dealer_id"]},
+                                    {"$pull": {"webseite.bilder": key}, "$set": {"webseite.aktualisiert_am": now_iso()}})
+    if r.modified_count:
+        from storage_service import loeschen_oder_vormerken
+        await loeschen_oder_vormerken(db, key=key, grund="firmenseite_bild_entfernt", dealer_id=user["dealer_id"])
+    d = await db.dealers.find_one({"id": user["dealer_id"]}, _FIRMA_FELDER)
+    return _webseite_antwort(d or {}, True)
+
+
+# ---------------------------------------------------------------- Unterschrift des Chefs
+def _unterschrift_pruefen(raw: bytes, wo: str) -> None:
+    """Wie im Abholprotokoll: lesbar, mit Tinte, hoechstens 2 MB."""
+    from routes.protocols import unterschrift_hat_tinte
+    if not unterschrift_hat_tinte(raw):
+        raise HTTPException(400, f"{wo} ist leer — bitte eine sichtbare Unterschrift verwenden")
+    if len(raw) > 2 * 1024 * 1024:
+        raise HTTPException(400, f"{wo} zu groß (max. 2 MB)")
+
+
+@router.post("/dealer/unterschrift")
+async def unterschrift_hochladen(body: UnterschriftIn, user=Depends(current_firma)):
+    """Bild der Unterschrift des Chefs (PNG) — landet im Kasten "Kaeufer / Haendler" jedes ueber
+    das Kundenportal unterschriebenen Vertrags. Nur der Hauptchef."""
+    await _nur_chef(user)
+    from storage_service import StorageError, bild_verkleinern, make_key, save_async, loeschen_oder_vormerken
+    raw = _bild_bytes(body.bild_b64, "Unterschrift", 2 * 1024 * 1024)
+    _unterschrift_pruefen(raw, "Unterschrift")
+    try:
+        raw = await asyncio.to_thread(bild_verkleinern, raw, "Unterschrift", "PNG")
+        key = make_key("unterschrift", user["dealer_id"], "unterschrift.png")
+        await save_async(key, raw)
+    except StorageError as exc:
+        raise HTTPException(400, str(exc))
+    alt = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0, "unterschrift_key": 1})
+    await db.dealers.update_one({"id": user["dealer_id"]},
+                                {"$set": {"unterschrift_key": key, "unterschrift_am": now_iso()}})
+    if (alt or {}).get("unterschrift_key") and alt["unterschrift_key"] != key:
+        await loeschen_oder_vormerken(db, key=alt["unterschrift_key"], grund="chef_unterschrift_ersetzt",
+                                      dealer_id=user["dealer_id"])
+    await log_activity_sicher(user["dealer_id"], user["id"], "firma.unterschrift.hochgeladen")
+    return {"ok": True, "unterschrift_vorhanden": True}
+
+
+@router.delete("/dealer/unterschrift")
+async def unterschrift_entfernen(user=Depends(current_firma)):
+    await _nur_chef(user)
+    d = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0, "unterschrift_key": 1})
+    key = (d or {}).get("unterschrift_key")
+    await db.dealers.update_one({"id": user["dealer_id"]}, {"$unset": {"unterschrift_key": "", "unterschrift_am": ""}})
+    if key:
+        from storage_service import loeschen_oder_vormerken
+        await loeschen_oder_vormerken(db, key=key, grund="chef_unterschrift_entfernt", dealer_id=user["dealer_id"])
+    return {"ok": True, "unterschrift_vorhanden": False}
+
+
+@router.get("/dealer/unterschrift")
+async def unterschrift_anzeigen(user=Depends(current_firma)):
+    """Vorschau fuer die Einstellungen (Chef und Sucher der Firma) — nie ueber /api/files."""
+    d = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0, "unterschrift_key": 1})
+    key = (d or {}).get("unterschrift_key")
+    daten = await _datei_bytes(key) if key else None
+    if not daten:
+        raise HTTPException(404, "Keine Unterschrift hinterlegt")
+    return Response(content=daten, media_type="image/png",
+                    headers={"Cache-Control": "private, no-store", "X-Robots-Tag": "noindex"})
+
+
+async def _datei_bytes(key: Optional[str]) -> Optional[bytes]:
+    if not key:
+        return None
+    try:
+        from storage_service import load_async
+        daten = await load_async(key)
+        return daten if daten and len(daten) <= 3 * 1024 * 1024 else None
+    except Exception as exc:  # noqa: BLE001
+        log.info("Datei %s nicht ladbar: %s", key, exc)
+        return None
+
+
+# ---------------------------------------------------------------- Code-Freigabe (Sucher/Chef)
+def code_erzeugen() -> str:
+    return "".join(secrets.choice(CODE_ZEICHEN) for _ in range(CODE_LAENGE))
+
+
+def code_normalisieren(roh: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", (roh or "").upper())[:CODE_LAENGE]
+
+
+def _laeuft_ab(f: Optional[dict]) -> Optional[datetime]:
+    try:
+        return datetime.fromisoformat((f or {}).get("laeuft_ab") or "")
+    except ValueError:
+        return None
+
+
+def portal_offen(p: Optional[dict], version: int) -> bool:
+    """Offener, nicht abgelaufener Code fuer GENAU diese Fassung."""
+    if not p or p.get("status") != "offen" or int(p.get("version") or 0) != int(version or 1):
+        return False
+    ab = _laeuft_ab(p)
+    return bool(ab and ab > datetime.now(timezone.utc))
+
+
+def _portal_antwort(c: dict, slug: str) -> dict:
+    p = dict(c.get("portal") or {})
+    version = int(c.get("version") or 1)
+    status = p.get("status") or "keiner"
+    if status == "offen" and not portal_offen(p, version):
+        status = "abgelaufen" if int(p.get("version") or 0) == version else "fassung_veraltet"
+    return {"status": status, "code": p.get("code") if status == "offen" else None,
+            "laeuft_ab": p.get("laeuft_ab"), "version": p.get("version"), "aktuelle_version": version,
+            "unterschrieben_am": p.get("unterschrieben_am"), "name": p.get("name"),
+            "url": firmen_url(slug) if slug else "", "slug": slug,
+            "pdf_signiert": bool(c.get("pdf_signiert_b64"))}
+
+
+async def _vertrag_und_slug(contract_id: str, user: dict) -> tuple:
+    from routes.contracts import _vertrag_bereich
+    c = await db.generated_pdfs.find_one({"id": contract_id, **_vertrag_bereich(user)},
+                                         {"_id": 0, "id": 1, "version": 1, "portal": 1, "contract_no": 1,
+                                          "pdf_signiert_b64": 1, "user_id": 1})
+    if c is None:
+        raise HTTPException(404, "Vertrag nicht gefunden")
+    d = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0, "webseite": 1})
+    w = (d or {}).get("webseite") or {}
+    return c, (w.get("slug") or ""), bool(w.get("aktiv"))
+
+
+@router.post("/contracts/{contract_id}/portal")
+async def portal_freigeben(contract_id: str, user=Depends(current_firma)):
+    """Code fuer den Kunden erzeugen (oder den noch laufenden derselben Fassung zurueckgeben)."""
+    from routes.contracts import _vertrag_bereich
+    c, slug, aktiv = await _vertrag_und_slug(contract_id, user)
+    if not slug or not aktiv:
+        raise HTTPException(409, "Erst die Firmenseite einrichten (Einstellungen → Firmenseite & Kundenportal): "
+                                 "Adresse festlegen und einschalten.")
+    bereich = _vertrag_bereich(user)
+    for _ in range(6):
+        c = await db.generated_pdfs.find_one({"id": contract_id, **bereich},
+                                             {"_id": 0, "id": 1, "version": 1, "portal": 1, "contract_no": 1,
+                                              "pdf_signiert_b64": 1})
+        if c is None:
+            raise HTTPException(404, "Vertrag nicht gefunden")
+        version = int(c.get("version") or 1)
+        p = c.get("portal") or {}
+        if p.get("status") == "unterschrieben" and int(p.get("version") or 0) == version:
+            raise HTTPException(409, "Dieser Vertrag ist schon vom Kunden unterschrieben.")
+        if portal_offen(p, version) and (_laeuft_ab(p) - datetime.now(timezone.utc)) > timedelta(hours=1):
+            return _portal_antwort(c, slug)
+        neu = {"code": code_erzeugen(), "status": "offen", "erstellt_am": now_iso(),
+               "laeuft_ab": (datetime.now(timezone.utc) + timedelta(days=PORTAL_CODE_TAGE)).isoformat(),
+               "erstellt_von": user.get("id"), "version": version, "versuche": 0}
+        filt = {"id": contract_id, **bereich, "version": c.get("version")}
+        if p:
+            filt["portal.erstellt_am"] = p.get("erstellt_am")
+        else:
+            filt["portal"] = {"$exists": False}
+        try:
+            r = await db.generated_pdfs.update_one(filt, {"$set": {"portal": neu}})
+        except DuplicateKeyError:
+            continue                                    # Code in dieser Firma schon offen -> neuer Code
+        if r.modified_count:
+            await log_activity_sicher(user["dealer_id"], user["id"], "vertrag.portal.freigegeben",
+                                      ref=contract_id, meta={"version": version, "laeuft_ab": neu["laeuft_ab"]})
+            return _portal_antwort({**c, "portal": neu}, slug)
+    raise HTTPException(409, "Der Vertrag wurde gerade geändert — bitte die Seite neu laden.")
+
+
+@router.get("/contracts/{contract_id}/portal")
+async def portal_stand(contract_id: str, user=Depends(current_firma)):
+    c, slug, _aktiv = await _vertrag_und_slug(contract_id, user)
+    return _portal_antwort(c, slug)
+
+
+@router.delete("/contracts/{contract_id}/portal")
+async def portal_zurueckziehen(contract_id: str, user=Depends(current_firma)):
+    """Offenen Code sofort ungueltig machen (der Kunde kommt damit nicht mehr hinein)."""
+    from routes.contracts import _vertrag_bereich
+    r = await db.generated_pdfs.update_one(
+        {"id": contract_id, **_vertrag_bereich(user), "portal.status": "offen"},
+        {"$set": {"portal.status": "zurueckgezogen", "portal.zurueckgezogen_am": now_iso(),
+                  "portal.zurueckgezogen_von": user.get("id")}})
+    if not r.matched_count:
+        c, slug, _aktiv = await _vertrag_und_slug(contract_id, user)
+        return _portal_antwort(c, slug)
+    await log_activity_sicher(user["dealer_id"], user["id"], "vertrag.portal.zurueckgezogen", ref=contract_id)
+    c, slug, _aktiv = await _vertrag_und_slug(contract_id, user)
+    return _portal_antwort(c, slug)
+
+
+@router.get("/contracts/{contract_id}/portal/pdf")
+async def portal_pdf(contract_id: str, user=Depends(current_firma)):
+    """Der vom Kunden unterschriebene Vertrag (PDF mit beiden Unterschriften)."""
+    from routes.contracts import _vertrag_bereich
+    from vertrag_dateiname import content_disposition
+    c = await db.generated_pdfs.find_one({"id": contract_id, **_vertrag_bereich(user)},
+                                         {"_id": 0, "pdf_signiert_b64": 1, "contract_no": 1, "portal.version": 1})
+    if c is None:
+        raise HTTPException(404, "Vertrag nicht gefunden")
+    if not c.get("pdf_signiert_b64"):
+        raise HTTPException(404, "Noch keine Unterschrift des Kunden")
+    return Response(content=base64.b64decode(c["pdf_signiert_b64"]), media_type="application/pdf",
+                    headers={"Content-Disposition": content_disposition(
+                                 f"Kaufvertrag-{c.get('contract_no') or contract_id}-unterschrieben.pdf"),
+                             "Cache-Control": "no-store"})
+
+
+# ---------------------------------------------------------------- Kundenportal (oeffentlich)
+class OeffnenIn(BaseModel):
+    code: str = Field(min_length=1, max_length=20)
+    slug: Optional[str] = Field(default=None, max_length=60)
+    host: Optional[str] = Field(default=None, max_length=253)
+
+
+class UnterschreibenIn(BaseModel):
+    signature_b64: str = Field(min_length=20, max_length=UNTERSCHRIFT_B64_MAX)
+    name: str = Field(min_length=2, max_length=120)
+    einverstanden: bool = False
+
+
+def _sitzung_token(c: dict) -> str:
+    return jwt.encode({"typ": "portal", "cid": c["id"], "v": int(c.get("version") or 1), "d": c.get("dealer_id"),
+                       "exp": datetime.now(timezone.utc) + timedelta(minutes=PORTAL_SITZUNG_MINUTEN),
+                       "jti": secrets.token_hex(8)}, _auth.JWT_SECRET, algorithm=_auth.JWT_ALG)
+
+
+def _vertrag_kurz(c: dict, firma: dict) -> dict:
+    cd = c.get("contract_data") or {}
+    p = c.get("portal") or {}
+    return {"contract_no": c.get("contract_no") or "", "marke": c.get("make") or cd.get("vehicle_make") or "",
+            "modell": c.get("model") or cd.get("vehicle_model") or "",
+            "verkaeufer": c.get("seller_name") or cd.get("seller_name") or "",
+            "kaufpreis": c.get("purchase_price") if c.get("purchase_price") is not None else cd.get("purchase_price"),
+            "abholung": c.get("pickup_date") or cd.get("pickup_date") or "",
+            "firma": firma.get("company_name") or "", "version": int(c.get("version") or 1),
+            "status": p.get("status") or "offen", "unterschrieben_am": p.get("unterschrieben_am"),
+            "laeuft_ab": p.get("laeuft_ab")}
+
+
+_VERTRAG_FELDER = {"_id": 0, "id": 1, "dealer_id": 1, "user_id": 1, "version": 1, "portal": 1, "contract_no": 1,
+                   "make": 1, "model": 1, "seller_name": 1, "purchase_price": 1, "pickup_date": 1,
+                   "contract_data": 1, "vehicle_id": 1, "pdf_b64": 1, "pdf_signiert_b64": 1}
+
+CODE_FALSCH = "Code ungültig oder abgelaufen. Bitte den Code vom Autohaus prüfen."
+
+
+@router.post("/public/portal/oeffnen")
+async def portal_oeffnen(body: OeffnenIn, request: Request):
+    """Kunde gibt den Code auf der Firmenseite ein -> kurze Sitzung + Vertragskurzdaten."""
+    ip = client_ip(request)
+    if not await _code_limiter_ip.check(ip):
+        raise HTTPException(429, "Zu viele Versuche — bitte in 10 Minuten erneut.")
+    firma = await firma_laden(host=body.host, slug=body.slug)
+    if not firma:
+        raise HTTPException(404, "Zu dieser Adresse gibt es keine Firmenseite.")
+    if not await _code_limiter_firma.check(f"firma:{firma['id']}"):
+        raise HTTPException(429, "Zu viele Versuche — bitte später erneut.")
+    code = code_normalisieren(body.code)
+    if len(code) != CODE_LAENGE:
+        raise HTTPException(404, CODE_FALSCH)
+    c = await db.generated_pdfs.find_one({"dealer_id": firma["id"], "portal.code": code, "portal.status": "offen",
+                                          "loeschung.status": {"$ne": "laeuft"}}, _VERTRAG_FELDER)
+    if not c or not portal_offen(c.get("portal"), int(c.get("version") or 1)):
+        await log_activity_sicher(firma["id"], "", "vertrag.portal.code_falsch", meta={"ip": ip})
+        raise HTTPException(404, CODE_FALSCH)
+    await db.generated_pdfs.update_one({"id": c["id"], "portal.code": code},
+                                       {"$inc": {"portal.abrufe": 1}, "$set": {"portal.zuletzt_geoeffnet": now_iso()}})
+    await log_activity_sicher(firma["id"], "", "vertrag.portal.geoeffnet", ref=c["id"], meta={"ip": ip})
+    return {"sitzung": _sitzung_token(c), "vertrag": _vertrag_kurz(c, firma), "firma": firma_oeffentlich(firma),
+            "sitzung_minuten": PORTAL_SITZUNG_MINUTEN}
+
+
+async def _sitzung_pruefen(sitzung: str) -> dict:
+    try:
+        nutz = jwt.decode(sitzung, _auth.JWT_SECRET, algorithms=[_auth.JWT_ALG])
+    except jwt.PyJWTError:
+        raise HTTPException(401, "Die Sitzung ist abgelaufen — bitte den Code erneut eingeben.")
+    if nutz.get("typ") != "portal" or not nutz.get("cid"):
+        raise HTTPException(401, "Ungültige Sitzung")
+    c = await db.generated_pdfs.find_one({"id": nutz["cid"], "dealer_id": nutz.get("d"),
+                                          "loeschung.status": {"$ne": "laeuft"}}, _VERTRAG_FELDER)
+    if not c or int(c.get("version") or 1) != int(nutz.get("v") or 0):
+        raise HTTPException(410, "Der Vertrag wurde inzwischen geändert — bitte einen neuen Code beim Autohaus anfordern.")
+    p = c.get("portal") or {}
+    if p.get("status") not in ("offen", "unterschrieben") or int(p.get("version") or 0) != int(c.get("version") or 1):
+        raise HTTPException(410, "Die Freigabe wurde zurückgezogen oder ist abgelaufen.")
+    if p.get("status") == "offen" and not portal_offen(p, int(c.get("version") or 1)):
+        raise HTTPException(410, "Der Code ist abgelaufen — bitte einen neuen beim Autohaus anfordern.")
+    return c
+
+
+@router.get("/public/portal/{sitzung}")
+async def portal_sitzung(sitzung: str):
+    c = await _sitzung_pruefen(sitzung)
+    firma = await db.dealers.find_one({"id": c["dealer_id"]}, _FIRMA_FELDER) or {}
+    return {"vertrag": _vertrag_kurz(c, firma), "pdf_signiert": bool(c.get("pdf_signiert_b64"))}
+
+
+@router.get("/public/portal/{sitzung}/pdf")
+async def portal_sitzung_pdf(sitzung: str):
+    """Der Vertrag fuer den Kunden: vor der Unterschrift die Druckfassung, danach die unterschriebene."""
+    from vertrag_dateiname import content_disposition
+    c = await _sitzung_pruefen(sitzung)
+    b64 = c.get("pdf_signiert_b64") if (c.get("portal") or {}).get("status") == "unterschrieben" else c.get("pdf_b64")
+    if not b64:
+        raise HTTPException(404, "Das Vertrags-PDF fehlt — bitte das Autohaus ansprechen.")
+    name = f"Kaufvertrag-{c.get('contract_no') or c['id']}.pdf"
+    return Response(content=base64.b64decode(b64), media_type="application/pdf",
+                    headers={"Content-Disposition": content_disposition(name),
+                             "Cache-Control": "private, no-store", "X-Robots-Tag": "noindex"})
+
+
+async def _signiertes_pdf(c: dict, verkaeufer_png: bytes, kaeufer_png: Optional[bytes],
+                          name: str, wann: datetime) -> bytes:
+    """Druckfassung des Vertrags mit beiden Unterschriften — dieselbe Basis wie die Neuerzeugung
+    (Vertragsfassung, festgehaltene Kaeuferdaten und Logo), nichts vom heutigen Stand."""
+    from auftraggeber import kaeufer_basis
+    from pdf_service import generate_contract_pdf
+    from routes.contracts import _logo_einsetzen
+    from vertrag_felder import _apply_contract_overrides
+    contract_dict = dict(c.get("contract_data") or {})
+    v = await db.vehicles.find_one({"id": c.get("vehicle_id"), "dealer_id": c.get("dealer_id")}, {"_id": 0}) or {}
+    vehicle = dict(v.get("data") or {})
+    dealer = await kaeufer_basis(dealer_id=c.get("dealer_id"), user_ids=(c.get("user_id"),)) or {}
+    vehicle, dealer = _apply_contract_overrides(contract=contract_dict, vehicle=vehicle, dealer=dealer)
+    dealer = await _logo_einsetzen(dealer, contract_dict)
+    zeit = wann.astimezone(_BERLIN).strftime("%d.%m.%Y, %H:%M")
+    unterschriften = {"verkaeufer": verkaeufer_png, "verkaeufer_text": f"{name} · digital am {zeit} Uhr",
+                      "kaeufer": kaeufer_png, "kaeufer_text": "hinterlegte Unterschrift" if kaeufer_png else None,
+                      "hinweis": (f"Digital unterschrieben über das Kundenportal von "
+                                  f"{(dealer.get('company_name') or 'Autohändler').strip()} am {zeit} Uhr "
+                                  f"(Vertragsfassung {int(c.get('version') or 1)}).")}
+    return await asyncio.to_thread(generate_contract_pdf, dealer=dealer, vehicle=vehicle, contract=contract_dict,
+                                   unterschriften=unterschriften)
+
+
+try:
+    from zoneinfo import ZoneInfo
+    _BERLIN = ZoneInfo("Europe/Berlin")
+except Exception:  # noqa: BLE001
+    _BERLIN = timezone.utc
+
+
+@router.post("/public/portal/{sitzung}/unterschreiben")
+async def portal_unterschreiben(sitzung: str, body: UnterschreibenIn, request: Request):
+    """Der Kunde unterschreibt: Bild pruefen, speichern, PDF mit beiden Unterschriften erzeugen,
+    Vertrag als unterschrieben markieren (nur einmal, nur diese Fassung), Meldung an Sucher und Chef."""
+    ip = client_ip(request)
+    if not await _unterschrift_limiter.check(ip):
+        raise HTTPException(429, "Zu viele Versuche — bitte später erneut.")
+    if not body.einverstanden:
+        raise HTTPException(400, "Bitte bestätigen, dass Sie den Vertrag gelesen haben und ihm zustimmen.")
+    c = await _sitzung_pruefen(sitzung)
+    p = c.get("portal") or {}
+    if p.get("status") != "offen":
+        raise HTTPException(409, "Dieser Vertrag ist bereits unterschrieben.")
+    name = " ".join(body.name.split())
+    raw = _bild_bytes(body.signature_b64, "Unterschrift", 2 * 1024 * 1024)
+    _unterschrift_pruefen(raw, "Unterschrift")
+    from storage_service import StorageError, make_key, save_async, loeschen_oder_vormerken
+    firma = await db.dealers.find_one({"id": c["dealer_id"]}, {**_FIRMA_FELDER, "user_id": 1}) or {}
+    kaeufer_png = await _datei_bytes(firma.get("unterschrift_key"))
+    wann = datetime.now(timezone.utc)
+    try:
+        pdf = await _signiertes_pdf(c, raw, kaeufer_png, name, wann)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Kundenportal: unterschriebenes PDF fuer Vertrag %s nicht erzeugt", c["id"])
+        raise HTTPException(500, f"Der unterschriebene Vertrag konnte nicht erzeugt werden ({type(exc).__name__}).")
+    try:
+        key = make_key("portal", c["dealer_id"], "unterschrift-verkaeufer.png")
+        await save_async(key, raw)
+    except StorageError as exc:
+        raise HTTPException(400, f"Unterschrift konnte nicht gespeichert werden: {exc}")
+    r = await db.generated_pdfs.update_one(
+        {"id": c["id"], "version": c.get("version"), "portal.status": "offen", "portal.code": p.get("code")},
+        {"$set": {"portal.status": "unterschrieben", "portal.unterschrieben_am": wann.isoformat(),
+                  "portal.name": name[:120], "portal.ip": ip, "portal.user_agent": (request.headers.get("user-agent") or "")[:200],
+                  "portal.unterschrift_key": key, "portal.kaeufer_unterschrift": bool(kaeufer_png),
+                  "pdf_signiert_b64": base64.b64encode(pdf).decode(), "pdf_signiert_sha256": hashlib.sha256(pdf).hexdigest(),
+                  "pdf_signiert_version": int(c.get("version") or 1), "kunde_unterschrieben_am": wann.isoformat(),
+                  "updated_at": now_iso()}})
+    if not r.modified_count:
+        await loeschen_oder_vormerken(db, key=key, grund="portal_unterschrift_verworfen", dealer_id=c["dealer_id"])
+        raise HTTPException(409, "Dieser Vertrag wurde gerade schon unterschrieben oder geändert.")
+    empfaenger = [u for u in {firma.get("user_id"), c.get("user_id")} if u]
+    text = (f"Kaufvertrag {c.get('contract_no') or ''} ({c.get('make') or ''} {c.get('model') or ''}) wurde von "
+            f"{name} digital unterschrieben.").replace("  ", " ")
+    await meldung_anlegen(c["dealer_id"], empfaenger, "vertrag_unterschrieben", text, ref=c["id"],
+                          contract_no=c.get("contract_no"))
+    await log_activity_sicher(c["dealer_id"], "", "vertrag.portal.unterschrieben", ref=c["id"],
+                              meta={"name": name[:120], "version": int(c.get("version") or 1), "ip": ip,
+                                    "kaeufer_unterschrift": bool(kaeufer_png)})
+    return {"ok": True, "unterschrieben_am": wann.isoformat(), "contract_no": c.get("contract_no") or "",
+            "sitzung": sitzung}
+
+
+# ---------------------------------------------------------------- Meldungen in der App
+async def meldung_anlegen(dealer_id: str, empfaenger: List[str], typ: str, text: str, *,
+                          ref: Optional[str] = None, contract_no: Optional[str] = None) -> Optional[str]:
+    """Eine Meldung fuer Chef/Sucher (in-App). Laeuft nach MELDUNG_TAGE Tagen aus (TTL-Index)."""
+    if not empfaenger:
+        return None
+    import uuid
+    doc = {"id": uuid.uuid4().hex, "dealer_id": dealer_id, "empfaenger": sorted(set(empfaenger)), "typ": typ,
+           "text": text[:500], "ref": ref, "contract_no": contract_no, "erstellt_am": now_iso(),
+           "gelesen": {}, "laeuft_ab": datetime.now(timezone.utc) + timedelta(days=MELDUNG_TAGE)}
+    try:
+        await db.meldungen.insert_one(dict(doc))
+    except Exception:  # noqa: BLE001 — eine Meldung darf den Vorgang nie scheitern lassen
+        log.exception("Meldung %s fuer %s nicht gespeichert", typ, dealer_id)
+        return None
+    return doc["id"]
+
+
+def _meldung_sicht(m: dict, user_id: str) -> dict:
+    return {"id": m["id"], "typ": m.get("typ"), "text": m.get("text"), "ref": m.get("ref"),
+            "contract_no": m.get("contract_no"), "erstellt_am": m.get("erstellt_am"),
+            "gelesen": bool((m.get("gelesen") or {}).get(user_id))}
+
+
+@router.get("/meldungen")
+async def meldungen_liste(limit: int = 50, user=Depends(current_firma)):
+    limit = max(1, min(200, int(limit)))
+    cur = db.meldungen.find({"dealer_id": user["dealer_id"], "empfaenger": user["id"]}, {"_id": 0}) \
+        .sort("erstellt_am", -1).limit(limit)
+    return [_meldung_sicht(m, user["id"]) async for m in cur]
+
+
+@router.get("/meldungen/anzahl")
+async def meldungen_anzahl(user=Depends(current_firma)):
+    """Fuer den Zaehler im Menue (wie /protocols/zur-freigabe/anzahl): ungelesene Meldungen mit IDs."""
+    ids = [m["id"] async for m in db.meldungen.find(
+        {"dealer_id": user["dealer_id"], "empfaenger": user["id"], f"gelesen.{user['id']}": {"$exists": False}},
+        {"_id": 0, "id": 1}).sort("erstellt_am", -1).limit(100)]
+    return {"ungelesen": len(ids), "ids": ids}
+
+
+@router.post("/meldungen/{meldung_id}/gelesen")
+async def meldung_gelesen(meldung_id: str, user=Depends(current_firma)):
+    await db.meldungen.update_one({"id": meldung_id, "dealer_id": user["dealer_id"], "empfaenger": user["id"]},
+                                  {"$set": {f"gelesen.{user['id']}": now_iso()}})
+    return {"ok": True}
+
+
+@router.post("/meldungen/alle-gelesen")
+async def meldungen_alle_gelesen(user=Depends(current_firma)):
+    r = await db.meldungen.update_many({"dealer_id": user["dealer_id"], "empfaenger": user["id"],
+                                        f"gelesen.{user['id']}": {"$exists": False}},
+                                       {"$set": {f"gelesen.{user['id']}": now_iso()}})
+    return {"ok": True, "gelesen": int(r.modified_count)}

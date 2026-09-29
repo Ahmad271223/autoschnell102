@@ -6,7 +6,7 @@ import SeiteLaedt from "@/components/SeiteLaedt";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   Car, FileText, Calendar, Users, Settings as SettingsIcon, ShieldCheck,
-  Layers, LogOut, Activity, Search, Warehouse, Inbox, ClipboardCheck, Radar,
+  Layers, LogOut, Activity, Search, Warehouse, Inbox, ClipboardCheck, Radar, Bell,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { startseite } from "@/lib/rollen";
@@ -14,6 +14,7 @@ import { useFeatures } from "@/lib/features";
 import { verlassenBestaetigen } from "@/lib/ungespeichert";
 import { useAnfragenZaehler } from "@/lib/anfragenZaehler";
 import { useAbgelehntZaehler } from "@/lib/abgelehntZaehler";
+import { neueMeldungen, useMeldungenZaehler } from "@/lib/meldungen";
 import ThemeToggle from "@/components/ThemeToggle";
 import InstallPWAButton from "@/components/InstallPWAButton";
 import RechtsLinks from "@/components/RechtsLinks";
@@ -37,12 +38,16 @@ const NAV = [
   { to: "/app/anfragen", label: "Kaufanfragen", icon: Inbox, haendlerOnly: true, anfragen: true },
   { to: "/app/team", label: "Mitarbeiter / Sucher", icon: Users, haendlerOnly: true },
   { to: "/app/fahrer", label: "Fahrer", icon: Users },
+  // Kundenportal (29.09.2026): "Kaufvertrag bestätigt" — Chef und Sucher, mit Zähler und Hinweis
+  { to: "/app/meldungen", label: "Meldungen", icon: Bell, meldungen: true },
   { to: "/app/einstellungen", label: "Einstellungen", icon: SettingsIcon },
 ];
 
 // Letzter Stand der wartenden Protokolle je Konto — ueberlebt den Wechsel
 // zwischen Seiten mit eigenem Layout (sonst fiel der Hinweis dazwischen aus).
 const GESEHEN = {};
+// Letzter Stand der Meldungen je Konto (Kundenportal) — gleiche Rolle wie GESEHEN.
+const GESEHEN_MELDUNGEN = {};
 
 /**
  * Icon-Only Rail — konstant 64px breit auf allen Bildschirmgrößen.
@@ -74,6 +79,20 @@ export default function AppLayout({ children }) {
     Boolean(user) && user.role === "dealer" && Boolean(features.marktplatz), user?.id);
   // RP-464: vom Fahrer abgelehnte Zuteilungen — Fahrer teilt nur der Chef zu.
   const abgelehnt = useAbgelehntZaehler(Boolean(user) && user.role === "dealer", user?.id);
+  // Kundenportal (29.09.2026): Meldungen "Kaufvertrag bestätigt" — Chef UND Sucher; neue Meldung
+  // = neue ID (nicht nur eine höhere Zahl), erster Abruf meldet den Altbestand nicht.
+  const meldungen = useMeldungenZaehler(Boolean(user) && user.role !== "admin", user?.id);
+  useEffect(() => {
+    if (!meldungen.geladen || !Array.isArray(meldungen.ids)) return;
+    const neu = neueMeldungen(GESEHEN_MELDUNGEN, user?.id, meldungen.ids);
+    if (neu.length > 0 && !pathname.startsWith("/app/meldungen")) {
+      toast.success(neu.length === 1 ? "Kaufvertrag bestätigt — ein Kunde hat digital unterschrieben"
+        : `${neu.length} Kaufverträge wurden digital unterschrieben`, {
+        action: { label: "Öffnen", onClick: () => { if (verlassenBestaetigen()) nav("/app/meldungen"); } },
+        duration: 15000,
+      });
+    }
+  }, [meldungen, pathname, nav, user?.id]);
   // Rollenprüfung 22.09.2026 (RP-143): Wechsel innerhalb der App fragt nach,
   // solange eine Seite ungespeicherte Eingaben gemeldet hat (vorher schützte
   // nur beforeunload beim Neuladen — ein Klick in die Leiste verwarf still).
@@ -135,11 +154,11 @@ export default function AppLayout({ children }) {
             // Pruefbericht 20.09.2026 (M-02): aria-label nennt den Bereich samt
             // Zahl wartender Freigaben (der sichtbare Zaehler ist ausgeblendet).
             const zahl = it.zaehler ? freigabe.wartet
-              : it.anfragen ? anfragenWarten : it.abgelehnt ? abgelehnt : 0;
+              : it.anfragen ? anfragenWarten : it.abgelehnt ? abgelehnt : it.meldungen ? meldungen.ungelesen : 0;
             const zahlText = it.anfragen ? "brauchen eine Antwort"
-              : it.abgelehnt ? "vom Fahrer abgelehnt, bitte neu zuteilen" : "warten";
+              : it.abgelehnt ? "vom Fahrer abgelehnt, bitte neu zuteilen" : it.meldungen ? "ungelesen" : "warten";
             const zaehlerId = it.anfragen ? "nav-anfragen-zaehler"
-              : it.abgelehnt ? "nav-termine-zaehler" : "nav-freigaben-zaehler";
+              : it.abgelehnt ? "nav-termine-zaehler" : it.meldungen ? "nav-meldungen-zaehler" : "nav-freigaben-zaehler";
             return (
               <Link
                 key={it.to}

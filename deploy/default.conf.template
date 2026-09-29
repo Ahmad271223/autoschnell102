@@ -34,7 +34,10 @@ server {
   set $backend_up http://backend:8001;
   set $web_up http://web:80;
   listen 80;
-  server_name ${PUBLIC_HOST};
+  # Kundenportal (29.09.2026): FIRMEN_HOSTS = Firmenseiten (z. B. "*.autoschnell.de kfz-mueller.de");
+  # in dieser Betriebsart muss das Zertifikat sie mit abdecken (Wildcard) — produktiv laeuft die
+  # Plattform hinter dem Load Balancer (hinter-loadbalancer.conf.template).
+  server_name ${PUBLIC_HOST} ${FIRMEN_HOSTS};
   location /.well-known/acme-challenge/ { root /var/www/certbot; }
   location / { return 301 https://${PUBLIC_HOST}$request_uri; }
 }
@@ -51,7 +54,7 @@ server {
   set $web_up http://web:80;
   listen 443 ssl;
   http2 on;
-  server_name ${PUBLIC_HOST};
+  server_name ${PUBLIC_HOST} ${FIRMEN_HOSTS};
 
   ssl_certificate     /etc/nginx/certs/fullchain.pem;
   ssl_certificate_key /etc/nginx/certs/privkey.pem;

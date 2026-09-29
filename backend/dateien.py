@@ -19,8 +19,10 @@ import os
 import time
 from urllib.parse import quote
 
-OEFFENTLICHE_PREFIXE = ("logo/",)
-PRIVATE_PREFIXE = ("protocol/", "pickup/")
+# Kundenportal (29.09.2026): firma/ = Bilder der oeffentlichen Firmenseite; unterschrift/ = hinterlegte
+# Unterschrift des Chefs, portal/ = Unterschriften der Kunden — beide nur ueber eigene, angemeldete Wege.
+OEFFENTLICHE_PREFIXE = ("logo/", "firma/")
+PRIVATE_PREFIXE = ("protocol/", "pickup/", "unterschrift/", "portal/")
 from konfig import zahl_env  # Pruefung 14.09.2026: keine Abstuerze durch .env-Tippfehler
 STANDARD_TTL = zahl_env("DATEI_LINK_TTL_SEKUNDEN", 3600, unten=60)
 #: Rollenprüfung 22.09.2026 (RP-098 Nr. 8): Inseratsfotos (resale/) sind

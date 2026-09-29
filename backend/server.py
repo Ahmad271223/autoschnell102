@@ -57,6 +57,7 @@ from routes import admin_auto_daten as admin_auto_daten_routes
 from routes import appointments as appointments_routes
 from routes import auth as auth_routes
 from routes import bestand as bestand_routes
+from routes import kundenportal as kundenportal_routes
 from routes import contracts as contracts_routes
 from routes import dealer as dealer_routes
 from routes import drivers as drivers_routes
@@ -1448,6 +1449,17 @@ async def ensure_indexes():
     await unique_anlegen(
         db.generated_pdfs, "freigabe.token", name="vertrag_freigabe_token",
         partialFilterExpression={"freigabe.token": {"$exists": True}})
+    # Firmenseite + Kundenportal (29.09.2026): Adresse je Firma eindeutig; je Firma hoechstens ein
+    # offener Code je Wert (nur offene zaehlen — abgelaufene/unterschriebene Codes duerfen wiederkehren);
+    # Meldungen je Empfaenger, laufen per TTL aus (laeuft_ab ist ein echtes Datum).
+    await unique_anlegen(db.dealers, "webseite.slug", name="firma_webseite_slug",
+                         partialFilterExpression={"webseite.slug": {"$type": "string"}})
+    await db.dealers.create_index("webseite.domains", name="firma_webseite_domains")
+    await unique_anlegen(db.generated_pdfs, [("dealer_id", 1), ("portal.code", 1)], name="vertrag_portal_code",
+                         partialFilterExpression={"portal.status": "offen"})
+    await db.meldungen.create_index([("dealer_id", 1), ("empfaenger", 1), ("erstellt_am", -1)],
+                                    name="meldungen_empfaenger")
+    await db.meldungen.create_index("laeuft_ab", name="meldungen_ttl", expireAfterSeconds=0)
     # Audit-Log + Fehler-Meldungen (Admin-Bereich)
     await db.activity_logs.create_index([("created_at", -1)])
     await db.activity_logs.create_index([("action", 1), ("created_at", -1)])
@@ -2144,6 +2156,8 @@ api.include_router(admin_routes.router)
 api.include_router(admin_auto_daten_routes.router)
 api.include_router(dealer_routes.router)
 api.include_router(contracts_routes.router)
+# Firmenseite + Kundenportal (29.09.2026): oeffentliche Firmenseite, Code-Freigabe, Unterschrift, Meldungen
+api.include_router(kundenportal_routes.router)
 api.include_router(appointments_routes.router)
 api.include_router(drivers_routes.router)
 api.include_router(listings_routes.router)

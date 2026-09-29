@@ -350,6 +350,10 @@ services:
       - MARKTPLATZ_AKTIV=${MARKTPLATZ_AKTIV:-true}
       - LOG_AUFBEWAHRUNG_TAGE=${LOG_AUFBEWAHRUNG_TAGE:-60}
       - CORS_ORIGINS=${CORS_ORIGINS:-}
+      # Kundenportal (29.09.2026): Basisdomain der Firmen-Unterdomains (leer = aus FRONTEND_URL ohne
+      # app./www.), Gueltigkeit der 6-stelligen Codes in Tagen
+      - FIRMEN_DOMAIN=${FIRMEN_DOMAIN:-}
+      - PORTAL_CODE_TAGE=${PORTAL_CODE_TAGE:-7}
       - FRONTEND_URL=${FRONTEND_URL:-}
       - PUBLIC_API_URL=${PUBLIC_API_URL:-}
       # Aufbewahrung / Loeschung: Vertragsloeschung ist seit 14.09.2026 SCHARF
@@ -541,6 +545,10 @@ services:
       # Audit 09/2026 (Punkt 9): NUR diese Domain wird bedient (Host-Allowlist),
       # unbekannte Hosts bekommen 444, HTTP leitet fest hierhin um.
       - PUBLIC_HOST=${PUBLIC_HOST:?PUBLIC_HOST in .env setzen (z.B. app.autoschnell.de)}
+      # Kundenportal (29.09.2026): Firmenseiten unter eigenen Adressen — Wildcard fuer die
+      # Unterdomains plus eigene Kundendomains, durch Leerzeichen getrennt. Leer = keine.
+      # Aenderung wirkt erst nach: docker compose up -d --force-recreate --no-deps proxy
+      - FIRMEN_HOSTS=${FIRMEN_HOSTS:-}
       # Nur fuer die Betriebsart hinter einem Load Balancer: aus diesem Netz
       # wird X-Forwarded-For geglaubt (privates Netz des Anbieters).
       - PRIVATES_NETZ=${PRIVATES_NETZ:-127.0.0.1}

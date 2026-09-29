@@ -1,10 +1,12 @@
 import "@/App.css";
-import { Suspense, lazy, useEffect } from "react";
+import { Suspense, lazy, useEffect, useState } from "react";
 import NachladeFehler from "@/components/NachladeFehler";
 import SeiteLaedt from "@/components/SeiteLaedt";
 import FassungsHinweis from "@/components/FassungsHinweis";
 import { nachladenGescheitert } from "@/lib/fassung";
 import { hatUngespeichert } from "@/lib/ungespeichert";
+import { api } from "@/lib/api";
+import { istFirmenHostKandidat } from "@/lib/firmenHost";
 
 // Vite (09/2026): Seiten laden erst bei Bedarf nach — die erste Seite ist
 // dadurch deutlich schneller da.
@@ -163,6 +165,9 @@ const Inserat = seite(() => import("@/pages/app/Inserat"));
 const Fahrer = seite(() => import("@/pages/app/Fahrer"));
 const Team = seite(() => import("@/pages/app/Team"));
 const Einstellungen = seite(() => import("@/pages/app/Einstellungen"));
+// Kundenportal (29.09.2026): Meldungen "Kaufvertrag bestätigt" und die öffentliche Firmenseite
+const Meldungen = seite(() => import("@/pages/app/Meldungen"));
+const FirmenSeite = seite(() => import("@/pages/firma/FirmenSeite"));
 const Anfragen = seite(() => import("@/pages/app/Anfragen"));
 const Freigaben = seite(() => import("@/pages/app/Freigaben"));
 const Chancen = seite(() => import("@/pages/app/Chancen"));
@@ -209,6 +214,33 @@ function WeiterleitungMitQuery({ nach }) {
 // Pruefbericht 20.09.2026 (U-148): Unbekannte Adresse. Vorher <Navigate to="/">:
 // ein Angemeldeter mit Tippfehler in der Adresse landete auf der Werbeseite.
 // Jetzt eine kurze Meldung mit dem passenden Ausweg (lib/rollen.nichtGefundenZiel).
+/**
+ * Kundenportal (29.09.2026): Läuft die App unter der Adresse einer Firma (kfz-mueller.auto-schnellkauf.de
+ * oder eine eigene Kundendomain per DNS), zeigt sie NUR die Firmenseite. Die Hauptadresse (app.…,
+ * localhost, IP) fragt nie nach; eine unbekannte Adresse fällt auf die normalen Seiten zurück.
+ */
+function HostWeiche({ children }) {
+  const [stand, setStand] = useState(() => (
+    typeof window !== "undefined" && istFirmenHostKandidat(window.location.hostname) ? "pruefen" : "app"));
+  useEffect(() => {
+    if (stand !== "pruefen") return undefined;
+    let aktiv = true;
+    api.get("/public/firma", { params: { host: window.location.hostname } })
+      .then(() => { if (aktiv) setStand("firma"); })
+      .catch(() => { if (aktiv) setStand("app"); });
+    return () => { aktiv = false; };
+  }, [stand]);
+  if (stand === "pruefen") return <SeiteLaedt ganzeSeite />;
+  if (stand === "firma") {
+    return (
+      <Routes>
+        <Route path="*" element={<FirmenSeite />} />
+      </Routes>
+    );
+  }
+  return children;
+}
+
 function NichtGefunden() {
   const { user, loading } = useAuth();
   const { pathname } = useLocation();
@@ -242,6 +274,7 @@ export default function App() {
           <FassungsHinweis />
           <NachladeFehler>
           <Suspense fallback={<SeiteLaedt ganzeSeite />}>
+          <HostWeiche>
           <Routes>
             <Route path="/" element={<Landing />} />
             <Route path="/login" element={<Login />} />
@@ -262,6 +295,8 @@ export default function App() {
             <Route path="/impressum" element={<Impressum />} />
             <Route path="/datenschutz" element={<Datenschutz />} />
             <Route path="/agb" element={<AGB />} />
+            {/* Kundenportal (29.09.2026): Firmenseite auch über den Pfad (Vorschau, lokal ohne Unterdomains) */}
+            <Route path="/firma/:slug" element={<FirmenSeite />} />
 
             <Route path="/abo" element={<ProtectedRoute requireSub={false}><Subscription /></ProtectedRoute>} />
 
@@ -283,6 +318,8 @@ export default function App() {
             <Route path="/app/markt/chancen" element={<Wrap><FeatureGate feature="markt_chancen" bereich="Der Bereich Markt-Chancen" zurueck="/app/vergleich"><Chancen /></FeatureGate></Wrap>} />
             <Route path="/app/inserat/:id" element={<WrapFree><FeatureGate bereich="Das Inserieren" zurueck="/app/bestand"><Inserat /></FeatureGate></WrapFree>} />
             <Route path="/app/fahrer" element={<WrapFree><Fahrer /></WrapFree>} />
+            {/* Kundenportal (29.09.2026): Bestätigungen "Kaufvertrag digital unterschrieben" */}
+            <Route path="/app/meldungen" element={<WrapFree><Meldungen /></WrapFree>} />
             <Route path="/app/team" element={<WrapFree><Team /></WrapFree>} />
             <Route path="/app/einstellungen" element={<WrapFree><Einstellungen /></WrapFree>} />
 
@@ -335,6 +372,7 @@ export default function App() {
             {/* U-148: kein blindes <Navigate to="/"> mehr */}
             <Route path="*" element={<NichtGefunden />} />
           </Routes>
+          </HostWeiche>
           </Suspense>
           </NachladeFehler>
         </BrowserRouter>

@@ -28,6 +28,7 @@ const PLATZHALTER = [
 import { toast } from "sonner";
 import { vertragstextFuerFormular } from "@/lib/vertragstext";
 import KopierKnopf from "@/components/KopierKnopf";
+import FirmenseiteEinstellungen from "@/components/FirmenseiteEinstellungen";
 import {
   Building2, Sliders, FileText, Mail, MessageSquare, ShieldCheck, Save, Check, Globe,
   CreditCard, Calendar, X, ArrowRight, Bolt, Store,
@@ -448,6 +449,9 @@ export default function Einstellungen() {
                   Nicht die Anmeldenummer. Wunsch Ahmad 26.09.2026 abends: die Firma
                   (Chef UND Sucher) setzt sie selbst — eigene Route, sofort gespeichert. */}
               <VertragsKundennummerFeld dealer={dealer} refresh={refresh} />
+              {/* Kundenportal (29.09.2026): eigene Firmenseite (Adresse per DNS), Bilder, Über uns,
+                  Unterschrift des Chefs — Kunden unterschreiben Kaufverträge dort digital */}
+              <FirmenseiteEinstellungen user={user} />
               <div className="grid md:grid-cols-2 gap-3">
                 <AppleField label="Firmenname" value={form.profile.company_name} onChange={(v) => setProfile("company_name", v)} testid="set-company" />
                 <AppleField label="Ansprechpartner" value={form.profile.contact_person} onChange={(v) => setProfile("contact_person", v)} testid="set-contact" />

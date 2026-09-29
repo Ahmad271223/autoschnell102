@@ -1306,7 +1306,7 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
         vorhanden = await db.generated_pdfs.find_one(
             {"dealer_id": user["dealer_id"], "user_id": user["id"],
              "idempotency_key": body.idempotency_key},
-            {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0})
+            {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0, "pdf_signiert_b64": 0})
         if vorhanden:
             # Pruefung 14.09.2026 (F16): derselbe Schluessel mit ANDEREN
             # Vertragsdaten ist ein Fehler, nicht "der alte Vertrag".
@@ -1550,7 +1550,7 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
             vorhanden = await db.generated_pdfs.find_one(
                 {"dealer_id": user["dealer_id"], "user_id": user["id"],
                  "idempotency_key": body.idempotency_key},
-                {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0})
+                {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0, "pdf_signiert_b64": 0})
             if vorhanden:
                 # Runde 16 (15.09.2026): dieselbe Hash-Pruefung wie im Vorabpfad —
                 # sonst bekam Anfrage B still den Vertrag von Anfrage A.
@@ -1991,7 +1991,7 @@ async def list_contracts(
         query["send_status.channel"] = channel
     grenze = limit or CONTRACTS_LIST_MAX
     items = await db.generated_pdfs.find(
-        query, {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0},
+        query, {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0, "pdf_signiert_b64": 0},
     ).sort("created_at", -1).to_list(grenze + 1)
     abgeschnitten = len(items) > grenze
     items = items[:grenze]
@@ -2065,7 +2065,7 @@ async def get_contract(contract_id: str, user=Depends(current_firma)):
     Dateien gibt es weiterhin unter /contracts/{id}/pdf."""
     c = await db.generated_pdfs.find_one(
         {"id": contract_id, **_vertrag_bereich(user)},
-        {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0},
+        {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0, "pdf_signiert_b64": 0},
     )
     if not c:
         raise HTTPException(404, "Vertrag nicht gefunden")
@@ -2225,7 +2225,7 @@ async def list_contract_versions(contract_id: str, response: Response,
     # zeigt den Hinweis auf X-Truncated.
     fassungen = await db.generated_pdf_versions.find(
         {"contract_id": contract_id, "dealer_id": user["dealer_id"]},
-        {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0, "contract_data": 0},
+        {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0, "pdf_signiert_b64": 0, "contract_data": 0},
     ).sort("version", -1).to_list(grenze + 1)
     response.headers["X-Truncated"] = "1" if len(fassungen) > grenze else "0"
     fassungen = list(reversed(fassungen[:grenze]))
@@ -2260,7 +2260,7 @@ async def get_contract_version_pdf(contract_id: str, version: int,
         # die Druckfassung zu liefern.
         voll = await db.generated_pdfs.find_one(
             {"id": contract_id, **_vertrag_bereich(user)},
-            {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0})
+            {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0, "pdf_signiert_b64": 0})
         pdf_bytes = await _digitales_pdf_bytes(
             {**(voll or {}), **v, "id": contract_id, "version": version}, user, cache=False)
         if not pdf_bytes:

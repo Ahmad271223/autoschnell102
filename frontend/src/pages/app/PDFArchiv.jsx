@@ -3,13 +3,14 @@ import { useNavigate } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
 import { thumbSrc, thumbFehler } from "@/lib/bilder";
 import { toast } from "sonner";
-import { Search, Trash2, Eye, X, Car, ChevronLeft, ChevronRight, MapPin, FileText, Send, Mail, CalendarPlus, UserRoundPen } from "lucide-react";
+import { Search, Trash2, Eye, X, Car, ChevronLeft, ChevronRight, MapPin, FileText, Send, Mail, CalendarPlus, UserRoundPen, PenLine } from "lucide-react";
 import { openContractPdf } from "@/lib/pdf";
 import { openAuthedFile } from "@/lib/api";
 import BeweisCard from "@/components/BeweisCard";
 import SendDialog, { abholterminAnlegen, TERMIN_MELDUNG } from "@/components/SendDialog";
 import FolgeMailDialog from "@/components/FolgeMailDialog";
 import VerkaeuferKorrekturDialog from "@/components/VerkaeuferKorrekturDialog";
+import KundenportalDialog from "@/components/KundenportalDialog";
 
 // Rollenprüfung 22.09.2026 (RP-007/RP-106/RP-257): Verträge je Seite.
 export const ARCHIV_SEITE = 50;
@@ -62,6 +63,8 @@ export default function PDFArchiv() {
   // Entscheidung Ahmad 22.09.2026 (RP-481): Verkaeuferdaten eines Vertrags
   // korrigieren -> neue Fassung, danach direkt der Versand-Dialog.
   const [korrektur, setKorrektur] = useState(null);
+  // Kundenportal (29.09.2026): Code fuer die digitale Unterschrift des Kunden
+  const [portal, setPortal] = useState(null);
 
   // Runde 16 (15.09.2026): ein Ladefehler sah aus wie "keine Vertraege", und
   // die Kuerzung des Servers (X-Truncated ab 2.000) blieb unsichtbar.
@@ -291,6 +294,20 @@ export default function PDFArchiv() {
                           v{it.version}
                         </span>
                       )}
+                      {/* Kundenportal (29.09.2026): Stand der digitalen Unterschrift */}
+                      {it.kunde_unterschrieben_am ? (
+                        <span className="text-[11px] font-semibold px-2 py-1 rounded-full" data-testid={`portal-badge-${it.id}`}
+                              title={`Vom Kunden digital unterschrieben am ${new Date(it.kunde_unterschrieben_am).toLocaleString("de-DE")}`}
+                              style={{ background: "rgba(48,209,88,0.12)", border: "1px solid rgba(48,209,88,0.35)", color: "#30d158" }}>
+                          ✓ digital unterschrieben
+                        </span>
+                      ) : it.portal?.status === "offen" && (it.portal?.version || 1) === (it.version || 1) ? (
+                        <span className="text-[11px] font-semibold px-2 py-1 rounded-full" data-testid={`portal-badge-${it.id}`}
+                              title="Code für das Kundenportal ist aktiv — der Kunde kann unterschreiben"
+                              style={{ background: "rgba(255,159,10,0.12)", border: "1px solid rgba(255,159,10,0.35)", color: "var(--tx-amber, #ffb340)" }}>
+                          Code offen
+                        </span>
+                      ) : null}
                     </div>
                     <SpecsZeile cd={it.contract_data} />
                     <div className="mt-1.5 text-[13.5px] leading-relaxed"
@@ -377,6 +394,16 @@ export default function PDFArchiv() {
                               title="Vertrag an den Verkäufer senden (WhatsApp oder E-Mail)">
                         <Send size={16} />
                       </button>
+                      <button onClick={() => setPortal(it)}
+                              data-testid={`kundenportal-${it.id}`}
+                              className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-white/10"
+                              style={{ background: it.kunde_unterschrieben_am ? "rgba(48,209,88,0.18)" : "var(--apple-btn-secondary-bg)",
+                                       color: it.kunde_unterschrieben_am ? "#30d158" : "var(--text-primary)" }}
+                              aria-label="Kundenportal — digital unterschreiben lassen"
+                              title={it.kunde_unterschrieben_am ? "Vom Kunden digital unterschrieben — Vertrag öffnen"
+                                : "Kundenportal: Code erzeugen, damit der Kunde den Vertrag auf eurer Firmenseite digital unterschreibt"}>
+                        <PenLine size={16} />
+                      </button>
                       <button onClick={() => setFolgeMail(it)}
                               data-testid={`folgemail-${it.id}`}
                               className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-white/10"
@@ -426,6 +453,11 @@ export default function PDFArchiv() {
         // Dialog Empfaenger und Zustand des zuvor gesendeten Vertrags.
         <SendDialog open contract={senden} key={senden.id}
                     onClose={() => { setSenden(null); load(); }} />
+      )}
+
+      {portal && (
+        <KundenportalDialog open contract={portal} key={portal.id}
+                            onClose={() => { setPortal(null); load(); }} />
       )}
 
       {folgeMail && (

@@ -1,5 +1,6 @@
 """PDF generation for car purchase contracts (Kaufvertrag) using ReportLab."""
 import io
+from typing import Optional
 import logging
 import math
 import re
@@ -465,7 +466,31 @@ def empfang_drucken(contract, dealer=None) -> bool:
     return True
 
 
-def _empfang_kasten(rolle, seite, contract, st, unterschrift, mit_empfang=True):
+#: Kundenportal (29.09.2026): Hoehe der eingesetzten Unterschrift im Kasten
+UNTERSCHRIFT_HOEHE = 1.3 * cm
+
+
+def _unterschrift_flowable(daten, breite_max):
+    """Unterschriftsbild fuer den Kasten — oder None (kein Bild, unlesbar). Wie beim Logo:
+    ein kaputtes Bild darf keinen Vertrag verhindern, dann bleibt die Linie leer."""
+    if not daten:
+        return None
+    try:
+        from reportlab.lib.utils import ImageReader
+        from reportlab.platypus import Image as _RLImage
+        leser = ImageReader(io.BytesIO(daten))
+        breite, hoehe = leser.getSize()
+        if not breite or not hoehe:
+            return None
+        faktor = min(UNTERSCHRIFT_HOEHE / hoehe, breite_max / breite)
+        bild = _RLImage(io.BytesIO(daten), width=breite * faktor, height=hoehe * faktor)
+        bild.hAlign = "LEFT"
+        return bild
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _empfang_kasten(rolle, seite, contract, st, unterschrift, mit_empfang=True, bild=None, bild_text=None):
     """Kasten einer Partei im Abschnitt "Unterschriften": Titel,
     "bestätigt Empfang von:" mit Kaestchen, "Datum und Ort". Druckfassung
     (unterschrift=True) zusaetzlich mit der Unterschriftslinie; die digitale
@@ -494,9 +519,13 @@ def _empfang_kasten(rolle, seite, contract, st, unterschrift, mit_empfang=True):
         ("BOTTOMPADDING", (0, -1), (0, -1), 6),
     ]
     if unterschrift:
+        # Kundenportal (29.09.2026): liegt ein Unterschriftsbild vor (Kunde am Bildschirm bzw. die
+        # hinterlegte Unterschrift des Chefs), steht es auf der Linie; darunter Name und Zeitpunkt.
+        flow = _unterschrift_flowable(bild, COL_W - 16) if bild else None
         rows += [
-            [Spacer(1, 34)],
-            [Paragraph("Unterschrift", st["sig_label"])],
+            [flow if flow is not None else Spacer(1, 34)],
+            [Paragraph("Unterschrift" + (f" — {_xml_escape(bild_text)}" if (flow is not None and bild_text) else ""),
+                       st["sig_label"])],
         ]
         stil += [
             ("LINEBELOW", (0, 2), (0, 2), 0.5, GREY),   # Unterschrift line
@@ -506,13 +535,17 @@ def _empfang_kasten(rolle, seite, contract, st, unterschrift, mit_empfang=True):
     return t
 
 
-def _empfang_paar(contract, st, unterschrift, mit_empfang=True):
+def _empfang_paar(contract, st, unterschrift, mit_empfang=True, bilder=None):
     """Beide Kaesten nebeneinander — Verkaeufer links, Kaeufer rechts
-    (wie die Parteien oben im Vertrag)."""
+    (wie die Parteien oben im Vertrag). `bilder` (Kundenportal): {"verkaeufer": PNG-Bytes,
+    "verkaeufer_text": str, "kaeufer": PNG-Bytes | None, "kaeufer_text": str | None}."""
+    b = bilder or {}
     t = Table(
-        [[_empfang_kasten("Verkäufer / Halter", "verkaeufer", contract, st, unterschrift, mit_empfang),
+        [[_empfang_kasten("Verkäufer / Halter", "verkaeufer", contract, st, unterschrift, mit_empfang,
+                          bild=b.get("verkaeufer"), bild_text=b.get("verkaeufer_text")),
           "",
-          _empfang_kasten("Käufer / Händler", "kaeufer", contract, st, unterschrift, mit_empfang)]],
+          _empfang_kasten("Käufer / Händler", "kaeufer", contract, st, unterschrift, mit_empfang,
+                          bild=b.get("kaeufer"), bild_text=b.get("kaeufer_text"))]],
         colWidths=[COL_W, 0.5 * cm, COL_W],
     )
     t.setStyle(TableStyle([
@@ -746,12 +779,17 @@ def _platzhalter_vertrag(contract: dict, vehicle: dict) -> dict:
 
 
 def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
-                          digital: bool = False) -> bytes:
+                          digital: bool = False, unterschriften: Optional[dict] = None) -> bytes:
     """Build a Kaufvertrag PDF and return raw bytes.
 
     digital=True: Ausfertigung fuer den Versand per E-Mail/WhatsApp — ohne
     Abschnitt "Unterschriften" und ohne Empfangsbestaetigung, am Ende steht
     nur der Satz zur Gueltigkeit (seit 15.09.2026).
+
+    unterschriften (Kundenportal, 29.09.2026): Druckfassung MIT eingesetzten
+    Unterschriftsbildern — {"verkaeufer": PNG, "verkaeufer_text": str,
+    "kaeufer": PNG | None, "kaeufer_text": str | None, "hinweis": str} —
+    der Hinweis (wann, worueber, welche Fassung) steht unter den Kaesten.
 
     Vertragsende in beiden Fassungen (Wunsch Ahmad 21.09.2026): Besondere
     Vereinbarungen -> AGB -> Unterschrift (digital: der Gueltigkeitssatz)."""
@@ -1196,12 +1234,14 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
     # dem Titel die Empfangsbestaetigung mit Ankreuz-Kaestchen und "Datum
     # und Ort", darunter wie bisher die Linien — siehe _empfang_kasten.
     sig = _empfang_paar(contract, st, unterschrift=True,
-                        mit_empfang=empfang_drucken(contract, dealer))
+                        mit_empfang=empfang_drucken(contract, dealer), bilder=unterschriften)
+    hinweis = (unterschriften or {}).get("hinweis")
     story.append(Spacer(1, 8))
     story.append(KeepTogether([
         _section("Unterschriften", st),
         Spacer(1, 8),
         sig,
+        *([Spacer(1, 4), Paragraph(_xml_escape(str(hinweis)), st["small"])] if hinweis else []),
         Spacer(1, 4),
         Paragraph(
             # Wunsch Ahmad (12.09.2026): Der Satz deckt auch den Fall ab, dass der
