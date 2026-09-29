@@ -6,12 +6,17 @@
  * gebraucht wird (die Firmenseite bleibt sonst klein); der Worker liegt als eigene Datei im
  * Build (gleiche Herkunft, passt zur CSP script-src 'self').
  */
+// Der Worker wird von Vite als eigener JS-Chunk gebaut (?worker) — nicht als .mjs-Datei kopiert:
+// nginx/der Test-Server liefern .mjs sonst als application/octet-stream aus, und der Browser lehnt ein
+// Modul mit falschem MIME-Typ ab (Browser-Probe 29.09.2026: "Failed to load module script").
+import PdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?worker";
+
 let werkzeug = null;
 
 async function pdfjsLaden() {
   if (werkzeug) return werkzeug;
   const pdfjs = await import("pdfjs-dist");
-  pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
+  pdfjs.GlobalWorkerOptions.workerPort = new PdfWorker();
   werkzeug = pdfjs;
   return pdfjs;
 }
@@ -38,7 +43,10 @@ export async function pdfSeitenRendern(blob, breite) {
     canvas.style.width = "100%";
     canvas.style.height = "auto";
     canvas.setAttribute("aria-label", `Vertragsseite ${nr} von ${dokument.numPages}`);
-    await seite.render({ canvasContext: canvas.getContext("2d"), viewport: ansicht }).promise;
+    // intent "print": pdf.js zeichnet ohne requestAnimationFrame — im Hintergrund-Tab, in einer
+    // gedrosselten Ansicht oder direkt nach dem Umschalten der App wartete "display" sonst ewig auf
+    // den naechsten Bildaufbau (Browser-Probe 29.09.2026: Vorschau blieb bei "wird geladen").
+    await seite.render({ canvasContext: canvas.getContext("2d"), viewport: ansicht, intent: "print" }).promise;
     seiten.push(canvas);
   }
   return seiten;

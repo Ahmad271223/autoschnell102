@@ -161,7 +161,8 @@ function Kundenportal({ firma, slug, host }) {
       const { data } = await api.get(`/public/portal/${sitzung.sitzung}/pdf`, { responseType: "blob" });
       setPdfBlob(data);
       const { pdfSeitenRendern } = await import("@/lib/pdfAnzeige");
-      const breite = Math.min(820, (seitenRef.current?.clientWidth || 720));
+      // mindestens 320 px (lesbar), hoechstens 820 px — ein noch nicht gezeichneter Kasten meldet sonst 0
+      const breite = Math.min(820, Math.max(320, seitenRef.current?.clientWidth || 720));
       const seiten = await pdfSeitenRendern(data, breite);
       if (seitenRef.current) {
         seitenRef.current.replaceChildren(...seiten);
