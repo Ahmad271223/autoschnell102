@@ -33,6 +33,8 @@ const FIRMA = {
   bilder: ["/api/files/firma/d1/a.jpg", "/api/files/firma/d1/b.jpg"],
   kontakt: { adresse: "Hauptstraße 1", plz: "12345", ort: "Berlin", telefon: "030 123", email: "info@example.org", oeffnungszeiten: "Mo–Fr 9–18" },
   url: "https://kfz-mueller.auto-schnellkauf.de", portal_aktiv: true,
+  titelbild: "/api/files/firma/d1/a.jpg", titel: "Ihr Partner für den Autoankauf in Berlin", untertitel: "Schnell, sicher & fair",
+  social: { facebook: "", instagram: "https://www.instagram.com/kfz" }, plattform_url: "https://app.auto-schnellkauf.de",
 };
 const VERTRAG = { contract_no: "KV-1", marke: "VW", modell: "Golf", verkaeufer: "Erika Mustermann", kaufpreis: 12500, firma: "KFZ Müller GmbH", version: 1, status: "offen" };
 
@@ -76,9 +78,19 @@ describe("Firmenseite", () => {
     expect(el("firmenseite-name").textContent).toBe("KFZ Müller GmbH");
     expect(el("firmenseite-logo").getAttribute("src")).toContain("/api/files/logo/d1/x.png");
     expect(el("firmenseite-ueber-uns").textContent).toContain("Wir kaufen Ihr Auto.");
-    expect(el("firmenseite-bilder").querySelectorAll("img").length).toBe(2);
+    // Vorlage: erstes Bild = Titelbild, die weiteren unter "Über uns"; Überschrift/Unterzeile; Fußzeile mit Follow Us
+    expect(el("firmenseite-titel").querySelector("img").getAttribute("src")).toContain("/api/files/firma/d1/a.jpg");
+    expect(el("firmenseite-ueberschrift").textContent).toBe("Ihr Partner für den Autoankauf in Berlin");
+    expect(el("firmenseite-unterzeile").textContent).toBe("Schnell, sicher & fair");
+    expect(el("firmenseite-bilder").querySelectorAll("img").length).toBe(1);
     expect(el("firmenseite-kontakt").textContent).toContain("Hauptstraße 1, 12345 Berlin");
     expect(el("firmenseite-kontakt").textContent).toContain("Mo–Fr 9–18");
+    expect(el("firmenseite-kontakt").textContent).toContain("Impressum");
+    expect(el("firmenseite-social").querySelector('a[aria-label="Instagram"]').getAttribute("href")).toBe("https://www.instagram.com/kfz");
+    expect(el("firmenseite-social").querySelector('a[aria-label="Facebook"]')).toBeNull();
+    expect(el("firmenseite-datenschutz").getAttribute("href")).toBe("https://app.auto-schnellkauf.de/datenschutz");
+    expect(el("nav-kundenportal").getAttribute("href")).toBe("#kundenportal");
+    expect(behaelter.textContent).toContain("Vertrag digital einsehen und unterschreiben – sicher und bequem.");
     expect(el("kundenportal")).toBeTruthy();
     expect(el("portal-oeffnen").disabled).toBe(true);           // ohne 6 Zeichen kein Absenden
     expect(document.title).toContain("KFZ Müller GmbH");

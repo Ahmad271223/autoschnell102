@@ -169,6 +169,20 @@ def test_02_webseite_pflegen_und_oeffentlich_lesen(welt):
     assert st["webseite"]["slug"] == "kfz-mueller" and st["webseite"]["aktiv"] is True
     assert st["webseite"]["ueber_uns"] == "Wir kaufen Ihr Auto." and st["webseite"]["domains"] == ["kfz-mueller.de", "www.kfz-mueller.de"]
     assert st["url"] == "https://kfz-mueller.auto-schnellkauf.de" and st["url_pfad"].endswith("/firma/kfz-mueller")
+    # Vorlage 29.09.: Ueberschrift/Unterzeile (leer = Vorgabe mit Ort), Social-Links nur als https-Adresse
+    assert st["titel_vorgabe"] == "Ihr Partner für den Autoankauf in Berlin" and st["untertitel_vorgabe"] == "Schnell, sicher & fair"
+    assert _fehler(KP.put_webseite(KP.WebseiteIn(facebook="kfz.mueller"), user=w.chef)).status_code == 400
+    assert _fehler(KP.put_webseite(KP.WebseiteIn(instagram="javascript:alert(1)"), user=w.chef)).status_code == 400
+    st = _lauf(KP.put_webseite(KP.WebseiteIn(titel="  Ihr   Autohaus  ", untertitel="", facebook=" https://www.facebook.com/kfz ",
+                                             instagram=""), user=w.chef))
+    assert st["webseite"]["titel"] == "Ihr Autohaus" and st["webseite"]["facebook"] == "https://www.facebook.com/kfz"
+    assert st["webseite"]["untertitel"] == "" and st["webseite"]["instagram"] == ""
+    oeff = _lauf(KP.public_firma(slug="kfz-mueller"))
+    assert oeff["titel"] == "Ihr Autohaus" and oeff["untertitel"] == "Schnell, sicher & fair"
+    assert oeff["social"] == {"facebook": "https://www.facebook.com/kfz", "instagram": ""} and oeff["titelbild"] == ""
+    assert oeff["plattform_url"] == "https://app.auto-schnellkauf.de"
+    _lauf(KP.put_webseite(KP.WebseiteIn(titel=""), user=w.chef))
+    assert _lauf(KP.public_firma(slug="kfz-mueller"))["titel"] == "Ihr Partner für den Autoankauf in Berlin"
     # zweite Firma: dieselbe Adresse / Domain ist vergeben
     d2 = f"d2-{w.s}"
     chef2 = {"id": f"chef2-{w.s}", "dealer_id": d2, "role": "dealer", "active": True}

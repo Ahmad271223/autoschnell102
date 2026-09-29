@@ -61,7 +61,8 @@ describe("FirmenseiteEinstellungen", () => {
     });
     put.mockImplementation(async (url, body) => {
       expect(url).toBe("/admin/dealers/d1/webseite");
-      expect(body).toEqual({ slug: "kfz-mueller-gmbh", aktiv: true, ueber_uns: "Wir kaufen Ihr Auto.", domains: ["kfz-mueller.de"] });
+      expect(body).toEqual({ slug: "kfz-mueller-gmbh", aktiv: true, ueber_uns: "Wir kaufen Ihr Auto.", domains: ["kfz-mueller.de"],
+                             titel: "Ihr Partner in Hannover", untertitel: "", facebook: "", instagram: "https://www.instagram.com/kfz" });
       stand = STAND({ webseite: { slug: "kfz-mueller-gmbh", aktiv: true, ueber_uns: body.ueber_uns, bilder: [], domains: ["kfz-mueller.de"] },
                       url: "https://kfz-mueller-gmbh.auto-schnellkauf.de" });
       return { data: stand };
@@ -73,6 +74,8 @@ describe("FirmenseiteEinstellungen", () => {
     await klick("firmenseite-aktiv");
     await tippen("firmenseite-ueber-uns", "Wir kaufen Ihr Auto.");
     await tippen("firmenseite-domains", "kfz-mueller.de\n");
+    await tippen("firmenseite-titel", "Ihr Partner in Hannover");
+    await tippen("firmenseite-instagram", "https://www.instagram.com/kfz");
     await klick("firmenseite-speichern");
     expect(toast.success).toHaveBeenCalledWith("Firmenseite gespeichert");
     expect(el("firmenseite-url").textContent).toContain("https://kfz-mueller-gmbh.auto-schnellkauf.de");

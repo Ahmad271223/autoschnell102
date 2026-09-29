@@ -181,12 +181,19 @@ async def firma_laden(*, host: Optional[str] = None, slug: Optional[str] = None)
 
 def firma_oeffentlich(d: dict) -> dict:
     w = d.get("webseite") or {}
+    bilder = [f"/api/files/{k}" for k in (w.get("bilder") or []) if isinstance(k, str)]
     return {
         "slug": w.get("slug"),
         "firma": d.get("company_name") or "",
         "logo_url": d.get("logo_url") or "",
         "ueber_uns": w.get("ueber_uns") or "",
-        "bilder": [f"/api/files/{k}" for k in (w.get("bilder") or []) if isinstance(k, str)],
+        "bilder": bilder,
+        # Vorlage Ahmad 29.09.2026: Titelbild = erstes Bild, grosse Ueberschrift + Unterzeile, Social-Links
+        "titelbild": bilder[0] if bilder else "",
+        "titel": (w.get("titel") or "").strip() or titel_vorgabe(d.get("city")),
+        "untertitel": (w.get("untertitel") or "").strip() or UNTERTITEL_VORGABE,
+        "social": {k: (w.get(k) or "") for k in SOCIAL_FELDER},
+        "plattform_url": _hauptadresse(),
         "kontakt": {"adresse": d.get("address") or "", "plz": d.get("zip_code") or "",
                     "ort": d.get("city") or "", "telefon": d.get("phone") or "",
                     "email": d.get("email") or "", "oeffnungszeiten": d.get("opening_hours") or ""},
@@ -212,6 +219,33 @@ class WebseiteIn(BaseModel):
     aktiv: Optional[bool] = None
     ueber_uns: Optional[str] = Field(default=None, max_length=UEBER_UNS_MAX)
     domains: Optional[List[str]] = Field(default=None, max_length=DOMAINS_MAX)
+    # Vorlage Ahmad 29.09.2026 (Bild "Norden Autoankauf"): grosse Ueberschrift + Unterzeile ueber dem Titelbild,
+    # unten "Follow Us" — leer = Vorgabe ("Ihr Partner fuer den Autoankauf in <Ort>", "Schnell, sicher & fair")
+    titel: Optional[str] = Field(default=None, max_length=90)
+    untertitel: Optional[str] = Field(default=None, max_length=140)
+    facebook: Optional[str] = Field(default=None, max_length=200)
+    instagram: Optional[str] = Field(default=None, max_length=200)
+
+
+SOCIAL_FELDER = ("facebook", "instagram")
+
+
+def _social_pruefen(wert: str, name: str) -> str:
+    """Nur echte https-Adressen (kein javascript:, keine nackten Namen) — leer entfernt den Link."""
+    w = (wert or "").strip()
+    if not w:
+        return ""
+    if not re.match(r"^https://[a-z0-9.-]+\.[a-z]{2,}(/[^\s]*)?$", w, re.I):
+        raise HTTPException(400, f"{name.capitalize()}: bitte die vollständige Adresse mit https:// eintragen.")
+    return w[:200]
+
+
+def titel_vorgabe(ort: Optional[str]) -> str:
+    o = (ort or "").strip()
+    return f"Ihr Partner für den Autoankauf in {o}" if o else "Ihr Partner für den Autoankauf"
+
+
+UNTERTITEL_VORGABE = "Schnell, sicher & fair"
 
 
 class BildIn(BaseModel):
@@ -228,7 +262,10 @@ def _webseite_antwort(d: dict, ist_chef: bool) -> dict:
     return {
         "webseite": {"slug": slug, "aktiv": bool(w.get("aktiv")), "ueber_uns": w.get("ueber_uns") or "",
                      "bilder": [{"key": k, "url": f"/api/files/{k}"} for k in (w.get("bilder") or [])],
-                     "domains": list(w.get("domains") or [])},
+                     "domains": list(w.get("domains") or []),
+                     "titel": w.get("titel") or "", "untertitel": w.get("untertitel") or "",
+                     "facebook": w.get("facebook") or "", "instagram": w.get("instagram") or ""},
+        "titel_vorgabe": titel_vorgabe(d.get("city")), "untertitel_vorgabe": UNTERTITEL_VORGABE,
         "url": firmen_url(slug) if slug else "",
         "url_pfad": f"{_hauptadresse()}/firma/{slug}" if slug else "",
         "firmen_domain": firmen_domain(),
@@ -281,6 +318,14 @@ async def _webseite_setzen(dealer_id: str, body: WebseiteIn, wer: str) -> dict:
         setzen["webseite.aktiv"] = bool(body.aktiv)
     if body.ueber_uns is not None:
         setzen["webseite.ueber_uns"] = body.ueber_uns.strip()
+    if body.titel is not None:
+        setzen["webseite.titel"] = " ".join(body.titel.split())[:90]
+    if body.untertitel is not None:
+        setzen["webseite.untertitel"] = " ".join(body.untertitel.split())[:140]
+    for feld in SOCIAL_FELDER:
+        wert = getattr(body, feld)
+        if wert is not None:
+            setzen[f"webseite.{feld}"] = _social_pruefen(wert, feld)
     if body.domains is not None:
         doms: List[str] = []
         basis = firmen_domain()

@@ -28,7 +28,7 @@ const BACKEND = process.env.REACT_APP_BACKEND_URL || "";
 export default function FirmenseiteEinstellungen({ adminDealerId = null }) {
   const basis = adminDealerId ? `/admin/dealers/${adminDealerId}` : "/dealer";
   const [stand, setStand] = useState(null);
-  const [form, setForm] = useState({ slug: "", aktiv: false, ueber_uns: "", domains: "" });
+  const [form, setForm] = useState({ slug: "", aktiv: false, ueber_uns: "", domains: "", titel: "", untertitel: "", facebook: "", instagram: "" });
   const [fehler, setFehler] = useState("");
   const [busy, setBusy] = useState(false);
   const [unterschriftUrl, setUnterschriftUrl] = useState(null);
@@ -37,7 +37,8 @@ export default function FirmenseiteEinstellungen({ adminDealerId = null }) {
   const uebernehmen = useCallback((data) => {
     setStand(data);
     const w = data?.webseite || {};
-    setForm({ slug: w.slug || "", aktiv: !!w.aktiv, ueber_uns: w.ueber_uns || "", domains: (w.domains || []).join("\n") });
+    setForm({ slug: w.slug || "", aktiv: !!w.aktiv, ueber_uns: w.ueber_uns || "", domains: (w.domains || []).join("\n"),
+              titel: w.titel || "", untertitel: w.untertitel || "", facebook: w.facebook || "", instagram: w.instagram || "" });
   }, []);
   const laden = useCallback(async () => {
     try {
@@ -72,6 +73,7 @@ export default function FirmenseiteEinstellungen({ adminDealerId = null }) {
       const { data } = await api.put(`${basis}/webseite`, {
         slug: form.slug.trim().toLowerCase(), aktiv: form.aktiv, ueber_uns: form.ueber_uns,
         domains: form.domains.split(/\r?\n|,/).map((d) => d.trim()).filter(Boolean),
+        titel: form.titel, untertitel: form.untertitel, facebook: form.facebook.trim(), instagram: form.instagram.trim(),
       });
       uebernehmen(data);
       setFehler("");
@@ -184,7 +186,37 @@ export default function FirmenseiteEinstellungen({ adminDealerId = null }) {
             <div className="text-[11px] text-zinc-500 text-right">{form.ueber_uns.length}/2000</div>
           </div>
 
-          {/* Bilder */}
+          {/* Titelzeilen über dem Titelbild (Vorlage Ahmad 29.09.2026) */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="text-[12px] font-semibold text-zinc-400">Überschrift auf dem Titelbild</label>
+              <input value={form.titel} onChange={(e) => setForm({ ...form, titel: e.target.value.slice(0, 90) })} disabled={!istChef}
+                     placeholder={stand.titel_vorgabe || "Ihr Partner für den Autoankauf"} className="apple-input w-full mt-1" data-testid="firmenseite-titel" />
+              <div className="text-[11px] text-zinc-500 mt-1">Leer = „{stand.titel_vorgabe || "Ihr Partner für den Autoankauf"}“</div>
+            </div>
+            <div>
+              <label className="text-[12px] font-semibold text-zinc-400">Unterzeile</label>
+              <input value={form.untertitel} onChange={(e) => setForm({ ...form, untertitel: e.target.value.slice(0, 140) })} disabled={!istChef}
+                     placeholder={stand.untertitel_vorgabe || "Schnell, sicher & fair"} className="apple-input w-full mt-1" data-testid="firmenseite-untertitel" />
+              <div className="text-[11px] text-zinc-500 mt-1">Leer = „{stand.untertitel_vorgabe || "Schnell, sicher & fair"}“</div>
+            </div>
+          </div>
+
+          {/* Follow Us */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="text-[12px] font-semibold text-zinc-400">Facebook (optional)</label>
+              <input value={form.facebook} onChange={(e) => setForm({ ...form, facebook: e.target.value.slice(0, 200) })} disabled={!istChef}
+                     placeholder="https://www.facebook.com/…" className="apple-input w-full mt-1" data-testid="firmenseite-facebook" autoCapitalize="none" spellCheck={false} />
+            </div>
+            <div>
+              <label className="text-[12px] font-semibold text-zinc-400">Instagram (optional)</label>
+              <input value={form.instagram} onChange={(e) => setForm({ ...form, instagram: e.target.value.slice(0, 200) })} disabled={!istChef}
+                     placeholder="https://www.instagram.com/…" className="apple-input w-full mt-1" data-testid="firmenseite-instagram" autoCapitalize="none" spellCheck={false} />
+            </div>
+          </div>
+
+          {/* Bilder — das erste ist das große Titelbild */}
           <div>
             <div className="flex items-center justify-between">
               <label className="text-[12px] font-semibold text-zinc-400">Bilder ({bilder.length}/{stand.bilder_max || 6})</label>
@@ -213,6 +245,7 @@ export default function FirmenseiteEinstellungen({ adminDealerId = null }) {
                 ))}
               </div>
             ) : <div className="text-[12px] text-zinc-500 mt-1">Noch keine Bilder — z. B. Hof, Team, Ankauf vor Ort.</div>}
+            <div className="text-[11.5px] text-zinc-500 mt-1">Das erste Bild ist das große Titelbild oben auf der Seite (am besten quer, z. B. Hof oder Gebäude); die weiteren erscheinen unter „Über uns“.</div>
           </div>
 
           {/* Eigene Domains + Prüfung (Weg A) */}
