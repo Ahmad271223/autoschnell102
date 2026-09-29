@@ -875,8 +875,42 @@ async def monitoring(db) -> Dict[str, Any]:
             "rueckstand_entfernung": rueckstand, "indizes_fehlen": indizes_fehlen}
 
 
+async def segment_profil(db) -> Dict[str, Any]:
+    """Frage Ahmad 29.09.2026 ("was fehlt da"): die Kachel Taktung nannte die VORBELEGUNG fuer neue Auftraege
+    (MARKT_CRAWLS_JE_TAG = 2x), obwohl alle 3.780 aktiven Segmente 1x je Tag laufen; die Kopfzeile nannte
+    10 Zeilen, bestellt sind 5 (Masterliste). Jetzt aus den aktiven Segmenten selbst: Segmente je Abrufe/Tag
+    ({"1": n, "2": m}) und die Spanne der bestellten Zeilen je Segment."""
+    abrufe: Dict[str, int] = {}
+    zeilen_min = zeilen_max = None
+    async for g in db[SEGMENTE].aggregate([
+            {"$match": {"enabled": True}},
+            {"$group": {"_id": {"$ifNull": ["$crawls_per_day", 1]}, "n": {"$sum": 1},
+                        "zmin": {"$min": "$max_items"}, "zmax": {"$max": "$max_items"}}}]):
+        try:
+            k = max(1, min(4, int(g["_id"] or 1)))
+        except (TypeError, ValueError):
+            k = 1
+        abrufe[str(k)] = abrufe.get(str(k), 0) + int(g["n"])
+        for z in (g.get("zmin"), g.get("zmax")):
+            if isinstance(z, (int, float)) and z > 0:
+                zeilen_min = int(z) if zeilen_min is None else min(zeilen_min, int(z))
+                zeilen_max = int(z) if zeilen_max is None else max(zeilen_max, int(z))
+    return {"abrufe_je_tag": abrufe, "zeilen_je_segment": {"min": zeilen_min, "max": zeilen_max}}
+
+
+def naechster_plan_at() -> str:
+    """Kachel 'Naechster Lauf', wenn kein Job wartet (nach dem letzten Lauf des Tages stand dort nur "—"):
+    Beginn des Crawl-Fensters heute, falls noch vor uns, sonst morgen — der naechste Tagesplan."""
+    jetzt = konfig.jetzt()
+    start = konfig.fenster_start(konfig.heute_tag(jetzt))
+    if start <= jetzt:
+        start = konfig.fenster_start(konfig.heute_tag(jetzt + timedelta(days=1)))
+    return start.isoformat()
+
+
 async def status(db) -> Dict[str, Any]:
     return {"budget": await budget.dokument(db), "jobs": await jobs.uebersicht(db), "takt": await jobs.intervall(db),
+            **(await segment_profil(db)), "naechster_plan_at": naechster_plan_at(),
             "monitoring": await monitoring(db),
             # Wunsch Ahmad 28.09.2026: "wie viele Autos heute gecrawlt" mit Symbol — Kachel ganz vorn
             "heute": (await tages_stand(db))["gesamt"],

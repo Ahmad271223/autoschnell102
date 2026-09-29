@@ -69,7 +69,7 @@ export default function Markt() {
   const jobs = status.jobs || {};
   return (
     <div>
-      <PageHeader title="Marktanalyse" subtitle={`Eigene historische mobile.de-Beobachtung: je Segment die ${status.einstellungen?.rows_je_segment || 10} günstigsten Angebote, täglich.`}
+      <PageHeader title="Marktanalyse" subtitle={`Eigene historische mobile.de-Beobachtung: je Segment die ${zeilenText(status)} günstigsten Angebote, täglich.`}
                   action={<div className="flex gap-2">
                     <Button variant="outline" size="sm" onClick={laden}><RefreshCw size={14} /> Aktualisieren</Button>
                     {/* Ahmad 28.09.2026 („Knopf klappt nicht“): die Karte stand weit unten hinter Status/Deals — jetzt direkt
@@ -111,7 +111,7 @@ export default function Markt() {
           {/* Reparaturwelle 5 Nr. 30/31/38: "ohne Budget pausiert", Restbudget fuer die verbleibenden Tage, Entfernungsprüfung als Kostenteil */}
           {/* Prüfung Runde 4 (#2/4b): reicht das Budget nicht für jedes Segment alle 14 Tage, Warnung (geplant wird weiter nach dem Budget) */}
           <Kachel label="Taktung" tone={takt.ohne_budget || takt.budget_reicht_nicht ? "text-amber-300" : ""} data-testid="markt-taktung"
-                  wert={takt.ohne_budget ? "ohne Budget pausiert" : `an Crawl-Tagen ${status.crawls_je_tag_standard || 2}×; jedes Segment alle ${takt.intervall_tage} Tag(e)`}
+                  wert={takt.ohne_budget ? "ohne Budget pausiert" : `${abrufeText(status)}; jedes Segment alle ${takt.intervall_tage} Tag(e)`}
                   hint={takt.ohne_budget ? "Monatsbudget ist 0 — keine Planung, keine Jobs (unter „Bereiche & Budget“ setzen)"
                     : (takt.budget_erschoepft ? "Achtung: Restbudget aufgebraucht — nur 1 Segment je Tag, die übrigen gelten in den Berichten als „nicht geplant wegen Budget“ · "
                       : takt.budget_reicht_nicht ? `Achtung: das Budget reicht nicht, um jedes Segment spätestens alle ${takt.max_intervall_tage || 14} Tage abzurufen — geplant wird nur, was das Tagesbudget zulässt (jedes Segment alle ${takt.intervall_tage} Tage, das Budget reicht bis Monatsende); Werte älter als ${takt.max_intervall_tage || 14} Tage fehlen in den Berichten (Euro-Niveau dann leer) — Budget erhöhen oder Segmente reduzieren · ` : "")
@@ -123,7 +123,10 @@ export default function Markt() {
           <Kachel label={`Jobs heute (${jobs.tag || ""})`} wert={`${jobs.completed || 0} fertig · ${jobs.running || 0} laufen · ${jobs.queued || 0} warten`}
                   hint={[jobs.failed ? `${jobs.failed} fehlgeschlagen` : "keine Fehler", jobs.data_invalid ? `${jobs.data_invalid} ungültig (Sortierung unsicher, nichts gespeichert)` : ""].filter(Boolean).join(" · ")}
                   tone={jobs.failed ? "text-red-300" : jobs.data_invalid ? "text-amber-300" : ""} />
-          <Kachel label="Nächster Lauf" wert={jobs.naechster ? datumZeit(jobs.naechster.scheduled_at) : "—"} hint={jobs.naechster?.segment_id || ""} />
+          {/* Ahmad 29.09.2026: nach dem letzten Lauf des Tages stand hier „—“ — jetzt der nächste Tagesplan (Fensterbeginn) */}
+          <Kachel label="Nächster Lauf" data-testid="markt-naechster"
+                  wert={jobs.naechster ? datumZeit(jobs.naechster.scheduled_at) : status.naechster_plan_at ? datumZeit(status.naechster_plan_at) : "—"}
+                  hint={jobs.naechster ? (jobs.naechster.segment_id || "") : status.naechster_plan_at ? "Tagesplan — kein Job wartet" : ""} />
           <Kachel label="Listings / Snapshots" wert={`${(status.listings || 0).toLocaleString("de-DE")} / ${(status.snapshots || 0).toLocaleString("de-DE")}`} />
           <Kachel label="Scraper" wert={status.token_vorhanden ? "Token vorhanden" : "APIFY_TOKEN fehlt"} hint={status.actor} tone={status.token_vorhanden ? "" : "text-red-300"} />
           {/* Wunsch Ahmad 27.09.2026: Marktdaten fuer Chef/Sucher erst nach Freischaltung (Standard aus) */}
@@ -286,6 +289,22 @@ export function heuteText(h) {
 function heuteTitel(h) {
   if (!h || !h.geplant) return "Heute kein Abruf geplant (Budget-Rotation oder pausiert)";
   return `${h.ok} von ${h.geplant} Segment-Abrufen geklappt, davon ${h.ok_mit_treffern || 0} mit mindestens einem Auto · ${h.autos} von ${h.autos_soll || 0} bestellten Autos bekommen (weniger = Marktlücke oder Ausfall) · ${h.fehler} fehlgeschlagen/ungültig (${h.ungueltig} ungültig) · ${h.offen} ausstehend`;
+}
+
+// Frage Ahmad 29.09.2026 („was fehlt da“): die Kachel Taktung nannte die Vorbelegung für neue Aufträge (2×),
+// obwohl alle aktiven Segmente 1× laufen — jetzt die echte Verteilung aus den Segmenten (Rückfall: Vorbelegung)
+function abrufeText(status) {
+  const a = status.abrufe_je_tag || {};
+  const teile = Object.keys(a).sort().filter((k) => Number(a[k]) > 0)
+    .map((k) => `${Number(a[k]).toLocaleString("de-DE")} Segmente ${k}×/Tag`);
+  return teile.length ? teile.join(" · ") : `an Crawl-Tagen ${status.crawls_je_tag_standard || 2}×`;
+}
+
+// Kopfzeile: bestellte Zeilen je Segment aus den aktiven Segmenten (5 bei der Masterliste, 10 Vorbelegung)
+function zeilenText(status) {
+  const z = status.zeilen_je_segment;
+  if (z && z.min) return z.min === z.max ? `${z.min}` : `${z.min}–${z.max}`;
+  return `${status.einstellungen?.rows_je_segment || 10}`;
 }
 
 function Kachel({ label, wert, hint, tone = "", ...rest }) {

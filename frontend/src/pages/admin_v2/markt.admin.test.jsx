@@ -68,7 +68,9 @@ vi.mock("@/lib/api", () => ({
                       letzter_erfolg: { finished_at: "2026-10-01T05:10:00Z", segment_id: "bmw-320d:2019:50001-85000" },
                       alarme: [{ typ: "segment_veraltet", text: "3 Segment(e) seit über 48 h nicht erfolgreich aktualisiert", stufe: "warn" }] },
         jobs: { tag: "2026-10-01", completed: 6, running: 0, queued: 0, failed: 0, data_invalid: 1, naechster: null }, km_buckets: [{ min_km: 10000, max_km: 30000 }],
-        ez_buckets: [{ year_from: 2019, year_to: 2021 }], einstellungen: { rows_je_segment: 20 } } };
+        ez_buckets: [{ year_from: 2019, year_to: 2021 }], einstellungen: { rows_je_segment: 20 },
+        // Ahmad 29.09.2026 („was fehlt da“): echte Verteilung Abrufe/Tag, bestellte Zeilen, nächster Tagesplan
+        abrufe_je_tag: { 1: 3780 }, zeilen_je_segment: { min: 5, max: 10 }, naechster_plan_at: "2026-10-02T07:00:00+00:00" } };
       if (url === "/admin/market/models/bmw-320d") return { data: { id: "bmw-320d", label: "BMW 320d", fuel: "DIESEL", make_id: "3500", model_id: "10", version: 2, segmente: [{ ...SEG, version: 2 }, SEG2, SEG_ALT] } };
       if (url.includes("/listings/449438530/history")) return { data: { listing: { title: "BMW 320d Touring", active_state: "seen", mileage_km: 78000,
         first_registration: "03/2020", postal_code: "30159", city: "Hannover", price_history: [{ at: "2026-09-13T04:00:00Z", price: 19400 }, { at: "2026-10-01T04:00:00Z", price: 18900 }] },
@@ -188,6 +190,11 @@ describe("Admin Marktanalyse", () => {
     expect(el("markt-heute").textContent).toContain("O 28 von 46 Segmenten (24 mit Treffern) · 138 von 230 Autos");
     expect(el("markt-heute").textContent).toContain("✗ 1 fehlgeschlagen/ungültig · – 17 ausstehend · Aufträge: ✓ 1 · O 1 · ✗ 0");
     expect(el("markt-heute-bmw-320d").textContent).toBe("✓ 16/16 · 15 mit Treffern · 78/80 Autos");
+    // Ahmad 29.09.2026 („was fehlt da“): Taktung zeigt die echte Verteilung statt der Vorbelegung 2×, die Kopfzeile die
+    // bestellten Zeilen (5–10 statt 20 aus den Einstellungen), „Nächster Lauf“ den nächsten Tagesplan statt „—“
+    expect(behaelter.textContent).toContain("je Segment die 5–10 günstigsten Angebote");
+    expect(el("markt-naechster").textContent).toContain("02.10.");
+    expect(el("markt-naechster").textContent).toContain("Tagesplan — kein Job wartet");
     expect(el("markt-heute-audi-a4-40tdi").textContent).toBe("O 12/30 · 9 mit Treffern · 60/150 Autos · ✗ 1 · – 17");
     expect(el("markt-heute-vw-golf-20tdi").textContent).toBe("– heute nicht dran");
     expect(el("markt-heute-legende").textContent).toContain("✓ alle Segmente gecrawlt");
@@ -196,8 +203,9 @@ describe("Admin Marktanalyse", () => {
     expect(netz.posts[0]).toEqual({ url: "/admin/market/models/vw-golf-20tdi/enabled", body: { enabled: true } });
     await klick("markt-plan");
     expect(netz.posts[1].url).toBe("/admin/market/plan");
-    // Reparaturwelle 5 Nr. 31/38: Taktung sagt "an Crawl-Tagen 2x", Restbudget fuer Resttage, Entfernungskosten
-    expect(el("markt-taktung").textContent).toContain("an Crawl-Tagen 2×; jedes Segment alle 3 Tag(e)");
+    // Reparaturwelle 5 Nr. 31/38: Taktung, Restbudget fuer Resttage, Entfernungskosten — Ahmad 29.09.2026 („was fehlt
+    // da“): die echte Verteilung aus den Segmenten (3.780 × 1/Tag) statt der Vorbelegung „an Crawl-Tagen 2×“
+    expect(el("markt-taktung").textContent).toContain("3.780 Segmente 1×/Tag; jedes Segment alle 3 Tag(e)");
     expect(el("markt-taktung").textContent).toContain("Restbudget 437.50 $ für 5 Tage");
     expect(el("markt-taktung").textContent).toContain("Entfernungsprüfung bis 0.29 $/Tag");
     await klick("markt-konfig-oeffnen");
