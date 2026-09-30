@@ -93,8 +93,8 @@ OEFFENTLICH = {
     # Firmenseite + Kundenportal (29.09.2026): Firmendaten zur Adresse, Code-Eingabe (je IP fail-closed
     # gedrosselt), Sitzung (signiertes Kurzzeit-Token in der Adresse), Vertrags-PDF, Unterschrift
     "/api/public/firma", "/api/public/portal/oeffnen",
-    "/api/public/portal/{sitzung}", "/api/public/portal/{sitzung}/pdf",
-    "/api/public/portal/{sitzung}/unterschreiben",
+    "/api/public/portal/vertrag", "/api/public/portal/vertrag/pdf",
+    "/api/public/portal/vertrag/unterschreiben",
     "/api/marktplatz/haendler", "/api/marktplatz/listings",
     "/api/marktplatz/haendler/{slug}",        # Marktplatz ohne Anmeldung (Wunsch 09/2026)
     "/api/files/{key:path}",                  # signierte Dateilinks (dateien.signatur_gueltig)

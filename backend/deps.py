@@ -315,7 +315,10 @@ async def firma_gesperrt(dealer_id: Optional[str]) -> bool:
     chef = await db.users.find_one(
         {"dealer_id": dealer_id, "role": "dealer"},
         {"_id": 0, "active": 1}, sort=[("created_at", 1)])
-    return chef is not None and chef.get("active") is not True
+    # Pruefliste 30.09.2026: eine Firma OHNE Chef-Konto (Absturz mitten in einer Loeschung, Eingriff in
+    # die Datenbank) galt als "nicht gesperrt" — ihre Sucher arbeiteten weiter. Jetzt fail-closed: ohne
+    # Hauptaccount ist die Firma gesperrt, bis der Betreiber einen Chef bestimmt.
+    return chef is None or chef.get("active") is not True
 
 
 async def gesperrte_firmen_ids() -> set:
@@ -349,11 +352,16 @@ async def gesperrte_firmen_ids() -> set:
         {"$match": {"role": "dealer", "dealer_id": {"$nin": [None, ""]}}},
         {"$sort": {"created_at": 1}},
         {"$group": {"_id": "$dealer_id", "active": {"$first": "$active"}}},
-        {"$match": {"active": {"$ne": True}}},
     ])
+    mit_chef: set = set(mit_hauptkonto)
     async for r in rows:
-        if r["_id"] not in mit_hauptkonto:
+        mit_chef.add(r["_id"])
+        if r["_id"] not in mit_hauptkonto and r.get("active") is not True:
             gesperrt.add(r["_id"])
+    # Pruefliste 30.09.2026: dieselbe Regel wie firma_gesperrt — eine Firma ganz ohne Chef-Konto ist gesperrt.
+    async for d in db.dealers.find({"id": {"$nin": list(mit_chef)}}, {"_id": 0, "id": 1}):
+        if d.get("id"):
+            gesperrt.add(d["id"])
     return gesperrt
 
 

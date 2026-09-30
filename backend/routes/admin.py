@@ -1520,7 +1520,10 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
 
     # Runde 12: Audit VOR dem ersten destruktiven Schritt. Bricht die
     # Loeschung mittendrin ab, steht sonst nirgends, wer sie ausgeloest hat.
-    await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
+    # Pruefliste 30.09.2026: wieder die WERFENDE Variante — seit f883473 stand
+    # hier versehentlich log_activity_sicher (schluckt Fehler): die Loeschung
+    # begann auch dann, wenn die Spur "wer hat geloescht" nicht geschrieben war.
+    await log_activity(admin.get("dealer_id", ""), admin["id"],
                        "admin.firma.loeschung.gestartet", ref=dealer_id or user_id,
                        meta={"kontonummer": u.get("kontonummer", ""), "dealer_id": dealer_id})
     geloescht = {}
@@ -1970,7 +1973,8 @@ async def admin_delete_driver(driver_id: str, admin=Depends(current_super_admin)
     # Start-Audit VOR dem ersten destruktiven Schritt mit der WERFENDEN
     # Variante (wie admin.firma.loeschung.gestartet): scheitert es, wird
     # nichts pseudonymisiert. Ohne E-Mail in meta.
-    await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
+    # Pruefliste 30.09.2026: wirklich werfend (stand seit f883473 auf _sicher).
+    await log_activity(admin.get("dealer_id", ""), admin["id"],
                        "admin.fahrer.loeschung.gestartet", ref=driver_id,
                        meta={"wiederaufnahme": wiederaufnahme})
     # Audit 09/2026: nicht nur trennen, sondern pseudonymisieren (Termine,

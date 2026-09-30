@@ -75,6 +75,28 @@ fi
 PUBLIC_HOST=$(grep '^PUBLIC_HOST=' .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' )
 [ -n "$PUBLIC_HOST" ] || { echo "FEHLER: PUBLIC_HOST fehlt in .env"; exit 2; }
 
+# Pruefliste 30.09.2026: Das Rollout baut, was gerade ausgecheckt ist. Steht
+# der Server versehentlich auf einem ANDEREN Branch (z.B. main statt des
+# Go-Live-Branches), wuerde ein voellig anderer Stand sauber als neuer Release
+# gebaut. Der Branch des letzten erfolgreichen Rollouts steht in
+# deploy/.rollout-branch; weicht der aktuelle ab, startet das Rollout NICHT
+# (vor dem Drain: nichts geaendert, der Server bleibt in der Rotation).
+# Bewusster Wechsel:  BRANCH_WECHSEL=1 sh deploy/rollout.sh
+# Optional ein erwarteter Commit (Anfang der Kennung genuegt), geprueft nach
+# dem Pull:          ERWARTET=6c2a24c sh deploy/rollout.sh
+BRANCH_MARKE=deploy/.rollout-branch
+BRANCH_JETZT=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+BRANCH_ZULETZT=$(cat "$BRANCH_MARKE" 2>/dev/null || true)
+if [ -n "$BRANCH_JETZT" ] && [ -n "$BRANCH_ZULETZT" ] && [ "$BRANCH_JETZT" != "$BRANCH_ZULETZT" ] \
+        && [ "${BRANCH_WECHSEL:-}" != 1 ]; then
+    echo "FEHLER: ausgecheckt ist der Branch '$BRANCH_JETZT' — das letzte erfolgreiche Rollout lief mit '$BRANCH_ZULETZT'."
+    echo "   Rollout NICHT gestartet — dieser Server ist unveraendert in der Rotation, es wurde nichts geaendert."
+    echo "   Zurueck auf den bisherigen Branch:  git checkout $BRANCH_ZULETZT   (danach den Stand wie gewohnt holen)"
+    echo "   Oder, wenn der Wechsel gewollt ist:  BRANCH_WECHSEL=1 sh deploy/rollout.sh"
+    exit 2
+fi
+[ -z "$BRANCH_JETZT" ] || echo "   Branch: $BRANCH_JETZT"
+
 # Marker auf dem Host (deploy/drain/aktiv, per Volume im Proxy sichtbar —
 # ueberlebt einen Neustart des Proxy-Containers waehrend "up -d --build")
 # UND im Container (/tmp/drain, Uebergang fuer Proxys ohne das Volume).
@@ -180,6 +202,15 @@ fi
 
 echo "== 2/6 Code holen"
 git pull --ff-only
+# Pruefliste 30.09.2026: optional genau DEN Commit verlangen, der ausgerollt werden soll.
+COMMIT_JETZT=$(git rev-parse HEAD 2>/dev/null || true)
+if [ -n "${ERWARTET:-}" ]; then
+    case "$COMMIT_JETZT" in
+        "$ERWARTET"*) echo "   Commit wie erwartet: $ERWARTET" ;;
+        *) echo "FEHLER: ausgecheckt ist der Commit '${COMMIT_JETZT:-unbekannt}', erwartet war '$ERWARTET' — es wird nichts gebaut."
+           exit 1 ;;
+    esac
+fi
 # Pruefung 21.09.2026 (Betrieb): die .env enthaelt alle Geheimnisse und ist
 # nur fuer ihren Besitzer lesbar (600). Ein env_setzen.sh von vor dem
 # 21.09.2026 — auf dem Server liegt es bis zu genau diesem Pull — hinterliess
@@ -475,6 +506,10 @@ if [ "$PROBE_RC" != 0 ]; then
     exit 3
 fi
 alte_images_aufraeumen
+# Branch dieses erfolgreichen Rollouts merken (Pruefung beim naechsten Mal, siehe oben).
+if [ -n "$BRANCH_JETZT" ]; then
+    echo "$BRANCH_JETZT" > "$BRANCH_MARKE" 2>/dev/null || true
+fi
 if [ -n "$ZWISCHEN" ]; then
     echo "FERTIG auf $(hostname) (erster Server, Zwischenstand geprueft) — jetzt 'sh deploy/rollout.sh' OHNE ERSTER_SERVER auf dem anderen Server; dort wird streng geprueft."
 else

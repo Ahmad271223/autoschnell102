@@ -59,9 +59,18 @@ _PII_MUSTER = (
 # die vordefinierten Skizzen-Bezeichnungen uebernommen, kein Freitext.
 # Standard seit Go-Live-Audit 09/2026: AUS (produktionssicher); Altbestand
 # bereinigt scripts/schaeden_freitext_bereinigen.py.
+# Pruefliste 30.09.2026: in PRODUKTION gilt der Schalter nicht — die dauerhaften Auto-Daten sollen
+# anonym sein, ein versehentlich gesetztes "true" darf daran nichts aendern (vorher nur eine Warnung).
 import os as _os
-SCHAEDEN_FREITEXT = _os.environ.get("AUTO_DATEN_SCHAEDEN_FREITEXT", "false") \
-    .strip().lower() in ("1", "true", "yes", "ja")
+
+
+def schaeden_freitext_erlaubt() -> bool:
+    if _os.environ.get("APP_ENV", "").strip().lower() == "production":
+        return False
+    return _os.environ.get("AUTO_DATEN_SCHAEDEN_FREITEXT", "false").strip().lower() in ("1", "true", "yes", "ja")
+
+
+SCHAEDEN_FREITEXT = schaeden_freitext_erlaubt()
 
 
 _DEZIMAL = re.compile(r"^(\d[\d.,]*?)[.,](\d{1,2})$")

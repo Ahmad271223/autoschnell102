@@ -4066,7 +4066,11 @@ des Chefs) plus Zeitstempel/Name/Herkunftsadresse → Sucher und Chef sehen „K
 
 **Sicherheit:** Code je Firma eindeutig (Unique-Index nur auf offene Codes), Ablauf, an die Vertragsfassung gebunden
 (Neuerzeugung/Korrektur = neuer Code nötig), zurückziehbar; falsche Eingaben je Besucheradresse 10/10 min
-(fail-closed) und je Firma 200/10 min; Sitzung = signiertes JWT (45 min), PDF-Abruf `no-store` + `noindex`; die
+(fail-closed) und je Firma 200/10 min — gezählt werden nur FEHLVERSUCHE (ein richtiger Code gibt seinen Versuch
+zurück, löscht aber keine Fehlversuche; ebenso bei der Unterschrift, 30.09.2026); Sitzung = signiertes JWT (45 min),
+gebunden an GENAU den Code, mit dem sie entstand (ein zurückgezogener Code lebt durch einen neuen nicht wieder auf),
+und sie endet sofort, wenn die Firmenseite abgeschaltet, die Firma gesperrt oder in Löschung ist; sie reist in der
+Kopfzeile `X-Portal-Sitzung` (`/api/public/portal/vertrag…`), nie in der Adresse; PDF-Abruf `no-store` + `noindex`; die
 Unterschrift des Kunden liegt privat unter `portal/`, die des Chefs unter `unterschrift/` (nie über `/api/files`).
 Datenschutz: Zeitpunkt, Name und IP-Adresse der Unterschrift werden als Nachweis im Vertrag und im Audit
 (`vertrag.portal.*`) gespeichert — in die Datenschutzerklärung aufnehmen (Rechtstexte stehen ohnehin noch aus).
@@ -4086,3 +4090,23 @@ Wegwerf-Datenbank starten, dann `E2E_KI=1 npx playwright test e2e/kompletter-lau
 Backend mit eingeschalteter KI baut einmal die Markttabelle (`ki_marktdaten`, rund 1 €).
 Neue Schäden im Protokoll bekommen vom Server eine id, falls der Aufrufer keine mitschickt — ohne id verwarf die
 KI-Abholbewertung die Position („nicht bewertet“, Betriebsalarm); die App vergibt ohnehin immer eine.
+
+## Härtungen aus den Prüflisten (30.09.2026)
+
+- **Rollout prüft den Branch:** `deploy/rollout.sh` merkt sich nach jedem erfolgreichen Lauf den Branch in
+  `deploy/.rollout-branch`. Ist beim nächsten Mal ein anderer Branch ausgecheckt, startet das Rollout nicht (vor dem
+  Drain, nichts geändert). Bewusster Wechsel: `BRANCH_WECHSEL=1 sh deploy/rollout.sh`. Optional lässt sich genau ein
+  Commit verlangen: `ERWARTET=<Anfang der Commit-Kennung> sh deploy/rollout.sh` (geprüft nach dem Pull; bei Abweichung
+  wird nichts gebaut, der Server bleibt im Drain, danach `sh deploy/freigeben.sh`).
+- **Firma ohne Chef-Konto ist gesperrt** (`deps.firma_gesperrt`, `gesperrte_firmen_ids`): Sucher einer Firma ohne
+  Hauptaccount kommen nicht mehr durch, die Firmenseite ist aus. Abhilfe: im Admin einen Chef bestimmen.
+- **Start-Audit zwingend:** Firmen- und Fahrerlöschung beginnen nur, wenn der Eintrag „Löschung gestartet" geschrieben
+  wurde (sonst Fehler 500, bei der Firma ist dann noch nichts angefasst; der Fahrer ist gesperrt und die Löschung
+  lässt sich wiederholen).
+- **Freitext-Schäden:** `AUTO_DATEN_SCHAEDEN_FREITEXT` wird mit `APP_ENV=production` ignoriert — die dauerhaften
+  Auto-Daten bleiben anonym, auch wenn der Schalter versehentlich gesetzt ist.
+- **Fahrzeug-ID:** kein Rückfall mehr auf alte `v_<Nummer>`-Dokumente ohne gespeicherte Quelle.
+- **Bewusst NICHT geändert** (Abwägung, siehe jeweilige Stelle im Code): Wartungsmodus und KI-Budget bleiben bei
+  Datenbankfehlern offen (eine kaputte Abfrage soll die Plattform nicht anhalten; ein KI-Lauf kostet höchstens 20 ct),
+  R2-Ausfall bleibt eine Warnung mit Alarm (beide Server teilen den Speicher), `w:1` im Replica Set, die 24-h-Notbremse
+  der Link-Aufträge, der Deckel des Fehlerarchivs. Die Unterschrift des Chefs im Kundenportal bleibt freiwillig.

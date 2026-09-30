@@ -104,21 +104,26 @@ describe("Firmenseite", () => {
 
   it("Code → Vertrag → Unterschrift → Bestätigung; falscher Code und Drossel melden sich", async () => {
     const blob = new Blob(["%PDF-1.4"], { type: "application/pdf" });
-    get.mockImplementation(async (url) => {
+    get.mockImplementation(async (url, cfg) => {
       if (url === "/public/firma") return { data: FIRMA };
-      if (url.endsWith("/pdf")) return { data: blob };
+      if (url === "/public/portal/vertrag/pdf") {
+        // Sitzung in der Kopfzeile, nicht in der Adresse (30.09.2026)
+        expect(cfg.headers).toEqual({ "X-Portal-Sitzung": "tok" });
+        return { data: blob };
+      }
       throw new Error("unerwartet " + url);
     });
-    post.mockImplementation(async (url, body) => {
+    post.mockImplementation(async (url, body, cfg) => {
       if (url === "/public/portal/oeffnen") {
         if (body.code === "ABCDEF") throw { response: { status: 404, data: { detail: "Code ungültig oder abgelaufen. Bitte den Code vom Autohaus prüfen." } } };
         if (body.code === "ZZZZZZ") throw { response: { status: 429 } };
         expect(body).toEqual({ code: "K7M3XP", slug: "kfz-mueller" });
         return { data: { sitzung: "tok", vertrag: VERTRAG, firma: FIRMA, sitzung_minuten: 45 } };
       }
-      if (url === "/public/portal/tok/unterschreiben") {
+      if (url === "/public/portal/vertrag/unterschreiben") {
         expect(body).toEqual({ signature_b64: "data:image/png;base64,AAAA", name: "Erika Mustermann", einverstanden: true });
-        return { data: { ok: true, unterschrieben_am: "2026-09-29T10:00:00+00:00", contract_no: "KV-1", sitzung: "tok" } };
+        expect(cfg.headers).toEqual({ "X-Portal-Sitzung": "tok" });
+        return { data: { ok: true, unterschrieben_am: "2026-09-29T10:00:00+00:00", contract_no: "KV-1" } };
       }
       throw new Error("unerwartet " + url);
     });
@@ -142,7 +147,7 @@ describe("Firmenseite", () => {
     // ohne Unterschrift/Zustimmung: Hinweis, kein Aufruf
     await klick("portal-absenden");
     expect(el("portal-fehler").textContent).toContain("unterschreiben");
-    expect(post).not.toHaveBeenCalledWith("/public/portal/tok/unterschreiben", expect.anything());
+    expect(post.mock.calls.some(([u]) => u === "/public/portal/vertrag/unterschreiben")).toBe(false);
     await klick("pad");
     await klick("portal-absenden");
     expect(el("portal-fehler").textContent).toContain("gelesen");
@@ -153,7 +158,9 @@ describe("Firmenseite", () => {
     await klick("portal-pdf-fertig");
     expect(blobOeffnen).toHaveBeenCalled();
     // PDF-Vorschau lief nach der Unterschrift erneut (unterschriebene Fassung)
-    expect(get.mock.calls.filter(([u]) => u === "/public/portal/tok/pdf").length).toBe(2);
+    expect(get.mock.calls.filter(([u]) => u === "/public/portal/vertrag/pdf").length).toBe(2);
+    // kein Aufruf trägt die Sitzung in der Adresse
+    expect([...get.mock.calls, ...post.mock.calls].some(([u]) => String(u).includes("tok"))).toBe(false);
   });
 });
 

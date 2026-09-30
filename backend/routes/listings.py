@@ -270,19 +270,23 @@ async def _fahrzeug_id(source: str, ad_id: str, dealer_id: str) -> str:
     behaelt das alte Muster (Bestand, Snapshots, Vertraege haengen daran);
     andere Quellen bekommen "v_<quelle>_<id>".
 
-    Legacy-Rueckfall: gibt es fuer eine Nicht-Kleinanzeigen-Quelle noch kein
-    Dokument unter der neuen ID, aber eines unter "v_<id>" mit derselben
-    mobile_ad_id, dessen quelle fehlt oder passt, wird das alte Dokument
-    weiterverwendet (Vertraege/Termine daran bleiben erreichbar)."""
+    Pruefliste 30.09.2026: der fruehere Legacy-Rueckfall ist entfernt. Er
+    uebernahm ein altes "v_<id>"-Dokument OHNE gespeicherte Quelle fuer
+    mobile.de/AutoScout — stammte es in Wahrheit aus einer anderen Quelle mit
+    zufaellig gleicher Nummer, wurden zwei Autos wieder zusammengefuehrt. Seit
+    dem 08.09.2026 traegt jedes Fahrzeug seine Quelle, und die Live-Daten
+    wurden am 14.09.2026 neu begonnen: solche Altdokumente gibt es nicht mehr.
+    Uebernommen wird ein "v_<id>"-Dokument nur noch, wenn es AUSDRUECKLICH
+    dieselbe Quelle traegt."""
     if source == "kleinanzeigen":
         return f"v_{ad_id}"
     neu = f"v_{source}_{ad_id}"
     if await db.vehicles.count_documents({"id": neu, "dealer_id": dealer_id}, limit=1):
         return neu
     alt = await db.vehicles.find_one(
-        {"id": f"v_{ad_id}", "dealer_id": dealer_id, "mobile_ad_id": ad_id},
-        {"_id": 0, "quelle": 1})
-    if alt is not None and (not alt.get("quelle") or alt.get("quelle") == source):
+        {"id": f"v_{ad_id}", "dealer_id": dealer_id, "mobile_ad_id": ad_id, "quelle": source},
+        {"_id": 0, "id": 1})
+    if alt is not None:
         return f"v_{ad_id}"
     return neu
 

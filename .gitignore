@@ -126,3 +126,4 @@ deploy/drain/aktiv
 deploy/assets-alt/*
 !deploy/assets-alt/.gitkeep
 deploy/.proxy-vorlage
+deploy/.rollout-branch

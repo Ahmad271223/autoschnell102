@@ -521,10 +521,14 @@ def test_12_fahrzeug_id_quellen_eindeutig_mit_legacy_rueckfall(welt):
     async def lauf():
         ka = await L._fahrzeug_id("kleinanzeigen", ad, w.dealer_id)
         neu = await L._fahrzeug_id("mobile", ad, w.dealer_id)
-        # Legacy: altes Dokument v_<id> von mobile.de ohne quelle -> weiterverwenden
+        # 30.09.2026: altes Dokument v_<id> OHNE quelle wird NICHT mehr uebernommen (Kollision zweier
+        # Portale mit gleicher Nummer) — nur noch, wenn es ausdruecklich dieselbe Quelle traegt
         await db.vehicles.insert_one(w.fahrzeug(f"v_{ad}", lifecycle="gekauft", mobile_ad_id=ad))
+        ohne_quelle = await L._fahrzeug_id("mobile", ad, w.dealer_id)
+        await db.vehicles.update_one({"id": f"v_{ad}", "dealer_id": w.dealer_id},
+                                     {"$set": {"quelle": "mobile"}})
         legacy = await L._fahrzeug_id("mobile", ad, w.dealer_id)
-        # ... aber nicht, wenn es als Kleinanzeige markiert ist
+        # ... und nicht, wenn es als Kleinanzeige markiert ist
         await db.vehicles.update_one({"id": f"v_{ad}", "dealer_id": w.dealer_id},
                                      {"$set": {"quelle": "kleinanzeigen"}})
         getrennt = await L._fahrzeug_id("mobile", ad, w.dealer_id)
@@ -535,10 +539,11 @@ def test_12_fahrzeug_id_quellen_eindeutig_mit_legacy_rueckfall(welt):
         wieder = await L._fahrzeug_id("mobile", ad, w.dealer_id)
         # Fremdfirma: eigenes Dokument, kein Rueckfall auf fremde Altdaten
         fremd = await L._fahrzeug_id("mobile", ad, w.fremd)
-        return ka, neu, legacy, getrennt, k, v_neu, wieder, fremd
+        return ka, neu, ohne_quelle, legacy, getrennt, k, v_neu, wieder, fremd
 
-    ka, neu, legacy, getrennt, k, v_neu, wieder, fremd = welt.run(lauf())
+    ka, neu, ohne_quelle, legacy, getrennt, k, v_neu, wieder, fremd = welt.run(lauf())
     assert ka == f"v_{ad}" and neu == f"v_mobile_{ad}"
+    assert ohne_quelle == f"v_mobile_{ad}", "Altdokument ohne Quelle darf nicht uebernommen werden"
     assert legacy == f"v_{ad}" and getrennt == f"v_mobile_{ad}"
     assert k is None and v_neu["quelle"] == "mobile" and v_neu["mobile_ad_id"] == ad
     assert wieder == f"v_mobile_{ad}" and fremd == f"v_mobile_{ad}"

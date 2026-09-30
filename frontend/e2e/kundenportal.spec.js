@@ -104,6 +104,55 @@ test.describe("Kundenportal: Firmenseite, Code, digitale Unterschrift", () => {
     expect(pdf.status).toBe(200);
   });
 
+  test("Code zurückgezogen und neu erzeugt: die alte Sitzung des Kunden gilt nicht mehr", async ({ page }) => {
+    // Prüfliste 30.09.2026: die Sitzung hing nur an Vertrag und Fassung — nach einem neuen Code für
+    // dieselbe Fassung lebte die Sitzung des zurückgezogenen Codes wieder auf.
+    const vgl = await h.compareMock(sucher, "portal2");
+    test.skip(!vgl, "Mock-Vergleich nicht verfuegbar (MOCK_PROVIDER_FETCH)");
+    const vertrag = await h.post("/contracts", {
+      vehicle_id: vgl.vehicleId, seller_name: "Max Beispiel", seller_address: "Musterweg 3",
+      seller_zip: "10115", seller_city: "Berlin", seller_phone: "+49 170 7654321",
+      purchase_price: 9800, pickup_date: h.isoDate(4), pickup_time: "11:00",
+    }, { token: sucher.token });
+    const codeA = (await h.post(`/contracts/${vertrag.id}/portal`, {}, { token: sucher.token })).code;
+
+    // Kunde öffnet mit Code A — die Adresse der Seite und alle Aufrufe tragen die Sitzung NICHT
+    const aufrufe = [];
+    page.on("request", (r) => { if (r.url().includes("/api/public/portal/")) aufrufe.push(r); });
+    await page.goto(`/firma/${slug}`);
+    await page.getByTestId("portal-code").fill(codeA);
+    await page.getByTestId("portal-oeffnen").click();
+    await expect(page.getByTestId("portal-vertrag")).toContainText(vertrag.contract_no);
+    await expect(page.locator('[data-testid="portal-seiten"] canvas').first()).toBeVisible({ timeout: 30_000 });
+    const pdfAufruf = aufrufe.find((r) => r.url().endsWith("/api/public/portal/vertrag/pdf"));
+    expect(pdfAufruf, "PDF-Abruf über die neue Adresse").toBeTruthy();
+    expect(pdfAufruf.headers()["x-portal-sitzung"]).toMatch(/^eyJ/);
+    expect(aufrufe.every((r) => !r.url().includes("eyJ"))).toBe(true);        // kein Token in einer Adresse
+
+    // Autohaus zieht Code A zurück und erzeugt Code B für DIESELBE Fassung
+    await h.del(`/contracts/${vertrag.id}/portal`, { token: sucher.token });
+    const codeB = (await h.post(`/contracts/${vertrag.id}/portal`, {}, { token: sucher.token })).code;
+    expect(codeB).toMatch(/^[A-HJ-NP-Z2-9]{6}$/);
+
+    // Der Kunde mit der alten Sitzung kann nicht mehr unterschreiben
+    const pad = page.locator('[data-testid="portal-unterschrift"] canvas');
+    await pad.evaluate((el) => el.scrollIntoView({ block: "center" }));
+    const box = await pad.boundingBox();
+    await page.mouse.move(box.x + 20, box.y + box.height / 2);
+    await page.mouse.down();
+    for (let i = 1; i <= 20; i += 1) {
+      await page.mouse.move(box.x + 20 + (i * (box.width - 40)) / 20, box.y + box.height / 2 + Math.sin(i / 2) * 25);
+    }
+    await page.mouse.up();
+    await page.getByTestId("portal-einverstanden").check();
+    await page.getByTestId("portal-absenden").click();
+    await expect(page.getByTestId("portal-fehler")).toContainText("zurückgezogen oder ersetzt");
+    expect((await h.get(`/contracts/${vertrag.id}/portal`, { token: sucher.token })).status).toBe("offen");
+    // mit Code B geht es normal weiter
+    const neu = await h.api("POST", "/public/portal/oeffnen", { body: { code: codeB, slug }, ok: false });
+    expect(neu.status).toBe(200);
+  });
+
   test("Firmenseite aus: Kunde bekommt eine klare Meldung", async ({ page }) => {
     await h.superPut(`/admin/dealers/${firma.dealerId}/webseite`, { aktiv: false });
     await page.goto(`/firma/${slug}`);

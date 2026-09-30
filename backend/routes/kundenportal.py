@@ -38,16 +38,17 @@ import re
 import secrets
 import socket
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 import jwt
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
 
 import auth as _auth
-from deps import current_firma, current_super_admin, db, ist_haupt_chef, log_activity_sicher, now_iso
+from deps import (current_firma, current_super_admin, db, firma_gesperrt, ist_haupt_chef,
+                  log_activity_sicher, now_iso)
 from konfig import zahl_env
 from rate_limiter import SlidingWindowRateLimiter, client_ip
 
@@ -76,6 +77,9 @@ PRUEFUNG_ZEITLIMIT_S = 8
 
 # Falsche Codes: je Besucheradresse hart (fail-closed — ohne Datenbank lieber sperren als raten
 # lassen), je Firma weich (ein Buero mit vielen Kunden hinter einer Adresse bleibt arbeitsfaehig).
+# Pruefliste 30.09.2026: gezaehlt wird jeder Aufruf VOR der Pruefung (atomar), ein ERFOLGREICHER
+# Aufruf gibt seinen Versuch danach zurueck (erstatten) — vorher sperrten zehn richtige Codes aus
+# demselben WLAN (Autohaus, Hotel, Mobilfunk) den elften Kunden aus. Ebenso bei der Unterschrift.
 _code_limiter_ip = SlidingWindowRateLimiter(max_attempts=10, window_seconds=600,
                                             name="portal_code_ip", fail_closed=True)
 _code_limiter_firma = SlidingWindowRateLimiter(max_attempts=200, window_seconds=600,
@@ -153,7 +157,19 @@ def proxy_kennt(host: str) -> bool:
 # ---------------------------------------------------------------- Firma (oeffentlich)
 _FIRMA_FELDER = {"_id": 0, "id": 1, "user_id": 1, "company_name": 1, "logo_url": 1, "address": 1,
                  "zip_code": 1, "city": 1, "phone": 1, "email": 1, "opening_hours": 1,
-                 "webseite": 1, "unterschrift_key": 1, "active": 1}
+                 "webseite": 1, "unterschrift_key": 1, "active": 1, "loeschung": 1}
+
+
+async def firma_offen(d: Optional[dict]) -> bool:
+    """Darf diese Firma oeffentlich auftreten (Firmenseite, Code-Eingabe, laufende Portal-Sitzung)?
+    Firmenseite eingeschaltet, Firma nicht gesperrt (gesperrter Chef = gesperrte Firma, deps.firma_gesperrt)
+    und nicht in Loeschung. Pruefliste 30.09.2026: vorher blieb die Seite einer gesperrten Firma
+    erreichbar, und eine laufende Sitzung ueberlebte das Abschalten der Firmenseite."""
+    if not d or d.get("active") is False or not (d.get("webseite") or {}).get("aktiv"):
+        return False
+    if (d.get("loeschung") or {}).get("status") == "laeuft":
+        return False
+    return not await firma_gesperrt(d.get("id"))
 
 
 async def firma_laden(*, host: Optional[str] = None, slug: Optional[str] = None) -> Optional[dict]:
@@ -174,7 +190,7 @@ async def firma_laden(*, host: Optional[str] = None, slug: Optional[str] = None)
     if not filt:
         return None
     d = await db.dealers.find_one({**filt, "webseite.aktiv": True}, _FIRMA_FELDER)
-    if not d or d.get("active") is False:
+    if not await firma_offen(d):
         return None
     return d
 
@@ -390,10 +406,15 @@ async def _bild_hochladen(dealer_id: str, b64: str) -> dict:
         await save_async(key, raw)
     except StorageError as exc:
         raise HTTPException(400, str(exc))
-    r = await db.dealers.update_one(
-        {"id": dealer_id,
-         "$expr": {"$lt": [{"$size": {"$ifNull": ["$webseite.bilder", []]}}, BILDER_MAX]}},
-        {"$push": {"webseite.bilder": key}, "$set": {"webseite.aktualisiert_am": now_iso()}})
+    try:
+        r = await db.dealers.update_one(
+            {"id": dealer_id,
+             "$expr": {"$lt": [{"$size": {"$ifNull": ["$webseite.bilder", []]}}, BILDER_MAX]}},
+            {"$push": {"webseite.bilder": key}, "$set": {"webseite.aktualisiert_am": now_iso()}})
+    except Exception:
+        # Pruefliste 30.09.2026: die Datei liegt schon im Speicher — ohne Verweis bliebe sie fuer immer.
+        await loeschen_oder_vormerken(db, key=key, grund="firmenseite_bild_db_fehler", dealer_id=dealer_id)
+        raise
     if not r.modified_count:
         await loeschen_oder_vormerken(db, key=key, grund="firmenseite_bild_zu_viele", dealer_id=dealer_id)
         raise HTTPException(400, f"Höchstens {BILDER_MAX} Bilder — erst eines entfernen.")
@@ -455,11 +476,18 @@ async def _unterschrift_setzen(dealer_id: str, b64: str, wer: str) -> None:
         await save_async(key, raw)
     except StorageError as exc:
         raise HTTPException(400, str(exc))
-    alt = await db.dealers.find_one({"id": dealer_id}, {"_id": 0, "unterschrift_key": 1})
+    try:
+        alt = await db.dealers.find_one({"id": dealer_id}, {"_id": 0, "unterschrift_key": 1})
+        if alt is not None:
+            await db.dealers.update_one({"id": dealer_id},
+                                        {"$set": {"unterschrift_key": key, "unterschrift_am": now_iso()}})
+    except Exception:
+        # Pruefliste 30.09.2026: Unterschriftsbild ohne Verweis nie liegen lassen (Personendaten).
+        await loeschen_oder_vormerken(db, key=key, grund="chef_unterschrift_db_fehler", dealer_id=dealer_id)
+        raise
     if alt is None:
         await loeschen_oder_vormerken(db, key=key, grund="chef_unterschrift_ohne_firma", dealer_id=dealer_id)
         raise HTTPException(404, "Firma nicht gefunden")
-    await db.dealers.update_one({"id": dealer_id}, {"$set": {"unterschrift_key": key, "unterschrift_am": now_iso()}})
     if alt.get("unterschrift_key") and alt["unterschrift_key"] != key:
         await loeschen_oder_vormerken(db, key=alt["unterschrift_key"], grund="chef_unterschrift_ersetzt",
                                       dealer_id=dealer_id)
@@ -817,8 +845,18 @@ class UnterschreibenIn(BaseModel):
     einverstanden: bool = False
 
 
+def _portal_kennung(p: Optional[dict]) -> str:
+    """Kennung GENAU dieser Freigabe (Code + Zeitpunkt). Pruefliste 30.09.2026: die Sitzung hing nur an
+    Vertrag und Fassung — wurde Code A zurueckgezogen und Code B fuer dieselbe Fassung erzeugt, lebte
+    die Sitzung von Code A wieder auf. Jetzt gilt eine Sitzung nur fuer den Code, mit dem sie entstand."""
+    p = p or {}
+    roh = f"{p.get('code') or ''}|{p.get('erstellt_am') or ''}"
+    return hashlib.sha256(roh.encode("utf-8")).hexdigest()[:20]
+
+
 def _sitzung_token(c: dict) -> str:
     return jwt.encode({"typ": "portal", "cid": c["id"], "v": int(c.get("version") or 1), "d": c.get("dealer_id"),
+                       "k": _portal_kennung(c.get("portal")),
                        "exp": datetime.now(timezone.utc) + timedelta(minutes=PORTAL_SITZUNG_MINUTEN),
                        "jti": secrets.token_hex(8)}, _auth.JWT_SECRET, algorithm=_auth.JWT_ALG)
 
@@ -865,13 +903,21 @@ async def portal_oeffnen(body: OeffnenIn, request: Request):
     await db.generated_pdfs.update_one({"id": c["id"], "portal.code": code},
                                        {"$inc": {"portal.abrufe": 1}, "$set": {"portal.zuletzt_geoeffnet": now_iso()}})
     await log_activity_sicher(firma["id"], "", "vertrag.portal.geoeffnet", ref=c["id"], meta={"ip": ip})
+    # richtiger Code: dieser Aufruf war kein Fehlversuch
+    await _code_limiter_ip.erstatten(ip)
+    await _code_limiter_firma.erstatten(f"firma:{firma['id']}")
     return {"sitzung": _sitzung_token(c), "vertrag": _vertrag_kurz(c, firma), "firma": firma_oeffentlich(firma),
             "sitzung_minuten": PORTAL_SITZUNG_MINUTEN}
 
 
+#: Pruefliste 30.09.2026: die Sitzung reist in einer Kopfzeile, nicht mehr in der Adresse — Adressen landen
+#: in Server-, Proxy- und Ueberwachungsprotokollen (beim Fahrer wurde das Muster schon frueher entfernt).
+SitzungKopf = Annotated[str, Header(alias="X-Portal-Sitzung", max_length=4000)]
+
+
 async def _sitzung_pruefen(sitzung: str) -> dict:
     try:
-        nutz = jwt.decode(sitzung, _auth.JWT_SECRET, algorithms=[_auth.JWT_ALG])
+        nutz = jwt.decode(sitzung or "", _auth.JWT_SECRET, algorithms=[_auth.JWT_ALG])
     except jwt.PyJWTError:
         raise HTTPException(401, "Die Sitzung ist abgelaufen — bitte den Code erneut eingeben.")
     if nutz.get("typ") != "portal" or not nutz.get("cid"):
@@ -885,18 +931,25 @@ async def _sitzung_pruefen(sitzung: str) -> dict:
         raise HTTPException(410, "Die Freigabe wurde zurückgezogen oder ist abgelaufen.")
     if p.get("status") == "offen" and not portal_offen(p, int(c.get("version") or 1)):
         raise HTTPException(410, "Der Code ist abgelaufen — bitte einen neuen beim Autohaus anfordern.")
+    # nur fuer GENAU den Code, mit dem die Sitzung entstand (nicht fuer einen spaeter neu erzeugten)
+    if not nutz.get("k") or nutz.get("k") != _portal_kennung(p):
+        raise HTTPException(410, "Die Freigabe wurde zurückgezogen oder ersetzt — bitte den neuen Code "
+                                 "beim Autohaus anfordern.")
+    # Firmenseite abgeschaltet, Firma gesperrt oder in Loeschung: auch laufende Sitzungen enden
+    if not await firma_offen(await db.dealers.find_one({"id": c["dealer_id"]}, _FIRMA_FELDER)):
+        raise HTTPException(410, "Das Kundenportal dieses Autohauses ist derzeit nicht erreichbar.")
     return c
 
 
-@router.get("/public/portal/{sitzung}")
-async def portal_sitzung(sitzung: str):
+@router.get("/public/portal/vertrag")
+async def portal_sitzung(sitzung: SitzungKopf):
     c = await _sitzung_pruefen(sitzung)
     firma = await db.dealers.find_one({"id": c["dealer_id"]}, _FIRMA_FELDER) or {}
     return {"vertrag": _vertrag_kurz(c, firma), "pdf_signiert": bool(c.get("pdf_signiert_b64"))}
 
 
-@router.get("/public/portal/{sitzung}/pdf")
-async def portal_sitzung_pdf(sitzung: str):
+@router.get("/public/portal/vertrag/pdf")
+async def portal_sitzung_pdf(sitzung: SitzungKopf):
     """Der Vertrag fuer den Kunden: vor der Unterschrift die Druckfassung, danach die unterschriebene."""
     from vertrag_dateiname import content_disposition
     c = await _sitzung_pruefen(sitzung)
@@ -940,8 +993,8 @@ except Exception:  # noqa: BLE001
     _BERLIN = timezone.utc
 
 
-@router.post("/public/portal/{sitzung}/unterschreiben")
-async def portal_unterschreiben(sitzung: str, body: UnterschreibenIn, request: Request):
+@router.post("/public/portal/vertrag/unterschreiben")
+async def portal_unterschreiben(sitzung: SitzungKopf, body: UnterschreibenIn, request: Request):
     """Der Kunde unterschreibt: Bild pruefen, speichern, PDF mit beiden Unterschriften erzeugen,
     Vertrag als unterschrieben markieren (nur einmal, nur diese Fassung), Meldung an Sucher und Chef."""
     ip = client_ip(request)
@@ -970,14 +1023,21 @@ async def portal_unterschreiben(sitzung: str, body: UnterschreibenIn, request: R
         await save_async(key, raw)
     except StorageError as exc:
         raise HTTPException(400, f"Unterschrift konnte nicht gespeichert werden: {exc}")
-    r = await db.generated_pdfs.update_one(
-        {"id": c["id"], "version": c.get("version"), "portal.status": "offen", "portal.code": p.get("code")},
-        {"$set": {"portal.status": "unterschrieben", "portal.unterschrieben_am": wann.isoformat(),
-                  "portal.name": name[:120], "portal.ip": ip, "portal.user_agent": (request.headers.get("user-agent") or "")[:200],
-                  "portal.unterschrift_key": key, "portal.kaeufer_unterschrift": bool(kaeufer_png),
-                  "pdf_signiert_b64": base64.b64encode(pdf).decode(), "pdf_signiert_sha256": hashlib.sha256(pdf).hexdigest(),
-                  "pdf_signiert_version": int(c.get("version") or 1), "kunde_unterschrieben_am": wann.isoformat(),
-                  "updated_at": now_iso()}})
+    try:
+        r = await db.generated_pdfs.update_one(
+            {"id": c["id"], "version": c.get("version"), "portal.status": "offen", "portal.code": p.get("code")},
+            {"$set": {"portal.status": "unterschrieben", "portal.unterschrieben_am": wann.isoformat(),
+                      "portal.name": name[:120], "portal.ip": ip,
+                      "portal.user_agent": (request.headers.get("user-agent") or "")[:200],
+                      "portal.unterschrift_key": key, "portal.kaeufer_unterschrift": bool(kaeufer_png),
+                      "pdf_signiert_b64": base64.b64encode(pdf).decode(),
+                      "pdf_signiert_sha256": hashlib.sha256(pdf).hexdigest(),
+                      "pdf_signiert_version": int(c.get("version") or 1), "kunde_unterschrieben_am": wann.isoformat(),
+                      "updated_at": now_iso()}})
+    except Exception:
+        # Pruefliste 30.09.2026: Unterschriftsbild des Kunden ohne Verweis nie liegen lassen.
+        await loeschen_oder_vormerken(db, key=key, grund="portal_unterschrift_db_fehler", dealer_id=c["dealer_id"])
+        raise
     if not r.modified_count:
         await loeschen_oder_vormerken(db, key=key, grund="portal_unterschrift_verworfen", dealer_id=c["dealer_id"])
         raise HTTPException(409, "Dieser Vertrag wurde gerade schon unterschrieben oder geändert.")
@@ -989,8 +1049,8 @@ async def portal_unterschreiben(sitzung: str, body: UnterschreibenIn, request: R
     await log_activity_sicher(c["dealer_id"], "", "vertrag.portal.unterschrieben", ref=c["id"],
                               meta={"name": name[:120], "version": int(c.get("version") or 1), "ip": ip,
                                     "kaeufer_unterschrift": bool(kaeufer_png)})
-    return {"ok": True, "unterschrieben_am": wann.isoformat(), "contract_no": c.get("contract_no") or "",
-            "sitzung": sitzung}
+    await _unterschrift_limiter.erstatten(ip)            # erfolgreich unterschrieben: kein Fehlversuch
+    return {"ok": True, "unterschrieben_am": wann.isoformat(), "contract_no": c.get("contract_no") or ""}
 
 
 # ---------------------------------------------------------------- Meldungen in der App

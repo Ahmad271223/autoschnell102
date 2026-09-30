@@ -221,12 +221,15 @@ function Kundenportal({ firma, slug, host }) {
     } finally { setBusy(false); }
   };
 
-  // Vertrag laden und Seiten rendern, sobald die Sitzung steht
+  // Vertrag laden und Seiten rendern, sobald die Sitzung steht.
+  // Prüfliste 30.09.2026: die Sitzung reist in einer Kopfzeile — nie in der Adresse (Adressen landen in
+  // Server- und Proxy-Protokollen).
   const pdfLaden = useCallback(async () => {
     if (!sitzung?.sitzung) return;
     setSeitenStand("laedt");
     try {
-      const { data } = await api.get(`/public/portal/${sitzung.sitzung}/pdf`, { responseType: "blob" });
+      const { data } = await api.get("/public/portal/vertrag/pdf",
+        { responseType: "blob", headers: { "X-Portal-Sitzung": sitzung.sitzung } });
       setPdfBlob(data);
       const { pdfSeitenRendern } = await import("@/lib/pdfAnzeige");
       // mindestens 320 px (lesbar), hoechstens 820 px — ein noch nicht gezeichneter Kasten meldet sonst 0
@@ -253,7 +256,9 @@ function Kundenportal({ firma, slug, host }) {
     if (name.trim().length < 2) { setFehler("Bitte Ihren Namen eintragen."); return; }
     setBusy(true); setFehler("");
     try {
-      const { data } = await api.post(`/public/portal/${sitzung.sitzung}/unterschreiben`, { signature_b64: unterschrift, name: name.trim(), einverstanden: true });
+      const { data } = await api.post("/public/portal/vertrag/unterschreiben",
+        { signature_b64: unterschrift, name: name.trim(), einverstanden: true },
+        { headers: { "X-Portal-Sitzung": sitzung.sitzung } });
       setFertig(data);
       try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch { /* jsdom / alte Browser */ }
     } catch (err) {

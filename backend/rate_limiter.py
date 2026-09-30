@@ -391,6 +391,26 @@ class SlidingWindowRateLimiter:
         for k in stale:
             del self._buckets[k]
 
+    async def erstatten(self, key: str) -> None:
+        """Den eben per check() gezaehlten Versuch zuruecknehmen — der Aufruf war ERFOLGREICH und soll
+        nicht als Fehlversuch zaehlen (Pruefliste 30.09.2026: zehn Kunden hinter derselben Adresse
+        sperrten sonst den elften aus). Genau EIN Versuch, kein reset(): wer einen gueltigen Code hat,
+        kann damit seine Fehlversuche nicht loeschen. Wirft nie."""
+        if not _RATE_LIMIT_ENABLED or (_EXEMPT_LOOPBACK and key in _LOOPBACK_KEYS):
+            return
+        try:
+            from deps import db
+            fenster = int(time.time() // self.window_seconds)
+            for f in (fenster, fenster - 1):            # Fensterwechsel zwischen check() und Erstattung
+                r = await db.rate_limits.update_one(
+                    {"_id": f"{self.name}:{key}:{f}", "n": {"$gt": 0}}, {"$inc": {"n": -1}})
+                if r.modified_count:
+                    return
+        except Exception:  # noqa: BLE001 — dann zaehlt der Versuch eben mit
+            with self._lock:
+                if self._buckets.get(key):
+                    self._buckets[key].pop()
+
     async def reset(self, key: str) -> None:
         """Zaehler eines Schluessels leeren (z.B. nach erfolgreichem Login).
 

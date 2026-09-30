@@ -450,7 +450,9 @@ def pruefe_produktion(log) -> None:
                          "Abrufe, Anmeldeangriffe) erreichen niemanden per E-Mail.")
     if os.environ.get("AUTO_DATEN_SCHAEDEN_FREITEXT", "").strip().lower() in ("1", "true", "yes"):
         warnungen.append("AUTO_DATEN_SCHAEDEN_FREITEXT=true: Freitext-Schaeden koennen "
-                         "Personendaten enthalten (Standard: false).")
+                         "Personendaten enthalten (Standard: false)."
+                         + (" In Produktion wird der Schalter IGNORIERT (30.09.2026) — "
+                            "aus der .env entfernen." if ist_prod else ""))
     if os.environ.get("VERTRAG_LOESCHUNG_AKTIV", "").strip().lower() in ("1", "true", "yes", "ja"):
         warnungen.append("VERTRAG_LOESCHUNG_AKTIV=true: automatische Vertragsloeschung ist scharf.")
     elif ist_prod and not os.environ.get("VERTRAG_LOESCHUNG_AKTIV", "").strip():

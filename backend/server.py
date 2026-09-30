@@ -2193,7 +2193,7 @@ app.add_middleware(
     # Runde 10: kein Freibrief mehr — nur was die Oberflaeche wirklich nutzt.
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "Accept", "X-Requested-With",
-                   "Idempotency-Key", "X-CSRF-Token"],
+                   "Idempotency-Key", "X-CSRF-Token", "X-Portal-Sitzung"],
     # 20.09.2026: Kopfzeilen, die die Oberflaeche auswertet. In Produktion
     # liegt die API unter derselben Herkunft (dort sind sie ohnehin lesbar);
     # bei getrennter API-Adresse blieben sie ohne diese Liste unsichtbar.
