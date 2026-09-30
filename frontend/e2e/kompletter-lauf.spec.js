@@ -3,7 +3,8 @@
 //
 //   Betreiber  legt Firma (Chef), Sucher und Fahrer an, richtet die Firmenseite ein
 //   Chef       verbindet den Fahrer (Fahrer-Code)
-//   Sucher     vergleicht ein Inserat, erstellt den Kaufvertrag (Termin entsteht von selbst),
+//   Sucher     vergleicht ein Inserat, laesst die bekannte Delle bewerten (Vorschau / KI-Schadennachlass),
+//              erstellt den Kaufvertrag mit diesem Schaden (Termin entsteht von selbst),
 //              erzeugt den Code fuers Kundenportal
 //   Kunde      unterschreibt den Vertrag auf der Firmenseite
 //   Chef       teilt den Fahrer im Terminplaner zu
@@ -15,7 +16,8 @@
 //              (Hinweis in Vertragsliste, Dialog und Meldungen)
 //
 // KI: laeuft im CI ohne Schluessel ("aus"). Lokal mit E2E_KI=1 und einem Backend mit
-// KI_BEWERTUNG_AKTIV=true + ANTHROPIC_API_KEY rechnet die Abholbewertung ECHT (kostet ein paar Cent).
+// KI_BEWERTUNG_AKTIV=true + ANTHROPIC_API_KEY rechnen Schadennachlass (Vertrag) und Abholbewertung ECHT
+// (zusammen rund 15 Cent je Lauf).
 const { test, expect } = require("@playwright/test");
 const h = require("./helpers");
 
@@ -24,6 +26,9 @@ const KI_ECHT = process.env.E2E_KI === "1";
 const PREIS_VERTRAG = 12500;
 const PREIS_NEU = 11900;
 const KM_VOR_ORT = 96500;
+// Bekannter Schaden laut Inserat/Verkaeufer — steht im Vertrag, der Fahrer bestaetigt ihn nur.
+const DELLE = { view: "right", zone: "Kotflügel hinten rechts", x: 1100, y: 520, type_key: "delle", type_label: "Delle",
+                severity_data: { groesse: "2–5 cm", lack: "nein", lage: "Fläche" } };
 
 /** Mit der Maus in ein Unterschriftsfeld schreiben (Feld vorher in die Bildmitte holen). */
 async function unterschreiben(page, canvas) {
@@ -67,7 +72,8 @@ test.describe("Kompletter Lauf: Betreiber -> Sucher -> Kunde -> Chef -> Fahrer -
       slug, aktiv: true, ueber_uns: "Wir kaufen Ihr Auto — fair und schnell.",
     });
     if (KI_ECHT) {
-      // KI je Konto: Chef (Abholbewertung der Firma) und Fahrer des Termins
+      // KI je Konto: Sucher (Schadennachlass im Vertrag), Chef (Abholbewertung der Firma) und Fahrer des Termins
+      await h.superPost(`/admin/sucher/${sucher.userId}/ki`, { aktiv: true });
       await h.superPost(`/admin/sucher/${firma.userId}/ki`, { aktiv: true });
       await h.superPost(`/admin/drivers/${driver.id}/ki`, { aktiv: true });
     }
@@ -96,19 +102,45 @@ test.describe("Kompletter Lauf: Betreiber -> Sucher -> Kunde -> Chef -> Fahrer -
     await expect(page.getByTestId(`driver-row-${driver.id}`)).toContainText(driver.displayName);
   });
 
-  test("2 Sucher: Vergleich, Kaufvertrag, Termin entsteht, Code fuers Kundenportal", async ({ page }) => {
+  test("2 Sucher: Vergleich, Schadennachlass, Kaufvertrag, Termin entsteht, Code fuers Kundenportal", async ({ page }) => {
+    test.setTimeout(KI_ECHT ? 300_000 : 60_000);
     await h.formLogin(page, "auth", sucher);
     await expect(page).toHaveURL(/\/app\//);
     sucherToken = await tokenAusBrowser(page, "ah_token");
 
     const vgl = await h.compareMock({ token: sucherToken }, "lauf");
     test.skip(!vgl, "Mock-Vergleich nicht verfuegbar (MOCK_PROVIDER_FETCH)");
+
+    // Schadennachlass fuer die bekannte Delle: die Vorschau rechnet ohne KI (keine Kosten) ...
+    const anfrage = { vehicle_id: vgl.vehicleId, damages: [DELLE], purchase_price: PREIS_VERTRAG };
+    const vorschau = await h.post("/contracts/ki-schadennachlass/vorschau", anfrage, { token: sucherToken });
+    expect(vorschau.vorlaeufig).toBe(true);
+    expect(vorschau.fair_discount_eur).toBeGreaterThan(0);
+    expect(vorschau.recommended_purchase_price_eur).toBe(PREIS_VERTRAG - vorschau.fair_discount_eur);
+    // ... die KI-Bewertung nur mit freigeschaltetem Konto (rein beratend, aendert nichts am Vertrag)
+    let nachlass = await h.post("/contracts/ki-schadennachlass", anfrage, { token: sucherToken });
+    if (KI_ECHT) {
+      for (let i = 0; i < 100 && nachlass.status === "laeuft"; i += 1) {
+        await page.waitForTimeout(2000);
+        nachlass = await h.get(`/contracts/ki-schadennachlass/${nachlass.id}`, { token: sucherToken });
+      }
+      expect(nachlass.status).toBe("ok");
+      expect(nachlass.ergebnis, "KI-Schadennachlass ohne Ergebnis").toBeTruthy();
+      console.log(`[kompletter-lauf] KI Vertrag: ${JSON.stringify(nachlass.ergebnis.combined || nachlass.ergebnis).slice(0, 400)}`
+        + ` — Kosten ${nachlass.kosten_ct} ct`);
+    } else {
+      expect(["aus", "freischaltung"]).toContain(nachlass.status);
+      expect(nachlass.ergebnis).toBeNull();
+    }
+
     vertrag = await h.post("/contracts", {
       vehicle_id: vgl.vehicleId, seller_name: "Erika Mustermann", seller_address: "Musterweg 2",
       seller_zip: "10115", seller_city: "Berlin", seller_phone: "+49 170 1234567", seller_email: "erika@example.org",
       purchase_price: PREIS_VERTRAG, pickup_date: h.isoDate(0), pickup_time: "10:00",
+      damages: [DELLE], schluessel_anzahl: "2",
     }, { token: sucherToken });
     expect(vertrag.contract_no).toBeTruthy();
+    expect(vertrag.contract_data.damages).toHaveLength(1);
 
     // Der Abholtermin entsteht mit dem Vertrag — der Sucher sieht ihn, noch ohne Fahrer
     const termine = await h.get("/appointments", { token: sucherToken });
@@ -191,6 +223,8 @@ test.describe("Kompletter Lauf: Betreiber -> Sucher -> Kunde -> Chef -> Fahrer -
 
     const tpl = await h.get(`/driver/appointments/${termin.id}/protocol`, { token: fahrerToken });
     expect(tpl.preis_vertrag).toBe(PREIS_VERTRAG);
+    expect(tpl.damages).toHaveLength(1);                            // die Delle aus dem Vertrag
+    expect(String(tpl.template.keys_expected)).toBe("2");           // Schluessel laut Vertrag
     const zeilen = tpl.template.vehicle_check_fields;
     const fahrzeug = Object.fromEntries(zeilen.map((f) => [f.key, { status: f.options[0] }]));
     fahrzeug.mileage_contract = { status: "weicht ab", value: String(KM_VOR_ORT) };   // Vertrag: 90.000 km
@@ -198,7 +232,9 @@ test.describe("Kompletter Lauf: Betreiber -> Sucher -> Kunde -> Chef -> Fahrer -
     const zustand = Object.fromEntries(tpl.template.condition_fields.map((f) =>
       [f.key, f.key === "mileage" ? String(KM_VOR_ORT) : (f.options ? f.options[0] : "5/5/4/4")]));
     zustand.fuel_level = "1/2";
-    await h.put(`/driver/appointments/${termin.id}/protocol`, {
+    // Der neue Schaden geht bewusst OHNE id an den Server (die App vergibt sonst eine): der Server muss
+    // selbst eine vergeben — ohne id verwarf die KI-Abholbewertung die Position (Befund 30.09.2026).
+    const entwurf = await h.put(`/driver/appointments/${termin.id}/protocol`, {
       revision: tpl.protocol?.revision,
       vehicle_check: fahrzeug,
       documents: Object.fromEntries(tpl.template.documents.map((d) => [d, true])),
@@ -210,6 +246,10 @@ test.describe("Kompletter Lauf: Betreiber -> Sucher -> Kunde -> Chef -> Fahrer -
       place: "Berlin", seller_name: "Erika Mustermann", seller_id_document: "L01X00T47",
       notes: "Kompletter Lauf: Kilometerstand höher als im Vertrag, neuer Kratzer an der Fahrertür.",
     }, { token: fahrerToken });
+    expect(entwurf).toBeTruthy();
+    const gespeichert = await h.get(`/driver/appointments/${termin.id}/protocol`, { token: fahrerToken });
+    expect(gespeichert.protocol.new_damages).toHaveLength(1);
+    expect(gespeichert.protocol.new_damages[0].id).toMatch(/^n-[0-9a-f]{12}$/);
 
     await page.goto(`/fahrer/protokoll/${termin.id}`);
     await expect(page.getByTestId("protokoll-page")).toBeVisible();
@@ -267,6 +307,9 @@ test.describe("Kompletter Lauf: Betreiber -> Sucher -> Kunde -> Chef -> Fahrer -
       console.log(`[kompletter-lauf] KI: fair ${combined.fair_discount_eur} EUR Nachlass, empfohlener Preis `
         + `${combined.recommended_purchase_price_eur} EUR, Datenlage ${ki.ergebnis.datenlage}, `
         + `${items.map((i) => `${i.title}: ${i.fair_discount_eur} EUR`).join(" | ")}`);
+      // die bekannte Delle aus dem Vertrag ist KEIN neuer Schaden — sie darf nicht noch einmal abgezogen werden
+      expect(items.filter((i) => i.category === "damage")).toHaveLength(1);
+      if (ki.kosten_ct != null) console.log(`[kompletter-lauf] KI Abholung: Kosten ${ki.kosten_ct} ct`);
       const fahrerSicht = await h.get(`/driver/appointments/${termin.id}/ki-bewertung`, { token: fahrerToken });
       expect(fahrerSicht.status).toBe("ok");
       // beratend: der Preis im Vertrag ist durch die KI NICHT veraendert worden

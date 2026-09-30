@@ -499,6 +499,23 @@ class ProtocolIn(BaseModel):
     # Dicts — ein String-Element liess pickup_pdf_service abstuerzen).
     # Review 26.09.2026 (Nr. 63-65): nur bekannte Art/Ansicht/Bauteil/Merkmale.
     new_damages: Optional[List[ProtokollSchadenIn]] = Field(default=None, max_length=40)
+
+    @field_validator("new_damages", mode="after")
+    @classmethod
+    def _schaden_ids(cls, v):
+        """Kompletter Lauf 30.09.2026: jeder neue Schaden braucht eine eigene, nicht leere id — die
+        KI-Abholbewertung ordnet ihre Positionen darueber zu (source_id), Rueckfragen beziehen sich
+        darauf. Ohne id (oder mit doppelter) verwarf der Abgleich die Position: der Lauf endete mit
+        "fehler" und Betriebsalarm. Die App vergibt immer eine; fuer jeden anderen Weg tut es der Server."""
+        gesehen = set()
+        for d in v or []:
+            sid = str(d.id or "").strip()
+            if not sid or sid in gesehen:
+                sid = f"n-{uuid.uuid4().hex[:12]}"
+            d.id = sid
+            gesehen.add(sid)
+        return v
+
     notes: Optional[str] = Field(default=None, max_length=5000)   # Abschnitt 7
     place: Optional[str] = Field(default=None, max_length=200)    # Ort (Abschnitt 8)
     # Rollenprüfung 22.09.2026 (RP-058/157/074/173): Verkaeufername wie Ort im

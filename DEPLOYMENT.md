@@ -4082,5 +4082,7 @@ eines Vertrags gehen die Unterschriftsbilder des Kunden (`portal/…`) und die M
 (Betreiber → Chef → Sucher → Kunde → Fahrer → Freigabe → Abschluss) und läuft in der CI mit. Die KI ist dort aus
 (kein Schlüssel). Lokal mit echter KI-Abholbewertung: Backend mit `KI_BEWERTUNG_AKTIV=true` und Schlüssel auf einer
 Wegwerf-Datenbank starten, dann `E2E_KI=1 npx playwright test e2e/kompletter-lauf.spec.js` — kostet je Lauf rund
-10 Cent. Achtung: ein frisches Backend mit eingeschalteter KI baut beim ersten Aufräumlauf einmal die Markttabelle
-(`ki_marktdaten`, rund 1 €).
+23 Cent (Schadennachlass im Vertrag ≈ 11 ct, Abholbewertung ≈ 12 ct, gemessen 30.09.2026). Achtung: ein frisches
+Backend mit eingeschalteter KI baut einmal die Markttabelle (`ki_marktdaten`, rund 1 €).
+Neue Schäden im Protokoll bekommen vom Server eine id, falls der Aufrufer keine mitschickt — ohne id verwarf die
+KI-Abholbewertung die Position („nicht bewertet“, Betriebsalarm); die App vergibt ohnehin immer eine.

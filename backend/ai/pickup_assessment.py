@@ -282,8 +282,12 @@ def paket_bauen(protokoll: dict, appt: dict, vehicle: dict, contract: dict,
     hinweise: List[str] = []
     schaeden_roh = [d for d in (protokoll.get("new_damages") or []) if isinstance(d, dict)]
     je_id: Dict[str, dict] = {}
-    for d in schaeden_roh:
+    for nr, d in enumerate(schaeden_roh):
         k = _schaden_kurz(d)
+        # Kompletter Lauf 30.09.2026: Altbestand ohne (oder mit doppelter) id — die KI braucht je Position
+        # eine eindeutige source_id, sonst verwirft der Abgleich sie und der Lauf endet mit "fehler".
+        if not k["id"] or k["id"] in je_id:
+            k["id"] = f"neu:{nr + 1}"
         status, alt, feld = schaden_abgleich.abgleich(bekannt_roh, d)
         k["already_known"] = status == "bekannt"
         k["possibly_known"] = status == "moeglich"
