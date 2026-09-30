@@ -327,3 +327,89 @@ def test_limit_beim_anbieter_gibt_klartext():
     assert "Error code" not in grund
     assert PR.grund_aus_ausnahme(RuntimeError("Your credit balance is too low to access the API")).startswith(PR.LIMIT_ERREICHT)
     assert PR.grund_aus_ausnahme(ValueError("irgendwas")) == "ValueError: irgendwas"
+
+
+# ------------------------------------------------ Kostenfrage 30.09.2026: Tabellenlaeufe je Monat begrenzt
+def test_markttabelle_hoechstens_vier_laeufe_je_monat(welt, monkeypatch):  # noqa: F811
+    db = welt.db
+    vorher = welt.run(db.ki_marktdaten.find_one({"_id": MD.DOK_ID}))
+    laeufe = []
+
+    async def _scheitert(db_, erzwingen=False):
+        laeufe.append(1)
+        # wie ein Fehlversuch nach bezahlter Recherche: Versuch vermerkt, Status fehler
+        await db_.ki_marktdaten.update_one({"_id": MD.DOK_ID}, {"$set": {"stand_versuch": "2020-01-01T00:00:00+00:00",
+                                                                        "status": "fehler", "grund": "Test"}}, upsert=True)
+        return {"status": "fehler", "grund": "Test", "aktualisiert": False}
+    monkeypatch.setattr(MD, "aktualisieren", _scheitert)
+    monkeypatch.setattr(MD, "ki_aktiv", lambda: True)
+    monkeypatch.setenv("KI_MARKTANALYSE_AKTIV", "true")
+    monkeypatch.delenv("KI_MARKTDATEN_LAEUFE_MAX", raising=False)
+    try:
+        welt.run(db.ki_marktdaten.delete_many({"_id": MD.DOK_ID}))
+        assert MD.laeufe_max() == 4
+        # vier Fehlversuche (stuendlicher Weg; die Wartezeit ist hier schon abgelaufen) laufen ...
+        for _ in range(4):
+            assert welt.run(MD.pruefen_und_aktualisieren(db))["status"] == "fehler"
+        assert len(laeufe) == 4
+        # ... der fuenfte startet KEINE Recherche mehr — weder automatisch noch per Knopf
+        erg = welt.run(MD.pruefen_und_aktualisieren(db))
+        assert erg["status"] == "limit" and "Monatsgrenze" in erg["grund"] and len(laeufe) == 4
+        knopf = welt.run(MD.aktualisieren_im_hintergrund(db))
+        assert knopf["status"] == "limit" and knopf["gestartet"] is False and len(laeufe) == 4
+        d = welt.run(db.ki_marktdaten.find_one({"_id": MD.DOK_ID}))
+        assert d["laeufe_n"] == 4 and d["laeufe_monat"] == MD._monat() and not d.get("lauf_seit")
+        alarm = welt.run(db.betriebsalarme.find_one({"typ": "ki_marktdaten_limit", "ref": MD._monat()}))
+        assert alarm and alarm["offen"] is True
+        # neuer Monat: es geht wieder; hoehere Grenze per Umgebung ebenso
+        welt.run(db.ki_marktdaten.update_one({"_id": MD.DOK_ID}, {"$set": {"laeufe_monat": "2020-01"}}))
+        assert welt.run(MD.pruefen_und_aktualisieren(db))["status"] == "fehler" and len(laeufe) == 5
+        assert welt.run(db.ki_marktdaten.find_one({"_id": MD.DOK_ID}))["laeufe_n"] == 1
+        welt.run(db.ki_marktdaten.update_one({"_id": MD.DOK_ID}, {"$set": {"laeufe_n": 4}}))
+        monkeypatch.setenv("KI_MARKTDATEN_LAEUFE_MAX", "6")
+        assert welt.run(MD.lauf_zaehlen(db)) is True and welt.run(MD.lauf_zaehlen(db)) is True
+        assert welt.run(MD.lauf_zaehlen(db)) is False
+    finally:
+        welt.run(db.ki_marktdaten.delete_many({"_id": MD.DOK_ID}))
+        welt.run(db.betriebsalarme.delete_many({"typ": "ki_marktdaten_limit"}))
+        if vorher:
+            welt.run(db.ki_marktdaten.insert_one(vorher))
+
+
+def test_markttabelle_ausnahme_vermerkt_den_versuch_und_der_zaehler_ueberlebt_den_erfolg(welt, monkeypatch):  # noqa: F811
+    db = welt.db
+    vorher = welt.run(db.ki_marktdaten.find_one({"_id": MD.DOK_ID}))
+    monkeypatch.setattr(MD, "ki_aktiv", lambda: True)
+    monkeypatch.setenv("KI_MARKTANALYSE_AKTIV", "true")
+
+    async def _kaputt(**kw):
+        raise RuntimeError("Anbieter weg")
+    monkeypatch.setattr(MD, "recherche", _kaputt)
+    try:
+        welt.run(db.ki_marktdaten.delete_many({"_id": MD.DOK_ID}))
+        erg = welt.run(MD.aktualisieren(db, erzwingen=True))
+        assert erg["status"] == "fehler" and "Anbieter weg" in erg["grund"]
+        d = welt.run(db.ki_marktdaten.find_one({"_id": MD.DOK_ID}))
+        assert d["status"] == "fehler" and d["stand_versuch"], "sonst recherchiert der naechste Aufraeumlauf in einer Stunde erneut"
+        # gleich danach wartet der stuendliche Weg (6 Stunden), statt wieder zu recherchieren
+        assert welt.run(MD.pruefen_und_aktualisieren(db))["status"] == "wartet"
+        # der Zaehler ueberlebt einen erfolgreichen Lauf
+        welt.run(db.ki_marktdaten.update_one({"_id": MD.DOK_ID}, {"$set": {"laeufe_monat": MD._monat(), "laeufe_n": 3}}))
+
+        async def _gut(**kw):
+            return {"status": "ok", "text": "Delle 100-200 EUR (ADAC)", "quellen": [{"url": "https://www.adac.de/x", "titel": "ADAC"}],
+                    "suchen": 1, "dauer_ms": 1, "usage": {}}
+
+        async def _json(**kw):
+            return {"status": "ok", "daten": {"positionen": [{"typ": "delle", "auspraegung": "klein", "min_eur": 100, "max_eur": 200,
+                                                             "typisch_eur": 150, "quelle": "ADAC", "hinweis": ""}],
+                                              "zusammenfassung": "x"}, "usage": {}}
+        monkeypatch.setattr(MD, "recherche", _gut)
+        monkeypatch.setattr(MD, "json_bewerten", _json)
+        assert welt.run(MD.aktualisieren(db, erzwingen=True))["status"] == "ok"
+        d = welt.run(db.ki_marktdaten.find_one({"_id": MD.DOK_ID}))
+        assert d["status"] == "ok" and d["laeufe_n"] == 3 and d["laeufe_monat"] == MD._monat()
+    finally:
+        welt.run(db.ki_marktdaten.delete_many({"_id": MD.DOK_ID}))
+        if vorher:
+            welt.run(db.ki_marktdaten.insert_one(vorher))

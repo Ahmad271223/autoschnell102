@@ -4156,3 +4156,13 @@ Kundenunterschrift (bewusst nicht eingefroren).
 **Sonstiges:** am Vertrag steht `inserat_stand_fehlt` (`kein_inserat` / `kein_eintrag` / `fehler`), wenn kein
 Inseratsstand eingefroren werden konnte; fällt die Kleinanzeigen-API dreimal in Folge aus, gibt es den Betriebsalarm
 `kleinanzeigen_api_gestoert` (schließt sich, sobald sie wieder antwortet).
+
+**Kosten der KI — was gedeckelt ist und was nicht (Frage Ahmad 30.09.2026):**
+- Je BEWERTUNG (Abholung, Schadennachlass im Vertrag): hart 20 ct, Ziel 15 ct; je Firma 15 €/Monat, je Fahrer 10 €/Monat.
+- Die **Markttabelle** ist eine große Webrecherche (4 Gruppen, bis zu 32 Suchen, gut 1 € je Lauf) und fiel NICHT
+  unter diese Deckel: nach einem Fehlversuch lief sie alle 6 Stunden erneut, jeder Klick auf „Marktdaten jetzt“
+  startete einen vollen Lauf. Seit 30.09.2026: höchstens `KI_MARKTDATEN_LAEUFE_MAX` (Standard 4) gestartete Läufe je
+  Kalendermonat, automatisch und per Knopf zusammen; danach Status „limit“ und Betriebsalarm `ki_marktdaten_limit`.
+  Eine Ausnahme mitten im Lauf vermerkt jetzt den Versuch (vorher: Wiederholung jede Stunde).
+- Wo man es sieht: Anthropic-Konsole → Usage/Cost nach Tag und Modell (Haiku = Websuche/Tabelle, Sonnet =
+  Bewertungen); in der App Admin → Betrieb → KI (`kosten_usd_geschaetzt` der Bewertungen, 30 Tage).

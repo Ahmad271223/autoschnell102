@@ -357,6 +357,8 @@ services:
       # Kundenportal (30.09.2026): Aufrufe je Minute ueber dieselbe Adresse, danach Wartezeit
       - PORTAL_IP_JE_MINUTE=${PORTAL_IP_JE_MINUTE:-500}
       - PORTAL_IP_WARTEN_SEKUNDEN=${PORTAL_IP_WARTEN_SEKUNDEN:-120}
+      # KI-Markttabelle (30.09.2026): hoechstens so viele Laeufe je Monat (jeder gut 1 EUR)
+      - KI_MARKTDATEN_LAEUFE_MAX=${KI_MARKTDATEN_LAEUFE_MAX:-4}
       # dieselbe Liste wie beim Proxy — "Domain pruefen" im Admin sagt damit, ob der Proxy die Domain kennt
       - FIRMEN_HOSTS=${FIRMEN_HOSTS:-}
       - FRONTEND_URL=${FRONTEND_URL:-}

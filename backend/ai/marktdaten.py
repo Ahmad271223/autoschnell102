@@ -241,6 +241,51 @@ async def lauf_markieren(db=None) -> bool:
     return False
 
 
+# Kostenfrage Ahmad 30.09.2026: der Deckel von 20 ct gilt je BEWERTUNG. Ein Lauf der Markttabelle ist eine
+# grosse Webrecherche (vier Gruppen, bis zu 32 Suchen, gut 1 EUR) und war NICHT begrenzt: nach einem
+# Fehlversuch wurde alle sechs Stunden erneut recherchiert, jeder Klick auf "Marktdaten jetzt" startete
+# einen vollen Lauf, und nach einer Ausnahme sogar jede Stunde. Jetzt: hoechstens LAEUFE_JE_MONAT_MAX
+# gestartete Laeufe je Kalendermonat (automatisch UND per Knopf zusammen), danach Status "limit" + Alarm.
+def laeufe_max() -> int:
+    return zahl_env("KI_MARKTDATEN_LAEUFE_MAX", 4, unten=1, oben=60)
+
+
+def _monat() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m")
+
+
+async def lauf_zaehlen(db=None) -> bool:
+    """Einen Tabellenlauf fuer diesen Monat verbuchen — atomar. False = Monatsgrenze erreicht."""
+    db = db if db is not None else _db
+    monat, grenze = _monat(), laeufe_max()
+    r = await db[SAMMLUNG].update_one({"_id": DOK_ID, "laeufe_monat": monat, "laeufe_n": {"$lt": grenze}},
+                                      {"$inc": {"laeufe_n": 1}})
+    if r.matched_count:
+        return True
+    r = await db[SAMMLUNG].update_one({"_id": DOK_ID, "laeufe_monat": {"$ne": monat}},
+                                      {"$set": {"laeufe_monat": monat, "laeufe_n": 1}})
+    if r.matched_count:
+        return True
+    if not await db[SAMMLUNG].find_one({"_id": DOK_ID}, {"_id": 1}):
+        await db[SAMMLUNG].update_one({"_id": DOK_ID}, {"$setOnInsert": {"laeufe_monat": monat, "laeufe_n": 1}},
+                                      upsert=True)
+        return True
+    return False
+
+
+async def _limit_melden(db) -> dict:
+    grund = (f"Monatsgrenze erreicht: {laeufe_max()} Läufe der Markttabelle in diesem Monat "
+             "(KI_MARKTDATEN_LAEUFE_MAX). Die bisherige Tabelle gilt weiter.")
+    try:
+        import betrieb
+        await betrieb.alarm(db, "ki_marktdaten_limit", ref=_monat(), grund=grund,
+                            hinweis="Jeder Lauf kostet gut 1 EUR. Ursache der Fehlversuche pruefen (Betrieb → KI); "
+                                    "erst danach die Grenze mit env_setzen.sh erhoehen.")
+    except Exception:  # noqa: BLE001
+        pass
+    return {"status": "limit", "gestartet": False, "grund": grund}
+
+
 async def lauf_beenden(db=None) -> None:
     db = db if db is not None else _db
     try:
@@ -268,6 +313,9 @@ async def aktualisieren_im_hintergrund(db=None) -> dict:
     db = db if db is not None else _db
     if not await lauf_markieren(db):
         return {"status": "laeuft", "gestartet": False}
+    if not await lauf_zaehlen(db):
+        await lauf_beenden(db)
+        return await _limit_melden(db)
 
     async def _lauf():
         try:
@@ -400,6 +448,8 @@ async def aktualisieren(db=None, *, erzwingen: bool = False) -> dict:
                "zusammenfassung": str(j["daten"].get("zusammenfassung") or "")[:600],
                "modell": ki_modell(), "suchen": suchen, "gruppen_fehler": list(j.get("fehlgeschlagen") or []),
                "dauer_ms": dauer + int(j.get("dauer_ms") or 0), "usage": usage}
+        zaehler = await db[SAMMLUNG].find_one({"_id": DOK_ID}, {"_id": 0, "laeufe_monat": 1, "laeufe_n": 1}) or {}
+        doc.update({k: zaehler[k] for k in ("laeufe_monat", "laeufe_n") if k in zaehler})
         await db[SAMMLUNG].replace_one({"_id": DOK_ID}, doc, upsert=True)
         try:
             import betrieb
@@ -409,7 +459,15 @@ async def aktualisieren(db=None, *, erzwingen: bool = False) -> dict:
         return {**(_oeffentlich(doc) or {}), "aktualisiert": True}
     except Exception as exc:  # noqa: BLE001
         log.exception("Marktdaten nicht aktualisiert")
-        return {"status": "fehler", "grund": f"{type(exc).__name__}: {str(exc)[:200]}", "aktualisiert": False}
+        grund = f"{type(exc).__name__}: {str(exc)[:200]}"
+        # 30.09.2026: den Fehlversuch vermerken — ohne stand_versuch startete der stuendliche Aufraeumlauf
+        # die ganze (bezahlte) Recherche jede Stunde neu.
+        try:
+            await db[SAMMLUNG].update_one({"_id": DOK_ID}, {"$set": {"stand_versuch": jetzt, "status": "fehler",
+                                                                     "grund": grund}}, upsert=True)
+        except Exception:  # noqa: BLE001
+            pass
+        return {"status": "fehler", "grund": grund, "aktualisiert": False}
 
 
 async def _alarm(db, status: str, grund: str) -> None:
@@ -444,6 +502,8 @@ async def pruefen_und_aktualisieren(db=None) -> dict:
     if not await lauf_markieren(db):
         return {"status": "laeuft"}
     try:
+        if not await lauf_zaehlen(db):
+            return await _limit_melden(db)
         erg = await aktualisieren(db, erzwingen=True)
     finally:
         await lauf_beenden(db)

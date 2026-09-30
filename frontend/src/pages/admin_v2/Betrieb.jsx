@@ -302,6 +302,8 @@ function KiKarte() {
     setMarktLaeuft(true);
     try {
       const r = await api.post("/admin/ki/marktdaten");
+      // 30.09.2026: Monatsgrenze der Tabellenläufe erreicht (jeder Lauf kostet gut 1 €)
+      if (r.data?.status === "limit") { toast.error(r.data.grund || "Monatsgrenze der Marktdaten-Läufe erreicht.", { duration: 12000 }); return; }
       toast.info(r.data?.status === "laeuft" ? "Die Recherche läuft bereits — bitte warten (3–4 Minuten)."
                                               : "Recherche gestartet — dauert 3 bis 4 Minuten, die Seite lädt den Stand nach.", { duration: 8000 });
       const start = Date.now();

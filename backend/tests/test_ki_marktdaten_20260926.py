@@ -46,6 +46,12 @@ def _markt_attrappen(monkeypatch, *, recherche_status="ok", zaehler=None):
     monkeypatch.setattr(MD, "recherche", _recherche)
     monkeypatch.setattr(MD, "json_bewerten", _json)
     monkeypatch.setattr(MD, "ki_aktiv", lambda: True)
+
+    # 30.09.2026: die Monatsgrenze der Tabellenlaeufe ist hier nicht Thema (eigener Test in
+    # test_ki_quellen_20260930.py) — sonst haengt das Ergebnis am Zaehlerstand der Testdatenbank
+    async def _immer(_db=None):
+        return True
+    monkeypatch.setattr(MD, "lauf_zaehlen", _immer)
     monkeypatch.setenv("KI_MARKTANALYSE_AKTIV", "true")
     return MD
 
