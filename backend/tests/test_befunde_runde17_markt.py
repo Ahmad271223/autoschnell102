@@ -371,11 +371,18 @@ def test_401_haendlerliste_meldet_abschnitt(welt):
              "company_name": f"{name} Nr {i}",
              "marketplace": {"public": True}, "created_at": _jetzt()}
             for i in range(1001)])
+        # 30.09.2026: eine Firma ohne Chef-Konto gilt als gesperrt und steht nicht in der Haendlerliste —
+        # jede Testfirma bekommt deshalb ihren Chef (wie jede echte Firma).
+        await db.users.insert_many([
+            {"id": f"u_{w.dealer_id}_m{i}", "dealer_id": f"{w.dealer_id}_m{i}", "role": "dealer",
+             "active": True, "created_at": _jetzt()}
+            for i in range(1001)])
         r1 = Response()
         voll = await M.browse_dealers(r1, q=name, user=None)
         await db.dealers.delete_many({"id": {"$in": [f"{w.dealer_id}_m{i}" for i in range(3, 1001)]}})
         r2 = Response()
         klein = await M.browse_dealers(r2, q=name, user=None)
+        await db.users.delete_many({"dealer_id": {"$regex": f"^{w.dealer_id}_m"}})     # Chef-Konten wieder weg
         return r1.headers.get("X-Truncated"), voll, r2.headers.get("X-Truncated"), klein
 
     t1, voll, t2, klein = welt.run(lauf())

@@ -316,9 +316,12 @@ async def firma_gesperrt(dealer_id: Optional[str]) -> bool:
         {"dealer_id": dealer_id, "role": "dealer"},
         {"_id": 0, "active": 1}, sort=[("created_at", 1)])
     # Pruefliste 30.09.2026: eine Firma OHNE Chef-Konto (Absturz mitten in einer Loeschung, Eingriff in
-    # die Datenbank) galt als "nicht gesperrt" — ihre Sucher arbeiteten weiter. Jetzt fail-closed: ohne
-    # Hauptaccount ist die Firma gesperrt, bis der Betreiber einen Chef bestimmt.
-    return chef is None or chef.get("active") is not True
+    # die Datenbank) galt als "nicht gesperrt" — ihre Sucher arbeiteten weiter. Jetzt fail-closed: gibt es
+    # das Firmen-Dokument, aber kein Chef-Konto, ist die Firma gesperrt, bis der Betreiber einen Chef
+    # bestimmt. Ganz ohne Firmen-Dokument entscheidet wie bisher current_firma (403 "Kein Haendlerprofil").
+    if chef is None:
+        return firma is not None
+    return chef.get("active") is not True
 
 
 async def gesperrte_firmen_ids() -> set:

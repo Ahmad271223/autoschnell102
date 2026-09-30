@@ -46,28 +46,37 @@ def test_firma_ohne_chef_ist_gesperrt(welt):  # noqa: F811
                                  "created_at": "2026-02-01T00:00:00+00:00"}))
     assert _lauf(deps.firma_gesperrt(w.dealer_id)) is False
     assert w.dealer_id not in _lauf(deps.gesperrte_firmen_ids())
-    # ohne Firmen-ID (Kaeufer) bleibt es "nicht gesperrt"
+    # ohne Firmen-ID (Kaeufer) bleibt es "nicht gesperrt"; ganz ohne Firmen-Dokument entscheidet
+    # current_firma (403 "Kein Haendlerprofil") — firma_gesperrt meldet dafuer nichts
     assert _lauf(deps.firma_gesperrt(None)) is False
+    assert _lauf(deps.firma_gesperrt(f"gibt-es-nicht-{w.s}")) is False
 
 
 # ------------------------------------------------------------------ 2) Start-Audit zwingend
-def _audit_scheitert_bei(monkeypatch, modul, aktion):
+def _audit_scheitert_bei(monkeypatch, modul, aktion, *weitere_module):
+    """Liefert einen Schalter: solange schalter["an"], scheitert GENAU dieser Audit-Eintrag.
+    Die Module arbeiten dabei sicher auf der echten Datenbank (deps.db) — wurde eines von ihnen zum
+    ersten Mal waehrend einer Fixture mit Wegwerf-Datenbank importiert, zeigt sein `db` sonst dorthin."""
     echt = deps.log_activity
+    schalter = {"an": True}
 
     async def audit(dealer_id, user_id, action, ref=None, meta=None):
-        if action == aktion:
+        if schalter["an"] and action == aktion:
             raise RuntimeError("Audit-Schreiben gescheitert")
         return await echt(dealer_id, user_id, action, ref=ref, meta=meta)
     monkeypatch.setattr(deps, "log_activity", audit)
     monkeypatch.setattr(modul, "log_activity", audit)
+    for m in (modul, *weitere_module):
+        monkeypatch.setattr(m, "db", deps.db)
+    return schalter
 
 
 def test_firmenloeschung_beginnt_nicht_ohne_start_audit(aufraeumen, monkeypatch):  # noqa: F811
     import routes.admin as a
     dbx = _db()
     dealer_id, chef_id, sucher_id = _firma_anlegen(dbx, "startaudit")
-    _audit_scheitert_bei(monkeypatch, a, "admin.firma.loeschung.gestartet")
-    with pytest.raises(RuntimeError):
+    schalter = _audit_scheitert_bei(monkeypatch, a, "admin.firma.loeschung.gestartet")
+    with pytest.raises(RuntimeError, match="Audit-Schreiben gescheitert"):
         asyncio.run(a.admin_delete_user(chef_id, firma_loeschen=True, admin=SA))
     # nichts angefasst: kein Grabstein, Konten aktiv und angemeldet, Firma da
     firma = dbx.dealers.find_one({"id": dealer_id})
@@ -77,7 +86,7 @@ def test_firmenloeschung_beginnt_nicht_ohne_start_audit(aufraeumen, monkeypatch)
     assert all(k["active"] is True and k["current_session_id"] for k in konten), konten
     assert dbx.activity_logs.count_documents({"ref": dealer_id}) == 0
     # mit funktionierendem Audit laeuft die Loeschung normal durch
-    monkeypatch.undo()
+    schalter["an"] = False
     erg = asyncio.run(a.admin_delete_user(chef_id, firma_loeschen=True, admin=SA))
     assert erg["ok"] is True and dbx.dealers.count_documents({"id": dealer_id}) == 0
     assert dbx.activity_logs.count_documents({"action": "admin.firma.loeschung.gestartet", "ref": dealer_id}) == 1
@@ -99,18 +108,15 @@ def test_fahrerloeschung_pseudonymisiert_nicht_ohne_start_audit(monkeypatch):
         return await echt(db, driver_id)
     try:
         monkeypatch.setattr(DR, "fahrer_konto_anonymisieren", spion)
-        _audit_scheitert_bei(monkeypatch, a, "admin.fahrer.loeschung.gestartet")
-        with pytest.raises(RuntimeError):
+        schalter = _audit_scheitert_bei(monkeypatch, a, "admin.fahrer.loeschung.gestartet", DR)
+        with pytest.raises(RuntimeError, match="Audit-Schreiben gescheitert"):
             asyncio.run(a.admin_delete_driver(did, admin=SA))
         d = dbx.driver_accounts.find_one({"id": did}, {"_id": 0})
         assert gerufen == [], "ohne Start-Audit darf nichts pseudonymisiert werden"
         assert d is not None and d["display_name"] == "Hart Fahrer"
         assert d["active"] is False and (d.get("loeschung") or {}).get("status") == "laeuft"   # gesperrt, wiederaufnehmbar
         # Wiederholung mit funktionierendem Audit fuehrt zu Ende
-        monkeypatch.setattr(deps, "log_activity", deps.log_activity.__wrapped__
-                            if hasattr(deps.log_activity, "__wrapped__") else deps.log_activity)
-        monkeypatch.undo()
-        monkeypatch.setattr(DR, "fahrer_konto_anonymisieren", spion)
+        schalter["an"] = False
         assert asyncio.run(a.admin_delete_driver(did, admin=SA))["ok"] is True
         assert gerufen == [did] and dbx.driver_accounts.count_documents({"id": did}) == 0
     finally:

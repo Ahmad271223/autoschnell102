@@ -216,8 +216,11 @@ def test_geteilter_job_bucht_beim_konto_mit_kontingent(wegwerf, monkeypatch):
         await db.users.insert_many([
             {"id": "uA", "dealer_id": "d1", "role": "sucher", "active": True},
             {"id": "uB", "dealer_id": "d2", "role": "sucher", "active": True},
-            {"id": "uC", "dealer_id": "d1", "role": "sucher", "active": True}])
-        await db.dealers.insert_many([{"id": "d1"}, {"id": "d2"}])
+            {"id": "uC", "dealer_id": "d1", "role": "sucher", "active": True},
+            # 30.09.2026: eine Firma ohne Chef-Konto gilt als gesperrt — echte Firmen haben immer einen Chef
+            {"id": "chef1", "dealer_id": "d1", "role": "dealer", "active": True},
+            {"id": "chef2", "dealer_id": "d2", "role": "dealer", "active": True}])
+        await db.dealers.insert_many([{"id": "d1", "user_id": "chef1"}, {"id": "d2", "user_id": "chef2"}])
         # Der Beitritt traegt die Firma des Wartenden ein (Befund 149: ohne
         # sie waere es nicht mehr derselbe Auftrag).
         geteilt = _job(uid="uA", did="d1", user_ids=["uA", "uB"],

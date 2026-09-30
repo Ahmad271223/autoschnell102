@@ -530,7 +530,9 @@ def test_rp355_ausgestiegen_waehrend_des_versuchs_wird_nicht_neu_eingereiht(wegw
     monkeypatch.setattr(deps, "subscription_for", abo)
     s = uuid.uuid4().hex[:8]
     run(db.users.insert_one({"id": f"u_{s}", "role": "sucher", "dealer_id": f"d_{s}", "active": True}))
-    run(db.dealers.insert_one({"id": f"d_{s}"}))
+    # 30.09.2026: eine Firma ohne Chef-Konto gilt als gesperrt — echte Firmen haben immer einen Chef
+    run(db.users.insert_one({"id": f"chef_{s}", "role": "dealer", "dealer_id": f"d_{s}", "active": True}))
+    run(db.dealers.insert_one({"id": f"d_{s}", "user_id": f"chef_{s}"}))
     # Beim Beanspruchen wartete u noch; in der Datenbank ist er inzwischen raus.
     beansprucht = _job_doc(s, intern=False, user_ids=[f"u_{s}"], dealer_ids=[f"d_{s}"],
                            requested_by_user=f"u_{s}", requested_by_dealer=f"d_{s}")
