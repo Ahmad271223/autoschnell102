@@ -4098,7 +4098,8 @@ KI-Abholbewertung die Position („nicht bewertet“, Betriebsalarm); die App ve
   Drain, nichts geändert). Bewusster Wechsel: `BRANCH_WECHSEL=1 sh deploy/rollout.sh`. Optional lässt sich genau ein
   Commit verlangen: `ERWARTET=<Anfang der Commit-Kennung> sh deploy/rollout.sh` (geprüft nach dem Pull; bei Abweichung
   wird nichts gebaut, der Server bleibt im Drain, danach `sh deploy/freigeben.sh`).
-- **Firma ohne Chef-Konto ist gesperrt** (`deps.firma_gesperrt`, `gesperrte_firmen_ids`): Sucher einer Firma ohne
+- **Firma ohne Chef-Konto ist gesperrt** (`deps.firma_gesperrt`, `gesperrte_firmen_ids`; gemeint ist: das
+  Firmen-Dokument gibt es, ein Chef-Konto nicht): Sucher einer Firma ohne
   Hauptaccount kommen nicht mehr durch, die Firmenseite ist aus. Abhilfe: im Admin einen Chef bestimmen.
 - **Start-Audit zwingend:** Firmen- und Fahrerlöschung beginnen nur, wenn der Eintrag „Löschung gestartet" geschrieben
   wurde (sonst Fehler 500, bei der Firma ist dann noch nichts angefasst; der Fahrer ist gesperrt und die Löschung
