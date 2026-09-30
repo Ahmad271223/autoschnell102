@@ -4111,3 +4111,8 @@ KI-Abholbewertung die Position („nicht bewertet“, Betriebsalarm); die App ve
   Datenbankfehlern offen (eine kaputte Abfrage soll die Plattform nicht anhalten; ein KI-Lauf kostet höchstens 20 ct),
   R2-Ausfall bleibt eine Warnung mit Alarm (beide Server teilen den Speicher), `w:1` im Replica Set, die 24-h-Notbremse
   der Link-Aufträge, der Deckel des Fehlerarchivs. Die Unterschrift des Chefs im Kundenportal bleibt freiwillig.
+
+- **Kundenportal-Limit (Wunsch Ahmad 30.09.2026):** über dieselbe Adresse (IP) sind 500 Aufrufe je Minute möglich
+  (Code eingeben, unterschreiben, Codes erzeugen), danach 2 Minuten warten — `PORTAL_IP_JE_MINUTE`,
+  `PORTAL_IP_WARTEN_SEKUNDEN`. Daneben bleibt die Bremse für FALSCHE Codes (10 je Adresse und 200 je Firma in
+  10 Minuten): sie verhindert das Durchprobieren von Codes und zählt nur Fehlversuche.

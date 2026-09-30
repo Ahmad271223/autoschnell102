@@ -86,6 +86,22 @@ _code_limiter_firma = SlidingWindowRateLimiter(max_attempts=200, window_seconds=
                                                name="portal_code_firma")
 _unterschrift_limiter = SlidingWindowRateLimiter(max_attempts=20, window_seconds=600,
                                                  name="portal_unterschrift")
+# Wunsch Ahmad 30.09.2026: ueber dieselbe Adresse (IP) sind 500 Aufrufe je Minute moeglich, danach
+# 2 Minuten warten — fuer die Code-Eingabe, die Unterschrift (Kunde) und das Erzeugen von Codes
+# (Sucher/Chef). Zaehlt JEDEN Aufruf, auch erfolgreiche. Die Bremsen fuer FALSCHE Codes oben bleiben
+# daneben bestehen: sie verhindern das Durchprobieren von Codes und zaehlen nur Fehlversuche.
+PORTAL_IP_JE_MINUTE = zahl_env("PORTAL_IP_JE_MINUTE", 500, unten=1)
+PORTAL_IP_WARTEN_S = zahl_env("PORTAL_IP_WARTEN_SEKUNDEN", 120, unten=0)
+_portal_limiter_ip = SlidingWindowRateLimiter(max_attempts=PORTAL_IP_JE_MINUTE, window_seconds=60,
+                                              name="portal_ip_minute", sperre_sekunden=PORTAL_IP_WARTEN_S)
+_erzeugen_limiter_ip = SlidingWindowRateLimiter(max_attempts=PORTAL_IP_JE_MINUTE, window_seconds=60,
+                                                name="portal_erzeugen_ip", sperre_sekunden=PORTAL_IP_WARTEN_S)
+
+
+def _zu_viele_anfragen() -> HTTPException:
+    minuten = max(1, round(PORTAL_IP_WARTEN_S / 60))
+    return HTTPException(429, f"Zu viele Anfragen von diesem Anschluss — bitte in {minuten} Minuten erneut.",
+                         headers={"Retry-After": str(max(1, PORTAL_IP_WARTEN_S))})
 
 
 # ---------------------------------------------------------------- Adressen
@@ -746,9 +762,12 @@ async def _vertrag_und_slug(contract_id: str, user: dict) -> tuple:
 
 
 @router.post("/contracts/{contract_id}/portal")
-async def portal_freigeben(contract_id: str, user=Depends(current_firma)):
+async def portal_freigeben(contract_id: str, request: Request = None, user=Depends(current_firma)):
     """Code fuer den Kunden erzeugen (oder den noch laufenden derselben Fassung zurueckgeben)."""
     from routes.contracts import _vertrag_bereich
+    # 500 Codes je Minute ueber dieselbe Adresse, danach 2 Minuten warten (Wunsch Ahmad 30.09.2026)
+    if request is not None and not await _erzeugen_limiter_ip.check(client_ip(request)):
+        raise _zu_viele_anfragen()
     c, slug, aktiv = await _vertrag_und_slug(contract_id, user)
     if not slug or not aktiv:
         raise HTTPException(409, "Erst die Firmenseite einrichten (Einstellungen → Firmenseite & Kundenportal): "
@@ -885,8 +904,10 @@ CODE_FALSCH = "Code ungültig oder abgelaufen. Bitte den Code vom Autohaus prüf
 async def portal_oeffnen(body: OeffnenIn, request: Request):
     """Kunde gibt den Code auf der Firmenseite ein -> kurze Sitzung + Vertragskurzdaten."""
     ip = client_ip(request)
+    if not await _portal_limiter_ip.check(ip):
+        raise _zu_viele_anfragen()
     if not await _code_limiter_ip.check(ip):
-        raise HTTPException(429, "Zu viele Versuche — bitte in 10 Minuten erneut.")
+        raise HTTPException(429, "Zu viele falsche Codes — bitte in 10 Minuten erneut.")
     firma = await firma_laden(host=body.host, slug=body.slug)
     if not firma:
         raise HTTPException(404, "Zu dieser Adresse gibt es keine Firmenseite.")
@@ -998,6 +1019,8 @@ async def portal_unterschreiben(sitzung: SitzungKopf, body: UnterschreibenIn, re
     """Der Kunde unterschreibt: Bild pruefen, speichern, PDF mit beiden Unterschriften erzeugen,
     Vertrag als unterschrieben markieren (nur einmal, nur diese Fassung), Meldung an Sucher und Chef."""
     ip = client_ip(request)
+    if not await _portal_limiter_ip.check(ip):
+        raise _zu_viele_anfragen()
     if not await _unterschrift_limiter.check(ip):
         raise HTTPException(429, "Zu viele Versuche — bitte später erneut.")
     if not body.einverstanden:

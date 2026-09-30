@@ -217,7 +217,8 @@ function Kundenportal({ firma, slug, host }) {
       setName(data?.vertrag?.verkaeufer || "");
       if (data?.vertrag?.status === "unterschrieben") setFertig({ unterschrieben_am: data.vertrag.unterschrieben_am, contract_no: data.vertrag.contract_no });
     } catch (err) {
-      setFehler(err?.response?.status === 429 ? "Zu viele Versuche — bitte in 10 Minuten erneut." : errMsg(err, "Code ungültig oder abgelaufen."));
+      // 429: der Server sagt, wie lange zu warten ist (2 Minuten bei zu vielen Anfragen, 10 bei falschen Codes)
+      setFehler(errMsg(err, err?.response?.status === 429 ? "Zu viele Versuche — bitte später erneut." : "Code ungültig oder abgelaufen."));
     } finally { setBusy(false); }
   };
 

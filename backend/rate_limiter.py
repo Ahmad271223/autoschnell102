@@ -202,7 +202,7 @@ class SlidingWindowRateLimiter:
     _index_ok = False
 
     def __init__(self, max_attempts: int = 10, window_seconds: int = 60,
-                 name: str = "", fail_closed: bool = False):
+                 name: str = "", fail_closed: bool = False, sperre_sekunden: int = 0):
         # Runde 15 (15.09.2026): Anmelde-Limiter sind fail-closed — faellt
         # der gemeinsame Mongo-Zaehler aus, gilt "gesperrt" statt eines
         # Zaehlers je Prozess (aus 10/min wuerden sonst 10 je Worker).
@@ -218,6 +218,10 @@ class SlidingWindowRateLimiter:
         self.name = name
         self.max_attempts = max_attempts
         self.window_seconds = window_seconds
+        # Wunsch Ahmad 30.09.2026 (Kundenportal): "500 je Minute ueber dieselbe Adresse, danach 2 Minuten
+        # warten". Mit sperre_sekunden > 0 setzt das Ueberschreiten eine feste Wartezeit; waehrend sie
+        # laeuft, wird nicht weitergezaehlt (sie verlaengert sich durch weitere Versuche nicht).
+        self.sperre_sekunden = max(0, int(sperre_sekunden or 0))
         self._buckets: dict[str, list[float]] = defaultdict(list)
         self._lock = Lock()
         self._rueckfall_gemeldet = 0.0
@@ -241,7 +245,12 @@ class SlidingWindowRateLimiter:
         if _EXEMPT_LOOPBACK and key in _LOOPBACK_KEYS:
             return True
         try:
-            return await self._check_mongo(key)
+            if self.sperre_sekunden and await self._wartet_noch(key):
+                return False
+            erlaubt = await self._check_mongo(key)
+            if not erlaubt and self.sperre_sekunden:
+                await self._wartezeit_setzen(key)
+            return erlaubt
         except Exception:
             if self.fail_closed:
                 logging.getLogger("rate_limiter").exception(
@@ -249,6 +258,29 @@ class SlidingWindowRateLimiter:
                 return False
             await self._rueckfall_melden()
             return self._check_lokal(key)
+
+    def _sperr_id(self, key: str) -> str:
+        return f"{self.name}:sperre:{key}"
+
+    async def _wartet_noch(self, key: str) -> bool:
+        from deps import db
+        doc = await db.rate_limits.find_one({"_id": self._sperr_id(key)}, {"bis": 1})
+        return bool(doc and float(doc.get("bis") or 0) > time.time())
+
+    async def _wartezeit_setzen(self, key: str) -> None:
+        from datetime import datetime, timedelta, timezone
+        from deps import db
+        jetzt = time.time()
+        # nur setzen, wenn keine laeuft — und die Zaehler leeren, damit nach der Wartezeit wirklich
+        # wieder die volle Menge frei ist (sonst zaehlte das vorige Fenster noch anteilig mit)
+        await db.rate_limits.update_one(
+            {"_id": self._sperr_id(key)},
+            {"$set": {"bis": jetzt + self.sperre_sekunden,
+                      "ablauf": datetime.now(timezone.utc) + timedelta(seconds=self.sperre_sekunden + 60)}},
+            upsert=True)
+        fenster = int(jetzt // self.window_seconds)
+        await db.rate_limits.delete_many(
+            {"_id": {"$in": [f"{self.name}:{key}:{fenster}", f"{self.name}:{key}:{fenster - 1}"]}})
 
     async def _rueckfall_melden(self) -> None:
         """B-15: Der stille Rueckfall auf den Zaehler je Prozess war unsichtbar.

@@ -217,3 +217,54 @@ def test_keine_datei_ohne_verweis_wenn_die_datenbank_scheitert(welt, monkeypatch
     assert _lauf(KP.portal_unterschreiben(sitzung, _unterschrift(), _request()))["ok"]
     doc = w.run(w.db.generated_pdfs.find_one({"id": c["id"]}, {"_id": 0, "portal": 1}))
     assert doc["portal"]["unterschrift_key"] in w.ablage and len(w.ablage) == 3
+
+
+# ------------------------------------------------------------------ Wunsch Ahmad 30.09.2026
+def test_500_je_minute_je_adresse_dann_zwei_minuten_warten(welt, monkeypatch):  # noqa: F811
+    """Ueber dieselbe Adresse 500 Aufrufe je Minute (Code eingeben, unterschreiben, Codes erzeugen),
+    danach 2 Minuten warten. Geprueft mit kleinen Zahlen; die echten Werte stehen in den Konstanten."""
+    import time as _time
+    w = welt
+    assert KP.PORTAL_IP_JE_MINUTE == 500 and KP.PORTAL_IP_WARTEN_S == 120
+    for echt in (KP._portal_limiter_ip, KP._erzeugen_limiter_ip):
+        assert (echt.max_attempts, echt.window_seconds, echt.sperre_sekunden) == (500, 60, 120)
+    _seite_an(w)
+    vertraege = [_vertrag(w, w.sucher) for _ in range(5)]
+    code = _lauf(KP.portal_freigeben(vertraege[0]["id"], user=w.sucher))["code"]
+    monkeypatch.setattr(rate_limiter, "_RATE_LIMIT_ENABLED", True)
+    name = f"portal_min_{w.s}"
+    monkeypatch.setattr(KP, "_portal_limiter_ip", rate_limiter.SlidingWindowRateLimiter(
+        max_attempts=5, window_seconds=60, name=name, sperre_sekunden=120))
+    for n, grenze in (("_code_limiter_ip", 10), ("_code_limiter_firma", 200), ("_unterschrift_limiter", 20)):
+        monkeypatch.setattr(KP, n, rate_limiter.SlidingWindowRateLimiter(
+            max_attempts=grenze, window_seconds=600, name=f"{n}_{w.s}"))
+    ip = "192.0.2.70"
+    sitzungen = [_oeffnen(code, ip) for _ in range(5)]                      # fuenf Aufrufe: alle durch
+    f = _fehler(KP.portal_oeffnen(KP.OeffnenIn(code=code, slug="kfz-mueller"), _request(ip)))
+    assert f.status_code == 429 and "in 2 Minuten" in f.detail and f.headers["Retry-After"] == "120"
+    sperre = {"_id": f"{name}:sperre:{ip}"}
+    bis = w.run(w.db.rate_limits.find_one(sperre))["bis"]
+    assert 115 < bis - _time.time() <= 120
+    # waehrend der Wartezeit: weiter 429, auch fuer die Unterschrift — und die Wartezeit verlaengert sich nicht
+    assert _fehler(KP.portal_oeffnen(KP.OeffnenIn(code=code, slug="kfz-mueller"), _request(ip))).status_code == 429
+    g = _fehler(KP.portal_unterschreiben(sitzungen[0], _unterschrift(), _request(ip)))
+    assert g.status_code == 429 and "in 2 Minuten" in g.detail
+    assert w.run(w.db.rate_limits.find_one(sperre))["bis"] == bis
+    assert w.run(w.db.generated_pdfs.find_one({"id": vertraege[0]["id"]}, {"_id": 0, "portal.status": 1}))["portal"]["status"] == "offen"
+    assert _oeffnen(code, "192.0.2.71")                                     # andere Adresse unberuehrt
+    # Wartezeit vorbei: wieder die volle Menge (hier 5), dann erneut Pause
+    w.run(w.db.rate_limits.update_one(sperre, {"$set": {"bis": _time.time() - 1}}))
+    for _ in range(4):
+        assert _oeffnen(code, ip)
+    assert _lauf(KP.portal_unterschreiben(sitzungen[0], _unterschrift(), _request(ip)))["ok"]     # der fuenfte
+    assert _fehler(KP.portal_oeffnen(KP.OeffnenIn(code=code, slug="kfz-mueller"), _request(ip))).status_code == 429
+
+    # Codes erzeugen (Sucher/Chef): dieselbe Regel je Adresse
+    monkeypatch.setattr(KP, "_erzeugen_limiter_ip", rate_limiter.SlidingWindowRateLimiter(
+        max_attempts=3, window_seconds=60, name=f"portal_erz_{w.s}", sperre_sekunden=120))
+    buero = "192.0.2.80"
+    for v in vertraege[1:4]:
+        assert _lauf(KP.portal_freigeben(v["id"], request=_request(buero), user=w.sucher))["status"] == "offen"
+    h = _fehler(KP.portal_freigeben(vertraege[4]["id"], request=_request(buero), user=w.sucher))
+    assert h.status_code == 429 and "in 2 Minuten" in h.detail
+    assert _lauf(KP.portal_freigeben(vertraege[4]["id"], request=_request("192.0.2.81"), user=w.chef))["status"] == "offen"
