@@ -1359,10 +1359,15 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     # Beweisdokument laesst sich damit auch spaeter noch anfordern, ohne dass
     # die Verkaeuferdaten fuer alle anderen im gemeinsamen Speicher bleiben.
     inserat_stand = None
+    # Pruefliste 30.09.2026 (Nr. 28): WARUM der Inseratsstand fehlt, steht jetzt am Vertrag — vorher war
+    # "Datenbankfehler", "kein Eintrag im Zwischenspeicher" und "Fahrzeug ohne Inserat" nicht zu
+    # unterscheiden, und die Luecke fiel erst beim Beweisdokument auf. Der Vertrag scheitert daran weiter nie.
+    inserat_stand_fehlt = "kein_inserat"
     try:
         import beweis_service as _bs
         _schluessel = _bs.inserat_schluessel(v)
         if _schluessel:
+            inserat_stand_fehlt = "kein_eintrag"
             _eintrag = await db.listings_cache.find_one(
                 {"cache_key": _schluessel},
                 {"_id": 0, "data": 1, "fetched_at": 1, "source": 1, "item_id": 1, "url": 1})
@@ -1372,7 +1377,9 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
                                  "source": _eintrag.get("source"),
                                  "item_id": _eintrag.get("item_id"),
                                  "url": _eintrag.get("url")}
+                inserat_stand_fehlt = None
     except Exception as exc:  # noqa: BLE001 — der Vertrag darf daran nie scheitern
+        inserat_stand_fehlt = "fehler"
         log.warning("Vertrag %s: Inseratsstand nicht eingefroren: %s", body.vehicle_id, exc)
     # Apply dealer defaults if the form didn't override them. Both
     # special_agreements and agb_text now support a per-contract override
@@ -1463,6 +1470,7 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
         "pdf_digital_b64": pdf_digital_b64,
         "vehicle_image_urls": vehicle_image_urls,
         "inserat_stand": inserat_stand,
+        **({"inserat_stand_fehlt": inserat_stand_fehlt} if inserat_stand_fehlt else {}),
         # Stufe 3 (26.09.2026): welche KI-Schadenbewertung der Sucher vorher sah
         "ki_bewertung_id": (body.ki_bewertung_id or "").strip() or None,
         # Rollenpruefung 22.09.2026 (RP-200/RP-351): schon beim Anlegen ohne
@@ -3149,7 +3157,17 @@ async def folge_mail_senden(contract_id: str, body: FolgeMailIn,
         # Vorlage aendert nur Ahmad.)
         raise HTTPException(400, FOLGE_MAIL_BAHN_OHNE_VERBINDUNG)
 
-    schluessel = (body.idempotency_key or "").strip()
+    # Pruefliste 30.09.2026 (Folge-Mail Nr. 1-3): der Inhalt gehoert zum Schluessel — Fassung, Art, Empfaenger,
+    # Betreff, Text. (a) Derselbe Schluessel mit ANDEREM Inhalt ist ein Fehler (409) statt "bereits
+    # verschickt". (b) Ohne Schluessel wird er aus dem Inhalt abgeleitet: dieselbe Mail ist EIN Versand,
+    # eine geaenderte Mail ein neuer — vorher hiess der Anbieter-Schluessel nur folge-<vertrag>-<art>, und
+    # eine zweite Mail mit anderem Empfaenger galt beim Anbieter bis zu 30 Tage als Wiederholung
+    # ("versendet", obwohl nichts rausging). (c) Die Fassung steckt im Hash: nach einer Neuerzeugung des
+    # Vertrags ist derselbe Text ein neuer Versand.
+    import hashlib
+    inhalt_hash = hashlib.sha256("|".join([
+        contract_id, str(c.get("version") or 1), art, empfaenger.lower(), betreff, text]).encode("utf-8")).hexdigest()[:24]
+    schluessel = (body.idempotency_key or "").strip() or f"auto-{inhalt_hash}"
     if schluessel:
         # Rollenpruefung 22.09.2026 (RP-434): Ein frueher gescheiterter
         # Versuch mit DIESEM Schluessel (Altbestand: zustellung
@@ -3169,10 +3187,18 @@ async def folge_mail_senden(contract_id: str, body: FolgeMailIn,
             {"$push": {"send_status": {"$each": [{
                 "idempotency_key": schluessel, "channel": "email",
                 "art": art, "recipient": empfaenger, "subject": betreff,
+                "anfrage_hash": inhalt_hash, "version": int(c.get("version") or 1),
                 "sent_at": now_iso(), "zustellung": "laeuft"}],
                 "$slice": -SEND_STATUS_MAX}}})
         if res.modified_count == 0:
             await _reservierung_nachlesen(contract_id, bereich, schluessel)
+            vorher = await db.generated_pdfs.find_one({"id": contract_id, **bereich}, {"_id": 0, "send_status": 1})
+            alt_eintrag = next((e for e in (vorher or {}).get("send_status") or []
+                                if isinstance(e, dict) and e.get("idempotency_key") == schluessel), None)
+            if alt_eintrag and alt_eintrag.get("anfrage_hash") and alt_eintrag["anfrage_hash"] != inhalt_hash:
+                raise HTTPException(409, "Dieser Versand-Schlüssel gehört zu einer anderen Nachricht "
+                                         "(Empfänger oder Text geändert) — bitte die Seite neu laden "
+                                         "und erneut senden.")
             # RP-434: ehrlich sagen, was mit dem vorhandenen Eintrag ist —
             # "laeuft" heisst "laeuft noch", nicht "verschickt".
             antwort = await _folge_mail_vorhanden(contract_id, bereich, schluessel)
@@ -3194,7 +3220,7 @@ async def folge_mail_senden(contract_id: str, body: FolgeMailIn,
                 empfaenger, betreff, text, anhang=None, anhang_name="",
                 html=None, reply_to=antwort_adresse,
                 absender_name=firma.get("company_name") or "",
-                idempotency_key=f"folge-{contract_id}-{schluessel or art}")
+                idempotency_key=f"folge-{contract_id}-{schluessel}-{inhalt_hash[:12]}")
         except Exception:  # noqa: BLE001 — Anbieterfehler = nicht versendet
             log.exception("Folge-Mail %s zu %s fehlgeschlagen", art, contract_id)
             ok, beleg = False, ""

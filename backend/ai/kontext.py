@@ -286,7 +286,9 @@ def reparaturreferenz(damage: dict, marktdoc: Optional[dict]) -> Optional[Dict[s
         return None
     z = preisbasis.zeile(ref["key"]) or {}
     m = _markt_zeile(marktdoc, z.get("typ", ""), z.get("auspraegung", ""))
-    if m and not ref.get("manual_review"):
+    # Pruefliste 30.09.2026 (Nr. 20): ein Kostenvoranschlag fuer GENAU dieses Auto wird nicht von der
+    # Markttabelle ueberschrieben (vorher blieb "Kostenvoranschlag" stehen, die Zahlen kamen aus der Tabelle).
+    if m and not ref.get("manual_review") and ref.get("basis") != "kostenvoranschlag":
         ref.update(low=m["min_eur"], median=m["typisch_eur"], high=m["max_eur"],
                    source=f"Marktdaten {str(marktdoc.get('stand') or '')[:10]} ({m.get('quelle') or 'o. Q.'})")
     return ref
@@ -323,7 +325,11 @@ def eigene_anwenden(paket: Dict[str, Any], eigene: Dict[str, Dict[str, Any]]) ->
             if not ref or ref.get("manual_review"):
                 continue
             e = eigene.get(ref.get("key") or "")
-            if not e:
+            # Pruefliste 30.09.2026 (Nr. 19): nur wenn die eigenen Daten REICHEN (genug Belege aus mindestens
+            # zwei Quellen in einer passenden Stufe). Vorher ueberschrieb schon EIN gelernter Wert von
+            # irgendeinem Auto die Referenz — auch bei Getriebe oder Scheinwerfer. Ein Kostenvoranschlag
+            # fuer dieses Auto bleibt stehen (Nr. 20).
+            if not e or not e.get("reicht") or ref.get("basis") == "kostenvoranschlag":
                 continue
             ref.update(low=e["low"], median=e["median"], high=e["high"], source=e["source"], own_data_n=e["n"])
             n += 1
@@ -369,6 +375,10 @@ def datenlage(paket: Dict[str, Any]) -> str:
     pos = _positionen(paket)
     if any((p.get("repair_reference") or {}).get("assumption_made") for p in pos):
         minus += 1
+    # Pruefliste 30.09.2026 (Nr. 22): stuetzt sich eine Position nur auf einen ungefaehren Webwert
+    # (Orientierungswert, passt nicht genau zu Fahrzeug/Schaden/Jahr), sinkt die Datenlage.
+    if any((p.get("repair_reference") or {}).get("approximate") for p in pos):
+        minus += 1
     if any(not p.get("repair_reference") and p.get("type") not in ("other", "technical") for p in pos):
         minus += 1
     preise = paket.get("prices") or {}
@@ -379,6 +389,46 @@ def datenlage(paket: Dict[str, Any]) -> str:
     if minus == 0:
         return "hoch"
     return "mittel" if minus == 1 else "niedrig"
+
+
+def grundlage(ref: Optional[Dict[str, Any]]) -> Optional[Dict[str, str]]:
+    """Pruefliste 30.09.2026 (Nr. 23): woher stammt der Wert dieser Position? Fuer die Anzeige je Position —
+    ein nicht recherchierter Startwert soll nicht so belastbar wirken wie ein mit Quelle belegter Webwert."""
+    if not ref or ref.get("manual_review"):
+        return None
+    quelle = str(ref.get("source") or "")
+    if ref.get("basis") == "kostenvoranschlag":
+        return {"art": "kva", "text": "Kostenvoranschlag Werkstatt"
+                + (" – ungewöhnlich hoch, Beleg prüfen" if ref.get("kva_auffaellig") else "")}
+    if ref.get("web_geprueft"):
+        name = quelle[quelle.find("(") + 1:quelle.rfind(")")] if "(" in quelle else ""
+        return {"art": "web", "text": "Web geprüft" + (f": {name}" if name else "")
+                + (" (nur Orientierungswert)" if ref.get("approximate") else "")}
+    if ref.get("own_data_n"):
+        return {"art": "eigene", "text": f"Eigene Daten ({ref['own_data_n']} Belege)"}
+    if quelle.startswith("Marktdaten"):
+        return {"art": "markt", "text": "Markttabelle " + quelle[11:21].strip()}
+    return {"art": "start", "text": "Startwert (nicht recherchiert)"}
+
+
+def referenz_hinweise(paket: Dict[str, Any]) -> List[str]:
+    """Hinweise fuer den Chef aus den Referenzen (Nr. 20): auffaelliger Kostenvoranschlag."""
+    raus = []
+    for p in _positionen(paket):
+        ref = p.get("repair_reference") or {}
+        if ref.get("kva_auffaellig"):
+            name = " ".join(str(x) for x in (p.get("label") or p.get("type"), p.get("zone")) if x).strip()
+            raus.append(f"Kostenvoranschlag bei „{name}“ liegt weit über den üblichen Werten "
+                        f"({ref.get('median')} €) — bitte den Beleg der Werkstatt prüfen.")
+    return raus[:5]
+
+
+def grundlagen_setzen(ergebnis: Dict[str, Any], referenzen: Dict[str, Any]) -> None:
+    """Je Position `grundlage` (art, text) ins Ergebnis schreiben."""
+    for it in ergebnis.get("items") or []:
+        g = grundlage((referenzen or {}).get(str(it.get("source_id") or "")))
+        if g:
+            it["grundlage"] = g
 
 
 def vorberechnet(paket: Dict[str, Any]) -> Dict[str, Any]:

@@ -356,10 +356,13 @@ async def _rechnen(basis: dict, paket: dict, vorl: dict, bud: dict, eigene: dict
                                         schema=schemas.ANTWORT_SCHEMA, zusatz_teile=zusatz_teile,
                                         max_tokens=KI_MAX_TOKENS, fall_text_max_zeichen=marktdaten.FALL_TEXT_MAX_ZEICHEN)
         fall = await marktdaten.fall_recherche(ART, paket, sparmodus=bud["sparmodus"], eigene=eigene, kasse=kasse)
+        # Pruefliste 30.09.2026: erst pruefen, dann lernen; nur gepruefte Webwerte werden zur Referenz
+        marktdaten.recherche_pruefen(fall, paket, ART)
         gelernt = await marktdaten.lernen_aus_recherche(fall, paket, ART)
         if gelernt:
             eigene = await marktdaten.eigene_referenzen(paket, ART)
             kontext.eigene_anwenden(paket, eigene)
+        marktdaten.recherche_anwenden(paket, ART, fall)
         lage = kontext.datenlage(paket)
         antwort = await kasse.bewerten(json_bewerten, modell=basis["modell"], system=SYSTEM_PROMPT, nutzer=paket,
                                        schema=schemas.ANTWORT_SCHEMA, zusatz_teile=zusatz_teile,
@@ -378,7 +381,8 @@ async def _rechnen(basis: dict, paket: dict, vorl: dict, bud: dict, eigene: dict
                    "budget": {k: bud.get(k) for k in ("verbraucht_ct", "grenze_ct", "sparmodus")},
                    "recherche": ({"status": fall.get("status"), "suchen": fall.get("suchen"),
                                   "quellen": fall.get("quellen"), "text": fall.get("text"),
-                                  "gelernt": gelernt} if fall else None),
+                                  "gelernt": gelernt, "pruefung": fall.get("pruefung"),
+                                  "verworfen": fall.get("verworfen")} if fall else None),
                    "kostendeckel": kasse.bericht()}
         # Review 26.09.2026 (Nr. 6): genau eine Position je Schaden — doppelte
         # und fremde fliegen raus, eine fehlende bricht den Lauf ab.
@@ -407,6 +411,10 @@ async def _rechnen(basis: dict, paket: dict, vorl: dict, bud: dict, eigene: dict
             ergebnis["market"] = paket.get("market")
             ergebnis["quellen"] = list((fall or {}).get("quellen") or [])
             ergebnis["referenzen"] = {d["id"]: d.get("repair_reference") for d in paket["damages"] if d.get("repair_reference")}
+            kontext.grundlagen_setzen(ergebnis, ergebnis["referenzen"])
+            hinweise_kva = kontext.referenz_hinweise(paket)
+            if hinweise_kva:
+                ergebnis["hinweise"] = list(ergebnis.get("hinweise") or []) + hinweise_kva
             eintrag.update(status="ok", grund="", ergebnis=ergebnis, roh=antwort["daten"])
         else:
             eintrag.update(status=antwort.get("status") or "fehler", grund=antwort.get("grund") or "",

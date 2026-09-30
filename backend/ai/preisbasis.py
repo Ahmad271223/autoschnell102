@@ -348,6 +348,9 @@ def referenz_aus_zeile(z: Dict[str, Any], *, faktor: float = 1.0, annahme: bool 
     return ref
 
 
+KVA_AUFFAELLIG_FAKTOR = 2.0
+
+
 def kva_betrag(severity_data: Optional[Dict[str, Any]]) -> Optional[float]:
     """Betrag laut Kostenvoranschlag der Werkstatt (Technik-Mangel, bestaetigt)."""
     roh = str((severity_data or {}).get("kva_eur") or "").replace(".", "").replace(",", ".").strip()
@@ -392,8 +395,15 @@ def referenz(type_key: str, severity_data: Optional[Dict[str, Any]], zone: str =
         sd = severity_data or {}
         kva = kva_betrag(sd)
         if kva:
+            # Pruefliste 30.09.2026 (Nr. 20): der Betrag ist eine Angabe des Fahrers ohne Beleg. Liegt er
+            # ueber dem Doppelten des aufwendigsten ueblichen Falls dieses Bereichs (Tippfehler "8000"?),
+            # gilt er weiter — aber als Annahme: die Datenlage sinkt, und der Chef bekommt den Hinweis,
+            # den Beleg der Werkstatt zu pruefen.
+            ueblich_hoch = (z.get("szenarien") or (z["min"], 0, z["max"]))[2]
+            auffaellig = bool(ueblich_hoch) and kva > KVA_AUFFAELLIG_FAKTOR * float(ueblich_hoch)
             ref.update(low=round(kva * 0.9), median=round(kva), high=round(kva * 1.2),
-                       source="Kostenvoranschlag Werkstatt", basis="kostenvoranschlag", assumption_made=False)
+                       source="Kostenvoranschlag Werkstatt", basis="kostenvoranschlag",
+                       assumption_made=auffaellig, kva_auffaellig=auffaellig)
             return ref
         band = _UMFANG_BAND.get(_umfang_schluessel(sd))
         sz = z.get("szenarien") or (z["min"], (z["min"] + z["max"]) // 2, z["max"])

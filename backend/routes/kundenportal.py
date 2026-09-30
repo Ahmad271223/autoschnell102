@@ -58,6 +58,8 @@ router = APIRouter()
 # ---------------------------------------------------------------- Einstellungen
 PORTAL_CODE_TAGE = zahl_env("PORTAL_CODE_TAGE", 7, unten=1, oben=90)
 PORTAL_SITZUNG_MINUTEN = 45
+#: so lange gehoert ein Unterschrifts-Versuch dem Aufruf, der ihn begonnen hat (PDF erzeugen, speichern)
+SIGNIER_ANSPRUCH_S = 60
 CODE_LAENGE = 6
 # ohne 0/O und 1/I — am Telefon und auf dem Zettel nicht zu verwechseln
 CODE_ZEICHEN = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -916,13 +918,19 @@ async def portal_oeffnen(body: OeffnenIn, request: Request):
     code = code_normalisieren(body.code)
     if len(code) != CODE_LAENGE:
         raise HTTPException(404, CODE_FALSCH)
-    c = await db.generated_pdfs.find_one({"dealer_id": firma["id"], "portal.code": code, "portal.status": "offen",
-                                          "loeschung.status": {"$ne": "laeuft"}}, _VERTRAG_FELDER)
+    # Pruefliste 30.09.2026 (Nr. 29): pruefen und zaehlen in EINER Operation — vorher wurde erst gelesen,
+    # dann gezaehlt; wurde der Code genau dazwischen zurueckgezogen, bekam der Kunde noch eine Sitzung,
+    # die beim naechsten Aufruf 410 lieferte. Offen, nicht abgelaufen, fuer GENAU diese Fassung.
+    from pymongo import ReturnDocument
+    c = await db.generated_pdfs.find_one_and_update(
+        {"dealer_id": firma["id"], "portal.code": code, "portal.status": "offen",
+         "loeschung.status": {"$ne": "laeuft"}, "portal.laeuft_ab": {"$gt": now_iso()},
+         "$expr": {"$eq": ["$portal.version", {"$ifNull": ["$version", 1]}]}},
+        {"$inc": {"portal.abrufe": 1}, "$set": {"portal.zuletzt_geoeffnet": now_iso()}},
+        projection=_VERTRAG_FELDER, return_document=ReturnDocument.AFTER)
     if not c or not portal_offen(c.get("portal"), int(c.get("version") or 1)):
         await log_activity_sicher(firma["id"], "", "vertrag.portal.code_falsch", meta={"ip": ip})
         raise HTTPException(404, CODE_FALSCH)
-    await db.generated_pdfs.update_one({"id": c["id"], "portal.code": code},
-                                       {"$inc": {"portal.abrufe": 1}, "$set": {"portal.zuletzt_geoeffnet": now_iso()}})
     await log_activity_sicher(firma["id"], "", "vertrag.portal.geoeffnet", ref=c["id"], meta={"ip": ip})
     # richtiger Code: dieser Aufruf war kein Fehlversuch
     await _code_limiter_ip.erstatten(ip)
@@ -984,27 +992,24 @@ async def portal_sitzung_pdf(sitzung: SitzungKopf):
 
 
 async def _signiertes_pdf(c: dict, verkaeufer_png: bytes, kaeufer_png: Optional[bytes],
-                          name: str, wann: datetime) -> bytes:
-    """Druckfassung des Vertrags mit beiden Unterschriften — dieselbe Basis wie die Neuerzeugung
-    (Vertragsfassung, festgehaltene Kaeuferdaten und Logo), nichts vom heutigen Stand."""
-    from auftraggeber import kaeufer_basis
-    from pdf_service import generate_contract_pdf
-    from routes.contracts import _logo_einsetzen
-    from vertrag_felder import _apply_contract_overrides
-    contract_dict = dict(c.get("contract_data") or {})
-    v = await db.vehicles.find_one({"id": c.get("vehicle_id"), "dealer_id": c.get("dealer_id")}, {"_id": 0}) or {}
-    vehicle = dict(v.get("data") or {})
-    dealer = await kaeufer_basis(dealer_id=c.get("dealer_id"), user_ids=(c.get("user_id"),)) or {}
-    vehicle, dealer = _apply_contract_overrides(contract=contract_dict, vehicle=vehicle, dealer=dealer)
-    dealer = await _logo_einsetzen(dealer, contract_dict)
+                          name: str, wann: datetime) -> tuple:
+    """Das unterschriebene Dokument: die GESPEICHERTE Druckfassung (genau das, was der Kunde gelesen hat)
+    mit den Unterschriften in den Feldern und einem angefuegten Signaturnachweis (portal_pdf). Liefert
+    (PDF, Pruefsumme des gelesenen Dokuments, Bilder in den Feldern?).
+
+    Pruefliste 30.09.2026 (Nr. 4/5): vorher wurde hier ein NEUES PDF aus Vertragsdaten und dem heutigen
+    Fahrzeugstand erzeugt — mit dem Datum des Unterschriftstages und womoeglich anderen Angaben als im
+    gelesenen Dokument."""
+    import portal_pdf
+    if not c.get("pdf_b64"):
+        raise ValueError("Vertragsdokument fehlt")
+    original = base64.b64decode(c["pdf_b64"])
+    firma = await db.dealers.find_one({"id": c.get("dealer_id")}, {"_id": 0, "company_name": 1}) or {}
     zeit = wann.astimezone(_BERLIN).strftime("%d.%m.%Y, %H:%M")
-    unterschriften = {"verkaeufer": verkaeufer_png, "verkaeufer_text": f"{name} · digital am {zeit} Uhr",
-                      "kaeufer": kaeufer_png, "kaeufer_text": "hinterlegte Unterschrift" if kaeufer_png else None,
-                      "hinweis": (f"Digital unterschrieben über das Kundenportal von "
-                                  f"{(dealer.get('company_name') or 'Autohändler').strip()} am {zeit} Uhr "
-                                  f"(Vertragsfassung {int(c.get('version') or 1)}).")}
-    return await asyncio.to_thread(generate_contract_pdf, dealer=dealer, vehicle=vehicle, contract=contract_dict,
-                                   unterschriften=unterschriften)
+    return await asyncio.to_thread(
+        portal_pdf.unterschreiben, original, verkaeufer_png=verkaeufer_png, kaeufer_png=kaeufer_png, name=name,
+        zeit=zeit, firma=(firma.get("company_name") or "Autohändler").strip(),
+        vertragsnummer=str(c.get("contract_no") or c.get("id") or ""), fassung=int(c.get("version") or 1))
 
 
 try:
@@ -1033,36 +1038,65 @@ async def portal_unterschreiben(sitzung: SitzungKopf, body: UnterschreibenIn, re
     raw = _bild_bytes(body.signature_b64, "Unterschrift", 2 * 1024 * 1024)
     _unterschrift_pruefen(raw, "Unterschrift")
     from storage_service import StorageError, make_key, save_async, loeschen_oder_vormerken
-    firma = await db.dealers.find_one({"id": c["dealer_id"]}, {**_FIRMA_FELDER, "user_id": 1}) or {}
-    kaeufer_png = await _datei_bytes(firma.get("unterschrift_key"))
+    # Pruefliste 30.09.2026 (Nr. 7): ERST beanspruchen, dann rechnen. Vorher kam der Abgleich erst nach
+    # Bildpruefung, PDF und Speichern — zwanzig gleichzeitige Absendungen rechneten zwanzig PDFs, eine gewann.
     wann = datetime.now(timezone.utc)
+    offen_filter = {"id": c["id"], "version": c.get("version"), "portal.status": "offen", "portal.code": p.get("code")}
+    anspruch = secrets.token_hex(8)
+    r = await db.generated_pdfs.update_one(
+        {**offen_filter, "$or": [{"portal.anspruch_bis": {"$exists": False}}, {"portal.anspruch_bis": None},
+                                 {"portal.anspruch_bis": {"$lt": wann.isoformat()}}]},
+        {"$set": {"portal.anspruch": anspruch,
+                  "portal.anspruch_bis": (wann + timedelta(seconds=SIGNIER_ANSPRUCH_S)).isoformat()}})
+    if not r.modified_count:
+        stand = await db.generated_pdfs.find_one({"id": c["id"]}, {"_id": 0, "portal.status": 1})
+        if ((stand or {}).get("portal") or {}).get("status") == "unterschrieben":
+            raise HTTPException(409, "Dieser Vertrag ist bereits unterschrieben.")
+        raise HTTPException(409, "Die Unterschrift wird gerade verarbeitet — bitte einen Moment warten.")
+    eigener = {**offen_filter, "portal.anspruch": anspruch}
+
+    async def _anspruch_zurueck():
+        try:
+            await db.generated_pdfs.update_one(eigener, {"$unset": {"portal.anspruch": "", "portal.anspruch_bis": ""}})
+        except Exception:  # noqa: BLE001 — laeuft nach SIGNIER_ANSPRUCH_S von selbst ab
+            pass
+    key = None
     try:
-        pdf = await _signiertes_pdf(c, raw, kaeufer_png, name, wann)
-    except Exception as exc:  # noqa: BLE001
-        log.exception("Kundenportal: unterschriebenes PDF fuer Vertrag %s nicht erzeugt", c["id"])
-        raise HTTPException(500, f"Der unterschriebene Vertrag konnte nicht erzeugt werden ({type(exc).__name__}).")
-    try:
-        key = make_key("portal", c["dealer_id"], "unterschrift-verkaeufer.png")
-        await save_async(key, raw)
-    except StorageError as exc:
-        raise HTTPException(400, f"Unterschrift konnte nicht gespeichert werden: {exc}")
-    try:
+        firma = await db.dealers.find_one({"id": c["dealer_id"]}, {**_FIRMA_FELDER, "user_id": 1}) or {}
+        kaeufer_png = await _datei_bytes(firma.get("unterschrift_key"))
+        try:
+            pdf, gelesen_sha, in_feldern = await _signiertes_pdf(c, raw, kaeufer_png, name, wann)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Kundenportal: unterschriebenes PDF fuer Vertrag %s nicht erzeugt", c["id"])
+            raise HTTPException(500, f"Der unterschriebene Vertrag konnte nicht erzeugt werden ({type(exc).__name__}).")
+        try:
+            key = make_key("portal", c["dealer_id"], "unterschrift-verkaeufer.png")
+            await save_async(key, raw)
+        except StorageError as exc:
+            key = None
+            raise HTTPException(400, f"Unterschrift konnte nicht gespeichert werden: {exc}")
         r = await db.generated_pdfs.update_one(
-            {"id": c["id"], "version": c.get("version"), "portal.status": "offen", "portal.code": p.get("code")},
+            eigener,
             {"$set": {"portal.status": "unterschrieben", "portal.unterschrieben_am": wann.isoformat(),
                       "portal.name": name[:120], "portal.ip": ip,
                       "portal.user_agent": (request.headers.get("user-agent") or "")[:200],
                       "portal.unterschrift_key": key, "portal.kaeufer_unterschrift": bool(kaeufer_png),
+                      # Pruefsumme des Dokuments, das der Kunde gelesen hat (steht auch im Signaturnachweis)
+                      "portal.gelesen_sha256": gelesen_sha, "portal.unterschrift_in_feldern": bool(in_feldern),
                       "pdf_signiert_b64": base64.b64encode(pdf).decode(),
                       "pdf_signiert_sha256": hashlib.sha256(pdf).hexdigest(),
                       "pdf_signiert_version": int(c.get("version") or 1), "kunde_unterschrieben_am": wann.isoformat(),
-                      "updated_at": now_iso()}})
-    except Exception:
-        # Pruefliste 30.09.2026: Unterschriftsbild des Kunden ohne Verweis nie liegen lassen.
-        await loeschen_oder_vormerken(db, key=key, grund="portal_unterschrift_db_fehler", dealer_id=c["dealer_id"])
+                      "updated_at": now_iso()},
+             "$unset": {"portal.anspruch": "", "portal.anspruch_bis": ""}})
+    except BaseException:
+        # Pruefliste 30.09.2026: Unterschriftsbild des Kunden ohne Verweis nie liegen lassen; Anspruch frei
+        if key:
+            await loeschen_oder_vormerken(db, key=key, grund="portal_unterschrift_db_fehler", dealer_id=c["dealer_id"])
+        await _anspruch_zurueck()
         raise
     if not r.modified_count:
         await loeschen_oder_vormerken(db, key=key, grund="portal_unterschrift_verworfen", dealer_id=c["dealer_id"])
+        await _anspruch_zurueck()
         raise HTTPException(409, "Dieser Vertrag wurde gerade schon unterschrieben oder geändert.")
     empfaenger = [u for u in {firma.get("user_id"), c.get("user_id")} if u]
     text = (f"Kaufvertrag {c.get('contract_no') or ''} ({c.get('make') or ''} {c.get('model') or ''}) wurde von "

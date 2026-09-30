@@ -4116,3 +4116,43 @@ KI-Abholbewertung die Position („nicht bewertet“, Betriebsalarm); die App ve
   (Code eingeben, unterschreiben, Codes erzeugen), danach 2 Minuten warten — `PORTAL_IP_JE_MINUTE`,
   `PORTAL_IP_WARTEN_SEKUNDEN`. Daneben bleibt die Bremse für FALSCHE Codes (10 je Adresse und 200 je Firma in
   10 Minuten): sie verhindert das Durchprobieren von Codes und zählt nur Fehlversuche.
+
+## KI-Quellen, Folge-Mail, unterschriebenes Dokument (Prüfliste 4 vom 30.09.2026)
+
+**KI-Preisrecherche (`backend/ai/quellen.py`, `ai/marktdaten.py`):**
+- Eine Quelle gilt nur noch über ihre ADRESSE als vertrauenswürdig: exakte Domain oder Unterdomain aus
+  `VERTRAUTE_DOMAINS` (Fachbetriebe über ein Stichwort im Namen der eingetragenen Domain). Vorher genügte ein
+  Teilstring — „atu“ in „Reparatur“, „dat“ in „Datenbank“, `adac.de.beispiel.com`.
+- Jede Zeile des Datenblocks wird geprüft (`recherche_pruefen`): **belegt** (die Adresse war unter den echten
+  Suchtreffern dieses Laufs), **vertraut**, **plausibel** (0,25× bis 4× der Referenz), **ungefähr** (neue Spalte
+  „passung“). Die Bewertung bekommt das Ergebnis mit („Geprüfte Werte“ / „NICHT verwenden“); nur geprüfte Webwerte
+  werden zur Referenz der Position (`Websuche (…)`).
+- Gelernt wird nur Geprüftes, dieselbe Aussage derselben Quelle je Fahrzeugsegment nur einmal (Fingerabdruck `fp`).
+- Eigene Daten: gezählt werden Belege (je Quelle und Preisband einer), der Wert ist der Median über die Quellen,
+  ungefähre Werte zählen für „reicht“ nicht, je Schlüssel wird einzeln gelesen. Sie werden nur angewendet, wenn sie
+  reichen (5 Belege aus 2 Quellen). Bei Technik, Licht, Schlüssel und Warnleuchte gibt es keine Stufe „alle Marken“.
+- Ein Kostenvoranschlag des Fahrers wird nicht mehr von Tabelle, eigenen Daten oder Websuche überschrieben; liegt er
+  über dem Doppelten des aufwendigsten üblichen Falls, sinkt die Datenlage und der Chef bekommt einen Hinweis.
+- Je Position zeigt die Karte die Grundlage: Web geprüft / Eigene Daten / Markttabelle / Startwert / Kostenvoranschlag.
+- Markttabelle: der stündliche Weg nutzt denselben Laufmerker wie der Knopf (keine doppelte Recherche).
+- Ist das Monatslimit beim KI-Anbieter erreicht, steht das im Klartext an der Karte und im Betriebsalarm
+  („Limit in der Konsole des Anbieters erhöhen“) statt des rohen englischen Fehlers.
+- Bewusst unverändert: die KI-Bewertung läuft weiter als Hintergrundaufgabe (stirbt der Prozess, rechnet sie beim
+  nächsten Öffnen der Freigabe nach Ablauf von 150 s neu); „Werkstatt hat Diagnose bestätigt“ bleibt eine Angabe
+  des Fahrers; die Kalibrierung nutzt die jüngsten 3.000 Fälle.
+
+**Folge-Mail:** der Inhalt (Fassung, Art, Empfänger, Betreff, Text) gehört zum Versand-Schlüssel — derselbe Schlüssel
+mit anderem Inhalt gibt 409; ohne Schlüssel wird er aus dem Inhalt abgeleitet; der Schlüssel beim Mail-Anbieter
+trägt den Inhalt (vorher `folge-<vertrag>-<art>`: eine zweite Mail galt dort als Wiederholung).
+
+**Kundenportal — unterschriebenes Dokument (`backend/portal_pdf.py`):** Grundlage ist das GESPEICHERTE PDF, das der
+Kunde gelesen hat. Seine Seiten bleiben unverändert, die Unterschriften werden in die Unterschriftsfelder gelegt, ein
+Blatt „Signaturnachweis“ (wer, wann, Fassung, SHA-256 des gelesenen Dokuments) wird angefügt; am Vertrag steht
+`portal.gelesen_sha256`. Vorher wurde ein neues PDF mit dem Datum des Unterschriftstages und dem heutigen
+Fahrzeugstand erzeugt. Gleichzeitige Absendungen: eine rechnet (`portal.anspruch`, 60 s), die anderen bekommen 409.
+Der Code wird in einer Operation geprüft und gezählt. Die hinterlegte Unterschrift des Chefs gilt zum Zeitpunkt der
+Kundenunterschrift (bewusst nicht eingefroren).
+
+**Sonstiges:** am Vertrag steht `inserat_stand_fehlt` (`kein_inserat` / `kein_eintrag` / `fehler`), wenn kein
+Inseratsstand eingefroren werden konnte; fällt die Kleinanzeigen-API dreimal in Folge aus, gibt es den Betriebsalarm
+`kleinanzeigen_api_gestoert` (schließt sich, sobald sie wieder antwortet).

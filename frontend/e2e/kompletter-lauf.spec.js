@@ -176,6 +176,11 @@ test.describe("Kompletter Lauf: Betreiber -> Sucher -> Kunde -> Chef -> Fahrer -
     const stand = await h.get(`/contracts/${vertrag.id}/portal`, { token: sucherToken });
     expect(stand.status).toBe("unterschrieben");
     expect(stand.unterschrieben_version).toBe(1);
+    // Prüfliste 30.09.2026: unterschrieben wird das gelesene Dokument (Unterschrift in den Feldern +
+    // Signaturnachweis) — die Vorschau des Kunden zeigt danach eine Seite mehr
+    expect(stand.pdf_signiert).toBe(true);
+    await expect.poll(() => page.locator('[data-testid="portal-seiten"] canvas').count(), { timeout: 30_000 })
+      .toBeGreaterThanOrEqual(2);
     // Meldung fuer Sucher UND Chef
     expect((await h.get("/meldungen/anzahl", { token: sucherToken })).ungelesen).toBe(1);
     expect((await h.get("/meldungen/anzahl", { token: chefToken })).ungelesen).toBe(1);
@@ -304,6 +309,13 @@ test.describe("Kompletter Lauf: Betreiber -> Sucher -> Kunde -> Chef -> Fahrer -
       expect(combined.fair_discount_eur).toBeLessThan(PREIS_VERTRAG * 0.9);        // Deckel 90 % vom Kaufpreis
       expect(combined.recommended_purchase_price_eur).toBe(PREIS_VERTRAG - combined.fair_discount_eur);
       await expect(kiKarte).toContainText("€");
+      // Prüfliste 30.09.2026: je Position steht, worauf sich der Wert stützt (Web geprüft, eigene Daten,
+      // Markttabelle oder nur Startwert) — im Ergebnis und auf der Karte
+      for (const it of items) {
+        expect(it.grundlage?.text, `Grundlage fehlt bei ${it.title}`).toBeTruthy();
+        await expect(page.getByTestId(`ki-${protokollId}-grundlage-${it.source_id}`)).toContainText("Grundlage:");
+      }
+      console.log(`[kompletter-lauf] KI Grundlagen: ${items.map((i) => `${i.title}: ${i.grundlage.text}`).join(" | ")}`);
       console.log(`[kompletter-lauf] KI: fair ${combined.fair_discount_eur} EUR Nachlass, empfohlener Preis `
         + `${combined.recommended_purchase_price_eur} EUR, Datenlage ${ki.ergebnis.datenlage}, `
         + `${items.map((i) => `${i.title}: ${i.fair_discount_eur} EUR`).join(" | ")}`);

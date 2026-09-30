@@ -37,7 +37,7 @@ from typing import Any, Dict, List, Optional
 from deps import db as _db, now_iso
 from konfig import schalter_env, zahl_env
 
-from ai import preisbasis
+from ai import preisbasis, quellen as _quellen
 from ai.provider import LaufUebernommen, json_bewerten, ki_aktiv, ki_modell, ki_recherche_modell, recherche
 
 log = logging.getLogger("autohandel.ki")
@@ -71,9 +71,12 @@ SUCH_ANWEISUNG = ("Du hast fuer diese Liste hoechstens {n} Suchen. Plane sie (ei
                   "ADAC zuerst) und schreibe jeden gefundenen Wert SOFORT in deine Antwort. Ist das Suchlimit "
                   "erreicht, gib die bis dahin gefundenen Werte aus — niemals abbrechen oder eine leere Antwort geben.")
 DATEN_ANWEISUNG = ("Schliesse deine Antwort mit einer Zeile '" + DATEN_MARKER + "' ab und darunter je gefundenem Wert "
-                   "GENAU EINE Zeile im Format: id|min_eur|max_eur|typisch_eur|quelle|url — id ist die id der "
+                   "GENAU EINE Zeile im Format: id|min_eur|max_eur|typisch_eur|quelle|url|passung — id ist die id der "
                    "Position aus der Liste, Betraege als ganze Zahlen ohne Einheit, quelle der Name der Quelle "
-                   "(z. B. ADAC), ggf. mit Einschraenkung. Lieber ein ungefaehrer Wert mit Hinweis als keine Zeile. "
+                   "(z. B. ADAC), ggf. mit Einschraenkung, url die VOLLSTAENDIGE Adresse der Seite aus den "
+                   "Suchergebnissen, von der der Wert stammt (nicht erfinden, nicht kuerzen). passung ist 'genau', "
+                   "wenn der Wert zu Fahrzeugklasse, Schadenbild und Jahr passt, sonst 'ungefaehr' "
+                   "(Orientierungswert). Lieber ein ungefaehrer Wert mit Hinweis als keine Zeile. "
                    "Keine weiteren Zeilen nach dem Block.")
 _GRUPPEN = (
     ("Karosserie und Lack", ("delle", "kratzer", "steinschlag", "rost", "hagelschaden")),
@@ -435,7 +438,15 @@ async def pruefen_und_aktualisieren(db=None) -> dict:
                 return {"status": "wartet", "grund": (doc or {}).get("grund") or ""}
         except ValueError:
             pass
-    erg = await aktualisieren(db, erzwingen=True)
+    # Pruefliste 30.09.2026 (Nr. 10): derselbe Merker wie beim Knopf "Marktdaten jetzt" — vorher lief der
+    # stuendliche Weg am Merker vorbei, und ein Klick waehrend des Laufs (oder umgekehrt) recherchierte die
+    # ganze Tabelle doppelt.
+    if not await lauf_markieren(db):
+        return {"status": "laeuft"}
+    try:
+        erg = await aktualisieren(db, erzwingen=True)
+    finally:
+        await lauf_beenden(db)
     return {"status": erg.get("status"), "aktualisiert": erg.get("aktualisiert"), "grund": erg.get("grund") or ""}
 
 
@@ -493,8 +504,18 @@ def _netto(quelle: str) -> bool:
     return ("netto" in q or "ohne mwst" in q or "ohne mehrwertsteuer" in q or "zzgl" in q) and "brutto" not in q
 
 
+def _passung(wert: str) -> Optional[bool]:
+    """Siebte Spalte: True = ungefaehrer Orientierungswert, False = genau, None = nicht angegeben."""
+    w = str(wert or "").strip().lower()
+    if not w:
+        return None
+    if w.startswith(("ungef", "orient", "ca", "circa", "naeher", "näher")):
+        return True
+    return False if w.startswith("genau") else None
+
+
 def _daten_parsen(text: str) -> List[Dict[str, Any]]:
-    """Zeilen nach ###DATEN: id|min|max|typisch|quelle|url."""
+    """Zeilen nach ###DATEN: id|min|max|typisch|quelle|url[|passung]."""
     if not text or DATEN_MARKER not in text:
         return []
     block = text.split(DATEN_MARKER, 1)[1]
@@ -516,36 +537,33 @@ def _daten_parsen(text: str) -> List[Dict[str, Any]]:
         if _netto(quelle):
             lo, hi, ty = (round(x * 1.19, 2) for x in (lo, hi, ty))
             quelle = (quelle + " (auf brutto umgerechnet)")[:80]
-        raus.append({"id": pid[:120], "min_eur": lo, "max_eur": hi, "typisch_eur": ty,
+        zeile_neu = {"id": pid[:120], "min_eur": lo, "max_eur": hi, "typisch_eur": ty,
                      "quelle": quelle,
-                     "url": (teile[5] if len(teile) > 5 else "")[:300]})
+                     "url": (teile[5] if len(teile) > 5 else "")[:300]}
+        if len(teile) > 6 and _passung(teile[6]) is not None:
+            zeile_neu["ungefaehr"] = bool(_passung(teile[6]))
+        raus.append(zeile_neu)
     return raus[:20]
 
 
 # Review 25.09.2026 abends: gelernt wird nur aus bekannten Quellen und nur,
 # wenn der Wert plausibel zur Referenz passt — sonst verfaelscht ein
 # schlechter Webwert die eigene Datenbank fuer 180 Tage.
-VERTRAUTE_DOMAINS = ("adac.de", "fairgarage.com", "dat.de", "autobutler.de", "atu.de", "carglass.de", "wintec.de",
-                     "dekra.de", "boschcarservice.com", "repareo.de", "werkstattvergleich.de", "dellen-doktor.de",
-                     "dellendoktor.de", "dellentechnik", "pitstop.de", "autoglas", "reifen.com", "reifendirekt.de",
-                     "autobild.de", "auto-motor-und-sport.de", "hella.com", "tuev", "tuv.com", "gtue.de",
-                     "autoscout24.de", "mobile.de", "kfz-betrieb", "autoservicepraxis", "kfz.net", "autoplenum",
-                     "smart-repair", "smartrepair", "lackprofi", "carglass", "reifenleader", "meinauto", "vergoelst",
-                     "euromaster", "point-s", "premio", "driver-center", "bosch")
-VERTRAUTE_NAMEN = ("adac", "fairgarage", "dat", "autobutler", "atu", "carglass", "wintec", "dekra", "bosch",
-                   "repareo", "werkstattvergleich", "dellen", "pitstop", "hella", "tüv", "tuev", "gtü", "gtue",
-                   "auto bild", "auto motor", "autoscout", "mobile.de", "euromaster", "vergölst", "vergoelst")
+# Pruefliste 30.09.2026: die Quellenpruefung liegt in ai.quellen — exakte Domain statt Teilstring, und die
+# Adresse muss in diesem Lauf wirklich unter den Suchtreffern gewesen sein.
+VERTRAUTE_DOMAINS = _quellen.VERTRAUTE_DOMAINS
 PLAUSIBEL_UNTEN, PLAUSIBEL_OBEN = 0.25, 4.0
 
 
-def quelle_vertraut(quelle: str, url: str) -> bool:
-    """Bekannte Domain ODER bekannter Quellenname (die Recherche nennt oft
-    'ADAC' mit einer verkuerzten Adresse)."""
-    u = str(url or "").lower()
-    host = u.split("//", 1)[-1].split("/", 1)[0] if u else ""
-    q = str(quelle or "").lower()
-    return any(d in host for d in VERTRAUTE_DOMAINS) or any(n in q for n in VERTRAUTE_NAMEN)
+def quelle_vertraut(quelle: str, url: str, belegt=None) -> bool:
+    """Bekannte Domain (exakt oder Unterdomain). Der Quellenname allein genuegt nicht mehr; mit `belegt`
+    (Rechnernamen der echten Suchtreffer) muss die Zeile darauf gestuetzt sein."""
+    return _quellen.quelle_vertraut(quelle, url, belegt)
 
+
+# Review 25.09.2026 abends: gelernt wird nur aus bekannten Quellen und nur,
+# wenn der Wert plausibel zur Referenz passt — sonst verfaelscht ein
+# schlechter Webwert die eigene Datenbank fuer 180 Tage.
 
 def wert_plausibel(zeile: Dict[str, Any], ref: Dict[str, Any]) -> bool:
     """Innerhalb 0,25x der unteren bis 4x der oberen Referenz; min > 0."""
@@ -561,42 +579,142 @@ def wert_plausibel(zeile: Dict[str, Any], ref: Dict[str, Any]) -> bool:
     return lo >= r_lo * PLAUSIBEL_UNTEN and hi <= r_hi * PLAUSIBEL_OBEN
 
 
+def fall_hosts(fall: Optional[dict]) -> List[str]:
+    """Rechnernamen der echten Suchtreffer/Zitate dieses Laufs (ai.provider liefert `hosts`;
+    sonst aus den Quellen abgeleitet)."""
+    if not fall:
+        return []
+    hosts = {h for h in (fall.get("hosts") or []) if h}
+    hosts |= {_quellen.host_von(q.get("url")) for q in (fall.get("quellen") or []) if isinstance(q, dict)}
+    hosts.discard("")
+    return sorted(hosts)
+
+
+def recherche_pruefen(fall: Optional[dict], paket: Dict[str, Any], art: str) -> List[Dict[str, Any]]:
+    """Pruefliste 30.09.2026 (Nr. 11-13, 22): JEDE Zeile des ###DATEN-Blocks wird geprueft, bevor sie die
+    aktuelle Bewertung beeinflusst oder gelernt wird:
+
+      belegt    — die Adresse (oder der Quellenname als ganzes Wort) gehoert zu einem echten Suchtreffer
+                  dieses Laufs; das Modell kann keine Quelle mehr dazuschreiben,
+      vertraut  — der belegte Rechnername ist eine bekannte Domain (exakt, kein Teilstring),
+      plausibel — der Wert liegt zwischen 0,25x der unteren und 4x der oberen Referenz,
+      ungefaehr — das Modell hat den Wert selbst als Orientierungswert markiert.
+
+    Das Ergebnis steht in fall["pruefung"]; "ok" = belegt, vertraut und plausibel. Wirft nie."""
+    if not fall or fall.get("status") != "ok":
+        return []
+    if isinstance(fall.get("pruefung"), list):
+        return fall["pruefung"]
+    raus: List[Dict[str, Any]] = []
+    try:
+        je_id = {str(p.get("id")): p for p in _positionen(paket, art)}
+        hosts = fall_hosts(fall)
+        for z in _daten_parsen(fall.get("text") or ""):
+            p = je_id.get(z["id"])
+            ref = (p or {}).get("repair_reference") or {}
+            if not p or not ref.get("key"):
+                continue
+            host = _quellen.belegter_host(z.get("quelle"), z.get("url"), hosts)
+            belegt, vertraut, plausibel = bool(host), _quellen.host_vertraut(host), wert_plausibel(z, ref)
+            raus.append({"id": z["id"], "min_eur": z["min_eur"], "max_eur": z["max_eur"], "typisch_eur": z["typisch_eur"],
+                         "quelle": z.get("quelle") or "", "url": z.get("url") or "", "host": host,
+                         "ungefaehr": bool(z.get("ungefaehr")), "belegt": belegt, "vertraut": vertraut,
+                         "plausibel": plausibel, "ok": belegt and vertraut and plausibel})
+    except Exception:  # noqa: BLE001
+        log.exception("Recherche-Werte nicht pruefbar")
+        raus = []
+    fall["pruefung"] = raus
+    return raus
+
+
+def recherche_anwenden(paket: Dict[str, Any], art: str, fall: Optional[dict]) -> int:
+    """Die GEPRUEFTEN Werte dieses Laufs als Referenz der Position setzen (Quelle "Websuche …"). Vorher
+    gelangte der Webwert nur ueber die eigene Datenbank in die Referenz — auch ein einzelner, ungeprueft
+    gelernter Wert. Kostenvoranschlag und Fachpruefung bleiben unberuehrt. Liefert die Anzahl."""
+    ok = [z for z in ((fall or {}).get("pruefung") or []) if z.get("ok")]
+    if not ok:
+        return 0
+    je_id: Dict[str, List[dict]] = {}
+    for z in ok:
+        je_id.setdefault(z["id"], []).append(z)
+    n = 0
+    for p in _positionen(paket, art):
+        zeilen = je_id.get(str(p.get("id")))
+        ref = p.get("repair_reference")
+        if not zeilen or not ref or ref.get("manual_review") or ref.get("basis") == "kostenvoranschlag":
+            continue
+        genau = [z for z in zeilen if not z.get("ungefaehr")] or zeilen
+        namen = sorted({_quellen.stamm_domain(z["host"]) for z in genau if z.get("host")})[:3]
+        ref.update(low=round(min(z["min_eur"] for z in genau)),
+                   median=round(statistics.median(z["typisch_eur"] for z in genau)),
+                   high=round(max(z["max_eur"] for z in genau)),
+                   source=f"Websuche ({', '.join(namen)})", web_geprueft=True,
+                   approximate=all(bool(z.get("ungefaehr")) for z in genau))
+        ref.pop("own_data_n", None)
+        n += 1
+    if n:
+        from ai import kontext
+        paket["precomputed"] = kontext.vorberechnet(paket)
+    return n
+
+
+def _fingerabdruck(key: str, quelle_id: str, z: Dict[str, Any]) -> str:
+    """Dieselbe Aussage derselben Quelle (Nr. 14/30): Schluessel + Quelle + Preisband."""
+    return f"{key}|{quelle_id}|{round(float(z['min_eur']))}|{round(float(z['max_eur']))}|{round(float(z['typisch_eur']))}"
+
+
 async def lernen_aus_recherche(fall: Optional[dict], paket: Dict[str, Any], art: str, db=None) -> int:
-    """Gefundene Werte je Position in ki_reparaturpreise ablegen. Wirft nie."""
+    """Gepruefte Werte je Position in ki_reparaturpreise ablegen. Wirft nie.
+
+    Pruefliste 30.09.2026: nur Zeilen, die recherche_pruefen bestanden haben (belegt, vertraut, plausibel);
+    dieselbe Aussage derselben Quelle fuer dasselbe Fahrzeugsegment wird nur EINMAL gespeichert
+    (Fingerabdruck) — vorher zaehlte ein ADAC-Wert nach 20 aehnlichen Autos wie 20 Beobachtungen."""
     if not fall or fall.get("status") != "ok":
         return 0
     db = db if db is not None else _db
     try:
-        zeilen = _daten_parsen(fall.get("text") or "")
+        zeilen = recherche_pruefen(fall, paket, art)
         if not zeilen:
             return 0
         je_id = {str(p.get("id")): p for p in _positionen(paket, art)}
         v = paket.get("vehicle") or {}
         jetzt = now_iso()
+        seit = (datetime.now(timezone.utc) - timedelta(days=EIGENE_TAGE)).isoformat()
+        marke, modell, alter = _marke(v), str(v.get("model") or "")[:60], _alter_klasse(v)
         docs = []
+        gesehen: set = set()
         verworfen: List[Dict[str, Any]] = []
         for z in zeilen:
-            p = je_id.get(z["id"])
-            if not p:
-                continue
-            ref = p.get("repair_reference") or {}
-            key = ref.get("key")
+            p = je_id.get(z["id"]) or {}
+            key = (p.get("repair_reference") or {}).get("key")
             if not key:
                 continue
-            if not quelle_vertraut(z.get("quelle"), z.get("url")) or not wert_plausibel(z, ref):
+            if not z.get("ok"):
                 verworfen.append({"id": z["id"], "quelle": z.get("quelle"), "url": z.get("url"),
-                                  "min_eur": z["min_eur"], "max_eur": z["max_eur"]})
+                                  "min_eur": z["min_eur"], "max_eur": z["max_eur"],
+                                  "grund": ("nicht belegt" if not z.get("belegt") else
+                                            "Quelle unbekannt" if not z.get("vertraut") else "unplausibel")})
                 continue
+            quelle_id = _quellen.stamm_domain(z["host"])
+            fp = _fingerabdruck(key, quelle_id, z)
+            if fp in gesehen:
+                continue
+            gesehen.add(fp)
+            if await db[PREIS_SAMMLUNG].find_one({"fp": fp, "marke": marke, "modell": modell, "alter_klasse": alter,
+                                                  "stand": {"$gte": seit}}, {"_id": 1}):
+                continue                                # diese Aussage kennt die Datenbank schon
             docs.append({"key": key, "typ": p.get("type") or p.get("damage_type") or key.split("_")[0],
-                         "zone": str(p.get("zone") or "")[:80], "marke": _marke(v), "modell": str(v.get("model") or "")[:60],
-                         "alter_klasse": _alter_klasse(v), "min_eur": z["min_eur"], "max_eur": z["max_eur"],
+                         "zone": str(p.get("zone") or "")[:80], "marke": marke, "modell": modell,
+                         "alter_klasse": alter, "min_eur": z["min_eur"], "max_eur": z["max_eur"],
                          "typisch_eur": z["typisch_eur"], "quelle": z["quelle"], "url": z["url"],
+                         "host": quelle_id, "fp": fp, "ungefaehr": bool(z.get("ungefaehr")),
                          "art": art, "stand": jetzt})
         if docs:
             await db[PREIS_SAMMLUNG].insert_many(docs)
         if verworfen:
             fall["verworfen"] = verworfen[:20]
-            log.info("Recherche: %d Werte nicht gelernt (Quelle unbekannt oder unplausibel)", len(verworfen))
+            log.info("Recherche: %d Werte nicht gelernt (nicht belegt, Quelle unbekannt oder unplausibel)",
+                     len(verworfen))
         return len(docs)
     except Exception:  # noqa: BLE001
         log.exception("Recherche-Werte nicht gelernt")
@@ -612,8 +730,48 @@ def _quelle_norm(s) -> str:
     return re.split(r"[,(;/]", str(s or "").strip().lower())[0].strip()
 
 
+def _quelle_id(d: dict) -> str:
+    """Wer hat den Wert geliefert? Die Domain (neu gelernte Werte), sonst der Quellenname (Altbestand)."""
+    return str(d.get("host") or "").strip().lower() or _quelle_norm(d.get("quelle"))
+
+
 def _quellen_anzahl(docs: List[dict]) -> int:
-    return len({_quelle_norm(d.get("quelle")) for d in docs if _quelle_norm(d.get("quelle"))})
+    return len({_quelle_id(d) for d in docs if _quelle_id(d)})
+
+
+def _belege(docs: List[dict]) -> List[dict]:
+    """Je Quelle und Preisband EIN Beleg (Nr. 14/16/30): zwanzigmal derselbe Wert derselben Quelle ist
+    eine Beobachtung, nicht zwanzig. Die Reihenfolge (neueste zuerst) bleibt."""
+    gesehen, raus = set(), []
+    for d in docs:
+        try:
+            k = (_quelle_id(d), round(float(d["min_eur"])), round(float(d["max_eur"])), round(float(d["typisch_eur"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if k in gesehen:
+            continue
+        gesehen.add(k)
+        raus.append(d)
+    return raus
+
+
+def _median_je_quelle(belege: List[dict], feld: str) -> float:
+    """Erst der Median je Quelle, dann der Median ueber die Quellen (Nr. 16) — eine Quelle mit vielen
+    Werten ueberstimmt die anderen nicht mehr."""
+    je: Dict[str, List[float]] = {}
+    for d in belege:
+        je.setdefault(_quelle_id(d) or "?", []).append(float(d[feld]))
+    return statistics.median(statistics.median(w) for w in je.values())
+
+
+#: Pruefliste 30.09.2026 (Nr. 19): bei diesen Arten haengt der Preis an Marke und Technik — ein Wert von
+#: irgendeinem Auto ("alle") ist keine Grundlage (Getriebe, Scheinwerfer, Schluessel, Warnleuchte).
+MARKENGEBUNDENE_TYPEN = frozenset({"technical", "warning_light", "beleuchtung", "keys"})
+EIGENE_JE_SCHLUESSEL_MAX = 300
+
+
+def _markengebunden(key: str) -> bool:
+    return str((preisbasis.zeile(key) or {}).get("typ") or "") in MARKENGEBUNDENE_TYPEN or str(key).startswith("technik_")
 
 
 async def eigene_referenzen(paket: Dict[str, Any], art: str, db=None) -> Dict[str, Dict[str, Any]]:
@@ -621,11 +779,18 @@ async def eigene_referenzen(paket: Dict[str, Any], art: str, db=None) -> Dict[st
 
     Review 26.09.2026 (Nr. 19/20): Auswahl in Stufen — (1) gleiche Marke,
     gleiches Modell und gleiche Altersklasse, (2) Marke und Altersklasse,
-    (3) Marke, (4) alle. Die erste Stufe mit mindestens EIGENE_MIN Werten
+    (3) Marke, (4) alle. Die erste Stufe mit mindestens EIGENE_MIN Belegen
     aus mindestens EIGENE_QUELLEN_MIN verschiedenen Quellen gewinnt
     ("reicht": True -> keine Websuche mehr). Reicht keine Stufe, liefert
     die engste nicht leere Stufe einen Anhalt ("reicht": False, es wird
-    weiter gesucht). {} wenn nichts da. Wirft nie."""
+    weiter gesucht; kontext.eigene_anwenden setzt ihn NICHT als Referenz).
+    {} wenn nichts da. Wirft nie.
+
+    Pruefliste 30.09.2026: gezaehlt werden BELEGE (je Quelle und Preisband
+    einer), ungefaehre Orientierungswerte zaehlen fuer "reicht" nicht mit,
+    die Werte sind Mediane ueber die Quellen, je Schluessel wird einzeln
+    gelesen (kein gemeinsames Limit), und bei markengebundenen Arten gibt
+    es keine Stufe "alle"."""
     db = db if db is not None else _db
     raus: Dict[str, Dict[str, Any]] = {}
     try:
@@ -636,17 +801,22 @@ async def eigene_referenzen(paket: Dict[str, Any], art: str, db=None) -> Dict[st
         v = paket.get("vehicle") or {}
         marke, modell, alter = _marke(v), _modell_norm(v.get("model")), _alter_klasse(v)
         seit = (datetime.now(timezone.utc) - timedelta(days=EIGENE_TAGE)).isoformat()
-        je_key: Dict[str, List[dict]] = {}
-        async for d in db[PREIS_SAMMLUNG].find({"key": {"$in": sorted(keys)}, "stand": {"$gte": seit}},
-                                               {"_id": 0}).sort("stand", -1).limit(2000):
-            je_key.setdefault(d["key"], []).append(d)
-        for key, docs in je_key.items():
+        for key in sorted(keys):
+            docs = await db[PREIS_SAMMLUNG].find({"key": key, "stand": {"$gte": seit}}, {"_id": 0}) \
+                .sort("stand", -1).limit(EIGENE_JE_SCHLUESSEL_MAX).to_list(EIGENE_JE_SCHLUESSEL_MAX)
+            if not docs:
+                continue
             mit_marke = [d for d in docs if marke and d.get("marke") == marke]
             mit_alter = [d for d in mit_marke if alter != "?" and d.get("alter_klasse") == alter]
             mit_modell = [d for d in mit_alter if modell and _modell_norm(d.get("modell")) == modell]
-            stufen = list(zip(EIGENE_STUFEN, (mit_modell, mit_alter, mit_marke, docs)))
-            gewinner = next(((s, b) for s, b in stufen
-                             if len(b) >= EIGENE_MIN and _quellen_anzahl(b) >= EIGENE_QUELLEN_MIN), None)
+            stufen = [(s, _belege(b)) for s, b in zip(EIGENE_STUFEN, (mit_modell, mit_alter, mit_marke, docs))]
+            if _markengebunden(key):
+                stufen = [(s, b) for s, b in stufen if s != "alle"]
+
+            def _genug(b: List[dict]) -> bool:
+                fest = [d for d in b if not d.get("ungefaehr")]
+                return len(fest) >= EIGENE_MIN and _quellen_anzahl(fest) >= EIGENE_QUELLEN_MIN
+            gewinner = next(((s, b) for s, b in stufen if _genug(b)), None)
             reicht = gewinner is not None
             if gewinner is None:
                 gewinner = next(((s, b) for s, b in stufen if b), None)
@@ -654,14 +824,16 @@ async def eigene_referenzen(paket: Dict[str, Any], art: str, db=None) -> Dict[st
                 continue
             stufe, basis = gewinner
             basis = basis[:30]
-            quellen = sorted({d.get("quelle") for d in basis if d.get("quelle")})[:4]
-            raus[key] = {"n": len(basis), "low": round(statistics.median(d["min_eur"] for d in basis)),
-                         "median": round(statistics.median(d["typisch_eur"] for d in basis)),
-                         "high": round(statistics.median(d["max_eur"] for d in basis)),
+            if reicht:
+                basis = [d for d in basis if not d.get("ungefaehr")] or basis
+            namen = sorted({d.get("quelle") for d in basis if d.get("quelle")})[:4]
+            raus[key] = {"n": len(basis), "low": round(_median_je_quelle(basis, "min_eur")),
+                         "median": round(_median_je_quelle(basis, "typisch_eur")),
+                         "high": round(_median_je_quelle(basis, "max_eur")),
                          "stufe": stufe, "reicht": reicht, "quellen_n": _quellen_anzahl(basis),
                          "nur_marke": stufe != "alle",
                          "source": f"eigene Datenbank (n={len(basis)}{', ' + marke if stufe != 'alle' else ''}"
-                                   f"{'; ' + ', '.join(quellen) if quellen else ''})"}
+                                   f"{'; ' + ', '.join(namen) if namen else ''})"}
     except Exception:  # noqa: BLE001
         log.exception("eigene Referenzen nicht ladbar")
     return raus
@@ -775,6 +947,7 @@ async def fall_recherche(art: str, paket: Dict[str, Any], *, sparmodus: bool = F
         return {"text": "", "quellen": [], "suchen": int(r.get("suchen") or 0), "dauer_ms": r.get("dauer_ms"),
                 "usage": r.get("usage") or {}, "status": r.get("status"), "modell": modell}
     return {"text": (r.get("text") or "")[:FALL_RECHERCHE_TEXT_MAX], "quellen": list(r.get("quellen") or [])[:10],
+            "hosts": fall_hosts({"hosts": r.get("hosts"), "quellen": r.get("quellen")}),
             "suchen": int(r.get("suchen") or 0), "dauer_ms": r.get("dauer_ms"), "usage": r.get("usage") or {},
             "modell": modell, "status": "ok",
             "positionen": [str(p.get("id")) for p in recherche_auswahl(offen)]}
@@ -858,12 +1031,36 @@ async def _fall_runden(art: str, paket: Dict[str, Any], offen: List[dict], kasse
     block = ("\n" + DATEN_MARKER + "\n" + "\n".join(daten))[:3000] if daten else ""
     text = "\n\n".join(v for v in vor if v)[:max(0, FALL_RECHERCHE_TEXT_MAX - len(block))].rstrip() + block
     quellen: Dict[str, dict] = {}
+    hosts: set = set()
     for r in gut:
         for q in r.get("quellen") or []:
             quellen.setdefault(q.get("url"), q)
-    return {"text": text, "quellen": list(quellen.values())[:10], "suchen": suchen, "dauer_ms": dauer,
+        hosts |= set(fall_hosts({"hosts": r.get("hosts"), "quellen": r.get("quellen")}))
+    return {"text": text, "quellen": list(quellen.values())[:10], "hosts": sorted(hosts),
+            "suchen": suchen, "dauer_ms": dauer,
             "usage": usage, "modell": modell, "status": "ok", "runden": len(runden),
             "positionen": [str(p.get("id")) for p in recherche_auswahl(offen)]}
+
+
+def pruefung_als_text(fall: Optional[dict]) -> str:
+    """Pruefliste 30.09.2026 (Nr. 11): die Bewertung erfaehrt, welche Webwerte die Pruefung bestanden haben
+    — und welche nicht verwendet werden duerfen. Ohne Pruefung (alter Stand) leer."""
+    zeilen = (fall or {}).get("pruefung")
+    if not isinstance(zeilen, list) or not zeilen:
+        return ""
+    gut = [z for z in zeilen if z.get("ok")]
+    rest = [z for z in zeilen if not z.get("ok")]
+    teile = []
+    if gut:
+        teile.append("Gepruefte Werte (Quelle bekannt und im Suchergebnis belegt, Betrag plausibel): " + "; ".join(
+            f"id {z['id']}: {round(z['min_eur'])}-{round(z['max_eur'])} EUR, typisch {round(z['typisch_eur'])} "
+            f"({_quellen.stamm_domain(z['host'])}{', nur Orientierungswert' if z.get('ungefaehr') else ''})"
+            for z in gut[:12]))
+    if rest:
+        teile.append("NICHT verwenden (Quelle nicht belegt, unbekannt oder Betrag unplausibel): " + "; ".join(
+            f"id {z['id']}: {round(z['min_eur'])}-{round(z['max_eur'])} EUR ({str(z.get('quelle') or 'o. Q.')[:30]})"
+            for z in rest[:8]) + " — fuer diese Positionen gelten Tabelle und Ausgangswerte.")
+    return "\n".join(teile)[:1500] + "\n"
 
 
 def fall_als_text(fall: Optional[dict], anteil: float = 1.0) -> str:
@@ -876,7 +1073,7 @@ def fall_als_text(fall: Optional[dict], anteil: float = 1.0) -> str:
     if anteil < 1:
         text = text[:int(len(text) * anteil)].rstrip() + " …"
     voll = ("Marktrecherche zu diesem Fall (Websuche, Quellen unten; geht vor Tabelle und "
-            "Ausgangswerten):\n" + text
+            "Ausgangswerten):\n" + pruefung_als_text(fall) + text
             + ("\nQuellen: " + "; ".join(f"{q.get('titel') or ''} {q.get('url')}".strip() for q in fall.get("quellen") or [])
                if fall.get("quellen") else ""))
     return voll[:FALL_TEXT_MAX_ZEICHEN]

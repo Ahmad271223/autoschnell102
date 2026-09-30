@@ -682,10 +682,14 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
                                         max_tokens=KI_MAX_TOKENS, fall_text_max_zeichen=marktdaten.FALL_TEXT_MAX_ZEICHEN)
         fall = await marktdaten.fall_recherche("abholung", paket, sparmodus=bud["sparmodus"], eigene=eigene,
                                                kasse=kasse)
+        # Pruefliste 30.09.2026: erst pruefen (belegt, vertraut, plausibel), dann lernen — und nur die
+        # geprueften Webwerte dieses Laufs werden zur Referenz der Position.
+        marktdaten.recherche_pruefen(fall, paket, "abholung")
         gelernt = await marktdaten.lernen_aus_recherche(fall, paket, "abholung")
         if gelernt:
             eigene = await marktdaten.eigene_referenzen(paket, "abholung")
             kontext.eigene_anwenden(paket, eigene)
+        marktdaten.recherche_anwenden(paket, "abholung", fall)
         lage = kontext.datenlage(paket)
         if paket.get("damages_unconfirmed"):
             lage = "niedrig"                 # Nr. 95/96: Abweichung ohne Details
@@ -706,7 +710,8 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
                                                                           "fahrer_verbraucht_ct", "fahrer_grenze_ct")},
                    "recherche": ({"status": fall.get("status"), "suchen": fall.get("suchen"),
                                   "quellen": fall.get("quellen"), "text": fall.get("text"),
-                                  "gelernt": gelernt} if fall else None),
+                                  "gelernt": gelernt, "pruefung": fall.get("pruefung"),
+                                  "verworfen": fall.get("verworfen")} if fall else None),
                    "kostendeckel": kasse.bericht()}
         # Review 26.09.2026 (Nr. 6): genau eine Position je Abweichung — doppelte
         # und fremde fliegen raus, eine fehlende bricht den Lauf ab.
@@ -729,12 +734,13 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
             ergebnis["datenlage"] = schemas.datenlage_anpassen(ergebnis, lage)
             if paket.get("damages_unconfirmed"):
                 ergebnis["datenlage"] = "niedrig"
-            ergebnis["hinweise"] = list(paket.get("manual_hints") or [])
+            ergebnis["hinweise"] = list(paket.get("manual_hints") or []) + kontext.referenz_hinweise(paket)
             ergebnis["market"] = paket.get("market")
             ergebnis["quellen"] = list((fall or {}).get("quellen") or [])
             ergebnis["referenzen"] = {p["id"]: p.get("repair_reference") for p in
                                       [d for d in paket["new_damages"] if not d.get("already_known")] + paket["deviations"]
                                       if p.get("repair_reference")}
+            kontext.grundlagen_setzen(ergebnis, ergebnis["referenzen"])
             eintrag.update(status="ok", grund="", ergebnis=ergebnis, roh=antwort["daten"], eingabe=paket)
         else:
             eintrag.update(status=antwort.get("status") or "fehler", grund=antwort.get("grund") or "",

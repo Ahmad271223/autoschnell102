@@ -197,3 +197,25 @@ def test_rollout_ohne_git_auskunft_laeuft_wie_bisher(tmp_path):
     rc, out, im_drain, _a = TR._skript_lauf(tmp_path, "rollout.sh")
     assert rc == 0 and "FERTIG" in out and not im_drain, out
     assert not (tmp_path / "checkout" / "deploy" / ".rollout-branch").exists()
+
+
+# ------------------------------------------------------------------ 5) Kleinanzeigen-API faellt aus -> Alarm
+def test_kleinanzeigen_api_ausfall_gibt_alarm_und_schliesst_ihn_wieder(welt, monkeypatch):  # noqa: F811
+    import provider_fetch as PF
+    w = welt
+    monkeypatch.setattr(PF, "_KA_API", {"folge": 0, "alarm_am": 0.0, "offen": False})
+    filt = {"typ": "kleinanzeigen_api_gestoert", "ref": "kleinanzeigen_api"}
+    for _ in range(PF.KA_API_ALARM_AB - 1):                       # einzelne Aussetzer: kein Alarm
+        _lauf(PF._ka_api_gestoert(w.db, RuntimeError("HTTP 503")))
+    assert w.run(w.db.betriebsalarme.count_documents(filt)) == 0
+    _lauf(PF._ka_api_gestoert(w.db, RuntimeError("HTTP 503")))    # der dritte in Folge
+    a = w.run(w.db.betriebsalarme.find_one(filt, {"_id": 0}))
+    assert a and a["offen"] is True and a["anzahl"] == 1 and "503" in a["details"]["detail"]
+    for _ in range(20):                                           # weitere Fehler: kein Alarm-Gewitter
+        _lauf(PF._ka_api_gestoert(w.db, RuntimeError("HTTP 503")))
+    assert w.run(w.db.betriebsalarme.find_one(filt, {"_id": 0}))["anzahl"] == 1
+    _lauf(PF._ka_api_wieder_da(w.db))                             # API antwortet wieder
+    assert w.run(w.db.betriebsalarme.find_one(filt, {"_id": 0}))["offen"] is False
+    assert PF._KA_API["folge"] == 0 and PF._KA_API["offen"] is False
+    _lauf(PF._ka_api_gestoert(w.db, RuntimeError("HTTP 429")))    # ein neuer einzelner Aussetzer: wieder kein Alarm
+    assert w.run(w.db.betriebsalarme.count_documents({**filt, "offen": True})) == 0

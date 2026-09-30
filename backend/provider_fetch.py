@@ -264,6 +264,45 @@ async def _mit_scrape_bremse(db, ueber_api: bool, holen, url: str) -> Dict[str, 
         await release_slot(db, slot)
 
 
+# Pruefliste 30.09.2026 (Nr. 25): faellt die Kleinanzeigen-API aus, laufen alle Abrufe ueber den langsamen
+# eigenen Abruf (wenige gleichzeitig) — bisher stand das nur im Protokoll. Ab drei Fehlern in Folge gibt es
+# einen Betriebsalarm (hoechstens alle zehn Minuten), der sich schliesst, sobald die API wieder antwortet.
+_KA_API = {"folge": 0, "alarm_am": 0.0, "offen": False}
+KA_API_ALARM_AB = 3
+KA_API_ALARM_ABSTAND_S = 600
+
+
+async def _ka_api_gestoert(db, exc) -> None:
+    import time as _t
+    _KA_API["folge"] += 1
+    if _KA_API["folge"] < KA_API_ALARM_AB or (
+            _KA_API["offen"] and _t.monotonic() - _KA_API["alarm_am"] < KA_API_ALARM_ABSTAND_S):
+        return
+    _KA_API.update(alarm_am=_t.monotonic(), offen=True)
+    try:
+        from betrieb import alarm
+        await alarm(db, "kleinanzeigen_api_gestoert", ref="kleinanzeigen_api", fehler_in_folge=_KA_API["folge"],
+                    detail=str(exc)[:200],
+                    hinweis="Die Kleinanzeigen-API antwortet nicht oder lehnt ab. Die Abrufe laufen ueber den "
+                            "langsameren eigenen Abruf (wenige gleichzeitig) — Schluessel und Guthaben beim "
+                            "Anbieter pruefen.")
+    except Exception:  # noqa: BLE001 — der Alarm ist Beiwerk
+        pass
+
+
+async def _ka_api_wieder_da(db) -> None:
+    if not _KA_API["folge"] and not _KA_API["offen"]:
+        return
+    war_offen = _KA_API["offen"]
+    _KA_API.update(folge=0, offen=False)
+    if war_offen:
+        try:
+            from betrieb import alarm_schliessen
+            await alarm_schliessen(db, "kleinanzeigen_api_gestoert", ref="kleinanzeigen_api")
+        except Exception:  # noqa: BLE001
+            pass
+
+
 async def _abrufen(db, source: str, item_id: str, url: str) -> Dict[str, Any]:
     if source == "kleinanzeigen":
         from kleinanzeigen_service import fetch_kleinanzeigen_vehicle
@@ -278,8 +317,10 @@ async def _abrufen(db, source: str, item_id: str, url: str) -> Dict[str, Any]:
         if ueber_api:
             try:
                 v = await _api.hole_inserat(item_id, url)
+                await _ka_api_wieder_da(db)
             except _api.ApiNichtNutzbar as exc:
                 log.warning("Kleinanzeigen-API nicht nutzbar (%s) — eigener Abruf fuer %s", exc, item_id)
+                await _ka_api_gestoert(db, exc)
         if v is None:
             # Gegenpruefung 12.09.2026 (schwerer Befund): Der aeussere
             # Begrenzungs-Slot wurde bereits nach "API vorhanden" gewaehlt

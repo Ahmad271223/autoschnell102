@@ -654,7 +654,10 @@ def test_12_haertung_reservierung_dedupe_risiko_kva(welt, monkeypatch):
     assert r["basis"] == "bestaetigt_ohne_umfang" and r["assumption_made"] is True and r["kind"] == "repair_estimate"
     assert PB.kva_betrag({"kva_eur": "1.200,50"}) == 1200.5 and PB.kva_betrag({"kva_eur": "3"}) is None
     # --- Quellenqualitaet
-    assert MD.quelle_vertraut("ADAC", "https://www.adac.de/x") and MD.quelle_vertraut("ADAC", "")
+    # 30.09.2026: es zaehlt die Adresse (exakte Domain); der Quellenname allein genuegt nur noch, wenn er
+    # als ganzes Wort auf einen ECHTEN Suchtreffer dieses Laufs passt (tests/test_ki_quellen_20260930.py)
+    assert MD.quelle_vertraut("ADAC", "https://www.adac.de/x") and not MD.quelle_vertraut("ADAC", "")
+    assert MD.quelle_vertraut("ADAC", "", ["adac.de"]) and not MD.quelle_vertraut("ADAC", "", ["foren.example.org"])
     assert not MD.quelle_vertraut("irgendwer", "https://foren.example.org/x") and not MD.quelle_vertraut("blog", "")
     ref = {"low": 300, "high": 3500}
     assert MD.wert_plausibel({"min_eur": 250, "max_eur": 4000}, ref)

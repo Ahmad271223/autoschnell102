@@ -204,7 +204,7 @@ async def json_bewerten(*, system: str, nutzer: Dict[str, Any], schema: Dict[str
     except json.JSONDecodeError as exc:
         antwort.update(status="fehler", grund=f"kein gueltiges JSON: {exc}")
     except Exception as exc:  # noqa: BLE001 — bewusst breit: die KI ist Beiwerk
-        antwort.update(status=_status_aus_ausnahme(exc), grund=f"{type(exc).__name__}: {str(exc)[:200]}")
+        antwort.update(status=_status_aus_ausnahme(exc), grund=grund_aus_ausnahme(exc))
         if nicht_berechnet(exc):
             antwort["nicht_berechnet"] = True
         log.warning("KI-Aufruf gescheitert: %s", antwort["grund"])
@@ -293,6 +293,25 @@ async def _senden(client, versuche: int, **parameter):
                 raise
             log.info("KI-Aufruf: %s — kostenloser zweiter Versuch", type(exc).__name__)
             await asyncio.sleep(_warten_s(exc))
+
+
+LIMIT_ERREICHT = "KI derzeit nicht verfügbar — das Monatslimit beim KI-Anbieter ist erreicht"
+
+
+def grund_aus_ausnahme(exc: BaseException) -> str:
+    """Klartext fuer die Karte und den Betriebsalarm. Kompletter Lauf 30.09.2026: war das beim Anbieter
+    eingestellte Monatslimit erreicht (oder das Guthaben leer), stand dort nur der rohe englische Fehler
+    ("BadRequestError: Error code: 400 …") — weder der Chef noch der Betreiber erkannte, dass nichts kaputt
+    ist, sondern das Limit in der Konsole des Anbieters erhoeht werden muss."""
+    roh = str(exc)
+    klein = roh.lower()
+    if "usage limits" in klein or "credit balance" in klein or "billing" in klein:
+        import re as _re
+        m = _re.search(r"regain access on (\d{4})-(\d{2})-(\d{2})", roh)
+        ab = f" (wieder ab {m.group(3)}.{m.group(2)}.{m.group(1)})" if m else ""
+        return (f"{LIMIT_ERREICHT}{ab}. Betreiber: Limit bzw. Guthaben in der Konsole des Anbieters "
+                "(Anthropic → Limits/Billing) erhöhen.")
+    return f"{type(exc).__name__}: {roh[:200]}"
 
 
 def _status_aus_ausnahme(exc: Exception) -> str:
@@ -485,7 +504,7 @@ async def recherche(*, system: str, frage: str, max_suchen: int = 6,
                        suchen=int(usage.get("web_search_requests") or 0))
         raise
     except Exception as exc:  # noqa: BLE001 — Beiwerk, nie ein 500
-        grund = f"{type(exc).__name__}: {str(exc)[:200]}"
+        grund = grund_aus_ausnahme(exc)
         if kasse is not None and offen_nr and not nicht_berechnet(exc):
             # die gescheiterte Anfrage: ob berechnet, ist offen -> zur Obergrenze gebunden
             kasse.unsicher_buchen(f"recherche#{posten}", float(aktuell.get("obergrenze_ct") or 0), grund)
@@ -511,6 +530,10 @@ HINWEIS_FORTSETZUNG_GESCHEITERT = "Fortsetzung der Websuche gescheitert — Erge
 def _recherche_ok(antwort: KiAntwort, texte: list, zitiert: Dict[str, str], gefunden: Dict[str, str],
                   usage: Dict[str, int]) -> None:
     quellen = zitiert or gefunden
-    antwort.update(status="ok", text="\n".join(t for t in texte if t).strip(),
+    # Pruefliste 30.09.2026: die Rechnernamen ALLER Treffer und Zitate dieses Laufs — daran prueft
+    # ai.marktdaten.recherche_pruefen, ob eine Quelle im Datenblock wirklich belegt ist.
+    from ai.quellen import host_von
+    hosts = sorted({h for h in (host_von(u) for u in list(zitiert) + list(gefunden)) if h})[:80]
+    antwort.update(status="ok", text="\n".join(t for t in texte if t).strip(), hosts=hosts,
                    quellen=[{"url": u, "titel": t[:120]} for u, t in list(quellen.items())[:20]],
                    suchen=int(usage.get("web_search_requests") or 0), usage=usage)

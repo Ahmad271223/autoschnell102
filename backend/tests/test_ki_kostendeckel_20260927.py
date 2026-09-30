@@ -182,7 +182,10 @@ def test_a_alarm_szenario_geplant_ziel_nie_ueber_hart(welt, ki):
     assert len(kl.bewertungen) == 1 and kl.bewertungen[0]["max_tokens"] == _module("ai.provider").KI_MAX_TOKENS
     # die volle Recherche steht im Prompt der Bewertung
     zusatz = kl.bewertungen[0]["system"][1]["text"]
-    assert zusatz.endswith(MD.fall_als_text({"text": doc["recherche"]["text"], "quellen": doc["recherche"]["quellen"]}))
+    # 30.09.2026: der Fall-Text traegt das Pruefergebnis der Webwerte (hier ohne Suchtreffer: "NICHT verwenden")
+    assert zusatz.endswith(MD.fall_als_text({"text": doc["recherche"]["text"], "quellen": doc["recherche"]["quellen"],
+                                             "pruefung": doc["recherche"]["pruefung"]}))
+    assert "NICHT verwenden" in zusatz and doc["recherche"]["pruefung"][0]["belegt"] is False
     # der Puffer Ziel..Hart wurde genutzt, die harte Grenze galt vor dem Aufruf
     assert 15 < kd["obergrenze_ct"] <= 20 - 0.6
     assert _alarme(welt, "ki_kosten_ueberschritten", vid) == [], "zwischen Ziel und Hart kein Alarm"
@@ -461,7 +464,8 @@ def test_e_normalfall_vertrag_unveraendert(welt, ki):
     assert b["max_tokens"] == P.KI_MAX_TOKENS and b["model"] == SONNET
     assert b["system"][0]["text"] == D.SYSTEM_PROMPT and b["system"][0]["cache_control"] == {"type": "ephemeral"}
     doc = welt.run(welt.db.ki_bewertungen.find_one({"id": erg["id"]}, {"_id": 0}))
-    fall_text = MD.fall_als_text({"text": doc["recherche"]["text"], "quellen": doc["recherche"]["quellen"]})
+    fall_text = MD.fall_als_text({"text": doc["recherche"]["text"], "quellen": doc["recherche"]["quellen"],
+                                  "pruefung": doc["recherche"]["pruefung"]})
     assert b["system"][1]["text"].endswith(fall_text), "voller Fall-Text wie bisher"
     assert json.loads(b["messages"][0]["content"])["damages"][0]["id"] == "d1"
     # gleiche Ergebnisse: die Werte der KI-Antwort

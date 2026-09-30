@@ -171,7 +171,10 @@ def test_03_abholung_recherche_je_fall_lernt_und_quellen(welt, monkeypatch):
                 # Review 25.09.2026 abends: unbekannte Quelle und unplausibler Wert werden NICHT gelernt
                 "d1|1|2|1|irgendwer|https://foren.example.org/x\n"
                 "dev:keys|9000|20000|12000|ADAC|https://www.adac.de/y\n")
+        # 30.09.2026: gelernt wird nur, was unter den echten Suchtreffern war — der Lauf traegt deshalb
+        # die Rechnernamen der Treffer (ai.provider: hosts); Autobutler wurde gefunden, aber nicht zitiert
         return {"status": "ok", "grund": "", "text": text, "quellen": QUELLEN, "suchen": 2, "dauer_ms": 9,
+                "hosts": ["adac.de", "autobutler.de", "foren.example.org"],
                 "modell": "attrappe", "usage": {"web_search_requests": 2, "input_tokens": 300}}
     monkeypatch.setattr(MD, "recherche", _recherche)
     monkeypatch.setenv("KI_MARKTANALYSE_ABHOLUNG", "true")
@@ -207,16 +210,27 @@ def test_03_abholung_recherche_je_fall_lernt_und_quellen(welt, monkeypatch):
     keys = {p["key"]: p for p in preise}
     assert keys["delle_klein"]["typisch_eur"] == 160 and keys["delle_klein"]["quelle"] == "ADAC"
     assert keys["keys_fehlt"]["min_eur"] == 250 and keys["keys_fehlt"]["alter_klasse"] == "12+"
-    # die Referenz im Paket traegt danach die eigenen Werte
+    assert keys["delle_klein"]["host"] == "adac.de" and keys["delle_klein"]["fp"].startswith("delle_klein|adac.de|")
+    # 30.09.2026: die Referenz traegt den GEPRUEFTEN Webwert dieses Laufs (vorher: ueber die eigene Datenbank,
+    # schon mit einem einzigen gelernten Wert) — und das Ergebnis sagt je Position, worauf es sich stuetzt
     refs = erg["ergebnis"]["referenzen"]
-    assert refs["d1"]["median"] == 160 and refs["d1"]["source"].startswith("eigene Datenbank")
+    assert refs["d1"]["median"] == 160 and refs["d1"]["source"] == "Websuche (adac.de)" and refs["d1"]["web_geprueft"]
+    assert refs["dev:keys"]["median"] == 300 and refs["dev:keys"]["source"] == "Websuche (autobutler.de)"
+    pruefung = {(z["id"], z["quelle"]): z for z in doc["recherche"]["pruefung"]}
+    assert pruefung[("d1", "irgendwer")]["ok"] is False and pruefung[("d1", "irgendwer")]["vertraut"] is False
+    assert pruefung[("dev:keys", "ADAC")]["plausibel"] is False and pruefung[("dev:keys", "Autobutler")]["ok"] is True
+    assert {v["grund"] for v in doc["recherche"]["verworfen"]} == {"Quelle unbekannt", "unplausibel"}
+    # ein zweiter Lauf mit denselben Treffern lernt nichts doppelt (Fingerabdruck)
+    assert welt.run(MD.lernen_aus_recherche({"status": "ok", "text": doc["recherche"]["text"],
+                                             "hosts": ["adac.de", "autobutler.de"]}, doc["eingabe"], "abholung")) == 0
+    assert welt.run(welt.db.ki_reparaturpreise.count_documents({"marke": "bmw"})) == 2
     # genug eigene Werte (EIGENE_MIN aus >= 2 Quellen, Review 26.09.2026 Nr. 19/20)
     # -> keine Suche mehr fuer diese Positionen; Stufe Marke + Altersklasse
     for i in range(MD.EIGENE_MIN):
         welt.run(welt.db.ki_reparaturpreise.insert_many([
-            {"key": "delle_klein", "typ": "delle", "marke": "bmw", "alter_klasse": "12+", "min_eur": 100, "max_eur": 200,
+            {"key": "delle_klein", "typ": "delle", "marke": "bmw", "alter_klasse": "12+", "min_eur": 100 + i, "max_eur": 200,
              "typisch_eur": 150, "quelle": "ADAC" if i % 2 else "FairGarage", "stand": _jetzt(), "art": "abholung"},
-            {"key": "keys_fehlt", "typ": "keys", "marke": "bmw", "alter_klasse": "12+", "min_eur": 200, "max_eur": 400,
+            {"key": "keys_fehlt", "typ": "keys", "marke": "bmw", "alter_klasse": "12+", "min_eur": 200 + i, "max_eur": 400,
              "typisch_eur": 300, "quelle": "x" if i % 2 else "y", "stand": _jetzt(), "art": "abholung"}]))
     grund = welt.run(K._grundlagen(pid, w.dealer_id))
     paket = K.paket_bauen(*grund)

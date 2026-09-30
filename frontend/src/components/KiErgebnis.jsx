@@ -71,6 +71,15 @@ export default function KiErgebnis({ erg, kaufpreis, basisText, testPrefix, onPr
                     {[it.repair_method, it.reason].filter(Boolean).join(" — ")}
                   </div>
                 )}
+                {/* Prüfliste 30.09.2026: worauf stützt sich der Wert? Ein Startwert soll nicht so belastbar
+                    wirken wie ein mit Quelle belegter Webwert. */}
+                {it.grundlage?.text && (
+                  <div className="mt-0.5 text-[10.5px]" data-testid={`${testPrefix}-grundlage-${it.source_id}`}
+                       data-art={it.grundlage.art}
+                       style={{ color: it.grundlage.art === "start" ? "var(--st-amber)" : "var(--text-dim)" }}>
+                    Grundlage: {it.grundlage.text}
+                  </div>
+                )}
               </li>
             ))}
           </ul>

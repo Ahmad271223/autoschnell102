@@ -229,8 +229,9 @@ def test_05_marktdaten_karte_nur_eigener_bereich(welt, monkeypatch):
 
 
 # ------------------------------------------------ K6 eigene Referenzen in Stufen
-def _preis(key, *, marke="testmarke", modell="Alpha 2.0", alter="3-7", quelle="ADAC", stand=None, typisch=150):
-    return {"key": key, "typ": "delle", "marke": marke, "modell": modell, "alter_klasse": alter, "min_eur": 80,
+def _preis(key, *, nr=0, marke="testmarke", modell="Alpha 2.0", alter="3-7", quelle="ADAC", stand=None, typisch=150):
+    # 30.09.2026: gezaehlt werden BELEGE (je Quelle und Preisband einer) — `nr` macht die Werte verschieden
+    return {"key": key, "typ": "delle", "marke": marke, "modell": modell, "alter_klasse": alter, "min_eur": 80 + nr,
             "max_eur": 250, "typisch_eur": typisch, "quelle": quelle, "url": "", "art": "vertrag",
             "stand": stand or _jetzt()}
 
@@ -255,34 +256,34 @@ def test_06_eigene_referenzen_stufen_quellen_und_frist(welt):
         return welt.run(MD.eigene_referenzen(paket, "vertrag"))
 
     # (1) Marke + Modell + Altersklasse, 5 Werte, 2 Quellen -> reicht
-    e = _setzen([_preis(key, quelle="ADAC" if i % 2 else "FairGarage") for i in range(5)])
+    e = _setzen([_preis(key, nr=i, quelle="ADAC" if i % 2 else "FairGarage") for i in range(5)])
     assert e[key]["stufe"] == "marke_modell_alter" and e[key]["reicht"] is True and e[key]["n"] == 5
     assert e[key]["quellen_n"] == 2 and "testmarke" in e[key]["source"]
     assert MD.recherche_noetig(paket, "vertrag", e) == []
     # nur 4 Werte -> Anhalt aus der engsten Stufe, aber es wird weiter gesucht
-    e = _setzen([_preis(key, quelle="ADAC" if i % 2 else "FairGarage") for i in range(4)])
+    e = _setzen([_preis(key, nr=i, quelle="ADAC" if i % 2 else "FairGarage") for i in range(4)])
     assert e[key]["stufe"] == "marke_modell_alter" and e[key]["reicht"] is False
     assert [p["id"] for p in MD.recherche_noetig(paket, "vertrag", e)] == ["d1"]
     # 5 Werte, aber nur EINE Quelle (auch mit Zusatz) -> reicht nicht
-    e = _setzen([_preis(key, quelle="ADAC, netto 2024" if i % 2 else "ADAC") for i in range(5)])
+    e = _setzen([_preis(key, nr=i, quelle="ADAC, netto 2024" if i % 2 else "ADAC") for i in range(5)])
     assert e[key]["reicht"] is False and e[key]["quellen_n"] == 1
     # (2) anderes Modell, gleiche Marke und Altersklasse
-    e = _setzen([_preis(key, modell="Beta 1.6", quelle="ADAC" if i % 2 else "FairGarage") for i in range(5)])
+    e = _setzen([_preis(key, nr=i, modell="Beta 1.6", quelle="ADAC" if i % 2 else "FairGarage") for i in range(5)])
     assert e[key]["stufe"] == "marke_alter" and e[key]["reicht"] is True and e[key]["nur_marke"] is True
     # (3) andere Altersklasse, gleiche Marke
-    e = _setzen([_preis(key, alter="12+", quelle="ADAC" if i % 2 else "FairGarage") for i in range(5)])
+    e = _setzen([_preis(key, nr=i, alter="12+", quelle="ADAC" if i % 2 else "FairGarage") for i in range(5)])
     assert e[key]["stufe"] == "marke" and e[key]["reicht"] is True
     # (4) andere Marke -> alle
-    e = _setzen([_preis(key, marke="andere", quelle="ADAC" if i % 2 else "FairGarage") for i in range(5)])
+    e = _setzen([_preis(key, nr=i, marke="andere", quelle="ADAC" if i % 2 else "FairGarage") for i in range(5)])
     assert e[key]["stufe"] == "alle" and e[key]["reicht"] is True and e[key]["nur_marke"] is False
     # Stufe 1 gewinnt vor Stufe 2, auch wenn Stufe 2 mehr Werte hat
-    e = _setzen([_preis(key, quelle="ADAC" if i % 2 else "FairGarage", typisch=100) for i in range(5)]
-                + [_preis(key, modell="Beta 1.6", quelle="ADAC" if i % 2 else "FairGarage", typisch=500) for i in range(9)])
+    e = _setzen([_preis(key, nr=i, quelle="ADAC" if i % 2 else "FairGarage", typisch=100) for i in range(5)]
+                + [_preis(key, nr=i, modell="Beta 1.6", quelle="ADAC" if i % 2 else "FairGarage", typisch=500) for i in range(9)])
     assert e[key]["stufe"] == "marke_modell_alter" and e[key]["median"] == 100
     # aelter als 120 Tage zaehlt nicht
-    e = _setzen([_preis(key, quelle="ADAC" if i % 2 else "FairGarage", stand=_vor_tagen(121)) for i in range(5)])
+    e = _setzen([_preis(key, nr=i, quelle="ADAC" if i % 2 else "FairGarage", stand=_vor_tagen(121)) for i in range(5)])
     assert key not in e
-    e = _setzen([_preis(key, quelle="ADAC" if i % 2 else "FairGarage", stand=_vor_tagen(119)) for i in range(5)])
+    e = _setzen([_preis(key, nr=i, quelle="ADAC" if i % 2 else "FairGarage", stand=_vor_tagen(119)) for i in range(5)])
     assert e[key]["reicht"] is True
     welt.run(db.ki_reparaturpreise.delete_many({"key": key}))
 

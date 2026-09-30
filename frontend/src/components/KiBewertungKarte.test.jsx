@@ -23,7 +23,8 @@ const FERTIG = {
     items: [{ source_id: "d1", category: "damage", title: "Delle Kotflügel vorne rechts", priority: "orange",
               repair_method: "Ausbeulen ohne Lackieren", repair_estimate_eur: 150, minimum_justified_eur: 80,
               fair_discount_eur: 130, best_realistic_eur: 160, negotiation_start_eur: 220,
-              manual_review_required: false, reason: "Kleine Delle ohne Lackschaden." }],
+              manual_review_required: false, reason: "Kleine Delle ohne Lackschaden.",
+              grundlage: { art: "web", text: "Web geprüft: adac.de" } }],
     combined: { sum_fair_eur: 130, overlap_adjustment_eur: 0, minimum_justified_eur: 80, fair_discount_eur: 130,
                 best_realistic_eur: 160, negotiation_start_eur: 220, deal_risk: "normal",
                 manual_review_required: false, recommended_purchase_price_eur: 7970,
@@ -68,6 +69,9 @@ describe("KiBewertungKarte", () => {
     expect(api.get).toHaveBeenCalledTimes(1);
     expect(api.get.mock.calls[0][0]).toBe("/protocols/p1/ki-bewertung");
     expect(el("ki-karte-p1").dataset.status).toBe("ok");
+    // 30.09.2026: je Position steht, worauf sich der Wert stützt
+    expect(el("ki-p1-grundlage-d1").textContent).toBe("Grundlage: Web geprüft: adac.de");
+    expect(el("ki-p1-grundlage-d1").dataset.art).toBe("web");
     // Neu berechnen: sofort "laeuft" vom Server, kein Warten in der Anfrage
     // (jede Antwort ein eigenes Objekt, wie vom Netz)
     api.get.mockResolvedValueOnce({ data: { ...LAEUFT } });
