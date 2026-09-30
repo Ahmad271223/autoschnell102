@@ -4070,3 +4070,17 @@ des Chefs) plus Zeitstempel/Name/Herkunftsadresse → Sucher und Chef sehen „K
 Unterschrift des Kunden liegt privat unter `portal/`, die des Chefs unter `unterschrift/` (nie über `/api/files`).
 Datenschutz: Zeitpunkt, Name und IP-Adresse der Unterschrift werden als Nachweis im Vertrag und im Audit
 (`vertrag.portal.*`) gespeichert — in die Datenschutzerklärung aufnehmen (Rechtstexte stehen ohnehin noch aus).
+
+**Unterschrift gilt nur für ihre Fassung (Kompletter Lauf 30.09.2026):** Unterschreibt der Kunde online und entsteht
+danach eine neue Fassung (Preis bei der Abholung geändert, Termin verschoben), zeigt die App nicht mehr „digital
+unterschrieben“, sondern „Unterschrift nur für Fassung N“ (Vertragsliste, Dialog, Meldung an Sucher und Chef). Die
+unterschriebene frühere Fassung wandert samt Nachweis ins Archiv und bleibt abrufbar
+(`GET /contracts/{id}/portal/pdf?fassung=N`); für die neue Fassung lässt sich ein neuer Code erzeugen. Beim Löschen
+eines Vertrags gehen die Unterschriftsbilder des Kunden (`portal/…`) und die Meldungen dazu mit.
+
+**Kompletter Durchlauf als Test:** `frontend/e2e/kompletter-lauf.spec.js` spielt ein Fahrzeug durch alle Rollen
+(Betreiber → Chef → Sucher → Kunde → Fahrer → Freigabe → Abschluss) und läuft in der CI mit. Die KI ist dort aus
+(kein Schlüssel). Lokal mit echter KI-Abholbewertung: Backend mit `KI_BEWERTUNG_AKTIV=true` und Schlüssel auf einer
+Wegwerf-Datenbank starten, dann `E2E_KI=1 npx playwright test e2e/kompletter-lauf.spec.js` — kostet je Lauf rund
+10 Cent. Achtung: ein frisches Backend mit eingeschalteter KI baut beim ersten Aufräumlauf einmal die Markttabelle
+(`ki_marktdaten`, rund 1 €).

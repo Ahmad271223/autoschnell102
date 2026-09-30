@@ -14,6 +14,7 @@ const STATUS_TEXT = {
   keiner: "Noch kein Code erzeugt.",
   offen: "Code ist aktiv — der Kunde kann ihn jetzt auf der Firmenseite eingeben.",
   unterschrieben: "Der Kunde hat den Vertrag digital unterschrieben.",
+  unterschrieben_alt: "Der Vertrag wurde nach der Unterschrift des Kunden geändert — die Unterschrift gilt nur für die frühere Fassung.",
   abgelaufen: "Der Code ist abgelaufen — bitte einen neuen erzeugen.",
   fassung_veraltet: "Der Vertrag wurde seitdem neu erstellt — der alte Code gilt nicht mehr, bitte einen neuen erzeugen.",
   zurueckgezogen: "Der Code wurde zurückgezogen.",
@@ -23,6 +24,16 @@ function datum(iso) {
   if (!iso) return "";
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? String(iso) : d.toLocaleString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+/**
+ * Gilt die digitale Unterschrift des Kunden für die AKTUELLE Fassung ("aktuell"), nur für eine frühere
+ * ("alt" — der Vertrag wurde danach geändert, z. B. Preis bei der Abholung) oder gibt es keine ("")?
+ */
+export function portalUnterschrift(vertrag) {
+  if (!vertrag?.kunde_unterschrieben_am) return "";
+  const unterschrieben = Number(vertrag.pdf_signiert_version || vertrag.portal?.version || 1);
+  return unterschrieben === Number(vertrag.version || 1) ? "aktuell" : "alt";
 }
 
 export async function inZwischenablage(text) {
@@ -133,6 +144,21 @@ export default function KundenportalDialog({ open, contract, onClose }) {
                     className="apple-btn apple-btn-secondary !rounded-full !px-4 !py-2 text-sm inline-flex items-center gap-2 mt-3"
                     data-testid="kundenportal-pdf">
               <ExternalLink size={14} /> Unterschriebenen Vertrag öffnen
+            </button>
+          </div>
+        )}
+
+        {status !== "unterschrieben" && s.unterschrieben_version && s.unterschrieben_version !== (s.aktuelle_version || 1) && (
+          <div className="rounded-2xl p-4" style={{ background: "rgba(255,159,10,0.10)", border: "1px solid rgba(255,159,10,0.35)" }} data-testid="kundenportal-unterschrieben-alt">
+            <div className="font-semibold">Unterschrieben wurde Fassung {s.unterschrieben_version} — aktuell ist Fassung {s.aktuelle_version}</div>
+            <div className="text-[12.5px] text-zinc-500 mt-1">
+              Die neue Fassung trägt noch keine Unterschrift des Kunden. Erzeugt einen neuen Code oder lasst vor Ort unterschreiben.
+              Die unterschriebene frühere Fassung bleibt als Nachweis erhalten.
+            </div>
+            <button onClick={() => openAuthedFile(`/contracts/${contract.id}/portal/pdf?fassung=${s.unterschrieben_version}`)}
+                    className="apple-btn apple-btn-secondary !rounded-full !px-4 !py-2 text-sm inline-flex items-center gap-2 mt-3"
+                    data-testid="kundenportal-pdf-alt">
+              <ExternalLink size={14} /> Unterschriebene Fassung {s.unterschrieben_version} öffnen
             </button>
           </div>
         )}

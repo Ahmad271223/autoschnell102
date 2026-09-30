@@ -1336,6 +1336,24 @@ async def _grabstein_zuruecknehmen(db, contract_id: str, gestartet: str) -> None
         {"$unset": {"loeschung": ""}})
 
 
+async def _portal_unterschriften_entfernen(db, contract_id: str, dealer_id: Optional[str]) -> int:
+    """Unterschriftsbilder aus dem Kundenportal (Vertrag + archivierte Fassungen) loeschen bzw. vormerken
+    und die Meldungen zum Vertrag entfernen. Idempotent; liefert die Zahl der behandelten Bilder."""
+    keys = set()
+    haupt = await db.generated_pdfs.find_one({"id": contract_id}, {"_id": 0, "portal.unterschrift_key": 1})
+    if ((haupt or {}).get("portal") or {}).get("unterschrift_key"):
+        keys.add(haupt["portal"]["unterschrift_key"])
+    async for v in db.generated_pdf_versions.find(
+            {"contract_id": contract_id, "portal.unterschrift_key": {"$type": "string"}},
+            {"_id": 0, "portal.unterschrift_key": 1}):
+        keys.add(v["portal"]["unterschrift_key"])
+    for key in sorted(keys):
+        await loeschen_oder_vormerken(db, key=key, grund="vertrag_geloescht_portal_unterschrift",
+                                      dealer_id=dealer_id or "", ref={"contract_id": contract_id})
+    await db.meldungen.delete_many({"ref": contract_id})
+    return len(keys)
+
+
 async def vertrag_endgueltig_loeschen(db, contract_id: str, *, scrub_pii: bool,
                                       grund: str, audit: bool = True,
                                       vor_kaskade=None) -> bool:
@@ -1410,6 +1428,10 @@ async def vertrag_endgueltig_loeschen(db, contract_id: str, *, scrub_pii: bool,
         if ablehnung:
             await _grabstein_zuruecknehmen(db, contract_id, jetzt)
             raise LoeschungAbgelehnt(str(ablehnung))
+    # 0c) Kundenportal (Kompletter Lauf 30.09.2026): das Unterschriftsbild des Kunden liegt im Speicher
+    #     (portal/<firma>/…) — am Vertrag und an archivierten Fassungen. Es blieb nach der Loeschung
+    #     fuer immer liegen. Jetzt geht es mit dem Vertrag; ebenso die In-App-Meldungen (Kundenname).
+    await _portal_unterschriften_entfernen(db, contract_id, dealer_id)
     # 1) Vorversionen
     await db.generated_pdf_versions.delete_many({"contract_id": contract_id})
     await db.versand_schluessel.delete_many({"contract_id": contract_id})

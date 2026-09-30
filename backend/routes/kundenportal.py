@@ -691,7 +691,14 @@ def _portal_antwort(c: dict, slug: str) -> dict:
     status = p.get("status") or "keiner"
     if status == "offen" and not portal_offen(p, version):
         status = "abgelaufen" if int(p.get("version") or 0) == version else "fassung_veraltet"
+    # Kompletter Lauf 30.09.2026: unterschreibt der Kunde online und aendert der Chef danach bei der Abholung den
+    # Preis (neue Fassung), gehoert die Unterschrift zur ALTEN Fassung — das muss die App sagen, statt weiter
+    # "digital unterschrieben" zu zeigen. Die alte unterschriebene Fassung bleibt abrufbar.
+    if status == "unterschrieben" and int(p.get("version") or 0) != version:
+        status = "unterschrieben_alt"
     return {"status": status, "code": p.get("code") if status == "offen" else None,
+            "unterschrieben_version": ((int(c.get("pdf_signiert_version") or 0) or None)
+                                       if c.get("pdf_signiert_b64") else None),
             "laeuft_ab": p.get("laeuft_ab"), "version": p.get("version"), "aktuelle_version": version,
             "unterschrieben_am": p.get("unterschrieben_am"), "name": p.get("name"),
             "url": firmen_url(slug) if slug else "", "slug": slug,
@@ -702,7 +709,7 @@ async def _vertrag_und_slug(contract_id: str, user: dict) -> tuple:
     from routes.contracts import _vertrag_bereich
     c = await db.generated_pdfs.find_one({"id": contract_id, **_vertrag_bereich(user)},
                                          {"_id": 0, "id": 1, "version": 1, "portal": 1, "contract_no": 1,
-                                          "pdf_signiert_b64": 1, "user_id": 1})
+                                          "pdf_signiert_b64": 1, "pdf_signiert_version": 1, "user_id": 1})
     if c is None:
         raise HTTPException(404, "Vertrag nicht gefunden")
     d = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0, "webseite": 1})
@@ -722,7 +729,7 @@ async def portal_freigeben(contract_id: str, user=Depends(current_firma)):
     for _ in range(6):
         c = await db.generated_pdfs.find_one({"id": contract_id, **bereich},
                                              {"_id": 0, "id": 1, "version": 1, "portal": 1, "contract_no": 1,
-                                              "pdf_signiert_b64": 1})
+                                              "pdf_signiert_b64": 1, "pdf_signiert_version": 1})
         if c is None:
             raise HTTPException(404, "Vertrag nicht gefunden")
         version = int(c.get("version") or 1)
@@ -771,20 +778,30 @@ async def portal_zurueckziehen(contract_id: str, user=Depends(current_firma)):
 
 
 @router.get("/contracts/{contract_id}/portal/pdf")
-async def portal_pdf(contract_id: str, user=Depends(current_firma)):
-    """Der vom Kunden unterschriebene Vertrag (PDF mit beiden Unterschriften)."""
+async def portal_pdf(contract_id: str, fassung: Optional[int] = None, user=Depends(current_firma)):
+    """Der vom Kunden unterschriebene Vertrag (PDF mit beiden Unterschriften). Ohne `fassung` die zuletzt
+    unterschriebene; mit `fassung` genau diese (auch eine aeltere aus dem Archiv, 30.09.2026)."""
     from routes.contracts import _vertrag_bereich
     from vertrag_dateiname import content_disposition
     c = await db.generated_pdfs.find_one({"id": contract_id, **_vertrag_bereich(user)},
-                                         {"_id": 0, "pdf_signiert_b64": 1, "contract_no": 1, "portal.version": 1})
+                                         {"_id": 0, "pdf_signiert_b64": 1, "pdf_signiert_version": 1,
+                                          "contract_no": 1, "version": 1})
     if c is None:
         raise HTTPException(404, "Vertrag nicht gefunden")
-    if not c.get("pdf_signiert_b64"):
+    b64, version = c.get("pdf_signiert_b64"), int(c.get("pdf_signiert_version") or c.get("version") or 1)
+    if fassung is not None and (not b64 or int(fassung) != version):
+        alt = await db.generated_pdf_versions.find_one(
+            {"contract_id": contract_id, "version": int(fassung), "pdf_signiert_b64": {"$type": "string"}},
+            {"_id": 0, "pdf_signiert_b64": 1})
+        b64, version = (alt or {}).get("pdf_signiert_b64"), int(fassung)
+    if not b64:
         raise HTTPException(404, "Noch keine Unterschrift des Kunden")
-    return Response(content=base64.b64decode(c["pdf_signiert_b64"]), media_type="application/pdf",
-                    headers={"Content-Disposition": content_disposition(
-                                 f"Kaufvertrag-{c.get('contract_no') or contract_id}-unterschrieben.pdf"),
-                             "Cache-Control": "no-store"})
+    aktuell = version == int(c.get("version") or 1)
+    zusatz = "" if aktuell else f"-Fassung-{version}"
+    name = f"Kaufvertrag-{c.get('contract_no') or contract_id}{zusatz}-unterschrieben.pdf"
+    return Response(content=base64.b64decode(b64), media_type="application/pdf",
+                    headers={"Content-Disposition": content_disposition(name),
+                             "X-Vertrag-Version": str(version), "Cache-Control": "no-store"})
 
 
 # ---------------------------------------------------------------- Kundenportal (oeffentlich)

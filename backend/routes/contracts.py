@@ -2225,7 +2225,7 @@ async def list_contract_versions(contract_id: str, response: Response,
     # zeigt den Hinweis auf X-Truncated.
     fassungen = await db.generated_pdf_versions.find(
         {"contract_id": contract_id, "dealer_id": user["dealer_id"]},
-        {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0, "pdf_signiert_b64": 0, "contract_data": 0},
+        {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0, "pdf_signiert_b64": 0, "contract_data": 0, "portal": 0},
     ).sort("version", -1).to_list(grenze + 1)
     response.headers["X-Truncated"] = "1" if len(fassungen) > grenze else "0"
     fassungen = list(reversed(fassungen[:grenze]))
@@ -3533,6 +3533,33 @@ def _inhalt(vertragsdaten: dict) -> dict:
     return {k: w for k, w in (vertragsdaten or {}).items() if k not in FASSUNGS_FELDER}
 
 
+def _portal_nachweis(doc: dict, version: int) -> dict:
+    """Unterschrift des Kunden (Kundenportal) fuer GENAU diese Fassung — sonst leer."""
+    if not doc.get("pdf_signiert_b64") or int(doc.get("pdf_signiert_version") or 0) != int(version or 1):
+        return {}
+    return {"pdf_signiert_b64": doc.get("pdf_signiert_b64"),
+            "pdf_signiert_sha256": doc.get("pdf_signiert_sha256"),
+            "kunde_unterschrieben_am": doc.get("kunde_unterschrieben_am"),
+            "portal": doc.get("portal")}
+
+
+async def _meldung_unterschrift_veraltet(doc: dict, dealer_id: str, alte_version: int) -> None:
+    """In-App-Meldung an Sucher und Chef; darf die Neuerzeugung nie scheitern lassen."""
+    try:
+        from routes.kundenportal import meldung_anlegen
+        firma = await db.dealers.find_one({"id": dealer_id}, {"_id": 0, "user_id": 1}) or {}
+        empfaenger = [u for u in {firma.get("user_id"), doc.get("user_id")} if u]
+        nr = doc.get("contract_no") or ""
+        await meldung_anlegen(
+            dealer_id, empfaenger, "vertrag_unterschrift_veraltet",
+            (f"Kaufvertrag {nr} wurde geändert (Fassung {alte_version + 1}). Die digitale Unterschrift des Kunden "
+             f"gilt nur für Fassung {alte_version} — für die neue Fassung bitte einen neuen Code erzeugen "
+             f"oder vor Ort unterschreiben lassen.").replace("  ", " "),
+            ref=doc.get("id"), contract_no=nr or None)
+    except Exception:  # noqa: BLE001
+        log.exception("Meldung 'Unterschrift veraltet' fuer Vertrag %s nicht angelegt", doc.get("id"))
+
+
 def _fassung_kennzeichnen(contract_dict: dict, doc: dict, neue_version: int) -> None:
     """Rollenpruefung 22.09.2026 (RP-494): Eine neue Fassung trug dieselbe
     Vertragsnummer, "erstellt am <heute>" und z. B. einen anderen Preis —
@@ -3892,6 +3919,10 @@ async def regenerate_contract_for_pickup(
                 "archived_at": now_iso(),
                 "archived_by": user.get("id"),
                 "grund": grund,
+                # Kompletter Lauf 30.09.2026: hat der Kunde GENAU diese Fassung im Kundenportal
+                # unterschrieben, wandert das unterschriebene PDF samt Nachweis (Name, Zeit, Adresse)
+                # mit ins Archiv — die neue Fassung ist NICHT unterschrieben, die alte bleibt belegbar.
+                **_portal_nachweis(doc, alte_version),
             }},
             upsert=True)
         archiv_angelegt = archiv_res.upserted_id is not None
@@ -3990,6 +4021,10 @@ async def regenerate_contract_for_pickup(
     await log_activity_sicher(dealer_id, user.get("id", ""), "vertrag.abholtermin.geaendert",
                               ref=contract_id,
                               meta={"von": alt_datum, "auf": neu_datum})
+    # Kompletter Lauf 30.09.2026: Der Kunde hatte die VORIGE Fassung online unterschrieben — Sucher
+    # und Chef erfahren in der App, dass die neue Fassung keine Unterschrift traegt.
+    if _portal_nachweis(doc, alte_version):
+        await _meldung_unterschrift_veraltet(doc, dealer_id, alte_version)
     if ergebnis is not None:
         ergebnis["grund"] = "neu"
     return True

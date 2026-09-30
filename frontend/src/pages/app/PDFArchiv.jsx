@@ -10,7 +10,7 @@ import BeweisCard from "@/components/BeweisCard";
 import SendDialog, { abholterminAnlegen, TERMIN_MELDUNG } from "@/components/SendDialog";
 import FolgeMailDialog from "@/components/FolgeMailDialog";
 import VerkaeuferKorrekturDialog from "@/components/VerkaeuferKorrekturDialog";
-import KundenportalDialog from "@/components/KundenportalDialog";
+import KundenportalDialog, { portalUnterschrift } from "@/components/KundenportalDialog";
 
 // Rollenprüfung 22.09.2026 (RP-007/RP-106/RP-257): Verträge je Seite.
 export const ARCHIV_SEITE = 50;
@@ -295,7 +295,7 @@ export default function PDFArchiv() {
                         </span>
                       )}
                       {/* Kundenportal (29.09.2026): Stand der digitalen Unterschrift */}
-                      {it.kunde_unterschrieben_am ? (
+                      {portalUnterschrift(it) === "aktuell" ? (
                         <span className="text-[11px] font-semibold px-2 py-1 rounded-full" data-testid={`portal-badge-${it.id}`}
                               title={`Vom Kunden digital unterschrieben am ${new Date(it.kunde_unterschrieben_am).toLocaleString("de-DE")}`}
                               style={{ background: "rgba(48,209,88,0.12)", border: "1px solid rgba(48,209,88,0.35)", color: "#30d158" }}>
@@ -306,6 +306,13 @@ export default function PDFArchiv() {
                               title="Code für das Kundenportal ist aktiv — der Kunde kann unterschreiben"
                               style={{ background: "rgba(255,159,10,0.12)", border: "1px solid rgba(255,159,10,0.35)", color: "var(--tx-amber, #ffb340)" }}>
                           Code offen
+                        </span>
+                      ) : portalUnterschrift(it) === "alt" ? (
+                        /* Kompletter Lauf 30.09.2026: der Vertrag wurde NACH der Unterschrift geändert */
+                        <span className="text-[11px] font-semibold px-2 py-1 rounded-full" data-testid={`portal-badge-${it.id}`}
+                              title={`Der Kunde hat Fassung ${it.pdf_signiert_version || 1} digital unterschrieben — der Vertrag wurde danach geändert (Fassung ${it.version || 1}). Für die neue Fassung einen neuen Code erzeugen oder vor Ort unterschreiben lassen.`}
+                              style={{ background: "rgba(255,159,10,0.12)", border: "1px solid rgba(255,159,10,0.35)", color: "var(--tx-amber, #ffb340)" }}>
+                          Unterschrift nur für Fassung {it.pdf_signiert_version || 1}
                         </span>
                       ) : null}
                     </div>
@@ -397,10 +404,10 @@ export default function PDFArchiv() {
                       <button onClick={() => setPortal(it)}
                               data-testid={`kundenportal-${it.id}`}
                               className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-white/10"
-                              style={{ background: it.kunde_unterschrieben_am ? "rgba(48,209,88,0.18)" : "var(--apple-btn-secondary-bg)",
-                                       color: it.kunde_unterschrieben_am ? "#30d158" : "var(--text-primary)" }}
+                              style={{ background: portalUnterschrift(it) === "aktuell" ? "rgba(48,209,88,0.18)" : "var(--apple-btn-secondary-bg)",
+                                       color: portalUnterschrift(it) === "aktuell" ? "#30d158" : "var(--text-primary)" }}
                               aria-label="Kundenportal — digital unterschreiben lassen"
-                              title={it.kunde_unterschrieben_am ? "Vom Kunden digital unterschrieben — Vertrag öffnen"
+                              title={portalUnterschrift(it) === "aktuell" ? "Vom Kunden digital unterschrieben — Vertrag öffnen"
                                 : "Kundenportal: Code erzeugen, damit der Kunde den Vertrag auf eurer Firmenseite digital unterschreibt"}>
                         <PenLine size={16} />
                       </button>

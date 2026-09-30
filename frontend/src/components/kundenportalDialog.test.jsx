@@ -20,7 +20,7 @@ vi.mock("@/lib/api", () => ({
 }));
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-const { default: KundenportalDialog } = await import("./KundenportalDialog");
+const { default: KundenportalDialog, portalUnterschrift } = await import("./KundenportalDialog");
 
 const VERTRAG = { id: "c1", contract_no: "KV-1", make: "VW", model: "Golf", version: 1, seller_name: "Erika Mustermann" };
 let wurzel = null;
@@ -80,6 +80,33 @@ describe("KundenportalDialog", () => {
     expect(el("kundenportal-erzeugen")).toBeNull();
     await klick("kundenportal-pdf");
     expect(openAuthedFile).toHaveBeenCalledWith("/contracts/c1/portal/pdf");
+  });
+
+  it("Vertrag nach der Unterschrift geändert: Hinweis, frühere Fassung öffnen, neuer Code möglich (30.09.2026)", async () => {
+    let stand = { status: "unterschrieben_alt", unterschrieben_version: 1, aktuelle_version: 2, version: 1,
+                  unterschrieben_am: "2026-09-29T10:00:00+00:00", name: "Erika Mustermann", pdf_signiert: true, url: "https://x", code: null };
+    get.mockImplementation(async () => ({ data: stand }));
+    post.mockImplementation(async () => {
+      stand = { ...stand, status: "offen", code: "N3WC0D".replace("0", "Q"), version: 2, laeuft_ab: "2026-10-07T10:00:00+00:00" };
+      return { data: stand };
+    });
+    await rendern({ contract: { ...VERTRAG, version: 2 } });
+    expect(el("kundenportal-status").textContent).toContain("nach der Unterschrift des Kunden geändert");
+    expect(el("kundenportal-unterschrieben")).toBeNull();                 // kein grünes "unterschrieben"
+    expect(el("kundenportal-unterschrieben-alt").textContent).toContain("Unterschrieben wurde Fassung 1 — aktuell ist Fassung 2");
+    await klick("kundenportal-pdf-alt");
+    expect(openAuthedFile).toHaveBeenCalledWith("/contracts/c1/portal/pdf?fassung=1");
+    await klick("kundenportal-erzeugen");                                  // neuer Code für Fassung 2
+    expect(el("kundenportal-code").textContent).toBe("N3WCQD");
+    expect(el("kundenportal-unterschrieben-alt")).toBeTruthy();           // der Nachweis bleibt sichtbar
+  });
+
+  it("portalUnterschrift: aktuell, alt oder keine", () => {
+    expect(portalUnterschrift({})).toBe("");
+    expect(portalUnterschrift({ kunde_unterschrieben_am: "x", pdf_signiert_version: 1, version: 1 })).toBe("aktuell");
+    expect(portalUnterschrift({ kunde_unterschrieben_am: "x", pdf_signiert_version: 1 })).toBe("aktuell");
+    expect(portalUnterschrift({ kunde_unterschrieben_am: "x", pdf_signiert_version: 1, version: 2 })).toBe("alt");
+    expect(portalUnterschrift({ kunde_unterschrieben_am: "x", pdf_signiert_version: 2, version: 2, portal: { version: 2 } })).toBe("aktuell");
   });
 
   it("ohne Firmenseite: Hinweis mit Link zu den Einstellungen", async () => {
