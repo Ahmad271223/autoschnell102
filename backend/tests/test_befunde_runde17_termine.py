@@ -730,8 +730,11 @@ def test_10_new_damages_typisiert(welt):
         return await db.pickup_protocols.find_one({"appointment_id": aid}, {"_id": 0, "new_damages": 1})
 
     doc = welt.run(lauf())
-    assert doc["new_damages"] == [{"view": "front", "zone": "tuer_vl", "x": 10.0, "y": 20.0,
-                                   "type_label": "Kratzer", "type_key": "kratzer"}]
+    # 30.09.2026: ein Schaden ohne id bekommt beim Speichern eine vom Server (KI-Zuordnung je Position)
+    schaden = dict(doc["new_damages"][0])
+    assert schaden.pop("id").startswith("n-") and len(doc["new_damages"]) == 1
+    assert schaden == {"view": "front", "zone": "tuer_vl", "x": 10.0, "y": 20.0,
+                       "type_label": "Kratzer", "type_key": "kratzer"}
 
 
 # ================================================= Nr. 11: Korrektur verwerfen
