@@ -59,68 +59,25 @@ DIGITAL_VERTRAGSTEXT_STANDARD = (
     "2. Mündliche und schriftliche Absagen sind nach Vertragsbestätigung "
     "aufgrund anfallender Kosten nicht wirksam.\n\n"
     "3. Der/Die Verkäufer*in bestätigt, dass die oben festgehaltenen Daten "
-    "überprüft wurden und ihrer Richtigkeit entsprechen."
+    "überprüft wurden und ihrer Richtigkeit entsprechen.\n\n"
+    # Klarstellung Ahmad 01.10.2026: Punkt 4 BLEIBT im Standardtext — weg ist nur die zusaetzliche
+    # Zeile "Dieser Vertrag ist ohne Unterschrift gültig." ganz unten in der Online-Fassung.
+    "4. Dieser Vertrag ist rechtskräftig, verbindlich und auch ohne "
+    "Unterschrift gültig."
 )
-# Wunsch Ahmad 01.10.2026: der fruehere Punkt 4 ("Dieser Vertrag ist rechtskräftig, verbindlich und auch
-# ohne Unterschrift gültig.") steht in keinem Vertragstext mehr — nicht im Standard, nicht im Bestand
-# (Migration 22 raeumt die gespeicherten Firmen- und Sucher-Texte, vertragstext_ohne_unterschriftssatz).
-OHNE_UNTERSCHRIFT_SAETZE = (
-    "Dieser Vertrag ist rechtskräftig, verbindlich und auch ohne Unterschrift gültig.",
-    "Dieser Vertrag ist ohne Unterschrift gültig.",
-)
-_NUMMER_RE = re.compile(r"^(\s*)(\d+)([.)])(\s+)")
-
-
-def _satz_muster(satz: str):
-    return re.compile(r"\s+".join(re.escape(w) for w in satz.split()), re.IGNORECASE)
-
-
-def vertragstext_ohne_unterschriftssatz(text) -> str:
-    """Entfernt OHNE_UNTERSCHRIFT_SAETZE aus einem Vertragstext (Absaetze durch Leerzeilen getrennt).
-    Ein Absatz, der danach leer ist oder nur noch seine Nummer traegt, faellt weg; nummerierte Absaetze
-    ("1. …" / "2) …") werden dann lueckenlos neu durchnummeriert. Ein Text ohne den Satz kommt
-    unveraendert zurueck (die Migration erkennt daran, dass nichts zu schreiben ist)."""
-    roh = str(text or "")
-    if not roh.strip():
-        return roh
-    muster = [_satz_muster(s) for s in OHNE_UNTERSCHRIFT_SAETZE]
-    neu, gefallen, geaendert = [], False, False
-    for a in re.split(r"\n[ \t]*\n", roh):
-        b = a
-        for m in muster:
-            b = m.sub("", b)
-        if b != a:
-            geaendert = True
-            b = re.sub(r"[ \t]+", " ", b).strip()
-            if not b or re.fullmatch(r"\d+[.)]", b):
-                gefallen = True
-                continue
-        neu.append(b)
-    if not geaendert:
-        return roh
-    if gefallen:
-        n = 0
-        for i, a in enumerate(neu):
-            t = _NUMMER_RE.match(a)
-            if t:
-                n += 1
-                neu[i] = f"{t.group(1)}{n}{t.group(3)}{t.group(4)}{a[t.end():]}"
-    return "\n\n".join(neu)
-
-
 # Runde 26 (12.09.2026, Wunsch Ahmad: die zwei aehnlich klingenden Felder
 # zusammenlegen): Startertext fuer NEUE Firmen — die vier Klauseln plus die
 # AGB-Punkte, die frueher getrennt unter default_terms standen. Alles steht
 # ab Anlage im EINEN Feld "Vertragsbedingungen" und ist dort editierbar.
 AGB_PUNKTE_START = (
-    "4. Das Fahrzeug wird unter Ausschluss jeglicher Sachmängelhaftung verkauft, "
+    "5. Das Fahrzeug wird unter Ausschluss jeglicher Sachmängelhaftung verkauft, "
     "soweit gesetzlich zulässig (§ 444 BGB bleibt unberührt).\n\n"
-    "5. Der Käufer ist Händler im Sinne des § 14 BGB. Der Erwerb erfolgt zum "
+    "6. Der Käufer ist Händler im Sinne des § 14 BGB. Der Erwerb erfolgt zum "
     "Zwecke des gewerblichen Wiederverkaufs.\n\n"
-    "6. Eigentumsübergang erfolgt erst nach vollständigem Zahlungseingang.\n\n"
-    "7. Mündliche Nebenabreden bestehen nicht. Änderungen oder Ergänzungen "
+    "7. Eigentumsübergang erfolgt erst nach vollständigem Zahlungseingang.\n\n"
+    "8. Mündliche Nebenabreden bestehen nicht. Änderungen oder Ergänzungen "
     "bedürfen der Schriftform.\n\n"
-    "8. Erfüllungsort und Gerichtsstand ist der Sitz des Käufers, soweit "
+    "9. Erfüllungsort und Gerichtsstand ist der Sitz des Käufers, soweit "
     "gesetzlich zulässig."
 )
 

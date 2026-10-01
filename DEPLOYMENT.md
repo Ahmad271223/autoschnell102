@@ -4201,7 +4201,7 @@ Tests: `backend/tests/test_pruefliste_20261001.py`, `frontend/src/pages/firma/fi
 - Zweite Runde (01.10. abends): „Halter“ und „Händler“ sind überall raus — auch der Untertitel („für ein gebrauchtes
   Kraftfahrzeug“, ohne „Ankauf durch Händler“) und die Abschnitte im Vertragsdialog („Verkäufer“, „Käufer (du)“).
   Die Rechtsklausel „Der Käufer ist Händler im Sinne des § 14 BGB“ bleibt (Inhalt, keine Beschriftung).
-- Der Satz „Dieser Vertrag ist (rechtskräftig, verbindlich und auch) ohne Unterschrift gültig.“ steht in keinem
-  Vertragstext mehr: Standardtext ohne den alten Punkt 4 (AGB-Punkte jetzt 4–8), **Migration 22** entfernt ihn aus den
-  gespeicherten Firmen- und Sucher-Texten (Vertragsbedingungen, AGB, Besondere Vereinbarungen) und nummeriert
-  lückenlos neu. Bereits erzeugte Verträge bleiben unverändert (Archiv). Helfer: `pdf_service.vertragstext_ohne_unterschriftssatz`.
+- Klarstellung Ahmad 01.10. abends: Punkt 4 des Standardtexts („… auch ohne Unterschrift gültig“) BLEIBT; die
+  Vertragsbedingungen der Firmen werden nicht angefasst. Weg ist nur die zusätzliche Zeile „Dieser Vertrag ist ohne
+  Unterschrift gültig.“ ganz unten in der Online-Fassung (siehe oben). Eine kurz eingebaute Migration 22 dazu wurde vor
+  dem Rollout wieder entfernt.
