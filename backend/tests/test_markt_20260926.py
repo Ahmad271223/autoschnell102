@@ -1252,6 +1252,7 @@ def test_22_testlauf_ueber_alle_segmente(welt, monkeypatch):
     assert [x["anzahl"] for x in erg["segmente"]] == [2, 1, 0, 0, 0, 0]
     # Welle 5 Nr. 20: derselbe Zeilenfilter wie im Worker — je Segment geliefert/gueltig/verworfen (Grund)
     assert erg["segmente"][0] == {"label": "EZ 2019 · 10–30k km", "anzahl": 2, "geliefert": 2, "gueltig": 2, "verworfen": 0, "gruende": [],
+                                  "ungueltig": False,                 # Pruefliste 01.10.2026 (Markt Nr. 3)
                                   "ez_ok": True, "km_ok": True, "sortiert": True, "nachweis": "nur_monoton",
                                   "nachweis_grund": "keine searchPosition (Top-N nicht bewiesen)"}
     assert erg["segmente"][1]["ez_ok"] is False and erg["segmente"][1]["km_ok"] is True

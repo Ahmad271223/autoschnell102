@@ -178,6 +178,15 @@ async def kosten_abgleich(db, *, lauf_dokument=None) -> Dict[str, Any]:
     gruppen: Dict[str, List[Dict[str, Any]]] = {}
     for j in jobs:
         gruppen.setdefault(str(j["actor_run_id"]), []).append(j)
+    # Pruefliste 01.10.2026 (Markt Nr. 1): je Lauf ALLE seine Jobs laden — auch die hinter der Grenze
+    # ABGLEICH_MAX_JE_LAUF und die schon abgeglichenen. Vorher wurde eine an der Grenze abgeschnittene
+    # Teilgruppe gegen den GANZEN Laufpreis gerechnet (zu viel gebucht), und der Rest des Laufs beim
+    # naechsten Mal noch einmal. actual_cost enthaelt bereits frueher gebuchte Anteile, deshalb ist die
+    # Differenz zum echten Laufpreis nach dem ersten Abgleich null.
+    for run_ids in list(gruppen):
+        gruppen[run_ids] = await db[JOBS].find({"actor_run_id": run_ids, "actual_cost": {"$ne": None}},
+                                               {"_id": 0, "id": 1, "actor_run_id": 1, "actual_cost": 1, "tag": 1,
+                                                "actor": 1}).to_list(10000) or gruppen[run_ids]
     geprueft = gebucht = 0
     differenz_gesamt = 0.0
     fehler = 0

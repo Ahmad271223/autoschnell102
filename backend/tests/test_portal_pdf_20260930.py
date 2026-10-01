@@ -117,6 +117,7 @@ def test_gleichzeitiges_unterschreiben_rechnet_nur_einmal(welt, monkeypatch):  #
     c = _vertrag(w, w.sucher)
     code = _lauf(KP.portal_freigeben(c["id"], user=w.sucher))["code"]
     sitzung = _lauf(KP.portal_oeffnen(KP.OeffnenIn(code=code, slug="kfz-mueller"), _request()))["sitzung"]
+    _lauf(KP.portal_sitzung_pdf(sitzung))                        # Pruefliste 01.10.2026 (Nr. 2): erst lesen
     echt = KP._signiertes_pdf
     rechnungen = []
 
@@ -143,6 +144,7 @@ def test_gleichzeitiges_unterschreiben_rechnet_nur_einmal(welt, monkeypatch):  #
     c2 = _vertrag(w, w.sucher)
     code2 = _lauf(KP.portal_freigeben(c2["id"], user=w.sucher))["code"]
     sitzung2 = _lauf(KP.portal_oeffnen(KP.OeffnenIn(code=code2, slug="kfz-mueller"), _request()))["sitzung"]
+    _lauf(KP.portal_sitzung_pdf(sitzung2))                       # Pruefliste 01.10.2026 (Nr. 2): erst lesen
 
     async def _kaputt(*a, **k):
         raise RuntimeError("PDF kaputt")
@@ -156,6 +158,7 @@ def test_gleichzeitiges_unterschreiben_rechnet_nur_einmal(welt, monkeypatch):  #
     c3 = _vertrag(w, w.sucher)
     code3 = _lauf(KP.portal_freigeben(c3["id"], user=w.sucher))["code"]
     sitzung3 = _lauf(KP.portal_oeffnen(KP.OeffnenIn(code=code3, slug="kfz-mueller"), _request()))["sitzung"]
+    _lauf(KP.portal_sitzung_pdf(sitzung3))                       # Pruefliste 01.10.2026 (Nr. 2): erst lesen
     w.run(w.db.generated_pdfs.update_one({"id": c3["id"]}, {"$set": {"portal.anspruch": "tot", "portal.anspruch_bis": "2099-01-01T00:00:00+00:00"}}))
     f = _fehler(KP.portal_unterschreiben(sitzung3, body, _request()))
     assert f.status_code == 409 and "wird gerade verarbeitet" in f.detail

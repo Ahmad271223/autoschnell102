@@ -25,6 +25,7 @@ from test_kundenportal_20260929 import _b64, _fehler, _lauf, _png, _request, _ve
 def _unterschreiben(w, c, nutzer, name="Erika Mustermann"):
     frei = _lauf(KP.portal_freigeben(c["id"], user=nutzer))
     offen = _lauf(KP.portal_oeffnen(KP.OeffnenIn(code=frei["code"], slug="kfz-mueller"), _request()))
+    _lauf(KP.portal_sitzung_pdf(offen["sitzung"]))               # Pruefliste 01.10.2026 (Nr. 2): erst lesen
     _lauf(KP.portal_unterschreiben(offen["sitzung"], KP.UnterschreibenIn(
         signature_b64=_b64(_png()), name=name, einverstanden=True), _request("198.51.100.9")))
     return frei
@@ -79,6 +80,7 @@ def test_unterschrift_gilt_nur_fuer_ihre_fassung(welt, monkeypatch):  # noqa: F8
     frei2 = _lauf(KP.portal_freigeben(c["id"], user=w.sucher))
     assert frei2["status"] == "offen" and frei2["version"] == 2 and frei2["unterschrieben_version"] == 1
     offen = _lauf(KP.portal_oeffnen(KP.OeffnenIn(code=frei2["code"], slug="kfz-mueller"), _request()))
+    _lauf(KP.portal_sitzung_pdf(offen["sitzung"]))               # Pruefliste 01.10.2026 (Nr. 2): erst lesen
     _lauf(KP.portal_unterschreiben(offen["sitzung"], KP.UnterschreibenIn(
         signature_b64=_b64(_png()), name="Erika Mustermann", einverstanden=True), _request()))
     doc3 = w.run(w.db.generated_pdfs.find_one({"id": c["id"]}, {"_id": 0}))

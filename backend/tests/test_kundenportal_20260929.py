@@ -220,7 +220,7 @@ def test_03_unterschrift_des_chefs(welt):
     assert _lauf(KP.unterschrift_hochladen(KP.UnterschriftIn(bild_b64=_b64(_png())), user=w.chef))["unterschrift_vorhanden"]
     d = w.run(w.db.dealers.find_one({"id": w.dealer_id}, {"_id": 0, "unterschrift_key": 1}))
     assert d["unterschrift_key"].startswith(f"unterschrift/{w.dealer_id}/") and d["unterschrift_key"] in w.ablage
-    antwort = _lauf(KP.unterschrift_anzeigen(user=w.sucher))          # Vorschau auch fuer Sucher der Firma
+    antwort = _lauf(KP.unterschrift_anzeigen(user=w.chef))            # Vorschau nur fuer den Chef (01.10.2026)
     assert antwort.media_type == "image/png" and antwort.body[:8] == b"\x89PNG\r\n\x1a\n"
     alt = d["unterschrift_key"]
     _lauf(KP.unterschrift_hochladen(KP.UnterschriftIn(bild_b64=_b64(_png())), user=w.chef))

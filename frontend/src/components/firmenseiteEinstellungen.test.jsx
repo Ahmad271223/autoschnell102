@@ -102,9 +102,12 @@ describe("FirmenseiteEinstellungen", () => {
   });
 
   it("Sucher: alles nur lesen, kein Speichern-Knopf", async () => {
-    get.mockResolvedValue({ data: STAND({ ist_chef: false, webseite: { slug: "kfz", aktiv: true, ueber_uns: "x", bilder: [], domains: [] } }) });
+    get.mockResolvedValue({ data: STAND({ ist_chef: false, unterschrift_vorhanden: true, webseite: { slug: "kfz", aktiv: true, ueber_uns: "x", bilder: [], domains: [] } }) });
     await rendern({});
     expect(get).toHaveBeenCalledWith("/dealer/webseite");
+    // Prüfliste 01.10.2026 (Nr. 4): der Sucher bekommt das Unterschriftsbild des Chefs nicht — nur "hinterlegt"
+    expect(get.mock.calls.some(([u]) => String(u).endsWith("/unterschrift"))).toBe(false);
+    expect(el("firmenseite-unterschrift-stand").textContent).toBe("hinterlegt");
     expect(el("firmenseite-slug").disabled).toBe(true);
     expect(el("firmenseite-speichern")).toBeNull();
     expect(el("firmenseite-nur-chef").textContent).toContain("pflegt der Chef");

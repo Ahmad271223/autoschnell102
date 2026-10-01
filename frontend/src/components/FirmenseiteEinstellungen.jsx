@@ -51,12 +51,14 @@ export default function FirmenseiteEinstellungen({ adminDealerId = null }) {
   }, [basis, uebernehmen]);
   useEffect(() => { laden(); }, [laden]);
 
-  // Unterschrift-Vorschau: privater Pfad, nur angemeldet — als Blob laden
+  const istChef = !!adminDealerId || !!stand?.ist_chef;
+  // Unterschrift-Vorschau: privater Pfad, nur angemeldet — als Blob laden. Prüfliste 01.10.2026 (Nr. 4):
+  // NUR für den Chef (und den Betreiber); ein Sucher sieht nur, OB eine Unterschrift hinterlegt ist.
   useEffect(() => {
     let url = null;
     let aktiv = true;
     (async () => {
-      if (!stand?.unterschrift_vorhanden) { setUnterschriftUrl(null); return; }
+      if (!istChef || !stand?.unterschrift_vorhanden) { setUnterschriftUrl(null); return; }
       try {
         const { data } = await api.get(`${basis}/unterschrift`, { responseType: "blob" });
         url = URL.createObjectURL(data);
@@ -64,9 +66,8 @@ export default function FirmenseiteEinstellungen({ adminDealerId = null }) {
       } catch { if (aktiv) setUnterschriftUrl(null); }
     })();
     return () => { aktiv = false; if (url) URL.revokeObjectURL(url); };
-  }, [basis, stand?.unterschrift_vorhanden]);
+  }, [basis, istChef, stand?.unterschrift_vorhanden]);
 
-  const istChef = !!adminDealerId || !!stand?.ist_chef;
   const speichern = async () => {
     setBusy(true);
     try {
@@ -304,7 +305,7 @@ export default function FirmenseiteEinstellungen({ adminDealerId = null }) {
             <div className="flex items-center gap-4 mt-3">
               <div className="h-16 w-40 rounded-xl flex items-center justify-center overflow-hidden" style={{ background: "#fff", border: "1px solid var(--divider)" }}>
                 {unterschriftUrl ? <img src={unterschriftUrl} alt="Unterschrift" className="max-h-full max-w-full object-contain" data-testid="firmenseite-unterschrift-bild" />
-                  : <span className="text-[11px] text-zinc-500">{stand.unterschrift_vorhanden ? "…" : "keine hinterlegt"}</span>}
+                  : <span className="text-[11px] text-zinc-500" data-testid="firmenseite-unterschrift-stand">{stand.unterschrift_vorhanden ? (istChef ? "…" : "hinterlegt") : "keine hinterlegt"}</span>}
               </div>
               {istChef && (
                 <div className="flex flex-col gap-1.5">

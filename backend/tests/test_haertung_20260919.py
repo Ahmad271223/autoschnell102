@@ -159,6 +159,7 @@ NICHT_IM_CONTAINER = {
     # Lasttest-Skripte: werden von Hand gestartet und bekommen ihre Werte
     # in derselben Befehlszeile mit (scripts/lasttest_*.py).
     "LASTTEST_API", "LASTTEST_JE_QUELLE", "LASTTEST_NUR_A",
+    "LASTTEST_SUCHER", "LASTTEST_LINKS_JE_SUCHER", "LASTTEST_SZENARIO", "LASTTEST_FRIST_S",   # lasttest_30x30.py
 }
 
 

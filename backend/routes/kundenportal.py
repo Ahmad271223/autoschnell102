@@ -32,6 +32,7 @@ kurzlebiges signiertes Token (JWT, 45 Minuten) — nie der Code selbst in der Ad
 import asyncio
 import base64
 import hashlib
+import ipaddress
 import logging
 import os
 import re
@@ -47,7 +48,7 @@ from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
 
 import auth as _auth
-from deps import (current_firma, current_super_admin, db, firma_gesperrt, ist_haupt_chef,
+from deps import (current_chef, current_firma, current_super_admin, db, firma_gesperrt, ist_haupt_chef,
                   log_activity_sicher, now_iso)
 from konfig import zahl_env
 from rate_limiter import SlidingWindowRateLimiter, client_ip
@@ -532,7 +533,7 @@ async def _unterschrift_antwort(dealer_id: str) -> Response:
 
 
 @router.post("/dealer/unterschrift")
-async def unterschrift_hochladen(body: UnterschriftIn, user=Depends(current_firma)):
+async def unterschrift_hochladen(body: UnterschriftIn, user=Depends(current_chef)):
     """Bild der Unterschrift des Chefs (PNG) — landet im Kasten "Kaeufer / Haendler" jedes ueber
     das Kundenportal unterschriebenen Vertrags. Nur der Hauptchef."""
     await _nur_chef(user)
@@ -541,15 +542,17 @@ async def unterschrift_hochladen(body: UnterschriftIn, user=Depends(current_firm
 
 
 @router.delete("/dealer/unterschrift")
-async def unterschrift_entfernen(user=Depends(current_firma)):
+async def unterschrift_entfernen(user=Depends(current_chef)):
     await _nur_chef(user)
     await _unterschrift_loeschen(user["dealer_id"])
     return {"ok": True, "unterschrift_vorhanden": False}
 
 
 @router.get("/dealer/unterschrift")
-async def unterschrift_anzeigen(user=Depends(current_firma)):
-    """Vorschau fuer die Einstellungen (Chef und Sucher der Firma) — nie ueber /api/files."""
+async def unterschrift_anzeigen(user=Depends(current_chef)):
+    """Vorschau fuer die Einstellungen — NUR der Chef (Pruefliste 01.10.2026, Nr. 4: vorher konnte jeder Sucher
+    der Firma das Unterschriftsbild seines Chefs als PNG laden). Sucher sehen nur "hinterlegt: ja/nein"
+    (GET /dealer/webseite -> unterschrift_vorhanden). Nie ueber /api/files."""
     return await _unterschrift_antwort(user["dealer_id"])
 
 
@@ -566,6 +569,20 @@ async def _datei_bytes(key: Optional[str]) -> Optional[bytes]:
 
 
 # ---------------------------------------------------------------- Domain pruefen (Weg A)
+def adresse_oeffentlich(ip: str) -> bool:
+    """Pruefliste 01.10.2026 (Nr. 3): der Server spricht bei der Domain-Pruefung nur OEFFENTLICHE Adressen an —
+    kein 127.0.0.1, kein 10.x/172.16.x/192.168.x, nichts Link-Local oder Reserviertes, auch nicht als
+    IPv4-in-IPv6. Vorher reichte ein DNS-Name, der auf ein internes Netz zeigt, um aus unserem Backend heraus
+    interne Dienste anzusprechen (Rest-Risiko DNS-Rebinding bleibt klein: zwei Aufloesungen in wenigen Sekunden)."""
+    try:
+        a = ipaddress.ip_address(str(ip or "").split("%", 1)[0].strip("[]"))
+    except ValueError:
+        return False
+    if getattr(a, "ipv4_mapped", None):
+        a = a.ipv4_mapped
+    return bool(a.is_global) and not a.is_multicast
+
+
 async def _dns(host: str) -> List[str]:
     infos = await asyncio.wait_for(asyncio.to_thread(socket.getaddrinfo, host, 443, type=socket.SOCK_STREAM),
                                    PRUEFUNG_ZEITLIMIT_S)
@@ -601,11 +618,20 @@ async def domain_pruefen(domain: str, slug: str) -> Dict[str, Any]:
     # 1. DNS
     try:
         ips = await _dns(h)
-        schritte.append({"schritt": "dns", "ok": bool(ips), "text": f"Domain zeigt auf {', '.join(ips)}" if ips else "Domain zeigt nirgendwohin"})
+        intern = [ip for ip in ips if not adresse_oeffentlich(ip)]
+        if intern:
+            # Pruefliste 01.10.2026 (Nr. 3): zeigt die Domain auf ein internes Netz, wird sie NICHT angesprochen
+            schritte.append({"schritt": "dns", "ok": False,
+                             "text": f"Domain zeigt auf eine interne Adresse ({', '.join(intern)}) — das ist nicht erlaubt"})
+            ips = []
+            naechster = (f"DNS: {h} muss auf eine öffentliche Adresse zeigen — bei Cloudflare als CNAME auf {haupt} "
+                         "(Proxy an), nicht auf ein internes Netz.")
+        else:
+            schritte.append({"schritt": "dns", "ok": bool(ips), "text": f"Domain zeigt auf {', '.join(ips)}" if ips else "Domain zeigt nirgendwohin"})
     except Exception as exc:  # noqa: BLE001
         ips = []
         schritte.append({"schritt": "dns", "ok": False, "text": f"Domain nicht auflösbar ({type(exc).__name__})"})
-    if not ips:
+    if not ips and not naechster:
         naechster = (f"DNS: bei Cloudflare für {h} die Einträge @ und www als CNAME auf {haupt} anlegen (Proxy an) "
                      "— oder die Nameserver der Domain zuerst auf Cloudflare umstellen.")
     # 2. Proxy
@@ -882,6 +908,35 @@ def _sitzung_token(c: dict) -> str:
                        "jti": secrets.token_hex(8)}, _auth.JWT_SECRET, algorithm=_auth.JWT_ALG)
 
 
+# Pruefliste 01.10.2026 (Nr. 2): unterschreiben konnte, wer das Dokument nie bekommen hatte — die Oberflaeche
+# liess den Knopf auch nach einem gescheiterten PDF-Abruf zu, und der Server verlangte keinen Nachweis.
+# Jetzt vermerkt die PDF-Auslieferung, WELCHES Dokument (Pruefsumme, Fassung) an WELCHE Sitzung (Kennung
+# des Codes) ging; die Unterschrift gilt nur, wenn genau das zusammenpasst.
+GELESEN_HINWEIS = ("Bitte zuerst den Vertrag laden und lesen — die Unterschrift gilt nur für das angezeigte "
+                   "Dokument. Seite neu laden und erneut versuchen.")
+
+
+async def _gelesen_vermerken(c: dict, pdf: bytes) -> None:
+    import portal_pdf
+    p = c.get("portal") or {}
+    if p.get("status") != "offen":
+        return
+    await db.generated_pdfs.update_one(
+        {"id": c["id"], "version": c.get("version"), "portal.status": "offen", "portal.code": p.get("code")},
+        {"$set": {"portal.gelesen": {"kennung": _portal_kennung(p), "fassung": int(c.get("version") or 1),
+                                     "sha256": portal_pdf.pruefsumme(pdf), "am": now_iso()}}})
+
+
+def _gelesen_pruefen(c: dict) -> None:
+    import portal_pdf
+    p = c.get("portal") or {}
+    g = p.get("gelesen") or {}
+    erwartet = portal_pdf.pruefsumme(base64.b64decode(c["pdf_b64"])) if c.get("pdf_b64") else ""
+    if (not g or g.get("kennung") != _portal_kennung(p) or int(g.get("fassung") or 0) != int(c.get("version") or 1)
+            or not erwartet or g.get("sha256") != erwartet):
+        raise HTTPException(409, GELESEN_HINWEIS)
+
+
 def _vertrag_kurz(c: dict, firma: dict) -> dict:
     cd = c.get("contract_data") or {}
     p = c.get("portal") or {}
@@ -986,7 +1041,9 @@ async def portal_sitzung_pdf(sitzung: SitzungKopf):
     if not b64:
         raise HTTPException(404, "Das Vertrags-PDF fehlt — bitte das Autohaus ansprechen.")
     name = f"Kaufvertrag-{c.get('contract_no') or c['id']}.pdf"
-    return Response(content=base64.b64decode(b64), media_type="application/pdf",
+    pdf = base64.b64decode(b64)
+    await _gelesen_vermerken(c, pdf)                # Pruefliste 01.10.2026 (Nr. 2)
+    return Response(content=pdf, media_type="application/pdf",
                     headers={"Content-Disposition": content_disposition(name),
                              "Cache-Control": "private, no-store", "X-Robots-Tag": "noindex"})
 
@@ -1034,6 +1091,7 @@ async def portal_unterschreiben(sitzung: SitzungKopf, body: UnterschreibenIn, re
     p = c.get("portal") or {}
     if p.get("status") != "offen":
         raise HTTPException(409, "Dieser Vertrag ist bereits unterschrieben.")
+    _gelesen_pruefen(c)                             # Pruefliste 01.10.2026 (Nr. 2)
     name = " ".join(body.name.split())
     raw = _bild_bytes(body.signature_b64, "Unterschrift", 2 * 1024 * 1024)
     _unterschrift_pruefen(raw, "Unterschrift")

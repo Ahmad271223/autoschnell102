@@ -331,8 +331,12 @@ def testlauf_bestanden(erg: Dict[str, Any]) -> bool:
     Master-Auftrag Phase A: und der Lauf hat ALLE Segmente des Auftrags geprueft
     (segmente_geprueft == segmente_gesamt) — ein Teil-Testlauf ist kein Nachweis."""
     geprueft, gesamt = int(erg.get("segmente_geprueft") or 0), int(erg.get("segmente_gesamt") or 0)
+    # Pruefliste 01.10.2026 (Markt Nr. 2/3): Zeilen, die keinem Segment zuzuordnen sind, und Segmente, deren
+    # Rohzeilen keine Fahrzeugdaten ergaben (Parser/Actor defekt — der Worker wertet das als data_invalid),
+    # sind KEIN bestandener Test. Vorher galten 10 gute + 20 unzuordenbare Zeilen als "bestanden".
     return (int(erg.get("gueltig_gesamt") or 0) >= 1 and int(erg.get("verworfen_gesamt") or 0) == 0
-            and int(erg.get("sortierung_ungueltig") or 0) == 0 and geprueft == gesamt and gesamt >= 1)
+            and int(erg.get("sortierung_ungueltig") or 0) == 0 and int(erg.get("nicht_zuordenbar") or 0) == 0
+            and int(erg.get("segmente_ungueltig") or 0) == 0 and geprueft == gesamt and gesamt >= 1)
 
 
 async def testlauf(entwurf: Dict[str, Any], n: int = 5, *, db=None) -> Dict[str, Any]:
@@ -372,8 +376,11 @@ async def testlauf(entwurf: Dict[str, Any], n: int = 5, *, db=None) -> Dict[str,
             r = await apify.lauf(urls, n_anzeige)
     except apify.ApifyFehler as e:
         if res is not None:
-            gelaufen = e.art in ("zeit", "ausfall", "poll")
-            await budget.abrechnen(db, res, (e.usd if gelaufen else 0.0), 0, gelaufen=gelaufen, runs=1 if (gelaufen and e.run_id) else 0)
+            # Pruefliste 01.10.2026 (Markt Nr. 4): wie im Worker — auch "zuviel" (Datensatz groesser als erwartet)
+            # ist ein GELAUFENER, bezahlter Actor; unbekannte Kosten behalten die Schaetzung (None), nicht 0.
+            gelaufen = e.art in ("zeit", "ausfall", "poll", "zuviel")
+            await budget.abrechnen(db, res, (e.usd if (gelaufen and e.usd is not None) else (None if gelaufen else 0.0)), 0,
+                                   gelaufen=gelaufen, runs=1 if (gelaufen and e.run_id) else 0)
         raise
     except Exception:
         if res is not None:
@@ -398,6 +405,7 @@ async def testlauf(entwurf: Dict[str, Any], n: int = 5, *, db=None) -> Dict[str,
     erste_ls: List[Dict[str, Any]] = []
     gueltig_gesamt = verworfen_gesamt = geliefert_gesamt = 0
     sortierung_ungueltig = 0
+    segmente_ungueltig = 0          # Markt Nr. 3: Rohzeilen da, aber keine Fahrzeugdaten daraus
     for i, (s, u) in enumerate(zip(segs, urls)):
         roh = je_url[u]
         # Nr. 79: Sortierung und Top-N-Nachweis JE SEGMENT (vorher nur fuer das erste), wie im Worker auf den Rohzeilen
@@ -414,11 +422,16 @@ async def testlauf(entwurf: Dict[str, Any], n: int = 5, *, db=None) -> Dict[str,
         sortiert = normalisieren.preise_aufsteigend(gueltige)
         if ls and (nachweis == normalisieren.SORTIERUNG_UNGUELTIG or not sortiert):
             sortierung_ungueltig += 1
+        if roh and not ls:
+            # Pruefliste 01.10.2026 (Markt Nr. 3): der Worker wertet "Zeilen geliefert, nichts verwertbar" als
+            # data_invalid — der Testlauf zaehlte es als leeres Segment und liess den Auftrag bestehen.
+            segmente_ungueltig += 1
         geliefert_gesamt += len(ls)
         gueltig_gesamt += len(gueltige)
         verworfen_gesamt += len(gruende)
         ergebnis_segmente.append({"label": s["label"], "anzahl": len(zeilen), "geliefert": len(ls), "gueltig": len(gueltige),
                                   "verworfen": len(gruende), "gruende": gruende[:3],
+                                  "ungueltig": bool(roh and not ls),
                                   "ez_ok": all(z["ez_ok"] for z in zeilen) if zeilen else None,
                                   "km_ok": all(z["km_ok"] for z in zeilen) if zeilen else None,
                                   "sortiert": sortiert if ls else None, "nachweis": nachweis if ls else None,
@@ -434,6 +447,7 @@ async def testlauf(entwurf: Dict[str, Any], n: int = 5, *, db=None) -> Dict[str,
            "segmente_geprueft": len(segs), "segmente_gesamt": len(alle), "segmente_max": TESTLAUF_SEGMENTE_MAX,
            "geliefert_gesamt": geliefert_gesamt, "gueltig_gesamt": gueltig_gesamt, "verworfen_gesamt": verworfen_gesamt,
            "nicht_zuordenbar": nicht_zuordenbar, "sortierung_ungueltig": sortierung_ungueltig,
+           "segmente_ungueltig": segmente_ungueltig,
            "definition_hash": definition_hash(m), "filter_hash": filter_hash(m)}
     erg["bestanden"] = testlauf_bestanden(erg)
     erg["testlauf_ok_at"] = konfig.jetzt_iso() if erg["bestanden"] else None

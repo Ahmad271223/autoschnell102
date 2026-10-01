@@ -162,6 +162,43 @@ describe("Firmenseite", () => {
     // kein Aufruf trägt die Sitzung in der Adresse
     expect([...get.mock.calls, ...post.mock.calls].some(([u]) => String(u).includes("tok"))).toBe(false);
   });
+
+  it("Prüfliste 01.10.2026 (Nr. 2): ohne geladenes Vertragsdokument keine Unterschrift, danach erneut laden", async () => {
+    let pdfKaputt = true;
+    const blob = new Blob(["%PDF-1.4"], { type: "application/pdf" });
+    get.mockImplementation(async (url) => {
+      if (url === "/public/firma") return { data: FIRMA };
+      if (url === "/public/portal/vertrag/pdf") {
+        if (pdfKaputt) throw { response: { status: 404, data: { detail: "Das Vertrags-PDF fehlt" } } };
+        return { data: blob };
+      }
+      throw new Error("unerwartet " + url);
+    });
+    post.mockImplementation(async (url) => {
+      if (url === "/public/portal/oeffnen") return { data: { sitzung: "tok", vertrag: VERTRAG, firma: FIRMA, sitzung_minuten: 45 } };
+      if (url === "/public/portal/vertrag/unterschreiben") return { data: { ok: true, unterschrieben_am: "2026-10-01T10:00:00+00:00", contract_no: "KV-1" } };
+      throw new Error("unerwartet " + url);
+    });
+    await rendern();
+    await tippen("portal-code", "k7m3xp");
+    await klick("portal-oeffnen");
+    // Dokument kam nicht: Hinweis, Knopf gesperrt, kein Aufruf an den Server
+    expect(el("portal-pdf-fehlt").textContent).toContain("konnte nicht geladen werden");
+    expect(el("portal-absenden").disabled).toBe(true);
+    expect(el("portal-pdf-oeffnen").disabled).toBe(true);
+    await klick("pad");
+    await klick("portal-einverstanden");
+    expect(post.mock.calls.some(([u]) => u === "/public/portal/vertrag/unterschreiben")).toBe(false);
+    // "Vertrag erneut laden": jetzt kommt das Dokument — unterschreiben geht
+    pdfKaputt = false;
+    await klick("portal-pdf-erneut");
+    expect(el("portal-pdf-fehlt")).toBeNull();
+    expect(el("portal-absenden").disabled).toBe(false);
+    expect(el("portal-seiten").querySelectorAll("canvas").length).toBe(1);
+    await klick("portal-absenden");
+    expect(el("portal-fertig").textContent).toContain("Vielen Dank");
+    expect(get.mock.calls.filter(([u]) => u === "/public/portal/vertrag/pdf").length).toBe(3);
+  });
 });
 
 describe("Firmen-Host-Vorprüfung", () => {

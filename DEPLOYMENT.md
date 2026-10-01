@@ -4166,3 +4166,23 @@ Inseratsstand eingefroren werden konnte; fällt die Kleinanzeigen-API dreimal in
   Eine Ausnahme mitten im Lauf vermerkt jetzt den Versuch (vorher: Wiederholung jede Stunde).
 - Wo man es sieht: Anthropic-Konsole → Usage/Cost nach Tag und Modell (Haiku = Websuche/Tabelle, Sonnet =
   Bewertungen); in der App Admin → Betrieb → KI (`kosten_usd_geschaetzt` der Bewertungen, 30 Tage).
+
+## Prüfliste 01.10.2026 (externe Prüfung des Standes 2483e78, elf Punkte)
+
+Neun Punkte bestätigt und behoben, zwei bewusst so gelassen:
+
+| Nr. | Befund | Jetzt |
+|---|---|---|
+| 1 | Bilder unter `unterschrift/` (Chef) und `portal/` (Kunden) kamen über `/api/files` ohne Anmeldung und mit `public`-Cache heraus; `portal.unterschrift_key` stand in Vertragsantworten | `/api/files` sperrt alle `dateien.PRIVATE_PREFIXE` (eine Liste, Test hält sie zusammen); Vertragsantworten ohne Speicherschlüssel und Bearbeitungsmerker |
+| 2 | Kunde konnte unterschreiben, obwohl sein Browser das PDF nie bekam | PDF-Auslieferung vermerkt Fassung + Prüfsumme + Sitzungskennung (`portal.gelesen`); Unterschrift nur, wenn das zusammenpasst (409 sonst); Oberfläche sperrt den Knopf bis das Dokument da ist, Knopf „Vertrag erneut laden" |
+| 3 | Domain-Prüfung sprach vom Server aus jede Adresse an, auch 127.0.0.1/10.x/192.168.x | DNS-Ergebnis muss öffentlich sein (`adresse_oeffentlich`), sonst kein HTTPS-Aufruf; Rest-Risiko DNS-Rebinding klein (zwei Auflösungen in Sekunden) |
+| 4 | Jeder Sucher konnte das Unterschriftsbild seines Chefs laden (GET `/dealer/unterschrift`) | nur noch `current_chef` (GET, POST, DELETE); Sucher sehen nur „hinterlegt ja/nein" |
+| 5 | Firmenseite aus = laufende Portal-Sitzungen enden | bewusst so (Entscheidung 30.09.): die Firmenseite ist der Zugang zum Portal |
+| 6 | Portal-Freigabe ohne hinterlegte Chef-Unterschrift möglich | bewusst so (Entscheidung 30.09.): Chef-Unterschrift optional, der Signaturnachweis sagt „ohne hinterlegte Unterschrift" |
+| M1 | Kostenabgleich rechnete eine an der 200er-Grenze abgeschnittene Teilgruppe gegen den ganzen Laufpreis (zu viel, beim nächsten Mal nochmal) | je Lauf werden alle seine Jobs geladen; Differenz zum echten Laufpreis nach dem ersten Abgleich null |
+| M2/M3 | Testlauf „bestanden" trotz unzuordenbarer Zeilen bzw. Segmenten ohne Fahrzeugdaten | beides macht den Testlauf „nicht bestanden" (Grund im Auftrag, Anzeige im Admin) |
+| M4 | „zuviel" (Datensatz größer als erwartet) buchte im Testlauf 0 $ | wie im Worker: gelaufen und bezahlt, unbekannte Kosten behalten die Schätzung |
+| M5 | Sammel-Testlauf der Masterliste lebte nur im RAM eines Prozesses | beim Start nimmt ein Prozess einen abgebrochenen Lauf (Lease abgelaufen) nach 45 s wieder auf; bestandene Aufträge kosten keinen zweiten Lauf |
+
+Tests: `backend/tests/test_pruefliste_20261001.py`, `frontend/src/pages/firma/firmenSeite.test.jsx` (Nr. 2),
+`frontend/src/components/firmenseiteEinstellungen.test.jsx` (Nr. 4).

@@ -1040,7 +1040,12 @@ async def _readiness_pruefen():
 # pickup/: Schadenfotos aus Abholberichten zeigen fremde Fahrzeuge und
 # gehoeren nicht oeffentlich ins Netz — Abruf nur noch authentifiziert
 # ueber /api/pickup-fotos/{key} (Haendler der Firma oder deren Fahrer).
-_PRIVATE_FILE_PREFIXES = ("protocol/", "pickup/")
+# Pruefliste 01.10.2026 (Nr. 1): unterschrift/ (hinterlegte Chef-Unterschrift) und portal/ (Unterschriften
+# der Kunden) standen in dateien.PRIVATE_PREFIXE, aber NICHT in dieser Liste — und weil signatur_noetig()
+# fuer private Prefixe False liefert, kamen die Bilder ueber /api/files OHNE Anmeldung und sogar mit
+# "public"-Cache heraus. Jetzt gibt es nur noch EINE Liste (dateien.PRIVATE_PREFIXE); ein Test haelt
+# beide Stellen zusammen.
+from dateien import PRIVATE_PREFIXE as _PRIVATE_FILE_PREFIXES
 
 
 # Audit 09/2026 (Punkt 45): nicht-oeffentliche Dateien (z.B. Fahrzeugfotos
@@ -1943,6 +1948,22 @@ async def on_start():
     except Exception as exc:
         log.warning("markt worker start failed: %s", exc)
         WORKER_STATUS["markt"] = {"laeuft": False, "neustarts": 0, "letzter_fehler": str(exc)[:300]}
+    # Pruefliste 01.10.2026 (Markt Nr. 5): ein durch Neustart abgebrochener Sammel-Testlauf der Masterliste wird
+    # wieder aufgenommen (einmalig, nach kurzer Wartezeit; der Merker in der DB entscheidet, ein Server gewinnt).
+    try:
+        from markt import masterliste as _masterliste
+
+        async def _sammel_wiederaufnahme():
+            await asyncio.sleep(45)
+            try:
+                await _masterliste.testlauf_alle_wiederaufnehmen(db)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Sammel-Testlauf nicht wieder aufgenommen: %s", exc)
+        _t = asyncio.create_task(_sammel_wiederaufnahme())
+        _HINTERGRUND.add(_t)
+        _t.add_done_callback(_HINTERGRUND.discard)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Sammel-Testlauf-Wiederaufnahme nicht eingeplant: %s", exc)
     # Master-Auftrag Marktanalyse Phase D/E (27.09.2026): Auswertung aus gespeicherten Tageswerten (Hot Deals,
     # Berichte) — eigener Hintergrundjob, laeuft auch bei ausgeschaltetem Crawler, loest nie einen Abruf aus.
     # Bewusst OHNE WORKER_TAKT_S: eine langsame Auswertung darf die Instanz nie aus dem Lastverteiler nehmen;

@@ -491,6 +491,31 @@ async def testlauf_alle_beanspruchen(db, *, aktivieren: bool, mit_review: bool, 
     return lauf_id
 
 
+async def testlauf_alle_wiederaufnehmen(db) -> Optional[str]:
+    """Pruefliste 01.10.2026 (Markt Nr. 5): der Sammel-Testlauf lebte nur im RAM EINES Web-Prozesses — nach
+    Neustart/Rollout dieses Prozesses stand der Merker auf "laeuft", bis die Lease (15 min) ablief, und der
+    Lauf musste von Hand neu gestartet werden. Jetzt prueft jeder Prozess beim Start: Merker "laeuft" mit
+    abgelaufener Lease -> diesen Lauf wieder aufnehmen (atomar, nur ein Server gewinnt). Schon bestandene
+    Auftraege kosten keinen zweiten Lauf (testlauf_ok_hash). Ohne APIFY_TOKEN passiert nichts."""
+    from markt.konfig import KONFIG
+    if not konfig.token():
+        return None
+    doc = await db[KONFIG].find_one({"_id": TESTLAUF_ALLE_DOK}, {"_id": 0}) or {}
+    if not doc.get("laeuft") or str(doc.get("lease_until") or "") > konfig.jetzt_iso():
+        return None
+    aktivieren, mit_review = bool(doc.get("aktivieren")), bool(doc.get("mit_review"))
+    try:
+        lauf_id = await testlauf_alle_beanspruchen(db, aktivieren=aktivieren, mit_review=mit_review,
+                                                  wer=f"wiederaufnahme:{doc.get('gestartet_von') or ''}")
+    except LaeuftSchon:
+        return None
+    await db[KONFIG].update_one({"_id": TESTLAUF_ALLE_DOK, "lauf_id": lauf_id},
+                                {"$set": {"wiederaufgenommen_von": doc.get("lauf_id"), "wiederaufgenommen_at": konfig.jetzt_iso()}})
+    log.info("Sammel-Testlauf %s nach Neustart wieder aufgenommen (vorher %s)", lauf_id, doc.get("lauf_id"))
+    await testlauf_alle_ausfuehren(db, lauf_id, aktivieren=aktivieren, mit_review=mit_review)
+    return lauf_id
+
+
 def _kurz(erg: Dict[str, Any]) -> Dict[str, Any]:
     """Ergebnis eines Testlaufs fuer den Auftrag (nur Zahlen und Gruende, keine Inseratsdaten)."""
     gruende: List[str] = []
@@ -504,6 +529,10 @@ def _kurz(erg: Dict[str, Any]) -> Dict[str, Any]:
             grund = f"{erg['verworfen_gesamt']} Zeile(n) verworfen: {'; '.join(gruende[:3])}"
         elif int(erg.get("sortierung_ungueltig") or 0):
             grund = f"Sortierung in {erg['sortierung_ungueltig']} Segment(en) ungültig"
+        elif int(erg.get("nicht_zuordenbar") or 0):
+            grund = f"{erg['nicht_zuordenbar']} Zeile(n) keinem Segment zuzuordnen"
+        elif int(erg.get("segmente_ungueltig") or 0):
+            grund = f"{erg['segmente_ungueltig']} Segment(e) mit Zeilen ohne Fahrzeugdaten"
         elif int(erg.get("segmente_geprueft") or 0) != int(erg.get("segmente_gesamt") or 0):
             grund = "Testlauf deckt nicht alle Segmente ab"
         else:

@@ -31,6 +31,11 @@ def _unterschrift(name="Erika Mustermann", ok=True):
     return KP.UnterschreibenIn(signature_b64=_b64(_png()), name=name, einverstanden=ok)
 
 
+def _lesen(sitzung):
+    """Pruefliste 01.10.2026 (Nr. 2): unterschreiben darf nur, wer in DIESER Sitzung das Dokument geladen hat."""
+    assert _lauf(KP.portal_sitzung_pdf(sitzung)).body[:4] == b"%PDF"
+
+
 def test_sitzung_gilt_nur_fuer_ihren_code(welt):  # noqa: F811
     w = welt
     _seite_an(w)
@@ -104,6 +109,7 @@ def test_firmenseite_aus_oder_firma_gesperrt_beendet_sitzungen(welt):  # noqa: F
     w.run(w.db.dealers.update_one({"id": w.dealer_id}, {"$unset": {"loeschung": ""}}))
     alles_offen()
     # danach laesst sich normal unterschreiben — nichts wurde in der Zwischenzeit veraendert
+    _lesen(sitzung)
     assert _lauf(KP.portal_unterschreiben(sitzung, _unterschrift(), _request()))["ok"]
 
 
@@ -151,8 +157,10 @@ def test_bremse_zaehlt_nur_fehlversuche(welt, monkeypatch):  # noqa: F811
         v = _vertrag(w, w.sucher)
         sitzungen.append(_oeffnen(_lauf(KP.portal_freigeben(v["id"], user=w.sucher))["code"], "192.0.2.60"))
     for s in sitzungen[:3]:                                              # drei Kunden, eine Adresse, Grenze 2
+        _lesen(s)
         assert _lauf(KP.portal_unterschreiben(s, _unterschrift(), _request("192.0.2.61")))["ok"]
     assert _lauf(KP._unterschrift_limiter.stand("192.0.2.61")) == 0
+    _lesen(sitzungen[3])
     for _ in range(2):                                                   # zwei abgelehnte Versuche
         assert _fehler(KP.portal_unterschreiben(sitzungen[3], _unterschrift(ok=False), _request("192.0.2.61"))).status_code == 400
     assert _fehler(KP.portal_unterschreiben(sitzungen[3], _unterschrift(), _request("192.0.2.61"))).status_code == 429
@@ -189,6 +197,7 @@ def test_keine_datei_ohne_verweis_wenn_die_datenbank_scheitert(welt, monkeypatch
     _seite_an(w)
     c = _vertrag(w, w.sucher)
     sitzung = _oeffnen(_lauf(KP.portal_freigeben(c["id"], user=w.sucher))["code"])
+    _lesen(sitzung)
     echt = KP.db
     assert not w.ablage
 
@@ -256,6 +265,7 @@ def test_500_je_minute_je_adresse_dann_zwei_minuten_warten(welt, monkeypatch):  
     w.run(w.db.rate_limits.update_one(sperre, {"$set": {"bis": _time.time() - 1}}))
     for _ in range(4):
         assert _oeffnen(code, ip)
+    _lesen(sitzungen[0])                                                    # zaehlt nicht (keine Adresse)
     assert _lauf(KP.portal_unterschreiben(sitzungen[0], _unterschrift(), _request(ip)))["ok"]     # der fuenfte
     assert _fehler(KP.portal_oeffnen(KP.OeffnenIn(code=code, slug="kfz-mueller"), _request(ip))).status_code == 429
 

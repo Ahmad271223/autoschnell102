@@ -1898,6 +1898,23 @@ def _vertrag_bereich(user) -> Dict[str, Any]:
 CONTRACTS_LIST_MAX = 2000
 
 
+def _portal_bereinigen(doc: Optional[dict]) -> Optional[dict]:
+    """Pruefliste 01.10.2026 (Nr. 1): der Speicherschluessel der Kunden-Unterschrift (portal.unterschrift_key)
+    und die internen Bearbeitungsmerker gehoeren in keine Vertragsantwort — aus dem Schluessel liess sich
+    ein /api/files-Pfad bauen. Das Bild gibt es nur im unterschriebenen PDF. Aendert an Ort und Stelle."""
+    if not isinstance(doc, dict):
+        return doc
+    p = doc.get("portal")
+    if isinstance(p, dict):
+        for k in ("unterschrift_key", "anspruch", "anspruch_bis", "gelesen"):
+            p.pop(k, None)
+    for v in doc.get("versions") or []:
+        if isinstance(v, dict) and isinstance(v.get("portal"), dict):
+            for k in ("unterschrift_key", "anspruch", "anspruch_bis", "gelesen"):
+                v["portal"].pop(k, None)
+    return doc
+
+
 def _vertrag_maskieren(user: dict, doc: Optional[dict]) -> Optional[dict]:
     """Rollenpruefung 22.09.2026 (RP-017/RP-116): Konto-IDs von Chef und
     Kollegen aus Vertragsdaten entfernen — nur fuer Sucher, wie
@@ -2003,6 +2020,8 @@ async def list_contracts(
     ).sort("created_at", -1).to_list(grenze + 1)
     abgeschnitten = len(items) > grenze
     items = items[:grenze]
+    for i in items:
+        _portal_bereinigen(i)                       # Pruefliste 01.10.2026 (Nr. 1)
     # 10.09.2026: Inseratsfotos neben dem Vertrag als Vorschaubilder ueber
     # den eigenen Bild-Proxy (klein, zuverlaessig).
     from bild_proxy import thumbs as _thumbs
@@ -2080,7 +2099,7 @@ async def get_contract(contract_id: str, user=Depends(current_firma)):
     # Rollenpruefung 22.09.2026 (RP-406): wie die Liste mit Vorgangs-/Terminstand.
     await _vorgang_und_termin_anreichern(user, [c])
     # Rollenpruefung 22.09.2026 (RP-017/RP-116): keine fremden Konto-IDs fuer Sucher.
-    return _vertrag_maskieren(user, c)
+    return _vertrag_maskieren(user, _portal_bereinigen(c))
 
 
 @router.get("/contracts/{contract_id}/pdf")

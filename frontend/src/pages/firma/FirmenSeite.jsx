@@ -252,6 +252,8 @@ function Kundenportal({ firma, slug, host }) {
   };
 
   const absenden = async () => {
+    // Prüfliste 01.10.2026 (Nr. 2): ohne geladenes Vertragsdokument keine Unterschrift (der Server prüft das auch)
+    if (!pdfBlob) { setFehler("Der Vertrag wurde noch nicht geladen — bitte „Vertrag erneut laden“ drücken."); return; }
     if (!unterschrift) { setFehler("Bitte im Feld unterschreiben."); return; }
     if (!einverstanden) { setFehler("Bitte bestätigen, dass Sie den Vertrag gelesen haben."); return; }
     if (name.trim().length < 2) { setFehler("Bitte Ihren Namen eintragen."); return; }
@@ -315,7 +317,12 @@ function Kundenportal({ firma, slug, host }) {
             <div className="text-[13.5px]" style={{ color: F.textGrau }}>
               {seitenStand === "laedt" && "Vertrag wird geladen…"}
               {seitenStand === "fertig" && (fertig ? "Ihr unterschriebener Vertrag:" : "Bitte lesen Sie den Vertrag vollständig:")}
-              {seitenStand === "fehlgeschlagen" && "Die Vorschau ist hier nicht möglich — bitte das PDF öffnen."}
+              {seitenStand === "fehlgeschlagen" && pdfBlob && "Die Vorschau ist hier nicht möglich — bitte das PDF öffnen."}
+              {seitenStand === "fehlgeschlagen" && !pdfBlob && (
+                <span data-testid="portal-pdf-fehlt">Der Vertrag konnte nicht geladen werden.{" "}
+                  <button type="button" onClick={pdfLaden} className="underline" style={{ color: F.navy }} data-testid="portal-pdf-erneut">Vertrag erneut laden</button>
+                </span>
+              )}
             </div>
             <button type="button" onClick={pdfOeffnen} disabled={!pdfBlob} className="text-[13px] underline inline-flex items-center gap-1 disabled:opacity-50" style={{ color: F.navy }} data-testid="portal-pdf-oeffnen">
               <ExternalLink size={12} /> PDF öffnen
@@ -338,7 +345,7 @@ function Kundenportal({ firma, slug, host }) {
             <span>Ich habe den Kaufvertrag gelesen und stimme seinem Inhalt zu. Meine Unterschrift wird mit Datum, Uhrzeit und Geräteadresse im Vertrag festgehalten.</span>
           </label>
           {fehler && <div className="text-sm mt-2" style={{ color: F.rotDunkel }} data-testid="portal-fehler">{fehler}</div>}
-          <button type="button" onClick={absenden} disabled={busy} className="mt-4 w-full sm:w-auto disabled:opacity-50" style={knopf} data-testid="portal-absenden">
+          <button type="button" onClick={absenden} disabled={busy || !pdfBlob} className="mt-4 w-full sm:w-auto disabled:opacity-50" style={knopf} data-testid="portal-absenden">
             {busy ? "Sende…" : "Unterschreiben und absenden"}
           </button>
         </div>
