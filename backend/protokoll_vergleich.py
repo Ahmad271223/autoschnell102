@@ -439,6 +439,83 @@ def hu_korrektur(text: str, heute: Optional[datetime] = None) -> Dict[str, Any]:
     return {"hu_until": t} if t else {}
 
 
+#: Wie der Fahrer ein "Nein" bei der Ausstattung begruendet (routes.protocols.ProtocolIn.features).
+AUSSTATTUNG_BEFUND = {"fehlt": "fehlt komplett", "defekt": "vorhanden, defekt", "anders": "anders als beschrieben"}
+#: Zustandsantworten, die keine Maengel sind, aber dem Chef gesagt gehoeren.
+ZUSTAND_HINWEIS = {("driving", "nicht gefahren"), ("clean_inside", "mittel"), ("clean_outside", "mittel")}
+#: Zustandsfelder, die Zahl/Text sind (Kilometer stehen im Vergleich, Tank/Reifen im PDF).
+ZUSTAND_OHNE_BEFUND = ("mileage", "fuel_level", "tire_profile")
+
+
+def _ja(wert: Any) -> bool:
+    return wert is True or (isinstance(wert, str) and wert.strip().lower() in ("true", "ja"))
+
+
+def vor_ort_befunde(doc: dict, *, condition_fields, document_items, ausstattung) -> Dict[str, Any]:
+    """Wunsch Ahmad 01.10.2026: Der Chef bekommt ALLES, was der Fahrer vor Ort als fehlend, defekt,
+    anders oder mangelhaft angekreuzt hat — und was unbeantwortet blieb. Vorher standen die Haken zu
+    Ausstattung und Unterlagen zwar in der Antwort (dokumente/ausstattung), die Freigabe-Seite zeigte
+    sie aber nicht; sichtbar waren sie nur im PDF und in der KI-Karte.
+
+    Liefert {"ausstattung": [...], "dokumente": [...], "zustand": [...], "anzahl": n, "offen": n}; jeder
+    Eintrag {"name", "art": fehlt|defekt|anders|mangel|hinweis|offen, "befund": Text}. Leere Listen =
+    alles vorhanden und in Ordnung."""
+    doc = doc or {}
+    merkmale = doc.get("features") or {}
+    if not isinstance(merkmale, dict):
+        merkmale = {}
+    vorlage = ausstattung or []
+    if isinstance(vorlage, str):
+        vorlage = vorlage.split(",")
+    namen = list(dict.fromkeys([str(n).strip() for n in vorlage if str(n).strip()]
+                               + [str(k).strip() for k in merkmale]))
+    aus: List[Dict[str, Any]] = []
+    for name in namen:
+        w = merkmale.get(name)
+        if _ja(w):
+            continue
+        text = str(w).strip().lower() if isinstance(w, str) else ""
+        if w is None or (isinstance(w, str) and not text):
+            aus.append({"name": name[:80], "art": "offen", "befund": "keine Angabe"})
+        elif w is False or text == "fehlt":
+            aus.append({"name": name[:80], "art": "fehlt", "befund": AUSSTATTUNG_BEFUND["fehlt"]})
+        elif text in AUSSTATTUNG_BEFUND:
+            aus.append({"name": name[:80], "art": text, "befund": AUSSTATTUNG_BEFUND[text]})
+        else:
+            aus.append({"name": name[:80], "art": "anders", "befund": str(w)[:80]})
+    dokumente = doc.get("documents") or {}
+    if not isinstance(dokumente, dict):
+        dokumente = {}
+    dok: List[Dict[str, Any]] = []
+    for name in list(dict.fromkeys([str(n) for n in (document_items or [])] + [str(k) for k in dokumente])):
+        w = dokumente.get(name)
+        if _ja(w):
+            continue
+        if w is False or (isinstance(w, str) and w.strip().lower() in ("false", "nein")):
+            dok.append({"name": name[:80], "art": "fehlt", "befund": "fehlt"})
+        else:
+            dok.append({"name": name[:80], "art": "offen", "befund": "keine Angabe"})
+    cond = doc.get("condition") or {}
+    if not isinstance(cond, dict):
+        cond = {}
+    zustand: List[Dict[str, Any]] = []
+    for key, label, opts in condition_fields or []:
+        if key in ZUSTAND_OHNE_BEFUND or not isinstance(opts, list) or not opts:
+            continue
+        w = cond.get(key)
+        text = str(w if w is not None else "").strip()
+        if not text:
+            zustand.append({"name": label, "schluessel": key, "art": "offen", "befund": "keine Angabe"})
+        elif text != opts[0]:
+            art = "hinweis" if (key, text) in ZUSTAND_HINWEIS else "mangel"
+            zustand.append({"name": label, "schluessel": key, "art": art, "befund": text[:80]})
+    alle = aus + dok + zustand
+    return {"ausstattung": aus, "dokumente": dok, "zustand": zustand,
+            "anzahl": sum(1 for x in alle if x["art"] not in ("offen", "hinweis")),
+            "hinweise": sum(1 for x in alle if x["art"] == "hinweis"),
+            "offen": sum(1 for x in alle if x["art"] == "offen")}
+
+
 def abweichungen(zeilen: List[dict]) -> List[dict]:
     """Nur die Zeilen, ueber die sich verhandeln laesst — mit den bisherigen
     Schluesseln (feld/status/wert, Runde 30) plus Vertrag/vor Ort."""

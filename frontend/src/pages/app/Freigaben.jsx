@@ -133,6 +133,56 @@ function Vergleich({ eintrag }) {
   );
 }
 
+/** Wunsch Ahmad 01.10.2026: Was der Fahrer vor Ort als fehlend, defekt, anders oder mangelhaft
+ *  angekreuzt hat (Ausstattung, Unterlagen, Zustand) — plus alles, was ohne Angabe blieb. Die Haken
+ *  kamen schon vom Server (dokumente/ausstattung), standen aber nur im PDF und in der KI-Karte. */
+const VOR_ORT_GRUPPEN = [["ausstattung", "Ausstattung laut Inserat"], ["dokumente", "Unterlagen & Zubehör"], ["zustand", "Technischer Zustand"]];
+function befundFarbe(art) {
+  if (art === "offen") return "var(--text-dim)";
+  if (art === "hinweis") return "var(--text-strong)";
+  return "var(--st-amber)";
+}
+function VorOrt({ eintrag }) {
+  const v = eintrag.vor_ort;
+  if (!v) return null;                               // älteres Backend während eines Rollouts
+  const gruppen = VOR_ORT_GRUPPEN.map(([k, titel]) => [k, titel, Array.isArray(v[k]) ? v[k] : []]).filter(([, , l]) => l.length);
+  if (!gruppen.length) {
+    return (
+      <div className="mt-2 text-[12px] inline-flex items-center gap-1.5" style={{ color: "var(--st-gruen)" }}
+           data-testid={`vor-ort-ok-${eintrag.protocol_id}`}>
+        <Check size={13} /> Ausstattung, Unterlagen und Zustand vor Ort ohne Befund
+      </div>
+    );
+  }
+  const anzahl = Number(v.anzahl) || 0;
+  const ernst = anzahl > 0;
+  const kopf = [ernst ? `${anzahl} Abweichung${anzahl === 1 ? "" : "en"}` : "nur Hinweise",
+                v.hinweise ? `${v.hinweise} Hinweis${v.hinweise === 1 ? "" : "e"}` : "",
+                v.offen ? `${v.offen} ohne Angabe` : ""].filter(Boolean).join(" · ");
+  return (
+    <div className="mt-3 rounded-lg p-2.5"
+         style={{ background: ernst ? "#ff9f0a10" : "var(--wa-03)", border: `1px solid ${ernst ? "#ff9f0a44" : "var(--wa-06)"}` }}
+         data-testid={`vor-ort-${eintrag.protocol_id}`}>
+      <div className="text-[12px] font-semibold mb-1 inline-flex items-center gap-1"
+           style={{ color: ernst ? "var(--st-amber)" : "var(--text-strong)" }}>
+        <AlertTriangle size={12} /> Vor Ort festgestellt: {kopf}
+      </div>
+      {gruppen.map(([k, titel, liste]) => (
+        <div key={k} className="mt-1" data-testid={`vor-ort-${k}-${eintrag.protocol_id}`}>
+          <div className="text-[10px] uppercase tracking-wider text-zinc-500">{titel}</div>
+          <ul className="text-[12px] space-y-0.5">
+            {liste.map((x, i) => (
+              <li key={`${k}-${i}`} className="[overflow-wrap:anywhere]">
+                {x.name}: <b style={{ color: befundFarbe(x.art) }}>{x.befund}</b>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** Rollenprüfung 22.09.2026 (RP-453): Zusatz hinter dem Fahrer-Vorschlag. */
 export function vorschlagHinweis(e, freigegeben) {
   if (e?.preis_vorschlag_verworfen) return " — verworfen (auf Vertragspreis zurückgesetzt)";
@@ -334,6 +384,7 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
       </div>
 
       {!e.ladefehler && <div className="mt-3"><Vergleich eintrag={e} /></div>}
+      {!e.ladefehler && <VorOrt eintrag={e} />}
 
       {neueSchaeden.length > 0 && (
         <div className="mt-3 rounded-lg p-2.5" style={{ background: "#ff3b3014", border: "1px solid #ff3b3044" }}>

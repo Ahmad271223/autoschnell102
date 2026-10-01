@@ -3127,6 +3127,11 @@ async def protokolle_zur_freigabe(user=Depends(_chef_dep), response: Response = 
                 "dokumente": d.get("documents") or {},
                 "ausstattung": d.get("features") or {},
                 "zustand": d.get("condition") or {},
+                # Wunsch Ahmad 01.10.2026: fehlende/defekte/andere Ausstattung, fehlende Unterlagen und
+                # Maengel am Zustand auf einen Blick — die Haken oben zeigte die Seite nie an.
+                "vor_ort": PV.vor_ort_befunde(d, condition_fields=CONDITION_FIELDS, document_items=DOCUMENT_ITEMS,
+                                              ausstattung=(fahrzeug.get("features") or [])[:AUSSTATTUNG_MAX]
+                                              if isinstance(fahrzeug.get("features"), list) else fahrzeug.get("features")),
                 # Review 26.09.2026 (Nr. 101-105/113): Zahlen (0 ist ein Wert);
                 # "vereinbart" ist der Serverwert aus dem Vertrag (Altbestand:
                 # der frueher vom Fahrer getippte Text).

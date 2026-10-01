@@ -4205,3 +4205,15 @@ Tests: `backend/tests/test_pruefliste_20261001.py`, `frontend/src/pages/firma/fi
   Vertragsbedingungen der Firmen werden nicht angefasst. Weg ist nur die zusätzliche Zeile „Dieser Vertrag ist ohne
   Unterschrift gültig.“ ganz unten in der Online-Fassung (siehe oben). Eine kurz eingebaute Migration 22 dazu wurde vor
   dem Rollout wieder entfernt.
+
+## Freigabe: „Vor Ort festgestellt“ (Wunsch Ahmad 01.10.2026)
+
+Befund: `/protocols/zur-freigabe` lieferte die Haken des Fahrers zu Ausstattung, Unterlagen und Zustand schon mit
+(`ausstattung`, `dokumente`, `zustand`), die Freigabe-Seite zeigte sie aber nie — der Chef sah fehlende oder
+defekte Ausstattung nur im Protokoll-PDF oder in der KI-Karte.
+
+Jetzt: `protokoll_vergleich.vor_ort_befunde` fasst je Protokoll zusammen, was vor Ort als **fehlend, defekt, anders,
+mangelhaft** angekreuzt wurde und was **ohne Angabe** blieb (Feld `vor_ort`: `ausstattung`, `dokumente`, `zustand`,
+Zähler `anzahl`/`hinweise`/`offen`). Die Seite „Freigaben“ zeigt den Block „Vor Ort festgestellt“ direkt unter dem
+Vertragsvergleich; ohne Befund steht eine grüne Zeile. Kilometer stehen weiter im Vergleich, Tankfüllstand und
+Reifenprofil im PDF. Tests: `backend/tests/test_freigabe_vor_ort_20261001.py`, `frontend/src/pages/app/Freigaben.vorOrt.test.jsx`.
