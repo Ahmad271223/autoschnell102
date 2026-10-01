@@ -3176,9 +3176,12 @@ def test_60_spezifitaet_worker_erfolg_schalter_fail_closed(welt, monkeypatch):
     assert ABF.KANDIDATEN_LESEN == 200 and ABF.KANDIDATEN_MAX == 50
     q = inspect.getsource(ABF.modelle_fuer_fahrzeug)
     assert "to_list(KANDIDATEN_LESEN)" in q and "raus[:KANDIDATEN_MAX]" in q
-    # Nr. 93
+    # Nr. 93: im Crawl-Pfad erst NACH dem Takt (hinter einmal). 01.10.2026: ein Leerlauf-Takt (Crawler aus,
+    # kein Token, Wartung) stempelt ebenfalls — sonst galt die Instanz nach 3 x 60 s als "nicht bereit".
     q = inspect.getsource(JOBS.worker_forever)
-    assert q.index("await einmal(db, schalter_pruefen=True)") < q.index("erfolg()")
+    einmal_pos = q.index("await einmal(db, schalter_pruefen=True)")
+    assert "erfolg()" in q[einmal_pos:], "Erfolg nach dem Crawl-Takt"
+    assert q.count("erfolg()") == 3 and q.index("erfolg()") < einmal_pos, "Leerlauf-Takte stempeln auch"
     # Nr. 96
 
     class _Kaputt:
