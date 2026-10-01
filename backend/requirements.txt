@@ -40,7 +40,7 @@ python-dotenv==1.2.2
 python-multipart==0.0.32
 PyYAML==6.0.3
 reportlab==4.4.10
-pypdf==6.16.2
+pypdf==6.19.0
 requests==2.33.1
 s3transfer==0.16.1
 six==1.17.0

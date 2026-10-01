@@ -836,6 +836,40 @@ async def m21_empfang_kaestchen_leeren(db) -> dict:
     return z
 
 
+async def m22_vertragstext_ohne_unterschriftssatz(db) -> dict:
+    """Wunsch Ahmad 01.10.2026: "Dieser Vertrag ist (rechtskräftig, verbindlich und auch) ohne
+    Unterschrift gültig." steht in keinem Vertragstext mehr. Der Standardtext ist bereinigt
+    (pdf_service); hier der Bestand: dealers.digital_vertragstext / default_terms /
+    default_special_agreements und dieselben Felder in users.settings_override (Sucher).
+    Nummerierte Absaetze werden lueckenlos neu gezaehlt. Gespeicherte Vertraege (generated_pdfs)
+    bleiben unveraendert — Archiv. Idempotent (zweiter Lauf aendert nichts)."""
+    from pdf_service import vertragstext_ohne_unterschriftssatz as bereinigen
+    felder = ("digital_vertragstext", "default_terms", "default_special_agreements")
+    z = {"dealers": 0, "users": 0}
+    async for d in db.dealers.find({"$or": [{f: {"$type": "string"}} for f in felder]},
+                                   {"_id": 1, **{f: 1 for f in felder}}):
+        setzen = {}
+        for f in felder:
+            alt = d.get(f)
+            if isinstance(alt, str) and bereinigen(alt) != alt:
+                setzen[f] = bereinigen(alt)
+        if setzen:
+            r = await db.dealers.update_one({"_id": d["_id"]}, {"$set": setzen})
+            z["dealers"] += r.modified_count
+    async for u in db.users.find({"$or": [{f"settings_override.{f}": {"$type": "string"}} for f in felder]},
+                                 {"_id": 1, "settings_override": 1}):
+        ov = u.get("settings_override") or {}
+        setzen = {}
+        for f in felder:
+            alt = ov.get(f)
+            if isinstance(alt, str) and bereinigen(alt) != alt:
+                setzen[f"settings_override.{f}"] = bereinigen(alt)
+        if setzen:
+            r = await db.users.update_one({"_id": u["_id"]}, {"$set": setzen})
+            z["users"] += r.modified_count
+    return z
+
+
 MIGRATIONEN = [
     (1, "abos_normalisieren", m1_abos_normalisieren),
     (2, "lifecycle_nachziehen", m2_lifecycle),
@@ -867,6 +901,8 @@ MIGRATIONEN = [
     (20, "markt_land_alarme_schliessen", m20_markt_land_alarme_schliessen),
     # Pruefer-Restpunkt 28.09.2026: automatische Empfangs-Kreuze (24.-27.09.) vor der Uebergabe leeren
     (21, "empfang_kaestchen_leeren", m21_empfang_kaestchen_leeren),
+    # Wunsch Ahmad 01.10.2026: kein "ohne Unterschrift gültig" mehr in gespeicherten Vertragstexten
+    (22, "vertragstext_ohne_unterschriftssatz", m22_vertragstext_ohne_unterschriftssatz),
 ]
 
 

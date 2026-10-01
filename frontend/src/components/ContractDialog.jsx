@@ -491,7 +491,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
   // geändert hat:
   //  - Datum folgt dem Abholdatum (= Übergabetag; der Vertrag wird meist
   //    Tage vorher angelegt). Ohne Abholdatum gilt wieder "heute".
-  //  - Ort (Verkäufer) folgt "Verkäufer / Halter → Ort", Ort (Käufer)
+  //  - Ort (Verkäufer) folgt "Verkäufer → Ort", Ort (Käufer)
   //    folgt "Käufer → Ort" (z.B. Ort im Inserat fehlte und wird nachgetragen).
 
   const set = (k, v) => {
@@ -760,7 +760,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
 
           {/* Verkäufer + Käufer side-by-side on lg, stacked on small */}
           <div className="grid lg:grid-cols-2 gap-5">
-            <Section title="Verkäufer / Halter">
+            <Section title="Verkäufer">
               <Field label="Name / Firma *" required value={form.seller_name} onChange={(v) => set("seller_name", v)} testid="contract-seller-name"
                      helper={namensHinweise.length > 0 && (
                        <span data-testid="contract-seller-name-hinweis">
@@ -783,7 +783,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
             {/* Runde 24 (11.09.2026): Firma/Adresse/PLZ/Ort sind Pflicht —
                 Käufer im Kaufvertrag, Auftraggeber im Abholprotokoll. */}
             <div ref={kaeuferRef} style={{ scrollMarginTop: "5rem" }} data-testid="contract-kaeufer">
-            <Section title="Käufer (Händler — du)">
+            <Section title="Käufer (du)">
               {fehltInEinstellungen.length > 0 && (
                 <div role="alert" data-testid="contract-kaeufer-fehlt"
                      className="flex items-start gap-2.5 rounded-lg border px-3 py-2.5 text-sm leading-snug"

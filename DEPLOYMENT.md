@@ -4198,3 +4198,10 @@ Tests: `backend/tests/test_pruefliste_20261001.py`, `frontend/src/pages/firma/fi
 - Kundenfassung (E-Mail/WhatsApp): der Schlusssatz „Dieser Vertrag ist ohne Unterschrift gültig." ist weg; sie endet mit den
   Vertragsbedingungen der Firma (Klausel 4 des Standardtexts bleibt, weil der Text je Firma gespeichert ist).
 - Preis-Kasten: die Zeile „inkl. aller Bestandteile lt. Vertrag“ unter dem Kaufpreis ist weg (MwSt-Ausweis bleibt).
+- Zweite Runde (01.10. abends): „Halter“ und „Händler“ sind überall raus — auch der Untertitel („für ein gebrauchtes
+  Kraftfahrzeug“, ohne „Ankauf durch Händler“) und die Abschnitte im Vertragsdialog („Verkäufer“, „Käufer (du)“).
+  Die Rechtsklausel „Der Käufer ist Händler im Sinne des § 14 BGB“ bleibt (Inhalt, keine Beschriftung).
+- Der Satz „Dieser Vertrag ist (rechtskräftig, verbindlich und auch) ohne Unterschrift gültig.“ steht in keinem
+  Vertragstext mehr: Standardtext ohne den alten Punkt 4 (AGB-Punkte jetzt 4–8), **Migration 22** entfernt ihn aus den
+  gespeicherten Firmen- und Sucher-Texten (Vertragsbedingungen, AGB, Besondere Vereinbarungen) und nummeriert
+  lückenlos neu. Bereits erzeugte Verträge bleiben unverändert (Archiv). Helfer: `pdf_service.vertragstext_ohne_unterschriftssatz`.
