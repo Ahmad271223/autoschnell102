@@ -265,8 +265,9 @@ def test_17_der_vertrag_nimmt_beide_teile():
     """Gegenprobe an der Quelle: frueher wurde nur das Freitextfeld kopiert."""
     quelle = (BACKEND / "routes" / "contracts.py").read_text(encoding="utf-8")
     code = "\n".join(z.split("#", 1)[0] for z in quelle.splitlines())
-    assert code.count("_vorlagen.sondervereinbarungen(dealer)") == 2, (
-        "nicht beide Vertragswege nehmen Standardsatz UND eigenen Text")
+    # 01.10.2026: drei Wege — Anlegen, Vorschau und die nachtraegliche Aenderung (neue Fassung)
+    assert code.count("_vorlagen.sondervereinbarungen(dealer)") == 3, (
+        "nicht alle Vertragswege nehmen Standardsatz UND eigenen Text")
     assert 'dealer.get("default_special_agreements", "")' not in code, (
         "ein Weg kopiert weiter nur das Freitextfeld — der Schalter waere "
         "dort wirkungslos")
