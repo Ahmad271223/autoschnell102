@@ -303,3 +303,22 @@ Abnahme wie hier: technische Fehlerrate < 1 %, 0 Doppel-Abrufe/-Versand,
 0 Hänger, Drain vollständig, RAM fällt zurück, Stoß-Spannweite < 1 s,
 Annahme p95 < 500 ms bei n=100. Beide Skripte verweigern den Start ohne
 bestätigten Mock — es entsteht kein echter Anbieter-Verkehr.
+
+## 8. 30 Sucher × 30 neue mobile.de-Links (01.10.2026, lokal Windows + Mock)
+
+Skript `backend/scripts/lasttest_30x30.py`, Anbieter-Attrappe 8 s je Abruf (Apify nachgestellt),
+ein Prozess mit `LINK_JOB_CONCURRENCY=256` (bildet 2 Server × 4 Worker ab), `RATE_LIMIT_EXEMPT_LOOPBACK=false`,
+eine Firma mit 30 Suchern, 900 verschiedene neue Links. Kein echter Anbieter-Verkehr.
+
+| Lauf | Slots mobile.de | Ergebnis | Wartezeit je Link | Alle 30 Sucher fertig nach |
+|---|---|---|---|---|
+| Alltag: jeder Sucher 30 Links nacheinander | 16 | 900/900, 0 Fehler, jeder Link 1× abgerufen | median 15,5 s · p90 23 s · max 58 s | 8,2 min |
+| Alltag, dito | 32 | 900/900, 0 Fehler | median 9,8 s · p90 11 s · max 11,8 s | 5,1 min |
+| Sturm: 300 Links auf einmal (30 × 10) | 16 | 300/300, 0 Fehler; 84 erst abgewiesen (Firmen-Grenze 200 offene Jobs), dann durch | median 100 s · max 182 s | 3,0 min |
+| Sturm, dito | 32 | 300/300, 0 Fehler; 67 erst abgewiesen | median 52 s · max 93 s | 1,6 min |
+
+Sturm mit 900 Links auf einmal ist auf dem Windows-Laptop nicht messbar (das Betriebssystem wies 544
+Verbindungen ab, der Server selbst meldete keinen Fehler) — dafür `deploy/lasttest-auf-prod2.sh`.
+Grenzen, die dabei greifen: `LINK_JOB_MAX_OFFEN_JE_KONTO` (20) und `LINK_JOB_MAX_OFFEN_JE_FIRMA` (200,
+Compose-Standard) → 429 "… Links in der Warteschlange, bitte kurz warten"; die Oberfläche wartet je Link
+höchstens 120 s und meldet dann "Link vorgemerkt" (der Abruf läuft im Hintergrund weiter).
