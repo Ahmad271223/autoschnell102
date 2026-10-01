@@ -274,15 +274,42 @@ export function anfangsFormular(v, dealer, heute) {
   };
 }
 
-export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCreated }) {
+/** Wunsch Ahmad 01.10.2026: einen bestehenden Vertrag im selben Dialog ändern — alles wie beim
+ *  Anlegen, nur vorausgefüllt aus contract_data. Nummer und Abholtermin bleiben (Server). */
+export function formularAusVertrag(basis, vertrag) {
+  const cd = vertrag?.contract_data || {};
+  const neu = { ...basis };
+  for (const k of Object.keys(basis)) {
+    if (!(k in cd)) continue;
+    const w = cd[k];
+    if (typeof basis[k] === "boolean") neu[k] = Boolean(w);
+    else if (Array.isArray(basis[k])) neu[k] = Array.isArray(w) ? w.filter((d) => d && typeof d === "object") : [];
+    else neu[k] = w == null ? "" : String(w);
+  }
+  neu.contract_no = vertrag?.contract_no || cd.contract_no || "";
+  neu.kundennummer = cd.vertrags_kundennummer || cd.kundennummer || basis.kundennummer || "";
+  const preis = cd.purchase_price ?? vertrag?.purchase_price;
+  neu.purchase_price = preis == null ? "" : String(preis);
+  neu.pickup_date = vertrag?.pickup_date || cd.pickup_date || "";
+  neu.pickup_time = vertrag?.pickup_time || cd.pickup_time || "";
+  if (!neu.damages_text && neu.damages.length) neu.damages_text = damagesToText(neu.damages);
+  return neu;
+}
+
+const alleBeruehrt = (form) => Object.fromEntries(Object.keys(form).map((k) => [k, true]));
+
+export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCreated, vertrag = null }) {
   const { dealer, refresh, user } = useAuth();
+  const bearbeiten = Boolean(vertrag);
   const v = vehicle || {};
   // Market Intelligence (25.09.2026): optionaler Hinweis, blockiert nichts
   const markt = useMarktHinweis(vehicleId, open);
   // Runde 22 (11.09.2026, Nachprüfung): Vorgabe fürs Empfangsdatum einmal
   // beim Öffnen festhalten — set() vergleicht damit (siehe unten).
   const [heute] = useState(todayLocalIso);
-  const [form, setForm] = useState(() => anfangsFormular(v, dealer, heute));
+  const [form, setForm] = useState(() => (vertrag
+    ? formularAusVertrag(anfangsFormular(v, dealer, heute), vertrag)
+    : anfangsFormular(v, dealer, heute)));
   const [loading, setLoading] = useState(false);
   const [previewing, setPreviewing] = useState(false);
   // Wunsch Ahmad 26.09.2026 abends: 409 "Vertragsnummer bereits vergeben"
@@ -300,15 +327,18 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
   // Wunsch Ahmad 18.09.2026 / Rollenprüfung 22.09.2026 (RP-490): Felder, die
   // der Nutzer selbst angefasst hat — nur die bleiben beim Nachladen der
   // Einstellungen stehen.
-  const beruehrt = useRef({});
-  const entwurfKey = entwurfSchluessel(user?.id, vehicleId);
+  // Ändern-Modus: alle Felder gelten als vom Nutzer gesetzt — Einstellungen und frische Käuferdaten
+  // überschreiben nichts aus dem gespeicherten Vertrag; ein Entwurf wird nicht geführt.
+  const beruehrt = useRef(null);
+  if (beruehrt.current === null) beruehrt.current = bearbeiten ? alleBeruehrt(form) : {};
+  const entwurfKey = bearbeiten ? null : entwurfSchluessel(user?.id, vehicleId);
   const schliessen = () => {
     if (bearbeitet.current
         && !window.confirm("Eingaben im Kaufvertrag verwerfen? Sie sind noch nicht gespeichert.")) {
       return;
     }
     // RP-412: bewusst geschlossen = Entwurf weg.
-    entwurfLoeschen(entwurfKey);
+    if (entwurfKey) entwurfLoeschen(entwurfKey);
     onClose?.();
   };
   // Pruefbericht 20.09.2026 (M-07): role=dialog, Fokus, Escape — Escape geht
@@ -335,7 +365,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
   const [inseratVorschlaege, setInseratVorschlaege] = useState(null);
   useEffect(() => {
     if (!open) { entwurfGeprueft.current = null; return; }
-    if (entwurfGeprueft.current === entwurfKey) return;
+    if (!entwurfKey || entwurfGeprueft.current === entwurfKey) return;
     entwurfGeprueft.current = entwurfKey;
     const e = entwurfLesen(entwurfKey);
     if (!e) return;
@@ -372,7 +402,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
   const formRef = useRef(form);
   formRef.current = form;
   useEffect(() => {
-    if (!open) return undefined;
+    if (!open || !entwurfKey) return undefined;
     const sichern = () => {
       if (!bearbeitet.current) return;
       entwurfSpeichern(entwurfKey, { form: formRef.current, beruehrt: beruehrt.current,
@@ -639,6 +669,16 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
     // Klick auf „Übernehmen“ im Vertrag, die Rückfrage entfällt.
     setLoading(true);
     try {
+      if (bearbeiten) {
+        // Wunsch Ahmad 01.10.2026: bestehenden Vertrag ändern = neue Fassung (alte bleibt im Archiv)
+        const { data } = await api.post(`/contracts/${vertrag.id}/neue-fassung`, buildPayload());
+        bearbeitet.current = false;
+        if (data?.geaendert === false) {
+          toast.info(`Nichts geändert — der Vertrag bleibt in Fassung ${data.version || 1}.`);
+        }
+        onCreated?.(data);
+        return;
+      }
       // Pruefung 14.09.2026: Idempotenz — Doppelklick oder Wiederholung nach
       // Netzabbruch legt keinen zweiten Vertrag an (Schluessel je Dialog).
       const senden = (extra = {}) => api.post("/contracts",
@@ -651,9 +691,17 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
           // Fahrzeug schon einen offenen Vertrag — erst nachfragen, dann
           // bewusst einen zweiten anlegen (z. B. nachverhandelter Preis).
           const d = err?.response?.data?.detail;
-          if (err?.response?.status === 409 && d?.code === "vertrag_vorhanden"
-              && window.confirm(`${d.msg}\n\nTrotzdem einen zweiten Kaufvertrag anlegen?`)) {
-            return (await senden({ zweiter_vertrag_bestaetigt: true })).data;
+          if (err?.response?.status === 409 && d?.code === "vertrag_vorhanden") {
+            // Wunsch Ahmad 01.10.2026: statt den Link erneut einzufügen und einen zweiten Vertrag zu
+            // machen — den bestehenden mit diesen Eingaben als neue Fassung ändern.
+            const nr = d.contract_no ? ` (Nr. ${d.contract_no})` : "";
+            if (d.contract_id && window.confirm(`${d.msg}\n\nDen bestehenden Kaufvertrag${nr} mit diesen `
+                + "Eingaben ändern (neue Fassung, die alte bleibt im Archiv)?")) {
+              return (await api.post(`/contracts/${d.contract_id}/neue-fassung`, buildPayload())).data;
+            }
+            if (window.confirm(`${d.msg}\n\nTrotzdem einen zweiten Kaufvertrag anlegen?`)) {
+              return (await senden({ zweiter_vertrag_bestaetigt: true })).data;
+            }
           }
           throw err;
         }
@@ -687,7 +735,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
         data = await anlegen();
       }
       // RP-412: gespeichert — der Entwurf wird nicht mehr gebraucht.
-      entwurfLoeschen(entwurfKey);
+      if (entwurfKey) entwurfLoeschen(entwurfKey);
       bearbeitet.current = false;
       // Runde 15: der Vertrag ist gespeichert, auch wenn der automatische
       // Abholtermin nicht angelegt werden konnte — der Server sagt es.
@@ -716,14 +764,16 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
           Handy-Ansicht (24.09.2026): Hoehe nach dvh (iOS-Adressleiste), am
           Telefon fast randlos. */}
       <div ref={dialogRef} {...MODAL_ATTRIBUTE} aria-labelledby="contract-dialog-titel"
-           className="bg-[var(--bg-surface)] border w-full max-w-4xl modal-hoehe overflow-y-auto rounded-2xl"
+           className="bg-[var(--bg-surface)] border w-full max-w-[min(96vw,1500px)] modal-hoehe overflow-y-auto rounded-2xl"
            style={{ borderColor: "var(--border-default)" }} data-testid="contract-dialog">
         <div className="flex items-center justify-between px-6 py-3 border-b sticky top-0 bg-[var(--bg-surface)] z-10"
              style={{ borderColor: "var(--border-default)" }}>
           <div>
-            <div className="overline">Kaufvertrag</div>
+            <div className="overline" data-testid="contract-dialog-overline">
+              {bearbeiten ? `Kaufvertrag ändern · Fassung ${vertrag.version || 1} → ${(vertrag.version || 1) + 1}` : "Kaufvertrag"}
+            </div>
             <div className="font-display font-bold text-lg" id="contract-dialog-titel">
-              {vehicle?.make_label} {vehicle?.model_label}
+              {(vehicle?.make_label || vertrag?.make || "")} {(vehicle?.model_label || vertrag?.model || "")}
             </div>
           </div>
           {/* M-11: 44-px-Trefferflaeche statt des nackten 20-px-Symbols */}
@@ -741,10 +791,11 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
               Vertragsnummer meldet der Server (409) — Text unter dem Feld. */}
           <Section title="Nummern" subtitle="Beide Felder dürfen leer bleiben — dann vergibt die App die Vertragsnummer selbst und nimmt die Kundennummer aus den Einstellungen.">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <Field label="Vertragsnummer (leer = automatisch KV-…)" value={form.contract_no}
+              <Field label={bearbeiten ? "Vertragsnummer (bleibt)" : "Vertragsnummer (leer = automatisch KV-…)"} value={form.contract_no}
                      onChange={(v) => set("contract_no", v)} testid="contract-vertragsnummer"
-                     maxLength={40} placeholder="z. B. AH-2026-0042"
-                     helper="3–40 Zeichen: Buchstaben, Ziffern, Leerzeichen und - _ / . — je Firma nur einmal vergebbar." />
+                     maxLength={40} placeholder="z. B. AH-2026-0042" disabled={bearbeiten}
+                     helper={bearbeiten ? "Eine neue Fassung behält die Vertragsnummer."
+                       : "3–40 Zeichen: Buchstaben, Ziffern, Leerzeichen und - _ / . — je Firma nur einmal vergebbar."} />
               <Field label="Kundennummer (Vorbelegung: Firmenwert)" value={form.kundennummer}
                      onChange={(v) => set("kundennummer", v)} testid="contract-kundennummer"
                      maxLength={30} placeholder="z. B. 482913"
@@ -1134,8 +1185,11 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
               </span>
             </label>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <Field label="Abholdatum" type="date" value={form.pickup_date} onChange={(v) => set("pickup_date", v)} testid="contract-pickup-date" />
+              <Field label="Abholdatum" type="date" value={form.pickup_date} onChange={(v) => set("pickup_date", v)} testid="contract-pickup-date"
+                     disabled={bearbeiten}
+                     helper={bearbeiten ? "Den Abholtermin bitte im Terminplaner verschieben — der Vertrag bekommt dann selbst eine neue Fassung." : undefined} />
               <Field label="Abholuhrzeit (nur Terminplaner)" type="time" value={form.pickup_time} onChange={(v) => set("pickup_time", v)} testid="contract-pickup-time"
+                     disabled={bearbeiten}
                      helper="Steht nicht im Vertrag — nur für den Termin und die Fahrer-App." />
             </div>
             {/* Rollenprüfung 22.09.2026 (RP-218): Der Hilfetext sagt jetzt, was
@@ -1216,7 +1270,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
             <button type="submit" disabled={loading || previewing} data-testid="submit-contract"
                     className="apple-btn apple-btn-primary disabled:opacity-60">
               {loading ? <Loader2 size={14} className="animate-spin" /> : <FileText size={14} />}
-              {loading ? "Erstelle PDF…" : "PDF erstellen"}
+              {loading ? "Erstelle PDF…" : (bearbeiten ? "Neue Fassung erstellen" : "PDF erstellen")}
             </button>
           </div>
         </form>

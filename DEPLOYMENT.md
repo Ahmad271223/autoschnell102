@@ -4217,3 +4217,19 @@ mangelhaft** angekreuzt wurde und was **ohne Angabe** blieb (Feld `vor_ort`: `au
 Zähler `anzahl`/`hinweise`/`offen`). Die Seite „Freigaben“ zeigt den Block „Vor Ort festgestellt“ direkt unter dem
 Vertragsvergleich; ohne Befund steht eine grüne Zeile. Kilometer stehen weiter im Vergleich, Tankfüllstand und
 Reifenprofil im PDF. Tests: `backend/tests/test_freigabe_vor_ort_20261001.py`, `frontend/src/pages/app/Freigaben.vorOrt.test.jsx`.
+
+## Kaufvertrag nachträglich ändern (Wunsch Ahmad 01.10.2026)
+
+Chef und Sucher können einen bestehenden Kaufvertrag jederzeit nachträglich ändern — ohne auf den Fahrer zu warten
+und ohne denselben Link erneut einzufügen. Im Vertragsarchiv öffnet der Stift-Knopf („Kaufvertrag nachträglich ändern“)
+denselben Dialog wie beim Anlegen, vorausgefüllt aus den gespeicherten Vertragsdaten; „Neue Fassung erstellen“ ruft
+`POST /contracts/{id}/neue-fassung` (Chef: alle Verträge der Firma, Sucher: nur eigene). Die alte Fassung bleibt im
+Archiv (`generated_pdf_versions`, Grund `nachtraeglich_geaendert`), eine Kunden-Unterschrift gilt nur für die alte
+Fassung (Meldung wie bisher), offene Termine bekommen Verkäufername/Kontakt/Adresse mit, danach öffnet sich der
+Versand-Dialog. Beim Anlegen eines zweiten Vertrags zum selben Fahrzeug (409 `vertrag_vorhanden`) bietet der Dialog
+jetzt zuerst an, den bestehenden Vertrag mit den Eingaben zu ändern.
+
+Bleibt unverändert: Vertragsnummer, Abholdatum/-uhrzeit (im Terminplaner verschieben — der Vertrag bekommt dann
+selbst eine Fassung), eingefrorener Inseratsstand, Preis vor der Abholung, Logo. Nicht mitten im Versand (409).
+Der Dialog ist jetzt bis 1500 px breit (Skizzen). Tests: `backend/tests/test_vertrag_nachtraeglich_20261001.py`,
+`frontend/src/components/ContractDialog.aendern.test.jsx`.

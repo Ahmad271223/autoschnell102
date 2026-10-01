@@ -3,13 +3,14 @@ import { useNavigate } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
 import { thumbSrc, thumbFehler } from "@/lib/bilder";
 import { toast } from "sonner";
-import { Search, Trash2, Eye, X, Car, ChevronLeft, ChevronRight, MapPin, FileText, Send, Mail, CalendarPlus, UserRoundPen, PenLine } from "lucide-react";
+import { Search, Trash2, Eye, X, Car, ChevronLeft, ChevronRight, MapPin, FileText, Send, Mail, CalendarPlus, UserRoundPen, PenLine, Pencil } from "lucide-react";
 import { openContractPdf } from "@/lib/pdf";
 import { openAuthedFile } from "@/lib/api";
 import BeweisCard from "@/components/BeweisCard";
 import SendDialog, { abholterminAnlegen, TERMIN_MELDUNG } from "@/components/SendDialog";
 import FolgeMailDialog from "@/components/FolgeMailDialog";
 import VerkaeuferKorrekturDialog from "@/components/VerkaeuferKorrekturDialog";
+import ContractDialog from "@/components/ContractDialog";
 import KundenportalDialog, { portalUnterschrift } from "@/components/KundenportalDialog";
 
 // Rollenprüfung 22.09.2026 (RP-007/RP-106/RP-257): Verträge je Seite.
@@ -63,6 +64,9 @@ export default function PDFArchiv() {
   // Entscheidung Ahmad 22.09.2026 (RP-481): Verkaeuferdaten eines Vertrags
   // korrigieren -> neue Fassung, danach direkt der Versand-Dialog.
   const [korrektur, setKorrektur] = useState(null);
+  // Wunsch Ahmad 01.10.2026: den ganzen Vertrag nachtraeglich aendern (derselbe Dialog wie beim
+  // Anlegen, vorausgefuellt) -> neue Fassung, danach direkt der Versand-Dialog.
+  const [aendern, setAendern] = useState(null);
   // Kundenportal (29.09.2026): Code fuer die digitale Unterschrift des Kunden
   const [portal, setPortal] = useState(null);
 
@@ -420,6 +424,15 @@ export default function PDFArchiv() {
                               title="Hinweis nach Kaufabschluss / Bahnverbindung — per E-Mail verschicken oder kopieren, mit Name und Daten dieses Vertrags">
                         <Mail size={16} />
                       </button>
+                      <button onClick={() => setAendern(it)}
+                              data-testid={`vertrag-aendern-${it.id}`}
+                              className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-white/10"
+                              style={{ background: "var(--apple-btn-secondary-bg)",
+                                       color: "var(--text-primary)" }}
+                              aria-label="Kaufvertrag nachträglich ändern"
+                              title="Kaufvertrag nachträglich ändern — alle Angaben wie beim Anlegen; ergibt eine neue Fassung, die alte bleibt im Archiv">
+                        <Pencil size={16} />
+                      </button>
                       <button onClick={() => setKorrektur(it)}
                               data-testid={`verkaeufer-korrektur-${it.id}`}
                               className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-white/10"
@@ -470,6 +483,21 @@ export default function PDFArchiv() {
       {folgeMail && (
         <FolgeMailDialog open contract={folgeMail}
                          onClose={(gesendet) => { setFolgeMail(null); if (gesendet) load(); }} />
+      )}
+
+      {aendern && (
+        <ContractDialog open key={aendern.id} vertrag={aendern}
+          vehicle={{ make_label: aendern.make, model_label: aendern.model }} vehicleId={aendern.vehicle_id}
+          onClose={() => setAendern(null)}
+          onCreated={(c) => {
+            const it = aendern;
+            setAendern(null);
+            if (!c || c.geaendert === false) return;
+            toast.success(`Fassung ${c.version || ""} erstellt — die alte bleibt im Archiv.`);
+            // gleich weiter zum Versand, wie nach der Verkaeufer-Korrektur
+            setSenden({ ...it, ...c });
+            load();
+          }} />
       )}
 
       {korrektur && (

@@ -3405,6 +3405,171 @@ async def verkaeufer_korrigieren(contract_id: str, body: VerkaeuferKorrekturIn,
             "verkaeufer": {k: str(cd.get(k) or "") for k in VERKAEUFER_FELDER}}
 
 
+NACHTRAEGLICH_GRUND = "nachtraeglich_geaendert"
+#: Diese Angaben kommen NICHT aus dem Formular der nachtraeglichen Aenderung: die Vertragsnummer bleibt,
+#: Abholdatum/-uhrzeit gehoeren dem Terminplaner (eine Verschiebung dort erzeugt selbst eine Fassung).
+_NICHT_AUS_DEM_FORMULAR = ("contract_no", "pickup_date", "pickup_time")
+
+
+@router.post("/contracts/{contract_id}/neue-fassung")
+async def vertrag_nachtraeglich_aendern(contract_id: str, body: ContractIn, user=Depends(current_firma)):
+    """Wunsch Ahmad 01.10.2026: Chef und Sucher aendern einen bestehenden Kaufvertrag JEDERZEIT
+    nachtraeglich — derselbe Dialog wie beim Anlegen, vorausgefuellt, alles aenderbar — und erzeugen
+    daraus eine NEUE FASSUNG; die alte bleibt im Archiv (wie beim verschobenen Termin und bei der
+    Verkaeuferkorrektur). Beispiele: der Chef will nicht auf den Fahrer warten; der Sucher will nicht
+    denselben Link erneut einfuegen und einen zweiten Vertrag anlegen.
+
+    Bleibt wie bisher: Vertragsnummer, Abholdatum/-uhrzeit (_NICHT_AUS_DEM_FORMULAR), eingefrorener
+    Inseratsstand, Preis vor der Abholung, Logo. Nicht geschickte Felder (None) behalten ihren Wert;
+    leer geschickte Textfelder werden wie beim Anlegen behandelt (leer = Vorlage/Einstellung).
+    Chef: alle Vertraege der Firma; Sucher: nur eigene (_vertrag_bereich). Nicht mitten im Versand (409).
+    Antwort: der Vertrag ohne PDF-Daten (wie GET /contracts/{id}) plus geaendert=True — oder
+    {"geaendert": False, "version": n}, wenn die Eingaben nichts aendern."""
+    bereich = _vertrag_bereich(user)
+    doc = await db.generated_pdfs.find_one({"id": contract_id, **bereich}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Vertrag nicht gefunden")
+    if await _versand_laeuft(contract_id):
+        raise HTTPException(409, VERSAND_LAEUFT_TEXT, headers={"Retry-After": "5"})
+    dealer_id = user["dealer_id"]
+    alte_version = int(doc.get("version") or 1)
+    cd_alt = dict(doc.get("contract_data") or {})
+    eingaben = body.model_dump(exclude={"zweiter_vertrag_bestaetigt", "ki_bewertung_id",
+                                        "idempotency_key", "vehicle_id"})
+    contract_dict = dict(cd_alt)
+    for k, w in eingaben.items():
+        if k in _NICHT_AUS_DEM_FORMULAR:
+            continue
+        if w is None and k in cd_alt:
+            continue                                        # nicht geschickt: bleibt
+        contract_dict[k] = w
+    contract_dict["contract_no"] = str(doc.get("contract_no") or cd_alt.get("contract_no") or "")
+    for k in ("pickup_date", "pickup_time"):
+        contract_dict[k] = cd_alt[k] if cd_alt.get(k) is not None else (doc.get(k) or "")
+
+    v = await db.vehicles.find_one({"id": doc.get("vehicle_id"), "dealer_id": dealer_id}, {"_id": 0}) or {}
+    vehicle = dict(v.get("data") or {})
+    # Kaeufer ist der ERSTELLER des Vertrags (Runde 25) — nicht, wer gerade aendert.
+    from auftraggeber import kaeufer_basis
+    termin = await db.appointments.find_one({"contract_id": contract_id, "dealer_id": dealer_id},
+                                            {"_id": 0, "created_by": 1}) or {}
+    dealer = await kaeufer_basis(dealer_id=dealer_id,
+                                 user_ids=(doc.get("user_id"), termin.get("created_by"))) or {}
+    # leer = Vorlage/Einstellung, wie beim Anlegen (create_contract)
+    if not (contract_dict.get("additional_terms") or "").strip():
+        import vertrag_vorlagen as _vorlagen
+        contract_dict["additional_terms"] = _vorlagen.sondervereinbarungen(dealer)
+    if not (contract_dict.get("agb_text") or "").strip():
+        contract_dict["agb_text"] = dealer.get("default_terms", "") or ""
+    if contract_dict.get("vehicle_description") is None:
+        contract_dict["vehicle_description"] = vehicle.get("description", "") or ""
+    eigener_text = (contract_dict.get("digital_vertragstext") or "").strip()
+    contract_dict["digital_vertragstext"] = eigener_text or digitaler_vertragstext(dealer)
+    kundennummer_einsetzen(contract_dict)
+    if not await uebergabe_erfolgt(db, doc):
+        empfang_kaestchen_leeren(contract_dict)
+    vehicle, dealer = _apply_contract_overrides(contract=contract_dict, vehicle=vehicle, dealer=dealer)
+    kaeufer_pflicht_pruefen(dealer)
+    kaeufer_einfrieren(contract_dict, dealer)
+    contract_dict["logo_key"] = cd_alt.get("logo_key") or logo_schluessel(dealer)
+    dealer = await _logo_einsetzen(dealer, contract_dict)
+    if _inhalt(contract_dict) == _inhalt(cd_alt):
+        return {"geaendert": False, "version": alte_version}
+    _fassung_kennzeichnen(contract_dict, doc, alte_version + 1)
+    try:
+        pdf_bytes, pdf_digital = await asyncio.to_thread(
+            _pdfs_erzeugen, dealer=dealer, vehicle=vehicle, contract=contract_dict)
+    except Exception:
+        log.exception("Kaufvertrag %s: neue Fassung aus dem Dialog nicht erzeugt", contract_id)
+        raise HTTPException(400, "PDF konnte mit diesen Eingaben nicht erzeugt werden.")
+
+    # Archiv der alten Fassung (wie regenerate_contract_for_pickup: Upsert, Portal-Nachweis bleibt bei ihr)
+    archiv_id = str(uuid.uuid4())
+    archiv_angelegt = False
+    try:
+        archiv_res = await db.generated_pdf_versions.update_one(
+            {"contract_id": contract_id, "version": alte_version},
+            {"$setOnInsert": {
+                "id": archiv_id, "contract_id": contract_id, "dealer_id": dealer_id, "version": alte_version,
+                "pdf_b64": doc.get("pdf_b64"), "pdf_digital_b64": doc.get("pdf_digital_b64"),
+                "contract_data": doc.get("contract_data"),
+                "pickup_date": doc.get("pickup_date"), "pickup_time": doc.get("pickup_time"),
+                "filename": doc.get("filename"), "archived_at": now_iso(), "archived_by": user.get("id"),
+                "grund": NACHTRAEGLICH_GRUND, **_portal_nachweis(doc, alte_version)}},
+            upsert=True)
+        archiv_angelegt = archiv_res.upserted_id is not None
+    except DuplicateKeyError:
+        archiv_angelegt = False
+
+    kopf: Dict[str, Any] = {}
+    if any((contract_dict.get(k) or "") != (cd_alt.get(k) or "") for k in ("vehicle_make", "vehicle_model")):
+        marke = str(contract_dict.get("vehicle_make") or doc.get("make") or "").strip()
+        modell = str(contract_dict.get("vehicle_model") or doc.get("model") or "").strip()
+        kopf = {"make": marke, "model": modell,
+                "filename": _vertrag_dateiname({"make_label": marke, "model_label": modell})}
+    for feld in ("seller_name", "seller_phone", "seller_email"):
+        kopf[feld] = str(contract_dict.get(feld) or "").strip()
+    try:
+        if contract_dict.get("purchase_price") is not None:
+            kopf["purchase_price"] = float(contract_dict["purchase_price"])
+    except (TypeError, ValueError):
+        pass
+    kopf["kundennummer"] = str(contract_dict.get("vertrags_kundennummer") or "")
+    res = await db.generated_pdfs.update_one(
+        {"id": contract_id, "dealer_id": dealer_id, "version": doc.get("version"),
+         "loeschung.status": {"$ne": "laeuft"}, **_kein_laufender_versand()},
+        {"$set": {
+            "pdf_b64": base64.b64encode(pdf_bytes).decode(),
+            "pdf_digital_b64": base64.b64encode(pdf_digital).decode(),
+            "pdf_digital_nachtraeglich": False,
+            "contract_data": contract_dict,
+            "version": alte_version + 1,
+            "auto_daten_nachfuehrung_offen": True,
+            "updated_at": now_iso(),
+            "nachtraeglich_geaendert_am": now_iso(),
+            "nachtraeglich_geaendert_von": user.get("id"),
+            # eine neue Fassung ist noch NICHT versendet (Runde 16)
+            **({"status": "neu erstellt"} if doc.get("status") in ("versendet", "versand_vorbereitet") else {}),
+            **kopf,
+        }})
+    if res.modified_count == 0:
+        if archiv_angelegt:
+            await db.generated_pdf_versions.delete_one({"id": archiv_id})
+        if await _versand_laeuft(contract_id):
+            raise HTTPException(409, VERSAND_LAEUFT_TEXT, headers={"Retry-After": "5"})
+        raise HTTPException(409, "Der Vertrag wurde gerade anderweitig geändert — bitte neu laden und "
+                                 "noch einmal versuchen.")
+    try:
+        await auto_daten.nachfuehren(db, {**doc, "contract_data": contract_dict})
+    except Exception:  # noqa: BLE001
+        log.exception("Auto-Daten nach nachtraeglicher Aenderung von %s nicht nachgefuehrt", contract_id)
+    # offene Termine: Verkaeufername/Kontakt/Adresse mitziehen (abgeschlossene bleiben Beleg)
+    termine = 0
+    try:
+        from routes.appointments import ABGESCHLOSSEN
+        adresse = " ".join(x for x in (str(contract_dict.get("seller_address") or "").strip(),
+                                       str(contract_dict.get("seller_zip") or "").strip(),
+                                       str(contract_dict.get("seller_city") or "").strip()) if x)[:500]
+        termin_set = {"seller_name": kopf["seller_name"], "seller_phone": kopf["seller_phone"],
+                      "seller_email": kopf["seller_email"], "updated_at": now_iso()}
+        if adresse:
+            termin_set["pickup_address"] = adresse
+        r = await db.appointments.update_many(
+            {"contract_id": contract_id, "dealer_id": dealer_id, "status": {"$nin": list(ABGESCHLOSSEN)}},
+            {"$set": termin_set})
+        termine = r.modified_count
+    except Exception:  # noqa: BLE001 — der Vertrag steht; Termin ist Beiwerk
+        log.exception("Nachtraegliche Aenderung %s: Termin nicht nachgezogen", contract_id)
+    await log_activity_sicher(dealer_id, user.get("id", ""), "vertrag.nachtraeglich.geaendert", ref=contract_id,
+                              meta={"version": alte_version + 1, "termine": termine})
+    if _portal_nachweis(doc, alte_version):
+        await _meldung_unterschrift_veraltet(doc, dealer_id, alte_version)
+    frisch = await db.generated_pdfs.find_one(
+        {"id": contract_id, **bereich}, {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0, "pdf_signiert_b64": 0})
+    return {**_vertrag_maskieren(user, _portal_bereinigen(frisch or {})), "geaendert": True,
+            "termine_aktualisiert": termine}
+
+
 @router.delete("/contracts/{contract_id}")
 async def delete_contract(contract_id: str, user=Depends(current_firma)):
     # Berechtigungsmatrix (PR-Review 09/2026): Loeschen ist destruktiv —
