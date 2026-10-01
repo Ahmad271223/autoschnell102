@@ -912,7 +912,9 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         preis_label = (f"Netto {_eur(netto)}   ·   "
                        f"zzgl. 19 % MwSt {_eur(mwst)}")
     else:
-        preis_label = "inkl. aller Bestandteile lt. Vertrag"
+        # Wunsch Ahmad 01.10.2026: die Zeile "inkl. aller Bestandteile lt. Vertrag" entfaellt —
+        # unter dem Kaufpreis steht links nichts mehr (rechts weiter die Zahlungsart).
+        preis_label = ""
 
     # Pruefbericht 20.09.2026 (P-09): ein vorhandenes, aber leeres Feld (None)
     # stand als "None" im Vertrag — der Standard griff nur bei fehlendem Feld.
