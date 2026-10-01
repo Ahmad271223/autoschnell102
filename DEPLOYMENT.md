@@ -4197,3 +4197,4 @@ Tests: `backend/tests/test_pruefliste_20261001.py`, `frontend/src/pages/firma/fi
   eigenhändige Unterschrift ist dann nicht erforderlich") ist weg.
 - Kundenfassung (E-Mail/WhatsApp): der Schlusssatz „Dieser Vertrag ist ohne Unterschrift gültig." ist weg; sie endet mit den
   Vertragsbedingungen der Firma (Klausel 4 des Standardtexts bleibt, weil der Text je Firma gespeichert ist).
+- Preis-Kasten: die Zeile „inkl. aller Bestandteile lt. Vertrag“ unter dem Kaufpreis ist weg (MwSt-Ausweis bleibt).
