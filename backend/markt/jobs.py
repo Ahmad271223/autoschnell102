@@ -1240,9 +1240,18 @@ async def worker_forever(db, erfolg: Optional[Callable[[], None]] = None, takt_s
         try:
             if not await konfig.crawler_aktiv(db) or not konfig.token():
                 await konfig.crawler_aus_protokollieren(db)     # Runde 4 #1: nur 'bewusst aus', nie 'Token fehlt'
+                # CI-Befund 01.10.2026 (dreimal "nicht bereit" im Stack-Rauchtest): im Leerlauf (Crawler aus,
+                # kein APIFY_TOKEN, Wartung) stempelte der Worker keinen Erfolg — nach 3 x 60 s meldete
+                # /api/ready "Hintergrundjob markt: kein erfolgreicher Durchlauf" und die Instanz galt als
+                # nicht bereit, obwohl der Worker gesund und absichtlich untaetig war. Ein Leerlauf-Takt ist
+                # ein erfolgreicher Takt.
+                if erfolg:
+                    erfolg()
                 await asyncio.sleep(60)
                 continue
             if await _wartung_aktiv(db):
+                if erfolg:
+                    erfolg()
                 await asyncio.sleep(60)
                 continue
             tag = konfig.heute_tag()
