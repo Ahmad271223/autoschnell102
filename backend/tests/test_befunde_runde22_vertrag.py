@@ -117,7 +117,9 @@ def test_01_empfangsbestaetigung_in_beiden_fassungen(digital):
     assert "Datum und Ort: 18.08.2026, Grethem" in f
     assert "Zulassung" in f and "Abgemeldet" in f
     assert "Echtzeitüberweisung" in f            # Umlaut korrekt
-    assert "Verkäufer / Halter" in f and "Käufer / Händler" in f
+    # Wunsch Ahmad 01.10.2026: nur "Verkäufer" und "Käufer" — kein Halter/Händler mehr in den Kaesten
+    assert "Verkäufer" in f and "Käufer" in f
+    assert "Verkäufer / Halter" not in f and "Käufer / Händler" not in f and "(Halter)" not in f and "(Händler)" not in f
 
 
 def test_02_druckfassung_behaelt_linien_digital_ohne():
@@ -130,7 +132,7 @@ def test_02_druckfassung_behaelt_linien_digital_ohne():
     assert druck.count("Datum und Ort:") == 2
     assert "Mit ihrer Unterschrift" in druck
     assert "Ort, Datum" not in digital and "Mit ihrer Unterschrift" not in digital
-    assert "Dieser Vertrag ist ohne Unterschrift gültig." in digital
+    assert "Dieser Vertrag ist ohne Unterschrift gültig." not in digital      # Wunsch Ahmad 01.10.2026: Satz weg
     # Wunsch Ahmad (15.09.2026): die Kundenfassung traegt KEINE Empfangs-
     # bestaetigung (Schluessel erhalten, Kaufpreis bestaetigt) und keinen
     # Abschnitt "Unterschriften" — das gehoert nur in die Druckfassung.

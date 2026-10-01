@@ -80,14 +80,17 @@ def _text(digital=False, **vertrag) -> str:
 
 
 def _schluss(digital):
-    return GUELTIG if digital else UNTERSCHRIFTEN
+    """Letzter Teil: Druck = Abschnitt Unterschriften; digital = die Vertragsbedingungen selbst
+    (Wunsch Ahmad 01.10.2026: der Gueltigkeitssatz am Ende entfaellt)."""
+    return AVB if digital else UNTERSCHRIFTEN
 
 
 # ------------------------------------------------------------ Reihenfolge
 @pytest.mark.parametrize("digital", [False, True], ids=["druck", "digital"])
 def test_01_reihenfolge_mit_allen_teilen(digital):
     f = _text(digital=digital)
-    folge = [AUSSTATTUNG, BESCHREIBUNG, GEWAEHR, BESONDERE, AGB_ALT, AVB, _schluss(digital)]
+    folge = [AUSSTATTUNG, BESCHREIBUNG, GEWAEHR, BESONDERE, AGB_ALT, AVB] + ([] if digital else [UNTERSCHRIFTEN])
+    assert GUELTIG not in f, "der Schlusssatz ist seit dem 01.10.2026 weg"
     for teil in folge:
         assert f.count(teil) == 1, f"{teil!r} steht {f.count(teil)}x im Vertrag"
     pos = [f.index(teil) for teil in folge]
@@ -109,7 +112,7 @@ def test_02_die_letzten_drei_teile(digital):
     assert hinten.index("Die Fahrzeugübergabe findet bis/am 25.09.2026") \
         < hinten.index("Eigene Regel: Schlüssel liegen im Handschuhfach") < hinten.index(AGB_ALT)
     # Nach dem Schlussteil folgt kein weiterer Abschnitt mehr.
-    danach = f[f.index(_schluss(digital)):]
+    danach = f[f.index(_schluss(digital)) + len(_schluss(digital)):]
     for abschnitt in (BESONDERE, AGB_ALT, AVB, GEWAEHR, BESCHREIBUNG):
         assert abschnitt not in danach, f"{abschnitt!r} steht hinter der Unterschrift"
     if digital:
@@ -126,10 +129,10 @@ def test_03_reihenfolge_mit_teilweise_leeren_teilen(digital):
     ohne = dict(agb_text="", vehicle_description="", damages_text="")
     f = _text(digital=digital, **ohne)
     assert AGB_ALT not in f and BESCHREIBUNG not in f
-    assert f.index(GEWAEHR) < f.index(BESONDERE) < f.index(AVB) < f.index(_schluss(digital))
+    assert f.index(GEWAEHR) < f.index(BESONDERE) < f.index(AVB) <= f.index(_schluss(digital))
     f = _text(digital=digital, additional_terms="", **ohne)
     assert BESONDERE not in f
-    assert f.index(GEWAEHR) < f.index(AVB) < f.index(_schluss(digital))
+    assert f.index(GEWAEHR) < f.index(AVB) <= f.index(_schluss(digital))
     for text in (f, _text(digital=digital)):
         assert "3 · " not in text and "4 · " not in text, "neue Nummern am Vertragsende"
 

@@ -299,7 +299,7 @@ export default function FirmenseiteEinstellungen({ adminDealerId = null }) {
           <div className="rounded-2xl p-4" style={{ background: "var(--wa-05)", border: "1px solid var(--divider)" }}>
             <div className="flex items-center gap-2 font-semibold text-sm"><PenLine size={15} /> Unterschrift des Chefs</div>
             <div className="text-[12px] text-zinc-500 mt-1">
-              Ein Bild der Unterschrift (Foto oder Scan, weißer Hintergrund). Sie steht im Kasten „Käufer / Händler“ jedes
+              Ein Bild der Unterschrift (Foto oder Scan, weißer Hintergrund). Sie steht im Kasten „Käufer“ jedes
               Vertrags, den ein Kunde über das Portal unterschreibt — der Vertrag ist damit von beiden Seiten unterschrieben.
             </div>
             <div className="flex items-center gap-4 mt-3">

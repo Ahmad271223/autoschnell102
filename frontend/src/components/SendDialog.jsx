@@ -652,8 +652,8 @@ export default function SendDialog({ open, contract, onClose }) {
                           onChange={(e) => { angefasst.current.emailMsg = true; setEmailMsg(e.target.value); }} />
               </div>
               <div className="text-[11px] text-zinc-500">
-                Die E-Mail wird mit der digitalen Vertragsfassung im Anhang versendet (ohne Unterschriftsfelder —
-                unter „Unterschriften" steht: „Dieser Vertrag ist ohne Unterschrift gültig.") und im Archiv protokolliert.
+                Die E-Mail wird mit der digitalen Vertragsfassung im Anhang versendet (ohne Unterschriftsfelder) und im
+                Archiv protokolliert.
               </div>
               <button data-testid="send-email-btn" onClick={() => send("email")} disabled={busy || !email}
                       className="kinetic-button w-full py-3 rounded-sm flex items-center justify-center gap-2 font-bold disabled:opacity-50">

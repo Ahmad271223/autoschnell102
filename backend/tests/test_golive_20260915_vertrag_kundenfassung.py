@@ -55,7 +55,7 @@ def test_kundenfassung_ohne_unterschrift_und_empfang():
     # Kundenfassung: nichts davon, nur der Gueltigkeitssatz
     assert "bestätigt Empfang von" not in kunde and "Datum und Ort:" not in kunde
     assert "Unterschriften" not in kunde and "Schlüssel(n)" not in kunde
-    assert "Dieser Vertrag ist ohne Unterschrift gültig." in kunde
+    assert "Dieser Vertrag ist ohne Unterschrift gültig." not in kunde          # Wunsch Ahmad 01.10.2026
 
 
 def test_scheckheft_im_vertrag_und_modell():

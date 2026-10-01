@@ -80,17 +80,17 @@ def test_01_druckfassung_hat_unterschriftslinien():
 def test_01b_druckfassung_nennt_die_elektronische_uebermittlung():
     """Wunsch Ahmad (12.09.2026): Der Satz unter den Unterschriftslinien
     deckt auch den elektronischen Versand ab (Kfz-Kaufvertrag ist formfrei).
-    Die digitale Fassung bleibt unveraendert ("ohne Unterschrift gueltig")."""
+    Die digitale Fassung traegt den Satz nicht (seit 01.10.2026 gar keinen Schlusssatz mehr)."""
     c = dict(_CONTRACT, digital_vertragstext=DIGITAL_VERTRAGSTEXT_STANDARD)
     druck = _flach(_text(generate_contract_pdf(dealer=_DEALER, vehicle=_VEHICLE, contract=c)))
     digital = _flach(_text(generate_contract_pdf(dealer=_DEALER, vehicle=_VEHICLE,
                                                  contract=c, digital=True)))
     assert "Mit ihrer Unterschrift bestätigen beide Parteien die Richtigkeit aller Angaben" in druck
-    assert "Wird dieser Vertrag elektronisch übermittelt" in druck
-    assert "Bestätigung der Vertragsinhalte in Textform" in druck
-    assert "eigenhändige Unterschrift ist dann nicht erforderlich" in druck
+    # Wunsch Ahmad 01.10.2026: der letzte Satz ("eigenhaendige Unterschrift ist dann nicht erforderlich") ist weg
+    assert "Wird dieser Vertrag elektronisch übermittelt" not in druck
+    assert "eigenhändige Unterschrift ist dann nicht erforderlich" not in druck
     assert "elektronisch übermittelt" not in digital
-    assert "Dieser Vertrag ist ohne Unterschrift gültig." in digital
+    assert "Dieser Vertrag ist ohne Unterschrift gültig." not in digital
 
 
 def test_02_digitale_fassung_text_statt_linien():
@@ -99,9 +99,9 @@ def test_02_digitale_fassung_text_statt_linien():
                                     contract=c, digital=True))
     assert "Mit ihrer Unterschrift" not in _flach(t)
     # Wunsch Ahmad (15.09.2026): die Kundenfassung hat keinen Abschnitt
-    # "Unterschriften" mehr (nur der Gueltigkeitssatz).
+    # "Unterschriften" mehr; seit 01.10.2026 auch keinen Gueltigkeitssatz.
     assert "UNTERSCHRIFTEN" not in t.upper()
-    assert "ohne Unterschrift gültig" in _flach(t)
+    assert "Dieser Vertrag ist ohne Unterschrift gültig." not in _flach(t)      # Klausel 4 des Standardtexts bleibt
     assert "digitale Ausfertigung" in t
     f = _flach(t)
     # Beschluss 10.09.2026: die vier Klauseln unter "Allgemeine
@@ -110,18 +110,18 @@ def test_02_digitale_fassung_text_statt_linien():
     assert "keine Garantie oder Gewährleistung" in f
     assert "Absagen sind nach Vertragsbestätigung" in f
     assert "ihrer Richtigkeit entsprechen" in f
-    assert "Dieser Vertrag ist ohne Unterschrift gültig." in f
+    assert "Dieser Vertrag ist ohne Unterschrift gültig." not in f
     assert "Max Muster" in f and "Digi Autohaus GmbH" in f
 
 
 def test_02b_ohne_gespeicherten_text_keine_bedingungen():
     """Kein Text im Vertrag -> kein Abschnitt (nie ein heutiger Standard aus
-    der Luft); digital steht trotzdem der eine Satz."""
+    der Luft); digital steht auch kein Schlusssatz mehr (01.10.2026)."""
     f = _flach(_text(generate_contract_pdf(dealer=_DEALER, vehicle=_VEHICLE,
                                            contract=_CONTRACT, digital=True)))
     assert "Allgemeine Vertragsbedingungen" not in f
     assert "Absagen sind nach Vertragsbestätigung" not in f
-    assert "Dieser Vertrag ist ohne Unterschrift gültig." in f
+    assert "Dieser Vertrag ist ohne Unterschrift gültig." not in f
 
 
 def test_03_eigener_text_ersetzt_standard():

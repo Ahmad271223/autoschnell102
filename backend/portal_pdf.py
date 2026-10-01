@@ -155,8 +155,8 @@ def _nachweisblatt(*, firma: str, vertragsnummer: str, fassung: int, name: str, 
         c.setStrokeGray(0.6)
         c.line(x, y1 - 4, x + 260, y1 - 4)
         return y1 - 30
-    y = block("Verkäufer / Halter", f"{name} — digital unterschrieben am {zeit} Uhr", verkaeufer_png, y)
-    y = block("Käufer / Händler", f"{firma} — " + ("hinterlegte Unterschrift" if kaeufer_png else "ohne hinterlegte Unterschrift"),
+    y = block("Verkäufer", f"{name} — digital unterschrieben am {zeit} Uhr", verkaeufer_png, y)
+    y = block("Käufer", f"{firma} — " + ("hinterlegte Unterschrift" if kaeufer_png else "ohne hinterlegte Unterschrift"),
               kaeufer_png, y)
     c.setFont("Helvetica-Bold", 9)
     c.drawString(x, y, "Prüfsumme des vorgelegten Vertragsdokuments (SHA-256)".encode("cp1252").decode("cp1252"))

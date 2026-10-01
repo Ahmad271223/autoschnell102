@@ -4186,3 +4186,14 @@ Neun Punkte bestätigt und behoben, zwei bewusst so gelassen:
 
 Tests: `backend/tests/test_pruefliste_20261001.py`, `frontend/src/pages/firma/firmenSeite.test.jsx` (Nr. 2),
 `frontend/src/components/firmenseiteEinstellungen.test.jsx` (Nr. 4).
+
+## Kaufvertrag-PDF: Wortlaut (Wunsch Ahmad 01.10.2026)
+
+- Überschrift „KFZ-KAUFVERTRAG" (vorher „KAUFVERTRAG"); PDF-Metadaten-Titel „KFZ-Kaufvertrag".
+- Parteien oben und Unterschriftskästen unten heißen nur noch „Verkäufer" und „Käufer" (vorher „Verkäufer (Halter)" /
+  „Käufer (Händler)" bzw. „Verkäufer / Halter" / „Käufer / Händler"); ebenso der Signaturnachweis des Kundenportals.
+- Druckfassung: unter den Unterschriften steht nur noch „Mit ihrer Unterschrift bestätigen beide Parteien die Richtigkeit
+  aller Angaben sowie den Erhalt einer Vertragsausfertigung." Der Satz zur elektronischen Übermittlung („… eine
+  eigenhändige Unterschrift ist dann nicht erforderlich") ist weg.
+- Kundenfassung (E-Mail/WhatsApp): der Schlusssatz „Dieser Vertrag ist ohne Unterschrift gültig." ist weg; sie endet mit den
+  Vertragsbedingungen der Firma (Klausel 4 des Standardtexts bleibt, weil der Text je Firma gespeichert ist).

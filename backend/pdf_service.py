@@ -541,10 +541,10 @@ def _empfang_paar(contract, st, unterschrift, mit_empfang=True, bilder=None):
     "verkaeufer_text": str, "kaeufer": PNG-Bytes | None, "kaeufer_text": str | None}."""
     b = bilder or {}
     t = Table(
-        [[_empfang_kasten("Verkäufer / Halter", "verkaeufer", contract, st, unterschrift, mit_empfang,
+        [[_empfang_kasten("Verkäufer", "verkaeufer", contract, st, unterschrift, mit_empfang,
                           bild=b.get("verkaeufer"), bild_text=b.get("verkaeufer_text")),
           "",
-          _empfang_kasten("Käufer / Händler", "kaeufer", contract, st, unterschrift, mit_empfang,
+          _empfang_kasten("Käufer", "kaeufer", contract, st, unterschrift, mit_empfang,
                           bild=b.get("kaeufer"), bild_text=b.get("kaeufer_text"))]],
         colWidths=[COL_W, 0.5 * cm, COL_W],
     )
@@ -798,7 +798,7 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         buf, pagesize=A4,
         leftMargin=MARGIN, rightMargin=MARGIN,
         topMargin=1.6 * cm, bottomMargin=2.0 * cm,
-        title="Kaufvertrag", author=dealer.get("company_name", "Autohändler"),
+        title="KFZ-Kaufvertrag", author=dealer.get("company_name", "Autohändler"),
     )
     st = _styles()
     story = []
@@ -815,7 +815,8 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
     header_left = [
         Paragraph(f"<b>{_xml_escape(company)}</b>", st["brand"]),
         Spacer(1, 2),
-        Paragraph("<b>KAUFVERTRAG</b>", st["title"]),
+        # Wunsch Ahmad 01.10.2026: "KFZ-Kaufvertrag" statt "Kaufvertrag" in der Ueberschrift
+        Paragraph("<b>KFZ-KAUFVERTRAG</b>", st["title"]),
         Paragraph("für ein gebrauchtes Kraftfahrzeug — Ankauf durch Händler",
                   st["subtitle"]),
     ]
@@ -870,9 +871,10 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         ("Telefon", dealer.get("phone", "")),
         ("E-Mail", dealer.get("email", "")),
     ]
+    # Wunsch Ahmad 01.10.2026: nur "Verkäufer" und "Käufer" — ohne den Zusatz Halter/Händler
     story.append(_two_boxes(
-        "Verkäufer (Halter)", _ohne_leere(seller_rows),
-        "Käufer (Händler)", _ohne_leere(buyer_rows),
+        "Verkäufer", _ohne_leere(seller_rows),
+        "Käufer", _ohne_leere(buyer_rows),
         st,
     ))
     story.append(Spacer(1, 12))
@@ -1210,17 +1212,18 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         # weder den Abschnitt "Unterschriften" noch die Empfangsbestaetigung
         # (Schluessel erhalten, Kaufpreis bestaetigt) — das gehoert nur in die
         # Druckfassung, die Fahrer, Sucher und Chef oeffnen und ausdrucken.
-        # Nur der Satz zur Gueltigkeit bleibt.
-        block = [Paragraph("Dieser Vertrag ist ohne Unterschrift gültig.", st["body"])]
+        # Wunsch Ahmad 01.10.2026: der Schlusssatz "Dieser Vertrag ist ohne Unterschrift gültig."
+        # entfaellt — die Kundenfassung endet mit den Vertragsbedingungen.
+        block = []
         if nachtraeglich:
-            block.append(Spacer(1, 8))
             for para in avb.split("\n\n"):
                 txt = _xml_escape(para).replace("\n", "<br/>").strip()
                 if txt:
                     block.append(Paragraph(txt, st["small"]))
                     block.append(Spacer(1, 3))
-        story.append(Spacer(1, 8))
-        story.append(KeepTogether(block))
+        if block:
+            story.append(Spacer(1, 8))
+            story.append(KeepTogether(block))
         footer_left = company
         footer_center = f"Kaufvertrag {contract_no} · erstellt am {today} · digitale Ausfertigung"
         if fassung_text:
@@ -1230,7 +1233,7 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
 
     # ---------- Signatures — boxed, kept on one page ----------
     # Runde 22 (11.09.2026, Vorlage Ahmad): Die Unterschriftskaesten
-    # ("Verkäufer / Halter" links, "Käufer / Händler" rechts) tragen unter
+    # ("Verkäufer" links, "Käufer" rechts; seit 01.10.2026 ohne Halter/Händler) tragen unter
     # dem Titel die Empfangsbestaetigung mit Ankreuz-Kaestchen und "Datum
     # und Ort", darunter wie bisher die Linien — siehe _empfang_kasten.
     sig = _empfang_paar(contract, st, unterschrift=True,
@@ -1244,14 +1247,12 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         *([Spacer(1, 4), Paragraph(_xml_escape(str(hinweis)), st["small"])] if hinweis else []),
         Spacer(1, 4),
         Paragraph(
-            # Wunsch Ahmad (12.09.2026): Der Satz deckt auch den Fall ab, dass der
-            # Vertrag elektronisch uebermittelt wurde — ein Kfz-Kaufvertrag ist
-            # formfrei, eine eigenhaendige Unterschrift also nicht noetig.
+            # Wunsch Ahmad (12.09.2026): der Satz zur elektronischen Uebermittlung
+            # ("eine eigenhaendige Unterschrift ist dann nicht erforderlich") stand
+            # hier als letzter Satz — Wunsch Ahmad 01.10.2026: dieser Satz entfaellt,
+            # unter den Unterschriften bleibt nur die Bestaetigung.
             "Mit ihrer Unterschrift bestätigen beide Parteien die Richtigkeit "
-            "aller Angaben sowie den Erhalt einer Vertragsausfertigung. Wird dieser "
-            "Vertrag elektronisch übermittelt, gilt die Bestätigung der Vertragsinhalte "
-            "in Textform, zum Beispiel per E-Mail, als Zustimmung beider Parteien; eine "
-            "eigenhändige Unterschrift ist dann nicht erforderlich.",
+            "aller Angaben sowie den Erhalt einer Vertragsausfertigung.",
             st["small"],
         ),
     ]))
