@@ -118,3 +118,15 @@ def marktplatz_aktiv() -> bool:
     Code bleibt vollstaendig erhalten, nur der Schalter entscheidet."""
     return schalter_env("MARKTPLATZ_AKTIV", False)
 
+#: Wunsch Ahmad 02.10.2026: waehlbare Akzentfarbe der App je Konto (users.akzentfarbe,
+#: driver_accounts.akzentfarbe). "standard" = Rot/Blau wie bisher; die Farbwerte kennt nur die
+#: Oberflaeche (frontend/src/lib/akzent.js) — hier nur die erlaubten Schluessel.
+AKZENTFARBEN = ("standard", "rot", "lila", "gruen", "blau", "schwarz", "orange", "petrol", "pink", "gold", "indigo")
+
+
+def akzentfarbe_pruefen(wert) -> str:
+    """Gueltiger Schluessel (klein, getrimmt) — sonst ValueError."""
+    k = str(wert or "").strip().lower()
+    if k not in AKZENTFARBEN:
+        raise ValueError("Unbekannte Farbe — bitte eine der angebotenen Farben wählen")
+    return k

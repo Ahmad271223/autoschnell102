@@ -1,4 +1,5 @@
 import { fassungMithoeren } from "@/lib/fassung";
+import { akzentVomKonto } from "@/lib/akzent";
 import { createContext, useContext, useEffect, useState } from "react";
 import { TOKEN_FAHRER, tokenLesen, tokenLoeschen, tokenSetzen } from "@/lib/sitzung";
 import axios from "axios";
@@ -121,7 +122,7 @@ export function DriverAuthProvider({ children }) {
     const t = tokenLesen(TOKEN_FAHRER);
     if (!t) { setReady(true); return; }
     driverApi.get("/driver/me")
-      .then((r) => { setDriver(r.data); setFehler(null); })
+      .then((r) => { setDriver(r.data); setFehler(null); akzentVomKonto(r.data?.akzentfarbe); })
       .catch((e) => {
         // Runde 22 (11.09.2026): Vorher wurde bei JEDEM Fehler abgemeldet —
         // ein Funkloch unterwegs hiess neu anmelden (und wegen Single-Session

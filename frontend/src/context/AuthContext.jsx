@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
+import { akzentVomKonto } from "@/lib/akzent";
 import { aboNeuLadenAnmelden, api } from "@/lib/api";
 import { lesen, lokalerSpeicher, schreiben, sitzungsSpeicher } from "@/lib/speicher";
 import { vergleichLeeren } from "@/lib/vergleichSpeicher";
@@ -124,6 +125,8 @@ export const AuthProvider = ({ children }) => {
       setSubscription(data.subscription);
       setVerbindungsfehler(null);
       setLoading(false);
+      // Akzentfarbe (02.10.2026): der Kontowert gilt auf jedem Geraet
+      akzentVomKonto(data.user?.akzentfarbe);
       return data;
     } catch (e) {
       // Runde 22 (11.09.2026): Vorher wurde bei JEDEM Fehler abgemeldet —

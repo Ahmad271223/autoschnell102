@@ -121,10 +121,11 @@ def test_rp433_absender_mit_komma_wird_gequotet(monkeypatch):
     import email_service as ES
     monkeypatch.setattr(ES, "MAIL_ABSENDER_NAME", "AutoSchnell", raising=False)
     monkeypatch.setattr(ES, "MAIL_FROM", "AutoSchnell <vertrag@autoschnell.de>", raising=False)
+    # Wunsch Ahmad 02.10.2026: nur der Firmenname, kein "über AutoSchnell" mehr
     assert ES._absender("Autohaus Muster", kodiert=False) == \
-        "Autohaus Muster über AutoSchnell <vertrag@autoschnell.de>"
+        "Autohaus Muster <vertrag@autoschnell.de>"
     mit_komma = ES._absender("Autohaus Müller, Inh. X", kodiert=False)
-    assert mit_komma == '"Autohaus Müller, Inh. X über AutoSchnell" <vertrag@autoschnell.de>'
+    assert mit_komma == '"Autohaus Müller, Inh. X" <vertrag@autoschnell.de>'
     from email.utils import getaddresses
     assert len(getaddresses([mit_komma])) == 1, "das Komma trennt keine zweite Adresse ab"
     boese = ES._absender('A\\B "C"; D\r\nBcc: x@y.de', kodiert=False)

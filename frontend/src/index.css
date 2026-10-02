@@ -674,12 +674,14 @@ select option {
 }
 .apple-btn:active { transform: scale(0.97); }
 
+/* Akzentfarbe (02.10.2026): die Hauptknoepfe folgen der gewaehlten Farbe (lib/akzent.js setzt die
+   --knopf-primaer-Variablen); ohne Wahl bleibt das bisherige Blau. */
 .apple-btn-primary {
-  background: linear-gradient(180deg, #0a84ff 0%, #0062cc 100%);
+  background: linear-gradient(180deg, var(--knopf-primaer, #0a84ff) 0%, var(--knopf-primaer-dunkel, #0062cc) 100%);
   color: white;
-  box-shadow: 0 1px 0 rgba(255,255,255,0.18) inset, 0 6px 20px -8px rgba(10,132,255,0.55);
+  box-shadow: 0 1px 0 rgba(255,255,255,0.18) inset, 0 6px 20px -8px var(--knopf-primaer-schatten, rgba(10,132,255,0.55));
 }
-.apple-btn-primary:hover { background: linear-gradient(180deg, #1a90ff 0%, #0a6fdd 100%); }
+.apple-btn-primary:hover { background: linear-gradient(180deg, var(--knopf-primaer-hover, #1a90ff) 0%, var(--knopf-primaer-hover-dunkel, #0a6fdd) 100%); }
 
 .apple-btn-secondary {
   background: var(--apple-btn-secondary-bg);
@@ -782,9 +784,9 @@ select option {
   transition: background 0.15s, color 0.15s;
 }
 .cal-day.is-today .cal-daynum {
-  background: #ff3b30;
+  background: var(--accent-red);
   color: white;
-  box-shadow: 0 4px 12px -4px rgba(255,59,48,0.6);
+  box-shadow: 0 4px 12px -4px rgba(var(--akzent-rgb, 255,59,48), 0.6);
 }
 .cal-day.is-weekend:not(.is-today) .cal-daynum { color: var(--text-secondary); }
 
@@ -854,7 +856,7 @@ select option {
   bottom: calc(28px + env(safe-area-inset-bottom, 0px));
   width: 56px; height: 56px;
   border-radius: 50%;
-  background: linear-gradient(180deg, #0a84ff 0%, #0062cc 100%);
+  background: linear-gradient(180deg, var(--knopf-primaer, #0a84ff) 0%, var(--knopf-primaer-dunkel, #0062cc) 100%);
   color: white;
   display: flex; align-items: center; justify-content: center;
   box-shadow: 0 12px 30px -6px rgba(10,132,255,0.55), 0 1px 0 rgba(255,255,255,0.18) inset;

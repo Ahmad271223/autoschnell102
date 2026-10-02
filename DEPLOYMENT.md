@@ -4233,3 +4233,15 @@ Bleibt unverändert: Vertragsnummer, Abholdatum/-uhrzeit (im Terminplaner versch
 selbst eine Fassung), eingefrorener Inseratsstand, Preis vor der Abholung, Logo. Nicht mitten im Versand (409).
 Der Dialog ist jetzt bis 1500 px breit (Skizzen). Tests: `backend/tests/test_vertrag_nachtraeglich_20261001.py`,
 `frontend/src/components/ContractDialog.aendern.test.jsx`.
+
+## Absender nur Firmenname + Farbe der App (Wunsch Ahmad 02.10.2026)
+
+- **E-Mail-Absender:** Anzeigename ist nur noch der Firmenname („Autohaus Muster <vertrag@…>“), der Zusatz
+  „über AutoSchnell“ entfällt (`email_service._absender`). Ohne Firmenname steht weiter `MAIL_ABSENDER_NAME`.
+- **Farbe der App:** Einstellungen → Reiter „Farbe“ (Chef, Sucher, Betreiber) bzw. Fahrer-App → Mein Profil. Elf
+  Kacheln: Standard (Rot/Blau wie bisher) und zehn Farben (Rot, Lila, Grün, Blau, Schwarz, Orange, Petrol, Pink, Gold,
+  Indigo). Ein Klick zeigt die Farbe sofort, „Speichern“ legt sie am Konto ab (`PUT /auth/akzentfarbe` → `users.akzentfarbe`;
+  Fahrer `PUT /driver/me {akzentfarbe}` → `driver_accounts.akzentfarbe`), `/auth/me` und `/driver/me` liefern sie mit.
+  Erlaubte Schlüssel: `konfig.AKZENTFARBEN`; Farbwerte je Design in `frontend/src/lib/akzent.js`. Gesetzt werden
+  `--accent-red`, `--accent-red-hover`, `--border-focus` und die Variablen der Hauptknöpfe (`--knopf-primaer…`,
+  `.apple-btn-primary`, `.apple-fab`); Status-Rot (`--st-rot`, Fehlerkästen) bleibt rot. Keine Migration nötig.

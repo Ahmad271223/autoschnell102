@@ -58,6 +58,8 @@ class DriverAccountLogin(BaseModel):
 
 class DriverProfileUpdate(BaseModel):
     display_name: Optional[str] = Field(default=None, max_length=120)
+    # Wunsch Ahmad 02.10.2026: Farbe der Fahrer-App je Konto (konfig.AKZENTFARBEN)
+    akzentfarbe: Optional[str] = Field(default=None, max_length=20)
 
 
 class DriverPasswordIn(BaseModel):
@@ -1064,6 +1066,7 @@ async def driver_me(driver=Depends(current_driver)):
         "email": driver.get("email"),
         "display_name": driver.get("display_name"),
         "driver_code": driver.get("driver_code"),
+        "akzentfarbe": driver.get("akzentfarbe") or "standard",
         "dealers": dealer_list,
     }
 
@@ -1094,6 +1097,12 @@ async def driver_update_me(body: DriverProfileUpdate,
         if len(new_name) < 2:
             raise HTTPException(400, "Name zu kurz")
         update["display_name"] = new_name
+    if body.akzentfarbe is not None:
+        from konfig import akzentfarbe_pruefen
+        try:
+            update["akzentfarbe"] = akzentfarbe_pruefen(body.akzentfarbe)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
     if not update:
         raise HTTPException(400, "Nichts zu aktualisieren")
     update["updated_at"] = now_iso()

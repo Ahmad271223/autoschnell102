@@ -31,8 +31,9 @@ import KopierKnopf from "@/components/KopierKnopf";
 import FirmenseiteEinstellungen from "@/components/FirmenseiteEinstellungen";
 import {
   Building2, Sliders, FileText, Mail, MessageSquare, ShieldCheck, Save, Check, Globe,
-  CreditCard, Calendar, X, ArrowRight, Bolt, Store,
+  CreditCard, Calendar, X, ArrowRight, Bolt, Store, Palette,
 } from "lucide-react";
+import AkzentWahl from "@/components/AkzentWahl";
 import CountryPicker from "@/components/CountryPicker";
 
 // Formular aus dem (wirksamen) Haendlerdokument — ohne reine UI-Felder.
@@ -194,6 +195,8 @@ const SECTIONS = [
   { id: "markt",      label: "Marktplatz",     icon: Store },
   { id: "agb",        label: "Vertragstexte", icon: ShieldCheck },
   { id: "abo",        label: "Abo",            icon: CreditCard },
+  // Wunsch Ahmad 02.10.2026: Farbe der App je Konto
+  { id: "farbe",      label: "Farbe",          icon: Palette },
 ];
 
 export default function Einstellungen() {
@@ -825,6 +828,10 @@ export default function Einstellungen() {
 
           {active === "markt" && <MarketplacePanel />}
           {active === "abo" && <SubscriptionPanel />}
+          {active === "farbe" && (
+            <AkzentWahl aktuell={user?.akzentfarbe}
+                        speichern={async (f) => { await api.put("/auth/akzentfarbe", { farbe: f }); await refresh?.(); }} />
+          )}
         </div>
       </div>
     </div>

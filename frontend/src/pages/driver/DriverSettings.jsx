@@ -4,6 +4,7 @@ import { errMsg } from "@/lib/api";
 import { passwortProblem } from "@/lib/passwort";
 import { toast } from "sonner";
 import { Copy, Check, Building2, User, KeyRound } from "lucide-react";
+import AkzentWahl from "@/components/AkzentWahl";
 
 export default function DriverSettings() {
   const { driver, refresh, logout } = useDriver();
@@ -68,6 +69,11 @@ export default function DriverSettings() {
     <div data-testid="driver-settings">
       <div className="overline">Einstellungen</div>
       <h1 className="font-display font-black text-2xl tracking-tighter mb-5">Mein Profil</h1>
+      {/* Wunsch Ahmad 02.10.2026: Farbe der App — auch in der Fahrer-App, je Fahrerkonto */}
+      <div className="mb-5">
+        <AkzentWahl aktuell={driver?.akzentfarbe}
+                    speichern={async (f) => { await driverApi.put("/driver/me", { akzentfarbe: f }); await refresh?.(); }} />
+      </div>
 
       {/* Fahrer-ID Block */}
       <div className="tactical-card p-5">

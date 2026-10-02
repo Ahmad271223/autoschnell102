@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Sun, Moon } from "lucide-react";
 import { lokalerSpeicher, lesen, schreiben } from "@/lib/speicher";
+import { applyStoredAkzent } from "@/lib/akzent";
 
 const STORAGE_KEY = "ah_theme";
 
@@ -8,6 +9,8 @@ const STORAGE_KEY = "ah_theme";
  *  Handy blieb der Balken ueber der Seite auch im hellen Design schwarz). */
 function setzen(theme) {
   document.documentElement.setAttribute("data-theme", theme);
+  // Akzentfarbe (02.10.2026): je Design eigene Toene — beim Wechsel neu anwenden
+  applyStoredAkzent(theme);
   const leiste = document.querySelector('meta[name="theme-color"]');
   if (leiste) leiste.setAttribute("content", theme === "light" ? "#f5f5f7" : "#0a0a0a");
 }

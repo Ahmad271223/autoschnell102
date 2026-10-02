@@ -548,6 +548,24 @@ async def logout(user=Depends(current_user)):
     return {"ok": True}
 
 
+class AkzentIn(BaseModel):
+    farbe: str = Field(max_length=20)
+
+
+@router.put("/auth/akzentfarbe")
+async def akzentfarbe_setzen(body: AkzentIn, user=Depends(current_user)):
+    """Wunsch Ahmad 02.10.2026: Farbe der App je Konto (Chef, Sucher, Betreiber) — die Oberflaeche
+    merkt sie zusaetzlich im Browser; der Kontowert gilt auf jedem Geraet (/auth/me liefert ihn mit)."""
+    from deps import db as _db
+    from konfig import akzentfarbe_pruefen
+    try:
+        farbe = akzentfarbe_pruefen(body.farbe)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    await _db.users.update_one({"id": user["id"]}, {"$set": {"akzentfarbe": farbe}})
+    return {"akzentfarbe": farbe}
+
+
 @router.get("/auth/me")
 async def me(user=Depends(current_user)):
     from deps import effective_dealer, subscription_for

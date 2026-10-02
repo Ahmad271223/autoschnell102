@@ -290,7 +290,7 @@ def test_absender_ist_immer_unsere_adresse(resend):
     assert ok
     d = resend["daten"]
     # Adresse bleibt unsere, Firma steht nur im Anzeigenamen
-    assert d["from"] == "Autohaus Muster über AutoSchnell <vertrag@autoschnell.de>"
+    assert d["from"] == "Autohaus Muster <vertrag@autoschnell.de>"      # 02.10.2026: nur die Firma
     assert d["to"] == ["kunde@example.com"]
     # Antwort geht an den Sucher
     assert d["reply_to"] == ["max@autohaus-muster.de"]

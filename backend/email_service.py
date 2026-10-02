@@ -87,16 +87,15 @@ def gueltige_adresse(wert: str) -> bool:
 def _absender(anzeigename: Optional[str] = None, *, kodiert: bool = True) -> str:
     """Baut den From-Kopf: unsere Adresse, davor ein sprechender Name.
 
-    `anzeigename` darf die Firma sein; der Zusatz „über <Marke>" macht für
-    den Empfänger sichtbar, worüber die Nachricht verschickt wurde, und
-    verhindert den Eindruck einer gefälschten Absenderadresse.
+    `anzeigename` ist die Firma des Händlers (seit 02.10.2026 ohne den Zusatz
+    „über <Marke>" — Wunsch Ahmad); ohne Firma steht die Marke.
 
     `kodiert=True` liefert die SMTP-Form (Umlaute nach RFC 2047 kodiert),
     `kodiert=False` die reine UTF-8-Form für die Resend-Schnittstelle."""
     adresse = absender_adresse()
     name = (anzeigename or "").strip()
-    if name and name.lower() != MAIL_ABSENDER_NAME.lower():
-        name = f"{name} über {MAIL_ABSENDER_NAME}"
+    # Wunsch Ahmad 02.10.2026: NUR der Name der Firma als Absender — der fruehere Zusatz
+    # "<Firma> über AutoSchnell" entfaellt. Die Adresse bleibt unsere (DMARC/Resend).
     name = name or MAIL_ABSENDER_NAME
     if kodiert:
         return formataddr((name, adresse))
