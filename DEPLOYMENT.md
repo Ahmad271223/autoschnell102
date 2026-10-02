@@ -4257,3 +4257,14 @@ auf ≥ 900 $ anheben (Billing → Max monthly usage), sonst stoppt Apify die Ab
 Komplette Backend-Suite lokal am 02.10.2026 (frische DB `autoschnell_frisch`, Server auf :8002 mit `RUNDE14_HTTP=1`):
 4893 bestanden, 0 Fehler. Auf der Entwickler-DB r29 scheitern fünf Tests an alten Resten (auto_daten test_09,
 firmen_verwaltung test_01, golive runde2_betrieb m2_m8, markt test_14/test_37) — kein Code-Fehler.
+
+## Stempel & Unterschrift (Wunsch Ahmad 02.10.2026)
+
+Einstellungen → Firmenseite & Kundenportal → „Unterschrift des Chefs“ → Knopf „Stempel & Unterschrift erstellen“ (nur Chef).
+Aus den Firmendaten (vorbelegt aus dem Händlerprofil, `firma_daten` in GET /dealer/webseite) entsteht ein Firmenstempel in
+einem von sechs Designs (Klassisch, Rund, Ring modern, Nur Schrift, Linien, Kapsel; Optionen gleich große Schrift, leicht
+schräg, Abnutzung). Im Feld gezeichnet, wird die Unterschrift zugeschnitten und über den Stempel gelegt (Größe/Lage per
+Regler). „Übernehmen“ hinterlegt das PNG auf demselben Weg wie ein hochgeladenes Bild (POST /dealer/unterschrift) — es
+steht damit im Kasten „Käufer“ jedes über das Kundenportal unterschriebenen Vertrags. Nach Ahmads HTML-Vorlage, bewusst
+ohne den Rechnungsteil. Alles im Browser (`frontend/src/lib/stempel.js`, `components/StempelUnterschrift.jsx`), keine
+neuen Server-Felder. Sichtprüfung der Designs mit Chromium: Scratchpad-Skript `stempel_sicht.cjs`.

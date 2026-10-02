@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { CheckCircle2, Copy, ExternalLink, Globe, ImagePlus, PenLine, SearchCheck, Trash2, XCircle } from "lucide-react";
+import { CheckCircle2, Copy, ExternalLink, Globe, ImagePlus, PenLine, SearchCheck, Stamp, Trash2, XCircle } from "lucide-react";
+import StempelUnterschrift from "@/components/StempelUnterschrift";
 import { toast } from "sonner";
 import { api, errMsg } from "@/lib/api";
 import { inZwischenablage } from "@/components/KundenportalDialog";
@@ -32,6 +33,8 @@ export default function FirmenseiteEinstellungen({ adminDealerId = null }) {
   const [fehler, setFehler] = useState("");
   const [busy, setBusy] = useState(false);
   const [unterschriftUrl, setUnterschriftUrl] = useState(null);
+  // Wunsch Ahmad 02.10.2026: Stempel + Unterschrift im Browser erstellen statt nur ein Bild hochzuladen
+  const [stempelOffen, setStempelOffen] = useState(false);
   const [pruefung, setPruefung] = useState({});          // domain -> Ergebnis | {laeuft: true}
 
   const uebernehmen = useCallback((data) => {
@@ -109,6 +112,16 @@ export default function FirmenseiteEinstellungen({ adminDealerId = null }) {
       setStand((s) => ({ ...(s || {}), unterschrift_vorhanden: true }));
       toast.success("Unterschrift hinterlegt");
     } catch (e) { toast.error(errMsg(e, "Unterschrift konnte nicht hochgeladen werden")); } finally { setBusy(false); }
+  };
+  // Stempel-Generator: fertiges PNG (Data-URL) auf demselben Weg wie eine hochgeladene Datei hinterlegen
+  const unterschriftAusStempel = async (dataUrl) => {
+    setBusy(true);
+    try {
+      await api.post(`${basis}/unterschrift`, { bild_b64: dataUrl });
+      setStand((s) => ({ ...(s || {}), unterschrift_vorhanden: true }));
+      setStempelOffen(false);
+      toast.success("Stempel mit Unterschrift als Unterschrift der Firma hinterlegt");
+    } catch (e) { toast.error(errMsg(e, "Stempel konnte nicht hinterlegt werden")); throw e; } finally { setBusy(false); }
   };
   const unterschriftEntfernen = async () => {
     setBusy(true);
@@ -319,9 +332,19 @@ export default function FirmenseiteEinstellungen({ adminDealerId = null }) {
                     <button type="button" onClick={unterschriftEntfernen} disabled={busy} className="text-[11.5px] text-zinc-500 hover:text-red-400 text-left"
                             data-testid="firmenseite-unterschrift-entfernen">Unterschrift entfernen</button>
                   )}
+                  <button type="button" onClick={() => setStempelOffen((o) => !o)} disabled={busy}
+                          className="inline-flex items-center gap-1.5 text-[12px] font-semibold px-3 py-1.5 rounded-full"
+                          style={{ background: "var(--apple-btn-secondary-bg)", color: "var(--text-primary)", border: "1px solid var(--divider)" }}
+                          data-testid="firmenseite-stempel-oeffnen" aria-expanded={stempelOffen}>
+                    <Stamp size={13} /> {stempelOffen ? "Stempel-Werkzeug schließen" : "Stempel & Unterschrift erstellen"}
+                  </button>
                 </div>
               )}
             </div>
+            {istChef && stempelOffen && (
+              <StempelUnterschrift firma={stand.firma_daten || { name: stand.firma }} busy={busy}
+                                   onUebernehmen={unterschriftAusStempel} />
+            )}
           </div>
 
           {istChef ? (

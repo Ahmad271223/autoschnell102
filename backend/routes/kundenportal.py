@@ -308,6 +308,10 @@ def _webseite_antwort(d: dict, ist_chef: bool) -> dict:
         "unterschrift_vorhanden": bool(d.get("unterschrift_key")),
         "ist_chef": ist_chef,
         "firma": d.get("company_name") or "",
+        # Stempel & Unterschrift (Wunsch Ahmad 02.10.2026): Vorbelegung des Stempel-Generators
+        "firma_daten": {"name": d.get("company_name") or "", "strasse": d.get("address") or "",
+                        "plz": d.get("zip_code") or "", "ort": d.get("city") or "",
+                        "tel": d.get("phone") or "", "mail": d.get("email") or ""},
         "slug_vorschlag": slug_vorschlag(d.get("company_name") or ""),
         "proxy_hosts": proxy_hosts(),
         "bilder_max": BILDER_MAX, "domains_max": DOMAINS_MAX, "code_tage": PORTAL_CODE_TAGE,
