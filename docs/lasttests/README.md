@@ -316,9 +316,17 @@ eine Firma mit 30 Suchern, 900 verschiedene neue Links. Kein echter Anbieter-Ver
 | Alltag, dito | 32 | 900/900, 0 Fehler | median 9,8 s · p90 11 s · max 11,8 s | 5,1 min |
 | Sturm: 300 Links auf einmal (30 × 10) | 16 | 300/300, 0 Fehler; 84 erst abgewiesen (Firmen-Grenze 200 offene Jobs), dann durch | median 100 s · max 182 s | 3,0 min |
 | Sturm, dito | 32 | 300/300, 0 Fehler; 67 erst abgewiesen | median 52 s · max 93 s | 1,6 min |
+| Alltag, dito (02.10., Apify Scale) | 128 | 900/900, 0 Fehler | median 10,3 s · p90 11,1 s · max 11,9 s | 5,2 min |
+| Sturm, dito (02.10.) | 128 | 300/300, 0 Fehler; 92 erst abgewiesen (Firmen-Grenze 200) | median 26 s · max 34 s | 0,6 min |
+| 128 Sucher × 1 Link gleichzeitig (02.10.) | 128 | 128/128, 0 Fehler, alle 128 Slots gleichzeitig belegt | median 15,8 s · max 16,7 s | 0,3 min |
 
 Sturm mit 900 Links auf einmal ist auf dem Windows-Laptop nicht messbar (das Betriebssystem wies 544
 Verbindungen ab, der Server selbst meldete keinen Fehler) — dafür `deploy/lasttest-auf-prod2.sh`.
 Grenzen, die dabei greifen: `LINK_JOB_MAX_OFFEN_JE_KONTO` (20) und `LINK_JOB_MAX_OFFEN_JE_FIRMA` (200,
 Compose-Standard) → 429 "… Links in der Warteschlange, bitte kurz warten"; die Oberfläche wartet je Link
 höchstens 120 s und meldet dann "Link vorgemerkt" (der Abruf läuft im Hintergrund weiter).
+
+Apify-Konto am 02.10.2026 per API geprüft: Tarif Scale, 128 gleichzeitige Läufe, 256 GB Actor-Speicher; die Actors
+brauchen 512 MB (mobile.de) bzw. 1 GB (AutoScout) je Lauf — 128 Läufe passen ohne `APIFY_MEMORY_MB`. Das monatliche
+Kostenlimit des Kontos (`maxMonthlyUsageUsd`) stand auf 199 $ und muss in der Apify-Konsole (Billing) auf den
+geplanten Wert (≥ 900 $) gesetzt werden, sonst stoppt Apify die Abrufe im neuen Zyklus nach wenigen Tagen.

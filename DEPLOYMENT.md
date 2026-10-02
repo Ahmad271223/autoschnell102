@@ -4245,3 +4245,15 @@ Der Dialog ist jetzt bis 1500 px breit (Skizzen). Tests: `backend/tests/test_ver
   Erlaubte Schlüssel: `konfig.AKZENTFARBEN`; Farbwerte je Design in `frontend/src/lib/akzent.js`. Gesetzt werden
   `--accent-red`, `--accent-red-hover`, `--border-focus` und die Variablen der Hauptknöpfe (`--knopf-primaer…`,
   `.apple-btn-primary`, `.apple-fab`); Status-Rot (`--st-rot`, Fehlerkästen) bleibt rot. Keine Migration nötig.
+
+## Apify Scale: 128 gleichzeitige Läufe (02.10.2026)
+
+Server-.env auf beiden Servern: `APIFY_MAX_PARALLEL=128`, `MAX_CONCURRENT_MOBILE=128`, `MAX_CONCURRENT_AUTOSCOUT=128`
+(gilt nach dem Rollout). `LINK_JOB_CONCURRENCY` bleibt 32 je Prozess (4 Prozesse × 2 Server = 256 ≥ 128). Geprüft mit
+`backend/scripts/lasttest_30x30.py` (siehe `docs/lasttests/README.md`, Abschnitt 8) und per Apify-API (Plan Scale,
+128 Läufe, 256 GB; Actor-Speicher 512 MB / 1 GB). **Offen bei Ahmad:** monatliches Kostenlimit im Apify-Konto von 199 $
+auf ≥ 900 $ anheben (Billing → Max monthly usage), sonst stoppt Apify die Abrufe im neuen Zyklus nach wenigen Tagen.
+
+Komplette Backend-Suite lokal am 02.10.2026 (frische DB `autoschnell_frisch`, Server auf :8002 mit `RUNDE14_HTTP=1`):
+4893 bestanden, 0 Fehler. Auf der Entwickler-DB r29 scheitern fünf Tests an alten Resten (auto_daten test_09,
+firmen_verwaltung test_01, golive runde2_betrieb m2_m8, markt test_14/test_37) — kein Code-Fehler.
