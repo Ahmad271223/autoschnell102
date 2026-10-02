@@ -805,6 +805,8 @@ async def portal_freigeben(contract_id: str, request: Request = None, user=Depen
         raise HTTPException(409, "Erst die Firmenseite einrichten (Einstellungen → Firmenseite & Kundenportal): "
                                  "Adresse festlegen und einschalten.")
     bereich = _vertrag_bereich(user)
+    # Wunsch Ahmad 02.10.2026: der Kunde bekommt die Fassung ohne Empfangsbestaetigung
+    await _portal_dokument_sicherstellen(contract_id, bereich)
     for _ in range(6):
         c = await db.generated_pdfs.find_one({"id": contract_id, **bereich},
                                              {"_id": 0, "id": 1, "version": 1, "portal": 1, "contract_no": 1,
@@ -935,7 +937,8 @@ def _gelesen_pruefen(c: dict) -> None:
     import portal_pdf
     p = c.get("portal") or {}
     g = p.get("gelesen") or {}
-    erwartet = portal_pdf.pruefsumme(base64.b64decode(c["pdf_b64"])) if c.get("pdf_b64") else ""
+    dokument = _portal_dokument(c)
+    erwartet = portal_pdf.pruefsumme(dokument) if dokument else ""
     if (not g or g.get("kennung") != _portal_kennung(p) or int(g.get("fassung") or 0) != int(c.get("version") or 1)
             or not erwartet or g.get("sha256") != erwartet):
         raise HTTPException(409, GELESEN_HINWEIS)
@@ -956,7 +959,61 @@ def _vertrag_kurz(c: dict, firma: dict) -> dict:
 
 _VERTRAG_FELDER = {"_id": 0, "id": 1, "dealer_id": 1, "user_id": 1, "version": 1, "portal": 1, "contract_no": 1,
                    "make": 1, "model": 1, "seller_name": 1, "purchase_price": 1, "pickup_date": 1,
-                   "contract_data": 1, "vehicle_id": 1, "pdf_b64": 1, "pdf_signiert_b64": 1}
+                   "contract_data": 1, "vehicle_id": 1, "pdf_b64": 1, "pdf_signiert_b64": 1,
+                   "pdf_portal_b64": 1, "pdf_portal_version": 1}
+
+
+def _portal_dokument(c: dict) -> Optional[bytes]:
+    """Das Dokument, das der Kunde liest und unterschreibt: die Portal-Fassung dieser Vertragsfassung
+    (ohne Empfangsbestaetigung, Wunsch Ahmad 02.10.2026); fehlt sie (Code vor der Umstellung erzeugt,
+    Erzeugung gescheitert), die gespeicherte Druckfassung — nie ein heute neu gerechnetes PDF."""
+    if c.get("pdf_portal_b64") and int(c.get("pdf_portal_version") or 0) == int(c.get("version") or 1):
+        return base64.b64decode(c["pdf_portal_b64"])
+    return base64.b64decode(c["pdf_b64"]) if c.get("pdf_b64") else None
+
+
+async def portal_dokument_erzeugen(doc: dict) -> bytes:
+    """Wunsch Ahmad 02.10.2026: die Fassung fuer das Kundenportal — Druckfassung OHNE Empfangsbestaetigung
+    (kein "Kaufpreis erhalten", keine Schluesselanzahl, kein "Datum und Ort"); unten nur die Unterschrift
+    des Kunden und die der Firma. Aufgebaut wie die Neuerzeugung einer Fassung (Kaeufer = Ersteller des
+    Vertrags, eingefrorene Kaeuferdaten und Logo, Altvertrag ohne Text -> Nachtraeglich-Hinweis)."""
+    from auftraggeber import kaeufer_basis
+    from pdf_service import DIGITAL_NACHTRAEGLICH, generate_contract_pdf
+    from routes.contracts import _apply_contract_overrides, _logo_einsetzen
+    cd = dict(doc.get("contract_data") or {})
+    v = await db.vehicles.find_one({"id": doc.get("vehicle_id"), "dealer_id": doc["dealer_id"]}, {"_id": 0}) or {}
+    vehicle = dict(v.get("data") or {})
+    termin = await db.appointments.find_one({"contract_id": doc["id"], "dealer_id": doc["dealer_id"]},
+                                            {"_id": 0, "created_by": 1}) or {}
+    dealer = await kaeufer_basis(dealer_id=doc["dealer_id"], user_ids=(doc.get("user_id"), termin.get("created_by"))) or {}
+    vehicle, dealer = _apply_contract_overrides(contract=cd, vehicle=vehicle, dealer=dealer)
+    dealer = await _logo_einsetzen(dealer, cd)
+    if not (cd.get("digital_vertragstext") or "").strip():
+        cd["digital_vertragstext"] = DIGITAL_NACHTRAEGLICH
+    return await asyncio.to_thread(generate_contract_pdf, dealer=dealer, vehicle=vehicle, contract=cd, portal=True)
+
+
+async def _portal_dokument_sicherstellen(contract_id: str, bereich: dict) -> bool:
+    """Vor der Code-Erzeugung: liegt die Portal-Fassung fuer DIESE Vertragsfassung vor? Sonst erzeugen und
+    am Vertrag ablegen (pdf_portal_b64 / pdf_portal_version). Scheitert die Erzeugung, bleibt der Rueckfall
+    auf die Druckfassung (_portal_dokument) — der Code wird trotzdem erzeugt. True = Portal-Fassung liegt vor."""
+    doc = await db.generated_pdfs.find_one({"id": contract_id, **bereich},
+                                           {"_id": 0, "pdf_b64": 0, "pdf_digital_b64": 0, "pdf_signiert_b64": 0,
+                                            "pdf_portal_b64": 0})
+    if not doc:
+        return False
+    version = int(doc.get("version") or 1)
+    if int(doc.get("pdf_portal_version") or 0) == version:
+        return True
+    try:
+        pdf = await portal_dokument_erzeugen(doc)
+    except Exception:  # noqa: BLE001 — Rueckfall Druckfassung, nie den Code verhindern
+        log.exception("Kundenportal: Portal-Fassung fuer Vertrag %s nicht erzeugt — Druckfassung als Rueckfall", contract_id)
+        return False
+    r = await db.generated_pdfs.update_one({"id": contract_id, "version": doc.get("version")},
+                                           {"$set": {"pdf_portal_b64": base64.b64encode(pdf).decode(),
+                                                     "pdf_portal_version": version}})
+    return bool(r.matched_count)
 
 CODE_FALSCH = "Code ungültig oder abgelaufen. Bitte den Code vom Autohaus prüfen."
 
@@ -1041,11 +1098,13 @@ async def portal_sitzung_pdf(sitzung: SitzungKopf):
     """Der Vertrag fuer den Kunden: vor der Unterschrift die Druckfassung, danach die unterschriebene."""
     from vertrag_dateiname import content_disposition
     c = await _sitzung_pruefen(sitzung)
-    b64 = c.get("pdf_signiert_b64") if (c.get("portal") or {}).get("status") == "unterschrieben" else c.get("pdf_b64")
-    if not b64:
+    if (c.get("portal") or {}).get("status") == "unterschrieben":
+        pdf = base64.b64decode(c["pdf_signiert_b64"]) if c.get("pdf_signiert_b64") else None
+    else:
+        pdf = _portal_dokument(c)                    # Portal-Fassung ohne Empfangsbestaetigung (02.10.2026)
+    if not pdf:
         raise HTTPException(404, "Das Vertrags-PDF fehlt — bitte das Autohaus ansprechen.")
     name = f"Kaufvertrag-{c.get('contract_no') or c['id']}.pdf"
-    pdf = base64.b64decode(b64)
     await _gelesen_vermerken(c, pdf)                # Pruefliste 01.10.2026 (Nr. 2)
     return Response(content=pdf, media_type="application/pdf",
                     headers={"Content-Disposition": content_disposition(name),
@@ -1062,9 +1121,9 @@ async def _signiertes_pdf(c: dict, verkaeufer_png: bytes, kaeufer_png: Optional[
     Fahrzeugstand erzeugt — mit dem Datum des Unterschriftstages und womoeglich anderen Angaben als im
     gelesenen Dokument."""
     import portal_pdf
-    if not c.get("pdf_b64"):
+    original = _portal_dokument(c)                   # genau das, was der Kunde gelesen hat (02.10.2026)
+    if not original:
         raise ValueError("Vertragsdokument fehlt")
-    original = base64.b64decode(c["pdf_b64"])
     firma = await db.dealers.find_one({"id": c.get("dealer_id")}, {"_id": 0, "company_name": 1}) or {}
     zeit = wann.astimezone(_BERLIN).strftime("%d.%m.%Y, %H:%M")
     return await asyncio.to_thread(

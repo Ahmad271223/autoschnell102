@@ -81,20 +81,21 @@ def test_portal_unterschreibt_das_gelesene_dokument_nicht_den_heutigen_stand(wel
     w = welt
     _lauf(KP.put_webseite(KP.WebseiteIn(slug="kfz-mueller", aktiv=True), user=w.chef))
     c = _vertrag(w, w.sucher, vehicle_id=f"v-{w.s}")
-    gelesen = base64.b64decode(c["pdf_b64"])
-    # der Fahrzeugdatensatz aendert sich NACH der Vertragserzeugung (neuer Vergleich, Bearbeitung in der Akte)
+    # Wunsch Ahmad 02.10.2026: beim Erzeugen des Codes entsteht die Portal-Fassung (ohne Empfangsbestaetigung)
+    # aus dem Stand des Vertrags — DANACH aendert sich der Fahrzeugdatensatz, und es wird nichts mehr erzeugt.
+    code = _lauf(KP.portal_freigeben(c["id"], user=w.sucher))["code"]
     w.run(w.db.vehicles.insert_one({"id": f"v-{w.s}", "dealer_id": w.dealer_id,
                                     "data": {"make_label": "ANDERE MARKE", "model_label": "ANDERES MODELL",
                                              "features": ["Heute dazugekommen"], "mileage": 999999}}))
 
-    # und es wird nichts neu erzeugt
     def _verboten(**kw):
         raise AssertionError("beim Unterschreiben darf kein neues Vertrags-PDF erzeugt werden")
     import pdf_service
     monkeypatch.setattr(pdf_service, "generate_contract_pdf", _verboten)
-    code = _lauf(KP.portal_freigeben(c["id"], user=w.sucher))["code"]
     sitzung = _lauf(KP.portal_oeffnen(KP.OeffnenIn(code=code, slug="kfz-mueller"), _request()))["sitzung"]
-    assert _lauf(KP.portal_sitzung_pdf(sitzung)).body == gelesen
+    gelesen = _lauf(KP.portal_sitzung_pdf(sitzung)).body
+    assert gelesen != base64.b64decode(c["pdf_b64"]), "Portal-Fassung, nicht die Druckfassung"
+    assert "bestätigt Empfang von" not in _text(gelesen) and "Datum und Ort" not in _text(gelesen)
     assert _lauf(KP.portal_unterschreiben(sitzung, KP.UnterschreibenIn(
         signature_b64=_b64(_png()), name="Erika Mustermann", einverstanden=True), _request()))["ok"]
     doc = w.run(w.db.generated_pdfs.find_one({"id": c["id"]}, {"_id": 0}))

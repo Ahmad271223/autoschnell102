@@ -4268,3 +4268,16 @@ Regler). „Übernehmen“ hinterlegt das PNG auf demselben Weg wie ein hochgela
 steht damit im Kasten „Käufer“ jedes über das Kundenportal unterschriebenen Vertrags. Nach Ahmads HTML-Vorlage, bewusst
 ohne den Rechnungsteil. Alles im Browser (`frontend/src/lib/stempel.js`, `components/StempelUnterschrift.jsx`), keine
 neuen Server-Felder. Sichtprüfung der Designs mit Chromium: Scratchpad-Skript `stempel_sicht.cjs`.
+
+## Kundenportal: Unterschrift ohne Empfangsbestätigung (Wunsch Ahmad 02.10.2026)
+
+Unterschreibt der Kunde über die Firmenseite, steht unten im Vertrag nur noch seine Unterschrift und die der Firma —
+ohne „bestätigt Empfang von: Kaufpreis / Zulassungsbescheinigung / KFZ mit __ Schlüssel(n)“ und ohne „Datum und Ort“
+(Zeit und Name stehen auf dem Signaturnachweis). Dafür entsteht beim Erzeugen des Codes (POST /contracts/{id}/portal)
+eine eigene **Portal-Fassung** (`generate_contract_pdf(..., portal=True)`), gespeichert am Vertrag als `pdf_portal_b64` mit
+`pdf_portal_version`. Der Kunde liest und unterschreibt genau diese Fassung (`_portal_dokument`: Portal-Fassung nur, wenn
+ihre Versionsnummer zur aktuellen Vertragsfassung passt — sonst Rückfall auf die gespeicherte Druckfassung, nie ein neu
+gerechnetes PDF). Die Druckfassung `pdf_b64` für Fahrer/Sucher/Chef bleibt unverändert mit Empfangsbestätigung; die
+Firmeneinstellung „Empfangsbestätigung drucken“ gilt für die Portal-Fassung nicht. Scheitert die Erzeugung, wird der
+Code trotzdem ausgegeben (Log + Rückfall Druckfassung). Keine Migration: offene Codes von vor dem Rollout zeigen die
+Druckfassung, der nächste Code erzeugt die Portal-Fassung. Tests: `test_portal_ohne_empfang_20261002.py`.

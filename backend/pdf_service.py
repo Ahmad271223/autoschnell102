@@ -490,7 +490,8 @@ def _unterschrift_flowable(daten, breite_max):
         return None
 
 
-def _empfang_kasten(rolle, seite, contract, st, unterschrift, mit_empfang=True, bild=None, bild_text=None):
+def _empfang_kasten(rolle, seite, contract, st, unterschrift, mit_empfang=True, bild=None, bild_text=None,
+                    portal=False):
     """Kasten einer Partei im Abschnitt "Unterschriften": Titel,
     "bestätigt Empfang von:" mit Kaestchen, "Datum und Ort". Druckfassung
     (unterschrift=True) zusaetzlich mit der Unterschriftslinie; die digitale
@@ -499,10 +500,16 @@ def _empfang_kasten(rolle, seite, contract, st, unterschrift, mit_empfang=True, 
     zwei Datums-/Ortsangaben je Partei verwirrten."""
     c = contract or {}
     ort = c.get("empfang_ort_kaeufer") if seite == "kaeufer" else c.get("empfang_ort_verkaeufer")
-    inhalt = (_empfang_block(seite, contract, st, COL_W - 16) if mit_empfang
-              # Ohne Empfangsbestaetigung (Einstellung aus): nur "Datum und Ort".
-              else Paragraph("Datum und Ort: " + _xml_escape(
-                  _empfang_datum_ort(c.get("empfang_datum"), ort)), st["value"]))
+    if portal:
+        # Wunsch Ahmad 02.10.2026: im Kundenportal unten NUR die Unterschrift des Kunden und die der Firma —
+        # kein "Kaufpreis erhalten", keine Schluesselanzahl, kein "Datum und Ort" (Zeit und Name stehen auf
+        # dem Signaturnachweis). Die Zeile bleibt leer, damit die Unterschriftslinie an derselben Stelle liegt.
+        inhalt = Spacer(1, 2)
+    else:
+        inhalt = (_empfang_block(seite, contract, st, COL_W - 16) if mit_empfang
+                  # Ohne Empfangsbestaetigung (Einstellung aus): nur "Datum und Ort".
+                  else Paragraph("Datum und Ort: " + _xml_escape(
+                      _empfang_datum_ort(c.get("empfang_datum"), ort)), st["value"]))
     rows = [
         [Paragraph(f"<b>{_xml_escape(rolle)}</b>", st["sig_label"])],
         [inhalt],
@@ -535,17 +542,17 @@ def _empfang_kasten(rolle, seite, contract, st, unterschrift, mit_empfang=True, 
     return t
 
 
-def _empfang_paar(contract, st, unterschrift, mit_empfang=True, bilder=None):
+def _empfang_paar(contract, st, unterschrift, mit_empfang=True, bilder=None, portal=False):
     """Beide Kaesten nebeneinander — Verkaeufer links, Kaeufer rechts
     (wie die Parteien oben im Vertrag). `bilder` (Kundenportal): {"verkaeufer": PNG-Bytes,
     "verkaeufer_text": str, "kaeufer": PNG-Bytes | None, "kaeufer_text": str | None}."""
     b = bilder or {}
     t = Table(
         [[_empfang_kasten("Verkäufer", "verkaeufer", contract, st, unterschrift, mit_empfang,
-                          bild=b.get("verkaeufer"), bild_text=b.get("verkaeufer_text")),
+                          bild=b.get("verkaeufer"), bild_text=b.get("verkaeufer_text"), portal=portal),
           "",
           _empfang_kasten("Käufer", "kaeufer", contract, st, unterschrift, mit_empfang,
-                          bild=b.get("kaeufer"), bild_text=b.get("kaeufer_text"))]],
+                          bild=b.get("kaeufer"), bild_text=b.get("kaeufer_text"), portal=portal)]],
         colWidths=[COL_W, 0.5 * cm, COL_W],
     )
     t.setStyle(TableStyle([
@@ -779,8 +786,13 @@ def _platzhalter_vertrag(contract: dict, vehicle: dict) -> dict:
 
 
 def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
-                          digital: bool = False, unterschriften: Optional[dict] = None) -> bytes:
+                          digital: bool = False, unterschriften: Optional[dict] = None,
+                          portal: bool = False) -> bytes:
     """Build a Kaufvertrag PDF and return raw bytes.
+
+    portal=True (Wunsch Ahmad 02.10.2026): die Fassung fuer das Kundenportal — wie die Druckfassung, aber
+    die Unterschriftskaesten tragen nur die Unterschriftslinie (keine Empfangsbestaetigung, kein
+    "Datum und Ort"); unten stehen nur die Unterschrift des Kunden und die der Firma.
 
     digital=True: Ausfertigung fuer den Versand per E-Mail/WhatsApp — ohne
     Abschnitt "Unterschriften" und ohne Empfangsbestaetigung, am Ende steht
@@ -1239,7 +1251,8 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
     # dem Titel die Empfangsbestaetigung mit Ankreuz-Kaestchen und "Datum
     # und Ort", darunter wie bisher die Linien — siehe _empfang_kasten.
     sig = _empfang_paar(contract, st, unterschrift=True,
-                        mit_empfang=empfang_drucken(contract, dealer), bilder=unterschriften)
+                        mit_empfang=(not portal) and empfang_drucken(contract, dealer), bilder=unterschriften,
+                        portal=portal)
     hinweis = (unterschriften or {}).get("hinweis")
     story.append(Spacer(1, 8))
     story.append(KeepTogether([

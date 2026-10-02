@@ -76,8 +76,11 @@ def test_04_unterschrift_nur_nach_gelesenem_dokument(welt):  # noqa: F811
     assert f.status_code == 409 and "zuerst den Vertrag laden" in f.detail
     assert w.run(w.db.generated_pdfs.find_one({"id": c["id"]}, {"_id": 0, "portal.status": 1}))["portal"]["status"] == "offen"
     _lesen(s)
-    g = w.run(w.db.generated_pdfs.find_one({"id": c["id"]}, {"_id": 0, "portal.gelesen": 1, "pdf_b64": 1}))
-    assert g["portal"]["gelesen"]["sha256"] == portal_pdf.pruefsumme(base64.b64decode(g["pdf_b64"]))
+    g = w.run(w.db.generated_pdfs.find_one({"id": c["id"]}, {"_id": 0, "portal.gelesen": 1, "pdf_b64": 1,
+                                                              "pdf_portal_b64": 1, "pdf_portal_version": 1, "version": 1}))
+    # seit 02.10.2026 liest der Kunde die Portal-Fassung (ohne Empfangsbestaetigung) — der Vermerk gilt ihr
+    assert g["portal"]["gelesen"]["sha256"] == portal_pdf.pruefsumme(KP._portal_dokument(g))
+    assert g["portal"]["gelesen"]["sha256"] != portal_pdf.pruefsumme(base64.b64decode(g["pdf_b64"]))
     # neuer Code (Sitzung s stirbt): die neue Sitzung muss selbst lesen — der alte Vermerk gilt nicht
     _lauf(KP.portal_zurueckziehen(c["id"], user=w.sucher))
     s2 = _oeffnen(_lauf(KP.portal_freigeben(c["id"], user=w.sucher))["code"])
