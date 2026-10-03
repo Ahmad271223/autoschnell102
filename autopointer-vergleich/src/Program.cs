@@ -80,19 +80,16 @@ internal static class KonsolenModus
         if (ocr == null) { Console.WriteLine(fehler); return 4; }
 
         var start = DateTime.Now;
-        using var technik = AutoPointerFenster.Fotografiere(ansicht.TechnikTabelle);
-        using var kopf = AutoPointerFenster.Fotografiere(ansicht.KopfTabelle);
-        if (technik == null) { Console.WriteLine("Tabelle nicht lesbar."); return 5; }
-        var lesung = await AutoPointerQuelle.LiesBilderAsync(ocr, technik, kopf, Native.GetDpiForWindow(ansicht.TechnikTabelle), false);
-        var dauer = (DateTime.Now - start).TotalMilliseconds;
-        if (bilder != null)
+        var lesung = await AutoPointerQuelle.LiesAnsichtAsync(ocr, ansicht, false, bilder == null ? null : (technik, kopf) =>
         {
             Directory.CreateDirectory(bilder);
             technik.Save(Path.Combine(bilder, "technik.png"));
             kopf?.Save(Path.Combine(bilder, "kopf.png"));
-        }
+        });
+        var dauer = (DateTime.Now - start).TotalMilliseconds;
+        if (lesung == null) { Console.WriteLine("Tabelle nicht lesbar."); return 5; }
 
-        Console.WriteLine($"Gelesen in {dauer:0} ms (Texterkennung {ocr.Sprache}):");
+        Console.WriteLine($"Gelesen in {dauer:0} ms vom {(lesung.Weg == "Bildschirm" ? "Bildschirm (AutoPointer unberührt)" : "PrintWindow (Zeilen fehlten auf dem Bildschirm)")}, Texterkennung {ocr.Sprache}:");
         Console.WriteLine("  " + lesung.Rohtext);
         var f = lesung.Fahrzeug;
         var fehlt = DetailLeser.Fehlend(f);

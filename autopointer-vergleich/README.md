@@ -43,6 +43,10 @@ dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und 
 * Kann ein Auto nicht sicher gelesen werden (Marke/Modell, EZ oder km fehlen), öffnet sich **nichts**;
   unten rechts erscheint „Fahrzeug konnte nicht eindeutig erkannt werden“.
 * Kennt ein Portal das Modell nicht, öffnet dieses Portal nicht (sonst gäbe es eine Suche „nur Bentley“).
+* Steht in AutoPointer nur ein Platzhalter („VW Weitere VW“, „Andere“, „Sonstige“ – oft bei Kleinanzeigen),
+  kommt das Modell aus dem Titel („VW Beetle Cabrio 1.2 TSI“ → Beetle; nur Treffer im Modell-Katalog).
+* Das Programm filtert **nie nach Navigationssystem** (Wunsch Ahmad 03.10.) – in der App bleibt die
+  Einstellung „Navi mitvergleichen“ wie sie ist.
 
 ## Wie es funktioniert
 
@@ -54,9 +58,13 @@ gezeichnet). Deshalb:
    Kopf-Tabelle (Quelle, Titel, Preis). Unabhängig von Auflösung, Fenstergröße und Position.
 2. Nur solange AutoPointer im Vordergrund ist, alle 250 ms eine billige Prüfsumme (BitBlt) – ändert sich
    etwas, wird gewartet, bis die Ansicht 400 ms stillsteht.
-3. `PrintWindow` lässt die Tabelle sich selbst in ein Bild zeichnen (auch weggescrollte Zeilen bis zur
-   Inserat-ID), die **Windows-Texterkennung** (offline, de-DE) liest es mit 3-fachem Zoom; fehlende
-   Felder aus einem zweiten Durchlauf. Bezeichnungen werden unscharf erkannt („Kibmeterstand“).
+3. Zuerst wird nur **kopiert, was ohnehin auf dem Bildschirm steht** (BitBlt – AutoPointer bekommt davon
+   nichts mit). Nur wenn darin Marke/Modell, EZ, km oder die Inserat-ID fehlen (weggescrollt, schmale Ansicht),
+   lässt `PrintWindow` die Tabelle sich selbst in ein Bild zeichnen. Die **Windows-Texterkennung** (offline,
+   de-DE) liest es mit 3-fachem Zoom; fehlende Felder aus einem zweiten Durchlauf. Bezeichnungen werden
+   unscharf erkannt („Kibmeterstand“). Das Protokoll sagt je Auto, welcher Weg benutzt wurde.
+   (Anlass 03.10.2026: AutoPointer meldete eine „Zugriffsverletzung“ in aprun.exe. AutoPointer stürzt
+   nachweislich auch ohne uns ab – Windows-Ereignis vom 24.09. –, trotzdem fassen wir es so wenig wie möglich an.)
 4. Hat sich die Anzeige während des Lesens geändert, wird verworfen (keine Mischdaten bei A → B → C).
 5. Marke/Modell trennt das Programm mit den Katalogen aus `backend/` (Lesefehler wie „Bentavga“ werden
    korrigiert); die Links baut der Server (`backend/routes/werkzeuge.py`).

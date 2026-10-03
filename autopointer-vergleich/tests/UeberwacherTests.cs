@@ -359,4 +359,14 @@ public class UeberwacherTests
         Assert.Single(_b.Aufrufe);
         Assert.Equal(new[] { "AutoScout24" }, _b.Aufrufe[0].Select(v => v.Portal));
     }
+
+    [Fact]   // Befund 03.10.2026: AutoPointer moeglichst nicht selbst zeichnen lassen (PrintWindow)
+    public void Bildschirm_reicht_nur_mit_Pflichtfeldern_und_Inserat_ID()
+    {
+        Assert.True(AutoPointerQuelle.Reicht(Passat()));     // alle Zeilen bis zur Inserat-ID sichtbar
+        Assert.False(AutoPointerQuelle.Reicht(Bentley()));   // Tabelle endet vor der Inserat-ID -> PrintWindow
+        var f = Passat();
+        f.Kilometer = null;                                  // Pflichtfeld fehlt -> PrintWindow
+        Assert.False(AutoPointerQuelle.Reicht(f));
+    }
 }

@@ -11,8 +11,8 @@ namespace AutoPointerVergleich;
 /// UI Automation noch MSAA liefern den Text der Tabellenzellen - die Zellen
 /// werden gezeichnet, nicht als Steuerelemente angelegt. Deshalb:
 /// Fenster-Handles finden (Klassennamen + Ueberschrift "Technische Daten"),
-/// die Tabellen per PrintWindow abfotografieren und mit der Windows-
-/// Texterkennung lesen. Die Handles machen das unabhaengig von Bildschirm-
+/// die Tabellen abfotografieren (zuerst nur der Bildschirminhalt, PrintWindow
+/// nur wenn Zeilen fehlen) und mit der Windows-Texterkennung lesen. Die Handles machen das unabhaengig von Bildschirm-
 /// aufloesung, Fenstergroesse und Position.
 /// </remarks>
 internal sealed record DetailAnsicht(IntPtr Hauptfenster, IntPtr TechnikTabelle, IntPtr KopfTabelle);
@@ -131,15 +131,16 @@ internal static class AutoPointerFenster
         });
     }
 
-    /// <summary>Billige Pruefsumme des sichtbaren Inhalts (BitBlt, kein Aufruf in
-    /// AutoPointer hinein) - nur um Aenderungen zu bemerken.</summary>
-    public static ulong Pruefsumme(IntPtr hwnd)
+    /// <summary>Kopie dessen, was die Tabelle gerade anzeigt (BitBlt) — anders als
+    /// <see cref="Fotografiere"/> geht dabei KEINE Nachricht an AutoPointer, AutoPointer
+    /// zeichnet nichts extra. Weggescrollte Zeilen fehlen natuerlich.</summary>
+    public static Bitmap? Abbild(IntPtr hwnd)
     {
-        if (hwnd == IntPtr.Zero) return 0;
+        if (hwnd == IntPtr.Zero) return null;
         return Native.ImDpiKontext(hwnd, () =>
         {
-            if (!Native.GetClientRect(hwnd, out var r) || r.Width <= 0 || r.Height <= 0) return 0UL;
-            using var bmp = new Bitmap(r.Width, r.Height, PixelFormat.Format32bppRgb);
+            if (!Native.GetClientRect(hwnd, out var r) || r.Width <= 0 || r.Height <= 0) return null;
+            var bmp = new Bitmap(r.Width, r.Height, PixelFormat.Format32bppRgb);
             using (var g = Graphics.FromImage(bmp))
             {
                 IntPtr ziel = g.GetHdc();
@@ -151,8 +152,16 @@ internal static class AutoPointerFenster
                     g.ReleaseHdc(ziel);
                 }
             }
-            return Bildsumme(bmp);
+            return bmp;
         });
+    }
+
+    /// <summary>Billige Pruefsumme des sichtbaren Inhalts (BitBlt, kein Aufruf in
+    /// AutoPointer hinein) - nur um Aenderungen zu bemerken.</summary>
+    public static ulong Pruefsumme(IntPtr hwnd)
+    {
+        using var bmp = Abbild(hwnd);
+        return bmp == null ? 0UL : Bildsumme(bmp);
     }
 
     internal static unsafe ulong Bildsumme(Bitmap bmp)

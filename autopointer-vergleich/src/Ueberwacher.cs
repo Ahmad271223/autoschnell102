@@ -4,7 +4,9 @@ internal enum Lage { KeinAutoPointer, KeineDetails, Details }
 
 internal readonly record struct QuellenZustand(Lage Lage, ulong Summe);
 
-internal sealed record Lesung(Fahrzeug Fahrzeug, bool Leer, string Rohtext);
+/// <param name="Weg">"Bildschirm" (nur kopiert, was AutoPointer ohnehin zeigt) oder
+/// "PrintWindow" (AutoPointer hat die Tabelle extra in ein Bild gezeichnet).</param>
+internal sealed record Lesung(Fahrzeug Fahrzeug, bool Leer, string Rohtext, string Weg = "");
 
 /// <summary>Woher die Detailansicht kommt - echt: <see cref="AutoPointerQuelle"/>,
 /// in den Tests eine Attrappe.</summary>
@@ -211,7 +213,8 @@ internal sealed class Ueberwacher
             return;
         }
 
-        Protokoll.Schreibe("Fahrzeug erkannt\n" + string.Join("\n", f.Beschreibung()));
+        Protokoll.Schreibe((lesung.Weg.Length > 0 ? $"Fahrzeug erkannt (gelesen: {lesung.Weg})\n" : "Fahrzeug erkannt\n")
+                           + string.Join("\n", f.Beschreibung()));
         bool basis = _basis && !erzwungen;
         _basis = false;
         if (basis)
@@ -398,11 +401,42 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
     {
         var ansicht = _ansicht;
         if (ansicht == null) return null;
-        using var technik = AutoPointerFenster.Fotografiere(ansicht.TechnikTabelle);
-        using var kopf = AutoPointerFenster.Fotografiere(ansicht.KopfTabelle);
-        if (technik == null) return null;
-        return await LiesBilderAsync(_ocr, technik, kopf, Native.GetDpiForWindow(ansicht.TechnikTabelle), _einstellungen().ErkennungsbilderSpeichern);
+        return await LiesAnsichtAsync(_ocr, ansicht, _einstellungen().ErkennungsbilderSpeichern);
     }
+
+    /// <summary>Befund 03.10.2026: AutoPointer zeigte eine "Zugriffsverletzung" (aprun.exe). Es stuerzt
+    /// nachweislich auch ohne uns ab (24.09.), aber PrintWindow laesst AutoPointer selbst zeichnen —
+    /// deshalb zuerst nur den Bildschirminhalt kopieren (keine Nachricht an AutoPointer). PrintWindow
+    /// nur noch, wenn darin Pflichtzeilen oder die Inserat-ID fehlen (weggescrollt, schmale Ansicht).</summary>
+    internal static async Task<Lesung?> LiesAnsichtAsync(TextErkennung ocr, DetailAnsicht ansicht, bool bilderSpeichern,
+                                                         Action<System.Drawing.Bitmap, System.Drawing.Bitmap?>? bilder = null)
+    {
+        uint dpi = Native.GetDpiForWindow(ansicht.TechnikTabelle);
+        using (var technik = AutoPointerFenster.Abbild(ansicht.TechnikTabelle))
+        using (var kopf = AutoPointerFenster.Abbild(ansicht.KopfTabelle))
+        {
+            if (technik != null)
+            {
+                var sicht = await LiesBilderAsync(ocr, technik, kopf, dpi, bilderSpeichern);
+                if (Reicht(sicht.Fahrzeug))
+                {
+                    bilder?.Invoke(technik, kopf);
+                    return sicht with { Weg = "Bildschirm" };
+                }
+            }
+        }
+        using var technik2 = AutoPointerFenster.Fotografiere(ansicht.TechnikTabelle);
+        using var kopf2 = AutoPointerFenster.Fotografiere(ansicht.KopfTabelle);
+        if (technik2 == null) return null;
+        var gezeichnet = await LiesBilderAsync(ocr, technik2, kopf2, dpi, bilderSpeichern);
+        bilder?.Invoke(technik2, kopf2);
+        return gezeichnet with { Weg = "PrintWindow" };
+    }
+
+    /// <summary>Reicht der Bildschirminhalt? Pflichtfelder da und die Inserat-ID (letzte Zeile —
+    /// steht sie da, ist auch alles darueber sichtbar).</summary>
+    internal static bool Reicht(Fahrzeug f) =>
+        DetailLeser.Fehlend(f).Count == 0 && !string.IsNullOrWhiteSpace(f.InseratId);
 
     /// <summary>Zwei Durchlaeufe: Zoom x3 (bei 96 dpi), fehlende Felder aus einem
     /// zweiten Durchlauf mit x2 ergaenzt.</summary>

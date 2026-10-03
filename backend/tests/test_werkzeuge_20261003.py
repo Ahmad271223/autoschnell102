@@ -264,6 +264,31 @@ def test_21_unbekanntes_modell_keine_suche_nur_nach_marke():
     assert any("kein AutoScout24-Vergleich" in h for h in hinweise)
 
 
+def test_22_programm_filtert_nie_nach_navi():
+    # Wunsch Ahmad 03.10.2026: im Programm kein Navi-Filter, auch wenn die Firma "Navi mitvergleichen" an hat
+    v = wz.fahrzeug_zu_vehicle({**POLO, "titel": "VW Polo 1.4 Navi Klima"})
+    import mobile_service as ms
+    assert "NAVIGATION_SYSTEM" in ms.build_search_url(v, AHMADS_REGELN)     # App-Vergleich: bleibt wie er ist
+    links, _ = wz.vergleichs_links(v, AHMADS_REGELN)
+    assert links and all("NAVIGATION" not in x["url"] and "navi" not in x["url"].lower() for x in links)
+    assert AHMADS_REGELN["navi"] == {"mode": "wenn_vorhanden"}              # Firmenregeln nicht veraendert
+
+
+def test_23_weitere_vw_modell_aus_dem_titel():
+    # Befund 03.10.2026: Kleinanzeigen-Inserat "VW Weitere VW", Titel "VW Beetle Cabrio 1.2 TSI" -> kein Vergleich
+    beetle = {**POLO, "modell": "Weitere VW", "marke_modell_text": "VW Weitere VW", "titel": "VW Beetle Cabrio 1.2 TSI",
+              "ez_monat": 6, "ez_jahr": 2017, "kilometer": 41000, "kw": 77, "ps": 105}
+    v = wz.fahrzeug_zu_vehicle(beetle)
+    assert v["model_label"] == "Beetle"
+    links, hinweise = wz.vergleichs_links(v, AHMADS_REGELN)
+    assert [x["portal"] for x in links] == ["mobile.de", "AutoScout24"], hinweise
+    # Nichts Brauchbares im Titel: Platzhalter bleibt, Hinweis statt Suche nur nach "VW"
+    v = wz.fahrzeug_zu_vehicle({**beetle, "titel": "Schoenes Cabrio zu verkaufen"})
+    assert v["model_label"] == "Weitere VW"
+    links, hinweise = wz.vergleichs_links(v, AHMADS_REGELN)
+    assert links == [] and any("Weitere VW" in h for h in hinweise)
+
+
 def _abo(welt, an: bool):
     db = welt["db"]
     db.subscriptions.delete_many({"id": f"wz-test-{welt['sucher_id']}"})

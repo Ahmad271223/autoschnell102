@@ -235,7 +235,18 @@ def fahrzeug_zu_vehicle(f: dict) -> dict:
         "gearbox_label": _text(f.get("getriebe"), 40),
         "doors": _text(f.get("tueren"), 10) or None,
     }
-    return {k: w for k, w in v.items() if w not in (None, "")}
+    v = {k: w for k, w in v.items() if w not in (None, "")}
+    # Wunsch Ahmad 03.10.2026: Kleinanzeigen fuehrt viele Autos als "Weitere VW" — dann das Modell aus dem
+    # Titel ("VW Beetle Cabrio 1.2 TSI" -> Beetle), wie beim Einfuegen eines Links in der App
+    # (mobile_service._enhance_generic_model, nur der Titel zaehlt, Pruefbericht B-10). Uebernommen wird
+    # nur ein Treffer im Modell-Katalog — sonst bleibt es beim Hinweis statt einer Suche nur nach der Marke.
+    import mobile_service as ms
+    if titel and ms._is_generic_model_label(v.get("model_label")):
+        probe = ms._enhance_generic_model({k: v[k] for k in ("make_label", "model_label", "model_description")
+                                           if k in v})
+        if probe.get("model"):
+            v["model_label"] = probe["model_label"]
+    return v
 
 
 def vergleichs_links(vehicle: dict, regeln: dict) -> tuple:
@@ -246,6 +257,9 @@ def vergleichs_links(vehicle: dict, regeln: dict) -> tuple:
     kennt — sonst ein Hinweis statt einer Suche ueber die ganze Marke."""
     import autoscout_service as asv
     import mobile_service as ms
+    # Wunsch Ahmad 03.10.2026: im Programm NIE nach Navigationssystem filtern (in der App bleibt die
+    # Einstellung "Navi aus dem Inserat mitvergleichen" wie sie ist).
+    regeln = {**(regeln or {}), "navi": {"mode": "ignore"}}
     links, hinweise = [], []
     marke = vehicle.get("make_label", "")
     modell = vehicle.get("model_label", "")
