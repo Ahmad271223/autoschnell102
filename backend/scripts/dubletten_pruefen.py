@@ -120,6 +120,39 @@ def doppelte_ids(db) -> int:
     return n
 
 
+def doppelte_fassungen_und_mailschluessel(db) -> int:
+    """Pruefung 04.10.2026 (Nr. 23/34): seit diesem Tag HARTE Unique-Indizes —
+    generated_pdf_versions (contract_id, version) und mail_idempotenz.key. Eine
+    Dublette verhindert den Index, und der Produktionsstart bricht ab (rollout.sh
+    laesst den Server dann im Drain). Bereinigen von Hand: bei Fassungen das
+    Archivdokument behalten, das zum Versand passt (archived_at), bei
+    mail_idempotenz den Eintrag mit status "gesendet". Loescht NICHTS."""
+    n = 0
+    for d in db.generated_pdf_versions.aggregate([
+            {"$match": {"contract_id": {"$type": "string"}}},
+            {"$group": {"_id": {"contract_id": "$contract_id", "version": "$version"},
+                        "n": {"$sum": 1},
+                        "docs": {"$push": {"_id": "$_id", "id": "$id", "grund": "$grund",
+                                           "archived_at": "$archived_at"}}}},
+            {"$match": {"n": {"$gt": 1}}}]):
+        n += 1
+        print(f"generated_pdf_versions: Vertrag {d['_id']['contract_id']} Fassung "
+              f"{d['_id']['version']}: {d['n']}x")
+        for e in d["docs"]:
+            print(f"    _id={e.get('_id')}  id={e.get('id')}  grund={e.get('grund')}"
+                  f"  archived_at={e.get('archived_at')}")
+    for d in db.mail_idempotenz.aggregate([
+            {"$group": {"_id": "$key", "n": {"$sum": 1},
+                        "docs": {"$push": {"_id": "$_id", "status": "$status",
+                                           "begonnen": "$begonnen"}}}},
+            {"$match": {"n": {"$gt": 1}}}]):
+        n += 1
+        print(f"mail_idempotenz.key = {d['_id']!r}: {d['n']}x")
+        for e in d["docs"]:
+            print(f"    _id={e.get('_id')}  status={e.get('status')}  begonnen={e.get('begonnen')}")
+    return n
+
+
 def main(db=None) -> int:
     if db is None:
         db = MongoClient(MONGO_URL, serverSelectionTimeoutMS=10000)[DB_NAME]
@@ -138,6 +171,7 @@ def main(db=None) -> int:
     gefunden += doppelte_offene_termine(db)
     gefunden += doppelte_fahrzeuge(db)
     gefunden += doppelte_ids(db)
+    gefunden += doppelte_fassungen_und_mailschluessel(db)
     print("Keine Dubletten." if not gefunden else f"{gefunden} doppelte Werte — bitte bereinigen.")
     return 0 if not gefunden else 1
 

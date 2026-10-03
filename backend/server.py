@@ -1358,7 +1358,10 @@ async def ensure_indexes():
     await _vertragsnummer_index(db)
     # Pruefung 14.09.2026 (Liste 4, Nr. 79): SMTP-Idempotenz — ein Eintrag je
     # Schluessel (parallele Upserts), nach 30 Tagen automatisch weg.
-    await unique_anlegen(db.mail_idempotenz, "key", name="mail_schluessel", weich=True)
+    # Pruefung 04.10.2026 (Nr. 23): HART — ohne diesen Index koennten zwei Prozesse
+    # denselben SMTP-Versand gleichzeitig beanspruchen (doppelter Kaufvertrag).
+    # Vorher weich (nur Alarm). Dubletten: python scripts/dubletten_pruefen.py
+    await unique_anlegen(db.mail_idempotenz, "key", name="mail_schluessel")
     # Pruefung 14.09.2026 (A5): Versand-Schluessel ueberleben die Verlaufsliste
     await unique_anlegen(db.versand_schluessel, [("contract_id", 1), ("key", 1)],
                          name="versand_schluessel", weich=True)
