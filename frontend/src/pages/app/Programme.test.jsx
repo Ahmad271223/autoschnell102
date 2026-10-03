@@ -220,6 +220,7 @@ describe("Programme", () => {
     for (const { default: text } of quellen) {
       expect(text).not.toMatch(/autopointer/i);
       expect(text).not.toContain("10002");
+      expect(text).not.toContain("10001");
     }
   });
 });

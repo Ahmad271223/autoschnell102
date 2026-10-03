@@ -4,7 +4,7 @@ Kleines Windows-Hintergrundprogramm: Der Sucher klickt in **AutoPointer** ein In
 halbe Sekunde später öffnen sich automatisch die passenden Vergleichssuchen auf **mobile.de** und/oder
 **AutoScout24** als neue Browser-Tabs. Keine Eingabe, kein zusätzlicher Knopf.
 
-> Stand 03.10.2026: erst einmal **nur für Kunde 10002** (Chef + Sucher). Download in der App unter
+> Stand 03.10.2026: erst einmal **nur für die Kunden 10001 und 10002** (Chef + Sucher). Download in der App unter
 > „Programme“ – nur für freigegebene Firmen sichtbar (`AUTOPOINTER_VERGLEICH_KUNDEN`, siehe DEPLOYMENT.md,
 > Abschnitt „Programme zum Herunterladen“). Allen anderen zeigt die App nichts davon.
 

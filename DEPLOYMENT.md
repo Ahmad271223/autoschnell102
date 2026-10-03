@@ -4301,13 +4301,14 @@ Kommen beim Auslesen eines Inserats die Daten, aber keine Fotos, zeigt die Vergl
 - Die Vergleichsantwort trägt `bilder_nachholen_moeglich` (Kleinanzeigen im Browser-Modus: nein).
 - Tests: `backend/tests/test_bilder_nachholen_20261003.py`, `frontend/src/pages/app/Vergleich.bilderNachholen.test.jsx`.
 
-## Programme zum Herunterladen: AutoPointer-Vergleich nur für Kunde 10002 (Wunsch Ahmad 03.10.2026)
+## Programme zum Herunterladen: AutoPointer-Vergleich nur für Kunden 10001 und 10002 (Wunsch Ahmad 03.10.2026)
 
 Windows-Programm (Quelle `autopointer-vergleich/`, C#/.NET 10): erkennt in AutoPointer das rechts angezeigte Inserat
 (Fenster-Handles + Windows-Texterkennung) und öffnet automatisch die passenden mobile.de-/AutoScout24-Suchen.
-Erst einmal **nur für Kunde 10002** – „alle anderen sollen das gar nicht sehen“.
+Erst einmal **nur für Kunde 10002**, seit dem Abend des 03.10. auch **10001** – „alle anderen sollen das gar nicht sehen“.
 
-- Freigabe: `AUTOPOINTER_VERGLEICH_KUNDEN` (Kundennummern, Komma-getrennt; Standard `10002`, steht in `docker-compose.yml`).
+- Freigabe: `AUTOPOINTER_VERGLEICH_KUNDEN` (Kundennummern, Komma-getrennt; Standard `10001,10002`, steht in `docker-compose.yml`).
+  Steht die Variable in der `.env` eines Servers, gilt DIESER Wert — dann dort mit ändern.
   Gilt für Chef **und** alle Sucher der Firma. Leer gesetzt = für niemanden.
 - `GET /api/werkzeuge` liefert nur freigegebenen Firmen einen Eintrag (Name, Texte, Version, verbundener PC), allen
   anderen `[]`. Download `GET /api/werkzeuge/autopointer-vergleich/download` → 404 „Nicht gefunden“ für jede andere
