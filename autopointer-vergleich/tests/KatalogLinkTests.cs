@@ -108,6 +108,7 @@ public class ZuordnerTests
     // Befund 03.10.2026: Kleinanzeigen-Kategorie statt Modell, Modellwoerter verstreut in der Ueberschrift
     [InlineData("VW VW-Busse", "T5 Bulli multivan", "T5 Multivan")]
     [InlineData("VW VW-Busse", "Suche einen 7 sitzer", "VW-Busse")]   // nichts Brauchbares: Server sagt warum
+    [InlineData("VW VW-Busse", "VW T 5 Multivan", "T5 Multivan")]       // "T 5" zusammengezogen
     public void Platzhalter_Modell_kommt_aus_dem_Titel(string markeModell, string titel, string erwartet)
     {
         var f = Passat();
@@ -131,6 +132,44 @@ public class ZuordnerTests
         Assert.True(z.MarkeErkannt);
         Assert.Equal(marke, f.MarkeText);
         Assert.StartsWith(modell, f.ModellText);
+    }
+
+    [Theory]   // Befund 03.10.2026 (echtes Protokoll): "Hyundai i10" wurde als "Hyundai ilO" gelesen
+    [InlineData("Hyundai ilO")]
+    [InlineData("Hyundai il0")]
+    [InlineData("Hyundai i1O")]
+    [InlineData("Hyundai 110")]
+    [InlineData("Hyundai i10")]
+    public void Lesefehler_i_l_1_und_O_0_im_Modell(string feld)
+    {
+        var f = Passat();
+        f.MarkeModellText = feld;
+        f.Titel = "Hyundai ilO Classic";
+        var z = Zuordner.Zuordnen(f, Kat);
+        Assert.NotNull(z.MobileModell);
+        Assert.NotNull(z.AutoScoutModell);
+        Assert.Equal(("Hyundai", "i10"), (f.MarkeText, f.ModellText));
+    }
+
+    [Fact]   // Befund 03.10.2026 (echtes Protokoll): Feld "volvo xcoo", Ueberschrift "XC 60 D3 2017. mit Turboschad"
+    public void Volvo_xc_60_aus_der_Ueberschrift()
+    {
+        var f = Passat();
+        f.MarkeModellText = "volvo xcoo";
+        f.Titel = "XC 60 D3 2017. mit Turboschad";
+        var z = Zuordner.Zuordnen(f, Kat);
+        Assert.NotNull(z.MobileModell);
+        Assert.Equal("XC60", f.ModellText.Replace(" ", ""));
+    }
+
+    [Fact]
+    public void Verwechslung_nur_eindeutig_und_nur_mit_Ziffern()
+    {
+        Assert.Equal("i10", Katalog.Verwechslung(new[] { "i10", "i20", "i30" }, "ilO"));
+        Assert.Null(Katalog.Verwechslung(new[] { "i10", "110" }, "ilO"));          // zwei passen: lieber keiner
+        Assert.Null(Katalog.Verwechslung(new[] { "Golf", "Polo" }, "Go1f"));        // Namen ohne Ziffern nie
+        // Ueberschrift ebenso ("Hyundai ilO Classic" -> i10), wenn das Feld nichts taugt
+        Assert.Equal("i10", Katalog.AusTitel(new[] { "i10", "i20", "Atos" }, "Hyundai ilO Classic"));
     }
 
     [Fact]   // Befund 03.10.2026: BYD Dolphin (Neuwagen, mobile.de) — Marke/Modell in Grossbuchstaben

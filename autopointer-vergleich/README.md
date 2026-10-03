@@ -67,6 +67,9 @@ dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und 
   multivan“ → T5 Multivan, „VW Beetle Cabrio 1.2 TSI“ → Beetle; nur Treffer im Modell-Katalog, nie Sammelnamen wie
   „T5 andere“). Fehlt sogar die Marke („Andere“), kommen Marke und Modell aus der Überschrift („Ford Mondeo
   Turnier …“ → Ford Mondeo).
+* Typische Lesefehler der Texterkennung bei Modellen mit Ziffern: i/l/1 und O/0 werden verwechselt („Hyundai ilO“ →
+  i10; nur wenn genau ein Katalogmodell passt). In der Überschrift dürfen zwei Wörter zusammengehören („XC 60“ →
+  XC60).
 * Das Programm filtert **nie nach Navigationssystem** (Wunsch Ahmad 03.10.) – in der App bleibt die
   Einstellung „Navi mitvergleichen“ wie sie ist.
 

@@ -144,6 +144,27 @@ internal sealed class Katalog
     /// <summary>NFKD, ohne Akzente, klein, nur a-z0-9 (mobile_service._normalize).</summary>
     public static string Norm(string? s) => FahrzeugCodes.Norm(s);
 
+    /// <summary>Lesefehler-Form: die Texterkennung verwechselt i/l/1 und o/0 (Befund 03.10.2026: Hyundai
+    /// "i10" wurde als "ilO" gelesen). Beide Schreibweisen ergeben dieselbe Form ("110").</summary>
+    internal static string LeseForm(string? s)
+    {
+        var sb = new StringBuilder();
+        foreach (char c in Norm(s))
+            sb.Append(c switch { 'i' or 'l' or '1' => '1', 'o' or '0' => '0', _ => c });
+        return sb.ToString();
+    }
+
+    /// <summary>Katalogname, der sich vom gelesenen Modell nur durch i/l/1- bzw. o/0-Verwechslungen
+    /// unterscheidet — nur fuer Namen mit Ziffern und nur, wenn genau einer passt.</summary>
+    internal static string? Verwechslung(IEnumerable<string> namen, string modell)
+    {
+        string ziel = LeseForm(modell);
+        if (ziel.Length < 2) return null;
+        var treffer = namen.Where(n => n.Any(char.IsDigit) && LeseForm(n) == ziel)
+                           .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        return treffer.Count == 1 ? treffer[0] : null;
+    }
+
     // ---- Marke/Modell trennen ------------------------------------------------
 
     /// <summary>"Land Rover Range Rover Evoque" -> ("Land Rover", "Range Rover Evoque").
@@ -215,6 +236,9 @@ internal sealed class Katalog
                 string uid = marke.ModellIndex[unscharf];
                 return new ModellTreffer(uid, ModellName(marke, uid) ?? modell, true);
             }
+            if (Verwechslung(marke.Modelle.Select(m => m.Name), modell) is { } verwechselt
+                && MobileAufloesen(marke, verwechselt) is { } vid)
+                return new ModellTreffer(vid, ModellName(marke, vid) ?? verwechselt, true);
         }
         // Platzhalter ("Andere", "Weitere VW") oder Kleinanzeigen-Kategorie ("VW-Busse"): Modell aus der
         // Ueberschrift ("T5 Bulli multivan" -> T5 Multivan). Befund 03.10.2026.
@@ -270,13 +294,18 @@ internal sealed class Katalog
     internal static string? AusTitel(IEnumerable<string> modelle, string? titel)
     {
         if (string.IsNullOrWhiteSpace(titel)) return null;
-        var imTitel = new HashSet<string>(Woerter(titel), StringComparer.Ordinal);
+        var woerter = Woerter(titel);
+        var imTitel = new HashSet<string>(woerter, StringComparer.Ordinal);
+        // Befund 03.10.2026: "XC 60 D3 2017" — der Katalog schreibt "XC60": benachbarte Woerter auch zusammengezogen
+        for (int i = 0; i + 1 < woerter.Count; i++) imTitel.Add(woerter[i] + woerter[i + 1]);
+        var imTitelLese = new HashSet<string>(imTitel.Select(LeseForm), StringComparer.Ordinal);
+        bool steht(string wort) => imTitel.Contains(wort) || (wort.Any(char.IsDigit) && imTitelLese.Contains(LeseForm(wort)));
         string? bester = null;
         int besteWoerter = 0;
         foreach (var name in modelle)
         {
             var w = Woerter(name);
-            if (w.Count == 0 || w.Any(Sammelwoerter.Contains) || !w.All(imTitel.Contains)) continue;
+            if (w.Count == 0 || w.Any(Sammelwoerter.Contains) || !w.All(steht)) continue;
             if (w.Count > besteWoerter || (w.Count == besteWoerter && name.Length > (bester?.Length ?? 0)))
             {
                 bester = name;
@@ -328,6 +357,9 @@ internal sealed class Katalog
                 var u = marke.Modelle.First(x => Norm(x.ModelName) == unscharf);
                 return new ModellTreffer(u.ModelId.ToString(CultureInfo.InvariantCulture), u.ModelName, true);
             }
+            if (Verwechslung(marke.Modelle.Select(x => x.ModelName), modell) is { } verwechselt
+                && AutoScoutAufloesen(marke, verwechselt) is { } v)
+                return new ModellTreffer(v.ModelId.ToString(CultureInfo.InvariantCulture), v.ModelName, true);
         }
         string? ausTitel = AusTitel(marke.Modelle.Select(x => x.ModelName).Where(n => !Generisch.IsMatch(n)), titel);
         var t = ausTitel == null ? null : AutoScoutAufloesen(marke, ausTitel);
