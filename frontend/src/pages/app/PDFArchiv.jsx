@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
 import { thumbSrc, thumbFehler } from "@/lib/bilder";
 import { toast } from "sonner";
-import { Search, Trash2, Eye, X, Car, ChevronLeft, ChevronRight, MapPin, FileText, Send, Mail, CalendarPlus, UserRoundPen, PenLine, Pencil } from "lucide-react";
+import { Search, X, Car, ChevronLeft, ChevronRight, MapPin, Send } from "lucide-react";
 import { openContractPdf } from "@/lib/pdf";
 import { openAuthedFile } from "@/lib/api";
 import BeweisCard from "@/components/BeweisCard";
@@ -12,6 +12,7 @@ import FolgeMailDialog from "@/components/FolgeMailDialog";
 import VerkaeuferKorrekturDialog from "@/components/VerkaeuferKorrekturDialog";
 import ContractDialog from "@/components/ContractDialog";
 import KundenportalDialog, { portalUnterschrift } from "@/components/KundenportalDialog";
+import VertragAktionen from "@/components/VertragAktionen";
 
 // Rollenprüfung 22.09.2026 (RP-007/RP-106/RP-257): Verträge je Seite.
 export const ARCHIV_SEITE = 50;
@@ -365,92 +366,26 @@ export default function PDFArchiv() {
                       {it.purchase_price
                         ? `${Number(it.purchase_price).toLocaleString("de-DE")} €` : "—"}
                     </div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      {brauchtAbholtermin(it) && (
-                        <button onClick={() => terminAnlegen(it)}
-                                data-testid={`termin-anlegen-${it.id}`}
-                                disabled={!!terminLaeuft}
-                                className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-white/10 disabled:opacity-50"
-                                style={{ background: "var(--apple-btn-secondary-bg)",
-                                         color: "var(--text-primary)" }}
-                                aria-label="Abholtermin anlegen"
-                                title="Abholtermin anlegen — zu diesem Vertrag gibt es keinen offenen Termin">
-                          <CalendarPlus size={16} />
-                        </button>
-                      )}
-                      <button onClick={() => openPdf(it.id)} data-testid={`open-pdf-${it.id}`}
-                              disabled={!!pdfLaeuft} aria-busy={pdfLaeuft === `${it.id}:druck`}
-                              className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-white/10 disabled:opacity-50"
-                              style={{ background: "var(--apple-btn-secondary-bg)",
-                                       color: "var(--text-primary)" }}
-                              title="Vertrag öffnen (Druckfassung mit Unterschriftsfeldern)">
-                        <Eye size={16} />
-                      </button>
-                      <button onClick={() => openDigital(it.id)} data-testid={`open-pdf-digital-${it.id}`}
-                              disabled={!!pdfLaeuft} aria-busy={pdfLaeuft === `${it.id}:digital`}
-                              className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-white/10 disabled:opacity-50"
-                              style={{ background: "var(--apple-btn-secondary-bg)",
-                                       color: "var(--text-primary)" }}
-                              title="Digitale Fassung (für E-Mail/WhatsApp, ohne Unterschriftsfelder)">
-                        <FileText size={16} />
-                      </button>
-                      {/* Pruefbericht 20.09.2026 (H24): Aus dem Archiv liess sich ein
-                          Vertrag gar nicht erneut versenden — meldete sich der
-                          Verkaeufer einen Tag spaeter, blieb nur ein neuer Vertrag. */}
-                      <button onClick={() => setSenden(it)}
-                              data-testid={`senden-${it.id}`}
-                              className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-white/10"
-                              style={{ background: "var(--apple-btn-secondary-bg)",
-                                       color: "var(--text-primary)" }}
-                              title="Vertrag an den Verkäufer senden (WhatsApp oder E-Mail)">
-                        <Send size={16} />
-                      </button>
-                      <button onClick={() => setPortal(it)}
-                              data-testid={`kundenportal-${it.id}`}
-                              className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-white/10"
-                              style={{ background: portalUnterschrift(it) === "aktuell" ? "rgba(48,209,88,0.18)" : "var(--apple-btn-secondary-bg)",
-                                       color: portalUnterschrift(it) === "aktuell" ? "#30d158" : "var(--text-primary)" }}
-                              aria-label="Kundenportal — digital unterschreiben lassen"
-                              title={portalUnterschrift(it) === "aktuell" ? "Vom Kunden digital unterschrieben — Vertrag öffnen"
-                                : "Kundenportal: Code erzeugen, damit der Kunde den Vertrag auf eurer Firmenseite digital unterschreibt"}>
-                        <PenLine size={16} />
-                      </button>
-                      <button onClick={() => setFolgeMail(it)}
-                              data-testid={`folgemail-${it.id}`}
-                              className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-white/10"
-                              style={{ background: "var(--apple-btn-secondary-bg)",
-                                       color: "var(--text-primary)" }}
-                              aria-label="Hinweis nach Kaufabschluss und Bahnverbindung"
-                              title="Hinweis nach Kaufabschluss / Bahnverbindung — per E-Mail verschicken oder kopieren, mit Name und Daten dieses Vertrags">
-                        <Mail size={16} />
-                      </button>
-                      <button onClick={() => setAendern(it)}
-                              data-testid={`vertrag-aendern-${it.id}`}
-                              className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-white/10"
-                              style={{ background: "var(--apple-btn-secondary-bg)",
-                                       color: "var(--text-primary)" }}
-                              aria-label="Kaufvertrag nachträglich ändern"
-                              title="Kaufvertrag nachträglich ändern — alle Angaben wie beim Anlegen; ergibt eine neue Fassung, die alte bleibt im Archiv">
-                        <Pencil size={16} />
-                      </button>
-                      <button onClick={() => setKorrektur(it)}
-                              data-testid={`verkaeufer-korrektur-${it.id}`}
-                              className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-white/10"
-                              style={{ background: "var(--apple-btn-secondary-bg)",
-                                       color: "var(--text-primary)" }}
-                              aria-label="Verkäuferdaten korrigieren"
-                              title="Verkäuferdaten korrigieren (Name, Anschrift, Kontakt) — erzeugt eine neue Fassung">
-                        <UserRoundPen size={16} />
-                      </button>
-                      <button onClick={() => remove(it.id)} data-testid={`del-pdf-${it.id}`}
-                              disabled={!!loeschtId}
-                              className="w-10 h-10 rounded-full flex items-center justify-center transition-colors hover:bg-red-500/20 disabled:opacity-50"
-                              style={{ background: "var(--apple-btn-secondary-bg)",
-                                       color: "var(--text-secondary)" }}
-                              title="Löschen">
-                        <Trash2 size={16} />
-                      </button>
-                    </div>
+                    {/* Wunsch Ahmad 03.10.2026: statt acht Symbol-Knöpfen nebeneinander
+                        "Ansehen", "Senden" und das beschriftete Menü "Mehr". */}
+                    <VertragAktionen
+                      it={it}
+                      a={{
+                        termin: () => terminAnlegen(it),
+                        ansehen: () => openPdf(it.id),
+                        digital: () => openDigital(it.id),
+                        senden: () => setSenden(it),
+                        portal: () => setPortal(it),
+                        folgeMail: () => setFolgeMail(it),
+                        aendern: () => setAendern(it),
+                        korrektur: () => setKorrektur(it),
+                        loeschen: () => remove(it.id),
+                      }}
+                      zustand={{
+                        termin: brauchtAbholtermin(it),
+                        terminLaeuft, pdfLaeuft, loeschtId,
+                        portalUnterschrieben: portalUnterschrift(it) === "aktuell",
+                      }} />
                   </div>
                 </div>
               </div>

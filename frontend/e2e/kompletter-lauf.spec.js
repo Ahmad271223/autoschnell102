@@ -152,6 +152,7 @@ test.describe("Kompletter Lauf: Betreiber -> Sucher -> Kunde -> Chef -> Fahrer -
 
     // Vertragsliste: Kundenportal-Knopf -> Code erzeugen
     await page.goto("/app/vertraege");
+    await page.getByTestId(`pdf-mehr-${vertrag.id}`).click();             // 03.10.2026: im Menü "Mehr"
     await page.getByTestId(`kundenportal-${vertrag.id}`).click();
     await page.getByTestId("kundenportal-erzeugen").click();
     await expect(page.getByTestId("kundenportal-code")).toHaveText(/^[A-HJ-NP-Z2-9]{6}$/);
@@ -399,6 +400,7 @@ test.describe("Kompletter Lauf: Betreiber -> Sucher -> Kunde -> Chef -> Fahrer -
     await h.authPage(page, "app", sucherToken);
     await page.goto("/app/vertraege");
     await expect(page.getByTestId(`portal-badge-${vertrag.id}`)).toContainText("Unterschrift nur für Fassung 1");
+    await page.getByTestId(`pdf-mehr-${vertrag.id}`).click();             // 03.10.2026: im Menü "Mehr"
     await page.getByTestId(`kundenportal-${vertrag.id}`).click();
     await expect(page.getByTestId("kundenportal-status")).toContainText("nach der Unterschrift des Kunden geändert");
     await expect(page.getByTestId("kundenportal-unterschrieben-alt")).toContainText("Fassung 1 — aktuell ist Fassung 2");
