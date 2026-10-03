@@ -4438,3 +4438,41 @@ POST /dealer/sucher-zugaenge-anfrage (nur Chef). Gespeichert als `plan_requests`
 - Die Mail-Kennung (Idempotenz bei Resend) enthält jetzt den Änderungsstand — eine geänderte Anfrage wird
   nicht mehr als Doppel verworfen.
 - Tests: `backend/tests/test_weitere_sucher_20261003.py`, `frontend/src/components/WeitereSucherDialog.test.jsx`.
+
+## Prüfung 04.10.2026: Versand, KI-Budget, Termine, Vorschau, Druck-PDF, Indizes
+
+Externe Liste (44 Punkte) gegen den Code geprüft; umgesetzt wurde alles, was keine Entscheidung braucht.
+Offen für Ahmad: Nr. 37 (neue Fassung ohne Abo – bisher bewusst erlaubt), Nr. 26 (alter WhatsApp-Link gilt
+14 Tage weiter), Nr. 38/39 (Abhol-KI rechnet beim Öffnen nach KI-Update/7 Tagen neu), Ausgabenlimit in der
+Anthropic-Konsole (Nr. 16/17, harter Schutz gegen Preisänderungen). Bewusst nicht umgebaut (groß, nicht
+nötig): Mail-Outbox, KI-Warteschlange, PDFs nach R2 (Fotos stecken nicht im PDF, Verträge sind KB groß).
+
+- **E-Mail nie unbemerkt doppelt (Nr. 13/14/21/22):** derselbe Vertrag (gleiche Fassung) an dieselbe Adresse
+  ein zweites Mal nur mit Bestätigung — der Server antwortet 409 `bereits_versendet`, der Dialog fragt und
+  schickt `erneut: true` (gilt auch nach dem Neuladen). Unklarer Ausgang (Resend 5xx/409, abgerissene
+  Antwort, SMTP-Abriss) heißt 502 `versand_unklar` statt „fehlgeschlagen“; der Eintrag bleibt `unklar` und
+  wird beim nächsten Klick unter DEMSELBEN Schlüssel wieder aufgenommen (Resend stellt dann nicht doppelt
+  zu). Anderer Text oder älter als 23 h: 409 `frueherer_versand_unklar`, nur mit Bestätigung. Resend 409
+  `concurrent_idempotent_requests` wird abgewartet, sonst unklar — nie SMTP-Rückfall. SMTP gibt nach Beginn
+  der Übergabe nur bei ausdrücklicher Ablehnung frei (SMTPDataError/Recipients/Sender); QUIT nach der
+  Abgabe hat keine Folgen mehr. Datenbankfehler beim Vermerk nach erfolgtem Versand → kein 500, sondern
+  `status_vermerk: nicht_gespeichert`. Ergebnis der Belegkopie steht im Versandverlauf (`kopie`).
+  WhatsApp-Ersatzfenster ohne `noopener` (vorher galt ein offener Tab als blockiert).
+- **KI-Budget fail-closed (Nr. 1/24/41):** scheitert die Reservierung an der Datenbank, startet keine KI
+  (`BudgetNichtPruefbar`, Status „fehler“ mit „keine Kosten, bitte neu berechnen“). Scheitert nur der
+  Fahrer-Schritt, wird die Firmen-Reservierung zurückgenommen.
+- **Termine nach neuer Fassung (Nr. 43):** `cleanup_service.termine_aus_vertrag_nachziehen` für
+  Verkäuferkorrektur und nachträgliche Änderung; bei Fehler Merker `termin_nachfuehrung_offen` +
+  Betriebsalarm, der Aufräumlauf (`termin_nachfuehrung_nachgeholt`) zieht nach. Die nachträgliche Änderung
+  setzt bei neuem Namen jetzt auch `seller_name_geaendert_am` am Termin und leert den alten Namen im
+  Protokoll-Entwurf.
+- **PDF-Vorschau (Nr. 29):** 30 je Minute und Konto (429), höchstens 2 gleichzeitig je Prozess (nach 20 s
+  503). Die Vertragstexte waren schon begrenzt (20.000 bzw. 500 Zeichen).
+- **Druckfassung (Nr. 42):** fehlt `pdf_b64` oder ist es kaputt, wird es aus den eingefrorenen
+  Vertragsdaten nacherzeugt (Download, Fahrer, Admin) statt 500/404.
+- **Harte Indizes (Nr. 23/34-36):** `generated_pdf_versions (contract_id, version)` und
+  `mail_idempotenz.key` brechen den Produktionsstart ab, wenn sie fehlen. **Vor dem Ausrollen einmal auf
+  prod2 prüfen:** `docker compose exec backend python -X utf8 scripts/dubletten_pruefen.py` → muss
+  „Keine Dubletten.“ melden (sonst bleibt der Server beim Rollout im Drain, prod1 läuft weiter).
+- Tests: `backend/tests/test_pruefung_20261004_*.py`, `frontend/src/components/SendDialog.doppelversand.test.jsx`.
+  Keine neuen Umgebungswerte, keine Migration.
