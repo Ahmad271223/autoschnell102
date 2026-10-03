@@ -86,12 +86,13 @@ internal static class KonsolenModus
         if (ocr == null) { Console.WriteLine(fehler); return 4; }
 
         var start = DateTime.Now;
+        bool zeichnen = args.Contains("--zeichnen") || Einstellungen.Laden().AutoPointerZeichnenLassen;
         var lesung = await AutoPointerQuelle.LiesAnsichtAsync(ocr, ansicht, false, bilder == null ? null : (technik, kopf) =>
         {
             Directory.CreateDirectory(bilder);
             technik.Save(Path.Combine(bilder, "technik.png"));
             kopf?.Save(Path.Combine(bilder, "kopf.png"));
-        });
+        }, zeichnen);
         var dauer = (DateTime.Now - start).TotalMilliseconds;
         if (lesung == null) { Console.WriteLine("Tabelle nicht lesbar."); return 5; }
 

@@ -282,7 +282,19 @@ internal static class DetailLeser
         f.Quelle = quelle;
         f.Titel = titel;
         f.Preis ??= preis;
+        NeuwagenErgaenzen(f, DateTime.Now);
         return f;
+    }
+
+    private static readonly Regex Neu = new(@"^\s*neu(wagen|fahrzeug)?\s*$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>Befund 03.10.2026 (BYD Dolphin, mobile.de): Neuwagen haben in AutoPointer keine Zeilen
+    /// "Erstzulassung" und "Kilometerstand" — dann gilt dieses Jahr und 0 km, sonst oeffnete sich nichts.</summary>
+    internal static void NeuwagenErgaenzen(Fahrzeug f, DateTime heute)
+    {
+        if (f.Zustand == null || !Neu.IsMatch(f.Zustand)) return;
+        if (f.EzJahr == null) { f.EzJahr = heute.Year; f.EzMonat = null; }
+        f.Kilometer ??= 0;
     }
 
     /// <summary>Fuehrt zwei Lesungen zusammen: fehlende Felder der ersten werden

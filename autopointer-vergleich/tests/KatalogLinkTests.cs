@@ -121,6 +121,7 @@ public class ZuordnerTests
     [InlineData("Andere", "Ford Mondeo Turnier 2.0 TDCi Diesel, ...", "Ford", "Mondeo")]
     [InlineData("Andere", "Ford Mondeo Turnier 2.0 TDCi Diesel, …", "Ford", "Mondeo")]
     [InlineData("Sonstige", "BMW 320d Touring", "BMW", "320")]
+    [InlineData("Andere", "VW Weitere VW, Golf 4 1.9TDI Aussch...", "VW", "Golf")]   // Befund 03.10.2026 abends
     public void Ohne_Marke_kommt_alles_aus_dem_Titel(string feld, string titel, string marke, string modell)
     {
         var f = Passat();
@@ -130,6 +131,18 @@ public class ZuordnerTests
         Assert.True(z.MarkeErkannt);
         Assert.Equal(marke, f.MarkeText);
         Assert.StartsWith(modell, f.ModellText);
+    }
+
+    [Fact]   // Befund 03.10.2026: BYD Dolphin (Neuwagen, mobile.de) — Marke/Modell in Grossbuchstaben
+    public void Byd_Dolphin_wird_zugeordnet()
+    {
+        var f = Passat();
+        f.MarkeModellText = "BYD DOLPHIN";
+        f.Titel = "BYD Dolphin G DM-i Comfort";
+        var z = Zuordner.Zuordnen(f, Kat);
+        Assert.NotNull(z.MobileModell);
+        Assert.NotNull(z.AutoScoutModell);
+        Assert.Equal("BYD", f.MarkeText);
     }
 
     [Fact]

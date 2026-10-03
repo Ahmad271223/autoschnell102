@@ -29,6 +29,10 @@ internal sealed class Einstellungen
     public bool HinweiseAnzeigen { get; set; } = true;
     public bool TastenkuerzelAktiv { get; set; } = true;
     public bool ErkennungsbilderSpeichern { get; set; } = false;
+    /// <summary>Fehlen Zeilen auf dem Bildschirm, AutoPointer die Tabelle selbst zeichnen lassen (PrintWindow).
+    /// Standard AUS: zweimal am 03.10.2026 meldete AutoPointer genau dann dieselbe "Zugriffsverletzung"
+    /// (aprun.exe, Offset 16B050B).</summary>
+    public bool AutoPointerZeichnenLassen { get; set; } = false;
 
     /// <summary>Kleine Leiste mit den wichtigsten Knoepfen, immer im Vordergrund (Wunsch Ahmad 03.10.2026).</summary>
     public bool LeisteAnzeigen { get; set; } = true;

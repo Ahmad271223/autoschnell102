@@ -53,6 +53,8 @@ dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und 
   *Aktuelles Fahrzeug jetzt vergleichen* (auch bei Pause/selbem Auto), *Letzten Vergleich erneut öffnen*,
   *Einstellungen …* (Portale, Browser, Ablauf, mit Windows starten), *Protokoll anzeigen …*.
 * Ein Auto, das beim Programmstart schon angezeigt wird, öffnet nichts – erst das nächste angeklickte.
+* **Neuwagen** (Zustand „Neu“) haben in AutoPointer weder Erstzulassung noch Kilometerstand: dann gilt dieses Jahr
+  und 0 km (Befund 03.10.: BYD Dolphin, mobile.de).
 * Dasselbe Fahrzeug öffnet nie zweimal hintereinander (Kennung `Marke Modell | EZ | km | kW`).
 * Kann ein Auto nicht sicher gelesen werden (Marke/Modell, EZ oder km fehlen), öffnet sich **nichts**;
   unten rechts erscheint „Fahrzeug konnte nicht eindeutig erkannt werden“.
@@ -75,9 +77,11 @@ gezeichnet). Deshalb:
    Kopf-Tabelle (Quelle, Titel, Preis). Unabhängig von Auflösung, Fenstergröße und Position.
 2. Nur solange AutoPointer im Vordergrund ist, alle 250 ms eine billige Prüfsumme (BitBlt) – ändert sich
    etwas, wird gewartet, bis die Ansicht 400 ms stillsteht.
-3. Zuerst wird nur **kopiert, was ohnehin auf dem Bildschirm steht** (BitBlt – AutoPointer bekommt davon
-   nichts mit). Nur wenn darin Marke/Modell, EZ, km oder die Inserat-ID fehlen (weggescrollt, schmale Ansicht),
-   lässt `PrintWindow` die Tabelle sich selbst in ein Bild zeichnen. Die **Windows-Texterkennung** (offline,
+3. Es wird nur **kopiert, was ohnehin auf dem Bildschirm steht** (BitBlt – AutoPointer bekommt davon nichts mit).
+   Fehlen Zeilen (weggescrollt, schmale Ansicht), sagt das Programm „Detailbereich größer ziehen“. `PrintWindow`
+   (AutoPointer zeichnet die Tabelle selbst, auch weggescrollte Zeilen) nur noch, wenn es in den Einstellungen
+   ausdrücklich erlaubt ist — seit 1.3.2 Standard AUS: am 03.10.2026 meldete AutoPointer zweimal genau dabei
+   dieselbe „Zugriffsverletzung“ (aprun.exe, Offset 16B050B). Die **Windows-Texterkennung** (offline,
    de-DE) liest es mit 3-fachem Zoom; fehlende Felder aus einem zweiten Durchlauf. Bezeichnungen werden
    unscharf erkannt („Kibmeterstand“). Das Protokoll sagt je Auto, welcher Weg benutzt wurde.
    (Anlass 03.10.2026: AutoPointer meldete eine „Zugriffsverletzung“ in aprun.exe. AutoPointer stürzt

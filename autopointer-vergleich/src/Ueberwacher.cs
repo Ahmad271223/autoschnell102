@@ -201,7 +201,9 @@ internal sealed class Ueberwacher
             _basis = false;
             Protokoll.Schreibe($"Fahrzeug konnte nicht eindeutig erkannt werden – fehlt: {string.Join(", ", fehlt)}\n"
                                + $"Gelesen: {lesung.Rohtext}");
-            MeldeEinmal("Fahrzeug konnte nicht eindeutig erkannt werden (fehlt: " + string.Join(", ", fehlt) + ").");
+            MeldeEinmal("Fahrzeug konnte nicht eindeutig erkannt werden (fehlt: " + string.Join(", ", fehlt) + ")."
+                        + (lesung.Weg == "Bildschirm"
+                            ? " Tipp: Detailbereich in AutoPointer größer ziehen, damit alle Zeilen zu sehen sind." : ""));
             return;
         }
 
@@ -401,33 +403,39 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
     {
         var ansicht = _ansicht;
         if (ansicht == null) return null;
-        return await LiesAnsichtAsync(_ocr, ansicht, _einstellungen().ErkennungsbilderSpeichern);
+        var e = _einstellungen();
+        return await LiesAnsichtAsync(_ocr, ansicht, e.ErkennungsbilderSpeichern, zeichnenErlaubt: e.AutoPointerZeichnenLassen);
     }
 
     /// <summary>Befund 03.10.2026: AutoPointer zeigte eine "Zugriffsverletzung" (aprun.exe). Es stuerzt
     /// nachweislich auch ohne uns ab (24.09.), aber PrintWindow laesst AutoPointer selbst zeichnen —
     /// deshalb zuerst nur den Bildschirminhalt kopieren (keine Nachricht an AutoPointer). PrintWindow
     /// nur noch, wenn darin Pflichtzeilen oder die Inserat-ID fehlen (weggescrollt, schmale Ansicht).</summary>
+    /// <remarks>Zweiter Befund 03.10.2026 abends: dieselbe Zugriffsverletzung (Offset 16B050B) noch einmal —
+    /// PrintWindow nur noch, wenn der Sucher es in den Einstellungen ausdruecklich erlaubt
+    /// (<paramref name="zeichnenErlaubt"/>). Sonst gilt, was auf dem Bildschirm steht.</remarks>
     internal static async Task<Lesung?> LiesAnsichtAsync(TextErkennung ocr, DetailAnsicht ansicht, bool bilderSpeichern,
-                                                         Action<System.Drawing.Bitmap, System.Drawing.Bitmap?>? bilder = null)
+                                                         Action<System.Drawing.Bitmap, System.Drawing.Bitmap?>? bilder = null,
+                                                         bool zeichnenErlaubt = false)
     {
         uint dpi = Native.GetDpiForWindow(ansicht.TechnikTabelle);
         // Liegt die Leiste (immer im Vordergrund) ueber der Tabelle, zeigt der Bildschirm sie mit -> PrintWindow
         bool verdeckt = AutoPointerFenster.Verdeckt(ansicht.TechnikTabelle) || AutoPointerFenster.Verdeckt(ansicht.KopfTabelle);
-        if (!verdeckt)
+        if (!verdeckt || !zeichnenErlaubt)
         {
             using var technik = AutoPointerFenster.Abbild(ansicht.TechnikTabelle);
             using var kopf = AutoPointerFenster.Abbild(ansicht.KopfTabelle);
             if (technik != null)
             {
                 var sicht = await LiesBilderAsync(ocr, technik, kopf, dpi, bilderSpeichern);
-                if (Reicht(sicht.Fahrzeug))
+                if (!zeichnenErlaubt || Reicht(sicht.Fahrzeug))
                 {
                     bilder?.Invoke(technik, kopf);
                     return sicht with { Weg = "Bildschirm" };
                 }
             }
         }
+        if (!zeichnenErlaubt) return null;
         using var technik2 = AutoPointerFenster.Fotografiere(ansicht.TechnikTabelle);
         using var kopf2 = AutoPointerFenster.Fotografiere(ansicht.KopfTabelle);
         if (technik2 == null) return null;

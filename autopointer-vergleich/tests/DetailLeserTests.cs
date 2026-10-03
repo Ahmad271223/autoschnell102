@@ -5,6 +5,27 @@ namespace AutoPointerVergleich.Tests;
 
 public class DetailLeserTests
 {
+    [Fact]   // Befund 03.10.2026: BYD Dolphin (mobile.de, Neuwagen) — AutoPointer zeigt weder EZ noch km
+    public void Neuwagen_ohne_Erstzulassung_und_Kilometer()
+    {
+        var f = new Fahrzeug { MarkeModellText = "BYD DOLPHIN", Zustand = "Neu" };
+        DetailLeser.NeuwagenErgaenzen(f, new DateTime(2026, 10, 3));
+        Assert.Equal((2026, (int?)null, 0), (f.EzJahr!.Value, f.EzMonat, f.Kilometer!.Value));
+        Assert.Empty(DetailLeser.Fehlend(f));
+
+        var gebraucht = new Fahrzeug { MarkeModellText = "BYD DOLPHIN", Zustand = "Gebraucht" };
+        DetailLeser.NeuwagenErgaenzen(gebraucht, new DateTime(2026, 10, 3));
+        Assert.Contains("Erstzulassung", DetailLeser.Fehlend(gebraucht));
+
+        var mitEz = new Fahrzeug { MarkeModellText = "BYD DOLPHIN", Zustand = "Neuwagen", EzJahr = 2025, EzMonat = 12, Kilometer = 10 };
+        DetailLeser.NeuwagenErgaenzen(mitEz, new DateTime(2026, 10, 3));
+        Assert.Equal((2025, (int?)12, 10), (mitEz.EzJahr!.Value, mitEz.EzMonat, mitEz.Kilometer!.Value));
+    }
+
+    [Fact]
+    public void AutoPointer_zeichnen_lassen_ist_standardmaessig_aus() =>
+        Assert.False(new Einstellungen().AutoPointerZeichnenLassen);
+
     public DetailLeserTests() => Protokoll.DateiAktiv = false;
 
     [Fact]
