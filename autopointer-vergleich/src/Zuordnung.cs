@@ -22,6 +22,15 @@ internal static class Zuordner
     public static Zuordnung Zuordnen(Fahrzeug f, Katalog k)
     {
         var teile = k.TeileMarkeModell(f.MarkeModellText);
+        // Befund 03.10.2026: Kleinanzeigen zeigt manchmal nur "Andere" (ohne Marke) — dann Marke und Modell
+        // aus der Ueberschrift ("Ford Mondeo Turnier 2.0 TDCi Diesel, ..." -> Ford Mondeo).
+        bool ausTitel = false;
+        if ((teile == null || Katalog.IstPlatzhalter(teile.Value.Marke)) && !string.IsNullOrWhiteSpace(f.Titel)
+            && k.TeileMarkeModell(f.Titel.Trim()) is { } ausT && !Katalog.IstPlatzhalter(ausT.Marke))
+        {
+            teile = ausT;
+            ausTitel = true;
+        }
         if (teile == null) return new Zuordnung { MarkeText = f.MarkeModellText };
         var (marke, modell) = teile.Value;
         var mm = k.MobileMarkeFinden(marke);
@@ -41,10 +50,14 @@ internal static class Zuordner
         // nur ein Lesefehler wird durch den Katalognamen ersetzt. Befund 03.10.2026: Kleinanzeigen
         // fuehrt viele Autos als "weitere VW"; das Modell kommt dann aus dem Titel ("VW Beetle Cabrio"
         // -> Beetle), sonst lehnt der Server beide Portale ab und es oeffnet sich nichts.
+        // "VW VW-Busse" (Kategorie) + Ueberschrift "T5 Bulli multivan" -> T5 Multivan: was nicht aus dem Feld
+        // kam, schickt das Programm mit dem Katalognamen, den der Server sicher kennt.
+        bool ersetzt = ausTitel || Katalog.IstPlatzhalter(modell)
+                       || z.MobileModell?.AusTitel == true || z.AutoScoutModell?.AusTitel == true;
         f.MarkeText = marke;
         f.ModellText = z.MobileModell?.Unscharf == true ? z.MobileModell.Name
                      : z.AutoScoutModell?.Unscharf == true ? z.AutoScoutModell.Name
-                     : Katalog.IstPlatzhalter(modell) ? z.MobileModell?.Name ?? z.AutoScoutModell?.Name ?? modell
+                     : ersetzt ? z.MobileModell?.Name ?? z.AutoScoutModell?.Name ?? modell
                      : modell;
         return z;
     }

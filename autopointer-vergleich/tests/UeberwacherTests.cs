@@ -258,6 +258,7 @@ public class UeberwacherTests
         {
             var f = Bentley();
             f.MarkeModellText = "Quatschmarke X1";
+            f.Titel = "Quatschmarke X1 Sport";        // seit 03.10.: unbekannte Marke -> erst die Ueberschrift fragen
             return f;
         }
         await Anklicken(Unbekannt, 9);

@@ -57,8 +57,11 @@ dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und 
 * Kann ein Auto nicht sicher gelesen werden (Marke/Modell, EZ oder km fehlen), öffnet sich **nichts**;
   unten rechts erscheint „Fahrzeug konnte nicht eindeutig erkannt werden“.
 * Kennt ein Portal das Modell nicht, öffnet dieses Portal nicht (sonst gäbe es eine Suche „nur Bentley“).
-* Steht in AutoPointer nur ein Platzhalter („VW Weitere VW“, „Andere“, „Sonstige“ – oft bei Kleinanzeigen),
-  kommt das Modell aus dem Titel („VW Beetle Cabrio 1.2 TSI“ → Beetle; nur Treffer im Modell-Katalog).
+* Steht in AutoPointer nur ein Platzhalter („VW Weitere VW“, „Andere“, „Sonstige“) oder eine Kleinanzeigen-
+  Kategorie („VW VW-Busse“), kommt das Modell aus der Überschrift — die Wörter dürfen verstreut stehen („T5 Bulli
+  multivan“ → T5 Multivan, „VW Beetle Cabrio 1.2 TSI“ → Beetle; nur Treffer im Modell-Katalog, nie Sammelnamen wie
+  „T5 andere“). Fehlt sogar die Marke („Andere“), kommen Marke und Modell aus der Überschrift („Ford Mondeo
+  Turnier …“ → Ford Mondeo).
 * Das Programm filtert **nie nach Navigationssystem** (Wunsch Ahmad 03.10.) – in der App bleibt die
   Einstellung „Navi mitvergleichen“ wie sie ist.
 

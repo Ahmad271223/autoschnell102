@@ -25,7 +25,8 @@ internal sealed class AutoScoutMarke
     public List<AutoScoutModell> Modelle { get; } = new();
 }
 
-internal sealed record ModellTreffer(string Id, string Name, bool Unscharf);
+/// <param name="AusTitel">Modell kam aus der Ueberschrift (Feld war Platzhalter oder Kategorie).</param>
+internal sealed record ModellTreffer(string Id, string Name, bool Unscharf, bool AusTitel = false);
 
 /// <summary>Marken-/Modellkataloge von mobile.de und AutoScout24 mit derselben
 /// Zuordnungslogik wie im Backend (mobile_service._resolve_make/_resolve_model,
@@ -204,23 +205,22 @@ internal sealed class Katalog
     /// Modelle ("Andere") aus dem Titel + unscharfer Abgleich.</summary>
     public ModellTreffer? MobileModellFinden(MobileMarke marke, string modell, string? titel)
     {
-        if (Generisch.IsMatch(modell) || modell.Trim().Length == 0)
+        if (!IstPlatzhalter(modell))
         {
-            string? ausTitel = AusTitel(marke.ModelleRoh, titel);
-            if (ausTitel == null) return null;
-            modell = ausTitel;
+            string? id = MobileAufloesen(marke, modell);
+            if (id != null) return new ModellTreffer(id, ModellName(marke, id) ?? modell, false);
+            var unscharf = Unscharf(Norm(modell), marke.Modelle.Select(m => m.Norm));
+            if (unscharf != null)
+            {
+                string uid = marke.ModellIndex[unscharf];
+                return new ModellTreffer(uid, ModellName(marke, uid) ?? modell, true);
+            }
         }
-        string? id = MobileAufloesen(marke, modell);
-        if (id != null) return new ModellTreffer(id, ModellName(marke, id) ?? modell, false);
-
-        string ziel = Norm(modell);
-        var unscharf = Unscharf(ziel, marke.Modelle.Select(m => m.Norm));
-        if (unscharf != null)
-        {
-            string uid = marke.ModellIndex[unscharf];
-            return new ModellTreffer(uid, ModellName(marke, uid) ?? modell, true);
-        }
-        return null;
+        // Platzhalter ("Andere", "Weitere VW") oder Kleinanzeigen-Kategorie ("VW-Busse"): Modell aus der
+        // Ueberschrift ("T5 Bulli multivan" -> T5 Multivan). Befund 03.10.2026.
+        string? ausTitel = AusTitel(marke.ModelleRoh, titel);
+        string? tid = ausTitel == null ? null : MobileAufloesen(marke, ausTitel);
+        return tid == null ? null : new ModellTreffer(tid, ModellName(marke, tid) ?? ausTitel!, false, AusTitel: true);
     }
 
     private static string? ModellName(MobileMarke marke, string id) =>
@@ -257,17 +257,33 @@ internal sealed class Katalog
         return null;
     }
 
-    private static string? AusTitel(IEnumerable<string> modelle, string? titel)
+    private static readonly Regex Wort = new(@"[\p{L}\p{N}]+", RegexOptions.Compiled);
+    private static readonly HashSet<string> Sammelwoerter = new(StringComparer.Ordinal)
+        { "andere", "alle", "weitere", "sonstige", "other", "others", "misc" };
+
+    private static List<string> Woerter(string text) =>
+        Wort.Matches(text.ToLowerInvariant()).Select(m => m.Value).ToList();
+
+    /// <summary>Katalogmodell, dessen Woerter ALLE in der Ueberschrift stehen — auch verstreut
+    /// ("T5 Bulli multivan" -> "T5 Multivan"). Mehr passende Woerter gewinnen, dann der laengere Name.
+    /// Sammelnamen ("T5 andere", "T5 (Alle)") nie.</summary>
+    internal static string? AusTitel(IEnumerable<string> modelle, string? titel)
     {
         if (string.IsNullOrWhiteSpace(titel)) return null;
-        string t = titel.ToLowerInvariant();
-        foreach (var name in modelle.OrderByDescending(n => n.Length))
+        var imTitel = new HashSet<string>(Woerter(titel), StringComparer.Ordinal);
+        string? bester = null;
+        int besteWoerter = 0;
+        foreach (var name in modelle)
         {
-            string n = name.ToLowerInvariant().Trim();
-            if (n.Length == 0) continue;
-            if (Regex.IsMatch(t, @"(?<![\w])" + Regex.Escape(n) + @"(?![\w])")) return name;
+            var w = Woerter(name);
+            if (w.Count == 0 || w.Any(Sammelwoerter.Contains) || !w.All(imTitel.Contains)) continue;
+            if (w.Count > besteWoerter || (w.Count == besteWoerter && name.Length > (bester?.Length ?? 0)))
+            {
+                bester = name;
+                besteWoerter = w.Count;
+            }
         }
-        return null;
+        return bester;
     }
 
     /// <summary>Genau ein Katalogname mit kleinem Abstand (Lesefehler), sonst null.</summary>
@@ -302,21 +318,21 @@ internal sealed class Katalog
     /// als ein falsches) + Titel/unscharf wie bei mobile.de.</summary>
     public ModellTreffer? AutoScoutModellFinden(AutoScoutMarke marke, string modell, string? titel)
     {
-        if (Generisch.IsMatch(modell) || modell.Trim().Length == 0)
+        if (!IstPlatzhalter(modell))
         {
-            string? ausTitel = AusTitel(marke.Modelle.Select(m => m.ModelName).Where(n => !Generisch.IsMatch(n)), titel);
-            if (ausTitel == null) return null;
-            modell = ausTitel;
+            var m = AutoScoutAufloesen(marke, modell);
+            if (m != null) return new ModellTreffer(m.ModelId.ToString(CultureInfo.InvariantCulture), m.ModelName, false);
+            var unscharf = Unscharf(Norm(modell), marke.Modelle.Select(x => Norm(x.ModelName)));
+            if (unscharf != null)
+            {
+                var u = marke.Modelle.First(x => Norm(x.ModelName) == unscharf);
+                return new ModellTreffer(u.ModelId.ToString(CultureInfo.InvariantCulture), u.ModelName, true);
+            }
         }
-        var m = AutoScoutAufloesen(marke, modell);
-        if (m != null) return new ModellTreffer(m.ModelId.ToString(CultureInfo.InvariantCulture), m.ModelName, false);
-        var unscharf = Unscharf(Norm(modell), marke.Modelle.Select(x => Norm(x.ModelName)));
-        if (unscharf != null)
-        {
-            var u = marke.Modelle.First(x => Norm(x.ModelName) == unscharf);
-            return new ModellTreffer(u.ModelId.ToString(CultureInfo.InvariantCulture), u.ModelName, true);
-        }
-        return null;
+        string? ausTitel = AusTitel(marke.Modelle.Select(x => x.ModelName).Where(n => !Generisch.IsMatch(n)), titel);
+        var t = ausTitel == null ? null : AutoScoutAufloesen(marke, ausTitel);
+        return t == null ? null
+            : new ModellTreffer(t.ModelId.ToString(CultureInfo.InvariantCulture), t.ModelName, false, AusTitel: true);
     }
 
     private static AutoScoutModell? AutoScoutAufloesen(AutoScoutMarke marke, string modell)

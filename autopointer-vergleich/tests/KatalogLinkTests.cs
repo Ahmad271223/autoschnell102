@@ -105,6 +105,9 @@ public class ZuordnerTests
     [InlineData("VW weitere VW", "VW Beetle Cabrio 1.2 TSI", "Beetle")]
     [InlineData("VW Andere", "VW Beetle Cabrio 1.2 TSI", "Beetle")]
     [InlineData("VW weitere VW", "Schoenes Cabrio", "weitere VW")]   // nichts im Titel: so lassen, Server sagt warum
+    // Befund 03.10.2026: Kleinanzeigen-Kategorie statt Modell, Modellwoerter verstreut in der Ueberschrift
+    [InlineData("VW VW-Busse", "T5 Bulli multivan", "T5 Multivan")]
+    [InlineData("VW VW-Busse", "Suche einen 7 sitzer", "VW-Busse")]   // nichts Brauchbares: Server sagt warum
     public void Platzhalter_Modell_kommt_aus_dem_Titel(string markeModell, string titel, string erwartet)
     {
         var f = Passat();
@@ -114,11 +117,41 @@ public class ZuordnerTests
         Assert.Equal(("VW", erwartet), (f.MarkeText, f.ModellText));
     }
 
+    [Theory]   // Befund 03.10.2026: AutoPointer zeigt nur "Andere" — Marke UND Modell aus der Ueberschrift
+    [InlineData("Andere", "Ford Mondeo Turnier 2.0 TDCi Diesel, ...", "Ford", "Mondeo")]
+    [InlineData("Andere", "Ford Mondeo Turnier 2.0 TDCi Diesel, …", "Ford", "Mondeo")]
+    [InlineData("Sonstige", "BMW 320d Touring", "BMW", "320")]
+    public void Ohne_Marke_kommt_alles_aus_dem_Titel(string feld, string titel, string marke, string modell)
+    {
+        var f = Passat();
+        f.MarkeModellText = feld;
+        f.Titel = titel;
+        var z = Zuordner.Zuordnen(f, Kat);
+        Assert.True(z.MarkeErkannt);
+        Assert.Equal(marke, f.MarkeText);
+        Assert.StartsWith(modell, f.ModellText);
+    }
+
+    [Fact]
+    public void Titelabgleich_nimmt_nie_Sammelnamen_und_bevorzugt_mehr_Woerter()
+    {
+        Assert.Equal("T5 Multivan", Katalog.AusTitel(new[] { "T5 (Alle)", "T5 andere", "Multivan", "T5 Multivan" }, "VW T5 Bulli Multivan"));
+        Assert.Null(Katalog.AusTitel(new[] { "T5 (Alle)", "T5 andere" }, "T5 andere Ausstattung alle"));
+        Assert.Equal("Beetle", Katalog.AusTitel(new[] { "Beetle", "New Beetle" }, "VW Beetle Cabrio 1.2 TSI"));
+        Assert.Equal("New Beetle", Katalog.AusTitel(new[] { "Beetle", "New Beetle" }, "VW New Beetle 1.6"));
+    }
+
     [Fact]
     public void Unbekannte_Marke_wird_erkannt()
     {
         var f = Bentley();
         f.MarkeModellText = "Quatschmarke X1";
+        f.Titel = "Quatschmarke X1 Sport";
         Assert.False(Zuordner.Zuordnen(f, Kat).MarkeErkannt);
+        // steht die Marke in der Ueberschrift, kommt sie von dort (Befund 03.10.2026: Feld "Andere")
+        f = Bentley();
+        f.MarkeModellText = "Quatschmarke X1";
+        Assert.True(Zuordner.Zuordnen(f, Kat).MarkeErkannt);
+        Assert.Equal("Bentley", f.MarkeText);
     }
 }
