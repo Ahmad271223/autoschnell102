@@ -165,7 +165,8 @@ def test_resend_unklar_kein_smtp_rueckfall(monkeypatch):
     monkeypatch.setattr(ES, "_send_resend", unklar)
     ok, beleg = asyncio.run(ES.send_email_mit_beleg("v@example.test", "Betreff", "Text",
                                                     idempotency_key="k-106"))
-    assert ok is False and beleg == "" and gesendet == [], "unklar: NICHT ueber SMTP nachsenden"
+    # Pruefung 04.10.2026 (Nr. 22): der Beleg sagt jetzt "unklar" (nicht "fehlgeschlagen")
+    assert ok is False and beleg == ES.BELEG_UNKLAR and gesendet == [], "unklar: NICHT ueber SMTP nachsenden"
 
     async def abgelehnt(**k):
         return ""

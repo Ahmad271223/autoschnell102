@@ -226,7 +226,9 @@ def test_59_nur_sichere_fehler_geben_den_eintrag_frei():
     assert E._sicher_nicht_zugestellt(
         smtplib.SMTPServerDisconnected("weg"), laeuft) is False
     assert E._sicher_nicht_zugestellt(RuntimeError("irgendwas"), laeuft) is False
-    assert E._sicher_nicht_zugestellt(TimeoutError(), laeuft) is False or True
+    # Pruefung 04.10.2026 (Nr. 21): vorher stand hier eine Bedingung, die immer wahr war.
+    assert E._sicher_nicht_zugestellt(TimeoutError(), laeuft) is False
+    assert E._sicher_nicht_zugestellt(OSError("reset"), laeuft) is False
 
 
 def test_59b_der_versandweg_nutzt_die_pruefung():
@@ -239,7 +241,8 @@ def test_59b_der_versandweg_nutzt_die_pruefung():
     assert "UNKLAR" in stelle, "der unklare Fall muss im Protokoll stehen"
     # Und der Merker wird wirklich gesetzt, bevor gesendet wird:
     sync = inspect.getsource(E._send_sync)
-    assert sync.count('fortschritt["uebergabe_laeuft"] = True') == 2
+    # Pruefung 04.10.2026 (Nr. 21): beide Wege (465/587) teilen sich jetzt EINEN Ablauf
+    assert sync.count('fortschritt["uebergabe_laeuft"] = True') == 1
     for zweig in sync.split('fortschritt["uebergabe_laeuft"] = True')[1:]:
         assert zweig.lstrip().startswith("s.send_message(msg)")
 

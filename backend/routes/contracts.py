@@ -435,6 +435,11 @@ class SendIn(BaseModel):
     # aktuellen Fassung ab, gibt es keinen Vermerk (409) — vorher blieb eine
     # im 45-s-Fenster veraltete geteilte Datei unerkannt.
     version: Optional[int] = Field(default=None, ge=1)
+    # Pruefung 04.10.2026 (Nr. 22): ausdruecklich bestaetigter zweiter Versand.
+    # Ging DIESE Fassung schon an DIESEN Empfaenger (oder blieb ein Versuch
+    # ohne Ergebnis), antwortet der Server ohne diese Bestaetigung mit 409 —
+    # auch nach dem Neuladen der Seite (vorher merkte sich das nur der Dialog).
+    erneut: bool = False
 
     @field_validator("methode")
     @classmethod
@@ -2318,6 +2323,41 @@ async def get_contract_version_pdf(contract_id: str, version: int,
     )
 
 
+def _zeit_de(iso: Optional[str]) -> str:
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.fromisoformat(str(iso)).astimezone(
+            ZoneInfo("Europe/Berlin")).strftime("%d.%m.%Y um %H:%M Uhr")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _frueherer_mailversand(eintraege: list, empfaenger: str, version: int) -> Optional[dict]:
+    """Pruefung 04.10.2026 (Nr. 22): der juengste ABGESCHLOSSENE E-Mail-Versand
+    dieser Fassung an diesen Empfaenger. Altvertraege ohne Fassungsangabe im
+    Eintrag zaehlen nicht (kein falscher Alarm)."""
+    ziel = (empfaenger or "").strip().lower()
+    for e in reversed(eintraege or []):
+        if e.get("channel") != "email" or e.get("zustellung") != "versendet":
+            continue
+        if (e.get("recipient") or "").strip().lower() != ziel:
+            continue
+        if e.get("version") is None or int(e.get("version") or 0) != int(version):
+            continue
+        return e
+    return None
+
+
+VERSAND_UNKLAR_TEXT = (
+    "Der Mail-Dienst hat nicht eindeutig geantwortet — die E-Mail ist vielleicht schon beim "
+    "Empfänger angekommen. Ein erneuter Klick auf „Senden“ (gleiche Adresse, gleicher Text) ist "
+    "sicher: AutoSchnell verschickt sie dann nicht doppelt. Klappt es wieder nicht, bitte beim "
+    "Verkäufer nachfragen oder den Vertrag per WhatsApp schicken.")
+# Resend vergisst einen Idempotency-Key nach 24 Stunden — danach ist die
+# Wiederaufnahme eines unklaren Versands nicht mehr vor Doppelversand geschuetzt.
+UNKLAR_WIEDERAUFNAHME_MAX_S = 23 * 3600
+
+
 def _auto_schluessel(contract_id: str, c: dict, body) -> str:
     """Inhaltsschluessel fuer Aufrufer ohne eigenen Schluessel. Runde 10 nahm
     die Minute heraus (Doppelklick ueber die Minutengrenze); die Nachpruefung
@@ -2587,6 +2627,22 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                 return {"channel": archiv.get("channel"), "status": "ok",
                         "sent_at": archiv.get("sent_at"), "zustellung": "archiv",
                         "bereits_gesendet": True}
+            # Pruefung 04.10.2026 (Nr. 22): Der Dialog erzeugt je Oeffnen einen
+            # neuen Schluessel. Nach dem Neuladen der Seite ging derselbe
+            # Vertrag deshalb ohne jede Rueckfrage ein zweites Mal raus (die
+            # Rueckfrage "schon versendet" kannte nur der Dialog). Jetzt fragt
+            # der Server — ein bewusster zweiter Versand traegt erneut=true.
+            if body.channel == "email" and not body.erneut:
+                frueher = _frueherer_mailversand(eintraege, body.recipient,
+                                                 int(c.get("version") or 1))
+                if frueher:
+                    wann = _zeit_de(frueher.get("sent_at"))
+                    raise HTTPException(409, {
+                        "code": "bereits_versendet",
+                        "msg": (f"Diese Fassung des Vertrags wurde{(' am ' + wann) if wann else ''} "
+                                f"schon an {body.recipient} geschickt. Wirklich noch einmal senden?"),
+                        "sent_at": frueher.get("sent_at"),
+                    })
             # Nachpruefung Runde 10: Die Oberflaeche schickt je Klick einen
             # NEUEN Schluessel. Haengt zu demselben Kanal und Empfaenger noch
             # ein Versand ohne Ergebnis (Prozess starb, Timeout), haette der
@@ -2610,6 +2666,18 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                 # Beleg stehen (zustellung "abgeloest"), dieser Versand wird
                 # normal reserviert. Vor Doppelversand schuetzt weiter die
                 # Sperre fuer FRISCH laufende Versande (unten).
+                if body.channel == "email" and not body.erneut:
+                    # Pruefung 04.10.2026 (Nr. 22): der fruehere Versuch kam
+                    # vielleicht an — mit geaendertem Text nicht stillschweigend
+                    # ein zweites Mal senden.
+                    wann = _zeit_de(haengend.get("sent_at"))
+                    raise HTTPException(409, {
+                        "code": "frueherer_versand_unklar",
+                        "msg": (f"Ein früherer Versand an {body.recipient}"
+                                f"{(' vom ' + wann) if wann else ''} hatte kein eindeutiges "
+                                "Ergebnis — die E-Mail ist vielleicht schon angekommen. Mit dem "
+                                "geänderten Text trotzdem noch einmal senden?"),
+                    })
                 await _haengenden_versand_abloesen(contract_id, bereich, haengend)
                 frueherer_versand_abgeloest = True
             elif haengend:
@@ -2621,6 +2689,24 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
             raise HTTPException(409, "Dieser Versand-Schlüssel gehört zu einem anderen Versand "
                                      "(Empfänger oder Text geändert) — bitte die Seite neu laden "
                                      "und erneut senden.")
+        if (vorhanden and body.channel == "email" and not body.erneut
+                and vorhanden.get("zustellung") in ("laeuft", "unklar")
+                and _zustellung_haengt(vorhanden)):
+            try:
+                _alter = (datetime.now(timezone.utc) - datetime.fromisoformat(
+                    str(vorhanden.get("sent_at")))).total_seconds()
+            except (TypeError, ValueError):
+                _alter = 0
+            if _alter > UNKLAR_WIEDERAUFNAHME_MAX_S:
+                # Pruefung 04.10.2026 (Nr. 22): Resend kennt den Schluessel nach
+                # 24 h nicht mehr — dann nur noch bewusst senden.
+                raise HTTPException(409, {
+                    "code": "frueherer_versand_unklar",
+                    "msg": (f"Der Versand an {body.recipient} vom "
+                            f"{_zeit_de(vorhanden.get('sent_at')) or 'Vortag'} hatte kein "
+                            "eindeutiges Ergebnis — die E-Mail ist vielleicht schon angekommen. "
+                            "Trotzdem noch einmal senden?"),
+                })
         if (vorhanden and vorhanden.get("zustellung") in ("laeuft", "unklar")
                 and _zustellung_haengt(vorhanden)):
             # Zeitpunkt des ersten Versuchs behalten: die Kopie an den Sucher
@@ -2727,6 +2813,25 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                      "zustellung": {"$exists": False}})
             except Exception:  # noqa: BLE001
                 log.exception("Versand-Schluessel %s nach Fehlschlag nicht entfernt", contract_id)
+    async def _reservierung_unklar():
+        # Pruefung 04.10.2026 (Nr. 22): Der Anbieter hat die Mail vielleicht
+        # angenommen. Vorher wurde der Eintrag hier ENTFERNT — der naechste
+        # Versuch (nach dem Neuladen mit neuem Schluessel) stellte dann ein
+        # zweites Mal zu. Jetzt bleibt er als "unklar" stehen: der naechste
+        # Klick mit gleichem Inhalt uebernimmt ihn unter DIESEM Schluessel,
+        # und Resend liefert die erste Abgabe zurueck statt neu zuzustellen.
+        if not reserviert:
+            return
+        if wiederaufnahme:
+            await _reservierung_zurueck()          # setzt den eigenen Claim auf "unklar"
+            return
+        await db.generated_pdfs.update_one(
+            {"id": contract_id, **bereich,
+             "send_status": {"$elemMatch": {"idempotency_key": body.idempotency_key,
+                                            "zustellung": "laeuft"}}},
+            {"$set": {"send_status.$.zustellung": "unklar",
+                      "send_status.$.unklar_am": now_iso()}})
+
     # Runde 17 (Nr. 370): Zwischen dem Lesen oben und dem Versand kann die
     # Loeschung (Frist oder manuell) begonnen haben — der Grabstein nimmt
     # den Vertrag aus dem Bereich. Unmittelbar vor dem Versand noch einmal
@@ -2874,6 +2979,9 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                 # den Ausweg (Link-Weg) genannt, kein "spaeter erneut".
                 await _reservierung_zurueck()
                 raise HTTPException(413, _anhang_zu_gross_hinweis())
+            if not ok and beleg == email_service.BELEG_UNKLAR:
+                await _reservierung_unklar()
+                raise HTTPException(502, {"code": "versand_unklar", "msg": VERSAND_UNKLAR_TEXT})
             if not ok:
                 await _reservierung_zurueck()
                 raise HTTPException(502, "E-Mail-Versand fehlgeschlagen — "
@@ -2962,6 +3070,12 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
     }
     if body.methode:
         send_entry["methode"] = body.methode
+    if out.get("kopie"):
+        # Pruefung 04.10.2026 (Nr. 14): ob die Belegkopie an den Sucher ankam,
+        # stand nur in der Antwort — jetzt auch im Versandverlauf.
+        send_entry["kopie"] = out["kopie"]
+    if body.erneut:
+        send_entry["erneut"] = True
     if out.get("download_link"):
         send_entry["download_link"] = out["download_link"]
         send_entry["link_gueltig_bis"] = out.get("link_gueltig_bis")
@@ -2979,21 +3093,33 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
         if wiederaufnahme:
             send_entry["wiederaufgenommen"] = True
             send_entry["wiederaufnahme_am"] = claim_am
-        res = await db.generated_pdfs.update_one(
-            {"id": contract_id, **bereich,
-             "send_status": {"$elemMatch": {
-                 "idempotency_key": body.idempotency_key,
-                 **({"wiederaufnahme_am": claim_am} if wiederaufnahme else {})}}},
-            _abschluss(send_entry, neuer_status, fassung_veraltet,
-                       wiederaufnahme=True),
-        )
-    else:
-        res = await db.generated_pdfs.update_one(
-            {"id": contract_id, **bereich},
-            _abschluss(send_entry, neuer_status, fassung_veraltet,
-                       wiederaufnahme=False),
-        )
-    if reserviert and res.matched_count:
+    # Pruefung 04.10.2026 (Nr. 13): Scheitert der Vermerk an der Datenbank,
+    # ist der Versand trotzdem erfolgt — vorher kam dann ein 500 ("Versand
+    # fehlgeschlagen") und der Nutzer schickte nach. Jetzt gilt es wie ein
+    # nicht gespeicherter Vermerk; der reservierte Eintrag bleibt "laeuft",
+    # ein spaeterer Klick nimmt ihn unter demselben Schluessel wieder auf.
+    try:
+        if reserviert:
+            res = await db.generated_pdfs.update_one(
+                {"id": contract_id, **bereich,
+                 "send_status": {"$elemMatch": {
+                     "idempotency_key": body.idempotency_key,
+                     **({"wiederaufnahme_am": claim_am} if wiederaufnahme else {})}}},
+                _abschluss(send_entry, neuer_status, fassung_veraltet,
+                           wiederaufnahme=True),
+            )
+        else:
+            res = await db.generated_pdfs.update_one(
+                {"id": contract_id, **bereich},
+                _abschluss(send_entry, neuer_status, fassung_veraltet,
+                           wiederaufnahme=False),
+            )
+        vermerkt = res.matched_count > 0
+    except Exception:  # noqa: BLE001
+        log.exception("Vertrag %s per %s versendet, Status-Vermerk scheiterte an der Datenbank",
+                      contract_id, body.channel)
+        vermerkt = False
+    if reserviert and vermerkt:
         # Runde 16: Archiv-Eintrag ERST nach dem Erfolg (vorher bei der
         # Reservierung — ein Fehlschlag blieb dauerhaft "bereits gesendet").
         try:
@@ -3006,7 +3132,7 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                 upsert=True)
         except Exception:  # noqa: BLE001 — Archiv ist Zusatz, der Versand ist erfolgt
             log.exception("Versand-Schluessel %s nicht archiviert", contract_id)
-    if res.matched_count == 0:
+    if not vermerkt:
         # Runde 17 (Nr. 372): Der Versand IST erfolgt, aber der Vertrag war
         # beim Vermerk nicht mehr im Bereich (Loeschung begonnen, Eintrag
         # durch $slice verdraengt). Vorher blieb das stumm — die Antwort

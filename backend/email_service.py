@@ -157,6 +157,17 @@ _RESEND_VORUEBERGEHEND = {429, 500, 502, 503, 504}
 # Befund 106 (16.09.2026): nach diesen Antworten ist UNKLAR, ob Resend die
 # Mail angenommen hat (429 = sicher abgelehnt, 5xx = vielleicht angenommen).
 _RESEND_UNKLAR = {500, 502, 503, 504}
+# Pruefung 04.10.2026 (Nr. 22, Zusatz): Resend antwortet 409, wenn derselbe
+# Idempotency-Key gerade noch bearbeitet wird ("concurrent_idempotent_requests"
+# — kurz warten, dann kommt die Antwort der ersten Abgabe) oder schon mit
+# ANDEREM Inhalt benutzt wurde ("invalid_idempotent_request"). Beides heisst:
+# unter diesem Schluessel ging womoeglich schon eine Mail raus. Vorher galt
+# 409 als "sicher abgelehnt" und der SMTP-Rueckfall haette nachgesendet.
+_RESEND_KONFLIKT = 409
+#: Rueckgabe-Beleg von send_email_mit_beleg, wenn der Ausgang offen ist (die
+#: Mail ist vielleicht angekommen). Der Aufrufer darf dann NICHT mit neuem
+#: Schluessel nachsenden.
+BELEG_UNKLAR = "unklar"
 
 
 class ResendUnklar(RuntimeError):
@@ -228,6 +239,13 @@ def _wartezeit(versuch: int, retry_after: Optional[str]) -> float:
     return random.uniform(fenster / 2, fenster)
 
 
+def _resend_fehlername(r) -> str:
+    try:
+        return str((r.json() or {}).get("name") or "")
+    except Exception:  # noqa: BLE001 — kein JSON
+        return ""
+
+
 async def _send_resend(*, to: str, subject: str, text: str, html: Optional[str],
                        anhang: Optional[bytes], anhang_name: str,
                        reply_to: Sequence[str], kopie: Sequence[str],
@@ -286,7 +304,10 @@ async def _send_resend(*, to: str, subject: str, text: str, html: Optional[str],
                 return str(r.json().get("id") or "angenommen")
             except ValueError:
                 return "angenommen"
-        if r.status_code in _RESEND_VORUEBERGEHEND and versuch < RESEND_VERSUCHE - 1:
+        gleichzeitig = r.status_code == _RESEND_KONFLIKT and _resend_fehlername(r) == \
+            "concurrent_idempotent_requests"
+        if (r.status_code in _RESEND_VORUEBERGEHEND or gleichzeitig) \
+                and versuch < RESEND_VERSUCHE - 1:
             warte = _wartezeit(versuch, r.headers.get("retry-after"))
             if gewartet + warte <= RESEND_WARTEN_MAX:
                 log.warning("email_service: Resend HTTP %s (Tempo-Limit/voruebergehend) — "
@@ -295,6 +316,10 @@ async def _send_resend(*, to: str, subject: str, text: str, html: Optional[str],
                 gewartet += warte
                 continue
         break
+    if r is not None and r.status_code == _RESEND_KONFLIKT:
+        log.error("email_service: Resend meldet Schluessel-Konflikt (HTTP 409, %s) — "
+                  "Ausgang unklar, kein SMTP-Rueckfall", _resend_fehlername(r) or "ohne Namen")
+        raise ResendUnklar("Resend HTTP 409 (Idempotency-Key schon benutzt)")
     if r is not None and r.status_code in _RESEND_UNKLAR:
         # Befund 106 (16.09.2026): nach 5xx ist unklar, ob die Mail angenommen
         # wurde — kein Rueckfall auf SMTP (doppelte Zustellung).
@@ -315,6 +340,15 @@ _SICHER_ABGELEHNT = (smtplib.SMTPRecipientsRefused, smtplib.SMTPSenderRefused,
                      smtplib.SMTPHeloError, smtplib.SMTPAuthenticationError,
                      smtplib.SMTPNotSupportedError, ssl.SSLError,
                      ConnectionRefusedError, TimeoutError, OSError)
+#: Pruefung 04.10.2026 (Nr. 21): Ablehnungen, die der Server NACH Beginn der
+#: Uebergabe ausdruecklich meldet (Absender/Empfaenger/Inhalt abgewiesen).
+#: Vorher galt hier dieselbe Liste wie oben — und weil smtplib.SMTPException
+#: von OSError erbt, war damit JEDE SMTP-Antwort "sicher abgelehnt", auch
+#: eine gescheiterte Verabschiedung (QUIT) NACH erfolgreicher Abgabe: die
+#: Mail war raus, der Schluessel wurde freigegeben, der naechste Versuch
+#: stellte ein zweites Mal zu.
+_ABGELEHNT_BEI_UEBERGABE = (smtplib.SMTPRecipientsRefused, smtplib.SMTPSenderRefused,
+                            smtplib.SMTPDataError)
 
 
 def _sicher_nicht_zugestellt(exc: BaseException, fortschritt: dict) -> bool:
@@ -330,10 +364,11 @@ def _sicher_nicht_zugestellt(exc: BaseException, fortschritt: dict) -> bool:
     Freigegeben wird jetzt nur noch, wenn die Uebergabe gar nicht begonnen
     hat (Verbindung/Anmeldung gescheitert) oder der Server ausdruecklich
     abgelehnt hat."""
+    if fortschritt.get("fertig"):
+        return False                    # abgegeben — was danach scheitert, aendert daran nichts
     if not fortschritt.get("uebergabe_laeuft"):
         return True
-    return isinstance(exc, _SICHER_ABGELEHNT) and not isinstance(
-        exc, smtplib.SMTPServerDisconnected)
+    return isinstance(exc, _ABGELEHNT_BEI_UEBERGABE)
 
 
 def _send_sync(*, to: str, subject: str, text: str, html: Optional[str],
@@ -361,17 +396,32 @@ def _send_sync(*, to: str, subject: str, text: str, html: Optional[str],
     fortschritt = fortschritt if fortschritt is not None else {}
     ctx = ssl.create_default_context()
     if SMTP_PORT == 465:
-        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=ctx, timeout=20) as s:
-            s.login(SMTP_USER, SMTP_PASS)
-            fortschritt["uebergabe_laeuft"] = True
-            s.send_message(msg)
+        s = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=ctx, timeout=20)
     else:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as s:
+        s = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20)
+    try:
+        if SMTP_PORT != 465:
             s.starttls(context=ctx)
-            s.login(SMTP_USER, SMTP_PASS)
-            fortschritt["uebergabe_laeuft"] = True
-            s.send_message(msg)
-    fortschritt["fertig"] = True
+        s.login(SMTP_USER, SMTP_PASS)
+        fortschritt["uebergabe_laeuft"] = True
+        s.send_message(msg)
+        fortschritt["fertig"] = True
+    finally:
+        _smtp_beenden(s)
+
+
+def _smtp_beenden(s) -> None:
+    """Pruefung 04.10.2026 (Nr. 21): Verabschiedung (QUIT) ohne Folgen — vorher
+    lief sie im `with` und warf nach einer schon abgegebenen Mail noch eine
+    SMTPResponseException, die als "sicher abgelehnt" galt."""
+    try:
+        s.quit()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        s.close()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # Pruefbericht 20.09.2026 (P-18): Groesse eines Anhangs, ab der NICHT gesendet
@@ -444,10 +494,18 @@ async def send_email_mit_beleg(to: str, subject: str, text: str,
                 beleg = await _send_resend(**argumente, idempotency_key=idempotency_key)
             except ResendUnklar as exc:
                 # Befund 106: Ausgang bei Resend unklar — NICHT ueber SMTP
-                # wiederholen; der Versandstatus zeigt "nicht gesendet".
+                # wiederholen. Pruefung 04.10.2026 (Nr. 22): als "unklar"
+                # melden, damit der Versand unter DEMSELBEN Schluessel
+                # wiederholt wird (Resend stellt dann nicht doppelt zu).
                 log.error("email_service: '%s' an %s — %s; nicht ueber SMTP wiederholt",
                           subject, to, exc)
-                return False, ""
+                return False, BELEG_UNKLAR
+            except Exception as exc:  # noqa: BLE001
+                if not _sicher_nicht_angekommen(exc):
+                    log.error("email_service: Resend-Abgabe an %s ist UNKLAR (%s) — kein "
+                              "SMTP-Rueckfall", to, exc.__class__.__name__)
+                    return False, BELEG_UNKLAR
+                raise
             if beleg:
                 log.info("email_service: '%s' an %s über Resend gesendet (%s)",
                          subject, to, beleg)
@@ -470,7 +528,7 @@ async def send_email_mit_beleg(to: str, subject: str, text: str,
             if stand == "unklar":
                 log.error("email_service: SMTP-Abgabe an %s unter %s ist unklar (frueherer "
                           "Versuch ohne Ergebnis) — NICHT erneut gesendet", to, idempotency_key)
-                return False, ""
+                return False, BELEG_UNKLAR
         fortschritt: dict = {}
         try:
             await asyncio.to_thread(
@@ -480,13 +538,14 @@ async def send_email_mit_beleg(to: str, subject: str, text: str,
             # Sonst bleibt der Eintrag stehen und gilt beim naechsten Mal
             # als "unklar" — dann wird NICHT automatisch erneut gesendet,
             # und der Nutzer sieht den Zustand im Versandstatus.
-            if idempotency_key and _sicher_nicht_zugestellt(exc, fortschritt):
-                await _smtp_idempotenz_freigeben(idempotency_key)
-            elif idempotency_key:
-                log.error("email_service: SMTP-Abgabe an %s ist UNKLAR (%s nach "
-                          "Uebergabe) — der Eintrag bleibt stehen, es wird nicht "
-                          "automatisch erneut gesendet", to, exc.__class__.__name__)
-            raise
+            if _sicher_nicht_zugestellt(exc, fortschritt):
+                if idempotency_key:
+                    await _smtp_idempotenz_freigeben(idempotency_key)
+                raise
+            log.error("email_service: SMTP-Abgabe an %s ist UNKLAR (%s nach "
+                      "Uebergabe) — der Eintrag bleibt stehen, es wird nicht "
+                      "automatisch erneut gesendet", to, exc.__class__.__name__)
+            return False, BELEG_UNKLAR
         if idempotency_key:
             await _smtp_idempotenz_abschliessen(idempotency_key)
         log.info("email_service: '%s' an %s über SMTP gesendet", subject, to)
@@ -494,6 +553,20 @@ async def send_email_mit_beleg(to: str, subject: str, text: str,
     except Exception as exc:  # noqa: BLE001
         log.error("email_service: Versand an %s fehlgeschlagen: %s", to, exc)
         return False, ""
+
+
+def _sicher_nicht_angekommen(exc: BaseException) -> bool:
+    """Pruefung 04.10.2026 (Nr. 22): Resend war gar nicht erreichbar (Verbindung
+    nicht aufgebaut) — dann kam sicher nichts an. Brach die Verbindung erst
+    NACH dem Absenden ab (Lese-Zeitlimit, abgerissene Antwort), ist der
+    Ausgang offen."""
+    try:
+        import httpx
+    except Exception:  # noqa: BLE001
+        return True
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
+        return True
+    return not isinstance(exc, (httpx.TimeoutException, httpx.TransportError))
 
 
 # Ein Eintrag "laeuft" ohne Ergebnis (Prozess mitten im Versand gestorben)

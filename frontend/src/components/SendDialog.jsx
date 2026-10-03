@@ -295,10 +295,16 @@ export default function SendDialog({ open, contract, onClose }) {
     }
   };
 
-  const send = async (channel) => {
-    if (channel === "email" && emailGesendet
-        && !window.confirm("Diese E-Mail wurde gerade schon versendet. Wirklich noch einmal senden?")) {
-      return;
+  // Pruefung 04.10.2026 (Nr. 22): `erneut` = der Nutzer hat einen zweiten
+  // Versand derselben Fassung an dieselbe Adresse ausdruecklich bestaetigt.
+  // Der Server fragt jetzt selbst nach (409 "bereits_versendet") — auch nach
+  // dem Neuladen der Seite, wo `emailGesendet` wieder false ist.
+  const send = async (channel, erneut = false) => {
+    if (channel === "email" && emailGesendet && !erneut) {
+      if (!window.confirm("Diese E-Mail wurde gerade schon versendet. Wirklich noch einmal senden?")) {
+        return;
+      }
+      erneut = true;
     }
     setBusy(true);
     let fenster = null;
@@ -311,7 +317,7 @@ export default function SendDialog({ open, contract, onClose }) {
       const body = channel === "whatsapp"
         ? { channel, recipient: phone, message: waMsg, idempotency_key, methode: "link" }
         : { channel, recipient: email, subject, message: emailMsg,
-            idempotency_key };
+            idempotency_key, ...(erneut ? { erneut: true } : {}) };
       const { data } = await api.post(`/contracts/${contract.id}/send`, body);
       keyRef.current = neuerSchluessel();
       vermerkPruefen(data);
@@ -322,8 +328,15 @@ export default function SendDialog({ open, contract, onClose }) {
           try { fenster.location.href = data.wa_url; fenster.focus(); geoeffnet = true; } catch { geoeffnet = false; }
         }
         if (!geoeffnet) {
-          const w2 = window.open(data.wa_url, "_blank", "noopener");
-          geoeffnet = !!w2;
+          // Pruefung 04.10.2026: ohne "noopener" — damit liefert window.open
+          // IMMER null, ein geoeffneter Tab galt als blockiert (lib/popup.js).
+          // Erst leer oeffnen, opener kappen, dann navigieren.
+          let w2 = null;
+          try { w2 = window.open("", "_blank"); } catch { w2 = null; }
+          if (w2) {
+            try { w2.opener = null; } catch { /* egal */ }
+            try { w2.location.href = data.wa_url; geoeffnet = true; } catch { geoeffnet = false; }
+          }
         }
         const bis = data.link_gueltig_bis
           ? new Date(data.link_gueltig_bis).toLocaleDateString("de-DE") : null;
@@ -397,6 +410,23 @@ export default function SendDialog({ open, contract, onClose }) {
       }
     } catch (err) {
       if (fenster && !fenster.closed) { try { fenster.close(); } catch { /* egal */ } }
+      const d = err?.response?.data?.detail;
+      const code = d && typeof d === "object" ? d.code : null;
+      if (channel === "email" && err?.response?.status === 409 && !erneut
+          && (code === "bereits_versendet" || code === "frueherer_versand_unklar")) {
+        // Nr. 22: der Server kennt den frueheren Versand — nur auf Wunsch nochmal.
+        if (window.confirm(d.msg || "Diese Fassung wurde schon an diese Adresse geschickt. "
+          + "Wirklich noch einmal senden?")) {
+          setBusy(false);
+          await send(channel, true);
+        }
+        return;
+      }
+      if (channel === "email" && code === "versand_unklar") {
+        // Nr. 22: nicht "fehlgeschlagen" — die Mail ist vielleicht angekommen.
+        toast.warning(d.msg, { duration: 30000 });
+        return;
+      }
       toast.error(errMsg(err, "Versand fehlgeschlagen"));
     } finally {
       setBusy(false);
