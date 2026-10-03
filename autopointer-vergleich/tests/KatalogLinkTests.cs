@@ -101,6 +101,19 @@ public class ZuordnerTests
         Assert.Equal("Bentayga", f.ModellText);
     }
 
+    [Theory]   // Befund 03.10.2026 (Kleinanzeigen, AutoPointer zeigt "VW weitere VW")
+    [InlineData("VW weitere VW", "VW Beetle Cabrio 1.2 TSI", "Beetle")]
+    [InlineData("VW Andere", "VW Beetle Cabrio 1.2 TSI", "Beetle")]
+    [InlineData("VW weitere VW", "Schoenes Cabrio", "weitere VW")]   // nichts im Titel: so lassen, Server sagt warum
+    public void Platzhalter_Modell_kommt_aus_dem_Titel(string markeModell, string titel, string erwartet)
+    {
+        var f = Passat();
+        f.MarkeModellText = markeModell;
+        f.Titel = titel;
+        Zuordner.Zuordnen(f, Kat);
+        Assert.Equal(("VW", erwartet), (f.MarkeText, f.ModellText));
+    }
+
     [Fact]
     public void Unbekannte_Marke_wird_erkannt()
     {

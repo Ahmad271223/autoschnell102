@@ -38,10 +38,13 @@ internal static class Zuordner
         f.Marke = mm?.Name ?? am?.MakeName ?? marke;
         f.Modell = z.MobileModell?.Name ?? z.AutoScoutModell?.Name ?? modell;
         // An den Server geht, was AutoPointer zeigt (wie die Inseratsdaten im App-Vergleich) —
-        // nur ein Lesefehler wird durch den Katalognamen ersetzt.
+        // nur ein Lesefehler wird durch den Katalognamen ersetzt. Befund 03.10.2026: Kleinanzeigen
+        // fuehrt viele Autos als "weitere VW"; das Modell kommt dann aus dem Titel ("VW Beetle Cabrio"
+        // -> Beetle), sonst lehnt der Server beide Portale ab und es oeffnet sich nichts.
         f.MarkeText = marke;
         f.ModellText = z.MobileModell?.Unscharf == true ? z.MobileModell.Name
                      : z.AutoScoutModell?.Unscharf == true ? z.AutoScoutModell.Name
+                     : Katalog.IstPlatzhalter(modell) ? z.MobileModell?.Name ?? z.AutoScoutModell?.Name ?? modell
                      : modell;
         return z;
     }

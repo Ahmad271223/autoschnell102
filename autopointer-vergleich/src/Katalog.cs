@@ -64,6 +64,9 @@ internal sealed class Katalog
     private static readonly Regex KlammerZusatz = new(@"\s*\([^)]*\)\s*", RegexOptions.Compiled);
     private static readonly Regex Generisch = new(@"^\s*(weitere|andere|sonstige|other|others|misc)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    /// <summary>Platzhalter statt Modell ("weitere VW" bei Kleinanzeigen, "Andere", "Sonstige").</summary>
+    public static bool IstPlatzhalter(string? modell) => string.IsNullOrWhiteSpace(modell) || Generisch.IsMatch(modell);
+
     public int AnzahlMobileMarken => _mobile.Count;
     public int AnzahlAutoScoutMarken => _autoscout.Count;
 
