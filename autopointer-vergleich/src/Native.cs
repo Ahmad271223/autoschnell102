@@ -43,6 +43,11 @@ internal static class Native
     [DllImport("user32.dll")] public static extern bool AllowSetForegroundWindow(int dwProcessId);
     public const int ASFW_ANY = -1;
     [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr nach, int x, int y, int cx, int cy, uint flags);
+    public static readonly IntPtr HWND_TOPMOST = new(-1);
+    public const uint SWP_NOSIZE = 0x1, SWP_NOMOVE = 0x2, SWP_NOACTIVATE = 0x10;
+    public const int WS_EX_TOPMOST = 0x8, WS_EX_TOOLWINDOW = 0x80, WS_EX_NOACTIVATE = 0x08000000;
+    public const int WM_MOUSEACTIVATE = 0x21, MA_NOACTIVATE = 3;
     [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
     [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
 

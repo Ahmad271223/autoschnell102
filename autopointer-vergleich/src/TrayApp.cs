@@ -30,6 +30,10 @@ internal sealed class TrayApp : ApplicationContext
     private ProtokollForm? _protokollForm;
     private DateTime _letzteSprechblase = DateTime.MinValue;
     private readonly SteuerFenster _fenster;
+    private readonly Leiste _leiste;
+    private IntPtr _leistenHandle;          // fuer den Lese-Thread (kein Zugriff auf das Steuerelement dort)
+    private readonly ToolStripMenuItem _leisteMenue;
+    private AutoPointerQuelle? _quelle;
     private readonly EventWaitHandle _zeigenSignal;
     private string? _letzteMeldung;
 
@@ -46,6 +50,8 @@ internal sealed class TrayApp : ApplicationContext
         var oeffnen = new ToolStripMenuItem("Fenster öffnen", null, (_, _) => FensterZeigen());
         oeffnen.Font = new Font(oeffnen.Font, FontStyle.Bold);
         menue.Items.Add(oeffnen);
+        _leisteMenue = new ToolStripMenuItem("Kleine Leiste anzeigen", null, (_, _) => LeisteUmschalten());
+        menue.Items.Add(_leisteMenue);
         menue.Items.Add(new ToolStripSeparator());
         _verbindungsZeile = new ToolStripMenuItem("Nicht verbunden") { Enabled = false };
         menue.Items.Add(_verbindungsZeile);
@@ -91,8 +97,23 @@ internal sealed class TrayApp : ApplicationContext
         _fenster.EinstellungenOeffnen += EinstellungenZeigen;
         _fenster.ProtokollOeffnen += ProtokollZeigen;
         _fenster.Beenden += Beenden;
-        if (minimiert) _fenster.WindowState = FormWindowState.Minimized;   // Start mit Windows: nur in der Taskleiste
-        _fenster.Show();
+        _leiste = new Leiste(ZustandFuersFenster, () => _quelle?.Hauptfenster ?? IntPtr.Zero);
+        _leiste.Aktivieren += () => AutomatikSetzen(true);
+        _leiste.Stoppen += () => AutomatikSetzen(false);
+        _leiste.JetztVergleichen += async () => { if (_ueberwacher != null) await _ueberwacher.JetztVergleichenAsync(); };
+        _leiste.VertragOeffnen += VertragOeffnen;
+        _leiste.FensterOeffnen += FensterZeigen;
+        _leiste.EckeGewechselt += ecke => { _einstellungen.LeisteEcke = ecke; Speichern(_einstellungen); };
+        _leiste.Ausblenden += () => { _einstellungen.LeisteAnzeigen = false; Speichern(_einstellungen); LeisteAnwenden(); FensterZeigen(); };
+        _leiste.Beenden += Beenden;
+        AutoPointerFenster.EigeneFenster = () => new[] { _leistenHandle };
+        LeisteAnwenden();
+        // Mit Leiste startet nur die Leiste (das grosse Fenster per Klick auf ☰); ohne Leiste das Fenster
+        if (!_einstellungen.LeisteAnzeigen)
+        {
+            if (minimiert) _fenster.WindowState = FormWindowState.Minimized;   // Start mit Windows: nur in der Taskleiste
+            _fenster.Show();
+        }
 
         Protokoll.Aufraeumen();
         Protokoll.Schreibe($"AutoPointer-Vergleich {Application.ProductVersion} gestartet{(probelauf ? " – PROBELAUF (öffnet keinen Browser)" : "")}."
@@ -135,6 +156,34 @@ internal sealed class TrayApp : ApplicationContext
     private void FensterZeigen()
     {
         if (!_fenster.IsDisposed) _fenster.Zeigen();
+    }
+
+    /// <summary>Wunsch Ahmad 03.10.2026: kleine Leiste immer im Vordergrund, unten links oder rechts.</summary>
+    private void LeisteAnwenden()
+    {
+        bool an = _einstellungen.LeisteAnzeigen;
+        _leisteMenue.Checked = an;
+        _fenster.NurAusblenden(an);
+        if (_leiste.IsDisposed) return;
+        if (an)
+        {
+            _leiste.EckeSetzen(_einstellungen.LeisteEcke);
+            if (!_leiste.Visible) _leiste.Show();
+            _leistenHandle = _leiste.Handle;
+        }
+        else
+        {
+            _leiste.Hide();
+            _leistenHandle = IntPtr.Zero;
+        }
+    }
+
+    private void LeisteUmschalten()
+    {
+        _einstellungen.LeisteAnzeigen = !_einstellungen.LeisteAnzeigen;
+        Speichern(_einstellungen);
+        LeisteAnwenden();
+        if (!_einstellungen.LeisteAnzeigen) FensterZeigen();
     }
 
     private FensterZustand ZustandFuersFenster()
@@ -272,6 +321,7 @@ internal sealed class TrayApp : ApplicationContext
             return;
         }
         var quelle = new AutoPointerQuelle(ocr, () => _einstellungen);
+        _quelle = quelle;
         _ueberwacher = new Ueberwacher(quelle, katalog, () => _einstellungen, new BrowserAusgabe(_ui),
                                        new DienstVermittler(() => _dienst)) { Probelauf = _probelauf };
         _ueberwacher.StatusGeaendert += s => _ui.Post(_ => StatusAnzeigen(s), null);
@@ -361,6 +411,7 @@ internal sealed class TrayApp : ApplicationContext
             if (!warAn && _einstellungen.AutomatikAktiv) _ueberwacher?.Neustart();
             HotkeyAnwenden();
             AutomatikAnzeigen();
+            LeisteAnwenden();
             Protokoll.Schreibe("Einstellungen gespeichert.");
         }
         finally { _einstellungenForm = null; }
@@ -395,6 +446,8 @@ internal sealed class TrayApp : ApplicationContext
     {
         Protokoll.Schreibe("Beendet.");
         _fenster.EndgueltigSchliessen();
+        _leistenHandle = IntPtr.Zero;
+        _leiste.EndgueltigSchliessen();
         _ende.Cancel();
         _hotkey.Abmelden(HotkeyId);
         _hotkey.DestroyHandle();

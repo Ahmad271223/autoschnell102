@@ -21,6 +21,9 @@ internal sealed class SteuerFenster : Form
 
     /// <summary>true nur bei "Programm beenden" — sonst legt das X das Fenster in die Taskleiste.</summary>
     private bool _wirklichSchliessen;
+    /// <summary>Mit Leiste: X blendet das Fenster ganz aus (die Leiste bleibt sichtbar).</summary>
+    private bool _nurAusblenden;
+    private readonly Label _hinweisX;
 
     public event Action? Aktivieren, Stoppen, JetztVergleichen, LetztenOeffnen, VertragOeffnen,
         Verbinden, Trennen, EinstellungenOeffnen, ProtokollOeffnen, Beenden;
@@ -104,13 +107,13 @@ internal sealed class SteuerFenster : Form
         unten.Controls.Add(_beenden);
         stapel.Controls.Add(unten);
 
-        stapel.Controls.Add(new Label
+        _hinweisX = new Label
         {
-            Text = "Fenster schließen (X) = nur verkleinern, das Programm läuft unten in der Taskleiste weiter. "
-                 + "Ganz ausschalten: „Beenden“.",
             AutoSize = true, MaximumSize = new Size(Breite, 0), ForeColor = SystemColors.GrayText,
             Font = new Font("Segoe UI", 8.5f), Margin = new Padding(0, 10, 0, 0),
-        });
+        };
+        NurAusblenden(false);
+        stapel.Controls.Add(_hinweisX);
         Controls.Add(stapel);
 
         _aktivieren.Click += (_, _) => { Aktivieren?.Invoke(); Aktualisieren(); };
@@ -138,11 +141,22 @@ internal sealed class SteuerFenster : Form
         if (!_wirklichSchliessen && e.CloseReason == CloseReason.UserClosing)
         {
             e.Cancel = true;
-            WindowState = FormWindowState.Minimized;
+            if (_nurAusblenden) Hide();
+            else WindowState = FormWindowState.Minimized;
             return;
         }
         _takt.Stop();
         base.OnFormClosing(e);
+    }
+
+    /// <summary>Mit Leiste blendet das X das Fenster aus, ohne Leiste verkleinert es in die Taskleiste.</summary>
+    public void NurAusblenden(bool ja)
+    {
+        _nurAusblenden = ja;
+        _hinweisX.Text = ja
+            ? "Fenster schließen (X) = das Programm läuft mit der kleinen Leiste weiter. Ganz ausschalten: „Beenden“."
+            : "Fenster schließen (X) = nur verkleinern, das Programm läuft unten in der Taskleiste weiter. "
+              + "Ganz ausschalten: „Beenden“.";
     }
 
     /// <summary>"Programm beenden": diesmal wirklich schliessen.</summary>

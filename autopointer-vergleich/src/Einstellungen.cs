@@ -30,6 +30,12 @@ internal sealed class Einstellungen
     public bool TastenkuerzelAktiv { get; set; } = true;
     public bool ErkennungsbilderSpeichern { get; set; } = false;
 
+    /// <summary>Kleine Leiste mit den wichtigsten Knoepfen, immer im Vordergrund (Wunsch Ahmad 03.10.2026).</summary>
+    public bool LeisteAnzeigen { get; set; } = true;
+    /// <summary>Ecke der Leiste: "links" oder "rechts" (jeweils unten). Links verdeckt die Detailansicht von
+    /// AutoPointer nicht (die steht rechts).</summary>
+    public string LeisteEcke { get; set; } = Leiste.Links;
+
     // ---- Verbindung zu AutoSchnell ------------------------------------------
     public string Server { get; set; } = StandardServer;
     /// <summary>Programm-Schluessel, mit Windows-DPAPI fuer DIESES Windows-Konto verschluesselt.</summary>
@@ -90,6 +96,7 @@ internal sealed class Einstellungen
         if (string.IsNullOrWhiteSpace(Server) || !Uri.TryCreate(Server.Trim(), UriKind.Absolute, out _))
             Server = StandardServer;
         Server = Server.Trim().TrimEnd('/');
+        LeisteEcke = LeisteEcke == Leiste.Rechts ? Leiste.Rechts : Leiste.Links;
         return this;
     }
 

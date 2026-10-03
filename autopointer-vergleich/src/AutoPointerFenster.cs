@@ -131,6 +131,22 @@ internal static class AutoPointerFenster
         });
     }
 
+    /// <summary>Eigene Fenster, die ueber AutoPointer liegen koennen (die Leiste, immer im Vordergrund).
+    /// Setzt TrayApp; liefert Handles, kein Zugriff auf Steuerelemente (laeuft im Lese-Thread).</summary>
+    public static Func<IEnumerable<IntPtr>> EigeneFenster { get; set; } = () => Array.Empty<IntPtr>();
+
+    /// <summary>Liegt ein eigenes Fenster ueber diesem? Dann zeigt der Bildschirm dort nicht nur AutoPointer —
+    /// lieber PrintWindow als eine Leiste mitlesen.</summary>
+    public static bool Verdeckt(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero || !Native.GetWindowRect(hwnd, out var r)) return false;
+        foreach (var e in EigeneFenster())
+            if (e != IntPtr.Zero && Native.IsWindowVisible(e) && Native.GetWindowRect(e, out var o)
+                && o.Left < r.Right && o.Right > r.Left && o.Top < r.Bottom && o.Bottom > r.Top)
+                return true;
+        return false;
+    }
+
     /// <summary>Kopie dessen, was die Tabelle gerade anzeigt (BitBlt) — anders als
     /// <see cref="Fotografiere"/> geht dabei KEINE Nachricht an AutoPointer, AutoPointer
     /// zeichnet nichts extra. Weggescrollte Zeilen fehlen natuerlich.</summary>

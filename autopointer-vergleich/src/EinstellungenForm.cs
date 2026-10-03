@@ -19,6 +19,8 @@ internal sealed class EinstellungenForm : Form
     private readonly CheckBox _hotkey = Haken("Strg+Alt+P schaltet die Automatik an/aus");
     private readonly CheckBox _autostart = Haken("mit Windows starten");
     private readonly CheckBox _bilder = Haken("Erkennungsbilder speichern (nur zur Fehlersuche)");
+    private readonly CheckBox _leiste = Haken("Kleine Leiste mit den Knöpfen immer im Vordergrund anzeigen");
+    private readonly ComboBox _ecke = Auswahl("unten links", "unten rechts");
 
     public Einstellungen Ergebnis => _e;
 
@@ -45,6 +47,7 @@ internal sealed class EinstellungenForm : Form
                    Beschriftung("Die Suchregeln (Baujahr, Kilometer, Leistung, Kraftstoff, Getriebe …) kommen aus\n" +
                                 "AutoSchnell: Einstellungen → Vergleich. Änderungen dort gelten sofort auch hier.")),
             Gruppe("Automatische Vergleiche", _automatik, Reihe(_mobile, _autoscout)),
+            Gruppe("Leiste", _leiste, Reihe(Beschriftung("Position:"), _ecke)),
             Gruppe("Browser", Reihe(Beschriftung("Öffnen mit:"), _browser), _zurueck),
             Gruppe("Ablauf",
                    Reihe(Beschriftung("Wartezeit nach dem Anklicken:"), _wartezeit, Beschriftung("ms")),
@@ -78,6 +81,8 @@ internal sealed class EinstellungenForm : Form
         _hotkey.Checked = _e.TastenkuerzelAktiv;
         _autostart.Checked = _e.MitWindowsStarten;
         _bilder.Checked = _e.ErkennungsbilderSpeichern;
+        _leiste.Checked = _e.LeisteAnzeigen;
+        _ecke.SelectedIndex = _e.LeisteEcke == Leiste.Rechts ? 1 : 0;
     }
 
     private void Uebernehmen()
@@ -93,6 +98,8 @@ internal sealed class EinstellungenForm : Form
         _e.TastenkuerzelAktiv = _hotkey.Checked;
         _e.MitWindowsStarten = _autostart.Checked;
         _e.ErkennungsbilderSpeichern = _bilder.Checked;
+        _e.LeisteAnzeigen = _leiste.Checked;
+        _e.LeisteEcke = _ecke.SelectedIndex == 1 ? Leiste.Rechts : Leiste.Links;
         _e.Bereinigt();
         if (!_e.MobileDe && !_e.AutoScout24)
             MessageBox.Show(this, "Kein Portal ausgewählt – es werden keine Vergleiche geöffnet.", Text,

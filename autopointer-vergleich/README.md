@@ -40,6 +40,12 @@ dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und 
   *Protokoll*, *Beenden*. Das X verkleinert nur in die Taskleiste; aus ist das Programm nur mit *Beenden*.
   Ein zweiter Start (Doppelklick auf die EXE) holt das Fenster nach vorne. Beim Start mit Windows startet es
   verkleinert.
+* **Kleine Leiste** (seit 1.3.0, Wunsch Ahmad 03.10.): Status, *Stopp/Start*, *Vergleichen*, *Vertrag*, ☰ (großes
+  Fenster) — **immer im Vordergrund**, auch wenn der Browser Tabs öffnet, fest **unten links** (Standard, verdeckt die
+  Detailansicht von AutoPointer nicht) oder **unten rechts**, auf dem Bildschirm von AutoPointer. Sie nimmt
+  AutoPointer nie den Fokus weg. Rechtsklick auf die Leiste: Ecke wählen, ausblenden, beenden. Mit Leiste startet
+  das Programm nur mit der Leiste; das X am großen Fenster blendet es aus. Liegt die Leiste über der Tabelle, liest
+  das Programm per PrintWindow statt vom Bildschirm (sonst läse es die Leiste mit).
 * Symbol unten rechts im Infobereich: grün = aktiv, grau = Automatik aus, orange = AutoPointer nicht gefunden,
   rot = nicht verbunden bzw. gesperrt (Abo/Freigabe). **Doppelklick** öffnet das Fenster, **Strg+Alt+P**:
   Automatik an/aus.

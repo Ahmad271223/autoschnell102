@@ -412,9 +412,12 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
                                                          Action<System.Drawing.Bitmap, System.Drawing.Bitmap?>? bilder = null)
     {
         uint dpi = Native.GetDpiForWindow(ansicht.TechnikTabelle);
-        using (var technik = AutoPointerFenster.Abbild(ansicht.TechnikTabelle))
-        using (var kopf = AutoPointerFenster.Abbild(ansicht.KopfTabelle))
+        // Liegt die Leiste (immer im Vordergrund) ueber der Tabelle, zeigt der Bildschirm sie mit -> PrintWindow
+        bool verdeckt = AutoPointerFenster.Verdeckt(ansicht.TechnikTabelle) || AutoPointerFenster.Verdeckt(ansicht.KopfTabelle);
+        if (!verdeckt)
         {
+            using var technik = AutoPointerFenster.Abbild(ansicht.TechnikTabelle);
+            using var kopf = AutoPointerFenster.Abbild(ansicht.KopfTabelle);
             if (technik != null)
             {
                 var sicht = await LiesBilderAsync(ocr, technik, kopf, dpi, bilderSpeichern);
