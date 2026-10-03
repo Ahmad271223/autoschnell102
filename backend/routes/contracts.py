@@ -560,6 +560,66 @@ async def _digitales_pdf_bytes(c: dict, user: dict, cache: bool = True) -> Optio
     return None
 
 
+def _gespeichertes_pdf(wert) -> Optional[bytes]:
+    """Base64 aus der Datenbank -> PDF-Bytes; None, wenn es fehlt oder kaputt ist."""
+    if not wert or not isinstance(wert, str):
+        return None
+    try:
+        roh = base64.b64decode(wert, validate=True)
+    except (ValueError, TypeError):
+        return None
+    return roh if roh.startswith(b"%PDF") else None
+
+
+async def _druck_pdf_bytes(c: dict) -> Optional[bytes]:
+    """Pruefung 04.10.2026 (Nr. 42): Druckfassung eines gespeicherten Vertrags.
+    Fehlt sie oder ist sie kaputt (Altbestand, Migration, beschaedigtes Dokument),
+    gab es vorher einen 500 — jetzt wird sie wie die digitale Fassung aus den
+    EINGEFRORENEN Vertragsdaten nacherzeugt (festgehaltene Kaeuferdaten, Logo,
+    Farbe/Layout; Basis ist der Ersteller, nie der Abrufende) und per Compare-
+    and-Set auf genau diese Fassung zwischengespeichert. None = nicht moeglich."""
+    vorhanden = _gespeichertes_pdf(c.get("pdf_b64"))
+    if vorhanden is not None:
+        return vorhanden
+    try:
+        contract_dict = dict(c.get("contract_data") or {})
+        if not contract_dict:
+            return None
+        v = await db.vehicles.find_one(
+            {"id": c.get("vehicle_id"), "dealer_id": c.get("dealer_id")}, {"_id": 0}) or {}
+        vehicle = dict(v.get("data") or {})
+        from auftraggeber import kaeufer_basis
+        dealer = await kaeufer_basis(dealer_id=c.get("dealer_id"),
+                                     user_ids=(c.get("user_id"),)) or {}
+        vehicle, dealer = _apply_contract_overrides(
+            contract=contract_dict, vehicle=vehicle, dealer=dealer)
+        dealer = await _logo_einsetzen(dealer, contract_dict)
+        pdf_bytes = await asyncio.to_thread(
+            generate_contract_pdf, dealer=dealer, vehicle=vehicle, contract=contract_dict)
+        res = await db.generated_pdfs.update_one(
+            {"id": c["id"], "version": c.get("version"), "pdf_b64": c.get("pdf_b64")},
+            {"$set": {"pdf_b64": base64.b64encode(pdf_bytes).decode(),
+                      "pdf_druck_nacherzeugt_am": now_iso()}})
+        if res.matched_count == 0:
+            frisch = await db.generated_pdfs.find_one(
+                {"id": c["id"]}, {"_id": 0, "version": 1, "pdf_b64": 1})
+            if frisch and int(frisch.get("version") or 1) == int(c.get("version") or 1):
+                return _gespeichertes_pdf(frisch.get("pdf_b64")) or pdf_bytes
+            log.warning("Vertrag %s wurde waehrend der Druck-PDF-Erzeugung neu erstellt — "
+                        "alte Fassung verworfen", c.get("id"))
+            return None
+        log.warning("Druckfassung von Vertrag %s fehlte oder war beschaedigt — aus den "
+                    "Vertragsdaten nacherzeugt", c.get("id"))
+        return pdf_bytes
+    except Exception:
+        log.exception("Druckfassung von Vertrag %s konnte nicht nacherzeugt werden", c.get("id"))
+    return None
+
+
+DRUCK_FEHLER_HINWEIS = ("Die Druckfassung des Vertrags konnte nicht geladen werden. Bitte in ein paar "
+                        "Minuten erneut versuchen.")
+
+
 DIGITAL_FEHLER_HINWEIS = ("Die digitale Vertragsfassung konnte nicht erzeugt werden. "
                           "Bitte in ein paar Minuten erneut versuchen — ersatzweise "
                           "die Druckfassung herunterladen und von Hand anhängen.")
@@ -2182,7 +2242,10 @@ async def get_contract_pdf(contract_id: str, user=Depends(current_firma),
             # Kein stiller Ersatz durch die Druckfassung (Pruefbefund).
             raise HTTPException(503, DIGITAL_FEHLER_HINWEIS)
     else:
-        pdf_bytes = base64.b64decode(c["pdf_b64"])
+        # Pruefung 04.10.2026 (Nr. 42): fehlt die Druckfassung, wird sie nacherzeugt (vorher 500)
+        pdf_bytes = await _druck_pdf_bytes(c)
+        if not pdf_bytes:
+            raise HTTPException(503, DRUCK_FEHLER_HINWEIS)
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",

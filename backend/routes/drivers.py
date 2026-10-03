@@ -1542,11 +1542,16 @@ async def driver_contract_pdf(contract_id: str, driver=Depends(current_driver)):
     doc = await db.generated_pdfs.find_one(
         {"id": contract_id, "dealer_id": appt.get("dealer_id"),
          "loeschung.status": {"$ne": "laeuft"}},
-        {"_id": 0, "pdf_b64": 1},
+        {"_id": 0, "id": 1, "pdf_b64": 1, "contract_data": 1, "vehicle_id": 1,
+         "dealer_id": 1, "user_id": 1, "version": 1},
     )
-    if not doc or not doc.get("pdf_b64"):
+    if not doc:
         raise HTTPException(404, "Vertrag nicht gefunden")
-    pdf_bytes = base64.b64decode(doc["pdf_b64"])
+    # Pruefung 04.10.2026 (Nr. 42): fehlende/kaputte Druckfassung wird nacherzeugt
+    from routes.contracts import _druck_pdf_bytes
+    pdf_bytes = await _druck_pdf_bytes(doc)
+    if not pdf_bytes:
+        raise HTTPException(404, "Vertrag nicht gefunden")
     return Response(
         content=pdf_bytes, media_type="application/pdf",
         headers={"Content-Disposition": 'inline; filename="Kaufvertrag.pdf"',

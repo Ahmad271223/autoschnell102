@@ -1,7 +1,6 @@
 """Admin endpoints: users CRUD, contracts, stats, comparisons, URL-stats,
 self-password, cleanup trigger.
 """
-import base64
 import hashlib
 import os
 import re
@@ -2134,9 +2133,13 @@ async def admin_user_contracts(user_id: str, response: Response,
 async def admin_contract_pdf(contract_id: str, _=Depends(current_admin)):
     """Liefert das PDF eines beliebigen Vertrags an den Admin (read-only)."""
     doc = await db.generated_pdfs.find_one({"id": contract_id})
-    if not doc or not doc.get("pdf_b64"):
+    if not doc:
         raise HTTPException(404, "Vertrag oder PDF nicht gefunden")
-    pdf_bytes = base64.b64decode(doc["pdf_b64"])
+    # Pruefung 04.10.2026 (Nr. 42): fehlende/kaputte Druckfassung wird nacherzeugt
+    from routes.contracts import _druck_pdf_bytes
+    pdf_bytes = await _druck_pdf_bytes(doc)
+    if not pdf_bytes:
+        raise HTTPException(404, "Vertrag oder PDF nicht gefunden")
     raw_name = doc.get("filename") or f"vertrag_{contract_id}.pdf"
     # Rollenprüfung 22.09.2026 (RP-200/RP-351, Welle 2): Starlette kodiert
     # Kopfzeilen als latin-1 — ein 'Š', '–' oder Emoji im Dateinamen gab
