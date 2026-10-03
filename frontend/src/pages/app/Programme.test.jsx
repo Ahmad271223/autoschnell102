@@ -215,7 +215,7 @@ describe("Programme", () => {
       import("./Programme.jsx?raw"), import("@/lib/programme.js?raw"),
       import("@/components/AppLayout.jsx?raw"), import("@/App.jsx?raw"),
       import("@/components/ProgrammVergleiche.jsx?raw"), import("@/pages/admin_v2/ProgrammVergleiche.jsx?raw"),
-      import("@/pages/admin_v2/AdminLayout.jsx?raw"), import("./Vergleich.jsx?raw"),
+      import("@/pages/admin_v2/AdminLayout.jsx?raw"), import("./Vergleich.jsx?raw"), import("@/lib/programmStart.js?raw"),
     ]);
     for (const { default: text } of quellen) {
       expect(text).not.toMatch(/autopointer/i);

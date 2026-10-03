@@ -5,6 +5,7 @@ import SeiteLaedt from "@/components/SeiteLaedt";
 import FassungsHinweis from "@/components/FassungsHinweis";
 import { nachladenGescheitert } from "@/lib/fassung";
 import { hatUngespeichert } from "@/lib/ungespeichert";
+import { startZieleVerfolgen } from "@/lib/programmStart";
 import { api } from "@/lib/api";
 import { istFirmenHostKandidat } from "@/lib/firmenHost";
 
@@ -99,6 +100,21 @@ function vorladen() {
 
 // Vorladen, sobald jemand angemeldet ist (auch direkt nach der Anmeldung) —
 // nicht fuer den Admin, der die Haendlerseiten nie sieht.
+// Wunsch Ahmad 03.10.2026: Das Windows-Programm öffnet den Kaufvertrag in der installierten App. Ist sie schon
+// offen, kommt das Ziel hier an (launchQueue) — mit ungespeicherter Arbeit nur als Hinweis mit Knopf.
+function AppStartZiele() {
+  const nav = useNavigate();
+  useEffect(() => {
+    startZieleVerfolgen((ziel) => nav(ziel), {
+      beschaeftigt: hatUngespeichert,
+      nachfragen: (ausfuehren) => toast.info("Neues Auto aus dem Programm — hier ist noch etwas ungespeichert.", {
+        id: "app-start-ziel", duration: 20000, action: { label: "Trotzdem öffnen", onClick: ausfuehren },
+      }),
+    });
+  }, [nav]);
+  return null;
+}
+
 function Vorladen() {
   const { user } = useAuth();
   useEffect(() => {
@@ -110,8 +126,8 @@ function Vorladen() {
   }, [user]);
   return null;
 }
-import { BrowserRouter, Routes, Route, Link, Navigate, useLocation } from "react-router-dom";
-import { Toaster } from "sonner";
+import { BrowserRouter, Routes, Route, Link, Navigate, useLocation, useNavigate } from "react-router-dom";
+import { Toaster, toast } from "sonner";
 import { useTheme } from "@/components/ThemeToggle";
 
 import { AuthProvider, useAuth } from "@/context/AuthContext";
@@ -273,6 +289,7 @@ export default function App() {
        <BuyerAuthProvider>
         <BrowserRouter>
           <Vorladen />
+          <AppStartZiele />
           <Toaster theme={design} position="top-right" richColors closeButton />
           <FassungsHinweis />
           <NachladeFehler>

@@ -23,6 +23,7 @@ import ProfileBadge from "@/components/ProfileBadge";
 import PortalBadge from "@/components/PortalBadge";
 import { openContractPdf } from "@/lib/pdf";
 import { filterOeffnen, FILTER_TOAST_ID } from "@/lib/filterOeffnen";
+import { INSERAT_EREIGNIS } from "@/lib/programmStart";
 import { fensterDanebenSetzen, zweitenBildschirmAnfragen } from "@/lib/popup";
 import { hinweiseZeigen } from "@/lib/hinweise";
 import { useAuth } from "@/context/AuthContext";
@@ -244,7 +245,7 @@ export default function Vergleich() {
   const abbruchRef = useRef(null);
   const jobRef = useRef(null);
 
-  const abbrechen = () => {
+  const abbrechen = (art) => {
     const job = jobRef.current;
     try { abbruchRef.current?.abort(); } catch { /* egal */ }
     // Rollenprüfung 22.09.2026 (RP-004/RP-103/RP-254): Der abgebrochene Lauf
@@ -261,8 +262,10 @@ export default function Vergleich() {
     setWaitMsg(null);
     // Runde 24: das alte Ergebnis ist schon weg — seine Hinweise auch.
     hinweisIdsRef.current = hinweiseZeigen(toast, [], hinweisIdsRef.current);
-    toast.info("Abgebrochen — du kannst sofort einen neuen Link einfügen.");
+    if (!art?.still) toast.info("Abgebrochen — du kannst sofort einen neuen Link einfügen.");
   };
+  const abbrechenRef = useRef(abbrechen);
+  abbrechenRef.current = abbrechen;
 
   // Wunsch Ahmad 18.09.2026: "nur reinklicken, dann ist der kopierte Link
   // automatisch drin" — kein Rechtsklick, kein Strg+V. Nur wenn das Feld leer
@@ -505,6 +508,30 @@ export default function Vergleich() {
     startCompare(null, link, { ohneFilter: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Wunsch Ahmad 03.10.2026: Die installierte App ist schon offen und das Programm schickt ein neues Auto
+  // (lib/programmStart). Ein laufender Lauf wird still abgebrochen, dann liest die Seite das neue Auto aus — wie
+  // beim Öffnen über ?url= ohne die Filter ein zweites Mal.
+  const [nachLink, setNachLink] = useState(null);
+  useEffect(() => {
+    const uebernehmen = (e) => {
+      const link = inseratsLinkAusText(e?.detail || "");
+      if (!link) return;
+      if (laeuftRef.current) abbrechenRef.current?.({ still: true });
+      nav("/app/vergleich", { replace: true });
+      setNachLink(link);
+    };
+    window.addEventListener(INSERAT_EREIGNIS, uebernehmen);
+    return () => window.removeEventListener(INSERAT_EREIGNIS, uebernehmen);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(() => {
+    if (!nachLink || loading || laeuftRef.current) return;
+    setNachLink(null);
+    setUrl(nachLink);
+    startCompare(null, nachLink, { ohneFilter: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nachLink, loading]);
 
   // RP-207: Zähler über den Inserats-Schlüssel (siehe liveZaehlerPfad)
   const zaehlerPfad = liveZaehlerPfad(result);

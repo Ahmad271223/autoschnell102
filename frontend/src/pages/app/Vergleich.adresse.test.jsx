@@ -97,6 +97,22 @@ describe("Vergleich über ?url= (Programm)", () => {
     expect(filterOeffnen).not.toHaveBeenCalled();
   });
 
+  it("App schon offen: neues Auto aus dem Programm wird übernommen (ohne Filter)", async () => {
+    // Wunsch Ahmad 03.10.2026: Vertrag aus dem Programm in der offenen App — kein neues Fenster
+    const { filterOeffnen } = await import("@/lib/filterOeffnen");
+    const { INSERAT_EREIGNIS } = await import("@/lib/programmStart");
+    window.history.replaceState({}, "", "/app/vergleich");
+    await act(async () => { wurzel.render(createElement(Vergleich)); });
+    await warten();
+    expect(api.post).not.toHaveBeenCalled();
+    const neu = "https://www.kleinanzeigen.de/s-anzeige/3530379782";
+    await act(async () => { window.dispatchEvent(new CustomEvent(INSERAT_EREIGNIS, { detail: neu })); });
+    await warten();
+    const vergleich = api.post.mock.calls.find((c) => c[0] === "/mobile/compare");
+    expect(vergleich?.[1]).toMatchObject({ url: neu });
+    expect(filterOeffnen).not.toHaveBeenCalled();
+  });
+
   it("ohne ?url= startet nichts", async () => {
     window.history.replaceState({}, "", "/app/vergleich");
     await act(async () => { wurzel.render(createElement(Vergleich)); });
