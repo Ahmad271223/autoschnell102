@@ -6,8 +6,9 @@ import SeiteLaedt from "@/components/SeiteLaedt";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   Car, FileText, Calendar, Users, Settings as SettingsIcon, ShieldCheck,
-  Layers, LogOut, Activity, Search, Warehouse, Inbox, ClipboardCheck, Radar, Bell,
+  Layers, LogOut, Activity, Search, Warehouse, Inbox, ClipboardCheck, Radar, Bell, MonitorDown,
 } from "lucide-react";
+import { useProgramme } from "@/lib/programme";
 import { useAuth } from "@/context/AuthContext";
 import { startseite } from "@/lib/rollen";
 import { useFeatures } from "@/lib/features";
@@ -68,6 +69,15 @@ export default function AppLayout({ children }) {
     : NAV.filter((it) => !(it.haendlerOnly && user?.role === "sucher")
                          && (it.to !== "/app/anfragen" || features.marktplatz)
                          && (!it.feature || features[it.feature]));
+  // Programme zum Herunterladen (03.10.2026): nur wenn der Server fuer DIESE Firma
+  // welche freigeschaltet hat — Name vom Server, sonst kein Menuepunkt.
+  const programme = useProgramme(user?.role === "dealer" || user?.role === "sucher", user?.id);
+  if (programme && programme.length > 0) {
+    const vorEinstellungen = items.findIndex((it) => it.to === "/app/einstellungen");
+    items.splice(vorEinstellungen < 0 ? items.length : vorEinstellungen, 0, {
+      to: "/app/programme", label: programme.length === 1 ? programme[0].name : "Programme", icon: MonitorDown,
+    });
+  }
 
   // Runde 33 (Wunsch Ahmad): Warten Fahrer beim Verkaeufer auf die Freigabe,
   // soll man das auf JEDER Seite merken — Zahl im Menue, im Tab-Titel und ein

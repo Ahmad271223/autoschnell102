@@ -171,6 +171,8 @@ const FirmenSeite = seite(() => import("@/pages/firma/FirmenSeite"));
 const Anfragen = seite(() => import("@/pages/app/Anfragen"));
 const Freigaben = seite(() => import("@/pages/app/Freigaben"));
 const Chancen = seite(() => import("@/pages/app/Chancen"));
+// Programme zum Herunterladen (03.10.2026): Inhalte nur vom Server, je Firma freigeschaltet
+const Programme = seite(() => import("@/pages/app/Programme"));
 
 const DriverLogin = seite(() => import("@/pages/driver/DriverLogin"));
 const DriverLayout = seite(() => import("@/pages/driver/DriverLayout"));
@@ -322,6 +324,7 @@ export default function App() {
             <Route path="/app/meldungen" element={<WrapFree><Meldungen /></WrapFree>} />
             <Route path="/app/team" element={<WrapFree><Team /></WrapFree>} />
             <Route path="/app/einstellungen" element={<WrapFree><Einstellungen /></WrapFree>} />
+            <Route path="/app/programme" element={<WrapFree><Programme /></WrapFree>} />
 
             {/* B2B-Marktplatz (Zwischenhändler, eigenständig) */}
             <Route path="/markt/login" element={<FeatureGate bereich="Der B2B-Marktplatz"><BuyerLogin /></FeatureGate>} />

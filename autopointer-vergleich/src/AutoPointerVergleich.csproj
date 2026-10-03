@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <!-- 10.0.19041: Windows-Texterkennung (Windows.Media.Ocr) ueber die WinRT-Projektion -->
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>AutoSchnell-Vergleich</AssemblyName>
+    <RootNamespace>AutoPointerVergleich</RootNamespace>
+    <Product>AutoSchnell AutoPointer-Vergleich</Product>
+    <Company>Auto Schnell</Company>
+    <Version>1.0.0</Version>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Marken-/Modell-Kataloge: dieselben Dateien wie die Link-Bauer im Backend
+         (mobile_service.py / autoscout_service.py) - eine Quelle, keine Kopie. -->
+    <EmbeddedResource Include="..\..\backend\mobile_makes_models.json" LogicalName="mobile_makes_models.json" />
+    <EmbeddedResource Include="..\..\backend\autoscout_makes.json" LogicalName="autoscout_makes.json" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="AutoPointerVergleich.Tests" />
+  </ItemGroup>
+
+</Project>

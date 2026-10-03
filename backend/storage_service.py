@@ -250,10 +250,13 @@ class LocalDiskStorage:
         self.root = root
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def save(self, key: str, data: bytes) -> str:
+    def save(self, key: str, data: bytes, max_mb: Optional[int] = None) -> str:
         _validate_key(key)
-        if len(data) > MAX_FILE_MB * 1024 * 1024:
-            raise StorageError(f"Datei zu groß (max. {MAX_FILE_MB} MB)")
+        # max_mb: nur fuer Betreiber-Dateien wie das AutoPointer-Programm
+        # (werkzeuge.py, ~55 MB) - Uploads von Nutzern bleiben bei MAX_FILE_MB.
+        grenze = max_mb or MAX_FILE_MB
+        if len(data) > grenze * 1024 * 1024:
+            raise StorageError(f"Datei zu groß (max. {grenze} MB)")
         path = self.root / key
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
@@ -386,10 +389,13 @@ class S3Storage:
         self.bucket = os.environ["S3_BUCKET"]
         self.client = s3_client(endpoint=os.environ["S3_ENDPOINT"])
 
-    def save(self, key: str, data: bytes) -> str:
+    def save(self, key: str, data: bytes, max_mb: Optional[int] = None) -> str:
         _validate_key(key)
-        if len(data) > MAX_FILE_MB * 1024 * 1024:
-            raise StorageError(f"Datei zu groß (max. {MAX_FILE_MB} MB)")
+        # max_mb: nur fuer Betreiber-Dateien wie das AutoPointer-Programm
+        # (werkzeuge.py, ~55 MB) - Uploads von Nutzern bleiben bei MAX_FILE_MB.
+        grenze = max_mb or MAX_FILE_MB
+        if len(data) > grenze * 1024 * 1024:
+            raise StorageError(f"Datei zu groß (max. {grenze} MB)")
         self.client.put_object(Bucket=self.bucket, Key=key, Body=data)
         return key
 

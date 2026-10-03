@@ -164,6 +164,8 @@ services:
       # Bilder nachholen (03.10.2026): Versuche ohne Fotos je Inserat, Pause in Sekunden
       - BILDER_NACHHOLEN_MAX=${BILDER_NACHHOLEN_MAX:-3}
       - BILDER_NACHHOLEN_PAUSE_S=${BILDER_NACHHOLEN_PAUSE_S:-60}
+      # Werkzeuge (03.10.2026): wer den AutoPointer-Vergleich sieht (Kundennummern, Komma-getrennt)
+      - AUTOPOINTER_VERGLEICH_KUNDEN=${AUTOPOINTER_VERGLEICH_KUNDEN:-10002}
       - VERGLEICH_JE_KONTO_MINUTE=${VERGLEICH_JE_KONTO_MINUTE:-120}
       - VERSAND_JE_KONTO_10MIN=${VERSAND_JE_KONTO_10MIN:-300}
       - LINK_JOB_SOFORT_MAX=${LINK_JOB_SOFORT_MAX:-4}
