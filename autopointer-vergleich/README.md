@@ -113,5 +113,8 @@ Fehlersuche: `AutoSchnell-Vergleich.exe --einmal` liest das gerade angezeigte Au
 `--server <url>` nimmt einen Testserver; `--probelauf` startet das Tray-Programm, öffnet aber keinen Browser.
 `AUTOSCHNELL_VERGLEICH_DATEN=<ordner>` legt Einstellungen/Schlüssel woanders ab (Tests).
 
-Protokoll: `%LOCALAPPDATA%\AutoSchnell\AutoPointer-Vergleich\protokoll\` (14 Tage),
+Protokoll: `%LOCALAPPDATA%\AutoSchnell\AutoPointer-Vergleich\protokoll\` (14 Tage) — seit 1.3.5 **verschlüsselt**
+(Windows-DPAPI, nur derselbe Windows-Benutzer; lesbar im Protokollfenster mit Tagesauswahl und „Kopieren“ oder mit
+`--protokoll [JJJJ-MM-TT]`; alte Klartext-Dateien werden beim Start verschlüsselt und gelöscht; Erkennungsbilder
+ebenfalls, `--entschluesseln <datei.dat>`),
 Einstellungen: `%APPDATA%\AutoSchnell\AutoPointer-Vergleich\einstellungen.json` (Schlüssel DPAPI-verschlüsselt).

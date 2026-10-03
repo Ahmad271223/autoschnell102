@@ -115,6 +115,7 @@ internal sealed class TrayApp : ApplicationContext
             _fenster.Show();
         }
 
+        Protokoll.KlartextUmstellen();     // alte Klartext-Protokolle verschluesseln (03.10.2026)
         Protokoll.Aufraeumen();
         Protokoll.Schreibe($"AutoPointer-Vergleich {Application.ProductVersion} gestartet{(probelauf ? " – PROBELAUF (öffnet keinen Browser)" : "")}."
                            + $" Server: {_einstellungen.Server}");

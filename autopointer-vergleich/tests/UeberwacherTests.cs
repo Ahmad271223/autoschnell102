@@ -4,6 +4,7 @@ using static AutoPointerVergleich.Tests.Fixtures;
 namespace AutoPointerVergleich.Tests;
 
 /// <summary>Ablauf: Wartezeit, kein Doppel-Oeffnen, schnelles Wechseln, Mindestabstand.</summary>
+[Collection("Protokolldateien")]   // setzen Protokoll.DateiAktiv — nicht parallel zu TresorTests
 public class UeberwacherTests
 {
     private sealed class Attrappe : IAnsichtQuelle

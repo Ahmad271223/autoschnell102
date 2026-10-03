@@ -3,6 +3,7 @@ using static AutoPointerVergleich.Tests.Fixtures;
 
 namespace AutoPointerVergleich.Tests;
 
+[Collection("Protokolldateien")]   // setzen Protokoll.DateiAktiv — nicht parallel zu TresorTests
 public class DetailLeserTests
 {
     [Fact]   // Befund 03.10.2026: BYD Dolphin (mobile.de, Neuwagen) — AutoPointer zeigt weder EZ noch km

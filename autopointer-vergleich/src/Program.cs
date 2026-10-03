@@ -17,6 +17,8 @@ internal static class Program
     {
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         string? server = KonsolenModus.Argument(args, "--server");
+        if (args.Contains("--protokoll")) return KonsolenModus.ProtokollZeigen(KonsolenModus.Argument(args, "--protokoll"));
+        if (KonsolenModus.Argument(args, "--entschluesseln") is { } geheim) return KonsolenModus.Entschluesseln(geheim);
         if (args.Contains("--einmal")) return KonsolenModus.EinmalAsync(args, server).GetAwaiter().GetResult();
         if (KonsolenModus.Argument(args, "--verbinden") is { } code)
             return KonsolenModus.VerbindenAsync(code, server).GetAwaiter().GetResult();
@@ -132,6 +134,34 @@ internal static class KonsolenModus
         {
             Console.WriteLine("AutoSchnell: " + ex.Message);
             return 7;
+        }
+    }
+
+    /// <summary>--protokoll [JJJJ-MM-TT]: das verschluesselte Protokoll eines Tages lesbar ausgeben (nur unter dem
+    /// Windows-Konto, das es geschrieben hat).</summary>
+    public static int ProtokollZeigen(string? datum)
+    {
+        Native.AttachConsole(-1);
+        var tag = DateTime.TryParse(datum, out var t) ? t : DateTime.Today;
+        foreach (var z in Protokoll.Tag(tag)) Console.WriteLine(z);
+        return 0;
+    }
+
+    /// <summary>--entschluesseln &lt;datei.dat&gt;: ein gespeichertes Erkennungsbild/Text wieder lesbar machen.</summary>
+    public static int Entschluesseln(string datei)
+    {
+        Native.AttachConsole(-1);
+        try
+        {
+            string ziel = datei.EndsWith(".dat", StringComparison.OrdinalIgnoreCase) ? datei[..^4] : datei + ".klar";
+            File.WriteAllBytes(ziel, Tresor.Entschluesseln(File.ReadAllBytes(datei)));
+            Console.WriteLine("Entschlüsselt: " + ziel);
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("Nicht entschlüsselt: " + ex.Message);
+            return 9;
         }
     }
 

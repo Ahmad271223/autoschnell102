@@ -483,9 +483,16 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
             string ordner = Path.Combine(Protokoll.Ordner, "bilder");
             Directory.CreateDirectory(ordner);
             string basis = Path.Combine(ordner, DateTime.Now.ToString("yyyyMMdd-HHmmss-fff"));
-            technik.Save(basis + "-technik.png");
-            kopf?.Save(basis + "-kopf.png");
-            File.WriteAllText(basis + "-text.txt", roh);
+            // verschluesselt wie das Protokoll (Tresor); lesbar mit --entschluesseln <datei>
+            static byte[] Png(System.Drawing.Bitmap b)
+            {
+                using var ms = new MemoryStream();
+                b.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+                return ms.ToArray();
+            }
+            File.WriteAllBytes(basis + "-technik.png.dat", Tresor.Verschluesseln(Png(technik)));
+            if (kopf != null) File.WriteAllBytes(basis + "-kopf.png.dat", Tresor.Verschluesseln(Png(kopf)));
+            File.WriteAllBytes(basis + "-text.txt.dat", Tresor.Verschluesseln(System.Text.Encoding.UTF8.GetBytes(roh)));
         }
         catch (Exception ex) { Protokoll.Schreibe("Erkennungsbild nicht gespeichert: " + ex.Message); }
     }
