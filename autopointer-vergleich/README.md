@@ -25,7 +25,8 @@ halbe Sekunde später öffnen sich automatisch die passenden Vergleichssuchen au
 * Wird das Modell im Katalog eines Portals nicht gefunden, öffnet dieses Portal nicht (sonst gäbe es
   eine Suche „nur Bentley“). Abschaltbar in den Einstellungen.
 
-Standard-Filter: Modell exakt, EZ-Jahr exakt, Kilometer ± 15.000 (auf 5.000 gerundet), Leistung ± 5 PS,
+Standard-Filter (Vorgabe Ahmad 03.10.2026, wie `older_exact 1` / `plus 20000` / `min_ps 5` im Backend): Modell exakt,
+EZ ab Vorjahr und neuer, Kilometer bis Kilometerstand + 20.000, Leistung ab 5 PS weniger (nach oben offen),
 gleicher Kraftstoff, gleiches Getriebe, keine Unfallwagen, nur Deutschland, Preis aufsteigend.
 
 ## Wie es funktioniert

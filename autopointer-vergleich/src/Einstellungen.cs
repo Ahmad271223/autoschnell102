@@ -6,6 +6,8 @@ namespace AutoPointerVergleich;
 
 internal enum KmModus { Bereich, BisPlus, Aus }
 internal enum EzModus { ExaktesJahr, PlusMinus, AbJahr, Aus }
+/// <summary>PlusMinus = ± PS (tolerance_ps), AbMinus = ab −PS nach oben offen (min_ps).</summary>
+internal enum LeistungModus { PlusMinus, AbMinus, Aus }
 internal enum BrowserWahl { Standard, Edge, Chrome }
 internal enum Sortierung { PreisAufsteigend, KilometerAufsteigend, ErstzulassungAbsteigend, Relevanz }
 
@@ -16,16 +18,24 @@ internal sealed class Einstellungen
     public bool MobileDe { get; set; } = true;
     public bool AutoScout24 { get; set; } = true;
 
-    public KmModus KmModus { get; set; } = KmModus.Bereich;
-    public int KmSpanne { get; set; } = 15000;
-    /// <summary>Grenzen auf volle 5.000 km runden (84.975 km ± 15.000 -> 70.000–100.000).</summary>
+    // Standardregeln nach Ahmads Vorgabe (03.10.2026, Polo 10/2005, 128.000 km, 75 PS):
+    // fr=2004: / ml=:148000 / pw=51: — EZ ab Vorjahr, km bis +20.000, Leistung ab −5 PS
+    // (Backend: older_exact 1, plus 20000, min_ps 5).
+    public KmModus KmModus { get; set; } = KmModus.BisPlus;
+    public int KmSpanne { get; set; } = 20000;
+    /// <summary>Nur bei "Bereich": Grenzen auf volle 5.000 km runden (84.975 ± 15.000 -> 70.000–100.000).</summary>
     public bool KmRunden { get; set; } = true;
 
-    public EzModus EzModus { get; set; } = EzModus.ExaktesJahr;
+    public EzModus EzModus { get; set; } = EzModus.AbJahr;
     public int EzJahre { get; set; } = 1;
 
-    public bool LeistungFiltern { get; set; } = true;
+    public LeistungModus LeistungModus { get; set; } = LeistungModus.AbMinus;
     public int LeistungTolerantPs { get; set; } = 5;
+
+    /// <summary>Stand der Standardregeln. Gespeicherte Einstellungen mit aelterem Stand
+    /// bekommen beim Laden die neuen Suchregeln (Portale, Browser usw. bleiben).</summary>
+    public int RegelFassung { get; set; }
+    public const int AktuelleRegelFassung = 2;
     public bool KraftstoffFiltern { get; set; } = true;
     public bool GetriebeFiltern { get; set; } = true;
     public bool UnfallwagenAusblenden { get; set; } = true;
@@ -72,12 +82,32 @@ internal sealed class Einstellungen
             Protokoll.Schreibe($"Einstellungen nicht lesbar ({ex.Message}) – Standardwerte.");
             e = new Einstellungen();
         }
+        if (File.Exists(Datei) && e.RegelFassung < AktuelleRegelFassung)
+        {
+            e.RegelnAufStandard();
+            Protokoll.Schreibe("Suchregeln auf den neuen Standard gesetzt (EZ ab Vorjahr, km bis +20.000, Leistung ab −5 PS).");
+        }
+        e.RegelFassung = AktuelleRegelFassung;
         e.MitWindowsStarten = Autostart.IstAn();
         return e.Bereinigt();
     }
 
+    /// <summary>Nur die Suchregeln zuruecksetzen.</summary>
+    public void RegelnAufStandard()
+    {
+        var s = new Einstellungen();
+        KmModus = s.KmModus;
+        KmSpanne = s.KmSpanne;
+        KmRunden = s.KmRunden;
+        EzModus = s.EzModus;
+        EzJahre = s.EzJahre;
+        LeistungModus = s.LeistungModus;
+        LeistungTolerantPs = s.LeistungTolerantPs;
+    }
+
     public void Speichern()
     {
+        RegelFassung = AktuelleRegelFassung;
         Directory.CreateDirectory(Ordner);
         File.WriteAllText(Datei, JsonSerializer.Serialize(this, Json));
         Autostart.Setzen(MitWindowsStarten);

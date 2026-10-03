@@ -119,7 +119,7 @@ public class UeberwacherTests
         Assert.Equal(3, _b.Aufrufe.Count);
         Assert.Contains("ms=3100%3B16", _b.Aufrufe[0][0].Url);
         Assert.Contains("ms=25200%3B63", _b.Aufrufe[1][0].Url);
-        Assert.Contains("fr=2019%3A2019", _b.Aufrufe[2][0].Url);
+        Assert.Contains("fr=2018%3A&", _b.Aufrufe[2][0].Url);
     }
 
     [Fact]

@@ -95,12 +95,17 @@ internal static class LinkBauer
         _ => (null, null),
     };
 
-    internal static (int Von, int Bis)? KwGrenzen(Fahrzeug f, Einstellungen e)
+    /// <summary>Leistung in kW wie im Backend: tolerance_ps (± PS) bzw. min_ps (ab −PS,
+    /// nach oben offen: Bis = null).</summary>
+    internal static (int Von, int? Bis)? KwGrenzen(Fahrzeug f, Einstellungen e)
     {
-        if (!e.LeistungFiltern || f.Kw == null) return null;
-        if (e.LeistungTolerantPs == 0) return (f.Kw.Value, f.Kw.Value);
+        if (e.LeistungModus == LeistungModus.Aus || f.Kw == null) return null;
         int ps = f.Ps ?? FahrzeugCodes.KwZuPs(f.Kw.Value);
-        return (FahrzeugCodes.PsZuKw(Math.Max(1, ps - e.LeistungTolerantPs)), FahrzeugCodes.PsZuKw(ps + e.LeistungTolerantPs));
+        int tol = e.LeistungTolerantPs;
+        if (e.LeistungModus == LeistungModus.AbMinus)
+            return (tol == 0 ? f.Kw.Value : FahrzeugCodes.PsZuKw(Math.Max(1, ps - tol)), null);
+        if (tol == 0) return (f.Kw.Value, f.Kw.Value);
+        return (FahrzeugCodes.PsZuKw(Math.Max(1, ps - tol)), FahrzeugCodes.PsZuKw(ps + tol));
     }
 
     private static string S(int? v) => v?.ToString(CultureInfo.InvariantCulture) ?? "";
@@ -137,7 +142,7 @@ internal static class LinkBauer
             var (von, bis) = KmGrenzen(f.Kilometer.Value, e);
             if (von != null || bis != null) p.Add(("ml", $"{S(von)}:{S(bis)}"));
         }
-        if (KwGrenzen(f, e) is { } kw) p.Add(("pw", $"{kw.Von}:{kw.Bis}"));
+        if (KwGrenzen(f, e) is { } kw) p.Add(("pw", $"{kw.Von}:{S(kw.Bis)}"));
         if (e.KraftstoffFiltern && f.KraftstoffCode.Length > 0) p.Add(("ft", f.KraftstoffCode));
         if (e.GetriebeFiltern && f.GetriebeCode.Length > 0) p.Add(("tr", f.GetriebeCode));
         if (e.UnfallwagenAusblenden) p.Add(("dam", "0"));
@@ -190,7 +195,7 @@ internal static class LinkBauer
         if (KwGrenzen(f, e) is { } kw)
         {
             p.Add(("powerfrom", S(kw.Von)));
-            p.Add(("powerto", S(kw.Bis)));
+            if (kw.Bis != null) p.Add(("powerto", S(kw.Bis)));
             p.Add(("powertype", "kw"));
         }
         if (e.KraftstoffFiltern && FahrzeugCodes.AutoScoutKraftstoff.TryGetValue(f.KraftstoffCode, out var fuel)) p.Add(("fuel", fuel));
@@ -226,7 +231,7 @@ internal static class LinkBauer
             else if (e.AutoScout24 && !FahrzeugCodes.AutoScoutKraftstoff.ContainsKey(f.KraftstoffCode))
                 hinweise.Add($"Kraftstoff „{f.Kraftstoff}“ filtert nur mobile.de – AutoScout24 zeigt alle Kraftstoffarten.");
         }
-        if (e.LeistungFiltern && f.Kw == null)
+        if (e.LeistungModus != LeistungModus.Aus && f.Kw == null)
             hinweise.Add("Leistung nicht gelesen – Suche ohne Leistungsfilter.");
     }
 }

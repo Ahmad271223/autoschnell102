@@ -88,6 +88,13 @@ public class LinkBauerTests
         "https://suchen.mobile.de/fahrzeuge/search.html?isSearchRequest=true&ref=quickSearch&s=Car&vc=Car&pageNumber=1"
         + "&ms=25200%3B63%3B%3B%3B&fr=2006%3A2006&ml=230000%3A260000&pw=121%3A129&ft=DIESEL&tr=AUTOMATIC_GEAR&dam=0&cn=DE&sb=p&od=up";
 
+    /// <summary>Regeln, mit denen die Referenz-Links aus dem Backend erzeugt wurden
+    /// (exaktes EZ-Jahr, km-Bereich, Leistung ±5 PS).</summary>
+    private static Einstellungen AlteRegeln() => new()
+    {
+        KmModus = KmModus.Bereich, KmSpanne = 15000, EzModus = EzModus.ExaktesJahr, LeistungModus = LeistungModus.PlusMinus,
+    };
+
     private static (List<Vergleich> Links, List<string> Hinweise) Baue(Fahrzeug f, Einstellungen? e = null)
     {
         var z = LinkBauer.Zuordnen(f, Kat);
@@ -98,7 +105,7 @@ public class LinkBauerTests
     [Fact]
     public void Bentley_beide_Links_identisch_mit_Backend()
     {
-        var (links, hinweise) = Baue(Bentley());
+        var (links, hinweise) = Baue(Bentley(), AlteRegeln());
         Assert.Equal(2, links.Count);
         Assert.Equal(("mobile.de", BentleyMobile), (links[0].Portal, links[0].Url));
         Assert.Equal(("AutoScout24", BentleyAutoScout), (links[1].Portal, links[1].Url));
@@ -108,7 +115,7 @@ public class LinkBauerTests
     [Fact]
     public void Passat_mobile_Link_identisch_mit_Backend()
     {
-        var (links, _) = Baue(Passat());
+        var (links, _) = Baue(Passat(), AlteRegeln());
         Assert.Equal(PassatMobile, links[0].Url);
     }
 
@@ -126,7 +133,7 @@ public class LinkBauerTests
     [InlineData(5000, 15000, 0, 20000)]
     [InlineData(84975, 10000, 75000, 95000)]
     public void Kilometerbereich_gerundet(int km, int spanne, int von, int bis) =>
-        Assert.Equal(((int?)von, (int?)bis), LinkBauer.KmGrenzen(km, new Einstellungen { KmSpanne = spanne }));
+        Assert.Equal(((int?)von, (int?)bis), LinkBauer.KmGrenzen(km, new Einstellungen { KmModus = KmModus.Bereich, KmSpanne = spanne }));
 
     [Fact]
     public void Kilometerbereich_enthaelt_immer_das_Fahrzeug()
@@ -134,7 +141,7 @@ public class LinkBauerTests
         for (int km = 0; km < 400_000; km += 1237)
             foreach (int spanne in new[] { 5000, 7500, 15000, 30000 })
             {
-                var (von, bis) = LinkBauer.KmGrenzen(km, new Einstellungen { KmSpanne = spanne });
+                var (von, bis) = LinkBauer.KmGrenzen(km, new Einstellungen { KmModus = KmModus.Bereich, KmSpanne = spanne });
                 Assert.True(von <= km && bis >= km, $"{km} ± {spanne}: {von}–{bis}");
             }
     }
@@ -142,14 +149,14 @@ public class LinkBauerTests
     [Fact]
     public void Kilometer_ohne_Runden_und_bis_Modus()
     {
-        Assert.Equal(((int?)69975, (int?)99975), LinkBauer.KmGrenzen(84975, new Einstellungen { KmRunden = false }));
-        Assert.Equal(((int?)null, (int?)99975), LinkBauer.KmGrenzen(84975, new Einstellungen { KmModus = KmModus.BisPlus }));
+        Assert.Equal(((int?)69975, (int?)99975), LinkBauer.KmGrenzen(84975, new Einstellungen { KmModus = KmModus.Bereich, KmSpanne = 15000, KmRunden = false }));
+        Assert.Equal(((int?)null, (int?)99975), LinkBauer.KmGrenzen(84975, new Einstellungen { KmModus = KmModus.BisPlus, KmSpanne = 15000 }));
     }
 
     [Fact]
     public void Erstzulassung_Modi()
     {
-        Assert.Equal(((int?)2017, (int?)2017), LinkBauer.EzGrenzen(2017, new Einstellungen()));
+        Assert.Equal(((int?)2017, (int?)2017), LinkBauer.EzGrenzen(2017, new Einstellungen { EzModus = EzModus.ExaktesJahr }));
         Assert.Equal(((int?)2016, (int?)2018), LinkBauer.EzGrenzen(2017, new Einstellungen { EzModus = EzModus.PlusMinus }));
         Assert.Equal(((int?)2016, (int?)null), LinkBauer.EzGrenzen(2017, new Einstellungen { EzModus = EzModus.AbJahr }));
         var (links, _) = Baue(Bentley(), new Einstellungen { EzModus = EzModus.PlusMinus });
@@ -193,12 +200,62 @@ public class LinkBauerTests
     {
         var e = new Einstellungen
         {
-            LeistungFiltern = false, KraftstoffFiltern = false, GetriebeFiltern = false,
+            LeistungModus = LeistungModus.Aus, KraftstoffFiltern = false, GetriebeFiltern = false,
             UnfallwagenAusblenden = false, NurDeutschland = false, KmModus = KmModus.Aus, EzModus = EzModus.Aus,
         };
         var (links, _) = Baue(Bentley(), e);
         Assert.Equal("https://suchen.mobile.de/fahrzeuge/search.html?isSearchRequest=true&ref=quickSearch&s=Car&vc=Car&pageNumber=1&ms=3100%3B16%3B%3B%3B&sb=p&od=up", links[0].Url);
         Assert.Equal("https://www.autoscout24.de/lst/bentley?atype=C&cat=ma11mo21181&ocs_listing=include&sort=price&desc=0&ustate=N,U", links[1].Url);
+    }
+
+    // Ahmads Vorgabe 03.10.2026 (VW Polo aus Kleinanzeigen, 10/2005, 128.000 km, 55 kW/75 PS):
+    // genau dieser mobile.de-Link; der AutoScout-Link ist der des Backends mit denselben Regeln
+    // (older_exact 1, plus 20000, min_ps 5) — AutoScout schreibt ihn beim Oeffnen um in
+    // /lst/volkswagen/polo/ft_benzin/tr_schaltgetriebe?fregfrom=2004&kmto=148000&powerfrom=51...
+    private const string PoloMobileSoll =
+        "https://suchen.mobile.de/fahrzeuge/search.html?isSearchRequest=true&ref=quickSearch&s=Car&vc=Car&pageNumber=1"
+        + "&ms=25200%3B27%3B%3B%3B&fr=2004%3A&ml=%3A148000&pw=51%3A&ft=PETROL&tr=MANUAL_GEAR&dam=0&cn=DE&sb=p&od=up";
+    private const string PoloAutoScoutSoll =
+        "https://www.autoscout24.de/lst/volkswagen?atype=C&cy=D&cat=ma74mo2090&fregfrom=2004&kmto=148000&powerfrom=51"
+        + "&powertype=kw&fuel=B&gear=M&damaged_listing=exclude&ocs_listing=include&sort=price&desc=0&ustate=N,U";
+
+    private static Fahrzeug Polo() => new()
+    {
+        MarkeModellText = "VW Polo", EzMonat = 10, EzJahr = 2005, Kilometer = 128000, Kw = 55, Ps = 75,
+        Kraftstoff = "Benzin", Getriebe = "Schaltgetriebe", Zustand = "Gebraucht",
+    };
+
+    [Fact]
+    public void Standardregeln_ergeben_genau_Ahmads_Links()
+    {
+        var (links, hinweise) = Baue(Polo());
+        Assert.Equal(PoloMobileSoll, links[0].Url);
+        Assert.Equal(PoloAutoScoutSoll, links[1].Url);
+        Assert.Empty(hinweise);
+    }
+
+    [Fact]
+    public void Leistung_Modi()
+    {
+        var f = Polo();
+        Assert.Equal((51, (int?)null), LinkBauer.KwGrenzen(f, new Einstellungen())!.Value);
+        Assert.Equal((51, (int?)59), LinkBauer.KwGrenzen(f, new Einstellungen { LeistungModus = LeistungModus.PlusMinus })!.Value);
+        Assert.Equal((55, (int?)null), LinkBauer.KwGrenzen(f, new Einstellungen { LeistungTolerantPs = 0 })!.Value);
+        Assert.Equal((55, (int?)55), LinkBauer.KwGrenzen(f, new Einstellungen { LeistungModus = LeistungModus.PlusMinus, LeistungTolerantPs = 0 })!.Value);
+        Assert.Null(LinkBauer.KwGrenzen(f, new Einstellungen { LeistungModus = LeistungModus.Aus }));
+    }
+
+    [Fact]
+    public void Alte_gespeicherte_Regeln_werden_auf_den_Standard_gesetzt()
+    {
+        var e = AlteRegeln();
+        e.MobileDe = false;
+        e.Browser = BrowserWahl.Edge;
+        e.RegelnAufStandard();
+        Assert.Equal((KmModus.BisPlus, 20000, EzModus.AbJahr, 1, LeistungModus.AbMinus, 5),
+                     (e.KmModus, e.KmSpanne, e.EzModus, e.EzJahre, e.LeistungModus, e.LeistungTolerantPs));
+        Assert.False(e.MobileDe);                      // Portale/Browser bleiben
+        Assert.Equal(BrowserWahl.Edge, e.Browser);
     }
 
     [Fact]

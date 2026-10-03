@@ -9,19 +9,21 @@ internal sealed class EinstellungenForm : Form
     private readonly CheckBox _mobile = Haken("mobile.de");
     private readonly CheckBox _autoscout = Haken("AutoScout24");
 
+    private readonly RadioButton _kmBis = Wahl("bis Kilometerstand + Spanne (128.000 km → bis 148.000)");
     private readonly RadioButton _kmBereich = Wahl("Bereich: Kilometerstand ± Spanne");
-    private readonly RadioButton _kmBis = Wahl("bis Kilometerstand + Spanne");
     private readonly RadioButton _kmAus = Wahl("kein Kilometer-Filter");
     private readonly NumericUpDown _kmSpanne = Zahl(0, 500_000, 1000);
-    private readonly CheckBox _kmRunden = Haken("Grenzen auf volle 5.000 km runden");
+    private readonly CheckBox _kmRunden = Haken("beim Bereich Grenzen auf volle 5.000 km runden");
 
+    private readonly RadioButton _ezAb = Wahl("ab Jahr − Jahre und neuer (10/2005 → ab 2004)");
     private readonly RadioButton _ezExakt = Wahl("nur das Jahr der Erstzulassung (03/2017 → 2017)");
     private readonly RadioButton _ezPlusMinus = Wahl("Jahr ± Jahre (2017 → 2016–2018)");
-    private readonly RadioButton _ezAb = Wahl("ab Jahr − Jahre und neuer");
     private readonly RadioButton _ezAus = Wahl("kein Erstzulassungs-Filter");
     private readonly NumericUpDown _ezJahre = Zahl(0, 20, 1);
 
-    private readonly CheckBox _leistung = Haken("gleiche Leistung ±");
+    private readonly RadioButton _lAb = Wahl("ab Leistung − PS und stärker (75 PS → ab 70 PS)");
+    private readonly RadioButton _lPlusMinus = Wahl("Leistung ± PS (gleiche Motorisierung)");
+    private readonly RadioButton _lAus = Wahl("kein Leistungs-Filter");
     private readonly NumericUpDown _ps = Zahl(0, 200, 1);
     private readonly CheckBox _kraftstoff = Haken("gleicher Kraftstoff");
     private readonly CheckBox _getriebe = Haken("gleiches Getriebe");
@@ -62,10 +64,11 @@ internal sealed class EinstellungenForm : Form
 
         var links = Stapel(
             Gruppe("Automatische Vergleiche", _automatik, Reihe(_mobile, _autoscout)),
-            Gruppe("Kilometer", _kmBereich, _kmBis, _kmAus, Reihe(Beschriftung("Spanne:"), _kmSpanne, Beschriftung("km")), _kmRunden),
-            Gruppe("Erstzulassung", _ezExakt, _ezPlusMinus, _ezAb, _ezAus, Reihe(Beschriftung("Jahre:"), _ezJahre)));
+            Gruppe("Kilometer", _kmBis, _kmBereich, _kmAus, Reihe(Beschriftung("Spanne:"), _kmSpanne, Beschriftung("km")), _kmRunden),
+            Gruppe("Erstzulassung", _ezAb, _ezExakt, _ezPlusMinus, _ezAus, Reihe(Beschriftung("Jahre:"), _ezJahre)),
+            Gruppe("Leistung", _lAb, _lPlusMinus, _lAus, Reihe(Beschriftung("PS:"), _ps)));
         var rechts = Stapel(
-            Gruppe("Motor und Filter", Reihe(_leistung, _ps, Beschriftung("PS (gleiche Motorisierung)")), _kraftstoff, _getriebe,
+            Gruppe("Motor und Filter", _kraftstoff, _getriebe,
                    _unfall, _deutschland, _ohneModell, Reihe(Beschriftung("Sortierung:"), _sortierung)),
             Gruppe("Browser", Reihe(Beschriftung("Öffnen mit:"), _browser), _zurueck),
             Gruppe("Ablauf",
@@ -100,7 +103,7 @@ internal sealed class EinstellungenForm : Form
         _kmRunden.Checked = _e.KmRunden;
         (_e.EzModus switch { EzModus.PlusMinus => _ezPlusMinus, EzModus.AbJahr => _ezAb, EzModus.Aus => _ezAus, _ => _ezExakt }).Checked = true;
         _ezJahre.Value = _e.EzJahre;
-        _leistung.Checked = _e.LeistungFiltern;
+        (_e.LeistungModus switch { LeistungModus.PlusMinus => _lPlusMinus, LeistungModus.Aus => _lAus, _ => _lAb }).Checked = true;
         _ps.Value = _e.LeistungTolerantPs;
         _kraftstoff.Checked = _e.KraftstoffFiltern;
         _getriebe.Checked = _e.GetriebeFiltern;
@@ -128,7 +131,7 @@ internal sealed class EinstellungenForm : Form
         _e.KmRunden = _kmRunden.Checked;
         _e.EzModus = _ezPlusMinus.Checked ? EzModus.PlusMinus : _ezAb.Checked ? EzModus.AbJahr : _ezAus.Checked ? EzModus.Aus : EzModus.ExaktesJahr;
         _e.EzJahre = (int)_ezJahre.Value;
-        _e.LeistungFiltern = _leistung.Checked;
+        _e.LeistungModus = _lPlusMinus.Checked ? LeistungModus.PlusMinus : _lAus.Checked ? LeistungModus.Aus : LeistungModus.AbMinus;
         _e.LeistungTolerantPs = (int)_ps.Value;
         _e.KraftstoffFiltern = _kraftstoff.Checked;
         _e.GetriebeFiltern = _getriebe.Checked;
