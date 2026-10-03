@@ -31,9 +31,10 @@ import KopierKnopf from "@/components/KopierKnopf";
 import FirmenseiteEinstellungen from "@/components/FirmenseiteEinstellungen";
 import {
   Building2, Sliders, FileText, Mail, MessageSquare, ShieldCheck, Save, Check, Globe,
-  CreditCard, Calendar, X, ArrowRight, Bolt, Store, Palette,
+  CreditCard, Calendar, X, ArrowRight, Bolt, Store, Palette, LayoutTemplate,
 } from "lucide-react";
 import AkzentWahl from "@/components/AkzentWahl";
+import VertragDesign from "@/components/VertragDesign";
 import CountryPicker from "@/components/CountryPicker";
 
 // Formular aus dem (wirksamen) Haendlerdokument — ohne reine UI-Felder.
@@ -70,6 +71,9 @@ export function formAus(dealer) {
       dealer.sondervereinbarung_standard_aktiv !== false,
     // Wunsch Ahmad 24.09.2026: Übergabe & Empfangsbestätigung im Druck an/aus
     empfang_drucken: dealer.empfang_drucken !== false,
+    // Wunsch Ahmad 03.10.2026: Farbe und Layout des Kaufvertrags (nur Chef, firmenweit)
+    vertrag_farbe: dealer.vertrag_farbe || "standard",
+    vertrag_layout: dealer.vertrag_layout || "modern",
     // Runde 26: EIN Feld. Ein noch vorhandener AGB-Text wird hier
     // angehaengt; beim Speichern wird das alte Feld geleert.
     default_terms: "",
@@ -186,6 +190,7 @@ const FELD_TITEL = {
   default_terms: "AGB", default_special_agreements: "Besondere Vereinbarungen",
   digital_vertragstext: "Vertragstext", sondervereinbarung_standard_aktiv: "Standardsatz an/aus",
   empfang_drucken: "Empfangsbestätigung an/aus",
+  vertrag_farbe: "Vertragsfarbe", vertrag_layout: "Vertragslayout",
 };
 
 const SECTIONS = [
@@ -194,6 +199,8 @@ const SECTIONS = [
   { id: "templates",  label: "Versand",        icon: Mail },
   { id: "markt",      label: "Marktplatz",     icon: Store },
   { id: "agb",        label: "Vertragstexte", icon: ShieldCheck },
+  // Wunsch Ahmad 03.10.2026: Layout und Farbe des Kaufvertrags — nur der Chef
+  { id: "vertragsdesign", label: "Vertragsdesign", icon: LayoutTemplate, nurChef: true },
   { id: "abo",        label: "Abo",            icon: CreditCard },
   // Wunsch Ahmad 02.10.2026: Farbe der App je Konto
   { id: "farbe",      label: "Farbe",          icon: Palette },
@@ -204,9 +211,8 @@ export default function Einstellungen() {
   // Sucher sehen keinen Marktplatz-Reiter (nur der Chef verwaltet den
   // Marktplatz; die Endpunkte antworten Suchern mit 403 -> ewig "Lädt…").
   const features = useFeatures();          // Go-Live-Schalter: Marktplatz-Reiter nur wenn frei
-  const sections = (user?.role === "sucher" || !features.marktplatz)
-    ? SECTIONS.filter((s) => s.id !== "markt")
-    : SECTIONS;
+  const sections = SECTIONS.filter((s) => !(s.id === "markt" && (user?.role === "sucher" || !features.marktplatz))
+                                          && !(s.nurChef && user?.role !== "dealer"));
   const [form, setForm] = useState(null);
   const [active, setActive] = useState("profile");
   const [savedFlash, setSavedFlash] = useState(false);
@@ -823,6 +829,14 @@ export default function Einstellungen() {
                 hint="Stehen in jedem neuen Vertrag — unter dem Standardsatz, falls der eingeschaltet ist. Platzhalter sind auch hier erlaubt."
               />
               <PlaceholderHint placeholders={PLATZHALTER} />
+            </Section>
+          )}
+
+          {active === "vertragsdesign" && istChef && (
+            <Section title="Vertragsdesign"
+                     subtitle="Wie deine Kaufverträge aussehen: Layout und Farbe. Die Inhalte bleiben in beiden Layouts gleich.">
+              <VertragDesign farbe={form.vertrag_farbe} layout={form.vertrag_layout}
+                             onChange={(w) => setForm((f) => ({ ...f, ...w }))} />
             </Section>
           )}
 

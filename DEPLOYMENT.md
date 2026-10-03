@@ -4367,3 +4367,25 @@ Erst einmal **nur für Kunde 10002**, seit dem Abend des 03.10. auch **10001** �
   Bis dahin zeigt die Seite „Wird gerade bereitgestellt“. Speicher: `werkzeuge/autopointer-vergleich/…`, Eintrag in `werkzeuge`.
 - Tests: `backend/tests/test_werkzeuge_20261003.py`, `frontend/src/pages/app/Programme.test.jsx`,
   `autopointer-vergleich/tests` (`dotnet test`, nicht in der CI).
+
+## Vertragsdesign: Farbe + Layout „Formular“, Seitenleiste mit Namen (Wunsch Ahmad 03.10.2026)
+
+**Vertragsdesign** (Einstellungen → Vertragsdesign, nur Chef): Layout „Modern“ (bisher) oder „Formular“ (nach
+Ahmads Vorlage: Überschrift mittig, Abschnittstitel mit Linie, Felder auf gepunkteter Linie, heller Preisstreifen,
+Ausstattung als Fließtext) und eine von zehn Farben (statt fest Rot). Gespeichert am Firmendokument
+(`dealers.vertrag_farbe` = Farbnamen wie die App-Farbe, `dealers.vertrag_layout` = modern|formular, über
+PUT /dealer/settings; kein Sucher-Feld). Beim **Anlegen** (und in der Vorschau des Vertragsdialogs) hält
+`vertrag_design_festhalten` beides im Vertrag fest — wie das Logo: neue Fassungen, Kundenportal und jede
+Neuerzeugung nehmen den festgehaltenen Stand, Altverträge ohne Angabe bleiben rot/modern. `generate_contract_pdf`
+liest Farbe/Layout aus dem Vertrag (ContextVar `_GESTALTUNG`, Bausteine `_section`/`_kv_compact`/`_boxed_kv`).
+Inhalt und Regeln sind in beiden Layouts gleich. Vorschau mit Musterdaten: POST /dealer/vertrag-vorschau
+{farbe, layout, variante} (nur Chef, 30/min, speichert nichts). Druckfarben: `pdf_service.VERTRAG_FARBEN`
+= `frontend/src/lib/vertragDesign.js` (Test hält beide gleich). Keine neuen Umgebungswerte, keine Migration.
+
+**Seitenleiste** (`components/AppLayout.jsx`): am PC (ab 768 px) mit Namen und Gruppen (Einkauf, Abwicklung,
+Verkauf, Team, Allgemein) und Firmenname oben; unten „Leiste einklappen“ (gemerkt im Browser, `ah_leiste_schmal`).
+Am Handy bleibt die 64-px-Leiste, oben öffnet ein Menü-Knopf alle Bereiche mit Namen. Fahrer haben jetzt ein
+eigenes Symbol (LKW). Kennungen `nav-*` unverändert; das Handy-Menü nutzt `menue-*`.
+
+Tests: `backend/tests/test_vertrag_design_20261003.py`, `frontend/src/components/AppLayout.leiste.test.jsx`,
+`frontend/src/components/VertragDesign.test.jsx`.

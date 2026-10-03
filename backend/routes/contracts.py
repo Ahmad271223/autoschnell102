@@ -1039,6 +1039,17 @@ def logo_schluessel(firma: Optional[dict]) -> str:
     return key if key.startswith("logo/") and ".." not in key else ""
 
 
+def vertrag_design_festhalten(contract_dict: dict, firma: Optional[dict]) -> dict:
+    """Wunsch Ahmad 03.10.2026: Farbe und Layout des Vertrags (Firmeneinstellung des Chefs) werden beim
+    Anlegen wie das Logo im Vertrag festgehalten — spaetere Fassungen, das Kundenportal und jede
+    Neuerzeugung nehmen genau diesen Stand, nie den heutigen."""
+    from pdf_service import VERTRAG_FARBEN, vertrag_layout
+    farbe = str((firma or {}).get("vertrag_farbe") or "").strip().lower()
+    contract_dict["vertrag_farbe"] = farbe if farbe in VERTRAG_FARBEN else "standard"
+    contract_dict["vertrag_layout"] = vertrag_layout((firma or {}).get("vertrag_layout"))
+    return contract_dict
+
+
 async def _logo_bytes(key: Optional[str]) -> Optional[bytes]:
     """Logo-Datei laden — fehlt sie oder ist der Speicher weg, gibt es den
     Vertrag eben ohne Logo (nie ein Fehler deswegen)."""
@@ -1192,6 +1203,7 @@ async def preview_contract(body: ContractIn, user=Depends(require_active_sub),
     # Rollenpruefung 22.09.2026 (RP-452): die Vorschau zeigt das Logo, das
     # beim Erstellen festgehalten wuerde.
     contract_dict["logo_key"] = logo_schluessel(dealer)
+    vertrag_design_festhalten(contract_dict, dealer)     # 03.10.2026: Farbe + Layout wie beim Anlegen
     dealer = await _logo_einsetzen(dealer, contract_dict)
     # ReportLab ist CPU-gebunden -> in Thread auslagern, damit der
     # Event-Loop unter Last (200-500 Nutzer) nicht blockiert.
@@ -1418,6 +1430,8 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     # der Schluessel wird wie die Kaeuferdaten festgehalten; spaetere Fassungen
     # nehmen genau dieses Logo (oder keins), nie das heutige.
     contract_dict["logo_key"] = logo_schluessel(dealer)
+    # Wunsch Ahmad 03.10.2026: Farbe und Layout ebenso festhalten
+    vertrag_design_festhalten(contract_dict, dealer)
     dealer = await _logo_einsetzen(dealer, contract_dict)
     # Vertragsnummer VOR der PDF-Erzeugung festlegen, damit sie im Dokument
     # (Kopf + Fußzeile) erscheint und im Archiv wiederauffindbar ist.

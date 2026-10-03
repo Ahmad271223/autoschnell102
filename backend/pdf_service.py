@@ -1,4 +1,5 @@
 """PDF generation for car purchase contracts (Kaufvertrag) using ReportLab."""
+import contextvars
 import io
 from typing import Optional
 import logging
@@ -40,6 +41,61 @@ GREY = colors.HexColor("#71717A")
 DIVIDER = colors.HexColor("#E4E4E7")
 LIGHT = colors.HexColor("#F4F4F5")
 DARK = colors.HexColor("#0A0A0A")
+
+# Wunsch Ahmad 03.10.2026: Farbe und Layout des Kaufvertrags waehlt der Chef in den Einstellungen
+# (dealers.vertrag_farbe / dealers.vertrag_layout). Dieselben Farbnamen wie die Farbe der App
+# (konfig.AKZENTFARBEN), aber druckfreundliche Toene fuer weisses Papier. "standard" = das bisherige Rot.
+VERTRAG_FARBEN = {
+    "standard": "#FF3B30", "rot": "#FF3B30", "lila": "#7C3AED", "gruen": "#15803D",
+    "blau": "#0071E3", "schwarz": "#1D1D1F", "orange": "#E8731F", "petrol": "#0F766E",
+    "pink": "#BE185D", "gold": "#A16207", "indigo": "#4F46E5",
+}
+#: "modern" = das bisherige Layout (Balken-Ueberschriften, Kaesten, dunkler Preisblock);
+#: "formular" = nach Ahmads Vorlage: Ueberschrift mittig, Abschnittstitel mit Linie,
+#: Felder mit gepunkteter Linie, heller Preisstreifen, Ausstattung als Fliesstext.
+VERTRAG_LAYOUTS = ("modern", "formular")
+VERTRAG_LAYOUT_STANDARD = "modern"
+
+# Gestaltung des gerade gebauten Vertrags (Farbe, Layout) — gesetzt nur in generate_contract_pdf,
+# gelesen von den Bausteinen (_section, _kv_compact, …) und der Fusszeile. ContextVar statt
+# Modulkonstante: zwei Vertraege verschiedener Firmen entstehen gleichzeitig in Threads.
+_GESTALTUNG: contextvars.ContextVar = contextvars.ContextVar("vertrag_gestaltung", default=None)
+
+
+def vertrag_farbe_hex(wert) -> str:
+    """Farbname (oder None) -> Hex-Ton fuer den Vertrag; Unbekanntes -> Standard (Rot)."""
+    return VERTRAG_FARBEN.get(str(wert or "").strip().lower(), VERTRAG_FARBEN["standard"])
+
+
+def vertrag_layout(wert) -> str:
+    k = str(wert or "").strip().lower()
+    return k if k in VERTRAG_LAYOUTS else VERTRAG_LAYOUT_STANDARD
+
+
+def _akzent():
+    g = _GESTALTUNG.get()
+    return g["farbe"] if g else ACCENT
+
+
+def _akzent_hex() -> str:
+    g = _GESTALTUNG.get()
+    return g["hex"] if g else "#FF3B30"
+
+
+def _formular() -> bool:
+    g = _GESTALTUNG.get()
+    return bool(g) and g["layout"] == "formular"
+
+
+def _aufgehellt(farbe, anteil: float):
+    """Farbe mit Weiss gemischt (anteil 0..1 = Weissanteil) — als feste Farbe, damit Drucker und
+    PDF-Betrachter ohne Transparenz auskommen."""
+    return colors.Color(farbe.red + (1 - farbe.red) * anteil, farbe.green + (1 - farbe.green) * anteil,
+                        farbe.blue + (1 - farbe.blue) * anteil)
+
+
+FORMULAR_FLAECHE = colors.HexColor("#F5F8FB")
+FORMULAR_PUNKTLINIE = colors.HexColor("#C9D3DC")
 
 PAGE_W, PAGE_H = A4
 MARGIN = 1.8 * cm
@@ -112,7 +168,7 @@ def _styles():
         "subtitle": ParagraphStyle("subtitle", parent=s["Normal"], fontSize=9,
                                    leading=12, textColor=GREY),
         "brand": ParagraphStyle("brand", parent=s["Normal"], fontSize=10, leading=13,
-                                textColor=ACCENT),
+                                textColor=_akzent()),
         "meta_label": ParagraphStyle("meta_label", parent=s["Normal"], fontSize=7,
                                      leading=9, textColor=GREY, alignment=TA_RIGHT),
         "meta_value": ParagraphStyle("meta_value", parent=s["Normal"], fontSize=10,
@@ -139,18 +195,47 @@ def _styles():
                                     alignment=TA_RIGHT),
         "sig_label": ParagraphStyle("sig_label", parent=s["Normal"], fontSize=8,
                                     leading=10, textColor=GREY),
+        # Layout "formular" (Wunsch Ahmad 03.10.2026)
+        "f_title": ParagraphStyle("f_title", parent=s["Normal"], fontSize=19, leading=22,
+                                  textColor=_akzent(), alignment=1),
+        "f_subtitle": ParagraphStyle("f_subtitle", parent=s["Normal"], fontSize=8.5, leading=11,
+                                     textColor=GREY, alignment=1),
+        "f_firma": ParagraphStyle("f_firma", parent=s["Normal"], fontSize=10, leading=12.5,
+                                  textColor=_akzent()),
+        "f_section": ParagraphStyle("f_section", parent=s["Normal"], fontSize=9.5, leading=12,
+                                    textColor=_akzent()),
+        "f_label": ParagraphStyle("f_label", parent=s["Normal"], fontSize=7.5, leading=10,
+                                  textColor=GREY),
+        "f_price_label": ParagraphStyle("f_price_label", parent=s["Normal"], fontSize=7, leading=9,
+                                        textColor=GREY, alignment=1),
+        "f_price_value": ParagraphStyle("f_price_value", parent=s["Normal"], fontSize=18, leading=21,
+                                        textColor=_akzent(), alignment=1),
+        "f_price_sub": ParagraphStyle("f_price_sub", parent=s["Normal"], fontSize=10.5, leading=13,
+                                      textColor=PRIMARY, alignment=1),
     })
 
 
 def _section(title, st):
-    """Section heading: light bar with red accent edge — consistent visual anchor."""
+    """Section heading: light bar with red accent edge — consistent visual anchor.
+    Layout "formular": Titel in der Vertragsfarbe, GROSS, mit duenner Linie darunter."""
+    if _formular():
+        t = Table([[Paragraph(f"<b>{_xml_escape(str(title).upper())}</b>", st["f_section"])]],
+                  colWidths=[CONTENT_W], hAlign="LEFT")
+        t.setStyle(TableStyle([
+            ("LINEBELOW", (0, 0), (-1, -1), 1.1, _aufgehellt(_akzent(), 0.55)),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 2),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]))
+        return t
     t = Table(
         [[Paragraph(f"<b>{_xml_escape(title)}</b>", st["section"])]],
         colWidths=[CONTENT_W],
     )
     t.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, -1), LIGHT),
-        ("LINEBEFORE", (0, 0), (0, -1), 2.5, ACCENT),
+        ("LINEBEFORE", (0, 0), (0, -1), 2.5, _akzent()),
         ("LEFTPADDING", (0, 0), (-1, -1), 9),
         ("TOPPADDING", (0, 0), (-1, -1), 5),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
@@ -159,12 +244,26 @@ def _section(title, st):
     return t
 
 
+def _zeile_auszeichnen(zeile: str) -> str:
+    """Layout "formular": ein Aufzaehlungspunkt (•) oder eine Nummer ("1.") am Zeilenanfang steht in
+    der Vertragsfarbe und fett. Die Zeile ist schon escaped; sonst unveraendert."""
+    if not _formular():
+        return zeile
+    m = re.match(r"^(\s*)•\s*", zeile)
+    if m:
+        return f'{m.group(1)}<font color="{_akzent_hex()}"><b>•</b></font>&nbsp;&nbsp;' + zeile[m.end():]
+    m = re.match(r"^(\s*)(\d{1,2}\.)\s+", zeile)
+    if m:
+        return f'{m.group(1)}<font color="{_akzent_hex()}"><b>{m.group(2)}</b></font> ' + zeile[m.end():]
+    return zeile
+
+
 def _absaetze(text, style):
     """Freitext -> Paragraphs. Eine Leerzeile trennt Absaetze, ein einfacher
     Zeilenumbruch bleibt als <br/> erhalten. Nutzertext wird zuerst escaped."""
     out = []
     for para in (text or "").split("\n\n"):
-        txt = _xml_escape(para).replace("\n", "<br/>").strip()
+        txt = "<br/>".join(_zeile_auszeichnen(_xml_escape(z)) for z in para.split("\n")).strip()
         if txt:
             out.append(Paragraph(txt, style))
     return out
@@ -211,10 +310,20 @@ def _kv_compact(rows, st, label_w, value_w):
     data = []
     for label, value in rows:
         data.append([
-            Paragraph(label, st["label"]),
+            Paragraph(label, st["f_label" if _formular() else "label"]),
             Paragraph(_safe_para(value), st["value"]),
         ])
     t = Table(data, colWidths=[label_w, value_w])
+    if _formular():
+        # Wie ein ausgefuelltes Formular: Wert auf einer gepunkteten Linie
+        t.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "BOTTOM"),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+            ("TOPPADDING", (0, 0), (-1, -1), 2.5),
+            ("LEFTPADDING", (0, 0), (0, -1), 0),
+            ("LINEBELOW", (1, 0), (1, -1), 0.6, FORMULAR_PUNKTLINIE, None, (0.8, 1.6)),
+        ]))
+        return t
     t.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
@@ -225,7 +334,25 @@ def _kv_compact(rows, st, label_w, value_w):
 
 
 def _boxed_kv(title, rows, st):
-    """Key-value block inside a bordered box with a titled header row."""
+    """Key-value block inside a bordered box with a titled header row.
+    Layout "formular": kein Kasten — Abschnittstitel mit Linie, darunter die Felder."""
+    if _formular():
+        label_w = 2.4 * cm
+        inner = _kv_compact(rows, st, label_w, COL_W - label_w)
+        kopf = Table([[Paragraph(f"<b>{_xml_escape(str(title).upper())}</b>", st["f_section"])]],
+                     colWidths=[COL_W])
+        kopf.setStyle(TableStyle([
+            ("LINEBELOW", (0, 0), (-1, -1), 1.1, _aufgehellt(_akzent(), 0.55)),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 2), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]))
+        t = Table([[kopf], [inner]], colWidths=[COL_W])
+        t.setStyle(TableStyle([
+            ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (0, 0), 4),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ]))
+        return t
     label_w = 2.6 * cm
     val_w = COL_W - label_w - 0.6 * cm
     inner = _kv_compact(rows, st, label_w, val_w)
@@ -566,6 +693,7 @@ def _empfang_paar(contract, st, unterschrift, mit_empfang=True, bilder=None, por
 def _numbered_canvas_factory(footer_left: str, footer_center: str):
     """Canvas subclass drawing accent bar + footer with 'Seite X von Y' on
     every page. Two-pass: pages are buffered so the total count is known."""
+    akzent = _akzent()          # Vertragsfarbe (03.10.2026) — beim Bauen des Vertrags festgehalten
 
     class _NumberedCanvas(_rl_canvas.Canvas):
         def __init__(self, *args, **kwargs):
@@ -587,7 +715,7 @@ def _numbered_canvas_factory(footer_left: str, footer_center: str):
         def _decorate(self, total):
             # Top accent bar (full width) — brand anchor on every page.
             self.saveState()
-            self.setFillColor(ACCENT)
+            self.setFillColor(akzent)
             self.rect(0, PAGE_H - 0.14 * cm, PAGE_W, 0.14 * cm, stroke=0, fill=1)
             # Footer divider + text
             y = 1.1 * cm
@@ -787,7 +915,31 @@ def _platzhalter_vertrag(contract: dict, vehicle: dict) -> dict:
 
 def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
                           digital: bool = False, unterschriften: Optional[dict] = None,
-                          portal: bool = False) -> bytes:
+                          portal: bool = False, farbe: Optional[str] = None,
+                          layout: Optional[str] = None) -> bytes:
+    """Build a Kaufvertrag PDF and return raw bytes — siehe _vertrag_bauen.
+
+    Farbe und Layout (Wunsch Ahmad 03.10.2026) stehen im Vertrag selbst (contract.vertrag_farbe /
+    contract.vertrag_layout), beim Anlegen aus den Firmeneinstellungen festgehalten — wie das Logo:
+    eine spaetere Fassung sieht nie anders aus, nur weil die Firma heute eine andere Farbe gewaehlt hat.
+    Altvertraege ohne Angabe bleiben im bisherigen Aussehen (Rot, modern). `farbe`/`layout`
+    ueberschreiben (Vorschau in den Einstellungen, bevor gespeichert ist)."""
+    c = contract or {}
+    hexwert = vertrag_farbe_hex(farbe if farbe is not None else c.get("vertrag_farbe"))
+    token = _GESTALTUNG.set({
+        "farbe": colors.HexColor(hexwert), "hex": hexwert,
+        "layout": vertrag_layout(layout if layout is not None else c.get("vertrag_layout")),
+    })
+    try:
+        return _vertrag_bauen(dealer=dealer, vehicle=vehicle, contract=contract, digital=digital,
+                              unterschriften=unterschriften, portal=portal)
+    finally:
+        _GESTALTUNG.reset(token)
+
+
+def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
+                   digital: bool = False, unterschriften: Optional[dict] = None,
+                   portal: bool = False) -> bytes:
     """Build a Kaufvertrag PDF and return raw bytes.
 
     portal=True (Wunsch Ahmad 02.10.2026): die Fassung fuer das Kundenportal — wie die Druckfassung, aber
@@ -851,20 +1003,43 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
             Paragraph("FASSUNG", st["meta_label"]),
             Paragraph(f"<b>{_xml_escape(fassung_text)}</b>", st["meta_value"]),
         ]
-    head = Table([[header_left, header_right]], colWidths=[CONTENT_W - 4.5 * cm, 4.5 * cm])
-    head.setStyle(TableStyle([
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 0),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-    ]))
-    story.append(head)
-    story.append(Spacer(1, 8))
+    if _formular():
+        # Layout "formular" (Wunsch Ahmad 03.10.2026, nach seiner Vorlage): links Logo/Firma,
+        # in der Mitte die Ueberschrift in der Vertragsfarbe, rechts Nummer und Datum.
+        links = [Paragraph(f"<b>{_xml_escape(company)}</b>", st["f_firma"])]
+        if logo is not None:
+            links = [logo, Spacer(1, 3)] + links
+        mitte = [Paragraph("<b>KFZ-KAUFVERTRAG</b>", st["f_title"]),
+                 Paragraph("für ein gebrauchtes Kraftfahrzeug", st["f_subtitle"])]
+        head = Table([[links, mitte, header_right]],
+                     colWidths=[5.2 * cm, CONTENT_W - 9.4 * cm, 4.2 * cm], hAlign="LEFT")
+        head.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("VALIGN", (1, 0), (1, 0), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ]))
+        story.append(head)
+        story.append(Spacer(1, 10))
+        trenner = Table([[""]], colWidths=[CONTENT_W], rowHeights=[0.8], hAlign="LEFT")
+        trenner.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), DIVIDER)]))
+        story.append(trenner)
+        story.append(Spacer(1, 12))
+    else:
+        head = Table([[header_left, header_right]], colWidths=[CONTENT_W - 4.5 * cm, 4.5 * cm])
+        head.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ]))
+        story.append(head)
+        story.append(Spacer(1, 8))
 
-    # Accent line under the letterhead
-    line = Table([[""]], colWidths=[CONTENT_W], rowHeights=[2])
-    line.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), ACCENT)]))
-    story.append(line)
-    story.append(Spacer(1, 12))
+        # Accent line under the letterhead
+        line = Table([[""]], colWidths=[CONTENT_W], rowHeights=[2])
+        line.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), _akzent())]))
+        story.append(line)
+        story.append(Spacer(1, 12))
 
     # ---------- Parties — boxed, side by side ----------
     seller_rows = [
@@ -935,28 +1110,56 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         (f"{k}: {_xml_escape(str(v))}" if k else _xml_escape(str(v)))
         for k, v in pay_bits if str(v).strip()
     )
-    price_box = Table([
-        [
-            Paragraph("KAUFPREIS (VEREINBART)", st["price_label"]),
-            Paragraph(f"<b>{price_str}</b>", st["price_value"]),
-        ],
-        [
-            Paragraph(preis_label, st["price_label"]),
-            # Seit 16.09.2026 kein Strich, wenn keine Zahlungsart angegeben ist.
-            Paragraph(pay_sub, st["price_sub"]),
-        ],
-    ], colWidths=[CONTENT_W * 0.45, CONTENT_W * 0.55])
-    price_box.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), DARK),
-        ("LEFTPADDING", (0, 0), (-1, -1), 12),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 12),
-        ("TOPPADDING", (0, 0), (-1, 0), 10),
-        ("BOTTOMPADDING", (0, 0), (-1, 0), 2),
-        ("TOPPADDING", (0, 1), (-1, 1), 2),
-        ("BOTTOMPADDING", (0, 1), (-1, 1), 10),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("LINEBEFORE", (0, 0), (0, -1), 2.5, ACCENT),
-    ]))
+    if _formular():
+        # Layout "formular" (03.10.2026): heller Preisstreifen — Kaufpreis gross in der Vertragsfarbe,
+        # daneben die Zahlungsart (bei MwSt-Ausweis zusaetzlich Netto und MwSt).
+        spalten = [[Paragraph("KAUFPREIS (VEREINBART)", st["f_price_label"]),
+                    Paragraph(f"<b>{price_str}</b>", st["f_price_value"])]]
+        if contract.get("show_vat"):
+            spalten += [[Paragraph("NETTO", st["f_price_label"]),
+                         Paragraph(_xml_escape(_eur(brutto / 1.19)), st["f_price_sub"])],
+                        [Paragraph("19 % MWST", st["f_price_label"]),
+                         Paragraph(_xml_escape(_eur(brutto - brutto / 1.19)), st["f_price_sub"])]]
+        zahlungsart = str(contract.get("payment_method") or "Bar / Überweisung").strip()
+        if zahlungsart:
+            spalten.append([Paragraph("ZAHLUNGSART", st["f_price_label"]),
+                            Paragraph(_xml_escape(zahlungsart), st["f_price_sub"])])
+        # Die Kaufpreis-Spalte ist breiter, damit auch ein siebenstelliger Preis in EINE Zeile passt.
+        erste = CONTENT_W * (0.5 if len(spalten) <= 2 else 0.38)
+        rest = (CONTENT_W - erste) / max(1, len(spalten) - 1)
+        price_box = Table([spalten], colWidths=[erste] + [rest] * (len(spalten) - 1), hAlign="LEFT")
+        price_box.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), FORMULAR_FLAECHE),
+            ("BOX", (0, 0), (-1, -1), 0.6, DIVIDER),
+            ("ROUNDEDCORNERS", [5, 5, 5, 5]),
+            ("LINEAFTER", (0, 0), (-2, -1), 0.6, DIVIDER),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
+        ]))
+    else:
+        price_box = Table([
+            [
+                Paragraph("KAUFPREIS (VEREINBART)", st["price_label"]),
+                Paragraph(f"<b>{price_str}</b>", st["price_value"]),
+            ],
+            [
+                Paragraph(preis_label, st["price_label"]),
+                # Seit 16.09.2026 kein Strich, wenn keine Zahlungsart angegeben ist.
+                Paragraph(pay_sub, st["price_sub"]),
+            ],
+        ], colWidths=[CONTENT_W * 0.45, CONTENT_W * 0.55])
+        price_box.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), DARK),
+            ("LEFTPADDING", (0, 0), (-1, -1), 12),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+            ("TOPPADDING", (0, 0), (-1, 0), 10),
+            ("BOTTOMPADDING", (0, 0), (-1, 0), 2),
+            ("TOPPADDING", (0, 1), (-1, 1), 2),
+            ("BOTTOMPADDING", (0, 1), (-1, 1), 10),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LINEBEFORE", (0, 0), (0, -1), 2.5, _akzent()),
+        ]))
     story.append(KeepTogether([
         # Wunsch Ahmad 21.09.2026: der Kaufpreis ohne Nummer, die
         # Abschnitte danach zaehlen ab 1.
@@ -1125,7 +1328,15 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
 
     # ---------- Features ----------
     feats = _ausstattung_liste(vehicle.get("features"))   # P-15
-    if feats:
+    if feats and _formular():
+        # Layout "formular": Ausstattung als Fliesstext, durch Kommas getrennt
+        story.append(_section("Ausstattung laut Inserat / Verkäuferangaben", st))
+        story.append(Spacer(1, 6))
+        story.append(Paragraph(", ".join(_xml_escape(str(x)) for x in feats), st["body"]))
+        story.append(Spacer(1, 4))
+        story.append(Paragraph("<i>Ausstattung laut Inseratsangaben.</i>", st["small"]))
+        story.append(Spacer(1, 12))
+    elif feats:
         story.append(_section("Ausstattung laut Inserat / Verkäuferangaben", st))
         story.append(Spacer(1, 6))
         col_count = 3

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field, field_validator
 
 from deps import current_user, db, get_subscription_status, now_iso, current_firma
@@ -70,6 +70,29 @@ class DealerSettingsIn(BaseModel):
     # Text unter "Unterschriften" in der DIGITALEN Ausfertigung (Versand per
     # E-Mail/WhatsApp, ohne Unterschriftslinien). Leer = Standardtext.
     digital_vertragstext: Optional[str] = None
+    # Wunsch Ahmad 03.10.2026: Farbe und Layout des Kaufvertrags (nur der Chef, firmenweit —
+    # kein Sucher-Feld). Farbe: dieselben Namen wie die Farbe der App; Layout: modern | formular.
+    vertrag_farbe: Optional[str] = None
+    vertrag_layout: Optional[str] = None
+
+    @field_validator("vertrag_farbe")
+    @classmethod
+    def _vertrag_farbe(cls, v):
+        if v is None:
+            return v
+        from konfig import akzentfarbe_pruefen
+        return akzentfarbe_pruefen(v)
+
+    @field_validator("vertrag_layout")
+    @classmethod
+    def _vertrag_layout(cls, v):
+        if v is None:
+            return v
+        from pdf_service import VERTRAG_LAYOUTS
+        k = str(v).strip().lower()
+        if k not in VERTRAG_LAYOUTS:
+            raise ValueError("Unbekanntes Vertragslayout — bitte eines der angebotenen wählen")
+        return k
 
     # DoS-Schutz: default_terms/default_special_agreements werden in JEDES
     # Vertrags-PDF injiziert — ohne Cap koennte ein 2-MB-Wert jeden Vertrag
@@ -316,11 +339,111 @@ def _collect_settings_update(body: DealerSettingsIn) -> dict:
                  "email_subject_nach_kauf", "email_template_nach_kauf",
                  "whatsapp_template_nach_kauf",
                  "email_subject_bahn", "email_template_bahn",
-                 "sondervereinbarung_standard_aktiv", "empfang_drucken"):
+                 "sondervereinbarung_standard_aktiv", "empfang_drucken",
+                 "vertrag_farbe", "vertrag_layout"):
         wert = getattr(body, feld, None)
         if wert is not None:
             update[feld] = wert
     return update
+
+
+# ---------- Vertragsdesign: Vorschau mit Musterdaten (Wunsch Ahmad 03.10.2026) ----------
+class VertragVorschauIn(BaseModel):
+    """Farbe/Layout zum Ansehen, BEVOR gespeichert ist; leer = gespeicherter Stand der Firma."""
+    farbe: Optional[str] = None
+    layout: Optional[str] = None
+    variante: str = "druck"          # druck | digital
+
+    @field_validator("farbe")
+    @classmethod
+    def _farbe(cls, v):
+        if v is None or v == "":
+            return None
+        from konfig import akzentfarbe_pruefen
+        return akzentfarbe_pruefen(v)
+
+    @field_validator("layout")
+    @classmethod
+    def _layout(cls, v):
+        if v is None or v == "":
+            return None
+        from pdf_service import VERTRAG_LAYOUTS
+        k = str(v).strip().lower()
+        if k not in VERTRAG_LAYOUTS:
+            raise ValueError("Unbekanntes Vertragslayout")
+        return k
+
+    @field_validator("variante")
+    @classmethod
+    def _variante(cls, v):
+        k = str(v or "druck").strip().lower()
+        if k not in ("druck", "digital"):
+            raise ValueError("variante: druck oder digital")
+        return k
+
+
+#: Musterdaten der Vorschau — erkennbar als Muster (Nummer, Namen), nie ein echter Vertrag.
+VORSCHAU_VERTRAG = {
+    "contract_no": "MUSTER-0001",
+    "seller_name": "Max Mustermann", "seller_address": "Musterstraße 1",
+    "seller_zip": "12345", "seller_city": "Musterstadt",
+    "seller_phone": "0170 0000000", "seller_email": "max@beispiel.de",
+    "purchase_price": 12500, "payment_method": "Echtzeitüberweisung",
+    "tires": "Sommerreifen", "service_book": "ja", "hu_valid": "ja", "hu_until": "2027-06",
+    "accident_free": "ja", "drivable": "ja", "eu_import": "nein",
+    "vehicle_description": "Zweite Hand, scheckheftgepflegt, Nichtraucherfahrzeug.\n"
+                           "Frische Inspektion, Allwetter- und Winterreifen vorhanden.",
+}
+VORSCHAU_FAHRZEUG = {
+    "make_label": "Volkswagen", "model_label": "Golf", "model_description": "Golf VII 1.4 TSI Highline",
+    "first_registration": "03/2017", "mileage": 98500, "fuel_label": "Benzin",
+    "gearbox_label": "Schaltgetriebe", "power_kw": 92, "power_ps": 125, "color": "Grau",
+    "doors": "4/5", "previous_owners": 2,
+    "features": ["ABS", "Bluetooth", "Einparkhilfe hinten", "Klimaautomatik", "Navigationssystem",
+                 "Sitzheizung", "Tempomat", "Leichtmetallfelgen", "Start/Stopp-Automatik"],
+}
+
+_vorschau_limiter = None
+
+
+@router.post("/dealer/vertrag-vorschau")
+async def vertrag_vorschau(body: VertragVorschauIn, user=Depends(current_firma)):
+    """Kaufvertrag mit Musterdaten im gewaehlten Design (Farbe, Layout) — mit den echten Firmendaten,
+    dem Logo und den Vertragstexten der Firma. Speichert nichts. Nur der Chef (er waehlt das Design)."""
+    import asyncio
+    from datetime import date, timedelta
+    from deps import current_chef, effective_dealer
+    await current_chef(user)
+    global _vorschau_limiter
+    if _vorschau_limiter is None:
+        from rate_limiter import SlidingWindowRateLimiter
+        _vorschau_limiter = SlidingWindowRateLimiter(max_attempts=30, window_seconds=60, name="vertrag-vorschau")
+    if not await _vorschau_limiter.check(f"konto:{user['id']}"):
+        raise HTTPException(429, "Zu viele Vorschauen in kurzer Zeit — bitte kurz warten.")
+    import vertrag_vorlagen as _vorlagen
+    from pdf_service import digitaler_vertragstext, generate_contract_pdf
+    from routes.contracts import _logo_einsetzen, logo_schluessel
+    dealer = await effective_dealer(user) or {}
+    vertrag = dict(VORSCHAU_VERTRAG)
+    vertrag["pickup_date"] = (date.today() + timedelta(days=7)).isoformat()
+    vertrag["additional_terms"] = _vorlagen.sondervereinbarungen(dealer)
+    vertrag["agb_text"] = dealer.get("default_terms", "") or ""
+    vertrag["digital_vertragstext"] = digitaler_vertragstext(dealer)
+    vertrag["logo_key"] = logo_schluessel(dealer)
+    dealer = await _logo_einsetzen(dealer, vertrag)
+    try:
+        pdf = await asyncio.to_thread(
+            generate_contract_pdf, dealer=dealer, vehicle=dict(VORSCHAU_FAHRZEUG), contract=vertrag,
+            digital=body.variante == "digital",
+            farbe=body.farbe or dealer.get("vertrag_farbe") or "standard",
+            layout=body.layout or dealer.get("vertrag_layout") or "modern")
+    except Exception:  # noqa: BLE001 — eigene Texte mit kaputtem Inhalt: klare Meldung statt 500
+        import logging
+        logging.getLogger("autohandel").exception("Vertragsvorschau fehlgeschlagen")
+        raise HTTPException(400, "Die Vorschau konnte nicht erstellt werden — bitte die Vertragstexte prüfen.")
+    return Response(content=pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": 'inline; filename="Kaufvertrag-Muster.pdf"',
+                             "Cache-Control": "no-store"})
 
 
 @router.put("/dealer/settings")
