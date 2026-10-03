@@ -1,0 +1,334 @@
+# -*- coding: utf-8 -*-
+"""Werkzeuge zum Herunterladen — Programme, die nur bestimmte Kunden bekommen.
+
+03.10.2026 (Wunsch Ahmad): Der AutoPointer-Vergleich (Windows-Programm, Quelle
+in autopointer-vergleich/) ist erst einmal NUR fuer Kunde 10002 freigeschaltet, seit dem Abend
+auch fuer Kunde 10001 (Wunsch Ahmad).
+"Alle anderen bekommen das nicht, die sollen das gar nicht sehen": Fuer andere
+Firmen gibt es weder einen Menuepunkt noch einen Download — die Route antwortet
+404, als gaebe es sie nicht.
+
+Freigabe je Werkzeug ueber eine Umgebungsvariable mit Kundennummern (Firma =
+dealers.kunden_nr; Chef UND alle Sucher der Firma). Standard ohne Variable:
+10001 und 10002. Mehrere Kunden: AUTOPOINTER_VERGLEICH_KUNDEN=10001,10002,10017
+
+Die Programmdatei liegt im Datei-Speicher (S3/R2 bzw. lokal) unter
+werkzeuge/<id>/<dateiname>, Version/Groesse/Pruefsumme in der Sammlung
+`werkzeuge`. Hochladen: scripts/werkzeug_hochladen.py (im Backend-Container;
+die Datei ist groesser als das Upload-Limit von nginx).
+
+Lizenz (Wunsch Ahmad 03.10.2026 nachmittags): Das Programm arbeitet nur
+verbunden. Der Sucher holt sich in der App einen 6-stelligen Code (10 Minuten,
+einmal), das Programm tauscht ihn gegen einen Programm-Schluessel. Pro Konto
+EIN PC: eine neue Verbindung ersetzt die alte (der alte PC bekommt 401). Die
+Browser-Anmeldung bleibt davon unberuehrt — der Schluessel ist keine Sitzung
+und kann nur Vergleiche fuer dieses Werkzeug anfragen. Jeder Vergleich geht
+ueber den Server: Abo pruefen, Links mit den Vergleichsregeln der Firma bauen
+(wie der Vergleich in der App), protokollieren (Admin + Chef sehen, wer welches
+Auto verglichen hat).
+
+Dieses Modul importiert weder FastAPI noch server/routes — die Tests und das
+Skript nutzen es direkt.
+"""
+from __future__ import annotations
+
+import hashlib
+import os
+import re
+import secrets
+from datetime import datetime, timezone
+from typing import Iterable, Optional
+
+AUTOPOINTER = "autopointer-vergleich"
+
+WERKZEUGE = {
+    AUTOPOINTER: {
+        # Name und Texte kommen NUR ueber /api/werkzeuge (nur fuer freigegebene
+        # Firmen) — die Oberflaeche selbst enthaelt keinen Hinweis darauf.
+        "name": "AutoPointer-Vergleich",
+        "beschreibung": ("Windows-Programm für AutoPointer: Du klickst in AutoPointer ein Inserat an – "
+                         "eine halbe Sekunde später öffnen sich automatisch die passenden Vergleiche "
+                         "auf mobile.de und AutoScout24 (gleiches Modell, Baujahr, Kilometer, Leistung, "
+                         "Kraftstoff, Getriebe). Keine Eingabe nötig."),
+        "schritte": [
+            "Programm herunterladen und starten (Windows 10/11). Beim ersten Start meldet Windows evtl. "
+            "„Der Computer wurde durch Windows geschützt“ – dann „Weitere Informationen“ → „Trotzdem ausführen“.",
+            "Das Programm fragt nach einem Code: hier auf „Programm verbinden“ klicken und den 6-stelligen Code "
+            "eintippen. Jedes Konto kann auf EINEM PC verbunden sein; ein neuer PC ersetzt den alten.",
+            "Unten rechts erscheint ein grünes Lupen-Symbol. AutoPointer öffnen und ein Inserat anklicken – "
+            "die Vergleiche öffnen sich als neue Browser-Tabs, mit euren Vergleichsregeln aus AutoSchnell "
+            "(Einstellungen → Vergleich). Ohne aktives Abo öffnet das Programm nichts.",
+            "Kaufvertrag: Beim Anklicken liest AutoSchnell das Inserat schon im Hintergrund aus (Daten + Fotos). "
+            "Rechtsklick auf das Symbol → „Kaufvertrag: Auto in AutoSchnell öffnen“ oder hier unten bei „Deine "
+            "letzten Autos“ – kein Link-Einfügen nötig. Nur wenn AutoPointer bei AutoScout die Hash-ID nicht "
+            "vollständig zeigt: Inserat-Adresse selbst kopieren und unter „Vergleich“ einfügen.",
+            "Doppelklick auf das Symbol oder Strg+Alt+P schaltet die Automatik aus und wieder an. "
+            "Rechtsklick: Einstellungen (Portale, Browser, mit Windows starten).",
+        ],
+        "dateiname": "AutoSchnell-Vergleich.exe",
+        "schluessel": "werkzeuge/autopointer-vergleich/AutoSchnell-Vergleich.exe",
+        "kunden_env": "AUTOPOINTER_VERGLEICH_KUNDEN",
+        "kunden_standard": "10001,10002",
+    },
+}
+
+#: Obergrenze fuer eine Programmdatei (die EXE ist ~55 MB).
+MAX_MB = 200
+_MIN_BYTES = 1024
+
+
+def kunden_text(kunden_nr) -> str:
+    """Kundennummer als Text ohne fuehrende Nullen/Leerzeichen ("10002")."""
+    if kunden_nr is None or isinstance(kunden_nr, bool):
+        return ""
+    try:
+        return str(int(str(kunden_nr).strip()))
+    except ValueError:
+        return str(kunden_nr).strip()
+
+
+def freigegebene_kunden(werkzeug_id: str) -> frozenset:
+    """Kundennummern, die das Werkzeug sehen. Eine gesetzte, aber LEERE
+    Variable schaltet es fuer alle ab."""
+    w = WERKZEUGE.get(werkzeug_id)
+    if not w:
+        return frozenset()
+    roh = os.environ.get(w["kunden_env"])
+    if roh is None:
+        roh = w["kunden_standard"]
+    teile = (kunden_text(t) for t in roh.replace(";", ",").split(","))
+    return frozenset(t for t in teile if t)
+
+
+def ist_freigegeben(werkzeug_id: str, kunden_nr) -> bool:
+    k = kunden_text(kunden_nr)
+    return bool(k) and k in freigegebene_kunden(werkzeug_id)
+
+
+def freigegebene_werkzeuge(kunden_nr) -> list:
+    return [wid for wid in WERKZEUGE if ist_freigegeben(wid, kunden_nr)]
+
+
+def exe_pruefen(daten: bytes) -> None:
+    """Nur echte Windows-Programme (MZ-Kopf), nicht leer, nicht riesig."""
+    if not daten or len(daten) < _MIN_BYTES or daten[:2] != b"MZ":
+        raise ValueError("Keine Windows-Programmdatei (.exe)")
+    if len(daten) > MAX_MB * 1024 * 1024:
+        raise ValueError(f"Datei zu groß (max. {MAX_MB} MB)")
+
+
+def eintrag(werkzeug_id: str, daten: bytes, version: str, jetzt: Optional[datetime] = None) -> dict:
+    w = WERKZEUGE[werkzeug_id]
+    return {
+        "id": werkzeug_id,
+        "schluessel": w["schluessel"],
+        "dateiname": w["dateiname"],
+        "version": (version or "").strip()[:40] or (jetzt or datetime.now(timezone.utc)).strftime("%Y-%m-%d"),
+        "groesse": len(daten),
+        "sha256": hashlib.sha256(daten).hexdigest(),
+        "hochgeladen_am": (jetzt or datetime.now(timezone.utc)).isoformat(),
+    }
+
+
+def hochladen(db_sync, werkzeug_id: str, daten: bytes, version: str = "", storage=None) -> dict:
+    """Datei pruefen, in den Speicher legen, Eintrag schreiben (synchron:
+    pymongo-Datenbank, fuer Skript und Tests)."""
+    if werkzeug_id not in WERKZEUGE:
+        raise ValueError(f"Unbekanntes Werkzeug: {werkzeug_id}")
+    exe_pruefen(daten)
+    if storage is None:
+        from storage_service import storage as storage_standard
+        storage = storage_standard
+    meta = eintrag(werkzeug_id, daten, version)
+    storage.save(meta["schluessel"], daten, max_mb=MAX_MB)
+    db_sync.werkzeuge.replace_one({"id": werkzeug_id}, meta, upsert=True)
+    return meta
+
+
+def oeffentlich(meta: Optional[dict], werkzeug_id: str) -> dict:
+    """Was die Oberflaeche ueber ein freigegebenes Werkzeug erfaehrt."""
+    w = WERKZEUGE[werkzeug_id]
+    meta = meta or {}
+    return {
+        "id": werkzeug_id,
+        "name": w["name"],
+        "beschreibung": w.get("beschreibung", ""),
+        "schritte": list(w.get("schritte", [])),
+        "dateiname": w["dateiname"],
+        "vorhanden": bool(meta.get("groesse")),
+        "version": meta.get("version"),
+        "groesse": meta.get("groesse"),
+        "hochgeladen_am": meta.get("hochgeladen_am"),
+    }
+
+
+def alle_ids() -> Iterable[str]:
+    return WERKZEUGE.keys()
+
+
+# ---------------------------------------------------------------------------
+# Lizenz: Code -> Programm-Schluessel, ein PC je Konto
+# ---------------------------------------------------------------------------
+CODE_LAENGE = 6
+CODE_MINUTEN = 10
+#: Sammlungen (alle mit dealer_id — gehen in die Firmenloeschung, routes/admin.py)
+SAMMLUNG_CODES = "werkzeug_codes"
+SAMMLUNG_VERBINDUNGEN = "werkzeug_verbindungen"
+SAMMLUNG_VERGLEICHE = "werkzeug_vergleiche"
+#: Pruefbericht 03.10.2026 (Nr. 12): die App meldet, dass sie ein Auto aus dem Programm uebernommen hat
+SAMMLUNG_APP_STARTS = "werkzeug_app_starts"
+#: Pruefbericht 03.10.2026 (Nr. 16): warum ein Programm-Schluessel nicht mehr gilt (anderer PC, Chef, Betreiber)
+SAMMLUNG_GETRENNT = "werkzeug_getrennt"
+TOKEN_KOPF = "X-Werkzeug-Schluessel"
+
+
+def code_erzeugen() -> str:
+    return f"{secrets.randbelow(10 ** CODE_LAENGE):0{CODE_LAENGE}d}"
+
+
+def code_normalisieren(roh) -> str:
+    """Nur Ziffern ("123 456" / "123-456" -> "123456")."""
+    return re.sub(r"\D", "", str(roh or ""))[:20]
+
+
+def streuwert(wert: str) -> str:
+    """SHA-256 — Codes und Schluessel liegen nie im Klartext in der Datenbank."""
+    return hashlib.sha256(str(wert).encode("utf-8")).hexdigest()
+
+
+def schluessel_erzeugen() -> str:
+    return secrets.token_urlsafe(32)
+
+
+#: So lange bekommt derselbe PC fuer denselben Code denselben Schluessel noch einmal
+#: (Anfrage doppelt angekommen: Netz, Doppelklick — gesehen beim Test am 03.10.2026).
+WIEDERHOLUNG_SEKUNDEN = 120
+
+
+def schluessel_ableiten(geheimnis: str, code_id: str, pc_kennung: str) -> str:
+    """Schluessel fuer genau diese Einloesung (Code + PC): eine doppelt angekommene
+    Anfrage ergibt denselben Schluessel, ohne dass er irgendwo im Klartext liegt."""
+    import base64
+    import hmac
+    roh = hmac.new(str(geheimnis).encode("utf-8"), f"werkzeug|{code_id}|{pc_kennung}".encode("utf-8"),
+                   hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(roh).decode("ascii").rstrip("=")
+
+
+def _text(wert, laenge: int) -> str:
+    return re.sub(r"\s+", " ", str(wert or "")).strip()[:laenge]
+
+
+def fahrzeug_zu_vehicle(f: dict) -> dict:
+    """Vom Programm gelesene Werte -> Fahrzeug-Dict der Link-Bauer
+    (mobile_service/autoscout_service.build_search_url)."""
+    jahr, monat = f.get("ez_jahr"), f.get("ez_monat")
+    ez = f"{int(monat):02d}/{int(jahr)}" if jahr and monat else (str(int(jahr)) if jahr else "")
+    titel = _text(f.get("titel"), 200)
+    v = {
+        "make_label": _text(f.get("marke"), 60),
+        "model_label": _text(f.get("modell"), 80),
+        "model_description": titel,
+        "title": titel,
+        "first_registration": ez,
+        "mileage": int(f["kilometer"]) if f.get("kilometer") is not None else None,
+        "power_kw": int(f["kw"]) if f.get("kw") else None,
+        "power_ps": int(f["ps"]) if f.get("ps") else None,
+        "fuel": _text(f.get("kraftstoff"), 40),
+        "fuel_label": _text(f.get("kraftstoff"), 40),
+        "gearbox": _text(f.get("getriebe"), 40),
+        "gearbox_label": _text(f.get("getriebe"), 40),
+        "doors": _text(f.get("tueren"), 10) or None,
+    }
+    v = {k: w for k, w in v.items() if w not in (None, "")}
+    # Wunsch Ahmad 03.10.2026: Kleinanzeigen fuehrt viele Autos als "Weitere VW" — dann das Modell aus dem
+    # Titel ("VW Beetle Cabrio 1.2 TSI" -> Beetle), wie beim Einfuegen eines Links in der App
+    # (mobile_service._enhance_generic_model, nur der Titel zaehlt, Pruefbericht B-10). Uebernommen wird
+    # nur ein Treffer im Modell-Katalog — sonst bleibt es beim Hinweis statt einer Suche nur nach der Marke.
+    import mobile_service as ms
+    if titel and ms._is_generic_model_label(v.get("model_label")):
+        probe = ms._enhance_generic_model({k: v[k] for k in ("make_label", "model_label", "model_description")
+                                           if k in v})
+        if probe.get("model"):
+            v["model_label"] = probe["model_label"]
+    return v
+
+
+def vergleichs_links(vehicle: dict, regeln: dict) -> tuple:
+    """(links, hinweise) mit denselben Link-Bauern wie der Vergleich in der App.
+
+    Strenger als die App (Vorgabe Ahmad: "keine Suche nur nach Bentley"): ein
+    Portal bekommt nur dann einen Link, wenn sein Katalog Marke UND Modell
+    kennt — sonst ein Hinweis statt einer Suche ueber die ganze Marke."""
+    import autoscout_service as asv
+    import mobile_service as ms
+    # Wunsch Ahmad 03.10.2026: im Programm NIE nach Navigationssystem filtern (in der App bleibt die
+    # Einstellung "Navi aus dem Inserat mitvergleichen" wie sie ist).
+    regeln = {**(regeln or {}), "navi": {"mode": "ignore"}}
+    links, hinweise = [], []
+    marke = vehicle.get("make_label", "")
+    modell = vehicle.get("model_label", "")
+    m_marke, m_modell = ms.modell_aufgeloest(vehicle)
+    if m_marke and m_modell:
+        links.append({"portal": "mobile.de", "url": ms.build_search_url(vehicle, regeln)})
+    elif not m_marke:
+        hinweise.append(f"mobile.de kennt die Marke „{marke}“ nicht – kein mobile.de-Vergleich.")
+    else:
+        hinweise.append(f"mobile.de kennt das Modell „{modell}“ nicht – kein mobile.de-Vergleich "
+                        f"(sonst würde nur nach „{marke}“ gesucht).")
+    as_marke = asv._find_make(marke) if marke else None
+    as_modell = asv._find_model(as_marke, modell) if (as_marke and modell) else None
+    if as_marke and as_modell:
+        links.append({"portal": "AutoScout24", "url": asv.build_search_url(vehicle, regeln)})
+    elif not as_marke:
+        hinweise.append(f"AutoScout24 kennt die Marke „{marke}“ nicht – kein AutoScout24-Vergleich.")
+    else:
+        hinweise.append(f"AutoScout24 kennt das Modell „{modell}“ nicht – kein AutoScout24-Vergleich "
+                        f"(sonst würde nur nach „{marke}“ gesucht).")
+    for h in asv.regeln_nicht_abgebildet(vehicle, regeln):
+        if h not in hinweise:
+            hinweise.append(h)
+    return links, hinweise
+
+
+# ---------------------------------------------------------------------------
+# Inserat-Link (Wunsch Ahmad 03.10.2026): aus der Inserat-ID (mobile.de, Kleinanzeigen)
+# bzw. der Hash-ID (AutoScout24) — am 03.10. live mit echten Inseraten geprueft.
+# ---------------------------------------------------------------------------
+_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def vorab_warten_s() -> float:
+    """So lange wartet ein Vorab-Abruf, bevor er startet (Standard 15 s). Klickt der Sucher in der Zeit das
+    naechste Auto an, faellt der alte Abruf weg (kein Apify-Lauf, kein Tageskontingent); oeffnet er das Auto
+    in der App, startet er sofort."""
+    try:
+        return min(300.0, max(0.0, float(os.environ.get("AUTOPOINTER_VORAB_WARTEN_S") or 15)))
+    except ValueError:
+        return 15.0
+
+
+def vorab_abruf_an() -> bool:
+    """Inserat beim Klick im Programm im Hintergrund auslesen (Standard an). Jeder echte Abruf zaehlt
+    wie ein eingefuegter Link fuer das Tageslimit des Kontos; Speicher-Treffer sind kostenlos."""
+    return (os.environ.get("AUTOPOINTER_VORAB_ABRUF") or "true").strip().lower() not in ("0", "false", "nein", "aus")
+
+
+def inserat_url(quelle, inserat_id, hash_id=None) -> Optional[str]:
+    """Adresse des Original-Inserats oder None (lieber kein Link als ein falscher).
+
+    mobile.de:      suchen.mobile.de/fahrzeuge/details.html?id=<Inserat-ID>  (9 bis 14 Stellen gesehen)
+    Kleinanzeigen:  www.kleinanzeigen.de/s-anzeige/<Inserat-ID>
+    AutoScout24:    www.autoscout24.de/angebote/<Hash-ID>  (die Inserat-ID aus AutoPointer
+                    kennt AutoScout nicht — "Seite nicht gefunden")"""
+    q = re.sub(r"[^a-z0-9]", "", str(quelle or "").lower())
+    nummer = str(inserat_id or "").strip()
+    if "mobile" in q and re.fullmatch(r"\d{6,20}", nummer):
+        return f"https://suchen.mobile.de/fahrzeuge/details.html?id={nummer}"
+    if "kleinanzeigen" in q and re.fullmatch(r"\d{6,20}", nummer):
+        return f"https://www.kleinanzeigen.de/s-anzeige/{nummer}"
+    if "autoscout" in q:
+        h = str(hash_id or "").strip().lower()
+        if _UUID.match(h):
+            return f"https://www.autoscout24.de/angebote/{h}"
+    return None

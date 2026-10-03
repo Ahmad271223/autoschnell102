@@ -1,15 +1,25 @@
 """PDF generation for car purchase contracts (Kaufvertrag) using ReportLab."""
+import contextvars
 import io
+from typing import Optional
+import logging
+import math
+import re
 from datetime import datetime
 from xml.sax.saxutils import escape as _xml_escape
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.lib import colors
+from reportlab.pdfgen import canvas as _rl_canvas
 from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether, Flowable,
+    CondPageBreak,
 )
-from reportlab.lib.enums import TA_LEFT
+from reportlab.lib.enums import TA_LEFT, TA_RIGHT
+
+log = logging.getLogger("autohandel")
+
 
 def _safe_para(text) -> str:
     """Escape user-supplied text for use inside a ReportLab Paragraph.
@@ -25,19 +35,148 @@ def _safe_para(text) -> str:
     return _xml_escape(str(text).strip()) or "—"
 
 
-PRIMARY = colors.HexColor("#0A0A0A")
+PRIMARY = colors.HexColor("#18181B")
 ACCENT = colors.HexColor("#FF3B30")
 GREY = colors.HexColor("#71717A")
 DIVIDER = colors.HexColor("#E4E4E7")
+LIGHT = colors.HexColor("#F4F4F5")
+DARK = colors.HexColor("#0A0A0A")
+
+# Wunsch Ahmad 03.10.2026: Farbe und Layout des Kaufvertrags waehlt der Chef in den Einstellungen
+# (dealers.vertrag_farbe / dealers.vertrag_layout). Dieselben Farbnamen wie die Farbe der App
+# (konfig.AKZENTFARBEN), aber druckfreundliche Toene fuer weisses Papier. "standard" = das bisherige Rot.
+VERTRAG_FARBEN = {
+    "standard": "#FF3B30", "rot": "#FF3B30", "lila": "#7C3AED", "gruen": "#15803D",
+    "blau": "#0071E3", "schwarz": "#1D1D1F", "orange": "#E8731F", "petrol": "#0F766E",
+    "pink": "#BE185D", "gold": "#A16207", "indigo": "#4F46E5",
+}
+#: "modern" = das bisherige Layout (Balken-Ueberschriften, Kaesten, dunkler Preisblock);
+#: "formular" = nach Ahmads Vorlage: Ueberschrift mittig, Abschnittstitel mit Linie,
+#: Felder mit gepunkteter Linie, heller Preisstreifen, Ausstattung als Fliesstext.
+VERTRAG_LAYOUTS = ("modern", "formular")
+VERTRAG_LAYOUT_STANDARD = "modern"
+
+# Gestaltung des gerade gebauten Vertrags (Farbe, Layout) — gesetzt nur in generate_contract_pdf,
+# gelesen von den Bausteinen (_section, _kv_compact, …) und der Fusszeile. ContextVar statt
+# Modulkonstante: zwei Vertraege verschiedener Firmen entstehen gleichzeitig in Threads.
+_GESTALTUNG: contextvars.ContextVar = contextvars.ContextVar("vertrag_gestaltung", default=None)
+
+
+def vertrag_farbe_hex(wert) -> str:
+    """Farbname (oder None) -> Hex-Ton fuer den Vertrag; Unbekanntes -> Standard (Rot)."""
+    return VERTRAG_FARBEN.get(str(wert or "").strip().lower(), VERTRAG_FARBEN["standard"])
+
+
+def vertrag_layout(wert) -> str:
+    k = str(wert or "").strip().lower()
+    return k if k in VERTRAG_LAYOUTS else VERTRAG_LAYOUT_STANDARD
+
+
+def _akzent():
+    g = _GESTALTUNG.get()
+    return g["farbe"] if g else ACCENT
+
+
+def _akzent_hex() -> str:
+    g = _GESTALTUNG.get()
+    return g["hex"] if g else "#FF3B30"
+
+
+def _formular() -> bool:
+    g = _GESTALTUNG.get()
+    return bool(g) and g["layout"] == "formular"
+
+
+def _aufgehellt(farbe, anteil: float):
+    """Farbe mit Weiss gemischt (anteil 0..1 = Weissanteil) — als feste Farbe, damit Drucker und
+    PDF-Betrachter ohne Transparenz auskommen."""
+    return colors.Color(farbe.red + (1 - farbe.red) * anteil, farbe.green + (1 - farbe.green) * anteil,
+                        farbe.blue + (1 - farbe.blue) * anteil)
+
+
+FORMULAR_FLAECHE = colors.HexColor("#F5F8FB")
+FORMULAR_PUNKTLINIE = colors.HexColor("#C9D3DC")
+
+PAGE_W, PAGE_H = A4
+MARGIN = 1.8 * cm
+CONTENT_W = PAGE_W - 2 * MARGIN
+COL_W = (CONTENT_W - 0.5 * cm) / 2  # two columns with a small gutter
+
+# Digitale Ausfertigung (Wunsch Ahmad 09.09.2026): Wird der Vertrag per
+# E-Mail oder WhatsApp verschickt, gibt es keine Unterschriftslinien —
+# unter "Unterschriften" steht stattdessen dieser Text. Firma (Chef) und
+# Sucher koennen ihn in den Einstellungen dauerhaft durch einen eigenen
+# ersetzen (dealers.digital_vertragstext bzw. Sucher-Override); leer =
+# dieser Standard. Absaetze durch Leerzeile trennen.
+DIGITAL_VERTRAGSTEXT_STANDARD = (
+    "Folgende Vertragsbedingungen werden beidseitig eingewilligt.\n\n"
+    "1. Der/Die Verkäufer*in übernimmt nach der Fahrzeugübergabe keine "
+    "Garantie oder Gewährleistung für das Fahrzeug.\n\n"
+    "2. Mündliche und schriftliche Absagen sind nach Vertragsbestätigung "
+    "aufgrund anfallender Kosten nicht wirksam.\n\n"
+    "3. Der/Die Verkäufer*in bestätigt, dass die oben festgehaltenen Daten "
+    "überprüft wurden und ihrer Richtigkeit entsprechen.\n\n"
+    # Klarstellung Ahmad 01.10.2026: Punkt 4 BLEIBT im Standardtext — weg ist nur die zusaetzliche
+    # Zeile "Dieser Vertrag ist ohne Unterschrift gültig." ganz unten in der Online-Fassung.
+    "4. Dieser Vertrag ist rechtskräftig, verbindlich und auch ohne "
+    "Unterschrift gültig."
+)
+# Runde 26 (12.09.2026, Wunsch Ahmad: die zwei aehnlich klingenden Felder
+# zusammenlegen): Startertext fuer NEUE Firmen — die vier Klauseln plus die
+# AGB-Punkte, die frueher getrennt unter default_terms standen. Alles steht
+# ab Anlage im EINEN Feld "Vertragsbedingungen" und ist dort editierbar.
+AGB_PUNKTE_START = (
+    "5. Das Fahrzeug wird unter Ausschluss jeglicher Sachmängelhaftung verkauft, "
+    "soweit gesetzlich zulässig (§ 444 BGB bleibt unberührt).\n\n"
+    "6. Der Käufer ist Händler im Sinne des § 14 BGB. Der Erwerb erfolgt zum "
+    "Zwecke des gewerblichen Wiederverkaufs.\n\n"
+    "7. Eigentumsübergang erfolgt erst nach vollständigem Zahlungseingang.\n\n"
+    "8. Mündliche Nebenabreden bestehen nicht. Änderungen oder Ergänzungen "
+    "bedürfen der Schriftform.\n\n"
+    "9. Erfüllungsort und Gerichtsstand ist der Sitz des Käufers, soweit "
+    "gesetzlich zulässig."
+)
+
+VERTRAGSTEXT_START = DIGITAL_VERTRAGSTEXT_STANDARD + "\n\n" + AGB_PUNKTE_START
+
+
+# Hinweis fuer Altvertraege (vor Einfuehrung der Vertragsbedingungen): steht
+# in der digitalen Fassung unter "Unterschriften" — nie als Vertragstext.
+DIGITAL_NACHTRAEGLICH = (
+    "Diese digitale Ausfertigung wurde nachträglich erzeugt.\n\n"
+    "Der Vertrag wurde vor Einführung der digitalen Ausfertigung geschlossen. "
+    "Für ihn sind keine Vertragsbedingungen gespeichert; es gelten "
+    "ausschließlich die oben aufgeführten Vertragsangaben und die unterschriebene "
+    "Ausfertigung."
+)
+
+
+def digitaler_vertragstext(dealer: dict) -> str:
+    """Wirksamer Text fuer die digitale Ausfertigung: eigener Text der Firma
+    bzw. des Suchers (effective_dealer), sonst der Standard."""
+    eigen = ((dealer or {}).get("digital_vertragstext") or "").strip()
+    return eigen or DIGITAL_VERTRAGSTEXT_STANDARD
 
 
 def _styles():
     s = getSampleStyleSheet()
-    return {
-        "title": ParagraphStyle("title", parent=s["Title"], fontSize=22, leading=26,
-                                textColor=PRIMARY, alignment=TA_LEFT, spaceAfter=8),
-        "h2": ParagraphStyle("h2", parent=s["Heading2"], fontSize=11, leading=14,
-                             textColor=PRIMARY, spaceBefore=10, spaceAfter=4),
+    # Pruefbericht 20.09.2026 (P-01): Unicode-Schrift statt Helvetica.
+    from pdf_schrift import styles_anpassen
+    return styles_anpassen({
+        "title": ParagraphStyle("title", parent=s["Title"], fontSize=24, leading=27,
+                                textColor=PRIMARY, alignment=TA_LEFT, spaceAfter=0),
+        "subtitle": ParagraphStyle("subtitle", parent=s["Normal"], fontSize=9,
+                                   leading=12, textColor=GREY),
+        "brand": ParagraphStyle("brand", parent=s["Normal"], fontSize=10, leading=13,
+                                textColor=_akzent()),
+        "meta_label": ParagraphStyle("meta_label", parent=s["Normal"], fontSize=7,
+                                     leading=9, textColor=GREY, alignment=TA_RIGHT),
+        "meta_value": ParagraphStyle("meta_value", parent=s["Normal"], fontSize=10,
+                                     leading=13, textColor=PRIMARY, alignment=TA_RIGHT),
+        "section": ParagraphStyle("section", parent=s["Normal"], fontSize=10,
+                                  leading=13, textColor=PRIMARY),
+        "boxtitle": ParagraphStyle("boxtitle", parent=s["Normal"], fontSize=9,
+                                   leading=12, textColor=PRIMARY),
         "label": ParagraphStyle("label", parent=s["Normal"], fontSize=7, leading=9,
                                 textColor=GREY, alignment=TA_LEFT),
         "value": ParagraphStyle("value", parent=s["Normal"], fontSize=9, leading=11,
@@ -46,18 +185,145 @@ def _styles():
                                 textColor=GREY),
         "body": ParagraphStyle("body", parent=s["Normal"], fontSize=9, leading=12,
                                textColor=PRIMARY),
-    }
+        "price_label": ParagraphStyle("price_label", parent=s["Normal"], fontSize=8,
+                                      leading=10, textColor=colors.HexColor("#A1A1AA")),
+        "price_value": ParagraphStyle("price_value", parent=s["Normal"], fontSize=17,
+                                      leading=20, textColor=colors.white,
+                                      alignment=TA_RIGHT),
+        "price_sub": ParagraphStyle("price_sub", parent=s["Normal"], fontSize=8,
+                                    leading=10, textColor=colors.HexColor("#D4D4D8"),
+                                    alignment=TA_RIGHT),
+        "sig_label": ParagraphStyle("sig_label", parent=s["Normal"], fontSize=8,
+                                    leading=10, textColor=GREY),
+        # Layout "formular" (Wunsch Ahmad 03.10.2026)
+        "f_title": ParagraphStyle("f_title", parent=s["Normal"], fontSize=19, leading=22,
+                                  textColor=_akzent(), alignment=1),
+        "f_subtitle": ParagraphStyle("f_subtitle", parent=s["Normal"], fontSize=8.5, leading=11,
+                                     textColor=GREY, alignment=1),
+        "f_firma": ParagraphStyle("f_firma", parent=s["Normal"], fontSize=10, leading=12.5,
+                                  textColor=_akzent()),
+        "f_section": ParagraphStyle("f_section", parent=s["Normal"], fontSize=9.5, leading=12,
+                                    textColor=_akzent()),
+        "f_label": ParagraphStyle("f_label", parent=s["Normal"], fontSize=7.5, leading=10,
+                                  textColor=GREY),
+        "f_price_label": ParagraphStyle("f_price_label", parent=s["Normal"], fontSize=7, leading=9,
+                                        textColor=GREY, alignment=1),
+        "f_price_value": ParagraphStyle("f_price_value", parent=s["Normal"], fontSize=18, leading=21,
+                                        textColor=_akzent(), alignment=1),
+        "f_price_sub": ParagraphStyle("f_price_sub", parent=s["Normal"], fontSize=10.5, leading=13,
+                                      textColor=PRIMARY, alignment=1),
+    })
+
+
+def _section(title, st):
+    """Section heading: light bar with red accent edge — consistent visual anchor.
+    Layout "formular": Titel in der Vertragsfarbe, GROSS, mit duenner Linie darunter."""
+    if _formular():
+        t = Table([[Paragraph(f"<b>{_xml_escape(str(title).upper())}</b>", st["f_section"])]],
+                  colWidths=[CONTENT_W], hAlign="LEFT")
+        t.setStyle(TableStyle([
+            ("LINEBELOW", (0, 0), (-1, -1), 1.1, _aufgehellt(_akzent(), 0.55)),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 2),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]))
+        return t
+    t = Table(
+        [[Paragraph(f"<b>{_xml_escape(title)}</b>", st["section"])]],
+        colWidths=[CONTENT_W],
+    )
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), LIGHT),
+        ("LINEBEFORE", (0, 0), (0, -1), 2.5, _akzent()),
+        ("LEFTPADDING", (0, 0), (-1, -1), 9),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]))
+    return t
+
+
+def _zeile_auszeichnen(zeile: str) -> str:
+    """Layout "formular": ein Aufzaehlungspunkt (•) oder eine Nummer ("1.") am Zeilenanfang steht in
+    der Vertragsfarbe und fett. Die Zeile ist schon escaped; sonst unveraendert."""
+    if not _formular():
+        return zeile
+    m = re.match(r"^(\s*)•\s*", zeile)
+    if m:
+        return f'{m.group(1)}<font color="{_akzent_hex()}"><b>•</b></font>&nbsp;&nbsp;' + zeile[m.end():]
+    m = re.match(r"^(\s*)(\d{1,2}\.)\s+", zeile)
+    if m:
+        return f'{m.group(1)}<font color="{_akzent_hex()}"><b>{m.group(2)}</b></font> ' + zeile[m.end():]
+    return zeile
+
+
+def _absaetze(text, style):
+    """Freitext -> Paragraphs. Eine Leerzeile trennt Absaetze, ein einfacher
+    Zeilenumbruch bleibt als <br/> erhalten. Nutzertext wird zuerst escaped."""
+    out = []
+    for para in (text or "").split("\n\n"):
+        txt = "<br/>".join(_zeile_auszeichnen(_xml_escape(z)) for z in para.split("\n")).strip()
+        if txt:
+            out.append(Paragraph(txt, style))
+    return out
+
+
+# Wunsch Ahmad 21.09.2026: Eine Ueberschrift darf nie allein unten auf einer
+# Seite stehen. Ist der erste Absatz kurz, halten Ueberschrift und Absatz per
+# KeepTogether zusammen. Ein sehr langer erster Absatz (z. B. eigene AGB ohne
+# Leerzeilen) wuerde mit KeepTogether komplett auf die naechste Seite rutschen
+# und eine halbe Seite leer lassen — dann verlangt ein bedingter Umbruch nur
+# Platz fuer die Ueberschrift und die ersten Zeilen.
+_KOPF_ZUSAMMEN_BIS = 7 * cm
+_KOPF_MIN_PLATZ = 2.5 * cm
+
+
+def _abschnitt_mit_text(title, absaetze, st, abstand):
+    """Abschnitt mit Balken-Ueberschrift (_section, ohne Nummer) und Absaetzen.
+
+    Zwischen den Absaetzen `abstand` pt, am Ende 12 pt wie bei den
+    Abschnitten weiter oben — der naechste Abschnitt beginnt ohne eigenen
+    Abstand, so entsteht nie ein doppelter."""
+    if not absaetze:
+        return []
+    kopf = [_section(title, st), Spacer(1, 6)]
+    erster = absaetze[0]
+    _, hoehe = erster.wrap(CONTENT_W, PAGE_H)
+    if hoehe <= _KOPF_ZUSAMMEN_BIS:
+        teile = [KeepTogether(kopf + [erster])]
+    else:
+        teile = [CondPageBreak(_KOPF_MIN_PLATZ)] + kopf + [erster]
+    for p in absaetze[1:]:
+        teile += [Spacer(1, abstand), p]
+    teile.append(Spacer(1, 12))
+    return teile
 
 
 def _kv_compact(rows, st, label_w, value_w):
     """Compact key-value table with thin dividers, used inside a column."""
+    if not rows:
+        # Seit 16.09.2026 fallen leere Punkte weg (_ohne_leere) — ohne eine
+        # einzige Zeile wuerde reportlab an der leeren Tabelle scheitern
+        # (emptyTableAction='error'). Dann bleibt die Spalte einfach leer.
+        return Paragraph("", st["value"])
     data = []
     for label, value in rows:
         data.append([
-            Paragraph(label, st["label"]),
+            Paragraph(label, st["f_label" if _formular() else "label"]),
             Paragraph(_safe_para(value), st["value"]),
         ])
     t = Table(data, colWidths=[label_w, value_w])
+    if _formular():
+        # Wie ein ausgefuelltes Formular: Wert auf einer gepunkteten Linie
+        t.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "BOTTOM"),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+            ("TOPPADDING", (0, 0), (-1, -1), 2.5),
+            ("LEFTPADDING", (0, 0), (0, -1), 0),
+            ("LINEBELOW", (1, 0), (1, -1), 0.6, FORMULAR_PUNKTLINIE, None, (0.8, 1.6)),
+        ]))
+        return t
     t.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
@@ -67,26 +333,57 @@ def _kv_compact(rows, st, label_w, value_w):
     return t
 
 
-def _two_column_block(left_title, left_rows, right_title, right_rows, st):
-    """Place two key-value blocks side by side."""
-    col_w = 8.0 * cm
+def _boxed_kv(title, rows, st):
+    """Key-value block inside a bordered box with a titled header row.
+    Layout "formular": kein Kasten — Abschnittstitel mit Linie, darunter die Felder."""
+    if _formular():
+        label_w = 2.4 * cm
+        inner = _kv_compact(rows, st, label_w, COL_W - label_w)
+        kopf = Table([[Paragraph(f"<b>{_xml_escape(str(title).upper())}</b>", st["f_section"])]],
+                     colWidths=[COL_W])
+        kopf.setStyle(TableStyle([
+            ("LINEBELOW", (0, 0), (-1, -1), 1.1, _aufgehellt(_akzent(), 0.55)),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 2), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]))
+        t = Table([[kopf], [inner]], colWidths=[COL_W])
+        t.setStyle(TableStyle([
+            ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (0, 0), 4),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ]))
+        return t
     label_w = 2.6 * cm
-    val_w = col_w - label_w - 0.2 * cm
+    val_w = COL_W - label_w - 0.6 * cm
+    inner = _kv_compact(rows, st, label_w, val_w)
+    t = Table(
+        [[Paragraph(f"<b>{_xml_escape(title)}</b>", st["boxtitle"])], [inner]],
+        colWidths=[COL_W],
+    )
+    t.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.5, DIVIDER),
+        ("BACKGROUND", (0, 0), (0, 0), LIGHT),
+        ("LINEBELOW", (0, 0), (0, 0), 0.5, DIVIDER),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (0, 0), 5),
+        ("BOTTOMPADDING", (0, 0), (0, 0), 5),
+        ("TOPPADDING", (0, 1), (0, 1), 4),
+        ("BOTTOMPADDING", (0, 1), (0, 1), 6),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+    ]))
+    return t
 
-    left_box = [
-        Paragraph(left_title, st["h2"]),
-        _kv_compact(left_rows, st, label_w, val_w),
-    ]
-    right_box = [
-        Paragraph(right_title, st["h2"]),
-        _kv_compact(right_rows, st, label_w, val_w),
-    ]
-    t = Table([[left_box, right_box]], colWidths=[col_w, col_w], hAlign="LEFT")
+
+def _two_boxes(left_title, left_rows, right_title, right_rows, st):
+    """Place two boxed key-value blocks side by side."""
+    left = _boxed_kv(left_title, left_rows, st)
+    right = _boxed_kv(right_title, right_rows, st)
+    t = Table([[left, "", right]], colWidths=[COL_W, 0.5 * cm, COL_W], hAlign="LEFT")
     t.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("LEFTPADDING", (0, 0), (-1, -1), 0),
-        ("RIGHTPADDING", (0, 0), (0, 0), 12),
-        ("LEFTPADDING", (1, 0), (1, 0), 12),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
     ]))
     return t
 
@@ -97,21 +394,61 @@ def _two_col_kv(rows, st):
     half = (len(rows) + 1) // 2
     left = rows[:half]
     right = rows[half:]
-    while len(right) < len(left):
-        right.append(("", ""))
-    col_w = 8.0 * cm
+    # Runde 22: keine Fuellzeile mehr bei ungerader Zeilenzahl — sie erschien
+    # als leere Zeile mit "—" (seit der Zeile "Zulassung" in Abschnitt 2).
+    # Die Spalten stehen oben buendig (VALIGN TOP), unterschiedliche Hoehe stoert nicht.
     label_w = 3.2 * cm
-    val_w = col_w - label_w - 0.2 * cm
+    val_w = COL_W - label_w - 0.2 * cm
     left_t = _kv_compact(left, st, label_w, val_w)
     right_t = _kv_compact(right, st, label_w, val_w) if any(r[0] for r in right) else Paragraph("", st["value"])
-    t = Table([[left_t, right_t]], colWidths=[col_w, col_w], hAlign="LEFT")
+    t = Table([[left_t, "", right_t]], colWidths=[COL_W, 0.5 * cm, COL_W], hAlign="LEFT")
     t.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("LEFTPADDING", (0, 0), (-1, -1), 0),
-        ("RIGHTPADDING", (0, 0), (0, 0), 12),
-        ("LEFTPADDING", (1, 0), (1, 0), 12),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
     ]))
     return t
+
+
+def _ja_nein_oder_nichts(wert) -> str:
+    """True -> "Ja", False -> "Nein", alles andere -> "—" (Zeile faellt weg)."""
+    if wert is True:
+        return "Ja"
+    if wert is False:
+        return "Nein"
+    return "—"
+
+
+def _inserat_zustand(inserat, *, offenlegung: bool) -> str:
+    """Inseratsangabe fuer den Zusicherungsblock — NUR als negative
+    Offenlegung, sonst "—" (Zeile faellt weg).
+
+    Entscheidung Auftraggeber (28.09.2026): Eine negative Portalangabe
+    ("Unfallschaden: Ja", "Fahrbereit: Nein") schuetzt den Verkaeufer — der
+    Mangel war offengelegt — und steht deshalb IMMER im Vertrag, egal was im
+    Dialog gewaehlt ist. Eine positive Portalangabe ("Unfallschaden: Nein",
+    "Fahrbereit: Ja") ist keine Zusicherung des Verkaeufers, kann dem
+    Dialogwert widersprechen und wird deshalb nie gedruckt.
+
+    offenlegung: der Portalwert, der einen Mangel offenlegt (Unfallschaden:
+    True, fahrbereit: False)."""
+    if not isinstance(inserat, bool) or inserat is not offenlegung:
+        return "—"
+    return _ja_nein_oder_nichts(inserat)
+
+
+def _ohne_leere(rows):
+    """Wunsch Ahmad (16.09.2026): nicht ausgefuellte Punkte (z. B. E-Mail, Bereifung)
+    erscheinen im Vertrag gar nicht — statt einer Zeile mit Strich."""
+    out = []
+    for label, value in rows:
+        if value is None:
+            continue
+        s = str(value).strip()
+        if not s or s in ("—", "-", "–"):
+            continue
+        out.append((label, value))
+    return out
 
 
 def _yn(value):
@@ -126,38 +463,585 @@ def _yn(value):
     return s
 
 
-def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict) -> bytes:
-    """Build a Kaufvertrag PDF and return raw bytes."""
+def _zulassung_anzeige(value):
+    """Runde 22 (11.09.2026): Zulassungsstatus fuer die Zusicherungen —
+    nur die beiden bekannten Werte, alles andere (auch leer) als '—'."""
+    return {"angemeldet": "Angemeldet", "abgemeldet": "Abgemeldet"}.get(
+        str(value or "").strip().lower(), "—")
+
+
+# ---------- Empfangsbestaetigung (Runde 22, 11.09.2026, Vorlage Ahmad) ----------
+# Im Abschnitt "Unterschriften" je Partei ein Kasten: Kaeufer bestaetigt den
+# Empfang von Zulassungsbescheinigung Teil I & II und KFZ mit n Schluessel(n),
+# Verkaeufer den Empfang des Kaufpreises; darunter "Datum und Ort". Es steht
+# nur, was im Vertrag erfasst ist — Altvertraege ohne Felder bekommen leere
+# Kaestchen und eine Linie zum Ausfuellen von Hand.
+class _Kaestchen(Flowable):
+    """Ankreuz-Kaestchen, selbst gezeichnet: Quadrat, bei an=True mit Haken.
+    Bewusst kein Unicode-Zeichen (☐/☒) — die Standardschrift Helvetica hat
+    diese Zeichen nicht, sie erschienen als schwarze Kaesten."""
+
+    def __init__(self, an=False, groesse=8):
+        super().__init__()
+        self.an = bool(an)
+        self.groesse = groesse
+        self.width = self.height = groesse
+
+    def wrap(self, avail_w, avail_h):
+        return self.groesse, self.groesse
+
+    def draw(self):
+        s = self.groesse
+        c = self.canv
+        c.saveState()
+        c.setStrokeColor(PRIMARY)
+        c.setLineWidth(0.7)
+        c.rect(0, 0, s, s, stroke=1, fill=0)
+        if self.an:
+            # Haken aus zwei Strichen
+            c.setLineWidth(1.2)
+            p = c.beginPath()
+            p.moveTo(s * 0.18, s * 0.52)
+            p.lineTo(s * 0.42, s * 0.2)
+            p.lineTo(s * 0.86, s * 0.84)
+            c.drawPath(p, stroke=1, fill=0)
+        c.restoreState()
+
+
+def _angekreuzt(value) -> bool:
+    """True/False aus contract_data; Texte alter Clients ("true", "ja")
+    werden verstanden, alles andere gilt als nicht angekreuzt."""
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "ja", "yes", "x")
+    return bool(value)
+
+
+def _empfang_datum_ort(datum_iso, ort) -> str:
+    """'18.08.2026, Rensenheim' — nur, was im Vertrag steht. Runde 22
+    (11.09.2026, Gegenpruefung): fehlt nur ein Teil, steht an seiner Stelle
+    eine Linie zum Ausfuellen von Hand ('18.08.2026, ______________' bzw.
+    '__________, Rensenheim') — das Formular fuellt das Datum immer vor, der
+    Verkaeufer-Ort fehlt aber, wenn das Inserat keinen Ort hat. Fehlt beides:
+    eine durchgehende Linie."""
+    datum = str(datum_iso or "").strip()
+    if datum:
+        try:
+            from datetime import date as _date
+            datum = _date.fromisoformat(datum).strftime("%d.%m.%Y")
+        except (ValueError, TypeError):
+            pass
+    ort = str(ort or "").strip()
+    if not datum and not ort:
+        return "_" * 26
+    return f"{datum or '_' * 10}, {ort or '_' * 14}"
+
+
+def _empfang_block(seite, contract, st, breite):
+    """Inhalt der Empfangsbestaetigung einer Partei (seite: "kaeufer" |
+    "verkaeufer") als randlose Tabelle der Breite `breite`."""
+    c = contract or {}
+    if seite == "kaeufer":
+        anzahl = str(c.get("schluessel_anzahl") or "").strip()
+        punkte = [
+            (c.get("empfang_zulassungsbescheinigung"), "Zulassungsbescheinigung Teil I & II"),
+            (c.get("empfang_schluessel"), f"KFZ mit {anzahl or '____'} Schlüssel(n)"),
+        ]
+        ort = c.get("empfang_ort_kaeufer")
+    else:
+        punkte = [(c.get("empfang_kaufpreis"), "Kaufpreis")]
+        ort = c.get("empfang_ort_verkaeufer")
+    rows = [[Paragraph("<b>bestätigt Empfang von:</b>", st["sig_label"]), ""]]
+    for an, text in punkte:
+        rows.append([_Kaestchen(_angekreuzt(an)),
+                     Paragraph(_xml_escape(text), st["value"])])
+    # Hoehenausgleich: beide Kaesten stehen nebeneinander gleich hoch.
+    while len(rows) < 3:
+        rows.append(["", Paragraph("&nbsp;", st["value"])])
+    datum_ort = _empfang_datum_ort(c.get("empfang_datum"), ort)
+    rows.append([Paragraph("Datum und Ort: " + _xml_escape(datum_ort),
+                           st["value"]), ""])
+    t = Table(rows, colWidths=[0.5 * cm, breite - 0.5 * cm])
+    t.setStyle(TableStyle([
+        ("SPAN", (0, 0), (1, 0)),
+        ("SPAN", (0, -1), (1, -1)),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ("TOPPADDING", (0, -1), (-1, -1), 6),
+    ]))
+    return t
+
+
+def empfang_drucken(contract, dealer=None) -> bool:
+    """Wunsch Ahmad 24.09.2026: Steht die Empfangsbestaetigung (Kaestchen
+    Zulassungsbescheinigung/Schluessel/Kaufpreis) im gedruckten Vertrag?
+    Beim Erstellen eingefroren (contract_data.empfang_drucken, KAEUFER_FELDER),
+    sonst die Firmeneinstellung; fehlt beides: an (wie bisher).
+
+    Startpruefung 27.09.2026 (K3): Vertraege vom 24.09. bis zur Korrektur
+    tragen den Schalter als TEXT ("False"/"True") — frueher galt jeder Text
+    als "an". Jetzt versteht die Pruefung gespeicherte Texte ("False",
+    "false", "0", "nein", "aus" = aus); unbekannter Text zaehlt nicht."""
+    from vertrag_felder import als_wahrheitswert
+    for quelle in ((contract or {}).get("empfang_drucken"),
+                   (dealer or {}).get("empfang_drucken")):
+        wert = als_wahrheitswert(quelle)
+        if wert is not None:
+            return wert
+    return True
+
+
+#: Kundenportal (29.09.2026): Hoehe der eingesetzten Unterschrift im Kasten
+UNTERSCHRIFT_HOEHE = 1.3 * cm
+
+
+def _unterschrift_flowable(daten, breite_max):
+    """Unterschriftsbild fuer den Kasten — oder None (kein Bild, unlesbar). Wie beim Logo:
+    ein kaputtes Bild darf keinen Vertrag verhindern, dann bleibt die Linie leer."""
+    if not daten:
+        return None
+    try:
+        from reportlab.lib.utils import ImageReader
+        from reportlab.platypus import Image as _RLImage
+        leser = ImageReader(io.BytesIO(daten))
+        breite, hoehe = leser.getSize()
+        if not breite or not hoehe:
+            return None
+        faktor = min(UNTERSCHRIFT_HOEHE / hoehe, breite_max / breite)
+        bild = _RLImage(io.BytesIO(daten), width=breite * faktor, height=hoehe * faktor)
+        bild.hAlign = "LEFT"
+        return bild
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _empfang_kasten(rolle, seite, contract, st, unterschrift, mit_empfang=True, bild=None, bild_text=None,
+                    portal=False):
+    """Kasten einer Partei im Abschnitt "Unterschriften": Titel,
+    "bestätigt Empfang von:" mit Kaestchen, "Datum und Ort". Druckfassung
+    (unterschrift=True) zusaetzlich mit der Unterschriftslinie; die digitale
+    Fassung ohne. Die fruehere Linie "Ort, Datum" entfaellt (Beschluss
+    11.09.2026, wie Ahmads Vorlage): "Datum und Ort" steht schon im Kasten —
+    zwei Datums-/Ortsangaben je Partei verwirrten."""
+    c = contract or {}
+    ort = c.get("empfang_ort_kaeufer") if seite == "kaeufer" else c.get("empfang_ort_verkaeufer")
+    if portal:
+        # Wunsch Ahmad 02.10.2026: im Kundenportal unten NUR die Unterschrift des Kunden und die der Firma —
+        # kein "Kaufpreis erhalten", keine Schluesselanzahl, kein "Datum und Ort" (Zeit und Name stehen auf
+        # dem Signaturnachweis). Die Zeile bleibt leer, damit die Unterschriftslinie an derselben Stelle liegt.
+        inhalt = Spacer(1, 2)
+    else:
+        inhalt = (_empfang_block(seite, contract, st, COL_W - 16) if mit_empfang
+                  # Ohne Empfangsbestaetigung (Einstellung aus): nur "Datum und Ort".
+                  else Paragraph("Datum und Ort: " + _xml_escape(
+                      _empfang_datum_ort(c.get("empfang_datum"), ort)), st["value"]))
+    rows = [
+        [Paragraph(f"<b>{_xml_escape(rolle)}</b>", st["sig_label"])],
+        [inhalt],
+    ]
+    stil = [
+        ("BOX", (0, 0), (-1, -1), 0.5, DIVIDER),
+        ("BACKGROUND", (0, 0), (0, 0), LIGHT),
+        ("LINEBELOW", (0, 0), (0, 0), 0.5, DIVIDER),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (0, 0), 5),
+        ("BOTTOMPADDING", (0, 0), (0, 0), 5),
+        ("TOPPADDING", (0, 1), (0, 1), 5),
+        ("BOTTOMPADDING", (0, -1), (0, -1), 6),
+    ]
+    if unterschrift:
+        # Kundenportal (29.09.2026): liegt ein Unterschriftsbild vor (Kunde am Bildschirm bzw. die
+        # hinterlegte Unterschrift des Chefs), steht es auf der Linie; darunter Name und Zeitpunkt.
+        flow = _unterschrift_flowable(bild, COL_W - 16) if bild else None
+        rows += [
+            [flow if flow is not None else Spacer(1, 34)],
+            [Paragraph("Unterschrift" + (f" — {_xml_escape(bild_text)}" if (flow is not None and bild_text) else ""),
+                       st["sig_label"])],
+        ]
+        stil += [
+            ("LINEBELOW", (0, 2), (0, 2), 0.5, GREY),   # Unterschrift line
+        ]
+    t = Table(rows, colWidths=[COL_W])
+    t.setStyle(TableStyle(stil))
+    return t
+
+
+def _empfang_paar(contract, st, unterschrift, mit_empfang=True, bilder=None, portal=False):
+    """Beide Kaesten nebeneinander — Verkaeufer links, Kaeufer rechts
+    (wie die Parteien oben im Vertrag). `bilder` (Kundenportal): {"verkaeufer": PNG-Bytes,
+    "verkaeufer_text": str, "kaeufer": PNG-Bytes | None, "kaeufer_text": str | None}."""
+    b = bilder or {}
+    t = Table(
+        [[_empfang_kasten("Verkäufer", "verkaeufer", contract, st, unterschrift, mit_empfang,
+                          bild=b.get("verkaeufer"), bild_text=b.get("verkaeufer_text"), portal=portal),
+          "",
+          _empfang_kasten("Käufer", "kaeufer", contract, st, unterschrift, mit_empfang,
+                          bild=b.get("kaeufer"), bild_text=b.get("kaeufer_text"), portal=portal)]],
+        colWidths=[COL_W, 0.5 * cm, COL_W],
+    )
+    t.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+    ]))
+    return t
+
+
+def _numbered_canvas_factory(footer_left: str, footer_center: str):
+    """Canvas subclass drawing accent bar + footer with 'Seite X von Y' on
+    every page. Two-pass: pages are buffered so the total count is known."""
+    akzent = _akzent()          # Vertragsfarbe (03.10.2026) — beim Bauen des Vertrags festgehalten
+
+    class _NumberedCanvas(_rl_canvas.Canvas):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._saved_states = []
+
+        def showPage(self):
+            self._saved_states.append(dict(self.__dict__))
+            self._startPage()
+
+        def save(self):
+            total = len(self._saved_states)
+            for state in self._saved_states:
+                self.__dict__.update(state)
+                self._decorate(total)
+                super().showPage()
+            super().save()
+
+        def _decorate(self, total):
+            # Top accent bar (full width) — brand anchor on every page.
+            self.saveState()
+            self.setFillColor(akzent)
+            self.rect(0, PAGE_H - 0.14 * cm, PAGE_W, 0.14 * cm, stroke=0, fill=1)
+            # Footer divider + text
+            y = 1.1 * cm
+            self.setStrokeColor(DIVIDER)
+            self.setLineWidth(0.5)
+            self.line(MARGIN, y + 0.35 * cm, PAGE_W - MARGIN, y + 0.35 * cm)
+            self.setFillColor(GREY)
+            from pdf_schrift import auf_breite, ersatz_fuer
+            schrift = ersatz_fuer("Helvetica")
+            self.setFont(schrift, 7)
+            # Pruefbericht 20.09.2026 (P-08): ein langer Firmenname lief links
+            # in die mittlere Zeile hinein (das Abholprotokoll kuerzte schon).
+            # Links nur so viel, wie bis zur Mitte Platz ist (mit Abstand),
+            # sonst mit "…" gekuerzt.
+            mitte_breite = self.stringWidth(footer_center, schrift, 7)
+            links_max = (PAGE_W / 2 - mitte_breite / 2) - MARGIN - 0.4 * cm
+            self.drawString(MARGIN, y, auf_breite(footer_left, schrift, 7, links_max))
+            self.drawCentredString(PAGE_W / 2, y, footer_center)
+            self.drawRightString(PAGE_W - MARGIN, y,
+                                 f"Seite {self._pageNumber} von {total}")
+            self.restoreState()
+
+    return _NumberedCanvas
+
+
+def _monat_jahr(wert, art: str) -> str:
+    """Pruefbericht 20.09.2026 (P-20): Monat/Jahr im Vertrag einheitlich als
+    MM/JJJJ drucken. Die API normiert seitdem beim Anlegen; Altvertraege und
+    Korrekturen koennen noch '2027-03' oder '3.2027' tragen — die standen
+    roh im Vertrag ("gültig bis 2027-03")."""
+    from protokoll_vergleich import monat_jahr_text
+    return monat_jahr_text(wert, art=art)
+
+
+def _ausstattung_liste(wert) -> list:
+    """Pruefbericht 20.09.2026 (P-15): Ausstattung als saubere Liste. Import-/
+    Altdaten koennen einen Text liefern — der wurde in 3er-Stuecke geschnitten
+    und `row.append` auf einem str brach mit AttributeError. Text wird an
+    Kommas getrennt, Listen gesaeubert, alles andere ist leer."""
+    if isinstance(wert, str):
+        teile = wert.split(",")
+    elif isinstance(wert, (list, tuple)):
+        teile = wert
+    else:
+        return []
+    # Befund Ahmad 26.09.2026: englische Bezeichnungen aus dem Scraper
+    # ("Alloy wheels") auch bei aelteren Fahrzeugdaten deutsch drucken.
+    from ausstattung_de import liste_uebersetzen
+    return liste_uebersetzen(str(x).strip() for x in teile if x is not None and str(x).strip())
+
+
+def _preis_zahl(wert) -> float:
+    """Pruefbericht 20.09.2026 (P-16): Kaufpreis robust lesen. Die API laesst
+    nur Zahlen zu; Alt-/Importdaten koennen '12.500,00 EUR' oder '12500,50'
+    tragen — float() brach damit, und die Neuerzeugung scheiterte still.
+    Unlesbares wird 0 mit Warnung im Log (faellt im Vertrag sofort auf)."""
+    if wert is None or isinstance(wert, bool):
+        return 0.0
+    if isinstance(wert, (int, float)):
+        return float(wert) if math.isfinite(wert) else 0.0
+    roh = str(wert).strip()
+    s = re.sub(r"[^\d,.\-]", "", roh)
+    if "," in s and "." in s:
+        if s.rfind(",") > s.rfind("."):          # 12.500,00 -> deutsch
+            s = s.replace(".", "").replace(",", ".")
+        else:                                    # 12,500.00 -> englisch
+            s = s.replace(",", "")
+    elif "," in s:
+        s = s.replace(",", ".")                  # 12500,50
+    elif s.count(".") > 1 or re.fullmatch(r"-?\d{1,3}\.\d{3}", s):
+        s = s.replace(".", "")                   # 12.500 / 1.250.000 -> Tausenderpunkte
+    try:
+        zahl = float(s) if s else 0.0
+    except ValueError:
+        zahl = float("nan")
+    if not math.isfinite(zahl):
+        log.warning("Kaufvertrag: Kaufpreis %r nicht lesbar — 0,00 EUR im PDF", roh)
+        return 0.0
+    return zahl
+
+
+def _scheckheft_anzeige(contract: dict) -> str:
+    """Wunsch Ahmad (15.09.2026): Scheckheftgepflegt als Auswahl — "Ja,
+    lueckenlos" / "Nein" / "Teilweise, bis MM/JJJJ"."""
+    wert = str(contract.get("service_book") or "").strip().lower()
+    bis = _monat_jahr(str(contract.get("service_book_until") or "").strip(), art="ez")
+    if wert == "ja":
+        return "Ja, lückenlos"
+    if wert == "nein":
+        return "Nein"
+    if wert == "teilweise":
+        return f"Teilweise, bis {bis}" if bis else "Teilweise"
+    return "—"
+
+
+def _abholzeile(contract: dict) -> str:
+    """Abholung als EINE Zeile: "Wird abgeholt am 19.11.2026,
+    <Anschrift des Verkaeufers>". Leer, wenn kein Abholdatum im Vertrag steht.
+
+    Wunsch Ahmad (12.09.2026): Die Zeile steht jetzt unter den Halter- und
+    Kaeuferangaben statt im Kaufpreis-Kasten.
+    Wunsch Ahmad (15.09.2026): OHNE Uhrzeit — die Uhrzeit gehoert nur in den
+    Terminplaner und die Fahrer-App, nicht in den Vertrag.
+    """
+    if not contract.get("pickup_date"):
+        return ""
+    datum = str(contract.get("pickup_date", ""))
+    try:
+        from datetime import date as _date
+        datum = _date.fromisoformat(datum).strftime("%d.%m.%Y")
+    except (ValueError, TypeError):
+        pass
+    abhol = f"Wird abgeholt am {datum}"
+    adresse = ", ".join(x for x in [
+        (contract.get("seller_address") or "").strip(),
+        " ".join(y for y in [
+            (contract.get("seller_zip") or "").strip(),
+            (contract.get("seller_city") or "").strip()] if y),
+    ] if x)
+    if adresse:
+        abhol += f", {adresse}"
+    return abhol
+
+
+def _halter_anzahl(contract: dict, vehicle: dict) -> str:
+    """Anzahl der Fahrzeughalter: Vertragswert; fehlt das Feld ganz (None,
+    Altvertrag/anderer Client), der Wert aus dem Inserat (RP-404)."""
+    wert = (contract or {}).get("previous_owners")
+    if wert is None:
+        wert = (vehicle or {}).get("previous_owners", "")
+    return str(wert if wert is not None else "").strip()
+
+
+def _fassung_nummer(contract: dict) -> int:
+    try:
+        return int(contract.get("fassung") or 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+def _fassung_text(contract: dict) -> str:
+    """Rollenpruefung 22.09.2026 (RP-494): "2 · ersetzt Fassung 1 vom
+    21.09.2026" — leer fuer die erste Fassung (sie bleibt, wie sie war)."""
+    nr = _fassung_nummer(contract)
+    if nr < 2:
+        return ""
+    text = f"{nr} · ersetzt Fassung {nr - 1}"
+    vom = str(contract.get("ersetzt_fassung_am") or "").strip()[:10]
+    if vom:
+        try:
+            from datetime import date as _date
+            vom = _date.fromisoformat(vom).strftime("%d.%m.%Y")
+        except (ValueError, TypeError):
+            pass
+        text += f" vom {vom}"
+    return text
+
+
+#: Rollenpruefung 22.09.2026 (RP-452): Groesse des Firmenlogos im Kopf.
+LOGO_HOEHE = 1.2 * cm
+LOGO_BREITE_MAX = 5.0 * cm
+
+
+def _logo_flowable(daten):
+    """Firmenlogo als Bild fuer den Briefkopf — oder None (kein Logo,
+    unlesbare Datei). Nie ein Fehler: ein kaputtes Logo darf keinen
+    Kaufvertrag verhindern."""
+    if not daten:
+        return None
+    try:
+        from reportlab.lib.utils import ImageReader
+        from reportlab.platypus import Image as _RLImage
+        leser = ImageReader(io.BytesIO(daten))
+        breite, hoehe = leser.getSize()
+        if not breite or not hoehe:
+            return None
+        faktor = min(LOGO_HOEHE / hoehe, LOGO_BREITE_MAX / breite)
+        bild = _RLImage(io.BytesIO(daten), width=breite * faktor, height=hoehe * faktor)
+        bild.hAlign = "LEFT"
+        return bild
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _platzhalter_vertrag(contract: dict, vehicle: dict) -> dict:
+    """Rollenpruefung 22.09.2026 (RP-217/RP-368): {fahrzeug}, {marke} und
+    {modell} standen im PDF immer als "____" — das PDF bekommt die
+    Dialogdaten (vehicle_make/vehicle_model), die Platzhalter lasen aber
+    make/model. Marke und Modell kommen jetzt aus den Fahrzeugdaten, in denen
+    die Dialog-Ueberschreibungen schon stecken."""
+    v = vehicle or {}
+    return {**(contract or {}),
+            "make": (contract or {}).get("make") or v.get("make_label") or v.get("make") or "",
+            "model": ((contract or {}).get("model") or v.get("model_description")
+                      or v.get("model_label") or v.get("model") or "")}
+
+
+def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
+                          digital: bool = False, unterschriften: Optional[dict] = None,
+                          portal: bool = False, farbe: Optional[str] = None,
+                          layout: Optional[str] = None) -> bytes:
+    """Build a Kaufvertrag PDF and return raw bytes — siehe _vertrag_bauen.
+
+    Farbe und Layout (Wunsch Ahmad 03.10.2026) stehen im Vertrag selbst (contract.vertrag_farbe /
+    contract.vertrag_layout), beim Anlegen aus den Firmeneinstellungen festgehalten — wie das Logo:
+    eine spaetere Fassung sieht nie anders aus, nur weil die Firma heute eine andere Farbe gewaehlt hat.
+    Altvertraege ohne Angabe bleiben im bisherigen Aussehen (Rot, modern). `farbe`/`layout`
+    ueberschreiben (Vorschau in den Einstellungen, bevor gespeichert ist)."""
+    c = contract or {}
+    hexwert = vertrag_farbe_hex(farbe if farbe is not None else c.get("vertrag_farbe"))
+    token = _GESTALTUNG.set({
+        "farbe": colors.HexColor(hexwert), "hex": hexwert,
+        "layout": vertrag_layout(layout if layout is not None else c.get("vertrag_layout")),
+    })
+    try:
+        return _vertrag_bauen(dealer=dealer, vehicle=vehicle, contract=contract, digital=digital,
+                              unterschriften=unterschriften, portal=portal)
+    finally:
+        _GESTALTUNG.reset(token)
+
+
+def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
+                   digital: bool = False, unterschriften: Optional[dict] = None,
+                   portal: bool = False) -> bytes:
+    """Build a Kaufvertrag PDF and return raw bytes.
+
+    portal=True (Wunsch Ahmad 02.10.2026): die Fassung fuer das Kundenportal — wie die Druckfassung, aber
+    die Unterschriftskaesten tragen nur die Unterschriftslinie (keine Empfangsbestaetigung, kein
+    "Datum und Ort"); unten stehen nur die Unterschrift des Kunden und die der Firma.
+
+    digital=True: Ausfertigung fuer den Versand per E-Mail/WhatsApp — ohne
+    Abschnitt "Unterschriften" und ohne Empfangsbestaetigung, am Ende steht
+    nur der Satz zur Gueltigkeit (seit 15.09.2026).
+
+    unterschriften (Kundenportal, 29.09.2026): Druckfassung MIT eingesetzten
+    Unterschriftsbildern — {"verkaeufer": PNG, "verkaeufer_text": str,
+    "kaeufer": PNG | None, "kaeufer_text": str | None, "hinweis": str} —
+    der Hinweis (wann, worueber, welche Fassung) steht unter den Kaesten.
+
+    Vertragsende in beiden Fassungen (Wunsch Ahmad 21.09.2026): Besondere
+    Vereinbarungen -> AGB -> Unterschrift (digital: der Gueltigkeitssatz)."""
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf, pagesize=A4,
-        leftMargin=2*cm, rightMargin=2*cm, topMargin=1.8*cm, bottomMargin=1.8*cm,
-        title="Kaufvertrag", author=dealer.get("company_name", "Autohändler"),
+        leftMargin=MARGIN, rightMargin=MARGIN,
+        topMargin=1.6 * cm, bottomMargin=2.0 * cm,
+        title="KFZ-Kaufvertrag", author=dealer.get("company_name", "Autohändler"),
     )
     st = _styles()
     story = []
 
     today = datetime.now().strftime("%d.%m.%Y")
+    company = (dealer.get("company_name") or "Autohändler").strip()
+    contract_no = (contract.get("contract_no") or "").strip() or \
+        f"KV-{datetime.now().strftime('%Y%m%d-%H%M')}"
+    # Rollenpruefung 22.09.2026 (RP-494): ab der 2. Fassung steht im Kopf und
+    # in der Fusszeile, welche Fassung das ist und welche sie ersetzt.
+    fassung_text = _fassung_text(contract)
 
-    # Header
-    header_left = Paragraph(
-        "<b>KAUFVERTRAG</b><br/>"
-        "<font size=8 color='#71717A'>für ein gebrauchtes Kraftfahrzeug</font>",
-        st["title"],
-    )
-    header_right = Paragraph(f"<font size=9>Datum<br/><b>{today}</b></font>", st["value"])
-    head = Table([[header_left, header_right]], colWidths=[12*cm, 4.5*cm])
-    head.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP")]))
-    story.append(head)
-    story.append(Spacer(1, 6))
+    # ---------- Header / Briefkopf ----------
+    header_left = [
+        Paragraph(f"<b>{_xml_escape(company)}</b>", st["brand"]),
+        Spacer(1, 2),
+        # Wunsch Ahmad 01.10.2026: "KFZ-Kaufvertrag" statt "Kaufvertrag" in der Ueberschrift
+        Paragraph("<b>KFZ-KAUFVERTRAG</b>", st["title"]),
+        # Wunsch Ahmad 01.10.2026: kein "Händler" mehr in den Beschriftungen
+        Paragraph("für ein gebrauchtes Kraftfahrzeug", st["subtitle"]),
+    ]
+    # Rollenpruefung 22.09.2026 (RP-452): Firmenlogo ueber dem Firmennamen,
+    # wenn beim Vertrag eines festgehalten ist (routes.contracts legt die
+    # Bytes als dealer["_logo_bytes"] bereit). Fehler -> ohne Logo.
+    logo = _logo_flowable(dealer.get("_logo_bytes"))
+    if logo is not None:
+        header_left = [logo, Spacer(1, 4)] + header_left
+    header_right = [
+        Paragraph("VERTRAGS-NR.", st["meta_label"]),
+        Paragraph(f"<b>{_xml_escape(contract_no)}</b>", st["meta_value"]),
+        Spacer(1, 5),
+        Paragraph("DATUM", st["meta_label"]),
+        Paragraph(f"<b>{today}</b>", st["meta_value"]),
+    ]
+    if fassung_text:
+        header_right += [
+            Spacer(1, 5),
+            Paragraph("FASSUNG", st["meta_label"]),
+            Paragraph(f"<b>{_xml_escape(fassung_text)}</b>", st["meta_value"]),
+        ]
+    if _formular():
+        # Layout "formular" (Wunsch Ahmad 03.10.2026, nach seiner Vorlage): links Logo/Firma,
+        # in der Mitte die Ueberschrift in der Vertragsfarbe, rechts Nummer und Datum.
+        links = [Paragraph(f"<b>{_xml_escape(company)}</b>", st["f_firma"])]
+        if logo is not None:
+            links = [logo, Spacer(1, 3)] + links
+        mitte = [Paragraph("<b>KFZ-KAUFVERTRAG</b>", st["f_title"]),
+                 Paragraph("für ein gebrauchtes Kraftfahrzeug", st["f_subtitle"])]
+        head = Table([[links, mitte, header_right]],
+                     colWidths=[5.2 * cm, CONTENT_W - 9.4 * cm, 4.2 * cm], hAlign="LEFT")
+        head.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("VALIGN", (1, 0), (1, 0), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ]))
+        story.append(head)
+        story.append(Spacer(1, 10))
+        trenner = Table([[""]], colWidths=[CONTENT_W], rowHeights=[0.8], hAlign="LEFT")
+        trenner.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), DIVIDER)]))
+        story.append(trenner)
+        story.append(Spacer(1, 12))
+    else:
+        head = Table([[header_left, header_right]], colWidths=[CONTENT_W - 4.5 * cm, 4.5 * cm])
+        head.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ]))
+        story.append(head)
+        story.append(Spacer(1, 8))
 
-    # Accent line
-    line = Table([[""]], colWidths=[16.5*cm], rowHeights=[2])
-    line.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), ACCENT)]))
-    story.append(line)
-    story.append(Spacer(1, 10))
+        # Accent line under the letterhead
+        line = Table([[""]], colWidths=[CONTENT_W], rowHeights=[2])
+        line.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), _akzent())]))
+        story.append(line)
+        story.append(Spacer(1, 12))
 
-    # Parties — side by side
+    # ---------- Parties — boxed, side by side ----------
     seller_rows = [
         ("Name / Firma", contract.get("seller_name", "")),
         ("Anschrift", contract.get("seller_address", "")),
@@ -168,22 +1052,124 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict) -> byt
     ]
     buyer_rows = [
         ("Firma", dealer.get("company_name", "")),
-        ("Ansprechpartner", dealer.get("contact_person", "")),
+        # Wunsch Ahmad (16.09.2026): kein Ansprechpartner im Kaufvertrag.
         ("Anschrift", f"{dealer.get('address','')}".strip()),
         ("PLZ / Ort", f"{dealer.get('zip_code','')} {dealer.get('city','')}".strip()),
         ("Telefon", dealer.get("phone", "")),
         ("E-Mail", dealer.get("email", "")),
     ]
-    story.append(_two_column_block(
-        "Verkäufer (Halter)", seller_rows,
-        "Käufer (Händler)", buyer_rows,
+    # Wunsch Ahmad 01.10.2026: nur "Verkäufer" und "Käufer" — ohne den Zusatz Halter/Händler
+    story.append(_two_boxes(
+        "Verkäufer", _ohne_leere(seller_rows),
+        "Käufer", _ohne_leere(buyer_rows),
         st,
     ))
-    story.append(Spacer(1, 8))
+    story.append(Spacer(1, 12))
 
-    # Vehicle data — 2 columns
-    story.append(Paragraph("Fahrzeugdaten", st["h2"]))
+    # Abholung direkt unter den Halter-/Kaeuferangaben (Wunsch Ahmad 12.09.2026).
+    # Wunsch Ahmad 21.09.2026: nur, wenn die Besonderen Vereinbarungen die
+    # Uebergabe NICHT schon nennen — mit unserem Standardsatz ("Die
+    # Fahrzeugübergabe findet bis/am {abholdatum} in {ort} …") stuenden
+    # Datum und Ort sonst zweimal im Vertrag.
+    import vertrag_vorlagen as _vorlagen
+    from vertrag_platzhalter import ersetzen as _platzhalter_ersetzen
+    _abhol =("" if _vorlagen.uebergabe_in_vereinbarungen(contract.get("additional_terms"))
+              else _abholzeile(contract))
+    if _abhol:
+        story.append(Paragraph(f"<b>Abholung:</b> {_xml_escape(_abhol)}", st["body"]))
+        story.append(Spacer(1, 12))
 
+    # ---------- Kaufpreis ----------
+    # Wunsch Ahmad 20.09.2026: Der Kaufpreis steht jetzt direkt UNTER den
+    # Angaben zu Halter und Käufer, vor den Fahrzeugdaten. Vorher stand er
+    # weit unten hinter Fahrzeugdaten und Ausstattung — wer den Vertrag
+    # ueberfliegt, sucht die Zahl aber oben bei den beiden Parteien.
+    def _eur(betrag):
+        return (f"{betrag:,.2f} EUR"
+                .replace(",", "X").replace(".", ",").replace("X", "."))
+
+    brutto = _preis_zahl(contract.get("purchase_price"))   # P-16
+    price_str = _eur(brutto)
+
+    # MwSt-Ausweis (gewerblicher Verkauf, Regelbesteuerung): Kaufpreis ist
+    # der Bruttobetrag, Netto und Steuer werden daraus gerechnet.
+    if contract.get("show_vat"):
+        netto = brutto / 1.19
+        mwst = brutto - netto
+        preis_label = (f"Netto {_eur(netto)}   ·   "
+                       f"zzgl. 19 % MwSt {_eur(mwst)}")
+    else:
+        # Wunsch Ahmad 01.10.2026: die Zeile "inkl. aller Bestandteile lt. Vertrag" entfaellt —
+        # unter dem Kaufpreis steht links nichts mehr (rechts weiter die Zahlungsart).
+        preis_label = ""
+
+    # Pruefbericht 20.09.2026 (P-09): ein vorhandenes, aber leeres Feld (None)
+    # stand als "None" im Vertrag — der Standard griff nur bei fehlendem Feld.
+    pay_bits = [("Zahlungsart", contract.get("payment_method") or "Bar / Überweisung")]
+    pay_sub = "   ·   ".join(
+        (f"{k}: {_xml_escape(str(v))}" if k else _xml_escape(str(v)))
+        for k, v in pay_bits if str(v).strip()
+    )
+    if _formular():
+        # Layout "formular" (03.10.2026): heller Preisstreifen — Kaufpreis gross in der Vertragsfarbe,
+        # daneben die Zahlungsart (bei MwSt-Ausweis zusaetzlich Netto und MwSt).
+        spalten = [[Paragraph("KAUFPREIS (VEREINBART)", st["f_price_label"]),
+                    Paragraph(f"<b>{price_str}</b>", st["f_price_value"])]]
+        if contract.get("show_vat"):
+            spalten += [[Paragraph("NETTO", st["f_price_label"]),
+                         Paragraph(_xml_escape(_eur(brutto / 1.19)), st["f_price_sub"])],
+                        [Paragraph("19 % MWST", st["f_price_label"]),
+                         Paragraph(_xml_escape(_eur(brutto - brutto / 1.19)), st["f_price_sub"])]]
+        zahlungsart = str(contract.get("payment_method") or "Bar / Überweisung").strip()
+        if zahlungsart:
+            spalten.append([Paragraph("ZAHLUNGSART", st["f_price_label"]),
+                            Paragraph(_xml_escape(zahlungsart), st["f_price_sub"])])
+        # Die Kaufpreis-Spalte ist breiter, damit auch ein siebenstelliger Preis in EINE Zeile passt.
+        erste = CONTENT_W * (0.5 if len(spalten) <= 2 else 0.38)
+        rest = (CONTENT_W - erste) / max(1, len(spalten) - 1)
+        price_box = Table([spalten], colWidths=[erste] + [rest] * (len(spalten) - 1), hAlign="LEFT")
+        price_box.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), FORMULAR_FLAECHE),
+            ("BOX", (0, 0), (-1, -1), 0.6, DIVIDER),
+            ("ROUNDEDCORNERS", [5, 5, 5, 5]),
+            ("LINEAFTER", (0, 0), (-2, -1), 0.6, DIVIDER),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
+        ]))
+    else:
+        price_box = Table([
+            [
+                Paragraph("KAUFPREIS (VEREINBART)", st["price_label"]),
+                Paragraph(f"<b>{price_str}</b>", st["price_value"]),
+            ],
+            [
+                Paragraph(preis_label, st["price_label"]),
+                # Seit 16.09.2026 kein Strich, wenn keine Zahlungsart angegeben ist.
+                Paragraph(pay_sub, st["price_sub"]),
+            ],
+        ], colWidths=[CONTENT_W * 0.45, CONTENT_W * 0.55])
+        price_box.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), DARK),
+            ("LEFTPADDING", (0, 0), (-1, -1), 12),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+            ("TOPPADDING", (0, 0), (-1, 0), 10),
+            ("BOTTOMPADDING", (0, 0), (-1, 0), 2),
+            ("TOPPADDING", (0, 1), (-1, 1), 2),
+            ("BOTTOMPADDING", (0, 1), (-1, 1), 10),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LINEBEFORE", (0, 0), (0, -1), 2.5, _akzent()),
+        ]))
+    story.append(KeepTogether([
+        # Wunsch Ahmad 21.09.2026: der Kaufpreis ohne Nummer, die
+        # Abschnitte danach zaehlen ab 1.
+        _section("Kaufpreis & Konditionen", st),
+        Spacer(1, 6),
+        price_box,
+    ]))
+    story.append(Spacer(1, 12))
+
+    # ---------- Vehicle data — 2 columns ----------
     def _as_int(val):
         """Robuste Int-Konvertierung — Werte können als Number ODER String
         ankommen (Formularfelder, Mobile.de-Scrape, …). Liefert None wenn leer."""
@@ -224,64 +1210,135 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict) -> byt
         ("Türen", vehicle.get("doors", "")),
         ("Sitze", vehicle.get("seats", "")),
         ("FIN", vehicle.get("vin", "")),
-        ("Kennzeichen", vehicle.get("license_plate", "")),
-        ("Vorhalter", contract.get("previous_owners") or vehicle.get("previous_owners", "")),
+        # Wunsch Ahmad (15.09.2026): kein Kennzeichen im Kaufvertrag.
+        # Rollenpruefung 22.09.2026 (RP-430): Die Quellen liefern die ANZAHL
+        # DER FAHRZEUGHALTER einschliesslich des jetzigen ("2. Hand" = 2) —
+        # als "Vorhalter" war das um eins zu hoch zugesichert. Beschriftung
+        # wie im Beweisdokument und im Abholprotokoll ("Halter laut Schein").
+        # RP-404: der Inseratswert nur, wenn das Feld im Vertrag FEHLT —
+        # im Dialog bewusst geleert ("") heisst: keine Angabe.
+        ("Fahrzeughalter (Anzahl)", _halter_anzahl(contract, vehicle)),
     ]
-    story.append(_two_col_kv(veh_rows, st))
-    story.append(Spacer(1, 8))
+    story.append(_section("1 · Fahrzeugdaten", st))
+    story.append(Spacer(1, 6))
+    veh_rows = _ohne_leere(veh_rows)
+    if veh_rows:
+        story.append(_two_col_kv(veh_rows, st))
+    story.append(Spacer(1, 12))
 
-    # Zusicherungen & Zustand — manual fields entered by dealer
-    hu_value = (
-        f"{_yn(contract.get('hu_valid'))}"
-        + (f", gültig bis {contract['hu_until']}" if contract.get("hu_until") else "")
-    )
+    # ---------- Zusicherungen & Zustand — manual fields entered by dealer ----------
+    # Seit 16.09.2026: ohne Angabe kein "—, gültig bis …" — nur die Teile,
+    # die ausgefuellt sind (leer -> die Zeile faellt unten weg).
+    hu_teile = []
+    if _yn(contract.get("hu_valid")) != "—":
+        hu_teile.append(_yn(contract.get("hu_valid")))
+    # Rollenpruefung 22.09.2026 (RP-405): "Nein, gültig bis 05/2027" stand im
+    # Vertrag, wenn das (gesperrte, aber nicht geleerte) Datumsfeld noch einen
+    # Wert trug. Ohne HU gibt es kein "gültig bis".
+    if contract.get("hu_until") and _yn(contract.get("hu_valid")) != "Nein":
+        hu_teile.append(f"gültig bis {_monat_jahr(contract['hu_until'], art='hu')}")   # P-20
+    hu_value = ", ".join(hu_teile)
     accident_value = _yn(contract.get("accident_free"))
-    if contract.get("accident_free", "").strip().lower() == "nein" and contract.get("accident_location"):
+    # P-04: accident_free=None (Feld vorhanden, leer) brach hier mit
+    # AttributeError — die Vertragsanlage scheiterte dann mit 400.
+    if str(contract.get("accident_free") or "").strip().lower() == "nein" and contract.get("accident_location"):
         accident_value = f"Nein (Schaden: {contract['accident_location']})"
 
     zus_rows = [
         ("Bereifung", contract.get("tires") or "—"),
+        ("Scheckheftgepflegt", _scheckheft_anzeige(contract)),
         ("HU/AU", hu_value or "—"),
         ("Unfallfrei", accident_value),
         ("EU-Import", _yn(contract.get("eu_import"))),
         ("Fahrtauglich", _yn(contract.get("drivable"))),
         ("Gewerblich genutzt seit EZ", _yn(contract.get("commercial_since_ez"))),
-        ("Unfallschaden (Inserat)", "Nein" if not vehicle.get("accident_damaged") else "Ja"),
-        ("Fahrbereit (Inserat)", "Ja" if vehicle.get("roadworthy", True) else "Nein"),
+        # Runde 22 (11.09.2026, Vorlage Ahmad): angemeldet oder abgemeldet.
+        ("Zulassung", _zulassung_anzeige(contract.get("zulassung"))),
+        # Pruefbericht 20.09.2026 (S-01/S-02/S-05): Nur eine ECHTE Angabe des
+        # Inserats wird gedruckt. Vorher wurde aus "keine Angabe" (None, oder
+        # ein fehlendes Feld) "Unfallschaden: Nein" und "Fahrbereit: Ja" — bei
+        # AutoScout sogar "Fahrbereit: Nein". Beides stand als Zusicherung im
+        # Kaufvertrag, obwohl das Inserat nichts dazu sagte.
+        # Go-Live-Pruefung 27.09.2026 (K7/Zusatz): nur, wenn der Wert im
+        # Dialog dazu PASST — sonst widersprach sich der Abschnitt
+        # ("Fahrtauglich: Nein" neben "Fahrbereit (Inserat): Ja"), und der
+        # Sucher konnte die Zeile nicht entfernen. Leer im Dialog -> weg.
+        # Entscheidung Auftraggeber 28.09.2026: nur noch die NEGATIVE
+        # Offenlegung des Portals, dann aber immer (schuetzt den Verkaeufer);
+        # positive Portalangaben nie. Gilt fuer jede Neuerzeugung.
+        ("Unfallschaden (Inserat)", _inserat_zustand(vehicle.get("accident_damaged"), offenlegung=True)),
+        ("Fahrbereit (Inserat)", _inserat_zustand(vehicle.get("roadworthy"), offenlegung=False)),
     ]
-    story.append(Paragraph("Zusicherungen & Zustand", st["h2"]))
-    story.append(_two_col_kv(zus_rows, st))
-    story.append(Spacer(1, 8))
+    zus_rows = _ohne_leere(zus_rows)
+    if zus_rows:
+        story.append(_section("2 · Zusicherungen & Zustand", st))
+        story.append(Spacer(1, 6))
+        story.append(_two_col_kv(zus_rows, st))
+        story.append(Spacer(1, 12))
 
-    # Schäden / Beschädigungen — aus interaktiver Skizze
+    # ---------- Schäden / Beschädigungen — aus interaktiver Skizze ----------
     damages_text = (contract.get("damages_text") or "").strip()
     damages_list = contract.get("damages") or []
-    if damages_text or damages_list:
-        story.append(Paragraph("Schäden / Beschädigungen", st["h2"]))
+    damage_note = (contract.get("vehicle_damage_note") or "").strip()
+    if damages_text or damages_list or damage_note:
+        story.append(_section("Schäden / Beschädigungen", st))
+        story.append(Spacer(1, 6))
         if damages_text:
-            for line in damages_text.split("\n"):
-                line = _xml_escape(line.strip())
-                if line:
-                    story.append(Paragraph(line, st["body"]))
+            for line_txt in damages_text.split("\n"):
+                line_txt = _xml_escape(line_txt.strip())
+                if line_txt:
+                    story.append(Paragraph(line_txt, st["body"]))
                     story.append(Spacer(1, 1))
         elif damages_list:
             # Fallback if only the array was sent.
             for d in damages_list:
-                tl = _xml_escape(str(d.get("type_label") or d.get("type_key") or "Schaden"))
-                zone = _xml_escape(str(d.get("zone") or ""))
-                story.append(Paragraph(f"• {tl}: {zone}", st["body"]))
+                if not isinstance(d, dict):
+                    # Nachpruefung Runde 14: Freitext-Eintraege (Strings) sind
+                    # erlaubt — vorher stuerzte `d.get` hier mit 500 ab.
+                    story.append(Paragraph(f"• {_xml_escape(str(d or ''))}", st["body"]))
+                    story.append(Spacer(1, 1))
+                    continue
+                tl = _xml_escape(str(d.get("type_label") or d.get("type_key")
+                                     or d.get("label") or d.get("type") or "Schaden"))
+                zone = _xml_escape(str(d.get("zone") or d.get("part_label") or d.get("part") or ""))
+                story.append(Paragraph(f"• {tl}: {zone}" if zone else f"• {tl}", st["body"]))
                 story.append(Spacer(1, 1))
-        story.append(Paragraph(
-            "<i>Erfassung erfolgte vor Übergabe gemeinsam mit dem Verkäufer "
-            "anhand der Fahrzeugskizze. Markierungen siehe interne Dokumentation.</i>",
-            st["small"],
-        ))
-        story.append(Spacer(1, 8))
+        if damage_note:
+            # Freitextfeld "Sonstige Schäden / Hinweis" aus dem Formular —
+            # stand bisher nur in der Datenbank, nie im Vertrag.
+            story.append(Spacer(1, 4))
+            story.append(Paragraph(
+                f"<b>Sonstige Schäden / Hinweis:</b> {_xml_escape(damage_note)}",
+                st["body"],
+            ))
+            story.append(Spacer(1, 2))
+        if damages_text or damages_list:
+            # Rollenpruefung 22.09.2026 (RP-429): Hier stand "Erfassung erfolgte
+            # vor Übergabe gemeinsam mit dem Verkäufer … siehe interne
+            # Dokumentation". Der Sucher erfasst die Schaeden aber meist aus der
+            # Ferne (Inserat/Telefon), und eine "interne Dokumentation" hat der
+            # Verkaeufer nie gesehen. Sachlich, ohne Behauptung, die nicht
+            # stimmt. (Wortlaut mit Ahmad abstimmen — Vertragstext.)
+            story.append(Paragraph(
+                "<i>Erfassung anhand der Fahrzeugskizze nach Angaben des Verkäufers "
+                "bzw. laut Inserat.</i>",
+                st["small"],
+            ))
+        story.append(Spacer(1, 12))
 
-    # Features
-    feats = vehicle.get("features") or []
-    if feats:
-        story.append(Paragraph("Ausstattung laut Inserat / Verkäuferangaben", st["h2"]))
+    # ---------- Features ----------
+    feats = _ausstattung_liste(vehicle.get("features"))   # P-15
+    if feats and _formular():
+        # Layout "formular": Ausstattung als Fliesstext, durch Kommas getrennt
+        story.append(_section("Ausstattung laut Inserat / Verkäuferangaben", st))
+        story.append(Spacer(1, 6))
+        story.append(Paragraph(", ".join(_xml_escape(str(x)) for x in feats), st["body"]))
+        story.append(Spacer(1, 4))
+        story.append(Paragraph("<i>Ausstattung laut Inseratsangaben.</i>", st["small"]))
+        story.append(Spacer(1, 12))
+    elif feats:
+        story.append(_section("Ausstattung laut Inserat / Verkäuferangaben", st))
+        story.append(Spacer(1, 6))
         col_count = 3
         rows_data = []
         for i in range(0, len(feats), col_count):
@@ -289,90 +1346,146 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict) -> byt
             while len(row) < col_count:
                 row.append("")
             rows_data.append([Paragraph(f"• {_xml_escape(str(x))}", st["body"]) if x else "" for x in row])
-        t = Table(rows_data, colWidths=[5.5*cm]*col_count)
+        t = Table(rows_data, colWidths=[CONTENT_W / col_count] * col_count)
         t.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"),
                                ("BOTTOMPADDING", (0, 0), (-1, -1), 2)]))
         story.append(t)
         story.append(Spacer(1, 4))
+        # Rollenpruefung 22.09.2026 (RP-429): "Vor Vertragsabschluss vom Händler
+        # zu prüfen" war eine interne Arbeitsanweisung im Kundenvertrag.
         story.append(Paragraph(
-            "<i>Ausstattung laut Inseratsangaben. Vor Vertragsabschluss vom Händler zu prüfen.</i>",
+            "<i>Ausstattung laut Inseratsangaben.</i>",
             st["small"],
         ))
-        story.append(Spacer(1, 6))
+        story.append(Spacer(1, 12))
 
-    # Price & terms
-    story.append(Paragraph("Kaufpreis & Konditionen", st["h2"]))
-    price_str = (
-        f"{contract.get('purchase_price', 0):,.2f} EUR"
-        .replace(",", "X").replace(".", ",").replace("X", ".")
-    )
-    story.append(_two_col_kv([
-        ("Kaufpreis (vereinbart)", price_str),
-        ("Zahlungsart", contract.get("payment_method", "Bar / Überweisung")),
-        ("Abholdatum", contract.get("pickup_date", "")),
-        ("Abholuhrzeit", contract.get("pickup_time", "")),
-    ], st))
-    extra = (contract.get("additional_terms") or "").strip()
-    if extra:
-        story.append(Spacer(1, 4))
-        story.append(Paragraph("<b>Besondere Vereinbarungen</b>", st["body"]))
-        for para in extra.split("\n\n"):
-            # Escape user content first, then restore intentional <br/> line-breaks.
-            txt = _xml_escape(para).replace("\n", "<br/>").strip()
-            if txt:
-                story.append(Paragraph(txt, st["body"]))
-                story.append(Spacer(1, 2))
-    notes = (contract.get("notes") or "").strip()
-    if notes:
-        story.append(Spacer(1, 4))
-        story.append(Paragraph(f"<b>Notizen (intern):</b> {_xml_escape(notes)}", st["small"]))
+    # Wunsch Ahmad 21.09.2026: Das Vertragsende lautet in BEIDEN Fassungen
+    # immer Besondere Vereinbarungen -> AGB -> Unterschrift. Vorher standen
+    # Notizen, Fahrzeugbeschreibung und der Gewaehrleistungs-Absatz noch
+    # zwischen Besonderen Vereinbarungen und AGB. Alle Abschnitte ab hier
+    # enden mit 12 pt Abstand und beginnen ohne eigenen (kein doppelter).
 
-    # Vehicle description (from listing or manually edited in dialog).
+    # ---------- Vehicle description (from listing or manually edited in dialog) ----------
+    # Kommt wie die Ausstattung aus dem Inserat, steht deshalb direkt dahinter.
     vd = (contract.get("vehicle_description") or "").strip()
-    if vd:
-        story.append(Spacer(1, 10))
-        story.append(Paragraph("Fahrzeugbeschreibung (vom Inserat)", st["h2"]))
-        for para in vd.split("\n\n"):
-            txt = _xml_escape(para).replace("\n", "<br/>").strip()
-            if txt:
-                story.append(Paragraph(txt, st["body"]))
-                story.append(Spacer(1, 2))
+    story.extend(_abschnitt_mit_text(
+        "Fahrzeugbeschreibung (vom Inserat)", _absaetze(vd, st["body"]), st, 2))
 
-    # Disclaimer
-    story.append(Spacer(1, 8))
+    # Wunsch Ahmad 21.09.2026: "Notizen (intern)" (contract.notes, traegt nur
+    # der Chef im Vertragsdialog ein) stehen NICHT mehr im Vertrag — beide
+    # Fassungen gehen an den Verkaeufer (E-Mail/WhatsApp/Ausdruck). Die Notiz
+    # bleibt im Vertragsdatensatz gespeichert.
+
+    # ---------- Disclaimer ----------
     story.append(Paragraph(
         "<b>Gewährleistung:</b> Das Fahrzeug wird unter Ausschluss jeglicher Gewährleistung verkauft, "
         "soweit gesetzlich zulässig. Eigenschaftszusicherungen siehe oben. "
         "Der Käufer ist Händler im Sinne des § 14 BGB.",
         st["body"],
     ))
+    story.append(Spacer(1, 12))
 
-    # AGB
-    agb = (contract.get("agb_text") or "").strip()
-    if agb:
-        story.append(Spacer(1, 12))
-        story.append(Paragraph("Allgemeine Geschäftsbedingungen", st["h2"]))
-        for para in agb.split("\n\n"):
-            txt = _xml_escape(para).replace("\n", "<br/>").strip()
-            if txt:
-                story.append(Paragraph(txt, st["small"]))
-                story.append(Spacer(1, 4))
+    # ---------- Besondere Vereinbarungen ----------
+    # Wunsch Ahmad 20.09.2026: In den Besonderen Vereinbarungen stehen
+    # Platzhalter ({abholdatum}, {ort}, {zahlungsart} ...). Sie wurden bisher
+    # NUR im Browser ersetzt, und auch nur fuer E-Mail und WhatsApp — im PDF
+    # blieb "Die Fahrzeugübergabe findet bis/am ___ statt" leer und musste von
+    # Hand nachgetragen werden. Jetzt setzt der Server sie selbst ein.
+    # Seit 21.09.2026 mit Balken-Ueberschrift wie die AGB (ohne Nummer).
+    # Rollenpruefung 22.09.2026 (RP-217/RP-368): Marke/Modell aus den
+    # Fahrzeugdaten mitgeben ({fahrzeug} war sonst immer "____").
+    # Rollenpruefung 22.09.2026 (RP-484): {abholdatum} im Vertrag OHNE Uhrzeit —
+    # der Dialog sagt "Abholuhrzeit … steht nicht im Vertrag", und die
+    # Abholzeile ist seit 15.09. bewusst ohne Uhrzeit.
+    pl_vertrag = _platzhalter_vertrag(contract, vehicle)
+    extra = _platzhalter_ersetzen(
+        (contract.get("additional_terms") or "").strip(), pl_vertrag, dealer,
+        mit_uhrzeit=False)
+    story.extend(_abschnitt_mit_text(
+        "Besondere Vereinbarungen", _absaetze(extra, st["body"]), st, 2))
 
-    # Signatures
-    story.append(Spacer(1, 18))
-    sig = Table([
-        [
-            Paragraph("__________________________<br/><font size=8 color='#71717A'>Verkäufer / Halter</font>", st["body"]),
-            Paragraph("__________________________<br/><font size=8 color='#71717A'>Käufer / Händler</font>", st["body"]),
-        ],
-        [
-            Paragraph(f"<font size=8 color='#71717A'>Ort, Datum: {today}</font>", st["body"]),
-            Paragraph(f"<font size=8 color='#71717A'>Ort, Datum: {today}</font>", st["body"]),
-        ],
-    ], colWidths=[8.25*cm, 8.25*cm])
-    sig.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"),
-                             ("TOPPADDING", (0, 0), (-1, -1), 4)]))
-    story.append(sig)
+    # ---------- AGB ----------
+    # Auch in den Vertragsbedingungen — dieselbe Regel, damit niemand raten
+    # muss, wo Platzhalter wirken und wo nicht.
+    agb = _platzhalter_ersetzen(
+        (contract.get("agb_text") or "").strip(), pl_vertrag, dealer, mit_uhrzeit=False)
+    story.extend(_abschnitt_mit_text(
+        "Allgemeine Geschäftsbedingungen", _absaetze(agb, st["small"]), st, 4))
 
-    doc.build(story)
+    # ---------- Allgemeine Vertragsbedingungen (Beschluss Ahmad 10.09.2026) ----------
+    # Der Standardtext (vier Klauseln) bzw. der in den Einstellungen
+    # gespeicherte Text steht in JEDER Fassung unter einer eigenen
+    # Ueberschrift — nicht mehr unter "Unterschriften". Immer nur der bei
+    # der Erstellung festgehaltene Text (contract_data); Altvertraege ohne
+    # Text haben den Abschnitt nicht (DIGITAL_NACHTRAEGLICH ist ein Hinweis
+    # fuer die Unterschriften-Zeile, kein Vertragstext).
+    # Auch der Vertragstext der digitalen Ausfertigung (Ahmads AGB-Block)
+    # darf Platzhalter tragen — sonst waere es die einzige Ausnahme.
+    avb = _platzhalter_ersetzen(
+        (contract.get("digital_vertragstext") or "").strip(), pl_vertrag, dealer,
+        mit_uhrzeit=False)
+    nachtraeglich = bool(avb) and avb == DIGITAL_NACHTRAEGLICH.strip()
+    if avb and not nachtraeglich:
+        story.extend(_abschnitt_mit_text(
+            "Allgemeine Vertragsbedingungen", _absaetze(avb, st["body"]), st, 4))
+
+    # Der vorige Abschnitt endet schon mit 12 pt — zusammen 20 pt vor dem
+    # Schlussblock (Gueltigkeitssatz bzw. Unterschriften), wie bisher.
+    # ---------- Digitale Ausfertigung: ein Satz statt Unterschriftslinien ----------
+    if digital:
+        # Wunsch Ahmad (15.09.2026): die Kundenfassung (E-Mail/WhatsApp) traegt
+        # weder den Abschnitt "Unterschriften" noch die Empfangsbestaetigung
+        # (Schluessel erhalten, Kaufpreis bestaetigt) — das gehoert nur in die
+        # Druckfassung, die Fahrer, Sucher und Chef oeffnen und ausdrucken.
+        # Wunsch Ahmad 01.10.2026: der Schlusssatz "Dieser Vertrag ist ohne Unterschrift gültig."
+        # entfaellt — die Kundenfassung endet mit den Vertragsbedingungen.
+        block = []
+        if nachtraeglich:
+            for para in avb.split("\n\n"):
+                txt = _xml_escape(para).replace("\n", "<br/>").strip()
+                if txt:
+                    block.append(Paragraph(txt, st["small"]))
+                    block.append(Spacer(1, 3))
+        if block:
+            story.append(Spacer(1, 8))
+            story.append(KeepTogether(block))
+        footer_left = company
+        footer_center = f"Kaufvertrag {contract_no} · erstellt am {today} · digitale Ausfertigung"
+        if fassung_text:
+            footer_center += f" · Fassung {_fassung_nummer(contract)}"
+        doc.build(story, canvasmaker=_numbered_canvas_factory(footer_left, footer_center))
+        return buf.getvalue()
+
+    # ---------- Signatures — boxed, kept on one page ----------
+    # Runde 22 (11.09.2026, Vorlage Ahmad): Die Unterschriftskaesten
+    # ("Verkäufer" links, "Käufer" rechts; seit 01.10.2026 ohne Halter/Händler) tragen unter
+    # dem Titel die Empfangsbestaetigung mit Ankreuz-Kaestchen und "Datum
+    # und Ort", darunter wie bisher die Linien — siehe _empfang_kasten.
+    sig = _empfang_paar(contract, st, unterschrift=True,
+                        mit_empfang=(not portal) and empfang_drucken(contract, dealer), bilder=unterschriften,
+                        portal=portal)
+    hinweis = (unterschriften or {}).get("hinweis")
+    story.append(Spacer(1, 8))
+    story.append(KeepTogether([
+        _section("Unterschriften", st),
+        Spacer(1, 8),
+        sig,
+        *([Spacer(1, 4), Paragraph(_xml_escape(str(hinweis)), st["small"])] if hinweis else []),
+        Spacer(1, 4),
+        Paragraph(
+            # Wunsch Ahmad (12.09.2026): der Satz zur elektronischen Uebermittlung
+            # ("eine eigenhaendige Unterschrift ist dann nicht erforderlich") stand
+            # hier als letzter Satz — Wunsch Ahmad 01.10.2026: dieser Satz entfaellt,
+            # unter den Unterschriften bleibt nur die Bestaetigung.
+            "Mit ihrer Unterschrift bestätigen beide Parteien die Richtigkeit "
+            "aller Angaben sowie den Erhalt einer Vertragsausfertigung.",
+            st["small"],
+        ),
+    ]))
+
+    footer_left = company
+    footer_center = f"Kaufvertrag {contract_no} · erstellt am {today}"
+    if fassung_text:
+        footer_center += f" · Fassung {_fassung_nummer(contract)}"
+    doc.build(story, canvasmaker=_numbered_canvas_factory(footer_left, footer_center))
     return buf.getvalue()

@@ -1,0 +1,121 @@
+/*
+ * Rauchtest gegen den ECHTEN Produktions-Stack (Pruefbericht Runde 7,
+ * Befund 6).
+ *
+ * Die uebrige E2E-Suite laeuft gegen ein direkt gestartetes uvicorn, eine
+ * MongoDB ohne Passwort und einen kleinen Test-Server. Das prueft die
+ * Anwendung, aber nicht den Weg, den der Kunde spaeter wirklich nimmt:
+ *
+ *     Browser -> nginx (HTTPS) -> Backend im Container -> MongoDB mit Auth
+ *
+ * Genau dieser Weg wird hier einmal komplett durchlaufen. Absichtlich klein
+ * gehalten: der Test soll beweisen, dass der Produktions-Aufbau traegt —
+ * Fachlogik prueft die grosse Suite. Ein kurzer, stabiler Test, der bei
+ * jedem Push laeuft, ist mehr wert als ein langer, der flackert.
+ *
+ * Laeuft nur, wenn E2E_STACK=1 gesetzt ist (siehe playwright.config.js):
+ *   E2E_STACK=1 E2E_BASE_URL=https://localhost yarn e2e
+ */
+const { test, expect } = require("@playwright/test");
+const h = require("./helpers");
+
+// Pruefbericht 20.09.2026 (T-24): Zugangsdaten wie in der uebrigen Suite ueber
+// helpers.js — E2E_SUPER_ADMIN_*, sonst SUPER_ADMIN_* aus der Umgebung, sonst
+// (nur lokal) aus backend/.env. Vorher las diese Datei nur die Umgebung.
+const BENUTZER = h.SUPER_ADMIN.username;
+const PASSWORT = h.SUPER_ADMIN.password;
+
+test.describe("Produktions-Stack (nginx + Container + MongoDB mit Auth)", () => {
+  test("Oberflaeche kommt ueber HTTPS durch den Proxy", async ({ page }) => {
+    const antwort = await page.goto("/");
+    expect(antwort.status()).toBe(200);
+    expect(page.url().startsWith("https://")).toBeTruthy();
+    // Die SPA muss wirklich gerendert haben, nicht nur ein leeres Geruest.
+    await expect(page.locator("#root")).not.toBeEmpty();
+  });
+
+  test("Sicherheits-Kopfzeilen kommen vom echten Proxy", async ({ request }) => {
+    const r = await request.get("/");
+    const k = r.headers();
+    expect(k["strict-transport-security"]).toBeTruthy();
+    expect(k["x-content-type-options"]).toBe("nosniff");
+    expect(k["x-frame-options"]).toBe("DENY");
+    expect(k["referrer-policy"]).toBeTruthy();
+    expect(k["content-security-policy"]).toContain("frame-ancestors");
+  });
+
+  test("API antwortet unter derselben Herkunft", async ({ request }) => {
+    const gesund = await request.get("/api/health");
+    expect(gesund.status()).toBe(200);
+    expect((await gesund.json()).db).toBe("up");
+
+    // Bereitschaft aus BESUCHERSICHT. Seit dem 20.09.2026 (Nr. 54) liefert
+    // /api/ready einem nicht ausgewiesenen Aufrufer nur noch ready true/false
+    // mit 200 bzw. 503 — genau das, was ein Lastverteiler braucht. Die
+    // Einzelheiten (Schema-Version, freier Speicher, offene Alarme, Zahl der
+    // Super-Admins ohne zweiten Faktor) waren vorher fuer jeden lesbar.
+    //
+    // Dieser Rauchtest laeuft ueber nginx, ist also ein Besucher. Er prueft
+    // deshalb ZWEIERLEI: dass die Plattform bereit ist, und dass dabei nichts
+    // nach aussen dringt. Der inhaltliche Blick (welcher Fehler genau?) steht
+    // einen Schritt vorher in der CI — `docker compose exec backend curl -fsS
+    // .../api/ready` laeuft IM Container, sieht die volle Antwort und bricht
+    // bei 503 ab.
+    const bereit = await request.get("/api/ready");
+    const daten = await bereit.json();
+    expect(bereit.status(), `nicht bereit: ${JSON.stringify(daten)}`).toBe(200);
+    expect(daten.ready).toBe(true);
+    for (const geheim of ["fehler", "warnungen", "info", "schema_version"]) {
+      expect(daten[geheim], `/api/ready verraet "${geheim}" nach aussen`)
+        .toBeUndefined();
+    }
+  });
+
+  test("Anmeldung und ein geschuetzter Aufruf gehen durch den ganzen Weg",
+    async ({ page }) => {
+      test.skip(!BENUTZER || !PASSWORT, "Keine Super-Admin-Zugangsdaten gesetzt");
+      await page.goto("/login");
+      await page.getByTestId("login-kontonummer").fill(BENUTZER);
+      await page.getByTestId("login-password").fill(PASSWORT);
+      await page.getByTestId("login-submit").click();
+      await expect(page).toHaveURL(/\/admin\/?$/);
+      await expect(page.getByText("Angemeldet als")).toBeVisible();
+
+      // Ein geschuetzter API-Aufruf MIT dem Token aus dem Browser: beweist,
+      // dass der Proxy den Authorization-Kopf durchreicht und die MongoDB
+      // mit Passwort erreichbar ist.
+      const antwort = await page.evaluate(async () => {
+        // Runde 15: das Betreiber-Token liegt nur noch im Tab (sessionStorage),
+        // nicht in localStorage.
+        const t = sessionStorage.getItem("ah_token") || localStorage.getItem("ah_token");
+        const r = await fetch("/api/admin/stats", {
+          headers: { Authorization: `Bearer ${t}` },
+        });
+        return { status: r.status, text: (await r.text()).slice(0, 200) };
+      });
+      expect(antwort.status, antwort.text).toBe(200);
+    });
+
+  test("Unbekannte Adresse liefert die Oberflaeche, keinen Serverfehler",
+    async ({ request }) => {
+      // Bei einer SPA muss der Proxy jeden unbekannten Pfad auf index.html
+      // legen — sonst ist jeder direkt aufgerufene Link (z.B. aus einer
+      // E-Mail) kaputt.
+      const r = await request.get("/app/bestand");
+      expect(r.status()).toBe(200);
+      expect((await r.text()).toLowerCase()).toContain("<div id=\"root\"");
+    });
+
+  test("App-Dateien ohne Hash kommen ohne Zwischenspeicher", async ({ request }) => {
+    // Installierbare App (09/2026): Service Worker, boot.js und Manifest
+    // tragen keinen Hash im Namen. Ohne "no-cache" hielten Cloudflare oder
+    // der Browser nach einem Update die alte Fassung fest.
+    for (const pfad of ["/service-worker.js", "/boot.js", "/manifest.json"]) {
+      const r = await request.get(pfad);
+      expect(r.status(), pfad).toBe(200);
+      expect(r.headers()["cache-control"] || "", pfad).toContain("no-cache");
+    }
+    const manifest = await (await request.get("/manifest.json")).json();
+    expect(manifest.start_url).toBe("/start");
+  });
+});

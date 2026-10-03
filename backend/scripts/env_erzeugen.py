@@ -1,0 +1,279 @@
+# -*- coding: utf-8 -*-
+"""Produktions-.env erzeugen — mit sicheren Zufallswerten statt Platzhaltern.
+
+Der Produktions-Check des Backends verweigert den Start bei schwachen oder
+vergessenen Werten. Dieses Skript legt eine vollstaendige `.env` an: alles,
+was zufaellig sein muss, wird zufaellig erzeugt; alles, was du selbst
+entscheiden musst, steht klar markiert mit `BITTE-AUSFUELLEN` darin.
+
+Aufruf (auf dem Server, im Projektverzeichnis):
+  python backend/scripts/env_erzeugen.py --domain app.auto-schnellkauf.de > .env
+
+Kontonummer (13.09.2026): Es gibt nur den Super-Admin (SUPER_ADMIN_USERNAME/
+SUPER_ADMIN_PASSWORD); Bootstrap-Admin per E-Mail und Selbst-Registrierung
+entfallen.
+
+Vorhandene Werte uebernehmen (nichts neu wuerfeln):
+  python backend/scripts/env_erzeugen.py --domain … --vorlage .env > .env.neu
+
+Die Ausgabe enthaelt Passwoerter — nicht in Chats, Tickets oder Screenshots
+weitergeben und die Datei nur mit `chmod 600` ablegen.
+"""
+import argparse
+import re
+import secrets
+import string
+import sys
+from pathlib import Path
+
+ZEICHEN = string.ascii_letters + string.digits + "!%*+-_"
+# Fuer Werte, die in eine Verbindungs-URL wandern (MONGO_URL): nur Zeichen,
+# die dort KEINE Sonderbedeutung haben. Ein "%" oder "@" im Passwort macht
+# die Verbindungszeichenfolge sonst ungueltig.
+ZEICHEN_URL = string.ascii_letters + string.digits + "-_.~"
+
+
+def passwort(laenge: int = 24) -> str:
+    """Zufallspasswort fuer Anmeldungen (nicht fuer URLs)."""
+    return "".join(secrets.choice(ZEICHEN) for _ in range(laenge))
+
+
+def passwort_url(laenge: int = 32) -> str:
+    """Zufallspasswort, das gefahrlos in einer Verbindungs-URL stehen darf."""
+    return "".join(secrets.choice(ZEICHEN_URL) for _ in range(laenge))
+
+
+def geheimnis(bytes_: int = 32) -> str:
+    return secrets.token_hex(bytes_)
+
+
+def vorlage_lesen(pfad: str) -> dict:
+    werte = {}
+    if not pfad:
+        return werte
+    p = Path(pfad)
+    if not p.is_file():
+        print(f"# Hinweis: Vorlage {pfad} nicht gefunden — alles neu erzeugt",
+              file=sys.stderr)
+        return werte
+    for zeile in p.read_text(encoding="utf-8").splitlines():
+        if "=" in zeile and not zeile.strip().startswith("#"):
+            k, _, v = zeile.partition("=")
+            if v.strip():
+                werte.setdefault(k.strip(), v.strip())
+    return werte
+
+
+#: Aus --domain abgeleitet: hier gilt die Angabe auf der Kommandozeile, nicht
+#: die Vorlage (sonst liesse sich die Domain mit --vorlage nie wechseln).
+_DOMAIN_FELDER = ("PUBLIC_HOST", "FRONTEND_URL", "CORS_ORIGINS")
+
+
+def vorlage_anwenden(zeilen: list, alt: dict, domain_felder=_DOMAIN_FELDER) -> list:
+    """Rollenprüfung 22.09.2026 (RP-560): `--vorlage .env` hiess bisher "nur
+    einige Werte uebernehmen". Das Skript schrieb eine feste Liste —
+    Schluessel der Vorlage, die es nicht kannte (DATEN_SCHLUESSEL,
+    MONGO_EXTRA_ARGS, BACKUP_S3_ACCESS_KEY/SECRET_KEY, COMPOSE_FILE,
+    MARKTPLATZ_AKTIV, APIFY_*_ACTOR ...), fielen STILL weg, und feste Werte
+    (VERTRAG_LOESCHUNG_AKTIV=false, MONGO_CACHE_GB=4, MONGO_MEM_LIMIT=6g,
+    WEB_CONCURRENCY=4 ...) setzten die Einstellungen des Servers zurueck.
+    Ohne DATEN_SCHLUESSEL war ein damit verschluesseltes MFA-Geheimnis
+    unlesbar, ohne MONGO_EXTRA_ARGS startete Mongo ohne Replica Set.
+
+    Jetzt gilt: Jeder Wert der Vorlage gewinnt (ausser den aus --domain
+    abgeleiteten Adressen), und alles, was die Vorlage darueber hinaus
+    enthaelt, steht unten im Abschnitt "Uebernommen aus der Vorlage"."""
+    if not alt:
+        return list(zeilen)
+    aus = []
+    geschrieben = set()
+    for z in zeilen:
+        if "=" in z and not z.startswith("#"):
+            name, _, wert = z.partition("=")
+            name = name.strip()
+            geschrieben.add(name)
+            if name in alt and name not in domain_felder and alt[name] != wert:
+                z = f"{name}={alt[name]}"
+        aus.append(z)
+    rest = [k for k in alt if k not in geschrieben]
+    if rest:
+        aus += ["# ---- Uebernommen aus der Vorlage (vom Skript nicht selbst geschrieben) ----"]
+        aus += [f"{k}={alt[k]}" for k in rest]
+        aus.append("")
+    return aus
+
+
+def _domain_saeubern(roh: str) -> str:
+    """Schema und Schraegstriche entfernen.
+
+    Nachpruefung 20.09.2026, Nr. 26: hier stand
+    `.lstrip("https://").lstrip("http://")`. `lstrip` entfernt keine
+    Zeichenfolge, sondern JEDES Zeichen der Menge {h,t,p,s,:,/} vom Anfang —
+    aus "shop.example.de" wurde "op.example.de", aus "test.example.de"
+    "est.example.de". Jetzt wird das Schema als echtes Praefix entfernt."""
+    d = roh.strip().lower()
+    for schema in ("https://", "http://"):
+        if d.startswith(schema):
+            d = d[len(schema):]
+            break
+    return d.split("/", 1)[0].strip()
+
+
+def _proxy_vorlage(hinter_lb: bool) -> str:
+    """nginx-Betriebsart (Nr. 27) — Einzelserver ist der Standard."""
+    return ("hinter-loadbalancer.conf.template" if hinter_lb
+            else "default.conf.template")
+
+
+def main() -> int:
+    # Immer UTF-8 ausgeben: unter Windows schreibt Python sonst in der
+    # Systemkodierung, und die erzeugte .env waere auf dem Linux-Server kaputt.
+    for strom in (sys.stdout, sys.stderr):
+        try:
+            strom.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
+    ap = argparse.ArgumentParser(description="Produktions-.env erzeugen")
+    ap.add_argument("--domain", required=True,
+                    help="oeffentliche Adresse, z.B. app.auto-schnellkauf.de")
+    ap.add_argument("--mongo-host", default="mongo",
+                    help="Mongo-Adresse: 'mongo' (Docker) oder die private IP, "
+                         "z.B. 10.0.0.2")
+    ap.add_argument("--vorlage", default="",
+                    help="bestehende .env, deren Werte uebernommen werden")
+    # Nachpruefung 20.09.2026, Nr. 27: die Betriebsart wurde stillschweigend
+    # auf "hinter dem Load Balancer" gesetzt. Diese nginx-Vorlage verwirft
+    # direkte Zugriffe mit 444 — auf einem normalen Einzelserver war die
+    # Seite damit von aussen nicht erreichbar. Jetzt ist der Einzelserver
+    # der Standard und der Load-Balancer-Betrieb eine bewusste Angabe.
+    ap.add_argument("--hinter-loadbalancer", action="store_true",
+                    help="Server steht hinter einem Load Balancer, der die "
+                         "Verschluesselung beendet (nginx nur auf Port 80). "
+                         "Ohne diese Angabe: Einzelserver, nginx macht TLS selbst.")
+    ap.add_argument("--mail-von", default="Auto Schnellkauf <vertrag@auto-schnellkauf.de>")
+    ap.add_argument("--mail-name", default="Auto Schnellkauf")
+    args = ap.parse_args()
+
+    domain = _domain_saeubern(args.domain)
+    if not re.match(r"^[a-z0-9.-]+\.[a-z]{2,}$", domain):
+        print(f"FEHLER: '{args.domain}' sieht nicht wie eine Domain aus", file=sys.stderr)
+        return 1
+    alt = vorlage_lesen(args.vorlage)
+
+    def wert(name: str, neu):
+        return alt.get(name) or (neu() if callable(neu) else neu)
+
+    mongo_user = wert("MONGO_USER", "autoschnell_app")
+    mongo_pw = wert("MONGO_PASSWORD", passwort_url)
+    mongo_url = alt.get("MONGO_URL") or (
+        f"mongodb://{mongo_user}:{mongo_pw}@{args.mongo_host}:27017/"
+        f"?authSource=admin&maxPoolSize=20")
+
+    zeilen = [
+        "# AutoSchnell — Produktionskonfiguration",
+        f"# erzeugt fuer {domain}. Datei mit 'chmod 600 .env' schuetzen.",
+        "",
+        "# ---- Betrieb ----",
+        "APP_ENV=production",
+        "WEB_CONCURRENCY=4",
+        "BEWEIS_AUFBEWAHRUNG_TAGE=30",
+        "ENABLE_DOCS=false",
+        "MOCK_PROVIDER_FETCH=false",
+        "MOBILE_SANDBOX_MODE=false",
+        "RATE_LIMIT_ENABLED=true",
+        "TRUST_PROXY=true",
+        "# Eigene Vermittler (Load Balancer, Proxy). Pflicht, sobald mehr als",
+        "# ein Vermittler davorsteht - sonst sehen alle Besucher gleich aus.",
+        f"TRUSTED_PROXIES={alt.get('TRUSTED_PROXIES') or '127.0.0.1,172.16.0.0/12,10.0.0.4/32'}",
+        "# Betriebsart des Webservers. Hinter einem Load Balancer terminiert",
+        "# dieser die Verschluesselung; nginx laeuft dann nur auf Port 80.",
+        f"PROXY_TEMPLATE={alt.get('PROXY_TEMPLATE') or _proxy_vorlage(args.hinter_loadbalancer)}",
+        f"PRIVATES_NETZ={alt.get('PRIVATES_NETZ') or '10.0.0.0/16'}",
+        "",
+        "# ---- Adressen ----",
+        f"PUBLIC_HOST={domain}",
+        f"FRONTEND_URL=https://{domain}",
+        f"CORS_ORIGINS=https://{domain}",
+        "",
+        "# ---- Datenbank ----",
+        f"MONGO_USER={mongo_user}",
+        f"MONGO_PASSWORD={mongo_pw}",
+        f"MONGO_URL={mongo_url}",
+        f"DB_NAME={wert('DB_NAME', 'autoschnell')}",
+        "MONGO_CACHE_GB=4",
+        "MONGO_MEM_LIMIT=6g",
+        "",
+        "# ---- Anmeldung ----",
+        f"JWT_SECRET={wert('JWT_SECRET', geheimnis)}",
+        "# Eigener Schluessel fuer die Zwei-Faktor-Geheimnisse (mfa.py). Beim",
+        "# Lesen wird auch JWT_SECRET probiert — vorhandene Geheimnisse bleiben",
+        "# lesbar. NIE ersatzlos entfernen, sonst ist ein damit verschluesseltes",
+        "# MFA-Geheimnis unlesbar (Rollenpruefung 22.09.2026, RP-548/RP-560).",
+        f"DATEN_SCHLUESSEL={wert('DATEN_SCHLUESSEL', geheimnis)}",
+        f"SUPER_ADMIN_USERNAME={wert('SUPER_ADMIN_USERNAME', lambda: 'chef-' + secrets.token_hex(3))}",
+        f"SUPER_ADMIN_PASSWORD={wert('SUPER_ADMIN_PASSWORD', passwort)}",
+        "",
+        "# ---- E-Mail (Resend) ----",
+        f"RESEND_API_KEY={alt.get('RESEND_API_KEY') or 'BITTE-AUSFUELLEN-re_...'}",
+        f"MAIL_FROM={alt.get('MAIL_FROM') or args.mail_von}",
+        f"MAIL_ABSENDER_NAME={alt.get('MAIL_ABSENDER_NAME') or args.mail_name}",
+        "",
+        "# ---- Datei-Speicher ----",
+        "# Bei MEHREREN App-Servern PFLICHT: sonst liegen Fotos und PDFs nur",
+        "# auf dem Server, der sie angenommen hat. Hetzner Object Storage ist",
+        "# S3-kompatibel (Endpunkt z.B. https://nbg1.your-objectstorage.com).",
+        f"S3_ENDPOINT={alt.get('S3_ENDPOINT', '')}",
+        f"S3_BUCKET={alt.get('S3_BUCKET', '')}",
+        f"S3_ACCESS_KEY={alt.get('S3_ACCESS_KEY', '')}",
+        f"S3_SECRET_KEY={alt.get('S3_SECRET_KEY', '')}",
+        "S3_REGION=auto",
+        "",
+        "# ---- Sicherung ----",
+        "BACKUP_DIR=/backups",
+        "BACKUP_HOUR=3",
+        "# Pflicht in Produktion (production_check): ohne Offsite-Sicherung",
+        "# startet das Backend nicht (RP-548).",
+        f"BACKUP_S3_BUCKET={alt.get('BACKUP_S3_BUCKET') or 'BITTE-AUSFUELLEN'}",
+        "BACKUP_S3_PREFIX=autoschnell-backups/",
+        "BACKUP_S3_OBJECT_LOCK_DAYS=",
+        "BACKUP_S3_KEEP=14",
+        "",
+        "# ---- Anbieter-Abrufe ----",
+        "# Pflicht (production_check): leer bricht den Start ab (RP-548).",
+        f"APIFY_TOKEN={alt.get('APIFY_TOKEN') or 'BITTE-AUSFUELLEN'}",
+        "# 0 = kein Tageslimit fuer mobile.de/AutoScout (Entscheidung 09/2026).",
+        "# Ab ANBIETER_TAGESWARNUNG Abrufen gibt es EINEN Hinweis im Bereich",
+        "# Betrieb — eine Warnung, kein Riegel.",
+        "ANBIETER_TAGESLIMIT_JE_FIRMA=0",
+        "ANBIETER_TAGESLIMIT_GESAMT=0",
+        "# Je Konto: 400 neue Abrufe am Tag (Entscheidung Ahmad 16.09.2026), 0 = aus.",
+        "ANBIETER_TAGESLIMIT_JE_KONTO=400",
+        "ANBIETER_TAGESWARNUNG=5000",
+        "ABRUF_RUECKFALL_TAGESLIMIT=25",
+        "",
+        "# ---- Zahlungen (leer lassen, solange nicht genutzt) ----",
+        f"STRIPE_WEBHOOK_SECRET={alt.get('STRIPE_WEBHOOK_SECRET', '')}",
+        "",
+        "# ---- Fachliche Schalter ----",
+        "VERKAUF_KOSTENLOS=true",
+        "# Erst auf true stellen, wenn die 90-Tage-Loeschung wirklich loeschen soll",
+        "VERTRAG_LOESCHUNG_AKTIV=false",
+        "AUTO_DATEN_SCHAEDEN_FREITEXT=false",
+        "",
+    ]
+    zeilen = vorlage_anwenden(zeilen, alt, domain_felder=_DOMAIN_FELDER)
+    print("\n".join(zeilen))
+    offen = [z.split("=")[0] for z in zeilen if "BITTE-AUSFUELLEN" in z]
+    leer = [z.split("=")[0] for z in zeilen
+            if z.endswith("=") and z.split("=")[0] in
+            ("S3_ENDPOINT", "S3_BUCKET", "S3_ACCESS_KEY", "S3_SECRET_KEY",
+             "BACKUP_S3_BUCKET")]
+    if offen or leer:
+        print("\n# NOCH ZU ERGAENZEN: " + ", ".join(offen + leer), file=sys.stderr)
+    print("# Passwoerter wurden zufaellig erzeugt — sicher ablegen "
+          "(Passwortmanager).", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

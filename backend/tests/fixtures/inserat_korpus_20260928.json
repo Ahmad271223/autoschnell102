@@ -1,0 +1,295 @@
+{
+ "hinweis": "Soll-Ergebnisse fuer die Inserat-Vorbelegung (ai/inserat_regeln.vorschlaege). 'leer' = nichts vorbelegen (Hinweis erlaubt). 'nicht_ja' = Nein ODER leer, aber NIE Ja. 'nicht_nein' = Ja ODER leer, aber NIE Nein. Heute = 28.09.2026. Grundregel: im Zweifel leer, nie die falsche Richtung.",
+ "unfallfrei": [
+  [
+   "Leider nicht mehr unfallfrei.",
+   "Nein"
+  ],
+  [
+   "war nie unfallfrei",
+   "Nein"
+  ],
+  [
+   "nicht ganz unfallfrei",
+   "nicht_ja"
+  ],
+  [
+   "Unfallfrei? Leider nein",
+   "Nein"
+  ],
+  [
+   "Unfallfrei: nein",
+   "Nein"
+  ],
+  [
+   "nicht mehr ganz unfallfrei",
+   "Nein"
+  ],
+  [
+   "nicht zu 100 % unfallfrei",
+   "nicht_ja"
+  ],
+  [
+   "Das Fahrzeug ist keinesfalls unfallfrei",
+   "Nein"
+  ],
+  [
+   "Der Wagen ist keineswegs unfallfrei",
+   "Nein"
+  ],
+  [
+   "Nicht-unfallfrei",
+   "Nein"
+  ],
+  [
+   "nicht–unfallfrei",
+   "nicht_ja"
+  ],
+  [
+   "unfallfrei ist er leider nicht",
+   "nicht_ja"
+  ],
+  [
+   "unfallfrei ist es definitiv nicht",
+   "nicht_ja"
+  ],
+  [
+   "weder unfallfrei noch fahrbereit",
+   "nicht_ja"
+  ],
+  [
+   "Kein Unfallschaden, aber Hagelschaden",
+   "leer"
+  ],
+  [
+   "keine Mängel unfallfrei",
+   "Ja"
+  ],
+  [
+   "Nichtraucherfahrzeug keine Haustiere unfallfrei",
+   "Ja"
+  ],
+  [
+   "Verkaufe ohne Garantie unfallfrei",
+   "Ja"
+  ],
+  [
+   "Garagenwagen ohne Rost unfallfrei",
+   "Ja"
+  ],
+  [
+   "TÜV neu keine Mängel unfallfrei fahrbereit",
+   "Ja"
+  ],
+  [
+   "Wegen Neuanschaffung abzugeben kein Tausch unfallfrei fahrbereit",
+   "Ja"
+  ],
+  [
+   "Preis nicht verhandelbar unfallfrei fahrbereit",
+   "Ja"
+  ],
+  [
+   "Keine Garantie keine Rücknahme Unfallfrei Fahrbereit",
+   "Ja"
+  ],
+  [
+   "kein Unfall, unfallfrei",
+   "Ja"
+  ],
+  [
+   "keine Unfälle, scheckheftgepflegt",
+   "Ja"
+  ],
+  [
+   "keinerlei Unfälle, gepflegt",
+   "nicht_nein"
+  ],
+  [
+   "Keinerlei Unfallschäden",
+   "nicht_nein"
+  ],
+  [
+   "ohne jegliche Unfälle",
+   "nicht_nein"
+  ],
+  [
+   "ohne irgendwelche Unfallschäden",
+   "nicht_nein"
+  ],
+  [
+   "kein einziger Unfall",
+   "nicht_nein"
+  ],
+  [
+   "Wagen hatte keinen einzigen Unfall",
+   "nicht_nein"
+  ],
+  [
+   "keine mir bekannten Unfälle",
+   "leer"
+  ],
+  [
+   "Unfallfrei lt. Vorbesitzer",
+   "leer"
+  ],
+  [
+   "Unfallfrei nach Angaben des Vorbesitzers",
+   "leer"
+  ],
+  [
+   "laut Vorbesitzer unfallfrei",
+   "leer"
+  ],
+  [
+   "Unfallschaden: nicht bekannt",
+   "leer"
+  ],
+  [
+   "Unfälle: nicht bekannt",
+   "leer"
+  ],
+  [
+   "Unfallwagen, Frontschaden repariert.",
+   "Nein"
+  ],
+  [
+   "keine Kratzer Unfallschaden hinten",
+   "Nein"
+  ],
+  [
+   "nicht nur unfallfrei sondern auch gepflegt",
+   "Ja"
+  ],
+  [
+   "unfallfrei",
+   "Ja"
+  ],
+  [
+   "Fahrzeug ist unfallfrei und scheckheftgepflegt.",
+   "Ja"
+  ]
+ ],
+ "fahrbereit": [
+  [
+   "Fahrzeug ist nicht mehr fahrbereit.",
+   "Nein"
+  ],
+  [
+   "bedingt fahrbereit",
+   "leer"
+  ],
+  [
+   "nur eingeschränkt fahrbereit",
+   "leer"
+  ],
+  [
+   "Fahrzeug keinesfalls fahrbereit",
+   "Nein"
+  ],
+  [
+   "Auto ist leider keinesfalls fahrbereit",
+   "Nein"
+  ],
+  [
+   "nicht-fahrbereit",
+   "Nein"
+  ],
+  [
+   "(nicht) fahrbereit",
+   "nicht_ja"
+  ],
+  [
+   "Motor defekt, Auto nicht fahrbereit",
+   "Nein"
+  ],
+  [
+   "weder unfallfrei noch fahrbereit",
+   "nicht_ja"
+  ],
+  [
+   "TÜV neu keine Mängel unfallfrei fahrbereit",
+   "Ja"
+  ],
+  [
+   "fahrbereit",
+   "Ja"
+  ]
+ ],
+ "scheckheft": [
+  [
+   "nicht lückenlos scheckheftgepflegt",
+   "nicht_ja"
+  ],
+  [
+   "nicht durchgehend scheckheftgepflegt",
+   "nicht_ja"
+  ],
+  [
+   "lückenlos scheckheftgepflegt",
+   "Ja"
+  ],
+  [
+   "Keine Unfälle lückenlos scheckheftgepflegt",
+   "Ja"
+  ]
+ ],
+ "hu": [
+  [
+   "HU 08/2026",
+   "nicht_ja"
+  ],
+  [
+   "HU abgelaufen, wird neu gemacht (Portalfeld hu=08/2026)",
+   "nicht_ja"
+  ],
+  [
+   "TÜV/AU 05/2026 abgelaufen",
+   "nicht_ja"
+  ],
+  [
+   "TÜV 10/2027 Bremsbeläge abgelaufen",
+   "nicht_nein"
+  ],
+  [
+   "TÜV 03/2027 Garantie abgelaufen",
+   "nicht_nein"
+  ],
+  [
+   "HU 11/2027 Leasing abgelaufen",
+   "nicht_nein"
+  ],
+  [
+   "TÜV ist seit 2 Monaten abgelaufen",
+   "nicht_ja"
+  ],
+  [
+   "HU ist im März abgelaufen",
+   "nicht_ja"
+  ],
+  [
+   "TÜV ist seit kurzem abgelaufen",
+   "nicht_ja"
+  ],
+  [
+   "HU vor kurzem abgelaufen",
+   "nicht_ja"
+  ],
+  [
+   "TÜV ist seit 2 Monaten abgelaufen (Portalfeld hu=10/2027)",
+   "nicht_ja"
+  ],
+  [
+   "HU neu 09/2027",
+   "Ja"
+  ],
+  [
+   "keinen TÜV",
+   "nicht_ja"
+  ],
+  [
+   "TÜV neu",
+   "nicht_nein"
+  ]
+ ]
+}

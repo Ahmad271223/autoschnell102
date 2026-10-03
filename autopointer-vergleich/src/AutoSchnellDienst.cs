@@ -1,0 +1,300 @@
+using System.Net.Http.Json;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using Microsoft.Win32;
+
+namespace AutoPointerVergleich;
+
+/// <summary>Fehler vom AutoSchnell-Server (Status) oder keine Verbindung (Status 0).</summary>
+internal sealed class DienstFehler : Exception
+{
+    public int Status { get; }
+    public DienstFehler(int status, string meldung) : base(meldung) => Status = status;
+
+    /// <summary>401: Schluessel ungueltig (anderer PC verbunden, getrennt, Konto gesperrt).</summary>
+    public bool NichtVerbunden => Status == 401;
+    /// <summary>402: kein aktives Abo.</summary>
+    public bool KeinAbo => Status == 402;
+    public bool KeineVerbindung => Status == 0;
+}
+
+internal sealed record VerbindenAntwort(string Schluessel, string Konto, string Name, string Firma);
+/// <param name="AktuelleVersion">Pruefbericht 03.10.2026 (Nr. 4): die Version, die AutoSchnell gerade zum
+/// Herunterladen anbietet (null bei einem Server ohne diese Angabe) — ist sie neuer, sagt das Programm es.</param>
+internal sealed record StatusAntwort(string Konto, string Name, string Firma, string PcName, string? AboBis,
+                                     string? AktuelleVersion = null, string? ProgrammName = null);
+internal sealed record Vergleich(string Portal, string Url);
+
+/// <param name="ErkanntMarke">Seit 1.4.0: Marke/Modell erkennt der SERVER (Katalognamen zur Anzeige);
+/// null bei einem Server ohne Erkennung.</param>
+internal sealed record VergleichAntwort(IReadOnlyList<Vergleich> Links, IReadOnlyList<string> Hinweise, string Profil,
+                                        string? InseratUrl = null, string VorabStatus = "", string VorabHinweis = "",
+                                       string? ErkanntMarke = null, string? ErkanntModell = null, bool MarkeErkannt = true);
+
+/// <summary>Was der Ueberwacher vom Server braucht (in Tests eine Attrappe).</summary>
+internal interface IVergleichsDienst
+{
+    bool Verbunden { get; }
+    Task<VergleichAntwort> VergleichAsync(Fahrzeug f, bool probelauf);
+}
+
+/// <summary>Verbindung zu AutoSchnell (Wunsch Ahmad 03.10.2026): das Programm arbeitet nur
+/// verbunden. Ein 6-stelliger Code aus der App ergibt einen Programm-Schluessel (ein PC je
+/// Konto); jeder Vergleich geht ueber den Server — der prueft Abo und Freigabe und baut die
+/// Links mit den Vergleichsregeln der Firma.</summary>
+internal sealed class AutoSchnellDienst : IVergleichsDienst
+{
+    public const string Werkzeug = "autopointer-vergleich";
+    private const string SchluesselKopf = "X-Werkzeug-Schluessel";
+    /// <summary>Pruefbericht 03.10.2026 (Nr. 17): so lange darf ein Vergleich hoechstens dauern. Der Server antwortet
+    /// sonst in Sekundenbruchteilen (das Inserat liest er im Hintergrund) — haengt er, ist nach 8 s Schluss und das
+    /// naechste angeklickte Auto kommt dran, statt 15 s lang alles zu blockieren.</summary>
+    internal static TimeSpan VergleichFrist { get; set; } = TimeSpan.FromSeconds(8);
+
+    /// <summary>Pruefbericht 03.10.2026 (Nr. 15): nur diese Seiten oeffnet das Programm — Vergleiche bei mobile.de
+    /// und AutoScout24, Inserate zusaetzlich bei Kleinanzeigen. Alles andere (auch von einem falsch eingestellten
+    /// oder fremden Server) wird verworfen.</summary>
+    internal static readonly string[] VergleichsSeiten = { "mobile.de", "autoscout24.de" };
+    internal static readonly string[] InseratSeiten = { "mobile.de", "autoscout24.de", "kleinanzeigen.de" };
+
+    internal static bool ErlaubteAdresse(string? url, IEnumerable<string> seiten) =>
+        Uri.TryCreate(url, UriKind.Absolute, out var u) && u.Scheme == Uri.UriSchemeHttps
+        && string.IsNullOrEmpty(u.UserInfo)
+        && seiten.Any(h => u.Host.Equals(h, StringComparison.OrdinalIgnoreCase)
+                           || u.Host.EndsWith("." + h, StringComparison.OrdinalIgnoreCase));
+
+    private readonly HttpClient _http;
+    private readonly Func<string?> _schluessel;
+
+    public string Server { get; }
+
+    public AutoSchnellDienst(string server, Func<string?> schluessel, HttpMessageHandler? handler = null)
+    {
+        Server = server.TrimEnd('/');
+        _schluessel = schluessel;
+        _http = handler == null ? new HttpClient() : new HttpClient(handler);
+        _http.Timeout = TimeSpan.FromSeconds(15);
+        _http.DefaultRequestHeaders.UserAgent.ParseAdd($"AutoSchnell-Vergleich/{Application.ProductVersion.Split('+')[0]}");
+    }
+
+    public bool Verbunden => !string.IsNullOrEmpty(_schluessel());
+
+    private string Url(string pfad) => $"{Server}/api/werkzeuge/{Werkzeug}/{pfad}";
+
+    private HttpRequestMessage Anfrage(HttpMethod methode, string pfad, object? inhalt = null)
+    {
+        var a = new HttpRequestMessage(methode, Url(pfad));
+        var s = _schluessel();
+        if (!string.IsNullOrEmpty(s)) a.Headers.Add(SchluesselKopf, s);
+        if (inhalt != null) a.Content = JsonContent.Create(inhalt, options: Json);
+        return a;
+    }
+
+    internal static readonly JsonSerializerOptions Json = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        PropertyNameCaseInsensitive = true,
+    };
+
+    private async Task<JsonElement> SendeAsync(HttpRequestMessage anfrage, TimeSpan? frist = null)
+    {
+        HttpResponseMessage antwort;
+        using var abbruch = frist is { } f ? new CancellationTokenSource(f) : null;
+        try { antwort = await _http.SendAsync(anfrage, abbruch?.Token ?? CancellationToken.None); }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or OperationCanceledException)
+        {
+            if (abbruch?.IsCancellationRequested == true)
+                throw new DienstFehler(0, "AutoSchnell antwortet gerade nicht – beim nächsten Auto wird es erneut versucht.");
+            throw new DienstFehler(0, "Keine Verbindung zu AutoSchnell – bitte Internet prüfen.");
+        }
+        using (antwort)
+        {
+            string text = await antwort.Content.ReadAsStringAsync();
+            if (antwort.IsSuccessStatusCode)
+            {
+                try { return JsonDocument.Parse(text).RootElement.Clone(); }
+                catch (JsonException) { throw new DienstFehler(0, "Unerwartete Antwort von AutoSchnell."); }
+            }
+            throw new DienstFehler((int)antwort.StatusCode, Meldung(text, (int)antwort.StatusCode));
+        }
+    }
+
+    /// <summary>"Max Muster (10002-1) · Firma". Chef-Konten haben oft keinen Namen — dann
+    /// "Konto 10002 · Firma" statt einer Zeile, die mit Leerzeichen beginnt.</summary>
+    internal static string KontoText(string? name, string? konto, string? firma)
+    {
+        name = name?.Trim();
+        konto = konto?.Trim();
+        string wer = (string.IsNullOrEmpty(name), string.IsNullOrEmpty(konto)) switch
+        {
+            (false, false) => $"{name} ({konto})",
+            (false, true) => name!,
+            (true, false) => $"Konto {konto}",
+            _ => "Konto",
+        };
+        return string.IsNullOrWhiteSpace(firma) ? wer : $"{wer} · {firma.Trim()}";
+    }
+
+    internal static string Meldung(string text, int status)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(text);
+            if (doc.RootElement.TryGetProperty("detail", out var d))
+            {
+                // Standard-404 von FastAPI: die Route gibt es auf diesem Server (noch) nicht
+                if (status == 404 && d.ValueKind == JsonValueKind.String && d.GetString() == "Not Found")
+                    return "AutoSchnell kennt dieses Programm noch nicht – der Server ist noch nicht aktualisiert. Bitte später erneut versuchen.";
+                if (d.ValueKind == JsonValueKind.String) return d.GetString() ?? "";
+                if (d.ValueKind == JsonValueKind.Array) return "Ungültige Fahrzeugdaten.";
+            }
+        }
+        catch (JsonException) { }
+        return status switch
+        {
+            401 => "Programm nicht verbunden – bitte mit einem Code aus AutoSchnell verbinden.",
+            402 => "Kein aktives AutoSchnell-Abo – das Programm ist gesperrt.",
+            403 => "Für dein Konto nicht freigeschaltet.",
+            429 => "Zu viele Anfragen – bitte kurz warten.",
+            _ => $"AutoSchnell antwortet mit Fehler {status}.",
+        };
+    }
+
+    public async Task<VerbindenAntwort> VerbindenAsync(string code, string pcName, string pcKennung)
+    {
+        var e = await SendeAsync(Anfrage(HttpMethod.Post, "verbinden",
+            new { code, pc_name = pcName, pc_kennung = pcKennung }));
+        return new VerbindenAntwort(Text(e, "schluessel"), Text(e, "konto"), Text(e, "name"), Text(e, "firma"));
+    }
+
+    public async Task<StatusAntwort> StatusAsync()
+    {
+        var e = await SendeAsync(Anfrage(HttpMethod.Get, "status"));
+        return new StatusAntwort(Text(e, "konto"), Text(e, "name"), Text(e, "firma"), Text(e, "pc_name"),
+                                 e.TryGetProperty("abo_bis", out var b) && b.ValueKind == JsonValueKind.String ? b.GetString() : null,
+                                 Text(e, "aktuelle_version") is { Length: > 0 } av ? av : null,
+                                 Text(e, "programm_name") is { Length: > 0 } pn ? pn : null);
+    }
+
+    /// <summary>Pruefbericht 03.10.2026 (Nr. 12): hat die AutoSchnell-App das Auto wirklich uebernommen? Die
+    /// Web-App meldet den Start (Kennung im Link) an den Server; ohne Meldung oeffnet das Programm den Browser.
+    /// Fehler zaehlen als "nicht bestaetigt".</summary>
+    public async Task<bool> AppStartBestaetigtAsync(string startKennung)
+    {
+        try
+        {
+            var e = await SendeAsync(Anfrage(HttpMethod.Get, "app-start/" + Uri.EscapeDataString(startKennung)),
+                                     TimeSpan.FromSeconds(4));
+            return e.TryGetProperty("bestaetigt", out var b) && b.ValueKind == JsonValueKind.True;
+        }
+        catch (DienstFehler) { return false; }
+    }
+
+    /// <summary>Ist <paramref name="angeboten"/> neuer als <paramref name="eigene"/>? ("1.5.0" vs "1.4.2"; Zusaetze
+    /// wie "+abc" zaehlen nicht). Unlesbares -> false.</summary>
+    internal static bool NeuereVersion(string? angeboten, string? eigene)
+    {
+        static Version? V(string? s) =>
+            Version.TryParse((s ?? "").Split('+', '-')[0].Trim().TrimStart('v', 'V'), out var v) ? v : null;
+        var a = V(angeboten);
+        var e = V(eigene);
+        return a != null && e != null && a > e;
+    }
+
+    public async Task AbmeldenAsync()
+    {
+        try { await SendeAsync(Anfrage(HttpMethod.Post, "abmelden")); }
+        catch (DienstFehler) { /* lokal wird trotzdem getrennt */ }
+    }
+
+    public async Task<VergleichAntwort> VergleichAsync(Fahrzeug f, bool probelauf)
+    {
+        var e = await SendeAsync(Anfrage(HttpMethod.Post, "vergleich", new { fahrzeug = Nutzlast(f), probelauf }),
+                                 VergleichFrist);
+        var links = new List<Vergleich>();
+        if (e.TryGetProperty("links", out var l) && l.ValueKind == JsonValueKind.Array)
+            foreach (var x in l.EnumerateArray())
+            {
+                string url = Text(x, "url");
+                if (ErlaubteAdresse(url, VergleichsSeiten))
+                    links.Add(new Vergleich(Text(x, "portal"), url));
+                else if (url.Length > 0)
+                    Protokoll.Schreibe("Link verworfen (keine mobile.de-/AutoScout24-Adresse): " + url);
+            }
+        var hinweise = new List<string>();
+        if (e.TryGetProperty("hinweise", out var h) && h.ValueKind == JsonValueKind.Array)
+            hinweise.AddRange(h.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!));
+        string? inseratUrl = Text(e, "inserat_url") is { Length: > 0 } iu && ErlaubteAdresse(iu, InseratSeiten) ? iu : null;
+        string vorabStatus = "", vorabHinweis = "";
+        if (e.TryGetProperty("vorab", out var vorab) && vorab.ValueKind == JsonValueKind.Object)
+        {
+            vorabStatus = Text(vorab, "status");
+            vorabHinweis = Text(vorab, "hinweis");
+        }
+        string? marke = null, modell = null;
+        bool markeErkannt = true;
+        if (e.TryGetProperty("fahrzeug", out var fz) && fz.ValueKind == JsonValueKind.Object)
+        {
+            marke = Text(fz, "marke") is { Length: > 0 } m ? m : null;
+            modell = Text(fz, "modell");
+            markeErkannt = !fz.TryGetProperty("erkannt", out var ek) || ek.ValueKind != JsonValueKind.False;
+        }
+        return new VergleichAntwort(links, hinweise, Text(e, "profil"), inseratUrl, vorabStatus, vorabHinweis,
+                                    marke, modell, markeErkannt);
+    }
+
+    /// <summary>Fahrzeug -> Anfrage an /vergleich (Feldnamen wie routes/werkzeuge.FahrzeugIn).</summary>
+    internal static Dictionary<string, object?> Nutzlast(Fahrzeug f)
+    {
+        static string K(string? s, int n) => (s ?? "").Trim() is var t && t.Length > n ? t[..n] : (s ?? "").Trim();
+        // Seit 1.4.0 (Wunsch Ahmad 03.10.2026): das Programm erkennt nichts mehr selbst — es schickt, was
+        // AutoPointer zeigt (roh=true), der Server erkennt Marke und Modell. marke/modell (erstes Wort / Rest)
+        // nur, damit ein Server ohne Erkennung weiter antwortet.
+        string text = (f.MarkeModellText ?? "").Trim();
+        int leer = text.IndexOf(' ');
+        return new Dictionary<string, object?>
+        {
+            ["marke"] = K(leer > 0 ? text[..leer] : text, 60),
+            ["modell"] = K(leer > 0 ? text[(leer + 1)..] : "", 80),
+            ["roh"] = true,
+            ["marke_modell_text"] = K(f.MarkeModellText, 160),
+            ["titel"] = K(f.Titel, 300),
+            ["ez_monat"] = f.EzMonat,
+            ["ez_jahr"] = f.EzJahr,
+            ["kilometer"] = f.Kilometer,
+            ["kw"] = f.Kw,
+            ["ps"] = f.Ps,
+            ["kraftstoff"] = K(f.Kraftstoff, 60),
+            ["getriebe"] = K(f.Getriebe, 60),
+            ["tueren"] = K(f.Tueren, 20),
+            ["preis"] = f.Preis,
+            ["zustand"] = K(f.Zustand, 60),
+            ["kategorie"] = K(f.Kategorie, 80),
+            ["quelle"] = K(f.Quelle, 40),
+            ["inserat_id"] = K(f.InseratId, 60),
+            ["hash_id"] = K(f.HashId, 60),
+        };
+    }
+
+    private static string Text(JsonElement e, string name) =>
+        e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String
+            ? v.GetString() ?? "" : "";
+
+    /// <summary>Name und Kennung dieses PCs (die Kennung ist ein Streuwert, kein Klartext).</summary>
+    public static (string Name, string Kennung) PcAngaben()
+    {
+        string guid = "";
+        try
+        {
+            using var k = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64)
+                .OpenSubKey(@"SOFTWARE\Microsoft\Cryptography");
+            guid = k?.GetValue("MachineGuid") as string ?? "";
+        }
+        catch (Exception) { }
+        var roh = Encoding.UTF8.GetBytes($"{guid}|{Environment.MachineName}|{Environment.UserName}");
+        return (Environment.MachineName, Convert.ToHexString(SHA256.HashData(roh))[..32].ToLowerInvariant());
+    }
+}

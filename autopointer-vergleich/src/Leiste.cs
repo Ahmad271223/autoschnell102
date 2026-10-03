@@ -1,0 +1,218 @@
+namespace AutoPointerVergleich;
+
+/// <summary>Wunsch Ahmad 03.10.2026: "die Programm-Buttons sollen nicht in den Hintergrund, wenn Tabs geöffnet
+/// werden — kleiner machen und immer fest vorne lassen, am besten unten rechts oder unten links".
+/// Schmale Leiste mit den wichtigsten Knöpfen: immer im Vordergrund (auch über dem Browser), fest in der
+/// gewählten Ecke über der Taskleiste — auf dem Bildschirm, auf dem AutoPointer läuft. Sie nimmt AutoPointer
+/// nie den Fokus weg (WS_EX_NOACTIVATE): ein Klick auf einen Knopf wirkt, AutoPointer bleibt vorne.</summary>
+internal sealed class Leiste : Form
+{
+    public const string Links = "links", Rechts = "rechts";
+
+    private readonly Func<FensterZustand> _zustand;
+    private readonly Func<IntPtr> _bezug;
+    private readonly Label _status;
+    private readonly Button _schalter, _vergleichen, _vertrag, _fenster;
+    private readonly ToolStripMenuItem _links, _rechts;
+    private readonly ToolTip _tipps = new() { InitialDelay = 300, ShowAlways = true };   // Leiste ist nie aktiv
+    private readonly System.Windows.Forms.Timer _takt;
+    private string _ecke = Links;
+    private FensterZustand? _zuletzt;
+    private bool _endgueltig;
+
+    public event Action? Aktivieren, Stoppen, JetztVergleichen, VertragOeffnen, FensterOeffnen, Ausblenden, Beenden;
+    public event Action<string>? EckeGewechselt;
+
+    /// <param name="bezug">AutoPointer-Hauptfenster (oder Zero): die Leiste sitzt auf dessen Bildschirm.</param>
+    public Leiste(Func<FensterZustand> zustand, Func<IntPtr> bezug)
+    {
+        _zustand = zustand;
+        _bezug = bezug;
+        Text = "AutoSchnell Vergleich – Leiste";
+        Font = new Font("Segoe UI", 9.5f);
+        FormBorderStyle = FormBorderStyle.None;
+        ShowInTaskbar = false;
+        TopMost = true;
+        StartPosition = FormStartPosition.Manual;
+        AutoSize = true;
+        AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        AutoScaleMode = AutoScaleMode.Dpi;
+        BackColor = Color.FromArgb(31, 41, 55);
+        Padding = new Padding(4);
+
+        var reihe = new FlowLayoutPanel
+        {
+            FlowDirection = FlowDirection.LeftToRight, WrapContents = false, AutoSize = true, Margin = new Padding(0),
+            AutoSizeMode = AutoSizeMode.GrowAndShrink, BackColor = BackColor,
+        };
+        _status = new Label
+        {
+            AutoSize = false, Width = 152, Height = 34, TextAlign = ContentAlignment.MiddleCenter,
+            ForeColor = Color.White, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Margin = new Padding(0),
+            Cursor = Cursors.Hand, BackColor = Symbole.Pause,
+        };
+        _schalter = Knopf("■  Stopp", 84);
+        _vergleichen = Knopf("Vergleichen", 100);
+        _vertrag = Knopf("Vertrag", 74);
+        _fenster = Knopf("☰", 36);
+        reihe.Controls.AddRange(new Control[] { _status, _schalter, _vergleichen, _vertrag, _fenster });
+        Controls.Add(reihe);
+
+        _tipps.SetToolTip(_vergleichen, "Vergleich für das Auto, das AutoPointer gerade zeigt, jetzt öffnen");
+        _tipps.SetToolTip(_vertrag, "Kaufvertrag: das zuletzt angeklickte Auto in AutoSchnell öffnen");
+        _tipps.SetToolTip(_fenster, "Großes Fenster mit allen Knöpfen öffnen");
+
+        var menue = new ContextMenuStrip();
+        menue.Items.Add("Großes Fenster öffnen", null, (_, _) => FensterOeffnen?.Invoke());
+        menue.Items.Add(new ToolStripSeparator());
+        _links = new ToolStripMenuItem("Leiste unten links", null, (_, _) => EckeWaehlen(Links));
+        _rechts = new ToolStripMenuItem("Leiste unten rechts", null, (_, _) => EckeWaehlen(Rechts));
+        menue.Items.Add(_links);
+        menue.Items.Add(_rechts);
+        menue.Items.Add("Leiste ausblenden", null, (_, _) => Ausblenden?.Invoke());
+        menue.Items.Add(new ToolStripSeparator());
+        menue.Items.Add("Programm beenden", null, (_, _) => Beenden?.Invoke());
+        ContextMenuStrip = menue;
+        foreach (Control c in reihe.Controls) c.ContextMenuStrip = menue;
+        reihe.ContextMenuStrip = menue;
+
+        _status.Click += (_, _) => FensterOeffnen?.Invoke();
+        _schalter.Click += (_, _) =>
+        {
+            if (_zuletzt?.AutomatikAn == true) Stoppen?.Invoke(); else Aktivieren?.Invoke();
+            Aktualisieren();
+        };
+        _vergleichen.Click += (_, _) => JetztVergleichen?.Invoke();
+        _vertrag.Click += (_, _) => VertragOeffnen?.Invoke();
+        _fenster.Click += (_, _) => FensterOeffnen?.Invoke();
+
+        _takt = new System.Windows.Forms.Timer { Interval = 1000 };
+        _takt.Tick += (_, _) => { Aktualisieren(); Platzieren(); ObenHalten(); };
+        _takt.Start();
+        EckeSetzen(Links);
+        Aktualisieren();
+    }
+
+    // Immer oben, nie im Alt+Tab, nie aktiviert (AutoPointer behaelt den Fokus)
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            var cp = base.CreateParams;
+            cp.ExStyle |= Native.WS_EX_TOPMOST | Native.WS_EX_TOOLWINDOW | Native.WS_EX_NOACTIVATE;
+            return cp;
+        }
+    }
+
+    protected override bool ShowWithoutActivation => true;
+
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == Native.WM_MOUSEACTIVATE)
+        {
+            m.Result = (IntPtr)Native.MA_NOACTIVATE;
+            return;
+        }
+        base.WndProc(ref m);
+    }
+
+    protected override void OnLayout(LayoutEventArgs e)
+    {
+        base.OnLayout(e);
+        if (IsHandleCreated) Platzieren();
+    }
+
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        if (!_endgueltig && e.CloseReason == CloseReason.UserClosing)
+        {
+            e.Cancel = true;
+            return;
+        }
+        _takt.Stop();
+        base.OnFormClosing(e);
+    }
+
+    public void EndgueltigSchliessen()
+    {
+        _endgueltig = true;
+        Close();
+    }
+
+    /// <summary>"links" oder "rechts" (jeweils unten, über der Taskleiste).</summary>
+    public void EckeSetzen(string ecke)
+    {
+        _ecke = ecke == Rechts ? Rechts : Links;
+        _links.Checked = _ecke == Links;
+        _rechts.Checked = _ecke == Rechts;
+        if (IsHandleCreated) Platzieren();
+    }
+
+    private void EckeWaehlen(string ecke)
+    {
+        EckeSetzen(ecke);
+        EckeGewechselt?.Invoke(_ecke);
+    }
+
+    /// <summary>Ziel-Ecke auf dem Bildschirm von AutoPointer (sonst dem Hauptbildschirm).</summary>
+    internal Point Zielpunkt()
+    {
+        IntPtr bezug = IntPtr.Zero;
+        try { bezug = _bezug(); } catch (Exception) { /* AutoPointer gerade weg */ }
+        var schirm = bezug != IntPtr.Zero && Native.IsWindow(bezug) ? Screen.FromHandle(bezug)
+                   : Screen.PrimaryScreen ?? Screen.AllScreens[0];
+        var bereich = schirm.WorkingArea;            // ohne Taskleiste
+        int abstand = LogicalToDeviceUnits(8);
+        int y = bereich.Bottom - Height - abstand;
+        return _ecke == Rechts ? new Point(bereich.Right - Width - abstand, y) : new Point(bereich.Left + abstand, y);
+    }
+
+    private void Platzieren()
+    {
+        var ziel = Zielpunkt();
+        if (Location != ziel) Location = ziel;
+    }
+
+    /// <summary>Andere "immer oben"-Fenster (Browser im Vollbild, Hinweise) können sich davorschieben —
+    /// jede Sekunde wieder ganz nach oben, ohne zu aktivieren.</summary>
+    private void ObenHalten()
+    {
+        if (IsHandleCreated && Visible)
+            Native.SetWindowPos(Handle, Native.HWND_TOPMOST, 0, 0, 0, 0,
+                                Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
+    }
+
+    public void Aktualisieren()
+    {
+        FensterZustand z;
+        try { z = _zustand(); }
+        catch (Exception ex) { Protokoll.Schreibe("Leiste: " + ex.Message); return; }
+        _zuletzt = z;
+        var (farbe, titel, unter) = SteuerFenster.Anzeige(z);
+        _status.BackColor = farbe;
+        _status.Text = "●  " + Kurz(titel);
+        _tipps.SetToolTip(_status, unter + (z.LetztesAuto != null ? "\nLetztes Auto: " + z.LetztesAuto : "")
+                                   + (string.IsNullOrEmpty(z.LetzteMeldung) ? "" : "\n" + z.LetzteMeldung)
+                                   + "\n(Klick: großes Fenster)");
+        _schalter.Text = z.AutomatikAn ? "■  Stopp" : "▶  Start";
+        _schalter.BackColor = z.AutomatikAn ? Symbole.Fehler : Symbole.Aktiv;
+        _tipps.SetToolTip(_schalter, z.AutomatikAn ? "Automatik stoppen – es öffnet sich nichts mehr"
+                                                   : "Automatik starten – Vergleiche öffnen sich beim Anklicken");
+        _vergleichen.Enabled = z.Verbunden;
+        _vertrag.Enabled = z.Verbunden && z.LetztesAuto != null;
+    }
+
+    internal static string Kurz(string titel) => titel == "AKTIV – WARTET" ? "WARTET" : titel;
+
+    private Button Knopf(string text, int breite)
+    {
+        var b = new Button
+        {
+            Text = text, Width = breite, Height = 34, Margin = new Padding(4, 0, 0, 0), FlatStyle = FlatStyle.Flat,
+            BackColor = Color.FromArgb(55, 65, 81), ForeColor = Color.White, Cursor = Cursors.Hand,
+            UseVisualStyleBackColor = false, TabStop = false,
+        };
+        b.FlatAppearance.BorderSize = 0;
+        return b;
+    }
+}

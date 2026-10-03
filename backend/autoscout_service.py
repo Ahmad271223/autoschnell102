@@ -105,32 +105,94 @@ _MAKE_ALIASES = {
 }
 
 
+def _wortgrenzen(name: str) -> set:
+    """Positionen im normalisierten Namen (_norm), an denen ein Wortteil
+    endet: vor Leer-/Satzzeichen und an jedem Wechsel Buchstabe <-> Ziffer.
+
+    "E 220 d" -> e220d, Grenzen {1, 4, 5}; "M340i" -> m340i, Grenzen {1, 4, 5};
+    "CLA Shooting Brake" -> Grenzen {3, 11, 16}."""
+    grenzen: set = set()
+    if not name:
+        return grenzen
+    nfd = unicodedata.normalize("NFD", name)
+    text = "".join(c for c in nfd if unicodedata.category(c) != "Mn").lower()
+    n = 0
+    vorher = None
+    for ch in text:
+        if re.match(r"[a-z0-9]", ch):
+            art = "z" if ch.isdigit() else "b"
+            if vorher is not None and art != vorher and n:
+                grenzen.add(n)
+            n += 1
+            vorher = art
+        else:
+            if n:
+                grenzen.add(n)
+            vorher = None
+    if n:
+        grenzen.add(n)
+    return grenzen
+
+
 def _find_model(make: dict, model_name: str) -> Optional[dict]:
-    """Sucht ein Modell innerhalb einer Marke. Wir versuchen erst exakte
-    Treffer, dann „startswith" (z.B. „E 220 d" → Modell „E 220" / „E-Klasse"
-    je nach Autoscout-Schreibweise), dann den ersten enthaltenden Eintrag."""
+    """Sucht ein Modell innerhalb einer Marke: erst exakt, dann ein
+    Katalogname, mit dem unser Modell an einer WORTGRENZE beginnt („E 220 d"
+    -> „E 220", „Golf Variant" -> „Golf"), dann ein Katalogname, der mit
+    unserem Modell beginnt — aber nur, wenn es genau EINEN gibt.
+
+    Rollenprüfung 22.09.2026 (RP-435/RP-447): Vorher galt jeder Anfang und
+    im Zweifel der laengste Name. Das machte aus BMW M340i den M3, aus M135i
+    den M1, aus M240i den M2, aus M440i den M4, aus „CLA Shooting Brake" die
+    CL-Klasse und aus EQE/EQB/EQV eine einzelne Motorvariante (EQE 300,
+    EQB 250, EQV 250) — der AutoScout-Link suchte ein anderes Auto. Jetzt:
+    lieber None (Suche ueber die Marke, der Vergleich zeigt einen Hinweis)
+    als ein falsches Modell."""
     if not model_name:
         return None
     target = _norm(model_name)
     if not target:
         return None
     models = make.get("models") or []
-    # 1) Exakt
-    for m in models:
-        if _norm(m.get("modelName", "")) == target:
+    normiert = [(m, _norm(m.get("modelName", ""))) for m in models]
+    # 1) Exakt — auch gegen die Schreibweisen hinter " / " („Ceed / cee'd",
+    #    „Ceed SW / cee'd SW"): sonst war „Ceed" mehrdeutig.
+    for m, n in normiert:
+        if n == target:
             return m
-    # 2) Autoscout-Eintrag fängt mit unserem Modell an (z.B. "C 220" ∈ "C")
-    candidates = []
-    for m in models:
-        n = _norm(m.get("modelName", ""))
-        if n and (n.startswith(target) or target.startswith(n)):
-            candidates.append((m, n))
-    if candidates:
-        # Den spezifischsten (längsten Namen) nehmen
-        candidates.sort(key=lambda kv: len(kv[1]), reverse=True)
-        return candidates[0][0]
-    # 3) substring match (vorsichtig — nur wenn unique-ish)
-    contains = [m for m in models if target in _norm(m.get("modelName", ""))]
+    for m, _n in normiert:
+        teile = [_norm(t) for t in str(m.get("modelName", "")).split("/")]
+        if len(teile) > 1 and target in teile:
+            return m
+    # 2) Katalogname ist der Anfang unseres Modells — nur an einer Wortgrenze
+    #    („m3" ist kein Anfang von „m340i": dort geht die Zahl weiter).
+    grenzen = _wortgrenzen(model_name)
+
+    def _an_grenze(n: str) -> bool:
+        if len(n) in grenzen:
+            return True
+        # Abkuerzung mit EINEM Buchstaben: „Combo-e" fuer „Combo Electric" —
+        # der letzte Buchstabe des Katalognamens beginnt unser naechstes Wort.
+        return n[-1].isalpha() and (len(n) - 1) in grenzen and target[len(n) - 2].isalnum()
+
+    anfaenge = [(m, n) for m, n in normiert
+                if n and len(n) < len(target) and target.startswith(n) and _an_grenze(n)]
+    if anfaenge:
+        anfaenge.sort(key=lambda kv: len(kv[1]), reverse=True)
+        return anfaenge[0][0]
+    # 3) Unser Modell ist der Anfang eines Katalognamens: nur eindeutig.
+    #    „EQE" passt auf EQE 300, EQE 350, EQE 43 AMG ... -> keine Auswahl.
+    #    Vorrang haben Namen, die an einer Wortgrenze weitergehen („S 55" ->
+    #    „S 55 AMG", nicht „S 550").
+    laenger = [(m, n) for m, n in normiert if n and n.startswith(target)]
+    an_grenze = [m for m, n in laenger if len(target) in _wortgrenzen(m.get("modelName", ""))]
+    if len(an_grenze) == 1:
+        return an_grenze[0]
+    if len(laenger) == 1:
+        return laenger[0][0]
+    if laenger:
+        return None
+    # 4) substring match (vorsichtig — nur wenn eindeutig)
+    contains = [m for m, n in normiert if target in n]
     if len(contains) == 1:
         return contains[0]
     return None
@@ -158,6 +220,13 @@ def _parse_first_registration(raw) -> Optional[int]:
 
 
 # ---------- Public: URL builder ----------
+# ISO-Laendercode -> AutoScout24 "cy"-Code
+_AUTOSCOUT_COUNTRY = {
+    "DE": "D", "AT": "A", "BE": "B", "ES": "E", "FR": "F", "IT": "I",
+    "LU": "L", "NL": "NL",
+}
+
+
 def build_search_url(vehicle: dict, rules: dict) -> str:
     """Erzeugt eine AutoScout24-Suchurl, die zum übergebenen Fahrzeug passt.
 
@@ -193,10 +262,23 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
     path = f"/lst/{slug}" if slug else "/lst"
 
     # ---- Query-Parameter ------------------------------------------------
-    params: list = [
-        ("atype", "C"),       # Car
-        ("cy", "D"),          # Country: Germany
-    ]
+    params: list = [("atype", "C")]        # Car
+    # Land aus dem Regelwerk (PR-Review 09/2026): vorher immer "D", sodass
+    # "Export – alle Laender" auf AutoScout eine Deutschland-Suche blieb.
+    country_rule = rules.get("country") or {"mode": "exact", "codes": ["DE"]}
+    if country_rule.get("mode") == "exact":
+        codes = [_AUTOSCOUT_COUNTRY.get(str(c).upper())
+                 for c in (country_rule.get("codes") or ["DE"])]
+        codes = [c for c in codes if c]
+        if codes:
+            params.append(("cy", ",".join(codes)))
+    # mode "all"/"any": kein cy-Parameter -> alle Laender
+    # Verkaeufertyp (Haendler/Privat) wie bei mobile.de
+    seller_mode = (rules.get("seller") or {}).get("mode", "all")
+    if seller_mode == "dealer":
+        params.append(("custtype", "D"))
+    elif seller_mode == "private":
+        params.append(("custtype", "P"))
 
     # Marke+Modell-Kombi (mawXmoY) — nur wenn beide bekannt
     if make and model:
@@ -206,7 +288,7 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
 
     # Erstzulassung (fregfrom / fregto)
     fr_year = _parse_first_registration(vehicle.get("first_registration"))
-    fr_rule = rules.get("first_registration", {"mode": "older_exact", "years": 1})
+    fr_rule = rules.get("first_registration") or {"mode": "older_exact", "years": 1}
     if fr_rule.get("mode") == "year_range":
         from_y = fr_rule.get("from")
         to_y = fr_rule.get("to")
@@ -231,8 +313,15 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
             km = int(re.sub(r"\D", "", km))
         except Exception:
             km = None
-    km_rule = rules.get("mileage", {"mode": "plus", "value": 30000})
-    if km and km_rule.get("mode") != "ignore":
+    km_rule = rules.get("mileage") or {"mode": "plus", "value": 30000}
+    if km_rule.get("mode") == "custom":
+        # Nachpruefung Runde 10: fester Bereich unabhaengig vom Fahrzeug-km
+        # (km=0 liess den Filter vorher still wegfallen).
+        if km_rule.get("min") is not None:
+            params.append(("kmfrom", str(int(km_rule["min"]))))
+        if km_rule.get("max") is not None:
+            params.append(("kmto", str(int(km_rule["max"]))))
+    elif km and km_rule.get("mode") != "ignore":
         mode = km_rule.get("mode")
         v = int(km_rule.get("value", 30000))
         if mode == "exact":
@@ -242,11 +331,6 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
         elif mode == "range":
             params.append(("kmfrom", str(max(0, km - v))))
             params.append(("kmto", str(km + v)))
-        elif mode == "custom":
-            if km_rule.get("min") is not None:
-                params.append(("kmfrom", str(int(km_rule["min"]))))
-            if km_rule.get("max") is not None:
-                params.append(("kmto", str(int(km_rule["max"]))))
 
     # Leistung in kW (powerfrom / powerto)
     kw = vehicle.get("power_kw")
@@ -254,7 +338,7 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
         kw = int(kw) if kw not in (None, "") else None
     except Exception:
         kw = None
-    pwr_rule = rules.get("power", {"mode": "tolerance_ps", "value": 5})
+    pwr_rule = (rules.get("power") or {"mode": "tolerance_ps", "value": 5})
     if kw and pwr_rule.get("mode") != "ignore":
         mode = pwr_rule.get("mode")
         if mode == "exact":
@@ -274,41 +358,132 @@ def build_search_url(vehicle: dict, rules: dict) -> str:
             params.append(("powerfrom", str(mn)))
             params.append(("powerto", str(mx)))
             params.append(("powertype", "kw"))
+        elif mode == "min_ps":
+            # 15.09.2026 (Wunsch Ahmad): nur Untergrenze, nach oben offen.
+            v_ps = int(pwr_rule.get("value", 5))
+            cur_ps = vehicle.get("power_ps") or kw_to_ps(kw)
+            mn = ps_to_kw(max(1, int(cur_ps) - v_ps))
+            params.append(("powerfrom", str(mn)))
+            params.append(("powertype", "kw"))
 
     # Kraftstoff
-    fuel_rule = rules.get("fuel", {}).get("mode")
+    fuel_rule = (rules.get("fuel") or {}).get("mode")
     if fuel_rule == "exact":
-        fuel = vehicle.get("fuel_label") or vehicle.get("fuel")
-        if fuel:
-            params.append(("fuel", _autoscout_fuel(fuel)))
+        # 17.09.2026: Code UND Beschriftung pruefen; unbekannt -> kein leerer
+        # fuel=-Parameter mehr, sondern ein Hinweis (regeln_nicht_abgebildet).
+        fuel_code = _autoscout_fuel(vehicle.get("fuel"), vehicle.get("fuel_label"))
+        if fuel_code:
+            params.append(("fuel", fuel_code))
 
     # Getriebe
-    gear_rule = rules.get("gearbox", {}).get("mode")
+    gear_rule = (rules.get("gearbox") or {}).get("mode")
     if gear_rule == "exact":
-        gb = vehicle.get("gearbox_label") or vehicle.get("gearbox")
-        gb_code = _autoscout_gearbox(gb)
+        gb_code = _autoscout_gearbox(vehicle.get("gearbox"), vehicle.get("gearbox_label"))
         if gb_code:
             params.append(("gear", gb_code))
 
-    # Schaden
-    if rules.get("damage", {}).get("mode") == "no_accident":
+    # Schaden: NUR ausschliessen, wenn das Regelwerk es sagt. Vorher wurde
+    # immer ausgeschlossen — auch wenn das Exportprofil "Schaeden
+    # einschliessen" vorgab (PR-Review 09/2026). Fehlt die Regel, gilt der
+    # Inland-Default (keine Unfallwagen).
+    damage_mode = (rules.get("damage") or {}).get("mode", "no_accident")
+    if damage_mode == "no_accident":
         params.append(("damaged_listing", "exclude"))
-    else:
-        params.append(("damaged_listing", "exclude"))  # default: keine Unfaller
 
-    # Default-Polish: passt zum vom Nutzer geschickten Beispiel
+    # Tueren (doorfrom/doorto) — Runde 11: vorher endete die
+    # Regelverarbeitung nach Kraftstoff/Getriebe/Schaden, und beide Links
+    # sahen nach "derselben Suche" aus, obwohl AutoScout die Firmenregeln
+    # fuer Tueren nie umsetzte.
+    # Runde 24 (11.09.2026): Die Kategorie (body=) ist als Filter fuer beide
+    # Portale entfallen — AutoScout24 hatte nicht fuer jede mobile.de-
+    # Kategorie einen body-Code ("keine passende Kategorie fuer 'Kombi'").
+    # Kein body mehr, auch wenn gespeicherte Alt-Regeln "category" enthalten.
+    if (rules.get("doors") or {}).get("mode") == "exact":
+        tueren = _autoscout_tueren(vehicle.get("doors"))
+        if tueren:
+            params.append(("doorfrom", str(tueren[0])))
+            params.append(("doorto", str(tueren[1])))
+
     params.append(("ocs_listing", "include"))
-    params.append(("sort", "price"))
-    params.append(("desc", "0"))
+    # Sortierung aus dem Regelpaket (Runde 11: vorher starr sort=price&desc=0).
+    params.extend(_AUTOSCOUT_SORT.get(rules.get("sort") or "price_asc",
+                                      _AUTOSCOUT_SORT["price_asc"]))
     params.append(("ustate", "N,U"))
 
     return f"{base}{path}?{urlencode(params, safe=',')}"
 
 
+def _autoscout_tueren(wert) -> Optional[Tuple[int, int]]:
+    """Tuerenangabe (Code, "4/5" oder Zahl) -> (von, bis). S-19: ueber die
+    zentrale Zuordnung — "4/5" ergab vorher (4, 4)."""
+    from fahrzeug_codes import tueren_bereich
+    return tueren_bereich(wert)
+
+
+# Runde 24 (11.09.2026): Die Zuordnung mobile.de-Kategorie -> AutoScout24
+# body-Code (_AUTOSCOUT_BODY) ist mit dem Kategorie-Filter entfallen.
+_AUTOSCOUT_SORT = {
+    "price_asc": [("sort", "price"), ("desc", "0")],
+    "price_desc": [("sort", "price"), ("desc", "1")],
+    "mileage_asc": [("sort", "mileage"), ("desc", "0")],
+    "mileage_desc": [("sort", "mileage"), ("desc", "1")],
+    "first_registration_desc": [("sort", "year"), ("desc", "1")],
+    "first_registration_asc": [("sort", "year"), ("desc", "0")],
+    "relevance": [("sort", "standard"), ("desc", "0")],
+}
+
+
+def regeln_nicht_abgebildet(vehicle: dict, rules: dict) -> list:
+    """Welche Firmenregeln kann der AutoScout-Link NICHT umsetzen?
+    Liefert lesbare Hinweise fuer den Nutzer (Runde 11) — vorher bekam er
+    zwei Links "nach denselben Regeln", die stillschweigend verschieden
+    filterten.
+
+    Runde 24 (11.09.2026): Kategorie, Navigation und Klimatisierung sind
+    als Filter fuer beide Portale entfallen — dazu gibt es deshalb auch
+    keinen Hinweis mehr (auch nicht bei Alt-Regeln mit diesen Schluesseln).
+    Land und Hubraum bleiben."""
+    from regeln import laender_ohne_autoscout
+    rules = rules or {}
+    hinweise = []
+    fehlend = laender_ohne_autoscout(rules)
+    if fehlend:
+        country = rules.get("country") or {}
+        alle = [str(c).upper() for c in (country.get("codes") or [])]
+        uebrig = [c for c in alle if c not in fehlend]
+        if uebrig:
+            hinweise.append(f"AutoScout24 kennt {', '.join(fehlend)} nicht als Land — "
+                            f"der AutoScout-Link sucht nur in {', '.join(uebrig)}.")
+        else:
+            hinweise.append(f"AutoScout24 bietet {', '.join(fehlend)} nicht als Land an — "
+                            "der AutoScout-Link sucht in ALLEN AutoScout-Laendern.")
+    cc_mode = (rules.get("displacement") or {}).get("mode")
+    if cc_mode in ("exact", "tolerance") and vehicle.get("displacement"):
+        hinweise.append("Hubraum filtert nur mobile.de — der AutoScout-Link zeigt alle Hubraeume.")
+    # 17.09.2026: Getriebe/Kraftstoff "1:1", aber im Inserat fehlt die Angabe
+    # oder sie ist unbekannt -> sagen statt still ohne Filter zu suchen.
+    from fahrzeug_codes import filter_hinweise
+    hinweise += filter_hinweise(vehicle, rules)
+    # Pruefbericht 20.09.2026 (S-23): Neufahrzeug ohne Erstzulassung — der
+    # Jahresfilter faellt in beiden Links weg, das soll der Sucher wissen.
+    fr_mode = (rules.get("first_registration") or {}).get("mode", "older_exact")
+    if (vehicle or {}).get("neufahrzeug") and not (vehicle or {}).get("first_registration") \
+            and fr_mode not in ("ignore", "any", "year_range"):
+        hinweise.append("Neufahrzeug ohne Erstzulassung im Inserat — beide Links suchen "
+                        "ohne Erstzulassungs-Filter.")
+    return hinweise
+
+
 # ---------- Fuel/Gearbox-Mappings ----------
-def _autoscout_fuel(s: str) -> str:
-    """Mappt unsere Kraftstoff-Labels auf Autoscout-Codes."""
-    n = _norm(s)
+def _autoscout_fuel(*werte) -> str:
+    """Mappt Kraftstoff-Codes und -Labels auf AutoScout-Codes.
+    17.09.2026: ueber die zentrale Zuordnung (fahrzeug_codes) — vorher fielen
+    "Elektro/Benzin", "Autogas (LPG)" oder "Hybrid (Benzin/Elektro)" durch."""
+    from fahrzeug_codes import autoscout_kraftstoff
+    code = autoscout_kraftstoff(*werte)
+    if code:
+        return code
+    n = _norm(werte[0] if werte else "")
     if not n:
         return ""
     mapping = {
@@ -317,9 +492,15 @@ def _autoscout_fuel(s: str) -> str:
         "diesel": "D",
         "elektro": "E",
         "electric": "E",
+        "electricity": "E",      # Nachpruefung Runde 10: mobile.de-Codes und
+        "strom": "E",            # Labels, die nur mobile.de kannte
+        "super": "B",
+        "hybridbenzin": "2",
         "hybrid": "2",  # Autoscout: 2 = hybrid (benz/E)
         "hybriddiesel": "3",
         "plugin": "2",
+        "pluginhybrid": "2",     # Runde 10: "Plug-in-Hybrid" normalisiert zu pluginhybrid
+        "plugin-hybrid": "2",
         "lpg": "L",
         "autogas": "L",
         "cng": "C",
@@ -330,17 +511,12 @@ def _autoscout_fuel(s: str) -> str:
     return mapping.get(n, "")
 
 
-def _autoscout_gearbox(s: str) -> str:
-    n = _norm(s)
-    if not n:
-        return ""
-    if "auto" in n:
-        return "A"
-    if "manuell" in n or "manual" in n or "schalt" in n:
-        return "M"
-    if "halbauto" in n or "semi" in n:
-        return "S"
-    return ""
+def _autoscout_gearbox(*werte) -> str:
+    """AutoScout-Getriebecode (A/M/S). 17.09.2026: ueber die zentrale
+    Zuordnung — vorher wurde Halbautomatik als Automatik gefiltert, weil
+    "auto" zuerst geprueft wurde."""
+    from fahrzeug_codes import autoscout_getriebe
+    return autoscout_getriebe(*werte)
 
 
 # ---------- Public: Resolver (für ggf. Debug / Tests) ----------
@@ -354,3 +530,265 @@ def resolve(make_name: str, model_name: str) -> Tuple[Optional[int], Optional[in
         return None, None
     model = _find_model(make, model_name or "")
     return make["makeId"], model["modelId"] if model else None
+
+
+# =========================================================
+#        Apify-Scraper (ivanvs/autoscout-scraper)
+# =========================================================
+# AutoScout24 als QUELLE: Ein einzelnes Inserat wird ueber die
+# Apify-Plattform ausgelesen (ca. $0.004 je frischem Abruf; der
+# Listing-Cache verhindert Doppelabrufe). Gleicher Aufbau wie der
+# mobile.de-Scraper in mobile_service.py.
+import logging as _logging
+import os as _os
+
+import httpx as _httpx
+from anbieter_fehler import (ART_AUSFALL, AnbieterFehler, ListingGone,
+                             aus_ausnahme, aus_http_antwort)
+
+_log = _logging.getLogger("autoscout_service")
+
+APIFY_TOKEN = _os.environ.get("APIFY_TOKEN", "").strip()
+# Rollenprüfung 22.09.2026 (RP-549): ein LEER gesetzter Wert (docker-compose
+# ${APIFY_AUTOSCOUT_ACTOR:-}) ergab vorher "" statt des Standards -> Endpunkt
+# /v2/acts//run-sync... und jeder neue AutoScout-Link scheiterte.
+APIFY_AUTOSCOUT_ACTOR = (_os.environ.get("APIFY_AUTOSCOUT_ACTOR") or "").strip() \
+    or "ivanvs~autoscout-scraper"
+
+# Rollenprüfung 22.09.2026 (RP-202/RP-353): Text fuer ein Inserat, das der
+# Actor nicht (mehr) liefert — geht 1:1 an den Sucher.
+INSERAT_WEG_AUTOSCOUT = ("Das Inserat ist bei AutoScout24 nicht mehr online "
+                         "(entfernt oder verkauft) oder nicht abrufbar.")
+
+
+def autoscout_quelle_verfuegbar() -> bool:
+    return bool(APIFY_TOKEN)
+
+
+def detail_looks_like_autoscout_listing(url: str) -> bool:
+    """Nur echte Inserats-URLs (/angebote/...) duerfen an den Actor —
+    eine Suchseiten-URL (/lst/...) wuerde hunderte Ergebnisse abrufen
+    und unnoetig Geld kosten."""
+    return bool(url) and "autoscout24." in url and "/angebote/" in url
+
+
+from fahrzeug_codes import getriebe_code, kraftstoff_code  # noqa: E402
+
+
+def _autoscout_verkaeuferart(wert) -> Optional[str]:
+    """"Privat" / "Händler" des Actors -> privat | haendler | None."""
+    s = str(wert or "").strip().lower()
+    if s.startswith("privat"):
+        return "privat"
+    if s.startswith(("händler", "haendler", "dealer", "gewerb")):
+        return "haendler"
+    return None
+
+
+def _autoscout_firmenname(item: dict) -> Optional[str]:
+    """Rollenprüfung 22.09.2026 (RP-444): Firmenname eines Haendlerinserats.
+
+    Der Actor liefert einen Haendlerblock `dealer` (bei Privatinseraten leer,
+    siehe tests/fixtures/apify_autoscout_item.json); je nach Actor-Version
+    heisst das Feld companyName, name oder dealerName — auch flach am
+    Datensatz. Der erste nicht leere Wert gewinnt."""
+    dealer = item.get("dealer") if isinstance(item.get("dealer"), dict) else {}
+    for wert in (dealer.get("companyName"), dealer.get("name"), dealer.get("dealerName"),
+                 item.get("dealerName"), item.get("companyName")):
+        if isinstance(wert, str) and wert.strip():
+            return wert.strip()
+    return None
+
+
+def parse_autoscout_item(item: dict, item_id: str,
+                         url: Optional[str] = None) -> dict:
+    """Ein Datensatz des Actors -> internes Fahrzeug-Schema.
+
+    Der Actor liefert flache Felder mit deutschen Werten ("Schaltgetriebe",
+    "Benzin", "242.000 km") und fertige Bild-URLs — deutlich einfacher als
+    bei mobile.de."""
+    from mobile_service import (_apify_html_zu_text, _apify_leistung, _apify_zahl,
+                                telefon_aus)
+    from fahrzeug_codes import tueren_text
+    from kleinanzeigen_service import _teile_ausserhalb_klammern
+
+    adresse = item.get("address") or {}
+    kw, ps = _apify_leistung(item.get("power"))
+
+    # Pruefbericht 20.09.2026 (S-16): kein Platzhalter als Name — die Art
+    # (privat/gewerblich) steht in seller_type.
+    verkaeufer = (item.get("contactName") or "").strip() or None
+    seller_type = _autoscout_verkaeuferart(item.get("seller"))
+    # Rollenprüfung 22.09.2026 (RP-444): Bei Haendlerinseraten ist contactName
+    # der Verkaufsberater ("Herr Meier") — im Kaufvertrag muss aber die FIRMA
+    # stehen. Den Firmennamen aus dem Haendlerblock nehmen; der Berater bleibt
+    # nur Rueckfall und steht getrennt als Ansprechpartner.
+    ansprechpartner = None
+    if seller_type == "haendler":
+        firma = _autoscout_firmenname(item)
+        if firma:
+            if verkaeufer and verkaeufer != firma:
+                ansprechpartner = verkaeufer
+            verkaeufer = firma
+
+    # S-17: eine Zeichenkette ist EINE Nummer (vorher: ihr erstes Zeichen).
+    telefon = telefon_aus(item.get("phones"))
+
+    # Pruefbericht 20.09.2026 (S-28): description (HTML) zuerst — dort stehen
+    # die Umbrueche (<br>/<li>); descriptionText klebt alle Zeilen aneinander.
+    beschreibung = _apify_html_zu_text(item.get("description") or "")
+    if not beschreibung:
+        beschreibung = (item.get("descriptionText") or "").strip()
+
+    # comfort/media/safety/extras: je nach Inserat Liste oder Text.
+    # S-21: nicht innerhalb von Klammern trennen ("Audiosystem (Touchscreen,
+    # MP3)" ist EIN Merkmal), Dubletten weg, Obergrenze wie Kleinanzeigen.
+    from kleinanzeigen_api import MAX_MERKMALE
+    features: list = []
+    gesehen: set = set()
+
+    def _merkmal(text) -> None:
+        from ausstattung_de import uebersetzen
+        t = uebersetzen(text)         # 26.09.2026: englische Bezeichnung -> deutsch
+        if not t or t.casefold() in gesehen or len(features) >= MAX_MERKMALE:
+            return
+        gesehen.add(t.casefold())
+        features.append(t)
+
+    for k in ("comfort", "media", "safety", "extras"):
+        v = item.get(k)
+        if isinstance(v, list):
+            for x in v:
+                _merkmal(x)
+        elif isinstance(v, str) and v.strip():
+            for t in _teile_ausserhalb_klammern(v):
+                _merkmal(t)
+
+    detail_url = (item.get("url") or url or "").split("?")[0]
+    # S-29: paint als dritter Rueckfall — Platzhalter ("Andere"/"Other") nicht.
+    farbe = (item.get("colour") or item.get("manufacturerColour") or "").strip()
+    if not farbe:
+        paint = str(item.get("paint") or "").strip()
+        if paint.casefold() not in ("", "andere", "other", "sonstige", "sonstiges"):
+            farbe = paint
+
+    # S-24: einmal filtern UND Dubletten entfernen; image_count zaehlt die Liste.
+    bilder = list(dict.fromkeys(u for u in item.get("images") or []
+                                if isinstance(u, str) and u.startswith("http")))
+
+    preis = item.get("rawPrice")
+    if not isinstance(preis, (int, float)):
+        preis = _apify_zahl(item.get("price"))
+
+    halter = item.get("numberOfPreviousOwners")
+
+    return {
+        "mobile_ad_id": str(item.get("uniqueRef") or item_id),
+        "detail_url": detail_url,
+        "make": (item.get("manufacturer") or "").upper(),
+        "make_label": item.get("manufacturer") or "",
+        "model": item.get("model") or "",
+        "model_label": item.get("model") or "",
+        "model_description": item.get("modelVersion") or item.get("title") or "",
+        "category": item.get("bodyType") or "",
+        "category_label": item.get("bodyType") or "",
+        "first_registration": item.get("firstRegistration") or None,
+        "mileage": _apify_zahl(item.get("milage") or item.get("mileage")),
+        # 17.09.2026: mobile.de-Codes speichern (vorher "BENZIN", "SCHALTGETRIEBE" —
+        # damit filterte der mobile.de-Link still ohne Kraftstoff und Getriebe).
+        "fuel": kraftstoff_code(item.get("fuelType")) or (item.get("fuelType") or "").upper(),
+        "fuel_label": item.get("fuelType") or "",
+        "gearbox": getriebe_code(item.get("gearbox")) or (item.get("gearbox") or "").upper(),
+        "gearbox_label": item.get("gearbox") or "",
+        "power_kw": kw,
+        "power_ps": ps,
+        "displacement": _apify_zahl(item.get("engineSize")),
+        "doors": tueren_text(item.get("doors")),                  # S-19
+        "seats": _apify_zahl(item.get("seats")),
+        "color": farbe or None,
+        "vin": None,
+        "license_plate": None,
+        "hu": (item.get("generalInspection") or "").strip() or None,
+        "previous_owners": str(halter) if halter not in (None, "") else None,
+        # Der Actor liefert keine belastbare Unfall-/Fahrbereit-Angabe —
+        # ehrlich leer lassen statt "unfallfrei" zu erfinden.
+        "accident_damaged": None,
+        "roadworthy": None,
+        "features": features,
+        "description": beschreibung,
+        "list_price": float(preis) if preis is not None else None,
+        "currency": item.get("currency") or "EUR",
+        # S-09: VB und MwSt-Ausweis (isPriceDeductable = MwSt. ausweisbar)
+        "price_type": "NEGOTIABLE" if item.get("isPriceNegotiable") is True else None,
+        "price_negotiable": item.get("isPriceNegotiable") is True,
+        "mwst_ausweisbar": (item["isPriceDeductable"]
+                            if isinstance(item.get("isPriceDeductable"), bool) else None),
+        "seller_name": verkaeufer,
+        # RP-444: Verkaufsberater eines Haendlers (nur Information, nie Vertragspartei)
+        "seller_ansprechpartner": ansprechpartner,
+        # Beweisdokument: gewerblich/privat (privat: Name/Telefon nicht drucken)
+        "seller_type": seller_type,
+        "seller_address": (adresse.get("street") or "") or None,
+        "seller_zip": adresse.get("zip") or None,
+        "seller_city": adresse.get("city") or None,
+        "seller_phone": telefon,
+        "seller_email": "",
+        "image_urls": list(bilder),
+        "images": list(bilder),
+        "image_count": len(bilder),
+    }
+
+
+async def fetch_autoscout_vehicle(url: str, item_id: str) -> Optional[dict]:
+    """Einzelnes AutoScout24-Inserat ueber den Apify-Actor abrufen."""
+    if not autoscout_quelle_verfuegbar():
+        return None
+    if not detail_looks_like_autoscout_listing(url):
+        _log.warning("AutoScout: keine Inserats-URL, Abruf verweigert: %s", url[:120])
+        return None
+    endpoint = (f"https://api.apify.com/v2/acts/{APIFY_AUTOSCOUT_ACTOR}"
+                f"/run-sync-get-dataset-items")
+    from mobile_service import APIFY_TIMEOUT_SEKUNDEN, apify_lauf_parameter
+    from listing_identity import ABRUF_ZU_LANGE_TEXT, AbrufDauertZuLange
+    try:
+        # DP-04: dieselbe Grenze wie mobile.de (unter dem Cloudflare-Abbruch)
+        async with _httpx.AsyncClient(
+                timeout=_httpx.Timeout(float(APIFY_TIMEOUT_SEKUNDEN), connect=20.0)) as client:
+            r = await client.post(
+                endpoint,
+                headers={"Authorization": f"Bearer {APIFY_TOKEN}"},
+                # RP-553: Speicher/Build optional ueber die .env
+                params=apify_lauf_parameter("APIFY_AUTOSCOUT_BUILD"),
+                json={"urls": [{"url": url}], "maxRecords": 1},
+            )
+            fehler = aus_http_antwort(r.status_code, r.text, "AutoScout24")
+            if fehler is not None:
+                _log.warning("Apify AutoScout: HTTP %s fuer %s: %s",
+                             r.status_code, item_id, r.text[:300])
+                raise fehler
+            items = r.json()
+            if not isinstance(items, list) or (items and not isinstance(items[0], dict)):
+                _log.warning("Apify AutoScout: unerwartete Antwort fuer %s", item_id)
+                raise AnbieterFehler(ART_AUSFALL, "AutoScout24", "unerwartete Antwortform")
+            # Rollenprüfung 22.09.2026 (RP-202/RP-353): leer bzw. ohne Inhalt
+            # = Inserat weg. Vorher None -> RuntimeError -> drei bezahlte
+            # Wiederholungen, Budget zurueckgebucht, "Technischer Fehler".
+            if not items:
+                _log.warning("Apify AutoScout: leere Antwort fuer %s — Inserat weg", item_id)
+                raise ListingGone(INSERAT_WEG_AUTOSCOUT)
+            v = parse_autoscout_item(items[0], item_id, url=url)
+            # Wie bei mobile.de: ein Element ohne Inhalt bedeutet, das
+            # Inserat gibt es nicht (mehr) — nicht "leeres Fahrzeug".
+            if not v or not (v.get("make") or v.get("model") or v.get("list_price")):
+                _log.warning("Apify AutoScout: Antwort ohne Inhalt fuer %s — Inserat weg", item_id)
+                raise ListingGone(INSERAT_WEG_AUTOSCOUT)
+            return v
+    except (AnbieterFehler, ListingGone):
+        raise
+    except _httpx.TimeoutException:
+        _log.warning("Apify AutoScout: Zeitueberschreitung (%s s) fuer %s",
+                     APIFY_TIMEOUT_SEKUNDEN, item_id)
+        raise AbrufDauertZuLange(ABRUF_ZU_LANGE_TEXT)
+    except Exception as exc:
+        _log.exception("Apify AutoScout: Abruf fehlgeschlagen fuer %s", item_id)
+        raise aus_ausnahme(exc, "AutoScout24")

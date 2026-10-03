@@ -1,0 +1,277 @@
+{
+  "szenario": "T4",
+  "wiederholung": 3,
+  "zeitstempel": "20260829T163419Z",
+  "konfiguration": {
+    "nutzer": 100,
+    "dauer_s": 300,
+    "warmup_s": 30,
+    "firmen": 10,
+    "ziel": "http://localhost:8001",
+    "workers_hinweis": "s. Start"
+  },
+  "anfragen_gesamt": 12477,
+  "endpunkte": {
+    "abo_status": {
+      "ok": 526,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 100,
+      "p95_ms": 387,
+      "p99_ms": 523,
+      "fehler_nach_status": {}
+    },
+    "fahrer_termine": {
+      "ok": 502,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 105,
+      "p95_ms": 448,
+      "p99_ms": 527,
+      "fehler_nach_status": {}
+    },
+    "foto_loeschen": {
+      "ok": 808,
+      "fehler": 9,
+      "fehlerrate_prozent": 1.1,
+      "p50_ms": 37,
+      "p95_ms": 298,
+      "p99_ms": 416,
+      "fehler_nach_status": {
+        "404": 9
+      }
+    },
+    "foto_oeffnen": {
+      "ok": 478,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 92,
+      "p95_ms": 415,
+      "p99_ms": 614,
+      "fehler_nach_status": {}
+    },
+    "foto_upload_gross": {
+      "ok": 104,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 462,
+      "p95_ms": 1028,
+      "p99_ms": 1207,
+      "fehler_nach_status": {}
+    },
+    "foto_upload_klein": {
+      "ok": 529,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 131,
+      "p95_ms": 473,
+      "p99_ms": 571,
+      "fehler_nach_status": {}
+    },
+    "foto_upload_normal": {
+      "ok": 431,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 301,
+      "p95_ms": 649,
+      "p99_ms": 905,
+      "fehler_nach_status": {}
+    },
+    "link_bekannt": {
+      "ok": 857,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 220,
+      "p95_ms": 534,
+      "p99_ms": 646,
+      "fehler_nach_status": {}
+    },
+    "link_job_ende": {
+      "ok": 889,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 2306,
+      "p95_ms": 2668,
+      "p99_ms": 2862,
+      "fehler_nach_status": {}
+    },
+    "link_neu_check": {
+      "ok": 889,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 120,
+      "p95_ms": 431,
+      "p99_ms": 565,
+      "fehler_nach_status": {}
+    },
+    "link_neu_vergleich": {
+      "ok": 889,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 62,
+      "p95_ms": 355,
+      "p99_ms": 512,
+      "fehler_nach_status": {}
+    },
+    "markt_favorit": {
+      "ok": 243,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 103,
+      "p95_ms": 386,
+      "p99_ms": 467,
+      "fehler_nach_status": {}
+    },
+    "markt_haendler": {
+      "ok": 266,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 90,
+      "p95_ms": 409,
+      "p99_ms": 538,
+      "fehler_nach_status": {}
+    },
+    "markt_suche": {
+      "ok": 544,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 139,
+      "p95_ms": 499,
+      "p99_ms": 600,
+      "fehler_nach_status": {}
+    },
+    "pdf_download_protokoll": {
+      "ok": 319,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 106,
+      "p95_ms": 399,
+      "p99_ms": 512,
+      "fehler_nach_status": {}
+    },
+    "pdf_download_vertrag": {
+      "ok": 361,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 68,
+      "p95_ms": 386,
+      "p99_ms": 476,
+      "fehler_nach_status": {}
+    },
+    "pdf_vertrag_neu": {
+      "ok": 676,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 280,
+      "p95_ms": 606,
+      "p99_ms": 833,
+      "fehler_nach_status": {}
+    },
+    "protokoll_abschluss": {
+      "ok": 3157,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 829,
+      "p95_ms": 1340,
+      "p99_ms": 1604,
+      "fehler_nach_status": {}
+    }
+  },
+  "jobs": {
+    "annahme_p50_ms": 120,
+    "annahme_p95_ms": 431,
+    "warte_p50_ms": 2306,
+    "warte_p95_ms": 2668,
+    "warte_p99_ms": 2862,
+    "queue_max": 8,
+    "queue_schnitt": 2.0,
+    "drain_sekunden": 0,
+    "offene_jobs_nach_drain": 0,
+    "haengende_jobs": 0
+  },
+  "klassen": {
+    "technisch_unerwartet": 0,
+    "fachlich_erwartet": 0,
+    "sicherheitstest_ok": 0,
+    "race_ux_befund": 9,
+    "verbindungsabbruch_client": 0,
+    "erfolgreich": 12468
+  },
+  "klassen_details": {
+    "foto_loeschen": {
+      "404": "9x Race/UX-Befund"
+    }
+  },
+  "reset_forensik": [],
+  "server_abschluss_nachweis": {
+    "pdf_vertraege_db_delta": 745,
+    "pdf_vertraege_client_ok_inkl_warmup": 745,
+    "ohne_client_antwort_abgeschlossen": 0
+  },
+  "speicher": {
+    "vorher": {
+      "resale": {
+        "dateien": 4688,
+        "mb": 9853.3
+      },
+      "protocol": {
+        "dateien": 18600,
+        "mb": 1977.4
+      },
+      "pickup": {
+        "dateien": 0,
+        "mb": 0.0
+      },
+      "disk_frei_gb": 537.3
+    },
+    "nachher": {
+      "resale": {
+        "dateien": 5035,
+        "mb": 10551.9
+      },
+      "protocol": {
+        "dateien": 29058,
+        "mb": 3074.7
+      },
+      "pickup": {
+        "dateien": 0,
+        "mb": 0.0
+      },
+      "disk_frei_gb": 535.9
+    }
+  },
+  "pdf_beweis": {
+    "vertraege_gesamt": 755,
+    "speicher_mb_in_db": 4.4,
+    "stichprobe_geprueft": 15,
+    "eindeutige_dateien_in_stichprobe": 15,
+    "befunde": []
+  },
+  "foto_audit": {
+    "dateien_ohne_db": 14,
+    "db_ohne_datei": 6
+  },
+  "integritaet": {
+    "doppelte_anbieter_abrufe": 0,
+    "versand_gesendet": 0,
+    "versand_eintraege_delta": 0,
+    "doppel_versand": 0,
+    "jobs_nicht_fertig_im_messfenster": 0
+  },
+  "system": {
+    "cpu_median": 45,
+    "cpu_spitze": 59,
+    "ram_median": 52,
+    "ram_spitze": 53,
+    "ram_nach_drain": 52.1,
+    "mongo_verbindungen": 53,
+    "db_ops_pro_anfrage": 13.8,
+    "disk_write_mb_delta": 3760,
+    "net_mb_delta": 5
+  },
+  "cleanup_beweis": {
+    "db_reste": 0,
+    "datei_reste": 0,
+    "disk_frei_gb_nach_cleanup": 537.7
+  }
+}

@@ -1,0 +1,957 @@
+# -*- coding: utf-8 -*-
+"""Beweisdokumente je Inserat: Vormerken, Erzeugen, Aufbewahren.
+
+Ersetzt die Snapshots (Playwright/Browser) vollstaendig, Wunsch 10.09.2026:
+"wenn ein neuer link zum ersten mal von egal wem benutzt wird wird ein
+beweis dokument ... in eine pdf eintragen".
+
+Ablauf
+  1. Ein Inserat wird zum ersten Mal vom Server abgerufen
+     (listing_identity.get_or_fetch_listing, Miss-Zweig) oder verglichen
+     (routes/listings.compare). Beide rufen beweis_vormerken() auf.
+  2. beweis_vormerken legt EINE Zeile je Inserat an (Unique-Index auf
+     cache_key, $setOnInsert). Wer spaeter kommt — gleiche oder andere
+     Firma — bekommt dieselbe Zeile: nie zwei Beweisdokumente je Inserat.
+  3. Jeder Backend-Worker betreibt eine kleine Schleife
+     (run_beweis_worker_forever). Eine Zeile wird per atomarem Statuswechsel
+     offen -> in_arbeit beansprucht; genau EIN Worker gewinnt. Faellt er aus,
+     gibt die Aufraeumung die Zeile nach BEARBEITUNG_SEKUNDEN wieder frei.
+  4. Erzeugen: Inseratsdaten aus dem beim Vormerken eingefrorenen Stand
+     (quelle_daten, Runde 23 — Altbestand ohne ihn: listings_cache), Fotos ueber
+     bild_proxy.laden_fuer_pdf (Allowliste, Groessenlimit), PDF ueber
+     beweis_pdf.beweis_pdf (ohne Browser), Ablage im Datei-Speicher unter
+     beweise/<quelle>/<id>.pdf (firmenneutral).
+  5. Aufbewahrung: BEWEIS_AUFBEWAHRUNG_TAGE (Standard 30) ab Erstellung;
+     laenger, solange irgendeine Firma ein Fahrzeug zu diesem Inserat
+     fuehrt (Vertrag, Bestand ...). Danach wird die Datei geloescht und die
+     Zeile bleibt als Grabstein (status geloescht) — so entsteht fuer
+     denselben Link kein zweites "erstes" Dokument.
+
+Statuswerte: offen | in_arbeit | fertig | fehlgeschlagen | geloescht
+"""
+from __future__ import annotations
+
+import asyncio
+
+import wartung
+import hashlib
+import logging
+import os
+import time
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Set
+
+from pymongo import ReturnDocument
+from pymongo.errors import DuplicateKeyError
+
+log = logging.getLogger("autohandel")
+
+
+def _zahl_env(name: str, standard: int, unten: int, oben: int) -> int:
+    roh = os.environ.get(name, "")
+    try:
+        wert = int(roh) if str(roh).strip() else standard
+    except ValueError:
+        log.warning("%s=%r ist keine ganze Zahl — Standard %s", name, roh, standard)
+        wert = standard
+    if not unten <= wert <= oben:
+        log.warning("%s=%s liegt ausserhalb %s..%s — wird begrenzt", name, wert, unten, oben)
+    return max(unten, min(oben, wert))
+
+
+# Wie viele Beweisdokumente EIN Worker-Prozess gleichzeitig erzeugt
+# (4 Worker x 2 Server = 8 gleichzeitig bei Standard 1).
+BEWEIS_PARALLEL = _zahl_env("BEWEIS_PARALLEL", 1, 1, 8)
+# Hoechstzahl eingebetteter Fotos je Dokument (alle Adressen stehen im Anhang).
+BEWEIS_FOTOS_MAX = _zahl_env("BEWEIS_FOTOS_MAX", 20, 0, 60)
+# Runde 26 (12.09.2026, Wunsch Ahmad: Dokument kleiner): Fotos werden fuer
+# das Beweisdokument staerker verkleinert. Gemessen mit 9 Fotos: 666 KB ->
+# rund 374 KB, ohne dass Fahrzeug oder Schaeden schlechter erkennbar sind.
+_FOTO_KANTE_ERSTE = _zahl_env("BEWEIS_FOTO_KANTE_ERSTE", 1000, 400, 2000)
+_FOTO_KANTE = _zahl_env("BEWEIS_FOTO_KANTE", 640, 300, 2000)
+_FOTO_QUALITAET_ERSTE = _zahl_env("BEWEIS_FOTO_QUALITAET_ERSTE", 68, 40, 95)
+_FOTO_QUALITAET = _zahl_env("BEWEIS_FOTO_QUALITAET", 62, 40, 95)
+# Wunsch Ahmad 18.09.2026: 30 Tage statt 60. Laenger bleibt ein Dokument
+# trotzdem, solange eine Firma damit arbeitet (Vertrag, Termin, Bestand) —
+# siehe _gehalten(). Betroffen sind also vor allem Dokumente ohne Geschaeft.
+BEWEIS_AUFBEWAHRUNG_TAGE = _zahl_env("BEWEIS_AUFBEWAHRUNG_TAGE", 30, 1, 3650)
+
+
+def automatisch_aktiv() -> bool:
+    """Entsteht zu jedem abgerufenen Inserat automatisch ein Beweisdokument?
+
+    Wunsch Ahmad 18.09.2026: NEIN — das Dokument entsteht nur noch, wenn
+    jemand es verlangt (Knopf in der Akte/im Vergleich, Rueckfrage nach dem
+    Versand). Vorher bekam JEDES angesehene Inserat eines; bei 30 Suchern x
+    150 Vergleichen waeren das rund 3,5 GB am Tag gewesen, von denen fast
+    nichts gebraucht wird. `BEWEIS_AUTOMATISCH=true` stellt das alte
+    Verhalten ohne Code-Aenderung wieder her."""
+    return (os.environ.get("BEWEIS_AUTOMATISCH", "") or "").strip().lower() \
+        in ("1", "true", "ja", "yes")
+# Name/Anschrift/Telefon auch privater Anbieter drucken (Standard: nein).
+BEWEIS_PRIVATDATEN = (os.environ.get("BEWEIS_PRIVATDATEN", "") or "").strip().lower() \
+    in ("1", "true", "ja", "yes")
+BEARBEITUNG_SEKUNDEN = 300
+MAX_VERSUCHE = 3
+FOTO_PARALLEL = 4
+# Gesamtfrist je Erzeugung (unter der Lease) und Herzschlag, der die Lease
+# verlaengert, solange die Erzeugung laeuft (sonst uebernaehme ein zweiter
+# Worker nach BEARBEITUNG_SEKUNDEN und beide schrieben).
+ERZEUGUNG_MAX_SEKUNDEN = BEARBEITUNG_SEKUNDEN - 60
+HERZSCHLAG_SEKUNDEN = 60
+# Endgueltig gescheiterte Dokumente werden beim naechsten Gebrauch des Links
+# wieder in die Warteschlange gestellt — fruehestens nach dieser Pause.
+WIEDERBELEBEN_MINUTEN = 15
+# Lebenszyklen OHNE Geschaeftsbezug: diese Fahrzeuge halten ein
+# Beweisdokument NICHT ueber die Frist hinaus (sonst griffe sie nie).
+OHNE_GESCHAEFT = ("verglichen", "gefunden", "storniert", "nicht_abgeholt",
+                  "archiviert", "geloescht")
+
+_WORKER = f"{os.getpid()}-{uuid.uuid4().hex[:6]}"
+# Die Garantie "EIN Dokument je Inserat" haengt am Unique-Index auf
+# cache_key. Der Serverstart legt ihn an; beweis_vormerken stellt ihn
+# zusaetzlich einmal je Prozess und Datenbank sicher (Befund 10.09.2026:
+# ohne Index legten 25 gleichzeitige Erstabrufe zwei Dokumente an).
+_index_sicher: Set[str] = set()
+_wecker: Optional[asyncio.Event] = None
+_wecker_loop = None
+_laufend: Set[asyncio.Task] = set()
+
+
+def _jetzt() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _event() -> asyncio.Event:
+    """Wecker je Event-Loop (Tests erzeugen eigene Loops)."""
+    global _wecker, _wecker_loop
+    loop = asyncio.get_running_loop()
+    if _wecker is None or _wecker_loop is not loop:
+        _wecker = asyncio.Event()
+        _wecker_loop = loop
+    return _wecker
+
+
+def _wecken() -> None:
+    try:
+        _event().set()
+    except RuntimeError:  # kein laufender Loop
+        pass
+
+
+async def ensure_beweis_indexes(db) -> None:
+    await db.inserat_beweise.create_index("cache_key", unique=True, name="beweis_je_inserat")
+    await db.inserat_beweise.create_index("id", unique=True, name="beweis_id")
+    await db.inserat_beweise.create_index([("status", 1), ("erstellt_am", 1)],
+                                          name="beweis_status")
+    await db.vehicles.create_index("inserat_schluessel", name="fahrzeug_inserat",
+                                   sparse=True)
+
+
+# Audit 13.09.2026 (#37): Nach einem gescheiterten Aufbau erst nach dieser
+# Pause erneut versuchen (je Prozess und Datenbank).
+INDEX_NEUVERSUCH_SEKUNDEN = 300
+_index_versuch: Dict[str, float] = {}
+
+
+def _produktion() -> bool:
+    return os.environ.get("APP_ENV", "").strip().lower() == "production"
+
+
+async def beweis_indizes_sichern(db) -> bool:
+    """Audit 13.09.2026 (#37): Wie ensure_beweis_indexes, aber wirft nie und
+    trennt den Unique-Index (die Garantie "EIN Dokument je Inserat") von den
+    uebrigen. Fehlt er, gibt es einen Betriebsalarm (sichtbar in
+    /admin/betrieb und als Warnung in /ready) statt nur einer Log-Zeile; steht
+    er wieder, wird der Alarm geschlossen. Die anderen drei Indizes sind
+    Beiwerk und blockieren nichts. Liefert True, wenn der Unique-Index steht.
+
+    Beweis-Dubletten werden bewusst NICHT automatisch bereinigt: beide Zeilen
+    koennen PDFs mit IDs tragen, die Oberflaeche und Fahrer-App schon kennen."""
+    import betrieb
+    ref = "inserat_beweise.cache_key"
+    try:
+        await db.inserat_beweise.create_index("cache_key", unique=True,
+                                              name="beweis_je_inserat")
+    except Exception as exc:  # noqa: BLE001 — z.B. Dubletten im Altbestand
+        log.error("Beweisdokumente: Unique-Index beweis_je_inserat fehlt (%s) — "
+                  "doppelte Dokumente moeglich", exc)
+        await betrieb.alarm(db, "unique_index_fehlt", ref=ref, fehler=str(exc)[:300],
+                            hinweis="Doppelte cache_key in inserat_beweise von Hand "
+                                    "pruefen; der Index wird danach automatisch angelegt.")
+        return False
+    await betrieb.alarm_schliessen(db, "unique_index_fehlt", ref=ref)
+    try:
+        await db.inserat_beweise.create_index("id", unique=True, name="beweis_id")
+        await db.inserat_beweise.create_index([("status", 1), ("erstellt_am", 1)],
+                                              name="beweis_status")
+        await db.vehicles.create_index("inserat_schluessel", name="fahrzeug_inserat",
+                                       sparse=True)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Beweis-Indizes unvollstaendig: %s", exc)
+    return True
+
+
+async def beweise_haengend(db, minuten: int = 15) -> int:
+    """Audit 13.09.2026 (#38): Beweisdokumente, die abholbereit laenger als
+    `minuten` warten. Prozessunabhaengig — faellt der Beweis-Worker flotten-
+    weit aus, bleibt /ready sonst gruen, und die Nutzer sehen nur 409. Der
+    Index beweis_status (status, erstellt_am) deckt die Abfrage."""
+    jetzt = _jetzt()
+    return await db.inserat_beweise.count_documents(
+        {"status": "offen", "erstellt_am": {"$lt": jetzt - timedelta(minutes=minuten)},
+         "$or": [{"naechster_versuch_ab": None},
+                 {"naechster_versuch_ab": {"$lte": jetzt}}]})
+
+
+def kanonische_url(quelle: Any, item_id: Any, url: Any) -> str:
+    """Firmenneutrale Inserats-Adresse fuer Dokument und Oberflaeche: ohne
+    Such-/Tracking-Parameter und Fragment (die gingen sonst an alle Firmen
+    und ins PDF), Sonderzeichen im Pfad kodiert. mobile.de braucht die ID als
+    Parameter und bekommt deshalb immer die Standardadresse."""
+    from urllib.parse import quote, urlsplit, urlunsplit
+    iid = str(item_id or "").strip()
+    if str(quelle or "").startswith("mobile") and iid:
+        return f"https://suchen.mobile.de/fahrzeuge/details.html?id={quote(iid, safe='')}"
+    try:
+        teile = urlsplit(str(url or "").strip())
+    except ValueError:
+        return ""
+    if teile.scheme not in ("http", "https") or not teile.netloc:
+        return ""
+    pfad = quote(teile.path or "/", safe="/-._~%")
+    return urlunsplit(("https", teile.netloc.lower(), pfad, "", ""))[:2000]
+
+
+def oeffentlich(doc: Optional[dict]) -> Optional[dict]:
+    """Sachfelder fuer die Oberflaeche — ohne Speicherpfad und Bearbeiter.
+    Das Dokument kennt keine Ersteller-Firma: es gehoert zum Inserat."""
+    if not doc:
+        return None
+    felder = ("id", "quelle", "item_id", "url", "status", "erstellt_am",
+              "fertig_am", "daten_abgerufen_am", "pdf_bytes", "pdf_sha256",
+              "fotos_eingebettet", "fotos_gesamt", "fehler",
+              "daten_quelle", "ohne_fotos")
+    aus = {}
+    for k in felder:
+        v = doc.get(k)
+        if isinstance(v, datetime):
+            # Motor liefert Zeiten ohne Zeitzone (UTC) — ohne Zusatz laese der
+            # Browser sie als Ortszeit (2 h daneben).
+            v = (v if v.tzinfo else v.replace(tzinfo=timezone.utc)).isoformat()
+        aus[k] = v
+    return aus
+
+
+# Runde 23 (11.09.2026): Datenstand beim ersten Gebrauch einfrieren. Vorher
+# las der Worker die Fahrzeugdaten erst spaeter aus dem veraenderlichen
+# listings_cache — nach Verzoegerung, Fehlversuch, Wiederbelebung oder einem
+# erneuten Portalabruf zeigte das PDF einen NEUEREN Stand als beim
+# ausloesenden Erstgebrauch (oder scheiterte, wenn der Eintrag per TTL weg war).
+# Nicht eingefroren wird, was das PDF nie liest: interne Parser-Felder
+# (_mock, _resolved_*), die Vorschaubilder der Antwort und die doppelte
+# Fotoliste image_urls (foto_urls nimmt images vor image_urls).
+_ANBIETER_ERSATZNAMEN = ("händler", "privatverkäufer", "privatanbieter")
+_ANBIETER_KONTAKT = ("seller_address", "seller_phone", "seller_email")
+#: Weitere Namensfelder der Parser (RP-440/RP-444), maskiert wie seller_name.
+_ANBIETER_NAMEN = ("seller_alias", "seller_ansprechpartner")
+
+
+def quelle_einfrieren(quelle: Any, daten: Any) -> Optional[Dict[str, Any]]:
+    """Inseratsdaten fuer quelle_daten: nur, was das PDF braucht — und bei
+    privaten/unbekannten Anbietern schon maskiert.
+
+    Die Beweiszeile lebt laenger als der Zwischenspeicher (90 Tage und mehr,
+    solange ein Vorgang sie haelt). Sie speichert deshalb nie mehr
+    Personendaten, als das PDF selbst enthaelt: Freitexte wie
+    beweis_pdf.kontaktdaten_maskieren, Name/Anschrift/Telefon/E-Mail als
+    Platzhalter (das PDF druckt sie bei privaten Anbietern ohnehin nicht; der
+    Platzhalter erhaelt dort den Hinweis auf entfernte Angaben). PLZ/Ort und
+    die Ersatznamen ("Privatverkäufer") bleiben — PLZ/Ort stehen im PDF, die
+    Ersatznamen bestimmen die Anbieterart. Haendler (und BEWEIS_PRIVATDATEN)
+    bleiben unveraendert, weil das PDF sie vollstaendig druckt."""
+    if not isinstance(daten, dict) or not daten:
+        return None
+    aus = {k: v for k, v in daten.items()
+           if not str(k).startswith("_") and k != "images_thumbs"}
+    if aus.get("images"):
+        aus.pop("image_urls", None)
+    from beweis_pdf import KONTAKT_ENTFERNT, kontaktdaten_maskieren, verkaeufer_art
+    if BEWEIS_PRIVATDATEN or verkaeufer_art(aus, quelle) == "haendler":
+        return aus
+    gemaskt = kontaktdaten_maskieren(aus)
+    for feld in _ANBIETER_KONTAKT:
+        if gemaskt.get(feld):
+            gemaskt[feld] = KONTAKT_ENTFERNT
+    name = gemaskt.get("seller_name")
+    if name and str(name).strip().lower() not in _ANBIETER_ERSATZNAMEN:
+        gemaskt["seller_name"] = KONTAKT_ENTFERNT
+    # Rollenpruefung 22.09.2026 (RP-440/RP-444): Das Kleinanzeigen-Pseudonym
+    # eines Privatanbieters steht seit heute in seller_alias (vorher in
+    # seller_name, das hier maskiert wurde), der Ansprechpartner eines
+    # AutoScout-Haendlers in seller_ansprechpartner. Beides sind Namen — bei
+    # privaten/unbekannten Anbietern genauso ersetzen wie seller_name.
+    for feld in _ANBIETER_NAMEN:
+        if gemaskt.get(feld):
+            gemaskt[feld] = KONTAKT_ENTFERNT
+    if gemaskt != aus:
+        # Merker fuer _fuer_pdf ("_" = nie im PDF): hier wurde maskiert.
+        gemaskt["_kontakt_maskiert"] = True
+    return gemaskt
+
+
+def _fuer_pdf(daten: Dict[str, Any]) -> Dict[str, Any]:
+    """Eingefrorene Daten sind schon maskiert. beweis_pdf erkennt Maskierung
+    aber nur am Unterschied vor/nach seiner eigenen und liesse den Hinweis
+    auf entfernte Kontaktangaben weg, wenn nur Titel/Beschreibung eine
+    enthielten. seller_email wird bei privaten Anbietern nie gedruckt, loest
+    den Hinweis aber aus — nur fuer den Aufbau, nie gespeichert."""
+    if daten.get("_kontakt_maskiert") and not BEWEIS_PRIVATDATEN \
+            and not any(daten.get(f) for f in _ANBIETER_KONTAKT):
+        from beweis_pdf import KONTAKT_ENTFERNT
+        return dict(daten, seller_email=KONTAKT_ENTFERNT)
+    return daten
+
+
+async def beweis_vormerken(db, *, cache_key: str, quelle: str, item_id: Any,
+                           url: str, anlass: str, daten: Optional[dict] = None,
+                           abgerufen_am: Optional[datetime] = None) -> Optional[dict]:
+    """Beweisdokument fuer ein Inserat vormerken — idempotent, wirft nie.
+    Liefert die (neue oder bestehende) Zeile als oeffentliche Sachfelder.
+
+    daten/abgerufen_am (Runde 23): Stand des ausloesenden Abrufs. Er wird nur
+    beim Anlegen gespeichert ($setOnInsert) — spaetere Aufrufe, andere
+    Firmen, Wiederbelebung und neue Portalabrufe aendern ihn nie."""
+    if not cache_key:
+        return None
+    marke = f"{id(db.client) if hasattr(db, 'client') else id(db)}:{getattr(db, 'name', '')}"
+    if marke not in _index_sicher:
+        # Audit 13.09.2026 (#37): fail-open bleibt (Beweis darf den Abruf nie
+        # brechen), aber sichtbar (Betriebsalarm) und gedrosselt — vorher
+        # startete jeder Vergleich einen scheiternden Unique-Aufbau.
+        zuletzt = _index_versuch.get(marke)
+        if zuletzt is None or time.monotonic() - zuletzt >= INDEX_NEUVERSUCH_SEKUNDEN:
+            if await beweis_indizes_sichern(db):
+                _index_sicher.add(marke)
+                _index_versuch.pop(marke, None)
+            else:
+                _index_versuch[marke] = time.monotonic()
+    if marke not in _index_sicher and _produktion():
+        # Befund 123 (16.09.2026): ohne den Unique-Index koennten parallele
+        # Erstnutzungen mehrere "erste" Dokumente desselben Inserats anlegen —
+        # fuer eine Beweiskette nicht tragbar. In Produktion wird deshalb
+        # NICHT vorgemerkt (der Betriebsalarm unique_index_fehlt steht, der
+        # Abruf selbst laeuft weiter); ausserhalb bleibt es beim Alarm.
+        log.error("Beweisdokument %s: Unique-Index fehlt — Vormerkung in Produktion "
+                  "abgelehnt (fail-closed)", cache_key)
+        return None
+    felder = {"_id": 0, "id": 1, "status": 1, "quelle": 1, "item_id": 1, "url": 1,
+              "erstellt_am": 1, "fertig_am": 1, "pdf_bytes": 1, "fehler": 1,
+              "fotos_eingebettet": 1, "fotos_gesamt": 1, "daten_abgerufen_am": 1,
+              "pdf_sha256": 1}
+    neu = {"id": str(uuid.uuid4()), "cache_key": cache_key,
+           "quelle": quelle, "item_id": str(item_id or ""),
+           "url": kanonische_url(quelle, item_id, url), "status": "offen", "versuche": 0,
+           "anlass": anlass, "erstellt_am": _jetzt()}
+    try:
+        eingefroren = quelle_einfrieren(quelle, daten)
+    except Exception as exc:  # noqa: BLE001 — dann wie Altbestand aus dem Cache
+        log.warning("Beweisdokument %s: Datenstand nicht eingefroren: %s", cache_key, exc)
+        eingefroren = None
+    if eingefroren:
+        neu["quelle_daten"] = eingefroren
+        neu["quelle_abgerufen_am"] = abgerufen_am or _jetzt()
+    try:
+        try:
+            doc = await db.inserat_beweise.find_one_and_update(
+                {"cache_key": cache_key},
+                {"$setOnInsert": neu},
+                upsert=True, projection=felder, return_document=ReturnDocument.AFTER)
+        except DuplicateKeyError:
+            # Zwei gleichzeitige Erstnutzungen: der andere hat angelegt.
+            doc = await db.inserat_beweise.find_one({"cache_key": cache_key}, felder)
+    except Exception as exc:  # noqa: BLE001 — Beweis darf den Abruf nie brechen
+        log.warning("Beweisdokument fuer %s nicht vorgemerkt: %s", cache_key, exc)
+        # Phase 4 (4.5, B21): nicht nur ins Log — der Betrieb sieht den Alarm.
+        try:
+            import betrieb as _betrieb
+            await _betrieb.alarm(db, "beweis_vormerkung_fehlgeschlagen", ref=cache_key,
+                                 quelle=str(quelle), anlass=str(anlass), fehler=str(exc)[:300])
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+    if doc and doc.get("status") in ("fehlgeschlagen", "geloescht"):
+        # Nach einer Stoerung (Speicher, Neustart) bekaeme das Inserat sonst
+        # nie ein Dokument: beim naechsten Gebrauch erneut versuchen, aber
+        # fruehestens nach WIEDERBELEBEN_MINUTEN (kein Dauerfeuer).
+        # Pruefung 14.09.2026 (F8): auch ein Grabstein (geloescht) wird
+        # wiederbelebt, wenn NIE ein Dokument entstand (kein fertig_am) —
+        # sonst konnte ein Inserat, dessen erster Versuch scheiterte und das
+        # 90 Tage ruhte, nie mehr ein Beweisdokument bekommen. Ein Grabstein
+        # eines echten (fertigen) Dokuments bleibt: kein zweites "erstes"
+        # Dokument (Runde 23). Neuer Erstellzeitpunkt (F9).
+        try:
+            r = await db.inserat_beweise.update_one(
+                {"cache_key": cache_key,
+                 "$and": [
+                     {"$or": [{"status": "fehlgeschlagen"},
+                              {"status": "geloescht", "status_vor_loeschung": "fehlgeschlagen"},
+                              {"status": "geloescht", "status_vor_loeschung": {"$exists": False},
+                               "fertig_am": {"$in": [None]}},
+                              {"status": "geloescht", "status_vor_loeschung": {"$exists": False},
+                               "fertig_am": {"$exists": False}}]},
+                     {"$or": [{"fehlgeschlagen_am": {"$exists": False}},
+                              {"fehlgeschlagen_am": None},
+                              {"fehlgeschlagen_am": {"$lt": _jetzt() - timedelta(
+                                  minutes=WIEDERBELEBEN_MINUTEN)}}]}]},
+                {"$set": {"status": "offen", "versuche": 0, "fehler": None,
+                          "naechster_versuch_ab": None, "bearbeitung_bis": None,
+                          "erstellt_am": _jetzt(), "fertig_am": None,
+                          "verfall_pruefen_ab": None, "wiederbelebt_am": _jetzt()},
+                 "$unset": {"geloescht_am": ""}})
+            if r.modified_count:
+                doc = dict(doc, status="offen", fehler=None)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Beweisdokument %s nicht wiederbelebt: %s", cache_key, exc)
+    if doc and doc.get("status") == "geloescht" and anlass == "angefordert" and eingefroren:
+        doc = await _nach_verfall_neu_erzeugen(
+            db, doc, cache_key=cache_key, quelle=quelle, item_id=item_id, url=url,
+            eingefroren=eingefroren, abgerufen_am=abgerufen_am)
+    if doc and doc.get("status") == "offen":
+        _wecken()
+    return oeffentlich(doc)
+
+
+async def _nach_verfall_neu_erzeugen(db, doc: dict, *, cache_key: str, quelle: str,
+                                     item_id: Any, url: str, eingefroren: dict,
+                                     abgerufen_am: Optional[datetime]) -> dict:
+    """Rollenpruefung 22.09.2026 (RP-498): Ein fertiges Dokument, das nur ein
+    Vergleich hielt, verfaellt nach BEWEIS_AUFBEWAHRUNG_TAGE; der Grabstein
+    blieb fuer immer "geloescht". Entstand DANACH ein Kaufvertrag, bekam er
+    nie mehr ein Beweisdokument — /beweise/anfordern lieferte nur den
+    Grabstein zurueck (auch firmenuebergreifend, der Schluessel gilt je
+    Inserat).
+
+    Seit 18.09.2026 entstehen Dokumente nur noch auf Knopfdruck. Verlangt
+    jemand AUSDRUECKLICH ein neues (anlass "angefordert") und liegen
+    Inseratsdaten vor, wird der Grabstein wiederbelebt: neuer Datenstand,
+    neuer Erstellzeitpunkt, und das Dokument nennt das fruehere (erstellt
+    am …, geloescht am …) — es gibt also kein zweites "erstes" Dokument
+    ohne Hinweis. Wirft nie; im Fehlerfall bleibt der Grabstein."""
+    # Nur Grabsteine eines FERTIGEN Dokuments — nie erzeugte (fehlgeschlagene)
+    # belebt beweis_vormerken selbst wieder, mit der Pause WIEDERBELEBEN_MINUTEN.
+    filt = {"cache_key": cache_key, "status": "geloescht",
+            "$or": [{"status_vor_loeschung": "fertig"},
+                    {"status_vor_loeschung": {"$exists": False},
+                     "fertig_am": {"$nin": [None]}}]}
+    try:
+        alt = await db.inserat_beweise.find_one(
+            filt, {"_id": 0, "erstellt_am": 1, "fertig_am": 1, "geloescht_am": 1})
+        if not alt:
+            return doc
+        frueher = {"erstellt_am": alt.get("fertig_am") or alt.get("erstellt_am"),
+                   "geloescht_am": alt.get("geloescht_am")}
+        jetzt = _jetzt()
+        r = await db.inserat_beweise.update_one(
+            filt,
+            {"$set": {"status": "offen", "versuche": 0, "fehler": None,
+                      "naechster_versuch_ab": None, "bearbeitung_bis": None,
+                      "erstellt_am": jetzt, "fertig_am": None,
+                      "verfall_pruefen_ab": None, "wiederbelebt_am": jetzt,
+                      "anlass": "angefordert", "quelle": quelle,
+                      "item_id": str(item_id or ""),
+                      "url": kanonische_url(quelle, item_id, url),
+                      "quelle_daten": eingefroren,
+                      "quelle_abgerufen_am": abgerufen_am or jetzt,
+                      "neu_nach_verfall": frueher},
+             "$unset": {"geloescht_am": "", "status_vor_loeschung": "",
+                        "daten_quelle": "", "ohne_fotos": ""}})
+        if r.modified_count:
+            log.info("Beweisdokument %s nach Verfall neu angefordert", cache_key)
+            return dict(doc, status="offen", fehler=None, erstellt_am=jetzt, fertig_am=None,
+                        pdf_bytes=None, pdf_sha256=None)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Beweisdokument %s nach Verfall nicht neu vorgemerkt: %s", cache_key, exc)
+    return doc
+
+
+# ---------------------------------------------------------------- Worker --
+async def _aufraeumen(db) -> None:
+    """Verwaiste Bearbeitungen (Worker abgestuerzt/neu gestartet) freigeben."""
+    async for d in db.inserat_beweise.find(
+            {"status": "in_arbeit", "bearbeitung_bis": {"$lt": _jetzt()}},
+            {"_id": 0, "id": 1, "versuche": 1, "bearbeitung_bis": 1}):
+        # Befund 118 (16.09.2026): nur den GELESENEN (abgelaufenen) Stand
+        # freigeben — hat der Herzschlag die Frist inzwischen verlaengert oder
+        # ein anderer Worker neu beansprucht, trifft der Filter nicht mehr.
+        stand = {"id": d["id"], "status": "in_arbeit",
+                 "bearbeitung_bis": d.get("bearbeitung_bis")}
+        if (d.get("versuche") or 0) >= MAX_VERSUCHE:
+            await db.inserat_beweise.update_one(
+                stand,
+                {"$set": {"status": "fehlgeschlagen", "bearbeitung_bis": None,
+                          "fehlgeschlagen_am": _jetzt(),
+                          "fehler": "Erstellung mehrfach abgebrochen"}})
+        else:
+            await db.inserat_beweise.update_one(
+                stand, {"$set": {"status": "offen", "bearbeitung_bis": None}})
+
+
+async def _beanspruchen(db) -> Optional[dict]:
+    jetzt = _jetzt()
+    return await db.inserat_beweise.find_one_and_update(
+        {"status": "offen",
+         "$or": [{"naechster_versuch_ab": {"$exists": False}},
+                 {"naechster_versuch_ab": None},
+                 {"naechster_versuch_ab": {"$lte": jetzt}}]},
+        {"$set": {"status": "in_arbeit", "bearbeiter": _WORKER,
+                  # Befund 117 (16.09.2026): Kennung DIESER Beanspruchung —
+                  # ein ueberholter Versuch desselben Prozesses passt sonst
+                  # weiter auf "bearbeiter" und finalisiert den neuen Versuch.
+                  "bearbeitung_claim": uuid.uuid4().hex,
+                  "bearbeitung_bis": jetzt + timedelta(seconds=BEARBEITUNG_SEKUNDEN)},
+         "$inc": {"versuche": 1}},
+        sort=[("erstellt_am", 1)], projection={"_id": 0},
+        return_document=ReturnDocument.AFTER)
+
+
+def _eigene_bearbeitung(doc: dict) -> dict:
+    """Filter auf die EIGENE Beanspruchung (Befund 117): Zeile, in Arbeit,
+    dieser Worker — und, sofern beim Claim vergeben, dessen Kennung. Zeilen
+    ohne Kennung (Altbestand, Tests) laufen wie bisher ueber bearbeiter."""
+    f = {"id": doc["id"], "status": "in_arbeit", "bearbeiter": doc.get("bearbeiter")}
+    if doc.get("bearbeitung_claim"):
+        f["bearbeitung_claim"] = doc["bearbeitung_claim"]
+    return f
+
+
+def foto_urls(daten: Dict[str, Any]) -> List[str]:
+    roh = daten.get("images") or daten.get("image_urls") or []
+    aus: List[str] = []
+    for u in roh if isinstance(roh, list) else []:
+        if isinstance(u, str) and u.startswith("https://") and u not in aus:
+            aus.append(u)
+    return aus
+
+
+async def _fotos_laden(urls: List[str]) -> List[Optional[bytes]]:
+    from bild_proxy import laden_fuer_pdf
+    sperre = asyncio.Semaphore(FOTO_PARALLEL)
+
+    async def _eins(i: int, u: str) -> Optional[bytes]:
+        async with sperre:
+            try:
+                return await laden_fuer_pdf(
+                    u,
+                    _FOTO_KANTE_ERSTE if i == 0 else _FOTO_KANTE,
+                    _FOTO_QUALITAET_ERSTE if i == 0 else _FOTO_QUALITAET)
+            except Exception:  # noqa: BLE001 — ein Foto darf das Dokument nie verhindern
+                return None
+
+    return list(await asyncio.gather(*(_eins(i, u) for i, u in enumerate(urls))))
+
+
+def speicher_key(doc: dict) -> str:
+    """Alter, fester Schluessel (Dokumente vor dem Versuchs-Schluessel)."""
+    from beweis_pdf import quelle_norm
+    return f"beweise/{quelle_norm(doc.get('quelle'))}/{doc['id']}.pdf"
+
+
+def neuer_speicher_key(doc: dict) -> str:
+    """Schluessel je Versuch: eine verspaetete Datei eines abgebrochenen
+    Versuchs ueberschreibt nie das fertige Dokument (Pruefsumme stimmt)."""
+    from beweis_pdf import quelle_norm
+    return f"beweise/{quelle_norm(doc.get('quelle'))}/{doc['id']}-{uuid.uuid4().hex[:10]}.pdf"
+
+
+async def beweis_erzeugen(db, doc: dict) -> bool:
+    """Eine beanspruchte Zeile ausfuehren. True = fertig."""
+    eingefroren = doc.get("quelle_daten")
+    daten_quelle = "eingefroren"
+    if isinstance(eingefroren, dict) and eingefroren:
+        # Runde 23 (11.09.2026): der beim Erstgebrauch eingefrorene Stand —
+        # nie der (inzwischen evtl. neu abgerufene oder abgelaufene) Cache.
+        daten = eingefroren
+        abgerufen_am, cache_url = doc.get("quelle_abgerufen_am"), None
+    else:
+        # Altbestand (vor Runde 23 vorgemerkt) und Vormerkungen ohne Daten
+        # (routes/listings.compare zu altem Cache-Eintrag): wie bisher.
+        cache = await db.listings_cache.find_one(
+            {"cache_key": doc["cache_key"]},
+            {"_id": 0, "data": 1, "fetched_at": 1, "url": 1})
+        daten = (cache or {}).get("data")
+        if not isinstance(daten, dict) or not daten:
+            raise BeweisFehler("Inseratsdaten fehlen im Zwischenspeicher")
+        abgerufen_am, cache_url = (cache or {}).get("fetched_at"), (cache or {}).get("url")
+        # Phase 4 (4.5, B22/A25): Rueckfall auf den Zwischenspeicher wird am
+        # Dokument gekennzeichnet, und der verwendete Stand wird als Vollkopie
+        # eingefroren — das Dokument bleibt nachvollziehbar, auch wenn der
+        # Zwischenspeicher rotiert.
+        daten_quelle = "cache"
+        try:
+            kopie = quelle_einfrieren(doc.get("quelle"), daten)
+            if kopie:
+                await db.inserat_beweise.update_one(
+                    {"id": doc["id"], "quelle_daten": {"$exists": False}},
+                    {"$set": {"quelle_daten": kopie,
+                              "quelle_abgerufen_am": abgerufen_am or _jetzt()}})
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Beweisdokument %s: Cache-Stand nicht eingefroren: %s", doc.get("id"), exc)
+    # Pruefbericht 20.09.2026 (P-35): fehlt der Abrufzeitpunkt (Altbestand ohne
+    # fetched_at bzw. ohne quelle_abgerufen_am), stand "unbekannt" im fertigen
+    # Dokument. Die Vormerkung (erstellt_am) ist der spaeteste moegliche
+    # Zeitpunkt — Dokument und Datensatz sagen dann "spaetestens am".
+    abgerufen_spaetestens = False
+    if not abgerufen_am and doc.get("erstellt_am"):
+        abgerufen_am, abgerufen_spaetestens = doc.get("erstellt_am"), True
+    urls = foto_urls(daten)
+    fotos = await _fotos_laden(urls[:BEWEIS_FOTOS_MAX])
+    # Pruefung 14.09.2026 (B7): Inserat MIT Fotos, aber KEINES ladbar (Portal
+    # drosselt, Netz weg) — das Dokument wurde trotzdem "fertig", ohne ein
+    # einziges Bild, und nie wieder angefasst. Jetzt: erneut versuchen; erst
+    # der letzte Versuch stellt ohne Fotos fertig (fotos_eingebettet=0 bleibt
+    # sichtbar), damit ein Inserat mit toten Bildlinks nicht ewig offen bleibt.
+    if urls and not any(fotos) and (doc.get("versuche") or 1) < MAX_VERSUCHE:
+        raise BeweisFehler("Inseratsfotos konnten nicht geladen werden")
+    from beweis_pdf import beweis_pdf
+    erstellt = _jetzt()
+    pdf = await asyncio.to_thread(
+        beweis_pdf, quelle=doc.get("quelle"), daten=_fuer_pdf(daten),
+        url=kanonische_url(doc.get("quelle"), doc.get("item_id"),
+                           doc.get("url") or cache_url
+                           or daten.get("detail_url") or ""),
+        item_id=doc.get("item_id") or "", beweis_id=doc["id"],
+        abgerufen_am=abgerufen_am, erstellt_am=erstellt,
+        fotos=fotos, foto_urls=urls, privatdaten=BEWEIS_PRIVATDATEN,
+        # Rollenpruefung 22.09.2026 (RP-498): nach Verfall neu angefordert —
+        # das Dokument nennt das fruehere.
+        frueheres_dokument=doc.get("neu_nach_verfall"),
+        abgerufen_spaetestens=abgerufen_spaetestens)
+    key = neuer_speicher_key(doc)
+    # Erst vermerken, dann schreiben: jeder je geschriebene Schluessel steht in
+    # alle_keys und wird beim Verfall mit geloescht (auch verwaiste).
+    await db.inserat_beweise.update_one({"id": doc["id"]}, {"$addToSet": {"alle_keys": key}})
+    from storage_service import save_async
+    await save_async(key, pdf)
+    r = await db.inserat_beweise.update_one(
+        _eigene_bearbeitung(doc),
+        {"$set": {"status": "fertig", "pdf_key": key, "pdf_bytes": len(pdf),
+                  "pdf_sha256": hashlib.sha256(pdf).hexdigest(),
+                  "fertig_am": erstellt,
+                  "daten_abgerufen_am": abgerufen_am,
+                  "daten_abgerufen_spaetestens": abgerufen_spaetestens,   # P-35
+                  "fotos_eingebettet": sum(1 for f in fotos if f),
+                  "fotos_gesamt": len(urls), "fehler": None,
+                  # Phase 4 (4.5, B22/B23): Herkunft der Daten und "ohne Fotos"
+                  "daten_quelle": daten_quelle,
+                  "ohne_fotos": bool(urls) and not any(fotos),
+                  "bearbeitung_bis": None, "naechster_versuch_ab": None}})
+    # modified_count 0: ein anderer Worker hat uebernommen; die eigene Datei
+    # steht in alle_keys und wird beim Verfall geloescht.
+    return r.modified_count == 1
+
+
+async def _herzschlag(db, doc: dict) -> None:
+    """Lease verlaengern, solange die Erzeugung laeuft; endet, sobald die
+    Zeile nicht mehr diesem Worker gehoert."""
+    while True:
+        await asyncio.sleep(HERZSCHLAG_SEKUNDEN)
+        try:
+            r = await db.inserat_beweise.update_one(
+                _eigene_bearbeitung(doc),
+                {"$set": {"bearbeitung_bis": _jetzt() + timedelta(seconds=BEARBEITUNG_SEKUNDEN)}})
+            if r.matched_count == 0:
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — naechster Schlag versucht es erneut
+            continue
+
+
+# Phase 3 (3.3, B18/B19): nach dem Zeitlimit laeuft der PDF-Thread weiter —
+# so lange bleibt der Parallel-Slot belegt und der Eintrag wird nicht erneut
+# beansprucht; erst danach wird der Fehlschlag verbucht. Harte Obergrenze
+# fuer den Nachlauf, damit ein haengender Thread den Worker nicht ewig blockiert.
+NACHLAUF_MAX_SEKUNDEN = 15 * 60
+
+
+async def _bearbeiten(db, doc: dict) -> None:
+    puls = asyncio.create_task(_herzschlag(db, doc))
+    try:
+        lauf = asyncio.ensure_future(beweis_erzeugen(db, doc))
+        try:
+            await asyncio.wait_for(asyncio.shield(lauf), timeout=ERZEUGUNG_MAX_SEKUNDEN)
+        except asyncio.TimeoutError:
+            log.warning("Beweisdokument %s: Zeitlimit — warte auf das Ende des laufenden "
+                        "PDF-Threads, Slot bleibt belegt", doc.get("id"))
+            try:
+                await asyncio.wait_for(lauf, timeout=NACHLAUF_MAX_SEKUNDEN)
+            except asyncio.TimeoutError:
+                lauf.cancel()
+                log.error("Beweisdokument %s: PDF-Thread auch nach %ds nicht fertig",
+                          doc.get("id"), NACHLAUF_MAX_SEKUNDEN)
+            except Exception:  # noqa: BLE001
+                pass
+            if lauf.done() and not lauf.cancelled() and lauf.exception() is None \
+                    and lauf.result():
+                return          # doch noch fertig geworden (fertig gesetzt)
+            raise asyncio.TimeoutError()
+    except Exception as exc:  # noqa: BLE001 — auch Zeitlimit (TimeoutError)
+        versuche = doc.get("versuche") or 1
+        endgueltig = versuche >= MAX_VERSUCHE
+        intern = (str(exc) or exc.__class__.__name__)[:300]
+        # Pruefung 14.09.2026 (B4): `fehler` geht ueber oeffentlich() an die
+        # Oberflaeche — vorher der rohe Ausnahmetext (Pfade, Hostnamen, Treiber-
+        # meldungen). Nach aussen nur eigene Sachtexte; der Rest steht im Log
+        # und in fehler_intern.
+        if isinstance(exc, asyncio.TimeoutError):
+            grund = "Zeitlimit ueberschritten"
+        elif isinstance(exc, BeweisFehler):
+            grund = intern
+        else:
+            grund = "Technischer Fehler bei der Erzeugung"
+        log.warning("Beweisdokument %s (%s) Versuch %s fehlgeschlagen: %s",
+                    doc.get("id"), doc.get("cache_key"), versuche, intern)
+        setzen = {"status": "fehlgeschlagen" if endgueltig else "offen",
+                  "fehler": grund, "fehler_intern": intern, "bearbeitung_bis": None,
+                  "naechster_versuch_ab": None if endgueltig
+                  else _jetzt() + timedelta(seconds=60 * versuche)}
+        if endgueltig:
+            setzen["fehlgeschlagen_am"] = _jetzt()
+        await db.inserat_beweise.update_one(_eigene_bearbeitung(doc), {"$set": setzen})
+        if endgueltig:
+            try:
+                import betrieb
+                await betrieb.alarm(db, "beweis_fehlgeschlagen", ref=doc.get("cache_key") or "",
+                                    fehler=grund)
+            except Exception:  # noqa: BLE001 — Alarm ist Beiwerk
+                pass
+    finally:
+        puls.cancel()
+
+
+async def run_beweis_worker_forever(db) -> None:
+    sperre = asyncio.Semaphore(BEWEIS_PARALLEL)
+    letzte_aufraeumung = 0.0
+    while True:
+        try:
+            # Nachpruefung 20.09.2026, Nr. 64: waehrend einer Schreibpause
+            # (Sicherung/Restore) darf dieser Worker NICHT schreiben — sonst
+            # aendert sich die Datenbank mitten im Dump und die Sicherung
+            # nennt sich zu Unrecht stichtagsgenau.
+            if await wartung.aktiv_async(db):
+                await asyncio.sleep(5)
+                continue
+            if time.monotonic() - letzte_aufraeumung > 60:
+                letzte_aufraeumung = time.monotonic()
+                await _aufraeumen(db)
+            from server import worker_erfolg; worker_erfolg("beweise")  # noqa: E702 — Pruefbericht 20.09. SV-05: Durchlauf geschafft
+            await sperre.acquire()
+            try:
+                doc = await _beanspruchen(db)
+            except BaseException:
+                sperre.release()
+                raise
+            if not doc:
+                sperre.release()
+                wecker = _event()
+                wecker.clear()
+                try:
+                    await asyncio.wait_for(wecker.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+
+            async def _lauf(d=doc):
+                try:
+                    await _bearbeiten(db, d)
+                finally:
+                    sperre.release()
+
+            aufgabe = asyncio.create_task(_lauf())
+            _laufend.add(aufgabe)
+            aufgabe.add_done_callback(_laufend.discard)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — Schleife darf nie sterben
+            log.warning("Beweis-Schleife: %s", exc)
+            await asyncio.sleep(5)
+
+
+# ------------------------------------------------------------ Fahrzeuge --
+def inserat_schluessel(fahrzeug: Optional[dict]) -> Optional[str]:
+    """cache_key des Inserats zu einem Fahrzeug. Neu verglichene Fahrzeuge
+    tragen inserat_schluessel; aeltere werden ueber die Inserats-Adresse
+    zugeordnet (bei AutoScout24 weicht die Anzeigen-ID von der ID in der
+    Adresse ab — deshalb NICHT aus mobile_ad_id raten)."""
+    if not fahrzeug:
+        return None
+    if fahrzeug.get("inserat_schluessel"):
+        return str(fahrzeug["inserat_schluessel"])
+    daten = fahrzeug.get("data") or {}
+    from listing_identity import get_listing_identity
+    for u in (daten.get("detail_url"), daten.get("kleinanzeigen_url")):
+        if isinstance(u, str) and u.startswith("http"):
+            try:
+                return get_listing_identity(u)["cache_key"]
+            except Exception:  # noqa: BLE001
+                continue
+    quelle, ad = fahrzeug.get("quelle"), fahrzeug.get("mobile_ad_id")
+    if quelle in ("mobile", "kleinanzeigen") and ad:
+        return f"{quelle}:{ad}"
+    return None
+
+
+async def beweis_fuer_schluessel(db, cache_key: Optional[str]) -> Optional[dict]:
+    if not cache_key:
+        return None
+    return await db.inserat_beweise.find_one({"cache_key": cache_key}, {"_id": 0})
+
+
+# ---------------------------------------------------------- Aufbewahrung --
+async def _altbestand_zuordnen(db, limit: int = 500, filt: Optional[dict] = None) -> int:
+    """Fahrzeuge von vor der Umstellung bekommen ihren inserat_schluessel
+    (sonst hielte ihr Kaufvertrag das Dokument nicht). Nicht zuordenbare
+    bekommen None und werden nicht erneut angefasst."""
+    n = 0
+    async for v in db.vehicles.find(
+            {"inserat_schluessel": {"$exists": False}, **(filt or {})},
+            {"_id": 0, "id": 1, "dealer_id": 1, "quelle": 1, "mobile_ad_id": 1,
+             "data.detail_url": 1, "data.kleinanzeigen_url": 1}).limit(limit):
+        await db.vehicles.update_one(
+            {"id": v["id"], "dealer_id": v.get("dealer_id"),
+             "inserat_schluessel": {"$exists": False}},
+            {"$set": {"inserat_schluessel": inserat_schluessel(v)}})
+        n += 1
+    return n
+
+
+_TERMIN_GESCHLOSSEN = ("storniert", "nicht abgeholt", "erledigt", "abgeholt")
+
+
+class BeweisFehler(RuntimeError):
+    """Pruefung 14.09.2026 (B4): eigener Sachtext, der so an die Oberflaeche
+    darf (im Gegensatz zu fremden Ausnahmetexten)."""
+
+
+async def _paare_halten(db, paare: list) -> bool:
+    """Haelt ein Vertrag, ein nicht geloeschtes Inserat oder ein offener Termin
+    eines dieser (Fahrzeug, Firma)-Paare das Dokument?"""
+    if await db.generated_pdfs.count_documents({"$or": paare}, limit=1):
+        return True
+    # Befund 95 (16.09.2026): ein geloeschtes Weiterverkaufsinserat (Grabstein
+    # bis zur Bereinigung) haelt nicht mehr.
+    if await db.resale_listings.count_documents(
+            {"$or": paare, "status": {"$ne": "geloescht"}}, limit=1):
+        return True
+    # Pruefung 14.09.2026 (B9): Ein stornierter oder "nicht abgeholt"
+    # geschlossener Termin hielt das Dokument fuer immer — nur OFFENE Termine
+    # halten; ein abgeholtes Fahrzeug haelt ueber seinen Lebenszyklus.
+    return await db.appointments.count_documents(
+        {"$or": paare, "status": {"$nin": list(_TERMIN_GESCHLOSSEN)}}, limit=1) > 0
+
+
+async def _gehalten(db, cache_key: str) -> bool:
+    """Haelt ein echter Vorgang das Dokument? Bestand/Kauf/Abholung/Verkauf
+    oder ein Vertrag, Termin bzw. Inserat zum Fahrzeug der jeweiligen Firma.
+    Bloss verglichene, stornierte oder archivierte Fahrzeuge halten nicht.
+
+    Befund 90 (16.09.2026): kein 500er-Deckel mehr — bei einem stark geteilten
+    Inserat konnte der echte Vorgang in Fahrzeug Nr. 501+ liegen und das
+    Dokument wurde trotzdem geloescht. Jetzt Cursor in Haeppchen."""
+    gefunden = False
+    paare: list = []
+    async for v in db.vehicles.find(
+            {"inserat_schluessel": cache_key},
+            {"_id": 0, "id": 1, "dealer_id": 1, "lifecycle": 1}).batch_size(200):
+        gefunden = True
+        if (v.get("lifecycle") or "verglichen") not in OHNE_GESCHAEFT:
+            return True
+        paare.append({"vehicle_id": v["id"], "dealer_id": v.get("dealer_id")})
+        if len(paare) >= 200:
+            if await _paare_halten(db, paare):
+                return True
+            paare = []
+    if not gefunden:
+        return False
+    return bool(paare) and await _paare_halten(db, paare)
+
+
+async def beweise_verfallen(db, now: Optional[datetime] = None, seite: int = 500,
+                            max_seiten: int = 400, altbestand_filter: Optional[dict] = None) -> int:
+    """Dateien nach Ablauf der Frist loeschen, sofern kein echter Vorgang
+    das Dokument haelt. Die Zeile bleibt als Grabstein. Gehaltene Zeilen
+    werden erst nach einem Tag erneut geprueft — sonst blockierten 500
+    gehaltene Zeilen jeden Lauf und juengere verfielen nie."""
+    now = now or _jetzt()
+    try:
+        await _altbestand_zuordnen(db, filt=altbestand_filter)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Beweisdokumente: Altbestand-Zuordnung: %s", exc)
+    grenze = now - timedelta(days=BEWEIS_AUFBEWAHRUNG_TAGE)
+    # Pruefung 14.09.2026 (F9): Die Frist zaehlt ab der ERFOLGREICHEN Erzeugung
+    # (fertig_am); ohne fertig_am (fehlgeschlagen, Altbestand) ab erstellt_am.
+    # "wird_geloescht": ein frueherer Lauf ist mitten im Loeschen gestorben.
+    filt = {"$and": [
+        {"$or": [{"status": {"$in": ["fertig", "fehlgeschlagen"]},
+                  "$or": [{"fertig_am": {"$lt": grenze}},
+                          {"fertig_am": {"$in": [None]}, "erstellt_am": {"$lt": grenze}},
+                          {"fertig_am": {"$exists": False}, "erstellt_am": {"$lt": grenze}}]},
+                 {"status": "wird_geloescht"}]},
+        {"$or": [{"verfall_pruefen_ab": {"$exists": False}}, {"verfall_pruefen_ab": None},
+                 {"verfall_pruefen_ab": {"$lte": now}}]}]}
+    geloescht = 0
+    for _ in range(max_seiten):
+        kandidaten = await db.inserat_beweise.find(
+            filt, {"_id": 0, "id": 1, "cache_key": 1, "quelle": 1, "pdf_key": 1,
+                   "alle_keys": 1, "status": 1}).sort("erstellt_am", 1).to_list(seite)
+        if not kandidaten:
+            break
+        for d in kandidaten:
+            if await _gehalten(db, d["cache_key"]):
+                await db.inserat_beweise.update_one(
+                    {"id": d["id"]}, {"$set": {"verfall_pruefen_ab": now + timedelta(days=1)}})
+                continue
+            # Pruefung 14.09.2026 (F6/F7): Zeile ZUERST beanspruchen (nur aus
+            # fertig/fehlgeschlagen — eine inzwischen wiederbelebte Zeile
+            # (offen/in_arbeit) bleibt unangetastet), dann den Geschaeftsbezug
+            # ERNEUT pruefen; erst danach Dateien loeschen.
+            vorher = d.get("status")
+            if vorher != "wird_geloescht":
+                r = await db.inserat_beweise.update_one(
+                    {"id": d["id"], "status": {"$in": ["fertig", "fehlgeschlagen"]}},
+                    {"$set": {"status": "wird_geloescht", "status_vor_loeschung": vorher}})
+                if not r.modified_count:
+                    continue
+                if await _gehalten(db, d["cache_key"]):
+                    await db.inserat_beweise.update_one(
+                        {"id": d["id"], "status": "wird_geloescht"},
+                        {"$set": {"status": vorher,
+                                  "verfall_pruefen_ab": now + timedelta(days=1)},
+                         "$unset": {"status_vor_loeschung": ""}})
+                    continue
+            from storage_service import loeschen_oder_vormerken
+            keys = {k for k in (d.get("alle_keys") or []) if k}
+            keys.add(d.get("pdf_key") or speicher_key(d))
+            for key in sorted(keys):
+                # False = nicht geloescht, aber sicher vorgemerkt (Nachholung).
+                await loeschen_oder_vormerken(
+                    db, key=key, grund="beweis_verfall",
+                    ref={"collection": "inserat_beweise", "id": d["id"]})
+            await db.inserat_beweise.update_one(
+                {"id": d["id"], "status": "wird_geloescht"},
+                {"$set": {"status": "geloescht", "geloescht_am": now, "pdf_key": None},
+                 # Runde 23: der eingefrorene Datenstand geht mit — Grabstein
+                 # ohne Inseratsdaten.
+                 # status_vor_loeschung bleibt am Grabstein: nur ein NIE erzeugtes
+                 # Dokument wird spaeter wiederbelebt (beweis_vormerken, F8).
+                 "$unset": {"url": "", "pdf_sha256": "", "fehler": "", "alle_keys": "",
+                            "quelle_daten": ""}})
+            geloescht += 1
+        if len(kandidaten) < seite:
+            break
+    if geloescht:
+        log.info("[cleanup] %s Beweisdokumente nach %s Tagen geloescht",
+                 geloescht, BEWEIS_AUFBEWAHRUNG_TAGE)
+    return geloescht
