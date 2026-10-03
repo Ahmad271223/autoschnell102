@@ -136,6 +136,7 @@ CHEF_ROUTEN = {
     "/api/dealer/network/members/{buyer_user_id}",
     "/api/dealer/interessen", "/api/dealer/interessen/anzahl",
     "/api/dealer/unterschrift",                     # Pruefliste 01.10.2026 (Nr. 4): Bild der Chef-Unterschrift
+    "/api/dealer/sucher-zugaenge-anfrage",          # 03.10.2026: weitere Sucher-Zugaenge beim Betreiber anfragen
     "/api/interessen/{interest_id}/antwort",
     "/api/appointments/fahrer-abgelehnt/anzahl",
     "/api/protocols/zur-freigabe", "/api/protocols/zur-freigabe/anzahl",
