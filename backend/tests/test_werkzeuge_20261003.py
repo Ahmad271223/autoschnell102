@@ -649,3 +649,50 @@ def test_50_kollege_wartet_auf_dasselbe_inserat(welt):
     assert a and a["user_ids"] == ["kollege-x"], a
     db.link_jobs.delete_one({"url": url_a})
 
+
+# Wunsch Ahmad 03.10.2026: Erkennung auf dem Server — das Programm (ab 1.4.0) schickt nur Rohtext (roh=True)
+def _roh(text, titel, **zusatz):
+    erstes, _, rest = text.partition(" ")
+    return {**POLO, "marke": erstes or "?", "modell": rest, "marke_modell_text": text, "titel": titel, "roh": True,
+            **zusatz}
+
+
+_PROG: dict = {}
+
+
+def _prog(welt):
+    """Eine Verbindung fuer 51-53 — je Konto gibt es hoechstens 20 Codes in 10 Minuten."""
+    if "kopf" not in _PROG:
+        _abo(welt, True)
+        _PROG["kopf"] = _verbinden(welt, "PC-A")[1]
+    return _PROG["kopf"]
+
+
+def test_51_server_erkennt_marke_und_modell(welt):
+    prog = _prog(welt)
+    r = _vergleich(prog, _roh("Hyundai ilO", "Hyundai ilO Classic", ez_monat=12, ez_jahr=2010, kilometer=193530,
+                              kw=57, ps=78))
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["fahrzeug"] == {"marke": "Hyundai", "modell": "i10", "erkannt": True}
+    assert [x["portal"] for x in d["links"]] == ["mobile.de", "AutoScout24"]
+    gespeichert = welt["db"].werkzeug_vergleiche.find_one({"user_id": welt["sucher_id"]}, sort=[("erstellt_am", -1)])
+    assert (gespeichert["fahrzeug"]["marke"], gespeichert["fahrzeug"]["modell"]) == ("Hyundai", "i10")
+
+
+def test_52_server_erkennt_aus_der_ueberschrift_und_meldet_unbekanntes(welt):
+    prog = _prog(welt)
+    d = _vergleich(prog, _roh("Andere", "Ford Mondeo Turnier 2.0 TDCi Diesel, ...")).json()
+    assert d["fahrzeug"]["marke"] == "Ford" and d["fahrzeug"]["modell"] == "Mondeo" and d["links"]
+    d = _vergleich(prog, _roh("Quatschmarke X1", "Quatschmarke X1 Sport")).json()
+    assert d["fahrzeug"]["erkannt"] is False and d["links"] == []
+    assert any("Marke" in h for h in d["hinweise"])
+
+
+def test_53_aeltere_programme_wie_bisher(welt):
+    """Programme bis 1.3.5 schicken schon erkannte Werte (ohne roh) — der Server nimmt sie wie bisher."""
+    prog = _prog(welt)
+    d = _vergleich(prog, POLO).json()
+    assert d["fahrzeug"] == {"marke": "VW", "modell": "Polo", "erkannt": True}
+    assert [x["portal"] for x in d["links"]] == ["mobile.de", "AutoScout24"]
+

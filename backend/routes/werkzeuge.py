@@ -28,6 +28,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 import werkzeuge as wz
+import werkzeug_erkennung
 from deps import (FIRMA_GESPERRT_TEXT, current_chef, current_firma, current_super_admin, current_user, db,
                   effective_dealer, firma_gesperrt, log_activity_sicher, now_iso, require_active_sub,
                   subscription_for)
@@ -307,6 +308,10 @@ class FahrzeugIn(BaseModel):
     inserat_id: str = Field("", max_length=60)
     #: AutoScout24: Kennung fuer den Inserat-Link (nur wenn vollstaendig gelesen)
     hash_id: str = Field("", max_length=60)
+    #: Seit Programm 1.4.0 (Wunsch Ahmad 03.10.2026): Marke/Modell sind nur Rohtext (erstes Wort / Rest) —
+    #: der SERVER erkennt sie aus marke_modell_text + titel (werkzeug_erkennung). Aeltere Programme schicken
+    #: schon erkannte Werte (roh=False) und werden wie bisher behandelt.
+    roh: bool = False
 
 
 class VergleichIn(BaseModel):
@@ -330,6 +335,7 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     regeln = (regeln_lesen((dealer or {}).get("export_rules"), DEFAULT_EXPORT_RULES) if profil == "export"
               else regeln_lesen((dealer or {}).get("comparison_rules"), DEFAULT_RULES))
     f = body.fahrzeug.model_dump()
+    erkannt = _erkennen(f)
     f["inserat_url"] = wz.inserat_url(f.get("quelle"), f.get("inserat_id"), f.get("hash_id"))
     links, hinweise = wz.vergleichs_links(wz.fahrzeug_zu_vehicle(f), regeln)
     # Wunsch Ahmad 03.10.2026: das Inserat schon jetzt im Hintergrund auslesen (Daten + Fotos), damit
@@ -345,7 +351,19 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
         "vorab": vorab["status"],
     })
     return {"links": links, "hinweise": hinweise, "profil": profil, "inserat_url": f["inserat_url"],
-            "vorab": {"status": vorab["status"], "hinweis": vorab.get("hinweis", "")}}
+            "vorab": {"status": vorab["status"], "hinweis": vorab.get("hinweis", "")}, "fahrzeug": erkannt}
+
+
+def _erkennen(f: dict) -> dict:
+    """Programm ab 1.4.0 (roh=True): Marke/Modell auf dem Server erkennen und in f eintragen — so, wie es das
+    Programm bis 1.3.5 selbst tat (1:1 uebertragen, am 03.10.2026 ueber 16.636 Faelle abgeglichen).
+    Rueckgabe fuer die Anzeige im Programm: Katalognamen und ob die Marke bekannt ist."""
+    if not f.get("roh"):
+        return {"marke": f.get("marke") or "", "modell": f.get("modell") or "", "erkannt": True}
+    text = (f.get("marke_modell_text") or f"{f.get('marke') or ''} {f.get('modell') or ''}").strip()
+    z = werkzeug_erkennung.zuordnen(text, f.get("titel"))
+    f["marke"], f["modell"] = z["marke_text"], z["modell_text"]
+    return {"marke": z["marke"] or text, "modell": z["modell"] or "", "erkannt": z["erkannt"]}
 
 
 async def _vorab_ersetzen(user: dict, v: dict, neuer_job: Optional[str]) -> None:
