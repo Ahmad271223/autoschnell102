@@ -222,7 +222,7 @@ internal static class DetailLeser
     private static string QuelleName(string roh)
     {
         string n = FahrzeugCodes.Norm(roh);
-        if (n.Contains("mobile")) return "mobile.de";
+        if (n.Contains("mobi")) return "mobile.de";          // auch Lesefehler wie "Mobie.de"
         if (n.Contains("scout")) return "AutoScout24";
         if (n.Contains("anzeigen") || n.StartsWith("klein") || n.StartsWith("kkin")) return "Kleinanzeigen";
         return roh.Trim();

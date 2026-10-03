@@ -5,12 +5,15 @@ using System.Drawing.Imaging;
 namespace AutoPointerVergleich;
 
 /// <summary>Symbol im Infobereich: Lupe auf farbigem Grund.
-/// Gruen = aktiv, grau = Automatik aus, orange = AutoPointer nicht gefunden.</summary>
+/// Gruen = aktiv, grau = Automatik aus, orange = AutoPointer nicht gefunden,
+/// rot = nicht verbunden bzw. gesperrt (Abo/Freigabe).</summary>
 internal static class Symbole
 {
     public static readonly Color Aktiv = Color.FromArgb(22, 163, 74);
     public static readonly Color Pause = Color.FromArgb(120, 120, 120);
     public static readonly Color Warten = Color.FromArgb(217, 119, 6);
+    /// <summary>Nicht verbunden / kein Abo / nicht freigeschaltet.</summary>
+    public static readonly Color Fehler = Color.FromArgb(220, 38, 38);
 
     public static Bitmap Zeichne(int groesse, Color farbe)
     {

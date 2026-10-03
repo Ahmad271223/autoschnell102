@@ -94,6 +94,14 @@ public class DetailLeserTests
     [InlineData("320 (435)", 320, 435)]
     public void Leistung(string text, int kw, int ps) => Assert.Equal(((int?)kw, (int?)ps), DetailLeser.Leistung(text));
 
+    [Theory]
+    [InlineData("03.10.2026 13:20:00 - Inserat von Mobie.de", "mobile.de")]
+    [InlineData("03.10.2026 13:20:00 - Inserat von Mobile.de", "mobile.de")]
+    [InlineData("03.10.2026 13:20:00 - Inserat von AutoScout24", "AutoScout24")]
+    [InlineData("03.10.2026 13:20:00 - Inserat von Kkinanzeigen", "Kleinanzeigen")]
+    public void Quelle_auch_mit_Lesefehlern(string zeile, string quelle) =>
+        Assert.Equal(quelle, DetailLeser.Kopf(new[] { Z(zeile, 13, 27, 400, 14) }, 846).Quelle);
+
     [Fact]
     public void Leere_Erkennung_ergibt_fehlende_Pflichtfelder()
     {
@@ -138,10 +146,10 @@ public class DetailLeserTests
     public void Variante_aus_dem_Titel()
     {
         var f = Passat();
-        LinkBauer.Zuordnen(f, Kat);
+        Zuordner.Zuordnen(f, Kat);
         Assert.Equal("B6 - Bastlerfahrzeug", f.Variante);
         var b = Bentley();
-        LinkBauer.Zuordnen(b, Kat);
+        Zuordner.Zuordnen(b, Kat);
         Assert.Equal("V8 Diesel, 1. Hand, Mulliner, Nai", b.Variante);
     }
 }

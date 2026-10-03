@@ -8,26 +8,32 @@ halbe Sekunde später öffnen sich automatisch die passenden Vergleichssuchen au
 > „Programme“ – nur für freigegebene Firmen sichtbar (`AUTOPOINTER_VERGLEICH_KUNDEN`, siehe DEPLOYMENT.md,
 > Abschnitt „Programme zum Herunterladen“). Allen anderen zeigt die App nichts davon.
 
+## Lizenz: nur verbunden, nur mit Abo
+
+1. In AutoSchnell anmelden → „AutoPointer-Vergleich“ → **Code zum Verbinden anzeigen** (6 Ziffern, 10 Minuten,
+   nur mit aktivem Abo).
+2. Programm starten → Fenster „Mit AutoSchnell verbinden“ → Code eintippen.
+3. **Ein Konto = ein PC.** Wird dasselbe Konto auf einem zweiten PC verbunden, fragt der erste wieder nach einem
+   Code. Die Browser-Anmeldung bleibt davon unberührt.
+4. Jeder Vergleich geht über den AutoSchnell-Server: Abo prüfen, Links mit den **Vergleichsregeln der Firma**
+   bauen (AutoSchnell → Einstellungen → Vergleich, wie der Vergleich in der App), protokollieren. Ohne Abo
+   (402) oder ohne Verbindung öffnet das Programm nichts und sagt warum (rotes Symbol).
+5. Wer wann welches Auto verglichen hat: Super-Admin unter Admin → „Programm-Vergleiche“, der Chef in der App
+   beim Programm (nur seine Firma). Beide können PCs trennen.
+
 ## Bedienung
 
-* `AutoSchnell-Vergleich.exe` starten → grünes Lupen-Symbol unten rechts im Infobereich.
-  * grün = aktiv, grau = Automatik aus, orange = AutoPointer nicht gefunden
+* Symbol unten rechts im Infobereich: grün = aktiv, grau = Automatik aus, orange = AutoPointer nicht gefunden,
+  rot = nicht verbunden bzw. gesperrt (Abo/Freigabe).
 * **Doppelklick** auf das Symbol oder **Strg+Alt+P**: Automatik an/aus (z. B. nur durchscrollen).
-* **Rechtsklick** auf das Symbol:
-  * *Aktuelles Fahrzeug jetzt vergleichen* – sofort, auch bei Pause oder demselben Auto
-  * *Letzten Vergleich erneut öffnen*
-  * *Einstellungen …* – Portale, Kilometer-/EZ-Bereich, Leistung, Kraftstoff, Getriebe, Browser, Autostart
-  * *Protokoll anzeigen …* – was erkannt und welche Links gebaut wurden
+* **Rechtsklick**: Verbindungsstatus, *Mit AutoSchnell verbinden …*, *Verbindung trennen*, *Automatik*,
+  *Aktuelles Fahrzeug jetzt vergleichen* (auch bei Pause/selbem Auto), *Letzten Vergleich erneut öffnen*,
+  *Einstellungen …* (Portale, Browser, Ablauf, mit Windows starten), *Protokoll anzeigen …*.
 * Ein Auto, das beim Programmstart schon angezeigt wird, öffnet nichts – erst das nächste angeklickte.
 * Dasselbe Fahrzeug öffnet nie zweimal hintereinander (Kennung `Marke Modell | EZ | km | kW`).
 * Kann ein Auto nicht sicher gelesen werden (Marke/Modell, EZ oder km fehlen), öffnet sich **nichts**;
   unten rechts erscheint „Fahrzeug konnte nicht eindeutig erkannt werden“.
-* Wird das Modell im Katalog eines Portals nicht gefunden, öffnet dieses Portal nicht (sonst gäbe es
-  eine Suche „nur Bentley“). Abschaltbar in den Einstellungen.
-
-Standard-Filter (Vorgabe Ahmad 03.10.2026, wie `older_exact 1` / `plus 20000` / `min_ps 5` im Backend): Modell exakt,
-EZ ab Vorjahr und neuer, Kilometer bis Kilometerstand + 20.000, Leistung ab 5 PS weniger (nach oben offen),
-gleicher Kraftstoff, gleiches Getriebe, keine Unfallwagen, nur Deutschland, Preis aufsteigend.
+* Kennt ein Portal das Modell nicht, öffnet dieses Portal nicht (sonst gäbe es eine Suche „nur Bentley“).
 
 ## Wie es funktioniert
 
@@ -37,14 +43,14 @@ gezeichnet). Deshalb:
 
 1. Fenster-Handles finden: Überschrift „Technische Daten“ → `TcxGrid` → `TcxGridSite`, dazu die
    Kopf-Tabelle (Quelle, Titel, Preis). Unabhängig von Auflösung, Fenstergröße und Position.
-2. Alle 250 ms eine billige Prüfsumme (BitBlt) – ändert sich etwas, wird gewartet, bis die Ansicht
-   400 ms stillsteht.
+2. Nur solange AutoPointer im Vordergrund ist, alle 250 ms eine billige Prüfsumme (BitBlt) – ändert sich
+   etwas, wird gewartet, bis die Ansicht 400 ms stillsteht.
 3. `PrintWindow` lässt die Tabelle sich selbst in ein Bild zeichnen (auch weggescrollte Zeilen bis zur
    Inserat-ID), die **Windows-Texterkennung** (offline, de-DE) liest es mit 3-fachem Zoom; fehlende
-   Felder aus einem zweiten Durchlauf.
+   Felder aus einem zweiten Durchlauf. Bezeichnungen werden unscharf erkannt („Kibmeterstand“).
 4. Hat sich die Anzeige während des Lesens geändert, wird verworfen (keine Mischdaten bei A → B → C).
-5. Links nach denselben Regeln wie `backend/mobile_service.py` / `autoscout_service.py` /
-   `fahrzeug_codes.py`; die Marken-/Modellkataloge werden direkt aus `backend/` eingebunden.
+5. Marke/Modell trennt das Programm mit den Katalogen aus `backend/` (Lesefehler wie „Bentavga“ werden
+   korrigiert); die Links baut der Server (`backend/routes/werkzeuge.py`).
 
 AutoPointer wird nie verändert – das Programm liest nur, was ohnehin angezeigt wird.
 
@@ -58,9 +64,10 @@ dotnet test tests\AutoPointerVergleich.Tests.csproj
 powershell -ExecutionPolicy Bypass -File build.ps1     # → dist\AutoSchnell-Vergleich.exe (eine Datei)
 ```
 
-Fehlersuche ohne Tray: `AutoSchnell-Vergleich.exe --einmal [--bilder <Ordner>] [--oeffnen]` liest das
-gerade angezeigte Auto einmal und gibt Werte + Links aus. `--probelauf` startet das Tray-Programm,
-öffnet aber keinen Browser.
+Fehlersuche: `AutoSchnell-Vergleich.exe --einmal` liest das gerade angezeigte Auto einmal und gibt Werte
+(und, falls verbunden, die Server-Links im Probelauf) aus; `--verbinden <code>` verbindet ohne Fenster;
+`--server <url>` nimmt einen Testserver; `--probelauf` startet das Tray-Programm, öffnet aber keinen Browser.
+`AUTOSCHNELL_VERGLEICH_DATEN=<ordner>` legt Einstellungen/Schlüssel woanders ab (Tests).
 
 Protokoll: `%LOCALAPPDATA%\AutoSchnell\AutoPointer-Vergleich\protokoll\` (14 Tage),
-Einstellungen: `%APPDATA%\AutoSchnell\AutoPointer-Vergleich\einstellungen.json`.
+Einstellungen: `%APPDATA%\AutoSchnell\AutoPointer-Vergleich\einstellungen.json` (Schlüssel DPAPI-verschlüsselt).

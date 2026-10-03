@@ -20,17 +20,18 @@ internal interface IOeffner
     void Oeffne(IReadOnlyList<Vergleich> vergleiche, Einstellungen e, IntPtr autoPointer);
 }
 
-internal enum Status { Pause, KeinAutoPointer, Bereit, Aktiv }
+internal enum Status { Pause, KeinAutoPointer, Bereit, Aktiv, NichtVerbunden, Gesperrt }
 
 /// <summary>Der Ablauf: Aenderung in der Detailansicht bemerken -> warten, bis sie
-/// stillsteht -> lesen -> nur bei einem wirklich anderen Fahrzeug die
-/// Vergleiche oeffnen.</summary>
+/// stillsteht -> lesen -> nur bei einem wirklich anderen Fahrzeug beim
+/// AutoSchnell-Server die Vergleiche holen (Abo, Firmenregeln) und oeffnen.</summary>
 internal sealed class Ueberwacher
 {
     private readonly IAnsichtQuelle _quelle;
     private readonly Katalog _katalog;
     private readonly Func<Einstellungen> _einstellungen;
     private readonly IOeffner _oeffner;
+    private readonly IVergleichsDienst _dienst;
     private readonly Func<DateTime> _uhr;
     private readonly Func<TimeSpan, Task> _warte;
     private readonly SemaphoreSlim _einzeln = new(1, 1);
@@ -44,6 +45,9 @@ internal sealed class Ueberwacher
     private bool _ersterTick = true;
     private ulong _gemeldeteSumme;
     private Status? _status;
+    private bool _gesperrt;
+    /// <summary>Server meldete 401 — bis zum Neu-Verbinden (Neustart) keine Vergleiche.</summary>
+    private bool _verloren;
 
     public bool Probelauf { get; set; }
     public Fahrzeug? LetztesFahrzeug { get; private set; }
@@ -54,14 +58,17 @@ internal sealed class Ueberwacher
     public event Action<Status>? StatusGeaendert;
     /// <summary>Kurze Meldung fuer den Nutzer (Sprechblase). bool = Fehler.</summary>
     public event Action<string, bool>? Meldung;
+    /// <summary>Der Server kennt den Schluessel nicht mehr (anderer PC, getrennt) -> neu verbinden.</summary>
+    public event Action<string>? VerbindungVerloren;
 
     public Ueberwacher(IAnsichtQuelle quelle, Katalog katalog, Func<Einstellungen> einstellungen, IOeffner oeffner,
-                       Func<DateTime>? uhr = null, Func<TimeSpan, Task>? warte = null)
+                       IVergleichsDienst dienst, Func<DateTime>? uhr = null, Func<TimeSpan, Task>? warte = null)
     {
         _quelle = quelle;
         _katalog = katalog;
         _einstellungen = einstellungen;
         _oeffner = oeffner;
+        _dienst = dienst;
         _uhr = uhr ?? (() => DateTime.Now);
         _warte = warte ?? (t => Task.Delay(t));
     }
@@ -73,6 +80,8 @@ internal sealed class Ueberwacher
     {
         _basis = true;
         _ersterTick = true;
+        _verloren = false;
+        _gesperrt = false;
         _offen = false;
         _summe = 0;
     }
@@ -83,6 +92,11 @@ internal sealed class Ueberwacher
         if (!e.AutomatikAktiv)
         {
             SetzeStatus(Status.Pause);
+            return;
+        }
+        if (!_dienst.Verbunden || _verloren)
+        {
+            SetzeStatus(Status.NichtVerbunden);
             return;
         }
         if (!await _einzeln.WaitAsync(0)) return;
@@ -101,7 +115,7 @@ internal sealed class Ueberwacher
                 _offen = false;
                 return;
             }
-            SetzeStatus(Status.Aktiv);
+            SetzeStatus(_gesperrt ? Status.Gesperrt : Status.Aktiv);
             var jetzt = _uhr();
             if (z.Summe != _summe)
             {
@@ -144,6 +158,11 @@ internal sealed class Ueberwacher
                     : "In AutoPointer wird rechts gerade kein Fahrzeug angezeigt (Reiter „Übersicht“).", true);
                 return;
             }
+            if (!_dienst.Verbunden)
+            {
+                Melde("Nicht mit AutoSchnell verbunden – Rechtsklick auf das Symbol → „Mit AutoSchnell verbinden …“.", true);
+                return;
+            }
             var lesung = await _quelle.LiesAsync();
             if (lesung == null) return;
             _summe = _quelle.Pruefe().Summe;
@@ -182,7 +201,7 @@ internal sealed class Ueberwacher
             return;
         }
 
-        var zuordnung = LinkBauer.Zuordnen(f, _katalog);
+        var zuordnung = Zuordner.Zuordnen(f, _katalog);
         string schluessel = f.Schluessel;
         if (!erzwungen && schluessel == _letzterSchluessel)
         {
@@ -191,26 +210,61 @@ internal sealed class Ueberwacher
         }
 
         Protokoll.Schreibe("Fahrzeug erkannt\n" + string.Join("\n", f.Beschreibung()));
-        var hinweise = new List<string>();
-        var links = LinkBauer.Bauen(f, zuordnung, e, hinweise);
-        foreach (var v in links) Protokoll.Schreibe($"{v.Portal} URL erstellt: {v.Url}");
-        foreach (var h in hinweise) Protokoll.Schreibe("Hinweis: " + h);
-
         bool basis = _basis && !erzwungen;
         _basis = false;
-        _letzterSchluessel = schluessel;
-        LetztesFahrzeug = f;
-        if (links.Count > 0) LetzteVergleiche = links;
-
         if (basis)
         {
+            _letzterSchluessel = schluessel;
+            LetztesFahrzeug = f;
             Protokoll.Schreibe("Fahrzeug war beim Start schon angezeigt – nicht automatisch geöffnet "
                                + "(Menü „Aktuelles Fahrzeug jetzt vergleichen“).");
             return;
         }
+        if (!zuordnung.MarkeErkannt)
+        {
+            _letzterSchluessel = schluessel;
+            MeldeEinmal($"Marke in „{f.MarkeModellText}“ nicht erkannt – kein Vergleich.");
+            return;
+        }
+
+        VergleichAntwort antwort;
+        try { antwort = await _dienst.VergleichAsync(f, Probelauf); }
+        catch (DienstFehler ex)
+        {
+            // Schluessel bleibt der alte: nach Behebung (Abo, Verbindung) vergleicht
+            // derselbe Klick bzw. "Jetzt vergleichen" erneut.
+            Protokoll.Schreibe("AutoSchnell: " + ex.Message);
+            if (ex.NichtVerbunden)
+            {
+                _verloren = true;
+                SetzeStatus(Status.NichtVerbunden);
+                VerbindungVerloren?.Invoke(ex.Message);
+            }
+            else if (ex.KeinAbo || ex.Status == 403)
+            {
+                _gesperrt = true;
+                SetzeStatus(Status.Gesperrt);
+            }
+            Melde(ex.Message, true);
+            return;
+        }
+        if (_gesperrt)
+        {
+            _gesperrt = false;
+            SetzeStatus(Status.Aktiv);
+        }
+        _letzterSchluessel = schluessel;
+        LetztesFahrzeug = f;
+        foreach (var v in antwort.Links) Protokoll.Schreibe($"{v.Portal} URL (Regeln {antwort.Profil}): {v.Url}");
+        foreach (var h in antwort.Hinweise) Protokoll.Schreibe("Hinweis: " + h);
+        var links = antwort.Links
+            .Where(l => (l.Portal == "mobile.de" && e.MobileDe) || (l.Portal == "AutoScout24" && e.AutoScout24))
+            .ToList();
+        if (links.Count > 0) LetzteVergleiche = links;
         if (links.Count == 0)
         {
-            MeldeEinmal($"{f.Marke} {f.Modell}: kein Vergleich geöffnet – " + (hinweise.FirstOrDefault() ?? "kein Portal aktiv."));
+            MeldeEinmal($"{f.Marke} {f.Modell}: kein Vergleich geöffnet – "
+                        + (antwort.Links.Count > 0 ? "kein Portal in den Einstellungen aktiv." : antwort.Hinweise.FirstOrDefault() ?? "keine Links."));
             return;
         }
 
@@ -218,7 +272,7 @@ internal sealed class Ueberwacher
         if (abstand > TimeSpan.Zero) await _warte(abstand);
         Oeffne(links, e);
         _letzteOeffnung = _uhr();
-        var fehlendePortale = hinweise.Where(h => h.Contains("kein mobile.de-Vergleich") || h.Contains("kein AutoScout24-Vergleich")).ToList();
+        var fehlendePortale = antwort.Hinweise.Where(h => h.Contains("kein mobile.de-Vergleich") || h.Contains("kein AutoScout24-Vergleich")).ToList();
         if (fehlendePortale.Count > 0) Melde(string.Join("\n", fehlendePortale), false);
     }
 
@@ -260,6 +314,8 @@ internal sealed class Ueberwacher
             Status.Pause => "Automatik ist aus.",
             Status.KeinAutoPointer => "AutoPointer nicht gefunden – warte.",
             Status.Bereit => "AutoPointer gefunden – rechts wird kein Fahrzeug angezeigt.",
+            Status.NichtVerbunden => "Nicht mit AutoSchnell verbunden – keine Vergleiche.",
+            Status.Gesperrt => "AutoSchnell sperrt die Vergleiche (Abo/Freigabe).",
             _ => "AutoPointer-Detailansicht erkannt.",
         });
         StatusGeaendert?.Invoke(s);

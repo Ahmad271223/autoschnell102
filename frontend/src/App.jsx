@@ -173,6 +173,7 @@ const Freigaben = seite(() => import("@/pages/app/Freigaben"));
 const Chancen = seite(() => import("@/pages/app/Chancen"));
 // Programme zum Herunterladen (03.10.2026): Inhalte nur vom Server, je Firma freigeschaltet
 const Programme = seite(() => import("@/pages/app/Programme"));
+const AdminProgrammVergleiche = seite(() => import("@/pages/admin_v2/ProgrammVergleiche"));
 
 const DriverLogin = seite(() => import("@/pages/driver/DriverLogin"));
 const DriverLayout = seite(() => import("@/pages/driver/DriverLayout"));
@@ -369,6 +370,7 @@ export default function App() {
               {/* Master-Auftrag Phase F (27.09.2026): Segment-Optimierung — Health, Frequenz-Zuordnung, Vorschläge */}
               <Route path="markt/optimierung" element={<AdminMarktOptimierung />} />
               <Route path="markt/:modell" element={<AdminMarktModell />} />
+              <Route path="programm-vergleiche" element={<AdminProgrammVergleiche />} />
               <Route path="settings" element={<AdminSettings />} />
             </Route>
 

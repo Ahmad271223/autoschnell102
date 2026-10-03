@@ -1600,6 +1600,9 @@ async def ensure_indexes():
     from indizes import ki_indizes, markt_indizes
     await ki_indizes(db)
     await markt_indizes(db)
+    # Werkzeuge (03.10.2026): ein PC je Konto, Vergleichsprotokoll je Firma
+    from indizes import werkzeug_indizes
+    await werkzeug_indizes(db)
     try:
         from kontenanlage import konten_ohne_nummer
         ohne = await konten_ohne_nummer(db)

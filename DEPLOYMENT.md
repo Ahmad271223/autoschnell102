@@ -4304,22 +4304,44 @@ Kommen beim Auslesen eines Inserats die Daten, aber keine Fotos, zeigt die Vergl
 ## Programme zum Herunterladen: AutoPointer-Vergleich nur für Kunde 10002 (Wunsch Ahmad 03.10.2026)
 
 Windows-Programm (Quelle `autopointer-vergleich/`, C#/.NET 10): erkennt in AutoPointer das rechts angezeigte Inserat
-(Fenster-Handles + Windows-Texterkennung) und öffnet automatisch die passenden mobile.de-/AutoScout24-Suchen (Regeln
-wie `mobile_service`/`autoscout_service`). Erst einmal **nur für Kunde 10002** – „alle anderen sollen das gar nicht sehen“.
+(Fenster-Handles + Windows-Texterkennung) und öffnet automatisch die passenden mobile.de-/AutoScout24-Suchen.
+Erst einmal **nur für Kunde 10002** – „alle anderen sollen das gar nicht sehen“.
 
 - Freigabe: `AUTOPOINTER_VERGLEICH_KUNDEN` (Kundennummern, Komma-getrennt; Standard `10002`, steht in `docker-compose.yml`).
   Gilt für Chef **und** alle Sucher der Firma. Leer gesetzt = für niemanden.
-- `GET /api/werkzeuge` liefert nur freigegebenen Firmen einen Eintrag (Name, Texte, Version), allen anderen `[]`.
-  `GET /api/werkzeuge/autopointer-vergleich/download` → 404 „Nicht gefunden“ für jede andere Firma, 403 für
-  Betreiber/Fahrer/Käufer. Jeder Download steht im Aktivitätsprotokoll (`werkzeug_download`).
+- `GET /api/werkzeuge` liefert nur freigegebenen Firmen einen Eintrag (Name, Texte, Version, verbundener PC), allen
+  anderen `[]`. Download `GET /api/werkzeuge/autopointer-vergleich/download` → 404 „Nicht gefunden“ für jede andere
+  Firma, 403 für Betreiber/Fahrer/Käufer. Jeder Download steht im Aktivitätsprotokoll (`werkzeug_download`).
 - Oberfläche: Menüpunkt und Seite `/app/programme` erscheinen nur mit Eintrag; Name und Beschreibung kommen vom
-  Server – im App-Code steht kein Programmname (Test prüft das).
+  Server – im App-Code steht kein Programmname (Test prüft das, auch für die Admin-Seite).
+
+**Lizenz (Wunsch Ahmad 03.10.2026 nachmittags):** Das Programm arbeitet nur verbunden.
+- Sucher klickt in der App „Code zum Verbinden anzeigen“ (`POST …/code`, nur mit aktivem Abo, 10 Minuten, einmal) und
+  tippt den 6-stelligen Code ins Programm (`POST …/verbinden`, ohne Anmeldung, 10 Fehlversuche/10 min je IP).
+  Das Programm bekommt einen **Programm-Schlüssel** (Kopfzeile `X-Werkzeug-Schluessel`, in der DB nur als SHA-256,
+  auf dem PC mit Windows-DPAPI verschlüsselt). Kommt dieselbe Anfrage doppelt an, bekommt derselbe PC 2 Minuten lang
+  denselben Schlüssel (HMAC mit `JWT_SECRET`), ein anderer PC nie.
+- **Ein Konto = ein PC**: neue Verbindung ersetzt die alte (Unique-Index `werkzeug_pc_je_konto`); der alte PC bekommt
+  401 und fragt nach einem neuen Code. Die Browser-Anmeldung bleibt unberührt – der Schlüssel ist keine Sitzung und
+  kann nur `status`/`vergleich`/`abmelden` dieses Werkzeugs.
+- Jeder Vergleich geht über den Server (`POST …/vergleich`): Konto aktiv, Firma nicht gesperrt/gelöscht, freigegeben,
+  **Abo aktiv** (sonst 402 → Programm öffnet nichts), Links mit den **Vergleichsregeln der Firma** (aktives Profil
+  Inland/Export, Sucher-Overrides – wie der Vergleich in der App; Link-Bauer `mobile_service`/`autoscout_service`).
+  Strenger als die App: ohne erkanntes Modell kein Link für dieses Portal (keine Suche „nur Bentley“).
+- Protokoll `werkzeug_vergleiche` (wer, wann, welcher PC, Fahrzeugdaten, Links). Sehen: **Super-Admin** unter
+  Admin → „Programm-Vergleiche“ (alle Firmen, PCs trennen), **Chef** in der App unter dem Programm (nur eigene Firma,
+  PCs seiner Sucher trennen). Sammlungen `werkzeug_codes/_verbindungen/_vergleiche` gehen in die Firmenlöschung; beim
+  Löschen eines Kontos wird sein PC getrennt und seine Vergleiche pseudonymisiert.
+- Programm-Fehlersuche: `AutoSchnell-Vergleich.exe --einmal` (liest einmal, fragt verbunden den Server im Probelauf),
+  `--verbinden <code>` (ohne Fenster), `--server <url>` (Testserver), `AUTOSCHNELL_VERGLEICH_DATEN=<ordner>` (eigene
+  Einstellungen).
+
 - **Datei hochladen** (55 MB > nginx-Limit 25 MB, deshalb im Container; S3/R2: einmal reicht für beide Server):
   ```
   cd autopointer-vergleich && powershell -ExecutionPolicy Bypass -File build.ps1   # lokal: dist\AutoSchnell-Vergleich.exe
-  scp dist/AutoSchnell-Vergleich.exe <server>:/tmp/
+  scp dist/AutoSchnell-Vergleich.exe root@<server>:/tmp/                            # vom PC aus, nicht auf dem Server
   docker compose cp /tmp/AutoSchnell-Vergleich.exe backend:/tmp/AutoSchnell-Vergleich.exe
-  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.0.0
+  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.1.0
   ```
   Bis dahin zeigt die Seite „Wird gerade bereitgestellt“. Speicher: `werkzeuge/autopointer-vergleich/…`, Eintrag in `werkzeuge`.
 - Tests: `backend/tests/test_werkzeuge_20261003.py`, `frontend/src/pages/app/Programme.test.jsx`,

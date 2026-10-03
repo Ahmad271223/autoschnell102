@@ -1253,3 +1253,36 @@ async def markt_indizes(db) -> dict:
         log.exception("Markt-Index-Merker nicht geschrieben")
     return {"ok": not fehler, "fehler": fehler, "kritisch": kritisch}
 
+
+
+#: Werkzeuge (03.10.2026, backend/werkzeuge.py): (Sammlung, Schluessel, Optionen)
+WERKZEUG_INDIZES = (
+    # ein PC je Konto und Werkzeug — die Verbindung wird per upsert ersetzt
+    ("werkzeug_verbindungen", [("werkzeug", 1), ("user_id", 1)], {"name": "werkzeug_pc_je_konto", "unique": True}),
+    ("werkzeug_verbindungen", [("werkzeug", 1), ("token_hash", 1)], {"name": "werkzeug_schluessel"}),
+    ("werkzeug_codes", [("code_hash", 1), ("benutzt", 1)], {"name": "werkzeug_code"}),
+    ("werkzeug_vergleiche", [("werkzeug", 1), ("dealer_id", 1), ("erstellt_am", -1)],
+     {"name": "werkzeug_vergleiche_firma"}),
+    ("werkzeug_vergleiche", [("werkzeug", 1), ("erstellt_am", -1)], {"name": "werkzeug_vergleiche_zeit"}),
+)
+
+
+async def werkzeug_indizes(db) -> dict:
+    """Indizes der Werkzeug-Sammlungen. Scheitert einer (z.B. Dubletten vor dem
+    Unique-Index), bricht der Start NICHT ab: Warnung + Betriebsalarm index_fehlt
+    (die Verbindung ersetzt per upsert; ohne Index waere nur ein gleichzeitiger
+    Doppelaufruf ungeschuetzt)."""
+    from betrieb import alarm, alarm_schliessen
+    stand = {}
+    for sammlung, schluessel, optionen in WERKZEUG_INDIZES:
+        ref = f"{sammlung}.{optionen['name']}"
+        try:
+            await db[sammlung].create_index(schluessel, **optionen)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ensure_indexes: Index %s nicht angelegt: %s", ref, exc)
+            await alarm(db, "index_fehlt", ref=ref, fehler=str(exc)[:300])
+            stand[ref] = False
+        else:
+            await alarm_schliessen(db, "index_fehlt", ref=ref)
+            stand[ref] = True
+    return stand

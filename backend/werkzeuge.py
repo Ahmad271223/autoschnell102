@@ -16,6 +16,16 @@ werkzeuge/<id>/<dateiname>, Version/Groesse/Pruefsumme in der Sammlung
 `werkzeuge`. Hochladen: scripts/werkzeug_hochladen.py (im Backend-Container;
 die Datei ist groesser als das Upload-Limit von nginx).
 
+Lizenz (Wunsch Ahmad 03.10.2026 nachmittags): Das Programm arbeitet nur
+verbunden. Der Sucher holt sich in der App einen 6-stelligen Code (10 Minuten,
+einmal), das Programm tauscht ihn gegen einen Programm-Schluessel. Pro Konto
+EIN PC: eine neue Verbindung ersetzt die alte (der alte PC bekommt 401). Die
+Browser-Anmeldung bleibt davon unberuehrt — der Schluessel ist keine Sitzung
+und kann nur Vergleiche fuer dieses Werkzeug anfragen. Jeder Vergleich geht
+ueber den Server: Abo pruefen, Links mit den Vergleichsregeln der Firma bauen
+(wie der Vergleich in der App), protokollieren (Admin + Chef sehen, wer welches
+Auto verglichen hat).
+
 Dieses Modul importiert weder FastAPI noch server/routes — die Tests und das
 Skript nutzen es direkt.
 """
@@ -23,6 +33,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
+import secrets
 from datetime import datetime, timezone
 from typing import Iterable, Optional
 
@@ -40,10 +52,13 @@ WERKZEUGE = {
         "schritte": [
             "Programm herunterladen und starten (Windows 10/11). Beim ersten Start meldet Windows evtl. "
             "„Der Computer wurde durch Windows geschützt“ – dann „Weitere Informationen“ → „Trotzdem ausführen“.",
+            "Das Programm fragt nach einem Code: hier auf „Programm verbinden“ klicken und den 6-stelligen Code "
+            "eintippen. Jedes Konto kann auf EINEM PC verbunden sein; ein neuer PC ersetzt den alten.",
             "Unten rechts erscheint ein grünes Lupen-Symbol. AutoPointer öffnen und ein Inserat anklicken – "
-            "die Vergleiche öffnen sich als neue Browser-Tabs.",
+            "die Vergleiche öffnen sich als neue Browser-Tabs, mit euren Vergleichsregeln aus AutoSchnell "
+            "(Einstellungen → Vergleich). Ohne aktives Abo öffnet das Programm nichts.",
             "Doppelklick auf das Symbol oder Strg+Alt+P schaltet die Automatik aus und wieder an. "
-            "Rechtsklick: Einstellungen (Portale, Kilometer-Spanne, Baujahr, Browser, mit Windows starten).",
+            "Rechtsklick: Einstellungen (Portale, Browser, mit Windows starten).",
         ],
         "dateiname": "AutoSchnell-Vergleich.exe",
         "schluessel": "werkzeuge/autopointer-vergleich/AutoSchnell-Vergleich.exe",
@@ -144,3 +159,110 @@ def oeffentlich(meta: Optional[dict], werkzeug_id: str) -> dict:
 
 def alle_ids() -> Iterable[str]:
     return WERKZEUGE.keys()
+
+
+# ---------------------------------------------------------------------------
+# Lizenz: Code -> Programm-Schluessel, ein PC je Konto
+# ---------------------------------------------------------------------------
+CODE_LAENGE = 6
+CODE_MINUTEN = 10
+#: Sammlungen (alle mit dealer_id — gehen in die Firmenloeschung, routes/admin.py)
+SAMMLUNG_CODES = "werkzeug_codes"
+SAMMLUNG_VERBINDUNGEN = "werkzeug_verbindungen"
+SAMMLUNG_VERGLEICHE = "werkzeug_vergleiche"
+TOKEN_KOPF = "X-Werkzeug-Schluessel"
+
+
+def code_erzeugen() -> str:
+    return f"{secrets.randbelow(10 ** CODE_LAENGE):0{CODE_LAENGE}d}"
+
+
+def code_normalisieren(roh) -> str:
+    """Nur Ziffern ("123 456" / "123-456" -> "123456")."""
+    return re.sub(r"\D", "", str(roh or ""))[:20]
+
+
+def streuwert(wert: str) -> str:
+    """SHA-256 — Codes und Schluessel liegen nie im Klartext in der Datenbank."""
+    return hashlib.sha256(str(wert).encode("utf-8")).hexdigest()
+
+
+def schluessel_erzeugen() -> str:
+    return secrets.token_urlsafe(32)
+
+
+#: So lange bekommt derselbe PC fuer denselben Code denselben Schluessel noch einmal
+#: (Anfrage doppelt angekommen: Netz, Doppelklick — gesehen beim Test am 03.10.2026).
+WIEDERHOLUNG_SEKUNDEN = 120
+
+
+def schluessel_ableiten(geheimnis: str, code_id: str, pc_kennung: str) -> str:
+    """Schluessel fuer genau diese Einloesung (Code + PC): eine doppelt angekommene
+    Anfrage ergibt denselben Schluessel, ohne dass er irgendwo im Klartext liegt."""
+    import base64
+    import hmac
+    roh = hmac.new(str(geheimnis).encode("utf-8"), f"werkzeug|{code_id}|{pc_kennung}".encode("utf-8"),
+                   hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(roh).decode("ascii").rstrip("=")
+
+
+def _text(wert, laenge: int) -> str:
+    return re.sub(r"\s+", " ", str(wert or "")).strip()[:laenge]
+
+
+def fahrzeug_zu_vehicle(f: dict) -> dict:
+    """Vom Programm gelesene Werte -> Fahrzeug-Dict der Link-Bauer
+    (mobile_service/autoscout_service.build_search_url)."""
+    jahr, monat = f.get("ez_jahr"), f.get("ez_monat")
+    ez = f"{int(monat):02d}/{int(jahr)}" if jahr and monat else (str(int(jahr)) if jahr else "")
+    titel = _text(f.get("titel"), 200)
+    v = {
+        "make_label": _text(f.get("marke"), 60),
+        "model_label": _text(f.get("modell"), 80),
+        "model_description": titel,
+        "title": titel,
+        "first_registration": ez,
+        "mileage": int(f["kilometer"]) if f.get("kilometer") is not None else None,
+        "power_kw": int(f["kw"]) if f.get("kw") else None,
+        "power_ps": int(f["ps"]) if f.get("ps") else None,
+        "fuel": _text(f.get("kraftstoff"), 40),
+        "fuel_label": _text(f.get("kraftstoff"), 40),
+        "gearbox": _text(f.get("getriebe"), 40),
+        "gearbox_label": _text(f.get("getriebe"), 40),
+        "doors": _text(f.get("tueren"), 10) or None,
+    }
+    return {k: w for k, w in v.items() if w not in (None, "")}
+
+
+def vergleichs_links(vehicle: dict, regeln: dict) -> tuple:
+    """(links, hinweise) mit denselben Link-Bauern wie der Vergleich in der App.
+
+    Strenger als die App (Vorgabe Ahmad: "keine Suche nur nach Bentley"): ein
+    Portal bekommt nur dann einen Link, wenn sein Katalog Marke UND Modell
+    kennt — sonst ein Hinweis statt einer Suche ueber die ganze Marke."""
+    import autoscout_service as asv
+    import mobile_service as ms
+    links, hinweise = [], []
+    marke = vehicle.get("make_label", "")
+    modell = vehicle.get("model_label", "")
+    m_marke, m_modell = ms.modell_aufgeloest(vehicle)
+    if m_marke and m_modell:
+        links.append({"portal": "mobile.de", "url": ms.build_search_url(vehicle, regeln)})
+    elif not m_marke:
+        hinweise.append(f"mobile.de kennt die Marke „{marke}“ nicht – kein mobile.de-Vergleich.")
+    else:
+        hinweise.append(f"mobile.de kennt das Modell „{modell}“ nicht – kein mobile.de-Vergleich "
+                        f"(sonst würde nur nach „{marke}“ gesucht).")
+    as_marke = asv._find_make(marke) if marke else None
+    as_modell = asv._find_model(as_marke, modell) if (as_marke and modell) else None
+    if as_marke and as_modell:
+        links.append({"portal": "AutoScout24", "url": asv.build_search_url(vehicle, regeln)})
+    elif not as_marke:
+        hinweise.append(f"AutoScout24 kennt die Marke „{marke}“ nicht – kein AutoScout24-Vergleich.")
+    else:
+        hinweise.append(f"AutoScout24 kennt das Modell „{modell}“ nicht – kein AutoScout24-Vergleich "
+                        f"(sonst würde nur nach „{marke}“ gesucht).")
+    for h in asv.regeln_nicht_abgebildet(vehicle, regeln):
+        if h not in hinweise:
+            hinweise.append(h)
+    return links, hinweise

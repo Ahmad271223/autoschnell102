@@ -10,10 +10,12 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const get = vi.fn();
+const post = vi.fn();
+const del = vi.fn();
 const toast = { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn(), message: vi.fn() };
 vi.mock("sonner", () => ({ toast }));
 vi.mock("@/lib/api", () => ({
-  api: { get: (...a) => get(...a), post: vi.fn(), put: vi.fn(), delete: vi.fn() },
+  api: { get: (...a) => get(...a), post: (...a) => post(...a), put: vi.fn(), delete: (...a) => del(...a) },
   errMsg: (e, f) => e?.response?.data?.detail || e?.message || f,
 }));
 vi.mock("@/context/AuthContext", () => ({ useAuth: () => ({ user: { id: "u-10002-1", role: "sucher" } }) }));
@@ -46,9 +48,19 @@ async function rendern() {
   return behaelter;
 }
 const feld = (id) => behaelter.querySelector(`[data-testid="${id}"]`);
+const klick = async (el) => {
+  await act(async () => {
+    el.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+};
 
 beforeEach(() => {
   get.mockReset();
+  post.mockReset();
+  del.mockReset();
+  toast.success.mockReset();
   toast.error.mockReset();
   programmeVergessen();
 });
@@ -105,6 +117,69 @@ describe("Programme", () => {
     expect(feld("programme-seite")).toBeNull();
   });
 
+  it("Code zum Verbinden: 6 Ziffern, 10 Minuten", async () => {
+    get.mockResolvedValue({ data: { werkzeuge: [{ ...PROGRAMM, verbindung: null }] } });
+    post.mockResolvedValue({ data: { code: "482913", gueltig_bis: "2026-10-03T13:40:00+00:00", minuten: 10 } });
+    await rendern();
+    expect(feld("programm-pc-werkzeug-x").textContent).toContain("Noch kein PC verbunden");
+    await klick(feld("programm-code-werkzeug-x"));
+    expect(post).toHaveBeenCalledWith("/werkzeuge/werkzeug-x/code");
+    const anzeige = feld("programm-code-anzeige-werkzeug-x").textContent;
+    expect(anzeige).toContain("482 913");
+    expect(anzeige).toContain("10 Minuten");
+  });
+
+  it("ohne Abo: kein Code, klare Meldung", async () => {
+    get.mockResolvedValue({ data: { werkzeuge: [PROGRAMM] } });
+    post.mockRejectedValue({ response: { status: 402, data: { detail: "Kein aktives Abo" } } });
+    await rendern();
+    await klick(feld("programm-code-werkzeug-x"));
+    expect(feld("programm-code-anzeige-werkzeug-x")).toBeNull();
+    expect(toast.error).toHaveBeenCalledWith(expect.stringContaining("Kein aktives Abo"));
+  });
+
+  it("verbundener PC wird angezeigt und lässt sich trennen", async () => {
+    get.mockResolvedValue({ data: { werkzeuge: [{ ...PROGRAMM, verbindung: {
+      pc_name: "BUERO-PC", verbunden_am: "2026-10-03T10:00:00+00:00", zuletzt_am: "2026-10-03T11:00:00+00:00" } }] } });
+    del.mockResolvedValue({ data: { ok: true, getrennt: true } });
+    await rendern();
+    expect(feld("programm-pc-werkzeug-x").textContent).toContain("BUERO-PC");
+    await klick(feld("programm-trennen-werkzeug-x"));
+    expect(del).toHaveBeenCalledWith("/werkzeuge/werkzeug-x/verbindung");
+    expect(feld("programm-pc-werkzeug-x").textContent).toContain("Noch kein PC verbunden");
+  });
+
+  it("Chef sieht, wer aus der Firma wann welches Auto verglichen hat", async () => {
+    get.mockImplementation((url) => Promise.resolve(url === "/werkzeuge"
+      ? { data: { werkzeuge: [{ ...PROGRAMM, chef: true }] } }
+      : { data: { gesamt: 1,
+          verbindungen: [{ id: "v1", user_id: "s1", name: "Max Sucher", konto: "10050-1", pc_name: "PC-1",
+                           verbunden_am: "2026-10-03T10:00:00+00:00", zuletzt_am: "2026-10-03T11:00:00+00:00" }],
+          vergleiche: [{ id: "c1", user_id: "s1", name: "Max Sucher", konto: "10050-1", pc_name: "PC-1",
+                         erstellt_am: "2026-10-03T11:00:00+00:00",
+                         fahrzeug: { marke: "VW", modell: "Polo", ez_monat: 10, ez_jahr: 2005, kilometer: 128000, ps: 75,
+                                     preis: 2599, quelle: "Kleinanzeigen", inserat_id: "3529833344" },
+                         links: [{ portal: "mobile.de", url: "https://suchen.mobile.de/x" }] }] } }));
+    del.mockResolvedValue({ data: { ok: true } });
+    await rendern();
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(get).toHaveBeenCalledWith("/werkzeuge/werkzeug-x/firma", { params: { limit: 200 } });
+    const tabelle = feld("pv-vergleiche").textContent;
+    expect(tabelle).toContain("Max Sucher");
+    expect(tabelle).toContain("VW Polo · EZ 10/2005 · 128.000 km · 75 PS · 2.599 €");
+    expect(tabelle).toContain("3529833344");
+    expect(feld("pv-pcs").textContent).toContain("PC „PC-1“");
+    await klick(feld("pv-trennen-s1"));
+    expect(del).toHaveBeenCalledWith("/werkzeuge/werkzeug-x/verbindungen/s1");
+  });
+
+  it("Sucher sieht keine Firmenübersicht", async () => {
+    get.mockResolvedValue({ data: { werkzeuge: [{ ...PROGRAMM, chef: false }] } });
+    await rendern();
+    expect(feld("programm-firma")).toBeNull();
+    expect(get).toHaveBeenCalledTimes(1);
+  });
+
   it("Größe lesbar", () => {
     expect(groesseText(57671680)).toBe("55,0 MB");
     expect(groesseText(2048)).toBe("2 KB");
@@ -115,6 +190,8 @@ describe("Programme", () => {
     const quellen = await Promise.all([
       import("./Programme.jsx?raw"), import("@/lib/programme.js?raw"),
       import("@/components/AppLayout.jsx?raw"), import("@/App.jsx?raw"),
+      import("@/components/ProgrammVergleiche.jsx?raw"), import("@/pages/admin_v2/ProgrammVergleiche.jsx?raw"),
+      import("@/pages/admin_v2/AdminLayout.jsx?raw"),
     ]);
     for (const { default: text } of quellen) {
       expect(text).not.toMatch(/autopointer/i);

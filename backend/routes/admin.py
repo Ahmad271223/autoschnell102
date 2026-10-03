@@ -1301,6 +1301,9 @@ _COMPANY_COLLECTIONS = (
     # Schluessel) und laeuft ueber ai.budget.zaehler_loeschen; ki_reparatur-
     # preise ist systemweit ohne Firmen-/Nutzerbezug und bleibt.
     "ki_bewertungen", "ki_lernfaelle",
+    # Werkzeuge (03.10.2026): Codes, verbundene PCs und Vergleichsprotokoll des
+    # AutoPointer-Vergleichs tragen dealer_id (backend/werkzeuge.py).
+    "werkzeug_codes", "werkzeug_verbindungen", "werkzeug_vergleiche",
     # Go-Live 14.09.2026 (B6): users steht NICHT mehr im Tupel. Als letzter
     # Eintrag der Schleife lief users.delete_many noch VOR Snapshots, Dateien
     # und dealers.delete_many — brach einer dieser Schritte ab, fand der
@@ -1459,6 +1462,12 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
             await db.plan_requests.delete_many(
                 {"subject_user_id": user_id, "status": "offen"})
         await db.subscriptions.delete_many({"subject_user_id": user_id})
+        # Werkzeuge (03.10.2026): PC trennen, offene Codes weg; das Vergleichsprotokoll
+        # gehoert der Firma und bleibt — ohne Personenbezug (Pseudonym wie bei zugang_grants).
+        await db.werkzeug_verbindungen.delete_many({"user_id": user_id})
+        await db.werkzeug_codes.delete_many({"user_id": user_id})
+        await db.werkzeug_vergleiche.update_many(
+            {"user_id": user_id}, {"$set": {"user_id": _nutzer_pseudonym(user_id), "pc_name": ""}})
         await db.network_members.delete_many({"buyer_user_id": user_id})
         await db.buyer_favorites.delete_many({"buyer_user_id": user_id})
         # Pruefung 14.09.2026 (M1): fuer diesen Kaeufer reservierte Fahrzeuge

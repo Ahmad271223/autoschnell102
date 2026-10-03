@@ -12,6 +12,12 @@ internal sealed class TrayApp : ApplicationContext
     private readonly Icon _iconAktiv = Symbole.Icon(Symbole.Aktiv);
     private readonly Icon _iconPause = Symbole.Icon(Symbole.Pause);
     private readonly Icon _iconWarten = Symbole.Icon(Symbole.Warten);
+    private readonly Icon _iconFehler = Symbole.Icon(Symbole.Fehler);
+    private readonly ToolStripMenuItem _verbindungsZeile;
+    private readonly ToolStripMenuItem _trennen;
+    private readonly string? _serverUeberschrieben;
+    private AutoSchnellDienst _dienst = null!;
+    private VerbindenForm? _verbindenForm;
     private readonly SynchronizationContext _ui;
     private readonly CancellationTokenSource _ende = new();
     private readonly HotkeyFenster _hotkey;
@@ -22,13 +28,22 @@ internal sealed class TrayApp : ApplicationContext
     private ProtokollForm? _protokollForm;
     private DateTime _letzteSprechblase = DateTime.MinValue;
 
-    public TrayApp(bool probelauf)
+    public TrayApp(bool probelauf, string? server = null)
     {
         _probelauf = probelauf;
+        _serverUeberschrieben = server;
         _ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         _einstellungen = Einstellungen.Laden();
+        if (!string.IsNullOrWhiteSpace(server)) _einstellungen.Server = server.Trim().TrimEnd('/');
+        DienstErstellen();
 
         var menue = new ContextMenuStrip();
+        _verbindungsZeile = new ToolStripMenuItem("Nicht verbunden") { Enabled = false };
+        menue.Items.Add(_verbindungsZeile);
+        menue.Items.Add("Mit AutoSchnell verbinden …", null, (_, _) => VerbindenZeigen(null));
+        _trennen = new ToolStripMenuItem("Verbindung trennen", null, async (_, _) => await TrennenAsync());
+        menue.Items.Add(_trennen);
+        menue.Items.Add(new ToolStripSeparator());
         _automatik = new ToolStripMenuItem("Automatik aktiv", null, (_, _) => AutomatikUmschalten()) { CheckOnClick = false };
         menue.Items.Add(_automatik);
         menue.Items.Add("Aktuelles Fahrzeug jetzt vergleichen", null, async (_, _) =>
@@ -56,8 +71,109 @@ internal sealed class TrayApp : ApplicationContext
         AutomatikAnzeigen();
 
         Protokoll.Aufraeumen();
-        Protokoll.Schreibe($"AutoPointer-Vergleich {Application.ProductVersion} gestartet{(probelauf ? " – PROBELAUF (öffnet keinen Browser)" : "")}.");
+        Protokoll.Schreibe($"AutoPointer-Vergleich {Application.ProductVersion} gestartet{(probelauf ? " – PROBELAUF (öffnet keinen Browser)" : "")}."
+                           + $" Server: {_einstellungen.Server}");
+        VerbindungAnzeigen();
         Starten();
+        // Lizenz beim Start pruefen bzw. zum Verbinden auffordern (erst, wenn die Nachrichtenschleife laeuft)
+        _ui.Post(async _ => await LizenzPruefenAsync(beimStart: true), null);
+        var token = _ende.Token;
+        Task.Run(async () =>
+        {
+            while (!token.IsCancellationRequested)
+            {
+                try { await Task.Delay(TimeSpan.FromMinutes(15), token); }
+                catch (OperationCanceledException) { break; }
+                _ui.Post(async _ => await LizenzPruefenAsync(beimStart: false), null);
+            }
+        }, token);
+    }
+
+    private void DienstErstellen() =>
+        _dienst = new AutoSchnellDienst(_einstellungen.Server, () => _einstellungen.Schluessel());
+
+    private void VerbindungAnzeigen()
+    {
+        bool verbunden = _dienst.Verbunden;
+        _verbindungsZeile.Text = verbunden ? $"Verbunden: {_einstellungen.VerbundenAls}" : "Nicht mit AutoSchnell verbunden";
+        _trennen.Enabled = verbunden;
+    }
+
+    /// <summary>Beim Start und alle 15 Minuten: gilt der Schluessel noch, ist das Abo aktiv?</summary>
+    private async Task LizenzPruefenAsync(bool beimStart)
+    {
+        if (!_dienst.Verbunden)
+        {
+            if (beimStart) VerbindenZeigen(null);
+            return;
+        }
+        try
+        {
+            var s = await _dienst.StatusAsync();
+            string als = $"{s.Name} ({s.Konto}) · {s.Firma}";
+            if (als != _einstellungen.VerbundenAls)
+            {
+                _einstellungen.VerbundenAls = als;
+                Speichern(_einstellungen);
+            }
+            Protokoll.Schreibe($"Lizenz ok: {als} · PC {s.PcName}" + (s.AboBis != null ? $" · Abo bis {s.AboBis[..Math.Min(10, s.AboBis.Length)]}" : ""));
+            VerbindungAnzeigen();
+            StatusAnzeigen(_ueberwacher?.Status ?? Status.KeinAutoPointer);
+        }
+        catch (DienstFehler ex)
+        {
+            Protokoll.Schreibe("Lizenzprüfung: " + ex.Message);
+            if (ex.NichtVerbunden) VerbindungVerloren(ex.Message);
+            else if (!ex.KeineVerbindung)
+            {
+                _symbol.Icon = _iconFehler;
+                Sprechblase(ex.Message, true, erzwingen: true);
+            }
+            else if (beimStart) Sprechblase(ex.Message, true, erzwingen: true);
+        }
+    }
+
+    private void VerbindungVerloren(string meldung)
+    {
+        _einstellungen.SchluesselSetzen(null, null);
+        Speichern(_einstellungen);
+        VerbindungAnzeigen();
+        StatusAnzeigen(Status.NichtVerbunden);
+        VerbindenZeigen(meldung);
+    }
+
+    private void VerbindenZeigen(string? hinweis)
+    {
+        if (_verbindenForm is { IsDisposed: false }) { _verbindenForm.Activate(); return; }
+        using var f = new VerbindenForm(_dienst, hinweis);
+        _verbindenForm = f;
+        try
+        {
+            if (f.ShowDialog() != DialogResult.OK || f.Ergebnis == null) return;
+            var r = f.Ergebnis;
+            string als = $"{r.Name} ({r.Konto}) · {r.Firma}";
+            _einstellungen.SchluesselSetzen(r.Schluessel, als);
+            Speichern(_einstellungen);
+            Protokoll.Schreibe($"Mit AutoSchnell verbunden: {als}");
+            VerbindungAnzeigen();
+            _ueberwacher?.Neustart();
+            StatusAnzeigen(_ueberwacher?.Status ?? Status.KeinAutoPointer);
+            Sprechblase($"Verbunden als {als}. Klick in AutoPointer ein Inserat an – die Vergleiche öffnen sich automatisch.", false, erzwingen: true);
+        }
+        finally { _verbindenForm = null; }
+    }
+
+    private async Task TrennenAsync()
+    {
+        if (MessageBox.Show("Verbindung zu AutoSchnell trennen? Danach öffnet das Programm keine Vergleiche mehr, "
+                            + "bis es wieder mit einem Code verbunden wird.", "AutoPointer-Vergleich",
+                            MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+        await _dienst.AbmeldenAsync();
+        _einstellungen.SchluesselSetzen(null, null);
+        Speichern(_einstellungen);
+        Protokoll.Schreibe("Verbindung zu AutoSchnell getrennt.");
+        VerbindungAnzeigen();
+        StatusAnzeigen(Status.NichtVerbunden);
     }
 
     private void Starten()
@@ -79,9 +195,11 @@ internal sealed class TrayApp : ApplicationContext
             return;
         }
         var quelle = new AutoPointerQuelle(ocr, () => _einstellungen);
-        _ueberwacher = new Ueberwacher(quelle, katalog, () => _einstellungen, new BrowserAusgabe(_ui)) { Probelauf = _probelauf };
+        _ueberwacher = new Ueberwacher(quelle, katalog, () => _einstellungen, new BrowserAusgabe(_ui),
+                                       new DienstVermittler(() => _dienst)) { Probelauf = _probelauf };
         _ueberwacher.StatusGeaendert += s => _ui.Post(_ => StatusAnzeigen(s), null);
         _ueberwacher.Meldung += (t, f) => _ui.Post(_ => Sprechblase(t, f), null);
+        _ueberwacher.VerbindungVerloren += m => _ui.Post(_ => VerbindungVerloren(m), null);
         _ueberwacher.Neustart();
 
         var token = _ende.Token;
@@ -121,6 +239,7 @@ internal sealed class TrayApp : ApplicationContext
         {
             Status.Pause => _iconPause,
             Status.KeinAutoPointer => _iconWarten,
+            Status.NichtVerbunden or Status.Gesperrt => _iconFehler,
             _ => _iconAktiv,
         };
         string text = s switch
@@ -128,6 +247,8 @@ internal sealed class TrayApp : ApplicationContext
             Status.Pause => "Automatik aus",
             Status.KeinAutoPointer => "AutoPointer nicht gefunden",
             Status.Bereit => "bereit – kein Fahrzeug angezeigt",
+            Status.NichtVerbunden => "nicht mit AutoSchnell verbunden",
+            Status.Gesperrt => "gesperrt (Abo/Freigabe)",
             _ => "aktiv",
         };
         var letztes = _ueberwacher?.LetztesFahrzeug;
@@ -229,4 +350,14 @@ internal sealed class TrayApp : ApplicationContext
             base.WndProc(ref m);
         }
     }
+}
+
+
+/// <summary>Reicht an den jeweils aktuellen Dienst weiter (nach einem Neu-Verbinden).</summary>
+internal sealed class DienstVermittler : IVergleichsDienst
+{
+    private readonly Func<IVergleichsDienst> _dienst;
+    public DienstVermittler(Func<IVergleichsDienst> dienst) => _dienst = dienst;
+    public bool Verbunden => _dienst().Verbunden;
+    public Task<VergleichAntwort> VergleichAsync(Fahrzeug f, bool probelauf) => _dienst().VergleichAsync(f, probelauf);
 }

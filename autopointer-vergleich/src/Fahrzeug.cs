@@ -7,6 +7,9 @@ internal sealed class Fahrzeug
     public string MarkeModellText { get; set; } = "";
     public string? Marke { get; set; }
     public string? Modell { get; set; }
+    /// <summary>Marke/Modell wie in AutoPointer (getrennt), so gehen sie an den Server.</summary>
+    public string? MarkeText { get; set; }
+    public string? ModellText { get; set; }
     /// <summary>Inserat-Titel aus dem Kopf (oft mit Motor/Ausstattung).</summary>
     public string? Titel { get; set; }
     public string? Quelle { get; set; }

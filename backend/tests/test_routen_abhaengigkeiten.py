@@ -99,6 +99,11 @@ OEFFENTLICH = {
     "/api/marktplatz/haendler/{slug}",        # Marktplatz ohne Anmeldung (Wunsch 09/2026)
     "/api/files/{key:path}",                  # signierte Dateilinks (dateien.signatur_gueltig)
     "/api/bild",                              # Bild-Proxy nur mit Signatur (bild_proxy)
+    # Programme zum Herunterladen (03.10.2026): das Windows-Programm meldet sich nicht an — Code-Einloesung
+    # (je IP fail-closed gedrosselt) bzw. Programm-Schluessel in der Kopfzeile X-Werkzeug-Schluessel, der nur
+    # Status/Vergleich/Abmelden DIESES Werkzeugs erlaubt; Abo, Sperre und Freigabe prueft routes/werkzeuge._programm.
+    "/api/werkzeuge/{werkzeug_id}/verbinden", "/api/werkzeuge/{werkzeug_id}/status",
+    "/api/werkzeuge/{werkzeug_id}/vergleich", "/api/werkzeuge/{werkzeug_id}/abmelden",
 }
 # ... davon tragen diese trotzdem eine Kette (Besucher ODER Kaeufer, bzw. der
 # Marktplatz-Schalter) — sie zaehlen nicht als "ganz ohne Abhaengigkeit":
@@ -137,6 +142,8 @@ CHEF_ROUTEN = {
     "/api/protocols/rueckfragen-offen",
     "/api/protocols/{protocol_id}/freigabe",
     "/api/protocols/{protocol_id}/ki-bewertung", "/api/protocols/{protocol_id}/ki-bewertung/neu",   # KI-Abholbewertung (25.09.2026)
+    # Programme (03.10.2026): wer aus der Firma wann welches Auto verglichen hat, PC eines Suchers trennen
+    "/api/werkzeuge/{werkzeug_id}/firma", "/api/werkzeuge/{werkzeug_id}/verbindungen/{konto_id}",
 }
 # Sucher-Funktionen (kostenpflichtig): Abo-Pflicht ueber require_active_sub.
 ABO_ROUTEN = {
