@@ -142,7 +142,7 @@ internal static class KonsolenModus
         {
             var (name, kennung) = AutoSchnellDienst.PcAngaben();
             var r = await dienst.VerbindenAsync(code, name, kennung);
-            e.SchluesselSetzen(r.Schluessel, $"{r.Name} ({r.Konto}) · {r.Firma}");
+            e.SchluesselSetzen(r.Schluessel, AutoSchnellDienst.KontoText(r.Name, r.Konto, r.Firma));
             e.Speichern();
             Console.WriteLine($"Verbunden als {e.VerbundenAls} ({e.Server}).");
             return 0;

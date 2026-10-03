@@ -95,6 +95,22 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
         }
     }
 
+    /// <summary>"Max Muster (10002-1) · Firma". Chef-Konten haben oft keinen Namen — dann
+    /// "Konto 10002 · Firma" statt einer Zeile, die mit Leerzeichen beginnt.</summary>
+    internal static string KontoText(string? name, string? konto, string? firma)
+    {
+        name = name?.Trim();
+        konto = konto?.Trim();
+        string wer = (string.IsNullOrEmpty(name), string.IsNullOrEmpty(konto)) switch
+        {
+            (false, false) => $"{name} ({konto})",
+            (false, true) => name!,
+            (true, false) => $"Konto {konto}",
+            _ => "Konto",
+        };
+        return string.IsNullOrWhiteSpace(firma) ? wer : $"{wer} · {firma.Trim()}";
+    }
+
     internal static string Meldung(string text, int status)
     {
         try

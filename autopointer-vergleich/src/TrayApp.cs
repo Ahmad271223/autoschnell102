@@ -129,7 +129,7 @@ internal sealed class TrayApp : ApplicationContext
         try
         {
             var s = await _dienst.StatusAsync();
-            string als = $"{s.Name} ({s.Konto}) · {s.Firma}";
+            string als = AutoSchnellDienst.KontoText(s.Name, s.Konto, s.Firma);
             if (als != _einstellungen.VerbundenAls)
             {
                 _einstellungen.VerbundenAls = als;
@@ -170,7 +170,7 @@ internal sealed class TrayApp : ApplicationContext
         {
             if (f.ShowDialog() != DialogResult.OK || f.Ergebnis == null) return;
             var r = f.Ergebnis;
-            string als = $"{r.Name} ({r.Konto}) · {r.Firma}";
+            string als = AutoSchnellDienst.KontoText(r.Name, r.Konto, r.Firma);
             _einstellungen.SchluesselSetzen(r.Schluessel, als);
             Speichern(_einstellungen);
             Protokoll.Schreibe($"Mit AutoSchnell verbunden: {als}");

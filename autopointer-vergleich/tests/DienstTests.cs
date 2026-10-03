@@ -153,4 +153,12 @@ public class DienstTests
         Assert.Null(e.Schluessel());
         Assert.Null(e.VerbundenAls);
     }
+
+    [Theory]   // Befund 03.10.2026: Chef 10002 ohne Namen -> "Verbunden:  (10002) · Norden Autoankauf"
+    [InlineData("Max Muster", "10002-1", "AH", "Max Muster (10002-1) · AH")]
+    [InlineData("", "10002", "Norden Autoankauf", "Konto 10002 · Norden Autoankauf")]
+    [InlineData(null, "10002", "", "Konto 10002")]
+    [InlineData(" Max ", "", "AH", "Max · AH")]
+    public void Kontozeile_ohne_leeren_Namen(string? name, string konto, string firma, string erwartet) =>
+        Assert.Equal(erwartet, AutoSchnellDienst.KontoText(name, konto, firma));
 }
