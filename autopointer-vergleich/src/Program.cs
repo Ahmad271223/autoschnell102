@@ -32,6 +32,12 @@ internal static class Program
         catch (AbandonedMutexException) { erste = true; }
         if (!erste)
         {
+            // Wunsch Ahmad 03.10.2026: kein "laeuft bereits" mehr — das laufende Programm zeigt sein Fenster.
+            if (TrayApp.ZeigenAnfordern())
+            {
+                Protokoll.Schreibe("Läuft bereits – Fenster nach vorne geholt.");
+                return 0;
+            }
             Protokoll.Schreibe("Läuft bereits – zweiter Start beendet.");
             MessageBox.Show("AutoPointer-Vergleich läuft bereits – Symbol unten rechts im Infobereich " +
                             "(Rechtsklick → „Mit AutoSchnell verbinden …“ bzw. „Beenden“).",
@@ -44,7 +50,7 @@ internal static class Program
         AppDomain.CurrentDomain.UnhandledException += (_, e) => Protokoll.Schreibe("Fehler: " + e.ExceptionObject);
         try
         {
-            Application.Run(new TrayApp(args.Contains("--probelauf"), server));
+            Application.Run(new TrayApp(args.Contains("--probelauf"), server, minimiert: args.Contains("--autostart")));
         }
         catch (Exception ex)
         {

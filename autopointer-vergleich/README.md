@@ -25,17 +25,25 @@ halbe Sekunde später öffnen sich automatisch die passenden Vergleichssuchen au
 
 Beim Anklicken liest das Programm auch die **Inserat-ID** (mobile.de, Kleinanzeigen) bzw. die **Hash-ID**
 (AutoScout24, nur vollständig und zweimal gleich gelesen). Der Server baut daraus den Inserat-Link und liest das
-Inserat **im Hintergrund aus** (Daten + Fotos, wie das Einfügen in der App, zählt fürs Tageslimit). Für den Vertrag:
+Inserat **im Hintergrund aus** (Daten + Fotos, wie das Einfügen in der App, zählt fürs Tageslimit). Der Abruf
+wartet dafür 15 Sekunden: klickt der Sucher vorher das nächste Auto an, fällt der alte weg und der neue nimmt
+seinen Platz ein (kein Stau, kein unnötiger Abruf); öffnet er das Auto in der App, startet er sofort. Für den Vertrag:
 Rechtsklick → **„Kaufvertrag: Auto in AutoSchnell öffnen“** oder in der App „Deine letzten Autos“ → der Vergleich
 steht sofort da. Zeigt AutoPointer die Hash-ID nur abgeschnitten (schmale Detailansicht), gibt es keinen Link –
 dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und in AutoSchnell einfügen.
 
 ## Bedienung
 
+* **Fenster mit Knöpfen** (seit 1.2.0, Wunsch Ahmad 03.10.): große Anzeige AKTIV / GESTOPPT / NICHT VERBUNDEN,
+  Knöpfe *Aktivieren*, *Stoppen*, *Aktuelles Auto jetzt vergleichen*, *Letzten Vergleich nochmal öffnen*,
+  *Kaufvertrag: Auto in AutoSchnell öffnen*, *Mit AutoSchnell verbinden / Verbindung trennen*, *Einstellungen*,
+  *Protokoll*, *Beenden*. Das X verkleinert nur in die Taskleiste; aus ist das Programm nur mit *Beenden*.
+  Ein zweiter Start (Doppelklick auf die EXE) holt das Fenster nach vorne. Beim Start mit Windows startet es
+  verkleinert.
 * Symbol unten rechts im Infobereich: grün = aktiv, grau = Automatik aus, orange = AutoPointer nicht gefunden,
-  rot = nicht verbunden bzw. gesperrt (Abo/Freigabe).
-* **Doppelklick** auf das Symbol oder **Strg+Alt+P**: Automatik an/aus (z. B. nur durchscrollen).
-* **Rechtsklick**: Verbindungsstatus, *Mit AutoSchnell verbinden …*, *Verbindung trennen*, *Automatik*,
+  rot = nicht verbunden bzw. gesperrt (Abo/Freigabe). **Doppelklick** öffnet das Fenster, **Strg+Alt+P**:
+  Automatik an/aus.
+* **Rechtsklick**: *Fenster öffnen*, Verbindungsstatus, *Mit AutoSchnell verbinden …*, *Verbindung trennen*, *Automatik*,
   *Aktuelles Fahrzeug jetzt vergleichen* (auch bei Pause/selbem Auto), *Letzten Vergleich erneut öffnen*,
   *Einstellungen …* (Portale, Browser, Ablauf, mit Windows starten), *Protokoll anzeigen …*.
 * Ein Auto, das beim Programmstart schon angezeigt wird, öffnet nichts – erst das nächste angeklickte.

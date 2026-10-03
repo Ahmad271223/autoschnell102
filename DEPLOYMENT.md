@@ -4343,6 +4343,12 @@ Erst einmal **nur für Kunde 10002** – „alle anderen sollen das gar nicht se
   auf: gleiche Regeln wie das Einfügen in der App — Quellen-Freigabe, Speicher-Treffer kostenlos, Kleinanzeigen-
   Erweiterung, Warteschlange, **jeder echte Abruf zählt fürs Tageslimit des Kontos**, mobile/AutoScout kosten Apify).
   Abschalten: `AUTOPOINTER_VORAB_ABRUF=false`. Probeläufe lesen nichts aus.
+- **Altes Auto raus, neues rein** (Wunsch Ahmad 03.10. abends, „App hängt“): Vorher reihte jeder Klick einen
+  Abruf ein; zehn durchgeklickte Autos = zehn Abrufe in der Schlange des Kontos (älteste zuerst), der Link in
+  der App stand dahinter. Jetzt wartet ein Vorab-Abruf `AUTOPOINTER_VORAB_WARTEN_S` (Standard 15 s, Feld
+  `fruehestens`, `vorab: true`). Das nächste Auto im Programm zieht den alten, noch wartenden zurück
+  (`link_jobs.vorab_zurueckziehen`, Verbindung merkt `vorab_job_id`). Öffnet der Sucher das Auto in der App
+  (`/listings/check`), startet der Abruf sofort und gilt nicht mehr als zurückziehbar (`app_konten`).
 - Der Sucher öffnet das Auto per Rechtsklick → „Kaufvertrag: Auto in AutoSchnell öffnen“ oder in der App unter
   „Deine letzten Autos“ (`GET …/meine`): `/app/vergleich?url=<Inserat>` startet den Vergleich sofort, das Fahrzeug
   kommt aus dem Speicher (mit Fotos), „Kaufvertrag“ wie gewohnt.
@@ -4355,7 +4361,7 @@ Erst einmal **nur für Kunde 10002** – „alle anderen sollen das gar nicht se
   cd autopointer-vergleich && powershell -ExecutionPolicy Bypass -File build.ps1   # lokal: dist\AutoSchnell-Vergleich.exe
   scp dist/AutoSchnell-Vergleich.exe root@<server>:/tmp/                            # vom PC aus, nicht auf dem Server
   docker compose cp /tmp/AutoSchnell-Vergleich.exe backend:/tmp/AutoSchnell-Vergleich.exe
-  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.1.2
+  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.2.0
   ```
   Bis dahin zeigt die Seite „Wird gerade bereitgestellt“. Speicher: `werkzeuge/autopointer-vergleich/…`, Eintrag in `werkzeuge`.
 - Tests: `backend/tests/test_werkzeuge_20261003.py`, `frontend/src/pages/app/Programme.test.jsx`,

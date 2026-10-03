@@ -2,10 +2,12 @@ using System.Diagnostics;
 
 namespace AutoPointerVergleich;
 
-/// <summary>Laeuft unsichtbar im Hintergrund, nur mit Symbol im Infobereich.</summary>
+/// <summary>Steuerfenster mit Knoepfen (seit 03.10.2026, Wunsch Ahmad) plus Symbol im Infobereich.</summary>
 internal sealed class TrayApp : ApplicationContext
 {
     private const int HotkeyId = 0x4150;
+    /// <summary>Ein zweiter Programmstart setzt dieses Signal — die laufende Instanz zeigt ihr Fenster.</summary>
+    internal const string ZeigenSignalName = @"Local\AutoSchnell.AutoPointerVergleich.Zeigen";
 
     private readonly NotifyIcon _symbol;
     private readonly ToolStripMenuItem _automatik;
@@ -27,8 +29,11 @@ internal sealed class TrayApp : ApplicationContext
     private EinstellungenForm? _einstellungenForm;
     private ProtokollForm? _protokollForm;
     private DateTime _letzteSprechblase = DateTime.MinValue;
+    private readonly SteuerFenster _fenster;
+    private readonly EventWaitHandle _zeigenSignal;
+    private string? _letzteMeldung;
 
-    public TrayApp(bool probelauf, string? server = null)
+    public TrayApp(bool probelauf, string? server = null, bool minimiert = false)
     {
         _probelauf = probelauf;
         _serverUeberschrieben = server;
@@ -38,6 +43,10 @@ internal sealed class TrayApp : ApplicationContext
         DienstErstellen();
 
         var menue = new ContextMenuStrip();
+        var oeffnen = new ToolStripMenuItem("Fenster öffnen", null, (_, _) => FensterZeigen());
+        oeffnen.Font = new Font(oeffnen.Font, FontStyle.Bold);
+        menue.Items.Add(oeffnen);
+        menue.Items.Add(new ToolStripSeparator());
         _verbindungsZeile = new ToolStripMenuItem("Nicht verbunden") { Enabled = false };
         menue.Items.Add(_verbindungsZeile);
         menue.Items.Add("Mit AutoSchnell verbinden …", null, (_, _) => VerbindenZeigen(null));
@@ -65,11 +74,25 @@ internal sealed class TrayApp : ApplicationContext
             ContextMenuStrip = menue,
             Visible = true,
         };
-        _symbol.DoubleClick += (_, _) => AutomatikUmschalten();
+        _symbol.DoubleClick += (_, _) => FensterZeigen();
 
         _hotkey = new HotkeyFenster(() => AutomatikUmschalten());
         HotkeyAnwenden();
         AutomatikAnzeigen();
+
+        _fenster = new SteuerFenster(ZustandFuersFenster);
+        _fenster.Aktivieren += () => AutomatikSetzen(true);
+        _fenster.Stoppen += () => AutomatikSetzen(false);
+        _fenster.JetztVergleichen += async () => { if (_ueberwacher != null) await _ueberwacher.JetztVergleichenAsync(); };
+        _fenster.LetztenOeffnen += () => _ueberwacher?.LetztenErneutOeffnen();
+        _fenster.VertragOeffnen += VertragOeffnen;
+        _fenster.Verbinden += () => VerbindenZeigen(null);
+        _fenster.Trennen += async () => await TrennenAsync();
+        _fenster.EinstellungenOeffnen += EinstellungenZeigen;
+        _fenster.ProtokollOeffnen += ProtokollZeigen;
+        _fenster.Beenden += Beenden;
+        if (minimiert) _fenster.WindowState = FormWindowState.Minimized;   // Start mit Windows: nur in der Taskleiste
+        _fenster.Show();
 
         Protokoll.Aufraeumen();
         Protokoll.Schreibe($"AutoPointer-Vergleich {Application.ProductVersion} gestartet{(probelauf ? " – PROBELAUF (öffnet keinen Browser)" : "")}."
@@ -79,6 +102,12 @@ internal sealed class TrayApp : ApplicationContext
         // Lizenz beim Start pruefen bzw. zum Verbinden auffordern (erst, wenn die Nachrichtenschleife laeuft)
         _ui.Post(async _ => await LizenzPruefenAsync(beimStart: true), null);
         var token = _ende.Token;
+        _zeigenSignal = new EventWaitHandle(false, EventResetMode.AutoReset, ZeigenSignalName);
+        Task.Run(() =>
+        {
+            var warten = new[] { _zeigenSignal, token.WaitHandle };
+            while (WaitHandle.WaitAny(warten) == 0) _ui.Post(_ => FensterZeigen(), null);
+        }, token);
         Task.Run(async () =>
         {
             while (!token.IsCancellationRequested)
@@ -88,6 +117,35 @@ internal sealed class TrayApp : ApplicationContext
                 _ui.Post(async _ => await LizenzPruefenAsync(beimStart: false), null);
             }
         }, token);
+    }
+
+    /// <summary>Zweiter Programmstart: laufende Instanz zeigt ihr Fenster statt "laeuft bereits".</summary>
+    internal static bool ZeigenAnfordern()
+    {
+        try
+        {
+            using var signal = EventWaitHandle.OpenExisting(ZeigenSignalName);
+            Native.AllowSetForegroundWindow(Native.ASFW_ANY);
+            return signal.Set();
+        }
+        catch (WaitHandleCannotBeOpenedException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+    }
+
+    private void FensterZeigen()
+    {
+        if (!_fenster.IsDisposed) _fenster.Zeigen();
+    }
+
+    private FensterZustand ZustandFuersFenster()
+    {
+        var f = _ueberwacher?.LetztesFahrzeug;
+        string? auto = f == null ? null
+            : $"{(f.Marke != null ? $"{f.Marke} {f.Modell}".Trim() : f.MarkeModellText)} · EZ {f.EzText}"
+              + (f.Kilometer != null ? $" · {f.Kilometer:N0} km" : "");
+        return new FensterZustand(_ueberwacher?.Status ?? Status.KeinAutoPointer, _einstellungen.AutomatikAktiv,
+            _dienst.Verbunden, _einstellungen.VerbundenAls ?? "", auto,
+            !string.IsNullOrEmpty(_ueberwacher?.LetzteInseratUrl), _letzteMeldung, _probelauf);
     }
 
     /// <summary>Wunsch Ahmad 03.10.2026: das zuletzt angeklickte Auto in AutoSchnell oeffnen — der Server hat
@@ -234,14 +292,18 @@ internal sealed class TrayApp : ApplicationContext
         }, token);
     }
 
-    private void AutomatikUmschalten()
+    private void AutomatikUmschalten() => AutomatikSetzen(!_einstellungen.AutomatikAktiv);
+
+    private void AutomatikSetzen(bool an)
     {
-        _einstellungen.AutomatikAktiv = !_einstellungen.AutomatikAktiv;
+        if (_einstellungen.AutomatikAktiv == an) { _fenster.Aktualisieren(); return; }
+        _einstellungen.AutomatikAktiv = an;
         Speichern(_einstellungen);
         if (_einstellungen.AutomatikAktiv) _ueberwacher?.Neustart();
         AutomatikAnzeigen();
         Protokoll.Schreibe(_einstellungen.AutomatikAktiv ? "Automatik AN." : "Automatik AUS.");
         Sprechblase(_einstellungen.AutomatikAktiv ? "Automatik AN – Vergleiche öffnen sich beim Anklicken." : "Automatik AUS – es öffnet sich nichts.", false, erzwingen: true);
+        _fenster.Aktualisieren();
     }
 
     private void AutomatikAnzeigen()
@@ -278,6 +340,7 @@ internal sealed class TrayApp : ApplicationContext
 
     private void Sprechblase(string text, bool fehler, bool erzwingen = false)
     {
+        _letzteMeldung = $"{DateTime.Now:HH:mm} {text}";      // bleibt im Fenster stehen, die Sprechblase verschwindet
         StatusAnzeigen(_ueberwacher?.Status ?? Status.KeinAutoPointer);
         if (!erzwingen && !_einstellungen.HinweiseAnzeigen) return;
         if (!erzwingen && (DateTime.Now - _letzteSprechblase).TotalSeconds < 3) return;
@@ -331,6 +394,7 @@ internal sealed class TrayApp : ApplicationContext
     private void Beenden()
     {
         Protokoll.Schreibe("Beendet.");
+        _fenster.EndgueltigSchliessen();
         _ende.Cancel();
         _hotkey.Abmelden(HotkeyId);
         _hotkey.DestroyHandle();
