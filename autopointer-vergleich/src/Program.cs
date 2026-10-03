@@ -7,6 +7,7 @@ internal static class Program
     ///   --probelauf      wie oben, oeffnet aber keinen Browser (nur Protokoll)
     ///   --server &lt;url&gt;   anderer AutoSchnell-Server (Test), Standard app.auto-schnellkauf.de
     ///   --verbinden &lt;code&gt; ohne Fenster mit dem 6-stelligen Code aus AutoSchnell verbinden
+    ///   --systemcheck    prueft Windows, Texterkennung, Server, Abo, AutoPointer (mit Probe) und gibt es aus
     ///   --einmal         liest das gerade angezeigte Fahrzeug einmal und gibt die Werte
     ///                    aus; ist das Programm verbunden, fragt es den Server (Probelauf)
     ///                    nach den Links. --oeffnen oeffnet sie, --bilder &lt;Ordner&gt;
@@ -20,6 +21,7 @@ internal static class Program
         if (args.Contains("--protokoll")) return KonsolenModus.ProtokollZeigen(KonsolenModus.Argument(args, "--protokoll"));
         if (KonsolenModus.Argument(args, "--entschluesseln") is { } geheim) return KonsolenModus.Entschluesseln(geheim);
         if (args.Contains("--einmal")) return KonsolenModus.EinmalAsync(args, server).GetAwaiter().GetResult();
+        if (args.Contains("--systemcheck")) return KonsolenModus.SystemcheckAsync(server).GetAwaiter().GetResult();
         if (KonsolenModus.Argument(args, "--verbinden") is { } code)
             return KonsolenModus.VerbindenAsync(code, server).GetAwaiter().GetResult();
 
@@ -111,7 +113,7 @@ internal static class KonsolenModus
             return 6;
         }
         var e = Einstellungen.Laden();
-        if (!string.IsNullOrWhiteSpace(server)) e.Server = server.Trim().TrimEnd('/');
+        if (!ServerUebernehmen(e, server)) return 10;
         var dienst = new AutoSchnellDienst(e.Server, () => e.Schluessel());
         if (!dienst.Verbunden)
         {
@@ -137,6 +139,32 @@ internal static class KonsolenModus
             Console.WriteLine("AutoSchnell: " + ex.Message);
             return 7;
         }
+    }
+
+    /// <summary>Nr. 14: --server nur https://…auto-schnellkauf.de oder der eigene Rechner (Tests).</summary>
+    private static bool ServerUebernehmen(Einstellungen e, string? server)
+    {
+        if (string.IsNullOrWhiteSpace(server)) return true;
+        if (Einstellungen.SichererServer(server) is not { } sicher)
+        {
+            Console.WriteLine($"Server-Adresse nicht erlaubt: {server} (nur https://…auto-schnellkauf.de oder der eigene Rechner).");
+            return false;
+        }
+        e.Server = sicher;
+        return true;
+    }
+
+    /// <summary>--systemcheck: Pruefbericht 03.10.2026 (Nr. 6/8) — alles pruefen, Ergebnis ausgeben.
+    /// Rueckgabe 0 = alles gut, 11 = mindestens ein Fehler.</summary>
+    public static async Task<int> SystemcheckAsync(string? server)
+    {
+        Native.AttachConsole(-1);
+        Protokoll.DateiAktiv = false;
+        var e = Einstellungen.Laden();
+        if (!ServerUebernehmen(e, server)) return 10;
+        var punkte = await Systemcheck.PruefenAsync(e, new AutoSchnellDienst(e.Server, () => e.Schluessel()));
+        Console.WriteLine(Systemcheck.Text(punkte));
+        return punkte.Any(p => p.Stufe == PruefStufe.Fehler) ? 11 : 0;
     }
 
     /// <summary>--protokoll [JJJJ-MM-TT]: das verschluesselte Protokoll eines Tages lesbar ausgeben (nur unter dem
@@ -172,7 +200,7 @@ internal static class KonsolenModus
     {
         Native.AttachConsole(-1);
         var e = Einstellungen.Laden();
-        if (!string.IsNullOrWhiteSpace(server)) e.Server = server.Trim().TrimEnd('/');
+        if (!ServerUebernehmen(e, server)) return 10;
         var dienst = new AutoSchnellDienst(e.Server, () => null);
         try
         {

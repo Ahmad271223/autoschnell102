@@ -175,6 +175,10 @@ CODE_MINUTEN = 10
 SAMMLUNG_CODES = "werkzeug_codes"
 SAMMLUNG_VERBINDUNGEN = "werkzeug_verbindungen"
 SAMMLUNG_VERGLEICHE = "werkzeug_vergleiche"
+#: Pruefbericht 03.10.2026 (Nr. 12): die App meldet, dass sie ein Auto aus dem Programm uebernommen hat
+SAMMLUNG_APP_STARTS = "werkzeug_app_starts"
+#: Pruefbericht 03.10.2026 (Nr. 16): warum ein Programm-Schluessel nicht mehr gilt (anderer PC, Chef, Betreiber)
+SAMMLUNG_GETRENNT = "werkzeug_getrennt"
 TOKEN_KOPF = "X-Werkzeug-Schluessel"
 
 

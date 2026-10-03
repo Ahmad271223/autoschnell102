@@ -3,7 +3,7 @@
  * übernimmt das schon offene Fenster es (launchQueue) — App-Symbol holt nur nach vorne.
  */
 import { describe, expect, it, vi } from "vitest";
-import { INSERAT_EREIGNIS, zielAusAppStart, startZieleVerfolgen } from "./programmStart";
+import { INSERAT_EREIGNIS, zielAusAppStart, startZieleVerfolgen, startKennung, startMelden } from "./programmStart";
 
 const O = "https://app.auto-schnellkauf.de";
 const KA = "https://www.kleinanzeigen.de/s-anzeige/3530379782";
@@ -72,5 +72,47 @@ describe("startZieleVerfolgen", () => {
 
   it("Browser ohne launchQueue: nichts", () => {
     expect(startZieleVerfolgen(vi.fn(), { fenster: { location: { origin: O } } })).toBe(false);
+  });
+});
+
+describe("Pruefbericht 03.10.2026 (Nr. 12): Rueckmeldung an das Programm", () => {
+  const S = "0123456789abcdef0123456789abcdef";
+  const MIT_START = `${ZIEL}&start=${S}`;
+
+  it("Kennung nur in der Form des Programms (32 Hex-Zeichen)", () => {
+    expect(startKennung(MIT_START)).toBe(S);
+    expect(startKennung(`/app/vergleich?url=x&start=${S}`, O)).toBe(S);
+    expect(startKennung(ZIEL)).toBeNull();
+    expect(startKennung(`${ZIEL}&start=../../admin`)).toBeNull();
+    expect(startKennung(`${ZIEL}&start=${S.toUpperCase()}`)).toBeNull();
+    expect(startKennung("kaputt::")).toBeNull();
+  });
+
+  it("startMelden schickt genau eine Anfrage, Fehler sind egal", async () => {
+    const client = { post: vi.fn(() => Promise.resolve({ data: { ok: true } })) };
+    expect(await startMelden(client, S)).toBe(true);
+    expect(client.post).toHaveBeenCalledWith(`/werkzeuge/app-start/${S}`);
+    const kaputt = { post: vi.fn(() => Promise.reject(new Error("401"))) };
+    expect(await startMelden(kaputt, S)).toBe(false);
+    expect(await startMelden(client, "nein")).toBe(false);
+    expect(client.post).toHaveBeenCalledTimes(1);
+  });
+
+  it("offenes Fenster meldet den Start sofort — auch wenn wegen Ungespeichertem erst gefragt wird", () => {
+    const f = fenster("/app/vertraege");
+    const melden = vi.fn();
+    startZieleVerfolgen(vi.fn(), { fenster: f, startAdresse: `${O}/start`, beschaeftigt: () => true,
+                                   nachfragen: () => {}, melden });
+    f.starten(MIT_START);
+    expect(melden).toHaveBeenCalledWith(S);
+  });
+
+  it("ohne Kennung (App-Symbol, alte Programmversion) wird nichts gemeldet", () => {
+    const f = fenster("/app/termine");
+    const melden = vi.fn();
+    startZieleVerfolgen(vi.fn(), { fenster: f, startAdresse: `${O}/start`, melden });
+    f.starten(ZIEL);
+    f.starten(`${O}/start`);
+    expect(melden).not.toHaveBeenCalled();
   });
 });

@@ -8,10 +8,12 @@ App (angemeldet):
   DELETE /api/werkzeuge/{id}/verbindung          eigenen PC trennen
   GET    /api/werkzeuge/{id}/firma               Chef: Verbindungen + Vergleiche seiner Sucher
   DELETE /api/werkzeuge/{id}/verbindungen/{uid}  Chef: PC eines Kontos der Firma trennen
+  POST   /api/werkzeuge/app-start/{start}        App meldet: Auto aus dem Programm uebernommen (Nr. 12)
 Programm (Kopfzeile X-Werkzeug-Schluessel):
   POST   /api/werkzeuge/{id}/verbinden           Code -> Schluessel (ohne Anmeldung, gedrosselt)
-  GET    /api/werkzeuge/{id}/status              Lizenz pruefen (Abo, Freigabe, Sperren)
+  GET    /api/werkzeuge/{id}/status              Lizenz pruefen (Abo, Freigabe, Sperren) + angebotene Version
   POST   /api/werkzeuge/{id}/vergleich           Abo pruefen, Links mit Firmenregeln, protokollieren
+  GET    /api/werkzeuge/{id}/app-start/{start}   hat die App das Auto uebernommen? (Nr. 12)
 Betreiber:
   GET    /api/admin/werkzeug-vergleiche          wer hat wann welches Auto verglichen
   DELETE /api/admin/werkzeug-verbindungen/{uid}  PC eines Kontos trennen
@@ -19,6 +21,7 @@ Betreiber:
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -52,6 +55,60 @@ _vergleich_limiter = SlidingWindowRateLimiter(max_attempts=120, window_seconds=6
                                               name="werkzeug_vergleich")
 
 _USER_FELDER = {"_id": 0, "password_hash": 0, "mfa": 0, "settings": 0}
+
+#: Nr. 12: Kennung eines App-Starts (das Programm erzeugt 32 Hex-Zeichen)
+_START_KENNUNG = re.compile(r"^[0-9a-f]{32}$")
+_PROGRAMM_VERSION = re.compile(r"AutoSchnell-Vergleich/(\d+(?:\.\d+){1,3})")
+
+
+def _programm_version(user_agent: Optional[str]) -> Optional[str]:
+    """Nr. 4: Version des Programms aus der Kopfzeile User-Agent ("AutoSchnell-Vergleich/1.5.0")."""
+    m = _PROGRAMM_VERSION.search(user_agent or "")
+    return m.group(1) if m else None
+
+
+def _berlin(iso: Optional[str]) -> str:
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.fromisoformat(str(iso)).astimezone(ZoneInfo("Europe/Berlin")).strftime("%d.%m.%Y um %H:%M")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+async def _getrennt_merken(werkzeug_id: str, token_hashes, grund: str, pc_name: str = "") -> None:
+    """Nr. 16: festhalten, WARUM ein Schluessel nicht mehr gilt — das Programm sagt es dem Sucher dann genau
+    (vorher immer nur "vielleicht anderer PC"). 30 Tage, danach gilt wieder der allgemeine Text."""
+    jetzt = datetime.now(timezone.utc)
+    for h in {h for h in token_hashes if h}:
+        try:
+            await db[wz.SAMMLUNG_GETRENNT].update_one(
+                {"werkzeug": werkzeug_id, "token_hash": h},
+                {"$set": {"grund": grund, "pc_name": pc_name, "am": jetzt.isoformat(),
+                          "ablauf": jetzt + timedelta(days=30)}},
+                upsert=True)
+        except Exception:  # noqa: BLE001 — nur fuer die Meldung, nie den Vorgang aufhalten
+            log.exception("Werkzeug: Trenn-Grund nicht gespeichert")
+
+
+async def _nicht_verbunden_text(werkzeug_id: str, schluessel: str) -> str:
+    g = await db[wz.SAMMLUNG_GETRENNT].find_one(
+        {"werkzeug": werkzeug_id, "token_hash": wz.streuwert(schluessel)}, {"_id": 0})
+    if not g:
+        return NICHT_VERBUNDEN
+    wann = _berlin(g.get("am"))
+    am = f" am {wann}" if wann else ""
+    if g.get("grund") == "anderer_pc":
+        pc = f" („{g['pc_name']}“)" if g.get("pc_name") else ""
+        return (f"Dein Konto wurde{am} auf einem anderen PC{pc} verbunden – ein Konto kann nur auf einem PC "
+                "verbunden sein, dieser ist deshalb getrennt. Zum Zurückwechseln hier mit einem neuen Code aus "
+                "AutoSchnell verbinden.")
+    if g.get("grund") == "chef":
+        return f"Dein Chef hat diesen PC{am} von AutoSchnell getrennt. Bitte mit einem neuen Code verbinden."
+    if g.get("grund") == "betreiber":
+        return f"AutoSchnell hat diesen PC{am} getrennt. Bitte mit einem neuen Code verbinden."
+    if g.get("grund") == "app":
+        return f"Diese Verbindung wurde{am} in der AutoSchnell-App getrennt. Bitte mit einem neuen Code verbinden."
+    return NICHT_VERBUNDEN
 
 
 def _wid_pruefen(werkzeug_id: str) -> None:
@@ -166,8 +223,11 @@ async def werkzeug_code(werkzeug_id: str, user=Depends(require_active_sub)):
 @router.delete("/werkzeuge/{werkzeug_id}/verbindung")
 async def werkzeug_trennen(werkzeug_id: str, user=Depends(current_firma)):
     _wid_pruefen(werkzeug_id)
-    r = await db[wz.SAMMLUNG_VERBINDUNGEN].delete_many({"werkzeug": werkzeug_id, "user_id": user["id"]})
+    filt = {"werkzeug": werkzeug_id, "user_id": user["id"]}
+    alte = [x.get("token_hash") async for x in db[wz.SAMMLUNG_VERBINDUNGEN].find(filt, {"_id": 0, "token_hash": 1})]
+    r = await db[wz.SAMMLUNG_VERBINDUNGEN].delete_many(filt)
     if r.deleted_count:
+        await _getrennt_merken(werkzeug_id, alte, "app")
         await log_activity_sicher(user["dealer_id"], user["id"], "werkzeug.getrennt", ref=werkzeug_id)
     return {"ok": True, "getrennt": r.deleted_count > 0}
 
@@ -232,6 +292,11 @@ async def werkzeug_verbinden(werkzeug_id: str, body: VerbindenIn, request: Reque
         schluessel = wz.schluessel_erzeugen()
     jetzt = now_iso()
     pc_name = wz._text(body.pc_name, 80)
+    alt = await db[wz.SAMMLUNG_VERBINDUNGEN].find_one(
+        {"werkzeug": werkzeug_id, "user_id": user["id"]}, {"_id": 0, "token_hash": 1, "pc_kennung": 1})
+    if alt and alt.get("token_hash") != wz.streuwert(schluessel) \
+            and (alt.get("pc_kennung") or "") != wz._text(body.pc_kennung, 128):
+        await _getrennt_merken(werkzeug_id, [alt.get("token_hash")], "anderer_pc", pc_name)
     # Ein PC je Konto: die neue Verbindung ersetzt die alte (deren Schluessel gilt ab sofort nicht mehr).
     await db[wz.SAMMLUNG_VERBINDUNGEN].update_one(
         {"werkzeug": werkzeug_id, "user_id": user["id"]},
@@ -247,29 +312,37 @@ async def werkzeug_verbinden(werkzeug_id: str, body: VerbindenIn, request: Reque
             "firma": firma.get("company_name") or "", "werkzeug": werkzeug_id}
 
 
-async def _programm(werkzeug_id: str, schluessel: Optional[str]):
+async def _programm(werkzeug_id: str, schluessel: Optional[str], version: Optional[str] = None):
     _wid_pruefen(werkzeug_id)
     if not schluessel:
         raise HTTPException(401, NICHT_VERBUNDEN)
     v = await db[wz.SAMMLUNG_VERBINDUNGEN].find_one(
         {"werkzeug": werkzeug_id, "token_hash": wz.streuwert(schluessel)}, {"_id": 0})
     if not v:
-        raise HTTPException(401, NICHT_VERBUNDEN)
+        # Nr. 16: genau sagen, warum (anderer PC, Chef, Betreiber, App) — sonst der allgemeine Text
+        raise HTTPException(401, await _nicht_verbunden_text(werkzeug_id, schluessel))
     user = await db.users.find_one({"id": v["user_id"]}, _USER_FELDER)
     firma, abo = await _konto_pruefen(user, werkzeug_id)
-    await db[wz.SAMMLUNG_VERBINDUNGEN].update_one({"id": v["id"]}, {"$set": {"zuletzt_am": now_iso()}})
+    setzen = {"zuletzt_am": now_iso()}
+    if version:
+        setzen["programm_version"] = version          # Nr. 4: welche Version laeuft auf welchem PC
+    await db[wz.SAMMLUNG_VERBINDUNGEN].update_one({"id": v["id"]}, {"$set": setzen})
     return user, v, firma, abo
 
 
 @router.get("/werkzeuge/{werkzeug_id}/status")
 async def werkzeug_status(werkzeug_id: str,
-                          schluessel: Optional[str] = Header(None, alias=wz.TOKEN_KOPF)):
-    user, v, firma, abo = await _programm(werkzeug_id, schluessel)
+                          schluessel: Optional[str] = Header(None, alias=wz.TOKEN_KOPF),
+                          user_agent: Optional[str] = Header(None, alias="User-Agent")):
+    user, v, firma, abo = await _programm(werkzeug_id, schluessel, _programm_version(user_agent))
     konto = _konto_text(user)
     dealer = await effective_dealer(user)
+    # Nr. 4: die Version, die AutoSchnell gerade zum Herunterladen anbietet — ist sie neuer, sagt es das Programm
+    meta = await db.werkzeuge.find_one({"id": werkzeug_id}, {"_id": 0, "version": 1}) or {}
     return {"ok": True, "konto": konto["konto"], "name": konto["name"], "firma": firma.get("company_name") or "",
             "pc_name": v.get("pc_name") or "", "abo_bis": abo.get("expires_at"),
-            "profil": (dealer or {}).get("active_profile", "inland")}
+            "profil": (dealer or {}).get("active_profile", "inland"),
+            "aktuelle_version": meta.get("version"), "programm_name": wz.WERKZEUGE[werkzeug_id]["name"]}
 
 
 @router.post("/werkzeuge/{werkzeug_id}/abmelden")
@@ -321,11 +394,12 @@ class VergleichIn(BaseModel):
 
 @router.post("/werkzeuge/{werkzeug_id}/vergleich")
 async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
-                             schluessel: Optional[str] = Header(None, alias=wz.TOKEN_KOPF)):
+                             schluessel: Optional[str] = Header(None, alias=wz.TOKEN_KOPF),
+                             user_agent: Optional[str] = Header(None, alias="User-Agent")):
     """Abo pruefen, Links mit den Vergleichsregeln der Firma bauen (wie der
     Vergleich in der App: aktives Profil Inland/Export, Sucher-Overrides),
     protokollieren."""
-    user, v, _firma_doc, _abo = await _programm(werkzeug_id, schluessel)
+    user, v, _firma_doc, _abo = await _programm(werkzeug_id, schluessel, _programm_version(user_agent))
     if not await _vergleich_limiter.check(f"verbindung:{v['id']}"):
         raise HTTPException(429, "Zu viele Vergleiche in kurzer Zeit – bitte kurz warten.")
     from mobile_service import DEFAULT_EXPORT_RULES, DEFAULT_RULES
@@ -405,6 +479,37 @@ async def _vorab_abrufen(user: dict, url: Optional[str]) -> dict:
     return {"status": "laeuft", "hinweis": "", "job_id": r.get("job_id")}
 
 
+# ---------------------------------------------------------------- App-Start (Nr. 12)
+@router.post("/werkzeuge/app-start/{start}")
+async def werkzeug_app_start_melden(start: str, user=Depends(current_firma)):
+    """Pruefbericht 03.10.2026 (Nr. 12): die AutoSchnell-App hat ein Auto aus dem Programm uebernommen (Kennung im
+    Link "start"). Das Programm fragt danach — ohne Meldung oeffnet es den Kaufvertrag im Browser. 10 Minuten."""
+    if not _START_KENNUNG.match(start or ""):
+        raise HTTPException(400, "Ungültige Kennung")
+    jetzt = datetime.now(timezone.utc)
+    from pymongo.errors import DuplicateKeyError
+    try:
+        await db[wz.SAMMLUNG_APP_STARTS].update_one(
+            {"start": start},
+            {"$setOnInsert": {"start": start, "user_id": user["id"], "dealer_id": user.get("dealer_id"),
+                              "am": jetzt.isoformat(), "ablauf": jetzt + timedelta(minutes=10)}},
+            upsert=True)
+    except DuplicateKeyError:
+        pass                                   # zwei Meldungen gleichzeitig (Fenster + Ereignis): eine reicht
+    return {"ok": True}
+
+
+@router.get("/werkzeuge/{werkzeug_id}/app-start/{start}")
+async def werkzeug_app_start_pruefen(werkzeug_id: str, start: str,
+                                     schluessel: Optional[str] = Header(None, alias=wz.TOKEN_KOPF)):
+    """Nur fuer Starts derselben Firma — ein fremdes Programm erfaehrt nichts ueber andere Konten."""
+    user, _v, _firma_doc, _abo = await _programm(werkzeug_id, schluessel)
+    if not _START_KENNUNG.match(start or ""):
+        return {"bestaetigt": False}
+    d = await db[wz.SAMMLUNG_APP_STARTS].find_one({"start": start}, {"_id": 0, "dealer_id": 1})
+    return {"bestaetigt": bool(d) and bool(user.get("dealer_id")) and d.get("dealer_id") == user.get("dealer_id")}
+
+
 @router.get("/werkzeuge/{werkzeug_id}/meine")
 async def werkzeug_meine(werkzeug_id: str, limit: int = Query(30, ge=1, le=100), user=Depends(current_firma)):
     """Die eigenen zuletzt im Programm angeklickten Autos — mit Inserat-Link fuer den Kaufvertrag."""
@@ -451,10 +556,12 @@ async def werkzeug_firma(werkzeug_id: str, limit: int = Query(200, ge=1, le=500)
 @router.delete("/werkzeuge/{werkzeug_id}/verbindungen/{konto_id}")
 async def werkzeug_firma_trennen(werkzeug_id: str, konto_id: str, user=Depends(current_chef)):
     _wid_pruefen(werkzeug_id)
-    r = await db[wz.SAMMLUNG_VERBINDUNGEN].delete_many(
-        {"werkzeug": werkzeug_id, "user_id": konto_id, "dealer_id": user["dealer_id"]})
+    filt = {"werkzeug": werkzeug_id, "user_id": konto_id, "dealer_id": user["dealer_id"]}
+    alte = [x.get("token_hash") async for x in db[wz.SAMMLUNG_VERBINDUNGEN].find(filt, {"_id": 0, "token_hash": 1})]
+    r = await db[wz.SAMMLUNG_VERBINDUNGEN].delete_many(filt)
     if not r.deleted_count:
         raise HTTPException(404, "Keine Verbindung für dieses Konto.")
+    await _getrennt_merken(werkzeug_id, alte, "chef")
     await log_activity_sicher(user["dealer_id"], user["id"], "werkzeug.getrennt_durch_chef", ref=konto_id)
     return {"ok": True}
 
@@ -479,6 +586,9 @@ async def admin_werkzeug_vergleiche(werkzeug: str = wz.AUTOPOINTER, dealer_id: O
 @router.delete("/admin/werkzeug-verbindungen/{konto_id}")
 async def admin_werkzeug_trennen(konto_id: str, werkzeug: str = wz.AUTOPOINTER,
                                  admin=Depends(current_super_admin)):
-    r = await db[wz.SAMMLUNG_VERBINDUNGEN].delete_many({"werkzeug": werkzeug, "user_id": konto_id})
+    filt = {"werkzeug": werkzeug, "user_id": konto_id}
+    alte = [x.get("token_hash") async for x in db[wz.SAMMLUNG_VERBINDUNGEN].find(filt, {"_id": 0, "token_hash": 1})]
+    r = await db[wz.SAMMLUNG_VERBINDUNGEN].delete_many(filt)
+    await _getrennt_merken(werkzeug, alte, "betreiber")
     await log_activity_sicher(admin.get("dealer_id", ""), admin["id"], "admin.werkzeug.getrennt", ref=konto_id)
     return {"ok": True, "getrennt": r.deleted_count}

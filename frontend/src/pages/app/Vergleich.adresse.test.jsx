@@ -82,6 +82,23 @@ describe("Vergleich über ?url= (Programm)", () => {
     expect(vergleich[1]).toMatchObject({ url: KA });
   });
 
+  it("Pruefbericht 03.10.2026 (Nr. 12): meldet dem Programm, dass die App das Auto übernommen hat", async () => {
+    const S = "0123456789abcdef0123456789abcdef";
+    window.history.replaceState({}, "", `/app/vergleich?url=${encodeURIComponent(KA)}&start=${S}`);
+    await act(async () => { wurzel.render(createElement(Vergleich)); });
+    await warten();
+    const pfade = api.post.mock.calls.map((c) => c[0]);
+    expect(pfade.filter((x) => x === `/werkzeuge/app-start/${S}`)).toHaveLength(1);
+    expect(pfade).toContain("/mobile/compare");
+  });
+
+  it("ohne Kennung (alte Programmversion) keine Meldung", async () => {
+    window.history.replaceState({}, "", `/app/vergleich?url=${encodeURIComponent(KA)}`);
+    await act(async () => { wurzel.render(createElement(Vergleich)); });
+    await warten();
+    expect(api.post.mock.calls.some((c) => String(c[0]).startsWith("/werkzeuge/app-start/"))).toBe(false);
+  });
+
   it("aus dem Programm: nur auslesen, die Filter nicht ein zweites Mal öffnen", async () => {
     // Wunsch Ahmad 03.10.2026: das Programm hat mobile.de/AutoScout24 schon geöffnet
     const { filterOeffnen } = await import("@/lib/filterOeffnen");

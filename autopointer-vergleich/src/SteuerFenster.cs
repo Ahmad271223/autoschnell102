@@ -26,7 +26,7 @@ internal sealed class SteuerFenster : Form
     private readonly Label _hinweisX;
 
     public event Action? Aktivieren, Stoppen, JetztVergleichen, LetztenOeffnen, VertragOeffnen,
-        Verbinden, Trennen, EinstellungenOeffnen, ProtokollOeffnen, Beenden;
+        Verbinden, Trennen, EinstellungenOeffnen, ProtokollOeffnen, Beenden, SystemcheckOeffnen;
 
     public SteuerFenster(Func<FensterZustand> zustand)
     {
@@ -92,6 +92,11 @@ internal sealed class SteuerFenster : Form
         stapel.Controls.Add(_verbindung);
         _verbinden = Knopf("Mit AutoSchnell verbinden …");
         stapel.Controls.Add(_verbinden);
+        // Pruefbericht 03.10.2026 (Nr. 6/8): "Laeuft alles?" — Windows, Texterkennung, Server, Abo, AutoPointer, Probe
+        var systemcheck = Knopf("Systemcheck: läuft alles?");
+        systemcheck.Name = "systemcheck";
+        systemcheck.Click += (_, _) => SystemcheckOeffnen?.Invoke();
+        stapel.Controls.Add(systemcheck);
 
         var unten = Reihe();
         unten.Margin = new Padding(0, 14, 0, 0);

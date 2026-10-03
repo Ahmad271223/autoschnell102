@@ -59,7 +59,11 @@ dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und 
 * **Neuwagen** (Zustand „Neu“) haben in AutoPointer weder Erstzulassung noch Kilometerstand: dann gilt dieses Jahr
   und 0 km (Befund 03.10.: BYD Dolphin, mobile.de).
 * Dasselbe Fahrzeug öffnet nie zweimal hintereinander (Kennung aus dem gelesenen Text `Marke Modell | EZ | km | kW`,
-  Lesefehler i/l/1 und o/0 zählen nicht als neues Auto).
+  Lesefehler i/l/1 und o/0 zählen nicht als neues Auto). **Seit 1.5.0** entscheidet die Inserat-ID (AutoScout: Hash-ID),
+  wenn beide Lesungen eine haben: zwei verschiedene Inserate mit gleichen Daten sind zwei Autos; fehlt die ID in einer
+  Lesung, gilt weiter die Kennung aus den Daten (ein Lesefehler macht aus einem Auto nicht zwei).
+* Bei jedem neuen Auto werden „Letzten Vergleich erneut öffnen“ und das gemerkte Inserat sofort geleert — es öffnen
+  nie die Links eines früheren Autos.
 * **Seit 1.4.0 erkennt der Server Marke und Modell** (Wunsch Ahmad 03.10.: „das Programm enthält kaum noch Wissen“):
   das Programm schickt nur, was AutoPointer zeigt (`roh: true`), `backend/werkzeug_erkennung.py` erkennt es — 1:1 die
   frühere Programm-Logik (am 03.10. über 16.636 Fälle ohne Abweichung abgeglichen). Verbesserungen brauchen damit nur
@@ -117,6 +121,9 @@ Fehlersuche: `AutoSchnell-Vergleich.exe --einmal` liest das gerade angezeigte Au
 (und, falls verbunden, die Server-Links im Probelauf) aus; `--verbinden <code>` verbindet ohne Fenster;
 `--server <url>` nimmt einen Testserver; `--probelauf` startet das Tray-Programm, öffnet aber keinen Browser.
 `AUTOSCHNELL_VERGLEICH_DATEN=<ordner>` legt Einstellungen/Schlüssel woanders ab (Tests).
+`--systemcheck` (auch Knopf „Systemcheck“ im Fenster und im Menü) prüft Windows, Texterkennung, Server, Verbindung/Abo,
+Version, AutoPointer, eine Probe-Lesung samt Probe-Vergleich (öffnet nichts), Browser und App. Die Tests laufen seit
+1.5.0 auch in der GitHub-CI (Job „AutoPointer-Vergleich (Windows-Tests)“).
 
 Protokoll: `%LOCALAPPDATA%\AutoSchnell\AutoPointer-Vergleich\protokoll\` (14 Tage) — seit 1.3.5 **verschlüsselt**
 (Windows-DPAPI, nur derselbe Windows-Benutzer; lesbar im Protokollfenster mit Tagesauswahl und „Kopieren“ oder mit

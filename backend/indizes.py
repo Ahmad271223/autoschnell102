@@ -1266,6 +1266,11 @@ WERKZEUG_INDIZES = (
     ("werkzeug_vergleiche", [("werkzeug", 1), ("dealer_id", 1), ("erstellt_am", -1)],
      {"name": "werkzeug_vergleiche_firma"}),
     ("werkzeug_vergleiche", [("werkzeug", 1), ("erstellt_am", -1)], {"name": "werkzeug_vergleiche_zeit"}),
+    # Pruefbericht 03.10.2026 (Nr. 12/16): App-Start-Rueckmeldungen (10 min) und Trenn-Gruende (30 Tage)
+    ("werkzeug_app_starts", [("start", 1)], {"name": "werkzeug_app_start", "unique": True}),
+    ("werkzeug_app_starts", [("ablauf", 1)], {"name": "werkzeug_app_start_ablauf", "expireAfterSeconds": 0}),
+    ("werkzeug_getrennt", [("werkzeug", 1), ("token_hash", 1)], {"name": "werkzeug_getrennt_schluessel"}),
+    ("werkzeug_getrennt", [("ablauf", 1)], {"name": "werkzeug_getrennt_ablauf", "expireAfterSeconds": 0}),
 )
 
 

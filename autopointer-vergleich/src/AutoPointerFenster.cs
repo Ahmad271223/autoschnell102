@@ -44,11 +44,26 @@ internal static class AutoPointerFenster
         try
         {
             using var p = Process.GetProcessById((int)pid);
-            return Prozessnamen.Contains(p.ProcessName, StringComparer.OrdinalIgnoreCase);
+            if (Prozessnamen.Contains(p.ProcessName, StringComparer.OrdinalIgnoreCase)) return true;
+            // Pruefbericht 03.10.2026 (Nr. 7): benennt ein Update die Programmdatei um, erkennt der Pfad der
+            // Installation (Ordner "AutoPointer" bzw. Hersteller "vitdev") es trotzdem — zusaetzlich zum Fenstertitel.
+            return IstAutoPointerPfad(ProgrammPfad(p));
         }
         catch (ArgumentException) { return false; }
         catch (InvalidOperationException) { return false; }
     }
+
+    private static string? ProgrammPfad(Process p)
+    {
+        try { return p.MainModule?.FileName; }
+        catch (Exception) { return null; }     // anderer Benutzer/hoehere Rechte: Pfad nicht lesbar
+    }
+
+    /// <summary>Liegt die Programmdatei in einer AutoPointer-Installation? (rein, fuer Tests)</summary>
+    internal static bool IstAutoPointerPfad(string? pfad) =>
+        !string.IsNullOrWhiteSpace(pfad)
+        && (pfad.Contains(@"\AutoPointer", StringComparison.OrdinalIgnoreCase)
+            || pfad.Contains(@"\vitdev", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>Sucht die sichtbare Detailansicht (Reiter "Übersicht"). null, wenn
     /// rechts gerade kein Fahrzeug bzw. ein anderer Reiter angezeigt wird.</summary>
@@ -134,6 +149,11 @@ internal static class AutoPointerFenster
     /// <summary>Eigene Fenster, die ueber AutoPointer liegen koennen (die Leiste, immer im Vordergrund).
     /// Setzt TrayApp; liefert Handles, kein Zugriff auf Steuerelemente (laeuft im Lese-Thread).</summary>
     public static Func<IEnumerable<IntPtr>> EigeneFenster { get; set; } = () => Array.Empty<IntPtr>();
+
+    /// <summary>Pruefbericht 03.10.2026 (Nr. 10): eigene Fenster (die Leiste) kurz unsichtbar machen (true) bzw.
+    /// wieder zeigen (false), damit das Bildschirm-Abbild nur AutoPointer zeigt — ohne AutoPointer selbst zeichnen
+    /// zu lassen (PrintWindow, loeste dort Abstuerze aus). Setzt TrayApp; null = nichts zu tun.</summary>
+    public static Action<bool>? EigeneAusblenden { get; set; }
 
     /// <summary>Liegt ein eigenes Fenster ueber diesem? Dann zeigt der Bildschirm dort nicht nur AutoPointer —
     /// lieber PrintWindow als eine Leiste mitlesen.</summary>

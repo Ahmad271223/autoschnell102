@@ -366,7 +366,7 @@ public class UeberwacherTests
         await Anklicken(AutoScout, 1);
         Assert.Single(_b.Aufrufe);                      // die Vergleiche kommen trotzdem
         Assert.Null(_u.LetzteInseratUrl);
-        Assert.Contains(_meldungen, m => m.Contains("Hash-ID") && m.Contains("selbst kopieren"));
+        Assert.Contains(_meldungen, m => m.Contains("Hash-ID") && m.Contains("Adresse kopieren"));
     }
 
     [Fact]

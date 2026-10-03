@@ -34,6 +34,19 @@ internal static class BrowserOeffner
         }
     }
 
+    /// <summary>Systemcheck (Nr. 8): gibt es einen Browser fuer die Vergleiche?</summary>
+    public static bool BrowserVorhanden(BrowserWahl wahl)
+    {
+        if (Pfad("msedge.exe") != null || Pfad("chrome.exe") != null) return true;
+        try
+        {
+            using var k = Registry.CurrentUser.OpenSubKey(
+                @"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice");
+            return k?.GetValue("ProgId") is string { Length: > 0 };
+        }
+        catch (Exception) { return false; }
+    }
+
     private static string? Pfad(string exe)
     {
         foreach (var basis in new[] { Registry.CurrentUser, Registry.LocalMachine })

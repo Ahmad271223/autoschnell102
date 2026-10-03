@@ -97,11 +97,23 @@ internal sealed class Einstellungen
     {
         WartezeitMs = Math.Clamp(WartezeitMs, 100, 5000);
         MindestabstandMs = Math.Clamp(MindestabstandMs, 0, 60_000);
-        if (string.IsNullOrWhiteSpace(Server) || !Uri.TryCreate(Server.Trim(), UriKind.Absolute, out _))
-            Server = StandardServer;
-        Server = Server.Trim().TrimEnd('/');
+        Server = SichererServer(Server) ?? StandardServer;
         LeisteEcke = LeisteEcke == Leiste.Rechts ? Leiste.Rechts : Leiste.Links;
         return this;
+    }
+
+    /// <summary>Pruefbericht 03.10.2026 (Nr. 14): der Programm-Schluessel geht mit JEDER Anfrage an den Server —
+    /// deshalb nur https und nur AutoSchnell (auto-schnellkauf.de samt Unteradressen). http bzw. eine andere
+    /// Adresse nur fuer den eigenen Rechner (Tests: 127.0.0.1, localhost). Sonst null.</summary>
+    internal static string? SichererServer(string? adresse)
+    {
+        if (string.IsNullOrWhiteSpace(adresse) || !Uri.TryCreate(adresse.Trim(), UriKind.Absolute, out var u)) return null;
+        if (!string.IsNullOrEmpty(u.UserInfo) || u.Scheme is not ("https" or "http")) return null;
+        bool lokal = u.IsLoopback;
+        bool autoschnell = u.Host.Equals("auto-schnellkauf.de", StringComparison.OrdinalIgnoreCase)
+                           || u.Host.EndsWith(".auto-schnellkauf.de", StringComparison.OrdinalIgnoreCase);
+        if (!lokal && !(autoschnell && u.Scheme == "https")) return null;
+        return adresse.Trim().TrimEnd('/');
     }
 
     /// <summary>Programm-Schluessel fuer den aktuellen Server (oder null).</summary>

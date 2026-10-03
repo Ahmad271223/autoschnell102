@@ -21,7 +21,10 @@ internal sealed class DienstFehler : Exception
 }
 
 internal sealed record VerbindenAntwort(string Schluessel, string Konto, string Name, string Firma);
-internal sealed record StatusAntwort(string Konto, string Name, string Firma, string PcName, string? AboBis);
+/// <param name="AktuelleVersion">Pruefbericht 03.10.2026 (Nr. 4): die Version, die AutoSchnell gerade zum
+/// Herunterladen anbietet (null bei einem Server ohne diese Angabe) — ist sie neuer, sagt das Programm es.</param>
+internal sealed record StatusAntwort(string Konto, string Name, string Firma, string PcName, string? AboBis,
+                                     string? AktuelleVersion = null, string? ProgrammName = null);
 internal sealed record Vergleich(string Portal, string Url);
 
 /// <param name="ErkanntMarke">Seit 1.4.0: Marke/Modell erkennt der SERVER (Katalognamen zur Anzeige);
@@ -45,6 +48,22 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
 {
     public const string Werkzeug = "autopointer-vergleich";
     private const string SchluesselKopf = "X-Werkzeug-Schluessel";
+    /// <summary>Pruefbericht 03.10.2026 (Nr. 17): so lange darf ein Vergleich hoechstens dauern. Der Server antwortet
+    /// sonst in Sekundenbruchteilen (das Inserat liest er im Hintergrund) — haengt er, ist nach 8 s Schluss und das
+    /// naechste angeklickte Auto kommt dran, statt 15 s lang alles zu blockieren.</summary>
+    internal static TimeSpan VergleichFrist { get; set; } = TimeSpan.FromSeconds(8);
+
+    /// <summary>Pruefbericht 03.10.2026 (Nr. 15): nur diese Seiten oeffnet das Programm — Vergleiche bei mobile.de
+    /// und AutoScout24, Inserate zusaetzlich bei Kleinanzeigen. Alles andere (auch von einem falsch eingestellten
+    /// oder fremden Server) wird verworfen.</summary>
+    internal static readonly string[] VergleichsSeiten = { "mobile.de", "autoscout24.de" };
+    internal static readonly string[] InseratSeiten = { "mobile.de", "autoscout24.de", "kleinanzeigen.de" };
+
+    internal static bool ErlaubteAdresse(string? url, IEnumerable<string> seiten) =>
+        Uri.TryCreate(url, UriKind.Absolute, out var u) && u.Scheme == Uri.UriSchemeHttps
+        && string.IsNullOrEmpty(u.UserInfo)
+        && seiten.Any(h => u.Host.Equals(h, StringComparison.OrdinalIgnoreCase)
+                           || u.Host.EndsWith("." + h, StringComparison.OrdinalIgnoreCase));
 
     private readonly HttpClient _http;
     private readonly Func<string?> _schluessel;
@@ -80,12 +99,15 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
         PropertyNameCaseInsensitive = true,
     };
 
-    private async Task<JsonElement> SendeAsync(HttpRequestMessage anfrage)
+    private async Task<JsonElement> SendeAsync(HttpRequestMessage anfrage, TimeSpan? frist = null)
     {
         HttpResponseMessage antwort;
-        try { antwort = await _http.SendAsync(anfrage); }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        using var abbruch = frist is { } f ? new CancellationTokenSource(f) : null;
+        try { antwort = await _http.SendAsync(anfrage, abbruch?.Token ?? CancellationToken.None); }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or OperationCanceledException)
         {
+            if (abbruch?.IsCancellationRequested == true)
+                throw new DienstFehler(0, "AutoSchnell antwortet gerade nicht – beim nächsten Auto wird es erneut versucht.");
             throw new DienstFehler(0, "Keine Verbindung zu AutoSchnell – bitte Internet prüfen.");
         }
         using (antwort)
@@ -152,7 +174,34 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
     {
         var e = await SendeAsync(Anfrage(HttpMethod.Get, "status"));
         return new StatusAntwort(Text(e, "konto"), Text(e, "name"), Text(e, "firma"), Text(e, "pc_name"),
-                                 e.TryGetProperty("abo_bis", out var b) && b.ValueKind == JsonValueKind.String ? b.GetString() : null);
+                                 e.TryGetProperty("abo_bis", out var b) && b.ValueKind == JsonValueKind.String ? b.GetString() : null,
+                                 Text(e, "aktuelle_version") is { Length: > 0 } av ? av : null,
+                                 Text(e, "programm_name") is { Length: > 0 } pn ? pn : null);
+    }
+
+    /// <summary>Pruefbericht 03.10.2026 (Nr. 12): hat die AutoSchnell-App das Auto wirklich uebernommen? Die
+    /// Web-App meldet den Start (Kennung im Link) an den Server; ohne Meldung oeffnet das Programm den Browser.
+    /// Fehler zaehlen als "nicht bestaetigt".</summary>
+    public async Task<bool> AppStartBestaetigtAsync(string startKennung)
+    {
+        try
+        {
+            var e = await SendeAsync(Anfrage(HttpMethod.Get, "app-start/" + Uri.EscapeDataString(startKennung)),
+                                     TimeSpan.FromSeconds(4));
+            return e.TryGetProperty("bestaetigt", out var b) && b.ValueKind == JsonValueKind.True;
+        }
+        catch (DienstFehler) { return false; }
+    }
+
+    /// <summary>Ist <paramref name="angeboten"/> neuer als <paramref name="eigene"/>? ("1.5.0" vs "1.4.2"; Zusaetze
+    /// wie "+abc" zaehlen nicht). Unlesbares -> false.</summary>
+    internal static bool NeuereVersion(string? angeboten, string? eigene)
+    {
+        static Version? V(string? s) =>
+            Version.TryParse((s ?? "").Split('+', '-')[0].Trim().TrimStart('v', 'V'), out var v) ? v : null;
+        var a = V(angeboten);
+        var e = V(eigene);
+        return a != null && e != null && a > e;
     }
 
     public async Task AbmeldenAsync()
@@ -163,20 +212,22 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
 
     public async Task<VergleichAntwort> VergleichAsync(Fahrzeug f, bool probelauf)
     {
-        var e = await SendeAsync(Anfrage(HttpMethod.Post, "vergleich", new { fahrzeug = Nutzlast(f), probelauf }));
+        var e = await SendeAsync(Anfrage(HttpMethod.Post, "vergleich", new { fahrzeug = Nutzlast(f), probelauf }),
+                                 VergleichFrist);
         var links = new List<Vergleich>();
         if (e.TryGetProperty("links", out var l) && l.ValueKind == JsonValueKind.Array)
             foreach (var x in l.EnumerateArray())
             {
                 string url = Text(x, "url");
-                if (Uri.TryCreate(url, UriKind.Absolute, out var u) && u.Scheme == Uri.UriSchemeHttps)
+                if (ErlaubteAdresse(url, VergleichsSeiten))
                     links.Add(new Vergleich(Text(x, "portal"), url));
+                else if (url.Length > 0)
+                    Protokoll.Schreibe("Link verworfen (keine mobile.de-/AutoScout24-Adresse): " + url);
             }
         var hinweise = new List<string>();
         if (e.TryGetProperty("hinweise", out var h) && h.ValueKind == JsonValueKind.Array)
             hinweise.AddRange(h.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!));
-        string? inseratUrl = Text(e, "inserat_url") is { Length: > 0 } iu
-                             && Uri.TryCreate(iu, UriKind.Absolute, out var iuri) && iuri.Scheme == Uri.UriSchemeHttps ? iu : null;
+        string? inseratUrl = Text(e, "inserat_url") is { Length: > 0 } iu && ErlaubteAdresse(iu, InseratSeiten) ? iu : null;
         string vorabStatus = "", vorabHinweis = "";
         if (e.TryGetProperty("vorab", out var vorab) && vorab.ValueKind == JsonValueKind.Object)
         {

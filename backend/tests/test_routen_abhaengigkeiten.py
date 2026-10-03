@@ -104,6 +104,7 @@ OEFFENTLICH = {
     # Status/Vergleich/Abmelden DIESES Werkzeugs erlaubt; Abo, Sperre und Freigabe prueft routes/werkzeuge._programm.
     "/api/werkzeuge/{werkzeug_id}/verbinden", "/api/werkzeuge/{werkzeug_id}/status",
     "/api/werkzeuge/{werkzeug_id}/vergleich", "/api/werkzeuge/{werkzeug_id}/abmelden",
+    "/api/werkzeuge/{werkzeug_id}/app-start/{start}",   # 03.10.2026 Nr. 12: Programm-Schluessel statt Anmeldung
 }
 # ... davon tragen diese trotzdem eine Kette (Besucher ODER Kaeufer, bzw. der
 # Marktplatz-Schalter) — sie zaehlen nicht als "ganz ohne Abhaengigkeit":

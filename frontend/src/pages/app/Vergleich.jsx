@@ -23,7 +23,7 @@ import ProfileBadge from "@/components/ProfileBadge";
 import PortalBadge from "@/components/PortalBadge";
 import { openContractPdf } from "@/lib/pdf";
 import { filterOeffnen, FILTER_TOAST_ID } from "@/lib/filterOeffnen";
-import { INSERAT_EREIGNIS } from "@/lib/programmStart";
+import { INSERAT_EREIGNIS, startKennung, startMelden } from "@/lib/programmStart";
 import { fensterDanebenSetzen, zweitenBildschirmAnfragen } from "@/lib/popup";
 import { hinweiseZeigen } from "@/lib/hinweise";
 import { useAuth } from "@/context/AuthContext";
@@ -498,6 +498,9 @@ export default function Vergleich() {
     const param = new URLSearchParams(window.location.search).get("url");
     if (!param) return;
     adresseGestartet.current = true;
+    // Pruefbericht 03.10.2026 (Nr. 12): dem Programm melden, dass die App das Auto uebernommen hat
+    const start = startKennung(window.location.href);
+    if (start) startMelden(api, start);
     nav("/app/vergleich", { replace: true });
     const link = inseratsLinkAusText(param);
     if (!link) {

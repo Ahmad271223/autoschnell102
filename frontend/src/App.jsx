@@ -1,11 +1,11 @@
 import "@/App.css";
-import { Suspense, lazy, useEffect, useState } from "react";
+import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import NachladeFehler from "@/components/NachladeFehler";
 import SeiteLaedt from "@/components/SeiteLaedt";
 import FassungsHinweis from "@/components/FassungsHinweis";
 import { nachladenGescheitert } from "@/lib/fassung";
 import { hatUngespeichert } from "@/lib/ungespeichert";
-import { startZieleVerfolgen } from "@/lib/programmStart";
+import { startMelden, startZieleVerfolgen } from "@/lib/programmStart";
 import { api } from "@/lib/api";
 import { istFirmenHostKandidat } from "@/lib/firmenHost";
 
@@ -104,9 +104,14 @@ function vorladen() {
 // offen, kommt das Ziel hier an (launchQueue) — mit ungespeicherter Arbeit nur als Hinweis mit Knopf.
 function AppStartZiele() {
   const nav = useNavigate();
+  const { user } = useAuth();
+  const angemeldet = useRef(false);
+  angemeldet.current = !!user && !user.is_super_admin && user.role !== "admin";
   useEffect(() => {
     startZieleVerfolgen((ziel) => nav(ziel), {
       beschaeftigt: hatUngespeichert,
+      // Pruefbericht 03.10.2026 (Nr. 12): nur angemeldet melden — eine Anfrage ohne Anmeldung liefe in die 401-Abmeldung
+      melden: (start) => { if (angemeldet.current) startMelden(api, start); },
       nachfragen: (ausfuehren) => toast.info("Neues Auto aus dem Programm — hier ist noch etwas ungespeichert.", {
         id: "app-start-ziel", duration: 20000, action: { label: "Trotzdem öffnen", onClick: ausfuehren },
       }),

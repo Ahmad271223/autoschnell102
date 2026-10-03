@@ -25,6 +25,34 @@ internal sealed class Fahrzeug
     public string? Kategorie { get; set; }
     public string? Zustand { get; set; }
     public string? Tueren { get; set; }
+    /// <summary>Pruefbericht 03.10.2026 (Nr. 9): kW und PS widersprachen sich in BEIDEN Lesedurchgaengen —
+    /// welcher Wert falsch gelesen ist, laesst sich nicht sagen. Dann gilt die Leistung als unbekannt (der Vergleich
+    /// laeuft ohne Leistungsfilter, mit Hinweis) statt mit einem moeglicherweise falschen Wert.</summary>
+    public bool LeistungUnsicher { get; set; }
+
+    /// <summary>Pruefbericht 03.10.2026 (Nr. 1): Kennung des Inserats (Inserat-ID, sonst AutoScout-Hash-ID), klein
+    /// und ohne Leer-/Sonderzeichen; null ohne Kennung. Bewusst OHNE Quelle — die steht in einer anderen Zeile
+    /// und darf als Lesefehler nicht aus demselben Auto zwei machen.</summary>
+    public string? InseratKennung
+    {
+        get
+        {
+            string roh = !string.IsNullOrWhiteSpace(InseratId) ? InseratId! : HashId ?? "";
+            string id = new(roh.Trim().ToLowerInvariant().Where(char.IsLetterOrDigit).ToArray());
+            return id.Length >= 4 ? id : null;
+        }
+    }
+
+    /// <summary>Ist <paramref name="neu"/> dasselbe Auto wie das zuletzt gemerkte? Haben BEIDE eine Inserat-Kennung,
+    /// entscheidet sie (zwei Neuwagen mit 0 km und gleichen Daten sind verschiedene Inserate); sonst der Schluessel
+    /// aus den Fahrzeugdaten wie bisher.</summary>
+    public static bool GleichesAuto(string? altSchluessel, string? altKennung, Fahrzeug neu)
+    {
+        if (altSchluessel == null) return false;
+        string? kennung = neu.InseratKennung;
+        if (kennung != null && altKennung != null) return kennung == altKennung;
+        return neu.Schluessel == altSchluessel;
+    }
 
     public bool Unfallwagen => (Zustand ?? "").Contains("unfall", StringComparison.OrdinalIgnoreCase);
 

@@ -147,6 +147,28 @@ internal static class DetailLeser
 
     public static (int? Kw, int? Ps) Leistung(string? s)
     {
+        var (kw, ps, _) = LeistungGeprueft(s);
+        return (kw, ps);
+    }
+
+    /// <summary>Wie <see cref="Leistung"/>, aber: widersprechen sich gelesene kW und PS (Pruefbericht 03.10.2026,
+    /// Nr. 9), bleibt die Leistung unbekannt und <c>Unsicher</c> ist true — vorher gewann still der kW-Wert, auch
+    /// wenn genau der falsch gelesen war (110 kW -> 170 kW). Der zweite Lesedurchgang kann sie dann noch klaeren.</summary>
+    public static (int? Kw, int? Ps, bool Unsicher) LeistungGeprueft(string? s)
+    {
+        var (kw, ps) = LeistungRoh(s);
+        if (kw == null && ps == null) return (null, null, false);
+        if (kw != null && ps != null && Math.Abs(FahrzeugCodes.KwZuPs(kw.Value) - ps.Value) > 3
+            && Math.Abs(FahrzeugCodes.PsZuKw(ps.Value) - kw.Value) > 3)
+            return (null, null, true);
+        kw ??= ps != null ? FahrzeugCodes.PsZuKw(ps.Value) : null;
+        ps ??= kw != null ? FahrzeugCodes.KwZuPs(kw.Value) : null;
+        if (kw is < 5 or > 1500) return (null, null, false);
+        return (kw, ps, false);
+    }
+
+    private static (int? Kw, int? Ps) LeistungRoh(string? s)
+    {
         if (string.IsNullOrWhiteSpace(s)) return (null, null);
         string t = Zahlentext(s);
         int? kw = null, ps = null;
@@ -161,14 +183,6 @@ internal static class DetailLeser
             if (zahlen.Count >= 2) { kw = zahlen[0]; ps = zahlen[1]; }
             else if (zahlen.Count == 1) kw = zahlen[0];
         }
-        if (kw != null && ps != null && Math.Abs(FahrzeugCodes.KwZuPs(kw.Value) - ps.Value) > 3)
-        {
-            // Widerspruch -> der Wert, der zum anderen passt, gewinnt; sonst kW.
-            if (Math.Abs(FahrzeugCodes.PsZuKw(ps.Value) - kw.Value) > 3) ps = FahrzeugCodes.KwZuPs(kw.Value);
-        }
-        kw ??= ps != null ? FahrzeugCodes.PsZuKw(ps.Value) : null;
-        ps ??= kw != null ? FahrzeugCodes.KwZuPs(kw.Value) : null;
-        if (kw is < 5 or > 1500) return (null, null);
         return (kw, ps);
     }
 
@@ -271,7 +285,7 @@ internal static class DetailLeser
             Preis = Betrag(tab.GetValueOrDefault(Feld.Preis)),
         };
         (f.EzMonat, f.EzJahr) = Erstzulassung(tab.GetValueOrDefault(Feld.Erstzulassung));
-        (f.Kw, f.Ps) = Leistung(tab.GetValueOrDefault(Feld.Leistung));
+        (f.Kw, f.Ps, f.LeistungUnsicher) = LeistungGeprueft(tab.GetValueOrDefault(Feld.Leistung));
         if (tab.TryGetValue(Feld.InseratId, out var id))
         {
             string sauber = Regex.Replace(id, @"[^A-Za-z0-9\-]", "");
@@ -305,6 +319,8 @@ internal static class DetailLeser
         if (a.EzJahr == null) { a.EzJahr = b.EzJahr; a.EzMonat = b.EzMonat; }
         a.Kilometer ??= b.Kilometer;
         if (a.Kw == null) { a.Kw = b.Kw; a.Ps = b.Ps; }
+        // Nr. 9: unsicher bleibt die Leistung nur, wenn KEIN Durchgang einen stimmigen Wert lieferte
+        a.LeistungUnsicher = a.Kw == null && (a.LeistungUnsicher || b.LeistungUnsicher);
         a.Kraftstoff ??= b.Kraftstoff;
         a.Getriebe ??= b.Getriebe;
         a.Zustand ??= b.Zustand;

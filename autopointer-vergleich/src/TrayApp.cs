@@ -36,6 +36,10 @@ internal sealed class TrayApp : ApplicationContext
     private AutoPointerQuelle? _quelle;
     private readonly EventWaitHandle _zeigenSignal;
     private string? _letzteMeldung;
+    /// <summary>Stand der Zwischenablage, als das letzte Auto dran war (Nr. 11).</summary>
+    private uint _zwischenablageStand;
+    private bool _updateGemeldet;
+    private bool _systemcheckLaeuft;
 
     public TrayApp(bool probelauf, string? server = null, bool minimiert = false)
     {
@@ -43,7 +47,12 @@ internal sealed class TrayApp : ApplicationContext
         _serverUeberschrieben = server;
         _ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         _einstellungen = Einstellungen.Laden();
-        if (!string.IsNullOrWhiteSpace(server)) _einstellungen.Server = server.Trim().TrimEnd('/');
+        if (!string.IsNullOrWhiteSpace(server))
+        {
+            // Nr. 14: auch die Adresse von der Befehlszeile nur https://…auto-schnellkauf.de oder der eigene Rechner
+            if (Einstellungen.SichererServer(server) is { } sicher) _einstellungen.Server = sicher;
+            else Protokoll.Schreibe($"--server {server} ignoriert – nur https://…auto-schnellkauf.de oder der eigene Rechner.");
+        }
         DienstErstellen();
 
         var menue = new ContextMenuStrip();
@@ -70,6 +79,7 @@ internal sealed class TrayApp : ApplicationContext
         menue.Items.Add(new ToolStripSeparator());
         menue.Items.Add("Einstellungen …", null, (_, _) => EinstellungenZeigen());
         menue.Items.Add("Protokoll anzeigen …", null, (_, _) => ProtokollZeigen());
+        menue.Items.Add("Systemcheck: läuft alles? …", null, async (_, _) => await SystemcheckZeigenAsync());
         menue.Items.Add(new ToolStripSeparator());
         menue.Items.Add("Beenden", null, (_, _) => Beenden());
 
@@ -96,6 +106,7 @@ internal sealed class TrayApp : ApplicationContext
         _fenster.Trennen += async () => await TrennenAsync();
         _fenster.EinstellungenOeffnen += EinstellungenZeigen;
         _fenster.ProtokollOeffnen += ProtokollZeigen;
+        _fenster.SystemcheckOeffnen += async () => await SystemcheckZeigenAsync();
         _fenster.Beenden += Beenden;
         _leiste = new Leiste(ZustandFuersFenster, () => _quelle?.Hauptfenster ?? IntPtr.Zero);
         _leiste.Aktivieren += () => AutomatikSetzen(true);
@@ -107,6 +118,11 @@ internal sealed class TrayApp : ApplicationContext
         _leiste.Ausblenden += () => { _einstellungen.LeisteAnzeigen = false; Speichern(_einstellungen); LeisteAnwenden(); FensterZeigen(); };
         _leiste.Beenden += Beenden;
         AutoPointerFenster.EigeneFenster = () => new[] { _leistenHandle };
+        // Nr. 10: liegt die Leiste ueber der AutoPointer-Tabelle, wird sie fuer das Bildschirm-Abbild kurz unsichtbar
+        AutoPointerFenster.EigeneAusblenden = unsichtbar => _ui.Send(_ =>
+        {
+            if (!_leiste.IsDisposed && _leiste.Visible) _leiste.Opacity = unsichtbar ? 0 : 1;
+        }, null);
         LeisteAnwenden();
         // Mit Leiste startet nur die Leiste (das grosse Fenster per Klick auf ☰); ohne Leiste das Fenster
         if (!_einstellungen.LeisteAnzeigen)
@@ -203,20 +219,96 @@ internal sealed class TrayApp : ApplicationContext
     private void VertragOeffnen()
     {
         string? url = _ueberwacher?.LetzteInseratUrl;
+        var fahrzeug = _ueberwacher?.LetztesFahrzeug;
+        if (string.IsNullOrEmpty(url) && fahrzeug != null)
+        {
+            // Nr. 11: AutoScout zeigt die Kennung abgeschnitten — hat der Sucher die Adresse seit dem Anklicken
+            // kopiert ("Seite öffnen", Strg+L, Strg+C), nimmt das Programm sie.
+            url = InseratAusZwischenablage(fahrzeug);
+            if (url != null) Protokoll.Schreibe("Kaufvertrag: Inserat-Adresse aus der Zwischenablage übernommen: " + url);
+        }
         if (string.IsNullOrEmpty(url))
         {
-            Sprechblase(_ueberwacher?.LetztesFahrzeug == null
+            Sprechblase(fahrzeug == null
                 ? "Noch kein Auto verglichen – erst in AutoPointer ein Inserat anklicken."
                 : Ueberwacher.KeinLinkHinweis, true, erzwingen: true);
             return;
         }
-        string ziel = $"{_einstellungen.Server}/app/vergleich?url={Uri.EscapeDataString(url)}";
+        // Nr. 12: Kennung des Starts — die App meldet sie beim Uebernehmen an AutoSchnell zurueck
+        string start = Guid.NewGuid().ToString("N");
+        string ziel = $"{_einstellungen.Server}/app/vergleich?url={Uri.EscapeDataString(url)}&start={start}";
         Protokoll.Schreibe("Kaufvertrag: öffne " + ziel);
         // Wunsch Ahmad 03.10.2026: zuerst die installierte AutoSchnell-App (offenes Fenster oder neu starten),
         // nur ohne App im Browser
-        if (AutoSchnellApp.Oeffnen(ziel, _einstellungen.Server)) return;
+        if (AutoSchnellApp.Oeffnen(ziel, _einstellungen.Server))
+        {
+            _ = AppStartPruefenAsync(start, ziel);
+            return;
+        }
+        ImBrowserOeffnen(ziel);
+    }
+
+    private void ImBrowserOeffnen(string ziel)
+    {
         try { BrowserOeffner.Oeffne(new[] { ziel }, _einstellungen.Browser); }
         catch (Exception ex) { Sprechblase("Browser konnte nicht geöffnet werden: " + ex.Message, true, erzwingen: true); }
+    }
+
+    /// <summary>Pruefbericht 03.10.2026 (Nr. 12): Kommt von der App binnen 10 Sekunden keine Rueckmeldung (Fenster
+    /// nicht nach vorne gekommen, falsche App, nicht angemeldet), oeffnet das Programm den Kaufvertrag im Browser.</summary>
+    private async Task AppStartPruefenAsync(string start, string ziel)
+    {
+        if (!_dienst.Verbunden) return;
+        var bis = DateTime.Now.AddSeconds(10);
+        while (DateTime.Now < bis)
+        {
+            await Task.Delay(700);
+            if (await _dienst.AppStartBestaetigtAsync(start))
+            {
+                Protokoll.Schreibe("AutoSchnell-App hat das Auto übernommen.");
+                return;
+            }
+        }
+        Protokoll.Schreibe("AutoSchnell-App hat sich nicht gemeldet – Kaufvertrag im Browser geöffnet.");
+        Sprechblase("Die AutoSchnell-App hat nicht reagiert – der Kaufvertrag ist im Browser geöffnet.", false, erzwingen: true);
+        ImBrowserOeffnen(ziel);
+    }
+
+    /// <summary>Nr. 11: Inserat-Adresse aus der Zwischenablage — nur, wenn seit dem Anklicken dieses Autos etwas
+    /// kopiert wurde, nur Inserat-Seiten (mobile.de, AutoScout24, Kleinanzeigen) und nur das Portal dieses Autos.</summary>
+    private string? InseratAusZwischenablage(Fahrzeug f)
+    {
+        try
+        {
+            if (Native.GetClipboardSequenceNumber() == _zwischenablageStand) return null;
+            return InseratAdresse(Clipboard.ContainsText() ? Clipboard.GetText() : null, f.Quelle);
+        }
+        catch (Exception ex)
+        {
+            Protokoll.Schreibe("Zwischenablage nicht lesbar: " + ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>Erste Inserat-Adresse im Text, passend zum Portal (rein, fuer Tests).</summary>
+    internal static string? InseratAdresse(string? text, string? quelle)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        string q = (quelle ?? "").ToLowerInvariant();
+        string? portal = q.Contains("autoscout") ? "autoscout24.de" : q.Contains("mobile") ? "mobile.de"
+            : q.Contains("kleinanzeigen") || q.Contains("ebay") ? "kleinanzeigen.de" : null;
+        foreach (System.Text.RegularExpressions.Match m in
+                 System.Text.RegularExpressions.Regex.Matches(text, @"https://[^\s""'<>]+"))
+        {
+            string url = m.Value.TrimEnd('.', ',', ';', ')');
+            if (!AutoSchnellDienst.ErlaubteAdresse(url, portal != null ? new[] { portal } : AutoSchnellDienst.InseratSeiten))
+                continue;
+            string pfad = new Uri(url).AbsolutePath.ToLowerInvariant();
+            bool inserat = pfad.Contains("/angebote/") || pfad.Contains("/s-anzeige/") || pfad.Contains("/auto-inserat/")
+                           || (pfad.Contains("details.html") && url.Contains("id=", StringComparison.OrdinalIgnoreCase));
+            if (inserat) return url;
+        }
+        return null;
     }
 
     private void DienstErstellen() =>
@@ -247,6 +339,15 @@ internal sealed class TrayApp : ApplicationContext
                 Speichern(_einstellungen);
             }
             Protokoll.Schreibe($"Lizenz ok: {als} · PC {s.PcName}" + (s.AboBis != null ? $" · Abo bis {s.AboBis[..Math.Min(10, s.AboBis.Length)]}" : ""));
+            // Pruefbericht 03.10.2026 (Nr. 4): AutoSchnell bietet eine neuere Version an -> einmal je Programmstart sagen
+            string eigene = Application.ProductVersion.Split('+')[0];
+            if (!_updateGemeldet && AutoSchnellDienst.NeuereVersion(s.AktuelleVersion, eigene))
+            {
+                _updateGemeldet = true;
+                Protokoll.Schreibe($"Neue Version {s.AktuelleVersion} verfügbar (installiert: {eigene}).");
+                Sprechblase($"Neue Version {s.AktuelleVersion} verfügbar – in AutoSchnell unter „{s.ProgrammName ?? "Programme"}“ "
+                            + "herunterladen und starten (installiert: " + eigene + ").", false, erzwingen: true);
+            }
             VerbindungAnzeigen();
             StatusAnzeigen(_ueberwacher?.Status ?? Status.KeinAutoPointer);
         }
@@ -313,6 +414,8 @@ internal sealed class TrayApp : ApplicationContext
         {
             Protokoll.Schreibe(fehler);
             Sprechblase(fehler, true, erzwingen: true);
+            // Nr. 8: ohne Texterkennung geht nichts — gleich den Systemcheck zeigen (sagt, was fehlt und was zu tun ist)
+            _ui.Post(async _ => await SystemcheckZeigenAsync(), null);
             return;
         }
         Protokoll.Schreibe($"Texterkennung: {ocr.Sprache}");
@@ -323,6 +426,7 @@ internal sealed class TrayApp : ApplicationContext
         _ueberwacher.StatusGeaendert += s => _ui.Post(_ => StatusAnzeigen(s), null);
         _ueberwacher.Meldung += (t, f) => _ui.Post(_ => Sprechblase(t, f), null);
         _ueberwacher.VerbindungVerloren += m => _ui.Post(_ => VerbindungVerloren(m), null);
+        _ueberwacher.FahrzeugGewechselt += _ => _zwischenablageStand = Native.GetClipboardSequenceNumber();
         _ueberwacher.Neustart();
 
         var token = _ende.Token;
@@ -429,6 +533,26 @@ internal sealed class TrayApp : ApplicationContext
         _hotkey.Abmelden(HotkeyId);
         if (_einstellungen.TastenkuerzelAktiv && !_hotkey.Anmelden(HotkeyId, Native.MOD_CONTROL | Native.MOD_ALT, (uint)Keys.P))
             Protokoll.Schreibe("Strg+Alt+P ist schon von einem anderen Programm belegt – Umschalten nur über das Symbol.");
+    }
+
+    /// <summary>Pruefbericht 03.10.2026 (Nr. 6/8): Systemcheck mit Probe-Lesung und Probe-Vergleich.</summary>
+    private async Task SystemcheckZeigenAsync()
+    {
+        if (_systemcheckLaeuft) return;
+        _systemcheckLaeuft = true;
+        try
+        {
+            Sprechblase("Systemcheck läuft …", false, erzwingen: true);
+            var punkte = await Systemcheck.PruefenAsync(_einstellungen, _dienst);
+            string text = Systemcheck.Text(punkte);
+            Protokoll.Schreibe("Systemcheck:\n" + text);
+            bool fehler = punkte.Any(p => p.Stufe == PruefStufe.Fehler);
+            MessageBox.Show(text + "\n\n(Strg+C kopiert diesen Text.)",
+                fehler ? "Systemcheck – bitte beheben" : "Systemcheck – alles bereit",
+                MessageBoxButtons.OK, fehler ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
+        }
+        catch (Exception ex) { Protokoll.Schreibe("Systemcheck fehlgeschlagen: " + ex.Message); }
+        finally { _systemcheckLaeuft = false; }
     }
 
     private void ProtokollZeigen()

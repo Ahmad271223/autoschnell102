@@ -4362,11 +4362,43 @@ Erst einmal **nur für Kunde 10002**, seit dem Abend des 03.10. auch **10001** �
   cd autopointer-vergleich && powershell -ExecutionPolicy Bypass -File build.ps1   # lokal: dist\AutoSchnell-Vergleich.exe
   scp dist/AutoSchnell-Vergleich.exe root@<server>:/tmp/                            # vom PC aus, nicht auf dem Server
   docker compose cp /tmp/AutoSchnell-Vergleich.exe backend:/tmp/AutoSchnell-Vergleich.exe
-  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.4.0
+  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.5.0
   ```
   Bis dahin zeigt die Seite „Wird gerade bereitgestellt“. Speicher: `werkzeuge/autopointer-vergleich/…`, Eintrag in `werkzeuge`.
 - Tests: `backend/tests/test_werkzeuge_20261003.py`, `frontend/src/pages/app/Programme.test.jsx`,
-  `autopointer-vergleich/tests` (`dotnet test`, nicht in der CI).
+  `autopointer-vergleich/tests` (`dotnet test`, seit 04.10. auch in der CI: Job `autopointer` auf windows-latest).
+
+### Prüfbericht AutoPointer-Vergleich 03.10.2026 (18 Punkte), Programm 1.5.0
+
+- **Nr. 1** Gleiches Auto: Inserat-ID/AutoScout-Hash-ID entscheidet, wenn beide Lesungen eine haben
+  (`Fahrzeug.GleichesAuto`), sonst die Daten-Kennung. **Nr. 2** neues Auto leert sofort „Letzten Vergleich“.
+- **Nr. 3** .NET-Tests in der CI. **Nr. 5** (Feature-Branch nach `main`) und **Nr. 18** (Code-Signatur, Zertifikat
+  kaufen) macht Ahmad — nicht im Code lösbar.
+- **Nr. 4** `GET /werkzeuge/status` liefert `aktuelle_version` + `programm_name`; das Programm meldet einmal je Start
+  „neue Version verfügbar“. Die gesendete Programmversion (User-Agent) steht am Werkzeug (`programm_version`).
+- **Nr. 6/8** Systemcheck (Fenster, Menü, `--systemcheck`); öffnet sich beim Start von selbst nur bei schweren Fehlern
+  (Windows zu alt, keine Texterkennung, kein Browser).
+- **Nr. 7** AutoPointer wird auch nach Umbenennen der exe am Pfad (`\AutoPointer`, `\vitdev`) erkannt.
+- **Nr. 9** kW und PS widersprechen sich in beiden Lesungen → Leistung bleibt leer (kein stiller Falschwert),
+  Hinweis unten rechts; ebenso bei mehr als 100.000 km je Jahr.
+- **Nr. 10** Liegt die eigene Leiste über der Tabelle, wird sie fürs Bildschirmabbild kurz unsichtbar.
+- **Nr. 11** AutoScout-Hash-ID abgeschnitten: eine seit dem Anklicken kopierte Inserat-Adresse des passenden Portals
+  wird genommen (Zwischenablage, nur neue Kopien).
+- **Nr. 12** „Kaufvertrag“ in der App: die App meldet die Übernahme (`POST /werkzeuge/app-start/{start}`, Firmen-
+  Anmeldung), das Programm fragt nach (`GET /werkzeuge/{id}/app-start/{start}`, Programm-Schlüssel); ohne Rückmeldung
+  binnen 10 s öffnet der Browser. Sammlung `werkzeug_app_starts` (TTL). Die App meldet in `pages/app/Vergleich.jsx`
+  (frisch gestartet) und in `lib/programmStart.js` (Fenster schon offen, auch wenn erst wegen Ungespeichertem
+  nachgefragt wird) — nur angemeldet. **Neue Programmversion erst hochladen, wenn dieses Frontend live ist**, sonst
+  öffnet 1.5.0 nach 10 s zusätzlich den Browser.
+- **Nr. 13** Chrome-App-Verknüpfung: Adresse vor Name; nur genau „AutoSchnell“ (+ Klammerzusatz); mehrere
+  verschiedene → Browser statt raten.
+- **Nr. 14** `--server` und gespeicherte Adresse nur `https://…auto-schnellkauf.de` oder der eigene Rechner.
+- **Nr. 15** Das Programm öffnet nur Vergleichs-/Inseratseiten der bekannten Portale (Liste im Programm).
+- **Nr. 16** Getrennt-Gründe (Chef, Admin, anderer PC, selbst) in `werkzeug_getrennt` (TTL) → das Programm sagt,
+  warum es nicht mehr verbunden ist.
+- **Nr. 17** Ein Vergleich darf höchstens 8 s dauern (`VergleichFrist`), dann klare Meldung statt Hängen.
+- Tests: `autopointer-vergleich/tests/PruefberichtTests.cs`, `backend/tests/test_werkzeuge_20261003.py` (test_60–63).
+  Neue Indizes in `indizes.WERKZEUG_INDIZES` (werden beim Start angelegt), keine Umgebungswerte, keine Migration.
 
 ## Vertragsdesign: Farbe + Layout „Formular“, Seitenleiste mit Namen (Wunsch Ahmad 03.10.2026)
 

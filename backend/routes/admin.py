@@ -1304,6 +1304,9 @@ _COMPANY_COLLECTIONS = (
     # Werkzeuge (03.10.2026): Codes, verbundene PCs und Vergleichsprotokoll des
     # AutoPointer-Vergleichs tragen dealer_id (backend/werkzeuge.py).
     "werkzeug_codes", "werkzeug_verbindungen", "werkzeug_vergleiche",
+    # Pruefbericht 03.10.2026 (Nr. 12): App-Start-Meldungen (10 Minuten TTL) tragen dealer_id.
+    # werkzeug_getrennt hat keine dealer_id (Werkzeug + Schluessel-Streuwert, 30 Tage TTL).
+    "werkzeug_app_starts",
     # Go-Live 14.09.2026 (B6): users steht NICHT mehr im Tupel. Als letzter
     # Eintrag der Schleife lief users.delete_many noch VOR Snapshots, Dateien
     # und dealers.delete_many — brach einer dieser Schritte ab, fand der

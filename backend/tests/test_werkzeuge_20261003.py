@@ -163,7 +163,8 @@ def welt():
         sucher_id = s.json()["sucher_id"]
         db.users.delete_many({"id": {"$in": [firma["user_id"], sucher_id]}})
         db.dealers.delete_one({"id": firma["dealer_id"]})
-        for sammlung in ("subscriptions", "werkzeug_codes", "werkzeug_verbindungen", "werkzeug_vergleiche"):
+        for sammlung in ("subscriptions", "werkzeug_codes", "werkzeug_verbindungen", "werkzeug_vergleiche",
+                        "werkzeug_app_starts"):
             db[sammlung].delete_many({"dealer_id": firma["dealer_id"]})
         if getauscht:
             db.dealers.update_one({"id": getauscht[0]}, {"$set": {"kunden_nr": getauscht[1]}})
@@ -696,3 +697,75 @@ def test_53_aeltere_programme_wie_bisher(welt):
     assert d["fahrzeug"] == {"marke": "VW", "modell": "Polo", "erkannt": True}
     assert [x["portal"] for x in d["links"]] == ["mobile.de", "AutoScout24"]
 
+
+
+# ------------------------------------------------------------ Pruefbericht 03.10.2026 (Nr. 4, 12, 16)
+def _code_bremse_frei(welt):
+    """Die Tests dieser Datei holen zusammen mehr als 20 Codes in 10 Minuten (Bremse je Konto) — vor den
+    folgenden Tests den Zaehler des Test-Suchers leeren."""
+    welt["db"].rate_limits.delete_many({"_id": {"$regex": f"^werkzeug_code_konto:konto:{welt['sucher_id']}:"}})
+
+
+def test_60_anderer_pc_genau_benannt(welt):
+    """Nr. 16: der alte PC erfaehrt, dass und wo das Konto neu verbunden wurde."""
+    _code_bremse_frei(welt)
+    _abo(welt, True)
+    _, pc_a, _ = _verbinden(welt, "PC-Buero")
+    _, pc_b, _ = _verbinden(welt, "PC-Halle")
+    r = _status(pc_a)
+    assert r.status_code == 401
+    assert "anderen PC („PC-Halle“)" in r.json()["detail"] and "neuen Code" in r.json()["detail"]
+    assert _status(pc_b).status_code == 200
+
+
+def test_61_getrennt_durch_chef_oder_app_genau_benannt(welt):
+    _code_bremse_frei(welt)
+    _abo(welt, True)
+    _, prog, _ = _verbinden(welt, "PC-A")
+    requests.delete(f"{API}/werkzeuge/{WID}/verbindungen/{welt['sucher_id']}", headers=welt["chef"], timeout=30)
+    assert "Dein Chef hat diesen PC" in _status(prog).json()["detail"]
+    _, prog, _ = _verbinden(welt, "PC-A")
+    requests.delete(f"{API}/werkzeuge/{WID}/verbindung", headers=welt["sucher"], timeout=30)
+    assert "in der AutoSchnell-App getrennt" in _status(prog).json()["detail"]
+    # unbekannter Schluessel: der allgemeine Text wie bisher
+    assert "nicht (mehr) verbunden" in _status({wz.TOKEN_KOPF: "gibt-es-nicht"}).json()["detail"]
+
+
+def test_62_status_nennt_die_angebotene_version_und_merkt_die_eigene(welt):
+    """Nr. 4: das Programm erfaehrt die angebotene Version; der Server merkt sich, welche Version laeuft."""
+    _code_bremse_frei(welt)
+    _abo(welt, True)
+    db = welt["db"]
+    db.werkzeuge.update_one({"id": WID}, {"$set": {"version": "9.9.9"}}, upsert=True)
+    _, prog, _ = _verbinden(welt, "PC-A")
+    r = requests.get(f"{API}/werkzeuge/{WID}/status", headers={**prog, "User-Agent": "AutoSchnell-Vergleich/1.5.0"},
+                     timeout=30)
+    assert r.status_code == 200, r.text
+    assert r.json()["aktuelle_version"] == "9.9.9" and r.json()["programm_name"] == wz.WERKZEUGE[WID]["name"]
+    v = db.werkzeug_verbindungen.find_one({"user_id": welt["sucher_id"], "werkzeug": WID}, {"_id": 0})
+    assert v["programm_version"] == "1.5.0"
+    # Chef sieht die Version seines Suchers
+    r = requests.get(f"{API}/werkzeuge/{WID}/firma", headers=welt["chef"], timeout=30)
+    assert any(x.get("programm_version") == "1.5.0" for x in r.json()["verbindungen"])
+
+
+def test_63_app_start_rueckmeldung(welt):
+    """Nr. 12: die App meldet den Start, das Programm fragt danach — nur fuer die eigene Firma."""
+    _code_bremse_frei(welt)
+    _abo(welt, True)
+    _, prog, _ = _verbinden(welt, "PC-A")
+    start = uuid.uuid4().hex
+    frage = lambda s: requests.get(f"{API}/werkzeuge/{WID}/app-start/{s}", headers=prog, timeout=30)  # noqa: E731
+    assert frage(start).json() == {"bestaetigt": False}
+    r = requests.post(f"{API}/werkzeuge/app-start/{start}", headers=welt["sucher"], timeout=30)
+    assert r.status_code == 200, r.text
+    assert requests.post(f"{API}/werkzeuge/app-start/{start}", headers=welt["sucher"], timeout=30).status_code == 200
+    assert frage(start).json() == {"bestaetigt": True}
+    # eine fremde Firma meldet denselben Start nicht fuer uns
+    fremd = uuid.uuid4().hex
+    requests.post(f"{API}/werkzeuge/app-start/{fremd}", headers=welt["andere"], timeout=30)
+    assert frage(fremd).json() == {"bestaetigt": False}
+    assert requests.post(f"{API}/werkzeuge/app-start/kaputt", headers=welt["sucher"], timeout=30).status_code == 400
+    assert requests.post(f"{API}/werkzeuge/app-start/{start}", timeout=30).status_code in (401, 403)
+    assert frage("kaputt").json() == {"bestaetigt": False}
+    welt["db"].werkzeug_app_starts.delete_many({"start": {"$in": [start, fremd]}})

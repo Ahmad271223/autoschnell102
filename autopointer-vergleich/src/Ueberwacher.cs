@@ -41,6 +41,8 @@ internal sealed class Ueberwacher
     private DateTime _seit;
     private bool _offen;
     private string? _letzterSchluessel;
+    /// <summary>Inserat-Kennung des zuletzt gemerkten Autos (Pruefbericht 03.10.2026, Nr. 1).</summary>
+    private string? _letzteKennung;
     private DateTime _letzteOeffnung = DateTime.MinValue;
     private bool _basis = true;
     private bool _ersterTick = true;
@@ -63,6 +65,8 @@ internal sealed class Ueberwacher
     public event Action<string, bool>? Meldung;
     /// <summary>Der Server kennt den Schluessel nicht mehr (anderer PC, getrennt) -> neu verbinden.</summary>
     public event Action<string>? VerbindungVerloren;
+    /// <summary>Ein neues Auto ist jetzt "das letzte" (Nr. 11: ab hier zaehlt eine neu kopierte Inserat-Adresse).</summary>
+    public event Action<Fahrzeug>? FahrzeugGewechselt;
 
     public Ueberwacher(IAnsichtQuelle quelle, Func<Einstellungen> einstellungen, IOeffner oeffner,
                        IVergleichsDienst dienst, Func<DateTime>? uhr = null, Func<TimeSpan, Task>? warte = null)
@@ -178,7 +182,9 @@ internal sealed class Ueberwacher
     {
         if (LetzteVergleiche.Count == 0)
         {
-            Melde("Noch kein Vergleich vorhanden.", false);
+            // Nr. 2: nie die Links eines frueheren Autos — fuer das zuletzt angeklickte gibt es (noch) keine
+            Melde(LetztesFahrzeug == null ? "Noch kein Vergleich vorhanden."
+                : "Für das zuletzt angeklickte Auto gibt es keinen Vergleich – „Jetzt vergleichen“ drücken.", false);
             return;
         }
         Protokoll.Schreibe("Letzten Vergleich erneut geöffnet.");
@@ -206,8 +212,7 @@ internal sealed class Ueberwacher
         }
 
         // Seit 1.4.0: Marke/Modell erkennt der Server (Wunsch Ahmad 03.10.2026) — hier zaehlt der gelesene Text
-        string schluessel = f.Schluessel;
-        if (!erzwungen && schluessel == _letzterSchluessel)
+        if (!erzwungen && Fahrzeug.GleichesAuto(_letzterSchluessel, _letzteKennung, f))
         {
             Protokoll.Schreibe($"Gleiches Fahrzeug ({f.MarkeModellText} · {f.EzText} · {f.Kilometer} km) – kein neuer Vergleich.");
             return;
@@ -219,8 +224,12 @@ internal sealed class Ueberwacher
         _basis = false;
         if (basis)
         {
-            _letzterSchluessel = schluessel;
+            Merken(f);
             LetztesFahrzeug = f;
+            // Nr. 2: zu diesem Auto gibt es noch keinen Vergleich — keine Links/Inserat eines frueheren Autos
+            LetzteVergleiche = Array.Empty<Vergleich>();
+            LetzteInseratUrl = null;
+            FahrzeugGewechselt?.Invoke(f);
             Protokoll.Schreibe("Fahrzeug war beim Start schon angezeigt – nicht automatisch geöffnet "
                                + "(Menü „Aktuelles Fahrzeug jetzt vergleichen“).");
             return;
@@ -251,7 +260,7 @@ internal sealed class Ueberwacher
             _gesperrt = false;
             SetzeStatus(Status.Aktiv);
         }
-        _letzterSchluessel = schluessel;
+        Merken(f);
         if (antwort.ErkanntMarke != null)
         {
             f.Marke = antwort.ErkanntMarke;
@@ -260,6 +269,10 @@ internal sealed class Ueberwacher
         }
         LetztesFahrzeug = f;
         LetzteInseratUrl = antwort.InseratUrl;
+        // Pruefbericht 03.10.2026 (Nr. 2): ab hier gehoeren die "letzten Vergleiche" zu DIESEM Auto — auch wenn
+        // es keine gibt. Vorher blieben die Links des vorigen Autos stehen ("erneut oeffnen" zeigte das falsche Auto).
+        LetzteVergleiche = Array.Empty<Vergleich>();
+        FahrzeugGewechselt?.Invoke(f);
         if (!antwort.MarkeErkannt)
         {
             MeldeEinmal($"Marke in „{f.MarkeModellText}“ nicht erkannt – kein Vergleich.");
@@ -279,7 +292,7 @@ internal sealed class Ueberwacher
         var links = antwort.Links
             .Where(l => (l.Portal == "mobile.de" && e.MobileDe) || (l.Portal == "AutoScout24" && e.AutoScout24))
             .ToList();
-        if (links.Count > 0) LetzteVergleiche = links;
+        LetzteVergleiche = links;
         if (links.Count == 0)
         {
             if (vertragsHinweise.Count > 0) Melde(string.Join("\n", vertragsHinweise), false);
@@ -293,12 +306,37 @@ internal sealed class Ueberwacher
         Oeffne(links, e);
         _letzteOeffnung = _uhr();
         var fehlendePortale = antwort.Hinweise.Where(h => h.Contains("kein mobile.de-Vergleich") || h.Contains("kein AutoScout24-Vergleich")).ToList();
+        fehlendePortale.AddRange(PlausibilitaetsHinweise(f, _uhr()));
         fehlendePortale.AddRange(vertragsHinweise);
         if (fehlendePortale.Count > 0) Melde(string.Join("\n", fehlendePortale), false);
     }
 
+    private void Merken(Fahrzeug f)
+    {
+        _letzterSchluessel = f.Schluessel;
+        _letzteKennung = f.InseratKennung;
+    }
+
+    /// <summary>Pruefbericht 03.10.2026 (Nr. 9): Werte, die technisch moeglich, aber verdaechtig sind — nur als Hinweis
+    /// (der Vergleich laeuft trotzdem): widerspruechliche Leistung, ungewoehnlich viele Kilometer fuer das Alter.</summary>
+    internal static List<string> PlausibilitaetsHinweise(Fahrzeug f, DateTime jetzt)
+    {
+        var hinweise = new List<string>();
+        if (f.LeistungUnsicher && f.Kw == null)
+            hinweise.Add("Leistung nicht sicher gelesen (kW und PS passen nicht zusammen) – Vergleich ohne "
+                         + "Leistungsfilter. Bitte in AutoPointer prüfen.");
+        if (f.EzJahr != null && f.Kilometer != null)
+        {
+            double jahre = Math.Max(1.0, (jetzt.Year - f.EzJahr.Value) + ((jetzt.Month - (f.EzMonat ?? 6)) / 12.0));
+            if (f.Kilometer.Value / jahre > 100_000)
+                hinweise.Add($"Kilometerstand ungewöhnlich hoch ({f.Kilometer.Value:N0} km bei EZ {f.EzText}) – "
+                             + "bitte prüfen, ob richtig gelesen.");
+        }
+        return hinweise;
+    }
+
     internal const string KeinLinkHinweis =
-        "AutoScout-Inserat: die Kennung (Hash-ID) ist in AutoPointer nicht vollständig sichtbar. Für den Kaufvertrag bitte die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und in AutoSchnell unter „Vergleich“ einfügen. Tipp: Detailbereich in AutoPointer breiter ziehen – dann klappt es automatisch.";
+        "AutoScout-Inserat: die Kennung (Hash-ID) ist in AutoPointer nicht vollständig sichtbar. Für den Kaufvertrag: in AutoPointer „Seite öffnen“, im Browser die Adresse kopieren (Strg+L, dann Strg+C) und hier noch einmal „Kaufvertrag“ drücken – das Programm übernimmt die kopierte Adresse. Tipp: Detailbereich in AutoPointer breiter ziehen – dann klappt es automatisch.";
 
     private void Oeffne(IReadOnlyList<Vergleich> links, Einstellungen e)
     {
@@ -425,8 +463,27 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
         bool verdeckt = AutoPointerFenster.Verdeckt(ansicht.TechnikTabelle) || AutoPointerFenster.Verdeckt(ansicht.KopfTabelle);
         if (!verdeckt || !zeichnenErlaubt)
         {
-            using var technik = AutoPointerFenster.Abbild(ansicht.TechnikTabelle);
-            using var kopf = AutoPointerFenster.Abbild(ansicht.KopfTabelle);
+            // Nr. 10: liegt die eigene Leiste ueber der Tabelle (und PrintWindow ist aus), wird sie fuer das
+            // Abbild kurz unsichtbar — vorher stand sie mit im Bild und Zeilen fehlten.
+            bool ausgeblendet = false;
+            if (verdeckt && AutoPointerFenster.EigeneAusblenden is { } ausblenden)
+            {
+                try { ausblenden(true); ausgeblendet = true; await Task.Delay(150); }
+                catch (Exception ex) { Protokoll.Schreibe("Leiste nicht ausgeblendet: " + ex.Message); }
+            }
+            System.Drawing.Bitmap? technikBild, kopfBild;
+            try
+            {
+                technikBild = AutoPointerFenster.Abbild(ansicht.TechnikTabelle);
+                kopfBild = AutoPointerFenster.Abbild(ansicht.KopfTabelle);
+            }
+            finally
+            {
+                if (ausgeblendet)
+                    try { AutoPointerFenster.EigeneAusblenden?.Invoke(false); } catch (Exception) { }
+            }
+            using var technik = technikBild;
+            using var kopf = kopfBild;
             if (technik != null)
             {
                 var sicht = await LiesBilderAsync(ocr, technik, kopf, dpi, bilderSpeichern);

@@ -163,6 +163,27 @@ jobs:
         working-directory: frontend
         run: CI=true yarn build
 
+  autopointer:
+    name: AutoPointer-Vergleich (Windows-Tests)
+    # Pruefbericht 03.10.2026 (Nr. 3): Die .NET-Tests des PC-Programms liefen
+    # bisher nur lokal (build.ps1). Sie brauchen weder AutoPointer noch echte
+    # Texterkennung (alles nachgestellt), deshalb laufen sie hier auf Windows mit.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+      - name: Tests
+        working-directory: autopointer-vergleich
+        run: dotnet test tests/AutoPointerVergleich.Tests.csproj -c Release
+      - name: Programm bauen (wie build.ps1, ohne Tests)
+        working-directory: autopointer-vergleich
+        run: >-
+          dotnet publish src/AutoPointerVergleich.csproj -c Release -r win-x64 --self-contained true
+          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:EnableCompressionInSingleFile=true -p:DebugType=none -o dist-ci
+
   docker:
     name: Produktions-Images + Stack-Probe
     runs-on: ubuntu-latest

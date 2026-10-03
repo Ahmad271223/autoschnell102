@@ -10,7 +10,13 @@ namespace AutoPointerVergleich;
 /// Autostart) mit "--app-id=" und der Adresse von AutoSchnell.</summary>
 internal static class AutoSchnellApp
 {
-    internal sealed record Verknuepfung(string Programm, string Profil, string AppId);
+    /// <param name="PerAdresse">true: die Verknuepfung nennt die Adresse von AutoSchnell (sicher); false: nur am
+    /// Namen erkannt (Chrome schreibt keine Adresse hinein).</param>
+    internal sealed record Verknuepfung(string Programm, string Profil, string AppId, bool PerAdresse = false);
+
+    /// <summary>Pruefbericht 03.10.2026 (Nr. 13): Name einer Chrome-Verknuepfung ohne Adresse — genau "AutoSchnell",
+    /// hoechstens mit Zusatz in Klammern ("AutoSchnell (Profil 2)"). "AutoSchnell Test" o. Ae. zaehlt nicht mehr.</summary>
+    private static readonly Regex AppName = new(@"^AutoSchnell(\s*\([^)]*\))?$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly string[] Browser = { "msedge_proxy.exe", "chrome_proxy.exe", "msedge.exe", "chrome.exe" };
     private static readonly Regex AppId = new(@"--app-id=([a-p]{32})", RegexOptions.Compiled);
@@ -25,13 +31,25 @@ internal static class AutoSchnellApp
         if (!id.Success) return null;
         string host = Uri.TryCreate(server, UriKind.Absolute, out var s) ? s.Host : "";
         bool unsere = host.Length > 0 && argumente!.Contains("://" + host, StringComparison.OrdinalIgnoreCase);
+        bool perAdresse = unsere;
         // Chrome schreibt die Adresse nicht in die Verknuepfung — dann zaehlt der Name ("AutoSchnell.lnk")
         if (!unsere && !argumente!.Contains("--app-url=", StringComparison.OrdinalIgnoreCase))
-            unsere = Path.GetFileNameWithoutExtension(dateiname).StartsWith("AutoSchnell", StringComparison.OrdinalIgnoreCase);
+            unsere = AppName.IsMatch(Path.GetFileNameWithoutExtension(dateiname).Trim());
         if (!unsere) return null;
         var p = Profil.Match(argumente!);
         string profil = p.Success ? (p.Groups[1].Success ? p.Groups[1].Value : p.Groups[2].Value) : "Default";
-        return new Verknuepfung(ziel, profil, id.Groups[1].Value);
+        return new Verknuepfung(ziel, profil, id.Groups[1].Value, perAdresse);
+    }
+
+    /// <summary>Nr. 13: aus allen gefundenen Verknuepfungen die richtige — eine mit der Adresse von AutoSchnell
+    /// zuerst; sonst nur, wenn alle nur am Namen erkannten auf DIESELBE App zeigen. Mehrere verschiedene
+    /// Kandidaten: nicht raten (null -> Browser).</summary>
+    internal static Verknuepfung? Auswaehlen(IReadOnlyList<Verknuepfung> kandidaten)
+    {
+        var sicher = kandidaten.FirstOrDefault(k => k.PerAdresse);
+        if (sicher != null) return sicher;
+        if (kandidaten.Count == 0) return null;
+        return kandidaten.Select(k => (k.AppId, k.Profil)).Distinct().Count() == 1 ? kandidaten[0] : null;
     }
 
     /// <summary>Befehlszeile: App mit diesem Ziel starten (so starten auch die Sprunglisten-Eintraege einer App).</summary>
@@ -54,6 +72,7 @@ internal static class AutoSchnellApp
             if (typ == null) return null;
             shell = Activator.CreateInstance(typ);
             if (shell == null) return null;
+            var kandidaten = new List<Verknuepfung>();
             foreach (var ort in orte.Where(o => o.Length > 0 && Directory.Exists(o)))
             {
                 IEnumerable<string> dateien;
@@ -70,11 +89,16 @@ internal static class AutoSchnellApp
                     {
                         dynamic lnk = ((dynamic)shell).CreateShortcut(datei);
                         var v = AusVerknuepfung((string)lnk.TargetPath, (string)lnk.Arguments, datei, server);
-                        if (v != null && File.Exists(v.Programm)) return v;
+                        if (v != null && File.Exists(v.Programm)) kandidaten.Add(v);
                     }
                     catch (Exception) { /* kaputte Verknuepfung: weiter */ }
                 }
             }
+            var wahl = Auswaehlen(kandidaten);
+            if (wahl == null && kandidaten.Count > 1)
+                Protokoll.Schreibe($"{kandidaten.Count} mögliche AutoSchnell-Apps gefunden, keine eindeutig – "
+                                   + "Kaufvertrag öffnet im Browser.");
+            return wahl;
         }
         catch (Exception ex) { Protokoll.Schreibe("AutoSchnell-App nicht gesucht: " + ex.Message); }
         finally
