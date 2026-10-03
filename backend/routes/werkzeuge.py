@@ -336,6 +336,8 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     # der Kaufvertrag ohne Link-Einfuegen geht — derselbe Weg wie das Einfuegen in der App.
     vorab = await _vorab_abrufen(user, f["inserat_url"]) if not body.probelauf else \
         {"status": "probelauf", "hinweis": ""}
+    if not body.probelauf:
+        await _vorab_ersetzen(user, v, vorab.get("job_id"))
     await db[wz.SAMMLUNG_VERGLEICHE].insert_one({
         "id": str(uuid.uuid4()), "werkzeug": werkzeug_id, "dealer_id": user["dealer_id"], "user_id": user["id"],
         "verbindung_id": v["id"], "pc_name": v.get("pc_name") or "", "erstellt_am": now_iso(),
@@ -343,7 +345,20 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
         "vorab": vorab["status"],
     })
     return {"links": links, "hinweise": hinweise, "profil": profil, "inserat_url": f["inserat_url"],
-            "vorab": vorab}
+            "vorab": {"status": vorab["status"], "hinweis": vorab.get("hinweis", "")}}
+
+
+async def _vorab_ersetzen(user: dict, v: dict, neuer_job: Optional[str]) -> None:
+    """Wunsch Ahmad 03.10.2026: neues Auto angeklickt -> den alten, noch wartenden Vorab-Abruf dieses Kontos
+    zurueckziehen und den neuen merken. Fehler hier duerfen den Vergleich nie aufhalten."""
+    try:
+        alter_job = v.get("vorab_job_id")
+        if alter_job and alter_job != neuer_job:
+            from link_jobs import vorab_zurueckziehen
+            await vorab_zurueckziehen(db, alter_job, user.get("dealer_id") or "", user.get("id") or "")
+        await db[wz.SAMMLUNG_VERBINDUNGEN].update_one({"id": v["id"]}, {"$set": {"vorab_job_id": neuer_job}})
+    except Exception:  # noqa: BLE001
+        log.exception("Werkzeug: alter Vorab-Abruf nicht zurueckgezogen")
 
 
 async def _vorab_abrufen(user: dict, url: Optional[str]) -> dict:
@@ -356,9 +371,9 @@ async def _vorab_abrufen(user: dict, url: Optional[str]) -> dict:
                                                   "Adresse kopieren und in AutoSchnell einfügen."}
     if not wz.vorab_abruf_an():
         return {"status": "aus", "hinweis": ""}
-    from routes.listings import ListingURLIn, listings_check
+    from routes.listings import ListingURLIn, listing_pruefen
     try:
-        r = await listings_check(ListingURLIn(url=url), user)
+        r = await listing_pruefen(ListingURLIn(url=url), user, vorab_warten_s=wz.vorab_warten_s())
     except HTTPException as exc:
         status = "limit" if exc.status_code == 429 else "fehler"
         return {"status": status, "hinweis": str(exc.detail)[:200]}
@@ -369,7 +384,7 @@ async def _vorab_abrufen(user: dict, url: Optional[str]) -> dict:
         return {"status": "fertig", "hinweis": ""}
     if r.get("status") == "needs_client_fetch":
         return {"status": "in_app", "hinweis": "Dieses Inserat liest AutoSchnell beim Öffnen in der App aus."}
-    return {"status": "laeuft", "hinweis": ""}
+    return {"status": "laeuft", "hinweis": "", "job_id": r.get("job_id")}
 
 
 @router.get("/werkzeuge/{werkzeug_id}/meine")

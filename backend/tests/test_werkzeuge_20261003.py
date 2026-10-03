@@ -562,6 +562,8 @@ def test_47_danach_steht_das_auto_in_der_app_sofort_bereit(welt):
     fz, url = _kleinanzeigen_polo()
     assert _vergleich(prog, fz).json()["vorab"]["status"] in ("laeuft", "fertig")
     db = welt["db"]
+    # Der Sucher bleibt beim Auto: die Vorab-Wartezeit (15 s) ist um — hier vorgespult
+    db.link_jobs.update_many({"url": url}, {"$set": {"fruehestens": None}})
     for _ in range(120):
         job = db.link_jobs.find_one({"url": url}, {"_id": 0, "status": 1})
         if job and job["status"] in ("completed", "failed"):
@@ -573,3 +575,75 @@ def test_47_danach_steht_das_auto_in_der_app_sofort_bereit(welt):
     d = r.json()
     assert d.get("vehicle_id") and d.get("vehicle")
     assert d.get("cached") is True, "Fahrzeug kam aus dem Speicher, kein zweiter Abruf"
+
+
+# Wunsch Ahmad 03.10.2026 abends: "irgendwie haengt meine App ... wenn neues Inserat geoeffnet wird, soll im
+# Hintergrund die alte URL automatisch entfernt und durch die neue ersetzt werden".
+def _vorab_job(db, url):
+    return db.link_jobs.find_one({"url": url}, {"_id": 0})
+
+
+def test_48_neues_auto_ersetzt_den_wartenden_vorab_abruf(welt):
+    from datetime import datetime, timezone
+    _abo(welt, True)
+    _, prog, _ = _verbinden(welt, "PC-A")
+    db = welt["db"]
+    fz_a, url_a = _kleinanzeigen_polo()
+    assert _vergleich(prog, fz_a).json()["vorab"]["status"] == "laeuft"
+    a = _vorab_job(db, url_a)
+    assert a and a["status"] == "queued" and a.get("vorab") is True
+    frueh = a["fruehestens"].replace(tzinfo=timezone.utc)
+    assert frueh > datetime.now(timezone.utc), "wartet erst kurz, bevor Apify laeuft"
+    # naechstes Auto angeklickt: der alte Abruf ist weg, der neue wartet
+    fz_b, url_b = _kleinanzeigen_polo()
+    assert _vergleich(prog, fz_b).json()["vorab"]["status"] == "laeuft"
+    assert _vorab_job(db, url_a) is None
+    b = _vorab_job(db, url_b)
+    assert b and b["status"] == "queued" and b.get("vorab") is True
+    verbindung = db.werkzeug_verbindungen.find_one({"user_id": welt["sucher_id"], "werkzeug": WID})
+    assert verbindung["vorab_job_id"] == b["id"]
+    # Auto ohne Inserat-Link (AutoScout ohne Hash-ID): auch dann faellt der alte Abruf weg
+    ohne = {**POLO, "quelle": "AutoScout24", "inserat_id": "474879577", "hash_id": ""}
+    assert _vergleich(prog, ohne).json()["vorab"]["status"] == "kein_link"
+    assert _vorab_job(db, url_b) is None
+    assert db.werkzeug_verbindungen.find_one({"id": verbindung["id"]})["vorab_job_id"] is None
+
+
+def test_49_in_der_app_geoeffnet_startet_sofort_und_bleibt(welt):
+    import time
+    _abo(welt, True)
+    _, prog, _ = _verbinden(welt, "PC-A")
+    db = welt["db"]
+    fz_a, url_a = _kleinanzeigen_polo()
+    assert _vergleich(prog, fz_a).json()["vorab"]["status"] == "laeuft"
+    # Sucher oeffnet das Auto fuer den Kaufvertrag in der App: kein Warten mehr
+    r = requests.post(f"{API}/listings/check", json={"url": url_a}, headers=welt["sucher"], timeout=30)
+    assert r.status_code == 200, r.text
+    a = _vorab_job(db, url_a)
+    assert a and welt["sucher_id"] in (a.get("app_konten") or [])
+    assert a.get("fruehestens") is None or a["status"] != "queued"
+    # ein neues Auto im Programm zieht diesen Abruf NICHT zurueck — die App wartet darauf
+    fz_b, _url_b = _kleinanzeigen_polo()
+    assert _vergleich(prog, fz_b).status_code == 200
+    for _ in range(120):
+        a = _vorab_job(db, url_a)
+        if a and a["status"] in ("completed", "failed"):
+            break
+        time.sleep(0.25)
+    assert a and a["status"] == "completed", a
+
+
+def test_50_kollege_wartet_auf_dasselbe_inserat(welt):
+    """Zwei Konten, dasselbe Inserat: zieht das Programm des einen zurueck, bleibt der Abruf fuer den anderen."""
+    _abo(welt, True)
+    _, prog, _ = _verbinden(welt, "PC-A")
+    db = welt["db"]
+    fz_a, url_a = _kleinanzeigen_polo()
+    _vergleich(prog, fz_a)
+    db.link_jobs.update_one({"url": url_a}, {"$addToSet": {"user_ids": "kollege-x"}})
+    fz_b, _ = _kleinanzeigen_polo()
+    _vergleich(prog, fz_b)
+    a = _vorab_job(db, url_a)
+    assert a and a["user_ids"] == ["kollege-x"], a
+    db.link_jobs.delete_one({"url": url_a})
+

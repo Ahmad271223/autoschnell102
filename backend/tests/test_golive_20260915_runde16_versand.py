@@ -207,4 +207,4 @@ def test_rueckfall_rueckbuchung_und_abruf_bremse(wegwerf, monkeypatch):
     assert "async with _AbrufSlot(user):" in q and q.count("await _rueckfall_zurueck(user)") >= 4
     assert "async with _AbrufSlot(user):" in inspect.getsource(L.listings_resolve)
     assert '"inserat.aufgeloest"' in inspect.getsource(L.listings_resolve)
-    assert "await _rueckfall_zurueck(user)" in inspect.getsource(L.listings_check)
+    assert "await _rueckfall_zurueck(user)" in inspect.getsource(L.listing_pruefen)

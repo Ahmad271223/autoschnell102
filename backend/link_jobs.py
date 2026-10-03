@@ -560,6 +560,68 @@ async def get_job(db, job_id: str) -> Optional[dict]:
     return await db.link_jobs.find_one({"id": job_id}, {"_id": 0})
 
 
+# ---------------------------------------------------------------------------
+# Vorab-Abruf aus dem Programm (Wunsch Ahmad 03.10.2026 abends): "irgendwie haengt meine App ... wenn neues
+# Inserat geoeffnet wird, soll im Hintergrund die alte URL automatisch entfernt und durch die neue ersetzt
+# werden". Vorher reihte JEDER Klick in AutoPointer einen Abruf ein; wer zehn Autos durchklickte, hatte zehn
+# Abrufe in seiner Schlange (je Konto aelteste zuerst) — der Link, den er dann in der App oeffnete, stand
+# dahinter, und jeder Abruf kostete Tageskontingent und Apify.
+# Jetzt: ein Vorab-Job wartet kurz (fruehestens = jetzt + Wartezeit). Klickt der Sucher vorher das naechste
+# Auto an, zieht das Programm den alten Job zurueck (geloescht, solange er wartet). Oeffnet er das Auto in
+# der App, beginnt der Abruf sofort und der Job wird nie mehr als Vorab-Job zurueckgezogen.
+# ---------------------------------------------------------------------------
+async def vorab_markieren(db, job_id: str, warten_s: float) -> bool:
+    """Frisch eingereihten Job als Vorab-Abruf des Programms markieren und kurz zurueckstellen."""
+    r = await db.link_jobs.update_one(
+        {"id": job_id, "status": "queued", "attempts": 0},
+        {"$set": {"vorab": True, "fruehestens": _now() + timedelta(seconds=max(0.0, warten_s)),
+                  "updated_at": _now()}})
+    return r.modified_count == 1
+
+
+async def app_wartet(db, job_id: str, user_id: str) -> bool:
+    """Die App wartet selbst auf diesen Job (Link eingefuegt, Kaufvertrag geoeffnet): als App-Wartender
+    merken — so zieht ihn das Programm nie zurueck — und eine Vorab-Wartezeit faellt sofort weg.
+    True, wenn der Job dadurch jetzt sofort abgerufen werden kann."""
+    if not job_id or not user_id:
+        return False
+    # user_ids erneut setzen: hat das Programm den Job in derselben Millisekunde verlassen, wartet die App
+    # trotzdem weiter (sonst endete er als "niemand wartet").
+    await db.link_jobs.update_one({"id": job_id, "status": {"$in": list(OFFEN)}},
+                                  {"$addToSet": {"app_konten": user_id, "user_ids": user_id}})
+    r = await db.link_jobs.update_one(
+        {"id": job_id, "status": "queued", "vorab": True, "attempts": 0},
+        {"$set": {"fruehestens": None, "updated_at": _now()}})
+    return r.modified_count == 1
+
+
+async def vorab_zurueckziehen(db, job_id: str, dealer_id: str = "", user_id: str = "") -> dict:
+    """Neues Auto im Programm: den alten, noch WARTENDEN Vorab-Job dieses Kontos zurueckziehen.
+
+    Wie warten_beenden, aber nur fuer Vorab-Jobs und nie, wenn dasselbe Konto in der App darauf wartet.
+    Laeuft der Abruf schon, bleibt er (sein Ergebnis landet im Zwischenspeicher). Wartet ein Kollege
+    auf dasselbe Inserat, verlaesst nur dieses Konto den Job.
+    Rueckgabe: {"status": "abgebrochen" | "verlassen" | "unveraendert"}."""
+    if not job_id or not user_id:
+        return {"status": "unveraendert"}
+    nicht_in_app = {"app_konten": {"$ne": user_id}}
+    job = await db.link_jobs.find_one_and_update(
+        {"id": job_id, "status": "queued", "vorab": True, "user_ids": user_id, **nicht_in_app},
+        {"$pull": {"user_ids": user_id}},
+        projection={"_id": 0}, return_document=ReturnDocument.AFTER)
+    if not job:
+        return {"status": "unveraendert"}
+    job = await _aussteiger_aufraeumen(db, job, dealer_id, user_id)
+    if not (job.get("user_ids") or []):
+        entfernt = await db.link_jobs.delete_one(
+            {"id": job_id, "status": "queued", "user_ids": [], **nicht_in_app})
+        if entfernt.deleted_count == 1:
+            await _rueckfall_freigeben(db, job)
+            log.info("link_jobs: Vorab-Job %s zurueckgezogen (neues Auto im Programm)", job_id)
+            return {"status": "abgebrochen"}
+    return {"status": "verlassen"}
+
+
 async def _aussteiger_aufraeumen(db, job: dict, dealer_id: str, user_id: str) -> dict:
     """Nach dem Aussteigen aufraeumen, was sonst stehen bleibt.
 

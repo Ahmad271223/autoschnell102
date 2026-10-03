@@ -1194,7 +1194,17 @@ async def ingest_client_html(body: IngestIn, user=Depends(require_active_sub)):
 # =========================================================
 @router.post("/listings/check")
 async def listings_check(body: ListingURLIn, user=Depends(require_active_sub)):
+    """Vorab-Check beim Einfuegen eines Links in der App (siehe listing_pruefen)."""
+    return await listing_pruefen(body, user)
+
+
+async def listing_pruefen(body: ListingURLIn, user: dict, *, vorab_warten_s: Optional[float] = None) -> dict:
     """Schneller Vorab-Check beim Einfuegen eines Links.
+
+    `vorab_warten_s` (nur das Programm, routes/werkzeuge.py): der Abruf ist ein Vorab-Abruf fuer den
+    Kaufvertrag und wartet so viele Sekunden, bevor er startet — klickt der Sucher vorher das naechste
+    Auto an, zieht das Programm ihn zurueck (link_jobs.vorab_zurueckziehen). Ohne den Wert ruft die App:
+    sie wartet selbst, ein wartender Vorab-Job desselben Inserats startet dann sofort.
 
     - Inserat bekannt (Cache oder eigene Quarantaene): sofort
       {"status": "completed"} — das Frontend ruft direkt /mobile/compare.
@@ -1256,6 +1266,14 @@ async def listings_check(body: ListingURLIn, user=Depends(require_active_sub)):
         # Pruefbericht 20.09.2026 (A-05): einem schon laufenden (oder fertigen)
         # Job beigetreten — kein eigener Abruf, der gebuchte Punkt geht zurueck.
         await _rueckfall_zurueck(user)
+    from link_jobs import app_wartet, vorab_markieren
+    if vorab_warten_s is not None:
+        if job.get("neu") and job.get("status") == "queued" and vorab_warten_s > 0:
+            await vorab_markieren(db, job["id"], vorab_warten_s)
+            return {"status": job["status"], "job_id": job["id"],
+                    "source": source, "item_id": identity["item_id"]}
+    elif job.get("status") == "queued":
+        await app_wartet(db, job["id"], user.get("id") or "")
     if job.get("status") == "queued":
         # Sofort-Anstoss (begrenzt/dedupliziert, Audit 09/2026 Punkt 17)
         from link_jobs import anstossen

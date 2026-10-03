@@ -207,7 +207,7 @@ def test_a05_beitritt_und_scheitern_geben_den_rueckfall_zurueck(wegwerf):
 
 
 def test_a05_listings_check_verdrahtung_und_hinweis(monkeypatch):
-    q = inspect.getsource(L.listings_check)
+    q = inspect.getsource(L.listing_pruefen)   # seit 03.10.2026: Logik in listing_pruefen (auch fuers Programm)
     assert "rueckfall_schluessel=rueckfall_am_job" in q
     assert 'if rueckfall_gebucht and not job.get("neu"):' in q
     assert "await _rueckfall_zurueck(user)" in q

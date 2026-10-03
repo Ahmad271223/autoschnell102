@@ -227,7 +227,7 @@ def test_link_jobs_claim_und_race(wegwerf):
     q = inspect.getsource(LJ.enqueue_job)
     assert "peek_cached_listing" in q and "raise JobRace(" in q
     assert issubclass(LJ.JobRace, LJ.WarteschlangeVoll)
-    assert "except JobRace as race:" in inspect.getsource(L.listings_check) if hasattr(L, "listings_check") \
+    assert "except JobRace as race:" in inspect.getsource(L.listing_pruefen) if hasattr(L, "listing_pruefen") \
         else "JobRace" in inspect.getsource(L)
 
 

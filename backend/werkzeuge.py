@@ -293,6 +293,16 @@ def vergleichs_links(vehicle: dict, regeln: dict) -> tuple:
 _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 
+def vorab_warten_s() -> float:
+    """So lange wartet ein Vorab-Abruf, bevor er startet (Standard 15 s). Klickt der Sucher in der Zeit das
+    naechste Auto an, faellt der alte Abruf weg (kein Apify-Lauf, kein Tageskontingent); oeffnet er das Auto
+    in der App, startet er sofort."""
+    try:
+        return min(300.0, max(0.0, float(os.environ.get("AUTOPOINTER_VORAB_WARTEN_S") or 15)))
+    except ValueError:
+        return 15.0
+
+
 def vorab_abruf_an() -> bool:
     """Inserat beim Klick im Programm im Hintergrund auslesen (Standard an). Jeder echte Abruf zaehlt
     wie ein eingefuegter Link fuer das Tageslimit des Kontos; Speicher-Treffer sind kostenlos."""
