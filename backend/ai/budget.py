@@ -114,6 +114,16 @@ async def _zaehler_erhoehen(db, key: str, est: float, grenze: float) -> bool:
     return doc is not None
 
 
+class BudgetNichtPruefbar(RuntimeError):
+    """Pruefung 04.10.2026 (Nr. 1/24/41): die Reservierung scheiterte an der
+    Datenbank — der Lauf darf dann NICHT starten (vorher: "offen", die KI rechnete
+    ohne Firmen- und Fahrer-Deckel weiter)."""
+
+
+GRUND_NICHT_PRUEFBAR = ("KI-Budget konnte gerade nicht geprüft werden — die Bewertung wurde nicht "
+                        "gestartet (keine Kosten). Bitte in einer Minute neu berechnen.")
+
+
 async def reservieren(*, user_id: Optional[str], dealer_id: Optional[str], art: str, driver_id: Optional[str] = None,
                       db=None) -> Optional[Dict[str, Any]]:
     """Review 25.09.2026 abends: das Budget wird VOR dem Lauf atomar reserviert
@@ -122,7 +132,11 @@ async def reservieren(*, user_id: Optional[str], dealer_id: Optional[str], art: 
     ueberschreiten. Reserviert wird die HARTE Einzelgrenze (KI_KOSTEN_MAX_CT,
     20 ct) — mehr kann ein Lauf seit 27.09.2026 nicht kosten (ai.kostenkasse);
     `abrechnen` ersetzt sie nach dem Lauf durch die echten Kosten.
-    None = Budget voll. Ohne Grenze oder bei DB-Fehler: offen (wie pruefen).
+    None = Budget voll. Ohne Grenze: offen. Bei DB-Fehler (Pruefung 04.10.2026,
+    Nr. 1/24/41): BudgetNichtPruefbar — der Aufrufer startet KEINE KI. Vorher
+    hiess es "die Bremse darf die KI nicht abschalten" und der Lauf rechnete
+    ohne Deckel; fuer eine Kostenbremse ist das falsch herum (AutoSchnell selbst
+    arbeitet weiter, nur die kostenpflichtige KI wartet).
 
     Abholung mit Fahrer (26.09.2026 abends): erst der Firmen-, dann der
     Fahrer-Zaehler. Ist der Fahrer-Deckel voll, wird die Firmen-Reservierung
@@ -135,17 +149,30 @@ async def reservieren(*, user_id: Optional[str], dealer_id: Optional[str], art: 
     db = db if db is not None else _db
     key = _schluessel(user_id, dealer_id, art)
     key_fahrer = _fahrer_schluessel(driver_id) if grenze_fahrer > 0 else None
+    firma_reserviert = False
     try:
         if grenze > 0 and not await _zaehler_erhoehen(db, key, est, grenze):
             return None                                   # Firmen-/Kontobudget voll
+        firma_reserviert = grenze > 0
         if key_fahrer:
             if not await _zaehler_erhoehen(db, key_fahrer, est, grenze_fahrer):
                 if grenze > 0:                            # Firmen-Reservierung zurueck
                     await db[ZAEHLER].update_one({"_id": key}, {"$inc": {"ct": -est}})
                 return None                               # Fahrer-Deckel voll
         return {"schluessel": key if grenze > 0 else None, "fahrer_schluessel": key_fahrer, "est_ct": est}
-    except Exception:  # noqa: BLE001 — die Bremse darf die KI nicht abschalten
-        return {"schluessel": None, "est_ct": 0.0}
+    except Exception as exc:  # noqa: BLE001
+        if firma_reserviert:
+            # Der Fahrer-Schritt scheiterte: die Firmen-Reservierung nicht verwaist
+            # stehen lassen (sonst bis zum stuendlichen Abgleich 20 ct zu viel)
+            try:
+                await db[ZAEHLER].update_one({"_id": key}, {"$inc": {"ct": -est}})
+            except Exception:  # noqa: BLE001
+                pass
+        import logging
+        logging.getLogger("autohandel.ki").error(
+            "KI-Budget nicht pruefbar (%s) — Lauf (%s, Firma %s) NICHT gestartet",
+            exc.__class__.__name__, art, dealer_id)
+        raise BudgetNichtPruefbar(str(exc)) from exc
 
 
 async def abrechnen(reservierung: Optional[Dict[str, Any]], tatsaechlich_ct: float, db=None) -> None:

@@ -263,7 +263,14 @@ async def bewerten(*, user: dict, vehicle_doc: dict, damages: List[dict],
         andere = await _lauf_beanspruchen(start, dealer_id, h)
         if andere is not None:
             return _oeffentlich(andere)
-        res = await budget.reservieren(user_id=user.get("id"), dealer_id=dealer_id, art=ART)
+        try:
+            res = await budget.reservieren(user_id=user.get("id"), dealer_id=dealer_id, art=ART)
+        except budget.BudgetNichtPruefbar:
+            # Pruefung 04.10.2026 (Nr. 1/24/41): ohne pruefbares Budget keine KI
+            eintrag = {**basis, "status": "fehler", "grund": budget.GRUND_NICHT_PRUEFBAR,
+                       "ergebnis": None, "vorschau": vorl, "dauer_ms": 0, "kosten_ct": 0}
+            await db[SAMMLUNG].update_one({"id": basis["id"]}, {"$set": eintrag, "$unset": {"lease_until": ""}})
+            return _oeffentlich(eintrag)
         if res is None:
             eintrag = {**basis, "status": "budget", "grund": bud["grund"] or "Monatsbudget für KI-Bewertungen aufgebraucht.",
                        "ergebnis": None, "vorschau": vorl, "budget": bud, "dauer_ms": 0, "kosten_ct": 0}

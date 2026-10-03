@@ -655,7 +655,15 @@ async def bewertung_ausfuehren(protocol_id: str, dealer_id: str, *, erzwingen: b
         if fremd is not None:
             return _oeffentlich(fremd)
         # Budget atomar reservieren — erst wenn dieser Aufruf den Lauf wirklich haelt
-        res = await budget.reservieren(user_id=None, dealer_id=dealer_id, art="abholung", driver_id=fahrer_id)
+        try:
+            res = await budget.reservieren(user_id=None, dealer_id=dealer_id, art="abholung", driver_id=fahrer_id)
+        except budget.BudgetNichtPruefbar:
+            # Pruefung 04.10.2026 (Nr. 1/24/41): ohne pruefbares Budget keine KI
+            eintrag = {**basis, "status": "fehler", "grund": budget.GRUND_NICHT_PRUEFBAR,
+                       "ergebnis": None, "dauer_ms": 0, "kosten_ct": 0}
+            await db[SAMMLUNG].update_one({"protocol_id": protocol_id, "input_hash": h},
+                                          {"$set": eintrag, "$unset": {"lease_until": ""}})
+            return _oeffentlich(eintrag)
         if res is None:
             # Welcher Deckel war es (Firma oder Fahrer)? pruefen liess den Lauf
             # noch zu (bud["grund"] waere hoechstens der Sparmodus-Hinweis), die
