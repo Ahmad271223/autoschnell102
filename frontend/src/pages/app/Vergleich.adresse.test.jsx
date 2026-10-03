@@ -82,6 +82,21 @@ describe("Vergleich über ?url= (Programm)", () => {
     expect(vergleich[1]).toMatchObject({ url: KA });
   });
 
+  it("aus dem Programm: nur auslesen, die Filter nicht ein zweites Mal öffnen", async () => {
+    // Wunsch Ahmad 03.10.2026: das Programm hat mobile.de/AutoScout24 schon geöffnet
+    const { filterOeffnen } = await import("@/lib/filterOeffnen");
+    api.post.mockImplementation((pfad) => Promise.resolve(pfad === "/listings/check"
+      ? { data: { status: "completed", cached: true, source: "kleinanzeigen" } }
+      : { data: { vehicle_id: "v_3529833344", cache_key: "kleinanzeigen:3529833344", source: "kleinanzeigen",
+                  cached: true, search_url: "https://suchen.mobile.de/x", autoscout_url: "https://www.autoscout24.de/lst/x",
+                  vehicle: { make_label: "VW", model_label: "Polo", images: [], images_thumbs: [] } } }));
+    window.history.replaceState({}, "", `/app/vergleich?url=${encodeURIComponent(KA)}`);
+    await act(async () => { wurzel.render(createElement(Vergleich)); });
+    await warten();
+    expect(api.post.mock.calls.map((c) => c[0])).toContain("/mobile/compare");
+    expect(filterOeffnen).not.toHaveBeenCalled();
+  });
+
   it("ohne ?url= startet nichts", async () => {
     window.history.replaceState({}, "", "/app/vergleich");
     await act(async () => { wurzel.render(createElement(Vergleich)); });

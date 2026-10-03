@@ -316,7 +316,9 @@ export default function Vergleich() {
     }
   };
 
-  const startCompare = async (e, direktUrl, { behalteVertrag = false } = {}) => {
+  // ohneFilter (Wunsch Ahmad 03.10.2026): kommt der Sucher aus dem Windows-Programm, hat das die
+  // Vergleiche schon geöffnet — dann nur auslesen (für den Kaufvertrag), keine Filter-Tabs ein zweites Mal.
+  const startCompare = async (e, direktUrl, { behalteVertrag = false, ohneFilter = false } = {}) => {
     e?.preventDefault?.();
     const roh = (direktUrl ?? url).trim();
     // RP-409: steht im Feld ein geteilter Text, zählt nur der Link darin.
@@ -434,7 +436,7 @@ export default function Vergleich() {
       // mit Knopf den Rest. Schalter erst JETZT lesen (schalterRef) und nur,
       // solange die Vergleichsseite noch offen ist (aktivRef).
       const schalter = schalterRef.current;
-      if (aktivRef.current && schalter.auto) {
+      if (aktivRef.current && schalter.auto && !ohneFilter) {
         const eintraege = filterEintraege(data, { mobile: schalter.mobile, autoscout: schalter.autoscout });
         if (eintraege.length > 0) filterOeffnen(eintraege, { automatisch: true });
       }
@@ -485,6 +487,8 @@ export default function Vergleich() {
   // Programme zum Herunterladen (03.10.2026): Das Windows-Programm schickt den Sucher mit
   // ?url=<Inserat> hierher. Der Server hat das Inserat beim Anklicken schon im Hintergrund
   // ausgelesen — der Vergleich steht sofort mit Fotos da, der Kaufvertrag geht ohne Link-Einfügen.
+  // Die Filter (mobile.de/AutoScout24) hat das Programm schon geöffnet: hier nur auslesen, den
+  // Kaufvertrag startet der Sucher selbst (Wunsch Ahmad 03.10.2026).
   const adresseGestartet = useRef(false);
   useEffect(() => {
     if (adresseGestartet.current) return;
@@ -498,7 +502,7 @@ export default function Vergleich() {
       return;
     }
     setUrl(link);
-    startCompare(null, link);
+    startCompare(null, link, { ohneFilter: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
