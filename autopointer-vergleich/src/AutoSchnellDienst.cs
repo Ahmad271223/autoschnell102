@@ -101,6 +101,9 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
             using var doc = JsonDocument.Parse(text);
             if (doc.RootElement.TryGetProperty("detail", out var d))
             {
+                // Standard-404 von FastAPI: die Route gibt es auf diesem Server (noch) nicht
+                if (status == 404 && d.ValueKind == JsonValueKind.String && d.GetString() == "Not Found")
+                    return "AutoSchnell kennt dieses Programm noch nicht – der Server ist noch nicht aktualisiert. Bitte später erneut versuchen.";
                 if (d.ValueKind == JsonValueKind.String) return d.GetString() ?? "";
                 if (d.ValueKind == JsonValueKind.Array) return "Ungültige Fahrzeugdaten.";
             }

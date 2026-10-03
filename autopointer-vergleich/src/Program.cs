@@ -21,10 +21,20 @@ internal static class Program
         if (KonsolenModus.Argument(args, "--verbinden") is { } code)
             return KonsolenModus.VerbindenAsync(code, server).GetAwaiter().GetResult();
 
-        using var mutex = new Mutex(true, @"Local\AutoSchnell.AutoPointerVergleich", out bool erste);
+        Protokoll.Schreibe($"Programmstart {Application.ProductVersion.Split('+')[0]} ({Environment.ProcessPath})");
+        // Nur EINE Instanz. Befund 03.10.2026: "createdNew" taugte dafuer nicht — ein Startversuch, der
+        // mit der Meldung "laeuft bereits" offen stand, hielt die Sperre am Leben, und jede neue Version
+        // brach danach sofort ab. Jetzt zaehlt nur, ob eine LAUFENDE Instanz die Sperre wirklich besitzt;
+        // ist sie abgestuerzt oder beendet worden (abandoned), startet die neue normal.
+        using var mutex = new Mutex(false, @"Local\AutoSchnell.AutoPointerVergleich");
+        bool erste;
+        try { erste = mutex.WaitOne(0, false); }
+        catch (AbandonedMutexException) { erste = true; }
         if (!erste)
         {
-            MessageBox.Show("AutoPointer-Vergleich läuft bereits – Symbol unten rechts im Infobereich.",
+            Protokoll.Schreibe("Läuft bereits – zweiter Start beendet.");
+            MessageBox.Show("AutoPointer-Vergleich läuft bereits – Symbol unten rechts im Infobereich " +
+                            "(Rechtsklick → „Mit AutoSchnell verbinden …“ bzw. „Beenden“).",
                 "AutoPointer-Vergleich", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return 0;
         }
@@ -32,7 +42,23 @@ internal static class Program
         Application.SetCompatibleTextRenderingDefault(false);
         Application.ThreadException += (_, e) => Protokoll.Schreibe("Fehler: " + e.Exception);
         AppDomain.CurrentDomain.UnhandledException += (_, e) => Protokoll.Schreibe("Fehler: " + e.ExceptionObject);
-        Application.Run(new TrayApp(args.Contains("--probelauf"), server));
+        try
+        {
+            Application.Run(new TrayApp(args.Contains("--probelauf"), server));
+        }
+        catch (Exception ex)
+        {
+            Protokoll.Schreibe("Start fehlgeschlagen: " + ex);
+            MessageBox.Show("AutoPointer-Vergleich konnte nicht starten:\n\n" + ex.Message +
+                            "\n\nDetails im Protokoll: " + Protokoll.Ordner, "AutoPointer-Vergleich",
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return 1;
+        }
+        finally
+        {
+            mutex.ReleaseMutex();
+        }
+        Protokoll.Schreibe("Programm beendet.");
         return 0;
     }
 }

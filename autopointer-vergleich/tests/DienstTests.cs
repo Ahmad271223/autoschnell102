@@ -75,6 +75,8 @@ public class DienstTests
     [InlineData(401, """{"detail":"Dieses Programm ist nicht (mehr) verbunden"}""", "nicht (mehr) verbunden")]
     [InlineData(403, "kaputt", "nicht freigeschaltet")]
     [InlineData(422, """{"detail":[{"msg":"x"}]}""", "Ungültige Fahrzeugdaten")]
+    [InlineData(404, """{"detail":"Not Found"}""", "Server ist noch nicht aktualisiert")]
+    [InlineData(404, """{"detail":"Code ungültig oder abgelaufen"}""", "Code ungültig")]
     public async Task Fehler_vom_Server_werden_lesbar(int status, string text, string erwartet)
     {
         var (d, a) = Dienst();
