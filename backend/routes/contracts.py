@@ -612,6 +612,33 @@ def wa_nummer(recipient: Optional[str]) -> str:
 VERTRAG_LINK_TAGE = max(1, min(int(os.environ.get("VERTRAG_LINK_TAGE") or 14), 365))
 _link_limiter = SlidingWindowRateLimiter(max_attempts=60, window_seconds=60,
                                          name="vertrag_link")
+# Pruefung 04.10.2026 (Nr. 29): Die Vorschau (POST /contracts/preview) erzeugt
+# bei jedem Klick ein PDF mit ReportLab (CPU) und hatte weder Takt noch Grenze —
+# viele gleichzeitige Vorschauen (Doppelklicks, fehlerhafter Client) belegten
+# alle Threads, und echte Vertraege warteten mit. Jetzt: je Konto 30 je Minute
+# (wie die Design-Vorschau, routes/dealer.py) und je Prozess hoechstens
+# VORSCHAU_PARALLEL gleichzeitig; wer laenger als VORSCHAU_WARTEN_S wartet,
+# bekommt 503. Das Anlegen und neue Fassungen bleiben ungebremst.
+_vorschau_limiter = SlidingWindowRateLimiter(max_attempts=30, window_seconds=60,
+                                             name="vertrag_vorschau_pdf")
+VORSCHAU_PARALLEL = 2
+VORSCHAU_WARTEN_S = 20.0
+_vorschau_sperren = None  # weakref.WeakKeyDictionary: Ereignisschleife -> Semaphore
+
+
+def _vorschau_sperre() -> asyncio.Semaphore:
+    """Je Ereignisschleife eine eigene Sperre (Tests laufen mit mehreren Schleifen)."""
+    global _vorschau_sperren
+    import weakref
+    if _vorschau_sperren is None:
+        _vorschau_sperren = weakref.WeakKeyDictionary()
+    schleife = asyncio.get_running_loop()
+    sperre = _vorschau_sperren.get(schleife)
+    if sperre is None:
+        sperre = _vorschau_sperren[schleife] = asyncio.Semaphore(VORSCHAU_PARALLEL)
+    return sperre
+
+
 # Runde 16 (15.09.2026): Versand je Konto gedeckelt (VERSAND_JE_KONTO_10MIN).
 _versand_limiter = SlidingWindowRateLimiter(
     max_attempts=int(os.environ.get("VERSAND_JE_KONTO_10MIN", "300") or 300),
@@ -1164,6 +1191,10 @@ async def preview_contract(body: ContractIn, user=Depends(require_active_sub),
     """Generate a draft Kaufvertrag PDF without persisting anything.
     Returns the PDF inline so the dealer can review it before final save.
     ?variante=digital liefert die Ausfertigung ohne Unterschriftslinien."""
+    # Pruefung 04.10.2026 (Nr. 29): Takt je Konto (Begruendung bei _vorschau_limiter)
+    if not await _vorschau_limiter.check(f"konto:{user.get('id')}"):
+        raise HTTPException(429, "Zu viele Vorschauen in kurzer Zeit — bitte einen Moment warten.",
+                            headers={"Retry-After": "30"})
     # Umbau Kaufvorgaenge 09.09.2026: das Inserat ist firmenweit gemeinsam —
     # JEDER Sucher der Firma darf dafuer einen eigenen Vertrag anlegen.
     # Rollenpruefung 22.09.2026 (RP-014/RP-113): ... aber nur, wenn er es
@@ -1215,6 +1246,13 @@ async def preview_contract(body: ContractIn, user=Depends(require_active_sub),
     # Event-Loop unter Last (200-500 Nutzer) nicht blockiert.
     # try/except: ein Layout-Fehler (z.B. pathologische Eingabe) wird zu
     # einem sauberen 400 statt einem unhandled 500.
+    # Nr. 29: hoechstens VORSCHAU_PARALLEL Vorschauen gleichzeitig je Prozess
+    sperre = _vorschau_sperre()
+    try:
+        await asyncio.wait_for(sperre.acquire(), timeout=VORSCHAU_WARTEN_S)
+    except asyncio.TimeoutError:
+        raise HTTPException(503, "Gerade werden sehr viele Vorschauen erzeugt — bitte gleich noch "
+                                 "einmal versuchen.", headers={"Retry-After": "10"})
     try:
         pdf_bytes = await asyncio.to_thread(
             generate_contract_pdf,
@@ -1223,6 +1261,8 @@ async def preview_contract(body: ContractIn, user=Depends(require_active_sub),
         )
     except Exception:
         raise HTTPException(400, "PDF konnte mit diesen Eingaben nicht erzeugt werden.")
+    finally:
+        sperre.release()
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
