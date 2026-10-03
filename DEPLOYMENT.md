@@ -4281,3 +4281,22 @@ gerechnetes PDF). Die Druckfassung `pdf_b64` für Fahrer/Sucher/Chef bleibt unve
 Firmeneinstellung „Empfangsbestätigung drucken“ gilt für die Portal-Fassung nicht. Scheitert die Erzeugung, wird der
 Code trotzdem ausgegeben (Log + Rückfall Druckfassung). Keine Migration: offene Codes von vor dem Rollout zeigen die
 Druckfassung, der nächste Code erzeugt die Portal-Fassung. Tests: `test_portal_ohne_empfang_20261002.py`.
+
+## Bilder nachholen (Wunsch Ahmad 03.10.2026)
+
+Kommen beim Auslesen eines Inserats die Daten, aber keine Fotos, zeigt die Vergleichsseite unter den Fahrzeugdaten
+„Fotos vom Inserat“ mit dem Knopf **Bilder nachholen** (`components/BilderNachholen.jsx`). Er ruft
+`POST /api/mobile/bilder-nachholen {url}` auf: der Server holt das Inserat noch einmal **komplett** beim Anbieter
+(Speichereintrag entwerten, bei mobile.de auch `vehicle_cache`, dann `get_or_fetch_listing` wie beim Vergleich).
+
+- Nur wenn der erste Abruf geklappt hat (Daten in `listings_cache`) und dabei keine Fotos kamen. Ohne Daten: 409
+  „bitte den Link neu auslesen“. Nur für Konten, die das Inserat selbst ausgelesen haben (`vehicle_comparisons`).
+- Je Inserat höchstens `BILDER_NACHHOLEN_MAX` (3) Versuche ohne Fotos und einer je `BILDER_NACHHOLEN_PAUSE_S` (60 s),
+  atomar am Speichereintrag (`bilder_nachholen.versuche/zuletzt`) — Doppelklick oder zwei Kollegen lösen nur einen Abruf aus.
+- Jeder echte Abruf zählt wie ein neuer Link für das Tageslimit des Kontos. Scheitert er, bleibt der alte Stand gültig,
+  der Versuch zählt nicht, es gibt keine Pause. Ein laufender Abruf wird nie gestört (503, die Oberfläche wiederholt).
+- Kommen Fotos, landen sie in allen Fahrzeugen der Firma zu diesem Inserat, die noch keine haben (`data.images`,
+  `image_urls`, `image_count`, `bilder_nachgeholt_am`) — auch bei abgeholten Fahrzeugen, Händlerkorrekturen bleiben.
+  Verträge ohne eigenen Bilderstand zeigen sie dann ebenfalls.
+- Die Vergleichsantwort trägt `bilder_nachholen_moeglich` (Kleinanzeigen im Browser-Modus: nein).
+- Tests: `backend/tests/test_bilder_nachholen_20261003.py`, `frontend/src/pages/app/Vergleich.bilderNachholen.test.jsx`.

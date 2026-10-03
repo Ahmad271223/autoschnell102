@@ -18,6 +18,7 @@ import {
 import ContractDialog from "@/components/ContractDialog";
 import SendDialog from "@/components/SendDialog";
 import BeweisCard from "@/components/BeweisCard";
+import BilderNachholen from "@/components/BilderNachholen";
 import ProfileBadge from "@/components/ProfileBadge";
 import PortalBadge from "@/components/PortalBadge";
 import { openContractPdf } from "@/lib/pdf";
@@ -425,7 +426,7 @@ export default function Vergleich() {
           : "Zu diesem Link kam kein Fahrzeug zurück — bitte erneut versuchen.");
       }
       const t1 = Date.now();
-      setResult({ ...data, ms: t1 - t0 });
+      setResult({ ...data, ms: t1 - t0, link: ziel });
       // Runde 22 (11.09.2026): Filter der aktiven Portale gleich mit oeffnen.
       // Nur hier (echter Vergleichslauf), nie beim Wiederherstellen aus der
       // sessionStorage. Benannte Fenster -> derselbe Tab wird wiederverwendet;
@@ -799,6 +800,17 @@ export default function Vergleich() {
                     )}
                   </div>
                 </div>
+              )}
+
+              {/* Wunsch Ahmad 03.10.2026: Daten kamen, Fotos nicht -> komplett neu abrufen */}
+              {!(result.vehicle.images?.length > 0) && result.bilder_nachholen_moeglich !== false && (
+                <BilderNachholen
+                  key={result.cache_key || result.vehicle_id}
+                  url={result.link || url}
+                  onBilder={(a) => setResult((r) => (r && r.vehicle_id === result.vehicle_id
+                    ? { ...r, vehicle: { ...r.vehicle, images: a.images, image_urls: a.images,
+                                         image_count: a.bilder, images_thumbs: a.images_thumbs } }
+                    : r))} />
               )}
 
               {result.vehicle.features?.length > 0 && (

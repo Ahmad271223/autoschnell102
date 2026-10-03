@@ -894,7 +894,197 @@ async def compare(body: CompareIn, background: BackgroundTasks,
         "beweis": beweis,
         # U-11: False bei Browserdaten — kein Knopf "Beweisdokument erstellen"
         "beweis_moeglich": beweis_moeglich,
+        # Wunsch Ahmad 03.10.2026: Daten kamen, Fotos nicht -> Knopf "Bilder nachholen"
+        "bilder_nachholen_moeglich": bilder_nachholen_moeglich(source, _bilder),
     }
+
+
+# =========================================================
+#        BILDER NACHHOLEN (Wunsch Ahmad 03.10.2026)
+# =========================================================
+# Kam beim Auslesen eines Inserats alles AUSSER den Fotos (der Anbieter liefert
+# gelegentlich Daten ohne Bilder), holt der Knopf "Bilder nachholen" das Inserat
+# noch einmal KOMPLETT beim Anbieter. Erlaubt nur, wenn
+#   - der erste Abruf geklappt hat (Daten liegen im gemeinsamen Speicher) und
+#   - dabei KEINE Fotos kamen.
+# Ein gescheiterter Abruf laeuft wie bisher ueber "Auslesen" — dafuer gibt es
+# diesen Knopf nicht. Je Inserat hoechstens BILDER_NACHHOLEN_MAX Versuche ohne
+# Fotos und einer je BILDER_NACHHOLEN_PAUSE_S Sekunden (auch gegen Doppelklick
+# und zwei Kollegen gleichzeitig). Jeder echte Abruf zaehlt wie ein neuer Link
+# fuer das Tageslimit des Kontos (fetch_listing). Scheitert der neue Abruf,
+# bleibt der alte Stand gueltig und der Versuch zaehlt nicht.
+BILDER_NACHHOLEN_MAX = int(os.environ.get("BILDER_NACHHOLEN_MAX", "3") or 3)
+BILDER_NACHHOLEN_PAUSE_S = int(os.environ.get("BILDER_NACHHOLEN_PAUSE_S", "60") or 60)
+BILDER_NACHHOLEN_QUELLEN = ("mobile", "autoscout24", "kleinanzeigen")
+KEINE_FOTOS_HINWEIS = ("Auch beim neuen Abruf kamen keine Fotos mit — das Inserat hat "
+                       "vermutlich keine.")
+
+
+def _bilder_von(daten) -> list:
+    d = daten if isinstance(daten, dict) else {}
+    return [u for u in (d.get("images") or d.get("image_urls") or []) if isinstance(u, str) and u]
+
+
+def bilder_nachholen_moeglich(source: str, bilder) -> bool:
+    """Fuer die Vergleichsantwort: Knopf zeigen, wenn keine Fotos da sind und der
+    Server dieses Inserat selbst abrufen darf (Kleinanzeigen im Browser-Modus nicht)."""
+    if bilder or source not in BILDER_NACHHOLEN_QUELLEN:
+        return False
+    return not (source == "kleinanzeigen" and _erweiterung_noetig())
+
+
+def _ohne_bilder(feld: str) -> dict:
+    """Mongo-Filter: unter <feld>.images UND <feld>.image_urls liegt nichts."""
+    def leer(f):
+        return {"$or": [{f: {"$exists": False}}, {f: None}, {f: {"$size": 0}}]}
+    return {"$and": [leer(f"{feld}.images"), leer(f"{feld}.image_urls")]}
+
+
+async def _bilder_ins_fahrzeug(user: dict, cache_key: str, vid: str, bilder: list) -> int:
+    """Die nachgeholten Fotos an die Fahrzeuge DIESER Firma zu diesem Inserat, die
+    noch keine haben — egal wie weit der Vorgang ist (Fotos sind keine Korrektur
+    des Haendlers). Vertraege ohne eigenen Bilderstand zeigen sie dann auch
+    (list_contracts, bilder_nachgetragen). Andere Felder bleiben unberuehrt."""
+    if not bilder:
+        return 0
+    r = await db.vehicles.update_many(
+        {"dealer_id": user["dealer_id"], "data": {"$type": "object"},
+         "$and": [{"$or": [{"inserat_schluessel": cache_key}, {"id": vid}]}, _ohne_bilder("data")]},
+        {"$set": {"data.images": bilder, "data.image_urls": bilder, "data.image_count": len(bilder),
+                  "bilder_nachgeholt_am": now_iso(), "updated_at": now_iso()}})
+    return r.modified_count
+
+
+async def _nachholen_zuruecknehmen(cache_key: str, vorher: dict) -> None:
+    """Abruf gescheitert: Versuch nicht zaehlen, Pause aufheben und — falls kein
+    anderer inzwischen neu geschrieben hat — den alten Stand wieder gueltig machen."""
+    try:
+        await db.listings_cache.update_one(
+            {"cache_key": cache_key, "bilder_nachholen.versuche": {"$gt": 0}},
+            {"$inc": {"bilder_nachholen.versuche": -1}, "$unset": {"bilder_nachholen.zuletzt": ""}})
+        if vorher.get("expires_at"):
+            await db.listings_cache.update_one(
+                {"cache_key": cache_key, "fetched_at": vorher.get("fetched_at")},
+                {"$set": {"expires_at": vorher["expires_at"]}})
+    except Exception:  # noqa: BLE001 — Aufraeumen, nie den eigentlichen Fehler verdecken
+        log.exception("Bilder nachholen: Zuruecknehmen fuer %s fehlgeschlagen", cache_key)
+
+
+def _nachholen_fehler(exc: Exception, raw_url: str) -> HTTPException:
+    """Fehler des neuen Abrufs wie beim Vergleich in klare Antworten uebersetzen."""
+    if isinstance(exc, HTTPException):
+        return exc
+    if isinstance(exc, ListingIdentityError):
+        return HTTPException(400, str(exc))
+    if isinstance(exc, ListingGone):
+        return HTTPException(404, str(exc))
+    if isinstance(exc, ListingBusy):
+        return HTTPException(503, str(exc), headers={"Retry-After": "5"})
+    if isinstance(exc, TageslimitErreicht):
+        return HTTPException(429, str(exc))
+    if isinstance(exc, RuntimeError):
+        return HTTPException(502, str(exc))
+    log.exception("Bilder nachholen fehlgeschlagen fuer %s", raw_url, exc_info=exc)
+    return HTTPException(500, "Die Fotos konnten nicht nachgeholt werden — bitte später noch einmal.")
+
+
+@router.post("/mobile/bilder-nachholen")
+async def bilder_nachholen(body: CompareIn, user=Depends(require_active_sub)):
+    raw_url = (body.url or "").strip()
+    try:
+        identity = get_listing_identity(raw_url)
+    except ListingIdentityError as exc:
+        raise HTTPException(400, str(exc) or "Keine gültige Fahrzeug-Adresse erkannt.")
+    source, item_id, ck = identity["source"], identity["item_id"], identity["cache_key"]
+    if source not in BILDER_NACHHOLEN_QUELLEN:
+        raise HTTPException(400, "Für diese Quelle können keine Fotos nachgeholt werden.")
+    if source == "autoscout24" and not autoscout_quelle_verfuegbar():
+        raise HTTPException(400, "AutoScout24-Links sind noch nicht freigeschaltet.")
+    if source == "mobile" and not mobile_quelle_verfuegbar():
+        raise HTTPException(400, "mobile.de-Links sind noch nicht freigeschaltet.")
+    if source == "kleinanzeigen" and _erweiterung_noetig():
+        raise HTTPException(409, "Kleinanzeigen-Inserate holt dein Browser — bitte den Link "
+                                 "einfach neu auslesen.")
+    # Nur wer dieses Inserat selbst ausgelesen hat (sonst koennte jeder fuer
+    # beliebige Inserate bezahlte Abrufe ausloesen).
+    if not await db.vehicle_comparisons.count_documents({"cache_key": ck, "user_id": user["id"]}, limit=1):
+        raise HTTPException(404, "Bitte das Inserat zuerst auslesen.")
+
+    eintrag = await db.listings_cache.find_one(
+        {"cache_key": ck}, {"_id": 0, "data": 1, "bilder_nachholen": 1})
+    if not eintrag or not eintrag.get("data"):
+        # Der erste Abruf hat nicht geklappt -> kein Nachholen, sondern neu auslesen.
+        raise HTTPException(409, "Für dieses Inserat liegen keine Daten vor — bitte den Link "
+                                 "neu auslesen.")
+    ad_id = (eintrag["data"] or {}).get("mobile_ad_id") or item_id
+    vid = await _fahrzeug_id(source, ad_id, user["dealer_id"])
+    from bild_proxy import thumbs as _thumbs
+    schon_da = _bilder_von(eintrag["data"])
+    if schon_da:
+        # Inzwischen sind Fotos da (z. B. hat ein Kollege nachgeholt): kein Abruf.
+        await _bilder_ins_fahrzeug(user, ck, vid, schon_da)
+        return {"ok": True, "bilder": len(schon_da), "nachgeholt": False, "images": schon_da,
+                "images_thumbs": _thumbs(schon_da[:40]), "versuche_uebrig": None, "hinweis": None}
+
+    stand = eintrag.get("bilder_nachholen") or {}
+    if int(stand.get("versuche") or 0) >= BILDER_NACHHOLEN_MAX:
+        raise HTTPException(409, f"Schon {BILDER_NACHHOLEN_MAX}-mal ohne Fotos nachgeholt — "
+                                 "das Inserat hat offenbar keine Fotos.")
+    jetzt = datetime.now(timezone.utc)
+    # Atomar: nur EIN Versuch je Pause (Doppelklick, zwei Kollegen gleichzeitig)
+    vorher = await db.listings_cache.find_one_and_update(
+        {"cache_key": ck, "data": {"$type": "object"},
+         "$and": [_ohne_bilder("data"),
+                  {"$or": [{"bilder_nachholen.versuche": {"$exists": False}},
+                           {"bilder_nachholen.versuche": {"$lt": BILDER_NACHHOLEN_MAX}}]},
+                  {"$or": [{"bilder_nachholen.zuletzt": {"$exists": False}},
+                           {"bilder_nachholen.zuletzt": None},
+                           {"bilder_nachholen.zuletzt": {
+                               "$lt": jetzt - timedelta(seconds=BILDER_NACHHOLEN_PAUSE_S)}}]}]},
+        {"$inc": {"bilder_nachholen.versuche": 1},
+         "$set": {"bilder_nachholen.zuletzt": jetzt, "bilder_nachholen.von": user["id"]}},
+        projection={"_id": 0, "expires_at": 1, "fetched_at": 1, "bilder_nachholen": 1},
+        return_document=ReturnDocument.BEFORE)
+    if vorher is None:
+        raise HTTPException(429, "Die Fotos werden gerade schon nachgeholt — bitte in einer "
+                                 "Minute noch einmal.")
+    # Den Speichereintrag entwerten, damit wirklich neu abgerufen wird — aber nie
+    # einen laufenden Abruf stoeren (dessen Ergebnis kommt gleich ohnehin).
+    r = await db.listings_cache.update_one(
+        {"cache_key": ck, "$or": [{"fetching_until": {"$exists": False}}, {"fetching_until": None},
+                                  {"fetching_until": {"$lt": jetzt}}]},
+        {"$set": {"expires_at": jetzt - timedelta(seconds=1)}})
+    if not r.matched_count:
+        await _nachholen_zuruecknehmen(ck, {})
+        raise HTTPException(503, "Das Inserat wird gerade abgerufen — bitte gleich noch einmal.",
+                            headers={"Retry-After": "5"})
+    if source == "mobile":
+        # Zweiter Speicher nur bei mobile.de (30 min) — sonst waere der Abruf keiner.
+        await db.vehicle_cache.delete_one({"mobile_ad_id": item_id})
+
+    async def _fetcher(src: str, iid: str, url: str) -> dict:
+        async with _AbrufSlot(user):
+            return await fetch_listing(db, src, iid, url,
+                                       dealer_id=user.get("dealer_id") or "",
+                                       user_id=user.get("id") or "")
+
+    try:
+        daten, _aus_speicher = await get_or_fetch_listing(
+            db, raw_url, _fetcher, ttl_hours=LISTING_CACHE_TTL_HOURS,
+            dealer_id=user.get("dealer_id") or "")
+    except Exception as exc:  # noqa: BLE001
+        await _nachholen_zuruecknehmen(ck, vorher)
+        raise _nachholen_fehler(exc, raw_url)
+
+    bilder = _bilder_von(daten)
+    fahrzeuge = await _bilder_ins_fahrzeug(user, ck, vid, bilder)
+    await log_activity_sicher(user["dealer_id"], user["id"], "vergleich.bilder_nachgeholt", ref=ad_id,
+                              meta={"bilder": len(bilder), "fahrzeuge": fahrzeuge})
+    versuche = int((vorher.get("bilder_nachholen") or {}).get("versuche") or 0) + 1
+    return {"ok": True, "bilder": len(bilder), "nachgeholt": bool(bilder), "images": bilder,
+            "images_thumbs": _thumbs(bilder[:40]), "abgerufen_am": now_iso(),
+            "versuche_uebrig": None if bilder else max(0, BILDER_NACHHOLEN_MAX - versuche),
+            "hinweis": None if bilder else KEINE_FOTOS_HINWEIS}
 
 
 class IngestIn(BaseModel):
