@@ -605,6 +605,7 @@ async def _cleanup_once(db, wache=None) -> dict:
     # (C17/C18) und nicht verteilte Fahrernamen (A6) nachziehen.
     await s("termin_nacharbeit_nachgeholt", lambda: termin_nacharbeit_nachholen(db, now))
     await s("vertrags_nacharbeit_nachgeholt", lambda: vertrags_nacharbeit_nachholen(db))
+    await s("termin_nachfuehrung_nachgeholt", lambda: termin_nachfuehrung_nachholen(db))
     await s("konto_nachlese", lambda: konto_nachlese_abarbeiten(db, now))
     await s("kaufvorgang_nacharbeit_nachgeholt", lambda: kaufvorgang_nacharbeit_nachholen(db))
     await s("termin_verweise_bereinigt", lambda: termin_verweise_bereinigen(db, now))
@@ -1035,6 +1036,89 @@ async def konto_nachlese_abarbeiten(db, now: datetime) -> int:
             log.info("Konto-Nachlese: Waisendaten von %s nachtraeglich an %s "
                      "uebergeben: %s", stein["_id"], stein["an"], z)
     return nachgeholt
+
+
+#: Pruefung 04.10.2026 (Nr. 43): Merker am Vertrag — die offenen Termine tragen
+#: noch nicht die Verkaeufer-Angaben der aktuellen Fassung.
+TERMIN_NACHFUEHRUNG_OFFEN = "termin_nachfuehrung_offen"
+
+
+async def termine_aus_vertrag_nachziehen(db, contract_id: str, dealer_id: str) -> int:
+    """Pruefung 04.10.2026 (Nr. 43): Verkaeufer-Angaben der AKTUELLEN Vertrags-
+    fassung (Name, Telefon, E-Mail, Abholadresse) in die offenen Termine des
+    Vertrags uebernehmen; abgeschlossene Termine bleiben Beleg. Aendert sich der
+    Name, bekommt der Termin den Zeitpunkt (SELLER_NAME_GEAENDERT_AM) und ein
+    Protokoll-Entwurf mit dem ALTEN Namen verliert ihn (RP-082) — wie bei der
+    Verkaeuferkorrektur, jetzt auch nach der nachtraeglichen Aenderung.
+
+    Ein gemeinsamer Weg fuer PUT /contracts/{id}/verkaeufer, POST .../neue-fassung
+    und den Nachholer (termin_nachfuehrung_nachholen). Liefert die Zahl der
+    offenen Termine; WIRFT bei Datenbankfehlern (der Aufrufer setzt den Merker)."""
+    from routes.appointments import ABGESCHLOSSEN
+    from routes.protocols import SELLER_NAME_GEAENDERT_AM
+    c = await db.generated_pdfs.find_one({"id": contract_id, "dealer_id": dealer_id},
+                                         {"_id": 0, "contract_data": 1})
+    if not c:
+        return 0
+    cd = c.get("contract_data") or {}
+    name = str(cd.get("seller_name") or "").strip()
+    adresse = " ".join(x for x in (str(cd.get("seller_address") or "").strip(),
+                                   str(cd.get("seller_zip") or "").strip(),
+                                   str(cd.get("seller_city") or "").strip()) if x)[:500]
+    jetzt = now_iso()
+    basis = {"seller_name": name, "seller_phone": str(cd.get("seller_phone") or "").strip(),
+             "seller_email": str(cd.get("seller_email") or "").strip(), "updated_at": jetzt}
+    if adresse:
+        basis["pickup_address"] = adresse
+    n = 0
+    async for a in db.appointments.find(
+            {"contract_id": contract_id, "dealer_id": dealer_id,
+             "status": {"$nin": list(ABGESCHLOSSEN)}}, {"_id": 0, "id": 1, "seller_name": 1}):
+        alter_name = str(a.get("seller_name") or "").strip()
+        setzen = dict(basis)
+        if name != alter_name:
+            setzen[SELLER_NAME_GEAENDERT_AM] = jetzt
+        await db.appointments.update_one({"id": a["id"]}, {"$set": setzen})
+        if name != alter_name and alter_name:
+            await db.pickup_protocols.update_many(
+                {"appointment_id": a["id"], "dealer_id": dealer_id, "status": "entwurf",
+                 "superseded": {"$ne": True}, "seller_name": alter_name},
+                {"$unset": {"seller_name": ""}})
+        n += 1
+    return n
+
+
+async def termin_nachfuehrung_merken(db, contract_id: str, dealer_id: str) -> None:
+    """Nr. 43: das Nachziehen scheiterte — Merker setzen (der Nachholer zieht im
+    naechsten Aufraeumlauf nach) und Betriebsalarm. Wirft nie."""
+    try:
+        await db.generated_pdfs.update_one({"id": contract_id},
+                                           {"$set": {TERMIN_NACHFUEHRUNG_OFFEN: True}})
+    except Exception:  # noqa: BLE001
+        log.exception("Merker %s fuer Vertrag %s nicht gesetzt", TERMIN_NACHFUEHRUNG_OFFEN, contract_id)
+    try:
+        await alarm(db, "termin_nachfuehrung_offen", ref=contract_id, dealer_id=dealer_id)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def termin_nachfuehrung_nachholen(db) -> int:
+    """Nr. 43: Vertraege mit Merker — Termine aus der aktuellen Fassung nachziehen.
+    Vorher blieb ein gescheitertes Nachziehen ohne Merker und ohne Alarm liegen:
+    der Fahrer sah Name und Telefon der ALTEN Fassung."""
+    n = 0
+    async for c in db.generated_pdfs.find(
+            {TERMIN_NACHFUEHRUNG_OFFEN: True, "loeschung.status": {"$ne": "laeuft"}},
+            {"_id": 0, "id": 1, "dealer_id": 1}).limit(200):
+        try:
+            await termine_aus_vertrag_nachziehen(db, c["id"], c["dealer_id"])
+            await db.generated_pdfs.update_one({"id": c["id"]},
+                                               {"$unset": {TERMIN_NACHFUEHRUNG_OFFEN: ""}})
+            await alarm_schliessen(db, "termin_nachfuehrung_offen", c["id"])
+            n += 1
+        except Exception:  # noqa: BLE001
+            log.exception("Termin-Nachfuehrung zu Vertrag %s nicht nachgeholt", c.get("id"))
+    return n
 
 
 async def vertrags_nacharbeit_nachholen(db) -> int:

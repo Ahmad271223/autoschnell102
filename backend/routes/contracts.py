@@ -39,6 +39,7 @@ from deps import (
 )
 import auto_daten
 from cleanup_service import LoeschungAbgelehnt, vertrag_endgueltig_loeschen
+import cleanup_service as _cleanup
 from lifecycle import try_set_lifecycle
 from pdf_service import DIGITAL_NACHTRAEGLICH, generate_contract_pdf, digitaler_vertragstext
 from rate_limiter import SlidingWindowRateLimiter
@@ -3504,43 +3505,22 @@ async def verkaeufer_korrigieren(contract_id: str, body: VerkaeuferKorrekturIn,
     neuer_name = str(cd.get("seller_name") or "").strip()
     # Offene Termine zu diesem Vertrag mitziehen (abgeschlossene bleiben als
     # Beleg, wie sie waren). Die Zusage des Fahrers wird NICHT zurueckgesetzt:
-    # der Termin selbst (Zeit, Ort) aendert sich nicht.
-    from routes.appointments import ABGESCHLOSSEN
-    from routes.protocols import SELLER_NAME_GEAENDERT_AM
-    adresse = " ".join(x for x in (
-        str(cd.get("seller_address") or "").strip(),
-        str(cd.get("seller_zip") or "").strip(),
-        str(cd.get("seller_city") or "").strip()) if x)[:500]
-    termin_set = {"seller_name": neuer_name,
-                  "seller_phone": str(cd.get("seller_phone") or "").strip(),
-                  "seller_email": str(cd.get("seller_email") or "").strip(),
-                  "updated_at": now_iso()}
-    if adresse:
-        termin_set["pickup_address"] = adresse
-    if neuer_name != alter_name:
-        termin_set[SELLER_NAME_GEAENDERT_AM] = termin_set["updated_at"]
-    offene: list = []
+    # der Termin selbst (Zeit, Ort) aendert sich nicht. Pruefung 04.10.2026
+    # (Nr. 43): gemeinsamer Weg mit der nachtraeglichen Aenderung; scheitert er,
+    # bleibt ein Merker stehen und der Aufraeumlauf zieht nach (vorher nur Log).
+    termine = 0
     try:
-        offene = [a["id"] async for a in db.appointments.find(
-            {"contract_id": contract_id, "dealer_id": user["dealer_id"],
-             "status": {"$nin": list(ABGESCHLOSSEN)}}, {"_id": 0, "id": 1})]
-        if offene:
-            await db.appointments.update_many({"id": {"$in": offene}}, {"$set": termin_set})
-            if neuer_name != alter_name and alter_name:
-                await db.pickup_protocols.update_many(
-                    {"appointment_id": {"$in": offene}, "dealer_id": user["dealer_id"],
-                     "status": "entwurf", "superseded": {"$ne": True},
-                     "seller_name": alter_name},
-                    {"$unset": {"seller_name": ""}})
-    except Exception:  # noqa: BLE001 — der Vertrag steht; Termin ist Beiwerk
-        log.exception("Verkaeuferkorrektur %s: Termin nicht nachgezogen", contract_id)
+        termine = await _cleanup.termine_aus_vertrag_nachziehen(db, contract_id, user["dealer_id"])
+    except Exception:  # noqa: BLE001 — der Vertrag steht; Termin wird nachgeholt
+        log.exception("Verkaeuferkorrektur %s: Termin nicht nachgezogen — Merker gesetzt", contract_id)
+        await _cleanup.termin_nachfuehrung_merken(db, contract_id, user["dealer_id"])
     await log_activity_sicher(user["dealer_id"], user["id"], "vertrag.verkaeufer.korrigiert",
                               ref=contract_id,
                               meta={"version": (frisch or {}).get("version"),
                                     "name_geaendert": neuer_name != alter_name,
-                                    "termine": len(offene)})
+                                    "termine": termine})
     return {"geaendert": True, "version": int((frisch or {}).get("version") or 0),
-            "termine_aktualisiert": len(offene),
+            "termine_aktualisiert": termine,
             # fuer den Versand-Dialog direkt danach (ohne Neuladen der Liste)
             "verkaeufer": {k: str(cd.get(k) or "") for k in VERKAEUFER_FELDER}}
 
@@ -3683,23 +3663,16 @@ async def vertrag_nachtraeglich_aendern(contract_id: str, body: ContractIn, user
         await auto_daten.nachfuehren(db, {**doc, "contract_data": contract_dict})
     except Exception:  # noqa: BLE001
         log.exception("Auto-Daten nach nachtraeglicher Aenderung von %s nicht nachgefuehrt", contract_id)
-    # offene Termine: Verkaeufername/Kontakt/Adresse mitziehen (abgeschlossene bleiben Beleg)
+    # offene Termine: Verkaeufername/Kontakt/Adresse mitziehen (abgeschlossene bleiben Beleg).
+    # Pruefung 04.10.2026 (Nr. 43): vorher ohne Merker — scheiterte das, sah der Fahrer Name und
+    # Telefon der alten Fassung, und niemand zog nach. Jetzt derselbe Weg wie die Verkaeufer-
+    # korrektur (inkl. Namensaenderung am Termin und Protokoll-Entwurf), sonst Merker + Nachholer.
     termine = 0
     try:
-        from routes.appointments import ABGESCHLOSSEN
-        adresse = " ".join(x for x in (str(contract_dict.get("seller_address") or "").strip(),
-                                       str(contract_dict.get("seller_zip") or "").strip(),
-                                       str(contract_dict.get("seller_city") or "").strip()) if x)[:500]
-        termin_set = {"seller_name": kopf["seller_name"], "seller_phone": kopf["seller_phone"],
-                      "seller_email": kopf["seller_email"], "updated_at": now_iso()}
-        if adresse:
-            termin_set["pickup_address"] = adresse
-        r = await db.appointments.update_many(
-            {"contract_id": contract_id, "dealer_id": dealer_id, "status": {"$nin": list(ABGESCHLOSSEN)}},
-            {"$set": termin_set})
-        termine = r.modified_count
-    except Exception:  # noqa: BLE001 — der Vertrag steht; Termin ist Beiwerk
-        log.exception("Nachtraegliche Aenderung %s: Termin nicht nachgezogen", contract_id)
+        termine = await _cleanup.termine_aus_vertrag_nachziehen(db, contract_id, dealer_id)
+    except Exception:  # noqa: BLE001 — der Vertrag steht; Termin wird nachgeholt
+        log.exception("Nachtraegliche Aenderung %s: Termin nicht nachgezogen — Merker gesetzt", contract_id)
+        await _cleanup.termin_nachfuehrung_merken(db, contract_id, dealer_id)
     await log_activity_sicher(dealer_id, user.get("id", ""), "vertrag.nachtraeglich.geaendert", ref=contract_id,
                               meta={"version": alte_version + 1, "termine": termine})
     if _portal_nachweis(doc, alte_version):
