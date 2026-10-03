@@ -36,6 +36,13 @@ import vertrag_vorlagen as V  # noqa: E402
 API = konten.API
 MONGO_URL = konten.MONGO_URL if hasattr(konten, "MONGO_URL") else None
 SUF = uuid.uuid4().hex[:8]
+# Datumsfalle (03.10.2026): fest "2026-10-03" war am 03.10. zugleich das Datum
+# "erstellt am" im PDF — test_d1 ("altes Datum weg") schlug genau an dem Tag fehl.
+# Abholdaten deshalb relativ zu heute, nie gleich heute.
+_ABHOL = datetime.now(timezone.utc).date() + timedelta(days=14)
+_NEU = datetime.now(timezone.utc).date() + timedelta(days=45)
+ABHOL_ISO, ABHOL_DE = _ABHOL.isoformat(), _ABHOL.strftime("%d.%m.%Y")
+NEU_ISO, NEU_DE = _NEU.isoformat(), _NEU.strftime("%d.%m.%Y")
 PW = "Rt7Kq2Mx9-Sicher!42"
 
 
@@ -137,7 +144,7 @@ def _vertrag(w, kopf=None, **extra):
         "seller_address": "Hauptstr. 5", "seller_zip": "40210",
         "seller_city": "Düsseldorf", "purchase_price": 15900,
         "payment_method": "Echtzeitüberweisung",
-        "pickup_date": "2026-10-03", "pickup_time": "14:30",
+        "pickup_date": ABHOL_ISO, "pickup_time": "14:30",
         "idempotency_key": f"pdf-{uuid.uuid4().hex[:12]}",
     }
     koerper.update(extra)
@@ -174,7 +181,7 @@ def test_a1_neue_firma_bekommt_die_startwerte(welt):
 def test_a2_das_pdf_einer_neuen_firma_ist_vollstaendig(welt):
     v = _vertrag(welt, nr=1)
     text = _pdf(welt, v["id"])
-    assert "03.10.2026" in text, "Abholdatum fehlt im PDF"
+    assert ABHOL_DE in text, "Abholdatum fehlt im PDF"
     assert "Hauptstr. 5, 40210" in text, "Übergabeort fehlt"
     assert "Echtzeitüberweisung" in text, "Zahlungsart fehlt"
     for p in ("{abholdatum}", "{ort}", "{zahlungsart}", "{kundennummer}",
@@ -194,7 +201,7 @@ def test_a4_auch_die_druckfassung_ist_vollstaendig(welt):
     Unterschriftslinien geht denselben Weg."""
     v = _vertrag(welt, nr=3)
     text = _pdf(welt, v["id"], digital=False)
-    assert "03.10.2026" in text and "{abholdatum}" not in text
+    assert ABHOL_DE in text and "{abholdatum}" not in text
 
 
 # ------------------------------------------- B: BESTEHENDE Firma (Altbestand)
@@ -213,7 +220,7 @@ def test_b1_firma_ohne_die_neuen_felder_bricht_nicht(welt):
         # Fehlt der Schalter, gilt AN — der Standardsatz ist also da.
         assert "Fahrzeugübergabe findet" in text, (
             "Altbestand bekommt den Standardsatz nicht")
-        assert "03.10.2026" in text and "{abholdatum}" not in text
+        assert ABHOL_DE in text and "{abholdatum}" not in text
         # Und die Folge-Mail-Vorlage faellt auf den Standard zurueck.
         r = requests.get(f"{API}/contracts/{v['id']}/folge-mail/bahn",
                          headers=welt["kopf"], timeout=30)
@@ -266,7 +273,7 @@ def test_c1_schalter_aus_entfernt_nur_unseren_satz(welt):
 def test_c2_schalter_wieder_an(welt):
     v = _vertrag(welt, nr=7)
     text = _pdf(welt, v["id"])
-    assert "Fahrzeugübergabe findet" in text and "03.10.2026" in text
+    assert "Fahrzeugübergabe findet" in text and ABHOL_DE in text
 
 
 def test_c3_eigene_platzhalter_im_freitext_werden_auch_gefuellt(welt):
@@ -319,9 +326,9 @@ def test_d1_neues_abholdatum_erscheint_im_neuen_pdf(welt):
     den Text von Hand anfasst."""
     v = _vertrag(welt, nr=10)
     alt = _pdf(welt, v["id"])
-    assert "03.10.2026" in alt
+    assert ABHOL_DE in alt
 
-    neu_datum = "2026-11-17"
+    neu_datum = NEU_ISO
     import asyncio
     import routes.contracts as C
     dbx = _db()
@@ -333,8 +340,8 @@ def test_d1_neues_abholdatum_erscheint_im_neuen_pdf(welt):
     assert geaendert, "die Neuerzeugung meldete keine Aenderung"
 
     neu = _pdf(welt, v["id"])
-    assert "17.11.2026" in neu, "das neue Abholdatum steht nicht im PDF"
-    assert "03.10.2026" not in neu, "das alte Datum steht noch im PDF"
+    assert NEU_DE in neu, "das neue Abholdatum steht nicht im PDF"
+    assert ABHOL_DE not in neu, "das alte Datum steht noch im PDF"
     assert "{abholdatum}" not in neu
 
 

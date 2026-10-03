@@ -1,4 +1,11 @@
 {
   "hinweis": "Zeitlich befristete, begruendete Ausnahmen fuer audit-pruefen.js (Audit 09/2026, Blocker 1). Abgelaufene Ausnahmen blockieren wieder. Format: {modul oder id, grund, bis JJJJ-MM-TT}.",
-  "ausnahmen": []
+  "ausnahmen": [
+    {
+      "modul": "braces",
+      "id": 1240992,
+      "grund": "Am 03.10.2026 gemeldet, noch KEINE reparierte Version (patched <0.0.0). braces kommt nur ueber tailwindcss (micromatch/chokidar) beim Bauen und verarbeitet dort nur unsere eigenen Content-Muster aus tailwind.config.js — es landet nicht im ausgelieferten Code und sieht nie Eingaben von Nutzern. Sobald eine reparierte Version erscheint: yarn upgrade/resolution und Ausnahme entfernen.",
+      "bis": "2026-11-02"
+    }
+  ]
 }
