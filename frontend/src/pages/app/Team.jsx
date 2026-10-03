@@ -7,6 +7,7 @@ import { useFeatures } from "@/lib/features";
 import { useAuth } from "@/context/AuthContext";
 import { startseite } from "@/lib/rollen";
 import { planText } from "@/lib/abo";
+import WeitereSucherDialog from "@/components/WeitereSucherDialog";
 
 /**
  * Mitarbeiter / Sucher-Übersicht + Weiterverkaufsplan.
@@ -62,6 +63,9 @@ export default function Team() {
   // Prüfbericht 20.09. U-165: der Server kappt bei 1.000 Suchern und meldet
   // das per X-Truncated — vorher galt die Liste als vollständig.
   const [gekuerzt, setGekuerzt] = useState(false);
+  // Wunsch Ahmad 03.10.2026: Anfrage weiterer Sucher-Zugaenge an den Betreiber (statt mailto-Link)
+  const [weitereOffen, setWeitereOffen] = useState(false);
+  const [weitereAnfrage, setWeitereAnfrage] = useState(null);
 
   // Go-Live-Schalter (15.09.2026): der Weiterverkaufsplan gehoert zum
   // Marktplatz — ausgeschaltet wird er weder geladen noch angezeigt (die
@@ -83,6 +87,10 @@ export default function Team() {
       const sp = await api.get("/dealer/sucher-plans");
       setSucherPlans(sp.data?.plans || null);
     } catch { setSucherPlans(null); }
+    try {
+      const wa = await api.get("/dealer/sucher-zugaenge-anfrage");
+      setWeitereAnfrage(wa.data?.anfrage || null);
+    } catch { /* Hinweis nur Zusatz — ohne ihn bleibt die Seite benutzbar */ }
     if (features.marktplatz) {
       try {
         const p = await api.get("/dealer/sale-plan");
@@ -137,13 +145,34 @@ export default function Team() {
             Sucher & Verkaufsplan
           </h1>
         </div>
-        <a href={"mailto:support@autohandel.app?subject=Weitere%20Sucher-Zug%C3%A4nge&body=Hallo%2C%20wir%20brauchen%20weitere%20Sucher-Zug%C3%A4nge%20f%C3%BCr%20unsere%20Firma."}
-           data-testid="team-request-sucher"
-           className="inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold text-white"
-           style={{ background: "var(--accent-red)" }}>
+        <button type="button" onClick={() => setWeitereOffen(true)}
+                data-testid="team-request-sucher"
+                className="inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold text-white"
+                style={{ background: "var(--accent-red)" }}>
           <UserPlus size={16} /> Weitere Sucher anfragen
-        </a>
+        </button>
       </div>
+
+      {weitereAnfrage && (
+        <div className="mt-6 rounded-xl border px-4 py-3 flex flex-wrap items-center gap-3 text-sm"
+             data-testid="team-weitere-anfrage"
+             style={{ borderColor: "rgba(52,199,89,0.35)", background: "rgba(52,199,89,0.08)" }}>
+          <span className="flex-1 min-w-0" style={{ color: "var(--text-primary)" }}>
+            Deine Anfrage über <b>{weitereAnfrage.sucher_anzahl} weitere Sucher</b>
+            {" "}({weitereAnfrage.wanted_plan === "yearly" ? "Jahresabo" : "Monatsabo"}) vom{" "}
+            {new Date(weitereAnfrage.updated_at || weitereAnfrage.created_at).toLocaleDateString("de-DE")}{" "}
+            liegt beim Betreiber — er meldet sich bei dir.
+          </span>
+          <button type="button" onClick={() => setWeitereOffen(true)} data-testid="team-weitere-aendern"
+                  className="underline underline-offset-2 font-semibold" style={{ color: "var(--text-primary)" }}>
+            Anfrage ändern
+          </button>
+        </div>
+      )}
+      <WeitereSucherDialog key={weitereOffen ? `offen-${weitereAnfrage?.id || "neu"}` : "zu"}
+                           offen={weitereOffen} anfrage={weitereAnfrage} preise={sucherPlans}
+                           onClose={() => setWeitereOffen(false)}
+                           onGesendet={(a) => { if (a) setWeitereAnfrage(a); }} />
 
       {gekuerzt && (
         <div className="mt-6 rounded-xl border px-4 py-2 text-sm" data-testid="team-gekuerzt"

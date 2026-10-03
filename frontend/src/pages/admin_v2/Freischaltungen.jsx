@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import { PageHeader, Card, Badge, Button, Spinner, EmptyState, fmtDate } from "./_ui";
@@ -86,6 +87,7 @@ export function anfragePlan(wanted) {
  * - Marktplatz-Zugang: hier manuell aktivieren/sperren; Passwort setzen.
  */
 export default function AdminFreischaltungen() {
+  const nav = useNavigate();
   const [requests, setRequests] = useState(null);
   const [buyers, setBuyers] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -206,6 +208,14 @@ export default function AdminFreischaltungen() {
     } catch (e) { toast.error(errMsg(e)); }
   });
 
+  // Wunsch Ahmad 03.10.2026: "Weitere Sucher" — angelegt wird in der Firmenansicht, danach hier abhaken.
+  const erledigt = (req) => aktion(req.id, async () => {
+    try {
+      await closeReq(req.id, "erledigt");
+      toast.success("Anfrage erledigt");
+    } catch (e) { toast.error(errMsg(e, "Konnte nicht als erledigt markiert werden")); }
+  });
+
   const ablehnen = (req) => aktion(req.id, async () => {
     try {
       await closeReq(req.id, "abgelehnt");
@@ -277,12 +287,14 @@ export default function AdminFreischaltungen() {
                   const isSucher = r.type === "sucher_abo";
                   const isBuyer = r.type === "buyer_access";
                   const isZugang = r.type === "zugang";
+                  const isWeitere = r.type === "weitere_sucher";
                   const art = ZUGANG_ART[r.art] ? r.art : "firma";
                   return (
                     <Card key={r.id} padded={false}>
                       <div className="p-4 flex flex-wrap items-center gap-3" data-testid={`anfrage-${r.id}`}>
-                        <Badge tone={isZugang ? ZUGANG_ART[art].tone : isSucher ? "purple" : isBuyer ? "blue" : "gray"}>
-                          {isZugang ? ZUGANG_ART[art].label : isSucher ? "Sucher-Abo" : isBuyer ? "Marktplatz-Zugang" : (r.type || "Paket")}
+                        <Badge tone={isZugang ? ZUGANG_ART[art].tone : isSucher ? "purple" : isBuyer ? "blue" : isWeitere ? "yellow" : "gray"}>
+                          {isZugang ? ZUGANG_ART[art].label : isSucher ? "Sucher-Abo" : isBuyer ? "Marktplatz-Zugang"
+                            : isWeitere ? "Weitere Sucher" : (r.type || "Paket")}
                         </Badge>
                         {isBuyer && r.verlaengerung ? (
                           <Badge tone="yellow">
@@ -312,7 +324,7 @@ export default function AdminFreischaltungen() {
                           <div className="text-[12px] text-zinc-500">
                             {isZugang ? (r.contact_person || "") : r.company_name}
                             {r.contact_email ? ` · ${r.contact_email}` : ""}
-                            {isZugang && r.contact_phone ? ` · ${r.contact_phone}` : ""}
+                            {(isZugang || isWeitere) && r.contact_phone ? ` · ${r.contact_phone}` : ""}
                             {isZugang && art === "kaeufer" && r.ust_id ? ` · USt ${r.ust_id}` : ""}
                             {isZugang && art === "kaeufer" && r.gewerblich_bestaetigt_am ? " · B2B bestätigt" : ""}
                             {isZugang && art === "kaeufer" && r.einladung ? (
@@ -320,7 +332,7 @@ export default function AdminFreischaltungen() {
                             ) : null}
                             {" · "}{fmtDate(r.created_at)}
                           </div>
-                          {isZugang && r.message ? (
+                          {(isZugang || isWeitere) && r.message ? (
                             <div className="text-[12px] text-zinc-400 mt-1 max-w-xl whitespace-pre-wrap">{r.message}</div>
                           ) : null}
                         </div>
@@ -355,6 +367,18 @@ export default function AdminFreischaltungen() {
                             </Button>
                           </>)}
                           {isBuyer && <Button size="sm" onClick={() => grantBuyer(r)} disabled={!!arbeitet}><Check size={14} /> Zugang aktivieren</Button>}
+                          {isWeitere && r.requester_user_id && (
+                            <Button size="sm" onClick={() => nav(`/admin/users/${r.requester_user_id}`)}
+                                    data-testid={`weitere-sucher-firma-${r.id}`}>
+                              <UserPlus size={14} /> Zur Firma (Sucher anlegen)
+                            </Button>
+                          )}
+                          {isWeitere && (
+                            <Button size="sm" variant="outline" onClick={() => erledigt(r)} disabled={!!arbeitet}
+                                    data-testid={`anfrage-erledigt-${r.id}`}>
+                              <Check size={14} /> Erledigt
+                            </Button>
+                          )}
                           {!isZugang && !isSucher && !isBuyer && r.wanted_tier && r.dealer_id && (
                             <Button size="sm" onClick={() => grantPlan(r)} disabled={!!arbeitet}><Check size={14} /> Paket aktivieren</Button>
                           )}

@@ -764,7 +764,9 @@ async def plan_requests_unique_indizes(db) -> None:
     from betrieb import alarm, alarm_schliessen
     for name, felder, typ in (
             ("uniq_offene_sucher_abo_anfrage", "subject_user_id", "sucher_abo"),
-            ("uniq_offene_verkaufspaket_anfrage", "dealer_id", "verkaufspaket")):
+            ("uniq_offene_verkaufspaket_anfrage", "dealer_id", "verkaufspaket"),
+            # 03.10.2026: hoechstens EINE offene Anfrage weiterer Sucher-Zugaenge je Firma
+            ("uniq_offene_weitere_sucher_anfrage", "dealer_id", "weitere_sucher")):
         ref = f"plan_requests.{name}"
         try:
             await db.plan_requests.create_index(

@@ -2161,6 +2161,8 @@ async def admin_stats(_=Depends(current_admin)):
             "created_at": {"$gte": datetime.now(timezone.utc).replace(hour=0, minute=0, second=0).isoformat()}
         }),
         "open_errors": await db.error_logs.count_documents({"status": "open"}),
+        # Wunsch Ahmad 03.10.2026: offene Anfragen (Freischaltungen) auf einen Blick im Dashboard
+        "anfragen_offen": await db.plan_requests.count_documents({"status": "offen"}),
     }
 
 

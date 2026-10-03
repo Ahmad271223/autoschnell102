@@ -223,6 +223,8 @@ ANFRAGE_ART = {
     ("zugang", None): "Neuer Zugang angefragt",
     ("sucher_abo", None): "Sucher-Abo angefragt",
     ("buyer_access", None): "Marktplatz-Zugang angefragt",
+    # Wunsch Ahmad 03.10.2026: "Weitere Sucher anfragen" auf der Team-Seite des Chefs
+    ("weitere_sucher", None): "Weitere Sucher-Zugaenge angefragt",
 }
 
 
@@ -297,8 +299,10 @@ async def neue_anfragen_melden(db) -> int:
         import hashlib
 
         from email_service import send_email
+        # 03.10.2026: mit dem Aenderungsstand — eine geaenderte, erneut gemeldete Anfrage (z. B. mehr
+        # Sucher gewuenscht) bekommt eine NEUE Kennung; mit der alten verwarf der Mailanbieter sie als Doppel.
         schluessel = "anfragen-" + hashlib.sha256(
-            ",".join(sorted(str(a.get("id")) for a in anfragen)).encode()
+            ",".join(sorted(f"{a.get('id')}@{a.get('updated_at') or ''}" for a in anfragen)).encode()
         ).hexdigest()[:24]
         if not await send_email(ziel, betreff, text, idempotency_key=schluessel):
             log.error("[betriebsmeldung] Anfragen-Mail an %s nicht zugestellt "

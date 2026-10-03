@@ -4389,3 +4389,20 @@ eigenes Symbol (LKW). Kennungen `nav-*` unverändert; das Handy-Menü nutzt `men
 
 Tests: `backend/tests/test_vertrag_design_20261003.py`, `frontend/src/components/AppLayout.leiste.test.jsx`,
 `frontend/src/components/VertragDesign.test.jsx`.
+
+## „Weitere Sucher anfragen“ kommt beim Betreiber an (Wunsch Ahmad 03.10.2026)
+
+Der Knopf auf der Team-Seite des Chefs war ein mailto-Link an support@autohandel.app — die Anfrage kam nie an.
+Jetzt öffnet er ein Fenster (Anzahl 1–50, Monats- oder Jahresabo, Nachricht) und sendet
+POST /dealer/sucher-zugaenge-anfrage (nur Chef). Gespeichert als `plan_requests` mit `type: weitere_sucher`
+(eine offene je Firma, Index `uniq_offene_weitere_sucher_anfrage`; eine neue Eingabe ändert sie und meldet sie neu).
+
+- **Admin:** Freischaltungen zeigt die Anfrage („Weitere Sucher“, Nachricht, Telefon) mit „Zur Firma (Sucher
+  anlegen)“ und „Erledigt“; die Übersicht hat die Kachel „Offene Anfragen“ (`/admin/stats` → `anfragen_offen`).
+- **Mail:** über die Betriebsmeldung an `BETRIEB_MELDUNG_AN` (alle 10 Minuten gesammelt, wie die übrigen
+  Anfragen). Auf beiden Servern setzen, dann ausrollen:
+  `sh deploy/env_setzen.sh BETRIEB_MELDUNG_AN=ahmadfkh006@gmail.com`. Damit kommen auch Betriebsalarme und
+  der Tagesbericht (08:00); nur den Tagesbericht abschalten: `BETRIEB_TAGESBERICHT_STUNDE=-1`.
+- Die Mail-Kennung (Idempotenz bei Resend) enthält jetzt den Änderungsstand — eine geänderte Anfrage wird
+  nicht mehr als Doppel verworfen.
+- Tests: `backend/tests/test_weitere_sucher_20261003.py`, `frontend/src/components/WeitereSucherDialog.test.jsx`.

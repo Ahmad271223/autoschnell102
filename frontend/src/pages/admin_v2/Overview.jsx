@@ -44,11 +44,20 @@ export default function AdminOverview() {
         <div className="flex items-center gap-2 text-zinc-500 text-sm"><Spinner /> lade…</div>
       ) : (
         <>
-          <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 md:gap-4">
+          <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3 md:gap-4">
             <StatCard label="Nutzer"           value={fmtNum(stats?.users)}            color="blue" />
             <StatCard label="Aktive Abos"      value={fmtNum(stats?.active_subs)}      color="green" />
             <StatCard label="Verträge gesamt"  value={fmtNum(stats?.contracts)}        color="purple" />
             <StatCard label="Vergleiche heute" value={fmtNum(stats?.comparisons_today)} color="orange" />
+            {/* Wunsch Ahmad 03.10.2026: offene Anfragen (weitere Sucher, Abos, Zugänge) auf einen Blick */}
+            <Link to="/admin/freischaltungen" className="block" data-testid="overview-anfragen">
+              <StatCard
+                label="Offene Anfragen"
+                value={fmtNum(stats?.anfragen_offen)}
+                hint={stats?.anfragen_offen > 0 ? "Jetzt ansehen →" : "Nichts offen"}
+                color={stats?.anfragen_offen > 0 ? "orange" : "gray"}
+              />
+            </Link>
             <Link to="/admin/errors" className="block">
               <StatCard
                 label="Offene Fehler"

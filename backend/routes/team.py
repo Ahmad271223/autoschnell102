@@ -26,6 +26,7 @@ from deps import (current_firma, current_user, db, get_subscription_status,
 from routes.bestand import current_haendler
 
 from deps import marktplatz_freigeschaltet  # Go-Live-Schalter 15.09.2026
+from deps import current_chef  # 03.10.2026: Anfrage weiterer Sucher-Zugaenge nur der Chef
 
 router = APIRouter()
 log = logging.getLogger("autohandel")
@@ -79,6 +80,13 @@ def ist_probe(plan) -> bool:
 # ---------- Models ----------
 class UpgradeRequestIn(BaseModel):
     wanted_tier: str = Field(max_length=20)
+    message: str = Field(default="", max_length=2000)
+
+
+class WeitereSucherIn(BaseModel):
+    """Wunsch Ahmad 03.10.2026: der Chef fragt weitere Sucher-Zugaenge an (statt eines mailto-Links)."""
+    anzahl: int = Field(ge=1, le=50)
+    plan: str = Field(default="monthly", max_length=20)
     message: str = Field(default="", max_length=2000)
 
 
@@ -384,6 +392,72 @@ async def sale_plan_upgrade_request(body: UpgradeRequestIn,
                        ref=req_id, meta={"wunsch": body.wanted_tier})
     return {"ok": True, "request_id": req_id,
             "hinweis": "Anfrage wurde an den Administrator übermittelt."}
+
+
+# ---------- Weitere Sucher-Zugaenge (Wunsch Ahmad 03.10.2026) ----------
+# Vorher war "Weitere Sucher anfragen" nur ein mailto-Link an eine Adresse, die niemand las — die Anfrage
+# kam nie an. Jetzt eine echte Anfrage in plan_requests (type "weitere_sucher"): sie steht im Admin-Bereich
+# unter Freischaltungen (und als Zahl auf der Uebersicht) und geht per Betriebsmeldung an BETRIEB_MELDUNG_AN.
+# Eine offene Anfrage je Firma (Teil-Unique-Index); eine erneute Anfrage aendert sie und meldet sie neu.
+def _anfrage_fuer_chef(doc: dict) -> dict:
+    return {k: doc.get(k) for k in ("id", "sucher_anzahl", "wanted_plan", "message", "created_at", "updated_at")}
+
+
+def _euro(betrag) -> str:
+    return f"{int(round(float(betrag or 0))):,} €".replace(",", ".")
+
+
+@router.get("/dealer/sucher-zugaenge-anfrage")
+async def weitere_sucher_anfrage_lesen(user=Depends(current_chef)):
+    """Die offene Anfrage der Firma (oder null) — fuer den Hinweis auf der Team-Seite."""
+    doc = await db.plan_requests.find_one(
+        {"type": "weitere_sucher", "dealer_id": user["dealer_id"], "status": "offen"}, {"_id": 0})
+    return {"anfrage": _anfrage_fuer_chef(doc) if doc else None}
+
+
+@router.post("/dealer/sucher-zugaenge-anfrage")
+async def weitere_sucher_anfragen(body: WeitereSucherIn, user=Depends(current_chef)):
+    plan = ANFRAGBARE_PLANS.get(str(body.plan or "").strip())
+    if not plan:
+        raise HTTPException(400, "Bitte Monats- oder Jahresabo wählen.")
+    plan_key = str(body.plan).strip()
+    schluessel = {"type": "weitere_sucher", "dealer_id": user["dealer_id"], "status": "offen"}
+    vorher = await db.plan_requests.find_one(
+        schluessel, {"_id": 0, "sucher_anzahl": 1, "wanted_plan": 1, "message": 1})
+    dealer = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0}) or {}
+    nachricht = (body.message or "").strip()
+    wunsch = (f"{body.anzahl} weitere Sucher-Zugänge · {plan['label']} "
+              f"({_euro(plan['price'])} je Sucher)")
+    req_id = str(uuid.uuid4())
+    doc, neu = await _offene_anfrage_upsert(
+        schluessel,
+        {"id": req_id,
+         "company_name": dealer.get("company_name", ""),
+         "kontonummer": user.get("kontonummer"),
+         "kunden_nr": dealer.get("kunden_nr"),
+         "contact_email": user.get("email") or dealer.get("email", ""),
+         "contact_phone": dealer.get("phone", ""),
+         # der Betreiber springt von der Anfrage zur Firma (dort legt er die Sucher an)
+         "requester_user_id": user["id"],
+         "created_at": now_iso()},
+        {"sucher_anzahl": body.anzahl, "wanted": wunsch, "wanted_plan": plan_key,
+         "message": nachricht, "updated_at": now_iso()})
+    if not neu:
+        geaendert = (vorher or {}).get("sucher_anzahl") != body.anzahl \
+            or (vorher or {}).get("wanted_plan") != plan_key or ((vorher or {}).get("message") or "") != nachricht
+        if geaendert:
+            # neuer Wunsch -> der Betreiber bekommt die Anfrage noch einmal per Mail
+            await db.plan_requests.update_one({"id": doc["id"], "status": "offen"},
+                                              {"$unset": {"gemeldet_am": ""}})
+        await log_activity_sicher(user["dealer_id"], user["id"], "sucher.zugaenge.anfrage.geaendert",
+                                  ref=doc["id"], meta={"anzahl": body.anzahl, "plan": plan_key})
+        return {"ok": True, "request_id": doc["id"], "bereits_offen": True, "anfrage": _anfrage_fuer_chef(doc),
+                "hinweis": "Deine offene Anfrage wurde aktualisiert." if geaendert
+                else "Diese Anfrage liegt bereits beim Betreiber."}
+    await log_activity_sicher(user["dealer_id"], user["id"], "sucher.zugaenge.anfrage",
+                              ref=req_id, meta={"anzahl": body.anzahl, "plan": plan_key})
+    return {"ok": True, "request_id": req_id, "anfrage": _anfrage_fuer_chef(doc),
+            "hinweis": "Anfrage an den Betreiber gesendet — er meldet sich bei dir."}
 
 
 # ---------- Eigenes Abo des Chefs (Anfrage an den Betreiber) ----------
