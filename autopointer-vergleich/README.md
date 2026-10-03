@@ -28,8 +28,11 @@ Beim Anklicken liest das Programm auch die **Inserat-ID** (mobile.de, Kleinanzei
 Inserat **im Hintergrund aus** (Daten + Fotos, wie das Einfügen in der App, zählt fürs Tageslimit). Der Abruf
 wartet dafür 15 Sekunden: klickt der Sucher vorher das nächste Auto an, fällt der alte weg und der neue nimmt
 seinen Platz ein (kein Stau, kein unnötiger Abruf); öffnet er das Auto in der App, startet er sofort. Für den Vertrag:
-Rechtsklick → **„Kaufvertrag: Auto in AutoSchnell öffnen“** oder in der App „Deine letzten Autos“ → der Vergleich
-steht sofort da. Zeigt AutoPointer die Hash-ID nur abgeschnitten (schmale Detailansicht), gibt es keinen Link –
+Rechtsklick → **„Kaufvertrag: Auto in AutoSchnell öffnen“** (bzw. „Vertrag“ in der Leiste) oder in der App „Deine
+letzten Autos“ → der Vergleich steht sofort da. Seit 1.3.3 öffnet das in der **installierten AutoSchnell-App**
+(Edge/Chrome, erkannt an ihrer Verknüpfung): ist sie offen, übernimmt dieses Fenster das Auto (manifest
+`launch_handler` „focus-existing“ + `lib/programmStart.js`; mit ungespeicherter Arbeit nur ein Hinweis mit Knopf),
+sonst startet sie; nur ohne installierte App öffnet der Browser. Zeigt AutoPointer die Hash-ID nur abgeschnitten (schmale Detailansicht), gibt es keinen Link –
 dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und in AutoSchnell einfügen.
 
 ## Bedienung

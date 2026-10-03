@@ -211,6 +211,9 @@ internal sealed class TrayApp : ApplicationContext
         }
         string ziel = $"{_einstellungen.Server}/app/vergleich?url={Uri.EscapeDataString(url)}";
         Protokoll.Schreibe("Kaufvertrag: öffne " + ziel);
+        // Wunsch Ahmad 03.10.2026: zuerst die installierte AutoSchnell-App (offenes Fenster oder neu starten),
+        // nur ohne App im Browser
+        if (AutoSchnellApp.Oeffnen(ziel, _einstellungen.Server)) return;
         try { BrowserOeffner.Oeffne(new[] { ziel }, _einstellungen.Browser); }
         catch (Exception ex) { Sprechblase("Browser konnte nicht geöffnet werden: " + ex.Message, true, erzwingen: true); }
     }
