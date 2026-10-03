@@ -21,6 +21,15 @@ halbe Sekunde später öffnen sich automatisch die passenden Vergleichssuchen au
 5. Wer wann welches Auto verglichen hat: Super-Admin unter Admin → „Programm-Vergleiche“, der Chef in der App
    beim Programm (nur seine Firma). Beide können PCs trennen.
 
+## Kaufvertrag ohne Link-Einfügen
+
+Beim Anklicken liest das Programm auch die **Inserat-ID** (mobile.de, Kleinanzeigen) bzw. die **Hash-ID**
+(AutoScout24, nur vollständig und zweimal gleich gelesen). Der Server baut daraus den Inserat-Link und liest das
+Inserat **im Hintergrund aus** (Daten + Fotos, wie das Einfügen in der App, zählt fürs Tageslimit). Für den Vertrag:
+Rechtsklick → **„Kaufvertrag: Auto in AutoSchnell öffnen“** oder in der App „Deine letzten Autos“ → der Vergleich
+steht sofort da. Zeigt AutoPointer die Hash-ID nur abgeschnitten (schmale Detailansicht), gibt es keinen Link –
+dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und in AutoSchnell einfügen.
+
 ## Bedienung
 
 * Symbol unten rechts im Infobereich: grün = aktiv, grau = Automatik aus, orange = AutoPointer nicht gefunden,

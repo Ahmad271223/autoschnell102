@@ -43,7 +43,9 @@ public class DienstTests
             {"links":[{"portal":"mobile.de","url":"https://suchen.mobile.de/x?ms=1"},
                       {"portal":"AutoScout24","url":"https://www.autoscout24.de/lst/vw"},
                       {"portal":"boese","url":"javascript:alert(1)"}],
-             "hinweise":["Getriebe nicht gelesen"],"profil":"inland"}
+             "hinweise":["Getriebe nicht gelesen"],"profil":"inland",
+             "inserat_url":"https://www.kleinanzeigen.de/s-anzeige/3529712138",
+             "vorab":{"status":"laeuft","hinweis":""}}
             """);
         var f = Passat();
         Zuordner.Zuordnen(f, Kat);
@@ -68,6 +70,9 @@ public class DienstTests
         Assert.Equal(new[] { "mobile.de", "AutoScout24" }, antwort.Links.Select(l => l.Portal));
         Assert.Equal(new[] { "Getriebe nicht gelesen" }, antwort.Hinweise);
         Assert.Equal("inland", antwort.Profil);
+        Assert.Equal("https://www.kleinanzeigen.de/s-anzeige/3529712138", antwort.InseratUrl);
+        Assert.Equal("laeuft", antwort.VorabStatus);
+        Assert.True(fz.TryGetProperty("hash_id", out _));
     }
 
     [Theory]

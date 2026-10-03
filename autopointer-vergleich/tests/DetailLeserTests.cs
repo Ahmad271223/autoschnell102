@@ -102,6 +102,29 @@ public class DetailLeserTests
     public void Quelle_auch_mit_Lesefehlern(string zeile, string quelle) =>
         Assert.Equal(quelle, DetailLeser.Kopf(new[] { Z(zeile, 13, 27, 400, 14) }, 846).Quelle);
 
+    // Hash-ID = AutoScout-Kennung fuer den Inserat-Link (Wunsch Ahmad 03.10.2026, live: Opel Mokka X)
+    [Theory]
+    [InlineData("ee31ae2a-9d2f-4c62-b078-cc6af83d3f1d", "ee31ae2a-9d2f-4c62-b078-cc6af83d3f1d")]
+    [InlineData("EE31AE2A-9D2F-4C62-B078-CC6AF83D3F1D", "ee31ae2a-9d2f-4c62-b078-cc6af83d3f1d")]
+    [InlineData("ee31ae2a-9d2f-4c62-bO78-cc6af83d3fld", "ee31ae2a-9d2f-4c62-b078-cc6af83d3f1d")]   // O statt 0, l statt 1
+    [InlineData("ee31ae2a-9d2f- 4c62-b078-cc6af83d3f1d", "ee31ae2a-9d2f-4c62-b078-cc6af83d3f1d")]
+    [InlineData("9bcc72cb-be50-4cc4-804d-0d...", null)]                                         // abgeschnitten
+    [InlineData("9bcc72cb-be50-4cc4-804d-0d…", null)]
+    [InlineData("ee31ae2a-9d2f-4c62-b078-cc6af83d3f", null)]                                    // zu kurz
+    [InlineData("", null)]
+    public void Hash_ID_nur_vollstaendig(string text, string? erwartet) =>
+        Assert.Equal(erwartet, DetailLeser.HashId(text));
+
+    [Fact]
+    public void Hash_ID_aus_der_Tabelle_und_nicht_aus_dem_zweiten_Durchlauf_ergaenzt()
+    {
+        var zeilen = PassatTechnik.Concat(new[] { Z("Hash-1D:", 11, 335), Z("ee31ae2a-9d2f-4c62-b078-cc6af83d3f1d", 212, 335) }).ToArray();
+        var f = DetailLeser.Auswerten(zeilen, PassatKopf, 846);
+        Assert.Equal("ee31ae2a-9d2f-4c62-b078-cc6af83d3f1d", f.HashId);
+        var ohne = Passat();
+        Assert.Null(DetailLeser.Ergaenzen(ohne, f).HashId);
+    }
+
     [Fact]
     public void Leere_Erkennung_ergibt_fehlende_Pflichtfelder()
     {

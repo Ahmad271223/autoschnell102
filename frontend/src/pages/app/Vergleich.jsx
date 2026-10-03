@@ -482,6 +482,26 @@ export default function Vergleich() {
     }
   };
 
+  // Programme zum Herunterladen (03.10.2026): Das Windows-Programm schickt den Sucher mit
+  // ?url=<Inserat> hierher. Der Server hat das Inserat beim Anklicken schon im Hintergrund
+  // ausgelesen — der Vergleich steht sofort mit Fotos da, der Kaufvertrag geht ohne Link-Einfügen.
+  const adresseGestartet = useRef(false);
+  useEffect(() => {
+    if (adresseGestartet.current) return;
+    const param = new URLSearchParams(window.location.search).get("url");
+    if (!param) return;
+    adresseGestartet.current = true;
+    nav("/app/vergleich", { replace: true });
+    const link = inseratsLinkAusText(param);
+    if (!link) {
+      toast.error("In der Adresse steht kein gültiger Inserats-Link.");
+      return;
+    }
+    setUrl(link);
+    startCompare(null, link);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // RP-207: Zähler über den Inserats-Schlüssel (siehe liveZaehlerPfad)
   const zaehlerPfad = liveZaehlerPfad(result);
   useEffect(() => {

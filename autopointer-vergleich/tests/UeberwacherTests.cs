@@ -37,6 +37,7 @@ public class UeberwacherTests
     {
         public bool Verbunden { get; set; } = true;
         public DienstFehler? Fehler;
+        public string? InseratUrl;
         public readonly List<Fahrzeug> Anfragen = new();
 
         public Task<VergleichAntwort> VergleichAsync(Fahrzeug f, bool probelauf)
@@ -48,7 +49,7 @@ public class UeberwacherTests
             {
                 new Vergleich("mobile.de", $"https://suchen.mobile.de/{id}"),
                 new Vergleich("AutoScout24", $"https://www.autoscout24.de/{id}"),
-            }, Array.Empty<string>(), "inland"));
+            }, Array.Empty<string>(), "inland", InseratUrl, InseratUrl != null ? "laeuft" : "kein_link"));
         }
     }
 
@@ -321,6 +322,32 @@ public class UeberwacherTests
         for (int i = 0; i < 4; i++) await Tick();
         Assert.Equal(0, _q.Lesungen);
         Assert.Equal(Status.NichtVerbunden, _u.Status);
+    }
+
+    [Fact]
+    public async Task Kaufvertrag_Inserat_Link_wird_gemerkt()
+    {
+        await Start();
+        _server.InseratUrl = "https://www.kleinanzeigen.de/s-anzeige/3529712138";
+        await Anklicken(Passat, 1);
+        Assert.Equal("https://www.kleinanzeigen.de/s-anzeige/3529712138", _u.LetzteInseratUrl);
+        Assert.DoesNotContain(_meldungen, m => m.Contains("Hash-ID"));
+    }
+
+    [Fact]
+    public async Task AutoScout_ohne_Hash_ID_sagt_Link_selbst_einfuegen()
+    {
+        await Start();
+        Fahrzeug AutoScout()
+        {
+            var f = Bentley();
+            f.Quelle = "AutoScout24";
+            return f;
+        }
+        await Anklicken(AutoScout, 1);
+        Assert.Single(_b.Aufrufe);                      // die Vergleiche kommen trotzdem
+        Assert.Null(_u.LetzteInseratUrl);
+        Assert.Contains(_meldungen, m => m.Contains("Hash-ID") && m.Contains("selbst kopieren"));
     }
 
     [Fact]

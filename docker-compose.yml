@@ -166,6 +166,8 @@ services:
       - BILDER_NACHHOLEN_PAUSE_S=${BILDER_NACHHOLEN_PAUSE_S:-60}
       # Werkzeuge (03.10.2026): wer den AutoPointer-Vergleich sieht (Kundennummern, Komma-getrennt)
       - AUTOPOINTER_VERGLEICH_KUNDEN=${AUTOPOINTER_VERGLEICH_KUNDEN:-10002}
+      # Inserat beim Klick im Programm vorab auslesen (Daten + Fotos fuer den Kaufvertrag; zaehlt fuers Tageslimit)
+      - AUTOPOINTER_VORAB_ABRUF=${AUTOPOINTER_VORAB_ABRUF:-true}
       - VERGLEICH_JE_KONTO_MINUTE=${VERGLEICH_JE_KONTO_MINUTE:-120}
       - VERSAND_JE_KONTO_10MIN=${VERSAND_JE_KONTO_10MIN:-300}
       - LINK_JOB_SOFORT_MAX=${LINK_JOB_SOFORT_MAX:-4}

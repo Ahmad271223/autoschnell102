@@ -152,13 +152,15 @@ describe("Programme", () => {
   it("Chef sieht, wer aus der Firma wann welches Auto verglichen hat", async () => {
     get.mockImplementation((url) => Promise.resolve(url === "/werkzeuge"
       ? { data: { werkzeuge: [{ ...PROGRAMM, chef: true }] } }
+      : url.endsWith("/meine") ? { data: { vergleiche: [] } }
       : { data: { gesamt: 1,
           verbindungen: [{ id: "v1", user_id: "s1", name: "Max Sucher", konto: "10050-1", pc_name: "PC-1",
                            verbunden_am: "2026-10-03T10:00:00+00:00", zuletzt_am: "2026-10-03T11:00:00+00:00" }],
           vergleiche: [{ id: "c1", user_id: "s1", name: "Max Sucher", konto: "10050-1", pc_name: "PC-1",
                          erstellt_am: "2026-10-03T11:00:00+00:00",
                          fahrzeug: { marke: "VW", modell: "Polo", ez_monat: 10, ez_jahr: 2005, kilometer: 128000, ps: 75,
-                                     preis: 2599, quelle: "Kleinanzeigen", inserat_id: "3529833344" },
+                                     preis: 2599, quelle: "Kleinanzeigen", inserat_id: "3529833344",
+                                     inserat_url: "https://www.kleinanzeigen.de/s-anzeige/3529833344" },
                          links: [{ portal: "mobile.de", url: "https://suchen.mobile.de/x" }] }] } }));
     del.mockResolvedValue({ data: { ok: true } });
     await rendern();
@@ -168,6 +170,7 @@ describe("Programme", () => {
     expect(tabelle).toContain("Max Sucher");
     expect(tabelle).toContain("VW Polo · EZ 10/2005 · 128.000 km · 75 PS · 2.599 €");
     expect(tabelle).toContain("3529833344");
+    expect(feld("pv-inserat-c1").getAttribute("href")).toBe("https://www.kleinanzeigen.de/s-anzeige/3529833344");
     expect(feld("pv-pcs").textContent).toContain("PC „PC-1“");
     await klick(feld("pv-trennen-s1"));
     expect(del).toHaveBeenCalledWith("/werkzeuge/werkzeug-x/verbindungen/s1");
@@ -177,7 +180,28 @@ describe("Programme", () => {
     get.mockResolvedValue({ data: { werkzeuge: [{ ...PROGRAMM, chef: false }] } });
     await rendern();
     expect(feld("programm-firma")).toBeNull();
-    expect(get).toHaveBeenCalledTimes(1);
+    expect(get.mock.calls.map((c) => c[0])).not.toContain("/werkzeuge/werkzeug-x/firma");
+  });
+
+  it("Deine letzten Autos: mit Inserat-Adresse direkt zum Kaufvertrag, ohne Adresse ein Hinweis", async () => {
+    get.mockImplementation((url) => Promise.resolve(url === "/werkzeuge"
+      ? { data: { werkzeuge: [PROGRAMM] } }
+      : { data: { vergleiche: [
+          { id: "m1", erstellt_am: "2026-10-03T13:00:00+00:00",
+            fahrzeug: { marke: "Opel", modell: "Mokka X", ez_jahr: 2018, kilometer: 14500,
+                        inserat_url: "https://www.autoscout24.de/angebote/ee31ae2a-9d2f-4c62-b078-cc6af83d3f1d" } },
+          { id: "m2", erstellt_am: "2026-10-03T12:00:00+00:00",
+            fahrzeug: { marke: "Audi", modell: "A5", ez_jahr: 2026, kilometer: 29219, inserat_url: null } },
+        ] } }));
+    await rendern();
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(get).toHaveBeenCalledWith("/werkzeuge/werkzeug-x/meine", { params: { limit: 15 } });
+    const link = feld("meine-vertrag-m1");
+    expect(link.getAttribute("href")).toBe(
+      `/app/vergleich?url=${encodeURIComponent("https://www.autoscout24.de/angebote/ee31ae2a-9d2f-4c62-b078-cc6af83d3f1d")}`);
+    expect(link.textContent).toContain("Für Kaufvertrag öffnen");
+    expect(feld("meine-vertrag-m2")).toBeNull();
+    expect(feld("meine-ohne-link-m2").textContent).toContain("selbst kopieren");
   });
 
   it("Größe lesbar", () => {
@@ -191,7 +215,7 @@ describe("Programme", () => {
       import("./Programme.jsx?raw"), import("@/lib/programme.js?raw"),
       import("@/components/AppLayout.jsx?raw"), import("@/App.jsx?raw"),
       import("@/components/ProgrammVergleiche.jsx?raw"), import("@/pages/admin_v2/ProgrammVergleiche.jsx?raw"),
-      import("@/pages/admin_v2/AdminLayout.jsx?raw"),
+      import("@/pages/admin_v2/AdminLayout.jsx?raw"), import("./Vergleich.jsx?raw"),
     ]);
     for (const { default: text } of quellen) {
       expect(text).not.toMatch(/autopointer/i);

@@ -449,3 +449,102 @@ def test_41_schluessel_ableiten():
     assert a != wz.schluessel_ableiten("geheim", "code-2", "pc-a")
     assert a != wz.schluessel_ableiten("anders", "code-1", "pc-a")
     assert len(a) >= 40 and "=" not in a
+
+
+# ------------------------------------------------------------ Teil 4: Inserat-Link + Vorab-Abruf fuer den Kaufvertrag
+# Wunsch Ahmad 03.10.2026: "wenn Kunde dieses Auto anklickt soll Vergleich kommen und wir scrapen im Hintergrund
+# schonmal das Auto fuer den Vertrag ... wenn Hash-ID nicht sichtbar war: URL selber kopieren und einfuegen".
+UUID = "ee31ae2a-9d2f-4c62-b078-cc6af83d3f1d"
+
+
+def test_42_inserat_url_je_portal():
+    assert wz.inserat_url("mobile.de", "453270494") == "https://suchen.mobile.de/fahrzeuge/details.html?id=453270494"
+    # live 03.10.2026: AutoPointer zeigt bei mobile.de auch 14-stellige IDs (Ford Grand Tourneo) — mobile.de oeffnet sie
+    assert wz.inserat_url("mobile.de", "48761918484992") ==         "https://suchen.mobile.de/fahrzeuge/details.html?id=48761918484992"
+    assert wz.inserat_url("Kleinanzeigen", "3529833344") == "https://www.kleinanzeigen.de/s-anzeige/3529833344"
+    # AutoScout: NUR mit vollstaendiger Hash-ID (die Inserat-ID aus AutoPointer kennt AutoScout nicht)
+    assert wz.inserat_url("AutoScout24", "474879577", UUID) == f"https://www.autoscout24.de/angebote/{UUID}"
+    assert wz.inserat_url("AutoScout24", "474879577", UUID.upper()) == f"https://www.autoscout24.de/angebote/{UUID}"
+    assert wz.inserat_url("AutoScout24", "474879577", "9bcc72cb-be50-4cc4-804d-0d...") is None
+    assert wz.inserat_url("AutoScout24", "474879577", "") is None
+    assert wz.inserat_url("mobile.de", "abc") is None
+    assert wz.inserat_url("", "453270494") is None
+
+
+def _kleinanzeigen_polo():
+    nummer = "35" + str(secrets.randbelow(10 ** 8)).zfill(8)
+    return {**POLO, "quelle": "Kleinanzeigen", "inserat_id": nummer}, f"https://www.kleinanzeigen.de/s-anzeige/{nummer}"
+
+
+def test_43_klick_liest_das_inserat_vorab_aus(welt):
+    _abo(welt, True)
+    _, prog, _ = _verbinden(welt, "PC-A")
+    fz, url = _kleinanzeigen_polo()
+    r = _vergleich(prog, fz)
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["inserat_url"] == url
+    assert d["vorab"]["status"] in ("laeuft", "fertig"), d["vorab"]
+    db = welt["db"]
+    assert db.link_jobs.find_one({"url": url, "user_ids": welt["sucher_id"]}) or d["vorab"]["status"] == "fertig"
+    eintrag = db.werkzeug_vergleiche.find_one({"fahrzeug.inserat_id": fz["inserat_id"]})
+    assert eintrag["fahrzeug"]["inserat_url"] == url and eintrag["vorab"] == d["vorab"]["status"]
+
+
+def test_44_autoscout_ohne_vollstaendige_hash_id_sagt_es(welt):
+    _abo(welt, True)
+    _, prog, _ = _verbinden(welt, "PC-A")
+    ohne = {**POLO, "quelle": "AutoScout24", "inserat_id": "474879577", "hash_id": ""}
+    d = _vergleich(prog, ohne).json()
+    assert d["inserat_url"] is None and d["vorab"]["status"] == "kein_link"
+    assert "kopieren" in d["vorab"]["hinweis"]
+    assert d["links"], "die Vergleiche kommen trotzdem"
+    mit = {**ohne, "hash_id": UUID}
+    d = _vergleich(prog, mit).json()
+    assert d["inserat_url"] == f"https://www.autoscout24.de/angebote/{UUID}"
+    assert d["vorab"]["status"] != "kein_link"
+
+
+def test_45_probelauf_liest_nichts_aus(welt):
+    _abo(welt, True)
+    _, prog, _ = _verbinden(welt, "PC-A")
+    fz, url = _kleinanzeigen_polo()
+    r = requests.post(f"{API}/werkzeuge/{WID}/vergleich", headers=prog, json={"fahrzeug": fz, "probelauf": True},
+                      timeout=30)
+    assert r.json()["vorab"]["status"] == "probelauf"
+    assert welt["db"].link_jobs.find_one({"url": url}) is None
+
+
+def test_46_meine_autos_fuer_den_kaufvertrag(welt):
+    _abo(welt, True)
+    _, prog, _ = _verbinden(welt, "PC-A")
+    fz, url = _kleinanzeigen_polo()
+    assert _vergleich(prog, fz).status_code == 200
+    r = requests.get(f"{API}/werkzeuge/{WID}/meine", headers=welt["sucher"], timeout=30)
+    assert r.status_code == 200, r.text
+    liste = r.json()["vergleiche"]
+    assert liste[0]["fahrzeug"]["inserat_url"] == url
+    assert all(not x.get("probelauf") for x in liste)
+    assert requests.get(f"{API}/werkzeuge/{WID}/meine", headers=welt["andere"], timeout=30).status_code == 404
+
+
+def test_47_danach_steht_das_auto_in_der_app_sofort_bereit(welt):
+    """Ganzer Weg: Klick im Programm -> Abruf im Hintergrund -> /app/vergleich?url=... ruft
+    /mobile/compare auf und bekommt das Fahrzeug aus dem Speicher (kein neuer Abruf)."""
+    import time
+    _abo(welt, True)
+    _, prog, _ = _verbinden(welt, "PC-A")
+    fz, url = _kleinanzeigen_polo()
+    assert _vergleich(prog, fz).json()["vorab"]["status"] in ("laeuft", "fertig")
+    db = welt["db"]
+    for _ in range(120):
+        job = db.link_jobs.find_one({"url": url}, {"_id": 0, "status": 1})
+        if job and job["status"] in ("completed", "failed"):
+            break
+        time.sleep(0.25)
+    assert job and job["status"] == "completed", job
+    r = requests.post(f"{API}/mobile/compare", json={"url": url}, headers=welt["sucher"], timeout=60)
+    assert r.status_code == 200, r.text[:300]
+    d = r.json()
+    assert d.get("vehicle_id") and d.get("vehicle")
+    assert d.get("cached") is True, "Fahrzeug kam aus dem Speicher, kein zweiter Abruf"

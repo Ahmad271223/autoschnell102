@@ -52,6 +52,8 @@ internal sealed class Ueberwacher
     public bool Probelauf { get; set; }
     public Fahrzeug? LetztesFahrzeug { get; private set; }
     public IReadOnlyList<Vergleich> LetzteVergleiche { get; private set; } = Array.Empty<Vergleich>();
+    /// <summary>Original-Inserat des zuletzt verglichenen Autos (fuer "Kaufvertrag: in AutoSchnell oeffnen").</summary>
+    public string? LetzteInseratUrl { get; private set; }
     public Status Status => _status ?? Status.KeinAutoPointer;
 
     /// <summary>Statuswechsel (fuer das Symbol im Infobereich).</summary>
@@ -255,14 +257,25 @@ internal sealed class Ueberwacher
         }
         _letzterSchluessel = schluessel;
         LetztesFahrzeug = f;
+        LetzteInseratUrl = antwort.InseratUrl;
         foreach (var v in antwort.Links) Protokoll.Schreibe($"{v.Portal} URL (Regeln {antwort.Profil}): {v.Url}");
         foreach (var h in antwort.Hinweise) Protokoll.Schreibe("Hinweis: " + h);
+        Protokoll.Schreibe(antwort.InseratUrl != null
+            ? $"Inserat: {antwort.InseratUrl} – für den Kaufvertrag vorab ausgelesen: {antwort.VorabStatus}"
+            : "Inserat-Adresse unbekannt – für den Kaufvertrag von Hand einfügen.");
+        // Hinweise fuer den Kaufvertrag (Wunsch Ahmad 03.10.2026)
+        var vertragsHinweise = new List<string>();
+        if (antwort.InseratUrl == null && (f.Quelle ?? "").Contains("AutoScout", StringComparison.OrdinalIgnoreCase))
+            vertragsHinweise.Add(KeinLinkHinweis);
+        else if (antwort.VorabStatus is "limit" or "fehler" && antwort.VorabHinweis.Length > 0)
+            vertragsHinweise.Add("Für den Kaufvertrag nicht vorab ausgelesen: " + antwort.VorabHinweis);
         var links = antwort.Links
             .Where(l => (l.Portal == "mobile.de" && e.MobileDe) || (l.Portal == "AutoScout24" && e.AutoScout24))
             .ToList();
         if (links.Count > 0) LetzteVergleiche = links;
         if (links.Count == 0)
         {
+            if (vertragsHinweise.Count > 0) Melde(string.Join("\n", vertragsHinweise), false);
             MeldeEinmal($"{f.Marke} {f.Modell}: kein Vergleich geöffnet – "
                         + (antwort.Links.Count > 0 ? "kein Portal in den Einstellungen aktiv." : antwort.Hinweise.FirstOrDefault() ?? "keine Links."));
             return;
@@ -273,8 +286,12 @@ internal sealed class Ueberwacher
         Oeffne(links, e);
         _letzteOeffnung = _uhr();
         var fehlendePortale = antwort.Hinweise.Where(h => h.Contains("kein mobile.de-Vergleich") || h.Contains("kein AutoScout24-Vergleich")).ToList();
+        fehlendePortale.AddRange(vertragsHinweise);
         if (fehlendePortale.Count > 0) Melde(string.Join("\n", fehlendePortale), false);
     }
+
+    internal const string KeinLinkHinweis =
+        "AutoScout-Inserat: die Kennung (Hash-ID) ist in AutoPointer nicht vollständig sichtbar. Für den Kaufvertrag bitte die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und in AutoSchnell unter „Vergleich“ einfügen. Tipp: Detailbereich in AutoPointer breiter ziehen – dann klappt es automatisch.";
 
     private void Oeffne(IReadOnlyList<Vergleich> links, Einstellungen e)
     {
@@ -397,11 +414,14 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
         var zk = kopf != null ? await ocr.LiesAsync(kopf, faktor) : new List<OcrZeile>();
         var f = DetailLeser.Auswerten(zt, zk, kopf?.Width ?? 0);
         string roh = Rohtext(zt, zk);
-        if (DetailLeser.Fehlend(f).Count > 0 || DetailLeser.Unvollstaendig(f).Count > 0)
+        if (DetailLeser.Fehlend(f).Count > 0 || DetailLeser.Unvollstaendig(f).Count > 0 || f.HashId != null)
         {
             var zt2 = await ocr.LiesAsync(technik, faktor * 2 / 3);
             var f2 = DetailLeser.Auswerten(zt2, zk, kopf?.Width ?? 0);
+            // Hash-ID (fuer den AutoScout-Link) nur, wenn beide Durchlaeufe genau dasselbe lesen
+            string? hash = f.HashId != null && f.HashId == f2.HashId ? f.HashId : null;
             f = DetailLeser.Ergaenzen(f, f2);
+            f.HashId = hash;
             roh += "  ||  2. Durchlauf: " + Rohtext(zt2, Array.Empty<OcrZeile>());
         }
         if (bilderSpeichern) Speichere(technik, kopf, roh);

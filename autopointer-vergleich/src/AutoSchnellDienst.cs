@@ -22,7 +22,8 @@ internal sealed class DienstFehler : Exception
 
 internal sealed record VerbindenAntwort(string Schluessel, string Konto, string Name, string Firma);
 internal sealed record StatusAntwort(string Konto, string Name, string Firma, string PcName, string? AboBis);
-internal sealed record VergleichAntwort(IReadOnlyList<Vergleich> Links, IReadOnlyList<string> Hinweise, string Profil);
+internal sealed record VergleichAntwort(IReadOnlyList<Vergleich> Links, IReadOnlyList<string> Hinweise, string Profil,
+                                        string? InseratUrl = null, string VorabStatus = "", string VorabHinweis = "");
 
 /// <summary>Was der Ueberwacher vom Server braucht (in Tests eine Attrappe).</summary>
 internal interface IVergleichsDienst
@@ -153,7 +154,15 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
         var hinweise = new List<string>();
         if (e.TryGetProperty("hinweise", out var h) && h.ValueKind == JsonValueKind.Array)
             hinweise.AddRange(h.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!));
-        return new VergleichAntwort(links, hinweise, Text(e, "profil"));
+        string? inseratUrl = Text(e, "inserat_url") is { Length: > 0 } iu
+                             && Uri.TryCreate(iu, UriKind.Absolute, out var iuri) && iuri.Scheme == Uri.UriSchemeHttps ? iu : null;
+        string vorabStatus = "", vorabHinweis = "";
+        if (e.TryGetProperty("vorab", out var vorab) && vorab.ValueKind == JsonValueKind.Object)
+        {
+            vorabStatus = Text(vorab, "status");
+            vorabHinweis = Text(vorab, "hinweis");
+        }
+        return new VergleichAntwort(links, hinweise, Text(e, "profil"), inseratUrl, vorabStatus, vorabHinweis);
     }
 
     /// <summary>Fahrzeug -> Anfrage an /vergleich (Feldnamen wie routes/werkzeuge.FahrzeugIn).</summary>
@@ -179,6 +188,7 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
             ["kategorie"] = K(f.Kategorie, 80),
             ["quelle"] = K(f.Quelle, 40),
             ["inserat_id"] = K(f.InseratId, 60),
+            ["hash_id"] = K(f.HashId, 60),
         };
     }
 

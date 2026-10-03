@@ -305,6 +305,8 @@ class FahrzeugIn(BaseModel):
     kategorie: str = Field("", max_length=80)
     quelle: str = Field("", max_length=40)
     inserat_id: str = Field("", max_length=60)
+    #: AutoScout24: Kennung fuer den Inserat-Link (nur wenn vollstaendig gelesen)
+    hash_id: str = Field("", max_length=60)
 
 
 class VergleichIn(BaseModel):
@@ -328,13 +330,59 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     regeln = (regeln_lesen((dealer or {}).get("export_rules"), DEFAULT_EXPORT_RULES) if profil == "export"
               else regeln_lesen((dealer or {}).get("comparison_rules"), DEFAULT_RULES))
     f = body.fahrzeug.model_dump()
+    f["inserat_url"] = wz.inserat_url(f.get("quelle"), f.get("inserat_id"), f.get("hash_id"))
     links, hinweise = wz.vergleichs_links(wz.fahrzeug_zu_vehicle(f), regeln)
+    # Wunsch Ahmad 03.10.2026: das Inserat schon jetzt im Hintergrund auslesen (Daten + Fotos), damit
+    # der Kaufvertrag ohne Link-Einfuegen geht — derselbe Weg wie das Einfuegen in der App.
+    vorab = await _vorab_abrufen(user, f["inserat_url"]) if not body.probelauf else \
+        {"status": "probelauf", "hinweis": ""}
     await db[wz.SAMMLUNG_VERGLEICHE].insert_one({
         "id": str(uuid.uuid4()), "werkzeug": werkzeug_id, "dealer_id": user["dealer_id"], "user_id": user["id"],
         "verbindung_id": v["id"], "pc_name": v.get("pc_name") or "", "erstellt_am": now_iso(),
         "fahrzeug": f, "links": links, "hinweise": hinweise, "profil": profil, "probelauf": body.probelauf,
+        "vorab": vorab["status"],
     })
-    return {"links": links, "hinweise": hinweise, "profil": profil}
+    return {"links": links, "hinweise": hinweise, "profil": profil, "inserat_url": f["inserat_url"],
+            "vorab": vorab}
+
+
+async def _vorab_abrufen(user: dict, url: Optional[str]) -> dict:
+    """Inserat fuer den Kaufvertrag vorab auslesen — ueber POST /listings/check (dieselben Regeln wie
+    beim Einfuegen in der App: Quellen-Freigabe, Speicher-Treffer kostenlos, Kleinanzeigen-Erweiterung,
+    Warteschlange, Tageslimit je Konto). Der Sucher oeffnet danach /app/vergleich?url=…, der Vergleich
+    steht sofort mit Fotos da und uebernimmt das Fahrzeug fuer den Vertrag."""
+    if not url:
+        return {"status": "kein_link", "hinweis": "Inserat-Adresse unbekannt – für den Kaufvertrag bitte die "
+                                                  "Adresse kopieren und in AutoSchnell einfügen."}
+    if not wz.vorab_abruf_an():
+        return {"status": "aus", "hinweis": ""}
+    from routes.listings import ListingURLIn, listings_check
+    try:
+        r = await listings_check(ListingURLIn(url=url), user)
+    except HTTPException as exc:
+        status = "limit" if exc.status_code == 429 else "fehler"
+        return {"status": status, "hinweis": str(exc.detail)[:200]}
+    except Exception:  # noqa: BLE001 — der Vergleich darf am Vorab-Abruf nie scheitern
+        log.exception("Werkzeug: Vorab-Abruf %s gescheitert", url)
+        return {"status": "fehler", "hinweis": ""}
+    if r.get("status") == "completed":
+        return {"status": "fertig", "hinweis": ""}
+    if r.get("status") == "needs_client_fetch":
+        return {"status": "in_app", "hinweis": "Dieses Inserat liest AutoSchnell beim Öffnen in der App aus."}
+    return {"status": "laeuft", "hinweis": ""}
+
+
+@router.get("/werkzeuge/{werkzeug_id}/meine")
+async def werkzeug_meine(werkzeug_id: str, limit: int = Query(30, ge=1, le=100), user=Depends(current_firma)):
+    """Die eigenen zuletzt im Programm angeklickten Autos — mit Inserat-Link fuer den Kaufvertrag."""
+    _wid_pruefen(werkzeug_id)
+    if not wz.ist_freigegeben(werkzeug_id, await _kunden_nr(user)):
+        raise HTTPException(404, NICHT_GEFUNDEN)
+    liste = [x async for x in db[wz.SAMMLUNG_VERGLEICHE].find(
+        {"werkzeug": werkzeug_id, "user_id": user["id"], "probelauf": {"$ne": True}},
+        {"_id": 0, "id": 1, "erstellt_am": 1, "fahrzeug": 1, "links": 1, "vorab": 1})
+        .sort("erstellt_am", -1).limit(limit)]
+    return {"vergleiche": liste}
 
 
 # ---------------------------------------------------------------- Chef

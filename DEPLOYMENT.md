@@ -4332,6 +4332,20 @@ Erst einmal **nur für Kunde 10002** – „alle anderen sollen das gar nicht se
   Admin → „Programm-Vergleiche“ (alle Firmen, PCs trennen), **Chef** in der App unter dem Programm (nur eigene Firma,
   PCs seiner Sucher trennen). Sammlungen `werkzeug_codes/_verbindungen/_vergleiche` gehen in die Firmenlöschung; beim
   Löschen eines Kontos wird sein PC getrennt und seine Vergleiche pseudonymisiert.
+**Kaufvertrag ohne Link-Einfügen (Wunsch Ahmad 03.10.2026 nachmittags):**
+- Das Programm liest zusätzlich die **Inserat-ID** und bei AutoScout die **Hash-ID** (nur vollständig und nur, wenn zwei
+  Lesedurchgänge exakt gleich sind). Der Server baut daraus den Inserat-Link (`werkzeuge.inserat_url`, am 03.10. live
+  geprüft): mobile.de `suchen.mobile.de/fahrzeuge/details.html?id=<ID>` (9–14 Stellen gesehen), Kleinanzeigen
+  `www.kleinanzeigen.de/s-anzeige/<ID>`, AutoScout24 `www.autoscout24.de/angebote/<Hash-ID>` (die AutoPointer-
+  Inserat-ID kennt AutoScout nicht). AutoPointer schneidet die Hash-ID in schmaler Detailansicht ab → kein Link, das
+  Programm sagt „Inserat-Adresse selbst kopieren und einfügen“ (Tipp: Detailbereich breiter ziehen).
+- Mit Link liest der Server das Inserat beim Klick **im Hintergrund aus** (`_vorab_abrufen` ruft `POST /listings/check`
+  auf: gleiche Regeln wie das Einfügen in der App — Quellen-Freigabe, Speicher-Treffer kostenlos, Kleinanzeigen-
+  Erweiterung, Warteschlange, **jeder echte Abruf zählt fürs Tageslimit des Kontos**, mobile/AutoScout kosten Apify).
+  Abschalten: `AUTOPOINTER_VORAB_ABRUF=false`. Probeläufe lesen nichts aus.
+- Der Sucher öffnet das Auto per Rechtsklick → „Kaufvertrag: Auto in AutoSchnell öffnen“ oder in der App unter
+  „Deine letzten Autos“ (`GET …/meine`): `/app/vergleich?url=<Inserat>` startet den Vergleich sofort, das Fahrzeug
+  kommt aus dem Speicher (mit Fotos), „Kaufvertrag“ wie gewohnt.
 - Programm-Fehlersuche: `AutoSchnell-Vergleich.exe --einmal` (liest einmal, fragt verbunden den Server im Probelauf),
   `--verbinden <code>` (ohne Fenster), `--server <url>` (Testserver), `AUTOSCHNELL_VERGLEICH_DATEN=<ordner>` (eigene
   Einstellungen).
@@ -4341,7 +4355,7 @@ Erst einmal **nur für Kunde 10002** – „alle anderen sollen das gar nicht se
   cd autopointer-vergleich && powershell -ExecutionPolicy Bypass -File build.ps1   # lokal: dist\AutoSchnell-Vergleich.exe
   scp dist/AutoSchnell-Vergleich.exe root@<server>:/tmp/                            # vom PC aus, nicht auf dem Server
   docker compose cp /tmp/AutoSchnell-Vergleich.exe backend:/tmp/AutoSchnell-Vergleich.exe
-  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.1.0
+  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.1.2
   ```
   Bis dahin zeigt die Seite „Wird gerade bereitgestellt“. Speicher: `werkzeuge/autopointer-vergleich/…`, Eintrag in `werkzeuge`.
 - Tests: `backend/tests/test_werkzeuge_20261003.py`, `frontend/src/pages/app/Programme.test.jsx`,

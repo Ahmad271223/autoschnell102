@@ -6,7 +6,7 @@ internal enum Feld
 {
     MarkeModell, Preis, Zustand, Kategorie, Erstzulassung, Kilometer, Leistung, Getriebe, Kraftstoff,
     Farbe, Herstellerfarbe, Klimatisierung, Interieur, Tueren, Umweltplakette, InseratId, Hubraum,
-    Schadstoffklasse, Sitzplaetze,
+    Schadstoffklasse, Sitzplaetze, HashId,
 }
 
 /// <summary>Macht aus den erkannten Textzeilen der beiden Tabellen ein Fahrzeug.</summary>
@@ -28,6 +28,7 @@ internal static class DetailLeser
         ("turen", Feld.Tueren), ("tueren", Feld.Tueren), ("umweltplakette", Feld.Umweltplakette),
         ("inseratid", Feld.InseratId), ("hubraum", Feld.Hubraum),
         ("schadstoffklasse", Feld.Schadstoffklasse), ("sitzplatze", Feld.Sitzplaetze),
+        ("hashid", Feld.HashId),
     };
 
     public static Feld? BezeichnungErkennen(string text)
@@ -180,6 +181,31 @@ internal static class DetailLeser
         return ziffern.Length is > 0 and <= 9 ? int.Parse(ziffern) : null;
     }
 
+    private static readonly Regex Uuid = new(
+        @"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", RegexOptions.Compiled);
+
+    /// <summary>Hash-ID (AutoScout-Kennung, 36 Zeichen). Nur vollstaendig: zeigt AutoPointer sie in
+    /// schmaler Ansicht abgeschnitten ("9bcc72cb-…-0d..."), gibt es keine — dann muss der Sucher den
+    /// Link selbst kopieren. Typische Lesefehler (O/o statt 0, l/I statt 1) werden repariert.</summary>
+    public static string? HashId(string? s)
+    {
+        if (string.IsNullOrWhiteSpace(s) || s.Contains("...") || s.Contains('…')) return null;
+        var sb = new System.Text.StringBuilder();
+        foreach (char c in s)
+        {
+            if (char.IsWhiteSpace(c)) continue;
+            sb.Append(c switch
+            {
+                'O' or 'o' => '0',
+                'l' or 'I' or '|' => '1',
+                '–' or '—' => '-',
+                _ => char.ToLowerInvariant(c),
+            });
+        }
+        string h = sb.ToString();
+        return Uuid.IsMatch(h) ? h : null;
+    }
+
     private static string? Sauber(string? s)
     {
         if (string.IsNullOrWhiteSpace(s)) return null;
@@ -251,6 +277,7 @@ internal static class DetailLeser
             string sauber = Regex.Replace(id, @"[^A-Za-z0-9\-]", "");
             f.InseratId = sauber.Length > 0 ? sauber : null;
         }
+        f.HashId = HashId(tab.GetValueOrDefault(Feld.HashId));
         var (quelle, titel, preis) = Kopf(kopf, kopfBreite);
         f.Quelle = quelle;
         f.Titel = titel;
@@ -273,6 +300,8 @@ internal static class DetailLeser
         a.Tueren ??= b.Tueren;
         a.Preis ??= b.Preis;
         a.InseratId ??= b.InseratId;
+        // Hash-ID bewusst NICHT ergaenzen: sie gilt nur, wenn beide Durchlaeufe dasselbe lesen
+        // (AutoPointerQuelle.LiesBilderAsync) — lieber kein Link als ein falscher.
         a.Quelle ??= b.Quelle;
         a.Titel ??= b.Titel;
         return a;

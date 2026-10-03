@@ -51,6 +51,7 @@ internal sealed class TrayApp : ApplicationContext
             if (_ueberwacher != null) await _ueberwacher.JetztVergleichenAsync();
         });
         menue.Items.Add("Letzten Vergleich erneut öffnen", null, (_, _) => _ueberwacher?.LetztenErneutOeffnen());
+        menue.Items.Add("Kaufvertrag: Auto in AutoSchnell öffnen", null, (_, _) => VertragOeffnen());
         menue.Items.Add(new ToolStripSeparator());
         menue.Items.Add("Einstellungen …", null, (_, _) => EinstellungenZeigen());
         menue.Items.Add("Protokoll anzeigen …", null, (_, _) => ProtokollZeigen());
@@ -87,6 +88,24 @@ internal sealed class TrayApp : ApplicationContext
                 _ui.Post(async _ => await LizenzPruefenAsync(beimStart: false), null);
             }
         }, token);
+    }
+
+    /// <summary>Wunsch Ahmad 03.10.2026: das zuletzt angeklickte Auto in AutoSchnell oeffnen — der Server hat
+    /// es schon ausgelesen, der Vergleich steht sofort mit Fotos da, "Kaufvertrag erstellen" ohne Link-Einfuegen.</summary>
+    private void VertragOeffnen()
+    {
+        string? url = _ueberwacher?.LetzteInseratUrl;
+        if (string.IsNullOrEmpty(url))
+        {
+            Sprechblase(_ueberwacher?.LetztesFahrzeug == null
+                ? "Noch kein Auto verglichen – erst in AutoPointer ein Inserat anklicken."
+                : Ueberwacher.KeinLinkHinweis, true, erzwingen: true);
+            return;
+        }
+        string ziel = $"{_einstellungen.Server}/app/vergleich?url={Uri.EscapeDataString(url)}";
+        Protokoll.Schreibe("Kaufvertrag: öffne " + ziel);
+        try { BrowserOeffner.Oeffne(new[] { ziel }, _einstellungen.Browser); }
+        catch (Exception ex) { Sprechblase("Browser konnte nicht geöffnet werden: " + ex.Message, true, erzwingen: true); }
     }
 
     private void DienstErstellen() =>

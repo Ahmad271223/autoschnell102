@@ -70,7 +70,17 @@ export function VergleichsTabelle({ vergleiche = [], mitFirma = false }) {
               <td className="py-2 pr-3">{kontoText(x)}<div className="text-xs text-zinc-500">PC „{x.pc_name || "–"}“</div></td>
               {mitFirma && <td className="py-2 pr-3">{x.firma}{x.kunden_nr ? <div className="text-xs text-zinc-500">Kd.-Nr. {x.kunden_nr}</div> : null}</td>}
               <td className="py-2 pr-3">{fahrzeugText(x.fahrzeug)}</td>
-              <td className="py-2 pr-3 text-xs text-zinc-500">{[x.fahrzeug?.quelle, x.fahrzeug?.inserat_id].filter(Boolean).join(" · ") || "–"}</td>
+              <td className="py-2 pr-3 text-xs text-zinc-500">
+                {[x.fahrzeug?.quelle, x.fahrzeug?.inserat_id].filter(Boolean).join(" · ") || "–"}
+                {x.fahrzeug?.inserat_url && (
+                  <div>
+                    <a href={x.fahrzeug.inserat_url} target="_blank" rel="noopener noreferrer"
+                       className="inline-flex items-center gap-1 underline" data-testid={`pv-inserat-${x.id}`}>
+                      Inserat öffnen <ExternalLink size={11} />
+                    </a>
+                  </div>
+                )}
+              </td>
               <td className="py-2 pr-3">
                 <div className="flex flex-wrap gap-2">
                   {(x.links || []).map((l) => (

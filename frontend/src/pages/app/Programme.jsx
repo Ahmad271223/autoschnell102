@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
-import { Navigate } from "react-router-dom";
-import { Download, KeyRound, Monitor, MonitorX } from "lucide-react";
+import { Link, Navigate } from "react-router-dom";
+import { Download, FileSignature, KeyRound, Monitor, MonitorX } from "lucide-react";
 import { toast } from "sonner";
 import { api, errMsg } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { startseite } from "@/lib/rollen";
 import { groesseText, useProgramme } from "@/lib/programme";
-import { VergleichsTabelle, VerbindungsListe, zeit } from "@/components/ProgrammVergleiche";
+import { VergleichsTabelle, VerbindungsListe, fahrzeugText, zeit } from "@/components/ProgrammVergleiche";
 
 /**
  * Programme zum Herunterladen (03.10.2026). Was hier steht, liefert der Server —
@@ -139,6 +139,8 @@ export default function Programme() {
               </ol>
             )}
 
+            <MeineAutos programm={p} />
+
             {p.chef && <FirmenUebersicht programm={p} />}
           </section>
         );
@@ -189,6 +191,52 @@ function FirmenUebersicht({ programm }) {
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+/**
+ * Die zuletzt im Programm angeklickten Autos (Wunsch Ahmad 03.10.2026): Der Server hat sie beim
+ * Anklicken schon ausgelesen — „Für Kaufvertrag öffnen“ öffnet den Vergleich sofort mit Fotos.
+ * Ohne Inserat-Adresse (Kennung nicht vollständig lesbar) muss der Link von Hand rein.
+ */
+function MeineAutos({ programm }) {
+  const [liste, setListe] = useState(null);
+  useEffect(() => {
+    let aktiv = true;
+    api.get(`/werkzeuge/${encodeURIComponent(programm.id)}/meine`, { params: { limit: 15 } })
+      .then(({ data }) => { if (aktiv) setListe(Array.isArray(data?.vergleiche) ? data.vergleiche : []); })
+      .catch(() => { if (aktiv) setListe([]); });
+    return () => { aktiv = false; };
+  }, [programm.id]);
+  if (!liste || liste.length === 0) return null;
+  return (
+    <div className="space-y-2" data-testid="programm-meine">
+      <h2 className="font-display font-black text-lg tracking-tight">Deine letzten Autos</h2>
+      <p className="text-sm text-zinc-500">
+        Beim Anklicken im Programm liest AutoSchnell das Inserat schon aus – für den Kaufvertrag einfach öffnen.
+      </p>
+      <ul className="divide-y" style={{ borderColor: "var(--border-default)" }}>
+        {liste.map((x) => {
+          const url = x.fahrzeug?.inserat_url;
+          return (
+            <li key={x.id} className="py-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+              <span className="text-zinc-500 whitespace-nowrap">{zeit(x.erstellt_am)}</span>
+              <span className="flex-1 min-w-[12rem]">{fahrzeugText(x.fahrzeug)}</span>
+              {url ? (
+                <Link to={`/app/vergleich?url=${encodeURIComponent(url)}`} data-testid={`meine-vertrag-${x.id}`}
+                      className="apple-btn apple-btn-secondary !rounded-full !px-3 !py-1 text-xs inline-flex items-center gap-1">
+                  <FileSignature size={13} /> Für Kaufvertrag öffnen
+                </Link>
+              ) : (
+                <span className="text-xs text-amber-500" data-testid={`meine-ohne-link-${x.id}`}>
+                  Inserat-Adresse fehlt – bitte selbst kopieren und unter „Vergleich“ einfügen
+                </span>
+              )}
+            </li>
+          );
+        })}
+      </ul>
     </div>
   );
 }

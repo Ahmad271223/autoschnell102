@@ -117,6 +117,7 @@ internal static class KonsolenModus
         {
             var antwort = await dienst.VergleichAsync(f, probelauf: true);
             Console.WriteLine($"Regeln: {antwort.Profil}");
+            Console.WriteLine($"Inserat: {antwort.InseratUrl ?? "(Adresse unbekannt – für den Kaufvertrag selbst einfügen)"}");
             foreach (var v in antwort.Links) Console.WriteLine($"{v.Portal}: {v.Url}");
             foreach (var h in antwort.Hinweise) Console.WriteLine("Hinweis: " + h);
             if (args.Contains("--oeffnen") && antwort.Links.Count > 0)

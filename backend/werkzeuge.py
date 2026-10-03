@@ -57,6 +57,10 @@ WERKZEUGE = {
             "Unten rechts erscheint ein grünes Lupen-Symbol. AutoPointer öffnen und ein Inserat anklicken – "
             "die Vergleiche öffnen sich als neue Browser-Tabs, mit euren Vergleichsregeln aus AutoSchnell "
             "(Einstellungen → Vergleich). Ohne aktives Abo öffnet das Programm nichts.",
+            "Kaufvertrag: Beim Anklicken liest AutoSchnell das Inserat schon im Hintergrund aus (Daten + Fotos). "
+            "Rechtsklick auf das Symbol → „Kaufvertrag: Auto in AutoSchnell öffnen“ oder hier unten bei „Deine "
+            "letzten Autos“ – kein Link-Einfügen nötig. Nur wenn AutoPointer bei AutoScout die Hash-ID nicht "
+            "vollständig zeigt: Inserat-Adresse selbst kopieren und unter „Vergleich“ einfügen.",
             "Doppelklick auf das Symbol oder Strg+Alt+P schaltet die Automatik aus und wieder an. "
             "Rechtsklick: Einstellungen (Portale, Browser, mit Windows starten).",
         ],
@@ -266,3 +270,36 @@ def vergleichs_links(vehicle: dict, regeln: dict) -> tuple:
         if h not in hinweise:
             hinweise.append(h)
     return links, hinweise
+
+
+# ---------------------------------------------------------------------------
+# Inserat-Link (Wunsch Ahmad 03.10.2026): aus der Inserat-ID (mobile.de, Kleinanzeigen)
+# bzw. der Hash-ID (AutoScout24) — am 03.10. live mit echten Inseraten geprueft.
+# ---------------------------------------------------------------------------
+_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def vorab_abruf_an() -> bool:
+    """Inserat beim Klick im Programm im Hintergrund auslesen (Standard an). Jeder echte Abruf zaehlt
+    wie ein eingefuegter Link fuer das Tageslimit des Kontos; Speicher-Treffer sind kostenlos."""
+    return (os.environ.get("AUTOPOINTER_VORAB_ABRUF") or "true").strip().lower() not in ("0", "false", "nein", "aus")
+
+
+def inserat_url(quelle, inserat_id, hash_id=None) -> Optional[str]:
+    """Adresse des Original-Inserats oder None (lieber kein Link als ein falscher).
+
+    mobile.de:      suchen.mobile.de/fahrzeuge/details.html?id=<Inserat-ID>  (9 bis 14 Stellen gesehen)
+    Kleinanzeigen:  www.kleinanzeigen.de/s-anzeige/<Inserat-ID>
+    AutoScout24:    www.autoscout24.de/angebote/<Hash-ID>  (die Inserat-ID aus AutoPointer
+                    kennt AutoScout nicht — "Seite nicht gefunden")"""
+    q = re.sub(r"[^a-z0-9]", "", str(quelle or "").lower())
+    nummer = str(inserat_id or "").strip()
+    if "mobile" in q and re.fullmatch(r"\d{6,20}", nummer):
+        return f"https://suchen.mobile.de/fahrzeuge/details.html?id={nummer}"
+    if "kleinanzeigen" in q and re.fullmatch(r"\d{6,20}", nummer):
+        return f"https://www.kleinanzeigen.de/s-anzeige/{nummer}"
+    if "autoscout" in q:
+        h = str(hash_id or "").strip().lower()
+        if _UUID.match(h):
+            return f"https://www.autoscout24.de/angebote/{h}"
+    return None
