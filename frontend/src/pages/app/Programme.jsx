@@ -149,13 +149,16 @@ export default function Programme() {
   );
 }
 
+// Wunsch Ahmad 03.10.2026: "nur die letzten 30 anzeigen, nicht alle immer"
+const FIRMA_ANZAHL = 30;
+
 /** Chef: wer aus der Firma hat wann welches Auto verglichen, welche PCs sind verbunden. */
 function FirmenUebersicht({ programm }) {
   const [daten, setDaten] = useState(null);
   const [fehler, setFehler] = useState("");
   const laden = useCallback(async () => {
     try {
-      const { data } = await api.get(`/werkzeuge/${encodeURIComponent(programm.id)}/firma`, { params: { limit: 200 } });
+      const { data } = await api.get(`/werkzeuge/${encodeURIComponent(programm.id)}/firma`, { params: { limit: FIRMA_ANZAHL } });
       setDaten(data);
       setFehler("");
     } catch (e) {
@@ -186,7 +189,11 @@ function FirmenUebersicht({ programm }) {
             <VerbindungsListe verbindungen={daten.verbindungen} onTrennen={trennen} />
           </div>
           <div>
-            <div className="text-sm font-semibold mb-2">Vergleiche ({daten.gesamt})</div>
+            <div className="text-sm font-semibold mb-2" data-testid="programm-firma-titel">
+              {daten.gesamt > (daten.vergleiche?.length || 0)
+                ? `Letzte ${daten.vergleiche.length} Vergleiche (von ${daten.gesamt})`
+                : `Vergleiche (${daten.gesamt})`}
+            </div>
             <VergleichsTabelle vergleiche={daten.vergleiche} />
           </div>
         </>

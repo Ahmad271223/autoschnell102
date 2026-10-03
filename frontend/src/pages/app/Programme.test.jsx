@@ -165,7 +165,9 @@ describe("Programme", () => {
     del.mockResolvedValue({ data: { ok: true } });
     await rendern();
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
-    expect(get).toHaveBeenCalledWith("/werkzeuge/werkzeug-x/firma", { params: { limit: 200 } });
+    // Wunsch Ahmad 03.10.2026: nur die letzten 30 laden
+    expect(get).toHaveBeenCalledWith("/werkzeuge/werkzeug-x/firma", { params: { limit: 30 } });
+    expect(feld("programm-firma-titel").textContent).toBe("Vergleiche (1)");
     const tabelle = feld("pv-vergleiche").textContent;
     expect(tabelle).toContain("Max Sucher");
     expect(tabelle).toContain("VW Polo · EZ 10/2005 · 128.000 km · 75 PS · 2.599 €");
@@ -174,6 +176,18 @@ describe("Programme", () => {
     expect(feld("pv-pcs").textContent).toContain("PC „PC-1“");
     await klick(feld("pv-trennen-s1"));
     expect(del).toHaveBeenCalledWith("/werkzeuge/werkzeug-x/verbindungen/s1");
+  });
+
+  it("mehr als 30 Vergleiche: Überschrift sagt, wie viele es insgesamt sind", async () => {
+    get.mockImplementation((url) => Promise.resolve(url === "/werkzeuge"
+      ? { data: { werkzeuge: [{ ...PROGRAMM, chef: true }] } }
+      : url.endsWith("/meine") ? { data: { vergleiche: [] } }
+      : { data: { gesamt: 120, verbindungen: [],
+          vergleiche: Array.from({ length: 30 }, (_, i) => ({ id: `c${i}`, user_id: "s1", erstellt_am: "2026-10-03T11:00:00+00:00",
+                                                              fahrzeug: { marke: "VW", modell: "Polo" }, links: [] })) } }));
+    await rendern();
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(feld("programm-firma-titel").textContent).toBe("Letzte 30 Vergleiche (von 120)");
   });
 
   it("Sucher sieht keine Firmenübersicht", async () => {
