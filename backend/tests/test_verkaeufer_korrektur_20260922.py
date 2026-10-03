@@ -202,6 +202,9 @@ def test_05_route_und_oberflaeche_sind_verdrahtet():
     assert '@router.put("/contracts/{contract_id}/verkaeufer")' in quelle
     projekt = Path(__file__).resolve().parents[2]
     archiv = (projekt / "frontend" / "src" / "pages" / "app" / "PDFArchiv.jsx").read_text(encoding="utf-8")
-    assert "VerkaeuferKorrekturDialog" in archiv and "verkaeufer-korrektur-${it.id}" in archiv
+    assert "VerkaeuferKorrekturDialog" in archiv and "korrektur: () => setKorrektur(it)" in archiv
+    # 03.10.2026: der Knopf steht im Menue "Mehr" der Aktionsleiste
+    aktionen = (projekt / "frontend" / "src" / "components" / "VertragAktionen.jsx").read_text(encoding="utf-8")
+    assert "verkaeufer-korrektur-${it.id}" in aktionen and "onClick={a.korrektur}" in aktionen
     dialog = (projekt / "frontend" / "src" / "components" / "VerkaeuferKorrekturDialog.jsx").read_text(encoding="utf-8")
     assert "api.put(`/contracts/${contract.id}/verkaeufer`" in dialog

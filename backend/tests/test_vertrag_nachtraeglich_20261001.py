@@ -165,4 +165,7 @@ def test_04_route_und_oberflaeche():
     archiv = (front / "pages" / "app" / "PDFArchiv.jsx").read_text(encoding="utf-8")
     assert "/neue-fassung`" in dialog and "export function formularAusVertrag" in dialog
     assert "max-w-[min(96vw,1500px)]" in dialog, "Dialog breiter (Wunsch Ahmad 01.10.2026)"
-    assert "vertrag-aendern-" in archiv and "<ContractDialog open key={aendern.id} vertrag={aendern}" in archiv
+    assert "aendern: () => setAendern(it)" in archiv and "<ContractDialog open key={aendern.id} vertrag={aendern}" in archiv
+    # 03.10.2026: der Knopf steht im Menue "Mehr" der Aktionsleiste
+    aktionen = (front / "components" / "VertragAktionen.jsx").read_text(encoding="utf-8")
+    assert "vertrag-aendern-${it.id}" in aktionen and "onClick={a.aendern}" in aktionen
