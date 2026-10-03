@@ -12,17 +12,10 @@
     <RootNamespace>AutoPointerVergleich</RootNamespace>
     <Product>AutoSchnell AutoPointer-Vergleich</Product>
     <Company>Auto Schnell</Company>
-    <Version>1.3.5</Version>
+    <Version>1.4.0</Version>
     <ApplicationIcon>app.ico</ApplicationIcon>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
-
-  <ItemGroup>
-    <!-- Marken-/Modell-Kataloge: dieselben Dateien wie die Link-Bauer im Backend
-         (mobile_service.py / autoscout_service.py) - eine Quelle, keine Kopie. -->
-    <EmbeddedResource Include="..\..\backend\mobile_makes_models.json" LogicalName="mobile_makes_models.json" />
-    <EmbeddedResource Include="..\..\backend\autoscout_makes.json" LogicalName="autoscout_makes.json" />
-  </ItemGroup>
 
   <ItemGroup>
     <InternalsVisibleTo Include="AutoPointerVergleich.Tests" />

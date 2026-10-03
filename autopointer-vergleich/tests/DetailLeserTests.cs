@@ -60,8 +60,6 @@ public class DetailLeserTests
         Assert.Equal(84975, f.Kilometer);
         Assert.Equal(320, f.Kw);
         Assert.Equal(435, f.Ps);
-        Assert.Equal("AUTOMATIC_GEAR", f.GetriebeCode);
-        Assert.Equal("DIESEL", f.KraftstoffCode);
         Assert.Equal(99900, f.Preis);
         Assert.Equal("mobile.de", f.Quelle);
         Assert.Equal("Bentley Bentayga V8 Diesel, 1. Hand, Mulliner, Nai", f.Titel);
@@ -191,10 +189,24 @@ public class DetailLeserTests
     public void Variante_aus_dem_Titel()
     {
         var f = Passat();
-        Zuordner.Zuordnen(f, Kat);
         Assert.Equal("B6 - Bastlerfahrzeug", f.Variante);
+        f.Marke = "Volkswagen";                       // was der Server erkannt hat, aendert nichts daran
+        f.Modell = "Passat Variant";
+        Assert.Equal("B6 - Bastlerfahrzeug", f.Variante);
+        Assert.Equal("V8 Diesel, 1. Hand, Mulliner, Nai", Bentley().Variante);
+    }
+
+    [Fact]   // seit 1.4.0: Kennung aus dem gelesenen Text, Lesefehler i/l/1 und o/0 zaehlen nicht als neues Auto
+    public void Schluessel_aus_dem_gelesenen_Text()
+    {
+        var f = Bentley();
+        Assert.Equal("bent1eybentayga | 03/2017 | 84975 km | 320 kW", f.Schluessel);
+        var a = Bentley();
+        a.MarkeModellText = "Hyundai i10";
         var b = Bentley();
-        Zuordner.Zuordnen(b, Kat);
-        Assert.Equal("V8 Diesel, 1. Hand, Mulliner, Nai", b.Variante);
+        b.MarkeModellText = "HYUNDAI ilO";
+        Assert.Equal(a.Schluessel, b.Schluessel);
+        b.MarkeModellText = "Hyundai i20";
+        Assert.NotEqual(a.Schluessel, b.Schluessel);
     }
 }

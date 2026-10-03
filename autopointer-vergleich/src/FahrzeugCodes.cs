@@ -4,25 +4,10 @@ using System.Text.RegularExpressions;
 
 namespace AutoPointerVergleich;
 
-/// <summary>Getriebe-/Kraftstoff-Codes fuer beide Portale - 1:1 nach
-/// backend/fahrzeug_codes.py (Befund 17.09.2026: nie Rohwerte in Filter-Links,
-/// mobile.de und AutoScout24 ignorieren unbekannte Werte still).</summary>
+/// <summary>Kleine Helfer fuer das Lesen (Normalform, kW/PS, Lesefehler-Abstand). Getriebe-/Kraftstoff-Codes und
+/// alles Portal-Wissen stehen seit 1.4.0 nur noch auf dem Server (backend/fahrzeug_codes.py).</summary>
 internal static class FahrzeugCodes
 {
-    public static readonly IReadOnlyDictionary<string, string> AutoScoutGetriebe = new Dictionary<string, string>
-    {
-        ["AUTOMATIC_GEAR"] = "A", ["MANUAL_GEAR"] = "M", ["SEMIAUTOMATIC_GEAR"] = "S",
-    };
-
-    public static readonly IReadOnlyDictionary<string, string> AutoScoutKraftstoff = new Dictionary<string, string>
-    {
-        ["PETROL"] = "B", ["DIESEL"] = "D", ["ELECTRICITY"] = "E", ["HYBRID"] = "2",
-        ["HYBRID_DIESEL"] = "3", ["LPG"] = "L", ["CNG"] = "C", ["HYDROGENIUM"] = "H",
-    };
-
-    private static readonly string[] KraftstoffCodes =
-        { "PETROL", "DIESEL", "ELECTRICITY", "HYBRID", "HYBRID_DIESEL", "LPG", "CNG", "HYDROGENIUM", "ETHANOL", "OTHER" };
-
     /// <summary>Kleinbuchstaben ohne Akzente, nur a-z und 0-9 (wie _norm im Backend).</summary>
     public static string Norm(string? wert)
     {
@@ -35,40 +20,6 @@ internal static class FahrzeugCodes
             if (k is >= 'a' and <= 'z' or >= '0' and <= '9') sb.Append(k);
         }
         return sb.ToString();
-    }
-
-    public static string? GetriebeCode(string? wert)
-    {
-        string n = Norm(wert);
-        if (n.Length == 0) return null;
-        // Reihenfolge wichtig: "Halbautomatik" enthaelt "auto".
-        if (n.Contains("halbauto") || n.StartsWith("semi")) return "SEMIAUTOMATIC_GEAR";
-        if (n.Contains("auto") || n.Contains("doppelkupplung") || n.Contains("dsg") || n.Contains("cvt")
-            || n.Contains("stufenlos") || n.Contains("tiptronic")) return "AUTOMATIC_GEAR";
-        if (n.Contains("schalt") || n.Contains("manu")) return "MANUAL_GEAR";
-        return null;
-    }
-
-    public static string? KraftstoffCode(string? wert)
-    {
-        string roh = (wert ?? "").Trim();
-        if (KraftstoffCodes.Contains(roh.ToUpperInvariant())) return roh.ToUpperInvariant();
-        string n = Norm(roh);
-        if (n.Length == 0) return null;
-        bool elektrisch = n.Contains("elektr") || n.Contains("electr") || n.Contains("strom");
-        bool verbrenner = n.Contains("benzin") || n.Contains("petrol") || n.Contains("gasoline") || n.Contains("diesel");
-        // Reihenfolge wichtig: "Hybrid (Diesel/Elektro)" enthaelt "diesel" und "elektro".
-        if (n.Contains("hybrid") || n.Contains("plugin") || (elektrisch && verbrenner))
-            return n.Contains("diesel") ? "HYBRID_DIESEL" : "HYBRID";
-        if (n.Contains("wasserstoff") || n.Contains("hydrogen")) return "HYDROGENIUM";
-        if (n.Contains("lpg") || n.Contains("autogas") || n.Contains("flussiggas")) return "LPG";
-        if (n.Contains("cng") || n.Contains("erdgas") || n.Contains("naturalgas")) return "CNG";
-        if (n.Contains("ethanol") || n.Contains("e85")) return "ETHANOL";
-        if (elektrisch) return "ELECTRICITY";
-        if (n.Contains("diesel")) return "DIESEL";
-        if (n.Contains("benzin") || n.Contains("petrol") || n.Contains("gasoline") || n.StartsWith("super")) return "PETROL";
-        if (n is "andere" or "sonstige" or "sonstiges" or "other" or "others") return "OTHER";
-        return null;
     }
 
     // Umrechnung wie autoscout_service.kw_to_ps / ps_to_kw

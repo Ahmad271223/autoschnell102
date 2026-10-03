@@ -45,12 +45,20 @@ public class UeberwacherTests
         {
             Anfragen.Add(f);
             if (Fehler != null) return Task.FromException<VergleichAntwort>(Fehler);
-            string id = $"{f.MarkeText}-{f.ModellText}-{f.EzJahr}".Replace(' ', '_');
+            int leer = f.MarkeModellText.IndexOf(' ');
+            string id = (leer > 0 ? $"{f.MarkeModellText[..leer]}-{f.MarkeModellText[(leer + 1)..]}" : f.MarkeModellText)
+                        .Replace(' ', '_') + $"-{f.EzJahr}";
+            // wie der echte Server seit 1.4.0: unbekannte Marke -> keine Links, erkannt=false
+            if (f.MarkeModellText.StartsWith("Quatsch", StringComparison.Ordinal))
+                return Task.FromResult(new VergleichAntwort(Array.Empty<Vergleich>(),
+                    new[] { "mobile.de kennt die Marke „Quatschmarke“ nicht – kein mobile.de-Vergleich." }, "inland",
+                    InseratUrl, "kein_link", ErkanntMarke: f.MarkeModellText, ErkanntModell: "", MarkeErkannt: false));
             return Task.FromResult(new VergleichAntwort(new[]
             {
                 new Vergleich("mobile.de", $"https://suchen.mobile.de/{id}"),
                 new Vergleich("AutoScout24", $"https://www.autoscout24.de/{id}"),
-            }, Array.Empty<string>(), "inland", InseratUrl, InseratUrl != null ? "laeuft" : "kein_link"));
+            }, Array.Empty<string>(), "inland", InseratUrl, InseratUrl != null ? "laeuft" : "kein_link",
+               ErkanntMarke: "Erkannt", ErkanntModell: f.MarkeModellText));
         }
     }
 
@@ -73,7 +81,7 @@ public class UeberwacherTests
     public UeberwacherTests()
     {
         Protokoll.DateiAktiv = false;
-        _u = new Ueberwacher(_q, Kat, () => _e, _b, _server, () => _jetzt, t =>
+        _u = new Ueberwacher(_q, () => _e, _b, _server, () => _jetzt, t =>
         {
             _gewartet.Add(t);
             _jetzt += t;
@@ -252,20 +260,29 @@ public class UeberwacherTests
     }
 
     [Fact]
-    public async Task Unbekannte_Marke_fragt_den_Server_gar_nicht()
+    public async Task Unbekannte_Marke_meldet_der_Server()
     {
+        // seit 1.4.0 erkennt der Server Marke und Modell — er sagt auch, wenn er die Marke nicht kennt
         await Start();
         Fahrzeug Unbekannt()
         {
             var f = Bentley();
             f.MarkeModellText = "Quatschmarke X1";
-            f.Titel = "Quatschmarke X1 Sport";        // seit 03.10.: unbekannte Marke -> erst die Ueberschrift fragen
+            f.Titel = "Quatschmarke X1 Sport";
             return f;
         }
         await Anklicken(Unbekannt, 9);
         Assert.Empty(_b.Aufrufe);
-        Assert.Empty(_server.Anfragen);
+        Assert.Single(_server.Anfragen);
         Assert.Contains(_meldungen, m => m.Contains("nicht erkannt"));
+    }
+
+    [Fact]
+    public async Task Erkannte_Namen_vom_Server_stehen_am_Fahrzeug()
+    {
+        await Start();
+        await Anklicken(Passat, 10);
+        Assert.Equal(("Erkannt", "VW Passat Variant"), (_u.LetztesFahrzeug!.Marke, _u.LetztesFahrzeug.Modell));
     }
 
     [Fact]

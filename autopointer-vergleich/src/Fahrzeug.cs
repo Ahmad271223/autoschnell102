@@ -5,11 +5,9 @@ internal sealed class Fahrzeug
 {
     /// <summary>Feld "Marke, Modell" wie angezeigt, z. B. "Bentley Bentayga".</summary>
     public string MarkeModellText { get; set; } = "";
+    /// <summary>Katalognamen, wie sie der Server erkannt hat (seit 1.4.0) — nur zur Anzeige.</summary>
     public string? Marke { get; set; }
     public string? Modell { get; set; }
-    /// <summary>Marke/Modell wie in AutoPointer (getrennt), so gehen sie an den Server.</summary>
-    public string? MarkeText { get; set; }
-    public string? ModellText { get; set; }
     /// <summary>Inserat-Titel aus dem Kopf (oft mit Motor/Ausstattung).</summary>
     public string? Titel { get; set; }
     public string? Quelle { get; set; }
@@ -30,9 +28,6 @@ internal sealed class Fahrzeug
 
     public bool Unfallwagen => (Zustand ?? "").Contains("unfall", StringComparison.OrdinalIgnoreCase);
 
-    public string KraftstoffCode => FahrzeugCodes.KraftstoffCode(Kraftstoff) ?? "";
-    public string GetriebeCode => FahrzeugCodes.GetriebeCode(Getriebe) ?? "";
-
     /// <summary>Zusatz aus dem Titel nach Marke/Modell ("V8 Diesel, 1. Hand ...").</summary>
     public string? Variante
     {
@@ -52,10 +47,13 @@ internal sealed class Fahrzeug
         }
     }
 
-    /// <summary>Kennung "Bentley Bentayga | 03/2017 | 84975 km | 320 kW": bleibt sie
-    /// gleich, ist es dasselbe Fahrzeug und es wird nichts neu geoeffnet.</summary>
-    public string Schluessel =>
-        $"{(Marke != null ? $"{Marke} {Modell}".Trim() : MarkeModellText)} | {EzText} | {Kilometer} km | {Kw} kW";
+    /// <summary>Kennung "bent1eybentayga | 03/2017 | 84975 km | 320 kW": bleibt sie gleich, ist es dasselbe
+    /// Fahrzeug und es wird nichts neu geoeffnet. Aus dem gelesenen Text (die Erkennung macht der Server) —
+    /// klein, ohne Zeichen, i/l/1 und o/0 gleich, damit ein Lesefehler kein zweites Oeffnen ausloest.</summary>
+    public string Schluessel => $"{Kennwort(MarkeModellText)} | {EzText} | {Kilometer} km | {Kw} kW";
+
+    private static string Kennwort(string text) =>
+        new(FahrzeugCodes.Norm(text).Select(c => c switch { 'i' or 'l' => '1', 'o' => '0', _ => c }).ToArray());
 
     public string EzText => EzJahr == null ? "?" : EzMonat != null ? $"{EzMonat:00}/{EzJahr}" : $"{EzJahr}";
 

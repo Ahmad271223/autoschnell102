@@ -316,17 +316,9 @@ internal sealed class TrayApp : ApplicationContext
             return;
         }
         Protokoll.Schreibe($"Texterkennung: {ocr.Sprache}");
-        Katalog katalog;
-        try { katalog = Katalog.Laden(); }
-        catch (Exception ex)
-        {
-            Protokoll.Schreibe("Katalog nicht ladbar: " + ex.Message);
-            Sprechblase("Katalog nicht ladbar: " + ex.Message, true, erzwingen: true);
-            return;
-        }
         var quelle = new AutoPointerQuelle(ocr, () => _einstellungen);
         _quelle = quelle;
-        _ueberwacher = new Ueberwacher(quelle, katalog, () => _einstellungen, new BrowserAusgabe(_ui),
+        _ueberwacher = new Ueberwacher(quelle, () => _einstellungen, new BrowserAusgabe(_ui),
                                        new DienstVermittler(() => _dienst)) { Probelauf = _probelauf };
         _ueberwacher.StatusGeaendert += s => _ui.Post(_ => StatusAnzeigen(s), null);
         _ueberwacher.Meldung += (t, f) => _ui.Post(_ => Sprechblase(t, f), null);

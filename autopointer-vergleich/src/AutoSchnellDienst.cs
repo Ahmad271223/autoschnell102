@@ -22,8 +22,13 @@ internal sealed class DienstFehler : Exception
 
 internal sealed record VerbindenAntwort(string Schluessel, string Konto, string Name, string Firma);
 internal sealed record StatusAntwort(string Konto, string Name, string Firma, string PcName, string? AboBis);
+internal sealed record Vergleich(string Portal, string Url);
+
+/// <param name="ErkanntMarke">Seit 1.4.0: Marke/Modell erkennt der SERVER (Katalognamen zur Anzeige);
+/// null bei einem Server ohne Erkennung.</param>
 internal sealed record VergleichAntwort(IReadOnlyList<Vergleich> Links, IReadOnlyList<string> Hinweise, string Profil,
-                                        string? InseratUrl = null, string VorabStatus = "", string VorabHinweis = "");
+                                        string? InseratUrl = null, string VorabStatus = "", string VorabHinweis = "",
+                                       string? ErkanntMarke = null, string? ErkanntModell = null, bool MarkeErkannt = true);
 
 /// <summary>Was der Ueberwacher vom Server braucht (in Tests eine Attrappe).</summary>
 internal interface IVergleichsDienst
@@ -178,17 +183,32 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
             vorabStatus = Text(vorab, "status");
             vorabHinweis = Text(vorab, "hinweis");
         }
-        return new VergleichAntwort(links, hinweise, Text(e, "profil"), inseratUrl, vorabStatus, vorabHinweis);
+        string? marke = null, modell = null;
+        bool markeErkannt = true;
+        if (e.TryGetProperty("fahrzeug", out var fz) && fz.ValueKind == JsonValueKind.Object)
+        {
+            marke = Text(fz, "marke") is { Length: > 0 } m ? m : null;
+            modell = Text(fz, "modell");
+            markeErkannt = !fz.TryGetProperty("erkannt", out var ek) || ek.ValueKind != JsonValueKind.False;
+        }
+        return new VergleichAntwort(links, hinweise, Text(e, "profil"), inseratUrl, vorabStatus, vorabHinweis,
+                                    marke, modell, markeErkannt);
     }
 
     /// <summary>Fahrzeug -> Anfrage an /vergleich (Feldnamen wie routes/werkzeuge.FahrzeugIn).</summary>
     internal static Dictionary<string, object?> Nutzlast(Fahrzeug f)
     {
         static string K(string? s, int n) => (s ?? "").Trim() is var t && t.Length > n ? t[..n] : (s ?? "").Trim();
+        // Seit 1.4.0 (Wunsch Ahmad 03.10.2026): das Programm erkennt nichts mehr selbst — es schickt, was
+        // AutoPointer zeigt (roh=true), der Server erkennt Marke und Modell. marke/modell (erstes Wort / Rest)
+        // nur, damit ein Server ohne Erkennung weiter antwortet.
+        string text = (f.MarkeModellText ?? "").Trim();
+        int leer = text.IndexOf(' ');
         return new Dictionary<string, object?>
         {
-            ["marke"] = K(f.MarkeText ?? f.Marke, 60),
-            ["modell"] = K(f.ModellText ?? f.Modell, 80),
+            ["marke"] = K(leer > 0 ? text[..leer] : text, 60),
+            ["modell"] = K(leer > 0 ? text[(leer + 1)..] : "", 80),
+            ["roh"] = true,
             ["marke_modell_text"] = K(f.MarkeModellText, 160),
             ["titel"] = K(f.Titel, 300),
             ["ez_monat"] = f.EzMonat,

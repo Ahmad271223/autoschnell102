@@ -45,10 +45,10 @@ public class DienstTests
                       {"portal":"boese","url":"javascript:alert(1)"}],
              "hinweise":["Getriebe nicht gelesen"],"profil":"inland",
              "inserat_url":"https://www.kleinanzeigen.de/s-anzeige/3529712138",
-             "vorab":{"status":"laeuft","hinweis":""}}
+             "vorab":{"status":"laeuft","hinweis":""},
+             "fahrzeug":{"marke":"Volkswagen","modell":"Passat Variant","erkannt":true}}
             """);
         var f = Passat();
-        Zuordner.Zuordnen(f, Kat);
         var antwort = await d.VergleichAsync(f, probelauf: false);
 
         Assert.Equal(HttpMethod.Post, a.Letzte!.Method);
@@ -58,6 +58,10 @@ public class DienstTests
         var fz = doc.RootElement.GetProperty("fahrzeug");
         Assert.Equal("VW", fz.GetProperty("marke").GetString());
         Assert.Equal("Passat Variant", fz.GetProperty("modell").GetString());
+        // seit 1.4.0: nur Rohtext — erkannt wird auf dem Server
+        Assert.True(fz.GetProperty("roh").GetBoolean());
+        Assert.Equal("VW Passat Variant", fz.GetProperty("marke_modell_text").GetString());
+        Assert.Equal(("Volkswagen", "Passat Variant", true), (antwort.ErkanntMarke, antwort.ErkanntModell, antwort.MarkeErkannt));
         Assert.Equal(2006, fz.GetProperty("ez_jahr").GetInt32());
         Assert.Equal(10, fz.GetProperty("ez_monat").GetInt32());
         Assert.Equal(244000, fz.GetProperty("kilometer").GetInt32());

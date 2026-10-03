@@ -50,9 +50,6 @@ internal static class Fixtures
         Z("mobile.de", 690, 50, 140, 20),
     };
 
-    private static Katalog? _katalog;
-    public static Katalog Kat => _katalog ??= Katalog.Laden();
-
     public static Fahrzeug Bentley() => DetailLeser.Auswerten(BentleyTechnik, BentleyKopf, 846);
     public static Fahrzeug Passat() => DetailLeser.Auswerten(PassatTechnik, PassatKopf, 846);
 }

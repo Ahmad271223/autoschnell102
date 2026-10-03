@@ -102,7 +102,6 @@ internal static class KonsolenModus
         Console.WriteLine("  " + lesung.Rohtext);
         var f = lesung.Fahrzeug;
         var fehlt = DetailLeser.Fehlend(f);
-        Zuordner.Zuordnen(f, Katalog.Laden());
         foreach (var z in f.Beschreibung()) Console.WriteLine("  " + z);
         Console.WriteLine("  Schlüssel: " + f.Schluessel);
         Console.WriteLine("  An den Server: " + System.Text.Json.JsonSerializer.Serialize(AutoSchnellDienst.Nutzlast(f)));
@@ -122,6 +121,9 @@ internal static class KonsolenModus
         try
         {
             var antwort = await dienst.VergleichAsync(f, probelauf: true);
+            if (antwort.ErkanntMarke != null)
+                Console.WriteLine($"Erkannt (AutoSchnell): {antwort.ErkanntMarke} {antwort.ErkanntModell}"
+                                  + (antwort.MarkeErkannt ? "" : " – Marke unbekannt"));
             Console.WriteLine($"Regeln: {antwort.Profil}");
             Console.WriteLine($"Inserat: {antwort.InseratUrl ?? "(Adresse unbekannt – für den Kaufvertrag selbst einfügen)"}");
             foreach (var v in antwort.Links) Console.WriteLine($"{v.Portal}: {v.Url}");

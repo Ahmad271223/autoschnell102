@@ -30,7 +30,6 @@ internal enum Status { Pause, KeinAutoPointer, Bereit, Aktiv, NichtVerbunden, Ge
 internal sealed class Ueberwacher
 {
     private readonly IAnsichtQuelle _quelle;
-    private readonly Katalog _katalog;
     private readonly Func<Einstellungen> _einstellungen;
     private readonly IOeffner _oeffner;
     private readonly IVergleichsDienst _dienst;
@@ -65,11 +64,10 @@ internal sealed class Ueberwacher
     /// <summary>Der Server kennt den Schluessel nicht mehr (anderer PC, getrennt) -> neu verbinden.</summary>
     public event Action<string>? VerbindungVerloren;
 
-    public Ueberwacher(IAnsichtQuelle quelle, Katalog katalog, Func<Einstellungen> einstellungen, IOeffner oeffner,
+    public Ueberwacher(IAnsichtQuelle quelle, Func<Einstellungen> einstellungen, IOeffner oeffner,
                        IVergleichsDienst dienst, Func<DateTime>? uhr = null, Func<TimeSpan, Task>? warte = null)
     {
         _quelle = quelle;
-        _katalog = katalog;
         _einstellungen = einstellungen;
         _oeffner = oeffner;
         _dienst = dienst;
@@ -207,15 +205,15 @@ internal sealed class Ueberwacher
             return;
         }
 
-        var zuordnung = Zuordner.Zuordnen(f, _katalog);
+        // Seit 1.4.0: Marke/Modell erkennt der Server (Wunsch Ahmad 03.10.2026) — hier zaehlt der gelesene Text
         string schluessel = f.Schluessel;
         if (!erzwungen && schluessel == _letzterSchluessel)
         {
-            Protokoll.Schreibe($"Gleiches Fahrzeug ({schluessel}) – kein neuer Vergleich.");
+            Protokoll.Schreibe($"Gleiches Fahrzeug ({f.MarkeModellText} · {f.EzText} · {f.Kilometer} km) – kein neuer Vergleich.");
             return;
         }
 
-        Protokoll.Schreibe((lesung.Weg.Length > 0 ? $"Fahrzeug erkannt (gelesen: {lesung.Weg})\n" : "Fahrzeug erkannt\n")
+        Protokoll.Schreibe((lesung.Weg.Length > 0 ? $"Fahrzeug gelesen ({lesung.Weg})\n" : "Fahrzeug gelesen\n")
                            + string.Join("\n", f.Beschreibung()));
         bool basis = _basis && !erzwungen;
         _basis = false;
@@ -227,13 +225,6 @@ internal sealed class Ueberwacher
                                + "(Menü „Aktuelles Fahrzeug jetzt vergleichen“).");
             return;
         }
-        if (!zuordnung.MarkeErkannt)
-        {
-            _letzterSchluessel = schluessel;
-            MeldeEinmal($"Marke in „{f.MarkeModellText}“ nicht erkannt – kein Vergleich.");
-            return;
-        }
-
         VergleichAntwort antwort;
         try { antwort = await _dienst.VergleichAsync(f, Probelauf); }
         catch (DienstFehler ex)
@@ -261,8 +252,19 @@ internal sealed class Ueberwacher
             SetzeStatus(Status.Aktiv);
         }
         _letzterSchluessel = schluessel;
+        if (antwort.ErkanntMarke != null)
+        {
+            f.Marke = antwort.ErkanntMarke;
+            f.Modell = antwort.ErkanntModell;
+            Protokoll.Schreibe($"Erkannt (AutoSchnell): {f.Marke} {f.Modell}".TrimEnd());
+        }
         LetztesFahrzeug = f;
         LetzteInseratUrl = antwort.InseratUrl;
+        if (!antwort.MarkeErkannt)
+        {
+            MeldeEinmal($"Marke in „{f.MarkeModellText}“ nicht erkannt – kein Vergleich.");
+            return;
+        }
         foreach (var v in antwort.Links) Protokoll.Schreibe($"{v.Portal} URL (Regeln {antwort.Profil}): {v.Url}");
         foreach (var h in antwort.Hinweise) Protokoll.Schreibe("Hinweis: " + h);
         Protokoll.Schreibe(antwort.InseratUrl != null

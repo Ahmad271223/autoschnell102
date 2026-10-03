@@ -58,7 +58,12 @@ dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und 
 * Ein Auto, das beim Programmstart schon angezeigt wird, öffnet nichts – erst das nächste angeklickte.
 * **Neuwagen** (Zustand „Neu“) haben in AutoPointer weder Erstzulassung noch Kilometerstand: dann gilt dieses Jahr
   und 0 km (Befund 03.10.: BYD Dolphin, mobile.de).
-* Dasselbe Fahrzeug öffnet nie zweimal hintereinander (Kennung `Marke Modell | EZ | km | kW`).
+* Dasselbe Fahrzeug öffnet nie zweimal hintereinander (Kennung aus dem gelesenen Text `Marke Modell | EZ | km | kW`,
+  Lesefehler i/l/1 und o/0 zählen nicht als neues Auto).
+* **Seit 1.4.0 erkennt der Server Marke und Modell** (Wunsch Ahmad 03.10.: „das Programm enthält kaum noch Wissen“):
+  das Programm schickt nur, was AutoPointer zeigt (`roh: true`), `backend/werkzeug_erkennung.py` erkennt es — 1:1 die
+  frühere Programm-Logik (am 03.10. über 16.636 Fälle ohne Abweichung abgeglichen). Verbesserungen brauchen damit nur
+  ein Server-Update. Alle Regeln unten gelten weiter, laufen aber auf dem Server.
 * Kann ein Auto nicht sicher gelesen werden (Marke/Modell, EZ oder km fehlen), öffnet sich **nichts**;
   unten rechts erscheint „Fahrzeug konnte nicht eindeutig erkannt werden“.
 * Kennt ein Portal das Modell nicht, öffnet dieses Portal nicht (sonst gäbe es eine Suche „nur Bentley“).
@@ -93,8 +98,8 @@ gezeichnet). Deshalb:
    (Anlass 03.10.2026: AutoPointer meldete eine „Zugriffsverletzung“ in aprun.exe. AutoPointer stürzt
    nachweislich auch ohne uns ab – Windows-Ereignis vom 24.09. –, trotzdem fassen wir es so wenig wie möglich an.)
 4. Hat sich die Anzeige während des Lesens geändert, wird verworfen (keine Mischdaten bei A → B → C).
-5. Marke/Modell trennt das Programm mit den Katalogen aus `backend/` (Lesefehler wie „Bentavga“ werden
-   korrigiert); die Links baut der Server (`backend/routes/werkzeuge.py`).
+5. Marke/Modell erkennt seit 1.4.0 der Server (`backend/werkzeug_erkennung.py`, Kataloge aus `backend/`,
+   Lesefehler wie „Bentavga“ werden korrigiert); die Links baut er ebenfalls (`backend/routes/werkzeuge.py`).
 
 AutoPointer wird nie verändert – das Programm liest nur, was ohnehin angezeigt wird.
 
