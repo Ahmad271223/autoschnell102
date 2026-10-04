@@ -16,7 +16,13 @@ import { VergleichsTabelle, VerbindungsListe, fahrzeugText, zeit } from "@/compo
  * Lizenz (Wunsch Ahmad 03.10.2026 nachmittags): Das Programm arbeitet nur verbunden —
  * hier gibt es den 6-stelligen Code dafür (10 Minuten, einmal, nur mit aktivem Abo).
  * Ein Konto = ein PC. Der Chef sieht, wer aus seiner Firma wann welches Auto verglichen hat.
+ *
+ * Wunsch Ahmad 04.10.2026: bei zwei Programmen links das erste, rechts das zweite (nicht ewig
+ * runterscrollen). Spalten nach Platz, nicht nach Fensterbreite — ist es zu schmal (Handy,
+ * Seitenleiste offen), stehen sie wie bisher untereinander.
  */
+const SPALTEN = "repeat(auto-fit, minmax(min(100%, 26rem), 1fr))";
+
 export default function Programme() {
   const { user } = useAuth();
   const liste = useProgramme(Boolean(user) && (user.role === "dealer" || user.role === "sucher"), user?.id);
@@ -69,8 +75,11 @@ export default function Programme() {
     }
   };
 
+  const nebeneinander = liste.length > 1;
   return (
-    <div className="max-w-4xl mx-auto space-y-8" data-testid="programme-seite">
+    <div className={`p-3 sm:p-6 lg:p-8 mx-auto ${nebeneinander ? "max-w-[1600px] grid gap-5" : "max-w-4xl"}`}
+         style={nebeneinander ? { gridTemplateColumns: SPALTEN } : undefined}
+         data-testid="programme-seite">
       {liste.map((p) => {
         const verbindung = getrennt[p.id] ? null : p.verbindung;
         const code = codes[p.id];
@@ -78,7 +87,9 @@ export default function Programme() {
         const browser = p.art === "browser";
         const geraet = p.geraet || "PC";
         return (
-          <section key={p.id} className="space-y-5" data-testid={`programm-${p.id}`}>
+          <section key={p.id} className={`space-y-5 min-w-0 ${nebeneinander ? "rounded-2xl p-4 sm:p-5" : ""}`}
+                   style={nebeneinander ? { border: "1px solid var(--border-default)" } : undefined}
+                   data-testid={`programm-${p.id}`}>
             <div className="flex items-start gap-3">
               <span className="w-10 h-10 rounded-md flex items-center justify-center shrink-0"
                     style={{ background: "var(--bg-surface)", border: "1px solid var(--border-default)" }}>

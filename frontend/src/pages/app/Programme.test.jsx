@@ -166,6 +166,34 @@ describe("Programme", () => {
     expect(feld("programm-pc-werkzeug-x").textContent).toContain("in einem Browser");
   });
 
+  it("zwei Programme (Wunsch Ahmad 04.10.2026): nebeneinander als zwei Karten, erstes links", async () => {
+    const zweites = { ...PROGRAMM, id: "werkzeug-y", name: "Zweites", art: "browser", geraet: "Browser" };
+    get.mockResolvedValue({ data: { werkzeuge: [PROGRAMM, zweites] } });
+    await rendern();
+    const seite = feld("programme-seite");
+    expect(seite.className).toContain("grid");
+    expect(seite.style.gridTemplateColumns).toContain("auto-fit");
+    // zu schmal (Handy, Seitenleiste offen): Spalte nie breiter als der Platz, dann untereinander
+    expect(seite.style.gridTemplateColumns).toContain("min(100%");
+    const karten = [...seite.children];
+    expect(karten.map((k) => k.dataset.testid)).toEqual(["programm-werkzeug-x", "programm-werkzeug-y"]);
+    for (const k of karten) {
+      // min-w-0: die Firmen-Tabelle scrollt in ihrer Karte statt die Spalte aufzudrücken
+      expect(k.className).toContain("min-w-0");
+      expect(k.style.border).toContain("1px solid");
+    }
+    expect(feld("programm-download-werkzeug-y").textContent).toContain("Chrome und Edge");
+  });
+
+  it("nur ein Programm: eine Spalte wie bisher, ohne Karte", async () => {
+    get.mockResolvedValue({ data: { werkzeuge: [PROGRAMM] } });
+    await rendern();
+    const seite = feld("programme-seite");
+    expect(seite.className).not.toContain("grid");
+    expect(seite.className).toContain("max-w-4xl");
+    expect(feld("programm-werkzeug-x").style.border).toBe("");
+  });
+
   it("Chef sieht, wer aus der Firma wann welches Auto verglichen hat", async () => {
     get.mockImplementation((url) => Promise.resolve(url === "/werkzeuge"
       ? { data: { werkzeuge: [{ ...PROGRAMM, chef: true }] } }
