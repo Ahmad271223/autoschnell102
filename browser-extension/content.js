@@ -1,4 +1,4 @@
-// Brücke zwischen der AutoSchnell-Web-App und dem Abruf-Helfer.
+// Brücke zwischen der AutoSchnell-Web-App und dem Helfer.
 // Die App spricht die Erweiterung NICHT direkt an (kennt ihre ID nicht),
 // sondern über window.postMessage — dieses Content-Script leitet weiter.
 
@@ -31,4 +31,28 @@ window.addEventListener("message", (event) => {
       }
     );
   }
+});
+
+// 3. Browser-Helfer (04.10.2026, Wunsch Ahmad "immer die App öffnen"):
+//    a) Läuft diese Seite als installierte App (eigenes Fenster), merkt sich der Helfer das — dann startet er bei
+//       "Kaufvertrag" die App statt einer Webseite.
+//    b) Ist die App offen, schickt der Helfer das Ziel hierher; die App wechselt ohne Neuladen dorthin.
+function alsApp() {
+  return ["standalone", "window-controls-overlay", "minimal-ui"]
+    .some((m) => window.matchMedia && window.matchMedia(`(display-mode: ${m})`).matches);
+}
+try {
+  if (alsApp()) chrome.runtime.sendMessage({ type: "AUTOSCHNELL_APP" }, () => void chrome.runtime.lastError);
+} catch (e) { /* Erweiterung neu geladen */ }
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || sender.id !== chrome.runtime.id || msg.type !== "AUTOSCHNELL_OEFFNEN") return false;
+  const ziel = typeof msg.ziel === "string" ? msg.ziel : "";
+  if (!/^\/app\/[a-z]/.test(ziel)) {
+    sendResponse({ ok: false });
+    return false;
+  }
+  window.postMessage({ __autoschnell: true, type: "OEFFNEN", ziel }, window.location.origin);
+  sendResponse({ ok: true, app: alsApp() });
+  return false;
 });

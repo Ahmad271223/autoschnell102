@@ -1240,6 +1240,13 @@ async def listing_pruefen(body: ListingURLIn, user: dict, *, vorab_warten_s: Opt
     except ListingIdentityError as exc:
         raise HTTPException(400, str(exc) or "Ungültige URL.")
     source = identity["source"]
+    # Browser-Helfer (04.10.2026, Wunsch Ahmad "Kaufvertrag ohne Apify"): Hat die Erweiterung DIESES Kontos das
+    # Inserat gerade gelesen, ist es fertig — kein Hintergrundjob, kein Apify, auch ohne Anbieter-Zugang.
+    # /mobile/compare nimmt danach dieselben Browserdaten (oder einen frischen Server-Speicher, falls vorhanden).
+    from browser_helfer import inserat_lesen
+    if await inserat_lesen(db, identity["cache_key"], user.get("id") or "") is not None:
+        return {"status": "completed", "cached": True, "source": source,
+                "item_id": identity["item_id"], "browser_helfer": True}
     if source == "autoscout24" and not autoscout_quelle_verfuegbar():
         raise HTTPException(400, "AutoScout24-Links sind noch nicht "
                                  "freigeschaltet (kein Zugang hinterlegt).")

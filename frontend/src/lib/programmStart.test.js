@@ -3,7 +3,10 @@
  * übernimmt das schon offene Fenster es (launchQueue) — App-Symbol holt nur nach vorne.
  */
 import { describe, expect, it, vi } from "vitest";
-import { INSERAT_EREIGNIS, zielAusAppStart, startZieleVerfolgen, startKennung, startMelden } from "./programmStart";
+import {
+  INSERAT_EREIGNIS, zielAusAppStart, startZieleVerfolgen, startKennung, startMelden, protokollSuche,
+  erweiterungZieleVerfolgen,
+} from "./programmStart";
 
 const O = "https://app.auto-schnellkauf.de";
 const KA = "https://www.kleinanzeigen.de/s-anzeige/3530379782";
@@ -38,6 +41,62 @@ describe("zielAusAppStart", () => {
   });
 });
 
+describe("Browser-Helfer: App per Link-Typ web+autoschnell: (04.10.2026)", () => {
+  const PROT = `web+autoschnell:vertrag?url=${encodeURIComponent(KA)}`;
+  it("protokollSuche macht daraus ?url=…&vertrag=1, andere Suchen bleiben", () => {
+    const s = protokollSuche(`?protokoll=${encodeURIComponent(PROT)}`);
+    expect(s.get("url")).toBe(KA);
+    expect(s.get("vertrag")).toBe("1");
+    expect(protokollSuche(`?url=${encodeURIComponent(KA)}`).get("url")).toBe(KA);
+    expect(protokollSuche(`?protokoll=${encodeURIComponent("javascript:alert(1)")}`).toString()).toBe("");
+  });
+  it("App schon offen (launchQueue): Ziel aus dem Link-Typ", () => {
+    expect(zielAusAppStart(`${O}/app/vergleich?protokoll=${encodeURIComponent(PROT)}`, { origin: O, startAdresse: "" }))
+      .toBe(`/app/vergleich?url=${encodeURIComponent(KA)}&vertrag=1`);
+  });
+});
+
+describe("Browser-Helfer: Ziel aus der Erweiterung im offenen App-Fenster (04.10.2026)", () => {
+  function appFenster(pfad) {
+    const f = fenster(pfad);
+    const hoerer = [];
+    f.addEventListener = (typ, h) => hoerer.push(h);
+    f.removeEventListener = vi.fn();
+    f.senden = (data, quelle = f) => hoerer.forEach((h) => h({ source: quelle, data }));
+    return f;
+  }
+  it("andere Seite offen: dorthin navigieren", () => {
+    const f = appFenster("/app/termine");
+    const nav = vi.fn();
+    erweiterungZieleVerfolgen(nav, { fenster: f });
+    f.senden({ __autoschnell: true, type: "OEFFNEN", ziel: `/app/vergleich?url=${encodeURIComponent(KA)}&vertrag=1` });
+    expect(nav).toHaveBeenCalledWith(`/app/vergleich?url=${encodeURIComponent(KA)}&vertrag=1`);
+  });
+  it("Vergleich offen: Ereignis mit Kaufvertrag", () => {
+    const f = appFenster("/app/vergleich");
+    const nav = vi.fn();
+    erweiterungZieleVerfolgen(nav, { fenster: f });
+    f.senden({ __autoschnell: true, type: "OEFFNEN", ziel: `/app/vergleich?url=${encodeURIComponent(KA)}&vertrag=1` });
+    expect(nav).not.toHaveBeenCalled();
+    expect(f.ereignisse[0].detail).toEqual({ link: KA, vertrag: true });
+  });
+  it("fremde Quelle, fremde Ziele und ungespeicherte Arbeit", () => {
+    const f = appFenster("/app/termine");
+    const nav = vi.fn();
+    const nachfragen = vi.fn();
+    erweiterungZieleVerfolgen(nav, { fenster: f, beschaeftigt: () => true, nachfragen });
+    f.senden({ __autoschnell: true, type: "OEFFNEN", ziel: "/app/vertraege" }, { anderes: "fenster" });
+    f.senden({ __autoschnell: true, type: "OEFFNEN", ziel: "https://boese.example/app/x" });
+    f.senden({ __autoschnell: true, type: "OEFFNEN", ziel: "//boese.example/app" });
+    expect(nachfragen).not.toHaveBeenCalled();
+    f.senden({ __autoschnell: true, type: "OEFFNEN", ziel: "/app/vertraege" });
+    expect(nachfragen).toHaveBeenCalledTimes(1);
+    expect(nav).not.toHaveBeenCalled();
+    nachfragen.mock.calls[0][0]();
+    expect(nav).toHaveBeenCalledWith("/app/vertraege");
+  });
+});
+
 describe("startZieleVerfolgen", () => {
   it("andere Seite offen: dorthin navigieren", () => {
     const f = fenster("/app/termine");
@@ -56,6 +115,13 @@ describe("startZieleVerfolgen", () => {
     expect(nav).not.toHaveBeenCalled();
     expect(f.ereignisse[0].type).toBe(INSERAT_EREIGNIS);
     expect(f.ereignisse[0].detail).toBe(KA);
+  });
+
+  it("Browser-Helfer (04.10.2026): &vertrag=1 geht mit (Kaufvertrag gleich öffnen)", () => {
+    const f = fenster("/app/vergleich");
+    startZieleVerfolgen(vi.fn(), { fenster: f, startAdresse: `${O}/start` });
+    f.starten(`${ZIEL}&vertrag=1`);
+    expect(f.ereignisse[0].detail).toEqual({ link: KA, vertrag: true });
   });
 
   it("ungespeicherte Arbeit: erst fragen, erst auf Knopfdruck wechseln", () => {

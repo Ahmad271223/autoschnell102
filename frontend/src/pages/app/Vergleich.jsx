@@ -23,7 +23,7 @@ import ProfileBadge from "@/components/ProfileBadge";
 import PortalBadge from "@/components/PortalBadge";
 import { openContractPdf } from "@/lib/pdf";
 import { filterOeffnen, FILTER_TOAST_ID } from "@/lib/filterOeffnen";
-import { INSERAT_EREIGNIS, startKennung, startMelden } from "@/lib/programmStart";
+import { INSERAT_EREIGNIS, protokollSuche, startKennung, startMelden } from "@/lib/programmStart";
 import { fensterDanebenSetzen, zweitenBildschirmAnfragen } from "@/lib/popup";
 import { hinweiseZeigen } from "@/lib/hinweise";
 import { useAuth } from "@/context/AuthContext";
@@ -321,7 +321,9 @@ export default function Vergleich() {
 
   // ohneFilter (Wunsch Ahmad 03.10.2026): kommt der Sucher aus dem Windows-Programm, hat das die
   // Vergleiche schon geöffnet — dann nur auslesen (für den Kaufvertrag), keine Filter-Tabs ein zweites Mal.
-  const startCompare = async (e, direktUrl, { behalteVertrag = false, ohneFilter = false } = {}) => {
+  // vertragOeffnen (Wunsch Ahmad 04.10.2026): aus dem Browser-Helfer ("Kaufvertrag") gleich den Vertrag öffnen —
+  // die Daten hat die Erweiterung aus der Inseratsseite gelesen, kein Abruf, kein zweiter Klick.
+  const startCompare = async (e, direktUrl, { behalteVertrag = false, ohneFilter = false, vertragOeffnen = false } = {}) => {
     e?.preventDefault?.();
     const roh = (direktUrl ?? url).trim();
     // RP-409: steht im Feld ein geteilter Text, zählt nur der Link darin.
@@ -432,6 +434,7 @@ export default function Vergleich() {
       }
       const t1 = Date.now();
       setResult({ ...data, ms: t1 - t0, link: ziel });
+      if (vertragOeffnen && aktuell() && data.vehicle_id && !data.fahrzeug_geloescht) setShowContract(true);
       // Runde 22 (11.09.2026): Filter der aktiven Portale gleich mit oeffnen.
       // Nur hier (echter Vergleichslauf), nie beim Wiederherstellen aus der
       // sessionStorage. Benannte Fenster -> derselbe Tab wird wiederverwendet;
@@ -495,9 +498,13 @@ export default function Vergleich() {
   const adresseGestartet = useRef(false);
   useEffect(() => {
     if (adresseGestartet.current) return;
-    const param = new URLSearchParams(window.location.search).get("url");
+    // ?protokoll=web+autoschnell:vertrag?url=… (App aus dem Browser-Helfer gestartet) wird zu ?url=…&vertrag=1
+    const suche = protokollSuche(window.location.search);
+    const param = suche.get("url");
     if (!param) return;
     adresseGestartet.current = true;
+    // Browser-Helfer (04.10.2026): "&vertrag=1" = Kaufvertrag gleich öffnen (vor dem nav lesen — der leert die Adresse)
+    const vertrag = suche.get("vertrag") === "1";
     // Pruefbericht 03.10.2026 (Nr. 12): dem Programm melden, dass die App das Auto uebernommen hat
     const start = startKennung(window.location.href);
     if (start) startMelden(api, start);
@@ -508,7 +515,7 @@ export default function Vergleich() {
       return;
     }
     setUrl(link);
-    startCompare(null, link, { ohneFilter: true });
+    startCompare(null, link, { ohneFilter: true, vertragOeffnen: vertrag });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -518,11 +525,13 @@ export default function Vergleich() {
   const [nachLink, setNachLink] = useState(null);
   useEffect(() => {
     const uebernehmen = (e) => {
-      const link = inseratsLinkAusText(e?.detail || "");
+      // detail: der Link (Programm) oder { link, vertrag } (Browser-Helfer "Kaufvertrag", 04.10.2026)
+      const d = e?.detail;
+      const link = inseratsLinkAusText((typeof d === "string" ? d : d?.link) || "");
       if (!link) return;
       if (laeuftRef.current) abbrechenRef.current?.({ still: true });
       nav("/app/vergleich", { replace: true });
-      setNachLink(link);
+      setNachLink({ link, vertrag: typeof d === "object" && d?.vertrag === true });
     };
     window.addEventListener(INSERAT_EREIGNIS, uebernehmen);
     return () => window.removeEventListener(INSERAT_EREIGNIS, uebernehmen);
@@ -531,8 +540,8 @@ export default function Vergleich() {
   useEffect(() => {
     if (!nachLink || loading || laeuftRef.current) return;
     setNachLink(null);
-    setUrl(nachLink);
-    startCompare(null, nachLink, { ohneFilter: true });
+    setUrl(nachLink.link);
+    startCompare(null, nachLink.link, { ohneFilter: true, vertragOeffnen: nachLink.vertrag });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nachLink, loading]);
 

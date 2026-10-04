@@ -76,6 +76,10 @@
       animation:s 1s linear infinite;vertical-align:-1px;margin-right:6px}
     @keyframes s{to{transform:rotate(360deg)}}
     hr{border:0;border-top:1px solid #f3f4f6;margin:8px 0}
+    .umgerechnet{margin-top:3px;font-size:12px;color:#111827;background:#f9fafb;border-radius:6px;padding:4px 6px}
+    .aufklapp{all:unset;cursor:pointer;display:block;margin-top:4px;font-size:12px;color:#b45309}
+    .aufklapp:hover{text-decoration:underline}
+    .liste{margin:4px 0 0;padding-left:16px;max-height:140px;overflow:auto;font-size:11px;color:#4b5563}
   `;
 
   function fahrzeugZeile(f) {
@@ -104,7 +108,33 @@
     } else {
       t.appendChild(el("div", "ampeltext", lage.text || ""));
       if (lage.text_guenstigstes) t.appendChild(el("div", "klein", lage.text_guenstigstes));
-      if (typeof lage.mitte === "number") t.appendChild(el("div", "klein", "Mitte aller Vergleichsangebote: " + A.euro(lage.mitte)));
+      if (typeof lage.mitte === "number") t.appendChild(el("div", "klein", "Mitte aller sauberen Angebote: " + A.euro(lage.mitte)));
+      // Wunsch Ahmad 04.10.2026: guenstigstes Angebot auf km und Baujahr des eigenen Autos umgerechnet
+      const u = lage.umgerechnet;
+      if (u && u.text) {
+        const zeile = el("div", "umgerechnet", u.text + (u.text_inserat ? " – " + u.text_inserat : ""));
+        zeile.title = u.text_faktoren || "";
+        t.appendChild(zeile);
+      }
+      // ... und Unfallwagen, Export, Neuwagen usw. aussortiert (aufklappbar)
+      if (lage.text_aussortiert) {
+        const offen = !!(zustand && zustand.offeneListen && zustand.offeneListen[name]);
+        const knopf = el("button", "aufklapp", lage.text_aussortiert + (offen ? " ▴" : " ▾"));
+        knopf.setAttribute("aria-expanded", offen ? "true" : "false");
+        knopf.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          zustand.offeneListen = { ...(zustand.offeneListen || {}), [name]: !offen };
+          zeichnen();
+        });
+        t.appendChild(knopf);
+        if (offen) {
+          const ul = el("ul", "liste");
+          for (const a of lage.aussortiert || []) {
+            ul.appendChild(el("li", null, A.euro(a.preis) + " · " + a.grund_text + (a.titel ? " – " + a.titel : "")));
+          }
+          t.appendChild(ul);
+        }
+      }
     }
     z.appendChild(t);
     return z;
@@ -188,6 +218,21 @@
         vertrag.addEventListener("click", async (ev) => {
           if (!ev.isTrusted) return;
           const r2 = await A.senden({ typ: "vertrag", kennung: z.kennung });
+          if (r2 && r2.protokoll) {
+            // Installierte App ist zu: per Link-Typ web+autoschnell: starten (noch im Klick, sonst blockt der Browser)
+            const a = document.createElement("a");
+            a.href = r2.protokoll;
+            a.style.display = "none";
+            (document.body || document.documentElement).appendChild(a);
+            a.click();
+            a.remove();
+            z.meldung = "AutoSchnell-App wird geöffnet …";
+            zeichnen();
+            const r3 = await A.senden({ typ: "app_start_pruefen", kennung: z.kennung });
+            z.meldung = r3 && r3.weg === "webseite" ? "Keine AutoSchnell-App gefunden – Webseite geöffnet." : "";
+            zeichnen();
+            return;
+          }
           if (!r2 || r2.fehler) { z.meldung = "AutoSchnell konnte nicht geöffnet werden."; zeichnen(); }
         });
         knoepfe.appendChild(vertrag);

@@ -25,7 +25,11 @@ vi.mock("@/context/AuthContext", () => ({
   useAuth: () => ({ user: { id: "u1" }, refresh: vi.fn(), setDealer: vi.fn() }),
 }));
 vi.mock("react-router-dom", () => ({ useNavigate: () => navMock }));
-vi.mock("@/components/ContractDialog", () => ({ default: () => null }));
+// Browser-Helfer (04.10.2026): sichtbar machen, ob der Kaufvertrag aufgeht
+vi.mock("@/components/ContractDialog", async () => {
+  const { createElement: ce } = await import("react");
+  return { default: () => ce("div", { "data-testid": "vertrag-dialog" }) };
+});
 vi.mock("@/components/SendDialog", () => ({ default: () => null }));
 vi.mock("@/components/BeweisCard", () => ({ default: () => null }));
 vi.mock("@/components/ProfileBadge", () => ({ default: () => null }));
@@ -128,6 +132,45 @@ describe("Vergleich über ?url= (Programm)", () => {
     const vergleich = api.post.mock.calls.find((c) => c[0] === "/mobile/compare");
     expect(vergleich?.[1]).toMatchObject({ url: neu });
     expect(filterOeffnen).not.toHaveBeenCalled();
+  });
+
+  it("Browser-Helfer (04.10.2026): &vertrag=1 öffnet den Kaufvertrag gleich, ohne zweiten Klick", async () => {
+    window.history.replaceState({}, "", `/app/vergleich?url=${encodeURIComponent(KA)}&vertrag=1`);
+    await act(async () => { wurzel.render(createElement(Vergleich)); });
+    await warten();
+    expect(api.post.mock.calls.map((c) => c[0])).toContain("/mobile/compare");
+    expect(behaelter.querySelector('[data-testid="vertrag-dialog"]')).not.toBeNull();
+  });
+
+  it("ohne &vertrag=1 bleibt der Kaufvertrag zu (Programm, Deine letzten Autos)", async () => {
+    window.history.replaceState({}, "", `/app/vergleich?url=${encodeURIComponent(KA)}`);
+    await act(async () => { wurzel.render(createElement(Vergleich)); });
+    await warten();
+    expect(behaelter.querySelector('[data-testid="vertrag-dialog"]')).toBeNull();
+  });
+
+  it("App schon offen: { link, vertrag } aus dem Browser-Helfer öffnet den Kaufvertrag", async () => {
+    const { INSERAT_EREIGNIS } = await import("@/lib/programmStart");
+    window.history.replaceState({}, "", "/app/vergleich");
+    await act(async () => { wurzel.render(createElement(Vergleich)); });
+    await warten();
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent(INSERAT_EREIGNIS, { detail: { link: KA, vertrag: true } }));
+    });
+    await warten();
+    expect(api.post.mock.calls.find((c) => c[0] === "/mobile/compare")?.[1]).toMatchObject({ url: KA });
+    expect(behaelter.querySelector('[data-testid="vertrag-dialog"]')).not.toBeNull();
+  });
+
+  it("gelöschtes Fahrzeug: kein Kaufvertrag, auch mit &vertrag=1", async () => {
+    api.post.mockImplementation((pfad) => Promise.resolve(pfad === "/listings/check"
+      ? { data: { status: "completed", cached: true, source: "kleinanzeigen" } }
+      : { data: { vehicle_id: "v_3529833344", fahrzeug_geloescht: true, source: "kleinanzeigen", cached: true,
+                  vehicle: { make_label: "VW", model_label: "Polo", images: [], images_thumbs: [] } } }));
+    window.history.replaceState({}, "", `/app/vergleich?url=${encodeURIComponent(KA)}&vertrag=1`);
+    await act(async () => { wurzel.render(createElement(Vergleich)); });
+    await warten();
+    expect(behaelter.querySelector('[data-testid="vertrag-dialog"]')).toBeNull();
   });
 
   it("ohne ?url= startet nichts", async () => {

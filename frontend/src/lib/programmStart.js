@@ -31,6 +31,25 @@ export function startMelden(client, start) {
 // Adresse, mit der dieses Fenster gestartet wurde (beim Laden des Moduls, bevor eine Seite sie umschreibt).
 const START_ADRESSE = typeof window !== "undefined" ? window.location.href : "";
 
+/**
+ * Browser-Helfer (04.10.2026, Wunsch Ahmad "immer die App öffnen"): Ist die App installiert, aber zu, startet die
+ * Erweiterung sie über den Link-Typ web+autoschnell: (manifest.json protocol_handlers) — der Browser öffnet dann
+ * /app/vergleich?protokoll=<web+autoschnell:vertrag?url=…>. Daraus wird die gewohnte Suche ?url=…&vertrag=1.
+ * Andere Suchen bleiben, wie sie sind.
+ */
+export function protokollSuche(search) {
+  const s = new URLSearchParams(search || "");
+  const roh = s.get("protokoll");
+  if (!roh) return s;
+  const m = /^web\+autoschnell:(?:\/\/)?([a-z]+)\??(.*)$/i.exec(roh.trim());
+  const neu = new URLSearchParams();
+  if (!m) return neu;
+  const innen = new URLSearchParams(m[2]);
+  if (innen.get("url")) neu.set("url", innen.get("url"));
+  if (m[1].toLowerCase() === "vertrag") neu.set("vertrag", "1");
+  return neu;
+}
+
 /** Wohin soll ein App-Start führen? null = nur nach vorne holen (App-Symbol) oder nichts zu tun. */
 export function zielAusAppStart(targetURL, { origin, startAdresse = START_ADRESSE } = {}) {
   if (!targetURL) return null;
@@ -39,7 +58,54 @@ export function zielAusAppStart(targetURL, { origin, startAdresse = START_ADRESS
   if (u.origin !== origin) return null;
   if (targetURL === startAdresse) return null;            // frisch geöffnetes Fenster steht schon dort
   if (u.pathname === "/" || u.pathname === "/start") return null;   // App-Symbol: nur nach vorne holen
+  if (u.searchParams.has("protokoll")) {
+    const s = protokollSuche(u.search).toString();
+    return s ? `/app/vergleich?${s}` : null;
+  }
   return u.pathname + u.search + u.hash;
+}
+
+/**
+ * Ein Ziel in der laufenden App öffnen: Vergleichsseite offen -> Ereignis (sie übernimmt das Auto selbst),
+ * sonst navigieren; mit ungespeicherter Arbeit erst nachfragen.
+ */
+export function zielUebernehmen(ziel, { fenster, navigieren, beschaeftigt = () => false, nachfragen = (f) => f() }) {
+  const ausfuehren = () => {
+    const u = new URL(ziel, fenster.location.origin);
+    const link = u.pathname === "/app/vergleich" ? u.searchParams.get("url") : null;
+    if (link && fenster.location.pathname === "/app/vergleich") {
+      // Die Vergleichsseite ist offen und bleibt eingehängt — sie übernimmt das neue Auto selbst.
+      // Browser-Helfer (04.10.2026): "&vertrag=1" -> Kaufvertrag gleich öffnen (sonst wie bisher nur der Link).
+      const vertrag = u.searchParams.get("vertrag") === "1";
+      fenster.dispatchEvent(new CustomEvent(INSERAT_EREIGNIS, { detail: vertrag ? { link, vertrag } : link }));
+      return;
+    }
+    navigieren(ziel);
+  };
+  if (beschaeftigt()) nachfragen(ausfuehren);
+  else ausfuehren();
+}
+
+/**
+ * Browser-Helfer (04.10.2026): Die Erweiterung holt ein offenes App-Fenster nach vorne und schickt das Ziel über
+ * ihr Seiten-Skript (content.js, window.postMessage) — kein Neuladen, ungespeicherte Arbeit bleibt.
+ * Nur Pfade innerhalb der App (/app/…), nur aus diesem Fenster.
+ */
+export function erweiterungZieleVerfolgen(navigieren, {
+  fenster = typeof window !== "undefined" ? window : null,
+  beschaeftigt = () => false,
+  nachfragen = (ausfuehren) => ausfuehren(),
+} = {}) {
+  if (!fenster?.addEventListener) return () => {};
+  const empfangen = (e) => {
+    const d = e?.data;
+    if (e?.source !== fenster || !d || d.__autoschnell !== true || d.type !== "OEFFNEN") return;
+    const ziel = typeof d.ziel === "string" ? d.ziel : "";
+    if (!/^\/app\/[a-z]/.test(ziel) || ziel.startsWith("//")) return;
+    zielUebernehmen(ziel, { fenster, navigieren, beschaeftigt, nachfragen });
+  };
+  fenster.addEventListener("message", empfangen);
+  return () => fenster.removeEventListener("message", empfangen);
 }
 
 /**
@@ -62,18 +128,7 @@ export function startZieleVerfolgen(navigieren, {
     if (!ziel) return;
     const start = startKennung(ziel, fenster.location.origin);
     if (start) melden(start);
-    const ausfuehren = () => {
-      const u = new URL(ziel, fenster.location.origin);
-      const link = u.pathname === "/app/vergleich" ? u.searchParams.get("url") : null;
-      if (link && fenster.location.pathname === "/app/vergleich") {
-        // Die Vergleichsseite ist offen und bleibt eingehängt — sie übernimmt das neue Auto selbst.
-        fenster.dispatchEvent(new CustomEvent(INSERAT_EREIGNIS, { detail: link }));
-        return;
-      }
-      navigieren(ziel);
-    };
-    if (beschaeftigt()) nachfragen(ausfuehren);
-    else ausfuehren();
+    zielUebernehmen(ziel, { fenster, navigieren, beschaeftigt, nachfragen });
   });
   return true;
 }

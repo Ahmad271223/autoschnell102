@@ -5,7 +5,7 @@ import SeiteLaedt from "@/components/SeiteLaedt";
 import FassungsHinweis from "@/components/FassungsHinweis";
 import { nachladenGescheitert } from "@/lib/fassung";
 import { hatUngespeichert } from "@/lib/ungespeichert";
-import { startMelden, startZieleVerfolgen } from "@/lib/programmStart";
+import { erweiterungZieleVerfolgen, startMelden, startZieleVerfolgen } from "@/lib/programmStart";
 import { api } from "@/lib/api";
 import { istFirmenHostKandidat } from "@/lib/firmenHost";
 
@@ -108,14 +108,17 @@ function AppStartZiele() {
   const angemeldet = useRef(false);
   angemeldet.current = !!user && !user.is_super_admin && user.role !== "admin";
   useEffect(() => {
+    const nachfragen = (ausfuehren) => toast.info("Neues Auto — hier ist noch etwas ungespeichert.", {
+      id: "app-start-ziel", duration: 20000, action: { label: "Trotzdem öffnen", onClick: ausfuehren },
+    });
     startZieleVerfolgen((ziel) => nav(ziel), {
       beschaeftigt: hatUngespeichert,
       // Pruefbericht 03.10.2026 (Nr. 12): nur angemeldet melden — eine Anfrage ohne Anmeldung liefe in die 401-Abmeldung
       melden: (start) => { if (angemeldet.current) startMelden(api, start); },
-      nachfragen: (ausfuehren) => toast.info("Neues Auto aus dem Programm — hier ist noch etwas ungespeichert.", {
-        id: "app-start-ziel", duration: 20000, action: { label: "Trotzdem öffnen", onClick: ausfuehren },
-      }),
+      nachfragen,
     });
+    // Browser-Helfer (04.10.2026): "Kaufvertrag" aus der Erweiterung im schon offenen App-Fenster
+    return erweiterungZieleVerfolgen((ziel) => nav(ziel), { beschaeftigt: hatUngespeichert, nachfragen });
   }, [nav]);
   return null;
 }

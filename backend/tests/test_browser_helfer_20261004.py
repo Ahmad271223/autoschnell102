@@ -302,6 +302,77 @@ def test_12_navi_nur_im_programm_ignoriert():
     assert "NAVIGATION_SYSTEM" in links_browser[0]["url"]
 
 
+def _t(i, preis, titel="Volkswagen Golf", zustand=(), neu=False, km=120000, ez="06/2015"):
+    return {"id": f"t{i}", "preis": preis, "titel": titel, "zustand": list(zustand), "neu": neu, "km": km, "ez": ez}
+
+
+def test_13_aussortieren_unfall_export_neuwagen_lockangebot():
+    """Wunsch Ahmad 04.10.2026: Unfallwagen, Export, Neuwagen (und Lockangebote) zaehlen nicht mit."""
+    treffer = [
+        _t(1, 870, zustand=["Beschädigt", "Unfallfahrzeug"]),
+        _t(2, 1900, titel="Golf VII 1.2 TSI UNFALLFAHRZEUG"),
+        _t(3, 2500, zustand=["Unfallfrei", "Nicht fahrtauglich"]),
+        _t(4, 3000, titel="Golf 2.0 TDI Motorschaden"),
+        _t(5, 4000, titel="Golf Highline – nur Export / Gewerbe"),
+        _t(6, 26000, neu=True),                                   # Tageszulassung
+        _t(7, 9100, km=12, ez="09/2026"),                         # Neuwagen ohne Kennzeichnung
+        _t(8, 2000, titel="Golf Comfortline"),                    # Lockangebot (< 40 % der Mitte)
+        _t(9, 9000, titel="Golf Comfortline Export möglich", zustand=["Unfallfrei"]),   # bleibt
+        _t(10, 9500), _t(11, 9800), _t(12, 10200), _t(13, 11000, titel="Golf unbeschädigt, Unfallfrei"),
+    ]
+    lage = bh.marktlage(9700, "x", {"portal": "mobile.de", "gesamt": 13, "sortierung": "preis_auf",
+                                    "treffer": treffer}, eigen={"kilometer": 120000, "ez_jahr": 2015, "ez_monat": 6})
+    gruende = {a["preis"]: a["grund"] for a in lage["aussortiert"]}
+    assert gruende == {870: "unfall", 1900: "unfall", 2500: "defekt", 3000: "defekt", 4000: "export",
+                       26000: "neu", 9100: "neu", 2000: "preis"}
+    assert lage["aussortiert_anzahl"] == 8 and lage["gesamt"] == 5 and lage["gelesen"] == 5
+    assert lage["guenstigstes"] == 9000 and lage["platz"] == 3 and lage["ampel"] == "gelb", lage
+    assert lage["text_aussortiert"].startswith("8 aussortiert: 2× Unfall/beschädigt")
+    assert "Export/Händlerpreis" in lage["text_aussortiert"] and "Neuwagen/Tageszulassung" in lage["text_aussortiert"]
+    # nur Aussortiertes auf Seite 1 -> ehrlich grau
+    nur_schrott = bh.marktlage(9700, "x", {"portal": "mobile.de", "gesamt": 300, "sortierung": "preis_auf",
+                                           "treffer": treffer[:5]})
+    assert nur_schrott["ampel"] == "grau" and "nur aussortierte" in nur_schrott["text"]
+
+
+def test_14_umrechnung_auf_km_und_baujahr():
+    import math
+    # Markt nach Formel: -2 % je 10.000 km, +10 % je Jahr juenger
+    def preis(km, jahr):
+        return int(round(20000 * 0.98 ** ((km - 100000) / 10000) * 1.10 ** (jahr - 2015)))
+    saubere = [_t(i, preis(km, j), km=km, ez=f"01/{j}") for i, (km, j) in enumerate(
+        [(60000, 2017), (80000, 2016), (100000, 2015), (120000, 2015), (140000, 2014), (160000, 2014),
+         (90000, 2017), (150000, 2016)])]
+    je_km, je_jahr, quelle = bh.umrechnungs_faktoren(saubere)
+    assert math.isclose(je_km, -0.02, abs_tol=0.002) and math.isclose(je_jahr, 0.10, abs_tol=0.01)
+    assert quelle == "aus 8 Vergleichsangeboten berechnet"
+    u = bh.umrechnung(saubere, {"kilometer": 100000, "ez_jahr": 2015, "ez_monat": 1}, 21000)
+    assert abs(u["preis"] - 20000) <= 100, u                       # auf das eigene Auto umgerechnet
+    assert u["text"].startswith("Günstigstes sauberes Angebot umgerechnet auf euer Auto: ca. ")
+    assert "Inserat ca." in u["text_inserat"] and "darüber" in u["text_inserat"]
+    assert "je 10.000 km mehr −2,0 %" in u["text_faktoren"] and "je Jahr jünger +10,0 %" in u["text_faktoren"]
+    # zu wenige Angebote -> Faustwert (und so benannt)
+    wenig = bh.umrechnung(saubere[:3], {"kilometer": 100000, "ez_jahr": 2015}, None)
+    assert wenig["quelle"] == "Faustwert" and "Faustwert" in wenig["text_faktoren"] and "text_inserat" not in wenig
+    assert bh.umrechnung(saubere, {"kilometer": None, "ez_jahr": 2015}, 1) is None       # eigenes Auto unbekannt
+    # unplausibles Ergebnis (mehr km = teurer) -> Faustwert statt Unsinn
+    verkehrt = [_t(i, 10000 + i * 1000, km=50000 + i * 20000, ez="01/2015" if i % 2 else "01/2016") for i in range(8)]
+    assert bh.umrechnungs_faktoren(verkehrt)[2] == "Faustwert"
+
+
+def test_15_mobile_karten_titel_und_zustand():
+    html = ('<html><body>'
+            '<a href="/fahrzeuge/details.html?id=111111111&amp;vc=Car" data-testid="base-result-listing-1-link">'
+            '<div>Gesponsert</div><div>Volkswagen Golf</div><div>VII 1.2 TSI</div><div>2.500 €</div>'
+            '<div>Beschädigt</div><div>•</div><div>Unfallfahrzeug</div><div>• EZ 04/2015 • 126.406 km</div></a>'
+            '<a href="/fahrzeuge/details.html?id=222222222"><div>NEU</div><div>Volkswagen Golf</div>'
+            '<div>Comfortline</div><div>9.900 €</div><div>Unfallfrei</div></a>'
+            '</body></html>')
+    karten = bh.mobile_karten(html)
+    assert karten["111111111"] == {"titel": "Volkswagen Golf VII 1.2 TSI", "zustand": ["Beschädigt", "Unfallfahrzeug"]}
+    assert karten["222222222"] == {"titel": "Volkswagen Golf Comfortline", "zustand": ["Unfallfrei"]}
+
+
 # ------------------------------------------------------------ Teil 2: ueber HTTP
 def _neue_firma():
     s = uuid.uuid4().hex[:8]
@@ -396,6 +467,9 @@ def test_32_kaufvertrag_nimmt_die_browserdaten_nur_fuer_dieses_konto(welt):
     db = welt["db"]
     db.listings_cache.delete_many({"cache_key": f"mobile:{MOBILE_ID}"})
     jobs_vorher = db.link_jobs.count_documents({"url": {"$regex": MOBILE_ID}})
+    # Die App fragt zuerst /listings/check — mit Browserdaten fertig, KEIN Hintergrund-Abruf (Apify)
+    chk = requests.post(f"{API}/listings/check", json={"url": MOBILE_URL}, headers=welt["sucher"], timeout=30)
+    assert chk.status_code == 200 and chk.json()["status"] == "completed" and chk.json().get("browser_helfer"), chk.text
     r = requests.post(f"{API}/mobile/compare", json={"url": MOBILE_URL}, headers=welt["sucher"], timeout=60)
     assert r.status_code == 200, r.text[:300]
     d = r.json()
@@ -422,6 +496,7 @@ def test_33_vergleichsseite_ergibt_die_ampel(welt):
     lage = r.json()
     # 2 von 8 Vergleichsangeboten sind guenstiger = 25 % -> gerade noch gruen
     assert lage["platz"] == 3 and lage["gesamt"] == 8 and lage["anteil"] == 0.25 and lage["ampel"] == "gruen", lage
+    assert lage["aussortiert_anzahl"] == 0 and lage["umgerechnet"]["text"].startswith("Günstigstes sauberes Angebot")
     gespeichert = welt["db"].werkzeug_vergleiche.find_one({"id": d["vergleich_id"]})
     assert gespeichert["marktlage"]["mobile"]["platz"] == 3
     # falscher Vergleich, keine Vergleichsseite, fremdes Konto
@@ -452,6 +527,27 @@ def test_34_fehlerfaelle(welt):
     r = requests.post(f"{API}/werkzeuge/{wz.AUTOPOINTER}/inserat", headers=prog, timeout=30,
                       json={"url": MOBILE_URL, "seite": _seite("x" * 30)})
     assert r.status_code == 404
+
+
+def test_34b_beschaedigte_filtert_schon_das_portal(welt):
+    """Wunsch Ahmad 04.10.2026: Unfall-/beschaedigte Autos gar nicht erst anzeigen — auch wenn die Firmenregel
+    (z.B. Export-Profil) sie zulaesst."""
+    db = welt["db"]
+    vorher = db.dealers.find_one({"id": welt["firma"]["dealer_id"]}, {"_id": 0, "comparison_rules": 1}) or {}
+    db.dealers.update_one({"id": welt["firma"]["dealer_id"]},
+                          {"$set": {"comparison_rules": {"damage": {"mode": "ignore"}, "sort": "price_asc"}}})
+    try:
+        r = _inserat(welt["prog"])
+        assert r.status_code == 200, r.text
+        links = {l["portal"]: l["url"] for l in r.json()["links"]}
+        assert "dam=0" in links["mobile.de"], links
+        if "AutoScout24" in links:
+            assert "damaged_listing=exclude" in links["AutoScout24"]
+    finally:
+        if vorher.get("comparison_rules"):
+            db.dealers.update_one({"id": welt["firma"]["dealer_id"]}, {"$set": {"comparison_rules": vorher["comparison_rules"]}})
+        else:
+            db.dealers.update_one({"id": welt["firma"]["dealer_id"]}, {"$unset": {"comparison_rules": ""}})
 
 
 def test_35_autoscout_inserat_ueber_http(welt):

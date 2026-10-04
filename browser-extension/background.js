@@ -202,11 +202,97 @@ async function sucheBearbeiten(msg, tab) {
 }
 
 // ------------------------------------------------------------------ Kaufvertrag
-async function vertragOeffnen(msg, tab) {
+// Wunsch Ahmad 04.10.2026: "unbedingt nicht AutoSchnell als Webseite oeffnen — nur wenn keine App installiert ist,
+// ansonsten immer die App". Reihenfolge:
+//   1. App-Fenster offen  -> nach vorne holen, darin zum Vertrag wechseln (ohne Neuladen, content.js -> App)
+//   2. App installiert, aber zu -> per Link-Typ web+autoschnell: starten (manifest.json protocol_handlers);
+//      kommt binnen APP_START_MS kein App-Fenster, gilt die App als entfernt -> Webseite
+//   3. keine App -> Webseite in neuem Tab
+// "&vertrag=1": AutoSchnell oeffnet gleich das Vertragsfenster — mit den Daten, die hier aus der Seite kamen.
+const APP_GESEHEN_TAGE = 60;
+const APP_START_MS = 10000;
+
+async function appFenster(basis) {
+  let tabs = [];
+  try { tabs = await chrome.tabs.query({ url: basis + "/*" }); } catch (e) { tabs = []; }
+  for (const t of tabs) {
+    try {
+      const fenster = await chrome.windows.get(t.windowId);
+      if (fenster && fenster.type === "app") return t;
+    } catch (e) { /* Fenster zu */ }
+  }
+  return null;
+}
+
+function anTab(tabId, nachricht) {
+  return new Promise((fertig) => {
+    try {
+      chrome.tabs.sendMessage(tabId, nachricht, (antwort) => fertig(chrome.runtime.lastError ? null : antwort));
+    } catch (e) {
+      fertig(null);
+    }
+  });
+}
+
+async function vertragsZiel(kennung) {
   const s = await sitzung();
-  const i = s.inserate[String(msg.kennung || "")];
-  if (!i || !i.antwort || !i.antwort.app_pfad) return { fehler: "unbekannt" };
-  await chrome.tabs.create({ url: (await server()) + i.antwort.app_pfad, index: tab.index + 1, openerTabId: tab.id });
+  const i = s.inserate[String(kennung || "")];
+  if (!i || !i.antwort || !i.antwort.app_pfad) return null;
+  return { pfad: i.antwort.app_pfad + "&vertrag=1", inseratUrl: i.antwort.inserat_url };
+}
+
+async function webseiteOeffnen(basis, pfad, tab) {
+  await chrome.tabs.create({ url: basis + pfad, index: tab.index + 1, openerTabId: tab.id });
+  return { ok: true, weg: "webseite" };
+}
+
+async function vertragOeffnen(msg, tab) {
+  const ziel = await vertragsZiel(msg.kennung);
+  if (!ziel) return { fehler: "unbekannt" };
+  const basis = await server();
+  // 1. offenes App-Fenster
+  const app = await appFenster(basis);
+  if (app) {
+    const antwort = await anTab(app.id, { type: "AUTOSCHNELL_OEFFNEN", ziel: ziel.pfad });
+    if (!antwort || !antwort.ok) {
+      // App vor dem Helfer geoeffnet (kein Seiten-Skript darin): dorthin wechseln
+      await chrome.tabs.update(app.id, { url: basis + ziel.pfad });
+    }
+    await chrome.windows.update(app.windowId, { focused: true });
+    return { ok: true, weg: "app" };
+  }
+  // 2. installiert (schon einmal als App gesehen), aber zu: das Seiten-Skript startet sie per Link-Typ
+  const { appGesehen } = await lokal("appGesehen");
+  const gesehenAm = appGesehen && appGesehen[basis];
+  if (gesehenAm && Date.now() - gesehenAm < APP_GESEHEN_TAGE * 86400000 && ziel.inseratUrl && !msg.ohneApp) {
+    return { protokoll: "web+autoschnell:vertrag?url=" + encodeURIComponent(ziel.inseratUrl) };
+  }
+  // 3. keine App
+  return webseiteOeffnen(basis, ziel.pfad, tab);
+}
+
+/** Nach dem Start per Link-Typ: kommt kein App-Fenster, ist die App wohl entfernt -> Webseite (und merken). */
+async function appStartPruefen(msg, tab) {
+  const basis = await server();
+  const ende = Date.now() + APP_START_MS;
+  while (Date.now() < ende) {
+    if (await appFenster(basis)) return { ok: true, weg: "app" };
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  const { appGesehen } = await lokal("appGesehen");
+  await chrome.storage.local.set({ appGesehen: { ...(appGesehen || {}), [basis]: 0 } });
+  const ziel = await vertragsZiel(msg.kennung);
+  return ziel ? webseiteOeffnen(basis, ziel.pfad, tab) : { fehler: "unbekannt" };
+}
+
+/** Je AutoSchnell-Adresse merken, wann sie zuletzt als installierte App lief (Reihenfolge der Einrichtung egal). */
+async function appGesehenMerken(sender) {
+  let herkunft = "";
+  try { herkunft = new URL(sender.url).origin; } catch (e) { return { ok: false }; }
+  if (!serverErlaubt(herkunft)) return { ok: false };
+  const { appGesehen } = await lokal("appGesehen");
+  await chrome.storage.local.set({ appGesehen: { ...(appGesehen && typeof appGesehen === "object" ? appGesehen : {}),
+                                                 [herkunft]: Date.now() } });
   return { ok: true };
 }
 
@@ -278,6 +364,7 @@ const AKTIONEN = {
   suche_bereit: (m, t) => sucheBereit(t),
   suche: (m, t) => sucheBearbeiten(m, t),
   vertrag: (m, t) => vertragOeffnen(m, t),
+  app_start_pruefen: (m, t) => appStartPruefen(m, t),
   vergleiche_oeffnen: (m, t) => vergleicheManuell(m, t),
 };
 const FENSTER = { verbinden, status, trennen, einstellungen: einstellungenSetzen };
@@ -286,6 +373,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || sender.id !== chrome.runtime.id) return false;
   if (msg.type === "AUTOSCHNELL_FETCH") {
     abrufHelfer(msg, sendResponse);
+    return true;
+  }
+  // content.js meldet: AutoSchnell laeuft hier als installierte App
+  if (msg.type === "AUTOSCHNELL_APP" && sender.tab) {
+    appGesehenMerken(sender).then(sendResponse, () => sendResponse({ ok: false }));
     return true;
   }
   // Seiten-Skripte: nur aus dem obersten Rahmen eines Portal-Tabs

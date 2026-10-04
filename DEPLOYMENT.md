@@ -4414,13 +4414,20 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
   hat Vorrang (nur dafür gibt es ein Beweisdokument).
 - Die selbst geöffneten Vergleichsseiten kommen über `POST …/marktlage` zurück: Platz unter allen Treffern + Ampel
   (grün ≤ 25 % günstiger, gelb ≤ 50 %, rot darüber; Werbeplätze zählen nicht), gespeichert unter
-  `werkzeug_vergleiche.marktlage`. Keine KI, keine Kosten.
+  `werkzeug_vergleiche.marktlage`. Keine KI, keine Kosten. Seit 2.1.0: Unfall/defekt/Export/Neuwagen/Lockangebote
+  werden aussortiert (eigene Liste), das günstigste saubere Angebot wird auf km/EZ des eigenen Autos umgerechnet
+  (Faktoren aus den Angeboten selbst, sonst Faustwert −1,5 %/10.000 km, +8 %/Jahr — so beschriftet); die Links
+  filtern Beschädigte immer schon beim Portal.
+- „Kaufvertrag“ öffnet die **installierte App** (offenes App-Fenster oder Start per `web+autoschnell:`), nur ohne
+  App eine Webseite; das Vertragsfenster geht gleich auf (`&vertrag=1`). Das App-Manifest hat dafür seit 04.10.2026
+  `protocol_handlers` — installierte Apps übernehmen das neue Manifest beim nächsten Start/Update; beim ersten
+  Öffnen fragt der Browser einmal „AutoSchnell öffnen?“.
 - **ZIP bauen und hochladen** (klein, ~25 KB):
   ```
   powershell -File browser-extension\bauen.ps1                                       # lokal: browser-extension\dist\AutoSchnell-Helfer.zip
   scp browser-extension/dist/AutoSchnell-Helfer.zip root@<server>:/tmp/
   docker compose cp /tmp/AutoSchnell-Helfer.zip backend:/tmp/AutoSchnell-Helfer.zip
-  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Helfer.zip --werkzeug browser-helfer --version 2.0.0
+  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Helfer.zip --werkzeug browser-helfer --version 2.1.0
   ```
   Reihenfolge: erst Server deployen (neue Routen), dann ZIP hochladen.
 - Tests: `backend/tests/test_browser_helfer_20261004.py` (Teil 1 ohne Server, Teil 2 über HTTP).

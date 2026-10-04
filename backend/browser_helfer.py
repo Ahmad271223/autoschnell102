@@ -446,21 +446,63 @@ def _sortierung_autoscout(url: str) -> str:
     return "preis_auf" if sort == "price" and desc in ("0", "") else (f"{sort}:{desc}" if sort else "relevanz")
 
 
+#: Zustandszeilen der mobile.de-Ergebniskarten (stehen NICHT in den eingebetteten Daten, live 04.10.2026)
+_MOBILE_ZUSTAENDE = {"unfallfrei", "beschädigt", "unfallfahrzeug", "nicht fahrtauglich", "fahrtauglich", "repariert"}
+_MOBILE_ABZEICHEN = {"gesponsert", "neu", "top", "neues angebot"}
+_PREISZEILE = re.compile(r"^\d[\d.]*\s*€")
+
+
+def mobile_karten(html: str) -> Dict[str, dict]:
+    """Je Inserat-ID aus der sichtbaren Ergebnisliste: Titel (Marke/Modell + Zusatz) und Zustandszeilen
+    ("Unfallfrei", "Beschädigt", "Unfallfahrzeug", "Nicht fahrtauglich") — fuers Aussortieren."""
+    try:
+        import lxml.html
+        baum = lxml.html.fromstring(html)
+    except Exception:  # noqa: BLE001 — ohne Karten zaehlen nur die eingebetteten Daten
+        return {}
+    karten: Dict[str, dict] = {}
+    for a in baum.xpath('//a[contains(@href, "details.html?")]'):
+        m = re.search(r"details\.html\?(?:[^\"'#]*&)?id=(\d+)", a.get("href") or "")
+        if not m or m.group(1) in karten:
+            continue
+        zeilen = [z.strip() for z in a.itertext() if z.strip() and z.strip() != "•"]
+        titel = []
+        for z in zeilen:
+            if _PREISZEILE.match(z):
+                break
+            if z.lower() not in _MOBILE_ABZEICHEN:
+                titel.append(z)
+        karten[m.group(1)] = {"titel": " ".join(titel)[:200],
+                              "zustand": [z for z in zeilen if z.lower() in _MOBILE_ZUSTAENDE]}
+    return karten
+
+
 def mobile_treffer(html: str, url: str) -> dict:
     from mobile_service import _apify_leistung, _apify_zahl
     text = next_flight_text(html)
     sr = json_objekt_nach(text, '"searchResults":{"numResultsTotal"')
     if not sr or not isinstance(sr.get("listings"), list):
         raise SeiteUngueltig("Auf der Vergleichsseite stehen keine Ergebnisse (Prüfseite von mobile.de?).")
-    treffer = []
+    karten = mobile_karten(html)
+    treffer, gesehen = [], set()
     for x in sr["listings"]:
         if not isinstance(x, dict) or str(x.get("type") or "").lower() in _MOBILE_WERBUNG:
             continue
+        kennung = str(x.get("id") or "")
+        if kennung in gesehen:               # ein hervorgehobenes Angebot steht evtl. zweimal in der Liste
+            continue
+        gesehen.add(kennung)
         attr = x.get("attr") if isinstance(x.get("attr"), dict) else {}
         kw, ps = _apify_leistung(attr.get("pw"))
         preis = ((x.get("price") or {}).get("grs") or {}).get("amount") if isinstance(x.get("price"), dict) else None
+        karte = karten.get(kennung) or {}
+        zustand_neu = " ".join(str(attr.get(k) or "") for k in ("con", "subc")).lower()
         treffer.append({
-            "id": str(x.get("id") or ""),
+            "id": kennung,
+            "titel": karte.get("titel") or " ".join(
+                str((x.get(k) or {}).get("localized") or "") for k in ("make", "model")).strip(),
+            "zustand": karte.get("zustand") or [],
+            "neu": "tageszulassung" in zustand_neu or "neufahrzeug" in zustand_neu,
             "preis": int(preis) if isinstance(preis, (int, float)) and preis > 0 else None,
             "ez": attr.get("fr") or None,
             "km": _apify_zahl(attr.get("ml")),
@@ -495,8 +537,14 @@ def autoscout_treffer(html: str, url: str) -> dict:
         kw, ps = _apify_leistung(leistung)
         preis = (x.get("price") or {}).get("priceRaw") if isinstance(x.get("price"), dict) else None
         ez = str(t.get("firstRegistration") or "").replace("-", "/") or None
+        fz = x.get("vehicle") if isinstance(x.get("vehicle"), dict) else {}
         treffer.append({
             "id": str(x.get("id") or "").lower(),
+            "titel": " ".join(str(fz.get(k) or "") for k in ("make", "model", "modelVersionInput", "subtitle")
+                              if fz.get(k)).strip()[:200],
+            "zustand": [],
+            # AutoScout-Angebotsart: N = neu, S = Tageszulassung (U = gebraucht, J = Jahreswagen bleiben)
+            "neu": str(fz.get("offerType") or "").upper() in ("N", "S"),
             "preis": int(preis) if isinstance(preis, (int, float)) and preis > 0 else None,
             "ez": ez, "km": _apify_zahl(t.get("mileage")), "kw": kw, "ps": ps,
             "kraftstoff": (x.get("vehicle") or {}).get("fuel") if isinstance(x.get("vehicle"), dict) else None,
@@ -542,33 +590,198 @@ GRUEN_BIS = 0.25
 GELB_BIS = 0.5
 MIN_VERGLEICHE = 3
 
+# Wunsch Ahmad 04.10.2026: "Aussortierte Angebote: Unfallwagen, Export oder Neuwagen" — sie verfaelschen sonst die
+# Ampel (E2E: auf einer Golf-Seite ohne Schadensfilter waren die fuenf billigsten alle "Beschädigt").
+_AUS_UNFALL = re.compile(r"unfallfahrzeug|unfallwagen|unfallschaden|(?<!un)besch(ä|ae)digt|hagel|\bunfall\b(?!\s*frei)",
+                         re.I)
+_AUS_DEFEKT = re.compile(r"nicht\s+fahr(tauglich|bereit|f(ä|ae)hig)|motorschaden|getriebeschaden|\bdefekt|\bbastler"
+                         r"|\b(ohne|kein(e|en)?)\s+(tüv|tuev|hu)\b|\bmotor\s+(kaputt|defekt)", re.I)
+_AUS_EXPORT = re.compile(r"\bexport(?!\s*(m(ö|oe)glich|auf\s+anfrage|gerne))|\bnur\s+(an\s+)?(h(ä|ae)ndler|gewerbe)"
+                         r"|h(ä|ae)ndler\s*/\s*export|gewerbe\s*/\s*(h(ä|ae)ndler|export)|h(ä|ae)ndlerpreis", re.I)
+GRUENDE = {
+    "unfall": "Unfall/beschädigt",
+    "defekt": "nicht fahrbereit/defekt",
+    "export": "Export/Händlerpreis",
+    "neu": "Neuwagen/Tageszulassung",
+    "preis": "Preis auffällig niedrig",
+}
+#: Lockangebot/Teileauto: unter 40 % der Mitte der uebrigen Angebote (erst ab 5 Angeboten)
+PREIS_AUFFAELLIG = 0.4
+#: Neuwagen ohne Kennzeichnung: hoechstens so viele km, wenn das eigene Auto deutlich mehr hat
+NEU_KM = 1000
+
+
+def _aussortieren(t: dict, eigene_km) -> Optional[str]:
+    text = " ".join([str(t.get("titel") or "")] + [str(z) for z in t.get("zustand") or []])
+    if _AUS_UNFALL.search(text):
+        return "unfall"
+    if _AUS_DEFEKT.search(text):
+        return "defekt"
+    if _AUS_EXPORT.search(text):
+        return "export"
+    km = t.get("km")
+    if t.get("neu") or (isinstance(km, int) and km <= NEU_KM and isinstance(eigene_km, int) and eigene_km >= 10 * NEU_KM):
+        return "neu"
+    return None
+
+
+def _jahr(ez) -> Optional[float]:
+    m = re.match(r"^\s*(\d{1,2})/(\d{4})\s*$", str(ez or ""))
+    if m and 1 <= int(m.group(1)) <= 12:
+        return int(m.group(2)) + (int(m.group(1)) - 1) / 12
+    m = re.match(r"^\s*(\d{4})\s*$", str(ez or ""))
+    return int(m.group(1)) + 0.5 if m else None
+
+
+#: Faustwerte, wenn die Vergleichsangebote keine eigene Umrechnung hergeben (zu wenige, zu gleich, unplausibel)
+FAUST_JE_10000_KM = -0.015       # -1,5 % je 10.000 km mehr
+FAUST_JE_JAHR = 0.08             # +8 % je Jahr juenger
+#: plausibler Bereich fuer die aus den Angeboten berechneten Werte
+_KM_BEREICH = (-0.04, 0.0)
+_JAHR_BEREICH = (0.0, 0.20)
+
+
+def _loesen(a: List[List[float]], b: List[float]) -> Optional[List[float]]:
+    """Kleines lineares Gleichungssystem (Gauss mit Spaltenpivot); None, wenn (fast) singulaer."""
+    n = len(b)
+    m = [row[:] + [b[i]] for i, row in enumerate(a)]
+    for k in range(n):
+        p = max(range(k, n), key=lambda i: abs(m[i][k]))
+        if abs(m[p][k]) < 1e-9:
+            return None
+        m[k], m[p] = m[p], m[k]
+        for i in range(k + 1, n):
+            f = m[i][k] / m[k][k]
+            for j in range(k, n + 1):
+                m[i][j] -= f * m[k][j]
+    x = [0.0] * n
+    for i in range(n - 1, -1, -1):
+        x[i] = (m[i][n] - sum(m[i][j] * x[j] for j in range(i + 1, n))) / m[i][i]
+    return x
+
+
+def umrechnungs_faktoren(saubere: List[dict]) -> Tuple[float, float, str]:
+    """(je 10.000 km, je Jahr, Quelle) als Anteil (log-linear). Aus den Vergleichsangeboten per Ausgleichsrechnung
+    log(Preis) ~ km + Erstzulassung, wenn genug unterschiedliche Angebote da sind und das Ergebnis plausibel ist;
+    sonst die Faustwerte."""
+    import math
+    punkte = [(math.log(t["preis"]), t["km"] / 10000, _jahr(t.get("ez"))) for t in saubere
+              if t.get("preis") and isinstance(t.get("km"), int) and _jahr(t.get("ez")) is not None]
+    if len(punkte) >= 6:
+        kms = [p[1] for p in punkte]
+        jahre = [p[2] for p in punkte]
+        if max(kms) - min(kms) >= 2 and max(jahre) - min(jahre) >= 1:
+            s = lambda f: sum(f(p) for p in punkte)  # noqa: E731
+            n = float(len(punkte))
+            a = [[n, s(lambda p: p[1]), s(lambda p: p[2])],
+                 [s(lambda p: p[1]), s(lambda p: p[1] ** 2), s(lambda p: p[1] * p[2])],
+                 [s(lambda p: p[2]), s(lambda p: p[1] * p[2]), s(lambda p: p[2] ** 2)]]
+            b = [s(lambda p: p[0]), s(lambda p: p[0] * p[1]), s(lambda p: p[0] * p[2])]
+            x = _loesen(a, b)
+            if x:
+                je_km, je_jahr = math.exp(x[1]) - 1, math.exp(x[2]) - 1
+                if _KM_BEREICH[0] <= je_km <= _KM_BEREICH[1] and _JAHR_BEREICH[0] <= je_jahr <= _JAHR_BEREICH[1]:
+                    return je_km, je_jahr, f"aus {len(punkte)} Vergleichsangeboten berechnet"
+    return FAUST_JE_10000_KM, FAUST_JE_JAHR, "Faustwert"
+
+
+def _prozent(x: float) -> str:
+    return f"{x * 100:+.1f} %".replace(".", ",").replace("-", "−")
+
+
+def umrechnung(saubere: List[dict], eigen: Optional[dict], preis: Optional[int]) -> Optional[dict]:
+    """Wunsch Ahmad 04.10.2026: das guenstigste Angebot auf km und Erstzulassung des eigenen Autos umrechnen.
+    Gerechnet wird jedes saubere Angebot; das guenstigste NACH der Umrechnung zaehlt (das kann ein anderes sein
+    als das guenstigste auf der Seite)."""
+    eigen = eigen or {}
+    km_e = eigen.get("kilometer")
+    jahr_e = (eigen["ez_jahr"] + ((eigen.get("ez_monat") or 7) - 1) / 12) if eigen.get("ez_jahr") else None
+    if not isinstance(km_e, int) or jahr_e is None:
+        return None
+    je_km, je_jahr, quelle = umrechnungs_faktoren(saubere)
+    beste = None
+    for t in saubere:
+        j = _jahr(t.get("ez"))
+        if not t.get("preis") or not isinstance(t.get("km"), int) or j is None:
+            continue
+        faktor = (1 + je_km) ** ((km_e - t["km"]) / 10000) * (1 + je_jahr) ** (jahr_e - j)
+        wert = t["preis"] * faktor
+        if beste is None or wert < beste[0]:
+            beste = (wert, t)
+    if beste is None:
+        return None
+    wert, t = int(round(beste[0], -1)), beste[1]
+    km_text = f"{t['km']:,}".replace(",", ".")
+    raus = {"preis": wert, "angebot_preis": t["preis"], "angebot_ez": t.get("ez"), "angebot_km": t.get("km"),
+            "je_10000_km": round(je_km, 4), "je_jahr": round(je_jahr, 4), "quelle": quelle,
+            "text": (f"Günstigstes sauberes Angebot umgerechnet auf euer Auto: ca. {_eur(wert)} "
+                     f"(Angebot {_eur(t['preis'])}, EZ {t.get('ez')}, {km_text} km)"),
+            "text_faktoren": (f"Umrechnung ({quelle}): je 10.000 km mehr {_prozent(je_km)}, "
+                              f"je Jahr jünger {_prozent(je_jahr)}")}
+    if preis:
+        diff = preis - wert
+        raus["text_inserat"] = (f"Inserat ca. {_eur(diff)} darüber" if diff > 0
+                                else f"Inserat ca. {_eur(-diff)} darunter" if diff < 0 else "Inserat liegt gleichauf")
+    return raus
+
 
 def _eur(n) -> str:
     return f"{int(n):,} €".replace(",", ".")
 
 
-def marktlage(preis: Optional[int], eigene_id: str, liste: dict) -> dict:
+def marktlage(preis: Optional[int], eigene_id: str, liste: dict, eigen: Optional[dict] = None) -> dict:
     """Wo liegt das Inserat unter den Vergleichsangeboten?
 
     Nach Preis aufsteigend sortiert (Standard der Firmenregeln) zeigt Seite 1 die
     guenstigsten Angebote: liegt der eigene Preis darin, ist der Platz unter ALLEN
     Treffern exakt bekannt; liegt er darueber, ist nur eine Untergrenze bekannt.
-    Andere Sortierung: Seite 1 ist nur eine Stichprobe."""
+    Andere Sortierung: Seite 1 ist nur eine Stichprobe.
+
+    Unfall/beschaedigt, nicht fahrbereit, Export/Haendlerpreis, Neuwagen und auffaellig billige Angebote werden
+    aussortiert (eigene Liste) und zaehlen nicht; das guenstigste saubere Angebot wird zusaetzlich auf km und
+    Erstzulassung des eigenen Autos umgerechnet (`eigen`: kilometer, ez_jahr, ez_monat)."""
     eigene_id = str(eigene_id or "").lower()
     alle = [t for t in liste.get("treffer") or [] if t.get("preis")]
     selbst_dabei = any(str(t.get("id") or "").lower() == eigene_id for t in alle)
-    preise = sorted(t["preis"] for t in alle if str(t.get("id") or "").lower() != eigene_id)
+    eigene_km = (eigen or {}).get("kilometer")
+    sauber, aussortiert = [], []
+    for t in alle:
+        if str(t.get("id") or "").lower() == eigene_id:
+            continue
+        grund = _aussortieren(t, eigene_km)
+        (aussortiert.append((t, grund)) if grund else sauber.append(t))
+    if len(sauber) >= 5:
+        mitte = statistics.median(t["preis"] for t in sauber)
+        billig = [t for t in sauber if t["preis"] < PREIS_AUFFAELLIG * mitte]
+        sauber = [t for t in sauber if t not in billig]
+        aussortiert += [(t, "preis") for t in billig]
+    preise = sorted(t["preis"] for t in sauber)
     gelesen = len(preise)
     gesamt = liste.get("gesamt")
-    gesamt = max((gesamt - (1 if selbst_dabei else 0)) if isinstance(gesamt, int) else gelesen, gelesen)
+    gesamt = max((gesamt - (1 if selbst_dabei else 0) - len(aussortiert)) if isinstance(gesamt, int) else gelesen,
+                 gelesen)
+    zaehlung: Dict[str, int] = {}
+    for _t, g in aussortiert:
+        zaehlung[g] = zaehlung.get(g, 0) + 1
     raus: Dict[str, Any] = {
         "portal": liste.get("portal"), "preis": preis, "gesamt": gesamt, "gelesen": gelesen,
         "guenstigstes": preise[0] if preise else None,
         "mitte": int(statistics.median(preise)) if preise and gesamt <= gelesen else None,
         "stichprobe": liste.get("sortierung") != "preis_auf",
+        "aussortiert_anzahl": len(aussortiert),
+        "aussortiert": [{"preis": t["preis"], "grund": g, "grund_text": GRUENDE[g],
+                         "titel": (t.get("titel") or "")[:120], "ez": t.get("ez"), "km": t.get("km")}
+                        for t, g in sorted(aussortiert, key=lambda x: x[0]["preis"])][:25],
+        "text_aussortiert": (f"{len(aussortiert)} aussortiert: "
+                             + ", ".join(f"{n}× {GRUENDE[g]}" for g, n in sorted(zaehlung.items(), key=lambda x: -x[1]))
+                             if aussortiert else ""),
+        "umgerechnet": umrechnung(sauber, eigen, preis),
     }
     if not preis:
         return {**raus, "ampel": "grau", "text": "Kein Preis im Inserat – keine Einordnung."}
+    if gelesen == 0 and aussortiert:
+        return {**raus, "ampel": "grau",
+                "text": "Auf der ersten Vergleichsseite stehen nur aussortierte Angebote – bitte selbst durchsehen."}
     if gesamt < MIN_VERGLEICHE:
         return {**raus, "ampel": "grau",
                 "text": f"Nur {gesamt} Vergleichsangebot{'e' if gesamt != 1 else ''} – zu wenig für eine Einordnung."}
@@ -601,7 +814,7 @@ def marktlage(preis: Optional[int], eigene_id: str, liste: dict) -> dict:
         ampel, text = "grau", f"Teurer als die {gelesen} günstigsten von {gesamt} – genauer Platz unbekannt"
     raus.update({"ampel": ampel, "text": text})
     if preise:
-        raus["text_guenstigstes"] = (f"Günstigstes Vergleichsangebot {_eur(preise[0])}"
+        raus["text_guenstigstes"] = (f"Günstigstes sauberes Angebot {_eur(preise[0])}"
                                      + (f" (Inserat {_eur(preis - preise[0])} teurer)" if preis > preise[0]
                                         else " – das Inserat ist günstiger" if preis < preise[0]
                                         else " – gleicher Preis (vielleicht dasselbe Auto auf dem anderen Portal)"))

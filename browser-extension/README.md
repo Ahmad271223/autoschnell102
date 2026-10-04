@@ -20,9 +20,16 @@ Seit Version 2.0.0 (04.10.2026) macht die Erweiterung zwei Dinge:
 4. Jede selbst geöffnete Vergleichsseite geht genau einmal an `POST …/marktlage` → Platz des Inserats
    unter den Vergleichsangeboten + Ampel (grün ≤ 25 %, gelb ≤ 50 %, rot darüber). Keine KI.
 5. Box im Inserat: Fahrzeug, Ampel je Portal, Preisbewertung von mobile.de/AutoScout24, Hinweise
-   (Unfall, HU, Vorbesitzer, Schadenswörter, VB), Knopf **Kaufvertrag** → `/app/vergleich?url=…`.
-   `/mobile/compare` nimmt dann die Browserdaten dieses Kontos: kein Apify-Abruf, kein Tageslimit.
-   Beweisdokument gibt es für Browserdaten nicht (nur nach Server-Abruf).
+   (Unfall, HU, Vorbesitzer, Schadenswörter, VB), seit 2.1.0 auch **aussortierte Angebote** (Unfall,
+   defekt, Export/Händlerpreis, Neuwagen, Lockangebote) und das günstigste saubere Angebot **umgerechnet**
+   auf km und Erstzulassung des eigenen Autos. Beschädigte filtert schon das Portal (dam=0 /
+   damaged_listing=exclude), egal was die Firmenregel sagt.
+6. Knopf **Kaufvertrag** → `/app/vergleich?url=…&vertrag=1`: das Vertragsfenster geht gleich auf, alles
+   aus der Seite eingetragen. `/listings/check` und `/mobile/compare` nehmen die Browserdaten dieses Kontos:
+   kein Apify-Abruf, kein Tageslimit. Beweisdokument gibt es für Browserdaten nicht (nur nach Server-Abruf).
+   **Immer die installierte App** (Wunsch Ahmad): offenes App-Fenster → nach vorne, Ziel über `content.js`
+   (kein Neuladen); App installiert, aber zu → Start über `web+autoschnell:` (protocol_handlers im
+   App-Manifest; "installiert" merkt sich der Helfer, wenn AutoSchnell einmal als App lief); sonst Webseite.
 
 Alles Wissen über den Seitenaufbau der Portale liegt auf dem Server — ändert ein Portal seine Seite,
 reicht ein Server-Update. Die Erweiterung schickt nur die Seite.

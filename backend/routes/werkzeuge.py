@@ -558,6 +558,10 @@ async def werkzeug_inserat(werkzeug_id: str, body: InseratIn,
     inserat_url = wz.inserat_url(identity["source"], identity["item_id"], identity["item_id"]) or body.url.strip()
     await bh.inserat_merken(db, identity, inserat_url, fahrzeug, user)
     profil, regeln = await _firmenregeln(user)
+    # Wunsch Ahmad 04.10.2026: "beschädigte direkt nicht anzeigen" — die Vergleichsseiten filtern Unfall-/beschaedigte
+    # Autos schon beim Portal weg (mobile.de dam=0, AutoScout24 damaged_listing=exclude), egal was die Firmenregel sagt.
+    # Was trotzdem durchrutscht (Export, Neuwagen, Lockangebote …), sortiert /marktlage aus.
+    regeln = {**regeln, "damage": {"mode": "no_accident"}}
     links, hinweise = wz.vergleichs_links(fahrzeug, regeln, navi_ignorieren=False)
     kurz = bh.fahrzeug_kurz(fahrzeug, identity, inserat_url)
     verhandlung = bh.verhandlung_hinweise(fahrzeug)
@@ -612,7 +616,8 @@ async def werkzeug_marktlage(werkzeug_id: str, body: MarktlageIn,
         log.exception("Browser-Helfer: Vergleichsseite nicht auswertbar")
         raise HTTPException(422, "Die Vergleichsseite konnte nicht ausgewertet werden.")
     fz = doc.get("fahrzeug") or {}
-    lage = bh.marktlage(fz.get("preis"), fz.get("inserat_id") or "", liste)
+    # Wunsch Ahmad 04.10.2026: aussortieren (Unfall, Export, Neuwagen …) und auf km/EZ des eigenen Autos umrechnen
+    lage = bh.marktlage(fz.get("preis"), fz.get("inserat_id") or "", liste, eigen=fz)
     lage["am"] = now_iso()
     await db[wz.SAMMLUNG_VERGLEICHE].update_one(
         {"id": doc["id"]}, {"$set": {f"marktlage.{'mobile' if art == 'mobile' else 'autoscout'}": lage}})
