@@ -774,8 +774,11 @@ def _parse_apify_item(item: dict, ad_id: str, url: Optional[str] = None) -> Dict
                        or ((kontakt.get("person") or {}).get("name") if isinstance(kontakt.get("person"), dict) else None)
                        or None,
         # Beweisdokument: gewerblich/privat (privat: Name/Telefon nicht drucken)
+        # 04.10.2026 (Browser-Helfer, live geprueft): mobile.de nennt Privatanbieter "FSBO" ("Privatanbieter")
+        # und gewerbliche Anbieter ohne Haendlervertrag "COMM_FSBO" — vorher blieb seller_type dann leer.
         "seller_type": {"DEALER": "haendler", "PRIVATE": "privat",
-                        "PRIVATE_SELLER": "privat"}.get(
+                        "PRIVATE_SELLER": "privat", "FSBO": "privat",
+                        "COMM_FSBO": "haendler"}.get(
             str(kontakt.get("enumType") or "").upper()),
         "seller_address": kontakt.get("address1"),
         "seller_zip": plz,

@@ -10,7 +10,11 @@ Aufruf (Server, im Repo-Ordner):
     docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.0.0
 
 Wer das Werkzeug sieht, steht NICHT hier, sondern in AUTOPOINTER_VERGLEICH_KUNDEN
-(Standard 10002).
+(Standard 10001,10002).
+
+Browser-Helfer (04.10.2026): dieselbe Datei-Pruefung als ZIP mit manifest.json —
+    docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Helfer.zip --werkzeug browser-helfer --version 2.0.0
+Freigabe in BROWSER_HELFER_KUNDEN.
 
 Exit 0 = hochgeladen, 2 = Datei fehlt/ungueltig.
 """
@@ -24,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 def main(argv=None, db=None, storage=None) -> int:
     ap = argparse.ArgumentParser(description="Programmdatei eines Werkzeugs hochladen")
-    ap.add_argument("datei", help="Pfad zur .exe")
+    ap.add_argument("datei", help="Pfad zur .exe (Programm) bzw. .zip (Browser-Helfer)")
     ap.add_argument("--werkzeug", default="autopointer-vergleich", help="Werkzeug-ID")
     ap.add_argument("--version", default="", help="Versionsangabe, z.B. 1.0.0 (Standard: heutiges Datum)")
     ap.add_argument("--db", default=None, help="Datenbankname (Standard: DB_NAME oder autoschnell)")

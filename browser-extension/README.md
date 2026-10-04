@@ -1,43 +1,44 @@
-# AutoSchnell Abruf-Helfer (Browser-Erweiterung)
+# AutoSchnell Helfer (Browser-Erweiterung für Chrome und Edge)
 
-Diese kleine Erweiterung lädt Kleinanzeigen-Fahrzeugseiten über die
-**Internetverbindung des jeweiligen Nutzers** — statt über den AutoSchnell-
-Server. Dadurch verteilen sich die Abrufe auf hunderte verschiedene
-Anschlüsse, und Kleinanzeigen blockt den Server nicht, egal wie viele
-Vergleiche laufen.
+Seit Version 2.0.0 (04.10.2026) macht die Erweiterung zwei Dinge:
 
-**Nur Kleinanzeigen.** mobile.de und AutoScout laufen weiter über den
-Server (offizielle API, keine Sperr-Gefahr).
+1. **Abruf-Helfer (wie bisher):** lädt für die AutoSchnell-App Kleinanzeigen-Fahrzeugseiten über die
+   Internetverbindung des Nutzers (`AUTOSCHNELL_FETCH`, `content.js`), damit der Server nicht gesperrt
+   wird. Aktiv nur mit `CLIENT_FETCH_KLEINANZEIGEN=true` (siehe `docs/kleinanzeigen-abruf.md`).
+2. **Browser-Helfer (neu, Wunsch Ahmad 04.10.2026):** auf mobile.de, AutoScout24 und Kleinanzeigen.
+   Freigabe auf dem Server per `BROWSER_HELFER_KUNDEN` (Standard `10001,10002`).
 
-## Wie es funktioniert (in einfach)
-1. Sucher klickt „Vergleichen".
-2. Der Server schaut in den Speicher: Link schon da? → sofort fertig.
-3. Wenn neu: Der Server bittet den Browser des Nutzers, die Seite zu holen.
-4. Diese Erweiterung lädt die Seite über die Leitung des Nutzers.
-5. Das Ergebnis geht an den Server, wird für immer gespeichert — alle
-   weiteren Nutzer bekommen es dann sofort aus dem Speicher.
+## So läuft der Browser-Helfer
+1. Einmalig verbinden: Symbol anklicken, 6-stelligen Code aus AutoSchnell (Programme → Browser-Helfer)
+   eintippen. Ein Konto = ein Browser (wie beim AutoPointer-Programm ein PC); Abo-Pflicht.
+2. Inserat öffnen → `portal.js` packt die Seite (gzip) → `POST /api/werkzeuge/browser-helfer/inserat`.
+   Der Server liest sie aus (`backend/browser_helfer.py`), baut die Vergleichslinks mit den Firmenregeln,
+   merkt Inserat + Verkäuferdaten **nur für dieses Konto** (24 h, `werkzeug_inserate`) und schreibt das
+   Protokoll (`werkzeug_vergleiche`, Chef-Übersicht, „Deine letzten Autos“).
+3. Die Vergleiche gehen als Hintergrund-Tabs auf (abschaltbar im Symbol-Fenster). Inserate, die aus einer
+   dieser Vergleichsseiten geöffnet werden, öffnen **keine** neuen Vergleiche (nur Knopf).
+4. Jede selbst geöffnete Vergleichsseite geht genau einmal an `POST …/marktlage` → Platz des Inserats
+   unter den Vergleichsangeboten + Ampel (grün ≤ 25 %, gelb ≤ 50 %, rot darüber). Keine KI.
+5. Box im Inserat: Fahrzeug, Ampel je Portal, Preisbewertung von mobile.de/AutoScout24, Hinweise
+   (Unfall, HU, Vorbesitzer, Schadenswörter, VB), Knopf **Kaufvertrag** → `/app/vergleich?url=…`.
+   `/mobile/compare` nimmt dann die Browserdaten dieses Kontos: kein Apify-Abruf, kein Tageslimit.
+   Beweisdokument gibt es für Browserdaten nicht (nur nach Server-Abruf).
 
-Die Erweiterung darf **ausschließlich** kleinanzeigen.de lesen (siehe
-`host_permissions`) und reagiert nur auf die AutoSchnell-Seite.
+Alles Wissen über den Seitenaufbau der Portale liegt auf dem Server — ändert ein Portal seine Seite,
+reicht ein Server-Update. Die Erweiterung schickt nur die Seite.
 
-Auf welchen Adressen sie aktiv ist, steht in `manifest.json` unter
-`content_scripts.matches`. Rollenprüfung 22.09.2026 (RP-445): Die Live-
-Adresse `app.auto-schnellkauf.de` fehlte dort — die Erweiterung lud auf der
-Produktionsseite nie. Wechselt die Adresse (PUBLIC_HOST), muss sie hier
-ergänzt und die Version erhöht werden; bereits installierte Erweiterungen
-danach neu laden bzw. aktualisieren.
+## Bauen und bereitstellen
+```
+powershell -File browser-extension\bauen.ps1
+```
+erzeugt `browser-extension\dist\AutoSchnell-Helfer.zip`. Hochladen wie das Programm
+(DEPLOYMENT.md „Programme zum Herunterladen“) mit `--werkzeug browser-helfer`.
 
-## Installation (bis zur Veröffentlichung im Chrome Web Store)
-1. Chrome öffnen → `chrome://extensions`
-2. Oben rechts „Entwicklermodus" einschalten.
-3. „Entpackte Erweiterung laden" → diesen Ordner (`browser-extension`) wählen.
-4. Fertig — beim nächsten Vergleich nutzt AutoSchnell automatisch den Helfer.
+## Installation beim Nutzer (bis zum Chrome Web Store)
+1. ZIP aus AutoSchnell herunterladen und entpacken.
+2. `chrome://extensions` bzw. `edge://extensions` → „Entwicklermodus“ → „Entpackte Erweiterung laden“
+   → entpackten Ordner wählen.
+3. Symbol anheften, Code eintippen.
 
-Für den flächendeckenden Einsatz später: als `.crx` signieren und im
-Chrome Web Store / Firefox Add-ons veröffentlichen, dann installiert jeder
-Sucher sie mit einem Klick.
-
-## Aktivierung serverseitig
-Der Server nutzt den Helfer nur, wenn `CLIENT_FETCH_KLEINANZEIGEN=true`
-gesetzt ist (siehe `.env.example`). Ist er aus, holt der Server wie bisher
-selbst — die Plattform funktioniert also mit und ohne Erweiterung.
+Zum Testen gegen ein lokales Backend: im Symbol-Fenster unter „Server (nur zum Testen)“
+`http://127.0.0.1:8001` eintragen (der Browser fragt einmal nach dem Zugriffsrecht).

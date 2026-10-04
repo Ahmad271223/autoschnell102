@@ -33,6 +33,7 @@ WID = wz.AUTOPOINTER
 def test_01_standard_nur_10001_und_10002(monkeypatch):
     # 03.10.2026 abends (Wunsch Ahmad): "schalte das Programm auch frei jetzt fuer 10001"
     monkeypatch.delenv("AUTOPOINTER_VERGLEICH_KUNDEN", raising=False)
+    monkeypatch.setenv("BROWSER_HELFER_KUNDEN", "")      # 04.10.2026: zweites Werkzeug, hier nur das Programm
     assert wz.freigegebene_kunden(WID) == frozenset({"10001", "10002"})
     assert wz.ist_freigegeben(WID, 10002)
     assert wz.ist_freigegeben(WID, "10002")
@@ -186,8 +187,9 @@ def _download(kopf):
 def test_10_ohne_datei_sichtbar_aber_noch_nicht_ladbar(welt):
     welt["db"].werkzeuge.delete_one({"id": WID})
     liste = _liste(welt["chef"])
-    assert [w["id"] for w in liste] == [WID]
-    assert liste[0]["vorhanden"] is False
+    # 04.10.2026: der Browser-Helfer steht (freigegeben fuer 10001/10002) hinter dem Programm
+    assert [w["id"] for w in liste][0] == WID and set(w["id"] for w in liste) <= {WID, wz.BROWSER_HELFER}
+    assert liste[0]["vorhanden"] is False and liste[0]["art"] == "windows" and liste[0]["geraet"] == "PC"
     r = _download(welt["chef"])
     assert r.status_code == 404
     assert "noch nicht hochgeladen" in r.json()["detail"]

@@ -627,7 +627,18 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     source = identity["source"]
     item_id = identity["item_id"]
 
-    if source == "autoscout24" and not autoscout_quelle_verfuegbar():
+    # Browser-Helfer (04.10.2026, Wunsch Ahmad): Hat die Erweiterung DIESES Kontos das Inserat gerade
+    # gelesen, stehen die Daten schon da — kein Apify-Abruf, kein Tageslimit, kein Warten, und es geht auch
+    # ohne Anbieter-Zugang. Nur fuer dieses Konto (A-01/A-02: nie fuer Kollegen) und nur ohne frischen
+    # Server-Abruf im Speicher (der hat Vorrang, weil es nur dafuer ein Beweisdokument gibt).
+    from browser_helfer import inserat_lesen
+    helfer = await inserat_lesen(db, identity["cache_key"], user.get("id") or "")
+    if helfer is not None and await db.listings_cache.count_documents(
+            {"cache_key": identity["cache_key"], "data": {"$ne": None},
+             "expires_at": {"$gt": datetime.now(timezone.utc)}}, limit=1):
+        helfer = None
+
+    if source == "autoscout24" and not autoscout_quelle_verfuegbar() and helfer is None:
         raise HTTPException(
             400,
             "AutoScout24-Links sind noch nicht freigeschaltet (kein Zugang "
@@ -637,7 +648,7 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     # Apify-Scraper (APIFY_TOKEN). Ohne beides (und ohne ausdrücklichen
     # Sandbox-Modus) früh und verständlich abbrechen — statt tief im
     # Fetcher mit einer technischen Meldung.
-    if source == "mobile" and not mobile_quelle_verfuegbar():
+    if source == "mobile" and not mobile_quelle_verfuegbar() and helfer is None:
         raise HTTPException(
             400,
             "mobile.de-Links sind noch nicht freigeschaltet (kein Zugang "
@@ -655,9 +666,10 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     # nicht der Server — der Browser des Nutzers wird gebeten, die Seite zu
     # holen und per /listings/ingest zu schicken. Danach ruft das Frontend
     # compare erneut auf -> Treffer (global oder eigene Quarantaene).
-    client_hit = None
+    client_hit = (helfer[0], "browser_helfer") if helfer is not None else None
+    helfer_gelesen_am = helfer[1] if helfer is not None else None
     rueckfall_gebucht = False
-    if source == "kleinanzeigen" and _erweiterung_noetig():
+    if client_hit is None and source == "kleinanzeigen" and _erweiterung_noetig():
         # Nachpruefung Runde 14 (Nr. 86): ERST den Cache pruefen, DANN den
         # Rueckfall zaehlen. Vorher zaehlte _rueckfall_erlaubt sofort ($inc),
         # auch wenn das Inserat laengst im Cache lag und gar kein Abruf
@@ -864,7 +876,10 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     # von vor zehn Tagen sah aus wie eben abgerufen. Die Oberflaeche zeigt
     # jetzt "Stand vom …".
     abgerufen_am = None
-    if was_cached:
+    if helfer_gelesen_am is not None:
+        abgerufen_am = (helfer_gelesen_am.replace(tzinfo=timezone.utc) if helfer_gelesen_am.tzinfo is None
+                        else helfer_gelesen_am).isoformat()
+    elif was_cached:
         try:
             _c = await db.listings_cache.find_one({"cache_key": identity["cache_key"]},
                                                   {"_id": 0, "fetched_at": 1})

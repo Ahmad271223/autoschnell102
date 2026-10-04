@@ -149,6 +149,23 @@ describe("Programme", () => {
     expect(feld("programm-pc-werkzeug-x").textContent).toContain("Noch kein PC verbunden");
   });
 
+  it("Browser-Erweiterung (04.10.2026): ZIP für Chrome/Edge, Browser statt PC", async () => {
+    get.mockResolvedValue({ data: { werkzeuge: [{ ...PROGRAMM, art: "browser", geraet: "Browser", dateiname: "Helfer.zip",
+      verbindung: { pc_name: "Edge · Windows", verbunden_am: "2026-10-04T10:00:00+00:00", zuletzt_am: "2026-10-04T11:00:00+00:00" } }] } });
+    post.mockResolvedValue({ data: { code: "123456", gueltig_bis: "2026-10-04T13:40:00+00:00", minuten: 10 } });
+    del.mockResolvedValue({ data: { ok: true, getrennt: true } });
+    await rendern();
+    expect(feld("programm-download-werkzeug-x").textContent).toContain("Chrome und Edge");
+    expect(feld("programm-download-werkzeug-x").textContent).not.toContain("Windows");
+    expect(feld("programm-pc-werkzeug-x").textContent).toContain("Verbunden mit Browser „Edge · Windows“");
+    expect(feld("programm-trennen-werkzeug-x").textContent).toContain("Browser trennen");
+    await klick(feld("programm-code-werkzeug-x"));
+    expect(feld("programm-code-anzeige-werkzeug-x").textContent).toContain("In der Erweiterung eintippen");
+    await klick(feld("programm-trennen-werkzeug-x"));
+    expect(feld("programm-pc-werkzeug-x").textContent).toContain("Noch kein Browser verbunden");
+    expect(feld("programm-pc-werkzeug-x").textContent).toContain("in einem Browser");
+  });
+
   it("Chef sieht, wer aus der Firma wann welches Auto verglichen hat", async () => {
     get.mockImplementation((url) => Promise.resolve(url === "/werkzeuge"
       ? { data: { werkzeuge: [{ ...PROGRAMM, chef: true }] } }

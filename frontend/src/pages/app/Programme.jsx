@@ -61,7 +61,9 @@ export default function Programme() {
     try {
       await api.delete(`/werkzeuge/${encodeURIComponent(p.id)}/verbindung`);
       setGetrennt((g) => ({ ...g, [p.id]: true }));
-      toast.success("PC getrennt – das Programm dort öffnet nichts mehr.");
+      toast.success(p.art === "browser"
+        ? "Browser getrennt – die Erweiterung dort öffnet nichts mehr."
+        : "PC getrennt – das Programm dort öffnet nichts mehr.");
     } catch (e) {
       toast.error(errMsg(e, "Trennen hat nicht geklappt"));
     }
@@ -72,6 +74,9 @@ export default function Programme() {
       {liste.map((p) => {
         const verbindung = getrennt[p.id] ? null : p.verbindung;
         const code = codes[p.id];
+        // 04.10.2026: Programm (Windows, ein PC je Konto) oder Erweiterung (Chrome/Edge, ein Browser je Konto)
+        const browser = p.art === "browser";
+        const geraet = p.geraet || "PC";
         return (
           <section key={p.id} className="space-y-5" data-testid={`programm-${p.id}`}>
             <div className="flex items-start gap-3">
@@ -94,7 +99,7 @@ export default function Programme() {
                 className="apple-btn apple-btn-primary !rounded-full !px-5 !py-2.5 text-sm inline-flex items-center gap-2 disabled:opacity-50"
               >
                 <Download size={16} />
-                {laedt === p.id ? "Wird geladen…" : "Für Windows herunterladen"}
+                {laedt === p.id ? "Wird geladen…" : browser ? "Für Chrome und Edge herunterladen (ZIP)" : "Für Windows herunterladen"}
               </button>
               <span className="text-xs text-zinc-500" data-testid={`programm-info-${p.id}`}>
                 {p.vorhanden
@@ -105,21 +110,21 @@ export default function Programme() {
 
             <div className="rounded-xl p-4 space-y-3" style={{ border: "1px solid var(--border-default)", background: "var(--bg-surface)" }}
                  data-testid={`programm-verbindung-${p.id}`}>
-              <div className="font-semibold text-sm">Programm verbinden</div>
+              <div className="font-semibold text-sm">{browser ? "Erweiterung verbinden" : "Programm verbinden"}</div>
               <div className="text-sm text-zinc-500" data-testid={`programm-pc-${p.id}`}>
                 {verbindung
-                  ? <>Verbunden mit PC „{verbindung.pc_name || "unbekannt"}“ · seit {zeit(verbindung.verbunden_am)} · zuletzt aktiv {zeit(verbindung.zuletzt_am)}</>
-                  : "Noch kein PC verbunden. Jedes Konto kann auf einem PC verbunden sein – ein neuer PC ersetzt den alten."}
+                  ? <>Verbunden mit {geraet} „{verbindung.pc_name || "unbekannt"}“ · seit {zeit(verbindung.verbunden_am)} · zuletzt aktiv {zeit(verbindung.zuletzt_am)}</>
+                  : `Noch kein ${geraet} verbunden. Jedes Konto kann ${browser ? "in" : "auf"} einem ${geraet} verbunden sein – ein neuer ${geraet} ersetzt den alten.`}
               </div>
               <div className="flex flex-wrap items-center gap-3">
                 <button type="button" onClick={() => codeHolen(p)} data-testid={`programm-code-${p.id}`}
                         className="apple-btn apple-btn-secondary !rounded-full !px-4 !py-2 text-sm inline-flex items-center gap-2">
-                  <KeyRound size={15} /> {verbindung ? "Anderen PC verbinden" : "Code zum Verbinden anzeigen"}
+                  <KeyRound size={15} /> {verbindung ? `Anderen ${geraet} verbinden` : "Code zum Verbinden anzeigen"}
                 </button>
                 {verbindung && (
                   <button type="button" onClick={() => trennen(p)} data-testid={`programm-trennen-${p.id}`}
                           className="apple-btn apple-btn-secondary !rounded-full !px-4 !py-2 text-sm inline-flex items-center gap-2">
-                    <MonitorX size={15} /> PC trennen
+                    <MonitorX size={15} /> {geraet} trennen
                   </button>
                 )}
               </div>
@@ -127,7 +132,7 @@ export default function Programme() {
                 <div data-testid={`programm-code-anzeige-${p.id}`}>
                   <div className="font-mono font-black text-3xl tracking-[0.3em]">{code.code.slice(0, 3)} {code.code.slice(3)}</div>
                   <div className="text-xs text-zinc-500 mt-1">
-                    Im Programm eintippen · gültig bis {zeit(code.gueltig_bis).split(", ")[1] || zeit(code.gueltig_bis)} Uhr ({code.minuten} Minuten) · nur einmal
+                    {browser ? "In der Erweiterung eintippen (Symbol in der Browserleiste)" : "Im Programm eintippen"} · gültig bis {zeit(code.gueltig_bis).split(", ")[1] || zeit(code.gueltig_bis)} Uhr ({code.minuten} Minuten) · nur einmal
                   </div>
                 </div>
               )}
@@ -221,7 +226,9 @@ function MeineAutos({ programm }) {
     <div className="space-y-2" data-testid="programm-meine">
       <h2 className="font-display font-black text-lg tracking-tight">Deine letzten Autos</h2>
       <p className="text-sm text-zinc-500">
-        Beim Anklicken im Programm liest AutoSchnell das Inserat schon aus – für den Kaufvertrag einfach öffnen.
+        {programm.art === "browser"
+          ? "Beim Öffnen im Browser liest AutoSchnell das Inserat schon aus – für den Kaufvertrag einfach öffnen (24 Stunden ohne neuen Abruf)."
+          : "Beim Anklicken im Programm liest AutoSchnell das Inserat schon aus – für den Kaufvertrag einfach öffnen."}
       </p>
       <ul className="divide-y" style={{ borderColor: "var(--border-default)" }}>
         {liste.map((x) => {

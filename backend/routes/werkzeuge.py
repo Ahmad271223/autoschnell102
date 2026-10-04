@@ -14,6 +14,9 @@ Programm (Kopfzeile X-Werkzeug-Schluessel):
   GET    /api/werkzeuge/{id}/status              Lizenz pruefen (Abo, Freigabe, Sperren) + angebotene Version
   POST   /api/werkzeuge/{id}/vergleich           Abo pruefen, Links mit Firmenregeln, protokollieren
   GET    /api/werkzeuge/{id}/app-start/{start}   hat die App das Auto uebernommen? (Nr. 12)
+Browser-Helfer (04.10.2026, nur Werkzeuge mit art "browser", Kopfzeile X-Werkzeug-Schluessel):
+  POST   /api/werkzeuge/{id}/inserat             Inseratsseite aus dem Browser -> Links, Vertragsdaten, Hinweise
+  POST   /api/werkzeuge/{id}/marktlage           Vergleichsseite aus dem Browser -> Platz + Ampel
 Betreiber:
   GET    /api/admin/werkzeug-vergleiche          wer hat wann welches Auto verglichen
   DELETE /api/admin/werkzeug-verbindungen/{uid}  PC eines Kontos trennen
@@ -25,6 +28,7 @@ import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -61,8 +65,11 @@ _START_KENNUNG = re.compile(r"^[0-9a-f]{32}$")
 _PROGRAMM_VERSION = re.compile(r"AutoSchnell-Vergleich/(\d+(?:\.\d+){1,3})")
 
 
-def _programm_version(user_agent: Optional[str]) -> Optional[str]:
-    """Nr. 4: Version des Programms aus der Kopfzeile User-Agent ("AutoSchnell-Vergleich/1.5.0")."""
+def _programm_version(user_agent: Optional[str], kopf: Optional[str] = None) -> Optional[str]:
+    """Nr. 4: Version des Programms aus der Kopfzeile User-Agent ("AutoSchnell-Vergleich/1.5.0").
+    Eine Browser-Erweiterung darf den User-Agent nicht setzen — sie schickt X-Werkzeug-Version."""
+    if kopf and re.fullmatch(r"\d+(?:\.\d+){1,3}", kopf.strip()):
+        return kopf.strip()
     m = _PROGRAMM_VERSION.search(user_agent or "")
     return m.group(1) if m else None
 
@@ -184,7 +191,8 @@ async def werkzeug_download(werkzeug_id: str, user=Depends(current_firma)):
     dateiname = meta.get("dateiname") or wz.WERKZEUGE[werkzeug_id]["dateiname"]
     return StreamingResponse(
         bloecke_async(meta["schluessel"], 0, groesse - 1),
-        media_type="application/vnd.microsoft.portable-executable",
+        media_type=("application/zip" if wz.art(werkzeug_id) == "browser"
+                    else "application/vnd.microsoft.portable-executable"),
         headers={
             "Content-Disposition": f'attachment; filename="{dateiname}"',
             "Content-Length": str(groesse),
@@ -333,8 +341,9 @@ async def _programm(werkzeug_id: str, schluessel: Optional[str], version: Option
 @router.get("/werkzeuge/{werkzeug_id}/status")
 async def werkzeug_status(werkzeug_id: str,
                           schluessel: Optional[str] = Header(None, alias=wz.TOKEN_KOPF),
-                          user_agent: Optional[str] = Header(None, alias="User-Agent")):
-    user, v, firma, abo = await _programm(werkzeug_id, schluessel, _programm_version(user_agent))
+                          user_agent: Optional[str] = Header(None, alias="User-Agent"),
+                          version: Optional[str] = Header(None, alias="X-Werkzeug-Version")):
+    user, v, firma, abo = await _programm(werkzeug_id, schluessel, _programm_version(user_agent, version))
     konto = _konto_text(user)
     dealer = await effective_dealer(user)
     # Nr. 4: die Version, die AutoSchnell gerade zum Herunterladen anbietet — ist sie neuer, sagt es das Programm
@@ -484,6 +493,130 @@ async def _vorab_abrufen(user: dict, url: Optional[str]) -> dict:
     if r.get("status") == "needs_client_fetch":
         return {"status": "in_app", "hinweis": "Dieses Inserat liest AutoSchnell beim Öffnen in der App aus."}
     return {"status": "laeuft", "hinweis": "", "job_id": r.get("job_id")}
+
+
+# ---------------------------------------------------------------- Browser-Helfer (04.10.2026)
+# Wunsch Ahmad 04.10.2026: eigene Erweiterung fuer Chrome/Edge. Beim Oeffnen eines Inserats schickt sie die
+# Seite (gzip, base64) — der Server baut die Vergleichslinks mit den Firmenregeln, merkt die Daten fuer den
+# Kaufvertrag (nur fuer DIESES Konto, browser_helfer.inserat_merken) und gibt Hinweise zurueck. Die
+# Vergleichsseite, die die Erweiterung danach oeffnet, kommt ueber /marktlage zurueck: Platz + Ampel.
+# Kein Apify-Abruf, kein Tageslimit, keine KI.
+_inserat_limiter = SlidingWindowRateLimiter(max_attempts=120, window_seconds=60, name="werkzeug_inserat")
+_marktlage_limiter = SlidingWindowRateLimiter(max_attempts=240, window_seconds=60, name="werkzeug_marktlage")
+#: base64(gzip(HTML)): ~4/3 der gepackten Groesse (browser_helfer.MAX_GEPACKT)
+_SEITE_MAX = 4 * 1024 * 1024 + 16
+
+
+def _browser_werkzeug(werkzeug_id: str) -> None:
+    _wid_pruefen(werkzeug_id)
+    if wz.art(werkzeug_id) != "browser":
+        raise HTTPException(404, NICHT_GEFUNDEN)
+
+
+async def _firmenregeln(user: dict):
+    from mobile_service import DEFAULT_EXPORT_RULES, DEFAULT_RULES
+    from regeln import regeln_lesen
+    dealer = await effective_dealer(user)
+    profil = (dealer or {}).get("active_profile", "inland")
+    regeln = (regeln_lesen((dealer or {}).get("export_rules"), DEFAULT_EXPORT_RULES) if profil == "export"
+              else regeln_lesen((dealer or {}).get("comparison_rules"), DEFAULT_RULES))
+    return profil, regeln
+
+
+class InseratIn(BaseModel):
+    url: str = Field(..., max_length=2048)
+    #: base64(gzip(document.documentElement.outerHTML))
+    seite: str = Field(..., min_length=20, max_length=_SEITE_MAX)
+
+
+@router.post("/werkzeuge/{werkzeug_id}/inserat")
+async def werkzeug_inserat(werkzeug_id: str, body: InseratIn,
+                           schluessel: Optional[str] = Header(None, alias=wz.TOKEN_KOPF),
+                           version: Optional[str] = Header(None, alias="X-Werkzeug-Version")):
+    import asyncio
+    import browser_helfer as bh
+    from anbieter_fehler import ListingGone
+    from listing_identity import ListingIdentityError, get_listing_identity
+    _browser_werkzeug(werkzeug_id)
+    user, v, _firma_doc, _abo = await _programm(werkzeug_id, schluessel, _programm_version(None, version))
+    if not await _inserat_limiter.check(f"verbindung:{v['id']}"):
+        raise HTTPException(429, "Zu viele Inserate in kurzer Zeit – bitte kurz warten.")
+    try:
+        identity = get_listing_identity(body.url.strip())
+    except ListingIdentityError as exc:
+        raise HTTPException(400, str(exc) or "Kein Inserat von mobile.de, AutoScout24 oder Kleinanzeigen.")
+    try:
+        html = await asyncio.to_thread(bh.seite_entpacken, body.seite)
+        fahrzeug, bewertung = await asyncio.to_thread(bh.inserat_auslesen, identity, body.url.strip(), html)
+    except bh.SeiteUngueltig as exc:
+        raise HTTPException(422, str(exc))
+    except ListingGone as exc:
+        raise HTTPException(404, str(exc))
+    except Exception:  # noqa: BLE001 — eine unbekannte Seite ist ein 422, kein 500
+        log.exception("Browser-Helfer: Inserat %s nicht auswertbar", identity["cache_key"])
+        raise HTTPException(422, "Die Seite konnte nicht ausgewertet werden.")
+    inserat_url = wz.inserat_url(identity["source"], identity["item_id"], identity["item_id"]) or body.url.strip()
+    await bh.inserat_merken(db, identity, inserat_url, fahrzeug, user)
+    profil, regeln = await _firmenregeln(user)
+    links, hinweise = wz.vergleichs_links(fahrzeug, regeln, navi_ignorieren=False)
+    kurz = bh.fahrzeug_kurz(fahrzeug, identity, inserat_url)
+    verhandlung = bh.verhandlung_hinweise(fahrzeug)
+    vergleich_id = str(uuid.uuid4())
+    await db[wz.SAMMLUNG_VERGLEICHE].insert_one({
+        "id": vergleich_id, "werkzeug": werkzeug_id, "dealer_id": user["dealer_id"], "user_id": user["id"],
+        "verbindung_id": v["id"], "pc_name": v.get("pc_name") or "", "erstellt_am": now_iso(),
+        "fahrzeug": kurz, "links": links, "hinweise": hinweise, "profil": profil, "probelauf": False,
+        "vorab": "fertig", "portal_bewertung": bewertung, "verhandlung": verhandlung, "marktlage": {},
+    })
+    return {"vergleich_id": vergleich_id, "links": links, "hinweise": hinweise, "profil": profil,
+            "fahrzeug": kurz, "inserat_url": inserat_url,
+            "app_pfad": "/app/vergleich?url=" + quote(inserat_url, safe=""),
+            "portal_bewertung": bewertung, "verhandlung": verhandlung,
+            "verkaeufer": {"name": fahrzeug.get("seller_name") or "", "art": fahrzeug.get("seller_type") or ""}}
+
+
+class MarktlageIn(BaseModel):
+    vergleich_id: str = Field(..., min_length=1, max_length=64)
+    url: str = Field(..., max_length=4096)
+    seite: str = Field(..., min_length=20, max_length=_SEITE_MAX)
+
+
+@router.post("/werkzeuge/{werkzeug_id}/marktlage")
+async def werkzeug_marktlage(werkzeug_id: str, body: MarktlageIn,
+                             schluessel: Optional[str] = Header(None, alias=wz.TOKEN_KOPF),
+                             version: Optional[str] = Header(None, alias="X-Werkzeug-Version")):
+    """Die Vergleichsseite, die die Erweiterung zu einem Inserat geoeffnet hat: wo liegt der Preis?"""
+    import asyncio
+    import browser_helfer as bh
+    _browser_werkzeug(werkzeug_id)
+    user, v, _firma_doc, _abo = await _programm(werkzeug_id, schluessel, _programm_version(None, version))
+    if not await _marktlage_limiter.check(f"verbindung:{v['id']}"):
+        raise HTTPException(429, "Zu viele Vergleichsseiten in kurzer Zeit – bitte kurz warten.")
+    art = bh.ist_vergleichsseite(body.url.strip())
+    if not art:
+        raise HTTPException(400, "Das ist keine Vergleichsseite von mobile.de oder AutoScout24.")
+    doc = await db[wz.SAMMLUNG_VERGLEICHE].find_one(
+        {"id": body.vergleich_id, "werkzeug": werkzeug_id, "user_id": user["id"]},
+        {"_id": 0, "id": 1, "fahrzeug": 1, "links": 1})
+    if doc is None:
+        raise HTTPException(404, "Vergleich nicht gefunden.")
+    portal = "mobile.de" if art == "mobile" else "AutoScout24"
+    if not any(l.get("portal") == portal for l in doc.get("links") or []):
+        raise HTTPException(400, "Zu diesem Inserat wurde keine solche Vergleichsseite geöffnet.")
+    try:
+        html = await asyncio.to_thread(bh.seite_entpacken, body.seite)
+        liste = await asyncio.to_thread(bh.treffer_auslesen, body.url.strip(), html)
+    except bh.SeiteUngueltig as exc:
+        raise HTTPException(422, str(exc))
+    except Exception:  # noqa: BLE001
+        log.exception("Browser-Helfer: Vergleichsseite nicht auswertbar")
+        raise HTTPException(422, "Die Vergleichsseite konnte nicht ausgewertet werden.")
+    fz = doc.get("fahrzeug") or {}
+    lage = bh.marktlage(fz.get("preis"), fz.get("inserat_id") or "", liste)
+    lage["am"] = now_iso()
+    await db[wz.SAMMLUNG_VERGLEICHE].update_one(
+        {"id": doc["id"]}, {"$set": {f"marktlage.{'mobile' if art == 'mobile' else 'autoscout'}": lage}})
+    return lage
 
 
 # ---------------------------------------------------------------- App-Start (Nr. 12)

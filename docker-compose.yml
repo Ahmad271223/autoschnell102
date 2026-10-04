@@ -166,6 +166,8 @@ services:
       - BILDER_NACHHOLEN_PAUSE_S=${BILDER_NACHHOLEN_PAUSE_S:-60}
       # Werkzeuge (03.10.2026): wer den AutoPointer-Vergleich sieht (Kundennummern, Komma-getrennt)
       - AUTOPOINTER_VERGLEICH_KUNDEN=${AUTOPOINTER_VERGLEICH_KUNDEN:-10001,10002}
+      # Browser-Helfer (04.10.2026): wer die Erweiterung fuer Chrome/Edge sieht und verbinden darf
+      - BROWSER_HELFER_KUNDEN=${BROWSER_HELFER_KUNDEN:-10001,10002}
       # Inserat beim Klick im Programm vorab auslesen (Daten + Fotos fuer den Kaufvertrag; zaehlt fuers Tageslimit)
       - AUTOPOINTER_VORAB_ABRUF=${AUTOPOINTER_VORAB_ABRUF:-true}
       - AUTOPOINTER_VORAB_WARTEN_S=${AUTOPOINTER_VORAB_WARTEN_S:-15}

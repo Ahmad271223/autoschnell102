@@ -40,12 +40,17 @@ from datetime import datetime, timezone
 from typing import Iterable, Optional
 
 AUTOPOINTER = "autopointer-vergleich"
+#: 04.10.2026 (Wunsch Ahmad): eigene Browser-Erweiterung fuer Chrome/Edge (browser-extension/,
+#: Auswertung in backend/browser_helfer.py) — gleiche Lizenz wie das Programm (Code, ein Browser je Konto).
+BROWSER_HELFER = "browser-helfer"
 
 WERKZEUGE = {
     AUTOPOINTER: {
         # Name und Texte kommen NUR ueber /api/werkzeuge (nur fuer freigegebene
         # Firmen) — die Oberflaeche selbst enthaelt keinen Hinweis darauf.
         "name": "AutoPointer-Vergleich",
+        "art": "windows",
+        "geraet": "PC",
         "beschreibung": ("Windows-Programm für AutoPointer: Du klickst in AutoPointer ein Inserat an – "
                          "eine halbe Sekunde später öffnen sich automatisch die passenden Vergleiche "
                          "auf mobile.de und AutoScout24 (gleiches Modell, Baujahr, Kilometer, Leistung, "
@@ -70,11 +75,40 @@ WERKZEUGE = {
         "kunden_env": "AUTOPOINTER_VERGLEICH_KUNDEN",
         "kunden_standard": "10001,10002",
     },
+    BROWSER_HELFER: {
+        "name": "Browser-Helfer für Chrome und Edge",
+        "art": "browser",
+        "geraet": "Browser",
+        "beschreibung": ("Erweiterung für Chrome und Edge: Du öffnest ein Inserat auf mobile.de, AutoScout24 oder "
+                         "Kleinanzeigen – sofort gehen die Vergleiche mit euren Regeln auf, im Inserat zeigt eine "
+                         "Ampel, wo der Preis unter den Vergleichsangeboten liegt, und der Kaufvertrag geht mit "
+                         "einem Klick – ohne Link-Einfügen und ohne Warten."),
+        "schritte": [
+            "ZIP herunterladen und entpacken (Rechtsklick auf die Datei → „Alle extrahieren“).",
+            "Chrome: chrome://extensions öffnen, Edge: edge://extensions – „Entwicklermodus“ einschalten → "
+            "„Entpackte Erweiterung laden“ (Edge: „Entpackt laden“) → den entpackten Ordner wählen.",
+            "Auf das AutoSchnell-Symbol in der Browserleiste klicken (evtl. erst über das Puzzle-Symbol anheften) "
+            "und den 6-stelligen Code von hier eintippen. Jedes Konto kann in EINEM Browser verbunden sein; ein "
+            "neuer Browser ersetzt den alten.",
+            "Inserat öffnen – Vergleiche, Ampel und der Knopf „Kaufvertrag“ erscheinen von selbst. Im Symbol-Menü "
+            "lässt sich das automatische Öffnen der Vergleiche abschalten. Ohne aktives Abo passiert nichts.",
+        ],
+        "dateiname": "AutoSchnell-Helfer.zip",
+        "schluessel": "werkzeuge/browser-helfer/AutoSchnell-Helfer.zip",
+        "kunden_env": "BROWSER_HELFER_KUNDEN",
+        "kunden_standard": "10001,10002",
+    },
 }
 
 #: Obergrenze fuer eine Programmdatei (die EXE ist ~55 MB).
 MAX_MB = 200
 _MIN_BYTES = 1024
+#: Erweiterungs-ZIP: deutlich kleiner als ein Programm
+MAX_ZIP_MB = 20
+
+
+def art(werkzeug_id: str) -> str:
+    return (WERKZEUGE.get(werkzeug_id) or {}).get("art", "windows")
 
 
 def kunden_text(kunden_nr) -> str:
@@ -117,6 +151,26 @@ def exe_pruefen(daten: bytes) -> None:
         raise ValueError(f"Datei zu groß (max. {MAX_MB} MB)")
 
 
+def zip_pruefen(daten: bytes) -> None:
+    """Nur ein ZIP mit manifest.json im obersten Ordner (Chrome laedt den entpackten Ordner)."""
+    import io
+    import zipfile
+    if not daten or len(daten) < _MIN_BYTES or daten[:4] != b"PK\x03\x04":
+        raise ValueError("Keine ZIP-Datei")
+    if len(daten) > MAX_ZIP_MB * 1024 * 1024:
+        raise ValueError(f"Datei zu groß (max. {MAX_ZIP_MB} MB)")
+    try:
+        namen = zipfile.ZipFile(io.BytesIO(daten)).namelist()
+    except zipfile.BadZipFile:
+        raise ValueError("ZIP-Datei beschädigt")
+    if "manifest.json" not in namen:
+        raise ValueError("Im ZIP fehlt manifest.json (Erweiterung im obersten Ordner packen)")
+
+
+def datei_pruefen(werkzeug_id: str, daten: bytes) -> None:
+    zip_pruefen(daten) if art(werkzeug_id) == "browser" else exe_pruefen(daten)
+
+
 def eintrag(werkzeug_id: str, daten: bytes, version: str, jetzt: Optional[datetime] = None) -> dict:
     w = WERKZEUGE[werkzeug_id]
     return {
@@ -135,7 +189,7 @@ def hochladen(db_sync, werkzeug_id: str, daten: bytes, version: str = "", storag
     pymongo-Datenbank, fuer Skript und Tests)."""
     if werkzeug_id not in WERKZEUGE:
         raise ValueError(f"Unbekanntes Werkzeug: {werkzeug_id}")
-    exe_pruefen(daten)
+    datei_pruefen(werkzeug_id, daten)
     if storage is None:
         from storage_service import storage as storage_standard
         storage = storage_standard
@@ -155,6 +209,9 @@ def oeffentlich(meta: Optional[dict], werkzeug_id: str) -> dict:
         "beschreibung": w.get("beschreibung", ""),
         "schritte": list(w.get("schritte", [])),
         "dateiname": w["dateiname"],
+        # 04.10.2026: Programm (Windows) oder Erweiterung (Browser) — Texte der Seite "Programme"
+        "art": w.get("art", "windows"),
+        "geraet": w.get("geraet", "PC"),
         "vorhanden": bool(meta.get("groesse")),
         "version": meta.get("version"),
         "groesse": meta.get("groesse"),
@@ -254,7 +311,7 @@ def fahrzeug_zu_vehicle(f: dict) -> dict:
     return v
 
 
-def vergleichs_links(vehicle: dict, regeln: dict) -> tuple:
+def vergleichs_links(vehicle: dict, regeln: dict, navi_ignorieren: bool = True) -> tuple:
     """(links, hinweise) mit denselben Link-Bauern wie der Vergleich in der App.
 
     Strenger als die App (Vorgabe Ahmad: "keine Suche nur nach Bentley"): ein
@@ -263,8 +320,10 @@ def vergleichs_links(vehicle: dict, regeln: dict) -> tuple:
     import autoscout_service as asv
     import mobile_service as ms
     # Wunsch Ahmad 03.10.2026: im Programm NIE nach Navigationssystem filtern (in der App bleibt die
-    # Einstellung "Navi aus dem Inserat mitvergleichen" wie sie ist).
-    regeln = {**(regeln or {}), "navi": {"mode": "ignore"}}
+    # Einstellung "Navi aus dem Inserat mitvergleichen" wie sie ist). Der Browser-Helfer liest das ganze
+    # Inserat samt Ausstattung wie die App — dort gilt die Firmeneinstellung (navi_ignorieren=False).
+    if navi_ignorieren:
+        regeln = {**(regeln or {}), "navi": {"mode": "ignore"}}
     links, hinweise = [], []
     marke = vehicle.get("make_label", "")
     modell = vehicle.get("model_label", "")

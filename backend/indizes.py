@@ -1274,6 +1274,9 @@ WERKZEUG_INDIZES = (
     ("werkzeug_app_starts", [("ablauf", 1)], {"name": "werkzeug_app_start_ablauf", "expireAfterSeconds": 0}),
     ("werkzeug_getrennt", [("werkzeug", 1), ("token_hash", 1)], {"name": "werkzeug_getrennt_schluessel"}),
     ("werkzeug_getrennt", [("ablauf", 1)], {"name": "werkzeug_getrennt_ablauf", "expireAfterSeconds": 0}),
+    # Browser-Helfer (04.10.2026): gelesene Inserate je Konto fuer den Kaufvertrag (24 h, browser_helfer.py)
+    ("werkzeug_inserate", [("cache_key", 1), ("user_id", 1)], {"name": "werkzeug_inserat_konto", "unique": True}),
+    ("werkzeug_inserate", [("ablauf", 1)], {"name": "werkzeug_inserat_ablauf", "expireAfterSeconds": 0}),
 )
 
 

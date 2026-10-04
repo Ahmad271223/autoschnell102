@@ -1306,6 +1306,8 @@ _COMPANY_COLLECTIONS = (
     # Pruefbericht 03.10.2026 (Nr. 12): App-Start-Meldungen (10 Minuten TTL) tragen dealer_id.
     # werkzeug_getrennt hat keine dealer_id (Werkzeug + Schluessel-Streuwert, 30 Tage TTL).
     "werkzeug_app_starts",
+    # Browser-Helfer (04.10.2026): vom Browser gelesene Inserate (Verkaeuferdaten, 24 h TTL) tragen dealer_id.
+    "werkzeug_inserate",
     # Go-Live 14.09.2026 (B6): users steht NICHT mehr im Tupel. Als letzter
     # Eintrag der Schleife lief users.delete_many noch VOR Snapshots, Dateien
     # und dealers.delete_many — brach einer dieser Schritte ab, fand der
@@ -1468,6 +1470,8 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
         # gehoert der Firma und bleibt — ohne Personenbezug (Pseudonym wie bei zugang_grants).
         await db.werkzeug_verbindungen.delete_many({"user_id": user_id})
         await db.werkzeug_codes.delete_many({"user_id": user_id})
+        # Browser-Helfer (04.10.2026): vom Browser des Kontos gelesene Inserate (Verkaeuferdaten) weg
+        await db.werkzeug_inserate.delete_many({"user_id": user_id})
         await db.werkzeug_vergleiche.update_many(
             {"user_id": user_id}, {"$set": {"user_id": _nutzer_pseudonym(user_id), "pc_name": ""}})
         await db.network_members.delete_many({"buyer_user_id": user_id})

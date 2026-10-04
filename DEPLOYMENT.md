@@ -1584,9 +1584,41 @@ https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CO
 apt update && apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 docker compose version        # muss eine Version anzeigen
 
-git clone https://github.com/Ahmad271223/autoschnell102.git /opt/autoschnell
+# Seit 04.10.2026 ist das Repo PRIVAT (Wunsch Ahmad: "darf keiner sehen") — Klonen nur mit Deploy-Key,
+# siehe Abschnitt "Privates Repo: Deploy-Key je Server" direkt darunter.
+git clone git@github.com:Ahmad271223/autoschnell102.git /opt/autoschnell
 cd /opt/autoschnell && git checkout feature/plattform-ausbau-2026-08
 ```
+
+### Privates Repo: Deploy-Key je Server (seit 04.10.2026)
+
+Das GitHub-Repo ist seit 04.10.2026 privat. Ohne Schlüssel scheitern `git clone`/`git pull` (und damit
+`deploy/rollout.sh`) mit „Repository not found“ bzw. einer Passwortabfrage. Jeder Server bekommt einen eigenen
+**Nur-Lese-Schlüssel** (Deploy-Key), der nur dieses eine Repo lesen darf:
+
+```bash
+# 1. auf dem Server (prod1 bzw. prod2) — Namen je Server anpassen
+ssh-keygen -t ed25519 -N "" -C "autoschnell-prod1-deploy" -f /root/.ssh/autoschnell_deploy
+cat >> /root/.ssh/config <<'EOF'
+Host github.com
+  HostName github.com
+  User git
+  IdentityFile /root/.ssh/autoschnell_deploy
+  IdentitiesOnly yes
+EOF
+chmod 600 /root/.ssh/config /root/.ssh/autoschnell_deploy
+cat /root/.ssh/autoschnell_deploy.pub        # diese EINE Zeile kopieren
+```
+2. GitHub → Repo → **Settings → Deploy keys → Add deploy key**: Titel „prod1“ (bzw. „prod2“), Zeile einfügen,
+   **„Allow write access“ NICHT ankreuzen**. Für jeden Server einen eigenen Schlüssel.
+3. Zurück auf dem Server, vorhandenen Checkout umstellen und prüfen:
+```bash
+cd /opt/autoschnell
+git remote set-url origin git@github.com:Ahmad271223/autoschnell102.git
+ssh -o StrictHostKeyChecking=accept-new -T git@github.com   # "Hi Ahmad271223/autoschnell102! You've successfully authenticated…"
+git fetch && git status
+```
+Danach läuft `sh deploy/rollout.sh` wie bisher. Einen Server abschalten = seinen Deploy-Key bei GitHub löschen.
 
 Die Prüfskripte laufen im Container mit, dort sind alle Bibliotheken vorhanden. Auf dem Server selbst muss dafür nichts installiert werden:
 
@@ -4367,6 +4399,31 @@ Erst einmal **nur für Kunde 10002**, seit dem Abend des 03.10. auch **10001** �
   Bis dahin zeigt die Seite „Wird gerade bereitgestellt“. Speicher: `werkzeuge/autopointer-vergleich/…`, Eintrag in `werkzeuge`.
 - Tests: `backend/tests/test_werkzeuge_20261003.py`, `frontend/src/pages/app/Programme.test.jsx`,
   `autopointer-vergleich/tests` (`dotnet test`, seit 04.10. auch in der CI: Job `autopointer` auf windows-latest).
+
+### Browser-Helfer für Chrome und Edge (Wunsch Ahmad 04.10.2026)
+
+Zweites Werkzeug `browser-helfer` neben dem Programm — die Erweiterung `browser-extension/` (Version 2.0.0, enthält
+weiter den Kleinanzeigen-Abruf-Helfer). Gleiche Lizenz: 6-stelliger Code, **ein Konto = ein Browser**, Abo-Pflicht,
+Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
+- Freigabe: `BROWSER_HELFER_KUNDEN` (Standard `10001,10002`, `docker-compose.yml`; leer = niemand).
+- Inserat öffnen → `POST /api/werkzeuge/browser-helfer/inserat` (Seite gzip+base64, Schlüssel-Kopfzeile). Der Server
+  wertet aus (`backend/browser_helfer.py`; mobile.de-Datenstrom = Apify-Format, AutoScout `__NEXT_DATA__`,
+  Kleinanzeigen-Parser), baut die Links mit den Firmenregeln (Navi-Regel wie in der App) und merkt die Daten **nur für
+  dieses Konto** 24 h in `werkzeug_inserate` (TTL, Firmen-/Kontolöschung). `/mobile/compare` nimmt sie für dieses Konto
+  statt eines Abrufs — kein Apify, kein Tageslimit, auch ohne Anbieter-Zugang; ein frischer Server-Abruf im Speicher
+  hat Vorrang (nur dafür gibt es ein Beweisdokument).
+- Die selbst geöffneten Vergleichsseiten kommen über `POST …/marktlage` zurück: Platz unter allen Treffern + Ampel
+  (grün ≤ 25 % günstiger, gelb ≤ 50 %, rot darüber; Werbeplätze zählen nicht), gespeichert unter
+  `werkzeug_vergleiche.marktlage`. Keine KI, keine Kosten.
+- **ZIP bauen und hochladen** (klein, ~25 KB):
+  ```
+  powershell -File browser-extension\bauen.ps1                                       # lokal: browser-extension\dist\AutoSchnell-Helfer.zip
+  scp browser-extension/dist/AutoSchnell-Helfer.zip root@<server>:/tmp/
+  docker compose cp /tmp/AutoSchnell-Helfer.zip backend:/tmp/AutoSchnell-Helfer.zip
+  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Helfer.zip --werkzeug browser-helfer --version 2.0.0
+  ```
+  Reihenfolge: erst Server deployen (neue Routen), dann ZIP hochladen.
+- Tests: `backend/tests/test_browser_helfer_20261004.py` (Teil 1 ohne Server, Teil 2 über HTTP).
 
 ### Prüfbericht AutoPointer-Vergleich 03.10.2026 (18 Punkte), Programm 1.5.0
 
