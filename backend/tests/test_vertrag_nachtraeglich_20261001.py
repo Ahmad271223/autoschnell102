@@ -157,7 +157,8 @@ def test_04_route_und_oberflaeche():
     assert "/contracts/{contract_id}/neue-fassung" in pfade
     namen = {d.call.__name__ for r in C.router.routes if getattr(r, "path", "") == "/contracts/{contract_id}/neue-fassung"
              for d in r.dependant.dependencies}
-    assert "current_firma" in namen and "require_active_sub" not in namen, "Chef UND Sucher (eigene)"
+    # Entscheidung Ahmad 04.10.2026 (Pruefung Nr. 37): Chef frei, Sucher (eigene) nur mit aktivem Abo
+    assert "aendern_braucht_abo" in namen and "require_active_sub" not in namen, "Chef frei, Sucher mit Abo"
     q = inspect.getsource(C.vertrag_nachtraeglich_aendern)
     assert "_NICHT_AUS_DEM_FORMULAR" in q and "_portal_nachweis(doc, alte_version)" in q
     front = Path(__file__).resolve().parent.parent.parent / "frontend" / "src"

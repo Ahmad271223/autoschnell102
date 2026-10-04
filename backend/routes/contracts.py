@@ -35,7 +35,7 @@ from pymongo.errors import DuplicateKeyError
 from deps import (
     TERMIN_OFFEN_WERTE, current_firma, fahrzeug_bereich, ist_sucher,
     clean_doc, db, log_activity, log_activity_sicher, now_iso,
-    require_active_sub, datum_iso_pruefen, uhrzeit_hhmm_pruefen,
+    require_active_sub, datum_iso_pruefen, uhrzeit_hhmm_pruefen, aendern_braucht_abo,
 )
 import auto_daten
 from cleanup_service import LoeschungAbgelehnt, vertrag_endgueltig_loeschen
@@ -3598,7 +3598,7 @@ class VerkaeuferKorrekturIn(BaseModel):
 
 @router.put("/contracts/{contract_id}/verkaeufer")
 async def verkaeufer_korrigieren(contract_id: str, body: VerkaeuferKorrekturIn,
-                                 user=Depends(current_firma)):
+                                 user=Depends(aendern_braucht_abo)):
     """Verkaeuferdaten korrigieren (Entscheidung Ahmad 22.09.2026, RP-481).
 
     Vorher gab es fuer einen Tippfehler im Namen oder eine falsche Anschrift
@@ -3668,7 +3668,7 @@ _NICHT_AUS_DEM_FORMULAR = ("contract_no", "pickup_date", "pickup_time")
 
 
 @router.post("/contracts/{contract_id}/neue-fassung")
-async def vertrag_nachtraeglich_aendern(contract_id: str, body: ContractIn, user=Depends(current_firma)):
+async def vertrag_nachtraeglich_aendern(contract_id: str, body: ContractIn, user=Depends(aendern_braucht_abo)):
     """Wunsch Ahmad 01.10.2026: Chef und Sucher aendern einen bestehenden Kaufvertrag JEDERZEIT
     nachtraeglich — derselbe Dialog wie beim Anlegen, vorausgefuellt, alles aenderbar — und erzeugen
     daraus eine NEUE FASSUNG; die alte bleibt im Archiv (wie beim verschobenen Termin und bei der
@@ -3678,7 +3678,8 @@ async def vertrag_nachtraeglich_aendern(contract_id: str, body: ContractIn, user
     Bleibt wie bisher: Vertragsnummer, Abholdatum/-uhrzeit (_NICHT_AUS_DEM_FORMULAR), eingefrorener
     Inseratsstand, Preis vor der Abholung, Logo. Nicht geschickte Felder (None) behalten ihren Wert;
     leer geschickte Textfelder werden wie beim Anlegen behandelt (leer = Vorlage/Einstellung).
-    Chef: alle Vertraege der Firma; Sucher: nur eigene (_vertrag_bereich). Nicht mitten im Versand (409).
+    Chef: alle Vertraege der Firma; Sucher: nur eigene (_vertrag_bereich) und nur mit aktivem Abo
+    (Entscheidung Ahmad 04.10.2026, aendern_braucht_abo). Nicht mitten im Versand (409).
     Antwort: der Vertrag ohne PDF-Daten (wie GET /contracts/{id}) plus geaendert=True — oder
     {"geaendert": False, "version": n}, wenn die Eingaben nichts aendern."""
     bereich = _vertrag_bereich(user)

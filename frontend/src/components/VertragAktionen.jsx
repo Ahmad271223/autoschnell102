@@ -50,7 +50,7 @@ function Gruppe({ titel, children }) {
 /**
  * it: der Vertrag; a: Aktionen {ansehen, digital, senden, portal, folgeMail, aendern, korrektur,
  * loeschen, termin}; zustand: {termin: bool (Knopf zeigen), terminLaeuft, pdfLaeuft, loeschtId,
- * portalUnterschrieben: bool}
+ * portalUnterschrieben: bool, aendernOhneAbo: bool (Sucher ohne Abo — Entscheidung Ahmad 04.10.2026)}
  */
 export default function VertragAktionen({ it, a, zustand = {} }) {
   const [offen, setOffen] = useState(false);
@@ -129,12 +129,16 @@ export default function VertragAktionen({ it, a, zustand = {} }) {
                  text="Per E-Mail schicken oder zum Kopieren" />
       </Gruppe>
       <Gruppe titel="Ändern">
+        {/* Entscheidung Ahmad 04.10.2026 (Prüfung Nr. 37): Sucher ohne Abo sehen und laden Verträge,
+            ändern aber nicht (der Server antwortet sonst 402). */}
         <Eintrag testid={`vertrag-aendern-${it.id}`} icon={Pencil} schliessen={schliessen} onClick={a.aendern}
-                 titel="Kaufvertrag ändern"
-                 text="Alle Angaben wie beim Anlegen – ergibt eine neue Fassung" />
+                 disabled={!!zustand.aendernOhneAbo} titel="Kaufvertrag ändern"
+                 text={zustand.aendernOhneAbo ? "Nur mit aktivem Abo"
+                   : "Alle Angaben wie beim Anlegen – ergibt eine neue Fassung"} />
         <Eintrag testid={`verkaeufer-korrektur-${it.id}`} icon={UserRoundPen} schliessen={schliessen}
-                 onClick={a.korrektur} titel="Verkäuferdaten korrigieren"
-                 text="Name, Anschrift, Kontakt – ergibt eine neue Fassung" />
+                 onClick={a.korrektur} disabled={!!zustand.aendernOhneAbo} titel="Verkäuferdaten korrigieren"
+                 text={zustand.aendernOhneAbo ? "Nur mit aktivem Abo"
+                   : "Name, Anschrift, Kontakt – ergibt eine neue Fassung"} />
       </Gruppe>
       <div className="my-1 border-t" style={{ borderColor: "var(--border-default)" }} />
       <Eintrag testid={`del-pdf-${it.id}`} icon={Trash2} schliessen={schliessen} onClick={a.loeschen}

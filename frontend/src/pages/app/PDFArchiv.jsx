@@ -13,6 +13,7 @@ import VerkaeuferKorrekturDialog from "@/components/VerkaeuferKorrekturDialog";
 import ContractDialog from "@/components/ContractDialog";
 import KundenportalDialog, { portalUnterschrift } from "@/components/KundenportalDialog";
 import VertragAktionen from "@/components/VertragAktionen";
+import { useAuth } from "@/context/AuthContext";
 
 // Rollenprüfung 22.09.2026 (RP-007/RP-106/RP-257): Verträge je Seite.
 export const ARCHIV_SEITE = 50;
@@ -50,6 +51,10 @@ const DAY_FILTERS = [
 
 export default function PDFArchiv() {
   const nav = useNavigate();
+  // Entscheidung Ahmad 04.10.2026 (Prüfung Nr. 37): Sucher ohne aktives Abo sehen und laden Verträge,
+  // ändern aber nicht — der Chef bleibt frei (Server: deps.aendern_braucht_abo).
+  const auth = useAuth() || {};
+  const aendernOhneAbo = auth.user?.role === "sucher" && !auth.subscription?.active;
   const [items, setItems] = useState([]);
   const [q, setQ] = useState("");
   const [days, setDays] = useState(0);
@@ -385,6 +390,7 @@ export default function PDFArchiv() {
                         termin: brauchtAbholtermin(it),
                         terminLaeuft, pdfLaeuft, loeschtId,
                         portalUnterschrieben: portalUnterschrift(it) === "aktuell",
+                        aendernOhneAbo,
                       }} />
                   </div>
                 </div>

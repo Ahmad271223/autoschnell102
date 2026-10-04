@@ -4442,7 +4442,7 @@ POST /dealer/sucher-zugaenge-anfrage (nur Chef). Gespeichert als `plan_requests`
 ## Prüfung 04.10.2026: Versand, KI-Budget, Termine, Vorschau, Druck-PDF, Indizes
 
 Externe Liste (44 Punkte) gegen den Code geprüft; umgesetzt wurde alles, was keine Entscheidung braucht.
-Offen für Ahmad: Nr. 37 (neue Fassung ohne Abo – bisher bewusst erlaubt), Nr. 38/39 (Abhol-KI rechnet beim Öffnen nach KI-Update/7 Tagen neu), Ausgabenlimit in der
+Offen für Ahmad: Nr. 38/39 (Abhol-KI rechnet beim Öffnen nach KI-Update/7 Tagen neu), Ausgabenlimit in der
 Anthropic-Konsole (Nr. 16/17, harter Schutz gegen Preisänderungen). Bewusst nicht umgebaut (groß, nicht
 nötig): Mail-Outbox, KI-Warteschlange, PDFs nach R2 (Fotos stecken nicht im PDF, Verträge sind KB groß).
 
@@ -4479,5 +4479,9 @@ nötig): Mail-Outbox, KI-Warteschlange, PDFs nach R2 (Fotos stecken nicht im PDF
   Vorher lieferte er bis zu 14 Tage die archivierte Fassung. Im Browser kommt eine lesbare Seite statt JSON
   (eigene CSP nur mit der Prüfsumme ihres Style-Blocks). `freigabe_alt` dient nur noch dieser Meldung.
   Der Sucher schickt die neue Fassung wie bisher über „Senden“ (Korrektur-Vorlage).
+- **Ändern nur mit Abo (Nr. 37, Entscheidung Ahmad 04.10.):** neue Fassung (POST …/neue-fassung) und
+  Verkäuferkorrektur (PUT …/verkaeufer) laufen über `deps.aendern_braucht_abo` — Sucher ohne aktives Abo
+  bekommen 402 („ansehen und herunterladen ja, ändern nur mit Abo“), der Chef bleibt frei. Im Vertragsarchiv
+  sind beide Einträge dann ausgegraut („Nur mit aktivem Abo“). Ansehen/Herunterladen bleiben ohne Abo.
 - Tests: `backend/tests/test_pruefung_20261004_*.py`, `frontend/src/components/SendDialog.doppelversand.test.jsx`.
   Keine neuen Umgebungswerte, keine Migration.

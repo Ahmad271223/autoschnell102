@@ -204,10 +204,12 @@ def test_05_terminloeschung_protokolliert_vor_dem_loeschen():
 
 def test_06_whatsapp_link_liefert_die_digitale_fassung():
     """Befund: Fehlte die digitale Fassung im Versionsarchiv, kam still die
-    DRUCKfassung mit Unterschriftslinien."""
+    DRUCKfassung mit Unterschriftslinien. Seit 04.10.2026 (Entscheidung Ahmad,
+    Pruefung Nr. 26) liefert der Link einer ERSETZTEN Fassung gar nichts mehr
+    (410) — der aktuelle Link weiterhin nur die digitale Fassung."""
     quelle = (WURZEL / "routes" / "contracts.py").read_text(encoding="utf-8")
     block = quelle[quelle.index("geteilte_version = int("):]
-    block = block[:block.index("await db.generated_pdfs.update_one(")]
-    assert "_digitales_pdf_bytes({**c, **alt}" in block, block[:600]
-    assert 'base64.b64decode(alt["pdf_b64"])' not in block, \
-        "die Druckfassung darf nicht mehr als Ersatz dienen"
+    block = block[:block.index("await _abruf_zaehlen(")]
+    assert "raise HTTPException(410, FASSUNG_ERSETZT_TEXT)" in block, block[:600]
+    assert "pdf_bytes = await _digitales_pdf_bytes(c, ersteller)" in block
+    assert "pdf_b64" not in block, "die Druckfassung darf nie als Ersatz dienen"

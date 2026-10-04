@@ -775,6 +775,23 @@ async def require_active_sub(user=Depends(current_firma)):
     return user
 
 
+#: Entscheidung Ahmad 04.10.2026 (Pruefung Nr. 37): Meldung, wenn ein Sucher ohne Abo einen Vertrag aendern will.
+ABO_FUER_AENDERUNG = ("Kein aktives Abo — Verträge kannst du ansehen und herunterladen; ändern geht erst wieder "
+                      "mit aktivem Abo.")
+
+
+async def aendern_braucht_abo(user=Depends(current_firma)):
+    """Entscheidung Ahmad 04.10.2026 (Pruefung Nr. 37): Einen bestehenden Kaufvertrag aendern (neue Fassung,
+    Verkaeuferkorrektur) darf ein SUCHER nur mit aktivem Abo — ohne Abo nur ansehen und herunterladen. Der
+    Chef bleibt frei (kostenlos fuers Verwalten, subscription_for). Vorher lief beides nur ueber current_firma:
+    mit abgelaufenem Abo liessen sich neue Fassungen anlegen (versenden aber nicht)."""
+    if user.get("role") == "sucher":
+        sub = await subscription_for(user)
+        if not sub.get("active"):
+            raise HTTPException(402, ABO_FUER_AENDERUNG)
+    return user
+
+
 async def naechste_kunden_nr() -> int:
     """Fortlaufende Firmen-Kundennummer, automatisch und atomar vergeben.
     Start bei 1001 (4-stellig) — Wunsch 09/2026: der Betreiber muss nichts
