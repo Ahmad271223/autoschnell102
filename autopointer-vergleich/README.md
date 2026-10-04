@@ -40,21 +40,24 @@ dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und 
 * **Fenster mit Knöpfen** (seit 1.2.0, Wunsch Ahmad 03.10.): große Anzeige AKTIV / GESTOPPT / NICHT VERBUNDEN,
   Knöpfe *Aktivieren*, *Stoppen*, *Aktuelles Auto jetzt vergleichen*, *Letzten Vergleich nochmal öffnen*,
   *Kaufvertrag: Auto in AutoSchnell öffnen*, *Mit AutoSchnell verbinden / Verbindung trennen*, *Einstellungen*,
-  *Protokoll*, *Beenden*. Das X verkleinert nur in die Taskleiste; aus ist das Programm nur mit *Beenden*.
+  *Beenden*. Das X verkleinert nur in die Taskleiste; aus ist das Programm nur mit *Beenden*.
   Ein zweiter Start (Doppelklick auf die EXE) holt das Fenster nach vorne. Beim Start mit Windows startet es
   verkleinert.
 * **Kleine Leiste** (seit 1.3.0, Wunsch Ahmad 03.10.): Status, *Stopp/Start*, *Vergleichen*, *Vertrag*, ☰ (großes
   Fenster) — **immer im Vordergrund**, auch wenn der Browser Tabs öffnet, fest **unten links** (Standard, verdeckt die
   Detailansicht von AutoPointer nicht) oder **unten rechts**, auf dem Bildschirm von AutoPointer. Sie nimmt
   AutoPointer nie den Fokus weg. Rechtsklick auf die Leiste: Ecke wählen, ausblenden, beenden. Mit Leiste startet
-  das Programm nur mit der Leiste; das X am großen Fenster blendet es aus. Liegt die Leiste über der Tabelle, liest
-  das Programm per PrintWindow statt vom Bildschirm (sonst läse es die Leiste mit).
+  das Programm nur mit der Leiste; das X am großen Fenster blendet es aus. Liegt die Leiste über der Tabelle, wird
+  sie für das Bildschirm-Abbild kurz unsichtbar.
+* **Griff-Punkt** (seit 1.5.2, Wunsch Ahmad 04.10.): der kleine runde Punkt links an der Leiste — gedrückt halten und
+  ziehen, dann steht die Leiste, wo man will (Stelle wird gemerkt). Rechtsklick → „unten links/rechts“ setzt sie
+  zurück in die Ecke; liegt die Stelle auf keinem Bildschirm mehr (Bildschirm abgesteckt), springt sie selbst zurück.
 * Symbol unten rechts im Infobereich: grün = aktiv, grau = Automatik aus, orange = AutoPointer nicht gefunden,
   rot = nicht verbunden bzw. gesperrt (Abo/Freigabe). **Doppelklick** öffnet das Fenster, **Strg+Alt+P**:
   Automatik an/aus.
 * **Rechtsklick**: *Fenster öffnen*, Verbindungsstatus, *Mit AutoSchnell verbinden …*, *Verbindung trennen*, *Automatik*,
   *Aktuelles Fahrzeug jetzt vergleichen* (auch bei Pause/selbem Auto), *Letzten Vergleich erneut öffnen*,
-  *Einstellungen …* (Portale, Browser, Ablauf, mit Windows starten), *Protokoll anzeigen …*.
+  *Einstellungen …* (Portale, Browser, Ablauf, mit Windows starten), *Systemcheck*.
 * Ein Auto, das beim Programmstart schon angezeigt wird, öffnet nichts – erst das nächste angeklickte.
 * **Neuwagen** (Zustand „Neu“) haben in AutoPointer weder Erstzulassung noch Kilometerstand: dann gilt dieses Jahr
   und 0 km (Befund 03.10.: BYD Dolphin, mobile.de).
@@ -99,12 +102,11 @@ gezeichnet). Deshalb:
 2. Nur solange AutoPointer im Vordergrund ist, alle 250 ms eine billige Prüfsumme (BitBlt) – ändert sich
    etwas, wird gewartet, bis die Ansicht 400 ms stillsteht.
 3. Es wird nur **kopiert, was ohnehin auf dem Bildschirm steht** (BitBlt – AutoPointer bekommt davon nichts mit).
-   Fehlen Zeilen (weggescrollt, schmale Ansicht), sagt das Programm „Detailbereich größer ziehen“. `PrintWindow`
-   (AutoPointer zeichnet die Tabelle selbst, auch weggescrollte Zeilen) nur noch, wenn es in den Einstellungen
-   ausdrücklich erlaubt ist — seit 1.3.2 Standard AUS: am 03.10.2026 meldete AutoPointer zweimal genau dabei
-   dieselbe „Zugriffsverletzung“ (aprun.exe, Offset 16B050B). Die **Windows-Texterkennung** (offline,
-   de-DE) liest es mit 3-fachem Zoom; fehlende Felder aus einem zweiten Durchlauf. Bezeichnungen werden
-   unscharf erkannt („Kibmeterstand“). Das Protokoll sagt je Auto, welcher Weg benutzt wurde.
+   Fehlen Zeilen (weggescrollt, schmale Ansicht), sagt das Programm „Detailbereich größer ziehen“. AutoPointer die
+   Tabelle selbst zeichnen lassen (`PrintWindow`) ist seit 1.5.2 **ganz entfernt** (Wunsch Ahmad 04.10.): am
+   03.10.2026 meldete AutoPointer zweimal genau dabei dieselbe „Zugriffsverletzung“ (aprun.exe, Offset 16B050B).
+   Die **Windows-Texterkennung** (offline, de-DE) liest es mit 3-fachem Zoom; fehlende Felder aus einem zweiten
+   Durchlauf. Bezeichnungen werden unscharf erkannt („Kibmeterstand“).
    (Anlass 03.10.2026: AutoPointer meldete eine „Zugriffsverletzung“ in aprun.exe. AutoPointer stürzt
    nachweislich auch ohne uns ab – Windows-Ereignis vom 24.09. –, trotzdem fassen wir es so wenig wie möglich an.)
 4. Hat sich die Anzeige während des Lesens geändert, wird verworfen (keine Mischdaten bei A → B → C).
@@ -131,8 +133,8 @@ Fehlersuche: `AutoSchnell-Vergleich.exe --einmal` liest das gerade angezeigte Au
 Version, AutoPointer, eine Probe-Lesung samt Probe-Vergleich (öffnet nichts), Browser und App. Die Tests laufen seit
 1.5.0 auch in der GitHub-CI (Job „AutoPointer-Vergleich (Windows-Tests)“).
 
-Protokoll: `%LOCALAPPDATA%\AutoSchnell\AutoPointer-Vergleich\protokoll\` (14 Tage) — seit 1.3.5 **verschlüsselt**
-(Windows-DPAPI, nur derselbe Windows-Benutzer; lesbar im Protokollfenster mit Tagesauswahl und „Kopieren“ oder mit
-`--protokoll [JJJJ-MM-TT]`; alte Klartext-Dateien werden beim Start verschlüsselt und gelöscht; Erkennungsbilder
-ebenfalls, `--entschluesseln <datei.dat>`),
+Protokoll: `%LOCALAPPDATA%\AutoSchnell\AutoPointer-Vergleich\protokoll\` (14 Tage) — **verschlüsselt** (Windows-DPAPI,
+nur derselbe Windows-Benutzer) und seit 1.5.2 **im Programm nirgends mehr anzuzeigen** (Wunsch Ahmad 04.10.: kein
+Protokollfenster, kein `--protokoll`, kein `--entschluesseln`). Für den Support liest es nur ein eigenes Werkzeug
+außerhalb des Programms auf dem betroffenen PC unter demselben Windows-Konto. Erkennungsbilder ebenfalls verschlüsselt,
 Einstellungen: `%APPDATA%\AutoSchnell\AutoPointer-Vergleich\einstellungen.json` (Schlüssel DPAPI-verschlüsselt).

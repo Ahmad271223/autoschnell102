@@ -19,9 +19,15 @@ internal sealed class Leiste : Form
     private string _ecke = Links;
     private FensterZustand? _zuletzt;
     private bool _endgueltig;
+    private readonly Griff _griff;
+    /// <summary>Frei verschobene Stelle (linke obere Ecke) oder null = feste Ecke.</summary>
+    private Point? _frei;
+    private Point? _ziehVersatz;
 
     public event Action? Aktivieren, Stoppen, JetztVergleichen, VertragOeffnen, FensterOeffnen, Ausblenden, Beenden;
     public event Action<string>? EckeGewechselt;
+    /// <summary>Leiste per Griff-Punkt verschoben (Stelle) bzw. zurueck in die Ecke (null).</summary>
+    public event Action<Point?>? PositionGeaendert;
 
     /// <param name="bezug">AutoPointer-Hauptfenster (oder Zero): die Leiste sitzt auf dessen Bildschirm.</param>
     public Leiste(Func<FensterZustand> zustand, Func<IntPtr> bezug)
@@ -55,12 +61,18 @@ internal sealed class Leiste : Form
         _vergleichen = Knopf("Vergleichen", 100);
         _vertrag = Knopf("Vertrag", 74);
         _fenster = Knopf("☰", 36);
-        reihe.Controls.AddRange(new Control[] { _status, _schalter, _vergleichen, _vertrag, _fenster });
+        // Wunsch Ahmad 04.10.2026: kleiner runder Punkt in der Ecke — gedrueckt halten und ziehen verschiebt die Leiste
+        _griff = new Griff { Width = 16, Height = 34, Margin = new Padding(0, 0, 4, 0), Cursor = Cursors.SizeAll };
+        _griff.MouseDown += (_, e) => { if (e.Button == MouseButtons.Left) GriffRunter(Cursor.Position); };
+        _griff.MouseMove += (_, e) => { if (e.Button == MouseButtons.Left) GriffZiehen(Cursor.Position); };
+        _griff.MouseUp += (_, _) => GriffLos();
+        reihe.Controls.AddRange(new Control[] { _griff, _status, _schalter, _vergleichen, _vertrag, _fenster });
         Controls.Add(reihe);
 
         _tipps.SetToolTip(_vergleichen, "Vergleich für das Auto, das AutoPointer gerade zeigt, jetzt öffnen");
         _tipps.SetToolTip(_vertrag, "Kaufvertrag: das zuletzt angeklickte Auto in AutoSchnell öffnen");
         _tipps.SetToolTip(_fenster, "Großes Fenster mit allen Knöpfen öffnen");
+        _tipps.SetToolTip(_griff, "Gedrückt halten und ziehen: Leiste verschieben\n(Rechtsklick: zurück in eine Ecke)");
 
         var menue = new ContextMenuStrip();
         menue.Items.Add("Großes Fenster öffnen", null, (_, _) => FensterOeffnen?.Invoke());
@@ -150,8 +162,43 @@ internal sealed class Leiste : Form
 
     private void EckeWaehlen(string ecke)
     {
+        _frei = null;                    // zurueck in die feste Ecke
         EckeSetzen(ecke);
         EckeGewechselt?.Invoke(_ecke);
+        PositionGeaendert?.Invoke(null);
+    }
+
+    /// <summary>Gespeicherte freie Stelle uebernehmen (null = feste Ecke).</summary>
+    public void PositionSetzen(Point? stelle)
+    {
+        _frei = stelle;
+        if (IsHandleCreated) Platzieren();
+    }
+
+    // ---- Griff-Punkt: gedrueckt halten und ziehen (Bildschirmpunkte, damit Tests es nachstellen koennen) ----
+    internal void GriffRunter(Point maus) => _ziehVersatz = new Point(maus.X - Left, maus.Y - Top);
+
+    internal void GriffZiehen(Point maus)
+    {
+        if (_ziehVersatz is not { } v) return;
+        Location = new Point(maus.X - v.X, maus.Y - v.Y);
+    }
+
+    internal void GriffLos()
+    {
+        if (_ziehVersatz == null) return;
+        _ziehVersatz = null;
+        _frei = Sichtbar(Location) ? Location : null;
+        Platzieren();
+        PositionGeaendert?.Invoke(_frei);
+    }
+
+    /// <summary>Liegt die Leiste an dieser Stelle wenigstens zum Teil auf einem Bildschirm? (Bildschirm
+    /// abgesteckt, andere Aufloesung -> sonst waere sie unerreichbar.)</summary>
+    private bool Sichtbar(Point stelle)
+    {
+        var flaeche = new Rectangle(stelle, Size);
+        return Screen.AllScreens.Any(s => Rectangle.Intersect(s.WorkingArea, flaeche) is { Width: >= 40, Height: >= 20 });
     }
 
     /// <summary>Ziel-Ecke auf dem Bildschirm von AutoPointer (sonst dem Hauptbildschirm).</summary>
@@ -167,8 +214,19 @@ internal sealed class Leiste : Form
         return _ecke == Rechts ? new Point(bereich.Right - Width - abstand, y) : new Point(bereich.Left + abstand, y);
     }
 
-    private void Platzieren()
+    internal void Platzieren()
     {
+        if (_ziehVersatz != null) return;                  // wird gerade gezogen
+        if (_frei is { } frei)
+        {
+            if (Sichtbar(frei))
+            {
+                if (Location != frei) Location = frei;
+                return;
+            }
+            _frei = null;                                  // Bildschirm weg: zurueck in die Ecke
+            PositionGeaendert?.Invoke(null);
+        }
         var ziel = Zielpunkt();
         if (Location != ziel) Location = ziel;
     }
@@ -203,6 +261,25 @@ internal sealed class Leiste : Form
     }
 
     internal static string Kurz(string titel) => titel == "AKTIV – WARTET" ? "WARTET" : titel;
+
+    /// <summary>Kleiner runder Punkt (Griff zum Verschieben).</summary>
+    private sealed class Griff : Control
+    {
+        public Griff()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint, true);
+            BackColor = Color.FromArgb(31, 41, 55);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            int d = Math.Min(Width, Height) - LogicalToDeviceUnits(6);
+            var kreis = new Rectangle((Width - d) / 2, (Height - d) / 2, d, d);
+            using var pinsel = new SolidBrush(Color.FromArgb(203, 213, 225));
+            e.Graphics.FillEllipse(pinsel, kreis);
+        }
+    }
 
     private Button Knopf(string text, int breite)
     {

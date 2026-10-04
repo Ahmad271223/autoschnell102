@@ -138,27 +138,6 @@ internal static class AutoPointerFenster
         Native.IsWindow(d.TechnikTabelle) && Brauchbar(d.TechnikTabelle) && !Native.IsIconic(d.Hauptfenster)
         && (d.KopfTabelle == IntPtr.Zero || Brauchbar(d.KopfTabelle));
 
-    /// <summary>Laesst die Tabelle sich selbst in ein Bild zeichnen (PrintWindow).
-    /// Liefert auch Zeilen, die in AutoPointer gerade weggescrollt bzw. verdeckt
-    /// sind (Tueren, Inserat-ID ...).</summary>
-    public static Bitmap? Fotografiere(IntPtr hwnd)
-    {
-        if (hwnd == IntPtr.Zero) return null;
-        return Native.ImDpiKontext(hwnd, () =>
-        {
-            if (!Native.GetClientRect(hwnd, out var r) || r.Width <= 0 || r.Height <= 0) return null;
-            var bmp = new Bitmap(r.Width, r.Height, PixelFormat.Format32bppRgb);
-            using (var g = Graphics.FromImage(bmp))
-            {
-                g.Clear(Color.White);
-                IntPtr dc = g.GetHdc();
-                try { Native.PrintWindow(hwnd, dc, 0); }
-                finally { g.ReleaseHdc(dc); }
-            }
-            return bmp;
-        });
-    }
-
     /// <summary>Eigene Fenster, die ueber AutoPointer liegen koennen (die Leiste, immer im Vordergrund).
     /// Setzt TrayApp; liefert Handles, kein Zugriff auf Steuerelemente (laeuft im Lese-Thread).</summary>
     public static Func<IEnumerable<IntPtr>> EigeneFenster { get; set; } = () => Array.Empty<IntPtr>();
@@ -180,9 +159,9 @@ internal static class AutoPointerFenster
         return false;
     }
 
-    /// <summary>Kopie dessen, was die Tabelle gerade anzeigt (BitBlt) — anders als
-    /// <see cref="Fotografiere"/> geht dabei KEINE Nachricht an AutoPointer, AutoPointer
-    /// zeichnet nichts extra. Weggescrollte Zeilen fehlen natuerlich.</summary>
+    /// <summary>Kopie dessen, was die Tabelle gerade anzeigt (BitBlt) — dabei geht KEINE Nachricht an
+    /// AutoPointer, AutoPointer zeichnet nichts extra. Weggescrollte Zeilen fehlen natuerlich (AutoPointer selbst
+    /// zeichnen lassen — PrintWindow — ist seit 04.10.2026 ganz entfernt: es loeste dort Abstuerze aus).</summary>
     public static Bitmap? Abbild(IntPtr hwnd)
     {
         if (hwnd == IntPtr.Zero) return null;

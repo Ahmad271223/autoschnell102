@@ -113,6 +113,38 @@ public class SteuerFensterTests
         });
     }
 
+    [Fact]   // Wunsch Ahmad 04.10.2026: runder Punkt in der Ecke — gedrueckt halten und ziehen verschiebt die Leiste
+    public void Leiste_mit_dem_Griff_verschieben_und_zurueck_in_die_Ecke()
+    {
+        ImSta(() =>
+        {
+            var zustand = Zustand();
+            using var l = new Leiste(() => zustand, () => IntPtr.Zero);
+            var gemeldet = new List<Point?>();
+            l.PositionGeaendert += p => gemeldet.Add(p);
+            l.Show();
+            Application.DoEvents();
+            var ecke = l.Location;
+            var bereich = (Screen.PrimaryScreen ?? Screen.AllScreens[0]).WorkingArea;
+            var ziel = new Point(bereich.Left + bereich.Width / 3, bereich.Top + bereich.Height / 3);
+
+            l.GriffRunter(new Point(ecke.X + 8, ecke.Y + 17));          // Punkt gedrueckt
+            l.GriffZiehen(new Point(ziel.X + 8, ziel.Y + 17));
+            l.Platzieren();                                             // Takt waehrend des Ziehens: bleibt
+            Assert.Equal(ziel, l.Location);
+            l.GriffLos();
+            Assert.Equal(ziel, l.Location);
+            Assert.Equal(ziel, gemeldet.Last());
+            l.Platzieren();                                             // Takt danach: bleibt an der neuen Stelle
+            Assert.Equal(ziel, l.Location);
+
+            l.PositionSetzen(new Point(-30000, -30000));                // Bildschirm weg -> zurueck in die Ecke
+            Assert.Equal(ecke, l.Location);
+            Assert.Null(gemeldet.Last());
+            l.EndgueltigSchliessen();
+        });
+    }
+
     [Fact]   // die Leiste liegt immer oben: liegt sie ueber der Tabelle, wird nicht vom Bildschirm gelesen
     public void Leiste_ueber_der_Tabelle_wird_erkannt()
     {

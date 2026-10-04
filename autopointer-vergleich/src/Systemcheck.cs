@@ -132,7 +132,7 @@ internal static class Systemcheck
         {
             try
             {
-                var lesung = await AutoPointerQuelle.LiesAnsichtAsync(ocr, ansicht, false, zeichnenErlaubt: false);
+                var lesung = await AutoPointerQuelle.LiesAnsichtAsync(ocr, ansicht, false);
                 if (lesung == null || lesung.Leer) leseFehler = "Tabelle nicht lesbar (verdeckt oder leer).";
                 else gelesen = lesung.Fahrzeug;
             }

@@ -18,8 +18,6 @@ internal static class Program
     {
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         string? server = KonsolenModus.Argument(args, "--server");
-        if (args.Contains("--protokoll")) return KonsolenModus.ProtokollZeigen(KonsolenModus.Argument(args, "--protokoll"));
-        if (KonsolenModus.Argument(args, "--entschluesseln") is { } geheim) return KonsolenModus.Entschluesseln(geheim);
         if (args.Contains("--einmal")) return KonsolenModus.EinmalAsync(args, server).GetAwaiter().GetResult();
         if (args.Contains("--systemcheck")) return KonsolenModus.SystemcheckAsync(server).GetAwaiter().GetResult();
         if (KonsolenModus.Argument(args, "--verbinden") is { } code)
@@ -91,17 +89,16 @@ internal static class KonsolenModus
         if (ocr == null) { Console.WriteLine(fehler); return 4; }
 
         var start = DateTime.Now;
-        bool zeichnen = args.Contains("--zeichnen") || Einstellungen.Laden().AutoPointerZeichnenLassen;
         var lesung = await AutoPointerQuelle.LiesAnsichtAsync(ocr, ansicht, false, bilder == null ? null : (technik, kopf) =>
         {
             Directory.CreateDirectory(bilder);
             technik.Save(Path.Combine(bilder, "technik.png"));
             kopf?.Save(Path.Combine(bilder, "kopf.png"));
-        }, zeichnen);
+        });
         var dauer = (DateTime.Now - start).TotalMilliseconds;
         if (lesung == null) { Console.WriteLine("Tabelle nicht lesbar."); return 5; }
 
-        Console.WriteLine($"Gelesen in {dauer:0} ms vom {(lesung.Weg == "Bildschirm" ? "Bildschirm (AutoPointer unberührt)" : "PrintWindow (Zeilen fehlten auf dem Bildschirm)")}, Texterkennung {ocr.Sprache}:");
+        Console.WriteLine($"Gelesen in {dauer:0} ms vom Bildschirm (AutoPointer unberührt), Texterkennung {ocr.Sprache}:");
         Console.WriteLine("  " + lesung.Rohtext);
         var f = lesung.Fahrzeug;
         var fehlt = DetailLeser.Fehlend(f);
@@ -168,34 +165,6 @@ internal static class KonsolenModus
         var punkte = await Systemcheck.PruefenAsync(e, new AutoSchnellDienst(e.Server, () => e.Schluessel()));
         Console.WriteLine(Systemcheck.Text(punkte));
         return punkte.Any(p => p.Stufe == PruefStufe.Fehler) ? 11 : 0;
-    }
-
-    /// <summary>--protokoll [JJJJ-MM-TT]: das verschluesselte Protokoll eines Tages lesbar ausgeben (nur unter dem
-    /// Windows-Konto, das es geschrieben hat).</summary>
-    public static int ProtokollZeigen(string? datum)
-    {
-        Native.AttachConsole(-1);
-        var tag = DateTime.TryParse(datum, out var t) ? t : DateTime.Today;
-        foreach (var z in Protokoll.Tag(tag)) Console.WriteLine(z);
-        return 0;
-    }
-
-    /// <summary>--entschluesseln &lt;datei.dat&gt;: ein gespeichertes Erkennungsbild/Text wieder lesbar machen.</summary>
-    public static int Entschluesseln(string datei)
-    {
-        Native.AttachConsole(-1);
-        try
-        {
-            string ziel = datei.EndsWith(".dat", StringComparison.OrdinalIgnoreCase) ? datei[..^4] : datei + ".klar";
-            File.WriteAllBytes(ziel, Tresor.Entschluesseln(File.ReadAllBytes(datei)));
-            Console.WriteLine("Entschlüsselt: " + ziel);
-            return 0;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine("Nicht entschlüsselt: " + ex.Message);
-            return 9;
-        }
     }
 
     /// <summary>--verbinden 123456: ohne Fenster verbinden (Support, Tests).</summary>

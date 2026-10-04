@@ -29,16 +29,16 @@ internal sealed class Einstellungen
     public bool HinweiseAnzeigen { get; set; } = true;
     public bool TastenkuerzelAktiv { get; set; } = true;
     public bool ErkennungsbilderSpeichern { get; set; } = false;
-    /// <summary>Fehlen Zeilen auf dem Bildschirm, AutoPointer die Tabelle selbst zeichnen lassen (PrintWindow).
-    /// Standard AUS: zweimal am 03.10.2026 meldete AutoPointer genau dann dieselbe "Zugriffsverletzung"
-    /// (aprun.exe, Offset 16B050B).</summary>
-    public bool AutoPointerZeichnenLassen { get; set; } = false;
 
     /// <summary>Kleine Leiste mit den wichtigsten Knoepfen, immer im Vordergrund (Wunsch Ahmad 03.10.2026).</summary>
     public bool LeisteAnzeigen { get; set; } = true;
     /// <summary>Ecke der Leiste: "links" oder "rechts" (jeweils unten). Links verdeckt die Detailansicht von
     /// AutoPointer nicht (die steht rechts).</summary>
     public string LeisteEcke { get; set; } = Leiste.Links;
+    /// <summary>Frei verschobene Leiste (Griff-Punkt, Wunsch Ahmad 04.10.2026): linke obere Ecke in
+    /// Bildschirmpunkten; null = feste Ecke (LeisteEcke).</summary>
+    public int? LeisteX { get; set; }
+    public int? LeisteY { get; set; }
 
     // ---- Verbindung zu AutoSchnell ------------------------------------------
     public string Server { get; set; } = StandardServer;

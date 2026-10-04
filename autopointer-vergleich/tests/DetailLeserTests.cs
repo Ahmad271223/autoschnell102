@@ -23,9 +23,16 @@ public class DetailLeserTests
         Assert.Equal((2025, (int?)12, 10), (mitEz.EzJahr!.Value, mitEz.EzMonat, mitEz.Kilometer!.Value));
     }
 
-    [Fact]
-    public void AutoPointer_zeichnen_lassen_ist_standardmaessig_aus() =>
-        Assert.False(new Einstellungen().AutoPointerZeichnenLassen);
+    [Fact]   // Wunsch Ahmad 04.10.2026: AutoPointer NIE selbst zeichnen lassen — PrintWindow ist ganz entfernt
+    public void AutoPointer_wird_nie_zum_Zeichnen_gebracht()
+    {
+        Assert.Null(typeof(Native).GetMethod("PrintWindow"));
+        Assert.Null(typeof(Einstellungen).GetProperty("AutoPointerZeichnenLassen"));
+    }
+
+    [Fact]   // Wunsch Ahmad 04.10.2026: das Protokoll wird nirgends angezeigt
+    public void Protokoll_hat_kein_Fenster() =>
+        Assert.Null(typeof(Program).Assembly.GetType("AutoPointerVergleich.ProtokollForm"));
 
     public DetailLeserTests() => Protokoll.DateiAktiv = false;
 

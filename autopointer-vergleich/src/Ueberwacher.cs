@@ -444,7 +444,7 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
         var ansicht = _ansicht;
         if (ansicht == null) return null;
         var e = _einstellungen();
-        return await LiesAnsichtAsync(_ocr, ansicht, e.ErkennungsbilderSpeichern, zeichnenErlaubt: e.AutoPointerZeichnenLassen);
+        return await LiesAnsichtAsync(_ocr, ansicht, e.ErkennungsbilderSpeichern);
     }
 
     /// <summary>Befund 03.10.2026: AutoPointer zeigte eine "Zugriffsverletzung" (aprun.exe). Es stuerzt
@@ -455,12 +455,11 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
     /// PrintWindow nur noch, wenn der Sucher es in den Einstellungen ausdruecklich erlaubt
     /// (<paramref name="zeichnenErlaubt"/>). Sonst gilt, was auf dem Bildschirm steht.</remarks>
     internal static async Task<Lesung?> LiesAnsichtAsync(TextErkennung ocr, DetailAnsicht ansicht, bool bilderSpeichern,
-                                                         Action<System.Drawing.Bitmap, System.Drawing.Bitmap?>? bilder = null,
-                                                         bool zeichnenErlaubt = false)
+                                                         Action<System.Drawing.Bitmap, System.Drawing.Bitmap?>? bilder = null)
     {
         // Beschreibung GLEICHZEITIG mit der Tabelle lesen (eigene Texterkennung) — sonst +0,15-0,2 s je Auto
         var beschreibung = BeschreibungLesenAsync(BeschreibungsErkennung() ?? ocr, ansicht);
-        var lesung = await LiesTabellenAsync(ocr, ansicht, bilderSpeichern, bilder, zeichnenErlaubt);
+        var lesung = await LiesTabellenAsync(ocr, ansicht, bilderSpeichern, bilder);
         string? text = await beschreibung;
         if (lesung != null) lesung.Fahrzeug.BeschreibungText = text;
         return lesung;
@@ -504,13 +503,12 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
     }
 
     private static async Task<Lesung?> LiesTabellenAsync(TextErkennung ocr, DetailAnsicht ansicht, bool bilderSpeichern,
-                                                         Action<System.Drawing.Bitmap, System.Drawing.Bitmap?>? bilder,
-                                                         bool zeichnenErlaubt)
+                                                         Action<System.Drawing.Bitmap, System.Drawing.Bitmap?>? bilder)
     {
         uint dpi = Native.GetDpiForWindow(ansicht.TechnikTabelle);
-        // Liegt die Leiste (immer im Vordergrund) ueber der Tabelle, zeigt der Bildschirm sie mit -> PrintWindow
+        // Wunsch Ahmad 04.10.2026: AutoPointer NIE selbst zeichnen lassen (PrintWindow ist ganz entfernt) —
+        // nur der Bildschirm. Liegt die eigene Leiste darueber, wird sie fuer das Abbild kurz ausgeblendet.
         bool verdeckt = AutoPointerFenster.Verdeckt(ansicht.TechnikTabelle) || AutoPointerFenster.Verdeckt(ansicht.KopfTabelle);
-        if (!verdeckt || !zeichnenErlaubt)
         {
             // Nr. 10: liegt die eigene Leiste ueber der Tabelle (und PrintWindow ist aus), wird sie fuer das
             // Abbild kurz unsichtbar — vorher stand sie mit im Bild und Zeilen fehlten.
@@ -536,26 +534,12 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
             if (technik != null)
             {
                 var sicht = await LiesBilderAsync(ocr, technik, kopf, dpi, bilderSpeichern);
-                if (!zeichnenErlaubt || Reicht(sicht.Fahrzeug))
-                {
-                    bilder?.Invoke(technik, kopf);
-                    return sicht with { Weg = "Bildschirm" };
-                }
+                bilder?.Invoke(technik, kopf);
+                return sicht with { Weg = "Bildschirm" };
             }
         }
-        if (!zeichnenErlaubt) return null;
-        using var technik2 = AutoPointerFenster.Fotografiere(ansicht.TechnikTabelle);
-        using var kopf2 = AutoPointerFenster.Fotografiere(ansicht.KopfTabelle);
-        if (technik2 == null) return null;
-        var gezeichnet = await LiesBilderAsync(ocr, technik2, kopf2, dpi, bilderSpeichern);
-        bilder?.Invoke(technik2, kopf2);
-        return gezeichnet with { Weg = "PrintWindow" };
+        return null;
     }
-
-    /// <summary>Reicht der Bildschirminhalt? Pflichtfelder da und die Inserat-ID (letzte Zeile —
-    /// steht sie da, ist auch alles darueber sichtbar).</summary>
-    internal static bool Reicht(Fahrzeug f) =>
-        DetailLeser.Fehlend(f).Count == 0 && !string.IsNullOrWhiteSpace(f.InseratId);
 
     /// <summary>Zwei Durchlaeufe: Zoom x3 (bei 96 dpi), fehlende Felder aus einem
     /// zweiten Durchlauf mit x2 ergaenzt.</summary>

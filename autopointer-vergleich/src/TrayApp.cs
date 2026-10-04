@@ -27,7 +27,6 @@ internal sealed class TrayApp : ApplicationContext
     private Einstellungen _einstellungen;
     private Ueberwacher? _ueberwacher;
     private EinstellungenForm? _einstellungenForm;
-    private ProtokollForm? _protokollForm;
     private DateTime _letzteSprechblase = DateTime.MinValue;
     private readonly SteuerFenster _fenster;
     private readonly Leiste _leiste;
@@ -78,7 +77,6 @@ internal sealed class TrayApp : ApplicationContext
         menue.Items.Add("Kaufvertrag: Auto in AutoSchnell öffnen", null, (_, _) => VertragOeffnen());
         menue.Items.Add(new ToolStripSeparator());
         menue.Items.Add("Einstellungen …", null, (_, _) => EinstellungenZeigen());
-        menue.Items.Add("Protokoll anzeigen …", null, (_, _) => ProtokollZeigen());
         menue.Items.Add("Systemcheck: läuft alles? …", null, async (_, _) => await SystemcheckZeigenAsync());
         menue.Items.Add(new ToolStripSeparator());
         menue.Items.Add("Beenden", null, (_, _) => Beenden());
@@ -105,7 +103,6 @@ internal sealed class TrayApp : ApplicationContext
         _fenster.Verbinden += () => VerbindenZeigen(null);
         _fenster.Trennen += async () => await TrennenAsync();
         _fenster.EinstellungenOeffnen += EinstellungenZeigen;
-        _fenster.ProtokollOeffnen += ProtokollZeigen;
         _fenster.SystemcheckOeffnen += async () => await SystemcheckZeigenAsync();
         _fenster.Beenden += Beenden;
         _leiste = new Leiste(ZustandFuersFenster, () => _quelle?.Hauptfenster ?? IntPtr.Zero);
@@ -115,6 +112,12 @@ internal sealed class TrayApp : ApplicationContext
         _leiste.VertragOeffnen += VertragOeffnen;
         _leiste.FensterOeffnen += FensterZeigen;
         _leiste.EckeGewechselt += ecke => { _einstellungen.LeisteEcke = ecke; Speichern(_einstellungen); };
+        _leiste.PositionGeaendert += stelle =>
+        {
+            _einstellungen.LeisteX = stelle?.X;
+            _einstellungen.LeisteY = stelle?.Y;
+            Speichern(_einstellungen);
+        };
         _leiste.Ausblenden += () => { _einstellungen.LeisteAnzeigen = false; Speichern(_einstellungen); LeisteAnwenden(); FensterZeigen(); };
         _leiste.Beenden += Beenden;
         AutoPointerFenster.EigeneFenster = () => new[] { _leistenHandle };
@@ -185,6 +188,7 @@ internal sealed class TrayApp : ApplicationContext
         if (an)
         {
             _leiste.EckeSetzen(_einstellungen.LeisteEcke);
+            _leiste.PositionSetzen(_einstellungen.LeisteX is int x && _einstellungen.LeisteY is int y ? new Point(x, y) : null);
             if (!_leiste.Visible) _leiste.Show();
             _leistenHandle = _leiste.Handle;
         }
@@ -553,13 +557,6 @@ internal sealed class TrayApp : ApplicationContext
         }
         catch (Exception ex) { Protokoll.Schreibe("Systemcheck fehlgeschlagen: " + ex.Message); }
         finally { _systemcheckLaeuft = false; }
-    }
-
-    private void ProtokollZeigen()
-    {
-        if (_protokollForm is { IsDisposed: false }) { _protokollForm.Activate(); return; }
-        _protokollForm = new ProtokollForm();
-        _protokollForm.Show();
     }
 
     private void Beenden()

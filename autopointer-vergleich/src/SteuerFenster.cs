@@ -15,7 +15,7 @@ internal sealed class SteuerFenster : Form
     private readonly Func<FensterZustand> _zustand;
     private readonly Panel _ampel;
     private readonly Label _titel, _unterzeile, _verbindung, _letztes, _meldung;
-    private readonly Button _aktivieren, _stoppen, _jetzt, _erneut, _vertrag, _verbinden, _einstellungen, _protokoll, _beenden;
+    private readonly Button _aktivieren, _stoppen, _jetzt, _erneut, _vertrag, _verbinden, _einstellungen, _beenden;
     private readonly System.Windows.Forms.Timer _takt;
     private FensterZustand? _zuletzt;
 
@@ -26,7 +26,7 @@ internal sealed class SteuerFenster : Form
     private readonly Label _hinweisX;
 
     public event Action? Aktivieren, Stoppen, JetztVergleichen, LetztenOeffnen, VertragOeffnen,
-        Verbinden, Trennen, EinstellungenOeffnen, ProtokollOeffnen, Beenden, SystemcheckOeffnen;
+        Verbinden, Trennen, EinstellungenOeffnen, Beenden, SystemcheckOeffnen;
 
     public SteuerFenster(Func<FensterZustand> zustand)
     {
@@ -100,15 +100,14 @@ internal sealed class SteuerFenster : Form
 
         var unten = Reihe();
         unten.Margin = new Padding(0, 14, 0, 0);
-        int drittel = (Breite - 20) / 3;
-        _einstellungen = Knopf("Einstellungen", drittel);
-        _protokoll = Knopf("Protokoll", drittel);
-        _beenden = Knopf("Beenden", drittel);
+        // Wunsch Ahmad 04.10.2026: das Protokoll wird nirgends angezeigt (nur verschluesselt gespeichert)
+        int haelfte = (Breite - 10) / 2;
+        _einstellungen = Knopf("Einstellungen", haelfte);
+        _beenden = Knopf("Beenden", haelfte);
         _beenden.ForeColor = Symbole.Fehler;
         _einstellungen.Margin = new Padding(0);
-        _protokoll.Margin = _beenden.Margin = new Padding(10, 0, 0, 0);
+        _beenden.Margin = new Padding(10, 0, 0, 0);
         unten.Controls.Add(_einstellungen);
-        unten.Controls.Add(_protokoll);
         unten.Controls.Add(_beenden);
         stapel.Controls.Add(unten);
 
@@ -132,7 +131,6 @@ internal sealed class SteuerFenster : Form
             Aktualisieren();
         };
         _einstellungen.Click += (_, _) => EinstellungenOeffnen?.Invoke();
-        _protokoll.Click += (_, _) => ProtokollOeffnen?.Invoke();
         _beenden.Click += (_, _) => Beenden?.Invoke();
 
         _takt = new System.Windows.Forms.Timer { Interval = 1000 };
