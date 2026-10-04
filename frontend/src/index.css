@@ -533,6 +533,13 @@ html, body, #root {
 .vertrag-formular label.text-xs {
   color: var(--text-secondary);
   font-weight: 600;
+  /* 04.10.2026: alle Beschriftungen gleich hoch — vorher standen Auswahlfelder (inline-Label) tiefer
+     als Textfelder ("Kaufpreis" und "Zahlungsart" schief nebeneinander) */
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  min-height: 18px;
+  line-height: 1.2;
 }
 .vertrag-formular .input-base.vf-fehlt {
   border-color: var(--st-amber);
