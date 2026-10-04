@@ -342,19 +342,18 @@ def plausibel(f: dict, heute: Optional[date] = None) -> list:
     return hinweise
 
 
-def vergleichs_links(vehicle: dict, regeln: dict, navi_ignorieren: bool = True) -> tuple:
+def vergleichs_links(vehicle: dict, regeln: dict) -> tuple:
     """(links, hinweise) mit denselben Link-Bauern wie der Vergleich in der App.
 
     Strenger als die App (Vorgabe Ahmad: "keine Suche nur nach Bentley"): ein
     Portal bekommt nur dann einen Link, wenn sein Katalog Marke UND Modell
-    kennt — sonst ein Hinweis statt einer Suche ueber die ganze Marke."""
+    kennt — sonst ein Hinweis statt einer Suche ueber die ganze Marke.
+
+    Wunsch Ahmad 04.10.2026: Programm und Browser-Helfer halten sich IMMER an die AutoSchnell-Einstellungen
+    (Firma/Sucher) — auch beim Navi (03.10. war es im Programm abgeschaltet) und bei Beschaedigten (der Helfer
+    hat sie seit 04.10. vormittags immer ausgeschlossen). Wer kein Navi-Filter will, stellt "Navi" auf egal."""
     import autoscout_service as asv
     import mobile_service as ms
-    # Wunsch Ahmad 03.10.2026: im Programm NIE nach Navigationssystem filtern (in der App bleibt die
-    # Einstellung "Navi aus dem Inserat mitvergleichen" wie sie ist). Der Browser-Helfer liest das ganze
-    # Inserat samt Ausstattung wie die App — dort gilt die Firmeneinstellung (navi_ignorieren=False).
-    if navi_ignorieren:
-        regeln = {**(regeln or {}), "navi": {"mode": "ignore"}}
     links, hinweise = [], []
     marke = vehicle.get("make_label", "")
     modell = vehicle.get("model_label", "")

@@ -292,14 +292,37 @@ def test_11_werkzeug_eintrag_zip_statt_exe(monkeypatch):
     assert oe["art"] == "browser" and oe["geraet"] == "Browser" and oe["dateiname"].endswith(".zip")
 
 
-def test_12_navi_nur_im_programm_ignoriert():
+def test_12_navi_wie_eingestellt():
+    """Wunsch Ahmad 04.10.2026 (abends): Programm und Helfer immer nach den AutoSchnell-Einstellungen."""
     v = {"make_label": "Volkswagen", "model_label": "Golf", "first_registration": "05/2018", "mileage": 90000,
          "power_kw": 110, "features": ["Navigationssystem"]}
-    regeln = {"navi": {"mode": "wenn_vorhanden"}, "sort": "price_asc"}
-    links_programm, _ = wz.vergleichs_links(v, regeln)
-    links_browser, _ = wz.vergleichs_links(v, regeln, navi_ignorieren=False)
-    assert "NAVIGATION_SYSTEM" not in links_programm[0]["url"]
-    assert "NAVIGATION_SYSTEM" in links_browser[0]["url"]
+    links, _ = wz.vergleichs_links(v, {"navi": {"mode": "wenn_vorhanden"}, "sort": "price_asc"})
+    assert "NAVIGATION_SYSTEM" in links[0]["url"]
+    links, _ = wz.vergleichs_links(v, {"navi": {"mode": "ignore"}, "sort": "price_asc"})
+    assert "NAVIGATION_SYSTEM" not in links[0]["url"]
+
+
+def test_16_gleiche_suche_erkennt_die_vergleichsseite_des_programms():
+    """AutoScout24 schreibt die Adresse nach dem Laden um (04.10.2026 im Browser gesehen), mobile.de nicht."""
+    link = ("https://www.autoscout24.de/lst/volkswagen?atype=C&cy=D&cat=ma74mo2090&fregfrom=2004&kmto=158000"
+            "&powerfrom=51&powerto=59&powertype=kw&fuel=B&gear=M&damaged_listing=exclude&ocs_listing=include"
+            "&sort=price&desc=0&ustate=N,U")
+    umgeschrieben = ("https://www.autoscout24.de/lst/volkswagen/polo/ft_benzin/tr_schaltgetriebe?fregfrom=2004&cy=D"
+                     "&kmto=158000&powerfrom=51&powerto=59&powertype=kw&damaged_listing=exclude&ocs_listing=include"
+                     "&sort=price&desc=0&ustate=N%2CU&atype=C")
+    assert bh.gleiche_suche(link, link) and bh.gleiche_suche(link, umgeschrieben)
+    assert not bh.gleiche_suche(link, umgeschrieben.replace("kmto=158000", "kmto=150000"))   # Filter geaendert
+    assert not bh.gleiche_suche(link, umgeschrieben + "&page=2")                             # andere Seite
+    assert not bh.gleiche_suche(link, umgeschrieben.replace("/volkswagen/", "/audi/"))      # andere Marke
+    assert not bh.gleiche_suche(link, umgeschrieben.replace("autoscout24.de", "autoscout24.at"))
+    mobile = ("https://suchen.mobile.de/fahrzeuge/search.html?isSearchRequest=true&ref=quickSearch&s=Car&vc=Car"
+              "&pageNumber=1&ms=25200%3B27%3B%3B%3B&fr=2004%3A&ml=%3A158000&pw=51%3A59&ft=PETROL&dam=0&cn=DE&sb=p&od=up")
+    assert bh.gleiche_suche(mobile, mobile.replace("ms=25200%3B27%3B%3B%3B", "ms=25200;27;;;"))
+    assert bh.gleiche_suche(mobile, mobile.replace("ref=quickSearch", "ref=srp"))
+    assert not bh.gleiche_suche(mobile, mobile.replace("pageNumber=1", "pageNumber=2"))
+    assert not bh.gleiche_suche(mobile, mobile.replace("od=up", "od=down"))
+    assert not bh.gleiche_suche(mobile, mobile + "&fe=NAVIGATION_SYSTEM")
+    assert not bh.gleiche_suche(mobile, link) and not bh.gleiche_suche("https://example.com/x", mobile)
 
 
 def _t(i, preis, titel="Volkswagen Golf", zustand=(), neu=False, km=120000, ez="06/2015"):
@@ -531,20 +554,21 @@ def test_34_fehlerfaelle(welt):
     assert r.status_code == 404
 
 
-def test_34b_beschaedigte_filtert_schon_das_portal(welt):
-    """Wunsch Ahmad 04.10.2026: Unfall-/beschaedigte Autos gar nicht erst anzeigen — auch wenn die Firmenregel
-    (z.B. Export-Profil) sie zulaesst."""
+def test_34b_beschaedigte_wie_eingestellt(welt):
+    """Wunsch Ahmad 04.10.2026 (abends): "immer an die AutoSchnell-Regeln halten" — die Firmenregel entscheidet
+    ueber Beschaedigte (vormittags hatte der Helfer sie noch immer ausgeschlossen)."""
     db = welt["db"]
     vorher = db.dealers.find_one({"id": welt["firma"]["dealer_id"]}, {"_id": 0, "comparison_rules": 1}) or {}
-    db.dealers.update_one({"id": welt["firma"]["dealer_id"]},
-                          {"$set": {"comparison_rules": {"damage": {"mode": "ignore"}, "sort": "price_asc"}}})
     try:
-        r = _inserat(welt["prog"])
-        assert r.status_code == 200, r.text
-        links = {l["portal"]: l["url"] for l in r.json()["links"]}
-        assert "dam=0" in links["mobile.de"], links
-        if "AutoScout24" in links:
-            assert "damaged_listing=exclude" in links["AutoScout24"]
+        for modus, mit_filter in (("ignore", False), ("no_accident", True)):
+            db.dealers.update_one({"id": welt["firma"]["dealer_id"]},
+                                  {"$set": {"comparison_rules": {"damage": {"mode": modus}, "sort": "price_asc"}}})
+            r = _inserat(welt["prog"])
+            assert r.status_code == 200, r.text
+            links = {l["portal"]: l["url"] for l in r.json()["links"]}
+            assert ("dam=0" in links["mobile.de"]) is mit_filter, (modus, links)
+            if "AutoScout24" in links:
+                assert ("damaged_listing=exclude" in links["AutoScout24"]) is mit_filter, (modus, links)
     finally:
         if vorher.get("comparison_rules"):
             db.dealers.update_one({"id": welt["firma"]["dealer_id"]}, {"$set": {"comparison_rules": vorher["comparison_rules"]}})
@@ -606,3 +630,52 @@ def test_36_zip_laden_fuer_die_firma(welt):
             db.werkzeuge.replace_one({"id": WID}, vorher, upsert=True)
         else:
             db.werkzeuge.delete_one({"id": WID})
+
+
+def test_38_programm_und_helfer_arbeiten_zusammen(welt):
+    """Wunsch Ahmad 04.10.2026 (abends): Hat das Windows-Programm das Auto gerade verglichen, oeffnet der Helfer
+    nichts von selbst (nur auf Knopfdruck) — und die Vergleichsseiten des Programms bekommen die Ampel."""
+    from datetime import datetime, timedelta, timezone
+    db, helfer = welt["db"], welt["prog"]
+    assert _inserat(helfer).json()["programm_verglichen"] is None
+    pc = _verbinden(welt, "sucher", wid=wz.AUTOPOINTER, name="PC-Buero")
+    f = {"marke": "VW", "modell": "Golf", "marke_modell_text": "VW Golf", "titel": "VW Golf VII 2.0 GTI TCR",
+         "ez_monat": 5, "ez_jahr": 2019, "kilometer": 60000, "kw": 213, "ps": 290, "kraftstoff": "Benzin",
+         "getriebe": "Automatik", "preis": 23850, "quelle": "mobile.de", "inserat_id": MOBILE_ID, "roh": True}
+    r = requests.post(f"{API}/werkzeuge/{wz.AUTOPOINTER}/vergleich", headers=pc, json={"fahrzeug": f}, timeout=60)
+    assert r.status_code == 200, r.text
+    links = {l["portal"]: l["url"] for l in r.json()["links"]}
+    eintrag = db.werkzeug_vergleiche.find_one({"werkzeug": wz.AUTOPOINTER, "user_id": welt["sucher_id"]},
+                                              sort=[("erstellt_am", -1)])
+    try:
+        # 1. Helfer oeffnet dasselbe Inserat -> er weiss, dass das Programm es gerade verglichen hat
+        h = _inserat(helfer)
+        assert h.status_code == 200 and h.json()["programm_verglichen"] == eintrag["erstellt_am"], h.text
+
+        def zuordnen(kopf, url):
+            return requests.post(f"{API}/werkzeuge/{WID}/programm-suche", headers=kopf, json={"url": url}, timeout=30)
+
+        # 2. Vergleichsseite des Programms -> Zuordnung, dann die Ampel am Vergleich des Programms
+        z = zuordnen(helfer, links["mobile.de"])
+        assert z.status_code == 200, z.text
+        assert z.json()["vergleich_id"] == eintrag["id"] and z.json()["portal"] == "mobile.de"
+        assert z.json()["fahrzeug"]["preis"] == 23850 and z.json()["fahrzeug"]["inserat_url"] == MOBILE_URL
+        preise = [21850, 22850, 24350, 24750, 25350, 26850, 27850, 28850]
+        m = requests.post(f"{API}/werkzeuge/{WID}/marktlage", headers=helfer, timeout=60,
+                          json={"vergleich_id": eintrag["id"], "url": links["mobile.de"],
+                                "seite": _seite(_mobile_suche_html(preise))})
+        assert m.status_code == 200, m.text
+        assert m.json()["platz"] == 3 and m.json()["ampel"] == "gruen", m.json()
+        assert db.werkzeug_vergleiche.find_one({"id": eintrag["id"]})["marktlage"]["mobile"]["platz"] == 3
+        # 3. andere Suche, fremdes Konto, keine Vergleichsseite -> nichts
+        assert zuordnen(helfer, links["mobile.de"].replace("od=up", "od=down")).status_code == 404
+        assert zuordnen(_verbinden(welt, "chef", name="Chrome · Windows"), links["mobile.de"]).status_code == 404
+        assert zuordnen(helfer, MOBILE_URL).status_code == 400
+        # 4. aelter als 30 Minuten -> wieder frei
+        alt = (datetime.now(timezone.utc) - timedelta(minutes=31)).isoformat()
+        db.werkzeug_vergleiche.update_one({"id": eintrag["id"]}, {"$set": {"erstellt_am": alt}})
+        assert _inserat(helfer).json()["programm_verglichen"] is None
+        assert zuordnen(helfer, links["mobile.de"]).status_code == 404
+    finally:
+        db.werkzeug_vergleiche.delete_many({"werkzeug": wz.AUTOPOINTER, "user_id": welt["sucher_id"]})
+        db.link_jobs.delete_many({"url": MOBILE_URL})

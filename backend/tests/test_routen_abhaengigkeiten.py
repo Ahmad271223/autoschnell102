@@ -107,6 +107,7 @@ OEFFENTLICH = {
     "/api/werkzeuge/{werkzeug_id}/app-start/{start}",   # 03.10.2026 Nr. 12: Programm-Schluessel statt Anmeldung
     # Browser-Helfer (04.10.2026): Erweiterung mit demselben Schluessel (nur Werkzeuge mit art "browser")
     "/api/werkzeuge/{werkzeug_id}/inserat", "/api/werkzeuge/{werkzeug_id}/marktlage",
+    "/api/werkzeuge/{werkzeug_id}/programm-suche",   # 04.10.2026: Vergleichsseite des Programms desselben Kontos
 }
 # ... davon tragen diese trotzdem eine Kette (Besucher ODER Kaeufer, bzw. der
 # Marktplatz-Schalter) — sie zaehlen nicht als "ganz ohne Abhaengigkeit":

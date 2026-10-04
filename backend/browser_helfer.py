@@ -28,7 +28,7 @@ import statistics
 import zlib
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlparse
 
 #: Grenzen fuer eine eingeschickte Seite (mobile.de-Inserat ~1 MB, gepackt ~200 KB)
 MAX_GEPACKT = 3 * 1024 * 1024
@@ -556,6 +556,37 @@ def autoscout_treffer(html: str, url: str) -> dict:
     gesamt = pp.get("numberOfResults")
     return {"portal": "AutoScout24", "gesamt": gesamt if isinstance(gesamt, int) else None,
             "sortierung": _sortierung_autoscout(url), "treffer": treffer}
+
+
+#: AutoScout24 schreibt die Such-Adresse nach dem Laden um (04.10.2026 im Browser gesehen):
+#:   /lst/volkswagen?atype=C&cat=ma74mo2090&fuel=B&gear=M&kmto=158000&…
+#:   -> /lst/volkswagen/polo/ft_benzin/tr_schaltgetriebe?kmto=158000&…&atype=C
+#: Diese Angaben wandern in den Pfad; alle anderen Filter bleiben (in anderer Reihenfolge) stehen.
+_AUTOSCOUT_IN_DEN_PFAD = frozenset({"cat", "fuel", "gear", "body", "mmvmk0", "mmvmd0", "mmmv"})
+_NIE_VERGLEICHEN = frozenset({"ref"})
+
+
+def _filter(query: str, ohne=frozenset()) -> list:
+    return sorted((k, v) for k, v in parse_qsl(query, keep_blank_values=True)
+                  if k not in _NIE_VERGLEICHEN and k not in ohne)
+
+
+def gleiche_suche(link_url: str, seiten_url: str) -> bool:
+    """Ist die geoeffnete Ergebnisseite genau die Suche aus diesem Link (dieselben Filter, erste Seite)?
+
+    Wunsch Ahmad 04.10.2026: der Helfer wertet auch die Vergleichsseiten aus, die das Windows-Programm geoeffnet
+    hat. Lieber keine Ampel als die Ampel eines anderen Autos: ein geaenderter oder zusaetzlicher Filter, eine
+    andere Seite oder Sortierung passt nicht."""
+    art = ist_vergleichsseite(link_url)
+    if not art or art != ist_vergleichsseite(seiten_url):
+        return False
+    a, b = urlparse(link_url), urlparse(seiten_url)
+    if art == "mobile":
+        return a.path == b.path and _filter(a.query) == _filter(b.query)
+    host = lambda p: (p.hostname or "").lower().removeprefix("www.")
+    marke = lambda p: (p.path.rstrip("/").split("/") + ["", "", ""])[2].lower()
+    return (host(a) == host(b) and marke(a) == marke(b)
+            and _filter(a.query, _AUTOSCOUT_IN_DEN_PFAD) == _filter(b.query, _AUTOSCOUT_IN_DEN_PFAD))
 
 
 def ist_vergleichsseite(url: str) -> Optional[str]:

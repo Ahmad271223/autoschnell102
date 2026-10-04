@@ -17,6 +17,7 @@ Programm (Kopfzeile X-Werkzeug-Schluessel):
 Browser-Helfer (04.10.2026, nur Werkzeuge mit art "browser", Kopfzeile X-Werkzeug-Schluessel):
   POST   /api/werkzeuge/{id}/inserat             Inseratsseite aus dem Browser -> Links, Vertragsdaten, Hinweise
   POST   /api/werkzeuge/{id}/marktlage           Vergleichsseite aus dem Browser -> Platz + Ampel
+  POST   /api/werkzeuge/{id}/programm-suche      gehoert diese Vergleichsseite zu einem Vergleich des Programms?
 Betreiber:
   GET    /api/admin/werkzeug-vergleiche          wer hat wann welches Auto verglichen
   DELETE /api/admin/werkzeug-verbindungen/{uid}  PC eines Kontos trennen
@@ -426,7 +427,7 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     vehicle = wz.fahrzeug_zu_vehicle(f)
     # Befund 04.10.2026: unplausible EZ/km sagen — die Filter bleiben wie eingestellt (wz.plausibel)
     melden = wz.plausibel(f)
-    links, hinweise = wz.vergleichs_links(vehicle, regeln)
+    links, hinweise = wz.vergleichs_links(vehicle, regeln)      # Navi + Beschaedigte wie eingestellt (04.10.)
     if erkannt.pop("aus_beschreibung", False):
         melden.insert(0, f"Modell aus der Beschreibung übernommen: {erkannt['modell']} – bitte kurz prüfen.")
     # "melden": was das Programm (ab 1.5.3) dem Sucher sofort zeigt; aeltere Programme protokollieren die Hinweise
@@ -513,6 +514,26 @@ _marktlage_limiter = SlidingWindowRateLimiter(max_attempts=240, window_seconds=6
 _SEITE_MAX = 4 * 1024 * 1024 + 16
 
 
+#: Wunsch Ahmad 04.10.2026: Programm und Helfer arbeiten zusammen — was das Programm in dieser Zeit verglichen
+#: hat, oeffnet der Helfer nicht noch einmal von selbst (nur auf Knopfdruck); die Vergleichsseiten, die das
+#: Programm geoeffnet hat, wertet der Helfer aus (Ampel).
+ZUSAMMEN_MINUTEN = 30
+
+
+def _seit(minuten: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(minutes=minuten)).isoformat()
+
+
+async def _programm_vergleich(user: dict, inserat_url: str) -> Optional[dict]:
+    """Letzter Vergleich DIESES Kontos im Windows-Programm zu diesem Inserat (ZUSAMMEN_MINUTEN), sonst None."""
+    if not inserat_url:
+        return None
+    return await db[wz.SAMMLUNG_VERGLEICHE].find_one(
+        {"werkzeug": wz.AUTOPOINTER, "user_id": user["id"], "probelauf": {"$ne": True},
+         "fahrzeug.inserat_url": inserat_url, "erstellt_am": {"$gte": _seit(ZUSAMMEN_MINUTEN)}},
+        {"_id": 0, "id": 1, "erstellt_am": 1}, sort=[("erstellt_am", -1)])
+
+
 def _browser_werkzeug(werkzeug_id: str) -> None:
     _wid_pruefen(werkzeug_id)
     if wz.art(werkzeug_id) != "browser":
@@ -564,12 +585,15 @@ async def werkzeug_inserat(werkzeug_id: str, body: InseratIn,
     inserat_url = wz.inserat_url(identity["source"], identity["item_id"], identity["item_id"]) or body.url.strip()
     await bh.inserat_merken(db, identity, inserat_url, fahrzeug, user)
     profil, regeln = await _firmenregeln(user)
-    # Wunsch Ahmad 04.10.2026: "beschädigte direkt nicht anzeigen" — die Vergleichsseiten filtern Unfall-/beschaedigte
-    # Autos schon beim Portal weg (mobile.de dam=0, AutoScout24 damaged_listing=exclude), egal was die Firmenregel sagt.
-    # Was trotzdem durchrutscht (Export, Neuwagen, Lockangebote …), sortiert /marktlage aus.
-    regeln = {**regeln, "damage": {"mode": "no_accident"}}
-    links, hinweise = wz.vergleichs_links(fahrzeug, regeln, navi_ignorieren=False)
+    # Wunsch Ahmad 04.10.2026 (abends): immer an die AutoSchnell-Einstellungen halten — Beschaedigte und Navi wie
+    # eingestellt (vorher hier immer "ohne Beschaedigte"). Was trotzdem durchrutscht (Unfall, Export, Neuwagen,
+    # Lockangebote …), sortiert /marktlage fuer die Ampel weiter aus.
+    links, hinweise = wz.vergleichs_links(fahrzeug, regeln)
     kurz = bh.fahrzeug_kurz(fahrzeug, identity, inserat_url)
+    # wie im Programm: unplausible EZ/km sagen (Filter bleiben wie eingestellt)
+    melden = wz.plausibel(kurz)
+    hinweise = melden + hinweise
+    programm = await _programm_vergleich(user, inserat_url)
     verhandlung = bh.verhandlung_hinweise(fahrzeug)
     vergleich_id = str(uuid.uuid4())
     await db[wz.SAMMLUNG_VERGLEICHE].insert_one({
@@ -581,7 +605,9 @@ async def werkzeug_inserat(werkzeug_id: str, body: InseratIn,
     return {"vergleich_id": vergleich_id, "links": links, "hinweise": hinweise, "profil": profil,
             "fahrzeug": kurz, "inserat_url": inserat_url,
             "app_pfad": "/app/vergleich?url=" + quote(inserat_url, safe=""),
-            "portal_bewertung": bewertung, "verhandlung": verhandlung,
+            "portal_bewertung": bewertung, "verhandlung": verhandlung, "melden": melden,
+            # das Programm hat dieses Auto gerade verglichen -> der Helfer oeffnet nichts von selbst
+            "programm_verglichen": programm["erstellt_am"] if programm else None,
             "verkaeufer": {"name": fahrzeug.get("seller_name") or "", "art": fahrzeug.get("seller_type") or ""}}
 
 
@@ -605,8 +631,9 @@ async def werkzeug_marktlage(werkzeug_id: str, body: MarktlageIn,
     art = bh.ist_vergleichsseite(body.url.strip())
     if not art:
         raise HTTPException(400, "Das ist keine Vergleichsseite von mobile.de oder AutoScout24.")
+    # eigener Vergleich oder einer des Windows-Programms DESSELBEN Kontos (programm-suche, 04.10.2026)
     doc = await db[wz.SAMMLUNG_VERGLEICHE].find_one(
-        {"id": body.vergleich_id, "werkzeug": werkzeug_id, "user_id": user["id"]},
+        {"id": body.vergleich_id, "werkzeug": {"$in": [werkzeug_id, wz.AUTOPOINTER]}, "user_id": user["id"]},
         {"_id": 0, "id": 1, "fahrzeug": 1, "links": 1})
     if doc is None:
         raise HTTPException(404, "Vergleich nicht gefunden.")
@@ -628,6 +655,40 @@ async def werkzeug_marktlage(werkzeug_id: str, body: MarktlageIn,
     await db[wz.SAMMLUNG_VERGLEICHE].update_one(
         {"id": doc["id"]}, {"$set": {f"marktlage.{'mobile' if art == 'mobile' else 'autoscout'}": lage}})
     return lage
+
+
+class ProgrammSucheIn(BaseModel):
+    url: str = Field(..., max_length=4096)
+
+
+@router.post("/werkzeuge/{werkzeug_id}/programm-suche")
+async def werkzeug_programm_suche(werkzeug_id: str, body: ProgrammSucheIn,
+                                  schluessel: Optional[str] = Header(None, alias=wz.TOKEN_KOPF),
+                                  version: Optional[str] = Header(None, alias="X-Werkzeug-Version")):
+    """Wunsch Ahmad 04.10.2026: eine Vergleichsseite, die der Helfer NICHT selbst geoeffnet hat — stammt sie aus
+    einem Vergleich des Windows-Programms DIESES Kontos (letzte 30 min, dieselbe Suche)? Dann bekommt die
+    Erweiterung die Vergleichs-ID fuer /marktlage und das Auto fuer die Box. Nur die Adresse kommt her, die
+    Seite erst bei einem Treffer."""
+    import browser_helfer as bh
+    _browser_werkzeug(werkzeug_id)
+    user, v, _firma_doc, _abo = await _programm(werkzeug_id, schluessel, _programm_version(None, version))
+    if not await _marktlage_limiter.check(f"verbindung:{v['id']}"):
+        raise HTTPException(429, "Zu viele Vergleichsseiten in kurzer Zeit – bitte kurz warten.")
+    url = body.url.strip()
+    art = bh.ist_vergleichsseite(url)
+    if not art:
+        raise HTTPException(400, "Das ist keine Vergleichsseite von mobile.de oder AutoScout24.")
+    portal = "mobile.de" if art == "mobile" else "AutoScout24"
+    async for doc in db[wz.SAMMLUNG_VERGLEICHE].find(
+            {"werkzeug": wz.AUTOPOINTER, "user_id": user["id"], "probelauf": {"$ne": True},
+             "erstellt_am": {"$gte": _seit(ZUSAMMEN_MINUTEN)}},
+            {"_id": 0, "id": 1, "fahrzeug": 1, "links": 1, "erstellt_am": 1}).sort("erstellt_am", -1).limit(50):
+        if any(l.get("portal") == portal and bh.gleiche_suche(l.get("url") or "", url) for l in doc.get("links") or []):
+            f = doc.get("fahrzeug") or {}
+            return {"vergleich_id": doc["id"], "portal": portal,
+                    "fahrzeug": {k: f.get(k) for k in ("marke", "modell", "titel", "ez_monat", "ez_jahr", "kilometer",
+                                                       "ps", "preis", "inserat_url")}}
+    raise HTTPException(404, "Kein passender Vergleich des Programms.")
 
 
 # ---------------------------------------------------------------- App-Start (Nr. 12)

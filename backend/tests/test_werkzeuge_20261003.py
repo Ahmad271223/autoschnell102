@@ -269,12 +269,15 @@ def test_21_unbekanntes_modell_keine_suche_nur_nach_marke():
     assert any("kein AutoScout24-Vergleich" in h for h in hinweise)
 
 
-def test_22_programm_filtert_nie_nach_navi():
-    # Wunsch Ahmad 03.10.2026: im Programm kein Navi-Filter, auch wenn die Firma "Navi mitvergleichen" an hat
+def test_22_programm_navi_wie_eingestellt():
+    # 03.10.2026 war im Programm der Navi-Filter immer aus. Wunsch Ahmad 04.10.2026 (abends): "immer an die
+    # AutoSchnell-Regeln halten" — "Navi wenn vorhanden" filtert auch im Programm, "egal" nicht.
     v = wz.fahrzeug_zu_vehicle({**POLO, "titel": "VW Polo 1.4 Navi Klima"})
     import mobile_service as ms
-    assert "NAVIGATION_SYSTEM" in ms.build_search_url(v, AHMADS_REGELN)     # App-Vergleich: bleibt wie er ist
     links, _ = wz.vergleichs_links(v, AHMADS_REGELN)
+    assert links[0]["portal"] == "mobile.de" and links[0]["url"] == ms.build_search_url(v, AHMADS_REGELN)
+    assert "NAVIGATION_SYSTEM" in links[0]["url"]
+    links, _ = wz.vergleichs_links(v, {**AHMADS_REGELN, "navi": {"mode": "ignore"}})
     assert links and all("NAVIGATION" not in x["url"] and "navi" not in x["url"].lower() for x in links)
     assert AHMADS_REGELN["navi"] == {"mode": "wenn_vorhanden"}              # Firmenregeln nicht veraendert
 
