@@ -258,8 +258,8 @@ async def beweis_anfordern(body: AnforderungIn, user=Depends(current_firma)):
         # damit geht das Beweisdokument auch danach noch, und nur fuer ihn.
         eintrag = await _stand_aus_eigenem_vertrag(user, schluessel) or eintrag
         daten = (eintrag or {}).get("data") or None
-    if not daten and await db.werkzeug_inserate.count_documents(
-            {"cache_key": schluessel, "dealer_id": user["dealer_id"]}, limit=1):
+    # (seit 04.10. abends auch Browserdaten eines anderen Kontos — Zugriff ist oben schon geprueft)
+    if not daten and await db.werkzeug_inserate.count_documents({"cache_key": schluessel}, limit=1):
         # Browser-Helfer (04.10.2026, Wunsch Ahmad: Fotos ins Beweisdokument, wenn man eins erstellt): Die Daten
         # aus dem Browser zaehlen als Beweis nicht (RP-446). Auf Knopfdruck holt der Server das Inserat deshalb
         # EINMAL selbst (zaehlt fuers Tageslimit, Apify nur hier) — das Dokument entsteht aus diesem echten Abruf.

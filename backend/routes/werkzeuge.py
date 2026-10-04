@@ -505,7 +505,7 @@ async def _vorab_abrufen(user: dict, url: Optional[str]) -> dict:
 # ---------------------------------------------------------------- Browser-Helfer (04.10.2026)
 # Wunsch Ahmad 04.10.2026: eigene Erweiterung fuer Chrome/Edge. Beim Oeffnen eines Inserats schickt sie die
 # Seite (gzip, base64) — der Server baut die Vergleichslinks mit den Firmenregeln, merkt die Daten fuer den
-# Kaufvertrag (nur fuer DIESES Konto, browser_helfer.inserat_merken) und gibt Hinweise zurueck. Die
+# Kaufvertrag (browser_helfer.inserat_merken; seit 04.10. abends fuer alle Konten) und gibt Hinweise zurueck. Die
 # Vergleichsseite, die die Erweiterung danach oeffnet, kommt ueber /marktlage zurueck: Platz + Ampel.
 # Kein Apify-Abruf, kein Tageslimit, keine KI.
 _inserat_limiter = SlidingWindowRateLimiter(max_attempts=120, window_seconds=60, name="werkzeug_inserat")

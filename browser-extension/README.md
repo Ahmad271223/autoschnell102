@@ -13,7 +13,8 @@ Seit Version 2.0.0 (04.10.2026) macht die Erweiterung zwei Dinge:
    eintippen. Ein Konto = ein Browser (wie beim AutoPointer-Programm ein PC); Abo-Pflicht.
 2. Inserat öffnen → `portal.js` packt die Seite (gzip) → `POST /api/werkzeuge/browser-helfer/inserat`.
    Der Server liest sie aus (`backend/browser_helfer.py`), baut die Vergleichslinks mit den Firmenregeln,
-   merkt Inserat + Verkäuferdaten **nur für dieses Konto** (24 h, `werkzeug_inserate`) und schreibt das
+   merkt Inserat + Verkäuferdaten 24 h (`werkzeug_inserate`, seit 04.10. abends für **alle** Konten — wer
+   den Link direkt in AutoSchnell einfügt, braucht dann keinen Apify-Abruf) und schreibt das
    Protokoll (`werkzeug_vergleiche`, Chef-Übersicht, „Deine letzten Autos“).
 3. Die Vergleiche gehen als Hintergrund-Tabs auf (abschaltbar im Symbol-Fenster). Inserate, die aus einer
    dieser Vergleichsseiten geöffnet werden, öffnen **keine** neuen Vergleiche (nur Knopf).
@@ -41,7 +42,7 @@ Seit Version 2.0.0 (04.10.2026) macht die Erweiterung zwei Dinge:
    - Knopf **Vergleich öffnen** immer in der Box und im Fenster am AutoSchnell-Symbol (auch bei zugemachter
      Box) — öffnet die Vergleiche trotzdem.
 6. Knopf **Kaufvertrag** → `/app/vergleich?url=…&vertrag=1`: das Vertragsfenster geht gleich auf, alles
-   aus der Seite eingetragen. `/listings/check` und `/mobile/compare` nehmen die Browserdaten dieses Kontos:
+   aus der Seite eingetragen. `/listings/check` und `/mobile/compare` nehmen die Browserdaten (jedes Konto):
    kein Apify-Abruf, kein Tageslimit. Beweisdokument gibt es für Browserdaten nicht (nur nach Server-Abruf).
    **Immer die installierte App** (Wunsch Ahmad): offenes App-Fenster → nach vorne, Ziel über `content.js`
    (kein Neuladen); App installiert, aber zu → Start über `web+autoschnell:` (protocol_handlers im

@@ -4417,10 +4417,15 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
 - Freigabe: `BROWSER_HELFER_KUNDEN` (Standard `10001,10002`, `docker-compose.yml`; leer = niemand).
 - Inserat öffnen → `POST /api/werkzeuge/browser-helfer/inserat` (Seite gzip+base64, Schlüssel-Kopfzeile). Der Server
   wertet aus (`backend/browser_helfer.py`; mobile.de-Datenstrom = Apify-Format, AutoScout `__NEXT_DATA__`,
-  Kleinanzeigen-Parser), baut die Links mit den Firmenregeln (Navi-Regel wie in der App) und merkt die Daten **nur für
-  dieses Konto** 24 h in `werkzeug_inserate` (TTL, Firmen-/Kontolöschung). `/mobile/compare` nimmt sie für dieses Konto
-  statt eines Abrufs — kein Apify, kein Tageslimit, auch ohne Anbieter-Zugang; ein frischer Server-Abruf im Speicher
-  hat Vorrang (nur dafür gibt es ein Beweisdokument).
+  Kleinanzeigen-Parser), baut die Links mit den Firmenregeln (Navi-Regel wie in der App) und merkt die Daten 24 h in
+  `werkzeug_inserate` (TTL, Firmen-/Kontolöschung, mit Konto + Firma des Lieferers). `/listings/check` und
+  `/mobile/compare` nehmen sie statt eines Abrufs — kein Apify, kein Tageslimit, auch ohne Anbieter-Zugang; ein
+  frischer Server-Abruf im Speicher hat Vorrang. **Seit 04.10.2026 abends für ALLE Konten und Firmen**
+  (Entscheidung Ahmad „alle sofort“, löst A-01/A-02 aus dem Prüfbericht 20.09. bewusst ab): wer den Link direkt in
+  AutoSchnell einfügt oder das Windows-Programm nutzt (Vorab-Abruf), bekommt die jüngste Lesung — erst die eigene.
+  Risiko: eine gezielt gefälschte Seite erreicht fremde Kaufverträge; dagegen liest der Server die Seite selbst,
+  prüft die Inserat-Nummer, Marke und Preis, und `vehicle_comparisons.browser_helfer_von` hält fest, wer geliefert
+  hat (nie in einer Antwort). Beweisdokument nur per Server-Abruf auf Knopfdruck (RP-446).
 - Die selbst geöffneten Vergleichsseiten kommen über `POST …/marktlage` zurück: Platz unter allen Treffern + Ampel
   (grün ≤ 25 % günstiger, gelb ≤ 50 %, rot darüber; Werbeplätze zählen nicht), gespeichert unter
   `werkzeug_vergleiche.marktlage`. Keine KI, keine Kosten. Seit 2.1.0: Unfall/defekt/Export/Neuwagen/Lockangebote

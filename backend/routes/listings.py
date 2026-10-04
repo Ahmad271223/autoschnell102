@@ -627,10 +627,10 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     source = identity["source"]
     item_id = identity["item_id"]
 
-    # Browser-Helfer (04.10.2026, Wunsch Ahmad): Hat die Erweiterung DIESES Kontos das Inserat gerade
-    # gelesen, stehen die Daten schon da — kein Apify-Abruf, kein Tageslimit, kein Warten, und es geht auch
-    # ohne Anbieter-Zugang. Nur fuer dieses Konto (A-01/A-02: nie fuer Kollegen) und nur ohne frischen
-    # Server-Abruf im Speicher (der hat Vorrang, weil es nur dafuer ein Beweisdokument gibt).
+    # Browser-Helfer (04.10.2026, Wunsch Ahmad): Hat der Helfer das Inserat in den letzten 24 h gelesen, stehen
+    # die Daten schon da — kein Apify-Abruf, kein Tageslimit, kein Warten, und es geht auch ohne Anbieter-Zugang.
+    # Seit 04.10. abends fuer ALLE Konten (Entscheidung Ahmad "alle sofort", browser_helfer.inserat_lesen: das
+    # eigene zuerst, sonst die juengste Lesung). Nur ohne frischen Server-Abruf im Speicher (der hat Vorrang).
     from browser_helfer import inserat_lesen
     helfer = await inserat_lesen(db, identity["cache_key"], user.get("id") or "")
     if helfer is not None and await db.listings_cache.count_documents(
@@ -668,6 +668,8 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     # compare erneut auf -> Treffer (global oder eigene Quarantaene).
     client_hit = (helfer[0], "browser_helfer") if helfer is not None else None
     helfer_gelesen_am = helfer[1] if helfer is not None else None
+    # wer die Browserdaten geliefert hat, wenn es nicht dieses Konto war (nur gespeichert, nie angezeigt)
+    helfer_von = helfer[2] if helfer is not None and helfer[2].get("user_id") != user.get("id") else None
     rueckfall_gebucht = False
     if client_hit is None and source == "kleinanzeigen" and _erweiterung_noetig():
         # Nachpruefung Runde 14 (Nr. 86): ERST den Cache pruefen, DANN den
@@ -815,6 +817,8 @@ async def compare(body: CompareIn, background: BackgroundTasks,
         "user_id": user["id"],
         "created_at": now_iso(),
         "expires_at_dt": expires_at,
+        # Entscheidung Ahmad 04.10.2026: Browserdaten eines anderen Kontos genommen -> wer sie geliefert hat
+        **({"browser_helfer_von": helfer_von} if helfer_von else {}),
     })
     await log_activity_sicher(user["dealer_id"], user["id"], "vergleich.gestartet", ref=ad_id,
                        meta={"kollege": kollege["user_id"]} if kollege else None)
@@ -1242,8 +1246,9 @@ async def listing_pruefen(body: ListingURLIn, user: dict, *, vorab_warten_s: Opt
     except ListingIdentityError as exc:
         raise HTTPException(400, str(exc) or "Ungültige URL.")
     source = identity["source"]
-    # Browser-Helfer (04.10.2026, Wunsch Ahmad "Kaufvertrag ohne Apify"): Hat die Erweiterung DIESES Kontos das
-    # Inserat gerade gelesen, ist es fertig — kein Hintergrundjob, kein Apify, auch ohne Anbieter-Zugang.
+    # Browser-Helfer (04.10.2026, Wunsch Ahmad "Kaufvertrag ohne Apify"): Hat der Helfer IRGENDEINES Kontos das
+    # Inserat in den letzten 24 h gelesen (seit 04.10. abends fuer alle), ist es fertig — kein Hintergrundjob,
+    # kein Apify, auch ohne Anbieter-Zugang. Das gilt auch fuer den Vorab-Abruf des Windows-Programms.
     # /mobile/compare nimmt danach dieselben Browserdaten (oder einen frischen Server-Speicher, falls vorhanden).
     from browser_helfer import inserat_lesen
     if await inserat_lesen(db, identity["cache_key"], user.get("id") or "") is not None:
