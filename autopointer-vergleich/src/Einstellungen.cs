@@ -163,12 +163,36 @@ internal static class Autostart
         catch { return false; }
     }
 
+    /// <summary>Pruefung 04.10.2026: Wert des Autostart-Eintrags fuer diese Programmdatei.</summary>
+    internal static string Wert(string pfad) => $"\"{pfad}\" --autostart";
+
+    /// <summary>Muss ein vorhandener Autostart-Eintrag auf die laufende Datei umgestellt werden? (rein, fuer Tests)</summary>
+    internal static bool MussNachziehen(string? eintrag, string? pfad) =>
+        eintrag != null && !string.IsNullOrEmpty(pfad)
+        && !string.Equals(eintrag.Trim(), Wert(pfad), StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Pruefung 04.10.2026: Wer ein Update an anderer Stelle speichert ("AutoSchnell-Vergleich (1).exe" in
+    /// Downloads), bekam beim naechsten Windows-Start wieder die ALTE Datei — der Eintrag zeigte auf deren Pfad.
+    /// Ist der Autostart an, zeigt er jetzt beim Programmstart immer auf die laufende Datei. Aus bleibt aus.</summary>
+    public static void PfadNachziehen()
+    {
+        try
+        {
+            using var k = Registry.CurrentUser.OpenSubKey(Schluessel, writable: true);
+            string? pfad = Environment.ProcessPath;
+            if (k == null || !MussNachziehen(k.GetValue(Name) as string, pfad)) return;
+            k.SetValue(Name, Wert(pfad!));
+            Protokoll.Schreibe("Autostart zeigt jetzt auf diese Programmdatei: " + pfad);
+        }
+        catch (Exception ex) { Protokoll.Schreibe("Autostart nicht nachgezogen: " + ex.Message); }
+    }
+
     public static void Setzen(bool an)
     {
         if (an == IstAn()) return;
         using var k = Registry.CurrentUser.OpenSubKey(Schluessel, writable: true);
         if (k == null) return;
-        if (an) k.SetValue(Name, $"\"{Environment.ProcessPath}\" --autostart");
+        if (an) k.SetValue(Name, Wert(Environment.ProcessPath ?? ""));
         else k.DeleteValue(Name, throwOnMissingValue: false);
     }
 }

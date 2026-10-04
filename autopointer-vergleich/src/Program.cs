@@ -48,6 +48,7 @@ internal static class Program
                 "AutoPointer-Vergleich", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return 0;
         }
+        Autostart.PfadNachziehen();      // Pruefung 04.10.2026: nach einem Update an anderer Stelle
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         Application.ThreadException += (_, e) => Protokoll.Schreibe("Fehler: " + e.Exception);
