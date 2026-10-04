@@ -263,7 +263,7 @@ async def beweis_anfordern(body: AnforderungIn, user=Depends(current_firma)):
         # Browser-Helfer (04.10.2026, Wunsch Ahmad: Fotos ins Beweisdokument, wenn man eins erstellt): Die Daten
         # aus dem Browser zaehlen als Beweis nicht (RP-446). Auf Knopfdruck holt der Server das Inserat deshalb
         # EINMAL selbst (zaehlt fuers Tageslimit, Apify nur hier) — das Dokument entsteht aus diesem echten Abruf.
-        return await _beweis_mit_serverabruf(user, schluessel, fahrzeug)
+        return await _beweis_mit_serverabruf(user, schluessel)
     if not daten and await db.listings_cache_client.count_documents(
             {"cache_key": schluessel, "dealer_id": user["dealer_id"]}, limit=1):
         # Rollenpruefung 22.09.2026 (RP-446): Per Browser-Erweiterung geladene
@@ -310,16 +310,17 @@ BEWEIS_SERVERABRUF_HINWEIS = (
     "Browser zählen als Beweis nicht. Das Dokument ist in ein bis drei Minuten fertig.")
 
 
-async def _beweis_mit_serverabruf(user: dict, schluessel: str, fahrzeug: Optional[dict]) -> dict:
+async def _beweis_mit_serverabruf(user: dict, schluessel: str) -> dict:
     """Browser-Helfer-Auto: Link-Job (gleiche Regeln wie das Einfuegen in der App: Warteschlange je Konto,
     Tageslimit, ein Abruf je Inserat) + Beweis ohne eingefrorene Daten — der Worker nimmt den Stand aus dem
-    gemeinsamen Speicher, sobald der Abruf fertig ist (bis zu MAX_VERSUCHE mit wachsender Pause)."""
+    gemeinsamen Speicher, sobald der Abruf fertig ist (bis zu MAX_VERSUCHE mit wachsender Pause).
+    Befund 155: nichts aus den (in der Akte korrigierbaren) Fahrzeugdaten — die Adresse kommt nur aus der
+    Inseratskennung."""
     from datetime import datetime, timedelta, timezone
     import werkzeuge as wz
     from link_jobs import JobRace, WarteschlangeVoll, anstossen, enqueue_job
     quelle, _, item_id = schluessel.partition(":")
-    daten = (fahrzeug or {}).get("data") or {}
-    url = wz.inserat_url(quelle, item_id, item_id) or daten.get("detail_url") or daten.get("kleinanzeigen_url") or ""
+    url = wz.inserat_url(quelle, item_id, item_id) or ""
     if not url:
         raise HTTPException(404, "Zu diesem Inserat ist keine Adresse bekannt — bitte den Link neu vergleichen.")
     try:
