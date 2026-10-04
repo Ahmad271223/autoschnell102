@@ -108,7 +108,8 @@ def test_freigabe_link_folgt_der_aktuellen_fassung_und_alte_links_laufen_weiter(
     doc = run(db.generated_pdfs.find_one({"id": "c1"}))
     assert doc["freigabe"]["version"] == 2 and doc["freigabe"]["token"] in link
     assert doc["freigabe"]["token"] != "alt-token-xyz"
-    # der alte, noch laufende Link ist historisiert (bleibt abrufbar)
+    # der alte, noch laufende Link ist historisiert (seit 04.10.2026, Nr. 26: nur
+    # noch fuer die Meldung "Fassung ersetzt", nicht mehr abrufbar)
     assert [f["token"] for f in doc.get("freigabe_alt") or []] == ["alt-token-xyz"]
     # ein gueltiger Link derselben Fassung wird wiederverwendet
     link2, _ = run(C._freigabe_link("c1", bereich, CHEF))

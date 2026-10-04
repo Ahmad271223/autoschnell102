@@ -4442,8 +4442,7 @@ POST /dealer/sucher-zugaenge-anfrage (nur Chef). Gespeichert als `plan_requests`
 ## Prüfung 04.10.2026: Versand, KI-Budget, Termine, Vorschau, Druck-PDF, Indizes
 
 Externe Liste (44 Punkte) gegen den Code geprüft; umgesetzt wurde alles, was keine Entscheidung braucht.
-Offen für Ahmad: Nr. 37 (neue Fassung ohne Abo – bisher bewusst erlaubt), Nr. 26 (alter WhatsApp-Link gilt
-14 Tage weiter), Nr. 38/39 (Abhol-KI rechnet beim Öffnen nach KI-Update/7 Tagen neu), Ausgabenlimit in der
+Offen für Ahmad: Nr. 37 (neue Fassung ohne Abo – bisher bewusst erlaubt), Nr. 38/39 (Abhol-KI rechnet beim Öffnen nach KI-Update/7 Tagen neu), Ausgabenlimit in der
 Anthropic-Konsole (Nr. 16/17, harter Schutz gegen Preisänderungen). Bewusst nicht umgebaut (groß, nicht
 nötig): Mail-Outbox, KI-Warteschlange, PDFs nach R2 (Fotos stecken nicht im PDF, Verträge sind KB groß).
 
@@ -4474,5 +4473,11 @@ nötig): Mail-Outbox, KI-Warteschlange, PDFs nach R2 (Fotos stecken nicht im PDF
   `mail_idempotenz.key` brechen den Produktionsstart ab, wenn sie fehlen. **Vor dem Ausrollen einmal auf
   prod2 prüfen:** `docker compose exec backend python -X utf8 scripts/dubletten_pruefen.py` → muss
   „Keine Dubletten.“ melden (sonst bleibt der Server beim Rollout im Drain, prod1 läuft weiter).
+- **Alter WhatsApp-Link (Nr. 26, Entscheidung Ahmad 04.10.):** gibt es eine neue Fassung (Preis, Verkäufer,
+  Fahrzeug, Bedingungen, auch ein verschobener Abholtermin), ist der Link der alten Fassung SOFORT ungültig —
+  410 mit „Dieser Kaufvertrag wurde inzwischen geändert … bitte beim Händler die aktuelle Fassung anfordern“.
+  Vorher lieferte er bis zu 14 Tage die archivierte Fassung. Im Browser kommt eine lesbare Seite statt JSON
+  (eigene CSP nur mit der Prüfsumme ihres Style-Blocks). `freigabe_alt` dient nur noch dieser Meldung.
+  Der Sucher schickt die neue Fassung wie bisher über „Senden“ (Korrektur-Vorlage).
 - Tests: `backend/tests/test_pruefung_20261004_*.py`, `frontend/src/components/SendDialog.doppelversand.test.jsx`.
   Keine neuen Umgebungswerte, keine Migration.

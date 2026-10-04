@@ -269,7 +269,7 @@ def test_10_link_ist_an_die_verschickte_fassung_gebunden(welt):
     """Runde 18 (Hoch): Der verschickte Link muss die Fassung liefern, die
     verschickt wurde. Wird der Vertrag danach neu erzeugt (verschobener
     Abholtermin), zeigte derselbe Link vorher stillschweigend einen anderen
-    Vertragsinhalt."""
+    Vertragsinhalt. Seit 04.10.2026 (Nr. 26): dann ist er ungueltig (410)."""
     dbx = _db()
     # Frischer Vertrag mit Abholtermin (der erzeugt den Termin automatisch)
     # Rollenpruefung 22.09.2026 (RP-416): weiterer Vertrag des Chefs zu
@@ -298,12 +298,15 @@ def test_10_link_ist_an_die_verschickte_fassung_gebunden(welt):
     assert r.status_code == 200, r.text[:300]
     assert int(dbx.generated_pdfs.find_one({"id": cid}).get("version") or 1) == 2
 
-    # Der bereits verschickte Link liefert weiterhin die alte Fassung
+    # Entscheidung Ahmad 04.10.2026 (Pruefung Nr. 26): der bereits verschickte Link
+    # ist mit der neuen Fassung sofort ungueltig (vorher: lieferte 14 Tage die alte).
+    # Er zeigt also weiterhin nie einen anderen Vertragsinhalt — sondern gar keinen.
     alt = requests.get(_lokal(link_v1), timeout=60)
-    assert alt.status_code == 200 and alt.content[:4] == b"%PDF"
-    f_alt = _flach(_text(alt.content))
-    assert "01.05.2099" in f_alt and "09.05.2099" not in f_alt, \
-        "der verschickte Link darf keinen anderen Vertragsinhalt zeigen"
+    assert alt.status_code == 410 and alt.content[:4] != b"%PDF"
+    assert "nicht mehr gültig" in alt.json()["detail"]
+    seite = requests.get(_lokal(link_v1), headers={"Accept": "text/html"}, timeout=60)
+    assert seite.status_code == 410 and "text/html" in seite.headers["content-type"]
+    assert "aktuelle Fassung anfordern" in seite.text
 
     # Der naechste Versand erzeugt einen NEUEN Link auf die neue Fassung
     r = requests.post(f"{API}/contracts/{cid}/send", headers=welt["H"],

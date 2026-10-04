@@ -762,9 +762,10 @@ async def _freigabe_link(contract_id: str, bereich: dict, user: dict) -> tuple[s
     # Runde 16 (15.09.2026): (a) verliert der CAS, wird komplett neu gelesen und
     # die dann gespeicherte Freigabe gegen die AKTUELLE Fassung geprueft — sonst
     # bekam ein neuer Versand nach einem Versions-Race den Link der alten
-    # Fassung; (b) ein noch laufender alter Link wandert in freigabe_alt und
-    # bleibt bis zu seinem Ablauf abrufbar (die Zusage im Chat wird nicht
-    # gebrochen).
+    # Fassung; (b) ein noch laufender alter Link wandert in freigabe_alt.
+    # Entscheidung Ahmad 04.10.2026 (Pruefung Nr. 26): abrufbar ist er dort NICHT
+    # mehr — er dient nur noch dazu, dem Verkaeufer "Fassung ersetzt" statt
+    # "Link ungueltig" zu sagen (public_vertrag_pdf).
     for _ in range(4):
         c = await db.generated_pdfs.find_one({"id": contract_id, **bereich},
                                              {"_id": 0, "freigabe": 1, "version": 1})
@@ -2260,7 +2261,60 @@ async def get_contract_pdf(contract_id: str, user=Depends(current_firma),
     )
 
 
+#: Entscheidung Ahmad 04.10.2026 (Pruefung Nr. 26): Sobald es eine neue Fassung gibt (Preis, Verkaeufer,
+#: Fahrzeug, Bedingungen, Schaeden, auch ein verschobener Abholtermin — das Datum steht im Vertrag), ist der
+#: Link der alten Fassung sofort ungueltig. Vorher lieferte er bis zu 14 Tage weiter die alte Fassung, und der
+#: Verkaeufer konnte zwei verschiedene, funktionierende Vertraege in der Hand haben.
+FASSUNG_ERSETZT_TEXT = ("Dieser Kaufvertrag wurde inzwischen geändert — diese Fassung ist nicht mehr gültig. "
+                        "Bitte beim Händler die aktuelle Fassung anfordern.")
+
+
+_FEHLERSEITE_STIL = ("body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;"
+                     "background:#f6f7f9;color:#1d232b;margin:0;padding:48px 16px}"
+                     "main{max-width:520px;margin:0 auto;background:#fff;border:1px solid #e3e6eb;"
+                     "border-radius:12px;padding:28px 24px}h1{font-size:20px;margin:0 0 12px}"
+                     "p{font-size:16px;line-height:1.5;margin:0}")
+
+
+def _fehlerseite_csp() -> str:
+    """Die API-Antworten tragen default-src 'none' (server.py) — die Seite darf genau IHREN Style-Block
+    (Pruefsumme), sonst nichts: keine Skripte, keine fremden Quellen."""
+    import hashlib
+    summe = base64.b64encode(hashlib.sha256(_FEHLERSEITE_STIL.encode("utf-8")).digest()).decode()
+    return f"default-src 'none'; style-src 'sha256-{summe}'; frame-ancestors 'none'"
+
+
+def _lesbare_fehlerseite(route):
+    """Pruefung 04.10.2026 (Nr. 26): Der Verkaeufer oeffnet den Link im Handy-Browser — Fehler kamen dort
+    als roher JSON-Text an. Fragt ein Browser (Accept: text/html), gibt es eine kleine lesbare Seite mit
+    demselben Status; API-Aufrufer (Tests, Skripte) bekommen weiter das JSON."""
+    import functools
+    import html as _html
+
+    @functools.wraps(route)
+    async def mit_seite(token: str, request: Request):
+        try:
+            return await route(token, request)
+        except HTTPException as exc:
+            if "text/html" not in (request.headers.get("accept") or "").lower():
+                raise
+            from fastapi.responses import HTMLResponse
+            text = exc.detail if isinstance(exc.detail, str) else "Dieser Link ist nicht gültig."
+            seite = ("<!doctype html><html lang=\"de\"><head><meta charset=\"utf-8\">"
+                     "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+                     "<meta name=\"robots\" content=\"noindex\"><title>Kaufvertrag</title>"
+                     f"<style>{_FEHLERSEITE_STIL}</style></head><body><main>"
+                     "<h1>Kaufvertrag nicht verfügbar</h1>"
+                     f"<p>{_html.escape(text)}</p></main></body></html>")
+            return HTMLResponse(seite, status_code=exc.status_code,
+                                headers={**(exc.headers or {}), "Cache-Control": "no-store",
+                                         "X-Robots-Tag": "noindex",
+                                         "Content-Security-Policy": _fehlerseite_csp()})
+    return mit_seite
+
+
 @router.get("/public/vertrag/{token}")
+@_lesbare_fehlerseite
 async def public_vertrag_pdf(token: str, request: Request):
     """Digitale Vertragsfassung ueber den Download-Link aus der WhatsApp-
     Nachricht — OHNE Anmeldung, nur mit gueltigem Token (siehe
@@ -2268,9 +2322,10 @@ async def public_vertrag_pdf(token: str, request: Request):
     in Loeschung = 404.
 
     Runde 18: Der Link ist an die FASSUNG gebunden, die verschickt wurde
-    (freigabe.version). Wird der Vertrag danach neu erzeugt (verschobener
-    Abholtermin), liefert derselbe Link weiterhin die archivierte Fassung —
-    vorher zeigte er stillschweigend einen anderen Vertragsinhalt.
+    (freigabe.version) — er zeigt nie einen anderen Vertragsinhalt.
+    Entscheidung Ahmad 04.10.2026 (Pruefung Nr. 26): gibt es inzwischen eine
+    neue Fassung, ist der alte Link sofort ungueltig (410, FASSUNG_ERSETZT_TEXT)
+    statt bis zu 14 Tage die archivierte Fassung zu liefern.
 
     Gezaehlt wird ein ANONYMER Linkabruf. Wer den Link hat, kann ihn oeffnen;
     das ist kein Nachweis, dass der Verkaeufer das Dokument gesehen hat."""
@@ -2289,8 +2344,8 @@ async def public_vertrag_pdf(token: str, request: Request):
         raise HTTPException(404, "Link ungültig oder Vertrag nicht mehr vorhanden")
     freigabe = c.get("freigabe") or {}
     if freigabe.get("token") != token:
-        # Runde 16: ein aelterer, noch laufender Link — er liefert weiterhin
-        # die damals verschickte Fassung (Zusage im Chat bleibt gueltig).
+        # Ein aelterer Link (Runde 16: in freigabe_alt) — seit 04.10.2026 nur noch,
+        # um "Fassung ersetzt" statt "Link ungueltig" zu sagen (Nr. 26).
         freigabe = next((f for f in (c.get("freigabe_alt") or []) if f.get("token") == token), {})
     try:
         laeuft_ab = datetime.fromisoformat(freigabe.get("laeuft_ab") or "")
@@ -2301,40 +2356,19 @@ async def public_vertrag_pdf(token: str, request: Request):
                                  "einen neuen Link bitten.")
     geteilte_version = int(freigabe.get("version") or c.get("version") or 1)
     if geteilte_version != int(c.get("version") or 1):
-        # Der Vertrag wurde nach dem Versand neu erzeugt: die damals
-        # verschickte Fassung liegt im Versionsarchiv.
-        alt = await db.generated_pdf_versions.find_one(
-            {"contract_id": c["id"], "dealer_id": c.get("dealer_id"),
-             "version": geteilte_version},
-            {"_id": 0, "pdf_digital_b64": 1, "pdf_b64": 1, "filename": 1,
-             "contract_data": 1})
-        # Abnahme 12.09.2026: Fehlte die digitale Fassung im Archiv, kam
-        # still die DRUCKfassung mit Unterschriftslinien — obwohl der Link
-        # eine digitale Ausfertigung zusagt. Sie wird jetzt aus den
-        # archivierten Vertragsdaten nacherzeugt (dieselbe Funktion wie
-        # fuer Altvertraege); nur wenn auch das nicht geht, gibt es 410.
-        if (alt or {}).get("pdf_digital_b64"):
-            pdf_bytes = base64.b64decode(alt["pdf_digital_b64"])
-        elif alt:
-            ersteller_alt = await db.users.find_one(
-                {"id": c.get("user_id")}, {"_id": 0}) \
-                or {"id": c.get("user_id"), "dealer_id": c.get("dealer_id")}
-            pdf_bytes = await _digitales_pdf_bytes({**c, **alt}, ersteller_alt, cache=False)
-        else:
-            pdf_bytes = None
-        if not pdf_bytes:
-            raise HTTPException(410, "Der Vertrag wurde inzwischen geändert und die "
-                                     "verschickte Fassung ist nicht mehr abrufbar — "
-                                     "bitte den Händler um einen neuen Link bitten.")
-        fname_quelle = (alt or {}).get("filename") or c.get("filename") or ""
-    else:
-        ersteller = await db.users.find_one({"id": c.get("user_id")}, {"_id": 0}) \
-            or {"id": c.get("user_id"), "dealer_id": c.get("dealer_id")}
-        pdf_bytes = await _digitales_pdf_bytes(c, ersteller)
-        if not pdf_bytes:
-            raise HTTPException(503, "Der Vertrag kann gerade nicht bereitgestellt "
-                                     "werden — bitte in ein paar Minuten erneut versuchen.")
-        fname_quelle = c.get("filename") or ""
+        # Nr. 26: neue Fassung -> der Link der alten ist sofort ungueltig (vorher
+        # lieferte er bis zu seinem Ablauf die archivierte Fassung).
+        await log_activity_sicher(c.get("dealer_id"), None, "vertrag.link.fassung_ersetzt",
+                                  ref=c["id"], meta={"anonym": True, "version": geteilte_version,
+                                                     "aktuell": int(c.get("version") or 1)})
+        raise HTTPException(410, FASSUNG_ERSETZT_TEXT)
+    ersteller = await db.users.find_one({"id": c.get("user_id")}, {"_id": 0}) \
+        or {"id": c.get("user_id"), "dealer_id": c.get("dealer_id")}
+    pdf_bytes = await _digitales_pdf_bytes(c, ersteller)
+    if not pdf_bytes:
+        raise HTTPException(503, "Der Vertrag kann gerade nicht bereitgestellt "
+                                 "werden — bitte in ein paar Minuten erneut versuchen.")
+    fname_quelle = c.get("filename") or ""
     # Pruefung 14.09.2026 (Liste 5, Nr. 3): begann die Loeschung waehrend der
     # PDF-Erzeugung, wird nichts mehr ausgeliefert.
     if not await db.generated_pdfs.count_documents(
@@ -2343,7 +2377,6 @@ async def public_vertrag_pdf(token: str, request: Request):
     await _abruf_zaehlen(c["id"], token, aktuell=(c.get("freigabe") or {}).get("token") == token)
     # Anonymer Abruf: KEINEM Konto zurechenbar (weder Ersteller noch
     # Empfaenger) — der Audit-Eintrag sagt genau das.
-    from deps import log_activity_sicher
     await log_activity_sicher(c.get("dealer_id"), None, "vertrag.link.abgerufen",
                               ref=c["id"], meta={"anonym": True,
                                                  "version": geteilte_version})
