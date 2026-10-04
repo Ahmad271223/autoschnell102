@@ -14,6 +14,9 @@ internal sealed class Fahrzeug
     public string? InseratId { get; set; }
     /// <summary>AutoScout-Kennung (Zeile "Hash-ID"), nur wenn vollstaendig und zweimal gleich gelesen.</summary>
     public string? HashId { get; set; }
+    /// <summary>Sichtbarer Anfang der Beschreibung (seit 1.5.1) — der Server nimmt das Modell daraus nur, wenn
+    /// Feld und Ueberschrift keins hergeben.</summary>
+    public string? BeschreibungText { get; set; }
     public int? Preis { get; set; }
     public int? EzMonat { get; set; }
     public int? EzJahr { get; set; }

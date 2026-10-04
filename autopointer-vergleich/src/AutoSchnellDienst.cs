@@ -276,6 +276,7 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
             ["quelle"] = K(f.Quelle, 40),
             ["inserat_id"] = K(f.InseratId, 60),
             ["hash_id"] = K(f.HashId, 60),
+            ["beschreibung"] = K(f.BeschreibungText, 1500),
         };
     }
 

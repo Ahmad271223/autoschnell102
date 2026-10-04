@@ -15,7 +15,10 @@ namespace AutoPointerVergleich;
 /// nur wenn Zeilen fehlen) und mit der Windows-Texterkennung lesen. Die Handles machen das unabhaengig von Bildschirm-
 /// aufloesung, Fenstergroesse und Position.
 /// </remarks>
-internal sealed record DetailAnsicht(IntPtr Hauptfenster, IntPtr TechnikTabelle, IntPtr KopfTabelle);
+/// <param name="Beschreibung">Textfeld unter "Beschreibung" (THTMLStaticText) oder Zero — seit 1.5.1 gelesen,
+/// damit der Server das Modell notfalls dort findet (Befund 04.10.2026: "meinen Mercedes C 300 e").</param>
+internal sealed record DetailAnsicht(IntPtr Hauptfenster, IntPtr TechnikTabelle, IntPtr KopfTabelle,
+                                     IntPtr Beschreibung = default);
 
 internal static class AutoPointerFenster
 {
@@ -102,7 +105,17 @@ internal static class AutoPointerFenster
                 Native.GetWindowRect(site, out var r);
                 if (r.Top < kopfOben) { kopfOben = r.Top; kopf = site; }
             }
-            return new DetailAnsicht(hauptfenster, technik, kopf);
+            IntPtr beschreibung = IntPtr.Zero;
+            foreach (var bk in kinder.Where(h => K(h) == "TJvNavPanelHeader" && Native.IsWindowVisible(h)
+                                                 && Native.Text(h).Trim() == "Beschreibung"))
+            {
+                var bp = eltern[bk];
+                if (!IstNachfahre(bp, bereich, eltern)) continue;
+                beschreibung = kinder.FirstOrDefault(h => eltern[h] == bp && h != bk
+                                                          && K(h) != "TJvNavPanelHeader" && Brauchbar(h));
+                if (beschreibung != IntPtr.Zero) break;
+            }
+            return new DetailAnsicht(hauptfenster, technik, kopf, beschreibung);
         }
         return null;
     }

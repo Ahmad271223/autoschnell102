@@ -76,6 +76,12 @@ dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und 
   multivan“ → T5 Multivan, „VW Beetle Cabrio 1.2 TSI“ → Beetle; nur Treffer im Modell-Katalog, nie Sammelnamen wie
   „T5 andere“). Fehlt sogar die Marke („Andere“), kommen Marke und Modell aus der Überschrift („Ford Mondeo
   Turnier …“ → Ford Mondeo).
+* **Modell nur in der Beschreibung** (seit 1.5.1, Befund 04.10.: Mercedes „Andere“, Überschrift „Mercedes-Benz Weitere
+  Mercedes Be…“, Beschreibung „meinen Mercedes C 300 e“): das Programm liest den sichtbaren Anfang der Beschreibung
+  mit (vom Bildschirm, parallel zur Tabelle, kein Zeitverlust); der Server nimmt das Modell daraus nur, wenn Feld und
+  Überschrift keins hergeben, und strenger als bei der Überschrift (Wörter direkt hintereinander, keine Kurznamen wie
+  „G“) — mit Hinweis „Modell aus der Beschreibung übernommen … bitte kurz prüfen“. Die Beschreibung wird nicht
+  gespeichert.
 * Typische Lesefehler der Texterkennung bei Modellen mit Ziffern: i/l/1 und O/0 werden verwechselt („Hyundai ilO“ →
   i10; nur wenn genau ein Katalogmodell passt). In der Überschrift dürfen zwei Wörter zusammengehören („XC 60“ →
   XC60).

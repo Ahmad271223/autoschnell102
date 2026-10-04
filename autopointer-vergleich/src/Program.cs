@@ -107,6 +107,8 @@ internal static class KonsolenModus
         var fehlt = DetailLeser.Fehlend(f);
         foreach (var z in f.Beschreibung()) Console.WriteLine("  " + z);
         Console.WriteLine("  Schlüssel: " + f.Schluessel);
+        if (f.BeschreibungText != null)
+            Console.WriteLine("  Beschreibung: " + (f.BeschreibungText.Length > 120 ? f.BeschreibungText[..120] + " …" : f.BeschreibungText));
         Console.WriteLine("  An den Server: " + System.Text.Json.JsonSerializer.Serialize(AutoSchnellDienst.Nutzlast(f)));
         if (fehlt.Count > 0)
         {

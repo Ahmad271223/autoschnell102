@@ -458,6 +458,55 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
                                                          Action<System.Drawing.Bitmap, System.Drawing.Bitmap?>? bilder = null,
                                                          bool zeichnenErlaubt = false)
     {
+        // Beschreibung GLEICHZEITIG mit der Tabelle lesen (eigene Texterkennung) — sonst +0,15-0,2 s je Auto
+        var beschreibung = BeschreibungLesenAsync(BeschreibungsErkennung() ?? ocr, ansicht);
+        var lesung = await LiesTabellenAsync(ocr, ansicht, bilderSpeichern, bilder, zeichnenErlaubt);
+        string? text = await beschreibung;
+        if (lesung != null) lesung.Fahrzeug.BeschreibungText = text;
+        return lesung;
+    }
+
+    private static TextErkennung? _beschreibungsErkennung;
+    private static bool _beschreibungsErkennungVersucht;
+
+    /// <summary>Zweite Texterkennung nur fuer die Beschreibung (laeuft parallel zur Tabelle).</summary>
+    private static TextErkennung? BeschreibungsErkennung()
+    {
+        if (_beschreibungsErkennungVersucht) return _beschreibungsErkennung;
+        _beschreibungsErkennungVersucht = true;
+        _beschreibungsErkennung = TextErkennung.Erstelle(out _);
+        return _beschreibungsErkennung;
+    }
+
+    /// <summary>Befund 04.10.2026 (Mercedes, Feld "Andere", Modell nur in der Beschreibung): den sichtbaren Anfang
+    /// der Beschreibung lesen — nur vom Bildschirm (nie PrintWindow), nicht wenn die Leiste davor liegt.
+    /// Was daraus wird, entscheidet der Server (nur wenn Feld und Ueberschrift kein Modell hergeben).</summary>
+    internal static async Task<string?> BeschreibungLesenAsync(TextErkennung ocr, DetailAnsicht ansicht)
+    {
+        if (ansicht.Beschreibung == IntPtr.Zero || !Native.IsWindow(ansicht.Beschreibung)
+            || AutoPointerFenster.Verdeckt(ansicht.Beschreibung)) return null;
+        await Task.Yield();          // nicht im Takt des Aufrufers: die Tabelle wird derweil gelesen
+        try
+        {
+            using var bild = AutoPointerFenster.Abbild(ansicht.Beschreibung);
+            if (bild == null) return null;
+            uint dpi = Native.GetDpiForWindow(ansicht.Beschreibung);
+            double faktor = Math.Clamp(2.0 * 96 / (dpi == 0 ? 96 : dpi), 1.0, 2.0);
+            var zeilen = await ocr.LiesAsync(bild, faktor);
+            string text = string.Join(" ", zeilen.Select(z => z.Text)).Trim();
+            return text.Length == 0 ? null : text.Length > 1500 ? text[..1500] : text;
+        }
+        catch (Exception ex)
+        {
+            Protokoll.Schreibe("Beschreibung nicht gelesen: " + ex.Message);
+            return null;
+        }
+    }
+
+    private static async Task<Lesung?> LiesTabellenAsync(TextErkennung ocr, DetailAnsicht ansicht, bool bilderSpeichern,
+                                                         Action<System.Drawing.Bitmap, System.Drawing.Bitmap?>? bilder,
+                                                         bool zeichnenErlaubt)
+    {
         uint dpi = Native.GetDpiForWindow(ansicht.TechnikTabelle);
         // Liegt die Leiste (immer im Vordergrund) ueber der Tabelle, zeigt der Bildschirm sie mit -> PrintWindow
         bool verdeckt = AutoPointerFenster.Verdeckt(ansicht.TechnikTabelle) || AutoPointerFenster.Verdeckt(ansicht.KopfTabelle);
