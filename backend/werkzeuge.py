@@ -315,35 +315,30 @@ def _km_text(km: int) -> str:
     return f"{km:,}".replace(",", ".")
 
 
-def plausibel(vehicle: dict, f: dict, heute: Optional[date] = None) -> list:
+def plausibel(f: dict, heute: Optional[date] = None) -> list:
     """Befund Ahmad 04.10.2026 (echte Vergleichsliste: "Kia Rio · EZ 04/2026 · 165.000 km", "Opel Crossland ·
-    EZ 10/2026 · 75.000 km", "Audi 80 · 1.960.817 km"): Lesefehler oder falsche Angaben im Inserat. Statt einer
-    Suche mit falschem Filter (findet nichts Passendes) den unplausiblen Filter WEGLASSEN und es sagen.
+    EZ 10/2026 · 75.000 km", "Audi 80 · 1.960.817 km"): Lesefehler oder falsche Angaben im Inserat -> dem Sucher
+    SAGEN. Die Filter bleiben trotzdem genau so, wie sie in den Einstellungen (Firma/Sucher) stehen — Wunsch Ahmad
+    04.10.: "EZ immer -1 und km immer +20.000 oder je nachdem, was im Konto eingestellt ist", nie still weglassen.
 
-      * Kilometer ueber 1.000.000                      -> ohne Kilometer-Filter
-      * Erstzulassung in der Zukunft                    -> ohne Erstzulassungs-Filter
-      * mehr als 20.000 km + 10.000 km je Monat Alter   -> ohne Erstzulassungs-Filter (die EZ ist meist falsch)
+      * Kilometer ueber 1.000.000
+      * Erstzulassung in der Zukunft
+      * mehr als 20.000 km + 10.000 km je Monat Alter
 
-    Entfernt dazu first_registration bzw. mileage aus vehicle; Rueckgabe: Hinweise fuer den Sucher."""
+    Rueckgabe: Hinweise fuer den Sucher (leer = alles plausibel)."""
     heute = heute or date.today()
     hinweise = []
     jahr, monat, km = f.get("ez_jahr"), f.get("ez_monat"), f.get("kilometer")
     if km is not None and km > 1_000_000:
-        vehicle.pop("mileage", None)
-        hinweise.append(f"Kilometerstand {_km_text(km)} km ist unplausibel (Lesefehler?) – ohne Kilometer-Filter "
-                        "gesucht. Bitte prüfen.")
+        hinweise.append(f"Kilometerstand {_km_text(km)} km wirkt unplausibel (Lesefehler?) – bitte prüfen.")
         km = None
     if jahr:
         ez_text = f"{int(monat):02d}/{int(jahr)}" if monat else str(int(jahr))
         alter = (heute.year - int(jahr)) * 12 + (heute.month - int(monat or 1))
         if alter < 0:
-            vehicle.pop("first_registration", None)
-            hinweise.append(f"Erstzulassung {ez_text} liegt in der Zukunft – ohne Erstzulassungs-Filter gesucht. "
-                            "Bitte prüfen.")
+            hinweise.append(f"Erstzulassung {ez_text} liegt in der Zukunft – bitte prüfen.")
         elif km is not None and km > 20_000 + 10_000 * alter:
-            vehicle.pop("first_registration", None)
-            hinweise.append(f"Erstzulassung {ez_text} passt nicht zu {_km_text(km)} km – ohne Erstzulassungs-Filter "
-                            "gesucht. Bitte prüfen.")
+            hinweise.append(f"Erstzulassung {ez_text} passt nicht zu {_km_text(km)} km – bitte prüfen.")
     return hinweise
 
 

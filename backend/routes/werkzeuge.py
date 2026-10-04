@@ -424,8 +424,8 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     erkannt = _erkennen(f)
     f["inserat_url"] = wz.inserat_url(f.get("quelle"), f.get("inserat_id"), f.get("hash_id"))
     vehicle = wz.fahrzeug_zu_vehicle(f)
-    # Befund 04.10.2026: unplausible EZ/km nicht als Filter nehmen, sondern sagen (wz.plausibel)
-    melden = wz.plausibel(vehicle, f)
+    # Befund 04.10.2026: unplausible EZ/km sagen — die Filter bleiben wie eingestellt (wz.plausibel)
+    melden = wz.plausibel(f)
     links, hinweise = wz.vergleichs_links(vehicle, regeln)
     if erkannt.pop("aus_beschreibung", False):
         melden.insert(0, f"Modell aus der Beschreibung übernommen: {erkannt['modell']} – bitte kurz prüfen.")

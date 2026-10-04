@@ -723,38 +723,52 @@ def test_54_modell_aus_der_beschreibung_mit_hinweis_und_ohne_speichern(welt):
 
 
 def test_55_plausibilitaet_ez_und_km():
-    """Befund 04.10.2026 (echte Liste): unplausible EZ/km -> Filter weglassen und sagen."""
+    """Befund 04.10.2026 (echte Liste): unplausible EZ/km sagen — die Filter bleiben wie eingestellt."""
     from datetime import date
     heute = date(2026, 10, 4)
 
     def pruefen(**werte):
         f = {**POLO, **werte}
         v = wz.fahrzeug_zu_vehicle(f)
-        return v, wz.plausibel(v, f, heute)
+        h = wz.plausibel(f, heute)
+        assert "first_registration" in v and "mileage" in v      # nie still weglassen (Wunsch Ahmad 04.10.)
+        return h
 
-    v, h = pruefen(ez_monat=4, ez_jahr=2026, kilometer=165000)          # Kia Rio
-    assert "first_registration" not in v and "mileage" in v and "passt nicht zu 165.000 km" in h[0]
-    v, h = pruefen(ez_monat=10, ez_jahr=2026, kilometer=75000)          # Opel Crossland
-    assert "first_registration" not in v and h
-    v, h = pruefen(ez_monat=2, ez_jahr=1998, kilometer=1960817)         # Audi 80
-    assert "mileage" not in v and "first_registration" in v and "1.960.817" in h[0]
-    v, h = pruefen(ez_monat=11, ez_jahr=2026, kilometer=10)             # Zukunft
-    assert "first_registration" not in v and "Zukunft" in h[0]
+    h = pruefen(ez_monat=4, ez_jahr=2026, kilometer=165000)             # Kia Rio
+    assert len(h) == 1 and "passt nicht zu 165.000 km" in h[0]
+    assert pruefen(ez_monat=10, ez_jahr=2026, kilometer=75000)          # Opel Crossland
+    h = pruefen(ez_monat=2, ez_jahr=1998, kilometer=1960817)            # Audi 80
+    assert len(h) == 1 and "1.960.817" in h[0]
+    assert "Zukunft" in pruefen(ez_monat=11, ez_jahr=2026, kilometer=10)[0]
     for ok in (dict(ez_monat=2, ez_jahr=2026, kilometer=15720),           # Seat Ibiza: passt
                dict(ez_monat=None, ez_jahr=2026, kilometer=0),            # Neuwagen
                dict(ez_monat=10, ez_jahr=2005, kilometer=128000)):        # Polo
-        v, h = pruefen(**ok)
-        assert h == [] and "first_registration" in v, ok
+        assert pruefen(**ok) == [], ok
 
 
-def test_56_unplausibles_wird_gemeldet_und_nicht_gefiltert(welt):
+def test_56_unplausibles_wird_gemeldet_filter_wie_eingestellt(welt):
+    """Wunsch Ahmad 04.10.: "EZ immer -1 und km immer +20.000 oder je nachdem, was im Konto eingestellt ist" —
+    auch bei unplausiblen Daten nur melden, die Filter kommen unveraendert aus den Einstellungen."""
     prog = _prog(welt)
-    r = _vergleich(prog, _roh("Kia Rio", "Kia Rio 1.2", ez_monat=4, ez_jahr=2026, kilometer=165000, kw=62, ps=84))
-    assert r.status_code == 200, r.text
-    d = r.json()
-    assert d["melden"] and "passt nicht zu 165.000 km" in d["melden"][0]
-    mobile = next(x["url"] for x in d["links"] if x["portal"] == "mobile.de")
-    assert "fr=" not in mobile and "ml=" in mobile
+    db, dealer_id = welt["db"], welt["firma"]["dealer_id"]
+    vorher = db.dealers.find_one({"id": dealer_id}, {"_id": 0, "comparison_rules": 1}) or {}
+    kia = _roh("Kia Rio", "Kia Rio 1.2", ez_monat=4, ez_jahr=2026, kilometer=165000, kw=62, ps=84)
+    try:
+        for regeln, fr, ml in ((AHMADS_REGELN, "fr=2025%3A", "ml=%3A185000"),
+                               ({**AHMADS_REGELN, "first_registration": {"mode": "older_exact", "years": 3},
+                                 "mileage": {"mode": "plus", "value": 40000}}, "fr=2023%3A", "ml=%3A205000")):
+            db.dealers.update_one({"id": dealer_id}, {"$set": {"comparison_rules": regeln}})
+            r = _vergleich(prog, kia)
+            assert r.status_code == 200, r.text
+            d = r.json()
+            assert d["melden"] and "passt nicht zu 165.000 km" in d["melden"][0]
+            mobile = next(x["url"] for x in d["links"] if x["portal"] == "mobile.de")
+            assert fr in mobile and ml in mobile, mobile
+    finally:
+        if vorher.get("comparison_rules"):
+            db.dealers.update_one({"id": dealer_id}, {"$set": {"comparison_rules": vorher["comparison_rules"]}})
+        else:
+            db.dealers.update_one({"id": dealer_id}, {"$unset": {"comparison_rules": ""}})
 
 
 def test_60_anderer_pc_genau_benannt(welt):
