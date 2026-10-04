@@ -32,11 +32,11 @@ describe("RP-440/RP-444: Verkäufername im Kaufvertrag", () => {
     // das Pseudonym selbst eingetippt: Hinweis bleibt
     expect(verkaeuferNameHinweise(v, "VNightX")).toHaveLength(1);
   });
-  it("Händler: kein Pseudonym-Hinweis, kein Ansprechpartner (Wunsch Ahmad 04.10.2026)", () => {
+  it("Händler: kein Pseudonym-Hinweis, Ansprechpartner nur als Info (Wunsch Ahmad 04.10.2026)", () => {
     expect(verkaeuferNameHinweise({ seller_name: "Davidoff GmbH", seller_alias: null }, "")).toEqual([]);
     expect(verkaeuferNameHinweise(
       { seller_name: "Autohaus Nord GmbH", seller_ansprechpartner: "Herr Meier" }, "Autohaus Nord GmbH"))
-      .toEqual([]);
+      .toEqual(["Ansprechpartner laut Inserat: Herr Meier (nur zur Info, kommt nicht in den Vertrag)"]);
     expect(verkaeuferNameHinweise({}, "")).toEqual([]);
     expect(verkaeuferNameHinweise(null)).toEqual([]);
   });

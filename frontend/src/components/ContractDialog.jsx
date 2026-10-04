@@ -172,8 +172,12 @@ export function verkaeuferNameHinweise(vehicle, eingabe = "") {
     hinweise.push(`Kleinanzeigen-Name: ${alias} — ein frei gewähltes Pseudonym, bitte den `
       + "echten Namen des Verkäufers eintragen.");
   }
-  // Wunsch Ahmad 04.10.2026: "Ansprechpartner" kommt im Kaufvertrag nicht mehr vor — auch nicht als
-  // Hinweis aus dem Inserat (vorher "Ansprechpartner laut Inserat: …").
+  // Wunsch Ahmad 04.10.2026: der Ansprechpartner aus dem Inserat ist fuer den Sucher sichtbar, kommt aber
+  // NIE in den Vertrag (nur Hinweis unter "Name / Firma"; das Kaeufer-Feld "Ansprechpartner" ist weg).
+  const ansprechpartner = String(v.seller_ansprechpartner || "").trim();
+  if (ansprechpartner && ansprechpartner.toLowerCase() !== name.toLowerCase()) {
+    hinweise.push(`Ansprechpartner laut Inserat: ${ansprechpartner} (nur zur Info, kommt nicht in den Vertrag)`);
+  }
   return hinweise;
 }
 

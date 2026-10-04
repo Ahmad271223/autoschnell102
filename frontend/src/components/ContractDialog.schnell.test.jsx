@@ -2,7 +2,8 @@
  * Wunsch Ahmad 04.10.2026: Kaufvertrag schneller abschließen.
  *  - die wichtigsten Angaben (Name, Telefon, E-Mail, Adresse, PLZ, Ort, Kaufpreis) sind markiert, solange sie
  *    fehlen, und stehen unten unter „Noch offen“ (Klick springt zum Feld)
- *  - kein „Ansprechpartner“ mehr (weder Feld beim Käufer noch Hinweis aus dem Inserat)
+ *  - kein Feld „Ansprechpartner“ mehr beim Käufer; der Ansprechpartner aus dem Inserat steht nur als Info
+ *    unter dem Namen des Verkäufers und kommt nie in den Vertrag
  *  - Schäden von Hand UNTER der Skizze (Abschnitt „Schäden“), nicht mehr oben bei „Unfallfrei“
  *  - Abschnitte als Karten mit Symbol, Überschriften wie im PDF („Zustand“, „Beschreibung“)
  */
@@ -109,10 +110,11 @@ describe("Wichtige Angaben markiert + „Noch offen“", () => {
 });
 
 describe("kein Ansprechpartner, Schäden unter der Skizze, Karten", () => {
-  it("Käufer ohne Ansprechpartner-Feld, kein Hinweis aus dem Inserat, nichts im Payload", async () => {
+  it("Käufer ohne Ansprechpartner-Feld; der aus dem Inserat nur als Info, nichts davon im Payload", async () => {
     await oeffnen({ seller_name: "Autohaus Nord GmbH", seller_ansprechpartner: "Herr Meier", make_label: "VW" });
     expect(feld("contract-dealer-contact")).toBeNull();
-    expect(behaelter.textContent).not.toContain("Ansprechpartner");
+    expect(feld("contract-seller-name-hinweis").textContent)
+      .toContain("Ansprechpartner laut Inserat: Herr Meier (nur zur Info, kommt nicht in den Vertrag)");
     tippen(feld("contract-price"), "4.500");
     tippen(feld("contract-payment"), "Bar");
     post.mockResolvedValue({ data: { id: "c1" } });
