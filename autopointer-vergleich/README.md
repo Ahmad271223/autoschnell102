@@ -58,7 +58,11 @@ dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und 
 * **Rechtsklick**: *Fenster öffnen*, Verbindungsstatus, *Mit AutoSchnell verbinden …*, *Verbindung trennen*, *Automatik*,
   *Aktuelles Fahrzeug jetzt vergleichen* (auch bei Pause/selbem Auto), *Letzten Vergleich erneut öffnen*,
   *Einstellungen …* (Portale, Browser, Ablauf, mit Windows starten), *Systemcheck*.
-* Ein Auto, das beim Programmstart schon angezeigt wird, öffnet nichts – erst das nächste angeklickte.
+* Ein Auto, das beim Programmstart schon angezeigt wird, öffnet nichts – erst das nächste angeklickte. **Nach dem (Neu-)Verbinden**
+  dagegen wird das gerade angezeigte Auto sofort verglichen (seit 1.5.3, Befund 04.10.: Mercedes nach Neuverbinden).
+* **Unplausible Daten** (seit 1.5.3, Befund 04.10.: „Kia Rio · EZ 04/2026 · 165.000 km“, „Audi 80 · 1.960.817 km“):
+  der Server lässt den falschen Filter weg (Erstzulassung in der Zukunft oder zu jung für die Kilometer → ohne
+  EZ-Filter; über 1 Mio. km → ohne km-Filter) und das Programm zeigt den Hinweis sofort (`melden` in der Antwort).
 * **Neuwagen** (Zustand „Neu“) haben in AutoPointer weder Erstzulassung noch Kilometerstand: dann gilt dieses Jahr
   und 0 km (Befund 03.10.: BYD Dolphin, mobile.de).
 * Dasselbe Fahrzeug öffnet nie zweimal hintereinander (Kennung aus dem gelesenen Text `Marke Modell | EZ | km | kW`,

@@ -92,6 +92,17 @@ internal sealed class Ueberwacher
         _summe = 0;
     }
 
+    /// <summary>Befund 04.10.2026 (Mercedes nach dem Neuverbinden nicht geoeffnet): nach dem (Neu-)Verbinden wird das
+    /// gerade angezeigte Auto verglichen — nicht wie beim Programmstart als "schon gesehen" behandelt, und auch
+    /// dann, wenn es vor dem Trennen schon dran war.</summary>
+    public void NachVerbinden()
+    {
+        Neustart();
+        _basis = false;
+        _letzterSchluessel = null;
+        _letzteKennung = null;
+    }
+
     public async Task TickAsync()
     {
         var e = _einstellungen();
@@ -306,7 +317,15 @@ internal sealed class Ueberwacher
         Oeffne(links, e);
         _letzteOeffnung = _uhr();
         var fehlendePortale = antwort.Hinweise.Where(h => h.Contains("kein mobile.de-Vergleich") || h.Contains("kein AutoScout24-Vergleich")).ToList();
-        fehlendePortale.AddRange(PlausibilitaetsHinweise(f, _uhr()));
+        var plausi = PlausibilitaetsHinweise(f, _uhr());
+        if (antwort.Melden != null)
+        {
+            // Seit 04.10.2026 prueft der Server EZ/km selbst und laesst den falschen Filter weg — dann seine Hinweise
+            // statt der eigenen Kilometer-Meldung (sonst doppelt); was das Lesen betrifft (Leistung), bleibt
+            fehlendePortale.InsertRange(0, antwort.Melden);
+            plausi = plausi.Where(h => !h.StartsWith("Kilometerstand ungewöhnlich hoch", StringComparison.Ordinal)).ToList();
+        }
+        fehlendePortale.AddRange(plausi);
         fehlendePortale.AddRange(vertragsHinweise);
         if (fehlendePortale.Count > 0) Melde(string.Join("\n", fehlendePortale), false);
     }

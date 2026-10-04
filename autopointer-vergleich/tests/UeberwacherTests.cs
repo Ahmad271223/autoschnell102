@@ -39,6 +39,7 @@ public class UeberwacherTests
         public bool Verbunden { get; set; } = true;
         public DienstFehler? Fehler;
         public string? InseratUrl;
+        public List<string>? Melden;
         public readonly List<Fahrzeug> Anfragen = new();
 
         public Task<VergleichAntwort> VergleichAsync(Fahrzeug f, bool probelauf)
@@ -58,7 +59,7 @@ public class UeberwacherTests
                 new Vergleich("mobile.de", $"https://suchen.mobile.de/{id}"),
                 new Vergleich("AutoScout24", $"https://www.autoscout24.de/{id}"),
             }, Array.Empty<string>(), "inland", InseratUrl, InseratUrl != null ? "laeuft" : "kein_link",
-               ErkanntMarke: "Erkannt", ErkanntModell: f.MarkeModellText));
+               ErkanntMarke: "Erkannt", ErkanntModell: f.MarkeModellText, Melden: Melden));
         }
     }
 
@@ -214,6 +215,31 @@ public class UeberwacherTests
         Assert.NotNull(_u.LetztesFahrzeug);
         await Anklicken(Passat, 2);
         Assert.Single(_b.Aufrufe);
+    }
+
+    [Fact]   // Befund 04.10.2026: Mercedes stand schon da, Programm neu verbunden -> nichts ging auf
+    public async Task Nach_dem_Verbinden_wird_das_angezeigte_Auto_verglichen()
+    {
+        _q.Zeige(Bentley, 1);       // schon da, bevor das Programm startet: wird nicht geoeffnet
+        for (int i = 0; i < 5; i++) await Tick();
+        Assert.Empty(_b.Aufrufe);
+        _u.NachVerbinden();         // Programm (neu) mit AutoSchnell verbunden
+        for (int i = 0; i < 5; i++) await Tick();
+        Assert.Single(_b.Aufrufe);
+        Assert.Contains("Bentley", _b.Aufrufe[0][0].Url);
+        _u.NachVerbinden();         // erneut verbunden: auch dasselbe Auto noch einmal
+        for (int i = 0; i < 5; i++) await Tick();
+        Assert.Equal(2, _b.Aufrufe.Count);
+    }
+
+    [Fact]   // Befund 04.10.2026: unplausible EZ/km meldet der Server — das Programm zeigt es sofort (nicht nur im Protokoll)
+    public async Task Hinweise_des_Servers_werden_gezeigt()
+    {
+        await Start();
+        _server.Melden = new() { "Erstzulassung 04/2026 passt nicht zu 165.000 km – ohne Erstzulassungs-Filter gesucht. Bitte prüfen." };
+        await Anklicken(Golf, 7);
+        Assert.Single(_b.Aufrufe);                         // Vergleich geht trotzdem auf
+        Assert.Contains(_meldungen, m => m.Contains("passt nicht zu 165.000 km"));
     }
 
     [Fact]

@@ -46,7 +46,8 @@ public class DienstTests
              "hinweise":["Getriebe nicht gelesen"],"profil":"inland",
              "inserat_url":"https://www.kleinanzeigen.de/s-anzeige/3529712138",
              "vorab":{"status":"laeuft","hinweis":""},
-             "fahrzeug":{"marke":"Volkswagen","modell":"Passat Variant","erkannt":true}}
+             "fahrzeug":{"marke":"Volkswagen","modell":"Passat Variant","erkannt":true},
+             "melden":["Erstzulassung 04/2026 passt nicht zu 165.000 km – ohne Erstzulassungs-Filter gesucht. Bitte prüfen."]}
             """);
         var f = Passat();
         var antwort = await d.VergleichAsync(f, probelauf: false);
@@ -62,6 +63,7 @@ public class DienstTests
         Assert.True(fz.GetProperty("roh").GetBoolean());
         Assert.Equal("VW Passat Variant", fz.GetProperty("marke_modell_text").GetString());
         Assert.Equal(("Volkswagen", "Passat Variant", true), (antwort.ErkanntMarke, antwort.ErkanntModell, antwort.MarkeErkannt));
+        Assert.Contains("passt nicht zu 165.000 km", Assert.Single(antwort.Melden!));
         Assert.Equal(2006, fz.GetProperty("ez_jahr").GetInt32());
         Assert.Equal(10, fz.GetProperty("ez_monat").GetInt32());
         Assert.Equal(244000, fz.GetProperty("kilometer").GetInt32());

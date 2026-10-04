@@ -391,7 +391,7 @@ internal sealed class TrayApp : ApplicationContext
             Speichern(_einstellungen);
             Protokoll.Schreibe($"Mit AutoSchnell verbunden: {als}");
             VerbindungAnzeigen();
-            _ueberwacher?.Neustart();
+            _ueberwacher?.NachVerbinden();      // das gerade angezeigte Auto gleich vergleichen
             StatusAnzeigen(_ueberwacher?.Status ?? Status.KeinAutoPointer);
             Sprechblase($"Verbunden als {als}. Klick in AutoPointer ein Inserat an – die Vergleiche öffnen sich automatisch.", false, erzwingen: true);
         }

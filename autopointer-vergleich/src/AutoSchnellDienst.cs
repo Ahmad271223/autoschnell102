@@ -31,7 +31,8 @@ internal sealed record Vergleich(string Portal, string Url);
 /// null bei einem Server ohne Erkennung.</param>
 internal sealed record VergleichAntwort(IReadOnlyList<Vergleich> Links, IReadOnlyList<string> Hinweise, string Profil,
                                         string? InseratUrl = null, string VorabStatus = "", string VorabHinweis = "",
-                                       string? ErkanntMarke = null, string? ErkanntModell = null, bool MarkeErkannt = true);
+                                       string? ErkanntMarke = null, string? ErkanntModell = null, bool MarkeErkannt = true,
+                                       IReadOnlyList<string>? Melden = null);
 
 /// <summary>Was der Ueberwacher vom Server braucht (in Tests eine Attrappe).</summary>
 internal interface IVergleichsDienst
@@ -242,8 +243,13 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
             modell = Text(fz, "modell");
             markeErkannt = !fz.TryGetProperty("erkannt", out var ek) || ek.ValueKind != JsonValueKind.False;
         }
+        // Seit 04.10.2026: was der Server dem Sucher sofort zeigen will (unplausible EZ/km, Modell aus der Beschreibung);
+        // null = Server ohne diese Angabe
+        List<string>? melden = null;
+        if (e.TryGetProperty("melden", out var md) && md.ValueKind == JsonValueKind.Array)
+            melden = md.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!).ToList();
         return new VergleichAntwort(links, hinweise, Text(e, "profil"), inseratUrl, vorabStatus, vorabHinweis,
-                                    marke, modell, markeErkannt);
+                                    marke, modell, markeErkannt, melden);
     }
 
     /// <summary>Fahrzeug -> Anfrage an /vergleich (Feldnamen wie routes/werkzeuge.FahrzeugIn).</summary>
