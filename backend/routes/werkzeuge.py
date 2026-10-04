@@ -423,9 +423,14 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     f = body.fahrzeug.model_dump()
     erkannt = _erkennen(f)
     f["inserat_url"] = wz.inserat_url(f.get("quelle"), f.get("inserat_id"), f.get("hash_id"))
-    links, hinweise = wz.vergleichs_links(wz.fahrzeug_zu_vehicle(f), regeln)
+    vehicle = wz.fahrzeug_zu_vehicle(f)
+    # Befund 04.10.2026: unplausible EZ/km nicht als Filter nehmen, sondern sagen (wz.plausibel)
+    melden = wz.plausibel(vehicle, f)
+    links, hinweise = wz.vergleichs_links(vehicle, regeln)
     if erkannt.pop("aus_beschreibung", False):
-        hinweise.insert(0, f"Modell aus der Beschreibung übernommen: {erkannt['modell']} – bitte kurz prüfen.")
+        melden.insert(0, f"Modell aus der Beschreibung übernommen: {erkannt['modell']} – bitte kurz prüfen.")
+    # "melden": was das Programm (ab 1.5.3) dem Sucher sofort zeigt; aeltere Programme protokollieren die Hinweise
+    hinweise = melden + hinweise
     # Wunsch Ahmad 03.10.2026: das Inserat schon jetzt im Hintergrund auslesen (Daten + Fotos), damit
     # der Kaufvertrag ohne Link-Einfuegen geht — derselbe Weg wie das Einfuegen in der App.
     vorab = await _vorab_abrufen(user, f["inserat_url"]) if not body.probelauf else \
@@ -439,7 +444,8 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
         "vorab": vorab["status"],
     })
     return {"links": links, "hinweise": hinweise, "profil": profil, "inserat_url": f["inserat_url"],
-            "vorab": {"status": vorab["status"], "hinweis": vorab.get("hinweis", "")}, "fahrzeug": erkannt}
+            "vorab": {"status": vorab["status"], "hinweis": vorab.get("hinweis", "")}, "fahrzeug": erkannt,
+            "melden": melden}
 
 
 def _erkennen(f: dict) -> dict:

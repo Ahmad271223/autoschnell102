@@ -36,7 +36,7 @@ import hashlib
 import os
 import re
 import secrets
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Iterable, Optional
 
 AUTOPOINTER = "autopointer-vergleich"
@@ -309,6 +309,42 @@ def fahrzeug_zu_vehicle(f: dict) -> dict:
         if probe.get("model"):
             v["model_label"] = probe["model_label"]
     return v
+
+
+def _km_text(km: int) -> str:
+    return f"{km:,}".replace(",", ".")
+
+
+def plausibel(vehicle: dict, f: dict, heute: Optional[date] = None) -> list:
+    """Befund Ahmad 04.10.2026 (echte Vergleichsliste: "Kia Rio · EZ 04/2026 · 165.000 km", "Opel Crossland ·
+    EZ 10/2026 · 75.000 km", "Audi 80 · 1.960.817 km"): Lesefehler oder falsche Angaben im Inserat. Statt einer
+    Suche mit falschem Filter (findet nichts Passendes) den unplausiblen Filter WEGLASSEN und es sagen.
+
+      * Kilometer ueber 1.000.000                      -> ohne Kilometer-Filter
+      * Erstzulassung in der Zukunft                    -> ohne Erstzulassungs-Filter
+      * mehr als 20.000 km + 10.000 km je Monat Alter   -> ohne Erstzulassungs-Filter (die EZ ist meist falsch)
+
+    Entfernt dazu first_registration bzw. mileage aus vehicle; Rueckgabe: Hinweise fuer den Sucher."""
+    heute = heute or date.today()
+    hinweise = []
+    jahr, monat, km = f.get("ez_jahr"), f.get("ez_monat"), f.get("kilometer")
+    if km is not None and km > 1_000_000:
+        vehicle.pop("mileage", None)
+        hinweise.append(f"Kilometerstand {_km_text(km)} km ist unplausibel (Lesefehler?) – ohne Kilometer-Filter "
+                        "gesucht. Bitte prüfen.")
+        km = None
+    if jahr:
+        ez_text = f"{int(monat):02d}/{int(jahr)}" if monat else str(int(jahr))
+        alter = (heute.year - int(jahr)) * 12 + (heute.month - int(monat or 1))
+        if alter < 0:
+            vehicle.pop("first_registration", None)
+            hinweise.append(f"Erstzulassung {ez_text} liegt in der Zukunft – ohne Erstzulassungs-Filter gesucht. "
+                            "Bitte prüfen.")
+        elif km is not None and km > 20_000 + 10_000 * alter:
+            vehicle.pop("first_registration", None)
+            hinweise.append(f"Erstzulassung {ez_text} passt nicht zu {_km_text(km)} km – ohne Erstzulassungs-Filter "
+                            "gesucht. Bitte prüfen.")
+    return hinweise
 
 
 def vergleichs_links(vehicle: dict, regeln: dict, navi_ignorieren: bool = True) -> tuple:
