@@ -3,6 +3,7 @@
 //
 // Inserat offen  -> Seite (gzip) an AutoSchnell, Box mit Fahrzeug, Ampel, Hinweisen, "Kaufvertrag".
 // Vergleichsseite, die der Helfer selbst geoeffnet hat -> genau einmal an AutoSchnell (Platz + Ampel).
+// Seit 2.3.0 auch die Vergleichsseite des Windows-Programms (dasselbe Konto): Box mit Auto + Ampel hier.
 // mobile.de und AutoScout24 wechseln Seiten oft ohne Neuladen: die Adresse wird beobachtet; nach einem
 // solchen Wechsel steht das neue Inserat nicht im Quelltext — dann wird die Seite einmal frisch geholt
 // (normaler Seitenaufruf im Browser des Nutzers).
@@ -90,7 +91,7 @@
     return teile.filter(Boolean).join(" · ");
   }
 
-  function lageZeile(name, lage, wartet) {
+  function lageZeile(name, lage, wartet, ohneText) {
     const z = el("div", "zeile");
     const farbe = lage ? (lage.ampel || "grau") : "grau";
     z.appendChild(el("span", "punkt " + farbe));
@@ -102,7 +103,7 @@
         w.appendChild(el("span", "spin"));
         w.appendChild(document.createTextNode("Vergleichsseite wird ausgewertet …"));
       } else {
-        w.textContent = "Vergleich nicht geöffnet";
+        w.textContent = ohneText || "Vergleich nicht geöffnet";
       }
       t.appendChild(w);
     } else {
@@ -191,13 +192,21 @@
         inhalt.appendChild(p);
       } else if (z.phase === "fehler") {
         inhalt.appendChild(el("div", "fehler", z.text || "Das hat nicht geklappt."));
+      } else if (z.phase === "suche") {
+        // Vergleichsseite des Windows-Programms: das Auto dazu und wo es hier liegt
+        inhalt.appendChild(el("div", "fz", fahrzeugZeile(z.fahrzeug || {})));
+        inhalt.appendChild(el("div", "klein", "Preis im Inserat: " + A.euro((z.fahrzeug || {}).preis)));
+        inhalt.appendChild(lageZeile(z.portal || "", z.lage, !z.lage && !z.text, z.text));
+        inhalt.appendChild(el("div", "klein", "Vergleich aus dem Vergleich-Programm."));
       } else if (a) {
         inhalt.appendChild(el("div", "fz", fahrzeugZeile(a.fahrzeug || {})));
         inhalt.appendChild(el("div", "klein", "Preis im Inserat: " + A.euro((a.fahrzeug || {}).preis)));
         const portale = (a.links || []).map((l) => l.portal);
         const offen = z.geoeffnet > 0 || z.schonOffen;
+        // Wunsch Ahmad 04.10.2026: das Programm hat die Vergleiche schon offen — die Ampel kommt per Direktabruf
+        const ohneText = z.vomProgramm && !offen ? "Im Vergleich-Programm geöffnet" : "";
         for (const [name, schluessel] of [["mobile.de", "mobile"], ["AutoScout24", "autoscout"]]) {
-          if (portale.includes(name)) inhalt.appendChild(lageZeile(name, (z.marktlage || {})[schluessel], offen));
+          if (portale.includes(name)) inhalt.appendChild(lageZeile(name, (z.marktlage || {})[schluessel], offen, ohneText));
         }
         const bw = bewertungZeile(a.portal_bewertung);
         if (bw) inhalt.appendChild(el("div", "klein", bw));
@@ -211,6 +220,7 @@
         }
         for (const h of (a.hinweise || []).slice(0, 2)) inhalt.appendChild(el("div", "klein", h));
         if (z.ausVergleich && !offen) inhalt.appendChild(el("div", "klein", "Aus einer Vergleichsseite geöffnet – Vergleiche nur auf Knopfdruck."));
+        else if (z.vomProgramm && !offen) inhalt.appendChild(el("div", "klein", "Das Vergleich-Programm hat dieses Auto gerade verglichen – hier nur auf Knopfdruck."));
         if (z.meldung) inhalt.appendChild(el("div", "klein", z.meldung));
         const knoepfe = el("div", "knoepfe");
         const vertrag = el("button", "knopf haupt", "Kaufvertrag");
@@ -237,11 +247,12 @@
         });
         knoepfe.appendChild(vertrag);
         if ((a.links || []).length) {
-          const vergl = el("button", "knopf neben", offen ? "Vergleiche erneut" : "Vergleiche öffnen");
+          // Wunsch Ahmad 04.10.2026: "Vergleich öffnen" immer drücken können — wie "Vergleichen" im Programm
+          const vergl = el("button", "knopf neben", "Vergleich öffnen");
+          vergl.title = "Vergleichsseiten mit euren AutoSchnell-Einstellungen öffnen";
           vergl.addEventListener("click", async (ev) => {
             if (!ev.isTrusted) return;
-            const r2 = await A.senden({ typ: "vergleiche_oeffnen", kennung: z.kennung });
-            if (r2 && r2.geoeffnet) { z.geoeffnet = r2.geoeffnet; zeichnen(); }
+            await vergleichOeffnen();
           });
           knoepfe.appendChild(vergl);
         }
@@ -286,21 +297,37 @@
       // Eine schon eingetroffene Ampel (direkt geholte Vergleichsseite) nicht wieder wegwerfen
       const schon = (zustand && zustand.kennung === kennung && zustand.marktlage) || {};
       zustand = { kennung, phase: "fertig", antwort: antwort.antwort, geoeffnet: antwort.geoeffnet,
-                  schonOffen: antwort.schonOffen, ausVergleich: antwort.ausVergleich,
+                  schonOffen: antwort.schonOffen, ausVergleich: antwort.ausVergleich, vomProgramm: antwort.vomProgramm,
                   marktlage: { ...schon, ...(antwort.marktlage || {}) } };
     }
     zeichnen();
   }
 
-  chrome.runtime.onMessage.addListener((msg) => {
+  /** "Vergleich öffnen" — aus der Box oder aus dem Fenster am AutoSchnell-Symbol (auch bei zugemachter Box). */
+  async function vergleichOeffnen() {
+    const kennung = aktuelleKennung;
+    if (!kennung) return { fehler: "kein_inserat" };
+    const r = await A.senden({ typ: "vergleiche_oeffnen", kennung });
+    if (r && r.geoeffnet && zustand && zustand.kennung === kennung) {
+      zustand.geoeffnet = r.geoeffnet;
+      zeichnen();
+    }
+    return r || { fehler: "intern" };
+  }
+
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg && msg.typ === "marktlage" && zustand && msg.kennung === zustand.kennung) {
       zustand.marktlage = { ...(zustand.marktlage || {}), [msg.portal]: msg.lage };
       zeichnen();
     }
+    if (msg && msg.typ === "vergleich_oeffnen") {             // Knopf im Fenster am Symbol (popup.js)
+      vergleichOeffnen().then(sendResponse, () => sendResponse({ fehler: "intern" }));
+      return true;
+    }
     return false;
   });
 
-  // ---------------------------------------------------------------- Vergleichsseite (nur eigene Tabs)
+  // ---------------------------------------------------------------- Vergleichsseite (eigene Tabs + die des Programms)
   function istVergleichsseite(href) {
     try {
       const u = new URL(href);
@@ -314,11 +341,21 @@
   let sucheGeschickt = false;
   async function vergleichsseite() {
     if (sucheGeschickt) return;
-    const bereit = await A.senden({ typ: "suche_bereit" });
+    const bereit = await A.senden({ typ: "suche_bereit", url: location.href });
     if (!bereit || !bereit.senden) return;
     sucheGeschickt = true;
+    const programm = bereit.programm;
+    if (programm && !aktuelleKennung) {
+      zustand = { phase: "suche", fahrzeug: programm.fahrzeug || {}, portal: programm.portal, lage: null };
+      zeichnen();
+    }
     const seite = await A.packen(document.documentElement.outerHTML);
-    await A.senden({ typ: "suche", url: location.href, seite });
+    const r = await A.senden({ typ: "suche", url: location.href, seite });
+    if (programm && zustand && zustand.phase === "suche") {
+      if (r && r.lage) zustand.lage = r.lage;
+      else zustand.text = (r && r.text) || "Die Vergleichsseite konnte nicht ausgewertet werden.";
+      zeichnen();
+    }
   }
 
   // ---------------------------------------------------------------- Adresse beobachten

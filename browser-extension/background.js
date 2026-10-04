@@ -7,6 +7,8 @@
 //    Box im Inserat zeigt alles, "Kaufvertrag" oeffnet das Auto sofort in AutoSchnell.
 //    Verbunden wird mit dem 6-stelligen Code aus AutoSchnell (Programme) — der Schluessel kann nur
 //    diese Erweiterung bedienen, keine Anmeldung, kein Passwort. Ein Konto = ein Browser.
+// 3. Zusammen mit dem Windows-Programm (2.3.0): was das Programm gerade verglichen hat, oeffnet der Helfer nicht
+//    doppelt; die Vergleichsseiten des Programms bekommen die Ampel (programm-suche -> marktlage).
 
 const VERSION = chrome.runtime.getManifest().version;
 const SERVER_STANDARD = "https://app.auto-schnellkauf.de";
@@ -99,8 +101,8 @@ function fehlertext(status, daten, ersatz) {
 
 // ------------------------------------------------------------------ Sitzungsspeicher (ueberlebt Pausen des Service Workers)
 async function sitzung() {
-  const s = await chrome.storage.session.get(["inserate", "vergleichsTabs"]);
-  return { inserate: s.inserate || {}, vergleichsTabs: s.vergleichsTabs || {} };
+  const s = await chrome.storage.session.get(["inserate", "vergleichsTabs", "programmTabs"]);
+  return { inserate: s.inserate || {}, vergleichsTabs: s.vergleichsTabs || {}, programmTabs: s.programmTabs || {} };
 }
 
 let sperre = Promise.resolve();
@@ -111,6 +113,7 @@ function sitzungAendern(fn) {
     const ergebnis = await fn(s);
     const jetzt = Date.now();
     for (const [k, v] of Object.entries(s.inserate)) if (jetzt - v.zeit > 2 * 60 * 60 * 1000) delete s.inserate[k];
+    for (const [k, v] of Object.entries(s.programmTabs)) if (jetzt - (v.zeit || 0) > 2 * 60 * 60 * 1000) delete s.programmTabs[k];
     await chrome.storage.session.set(s);
     return ergebnis;
   });
@@ -160,7 +163,9 @@ async function inseratBearbeiten(msg, tab) {
   const vorher = s.inserate[kennung];
   // Aus einer unserer Vergleichsseiten geoeffnet (neuer Tab) oder darin weitergeklickt (derselbe Tab)?
   // Dann nichts automatisch oeffnen — sonst oeffnet jedes angeschaute Vergleichsauto neue Vergleiche.
-  const ausVergleich = !!((tab.openerTabId && s.vergleichsTabs[tab.openerTabId]) || s.vergleichsTabs[tab.id]);
+  // Seit 2.3.0 zaehlen auch die Vergleichsseiten des Windows-Programms dazu (programmTabs).
+  const vergleichsTab = (id) => !!(id && (s.vergleichsTabs[id] || s.programmTabs[id]));
+  const ausVergleich = vergleichsTab(tab.openerTabId) || vergleichsTab(tab.id);
   let antwort;
   if (vorher && Date.now() - vorher.zeit < WIEDERHOLEN_MS && vorher.antwort) {
     antwort = vorher.antwort;
@@ -175,10 +180,18 @@ async function inseratBearbeiten(msg, tab) {
   }
   const e = await einstellungen();
   const schonOffen = !!(vorher && vorher.geoeffnet && Date.now() - vorher.zeit < WIEDERHOLEN_MS);
+  // Wunsch Ahmad 04.10.2026: hat das Windows-Programm dieses Auto gerade verglichen, sind die Vergleiche schon
+  // offen — hier nichts doppelt oeffnen ("Vergleich oeffnen" geht trotzdem). Die Ampel kommt per Direktabruf.
+  const vomProgramm = !!antwort.programm_verglichen;
   let geoeffnet = 0;
-  if (e.vergleicheOeffnen && !ausVergleich && !schonOffen) geoeffnet = vergleicheStarten(tab, kennung, antwort);
+  if (e.vergleicheOeffnen && !ausVergleich && !schonOffen && !vomProgramm) {
+    geoeffnet = vergleicheStarten(tab, kennung, antwort);
+  } else if (e.vergleicheOeffnen && vomProgramm && !ausVergleich && !schonOffen
+             && !Object.keys((vorher && vorher.marktlage) || {}).length) {
+    direktAuswerten(kennung, antwort, tab.id).catch(() => {});
+  }
   const neu = (await sitzung()).inserate[kennung] || {};
-  return { antwort, geoeffnet, ausVergleich, schonOffen, marktlage: neu.marktlage || {}, server: await server() };
+  return { antwort, geoeffnet, ausVergleich, schonOffen, vomProgramm, marktlage: neu.marktlage || {}, server: await server() };
 }
 
 // ------------------------------------------------------------------ Vergleichsseite
@@ -231,16 +244,45 @@ async function direktAuswerten(kennung, antwort, inseratTab) {
   }));
 }
 
-async function sucheBereit(tab) {
+async function sucheBereit(msg, tab) {
   const s = await sitzung();
   const e = s.vergleichsTabs[tab.id];
-  const schon = e && ((s.inserate[e.kennung] || {}).marktlage || {})[portalSchluessel(e.portal)];
-  return { senden: !!e && !e.erledigt && !schon };
+  if (e) {
+    const schon = ((s.inserate[e.kennung] || {}).marktlage || {})[portalSchluessel(e.portal)];
+    return { senden: !e.erledigt && !schon };
+  }
+  // Wunsch Ahmad 04.10.2026: eine Vergleichsseite, die das Windows-Programm DESSELBEN Kontos gerade geoeffnet
+  // hat (letzte 30 min, dieselbe Suche)? Erst nur die Adresse fragen — die Seite geht nur bei einem Treffer raus.
+  if (s.programmTabs[tab.id]) return { senden: false };
+  const { schluessel } = await lokal("schluessel");
+  if (!schluessel) return { senden: false };
+  const r = await api(`/werkzeuge/${WERKZEUG}/programm-suche`, {
+    methode: "POST", daten: { url: String(msg.url || tab.url || "") },
+  });
+  if (r.status !== 200 || !r.daten || !r.daten.vergleich_id) return { senden: false };
+  await sitzungAendern((x) => {
+    x.programmTabs[tab.id] = { vergleich_id: r.daten.vergleich_id, portal: r.daten.portal, zeit: Date.now() };
+  });
+  return { senden: true, programm: { fahrzeug: r.daten.fahrzeug || {}, portal: r.daten.portal } };
+}
+
+async function programmSucheBearbeiten(msg, tab) {
+  const p = (await sitzung()).programmTabs[tab.id];
+  if (!p || p.erledigt) return { fehler: "kein_vergleich" };
+  await sitzungAendern((x) => { if (x.programmTabs[tab.id]) x.programmTabs[tab.id].erledigt = true; });  // genau einmal
+  const r = await api(`/werkzeuge/${WERKZEUG}/marktlage`, {
+    methode: "POST", daten: { vergleich_id: p.vergleich_id, url: msg.url, seite: msg.seite },
+  });
+  if (r.status !== 200 || !r.daten) {
+    return { fehler: "server", text: fehlertext(r.status, r.daten, "Die Vergleichsseite konnte nicht ausgewertet werden.") };
+  }
+  return { lage: r.daten };
 }
 
 async function sucheBearbeiten(msg, tab) {
   const s = await sitzung();
   const eintrag = s.vergleichsTabs[tab.id];
+  if (!eintrag && s.programmTabs[tab.id]) return programmSucheBearbeiten(msg, tab);
   if (!eintrag || eintrag.erledigt) return { fehler: "kein_vergleich" };
   await sitzungAendern((x) => { if (x.vergleichsTabs[tab.id]) x.vergleichsTabs[tab.id].erledigt = true; });  // genau einmal
   const r = await api(`/werkzeuge/${WERKZEUG}/marktlage`, {
@@ -413,7 +455,7 @@ async function einstellungenSetzen(msg) {
 // ------------------------------------------------------------------ Nachrichten
 const AKTIONEN = {
   inserat: (m, t) => inseratBearbeiten(m, t),
-  suche_bereit: (m, t) => sucheBereit(t),
+  suche_bereit: (m, t) => sucheBereit(m, t),
   suche: (m, t) => sucheBearbeiten(m, t),
   vertrag: (m, t) => vertragOeffnen(m, t),
   app_start_pruefen: (m, t) => appStartPruefen(m, t),
@@ -446,5 +488,5 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  sitzungAendern((s) => { delete s.vergleichsTabs[tabId]; }).catch(() => {});
+  sitzungAendern((s) => { delete s.vergleichsTabs[tabId]; delete s.programmTabs[tabId]; }).catch(() => {});
 });

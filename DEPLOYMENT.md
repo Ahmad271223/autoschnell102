@@ -4407,7 +4407,7 @@ Erst einmal **nur für Kunde 10002**, seit dem Abend des 03.10. auch **10001** �
 
 ### Browser-Helfer für Chrome und Edge (Wunsch Ahmad 04.10.2026)
 
-Zweites Werkzeug `browser-helfer` neben dem Programm — die Erweiterung `browser-extension/` (Version 2.2.0, enthält
+Zweites Werkzeug `browser-helfer` neben dem Programm — die Erweiterung `browser-extension/` (Version 2.3.0, enthält
 weiter den Kleinanzeigen-Abruf-Helfer). Gleiche Lizenz: 6-stelliger Code, **ein Konto = ein Browser**, Abo-Pflicht,
 Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
 - Freigabe: `BROWSER_HELFER_KUNDEN` (Standard `10001,10002`, `docker-compose.yml`; leer = niemand).
@@ -4421,11 +4421,16 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
   (grün ≤ 25 % günstiger, gelb ≤ 50 %, rot darüber; Werbeplätze zählen nicht), gespeichert unter
   `werkzeug_vergleiche.marktlage`. Keine KI, keine Kosten. Seit 2.1.0: Unfall/defekt/Export/Neuwagen/Lockangebote
   werden aussortiert (eigene Liste), das günstigste saubere Angebot wird auf km/EZ des eigenen Autos umgerechnet
-  (Faktoren aus den Angeboten selbst, sonst Faustwert −1,5 %/10.000 km, +8 %/Jahr — so beschriftet); die Links
-  filtern Beschädigte immer schon beim Portal.
+  (Faktoren aus den Angeboten selbst, sonst Faustwert −1,5 %/10.000 km, +8 %/Jahr — so beschriftet). Die Links
+  folgen seit 2.3.0 (Server ab 04.10. abends) **immer den AutoSchnell-Einstellungen** — Beschädigte und Navi wie
+  eingestellt, im Helfer UND im Windows-Programm (Wunsch Ahmad).
 - Seit 2.2.0 schneller: die Box startet, sobald die Seite geladen ist (nicht erst nach allen Bildern/Werbung), und
   der Helfer holt die Vergleichsseiten zusätzlich selbst im Hintergrund — die Ampel steht, bevor die Tabs fertig
   geladen sind (gemessen AutoScout: Box 1,4 → 1,2 s, Ampel 2,8 → 1,8 s). Je Vergleichsseite höchstens eine Marktlage.
+- Seit 2.3.0 mit dem Windows-Programm zusammen (dasselbe Konto, 30 Minuten): was das Programm gerade verglichen
+  hat, öffnet der Helfer nicht noch einmal (`programm_verglichen`); dessen Vergleichsseiten erkennt er über
+  `POST …/programm-suche` (nur die Adresse, Seite erst bei Treffer) und zeigt dort die Ampel. Knopf
+  „Vergleich öffnen“ in der Box und im Fenster am Symbol. Index `werkzeug_vergleiche_konto` legt der Start an.
 - „Kaufvertrag“ öffnet die **installierte App** (offenes App-Fenster oder Start per `web+autoschnell:`), nur ohne
   App eine Webseite; das Vertragsfenster geht gleich auf (`&vertrag=1`). Das App-Manifest hat dafür seit 04.10.2026
   `protocol_handlers` — installierte Apps übernehmen das neue Manifest beim nächsten Start/Update; beim ersten
@@ -4435,7 +4440,7 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
   powershell -File browser-extension\bauen.ps1                                       # lokal: browser-extension\dist\AutoSchnell-Helfer.zip
   scp browser-extension/dist/AutoSchnell-Helfer.zip root@<server>:/tmp/
   docker compose cp /tmp/AutoSchnell-Helfer.zip backend:/tmp/AutoSchnell-Helfer.zip
-  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Helfer.zip --werkzeug browser-helfer --version 2.2.0
+  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Helfer.zip --werkzeug browser-helfer --version 2.3.0
   ```
   Reihenfolge: erst Server deployen (neue Routen), dann ZIP hochladen.
 - Tests: `backend/tests/test_browser_helfer_20261004.py` (Teil 1 ohne Server, Teil 2 über HTTP).

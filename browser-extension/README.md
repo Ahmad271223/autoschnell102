@@ -22,11 +22,21 @@ Seit Version 2.0.0 (04.10.2026) macht die Erweiterung zwei Dinge:
 5. Box im Inserat: Fahrzeug, Ampel je Portal, Preisbewertung von mobile.de/AutoScout24, Hinweise
    (Unfall, HU, Vorbesitzer, Schadenswörter, VB), seit 2.1.0 auch **aussortierte Angebote** (Unfall,
    defekt, Export/Händlerpreis, Neuwagen, Lockangebote) und das günstigste saubere Angebot **umgerechnet**
-   auf km und Erstzulassung des eigenen Autos. Beschädigte filtert schon das Portal (dam=0 /
-   damaged_listing=exclude), egal was die Firmenregel sagt.
+   auf km und Erstzulassung des eigenen Autos. Seit 2.3.0 gelten Beschädigte und Navi **wie in den
+   AutoSchnell-Einstellungen** (Wunsch Ahmad 04.10. abends: „immer an AutoSchnell-Regeln halten“; 2.1.0/2.2.0
+   haben Beschädigte immer ausgeschlossen). Für die Ampel sortiert `/marktlage` Unfallwagen usw. weiter aus.
+   Unplausible Erstzulassung/Kilometer stehen als Hinweis in der Box (`melden`, wie im Windows-Programm).
    Seit 2.2.0: Start bei `document_end` statt nach allen Bildern; `background.js` holt die Vergleichsseiten
    zusätzlich selbst (`direktAuswerten`, mit den Cookies des Nutzers) — wer zuerst fertig ist, liefert die
    Ampel, die zweite Lieferung wird verworfen (`marktlageMerken`).
+   **Zusammen mit dem Windows-Programm (seit 2.3.0, dasselbe AutoSchnell-Konto):**
+   - Hat das Programm das Auto in den letzten 30 Minuten verglichen (`programm_verglichen` in der Antwort von
+     `…/inserat`), öffnet der Helfer **keine** Vergleiche von selbst — nur die Ampel per Direktabruf.
+   - Die Vergleichsseiten, die das Programm geöffnet hat, erkennt der Helfer (`POST …/programm-suche`: erst nur
+     die Adresse, `browser_helfer.gleiche_suche` verträgt das Umschreiben der AutoScout24-Adresse) und zeigt dort
+     eine Box mit dem Auto und der Ampel. Autos, die man von dort aus öffnet, öffnen keine neuen Vergleiche.
+   - Knopf **Vergleich öffnen** immer in der Box und im Fenster am AutoSchnell-Symbol (auch bei zugemachter
+     Box) — öffnet die Vergleiche trotzdem.
 6. Knopf **Kaufvertrag** → `/app/vergleich?url=…&vertrag=1`: das Vertragsfenster geht gleich auf, alles
    aus der Seite eingetragen. `/listings/check` und `/mobile/compare` nehmen die Browserdaten dieses Kontos:
    kein Apify-Abruf, kein Tageslimit. Beweisdokument gibt es für Browserdaten nicht (nur nach Server-Abruf).

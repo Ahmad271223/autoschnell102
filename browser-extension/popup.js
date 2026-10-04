@@ -81,6 +81,41 @@ $("trennen").addEventListener("click", async () => {
   zeigen(await senden({ typ: "status" }));
 });
 
+// Wunsch Ahmad 04.10.2026: "Vergleich öffnen" auch hier — fuer das Inserat im gerade offenen Tab
+function anTab(tabId, nachricht) {
+  return new Promise((fertig) => {
+    try {
+      chrome.tabs.sendMessage(tabId, nachricht, (antwort) => fertig(chrome.runtime.lastError ? null : antwort));
+    } catch (e) {
+      fertig(null);
+    }
+  });
+}
+
+$("vergleich").addEventListener("click", async () => {
+  const text = $("vergleichText");
+  $("vergleich").disabled = true;
+  try {
+    let tab = null;
+    try { [tab] = await chrome.tabs.query({ active: true, currentWindow: true }); } catch (e) { tab = null; }
+    const r = tab ? await anTab(tab.id, { typ: "vergleich_oeffnen" }) : null;
+    if (r && r.geoeffnet) {
+      text.textContent = r.geoeffnet === 1 ? "1 Vergleich geöffnet." : r.geoeffnet + " Vergleiche geöffnet.";
+    } else if (r && r.fehler === "unbekannt") {
+      text.textContent = "Das Inserat ist noch nicht gelesen – Seite neu laden und noch einmal drücken.";
+    } else if (r && r.fehler !== "kein_inserat" && r.fehler) {
+      text.textContent = "Das hat nicht geklappt – Seite neu laden und noch einmal drücken.";
+    } else if (r && !r.fehler) {
+      text.textContent = "Für dieses Auto gibt es keinen Vergleich (Marke oder Modell unbekannt).";
+    } else {
+      text.textContent = "Hier ist kein Inserat offen – erst ein Auto auf mobile.de, AutoScout24 oder Kleinanzeigen öffnen.";
+    }
+    text.hidden = false;
+  } finally {
+    $("vergleich").disabled = false;
+  }
+});
+
 $("oeffnen").addEventListener("change", async () => {
   await senden({ typ: "einstellungen", einstellungen: { vergleicheOeffnen: $("oeffnen").checked } });
 });
