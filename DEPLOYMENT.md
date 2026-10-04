@@ -4394,7 +4394,11 @@ Erst einmal **nur für Kunde 10002**, seit dem Abend des 03.10. auch **10001** �
   `--verbinden <code>` (ohne Fenster), `--server <url>` (Testserver), `AUTOSCHNELL_VERGLEICH_DATEN=<ordner>` (eigene
   Einstellungen).
 
-- **Datei hochladen** (55 MB > nginx-Limit 25 MB, deshalb im Container; S3/R2: einmal reicht für beide Server):
+- **Datei hochladen in EINEM Befehl** (seit 04.10.2026, vom PC im Projektordner, nach dem Ausrollen):
+  `powershell -ExecutionPolicy Bypass -File autopointer-vergleich\hochladen.ps1 -Server root@<server>` — baut die EXE
+  (build.ps1 mit Tests), kopiert sie und trägt sie mit der Version aus der .csproj ein; `-OhneBauen` nimmt die
+  vorhandene dist-Datei. Gegenstück für den Browser-Helfer: `browser-extension\hochladen.ps1`.
+- **Datei hochladen von Hand** (55 MB > nginx-Limit 25 MB, deshalb im Container; S3/R2: einmal reicht für beide Server):
   ```
   cd autopointer-vergleich && powershell -ExecutionPolicy Bypass -File build.ps1   # lokal: dist\AutoSchnell-Vergleich.exe
   scp dist/AutoSchnell-Vergleich.exe root@<server>:/tmp/                            # vom PC aus, nicht auf dem Server
