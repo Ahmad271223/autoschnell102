@@ -1095,11 +1095,20 @@ async def portal_sitzung(sitzung: SitzungKopf):
 
 @router.get("/public/portal/vertrag/pdf")
 async def portal_sitzung_pdf(sitzung: SitzungKopf):
-    """Der Vertrag fuer den Kunden: vor der Unterschrift die Druckfassung, danach die unterschriebene."""
+    """Der Vertrag fuer den Kunden: vor der Unterschrift die Druckfassung, danach die unterschriebene —
+    ohne das Blatt "Signaturnachweis" (Wunsch Ahmad 04.10.2026: das sieht nur die Firma)."""
     from vertrag_dateiname import content_disposition
     c = await _sitzung_pruefen(sitzung)
-    if (c.get("portal") or {}).get("status") == "unterschrieben":
+    p = c.get("portal") or {}
+    if p.get("status") == "unterschrieben":
         pdf = base64.b64decode(c["pdf_signiert_b64"]) if c.get("pdf_signiert_b64") else None
+        if pdf and p.get("unterschrift_in_feldern"):
+            import portal_pdf
+            try:
+                pdf = await asyncio.to_thread(portal_pdf.kundenfassung, pdf)
+            except Exception:  # noqa: BLE001 — lieber gar nicht als mit Nachweisblatt
+                log.exception("Kundenportal: Kundenfassung fuer Vertrag %s nicht erzeugt", c["id"])
+                raise HTTPException(500, "Der Vertrag kann gerade nicht geladen werden — bitte später erneut.")
     else:
         pdf = _portal_dokument(c)                    # Portal-Fassung ohne Empfangsbestaetigung (02.10.2026)
     if not pdf:

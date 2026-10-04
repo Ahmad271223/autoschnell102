@@ -52,9 +52,11 @@ def test_unterschrieben_wird_das_gespeicherte_dokument():
         alt, neu = _text(original, i), _text(pdf, i)
         for zeile in [z for z in alt.splitlines() if z.strip()]:
             assert zeile in neu, (i, zeile)
-    # in den Feldern: Name und Zeitpunkt neben der Beschriftung, beim Haendler "hinterlegte Unterschrift"
+    # in den Feldern: Name und Zeitpunkt neben der Beschriftung; beim Haendler seit 04.10.2026 (Wunsch Ahmad)
+    # NICHT mehr "hinterlegte Unterschrift" — die Seite bekommt der Kunde, vermerkt ist es nur im Nachweis
     letzte = _text(pdf, n - 1)
-    assert "Erika Mustermann · digital am 30.09.2026, 10:15 Uhr" in letzte and "hinterlegte Unterschrift" in letzte
+    assert "Erika Mustermann · digital am 30.09.2026, 10:15 Uhr" in letzte and "hinterlegte Unterschrift" not in letzte
+    assert "KFZ Müller GmbH — hinterlegte Unterschrift" in _text(pdf, n)
     # Signaturnachweis: wer, wann, welche Fassung, Pruefsumme des gelesenen Dokuments
     blatt = _text(pdf, n)
     assert "Signaturnachweis" in blatt and "Kaufvertrag KV-PDF30 · Vertragsfassung 1" in blatt

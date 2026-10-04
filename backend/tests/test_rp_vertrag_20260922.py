@@ -219,14 +219,14 @@ def test_rp429_keine_falschen_saetze_im_vertrag():
     assert "Kratzer Tür links" in text and "Navi" in text
 
 
-def test_rp494_fassung_steht_im_vertrag():
-    erste = _pdf({"fassung": 1})
-    assert "FASSUNG" not in erste and "ersetzt Fassung" not in erste
-    zweite = _pdf({"fassung": 2, "ersetzt_fassung_am": "2026-09-21"})
-    assert "2 · ersetzt Fassung 1 vom 21.09.2026" in zweite, zweite[:600]
-    assert "Fassung 2" in zweite                           # Fusszeile
-    digital = _pdf({"fassung": 3, "ersetzt_fassung_am": "2026-09-22"}, digital=True)
-    assert "ersetzt Fassung 2 vom 22.09.2026" in digital and "Fassung 3" in digital
+def test_rp494_fassung_steht_nicht_mehr_im_vertrag():
+    """RP-494 schrieb "Fassung N · ersetzt Fassung N-1 vom …" in Kopf und Fusszeile. Wunsch Ahmad 04.10.2026:
+    der Kunde darf das nicht sehen — jede Fassung des PDFs geht an ihn. Die Fassung bleibt gespeichert."""
+    for daten, digital in (({"fassung": 1}, False), ({"fassung": 2, "ersetzt_fassung_am": "2026-09-21"}, False),
+                           ({"fassung": 3, "ersetzt_fassung_am": "2026-09-22"}, True)):
+        text = _pdf(daten, digital=digital)
+        assert "FASSUNG" not in text and "ersetzt Fassung" not in text, text[:600]
+        assert f"Fassung {daten['fassung']}" not in text
 
 
 def _png(breite=120, hoehe=40) -> bytes:

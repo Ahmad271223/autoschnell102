@@ -189,8 +189,10 @@ def unterschreiben(original: bytes, *, verkaeufer_png: bytes, kaeufer_png: Optio
         nr, links, rechts = felder
         seite = schreiber.pages[nr]
         masse = (float(seite.mediabox.width), float(seite.mediabox.height))
+        # Wunsch Ahmad 04.10.2026: neben der Unterschrift der Firma steht im Vertrag NICHT "hinterlegte
+        # Unterschrift" — die Seite bekommt der Kunde; vermerkt ist es nur im Signaturnachweis (Firma).
         auflage = _auflage(masse, links, rechts, verkaeufer_png, kaeufer_png,
-                           f"{name} · digital am {zeit} Uhr", "hinterlegte Unterschrift")
+                           f"{name} · digital am {zeit} Uhr", "")
         seite.merge_page(PdfReader(io.BytesIO(auflage)).pages[0])
         in_feldern = True
     blatt = _nachweisblatt(firma=firma, vertragsnummer=vertragsnummer, fassung=fassung, name=name, zeit=zeit,
@@ -200,3 +202,28 @@ def unterschreiben(original: bytes, *, verkaeufer_png: bytes, kaeufer_png: Optio
     raus = io.BytesIO()
     schreiber.write(raus)
     return raus.getvalue(), summe, in_feldern
+
+
+def _ist_nachweisblatt(seite) -> bool:
+    try:
+        return (seite.extract_text() or "").lstrip().startswith("Signaturnachweis")
+    except Exception:  # noqa: BLE001 — unlesbar: dann ist es nicht unser Blatt
+        return False
+
+
+def kundenfassung(signiert: bytes) -> bytes:
+    """Wunsch Ahmad 04.10.2026: der Kunde bekommt den unterschriebenen Vertrag OHNE das Blatt
+    "Signaturnachweis" (Pruefsumme, "hinterlegte Unterschrift", Fassung) — das bleibt bei der Firma.
+    Entfernt nur das angefuegte letzte Blatt und nur, wenn es wirklich der Nachweis ist; sonst kommt das
+    Dokument unveraendert zurueck. Nur verwenden, wenn die Unterschriften in den Feldern stehen — sonst
+    stehen sie allein auf dem Nachweisblatt."""
+    from pypdf import PdfReader, PdfWriter
+    leser = PdfReader(io.BytesIO(signiert))
+    if len(leser.pages) < 2 or not _ist_nachweisblatt(leser.pages[-1]):
+        return signiert
+    schreiber = PdfWriter()
+    for seite in leser.pages[:-1]:
+        schreiber.add_page(seite)
+    raus = io.BytesIO()
+    schreiber.write(raus)
+    return raus.getvalue()

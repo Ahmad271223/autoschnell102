@@ -277,7 +277,11 @@ def test_04_freigabe_code_und_unterschrift(welt, monkeypatch):
     assert "Kundenportal von KFZ Müller GmbH" in text and "Erika Mustermann" in text and "hinterlegte Unterschrift" in text
     # danach: Sitzung liefert die unterschriebene Fassung, kein zweites Mal, keine neue Freigabe
     assert _lauf(KP.portal_sitzung(sitzung))["pdf_signiert"] is True
-    assert _lauf(KP.portal_sitzung_pdf(sitzung)).body == signiert
+    # Wunsch Ahmad 04.10.2026: der Kunde bekommt sie OHNE das Blatt "Signaturnachweis" (das hat nur die Firma)
+    kunde = _lauf(KP.portal_sitzung_pdf(sitzung)).body
+    assert len(PdfReader(io.BytesIO(kunde)).pages) == len(PdfReader(io.BytesIO(signiert)).pages) - 1
+    kunde_text = "".join(seite.extract_text() or "" for seite in PdfReader(io.BytesIO(kunde)).pages)
+    assert "Signaturnachweis" not in kunde_text and "Erika Mustermann" in kunde_text
     assert _fehler(KP.portal_unterschreiben(sitzung, KP.UnterschreibenIn(signature_b64=_b64(_png()), name="X Y",
                                                                           einverstanden=True), _request())).status_code == 409
     assert _fehler(KP.portal_freigeben(c["id"], user=w.sucher)).status_code == 409

@@ -878,29 +878,10 @@ def _halter_anzahl(contract: dict, vehicle: dict) -> str:
     return str(wert if wert is not None else "").strip()
 
 
-def _fassung_nummer(contract: dict) -> int:
-    try:
-        return int(contract.get("fassung") or 1)
-    except (TypeError, ValueError):
-        return 1
-
-
-def _fassung_text(contract: dict) -> str:
-    """Rollenpruefung 22.09.2026 (RP-494): "2 · ersetzt Fassung 1 vom
-    21.09.2026" — leer fuer die erste Fassung (sie bleibt, wie sie war)."""
-    nr = _fassung_nummer(contract)
-    if nr < 2:
-        return ""
-    text = f"{nr} · ersetzt Fassung {nr - 1}"
-    vom = str(contract.get("ersetzt_fassung_am") or "").strip()[:10]
-    if vom:
-        try:
-            from datetime import date as _date
-            vom = _date.fromisoformat(vom).strftime("%d.%m.%Y")
-        except (ValueError, TypeError):
-            pass
-        text += f" vom {vom}"
-    return text
+# Wunsch Ahmad 04.10.2026: "Fassung N · ersetzt Fassung N-1 vom …" (RP-494) steht NICHT mehr im Vertrag —
+# jede Fassung des PDFs geht an den Kunden (Druck, Versand, Kundenportal), und der soll nicht sehen, wie oft
+# geaendert wurde. Die Fassung bleibt am Vertrag gespeichert (contract_data.fassung / ersetzt_fassung_am,
+# version) und steht in der App sowie im Signaturnachweis, den nur die Firma bekommt.
 
 
 #: Rollenpruefung 22.09.2026 (RP-452): Groesse des Firmenlogos im Kopf.
@@ -1000,10 +981,6 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
     company = (dealer.get("company_name") or "Autohändler").strip()
     contract_no = (contract.get("contract_no") or "").strip() or \
         f"KV-{datetime.now().strftime('%Y%m%d-%H%M')}"
-    # Rollenpruefung 22.09.2026 (RP-494): ab der 2. Fassung steht im Kopf und
-    # in der Fusszeile, welche Fassung das ist und welche sie ersetzt.
-    fassung_text = _fassung_text(contract)
-
     # ---------- Header / Briefkopf ----------
     header_left = [
         Paragraph(f"<b>{_xml_escape(company)}</b>", st["brand"]),
@@ -1026,12 +1003,6 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
         Paragraph("DATUM", st["meta_label"]),
         Paragraph(f"<b>{today}</b>", st["meta_value"]),
     ]
-    if fassung_text:
-        header_right += [
-            Spacer(1, 5),
-            Paragraph("FASSUNG", st["meta_label"]),
-            Paragraph(f"<b>{_xml_escape(fassung_text)}</b>", st["meta_value"]),
-        ]
     if _formular():
         # Layout "formular" (Wunsch Ahmad 03.10.2026, nach seiner Vorlage): links Logo/Firma,
         # in der Mitte die Ueberschrift in der Vertragsfarbe, rechts Nummer und Datum.
@@ -1480,8 +1451,6 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
             story.append(KeepTogether(block))
         footer_left = company
         footer_center = f"Kaufvertrag {contract_no} · erstellt am {today} · digitale Ausfertigung"
-        if fassung_text:
-            footer_center += f" · Fassung {_fassung_nummer(contract)}"
         doc.build(story, canvasmaker=_numbered_canvas_factory(footer_left, footer_center))
         return buf.getvalue()
 
@@ -1514,7 +1483,5 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
 
     footer_left = company
     footer_center = f"Kaufvertrag {contract_no} · erstellt am {today}"
-    if fassung_text:
-        footer_center += f" · Fassung {_fassung_nummer(contract)}"
     doc.build(story, canvasmaker=_numbered_canvas_factory(footer_left, footer_center))
     return buf.getvalue()
