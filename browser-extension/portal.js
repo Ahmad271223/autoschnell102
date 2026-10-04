@@ -241,7 +241,7 @@
           vergl.addEventListener("click", async (ev) => {
             if (!ev.isTrusted) return;
             const r2 = await A.senden({ typ: "vergleiche_oeffnen", kennung: z.kennung });
-            if (r2 && r2.geoeffnet) { z.geoeffnet = r2.geoeffnet; z.marktlage = {}; zeichnen(); }
+            if (r2 && r2.geoeffnet) { z.geoeffnet = r2.geoeffnet; zeichnen(); }
           });
           knoepfe.appendChild(vergl);
         }
@@ -283,8 +283,11 @@
     } else if (antwort.fehler) {
       zustand = { kennung, phase: "fehler", text: antwort.text || "Das Inserat konnte nicht gelesen werden." };
     } else {
+      // Eine schon eingetroffene Ampel (direkt geholte Vergleichsseite) nicht wieder wegwerfen
+      const schon = (zustand && zustand.kennung === kennung && zustand.marktlage) || {};
       zustand = { kennung, phase: "fertig", antwort: antwort.antwort, geoeffnet: antwort.geoeffnet,
-                  schonOffen: antwort.schonOffen, ausVergleich: antwort.ausVergleich, marktlage: antwort.marktlage || {} };
+                  schonOffen: antwort.schonOffen, ausVergleich: antwort.ausVergleich,
+                  marktlage: { ...schon, ...(antwort.marktlage || {}) } };
     }
     zeichnen();
   }

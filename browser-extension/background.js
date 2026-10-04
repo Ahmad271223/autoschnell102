@@ -140,6 +140,15 @@ async function vergleicheOeffnen(tab, kennung, antwort) {
   return neue.length;
 }
 
+/** Tempo: Vergleichsseiten sofort direkt holen und die Tabs anlegen — ohne dass die Box darauf wartet. */
+function vergleicheStarten(tab, kennung, antwort) {
+  // sofort vermerken (Neuladen des Inserats oeffnet nichts doppelt), die Tabs folgen gleich
+  sitzungAendern((s) => { if (s.inserate[kennung]) s.inserate[kennung].geoeffnet = true; }).catch(() => {});
+  direktAuswerten(kennung, antwort, tab.id).catch(() => {});
+  vergleicheOeffnen(tab, kennung, antwort).catch(() => {});
+  return (antwort.links || []).length;
+}
+
 async function inseratBearbeiten(msg, tab) {
   const { schluessel } = await lokal("schluessel");
   if (!schluessel) {
@@ -167,15 +176,66 @@ async function inseratBearbeiten(msg, tab) {
   const e = await einstellungen();
   const schonOffen = !!(vorher && vorher.geoeffnet && Date.now() - vorher.zeit < WIEDERHOLEN_MS);
   let geoeffnet = 0;
-  if (e.vergleicheOeffnen && !ausVergleich && !schonOffen) geoeffnet = await vergleicheOeffnen(tab, kennung, antwort);
+  if (e.vergleicheOeffnen && !ausVergleich && !schonOffen) geoeffnet = vergleicheStarten(tab, kennung, antwort);
   const neu = (await sitzung()).inserate[kennung] || {};
   return { antwort, geoeffnet, ausVergleich, schonOffen, marktlage: neu.marktlage || {}, server: await server() };
 }
 
 // ------------------------------------------------------------------ Vergleichsseite
+// Tempo (04.10.2026, Wunsch Ahmad "noch schneller"): Die Vergleichsseite wird zusaetzlich DIREKT geholt (nur die
+// Seite, ohne Anzeige, ~0,5 s statt mehrere Sekunden bis der Hintergrund-Tab geladen ist) — die Ampel steht so
+// meist eine Sekunde nach der Box. Klappt das nicht (Pruefseite des Portals, offline), liest wie bisher der Tab.
+const portalSchluessel = (portal) => (portal === "AutoScout24" ? "autoscout" : "mobile");
+
+async function packen(text) {
+  const strom = new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"));
+  const bytes = new Uint8Array(await new Response(strom).arrayBuffer());
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
+/** Ergebnis einer Vergleichsseite merken (genau einmal je Portal) und an den Inserat-Tab geben. */
+async function marktlageMerken(kennung, schluessel, lage, inseratTab) {
+  const neu = await sitzungAendern((x) => {
+    const i = x.inserate[kennung];
+    if (!i || (i.marktlage || {})[schluessel]) return false;
+    i.marktlage = { ...(i.marktlage || {}), [schluessel]: lage };
+    for (const e of Object.values(x.vergleichsTabs)) {
+      if (e.kennung === kennung && portalSchluessel(e.portal) === schluessel) e.erledigt = true;
+    }
+    return true;
+  });
+  if (!neu) return false;
+  try {
+    await chrome.tabs.sendMessage(inseratTab, { typ: "marktlage", kennung, portal: schluessel, lage });
+  } catch (e) { /* Inserat-Tab schon zu */ }
+  return true;
+}
+
+async function direktAuswerten(kennung, antwort, inseratTab) {
+  await Promise.all((antwort.links || []).map(async (link) => {
+    const schluessel = portalSchluessel(link.portal);
+    try {
+      const r = await fetch(link.url, { credentials: "include", cache: "no-store" });
+      if (!r.ok) return;
+      const seite = await packen(await r.text());
+      const s = await sitzung();
+      if (((s.inserate[kennung] || {}).marktlage || {})[schluessel]) return;     // der Tab war schneller
+      const ziel = r.url && new URL(r.url).host === new URL(link.url).host ? r.url : link.url;
+      const res = await api(`/werkzeuge/${WERKZEUG}/marktlage`, {
+        methode: "POST", daten: { vergleich_id: antwort.vergleich_id, url: ziel, seite },
+      });
+      if (res.status === 200 && res.daten) await marktlageMerken(kennung, schluessel, res.daten, inseratTab);
+    } catch (e) { /* dann liest der Tab */ }
+  }));
+}
+
 async function sucheBereit(tab) {
   const s = await sitzung();
-  return { senden: !!s.vergleichsTabs[tab.id] && !s.vergleichsTabs[tab.id].erledigt };
+  const e = s.vergleichsTabs[tab.id];
+  const schon = e && ((s.inserate[e.kennung] || {}).marktlage || {})[portalSchluessel(e.portal)];
+  return { senden: !!e && !e.erledigt && !schon };
 }
 
 async function sucheBearbeiten(msg, tab) {
@@ -189,16 +249,8 @@ async function sucheBearbeiten(msg, tab) {
   if (r.status !== 200 || !r.daten) {
     return { fehler: "server", text: fehlertext(r.status, r.daten, "Die Vergleichsseite konnte nicht ausgewertet werden.") };
   }
-  const lage = r.daten;
-  const schluessel = eintrag.portal === "AutoScout24" ? "autoscout" : "mobile";
-  await sitzungAendern((x) => {
-    const i = x.inserate[eintrag.kennung];
-    if (i) i.marktlage = { ...(i.marktlage || {}), [schluessel]: lage };
-  });
-  try {
-    await chrome.tabs.sendMessage(eintrag.inseratTab, { typ: "marktlage", kennung: eintrag.kennung, portal: schluessel, lage });
-  } catch (e) { /* Inserat-Tab schon zu */ }
-  return { lage };
+  await marktlageMerken(eintrag.kennung, portalSchluessel(eintrag.portal), r.daten, eintrag.inseratTab);
+  return { lage: r.daten };
 }
 
 // ------------------------------------------------------------------ Kaufvertrag
@@ -301,7 +353,7 @@ async function vergleicheManuell(msg, tab) {
   const kennung = String(msg.kennung || "");
   const i = s.inserate[kennung];
   if (!i || !i.antwort) return { fehler: "unbekannt" };
-  return { geoeffnet: await vergleicheOeffnen(tab, kennung, i.antwort) };
+  return { geoeffnet: vergleicheStarten(tab, kennung, i.antwort) };
 }
 
 // ------------------------------------------------------------------ Fenster (popup.html)

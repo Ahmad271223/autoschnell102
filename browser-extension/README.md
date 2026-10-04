@@ -24,6 +24,9 @@ Seit Version 2.0.0 (04.10.2026) macht die Erweiterung zwei Dinge:
    defekt, Export/Händlerpreis, Neuwagen, Lockangebote) und das günstigste saubere Angebot **umgerechnet**
    auf km und Erstzulassung des eigenen Autos. Beschädigte filtert schon das Portal (dam=0 /
    damaged_listing=exclude), egal was die Firmenregel sagt.
+   Seit 2.2.0: Start bei `document_end` statt nach allen Bildern; `background.js` holt die Vergleichsseiten
+   zusätzlich selbst (`direktAuswerten`, mit den Cookies des Nutzers) — wer zuerst fertig ist, liefert die
+   Ampel, die zweite Lieferung wird verworfen (`marktlageMerken`).
 6. Knopf **Kaufvertrag** → `/app/vergleich?url=…&vertrag=1`: das Vertragsfenster geht gleich auf, alles
    aus der Seite eingetragen. `/listings/check` und `/mobile/compare` nehmen die Browserdaten dieses Kontos:
    kein Apify-Abruf, kein Tageslimit. Beweisdokument gibt es für Browserdaten nicht (nur nach Server-Abruf).

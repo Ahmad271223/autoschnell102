@@ -4407,7 +4407,7 @@ Erst einmal **nur für Kunde 10002**, seit dem Abend des 03.10. auch **10001** �
 
 ### Browser-Helfer für Chrome und Edge (Wunsch Ahmad 04.10.2026)
 
-Zweites Werkzeug `browser-helfer` neben dem Programm — die Erweiterung `browser-extension/` (Version 2.0.0, enthält
+Zweites Werkzeug `browser-helfer` neben dem Programm — die Erweiterung `browser-extension/` (Version 2.2.0, enthält
 weiter den Kleinanzeigen-Abruf-Helfer). Gleiche Lizenz: 6-stelliger Code, **ein Konto = ein Browser**, Abo-Pflicht,
 Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
 - Freigabe: `BROWSER_HELFER_KUNDEN` (Standard `10001,10002`, `docker-compose.yml`; leer = niemand).
@@ -4423,6 +4423,9 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
   werden aussortiert (eigene Liste), das günstigste saubere Angebot wird auf km/EZ des eigenen Autos umgerechnet
   (Faktoren aus den Angeboten selbst, sonst Faustwert −1,5 %/10.000 km, +8 %/Jahr — so beschriftet); die Links
   filtern Beschädigte immer schon beim Portal.
+- Seit 2.2.0 schneller: die Box startet, sobald die Seite geladen ist (nicht erst nach allen Bildern/Werbung), und
+  der Helfer holt die Vergleichsseiten zusätzlich selbst im Hintergrund — die Ampel steht, bevor die Tabs fertig
+  geladen sind (gemessen AutoScout: Box 1,4 → 1,2 s, Ampel 2,8 → 1,8 s). Je Vergleichsseite höchstens eine Marktlage.
 - „Kaufvertrag“ öffnet die **installierte App** (offenes App-Fenster oder Start per `web+autoschnell:`), nur ohne
   App eine Webseite; das Vertragsfenster geht gleich auf (`&vertrag=1`). Das App-Manifest hat dafür seit 04.10.2026
   `protocol_handlers` — installierte Apps übernehmen das neue Manifest beim nächsten Start/Update; beim ersten
@@ -4432,7 +4435,7 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
   powershell -File browser-extension\bauen.ps1                                       # lokal: browser-extension\dist\AutoSchnell-Helfer.zip
   scp browser-extension/dist/AutoSchnell-Helfer.zip root@<server>:/tmp/
   docker compose cp /tmp/AutoSchnell-Helfer.zip backend:/tmp/AutoSchnell-Helfer.zip
-  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Helfer.zip --werkzeug browser-helfer --version 2.1.0
+  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Helfer.zip --werkzeug browser-helfer --version 2.2.0
   ```
   Reihenfolge: erst Server deployen (neue Routen), dann ZIP hochladen.
 - Tests: `backend/tests/test_browser_helfer_20261004.py` (Teil 1 ohne Server, Teil 2 über HTTP).
