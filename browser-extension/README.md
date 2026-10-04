@@ -29,6 +29,9 @@ Seit Version 2.0.0 (04.10.2026) macht die Erweiterung zwei Dinge:
    Seit 2.2.0: Start bei `document_end` statt nach allen Bildern; `background.js` holt die Vergleichsseiten
    zusätzlich selbst (`direktAuswerten`, mit den Cookies des Nutzers) — wer zuerst fertig ist, liefert die
    Ampel, die zweite Lieferung wird verworfen (`marktlageMerken`).
+   Seit 2.4.0: `gemeinsam.js` läuft bei `document_start` (portal.js weiter bei `document_end`) und meldet ein
+   Inserat sofort (`frueh`): der Hintergrund wacht auf und wärmt die Verbindung zu AutoSchnell vor. portal.js
+   fragt erst ohne Seite — kennt der Helfer das Inserat (30 min), steht die Box ohne Einpacken und Hochladen.
    **Zusammen mit dem Windows-Programm (seit 2.3.0, dasselbe AutoSchnell-Konto):**
    - Hat das Programm das Auto in den letzten 30 Minuten verglichen (`programm_verglichen` in der Antwort von
      `…/inserat`), öffnet der Helfer **keine** Vergleiche von selbst — nur die Ampel per Direktabruf.

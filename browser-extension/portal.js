@@ -278,14 +278,19 @@
   async function inserat(kennung, ersterAufruf) {
     zustand = { kennung, phase: "laden" };
     zeichnen();
-    // Erster Aufruf: die geladene Seite enthaelt das Inserat. Nach einem Wechsel ohne Neuladen: frisch holen.
-    let html = ersterAufruf ? document.documentElement.outerHTML : await frischHolen(location.href);
-    if (!html) html = document.documentElement.outerHTML;
-    let antwort = await A.senden({ typ: "inserat", kennung, url: location.href, seite: await A.packen(html) });
-    if (antwort && antwort.fehler === "seite" && ersterAufruf) {
-      const frisch = await frischHolen(location.href);
-      if (frisch && kennung === aktuelleKennung) {
-        antwort = await A.senden({ typ: "inserat", kennung, url: location.href, seite: await A.packen(frisch) });
+    // Tempo (2.4.0): erst fragen, ob der Helfer das Inserat gerade schon gelesen hat (Neuladen, zurueck, zweiter
+    // Tab) — dann steht die Box sofort, ohne die Seite einzupacken oder neu zu holen.
+    let antwort = await A.senden({ typ: "inserat", kennung, url: location.href });
+    if (!antwort || antwort.bekannt === false) {
+      // Erster Aufruf: die geladene Seite enthaelt das Inserat. Nach einem Wechsel ohne Neuladen: frisch holen.
+      let html = ersterAufruf ? document.documentElement.outerHTML : await frischHolen(location.href);
+      if (!html) html = document.documentElement.outerHTML;
+      antwort = await A.senden({ typ: "inserat", kennung, url: location.href, seite: await A.packen(html) });
+      if (antwort && antwort.fehler === "seite" && ersterAufruf) {
+        const frisch = await frischHolen(location.href);
+        if (frisch && kennung === aktuelleKennung) {
+          antwort = await A.senden({ typ: "inserat", kennung, url: location.href, seite: await A.packen(frisch) });
+        }
       }
     }
     if (kennung !== aktuelleKennung) return;          // inzwischen weitergeklickt

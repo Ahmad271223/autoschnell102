@@ -1,4 +1,4 @@
-// AutoSchnell Helfer — gemeinsame Hilfen der Seiten-Skripte (inserat.js, suche.js).
+// AutoSchnell Helfer — gemeinsame Hilfen der Seiten-Skripte (portal.js).
 // Liegt im selben isolierten Bereich wie das jeweilige Skript; die Portalseite sieht davon nichts.
 
 var AutoSchnell = globalThis.AutoSchnell || (globalThis.AutoSchnell = {});
@@ -51,3 +51,11 @@ AutoSchnell.senden = function senden(nachricht) {
 AutoSchnell.euro = function euro(n) {
   return typeof n === "number" && isFinite(n) ? Math.round(n).toLocaleString("de-DE") + " €" : "–";
 };
+
+// Tempo (2.4.0): Diese Datei laeuft schon beim Seitenstart (document_start), portal.js erst, wenn die Seite da ist.
+// Auf einem Inserat jetzt schon den Hintergrund wecken und die Verbindung zu AutoSchnell aufbauen lassen — bis die
+// Seite geladen ist, laeuft beides, und das Inserat geht ohne Aufwachen und Verbindungsaufbau raus.
+if (window.top === window && !AutoSchnell.fruehGemeldet && AutoSchnell.inseratKennung(location.href)) {
+  AutoSchnell.fruehGemeldet = true;
+  AutoSchnell.senden({ typ: "frueh" });
+}

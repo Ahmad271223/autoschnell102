@@ -66,8 +66,10 @@ function browserName() {
 }
 
 async function api(pfad, { methode = "GET", daten, ohneSchluessel = false } = {}) {
-  const basis = await server();
-  const { schluessel } = await lokal("schluessel");
+  // Tempo (2.4.0): Server und Schluessel in EINEM Speicherzugriff
+  const gespeichert = await lokal(["server", "schluessel"]);
+  const basis = gespeichert.server && serverErlaubt(gespeichert.server) ? gespeichert.server : SERVER_STANDARD;
+  const schluessel = gespeichert.schluessel;
   const kopf = { "Content-Type": "application/json", "X-Werkzeug-Version": VERSION };
   if (!ohneSchluessel && schluessel) kopf["X-Werkzeug-Schluessel"] = schluessel;
   const abbruch = new AbortController();
@@ -152,14 +154,30 @@ function vergleicheStarten(tab, kennung, antwort) {
   return (antwort.links || []).length;
 }
 
+// Tempo (2.4.0): gemeinsam.js meldet ein Inserat schon beim Seitenstart. Der Hintergrund ist damit wach, und eine
+// kleine Anfrage baut die Verbindung zu AutoSchnell auf (Namensaufloesung, TLS) — wenn portal.js die Seite schickt,
+// steht beides schon. Hoechstens alle VORWAERMEN_MS eine Anfrage.
+const VORWAERMEN_MS = 15000;
+let vorgewaermt = 0;
+
+async function fruehBearbeiten() {
+  const gespeichert = await lokal(["server", "schluessel"]);
+  if (!gespeichert.schluessel) return { ok: false };
+  if (Date.now() - vorgewaermt > VORWAERMEN_MS) {
+    vorgewaermt = Date.now();
+    const basis = gespeichert.server && serverErlaubt(gespeichert.server) ? gespeichert.server : SERVER_STANDARD;
+    fetch(basis + "/api/health", { credentials: "omit", cache: "no-store" }).catch(() => {});
+  }
+  return { ok: true };
+}
+
 async function inseratBearbeiten(msg, tab) {
-  const { schluessel } = await lokal("schluessel");
+  const kennung = String(msg.kennung || "");
+  const [{ schluessel, getrenntGrund }, s, e] = await Promise.all([
+    lokal(["schluessel", "getrenntGrund"]), sitzung(), einstellungen()]);
   if (!schluessel) {
-    const { getrenntGrund } = await lokal("getrenntGrund");
     return { fehler: "nicht_verbunden", text: getrenntGrund || "Nicht verbunden – auf das AutoSchnell-Symbol klicken und den Code aus AutoSchnell eintippen." };
   }
-  const kennung = String(msg.kennung || "");
-  const s = await sitzung();
   const vorher = s.inserate[kennung];
   // Aus einer unserer Vergleichsseiten geoeffnet (neuer Tab) oder darin weitergeklickt (derselbe Tab)?
   // Dann nichts automatisch oeffnen — sonst oeffnet jedes angeschaute Vergleichsauto neue Vergleiche.
@@ -169,6 +187,9 @@ async function inseratBearbeiten(msg, tab) {
   let antwort;
   if (vorher && Date.now() - vorher.zeit < WIEDERHOLEN_MS && vorher.antwort) {
     antwort = vorher.antwort;
+  } else if (!msg.seite) {
+    // Tempo (2.4.0): portal.js fragt erst ohne Seite — nur ein unbekanntes Inserat wird eingepackt und geschickt
+    return { bekannt: false };
   } else {
     const r = await api(`/werkzeuge/${WERKZEUG}/inserat`, { methode: "POST", daten: { url: msg.url, seite: msg.seite } });
     if (r.status !== 200 || !r.daten || !r.daten.vergleich_id) {
@@ -178,7 +199,6 @@ async function inseratBearbeiten(msg, tab) {
     antwort = r.daten;
     await sitzungAendern((x) => { x.inserate[kennung] = { zeit: Date.now(), antwort, geoeffnet: false, marktlage: {} }; });
   }
-  const e = await einstellungen();
   const schonOffen = !!(vorher && vorher.geoeffnet && Date.now() - vorher.zeit < WIEDERHOLEN_MS);
   // Wunsch Ahmad 04.10.2026: hat das Windows-Programm dieses Auto gerade verglichen, sind die Vergleiche schon
   // offen — hier nichts doppelt oeffnen ("Vergleich oeffnen" geht trotzdem). Die Ampel kommt per Direktabruf.
@@ -190,8 +210,9 @@ async function inseratBearbeiten(msg, tab) {
              && !Object.keys((vorher && vorher.marktlage) || {}).length) {
     direktAuswerten(kennung, antwort, tab.id).catch(() => {});
   }
-  const neu = (await sitzung()).inserate[kennung] || {};
-  return { antwort, geoeffnet, ausVergleich, schonOffen, vomProgramm, marktlage: neu.marktlage || {}, server: await server() };
+  const [jetzt, basis] = await Promise.all([sitzung(), server()]);
+  const neu = jetzt.inserate[kennung] || {};
+  return { antwort, geoeffnet, ausVergleich, schonOffen, vomProgramm, marktlage: neu.marktlage || {}, server: basis };
 }
 
 // ------------------------------------------------------------------ Vergleichsseite
@@ -454,6 +475,7 @@ async function einstellungenSetzen(msg) {
 
 // ------------------------------------------------------------------ Nachrichten
 const AKTIONEN = {
+  frueh: () => fruehBearbeiten(),
   inserat: (m, t) => inseratBearbeiten(m, t),
   suche_bereit: (m, t) => sucheBereit(m, t),
   suche: (m, t) => sucheBearbeiten(m, t),
