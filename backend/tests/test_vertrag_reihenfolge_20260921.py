@@ -50,8 +50,12 @@ VERTRAG = {
 # Suchbegriffe: "Gewährleistung:" MIT Doppelpunkt (Klausel 1 der
 # Vertragsbedingungen enthaelt das Wort auch), der Gueltigkeitssatz
 # vollstaendig (Klausel 4 enthaelt "auch ohne Unterschrift gültig").
-AUSSTATTUNG = "Ausstattung laut Inserat / Verkäuferangaben"
-BESCHREIBUNG = "Fahrzeugbeschreibung (vom Inserat)"
+# Wunsch Ahmad 04.10.2026: kuerzere Ueberschriften (vorher "Ausstattung laut Inserat / Verkäuferangaben",
+# "Fahrzeugbeschreibung (vom Inserat)", "2 · Zusicherungen & Zustand")
+# Die Ueberschrift "Ausstattung" steckt auch in der Hinweiszeile darunter — fuer Reihenfolge und
+# "genau einmal" zaehlt deshalb die Hinweiszeile (sie gehoert fest zum Abschnitt).
+AUSSTATTUNG = "Ausstattung laut Inseratsangaben."
+BESCHREIBUNG = "Beschreibung"
 GEWAEHR = "Gewährleistung:"
 BESONDERE = "Besondere Vereinbarungen"
 AGB_ALT = "Allgemeine Geschäftsbedingungen"
@@ -104,7 +108,7 @@ def test_02_die_letzten_drei_teile(digital):
     f = _text(digital=digital)
     hinten = f[f.index(BESONDERE):]
     for frueher in (AUSSTATTUNG, BESCHREIBUNG, GEWAEHR, "Schäden / Beschädigungen",
-                    "Zusicherungen & Zustand", "1 · Fahrzeugdaten",
+                    "2 · Zustand", "1 · Fahrzeugdaten",
                     "Kaufpreis & Konditionen", "Notizen"):
         assert frueher not in hinten, f"{frueher!r} steht hinter den Besonderen Vereinbarungen"
     assert hinten.index(BESONDERE) < hinten.index("Allgemeine") < hinten.index(_schluss(digital))

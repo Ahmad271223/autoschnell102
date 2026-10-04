@@ -62,10 +62,10 @@ def test_01_kaufpreis_ohne_nummer_danach_ab_eins():
     assert "Kaufpreis & Konditionen" in f
     assert "2 · Kaufpreis" not in f, "die 2 vor dem Kaufpreis ist noch da"
     assert "1 · Fahrzeugdaten" in f
-    assert "2 · Zusicherungen & Zustand" in f
+    assert "2 · Zustand" in f            # 04.10.2026: vorher "2 · Zusicherungen & Zustand"
     assert "3 · " not in f and "4 · " not in f, "alte Nummern 3/4 stehen noch drin"
     assert f.index("Kaufpreis & Konditionen") < f.index("1 · Fahrzeugdaten") \
-        < f.index("2 · Zusicherungen")
+        < f.index("2 · Zustand")
 
 
 def test_02_quelle_hat_keine_alten_nummern():

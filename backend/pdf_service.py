@@ -595,9 +595,20 @@ def empfang_drucken(contract, dealer=None) -> bool:
 
 #: Kundenportal (29.09.2026): Hoehe der eingesetzten Unterschrift im Kasten
 UNTERSCHRIFT_HOEHE = 1.3 * cm
+#: Wunsch Ahmad 04.10.2026: der Firmenstempel (Stempel & Unterschrift des Chefs im Kasten "Käufer") dreimal so
+#: gross wie eine Unterschrift — vorher war er auf dieselben 1,3 cm begrenzt und kaum lesbar. Breiter als der
+#: Kasten wird er nie (dann begrenzt die Breite).
+STEMPEL_HOEHE = 3 * UNTERSCHRIFT_HOEHE
+
+#: Wunsch Ahmad 04.10.2026: kuerzere Ueberschriften im Vertrag (vorher "2 · Zusicherungen & Zustand",
+#: "Ausstattung laut Inserat / Verkäuferangaben", "Fahrzeugbeschreibung (vom Inserat)"). Die Hinweiszeilen
+#: darunter ("Ausstattung laut Inseratsangaben." usw.) bleiben.
+TITEL_ZUSTAND = "2 · Zustand"
+TITEL_AUSSTATTUNG = "Ausstattung"
+TITEL_BESCHREIBUNG = "Beschreibung"
 
 
-def _unterschrift_flowable(daten, breite_max):
+def _unterschrift_flowable(daten, breite_max, hoehe_max=UNTERSCHRIFT_HOEHE):
     """Unterschriftsbild fuer den Kasten — oder None (kein Bild, unlesbar). Wie beim Logo:
     ein kaputtes Bild darf keinen Vertrag verhindern, dann bleibt die Linie leer."""
     if not daten:
@@ -609,7 +620,7 @@ def _unterschrift_flowable(daten, breite_max):
         breite, hoehe = leser.getSize()
         if not breite or not hoehe:
             return None
-        faktor = min(UNTERSCHRIFT_HOEHE / hoehe, breite_max / breite)
+        faktor = min(hoehe_max / hoehe, breite_max / breite)
         bild = _RLImage(io.BytesIO(daten), width=breite * faktor, height=hoehe * faktor)
         bild.hAlign = "LEFT"
         return bild
@@ -618,7 +629,7 @@ def _unterschrift_flowable(daten, breite_max):
 
 
 def _empfang_kasten(rolle, seite, contract, st, unterschrift, mit_empfang=True, bild=None, bild_text=None,
-                    portal=False):
+                    portal=False, zeile_hoehe=None):
     """Kasten einer Partei im Abschnitt "Unterschriften": Titel,
     "bestätigt Empfang von:" mit Kaestchen, "Datum und Ort". Druckfassung
     (unterschrift=True) zusaetzlich mit der Unterschriftslinie; die digitale
@@ -655,9 +666,17 @@ def _empfang_kasten(rolle, seite, contract, st, unterschrift, mit_empfang=True, 
     if unterschrift:
         # Kundenportal (29.09.2026): liegt ein Unterschriftsbild vor (Kunde am Bildschirm bzw. die
         # hinterlegte Unterschrift des Chefs), steht es auf der Linie; darunter Name und Zeitpunkt.
-        flow = _unterschrift_flowable(bild, COL_W - 16) if bild else None
+        # 04.10.2026: im Kasten "Käufer" steht der Firmenstempel des Chefs — dreimal so gross
+        flow = _unterschrift_flowable(bild, COL_W - 16,
+                                      STEMPEL_HOEHE if seite == "kaeufer" else UNTERSCHRIFT_HOEHE) if bild else None
+        zeile = flow if flow is not None else Spacer(1, 34)
+        if zeile_hoehe:
+            # beide Kaesten gleich hoch; die Unterschrift steht unten auf der Linie
+            hoehe = flow.drawHeight if flow is not None else 0
+            zeile = ([Spacer(1, max(0, zeile_hoehe - hoehe)), flow] if flow is not None
+                     else Spacer(1, max(34, zeile_hoehe)))
         rows += [
-            [flow if flow is not None else Spacer(1, 34)],
+            [zeile],
             [Paragraph("Unterschrift" + (f" — {_xml_escape(bild_text)}" if (flow is not None and bild_text) else ""),
                        st["sig_label"])],
         ]
@@ -674,12 +693,22 @@ def _empfang_paar(contract, st, unterschrift, mit_empfang=True, bilder=None, por
     (wie die Parteien oben im Vertrag). `bilder` (Kundenportal): {"verkaeufer": PNG-Bytes,
     "verkaeufer_text": str, "kaeufer": PNG-Bytes | None, "kaeufer_text": str | None}."""
     b = bilder or {}
+    # 04.10.2026: traegt der Kasten "Käufer" den (grossen) Firmenstempel, bekommen beide Kaesten dieselbe
+    # Hoehe fuer die Unterschriftszeile — sonst stuenden die Linien versetzt.
+    zeile_hoehe = None
+    if unterschrift and b.get("kaeufer"):
+        stempel = _unterschrift_flowable(b.get("kaeufer"), COL_W - 16, STEMPEL_HOEHE)
+        kunde = _unterschrift_flowable(b.get("verkaeufer"), COL_W - 16) if b.get("verkaeufer") else None
+        hoehen = [f.drawHeight for f in (stempel, kunde) if f is not None]
+        zeile_hoehe = max(hoehen) if hoehen else None
     t = Table(
         [[_empfang_kasten("Verkäufer", "verkaeufer", contract, st, unterschrift, mit_empfang,
-                          bild=b.get("verkaeufer"), bild_text=b.get("verkaeufer_text"), portal=portal),
+                          bild=b.get("verkaeufer"), bild_text=b.get("verkaeufer_text"), portal=portal,
+                          zeile_hoehe=zeile_hoehe),
           "",
           _empfang_kasten("Käufer", "kaeufer", contract, st, unterschrift, mit_empfang,
-                          bild=b.get("kaeufer"), bild_text=b.get("kaeufer_text"), portal=portal)]],
+                          bild=b.get("kaeufer"), bild_text=b.get("kaeufer_text"), portal=portal,
+                          zeile_hoehe=zeile_hoehe)]],
         colWidths=[COL_W, 0.5 * cm, COL_W],
     )
     t.setStyle(TableStyle([
@@ -1271,7 +1300,7 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
     ]
     zus_rows = _ohne_leere(zus_rows)
     if zus_rows:
-        story.append(_section("2 · Zusicherungen & Zustand", st))
+        story.append(_section(TITEL_ZUSTAND, st))
         story.append(Spacer(1, 6))
         story.append(_two_col_kv(zus_rows, st))
         story.append(Spacer(1, 12))
@@ -1330,14 +1359,14 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
     feats = _ausstattung_liste(vehicle.get("features"))   # P-15
     if feats and _formular():
         # Layout "formular": Ausstattung als Fliesstext, durch Kommas getrennt
-        story.append(_section("Ausstattung laut Inserat / Verkäuferangaben", st))
+        story.append(_section(TITEL_AUSSTATTUNG, st))
         story.append(Spacer(1, 6))
         story.append(Paragraph(", ".join(_xml_escape(str(x)) for x in feats), st["body"]))
         story.append(Spacer(1, 4))
         story.append(Paragraph("<i>Ausstattung laut Inseratsangaben.</i>", st["small"]))
         story.append(Spacer(1, 12))
     elif feats:
-        story.append(_section("Ausstattung laut Inserat / Verkäuferangaben", st))
+        story.append(_section(TITEL_AUSSTATTUNG, st))
         story.append(Spacer(1, 6))
         col_count = 3
         rows_data = []
@@ -1369,7 +1398,7 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
     # Kommt wie die Ausstattung aus dem Inserat, steht deshalb direkt dahinter.
     vd = (contract.get("vehicle_description") or "").strip()
     story.extend(_abschnitt_mit_text(
-        "Fahrzeugbeschreibung (vom Inserat)", _absaetze(vd, st["body"]), st, 2))
+        TITEL_BESCHREIBUNG, _absaetze(vd, st["body"]), st, 2))
 
     # Wunsch Ahmad 21.09.2026: "Notizen (intern)" (contract.notes, traegt nur
     # der Chef im Vertragsdialog ein) stehen NICHT mehr im Vertrag — beide

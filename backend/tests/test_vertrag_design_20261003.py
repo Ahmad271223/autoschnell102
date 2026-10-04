@@ -93,7 +93,7 @@ def test_03_formular_hat_denselben_inhalt(digital):
                    "auch ohne Unterschrift gültig", "Gewährleistung"):
         assert stueck in modern, stueck
         assert stueck in formular, stueck
-    for titel in ("Verkäufer", "Käufer", "Fahrzeugdaten", "Zusicherungen & Zustand", "Besondere Vereinbarungen",
+    for titel in ("Verkäufer", "Käufer", "Fahrzeugdaten", "2 · Zustand", "Besondere Vereinbarungen",
                   "Allgemeine Vertragsbedingungen"):
         assert titel.upper() in formular, titel
     assert "ABS, Navigationssystem, Sitzheizung" in formular, "Ausstattung als Fliesstext"

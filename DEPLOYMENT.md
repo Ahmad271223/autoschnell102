@@ -4501,3 +4501,13 @@ Kleinanzeigen-Inserat 3530655110: Modell „Weitere Mercedes Benz“, Titel „M
 - Schon gespeicherte Inserate: der Zwischenspeicher gilt 6 Stunden, danach stimmt das Modell von selbst.
 - Das Programm (AutoPointer) hat einen eigenen Weg (`werkzeug_erkennung.aus_beschreibung`, andere Sitzung).
 - Tests: `backend/tests/test_modell_aus_text_20261004.py`.
+
+## Vertrag: kürzere Überschriften, Firmenstempel 3× so groß (Wunsch Ahmad 04.10.2026)
+
+`pdf_service.py`: „Fahrzeugbeschreibung (vom Inserat)“ → **Beschreibung**, „Ausstattung laut Inserat /
+Verkäuferangaben“ → **Ausstattung**, „2 · Zusicherungen & Zustand“ → **2 · Zustand** (Konstanten `TITEL_*`; die
+Hinweiszeilen darunter bleiben). Der Firmenstempel (Stempel & Unterschrift des Chefs im Kasten „Käufer“ der über das
+Kundenportal unterschriebenen Verträge) ist jetzt `STEMPEL_HOEHE` = 3 × 1,3 cm hoch (höchstens kastenbreit); beide
+Unterschriftskästen bleiben gleich hoch, die Kundenunterschrift steht unten auf der Linie. Gilt für neu erzeugte
+PDFs (jede neue Fassung); bereits gespeicherte PDF-Dateien ändern sich nicht. Der Vertragsdialog behält seine
+Abschnittsnamen. Tests: `backend/tests/test_vertrag_titel_stempel_20261004.py`.
