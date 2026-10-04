@@ -385,6 +385,9 @@ class FahrzeugIn(BaseModel):
     #: der SERVER erkennt sie aus marke_modell_text + titel (werkzeug_erkennung). Aeltere Programme schicken
     #: schon erkannte Werte (roh=False) und werden wie bisher behandelt.
     roh: bool = False
+    #: Seit Programm 1.4.1: Anfang der Beschreibung (vom Bildschirm gelesen) — nur, falls Feld und Ueberschrift
+    #: kein Modell hergeben (Befund 04.10.2026: "meinen Mercedes C 300 e"). Wird nicht gespeichert.
+    beschreibung: str = Field("", max_length=2000)
 
 
 class VergleichIn(BaseModel):
@@ -412,6 +415,8 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     erkannt = _erkennen(f)
     f["inserat_url"] = wz.inserat_url(f.get("quelle"), f.get("inserat_id"), f.get("hash_id"))
     links, hinweise = wz.vergleichs_links(wz.fahrzeug_zu_vehicle(f), regeln)
+    if erkannt.pop("aus_beschreibung", False):
+        hinweise.insert(0, f"Modell aus der Beschreibung übernommen: {erkannt['modell']} – bitte kurz prüfen.")
     # Wunsch Ahmad 03.10.2026: das Inserat schon jetzt im Hintergrund auslesen (Daten + Fotos), damit
     # der Kaufvertrag ohne Link-Einfuegen geht — derselbe Weg wie das Einfuegen in der App.
     vorab = await _vorab_abrufen(user, f["inserat_url"]) if not body.probelauf else \
@@ -433,11 +438,13 @@ def _erkennen(f: dict) -> dict:
     Programm bis 1.3.5 selbst tat (1:1 uebertragen, am 03.10.2026 ueber 16.636 Faelle abgeglichen).
     Rueckgabe fuer die Anzeige im Programm: Katalognamen und ob die Marke bekannt ist."""
     if not f.get("roh"):
+        f.pop("beschreibung", None)
         return {"marke": f.get("marke") or "", "modell": f.get("modell") or "", "erkannt": True}
     text = (f.get("marke_modell_text") or f"{f.get('marke') or ''} {f.get('modell') or ''}").strip()
-    z = werkzeug_erkennung.zuordnen(text, f.get("titel"))
+    z = werkzeug_erkennung.zuordnen(text, f.get("titel"), beschreibung=f.pop("beschreibung", "") or None)
     f["marke"], f["modell"] = z["marke_text"], z["modell_text"]
-    return {"marke": z["marke"] or text, "modell": z["modell"] or "", "erkannt": z["erkannt"]}
+    return {"marke": z["marke"] or text, "modell": z["modell"] or "", "erkannt": z["erkannt"],
+            "aus_beschreibung": z["aus_beschreibung"]}
 
 
 async def _vorab_ersetzen(user: dict, v: dict, neuer_job: Optional[str]) -> None:

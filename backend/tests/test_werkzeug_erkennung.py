@@ -138,3 +138,33 @@ def test_12_unbekannte_marke():
     assert z["erkannt"] and z["marke_text"] == "Bentley"
     leer = we.zuordnen("", "")
     assert not leer["erkannt"] and leer["marke"] is None
+
+
+# Befund 04.10.2026: Feld "Andere", Ueberschrift "Mercedes-Benz Weitere Mercedes Be...", Modell nur in der Beschreibung
+MERCEDES_TEXT = ("Verkaufe auf diesem Weg meinen Mercedes C 300 e, da ich ein Firmenfahrzeug erhalte und das Fahrzeug "
+                 "nicht mehr benötige.Im Grunde hat das Fahrzeug alles, was man braucht:Gutes Soundsystem")
+
+
+def test_13_modell_aus_der_beschreibung():
+    z = we.zuordnen("Andere", "Mercedes-Benz Weitere Mercedes Be...", beschreibung=MERCEDES_TEXT)
+    assert (z["marke_text"], z["modell_text"], z["aus_beschreibung"]) == ("Mercedes-Benz", "C 300", True)
+    # ohne Beschreibung wie bisher (Soll-Werte unveraendert)
+    assert we.zuordnen("Andere", "Mercedes-Benz Weitere Mercedes Be...")["aus_beschreibung"] is False
+
+
+def test_14_beschreibung_nur_wenn_feld_und_ueberschrift_nichts_ergeben():
+    z = we.zuordnen("VW Golf", "VW Golf 1.4", beschreibung="Tausche auch gegen einen Passat Variant")
+    assert z["modell_text"] == "Golf" and z["aus_beschreibung"] is False
+
+
+def test_15_beschreibung_ist_strenger_als_die_ueberschrift():
+    # Woerter muessen zusammenstehen ("C 300", "C300", "320d" fuer 320) — verstreut zaehlt nicht
+    assert we.aus_beschreibung(["C 300", "C 200"], "Typ C3OO, Bj 2020") == "C 300"
+    assert we.aus_beschreibung(["320", "X3"], "Schoener 320d Touring, kein Unfall") == "320"
+    assert we.aus_beschreibung(["C 300"], "Klasse C mit 300 PS") is None
+    # sehr kurze Namen und Sammelnamen nie
+    assert we.aus_beschreibung(["G", "V", "T1", "CL"], "G Klasse, V Klasse, T1, CL") is None
+    assert we.aus_beschreibung(["T5 andere", "T5 (Alle)"], "T5 andere Alle") is None
+    # mehr Woerter gewinnen
+    assert we.aus_beschreibung(["C 300", "C 300 AMG"], "C 300 AMG Line") == "C 300 AMG"
+

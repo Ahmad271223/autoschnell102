@@ -706,6 +706,20 @@ def _code_bremse_frei(welt):
     welt["db"].rate_limits.delete_many({"_id": {"$regex": f"^werkzeug_code_konto:konto:{welt['sucher_id']}:"}})
 
 
+def test_54_modell_aus_der_beschreibung_mit_hinweis_und_ohne_speichern(welt):
+    """Befund 04.10.2026: Mercedes, Feld "Andere", Modell nur in der Beschreibung ("meinen Mercedes C 300 e")."""
+    prog = _prog(welt)
+    text = "Verkaufe auf diesem Weg meinen Mercedes C 300 e, da ich ein Firmenfahrzeug erhalte"
+    r = _vergleich(prog, _roh("Andere", "Mercedes-Benz Weitere Mercedes Be...", beschreibung=text,
+                              ez_monat=6, ez_jahr=2022, kilometer=82200, kw=229, ps=311))
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["fahrzeug"]["modell"] == "C 300" and d["links"]
+    assert d["hinweise"][0].startswith("Modell aus der Beschreibung übernommen: C 300")
+    gespeichert = welt["db"].werkzeug_vergleiche.find_one({"user_id": welt["sucher_id"]}, sort=[("erstellt_am", -1)])
+    assert gespeichert["fahrzeug"]["modell"] == "C 300" and "beschreibung" not in gespeichert["fahrzeug"]
+
+
 def test_60_anderer_pc_genau_benannt(welt):
     """Nr. 16: der alte PC erfaehrt, dass und wo das Konto neu verbunden wurde."""
     _code_bremse_frei(welt)

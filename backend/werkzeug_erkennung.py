@@ -131,6 +131,51 @@ def aus_titel(modelle, titel: Optional[str]) -> Optional[str]:
     return bester
 
 
+def _mit_ziffer(s: str) -> bool:
+    return any(ch.isdigit() for ch in s)
+
+
+def aus_beschreibung(modelle, text: Optional[str]) -> Optional[str]:
+    """Befund 04.10.2026 (Mercedes, Feld "Andere", Ueberschrift "Mercedes-Benz Weitere Mercedes Be...",
+    Beschreibung "... meinen Mercedes C 300 e ..."): Modell aus der BESCHREIBUNG — strenger als bei der
+    Ueberschrift, weil Beschreibungen viel erwaehnen: die Woerter des Katalognamens muessen DIREKT
+    hintereinander stehen ("C 300", "C300", "320d" fuer "320"), sehr kurze Namen ("G", "V", "T1") zaehlen nicht,
+    Sammelnamen nie. Mehr Woerter gewinnen, dann der laengere Name, dann die fruehere Stelle."""
+    if not text or not text.strip():
+        return None
+    t = _woerter(text[:800])
+    bester: Optional[str] = None
+    beste = (0, 0)
+    beste_pos = 0
+    for name in modelle:
+        w = _woerter(name)
+        if not w or any(x in _SAMMELWOERTER for x in w) or len(norm(name)) <= 2:
+            continue
+        zusammen = "".join(w)
+        ziffer = _mit_ziffer(zusammen)
+        gleich = (lambda a, b: a == b or (ziffer and lese_form(a) == lese_form(b)))
+        pos = None
+        for i in range(len(t)):
+            if len(t) - i >= len(w) and all(gleich(t[i + j], w[j]) for j in range(len(w))):
+                pos = i
+            else:
+                for k in (1, 2, 3):
+                    stueck = "".join(t[i:i + k])
+                    if gleich(stueck, zusammen) or (
+                            k == 1 and ziffer and stueck.startswith(zusammen) and stueck[len(zusammen):].isalpha()
+                            and len(stueck) - len(zusammen) <= 2):
+                        pos = i
+                        break
+            if pos is not None:
+                break
+        if pos is None:
+            continue
+        rang = (len(w), len(name))
+        if rang > beste or (rang == beste and pos < beste_pos):
+            bester, beste, beste_pos = name, rang, pos
+    return bester
+
+
 def _unscharf(ziel: str, namen) -> Optional[str]:
     """Genau ein Katalogname mit kleinem Abstand (Lesefehler), sonst None."""
     if len(ziel) < 4:
@@ -418,7 +463,8 @@ def katalog() -> Katalog:
     return _KATALOG
 
 
-def zuordnen(marke_modell_text: str, titel: Optional[str] = None, k: Optional[Katalog] = None) -> dict:
+def zuordnen(marke_modell_text: str, titel: Optional[str] = None, k: Optional[Katalog] = None,
+             beschreibung: Optional[str] = None) -> dict:
     """Wie Zuordner.Zuordnen im Programm (bis 1.3.5).
 
     Rueckgabe:
@@ -426,6 +472,7 @@ def zuordnen(marke_modell_text: str, titel: Optional[str] = None, k: Optional[Ka
                                korrigiert nur bei Lesefehler, Platzhalter oder Ueberschrift)
       marke/modell           — Katalognamen zur Anzeige ("Volkswagen", "Golf")
       erkannt                — Marke in einem der Kataloge gefunden
+      aus_beschreibung       — Modell kam aus der Beschreibung (nur wenn Feld und Ueberschrift nichts ergaben)
     """
     k = k or katalog()
     text = marke_modell_text or ""
@@ -437,12 +484,27 @@ def zuordnen(marke_modell_text: str, titel: Optional[str] = None, k: Optional[Ka
             teile = aus_t
             ganz_aus_titel = True
     if teile is None:
-        return {"marke_text": text, "modell_text": "", "marke": None, "modell": None, "erkannt": False}
+        return {"marke_text": text, "modell_text": "", "marke": None, "modell": None, "erkannt": False,
+                "aus_beschreibung": False}
     marke, modell = teile
     mm = k.mobile_marke(marke)
     am = k.autoscout_marke(marke)
     mob = k.mobile_modell(mm, modell, titel) if mm else None
     asm = k.autoscout_modell(am, modell, titel) if am else None
+    aus_text = False
+    if (mm or am) and mob is None and asm is None and beschreibung:
+        # Befund 04.10.2026: Feld und Ueberschrift ohne Modell — die Beschreibung fragen (strenger)
+        if mm:
+            t = aus_beschreibung(mm.roh, beschreibung)
+            tid = k._mobile_aufloesen(mm, t) if t else None
+            if tid is not None:
+                mob = ModellTreffer(tid, k._modell_name(mm, tid) or t, False, True)
+        if am:
+            t = aus_beschreibung([x[1] for x in am.modelle if not _GENERISCH.match(x[1])], beschreibung)
+            tm = k._autoscout_aufloesen(am, t) if t else None
+            if tm is not None:
+                asm = ModellTreffer(str(tm[0]), tm[1], False, True)
+        aus_text = bool(mob or asm)
     ersetzt = ganz_aus_titel or ist_platzhalter(modell) or bool(mob and mob.aus_titel) or bool(asm and asm.aus_titel)
     if mob and mob.unscharf:
         modell_text = mob.name
@@ -458,4 +520,5 @@ def zuordnen(marke_modell_text: str, titel: Optional[str] = None, k: Optional[Ka
         "marke": mm.name if mm else (am.name if am else marke),
         "modell": mob.name if mob else (asm.name if asm else modell),
         "erkannt": bool(mm or am),
+        "aus_beschreibung": aus_text,
     }
