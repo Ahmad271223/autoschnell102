@@ -26,6 +26,17 @@ foreach ($d in @("background.js", "content.js", "gemeinsam.js", "portal.js", "po
 }
 $zip = Join-Path $dist "AutoSchnell-Helfer.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }
-Compress-Archive -Path (Join-Path $arbeit "*") -DestinationPath $zip
+# ZIP selbst schreiben statt Compress-Archive: das schreibt unter PowerShell 5.1 "icons\icon-16.png" (Backslash),
+# die ZIP-Spezifikation und der Chrome Web Store verlangen "/" als Trenner.
+Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+$basis = (Get-Item $arbeit).FullName.TrimEnd("\") + "\"
+$archiv = [System.IO.Compression.ZipFile]::Open($zip, [System.IO.Compression.ZipArchiveMode]::Create)
+try {
+    foreach ($f in (Get-ChildItem $arbeit -Recurse -File | Sort-Object FullName)) {
+        $name = $f.FullName.Substring($basis.Length).Replace("\", "/")
+        [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+            $archiv, $f.FullName, $name, [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+    }
+} finally { $archiv.Dispose() }
 Remove-Item $arbeit -Recurse -Force
 Write-Host ("Gebaut: {0}  Version {1}  {2:N0} Bytes" -f $zip, $manifest.version, (Get-Item $zip).Length)
