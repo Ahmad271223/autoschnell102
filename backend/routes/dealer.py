@@ -728,6 +728,31 @@ async def upload_logo(body: LogoUploadIn, user=Depends(current_firma)):
     return {"ok": True, "logo_url": logo_url}
 
 
+@router.delete("/dealer/logo")
+async def logo_loeschen(user=Depends(current_firma)):
+    """Wunsch Ahmad 04.10.2026: das Firmenlogo wieder loeschen — sofort, ohne "Speichern". Vorher ging das
+    nur ueber einen kleinen grauen Text im Formular, der erst mit "Speichern" wirkte (sonst kam das Logo nach
+    dem Neuladen zurueck). Nur der Hauptchef (wie beim Hochladen). Bereits erstellte Vertraege behalten ihr
+    festgehaltenes Logo: die Datei bleibt liegen, solange ein Vertrag sie nennt (_altes_logo_wegraeumen)."""
+    from deps import ist_haupt_chef, log_activity_sicher
+    if not await ist_haupt_chef(user):
+        raise HTTPException(403, "Das Firmenlogo ändert nur der Chef.")
+    for _ in range(4):
+        stand = await db.dealers.find_one({"id": user["dealer_id"]}, {"_id": 0, "logo_url": 1}) or {}
+        vorher = stand.get("logo_url") or ""
+        if not vorher:
+            return {"ok": True, "logo_url": ""}
+        # Vergleichen-und-Setzen: ein paralleler Upload gewinnt nicht still gegen das Loeschen
+        res = await db.dealers.update_one({"id": user["dealer_id"], "logo_url": vorher},
+                                          {"$set": {"logo_url": "", "updated_at": now_iso()}})
+        if res.modified_count:
+            await log_activity_sicher(user["dealer_id"], user["id"], "einstellungen.logo.geloescht",
+                                      meta={"vorher": vorher})
+            await _altes_logo_wegraeumen(vorher, user["dealer_id"])
+            return {"ok": True, "logo_url": ""}
+    raise HTTPException(409, "Das Logo wurde gerade geändert — bitte die Seite neu laden.")
+
+
 async def _altes_logo_wegraeumen(alte_url: Optional[str], dealer_id: str) -> None:
     """Vorheriges hochgeladenes Logo (logo/<firma>/...) loeschen, wenn kein
     anderes Dokument es mehr referenziert — auch alte Sucher-Overrides (vor

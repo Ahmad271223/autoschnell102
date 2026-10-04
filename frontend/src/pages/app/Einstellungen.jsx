@@ -31,7 +31,7 @@ import KopierKnopf from "@/components/KopierKnopf";
 import FirmenseiteEinstellungen from "@/components/FirmenseiteEinstellungen";
 import {
   Building2, Sliders, FileText, Mail, MessageSquare, ShieldCheck, Save, Check, Globe,
-  CreditCard, Calendar, X, ArrowRight, Bolt, Store, Palette, LayoutTemplate,
+  CreditCard, Calendar, X, ArrowRight, Bolt, Store, Palette, LayoutTemplate, Trash2,
 } from "lucide-react";
 import AkzentWahl from "@/components/AkzentWahl";
 import VertragDesign from "@/components/VertragDesign";
@@ -220,6 +220,8 @@ export default function Einstellungen() {
   // Letzter Serverstand des Formulars — Grundlage fuer "was hat sich
   // geaendert" (B19) und fuer das Erhalten ungespeicherter Eingaben (H37).
   const ausgangRef = useRef(null);
+  // Wunsch Ahmad 04.10.2026: "Logo löschen" läuft gerade (siehe logoLoeschen)
+  const [logoLoescht, setLogoLoescht] = useState(false);
   const istChef = user?.role === "dealer";
   // Rollenprüfung 22.09.2026 (RP-414): Eingabefelder mit unlesbarem Wert
   // (z. B. Kilometer "50.0") — solange einer da ist, wird nicht gespeichert.
@@ -272,6 +274,24 @@ export default function Einstellungen() {
       await refresh();
       toast.success("Logo hochgeladen");
     } catch (e) { toast.error(errMsg(e, "Logo konnte nicht hochgeladen werden")); }
+  };
+  // Wunsch Ahmad 04.10.2026: Logo löschen — sofort (eigene Route), mit Rückfrage. Vorher nur ein kleiner
+  // grauer Text, der erst nach "Speichern" wirkte.
+  const logoLoeschen = async () => {
+    if (logoLoescht) return;
+    if (!window.confirm("Logo wirklich löschen? Neue Kaufverträge und Mails erscheinen dann ohne Logo. "
+      + "Bereits erstellte Verträge behalten ihr Logo.")) return;
+    setLogoLoescht(true);
+    try {
+      await api.delete("/dealer/logo");
+      setProfile("logo_url", "");
+      await refresh();
+      toast.success("Logo gelöscht");
+    } catch (e) {
+      toast.error(errMsg(e, "Logo konnte nicht gelöscht werden"));
+    } finally {
+      setLogoLoescht(false);
+    }
   };
   const setRule = (key, val) => setForm({
     ...form,
@@ -431,24 +451,31 @@ export default function Einstellungen() {
                   </div>
                 ) : (
                 <div>
+                  <div className="flex flex-wrap items-center gap-2">
                   <label className="inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold text-white cursor-pointer"
                          style={{ background: "var(--accent-red)" }} data-testid="set-logo">
-                    Logo hochladen
+                    {form.profile.logo_url ? "Logo ersetzen" : "Logo hochladen"}
                     {/* U-133/M50: nach einem Fehlschlag laesst sich dieselbe Datei
                         wieder waehlen (sonst feuert onChange nicht erneut). */}
                     <input type="file" accept="image/*" className="hidden"
                            onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; uploadLogo(f); }} />
                   </label>
+                  {form.profile.logo_url && (
+                    <button type="button" onClick={logoLoeschen} disabled={logoLoescht}
+                            className="inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold
+                                       transition-colors hover:brightness-110 disabled:opacity-50"
+                            style={{ background: "var(--apple-btn-secondary-bg)", color: "var(--st-rot)" }}
+                            data-testid="logo-loeschen">
+                      <Trash2 size={14} /> {logoLoescht ? "Wird gelöscht…" : "Logo löschen"}
+                    </button>
+                  )}
+                  </div>
                   {/* RP-452: das Logo wird beim Anlegen im Vertrag festgehalten
                       (contract_data.logo_key) — ältere Verträge bleiben ohne. */}
                   <div className="text-[11px] text-zinc-500 mt-1.5" data-testid="logo-hinweis">
                     PNG/JPG, max. 2 MB. Erscheint auf neuen Kaufverträgen, in Vertrags-Mails und auf dem
                     Marktplatz. Bereits erstellte Verträge bleiben unverändert.
                   </div>
-                  {form.profile.logo_url && (
-                    <button type="button" onClick={() => setProfile("logo_url", "")}
-                            className="text-[11px] text-zinc-500 hover:text-red-400 mt-1">Logo entfernen</button>
-                  )}
                 </div>
                 )}
               </div>
