@@ -40,6 +40,22 @@ function serverErlaubt(s) {
   return s === SERVER_STANDARD || /^http:\/\/(localhost|127\.0\.0\.1)(:\d{2,5})?$/.test(s);
 }
 
+/** 2.6.0 (Pruefung 05.10.2026, Nr. 12): Den Kleinanzeigen-Abruf darf nur AutoSchnell selbst ausloesen — nicht jede
+ *  Seite, auf der content.js laeuft (z. B. die Beispiel-Adresse autoschnell.de). */
+function appHerkunft(sender) {
+  let herkunft = "";
+  try { herkunft = new URL(String(sender.url || "")).origin; } catch (e) { return false; }
+  return !!sender.tab && (serverErlaubt(herkunft)
+    || ["https://auto-schnellkauf.de", "https://www.auto-schnellkauf.de"].includes(herkunft));
+}
+
+/** 2.6.0 (Nr. 7): Gemerkte Inserate gehoeren zur Verbindung — beim Trennen/Neuverbinden weg damit (sonst 30 min
+ *  alte Antworten mit Links und Vergleichs-IDs eines anderen Kontos). */
+async function sitzungLeeren() {
+  try { await chrome.storage.session.clear(); } catch (e) { /* egal */ }
+  zuletztAutomatisch.clear();
+}
+
 async function lokal(schluessel) {
   return chrome.storage.local.get(schluessel);
 }
@@ -82,9 +98,15 @@ async function api(pfad, { methode = "GET", daten, ohneSchluessel = false } = {}
     let antwort = null;
     try { antwort = await r.json(); } catch (e) { antwort = null; }
     if (r.status === 401 && !ohneSchluessel) {
-      // Verbindung gilt nicht mehr (anderer Browser, Chef, App) — der Server sagt genau, warum
-      await chrome.storage.local.remove(["schluessel"]);
-      await chrome.storage.local.set({ getrenntGrund: (antwort && antwort.detail) || "Nicht mehr verbunden." });
+      // Verbindung gilt nicht mehr (anderer Browser, Chef, App) — der Server sagt genau, warum.
+      // 2.6.0 (Nr. 8): nur, wenn noch DERSELBE Schluessel gespeichert ist — eine alte Anfrage, die nach dem
+      // Neu-Verbinden zurueckkommt, darf den neuen Schluessel nicht loeschen.
+      const { schluessel: jetzt } = await lokal("schluessel");
+      if (jetzt && jetzt === schluessel) {
+        await chrome.storage.local.remove(["schluessel"]);
+        await chrome.storage.local.set({ getrenntGrund: (antwort && antwort.detail) || "Nicht mehr verbunden." });
+        await sitzungLeeren();
+      }
     }
     return { status: r.status, daten: antwort };
   } catch (e) {
@@ -129,29 +151,96 @@ async function einstellungen() {
 }
 
 // ------------------------------------------------------------------ Inserat
+/** 2.6.0 (Pruefung 05.10.2026, Nr. 22): nur Suchseiten von mobile.de und AutoScout24 oeffnen bzw. mit den Cookies
+ *  des Nutzers abrufen — egal, was der Server schickt. */
+function erlaubterLink(url) {
+  try {
+    const u = new URL(String(url || ""));
+    if (u.protocol !== "https:") return false;
+    if (u.hostname === "suchen.mobile.de") return u.pathname.startsWith("/fahrzeuge/search.html");
+    return /^www\.autoscout24\.(de|at|ch)$/.test(u.hostname) && u.pathname.startsWith("/lst");
+  } catch (e) {
+    return false;
+  }
+}
+const erlaubteLinks = (antwort) => ((antwort && antwort.links) || []).filter((l) => l && erlaubterLink(l.url));
+
 async function vergleicheOeffnen(tab, kennung, antwort) {
-  const links = (antwort && antwort.links) || [];
+  const links = erlaubteLinks(antwort);
+  const s = await sitzung();
   const neue = [];
   for (let i = 0; i < links.length; i++) {
-    try {
-      const t = await chrome.tabs.create({ url: links[i].url, active: false, openerTabId: tab.id, index: tab.index + 1 + i });
-      neue.push([t.id, { vergleich_id: antwort.vergleich_id, inseratTab: tab.id, kennung, portal: links[i].portal }]);
-    } catch (e) { /* Fenster zu */ }
+    const eintrag = { vergleich_id: antwort.vergleich_id, inseratTab: tab.id, kennung, portal: links[i].portal };
+    // 2.6.0 (Nr. 2): den Vergleichs-Tab dieses Inserat-Tabs fuer dasselbe Portal wiederverwenden ("naechstes
+    // Fahrzeug" ohne Neuladen, erneuter Knopfdruck) — statt bei jedem Auto zwei neue Tabs
+    const alt = Object.entries(s.vergleichsTabs).find(([, v]) => v.inseratTab === tab.id && v.portal === links[i].portal);
+    if (alt) {
+      try {
+        await chrome.tabs.update(Number(alt[0]), { url: links[i].url });
+        neue.push([Number(alt[0]), eintrag]);
+        continue;
+      } catch (e) { /* Tab inzwischen zu: neu anlegen */ }
+    }
+    // im Fenster des Inserats (Nr. 16); App-/Popup-Fenster haben keine Tabs -> dann im normalen Fenster
+    for (const ort of [{ windowId: tab.windowId, index: tab.index + 1 + i, openerTabId: tab.id }, {}]) {
+      try {
+        const t = await chrome.tabs.create({ url: links[i].url, active: false, ...ort });
+        neue.push([t.id, eintrag]);
+        break;
+      } catch (e) { /* naechster Versuch */ }
+    }
   }
-  await sitzungAendern((s) => {
-    for (const [id, eintrag] of neue) s.vergleichsTabs[id] = eintrag;
-    if (s.inserate[kennung]) s.inserate[kennung].geoeffnet = true;
+  await sitzungAendern((x) => {
+    for (const [id, eintrag] of neue) x.vergleichsTabs[id] = eintrag;      // ohne "erledigt": wird neu ausgewertet
+    if (x.inserate[kennung]) x.inserate[kennung].geoeffnet = true;
   });
   return neue.length;
 }
 
 /** Tempo: Vergleichsseiten sofort direkt holen und die Tabs anlegen — ohne dass die Box darauf wartet. */
 function vergleicheStarten(tab, kennung, antwort) {
+  zuletztAutomatisch.set(kennung, Date.now());
   // sofort vermerken (Neuladen des Inserats oeffnet nichts doppelt), die Tabs folgen gleich
-  sitzungAendern((s) => { if (s.inserate[kennung]) s.inserate[kennung].geoeffnet = true; }).catch(() => {});
+  sitzungAendern((s) => {
+    if (s.inserate[kennung]) Object.assign(s.inserate[kennung], { geoeffnet: true, lageFehler: {} });   // neuer Versuch
+  }).catch(() => {});
   direktAuswerten(kennung, antwort, tab.id).catch(() => {});
   vergleicheOeffnen(tab, kennung, antwort).catch(() => {});
-  return (antwort.links || []).length;
+  return erlaubteLinks(antwort).length;
+}
+
+// 2.6.0 (Pruefung 05.10.2026, Nr. 2/13): Bremse gegen eine Tab-Flut. Von selbst oeffnen nur
+//   - wenn man das Inserat wirklich ansieht (sichtbarer Tab; ein im Hintergrund geoeffnetes Inserat oeffnet seine
+//     Vergleiche erst, wenn man hinwechselt — Mittelklick auf 10 Treffer = keine 20 Tabs auf einmal),
+//   - nicht nach Neuladen, Zurueck/Vor oder bei wiederhergestellten/verworfenen Tabs (Browser-Neustart),
+//   - hoechstens AUTO_JE_MINUTE Inserate je Minute, und dasselbe Inserat nie zweimal gleichzeitig.
+const AUTO_JE_MINUTE = 8;
+const zuletztAutomatisch = new Map();   // kennung -> Zeit (Speicher des Service Workers; "geoeffnet" steht in der Sitzung)
+const autoZeiten = [];
+const laufendeInserate = new Map();     // kennung -> laufendes POST /inserat (F5 waehrend des Hochladens, zwei Tabs)
+
+function automatischErlaubt(kennung) {
+  const jetzt = Date.now();
+  const zuletzt = zuletztAutomatisch.get(kennung);
+  if (zuletzt && jetzt - zuletzt < WIEDERHOLEN_MS) return "schon_offen";
+  while (autoZeiten.length && jetzt - autoZeiten[0] > 60000) autoZeiten.shift();
+  if (autoZeiten.length >= AUTO_JE_MINUTE) return "gebremst";
+  autoZeiten.push(jetzt);
+  zuletztAutomatisch.set(kennung, jetzt);
+  return "";
+}
+
+/** Warum (nicht) von selbst geoeffnet wird — "" = jetzt oeffnen. Die Box zeigt den Grund. */
+function automatik({ e, msg, ausVergleich, schonOffen, vomProgramm }) {
+  if (msg.ohneOeffnen) return "nachgelesen";
+  if (!e.vergleicheOeffnen) return "aus";
+  if (ausVergleich) return "aus_vergleich";
+  if (schonOffen) return "schon_offen";
+  if (vomProgramm) return "programm";
+  const a = msg.ansicht || {};                     // aeltere Seiten-Skripte schicken das nicht: wie bisher
+  if (a.verworfen || a.navTyp === "reload" || a.navTyp === "back_forward") return "neu_geladen";
+  if (a.sichtbar === false) return "hintergrund";
+  return "";
 }
 
 // Tempo (2.4.0): gemeinsam.js meldet ein Inserat schon beim Seitenstart. Der Hintergrund ist damit wach, und eine
@@ -160,10 +249,41 @@ function vergleicheStarten(tab, kennung, antwort) {
 const VORWAERMEN_MS = 15000;
 let vorgewaermt = 0;
 
+// 2.6.0 (Pruefung 05.10.2026, Nr. 9/15): /status hoechstens alle 30 min — gibt es eine neuere Version zum
+// Herunterladen (entpackte Erweiterungen aktualisieren sich nicht selbst)? Hat das Konto das Windows-Programm
+// (sonst fragt jede Ergebnisseite umsonst /programm-suche)?
+const STATUS_MS = 30 * 60 * 1000;
+
+async function statusHolen() {
+  const { statusMerker } = await lokal("statusMerker");
+  if (statusMerker && Date.now() - statusMerker.zeit < STATUS_MS) return statusMerker;
+  const r = await api(`/werkzeuge/${WERKZEUG}/status`);
+  if (r.status !== 200 || !r.daten) return statusMerker || null;
+  const merker = { zeit: Date.now(), aktuelle_version: r.daten.aktuelle_version || "",
+                   programm_verbunden: r.daten.programm_verbunden !== false };
+  await chrome.storage.local.set({ statusMerker: merker });
+  return merker;
+}
+
+/** Ist Version a neuer als b ("2.10.0" > "2.9.1")? */
+function istNeuer(a, b) {
+  const t = (v) => String(v || "").split(".").map((x) => parseInt(x, 10) || 0);
+  const x = t(a);
+  const y = t(b);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
+  }
+  return false;
+}
+
 async function fruehBearbeiten() {
-  const gespeichert = await lokal(["server", "schluessel"]);
+  const gespeichert = await lokal(["server", "schluessel", "statusMerker"]);
   if (!gespeichert.schluessel) return { ok: false };
-  if (Date.now() - vorgewaermt > VORWAERMEN_MS) {
+  const m = gespeichert.statusMerker;
+  if (!m || Date.now() - m.zeit >= STATUS_MS) {
+    vorgewaermt = Date.now();
+    statusHolen().catch(() => {});                   // baut dabei auch die Verbindung auf
+  } else if (Date.now() - vorgewaermt > VORWAERMEN_MS) {
     vorgewaermt = Date.now();
     const basis = gespeichert.server && serverErlaubt(gespeichert.server) ? gespeichert.server : SERVER_STANDARD;
     fetch(basis + "/api/health", { credentials: "omit", cache: "no-store" }).catch(() => {});
@@ -173,8 +293,8 @@ async function fruehBearbeiten() {
 
 async function inseratBearbeiten(msg, tab) {
   const kennung = String(msg.kennung || "");
-  const [{ schluessel, getrenntGrund }, s, e] = await Promise.all([
-    lokal(["schluessel", "getrenntGrund"]), sitzung(), einstellungen()]);
+  const [{ schluessel, getrenntGrund, statusMerker }, s, e] = await Promise.all([
+    lokal(["schluessel", "getrenntGrund", "statusMerker"]), sitzung(), einstellungen()]);
   if (!schluessel) {
     return { fehler: "nicht_verbunden", text: getrenntGrund || "Nicht verbunden – auf das AutoSchnell-Symbol klicken und den Code aus AutoSchnell eintippen." };
   }
@@ -191,30 +311,58 @@ async function inseratBearbeiten(msg, tab) {
     // Tempo (2.4.0): portal.js fragt erst ohne Seite — nur ein unbekanntes Inserat wird eingepackt und geschickt
     return { bekannt: false };
   } else {
-    const r = await api(`/werkzeuge/${WERKZEUG}/inserat`, { methode: "POST", daten: { url: msg.url, seite: msg.seite } });
+    // 2.6.0 (Nr. 13): laeuft fuer dieses Inserat schon ein Hochladen (F5, zweiter Tab), darauf warten statt zweimal
+    let lauf = laufendeInserate.get(kennung);
+    const erster = !lauf;
+    if (erster) {
+      lauf = api(`/werkzeuge/${WERKZEUG}/inserat`, { methode: "POST", daten: { url: msg.url, seite: msg.seite } });
+      laufendeInserate.set(kennung, lauf);
+      lauf.then(() => laufendeInserate.delete(kennung));
+    }
+    const r = await lauf;
     if (r.status !== 200 || !r.daten || !r.daten.vergleich_id) {
       return { fehler: r.status === 422 ? "seite" : "server", status: r.status,
                text: fehlertext(r.status, r.daten, "Das Inserat konnte nicht gelesen werden.") };
     }
     antwort = r.daten;
-    await sitzungAendern((x) => { x.inserate[kennung] = { zeit: Date.now(), antwort, geoeffnet: false, marktlage: {} }; });
+    if (erster) {
+      await sitzungAendern((x) => { x.inserate[kennung] = { zeit: Date.now(), antwort, geoeffnet: false, marktlage: {} }; });
+    }
   }
   const schonOffen = !!(vorher && vorher.geoeffnet && Date.now() - vorher.zeit < WIEDERHOLEN_MS);
   // Wunsch Ahmad 04.10.2026: hat das Windows-Programm dieses Auto gerade verglichen, sind die Vergleiche schon
   // offen — hier nichts doppelt oeffnen ("Vergleich oeffnen" geht trotzdem). Die Ampel kommt per Direktabruf.
   const vomProgramm = !!antwort.programm_verglichen;
   let geoeffnet = 0;
-  // ohneOeffnen (2.5.0): portal.js liest nur nach, weil der Helfer das Inserat vergessen hatte — ein Knopf folgt
-  const vonSelbst = e.vergleicheOeffnen && !msg.ohneOeffnen;
-  if (vonSelbst && !ausVergleich && !schonOffen && !vomProgramm) {
+  let grund = automatik({ e, msg, ausVergleich, schonOffen, vomProgramm });
+  if (!grund) grund = automatischErlaubt(kennung);
+  if (!grund) {
     geoeffnet = vergleicheStarten(tab, kennung, antwort);
-  } else if (vonSelbst && vomProgramm && !ausVergleich && !schonOffen
+  } else if (grund === "programm" && e.vergleicheOeffnen && !ausVergleich && !schonOffen
              && !Object.keys((vorher && vorher.marktlage) || {}).length) {
     direktAuswerten(kennung, antwort, tab.id).catch(() => {});
   }
   const [jetzt, basis] = await Promise.all([sitzung(), server()]);
   const neu = jetzt.inserate[kennung] || {};
-  return { antwort, geoeffnet, ausVergleich, schonOffen, vomProgramm, marktlage: neu.marktlage || {}, server: basis };
+  return { antwort, geoeffnet, ausVergleich, schonOffen: schonOffen || grund === "schon_offen", vomProgramm,
+           automatik: grund, marktlage: neu.marktlage || {}, lageFehler: neu.lageFehler || {}, server: basis,
+           // 2.6.0 (Nr. 9): in AutoSchnell gibt es eine neuere Version des Helfers
+           neueVersion: statusMerker && istNeuer(statusMerker.aktuelle_version, VERSION) ? statusMerker.aktuelle_version : "" };
+}
+
+/** 2.6.0 (Nr. 2): Ein im Hintergrund geoeffnetes Inserat ist jetzt sichtbar — erst jetzt von selbst oeffnen. */
+async function vergleicheAutomatisch(msg, tab) {
+  const kennung = String(msg.kennung || "");
+  const [s, e] = await Promise.all([sitzung(), einstellungen()]);
+  const i = s.inserate[kennung];
+  if (!i || !i.antwort) return { geoeffnet: 0, automatik: "unbekannt" };
+  const vergleichsTab = (id) => !!(id && (s.vergleichsTabs[id] || s.programmTabs[id]));
+  const grund = automatik({
+    e, msg: {}, ausVergleich: vergleichsTab(tab.openerTabId) || vergleichsTab(tab.id),
+    schonOffen: !!i.geoeffnet, vomProgramm: !!i.antwort.programm_verglichen,
+  }) || automatischErlaubt(kennung);
+  if (grund) return { geoeffnet: 0, automatik: grund };
+  return { geoeffnet: vergleicheStarten(tab, kennung, i.antwort), automatik: "" };
 }
 
 // ------------------------------------------------------------------ Vergleichsseite
@@ -249,12 +397,42 @@ async function marktlageMerken(kennung, schluessel, lage, inseratTab) {
   return true;
 }
 
+/** 2.6.0: Eine Vergleichsseite war nicht auswertbar — merken und dem Inserat-Tab sagen (statt endlos "wird
+ *  ausgewertet"). vorlaeufig = nur der Direktabruf scheiterte; der Tab kann es noch schaffen. */
+async function lageFehlerMelden(kennung, schluessel, text, vorlaeufig, inseratTab) {
+  const neu = await sitzungAendern((x) => {
+    const i = x.inserate[kennung];
+    if (!i || (i.marktlage || {})[schluessel]) return false;             // Ampel ist schon da
+    const alt = (i.lageFehler || {})[schluessel];
+    if (alt && !alt.vorlaeufig && vorlaeufig) return false;               // endgueltig bleibt endgueltig
+    i.lageFehler = { ...(i.lageFehler || {}), [schluessel]: { text, vorlaeufig } };
+    return true;
+  });
+  if (!neu || !inseratTab) return;
+  try {
+    await chrome.tabs.sendMessage(inseratTab, { typ: "marktlage_fehler", kennung, portal: schluessel, text, vorlaeufig });
+  } catch (e) { /* Inserat-Tab schon zu */ }
+}
+
+// 2.6.0 (Pruefung 05.10.2026, Nr. 4): direkt geholt wird nur bei AutoScout24. mobile.de schuetzt sich gegen
+// Abrufe ohne Browser-Fenster (im Test: 403) — ein zweiter Abruf je Vergleichsseite koennte dort das Cookie des
+// Nutzers so verschlechtern, dass er beim normalen Surfen Pruefseiten bekommt. Die Ampel kommt dort aus dem Tab.
+const DIREKT_PORTALE = ["AutoScout24"];
+const DIREKT_MS = 15000;
+
 async function direktAuswerten(kennung, antwort, inseratTab) {
-  await Promise.all((antwort.links || []).map(async (link) => {
+  await Promise.all(erlaubteLinks(antwort).filter((l) => DIREKT_PORTALE.includes(l.portal)).map(async (link) => {
     const schluessel = portalSchluessel(link.portal);
+    const abbruch = new AbortController();
+    const uhr = setTimeout(() => abbruch.abort(), DIREKT_MS);
     try {
-      const r = await fetch(link.url, { credentials: "include", cache: "no-store" });
-      if (!r.ok) return;
+      const r = await fetch(link.url, { credentials: "include", cache: "no-store", signal: abbruch.signal,
+                                        headers: { Accept: "text/html,application/xhtml+xml" } });
+      if (!r.ok) {
+        await lageFehlerMelden(kennung, schluessel, `${link.portal} hat die Vergleichsseite nicht geliefert (${r.status})`,
+                               true, inseratTab);
+        return;
+      }
       const seite = await packen(await r.text());
       const s = await sitzung();
       if (((s.inserate[kennung] || {}).marktlage || {})[schluessel]) return;     // der Tab war schneller
@@ -263,7 +441,13 @@ async function direktAuswerten(kennung, antwort, inseratTab) {
         methode: "POST", daten: { vergleich_id: antwort.vergleich_id, url: ziel, seite },
       });
       if (res.status === 200 && res.daten) await marktlageMerken(kennung, schluessel, res.daten, inseratTab);
-    } catch (e) { /* dann liest der Tab */ }
+      else await lageFehlerMelden(kennung, schluessel, fehlertext(res.status, res.daten, "Vergleichsseite nicht auswertbar"),
+                                  true, inseratTab);
+    } catch (e) {
+      /* offline, Zeitgrenze o. ae. — dann liest der Tab; die Box sagt es nach der Zeitgrenze */
+    } finally {
+      clearTimeout(uhr);
+    }
   }));
 }
 
@@ -279,6 +463,9 @@ async function sucheBereit(msg, tab) {
   if (s.programmTabs[tab.id]) return { senden: false };
   const { schluessel } = await lokal("schluessel");
   if (!schluessel) return { senden: false };
+  // 2.6.0 (Nr. 15): ohne verbundenes Windows-Programm gibt es keine Programm-Vergleiche — nicht jedes Mal fragen
+  const merker = await statusHolen();
+  if (merker && merker.programm_verbunden === false) return { senden: false };
   const r = await api(`/werkzeuge/${WERKZEUG}/programm-suche`, {
     methode: "POST", daten: { url: String(msg.url || tab.url || "") },
   });
@@ -312,7 +499,10 @@ async function sucheBearbeiten(msg, tab) {
     methode: "POST", daten: { vergleich_id: eintrag.vergleich_id, url: msg.url, seite: msg.seite },
   });
   if (r.status !== 200 || !r.daten) {
-    return { fehler: "server", text: fehlertext(r.status, r.daten, "Die Vergleichsseite konnte nicht ausgewertet werden.") };
+    const text = fehlertext(r.status, r.daten, "Die Vergleichsseite konnte nicht ausgewertet werden.");
+    // 2.6.0: auch der Tab schaffte es nicht — die Box im Inserat sagt es gleich (nicht erst nach der Zeitgrenze)
+    await lageFehlerMelden(eintrag.kennung, portalSchluessel(eintrag.portal), text, false, eintrag.inseratTab);
+    return { fehler: "server", text };
   }
   await marktlageMerken(eintrag.kennung, portalSchluessel(eintrag.portal), r.daten, eintrag.inseratTab);
   return { lage: r.daten };
@@ -327,7 +517,9 @@ async function sucheBearbeiten(msg, tab) {
 //   3. keine App -> Webseite in neuem Tab
 // "&vertrag=1": AutoSchnell oeffnet gleich das Vertragsfenster — mit den Daten, die hier aus der Seite kamen.
 const APP_GESEHEN_TAGE = 60;
-const APP_START_MS = 10000;
+// 2.6.0: 6 statt 10 s — ein Start per web+autoschnell: braucht meist 1–3 s; scheitert er, merkt sich der Helfer das
+// (appGesehen = 0) und oeffnet beim naechsten Mal gleich die Webseite
+const APP_START_MS = 6000;
 
 async function appFenster(basis) {
   let tabs = [];
@@ -359,7 +551,11 @@ async function vertragsZiel(kennung) {
 }
 
 async function webseiteOeffnen(basis, pfad, tab) {
-  await chrome.tabs.create({ url: basis + pfad, index: tab.index + 1, openerTabId: tab.id });
+  try {
+    await chrome.tabs.create({ url: basis + pfad, windowId: tab.windowId, index: tab.index + 1, openerTabId: tab.id });
+  } catch (e) {
+    await chrome.tabs.create({ url: basis + pfad });            // Fenster ohne Tabs (App/Popup)
+  }
   return { ok: true, weg: "webseite" };
 }
 
@@ -371,11 +567,12 @@ async function vertragOeffnen(msg, tab) {
   const app = await appFenster(basis);
   if (app) {
     const antwort = await anTab(app.id, { type: "AUTOSCHNELL_OEFFNEN", ziel: ziel.pfad });
-    if (!antwort || !antwort.ok) {
-      // App vor dem Helfer geoeffnet (kein Seiten-Skript darin): dorthin wechseln
-      await chrome.tabs.update(app.id, { url: basis + ziel.pfad });
-    }
     await chrome.windows.update(app.windowId, { focused: true });
+    if (!antwort || !antwort.ok) {
+      // 2.6.0 (Pruefung 05.10.2026, Nr. 6): Die App lief schon vor dem (aktualisierten) Helfer — nicht hart neu
+      // laden (ein halb ausgefuellter Kaufvertrag waere weg). Nach vorne holen und sagen, was zu tun ist.
+      return { ok: true, weg: "app_neu_laden" };
+    }
     return { ok: true, weg: "app" };
   }
   // 2. installiert (schon einmal als App gesehen), aber zu: das Seiten-Skript startet sie per Link-Typ
@@ -440,7 +637,8 @@ async function verbinden(msg) {
   await chrome.storage.local.set({
     schluessel: r.daten.schluessel, konto: r.daten.konto || "", name: r.daten.name || "", firma: r.daten.firma || "",
   });
-  await chrome.storage.local.remove("getrenntGrund");
+  await chrome.storage.local.remove(["getrenntGrund", "statusMerker"]);
+  await sitzungLeeren();
   return { ok: true, konto: r.daten.konto, name: r.daten.name, firma: r.daten.firma };
 }
 
@@ -465,7 +663,8 @@ async function status() {
 async function trennen() {
   const { schluessel } = await lokal("schluessel");
   if (schluessel) await api(`/werkzeuge/${WERKZEUG}/abmelden`, { methode: "POST" });
-  await chrome.storage.local.remove(["schluessel", "konto", "name", "firma", "getrenntGrund"]);
+  await chrome.storage.local.remove(["schluessel", "konto", "name", "firma", "getrenntGrund", "statusMerker"]);
+  await sitzungLeeren();
   return { ok: true };
 }
 
@@ -484,12 +683,22 @@ const AKTIONEN = {
   vertrag: (m, t) => vertragOeffnen(m, t),
   app_start_pruefen: (m, t) => appStartPruefen(m, t),
   vergleiche_oeffnen: (m, t) => vergleicheManuell(m, t),
+  vergleiche_auto: (m, t) => vergleicheAutomatisch(m, t),
 };
 const FENSTER = { verbinden, status, trennen, einstellungen: einstellungenSetzen };
+const INTERN_TEXT = "Im AutoSchnell Helfer ist etwas schiefgelaufen – bitte die Seite neu laden.";
+
+/** Oberster Rahmen eines Tabs. 2.6.0 (Nr. 10): vorgeladene Seiten (Speculation Rules, Adresszeile) haben dort eine
+ *  andere frameId als 0 — massgeblich ist der Rahmentyp. */
+const obersterRahmen = (sender) => sender.frameId === 0 || sender.frameType === "outermost_frame";
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || sender.id !== chrome.runtime.id) return false;
   if (msg.type === "AUTOSCHNELL_FETCH") {
+    if (!appHerkunft(sender)) {
+      sendResponse({ ok: false, error: "Nur aus AutoSchnell erlaubt." });
+      return false;
+    }
     abrufHelfer(msg, sendResponse);
     return true;
   }
@@ -499,8 +708,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
   // Seiten-Skripte: nur aus dem obersten Rahmen eines Portal-Tabs
-  if (AKTIONEN[msg.typ] && sender.tab && sender.frameId === 0 && /^https:\/\//.test(String(sender.url || ""))) {
-    AKTIONEN[msg.typ](msg, sender.tab).then(sendResponse, (e) => sendResponse({ fehler: "intern", text: String(e && e.message || e) }));
+  if (AKTIONEN[msg.typ] && sender.tab && obersterRahmen(sender) && /^https:\/\//.test(String(sender.url || ""))) {
+    AKTIONEN[msg.typ](msg, sender.tab).then(sendResponse, (e) => {
+      console.error("AutoSchnell Helfer:", msg.typ, e);       // Nr. 17: Englisches nie in die Box
+      sendResponse({ fehler: "intern", text: INTERN_TEXT });
+    });
     return true;
   }
   // Fenster der Erweiterung (popup.html — auch, wenn es als Tab geoeffnet ist); nie aus einer Webseite
@@ -512,5 +724,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  sitzungAendern((s) => { delete s.vergleichsTabs[tabId]; delete s.programmTabs[tabId]; }).catch(() => {});
+  // 2.6.0 (Nr. 17): nur schreiben, wenn der Tab bekannt ist — vorher schrieb JEDES Schliessen den ganzen Zustand neu
+  sitzung().then((s) => {
+    if (!s.vergleichsTabs[tabId] && !s.programmTabs[tabId]) return null;
+    return sitzungAendern((x) => { delete x.vergleichsTabs[tabId]; delete x.programmTabs[tabId]; });
+  }).catch(() => {});
 });

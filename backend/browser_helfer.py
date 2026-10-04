@@ -619,13 +619,21 @@ def ist_vergleichsseite(url: str) -> Optional[str]:
     return None
 
 
+#: Pruefung 05.10.2026 (Nr. 11): eine Ergebnisseite hat 20–50 Treffer — mehr wertet der Server nie aus (eine
+#: praeparierte 8-MB-Seite mit Zehntausenden "Treffern" haette sonst einen Prozess minutenlang belegt)
+MAX_TREFFER = 200
+
+
 def treffer_auslesen(url: str, html: str) -> dict:
     art = ist_vergleichsseite(url)
     if art == "mobile":
-        return mobile_treffer(html, url)
-    if art == "autoscout24":
-        return autoscout_treffer(html, url)
-    raise SeiteUngueltig("Das ist keine Vergleichsseite von mobile.de oder AutoScout24.")
+        liste = mobile_treffer(html, url)
+    elif art == "autoscout24":
+        liste = autoscout_treffer(html, url)
+    else:
+        raise SeiteUngueltig("Das ist keine Vergleichsseite von mobile.de oder AutoScout24.")
+    liste["treffer"] = (liste.get("treffer") or [])[:MAX_TREFFER]
+    return liste
 
 
 # ---------------------------------------------------------------- Marktlage + Ampel
@@ -786,7 +794,7 @@ def marktlage(preis: Optional[int], eigene_id: str, liste: dict, eigen: Optional
     aussortiert (eigene Liste) und zaehlen nicht; das guenstigste saubere Angebot wird zusaetzlich auf km und
     Erstzulassung des eigenen Autos umgerechnet (`eigen`: kilometer, ez_jahr, ez_monat)."""
     eigene_id = str(eigene_id or "").lower()
-    alle = [t for t in liste.get("treffer") or [] if t.get("preis")]
+    alle = [t for t in (liste.get("treffer") or [])[:MAX_TREFFER] if t.get("preis")]
     selbst_dabei = any(str(t.get("id") or "").lower() == eigene_id for t in alle)
     eigene_km = (eigen or {}).get("kilometer")
     sauber, aussortiert = [], []
@@ -798,7 +806,7 @@ def marktlage(preis: Optional[int], eigene_id: str, liste: dict, eigen: Optional
     if len(sauber) >= 5:
         mitte = statistics.median(t["preis"] for t in sauber)
         billig = [t for t in sauber if t["preis"] < PREIS_AUFFAELLIG * mitte]
-        sauber = [t for t in sauber if t not in billig]
+        sauber = [t for t in sauber if t["preis"] >= PREIS_AUFFAELLIG * mitte]   # linear (Nr. 11), dieselbe Grenze
         aussortiert += [(t, "preis") for t in billig]
     preise = sorted(t["preis"] for t in sauber)
     gelesen = len(preise)

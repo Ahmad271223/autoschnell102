@@ -1269,6 +1269,9 @@ WERKZEUG_INDIZES = (
     ("werkzeug_vergleiche", [("werkzeug", 1), ("dealer_id", 1), ("erstellt_am", -1)],
      {"name": "werkzeug_vergleiche_firma"}),
     ("werkzeug_vergleiche", [("werkzeug", 1), ("erstellt_am", -1)], {"name": "werkzeug_vergleiche_zeit"}),
+    # Pruefung Browser-Helfer 05.10.2026 (Nr. 1): /marktlage liest und schreibt je Vergleichsseite ueber "id" —
+    # ohne Index ein Vollscan der ganzen Sammlung (jedes geoeffnete Inserat legt ein Dokument an)
+    ("werkzeug_vergleiche", [("id", 1)], {"name": "werkzeug_vergleich_id", "unique": True}),
     # 04.10.2026: Browser-Helfer fragt nach den Vergleichen des Programms DIESES Kontos (letzte 30 min)
     ("werkzeug_vergleiche", [("werkzeug", 1), ("user_id", 1), ("erstellt_am", -1)],
      {"name": "werkzeug_vergleiche_konto"}),

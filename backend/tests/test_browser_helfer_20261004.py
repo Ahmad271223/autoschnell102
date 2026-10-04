@@ -712,3 +712,37 @@ def test_38_programm_und_helfer_arbeiten_zusammen(welt):
     finally:
         db.werkzeug_vergleiche.delete_many({"werkzeug": wz.AUTOPOINTER, "user_id": welt["sucher_id"]})
         db.link_jobs.delete_many({"url": MOBILE_URL})
+
+
+def test_39_status_und_texte_fuer_den_browser(welt):
+    """Pruefung 05.10.2026 (Nr. 15/24): /status sagt dem Helfer, ob das Konto das Windows-Programm hat (sonst fragt
+    jede Ergebnisseite umsonst /programm-suche); die Meldungen sprechen vom Browser, nicht vom PC/Programm."""
+    s = requests.get(f"{API}/werkzeuge/{WID}/status", headers=welt["prog"], timeout=30)
+    assert s.status_code == 200 and s.json()["programm_verbunden"] is True, s.text      # test_38 hat es verbunden
+    chef = _verbinden(welt, "chef", name="Edge · Chef")
+    assert requests.get(f"{API}/werkzeuge/{WID}/status", headers=chef, timeout=30).json()["programm_verbunden"] is False
+    falsch = requests.get(f"{API}/werkzeuge/{WID}/status", timeout=30,
+                          headers={wz.TOKEN_KOPF: "gibt-es-nicht", "X-Werkzeug-Version": "2.6.0"})
+    assert falsch.status_code == 401
+    assert "Browser" in falsch.json()["detail"] and "PC" not in falsch.json()["detail"], falsch.text
+    ohne = requests.get(f"{API}/werkzeuge/{WID}/status", timeout=30, headers={"X-Werkzeug-Version": "2.6.0"})
+    assert ohne.status_code == 401 and "Programm" not in ohne.json()["detail"]
+    # das Windows-Programm behaelt seine Texte
+    prog = requests.get(f"{API}/werkzeuge/{wz.AUTOPOINTER}/status", timeout=30, headers={wz.TOKEN_KOPF: "gibt-es-nicht"})
+    assert "nicht (mehr) verbunden" in prog.json()["detail"] and "PC" in prog.json()["detail"]
+
+
+def test_40_trefferzahl_gedeckelt():
+    """Pruefung 05.10.2026 (Nr. 11): mehr als MAX_TREFFER Treffer wertet der Server nie aus (praeparierte Seite)."""
+    preise = [10000 + i * 10 for i in range(bh.MAX_TREFFER + 150)]
+    liste = bh.treffer_auslesen(MOBILE_SUCHE, _mobile_suche_html(preise))
+    assert len(liste["treffer"]) == bh.MAX_TREFFER
+    lage = bh.marktlage(20000, "", liste)
+    assert lage["gesamt"] == bh.MAX_TREFFER + 150 and lage["ampel"], lage
+
+
+def test_41_index_auf_vergleichs_id():
+    """Pruefung 05.10.2026 (Nr. 1): /marktlage liest und schreibt werkzeug_vergleiche ueber "id" — ohne Index ein
+    Vollscan je Vergleichsseite."""
+    from indizes import WERKZEUG_INDIZES
+    assert any(s == "werkzeug_vergleiche" and k == [("id", 1)] and o.get("unique") for s, k, o in WERKZEUG_INDIZES)

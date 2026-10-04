@@ -36,6 +36,11 @@ Seit Version 2.0.0 (04.10.2026) macht die Erweiterung zwei Dinge:
    Seit 2.5.0: Box erkennt eine aktualisierte/neu geladene Erweiterung (`AutoSchnell.helferDa`) und bietet
    „Seite neu laden“; kennt der Helfer das Inserat nicht mehr, lesen „Kaufvertrag“/„Vergleich öffnen“ es nach
    (`nachlesen`, `ohneOeffnen: true`) und wiederholen sich einmal.
+   Seit 2.6.0 (Live-Prüfung): von selbst öffnen nur im sichtbaren Tab (`ansicht`, `vergleiche_auto` beim
+   Hinwechseln), nicht nach Neuladen/Zurück, höchstens 8 je Minute, Vergleichs-Tabs je Inserat-Tab werden
+   wiederverwendet; Ampel mit Zeitgrenze/Fehlertext (`marktlage_fehler`); Direktabruf nur AutoScout24;
+   Box hängt sich wieder ein, erkennt eine Doppel-Installation (Seiten-Ereignis `autoschnell-helfer-da`) und
+   vorgeladene Seiten; Kleinanzeigen nur Kategorie 216.
    **Zusammen mit dem Windows-Programm (seit 2.3.0, dasselbe AutoSchnell-Konto):**
    - Hat das Programm das Auto in den letzten 30 Minuten verglichen (`programm_verglichen` in der Antwort von
      `…/inserat`), öffnet der Helfer **keine** Vergleiche von selbst — nur die Ampel per Direktabruf.

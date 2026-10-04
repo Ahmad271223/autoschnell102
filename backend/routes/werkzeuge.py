@@ -51,9 +51,23 @@ CODE_FALSCH = "Code ungültig oder abgelaufen – bitte in AutoSchnell einen neu
 NICHT_VERBUNDEN = ("Dieses Programm ist nicht (mehr) verbunden – vielleicht wurde dein Konto auf einem "
                    "anderen PC verbunden. Bitte mit einem neuen Code aus AutoSchnell verbinden.")
 KEIN_ABO = "Kein aktives AutoSchnell-Abo – das Programm ist gesperrt."
+#: Pruefung Browser-Helfer 05.10.2026 (Nr. 24): der Helfer laeuft im Browser — keine Texte von "PC" und "Programm"
+NICHT_VERBUNDEN_BROWSER = ("Der AutoSchnell Helfer ist nicht (mehr) verbunden – vielleicht wurde dein Konto in einem "
+                           "anderen Browser verbunden. Bitte auf das AutoSchnell-Symbol klicken und mit einem neuen "
+                           "Code aus AutoSchnell verbinden.")
+KEIN_ABO_BROWSER = "Kein aktives AutoSchnell-Abo – der Helfer ist gesperrt."
+
+
+def _ist_browser(werkzeug_id: str) -> bool:
+    return wz.art(werkzeug_id) == "browser"
+
 
 _verbinden_limiter_ip = SlidingWindowRateLimiter(max_attempts=10, window_seconds=600,
                                                  name="werkzeug_verbinden_ip", fail_closed=True)
+#: Pruefung 05.10.2026 (Nr. 23): auch ueber ALLE Adressen hoechstens 200 falsche Codes in 10 Minuten — ein Raten mit
+#: vielen Adressen kommt so nicht weit (6 Stellen, 10 min gueltig, einmal nutzbar). Trifft nur NEUE Verbindungen.
+_verbinden_limiter_gesamt = SlidingWindowRateLimiter(max_attempts=200, window_seconds=600,
+                                                     name="werkzeug_verbinden_gesamt", fail_closed=True)
 _code_limiter_konto = SlidingWindowRateLimiter(max_attempts=20, window_seconds=600,
                                                name="werkzeug_code_konto")
 _vergleich_limiter = SlidingWindowRateLimiter(max_attempts=120, window_seconds=60,
@@ -101,10 +115,23 @@ async def _getrennt_merken(werkzeug_id: str, token_hashes, grund: str, pc_name: 
 async def _nicht_verbunden_text(werkzeug_id: str, schluessel: str) -> str:
     g = await db[wz.SAMMLUNG_GETRENNT].find_one(
         {"werkzeug": werkzeug_id, "token_hash": wz.streuwert(schluessel)}, {"_id": 0})
+    browser = _ist_browser(werkzeug_id)
     if not g:
-        return NICHT_VERBUNDEN
+        return NICHT_VERBUNDEN_BROWSER if browser else NICHT_VERBUNDEN
     wann = _berlin(g.get("am"))
     am = f" am {wann}" if wann else ""
+    if browser:
+        if g.get("grund") == "anderer_pc":
+            wo = f" („{g['pc_name']}“)" if g.get("pc_name") else ""
+            return (f"Dein Konto wurde{am} in einem anderen Browser{wo} verbunden – ein Konto kann nur in einem "
+                    "Browser verbunden sein. Zum Zurückwechseln auf das AutoSchnell-Symbol klicken und mit einem "
+                    "neuen Code verbinden.")
+        wer = {"chef": "Dein Chef hat", "betreiber": "AutoSchnell hat"}.get(g.get("grund"))
+        if wer:
+            return f"{wer} diesen Browser{am} getrennt. Bitte auf das AutoSchnell-Symbol klicken und neu verbinden."
+        if g.get("grund") == "app":
+            return f"Der Helfer wurde{am} in der AutoSchnell-App getrennt. Bitte auf das AutoSchnell-Symbol klicken."
+        return NICHT_VERBUNDEN_BROWSER
     if g.get("grund") == "anderer_pc":
         pc = f" („{g['pc_name']}“)" if g.get("pc_name") else ""
         return (f"Dein Konto wurde{am} auf einem anderen PC{pc} verbunden – ein Konto kann nur auf einem PC "
@@ -263,7 +290,7 @@ async def _konto_pruefen(user: Optional[dict], werkzeug_id: str):
         raise HTTPException(403, "Dieses Programm ist für dein Konto nicht freigeschaltet.")
     abo = await subscription_for(user)
     if not abo.get("active"):
-        raise HTTPException(402, KEIN_ABO)
+        raise HTTPException(402, KEIN_ABO_BROWSER if _ist_browser(werkzeug_id) else KEIN_ABO)
     return firma, abo
 
 
@@ -273,6 +300,10 @@ async def werkzeug_verbinden(werkzeug_id: str, body: VerbindenIn, request: Reque
     ip = client_ip(request)
     if not await _verbinden_limiter_ip.check(ip):
         raise HTTPException(429, "Zu viele falsche Codes – bitte in 10 Minuten erneut.")
+    if not await _verbinden_limiter_gesamt.check("alle"):
+        await _verbinden_limiter_ip.erstatten(ip)
+        log.warning("Werkzeug: Grenze fuer falsche Codes insgesamt erreicht (Raten ueber viele Adressen?)")
+        raise HTTPException(429, "Gerade zu viele Verbindungsversuche – bitte in ein paar Minuten erneut.")
     code = wz.code_normalisieren(body.code)
     if len(code) != wz.CODE_LAENGE:
         raise HTTPException(404, CODE_FALSCH)
@@ -314,6 +345,7 @@ async def werkzeug_verbinden(werkzeug_id: str, body: VerbindenIn, request: Reque
                   "verbunden_am": jetzt, "zuletzt_am": jetzt}},
         upsert=True)
     await _verbinden_limiter_ip.erstatten(ip)
+    await _verbinden_limiter_gesamt.erstatten("alle")
     await log_activity_sicher(user["dealer_id"], user["id"], "werkzeug.verbunden", ref=werkzeug_id,
                               meta={"pc_name": pc_name})
     konto = _konto_text(user)
@@ -324,7 +356,7 @@ async def werkzeug_verbinden(werkzeug_id: str, body: VerbindenIn, request: Reque
 async def _programm(werkzeug_id: str, schluessel: Optional[str], version: Optional[str] = None):
     _wid_pruefen(werkzeug_id)
     if not schluessel:
-        raise HTTPException(401, NICHT_VERBUNDEN)
+        raise HTTPException(401, NICHT_VERBUNDEN_BROWSER if _ist_browser(werkzeug_id) else NICHT_VERBUNDEN)
     v = await db[wz.SAMMLUNG_VERBINDUNGEN].find_one(
         {"werkzeug": werkzeug_id, "token_hash": wz.streuwert(schluessel)}, {"_id": 0})
     if not v:
@@ -349,10 +381,15 @@ async def werkzeug_status(werkzeug_id: str,
     dealer = await effective_dealer(user)
     # Nr. 4: die Version, die AutoSchnell gerade zum Herunterladen anbietet — ist sie neuer, sagt es das Programm
     meta = await db.werkzeuge.find_one({"id": werkzeug_id}, {"_id": 0, "version": 1}) or {}
-    return {"ok": True, "konto": konto["konto"], "name": konto["name"], "firma": firma.get("company_name") or "",
-            "pc_name": v.get("pc_name") or "", "abo_bis": abo.get("expires_at"),
-            "profil": (dealer or {}).get("active_profile", "inland"),
-            "aktuelle_version": meta.get("version"), "programm_name": wz.WERKZEUGE[werkzeug_id]["name"]}
+    antwort = {"ok": True, "konto": konto["konto"], "name": konto["name"], "firma": firma.get("company_name") or "",
+               "pc_name": v.get("pc_name") or "", "abo_bis": abo.get("expires_at"),
+               "profil": (dealer or {}).get("active_profile", "inland"),
+               "aktuelle_version": meta.get("version"), "programm_name": wz.WERKZEUGE[werkzeug_id]["name"]}
+    if _ist_browser(werkzeug_id):
+        # Pruefung 05.10.2026 (Nr. 15): der Helfer fragt /programm-suche nur, wenn das Konto das Windows-Programm hat
+        antwort["programm_verbunden"] = await db[wz.SAMMLUNG_VERBINDUNGEN].count_documents(
+            {"werkzeug": wz.AUTOPOINTER, "user_id": user["id"]}, limit=1) > 0
+    return antwort
 
 
 @router.post("/werkzeuge/{werkzeug_id}/abmelden")
@@ -512,6 +549,19 @@ _inserat_limiter = SlidingWindowRateLimiter(max_attempts=120, window_seconds=60,
 _marktlage_limiter = SlidingWindowRateLimiter(max_attempts=240, window_seconds=60, name="werkzeug_marktlage")
 #: base64(gzip(HTML)): ~4/3 der gepackten Groesse (browser_helfer.MAX_GEPACKT)
 _SEITE_MAX = 4 * 1024 * 1024 + 16
+#: Pruefung 05.10.2026 (Nr. 11): Entpacken + Auswerten laeuft in Threads — je Prozess hoechstens so viele
+#: gleichzeitig, damit eine Welle grosser Seiten nicht alle Threads (und damit jede andere Anfrage) belegt
+_AUSWERTEN_GLEICHZEITIG = 4
+_auswerten_sperre = None
+
+
+async def _auswerten(fn, *args):
+    import asyncio
+    global _auswerten_sperre
+    if _auswerten_sperre is None:
+        _auswerten_sperre = asyncio.Semaphore(_AUSWERTEN_GLEICHZEITIG)
+    async with _auswerten_sperre:
+        return await asyncio.to_thread(fn, *args)
 
 
 #: Wunsch Ahmad 04.10.2026: Programm und Helfer arbeiten zusammen — was das Programm in dieser Zeit verglichen
@@ -560,7 +610,6 @@ class InseratIn(BaseModel):
 async def werkzeug_inserat(werkzeug_id: str, body: InseratIn,
                            schluessel: Optional[str] = Header(None, alias=wz.TOKEN_KOPF),
                            version: Optional[str] = Header(None, alias="X-Werkzeug-Version")):
-    import asyncio
     import browser_helfer as bh
     from anbieter_fehler import ListingGone
     from listing_identity import ListingIdentityError, get_listing_identity
@@ -573,8 +622,8 @@ async def werkzeug_inserat(werkzeug_id: str, body: InseratIn,
     except ListingIdentityError as exc:
         raise HTTPException(400, str(exc) or "Kein Inserat von mobile.de, AutoScout24 oder Kleinanzeigen.")
     try:
-        html = await asyncio.to_thread(bh.seite_entpacken, body.seite)
-        fahrzeug, bewertung = await asyncio.to_thread(bh.inserat_auslesen, identity, body.url.strip(), html)
+        html = await _auswerten(bh.seite_entpacken, body.seite)
+        fahrzeug, bewertung = await _auswerten(bh.inserat_auslesen, identity, body.url.strip(), html)
     except bh.SeiteUngueltig as exc:
         raise HTTPException(422, str(exc))
     except ListingGone as exc:
@@ -622,7 +671,6 @@ async def werkzeug_marktlage(werkzeug_id: str, body: MarktlageIn,
                              schluessel: Optional[str] = Header(None, alias=wz.TOKEN_KOPF),
                              version: Optional[str] = Header(None, alias="X-Werkzeug-Version")):
     """Die Vergleichsseite, die die Erweiterung zu einem Inserat geoeffnet hat: wo liegt der Preis?"""
-    import asyncio
     import browser_helfer as bh
     _browser_werkzeug(werkzeug_id)
     user, v, _firma_doc, _abo = await _programm(werkzeug_id, schluessel, _programm_version(None, version))
@@ -641,8 +689,8 @@ async def werkzeug_marktlage(werkzeug_id: str, body: MarktlageIn,
     if not any(l.get("portal") == portal for l in doc.get("links") or []):
         raise HTTPException(400, "Zu diesem Inserat wurde keine solche Vergleichsseite geöffnet.")
     try:
-        html = await asyncio.to_thread(bh.seite_entpacken, body.seite)
-        liste = await asyncio.to_thread(bh.treffer_auslesen, body.url.strip(), html)
+        html = await _auswerten(bh.seite_entpacken, body.seite)
+        liste = await _auswerten(bh.treffer_auslesen, body.url.strip(), html)
     except bh.SeiteUngueltig as exc:
         raise HTTPException(422, str(exc))
     except Exception:  # noqa: BLE001

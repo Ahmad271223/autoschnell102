@@ -4411,7 +4411,7 @@ Erst einmal **nur für Kunde 10002**, seit dem Abend des 03.10. auch **10001** �
 
 ### Browser-Helfer für Chrome und Edge (Wunsch Ahmad 04.10.2026)
 
-Zweites Werkzeug `browser-helfer` neben dem Programm — die Erweiterung `browser-extension/` (Version 2.5.0, enthält
+Zweites Werkzeug `browser-helfer` neben dem Programm — die Erweiterung `browser-extension/` (Version 2.6.0, enthält
 weiter den Kleinanzeigen-Abruf-Helfer). Gleiche Lizenz: 6-stelliger Code, **ein Konto = ein Browser**, Abo-Pflicht,
 Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
 - Freigabe: `BROWSER_HELFER_KUNDEN` (Standard `10001,10002`, `docker-compose.yml`; leer = niemand).
@@ -4450,6 +4450,26 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
   sie sagt das jetzt sofort („aktualisiert – Seite neu laden“ + Knopf). Hat der Helfer das Inserat vergessen
   (Browser neu gestartet, > 2 h offen), liest die Box es nach (`ohneOeffnen`) und führt den Knopf dann aus; jeder
   Knopf zeigt sofort „… wird geöffnet“ bzw. einen Fehlertext. Im echten Edge alle drei Fälle geprüft.
+- **2.6.0 — Live-Prüfung 05.10.2026** (24 Befunde eines unabhängigen Prüfers, gegengeprüft; Server + Erweiterung):
+  - Server: eindeutiger Index `werkzeug_vergleiche.id` (vorher Vollscan je /marktlage), Trefferzahl je Vergleichsseite
+    auf 200 gedeckelt (+ lineares Aussortieren), höchstens 4 Seiten gleichzeitig entpacken/auswerten je Prozess,
+    falsche Codes auch insgesamt gebremst (200 / 10 min), Texte für den Browser statt „PC/Programm“, `/status`
+    liefert `programm_verbunden` (der Helfer fragt /programm-suche nur dann).
+  - Keine Tab-Flut: von selbst öffnen nur im sichtbaren Tab (Hintergrund-Tab öffnet beim Hinwechseln), nicht nach
+    Neuladen/Zurück/wiederhergestellten Tabs, höchstens 8 Inserate je Minute, Vergleichs-Tabs je Inserat-Tab werden
+    wiederverwendet („nächstes Fahrzeug“), dasselbe Inserat nie doppelt hochgeladen. Die Box nennt immer den Grund.
+  - Ampel: nach 12 s bzw. sofort bei nicht auswertbarer Seite ein Text statt Kreisel. Direktabruf nur noch bei
+    AutoScout24 (mobile.de schützt sich gegen Abrufe ohne Fenster; ein zweiter Abruf könnte das Cookie des Nutzers
+    verschlechtern) — mit Zeitgrenze 15 s.
+  - Robust: Box hängt sich wieder ein, wenn die Seite sie entfernt; zweimal installiert → Box sagt es und tut nichts;
+    Seitenwechsel ohne Neuladen sofort erkannt; vorgeladene Seiten erst beim Öffnen; Trennen/Neuverbinden leert den
+    Zwischenspeicher; alte 401 löscht keinen neuen Schlüssel; Kleinanzeigen nur Kategorie Autos (216), mobile.de nur
+    echte Inseratspfade; nur Suchseiten von mobile.de/AutoScout24 werden geöffnet; Kleinanzeigen-Abruf nur aus
+    AutoSchnell; App wird nie hart neu geladen; „Erneut versuchen“; Hinweis auf neue Version (Box + Fenster);
+    Mindestversion Chrome/Edge 112.
+  - Offen (Entscheidung Ahmad): Aufbewahrungsfrist für `werkzeug_vergleiche` (wächst je geöffnetem Inserat);
+    Datenschutzerklärung/Web-Store-Angaben (der Helfer schickt die ganze Seite, ausgewertet werden nur die
+    Fahrzeugdaten, die Rohseite wird nicht gespeichert); autoscout24.ch hat andere Inseratsadressen (ungenutzt).
 - „Kaufvertrag“ öffnet die **installierte App** (offenes App-Fenster oder Start per `web+autoschnell:`), nur ohne
   App eine Webseite; das Vertragsfenster geht gleich auf (`&vertrag=1`). Das App-Manifest hat dafür seit 04.10.2026
   `protocol_handlers` — installierte Apps übernehmen das neue Manifest beim nächsten Start/Update; beim ersten
@@ -4459,7 +4479,7 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
   powershell -File browser-extension\bauen.ps1                                       # lokal: browser-extension\dist\AutoSchnell-Helfer.zip
   scp browser-extension/dist/AutoSchnell-Helfer.zip root@<server>:/tmp/
   docker compose cp /tmp/AutoSchnell-Helfer.zip backend:/tmp/AutoSchnell-Helfer.zip
-  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Helfer.zip --werkzeug browser-helfer --version 2.5.0
+  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Helfer.zip --werkzeug browser-helfer --version 2.6.0
   ```
   Reihenfolge: erst Server deployen (neue Routen), dann ZIP hochladen.
 - Tests: `backend/tests/test_browser_helfer_20261004.py` (Teil 1 ohne Server, Teil 2 über HTTP).

@@ -17,8 +17,23 @@
 
   // ---------------------------------------------------------------- Box (geschlossenes Shadow-DOM)
   const HOST_ID = "autoschnell-helfer-box";
+  // 2.6.0 (Nr. 24): warum die Vergleiche NICHT von selbst aufgingen (background.js automatik())
+  const GRUENDE = {
+    aus: "Automatisches Öffnen ist aus (Fenster am AutoSchnell-Symbol) – Vergleiche per Knopf.",
+    aus_vergleich: "Aus einer Vergleichsseite geöffnet – Vergleiche nur auf Knopfdruck.",
+    programm: "Das Vergleich-Programm hat dieses Auto gerade verglichen – hier nur auf Knopfdruck.",
+    neu_geladen: "Seite neu geladen – Vergleiche nur auf Knopfdruck.",
+    hintergrund: "Im Hintergrund geöffnet – die Vergleiche gehen auf, sobald du hierher wechselst.",
+    gebremst: "Viele Inserate auf einmal geöffnet – hier die Vergleiche per Knopf öffnen.",
+  };
+  // 2.6.0 (Nr. 18): mit × geschlossene Boxen (je Inserat) bleiben zu, bis die Seite neu geladen wird
+  const geschlossen = new Set();
+  // ohne Ampel nach so vielen ms: sagen, was los ist (statt endlos "wird ausgewertet") — 2.6.0
+  const AMPEL_MS = 12000;
   let wurzel = null;
-  let zustand = null;   // { kennung, phase, antwort, marktlage, text, ... }
+  let hostEl = null;
+  let waechter = null;
+  let zustand = null;   // { kennung, phase, antwort, marktlage, lageFehler, lageStart, text, ... }
   let zugeklappt = false;
 
   function el(tag, klasse, text) {
@@ -28,22 +43,44 @@
     return e;
   }
 
+  function einhaengen() {
+    (document.body || document.documentElement).appendChild(hostEl);
+  }
+
+  /** 2.6.0: Baut die Seite sich neu auf (React) und wirft dabei fremde Elemente raus, haengt sich die Box sofort
+   *  wieder ein. Beobachtet nur die oberste Ebene (html, body) — keine Last bei jeder Aenderung der Seite. */
+  function beobachten() {
+    if (!waechter) {
+      waechter = new MutationObserver(() => {
+        if (!hostEl || !zustand) return;
+        if (!hostEl.isConnected || (document.body && hostEl.parentNode !== document.body)) einhaengen();
+        beobachten();                                  // body evtl. ersetzt: neuen body beobachten
+      });
+    }
+    waechter.disconnect();
+    waechter.observe(document.documentElement, { childList: true });
+    if (document.body) waechter.observe(document.body, { childList: true });
+  }
+
   function wurzelHolen() {
-    let host = document.getElementById(HOST_ID);
-    if (host && wurzel) return wurzel;
-    if (host) host.remove();
-    host = document.createElement("div");
-    host.id = HOST_ID;
+    if (hostEl && wurzel) {
+      if (!hostEl.isConnected) einhaengen();
+      return wurzel;
+    }
+    hostEl = document.createElement("div");
+    hostEl.id = HOST_ID;
     // oberste Ebene: Portale legen Cookie-Fenster mit eigener Ebene ueber die Seite (E2E 04.10.2026)
-    host.style.cssText = "position:fixed;right:16px;bottom:16px;z-index:2147483647;";
-    wurzel = host.attachShadow({ mode: "closed" });
-    (document.body || document.documentElement).appendChild(host);
+    hostEl.style.cssText = "position:fixed;right:16px;bottom:16px;z-index:2147483647;";
+    wurzel = hostEl.attachShadow({ mode: "closed" });
+    einhaengen();
+    beobachten();
     return wurzel;
   }
 
   function boxWeg() {
-    const host = document.getElementById(HOST_ID);
-    if (host) host.remove();
+    if (waechter) waechter.disconnect();
+    if (hostEl) hostEl.remove();
+    hostEl = null;
     wurzel = null;
   }
 
@@ -91,7 +128,7 @@
     return teile.filter(Boolean).join(" · ");
   }
 
-  function lageZeile(name, lage, wartet, ohneText) {
+  function lageZeile(name, lage, wartet, ohneText, fehlerText) {
     const z = el("div", "zeile");
     const farbe = lage ? (lage.ampel || "grau") : "grau";
     z.appendChild(el("span", "punkt " + farbe));
@@ -99,7 +136,10 @@
     t.appendChild(el("div", "portal", name));
     if (!lage) {
       const w = el("div", "klein");
-      if (wartet) {
+      if (wartet && fehlerText) {
+        // 2.6.0: nicht endlos drehen — sagen, was los ist und was hilft
+        w.textContent = fehlerText;
+      } else if (wartet) {
         w.appendChild(el("span", "spin"));
         w.appendChild(document.createTextNode("Vergleichsseite wird ausgewertet …"));
       } else {
@@ -141,6 +181,17 @@
     return z;
   }
 
+  /** 2.6.0: Text statt Kreisel — sofort, wenn die Vergleichsseite im Tab nicht auswertbar war; sonst nach AMPEL_MS
+   *  (dann mit dem Grund des Direktabrufs, falls einer kam). Kommt die Ampel spaeter doch, ersetzt sie den Text. */
+  function ampelFehler(z, schluessel) {
+    const f = (z.lageFehler || {})[schluessel];
+    const grund = f ? String(f.text || "").replace(/[.\s]+$/, "") : "";
+    const hilfe = "Vergleichs-Tab einmal anklicken oder „Vergleich öffnen“ drücken.";
+    if (f && !f.vorlaeufig) return grund + " – " + hilfe;
+    if (z.lageAbgelaufen) return (grund || "Noch keine Auswertung") + " – " + hilfe;
+    return null;
+  }
+
   function bewertungZeile(b) {
     if (!b) return null;
     if (b.portal === "mobile.de" && b.stufe) {
@@ -152,8 +203,11 @@
   }
 
   function zeichnen() {
-    if (!zustand) { boxWeg(); return; }
+    if (!zustand || geschlossen.has(zustand.kennung || "")) { boxWeg(); return; }
     const r = wurzelHolen();
+    // 2.6.0 (Nr. 18): beim Neuzeichnen (Ampel kommt) nicht an den Anfang springen
+    const vorige = r.querySelector(".box");
+    const scroll = vorige ? vorige.scrollTop : 0;
     r.textContent = "";
     const stil = el("style");
     stil.textContent = STIL;
@@ -177,10 +231,21 @@
     zu.setAttribute("aria-label", "Schließen");
     kopf.appendChild(klapp);
     kopf.appendChild(zu);
-    const umschalten = (ev) => { ev.stopPropagation(); zugeklappt = !zugeklappt; zeichnen(); };
+    const umschalten = (ev) => {
+      ev.stopPropagation();
+      zugeklappt = !zugeklappt;
+      // 2.6.0 (Nr. 18): zugeklappt bleibt zugeklappt — auch im naechsten Inserat
+      try { if (A.helferDa()) chrome.storage.local.set({ boxZugeklappt: zugeklappt }); } catch (e) { /* egal */ }
+      zeichnen();
+    };
     kopf.addEventListener("click", umschalten);
     klapp.addEventListener("click", umschalten);
-    zu.addEventListener("click", (ev) => { ev.stopPropagation(); zustand = null; boxWeg(); });
+    zu.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      geschlossen.add(z.kennung || "");          // 2.6.0 (Nr. 18): kommt fuer dieses Inserat nicht wieder
+      zustand = null;
+      boxWeg();
+    });
     box.appendChild(kopf);
 
     if (!zugeklappt) {
@@ -193,13 +258,30 @@
         neu.addEventListener("click", (ev) => { if (ev.isTrusted) location.reload(); });
         knoepfe.appendChild(neu);
         inhalt.appendChild(knoepfe);
+      } else if (z.phase === "doppelt") {
+        const versionen = [chrome.runtime.getManifest().version, ...A.andere.values()].filter(Boolean);
+        inhalt.appendChild(el("div", "fehler", "Der AutoSchnell Helfer ist zweimal installiert"
+          + (versionen.length > 1 ? " (Versionen " + versionen.join(" und ") + ")" : "") + "."));
+        inhalt.appendChild(el("div", "klein", "Bitte in edge://extensions bzw. chrome://extensions die ältere Version "
+          + "entfernen und diese Seite neu laden. Bis dahin öffnet der Helfer nichts, damit nichts doppelt passiert."));
       } else if (z.phase === "laden") {
         const p = el("div", "klein");
         p.appendChild(el("span", "spin"));
         p.appendChild(document.createTextNode("Inserat wird gelesen …"));
         inhalt.appendChild(p);
       } else if (z.phase === "fehler") {
-        inhalt.appendChild(el("div", "fehler", z.text || "Das hat nicht geklappt."));
+        // 2.6.0 (Nr. 24): "nicht verbunden" ruhig in Grau statt als rote Fehlerbox auf jedem Inserat
+        inhalt.appendChild(el("div", z.nichtVerbunden ? "klein" : "fehler", z.text || "Das hat nicht geklappt."));
+        if (!z.nichtVerbunden && z.kennung) {
+          // 2.6.0 (Nr. 5): nach 429/5xx/Zeitueberschreitung nicht nur "Seite neu laden"
+          const knoepfe = el("div", "knoepfe");
+          const nochmal = el("button", "knopf neben", "Erneut versuchen");
+          nochmal.addEventListener("click", (ev) => {
+            if (ev.isTrusted && z.kennung === aktuelleKennung) inserat(z.kennung, true);
+          });
+          knoepfe.appendChild(nochmal);
+          inhalt.appendChild(knoepfe);
+        }
       } else if (z.phase === "suche") {
         // Vergleichsseite des Windows-Programms: das Auto dazu und wo es hier liegt
         inhalt.appendChild(el("div", "fz", fahrzeugZeile(z.fahrzeug || {})));
@@ -212,9 +294,12 @@
         const portale = (a.links || []).map((l) => l.portal);
         const offen = z.geoeffnet > 0 || z.schonOffen;
         // Wunsch Ahmad 04.10.2026: das Programm hat die Vergleiche schon offen — die Ampel kommt per Direktabruf
-        const ohneText = z.vomProgramm && !offen ? "Im Vergleich-Programm geöffnet" : "";
+        const ohneText = offen ? "" : z.vomProgramm ? "Im Vergleich-Programm geöffnet"
+          : z.automatik === "hintergrund" ? "Öffnet, sobald du hierher wechselst" : "";
         for (const [name, schluessel] of [["mobile.de", "mobile"], ["AutoScout24", "autoscout"]]) {
-          if (portale.includes(name)) inhalt.appendChild(lageZeile(name, (z.marktlage || {})[schluessel], offen, ohneText));
+          if (portale.includes(name)) {
+            inhalt.appendChild(lageZeile(name, (z.marktlage || {})[schluessel], offen, ohneText, ampelFehler(z, schluessel)));
+          }
         }
         const bw = bewertungZeile(a.portal_bewertung);
         if (bw) inhalt.appendChild(el("div", "klein", bw));
@@ -227,9 +312,21 @@
           inhalt.appendChild(ul);
         }
         for (const h of (a.hinweise || []).slice(0, 2)) inhalt.appendChild(el("div", "klein", h));
-        if (z.ausVergleich && !offen) inhalt.appendChild(el("div", "klein", "Aus einer Vergleichsseite geöffnet – Vergleiche nur auf Knopfdruck."));
-        else if (z.vomProgramm && !offen) inhalt.appendChild(el("div", "klein", "Das Vergleich-Programm hat dieses Auto gerade verglichen – hier nur auf Knopfdruck."));
+        // 2.6.0 (Nr. 24): immer sagen, WARUM die Vergleiche nicht von selbst aufgingen
+        const grund = offen ? "" : GRUENDE[z.automatik] || (z.ausVergleich ? GRUENDE.aus_vergleich : z.vomProgramm ? GRUENDE.programm : "");
+        if (grund) inhalt.appendChild(el("div", "klein", grund));
+        if (z.neueVersion) {
+          inhalt.appendChild(el("div", "klein", `Neue Version ${z.neueVersion} des Helfers verfügbar – in AutoSchnell unter Programme.`));
+        }
         if (z.meldung) inhalt.appendChild(el("div", "klein", z.meldung));
+        if (z.protokollWartet) {
+          // 2.6.0 (Nr. 19): nach dem Nachlesen ist die Klick-Erlaubnis des Browsers abgelaufen — ein zweiter Klick
+          const knoepfe2 = el("div", "knoepfe");
+          const jetzt = el("button", "knopf haupt", "In der AutoSchnell-App öffnen");
+          jetzt.addEventListener("click", (ev) => { if (ev.isTrusted) appStarten(z, z.protokollWartet); });
+          knoepfe2.appendChild(jetzt);
+          inhalt.appendChild(knoepfe2);
+        }
         const knoepfe = el("div", "knoepfe");
         const vertrag = el("button", "knopf haupt", "Kaufvertrag");
         vertrag.title = "Auto sofort in AutoSchnell öffnen – alle Daten sind schon da";
@@ -237,30 +334,35 @@
           if (!ev.isTrusted) return;
           if (!A.helferDa()) { veraltet(); return; }
           z.meldung = "AutoSchnell wird geöffnet …";
+          z.protokollWartet = "";
           zeichnen();
           let r2 = await A.senden({ typ: "vertrag", kennung: z.kennung });
+          let nachgelesen = false;
           // Helfer kennt das Inserat nicht mehr (Browser neu gestartet, lange offen): nachlesen und noch einmal
-          if (r2 && r2.fehler === "unbekannt" && await nachlesen(z.kennung)) {
-            r2 = await A.senden({ typ: "vertrag", kennung: z.kennung });
+          if (r2 && r2.fehler === "unbekannt") {
+            const nach = await nachlesen(z.kennung);
+            nachgelesen = true;
+            r2 = nach && nach.antwort ? await A.senden({ typ: "vertrag", kennung: z.kennung }) : (nach || r2);
           }
           if (r2 && r2.protokoll) {
-            // Installierte App ist zu: per Link-Typ web+autoschnell: starten (noch im Klick, sonst blockt der Browser)
-            const a = document.createElement("a");
-            a.href = r2.protokoll;
-            a.style.display = "none";
-            (document.body || document.documentElement).appendChild(a);
-            a.click();
-            a.remove();
-            z.meldung = "AutoSchnell-App wird geöffnet …";
-            zeichnen();
-            const r3 = await A.senden({ typ: "app_start_pruefen", kennung: z.kennung });
-            z.meldung = r3 && r3.weg === "webseite" ? "Keine AutoSchnell-App gefunden – Webseite geöffnet." : "";
-            zeichnen();
+            if (nachgelesen) {
+              // 2.6.0 (Nr. 19): der Browser startet die App nur direkt nach einem Klick — nach dem Nachlesen ist das
+              // vorbei, also einen zweiten Klick anbieten statt still zu scheitern
+              z.protokollWartet = r2.protokoll;
+              z.meldung = "Inserat neu gelesen – bitte noch einmal klicken:";
+              zeichnen();
+              return;
+            }
+            await appStarten(z, r2.protokoll);
             return;
           }
           if (!A.helferDa()) { veraltet(); return; }
-          z.meldung = !r2 || r2.fehler
-            ? "AutoSchnell konnte nicht geöffnet werden – Seite neu laden und noch einmal drücken." : "";
+          z.meldung = r2 && r2.weg === "app_neu_laden"
+            ? "Die AutoSchnell-App ist offen, kennt den aktualisierten Helfer aber noch nicht – dort einmal neu laden "
+              + "(F5), dann hier noch einmal „Kaufvertrag“ drücken."
+            : !r2 || r2.fehler
+              ? (r2 && r2.text) || "AutoSchnell konnte nicht geöffnet werden – Seite neu laden und noch einmal drücken."
+              : "";
           zeichnen();
         });
         knoepfe.appendChild(vertrag);
@@ -279,18 +381,56 @@
       box.appendChild(inhalt);
     }
     r.appendChild(box);
+    box.scrollTop = scroll;
+  }
+
+  /** Installierte App ist zu: per Link-Typ web+autoschnell: starten (noch im Klick, sonst blockt der Browser). */
+  async function appStarten(z, protokoll) {
+    const a = document.createElement("a");
+    a.href = protokoll;
+    a.style.display = "none";
+    (document.body || document.documentElement).appendChild(a);
+    a.click();
+    a.remove();
+    z.protokollWartet = "";
+    z.meldung = "AutoSchnell-App wird geöffnet …";
+    zeichnen();
+    const r3 = await A.senden({ typ: "app_start_pruefen", kennung: z.kennung });
+    z.meldung = r3 && r3.weg === "webseite" ? "Keine AutoSchnell-App gefunden – Webseite geöffnet." : "";
+    zeichnen();
   }
 
   // ---------------------------------------------------------------- Inserat
   let aktuelleKennung = null;
+  const FRISCH_MS = 15000;
 
   async function frischHolen(url) {
+    // 2.6.0 (Nr. 5): mit Zeitgrenze — haengt das Portal, dreht "Inserat wird gelesen" nicht endlos
+    const abbruch = new AbortController();
+    const uhr = setTimeout(() => abbruch.abort(), FRISCH_MS);
     try {
-      const r = await fetch(url, { credentials: "include", cache: "no-store" });
+      const r = await fetch(url, { credentials: "include", cache: "no-store", signal: abbruch.signal });
       return r.ok ? await r.text() : null;
     } catch (e) {
       return null;
+    } finally {
+      clearTimeout(uhr);
     }
+  }
+
+  /** 2.6.0 (Nr. 2): wie wurde die Seite geoeffnet? Der Hintergrund oeffnet Vergleiche nur von selbst, wenn man das
+   *  Inserat wirklich ansieht — nicht im Hintergrund-Tab, nicht nach Neuladen/Zurueck, nicht bei verworfenen Tabs. */
+  function ansicht(ersterAufruf) {
+    let navTyp = "spa";                        // Wechsel ohne Neuladen ("naechstes Fahrzeug") = bewusst angeklickt
+    if (ersterAufruf) {
+      try {
+        const n = performance.getEntriesByType("navigation")[0];
+        navTyp = (n && n.type) || "navigate";
+      } catch (e) {
+        navTyp = "navigate";
+      }
+    }
+    return { sichtbar: document.visibilityState === "visible", navTyp, verworfen: !!document.wasDiscarded };
   }
 
   async function inserat(kennung, ersterAufruf) {
@@ -298,30 +438,55 @@
     zeichnen();
     // Tempo (2.4.0): erst fragen, ob der Helfer das Inserat gerade schon gelesen hat (Neuladen, zurueck, zweiter
     // Tab) — dann steht die Box sofort, ohne die Seite einzupacken oder neu zu holen.
-    let antwort = await A.senden({ typ: "inserat", kennung, url: location.href });
+    const wie = ansicht(ersterAufruf);
+    let antwort = await A.senden({ typ: "inserat", kennung, url: location.href, ansicht: wie });
     if (!antwort || antwort.bekannt === false) {
       // Erster Aufruf: die geladene Seite enthaelt das Inserat. Nach einem Wechsel ohne Neuladen: frisch holen.
       let html = ersterAufruf ? document.documentElement.outerHTML : await frischHolen(location.href);
       if (!html) html = document.documentElement.outerHTML;
-      antwort = await A.senden({ typ: "inserat", kennung, url: location.href, seite: await A.packen(html) });
+      antwort = await A.senden({ typ: "inserat", kennung, url: location.href, seite: await A.packen(html), ansicht: wie });
       if (antwort && antwort.fehler === "seite" && ersterAufruf) {
         const frisch = await frischHolen(location.href);
         if (frisch && kennung === aktuelleKennung) {
-          antwort = await A.senden({ typ: "inserat", kennung, url: location.href, seite: await A.packen(frisch) });
+          antwort = await A.senden({ typ: "inserat", kennung, url: location.href, seite: await A.packen(frisch),
+                                     ansicht: wie });
         }
       }
     }
     if (kennung !== aktuelleKennung) return;          // inzwischen weitergeklickt
     if (!antwort) {
-      zustand = { kennung, phase: "fehler", text: "Der AutoSchnell Helfer antwortet nicht – Seite neu laden." };
+      if (!A.helferDa()) { zustand = { kennung, phase: "laden" }; veraltet(); return; }
+      zustand = { kennung, phase: "fehler", text: "Der AutoSchnell Helfer antwortet nicht – bitte erneut versuchen." };
     } else if (antwort.fehler) {
-      zustand = { kennung, phase: "fehler", text: antwort.text || "Das Inserat konnte nicht gelesen werden." };
+      zustand = { kennung, phase: "fehler", text: antwort.text || "Das Inserat konnte nicht gelesen werden.",
+                  nichtVerbunden: antwort.fehler === "nicht_verbunden" };
     } else {
       // Eine schon eingetroffene Ampel (direkt geholte Vergleichsseite) nicht wieder wegwerfen
-      const schon = (zustand && zustand.kennung === kennung && zustand.marktlage) || {};
+      const vorher = zustand && zustand.kennung === kennung ? zustand : {};
       zustand = { kennung, phase: "fertig", antwort: antwort.antwort, geoeffnet: antwort.geoeffnet,
                   schonOffen: antwort.schonOffen, ausVergleich: antwort.ausVergleich, vomProgramm: antwort.vomProgramm,
-                  marktlage: { ...schon, ...(antwort.marktlage || {}) } };
+                  automatik: antwort.automatik || "", neueVersion: antwort.neueVersion || "",
+                  marktlage: { ...(vorher.marktlage || {}), ...(antwort.marktlage || {}) },
+                  lageFehler: { ...(antwort.lageFehler || {}), ...(vorher.lageFehler || {}) },
+                  lageStart: Date.now() };
+      // im Hintergrund geoeffnet und inzwischen doch sichtbar? Dann gleich oeffnen
+      if (zustand.automatik === "hintergrund" && document.visibilityState === "visible") sichtbarGeworden();
+    }
+    zeichnen();
+  }
+
+  /** 2.6.0 (Nr. 2): Ein im Hintergrund geoeffnetes Inserat wird angesehen — jetzt erst von selbst vergleichen. */
+  async function sichtbarGeworden() {
+    if (document.visibilityState !== "visible" || !zustand || zustand.phase !== "fertig"
+        || zustand.automatik !== "hintergrund" || !A.helferDa()) return;
+    const kennung = zustand.kennung;
+    zustand.automatik = "";                            // genau einmal
+    const r = await A.senden({ typ: "vergleiche_auto", kennung });
+    if (!zustand || zustand.kennung !== kennung) return;
+    if (r && r.geoeffnet) {
+      Object.assign(zustand, { geoeffnet: r.geoeffnet, lageFehler: {}, lageAbgelaufen: false, lageStart: Date.now() });
+    } else {
+      zustand.automatik = (r && r.automatik) || "";
     }
     zeichnen();
   }
@@ -344,7 +509,7 @@
       const frisch = await frischHolen(location.href);
       if (frisch) r = await senden(frisch);
     }
-    return !!(r && r.antwort);
+    return r;          // 2.6.0 (Nr. 5): mit Grund (nicht verbunden, kein Abo, zu viele …) statt nur ja/nein
   }
 
   /** "Vergleich öffnen" — aus der Box oder aus dem Fenster am AutoSchnell-Symbol (auch bei zugemachter Box). */
@@ -355,15 +520,20 @@
     const hier = () => zustand && zustand.kennung === kennung;
     if (hier()) { zustand.meldung = "Vergleiche werden geöffnet …"; zeichnen(); }
     let r = await A.senden({ typ: "vergleiche_oeffnen", kennung });
-    if (r && r.fehler === "unbekannt" && await nachlesen(kennung)) {
-      r = await A.senden({ typ: "vergleiche_oeffnen", kennung });
+    if (r && r.fehler === "unbekannt") {
+      const nach = await nachlesen(kennung);
+      r = nach && nach.antwort ? await A.senden({ typ: "vergleiche_oeffnen", kennung }) : (nach || r);
     }
     if (!A.helferDa()) { veraltet(); return { fehler: "veraltet" }; }
     if (hier()) {
-      if (r && r.geoeffnet) zustand.geoeffnet = r.geoeffnet;
+      if (r && r.geoeffnet) {
+        // neue Vergleichsseiten: die Zeitgrenze der Ampel beginnt neu
+        Object.assign(zustand, { geoeffnet: r.geoeffnet, automatik: "", lageFehler: {}, lageAbgelaufen: false,
+                                 lageStart: Date.now() });
+      }
       zustand.meldung = r && r.geoeffnet ? ""
         : r && !r.fehler ? "Für dieses Auto gibt es keinen Vergleich (Marke oder Modell unbekannt)."
-          : "Die Vergleiche konnten nicht geöffnet werden – Seite neu laden und noch einmal drücken.";
+          : (r && r.text) || "Die Vergleiche konnten nicht geöffnet werden – Seite neu laden und noch einmal drücken.";
       zeichnen();
     }
     return r || { fehler: "intern" };
@@ -373,6 +543,14 @@
     if (msg && msg.typ === "marktlage" && zustand && msg.kennung === zustand.kennung) {
       zustand.marktlage = { ...(zustand.marktlage || {}), [msg.portal]: msg.lage };
       zeichnen();
+    }
+    // 2.6.0: Vergleichsseite nicht auswertbar (vorlaeufig = nur der Direktabruf; der Tab kann es noch schaffen)
+    if (msg && msg.typ === "marktlage_fehler" && zustand && msg.kennung === zustand.kennung) {
+      const alt = (zustand.lageFehler || {})[msg.portal];
+      if (!alt || alt.vorlaeufig) {
+        zustand.lageFehler = { ...(zustand.lageFehler || {}), [msg.portal]: { text: msg.text, vorlaeufig: !!msg.vorlaeufig } };
+        zeichnen();
+      }
     }
     if (msg && msg.typ === "vergleich_oeffnen") {             // Knopf im Fenster am Symbol (popup.js)
       vergleichOeffnen().then(sendResponse, () => sendResponse({ fehler: "intern" }));
@@ -430,14 +608,51 @@
     if (ersterAufruf && istVergleichsseite(location.href)) vergleichsseite();
   }
 
-  pruefen(true);
+  // 2.6.0: zweimal installiert (zwei Erweiterungs-IDs, gemeinsam.js)? Dann nichts tun ausser es zu sagen — sonst
+  // gehen Vergleiche doppelt auf und die beiden Boxen nehmen sich gegenseitig weg.
+  if (A.andere && A.andere.size) {
+    zustand = { phase: "doppelt" };
+    zeichnen();
+    return;
+  }
+
   let letzte = location.href;
-  setInterval(() => {
-    // Erweiterung inzwischen aktualisiert/neu geladen? Dann gleich sagen — nicht erst, wenn ein Knopf stumm bleibt
-    if (zustand && !zustand.veraltet && !A.helferDa()) veraltet();
+  const adresseGewechselt = () => {
     if (location.href !== letzte) {
       letzte = location.href;
       pruefen(false);
     }
-  }, 700);
+  };
+
+  function starten() {
+    // 2.6.0 (Nr. 18): zugeklappt bleibt zugeklappt
+    try {
+      chrome.storage.local.get("boxZugeklappt").then((x) => {
+        if (x && x.boxZugeklappt && !zugeklappt) { zugeklappt = true; if (zustand) zeichnen(); }
+      }).catch(() => {});
+    } catch (e) { /* egal */ }
+    letzte = location.href;
+    pruefen(true);
+    // 2.6.0: Seitenwechsel ohne Neuladen sofort erkennen (Navigation API / zurueck); die Abfrage bleibt als Rueckfall
+    try { if (window.navigation) window.navigation.addEventListener("currententrychange", adresseGewechselt); } catch (e) { /* alt */ }
+    window.addEventListener("popstate", adresseGewechselt);
+    // 2.6.0 (Nr. 2): im Hintergrund geoeffnete Inserate oeffnen ihre Vergleiche, wenn man hinwechselt
+    document.addEventListener("visibilitychange", sichtbarGeworden);
+    setInterval(() => {
+      // Erweiterung inzwischen aktualisiert/neu geladen? Dann gleich sagen — nicht erst, wenn ein Knopf stumm bleibt
+      if (zustand && !zustand.veraltet && !A.helferDa()) veraltet();
+      // keine Ampel nach AMPEL_MS: einmal neu zeichnen, die Zeile sagt dann, was los ist
+      if (zustand && zustand.phase === "fertig" && zustand.lageStart && !zustand.lageAbgelaufen
+          && Date.now() - zustand.lageStart > AMPEL_MS) {
+        zustand.lageAbgelaufen = true;
+        zeichnen();
+      }
+      adresseGewechselt();
+    }, 700);
+  }
+
+  // 2.6.0 (Pruefung 05.10.2026, Nr. 10): vorgeladene Seiten (Google-Treffer, Adresszeile) erst bearbeiten, wenn man
+  // sie wirklich oeffnet — sonst wuerden Inserate hochgeladen und Vergleiche geoeffnet, die man nie ansieht
+  if (document.prerendering) document.addEventListener("prerenderingchange", starten, { once: true });
+  else starten();
 })();

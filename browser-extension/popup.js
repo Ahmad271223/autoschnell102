@@ -10,6 +10,17 @@ function senden(nachricht) {
   });
 }
 
+/** Ist Version a neuer als b ("2.10.0" > "2.9.1")? */
+function istNeuer(a, b) {
+  const t = (v) => String(v || "").split(".").map((x) => parseInt(x, 10) || 0);
+  const x = t(a);
+  const y = t(b);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0);
+  }
+  return false;
+}
+
 function datum(iso) {
   if (!iso) return "–";
   const d = new Date(iso);
@@ -35,8 +46,15 @@ function zeigen(st) {
   $("name").textContent = st.name || "–";
   $("firma").textContent = st.firma || "–";
   $("abo").textContent = datum(st.abo_bis);
-  $("hinweis").hidden = !st.hinweis;
-  $("hinweis").textContent = st.hinweis || "";
+  // 2.6.0 (Pruefung 05.10.2026, Nr. 9): entpackte Erweiterungen aktualisieren sich nicht selbst — sagen, wenn es
+  // in AutoSchnell eine neuere Version gibt
+  const ich = st.version || chrome.runtime.getManifest().version;
+  const neu = st.aktuelle_version && istNeuer(st.aktuelle_version, ich)
+    ? `Neue Version ${st.aktuelle_version} verfügbar: in AutoSchnell unter Programme herunterladen, in denselben Ordner `
+      + "entpacken (alte Dateien überschreiben) und unter Erweiterungen „Neu laden“ drücken." : "";
+  const texte = [st.hinweis, neu].filter(Boolean);
+  $("hinweis").hidden = !texte.length;
+  $("hinweis").textContent = texte.join(" ");
   $("oeffnen").checked = !(st.einstellungen && st.einstellungen.vergleicheOeffnen === false);
 }
 
