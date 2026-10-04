@@ -185,7 +185,15 @@
 
     if (!zugeklappt) {
       const inhalt = el("div", "inhalt");
-      if (z.phase === "laden") {
+      if (z.veraltet) {
+        // Erweiterung aktualisiert/neu geladen: diese Box erreicht den Helfer nicht mehr
+        inhalt.appendChild(el("div", "fehler", "Der AutoSchnell Helfer wurde aktualisiert. Bitte die Seite neu laden."));
+        const knoepfe = el("div", "knoepfe");
+        const neu = el("button", "knopf haupt", "Seite neu laden");
+        neu.addEventListener("click", (ev) => { if (ev.isTrusted) location.reload(); });
+        knoepfe.appendChild(neu);
+        inhalt.appendChild(knoepfe);
+      } else if (z.phase === "laden") {
         const p = el("div", "klein");
         p.appendChild(el("span", "spin"));
         p.appendChild(document.createTextNode("Inserat wird gelesen …"));
@@ -227,7 +235,14 @@
         vertrag.title = "Auto sofort in AutoSchnell öffnen – alle Daten sind schon da";
         vertrag.addEventListener("click", async (ev) => {
           if (!ev.isTrusted) return;
-          const r2 = await A.senden({ typ: "vertrag", kennung: z.kennung });
+          if (!A.helferDa()) { veraltet(); return; }
+          z.meldung = "AutoSchnell wird geöffnet …";
+          zeichnen();
+          let r2 = await A.senden({ typ: "vertrag", kennung: z.kennung });
+          // Helfer kennt das Inserat nicht mehr (Browser neu gestartet, lange offen): nachlesen und noch einmal
+          if (r2 && r2.fehler === "unbekannt" && await nachlesen(z.kennung)) {
+            r2 = await A.senden({ typ: "vertrag", kennung: z.kennung });
+          }
           if (r2 && r2.protokoll) {
             // Installierte App ist zu: per Link-Typ web+autoschnell: starten (noch im Klick, sonst blockt der Browser)
             const a = document.createElement("a");
@@ -243,7 +258,10 @@
             zeichnen();
             return;
           }
-          if (!r2 || r2.fehler) { z.meldung = "AutoSchnell konnte nicht geöffnet werden."; zeichnen(); }
+          if (!A.helferDa()) { veraltet(); return; }
+          z.meldung = !r2 || r2.fehler
+            ? "AutoSchnell konnte nicht geöffnet werden – Seite neu laden und noch einmal drücken." : "";
+          zeichnen();
         });
         knoepfe.appendChild(vertrag);
         if ((a.links || []).length) {
@@ -308,13 +326,44 @@
     zeichnen();
   }
 
+  /** Erweiterung aktualisiert/neu geladen: die Box sagt es und bietet "Seite neu laden" (statt stummer Knoepfe). */
+  function veraltet() {
+    if (!zustand || zustand.veraltet) return;
+    zustand.veraltet = true;
+    zugeklappt = false;
+    zeichnen();
+  }
+
+  /** Der Helfer kennt das Inserat nicht mehr (Browser neu gestartet, laenger als 2 h offen): die Seite noch einmal
+   *  schicken — ohne von selbst Vergleiche zu oeffnen —, danach wiederholt der Knopf seine Aktion. */
+  async function nachlesen(kennung) {
+    const senden = async (html) => A.senden({ typ: "inserat", kennung, url: location.href, seite: await A.packen(html),
+                                              ohneOeffnen: true });
+    let r = await senden(document.documentElement.outerHTML);
+    if (r && r.fehler === "seite") {                 // nach Seitenwechsel ohne Neuladen: frisch holen
+      const frisch = await frischHolen(location.href);
+      if (frisch) r = await senden(frisch);
+    }
+    return !!(r && r.antwort);
+  }
+
   /** "Vergleich öffnen" — aus der Box oder aus dem Fenster am AutoSchnell-Symbol (auch bei zugemachter Box). */
   async function vergleichOeffnen() {
     const kennung = aktuelleKennung;
     if (!kennung) return { fehler: "kein_inserat" };
-    const r = await A.senden({ typ: "vergleiche_oeffnen", kennung });
-    if (r && r.geoeffnet && zustand && zustand.kennung === kennung) {
-      zustand.geoeffnet = r.geoeffnet;
+    if (!A.helferDa()) { veraltet(); return { fehler: "veraltet" }; }
+    const hier = () => zustand && zustand.kennung === kennung;
+    if (hier()) { zustand.meldung = "Vergleiche werden geöffnet …"; zeichnen(); }
+    let r = await A.senden({ typ: "vergleiche_oeffnen", kennung });
+    if (r && r.fehler === "unbekannt" && await nachlesen(kennung)) {
+      r = await A.senden({ typ: "vergleiche_oeffnen", kennung });
+    }
+    if (!A.helferDa()) { veraltet(); return { fehler: "veraltet" }; }
+    if (hier()) {
+      if (r && r.geoeffnet) zustand.geoeffnet = r.geoeffnet;
+      zustand.meldung = r && r.geoeffnet ? ""
+        : r && !r.fehler ? "Für dieses Auto gibt es keinen Vergleich (Marke oder Modell unbekannt)."
+          : "Die Vergleiche konnten nicht geöffnet werden – Seite neu laden und noch einmal drücken.";
       zeichnen();
     }
     return r || { fehler: "intern" };
@@ -384,6 +433,8 @@
   pruefen(true);
   let letzte = location.href;
   setInterval(() => {
+    // Erweiterung inzwischen aktualisiert/neu geladen? Dann gleich sagen — nicht erst, wenn ein Knopf stumm bleibt
+    if (zustand && !zustand.veraltet && !A.helferDa()) veraltet();
     if (location.href !== letzte) {
       letzte = location.href;
       pruefen(false);

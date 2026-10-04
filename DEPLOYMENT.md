@@ -4411,7 +4411,7 @@ Erst einmal **nur für Kunde 10002**, seit dem Abend des 03.10. auch **10001** �
 
 ### Browser-Helfer für Chrome und Edge (Wunsch Ahmad 04.10.2026)
 
-Zweites Werkzeug `browser-helfer` neben dem Programm — die Erweiterung `browser-extension/` (Version 2.4.0, enthält
+Zweites Werkzeug `browser-helfer` neben dem Programm — die Erweiterung `browser-extension/` (Version 2.5.0, enthält
 weiter den Kleinanzeigen-Abruf-Helfer). Gleiche Lizenz: 6-stelliger Code, **ein Konto = ein Browser**, Abo-Pflicht,
 Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
 - Freigabe: `BROWSER_HELFER_KUNDEN` (Standard `10001,10002`, `docker-compose.yml`; leer = niemand).
@@ -4445,6 +4445,11 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
   Tab desselben Inserats (30 min): Box sofort aus dem Gedächtnis, ohne Einpacken, Hochladen oder (nach Seitenwechsel
   ohne Neuladen) erneuten Seitenabruf. Lokal gemessen im Rauschen — der Rest nach dem Laden der Seite sind die
   Skripte des Portals selbst; spürbar vor allem nach Pausen (Verbindung/Hintergrund kalt) und auf langsamen PCs.
+- Seit 2.5.0 (Befund Ahmad 04.10.: „Kaufvertrag und Vergleich öffnen hängen und machen nichts“): Nach einem Update
+  oder „Neu laden“ der Erweiterung bleibt die Box in schon offenen Tabs stehen, erreicht den Helfer aber nicht mehr —
+  sie sagt das jetzt sofort („aktualisiert – Seite neu laden“ + Knopf). Hat der Helfer das Inserat vergessen
+  (Browser neu gestartet, > 2 h offen), liest die Box es nach (`ohneOeffnen`) und führt den Knopf dann aus; jeder
+  Knopf zeigt sofort „… wird geöffnet“ bzw. einen Fehlertext. Im echten Edge alle drei Fälle geprüft.
 - „Kaufvertrag“ öffnet die **installierte App** (offenes App-Fenster oder Start per `web+autoschnell:`), nur ohne
   App eine Webseite; das Vertragsfenster geht gleich auf (`&vertrag=1`). Das App-Manifest hat dafür seit 04.10.2026
   `protocol_handlers` — installierte Apps übernehmen das neue Manifest beim nächsten Start/Update; beim ersten
@@ -4454,7 +4459,7 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
   powershell -File browser-extension\bauen.ps1                                       # lokal: browser-extension\dist\AutoSchnell-Helfer.zip
   scp browser-extension/dist/AutoSchnell-Helfer.zip root@<server>:/tmp/
   docker compose cp /tmp/AutoSchnell-Helfer.zip backend:/tmp/AutoSchnell-Helfer.zip
-  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Helfer.zip --werkzeug browser-helfer --version 2.4.0
+  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Helfer.zip --werkzeug browser-helfer --version 2.5.0
   ```
   Reihenfolge: erst Server deployen (neue Routen), dann ZIP hochladen.
 - Tests: `backend/tests/test_browser_helfer_20261004.py` (Teil 1 ohne Server, Teil 2 über HTTP).

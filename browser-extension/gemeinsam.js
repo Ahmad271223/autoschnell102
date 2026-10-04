@@ -48,6 +48,12 @@ AutoSchnell.senden = function senden(nachricht) {
   });
 };
 
+/** Ist die Erweiterung noch erreichbar? Nach einem Update oder "Neu laden" laeuft ein schon geladenes Seiten-Skript
+ *  weiter, kann aber nichts mehr senden (Chrome laedt offene Tabs nicht neu) — dann muss die Seite neu geladen werden. */
+AutoSchnell.helferDa = function helferDa() {
+  try { return !!(chrome.runtime && chrome.runtime.id); } catch (e) { return false; }
+};
+
 AutoSchnell.euro = function euro(n) {
   return typeof n === "number" && isFinite(n) ? Math.round(n).toLocaleString("de-DE") + " €" : "–";
 };

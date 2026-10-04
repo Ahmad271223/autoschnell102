@@ -33,6 +33,9 @@ Seit Version 2.0.0 (04.10.2026) macht die Erweiterung zwei Dinge:
    Seit 2.4.0: `gemeinsam.js` läuft bei `document_start` (portal.js weiter bei `document_end`) und meldet ein
    Inserat sofort (`frueh`): der Hintergrund wacht auf und wärmt die Verbindung zu AutoSchnell vor. portal.js
    fragt erst ohne Seite — kennt der Helfer das Inserat (30 min), steht die Box ohne Einpacken und Hochladen.
+   Seit 2.5.0: Box erkennt eine aktualisierte/neu geladene Erweiterung (`AutoSchnell.helferDa`) und bietet
+   „Seite neu laden“; kennt der Helfer das Inserat nicht mehr, lesen „Kaufvertrag“/„Vergleich öffnen“ es nach
+   (`nachlesen`, `ohneOeffnen: true`) und wiederholen sich einmal.
    **Zusammen mit dem Windows-Programm (seit 2.3.0, dasselbe AutoSchnell-Konto):**
    - Hat das Programm das Auto in den letzten 30 Minuten verglichen (`programm_verglichen` in der Antwort von
      `…/inserat`), öffnet der Helfer **keine** Vergleiche von selbst — nur die Ampel per Direktabruf.

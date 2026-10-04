@@ -204,9 +204,11 @@ async function inseratBearbeiten(msg, tab) {
   // offen — hier nichts doppelt oeffnen ("Vergleich oeffnen" geht trotzdem). Die Ampel kommt per Direktabruf.
   const vomProgramm = !!antwort.programm_verglichen;
   let geoeffnet = 0;
-  if (e.vergleicheOeffnen && !ausVergleich && !schonOffen && !vomProgramm) {
+  // ohneOeffnen (2.5.0): portal.js liest nur nach, weil der Helfer das Inserat vergessen hatte — ein Knopf folgt
+  const vonSelbst = e.vergleicheOeffnen && !msg.ohneOeffnen;
+  if (vonSelbst && !ausVergleich && !schonOffen && !vomProgramm) {
     geoeffnet = vergleicheStarten(tab, kennung, antwort);
-  } else if (e.vergleicheOeffnen && vomProgramm && !ausVergleich && !schonOffen
+  } else if (vonSelbst && vomProgramm && !ausVergleich && !schonOffen
              && !Object.keys((vorher && vorher.marktlage) || {}).length) {
     direktAuswerten(kennung, antwort, tab.id).catch(() => {});
   }
