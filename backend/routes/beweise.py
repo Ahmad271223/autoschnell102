@@ -258,6 +258,12 @@ async def beweis_anfordern(body: AnforderungIn, user=Depends(current_firma)):
         # damit geht das Beweisdokument auch danach noch, und nur fuer ihn.
         eintrag = await _stand_aus_eigenem_vertrag(user, schluessel) or eintrag
         daten = (eintrag or {}).get("data") or None
+    if not daten and await db.werkzeug_inserate.count_documents(
+            {"cache_key": schluessel, "dealer_id": user["dealer_id"]}, limit=1):
+        # Browser-Helfer (04.10.2026, Wunsch Ahmad: Fotos ins Beweisdokument, wenn man eins erstellt): Die Daten
+        # aus dem Browser zaehlen als Beweis nicht (RP-446). Auf Knopfdruck holt der Server das Inserat deshalb
+        # EINMAL selbst (zaehlt fuers Tageslimit, Apify nur hier) — das Dokument entsteht aus diesem echten Abruf.
+        return await _beweis_mit_serverabruf(user, schluessel, fahrzeug)
     if not daten and await db.listings_cache_client.count_documents(
             {"cache_key": schluessel, "dealer_id": user["dealer_id"]}, limit=1):
         # Rollenpruefung 22.09.2026 (RP-446): Per Browser-Erweiterung geladene
@@ -295,6 +301,46 @@ async def beweis_anfordern(body: AnforderungIn, user=Depends(current_firma)):
         antwort["hinweis"] = ("Das Inserat wurde nach deinem Vergleich noch einmal "
                               "abgerufen — das Dokument hält diesen neueren Stand fest.")
     return antwort
+
+
+#: so viel Vorsprung bekommt der Server-Abruf, bevor der Beweis-Worker das erste Mal nach den Daten sieht
+_ABRUF_VORSPRUNG_SEKUNDEN = 20
+BEWEIS_SERVERABRUF_HINWEIS = (
+    "Für das Beweisdokument holt unser Server das Inserat jetzt einmal selbst ab — die Daten aus deinem "
+    "Browser zählen als Beweis nicht. Das Dokument ist in ein bis drei Minuten fertig.")
+
+
+async def _beweis_mit_serverabruf(user: dict, schluessel: str, fahrzeug: Optional[dict]) -> dict:
+    """Browser-Helfer-Auto: Link-Job (gleiche Regeln wie das Einfuegen in der App: Warteschlange je Konto,
+    Tageslimit, ein Abruf je Inserat) + Beweis ohne eingefrorene Daten — der Worker nimmt den Stand aus dem
+    gemeinsamen Speicher, sobald der Abruf fertig ist (bis zu MAX_VERSUCHE mit wachsender Pause)."""
+    from datetime import datetime, timedelta, timezone
+    import werkzeuge as wz
+    from link_jobs import JobRace, WarteschlangeVoll, anstossen, enqueue_job
+    quelle, _, item_id = schluessel.partition(":")
+    daten = (fahrzeug or {}).get("data") or {}
+    url = wz.inserat_url(quelle, item_id, item_id) or daten.get("detail_url") or daten.get("kleinanzeigen_url") or ""
+    if not url:
+        raise HTTPException(404, "Zu diesem Inserat ist keine Adresse bekannt — bitte den Link neu vergleichen.")
+    try:
+        await enqueue_job(db, url, dealer_id=user.get("dealer_id") or "", user_id=user.get("id") or "")
+    except JobRace as race:
+        raise HTTPException(503, race.text, headers={"Retry-After": "2"})
+    except WarteschlangeVoll as voll:
+        raise HTTPException(429, voll.text)
+    anstossen(db)
+    doc = await BS.beweis_vormerken(db, cache_key=schluessel, quelle=quelle, item_id=item_id, url=url,
+                                    anlass="angefordert", daten=None)
+    if not doc:
+        raise HTTPException(503, "Das Beweisdokument konnte gerade nicht angefordert "
+                                 "werden — bitte in ein paar Minuten noch einmal.")
+    await db.inserat_beweise.update_one(
+        {"cache_key": schluessel, "status": "offen", "quelle_daten": {"$exists": False}},
+        {"$set": {"naechster_versuch_ab": datetime.now(timezone.utc) + timedelta(seconds=_ABRUF_VORSPRUNG_SEKUNDEN),
+                  "serverabruf_fuer_browserdaten": True}})
+    await log_activity_sicher(user["dealer_id"], user["id"], "beweis.angefordert",
+                              ref=str(item_id or schluessel), meta={"serverabruf": True})
+    return {"beweis": doc, "hinweis": BEWEIS_SERVERABRUF_HINWEIS}
 
 
 @router.get("/beweise/{beweis_id}")

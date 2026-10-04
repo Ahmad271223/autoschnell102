@@ -245,7 +245,10 @@ def test_u11_herkunft_aus_speicher_oder_quarantaene(wegwerf):
     assert fremd is None, "die Quarantaene gehoert der einreichenden Firma"
     q = inspect.getsource(L.compare)
     assert '"beweis_moeglich": beweis_moeglich' in q
-    assert 'beweis_moeglich = client_hit is None or client_hit[1] == "speicher"' in q
+    # 04.10.2026 (Browser-Helfer): auch "browser_helfer" — dort holt der Server das Inserat fuer den Beweis auf
+    # Knopfdruck selbst (routes/beweise._beweis_mit_serverabruf). Quarantaene-Daten bleiben ohne Beweis.
+    assert 'beweis_moeglich = client_hit is None or client_hit[1] in ("speicher", "browser_helfer")' in q
+    assert '"quarantaene"' not in q.split("beweis_moeglich = ", 1)[1].split("\n", 1)[0]
     # die Suche nach einem vorhandenen Dokument laeuft auch beim Treffer
     assert "if client_hit is None:\n        from beweis_service" not in q
 

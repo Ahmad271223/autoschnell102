@@ -475,7 +475,9 @@ def test_32_kaufvertrag_nimmt_die_browserdaten_nur_fuer_dieses_konto(welt):
     d = r.json()
     assert d["cached"] is True and d["vehicle"]["make_label"] == "Volkswagen"
     assert d["vehicle"]["mobile_ad_id"] == MOBILE_ID and not d["vehicle"].get("_mock")
-    assert d["beweis_moeglich"] is False and d["abgerufen_am"]
+    # 04.10.2026: Beweis auch hier — auf Knopfdruck holt der Server das Inserat selbst (test_37)
+    assert d["beweis_moeglich"] is True and d["abgerufen_am"]
+    welt["vehicle_id"] = d["vehicle_id"]
     assert db.link_jobs.count_documents({"url": {"$regex": MOBILE_ID}}) == jobs_vorher, "kein Abruf"
     assert db.listings_cache.count_documents({"cache_key": f"mobile:{MOBILE_ID}"}) == 0, "nichts geteilt"
     # Der Chef derselben Firma bekommt die Browserdaten des Suchers NICHT (A-01/A-02)
@@ -557,6 +559,31 @@ def test_35_autoscout_inserat_ueber_http(welt):
     assert d["fahrzeug"]["quelle"] == "autoscout24" and d["portal_bewertung"]["mitte"] == 3500
     assert "Preis verhandelbar (VB)" in d["verhandlung"]
     assert d["inserat_url"] == f"https://www.autoscout24.de/angebote/{AS_ID}"
+
+
+def test_37_beweis_fuer_browserdaten_holt_der_server_selbst(welt):
+    """Wunsch Ahmad 04.10.2026: Fotos ins Beweisdokument, wenn man eins erstellt. Browserdaten zaehlen als Beweis
+    nicht (RP-446) — der Server holt das Inserat auf Knopfdruck einmal selbst (Link-Job), der Beweis wartet darauf."""
+    db = welt["db"]
+    ck = f"mobile:{MOBILE_ID}"
+    db.listings_cache.delete_many({"cache_key": ck})
+    db.inserat_beweise.delete_many({"cache_key": ck})
+    try:
+        r = requests.post(f"{API}/beweise/anfordern", json={"vehicle_id": welt["vehicle_id"]},
+                          headers=welt["sucher"], timeout=30)
+        assert r.status_code == 200, r.text
+        assert "holt unser Server das Inserat jetzt einmal selbst" in r.json()["hinweis"]
+        assert db.link_jobs.count_documents({"url": MOBILE_URL}) >= 1, "Server-Abruf eingereiht"
+        doc = db.inserat_beweise.find_one({"cache_key": ck})
+        assert doc and doc.get("serverabruf_fuer_browserdaten") is True and not doc.get("quelle_daten")
+        # zweimal klicken: dasselbe Dokument, kein zweiter Auftrag
+        r2 = requests.post(f"{API}/beweise/anfordern", json={"vehicle_id": welt["vehicle_id"]},
+                           headers=welt["sucher"], timeout=30)
+        assert r2.status_code == 200 and r2.json()["beweis"]["id"] == r.json()["beweis"]["id"]
+    finally:
+        db.inserat_beweise.delete_many({"cache_key": ck})
+        db.link_jobs.delete_many({"url": MOBILE_URL})
+        db.listings_cache.delete_many({"cache_key": ck})
 
 
 def test_36_zip_laden_fuer_die_firma(welt):

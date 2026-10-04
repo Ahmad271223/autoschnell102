@@ -1091,8 +1091,13 @@ Backend-RAM ≈ 400 MB × Worker + 500 MB.
 Wird ein Inserats-Link zum ersten Mal verwendet — egal von welcher Firma —,
 entsteht genau EIN PDF, das alle Firmen teilen, die das Inserat verwenden:
 Portal-Kennzeichnung links oben, Anzeigen-ID, Inserats-Adresse, alle
-ausgelesenen Daten geordnet, die Inseratsfotos (höchstens
-`BEWEIS_FOTOS_MAX`, alle Adressen im Anhang). Erzeugt wird es im
+ausgelesenen Daten geordnet, die Inseratsfotos (seit 04.10.2026 alle — `BEWEIS_FOTOS_MAX`
+Standard 100 nur als Sicherung —, und das ganze Dokument höchstens `BEWEIS_MAX_KB` = 500 KB:
+die Fotos werden dafür stufenweise kleiner, gemessen 27 echte Fotos = 422 KB statt 1.459 KB; erst wenn
+selbst die stärkste Stufe nicht reicht, entfallen hintere Fotos, alle Adressen stehen im Anhang).
+**Achtung:** Steht `BEWEIS_FOTOS_MAX=20` noch in einer Server-.env, gilt das weiter —
+`sh deploy/env_setzen.sh BEWEIS_FOTOS_MAX=100` auf beiden Servern. Browser-Helfer-Autos: auf Knopfdruck holt
+der Server das Inserat für den Beweis einmal selbst (Link-Job), Browserdaten sind kein Beweis. Erzeugt wird es im
 Hintergrund (`beweis_service.py`, Collection `inserat_beweise`, Dateien
 unter `beweise/<portal>/` in R2) — der Vergleich wartet nie darauf.
 

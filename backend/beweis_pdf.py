@@ -468,8 +468,12 @@ def beweis_pdf(*, quelle: str, daten: Dict[str, Any], url: str, item_id: str,
                fotos: Sequence[Optional[bytes]], foto_urls: Sequence[str],
                privatdaten: bool = False,
                frueheres_dokument: Optional[Dict[str, Any]] = None,
-               abgerufen_spaetestens: bool = False) -> bytes:
+               abgerufen_spaetestens: bool = False,
+               groesse_begrenzt_kb: Optional[int] = None) -> bytes:
     """Beweisdokument als PDF-Bytes.
+
+    groesse_begrenzt_kb (04.10.2026): fotos ist wegen der Dateigroesse gekuerzt — der Hinweis sagt das,
+    statt die uebrigen als "nicht ladbar" zu fuehren.
 
     fotos: JPEG-Bytes der ersten Inseratsfotos, in derselben Reihenfolge wie
     foto_urls (None = Foto war nicht ladbar). foto_urls: ALLE Fotoadressen des
@@ -656,7 +660,11 @@ def beweis_pdf(*, quelle: str, daten: Dict[str, Any], url: str, item_id: str,
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ])))
         hinweis = f"{len(geladen)} von {len(urls)} Inseratsfotos eingebettet"
-        if len(geladen) < len(urls):
+        if groesse_begrenzt_kb and len(liste) < len(urls):
+            # Wunsch Ahmad 04.10.2026: Dokument hoechstens ~500 KB — der Rest steht nur als Adresse im Anhang
+            hinweis += (f"; weitere wegen der Dateigröße (höchstens {groesse_begrenzt_kb} KB je Dokument) "
+                        "nur als Adresse im Anhang")
+        elif len(geladen) < len(urls):
             hinweis += "; die Adressen aller Fotos stehen im Anhang"
         story.append(Paragraph(hinweis + ".", st_klein))
     abstand(12)

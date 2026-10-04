@@ -64,7 +64,9 @@ def _zahl_env(name: str, standard: int, unten: int, oben: int) -> int:
 # (4 Worker x 2 Server = 8 gleichzeitig bei Standard 1).
 BEWEIS_PARALLEL = _zahl_env("BEWEIS_PARALLEL", 1, 1, 8)
 # Hoechstzahl eingebetteter Fotos je Dokument (alle Adressen stehen im Anhang).
-BEWEIS_FOTOS_MAX = _zahl_env("BEWEIS_FOTOS_MAX", 20, 0, 60)
+# Wunsch Ahmad 04.10.2026: "alle Fotos übernehmen, muss nicht 20 Obergrenze sein" — die Groesse haelt jetzt
+# BEWEIS_MAX_KB (Fotos werden dafuer kleiner); 100 ist nur noch eine Sicherung gegen Ausreisser.
+BEWEIS_FOTOS_MAX = _zahl_env("BEWEIS_FOTOS_MAX", 100, 0, 150)
 # Runde 26 (12.09.2026, Wunsch Ahmad: Dokument kleiner): Fotos werden fuer
 # das Beweisdokument staerker verkleinert. Gemessen mit 9 Fotos: 666 KB ->
 # rund 374 KB, ohne dass Fahrzeug oder Schaeden schlechter erkennbar sind.
@@ -72,6 +74,13 @@ _FOTO_KANTE_ERSTE = _zahl_env("BEWEIS_FOTO_KANTE_ERSTE", 1000, 400, 2000)
 _FOTO_KANTE = _zahl_env("BEWEIS_FOTO_KANTE", 640, 300, 2000)
 _FOTO_QUALITAET_ERSTE = _zahl_env("BEWEIS_FOTO_QUALITAET_ERSTE", 68, 40, 95)
 _FOTO_QUALITAET = _zahl_env("BEWEIS_FOTO_QUALITAET", 62, 40, 95)
+# Wunsch Ahmad 04.10.2026: "sehr stark komprimiert — so 500 KB pro Auto maximum". Gemessen am 18.09.: 20 Fotos
+# ergaben ~960 KB. Passt das Dokument nicht unter die Grenze, werden die Fotos stufenweise kleiner und staerker
+# komprimiert (_STUFEN: erste Kante, weitere Kante, Qualitaet erste, Qualitaet weitere); reicht auch die letzte
+# Stufe nicht, entfallen die hinteren Fotos — ihre Adressen bleiben im Anhang, das Dokument sagt es.
+BEWEIS_MAX_KB = _zahl_env("BEWEIS_MAX_KB", 500, 150, 5000)
+_STUFEN = ((800, 520, 60, 55), (700, 440, 55, 50), (600, 380, 50, 45), (520, 320, 45, 42),
+           (460, 270, 42, 40), (400, 230, 40, 40))
 # Wunsch Ahmad 18.09.2026: 30 Tage statt 60. Laenger bleibt ein Dokument
 # trotzdem, solange eine Firma damit arbeitet (Vertrag, Termin, Bestand) —
 # siehe _gehalten(). Betroffen sind also vor allem Dokumente ohne Geschaeft.
@@ -552,6 +561,53 @@ async def _fotos_laden(urls: List[str]) -> List[Optional[bytes]]:
     return list(await asyncio.gather(*(_eins(i, u) for i, u in enumerate(urls))))
 
 
+def _neu_kodieren(fotos: List[Optional[bytes]], stufe) -> List[Optional[bytes]]:
+    from bild_proxy import _fuer_pdf
+    kante_erste, kante, q_erste, q = stufe
+    aus: List[Optional[bytes]] = []
+    for i, f in enumerate(fotos):
+        if not f:
+            aus.append(f)
+            continue
+        try:
+            aus.append(_fuer_pdf(f, kante_erste if i == 0 else kante, q_erste if i == 0 else q))
+        except Exception:  # noqa: BLE001 — dann bleibt das bisherige (schon verkleinerte) Foto
+            aus.append(f)
+    return aus
+
+
+def _summe(fotos) -> int:
+    return sum(len(f) for f in fotos if f)
+
+
+def pdf_unter_grenze(bauen, fotos: List[Optional[bytes]], grenze: int):
+    """(pdf, fotos, stufe): bauen(fotos, begrenzt) liefert die PDF-Bytes. Stufe 0 = Fotos wie geladen;
+    1..len(_STUFEN) = neu verkleinert; gekuerzte Liste = hintere Fotos wegen der Groesse weggelassen.
+    Gerechnet wird ueber die Fotogroessen (ein Dokument wird nur so oft gebaut wie noetig)."""
+    pdf = bauen(fotos, False)
+    if len(pdf) <= grenze or not any(fotos):
+        return pdf, fotos, 0
+    ohne_fotos = max(0, len(pdf) - _summe(fotos))
+    ziel = grenze * 0.96 - ohne_fotos
+    kandidat, stufe = fotos, 0
+    for nr, werte in enumerate(_STUFEN, 1):
+        kandidat, stufe = _neu_kodieren(fotos, werte), nr
+        if _summe(kandidat) <= ziel:
+            break
+    kandidat = list(kandidat)
+    begrenzt = False
+    while kandidat and _summe(kandidat) > ziel:
+        kandidat.pop()
+        begrenzt = True
+    for _ in range(len(kandidat) + 1):
+        pdf = bauen(kandidat, begrenzt)
+        if len(pdf) <= grenze or not kandidat:
+            break
+        kandidat.pop()
+        begrenzt = True
+    return pdf, kandidat, stufe
+
+
 def speicher_key(doc: dict) -> str:
     """Alter, fester Schluessel (Dokumente vor dem Versuchs-Schluessel)."""
     from beweis_pdf import quelle_norm
@@ -616,18 +672,24 @@ async def beweis_erzeugen(db, doc: dict) -> bool:
         raise BeweisFehler("Inseratsfotos konnten nicht geladen werden")
     from beweis_pdf import beweis_pdf
     erstellt = _jetzt()
-    pdf = await asyncio.to_thread(
-        beweis_pdf, quelle=doc.get("quelle"), daten=_fuer_pdf(daten),
-        url=kanonische_url(doc.get("quelle"), doc.get("item_id"),
-                           doc.get("url") or cache_url
-                           or daten.get("detail_url") or ""),
-        item_id=doc.get("item_id") or "", beweis_id=doc["id"],
-        abgerufen_am=abgerufen_am, erstellt_am=erstellt,
-        fotos=fotos, foto_urls=urls, privatdaten=BEWEIS_PRIVATDATEN,
-        # Rollenpruefung 22.09.2026 (RP-498): nach Verfall neu angefordert —
-        # das Dokument nennt das fruehere.
-        frueheres_dokument=doc.get("neu_nach_verfall"),
-        abgerufen_spaetestens=abgerufen_spaetestens)
+
+    def _bauen(liste, begrenzt):
+        return beweis_pdf(
+            quelle=doc.get("quelle"), daten=_fuer_pdf(daten),
+            url=kanonische_url(doc.get("quelle"), doc.get("item_id"),
+                               doc.get("url") or cache_url
+                               or daten.get("detail_url") or ""),
+            item_id=doc.get("item_id") or "", beweis_id=doc["id"],
+            abgerufen_am=abgerufen_am, erstellt_am=erstellt,
+            fotos=liste, foto_urls=urls, privatdaten=BEWEIS_PRIVATDATEN,
+            # Rollenpruefung 22.09.2026 (RP-498): nach Verfall neu angefordert —
+            # das Dokument nennt das fruehere.
+            frueheres_dokument=doc.get("neu_nach_verfall"),
+            abgerufen_spaetestens=abgerufen_spaetestens,
+            groesse_begrenzt_kb=BEWEIS_MAX_KB if begrenzt else None)
+
+    # Wunsch Ahmad 04.10.2026: hoechstens BEWEIS_MAX_KB je Dokument (Fotos stufenweise kleiner, notfalls weniger)
+    pdf, fotos, foto_stufe = await asyncio.to_thread(pdf_unter_grenze, _bauen, fotos, BEWEIS_MAX_KB * 1024)
     key = neuer_speicher_key(doc)
     # Erst vermerken, dann schreiben: jeder je geschriebene Schluessel steht in
     # alle_keys und wird beim Verfall mit geloescht (auch verwaiste).
@@ -643,6 +705,7 @@ async def beweis_erzeugen(db, doc: dict) -> bool:
                   "daten_abgerufen_spaetestens": abgerufen_spaetestens,   # P-35
                   "fotos_eingebettet": sum(1 for f in fotos if f),
                   "fotos_gesamt": len(urls), "fehler": None,
+                  "foto_stufe": foto_stufe,
                   # Phase 4 (4.5, B22/B23): Herkunft der Daten und "ohne Fotos"
                   "daten_quelle": daten_quelle,
                   "ohne_fotos": bool(urls) and not any(fotos),

@@ -834,7 +834,9 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     # blendet den Knopf dann aus (beweis_moeglich). Und: auch bei einem
     # Treffer aus dem Speicher wird nach einem VORHANDENEN Dokument gesucht —
     # vorher zeigte die Karte "erstellen", obwohl es laengst eines gab.
-    beweis_moeglich = client_hit is None or client_hit[1] == "speicher"
+    # Browser-Helfer (04.10.2026): auf Knopfdruck holt der Server das Inserat fuer den Beweis selbst
+    # (routes/beweise._beweis_mit_serverabruf) — deshalb gibt es den Knopf auch hier.
+    beweis_moeglich = client_hit is None or client_hit[1] in ("speicher", "browser_helfer")
     from beweis_service import automatisch_aktiv, beweis_fuer_schluessel, oeffentlich
     from beweis_service import beweis_vormerken
     if client_hit is None and automatisch_aktiv():
