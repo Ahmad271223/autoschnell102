@@ -4485,3 +4485,19 @@ nötig): Mail-Outbox, KI-Warteschlange, PDFs nach R2 (Fotos stecken nicht im PDF
   sind beide Einträge dann ausgegraut („Nur mit aktivem Abo“). Ansehen/Herunterladen bleiben ohne Abo.
 - Tests: `backend/tests/test_pruefung_20261004_*.py`, `frontend/src/components/SendDialog.doppelversand.test.jsx`.
   Keine neuen Umgebungswerte, keine Migration.
+
+## Modell aus Titel/Beschreibung bei „Weitere …“ (Wunsch Ahmad 04.10.2026)
+
+Kleinanzeigen-Inserat 3530655110: Modell „Weitere Mercedes Benz“, Titel „Mercedes Benz c300e“, Beschreibung
+„… meinen Mercedes C 300 e …“. Vorher wurde das Modell „c300e“ (kennt kein Portal → Suche über die ganze Marke).
+`mobile_service._enhance_generic_model` (App-Weg: Link einfügen, Vorab-Abruf, auch der Titel-Abgleich in
+`werkzeuge.fahrzeug_zu_vehicle`):
+- **Titel:** Leerzeichen zählen nicht („C300“ = „C 300“), an einer Modellnummer darf ein kurzer Buchstaben-
+  Zusatz hängen („c300e“, „320d“, „E220CDI“ → C 300 / 320 / E 220); Namen unter 2 Zeichen zählen dabei nicht.
+- **Beschreibung:** nur, wenn die Marke direkt davor steht („Mercedes C 300 e“, „VW Golf 7“) und alle solchen
+  Stellen dasselbe Modell nennen — dann mit Hinweis „Modell … aus der Beschreibung übernommen — bitte kurz
+  prüfen“ (`_modell_aus_beschreibung`, routes/listings `_katalog_pruefen`). „Günstiger als jeder Golf!“ und
+  „Tausche VW Golf gegen VW Polo“ bestimmen kein Modell (B-10 bleibt).
+- Schon gespeicherte Inserate: der Zwischenspeicher gilt 6 Stunden, danach stimmt das Modell von selbst.
+- Das Programm (AutoPointer) hat einen eigenen Weg (`werkzeug_erkennung.aus_beschreibung`, andere Sitzung).
+- Tests: `backend/tests/test_modell_aus_text_20261004.py`.

@@ -329,6 +329,11 @@ def _katalog_pruefen(vehicle: dict):
         # Sucher soll sie vorher pruefen.
         hinweise.append(f"Marke „{marke}“ stand nicht in den Inseratsdaten, sondern wurde aus "
                         "dem Titel übernommen — bitte prüfen, bevor sie in den Kaufvertrag geht.")
+    if vehicle.get("_modell_aus_beschreibung") and modell:
+        # Wunsch Ahmad 04.10.2026: Modell stand nur in der Beschreibung ("meinen Mercedes C 300 e") —
+        # Links und Kaufvertrag uebernehmen es, der Sucher soll es kurz pruefen.
+        hinweise.append(f"Modell „{modell}“ stand nicht in den Inseratsdaten, sondern wurde aus der "
+                        "Beschreibung übernommen — bitte kurz prüfen.")
     if not marke_mobile:
         hinweise.append(f"mobile.de kennt die Marke „{marke}“ nicht — kein mobile.de-Link "
                         "(er hätte über alle Marken gesucht).")

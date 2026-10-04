@@ -1122,6 +1122,90 @@ def _is_generic_model_label(label: Optional[str]) -> bool:
     return bool(_GENERIC_MODEL_RX.search(str(label).strip()))
 
 
+# Wunsch Ahmad 04.10.2026 (Kleinanzeigen 3530655110: Modell "Weitere Mercedes Benz", Titel "Mercedes Benz
+# c300e", Beschreibung "... meinen Mercedes C 300 e ..."): Der Abgleich suchte im Titel nur die genaue
+# Schreibweise "c 300" — "c300e" (zusammen, mit Zusatz) fand er nicht, und das Modell wurde "c300e" (kennt
+# kein Portal -> Suche ueber die ganze Marke). Jetzt zaehlen Leerzeichen nicht, und an einer Modellnummer
+# darf ein kurzer Buchstaben-Zusatz haengen ("c300e", "320d", "e220cdi"). Aus der BESCHREIBUNG kommt das
+# Modell nur, wenn die Marke direkt davor steht ("Mercedes C 300 e") und es eindeutig ist — "Guenstiger
+# als jeder Golf!" bleibt ein Vorschlag (Pruefbericht B-10).
+_ZUSATZ_MAX = 3          # Buchstaben nach der Modellnummer: e, d, de, h, t, cdi
+
+
+def _text_woerter(text: str) -> List[str]:
+    s = unicodedata.normalize("NFKD", text or "")
+    s = "".join(c for c in s if not unicodedata.combining(c)).lower()
+    return re.findall(r"[a-z0-9]+", s)
+
+
+def _kompakt_treffer(name_kompakt: str, stueck: str) -> bool:
+    """Steht der Katalogname (ohne Leerzeichen) genau so da — oder als Modellnummer mit kurzem Zusatz?"""
+    if stueck == name_kompakt:
+        return True
+    rest = stueck[len(name_kompakt):]
+    return (stueck.startswith(name_kompakt) and name_kompakt[-1:].isdigit()
+            and rest.isalpha() and len(rest) <= _ZUSATZ_MAX)
+
+
+def _modell_an(raw_models: List[str], woerter: List[str], i: int) -> Optional[str]:
+    """Laengster Katalogname, der an Wort i beginnt (bis zu drei Woerter zusammengezogen)."""
+    for name in raw_models:                       # laengste zuerst
+        kn = _normalize(name)
+        if len(kn) < 2:
+            continue                              # "G", "V": viel zu viele Zufallstreffer
+        for k in (1, 2, 3):
+            if i + k > len(woerter):
+                break
+            if _kompakt_treffer(kn, "".join(woerter[i:i + k])):
+                return name
+    return None
+
+
+def _modell_kompakt(raw_models: List[str], text: str) -> Optional[str]:
+    """Titel: erster Katalogname, der irgendwo steht (Leerzeichen egal, Zusatz an Nummern erlaubt)."""
+    woerter = _text_woerter(text)
+    for i in range(len(woerter)):
+        treffer = _modell_an(raw_models, woerter, i)
+        if treffer:
+            return treffer
+    return None
+
+
+def _marken_formen(make_entry: Dict[str, Any], vehicle: Dict[str, Any]) -> set:
+    """Schreibweisen der Marke als Woerter ("mercedes", "benz", "mercedesbenz", "vw", "volkswagen")."""
+    kanon = _normalize(make_entry.get("raw_name") or "")
+    formen = {kanon, _normalize(vehicle.get("make_label") or "")}
+    formen |= {alias for alias, ziel in _MAKE_ALIASES.items() if ziel == kanon}
+    for w in _text_woerter(make_entry.get("raw_name") or "") + _text_woerter(vehicle.get("make_label") or ""):
+        if len(w) >= 3:
+            formen.add(w)
+    return {f for f in formen if f}
+
+
+def _modell_aus_beschreibung(raw_models: List[str], text: str, formen: set) -> Optional[str]:
+    """Beschreibung: nur Treffer direkt nach der Marke (hoechstens ein Wort dazwischen) — und nur, wenn alle
+    solchen Stellen dasselbe Modell nennen ("Tausche VW Golf gegen VW Polo" -> keins)."""
+    woerter = _text_woerter(text)
+    gefunden = set()
+    i = 0
+    while i < len(woerter):
+        ende = None
+        if i + 1 < len(woerter) and woerter[i] + woerter[i + 1] in formen:
+            ende = i + 2
+        elif woerter[i] in formen:
+            ende = i + 1
+        if ende is not None:
+            for start in (ende, ende + 1):
+                treffer = _modell_an(raw_models, woerter, start) if start < len(woerter) else None
+                if treffer:
+                    gefunden.add(treffer)
+                    break
+            i = ende
+            continue
+        i += 1
+    return next(iter(gefunden)) if len(gefunden) == 1 else None
+
+
 def _enhance_generic_model(vehicle: Dict[str, Any]) -> Dict[str, Any]:
     """If `model_label` is generic (e.g. 'Weitere Peugeot'), try to find
     the real model name in the listing title (`model_description`) or
@@ -1170,11 +1254,22 @@ def _enhance_generic_model(vehicle: Dict[str, Any]) -> Dict[str, Any]:
         return None
 
     matched = _try_match(md) if md else None
+    if not matched and md:
+        # 04.10.2026: "c300e", "C300" im Titel (Leerzeichen egal, Zusatz an der Nummer)
+        matched = _modell_kompakt(raw_models, md)
     if matched:
         vehicle["model_label"] = matched
         vehicle["model"] = matched.upper()
         return vehicle
     if desc:
+        # 04.10.2026 (Wunsch Ahmad): aus der Beschreibung nur mit der Marke direkt davor und eindeutig;
+        # die Vergleichsseite sagt dazu "bitte pruefen" (_modell_aus_beschreibung).
+        aus_text = _modell_aus_beschreibung(raw_models, desc[:1500], _marken_formen(make_entry, vehicle))
+        if aus_text:
+            vehicle["model_label"] = aus_text
+            vehicle["model"] = aus_text.upper()
+            vehicle["_modell_aus_beschreibung"] = True
+            return vehicle
         vorschlag = _try_match(desc[:600])
         if vorschlag:
             vehicle["model_vorschlag"] = vorschlag
