@@ -1302,11 +1302,19 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
             <div className="mr-auto flex flex-wrap items-center gap-1.5 text-[12px]" data-testid="contract-noch-offen">
               {offenWichtig.length > 0 ? (
                 <>
-                  <span className="font-semibold" style={{ color: "var(--st-amber)" }}>Noch offen:</span>
+                  {/* Handy: ein kompakter Knopf statt der ganzen Liste (die Leiste klebt unten) */}
+                  <button type="button" onClick={() => zumFeld(offenWichtig[0].testid)}
+                          data-testid="contract-offen-handy"
+                          className="sm:hidden rounded-full px-2.5 py-1 font-semibold border"
+                          style={{ borderColor: "var(--st-amber)", color: "var(--st-amber)",
+                                   background: "color-mix(in srgb, var(--st-amber) 10%, transparent)" }}>
+                    {offenWichtig.length} offen: {offenWichtig[0].label} →
+                  </button>
+                  <span className="hidden sm:inline font-semibold" style={{ color: "var(--st-amber)" }}>Noch offen:</span>
                   {offenWichtig.map((x) => (
                     <button key={x.key} type="button" onClick={() => zumFeld(x.testid)}
                             data-testid={`contract-offen-${x.key}`}
-                            className="rounded-full px-2.5 py-1 font-semibold border"
+                            className="hidden sm:inline-block rounded-full px-2.5 py-1 font-semibold border"
                             style={{ borderColor: "var(--st-amber)", color: "var(--st-amber)",
                                      background: "color-mix(in srgb, var(--st-amber) 10%, transparent)" }}>
                       {x.label}
