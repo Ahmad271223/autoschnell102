@@ -107,7 +107,7 @@ describe("Nummern: Vorbelegung und Fehlertext (reine Helfer)", () => {
     expect(nummernFehlerAusAntwort(new Error("Network Error"))).toBe("");
   });
   it("Quelltext: Abschnitt „Nummern“ mit beiden Feldern, Payload nimmt das ganze Formular", () => {
-    const block = QUELLE.slice(QUELLE.indexOf('<Section title="Nummern"'), QUELLE.indexOf('title="Verkäufer"'));
+    const block = QUELLE.slice(QUELLE.indexOf('<Section title="Nummern"'), QUELLE.indexOf('<Section title="Beschreibung"'));
     expect(block).toMatch(/testid="contract-vertragsnummer"/);
     expect(block).toMatch(/testid="contract-kundennummer"/);
     expect(block).toMatch(/maxLength=\{40\}/);

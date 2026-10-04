@@ -7,7 +7,8 @@ import { useMarktHinweis } from "@/components/MarktdatenKarte";
 import { blobOeffnen } from "@/lib/dateiOeffnen";
 import { toast } from "sonner";
 import { useAuth } from "@/context/AuthContext";
-import { X, Eye, FileText, Loader2, AlertTriangle, ExternalLink } from "lucide-react";
+import { X, Eye, FileText, Loader2, AlertTriangle, ExternalLink, Hash, UserRound, Building2, Car, ShieldCheck,
+         Wrench, Euro, AlignLeft, ScrollText, CheckCircle2 } from "lucide-react";
 import DamageSelector, { damagesToText } from "./DamageSelector";
 import KiSchadenKarte from "./KiSchadenKarte";
 import { offeneVorschlaege, uebernahmenAusEntwurf, vorschlaegeAuswerten, vorschlaegeFuerAlle,
@@ -171,11 +172,34 @@ export function verkaeuferNameHinweise(vehicle, eingabe = "") {
     hinweise.push(`Kleinanzeigen-Name: ${alias} — ein frei gewähltes Pseudonym, bitte den `
       + "echten Namen des Verkäufers eintragen.");
   }
-  const ansprechpartner = String(v.seller_ansprechpartner || "").trim();
-  if (ansprechpartner && ansprechpartner.toLowerCase() !== name.toLowerCase()) {
-    hinweise.push(`Ansprechpartner laut Inserat: ${ansprechpartner}`);
-  }
+  // Wunsch Ahmad 04.10.2026: "Ansprechpartner" kommt im Kaufvertrag nicht mehr vor — auch nicht als
+  // Hinweis aus dem Inserat (vorher "Ansprechpartner laut Inserat: …").
   return hinweise;
+}
+
+// Wunsch Ahmad 04.10.2026: damit der Kaufvertrag schneller fertig ist, sind die wichtigsten Angaben
+// farbig markiert, solange sie fehlen, und stehen unten unter "Noch offen" (Klick springt zum Feld).
+// Pflicht bleiben wie bisher nur Name und Kaufpreis — der Rest blockiert nichts.
+export const WICHTIGE_FELDER = [
+  { key: "seller_name", label: "Name", testid: "contract-seller-name" },
+  { key: "seller_phone", label: "Telefon", testid: "contract-seller-phone" },
+  { key: "seller_email", label: "E-Mail", testid: "contract-seller-email" },
+  { key: "seller_address", label: "Adresse", testid: "contract-seller-address" },
+  { key: "seller_zip", label: "PLZ", testid: "contract-seller-zip" },
+  { key: "seller_city", label: "Ort", testid: "contract-seller-city" },
+  { key: "purchase_price", label: "Kaufpreis", testid: "contract-price" },
+];
+
+export function fehlendeWichtige(form) {
+  const f = form || {};
+  return WICHTIGE_FELDER.filter(({ key }) => !String(f[key] ?? "").trim());
+}
+
+function zumFeld(testid) {
+  const el = typeof document !== "undefined" ? document.querySelector(`[data-testid="${testid}"]`) : null;
+  if (!el) return;
+  el.scrollIntoView?.({ behavior: "smooth", block: "center" });
+  el.focus?.({ preventScroll: true });
 }
 
 // Wunsch Ahmad 26.09.2026 abends: Der Server meldet eine schon vergebene
@@ -351,6 +375,8 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
   const fehltInEinstellungen = fehlendeKaeuferfelder(kaeuferAusProfil(dealer));
   // RP-440/RP-444: Pseudonym/Ansprechpartner als Hinweis unter "Name / Firma".
   const namensHinweise = verkaeuferNameHinweise(v, form.seller_name);
+  const offenWichtig = fehlendeWichtige(form);
+  const fehlt = (key) => offenWichtig.some((x) => x.key === key);
   const kaeuferRef = useRef(null);
   // Pruefung 14.09.2026: ein Idempotenz-Schluessel je geoeffnetem Dialog.
   const idempotenz = useRef(neuerIdempotenzSchluessel());
@@ -784,49 +810,31 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
           </button>
         </div>
 
-        <form onSubmit={submit} className="p-4 sm:p-6 space-y-6 vertrag-formular">
-          {/* Wunsch Ahmad 26.09.2026 abends: Vertragsnummer und Kundennummer
-              selbst vergeben. Leer = automatisch (KV-<Datum>-…) bzw. die
-              Firmen-Kundennummer aus den Einstellungen. Eine schon vergebene
-              Vertragsnummer meldet der Server (409) — Text unter dem Feld. */}
-          <Section title="Nummern" subtitle="Beide Felder dürfen leer bleiben — dann vergibt die App die Vertragsnummer selbst und nimmt die Kundennummer aus den Einstellungen.">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <Field label={bearbeiten ? "Vertragsnummer (bleibt)" : "Vertragsnummer (leer = automatisch KV-…)"} value={form.contract_no}
-                     onChange={(v) => set("contract_no", v)} testid="contract-vertragsnummer"
-                     maxLength={40} placeholder="z. B. AH-2026-0042" disabled={bearbeiten}
-                     helper={bearbeiten ? "Eine neue Fassung behält die Vertragsnummer."
-                       : "3–40 Zeichen: Buchstaben, Ziffern, Leerzeichen und - _ / . — je Firma nur einmal vergebbar."} />
-              <Field label="Kundennummer (Vorbelegung: Firmenwert)" value={form.kundennummer}
-                     onChange={(v) => set("kundennummer", v)} testid="contract-kundennummer"
-                     maxLength={30} placeholder="z. B. 482913"
-                     helper="Steht im Vertrag („nur unter Vorlage der Kundennummer“), in den Vorlagen als {kundennummer} und im Abholauftrag. Darf in mehreren Verträgen gleich sein." />
-            </div>
-            {nummernFehler && (
-              <div role="alert" data-testid="contract-nummern-fehler"
-                   className="text-[12px] leading-snug" style={{ color: "var(--accent-red)" }}>
-                {nummernFehler}
-              </div>
-            )}
-          </Section>
-
+        <form onSubmit={submit} className="p-3 sm:p-5 space-y-4 vertrag-formular">
           {/* Verkäufer + Käufer side-by-side on lg, stacked on small */}
           <div className="grid lg:grid-cols-2 gap-5">
-            <Section title="Verkäufer">
+            <Section title="Verkäufer" icon={UserRound}>
               <Field label="Name / Firma *" required value={form.seller_name} onChange={(v) => set("seller_name", v)} testid="contract-seller-name"
+                     fehlt={fehlt("seller_name")}
                      helper={namensHinweise.length > 0 && (
                        <span data-testid="contract-seller-name-hinweis">
                          {namensHinweise.map((h) => <span key={h} className="block">{h}</span>)}
                        </span>
                      )} />
               {/* M-13: am Handy einspaltig; M-12: Telefon-/Zifferntastatur */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <Field label="Telefon" type="tel" autoComplete="tel" value={form.seller_phone} onChange={(v) => set("seller_phone", v)} testid="contract-seller-phone" />
-                <Field label="E-Mail" type="email" value={form.seller_email} onChange={(v) => set("seller_email", v)} testid="contract-seller-email" />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <Field label="Telefon" type="tel" autoComplete="tel" value={form.seller_phone} onChange={(v) => set("seller_phone", v)} testid="contract-seller-phone"
+                       fehlt={fehlt("seller_phone")} />
+                <Field label="E-Mail" type="email" value={form.seller_email} onChange={(v) => set("seller_email", v)} testid="contract-seller-email"
+                       fehlt={fehlt("seller_email")} />
               </div>
-              <Field label="Adresse" value={form.seller_address} onChange={(v) => set("seller_address", v)} testid="contract-seller-address" />
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <Field label="PLZ" inputMode="numeric" value={form.seller_zip} onChange={(v) => set("seller_zip", v)} testid="contract-seller-zip" />
-                <Field label="Ort" value={form.seller_city} onChange={(v) => set("seller_city", v)} testid="contract-seller-city" />
+              <Field label="Adresse" value={form.seller_address} onChange={(v) => set("seller_address", v)} testid="contract-seller-address"
+                     fehlt={fehlt("seller_address")} />
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                <Field label="PLZ" inputMode="numeric" value={form.seller_zip} onChange={(v) => set("seller_zip", v)} testid="contract-seller-zip"
+                       fehlt={fehlt("seller_zip")} />
+                <Field label="Ort" value={form.seller_city} onChange={(v) => set("seller_city", v)} testid="contract-seller-city"
+                       fehlt={fehlt("seller_city")} />
                 <Field label="Ausweis-Nr." value={form.id_document} onChange={(v) => set("id_document", v)} testid="contract-id-doc" />
               </div>
             </Section>
@@ -834,7 +842,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
             {/* Runde 24 (11.09.2026): Firma/Adresse/PLZ/Ort sind Pflicht —
                 Käufer im Kaufvertrag, Auftraggeber im Abholprotokoll. */}
             <div ref={kaeuferRef} style={{ scrollMarginTop: "5rem" }} data-testid="contract-kaeufer">
-            <Section title="Käufer (du)">
+            <Section title="Käufer (du)" icon={Building2}>
               {fehltInEinstellungen.length > 0 && (
                 <div role="alert" data-testid="contract-kaeufer-fehlt"
                      className="flex items-start gap-2.5 rounded-lg border px-3 py-2.5 text-sm leading-snug"
@@ -863,16 +871,14 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                 </div>
               )}
               <Field label="Firma *" required value={form.dealer_company} onChange={(v) => set("dealer_company", v)} testid="contract-dealer-company" />
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <Field label="Ansprechpartner" value={form.dealer_contact} onChange={(v) => set("dealer_contact", v)} testid="contract-dealer-contact" />
+              {/* Wunsch Ahmad 04.10.2026: kein "Ansprechpartner" mehr im Kaufvertrag */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                 <Field label="Telefon" type="tel" autoComplete="tel" value={form.dealer_phone} onChange={(v) => set("dealer_phone", v)} testid="contract-dealer-phone" />
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <Field label="WhatsApp" type="tel" autoComplete="tel" value={form.dealer_whatsapp} onChange={(v) => set("dealer_whatsapp", v)} testid="contract-dealer-wa" />
-                <Field label="E-Mail" type="email" value={form.dealer_email} onChange={(v) => set("dealer_email", v)} testid="contract-dealer-email" />
               </div>
+              <Field label="E-Mail" type="email" value={form.dealer_email} onChange={(v) => set("dealer_email", v)} testid="contract-dealer-email" />
               <Field label="Adresse *" required value={form.dealer_address} onChange={(v) => set("dealer_address", v)} testid="contract-dealer-address" />
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                 <Field label="PLZ *" required inputMode="numeric" value={form.dealer_zip} onChange={(v) => set("dealer_zip", v)} testid="contract-dealer-zip" />
                 <Field label="Ort *" required value={form.dealer_city} onChange={(v) => set("dealer_city", v)} testid="contract-dealer-city" />
               </div>
@@ -888,14 +894,14 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
               Vertrags-Erstellung anpassbar. */}
           {/* Rollenprüfung 22.09.2026 (RP-404): ein geleertes Feld kommt nicht
               mehr still aus dem Inserat zurück. */}
-          <Section title="Fahrzeugdaten" subtitle="Aus dem Inserat übernommen — bei Bedarf korrigieren. Ein geleertes Feld bleibt im Vertrag leer.">
+          <Section title="Fahrzeugdaten" icon={Car} subtitle="Aus dem Inserat übernommen — bei Bedarf korrigieren. Ein geleertes Feld bleibt im Vertrag leer.">
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
               <Field label="Marke" value={form.vehicle_make} onChange={(v) => set("vehicle_make", v)} testid="contract-veh-make" />
               <Field label="Modell" value={form.vehicle_model} onChange={(v) => set("vehicle_model", v)} testid="contract-veh-model" />
               <Field label="Kategorie" value={form.vehicle_category} onChange={(v) => set("vehicle_category", v)} testid="contract-veh-cat" />
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
               <div>
                 <label className="text-xs text-zinc-400">Erstzulassung (MM/JJJJ)</label>
                 <MonatJahrEingabe value={form.vehicle_first_registration}
@@ -910,13 +916,13 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
               {/* M-12: Zifferntastatur fuer reine Zahlenfelder */}
               <Field label="Hubraum (ccm)" inputMode="numeric" value={form.vehicle_displacement} onChange={(v) => set("vehicle_displacement", v)} testid="contract-veh-ccm" />
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-2.5">
               <Field label="Kraftstoff" value={form.vehicle_fuel} onChange={(v) => set("vehicle_fuel", v)} testid="contract-veh-fuel" />
               <Field label="Getriebe" value={form.vehicle_gearbox} onChange={(v) => set("vehicle_gearbox", v)} testid="contract-veh-gear" />
               <Field label="Leistung (kW)" inputMode="numeric" value={form.vehicle_power_kw} onChange={(v) => set("vehicle_power_kw", v)} testid="contract-veh-kw" />
               <Field label="Leistung (PS)" inputMode="numeric" value={form.vehicle_power_ps} onChange={(v) => set("vehicle_power_ps", v)} testid="contract-veh-ps" />
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-2.5">
               <Field label="Farbe" value={form.vehicle_color} onChange={(v) => set("vehicle_color", v)} testid="contract-veh-color" />
               <Field label="Türen" inputMode="numeric" value={form.vehicle_doors} onChange={(v) => set("vehicle_doors", v)} testid="contract-veh-doors" />
               <Field label="Sitze" inputMode="numeric" value={form.vehicle_seats} onChange={(v) => set("vehicle_seats", v)} testid="contract-veh-seats" />
@@ -934,16 +940,15 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                 helper="Anzahl der Halter laut Inserat bzw. Fahrzeugbrief, der jetzige mitgezählt („2. Hand“ = 2). Wird aus dem Inserat übernommen — bitte prüfen."
               />
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
               {/* Wunsch Ahmad (15.09.2026): kein Kennzeichen im Kaufvertrag */}
               <Field label="FIN" value={form.vehicle_vin} onChange={(v) => set("vehicle_vin", v)} testid="contract-veh-fin" />
             </div>
-            <Field label="Sonstige Schäden / Hinweis (erscheint im Vertrag)" value={form.vehicle_damage_note} onChange={(v) => set("vehicle_damage_note", v)} testid="contract-veh-damage" placeholder="z.B. Motorschaden, Hagelschaden" />
           </Section>
 
-          {/* Zusicherungen & Zustand */}
-          <Section title="Zusicherungen & Zustand">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          {/* Zustand (04.10.2026: vorher "Zusicherungen & Zustand", wie im PDF) */}
+          <Section title="Zustand" icon={ShieldCheck}>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
               <SelectField
                 label="Bereifung"
                 value={form.tires}
@@ -965,7 +970,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                                   className="input-base w-full mt-1 disabled:opacity-50" />
               </div>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
               <SelectField
                 label="Scheckheftgepflegt"
                 value={form.service_book}
@@ -981,22 +986,22 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                                   className="input-base w-full mt-1 disabled:opacity-50" />
               </div>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <SelectField
-                label="Unfallfrei"
-                value={form.accident_free}
-                onChange={(v) => set("accident_free", v)}
-                options={YN_OPTIONS}
-                testid="contract-accident-free"
-              />
-              <Field
-                label="Wenn nicht unfallfrei: wo / Beschreibung"
-                value={form.accident_location}
-                onChange={(v) => set("accident_location", v)}
-                testid="contract-accident-loc"
-                placeholder="z.B. Heckschaden rechts"
-                disabled={form.accident_free !== "Nein"}
-              />
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
+              <div>
+                <SelectField
+                  label="Unfallfrei"
+                  value={form.accident_free}
+                  onChange={(v) => set("accident_free", v)}
+                  options={YN_OPTIONS}
+                  testid="contract-accident-free"
+                />
+                {form.accident_free === "Nein" && (
+                  <div className="text-[11px] mt-1 leading-snug" style={{ color: "var(--st-amber)" }}
+                       data-testid="contract-accident-hinweis">
+                    Wo und was: unten bei „Schäden“ unter der Skizze eintragen.
+                  </div>
+                )}
+              </div>
               <SelectField
                 label="EU-Import"
                 value={form.eu_import}
@@ -1004,8 +1009,6 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                 options={YN_OPTIONS}
                 testid="contract-eu-import"
               />
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               <SelectField
                 label="Fahrtauglich"
                 value={form.drivable}
@@ -1013,6 +1016,8 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                 options={YN_OPTIONS}
                 testid="contract-drivable"
               />
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
               <SelectField
                 label="Gewerblich genutzt seit EZ"
                 value={form.commercial_since_ez}
@@ -1027,8 +1032,6 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                 options={ZULASSUNG_OPTIONS}
                 testid="contract-zulassung"
               />
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               {/* Entscheidung Ahmad 26.09.2026: Schlüsselanzahl gehört in den Vertrag —
                   der Fahrer gleicht vor Ort dagegen ab (Abholprotokoll, KI). Fehlt sie,
                   nur ein Hinweis, kein Blockieren. */}
@@ -1103,7 +1106,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
             )}
           </Section>
 
-          <Section title="Schäden / Beschädigungen">
+          <Section title="Schäden / Beschädigungen" icon={Wrench}>
             <div className="lg:flex lg:gap-4 lg:items-start">
               <div className="flex-1 min-w-0" ref={schaedenRef}>
                 <DamageSelector
@@ -1132,17 +1135,29 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                 />
               </div>
             </div>
+            {/* Wunsch Ahmad 04.10.2026: Schäden von Hand UNTER der Skizze eintragen — vorher stand das
+                Textfeld oben bei den Fahrzeugdaten bzw. neben "Unfallfrei". */}
+            <div className="space-y-2.5" data-testid="contract-schaeden-text">
+              <Field label="Schäden selbst eintragen (erscheint im Vertrag)" multiline rows={2}
+                     value={form.vehicle_damage_note} onChange={(v) => set("vehicle_damage_note", v)}
+                     testid="contract-veh-damage" placeholder="z. B. Kratzer Heckklappe, Delle Tür hinten links, Motorschaden" />
+              {form.accident_free === "Nein" && (
+                <Field label="Unfallschaden: wo / Beschreibung" value={form.accident_location}
+                       onChange={(v) => set("accident_location", v)} testid="contract-accident-loc"
+                       placeholder="z. B. Heckschaden rechts, repariert" />
+              )}
+            </div>
           </Section>
 
-          <Section title="Konditionen">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <Section title="Konditionen" icon={Euro}>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
               {/* Rollenprüfung 22.09.2026 (RP-402): Textfeld mit deutscher
                   Schreibweise; darunter steht, welcher Betrag erkannt wurde. */}
               <div>
                 <Field
                   label="Kaufpreis (€) *" required inputMode="decimal"
                   value={form.purchase_price} onChange={(v) => set("purchase_price", v)}
-                  testid="contract-price" placeholder="z.B. 8.900"
+                  testid="contract-price" placeholder="z.B. 8.900" fehlt={fehlt("purchase_price")}
                 />
                 {String(form.purchase_price || "").trim() !== "" && (
                   <div className="text-[11px] mt-1 leading-snug" data-testid="contract-price-erkannt"
@@ -1184,7 +1199,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                 </span>
               </span>
             </label>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
               <Field label="Abholdatum" type="date" value={form.pickup_date} onChange={(v) => set("pickup_date", v)} testid="contract-pickup-date"
                      disabled={bearbeiten}
                      helper={bearbeiten ? "Den Abholtermin bitte im Terminplaner verschieben — der Vertrag bekommt dann selbst eine neue Fassung." : undefined} />
@@ -1208,6 +1223,30 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
             )}
           </Section>
 
+          {/* Wunsch Ahmad 26.09.2026 abends: Vertragsnummer und Kundennummer
+              selbst vergeben. Leer = automatisch (KV-<Datum>-…) bzw. die
+              Firmen-Kundennummer aus den Einstellungen. Eine schon vergebene
+              Vertragsnummer meldet der Server (409) — Text unter dem Feld. */}
+          <Section title="Nummern" icon={Hash} subtitle="Beide Felder dürfen leer bleiben — dann vergibt die App die Vertragsnummer selbst und nimmt die Kundennummer aus den Einstellungen.">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <Field label={bearbeiten ? "Vertragsnummer (bleibt)" : "Vertragsnummer (leer = automatisch KV-…)"} value={form.contract_no}
+                     onChange={(v) => set("contract_no", v)} testid="contract-vertragsnummer"
+                     maxLength={40} placeholder="z. B. AH-2026-0042" disabled={bearbeiten}
+                     helper={bearbeiten ? "Eine neue Fassung behält die Vertragsnummer."
+                       : "3–40 Zeichen: Buchstaben, Ziffern, Leerzeichen und - _ / . — je Firma nur einmal vergebbar."} />
+              <Field label="Kundennummer (Vorbelegung: Firmenwert)" value={form.kundennummer}
+                     onChange={(v) => set("kundennummer", v)} testid="contract-kundennummer"
+                     maxLength={30} placeholder="z. B. 482913"
+                     helper="Steht im Vertrag („nur unter Vorlage der Kundennummer“), in den Vorlagen als {kundennummer} und im Abholauftrag. Darf in mehreren Verträgen gleich sein." />
+            </div>
+            {nummernFehler && (
+              <div role="alert" data-testid="contract-nummern-fehler"
+                   className="text-[12px] leading-snug" style={{ color: "var(--accent-red)" }}>
+                {nummernFehler}
+              </div>
+            )}
+          </Section>
+
           {/* Wunsch Ahmad 24.09.2026: Die Übergabe & Empfangsbestätigung
               wird beim Erstellen nicht mehr abgefragt. Ob der Block im
               gedruckten Vertrag steht, schaltet der Chef unter Einstellungen →
@@ -1215,7 +1254,8 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
               aus Abholdatum, Firmensitz und Verkäuferort, die Kästchen bleiben
               zum Ankreuzen von Hand leer. */}
 
-          <Section title="Fahrzeugbeschreibung (vom Inserat)">
+          {/* 04.10.2026: wie im PDF nur noch "Beschreibung" */}
+          <Section title="Beschreibung" icon={AlignLeft}>
             <Field
               label="Beschreibungstext"
               value={form.vehicle_description}
@@ -1230,7 +1270,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
           {/* Wunsch Ahmad 18.09.2026: Die Bedingungen aus den Einstellungen
               standen bisher nur im PDF — jetzt stehen sie hier, und wer will,
               ueberarbeitet sie fuer genau diesen Vertrag. */}
-          <Section title="Vertragsbedingungen & AGB">
+          <Section title="Vertragsbedingungen & AGB" icon={ScrollText}>
             <Field
               label="Vertragsbedingungen & AGB (stehen in diesem Kaufvertrag)"
               value={form.digital_vertragstext}
@@ -1255,9 +1295,30 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
 
           {/* Handy-Ansicht (24.09.2026): Rand wie das Formular (4/6), Polster
               bis ueber den Home-Balken der installierten App. */}
-          <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-3 pt-2 sticky bottom-0 bg-[var(--bg-surface)] py-3 -mx-4 px-4 sm:-mx-6 sm:px-6 border-t"
-               style={{ borderColor: "var(--border-default)",
+          <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-3 pt-2 sticky bottom-0 bg-[var(--bg-surface)] py-3 -mx-3 px-3 sm:-mx-5 sm:px-5 border-t"
+               style={{ borderColor: "var(--vf-linie)",
                         paddingBottom: "calc(0.75rem + env(safe-area-inset-bottom, 0px))" }}>
+            {/* Wunsch Ahmad 04.10.2026: was Wichtiges noch fehlt — ein Klick springt zum Feld */}
+            <div className="mr-auto flex flex-wrap items-center gap-1.5 text-[12px]" data-testid="contract-noch-offen">
+              {offenWichtig.length > 0 ? (
+                <>
+                  <span className="font-semibold" style={{ color: "var(--st-amber)" }}>Noch offen:</span>
+                  {offenWichtig.map((x) => (
+                    <button key={x.key} type="button" onClick={() => zumFeld(x.testid)}
+                            data-testid={`contract-offen-${x.key}`}
+                            className="rounded-full px-2.5 py-1 font-semibold border"
+                            style={{ borderColor: "var(--st-amber)", color: "var(--st-amber)",
+                                     background: "color-mix(in srgb, var(--st-amber) 10%, transparent)" }}>
+                      {x.label}
+                    </button>
+                  ))}
+                </>
+              ) : (
+                <span className="inline-flex items-center gap-1 font-semibold" style={{ color: "var(--accent-green)" }}>
+                  <CheckCircle2 size={14} /> Alles Wichtige ausgefüllt
+                </span>
+              )}
+            </div>
             <button type="button" onClick={schliessen}
                     className="apple-btn apple-btn-secondary" data-testid="cancel-contract">
               Abbrechen
@@ -1279,25 +1340,35 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
   );
 }
 
-const Section = ({ title, subtitle, children }) => (
-  <div>
-    <div className="overline mb-1">{title}</div>
-    {subtitle && <div className="text-[11px] text-zinc-500 mb-3">{subtitle}</div>}
-    {!subtitle && <div className="mb-3" />}
-    <div className="space-y-3">{children}</div>
-  </div>
+// Wunsch Ahmad 04.10.2026 (Vorlage mit Fotos): jeder Abschnitt als Karte mit Symbol, kraeftigeren Linien
+// und etwas dichter — Abstaende ueber .vertrag-formular (index.css).
+const Section = ({ title, subtitle, icon: Icon, children }) => (
+  <section className="vf-karte">
+    <div className="vf-kopf">
+      {Icon && (
+        <span className="vf-symbol" aria-hidden="true"><Icon size={15} /></span>
+      )}
+      <div className="overline !mb-0">{title}</div>
+    </div>
+    {subtitle && <div className="text-[11px] text-zinc-500 -mt-1 mb-2.5">{subtitle}</div>}
+    <div className="space-y-2.5">{children}</div>
+  </section>
 );
 
 // M-12: autoComplete durchreichen (type="tel" autoComplete="tel" an den Telefonfeldern).
-const Field = ({ label, value, onChange, type = "text", multiline, rows = 2, required, testid, placeholder, disabled, helper, inputMode, maxLength, autoComplete }) => (
+// 04.10.2026: `fehlt` markiert ein wichtiges, noch leeres Feld (Rahmen + "fehlt" an der Beschriftung).
+const Field = ({ label, value, onChange, type = "text", multiline, rows = 2, required, testid, placeholder, disabled, helper, inputMode, maxLength, autoComplete, fehlt }) => (
   <div>
-    <label className="text-xs text-zinc-400">{label}</label>
+    <label className="text-xs text-zinc-400 flex items-center gap-1.5">
+      {label}
+      {fehlt && <span className="vf-fehlt-marke" data-testid={testid ? `${testid}-fehlt` : undefined}>fehlt</span>}
+    </label>
     {multiline ? (
       <textarea data-testid={testid} value={value} onChange={(e) => onChange(e.target.value)} required={required}
-                rows={rows} className="input-base w-full mt-1" placeholder={placeholder} disabled={disabled} />
+                rows={rows} className={`input-base w-full mt-1${fehlt ? " vf-fehlt" : ""}`} placeholder={placeholder} disabled={disabled} />
     ) : (
       <input data-testid={testid} type={type} value={value} onChange={(e) => onChange(e.target.value)}
-             required={required} className="input-base w-full mt-1 disabled:opacity-50"
+             required={required} className={`input-base w-full mt-1 disabled:opacity-50${fehlt ? " vf-fehlt" : ""}`}
              placeholder={placeholder} disabled={disabled}
              inputMode={inputMode} maxLength={maxLength} autoComplete={autoComplete} />
     )}

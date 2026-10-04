@@ -176,11 +176,12 @@ describe("M-07 / M-11 / M-12 / M-13 / M-20: Dialoge", () => {
   });
   it("M-13: keine festen Zwei-/Dreispalter mehr im Kaufvertrag", () => {
     const formular = VERTRAG.slice(VERTRAG.indexOf("<form onSubmit={submit}"));
-    expect(formular).not.toMatch(/className="grid grid-cols-2 gap-3"/);
-    expect(formular).not.toMatch(/className="grid grid-cols-3 gap-3"/);
-    // 26.09.2026: +1 durch den Abschnitt „Nummern“ (Vertrags-/Kundennummer)
-    expect((formular.match(/grid grid-cols-1 sm:grid-cols-2 gap-3/g) || []).length).toBe(6);
-    expect(formular).toMatch(/grid grid-cols-1 sm:grid-cols-3 gap-3/);
+    // 04.10.2026: Abstaende etwas dichter (gap-2.5), Ansprechpartner raus (Telefon + WhatsApp in einer Zeile)
+    expect(formular).not.toMatch(/className="grid grid-cols-2 gap-/);
+    expect(formular).not.toMatch(/className="grid grid-cols-3 gap-/);
+    // 26.09.2026: +1 durch den Abschnitt „Nummern“ (Vertrags-/Kundennummer); 04.10.2026: -1 (Ansprechpartner)
+    expect((formular.match(/grid grid-cols-1 sm:grid-cols-2 gap-2\.5/g) || []).length).toBe(5);
+    expect(formular).toMatch(/grid grid-cols-1 sm:grid-cols-3 gap-2\.5/);
   });
   it("M-20: Versandweg als Reiter", () => {
     expect(SEND).toMatch(/role="tablist" aria-label="Versandweg"/);

@@ -64,7 +64,6 @@ describe("kaeuferAusProfil", () => {
   test("ordnet Profilfelder den Formularfeldern zu, WhatsApp faellt auf Telefon zurueck", () => {
     expect(kaeuferAusProfil(PROFIL)).toEqual({
       dealer_company: "Autohaus Beispiel GmbH",
-      dealer_contact: "Sam Sucher",
       dealer_phone: "0911 1234",
       dealer_whatsapp: "0911 1234",
       dealer_email: "sam@example.de",

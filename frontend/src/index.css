@@ -281,6 +281,9 @@ a[href*="emergent.sh"],
   --st-gruen: #34c759;
   --st-gelb: #ffd60a;
   --st-amber: #ff9f0a;
+  /* Vertragsseite (04.10.2026): kraeftigere Linien, Kartenfläche */
+  --vf-linie: rgba(255, 255, 255, 0.20);
+  --vf-karte: rgba(255, 255, 255, 0.02);
   --st-rot: #ff453a;
   --st-grau: #8e8e93;
   --st-lila: #a855f7;
@@ -364,6 +367,9 @@ a[href*="emergent.sh"],
   --st-gruen: #167a45;
   --st-gelb: #7a6000;
   --st-amber: #9c5400;
+  /* Vertragsseite (04.10.2026): kraeftigere Linien, Kartenfläche */
+  --vf-linie: rgba(0, 0, 0, 0.20);
+  --vf-karte: #ffffff;
   --st-rot: #d70015;
   --st-grau: #5a5a5f;
   --st-lila: #7e22ce;
@@ -486,6 +492,62 @@ html, body, #root {
 }
 .vertrag-formular .overline {
   font-weight: 700;
+}
+
+/* Wunsch Ahmad 04.10.2026 (Vorlage mit Fotos): Vertragsseite mit kraeftigeren Linien, jeder Abschnitt
+   als Karte mit Symbol, etwas dichter — aber nicht gedraengt. Fehlende wichtige Angaben bernsteinfarben. */
+.vertrag-formular .vf-karte {
+  border: 1.5px solid var(--vf-linie);
+  border-radius: 14px;
+  padding: 0.85rem 1rem 1rem;
+  background: var(--vf-karte);
+}
+.vertrag-formular .vf-kopf {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding-bottom: 0.55rem;
+  margin-bottom: 0.75rem;
+  border-bottom: 1.5px solid var(--vf-linie);
+}
+.vertrag-formular .vf-symbol {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent-green);
+  background: color-mix(in srgb, var(--accent-green) 12%, transparent);
+  flex-shrink: 0;
+}
+.vertrag-formular .input-base {
+  border-width: 1.5px;
+  border-color: var(--vf-linie);
+  border-radius: 10px;
+  padding: 0.55rem 0.8rem;
+}
+.vertrag-formular .input-base:focus {
+  border-color: var(--border-focus);
+}
+.vertrag-formular label.text-xs {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+.vertrag-formular .input-base.vf-fehlt {
+  border-color: var(--st-amber);
+  background: color-mix(in srgb, var(--st-amber) 7%, var(--bg-input));
+}
+.vertrag-formular .vf-fehlt-marke {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--st-amber);
+  border: 1px solid var(--st-amber);
+  border-radius: 999px;
+  padding: 0 6px;
+  line-height: 15px;
 }
 
 .live-dot {

@@ -30,7 +30,7 @@ export function kaeuferAusProfil(dealer) {
   const d = dealer || {};
   return {
     dealer_company: d.company_name || "",
-    dealer_contact: d.contact_person || "",
+    // Wunsch Ahmad 04.10.2026: kein "Ansprechpartner" (dealer_contact) mehr im Kaufvertrag
     dealer_phone: d.phone || "",
     dealer_whatsapp: d.whatsapp_number || d.phone || "",
     dealer_email: d.email || "",
