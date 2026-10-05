@@ -56,6 +56,28 @@ internal static class Protokoll
         NeueZeile?.Invoke(eintrag);
     }
 
+    private static readonly Dictionary<string, (DateTime Zuletzt, int Unterdrueckt)> Gedrosselt = new();
+
+    /// <summary>Pruefung 05.10.2026 (Paket 1): dieselbe Meldung je Schluessel hoechstens einmal je <paramref name="abstand"/>
+    /// — ein Fehler im 250-ms-Takt fuellte sonst das Protokoll (bis ~1 GB am Tag). Unterdrueckte werden gezaehlt
+    /// und beim naechsten Schreiben genannt.</summary>
+    public static void SchreibeGedrosselt(string schluessel, string text, TimeSpan abstand)
+    {
+        int unterdrueckt;
+        lock (Sperre)
+        {
+            var jetzt = DateTime.Now;
+            if (Gedrosselt.TryGetValue(schluessel, out var g) && jetzt - g.Zuletzt < abstand)
+            {
+                Gedrosselt[schluessel] = (g.Zuletzt, g.Unterdrueckt + 1);
+                return;
+            }
+            unterdrueckt = Gedrosselt.TryGetValue(schluessel, out g) ? g.Unterdrueckt : 0;
+            Gedrosselt[schluessel] = (jetzt, 0);
+        }
+        Schreibe(unterdrueckt > 0 ? $"{text}\n(dazwischen {unterdrueckt}-mal dieselbe Meldung unterdrückt)" : text);
+    }
+
     public static List<string> Letzte()
     {
         lock (Sperre) return Puffer.ToList();

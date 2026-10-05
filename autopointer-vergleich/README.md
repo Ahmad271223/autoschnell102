@@ -64,6 +64,11 @@ dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und 
   das Programm zeigt sofort einen „bitte prüfen“-Hinweis (`melden` in der Antwort; Erstzulassung in der Zukunft,
   zu jung für die Kilometer oder über 1 Mio. km). Die Filter bleiben trotzdem genau wie in den Einstellungen
   (Firma/Sucher, z. B. EZ 1 Jahr älter, km +20.000) — es wird nie still ein Filter weggelassen.
+* **1.5.4 (Paket 1, Prüfung 05./06.10.):** ein Lesefehler (GDI, Texterkennung) wird keine Schleife im 250-ms-Takt
+  mehr — 3 Versuche mit 2/4/6 s Abstand, dann Hinweis und Ruhe bis zur nächsten Änderung (vorher Dauerlast und ein
+  Protokoll, das um ~1 GB am Tag wuchs; gleiche Fehler im Takt werden außerdem gedrosselt protokolliert).
+  Einstellungen (mit dem Programm-Schlüssel) werden in einem Zug getauscht und behalten eine `.bak` — ein Absturz
+  beim Speichern kostet keinen Code mehr. Doppelklick auf „Vergleichen“ öffnet nicht mehr doppelt.
 * **Neuwagen** (Zustand „Neu“) haben in AutoPointer weder Erstzulassung noch Kilometerstand: dann gilt dieses Jahr
   und 0 km (Befund 03.10.: BYD Dolphin, mobile.de).
 * Dasselbe Fahrzeug öffnet nie zweimal hintereinander (Kennung aus dem gelesenen Text `Marke Modell | EZ | km | kW`,

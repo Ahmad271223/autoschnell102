@@ -63,28 +63,42 @@ internal sealed class Einstellungen
         Converters = { new JsonStringEnumConverter() },
     };
 
+    private static string Sicherung => Datei + ".bak";
+
     public static Einstellungen Laden()
     {
-        Einstellungen e;
+        // Pruefung 05.10.2026 (Paket 1): eine abgeschnittene Datei (Absturz/Stromausfall beim Speichern) kostete den
+        // Programm-Schluessel — jetzt zaehlt dann die Sicherung vom letzten Speichern (.bak)
+        var e = Lies(Datei) ?? Lies(Sicherung) ?? new Einstellungen();
+        e.MitWindowsStarten = Autostart.IstAn();
+        return e.Bereinigt();
+    }
+
+    private static Einstellungen? Lies(string pfad)
+    {
         try
         {
-            e = File.Exists(Datei)
-                ? JsonSerializer.Deserialize<Einstellungen>(File.ReadAllText(Datei), Json) ?? new Einstellungen()
-                : new Einstellungen();
+            if (!File.Exists(pfad)) return null;
+            var e = JsonSerializer.Deserialize<Einstellungen>(File.ReadAllText(pfad), Json);
+            if (e == null) Protokoll.Schreibe($"Einstellungen leer ({Path.GetFileName(pfad)}).");
+            return e;
         }
         catch (Exception ex)
         {
-            Protokoll.Schreibe($"Einstellungen nicht lesbar ({ex.Message}) – Standardwerte.");
-            e = new Einstellungen();
+            Protokoll.Schreibe($"Einstellungen nicht lesbar ({Path.GetFileName(pfad)}: {ex.Message}).");
+            return null;
         }
-        e.MitWindowsStarten = Autostart.IstAn();
-        return e.Bereinigt();
     }
 
     public void Speichern()
     {
         Directory.CreateDirectory(Ordner);
-        File.WriteAllText(Datei, JsonSerializer.Serialize(this, Json));
+        // Paket 1: erst vollstaendig in eine neue Datei, dann in einem Zug tauschen (die alte wird zur .bak) —
+        // File.WriteAllText leerte die Datei zuerst; ein Absturz dazwischen hinterliess eine leere Datei
+        string neu = Datei + ".neu";
+        File.WriteAllText(neu, JsonSerializer.Serialize(this, Json));
+        if (File.Exists(Datei)) File.Replace(neu, Datei, Sicherung);
+        else File.Move(neu, Datei, overwrite: true);
         Autostart.Setzen(MitWindowsStarten);
     }
 

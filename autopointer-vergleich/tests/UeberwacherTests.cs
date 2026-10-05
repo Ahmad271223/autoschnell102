@@ -396,6 +396,41 @@ public class UeberwacherTests
     }
 
     [Fact]
+    public async Task Lesefehler_wird_keine_Schleife_im_Takt()
+    {
+        // Pruefung 05.10.2026 (Paket 1): warf das Lesen eine Ausnahme (GDI, Texterkennung), blieb der Inhalt "offen"
+        // und wurde alle 250 ms neu gelesen — Dauerlast und ein Protokoll, das um ~1 GB am Tag wuchs.
+        await Start();
+        _q.Zeige(() => throw new InvalidOperationException("GDI+ generic error"), 1);
+        for (int i = 0; i < 200; i++) await Tick();               // 50 Sekunden
+        Assert.Equal(Ueberwacher.LeseVersuche, _q.Lesungen);      // 3 Versuche (2/4/6 s Abstand), dann Ruhe
+        Assert.Single(_meldungen.Where(m => m.Contains("konnte nicht gelesen werden")));
+        Assert.Empty(_b.Aufrufe);
+        // naechstes Auto: alles wie gewohnt
+        await Anklicken(Bentley, 2);
+        Assert.Single(_b.Aufrufe);
+    }
+
+    [Fact]
+    public async Task Doppelklick_auf_Vergleichen_oeffnet_nur_einmal()
+    {
+        // Pruefung 05.10.2026 (Paket 1): der zweite Klick stellte sich an der Sperre an und oeffnete dieselben
+        // Vergleiche noch einmal ("erzwungen" uebergeht die Pruefung "gleiches Auto" absichtlich)
+        await Start();
+        _q.Zeige(Bentley, 1);
+        Task? zweiter = null;
+        _q.WaehrendDesLesens = () => { zweiter ??= _u.JetztVergleichenAsync(); };
+        await _u.JetztVergleichenAsync();
+        await zweiter!;
+        Assert.Single(_b.Aufrufe);
+        Assert.Equal(1, _q.Lesungen);
+        // "Vergleichen" nach dem Lesen oeffnet weiter auch dasselbe Auto (gewollt: Tabs versehentlich geschlossen)
+        _q.WaehrendDesLesens = null;
+        await _u.JetztVergleichenAsync();
+        Assert.Equal(2, _b.Aufrufe.Count);
+    }
+
+    [Fact]
     public async Task Nur_die_eingestellten_Portale_oeffnen()
     {
         await Start();

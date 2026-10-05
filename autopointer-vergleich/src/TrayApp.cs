@@ -439,7 +439,12 @@ internal sealed class TrayApp : ApplicationContext
             while (!token.IsCancellationRequested)
             {
                 try { await _ueberwacher.TickAsync(); }
-                catch (Exception ex) { Protokoll.Schreibe("Fehler: " + ex); }
+                catch (Exception ex)
+                {
+                    // Paket 1: derselbe Fehler alle 250 ms wuerde das Protokoll fluten — je Fehlerart alle 60 s
+                    Protokoll.SchreibeGedrosselt("takt:" + ex.GetType().Name + ":" + ex.Message, "Fehler: " + ex,
+                                                 TimeSpan.FromSeconds(60));
+                }
                 try { await Task.Delay(250, token); }
                 catch (OperationCanceledException) { break; }
             }

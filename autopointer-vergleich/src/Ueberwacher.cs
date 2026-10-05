@@ -51,6 +51,10 @@ internal sealed class Ueberwacher
     private bool _gesperrt;
     /// <summary>Server meldete 401 — bis zum Neu-Verbinden (Neustart) keine Vergleiche.</summary>
     private bool _verloren;
+    /// <summary>Paket 1: Lesefehler hintereinander fuer denselben Inhalt (GDI, Texterkennung) — hoechstens
+    /// <see cref="LeseVersuche"/> Versuche mit wachsendem Abstand, dann erst wieder bei einer Aenderung.</summary>
+    private int _lesefehler;
+    internal const int LeseVersuche = 3;
 
     public bool Probelauf { get; set; }
     public Fahrzeug? LetztesFahrzeug { get; private set; }
@@ -143,7 +147,31 @@ internal sealed class Ueberwacher
             }
             if (!_offen || (jetzt - _seit).TotalMilliseconds < e.WartezeitMs) return;
 
-            var lesung = await _quelle.LiesAsync();
+            Lesung? lesung;
+            try
+            {
+                lesung = await _quelle.LiesAsync();
+                _lesefehler = 0;
+            }
+            catch (Exception ex)
+            {
+                // Pruefung 05.10.2026 (Paket 1): vorher blieb _offen stehen — derselbe Inhalt wurde alle 250 ms neu
+                // gelesen (volle Texterkennung) und jeder Fehler samt Stapel protokolliert. Jetzt: 3 Versuche mit
+                // 2/4/6 s Abstand, dann ist dieser Inhalt erledigt (naechste Aenderung oder "Vergleichen").
+                _lesefehler++;
+                Protokoll.Schreibe($"Lesen fehlgeschlagen ({_lesefehler}. Versuch): {ex.GetType().Name}: {ex.Message}");
+                if (_lesefehler >= LeseVersuche)
+                {
+                    _offen = false;
+                    _lesefehler = 0;
+                    MeldeEinmal("Die Anzeige konnte nicht gelesen werden – das Auto noch einmal anklicken oder „Vergleichen“ drücken.");
+                }
+                else
+                {
+                    _seit = _uhr().AddMilliseconds(2000 * _lesefehler);
+                }
+                return;
+            }
             var nach = _quelle.Pruefe();
             if (nach.Lage != Lage.Details || nach.Summe != _summe)
             {
@@ -164,7 +192,13 @@ internal sealed class Ueberwacher
     /// oeffnen - auch bei Pause und auch, wenn es dasselbe Fahrzeug ist.</summary>
     public async Task JetztVergleichenAsync()
     {
-        await _einzeln.WaitAsync();
+        // Pruefung 05.10.2026 (Paket 1): laeuft gerade ein Lesen (Doppelklick auf "Vergleichen", Knopf waehrend die
+        // Automatik liest), nicht anstellen — sonst gingen dieselben Vergleiche zweimal auf
+        if (!await _einzeln.WaitAsync(0))
+        {
+            Protokoll.Schreibe("„Vergleichen“: es läuft schon ein Lesen – nicht doppelt.");
+            return;
+        }
         try
         {
             var z = _quelle.Pruefe();
