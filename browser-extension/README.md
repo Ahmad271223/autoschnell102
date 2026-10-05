@@ -43,6 +43,11 @@ Seit Version 2.0.0 (04.10.2026) macht die Erweiterung zwei Dinge:
    vorgeladene Seiten; Kleinanzeigen nur Kategorie 216.
    Seit 2.6.1: „Kaufvertrag“ startet die App immer zuerst per Link-Typ (auch wenn der Helfer sie nie gesehen hat);
    ohne App-Fenster fragt die Box („Webseite öffnen“) statt selbst die Webseite zu öffnen.
+   Seit 2.6.2 (Paket 1, Prüfung 05./06.10.): Vergleichs-Tab nur wiederverwenden, wenn dort noch eine Vergleichsseite
+   steht (`chrome.tabs.get` + `erlaubterLink`, sonst neuer Tab); Doppelstart-Sperre (`zuletztGestartet`, Knopf
+   gesperrt, solange er läuft); `/marktlage` antwortet 409 für eine andere Suche (Tab lud noch das vorige Auto) —
+   dann und nach vorübergehenden Fehlern (kein Netz, 429, 5xx) wird „erledigt“ zurückgenommen, der Tab versucht es
+   nach 6 s einmal neu.
    **Zusammen mit dem Windows-Programm (seit 2.3.0, dasselbe AutoSchnell-Konto):**
    - Hat das Programm das Auto in den letzten 30 Minuten verglichen (`programm_verglichen` in der Antwort von
      `…/inserat`), öffnet der Helfer **keine** Vergleiche von selbst — nur die Ampel per Direktabruf.

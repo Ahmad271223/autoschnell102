@@ -169,6 +169,7 @@ async function vergleicheOeffnen(tab, kennung, antwort) {
   const links = erlaubteLinks(antwort);
   const s = await sitzung();
   const neue = [];
+  const abgehaengt = [];
   for (let i = 0; i < links.length; i++) {
     const eintrag = { vergleich_id: antwort.vergleich_id, inseratTab: tab.id, kennung, portal: links[i].portal };
     // 2.6.0 (Nr. 2): den Vergleichs-Tab dieses Inserat-Tabs fuer dasselbe Portal wiederverwenden ("naechstes
@@ -176,9 +177,16 @@ async function vergleicheOeffnen(tab, kennung, antwort) {
     const alt = Object.entries(s.vergleichsTabs).find(([, v]) => v.inseratTab === tab.id && v.portal === links[i].portal);
     if (alt) {
       try {
-        await chrome.tabs.update(Number(alt[0]), { url: links[i].url });
-        neue.push([Number(alt[0]), eintrag]);
-        continue;
+        // 2.6.2 (Pruefung 05.10.2026, Paket 1): nur, wenn dort noch eine Vergleichsseite steht. Hat der Nutzer in
+        // dem Tab ein Auto geoeffnet (vielleicht schon das Kontaktformular ausgefuellt) oder ist ganz woanders,
+        // bleibt der Tab wie er ist — die Vergleiche gehen in einen neuen.
+        const altTab = await chrome.tabs.get(Number(alt[0]));
+        if (erlaubterLink(altTab.pendingUrl || altTab.url || "")) {
+          await chrome.tabs.update(Number(alt[0]), { url: links[i].url });
+          neue.push([Number(alt[0]), eintrag]);
+          continue;
+        }
+        abgehaengt.push(Number(alt[0]));
       } catch (e) { /* Tab inzwischen zu: neu anlegen */ }
     }
     // im Fenster des Inserats (Nr. 16); App-/Popup-Fenster haben keine Tabs -> dann im normalen Fenster
@@ -191,14 +199,25 @@ async function vergleicheOeffnen(tab, kennung, antwort) {
     }
   }
   await sitzungAendern((x) => {
+    // der Tab bleibt "aus einem Vergleich" (Autos darin oeffnen nichts von selbst), wird aber nie mehr ueberschrieben
+    for (const id of abgehaengt) if (x.vergleichsTabs[id]) Object.assign(x.vergleichsTabs[id], { inseratTab: -1, erledigt: true });
     for (const [id, eintrag] of neue) x.vergleichsTabs[id] = eintrag;      // ohne "erledigt": wird neu ausgewertet
     if (x.inserate[kennung]) x.inserate[kennung].geoeffnet = true;
   });
   return neue.length;
 }
 
+// 2.6.2 (Pruefung 05.10.2026, Paket 1): Doppelklick auf "Vergleich öffnen" (oder Knopf + Automatik im selben
+// Augenblick) oeffnete die Tabs doppelt — der zweite Start las die Tab-Liste, bevor der erste sie geschrieben hatte.
+const DOPPELT_MS = 1500;
+const zuletztGestartet = new Map();
+
 /** Tempo: Vergleichsseiten sofort direkt holen und die Tabs anlegen — ohne dass die Box darauf wartet. */
 function vergleicheStarten(tab, kennung, antwort) {
+  const jetzt = Date.now();
+  if (jetzt - (zuletztGestartet.get(kennung) || 0) < DOPPELT_MS) return erlaubteLinks(antwort).length;
+  zuletztGestartet.set(kennung, jetzt);
+  for (const [k, z] of zuletztGestartet) if (jetzt - z > 60000) zuletztGestartet.delete(k);
   zuletztAutomatisch.set(kennung, Date.now());
   // sofort vermerken (Neuladen des Inserats oeffnet nichts doppelt), die Tabs folgen gleich
   sitzungAendern((s) => {
@@ -441,6 +460,7 @@ async function direktAuswerten(kennung, antwort, inseratTab) {
         methode: "POST", daten: { vergleich_id: antwort.vergleich_id, url: ziel, seite },
       });
       if (res.status === 200 && res.daten) await marktlageMerken(kennung, schluessel, res.daten, inseratTab);
+      else if (res.status === 409) { /* Adresse nach Weiterleitung passt nicht zur Suche: der Tab liefert */ }
       else await lageFehlerMelden(kennung, schluessel, fehlertext(res.status, res.daten, "Vergleichsseite nicht auswertbar"),
                                   true, inseratTab);
     } catch (e) {
@@ -476,6 +496,11 @@ async function sucheBereit(msg, tab) {
   return { senden: true, programm: { fahrzeug: r.daten.fahrzeug || {}, portal: r.daten.portal } };
 }
 
+// 2.6.2 (Pruefung 05.10.2026, Paket 1): "erledigt" wird VOR der Anfrage gesetzt (genau einmal senden). Scheiterte
+// sie nur voruebergehend (kein Netz, Server kurz weg, Bremse) oder gehoerte die Seite zu einer anderen Suche
+// (409: der Tab lud noch die Suche des vorigen Autos), blieb der Tab fuer immer "erledigt" — nie mehr eine Ampel.
+const istVorlaeufig = (status) => status === 0 || status === 429 || status >= 500;
+
 async function programmSucheBearbeiten(msg, tab) {
   const p = (await sitzung()).programmTabs[tab.id];
   if (!p || p.erledigt) return { fehler: "kein_vergleich" };
@@ -484,7 +509,10 @@ async function programmSucheBearbeiten(msg, tab) {
     methode: "POST", daten: { vergleich_id: p.vergleich_id, url: msg.url, seite: msg.seite },
   });
   if (r.status !== 200 || !r.daten) {
-    return { fehler: "server", text: fehlertext(r.status, r.daten, "Die Vergleichsseite konnte nicht ausgewertet werden.") };
+    const nochmal = istVorlaeufig(r.status);
+    if (nochmal) await sitzungAendern((x) => { if (x.programmTabs[tab.id]) x.programmTabs[tab.id].erledigt = false; });
+    return { fehler: nochmal ? "vorlaeufig" : "server",
+             text: fehlertext(r.status, r.daten, "Die Vergleichsseite konnte nicht ausgewertet werden.") };
   }
   return { lage: r.daten };
 }
@@ -500,9 +528,19 @@ async function sucheBearbeiten(msg, tab) {
   });
   if (r.status !== 200 || !r.daten) {
     const text = fehlertext(r.status, r.daten, "Die Vergleichsseite konnte nicht ausgewertet werden.");
+    const nochmal = istVorlaeufig(r.status);
+    if (nochmal || r.status === 409) {
+      // nur zuruecknehmen, wenn der Tab noch zu DIESEM Vergleich gehoert (inzwischen kann das naechste Auto dran sein)
+      await sitzungAendern((x) => {
+        const e = x.vergleichsTabs[tab.id];
+        if (e && e.vergleich_id === eintrag.vergleich_id) e.erledigt = false;
+      });
+    }
+    // 409 = diese Seite gehoert zu einer anderen Suche (der Tab laedt gleich die richtige): nichts melden
+    if (r.status === 409) return { fehler: "andere_suche" };
     // 2.6.0: auch der Tab schaffte es nicht — die Box im Inserat sagt es gleich (nicht erst nach der Zeitgrenze)
-    await lageFehlerMelden(eintrag.kennung, portalSchluessel(eintrag.portal), text, false, eintrag.inseratTab);
-    return { fehler: "server", text };
+    await lageFehlerMelden(eintrag.kennung, portalSchluessel(eintrag.portal), text, nochmal, eintrag.inseratTab);
+    return { fehler: nochmal ? "vorlaeufig" : "server", text };
   }
   await marktlageMerken(eintrag.kennung, portalSchluessel(eintrag.portal), r.daten, eintrag.inseratTab);
   return { lage: r.daten };

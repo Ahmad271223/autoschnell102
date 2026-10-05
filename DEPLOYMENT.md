@@ -4411,7 +4411,7 @@ Erst einmal **nur für Kunde 10002**, seit dem Abend des 03.10. auch **10001** �
 
 ### Browser-Helfer für Chrome und Edge (Wunsch Ahmad 04.10.2026)
 
-Zweites Werkzeug `browser-helfer` neben dem Programm — die Erweiterung `browser-extension/` (Version 2.6.1, enthält
+Zweites Werkzeug `browser-helfer` neben dem Programm — die Erweiterung `browser-extension/` (Version 2.6.2, enthält
 weiter den Kleinanzeigen-Abruf-Helfer). Gleiche Lizenz: 6-stelliger Code, **ein Konto = ein Browser**, Abo-Pflicht,
 Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
 - Freigabe: `BROWSER_HELFER_KUNDEN` (Standard `10001,10002`, `docker-compose.yml`; leer = niemand).
@@ -4473,6 +4473,19 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
     anderen Browser aufgehen, der Browser fragt evtl. erst „AutoSchnell öffnen?“), sondern die Box fragt mit Knopf
     „Webseite öffnen“. Wer den drückt, bekommt ab dann gleich die Webseite (appGesehen = 0), bis AutoSchnell wieder
     als App läuft.
+  - **2.6.2 + Server — „Paket 1“ (eigene Prüfung 05./06.10.2026: schneller, sicherer, ausfallsicherer):**
+    - Server: vier Stellen der Seitenauswertung liefen auf einer präparierten Seite quadratisch und hielten dabei den
+      ganzen Prozess an (jetzt linear, Zeittest `test_17`); Modell aus der Beschreibung 2,5 s → 0,18 s und im Thread;
+      Werte aus der Seite werden vor dem Speichern begrenzt (`browser_helfer.fahrzeug_bereinigen`: NaN abgelehnt,
+      Zahlen im plausiblen Bereich, Texte gekürzt, Fotos nur von den Bild-Servern der Portale) und erst NACH allen
+      Rechenschritten gespeichert; 422-Antworten kürzen das Eingabe-Echo.
+    - `/marktlage` nimmt nur noch die Suche DIESES Vergleichs (sonst 409, Zeile „passt nicht zum Vergleich“ im
+      Log — dort nachsehen, falls eine Ampel ausbleibt). `gleiche_suche` verträgt jetzt „Erstzulassung genau“ bei
+      AutoScout24 (`re_2012` im Pfad; vorher fehlte dort die Ampel auf den Programm-Seiten).
+    - Erweiterung: ein Vergleichs-Tab wird nur wiederverwendet, wenn dort noch eine Vergleichsseite steht (sonst
+      neuer Tab — nichts, was der Nutzer dort offen hat, wird überschrieben); Doppelklick auf „Vergleich öffnen“
+      öffnet nicht mehr doppelt; nach kurzem Netz-/Serverfehler versucht der Vergleichs-Tab die Ampel einmal neu
+      (vorher blieb sie für diesen Tab für immer aus).
   - Offen (Entscheidung Ahmad): Aufbewahrungsfrist für `werkzeug_vergleiche` (wächst je geöffnetem Inserat);
     Datenschutzerklärung/Web-Store-Angaben (der Helfer schickt die ganze Seite, ausgewertet werden nur die
     Fahrzeugdaten, die Rohseite wird nicht gespeichert); autoscout24.ch hat andere Inseratsadressen (ungenutzt).
@@ -4485,7 +4498,7 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
   powershell -File browser-extension\bauen.ps1                                       # lokal: browser-extension\dist\AutoSchnell-Helfer.zip
   scp browser-extension/dist/AutoSchnell-Helfer.zip root@<server>:/tmp/
   docker compose cp /tmp/AutoSchnell-Helfer.zip backend:/tmp/AutoSchnell-Helfer.zip
-  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Helfer.zip --werkzeug browser-helfer --version 2.6.1
+  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Helfer.zip --werkzeug browser-helfer --version 2.6.2
   ```
   Reihenfolge: erst Server deployen (neue Routen), dann ZIP hochladen.
 - Tests: `backend/tests/test_browser_helfer_20261004.py` (Teil 1 ohne Server, Teil 2 über HTTP).

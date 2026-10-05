@@ -379,9 +379,16 @@
           // Wunsch Ahmad 04.10.2026: "Vergleich öffnen" immer drücken können — wie "Vergleichen" im Programm
           const vergl = el("button", "knopf neben", "Vergleich öffnen");
           vergl.title = "Vergleichsseiten mit euren AutoSchnell-Einstellungen öffnen";
+          vergl.disabled = !!z.oeffnetGerade;
           vergl.addEventListener("click", async (ev) => {
-            if (!ev.isTrusted) return;
-            await vergleichOeffnen();
+            if (!ev.isTrusted || z.oeffnetGerade) return;      // 2.6.2: Doppelklick oeffnete die Tabs doppelt
+            z.oeffnetGerade = true;
+            try {
+              await vergleichOeffnen();
+            } finally {
+              z.oeffnetGerade = false;
+              if (zustand === z) zeichnen();
+            }
           });
           knoepfe.appendChild(vergl);
         }
@@ -607,7 +614,13 @@
       zeichnen();
     }
     const seite = await A.packen(document.documentElement.outerHTML);
-    const r = await A.senden({ typ: "suche", url: location.href, seite });
+    let r = await A.senden({ typ: "suche", url: location.href, seite });
+    // 2.6.2 (Pruefung 05.10.2026, Paket 1): kein Netz / Server kurz weg -> einmal von selbst wiederholen
+    // (vorher galt der Tab danach fuer immer als erledigt — keine Ampel, auch nicht nach Neuladen)
+    if (r && r.fehler === "vorlaeufig") {
+      await new Promise((fertig) => setTimeout(fertig, 6000));
+      r = await A.senden({ typ: "suche", url: location.href, seite });
+    }
     if (programm && zustand && zustand.phase === "suche") {
       if (r && r.lage) zustand.lage = r.lage;
       else zustand.text = (r && r.text) || "Die Vergleichsseite konnte nicht ausgewertet werden.";
