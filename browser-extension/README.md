@@ -41,6 +41,8 @@ Seit Version 2.0.0 (04.10.2026) macht die Erweiterung zwei Dinge:
    wiederverwendet; Ampel mit Zeitgrenze/Fehlertext (`marktlage_fehler`); Direktabruf nur AutoScout24;
    Box hängt sich wieder ein, erkennt eine Doppel-Installation (Seiten-Ereignis `autoschnell-helfer-da`) und
    vorgeladene Seiten; Kleinanzeigen nur Kategorie 216.
+   Seit 2.6.1: „Kaufvertrag“ startet die App immer zuerst per Link-Typ (auch wenn der Helfer sie nie gesehen hat);
+   ohne App-Fenster fragt die Box („Webseite öffnen“) statt selbst die Webseite zu öffnen.
    **Zusammen mit dem Windows-Programm (seit 2.3.0, dasselbe AutoSchnell-Konto):**
    - Hat das Programm das Auto in den letzten 30 Minuten verglichen (`programm_verglichen` in der Antwort von
      `…/inserat`), öffnet der Helfer **keine** Vergleiche von selbst — nur die Ampel per Direktabruf.

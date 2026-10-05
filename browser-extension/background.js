@@ -512,14 +512,20 @@ async function sucheBearbeiten(msg, tab) {
 // Wunsch Ahmad 04.10.2026: "unbedingt nicht AutoSchnell als Webseite oeffnen — nur wenn keine App installiert ist,
 // ansonsten immer die App". Reihenfolge:
 //   1. App-Fenster offen  -> nach vorne holen, darin zum Vertrag wechseln (ohne Neuladen, content.js -> App)
-//   2. App installiert, aber zu -> per Link-Typ web+autoschnell: starten (manifest.json protocol_handlers);
-//      kommt binnen APP_START_MS kein App-Fenster, gilt die App als entfernt -> Webseite
-//   3. keine App -> Webseite in neuem Tab
+//   2. sonst per Link-Typ web+autoschnell: starten (manifest.json protocol_handlers) — seit 2.6.1 auch, wenn der
+//      Helfer die App noch nie gesehen hat (Befund Ahmad 05.10.: in Chrome frisch installiert -> es ging gleich die
+//      Webseite auf). Kommt kein App-Fenster, macht der Helfer NICHT selbst die Webseite auf: die App kann in einem
+//      anderen Browser liegen oder der Browser fragt erst "AutoSchnell oeffnen?" — die Box bietet "Webseite oeffnen".
+//   3. Webseite nur, wenn der Nutzer das dort gewaehlt hat (merkt sich der Helfer: appGesehen = 0, bis die App wieder
+//      als App laeuft) oder es keine Inserats-Adresse gibt
 // "&vertrag=1": AutoSchnell oeffnet gleich das Vertragsfenster — mit den Daten, die hier aus der Seite kamen.
-const APP_GESEHEN_TAGE = 60;
-// 2.6.0: 6 statt 10 s — ein Start per web+autoschnell: braucht meist 1–3 s; scheitert er, merkt sich der Helfer das
-// (appGesehen = 0) und oeffnet beim naechsten Mal gleich die Webseite
-const APP_START_MS = 6000;
+const APP_START_MS = 8000;
+
+async function appStandMerken(basis, wert) {
+  const { appGesehen } = await lokal("appGesehen");
+  await chrome.storage.local.set({ appGesehen: { ...(appGesehen && typeof appGesehen === "object" ? appGesehen : {}),
+                                                 [basis]: wert } });
+}
 
 async function appFenster(basis) {
   let tabs = [];
@@ -575,28 +581,34 @@ async function vertragOeffnen(msg, tab) {
     }
     return { ok: true, weg: "app" };
   }
-  // 2. installiert (schon einmal als App gesehen), aber zu: das Seiten-Skript startet sie per Link-Typ
+  // 3. der Nutzer hat in der Box "Webseite oeffnen" gewaehlt -> merken, ab jetzt gleich die Webseite
+  if (msg.webseite) {
+    await appStandMerken(basis, 0);
+    return webseiteOeffnen(basis, ziel.pfad, tab);
+  }
+  // 2. App starten (das Seiten-Skript klickt den Link, noch im Klick des Nutzers) — ausser der Nutzer hat gesagt,
+  //    dass es hier keine App gibt
   const { appGesehen } = await lokal("appGesehen");
-  const gesehenAm = appGesehen && appGesehen[basis];
-  if (gesehenAm && Date.now() - gesehenAm < APP_GESEHEN_TAGE * 86400000 && ziel.inseratUrl && !msg.ohneApp) {
+  const stand = appGesehen && typeof appGesehen === "object" ? appGesehen[basis] : undefined;
+  if (stand !== 0 && ziel.inseratUrl) {
     return { protokoll: "web+autoschnell:vertrag?url=" + encodeURIComponent(ziel.inseratUrl) };
   }
-  // 3. keine App
   return webseiteOeffnen(basis, ziel.pfad, tab);
 }
 
-/** Nach dem Start per Link-Typ: kommt kein App-Fenster, ist die App wohl entfernt -> Webseite (und merken). */
+/** Nach dem Start per Link-Typ: App-Fenster da -> merken; sonst "unklar" — die Box fragt, statt selbst die Webseite
+ *  aufzumachen (die App koennte in einem anderen Browser aufgegangen sein). */
 async function appStartPruefen(msg, tab) {
   const basis = await server();
   const ende = Date.now() + APP_START_MS;
   while (Date.now() < ende) {
-    if (await appFenster(basis)) return { ok: true, weg: "app" };
+    if (await appFenster(basis)) {
+      await appStandMerken(basis, Date.now());
+      return { ok: true, weg: "app" };
+    }
     await new Promise((r) => setTimeout(r, 500));
   }
-  const { appGesehen } = await lokal("appGesehen");
-  await chrome.storage.local.set({ appGesehen: { ...(appGesehen || {}), [basis]: 0 } });
-  const ziel = await vertragsZiel(msg.kennung);
-  return ziel ? webseiteOeffnen(basis, ziel.pfad, tab) : { fehler: "unbekannt" };
+  return { ok: true, weg: "unklar" };
 }
 
 /** Je AutoSchnell-Adresse merken, wann sie zuletzt als installierte App lief (Reihenfolge der Einrichtung egal). */
@@ -604,9 +616,7 @@ async function appGesehenMerken(sender) {
   let herkunft = "";
   try { herkunft = new URL(sender.url).origin; } catch (e) { return { ok: false }; }
   if (!serverErlaubt(herkunft)) return { ok: false };
-  const { appGesehen } = await lokal("appGesehen");
-  await chrome.storage.local.set({ appGesehen: { ...(appGesehen && typeof appGesehen === "object" ? appGesehen : {}),
-                                                 [herkunft]: Date.now() } });
+  await appStandMerken(herkunft, Date.now());
   return { ok: true };
 }
 

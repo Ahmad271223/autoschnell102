@@ -319,6 +319,14 @@
           inhalt.appendChild(el("div", "klein", `Neue Version ${z.neueVersion} des Helfers verfügbar – in AutoSchnell unter Programme.`));
         }
         if (z.meldung) inhalt.appendChild(el("div", "klein", z.meldung));
+        if (z.webseiteAnbieten) {
+          const knoepfe3 = el("div", "knoepfe");
+          const web = el("button", "knopf neben", "Webseite öffnen");
+          web.title = "Keine AutoSchnell-App installiert? Dann AutoSchnell als Webseite öffnen (merkt sich der Helfer).";
+          web.addEventListener("click", (ev) => { if (ev.isTrusted) webseiteStatt(z); });
+          knoepfe3.appendChild(web);
+          inhalt.appendChild(knoepfe3);
+        }
         if (z.protokollWartet) {
           // 2.6.0 (Nr. 19): nach dem Nachlesen ist die Klick-Erlaubnis des Browsers abgelaufen — ein zweiter Klick
           const knoepfe2 = el("div", "knoepfe");
@@ -335,6 +343,7 @@
           if (!A.helferDa()) { veraltet(); return; }
           z.meldung = "AutoSchnell wird geöffnet …";
           z.protokollWartet = "";
+          z.webseiteAnbieten = false;
           zeichnen();
           let r2 = await A.senden({ typ: "vertrag", kennung: z.kennung });
           let nachgelesen = false;
@@ -393,10 +402,26 @@
     a.click();
     a.remove();
     z.protokollWartet = "";
+    z.webseiteAnbieten = false;
     z.meldung = "AutoSchnell-App wird geöffnet …";
     zeichnen();
     const r3 = await A.senden({ typ: "app_start_pruefen", kennung: z.kennung });
-    z.meldung = r3 && r3.weg === "webseite" ? "Keine AutoSchnell-App gefunden – Webseite geöffnet." : "";
+    // 2.6.1: kein App-Fenster zu sehen -> fragen statt selbst die Webseite aufzumachen (die App kann in einem anderen
+    // Browser aufgegangen sein, oder der Browser fragt noch "AutoSchnell öffnen?")
+    const unklar = !r3 || r3.weg === "unklar";
+    z.meldung = unklar ? "Hat sich die AutoSchnell-App geöffnet? Falls nicht (keine App installiert):" : "";
+    z.webseiteAnbieten = unklar;
+    zeichnen();
+  }
+
+  /** 2.6.1: "Webseite öffnen" — der Nutzer sagt, es gibt hier keine App; der Helfer merkt sich das. */
+  async function webseiteStatt(z) {
+    z.webseiteAnbieten = false;
+    z.meldung = "AutoSchnell wird geöffnet …";
+    zeichnen();
+    const r = await A.senden({ typ: "vertrag", kennung: z.kennung, webseite: true });
+    z.meldung = r && r.weg === "webseite" ? ""
+      : (r && r.text) || "AutoSchnell konnte nicht geöffnet werden – Seite neu laden und noch einmal drücken.";
     zeichnen();
   }
 

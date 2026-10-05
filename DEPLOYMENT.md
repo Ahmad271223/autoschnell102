@@ -4411,7 +4411,7 @@ Erst einmal **nur für Kunde 10002**, seit dem Abend des 03.10. auch **10001** �
 
 ### Browser-Helfer für Chrome und Edge (Wunsch Ahmad 04.10.2026)
 
-Zweites Werkzeug `browser-helfer` neben dem Programm — die Erweiterung `browser-extension/` (Version 2.6.0, enthält
+Zweites Werkzeug `browser-helfer` neben dem Programm — die Erweiterung `browser-extension/` (Version 2.6.1, enthält
 weiter den Kleinanzeigen-Abruf-Helfer). Gleiche Lizenz: 6-stelliger Code, **ein Konto = ein Browser**, Abo-Pflicht,
 Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
 - Freigabe: `BROWSER_HELFER_KUNDEN` (Standard `10001,10002`, `docker-compose.yml`; leer = niemand).
@@ -4467,6 +4467,12 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
     echte Inseratspfade; nur Suchseiten von mobile.de/AutoScout24 werden geöffnet; Kleinanzeigen-Abruf nur aus
     AutoSchnell; App wird nie hart neu geladen; „Erneut versuchen“; Hinweis auf neue Version (Box + Fenster);
     Mindestversion Chrome/Edge 112.
+  - 2.6.1 (Befund Ahmad 05.10.: in Chrome ging bei „Kaufvertrag“ die Webseite statt der App auf — der frisch
+    installierte Helfer kannte die App noch nicht): der Helfer startet die App jetzt IMMER zuerst per
+    `web+autoschnell:`; kommt binnen 8 s kein App-Fenster, öffnet er NICHT selbst die Webseite (die App kann in einem
+    anderen Browser aufgehen, der Browser fragt evtl. erst „AutoSchnell öffnen?“), sondern die Box fragt mit Knopf
+    „Webseite öffnen“. Wer den drückt, bekommt ab dann gleich die Webseite (appGesehen = 0), bis AutoSchnell wieder
+    als App läuft.
   - Offen (Entscheidung Ahmad): Aufbewahrungsfrist für `werkzeug_vergleiche` (wächst je geöffnetem Inserat);
     Datenschutzerklärung/Web-Store-Angaben (der Helfer schickt die ganze Seite, ausgewertet werden nur die
     Fahrzeugdaten, die Rohseite wird nicht gespeichert); autoscout24.ch hat andere Inseratsadressen (ungenutzt).
@@ -4479,7 +4485,7 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
   powershell -File browser-extension\bauen.ps1                                       # lokal: browser-extension\dist\AutoSchnell-Helfer.zip
   scp browser-extension/dist/AutoSchnell-Helfer.zip root@<server>:/tmp/
   docker compose cp /tmp/AutoSchnell-Helfer.zip backend:/tmp/AutoSchnell-Helfer.zip
-  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Helfer.zip --werkzeug browser-helfer --version 2.6.0
+  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Helfer.zip --werkzeug browser-helfer --version 2.6.1
   ```
   Reihenfolge: erst Server deployen (neue Routen), dann ZIP hochladen.
 - Tests: `backend/tests/test_browser_helfer_20261004.py` (Teil 1 ohne Server, Teil 2 über HTTP).
