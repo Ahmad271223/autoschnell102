@@ -189,7 +189,7 @@ async def _validierungsfehler(request: Request, exc: RequestValidationError):
         if "ctx" in e:
             e["ctx"] = _json_sicher({k: (str(v) if isinstance(v, Exception) else v)
                                      for k, v in e["ctx"].items()})
-        e["input"] = _geheim_redigieren(e.get("loc") or (), _json_sicher(e.get("input")))
+        e["input"] = _geheim_redigieren(e.get("loc") or (), _json_sicher(_echo_kuerzen(e.get("input"))))
         fehler.append(e)
     return JSONResponse(status_code=422, content={"detail": fehler})
 
@@ -199,6 +199,25 @@ async def _validierungsfehler(request: Request, exc: RequestValidationError):
 # Support-Screenshots).
 _GEHEIME_FELDER = {"password", "new_password", "current_password", "code", "mfa_token",
                    "token", "secret", "password_hash"}
+
+
+def _echo_kuerzen(wert, tiefe: int = 0):
+    """Pruefung 05.10.2026 (Paket 1): das Eingabe-Echo der 422-Antwort gekuerzt — vorher kam eine zu grosse
+    Anfrage (z.B. "seite" des Browser-Helfers, bis 25 MB) vollstaendig zurueck, auch ohne Anmeldung."""
+    if isinstance(wert, str):
+        return wert if len(wert) <= 300 else wert[:200] + f"… ({len(wert)} Zeichen)"
+    if isinstance(wert, bytes):
+        return f"({len(wert)} Bytes)"
+    if isinstance(wert, dict):
+        if tiefe >= 4:
+            return "…"
+        return {(k if not isinstance(k, str) else k[:100]): _echo_kuerzen(v, tiefe + 1)
+                for k, v in list(wert.items())[:50]}
+    if isinstance(wert, (list, tuple)):
+        if tiefe >= 4:
+            return "…"
+        return [_echo_kuerzen(v, tiefe + 1) for v in list(wert)[:20]]
+    return wert
 
 
 def _geheim_redigieren(loc, eingabe):

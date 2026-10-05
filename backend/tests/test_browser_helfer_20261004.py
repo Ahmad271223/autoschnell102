@@ -323,6 +323,119 @@ def test_16_gleiche_suche_erkennt_die_vergleichsseite_des_programms():
     assert not bh.gleiche_suche(mobile, mobile.replace("od=up", "od=down"))
     assert not bh.gleiche_suche(mobile, mobile + "&fe=NAVIGATION_SYSTEM")
     assert not bh.gleiche_suche(mobile, link) and not bh.gleiche_suche("https://example.com/x", mobile)
+    # 06.10.2026, vier weitere echte Suchen im Browser geladen: "Erstzulassung genau 2012" wandert als "re_2012"
+    # in den Pfad (vorher: keine Ampel), Modelltyp als "mt_c-220", bei Tesla fallen Kraftstoff/Getriebe ganz weg
+    echte = [
+        ("https://www.autoscout24.de/lst/bmw?atype=C&cy=D&cat=ma13mo1641&fregfrom=2016&kmto=175000&powerfrom=136"
+         "&powerto=143&powertype=kw&fuel=D&gear=A&damaged_listing=exclude&ocs_listing=include&sort=price&desc=0"
+         "&ustate=N,U",
+         "https://www.autoscout24.de/lst/bmw/320/ft_diesel/tr_automatik?fregfrom=2016&cy=D&kmto=175000&powerfrom=136"
+         "&powerto=143&powertype=kw&damaged_listing=exclude&ocs_listing=include&sort=price&desc=0&ustate=N%2CU&atype=C"),
+        ("https://www.autoscout24.de/lst/mercedes-benz?atype=C&cat=ma47mo2147&powerfrom=118&powerto=132&powertype=kw"
+         "&fuel=D&gear=A&ocs_listing=include&sort=price&desc=0&ustate=N,U",
+         "https://www.autoscout24.de/lst/mercedes-benz/c-klasse/mt_c-220/ft_diesel/tr_automatik?powerfrom=118"
+         "&powerto=132&powertype=kw&ocs_listing=include&sort=price&desc=0&ustate=N%2CU&atype=C"),
+        ("https://www.autoscout24.de/lst/opel?atype=C&custtype=D&cat=ma54mo1918&fregfrom=2012&fregto=2012&kmfrom=78000"
+         "&kmto=118000&powerfrom=51&powerto=51&powertype=kw&fuel=B&gear=M&ocs_listing=include&sort=price&desc=0"
+         "&ustate=N,U",
+         "https://www.autoscout24.de/lst/opel/corsa/re_2012/ft_benzin/tr_schaltgetriebe?custtype=D&kmfrom=78000"
+         "&kmto=118000&powerfrom=51&powerto=51&powertype=kw&ocs_listing=include&sort=price&desc=0&ustate=N%2CU&atype=C"),
+        ("https://www.autoscout24.de/lst/tesla?atype=C&cy=D&cat=ma51520mo74665&fregfrom=2020&kmto=90000&powerfrom=321"
+         "&powerto=328&powertype=kw&fuel=E&gear=A&damaged_listing=exclude&ocs_listing=include&sort=price&desc=0"
+         "&ustate=N,U",
+         "https://www.autoscout24.de/lst/tesla/model-3?fregfrom=2020&cy=D&kmto=90000&powerfrom=321&powerto=328"
+         "&powertype=kw&damaged_listing=exclude&ocs_listing=include&sort=price&desc=0&ustate=N%2CU&atype=C"),
+    ]
+    for i, (l, s) in enumerate(echte):
+        assert bh.gleiche_suche(l, s), s
+        assert not any(bh.gleiche_suche(l, s2) for j, (_, s2) in enumerate(echte) if j != i), l
+    opel_link, opel_seite = echte[2]
+    assert not bh.gleiche_suche(opel_link, opel_seite.replace("re_2012", "re_2013"))        # anderes Jahr
+    assert not bh.gleiche_suche(opel_link, opel_seite.replace("custtype=D&", ""))           # Filter entfernt
+
+
+def test_17_auswertung_laeuft_nicht_quadratisch():
+    """Pruefung 05./06.10.2026 (Paket 1): vier Stellen liefen auf einer praeparierten Seite quadratisch (128 KB
+    "<script " = 2,5 s, jede Verdopplung x4; die Regex-Maschine gibt dabei den Prozess nicht frei -> alle anderen
+    Anfragen dieses Prozesses standen). Jetzt linear: 400 KB muessen in Sekundenbruchteilen durch sein
+    (quadratisch waeren es je Fall 10 s bis Minuten)."""
+    import time
+    import mobile_service as ms
+    n = 400_000
+    faelle = {
+        "next_data": lambda: bh.next_data("<script " * (n // 8)),
+        "beschreibung <": lambda: ms._apify_html_zu_text("<" * n),
+        "beschreibung <li": lambda: ms._apify_html_zu_text("<li" * (n // 3)),
+        "flight kaputte Stuecke": lambda: bh.next_flight_text("self.__next_f.push([1," * (n // 22)),
+        "karten lange Adresse": lambda: bh.mobile_karten(
+            '<html><body><a href="details.html?' + "details.html?&" * (n // 14) + '">x</a></body></html>'),
+    }
+    for name, fn in faelle.items():
+        start = time.perf_counter()
+        fn()
+        assert time.perf_counter() - start < 2.0, name
+    # ... und die echten Faelle gehen weiter
+    assert bh.next_data('<script id="__NEXT_DATA__" type="application/json">{"a":1}</script>') == {"a": 1}
+    assert ms._apify_html_zu_text("<ul><li class='x'>Eins</li><li>Zwei</li></ul><b>fett</b>") == "- Eins\n- Zwei\n\nfett"
+    assert bh.mobile_karten('<html><body><a href="/fahrzeuge/details.html?x=1&id=123456">Golf</a></body></html>') \
+        == {"123456": {"titel": "Golf", "zustand": []}}
+
+
+def test_18_werte_aus_der_seite_werden_vor_dem_speichern_begrenzt():
+    """Pruefung 05.10.2026 (Paket 1): die Lesung gilt 24 h fuer ALLE Konten — nie ungeprueft speichern."""
+    ident = _identity(MOBILE_URL)
+    # Preis NaN: bestand "Preis vorhanden", wurde gespeichert, danach int(nan) -> 500. NaN ist kein JSON.
+    kaputt = _mobile_listing()
+    kaputt["price"] = {"grs": {"amount": float("nan"), "currency": "EUR"}, "type": "FIXED"}
+    assert "NaN" in _mobile_inserat_html(kaputt)
+    with pytest.raises(bh.SeiteUngueltig):
+        bh.inserat_auslesen(ident, MOBILE_URL, _mobile_inserat_html(kaputt))
+    # normale Seite: unveraendert
+    normal, _ = bh.inserat_auslesen(ident, MOBILE_URL, _mobile_inserat_html(_mobile_listing()))
+    assert normal["make_label"] == "Volkswagen" and normal["list_price"] == 23850.0 and len(normal["image_urls"]) == 46
+    assert normal["image_count"] == 46 and isinstance(normal["features"], list) and normal["features"]
+    # die Regeln selbst
+    roh = {"make_label": "Volkswagen", "model_label": {"x": 1}, "model_description": ["a"], "title": 320,
+           "list_price": float("inf"), "mileage": 10 ** 20, "power_kw": -5, "power_ps": True, "seats": 5,
+           "description": "x" * 50_000, "color": "y" * 5000, "features": ["Klima", {"boese": 1}, ["x"], 7, "z" * 900],
+           "image_urls": ["https://img.classistatic.de/a.jpg", "https://fremd.example/zaehler.gif", 5,
+                          "http://img.classistatic.de/unverschluesselt.jpg"],
+           "images": [{"u": 1}], "image_count": 99, "previous_owners": 2, "accident_damaged": False,
+           "irgendwas": {"objekt": 1}, "_resolved_make_id": 25200}
+    s = bh.fahrzeug_bereinigen(roh)
+    assert s["model_label"] is None and s["model_description"] is None and s["title"] == "320"
+    assert s["list_price"] is None and s["mileage"] is None and s["power_kw"] is None and s["power_ps"] is None
+    assert s["seats"] == 5 and len(s["description"]) == bh.MAX_BESCHREIBUNG and len(s["color"]) == bh.MAX_TEXT
+    assert s["features"] == ["Klima", 7, "z" * bh.MAX_TEXT]
+    assert s["image_urls"] == ["https://img.classistatic.de/a.jpg"] and s["images"] == [] and s["image_count"] == 1
+    assert s["previous_owners"] == 2 and s["accident_damaged"] is False and s["irgendwas"] is None
+    assert s["_resolved_make_id"] == 25200
+    # falscher Typ in der Seite (Untertitel als Objekt): frueher KeyError -> 500; jetzt sauber gelesen oder abgelehnt
+    try:
+        f, _ = bh.inserat_auslesen(ident, MOBILE_URL, _mobile_inserat_html(_mobile_listing(subTitle={"x": 1})))
+        assert f["model_description"] is None or isinstance(f["model_description"], str)
+        assert bh.fahrzeug_kurz(f, ident, MOBILE_URL)["titel"] is not None
+    except (bh.SeiteUngueltig, KeyError, TypeError, AttributeError, ValueError):
+        pass        # der Leser lehnt ab — die Route macht daraus 422 (test_42)
+
+
+def test_19_absurde_vergleichsangebote_bringen_die_umrechnung_nicht_zum_ueberlauf():
+    """Kilometer 10^20 oder Erstzulassung 01/9999 in einer Ergebnisseite: frueher OverflowError -> 500."""
+    assert bh._treffer_bereinigen({"id": 7, "titel": "x" * 900, "preis": 10 ** 20, "km": 10 ** 20, "ez": "01/9999" * 9,
+                                   "zustand": ["Unfallfrei", {"x": 1}], "kw": "viel", "verkaeufer": "wer"}) \
+        == {"id": "", "titel": "x" * 200, "zustand": ["Unfallfrei"], "neu": False, "preis": None, "km": None,
+            "ez": ("01/9999" * 9)[:10], "kw": None, "ps": None, "kraftstoff": None, "getriebe": None,
+            "verkaeufer": None, "bewertung": None}
+    assert bh._jahr("01/9999") is None and bh._jahr("9999") is None and bh._jahr("06/2015") == 2015 + 5 / 12
+    wild = [bh._treffer_bereinigen(dict(_t(i, 9000 + i * 500), km=(10 ** 20 if i % 2 else 100000),
+                                        ez=("01/9999" if i % 3 else "06/2015"))) for i in range(12)]
+    lage = bh.marktlage(11000, "", {"treffer": wild, "gesamt": 12, "sortierung": "preis_auf"},
+                        eigen={"kilometer": 0, "ez_jahr": 1950, "ez_monat": 1})
+    assert lage["ampel"] in ("gruen", "gelb", "rot", "grau")
+    # ... und selbst ungefilterte Werte (eigenes Auto "EZ 9999") lassen die Umrechnung nur aus
+    roh = [dict(_t(i, 9000 + i * 500)) for i in range(8)]
+    assert bh.marktlage(11000, "", {"treffer": roh, "gesamt": 8, "sortierung": "preis_auf"},
+                        eigen={"kilometer": 10 ** 9, "ez_jahr": 9999, "ez_monat": 1})["ampel"]
 
 
 def _t(i, preis, titel="Volkswagen Golf", zustand=(), neu=False, km=120000, ez="06/2015"):
@@ -548,8 +661,16 @@ def test_33_vergleichsseite_ergibt_die_ampel(welt):
     d, prog = welt["vergleich"], welt["prog"]
     preis = d["fahrzeug"]["preis"]
     preise = [preis - 2000, preis - 1000, preis + 500, preis + 900, preis + 1500, preis + 3000, preis + 4000, preis + 5000]
+    suche = next(l["url"] for l in d["links"] if l["portal"] == "mobile.de")
+    # Pruefung 05.10.2026 (Paket 1): eine ANDERE Suche (z.B. der Tab laedt noch die Suche des vorigen Autos)
+    # bekommt keine Ampel — 409, nichts gespeichert; die richtige Seite danach schon
+    andere = requests.post(f"{API}/werkzeuge/{WID}/marktlage", headers=prog, timeout=60,
+                           json={"vergleich_id": d["vergleich_id"], "url": MOBILE_SUCHE,
+                                 "seite": _seite(_mobile_suche_html(preise))})
+    assert andere.status_code == 409, andere.text
+    assert not welt["db"].werkzeug_vergleiche.find_one({"id": d["vergleich_id"]})["marktlage"]
     r = requests.post(f"{API}/werkzeuge/{WID}/marktlage", headers=prog, timeout=60,
-                      json={"vergleich_id": d["vergleich_id"], "url": MOBILE_SUCHE, "seite": _seite(_mobile_suche_html(preise))})
+                      json={"vergleich_id": d["vergleich_id"], "url": suche, "seite": _seite(_mobile_suche_html(preise))})
     assert r.status_code == 200, r.text
     lage = r.json()
     # 2 von 8 Vergleichsangeboten sind guenstiger = 25 % -> gerade noch gruen
@@ -566,7 +687,7 @@ def test_33_vergleichsseite_ergibt_die_ampel(welt):
     assert kein.status_code == 400
     chef_prog = _verbinden(welt, "chef", name="Chrome · Windows")
     fremd = requests.post(f"{API}/werkzeuge/{WID}/marktlage", headers=chef_prog, timeout=30,
-                          json={"vergleich_id": d["vergleich_id"], "url": MOBILE_SUCHE,
+                          json={"vergleich_id": d["vergleich_id"], "url": suche,
                                 "seite": _seite(_mobile_suche_html(preise))})
     assert fremd.status_code == 404, "nur der eigene Vergleich"
 
@@ -746,3 +867,43 @@ def test_41_index_auf_vergleichs_id():
     Vollscan je Vergleichsseite."""
     from indizes import WERKZEUG_INDIZES
     assert any(s == "werkzeug_vergleiche" and k == [("id", 1)] and o.get("unique") for s, k, o in WERKZEUG_INDIZES)
+
+
+def test_42_kaputte_seitenwerte_enden_als_422_und_werden_nie_gespeichert(welt):
+    """Pruefung 05.10.2026 (Paket 1): vorher wurde erst gespeichert (fuer alle Konten, 24 h) und danach scheiterte
+    die Anfrage mit 500 — der kaputte Wert blieb liegen."""
+    db, prog = welt["db"], welt["prog"]
+    andere_id = "42196329136897"
+    url = f"https://suchen.mobile.de/fahrzeuge/details.html?id={andere_id}"
+    ck = f"mobile:{andere_id}"
+    db.werkzeug_inserate.delete_many({"cache_key": ck})
+    kaputt = _mobile_listing(id=int(andere_id))
+    kaputt["price"] = {"grs": {"amount": float("nan"), "currency": "EUR"}, "type": "FIXED"}
+    r = _inserat(prog, url=url, html=_mobile_inserat_html(kaputt))
+    assert r.status_code == 422, r.text
+    r = _inserat(prog, url=url, html=_mobile_inserat_html(_mobile_listing(id=int(andere_id), subTitle={"x": 1})))
+    assert r.status_code in (200, 422), r.text
+    if r.status_code == 422:
+        assert db.werkzeug_inserate.count_documents({"cache_key": ck}) == 0, "abgelehnt = nie gespeichert"
+    # riesige Beschreibung + fremde Bildadresse: gespeichert wird nur die begrenzte Fassung
+    gross = _mobile_listing(id=int(andere_id))
+    r = _inserat(prog, url=url, html=_mobile_inserat_html(gross, beschreibung="Sehr lang. " * 40_000))
+    assert r.status_code == 200, r.text
+    gemerkt = db.werkzeug_inserate.find_one({"cache_key": ck, "user_id": welt["sucher_id"]})
+    assert gemerkt and len(gemerkt["data"]["description"]) <= bh.MAX_BESCHREIBUNG
+    assert all(u.startswith("https://img.classistatic.de/") for u in gemerkt["data"]["image_urls"])
+    db.werkzeug_inserate.delete_many({"cache_key": ck})
+    db.werkzeug_vergleiche.delete_many({"fahrzeug.inserat_id": andere_id})
+
+
+def test_43_fehlerantwort_spiegelt_keine_ganze_seite(welt):
+    """Pruefung 05.10.2026 (Paket 1): eine zu grosse "seite" kam in der 422-Antwort vollstaendig zurueck (bis
+    25 MB, auch ohne Anmeldung). Jetzt gekuerzt."""
+    gross = "A" * (5 * 1024 * 1024)
+    r = requests.post(f"{API}/werkzeuge/{WID}/inserat", timeout=60, json={"url": MOBILE_URL, "seite": gross})
+    assert r.status_code == 422, r.status_code
+    assert len(r.content) < 5000, len(r.content)
+    assert "Zeichen" in r.text and "seite" in r.text
+    # ... auch wenn das Echo der ganze Anfragekoerper ist (Pflichtfeld fehlt)
+    r = requests.post(f"{API}/werkzeuge/{WID}/marktlage", timeout=60, json={"url": MOBILE_URL, "seite": gross})
+    assert r.status_code == 422 and len(r.content) < 5000, (r.status_code, len(r.content))

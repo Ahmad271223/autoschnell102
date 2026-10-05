@@ -459,7 +459,10 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     regeln = (regeln_lesen((dealer or {}).get("export_rules"), DEFAULT_EXPORT_RULES) if profil == "export"
               else regeln_lesen((dealer or {}).get("comparison_rules"), DEFAULT_RULES))
     f = body.fahrzeug.model_dump()
-    erkannt = _erkennen(f)
+    # Pruefung 05.10.2026 (Paket 1): die Erkennung rechnet (Modell aus der Beschreibung: bis 0,2 s) — im Thread,
+    # damit in der Zeit keine andere Anfrage dieses Prozesses wartet
+    import asyncio
+    erkannt = await asyncio.to_thread(_erkennen, f)
     f["inserat_url"] = wz.inserat_url(f.get("quelle"), f.get("inserat_id"), f.get("hash_id"))
     vehicle = wz.fahrzeug_zu_vehicle(f)
     # Befund 04.10.2026: unplausible EZ/km sagen — die Filter bleiben wie eingestellt (wz.plausibel)
@@ -632,18 +635,24 @@ async def werkzeug_inserat(werkzeug_id: str, body: InseratIn,
         log.exception("Browser-Helfer: Inserat %s nicht auswertbar", identity["cache_key"])
         raise HTTPException(422, "Die Seite konnte nicht ausgewertet werden.")
     inserat_url = wz.inserat_url(identity["source"], identity["item_id"], identity["item_id"]) or body.url.strip()
-    await bh.inserat_merken(db, identity, inserat_url, fahrzeug, user)
     profil, regeln = await _firmenregeln(user)
     # Wunsch Ahmad 04.10.2026 (abends): immer an die AutoSchnell-Einstellungen halten — Beschaedigte und Navi wie
     # eingestellt (vorher hier immer "ohne Beschaedigte"). Was trotzdem durchrutscht (Unfall, Export, Neuwagen,
     # Lockangebote …), sortiert /marktlage fuer die Ampel weiter aus.
-    links, hinweise = wz.vergleichs_links(fahrzeug, regeln)
-    kurz = bh.fahrzeug_kurz(fahrzeug, identity, inserat_url)
-    # wie im Programm: unplausible EZ/km sagen (Filter bleiben wie eingestellt)
-    melden = wz.plausibel(kurz)
+    try:
+        links, hinweise = wz.vergleichs_links(fahrzeug, regeln)
+        kurz = bh.fahrzeug_kurz(fahrzeug, identity, inserat_url)
+        # wie im Programm: unplausible EZ/km sagen (Filter bleiben wie eingestellt)
+        melden = wz.plausibel(kurz)
+        verhandlung = bh.verhandlung_hinweise(fahrzeug)
+    except Exception:  # noqa: BLE001 — Werte aus der Seite, mit denen sich nicht rechnen laesst: 422, kein 500
+        log.exception("Browser-Helfer: Inserat %s nicht verwertbar", identity["cache_key"])
+        raise HTTPException(422, "Die Seite konnte nicht ausgewertet werden.")
     hinweise = melden + hinweise
+    # Pruefung 05.10.2026 (Paket 1): ERST nach allen Rechenschritten merken — die Lesung gilt 24 h fuer alle Konten;
+    # vorher wurde gespeichert und danach scheiterte die Anfrage (500), der kaputte Wert blieb liegen.
+    await bh.inserat_merken(db, identity, inserat_url, fahrzeug, user)
     programm = await _programm_vergleich(user, inserat_url)
-    verhandlung = bh.verhandlung_hinweise(fahrzeug)
     vergleich_id = str(uuid.uuid4())
     await db[wz.SAMMLUNG_VERGLEICHE].insert_one({
         "id": vergleich_id, "werkzeug": werkzeug_id, "dealer_id": user["dealer_id"], "user_id": user["id"],
@@ -686,19 +695,27 @@ async def werkzeug_marktlage(werkzeug_id: str, body: MarktlageIn,
     if doc is None:
         raise HTTPException(404, "Vergleich nicht gefunden.")
     portal = "mobile.de" if art == "mobile" else "AutoScout24"
-    if not any(l.get("portal") == portal for l in doc.get("links") or []):
+    eigene = [l.get("url") or "" for l in doc.get("links") or [] if l.get("portal") == portal]
+    if not eigene:
         raise HTTPException(400, "Zu diesem Inserat wurde keine solche Vergleichsseite geöffnet.")
+    # Pruefung 05.10.2026 (Paket 1): nur die Suche DIESES Vergleichs. Wer schnell zum naechsten Auto klickt, dessen
+    # Vergleichs-Tab laedt noch die alte Suche — sie bekam die Ampel des neuen Autos. 409: die Erweiterung wartet
+    # dann auf die richtige Seite. (Lieber keine Ampel als die eines anderen Autos, wie bei /programm-suche.)
+    if not any(bh.gleiche_suche(u, body.url.strip()) for u in eigene):
+        log.info("Browser-Helfer: Vergleichsseite passt nicht zum Vergleich %s (%s) — Seite: %s | Link: %s",
+                 doc["id"], portal, body.url.strip()[:400], eigene[0][:400])
+        raise HTTPException(409, "Diese Vergleichsseite gehört zu einer anderen Suche.")
     try:
         html = await _auswerten(bh.seite_entpacken, body.seite)
         liste = await _auswerten(bh.treffer_auslesen, body.url.strip(), html)
+        fz = doc.get("fahrzeug") or {}
+        # Wunsch Ahmad 04.10.2026: aussortieren (Unfall, Export, Neuwagen …), auf km/EZ des eigenen Autos umrechnen
+        lage = bh.marktlage(fz.get("preis"), fz.get("inserat_id") or "", liste, eigen=fz)
     except bh.SeiteUngueltig as exc:
         raise HTTPException(422, str(exc))
     except Exception:  # noqa: BLE001
         log.exception("Browser-Helfer: Vergleichsseite nicht auswertbar")
         raise HTTPException(422, "Die Vergleichsseite konnte nicht ausgewertet werden.")
-    fz = doc.get("fahrzeug") or {}
-    # Wunsch Ahmad 04.10.2026: aussortieren (Unfall, Export, Neuwagen …) und auf km/EZ des eigenen Autos umrechnen
-    lage = bh.marktlage(fz.get("preis"), fz.get("inserat_id") or "", liste, eigen=fz)
     lage["am"] = now_iso()
     await db[wz.SAMMLUNG_VERGLEICHE].update_one(
         {"id": doc["id"]}, {"$set": {f"marktlage.{'mobile' if art == 'mobile' else 'autoscout'}": lage}})

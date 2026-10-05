@@ -648,9 +648,11 @@ def _apify_html_zu_text(html_text: str) -> str:
     """htmlDescription -> lesbarer Text (Listenpunkte/Umbrueche erhalten)."""
     if not html_text:
         return ""
+    # [^<>] statt [^>]: auf einem Text aus lauter "<" liefen beide Muster quadratisch (Pruefung 05.10.2026:
+    # 32 KB = 0,8 s; die Beschreibung kommt beim Browser-Helfer aus einer eingeschickten Seite)
     t = re.sub(r"(?i)<\s*(br|/li|/p|/ul|/ol)\s*/?>", "\n", html_text)
-    t = re.sub(r"(?i)<\s*li[^>]*>", "- ", t)
-    t = re.sub(r"<[^>]+>", "", t)
+    t = re.sub(r"(?i)<\s*li[^<>]*>", "- ", t)
+    t = re.sub(r"<[^<>]+>", "", t)
     t = _htmllib.unescape(t)
     return re.sub(r"\n{3,}", "\n\n", t).strip()
 

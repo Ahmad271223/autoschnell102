@@ -17,6 +17,7 @@ Was sie kann (jeweils mit Befund):
 """
 from __future__ import annotations
 
+import functools
 import json
 import re
 import unicodedata
@@ -44,6 +45,10 @@ _WORT = re.compile(r"[^\W_]+")
 _SAMMELWOERTER = {"andere", "alle", "weitere", "sonstige", "other", "others", "misc"}
 
 
+# Pruefung 05.10.2026 (Paket 1): "Mercedes Andere" + Beschreibung brauchte 2,5 s — 474.000 Aufrufe von
+# lese_form/norm fuer immer dieselben Woerter (jedes Katalogmodell x jedes Wort der Beschreibung). Mit Merkzettel
+# rechnet jedes Wort einmal; das Ergebnis ist dasselbe (reine Funktionen).
+@functools.lru_cache(maxsize=100_000)
 def norm(wert: Optional[str]) -> str:
     """Kleinbuchstaben ohne Akzente, nur a-z und 0-9 (FahrzeugCodes.Norm / mobile_service._normalize)."""
     if not wert:
@@ -80,6 +85,7 @@ def ist_platzhalter(modell: Optional[str]) -> bool:
     return not (modell or "").strip() or bool(_GENERISCH.match(modell or ""))
 
 
+@functools.lru_cache(maxsize=100_000)
 def lese_form(s: Optional[str]) -> str:
     """i/l/1 -> 1, o/0 -> 0 (Befund 03.10.2026: Hyundai "i10" als "ilO" gelesen)."""
     return "".join("1" if c in "il1" else "0" if c in "o0" else c for c in norm(s))

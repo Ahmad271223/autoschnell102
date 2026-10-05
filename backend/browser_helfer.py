@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import re
 import statistics
 import zlib
@@ -34,7 +35,23 @@ from urllib.parse import parse_qs, parse_qsl, urlparse
 MAX_GEPACKT = 3 * 1024 * 1024
 MAX_HTML = 8 * 1024 * 1024
 
-_DEC = json.JSONDecoder()
+#: Pruefung 05.10.2026 (Paket 1): was aus einer Browserseite gespeichert wird, gilt 24 h fuer ALLE Konten —
+#: deshalb feste Grenzen fuer jeden Wert (fahrzeug_bereinigen), bevor irgendetwas gespeichert wird.
+MAX_BESCHREIBUNG_HTML = 200_000
+MAX_BESCHREIBUNG = 20_000
+MAX_TEXT = 500
+MAX_LISTE = 400
+MAX_BILDER = 60
+MAX_HREF = 2000
+
+
+def _keine_konstante(name):
+    """NaN / Infinity sind kein JSON (JSON.stringify schreibt sie nie) — eine Seite damit ist nicht echt.
+    Vorher kam ein Preis NaN durch die Pruefung "Preis vorhanden", wurde gespeichert und endete als 500."""
+    raise ValueError(f"kein JSON: {name}")
+
+
+_DEC = json.JSONDecoder(parse_constant=_keine_konstante)
 
 
 class SeiteUngueltig(ValueError):
@@ -108,12 +125,13 @@ def seite_entpacken(b64: str) -> str:
 
 # ---------------------------------------------------------------- Next.js-Daten
 _FLIGHT_START = "self.__next_f.push([1,"
+_FLIGHT_FEHLVERSUCHE = 50
 
 
 def next_flight_text(html: str) -> str:
     """Den Next.js-Datenstrom (App-Router) einer Seite zusammensetzen: jedes
     self.__next_f.push([1,"…"]) traegt ein JSON-Textstueck."""
-    teile, pos = [], 0
+    teile, pos, fehlversuche = [], 0, 0
     while True:
         i = html.find(_FLIGHT_START, pos)
         if i < 0:
@@ -122,6 +140,12 @@ def next_flight_text(html: str) -> str:
         try:
             wert, ende = _DEC.raw_decode(html, j)
         except ValueError:
+            # Pruefung 06.10.2026 (Paket 1): jeder Fehlversuch kostet Zeit im Verhaeltnis zur Seitenlaenge (die
+            # Fehlermeldung zaehlt die Zeilen bis zur Stelle) — eine Seite aus lauter kaputten Stuecken lief
+            # quadratisch (120 KB = 0,4 s, 8 MB = Minuten). Echte Seiten haben keine oder kaum kaputte Stuecke.
+            fehlversuche += 1
+            if fehlversuche > _FLIGHT_FEHLVERSUCHE:
+                break
             pos = j
             continue
         if isinstance(wert, str):
@@ -179,7 +203,9 @@ def flight_textblock(text: str, verweis) -> Optional[str]:
 
 def next_data(html: str) -> Optional[dict]:
     """<script id="__NEXT_DATA__" type="application/json">…</script> (Pages-Router, AutoScout24)."""
-    m = re.search(r'<script[^>]*id="__NEXT_DATA__"[^>]*>', html)
+    # [^<>] statt [^>]: sonst laeuft die Suche auf einer Seite aus lauter "<script " quadratisch
+    # (Pruefung 05.10.2026, gemessen 64 KB = 0,9 s, jede Verdopplung x4 — und re gibt die Sperre nicht frei)
+    m = re.search(r'<script[^<>]*id="__NEXT_DATA__"[^<>]*>', html)
     if not m:
         return None
     try:
@@ -230,7 +256,7 @@ def mobile_inserat(html: str, item_id: str, url: str) -> Tuple[dict, Optional[di
     if str(listing.get("id") or "") != str(item_id):
         raise SeiteUngueltig("Die Seite gehört zu einem anderen Inserat.")
     listing = dict(listing)
-    listing["htmlDescription"] = flight_textblock(text, listing.get("htmlDescription")) or ""
+    listing["htmlDescription"] = (flight_textblock(text, listing.get("htmlDescription")) or "")[:MAX_BESCHREIBUNG_HTML]
     fahrzeug = ms._parse_apify_item(listing, str(item_id), url)
     return fahrzeug, mobile_bewertung(listing)
 
@@ -310,7 +336,7 @@ def autoscout_inserat(html: str, item_id: str, url: str) -> Tuple[dict, Optional
                            else "AutoScout24: unfallfrei" if unfall is False else None),
         "roadworthy": None,
         "features": merkmale,
-        "description": _apify_html_zu_text(str(details.get("description") or "")),
+        "description": _apify_html_zu_text(str(details.get("description") or "")[:MAX_BESCHREIBUNG_HTML]),
         "list_price": float(preise["priceRaw"]) if isinstance(preise.get("priceRaw"), (int, float)) else None,
         "currency": "EUR",
         "price_type": "NEGOTIABLE" if preise.get("negotiable") is True else None,
@@ -349,11 +375,74 @@ def inserat_auslesen(identity: dict, url: str, html: str) -> Tuple[dict, Optiona
     """(fahrzeug im Schema von /mobile/compare, Preisbewertung des Portals oder None).
     Ohne Marke oder Preis ist es kein verwertbares Inserat (wie /listings/ingest)."""
     fahrzeug, bewertung = _LESER[identity["source"]](html, identity["item_id"], url)
+    fahrzeug = fahrzeug_bereinigen(fahrzeug)
     if not (fahrzeug.get("make_label") or fahrzeug.get("make_id")):
         raise SeiteUngueltig("Auf der Seite steht keine erkennbare Fahrzeugmarke.")
     if not fahrzeug.get("list_price"):
         raise SeiteUngueltig("Auf der Seite steht kein Preis.")
     return fahrzeug, bewertung
+
+
+#: Zahlenfelder mit plausiblem Bereich — ausserhalb = nicht gelesen (None). Absurde Werte (10^20 km) liessen die
+#: Umrechnung ueberlaufen (500), ein Preis NaN bestand die Pruefung "Preis vorhanden".
+_ZAHL_GRENZEN = {"list_price": (1, 100_000_000), "mileage": (0, 3_000_000), "power_kw": (1, 2000),
+                 "power_ps": (1, 3000), "displacement": (1, 20_000), "seats": (1, 99)}
+#: Textfelder, mit denen der Server weiterrechnet (Links, Hinweise, Kurzfassung): immer Text oder None
+_TEXT_FELDER = frozenset({
+    "mobile_ad_id", "kleinanzeigen_id", "detail_url", "make", "make_label", "model", "model_label",
+    "model_description", "title", "category", "category_label", "first_registration", "fuel", "fuel_label",
+    "gearbox", "gearbox_label", "description", "seller_name", "seller_type"})
+_BILD_FELDER = frozenset({"image_urls", "images"})
+
+
+def _wert_bereinigen(wert, in_liste: bool = False):
+    """Nur einfache Werte in festen Grenzen: Text gekuerzt, Zahlen endlich, Listen flach (nur einfache Werte).
+    Alle drei Leser liefern flache Daten — ein Objekt oder eine Liste in einer Liste ist nie echt (None)."""
+    if wert is None or isinstance(wert, bool):
+        return wert
+    if isinstance(wert, int):
+        return wert if abs(wert) <= 10 ** 12 else None
+    if isinstance(wert, float):
+        return wert if math.isfinite(wert) and abs(wert) <= 1e12 else None
+    if isinstance(wert, str):
+        return wert[:MAX_TEXT]
+    if isinstance(wert, (list, tuple)) and not in_liste:
+        roh = [_wert_bereinigen(w, True) for w in list(wert)[:MAX_LISTE]]
+        return [w for w in roh if w is not None]
+    return None
+
+
+def fahrzeug_bereinigen(fahrzeug: dict) -> dict:
+    """Pruefung 05.10.2026 (Paket 1): die Werte kommen aus einer Seite, die ein Browser geschickt hat, und gelten
+    danach fuer alle Konten — vor dem Speichern in feste Formen bringen:
+      * Zahlen nur endlich und im plausiblen Bereich (sonst None), Texte gekuerzt, falsche Typen (Objekt statt
+        Text) werden zu None statt spaeter zu einem 500
+      * Beschreibung hoechstens 20.000 Zeichen, Listen hoechstens 400 Eintraege
+      * Fotos nur von den Bild-Servern der Portale (bild_proxy.erlaubt) — eine fremde Adresse wuerde sonst im
+        Browser anderer Firmen geladen (deren IP-Adresse geht an den fremden Server)"""
+    import bild_proxy
+    sauber: Dict[str, Any] = {}
+    for k, w in list(fahrzeug.items())[:200]:
+        k = str(k)[:60]
+        if k in _BILD_FELDER:
+            sauber[k] = [u for u in (w if isinstance(w, (list, tuple)) else [])
+                         if isinstance(u, str) and bild_proxy.erlaubt(u)][:MAX_BILDER]
+        elif k in _ZAHL_GRENZEN:
+            von, bis = _ZAHL_GRENZEN[k]
+            ok = (isinstance(w, (int, float)) and not isinstance(w, bool) and math.isfinite(w) and von <= w <= bis)
+            sauber[k] = w if ok else None
+        elif k in _TEXT_FELDER:
+            if isinstance(w, str):
+                sauber[k] = w[:MAX_BESCHREIBUNG if k == "description" else MAX_TEXT]
+            elif isinstance(w, (int, float)) and not isinstance(w, bool) and math.isfinite(w):
+                sauber[k] = str(w)[:MAX_TEXT]
+            else:
+                sauber[k] = None
+        else:
+            sauber[k] = _wert_bereinigen(w)
+    if "image_count" in sauber:
+        sauber["image_count"] = len(sauber.get("image_urls") or sauber.get("images") or [])
+    return sauber
 
 
 def fahrzeug_kurz(fahrzeug: dict, identity: dict, inserat_url: str) -> dict:
@@ -476,7 +565,10 @@ def mobile_karten(html: str) -> Dict[str, dict]:
         return {}
     karten: Dict[str, dict] = {}
     for a in baum.xpath('//a[contains(@href, "details.html?")]'):
-        m = re.search(r"details\.html\?(?:[^\"'#]*&)?id=(\d+)", a.get("href") or "")
+        href = a.get("href") or ""
+        if len(href) > MAX_HREF:             # eine echte Inserat-Adresse ist kurz; lange liefen quadratisch
+            continue
+        m = re.search(r"details\.html\?(?:[^\"'#]*&)?id=(\d+)", href)
         if not m or m.group(1) in karten:
             continue
         zeilen = [z.strip() for z in a.itertext() if z.strip() and z.strip() != "•"]
@@ -598,9 +690,26 @@ def gleiche_suche(link_url: str, seiten_url: str) -> bool:
     if art == "mobile":
         return a.path == b.path and _filter(a.query) == _filter(b.query)
     host = lambda p: (p.hostname or "").lower().removeprefix("www.")
-    marke = lambda p: (p.path.rstrip("/").split("/") + ["", "", ""])[2].lower()
-    return (host(a) == host(b) and marke(a) == marke(b)
-            and _filter(a.query, _AUTOSCOUT_IN_DEN_PFAD) == _filter(b.query, _AUTOSCOUT_IN_DEN_PFAD))
+    return host(a) == host(b) and _autoscout_kern(a) == _autoscout_kern(b)
+
+
+def _autoscout_kern(p) -> tuple:
+    """Was von einer AutoScout24-Suche nach dem Umschreiben der Adresse gleich bleibt: Marke, Erstzulassung und
+    alle Filter, die NICHT in den Pfad wandern. Am 06.10.2026 an fuenf echten Suchen geprueft:
+      /lst/opel?…&cat=ma54mo1918&fregfrom=2012&fregto=2012&fuel=B&gear=M&kmfrom=…
+      -> /lst/opel/corsa/re_2012/ft_benzin/tr_schaltgetriebe?kmfrom=…        (gleiches Jahr von/bis -> "re_2012")
+      /lst/tesla?…&cat=…&fuel=E&gear=A -> /lst/tesla/model-3?…               (Kraftstoff/Getriebe ganz weg)
+    Vorher fiel "Erstzulassung genau" (fregfrom = fregto) durch — keine Ampel auf den Programm-Seiten."""
+    q = dict(parse_qsl(p.query, keep_blank_values=True))
+    teile = [s.lower() for s in p.path.split("/") if s]
+    marke = teile[1] if len(teile) > 1 else ""
+    von, bis = q.pop("fregfrom", ""), q.pop("fregto", "")
+    jahr = next((s[3:] for s in teile[2:] if s.startswith("re_")), "")
+    if jahr and not von and not bis:
+        von = bis = jahr
+    for k in _AUTOSCOUT_IN_DEN_PFAD | _NIE_VERGLEICHEN:
+        q.pop(k, None)
+    return marke, von, bis, sorted(q.items())
 
 
 def ist_vergleichsseite(url: str) -> Optional[str]:
@@ -632,8 +741,34 @@ def treffer_auslesen(url: str, html: str) -> dict:
         liste = autoscout_treffer(html, url)
     else:
         raise SeiteUngueltig("Das ist keine Vergleichsseite von mobile.de oder AutoScout24.")
-    liste["treffer"] = (liste.get("treffer") or [])[:MAX_TREFFER]
+    liste["treffer"] = [_treffer_bereinigen(t) for t in (liste.get("treffer") or [])[:MAX_TREFFER]]
     return liste
+
+
+def _zahl_im_bereich(wert, von: int, bis: int) -> Optional[int]:
+    ok = isinstance(wert, (int, float)) and not isinstance(wert, bool) and math.isfinite(wert) and von <= wert <= bis
+    return int(wert) if ok else None
+
+
+def _treffer_bereinigen(t: dict) -> dict:
+    """Wie fahrzeug_bereinigen fuer ein Vergleichsangebot: absurde Kilometer (10^20) liessen die Umrechnung
+    ueberlaufen (OverflowError -> 500), Texte/Listen kamen ungekuerzt in werkzeug_vergleiche.marktlage."""
+    text = lambda w, n: w[:n] if isinstance(w, str) else None  # noqa: E731
+    return {
+        "id": text(t.get("id"), 64) or "",
+        "titel": text(t.get("titel"), 200) or "",
+        "zustand": [z[:60] for z in (t.get("zustand") or []) if isinstance(z, str)][:10],
+        "neu": t.get("neu") is True,
+        "preis": _zahl_im_bereich(t.get("preis"), 1, 100_000_000),
+        "ez": text(t.get("ez"), 10),
+        "km": _zahl_im_bereich(t.get("km"), 0, 3_000_000),
+        "kw": _zahl_im_bereich(t.get("kw"), 1, 2000),
+        "ps": _zahl_im_bereich(t.get("ps"), 1, 3000),
+        "kraftstoff": text(t.get("kraftstoff"), 40),
+        "getriebe": text(t.get("getriebe"), 40),
+        "verkaeufer": t.get("verkaeufer") if t.get("verkaeufer") in ("haendler", "privat") else None,
+        "bewertung": text(t.get("bewertung"), 40),
+    }
 
 
 # ---------------------------------------------------------------- Marktlage + Ampel
@@ -679,11 +814,12 @@ def _aussortieren(t: dict, eigene_km) -> Optional[str]:
 
 
 def _jahr(ez) -> Optional[float]:
-    m = re.match(r"^\s*(\d{1,2})/(\d{4})\s*$", str(ez or ""))
-    if m and 1 <= int(m.group(1)) <= 12:
+    # nur 1900–2100: "01/9999" liess (1 + je_jahr) ** Jahre ueberlaufen (OverflowError)
+    m = re.match(r"^\s*(\d{1,2})/(\d{4})\s*$", str(ez or "")[:20])
+    if m and 1 <= int(m.group(1)) <= 12 and 1900 <= int(m.group(2)) <= 2100:
         return int(m.group(2)) + (int(m.group(1)) - 1) / 12
-    m = re.match(r"^\s*(\d{4})\s*$", str(ez or ""))
-    return int(m.group(1)) + 0.5 if m else None
+    m = re.match(r"^\s*(\d{4})\s*$", str(ez or "")[:20])
+    return int(m.group(1)) + 0.5 if m and 1900 <= int(m.group(1)) <= 2100 else None
 
 
 #: Faustwerte, wenn die Vergleichsangebote keine eigene Umrechnung hergeben (zu wenige, zu gleich, unplausibel)
@@ -757,8 +893,11 @@ def umrechnung(saubere: List[dict], eigen: Optional[dict], preis: Optional[int])
         j = _jahr(t.get("ez"))
         if not t.get("preis") or not isinstance(t.get("km"), int) or j is None:
             continue
-        faktor = (1 + je_km) ** ((km_e - t["km"]) / 10000) * (1 + je_jahr) ** (jahr_e - j)
-        wert = t["preis"] * faktor
+        try:
+            faktor = (1 + je_km) ** ((km_e - t["km"]) / 10000) * (1 + je_jahr) ** (jahr_e - j)
+            wert = t["preis"] * faktor
+        except (OverflowError, ZeroDivisionError):      # absurde Werte (EZ 9999, 10^9 km): nicht umrechenbar
+            continue
         if beste is None or wert < beste[0]:
             beste = (wert, t)
     if beste is None:
