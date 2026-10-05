@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger("autohandel.migrationen")
 
-ZIEL_VERSION = 21
+ZIEL_VERSION = 22   # 22: werkzeug_vergleiche_ablauf (Entscheidung Ahmad 06.10.2026: 60 Tage)
 _SPERRE = "migration"
 
 
