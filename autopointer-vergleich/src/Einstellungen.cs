@@ -90,13 +90,31 @@ internal sealed class Einstellungen
         }
     }
 
+    /// <summary>Pruefung 05.10.2026 (Paket 2, A12): der Server von der Befehlszeile (--server, Tests) gilt nur im
+    /// Speicher — beim Speichern bleibt der gespeicherte Server stehen. Vorher landete der Testserver in der Datei
+    /// und das Programm haengte sich beim naechsten normalen Start an den falschen Server.</summary>
+    private string? _serverGespeichert;
+    [JsonIgnore] public bool ServerNurImSpeicher => _serverGespeichert != null;
+
+    public void ServerUeberschreiben(string server)
+    {
+        _serverGespeichert ??= Server;
+        Server = server;
+    }
+
     public void Speichern()
     {
         Directory.CreateDirectory(Ordner);
         // Paket 1: erst vollstaendig in eine neue Datei, dann in einem Zug tauschen (die alte wird zur .bak) —
         // File.WriteAllText leerte die Datei zuerst; ein Absturz dazwischen hinterliess eine leere Datei
         string neu = Datei + ".neu";
-        File.WriteAllText(neu, JsonSerializer.Serialize(this, Json));
+        var zuSchreiben = this;
+        if (_serverGespeichert != null)
+        {
+            zuSchreiben = Kopie();
+            zuSchreiben.Server = _serverGespeichert;       // A12: --server nie in die Datei
+        }
+        File.WriteAllText(neu, JsonSerializer.Serialize(zuSchreiben, Json));
         if (File.Exists(Datei)) File.Replace(neu, Datei, Sicherung);
         else File.Move(neu, Datei, overwrite: true);
         Autostart.Setzen(MitWindowsStarten);
@@ -187,15 +205,24 @@ internal static class Autostart
 
     /// <summary>Pruefung 04.10.2026: Wer ein Update an anderer Stelle speichert ("AutoSchnell-Vergleich (1).exe" in
     /// Downloads), bekam beim naechsten Windows-Start wieder die ALTE Datei — der Eintrag zeigte auf deren Pfad.
-    /// Ist der Autostart an, zeigt er jetzt beim Programmstart immer auf die laufende Datei. Aus bleibt aus.</summary>
+    /// Ist der Autostart an, zeigt er beim Programmstart auf die richtige Datei. Aus bleibt aus.
+    /// Pruefung 05.10.2026 (Paket 2, A6): "richtig" ist die Kopie am festen Platz (<see cref="Installation"/>), sobald
+    /// es sie gibt; sonst die laufende Datei — nie eine aus Temp/Downloads (dann bleibt der Eintrag, wie er ist).</summary>
     public static void PfadNachziehen()
     {
         try
         {
             using var k = Registry.CurrentUser.OpenSubKey(Schluessel, writable: true);
-            string? pfad = Environment.ProcessPath;
-            if (k == null || !MussNachziehen(k.GetValue(Name) as string, pfad)) return;
-            k.SetValue(Name, Wert(pfad!));
+            if (k == null || k.GetValue(Name) is not string eintrag) return;
+            string? pfad = Installation.AutostartZiel();
+            if (pfad == null)
+            {
+                Protokoll.Schreibe("Autostart nicht nachgezogen: das Programm läuft aus einem temporären Ordner und die "
+                                   + "feste Kopie fehlt (" + Environment.ProcessPath + ").");
+                return;
+            }
+            if (!MussNachziehen(eintrag, pfad)) return;
+            k.SetValue(Name, Wert(pfad));
             Protokoll.Schreibe("Autostart zeigt jetzt auf diese Programmdatei: " + pfad);
         }
         catch (Exception ex) { Protokoll.Schreibe("Autostart nicht nachgezogen: " + ex.Message); }
@@ -206,7 +233,8 @@ internal static class Autostart
         if (an == IstAn()) return;
         using var k = Registry.CurrentUser.OpenSubKey(Schluessel, writable: true);
         if (k == null) return;
-        if (an) k.SetValue(Name, Wert(Environment.ProcessPath ?? ""));
+        // Paket 2 (A6): auf die feste Kopie, wenn es sie gibt — sonst wie bisher auf die laufende Datei
+        if (an) k.SetValue(Name, Wert(Installation.AutostartZiel() ?? Environment.ProcessPath ?? ""));
         else k.DeleteValue(Name, throwOnMissingValue: false);
     }
 }

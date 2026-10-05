@@ -440,4 +440,68 @@ public class UeberwacherTests
         Assert.Equal(new[] { "AutoScout24" }, _b.Aufrufe[0].Select(v => v.Portal));
     }
 
+    [Fact]   // Pruefung 05.10.2026 (Paket 2, A11): NachVerbinden() kam vom Oberflaechen-Thread mitten ins Lesen
+    public async Task Neuverbinden_waehrend_des_Lesens_verliert_das_Auto_nicht()
+    {
+        // vorher: die Felder wurden mitten im Lesen zurueckgesetzt (_summe = 0, _offen = false) — das gelesene Auto
+        // galt als "waehrend des Lesens geaendert" und wurde verworfen, danach nie mehr gelesen (nichts mehr "offen")
+        await Start();
+        _q.Zeige(Bentley, 1);
+        _q.WaehrendDesLesens = () => { _u.NachVerbinden(); _q.WaehrendDesLesens = null; };
+        for (int i = 0; i < 8; i++) await Tick();
+        // das laufende Lesen wird fertig und oeffnet; der Wunsch "NachVerbinden" gilt danach (gleiches Auto noch einmal)
+        Assert.Equal(2, _b.Aufrufe.Count);
+        Assert.Equal(2, _q.Lesungen);
+    }
+
+    [Fact]   // A11: nach einer 401 reicht NachVerbinden() auch dann, wenn der Takt gerade frueh aussteigt
+    public async Task Nach_401_und_Neuverbinden_laeuft_es_weiter()
+    {
+        await Start();
+        _server.Fehler = new DienstFehler(401, "Dieses Programm ist nicht (mehr) verbunden");
+        await Anklicken(Bentley, 1);
+        Assert.Equal(Status.NichtVerbunden, _u.Status);
+        for (int i = 0; i < 3; i++) await Tick();          // bleibt "nicht verbunden", liest nichts
+        Assert.Equal(1, _q.Lesungen);
+        _server.Fehler = null;
+        _u.NachVerbinden();
+        for (int i = 0; i < 6; i++) await Tick();
+        Assert.Single(_b.Aufrufe);
+        Assert.Equal(Status.Aktiv, _u.Status);
+    }
+
+    [Fact]   // Paket 2 (A8): /status meldete 402/403 — der Ueberwacher liest nichts, bis die Sperre weg ist
+    public async Task Lizenzsperre_liest_nichts()
+    {
+        await Start();
+        _u.LizenzGesperrt = true;
+        await Anklicken(Bentley, 1);
+        Assert.Equal(0, _q.Lesungen);
+        Assert.Equal(Status.Gesperrt, _u.Status);
+        Assert.Empty(_b.Aufrufe);
+        _u.LizenzGesperrt = false;                       // Abo verlaengert: die naechste Lizenzpruefung hebt auf
+        for (int i = 0; i < 5; i++) await Tick();
+        Assert.Single(_b.Aufrufe);
+        Assert.Equal(Status.Aktiv, _u.Status);
+    }
+
+    [Fact]   // Paket 2 (A10): ein Sprung der Uhr (Zeitabgleich) fuehrt nie zu einer Wartezeit ueber dem Mindestabstand
+    public async Task Mindestabstand_nie_laenger_als_eingestellt_auch_bei_Uhrsprung()
+    {
+        await Start();
+        _e.WartezeitMs = 100;
+        _e.MindestabstandMs = 2000;
+        await Anklicken(Bentley, 1);
+        _jetzt = _jetzt.AddHours(-1);                    // Uhr zurueckgestellt
+        await Anklicken(Passat, 2);
+        Assert.Equal(2, _b.Aufrufe.Count);
+        Assert.Single(_gewartet);
+        Assert.True(_gewartet[0] <= TimeSpan.FromMilliseconds(2000), _gewartet[0].ToString());
+        // Uhr weit vorgestellt: gar keine Wartezeit
+        _jetzt = _jetzt.AddHours(2);
+        await Anklicken(Golf, 3);
+        Assert.Equal(3, _b.Aufrufe.Count);
+        Assert.Single(_gewartet);
+    }
+
 }

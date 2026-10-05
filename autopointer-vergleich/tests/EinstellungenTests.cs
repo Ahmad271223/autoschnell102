@@ -49,6 +49,59 @@ public class EinstellungenTests
         }
     }
 
+    [Fact]   // Pruefung 05.10.2026 (Paket 2, A12): --server gilt nur fuer diesen Lauf — nie in die Datei
+    public void Server_von_der_Befehlszeile_wird_nie_gespeichert()
+    {
+        string ordner = Path.Combine(Path.GetTempPath(), "as-einst-" + Guid.NewGuid().ToString("N")[..8]);
+        string? vorher = Environment.GetEnvironmentVariable("AUTOSCHNELL_VERGLEICH_DATEN");
+        bool dateiVorher = Protokoll.DateiAktiv;
+        Environment.SetEnvironmentVariable("AUTOSCHNELL_VERGLEICH_DATEN", ordner);
+        Protokoll.DateiAktiv = false;
+        try
+        {
+            bool autostart = Autostart.IstAn();          // Setzen(an == IstAn) aendert nichts an der Registrierung
+            var e = new Einstellungen { MitWindowsStarten = autostart };
+            e.ServerUeberschreiben("http://127.0.0.1:9");
+            Assert.Equal("http://127.0.0.1:9", e.Server);
+            Assert.True(e.ServerNurImSpeicher);
+            e.SchluesselSetzen("test-schluessel", "Test (10002-1)");
+            e.WartezeitMs = 650;
+            e.Speichern();
+
+            var geladen = Einstellungen.Laden();
+            Assert.Equal(Einstellungen.StandardServer, geladen.Server);       // der gespeicherte Server bleibt
+            Assert.Equal(650, geladen.WartezeitMs);
+            Assert.False(geladen.ServerNurImSpeicher);
+            // der Schluessel gehoert zum Testserver — fuer den gespeicherten Server gilt er nicht
+            Assert.Equal("http://127.0.0.1:9", geladen.SchluesselServer);
+            Assert.Null(geladen.Schluessel());
+            geladen.ServerUeberschreiben("http://127.0.0.1:9");
+            Assert.Equal("test-schluessel", geladen.Schluessel());
+            // im Speicher bleibt der Testserver auch nach dem Speichern
+            Assert.Equal("http://127.0.0.1:9", e.Server);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AUTOSCHNELL_VERGLEICH_DATEN", vorher);
+            Protokoll.DateiAktiv = dateiVorher;
+            try { Directory.Delete(ordner, true); } catch (IOException) { }
+        }
+    }
+
+    [Fact]   // Paket 2 (A13): Erkennungsbilder hoechstens ~200 MB — die aeltesten fliegen zuerst
+    public void Erkennungsbilder_ueber_dem_Limit_aelteste_zuerst()
+    {
+        var t0 = new DateTime(2026, 10, 5, 8, 0, 0);
+        var dateien = new List<(string Pfad, long Groesse, DateTime Zeit)>
+        {
+            ("a", 60, t0), ("b", 60, t0.AddMinutes(1)), ("c", 60, t0.AddMinutes(2)), ("d", 60, t0.AddMinutes(3)),
+        };
+        Assert.Equal(new[] { "b", "a" }, Protokoll.UeberDemLimit(dateien, 150));   // d + c = 120 bleiben
+        Assert.Empty(Protokoll.UeberDemLimit(dateien, 240));
+        Assert.Equal(new[] { "c", "b", "a" }, Protokoll.UeberDemLimit(dateien, 100));
+        Assert.Equal(200L * 1024 * 1024, Protokoll.BilderMaxBytes);
+    }
+
     [Fact]
     public void Gedrosseltes_Protokoll_zaehlt_Wiederholungen()
     {

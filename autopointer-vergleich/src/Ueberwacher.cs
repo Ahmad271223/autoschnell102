@@ -22,7 +22,9 @@ internal interface IOeffner
     void Oeffne(IReadOnlyList<Vergleich> vergleiche, Einstellungen e, IntPtr autoPointer);
 }
 
-internal enum Status { Pause, KeinAutoPointer, Bereit, Aktiv, NichtVerbunden, Gesperrt }
+/// <param name="TexterkennungFehlt">Paket 2 (A9): Windows-Texterkennung (Sprachpaket) fehlt — wird jede Minute
+/// erneut versucht; bis dahin liest das Programm nichts.</param>
+internal enum Status { Pause, KeinAutoPointer, Bereit, Aktiv, NichtVerbunden, Gesperrt, TexterkennungFehlt }
 
 /// <summary>Der Ablauf: Aenderung in der Detailansicht bemerken -> warten, bis sie
 /// stillsteht -> lesen -> nur bei einem wirklich anderen Fahrzeug beim
@@ -34,16 +36,20 @@ internal sealed class Ueberwacher
     private readonly IOeffner _oeffner;
     private readonly IVergleichsDienst _dienst;
     private readonly Func<DateTime> _uhr;
+    /// <summary>Pruefung 05.10.2026 (Paket 2, A10): Zeitabstaende (Wartezeit, Mindestabstand) laufen ueber diese
+    /// monotone Uhr in Millisekunden (Environment.TickCount64) — nicht ueber DateTime.Now, das beim Stellen der
+    /// Uhr (Zeitabgleich, Sommerzeit) springt. Tests, die nur eine DateTime-Uhr geben, bekommen sie daraus.</summary>
+    private readonly Func<long> _takt;
     private readonly Func<TimeSpan, Task> _warte;
     private readonly SemaphoreSlim _einzeln = new(1, 1);
 
     private ulong _summe;
-    private DateTime _seit;
-    private bool _offen;
+    private long _seit;
+    private volatile bool _offen;
     private string? _letzterSchluessel;
     /// <summary>Inserat-Kennung des zuletzt gemerkten Autos (Pruefbericht 03.10.2026, Nr. 1).</summary>
     private string? _letzteKennung;
-    private DateTime _letzteOeffnung = DateTime.MinValue;
+    private long? _letzteOeffnung;
     private bool _basis = true;
     private bool _ersterTick = true;
     private ulong _gemeldeteSumme;
@@ -55,8 +61,16 @@ internal sealed class Ueberwacher
     /// <see cref="LeseVersuche"/> Versuche mit wachsendem Abstand, dann erst wieder bei einer Aenderung.</summary>
     private int _lesefehler;
     internal const int LeseVersuche = 3;
+    /// <summary>Pruefung 05.10.2026 (Paket 2, A11): Neustart()/NachVerbinden() kommen vom Oberflaechen-Thread, waehrend
+    /// der Takt-Thread liest. Vorher setzten sie die Felder mitten im Lesen zurueck — das gerade gelesene Auto wurde
+    /// verworfen und danach nie verglichen (_offen war schon false). Jetzt merken sie nur einen Wunsch, den der
+    /// naechste Durchlauf unter der Sperre anwendet. 0 = nichts, 1 = Neustart, 2 = NachVerbinden.</summary>
+    private int _angefordert;
 
     public bool Probelauf { get; set; }
+    /// <summary>Paket 2 (A8): die Lizenzpruefung (/status) meldete 402/403 — bis sie wieder gut ist, wird nichts
+    /// gelesen (Status "Gesperrt"). Setzt TrayApp.</summary>
+    public volatile bool LizenzGesperrt;
     public Fahrzeug? LetztesFahrzeug { get; private set; }
     public IReadOnlyList<Vergleich> LetzteVergleiche { get; private set; } = Array.Empty<Vergleich>();
     /// <summary>Original-Inserat des zuletzt verglichenen Autos (fuer "Kaufvertrag: in AutoSchnell oeffnen").</summary>
@@ -72,57 +86,77 @@ internal sealed class Ueberwacher
     /// <summary>Ein neues Auto ist jetzt "das letzte" (Nr. 11: ab hier zaehlt eine neu kopierte Inserat-Adresse).</summary>
     public event Action<Fahrzeug>? FahrzeugGewechselt;
 
+    /// <param name="uhr">Datum/Uhrzeit fuer Plausibilitaet (EZ in der Zukunft) — Tests stellen sie.</param>
+    /// <param name="takt">Monotone Uhr in ms fuer Abstaende; fehlt sie, kommt sie aus <paramref name="uhr"/> (Tests)
+    /// bzw. ist Environment.TickCount64.</param>
     public Ueberwacher(IAnsichtQuelle quelle, Func<Einstellungen> einstellungen, IOeffner oeffner,
-                       IVergleichsDienst dienst, Func<DateTime>? uhr = null, Func<TimeSpan, Task>? warte = null)
+                       IVergleichsDienst dienst, Func<DateTime>? uhr = null, Func<TimeSpan, Task>? warte = null,
+                       Func<long>? takt = null)
     {
         _quelle = quelle;
         _einstellungen = einstellungen;
         _oeffner = oeffner;
         _dienst = dienst;
         _uhr = uhr ?? (() => DateTime.Now);
+        _takt = takt ?? (uhr != null ? () => uhr().Ticks / TimeSpan.TicksPerMillisecond : () => Environment.TickCount64);
         _warte = warte ?? (t => Task.Delay(t));
     }
 
     /// <summary>Beim Start und beim Wiedereinschalten: Ein Fahrzeug, das gerade
     /// schon angezeigt wird, gilt als gesehen und oeffnet keine Tabs - erst das
-    /// naechste angeklickte.</summary>
-    public void Neustart()
+    /// naechste angeklickte. (Wird beim naechsten Durchlauf unter der Sperre angewendet, A11.)</summary>
+    public void Neustart() => Interlocked.Exchange(ref _angefordert, 1);
+
+    /// <summary>Befund 04.10.2026 (Mercedes nach dem Neuverbinden nicht geoeffnet): nach dem (Neu-)Verbinden wird das
+    /// gerade angezeigte Auto verglichen — nicht wie beim Programmstart als "schon gesehen" behandelt, und auch
+    /// dann, wenn es vor dem Trennen schon dran war. (Angewendet beim naechsten Durchlauf unter der Sperre, A11.)</summary>
+    public void NachVerbinden() => Interlocked.Exchange(ref _angefordert, 2);
+
+    /// <summary>Angeforderten Neustart/NachVerbinden anwenden — nur unter <see cref="_einzeln"/>.</summary>
+    private void AnforderungAnwenden()
     {
+        int a = Interlocked.Exchange(ref _angefordert, 0);
+        if (a == 0) return;
         _basis = true;
         _ersterTick = true;
         _verloren = false;
         _gesperrt = false;
         _offen = false;
         _summe = 0;
-    }
-
-    /// <summary>Befund 04.10.2026 (Mercedes nach dem Neuverbinden nicht geoeffnet): nach dem (Neu-)Verbinden wird das
-    /// gerade angezeigte Auto verglichen — nicht wie beim Programmstart als "schon gesehen" behandelt, und auch
-    /// dann, wenn es vor dem Trennen schon dran war.</summary>
-    public void NachVerbinden()
-    {
-        Neustart();
-        _basis = false;
-        _letzterSchluessel = null;
-        _letzteKennung = null;
+        if (a == 2)
+        {
+            _basis = false;
+            _letzterSchluessel = null;
+            _letzteKennung = null;
+        }
     }
 
     public async Task TickAsync()
     {
-        var e = _einstellungen();
-        if (!e.AutomatikAktiv)
-        {
-            SetzeStatus(Status.Pause);
-            return;
-        }
-        if (!_dienst.Verbunden || _verloren)
-        {
-            SetzeStatus(Status.NichtVerbunden);
-            return;
-        }
+        // A11: auch die fruehen Ausstiege (Pause, nicht verbunden) unter der Sperre, damit ein angeforderter
+        // Neustart/NachVerbinden sicher angewendet wird (z. B. _verloren zuruecksetzen) und nie mitten im Lesen greift
         if (!await _einzeln.WaitAsync(0)) return;
         try
         {
+            AnforderungAnwenden();
+            var e = _einstellungen();
+            if (!e.AutomatikAktiv)
+            {
+                SetzeStatus(Status.Pause);
+                return;
+            }
+            if (!_dienst.Verbunden || _verloren)
+            {
+                SetzeStatus(Status.NichtVerbunden);
+                return;
+            }
+            if (LizenzGesperrt)
+            {
+                // A8: /status sagte 402/403 — nichts lesen, bis die Lizenzpruefung wieder gut ist
+                SetzeStatus(Status.Gesperrt);
+                _offen = false;
+                return;
+            }
             var z = _quelle.Pruefe();
             if (_ersterTick)
             {
@@ -137,7 +171,7 @@ internal sealed class Ueberwacher
                 return;
             }
             SetzeStatus(_gesperrt ? Status.Gesperrt : Status.Aktiv);
-            var jetzt = _uhr();
+            long jetzt = _takt();
             if (z.Summe != _summe)
             {
                 _summe = z.Summe;
@@ -145,7 +179,7 @@ internal sealed class Ueberwacher
                 _offen = true;
                 return;
             }
-            if (!_offen || (jetzt - _seit).TotalMilliseconds < e.WartezeitMs) return;
+            if (!_offen || jetzt - _seit < e.WartezeitMs) return;
 
             Lesung? lesung;
             try
@@ -168,7 +202,7 @@ internal sealed class Ueberwacher
                 }
                 else
                 {
-                    _seit = _uhr().AddMilliseconds(2000 * _lesefehler);
+                    _seit = _takt() + 2000 * _lesefehler;
                 }
                 return;
             }
@@ -178,7 +212,7 @@ internal sealed class Ueberwacher
                 // Waehrend des Lesens hat AutoPointer weitergeblaettert: verwerfen,
                 // sonst koennten Werte zweier Fahrzeuge gemischt werden.
                 _summe = nach.Summe;
-                _seit = _uhr();
+                _seit = _takt();
                 return;
             }
             _offen = false;
@@ -201,6 +235,7 @@ internal sealed class Ueberwacher
         }
         try
         {
+            AnforderungAnwenden();
             var z = _quelle.Pruefe();
             if (z.Lage != Lage.Details)
             {
@@ -346,10 +381,15 @@ internal sealed class Ueberwacher
             return;
         }
 
-        var abstand = _letzteOeffnung.AddMilliseconds(e.MindestabstandMs) - _uhr();
-        if (abstand > TimeSpan.Zero) await _warte(abstand);
+        if (_letzteOeffnung is { } letzte)
+        {
+            // A10: monoton gemessen und auf den Mindestabstand begrenzt — ein Sprung der Uhr (oder eine Test-Uhr,
+            // die zurueckgestellt wird) fuehrt nie zu einer Wartezeit laenger als MindestabstandMs
+            long abstand = Math.Clamp(letzte + e.MindestabstandMs - _takt(), 0, e.MindestabstandMs);
+            if (abstand > 0) await _warte(TimeSpan.FromMilliseconds(abstand));
+        }
         Oeffne(links, e);
-        _letzteOeffnung = _uhr();
+        _letzteOeffnung = _takt();
         var fehlendePortale = antwort.Hinweise.Where(h => h.Contains("kein mobile.de-Vergleich") || h.Contains("kein AutoScout24-Vergleich")).ToList();
         var plausi = PlausibilitaetsHinweise(f, _uhr());
         if (antwort.Melden != null)
@@ -431,6 +471,7 @@ internal sealed class Ueberwacher
             Status.Bereit => "AutoPointer gefunden – rechts wird kein Fahrzeug angezeigt.",
             Status.NichtVerbunden => "Nicht mit AutoSchnell verbunden – keine Vergleiche.",
             Status.Gesperrt => "AutoSchnell sperrt die Vergleiche (Abo/Freigabe).",
+            Status.TexterkennungFehlt => "Windows-Texterkennung fehlt – es wird nichts gelesen.",
             _ => "AutoPointer-Detailansicht erkannt.",
         });
         StatusGeaendert?.Invoke(s);
@@ -444,7 +485,7 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
     private readonly Func<Einstellungen> _einstellungen;
     private DetailAnsicht? _ansicht;
     private IntPtr _haupt;
-    private DateTime _letzteSuche = DateTime.MinValue;
+    private long _letzteSuche = long.MinValue / 2;      // A10: monoton (TickCount64)
 
     public AutoPointerQuelle(TextErkennung ocr, Func<Einstellungen> einstellungen)
     {
@@ -462,8 +503,8 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
             if (_haupt == IntPtr.Zero || !Native.IsWindow(_haupt))
             {
                 _haupt = IntPtr.Zero;
-                if ((DateTime.Now - _letzteSuche).TotalSeconds < 2) return new QuellenZustand(Lage.KeinAutoPointer, 0);
-                _letzteSuche = DateTime.Now;
+                if (Environment.TickCount64 - _letzteSuche < 2000) return new QuellenZustand(Lage.KeinAutoPointer, 0);
+                _letzteSuche = Environment.TickCount64;
                 _haupt = AutoPointerFenster.FindeHauptfenster();
                 if (_haupt == IntPtr.Zero) return new QuellenZustand(Lage.KeinAutoPointer, 0);
             }

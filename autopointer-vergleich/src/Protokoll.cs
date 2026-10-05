@@ -56,18 +56,18 @@ internal static class Protokoll
         NeueZeile?.Invoke(eintrag);
     }
 
-    private static readonly Dictionary<string, (DateTime Zuletzt, int Unterdrueckt)> Gedrosselt = new();
+    private static readonly Dictionary<string, (long Zuletzt, int Unterdrueckt)> Gedrosselt = new();
 
     /// <summary>Pruefung 05.10.2026 (Paket 1): dieselbe Meldung je Schluessel hoechstens einmal je <paramref name="abstand"/>
     /// — ein Fehler im 250-ms-Takt fuellte sonst das Protokoll (bis ~1 GB am Tag). Unterdrueckte werden gezaehlt
-    /// und beim naechsten Schreiben genannt.</summary>
+    /// und beim naechsten Schreiben genannt. Paket 2 (A10): Abstand monoton (TickCount64), nicht nach der Uhr.</summary>
     public static void SchreibeGedrosselt(string schluessel, string text, TimeSpan abstand)
     {
         int unterdrueckt;
         lock (Sperre)
         {
-            var jetzt = DateTime.Now;
-            if (Gedrosselt.TryGetValue(schluessel, out var g) && jetzt - g.Zuletzt < abstand)
+            long jetzt = Environment.TickCount64;
+            if (Gedrosselt.TryGetValue(schluessel, out var g) && jetzt - g.Zuletzt < abstand.TotalMilliseconds)
             {
                 Gedrosselt[schluessel] = (g.Zuletzt, g.Unterdrueckt + 1);
                 return;
@@ -128,6 +128,11 @@ internal static class Protokoll
         catch (System.Security.Cryptography.CryptographicException) { }
     }
 
+    /// <summary>Pruefung 05.10.2026 (Paket 2, A13): Erkennungsbilder (nur zur Fehlersuche, wenn eingeschaltet) nehmen
+    /// hoechstens so viel Platz — darueber fliegen die aeltesten raus. Vorher nur "aelter als 3 Tage": bei einem
+    /// vergessenen Haken waren das mehrere GB.</summary>
+    internal const long BilderMaxBytes = 200L * 1024 * 1024;
+
     public static void Aufraeumen(int tage = 14)
     {
         try
@@ -137,10 +142,45 @@ internal static class Protokoll
                 if (File.GetLastWriteTime(datei) < DateTime.Now.AddDays(-tage)) File.Delete(datei);
             var bilder = Path.Combine(Ordner, "bilder");
             if (Directory.Exists(bilder))
+            {
+                var vorhanden = new List<(string Pfad, long Groesse, DateTime Zeit)>();
                 foreach (var datei in Directory.GetFiles(bilder))
-                    if (File.GetLastWriteTime(datei) < DateTime.Now.AddDays(-3)) File.Delete(datei);
+                {
+                    var info = new FileInfo(datei);
+                    if (info.LastWriteTime < DateTime.Now.AddDays(-3)) File.Delete(datei);
+                    else vorhanden.Add((datei, info.Length, info.LastWriteTime));
+                }
+                foreach (var datei in UeberDemLimit(vorhanden, BilderMaxBytes)) File.Delete(datei);
+            }
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
+    }
+
+    /// <summary>Welche Dateien (aelteste zuerst) weg muessen, damit die Summe unter <paramref name="maxBytes"/>
+    /// bleibt. (rein, fuer Tests)</summary>
+    internal static List<string> UeberDemLimit(IEnumerable<(string Pfad, long Groesse, DateTime Zeit)> dateien, long maxBytes)
+    {
+        var liste = dateien.OrderByDescending(d => d.Zeit).ToList();      // neueste zuerst: die bleiben
+        long summe = 0;
+        var weg = new List<string>();
+        foreach (var d in liste)
+        {
+            summe += d.Groesse;
+            if (summe > maxBytes) weg.Add(d.Pfad);
+        }
+        return weg;
+    }
+
+    private static DateTime _aufgeraeumtAm = DateTime.MinValue;
+
+    /// <summary>Paket 2 (A13): das Programm laeuft wochenlang durch — Aufraeumen nicht nur beim Start, sondern bei
+    /// jedem Datumswechsel (vom Takt aus aufgerufen, kostet sonst nichts).</summary>
+    public static void AufraeumenBeiTageswechsel()
+    {
+        var heute = DateTime.Today;
+        if (heute == _aufgeraeumtAm) return;
+        _aufgeraeumtAm = heute;
+        Aufraeumen();
     }
 }

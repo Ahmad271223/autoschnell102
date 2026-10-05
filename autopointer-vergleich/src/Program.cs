@@ -5,8 +5,10 @@ internal static class Program
     /// <summary>
     ///   (ohne)           Hintergrundprogramm mit Symbol im Infobereich
     ///   --probelauf      wie oben, oeffnet aber keinen Browser (nur Protokoll)
-    ///   --server &lt;url&gt;   anderer AutoSchnell-Server (Test), Standard app.auto-schnellkauf.de
-    ///   --verbinden &lt;code&gt; ohne Fenster mit dem 6-stelligen Code aus AutoSchnell verbinden
+    ///   --server &lt;url&gt;   anderer AutoSchnell-Server (Test), Standard app.auto-schnellkauf.de — gilt nur fuer
+    ///                    diesen Lauf, wird nie gespeichert (Paket 2, A12)
+    ///   --verbinden &lt;code&gt; ohne Fenster mit dem 6-stelligen Code aus AutoSchnell verbinden (nur, wenn das
+    ///                    Programm nicht gerade laeuft)
     ///   --systemcheck    prueft Windows, Texterkennung, Server, Abo, AutoPointer (mit Probe) und gibt es aus
     ///   --einmal         liest das gerade angezeigte Fahrzeug einmal und gibt die Werte
     ///                    aus; ist das Programm verbunden, fragt es den Server (Probelauf)
@@ -46,7 +48,9 @@ internal static class Program
                 "AutoPointer-Vergleich", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return 0;
         }
+        Installation.Sicherstellen();    // Pruefung 05.10.2026 (Paket 2, A6): Kopie am festen Platz
         Autostart.PfadNachziehen();      // Pruefung 04.10.2026: nach einem Update an anderer Stelle
+        NeustartAnmelden(args);          // Paket 2 (A7): nach Absturz/Haenger startet Windows das Programm neu
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         Application.ThreadException += (_, e) => Protokoll.Schreibe("Fehler: " + e.Exception);
@@ -69,6 +73,27 @@ internal static class Program
         }
         Protokoll.Schreibe("Programm beendet.");
         return 0;
+    }
+
+    /// <summary>Befehlszeile fuer den Neustart nach Absturz: die vorhandenen Argumente, dazu --autostart (das Programm
+    /// kommt dann verkleinert bzw. nur mit der Leiste wieder — der Sucher hat es ja nicht selbst gestartet).
+    /// (rein, fuer Tests)</summary>
+    internal static string NeustartBefehl(IEnumerable<string> args)
+    {
+        var teile = args.Select(a => a.Contains(' ') ? $"\"{a}\"" : a).ToList();
+        if (!teile.Contains("--autostart")) teile.Add("--autostart");
+        string befehl = string.Join(" ", teile);
+        return befehl.Length > 1000 ? befehl[..1000] : befehl;      // RESTART_MAX_CMD_LINE = 1024
+    }
+
+    private static void NeustartAnmelden(string[] args)
+    {
+        try
+        {
+            int r = Native.RegisterApplicationRestart(NeustartBefehl(args), Native.RESTART_NO_REBOOT | Native.RESTART_NO_PATCH);
+            if (r != 0) Protokoll.Schreibe($"Neustart nach Absturz nicht angemeldet (HRESULT 0x{r:X8}).");
+        }
+        catch (Exception ex) { Protokoll.Schreibe("Neustart nach Absturz nicht angemeldet: " + ex.Message); }
     }
 }
 
@@ -141,7 +166,8 @@ internal static class KonsolenModus
         }
     }
 
-    /// <summary>Nr. 14: --server nur https://…auto-schnellkauf.de oder der eigene Rechner (Tests).</summary>
+    /// <summary>Nr. 14: --server nur https://…auto-schnellkauf.de oder der eigene Rechner (Tests).
+    /// Paket 2 (A12): gilt nur im Speicher — wird nie in die Einstellungen geschrieben.</summary>
     private static bool ServerUebernehmen(Einstellungen e, string? server)
     {
         if (string.IsNullOrWhiteSpace(server)) return true;
@@ -150,8 +176,20 @@ internal static class KonsolenModus
             Console.WriteLine($"Server-Adresse nicht erlaubt: {server} (nur https://…auto-schnellkauf.de oder der eigene Rechner).");
             return false;
         }
-        e.Server = sicher;
+        e.ServerUeberschreiben(sicher);
         return true;
+    }
+
+    /// <summary>Paket 2 (A12): laeuft das Programm gerade? (Es haelt das Signal zum "Fenster zeigen" offen.)</summary>
+    private static bool ProgrammLaeuft()
+    {
+        try
+        {
+            using var signal = EventWaitHandle.OpenExisting(TrayApp.ZeigenSignalName);
+            return true;
+        }
+        catch (WaitHandleCannotBeOpenedException) { return false; }
+        catch (UnauthorizedAccessException) { return true; }
     }
 
     /// <summary>--systemcheck: Pruefbericht 03.10.2026 (Nr. 6/8) — alles pruefen, Ergebnis ausgeben.
@@ -171,6 +209,13 @@ internal static class KonsolenModus
     public static async Task<int> VerbindenAsync(string code, string? server)
     {
         Native.AttachConsole(-1);
+        // Paket 2 (A12): laeuft das Programm, hat es die Einstellungen im Speicher — ein Schluessel von hier wuerde
+        // von dort gleich wieder ueberschrieben (oder umgekehrt). Dann nur im Fenster des laufenden Programms verbinden.
+        if (ProgrammLaeuft())
+        {
+            Console.WriteLine("AutoPointer-Vergleich läuft gerade – bitte dort im Fenster verbinden (oder das Programm erst beenden).");
+            return 9;
+        }
         var e = Einstellungen.Laden();
         if (!ServerUebernehmen(e, server)) return 10;
         var dienst = new AutoSchnellDienst(e.Server, () => null);

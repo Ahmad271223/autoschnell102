@@ -16,9 +16,11 @@ public class DienstTests
         public string? Inhalt;
         public Func<HttpRequestMessage, HttpResponseMessage> Antwort = _ => Json(200, "{}");
         public Exception? Ausnahme;
+        public int Aufrufe;
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage r, CancellationToken t)
         {
+            Aufrufe++;
             Letzte = r;
             Inhalt = r.Content == null ? null : await r.Content.ReadAsStringAsync(t);
             if (Ausnahme != null) throw Ausnahme;
@@ -29,10 +31,13 @@ public class DienstTests
     private static HttpResponseMessage Json(int status, string text) =>
         new((HttpStatusCode)status) { Content = new StringContent(text, Encoding.UTF8, "application/json") };
 
-    private static (AutoSchnellDienst, Attrappe) Dienst(string? schluessel = "geheim")
+    private static (AutoSchnellDienst, Attrappe) Dienst(string? schluessel = "geheim") => DienstMit(() => schluessel);
+
+    private static (AutoSchnellDienst, Attrappe) DienstMit(Func<string?> schluessel)
     {
         var a = new Attrappe();
-        return (new AutoSchnellDienst("https://app.example.test/", () => schluessel, a), a);
+        // Wiederholversuch ohne echte Sekunde Pause (Paket 2, A3)
+        return (new AutoSchnellDienst("https://app.example.test/", schluessel, a, _ => Task.CompletedTask), a);
     }
 
     [Fact]
@@ -106,7 +111,99 @@ public class DienstTests
         a.Ausnahme = new HttpRequestException("weg");
         var ex = await Assert.ThrowsAsync<DienstFehler>(() => d.StatusAsync());
         Assert.True(ex.KeineVerbindung);
+        Assert.True(ex.Voruebergehend);
         Assert.Contains("Keine Verbindung", ex.Message);
+        Assert.Equal(2, a.Aufrufe);                     // Paket 2 (A3): genau ein Wiederholversuch
+    }
+
+    [Fact]   // Pruefung 05.10.2026 (Paket 2, A3): ein kurzer Netzaussetzer kostet keinen Vergleich mehr
+    public async Task Verbindungsfehler_wird_genau_einmal_wiederholt()
+    {
+        var (d, a) = Dienst();
+        a.Antwort = _ =>
+        {
+            if (a.Aufrufe == 1) throw new HttpRequestException("Verbindung zurückgesetzt", new System.Net.Sockets.SocketException(10054));
+            return Json(200, """{"ok":true,"konto":"10002-1","name":"Max","firma":"AH","pc_name":"PC"}""");
+        };
+        var s = await d.StatusAsync();
+        Assert.Equal("Max", s.Name);
+        Assert.Equal(2, a.Aufrufe);
+    }
+
+    [Theory]   // Gateway/Ueberlast/Cloudflare: einmal wiederholen, dann eine verstaendliche Meldung
+    [InlineData(502)]
+    [InlineData(503)]
+    [InlineData(504)]
+    [InlineData(522)]
+    public async Task Gateway_Fehler_wird_einmal_wiederholt_dann_verstaendlich_gemeldet(int status)
+    {
+        var (d, a) = Dienst();
+        a.Antwort = _ => new HttpResponseMessage((HttpStatusCode)status) { Content = new StringContent("<html>Bad Gateway</html>") };
+        var ex = await Assert.ThrowsAsync<DienstFehler>(() => d.VergleichAsync(Passat(), false));
+        Assert.Equal(status, ex.Status);
+        Assert.True(ex.Voruebergehend);
+        Assert.Contains("kurz nicht erreichbar", ex.Message);
+        Assert.Equal(2, a.Aufrufe);
+        // beim zweiten Mal klappt es
+        var (d2, a2) = Dienst();
+        a2.Antwort = _ => a2.Aufrufe == 1 ? Json(status, "") : Json(200, """{"links":[],"hinweise":[],"profil":"inland"}""");
+        var antwort = await d2.VergleichAsync(Passat(), false);
+        Assert.Equal("inland", antwort.Profil);
+        Assert.Equal(2, a2.Aufrufe);
+    }
+
+    [Fact]   // NIE wiederholen: Zeitueberschreitung (/vergleich zaehlt serverseitig schon), 4xx, 500
+    public async Task Zeitueberschreitung_4xx_und_500_werden_nicht_wiederholt()
+    {
+        var (d, a) = Dienst();
+        a.Ausnahme = new TaskCanceledException("Zeit um");
+        var ex = await Assert.ThrowsAsync<DienstFehler>(() => d.VergleichAsync(Passat(), false));
+        Assert.True(ex.KeineVerbindung);
+        Assert.Equal(1, a.Aufrufe);
+
+        foreach (int status in new[] { 400, 404, 429, 500 })
+        {
+            var (d2, a2) = Dienst();
+            a2.Antwort = _ => Json(status, "{}");
+            var ex2 = await Assert.ThrowsAsync<DienstFehler>(() => d2.VergleichAsync(Passat(), false));
+            Assert.Equal(status, ex2.Status);
+            Assert.Equal(1, a2.Aufrufe);
+        }
+        Assert.True(AutoSchnellDienst.Wiederholbar(503));
+        Assert.True(AutoSchnellDienst.Wiederholbar(529));
+        Assert.False(AutoSchnellDienst.Wiederholbar(500));
+        Assert.False(AutoSchnellDienst.Wiederholbar(530));
+        Assert.False(AutoSchnellDienst.Wiederholbar(401));
+    }
+
+    [Fact]   // Paket 2 (A11): waehrend der Anfrage neu verbunden — die 401 zum ALTEN Schluessel wirft nicht raus
+    public async Task Alte_401_zaehlt_nicht_als_Verbindung_verloren()
+    {
+        string schluessel = "alt";
+        var (d, a) = DienstMit(() => schluessel);
+        a.Antwort = _ => { schluessel = "neu"; return Json(401, """{"detail":"Dieses Programm ist nicht (mehr) verbunden"}"""); };
+        var ex = await Assert.ThrowsAsync<DienstFehler>(() => d.VergleichAsync(Passat(), false));
+        Assert.Equal(401, ex.Status);
+        Assert.True(ex.Veraltet);
+        Assert.False(ex.NichtVerbunden);
+        Assert.Equal("alt", a.Letzte!.Headers.GetValues("X-Werkzeug-Schluessel").Single());
+        // derselbe Schluessel -> wie gehabt "nicht verbunden"
+        var (d2, a2) = Dienst("gleich");
+        a2.Antwort = _ => Json(401, "{}");
+        var ex2 = await Assert.ThrowsAsync<DienstFehler>(() => d2.StatusAsync());
+        Assert.True(ex2.NichtVerbunden);
+        Assert.False(ex2.Voruebergehend);
+    }
+
+    [Fact]   // A14: die Ursache eines Netzfehlers ist im Protokoll nachvollziehbar
+    public void Ursache_nennt_Typ_Meldung_und_innere_Ausnahme()
+    {
+        var ex = new HttpRequestException("Name nicht aufgelöst", new System.Net.Sockets.SocketException(11001));
+        string u = AutoSchnellDienst.Ursache(ex);
+        Assert.StartsWith("HttpRequestException: Name nicht aufgelöst → SocketException: ", u);
+        Assert.False(new DienstFehler(402, "x").Voruebergehend);
+        Assert.False(new DienstFehler(403, "x").Voruebergehend);
+        Assert.True(new DienstFehler(429, "x").Voruebergehend);
     }
 
     [Fact]

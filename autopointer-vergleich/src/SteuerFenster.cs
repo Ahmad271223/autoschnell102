@@ -1,8 +1,10 @@
 namespace AutoPointerVergleich;
 
 /// <summary>Was das Steuerfenster anzeigt (jede Sekunde neu abgefragt).</summary>
+/// <param name="Sperrgrund">Paket 2 (A8): Text des Servers zur Sperre (402/403 bei der Lizenzpruefung), sonst null.</param>
 internal sealed record FensterZustand(Status Status, bool AutomatikAn, bool Verbunden, string VerbundenAls,
-                                      string? LetztesAuto, bool HatInseratLink, string? LetzteMeldung, bool Probelauf);
+                                      string? LetztesAuto, bool HatInseratLink, string? LetzteMeldung, bool Probelauf,
+                                      string? Sperrgrund = null);
 
 /// <summary>Wunsch Ahmad 03.10.2026: "man kann nicht stoppen, aktivieren, nichts — das sollen Buttons sein".
 /// Sichtbares Fenster mit Knoepfen statt nur eines Symbols im Infobereich. Solange das Programm laeuft,
@@ -213,8 +215,14 @@ internal sealed class SteuerFenster : Form
     {
         if (!z.Verbunden || z.Status == Status.NichtVerbunden)
             return (Symbole.Fehler, "NICHT VERBUNDEN", "Unten „Mit AutoSchnell verbinden …“ drücken.");
+        if (z.Status == Status.TexterkennungFehlt)
+            // Paket 2 (A9): Sprachpaket fehlt — das Programm versucht es jede Minute erneut, kein Neustart noetig
+            return (Symbole.Fehler, "TEXTERKENNUNG FEHLT",
+                    "Windows-Texterkennung „Deutsch“ fehlt: Einstellungen → Zeit und Sprache → Sprache → Deutsch → "
+                    + "Optische Zeichenerkennung installieren. Wird jede Minute erneut geprüft.");
         if (z.Status == Status.Gesperrt)
-            return (Symbole.Fehler, "GESPERRT", "Kein aktives Abo oder nicht freigeschaltet.");
+            // Paket 2 (A8): der Text des Servers ("Kein aktives AutoSchnell-Abo …", "Für dein Konto nicht freigeschaltet.")
+            return (Symbole.Fehler, "GESPERRT", z.Sperrgrund ?? "Kein aktives Abo oder nicht freigeschaltet.");
         if (!z.AutomatikAn)
             return (Symbole.Pause, "GESTOPPT", "Es öffnet sich nichts. Zum Starten „Aktivieren“ drücken.");
         if (z.Status == Status.KeinAutoPointer)

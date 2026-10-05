@@ -25,6 +25,23 @@ public class SteuerFensterTests
         Assert.Equal(Symbole.Fehler, SteuerFenster.Anzeige(Zustand(verbunden: false)).Farbe);
     }
 
+    [Fact]   // Pruefung 05.10.2026 (Paket 2, A8/A9): Sperre mit dem Text des Servers, fehlende Texterkennung als eigener Zustand
+    public void Sperrgrund_vom_Server_und_Texterkennung_fehlt()
+    {
+        var gesperrt = Zustand(Status.Gesperrt) with { Sperrgrund = "Kein aktives AutoSchnell-Abo – das Programm ist gesperrt." };
+        var (farbe, titel, unter) = SteuerFenster.Anzeige(gesperrt);
+        Assert.Equal((Symbole.Fehler, "GESPERRT"), (farbe, titel));
+        Assert.Equal("Kein aktives AutoSchnell-Abo – das Programm ist gesperrt.", unter);
+        Assert.Equal("Kein aktives Abo oder nicht freigeschaltet.", SteuerFenster.Anzeige(Zustand(Status.Gesperrt)).Unterzeile);
+
+        var ocr = SteuerFenster.Anzeige(Zustand(Status.TexterkennungFehlt));
+        Assert.Equal((Symbole.Fehler, "TEXTERKENNUNG FEHLT"), (ocr.Farbe, ocr.Titel));
+        Assert.Contains("jede Minute", ocr.Unterzeile);
+        Assert.True(Leiste.Kurz(ocr.Titel).Length <= "NICHT VERBUNDEN".Length, Leiste.Kurz(ocr.Titel));
+        // "Nicht verbunden" geht vor (erst verbinden, dann faellt die Texterkennung auf)
+        Assert.Equal("NICHT VERBUNDEN", SteuerFenster.Anzeige(Zustand(Status.TexterkennungFehlt, verbunden: false)).Titel);
+    }
+
     [Fact]
     public void Fenster_zeigt_Knoepfe_passend_zum_Zustand()
     {

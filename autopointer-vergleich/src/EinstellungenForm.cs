@@ -106,6 +106,27 @@ internal sealed class EinstellungenForm : Form
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
+    /// <summary>Pruefung 05.10.2026 (Paket 2, A11): nur die Felder dieses Dialogs in die laufenden Einstellungen
+    /// schreiben. Vorher ersetzte "Speichern" das ganze Objekt durch die Kopie vom Oeffnen — hatte sich die
+    /// Verbindung inzwischen geaendert (Lizenzpruefung, 401, neu verbunden), ueberschrieb der Dialog
+    /// Schluessel/VerbundenAls/Server mit dem alten Stand.</summary>
+    public void AnwendenAuf(Einstellungen ziel)
+    {
+        ziel.AutomatikAktiv = _e.AutomatikAktiv;
+        ziel.MobileDe = _e.MobileDe;
+        ziel.AutoScout24 = _e.AutoScout24;
+        ziel.Browser = _e.Browser;
+        ziel.ZurueckZuAutoPointer = _e.ZurueckZuAutoPointer;
+        ziel.WartezeitMs = _e.WartezeitMs;
+        ziel.MindestabstandMs = _e.MindestabstandMs;
+        ziel.HinweiseAnzeigen = _e.HinweiseAnzeigen;
+        ziel.TastenkuerzelAktiv = _e.TastenkuerzelAktiv;
+        ziel.MitWindowsStarten = _e.MitWindowsStarten;
+        ziel.ErkennungsbilderSpeichern = _e.ErkennungsbilderSpeichern;
+        ziel.LeisteAnzeigen = _e.LeisteAnzeigen;
+        ziel.LeisteEcke = _e.LeisteEcke;
+    }
+
     // ---- kleine Bauhelfer ----------------------------------------------------
 
     private static CheckBox Haken(string text) => new() { Text = text, AutoSize = true, Margin = new Padding(3, 3, 3, 1) };

@@ -13,11 +13,18 @@ internal sealed class DienstFehler : Exception
     public int Status { get; }
     public DienstFehler(int status, string meldung) : base(meldung) => Status = status;
 
+    /// <summary>Pruefung 05.10.2026 (Paket 2, A11): die 401 kam zu einem Schluessel, der inzwischen ersetzt wurde
+    /// (waehrend der Anfrage neu verbunden) — dann gilt sie nicht als "Verbindung verloren".</summary>
+    public bool Veraltet { get; init; }
+
     /// <summary>401: Schluessel ungueltig (anderer PC verbunden, getrennt, Konto gesperrt).</summary>
-    public bool NichtVerbunden => Status == 401;
+    public bool NichtVerbunden => Status == 401 && !Veraltet;
     /// <summary>402: kein aktives Abo.</summary>
     public bool KeinAbo => Status == 402;
     public bool KeineVerbindung => Status == 0;
+    /// <summary>Paket 2 (A8): voruebergehend — keine Verbindung, Server ueberlastet (5xx), zu viele Anfragen (429).
+    /// Lizenzpruefung: still bleiben und spaeter erneut versuchen, kein rotes Symbol.</summary>
+    public bool Voruebergehend => Status == 0 || Status == 429 || Status >= 500;
 }
 
 internal sealed record VerbindenAntwort(string Schluessel, string Konto, string Name, string Firma);
@@ -68,13 +75,20 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
 
     private readonly HttpClient _http;
     private readonly Func<string?> _schluessel;
+    private readonly Func<TimeSpan, Task> _warte;
 
     public string Server { get; }
 
-    public AutoSchnellDienst(string server, Func<string?> schluessel, HttpMessageHandler? handler = null)
+    /// <summary>Pruefung 05.10.2026 (Paket 2, A3): so lange wartet der eine Wiederholversuch bei Netzfehlern/5xx.</summary>
+    internal static readonly TimeSpan WiederholPause = TimeSpan.FromSeconds(1);
+
+    /// <param name="warte">Wartezeit vor dem Wiederholversuch (Tests: sofort).</param>
+    public AutoSchnellDienst(string server, Func<string?> schluessel, HttpMessageHandler? handler = null,
+                             Func<TimeSpan, Task>? warte = null)
     {
         Server = server.TrimEnd('/');
         _schluessel = schluessel;
+        _warte = warte ?? (t => Task.Delay(t));
         _http = handler == null ? new HttpClient() : new HttpClient(handler);
         _http.Timeout = TimeSpan.FromSeconds(15);
         _http.DefaultRequestHeaders.UserAgent.ParseAdd($"AutoSchnell-Vergleich/{Application.ProductVersion.Split('+')[0]}");
@@ -84,11 +98,13 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
 
     private string Url(string pfad) => $"{Server}/api/werkzeuge/{Werkzeug}/{pfad}";
 
-    private HttpRequestMessage Anfrage(HttpMethod methode, string pfad, object? inhalt = null)
+    /// <summary>Baut die Anfrage NEU je Versuch (eine HttpRequestMessage laesst sich nur einmal senden) und merkt den
+    /// Schluessel, mit dem sie rausging (A11: eine 401 zaehlt nur, wenn er noch der aktuelle ist).</summary>
+    private HttpRequestMessage Anfrage(HttpMethod methode, string pfad, out string? gesendet, object? inhalt = null)
     {
         var a = new HttpRequestMessage(methode, Url(pfad));
-        var s = _schluessel();
-        if (!string.IsNullOrEmpty(s)) a.Headers.Add(SchluesselKopf, s);
+        gesendet = _schluessel();
+        if (!string.IsNullOrEmpty(gesendet)) a.Headers.Add(SchluesselKopf, gesendet);
         if (inhalt != null) a.Content = JsonContent.Create(inhalt, options: Json);
         return a;
     }
@@ -100,27 +116,66 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
         PropertyNameCaseInsensitive = true,
     };
 
-    private async Task<JsonElement> SendeAsync(HttpRequestMessage anfrage, TimeSpan? frist = null)
+    /// <summary>Pruefung 05.10.2026 (Paket 2, A3): lohnt bei diesem Status GENAU EIN Wiederholversuch? Nur, wenn
+    /// der Server die Anfrage sicher nicht verarbeitet hat — Gateway/Ueberlast (502/503/504) und Cloudflare (52x).
+    /// Nie bei 4xx und nie bei 500 (Serverfehler mitten in der Verarbeitung). (rein, fuer Tests)</summary>
+    internal static bool Wiederholbar(int status) => status is 502 or 503 or 504 or (>= 520 and <= 529);
+
+    private async Task<JsonElement> SendeAsync(HttpMethod methode, string pfad, object? inhalt = null, TimeSpan? frist = null)
     {
-        HttpResponseMessage antwort;
-        using var abbruch = frist is { } f ? new CancellationTokenSource(f) : null;
-        try { antwort = await _http.SendAsync(anfrage, abbruch?.Token ?? CancellationToken.None); }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or OperationCanceledException)
+        for (int versuch = 1; ; versuch++)
         {
-            if (abbruch?.IsCancellationRequested == true)
-                throw new DienstFehler(0, "AutoSchnell antwortet gerade nicht – beim nächsten Auto wird es erneut versucht.");
-            throw new DienstFehler(0, "Keine Verbindung zu AutoSchnell – bitte Internet prüfen.");
-        }
-        using (antwort)
-        {
-            string text = await antwort.Content.ReadAsStringAsync();
-            if (antwort.IsSuccessStatusCode)
+            string? gesendet;
+            HttpResponseMessage antwort;
+            using var abbruch = frist is { } f ? new CancellationTokenSource(f) : null;
+            try { antwort = await _http.SendAsync(Anfrage(methode, pfad, out gesendet, inhalt), abbruch?.Token ?? CancellationToken.None); }
+            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or OperationCanceledException)
             {
-                try { return JsonDocument.Parse(text).RootElement.Clone(); }
-                catch (JsonException) { throw new DienstFehler(0, "Unerwartete Antwort von AutoSchnell."); }
+                // A14: die Ursache ins Protokoll (Typ, Meldung, innere Ausnahme) — "Keine Verbindung" allein half nicht weiter
+                Protokoll.Schreibe($"Netzfehler ({pfad}, {versuch}. Versuch): {Ursache(ex)}");
+                // Zeitueberschreitung NIE wiederholen: /vergleich startet serverseitig den Vorab-Abruf und schreibt einen
+                // Eintrag — eine Wiederholung zaehlte doppelt. Nur ein echter Verbindungsfehler (kein Antwortbeginn) einmal.
+                if (ex is HttpRequestException && versuch == 1)
+                {
+                    await _warte(WiederholPause);
+                    continue;
+                }
+                if (abbruch?.IsCancellationRequested == true)
+                    throw new DienstFehler(0, "AutoSchnell antwortet gerade nicht – beim nächsten Auto wird es erneut versucht.");
+                throw new DienstFehler(0, "Keine Verbindung zu AutoSchnell – bitte Internet prüfen.");
             }
-            throw new DienstFehler((int)antwort.StatusCode, Meldung(text, (int)antwort.StatusCode));
+            using (antwort)
+            {
+                string text = await antwort.Content.ReadAsStringAsync();
+                if (antwort.IsSuccessStatusCode)
+                {
+                    try { return JsonDocument.Parse(text).RootElement.Clone(); }
+                    catch (JsonException) { throw new DienstFehler(0, "Unerwartete Antwort von AutoSchnell."); }
+                }
+                int status = (int)antwort.StatusCode;
+                if (Wiederholbar(status) && versuch == 1)
+                {
+                    Protokoll.Schreibe($"AutoSchnell antwortet mit {status} ({pfad}) – ein Wiederholversuch in {WiederholPause.TotalSeconds:0} s.");
+                    await _warte(WiederholPause);
+                    continue;
+                }
+                // A11: 401 zu einem Schluessel, der inzwischen ersetzt wurde (waehrend der Anfrage neu verbunden)?
+                bool veraltet = status == 401 && !string.IsNullOrEmpty(gesendet) && gesendet != _schluessel();
+                throw new DienstFehler(status, veraltet
+                    ? "Antwort gehört zu einer früheren Verbindung – bitte noch einmal versuchen."
+                    : Meldung(text, status)) { Veraltet = veraltet };
+            }
         }
+    }
+
+    /// <summary>Typ + Meldung der Ausnahme samt innerer Ausnahmen (A14), z. B.
+    /// "HttpRequestException: Name konnte nicht aufgelöst werden → SocketException: …".</summary>
+    internal static string Ursache(Exception ex)
+    {
+        var teile = new List<string>();
+        for (Exception? e = ex; e != null && teile.Count < 4; e = e.InnerException)
+            teile.Add($"{e.GetType().Name}: {e.Message}");
+        return string.Join(" → ", teile);
     }
 
     /// <summary>"Max Muster (10002-1) · Firma". Chef-Konten haben oft keinen Namen — dann
@@ -160,20 +215,21 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
             402 => "Kein aktives AutoSchnell-Abo – das Programm ist gesperrt.",
             403 => "Für dein Konto nicht freigeschaltet.",
             429 => "Zu viele Anfragen – bitte kurz warten.",
+            // Paket 2 (A3): Gateway/Ueberlast/Cloudflare — kein Fehler des Suchers, geht gleich wieder
+            502 or 503 or 504 or (>= 520 and <= 529) => "AutoSchnell ist kurz nicht erreichbar – wird gleich erneut versucht.",
             _ => $"AutoSchnell antwortet mit Fehler {status}.",
         };
     }
 
     public async Task<VerbindenAntwort> VerbindenAsync(string code, string pcName, string pcKennung)
     {
-        var e = await SendeAsync(Anfrage(HttpMethod.Post, "verbinden",
-            new { code, pc_name = pcName, pc_kennung = pcKennung }));
+        var e = await SendeAsync(HttpMethod.Post, "verbinden", new { code, pc_name = pcName, pc_kennung = pcKennung });
         return new VerbindenAntwort(Text(e, "schluessel"), Text(e, "konto"), Text(e, "name"), Text(e, "firma"));
     }
 
     public async Task<StatusAntwort> StatusAsync()
     {
-        var e = await SendeAsync(Anfrage(HttpMethod.Get, "status"));
+        var e = await SendeAsync(HttpMethod.Get, "status");
         return new StatusAntwort(Text(e, "konto"), Text(e, "name"), Text(e, "firma"), Text(e, "pc_name"),
                                  e.TryGetProperty("abo_bis", out var b) && b.ValueKind == JsonValueKind.String ? b.GetString() : null,
                                  Text(e, "aktuelle_version") is { Length: > 0 } av ? av : null,
@@ -187,8 +243,8 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
     {
         try
         {
-            var e = await SendeAsync(Anfrage(HttpMethod.Get, "app-start/" + Uri.EscapeDataString(startKennung)),
-                                     TimeSpan.FromSeconds(4));
+            var e = await SendeAsync(HttpMethod.Get, "app-start/" + Uri.EscapeDataString(startKennung),
+                                     frist: TimeSpan.FromSeconds(4));
             return e.TryGetProperty("bestaetigt", out var b) && b.ValueKind == JsonValueKind.True;
         }
         catch (DienstFehler) { return false; }
@@ -207,14 +263,13 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
 
     public async Task AbmeldenAsync()
     {
-        try { await SendeAsync(Anfrage(HttpMethod.Post, "abmelden")); }
+        try { await SendeAsync(HttpMethod.Post, "abmelden"); }
         catch (DienstFehler) { /* lokal wird trotzdem getrennt */ }
     }
 
     public async Task<VergleichAntwort> VergleichAsync(Fahrzeug f, bool probelauf)
     {
-        var e = await SendeAsync(Anfrage(HttpMethod.Post, "vergleich", new { fahrzeug = Nutzlast(f), probelauf }),
-                                 VergleichFrist);
+        var e = await SendeAsync(HttpMethod.Post, "vergleich", new { fahrzeug = Nutzlast(f), probelauf }, VergleichFrist);
         var links = new List<Vergleich>();
         if (e.TryGetProperty("links", out var l) && l.ValueKind == JsonValueKind.Array)
             foreach (var x in l.EnumerateArray())

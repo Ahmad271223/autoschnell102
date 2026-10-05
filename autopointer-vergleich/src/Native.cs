@@ -59,6 +59,13 @@ internal static class Native
 
     [DllImport("kernel32.dll")] public static extern bool AttachConsole(int pid);
 
+    /// <summary>Pruefung 05.10.2026 (Paket 2, A7): Windows startet das Programm nach einem Absturz oder Haenger
+    /// (Windows-Fehlerberichterstattung, fruehestens nach 60 s Laufzeit) mit dieser Befehlszeile neu.
+    /// Rueckgabe S_OK (0) bei Erfolg.</summary>
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    public static extern int RegisterApplicationRestart(string? befehlszeile, uint flags);
+    public const uint RESTART_NO_CRASH = 1, RESTART_NO_HANG = 2, RESTART_NO_PATCH = 4, RESTART_NO_REBOOT = 8;
+
     [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr hIcon);
 
     public static string Klasse(IntPtr hwnd)

@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Net.NetworkInformation;
+using Microsoft.Win32;
 
 namespace AutoPointerVergleich;
 
@@ -27,7 +29,16 @@ internal sealed class TrayApp : ApplicationContext
     private Einstellungen _einstellungen;
     private Ueberwacher? _ueberwacher;
     private EinstellungenForm? _einstellungenForm;
-    private DateTime _letzteSprechblase = DateTime.MinValue;
+    private long _letzteSprechblase = long.MinValue / 2;      // A10: monoton
+    /// <summary>Paket 2 (A9): Texterkennung fehlte beim Start (Fehlertext) — wird jede Minute erneut versucht.</summary>
+    private string? _ocrFehlt;
+    /// <summary>Paket 2 (A8): /status meldete 402/403 — Text des Servers; null = Lizenz in Ordnung.</summary>
+    private string? _lizenzSperre;
+    /// <summary>Paket 2 (A8): voruebergehende Fehler bei /status hintereinander (1 → 1 min, 2 → 2 min, dann 5 min).</summary>
+    private int _lizenzFehler;
+    /// <summary>Paket 2 (A8): wann die naechste Lizenzpruefung faellig ist (TickCount64, ms).</summary>
+    private long _naechsteLizenz;
+    private bool _lizenzLaeuft;
     private readonly SteuerFenster _fenster;
     private readonly Leiste _leiste;
     private IntPtr _leistenHandle;          // fuer den Lese-Thread (kein Zugriff auf das Steuerelement dort)
@@ -48,8 +59,9 @@ internal sealed class TrayApp : ApplicationContext
         _einstellungen = Einstellungen.Laden();
         if (!string.IsNullOrWhiteSpace(server))
         {
-            // Nr. 14: auch die Adresse von der Befehlszeile nur https://…auto-schnellkauf.de oder der eigene Rechner
-            if (Einstellungen.SichererServer(server) is { } sicher) _einstellungen.Server = sicher;
+            // Nr. 14: auch die Adresse von der Befehlszeile nur https://…auto-schnellkauf.de oder der eigene Rechner.
+            // Paket 2 (A12): gilt nur im Speicher — beim Speichern bleibt der gespeicherte Server stehen.
+            if (Einstellungen.SichererServer(server) is { } sicher) _einstellungen.ServerUeberschreiben(sicher);
             else Protokoll.Schreibe($"--server {server} ignoriert – nur https://…auto-schnellkauf.de oder der eigene Rechner.");
         }
         DienstErstellen();
@@ -135,12 +147,13 @@ internal sealed class TrayApp : ApplicationContext
         }
 
         Protokoll.KlartextUmstellen();     // alte Klartext-Protokolle verschluesseln (03.10.2026)
-        Protokoll.Aufraeumen();
+        Protokoll.AufraeumenBeiTageswechsel();
         Protokoll.Schreibe($"AutoPointer-Vergleich {Application.ProductVersion} gestartet{(probelauf ? " – PROBELAUF (öffnet keinen Browser)" : "")}."
-                           + $" Server: {_einstellungen.Server}");
+                           + $" Server: {_einstellungen.Server}" + (_einstellungen.ServerNurImSpeicher ? " (nur für diesen Lauf, --server)" : ""));
         VerbindungAnzeigen();
         Starten();
         // Lizenz beim Start pruefen bzw. zum Verbinden auffordern (erst, wenn die Nachrichtenschleife laeuft)
+        _naechsteLizenz = Environment.TickCount64 + LizenzTakt(TimeSpan.FromMinutes(15));
         _ui.Post(async _ => await LizenzPruefenAsync(beimStart: true), null);
         var token = _ende.Token;
         _zeigenSignal = new EventWaitHandle(false, EventResetMode.AutoReset, ZeigenSignalName);
@@ -149,15 +162,53 @@ internal sealed class TrayApp : ApplicationContext
             var warten = new[] { _zeigenSignal, token.WaitHandle };
             while (WaitHandle.WaitAny(warten) == 0) _ui.Post(_ => FensterZeigen(), null);
         }, token);
+        // Paket 2 (A8/A13): alle 15 s nachsehen, ob die Lizenzpruefung faellig ist (15 min, nach Fehlern 1/2/5 min)
+        // und ob der Tag gewechselt hat (Protokoll aufraeumen)
         Task.Run(async () =>
         {
             while (!token.IsCancellationRequested)
             {
-                try { await Task.Delay(TimeSpan.FromMinutes(15), token); }
+                try { await Task.Delay(TimeSpan.FromSeconds(15), token); }
                 catch (OperationCanceledException) { break; }
-                _ui.Post(async _ => await LizenzPruefenAsync(beimStart: false), null);
+                if (Environment.TickCount64 >= Interlocked.Read(ref _naechsteLizenz))
+                {
+                    Interlocked.Exchange(ref _naechsteLizenz, Environment.TickCount64 + LizenzTakt(TimeSpan.FromMinutes(15)));
+                    _ui.Post(async _ => await LizenzPruefenAsync(beimStart: false), null);
+                }
+                try { Protokoll.AufraeumenBeiTageswechsel(); }
+                catch (Exception ex) { Protokoll.SchreibeGedrosselt("aufraeumen", "Protokoll nicht aufgeräumt: " + ex.Message, TimeSpan.FromHours(1)); }
             }
         }, token);
+        // Paket 2 (A8): nach dem Aufwachen aus dem Standby und bei Netzwechsel die Lizenz sofort neu pruefen
+        // (nach kurzer Pause: direkt nach dem Aufwachen ist das Netz oft noch nicht da)
+        SystemEvents.PowerModeChanged += PowerModeGeaendert;
+        NetworkChange.NetworkAvailabilityChanged += NetzGeaendert;
+    }
+
+    private static long LizenzTakt(TimeSpan t) => (long)t.TotalMilliseconds;
+
+    private void PowerModeGeaendert(object? sender, PowerModeChangedEventArgs e)
+    {
+        if (e.Mode == PowerModes.Resume) LizenzBaldPruefen(TimeSpan.FromSeconds(8), "Aufwachen aus dem Standby");
+    }
+
+    private void NetzGeaendert(object? sender, NetworkAvailabilityEventArgs e)
+    {
+        if (e.IsAvailable) LizenzBaldPruefen(TimeSpan.FromSeconds(4), "Netzwerk wieder da");
+    }
+
+    /// <summary>Lizenzpruefung in Kuerze anstossen (ausserhalb des 15-min-Takts). Laeuft im Hintergrund, meldet sich
+    /// ueber den Oberflaechen-Thread.</summary>
+    private void LizenzBaldPruefen(TimeSpan verzoegerung, string anlass)
+    {
+        if (_ende.IsCancellationRequested) return;
+        Protokoll.Schreibe($"{anlass} – Lizenz wird in {verzoegerung.TotalSeconds:0} s neu geprüft.");
+        Task.Delay(verzoegerung, _ende.Token).ContinueWith(t =>
+        {
+            if (t.IsCanceled) return;
+            Interlocked.Exchange(ref _naechsteLizenz, Environment.TickCount64 + LizenzTakt(TimeSpan.FromMinutes(15)));
+            _ui.Post(async _ => await LizenzPruefenAsync(beimStart: false), null);
+        }, TaskScheduler.Default);
     }
 
     /// <summary>Zweiter Programmstart: laufende Instanz zeigt ihr Fenster statt "laeuft bereits".</summary>
@@ -213,9 +264,17 @@ internal sealed class TrayApp : ApplicationContext
         string? auto = f == null ? null
             : $"{(f.Marke != null ? $"{f.Marke} {f.Modell}".Trim() : f.MarkeModellText)} · EZ {f.EzText}"
               + (f.Kilometer != null ? $" · {f.Kilometer:N0} km" : "");
-        return new FensterZustand(_ueberwacher?.Status ?? Status.KeinAutoPointer, _einstellungen.AutomatikAktiv,
+        return new FensterZustand(AktuellerStatus(), _einstellungen.AutomatikAktiv,
             _dienst.Verbunden, _einstellungen.VerbundenAls ?? "", auto,
-            !string.IsNullOrEmpty(_ueberwacher?.LetzteInseratUrl), _letzteMeldung, _probelauf);
+            !string.IsNullOrEmpty(_ueberwacher?.LetzteInseratUrl), _letzteMeldung, _probelauf, _lizenzSperre);
+    }
+
+    /// <summary>Status fuer Symbol, Fenster und Leiste: Lizenzsperre (A8) und fehlende Texterkennung (A9) gehen vor.</summary>
+    private Status AktuellerStatus()
+    {
+        if (_lizenzSperre != null && _dienst.Verbunden) return Status.Gesperrt;
+        if (_ueberwacher == null && _ocrFehlt != null) return Status.TexterkennungFehlt;
+        return _ueberwacher?.Status ?? Status.KeinAutoPointer;
     }
 
     /// <summary>Wunsch Ahmad 03.10.2026: das zuletzt angeklickte Auto in AutoSchnell oeffnen — der Server hat
@@ -263,8 +322,8 @@ internal sealed class TrayApp : ApplicationContext
     private async Task AppStartPruefenAsync(string start, string ziel)
     {
         if (!_dienst.Verbunden) return;
-        var bis = DateTime.Now.AddSeconds(10);
-        while (DateTime.Now < bis)
+        long bis = Environment.TickCount64 + 10_000;     // A10: monoton
+        while (Environment.TickCount64 < bis)
         {
             await Task.Delay(700);
             if (await _dienst.AppStartBestaetigtAsync(start))
@@ -325,7 +384,11 @@ internal sealed class TrayApp : ApplicationContext
         _trennen.Enabled = verbunden;
     }
 
-    /// <summary>Beim Start und alle 15 Minuten: gilt der Schluessel noch, ist das Abo aktiv?</summary>
+    /// <summary>Beim Start und alle 15 Minuten: gilt der Schluessel noch, ist das Abo aktiv?
+    /// Pruefung 05.10.2026 (Paket 2, A8): voruebergehende Fehler (kein Netz, 5xx, 429) bleiben STILL — kein rotes
+    /// Symbol, keine Sprechblase alle 15 Minuten, auch nicht beim Autostart ohne Netz; stattdessen nach 1/2/5 Minuten
+    /// erneut. 402/403 werden zum Zustand "Gesperrt" (Leiste/Fenster zeigen den Server-Text, der Ueberwacher liest
+    /// nichts). 401 loescht wie bisher den Schluessel (anderer PC verbunden) — sofern er noch der aktuelle ist.</summary>
     private async Task LizenzPruefenAsync(bool beimStart)
     {
         if (!_dienst.Verbunden)
@@ -333,9 +396,13 @@ internal sealed class TrayApp : ApplicationContext
             if (beimStart) VerbindenZeigen(null);
             return;
         }
+        if (_lizenzLaeuft) return;
+        _lizenzLaeuft = true;
         try
         {
             var s = await _dienst.StatusAsync();
+            _lizenzFehler = 0;
+            LizenzSperreSetzen(null);
             string als = AutoSchnellDienst.KontoText(s.Name, s.Konto, s.Firma);
             if (als != _einstellungen.VerbundenAls)
             {
@@ -353,25 +420,50 @@ internal sealed class TrayApp : ApplicationContext
                             + "herunterladen und starten (installiert: " + eigene + ").", false, erzwingen: true);
             }
             VerbindungAnzeigen();
-            StatusAnzeigen(_ueberwacher?.Status ?? Status.KeinAutoPointer);
+            StatusAnzeigen(AktuellerStatus());
         }
         catch (DienstFehler ex)
         {
             Protokoll.Schreibe("Lizenzprüfung: " + ex.Message);
             if (ex.NichtVerbunden) VerbindungVerloren(ex.Message);
-            else if (!ex.KeineVerbindung)
+            else if (ex.KeinAbo || ex.Status == 403)
+            {
+                _lizenzFehler = 0;
+                LizenzSperreSetzen(ex.Message);
+                StatusAnzeigen(AktuellerStatus());
+                if (beimStart) Sprechblase(ex.Message, true, erzwingen: true);
+            }
+            else if (ex.Voruebergehend || ex.Veraltet)
+            {
+                // still: in 1, 2, dann alle 5 Minuten erneut — das Symbol bleibt, wie es ist
+                _lizenzFehler++;
+                var pause = TimeSpan.FromMinutes(_lizenzFehler switch { 1 => 1, 2 => 2, _ => 5 });
+                Interlocked.Exchange(ref _naechsteLizenz, Environment.TickCount64 + LizenzTakt(pause));
+                Protokoll.Schreibe($"Lizenzprüfung vorübergehend nicht möglich ({_lizenzFehler}. Mal) – erneut in {pause.TotalMinutes:0} min.");
+            }
+            else
             {
                 _symbol.Icon = _iconFehler;
                 Sprechblase(ex.Message, true, erzwingen: true);
             }
-            else if (beimStart) Sprechblase(ex.Message, true, erzwingen: true);
         }
+        finally { _lizenzLaeuft = false; }
+    }
+
+    private void LizenzSperreSetzen(string? grund)
+    {
+        if (_lizenzSperre == grund) return;
+        _lizenzSperre = grund;
+        if (_ueberwacher != null) _ueberwacher.LizenzGesperrt = grund != null;
+        Protokoll.Schreibe(grund != null ? "Gesperrt (Lizenzprüfung): " + grund : "Sperre aufgehoben (Lizenzprüfung ok).");
+        _fenster.Aktualisieren();
     }
 
     private void VerbindungVerloren(string meldung)
     {
         _einstellungen.SchluesselSetzen(null, null);
         Speichern(_einstellungen);
+        LizenzSperreSetzen(null);
         VerbindungAnzeigen();
         StatusAnzeigen(Status.NichtVerbunden);
         VerbindenZeigen(meldung);
@@ -390,9 +482,11 @@ internal sealed class TrayApp : ApplicationContext
             _einstellungen.SchluesselSetzen(r.Schluessel, als);
             Speichern(_einstellungen);
             Protokoll.Schreibe($"Mit AutoSchnell verbunden: {als}");
+            _lizenzFehler = 0;
+            LizenzSperreSetzen(null);           // der Code gibt es nur mit aktivem Abo
             VerbindungAnzeigen();
             _ueberwacher?.NachVerbinden();      // das gerade angezeigte Auto gleich vergleichen
-            StatusAnzeigen(_ueberwacher?.Status ?? Status.KeinAutoPointer);
+            StatusAnzeigen(AktuellerStatus());
             Sprechblase($"Verbunden als {als}. Klick in AutoPointer ein Inserat an – die Vergleiche öffnen sich automatisch.", false, erzwingen: true);
         }
         finally { _verbindenForm = null; }
@@ -406,6 +500,7 @@ internal sealed class TrayApp : ApplicationContext
         await _dienst.AbmeldenAsync();
         _einstellungen.SchluesselSetzen(null, null);
         Speichern(_einstellungen);
+        LizenzSperreSetzen(null);
         Protokoll.Schreibe("Verbindung zu AutoSchnell getrennt.");
         VerbindungAnzeigen();
         StatusAnzeigen(Status.NichtVerbunden);
@@ -417,17 +512,36 @@ internal sealed class TrayApp : ApplicationContext
         if (ocr == null)
         {
             Protokoll.Schreibe(fehler);
-            Sprechblase(fehler, true, erzwingen: true);
-            // Nr. 8: ohne Texterkennung geht nichts — gleich den Systemcheck zeigen (sagt, was fehlt und was zu tun ist)
-            _ui.Post(async _ => await SystemcheckZeigenAsync(), null);
+            bool erstesMal = _ocrFehlt == null;
+            _ocrFehlt = fehler;
+            StatusAnzeigen(AktuellerStatus());
+            _fenster.Aktualisieren();
+            if (erstesMal)
+            {
+                Sprechblase(fehler, true, erzwingen: true);
+                // Nr. 8: ohne Texterkennung geht nichts — gleich den Systemcheck zeigen (sagt, was fehlt und was zu tun ist)
+                _ui.Post(async _ => await SystemcheckZeigenAsync(), null);
+            }
+            // Pruefung 05.10.2026 (Paket 2, A9): eigener Zustand "Texterkennung fehlt" in Leiste und Fenster, jede
+            // Minute erneut versuchen (Sprachpaket nachinstalliert) — danach laeuft alles ohne Programm-Neustart
+            Task.Delay(TimeSpan.FromSeconds(60), _ende.Token).ContinueWith(t =>
+            {
+                if (!t.IsCanceled) _ui.Post(_ => { if (_ueberwacher == null) Starten(); }, null);
+            }, TaskScheduler.Default);
             return;
+        }
+        if (_ocrFehlt != null)
+        {
+            Protokoll.Schreibe("Texterkennung jetzt verfügbar – das Programm läuft normal weiter.");
+            Sprechblase("Texterkennung jetzt verfügbar – das Programm läuft normal weiter.", false, erzwingen: true);
+            _ocrFehlt = null;
         }
         Protokoll.Schreibe($"Texterkennung: {ocr.Sprache}");
         var quelle = new AutoPointerQuelle(ocr, () => _einstellungen);
         _quelle = quelle;
         _ueberwacher = new Ueberwacher(quelle, () => _einstellungen, new BrowserAusgabe(_ui),
-                                       new DienstVermittler(() => _dienst)) { Probelauf = _probelauf };
-        _ueberwacher.StatusGeaendert += s => _ui.Post(_ => StatusAnzeigen(s), null);
+                                       new DienstVermittler(() => _dienst)) { Probelauf = _probelauf, LizenzGesperrt = _lizenzSperre != null };
+        _ueberwacher.StatusGeaendert += s => _ui.Post(_ => StatusAnzeigen(AktuellerStatus()), null);
         _ueberwacher.Meldung += (t, f) => _ui.Post(_ => Sprechblase(t, f), null);
         _ueberwacher.VerbindungVerloren += m => _ui.Post(_ => VerbindungVerloren(m), null);
         _ueberwacher.FahrzeugGewechselt += _ => _zwischenablageStand = Native.GetClipboardSequenceNumber();
@@ -469,7 +583,7 @@ internal sealed class TrayApp : ApplicationContext
     {
         _automatik.Checked = _einstellungen.AutomatikAktiv;
         _automatik.Text = "Automatik aktiv" + (_einstellungen.TastenkuerzelAktiv ? "\tStrg+Alt+P" : "");
-        StatusAnzeigen(_ueberwacher?.Status ?? Status.KeinAutoPointer);
+        StatusAnzeigen(AktuellerStatus());
     }
 
     private void StatusAnzeigen(Status s)
@@ -479,7 +593,7 @@ internal sealed class TrayApp : ApplicationContext
         {
             Status.Pause => _iconPause,
             Status.KeinAutoPointer => _iconWarten,
-            Status.NichtVerbunden or Status.Gesperrt => _iconFehler,
+            Status.NichtVerbunden or Status.Gesperrt or Status.TexterkennungFehlt => _iconFehler,
             _ => _iconAktiv,
         };
         string text = s switch
@@ -488,7 +602,8 @@ internal sealed class TrayApp : ApplicationContext
             Status.KeinAutoPointer => "AutoPointer nicht gefunden",
             Status.Bereit => "bereit – kein Fahrzeug angezeigt",
             Status.NichtVerbunden => "nicht mit AutoSchnell verbunden",
-            Status.Gesperrt => "gesperrt (Abo/Freigabe)",
+            Status.Gesperrt => "gesperrt: " + (_lizenzSperre ?? "Abo/Freigabe"),
+            Status.TexterkennungFehlt => "Windows-Texterkennung fehlt",
             _ => "aktiv",
         };
         var letztes = _ueberwacher?.LetztesFahrzeug;
@@ -500,10 +615,10 @@ internal sealed class TrayApp : ApplicationContext
     private void Sprechblase(string text, bool fehler, bool erzwingen = false)
     {
         _letzteMeldung = $"{DateTime.Now:HH:mm} {text}";      // bleibt im Fenster stehen, die Sprechblase verschwindet
-        StatusAnzeigen(_ueberwacher?.Status ?? Status.KeinAutoPointer);
+        StatusAnzeigen(AktuellerStatus());
         if (!erzwingen && !_einstellungen.HinweiseAnzeigen) return;
-        if (!erzwingen && (DateTime.Now - _letzteSprechblase).TotalSeconds < 3) return;
-        _letzteSprechblase = DateTime.Now;
+        if (!erzwingen && Environment.TickCount64 - _letzteSprechblase < 3000) return;    // A10: monoton
+        _letzteSprechblase = Environment.TickCount64;
         _symbol.ShowBalloonTip(4000, "AutoPointer-Vergleich", text, fehler ? ToolTipIcon.Warning : ToolTipIcon.Info);
     }
 
@@ -516,7 +631,10 @@ internal sealed class TrayApp : ApplicationContext
         {
             if (f.ShowDialog() != DialogResult.OK) return;
             bool warAn = _einstellungen.AutomatikAktiv;
-            Speichern(f.Ergebnis);
+            // Paket 2 (A11): nur die Dialogfelder uebernehmen — Schluessel/VerbundenAls/Server koennen sich
+            // waehrend des offenen Dialogs geaendert haben (Lizenzpruefung, 401)
+            f.AnwendenAuf(_einstellungen);
+            Speichern(_einstellungen);
             if (!warAn && _einstellungen.AutomatikAktiv) _ueberwacher?.Neustart();
             HotkeyAnwenden();
             AutomatikAnzeigen();
@@ -567,6 +685,8 @@ internal sealed class TrayApp : ApplicationContext
     private void Beenden()
     {
         Protokoll.Schreibe("Beendet.");
+        SystemEvents.PowerModeChanged -= PowerModeGeaendert;
+        NetworkChange.NetworkAvailabilityChanged -= NetzGeaendert;
         _fenster.EndgueltigSchliessen();
         _leistenHandle = IntPtr.Zero;
         _leiste.EndgueltigSchliessen();

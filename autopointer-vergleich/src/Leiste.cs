@@ -260,7 +260,12 @@ internal sealed class Leiste : Form
         _vertrag.Enabled = z.Verbunden && z.LetztesAuto != null;
     }
 
-    internal static string Kurz(string titel) => titel == "AKTIV – WARTET" ? "WARTET" : titel;
+    internal static string Kurz(string titel) => titel switch
+    {
+        "AKTIV – WARTET" => "WARTET",
+        "TEXTERKENNUNG FEHLT" => "KEINE TEXTERK.",     // Paket 2 (A9): muss in die schmale Statusfläche passen
+        _ => titel,
+    };
 
     /// <summary>Kleiner runder Punkt (Griff zum Verschieben).</summary>
     private sealed class Griff : Control
