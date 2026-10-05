@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "AutoSchnell Helfer",
   "short_name": "AutoSchnell",
-  "version": "2.6.2",
+  "version": "2.6.3",
   "description": "AutoSchnell im Browser: Beim Öffnen eines Inserats gehen die Vergleiche mit euren Regeln auf, eine Ampel zeigt die Preislage, der Kaufvertrag geht mit einem Klick.",
   "minimum_chrome_version": "112",
   "icons": {
@@ -20,7 +20,9 @@
       "48": "icons/icon-48.png"
     }
   },
-  "permissions": ["storage"],
+  "permissions": [
+    "storage"
+  ],
   "host_permissions": [
     "https://app.auto-schnellkauf.de/*",
     "https://www.kleinanzeigen.de/*",
@@ -34,20 +36,21 @@
     "http://localhost/*",
     "http://127.0.0.1/*"
   ],
-  "background": { "service_worker": "background.js" },
+  "background": {
+    "service_worker": "background.js"
+  },
   "content_scripts": [
     {
       "matches": [
         "https://app.auto-schnellkauf.de/*",
         "https://auto-schnellkauf.de/*",
         "https://www.auto-schnellkauf.de/*",
-        "https://app.autoschnell.de/*",
-        "https://autoschnell.de/*",
-        "https://www.autoschnell.de/*",
         "http://localhost/*",
         "http://localhost:3000/*"
       ],
-      "js": ["content.js"],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_start"
     },
     {
@@ -58,7 +61,9 @@
         "https://www.autoscout24.ch/*",
         "https://www.kleinanzeigen.de/*"
       ],
-      "js": ["gemeinsam.js"],
+      "js": [
+        "gemeinsam.js"
+      ],
       "run_at": "document_start"
     },
     {
@@ -69,7 +74,9 @@
         "https://www.autoscout24.ch/*",
         "https://www.kleinanzeigen.de/*"
       ],
-      "js": ["portal.js"],
+      "js": [
+        "portal.js"
+      ],
       "run_at": "document_end"
     }
   ]

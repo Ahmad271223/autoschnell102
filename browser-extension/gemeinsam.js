@@ -86,7 +86,8 @@ AutoSchnell.andere = AutoSchnell.andere || new Map();
 // Tempo (2.4.0): Diese Datei laeuft schon beim Seitenstart (document_start), portal.js erst, wenn die Seite da ist.
 // Auf einem Inserat jetzt schon den Hintergrund wecken und die Verbindung zu AutoSchnell aufbauen lassen — bis die
 // Seite geladen ist, laeuft beides, und das Inserat geht ohne Aufwachen und Verbindungsaufbau raus.
-if (window.top === window && !AutoSchnell.fruehGemeldet && !AutoSchnell.andere.size
+// 2.6.3: auch mit (vermeintlicher) Doppel-Installation wecken; nur vorgeladene Seiten (prerendering) nicht
+if (window.top === window && !AutoSchnell.fruehGemeldet && !document.prerendering
     && AutoSchnell.inseratKennung(location.href)) {
   AutoSchnell.fruehGemeldet = true;
   AutoSchnell.senden({ typ: "frueh" });

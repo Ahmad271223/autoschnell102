@@ -17,21 +17,44 @@ const WIEDERHOLEN_MS = 30 * 60 * 1000;     // dasselbe Inserat innerhalb 30 min:
 const ANFRAGE_MS = 25000;
 
 // ------------------------------------------------------------------ 1. Abruf-Helfer (unveraendert)
-const KLEINANZEIGEN = /^https:\/\/(www\.)?kleinanzeigen\.de\/s-anzeige\//i;
+// 2.6.3 (Pruefung 05.10.2026, Paket 2): Adresse als URL pruefen (nicht als Text — "/s-anzeige/../x" fuehrte woanders
+// hin), Zeitgrenze (die App gibt nach 25 s auf, der Abruf lief weiter) und hoechstens 3 gleichzeitig (sonst konnte
+// ein Skript die Leitung des Nutzers bei Kleinanzeigen bis zur Sperre auslasten).
+const ABRUF_MS = 20000;
+const ABRUF_GLEICHZEITIG = 3;
+let abrufeLaufend = 0;
+
+function kleinanzeigenInserat(url) {
+  try {
+    const u = new URL(String(url || ""));
+    return u.protocol === "https:" && /^(www\.)?kleinanzeigen\.de$/.test(u.hostname)
+      && u.pathname.startsWith("/s-anzeige/") && !u.pathname.includes("/../") ? u.href : null;
+  } catch (e) {
+    return null;
+  }
+}
 
 function abrufHelfer(msg, sendResponse) {
-  const url = String(msg.url || "");
-  if (!KLEINANZEIGEN.test(url)) {
+  const url = kleinanzeigenInserat(msg.url);
+  if (!url) {
     sendResponse({ ok: false, error: "Nur Kleinanzeigen-Fahrzeuglinks erlaubt." });
     return;
   }
-  fetch(url, { credentials: "omit", headers: { Accept: "text/html,application/xhtml+xml" } })
+  if (abrufeLaufend >= ABRUF_GLEICHZEITIG) {
+    sendResponse({ ok: false, error: "Gerade laufen schon mehrere Abrufe – bitte gleich noch einmal." });
+    return;
+  }
+  abrufeLaufend++;
+  const abbruch = new AbortController();
+  const uhr = setTimeout(() => abbruch.abort(), ABRUF_MS);
+  fetch(url, { credentials: "omit", headers: { Accept: "text/html,application/xhtml+xml" }, signal: abbruch.signal })
     .then((r) => {
       if (!r.ok) throw new Error("HTTP " + r.status);
       return r.text();
     })
     .then((html) => sendResponse({ ok: true, html }))
-    .catch((e) => sendResponse({ ok: false, error: String((e && e.message) || e) }));
+    .catch((e) => sendResponse({ ok: false, error: String((e && e.message) || e) }))
+    .finally(() => { clearTimeout(uhr); abrufeLaufend--; });
 }
 
 // ------------------------------------------------------------------ Verbindung + Server
@@ -58,6 +81,26 @@ async function sitzungLeeren() {
 
 async function lokal(schluessel) {
   return chrome.storage.local.get(schluessel);
+}
+
+// 2.6.3 (Paket 2): Ohne Abo (402), gesperrt (403) oder ohne Netz (0) lud der Helfer trotzdem jede Inseratsseite
+// hoch (200–300 KB), nur um dieselbe Antwort zu bekommen — jetzt merkt er sich die Sperre kurz und antwortet
+// sofort aus dem Gedaechtnis. Ein 200 loescht den Merker.
+const SPERRE_MS = { 402: 5 * 60000, 403: 5 * 60000, 0: 60000 };
+
+async function sperreLesen() {
+  try {
+    const { sperre } = await chrome.storage.session.get("sperre");
+    return sperre && sperre.bis > Date.now() ? sperre : null;
+  } catch (e) { return null; }
+}
+
+async function sperreMerken(status, text) {
+  const dauer = SPERRE_MS[status];
+  try {
+    if (dauer) await chrome.storage.session.set({ sperre: { status, text, bis: Date.now() + dauer } });
+    else if (status === 200) await chrome.storage.session.remove("sperre");
+  } catch (e) { /* egal */ }
 }
 
 async function server() {
@@ -97,6 +140,9 @@ async function api(pfad, { methode = "GET", daten, ohneSchluessel = false } = {}
     });
     let antwort = null;
     try { antwort = await r.json(); } catch (e) { antwort = null; }
+    if (!ohneSchluessel && (r.status === 200 || r.status === 402 || r.status === 403)) {
+      await sperreMerken(r.status, fehlertext(r.status, antwort, "Gesperrt."));
+    }
     if (r.status === 401 && !ohneSchluessel) {
       // Verbindung gilt nicht mehr (anderer Browser, Chef, App) — der Server sagt genau, warum.
       // 2.6.0 (Nr. 8): nur, wenn noch DERSELBE Schluessel gespeichert ist — eine alte Anfrage, die nach dem
@@ -110,6 +156,7 @@ async function api(pfad, { methode = "GET", daten, ohneSchluessel = false } = {}
     }
     return { status: r.status, daten: antwort };
   } catch (e) {
+    if (!ohneSchluessel) await sperreMerken(0, "AutoSchnell ist gerade nicht erreichbar – Internetverbindung prüfen.");
     return { status: 0, daten: { detail: "AutoSchnell ist gerade nicht erreichbar – Internetverbindung prüfen." } };
   } finally {
     clearTimeout(uhr);
@@ -317,6 +364,8 @@ async function inseratBearbeiten(msg, tab) {
   if (!schluessel) {
     return { fehler: "nicht_verbunden", text: getrenntGrund || "Nicht verbunden – auf das AutoSchnell-Symbol klicken und den Code aus AutoSchnell eintippen." };
   }
+  const sperre = await sperreLesen();
+  if (sperre && !(s.inserate[kennung] || {}).antwort) return { fehler: "server", status: sperre.status, text: sperre.text };
   const vorher = s.inserate[kennung];
   // Aus einer unserer Vergleichsseiten geoeffnet (neuer Tab) oder darin weitergeklickt (derselbe Tab)?
   // Dann nichts automatisch oeffnen — sonst oeffnet jedes angeschaute Vergleichsauto neue Vergleiche.
@@ -591,7 +640,10 @@ async function vertragsZiel(kennung) {
   const s = await sitzung();
   const i = s.inserate[String(kennung || "")];
   if (!i || !i.antwort || !i.antwort.app_pfad) return null;
-  return { pfad: i.antwort.app_pfad + "&vertrag=1", inseratUrl: i.antwort.inserat_url };
+  // 2.6.3 (Paket 2): nur ein Pfad in der App (nie "//fremd.de/…" oder "@fremd.de") — auch wenn der Server falsch antwortet
+  const pfad = String(i.antwort.app_pfad);
+  if (!pfad.startsWith("/app/") || pfad.startsWith("//") || /[@\\]/.test(pfad.split("?")[0])) return null;
+  return { pfad: pfad + "&vertrag=1", inseratUrl: i.antwort.inserat_url };
 }
 
 async function webseiteOeffnen(basis, pfad, tab) {
@@ -690,11 +742,16 @@ async function verbinden(msg) {
   return { ok: true, konto: r.daten.konto, name: r.daten.name, firma: r.daten.firma };
 }
 
-async function status() {
+async function status(msg) {
   const daten = await lokal(["schluessel", "konto", "name", "firma", "getrenntGrund", "server"]);
   const e = await einstellungen();
   if (!daten.schluessel) {
     return { verbunden: false, grund: daten.getrenntGrund || "", einstellungen: e, server: await server(), version: VERSION };
+  }
+  if (msg && msg.schnell) {
+    // 2.6.3 (Paket 3): das Fenster zeigt sofort, was es weiss (Konto, Name, Firma) — der Server-Stand folgt
+    return { verbunden: true, konto: daten.konto, name: daten.name, firma: daten.firma, vorlaeufig: true,
+             einstellungen: e, server: await server(), version: VERSION };
   }
   const r = await api(`/werkzeuge/${WERKZEUG}/status`);
   if (r.status === 200 && r.daten) {
@@ -710,9 +767,16 @@ async function status() {
 
 async function trennen() {
   const { schluessel } = await lokal("schluessel");
-  if (schluessel) await api(`/werkzeuge/${WERKZEUG}/abmelden`, { methode: "POST" });
+  // 2.6.3 (Paket 3): erst lokal trennen (sofort), dann dem Server sagen — vorher wartete der Knopf bis 25 s
   await chrome.storage.local.remove(["schluessel", "konto", "name", "firma", "getrenntGrund", "statusMerker"]);
   await sitzungLeeren();
+  if (schluessel) {
+    const basis = await server();
+    fetch(basis + "/api/werkzeuge/" + WERKZEUG + "/abmelden", {
+      method: "POST", credentials: "omit", cache: "no-store",
+      headers: { "Content-Type": "application/json", "X-Werkzeug-Version": VERSION, "X-Werkzeug-Schluessel": schluessel },
+    }).catch(() => {});
+  }
   return { ok: true };
 }
 
@@ -733,7 +797,20 @@ const AKTIONEN = {
   vergleiche_oeffnen: (m, t) => vergleicheManuell(m, t),
   vergleiche_auto: (m, t) => vergleicheAutomatisch(m, t),
 };
-const FENSTER = { verbinden, status, trennen, einstellungen: einstellungenSetzen };
+const PORTAL = /^https:\/\/(suchen\.mobile\.de|www\.autoscout24\.(de|at|ch)|(www\.)?kleinanzeigen\.de)\//;
+const FENSTER = { verbinden, status: (m) => status(m), trennen, einstellungen: einstellungenSetzen };
+
+/** 2.6.3: Der Box-Zustand (zugeklappt) liegt im Hintergrund — Seiten-Skripte lesen storage.local nicht mehr selbst
+ *  (der Schluessel liegt dort; setAccessLevel TRUSTED_CONTEXTS sperrt den Speicher fuer Seiten-Skripte). */
+async function boxZustand(msg) {
+  if (msg.setzen !== undefined) await chrome.storage.local.set({ boxZugeklappt: !!msg.setzen });
+  const { boxZugeklappt } = await lokal("boxZugeklappt");
+  return { zugeklappt: !!boxZugeklappt };
+}
+AKTIONEN.box = (m) => boxZustand(m);
+try {
+  Promise.resolve(chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" })).catch(() => {});
+} catch (e) { /* aeltere Browser kennen es nicht — die Seiten-Skripte greifen ohnehin nicht mehr zu */ }
 const INTERN_TEXT = "Im AutoSchnell Helfer ist etwas schiefgelaufen – bitte die Seite neu laden.";
 
 /** Oberster Rahmen eines Tabs. 2.6.0 (Nr. 10): vorgeladene Seiten (Speculation Rules, Adresszeile) haben dort eine
@@ -756,7 +833,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
   // Seiten-Skripte: nur aus dem obersten Rahmen eines Portal-Tabs
-  if (AKTIONEN[msg.typ] && sender.tab && obersterRahmen(sender) && /^https:\/\//.test(String(sender.url || ""))) {
+  // 2.6.3 (Paket 2): nur von den Portalseiten — nicht von der AutoSchnell-Seite oder sonst irgendwo
+  if (AKTIONEN[msg.typ] && sender.tab && obersterRahmen(sender) && PORTAL.test(String(sender.url || ""))) {
     AKTIONEN[msg.typ](msg, sender.tab).then(sendResponse, (e) => {
       console.error("AutoSchnell Helfer:", msg.typ, e);       // Nr. 17: Englisches nie in die Box
       sendResponse({ fehler: "intern", text: INTERN_TEXT });

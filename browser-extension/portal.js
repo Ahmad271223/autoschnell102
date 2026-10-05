@@ -49,11 +49,19 @@
 
   /** 2.6.0: Baut die Seite sich neu auf (React) und wirft dabei fremde Elemente raus, haengt sich die Box sofort
    *  wieder ein. Beobachtet nur die oberste Ebene (html, body) — keine Last bei jeder Aenderung der Seite. */
+  // 2.6.3 (Paket 2): entfernt die Seite die Box selbst immer wieder, nicht endlos gegenhalten (Tab friert sonst ein)
+  const einhaengungen = [];
   function beobachten() {
     if (!waechter) {
       waechter = new MutationObserver(() => {
         if (!hostEl || !zustand) return;
-        if (!hostEl.isConnected || (document.body && hostEl.parentNode !== document.body)) einhaengen();
+        if (!hostEl.isConnected || (document.body && hostEl.parentNode !== document.body)) {
+          const jetzt = Date.now();
+          while (einhaengungen.length && jetzt - einhaengungen[0] > 10000) einhaengungen.shift();
+          if (einhaengungen.length >= 5) { waechter.disconnect(); return; }
+          einhaengungen.push(jetzt);
+          einhaengen();
+        }
         beobachten();                                  // body evtl. ersetzt: neuen body beobachten
       });
     }
@@ -235,7 +243,7 @@
       ev.stopPropagation();
       zugeklappt = !zugeklappt;
       // 2.6.0 (Nr. 18): zugeklappt bleibt zugeklappt — auch im naechsten Inserat
-      try { if (A.helferDa()) chrome.storage.local.set({ boxZugeklappt: zugeklappt }); } catch (e) { /* egal */ }
+      if (A.helferDa()) A.senden({ typ: "box", setzen: zugeklappt });
       zeichnen();
     };
     kopf.addEventListener("click", umschalten);
@@ -312,6 +320,9 @@
           inhalt.appendChild(ul);
         }
         for (const h of (a.hinweise || []).slice(0, 2)) inhalt.appendChild(el("div", "klein", h));
+        if (doppelt) inhalt.appendChild(el("div", "fehler", "Hinweis: Der AutoSchnell Helfer scheint zweimal installiert zu sein "
+          + "(Versionen " + [chrome.runtime.getManifest().version, ...A.andere.values()].filter(Boolean).join(" und ")
+          + ") – in den Erweiterungen die alte Kopie entfernen, sonst geht manches doppelt auf."));
         // 2.6.0 (Nr. 24): immer sagen, WARUM die Vergleiche nicht von selbst aufgingen
         const grund = offen ? "" : GRUENDE[z.automatik] || (z.ausVergleich ? GRUENDE.aus_vergleich : z.vomProgramm ? GRUENDE.programm : "");
         if (grund) inhalt.appendChild(el("div", "klein", grund));
@@ -405,7 +416,8 @@
     const a = document.createElement("a");
     a.href = protokoll;
     a.style.display = "none";
-    (document.body || document.documentElement).appendChild(a);
+    // 2.6.3 (Paket 2): im geschlossenen Schatten-DOM — ein Klick-Abfaenger der Seite sieht ihn nicht
+    (wurzel || document.body || document.documentElement).appendChild(a);
     a.click();
     a.remove();
     z.protokollWartet = "";
@@ -646,13 +658,9 @@
     if (ersterAufruf && istVergleichsseite(location.href)) vergleichsseite();
   }
 
-  // 2.6.0: zweimal installiert (zwei Erweiterungs-IDs, gemeinsam.js)? Dann nichts tun ausser es zu sagen — sonst
-  // gehen Vergleiche doppelt auf und die beiden Boxen nehmen sich gegenseitig weg.
-  if (A.andere && A.andere.size) {
-    zustand = { phase: "doppelt" };
-    zeichnen();
-    return;
-  }
+  // 2.6.0: zweimal installiert (zwei Erweiterungs-IDs, gemeinsam.js)? 2.6.3 (Paket 2): nur noch SAGEN, nicht mehr
+  // abschalten — das Signal laeuft ueber die Seite, jede Portalseite haette den Helfer damit stilllegen koennen.
+  const doppelt = !!(A.andere && A.andere.size);
 
   let letzte = location.href;
   const adresseGewechselt = () => {
@@ -664,11 +672,9 @@
 
   function starten() {
     // 2.6.0 (Nr. 18): zugeklappt bleibt zugeklappt
-    try {
-      chrome.storage.local.get("boxZugeklappt").then((x) => {
-        if (x && x.boxZugeklappt && !zugeklappt) { zugeklappt = true; if (zustand) zeichnen(); }
-      }).catch(() => {});
-    } catch (e) { /* egal */ }
+    A.senden({ typ: "box" }).then((x) => {
+      if (x && x.zugeklappt && !zugeklappt) { zugeklappt = true; if (zustand) zeichnen(); }
+    });
     letzte = location.href;
     pruefen(true);
     // 2.6.0: Seitenwechsel ohne Neuladen sofort erkennen (Navigation API / zurueck); die Abfrage bleibt als Rueckfall

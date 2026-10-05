@@ -138,4 +138,8 @@ $("oeffnen").addEventListener("change", async () => {
   await senden({ typ: "einstellungen", einstellungen: { vergleicheOeffnen: $("oeffnen").checked } });
 });
 
-senden({ typ: "status" }).then(zeigen);
+// 2.6.3 (Paket 3): erst sofort aus dem Speicher (Konto, Name, Firma), dann der Server-Stand
+senden({ typ: "status", schnell: true }).then((st) => {
+  zeigen(st);
+  if (st && st.vorlaeufig) senden({ typ: "status" }).then(zeigen);
+});

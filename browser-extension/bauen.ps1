@@ -12,7 +12,18 @@ $dist = Join-Path $quelle "dist"
 $arbeit = Join-Path $dist "AutoSchnell-Helfer"
 if (Test-Path $arbeit) { Remove-Item $arbeit -Recurse -Force }
 New-Item -ItemType Directory -Force $arbeit | Out-Null
-foreach ($d in @("manifest.json", "popup.html")) { Copy-Item (Join-Path $quelle $d) $arbeit }
+# 2.6.3: die ausgelieferte Fassung laeuft NICHT auf localhost (nur Entwicklung) — content.js dort wuerde jedem
+# lokalen Dienst den Kleinanzeigen-Abruf anbieten
+$mAus = Get-Content (Join-Path $quelle "manifest.json") -Raw -Encoding UTF8 | ConvertFrom-Json
+foreach ($cs in $mAus.content_scripts) {
+    $cs.matches = @($cs.matches | Where-Object { $_ -notmatch "localhost|127\.0\.0\.1" })
+}
+$mAus.optional_host_permissions = @($mAus.optional_host_permissions | Where-Object { $_ -notmatch "localhost|127\.0\.0\.1" })
+# jede im Manifest genannte Datei muss da sein (sonst fehlt sie im ZIP still)
+$genannt = @("popup.html", $mAus.background.service_worker) + @($mAus.content_scripts | ForEach-Object { $_.js })
+foreach ($g in $genannt) { if (-not (Test-Path (Join-Path $quelle $g))) { throw "Im Manifest genannt, aber nicht da: $g" } }
+[System.IO.File]::WriteAllText((Join-Path $arbeit "manifest.json"), ($mAus | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding $false))
+Copy-Item (Join-Path $quelle "popup.html") $arbeit
 Copy-Item (Join-Path $quelle "icons") (Join-Path $arbeit "icons") -Recurse
 # Wunsch Ahmad 04.10.2026 ("darf keiner sehen"): die ausgelieferten Skripte werden verkleinert (Kommentare raus,
 # kurze Namen, eine Zeile). Verschleiern (Obfuscator) bewusst NICHT: der Chrome Web Store lehnt verschleierten

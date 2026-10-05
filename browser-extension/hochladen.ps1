@@ -6,9 +6,17 @@
 # Nur ASCII in dieser Datei: Windows PowerShell 5 liest Skripte ohne BOM als ANSI.
 param(
     [Parameter(Mandatory = $true)][string]$Server,
-    [string]$Ordner = "/opt/autoschnell"
+    [string]$Ordner = "/opt/autoschnell",
+    [switch]$Force
 )
 $ErrorActionPreference = "Stop"
+# 2.6.3 (Paket 2): nur einen committeten Stand hochladen - ungespeicherte Aenderungen (auch die einer anderen
+# Sitzung im selben Ordner) kaemen sonst mit derselben Versionsnummer zu den Kunden. -Force uebergeht das.
+$repo = Split-Path $PSScriptRoot -Parent
+$offen = & git -C $repo status --porcelain -- browser-extension
+if ($offen -and -not $Force) { throw "browser-extension hat ungespeicherte Aenderungen - erst committen (oder -Force)." }
+$stand = (& git -C $repo rev-parse --short HEAD)
+Write-Host "Stand: $stand"
 & (Join-Path $PSScriptRoot "bauen.ps1")
 $zip = Join-Path $PSScriptRoot "dist\AutoSchnell-Helfer.zip"
 $version = (Get-Content (Join-Path $PSScriptRoot "manifest.json") -Raw -Encoding UTF8 | ConvertFrom-Json).version

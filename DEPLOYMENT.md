@@ -4421,7 +4421,7 @@ Erst einmal **nur für Kunde 10002**, seit dem Abend des 03.10. auch **10001** �
 
 ### Browser-Helfer für Chrome und Edge (Wunsch Ahmad 04.10.2026)
 
-Zweites Werkzeug `browser-helfer` neben dem Programm — die Erweiterung `browser-extension/` (Version 2.6.2, enthält
+Zweites Werkzeug `browser-helfer` neben dem Programm — die Erweiterung `browser-extension/` (Version 2.6.3, enthält
 weiter den Kleinanzeigen-Abruf-Helfer). Gleiche Lizenz: 6-stelliger Code, **ein Konto = ein Browser**, Abo-Pflicht,
 Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
 - Freigabe: `BROWSER_HELFER_KUNDEN` (Standard `10001,10002`, `docker-compose.yml`; leer = niemand).
@@ -4496,6 +4496,14 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
       neuer Tab — nichts, was der Nutzer dort offen hat, wird überschrieben); Doppelklick auf „Vergleich öffnen“
       öffnet nicht mehr doppelt; nach kurzem Netz-/Serverfehler versucht der Vergleichs-Tab die Ampel einmal neu
       (vorher blieb sie für diesen Tab für immer aus).
+  - **2.6.3 — Paket 2 + 3 (06.10.2026):** Doppel-Installation wird nur noch gemeldet, nicht mehr abgeschaltet (eine
+    Portalseite konnte das Signal fälschen); Aktionen nur von Portalseiten, `app_pfad` vom Server geprüft, Link-Typ-Start
+    im Schatten-DOM, Wiedereinhängen der Box begrenzt, `storage.local` nur für vertrauenswürdige Kontexte
+    (Box-Zustand über den Hintergrund); Kleinanzeigen-Abruf für die App mit URL-Prüfung, 20 s Zeitgrenze, höchstens
+    3 gleichzeitig; ohne Abo/gesperrt/offline merkt sich der Helfer die Sperre 5 min/1 min und lädt keine Seiten
+    hoch; Fenster am Symbol zeigt sofort Konto/Name/Firma, „Trennen“ wartet nicht auf den Server; `bauen.ps1`
+    entfernt localhost aus der ausgelieferten Fassung und prüft die Dateiliste, `hochladen.ps1` lädt nur einen
+    committeten Stand (`-Force` übergeht das) und nennt den Commit; Manifest ohne die Beispiel-Adresse autoschnell.de.
   - Offen (Entscheidung Ahmad): Aufbewahrungsfrist für `werkzeug_vergleiche` (wächst je geöffnetem Inserat);
     Datenschutzerklärung/Web-Store-Angaben (der Helfer schickt die ganze Seite, ausgewertet werden nur die
     Fahrzeugdaten, die Rohseite wird nicht gespeichert); autoscout24.ch hat andere Inseratsadressen (ungenutzt).
@@ -4508,7 +4516,7 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
   powershell -File browser-extension\bauen.ps1                                       # lokal: browser-extension\dist\AutoSchnell-Helfer.zip
   scp browser-extension/dist/AutoSchnell-Helfer.zip root@<server>:/tmp/
   docker compose cp /tmp/AutoSchnell-Helfer.zip backend:/tmp/AutoSchnell-Helfer.zip
-  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Helfer.zip --werkzeug browser-helfer --version 2.6.2
+  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Helfer.zip --werkzeug browser-helfer --version 2.6.3
   ```
   Reihenfolge: erst Server deployen (neue Routen), dann ZIP hochladen.
 - Tests: `backend/tests/test_browser_helfer_20261004.py` (Teil 1 ohne Server, Teil 2 über HTTP).
