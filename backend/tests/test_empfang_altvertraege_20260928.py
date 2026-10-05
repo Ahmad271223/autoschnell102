@@ -338,7 +338,7 @@ def test_p1_migration_21_eingetragen():
     M = _module("migrationen")
     namen = {n: name for n, name, _ in M.MIGRATIONEN}
     assert namen[21] == "empfang_kaestchen_leeren"
-    assert M.ZIEL_VERSION == 21
+    assert M.ZIEL_VERSION >= 21          # 22 seit 06.10.2026 (werkzeug_vergleiche_ablauf)
 
 
 # =============================================================== (2) Vorschau = Anlage

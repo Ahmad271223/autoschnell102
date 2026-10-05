@@ -560,7 +560,8 @@ def test_rp445_erweiterung_kennt_die_live_adresse():
     m = json.loads((BACKEND.parent / "browser-extension" / "manifest.json").read_text(encoding="utf-8"))
     passt = m["content_scripts"][0]["matches"]
     assert "https://app.auto-schnellkauf.de/*" in passt
-    assert "https://app.autoschnell.de/*" in passt           # Beispiel-PUBLIC_HOST
+    # Paket 2 (06.10.2026): die Beispiel-Adresse autoschnell.de gehoert uns nicht — dort laeuft content.js nicht mehr
+    assert not any("autoschnell.de" in x for x in passt), passt
     assert m["version"] != "1.0.0", "Version erhoeht, damit installierte Helfer aktualisieren"
 
 
