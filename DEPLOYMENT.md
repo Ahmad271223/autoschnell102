@@ -4496,6 +4496,15 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
       neuer Tab — nichts, was der Nutzer dort offen hat, wird überschrieben); Doppelklick auf „Vergleich öffnen“
       öffnet nicht mehr doppelt; nach kurzem Netz-/Serverfehler versucht der Vergleichs-Tab die Ampel einmal neu
       (vorher blieb sie für diesen Tab für immer aus).
+  - **Paket 2 Server (06.10.2026):** pymongo-Verbindungsfehler (Primary-Wahl nach einem Ausfall, ~10 s) enden als
+    **503 + Retry-After: 5** statt 500 (ErrorReportingMiddleware; nichts landet in error_logs) — Programm und Helfer
+    versuchen es einmal neu. **Vergleiche 60 Tage** (Entscheidung Ahmad): `werkzeug_vergleiche.ablauf` + TTL-Index
+    `werkzeug_vergleiche_ablauf`, `WERKZEUG_VERGLEICHE_TAGE` (Compose 60), Migration 22 setzt `ablauf` für den
+    Bestand (aus `erstellt_am`; Älteres löscht der TTL danach selbst); Indizes `user_id`/`dealer_id` für Konto- und
+    Firmenlöschung. Konto deaktiviert → 403 (Schlüssel bleibt; 401 ließ das Programm ihn wegwerfen). Bremsen je Konto
+    statt je Verbindung (Neu-Verbinden setzte die Zähler zurück). `_vorab_ersetzen` tauscht in einem Zug. Auswerten:
+    Sperre mit 10-s-Zeitlimit (503), Entpacken + Auslesen in einem Thread-Aufruf, `MAX_HTML` 4 MB, `zuletzt_am` nur
+    einmal je Minute, Übersichten ohne die Aussortiert-Listen.
   - **2.6.3 — Paket 2 + 3 (06.10.2026):** Doppel-Installation wird nur noch gemeldet, nicht mehr abgeschaltet (eine
     Portalseite konnte das Signal fälschen); Aktionen nur von Portalseiten, `app_pfad` vom Server geprüft, Link-Typ-Start
     im Schatten-DOM, Wiedereinhängen der Box begrenzt, `storage.local` nur für vertrauenswürdige Kontexte
