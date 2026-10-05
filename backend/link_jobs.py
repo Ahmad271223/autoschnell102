@@ -1059,8 +1059,10 @@ async def _process(db, job: dict) -> None:
             konto = {"id": uid or firma or "", "dealer_id": firma}
             try:
                 async with _AbrufSlot(konto):
-                    return await fetch_listing(db, src, iid, url,
-                                               dealer_id=firma, user_id=uid)
+                    # 06.10.2026: der Vorab-Abruf des Windows-Programms zaehlt im Programm-Topf (600), nicht
+                    # gegen die 150 Links des Kontos in der App
+                    topf = {"herkunft": "programm"} if job.get("vorab") else {}
+                    return await fetch_listing(db, src, iid, url, dealer_id=firma, user_id=uid, **topf)
             except TageslimitErreicht as exc:
                 letzte = exc
                 continue

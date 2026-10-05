@@ -452,6 +452,15 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     user, v, _firma_doc, _abo = await _programm(werkzeug_id, schluessel, _programm_version(user_agent))
     if not await _vergleich_limiter.check(f"verbindung:{v['id']}"):
         raise HTTPException(429, "Zu viele Vergleiche in kurzer Zeit – bitte kurz warten.")
+    # Entscheidung Ahmad 06.10.2026: hoechstens 600 Vergleiche je Konto und Tag ueber das Programm
+    # (PROGRAMM_TAGESLIMIT_JE_KONTO); der Probelauf zaehlt nicht
+    from provider_fetch import TageslimitErreicht, programm_tageslimit
+    verbleibend = None
+    if not body.probelauf:
+        try:
+            _stand, _limit, verbleibend = await programm_tageslimit(db, user["id"])
+        except TageslimitErreicht as exc:
+            raise HTTPException(429, str(exc))
     from mobile_service import DEFAULT_EXPORT_RULES, DEFAULT_RULES
     from regeln import regeln_lesen
     dealer = await effective_dealer(user)
@@ -470,6 +479,9 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     links, hinweise = wz.vergleichs_links(vehicle, regeln)      # Navi + Beschaedigte wie eingestellt (04.10.)
     if erkannt.pop("aus_beschreibung", False):
         melden.insert(0, f"Modell aus der Beschreibung übernommen: {erkannt['modell']} – bitte kurz prüfen.")
+    if verbleibend in (50, 20, 5, 1):
+        melden.append(f"Noch {verbleibend} Vergleich{'e' if verbleibend != 1 else ''} heute über das Programm "
+                      "(Tageslimit), dann wieder ab 0 Uhr.")
     # "melden": was das Programm (ab 1.5.3) dem Sucher sofort zeigt; aeltere Programme protokollieren die Hinweise
     hinweise = melden + hinweise
     # Wunsch Ahmad 03.10.2026: das Inserat schon jetzt im Hintergrund auslesen (Daten + Fotos), damit

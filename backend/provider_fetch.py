@@ -79,13 +79,38 @@ TAGESLIMIT_GESAMT = int(os.environ.get("ANBIETER_TAGESLIMIT_GESAMT", "0"))
 # Entscheidung Ahmad 16.09.2026: hoechstens 400 NEUE Abrufe je Konto und Tag
 # (alle Quellen, auch Kleinanzeigen). Bekannte Links aus dem Speicher und
 # Mitwarten an einem laufenden Abruf kosten nichts. Im Code 0 = aus (Tests,
-# lokale Entwicklung); docker-compose.yml und .env.example setzen 400.
+# lokale Entwicklung); docker-compose.yml und .env.example setzen den Wert.
+# Entscheidung Ahmad 06.10.2026: 150 je Konto und Tag ueber den Link in der App —
+# und ein EIGENER Topf fuer das Windows-Programm (PROGRAMM_TAGESLIMIT_JE_KONTO,
+# 600): dessen Vorab-Abrufe (Kaufvertrag) zaehlen nicht gegen die 150.
 TAGESLIMIT_JE_KONTO = int(os.environ.get("ANBIETER_TAGESLIMIT_JE_KONTO", "0"))
+PROGRAMM_TAGESLIMIT_JE_KONTO = int(os.environ.get("PROGRAMM_TAGESLIMIT_JE_KONTO", "0"))
 
 
 class TageslimitErreicht(RuntimeError):
     """Tageslimit (Konto, Firma oder gesamt) erreicht — die Routen antworten
     429, ein Link-Job scheitert sofort ohne weitere Versuche."""
+
+
+async def programm_tageslimit(db, user_id: str) -> tuple:
+    """Entscheidung Ahmad 06.10.2026: hoechstens PROGRAMM_TAGESLIMIT_JE_KONTO Vergleiche je Konto und Tag ueber das
+    Windows-Programm. Zaehlt den Vergleich (nicht den Probelauf) und liefert (stand, limit, verbleibend);
+    ueber dem Limit wird die Zaehlung zurueckgenommen und TageslimitErreicht geworfen. 0 = kein Limit."""
+    from pymongo import ReturnDocument
+    tag = tagesschluessel()
+    schluessel = f"{tag}:programm:{user_id}"
+    doc = await db.provider_budget.find_one_and_update(
+        {"_id": schluessel},
+        {"$inc": {"n": 1}, "$setOnInsert": {"ablauf": datetime.now(timezone.utc) + timedelta(days=2)}},
+        upsert=True, return_document=ReturnDocument.AFTER)
+    stand = int(doc.get("n") or 0)
+    limit = PROGRAMM_TAGESLIMIT_JE_KONTO
+    if limit > 0 and stand > limit:
+        await db.provider_budget.update_one({"_id": schluessel, "n": {"$gt": 0}}, {"$inc": {"n": -1}})
+        raise TageslimitErreicht(
+            f"Tageslimit des Programms erreicht ({limit} Vergleiche je Tag). Weitere Autos wieder ab 0 Uhr "
+            "(deutsche Zeit) – in AutoSchnell geht es über den Link weiter.")
+    return stand, limit, (limit - stand if limit > 0 else None)
 # Ab dieser Zahl Abrufe an einem Tag gibt es EINEN Betriebsalarm — ein
 # Hinweis, kein Riegel. So faellt ein Ausreisser auf, bevor die Rechnung
 # kommt. 0 schaltet auch die Warnung ab.
@@ -123,7 +148,7 @@ async def _budget_zurueck(db, belastet) -> None:
             pass
 
 
-async def _budget_pruefen(db, source: str, dealer_id: str, user_id: str = "") -> list:
+async def _budget_pruefen(db, source: str, dealer_id: str, user_id: str = "", herkunft: str = "app") -> list:
     from pymongo import ReturnDocument
     tag = tagesschluessel()                      # B-13: Mitternacht deutscher Zeit
     ablauf = datetime.now(timezone.utc) + timedelta(days=2)
@@ -151,7 +176,13 @@ async def _budget_pruefen(db, source: str, dealer_id: str, user_id: str = "") ->
     # Konto-Limit (Entscheidung Ahmad 16.09.2026): zaehlt JEDEN echten
     # Anbieter-Abruf dieses Kontos, auch Kleinanzeigen. Gezaehlt wird immer
     # (Auswertung), gebremst nur bei TAGESLIMIT_JE_KONTO > 0.
-    if user_id:
+    if user_id and herkunft == "programm":
+        # Vorab-Abruf eines Vergleichs aus dem Windows-Programm: eigener Topf (06.10.2026), hoechstens so viele wie
+        # Vergleiche — die Programm-Vergleiche selbst zaehlt routes/werkzeuge (programm_tageslimit)
+        stand = await _zaehlen(f"{tag}:konto:{user_id}:programm")
+        if PROGRAMM_TAGESLIMIT_JE_KONTO > 0 and stand > PROGRAMM_TAGESLIMIT_JE_KONTO:
+            await _ablehnen(PROGRAMM_TAGESLIMIT_JE_KONTO, "je Konto über das Programm")
+    elif user_id:
         stand = await _zaehlen(f"{tag}:konto:{user_id}")
         if TAGESLIMIT_JE_KONTO > 0 and stand > TAGESLIMIT_JE_KONTO:
             await _ablehnen(TAGESLIMIT_JE_KONTO, "je Konto")
@@ -175,7 +206,7 @@ async def _budget_pruefen(db, source: str, dealer_id: str, user_id: str = "") ->
 
 
 async def fetch_listing(db, source: str, item_id: str, url: str,
-                        dealer_id: str = "", user_id: str = "") -> Dict[str, Any]:
+                        dealer_id: str = "", user_id: str = "", herkunft: str = "app") -> Dict[str, Any]:
     """Holt ein Inserat bei der Quelle — oder liefert im Lasttest-Modus
     synthetische Daten mit realistischer Verzoegerung."""
     if MOCK_PROVIDER_FETCH:
@@ -188,7 +219,7 @@ async def fetch_listing(db, source: str, item_id: str, url: str,
         except ValueError:
             await asyncio.sleep(0.4)
         return mock_vehicle(item_id)
-    belastet = await _budget_pruefen(db, source, dealer_id, user_id)
+    belastet = await _budget_pruefen(db, source, dealer_id, user_id, herkunft)
     from kleinanzeigen_service import ListingGone
     try:
         return await _abrufen(db, source, item_id, url)

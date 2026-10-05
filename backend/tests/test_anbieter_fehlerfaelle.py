@@ -368,3 +368,45 @@ def test_offene_apify_rechnung_alarm_sagt_bezahlen_nicht_token_erneuern(apify):
     hinweis = (docs[0].get("details") or {}).get("hinweis", "") or str(docs[0])
     assert "Rechnung" in hinweis and "Billing" in hinweis and "kein Neustart" in hinweis
     assert "erneuern" not in hinweis
+
+
+def test_programm_topf_zaehlt_getrennt_von_den_links(monkeypatch):
+    """Entscheidung Ahmad 06.10.2026: 150 Links je Konto in der App, 600 Vergleiche ueber das Windows-Programm —
+    der Vorab-Abruf eines Programm-Vergleichs (herkunft="programm") zaehlt im eigenen Topf, nicht gegen die
+    Links; und programm_tageslimit zaehlt die Vergleiche selbst."""
+    monkeypatch.setattr(provider_fetch, "TAGESLIMIT_JE_KONTO", 1)
+    monkeypatch.setattr(provider_fetch, "PROGRAMM_TAGESLIMIT_JE_KONTO", 2)
+    monkeypatch.setattr(provider_fetch, "TAGESLIMIT_JE_FIRMA", 0)
+    monkeypatch.setattr(provider_fetch, "TAGESLIMIT_GESAMT", 0)
+    monkeypatch.setattr(provider_fetch, "TAGESWARNUNG", 0)
+    dealer, u = f"firma-{uuid.uuid4().hex[:8]}", f"u-{uuid.uuid4().hex[:6]}"
+
+    async def _lauf(db):
+        tag = provider_fetch.tagesschluessel()
+        app, prog, vergl = f"{tag}:konto:{u}", f"{tag}:konto:{u}:programm", f"{tag}:programm:{u}"
+        try:
+            await provider_fetch._budget_pruefen(db, "mobile", dealer, user_id=u)                       # Link 1
+            with pytest.raises(provider_fetch.TageslimitErreicht):
+                await provider_fetch._budget_pruefen(db, "mobile", dealer, user_id=u)                   # Link 2 -> Limit
+            b = await provider_fetch._budget_pruefen(db, "mobile", dealer, user_id=u, herkunft="programm")   # Programm 1
+            assert b[0] == prog, b
+            await provider_fetch._budget_pruefen(db, "kleinanzeigen", dealer, user_id=u, herkunft="programm")  # Programm 2
+            with pytest.raises(provider_fetch.TageslimitErreicht) as e:
+                await provider_fetch._budget_pruefen(db, "mobile", dealer, user_id=u, herkunft="programm")    # 3 -> Limit
+            assert "über das Programm" in str(e.value)
+            assert (await db.provider_budget.find_one({"_id": app}))["n"] == 1          # Links unberuehrt
+            assert (await db.provider_budget.find_one({"_id": prog}))["n"] == 2
+            # die Vergleiche selbst
+            assert await provider_fetch.programm_tageslimit(db, u) == (1, 2, 1)
+            assert await provider_fetch.programm_tageslimit(db, u) == (2, 2, 0)
+            with pytest.raises(provider_fetch.TageslimitErreicht) as e2:
+                await provider_fetch.programm_tageslimit(db, u)
+            assert "Tageslimit des Programms" in str(e2.value) and "2 Vergleiche" in str(e2.value)
+            assert (await db.provider_budget.find_one({"_id": vergl}))["n"] == 2          # abgelehnt = zurueckgebucht
+            monkeypatch.setattr(provider_fetch, "PROGRAMM_TAGESLIMIT_JE_KONTO", 0)
+            assert await provider_fetch.programm_tageslimit(db, u) == (3, 0, None)           # 0 = aus, zaehlt weiter
+        finally:
+            await db.provider_budget.delete_many({"_id": {"$in": [app, prog, vergl, f"{tag}:firma:{dealer}"]}})
+            # gesamt: Link 1 + Programm 1 (mobile) zaehlen, abgelehnte sind zurueckgebucht, Kleinanzeigen zaehlt nicht
+            await db.provider_budget.update_one({"_id": f"{tag}:gesamt"}, {"$inc": {"n": -2}})
+    _mit_db(_lauf)

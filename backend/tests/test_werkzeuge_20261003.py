@@ -774,6 +774,33 @@ def test_56_unplausibles_wird_gemeldet_filter_wie_eingestellt(welt):
             db.dealers.update_one({"id": dealer_id}, {"$unset": {"comparison_rules": ""}})
 
 
+def test_57_tageslimit_des_programms(welt):
+    """Entscheidung Ahmad 06.10.2026: 600 Vergleiche je Konto und Tag ueber das Programm (PROGRAMM_TAGESLIMIT_JE_KONTO,
+    Server-Vorgabe); kurz vorher ein Hinweis, der Probelauf zaehlt nicht, danach 429 mit klarem Text."""
+    import provider_fetch as pf
+    prog, db = _prog(welt), welt["db"]
+    schluessel = f"{pf.tagesschluessel()}:programm:{welt['sucher_id']}"
+    limit = 600          # Vorgabe docker-compose.yml und ci.yml (PROGRAMM_TAGESLIMIT_JE_KONTO); lokal: launch.json
+    try:
+        db.provider_budget.update_one({"_id": schluessel}, {"$set": {"n": limit - 2}}, upsert=True)
+        r = _vergleich(prog, _roh("VW Polo", "VW Polo 1.4"))
+        assert r.status_code == 200, r.text
+        assert any("Noch 1 Vergleich heute" in m for m in r.json()["melden"]), r.json()["melden"]
+        # Probelauf zaehlt nicht
+        r = requests.post(f"{API}/werkzeuge/{WID}/vergleich", headers=prog, timeout=30,
+                          json={"fahrzeug": _roh("VW Polo", "VW Polo 1.4"), "probelauf": True})
+        assert r.status_code == 200, r.text
+        assert db.provider_budget.find_one({"_id": schluessel})["n"] == limit - 1
+        r = _vergleich(prog, _roh("VW Polo", "VW Polo 1.4"))
+        assert r.status_code == 200, r.text                                  # der letzte
+        r = _vergleich(prog, _roh("VW Golf", "VW Golf 2.0"))
+        assert r.status_code == 429 and "Tageslimit des Programms" in r.json()["detail"],             f"{r.status_code} {r.text[:200]} — laeuft der Test-Server mit PROGRAMM_TAGESLIMIT_JE_KONTO=600?"
+        assert db.provider_budget.find_one({"_id": schluessel})["n"] == limit  # abgelehnt = nicht gezaehlt
+        assert db.werkzeug_vergleiche.count_documents({"user_id": welt["sucher_id"], "fahrzeug.modell": "Golf"}) == 0
+    finally:
+        db.provider_budget.delete_one({"_id": schluessel})
+
+
 def test_60_anderer_pc_genau_benannt(welt):
     """Nr. 16: der alte PC erfaehrt, dass und wo das Konto neu verbunden wurde."""
     _code_bremse_frei(welt)

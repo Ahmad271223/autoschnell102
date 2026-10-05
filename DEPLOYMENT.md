@@ -2264,11 +2264,21 @@ behoben (A `d051d02`, B `3fdc655`, C `729a7c1`, D `8ab1d50`). Neue Regeln, die n
   `.bleibt-dunkel`. Die Startseite bleibt als Marketing-Seite dunkel.
 - Vertragsformular des Suchers: Schrift eine Stufe kräftiger (`.vertrag-formular`).
 
-### Tageslimit je Konto und Werte in der .env setzen (16.09.2026)
+### Tageslimit je Konto und Werte in der .env setzen (16.09.2026, geändert 06.10.2026)
 
-Entscheidung Ahmad (16.09.2026): **höchstens 400 neue Anbieter-Abrufe je Konto und Tag**, über
+**Entscheidung Ahmad 06.10.2026:** zwei getrennte Töpfe je Konto und Tag —
+- **150** neue Anbieter-Abrufe über den **Link in der App** (`ANBIETER_TAGESLIMIT_JE_KONTO`, vorher 400), und
+- **600 Vergleiche über das Windows-Programm** (`PROGRAMM_TAGESLIMIT_JE_KONTO`): `POST /werkzeuge/…/vergleich`
+  zählt jeden Vergleich (nicht den Probelauf) in `provider_budget` (`<tag>:programm:<user_id>`); der 601. bekommt
+  429 „Tageslimit des Programms erreicht“, ab 50/20/5/1 verbleibenden steht ein Hinweis in `melden`. Die
+  Vorab-Abrufe dieser Vergleiche (Kaufvertrag) zählen im Programm-Topf (`<tag>:konto:<user_id>:programm`,
+  `fetch_listing(herkunft="programm")` für Jobs mit `vorab`), **nicht** gegen die 150 Links.
+  Die Server-.env gewinnt über die Compose-Vorgabe — auf beiden Servern setzen:
+  `sh deploy/env_setzen.sh ANBIETER_TAGESLIMIT_JE_KONTO=150 PROGRAMM_TAGESLIMIT_JE_KONTO=600`.
+
+Entscheidung Ahmad (16.09.2026, Werte seit 06.10. wie oben): **höchstens N neue Anbieter-Abrufe je Konto und Tag**, über
 alle Quellen (mobile.de, AutoScout, Kleinanzeigen): `ANBIETER_TAGESLIMIT_JE_KONTO` (Compose-Vorgabe
-400; 0 = aus). Gezählt wird nur ein echter Abruf: bekannte Links aus dem Speicher (14 Tage, spätestens nach 21 Tagen gelöscht),
+150; 0 = aus). Gezählt wird nur ein echter Abruf: bekannte Links aus dem Speicher (14 Tage, spätestens nach 21 Tagen gelöscht),
 Mitwarten an einem laufenden Abruf und technisch gescheiterte Abrufe (Rückbuchung) kosten nichts.
 Der 401. Abruf bekommt 429 mit klarer Meldung („Tageslimit für neue Links erreicht … morgen
 erneut“), ein Link-Job scheitert sofort ohne weitere Versuche. Firmen- und Gesamtlimit bleiben aus

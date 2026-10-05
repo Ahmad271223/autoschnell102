@@ -193,7 +193,7 @@ def pruefe_produktion(log) -> None:
                  "WEB_CONCURRENCY", "MIN_FREI_MB", "BEWEIS_FOTOS_MAX", "BEWEIS_MAX_KB", "BEWEIS_AUFBEWAHRUNG_TAGE",
                  "BEWEIS_PARALLEL", "FAHRERFOTO_TAGE", "BERICHT_AUFBEWAHRUNG_TAGE",
                  "ANBIETER_TAGESLIMIT_JE_FIRMA", "ANBIETER_TAGESLIMIT_GESAMT",
-                 "ANBIETER_TAGESLIMIT_JE_KONTO",
+                 "ANBIETER_TAGESLIMIT_JE_KONTO", "PROGRAMM_TAGESLIMIT_JE_KONTO",
                  "ANBIETER_TAGESWARNUNG", "ABRUF_RUECKFALL_TAGESLIMIT", "BILD_PROXY_LIMIT",
                  "BACKUP_HOUR", "RESEND_PARALLEL", "RESEND_VERSUCHE", "RESEND_PROZESSE",
                  "DATEI_LIMIT"):
@@ -222,8 +222,17 @@ def pruefe_produktion(log) -> None:
         if konto_limit_zahl <= 0:
             warnungen.append(
                 "ANBIETER_TAGESLIMIT_JE_KONTO fehlt oder ist 0 — kein Tageslimit je "
-                "Konto (Entscheidung 16.09.2026: 400). docker-compose setzt 400 vor; "
+                "Konto (Entscheidung 06.10.2026: 150, vorher 400). docker-compose setzt 150 vor; "
                 "in der .env pruefen.")
+        programm_limit = os.environ.get("PROGRAMM_TAGESLIMIT_JE_KONTO", "").strip()
+        try:
+            programm_limit_zahl = int(programm_limit) if programm_limit else 0
+        except ValueError:
+            programm_limit_zahl = 0
+        if programm_limit_zahl <= 0:
+            warnungen.append(
+                "PROGRAMM_TAGESLIMIT_JE_KONTO fehlt oder ist 0 — kein Tageslimit fuer Vergleiche "
+                "ueber das Windows-Programm (Entscheidung 06.10.2026: 600). docker-compose setzt 600 vor.")
 
     frontend = os.environ.get("FRONTEND_URL", "").strip()
     if not frontend.startswith("https://") or "localhost" in frontend:
