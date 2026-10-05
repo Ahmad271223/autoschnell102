@@ -32,9 +32,9 @@ _TEXTE = {
     ART_TOKEN: ("{quelle}-Abruf nicht möglich: der Zugang zum Abruf-Dienst (Apify-Token) "
                 "ist ungültig oder abgelaufen. Der Betreiber wurde benachrichtigt — "
                 "bekannte Links kommen weiter aus dem Speicher."),
-    ART_GUTHABEN: ("{quelle}-Abruf nicht möglich: das Guthaben beim Abruf-Dienst ist "
-                   "aufgebraucht. Der Betreiber wurde benachrichtigt — bekannte Links "
-                   "kommen weiter aus dem Speicher."),
+    ART_GUTHABEN: ("{quelle}-Abruf nicht möglich: beim Abruf-Dienst ist das Guthaben "
+                   "aufgebraucht oder eine Rechnung offen. Der Betreiber wurde benachrichtigt — "
+                   "bekannte Links kommen weiter aus dem Speicher."),
     ART_LIMIT: ("{quelle}-Abruf gerade nicht möglich: der Abruf-Dienst hat sein Limit "
                 "erreicht (zu viele Anfragen). Bitte in einigen Minuten erneut versuchen."),
     ART_ZEIT: ("{quelle} antwortet nicht (Zeitüberschreitung). Der Anbieter ist "
@@ -43,6 +43,21 @@ _TEXTE = {
                   "einem Fehler). Bitte später erneut versuchen; bekannte Links kommen "
                   "weiter aus dem Speicher."),
 }
+
+# Was der Betreiber im Bereich "Betrieb" als naechsten Schritt liest — je Fall (05.10.2026: bei offener
+# Apify-Rechnung stand dort "Token erneuern", dabei bleibt der Token gueltig).
+_HINWEISE = {
+    ART_TOKEN: ("Apify-Token pruefen (apify.com -> Settings -> Integrations), danach APIFY_TOKEN in der "
+                ".env erneuern und Backend neu starten"),
+    ART_GUTHABEN: ("Offene Rechnung bzw. Guthaben bei Apify begleichen (apify.com -> Settings -> Billing). "
+                   "Der Token bleibt gueltig: nach dem Bezahlen laufen die Abrufe von selbst wieder, "
+                   "kein Neustart noetig — danach den Alarm quittieren"),
+}
+
+# Apify sperrt den Zugang bei unbezahlten Rechnungen mit HTTP 403
+# {"error":{"type":"platform-feature-disabled","message":"Too many outstanding invoices"}} —
+# das ist eine Abrechnungssperre, KEIN ungueltiger Token.
+_ABRECHNUNG = ("invoice", "platform-feature-disabled")
 
 # Betriebsalarm hoechstens einmal je Stunde je (art, quelle) — sonst wuerde
 # ein Ausfall bei jedem Klick einen neuen Alarm erzeugen.
@@ -80,6 +95,8 @@ def aus_http_antwort(status: int, text: str, quelle: str) -> Optional[AnbieterFe
     if status in (200, 201):
         return None
     t = (text or "").lower()
+    if status in (401, 403) and any(w in t for w in _ABRECHNUNG):
+        return AnbieterFehler(ART_GUTHABEN, quelle, f"HTTP {status}: {text[:120]}")
     if status in (401, 403):
         return AnbieterFehler(ART_TOKEN, quelle, f"HTTP {status}: {text[:120]}")
     # Rollenprüfung 22.09.2026 (RP-553): Apify antwortet auch dann mit 402,
@@ -129,7 +146,6 @@ async def melden(db, fehler: AnbieterFehler) -> None:
         from betrieb import alarm
         await alarm(db, fehler.art, ref=fehler.quelle,
                     anbieter=fehler.quelle, detail=fehler.detail,
-                    hinweis="Apify-Token bzw. Guthaben pruefen (apify.com -> Settings/Billing), "
-                            "danach APIFY_TOKEN in der .env erneuern und Backend neu starten")
+                    hinweis=_HINWEISE.get(fehler.art, _HINWEISE[ART_TOKEN]))
     except Exception:  # noqa: BLE001 — Alarm darf den Abruf nie zusaetzlich brechen
         log.exception("Betriebsalarm fuer Anbieter-Fehler konnte nicht geschrieben werden")

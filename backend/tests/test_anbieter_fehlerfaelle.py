@@ -91,6 +91,9 @@ def _mobile(url="https://suchen.mobile.de/fahrzeuge/details.html?id=123456"):
     (401, '{"error":{"type":"token-not-found"}}', anbieter_fehler.ART_TOKEN, "Token"),
     (403, "forbidden", anbieter_fehler.ART_TOKEN, "Token"),
     (402, "Monthly usage hard limit exceeded", anbieter_fehler.ART_GUTHABEN, "Guthaben"),
+    # 05.10.2026 (live): offene Apify-Rechnung sperrt mit 403 — Abrechnung, kein ungueltiger Token
+    (403, '{ "error": { "type": "platform-feature-disabled", "message": "Too many outstanding invoices" } }',
+     anbieter_fehler.ART_GUTHABEN, "Rechnung offen"),
     (429, "rate limit exceeded", anbieter_fehler.ART_LIMIT, "Limit"),
     (500, "internal", anbieter_fehler.ART_AUSFALL, "gestört"),
     (504, "gateway timeout", anbieter_fehler.ART_ZEIT, "antwortet nicht"),
@@ -340,3 +343,28 @@ def test_tageslimit_je_konto_zaehlt_alle_quellen(monkeypatch):
             await db.provider_budget.delete_many({"_id": {"$in": [k1, k2, kf]}})
             await db.provider_budget.update_one({"_id": f"{tag}:gesamt"}, {"$inc": {"n": -3}})
     _mit_db(_lauf)
+
+
+def test_offene_apify_rechnung_alarm_sagt_bezahlen_nicht_token_erneuern(apify):
+    """05.10.2026: Apify sperrte wegen offener Rechnungen (HTTP 403 "Too many outstanding invoices"). Der Alarm
+    im Bereich "Betrieb" sagte "APIFY_TOKEN erneuern und Backend neu starten" — dabei bleibt der Token gueltig."""
+    anbieter_fehler._ALARM_ZULETZT.clear()
+    ref = f"AutoScout24-test-{uuid.uuid4().hex[:8]}"
+    text = '{ "error": { "type": "platform-feature-disabled", "message": "Too many outstanding invoices" } }'
+    f = anbieter_fehler.aus_http_antwort(403, text, ref)
+    assert f.art == anbieter_fehler.ART_GUTHABEN and f.betreiber_relevant
+    assert "Token" not in str(f) and "Rechnung offen" in str(f)
+    # ein echter Token-Fehler bleibt einer
+    assert anbieter_fehler.aus_http_antwort(403, "forbidden", ref).art == anbieter_fehler.ART_TOKEN
+    assert anbieter_fehler.aus_http_antwort(401, '{"error":{"type":"token-not-found"}}', ref).art ==         anbieter_fehler.ART_TOKEN
+
+    async def _lauf(db):
+        await anbieter_fehler.melden(db, f)
+        docs = await db.betriebsalarme.find({"ref": ref}, {"_id": 0}).to_list(10)
+        await db.betriebsalarme.delete_many({"ref": ref})
+        return docs
+    docs = _mit_db(_lauf)
+    assert len(docs) == 1 and docs[0]["typ"] == anbieter_fehler.ART_GUTHABEN
+    hinweis = (docs[0].get("details") or {}).get("hinweis", "") or str(docs[0])
+    assert "Rechnung" in hinweis and "Billing" in hinweis and "kein Neustart" in hinweis
+    assert "erneuern" not in hinweis
