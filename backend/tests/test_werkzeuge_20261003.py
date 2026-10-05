@@ -801,6 +801,18 @@ def test_57_tageslimit_des_programms(welt):
         db.provider_budget.delete_one({"_id": schluessel})
 
 
+def test_58_konto_deaktiviert_ist_403_der_schluessel_bleibt(welt):
+    """Paket 2: 401 liess das Programm seinen Schluessel wegwerfen — nach dem Reaktivieren war ein neuer Code noetig."""
+    prog, db = _prog(welt), welt["db"]
+    db.users.update_one({"id": welt["sucher_id"]}, {"$set": {"active": False}})
+    try:
+        r = requests.get(f"{API}/werkzeuge/{WID}/status", headers=prog, timeout=30)
+        assert r.status_code == 403 and "deaktiviert" in r.json()["detail"], r.text
+    finally:
+        db.users.update_one({"id": welt["sucher_id"]}, {"$set": {"active": True}})
+    assert requests.get(f"{API}/werkzeuge/{WID}/status", headers=prog, timeout=30).status_code == 200
+
+
 def test_60_anderer_pc_genau_benannt(welt):
     """Nr. 16: der alte PC erfaehrt, dass und wo das Konto neu verbunden wurde."""
     _code_bremse_frei(welt)
@@ -864,3 +876,76 @@ def test_63_app_start_rueckmeldung(welt):
     assert requests.post(f"{API}/werkzeuge/app-start/{start}", timeout=30).status_code in (401, 403)
     assert frage("kaputt").json() == {"bestaetigt": False}
     welt["db"].werkzeug_app_starts.delete_many({"start": {"$in": [start, fremd]}})
+
+
+# ------------------------------------------------------------ Paket 2 (Pruefung 05./06.10.2026)
+def test_70_vergleiche_laufen_nach_60_tagen_ab(welt):
+    """Entscheidung Ahmad 06.10.2026: Vergleiche 60 Tage aufbewahren — jeder neue Eintrag traegt `ablauf`
+    (TTL-Index werkzeug_vergleiche_ablauf), der Bestand bekommt ihn per Migration 22."""
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+    from indizes import WERKZEUG_INDIZES
+    assert any(s == "werkzeug_vergleiche" and k == [("ablauf", 1)] and o.get("expireAfterSeconds") == 0
+               for s, k, o in WERKZEUG_INDIZES)
+    assert any(s == "werkzeug_vergleiche" and k == [("user_id", 1)] for s, k, o in WERKZEUG_INDIZES)
+    assert any(s == "werkzeug_vergleiche" and k == [("dealer_id", 1)] for s, k, o in WERKZEUG_INDIZES)
+    assert wz.VERGLEICHE_TAGE == 60
+    db = welt["db"]
+    doc = db.werkzeug_vergleiche.find_one({"user_id": welt["sucher_id"], "probelauf": {"$ne": True}},
+                                          sort=[("erstellt_am", -1)])
+    assert doc and isinstance(doc.get("ablauf"), datetime), doc
+    frist = doc["ablauf"].replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)
+    assert timedelta(days=59) < frist <= timedelta(days=60), frist
+    # Migration 22: Bestand ohne ablauf
+    alt_id = f"alt-{uuid.uuid4().hex[:8]}"
+    db.werkzeug_vergleiche.insert_one({"id": alt_id, "werkzeug": WID, "dealer_id": welt["firma"]["dealer_id"],
+                                       "user_id": welt["sucher_id"], "erstellt_am": "2026-09-01T10:00:00+00:00",
+                                       "fahrzeug": {}, "links": [], "probelauf": False})
+    try:
+        from motor.motor_asyncio import AsyncIOMotorClient
+        import migrationen
+        async def lauf():
+            client = AsyncIOMotorClient(konten.MONGO_URL, serverSelectionTimeoutMS=5000)
+            try:
+                return await migrationen.m22_werkzeug_vergleiche_ablauf(client[db.name])
+            finally:
+                client.close()
+        stats = asyncio.run(lauf())
+        assert stats["gesetzt"] >= 1, stats
+        nach = db.werkzeug_vergleiche.find_one({"id": alt_id})
+        assert nach["ablauf"].replace(tzinfo=timezone.utc) == datetime(2026, 10, 31, 10, 0, tzinfo=timezone.utc)
+        assert asyncio.run(lauf())["gesetzt"] == 0                      # idempotent
+    finally:
+        db.werkzeug_vergleiche.delete_one({"id": alt_id})
+
+
+def test_72_quelltext_paket2():
+    """Bremsen je Konto (Neu-Verbinden setzte den Zaehler zurueck), Vorab-Tausch in einem Zug, Auswerten mit
+    Zeitlimit, Datenbank-Ausfall als 503."""
+    import inspect
+    import routes.werkzeuge as rw
+    import server
+    q = inspect.getsource(rw)
+    assert "verbindung:{v['id']}" not in q, "Bremse noch je Verbindung"
+    assert q.count("konto:{user['id']}") >= 4
+    assert "ReturnDocument.BEFORE" in inspect.getsource(rw._vorab_ersetzen)
+    assert "wait_for" in inspect.getsource(rw._auswerten) and "503" in inspect.getsource(rw._auswerten)
+    s = inspect.getsource(server.ErrorReportingMiddleware)
+    assert "ConnectionFailure" in s and "Retry-After" in s and "503" in s
+
+
+def test_73_datenbank_kurz_weg_ist_503():
+    import asyncio
+    from pymongo.errors import ServerSelectionTimeoutError
+    from starlette.requests import Request
+    import server
+    mw = server.ErrorReportingMiddleware(app=None)
+    anfrage = Request({"type": "http", "method": "POST", "path": "/api/werkzeuge/x/vergleich", "headers": [],
+                       "query_string": b"", "scheme": "http", "server": ("test", 80), "client": ("127.0.0.1", 1)})
+
+    async def weg(_):
+        raise ServerSelectionTimeoutError("No replica set members match selector Primary()")
+
+    antwort = asyncio.run(mw.dispatch(anfrage, weg))
+    assert antwort.status_code == 503 and antwort.headers.get("retry-after") == "5"
+    assert "Datenbank" in antwort.body.decode("utf-8")

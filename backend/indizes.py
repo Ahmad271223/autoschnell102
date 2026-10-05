@@ -1275,6 +1275,12 @@ WERKZEUG_INDIZES = (
     # 04.10.2026: Browser-Helfer fragt nach den Vergleichen des Programms DIESES Kontos (letzte 30 min)
     ("werkzeug_vergleiche", [("werkzeug", 1), ("user_id", 1), ("erstellt_am", -1)],
      {"name": "werkzeug_vergleiche_konto"}),
+    # Entscheidung Ahmad 06.10.2026 (Paket 2): Vergleiche hoechstens WERKZEUG_VERGLEICHE_TAGE (60) aufbewahren —
+    # die Datenbank loescht selbst (ablauf, werkzeuge.vergleich_ablauf); Konto- und Firmenloeschung filtern nach
+    # user_id/dealer_id allein (admin.py) — ohne diese Indizes ein Vollscan der wachsenden Sammlung
+    ("werkzeug_vergleiche", [("ablauf", 1)], {"name": "werkzeug_vergleiche_ablauf", "expireAfterSeconds": 0}),
+    ("werkzeug_vergleiche", [("user_id", 1)], {"name": "werkzeug_vergleiche_user"}),
+    ("werkzeug_vergleiche", [("dealer_id", 1)], {"name": "werkzeug_vergleiche_dealer"}),
     # Pruefbericht 03.10.2026 (Nr. 12/16): App-Start-Rueckmeldungen (10 min) und Trenn-Gruende (30 Tage)
     ("werkzeug_app_starts", [("start", 1)], {"name": "werkzeug_app_start", "unique": True}),
     ("werkzeug_app_starts", [("ablauf", 1)], {"name": "werkzeug_app_start_ablauf", "expireAfterSeconds": 0}),

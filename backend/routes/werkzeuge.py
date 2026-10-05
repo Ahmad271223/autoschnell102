@@ -277,8 +277,12 @@ class VerbindenIn(BaseModel):
 
 async def _konto_pruefen(user: Optional[dict], werkzeug_id: str):
     """Darf dieses Konto das Werkzeug JETZT benutzen? (firma, abo) oder HTTP-Fehler."""
-    if not user or user.get("active") is not True:
-        raise HTTPException(401, "Konto deaktiviert – bitte den Administrator kontaktieren.")
+    if not user:
+        raise HTTPException(401, "Konto nicht mehr vorhanden – bitte neu verbinden.")
+    if user.get("active") is not True:
+        # Paket 2 (Pruefung 05.10.2026): 403 statt 401 — bei 401 warf das Programm seinen Schluessel weg und
+        # brauchte nach dem Reaktivieren einen neuen Code
+        raise HTTPException(403, "Konto deaktiviert – bitte den Administrator kontaktieren.")
     if user.get("role") not in ("dealer", "sucher") or not user.get("dealer_id"):
         raise HTTPException(403, "Nur für Händler- und Sucher-Konten.")
     firma = await _firma(user["dealer_id"])
@@ -364,10 +368,16 @@ async def _programm(werkzeug_id: str, schluessel: Optional[str], version: Option
         raise HTTPException(401, await _nicht_verbunden_text(werkzeug_id, schluessel))
     user = await db.users.find_one({"id": v["user_id"]}, _USER_FELDER)
     firma, abo = await _konto_pruefen(user, werkzeug_id)
-    setzen = {"zuletzt_am": now_iso()}
-    if version:
+    # Paket 3 (Pruefung 05.10.2026): "zuletzt aktiv" hoechstens einmal je Minute schreiben, die Version nur,
+    # wenn sie sich aendert — vorher ein Schreibzugriff je Anfrage (Helfer: mehrere je Inserat)
+    setzen = {}
+    zuletzt = str(v.get("zuletzt_am") or "")
+    if zuletzt < (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat():
+        setzen["zuletzt_am"] = now_iso()
+    if version and version != v.get("programm_version"):
         setzen["programm_version"] = version          # Nr. 4: welche Version laeuft auf welchem PC
-    await db[wz.SAMMLUNG_VERBINDUNGEN].update_one({"id": v["id"]}, {"$set": setzen})
+    if setzen:
+        await db[wz.SAMMLUNG_VERBINDUNGEN].update_one({"id": v["id"]}, {"$set": setzen})
     return user, v, firma, abo
 
 
@@ -450,7 +460,7 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     Vergleich in der App: aktives Profil Inland/Export, Sucher-Overrides),
     protokollieren."""
     user, v, _firma_doc, _abo = await _programm(werkzeug_id, schluessel, _programm_version(user_agent))
-    if not await _vergleich_limiter.check(f"verbindung:{v['id']}"):
+    if not await _vergleich_limiter.check(f"konto:{user['id']}"):      # je Konto (Paket 2): Neu-Verbinden hilft nicht
         raise HTTPException(429, "Zu viele Vergleiche in kurzer Zeit – bitte kurz warten.")
     # Entscheidung Ahmad 06.10.2026: hoechstens 600 Vergleiche je Konto und Tag ueber das Programm
     # (PROGRAMM_TAGESLIMIT_JE_KONTO); der Probelauf zaehlt nicht
@@ -461,12 +471,7 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
             _stand, _limit, verbleibend = await programm_tageslimit(db, user["id"])
         except TageslimitErreicht as exc:
             raise HTTPException(429, str(exc))
-    from mobile_service import DEFAULT_EXPORT_RULES, DEFAULT_RULES
-    from regeln import regeln_lesen
-    dealer = await effective_dealer(user)
-    profil = (dealer or {}).get("active_profile", "inland")
-    regeln = (regeln_lesen((dealer or {}).get("export_rules"), DEFAULT_EXPORT_RULES) if profil == "export"
-              else regeln_lesen((dealer or {}).get("comparison_rules"), DEFAULT_RULES))
+    profil, regeln = await _firmenregeln(user)
     f = body.fahrzeug.model_dump()
     # Pruefung 05.10.2026 (Paket 1): die Erkennung rechnet (Modell aus der Beschreibung: bis 0,2 s) — im Thread,
     # damit in der Zeit keine andere Anfrage dieses Prozesses wartet
@@ -494,7 +499,7 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
         "id": str(uuid.uuid4()), "werkzeug": werkzeug_id, "dealer_id": user["dealer_id"], "user_id": user["id"],
         "verbindung_id": v["id"], "pc_name": v.get("pc_name") or "", "erstellt_am": now_iso(),
         "fahrzeug": f, "links": links, "hinweise": hinweise, "profil": profil, "probelauf": body.probelauf,
-        "vorab": vorab["status"],
+        "vorab": vorab["status"], "ablauf": wz.vergleich_ablauf(),
     })
     return {"links": links, "hinweise": hinweise, "profil": profil, "inserat_url": f["inserat_url"],
             "vorab": {"status": vorab["status"], "hinweis": vorab.get("hinweis", "")}, "fahrzeug": erkannt,
@@ -519,11 +524,16 @@ async def _vorab_ersetzen(user: dict, v: dict, neuer_job: Optional[str]) -> None
     """Wunsch Ahmad 03.10.2026: neues Auto angeklickt -> den alten, noch wartenden Vorab-Abruf dieses Kontos
     zurueckziehen und den neuen merken. Fehler hier duerfen den Vergleich nie aufhalten."""
     try:
-        alter_job = v.get("vorab_job_id")
+        # Paket 2 (Pruefung 05.10.2026): in EINEM Zug tauschen — zwei schnelle Klicks lasen vorher beide den alten
+        # Job, einer der neuen wurde nie zurueckgezogen (ein Apify-Abruf und Tageskontingent umsonst)
+        from pymongo import ReturnDocument
+        vorher = await db[wz.SAMMLUNG_VERBINDUNGEN].find_one_and_update(
+            {"id": v["id"]}, {"$set": {"vorab_job_id": neuer_job}},
+            projection={"_id": 0, "vorab_job_id": 1}, return_document=ReturnDocument.BEFORE)
+        alter_job = (vorher or {}).get("vorab_job_id")
         if alter_job and alter_job != neuer_job:
             from link_jobs import vorab_zurueckziehen
             await vorab_zurueckziehen(db, alter_job, user.get("dealer_id") or "", user.get("id") or "")
-        await db[wz.SAMMLUNG_VERBINDUNGEN].update_one({"id": v["id"]}, {"$set": {"vorab_job_id": neuer_job}})
     except Exception:  # noqa: BLE001
         log.exception("Werkzeug: alter Vorab-Abruf nicht zurueckgezogen")
 
@@ -570,13 +580,26 @@ _AUSWERTEN_GLEICHZEITIG = 4
 _auswerten_sperre = None
 
 
+_AUSWERTEN_WARTEN_S = 10
+
+
 async def _auswerten(fn, *args):
+    """Seite im Thread auswerten — hoechstens _AUSWERTEN_GLEICHZEITIG je Prozess. Paket 2 (05.10.2026): wer
+    laenger als _AUSWERTEN_WARTEN_S auf einen Platz wartet, bekommt 503 mit Retry-After statt endlos zu warten
+    (Cloudflare bricht nach ~100 s ohnehin ab, die Arbeit liefe dann umsonst weiter)."""
     import asyncio
     global _auswerten_sperre
     if _auswerten_sperre is None:
         _auswerten_sperre = asyncio.Semaphore(_AUSWERTEN_GLEICHZEITIG)
-    async with _auswerten_sperre:
+    try:
+        await asyncio.wait_for(_auswerten_sperre.acquire(), _AUSWERTEN_WARTEN_S)
+    except asyncio.TimeoutError:
+        raise HTTPException(503, "Gerade werden viele Seiten ausgewertet – bitte gleich noch einmal.",
+                            headers={"Retry-After": "5"})
+    try:
         return await asyncio.to_thread(fn, *args)
+    finally:
+        _auswerten_sperre.release()
 
 
 #: Wunsch Ahmad 04.10.2026: Programm und Helfer arbeiten zusammen — was das Programm in dieser Zeit verglichen
@@ -630,15 +653,17 @@ async def werkzeug_inserat(werkzeug_id: str, body: InseratIn,
     from listing_identity import ListingIdentityError, get_listing_identity
     _browser_werkzeug(werkzeug_id)
     user, v, _firma_doc, _abo = await _programm(werkzeug_id, schluessel, _programm_version(None, version))
-    if not await _inserat_limiter.check(f"verbindung:{v['id']}"):
+    if not await _inserat_limiter.check(f"konto:{user['id']}"):
         raise HTTPException(429, "Zu viele Inserate in kurzer Zeit – bitte kurz warten.")
     try:
         identity = get_listing_identity(body.url.strip())
     except ListingIdentityError as exc:
         raise HTTPException(400, str(exc) or "Kein Inserat von mobile.de, AutoScout24 oder Kleinanzeigen.")
     try:
-        html = await _auswerten(bh.seite_entpacken, body.seite)
-        fahrzeug, bewertung = await _auswerten(bh.inserat_auslesen, identity, body.url.strip(), html)
+        # Entpacken + Auslesen in EINEM Thread-Aufruf (Paket 3): das entpackte HTML (bis 4 MB) liegt nie
+        # zwischen zwei Aufrufen ausserhalb der Sperre herum
+        fahrzeug, bewertung = await _auswerten(
+            lambda: bh.inserat_auslesen(identity, body.url.strip(), bh.seite_entpacken(body.seite)))
     except bh.SeiteUngueltig as exc:
         raise HTTPException(422, str(exc))
     except ListingGone as exc:
@@ -671,6 +696,7 @@ async def werkzeug_inserat(werkzeug_id: str, body: InseratIn,
         "verbindung_id": v["id"], "pc_name": v.get("pc_name") or "", "erstellt_am": now_iso(),
         "fahrzeug": kurz, "links": links, "hinweise": hinweise, "profil": profil, "probelauf": False,
         "vorab": "fertig", "portal_bewertung": bewertung, "verhandlung": verhandlung, "marktlage": {},
+        "ablauf": wz.vergleich_ablauf(),
     })
     return {"vergleich_id": vergleich_id, "links": links, "hinweise": hinweise, "profil": profil,
             "fahrzeug": kurz, "inserat_url": inserat_url,
@@ -695,7 +721,7 @@ async def werkzeug_marktlage(werkzeug_id: str, body: MarktlageIn,
     import browser_helfer as bh
     _browser_werkzeug(werkzeug_id)
     user, v, _firma_doc, _abo = await _programm(werkzeug_id, schluessel, _programm_version(None, version))
-    if not await _marktlage_limiter.check(f"verbindung:{v['id']}"):
+    if not await _marktlage_limiter.check(f"konto:{user['id']}"):
         raise HTTPException(429, "Zu viele Vergleichsseiten in kurzer Zeit – bitte kurz warten.")
     art = bh.ist_vergleichsseite(body.url.strip())
     if not art:
@@ -718,8 +744,7 @@ async def werkzeug_marktlage(werkzeug_id: str, body: MarktlageIn,
                  doc["id"], portal, body.url.strip()[:400], eigene[0][:400])
         raise HTTPException(409, "Diese Vergleichsseite gehört zu einer anderen Suche.")
     try:
-        html = await _auswerten(bh.seite_entpacken, body.seite)
-        liste = await _auswerten(bh.treffer_auslesen, body.url.strip(), html)
+        liste = await _auswerten(lambda: bh.treffer_auslesen(body.url.strip(), bh.seite_entpacken(body.seite)))
         fz = doc.get("fahrzeug") or {}
         # Wunsch Ahmad 04.10.2026: aussortieren (Unfall, Export, Neuwagen …), auf km/EZ des eigenen Autos umrechnen
         lage = bh.marktlage(fz.get("preis"), fz.get("inserat_id") or "", liste, eigen=fz)
@@ -749,7 +774,7 @@ async def werkzeug_programm_suche(werkzeug_id: str, body: ProgrammSucheIn,
     import browser_helfer as bh
     _browser_werkzeug(werkzeug_id)
     user, v, _firma_doc, _abo = await _programm(werkzeug_id, schluessel, _programm_version(None, version))
-    if not await _marktlage_limiter.check(f"verbindung:{v['id']}"):
+    if not await _marktlage_limiter.check(f"konto:{user['id']}"):
         raise HTTPException(429, "Zu viele Vergleichsseiten in kurzer Zeit – bitte kurz warten.")
     url = body.url.strip()
     art = bh.ist_vergleichsseite(url)
@@ -817,8 +842,10 @@ async def _uebersicht(filter_: dict, limit: int, ueberspringen: int = 0) -> dict
     verbindungen = [v async for v in db[wz.SAMMLUNG_VERBINDUNGEN].find(
         filter_, {"_id": 0, "token_hash": 0, "pc_kennung": 0}).sort("zuletzt_am", -1).limit(500)]
     gesamt = await db[wz.SAMMLUNG_VERGLEICHE].count_documents(filter_)
-    vergleiche = [x async for x in db[wz.SAMMLUNG_VERGLEICHE].find(filter_, {"_id": 0})
-                  .sort("erstellt_am", -1).skip(ueberspringen).limit(limit)]
+    # Paket 3: ohne die aussortierten Angebote je Portal (bis 25 je Vergleich) — die Uebersicht zeigt sie nicht
+    vergleiche = [x async for x in db[wz.SAMMLUNG_VERGLEICHE].find(
+        filter_, {"_id": 0, "marktlage.mobile.aussortiert": 0, "marktlage.autoscout.aussortiert": 0, "ablauf": 0})
+        .sort("erstellt_am", -1).skip(ueberspringen).limit(limit)]
     namen = await _konten([x.get("user_id") for x in vergleiche + verbindungen])
     firmen_ids = list({x.get("dealer_id") for x in vergleiche + verbindungen if x.get("dealer_id")})
     firmen = {}

@@ -36,7 +36,7 @@ import hashlib
 import os
 import re
 import secrets
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Iterable, Optional
 
 AUTOPOINTER = "autopointer-vergleich"
@@ -232,6 +232,14 @@ CODE_MINUTEN = 10
 SAMMLUNG_CODES = "werkzeug_codes"
 SAMMLUNG_VERBINDUNGEN = "werkzeug_verbindungen"
 SAMMLUNG_VERGLEICHE = "werkzeug_vergleiche"
+#: Entscheidung Ahmad 06.10.2026: Vergleiche (Programm + Browser-Helfer) 60 Tage aufbewahren — wie Logs und
+#: Vertraege; "Deine letzten Autos" zeigt 30, die Chef-Uebersicht die letzten Wochen. Danach loescht Mongo (TTL).
+VERGLEICHE_TAGE = int(os.environ.get("WERKZEUG_VERGLEICHE_TAGE", "60") or 60)
+
+
+def vergleich_ablauf(ab: Optional[datetime] = None) -> datetime:
+    """Loeschzeitpunkt eines Vergleichs (TTL-Index werkzeug_vergleiche_ablauf)."""
+    return (ab or datetime.now(timezone.utc)) + timedelta(days=max(1, VERGLEICHE_TAGE))
 #: Pruefbericht 03.10.2026 (Nr. 12): die App meldet, dass sie ein Auto aus dem Programm uebernommen hat
 SAMMLUNG_APP_STARTS = "werkzeug_app_starts"
 #: Pruefbericht 03.10.2026 (Nr. 16): warum ein Programm-Schluessel nicht mehr gilt (anderer PC, Chef, Betreiber)

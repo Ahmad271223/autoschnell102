@@ -836,6 +836,27 @@ async def m21_empfang_kaestchen_leeren(db) -> dict:
     return z
 
 
+async def m22_werkzeug_vergleiche_ablauf(db) -> dict:
+    """Entscheidung Ahmad 06.10.2026 (Paket 2): Vergleiche aus Programm und Browser-Helfer werden 60 Tage
+    aufbewahrt (werkzeuge.VERGLEICHE_TAGE, TTL-Index auf `ablauf`). Bestand ohne `ablauf` bekommt ihn aus
+    erstellt_am (ISO-Text) — aeltere als 60 Tage loescht der TTL-Index danach selbst. Idempotent."""
+    import werkzeuge as wz
+    z = {"geprueft": 0, "gesetzt": 0, "ohne_datum": 0}
+    async for doc in db[wz.SAMMLUNG_VERGLEICHE].find({"ablauf": {"$exists": False}},
+                                                      {"_id": 1, "erstellt_am": 1}):
+        z["geprueft"] += 1
+        try:
+            ab = datetime.fromisoformat(str(doc.get("erstellt_am") or "").replace("Z", "+00:00"))
+            if ab.tzinfo is None:
+                ab = ab.replace(tzinfo=timezone.utc)
+        except ValueError:
+            ab = datetime.now(timezone.utc)
+            z["ohne_datum"] += 1
+        await db[wz.SAMMLUNG_VERGLEICHE].update_one({"_id": doc["_id"]}, {"$set": {"ablauf": wz.vergleich_ablauf(ab)}})
+        z["gesetzt"] += 1
+    return z
+
+
 MIGRATIONEN = [
     (1, "abos_normalisieren", m1_abos_normalisieren),
     (2, "lifecycle_nachziehen", m2_lifecycle),
@@ -867,6 +888,8 @@ MIGRATIONEN = [
     (20, "markt_land_alarme_schliessen", m20_markt_land_alarme_schliessen),
     # Pruefer-Restpunkt 28.09.2026: automatische Empfangs-Kreuze (24.-27.09.) vor der Uebergabe leeren
     (21, "empfang_kaestchen_leeren", m21_empfang_kaestchen_leeren),
+    # Entscheidung Ahmad 06.10.2026: Werkzeug-Vergleiche 60 Tage (TTL)
+    (22, "werkzeug_vergleiche_ablauf", m22_werkzeug_vergleiche_ablauf),
 ]
 
 

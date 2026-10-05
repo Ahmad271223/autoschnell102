@@ -33,7 +33,9 @@ from urllib.parse import parse_qs, parse_qsl, urlparse
 
 #: Grenzen fuer eine eingeschickte Seite (mobile.de-Inserat ~1 MB, gepackt ~200 KB)
 MAX_GEPACKT = 3 * 1024 * 1024
-MAX_HTML = 8 * 1024 * 1024
+#: Paket 2 (05.10.2026): 4 statt 8 MB — echte Inserats-/Ergebnisseiten liegen bei 1–2 MB; vier gleichzeitige
+#: Auswertungen halten so hoechstens ~64 MB Text im Speicher
+MAX_HTML = 4 * 1024 * 1024
 
 #: Pruefung 05.10.2026 (Paket 1): was aus einer Browserseite gespeichert wird, gilt 24 h fuer ALLE Konten —
 #: deshalb feste Grenzen fuer jeden Wert (fahrzeug_bereinigen), bevor irgendetwas gespeichert wird.

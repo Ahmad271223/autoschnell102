@@ -391,6 +391,18 @@ class ErrorReportingMiddleware(BaseHTTPMiddleware):
         try:
             return await call_next(request)
         except Exception as exc:
+            # Pruefung 05.10.2026 (Paket 2): waehrend die Datenbank den neuen Primary waehlt (~10 s nach einem
+            # Ausfall), endete jede Anfrage als 500 "Interner Serverfehler" — und der Versuch, den Fehler in
+            # error_logs zu schreiben, wartete selbst auf die Datenbank. Jetzt 503 mit Retry-After: Programm,
+            # Helfer und App versuchen es gleich noch einmal; nichts wird als Fehler festgehalten.
+            from pymongo.errors import ConnectionFailure, ExecutionTimeout, WaitQueueTimeoutError
+            if isinstance(exc, (ConnectionFailure, ExecutionTimeout, WaitQueueTimeoutError)):
+                log.warning("Datenbank kurz nicht erreichbar bei %s %s: %s: %s", request.method,
+                            request.url.path, type(exc).__name__, redigieren(str(exc))[:200])
+                return JSONResponse(
+                    status_code=503, headers={"Retry-After": "5"},
+                    content={"detail": "Die Datenbank ist gerade kurz nicht erreichbar – bitte in ein paar "
+                                       "Sekunden noch einmal versuchen."})
             err_id = str(uuid.uuid4())
             tb = redigieren(traceback.format_exc())
             log.exception("Unhandled error on %s %s (ref=%s)",

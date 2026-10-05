@@ -123,6 +123,8 @@ services:
       # Mitwarten kosten nichts. Das Windows-Programm hat einen eigenen Topf: 600 Vergleiche.
       - ANBIETER_TAGESLIMIT_JE_KONTO=${ANBIETER_TAGESLIMIT_JE_KONTO:-150}
       - PROGRAMM_TAGESLIMIT_JE_KONTO=${PROGRAMM_TAGESLIMIT_JE_KONTO:-600}
+      # Entscheidung Ahmad 06.10.2026: Vergleiche aus Programm und Browser-Helfer 60 Tage aufbewahren (TTL)
+      - WERKZEUG_VERGLEICHE_TAGE=${WERKZEUG_VERGLEICHE_TAGE:-60}
       # Pruefbericht 20.09. (B-04): gleichzeitige Plaetze je Quelle, die EINE Firma
       # hoechstens belegen darf, sobald eine andere Firma wartet (100 = aus).
       - ANBIETER_FIRMENANTEIL_PROZENT=${ANBIETER_FIRMENANTEIL_PROZENT:-50}
