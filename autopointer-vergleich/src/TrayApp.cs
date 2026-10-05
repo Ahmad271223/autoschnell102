@@ -81,12 +81,9 @@ internal sealed class TrayApp : ApplicationContext
         menue.Items.Add(new ToolStripSeparator());
         _automatik = new ToolStripMenuItem("Automatik aktiv", null, (_, _) => AutomatikUmschalten()) { CheckOnClick = false };
         menue.Items.Add(_automatik);
-        menue.Items.Add("Aktuelles Fahrzeug jetzt vergleichen", null, async (_, _) =>
-        {
-            if (_ueberwacher != null) await _ueberwacher.JetztVergleichenAsync();
-        });
+        menue.Items.Add("Aktuelles Fahrzeug jetzt vergleichen", null, (_, _) => VergleichenStarten());
         menue.Items.Add("Letzten Vergleich erneut öffnen", null, (_, _) => _ueberwacher?.LetztenErneutOeffnen());
-        menue.Items.Add("Kaufvertrag: Auto in AutoSchnell öffnen", null, (_, _) => VertragOeffnen());
+        menue.Items.Add("Kaufvertrag: Auto in AutoSchnell öffnen", null, async (_, _) => await VertragOeffnenAsync());
         menue.Items.Add(new ToolStripSeparator());
         menue.Items.Add("Einstellungen …", null, (_, _) => EinstellungenZeigen());
         menue.Items.Add("Systemcheck: läuft alles? …", null, async (_, _) => await SystemcheckZeigenAsync());
@@ -109,9 +106,9 @@ internal sealed class TrayApp : ApplicationContext
         _fenster = new SteuerFenster(ZustandFuersFenster);
         _fenster.Aktivieren += () => AutomatikSetzen(true);
         _fenster.Stoppen += () => AutomatikSetzen(false);
-        _fenster.JetztVergleichen += async () => { if (_ueberwacher != null) await _ueberwacher.JetztVergleichenAsync(); };
+        _fenster.JetztVergleichen += VergleichenStarten;
         _fenster.LetztenOeffnen += () => _ueberwacher?.LetztenErneutOeffnen();
-        _fenster.VertragOeffnen += VertragOeffnen;
+        _fenster.VertragOeffnen += async () => await VertragOeffnenAsync();
         _fenster.Verbinden += () => VerbindenZeigen(null);
         _fenster.Trennen += async () => await TrennenAsync();
         _fenster.EinstellungenOeffnen += EinstellungenZeigen;
@@ -120,8 +117,8 @@ internal sealed class TrayApp : ApplicationContext
         _leiste = new Leiste(ZustandFuersFenster, () => _quelle?.Hauptfenster ?? IntPtr.Zero);
         _leiste.Aktivieren += () => AutomatikSetzen(true);
         _leiste.Stoppen += () => AutomatikSetzen(false);
-        _leiste.JetztVergleichen += async () => { if (_ueberwacher != null) await _ueberwacher.JetztVergleichenAsync(); };
-        _leiste.VertragOeffnen += VertragOeffnen;
+        _leiste.JetztVergleichen += VergleichenStarten;
+        _leiste.VertragOeffnen += async () => await VertragOeffnenAsync();
         _leiste.FensterOeffnen += FensterZeigen;
         _leiste.EckeGewechselt += ecke => { _einstellungen.LeisteEcke = ecke; Speichern(_einstellungen); };
         _leiste.PositionGeaendert += stelle =>
@@ -277,9 +274,48 @@ internal sealed class TrayApp : ApplicationContext
         return _ueberwacher?.Status ?? Status.KeinAutoPointer;
     }
 
+    /// <summary>Pruefung 05.10.2026 (Paket 3, F5): "Vergleichen" (Leiste, Fenster, Menue) rechnete im Oberflaechen-Thread
+    /// — Bildschirm-Abbild, Hochskalieren und Auswertung froren Fenster und Leiste fuer 0,3-0,5 s ein. Jetzt im
+    /// Hintergrund; Fehler kommen als Sprechblase.</summary>
+    private void VergleichenStarten()
+    {
+        var u = _ueberwacher;
+        if (u == null)
+        {
+            Sprechblase(_ocrFehlt != null ? "Texterkennung fehlt – es kann nichts gelesen werden." : "Noch nicht bereit.", true, erzwingen: true);
+            return;
+        }
+        _ = Task.Run(async () =>
+        {
+            try { await u.JetztVergleichenAsync(); }
+            catch (Exception ex)
+            {
+                Protokoll.Schreibe("„Vergleichen“ fehlgeschlagen: " + ex);
+                _ui.Post(_ => Sprechblase("Vergleichen fehlgeschlagen: " + ex.Message, true, erzwingen: true), null);
+            }
+        });
+    }
+
     /// <summary>Wunsch Ahmad 03.10.2026: das zuletzt angeklickte Auto in AutoSchnell oeffnen — der Server hat
-    /// es schon ausgelesen, der Vergleich steht sofort mit Fotos da, "Kaufvertrag erstellen" ohne Link-Einfuegen.</summary>
-    private void VertragOeffnen()
+    /// es schon ausgelesen, der Vergleich steht sofort mit Fotos da, "Kaufvertrag erstellen" ohne Link-Einfuegen.
+    /// Paket 3 (F3): die Suche nach der App-Verknuepfung laeuft im Hintergrund (vorher fror die Oberflaeche bei jedem
+    /// Klick, solange alle Verknuepfungen per COM gelesen wurden).</summary>
+    private bool _vertragLaeuft;
+
+    private async Task VertragOeffnenAsync()
+    {
+        if (_vertragLaeuft) return;
+        _vertragLaeuft = true;
+        try { await VertragOeffnenInternAsync(); }
+        catch (Exception ex)
+        {
+            Protokoll.Schreibe("Kaufvertrag nicht geöffnet: " + ex);
+            Sprechblase("Kaufvertrag nicht geöffnet: " + ex.Message, true, erzwingen: true);
+        }
+        finally { _vertragLaeuft = false; }
+    }
+
+    private async Task VertragOeffnenInternAsync()
     {
         string? url = _ueberwacher?.LetzteInseratUrl;
         var fahrzeug = _ueberwacher?.LetztesFahrzeug;
@@ -303,7 +339,7 @@ internal sealed class TrayApp : ApplicationContext
         Protokoll.Schreibe("Kaufvertrag: öffne " + ziel);
         // Wunsch Ahmad 03.10.2026: zuerst die installierte AutoSchnell-App (offenes Fenster oder neu starten),
         // nur ohne App im Browser
-        if (AutoSchnellApp.Oeffnen(ziel, _einstellungen.Server))
+        if (await AutoSchnellApp.OeffnenAsync(ziel, _einstellungen.Server))
         {
             _ = AppStartPruefenAsync(start, ziel);
             return;
@@ -559,7 +595,8 @@ internal sealed class TrayApp : ApplicationContext
                     Protokoll.SchreibeGedrosselt("takt:" + ex.GetType().Name + ":" + ex.Message, "Fehler: " + ex,
                                                  TimeSpan.FromSeconds(60));
                 }
-                try { await Task.Delay(250, token); }
+                // Paket 3 (F2): solange eine Aenderung offen ist, alle 100 ms nachsehen (Vergleich bis 150 ms frueher)
+                try { await Task.Delay(_ueberwacher.KurzerTakt ? 100 : 250, token); }
                 catch (OperationCanceledException) { break; }
             }
         }, token);
@@ -738,4 +775,5 @@ internal sealed class DienstVermittler : IVergleichsDienst
     public DienstVermittler(Func<IVergleichsDienst> dienst) => _dienst = dienst;
     public bool Verbunden => _dienst().Verbunden;
     public Task<VergleichAntwort> VergleichAsync(Fahrzeug f, bool probelauf) => _dienst().VergleichAsync(f, probelauf);
+    public void Vorwaermen() => _dienst().Vorwaermen();
 }

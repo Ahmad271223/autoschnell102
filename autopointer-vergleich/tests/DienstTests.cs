@@ -257,6 +257,54 @@ public class DienstTests
         Assert.Null(e.VerbundenAls);
     }
 
+    [Fact]   // Pruefung 05.10.2026 (Paket 3, F6): Schluessel() entschluesselt nicht mehr bei jedem Aufruf (DPAPI ~6x/s)
+    public void Schluessel_Zwischenspeicher_folgt_dem_gespeicherten_Wert()
+    {
+        var e = new Einstellungen { Server = "https://app.example.test" };
+        e.SchluesselSetzen("erster", "Max");
+        Assert.Equal("erster", e.Schluessel());
+        Assert.Equal("erster", e.Schluessel());
+        // ein anderer gespeicherter Wert (z. B. aus der Datei nachgeladen) -> neu entschluesselt, nicht der alte
+        var andere = new Einstellungen { Server = "https://app.example.test" };
+        andere.SchluesselSetzen("zweiter", "Max");
+        e.SchluesselGeschuetzt = andere.SchluesselGeschuetzt;
+        Assert.Equal("zweiter", e.Schluessel());
+        // kaputter Wert -> null, und nach SchluesselSetzen wieder frisch
+        e.SchluesselGeschuetzt = Convert.ToBase64String(new byte[] { 1, 2, 3 });
+        Assert.Null(e.Schluessel());
+        e.SchluesselSetzen("dritter", "Max");
+        Assert.Equal("dritter", e.Schluessel());
+        e.Server = "https://anderer.example.test";
+        Assert.Null(e.Schluessel());
+        e.Server = "https://app.example.test";
+        Assert.Equal("dritter", e.Schluessel());
+        // 2.000 Aufrufe (≈ 6 je Sekunde ueber 5 Minuten) muessen aus dem Zwischenspeicher kommen
+        var uhr = System.Diagnostics.Stopwatch.StartNew();
+        for (int i = 0; i < 2000; i++) e.Schluessel();
+        Assert.True(uhr.ElapsedMilliseconds < 500, $"{uhr.ElapsedMilliseconds} ms fuer 2.000 Aufrufe");
+    }
+
+    [Fact]   // Paket 3 (F4): Vorwaermen schickt GET /api/health, hoechstens einmal je Minute, Fehler egal
+    public async Task Vorwaermen_ruft_health_hoechstens_einmal_je_Minute()
+    {
+        var (d, a) = Dienst();
+        a.Antwort = _ => Json(200, """{"ok":true}""");
+        d.Vorwaermen();
+        d.Vorwaermen();
+        d.Vorwaermen();
+        for (int i = 0; i < 100 && a.Aufrufe == 0; i++) await Task.Delay(20);
+        await Task.Delay(50);
+        Assert.Equal(1, a.Aufrufe);
+        Assert.Equal("https://app.example.test/api/health", a.Letzte!.RequestUri!.ToString());
+        Assert.Equal(HttpMethod.Get, a.Letzte.Method);
+        // Fehler beim Vorwaermen stoeren nicht
+        var (d2, a2) = Dienst();
+        a2.Ausnahme = new HttpRequestException("weg");
+        d2.Vorwaermen();
+        for (int i = 0; i < 100 && a2.Aufrufe == 0; i++) await Task.Delay(20);
+        Assert.Equal(1, a2.Aufrufe);
+    }
+
     [Theory]   // Befund 03.10.2026: Chef 10002 ohne Namen -> "Verbunden:  (10002) · Norden Autoankauf"
     [InlineData("Max Muster", "10002-1", "AH", "Max Muster (10002-1) · AH")]
     [InlineData("", "10002", "Norden Autoankauf", "Konto 10002 · Norden Autoankauf")]

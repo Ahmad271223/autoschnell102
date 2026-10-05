@@ -112,6 +112,11 @@ internal sealed class Ueberwacher
     /// dann, wenn es vor dem Trennen schon dran war. (Angewendet beim naechsten Durchlauf unter der Sperre, A11.)</summary>
     public void NachVerbinden() => Interlocked.Exchange(ref _angefordert, 2);
 
+    /// <summary>Paket 3 (F2): solange eine Aenderung "offen" ist (Anzeige hat sich geaendert, Wartezeit laeuft), fragt
+    /// die Takt-Schleife alle 100 ms statt 250 ms nach — der Vergleich geht bis zu 150 ms frueher auf. Sonst 250 ms
+    /// (Pruefsumme kostet sonst unnoetig CPU).</summary>
+    public bool KurzerTakt => _offen;
+
     /// <summary>Angeforderten Neustart/NachVerbinden anwenden — nur unter <see cref="_einzeln"/>.</summary>
     private void AnforderungAnwenden()
     {
@@ -177,6 +182,8 @@ internal sealed class Ueberwacher
                 _summe = z.Summe;
                 _seit = jetzt;
                 _offen = true;
+                // Paket 3 (F4): schon jetzt (vor Wartezeit und Lesen) die Verbindung zum Server vorwaermen
+                try { _dienst.Vorwaermen(); } catch (Exception) { }
                 return;
             }
             if (!_offen || jetzt - _seit < e.WartezeitMs) return;
@@ -552,23 +559,30 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
                                                          Action<System.Drawing.Bitmap, System.Drawing.Bitmap?>? bilder = null)
     {
         // Beschreibung GLEICHZEITIG mit der Tabelle lesen (eigene Texterkennung) — sonst +0,15-0,2 s je Auto
-        var beschreibung = BeschreibungLesenAsync(BeschreibungsErkennung() ?? ocr, ansicht);
+        var beschreibung = BeschreibungLesenAsync(WeitereErkennung(0) ?? ocr, ansicht);
         var lesung = await LiesTabellenAsync(ocr, ansicht, bilderSpeichern, bilder);
         string? text = await beschreibung;
         if (lesung != null) lesung.Fahrzeug.BeschreibungText = text;
         return lesung;
     }
 
-    private static TextErkennung? _beschreibungsErkennung;
-    private static bool _beschreibungsErkennungVersucht;
+    /// <summary>Pruefung 05.10.2026 (Paket 3, F1): weitere Texterkennungen fuer parallele Durchgaenge — 0: Beschreibung,
+    /// 1: Kopf-Tabelle, 2: zweiter Durchgang der Technik-Tabelle. Eine OcrEngine arbeitet nur einen Auftrag auf einmal
+    /// ab; mit eigener Engine laufen die Durchgaenge auf mehreren Kernen gleichzeitig. Einmal erzeugt, dann behalten;
+    /// null, wenn das Erzeugen fehlschlaegt (dann liest die Haupt-Engine nacheinander wie bisher).</summary>
+    private static readonly TextErkennung?[] _weitere = new TextErkennung?[3];
+    private static readonly bool[] _weitereVersucht = new bool[3];
+    private static readonly object _weitereSperre = new();
 
-    /// <summary>Zweite Texterkennung nur fuer die Beschreibung (laeuft parallel zur Tabelle).</summary>
-    private static TextErkennung? BeschreibungsErkennung()
+    private static TextErkennung? WeitereErkennung(int i)
     {
-        if (_beschreibungsErkennungVersucht) return _beschreibungsErkennung;
-        _beschreibungsErkennungVersucht = true;
-        _beschreibungsErkennung = TextErkennung.Erstelle(out _);
-        return _beschreibungsErkennung;
+        lock (_weitereSperre)
+        {
+            if (_weitereVersucht[i]) return _weitere[i];
+            _weitereVersucht[i] = true;
+            _weitere[i] = TextErkennung.Erstelle(out _);
+            return _weitere[i];
+        }
     }
 
     /// <summary>Befund 04.10.2026 (Mercedes, Feld "Andere", Modell nur in der Beschreibung): den sichtbaren Anfang
@@ -627,7 +641,7 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
             using var kopf = kopfBild;
             if (technik != null)
             {
-                var sicht = await LiesBilderAsync(ocr, technik, kopf, dpi, bilderSpeichern);
+                var sicht = await LiesBilderAsync(ocr, technik, kopf, dpi, bilderSpeichern, WeitereErkennung(1), WeitereErkennung(2));
                 bilder?.Invoke(technik, kopf);
                 return sicht with { Weg = "Bildschirm" };
             }
@@ -636,18 +650,44 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
     }
 
     /// <summary>Zwei Durchlaeufe: Zoom x3 (bei 96 dpi), fehlende Felder aus einem
-    /// zweiten Durchlauf mit x2 ergaenzt.</summary>
+    /// zweiten Durchlauf mit x2 ergaenzt.
+    /// Pruefung 05.10.2026 (Paket 3, F1): Technik-Tabelle, Kopf-Tabelle und der zweite Durchgang liefen nacheinander
+    /// (3 x Texterkennung ≈ 0,3-0,5 s). Mit <paramref name="ocrKopf"/> und <paramref name="ocrZweiter"/> (eigene
+    /// Engines) laufen alle drei GLEICHZEITIG; der zweite Durchgang wird immer schon gestartet (er wird fast immer
+    /// gebraucht: Hash-ID, fehlende Felder) und nur dann verwendet, wenn die bisherige Regel es verlangt. Die Regel
+    /// "Hash-ID nur, wenn beide Durchgaenge gleich lesen" bleibt. Ohne eigene Engines (null, Tests) wie bisher
+    /// nacheinander auf <paramref name="ocr"/>.</summary>
     internal static async Task<Lesung> LiesBilderAsync(TextErkennung ocr, System.Drawing.Bitmap technik,
-                                                       System.Drawing.Bitmap? kopf, uint dpi, bool bilderSpeichern)
+                                                       System.Drawing.Bitmap? kopf, uint dpi, bool bilderSpeichern,
+                                                       TextErkennung? ocrKopf = null, TextErkennung? ocrZweiter = null)
     {
         double faktor = Math.Clamp(3.0 * 96 / (dpi == 0 ? 96 : dpi), 1.5, 3.0);
-        var zt = await ocr.LiesAsync(technik, faktor);
-        var zk = kopf != null ? await ocr.LiesAsync(kopf, faktor) : new List<OcrZeile>();
+        var leer = new List<OcrZeile>();
+        List<OcrZeile> zt, zk;
+        Task<List<OcrZeile>>? zweiter = null;
+        if (ocrKopf != null && ocrZweiter != null)
+        {
+            // parallel: jede Engine ein eigenes Bild (GDI+-Bitmaps duerfen nicht gleichzeitig gelesen werden -> Kopie
+            // fuer den zweiten Durchgang) und ein eigener Thread (auch das Hochskalieren vor der Erkennung laeuft so
+            // nebeneinander). LiesAsync liest das Bild synchron ein, bevor es wartet — die Kopie darf danach weg.
+            using var technikKopie = new System.Drawing.Bitmap(technik);
+            var t2 = kopf != null ? Task.Run(() => ocrKopf.LiesAsync(kopf, faktor)) : Task.FromResult(leer);
+            zweiter = Task.Run(() => ocrZweiter.LiesAsync(technikKopie, faktor * 2 / 3));
+            zt = await ocr.LiesAsync(technik, faktor);
+            zk = await t2;
+            try { await zweiter; }
+            catch (Exception ex) { Protokoll.Schreibe("2. Durchlauf fehlgeschlagen: " + ex.Message); zweiter = null; }
+        }
+        else
+        {
+            zt = await ocr.LiesAsync(technik, faktor);
+            zk = kopf != null ? await ocr.LiesAsync(kopf, faktor) : leer;
+        }
         var f = DetailLeser.Auswerten(zt, zk, kopf?.Width ?? 0);
         string roh = Rohtext(zt, zk);
         if (DetailLeser.Fehlend(f).Count > 0 || DetailLeser.Unvollstaendig(f).Count > 0 || f.HashId != null)
         {
-            var zt2 = await ocr.LiesAsync(technik, faktor * 2 / 3);
+            var zt2 = zweiter != null ? zweiter.Result : await ocr.LiesAsync(technik, faktor * 2 / 3);
             var f2 = DetailLeser.Auswerten(zt2, zk, kopf?.Width ?? 0);
             // Hash-ID (fuer den AutoScout-Link) nur, wenn beide Durchlaeufe genau dasselbe lesen
             string? hash = f.HashId != null && f.HashId == f2.HashId ? f.HashId : null;

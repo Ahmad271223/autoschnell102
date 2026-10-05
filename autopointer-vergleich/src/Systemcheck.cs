@@ -122,6 +122,8 @@ internal static class Systemcheck
             try { status = await dienst.StatusAsync(); }
             catch (DienstFehler ex) { statusFehler = ex.Message; }
         }
+        // Paket 3 (F3): die App-Suche (COM) parallel im Hintergrund, nicht im Oberflaechen-Thread
+        var app = AutoSchnellApp.FindenAsync(e.Server);
         IntPtr haupt = AutoPointerFenster.FindeHauptfenster();
         var ansicht = haupt == IntPtr.Zero ? null : AutoPointerFenster.FindeDetails(haupt);
         Fahrzeug? gelesen = null;
@@ -161,7 +163,7 @@ internal static class Systemcheck
             Probe = probe,
             ProbeFehler = probeFehler,
             BrowserGefunden = BrowserOeffner.BrowserVorhanden(e.Browser),
-            AppInstalliert = AutoSchnellApp.Finden(e.Server) != null,
+            AppInstalliert = await app != null,
         });
     }
 

@@ -148,21 +148,35 @@ internal sealed class Einstellungen
         return adresse.Trim().TrimEnd('/');
     }
 
+    /// <summary>Pruefung 05.10.2026 (Paket 3, F6): Schluessel() wurde ~6-mal je Sekunde aufgerufen (Verbunden im Takt,
+    /// Leiste, Fenster) und entschluesselte JEDES Mal per DPAPI. Jetzt wird das Ergebnis je gespeichertem Schluessel
+    /// (SchluesselGeschuetzt + Server + SchluesselServer) behalten; SchluesselSetzen leert den Zwischenspeicher.
+    /// Ein unveraenderliches Paar, damit der Takt-Thread und der Oberflaechen-Thread ohne Sperre lesen koennen.</summary>
+    private sealed record SchluesselCache(string Kennung, string? Wert);
+    private SchluesselCache? _schluesselCache;
+
     /// <summary>Programm-Schluessel fuer den aktuellen Server (oder null).</summary>
     public string? Schluessel()
     {
         if (string.IsNullOrEmpty(SchluesselGeschuetzt) || !string.Equals(SchluesselServer, Server, StringComparison.OrdinalIgnoreCase))
             return null;
+        string kennung = $"{SchluesselGeschuetzt}|{Server}|{SchluesselServer}";
+        var cache = _schluesselCache;
+        if (cache != null && cache.Kennung == kennung) return cache.Wert;
+        string? wert;
         try
         {
             var roh = ProtectedData.Unprotect(Convert.FromBase64String(SchluesselGeschuetzt), Zusatz, DataProtectionScope.CurrentUser);
-            return Encoding.UTF8.GetString(roh);
+            wert = Encoding.UTF8.GetString(roh);
         }
-        catch (Exception) { return null; }       // anderes Windows-Konto / kaputt -> neu verbinden
+        catch (Exception) { wert = null; }       // anderes Windows-Konto / kaputt -> neu verbinden
+        _schluesselCache = new SchluesselCache(kennung, wert);
+        return wert;
     }
 
     public void SchluesselSetzen(string? schluessel, string? verbundenAls)
     {
+        _schluesselCache = null;
         if (string.IsNullOrEmpty(schluessel))
         {
             SchluesselGeschuetzt = null;

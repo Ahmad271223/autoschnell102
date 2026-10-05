@@ -69,6 +69,23 @@ dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und 
   Protokoll, das um ~1 GB am Tag wuchs; gleiche Fehler im Takt werden außerdem gedrosselt protokolliert).
   Einstellungen (mit dem Programm-Schlüssel) werden in einem Zug getauscht und behalten eine `.bak` — ein Absturz
   beim Speichern kostet keinen Code mehr. Doppelklick auf „Vergleichen“ öffnet nicht mehr doppelt.
+* **1.5.5 (Paket 2+3, Prüfung 05./06.10.) — ausfallsicherer und schneller:** ein Netzaussetzer oder 502/503/504
+  (Cloudflare 52x) wird genau einmal nach 1 s wiederholt (nie bei Zeitüberschreitung oder 4xx); die Lizenzprüfung bleibt
+  bei kein Netz/5xx still und versucht es nach 1/2/5 min, nach dem Standby und bei Netzwechsel sofort; kein Abo (402)
+  oder keine Freigabe (403) zeigen Leiste und Fenster als **GESPERRT** mit dem Text des Servers. Beim Start kopiert sich
+  das Programm nach `%LOCALAPPDATA%\Programs\AutoSchnell-Vergleich\` (nicht über eine neuere Kopie) — der Autostart
+  zeigt nur noch dorthin, nie mehr auf Downloads oder die ZIP-Vorschau; nach einem Absturz startet Windows es neu
+  (`RegisterApplicationRestart`). Fehlt die Windows-Texterkennung, zeigt das Programm **TEXTERKENNUNG FEHLT** und
+  versucht es jede Minute erneut (kein Neustart nötig). `--server` gilt nur für diesen Lauf und wird nie gespeichert;
+  `--verbinden` bricht ab, solange das Programm läuft. Zeitabstände laufen monoton (kein Hänger beim Stellen der Uhr),
+  das Protokoll wird bei jedem Datumswechsel aufgeräumt, Erkennungsbilder bleiben unter 200 MB.
+  Schneller: Technik-Tabelle, Kopf-Tabelle und zweiter Durchgang werden **gleichzeitig** gelesen (eigene Engines,
+  Regel „Hash-ID nur, wenn beide Durchgänge gleich lesen“ bleibt); solange eine Änderung offen ist, prüft der Takt alle
+  100 ms statt 250 ms; die Verbindung zum Server wird beim Anklicken vorgewärmt und 5 min offen gehalten;
+  „Vergleichen“ und die App-Suche für „Vertrag“ (Ergebnis 10 min gemerkt) laufen im Hintergrund statt im
+  Oberflächen-Thread; der Programm-Schlüssel wird nicht mehr 6-mal je Sekunde per DPAPI entschlüsselt.
+  `PublishReadyToRun` wurde gemessen (Start `--einmal` ≈ 1,29 s statt ≈ 1,23 s, Datei 70 statt 55 MB) und nicht
+  übernommen.
 * **Neuwagen** (Zustand „Neu“) haben in AutoPointer weder Erstzulassung noch Kilometerstand: dann gilt dieses Jahr
   und 0 km (Befund 03.10.: BYD Dolphin, mobile.de).
 * Dasselbe Fahrzeug öffnet nie zweimal hintereinander (Kennung aus dem gelesenen Text `Marke Modell | EZ | km | kW`,
@@ -110,7 +127,7 @@ gezeichnet). Deshalb:
 1. Fenster-Handles finden: Überschrift „Technische Daten“ → `TcxGrid` → `TcxGridSite`, dazu die
    Kopf-Tabelle (Quelle, Titel, Preis). Unabhängig von Auflösung, Fenstergröße und Position.
 2. Nur solange AutoPointer im Vordergrund ist, alle 250 ms eine billige Prüfsumme (BitBlt) – ändert sich
-   etwas, wird gewartet, bis die Ansicht 400 ms stillsteht.
+   etwas, wird gewartet, bis die Ansicht 400 ms stillsteht (seit 1.5.5 in dieser Zeit alle 100 ms geprüft).
 3. Es wird nur **kopiert, was ohnehin auf dem Bildschirm steht** (BitBlt – AutoPointer bekommt davon nichts mit).
    Fehlen Zeilen (weggescrollt, schmale Ansicht), sagt das Programm „Detailbereich größer ziehen“. AutoPointer die
    Tabelle selbst zeichnen lassen (`PrintWindow`) ist seit 1.5.2 **ganz entfernt** (Wunsch Ahmad 04.10.): am

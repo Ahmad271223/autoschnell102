@@ -56,7 +56,49 @@ internal static class AutoSchnellApp
     internal static string Argumente(Verknuepfung v, string url) =>
         $"--profile-directory=\"{v.Profil}\" --app-id={v.AppId} --app-launch-url-for-shortcuts-menu-item=\"{url}\"";
 
+    /// <summary>Pruefung 05.10.2026 (Paket 3, F3): das Ergebnis der Suche wird behalten — gefunden 10 Minuten, nicht
+    /// gefunden 1 Minute (die App kann gerade installiert werden) — und verworfen, sobald ein Start fehlschlaegt oder
+    /// die Programmdatei weg ist. Vorher las jeder Klick auf "Vertrag" alle Verknuepfungen per COM neu.</summary>
+    private static readonly object _cacheSperre = new();
+    private static (string Server, Verknuepfung? Wahl, long Bis)? _cache;
+    internal static readonly TimeSpan CacheGefunden = TimeSpan.FromMinutes(10), CacheNichtGefunden = TimeSpan.FromMinutes(1);
+
+    /// <summary>Gilt der Eintrag noch? (rein, fuer Tests)</summary>
+    internal static bool CacheGueltig((string Server, Verknuepfung? Wahl, long Bis)? eintrag, string server, long jetzt) =>
+        eintrag is { } e && e.Server == server && jetzt < e.Bis;
+
+    internal static void CacheLeeren()
+    {
+        lock (_cacheSperre) _cache = null;
+    }
+
     public static Verknuepfung? Finden(string server)
+    {
+        lock (_cacheSperre)
+            if (CacheGueltig(_cache, server, Environment.TickCount64) && (_cache!.Value.Wahl == null || File.Exists(_cache.Value.Wahl.Programm)))
+                return _cache.Value.Wahl;
+        var wahl = Suchen(server);
+        lock (_cacheSperre)
+            _cache = (server, wahl, Environment.TickCount64 + (long)(wahl != null ? CacheGefunden : CacheNichtGefunden).TotalMilliseconds);
+        return wahl;
+    }
+
+    /// <summary>F3: die Suche (COM, Dateisystem) auf einem eigenen STA-Thread im Hintergrund — der Oberflaechen-Thread
+    /// bleibt frei. WScript.Shell ist ein Apartment-Objekt; auf einem STA-Thread ohne Umweg ueber den Hauptthread.</summary>
+    public static Task<Verknuepfung?> FindenAsync(string server)
+    {
+        var tcs = new TaskCompletionSource<Verknuepfung?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var t = new Thread(() =>
+        {
+            try { tcs.SetResult(Finden(server)); }
+            catch (Exception ex) { tcs.SetException(ex); }
+        }) { IsBackground = true, Name = "AutoSchnell-App suchen" };
+        t.SetApartmentState(ApartmentState.STA);
+        t.Start();
+        return tcs.Task;
+    }
+
+    private static Verknuepfung? Suchen(string server)
     {
         var orte = new[]
         {
@@ -85,13 +127,21 @@ internal static class AutoSchnellApp
                 catch (UnauthorizedAccessException) { continue; }
                 foreach (var datei in dateien)
                 {
+                    object? lnk = null;
                     try
                     {
-                        dynamic lnk = ((dynamic)shell).CreateShortcut(datei);
-                        var v = AusVerknuepfung((string)lnk.TargetPath, (string)lnk.Arguments, datei, server);
+                        lnk = ((dynamic)shell).CreateShortcut(datei);
+                        dynamic d = lnk!;
+                        var v = AusVerknuepfung((string)d.TargetPath, (string)d.Arguments, datei, server);
                         if (v != null && File.Exists(v.Programm)) kandidaten.Add(v);
                     }
                     catch (Exception) { /* kaputte Verknuepfung: weiter */ }
+                    finally
+                    {
+                        // F3: jedes COM-Objekt sofort freigeben — vorher blieben Hunderte bis zum Finalizer liegen
+                        if (lnk != null && OperatingSystem.IsWindows())
+                            try { System.Runtime.InteropServices.Marshal.ReleaseComObject(lnk); } catch (Exception) { }
+                    }
                 }
             }
             var wahl = Auswaehlen(kandidaten);
@@ -108,10 +158,10 @@ internal static class AutoSchnellApp
         return null;
     }
 
-    /// <summary>In der installierten App oeffnen; false = keine App da (dann Browser).</summary>
-    public static bool Oeffnen(string url, string server)
+    /// <summary>In der installierten App oeffnen; false = keine App da (dann Browser). Die Suche laeuft im Hintergrund.</summary>
+    public static async Task<bool> OeffnenAsync(string url, string server)
     {
-        var v = Finden(server);
+        var v = await FindenAsync(server);
         if (v == null) return false;
         try
         {
@@ -122,6 +172,7 @@ internal static class AutoSchnellApp
         catch (Exception ex)
         {
             Protokoll.Schreibe("AutoSchnell-App ließ sich nicht starten: " + ex.Message);
+            CacheLeeren();                      // beim naechsten Klick neu suchen
             return false;
         }
     }

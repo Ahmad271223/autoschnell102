@@ -46,6 +46,9 @@ internal interface IVergleichsDienst
 {
     bool Verbunden { get; }
     Task<VergleichAntwort> VergleichAsync(Fahrzeug f, bool probelauf);
+    /// <summary>Paket 3 (F4): Verbindung vorwaermen, sobald eine Aenderung in AutoPointer erkannt ist — die Anfrage
+    /// trifft dann auf eine offene Verbindung (kein DNS/TLS-Aufbau mehr auf dem kritischen Weg). Darf nichts tun.</summary>
+    void Vorwaermen() { }
 }
 
 /// <summary>Verbindung zu AutoSchnell (Wunsch Ahmad 03.10.2026): das Programm arbeitet nur
@@ -89,12 +92,40 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
         Server = server.TrimEnd('/');
         _schluessel = schluessel;
         _warte = warte ?? (t => Task.Delay(t));
-        _http = handler == null ? new HttpClient() : new HttpClient(handler);
+        // Paket 3 (F4): offene Verbindungen 5 Minuten behalten (Standard 1 min) — zwischen zwei angeklickten Autos
+        // liegen oft Minuten, danach kostete jede Anfrage wieder DNS + TLS-Aufbau (0,2-0,5 s)
+        _http = handler == null
+            ? new HttpClient(new SocketsHttpHandler { PooledConnectionIdleTimeout = TimeSpan.FromMinutes(5) })
+            : new HttpClient(handler);
         _http.Timeout = TimeSpan.FromSeconds(15);
         _http.DefaultRequestHeaders.UserAgent.ParseAdd($"AutoSchnell-Vergleich/{Application.ProductVersion.Split('+')[0]}");
     }
 
     public bool Verbunden => !string.IsNullOrEmpty(_schluessel());
+
+    private long _zuletztVorgewaermt = long.MinValue / 2;
+    private int _vorwaermenLaeuft;
+
+    /// <summary>Paket 3 (F4): GET /api/health im Hintergrund, hoechstens alle 60 s, Fehler egal — danach steht die
+    /// Verbindung im Pool, wenn /vergleich kommt.</summary>
+    public void Vorwaermen()
+    {
+        long jetzt = Environment.TickCount64;
+        if (jetzt - _zuletztVorgewaermt < 60_000) return;
+        if (Interlocked.Exchange(ref _vorwaermenLaeuft, 1) == 1) return;
+        _zuletztVorgewaermt = jetzt;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var abbruch = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                using var a = new HttpRequestMessage(HttpMethod.Get, Server + "/api/health");
+                using var r = await _http.SendAsync(a, HttpCompletionOption.ResponseHeadersRead, abbruch.Token);
+            }
+            catch (Exception) { /* nur vorwaermen — der echte Aufruf meldet Fehler */ }
+            finally { Interlocked.Exchange(ref _vorwaermenLaeuft, 0); }
+        });
+    }
 
     private string Url(string pfad) => $"{Server}/api/werkzeuge/{Werkzeug}/{pfad}";
 

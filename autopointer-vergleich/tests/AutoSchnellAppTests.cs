@@ -46,6 +46,33 @@ public class AutoSchnellAppTests
             "--profile-directory=Default --app-id=abcdefghijklmnopabcdefghijklmnop", @"C:\Startmenue\YouTube.lnk", Server));
     }
 
+    [Fact]   // Pruefung 05.10.2026 (Paket 3, F3): Suchergebnis wird behalten (gefunden 10 min, nicht gefunden 1 min)
+    public void Suchergebnis_wird_zwischengespeichert()
+    {
+        var v = new AutoSchnellApp.Verknuepfung(Edge, "Default", "kloggooekeelopkjnmmejeamhcghhkim", true);
+        long jetzt = 1_000_000;
+        Assert.True(AutoSchnellApp.CacheGueltig((Server, v, jetzt + 1000), Server, jetzt));
+        Assert.False(AutoSchnellApp.CacheGueltig((Server, v, jetzt), Server, jetzt));               // abgelaufen
+        Assert.False(AutoSchnellApp.CacheGueltig((Server, v, jetzt + 1000), "https://anderer.test", jetzt));
+        Assert.False(AutoSchnellApp.CacheGueltig(null, Server, jetzt));
+        Assert.True(AutoSchnellApp.CacheGueltig((Server, null, jetzt + 1000), Server, jetzt));     // "nicht gefunden" zaehlt auch
+        Assert.True(AutoSchnellApp.CacheGefunden > AutoSchnellApp.CacheNichtGefunden);
+    }
+
+    [Fact]   // F3: die Suche laeuft auf einem eigenen Thread (STA) und blockiert den Aufrufer nicht
+    public async Task Suche_laeuft_im_Hintergrund()
+    {
+        AutoSchnellApp.CacheLeeren();
+        var aufgabe = AutoSchnellApp.FindenAsync("https://nirgends.example.test");
+        Assert.True(await Task.WhenAny(aufgabe, Task.Delay(TimeSpan.FromSeconds(30))) == aufgabe, "Suche haengt");
+        var erste = await aufgabe;                         // auf einem Entwickler-PC kann eine Chrome-App am Namen passen
+        // zweiter Aufruf kommt aus dem Zwischenspeicher: sofort und dasselbe Ergebnis
+        var uhr = System.Diagnostics.Stopwatch.StartNew();
+        Assert.Equal(erste, AutoSchnellApp.Finden("https://nirgends.example.test"));
+        Assert.True(uhr.ElapsedMilliseconds < 200, $"{uhr.ElapsedMilliseconds} ms");
+        AutoSchnellApp.CacheLeeren();
+    }
+
     [Fact]   // nur zur Entwicklung: AUTOSCHNELL_APP_PRUEFEN=1 sucht die echte App auf diesem PC (startet nichts)
     public void Finden_auf_diesem_PC()
     {

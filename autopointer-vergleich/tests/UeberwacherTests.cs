@@ -41,6 +41,8 @@ public class UeberwacherTests
         public string? InseratUrl;
         public List<string>? Melden;
         public readonly List<Fahrzeug> Anfragen = new();
+        public int Vorgewaermt;
+        public void Vorwaermen() => Vorgewaermt++;
 
         public Task<VergleichAntwort> VergleichAsync(Fahrzeug f, bool probelauf)
         {
@@ -502,6 +504,27 @@ public class UeberwacherTests
         await Anklicken(Golf, 3);
         Assert.Equal(3, _b.Aufrufe.Count);
         Assert.Single(_gewartet);
+    }
+
+    [Fact]   // Pruefung 05.10.2026 (Paket 3, F2/F4): kurzer Takt nur, solange eine Aenderung offen ist; Verbindung vorwaermen
+    public async Task Kurzer_Takt_und_Vorwaermen_nur_bei_offener_Aenderung()
+    {
+        await Start();
+        Assert.False(_u.KurzerTakt);
+        Assert.Equal(0, _server.Vorgewaermt);
+        _q.Zeige(Bentley, 1);
+        await Tick();                                     // Aenderung bemerkt: offen, Verbindung wird vorgewaermt
+        Assert.True(_u.KurzerTakt);
+        Assert.Equal(1, _server.Vorgewaermt);
+        await Tick();
+        Assert.True(_u.KurzerTakt);
+        await Tick();                                     // gelesen und geoeffnet: nicht mehr offen
+        Assert.Single(_b.Aufrufe);
+        Assert.False(_u.KurzerTakt);
+        Assert.Equal(1, _server.Vorgewaermt);             // nur einmal je Aenderung, nicht je Takt
+        for (int i = 0; i < 4; i++) await Tick();
+        Assert.False(_u.KurzerTakt);
+        Assert.Equal(1, _server.Vorgewaermt);
     }
 
 }
