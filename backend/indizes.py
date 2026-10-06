@@ -908,6 +908,8 @@ async def bestand_lese_indizes(db) -> None:
     for sammlung, schluessel, optionen in (
             ("activity_logs", [("dealer_id", 1), ("ref", 1), ("created_at", -1)],
              {"name": "akte_historie"}),
+            # 06.10.2026: Betreiber-Liste "wer hat welches Programm heruntergeladen" (werkzeug_download)
+            ("activity_logs", [("action", 1), ("created_at", -1)], {"name": "aktion_zeit"}),
             ("vehicles", [("archiv_aufraeumen_offen", 1)],
              {"name": "archiv_aufraeumen_offen",
               "partialFilterExpression": {"archiv_aufraeumen_offen": True}})):

@@ -922,6 +922,34 @@ async def admin_werkzeug_vergleiche(werkzeug: str = wz.AUTOPOINTER, dealer_id: O
     return daten
 
 
+@router.get("/admin/werkzeug-downloads")
+async def admin_werkzeug_downloads(limit: int = Query(300, ge=1, le=1000), _=Depends(current_super_admin)):
+    """Wunsch Ahmad 06.10.2026: wer hat wann welches Programm heruntergeladen — aus activity_logs
+    (werkzeug_download, geschrieben von /werkzeuge/{id}/download), neueste zuerst, mit Konto und Firma."""
+    filt = {"action": "werkzeug_download"}
+    roh = [x async for x in db.activity_logs.find(
+        filt, {"_id": 0, "id": 1, "dealer_id": 1, "user_id": 1, "ref": 1, "meta": 1, "created_at": 1})
+        .sort("created_at", -1).limit(limit)]
+    namen = await _konten([x.get("user_id") for x in roh])
+    firmen = {}
+    firmen_ids = list({x.get("dealer_id") for x in roh if x.get("dealer_id")})
+    if firmen_ids:
+        async for d in db.dealers.find({"id": {"$in": firmen_ids}}, {"_id": 0, "id": 1, "company_name": 1, "kunden_nr": 1}):
+            firmen[d["id"]] = {"firma": d.get("company_name") or "", "kunden_nr": d.get("kunden_nr")}
+    leer = {"konto": "", "name": "gelöschtes Konto", "rolle": ""}
+    downloads = []
+    for x in roh:
+        werkzeug = str(x.get("ref") or "")
+        eintrag = {"id": x.get("id"), "am": x.get("created_at"), "werkzeug": werkzeug,
+                   "programm": (wz.WERKZEUGE.get(werkzeug) or {}).get("name", werkzeug),
+                   "version": (x.get("meta") or {}).get("version"), "user_id": x.get("user_id"),
+                   "dealer_id": x.get("dealer_id")}
+        eintrag.update(namen.get(x.get("user_id"), leer))
+        eintrag.update(firmen.get(x.get("dealer_id"), {"firma": "", "kunden_nr": None}))
+        downloads.append(eintrag)
+    return {"downloads": downloads, "gesamt": await db.activity_logs.count_documents(filt)}
+
+
 @router.delete("/admin/werkzeug-verbindungen/{konto_id}")
 async def admin_werkzeug_trennen(konto_id: str, werkzeug: str = wz.AUTOPOINTER,
                                  admin=Depends(current_super_admin)):

@@ -3,7 +3,7 @@ import { Search } from "lucide-react";
 import { toast } from "sonner";
 import { api, errMsg } from "@/lib/api";
 import { Card, PageHeader, Spinner } from "./_ui";
-import { VergleichsTabelle, VerbindungsListe, fahrzeugText } from "@/components/ProgrammVergleiche";
+import { VergleichsTabelle, VerbindungsListe, fahrzeugText, zeit } from "@/components/ProgrammVergleiche";
 
 /**
  * Betreiber (Wunsch Ahmad 03.10.2026): wer hat wann welches Auto mit dem Programm verglichen,
@@ -11,6 +11,7 @@ import { VergleichsTabelle, VerbindungsListe, fahrzeugText } from "@/components/
  */
 export default function AdminProgrammVergleiche() {
   const [daten, setDaten] = useState(null);
+  const [downloads, setDownloads] = useState(null);
   const [q, setQ] = useState("");
   const laden = useCallback(async () => {
     try {
@@ -19,6 +20,13 @@ export default function AdminProgrammVergleiche() {
     } catch (e) {
       toast.error(errMsg(e, "Fehler beim Laden"));
       setDaten({ vergleiche: [], verbindungen: [], gesamt: 0 });
+    }
+    // Wunsch Ahmad 06.10.2026: wer hat wann welches Programm heruntergeladen
+    try {
+      const { data } = await api.get("/admin/werkzeug-downloads", { params: { limit: 300 } });
+      setDownloads(data.downloads || []);
+    } catch (e) {
+      setDownloads([]);
     }
   }, []);
   useEffect(() => { laden(); }, [laden]);
@@ -51,6 +59,37 @@ export default function AdminProgrammVergleiche() {
       <Card className="mb-4">
         <div className="text-sm font-semibold mb-2">Verbundene PCs</div>
         <VerbindungsListe verbindungen={daten.verbindungen} onTrennen={trennen} mitFirma />
+      </Card>
+      <Card className="mb-4">
+        <div className="text-sm font-semibold mb-2">Downloads{downloads ? ` (${downloads.length})` : ""}</div>
+        {!downloads ? <Spinner /> : !downloads.length
+          ? <div className="text-sm text-zinc-500" data-testid="admin-pv-keine-downloads">Noch kein Download.</div>
+          : (
+            <div className="overflow-x-auto" data-testid="admin-pv-downloads">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-zinc-500 text-xs">
+                    <th className="py-2 pr-3 font-medium">Zeit</th>
+                    <th className="py-2 pr-3 font-medium">Programm</th>
+                    <th className="py-2 pr-3 font-medium">Version</th>
+                    <th className="py-2 pr-3 font-medium">Konto</th>
+                    <th className="py-2 pr-3 font-medium">Firma</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {downloads.map((d) => (
+                    <tr key={d.id} className="border-t" style={{ borderColor: "var(--border-default)" }}>
+                      <td className="py-2 pr-3 whitespace-nowrap">{zeit(d.am)}</td>
+                      <td className="py-2 pr-3">{d.programm}</td>
+                      <td className="py-2 pr-3 text-xs text-zinc-500">{d.version || "–"}</td>
+                      <td className="py-2 pr-3">{d.name || "–"}{d.konto ? <div className="text-xs text-zinc-500">{d.konto}</div> : null}</td>
+                      <td className="py-2 pr-3">{d.firma}{d.kunden_nr ? <div className="text-xs text-zinc-500">Kd.-Nr. {d.kunden_nr}</div> : null}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
       </Card>
       <Card padded={false}>
         <div className="px-4 py-3 flex items-center gap-2" style={{ borderBottom: "1px solid var(--wa-08)" }}>

@@ -779,6 +779,13 @@ def test_36_zip_laden_fuer_die_firma(welt):
         assert r.status_code == 200 and r.content == daten
         assert r.headers["content-type"].startswith("application/zip")
         assert 'filename="AutoSchnell-Helfer.zip"' in r.headers["content-disposition"]
+        # Wunsch Ahmad 06.10.2026: der Betreiber sieht, wer wann welches Programm heruntergeladen hat
+        a = requests.get(f"{API}/admin/werkzeug-downloads", headers=konten.super_kopf(), timeout=30)
+        assert a.status_code == 200, a.text
+        meiner = next(d for d in a.json()["downloads"] if d["user_id"] == welt["sucher_id"] and d["werkzeug"] == WID)
+        assert meiner["version"] == "2.0.0-test" and meiner["programm"] == wz.WERKZEUGE[WID]["name"]
+        assert meiner["kunden_nr"] == 10002 and meiner["konto"] and meiner["am"]
+        assert requests.get(f"{API}/admin/werkzeug-downloads", headers=welt["chef"], timeout=30).status_code == 403
     finally:
         if vorher:
             db.werkzeuge.replace_one({"id": WID}, vorher, upsert=True)

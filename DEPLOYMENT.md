@@ -4431,6 +4431,9 @@ Zweites Werkzeug `browser-helfer` neben dem Programm — die Erweiterung `browse
 weiter den Kleinanzeigen-Abruf-Helfer). Gleiche Lizenz: 6-stelliger Code, **ein Konto = ein Browser**, Abo-Pflicht,
 Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
 - Freigabe: `BROWSER_HELFER_KUNDEN` (Standard `10001,10002,10007`, `docker-compose.yml`; leer = niemand).
+- Downloads (Wunsch Ahmad 06.10.2026): `GET /api/admin/werkzeug-downloads` (Super-Admin) listet aus `activity_logs`
+  (`werkzeug_download`, Index `aktion_zeit`), wer wann welches Programm in welcher Version geladen hat — Tabelle „Downloads“
+  auf der Betreiber-Seite Programm-Vergleiche.
 - Inserat öffnen → `POST /api/werkzeuge/browser-helfer/inserat` (Seite gzip+base64, Schlüssel-Kopfzeile). Der Server
   wertet aus (`backend/browser_helfer.py`; mobile.de-Datenstrom = Apify-Format, AutoScout `__NEXT_DATA__`,
   Kleinanzeigen-Parser), baut die Links mit den Firmenregeln (Navi-Regel wie in der App) und merkt die Daten 24 h in
