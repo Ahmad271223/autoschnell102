@@ -16,6 +16,7 @@ DANACH passiert:
   * Das Online-Protokoll zeigt alle Ausstattungen des Inserats (vorher 20).
 """
 import inspect
+import re
 import sys
 from pathlib import Path
 
@@ -50,7 +51,10 @@ def test_02_deckel_gilt_auch_im_pdf():
     quelle = (BACKEND / "routes" / "protocols.py").read_text(encoding="utf-8")
     # Review 26.09.2026 Nr. 137: der Freigabe-Schnappschuss deckelt die Ausstattung ebenso
     # 01.10.2026: dazu die Zusammenfassung "vor Ort festgestellt" in der Freigabe-Liste (vor_ort_befunde)
-    assert quelle.count('features") or [])[:AUSSTATTUNG_MAX]') == 5, \
+    # 06.10.2026: dazu die Vollansicht der Ausstattung fuer den Chef ("120/120 geprueft") — deshalb
+    # mindestens 5; entscheidend ist, dass JEDE Stelle mit AUSSTATTUNG_MAX deckelt und keine mit einer Zahl
+    assert not re.search(r'features"\) or \[\]\)\[:\d', quelle), "Ausstattung mit fester Zahl gedeckelt"
+    assert quelle.count('features") or [])[:AUSSTATTUNG_MAX]') >= 5, \
         "Online-Protokoll, beide PDF-Wege, der Freigabe-Schnappschuss und die Vor-Ort-Zusammenfassung"
     assert 'features") or [])[:20]' not in quelle
 
