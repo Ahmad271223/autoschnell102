@@ -86,8 +86,8 @@ def test_sendin_und_schluesselbindung():
     assert 'out["zustellung"] = "link_bereit"' in q and '= "chat_geoeffnet"' not in q
     # Archiv erst nach Erfolg, Rollback entfernt den Eintrag
     assert q.index("await db.versand_schluessel.delete_one(") < q.index("await db.versand_schluessel.update_one(")
-    # Versand-Limit und Fassung im Beleg
-    assert "_versand_limiter.check(" in q and '"version": int(c.get("version") or 1), "anfrage_hash"' in q
+    # Versand-Limit (seit 06.10.2026 je Tag, Wunsch Ahmad) und Fassung im Beleg
+    assert "mail_zaehler = await _mail_tag_zaehlen(user)" in q and '"version": int(c.get("version") or 1), "anfrage_hash"' in q
     # E-Mail-Identitaet aus den eingefrorenen Kaeuferdaten
     assert "_apply_contract_overrides(\n                contract=dict(c.get(\"contract_data\") or {}), vehicle={}, dealer=dict(firma))" in q
 

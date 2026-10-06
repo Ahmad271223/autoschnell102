@@ -210,16 +210,76 @@ class _Takt:
             await asyncio.sleep(schlaf)
 
 
-_resend_takt: Optional["_Takt"] = None
+# Wunsch Ahmad 06.10.2026: "die SaaS muss jederzeit hunderte Mails rausschicken koennen". Der Anteil je
+# Prozess (RESEND_RATE / RESEND_PROZESSE = 1,25 je Sekunde) liess EINEN Prozess nie schneller senden — 100
+# Vertraege, die auf demselben Prozess landeten, brauchten 80 s, obwohl das Konto 10 je Sekunde erlaubt.
+# Jetzt vergibt ein gemeinsamer Zaehler in der Datenbank die Sendeplaetze fuer ALLE Prozesse beider Server:
+# wer gerade sendet, bekommt das ganze Konto-Limit, zusammen bleibt es bei RESEND_RATE je Sekunde (100 Mails
+# = 10 s). Ist die Datenbank nicht erreichbar, gilt wieder der Anteil je Prozess — nie schneller als das
+# Konto erlaubt. RESEND_TAKT_GEMEINSAM=false schaltet zurueck auf nur den Anteil je Prozess.
+RESEND_TAKT_GEMEINSAM = (os.environ.get("RESEND_TAKT_GEMEINSAM", "true").strip().lower()
+                         not in ("0", "false", "nein", "aus"))
+#: Liegt der naechste gemeinsame Platz weiter als das in der Zukunft, stimmt etwas nicht (Uhr eines Servers
+#: verstellt) — dann beginnt der Zaehler neu, statt alle Mails minutenlang warten zu lassen.
+RESEND_TAKT_MAX_VORLAUF_S = 600.0
+
+
+class _GemeinsamerTakt:
+    """Sendeplaetze fuer alle Prozesse aus EINEM Zaehler (Sammlung mail_takt, ein Dokument je Konto-Limit):
+    jeder Aufruf schiebt "naechste" atomar um einen Abstand weiter und wartet bis zu seinem Platz."""
+
+    def __init__(self, rate: float, rueckfall: _Takt):
+        self.abstand = 1.0 / rate if rate > 0 else 0.0
+        self.rueckfall = rueckfall
+        self._gewarnt = 0.0
+
+    async def _platz_holen(self) -> float:
+        import time
+        from pymongo import ReturnDocument
+        from deps import db
+        jetzt = time.time()
+        doc = await asyncio.wait_for(db.mail_takt.find_one_and_update(
+            {"_id": "resend"},
+            [{"$set": {"naechste": {"$add": [{"$max": [{"$ifNull": ["$naechste", 0]}, jetzt]},
+                                             self.abstand]}}}],
+            upsert=True, return_document=ReturnDocument.AFTER), timeout=2.0)
+        start = float(doc["naechste"]) - self.abstand
+        if start - jetzt > RESEND_TAKT_MAX_VORLAUF_S:
+            log.warning("email_service: gemeinsamer Mail-Takt lag %.0f s in der Zukunft — neu begonnen",
+                        start - jetzt)
+            await db.mail_takt.update_one({"_id": "resend"}, {"$set": {"naechste": jetzt + self.abstand}})
+            start = jetzt
+        return start - time.time()
+
+    async def platz(self) -> None:
+        if not self.abstand:
+            return
+        try:
+            schlaf = await self._platz_holen()
+        except Exception as exc:  # noqa: BLE001 — Datenbank weg: Anteil je Prozess (sicher unter dem Limit)
+            loop = asyncio.get_running_loop()
+            if loop.time() - self._gewarnt > 60:
+                self._gewarnt = loop.time()
+                log.warning("email_service: gemeinsamer Mail-Takt nicht erreichbar (%s) — Anteil je Prozess",
+                            type(exc).__name__)
+            await self.rueckfall.platz()
+            return
+        if schlaf > 0:
+            await asyncio.sleep(schlaf)
+
+
+_resend_takt: Optional[object] = None
 _resend_takt_loop = None
 
 
-def _takt() -> "_Takt":
-    """Takt je Event-Loop (wie die Semaphore — Tests haben eigene Loops)."""
+def _takt():
+    """Takt je Event-Loop (wie die Semaphore — Tests haben eigene Loops): der gemeinsame Takt aller Prozesse,
+    mit dem Anteil je Prozess als Rueckfall (bzw. allein, wenn RESEND_TAKT_GEMEINSAM aus ist)."""
     global _resend_takt, _resend_takt_loop
     loop = asyncio.get_running_loop()
     if _resend_takt is None or _resend_takt_loop is not loop:
-        _resend_takt = _Takt(RESEND_RATE / RESEND_PROZESSE)
+        anteil = _Takt(RESEND_RATE / RESEND_PROZESSE)
+        _resend_takt = _GemeinsamerTakt(RESEND_RATE, anteil) if RESEND_TAKT_GEMEINSAM else anteil
         _resend_takt_loop = loop
     return _resend_takt
 

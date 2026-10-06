@@ -2353,7 +2353,12 @@ Prüfen mit `docker compose exec backend env | grep -E "MAX_CONCURRENT|LINK_JOB|
   beider Profile (`deps.regelpakete_vervollstaendigen`), ein geleertes Zahlenfeld speichert den
   Standard statt 0, der Editor bleibt nach dem Speichern auf dem bearbeiteten Profil, und ein
   Sucher-Override entsteht nur bei echter Abweichung (Vergleich vollständiger Pakete).
-- **Versand:** `VERSAND_JE_KONTO_10MIN` (Standard 300) deckelt die Vertragsversände je Konto.
+- **Versand:** `VERSAND_JE_KONTO_TAG` (Standard 100, seit 06.10.2026; vorher `VERSAND_JE_KONTO_10MIN`
+  = 300 je 10 Minuten) deckelt die E-Mails je Konto und Tag (deutsche Zeit), Vertrag und Folge-Mail
+  zusammen — keine Bremse je Minute oder Stunde. Gezählt wird nur, was an den Mail-Dienst geht
+  (Wiederholung, Fehlschlag und WhatsApp zählen nicht). Tempo: ein gemeinsamer Takt in der
+  Datenbank (`mail_takt`) lässt alle Prozesse zusammen `RESEND_RATE` Mails je Sekunde schicken
+  (Standard 10 = Resend-Kontolimit, 600 je Minute); ohne Datenbank gilt der Anteil je Prozess.
   Der Versand-Schlüssel ist an Fassung, Kanal, Empfänger, Betreff und Text gebunden (409 bei
   Abweichung); bei E-Mail können zwei Tabs denselben Vertrag nicht gleichzeitig an denselben
   Empfänger schicken (bei WhatsApp entsteht nur der Link, beide bekommen denselben); ein

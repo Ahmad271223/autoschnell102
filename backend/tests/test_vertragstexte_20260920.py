@@ -212,7 +212,8 @@ def test_13_die_folge_mails_gibt_es_als_route():
     fn = next(k for k in ast.walk(ast.parse(quelle))
               if isinstance(k, ast.AsyncFunctionDef) and k.name == "folge_mail_senden")
     koerper = ast.unparse(fn)
-    assert "await _versand_limiter.check(" in koerper
+    # seit 06.10.2026 (Wunsch Ahmad) das Tageslimit je Konto statt 300 je 10 Minuten
+    assert "await _mail_tag_zaehlen(user)" in koerper
     assert set(V.FOLGE_MAILS) == {"korrektur", "nach_kauf", "nach_kauf_whatsapp", "bahn"}
 
 

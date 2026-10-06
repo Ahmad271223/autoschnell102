@@ -185,7 +185,7 @@ def test_10_verschicken_nur_von_hand_mit_bremse():
     fn = next(k for k in ast.walk(ast.parse(quelle))
               if isinstance(k, ast.AsyncFunctionDef) and k.name == "folge_mail_senden")
     koerper = ast.unparse(fn)
-    assert "await _versand_limiter.check(" in koerper, "keine Versandbremse"
+    assert "await _mail_tag_zaehlen(user)" in koerper, "keine Versandbremse (Tageslimit seit 06.10.2026)"
     assert "FOLGE_MAIL_STORNIERT" in koerper and "kaufvorgaenge" in koerper
     assert "_firma_des_vertrags(" in koerper, "Firma des Aufrufers statt des Vertrags"
     assert "_ersetzen((body.message" in koerper, "eigener Text ohne Platzhalter-Ersetzung"

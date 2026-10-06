@@ -79,11 +79,15 @@ def test_03_ohne_rate_kein_abstand():
 
 
 def test_04_jeder_prozess_bekommt_nur_seinen_anteil():
-    """8 Prozesse teilen sich die 10 Anfragen je Sekunde des Kontos."""
+    """8 Prozesse teilen sich die 10 Anfragen je Sekunde des Kontos. Seit 06.10.2026 (Wunsch Ahmad) nur noch
+    der RUECKFALL, wenn der gemeinsame Takt aller Prozesse (Datenbank) nicht erreichbar ist — siehe
+    test_mail_tageslimit_20261006.py."""
     async def lauf():
         E._resend_takt = None                      # neu bauen lassen
         E._resend_takt_loop = None
-        return E._takt().abstand
+        takt = E._takt()
+        assert isinstance(takt, E._GemeinsamerTakt) and abs(takt.abstand - 1.0 / E.RESEND_RATE) < 1e-9
+        return takt.rueckfall.abstand
 
     abstand = asyncio.run(lauf())
     erwartet = 1.0 / (E.RESEND_RATE / E.RESEND_PROZESSE)

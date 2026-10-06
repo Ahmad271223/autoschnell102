@@ -470,7 +470,14 @@ def _versand_anfrage_hash(c: dict, body) -> str:
     return hashlib.sha256(roh.encode("utf-8")).hexdigest()[:24]
 
 
-VERSAND_JE_KONTO_10MIN = int(os.environ.get("VERSAND_JE_KONTO_10MIN", "300") or 300)
+# Wunsch Ahmad 06.10.2026: "hunderte Mails jederzeit, ohne Limit je Stunde oder Minute — je Nutzer
+# vielleicht 100 am Tag". Statt 300 je 10 Minuten (VERSAND_JE_KONTO_10MIN, entfaellt) gilt nur noch eine
+# Grenze je TAG (deutsche Zeit): hoechstens VERSAND_JE_KONTO_TAG E-Mails je Konto, Vertragsversand und
+# Folge-Mail zusammen. Gezaehlt wird nur, was wirklich an den Mail-Dienst geht — die Wiederholung
+# desselben Versands, ein abgelehnter oder gescheiterter Versand und WhatsApp (keine Mail) zaehlen nicht.
+# 0 = kein Limit.
+from konfig import zahl_env as _zahl_env  # noqa: E402
+VERSAND_JE_KONTO_TAG = _zahl_env("VERSAND_JE_KONTO_TAG", 100, unten=0)
 WA_ZIFFERN_MIN, WA_ZIFFERN_MAX = 7, 15
 
 
@@ -699,10 +706,44 @@ def _vorschau_sperre() -> asyncio.Semaphore:
     return sperre
 
 
-# Runde 16 (15.09.2026): Versand je Konto gedeckelt (VERSAND_JE_KONTO_10MIN).
-_versand_limiter = SlidingWindowRateLimiter(
-    max_attempts=int(os.environ.get("VERSAND_JE_KONTO_10MIN", "300") or 300),
-    window_seconds=600, name="vertrag_versand")
+def _mail_tageslimit_text() -> str:
+    return (f"Tageslimit erreicht: höchstens {VERSAND_JE_KONTO_TAG} E-Mails je Konto und Tag. Weitere "
+            "E-Mails wieder ab 0 Uhr (deutsche Zeit) — per WhatsApp geht es weiter.")
+
+
+async def _mail_tag_zaehlen(user: dict) -> Optional[str]:
+    """Eine E-Mail dieses Kontos fuer HEUTE zaehlen (VERSAND_JE_KONTO_TAG, Wunsch Ahmad 06.10.2026).
+    Liefert den Zaehler-Schluessel fuer _mail_tag_zurueck; ueber dem Limit wird die Zaehlung
+    zurueckgenommen und 429 geworfen. Mock-Versand (Last-/CI-Tests) zaehlt nicht. Ein Datenbankfehler
+    beim Zaehlen haelt keinen Kaufvertrag auf (None) — das Limit bremst Massenversand, es ist keine
+    Sicherheitspruefung."""
+    from provider_fetch import MOCK_PROVIDER_FETCH, tagesschluessel
+    if MOCK_PROVIDER_FETCH or VERSAND_JE_KONTO_TAG <= 0 or not (user or {}).get("id"):
+        return None
+    from pymongo import ReturnDocument
+    schluessel = f"{tagesschluessel()}:mail:{user['id']}"
+    try:
+        doc = await db.provider_budget.find_one_and_update(
+            {"_id": schluessel},
+            {"$inc": {"n": 1}, "$setOnInsert": {"ablauf": datetime.now(timezone.utc) + timedelta(days=2)}},
+            upsert=True, return_document=ReturnDocument.AFTER)
+    except Exception:  # noqa: BLE001
+        log.exception("Mail-Tageszaehler fuer Konto %s nicht gezaehlt", user.get("id"))
+        return None
+    if int((doc or {}).get("n") or 0) > VERSAND_JE_KONTO_TAG:
+        await _mail_tag_zurueck(schluessel)
+        raise HTTPException(429, _mail_tageslimit_text())
+    return schluessel
+
+
+async def _mail_tag_zurueck(schluessel: Optional[str]) -> None:
+    """Abgelehnter oder gescheiterter Versand: sein Platz im Tageslimit zaehlt nicht."""
+    if not schluessel:
+        return
+    try:
+        await db.provider_budget.update_one({"_id": schluessel, "n": {"$gt": 0}}, {"$inc": {"n": -1}})
+    except Exception:  # noqa: BLE001
+        log.exception("Mail-Tageszaehler %s nicht zurueckgenommen", schluessel)
 
 
 def _oeffentliche_basis() -> str:
@@ -2718,11 +2759,8 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
             "version": int(c.get("version") or 1),
             "geteilt": int(body.version),
         })
-    # Runde 16 (15.09.2026): Versand-Limit je Konto — kein Spam-/Kostenpfad
-    # ueber frei eingetragene Empfaenger (Resend/SMTP).
-    if not await _versand_limiter.check(f"konto:{user.get('id')}"):
-        raise HTTPException(429, f"Zu viele Versände in kurzer Zeit — höchstens "
-                                 f"{VERSAND_JE_KONTO_10MIN} je 10 Minuten. Bitte etwas warten.")
+    # Runde 16 (15.09.2026) bremste hier 300 Versaende je 10 Minuten. Seit 06.10.2026 (Wunsch Ahmad) nur
+    # noch das Tageslimit fuer E-Mails — gezaehlt nach der Reservierung (_mail_tag_zaehlen unten).
     anfrage_hash = _versand_anfrage_hash(c, body)
     frueherer_versand_abgeloest = False
     # Idempotenz RESERVIEREND (Review 09/2026): Der Schluessel wurde vorher
@@ -2923,6 +2961,7 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
     # Verzweigung: sonst fehlt der Merker auf den Wegen, die den
     # Versandblock gar nicht betreten.
     fassung_veraltet = False
+    mail_zaehler: Optional[str] = None      # Tageslimit-Platz dieses Versands (Wunsch Ahmad 06.10.2026)
 
     async def _reservierung_zurueck():
         # Bei einer Wiederaufnahme bleibt der Eintrag stehen: er traegt
@@ -2950,6 +2989,7 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                      "zustellung": {"$exists": False}})
             except Exception:  # noqa: BLE001
                 log.exception("Versand-Schluessel %s nach Fehlschlag nicht entfernt", contract_id)
+            await _mail_tag_zurueck(mail_zaehler)   # nichts ging raus -> zaehlt nicht
     async def _reservierung_unklar():
         # Pruefung 04.10.2026 (Nr. 22): Der Anbieter hat die Mail vielleicht
         # angenommen. Vorher wurde der Eintrag hier ENTFERNT — der naechste
@@ -2968,6 +3008,16 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                                             "zustellung": "laeuft"}}},
             {"$set": {"send_status.$.zustellung": "unklar",
                       "send_status.$.unklar_am": now_iso()}})
+
+    # Wunsch Ahmad 06.10.2026: Tageslimit fuer E-Mails. Erst NACH der Reservierung — die Wiederholung
+    # desselben Versands kam oben schon zurueck —, nie bei einer Wiederaufnahme (die Mail zaehlte schon)
+    # und nie fuer WhatsApp. Ueber dem Limit wird die Reservierung wieder entfernt.
+    if body.channel == "email" and reserviert and not wiederaufnahme:
+        try:
+            mail_zaehler = await _mail_tag_zaehlen(user)
+        except HTTPException:
+            await _reservierung_zurueck()
+            raise
 
     # Runde 17 (Nr. 370): Zwischen dem Lesen oben und dem Versand kann die
     # Loeschung (Frist oder manuell) begonnen haben — der Grabstein nimmt
@@ -3418,11 +3468,9 @@ async def folge_mail_senden(contract_id: str, body: FolgeMailIn,
     empfaenger = (body.recipient or "").strip()
     if not email_service.gueltige_adresse(empfaenger):
         raise HTTPException(400, "Bitte eine gültige E-Mail-Adresse angeben")
-    # Dieselbe Bremse wie beim Vertragsversand — sonst waere das hier ein
-    # offener Weg, ueber unsere Adresse beliebig viele Mails zu schicken.
-    if not await _versand_limiter.check(f"konto:{user.get('id')}"):
-        raise HTTPException(429, "Zu viele Sendungen in kurzer Zeit — bitte "
-                                 f"höchstens {VERSAND_JE_KONTO_10MIN} je 10 Minuten.")
+    # Dieselbe Bremse wie beim Vertragsversand (sonst waere das ein offener Weg, ueber unsere Adresse
+    # beliebig viele Mails zu schicken): seit 06.10.2026 das Tageslimit je Konto, gezaehlt nach der
+    # Reservierung unten (_mail_tag_zaehlen).
     if not MOCK_PROVIDER_FETCH and not email_service.email_configured():
         raise HTTPException(503, "E-Mail-Versand ist nicht eingerichtet — die Mail "
                                  "wurde NICHT versendet.")
@@ -3464,6 +3512,7 @@ async def folge_mail_senden(contract_id: str, body: FolgeMailIn,
     inhalt_hash = hashlib.sha256("|".join([
         contract_id, str(c.get("version") or 1), art, empfaenger.lower(), betreff, text]).encode("utf-8")).hexdigest()[:24]
     schluessel = (body.idempotency_key or "").strip() or f"auto-{inhalt_hash}"
+    mail_zaehler: Optional[str] = None
     if schluessel:
         # Rollenpruefung 22.09.2026 (RP-434): Ein frueher gescheiterter
         # Versuch mit DIESEM Schluessel (Altbestand: zustellung
@@ -3505,6 +3554,15 @@ async def folge_mail_senden(contract_id: str, body: FolgeMailIn,
             # doppelte Zustellung.
             log.info("Folge-Mail %s zu %s: haengender Versuch wird wiederholt",
                      art, contract_id)
+        else:
+            # neue Mail -> zaehlt fuers Tageslimit (Wunsch Ahmad 06.10.2026); darueber Reservierung zurueck
+            try:
+                mail_zaehler = await _mail_tag_zaehlen(user)
+            except HTTPException:
+                await db.generated_pdfs.update_one(
+                    {"id": contract_id, **bereich},
+                    {"$pull": {"send_status": {"idempotency_key": schluessel, "zustellung": "laeuft"}}})
+                raise
 
     _, antwort_adresse = sucher_kontakt(user, firma)
     if MOCK_PROVIDER_FETCH:
@@ -3531,6 +3589,7 @@ async def folge_mail_senden(contract_id: str, body: FolgeMailIn,
                 {"id": contract_id, **bereich},
                 {"$pull": {"send_status": {"idempotency_key": schluessel,
                                            "zustellung": "laeuft"}}})
+        await _mail_tag_zurueck(mail_zaehler)
         raise HTTPException(502, "E-Mail-Versand fehlgeschlagen — bitte in ein "
                                  "paar Minuten erneut versuchen.")
     if schluessel:

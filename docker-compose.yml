@@ -178,7 +178,8 @@ services:
       - AUTOPOINTER_VORAB_ABRUF=${AUTOPOINTER_VORAB_ABRUF:-true}
       - AUTOPOINTER_VORAB_WARTEN_S=${AUTOPOINTER_VORAB_WARTEN_S:-15}
       - VERGLEICH_JE_KONTO_MINUTE=${VERGLEICH_JE_KONTO_MINUTE:-120}
-      - VERSAND_JE_KONTO_10MIN=${VERSAND_JE_KONTO_10MIN:-300}
+      # Wunsch Ahmad 06.10.2026: E-Mails je Konto und TAG (Vertrag + Folge-Mail), keine Bremse je Minute/Stunde
+      - VERSAND_JE_KONTO_TAG=${VERSAND_JE_KONTO_TAG:-100}
       - LINK_JOB_SOFORT_MAX=${LINK_JOB_SOFORT_MAX:-4}
       - LINK_JOB_MAX_ATTEMPTS=${LINK_JOB_MAX_ATTEMPTS:-3}
       - IMAGE_QUALITY=${IMAGE_QUALITY:-80}
@@ -224,6 +225,9 @@ services:
       # (WEB_CONCURRENCY x Server). Ohne das schickten 46 gleichzeitige
       # Sendungen rund ein Drittel der Mails in einen endgueltigen 429.
       # Mehr Server oder mehr Worker? Dann RESEND_PROZESSE mit anheben.
+      # Seit 06.10.2026 vergibt ein gemeinsamer Zaehler (Datenbank) die Plaetze fuer alle
+      # Prozesse — wer sendet, bekommt das ganze RESEND_RATE; der Anteil je Prozess gilt nur
+      # noch, wenn die Datenbank weg ist. Hoeheres Limit bei Resend gebucht? RESEND_RATE anheben.
       - RESEND_RATE=${RESEND_RATE:-10}
       # Pruefbericht 20.09. (P-18): groessere Anhaenge werden nicht per Mail verschickt.
       - MAIL_ANHANG_MAX_BYTES=${MAIL_ANHANG_MAX_BYTES:-20971520}
