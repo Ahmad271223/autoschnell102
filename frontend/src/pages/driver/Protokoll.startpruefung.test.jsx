@@ -77,4 +77,16 @@ describe("Protokoll.jsx: Grund eines Ausstattungs-Nein", () => {
     expect(el("protokoll-ausstattung-art-Sitzheizung")).toBeTruthy();
     expect(el("protokoll-ausstattung-Sitzheizung-fehlt").textContent).toBe("fehlt komplett");
   });
+
+  it("Entwurf: alle Ausstattungen lassen sich mit einem Klick auf Ja setzen", async () => {
+    const viele = Object.fromEntries(Array.from({ length: 120 }, (_, i) => [`Feature ${i}`, undefined]));
+    const daten = antwort("entwurf");
+    daten.data.protocol.features = {};
+    daten.data.template.features = Object.keys(viele);
+    await starten(daten);
+    expect(el("protokoll-ausstattung-alle-ja")).toBeTruthy();
+    expect(el("protokoll-ausstattung-alle-ja").textContent).toContain("Alle auf Ja");
+    await act(async () => { el("protokoll-ausstattung-alle-ja").click(); });
+    expect(behaelter.textContent).toContain("120 Ausstattungen");
+  });
 });
