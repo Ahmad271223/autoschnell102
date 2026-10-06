@@ -65,7 +65,7 @@ def welt():
     vehicle_id = r.json()["vehicle_id"]
     r = requests.post(f"{API}/contracts", headers=h, json={
         "vehicle_id": vehicle_id, "seller_name": "T Verkaeufer",
-        "seller_address": "Weg 1", "seller_zip": "30159",
+        "seller_phone": "0170 1234567", "seller_address": "Weg 1", "seller_zip": "30159",
         "seller_city": "Hannover", "purchase_price": 9000,
         "pickup_date": "2099-05-01", "pickup_time": "10:00"}, timeout=90)
     assert r.status_code == 200, r.text[:200]

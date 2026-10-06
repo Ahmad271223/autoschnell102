@@ -196,7 +196,17 @@ export const WICHTIGE_FELDER = [
 
 export function fehlendeWichtige(form) {
   const f = form || {};
-  return WICHTIGE_FELDER.filter(({ key }) => !String(f[key] ?? "").trim());
+  // Wunsch Ahmad 06.10.2026: Telefon ODER E-Mail — ist eins da, fehlt das andere nicht
+  const kontakt = verkaeuferKontaktDa(f);
+  return WICHTIGE_FELDER.filter(({ key }) => !String(f[key] ?? "").trim()
+    && !(kontakt && (key === "seller_phone" || key === "seller_email")));
+}
+
+/** Wunsch Ahmad 06.10.2026: beim Erstellen ist Telefon ODER E-Mail des Verkäufers Pflicht (eins reicht). */
+export const KONTAKT_PFLICHT = "Bitte Telefonnummer oder E-Mail des Verkäufers eintragen — eins von beiden reicht.";
+export function verkaeuferKontaktDa(form) {
+  const f = form || {};
+  return Boolean(String(f.seller_phone ?? "").trim() || String(f.seller_email ?? "").trim());
 }
 
 function zumFeld(testid) {
@@ -664,6 +674,12 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
         ?.focus({ preventScroll: true });
       return;
     }
+    // Wunsch Ahmad 06.10.2026: Telefon ODER E-Mail des Verkäufers (beim Erstellen; der Server prüft es ebenso)
+    if (!bearbeiten && !verkaeuferKontaktDa(form)) {
+      toast.error(KONTAKT_PFLICHT);
+      zumFeld("contract-seller-phone");
+      return;
+    }
     if (preis.fehler) {
       toast.error(preis.fehler);
       return;
@@ -832,6 +848,11 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                 <Field label="E-Mail" type="email" value={form.seller_email} onChange={(v) => set("seller_email", v)} testid="contract-seller-email"
                        fehlt={fehlt("seller_email")} />
               </div>
+              {!bearbeiten && !verkaeuferKontaktDa(form) && (
+                <div className="text-[11px] -mt-1" style={{ color: "var(--accent-red, #ef4444)" }} data-testid="contract-kontakt-pflicht">
+                  Telefon oder E-Mail ist Pflicht — eins von beiden reicht.
+                </div>
+              )}
               <Field label="Adresse" value={form.seller_address} onChange={(v) => set("seller_address", v)} testid="contract-seller-address"
                      fehlt={fehlt("seller_address")} />
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">

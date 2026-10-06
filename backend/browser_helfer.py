@@ -73,7 +73,8 @@ class SeiteUngueltig(ValueError):
 #: der App, Windows-Programm), bekommt diese Daten — auch fremde Firmen. Das loest die Regel aus dem Pruefbericht
 #: 20.09.2026 (A-01/A-02: nur dieses Konto) bewusst ab; Risiko: eine gezielt gefaelschte Seite erreicht fremde
 #: Kaufvertraege. Dagegen: der Server liest die Seite selbst aus (nie fertige Daten vom Browser), die Inserat-Nummer
-#: in der Seite muss zur Adresse passen, Marke und Preis muessen da sein; wer geliefert hat, steht am Eintrag und
+#: in der Seite muss zur Adresse passen, die Marke muss da sein (der Preis seit 06.10.2026 nicht mehr — den Kaufpreis
+#: traegt der Sucher im Vertrag selbst ein); wer geliefert hat, steht am Eintrag und
 #: am Vergleich des Nutzers (vehicle_comparisons.browser_helfer_von). Ein Beweisdokument entsteht nie aus
 #: Browserdaten (RP-446) — dafuer holt der Server das Inserat auf Knopfdruck selbst.
 SAMMLUNG_INSERATE = "werkzeug_inserate"
@@ -421,13 +422,13 @@ _LESER = {"mobile": mobile_inserat, "autoscout24": autoscout_inserat, "kleinanze
 
 def inserat_auslesen(identity: dict, url: str, html: str) -> Tuple[dict, Optional[dict]]:
     """(fahrzeug im Schema von /mobile/compare, Preisbewertung des Portals oder None).
-    Ohne Marke oder Preis ist es kein verwertbares Inserat (wie /listings/ingest)."""
+    Ohne Marke ist es kein verwertbares Inserat. Wunsch Ahmad 06.10.2026: OHNE Preis (Kleinanzeigen "VB",
+    "Preis auf Anfrage") schon — vorher "Auf der Seite steht kein Preis." und man kam gar nicht zum Kaufvertrag;
+    den Kaufpreis traegt der Sucher im Vertrag ohnehin selbst ein. Die Ampel sagt dann "Kein Preis im Inserat"."""
     fahrzeug, bewertung = _LESER[identity["source"]](html, identity["item_id"], url)
     fahrzeug = fahrzeug_bereinigen(fahrzeug)
     if not (fahrzeug.get("make_label") or fahrzeug.get("make_id")):
         raise SeiteUngueltig("Auf der Seite steht keine erkennbare Fahrzeugmarke.")
-    if not fahrzeug.get("list_price"):
-        raise SeiteUngueltig("Auf der Seite steht kein Preis.")
     return fahrzeug, bewertung
 
 

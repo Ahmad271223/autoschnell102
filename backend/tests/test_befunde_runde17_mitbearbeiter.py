@@ -155,7 +155,8 @@ def test_02_jeder_sucher_der_firma_darf_einen_eigenen_vertrag_anlegen(welt, monk
     _auto_daten_stub(monkeypatch)
 
     def body(preis):
-        return C.ContractIn(vehicle_id=vid, seller_name="Verkaeufer", purchase_price=preis)
+        return C.ContractIn(vehicle_id=vid, seller_name="Verkaeufer", seller_phone="0170 1234567",
+                            purchase_price=preis)
 
     async def lauf():
         await w.db.vehicles.insert_one({"id": vid, "dealer_id": w.dealer_id, "lifecycle": "verglichen",

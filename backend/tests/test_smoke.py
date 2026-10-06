@@ -110,7 +110,7 @@ def test_fahrzeug_und_kaufvertrag(chef):
     vid = r.json()["id"]
 
     r = requests.post(f"{API}/contracts", headers=h, json={
-        "vehicle_id": vid, "seller_name": "Test Verkaeufer", "seller_address": "Weg 1",
+        "vehicle_id": vid, "seller_name": "Test Verkaeufer", "seller_phone": "0170 1234567", "seller_address": "Weg 1",
         "seller_zip": "30159", "seller_city": "Hannover", "purchase_price": 9000,
         "pickup_date": "2026-12-01", "pickup_time": "10:00"}, timeout=120)
     assert r.status_code == 200, f"Vertrag: {r.status_code} {r.text[:200]}"

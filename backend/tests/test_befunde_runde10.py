@@ -92,7 +92,7 @@ def welt():
     vid = r.json()["vehicle_id"]
     r = requests.post(f"{API}/contracts", headers=sucher["a"]["h"], json={
         "vehicle_id": vid, "seller_name": "V Zehn",
-        "seller_address": "Weg 10", "seller_zip": "30159",
+        "seller_phone": "0170 1234567", "seller_address": "Weg 10", "seller_zip": "30159",
         "seller_city": "Hannover", "purchase_price": 4100,
         "pickup_date": "2099-07-01", "pickup_time": "09:00"}, timeout=90)
     assert r.status_code == 200, r.text[:200]
@@ -221,7 +221,7 @@ def test_g3b_sucher_kann_eigenen_termin_loeschen(welt):
     """Ein zweiter Vertrag von A -> eigener Termin -> A loescht ihn."""
     # Rollenpruefung 22.09.2026 (RP-416): A hat schon einen offenen Vertrag zu
     # diesem Fahrzeug — ein zweiter nur nach Rueckfrage (409 ohne Bestaetigung).
-    zweit = {"vehicle_id": welt["vid"], "seller_name": "V Zwei",
+    zweit = {"vehicle_id": welt["vid"], "seller_name": "V Zwei", "seller_phone": "0170 1234567",
              "seller_address": "Weg 11", "seller_zip": "30159",
              "seller_city": "Hannover", "purchase_price": 4200,
              "pickup_date": "2099-08-01", "pickup_time": "11:00"}

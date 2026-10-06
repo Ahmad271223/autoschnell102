@@ -60,7 +60,7 @@ def _pdf_text(pdf: bytes) -> str:
 
 
 def _body(C, vid, **felder):
-    return C.ContractIn(vehicle_id=vid, seller_name="Vera Verkauf", purchase_price=4500,
+    return C.ContractIn(vehicle_id=vid, seller_name="Vera Verkauf", seller_phone="0170 1234567", purchase_price=4500,
                         payment_method="Bar", **felder)
 
 

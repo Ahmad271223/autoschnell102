@@ -1458,6 +1458,17 @@ def _idempotenz_konflikt(vorhanden: dict) -> dict:
     }
 
 
+#: Wunsch Ahmad 06.10.2026: beim ANLEGEN eines Kaufvertrags ist Telefon ODER E-Mail des Verkaeufers Pflicht —
+#: eins reicht. Ohne beides laesst sich der Vertrag weder schicken noch der Abholtermin abstimmen.
+KONTAKT_PFLICHT = ("Bitte Telefonnummer oder E-Mail des Verkäufers eintragen — eins von beiden reicht, ohne "
+                   "Kontakt kann der Vertrag nicht erstellt werden.")
+
+
+def verkaeufer_kontakt_fehlt(body) -> bool:
+    return not (str(getattr(body, "seller_phone", "") or "").strip()
+                or str(getattr(body, "seller_email", "") or "").strip())
+
+
 @router.post("/contracts")
 async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     # Pruefung 14.09.2026 (Liste 3, Nr. 1): derselbe Schluessel -> derselbe Vertrag.
@@ -1509,6 +1520,10 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     eigene_nr = body.contract_no or ""
     if eigene_nr and await _vertragsnummer_belegt(user["dealer_id"], eigene_nr):
         raise _vertragsnummer_konflikt(eigene_nr)
+    # Wunsch Ahmad 06.10.2026: erst NACH den Bereichs-/Sperr-/Doppel-Pruefungen (die sagen Wichtigeres),
+    # aber VOR PDF und Nebenwirkungen.
+    if verkaeufer_kontakt_fehlt(body):
+        raise HTTPException(422, KONTAKT_PFLICHT)
     from deps import effective_dealer
     dealer = await effective_dealer(user) or {}
     vehicle = v["data"]

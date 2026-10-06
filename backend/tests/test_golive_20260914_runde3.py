@@ -41,7 +41,7 @@ def _fehler(w, coro):
 
 def _vertrag_in(C, vid, purchase_price=12000, **extra):
     return C.ContractIn(vehicle_id=vid, seller_name="Vera Verkauf", seller_address="Weg 3",
-                        seller_zip="30159", seller_city="Hannover",
+                        seller_zip="30159", seller_city="Hannover", seller_phone="0170 1234567",
                         purchase_price=purchase_price, **extra)
 
 

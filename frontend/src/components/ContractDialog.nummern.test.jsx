@@ -75,7 +75,7 @@ const feld = (id) => behaelter.querySelector(`[data-testid="${id}"]`);
 async function dialogOeffnenUndAusfuellen() {
   rendern(createElement(ContractDialog, {
     open: true, onClose: () => {}, vehicleId: "v1", onCreated: () => {},
-    vehicle: { seller_name: "Vera Verkauf", make_label: "BMW", model_label: "320d" },
+    vehicle: { seller_name: "Vera Verkauf", make_label: "BMW", model_label: "320d", seller_email: "vera@beispiel.de" },
   }));
   await act(async () => { await Promise.resolve(); });
   tippen(feld("contract-price"), "4.500");

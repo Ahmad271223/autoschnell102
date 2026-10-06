@@ -67,7 +67,7 @@ def vertrag():
         pytest.skip("Backend ohne MOCK_PROVIDER_FETCH")
     vid = r.json()["vehicle_id"]
     r = requests.post(f"{API}/contracts", headers=h, json={
-        "vehicle_id": vid, "seller_name": "N V", "seller_address": "Weg 1",
+        "vehicle_id": vid, "seller_name": "N V", "seller_phone": "0170 1234567", "seller_address": "Weg 1",
         "seller_zip": "30159", "seller_city": "Hannover", "purchase_price": 5000,
         "pickup_date": "2099-06-01", "pickup_time": "10:00"}, timeout=90)
     assert r.status_code == 200, r.text[:200]

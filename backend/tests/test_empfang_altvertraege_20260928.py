@@ -40,7 +40,7 @@ FIRMA = {"company_name": "Altvertrag Test GmbH", "contact_person": "Chef A",
          "address": "Weg 2", "zip_code": "10117", "city": "Berlin",
          "phone": "030 2", "email": "chef@altvertrag.test", "empfang_drucken": True}
 VEHICLE = {"make_label": "Audi", "model_label": "A4"}
-DIALOG = {"seller_name": "Vera Verkauf", "seller_city": "Dresden",
+DIALOG = {"seller_name": "Vera Verkauf", "seller_city": "Dresden", "seller_phone": "0170 1234567",
           "purchase_price": 9900, "pickup_date": "2026-09-30",
           "empfang_datum": "2026-09-30", "empfang_ort_kaeufer": "Berlin",
           "empfang_ort_verkaeufer": "Dresden", "schluessel_anzahl": "2",

@@ -213,7 +213,7 @@ def test_02_sucher_fahrerverwaltung_gesperrt(welt):
 
 
 def test_03_sucher_loescht_keine_fremden_vertraege(welt):
-    basis = {"vehicle_id": welt["vehicle_id"], "seller_name": "RT Verkaeufer",
+    basis = {"vehicle_id": welt["vehicle_id"], "seller_name": "RT Verkaeufer", "seller_phone": "0170 1234567",
              "seller_address": "Weg 1", "seller_zip": "30159", "seller_city": "H",
              "purchase_price": 5000}
     r = requests.post(f"{API}/contracts", headers=welt["HA"],

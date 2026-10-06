@@ -143,7 +143,7 @@ def test_03_linkpruefung_als_job_und_vergleich(welt):
 def test_04_kaufvertrag_und_termin(welt):
     r = requests.post(f"{API}/contracts", headers=welt["H"], json={
         "vehicle_id": welt["vehicle_id"], "seller_name": "E2E Verkaeufer",
-        "seller_address": "Weg 3", "seller_zip": "30159",
+        "seller_phone": "0170 1234567", "seller_address": "Weg 3", "seller_zip": "30159",
         "seller_city": "Hannover", "purchase_price": 12000,
         "pickup_date": "2099-03-01", "pickup_time": "09:00"}, timeout=90)
     assert r.status_code == 200, r.text[:200]

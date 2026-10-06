@@ -55,7 +55,7 @@ def inserat():
     # Lifecycle: Inserats-Entwurf braucht ein verkaufsfaehiges Fahrzeug —
     # wie im echten Ablauf zuerst den Kaufvertrag anlegen.
     r = requests.post(f"{API}/contracts", headers=h, json={
-        "vehicle_id": vid, "seller_name": "F V", "seller_address": "W 1",
+        "vehicle_id": vid, "seller_name": "F V", "seller_phone": "0170 1234567", "seller_address": "W 1",
         "seller_zip": "30159", "seller_city": "Hannover",
         "purchase_price": 8000, "pickup_date": "2099-08-01",
         "pickup_time": "10:00"}, timeout=90)

@@ -152,7 +152,7 @@ def test_02_erstvergleich_legt_weiterhin_normal_an(welt):
 
 # ------------------------------------------------- Vertrag nach dem Kauf
 def _vertrag_body(C, vid):
-    return C.ContractIn(vehicle_id=vid, seller_name="Verkäufer V", purchase_price=1000,
+    return C.ContractIn(vehicle_id=vid, seller_name="Verkäufer V", seller_phone="0170 1234567", purchase_price=1000,
                         dealer_company="Käufer GmbH", dealer_address="Weg 1",
                         dealer_zip="30159", dealer_city="Hannover")
 

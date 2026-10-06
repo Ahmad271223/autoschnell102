@@ -221,7 +221,7 @@ def _sammlung_hooken(monkeypatch, methode, sammlung, ersatz):
 
 def _body(vid, **extra):
     C = _module("routes.contracts")
-    d = {"vehicle_id": vid, "seller_name": "Verkaeufer R17", "purchase_price": 5000,
+    d = {"vehicle_id": vid, "seller_name": "Verkaeufer R17", "seller_phone": "0170 1234567", "purchase_price": 5000,
          "seller_address": "Weg 1", "seller_zip": "30159", "seller_city": "Hannover"}
     d.update(extra)
     return C.ContractIn(**d)

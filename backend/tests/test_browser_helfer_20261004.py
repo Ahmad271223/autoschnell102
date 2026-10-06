@@ -167,8 +167,9 @@ def test_04_mobile_fremdes_inserat_oder_pruefseite_wird_abgelehnt():
         bh.inserat_auslesen(_identity(MOBILE_URL), MOBILE_URL, _mobile_inserat_html(_mobile_listing(id=123456789)))
     with pytest.raises(bh.SeiteUngueltig, match="keine Inseratsdaten"):
         bh.inserat_auslesen(_identity(MOBILE_URL), MOBILE_URL, "<html><body>Zugriff verweigert</body></html>")
-    with pytest.raises(bh.SeiteUngueltig, match="Preis"):
-        bh.inserat_auslesen(_identity(MOBILE_URL), MOBILE_URL, _mobile_inserat_html(_mobile_listing(price={})))
+    # Wunsch Ahmad 06.10.2026: OHNE Preis wird das Inserat trotzdem gelesen (Kaufvertrag muss gehen) — test_43/44
+    fz, _ = bh.inserat_auslesen(_identity(MOBILE_URL), MOBILE_URL, _mobile_inserat_html(_mobile_listing(price={})))
+    assert fz["make_label"] == "Volkswagen" and not fz.get("list_price")
 
 
 def test_05_mobile_privatanbieter_und_preisbewertung():
@@ -982,3 +983,86 @@ def test_42_kuerzen_bleibt_linear_bei_vielen_kurzen_props():
     start = time.perf_counter()
     assert bh._astro_props_kuerzen(viele) == viele
     assert time.perf_counter() - start < 2.0
+
+
+# ------------------------------------------------------------ Wunsch Ahmad 06.10.2026: Inserat ohne Preis
+_KA_OHNE_PREIS_URL = "https://www.kleinanzeigen.de/s-anzeige/opel-corsa-1-2/3532756705-216-8369"
+
+
+def _ka_ohne_preis(preis_text: str) -> str:
+    return ("<html><head><title>Opel Corsa</title>"
+            f'<link rel="canonical" href="{_KA_OHNE_PREIS_URL}"></head><body>'
+            '<h1 id="viewad-title">Opel Corsa 1.2</h1>'
+            f'<h2 id="viewad-price">{preis_text}</h2>'
+            '<span id="viewad-locality">30159 Niedersachsen - Hannover</span>'
+            '<div id="viewad-details"><div>Marke</div><div>Opel</div><div>Modell</div><div>Corsa</div>'
+            "<div>Kilometerstand</div><div>120.000 km</div><div>Erstzulassung</div><div>März 2012</div></div>"
+            '<p id="viewad-description-text">Gepflegter Kleinwagen aus zweiter Hand, Scheckheft, neue Reifen, '
+            "TÜV bis 2027. Preis auf Anfrage – bitte nur ernst gemeinte Anrufe.</p>"
+            "</body></html>")
+
+
+def test_43_inserat_ohne_preis_wird_gelesen_ampel_grau():
+    """Vorher: "Auf der Seite steht kein Preis." — man kam aus dem Helfer nicht zum Kaufvertrag. Jetzt wird das
+    Inserat gelesen (Marke reicht), die Ampel sagt ehrlich "Kein Preis im Inserat"; den Kaufpreis traegt der
+    Sucher im Vertrag selbst ein. Ohne Marke bleibt es eine ungueltige Seite."""
+    ident = _identity(_KA_OHNE_PREIS_URL)
+    for preis_text in ("VB", "Zu verschenken", ""):
+        fz, _ = bh.inserat_auslesen(ident, _KA_OHNE_PREIS_URL, _ka_ohne_preis(preis_text))
+        assert fz["make_label"] == "Opel" and not fz.get("list_price"), (preis_text, fz.get("list_price"))
+        kurz = bh.fahrzeug_kurz(fz, ident, _KA_OHNE_PREIS_URL)
+        assert kurz["preis"] is None
+        from mobile_service import DEFAULT_RULES
+        links, _ = wz.vergleichs_links(fz, DEFAULT_RULES)       # Links gehen auch ohne Preis
+        assert links
+        bh.verhandlung_hinweise(fz)
+    lage = bh.marktlage(None, "x", _liste([9000 + i * 100 for i in range(8)], gesamt=8))
+    assert lage["ampel"] == "grau" and lage["text"].startswith("Kein Preis im Inserat")
+    ohne_marke = _ka_ohne_preis("VB").replace("<div>Marke</div><div>Opel</div>", "")
+    with pytest.raises(bh.SeiteUngueltig, match="Fahrzeugmarke"):
+        bh.inserat_auslesen(ident, _KA_OHNE_PREIS_URL, ohne_marke.replace("Opel Corsa", "Auto"))
+
+
+def test_44_ohne_preis_bis_zum_kaufvertrag_und_kontakt_pflicht(welt):
+    """Der ganze Weg ueber HTTP: Helfer liest ein mobile.de-Inserat OHNE Preis -> die App vergleicht es (ohne
+    Abruf) -> Kaufvertrag. Wunsch Ahmad 06.10.2026: beim Anlegen ist Telefon ODER E-Mail des Verkaeufers Pflicht —
+    eins reicht."""
+    db = welt["db"]
+    nr = "42196329136897"
+    url = f"https://suchen.mobile.de/fahrzeuge/details.html?id={nr}"
+    ck = f"mobile:{nr}"
+    db.listings_cache.delete_many({"cache_key": ck})
+    prog = welt.get("prog") or _verbinden(welt)
+    r = _inserat(prog, url=url, html=_mobile_inserat_html(_mobile_listing(id=int(nr), price={})))
+    assert r.status_code == 200, r.text[:300]
+    d = r.json()
+    assert d["fahrzeug"]["preis"] is None and d["app_pfad"].startswith("/app/vergleich?url=")
+    cmp_ = requests.post(f"{API}/mobile/compare", json={"url": url}, headers=welt["sucher"], timeout=60)
+    assert cmp_.status_code == 200, cmp_.text[:300]
+    v = cmp_.json()
+    assert v["vehicle"]["make_label"] == "Volkswagen" and not v["vehicle"].get("list_price")
+    vid = v["vehicle_id"]
+    basis = {"vehicle_id": vid, "seller_name": "Vera Verkauf", "seller_address": "Weg 1", "seller_zip": "30159",
+             "seller_city": "Hannover", "purchase_price": 7400}
+    try:
+        ohne = requests.post(f"{API}/contracts", headers=welt["sucher"], json=basis, timeout=90)
+        assert ohne.status_code == 422 and "Telefonnummer oder E-Mail" in ohne.text, ohne.text[:300]
+        leer = requests.post(f"{API}/contracts", headers=welt["sucher"], timeout=90,
+                             json={**basis, "seller_phone": "   ", "seller_email": ""})
+        assert leer.status_code == 422, "nur Leerzeichen zaehlen nicht"
+        assert db.generated_pdfs.count_documents({"vehicle_id": vid}) == 0, "ohne Kontakt entsteht nichts"
+        mail = requests.post(f"{API}/contracts", headers=welt["sucher"], timeout=120,
+                             json={**basis, "seller_email": "vera@e2etest-mail.de"})
+        assert mail.status_code == 200, mail.text[:300]
+        tel = requests.post(f"{API}/contracts", headers=welt["sucher"], timeout=120,
+                            json={**basis, "seller_phone": "0170 1234567", "zweiter_vertrag_bestaetigt": True})
+        assert tel.status_code == 200, tel.text[:300]
+        gespeichert = db.generated_pdfs.find_one({"id": tel.json()["id"]}, {"_id": 0, "purchase_price": 1,
+                                                                           "contract_data": 1})
+        preis = gespeichert.get("purchase_price") or (gespeichert.get("contract_data") or {}).get("purchase_price")
+        assert preis == 7400, "den Kaufpreis traegt der Sucher selbst ein"
+    finally:
+        for sammlung in ("generated_pdfs", "generated_pdf_versions", "appointments", "admin_vehicle_data"):
+            db[sammlung].delete_many({"dealer_id": welt["firma"]["dealer_id"]})
+        db.listings_cache.delete_many({"cache_key": ck})
+        db.werkzeug_inserate.delete_many({"cache_key": ck})

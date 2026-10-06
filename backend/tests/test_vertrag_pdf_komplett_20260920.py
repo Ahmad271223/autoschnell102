@@ -140,7 +140,7 @@ def _fahrzeug(w, nr=0):
 def _vertrag(w, kopf=None, **extra):
     vid = _fahrzeug(w, extra.pop("nr", 0))
     koerper = {
-        "vehicle_id": vid, "seller_name": "Max Mustermann",
+        "vehicle_id": vid, "seller_name": "Max Mustermann", "seller_phone": "0170 1234567",
         "seller_address": "Hauptstr. 5", "seller_zip": "40210",
         "seller_city": "Düsseldorf", "purchase_price": 15900,
         "payment_method": "Echtzeitüberweisung",

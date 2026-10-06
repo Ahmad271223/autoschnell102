@@ -383,7 +383,7 @@ def _fahrzeug(w, vid, besitzer, **extra):
 
 
 def _body(C, vid, **kw):
-    return C.ContractIn(**{"vehicle_id": vid, "seller_name": "Verkäufer V",
+    return C.ContractIn(**{"vehicle_id": vid, "seller_name": "Verkäufer V", "seller_phone": "0170 1234567",
                            "purchase_price": 10000, **kw})
 
 

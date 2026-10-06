@@ -265,7 +265,7 @@ async def welt_aufbauen(sess) -> Welt:
         firma["vehicle_id"] = js["vehicle_id"]
         st, js = await _post_json(sess, f"{API}/contracts", {
             "vehicle_id": firma["vehicle_id"], "seller_name": f"V {i}",
-            "seller_address": "Weg 1", "seller_zip": "30159",
+            "seller_phone": "0170 1234567", "seller_address": "Weg 1", "seller_zip": "30159",
             "seller_city": "Hannover", "purchase_price": 10000 + i,
             "pickup_date": "2099-04-01", "pickup_time": "10:00"},
             h=h, timeout=120)

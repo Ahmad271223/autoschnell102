@@ -135,7 +135,7 @@ async def welt(sess, firmen):
         firma["vehicle_id"] = js["vehicle_id"]
         st, js = await _post(sess, f"{API}/contracts", {
             "vehicle_id": firma["vehicle_id"], "seller_name": "St V",
-            "seller_address": "W 1", "seller_zip": "30159",
+            "seller_phone": "0170 1234567", "seller_address": "W 1", "seller_zip": "30159",
             "seller_city": "Hannover", "purchase_price": 9000,
             "pickup_date": "2099-07-01", "pickup_time": "10:00"},
             h, timeout=120)
@@ -305,7 +305,7 @@ async def lauf(sess, firmen, szenario, nutzer):
                 try:
                     await _post(sess, f"{API}/contracts", {
                         "vehicle_id": f["vehicle_id"],
-                        "seller_name": "Spitze", "seller_address": "W",
+                        "seller_name": "Spitze", "seller_phone": "0170 1234567", "seller_address": "W",
                         "seller_zip": "30159", "seller_city": "H",
                         "purchase_price": 7000,
                         "pickup_date": "2099-07-02",

@@ -246,7 +246,7 @@ def test_10_anlegen_friert_die_einstellungen_ein(welt):
                                     "lifecycle": "verglichen", "status": "verglichen",
                                     "data": {"make_label": "BMW", "model_label": "320d"},
                                     "created_at": _jetzt()}))
-    body = C.ContractIn(vehicle_id=vid, seller_name="Verkäufer V", purchase_price=1000)
+    body = C.ContractIn(vehicle_id=vid, seller_name="Verkäufer V", seller_phone="0170 1234567", purchase_price=1000)
     antwort = w.run(C.create_contract(body, w.sucher))
     assert antwort is not None
     doc = w.run(w.db.generated_pdfs.find_one({"vehicle_id": vid}))

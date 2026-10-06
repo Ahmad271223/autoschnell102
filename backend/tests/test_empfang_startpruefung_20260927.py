@@ -42,7 +42,7 @@ FIRMA = {"company_name": "Empfang Test GmbH", "contact_person": "Chef E",
 VEHICLE = {"make_label": "BMW", "model_label": "320d"}
 # So schickt der Dialog den Vertrag (buildPayload: ...form) — mit den
 # Empfangs-Kaestchen, wie sie ein alter Dialogstand automatisch setzte.
-DIALOG = {"vehicle_id": "v_empfang", "seller_name": "Vera Verkauf",
+DIALOG = {"vehicle_id": "v_empfang", "seller_name": "Vera Verkauf", "seller_phone": "0170 1234567",
           "seller_city": "Dresden", "purchase_price": 12500,
           "pickup_date": "2026-09-30", "empfang_datum": "2026-09-30",
           "empfang_ort_kaeufer": "Berlin", "empfang_ort_verkaeufer": "Dresden",

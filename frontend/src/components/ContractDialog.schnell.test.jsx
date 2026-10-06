@@ -39,7 +39,8 @@ vi.mock("@/lib/ungespeichert", () => ({ useUngespeichert: () => {} }));
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
-const { default: ContractDialog, fehlendeWichtige, WICHTIGE_FELDER } = await import("./ContractDialog");
+const { default: ContractDialog, fehlendeWichtige, WICHTIGE_FELDER, KONTAKT_PFLICHT } = await import("./ContractDialog");
+const { toast } = await import("sonner");
 
 let wurzel = null;
 let behaelter = null;
@@ -113,7 +114,8 @@ describe("Wichtige Angaben markiert + „Noch offen“", () => {
 
 describe("kein Ansprechpartner, Schäden unter der Skizze, Karten", () => {
   it("Käufer ohne Ansprechpartner-Feld; der aus dem Inserat nur als Info, nichts davon im Payload", async () => {
-    await oeffnen({ seller_name: "Autohaus Nord GmbH", seller_ansprechpartner: "Herr Meier", make_label: "VW" });
+    await oeffnen({ seller_name: "Autohaus Nord GmbH", seller_ansprechpartner: "Herr Meier", make_label: "VW",
+                   seller_phone: "0511 123456" });
     expect(feld("contract-dealer-contact")).toBeNull();
     expect(feld("contract-seller-name-hinweis").textContent)
       .toContain("Ansprechpartner laut Inserat: Herr Meier (nur zur Info, kommt nicht in den Vertrag)");
@@ -165,5 +167,36 @@ describe("Abholuhrzeit (Wunsch Ahmad 06.10.2026)", () => {
     rolle.wert = "dealer";
     await oeffnen({ seller_name: "V", make_label: "VW" });
     expect(feld("contract-pickup-time")).not.toBeNull();
+  });
+});
+
+describe("Telefon oder E-Mail ist Pflicht (Wunsch Ahmad 06.10.2026)", () => {
+  it("ist eins da, fehlt das andere nicht", () => {
+    const offen = (f) => fehlendeWichtige({ seller_name: "A", purchase_price: "1.000", ...f }).map((x) => x.key);
+    expect(offen({})).toEqual(expect.arrayContaining(["seller_phone", "seller_email"]));
+    expect(offen({ seller_phone: "0170 1" })).not.toContain("seller_email");
+    expect(offen({ seller_email: "a@b.de" })).not.toContain("seller_phone");
+  });
+
+  it("ohne beides: Hinweis am Feld, Erstellen gesperrt — mit E-Mail allein geht es", async () => {
+    await oeffnen({ seller_name: "V", make_label: "VW" });
+    expect(feld("contract-kontakt-pflicht").textContent).toContain("eins von beiden reicht");
+    tippen(feld("contract-price"), "4.500");
+    tippen(feld("contract-payment"), "Bar");
+    post.mockResolvedValue({ data: { id: "c1" } });
+    const absenden = async () => {
+      await act(async () => {
+        behaelter.querySelector("form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+    };
+    await absenden();
+    expect(toast.error).toHaveBeenCalledWith(KONTAKT_PFLICHT);
+    expect(post.mock.calls.find((c) => c[0] === "/contracts")).toBeUndefined();
+    tippen(feld("contract-seller-email"), "v@beispiel.de");
+    expect(feld("contract-kontakt-pflicht")).toBeNull();
+    await absenden();
+    expect(post.mock.calls.find((c) => c[0] === "/contracts")).toBeTruthy();
   });
 });

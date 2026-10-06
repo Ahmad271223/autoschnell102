@@ -42,7 +42,7 @@ vi.mock("./DamageSelector", () => ({ default: () => null, damagesToText: () => "
 
 const { default: ContractDialog, entwurfSchluessel, entwurfSpeichern } = await import("./ContractDialog.jsx");
 
-const FAHRZEUG = { id: "V1", make_label: "BMW", mileage: "100000" };
+const FAHRZEUG = { id: "V1", make_label: "BMW", mileage: "100000", seller_phone: "0170 1234567" };  // Kontakt Pflicht (06.10.2026)
 const SCHLUESSEL = entwurfSchluessel("U1", "V1");
 const VORSCHLAEGE = {
   felder: {

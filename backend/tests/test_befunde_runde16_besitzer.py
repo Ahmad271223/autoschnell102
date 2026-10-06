@@ -555,7 +555,7 @@ def test_11_jeder_sucher_der_firma_darf_einen_eigenen_vertrag_anlegen(welt, monk
     vid, weg = f"v_a{w.s}", f"v_weg{w.s}"
 
     def body(v, preis):
-        return C.ContractIn(vehicle_id=v, seller_name="Verkaeufer", purchase_price=preis)
+        return C.ContractIn(vehicle_id=v, seller_name="Verkaeufer", seller_phone="0170 1234567", purchase_price=preis)
 
     async def lauf():
         await db.vehicles.insert_many([w.fahrzeug(vid, owner=w.a["id"]),

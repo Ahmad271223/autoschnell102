@@ -1182,11 +1182,12 @@ async def ingest_client_html(body: IngestIn, user=Depends(require_active_sub)):
         log.exception("ingest parse failed for %s", raw_url)
         raise HTTPException(422, "Die Seite konnte nicht ausgewertet werden.")
 
-    # Pflichtfelder: Titel, Preis UND Marke muessen vorhanden sein — eine
-    # "leere" Seite deutet auf manipuliertes HTML hin.
-    if not (parsed.get("title") or "").strip() or not parsed.get("list_price"):
+    # Pflichtfelder: Titel UND Marke muessen vorhanden sein — eine "leere" Seite deutet auf manipuliertes HTML
+    # hin. Wunsch Ahmad 06.10.2026: der Preis NICHT mehr (Kleinanzeigen "VB"/"Preis auf Anfrage") — sonst kam man
+    # ohne Preis im Inserat nicht zum Kaufvertrag; den Kaufpreis traegt der Sucher dort selbst ein.
+    if not (parsed.get("title") or "").strip():
         raise HTTPException(422, "Das HTML enthält keine verwertbaren "
-                                 "Fahrzeugdaten (Titel/Preis fehlen).")
+                                 "Fahrzeugdaten (Titel fehlt).")
     if not (parsed.get("make_id") or (parsed.get("make_label") or "").strip()):
         raise HTTPException(422, "Das HTML enthält keine erkennbare "
                                  "Fahrzeugmarke.")

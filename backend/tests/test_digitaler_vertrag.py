@@ -283,7 +283,7 @@ def test_20_vertrag_chef_beide_fassungen(welt):
     welt["vehicle_id"] = _vergleich(welt["H"])
     r = requests.post(f"{API}/contracts", headers=welt["H"], json={
         "vehicle_id": welt["vehicle_id"], "seller_name": "Digi Verkaeufer",
-        "seller_address": "Weg 3", "seller_zip": "30159",
+        "seller_phone": "0170 1234567", "seller_address": "Weg 3", "seller_zip": "30159",
         "seller_city": "Hannover", "purchase_price": 9000,
         "pickup_date": "2099-04-01", "pickup_time": "10:00",
         # Runde 22: Empfangsdatum wie im Formular = Abholdatum (test_25)
@@ -324,7 +324,7 @@ def test_22_vertrag_sucher_nutzt_eigenen_text(welt):
     assert _vergleich(welt["S"]) == welt["vehicle_id"]
     r = requests.post(f"{API}/contracts", headers=welt["S"], json={
         "vehicle_id": welt["vehicle_id"], "seller_name": "Digi Verkaeufer",
-        "seller_address": "Weg 3", "seller_zip": "30159",
+        "seller_phone": "0170 1234567", "seller_address": "Weg 3", "seller_zip": "30159",
         "seller_city": "Hannover", "purchase_price": 8500,
         "pickup_date": "2099-04-02", "pickup_time": "11:00"}, timeout=90)
     assert r.status_code == 200, r.text[:300]
@@ -484,7 +484,7 @@ def test_27_terminverschiebung_gibt_altvertrag_keine_heutigen_bedingungen(welt):
     dbx = _db()
     r = requests.post(f"{API}/contracts", headers=welt["H"], json={
         "vehicle_id": welt["vehicle_id"], "seller_name": "Alt V",
-        # Rollenpruefung 22.09.2026 (RP-416): zweiter Vertrag des Chefs zu
+        "seller_phone": "0170 1234567", # Rollenpruefung 22.09.2026 (RP-416): zweiter Vertrag des Chefs zu
         # diesem Fahrzeug — bewusst bestaetigt.
         "zweiter_vertrag_bestaetigt": True,
         "purchase_price": 100, "pickup_date": "2099-06-01", "pickup_time": "10:00",

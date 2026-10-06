@@ -222,7 +222,7 @@ def test_m37_archivsuche_findet_die_vertragsnummer(welt):
     assert v.status_code == 200, v.text[:300]
     r = requests.post(f"{API}/contracts", headers=welt["kopf"], timeout=180, json={
         "vehicle_id": v.json()["id"], "seller_name": "Erika Muster",
-        "seller_address": "Weg 1", "seller_zip": "40210", "seller_city": "Düsseldorf",
+        "seller_phone": "0170 1234567", "seller_address": "Weg 1", "seller_zip": "40210", "seller_city": "Düsseldorf",
         "purchase_price": 11900, "payment_method": "bar"})
     assert r.status_code == 200, r.text[:300]
     nr = r.json().get("contract_no")

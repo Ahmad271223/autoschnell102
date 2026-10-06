@@ -335,7 +335,7 @@ def test_14_anlegen_ohne_kaeufername_422_vorschau_bleibt_erlaubt(welt, monkeypat
                                     "created_at": _jetzt()}))
 
     def body(**kw):
-        return C.ContractIn(vehicle_id=vid, seller_name="Verkäufer V",
+        return C.ContractIn(vehicle_id=vid, seller_name="Verkäufer V", seller_phone="0170 1234567",
                             purchase_price=1000, **kw)
 
     pdf_versuche = []

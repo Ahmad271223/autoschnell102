@@ -255,7 +255,7 @@ def test_rp401_auto_datensatz_mit_vertragsdatum(welt):
     w = welt
     vid = f"vad_{w.s}"
     w.run(w.db.vehicles.insert_one(_fahrzeug(w, vid, w.a)))
-    out = w.run(C.create_contract(C.ContractIn(vehicle_id=vid, seller_name="Verkäufer V",
+    out = w.run(C.create_contract(C.ContractIn(vehicle_id=vid, seller_name="Verkäufer V", seller_phone="0170 1234567",
                                                purchase_price=10000), w.a))
     doc = w.run(w.db.generated_pdfs.find_one({"id": out["id"]}))
     assert w.angelegt == [doc["created_at"]], "Kaufdatum = Erstellung des Vertrags"
