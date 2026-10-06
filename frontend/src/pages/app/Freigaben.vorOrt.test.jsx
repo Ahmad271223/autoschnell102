@@ -75,6 +75,25 @@ describe("Freigabe: Vor Ort festgestellt", () => {
     expect(el("vor-ort-ok-p1")).toBeNull();
   });
 
+  it("zeigt dem Chef auch den kompletten Ausstattungsstand und die Ausweisnummer", async () => {
+    const ausstattung = Object.fromEntries(Array.from({ length: 120 }, (_, i) => [`Feature ${i}`, true]));
+    ausstattung["Feature 119"] = "defekt";
+    liste = [{
+      ...BASIS,
+      vor_ort: { ausstattung: [{ name: "Feature 119", art: "defekt", befund: "vorhanden, defekt" }],
+                 dokumente: [], zustand: [], anzahl: 1, hinweise: 0, offen: 0 },
+      ausstattung,
+      ausstattung_gesamt: 120,
+      ausstattung_beantwortet: 120,
+      ausstattung_vorhanden: 119,
+      verkaeufer_ausweis: "L01X00T47",
+    }];
+    await starten();
+    expect(el("freigabe-ausstattung-komplett-p1").textContent).toContain("120/120");
+    expect(el("freigabe-ausstattung-komplett-p1").textContent).toContain("vorhanden 119");
+    expect(el("freigabe-ausweis-p1").textContent).toContain("L01X00T47");
+  });
+
   it("ohne Befund: grüne Zeile; ohne Feld (älteres Backend): nichts", async () => {
     liste = [{ ...BASIS, vor_ort: { ausstattung: [], dokumente: [], zustand: [], anzahl: 0, hinweise: 0, offen: 0 } }];
     await starten();
