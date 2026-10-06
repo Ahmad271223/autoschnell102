@@ -228,3 +228,23 @@ def test_18_protokoll_pdf_ohne_datenbank():
                        env=env, capture_output=True, text=True, timeout=180)
     assert r.returncode == 0, (r.stdout + r.stderr)[-2500:]
 
+
+
+def test_19_mehr_als_100_ausstattungen_werden_nicht_abgeschnitten():
+    """06.10.2026: Fahrer, Chef-Freigabe und PDF muessen 100+ Ausstattungen
+    gemeinsam tragen koennen; die fruehere 80er-Grenze verlor den Rest."""
+    assert PV.AUSSTATTUNG_MAX >= 120
+    ausstattung = [f"Feature {i:03d}" for i in range(120)]
+    features = {name: True for name in ausstattung}
+    features["Feature 119"] = "defekt"
+    vor = PV.vor_ort_befunde(
+        {"features": features},
+        condition_fields=[],
+        document_items=[],
+        ausstattung=ausstattung,
+    )
+    assert vor["offen"] == 0
+    assert vor["anzahl"] == 1
+    assert vor["ausstattung"] == [
+        {"name": "Feature 119", "art": "defekt", "befund": "vorhanden, defekt"}
+    ]
