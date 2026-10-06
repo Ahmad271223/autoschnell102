@@ -222,7 +222,7 @@
     r.appendChild(stil);
     const box = el("div", "box");
     box.setAttribute("role", "region");
-    box.setAttribute("aria-label", "AutoSchnell Helfer");
+    box.setAttribute("aria-label", "AutoSchnell Analyse und Vertragsabwicklung");
     const kopf = el("div", "kopf");
     const marke = el("div", "marke");
     marke.appendChild(el("span", null, "Auto"));
@@ -260,7 +260,7 @@
       const inhalt = el("div", "inhalt");
       if (z.veraltet) {
         // Erweiterung aktualisiert/neu geladen: diese Box erreicht den Helfer nicht mehr
-        inhalt.appendChild(el("div", "fehler", "Der AutoSchnell Helfer wurde aktualisiert. Bitte die Seite neu laden."));
+        inhalt.appendChild(el("div", "fehler", "Die AutoSchnell-Erweiterung wurde aktualisiert. Bitte die Seite neu laden."));
         const knoepfe = el("div", "knoepfe");
         const neu = el("button", "knopf haupt", "Seite neu laden");
         neu.addEventListener("click", (ev) => { if (ev.isTrusted) location.reload(); });
@@ -268,10 +268,10 @@
         inhalt.appendChild(knoepfe);
       } else if (z.phase === "doppelt") {
         const versionen = [chrome.runtime.getManifest().version, ...A.andere.values()].filter(Boolean);
-        inhalt.appendChild(el("div", "fehler", "Der AutoSchnell Helfer ist zweimal installiert"
+        inhalt.appendChild(el("div", "fehler", "Die AutoSchnell-Erweiterung ist zweimal installiert"
           + (versionen.length > 1 ? " (Versionen " + versionen.join(" und ") + ")" : "") + "."));
         inhalt.appendChild(el("div", "klein", "Bitte in edge://extensions bzw. chrome://extensions die ältere Version "
-          + "entfernen und diese Seite neu laden. Bis dahin öffnet der Helfer nichts, damit nichts doppelt passiert."));
+          + "entfernen und diese Seite neu laden. Bis dahin öffnet die Erweiterung nichts, damit nichts doppelt passiert."));
       } else if (z.phase === "laden") {
         const p = el("div", "klein");
         p.appendChild(el("span", "spin"));
@@ -324,20 +324,20 @@
           inhalt.appendChild(ul);
         }
         for (const h of (a.hinweise || []).slice(0, 2)) inhalt.appendChild(el("div", "klein", h));
-        if (doppelt) inhalt.appendChild(el("div", "fehler", "Hinweis: Der AutoSchnell Helfer scheint zweimal installiert zu sein "
+        if (doppelt) inhalt.appendChild(el("div", "fehler", "Hinweis: Die AutoSchnell-Erweiterung scheint zweimal installiert zu sein "
           + "(Versionen " + [chrome.runtime.getManifest().version, ...A.andere.values()].filter(Boolean).join(" und ")
           + ") – in den Erweiterungen die alte Kopie entfernen, sonst geht manches doppelt auf."));
         // 2.6.0 (Nr. 24): immer sagen, WARUM die Vergleiche nicht von selbst aufgingen
         const grund = offen ? "" : GRUENDE[z.automatik] || (z.ausVergleich ? GRUENDE.aus_vergleich : z.vomProgramm ? GRUENDE.programm : "");
         if (grund) inhalt.appendChild(el("div", "klein", grund));
         if (z.neueVersion) {
-          inhalt.appendChild(el("div", "klein", `Neue Version ${z.neueVersion} des Helfers verfügbar – in AutoSchnell unter Programme.`));
+          inhalt.appendChild(el("div", "klein", `Neue Version ${z.neueVersion} der Erweiterung verfügbar – in AutoSchnell unter Programme.`));
         }
         if (z.meldung) inhalt.appendChild(el("div", "klein", z.meldung));
         if (z.webseiteAnbieten) {
           const knoepfe3 = el("div", "knoepfe");
           const web = el("button", "knopf neben", "Webseite öffnen");
-          web.title = "Keine AutoSchnell-App installiert? Dann AutoSchnell als Webseite öffnen (merkt sich der Helfer).";
+          web.title = "Keine AutoSchnell-App installiert? Dann AutoSchnell als Webseite öffnen (merkt sich die Erweiterung).";
           web.addEventListener("click", (ev) => { if (ev.isTrusted) webseiteStatt(z); });
           knoepfe3.appendChild(web);
           inhalt.appendChild(knoepfe3);
@@ -382,7 +382,7 @@
           }
           if (!A.helferDa()) { veraltet(); return; }
           z.meldung = r2 && r2.weg === "app_neu_laden"
-            ? "Die AutoSchnell-App ist offen, kennt den aktualisierten Helfer aber noch nicht – dort einmal neu laden "
+            ? "Die AutoSchnell-App ist offen, kennt die aktualisierte Erweiterung aber noch nicht – dort einmal neu laden "
               + "(F5), dann hier noch einmal „Kaufvertrag“ drücken."
             : !r2 || r2.fehler
               ? (r2 && r2.text) || "AutoSchnell konnte nicht geöffnet werden – Seite neu laden und noch einmal drücken."
@@ -504,7 +504,7 @@
     if (kennung !== aktuelleKennung) return;          // inzwischen weitergeklickt
     if (!antwort) {
       if (!A.helferDa()) { zustand = { kennung, phase: "laden" }; veraltet(); return; }
-      zustand = { kennung, phase: "fehler", text: "Der AutoSchnell Helfer antwortet nicht – bitte erneut versuchen." };
+      zustand = { kennung, phase: "fehler", text: "Die AutoSchnell-Erweiterung antwortet nicht – bitte erneut versuchen." };
     } else if (antwort.fehler) {
       zustand = { kennung, phase: "fehler", text: antwort.text || "Das Inserat konnte nicht gelesen werden.",
                   nichtVerbunden: antwort.fehler === "nicht_verbunden" };

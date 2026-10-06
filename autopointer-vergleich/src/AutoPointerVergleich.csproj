@@ -10,7 +10,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>AutoSchnell-Vergleich</AssemblyName>
     <RootNamespace>AutoPointerVergleich</RootNamespace>
-    <Product>AutoSchnell AutoPointer-Vergleich</Product>
+    <Product>AutoSchnell Vergleich</Product>
     <Company>Auto Schnell</Company>
     <Version>1.5.5</Version>
     <ApplicationIcon>app.ico</ApplicationIcon>

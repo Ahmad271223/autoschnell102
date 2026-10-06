@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "AutoSchnell Helfer",
+  "name": "AutoSchnell Analyse und Vertragsabwicklung",
   "short_name": "AutoSchnell",
   "version": "2.7.0",
   "description": "AutoSchnell im Browser: Beim Öffnen eines Inserats gehen die Vergleiche mit euren Regeln auf, eine Ampel zeigt die Preislage, der Kaufvertrag geht mit einem Klick.",
@@ -12,7 +12,7 @@
     "128": "icons/icon-128.png"
   },
   "action": {
-    "default_title": "AutoSchnell Helfer",
+    "default_title": "AutoSchnell Analyse und Vertragsabwicklung",
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon-16.png",

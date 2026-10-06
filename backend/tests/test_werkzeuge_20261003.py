@@ -424,7 +424,7 @@ def test_37_chef_und_admin_sehen_wer_was_verglichen_hat(welt):
     a = requests.get(f"{API}/admin/werkzeug-vergleiche", params={"dealer_id": welt["firma"]["dealer_id"]},
                      headers=konten.super_kopf(), timeout=30)
     assert a.status_code == 200, a.text
-    assert a.json()["vergleiche"][0]["kunden_nr"] == 10002 and a.json()["name"] == "AutoPointer-Vergleich"
+    assert a.json()["vergleiche"][0]["kunden_nr"] == 10002 and a.json()["name"] == "AutoSchnell Vergleich"
     assert requests.get(f"{API}/admin/werkzeug-vergleiche", headers=welt["chef"], timeout=30).status_code == 403
 
 

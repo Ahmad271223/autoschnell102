@@ -52,10 +52,10 @@ NICHT_VERBUNDEN = ("Dieses Programm ist nicht (mehr) verbunden – vielleicht wu
                    "anderen PC verbunden. Bitte mit einem neuen Code aus AutoSchnell verbinden.")
 KEIN_ABO = "Kein aktives AutoSchnell-Abo – das Programm ist gesperrt."
 #: Pruefung Browser-Helfer 05.10.2026 (Nr. 24): der Helfer laeuft im Browser — keine Texte von "PC" und "Programm"
-NICHT_VERBUNDEN_BROWSER = ("Der AutoSchnell Helfer ist nicht (mehr) verbunden – vielleicht wurde dein Konto in einem "
+NICHT_VERBUNDEN_BROWSER = ("AutoSchnell Analyse und Vertragsabwicklung ist nicht (mehr) verbunden – vielleicht wurde dein Konto in einem "
                            "anderen Browser verbunden. Bitte auf das AutoSchnell-Symbol klicken und mit einem neuen "
                            "Code aus AutoSchnell verbinden.")
-KEIN_ABO_BROWSER = "Kein aktives AutoSchnell-Abo – der Helfer ist gesperrt."
+KEIN_ABO_BROWSER = "Kein aktives AutoSchnell-Abo – die Erweiterung ist gesperrt."
 
 
 def _ist_browser(werkzeug_id: str) -> bool:
@@ -147,9 +147,9 @@ async def _nicht_verbunden_text(werkzeug_id: str, schluessel: str) -> str:
         if wer:
             return f"{wer} diesen Browser{am} getrennt. Bitte auf das AutoSchnell-Symbol klicken und neu verbinden."
         if g.get("grund") == "app":
-            return f"Der Helfer wurde{am} in der AutoSchnell-App getrennt. Bitte auf das AutoSchnell-Symbol klicken."
+            return f"Die Erweiterung wurde{am} in der AutoSchnell-App getrennt. Bitte auf das AutoSchnell-Symbol klicken."
         if g.get("grund") == "passwort":
-            return (f"Das Passwort deines Kontos wurde{am} geändert – zur Sicherheit wurde der Helfer getrennt. "
+            return (f"Das Passwort deines Kontos wurde{am} geändert – zur Sicherheit wurde die Erweiterung getrennt. "
                     "Bitte auf das AutoSchnell-Symbol klicken und mit einem neuen Code verbinden.")
         return NICHT_VERBUNDEN_BROWSER
     if g.get("grund") == "anderer_pc":

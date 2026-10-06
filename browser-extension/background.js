@@ -826,7 +826,7 @@ AKTIONEN.box = (m) => boxZustand(m);
 try {
   Promise.resolve(chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" })).catch(() => {});
 } catch (e) { /* aeltere Browser kennen es nicht — die Seiten-Skripte greifen ohnehin nicht mehr zu */ }
-const INTERN_TEXT = "Im AutoSchnell Helfer ist etwas schiefgelaufen – bitte die Seite neu laden.";
+const INTERN_TEXT = "In der AutoSchnell-Erweiterung ist etwas schiefgelaufen – bitte die Seite neu laden.";
 
 /** Oberster Rahmen eines Tabs. 2.6.0 (Nr. 10): vorgeladene Seiten (Speculation Rules, Adresszeile) haben dort eine
  *  andere frameId als 0 — massgeblich ist der Rahmentyp. */

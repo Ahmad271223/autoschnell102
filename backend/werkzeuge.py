@@ -48,7 +48,9 @@ WERKZEUGE = {
     AUTOPOINTER: {
         # Name und Texte kommen NUR ueber /api/werkzeuge (nur fuer freigegebene
         # Firmen) — die Oberflaeche selbst enthaelt keinen Hinweis darauf.
-        "name": "AutoPointer-Vergleich",
+        # Wunsch Ahmad 06.10.2026: Anzeigenamen "AutoSchnell Vergleich" / "AutoSchnell Analyse und
+        # Vertragsabwicklung" (Dateinamen und Kennungen bleiben)
+        "name": "AutoSchnell Vergleich",
         "art": "windows",
         "geraet": "PC",
         "beschreibung": ("Windows-Programm für AutoPointer: Du klickst in AutoPointer ein Inserat an – "
@@ -76,7 +78,7 @@ WERKZEUGE = {
         "kunden_standard": "10001,10002,10007",
     },
     BROWSER_HELFER: {
-        "name": "Browser-Helfer für Chrome und Edge",
+        "name": "AutoSchnell Analyse und Vertragsabwicklung",
         "art": "browser",
         "geraet": "Browser",
         "beschreibung": ("Erweiterung für Chrome und Edge: Du öffnest ein Inserat auf mobile.de, AutoScout24 oder "
