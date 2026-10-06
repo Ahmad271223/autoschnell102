@@ -59,12 +59,12 @@ def _pdf(**vertrag) -> str:
 # ------------------------------------------------------------ 1. Nummern
 def test_01_kaufpreis_ohne_nummer_danach_ab_eins():
     f = _pdf(additional_terms="", hu_valid="ja", hu_until="05/2027")
-    assert "Kaufpreis & Konditionen" in f
+    assert "Kaufpreis KAUFPREIS (VEREINBART)" in f and "Konditionen" not in f      # 06.10.2026: nur noch "Kaufpreis"
     assert "2 · Kaufpreis" not in f, "die 2 vor dem Kaufpreis ist noch da"
     assert "1 · Fahrzeugdaten" in f
     assert "2 · Zustand" in f            # 04.10.2026: vorher "2 · Zusicherungen & Zustand"
     assert "3 · " not in f and "4 · " not in f, "alte Nummern 3/4 stehen noch drin"
-    assert f.index("Kaufpreis & Konditionen") < f.index("1 · Fahrzeugdaten") \
+    assert f.index("Kaufpreis KAUFPREIS (VEREINBART)") < f.index("1 · Fahrzeugdaten") \
         < f.index("2 · Zustand")
 
 
@@ -86,7 +86,7 @@ def test_04_ohne_unsere_vereinbarung_bleibt_die_abholzeile():
     for sonder in ("", "• Eigene Regel: Schlüssel liegen im Handschuhfach."):
         f = _pdf(additional_terms=sonder)
         assert "Abholung: Wird abgeholt am 25.09.2026, Musterweg 5, 20095 Hamburg" in f, sonder
-        assert f.index("Wird abgeholt am") < f.index("Kaufpreis & Konditionen")
+        assert f.index("Wird abgeholt am") < f.index("Kaufpreis KAUFPREIS (VEREINBART)")
 
 
 def test_05_erkennung_des_satzes():

@@ -109,7 +109,7 @@ def test_02_die_letzten_drei_teile(digital):
     hinten = f[f.index(BESONDERE):]
     for frueher in (AUSSTATTUNG, BESCHREIBUNG, GEWAEHR, "Schäden / Beschädigungen",
                     "2 · Zustand", "1 · Fahrzeugdaten",
-                    "Kaufpreis & Konditionen", "Notizen"):
+                    "KAUFPREIS (VEREINBART)", "Notizen"):
         assert frueher not in hinten, f"{frueher!r} steht hinter den Besonderen Vereinbarungen"
     assert hinten.index(BESONDERE) < hinten.index("Allgemeine") < hinten.index(_schluss(digital))
     # Inhalt der Besonderen Vereinbarungen steht vor den AGB (Platzhalter ersetzt).

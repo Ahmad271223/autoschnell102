@@ -606,6 +606,8 @@ STEMPEL_HOEHE = 3 * UNTERSCHRIFT_HOEHE
 TITEL_ZUSTAND = "2 · Zustand"
 TITEL_AUSSTATTUNG = "Ausstattung"
 TITEL_BESCHREIBUNG = "Beschreibung"
+#: Wunsch Ahmad 06.10.2026: "Kaufpreis & Konditionen" heisst im fertigen Vertrag nur noch "Kaufpreis".
+TITEL_KAUFPREIS = "Kaufpreis"
 
 
 def _unterschrift_flowable(daten, breite_max, hoehe_max=UNTERSCHRIFT_HOEHE):
@@ -1163,7 +1165,7 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
     story.append(KeepTogether([
         # Wunsch Ahmad 21.09.2026: der Kaufpreis ohne Nummer, die
         # Abschnitte danach zaehlen ab 1.
-        _section("Kaufpreis & Konditionen", st),
+        _section(TITEL_KAUFPREIS, st),
         Spacer(1, 6),
         price_box,
     ]))

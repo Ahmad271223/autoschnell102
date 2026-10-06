@@ -86,7 +86,9 @@ def test_03_formular_hat_denselben_inhalt(digital):
     modern = _text(P.generate_contract_pdf(dealer=FIRMA, vehicle=FAHRZEUG, contract=VERTRAG, digital=digital))
     formular = _text(P.generate_contract_pdf(dealer=FIRMA, vehicle=FAHRZEUG, digital=digital,
                                              contract={**VERTRAG, "vertrag_layout": "formular"}))
-    assert "KAUFPREIS & KONDITIONEN" in formular and "Kaufpreis & Konditionen" in modern, "Layout greift"
+    # 06.10.2026: Abschnitt heisst nur noch "Kaufpreis" (steht direkt vor dem Kasten)
+    assert "KAUFPREIS KAUFPREIS (VEREINBART)" in formular and "Kaufpreis KAUFPREIS (VEREINBART)" in modern, "Layout greift"
+    assert "Konditionen" not in formular and "Konditionen" not in modern
     for stueck in ("KFZ-KAUFVERTRAG", "für ein gebrauchtes Kraftfahrzeug", "KV-DESIGN-1", "Erika Mustermann",
                    "Musterweg 5", "KFZ Müller GmbH", "22.500,00 EUR", "Echtzeitüberweisung", "Volkswagen",
                    "112.700 km", "Ja, gültig bis 06/2027", "Zweite Hand.", "Erster Punkt.", "Zweiter Punkt.",
@@ -116,11 +118,11 @@ def test_05_altvertrag_bleibt_wie_er_war_auch_wenn_die_firma_umstellt():
     """Die Firmeneinstellung wirkt nur beim ANLEGEN — generate liest den Vertrag, nie die Firma."""
     firma_neu = {**FIRMA, "vertrag_layout": "formular", "vertrag_farbe": "petrol"}
     alt = P.generate_contract_pdf(dealer=firma_neu, vehicle=FAHRZEUG, contract=VERTRAG)
-    assert "Kaufpreis & Konditionen" in _text(alt) and _rgb("#FF3B30") in _inhaltsstroeme(alt)
+    assert "Kaufpreis KAUFPREIS (VEREINBART)" in _text(alt) and _rgb("#FF3B30") in _inhaltsstroeme(alt)
     # Vorschau-Ueberschreibung greift trotzdem
     vorschau = P.generate_contract_pdf(dealer=FIRMA, vehicle=FAHRZEUG, contract=VERTRAG, layout="formular",
                                        farbe="gruen")
-    assert "KAUFPREIS & KONDITIONEN" in _text(vorschau) and _rgb("#15803D") in _inhaltsstroeme(vorschau)
+    assert "KAUFPREIS KAUFPREIS (VEREINBART)" in _text(vorschau) and _rgb("#15803D") in _inhaltsstroeme(vorschau)
 
 
 def test_06_beim_anlegen_festhalten():
@@ -180,12 +182,12 @@ def test_08_vorschau_mit_musterdaten(welt):
     assert r.media_type == "application/pdf" and r.body.startswith(b"%PDF")
     t = _text(r.body)
     assert "MUSTER-0001" in t and "Max Mustermann" in t and "KFZ Müller GmbH" in t
-    assert "KAUFPREIS & KONDITIONEN" in t, "ohne Auswahl: gespeichertes Layout der Firma (formular)"
+    assert "KAUFPREIS KAUFPREIS (VEREINBART)" in t, "ohne Auswahl: gespeichertes Layout der Firma (formular)"
     assert _rgb("#4F46E5") in _inhaltsstroeme(r.body), "ohne Auswahl: gespeicherte Farbe der Firma (indigo)"
     # Auswahl vor dem Speichern
     r2 = w.run(D.vertrag_vorschau(D.VertragVorschauIn(layout="modern", farbe="gruen", variante="digital"), w.chef))
     t2 = _text(r2.body)
-    assert "Kaufpreis & Konditionen" in t2 and "Unterschriften" not in t2
+    assert "Kaufpreis KAUFPREIS (VEREINBART)" in t2 and "Unterschriften" not in t2
     assert _rgb("#15803D") in _inhaltsstroeme(r2.body)
     # nichts gespeichert
     assert w.run(w.db.generated_pdfs.count_documents({})) == 0
