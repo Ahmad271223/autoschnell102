@@ -1207,9 +1207,13 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
               <Field label="Abholdatum" type="date" value={form.pickup_date} onChange={(v) => set("pickup_date", v)} testid="contract-pickup-date"
                      disabled={bearbeiten}
                      helper={bearbeiten ? "Den Abholtermin bitte im Terminplaner verschieben — der Vertrag bekommt dann selbst eine neue Fassung." : undefined} />
-              <Field label="Abholuhrzeit (nur Terminplaner)" type="time" value={form.pickup_time} onChange={(v) => set("pickup_time", v)} testid="contract-pickup-time"
-                     disabled={bearbeiten}
-                     helper="Steht nicht im Vertrag — nur für den Termin und die Fahrer-App." />
+              {/* Wunsch Ahmad 06.10.2026: der Sucher trägt keine Abholuhrzeit mehr ein — die Uhrzeit
+                  legt der Terminplaner fest (sie steht ohnehin nicht im Vertrag). */}
+              {user?.role !== "sucher" && (
+                <Field label="Abholuhrzeit (nur Terminplaner)" type="time" value={form.pickup_time} onChange={(v) => set("pickup_time", v)} testid="contract-pickup-time"
+                       disabled={bearbeiten}
+                       helper="Steht nicht im Vertrag — nur für den Termin und die Fahrer-App." />
+              )}
             </div>
             {/* Rollenprüfung 22.09.2026 (RP-218): Der Hilfetext sagt jetzt, was
                 beim Leeren passiert — wie bei den Vertragsbedingungen ("leer =

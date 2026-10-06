@@ -24,8 +24,9 @@ vi.mock("@/lib/api", () => ({
   api: { get: (...a) => get(...a), post: (...a) => post(...a), put: vi.fn(), delete: vi.fn() },
   errMsg: (e, f) => e?.response?.data?.detail || e?.message || f,
 }));
+const rolle = vi.hoisted(() => ({ wert: "sucher" }));
 vi.mock("@/context/AuthContext", () => ({
-  useAuth: () => ({ dealer: DEALER, user: { id: "u1", role: "sucher" }, refresh }),
+  useAuth: () => ({ dealer: DEALER, user: { id: "u1", role: rolle.wert }, refresh }),
 }));
 vi.mock("@/components/MarktdatenKarte", () => ({ useMarktHinweis: () => null }));
 vi.mock("./KiSchadenKarte", () => ({ default: () => null }));
@@ -49,6 +50,7 @@ afterEach(() => {
   behaelter = null;
 });
 beforeEach(() => {
+  rolle.wert = "sucher";
   post.mockReset();
   get.mockReset();
   get.mockResolvedValue({ data: null });
@@ -149,5 +151,19 @@ describe("kein Ansprechpartner, Schäden unter der Skizze, Karten", () => {
                                                   "Schäden / Beschädigungen", "Konditionen", "Nummern", "Beschreibung"]));
     expect(titel).not.toContain("Zusicherungen & Zustand");
     expect(titel.indexOf("Konditionen")).toBeLessThan(titel.indexOf("Nummern"));
+  });
+});
+
+describe("Abholuhrzeit (Wunsch Ahmad 06.10.2026)", () => {
+  it("der Sucher sieht nur das Abholdatum — die Uhrzeit legt der Terminplaner fest", async () => {
+    await oeffnen({ seller_name: "V", make_label: "VW" });
+    expect(feld("contract-pickup-date")).not.toBeNull();
+    expect(feld("contract-pickup-time")).toBeNull();
+  });
+
+  it("der Chef sieht die Uhrzeit weiter", async () => {
+    rolle.wert = "dealer";
+    await oeffnen({ seller_name: "V", make_label: "VW" });
+    expect(feld("contract-pickup-time")).not.toBeNull();
   });
 });
