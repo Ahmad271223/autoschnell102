@@ -112,6 +112,23 @@ async def _getrennt_merken(werkzeug_id: str, token_hashes, grund: str, pc_name: 
             log.exception("Werkzeug: Trenn-Grund nicht gespeichert")
 
 
+async def alle_trennen(user_id: str, grund: str = "passwort") -> int:
+    """Entscheidung Ahmad 06.10.2026: ein neues Passwort trennt Programm UND Browser-Helfer des Kontos — ein
+    gestohlenes Konto behielt sonst den Zugang ueber die Werkzeuge. Der naechste Aufruf bekommt 401 mit dem Grund,
+    verbinden geht dann mit einem neuen Code. Rueckgabe: Zahl der getrennten Verbindungen."""
+    getrennt = 0
+    for werkzeug_id in wz.WERKZEUGE:
+        filt = {"werkzeug": werkzeug_id, "user_id": user_id}
+        alte = [x.get("token_hash") async for x in db[wz.SAMMLUNG_VERBINDUNGEN].find(filt, {"_id": 0, "token_hash": 1})]
+        if not alte:
+            continue
+        r = await db[wz.SAMMLUNG_VERBINDUNGEN].delete_many(filt)
+        if r.deleted_count:
+            await _getrennt_merken(werkzeug_id, alte, grund)
+            getrennt += r.deleted_count
+    return getrennt
+
+
 async def _nicht_verbunden_text(werkzeug_id: str, schluessel: str) -> str:
     g = await db[wz.SAMMLUNG_GETRENNT].find_one(
         {"werkzeug": werkzeug_id, "token_hash": wz.streuwert(schluessel)}, {"_id": 0})
@@ -131,6 +148,9 @@ async def _nicht_verbunden_text(werkzeug_id: str, schluessel: str) -> str:
             return f"{wer} diesen Browser{am} getrennt. Bitte auf das AutoSchnell-Symbol klicken und neu verbinden."
         if g.get("grund") == "app":
             return f"Der Helfer wurde{am} in der AutoSchnell-App getrennt. Bitte auf das AutoSchnell-Symbol klicken."
+        if g.get("grund") == "passwort":
+            return (f"Das Passwort deines Kontos wurde{am} geändert – zur Sicherheit wurde der Helfer getrennt. "
+                    "Bitte auf das AutoSchnell-Symbol klicken und mit einem neuen Code verbinden.")
         return NICHT_VERBUNDEN_BROWSER
     if g.get("grund") == "anderer_pc":
         pc = f" („{g['pc_name']}“)" if g.get("pc_name") else ""
@@ -143,6 +163,9 @@ async def _nicht_verbunden_text(werkzeug_id: str, schluessel: str) -> str:
         return f"AutoSchnell hat diesen PC{am} getrennt. Bitte mit einem neuen Code verbinden."
     if g.get("grund") == "app":
         return f"Diese Verbindung wurde{am} in der AutoSchnell-App getrennt. Bitte mit einem neuen Code verbinden."
+    if g.get("grund") == "passwort":
+        return (f"Das Passwort deines Kontos wurde{am} geändert – zur Sicherheit wurde dieser PC getrennt. "
+                "Bitte mit einem neuen Code aus AutoSchnell verbinden.")
     return NICHT_VERBUNDEN
 
 

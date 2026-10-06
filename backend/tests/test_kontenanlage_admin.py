@@ -684,6 +684,7 @@ def test_passwort_setzen_hebt_konto_sperre_auf(wegwerf_limiter):
     assert z["nach"] == [False, False, False], "Passwort-Setzen muss die Sperre aufheben"
     assert z["sitzungen"] == [None, None, None]
     # 14.09.2026: das Audit haelt fest, ob wirklich eine Sperre bestand (hier ja)
-    assert z["audit"]["meta"] == {"kontonummer": "10091", "sperre_aufgehoben": True}, z["audit"]
+    # 06.10.2026: neues Passwort trennt auch Programm/Browser-Helfer — hier keine verbunden (0)
+    assert z["audit"]["meta"] == {"kontonummer": "10091", "sperre_aufgehoben": True, "werkzeuge_getrennt": 0}, z["audit"]
     assert z["audit_fahrer"]["meta"] == {"kontonummer": "10092",
                                          "sperre_aufgehoben": True}, z["audit_fahrer"]

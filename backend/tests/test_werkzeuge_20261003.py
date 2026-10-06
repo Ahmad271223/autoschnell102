@@ -949,3 +949,40 @@ def test_73_datenbank_kurz_weg_ist_503():
     antwort = asyncio.run(mw.dispatch(anfrage, weg))
     assert antwort.status_code == 503 and antwort.headers.get("retry-after") == "5"
     assert "Datenbank" in antwort.body.decode("utf-8")
+
+
+def test_74_neues_passwort_trennt_programm_und_helfer(welt):
+    """Entscheidung Ahmad 06.10.2026: ein neues Passwort (Admin setzt es) trennt alle Werkzeuge des Kontos — der
+    naechste Aufruf bekommt 401 mit dem Grund, ein neuer Code verbindet wieder."""
+    import asyncio
+    from motor.motor_asyncio import AsyncIOMotorClient
+    import routes.werkzeuge as rw
+    _abo(welt, True)
+    _, prog, _ = _verbinden(welt, "PC-Passwort")
+    r = requests.post(f"{API}/werkzeuge/browser-helfer/code", headers=welt["sucher"], timeout=30)
+    assert r.status_code == 200, r.text
+    r = requests.post(f"{API}/werkzeuge/browser-helfer/verbinden", timeout=30,
+                      json={"code": r.json()["code"], "pc_name": "Edge", "pc_kennung": "edge-passwort"})
+    assert r.status_code == 200, r.text
+    helfer = {wz.TOKEN_KOPF: r.json()["schluessel"], "X-Werkzeug-Version": "2.7.0"}
+    assert requests.get(f"{API}/werkzeuge/{WID}/status", headers=prog, timeout=30).status_code == 200
+
+    async def lauf():
+        client = AsyncIOMotorClient(konten.MONGO_URL, serverSelectionTimeoutMS=5000)
+        alt = rw.db
+        rw.db = client[welt["db"].name]
+        try:
+            return await rw.alle_trennen(welt["sucher_id"], "passwort")
+        finally:
+            rw.db = alt
+            client.close()
+    assert asyncio.run(lauf()) == 2
+    for kopf, wid in ((prog, WID), (helfer, "browser-helfer")):
+        r = requests.get(f"{API}/werkzeuge/{wid}/status", headers=kopf, timeout=30)
+        assert r.status_code == 401 and "Passwort" in r.json()["detail"] and "neuen Code" in r.json()["detail"], r.text
+    assert welt["db"].werkzeug_verbindungen.count_documents({"user_id": welt["sucher_id"]}) == 0
+    assert asyncio.run(lauf()) == 0                                       # nichts mehr zu trennen
+    # die Admin-Route ruft es auf (Quelltext)
+    import inspect
+    import routes.admin as ra
+    assert "alle_trennen(user_id, \"passwort\")" in inspect.getsource(ra.admin_user_set_password)

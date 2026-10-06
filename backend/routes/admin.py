@@ -1787,11 +1787,15 @@ async def admin_user_set_password(
     if r.matched_count == 0:
         raise HTTPException(409, "Dieses Konto wird gerade gelöscht — kein Passwort mehr setzen")
     sperre = await _konto_sperre_aufheben(u)
+    # Entscheidung Ahmad 06.10.2026: neues Passwort trennt Programm und Browser-Helfer (neuer Code noetig)
+    from routes.werkzeuge import alle_trennen
+    werkzeuge_getrennt = await alle_trennen(user_id, "passwort")
     await log_activity_sicher(admin.get("dealer_id", ""), admin["id"],
                        "admin.passwort.zurueckgesetzt",
                        ref=user_id, meta={"kontonummer": u.get("kontonummer", ""),
-                                          "sperre_aufgehoben": sperre.get("sperre_aufgehoben")})
-    return {"ok": True, **sperre}
+                                          "sperre_aufgehoben": sperre.get("sperre_aufgehoben"),
+                                          "werkzeuge_getrennt": werkzeuge_getrennt})
+    return {"ok": True, **sperre, "werkzeuge_getrennt": werkzeuge_getrennt}
 
 
 # ---------- Fahrer-Verwaltung (Review 09/2026: fehlte komplett) ----------
