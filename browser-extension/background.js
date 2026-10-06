@@ -192,10 +192,18 @@ function sitzungAendern(fn) {
   return lauf;
 }
 
+// Wunsch Ahmad 06.10.2026: wie im Windows-Programm waehlen, ob mobile.de, AutoScout24 oder beide aufgehen
+// (vorher immer beide). Die Wahl haelt der Hintergrund auch im Speicher (erlaubteLinks ist synchron).
+let portalWahl = { mobile: true, autoscout: true };
+const portalAn = (portal) => (portal === "AutoScout24" ? portalWahl.autoscout : portalWahl.mobile) !== false;
+
 async function einstellungen() {
   const { einstellungen: e } = await lokal("einstellungen");
-  return { vergleicheOeffnen: true, ...(e || {}) };
+  const alle = { vergleicheOeffnen: true, mobile: true, autoscout: true, ...(e || {}) };
+  portalWahl = { mobile: alle.mobile !== false, autoscout: alle.autoscout !== false };
+  return alle;
 }
+einstellungen().catch(() => {});
 
 // ------------------------------------------------------------------ Inserat
 /** 2.6.0 (Pruefung 05.10.2026, Nr. 22): nur Suchseiten von mobile.de und AutoScout24 oeffnen bzw. mit den Cookies
@@ -210,7 +218,8 @@ function erlaubterLink(url) {
     return false;
   }
 }
-const erlaubteLinks = (antwort) => ((antwort && antwort.links) || []).filter((l) => l && erlaubterLink(l.url));
+const erlaubteLinks = (antwort) =>
+  ((antwort && antwort.links) || []).filter((l) => l && erlaubterLink(l.url) && portalAn(l.portal));
 
 async function vergleicheOeffnen(tab, kennung, antwort) {
   const links = erlaubteLinks(antwort);
@@ -413,6 +422,7 @@ async function inseratBearbeiten(msg, tab) {
   const [jetzt, basis] = await Promise.all([sitzung(), server()]);
   const neu = jetzt.inserate[kennung] || {};
   return { antwort, geoeffnet, ausVergleich, schonOffen: schonOffen || grund === "schon_offen", vomProgramm,
+           portale: { mobile: portalWahl.mobile, autoscout: portalWahl.autoscout },
            automatik: grund, marktlage: neu.marktlage || {}, lageFehler: neu.lageFehler || {}, server: basis,
            // 2.6.0 (Nr. 9): in AutoSchnell gibt es eine neuere Version des Helfers
            neueVersion: statusMerker && istNeuer(statusMerker.aktuelle_version, VERSION) ? statusMerker.aktuelle_version : "" };
@@ -711,11 +721,14 @@ async function appGesehenMerken(sender) {
 }
 
 async function vergleicheManuell(msg, tab) {
-  const s = await sitzung();
+  const [s] = await Promise.all([sitzung(), einstellungen()]);
   const kennung = String(msg.kennung || "");
   const i = s.inserate[kennung];
   if (!i || !i.antwort) return { fehler: "unbekannt" };
-  return { geoeffnet: vergleicheStarten(tab, kennung, i.antwort) };
+  const geoeffnet = vergleicheStarten(tab, kennung, i.antwort);
+  // Links da, aber kein Portal gewaehlt (Fenster am Symbol): sagen, statt stumm nichts zu oeffnen
+  const keinPortal = geoeffnet === 0 && (i.antwort.links || []).some((l) => l && erlaubterLink(l.url));
+  return { geoeffnet, kein_portal: keinPortal };
 }
 
 // ------------------------------------------------------------------ Fenster (popup.html)
@@ -782,8 +795,10 @@ async function trennen() {
 
 async function einstellungenSetzen(msg) {
   const e = { ...(await einstellungen()), ...(msg.einstellungen || {}) };
-  await chrome.storage.local.set({ einstellungen: { vergleicheOeffnen: !!e.vergleicheOeffnen } });
-  return { ok: true, einstellungen: e };
+  const neu = { vergleicheOeffnen: !!e.vergleicheOeffnen, mobile: e.mobile !== false, autoscout: e.autoscout !== false };
+  await chrome.storage.local.set({ einstellungen: neu });
+  portalWahl = { mobile: neu.mobile, autoscout: neu.autoscout };
+  return { ok: true, einstellungen: neu };
 }
 
 // ------------------------------------------------------------------ Nachrichten

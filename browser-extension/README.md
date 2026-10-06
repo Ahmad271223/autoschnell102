@@ -52,6 +52,8 @@ Seit Version 2.0.0 (04.10.2026) macht die Erweiterung zwei Dinge:
    geprüft; Box-Zustand über den Hintergrund (`storage.local.setAccessLevel`); Sperre (402/403/offline) kurz gemerkt;
    Abruf-Helfer mit Zeitgrenze und höchstens 3 gleichzeitig; Fenster sofort aus dem Speicher; `bauen.ps1` ohne
    localhost, `hochladen.ps1` nur committet.
+   Seit 2.7.0 (Wunsch Ahmad 06.10.): Portalwahl im Fenster am Symbol — mobile.de, AutoScout24 oder beide (wie im
+   Windows-Programm); vorher gingen immer beide auf.
    **Zusammen mit dem Windows-Programm (seit 2.3.0, dasselbe AutoSchnell-Konto):**
    - Hat das Programm das Auto in den letzten 30 Minuten verglichen (`programm_verglichen` in der Antwort von
      `…/inserat`), öffnet der Helfer **keine** Vergleiche von selbst — nur die Ampel per Direktabruf.

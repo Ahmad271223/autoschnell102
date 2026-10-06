@@ -305,9 +305,13 @@
         const ohneText = offen ? "" : z.vomProgramm ? "Im Vergleich-Programm geöffnet"
           : z.automatik === "hintergrund" ? "Öffnet, sobald du hierher wechselst" : "";
         for (const [name, schluessel] of [["mobile.de", "mobile"], ["AutoScout24", "autoscout"]]) {
-          if (portale.includes(name)) {
+          // Wunsch Ahmad 06.10.2026: abgewaehlte Portale (Fenster am Symbol) tauchen in der Box nicht auf
+          if (portale.includes(name) && !(z.portale && z.portale[schluessel] === false)) {
             inhalt.appendChild(lageZeile(name, (z.marktlage || {})[schluessel], offen, ohneText, ampelFehler(z, schluessel)));
           }
+        }
+        if (z.portale && z.portale.mobile === false && z.portale.autoscout === false) {
+          inhalt.appendChild(el("div", "klein", "Kein Portal gewählt – im Fenster am AutoSchnell-Symbol mobile.de oder AutoScout24 einschalten."));
         }
         const bw = bewertungZeile(a.portal_bewertung);
         if (bw) inhalt.appendChild(el("div", "klein", bw));
@@ -507,7 +511,7 @@
     } else {
       // Eine schon eingetroffene Ampel (direkt geholte Vergleichsseite) nicht wieder wegwerfen
       const vorher = zustand && zustand.kennung === kennung ? zustand : {};
-      zustand = { kennung, phase: "fertig", antwort: antwort.antwort, geoeffnet: antwort.geoeffnet,
+      zustand = { kennung, phase: "fertig", antwort: antwort.antwort, geoeffnet: antwort.geoeffnet, portale: antwort.portale,
                   schonOffen: antwort.schonOffen, ausVergleich: antwort.ausVergleich, vomProgramm: antwort.vomProgramm,
                   automatik: antwort.automatik || "", neueVersion: antwort.neueVersion || "",
                   marktlage: { ...(vorher.marktlage || {}), ...(antwort.marktlage || {}) },
@@ -576,6 +580,7 @@
                                  lageStart: Date.now() });
       }
       zustand.meldung = r && r.geoeffnet ? ""
+        : r && r.kein_portal ? "Kein Portal gewählt – im Fenster am AutoSchnell-Symbol mobile.de oder AutoScout24 einschalten."
         : r && !r.fehler ? "Für dieses Auto gibt es keinen Vergleich (Marke oder Modell unbekannt)."
           : (r && r.text) || "Die Vergleiche konnten nicht geöffnet werden – Seite neu laden und noch einmal drücken.";
       zeichnen();

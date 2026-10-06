@@ -56,6 +56,9 @@ function zeigen(st) {
   $("hinweis").hidden = !texte.length;
   $("hinweis").textContent = texte.join(" ");
   $("oeffnen").checked = !(st.einstellungen && st.einstellungen.vergleicheOeffnen === false);
+  $("mobile").checked = !(st.einstellungen && st.einstellungen.mobile === false);
+  $("autoscout").checked = !(st.einstellungen && st.einstellungen.autoscout === false);
+  $("portalHinweis").hidden = $("mobile").checked || $("autoscout").checked;
 }
 
 async function serverRecht(server) {
@@ -134,9 +137,13 @@ $("vergleich").addEventListener("click", async () => {
   }
 });
 
-$("oeffnen").addEventListener("change", async () => {
-  await senden({ typ: "einstellungen", einstellungen: { vergleicheOeffnen: $("oeffnen").checked } });
-});
+async function einstellungenSenden() {
+  await senden({ typ: "einstellungen", einstellungen: {
+    vergleicheOeffnen: $("oeffnen").checked, mobile: $("mobile").checked, autoscout: $("autoscout").checked } });
+  $("portalHinweis").hidden = $("mobile").checked || $("autoscout").checked;
+}
+// Wunsch Ahmad 06.10.2026: wie im Windows-Programm — mobile.de, AutoScout24 oder beide
+for (const id of ["oeffnen", "mobile", "autoscout"]) $(id).addEventListener("change", einstellungenSenden);
 
 // 2.6.3 (Paket 3): erst sofort aus dem Speicher (Konto, Name, Firma), dann der Server-Stand
 senden({ typ: "status", schnell: true }).then((st) => {
