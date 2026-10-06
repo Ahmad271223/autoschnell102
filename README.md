@@ -15,6 +15,7 @@ Dateien in Cloudflare R2).
 | Kleinanzeigen-Abruf (wer ruft mit welcher IP ab) | [docs/kleinanzeigen-abruf.md](docs/kleinanzeigen-abruf.md) |
 | Übersprungene Tests der Backend-Suite | [docs/tests/UEBERSPRUNGENE_TESTS.md](docs/tests/UEBERSPRUNGENE_TESTS.md) |
 | Lasttests | `docs/lasttests/`, Skripte in `backend/scripts/lasttest_*.py`, auf prod2: `deploy/lasttest-auf-prod2.sh` |
+| Store-Apps (Android: TWA, iPhone: Capacitor ohne Mac per GitHub Actions) | `C:\Users\ahmad\autoschnell-playstore\ANLEITUNG-PLAY-STORE.md` (nicht im Repo), [ios-app/ANLEITUNG-APP-STORE.md](ios-app/ANLEITUNG-APP-STORE.md), Workflow `.github/workflows/ios.yml` |
 
 Lokal starten: `docker compose up -d --build` mit einer `.env` nach
 `.env.example` (Pflichtwerte prüft `backend/production_check.py` beim Start).
