@@ -386,6 +386,34 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
       {!e.ladefehler && <div className="mt-3"><Vergleich eintrag={e} /></div>}
       {!e.ladefehler && <VorOrt eintrag={e} />}
 
+      {!e.ladefehler && e.ausstattung_gesamt > 0 && (
+        <details className="mt-3 rounded-lg p-2.5" style={{ background: "var(--wa-03)" }}
+                 data-testid={`freigabe-ausstattung-komplett-${e.protocol_id}`}>
+          <summary className="cursor-pointer text-[12px] font-semibold">
+            Ausstattung vollständig geprüft: {e.ausstattung_beantwortet ?? Object.keys(e.ausstattung || {}).length}
+            /{e.ausstattung_gesamt} · vorhanden {e.ausstattung_vorhanden ?? Object.values(e.ausstattung || {}).filter((v) => v === true).length}
+          </summary>
+          <div className="mt-2 grid gap-1 sm:grid-cols-2">
+            {Object.entries(e.ausstattung || {}).map(([name, wert]) => (
+              <div key={name} className="text-[11px] flex justify-between gap-2">
+                <span className="truncate">{name}</span>
+                <span className="shrink-0" style={{ color: wert === true ? "var(--st-gruen)" : "var(--st-rot)" }}>
+                  {wert === true ? "Ja" : wert === "defekt" ? "Nein · defekt"
+                    : wert === "anders" ? "Nein · anders"
+                    : "Nein · fehlt"}
+                </span>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+
+      {e.verkaeufer_ausweis && (
+        <div className="mt-2 text-[12px] text-zinc-400" data-testid={`freigabe-ausweis-${e.protocol_id}`}>
+          <span className="text-zinc-500">Ausweisnummer Verkäufer:</span> {e.verkaeufer_ausweis}
+        </div>
+      )}
+
       {neueSchaeden.length > 0 && (
         <div className="mt-3 rounded-lg p-2.5" style={{ background: "#ff3b3014", border: "1px solid #ff3b3044" }}>
           <div className="text-[12px] font-semibold mb-1 inline-flex items-center gap-1" style={{ color: "var(--st-rot)" }}>
