@@ -66,6 +66,17 @@ internal sealed class Ueberwacher
     /// verworfen und danach nie verglichen (_offen war schon false). Jetzt merken sie nur einen Wunsch, den der
     /// naechste Durchlauf unter der Sperre anwendet. 0 = nichts, 1 = Neustart, 2 = NachVerbinden.</summary>
     private int _angefordert;
+    /// <summary>Wunsch Ahmad 06.10.2026 ("nur die Autos vergleichen, die man anklickt"): Zeitpunkt des letzten
+    /// Mausklicks in AutoPointer (gleiche Uhr wie <see cref="_takt"/>, siehe Klicks.cs). Eine Aenderung der
+    /// Detailansicht wird nur verglichen, wenn hoechstens <see cref="KlickVorlaufMs"/> davor (oder danach) geklickt
+    /// wurde — zeigt AutoPointer von selbst ein anderes Auto (Live-Liste rutscht weiter), bleibt es stehen, bis der
+    /// Sucher es anklickt. null = keine Klick-Pruefung (aeltere Tests).</summary>
+    private readonly Func<long>? _letzterKlick;
+    internal const int KlickVorlaufMs = 5000;
+    /// <summary>Die angezeigte Aenderung kam nicht vom Sucher — wartet auf seinen Klick.</summary>
+    private bool _ungeklickt;
+    /// <summary>NachVerbinden() zaehlt wie ein Klick: das gerade angezeigte Auto wird verglichen.</summary>
+    private long _klickErsatz = long.MinValue / 2;
 
     public bool Probelauf { get; set; }
     /// <summary>Paket 2 (A8): die Lizenzpruefung (/status) meldete 402/403 — bis sie wieder gut ist, wird nichts
@@ -89,10 +100,12 @@ internal sealed class Ueberwacher
     /// <param name="uhr">Datum/Uhrzeit fuer Plausibilitaet (EZ in der Zukunft) — Tests stellen sie.</param>
     /// <param name="takt">Monotone Uhr in ms fuer Abstaende; fehlt sie, kommt sie aus <paramref name="uhr"/> (Tests)
     /// bzw. ist Environment.TickCount64.</param>
+    /// <param name="letzterKlick">Letzter Mausklick in AutoPointer (Klicks.LetzterKlick, Uhr wie <paramref name="takt"/>).</param>
     public Ueberwacher(IAnsichtQuelle quelle, Func<Einstellungen> einstellungen, IOeffner oeffner,
                        IVergleichsDienst dienst, Func<DateTime>? uhr = null, Func<TimeSpan, Task>? warte = null,
-                       Func<long>? takt = null)
+                       Func<long>? takt = null, Func<long>? letzterKlick = null)
     {
+        _letzterKlick = letzterKlick;
         _quelle = quelle;
         _einstellungen = einstellungen;
         _oeffner = oeffner;
@@ -127,13 +140,24 @@ internal sealed class Ueberwacher
         _verloren = false;
         _gesperrt = false;
         _offen = false;
+        _ungeklickt = false;
         _summe = 0;
         if (a == 2)
         {
             _basis = false;
             _letzterSchluessel = null;
             _letzteKennung = null;
+            _klickErsatz = _takt();
         }
+    }
+
+    /// <summary>Hat der Sucher die Aenderung von <paramref name="seit"/> ausgeloest (oder danach in AutoPointer
+    /// geklickt)? Ohne Klick-Pruefung immer ja.</summary>
+    private bool VomSucher(long seit)
+    {
+        if (_letzterKlick == null) return true;
+        long klick = Math.Max(_letzterKlick(), _klickErsatz);
+        return klick >= seit - KlickVorlaufMs;
     }
 
     public async Task TickAsync()
@@ -173,6 +197,7 @@ internal sealed class Ueberwacher
                 SetzeStatus(z.Lage == Lage.KeinAutoPointer ? Status.KeinAutoPointer : Status.Bereit);
                 _summe = 0;
                 _offen = false;
+                _ungeklickt = false;
                 return;
             }
             SetzeStatus(_gesperrt ? Status.Gesperrt : Status.Aktiv);
@@ -182,11 +207,31 @@ internal sealed class Ueberwacher
                 _summe = z.Summe;
                 _seit = jetzt;
                 _offen = true;
+                _ungeklickt = false;
                 // Paket 3 (F4): schon jetzt (vor Wartezeit und Lesen) die Verbindung zum Server vorwaermen
                 try { _dienst.Vorwaermen(); } catch (Exception) { }
                 return;
             }
+            if (_ungeklickt)
+            {
+                // Wunsch Ahmad 06.10.2026: AutoPointer hat von selbst ein anderes Auto gezeigt — erst ein Klick des
+                // Suchers (auch auf genau dieses Auto) gibt es frei; dann wie gewohnt warten und lesen
+                if (!VomSucher(_seit)) return;
+                _ungeklickt = false;
+                _offen = true;
+                _seit = jetzt;
+                return;
+            }
             if (!_offen || jetzt - _seit < e.WartezeitMs) return;
+            if (!_basis && !VomSucher(_seit))
+            {
+                // Beim Start (_basis) wird nur gemerkt, nie geoeffnet — das darf ohne Klick passieren
+                _offen = false;
+                _ungeklickt = true;
+                Protokoll.SchreibeGedrosselt("ungeklickt", "AutoPointer zeigt ein anderes Auto, ohne dass in AutoPointer "
+                                             + "geklickt wurde – kein Vergleich (erst beim Anklicken).", TimeSpan.FromMinutes(5));
+                return;
+            }
 
             Lesung? lesung;
             try
@@ -260,6 +305,7 @@ internal sealed class Ueberwacher
             if (lesung == null) return;
             _summe = _quelle.Pruefe().Summe;
             _offen = false;
+            _ungeklickt = false;
             await VerarbeiteAsync(lesung, _einstellungen(), erzwungen: true);
         }
         finally { _einzeln.Release(); }

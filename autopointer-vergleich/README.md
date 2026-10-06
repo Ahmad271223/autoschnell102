@@ -86,6 +86,12 @@ dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und 
   Oberflächen-Thread; der Programm-Schlüssel wird nicht mehr 6-mal je Sekunde per DPAPI entschlüsselt.
   `PublishReadyToRun` wurde gemessen (Start `--einmal` ≈ 1,29 s statt ≈ 1,23 s, Datei 70 statt 55 MB) und nicht
   übernommen.
+* **1.5.6 (Wunsch Ahmad 06.10.) — nur angeklickte Autos:** Zeigt AutoPointer von selbst ein anderes Auto (die
+  Live-Liste fügt neue Inserate oben ein, die Markierung rutscht weiter), wird es nicht mehr verglichen — nur nach einem
+  **Mausklick in AutoPointer** (höchstens 5 s vor der Änderung, oder danach auf das angezeigte Auto). Dafür fragt ein
+  eigener Faden alle 15 ms nur die Maustasten ab und ob der Zeiger über AutoPointer liegt (`Klicks.cs`, kein Hook,
+  keine Tastatur). Der Start (nur merken), das (Neu-)Verbinden und „Vergleichen“ brauchen keinen Klick. Wer mit den
+  Pfeiltasten wechselt, drückt „Vergleichen“.
 * **Neuwagen** (Zustand „Neu“) haben in AutoPointer weder Erstzulassung noch Kilometerstand: dann gilt dieses Jahr
   und 0 km (Befund 03.10.: BYD Dolphin, mobile.de).
 * Dasselbe Fahrzeug öffnet nie zweimal hintereinander (Kennung aus dem gelesenen Text `Marke Modell | EZ | km | kW`,

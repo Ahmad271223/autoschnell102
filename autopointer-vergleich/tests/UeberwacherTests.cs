@@ -527,4 +527,95 @@ public class UeberwacherTests
         Assert.Equal(1, _server.Vorgewaermt);
     }
 
+    // ------------------------------------------------------------------------------------------------------------
+    // Wunsch Ahmad 06.10.2026: "das Programm vergleicht selber alle Autos auf AutoPointer und klickt sich selber
+    // durch — nur die, die man anklickt". Zeigt AutoPointer von selbst ein anderes Auto (Live-Liste rutscht weiter),
+    // wird erst nach einem Mausklick des Suchers in AutoPointer verglichen.
+    private long _klickMs = long.MinValue / 2;
+    private long JetztMs => _jetzt.Ticks / TimeSpan.TicksPerMillisecond;
+
+    private Ueberwacher MitKlicks()
+    {
+        var u = new Ueberwacher(_q, () => _e, _b, _server, () => _jetzt, t => { _jetzt += t; return Task.CompletedTask; },
+                                letzterKlick: () => _klickMs);
+        u.Neustart();
+        return u;
+    }
+
+    private async Task TickK(Ueberwacher u, int ms = 250)
+    {
+        await u.TickAsync();
+        _jetzt = _jetzt.AddMilliseconds(ms);
+    }
+
+    private async Task AnzeigeK(Ueberwacher u, Func<Fahrzeug> f, ulong summe, bool geklickt)
+    {
+        if (geklickt) _klickMs = JetztMs;
+        _q.Zeige(f, summe);
+        for (int i = 0; i < 4; i++) await TickK(u);
+    }
+
+    [Fact]
+    public async Task Ohne_Klick_zeigt_AutoPointer_ein_anderes_Auto_dann_kein_Vergleich_erst_beim_Anklicken()
+    {
+        var u = MitKlicks();
+        await TickK(u);                                   // AutoPointer zeigt noch nichts
+        await AnzeigeK(u, Bentley, 1, geklickt: true);
+        Assert.Single(_b.Aufrufe);
+        _jetzt = _jetzt.AddSeconds(10);
+        await AnzeigeK(u, Passat, 2, geklickt: false);    // Live-Liste rutscht weiter
+        await AnzeigeK(u, Golf, 3, geklickt: false);
+        Assert.Single(_b.Aufrufe);
+        Assert.Equal(1, _q.Lesungen);                     // gar nicht erst gelesen
+        Assert.False(u.KurzerTakt);
+        // der Sucher klickt jetzt genau das angezeigte Auto an (die Anzeige aendert sich dabei nicht)
+        _klickMs = JetztMs;
+        for (int i = 0; i < 4; i++) await TickK(u);
+        Assert.Equal(2, _b.Aufrufe.Count);
+        Assert.Contains("VW-Golf-2019", _b.Aufrufe[1][0].Url);
+    }
+
+    [Fact]
+    public async Task Klick_kurz_vor_der_Aenderung_zaehlt_ein_alter_nicht()
+    {
+        var u = MitKlicks();
+        await TickK(u);
+        _klickMs = JetztMs - 3000;                        // AutoPointer laedt die Details etwas laenger
+        _q.Zeige(Bentley, 1);
+        for (int i = 0; i < 4; i++) await TickK(u);
+        Assert.Single(_b.Aufrufe);
+        _jetzt = _jetzt.AddSeconds(30);
+        _klickMs = JetztMs - (Ueberwacher.KlickVorlaufMs + 1000);
+        _q.Zeige(Passat, 2);
+        for (int i = 0; i < 4; i++) await TickK(u);
+        Assert.Single(_b.Aufrufe);
+    }
+
+    [Fact]
+    public async Task Beim_Start_gemerkt_ohne_Klick_danach_nur_Angeklicktes()
+    {
+        _q.Zeige(Bentley, 1);                             // beim Start schon angezeigt
+        var u = MitKlicks();
+        for (int i = 0; i < 4; i++) await TickK(u);
+        Assert.Empty(_b.Aufrufe);                         // nur gemerkt (wie bisher)
+        Assert.Equal(1, _q.Lesungen);
+        await AnzeigeK(u, Passat, 2, geklickt: true);
+        Assert.Single(_b.Aufrufe);
+    }
+
+    [Fact]
+    public async Task Nach_dem_Verbinden_und_per_Knopf_auch_ohne_Klick()
+    {
+        var u = MitKlicks();
+        await TickK(u);
+        u.NachVerbinden();                                // zaehlt wie ein Klick: das angezeigte Auto kommt dran
+        await AnzeigeK(u, Bentley, 1, geklickt: false);
+        Assert.Single(_b.Aufrufe);
+        _jetzt = _jetzt.AddMinutes(1);
+        await AnzeigeK(u, Passat, 2, geklickt: false);
+        Assert.Single(_b.Aufrufe);
+        await u.JetztVergleichenAsync();                  // "Vergleichen" geht immer
+        Assert.Equal(2, _b.Aufrufe.Count);
+        Assert.Contains("VW-Passat_Variant-2006", _b.Aufrufe[1][0].Url);
+    }
 }

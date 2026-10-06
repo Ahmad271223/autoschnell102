@@ -57,6 +57,15 @@ internal static class Native
     public const uint MOD_ALT = 0x1, MOD_CONTROL = 0x2, MOD_NOREPEAT = 0x4000;
     public const int WM_HOTKEY = 0x0312;
 
+    // Wunsch Ahmad 06.10.2026 (Klicks.cs): nur die Maustasten abfragen und, ob der Zeiger ueber AutoPointer liegt
+    [StructLayout(LayoutKind.Sequential)]
+    public struct POINT { public int X, Y; }
+    [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vk);
+    [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
+    [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
+    public const uint GA_ROOT = 2;
+
     [DllImport("kernel32.dll")] public static extern bool AttachConsole(int pid);
 
     /// <summary>Pruefung 05.10.2026 (Paket 2, A7): Windows startet das Programm nach einem Absturz oder Haenger

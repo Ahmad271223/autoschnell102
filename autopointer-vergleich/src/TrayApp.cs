@@ -44,6 +44,8 @@ internal sealed class TrayApp : ApplicationContext
     private IntPtr _leistenHandle;          // fuer den Lese-Thread (kein Zugriff auf das Steuerelement dort)
     private readonly ToolStripMenuItem _leisteMenue;
     private AutoPointerQuelle? _quelle;
+    /// <summary>Wunsch Ahmad 06.10.2026: letzter Mausklick in AutoPointer — nur danach wird verglichen.</summary>
+    private Klicks? _klicks;
     private readonly EventWaitHandle _zeigenSignal;
     private string? _letzteMeldung;
     /// <summary>Stand der Zwischenablage, als das letzte Auto dran war (Nr. 11).</summary>
@@ -575,8 +577,11 @@ internal sealed class TrayApp : ApplicationContext
         Protokoll.Schreibe($"Texterkennung: {ocr.Sprache}");
         var quelle = new AutoPointerQuelle(ocr, () => _einstellungen);
         _quelle = quelle;
+        _klicks = new Klicks(() => quelle.Hauptfenster);
+        var klicks = _klicks;
         _ueberwacher = new Ueberwacher(quelle, () => _einstellungen, new BrowserAusgabe(_ui),
-                                       new DienstVermittler(() => _dienst)) { Probelauf = _probelauf, LizenzGesperrt = _lizenzSperre != null };
+                                       new DienstVermittler(() => _dienst),
+                                       letzterKlick: () => klicks.LetzterKlick) { Probelauf = _probelauf, LizenzGesperrt = _lizenzSperre != null };
         _ueberwacher.StatusGeaendert += s => _ui.Post(_ => StatusAnzeigen(AktuellerStatus()), null);
         _ueberwacher.Meldung += (t, f) => _ui.Post(_ => Sprechblase(t, f), null);
         _ueberwacher.VerbindungVerloren += m => _ui.Post(_ => VerbindungVerloren(m), null);
@@ -728,6 +733,7 @@ internal sealed class TrayApp : ApplicationContext
         _leistenHandle = IntPtr.Zero;
         _leiste.EndgueltigSchliessen();
         _ende.Cancel();
+        _klicks?.Dispose();
         _hotkey.Abmelden(HotkeyId);
         _hotkey.DestroyHandle();
         _symbol.Visible = false;

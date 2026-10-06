@@ -4436,7 +4436,7 @@ Suchern der Firma) – „alle anderen sollen das gar nicht sehen“.
   cd autopointer-vergleich && powershell -ExecutionPolicy Bypass -File build.ps1   # lokal: dist\AutoSchnell-Vergleich.exe
   scp dist/AutoSchnell-Vergleich.exe root@<server>:/tmp/                            # vom PC aus, nicht auf dem Server
   docker compose cp /tmp/AutoSchnell-Vergleich.exe backend:/tmp/AutoSchnell-Vergleich.exe
-  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.5.5
+  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.5.6
   ```
   Bis dahin zeigt die Seite „Wird gerade bereitgestellt“. Speicher: `werkzeuge/autopointer-vergleich/…`, Eintrag in `werkzeuge`.
 - Tests: `backend/tests/test_werkzeuge_20261003.py`, `frontend/src/pages/app/Programme.test.jsx`,
