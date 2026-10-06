@@ -543,6 +543,15 @@ export default function Protokoll() {
   };
   const setFeat = (name, wert) =>
     upd((s) => ({ features: { ...s.features, [name]: wert } }));
+  // 06.10.2026: bei langen Ausstattungslisten (100+) einmal alles als vorhanden
+  // markieren; einzelne Punkte lassen sich danach weiterhin auf Nein/fehlt/defekt/anders setzen.
+  const alleAusstattungenVorhanden = () =>
+    upd((s) => ({
+      features: {
+        ...s.features,
+        ...Object.fromEntries((data?.template?.features || []).map((name) => [name, true])),
+      },
+    }));
   const setCond = (k, v) =>
     upd((s) => ({ condition: { ...s.condition, [k]: v } }));
   // Abschnitt 1: pro Zeile Status (stimmt/weicht ab) bzw. Korrekturwert
@@ -1054,6 +1063,20 @@ export default function Protokoll() {
       {/* 3 Ausstattung */}
       {(tpl.features || []).length > 0 && (
         <Section n="3" title="Ausstattung laut Inserat" hint="Vorhanden? Bei jedem Punkt Ja oder Nein.">
+          {!gesperrt && (
+            <div className="mb-3 flex items-center justify-between gap-3 rounded-xl border px-3 py-2"
+                 style={{ borderColor: "var(--border-default)" }}>
+              <div className="text-[11px] text-zinc-400">
+                {tpl.features.length} Ausstattungen · alles vorhanden?
+              </div>
+              <button type="button" onClick={alleAusstattungenVorhanden}
+                      data-testid="protokoll-ausstattung-alle-ja"
+                      className="shrink-0 rounded-lg border px-3 min-h-[36px] text-xs font-semibold"
+                      style={{ borderColor: "var(--st-gruen)", color: "var(--st-gruen)" }}>
+                Alle auf Ja
+              </button>
+            </div>
+          )}
           {tpl.features.map((ft) => {
             const wert = f.features[ft];
             const nein = wert === false || typeof wert === "string";
