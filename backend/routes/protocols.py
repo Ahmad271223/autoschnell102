@@ -3126,6 +3126,18 @@ async def protokolle_zur_freigabe(user=Depends(_chef_dep), response: Response = 
                 # freigibt — Haken bei Dokumenten und Ausstattung inklusive.
                 "dokumente": d.get("documents") or {},
                 "ausstattung": d.get("features") or {},
+                # 06.10.2026: Chef kann bei 100+ Ausstattungen den kompletten
+                # Fahrerstand prüfen, nicht nur die Abweichungen.
+                "ausstattung_gesamt": len((fahrzeug.get("features") or [])[:AUSSTATTUNG_MAX])
+                    if isinstance(fahrzeug.get("features"), list) else 0,
+                "ausstattung_beantwortet": sum(
+                    1 for name in ((fahrzeug.get("features") or [])[:AUSSTATTUNG_MAX]
+                                   if isinstance(fahrzeug.get("features"), list) else [])
+                    if name in (d.get("features") or {})),
+                "ausstattung_vorhanden": sum(
+                    1 for name in ((fahrzeug.get("features") or [])[:AUSSTATTUNG_MAX]
+                                   if isinstance(fahrzeug.get("features"), list) else [])
+                    if (d.get("features") or {}).get(name) is True),
                 "zustand": d.get("condition") or {},
                 # Wunsch Ahmad 01.10.2026: fehlende/defekte/andere Ausstattung, fehlende Unterlagen und
                 # Maengel am Zustand auf einen Blick — die Haken oben zeigte die Seite nie an.
@@ -3141,6 +3153,7 @@ async def protokolle_zur_freigabe(user=Depends(_chef_dep), response: Response = 
                 "schluessel_vereinbart_fehlt": anzahl_text(d.get("keys_expected")) == "",
                 "fahrzeugdaten": d.get("vehicle_check") or {},
                 "ort": d.get("place") or "",
+                "verkaeufer_ausweis": str(d.get("seller_id_document") or "").strip(),
                 # Rollenprüfung 22.09.2026 (RP-480): der Preis VOR der Abholung
                 # (bei einer Korrektur nicht der schon verhandelte Zwischenstand).
                 "preis_vertrag": vertragspreis_vor_abholung(vertrag),
