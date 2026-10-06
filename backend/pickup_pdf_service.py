@@ -1261,6 +1261,17 @@ def _build_pickup_pdf(
             story.append(Spacer(1, 0.2 * cm))
             story.append(KeepTogether(_sketch_grid([], empty=True)))
 
+    # Wunsch Ahmad 06.10.2026: Lackdicke-Messungen des Fahrers (kein Schaden) als Klartext — die Fotos dazu
+    # stehen bewusst NICHT im PDF (sie sind nur befristet sichtbar, schadenfotos.py).
+    _lack = [m for m in ((filled or {}).get("lackmessungen") or []) if isinstance(m, dict)]
+    if _lack:
+        story.append(Spacer(1, 0.2 * cm))
+        story.append(Paragraph(
+            f"Lackdicke gemessen ({len(_lack)}): " + " &nbsp;·&nbsp; ".join(
+                f"<b>{_xe(str(m.get('zone') or '?'))}</b>: "
+                + (f"{int(m['wert_um'])} µm" if isinstance(m.get("wert_um"), (int, float)) else "ohne Wert")
+                for m in _lack[:60]), st["small"]))
+
     story.append(Spacer(1, 0.3 * cm))
     story.append(_section("7 · Bemerkungen des Fahrers", st))
     story.append(Spacer(1, 4))

@@ -2312,7 +2312,12 @@ async def delete_appointment(appt_id: str, user=Depends(current_firma),
     # Pruefung 14.09.2026 (C15): nicht unterschriebene Entwuerfe (ohne PDF und
     # Unterschriften) haengen an nichts mehr — mit loeschen statt verwaisen.
     try:
+        import schadenfotos as _sf
+        entwuerfe = await db.pickup_protocols.find(
+            {"appointment_id": appt_id, "status": "entwurf"}, _sf.PROJEKTION).to_list(50)
         await db.pickup_protocols.delete_many({"appointment_id": appt_id, "status": "entwurf"})
+        # Wunsch Ahmad 06.10.2026: die Schadenfotos der Entwuerfe mit (ausser eine Version nennt sie noch)
+        await _sf.dateien_loeschen(db, entwuerfe, "termin_geloescht_schadenfoto")
         # Pruefung 14.09.2026 (Liste 2, Nr. 3): Abholberichte des Termins mit —
         # Fotos werden geloescht bzw. zur Nachholung vorgemerkt, danach die
         # Berichte selbst (kein verwaister Bericht mit Fahrername/Notizen).

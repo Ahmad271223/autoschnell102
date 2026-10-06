@@ -10,6 +10,7 @@ import {
 import { protokollBefundHinweis, termineOffenDetail, termineStornoFrage } from "@/lib/akteHinweise";
 import { toast } from "sonner";
 import AbholFoto from "@/components/AbholFoto";
+import SchadenFotos from "@/components/SchadenFotos";
 import BeweisCard from "@/components/BeweisCard";
 import { fotosBis } from "@/components/AbholberichtDialog";
 import StatusSchild from "@/components/StatusSchild";
@@ -61,6 +62,30 @@ function Section({ title, children, warn }) {
 
 // Inserate, die noch laufen (wie backend/routes/resale.py _AKTIV).
 const INSERAT_AKTIV = ["entwurf", "verkaufsbereit", "reserviert", "veroeffentlicht", "zurueckgezogen"];
+
+/** Wunsch Ahmad 06.10.2026: Lackdicke-Messungen und Fotos des Fahrers zu einem Abhol-Protokoll (nur der
+ *  Chef bekommt die Felder; Fotos liefert der Server nur in der Sichtfrist von 7 Tagen). */
+function ProtokollFotos({ p }) {
+  const fotos = p.schaden_fotos || [];
+  const lack = p.lackmessungen || [];
+  if (!fotos.length && !lack.length) return null;
+  const markiert = [...new Set(fotos.map((f) => f.schaden_id))];
+  return (
+    <div className="ml-6 mb-2 space-y-1 text-[11px] text-zinc-400" data-testid={`akte-protokoll-fotos-${p.id}`}>
+      {lack.length > 0 && (
+        <div data-testid={`akte-protokoll-lack-${p.id}`}>
+          Lackdicke: {lack.map((m) => `${m.zone} ${m.wert_um ?? "?"} µm`).join(" · ")}
+        </div>
+      )}
+      {markiert.map((sid) => (
+        <div key={sid}>
+          <span>{(p.markierungen || {})[sid] || "Foto des Fahrers"}</span>
+          <SchadenFotos protokollId={p.id} schadenId={sid} fotos={fotos} size={48} />
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function KV({ k, val }) {
   return (
@@ -642,7 +667,8 @@ export default function FahrzeugAkte() {
         {(akte.protocols || []).length > 0 && (
           <Section title="Unterlagen · Abhol-Protokoll">
             {akte.protocols.map((p) => (
-              <button key={p.id} type="button"
+              <div key={p.id}>
+              <button type="button"
                  onClick={() => openAuthedFile(`/protocols/${p.id}.pdf`).catch(() => toast.error("Protokoll konnte nicht geladen werden"))}
                  className="mt-2 w-full flex items-center justify-between text-sm rounded-lg px-2 py-1.5 hover:bg-white/[0.04] text-left">
                 <span className="inline-flex items-center gap-1.5 text-zinc-200">
@@ -660,6 +686,9 @@ export default function FahrzeugAkte() {
                 </span>
                 <span className="text-zinc-500 text-xs">{fmtDate(p.finalized_at)}</span>
               </button>
+              {/* Wunsch Ahmad 06.10.2026 (nur Chef): Lackdicke und Fotos des Fahrers — Fotos 7 Tage */}
+              <ProtokollFotos p={p} />
+              </div>
             ))}
             <div className="mt-1.5 text-[11px] text-zinc-500">
               Unterschriften von Fahrer und Verkäufer/Kunde · beim Antippen als PDF öffnen

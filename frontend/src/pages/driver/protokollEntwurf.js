@@ -21,6 +21,8 @@ import { preisAusText } from "@/lib/preis";
 export const LEERER_ENTWURF = Object.freeze({
   documents: {}, features: {}, condition: {}, keys_count: "",
   notes: "", place: "", damages_confirmed: null, new_damages: [],
+  // Wunsch Ahmad 06.10.2026: Lackdicke-Messungen auf der Skizze (kein Schaden, nicht im Kaufvertrag)
+  lackmessungen: [],
   vehicle_check: {}, preis_vorschlag: "", sondervereinbarung: "",
   // Entscheidung Ahmad 22.09.2026 (Ausweisnummer): vor Ort nachgetragen,
   // Teil des Entwurfs (Autosave, Zusammenführung, Sicherung wie alle Felder).
@@ -51,6 +53,7 @@ export function entwurfAusServer(p) {
     // RP-067: nicht beantwortet bleibt null (vorher !! -> false = "Nein").
     damages_confirmed: typeof x.damages_confirmed === "boolean" ? x.damages_confirmed : null,
     new_damages: x.new_damages || [],
+    lackmessungen: Array.isArray(x.lackmessungen) ? x.lackmessungen : [],
     vehicle_check: x.vehicle_check || {},
     preis_vorschlag: preisFeldText(x.preis_vorschlag),
     sondervereinbarung: x.sondervereinbarung || "",

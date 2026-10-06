@@ -6,6 +6,7 @@ import { preisAusText, preisText } from "@/lib/preis";
 import { useUngespeichert } from "@/lib/ungespeichert";
 import { toast } from "sonner";
 import KiBewertungKarte from "@/components/KiBewertungKarte";
+import SchadenFotos from "@/components/SchadenFotos";
 import RueckfrageDialog from "@/components/RueckfrageDialog";
 import { rueckfrageBezug, schadenBezeichnung } from "@/lib/kiSchaden";
 import { datumZeit } from "@/lib/markt";
@@ -421,8 +422,26 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
           </div>
           <ul className="text-[12px] space-y-0.5">
             {neueSchaeden.map((s, i) => (
-              <li key={i}>
+              <li key={s.id || i}>
                 {(s.type_label || s.label || s.type || "Schaden")}{(s.zone || s.part_label) ? ` · ${s.zone || s.part_label}` : ""}{s.note ? ` – ${s.note}` : ""}
+                {/* Wunsch Ahmad 06.10.2026: Fotos des Fahrers zu diesem Schaden (7 Tage sichtbar) */}
+                <SchadenFotos protokollId={e.protocol_id} schadenId={s.id} fotos={e.schaden_fotos} />
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Wunsch Ahmad 06.10.2026: Lackdicke-Messungen des Fahrers (kein Schaden) mit Fotos */}
+      {(e.lackmessungen || []).length > 0 && (
+        <div className="mt-3 rounded-lg p-2.5" style={{ border: "1px solid var(--border-default)" }}
+             data-testid={`freigabe-lack-${e.protocol_id}`}>
+          <div className="text-[12px] font-semibold mb-1">Lackdicke gemessen: {e.lackmessungen.length}</div>
+          <ul className="text-[12px] space-y-0.5">
+            {e.lackmessungen.map((m, i) => (
+              <li key={m.id || i}>
+                {m.zone}: <b>{m.wert_um ?? "?"} µm</b>
+                <SchadenFotos protokollId={e.protocol_id} schadenId={m.id} fotos={e.schaden_fotos} />
               </li>
             ))}
           </ul>

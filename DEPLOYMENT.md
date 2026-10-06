@@ -1487,6 +1487,23 @@ Seit 10.09.2026 (Runde 21):
   (max. 2000 px); der Server speichert Bilder mit EXIF/GPS immer neu,
   ohne diese Daten.
 
+## Schadenfotos und Lackdicke im Abhol-Protokoll
+
+Seit 06.10.2026 (Wunsch Ahmad):
+
+- **Fahrer:** Abschnitt 6 „Vor-Ort-Aufnahme“ — zu jedem markierten Schaden und
+  jeder Lackdicke-Messung Knopf „Foto“ (Kamera oder Galerie), höchstens **25 Fotos
+  je Protokoll**. Lackdicke ist eine eigene Markierung (LD) mit Wert in µm, kein
+  Schaden: nie im Kaufvertrag, im Protokoll-PDF nur als Textzeile; beim Abschicken
+  braucht jede Messung ihren Wert.
+- **Chef:** sieht Fotos und Messwerte in den Freigaben und in der Fahrzeugakte
+  (Sucher nicht) — **7 Tage ab dem Hochladen** (`SCHADENFOTO_SICHT_TAGE`,
+  Standard 7). Danach liefert der Server sie nicht mehr aus (410), die Dateien
+  bleiben aber gespeichert (Entscheidung Ahmad) und gehen mit dem Protokoll:
+  verworfener Entwurf, gelöschter Termin, Löschung des Kaufvertrags. Nicht im PDF.
+- **Ablage:** `pickup_protocols.schaden_fotos`, Dateien unter dem privaten Präfix
+  `protocol/<firma>/` (Code: `backend/schadenfotos.py`).
+
 ## Fahrzeuge verkaufen ist kostenlos
 
 `VERKAUF_KOSTENLOS=true` (Standard) bedeutet: Jede Firma kann unbegrenzt viele Fahrzeuge veröffentlichen, ohne Paket und ohne Monatskontingent. Die Paketverwaltung bleibt im Code erhalten; mit `VERKAUF_KOSTENLOS=false` gelten wieder Pakete und Kontingente wie zuvor.

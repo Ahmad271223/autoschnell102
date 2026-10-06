@@ -1,7 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Trash2, Eraser } from "lucide-react";
+import { Camera, Trash2, Eraser, X } from "lucide-react";
 import { toast } from "sonner";
+import AbholFoto from "@/components/AbholFoto";
 import { TECHNIK_BEREICHE, TECHNIK_TYP, fragenFuer, istTechnik, mitAntwort, mitBetrag, technikSchaden } from "@/lib/kiSchaden";
+
+// Wunsch Ahmad 06.10.2026 (nur Fahrer-Protokoll): Lackdicke als EIGENE Markierung — kein Schaden, kommt
+// nie in den Kaufvertrag. Punkt antippen, Wert in µm eintragen, Fotos möglich. Grenze wie der Server
+// (routes/protocols.py LACKDICKE_MAX_UM).
+export const LACK_TYP = { key: "lackdicke", abbr: "LD", label: "Lackdicke messen", color: "#94a3b8" };
+export const LACKDICKE_MAX_UM = 5000;
+
+/** Eingabe "180" / "1.250" -> Zahl in µm (null = leer oder unlesbar, gedeckelt auf den Serverwert). */
+export function lackWert(text) {
+  const ziffern = String(text ?? "").replace(/\D/g, "").slice(0, 4);
+  if (!ziffern) return null;
+  return Math.min(LACKDICKE_MAX_UM, Number(ziffern));
+}
 
 // Rollenprüfung 22.09.2026 (RP-070/RP-169/RP-514): Ein Tipp auf einen Marker
 // löschte den Schaden sofort — und der Marker liegt genau auf dem Bauteilpunkt
@@ -276,11 +290,104 @@ function findNearestDot(view, x, y) {
   return null;
 }
 
-export default function DamageSelector({ damages = [], onChange }) {
+/**
+ * Fotos zu einer Markierung (Wunsch Ahmad 06.10.2026, nur Fahrer-Protokoll): Vorschaubilder, Entfernen und
+ * ein Knopf "Foto" (Kamera oder Galerie). Hochgeladen wird über `onHinzu(schadenId, datei)` des Protokolls.
+ */
+function FotoLeiste({ schadenId, foto }) {
+  const [laedt, setLaedt] = useState(false);
+  if (!foto) return null;
+  const eigene = foto.liste.filter((x) => x.schaden_id === schadenId);
+  const voll = foto.belegt >= foto.max;
+  const waehlen = async (e) => {
+    const dateien = Array.from(e.target.files || []);
+    e.target.value = "";
+    if (!dateien.length) return;
+    setLaedt(true);
+    try {
+      for (const datei of dateien) {
+        // nacheinander: der Server zählt die Grenze mit
+        const ok = await foto.onHinzu(schadenId, datei);
+        if (ok === false) break;
+      }
+    } finally {
+      setLaedt(false);
+    }
+  };
+  return (
+    <div className="mt-1.5 flex flex-wrap items-center gap-1.5" data-testid={`damage-fotos-${schadenId}`}>
+      {eigene.map((x) => (
+        <span key={x.id} className="relative inline-block">
+          <AbholFoto pfad={foto.pfad(x.id)} client={foto.client} size={48} label="Schadenfoto" />
+          {foto.onWeg && (
+            <button type="button" onClick={() => foto.onWeg(x.id)} aria-label="Foto entfernen"
+                    data-testid={`damage-foto-weg-${x.id}`}
+                    className="absolute -top-2 -right-2 w-6 h-6 rounded-full flex items-center justify-center text-white"
+                    style={{ background: "var(--accent-red, #ef4444)" }}>
+              <X size={12} />
+            </button>
+          )}
+        </span>
+      ))}
+      {foto.onHinzu && (
+        <label className={`inline-flex items-center gap-1 rounded-full border px-3 py-1.5 min-h-[36px] text-[11px] ${
+                 voll || laedt ? "opacity-50" : "cursor-pointer text-zinc-300 hover:text-white"}`}
+               style={{ borderColor: "var(--border-default)" }}
+               title={voll ? `Höchstens ${foto.max} Fotos je Protokoll` : "Foto aufnehmen oder auswählen"}
+               data-testid={`damage-foto-hinzu-${schadenId}`}>
+          <Camera size={13} /> {laedt ? "Wird hochgeladen…" : "Foto"}
+          <input type="file" accept="image/*" multiple className="hidden" disabled={voll || laedt}
+                 onChange={waehlen} data-testid={`damage-foto-input-${schadenId}`} />
+        </label>
+      )}
+    </div>
+  );
+}
+
+/**
+ * `lackMessungen` + `onLackChange` (nur Fahrer-Protokoll): zusätzliche Markierung „Lackdicke“.
+ * `fotos` = { liste, max, onHinzu, onWeg, pfad, client } (nur Fahrer-Protokoll): Fotos je Markierung.
+ * Ohne diese Angaben (Kaufvertrag) bleibt alles wie bisher.
+ */
+export default function DamageSelector({ damages = [], onChange, lackMessungen, onLackChange, fotos }) {
   const [activeType, setActiveType] = useState(DAMAGE_TYPES[5]); // default: Kratzer
+  const mitLack = typeof onLackChange === "function";
+  const lack = useMemo(() => (mitLack && Array.isArray(lackMessungen) ? lackMessungen : []),
+    [mitLack, lackMessungen]);
+  // Fotos zählen nur zu Markierungen, die es noch gibt (wie der Server)
+  const markierungsIds = useMemo(() => new Set([...damages, ...lack].map((d) => d.id)), [damages, lack]);
+  const foto = fotos ? {
+    ...fotos,
+    liste: (fotos.liste || []).filter((x) => markierungsIds.has(x.schaden_id)),
+    belegt: (fotos.liste || []).filter((x) => markierungsIds.has(x.schaden_id)).length,
+  } : null;
+
+  const aktuellLack = useRef(lack);
+  useEffect(() => { aktuellLack.current = lack; });
+  const removeLack = (id) => {
+    const weg = lack.filter((m) => m.id === id);
+    onLackChange?.(lack.filter((m) => m.id !== id));
+    if (weg.length) {
+      toast.success(`Entfernt: Lackdicke – ${weg[0].zone}`, {
+        duration: RUECKGAENGIG_MS,
+        action: { label: "Rückgängig", onClick: () => {
+          const da = new Set((aktuellLack.current || []).map((m) => m.id));
+          onLackChange?.([...(aktuellLack.current || []), ...weg.filter((m) => !da.has(m.id))]);
+        } },
+      });
+    }
+  };
+  const setLackWert = (id, text) => onLackChange?.(lack.map((m) => (m.id === id ? { ...m, wert_um: lackWert(text) } : m)));
 
   const handleDotClick = (view, dot) => {
     if (!activeType) return;
+    if (activeType.key === LACK_TYP.key) {
+      const messung = { id: `l-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, view,
+                        zone: dot.name, x: dot.cx, y: dot.cy, wert_um: null };
+      onLackChange?.([...lack, messung]);
+      toast.success(`Lackdicke: ${dot.name} – bitte den Wert in µm eintragen`, { duration: 2200 });
+      return;
+    }
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const newDamage = {
       id,
@@ -343,12 +450,14 @@ export default function DamageSelector({ damages = [], onChange }) {
   // RP-514: Tipp auf einen vorhandenen Marker.
   const handleMarkerTap = (view, m) => {
     if (activeType && activeType.key !== m.type_key) {
-      // Andere Schadensart gewählt -> zusätzlicher Schaden am selben Bauteil.
+      // Andere Schadensart gewählt -> zusätzlicher Schaden am selben Bauteil
+      // (bzw. eine Lackdicke-Messung, wenn "Lackdicke" gewählt ist).
       handleDotClick(view, { name: m.zone, cx: m.x, cy: m.y });
       return;
     }
     if (!window.confirm(`„${m.type_label} – ${m.zone}“ entfernen?`)) return;
-    removeDamage(m.id);
+    if (m.type_key === LACK_TYP.key) removeLack(m.id);
+    else removeDamage(m.id);
   };
 
   const clearAll = () => {
@@ -366,8 +475,13 @@ export default function DamageSelector({ damages = [], onChange }) {
   const grouped = useMemo(() => {
     const map = {};
     for (const d of damages) (map[d.view] ||= []).push(d);
+    // Lackdicke-Messungen als eigene Marker (LD) auf derselben Skizze
+    for (const m of lack) {
+      (map[m.view] ||= []).push({ ...m, type_key: LACK_TYP.key, abbr: LACK_TYP.abbr, color: LACK_TYP.color,
+                                  type_label: m.wert_um != null ? `Lackdicke ${m.wert_um} µm` : "Lackdicke" });
+    }
     return map;
-  }, [damages]);
+  }, [damages, lack]);
 
   // Technischer Mangel (25.09.2026 abends): kein Skizzenpunkt — Bereich
   // tippen, dann Stand/Fahrbereit/Warnleuchte und eine kurze Beschreibung.
@@ -393,7 +507,7 @@ export default function DamageSelector({ damages = [], onChange }) {
     <div className="space-y-4">
       {/* Schadensart-Chips */}
       <div className="flex flex-wrap gap-2" data-testid="damage-types">
-        {DAMAGE_TYPES.map((t) => {
+        {(mitLack ? [...DAMAGE_TYPES, LACK_TYP] : DAMAGE_TYPES).map((t) => {
           const active = activeType?.key === t.key;
           return (
             <button
@@ -581,16 +695,64 @@ export default function DamageSelector({ damages = [], onChange }) {
                          className="mt-1.5 w-full rounded-lg border bg-transparent px-2.5 py-1.5 text-[12px] text-zinc-200"
                          style={{ borderColor: "var(--border-default)" }} />
                 )}
+                <FotoLeiste schadenId={d.id} foto={foto} />
+              </li>
+            ))}
+          </ul>
+          {!mitLack && (
+            <div className="text-[11px] text-zinc-500">
+              Diese Liste wird automatisch als Abschnitt „Schäden / Beschädigungen"
+              in den Vertrag übernommen.
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="text-[11px] text-zinc-500">Noch keine Schäden erfasst.</div>
+      )}
+
+      {/* Lackdicke-Messungen (nur Fahrer-Protokoll) — kein Schaden, nicht im Kaufvertrag */}
+      {mitLack && lack.length > 0 && (
+        <div className="space-y-1.5" data-testid="lack-list">
+          <div className="overline">Lackdicke gemessen ({lack.length})</div>
+          <ul className="divide-y rounded-lg border" style={{ borderColor: "var(--border-default)" }}>
+            {lack.map((m) => (
+              <li key={m.id} className="px-3 py-2 text-sm">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="inline-flex items-center justify-center rounded-md px-1.5 py-0.5 text-[10px] font-bold shrink-0"
+                          style={{ backgroundColor: LACK_TYP.color, color: "#0a0a0a" }}>{LACK_TYP.abbr}</span>
+                    <span className="text-zinc-400 truncate">
+                      {m.zone}
+                      {VIEW_LABELS[m.view] ? <span className="text-zinc-600"> ({VIEW_LABELS[m.view]})</span> : null}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input value={m.wert_um ?? ""} inputMode="numeric" maxLength={4} placeholder="z. B. 120"
+                           aria-label={`Lackdicke ${m.zone} in µm`} data-testid={`lack-wert-${m.id}`}
+                           onChange={(e) => setLackWert(m.id, e.target.value)}
+                           className="w-24 rounded-lg border bg-transparent px-2.5 py-1.5 text-[12px] text-zinc-200"
+                           style={{ borderColor: m.wert_um == null ? "var(--accent-red, #ef4444)" : "var(--border-default)" }} />
+                    <span className="text-[11px] text-zinc-500">µm</span>
+                    <button type="button" onClick={() => removeLack(m.id)} aria-label="Messung entfernen"
+                            data-testid={`lack-remove-${m.id}`}
+                            className="text-zinc-500 hover:text-red-400 tipp flex items-center justify-center">
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                </div>
+                <FotoLeiste schadenId={m.id} foto={foto} />
               </li>
             ))}
           </ul>
           <div className="text-[11px] text-zinc-500">
-            Diese Liste wird automatisch als Abschnitt „Schäden / Beschädigungen"
-            in den Vertrag übernommen.
+            Lackdicke ist kein Schaden — sie kommt nicht in den Kaufvertrag, der Händler sieht sie bei der Freigabe.
           </div>
         </div>
-      ) : (
-        <div className="text-[11px] text-zinc-500">Noch keine Schäden erfasst.</div>
+      )}
+      {foto && (
+        <div className="text-[11px] text-zinc-500" data-testid="damage-fotos-zaehler">
+          Fotos: {foto.belegt} von {foto.max} · der Händler sieht sie {foto.sichtTage} Tage lang.
+        </div>
       )}
     </div>
   );

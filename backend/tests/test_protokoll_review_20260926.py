@@ -94,8 +94,12 @@ def test_66_schwere_fragen_synchron_mit_kischaden_js():
 def test_63_schadensarten_ansichten_skizze_synchron_mit_damageselector():
     P = _m("routes.protocols")
     src = (FRONTEND / "components" / "DamageSelector.jsx").read_text(encoding="utf-8")
-    arten = re.findall(r'\{ key: "(\w+)",\s+abbr:', src)
+    # nur der Block DAMAGE_TYPES — LACK_TYP (Lackdicke, 06.10.2026) ist bewusst KEINE Schadensart
+    block = re.search(r"export const DAMAGE_TYPES = \[(.*?)\];", src, re.S).group(1)
+    arten = re.findall(r'\{ key: "(\w+)",\s+abbr:', block)
     assert tuple(arten) + ("technik",) == P.SCHADEN_ARTEN
+    assert re.search(r'LACK_TYP = \{ key: "lackdicke"', src) and "lackdicke" not in P.SCHADEN_ARTEN
+    assert int(re.search(r"LACKDICKE_MAX_UM = (\d+);", src).group(1)) == P.LACKDICKE_MAX_UM
     views = re.search(r"const VIEW_LABELS = \{(.*?)\};", src, re.S).group(1)
     assert tuple(re.findall(r"^\s*(\w+):", views, re.M)) == P.SCHADEN_ANSICHTEN
     assert int(re.search(r"const IMG_W = (\d+);", src).group(1)) == P.SKIZZE_BREITE

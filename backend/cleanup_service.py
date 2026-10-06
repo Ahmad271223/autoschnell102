@@ -911,7 +911,7 @@ async def _protokolle_pii_entfernen(db, termin_ids: list, dealer_id,
     async for p in db.pickup_protocols.find(
             {"$or": oder},
             {"_id": 0, "id": 1, "pdf_path": 1, "signature_driver_key": 1,
-             "signature_seller_key": 1, "new_damages": 1}):
+             "signature_seller_key": 1, "new_damages": 1, "schaden_fotos": 1}):
         protokoll_ids.append(p["id"])
         unset, offen = {}, {}
         for feld in ("pdf_path", "signature_driver_key", "signature_seller_key"):
@@ -950,6 +950,15 @@ async def _protokolle_pii_entfernen(db, termin_ids: list, dealer_id,
                         "pii_geloescht_at": jetzt, "vertrag_geloescht": True, **offen}}
         if isinstance(p.get("new_damages"), list):
             upd["$set"]["new_damages"] = schaeden_ohne_freitext(p["new_damages"])
+        # Wunsch Ahmad 06.10.2026: Schadenfotos bleiben nach der Sichtfrist gespeichert — mit dem
+        # Kaufvertrag gehen sie. Scheitert das Loeschen einer Datei, merkt loeschen_oder_vormerken sie zur
+        # Nachholung vor (storage_delete_retry); der Verweis im Protokoll faellt in jedem Fall weg.
+        for foto in p.get("schaden_fotos") or []:
+            if isinstance(foto, dict) and foto.get("key"):
+                await loeschen_oder_vormerken(db, key=foto["key"], grund="vertrag_loeschung_schadenfoto",
+                                              dealer_id=dealer_id or "")
+        if p.get("schaden_fotos"):
+            upd["$set"]["schaden_fotos"] = []
         unset = {**unset, "contract_id": "", "kaufvorgang_id": ""}
         if contract_id:
             upd["$set"]["vertrag_geloescht_ref"] = contract_id
@@ -1310,14 +1319,18 @@ async def verwaiste_protokoll_entwuerfe_loeschen(db, now: datetime, mindestalter
         {"$lookup": {"from": "appointments", "localField": "appointment_id",
                      "foreignField": "id", "as": "termin"}},
         {"$match": {"termin": {"$size": 0}}},
-        {"$project": {"_id": 0, "id": 1, "status": 1}},
+        {"$project": {"_id": 0, "id": 1, "status": 1, "dealer_id": 1, "schaden_fotos": 1}},
         {"$limit": limit},
     ]).to_list(limit)
     n = 0
+    import schadenfotos as _sf
     for p in kandidaten:
         try:
             res = await db.pickup_protocols.delete_one({"id": p["id"], "status": p["status"]})
             n += res.deleted_count
+            if res.deleted_count:
+                # Wunsch Ahmad 06.10.2026: Schadenfotos des Entwurfs mit
+                await _sf.dateien_loeschen(db, [p], "protokoll_ohne_termin_schadenfoto")
         except Exception:  # noqa: BLE001
             log.exception("Verwaistes Protokoll %s nicht geloescht", p.get("id"))
     if n:

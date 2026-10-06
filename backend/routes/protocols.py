@@ -26,6 +26,7 @@ from pymongo.errors import DuplicateKeyError
 
 import betrieb
 import protokoll_vergleich as PV
+import schadenfotos as SF
 from ai import pickup_assessment as KI
 from deps import (besitzer_namen, current_chef, db, ist_sucher,
                   log_activity, log_activity_sicher, now_iso, termin_bereich,
@@ -400,6 +401,42 @@ RUECKFRAGE_OFFEN = "Bitte zuerst die Rückfrage des Chefs beantworten."
 RUECKFRAGE_VERLAUF_MAX = 50
 
 
+# Wunsch Ahmad 06.10.2026: Lackdicke als EIGENE Markierung auf der Skizze (kein Schaden, nie im Kaufvertrag):
+# Punkt antippen, Messwert in Mikrometern, Fotos moeglich (schadenfotos.py). Der Chef sieht Wert und Fotos
+# bei der Freigabe. LACKDICKE_MAX_UM: Serienlack ~100-180 um, Spachtel bis weit ueber 1000 — 5000 deckt
+# alles Messbare ab und faengt Tippfehler (zusaetzliche Null) nicht ab, aber Unsinn.
+LACKMESSUNG_MAX = 60
+LACKDICKE_MAX_UM = 5000
+
+
+class LackmessungIn(BaseModel):
+    """Eine Lackdicke-Messung auf der Skizze: Ansicht, Bauteil, Position wie ein Schaden, dazu der Wert.
+    Im Entwurf darf der Wert noch fehlen (erst Punkt setzen, dann messen) — beim Abschicken ist er Pflicht."""
+    id: Optional[str] = Field(default=None, max_length=40)
+    view: str = Field(max_length=20)
+    zone: str = Field(max_length=ZONE_MAX)
+    x: float
+    y: float
+    wert_um: Optional[int] = Field(default=None, ge=0, le=LACKDICKE_MAX_UM)
+
+    @model_validator(mode="after")
+    def _skizze_pruefen(self):
+        if self.view not in SCHADEN_ANSICHTEN:
+            raise ValueError(f"Lackdicke: unbekannte Ansicht '{str(self.view or '')[:20]}'")
+        self.zone = str(self.zone or "").strip()
+        if not self.zone:
+            raise ValueError("Lackdicke: Bauteil fehlt")
+        if not (0 <= self.x <= SKIZZE_BREITE and 0 <= self.y <= SKIZZE_HOEHE):
+            raise ValueError("Lackdicke: Position ausserhalb der Skizze")
+        return self
+
+
+class SchadenFotoIn(BaseModel):
+    """Ein Foto zu einem Schaden bzw. einer Lackdicke-Messung des Entwurfs (Wunsch Ahmad 06.10.2026)."""
+    schaden_id: str = Field(min_length=1, max_length=40)
+    photo_b64: str = Field(min_length=100, max_length=SF.SCHADENFOTO_B64_MAX)
+
+
 class ProtocolIn(BaseModel):
     """Alle Felder optional — der Fahrer speichert laufend Zwischenstände."""
     vehicle_check: Optional[Dict[str, Any]] = None      # Abschnitt 1 (Korrekturen)
@@ -514,6 +551,22 @@ class ProtocolIn(BaseModel):
                 sid = f"n-{uuid.uuid4().hex[:12]}"
             d.id = sid
             gesehen.add(sid)
+        return v
+
+    # Wunsch Ahmad 06.10.2026: Lackdicke-Messungen auf der Skizze (Abschnitt 6, kein Schaden)
+    lackmessungen: Optional[List[LackmessungIn]] = Field(default=None, max_length=LACKMESSUNG_MAX)
+
+    @field_validator("lackmessungen", mode="after")
+    @classmethod
+    def _lack_ids(cls, v):
+        """Wie bei den Schaeden: jede Messung hat eine eigene id (die Fotos haengen daran)."""
+        gesehen = set()
+        for m in v or []:
+            mid = str(m.id or "").strip()
+            if not mid or mid in gesehen:
+                mid = f"l-{uuid.uuid4().hex[:12]}"
+            m.id = mid
+            gesehen.add(mid)
         return v
 
     notes: Optional[str] = Field(default=None, max_length=5000)   # Abschnitt 7
@@ -1407,7 +1460,8 @@ async def entwurf_bei_terminaenderung_verwerfen(appt_id: str, neuer_fahrer: Opti
     try:
         doc = await db.pickup_protocols.find_one(
             {"appointment_id": appt_id, "superseded": {"$ne": True}, "status": "entwurf"},
-            {"_id": 0, "id": 1, "corrects_version": 1, "driver_account_id": 1})
+            {"_id": 0, "id": 1, "corrects_version": 1, "driver_account_id": 1,
+             "dealer_id": 1, "schaden_fotos": 1})
         if not doc:
             return False
         if nur_fahrer and neuer_fahrer and doc.get("driver_account_id") == neuer_fahrer:
@@ -1415,6 +1469,8 @@ async def entwurf_bei_terminaenderung_verwerfen(appt_id: str, neuer_fahrer: Opti
         if "corrects_version" in doc:
             return await korrektur_verwerfen(appt_id)
         res = await db.pickup_protocols.delete_one({"id": doc["id"], "status": "entwurf"})
+        if res.deleted_count:
+            await SF.dateien_loeschen(db, [doc], "protokoll_entwurf_verworfen")
         return bool(res.deleted_count)
     except Exception:  # noqa: BLE001
         log.exception("Protokoll-Entwurf zu Termin %s nach Terminaenderung nicht verworfen",
@@ -1638,8 +1694,11 @@ async def get_protocol(appt_id: str, driver=Depends(current_driver)):
     vehicle = fahrzeug_fuer_fahrer(vehicle_voll)
     return {
         # Gegenpruefung 12.09.2026: Infinity/NaN aus Altdaten nicht ans JSON geben.
-        "protocol": PV.json_sicher(doc),
+        "protocol": PV.json_sicher(SF.ohne_keys(doc)),
         "template": {
+            # Wunsch Ahmad 06.10.2026: Schadenfotos (Grenze je Protokoll, Sichtfrist beim Chef)
+            "schadenfoto_max": SF.SCHADENFOTO_MAX,
+            "schadenfoto_sicht_tage": SF.SCHADENFOTO_SICHT_TAGE,
             "vehicle_check_fields": [
                 {"key": k, "label": lb, "options": opts}
                 for k, lb, opts in VEHICLE_CHECK_FIELDS
@@ -1843,7 +1902,7 @@ async def save_protocol(appt_id: str, body: ProtocolIn,
         if res.matched_count == 0:
             await _entwurf_revision_pruefen(doc["id"], revision)
             await _speichern_abgelehnt(doc["id"])
-        return await db.pickup_protocols.find_one({"id": doc["id"]}, {"_id": 0})
+        return SF.ohne_keys(await db.pickup_protocols.find_one({"id": doc["id"]}, {"_id": 0}))
     await _vertrag_nicht_in_loeschung(appt)                  # Befund 48
     # Versionsnummer: hoechste vorhandene + 1 — nach einem verworfenen Entwurf
     # (Fahrzeug-/Vertragswechsel) waere "1" eine Dublette im Index.
@@ -1894,8 +1953,8 @@ async def save_protocol(appt_id: str, body: ProtocolIn,
         if res.matched_count == 0:
             await _entwurf_revision_pruefen(vorhandenes["id"], revision)
             await _speichern_abgelehnt(vorhandenes["id"])
-        return await db.pickup_protocols.find_one(
-            {"id": vorhandenes["id"]}, {"_id": 0})
+        return SF.ohne_keys(await db.pickup_protocols.find_one(
+            {"id": vorhandenes["id"]}, {"_id": 0}))
     return {k: v for k, v in new_doc.items() if k != "_id"}
 
 
@@ -2007,6 +2066,12 @@ def _alle_abschnitte_pruefen(doc: dict, ausstattung: List[str]) -> None:
     # es hier keine Pflicht mehr (ohne Angabe im Vertrag bleibt es leer).
     # Review 26.09.2026 (Nr. 66): jeder neue Schaden vollstaendig beschrieben.
     schaeden_vollstaendig_pruefen(doc.get("new_damages"))
+    # Wunsch Ahmad 06.10.2026: jede markierte Lackdicke-Messung braucht ihren Messwert
+    ohne_wert = [str(m.get("zone") or "?") for m in doc.get("lackmessungen") or []
+                 if isinstance(m, dict) and m.get("wert_um") is None]
+    if ohne_wert:
+        raise HTTPException(422, "Abschnitt 6: bitte bei jeder Lackdicke-Messung den Wert in µm eintragen: "
+                                 + ", ".join(ohne_wert))
     merkmale = doc.get("features") or {}
     # Umbau 26.09.2026: "fehlt"/"defekt"/"anders" gelten als beantwortet (Nein + Art)
     offen = [f for f in ausstattung
@@ -2061,6 +2126,12 @@ async def submit_protocol(appt_id: str, driver=Depends(current_driver)):
                               "seller_name": (doc.get("seller_name") or appt.get("seller_name") or "").strip()}
     aenderung: Dict[str, Any] = {"$set": setzen,
                                  "$unset": {"rueckfrage": "", "rueckfrage_am": "", "rueckfrage_frage": ""}}
+    # Wunsch Ahmad 06.10.2026: Fotos zu Schaeden/Messungen, die der Fahrer wieder entfernt hat, gehen nicht
+    # zum Chef — sie fallen beim Abschicken aus dem Protokoll, ihre Dateien werden danach geloescht.
+    verwaiste_fotos = [e for e in doc.get("schaden_fotos") or []
+                       if isinstance(e, dict) and str(e.get("schaden_id") or "") not in SF.markierungs_ids(doc)]
+    if verwaiste_fotos:
+        aenderung["$pull"] = {"schaden_fotos": {"id": {"$in": [e.get("id") for e in verwaiste_fotos]}}}
     if isinstance(frage, dict) and frage.get("question"):
         # Review 26.09.2026 (Nr. 60-62): die Runde wandert in den Verlauf;
         # rueckfrage_antworten behaelt nur die Antwort auf diese (letzte)
@@ -2093,6 +2164,10 @@ async def submit_protocol(appt_id: str, driver=Depends(current_driver)):
                                      "geändert — bitte neu laden, prüfen und erneut abschicken.")
         return {"ok": True, "status": (akt or {}).get("status", "unbekannt"),
                 "protocol_id": doc["id"], "bereits": True}
+    if verwaiste_fotos:
+        # die Eintraege sind gerade mit dem Abschicken herausgefallen -> Dateien loeschen
+        await SF.dateien_loeschen(db, [{"dealer_id": doc.get("dealer_id"), "schaden_fotos": verwaiste_fotos}],
+                                  "schadenfoto_schaden_entfernt")
     # Runde 12 (15.09.2026, Nr. 19): den Termin-Stand anfassen — ein Termin-
     # Update mit Beweisdaten-Aenderung, das den alten Stand gelesen hat,
     # scheitert danach an seiner Stand-Pruefung.
@@ -2136,7 +2211,8 @@ async def submit_protocol(appt_id: str, driver=Depends(current_driver)):
         # schon VORHER, bliebe er fuer immer liegen. Entwuerfe haben weder PDF
         # noch Unterschriften (die entstehen erst beim Abschluss).
         try:
-            await db.pickup_protocols.delete_one({"id": doc["id"], "status": "entwurf"})
+            if (await db.pickup_protocols.delete_one({"id": doc["id"], "status": "entwurf"})).deleted_count:
+                await SF.dateien_loeschen(db, [doc], "protokoll_entwurf_ohne_termin")
         except Exception:  # noqa: BLE001  (der Aufraeumjob holt es nach)
             log.exception("Verwaister Protokoll-Entwurf %s nicht geloescht", doc["id"])
         raise HTTPException(404, "Termin nicht gefunden")
@@ -2606,7 +2682,7 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
     filled = {k: doc.get(k) for k in
               ("vehicle_check", "documents", "keys_count", "keys_expected",
                "features", "condition", "damages_confirmed", "new_damages",
-               "notes")}
+               "notes", "lackmessungen")}
     # Pruefung 14.09.2026 (P2): Was der Chef freigegeben hat, gilt — Ort und
     # Verkaeufername aus dem Protokoll; die App-Werte nur, wenn dort nichts steht.
     filled["place"] = doc.get("place") or body.place or ""
@@ -3119,6 +3195,9 @@ async def protokolle_zur_freigabe(user=Depends(_chef_dep), response: Response = 
                 "abweichungen": PV.abweichungen(zeilen),
                 "vergleich": zeilen,
                 "neue_schaeden": d.get("new_damages") or [],
+                # Wunsch Ahmad 06.10.2026: Lackdicke-Messungen und Schadenfotos (7 Tage sichtbar)
+                "lackmessungen": d.get("lackmessungen") or [],
+                "schaden_fotos": SF.fuer_anzeige(d),
                 "schaeden_bestaetigt": d.get("damages_confirmed"),
                 "bemerkungen": d.get("notes") or "",
                 # Abnahme 12.09.2026: Der Chef bekam nur einen Auszug. Er soll
@@ -3570,3 +3649,158 @@ async def dealer_protocol_pdf(protocol_id: str, user=Depends(_dealer_dep)):
     if ist_sucher(user) and not await _protokoll_im_bereich(user, doc):
         raise HTTPException(404, "Protokoll nicht gefunden")
     return await _protokoll_pdf_antwort(doc)
+
+
+# ==========================================================================
+# Schadenfotos (Wunsch Ahmad 06.10.2026): Der Fahrer fotografiert, was er auf der Skizze markiert
+# (Schaden oder Lackdicke-Messung); der Chef sieht die Fotos bei der Freigabe — SF.SCHADENFOTO_SICHT_TAGE
+# Tage ab dem Hochladen, danach werden sie nicht mehr ausgeliefert (die Dateien bleiben gespeichert).
+# Regeln und Loeschung: schadenfotos.py.
+# ==========================================================================
+SCHADENFOTO_VOLL = (f"Höchstens {SF.SCHADENFOTO_MAX} Schadenfotos je Protokoll — bitte zuerst ein anderes "
+                    "Foto entfernen.")
+SCHADENFOTO_NICHT_GESPEICHERT = ("Diese Markierung ist noch nicht gespeichert — bitte einen Moment warten "
+                                 "und das Foto erneut hinzufügen.")
+
+
+def _schadenfoto_antwort(daten: bytes, key: str) -> Response:
+    from storage_service import guess_media_type
+    # wie die Abweichungsfotos (drivers.pickup_foto): nie im Browser-Cache halten
+    return Response(content=daten, media_type=guess_media_type(key),
+                    headers={"Cache-Control": "private, no-store"})
+
+
+async def _schadenfoto_laden(eintrag: Optional[dict]) -> Response:
+    from storage_service import StorageError, load_async
+    if not eintrag or not eintrag.get("key"):
+        raise HTTPException(404, "Foto nicht gefunden")
+    try:
+        daten = await load_async(eintrag["key"])
+    except StorageError:
+        raise HTTPException(404, "Foto nicht gefunden")
+    return _schadenfoto_antwort(daten, eintrag["key"])
+
+
+def _fotos_stand_filter(doc: dict) -> Dict[str, Any]:
+    """Optimistische Sperre fuer die Fotoliste: zaehlt jedes Hinzufuegen/Entfernen (fehlt = 0)."""
+    stand = int(doc.get("schaden_fotos_stand") or 0)
+    return {"schaden_fotos_stand": stand} if stand else {"schaden_fotos_stand": {"$in": [0, None]}}
+
+
+@router.post("/driver/appointments/{appt_id}/protocol/schaden-fotos")
+async def schaden_foto_hochladen(appt_id: str, body: SchadenFotoIn, driver=Depends(current_driver)):
+    """Ein Foto zu einem Schaden bzw. einer Lackdicke-Messung des ENTWURFS. Die Markierung muss schon
+    gespeichert sein (die App speichert vorher). Hoechstens SF.SCHADENFOTO_MAX aktive Fotos je Protokoll —
+    auch bei gleichzeitigem Hochladen (optimistische Sperre ueber schaden_fotos_stand)."""
+    import asyncio as _aio
+    from storage_service import (StorageError, bild_verkleinern, loeschen_oder_vormerken, make_key,
+                                 save_async, validate_image_bytes)
+    appt = await _appt_or_404(appt_id, driver)
+    _termin_offen_oder_409(appt)
+    doc = await _current(appt_id)
+    if not doc:
+        raise HTTPException(409, SCHADENFOTO_NICHT_GESPEICHERT)
+    if doc.get("status") != "entwurf":
+        await _speichern_abgelehnt(doc["id"])
+    if body.schaden_id not in SF.markierungs_ids(doc):
+        raise HTTPException(409, SCHADENFOTO_NICHT_GESPEICHERT)
+    if len(SF.aktive_fotos(doc)) >= SF.SCHADENFOTO_MAX:
+        raise HTTPException(409, SCHADENFOTO_VOLL)
+    try:
+        raw = base64.b64decode(body.photo_b64.split(",")[-1], validate=False)
+        validate_image_bytes(raw, wo="Schadenfoto")
+        # Verkleinern (EXIF/GPS raus, Bildbombe abgelehnt) in einem eigenen Faden
+        raw = await _aio.to_thread(bild_verkleinern, raw, "Schadenfoto")
+    except (StorageError, ValueError) as exc:
+        raise HTTPException(400, f"Foto konnte nicht gelesen werden: {exc}")
+    dealer_id = str(doc.get("dealer_id") or appt.get("dealer_id") or "x")
+    key = make_key("protocol", dealer_id, "schaden.jpg")
+    eintrag = {"id": uuid.uuid4().hex, "key": key, "schaden_id": body.schaden_id,
+               "erstellt_am": now_iso(), "von": driver["id"]}
+    fertig = False
+    try:
+        try:
+            await save_async(key, raw)
+        except StorageError as exc:
+            raise HTTPException(500, f"Foto konnte nicht gespeichert werden: {exc}")
+        for _versuch in range(3):
+            res = await db.pickup_protocols.update_one(
+                {"id": doc["id"], "status": "entwurf", **_fotos_stand_filter(doc),
+                 f"schaden_fotos.{SF.SCHADENFOTO_EINTRAEGE_MAX - 1}": {"$exists": False}},
+                {"$push": {"schaden_fotos": eintrag}, "$inc": {"schaden_fotos_stand": 1},
+                 "$set": {"updated_at": now_iso()}})
+            if res.modified_count:
+                fertig = True
+                break
+            # Zwischen Lesen und Schreiben hat sich etwas geaendert: neu lesen und erneut pruefen.
+            frisch = await db.pickup_protocols.find_one({"id": doc["id"]}, {"_id": 0})
+            if not frisch:
+                raise HTTPException(404, "Protokoll nicht gefunden")
+            doc = frisch
+            if doc.get("status") != "entwurf":
+                await _speichern_abgelehnt(doc["id"])
+            if body.schaden_id not in SF.markierungs_ids(doc):
+                raise HTTPException(409, SCHADENFOTO_NICHT_GESPEICHERT)
+            if len(SF.aktive_fotos(doc)) >= SF.SCHADENFOTO_MAX \
+                    or len(doc.get("schaden_fotos") or []) >= SF.SCHADENFOTO_EINTRAEGE_MAX:
+                raise HTTPException(409, SCHADENFOTO_VOLL)
+        if not fertig:
+            raise HTTPException(409, "Gerade wird ein anderes Foto gespeichert — bitte erneut versuchen.")
+    finally:
+        if not fertig:
+            await loeschen_oder_vormerken(db, key=key, grund="schadenfoto_nicht_uebernommen", dealer_id=dealer_id)
+    return {"id": eintrag["id"], "schaden_id": eintrag["schaden_id"], "erstellt_am": eintrag["erstellt_am"],
+            "sichtbar_bis": SF.sichtbar_bis(eintrag)}
+
+
+@router.delete("/driver/appointments/{appt_id}/protocol/schaden-fotos/{foto_id}")
+async def schaden_foto_entfernen(appt_id: str, foto_id: str, driver=Depends(current_driver)):
+    """Foto aus dem ENTWURF entfernen (Datei wird geloescht, ausser eine andere Version nennt sie noch)."""
+    appt = await _appt_or_404(appt_id, driver)
+    _termin_offen_oder_409(appt)
+    doc = await _current(appt_id)
+    eintrag = next((e for e in (doc or {}).get("schaden_fotos") or []
+                    if isinstance(e, dict) and e.get("id") == foto_id), None)
+    if not doc or not eintrag:
+        raise HTTPException(404, "Foto nicht gefunden")
+    if doc.get("status") != "entwurf":
+        await _speichern_abgelehnt(doc["id"])
+    res = await db.pickup_protocols.update_one(
+        {"id": doc["id"], "status": "entwurf", "schaden_fotos.id": foto_id},
+        {"$pull": {"schaden_fotos": {"id": foto_id}}, "$inc": {"schaden_fotos_stand": 1},
+         "$set": {"updated_at": now_iso()}})
+    if not res.modified_count:
+        akt = await db.pickup_protocols.find_one({"id": doc["id"]}, {"_id": 0, "status": 1})
+        if (akt or {}).get("status") != "entwurf":
+            await _speichern_abgelehnt(doc["id"])
+        return {"ok": True, "bereits": True}
+    await SF.dateien_loeschen(db, [{"dealer_id": doc.get("dealer_id"), "schaden_fotos": [eintrag]}],
+                              "schadenfoto_entfernt")
+    return {"ok": True}
+
+
+@router.get("/driver/appointments/{appt_id}/protocol/schaden-fotos/{foto_id}")
+async def schaden_foto_fahrer(appt_id: str, foto_id: str, driver=Depends(current_driver)):
+    """Der Fahrer sieht seine eigenen Fotos (Vorschau im Protokoll) — wie der Chef nur in der Sichtfrist."""
+    await _appt_or_404(appt_id, driver)
+    doc = await _current(appt_id)
+    eintrag = next((e for e in SF.aktive_fotos(doc or {}) if e.get("id") == foto_id), None)
+    if not eintrag or not SF.sichtbar(eintrag):
+        raise HTTPException(404, "Foto nicht gefunden")
+    return await _schadenfoto_laden(eintrag)
+
+
+@router.get("/protocols/{protocol_id}/schaden-fotos/{foto_id}")
+async def schaden_foto_chef(protocol_id: str, foto_id: str, user=Depends(_chef_dep)):
+    """Der Chef sieht die Fotos eines Protokolls seiner Firma — SF.SCHADENFOTO_SICHT_TAGE Tage ab dem
+    Hochladen; danach 410 (die Datei bleibt gespeichert, Entscheidung Ahmad 06.10.2026)."""
+    doc = await db.pickup_protocols.find_one(
+        {"id": protocol_id, "dealer_id": user["dealer_id"]},
+        {"_id": 0, "schaden_fotos": 1, "new_damages": 1, "lackmessungen": 1})
+    eintrag = next((e for e in SF.aktive_fotos(doc or {}) if e.get("id") == foto_id), None)
+    if not eintrag:
+        raise HTTPException(404, "Foto nicht gefunden")
+    if not SF.sichtbar(eintrag):
+        raise HTTPException(410, f"Schadenfotos sind nur {SF.SCHADENFOTO_SICHT_TAGE} Tage nach der "
+                                 "Aufnahme sichtbar.")
+    return await _schadenfoto_laden(eintrag)

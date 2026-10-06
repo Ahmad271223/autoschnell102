@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { driverApi, openDriverPdf } from "@/context/DriverContext";
 import { errMsg } from "@/lib/api";
+import { verkleinereBildDatei } from "@/lib/bilder";
 import { preisText } from "@/lib/preis";
 import { protokollZustand } from "@/lib/protokollZustand";
 import { toast } from "sonner";
@@ -141,6 +142,8 @@ export default function Protokoll() {
   // Erstes Laden gescheitert (z. B. Fahrt nicht mehr angenommen): Grund zeigen
   // statt endlos "lade…".
   const [ladeFehler, setLadeFehler] = useState(null);
+  // Wunsch Ahmad 06.10.2026: Fotos zu Schäden und Lackdicke-Messungen (eigener Upload je Foto)
+  const [schadenFotos, setSchadenFotos] = useState([]);
   // RP-546: Sicherung im Tab — einmal je Öffnen der Seite prüfen und
   // wiederherstellen, erst danach laufend sichern.
   const sicherungGeprueft = useRef(false);
@@ -156,6 +159,7 @@ export default function Protokoll() {
       setData(r.data);
       const p = r.data.protocol;
       revRef.current = p?.revision ?? null;
+      setSchadenFotos(Array.isArray(p?.schaden_fotos) ? p.schaden_fotos : []);
       if (p) {
         const server = entwurfAusServer(p);
         basisRef.current = server;
@@ -425,6 +429,34 @@ export default function Protokoll() {
     saveTimer.current = setTimeout(() => { autoSpeichernRef.current?.(); }, 1200);
   }, [gesperrt]);
 
+  // Wunsch Ahmad 06.10.2026: Foto zu einer Markierung. Die Markierung muss beim Server sein —
+  // deshalb erst einen wartenden Autosave sofort abschicken, dann das (verkleinerte) Foto hochladen.
+  // false = abbrechen (weitere ausgewählte Fotos nicht mehr versuchen).
+  const fotoHinzu = useCallback(async (schadenId, datei) => {
+    try {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+      await speichern({ nurWennGeaendert: true });
+      const photoB64 = await verkleinereBildDatei(datei);
+      const r = await driverApi.post(`/driver/appointments/${id}/protocol/schaden-fotos`,
+                                     { schaden_id: schadenId, photo_b64: photoB64 });
+      setSchadenFotos((l) => [...l, r.data]);
+      return true;
+    } catch (e) {
+      toast.error(errMsg(e, e?.message || "Foto konnte nicht hochgeladen werden"));
+      return false;
+    }
+  }, [id, speichern]);
+  const fotoWeg = useCallback(async (fotoId) => {
+    if (!window.confirm("Dieses Foto entfernen?")) return;
+    try {
+      await driverApi.delete(`/driver/appointments/${id}/protocol/schaden-fotos/${fotoId}`);
+      setSchadenFotos((l) => l.filter((x) => x.id !== fotoId));
+    } catch (e) {
+      toast.error(errMsg(e, "Foto konnte nicht entfernt werden"));
+    }
+  }, [id]);
+
   // Beim Verlassen der Seite einen noch wartenden Autosave sofort abschicken
   // (vorher lief er nach dem Timer ins Leere oder ging ganz verloren).
   useEffect(() => () => {
@@ -603,6 +635,13 @@ export default function Protokoll() {
       const offen = (f.new_damages || []).filter((d) => schwereOffen(d).length > 0)
         .map((d) => `${d.type_label || d.type_key} ${d.zone || ""}: ${schwereOffen(d).join(", ")}`.trim());
       toast.error(`Bitte bei jedem neuen Schaden alle Angaben wählen („unbekannt“ geht auch): ${offen.join(" · ")}`,
+                  { duration: 9000 });
+      return;
+    }
+    // Wunsch Ahmad 06.10.2026: jede Lackdicke-Messung braucht ihren Wert (der Server prüft es ebenso).
+    const ohneWert = (f.lackmessungen || []).filter((m) => m.wert_um === null || m.wert_um === undefined);
+    if (ohneWert.length) {
+      toast.error(`Bitte bei jeder Lackdicke-Messung den Wert in µm eintragen: ${ohneWert.map((m) => m.zone).join(", ")}`,
                   { duration: 9000 });
       return;
     }
@@ -1176,13 +1215,21 @@ export default function Protokoll() {
             Zuständen weiter bedienbar — Tipps auf die Skizze wurden nie
             gespeichert und gingen still verloren. Jetzt nur noch Anzeige. */}
         {gesperrt ? (
-          (f.new_damages || []).length === 0 ? (
+          (f.new_damages || []).length === 0 && (f.lackmessungen || []).length === 0 ? (
             <div className="text-sm text-zinc-500">Keine neuen Schäden erfasst.</div>
           ) : (
-            <div className="space-y-1 text-sm">
-              {f.new_damages.map((d, i) => (
+            <div className="space-y-1 text-sm" data-testid="protokoll-vorort-gesperrt">
+              {(f.new_damages || []).map((d, i) => (
                 <div key={d.id || i} className="text-red-400">
                   • {[d.type_label, d.zone].filter(Boolean).join(" — ")}
+                  {schadenFotos.some((x) => x.schaden_id === d.id) && (
+                    <span className="text-zinc-500"> · {schadenFotos.filter((x) => x.schaden_id === d.id).length} Foto(s)</span>
+                  )}
+                </div>
+              ))}
+              {(f.lackmessungen || []).map((m, i) => (
+                <div key={m.id || `l${i}`} className="text-zinc-300">
+                  • Lackdicke — {m.zone}: {m.wert_um ?? "?"} µm
                 </div>
               ))}
             </div>
@@ -1191,11 +1238,22 @@ export default function Protokoll() {
           <DamageSelector
             damages={f.new_damages || []}
             onChange={(list) => upd({ new_damages: list })}
+            lackMessungen={f.lackmessungen || []}
+            onLackChange={(list) => upd({ lackmessungen: list })}
+            fotos={{
+              liste: schadenFotos,
+              max: data?.template?.schadenfoto_max || 25,
+              sichtTage: data?.template?.schadenfoto_sicht_tage || 7,
+              onHinzu: fotoHinzu,
+              onWeg: fotoWeg,
+              pfad: (fotoId) => `/driver/appointments/${id}/protocol/schaden-fotos/${fotoId}`,
+              client: driverApi,
+            }}
           />
         )}
         <div className="text-xs text-zinc-500 mt-3">
-          Fotos zu Abweichungen machst du zusätzlich im Abhol-Check —
-          sie erscheinen automatisch in der Fahrzeugakte des Händlers.
+          Zu jedem Schaden und jeder Lackdicke-Messung kannst du Fotos machen (Knopf „Foto“) — der Händler
+          sieht sie bei der Freigabe. Fotos zu Abweichungen nach der Abholung weiter im Abhol-Check.
         </div>
       </Section>
 

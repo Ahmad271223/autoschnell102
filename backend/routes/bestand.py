@@ -803,12 +803,23 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
     # dem Abschluss (wie der Protokoll-Endpunkt), und die Gesamtzahl steht dabei.
     protokoll_filter = {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"],
                         "status": "final", "superseded": {"$ne": True}, **nur_eigene}
+    # Wunsch Ahmad 06.10.2026: der Chef sieht hier auch die Schadenfotos und Lackdicke-Messungen des Fahrers
+    # (Fotos SCHADENFOTO_SICHT_TAGE Tage ab dem Hochladen; Sucher nicht).
+    chef_felder = {} if ist_sucher else {"schaden_fotos": 1, "lackmessungen": 1, "new_damages": 1}
     protocols = await db.pickup_protocols.find(
         protokoll_filter,
         {"_id": 0, "id": 1, "version": 1, "finalized_at": 1, "driver_name": 1,
          "seller_name": 1, "place": 1, "corrects_version": 1, "superseded": 1,
-         "appointment_id": 1},
+         "appointment_id": 1, **chef_felder},
     ).sort([("finalized_at", -1), ("version", -1)]).to_list(20)
+    if not ist_sucher:
+        import schadenfotos as _sf
+        for p in protocols:
+            p["schaden_fotos"] = _sf.fuer_anzeige(p)
+            p["markierungen"] = _sf.markierungen(p)
+            p["lackmessungen"] = [{"id": m.get("id"), "zone": m.get("zone"), "wert_um": m.get("wert_um")}
+                                  for m in p.get("lackmessungen") or [] if isinstance(m, dict)]
+            p.pop("new_damages", None)
     protocols_gesamt = await db.pickup_protocols.count_documents(protokoll_filter)
     # Pruefbericht 20.09.2026 (R1-22): Versionen zaehlen je Termin — bei
     # mehreren Terminen zum Fahrzeug standen zwei "Version 1" gleichartig
