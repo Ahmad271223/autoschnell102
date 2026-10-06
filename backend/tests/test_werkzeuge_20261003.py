@@ -34,8 +34,9 @@ def test_01_standard_nur_10001_und_10002(monkeypatch):
     # 03.10.2026 abends (Wunsch Ahmad): "schalte das Programm auch frei jetzt fuer 10001"
     monkeypatch.delenv("AUTOPOINTER_VERGLEICH_KUNDEN", raising=False)
     monkeypatch.setenv("BROWSER_HELFER_KUNDEN", "")      # 04.10.2026: zweites Werkzeug, hier nur das Programm
-    assert wz.freigegebene_kunden(WID) == frozenset({"10001", "10002"})
+    assert wz.freigegebene_kunden(WID) == frozenset({"10001", "10002", "10007"})   # 10007 seit 06.10.2026
     assert wz.ist_freigegeben(WID, 10002)
+    assert wz.ist_freigegeben(WID, 10007)
     assert wz.ist_freigegeben(WID, "10002")
     assert wz.ist_freigegeben(WID, " 010002 ")
     assert wz.ist_freigegeben(WID, 10001)

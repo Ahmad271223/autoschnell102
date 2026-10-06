@@ -3,14 +3,14 @@
 
 03.10.2026 (Wunsch Ahmad): Der AutoPointer-Vergleich (Windows-Programm, Quelle
 in autopointer-vergleich/) ist erst einmal NUR fuer Kunde 10002 freigeschaltet, seit dem Abend
-auch fuer Kunde 10001 (Wunsch Ahmad).
+auch fuer Kunde 10001, seit 06.10.2026 auch fuer Kunde 10007 (Wunsch Ahmad).
 "Alle anderen bekommen das nicht, die sollen das gar nicht sehen": Fuer andere
 Firmen gibt es weder einen Menuepunkt noch einen Download — die Route antwortet
 404, als gaebe es sie nicht.
 
 Freigabe je Werkzeug ueber eine Umgebungsvariable mit Kundennummern (Firma =
 dealers.kunden_nr; Chef UND alle Sucher der Firma). Standard ohne Variable:
-10001 und 10002. Mehrere Kunden: AUTOPOINTER_VERGLEICH_KUNDEN=10001,10002,10017
+10001, 10002 und 10007. Mehrere Kunden: AUTOPOINTER_VERGLEICH_KUNDEN=10001,10002,10007,10017
 
 Die Programmdatei liegt im Datei-Speicher (S3/R2 bzw. lokal) unter
 werkzeuge/<id>/<dateiname>, Version/Groesse/Pruefsumme in der Sammlung
@@ -73,7 +73,7 @@ WERKZEUGE = {
         "dateiname": "AutoSchnell-Vergleich.exe",
         "schluessel": "werkzeuge/autopointer-vergleich/AutoSchnell-Vergleich.exe",
         "kunden_env": "AUTOPOINTER_VERGLEICH_KUNDEN",
-        "kunden_standard": "10001,10002",
+        "kunden_standard": "10001,10002,10007",
     },
     BROWSER_HELFER: {
         "name": "Browser-Helfer für Chrome und Edge",
@@ -96,7 +96,7 @@ WERKZEUGE = {
         "dateiname": "AutoSchnell-Helfer.zip",
         "schluessel": "werkzeuge/browser-helfer/AutoSchnell-Helfer.zip",
         "kunden_env": "BROWSER_HELFER_KUNDEN",
-        "kunden_standard": "10001,10002",
+        "kunden_standard": "10001,10002,10007",
     },
 }
 
