@@ -290,10 +290,9 @@ def vertrag_mail(*, vertrag: dict, firma: dict, sucher: dict,
             f'{f" · {escape(firmenname)}" if firmenname else ""}'
             + (f'<br>Telefon: {escape(sucher_tel)}' if sucher_tel else "")
             + (f'<br>E-Mail: <a href="mailto:{escape(sucher_mail)}" '
-               f'style="color:{FARBE_GRAU}">{escape(sucher_mail)}</a>' if sucher_mail else "")
-            # RP-473: nur, wenn eine Antwort wirklich beim Sucher/der Firma ankommt
-            + ('<br><br>Antworten auf diese E-Mail gehen direkt an '
-               + escape(sucher_name) + '.' if antwort_ok else ""))
+               f'style="color:{FARBE_GRAU}">{escape(sucher_mail)}</a>' if sucher_mail else ""))
+            # Wunsch Ahmad 06.10.2026: der Satz "Antworten auf diese E-Mail gehen direkt an <Name>." steht nicht
+            # mehr unter der Mail (RP-473 hatte ihn nur an eine gueltige Antwortadresse gebunden)
     )
     return betreff, text, _rahmen(inhalt)
 

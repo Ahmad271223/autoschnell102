@@ -297,7 +297,7 @@ def test_rp473_ohne_antwortadresse_keine_zusage():
                                     sucher={"first_name": "Max", "email": "max@f.test"},
                                     nachricht="", betreff=None)
     assert "Ihre Antwort geht direkt an Max (max@f.test)" in text
-    assert "gehen direkt an" in html
+    assert "gehen direkt an" not in html          # Wunsch Ahmad 06.10.2026: Satz unter der Mail weg
 
 
 def test_rp416_steuerfeld_zaehlt_nicht_zum_inhalt():
