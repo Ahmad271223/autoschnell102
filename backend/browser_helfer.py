@@ -34,8 +34,14 @@ from urllib.parse import parse_qs, parse_qsl, urlparse
 #: Grenzen fuer eine eingeschickte Seite (mobile.de-Inserat ~1 MB, gepackt ~200 KB)
 MAX_GEPACKT = 3 * 1024 * 1024
 #: Paket 2 (05.10.2026): 4 statt 8 MB — echte Inserats-/Ergebnisseiten liegen bei 1–2 MB; vier gleichzeitige
-#: Auswertungen halten so hoechstens ~64 MB Text im Speicher
+#: Auswertungen halten so hoechstens ~64 MB Text im Speicher.
+#: ACHTUNG (Befund 06.10.2026): Kleinanzeigen im neuen Astro-Format (~28 <astro-island>, ~12 davon mit den kompletten
+#: Inseratsdaten in props) hat bei 25 Fotos 6,2 MB — die Grenze gilt deshalb erst NACH _astro_props_kuerzen (2,1 MB).
+#: Nicht ohne Messung echter Seiten senken.
 MAX_HTML = 4 * 1024 * 1024
+#: Befund 06.10.2026 ("Die Seite ist zu groß" bei Kleinanzeigen): so viel darf eine Seite ENTPACKT haben, bevor die
+#: Wiederholungen entfernt sind (_astro_props_kuerzen) — danach gilt wieder MAX_HTML. Schutz gegen Zip-Bomben bleibt.
+MAX_ROH = 16 * 1024 * 1024
 
 #: Pruefung 05.10.2026 (Paket 1): was aus einer Browserseite gespeichert wird, gilt 24 h fuer ALLE Konten —
 #: deshalb feste Grenzen fuer jeden Wert (fahrzeug_bereinigen), bevor irgendetwas gespeichert wird.
@@ -107,8 +113,42 @@ async def inserat_lesen(db, cache_key: str, user_id: str) -> Optional[Tuple[dict
 
 
 # ---------------------------------------------------------------- Seite entpacken
+# Befund 06.10.2026: Kleinanzeigen zeigt Inserate im Browser im neuen Seitenformat ("Astro"). Jede Komponente
+# (<astro-island props="…">) traegt die KOMPLETTEN Inseratsdaten samt aller Bildadressen — bei 25 Fotos ~430 KB,
+# rund zwoelfmal auf derselben Seite: 6,2 MB. Gelesen wird ohnehin nur der sichtbare Teil (viewad-*, Tabelle) und die
+# Bildadressen; dafuer reicht EINE Kopie jedes Werts (6,2 -> 2,1 MB).
+_GROSSE_PROPS = re.compile(r'(\sprops=")([^"]{10000,})(")')
+
+
+def _astro_props_kuerzen(html: str) -> str:
+    """Wiederholte grosse props-Werte leeren (der erste bleibt). Reicht das nicht fuer MAX_HTML, bleibt nur der
+    erste grosse Wert ueberhaupt (darin stehen die Bildadressen der Galerie)."""
+    if 'props="' not in html:
+        return html
+    gesehen = set()
+
+    def _doppelt(m):
+        merkmal = (len(m.group(2)), hash(m.group(2)))
+        if merkmal in gesehen:
+            return m.group(1) + m.group(3)
+        gesehen.add(merkmal)
+        return m.group(0)
+    kurz = _GROSSE_PROPS.sub(_doppelt, html)
+    if len(kurz) > MAX_HTML:
+        erster = []
+
+        def _nur_erster(m):
+            if erster:
+                return m.group(1) + m.group(3)
+            erster.append(1)
+            return m.group(0)
+        kurz = _GROSSE_PROPS.sub(_nur_erster, kurz)
+    return kurz
+
+
 def seite_entpacken(b64: str) -> str:
-    """base64(gzip(HTML)) -> HTML. Groessen-Grenze VOR dem vollstaendigen Entpacken (Zip-Bombe)."""
+    """base64(gzip(HTML)) -> HTML. Groessen-Grenze VOR dem vollstaendigen Entpacken (Zip-Bombe): hoechstens MAX_ROH
+    entpackt, nach dem Kuerzen wiederholter Seitendaten (_astro_props_kuerzen) hoechstens MAX_HTML."""
     try:
         roh = base64.b64decode(str(b64 or ""), validate=True)
     except (ValueError, TypeError):
@@ -117,12 +157,18 @@ def seite_entpacken(b64: str) -> str:
         raise SeiteUngueltig("Die Seite ist leer oder zu groß.")
     entpacker = zlib.decompressobj(16 + zlib.MAX_WBITS)
     try:
-        daten = entpacker.decompress(roh, MAX_HTML + 1)
+        daten = entpacker.decompress(roh, MAX_ROH + 1)
     except zlib.error:
         raise SeiteUngueltig("Die Seite kam nicht lesbar an.")
-    if len(daten) > MAX_HTML or entpacker.unconsumed_tail:
+    if len(daten) > MAX_ROH or entpacker.unconsumed_tail:
         raise SeiteUngueltig("Die Seite ist zu groß.")
-    return daten.decode("utf-8", errors="replace")
+    html = daten.decode("utf-8", errors="replace")
+    del daten
+    if len(html) > MAX_HTML:
+        html = _astro_props_kuerzen(html)
+    if len(html) > MAX_HTML:
+        raise SeiteUngueltig("Die Seite ist zu groß.")
+    return html
 
 
 # ---------------------------------------------------------------- Next.js-Daten

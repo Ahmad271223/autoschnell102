@@ -914,3 +914,71 @@ def test_43_fehlerantwort_spiegelt_keine_ganze_seite(welt):
     # ... auch wenn das Echo der ganze Anfragekoerper ist (Pflichtfeld fehlt)
     r = requests.post(f"{API}/werkzeuge/{WID}/marktlage", timeout=60, json={"url": MOBILE_URL, "seite": gross})
     assert r.status_code == 422 and len(r.content) < 5000, (r.status_code, len(r.content))
+
+
+# ------------------------------------------------------------ Befund 06.10.2026: Kleinanzeigen im Astro-Format
+_KA_ASTRO_URL = "https://www.kleinanzeigen.de/s-anzeige/toyota-yaris-1-5-hybrid/3532756704-216-8369"
+
+
+def _ka_astro_seite(inseln: int = 12, props_kb: int = 450, verschieden: bool = False) -> str:
+    """Wie die echte Seite: die sichtbaren Teile (viewad-*, Tabelle) und viele <astro-island>, die jeweils die
+    kompletten Inseratsdaten samt Bildadressen in props tragen (Kleinanzeigen, Oktober 2026)."""
+    bilder = "".join(f"&quot;https://img.kleinanzeigen.de/api/v1/prod-ads/images/ab/{i:04d}?rule=$_59.AUTO&quot;,"
+                     for i in range(200))
+    daten = ("{&quot;adData&quot;:[0,{&quot;images&quot;:[" + bilder + "]}]}") * max(1, props_kb * 1024 // len(bilder))
+    teile = [f'<astro-island uid="u{i}" component-url="/_astro/K{i}.js" props="{daten + (str(i) if verschieden else "")}">'
+             f"<div>Teil {i}</div></astro-island>" for i in range(inseln)]
+    return ("<html><head><title>Toyota Yaris</title>"
+            '<link rel="canonical" href="https://www.kleinanzeigen.de/s-anzeige/toyota-yaris-1-5-hybrid/3532756704-216-8369">'
+            "</head><body>"
+            '<h1 id="viewad-title">Toyota Yaris 1.5 Hybrid Style</h1>'
+            '<h2 id="viewad-price">15.220 €</h2>'
+            '<span id="viewad-locality">74259 Baden-Württemberg - Widdern</span>'
+            '<div id="viewad-details"><div>Marke</div><div>Toyota</div><div>Modell</div><div>Yaris</div>'
+            "<div>Kilometerstand</div><div>83.895 km</div><div>Erstzulassung</div><div>Januar 2020</div>"
+            "<div>Kraftstoffart</div><div>Hybrid</div><div>Leistung</div><div>101 PS</div>"
+            "<div>Getriebe</div><div>Automatik</div></div>"
+            + "".join(teile) + "</body></html>")
+
+
+def test_40_kleinanzeigen_astro_seite_ueber_4_mb_wird_gekuerzt_und_gelesen():
+    """Befund 06.10.2026: "Die Seite ist zu groß." bei einem Kleinanzeigen-Auto (es war zufaellig reserviert —
+    damit hatte es nichts zu tun). Das neue Seitenformat wiederholt die Inseratsdaten ~12-mal (6,2 MB); seit
+    Paket 2 (MAX_HTML 4 MB) wurde das abgelehnt. Jetzt: bis MAX_ROH entpacken, Wiederholungen leeren, lesen."""
+    import time
+    html = _ka_astro_seite()
+    assert len(html) > bh.MAX_HTML, len(html)
+    start = time.perf_counter()
+    entpackt = bh.seite_entpacken(_seite(html))
+    dauer = time.perf_counter() - start
+    assert len(entpackt) < bh.MAX_HTML and entpackt.count('props=""') == 11
+    assert dauer < 2.0, f"Kuerzen dauerte {dauer:.2f}s — muss linear bleiben"
+    fahrzeug, _ = bh.kleinanzeigen_inserat(entpackt, "3532756704", _KA_ASTRO_URL)
+    assert fahrzeug["make_label"] == "Toyota" and fahrzeug["mileage"] == 83895
+    assert fahrzeug["first_registration"] == "01/2020"
+    assert fahrzeug["images"], "die Bildadressen aus der ersten Kopie bleiben"
+
+
+def test_41_alle_verschieden_dann_nur_die_erste_kopie_und_grenzen_bleiben():
+    html = _ka_astro_seite(inseln=12, verschieden=True)
+    assert len(html) > bh.MAX_HTML
+    entpackt = bh.seite_entpacken(_seite(html))
+    assert len(entpackt) < bh.MAX_HTML and entpackt.count('props=""') == 11
+    # ohne props (keine Astro-Seite) bleibt es bei der Grenze nach dem Kuerzen
+    with pytest.raises(bh.SeiteUngueltig):
+        bh.seite_entpacken(_seite("<p>" + "x" * (bh.MAX_HTML + 10) + "</p>"))
+    # Zip-Bombe ueber MAX_ROH: abgelehnt, ohne alles zu entpacken
+    bombe = base64.b64encode(gzip.compress(b"a" * (bh.MAX_ROH + 10))).decode()
+    with pytest.raises(bh.SeiteUngueltig):
+        bh.seite_entpacken(bombe)
+    assert bh.MAX_ROH == 16 * 1024 * 1024 and bh.MAX_HTML == 4 * 1024 * 1024
+
+
+def test_42_kuerzen_bleibt_linear_bei_vielen_kurzen_props():
+    """Paket 1: keine quadratischen Muster — viele kurze props (unter der 10-KB-Schwelle) und ein offenes
+    props=" ohne Ende laufen in Sekundenbruchteilen."""
+    import time
+    viele = '<astro-island props="kurz">' * 200_000 + ' props="' + "y" * 500_000
+    start = time.perf_counter()
+    assert bh._astro_props_kuerzen(viele) == viele
+    assert time.perf_counter() - start < 2.0
