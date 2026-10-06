@@ -229,6 +229,7 @@ services:
       # Prozesse — wer sendet, bekommt das ganze RESEND_RATE; der Anteil je Prozess gilt nur
       # noch, wenn die Datenbank weg ist. Hoeheres Limit bei Resend gebucht? RESEND_RATE anheben.
       - RESEND_RATE=${RESEND_RATE:-10}
+      - RESEND_TAKT_GEMEINSAM=${RESEND_TAKT_GEMEINSAM:-true}
       # Pruefbericht 20.09. (P-18): groessere Anhaenge werden nicht per Mail verschickt.
       - MAIL_ANHANG_MAX_BYTES=${MAIL_ANHANG_MAX_BYTES:-20971520}
       # Wunsch Ahmad 25.09.2026: KI-Abholbewertung (Claude). Schluessel nur in
