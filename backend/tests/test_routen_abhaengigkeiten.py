@@ -147,6 +147,7 @@ CHEF_ROUTEN = {
     "/api/protocols/rueckfragen-offen",
     "/api/protocols/{protocol_id}/freigabe",
     "/api/protocols/{protocol_id}/ki-bewertung", "/api/protocols/{protocol_id}/ki-bewertung/neu",   # KI-Abholbewertung (25.09.2026)
+    "/api/protocols/{protocol_id}/schaden-fotos/{foto_id}",   # Schadenfotos des Fahrers, nur Chef (06.10.2026)
     # Programme (03.10.2026): wer aus der Firma wann welches Auto verglichen hat, PC eines Suchers trennen
     "/api/werkzeuge/{werkzeug_id}/firma", "/api/werkzeuge/{werkzeug_id}/verbindungen/{konto_id}",
 }
