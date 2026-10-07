@@ -140,12 +140,16 @@ export default function Vergleich() {
     });
     return () => { aktiv = false; };
   }, [restored]);
-  // Portal-Toggles — Zustand wird in localStorage gespeichert
+  // Portal-Toggles. Wunsch Ahmad 08.10.2026: EINE Wahl je Konto (users.vergleich_portale) — sie gilt auch fuer das
+  // Windows-Programm und die Browser-Erweiterung; der Browser-Speicher ist nur noch der Rueckfall (alte Konten).
+  const kontoPortale = user?.vergleich_portale;
   const [portalMobile, setPortalMobile] = useState(() => {
+    if (kontoPortale && typeof kontoPortale.mobile === "boolean") return kontoPortale.mobile;
     return einstellungLesen(lokalerSpeicher(),
                             "ah_portal_mobile", user?.id, true);
   });
   const [portalAutoscout, setPortalAutoscout] = useState(() => {
+    if (kontoPortale && typeof kontoPortale.autoscout === "boolean") return kontoPortale.autoscout;
     return einstellungLesen(lokalerSpeicher(),
                             "ah_portal_autoscout", user?.id, true);
   });
@@ -161,16 +165,38 @@ export default function Vergleich() {
   // Moment des Starts waeren veraltet, wenn der Sucher inzwischen umschaltet.
   const schalterRef = useRef({ mobile: portalMobile, autoscout: portalAutoscout, auto: filterAuto });
 
-  const toggleMobile = (v) => {
-    setPortalMobile(v);
-    schalterRef.current.mobile = v;
-    einstellungSchreiben(lokalerSpeicher(), "ah_portal_mobile", kontoId, v);
+  // Kontowert nachziehen, sobald /auth/me ihn liefert (oder ein anderes Geraet ihn geaendert hat)
+  const kontoMobile = kontoPortale?.mobile;
+  const kontoAutoscout = kontoPortale?.autoscout;
+  useEffect(() => {
+    if (typeof kontoMobile === "boolean") { setPortalMobile(kontoMobile); schalterRef.current.mobile = kontoMobile; }
+    if (typeof kontoAutoscout === "boolean") {
+      setPortalAutoscout(kontoAutoscout); schalterRef.current.autoscout = kontoAutoscout;
+    }
+  }, [kontoMobile, kontoAutoscout]);
+
+  const portaleSetzen = (mobile, autoscout) => {
+    if (!mobile && !autoscout) {
+      toast.info("Mindestens ein Portal muss an sein.");
+      return;
+    }
+    const vorher = { mobile: portalMobile, autoscout: portalAutoscout };
+    setPortalMobile(mobile);
+    setPortalAutoscout(autoscout);
+    schalterRef.current.mobile = mobile;
+    schalterRef.current.autoscout = autoscout;
+    einstellungSchreiben(lokalerSpeicher(), "ah_portal_mobile", kontoId, mobile);
+    einstellungSchreiben(lokalerSpeicher(), "ah_portal_autoscout", kontoId, autoscout);
+    api.put("/auth/vergleich-portale", { mobile, autoscout }).catch((e) => {
+      setPortalMobile(vorher.mobile);
+      setPortalAutoscout(vorher.autoscout);
+      schalterRef.current.mobile = vorher.mobile;
+      schalterRef.current.autoscout = vorher.autoscout;
+      toast.error(errMsg(e, "Portalwahl nicht gespeichert – bitte erneut versuchen."));
+    });
   };
-  const toggleAutoscout = (v) => {
-    setPortalAutoscout(v);
-    schalterRef.current.autoscout = v;
-    einstellungSchreiben(lokalerSpeicher(), "ah_portal_autoscout", kontoId, v);
-  };
+  const toggleMobile = (v) => portaleSetzen(v, portalAutoscout);
+  const toggleAutoscout = (v) => portaleSetzen(portalMobile, v);
   const toggleFilterAuto = (v) => {
     setFilterAuto(v);
     schalterRef.current.auto = v;
@@ -677,7 +703,8 @@ export default function Vergleich() {
             type="button"
             data-testid="toggle-mobile"
             onClick={() => toggleMobile(!portalMobile)}
-            title={portalMobile ? "mobile.de aktiv — klicken zum Deaktivieren" : "mobile.de aktivieren"}
+            title={(portalMobile ? "mobile.de aktiv — klicken zum Deaktivieren" : "mobile.de aktivieren")
+              + " (gilt auch für das Windows-Programm und die Browser-Erweiterung)"}
             aria-label="mobile.de ein-/ausschalten"
             aria-pressed={portalMobile}
             className="shrink-0 p-1.5 rounded-xl bg-transparent border-0 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-red)]"
@@ -689,7 +716,8 @@ export default function Vergleich() {
             type="button"
             data-testid="toggle-autoscout"
             onClick={() => toggleAutoscout(!portalAutoscout)}
-            title={portalAutoscout ? "AutoScout24 aktiv — klicken zum Deaktivieren" : "AutoScout24 aktivieren"}
+            title={(portalAutoscout ? "AutoScout24 aktiv — klicken zum Deaktivieren" : "AutoScout24 aktivieren")
+              + " (gilt auch für das Windows-Programm und die Browser-Erweiterung)"}
             aria-label="AutoScout24 ein-/ausschalten"
             aria-pressed={portalAutoscout}
             className="shrink-0 p-1.5 rounded-xl bg-transparent border-0 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-red)]"

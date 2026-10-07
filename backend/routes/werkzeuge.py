@@ -420,7 +420,9 @@ async def werkzeug_status(werkzeug_id: str,
     antwort = {"ok": True, "konto": konto["konto"], "name": konto["name"], "firma": firma.get("company_name") or "",
                "pc_name": v.get("pc_name") or "", "abo_bis": abo.get("expires_at"),
                "profil": (dealer or {}).get("active_profile", "inland"),
-               "aktuelle_version": meta.get("version"), "programm_name": wz.WERKZEUGE[werkzeug_id]["name"]}
+               "aktuelle_version": meta.get("version"), "programm_name": wz.WERKZEUGE[werkzeug_id]["name"],
+               # 08.10.2026: Portalwahl kommt aus AutoSchnell (Programm ab 1.5.8, Erweiterung ab 2.7.2 zeigen sie)
+               "portale": wz.portale_von(user)}
     if _ist_browser(werkzeug_id):
         # Pruefung 05.10.2026 (Nr. 15): der Helfer fragt /programm-suche nur, wenn das Konto das Windows-Programm hat
         antwort["programm_verbunden"] = await db[wz.SAMMLUNG_VERBINDUNGEN].count_documents(
@@ -514,6 +516,8 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     # Befund 04.10.2026: unplausible EZ/km sagen — die Filter bleiben wie eingestellt (wz.plausibel)
     melden = wz.plausibel(f)
     links, hinweise = wz.vergleichs_links(vehicle, regeln)      # Navi + Beschaedigte wie eingestellt (04.10.)
+    # 08.10.2026: nur die Portale, die das Konto in AutoSchnell gewaehlt hat (eine Wahl fuer App/Programm/Helfer)
+    links, hinweise = wz.nach_portalen(links, hinweise, wz.portale_von(user))
     if erkannt.pop("aus_beschreibung", False):
         melden.insert(0, f"Modell aus der Beschreibung übernommen: {erkannt['modell']} – bitte kurz prüfen.")
     if verbleibend in (50, 20, 5, 1):
@@ -526,7 +530,9 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     # Wunsch Ahmad 07.10.2026: hat das Konto den Browser-Helfer, liest der das Inserat im Browser — das Programm
     # oeffnet das Inserat als Tab mit, der Helfer schickt die Seite (werkzeug_inserate, 24 h), der Kaufvertrag nimmt
     # sie. Kein Apify, kein Tageslimit, keine 32/128 Plaetze. Ohne Helfer wie bisher: Vorab-Abruf ueber Apify.
-    im_browser = (not body.probelauf and bool(f["inserat_url"]) and wz.inserat_im_browser_an() and helfer_da > 0)
+    # ohne Link (abgewaehltes oder unbekanntes Portal) oeffnet das Programm auch keinen Inserat-Tab -> Vorab wie bisher
+    im_browser = (not body.probelauf and bool(f["inserat_url"]) and wz.inserat_im_browser_an() and helfer_da > 0
+                  and bool(links))
     if body.probelauf:
         vorab = {"status": "probelauf", "hinweis": ""}
     elif im_browser:
@@ -725,6 +731,7 @@ async def werkzeug_inserat(werkzeug_id: str, body: InseratIn,
     # Lockangebote …), sortiert /marktlage fuer die Ampel weiter aus.
     try:
         links, hinweise = wz.vergleichs_links(fahrzeug, regeln)
+        links, hinweise = wz.nach_portalen(links, hinweise, wz.portale_von(user))      # 08.10.2026
         kurz = bh.fahrzeug_kurz(fahrzeug, identity, inserat_url)
         # wie im Programm: unplausible EZ/km sagen (Filter bleiben wie eingestellt)
         melden = wz.plausibel(kurz)

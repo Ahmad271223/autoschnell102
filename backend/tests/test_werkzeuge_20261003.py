@@ -847,6 +847,52 @@ def test_59_inserat_im_browser_statt_apify_wenn_der_helfer_verbunden_ist(welt):
     db.link_jobs.delete_many({"url": url})
 
 
+def test_59b_portalwahl_nur_einmal_in_autoschnell():
+    """Wunsch Ahmad 08.10.2026: EINE Portalwahl je Konto — ohne Eintrag beide, beide aus gibt es nicht; Links und
+    die Hinweise "kein <Portal>-Vergleich" der abgewaehlten Portale fallen weg."""
+    assert wz.portale_von({}) == {"mobile": True, "autoscout": True}
+    assert wz.portale_von({"vergleich_portale": {"mobile": False}}) == {"mobile": False, "autoscout": True}
+    assert wz.portale_von({"vergleich_portale": {"mobile": False, "autoscout": False}}) == \
+        {"mobile": True, "autoscout": True}
+    assert wz.portale_von({"vergleich_portale": "kaputt"}) == {"mobile": True, "autoscout": True}
+    links = [{"portal": "mobile.de", "url": "m"}, {"portal": "AutoScout24", "url": "a"}]
+    hinweise = ["mobile.de kennt das Modell „BO“ nicht – kein mobile.de-Vergleich (sonst …)", "EZ prüfen"]
+    l2, h2 = wz.nach_portalen(links, hinweise, {"mobile": False, "autoscout": True})
+    assert l2 == [{"portal": "AutoScout24", "url": "a"}] and h2 == ["EZ prüfen"]
+    l3, h3 = wz.nach_portalen(links, hinweise, {"mobile": True, "autoscout": True})
+    assert l3 == links and h3 == hinweise
+
+
+def test_59c_portalwahl_gilt_fuer_programm_und_status(welt):
+    """Die Wahl setzt der Sucher in AutoSchnell (PUT /auth/vergleich-portale); das Programm bekommt nur noch die
+    Links dieser Portale, /status nennt sie (Programm ab 1.5.8 / Erweiterung ab 2.7.2 zeigen sie nur an)."""
+    prog, db = _prog(welt), welt["db"]
+    kopf = welt["sucher"]
+    try:
+        r = requests.put(f"{API}/auth/vergleich-portale", headers=kopf, timeout=30,
+                         json={"mobile": False, "autoscout": False})
+        assert r.status_code == 400 and "Mindestens ein Portal" in r.text
+        assert requests.put(f"{API}/auth/vergleich-portale", timeout=30,
+                            json={"mobile": True, "autoscout": True}).status_code == 401
+        r = requests.put(f"{API}/auth/vergleich-portale", headers=kopf, timeout=30,
+                         json={"mobile": True, "autoscout": False})
+        assert r.status_code == 200 and r.json()["vergleich_portale"] == {"mobile": True, "autoscout": False}
+        me = requests.get(f"{API}/auth/me", headers=kopf, timeout=30).json()["user"]
+        assert me["vergleich_portale"] == {"mobile": True, "autoscout": False}
+        assert _status(prog).json()["portale"] == {"mobile": True, "autoscout": False}
+        r = _vergleich(prog)
+        assert r.status_code == 200, r.text
+        assert [l["portal"] for l in r.json()["links"]] == ["mobile.de"], r.json()["links"]
+        gespeichert = db.werkzeug_vergleiche.find_one({"user_id": welt["sucher_id"]}, sort=[("erstellt_am", -1)])
+        assert [l["portal"] for l in gespeichert["links"]] == ["mobile.de"]
+        requests.put(f"{API}/auth/vergleich-portale", headers=kopf, timeout=30,
+                     json={"mobile": False, "autoscout": True})
+        assert [l["portal"] for l in _vergleich(prog).json()["links"]] == ["AutoScout24"]
+    finally:
+        db.users.update_one({"id": welt["sucher_id"]}, {"$unset": {"vergleich_portale": ""}})
+    assert sorted(l["portal"] for l in _vergleich(prog).json()["links"]) == ["AutoScout24", "mobile.de"]
+
+
 def test_60_anderer_pc_genau_benannt(welt):
     """Nr. 16: der alte PC erfaehrt, dass und wo das Konto neu verbunden wurde."""
     _code_bremse_frei(welt)

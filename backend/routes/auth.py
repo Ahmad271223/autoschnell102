@@ -566,6 +566,23 @@ async def akzentfarbe_setzen(body: AkzentIn, user=Depends(current_user)):
     return {"akzentfarbe": farbe}
 
 
+class PortaleIn(BaseModel):
+    mobile: bool
+    autoscout: bool
+
+
+@router.put("/auth/vergleich-portale")
+async def vergleich_portale_setzen(body: PortaleIn, user=Depends(current_user)):
+    """Wunsch Ahmad 08.10.2026: EINE Portalwahl je Konto — die App (Vergleichsseite), das Windows-Programm und der
+    Browser-Helfer richten sich danach (werkzeuge.portale_von). Mindestens ein Portal bleibt an."""
+    from deps import db as _db
+    if not (body.mobile or body.autoscout):
+        raise HTTPException(400, "Mindestens ein Portal muss an sein (mobile.de oder AutoScout24).")
+    wahl = {"mobile": bool(body.mobile), "autoscout": bool(body.autoscout)}
+    await _db.users.update_one({"id": user["id"]}, {"$set": {"vergleich_portale": wahl}})
+    return {"vergleich_portale": wahl}
+
+
 @router.get("/auth/me")
 async def me(user=Depends(current_user)):
     from deps import effective_dealer, subscription_for

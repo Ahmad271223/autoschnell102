@@ -242,6 +242,32 @@ VERGLEICHE_TAGE = int(os.environ.get("WERKZEUG_VERGLEICHE_TAGE", "60") or 60)
 def vergleich_ablauf(ab: Optional[datetime] = None) -> datetime:
     """Loeschzeitpunkt eines Vergleichs (TTL-Index werkzeug_vergleiche_ablauf)."""
     return (ab or datetime.now(timezone.utc)) + timedelta(days=max(1, VERGLEICHE_TAGE))
+
+
+# ---------------------------------------------------------------- Portalwahl (08.10.2026)
+# Wunsch Ahmad 08.10.2026 (externe Pruefung): die Wahl "mobile.de / AutoScout24 / beide" gab es dreimal — in der App
+# (Browser-Speicher), im Windows-Programm und in der Erweiterung. Jetzt EINMAL je Konto (users.vergleich_portale,
+# PUT /auth/vergleich-portale, in der App auf der Vergleichsseite). Der Server filtert die Links fuer Programm und
+# Erweiterung selbst; beide zeigen die Wahl nur noch an (status.portale).
+PORTAL_SCHLUESSEL = {"mobile.de": "mobile", "AutoScout24": "autoscout"}
+
+
+def portale_von(user: Optional[dict]) -> dict:
+    """{"mobile": bool, "autoscout": bool} — ohne Eintrag beide; beide aus gibt es nicht (dann wieder beide)."""
+    p = (user or {}).get("vergleich_portale")
+    p = p if isinstance(p, dict) else {}
+    mobile, autoscout = p.get("mobile") is not False, p.get("autoscout") is not False
+    if not (mobile or autoscout):
+        mobile = autoscout = True
+    return {"mobile": mobile, "autoscout": autoscout}
+
+
+def nach_portalen(links: list, hinweise: list, portale: dict) -> tuple:
+    """Nur die Links der gewaehlten Portale — und keine Hinweise "kein <Portal>-Vergleich" fuer abgewaehlte."""
+    aus = [name for name, k in PORTAL_SCHLUESSEL.items() if portale.get(k) is False]
+    links = [l for l in links if portale.get(PORTAL_SCHLUESSEL.get(l.get("portal"), ""), True) is not False]
+    hinweise = [h for h in hinweise if not any(f"kein {name}-Vergleich" in str(h) for name in aus)]
+    return links, hinweise
 #: Pruefbericht 03.10.2026 (Nr. 12): die App meldet, dass sie ein Auto aus dem Programm uebernommen hat
 SAMMLUNG_APP_STARTS = "werkzeug_app_starts"
 #: Pruefbericht 03.10.2026 (Nr. 16): warum ein Programm-Schluessel nicht mehr gilt (anderer PC, Chef, Betreiber)

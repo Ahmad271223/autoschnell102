@@ -1116,3 +1116,24 @@ def test_45_inserat_lesen_kontaktdaten_nur_eigene_firma():
             client.close()
 
     asyncio.run(lauf())
+
+
+def test_46_helfer_nimmt_die_portalwahl_aus_autoschnell(welt):
+    """Wunsch Ahmad 08.10.2026: die Portalwahl gibt es nur noch in AutoSchnell — der Server liefert dem Helfer nur
+    die Links der gewaehlten Portale, /status nennt die Wahl (Erweiterung ab 2.7.2 zeigt sie nur noch an)."""
+    prog = welt.get("prog") or _verbinden(welt)
+    db = welt["db"]
+    try:
+        db.users.update_one({"id": welt["sucher_id"]}, {"$set": {"vergleich_portale": {"mobile": False,
+                                                                                        "autoscout": True}}})
+        st = requests.get(f"{API}/werkzeuge/{WID}/status", headers=prog, timeout=30)
+        assert st.status_code == 200 and st.json()["portale"] == {"mobile": False, "autoscout": True}
+        r = _inserat(prog)
+        assert r.status_code == 200, r.text
+        assert all(l["portal"] != "mobile.de" for l in r.json()["links"]), r.json()["links"]
+        assert not any("kein mobile.de-Vergleich" in h for h in r.json()["hinweise"])
+    finally:
+        db.users.update_one({"id": welt["sucher_id"]}, {"$unset": {"vergleich_portale": ""}})
+    r = _inserat(prog)
+    assert any(l["portal"] == "mobile.de" for l in r.json()["links"])
+
