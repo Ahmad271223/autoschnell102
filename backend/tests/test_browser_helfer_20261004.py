@@ -1137,3 +1137,74 @@ def test_46_helfer_nimmt_die_portalwahl_aus_autoschnell(welt):
     r = _inserat(prog)
     assert any(l["portal"] == "mobile.de" for l in r.json()["links"])
 
+
+def test_47_vorgangsnummer_programm_erweiterung_app(welt):
+    """Wunsch Ahmad 08.10.2026 (Vorgangsnummer): hat das Konto die Erweiterung, oeffnet das Programm nur
+    /app/vorgang/<id>; die Erweiterung uebernimmt den Vorgang genau einmal und oeffnet selbst, das Programm fragt
+    nach (sonst oeffnet es selbst), die App-Seite zeigt ihn als Rueckfall. Das Inserat dazu wird ueber die Nummer
+    zugeordnet — ohne 30-Minuten-Suche."""
+    import re
+    from datetime import datetime, timedelta, timezone
+    db, helfer = welt["db"], welt.get("prog") or _verbinden(welt)
+    pc = _verbinden(welt, "sucher", wid=wz.AUTOPOINTER, name="PC-Vorgang")
+    f = {"marke": "VW", "modell": "Golf", "marke_modell_text": "VW Golf", "titel": "VW Golf VII 2.0 GTI TCR",
+         "ez_monat": 5, "ez_jahr": 2019, "kilometer": 60000, "kw": 213, "ps": 290, "kraftstoff": "Benzin",
+         "getriebe": "Automatik", "preis": 23850, "quelle": "mobile.de", "inserat_id": MOBILE_ID, "roh": True}
+
+    def vergleich(**zusatz):
+        return requests.post(f"{API}/werkzeuge/{wz.AUTOPOINTER}/vergleich", timeout=60,
+                             headers={**pc, "User-Agent": "AutoSchnell-Vergleich/1.5.8"}, json={"fahrzeug": f, **zusatz})
+
+    def uebernehmen(vid):
+        return requests.post(f"{API}/werkzeuge/{WID}/vorgang/{vid}/uebernehmen", headers=helfer, timeout=30)
+
+    def stand(vid):
+        return requests.get(f"{API}/werkzeuge/{wz.AUTOPOINTER}/vorgang/{vid}", headers=pc, timeout=30)
+
+    r = vergleich()
+    assert r.status_code == 200, r.text
+    d = r.json()
+    vid = d["vorgang_id"]
+    try:
+        assert re.fullmatch(r"[0-9a-f-]{36}", vid) and d["ueber_helfer"] is True and d["links"]
+        assert stand(vid).json() == {"uebernommen": False}
+        app = requests.get(f"{API}/werkzeuge/vorgang/{vid}", headers=welt["sucher"], timeout=30)
+        assert app.status_code == 200 and app.json()["links"] == d["links"] and app.json()["uebernommen"] is False
+        assert requests.get(f"{API}/werkzeuge/vorgang/{vid}", headers=welt["chef"], timeout=30).status_code == 404, \
+            "nur das eigene Konto"
+        u = uebernehmen(vid)
+        assert u.status_code == 200 and u.json()["schon_uebernommen"] is False, u.text
+        assert u.json()["links"] == d["links"] and u.json()["inserat_url"] == MOBILE_URL
+        assert u.json()["kennung"] == f"mobile:{MOBILE_ID}", "dieselbe Kennung wie inseratKennung der Erweiterung"
+        assert u.json()["fahrzeug"]["preis"] == 23850 and u.json()["fahrzeug"]["marke"]
+        assert uebernehmen(vid).json()["schon_uebernommen"] is True, "Neuladen oeffnet nichts doppelt"
+        assert stand(vid).json() == {"uebernommen": True}
+        # das Inserat zu diesem Vorgang: genau dieser Programm-Vergleich (keine 30-Minuten-Suche)
+        h = requests.post(f"{API}/werkzeuge/{WID}/inserat", headers=helfer, timeout=60,
+                          json={"url": MOBILE_URL, "seite": _seite(_mobile_inserat_html(_mobile_listing())),
+                                "vorgang_id": vid})
+        assert h.status_code == 200, h.text
+        assert h.json()["programm_verglichen"] == db.werkzeug_vergleiche.find_one({"id": vid})["erstellt_am"]
+        assert db.werkzeug_vergleiche.find_one({"id": h.json()["vergleich_id"]})["vorgang_id"] == vid
+        # Ampel ueber den Vorgang wie bei einem eigenen Vergleich
+        preise = [21850, 22850, 24350, 24750, 25350, 26850, 27850, 28850]
+        mobile = next(l["url"] for l in d["links"] if l["portal"] == "mobile.de")
+        m = requests.post(f"{API}/werkzeuge/{WID}/marktlage", headers=helfer, timeout=60,
+                          json={"vergleich_id": vid, "url": mobile, "seite": _seite(_mobile_suche_html(preise))})
+        assert m.status_code == 200 and m.json()["platz"] == 3, m.text
+        # falsche, fremde und fremd-geformte Nummern; der Helfer fragt nicht nach (das tut nur das Programm)
+        assert uebernehmen(str(uuid.uuid4())).status_code == 404
+        assert uebernehmen("kaputt").status_code == 404
+        assert requests.get(f"{API}/werkzeuge/{WID}/vorgang/{vid}", headers=helfer, timeout=30).status_code == 404
+        # nach 10 Minuten nicht mehr uebernehmbar (die Seite in der App zeigt ihn weiter)
+        alt = (datetime.now(timezone.utc) - timedelta(minutes=11)).isoformat()
+        db.werkzeug_vergleiche.update_one({"id": vid}, {"$set": {"erstellt_am": alt}, "$unset": {"helfer_am": ""}})
+        assert uebernehmen(vid).status_code == 404 and stand(vid).status_code == 404
+        assert requests.get(f"{API}/werkzeuge/vorgang/{vid}", headers=welt["sucher"], timeout=30).status_code == 200
+        # Probelauf: nie ueber die Erweiterung
+        p = vergleich(probelauf=True)
+        assert p.json()["ueber_helfer"] is False and uebernehmen(p.json()["vorgang_id"]).status_code == 404
+    finally:
+        db.werkzeug_vergleiche.delete_many({"werkzeug": wz.AUTOPOINTER, "user_id": welt["sucher_id"]})
+        db.link_jobs.delete_many({"url": MOBILE_URL})
+

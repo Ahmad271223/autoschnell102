@@ -88,6 +88,35 @@ public class DienstTests
         Assert.True(fz.TryGetProperty("hash_id", out _));
     }
 
+    [Fact]   // 1.5.8 (Wunsch Ahmad 08.10.2026): Vorgangsnummer und "die Erweiterung oeffnet"
+    public async Task Vergleich_liest_Vorgangsnummer_und_fragt_nach()
+    {
+        var (d, a) = Dienst();
+        a.Antwort = _ => Json(200, """
+            {"links":[{"portal":"mobile.de","url":"https://suchen.mobile.de/x?ms=1"}],"hinweise":[],"profil":"inland",
+             "vorgang_id":"0f8c1a2b-3c4d-4e5f-8a9b-0c1d2e3f4a5b","ueber_helfer":true}
+            """);
+        var antwort = await d.VergleichAsync(Passat(), probelauf: false);
+        Assert.Equal("0f8c1a2b-3c4d-4e5f-8a9b-0c1d2e3f4a5b", antwort.VorgangId);
+        Assert.True(antwort.UeberHelfer);
+
+        // kaputte Nummer -> kein Vorgang, und dann auch nie "ueber die Erweiterung"
+        a.Antwort = _ => Json(200, """{"links":[],"hinweise":[],"profil":"inland","vorgang_id":"../x","ueber_helfer":true}""");
+        var kaputt = await d.VergleichAsync(Passat(), probelauf: false);
+        Assert.Null(kaputt.VorgangId);
+        Assert.False(kaputt.UeberHelfer);
+
+        a.Antwort = _ => Json(200, """{"uebernommen":true}""");
+        Assert.True(await d.VorgangUebernommenAsync("0f8c1a2b-3c4d-4e5f-8a9b-0c1d2e3f4a5b"));
+        Assert.Equal(HttpMethod.Get, a.Letzte!.Method);
+        Assert.Equal("https://app.example.test/api/werkzeuge/autopointer-vergleich/vorgang/0f8c1a2b-3c4d-4e5f-8a9b-0c1d2e3f4a5b",
+                     a.Letzte.RequestUri!.ToString());
+        a.Antwort = _ => Json(200, """{"uebernommen":false}""");
+        Assert.False(await d.VorgangUebernommenAsync("0f8c1a2b-3c4d-4e5f-8a9b-0c1d2e3f4a5b"));
+        a.Antwort = _ => Json(404, """{"detail":"Vorgang nicht gefunden oder abgelaufen."}""");
+        Assert.Null(await d.VorgangUebernommenAsync("0f8c1a2b-3c4d-4e5f-8a9b-0c1d2e3f4a5b"));
+    }
+
     [Theory]
     [InlineData(402, """{"detail":"Kein aktives AutoSchnell-Abo – das Programm ist gesperrt."}""", "Kein aktives AutoSchnell-Abo")]
     [InlineData(401, """{"detail":"Dieses Programm ist nicht (mehr) verbunden"}""", "nicht (mehr) verbunden")]

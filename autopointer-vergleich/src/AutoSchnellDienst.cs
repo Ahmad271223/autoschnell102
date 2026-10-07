@@ -39,7 +39,8 @@ internal sealed record Vergleich(string Portal, string Url);
 internal sealed record VergleichAntwort(IReadOnlyList<Vergleich> Links, IReadOnlyList<string> Hinweise, string Profil,
                                         string? InseratUrl = null, string VorabStatus = "", string VorabHinweis = "",
                                        string? ErkanntMarke = null, string? ErkanntModell = null, bool MarkeErkannt = true,
-                                       IReadOnlyList<string>? Melden = null, bool InseratImBrowser = false);
+                                       IReadOnlyList<string>? Melden = null, bool InseratImBrowser = false,
+                                       string? VorgangId = null, bool UeberHelfer = false);
 
 /// <summary>Was der Ueberwacher vom Server braucht (in Tests eine Attrappe).</summary>
 internal interface IVergleichsDienst
@@ -49,6 +50,8 @@ internal interface IVergleichsDienst
     /// <summary>Paket 3 (F4): Verbindung vorwaermen, sobald eine Aenderung in AutoPointer erkannt ist — die Anfrage
     /// trifft dann auf eine offene Verbindung (kein DNS/TLS-Aufbau mehr auf dem kritischen Weg). Darf nichts tun.</summary>
     void Vorwaermen() { }
+    /// <summary>1.5.8 (Vorgangsnummer): hat die Browser-Erweiterung den Vorgang uebernommen? null = nicht pruefbar.</summary>
+    Task<bool?> VorgangUebernommenAsync(string vorgangId) => Task.FromResult<bool?>(null);
 }
 
 /// <summary>Verbindung zu AutoSchnell (Wunsch Ahmad 03.10.2026): das Programm arbeitet nur
@@ -270,6 +273,18 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
     /// <summary>Pruefbericht 03.10.2026 (Nr. 12): hat die AutoSchnell-App das Auto wirklich uebernommen? Die
     /// Web-App meldet den Start (Kennung im Link) an den Server; ohne Meldung oeffnet das Programm den Browser.
     /// Fehler zaehlen als "nicht bestaetigt".</summary>
+    /// <summary>1.5.8: hat die Erweiterung den Vorgang uebernommen (GET vorgang/&lt;id&gt;)? null = nicht pruefbar.</summary>
+    public async Task<bool?> VorgangUebernommenAsync(string vorgangId)
+    {
+        try
+        {
+            var e = await SendeAsync(HttpMethod.Get, "vorgang/" + Uri.EscapeDataString(vorgangId),
+                                     frist: TimeSpan.FromSeconds(4));
+            return e.TryGetProperty("uebernommen", out var u) && u.ValueKind == JsonValueKind.True;
+        }
+        catch (DienstFehler) { return null; }
+    }
+
     public async Task<bool> AppStartBestaetigtAsync(string startKennung)
     {
         try
@@ -336,8 +351,12 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
             melden = md.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!).ToList();
         // Wunsch Ahmad 07.10.2026: hat das Konto den Browser-Helfer, liest der das Inserat — wir oeffnen es als Tab mit
         bool imBrowser = e.TryGetProperty("inserat_im_browser", out var ib) && ib.ValueKind == JsonValueKind.True;
+        // 1.5.8 (Wunsch Ahmad 08.10.2026): Vorgangsnummer; ueber_helfer = die Erweiterung oeffnet die Tabs
+        string? vorgang = Text(e, "vorgang_id") is { Length: 36 } vg && Guid.TryParse(vg, out _) ? vg : null;
+        bool ueberHelfer = e.TryGetProperty("ueber_helfer", out var uh) && uh.ValueKind == JsonValueKind.True;
         return new VergleichAntwort(links, hinweise, Text(e, "profil"), inseratUrl, vorabStatus, vorabHinweis,
-                                    marke, modell, markeErkannt, melden, imBrowser && inseratUrl != null);
+                                    marke, modell, markeErkannt, melden, imBrowser && inseratUrl != null,
+                                    vorgang, ueberHelfer && vorgang != null);
     }
 
     /// <summary>Fahrzeug -> Anfrage an /vergleich (Feldnamen wie routes/werkzeuge.FahrzeugIn).</summary>

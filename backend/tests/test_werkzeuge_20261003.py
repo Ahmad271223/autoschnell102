@@ -832,6 +832,7 @@ def test_59_inserat_im_browser_statt_apify_wenn_der_helfer_verbunden_ist(welt):
         assert r.status_code == 200, r.text
         d = r.json()
         assert d["inserat_im_browser"] is True and d["vorab"]["status"] == "browser" and d["inserat_url"] == url
+        assert d["ueber_helfer"] is True and d["vorgang_id"], "08.10.2026: mit Erweiterung oeffnet sie die Tabs"
         assert db.link_jobs.count_documents({"url": url}) == 0, "kein Apify-Vorab-Abruf"
         assert db.werkzeug_vergleiche.find_one({"user_id": welt["sucher_id"], "fahrzeug.inserat_id": "3529833377"})["vorab"] == "browser"
         # Probelauf: nie
@@ -844,6 +845,7 @@ def test_59_inserat_im_browser_statt_apify_wenn_der_helfer_verbunden_ist(welt):
     r = _vergleich(prog, auto)
     assert r.status_code == 200, r.text
     assert r.json()["inserat_im_browser"] is False and r.json()["vorab"]["status"] in ("laeuft", "fertig", "in_app")
+    assert r.json()["ueber_helfer"] is False, "ohne Erweiterung oeffnet das Programm selbst"
     db.link_jobs.delete_many({"url": url})
 
 

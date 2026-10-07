@@ -43,6 +43,16 @@ public class UeberwacherTests
         public List<string>? Melden;
         /// <summary>1.5.8: wie der echte Server — nur die Links der in AutoSchnell gewaehlten Portale (null = beide).</summary>
         public string[]? NurPortale;
+        /// <summary>1.5.8: Konto mit Browser-Erweiterung — der Server sagt ueber_helfer + Vorgangsnummer.</summary>
+        public bool UeberHelfer;
+        public bool? Uebernommen = true;
+        public readonly List<string> Nachgefragt = new();
+        public const string Vorgang = "11111111-2222-3333-4444-555555555555";
+        public Task<bool?> VorgangUebernommenAsync(string vorgangId)
+        {
+            Nachgefragt.Add(vorgangId);
+            return Task.FromResult(Uebernommen);
+        }
         public readonly List<Fahrzeug> Anfragen = new();
         public int Vorgewaermt;
         public void Vorwaermen() => Vorgewaermt++;
@@ -65,7 +75,8 @@ public class UeberwacherTests
                 new Vergleich("AutoScout24", $"https://www.autoscout24.de/{id}"),
             }.Where(v => NurPortale == null || NurPortale.Contains(v.Portal)).ToArray(), Array.Empty<string>(), "inland", InseratUrl, InseratImBrowser ? "browser" : InseratUrl != null ? "laeuft" : "kein_link",
                ErkanntMarke: "Erkannt", ErkanntModell: f.MarkeModellText, Melden: Melden,
-               InseratImBrowser: InseratImBrowser && InseratUrl != null));
+               InseratImBrowser: InseratImBrowser && InseratUrl != null,
+               VorgangId: UeberHelfer ? Vorgang : null, UeberHelfer: UeberHelfer));
         }
     }
 
@@ -453,6 +464,53 @@ public class UeberwacherTests
         _server.InseratImBrowser = false;
         await Anklicken(Bentley, 2);
         Assert.Equal(new[] { "mobile.de", "AutoScout24" }, _b.Aufrufe[1].Select(v => v.Portal));
+    }
+
+    [Fact]   // 1.5.8 (Vorgangsnummer): mit Erweiterung oeffnet das Programm nur die Vorgangsseite
+    public async Task Mit_Erweiterung_oeffnet_das_Programm_nur_die_Vorgangsseite()
+    {
+        await Start();
+        _server.UeberHelfer = true;
+        await Anklicken(Bentley, 1);
+        Assert.Single(_b.Aufrufe);
+        var v = Assert.Single(_b.Aufrufe[0]);
+        Assert.Equal("Vorgang", v.Portal);
+        Assert.Equal($"https://app.auto-schnellkauf.de/app/vorgang/{Server.Vorgang}", v.Url);
+        await _u.LetzteVorgangsPruefung!;
+        Assert.Equal(new[] { Server.Vorgang }, _server.Nachgefragt);
+        Assert.Single(_b.Aufrufe);                                   // uebernommen: nichts doppelt
+        Assert.Equal(new[] { "mobile.de", "AutoScout24" }, _u.LetzteVergleiche.Select(x => x.Portal));
+    }
+
+    [Fact]   // 1.5.8: uebernimmt die Erweiterung nicht (anderer Browser), oeffnet das Programm selbst — 30 min lang direkt
+    public async Task Uebernimmt_niemand_dann_selbst_und_30_Minuten_direkt()
+    {
+        await Start();
+        _server.UeberHelfer = true;
+        _server.Uebernommen = false;
+        await Anklicken(Bentley, 1);
+        await _u.LetzteVorgangsPruefung!;
+        Assert.Equal(2, _b.Aufrufe.Count);
+        Assert.Equal(new[] { "mobile.de", "AutoScout24" }, _b.Aufrufe[1].Select(x => x.Portal));
+        Assert.Contains(_meldungen, m => m.Contains("nicht übernommen"));
+        await Anklicken(Golf, 2);                                    // naechstes Auto: gleich direkt
+        Assert.Equal(3, _b.Aufrufe.Count);
+        Assert.Equal(new[] { "mobile.de", "AutoScout24" }, _b.Aufrufe[2].Select(x => x.Portal));
+        _jetzt = _jetzt.AddMinutes(31);                              // nach 30 min wieder ueber die Erweiterung
+        _server.Uebernommen = true;
+        await Anklicken(Bentley, 3);
+        Assert.Equal("Vorgang", Assert.Single(_b.Aufrufe[3]).Portal);
+    }
+
+    [Fact]   // 1.5.8: nicht pruefbar (Netz weg) -> lieber selbst oeffnen als gar nichts
+    public async Task Vorgang_nicht_pruefbar_dann_selbst_oeffnen()
+    {
+        await Start();
+        _server.UeberHelfer = true;
+        _server.Uebernommen = null;
+        await Anklicken(Bentley, 1);
+        await _u.LetzteVorgangsPruefung!;
+        Assert.Equal(2, _b.Aufrufe.Count);
     }
 
     [Fact]   // 1.5.8 (Wunsch Ahmad 08.10.2026): die Portalwahl steht in AutoSchnell, der Server schickt nur deren Links

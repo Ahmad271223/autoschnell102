@@ -179,6 +179,7 @@ const AdminMarktBericht = seite(() => import("@/pages/admin_v2/MarktBericht"));
 const AdminMarktOptimierung = seite(() => import("@/pages/admin_v2/MarktOptimierung"));
 
 import Vergleich from "@/pages/app/Vergleich";
+import Vorgang from "@/pages/app/Vorgang";
 const ManuelleSuche = seite(() => import("@/pages/app/ManuelleSuche"));
 const PDFArchiv = seite(() => import("@/pages/app/PDFArchiv"));
 const Termine = seite(() => import("@/pages/app/Termine"));
@@ -331,6 +332,8 @@ export default function App() {
             <Route path="/app" element={<ProtectedRoute requireSub={false}><AppHome /></ProtectedRoute>} />
             {/* Sucher-Funktionen: brauchen ein aktives (persönliches) Abo */}
             <Route path="/app/vergleich" element={<Wrap><Vergleich /></Wrap>} />
+            {/* Vorgangsnummer (08.10.2026): Seite des Windows-Programms — die Erweiterung uebernimmt sie meist vorher */}
+            <Route path="/app/vorgang/:id" element={<Wrap><Vorgang /></Wrap>} />
             <Route path="/app/suche" element={<Wrap><ManuelleSuche /></Wrap>} />
             <Route path="/app/fahrzeuge" element={<Wrap><Fahrzeugpool /></Wrap>} />
             {/* Verkaufen & Verwalten: kostenlos für den Händler-Hauptaccount */}

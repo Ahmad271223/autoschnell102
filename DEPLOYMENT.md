@@ -4564,6 +4564,19 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
     Vergleichsseite). Der Server filtert die Links für `/werkzeuge/*/vergleich` und `/inserat`
     (`werkzeuge.nach_portalen`), `/status` nennt die Wahl; Erweiterung und Programm haben keine eigenen Häkchen mehr.
     Ältere Erweiterungen/Programme filtern zusätzlich mit ihrer alten Wahl (Schnittmenge) — Update empfohlen.
+  - **2.7.2 / Programm 1.5.8 — Vorgangsnummer (Wunsch Ahmad 08.10.2026, externe Prüfung „drei Wege für denselben
+    Ablauf“):** jeder Programm-Vergleich ist ein Vorgang (`werkzeug_vergleiche.id`, `/vergleich` antwortet mit
+    `vorgang_id` und `ueber_helfer`). Hat das Konto die Erweiterung, öffnet das Programm NUR
+    `<Server>/app/vorgang/<id>`; `content.js` meldet das beim Seitenstart, die Erweiterung übernimmt
+    (`POST …/browser-helfer/vorgang/<id>/uebernehmen`, genau einmal, 10 Minuten), öffnet Vergleiche + Inserat selbst
+    (sie kennt damit alle Tabs: keine `/programm-suche`, kein 30-Minuten-Raten, nichts doppelt) und schickt das
+    Inserat mit `vorgang_id`. Das Programm fragt nach 3 s nach (`GET …/autopointer-vergleich/vorgang/<id>`) — hat
+    niemand übernommen (Erweiterung nicht in diesem Browser), öffnet es wie bisher selbst und die nächsten 30 Minuten
+    gleich direkt. Steht `/app/vorgang/<id>` doch in der App (Rückfall), zeigt sie Auto, Links und Kaufvertrag
+    (`GET /werkzeuge/vorgang/<id>`, nur das eigene Konto). E2E im echten Edge (Kleinanzeigen live): 3 Tabs, Inserat
+    nach 2,6 s mit Vorgang gelesen, Ampel am Programm-Vergleich, zweiter Aufruf öffnet nichts. `/programm-suche` und
+    `_programm_vergleich` bleiben für Programme ≤ 1.5.7 / Erweiterungen ≤ 2.7.1 — entfernen, sobald alle aktualisiert
+    haben.
   - **Passwort trennt Werkzeuge (Entscheidung Ahmad 06.10.2026):** setzt der Betreiber ein neues Passwort
     (`POST /admin/users/{id}/password`), trennt `routes.werkzeuge.alle_trennen` Programm und Helfer des Kontos
     (Grund `passwort` → 401 mit klarem Text, neuer Code nötig; Audit-Meta `werkzeuge_getrennt`).

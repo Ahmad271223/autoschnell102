@@ -533,6 +533,10 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     # ohne Link (abgewaehltes oder unbekanntes Portal) oeffnet das Programm auch keinen Inserat-Tab -> Vorab wie bisher
     im_browser = (not body.probelauf and bool(f["inserat_url"]) and wz.inserat_im_browser_an() and helfer_da > 0
                   and bool(links))
+    # Wunsch Ahmad 08.10.2026 (Vorgangsnummer): hat das Konto die Erweiterung, oeffnet das Programm (ab 1.5.8) nur
+    # /app/vorgang/<id> — die Erweiterung holt sich den Vorgang und oeffnet Vergleiche + Inserat selbst. So oeffnet
+    # genau EINER die Tabs, und die Erweiterung kennt sie (keine Programm-Suche, kein 30-Minuten-Raten).
+    ueber_helfer = not body.probelauf and helfer_da > 0 and bool(links)
     if body.probelauf:
         vorab = {"status": "probelauf", "hinweis": ""}
     elif im_browser:
@@ -543,7 +547,7 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
         "id": str(uuid.uuid4()), "werkzeug": werkzeug_id, "dealer_id": user["dealer_id"], "user_id": user["id"],
         "verbindung_id": v["id"], "pc_name": v.get("pc_name") or "", "erstellt_am": now_iso(),
         "fahrzeug": f, "links": links, "hinweise": hinweise, "profil": profil, "probelauf": body.probelauf,
-        "vorab": vorab["status"], "ablauf": wz.vergleich_ablauf(),
+        "vorab": vorab["status"], "ablauf": wz.vergleich_ablauf(), "ueber_helfer": ueber_helfer,
     }
     if body.probelauf:
         await db[wz.SAMMLUNG_VERGLEICHE].insert_one(eintrag)
@@ -556,7 +560,9 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
             "vorab": {"status": vorab["status"], "hinweis": vorab.get("hinweis", "")}, "fahrzeug": erkannt,
             "melden": melden,
             # Programm ab 1.5.7: das Inserat als Tab mit oeffnen, der Browser-Helfer liest es dort
-            "inserat_im_browser": im_browser}
+            "inserat_im_browser": im_browser,
+            # Programm ab 1.5.8: Vorgangsnummer; ueber_helfer -> nur /app/vorgang/<id> oeffnen (s. o.)
+            "vorgang_id": eintrag["id"], "ueber_helfer": ueber_helfer}
 
 
 def _erkennen(f: dict) -> dict:
@@ -695,6 +701,8 @@ class InseratIn(BaseModel):
     url: str = Field(..., max_length=2048)
     #: base64(gzip(document.documentElement.outerHTML))
     seite: str = Field(..., min_length=20, max_length=_SEITE_MAX)
+    #: 08.10.2026: das Inserat hat die Erweiterung zu diesem Vorgang des Programms geoeffnet (statt 30-Minuten-Suche)
+    vorgang_id: Optional[str] = Field(None, max_length=64)
 
 
 @router.post("/werkzeuge/{werkzeug_id}/inserat")
@@ -743,14 +751,16 @@ async def werkzeug_inserat(werkzeug_id: str, body: InseratIn,
     # Pruefung 05.10.2026 (Paket 1): ERST nach allen Rechenschritten merken — die Lesung gilt 24 h fuer alle Konten;
     # vorher wurde gespeichert und danach scheiterte die Anfrage (500), der kaputte Wert blieb liegen.
     await bh.inserat_merken(db, identity, inserat_url, fahrzeug, user)
-    programm = await _programm_vergleich(user, inserat_url)
+    # 08.10.2026: mit Vorgangsnummer genau dieser Vergleich des Programms; ohne (aeltere Erweiterung) wie bisher
+    programm = (await _vorgang_doc(body.vorgang_id, user["id"], {"_id": 0, "id": 1, "erstellt_am": 1})
+                if body.vorgang_id else None) or await _programm_vergleich(user, inserat_url)
     vergleich_id = str(uuid.uuid4())
     await db[wz.SAMMLUNG_VERGLEICHE].insert_one({
         "id": vergleich_id, "werkzeug": werkzeug_id, "dealer_id": user["dealer_id"], "user_id": user["id"],
         "verbindung_id": v["id"], "pc_name": v.get("pc_name") or "", "erstellt_am": now_iso(),
         "fahrzeug": kurz, "links": links, "hinweise": hinweise, "profil": profil, "probelauf": False,
         "vorab": "fertig", "portal_bewertung": bewertung, "verhandlung": verhandlung, "marktlage": {},
-        "ablauf": wz.vergleich_ablauf(),
+        "ablauf": wz.vergleich_ablauf(), **({"vorgang_id": programm["id"]} if programm else {}),
     })
     return {"vergleich_id": vergleich_id, "links": links, "hinweise": hinweise, "profil": profil,
             "fahrzeug": kurz, "inserat_url": inserat_url,
@@ -848,6 +858,90 @@ async def werkzeug_programm_suche(werkzeug_id: str, body: ProgrammSucheIn,
 
 
 # ---------------------------------------------------------------- App-Start (Nr. 12)
+# ---------------------------------------------------------------- Vorgangsnummer (08.10.2026)
+# Wunsch Ahmad 08.10.2026 (externe Pruefung "drei Wege fuer denselben Ablauf"): jeder Programm-Vergleich IST ein
+# Vorgang (werkzeug_vergleiche.id). Hat das Konto die Erweiterung, oeffnet das Programm nur /app/vorgang/<id>; die
+# Erweiterung uebernimmt ihn (POST …/vorgang/<id>/uebernehmen) und oeffnet Vergleiche + Inserat selbst. Das Programm
+# fragt kurz nach (GET …/vorgang/<id>) und oeffnet nur, wenn niemand uebernommen hat, selbst (Erweiterung nicht in
+# diesem Browser). Ohne Erweiterung bleibt alles wie bisher.
+VORGANG_MINUTEN = 10
+_VORGANG_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+_VORGANG_FAHRZEUG = ("marke", "modell", "titel", "ez_monat", "ez_jahr", "kilometer", "ps", "preis", "quelle",
+                     "inserat_id", "inserat_url")
+
+
+async def _vorgang_doc(vorgang_id: Optional[str], user_id: str, felder: Optional[dict] = None,
+                       minuten: Optional[int] = VORGANG_MINUTEN) -> Optional[dict]:
+    """Ein Vergleich des Windows-Programms DIESES Kontos (kein Probelauf), hoechstens ``minuten`` alt."""
+    if not vorgang_id or not _VORGANG_ID.match(str(vorgang_id)):
+        return None
+    filter_ = {"id": vorgang_id, "werkzeug": wz.AUTOPOINTER, "user_id": user_id, "probelauf": {"$ne": True}}
+    if minuten:
+        filter_["erstellt_am"] = {"$gte": _seit(minuten)}
+    return await db[wz.SAMMLUNG_VERGLEICHE].find_one(filter_, felder or {"_id": 0})
+
+
+def _vorgang_antwort(doc: dict) -> dict:
+    from listing_identity import ListingIdentityError, get_listing_identity
+    f = doc.get("fahrzeug") or {}
+    url = f.get("inserat_url") or None
+    kennung = None
+    if url:
+        try:
+            kennung = get_listing_identity(url)["cache_key"]      # = inseratKennung der Erweiterung (gemeinsam.js)
+        except ListingIdentityError:
+            url = None
+    return {"vorgang_id": doc["id"], "links": doc.get("links") or [], "inserat_url": url, "kennung": kennung,
+            "fahrzeug": {k: f.get(k) for k in _VORGANG_FAHRZEUG}}
+
+
+@router.post("/werkzeuge/{werkzeug_id}/vorgang/{vorgang_id}/uebernehmen")
+async def werkzeug_vorgang_uebernehmen(werkzeug_id: str, vorgang_id: str,
+                                       schluessel: Optional[str] = Header(None, alias=wz.TOKEN_KOPF),
+                                       version: Optional[str] = Header(None, alias="X-Werkzeug-Version")):
+    """Die Erweiterung uebernimmt einen Vorgang des Programms (genau einmal — ein Neuladen der Seite oeffnet nichts
+    doppelt: schon_uebernommen)."""
+    from pymongo import ReturnDocument
+    _browser_werkzeug(werkzeug_id)
+    user, _v, _firma_doc, _abo = await _programm(werkzeug_id, schluessel, _programm_version(None, version))
+    if not _VORGANG_ID.match(vorgang_id):
+        raise HTTPException(404, "Vorgang nicht gefunden.")
+    doc = await db[wz.SAMMLUNG_VERGLEICHE].find_one_and_update(
+        {"id": vorgang_id, "werkzeug": wz.AUTOPOINTER, "user_id": user["id"], "probelauf": {"$ne": True},
+         "erstellt_am": {"$gte": _seit(VORGANG_MINUTEN)}, "helfer_am": {"$exists": False}},
+        {"$set": {"helfer_am": now_iso()}}, projection={"_id": 0}, return_document=ReturnDocument.AFTER)
+    if doc is not None:
+        return {**_vorgang_antwort(doc), "schon_uebernommen": False}
+    vorhanden = await _vorgang_doc(vorgang_id, user["id"])
+    if vorhanden is None:
+        raise HTTPException(404, "Vorgang nicht gefunden oder abgelaufen.")
+    return {**_vorgang_antwort(vorhanden), "schon_uebernommen": True}
+
+
+@router.get("/werkzeuge/{werkzeug_id}/vorgang/{vorgang_id}")
+async def werkzeug_vorgang_stand(werkzeug_id: str, vorgang_id: str,
+                                 schluessel: Optional[str] = Header(None, alias=wz.TOKEN_KOPF),
+                                 user_agent: Optional[str] = Header(None, alias="User-Agent")):
+    """Das Programm fragt nach: hat die Erweiterung den Vorgang uebernommen? Sonst oeffnet es selbst."""
+    if _ist_browser(werkzeug_id):
+        raise HTTPException(404, NICHT_GEFUNDEN)
+    user, _v, _firma_doc, _abo = await _programm(werkzeug_id, schluessel, _programm_version(user_agent))
+    doc = await _vorgang_doc(vorgang_id, user["id"], {"_id": 0, "id": 1, "helfer_am": 1})
+    if doc is None:
+        raise HTTPException(404, "Vorgang nicht gefunden oder abgelaufen.")
+    return {"uebernommen": bool(doc.get("helfer_am"))}
+
+
+@router.get("/werkzeuge/vorgang/{vorgang_id}")
+async def app_vorgang(vorgang_id: str, user=Depends(current_user)):
+    """Die Seite /app/vorgang/<id> in AutoSchnell — nur sichtbar, wenn die Erweiterung in DIESEM Browser fehlt
+    (sonst uebernimmt sie, bevor die Seite steht): zeigt das Auto und die Links zum selbst Oeffnen."""
+    doc = await _vorgang_doc(vorgang_id, user["id"], minuten=None)
+    if doc is None:
+        raise HTTPException(404, "Vorgang nicht gefunden.")
+    return {**_vorgang_antwort(doc), "uebernommen": bool(doc.get("helfer_am"))}
+
+
 @router.post("/werkzeuge/app-start/{start}")
 async def werkzeug_app_start_melden(start: str, user=Depends(current_firma)):
     """Pruefbericht 03.10.2026 (Nr. 12): die AutoSchnell-App hat ein Auto aus dem Programm uebernommen (Kennung im

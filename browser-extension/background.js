@@ -9,6 +9,9 @@
 //    diese Erweiterung bedienen, keine Anmeldung, kein Passwort. Ein Konto = ein Browser.
 // 3. Zusammen mit dem Windows-Programm (2.3.0): was das Programm gerade verglichen hat, oeffnet der Helfer nicht
 //    doppelt; die Vergleichsseiten des Programms bekommen die Ampel (programm-suche -> marktlage).
+//    Seit 2.7.2 / Programm 1.5.8 (Vorgangsnummer, 08.10.2026): das Programm oeffnet nur /app/vorgang/<id>, der Helfer
+//    uebernimmt und oeffnet Vergleiche + Inserat selbst — er kennt damit alle Tabs (programm-suche nur noch fuer
+//    aeltere Programme).
 
 const VERSION = chrome.runtime.getManifest().version;
 const SERVER_STANDARD = "https://app.auto-schnellkauf.de";
@@ -388,7 +391,10 @@ async function inseratBearbeiten(msg, tab) {
     let lauf = laufendeInserate.get(kennung);
     const erster = !lauf;
     if (erster) {
-      lauf = api(`/werkzeuge/${WERKZEUG}/inserat`, { methode: "POST", daten: { url: msg.url, seite: msg.seite } });
+      // 2.7.2: gehoert das Inserat zu einem Vorgang des Programms, sagt die Nummer dem Server genau, zu welchem
+      const vorgang = vorher && vorher.vorgang && Date.now() - vorher.zeit < WIEDERHOLEN_MS ? vorher.vorgang : undefined;
+      lauf = api(`/werkzeuge/${WERKZEUG}/inserat`,
+                 { methode: "POST", daten: { url: msg.url, seite: msg.seite, ...(vorgang ? { vorgang_id: vorgang } : {}) } });
       laufendeInserate.set(kennung, lauf);
       lauf.then(() => laufendeInserate.delete(kennung));
     }
@@ -399,7 +405,13 @@ async function inseratBearbeiten(msg, tab) {
     }
     antwort = r.daten;
     if (erster) {
-      await sitzungAendern((x) => { x.inserate[kennung] = { zeit: Date.now(), antwort, geoeffnet: false, marktlage: {} }; });
+      await sitzungAendern((x) => {
+        const alt = x.inserate[kennung];
+        // 2.7.2: zu einem Vorgang vorgemerkt -> Vergleiche sind schon offen, die Ampel laeuft schon: behalten
+        x.inserate[kennung] = alt && alt.vorgang && Date.now() - alt.zeit < WIEDERHOLEN_MS
+          ? { ...alt, antwort }
+          : { zeit: Date.now(), antwort, geoeffnet: false, marktlage: {} };
+      });
     }
   }
   const schonOffen = !!(vorher && vorher.geoeffnet && Date.now() - vorher.zeit < WIEDERHOLEN_MS);
@@ -795,6 +807,55 @@ async function einstellungenSetzen(msg) {
   return { ok: true, einstellungen: neu };
 }
 
+// ------------------------------------------------------------------ Vorgang des Programms (2.7.2)
+// Wunsch Ahmad 08.10.2026 (externe Pruefung "drei Wege fuer denselben Ablauf"): das Windows-Programm oeffnet nur
+// /app/vorgang/<id>; content.js meldet das, bevor die App laedt. Der Helfer uebernimmt den Vorgang beim Server (genau
+// einmal), oeffnet die Vergleichsseiten als eigene Tabs (-> Ampel wie bei eigenen Vergleichen) und macht aus dem Tab
+// das Inserat (-> Box, Kaufvertrag). Uebernimmt er nicht (nicht verbunden, anderer Browser), oeffnet das Programm
+// nach 3 s selbst.
+const VORGANG_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function inseratAdresse(url) {
+  try {
+    const u = new URL(String(url || ""));
+    return u.protocol === "https:" && /^(suchen\.mobile\.de|www\.autoscout24\.(de|at|ch)|(www\.)?kleinanzeigen\.de)$/.test(u.hostname);
+  } catch (e) {
+    return false;
+  }
+}
+
+async function vorgangOeffnen(tab, id, alsAppFenster) {
+  if (!VORGANG_ID.test(id)) return { ok: false };
+  const { schluessel } = await lokal("schluessel");
+  if (!schluessel) return { ok: false, grund: "nicht_verbunden" };
+  const r = await api(`/werkzeuge/${WERKZEUG}/vorgang/${id}/uebernehmen`, { methode: "POST" });
+  if (r.status !== 200 || !r.daten) return { ok: false, status: r.status };
+  const v = r.daten;
+  if (v.schon_uebernommen) return { ok: true, schon: true };            // Neuladen der Seite: nichts doppelt
+  const inserat = inseratAdresse(v.inserat_url) && v.kennung ? v.inserat_url : "";
+  const kennung = inserat ? String(v.kennung) : "vorgang:" + id;
+  const antwort = { vergleich_id: id, links: v.links || [], fahrzeug: v.fahrzeug || {} };
+  // Im App-Fenster (installierte AutoSchnell-App) bleibt die App die App — alles geht in ein normales Browserfenster
+  let ziel = tab;
+  if (alsAppFenster) {
+    const fenster = (await chrome.windows.getAll({ windowTypes: ["normal"] }))[0];
+    ziel = fenster ? await chrome.tabs.create({ windowId: fenster.id, url: "about:blank", active: true })
+                   : (await chrome.windows.create({ url: "about:blank", focused: true })).tabs[0];
+  }
+  // vormerken: das Inserat gehoert zu diesem Vorgang — seine Vergleiche gehen hier auf (nicht noch einmal von selbst)
+  await sitzungAendern((s) => {
+    s.inserate[kennung] = { ...(s.inserate[kennung] || {}), zeit: Date.now(), geoeffnet: true, vorgang: id,
+                            marktlage: {}, lageFehler: {} };
+  });
+  zuletztAutomatisch.set(kennung, Date.now());
+  zuletztGestartet.set(kennung, Date.now());
+  await vergleicheOeffnen(ziel, kennung, antwort);
+  direktAuswerten(kennung, antwort, ziel.id).catch(() => {});
+  if (inserat) await chrome.tabs.update(ziel.id, { url: inserat, active: true });
+  else await chrome.tabs.remove(ziel.id).catch(() => {});      // ohne Inserat-Adresse: nur die Vergleiche
+  return { ok: true };
+}
+
 // ------------------------------------------------------------------ Nachrichten
 const AKTIONEN = {
   frueh: () => fruehBearbeiten(),
@@ -834,6 +895,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return false;
     }
     abrufHelfer(msg, sendResponse);
+    return true;
+  }
+  // 2.7.2: content.js meldet die Vorgangsseite des Windows-Programms (nur aus AutoSchnell, oberster Rahmen)
+  if (msg.type === "AUTOSCHNELL_VORGANG") {
+    if (!appHerkunft(sender) || !obersterRahmen(sender)) {
+      sendResponse({ ok: false });
+      return false;
+    }
+    vorgangOeffnen(sender.tab, String(msg.id || ""), !!msg.alsApp).then(sendResponse, (e) => {
+      console.error("AutoSchnell Helfer: Vorgang", e);
+      sendResponse({ ok: false });
+    });
     return true;
   }
   // content.js meldet: AutoSchnell laeuft hier als installierte App

@@ -62,6 +62,10 @@ dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und 
   Leiste ist immer da (kein Ausblenden mehr); das große Fenster zeigt nur noch Status, letztes Auto, Verbindung und
   Hilfe. Die **Portalwahl** (mobile.de/AutoScout24) gibt es nur noch in AutoSchnell auf der Vergleichsseite — der
   Server schickt nur deren Links; im Einstellungsfenster steht der Hinweis darauf.
+* **1.5.8 – Vorgangsnummer:** hat das Konto die Browser-Erweiterung, öffnet das Programm nur die Vorgangsseite
+  `/app/vorgang/<id>` — die Erweiterung öffnet Vergleiche und Inserat selbst (Ampel, Kaufvertrag, nichts doppelt).
+  Übernimmt sie nicht binnen 3 s (z. B. in einem anderen Browser installiert), öffnet das Programm wie bisher selbst,
+  mit Hinweis, und die nächsten 30 Minuten gleich direkt.
 * Ein Auto, das beim Programmstart schon angezeigt wird, öffnet nichts – erst das nächste angeklickte. **Nach dem (Neu-)Verbinden**
   dagegen wird das gerade angezeigte Auto sofort verglichen (seit 1.5.3, Befund 04.10.: Mercedes nach Neuverbinden).
 * **Unplausible Daten** (seit 1.5.3, Befund 04.10.: „Kia Rio · EZ 04/2026 · 165.000 km“, „Audi 80 · 1.960.817 km“):

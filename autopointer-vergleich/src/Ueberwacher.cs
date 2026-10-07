@@ -84,6 +84,13 @@ internal sealed class Ueberwacher
     public volatile bool LizenzGesperrt;
     public Fahrzeug? LetztesFahrzeug { get; private set; }
     public IReadOnlyList<Vergleich> LetzteVergleiche { get; private set; } = Array.Empty<Vergleich>();
+    /// <summary>1.5.8 (Vorgangsnummer): so lange hat die Erweiterung Zeit, den Vorgang zu uebernehmen.</summary>
+    internal const int VorgangWarteMs = 3000;
+    /// <summary>1.5.8: hat sie nicht uebernommen (nicht in diesem Browser), oeffnet das Programm so lange selbst.</summary>
+    internal const int HelferAusfallMs = 30 * 60 * 1000;
+    private long _helferAusfallBis = long.MinValue;
+    /// <summary>Die laufende Nachfrage beim Server (fuer Tests).</summary>
+    internal Task? LetzteVorgangsPruefung { get; private set; }
     /// <summary>Original-Inserat des zuletzt verglichenen Autos (fuer "Kaufvertrag: in AutoSchnell oeffnen").</summary>
     public string? LetzteInseratUrl { get; private set; }
     public Status Status => _status ?? Status.KeinAutoPointer;
@@ -445,7 +452,16 @@ internal sealed class Ueberwacher
             long abstand = Math.Clamp(letzte + e.MindestabstandMs - _takt(), 0, e.MindestabstandMs);
             if (abstand > 0) await _warte(TimeSpan.FromMilliseconds(abstand));
         }
-        Oeffne(links, e);
+        // 1.5.8 (Wunsch Ahmad 08.10.2026, Vorgangsnummer): hat das Konto die Browser-Erweiterung, oeffnet das Programm
+        // nur die Vorgangsseite — die Erweiterung holt sich den Vorgang und oeffnet Vergleiche + Inserat selbst (sie kennt
+        // dann ihre Tabs, nichts wird doppelt geoeffnet oder erraten). Uebernimmt sie nicht binnen 3 s (z. B. nicht in
+        // diesem Browser), oeffnet das Programm wie bisher selbst — und die naechsten 30 Minuten gleich direkt.
+        if (antwort.UeberHelfer && antwort.VorgangId is { } vorgang && _takt() >= _helferAusfallBis && !Probelauf)
+        {
+            Oeffne(new[] { new Vergleich("Vorgang", $"{e.Server.TrimEnd('/')}/app/vorgang/{vorgang}") }, e);
+            LetzteVorgangsPruefung = VorgangPruefenAsync(vorgang, links, e);
+        }
+        else Oeffne(links, e);
         _letzteOeffnung = _takt();
         var fehlendePortale = antwort.Hinweise.Where(h => h.Contains("kein mobile.de-Vergleich") || h.Contains("kein AutoScout24-Vergleich")).ToList();
         var plausi = PlausibilitaetsHinweise(f, _uhr());
@@ -459,6 +475,24 @@ internal sealed class Ueberwacher
         fehlendePortale.AddRange(plausi);
         fehlendePortale.AddRange(vertragsHinweise);
         if (fehlendePortale.Count > 0) Melde(string.Join("\n", fehlendePortale), false);
+    }
+
+    private async Task VorgangPruefenAsync(string vorgang, IReadOnlyList<Vergleich> links, Einstellungen e)
+    {
+        try
+        {
+            await _warte(TimeSpan.FromMilliseconds(VorgangWarteMs));
+            bool? uebernommen = await _dienst.VorgangUebernommenAsync(vorgang);
+            if (uebernommen == true) return;
+            Protokoll.Schreibe(uebernommen == false
+                ? "Browser-Erweiterung hat den Vorgang nicht übernommen – Vergleiche direkt geöffnet."
+                : "Vorgang nicht prüfbar – Vergleiche direkt geöffnet.");
+            _helferAusfallBis = _takt() + HelferAusfallMs;
+            Oeffne(links, e);
+            MeldeEinmal("Die Browser-Erweiterung hat die Vergleiche nicht übernommen (in diesem Browser nicht installiert "
+                        + "oder nicht verbunden?) – sie sind direkt geöffnet, ohne Ampel.");
+        }
+        catch (Exception ex) { Protokoll.Schreibe("Vorgang prüfen: " + ex.Message); }
     }
 
     private void Merken(Fahrzeug f)
