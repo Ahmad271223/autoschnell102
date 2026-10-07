@@ -4469,9 +4469,12 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
   `/mobile/compare` nehmen sie statt eines Abrufs — kein Apify, kein Tageslimit, auch ohne Anbieter-Zugang; ein
   frischer Server-Abruf im Speicher hat Vorrang. **Seit 04.10.2026 abends für ALLE Konten und Firmen**
   (Entscheidung Ahmad „alle sofort“, löst A-01/A-02 aus dem Prüfbericht 20.09. bewusst ab): wer den Link direkt in
-  AutoSchnell einfügt oder das Windows-Programm nutzt (Vorab-Abruf), bekommt die jüngste Lesung — erst die eigene.
+  AutoSchnell einfügt oder das Windows-Programm nutzt (Vorab-Abruf), bekommt die jüngste Lesung — erst die eigene,
+  dann die der eigenen Firma. **Seit 08.10.2026 (Datenschutz, Wunsch Ahmad):** aus der Lesung einer ANDEREN Firma
+  fehlen Telefon, E-Mail und Straße des Verkäufers (`browser_helfer.KONTAKT_FELDER`) — ein angemeldeter Browser
+  sieht z. B. bei Kleinanzeigen die Telefonnummer; Fahrzeugdaten, Name, PLZ und Ort bleiben für alle.
   Risiko: eine gezielt gefälschte Seite erreicht fremde Kaufverträge; dagegen liest der Server die Seite selbst,
-  prüft die Inserat-Nummer, Marke und Preis, und `vehicle_comparisons.browser_helfer_von` hält fest, wer geliefert
+  prüft die Inserat-Nummer und die Marke, und `vehicle_comparisons.browser_helfer_von` hält fest, wer geliefert
   hat (nie in einer Antwort). Beweisdokument nur per Server-Abruf auf Knopfdruck (RP-446).
 - Die selbst geöffneten Vergleichsseiten kommen über `POST …/marktlage` zurück: Platz unter allen Treffern + Ampel
   (grün ≤ 25 % günstiger, gelb ≤ 50 %, rot darüber; Werbeplätze zählen nicht), gespeichert unter

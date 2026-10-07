@@ -632,7 +632,8 @@ async def compare(body: CompareIn, background: BackgroundTasks,
     # Seit 04.10. abends fuer ALLE Konten (Entscheidung Ahmad "alle sofort", browser_helfer.inserat_lesen: das
     # eigene zuerst, sonst die juengste Lesung). Nur ohne frischen Server-Abruf im Speicher (der hat Vorrang).
     from browser_helfer import inserat_lesen
-    helfer = await inserat_lesen(db, identity["cache_key"], user.get("id") or "")
+    # 08.10.2026: Kontaktdaten des Verkaeufers nur aus Lesungen der EIGENEN Firma (browser_helfer.KONTAKT_FELDER)
+    helfer = await inserat_lesen(db, identity["cache_key"], user.get("id") or "", user.get("dealer_id") or "")
     if helfer is not None and await db.listings_cache.count_documents(
             {"cache_key": identity["cache_key"], "data": {"$ne": None},
              "expires_at": {"$gt": datetime.now(timezone.utc)}}, limit=1):

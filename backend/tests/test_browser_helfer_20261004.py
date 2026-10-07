@@ -624,6 +624,9 @@ def test_32_kaufvertrag_nimmt_die_browserdaten_ohne_abruf(welt):
     assert chef.status_code == 200, chef.text[:300]
     assert chef.json()["cached"] is True and chef.json()["vehicle"]["make_label"] == "Volkswagen"
     assert not chef.json()["vehicle"].get("_mock")
+    # 08.10.2026: dieselbe Firma -> Kontaktdaten des Verkaeufers bleiben (Lesung des eigenen Suchers)
+    assert chef.json()["vehicle"]["seller_phone"] == "+49 (0)1515 1747777"
+    assert chef.json()["vehicle"]["seller_address"] == "Versbacher Str. 6"
     assert db.link_jobs.count_documents({"url": {"$regex": MOBILE_ID}}) == jobs_vorher, "kein Abruf fuer den Chef"
     vc = db.vehicle_comparisons.find_one({"user_id": welt["firma"]["user_id"], "cache_key": f"mobile:{MOBILE_ID}"})
     assert vc["browser_helfer_von"] == {"user_id": welt["sucher_id"], "dealer_id": welt["firma"]["dealer_id"]}
@@ -651,6 +654,14 @@ def test_32b_fremde_firma_nimmt_die_lesung_ohne_apify(welt):
     d = r.json()
     assert d["cached"] is True and d["vehicle"]["make_label"] == "Volkswagen" and d["vehicle"]["mobile_ad_id"] == MOBILE_ID
     assert d["beweis_moeglich"] is True, "Beweis auf Knopfdruck per Server-Abruf (RP-446)"
+    # Wunsch Ahmad 08.10.2026 (Datenschutz): Fahrzeugdaten ja, Kontaktdaten des Verkaeufers NICHT aus der Lesung
+    # einer anderen Firma — Name, PLZ und Ort (wie im Inserat oeffentlich) bleiben
+    for feld in bh.KONTAKT_FELDER:
+        assert not d["vehicle"].get(feld), (feld, d["vehicle"].get(feld))
+    assert d["vehicle"]["seller_name"] == "AUTO-MAGER.DE" and d["vehicle"]["seller_zip"] == "97078"
+    fz = db.vehicles.find_one({"id": d["vehicle_id"], "dealer_id": andere["dealer_id"]}, {"_id": 0, "data": 1})
+    assert fz and not (fz["data"].get("seller_phone") or fz["data"].get("seller_address")), "auch nicht gespeichert"
+    assert "1515 1747777" not in r.text
     assert db.link_jobs.count_documents({"url": {"$regex": MOBILE_ID}}) == jobs_vorher, "kein Apify-Abruf"
     assert welt["sucher_id"] not in r.text, "der Lieferer steht nie in der Antwort"
     vc = db.vehicle_comparisons.find_one({"dealer_id": andere["dealer_id"], "cache_key": ck})
@@ -1066,3 +1077,42 @@ def test_44_ohne_preis_bis_zum_kaufvertrag_und_kontakt_pflicht(welt):
             db[sammlung].delete_many({"dealer_id": welt["firma"]["dealer_id"]})
         db.listings_cache.delete_many({"cache_key": ck})
         db.werkzeug_inserate.delete_many({"cache_key": ck})
+
+
+def test_45_inserat_lesen_kontaktdaten_nur_eigene_firma():
+    """Wunsch Ahmad 08.10.2026: inserat_lesen nimmt zuerst das eigene Konto, dann die eigene Firma, sonst irgendeine
+    Lesung — aus einer fremden Firma (oder ohne Firmenangabe) ohne Telefon, E-Mail und Strasse."""
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+    from motor.motor_asyncio import AsyncIOMotorClient
+    import os
+
+    async def lauf():
+        client = AsyncIOMotorClient(os.environ.get("MONGO_URL", "mongodb://localhost:27017"))
+        db = client["bh_kontakt_" + uuid.uuid4().hex[:8]]
+        try:
+            jetzt = datetime.now(timezone.utc)
+            daten = {"make_label": "VW", "seller_name": "Vera", "seller_phone": "0170 1", "seller_email": "v@x.de",
+                     "seller_address": "Weg 1", "seller_zip": "30159"}
+            for uid, did, alter in (("u_a", "firma_a", 5), ("u_b", "firma_b", 1)):
+                await db[bh.SAMMLUNG_INSERATE].insert_one({
+                    "cache_key": "mobile:1", "user_id": uid, "dealer_id": did, "data": dict(daten, seller_name=uid),
+                    "gelesen_am": jetzt - timedelta(minutes=alter), "ablauf": jetzt + timedelta(hours=1)})
+            eigen = await bh.inserat_lesen(db, "mobile:1", "u_a", "firma_a")
+            assert eigen[0]["seller_phone"] == "0170 1" and eigen[2]["user_id"] == "u_a"
+            kollege = await bh.inserat_lesen(db, "mobile:1", "u_a2", "firma_a")
+            assert kollege[0]["seller_phone"] == "0170 1" and kollege[2]["user_id"] == "u_a", \
+                "eigene Firma vor der juengeren fremden Lesung"
+            fremd = await bh.inserat_lesen(db, "mobile:1", "u_c", "firma_c")
+            assert fremd[2]["user_id"] == "u_b" and fremd[0]["seller_name"] == "u_b"
+            assert not any(k in fremd[0] for k in bh.KONTAKT_FELDER) and fremd[0]["seller_zip"] == "30159"
+            ohne_firma = await bh.inserat_lesen(db, "mobile:1", "", None)
+            assert not any(k in ohne_firma[0] for k in bh.KONTAKT_FELDER)
+            # gespeichert bleibt alles (die liefernde Firma braucht es weiter)
+            roh = await db[bh.SAMMLUNG_INSERATE].find_one({"user_id": "u_b"})
+            assert roh["data"]["seller_phone"] == "0170 1"
+        finally:
+            await client.drop_database(db.name)
+            client.close()
+
+    asyncio.run(lauf())

@@ -77,8 +77,13 @@ class SeiteUngueltig(ValueError):
 #: traegt der Sucher im Vertrag selbst ein); wer geliefert hat, steht am Eintrag und
 #: am Vergleich des Nutzers (vehicle_comparisons.browser_helfer_von). Ein Beweisdokument entsteht nie aus
 #: Browserdaten (RP-446) — dafuer holt der Server das Inserat auf Knopfdruck selbst.
+#: Wunsch Ahmad 08.10.2026 (Datenschutz, externe Pruefung): Fahrzeugdaten weiter fuer ALLE, die KONTAKTDATEN des
+#: Verkaeufers aber nur fuer die Firma, deren Browser die Seite gelesen hat — der Browser eines angemeldeten Nutzers
+#: sieht z. B. bei Kleinanzeigen die Telefonnummer, die ohne Anmeldung niemand sieht. Fremde Firmen bekommen die
+#: Lesung ohne KONTAKT_FELDER (Telefon/E-Mail tragen sie im Kaufvertrag selbst ein).
 SAMMLUNG_INSERATE = "werkzeug_inserate"
 INSERAT_STUNDEN = 24
+KONTAKT_FELDER = ("seller_phone", "seller_email", "seller_address")
 
 
 async def inserat_merken(db, identity: dict, url: str, fahrzeug: dict, user: dict) -> None:
@@ -92,25 +97,37 @@ async def inserat_merken(db, identity: dict, url: str, fahrzeug: dict, user: dic
         upsert=True)
 
 
-async def inserat_lesen(db, cache_key: str, user_id: str) -> Optional[Tuple[dict, datetime, dict]]:
-    """(Fahrzeugdaten, gelesen_am, von) aus dem Browser-Helfer — zuerst dieses Konto, sonst die juengste Lesung
-    irgendeines Kontos (Entscheidung Ahmad 04.10.2026, siehe oben). von = {user_id, dealer_id} des Lieferers."""
+async def inserat_lesen(db, cache_key: str, user_id: str,
+                        dealer_id: Optional[str] = None) -> Optional[Tuple[dict, datetime, dict]]:
+    """(Fahrzeugdaten, gelesen_am, von) aus dem Browser-Helfer — zuerst dieses Konto, dann die eigene Firma, sonst
+    die juengste Lesung irgendeines Kontos (Entscheidung Ahmad 04.10.2026, siehe oben). von = {user_id, dealer_id}
+    des Lieferers. Seit 08.10.2026: stammt die Lesung aus einer ANDEREN Firma als ``dealer_id``, fehlen die
+    KONTAKT_FELDER (ohne ``dealer_id`` ebenso — wer die Firma nicht nennt, bekommt keine fremden Kontaktdaten)."""
     if not cache_key:
         return None
     projektion = {"_id": 0, "data": 1, "gelesen_am": 1, "user_id": 1, "dealer_id": 1}
     frisch = {"$gt": datetime.now(timezone.utc)}
+    ok = {"$type": "object"}
     d = None
     if user_id:
         d = await db[SAMMLUNG_INSERATE].find_one(
-            {"cache_key": cache_key, "user_id": user_id, "ablauf": frisch}, projektion)
-    if d is None or not isinstance(d.get("data"), dict):
+            {"cache_key": cache_key, "user_id": user_id, "ablauf": frisch, "data": ok}, projektion)
+    if d is None and dealer_id:
         d = await db[SAMMLUNG_INSERATE].find_one(
-            {"cache_key": cache_key, "ablauf": frisch, "data": {"$type": "object"}}, projektion,
+            {"cache_key": cache_key, "dealer_id": dealer_id, "ablauf": frisch, "data": ok}, projektion,
             sort=[("gelesen_am", -1)])
+    if d is None:
+        d = await db[SAMMLUNG_INSERATE].find_one(
+            {"cache_key": cache_key, "ablauf": frisch, "data": ok}, projektion, sort=[("gelesen_am", -1)])
     if d is None or not isinstance(d.get("data"), dict):
         return None
-    return dict(d["data"]), d.get("gelesen_am"), {"user_id": d.get("user_id") or "",
-                                                  "dealer_id": d.get("dealer_id") or ""}
+    daten = dict(d["data"])
+    eigen = bool(user_id) and d.get("user_id") == user_id
+    if not eigen and (not dealer_id or (d.get("dealer_id") or "") != dealer_id):
+        for feld in KONTAKT_FELDER:
+            daten.pop(feld, None)
+    return daten, d.get("gelesen_am"), {"user_id": d.get("user_id") or "",
+                                        "dealer_id": d.get("dealer_id") or ""}
 
 
 # ---------------------------------------------------------------- Seite entpacken
