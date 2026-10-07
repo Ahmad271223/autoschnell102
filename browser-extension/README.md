@@ -54,6 +54,9 @@ Seit Version 2.0.0 (04.10.2026) macht die Erweiterung zwei Dinge:
    localhost, `hochladen.ps1` nur committet.
    Seit 2.7.0 (Wunsch Ahmad 06.10.): Portalwahl im Fenster am Symbol — mobile.de, AutoScout24 oder beide (wie im
    Windows-Programm); vorher gingen immer beide auf.
+   Seit 2.7.1 (07.10., E2E Programm + Erweiterung): auch die kurze Kleinanzeigen-Adresse `/s-anzeige/<Nr>` gilt als
+   Inserat (`inseratKennung`) — so öffnet das Windows-Programm ab 1.5.7 das Inserat als Tab, damit die Erweiterung es
+   liest (Kaufvertrag ohne Apify); vorher brauchte die Adresse die Kategorie `-216-`.
    **Zusammen mit dem Windows-Programm (seit 2.3.0, dasselbe AutoSchnell-Konto):**
    - Hat das Programm das Auto in den letzten 30 Minuten verglichen (`programm_verglichen` in der Antwort von
      `…/inserat`), öffnet der Helfer **keine** Vergleiche von selbst — nur die Ampel per Direktabruf.

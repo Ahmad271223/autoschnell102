@@ -32,8 +32,11 @@ AutoSchnell.inseratKennung = function inseratKennung(href) {
   }
   if (/(^|\.)kleinanzeigen\.de$/.test(host)) {
     // 2.6.0 (Nr. 3): nur die Kategorie Autos (216: ".../<Anzeigen-Nr>-216-<Ort>") — vorher galt jede Anzeige
-    // (Sofa, Handy) als Inserat: Hochladen, Fehlerbox, und "BMW Felgen" konnte als Auto durchgehen
-    const m = /\/s-anzeige\/(?:[^/]+\/)?(\d{6,})-216(?:-|$)/.exec(u.pathname);
+    // (Sofa, Handy) als Inserat: Hochladen, Fehlerbox, und "BMW Felgen" konnte als Auto durchgehen.
+    // 2.7.1 (E2E 07.10.2026): auch die kurze Adresse "/s-anzeige/<Anzeigen-Nr>" ohne Kategorie — so oeffnet das
+    // Windows-Programm das Inserat (werkzeuge.inserat_url), Kleinanzeigen leitet sie NICHT auf die lange Form um;
+    // ob es ein Auto ist, prueft dann der Server (422 sonst, keine Box fuer Sofas: Hochladen nur bei Fahrzeugseite)
+    const m = /\/s-anzeige\/(?:[^/]+\/)?(\d{6,})(?:-216(?:-|$)|\/?$)/.exec(u.pathname);
     return m ? "kleinanzeigen:" + m[1] : null;
   }
   return null;
