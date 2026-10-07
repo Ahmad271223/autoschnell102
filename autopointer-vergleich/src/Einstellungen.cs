@@ -16,8 +16,8 @@ internal sealed class Einstellungen
     public const string StandardServer = "https://app.auto-schnellkauf.de";
 
     public bool AutomatikAktiv { get; set; } = true;
-    public bool MobileDe { get; set; } = true;
-    public bool AutoScout24 { get; set; } = true;
+    // 1.5.8 (Wunsch Ahmad 08.10.2026): die Portalwahl (mobile.de / AutoScout24) gibt es nur noch in AutoSchnell —
+    // der Server schickt nur die Links der gewaehlten Portale. Alte Werte in einstellungen.json werden ignoriert.
 
     public BrowserWahl Browser { get; set; } = BrowserWahl.Standard;
     public bool ZurueckZuAutoPointer { get; set; } = false;
@@ -30,8 +30,8 @@ internal sealed class Einstellungen
     public bool TastenkuerzelAktiv { get; set; } = true;
     public bool ErkennungsbilderSpeichern { get; set; } = false;
 
-    /// <summary>Kleine Leiste mit den wichtigsten Knoepfen, immer im Vordergrund (Wunsch Ahmad 03.10.2026).</summary>
-    public bool LeisteAnzeigen { get; set; } = true;
+    // 1.5.8: die kleine Leiste ist immer da (EINE Bedienung statt Fenster + Leiste + Menue am Symbol);
+    // ein altes "LeisteAnzeigen": false in einstellungen.json wird ignoriert.
     /// <summary>Ecke der Leiste: "links" oder "rechts" (jeweils unten). Links verdeckt die Detailansicht von
     /// AutoPointer nicht (die steht rechts).</summary>
     public string LeisteEcke { get; set; } = Leiste.Links;

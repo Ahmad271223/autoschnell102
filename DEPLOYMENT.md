@@ -4436,7 +4436,7 @@ Suchern der Firma) – „alle anderen sollen das gar nicht sehen“.
   cd autopointer-vergleich && powershell -ExecutionPolicy Bypass -File build.ps1   # lokal: dist\AutoSchnell-Vergleich.exe
   scp dist/AutoSchnell-Vergleich.exe root@<server>:/tmp/                            # vom PC aus, nicht auf dem Server
   docker compose cp /tmp/AutoSchnell-Vergleich.exe backend:/tmp/AutoSchnell-Vergleich.exe
-  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.5.7
+  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.5.8
   ```
   Bis dahin zeigt die Seite „Wird gerade bereitgestellt“. Speicher: `werkzeuge/autopointer-vergleich/…`, Eintrag in `werkzeuge`.
 - Tests: `backend/tests/test_werkzeuge_20261003.py`, `frontend/src/pages/app/Programme.test.jsx`,
@@ -4444,7 +4444,7 @@ Suchern der Firma) – „alle anderen sollen das gar nicht sehen“.
 
 ### Browser-Helfer für Chrome und Edge (Wunsch Ahmad 04.10.2026)
 
-Zweites Werkzeug `browser-helfer` neben dem Programm — die Erweiterung `browser-extension/` (Version 2.7.1, enthält
+Zweites Werkzeug `browser-helfer` neben dem Programm — die Erweiterung `browser-extension/` (Version 2.7.2, enthält
 weiter den Kleinanzeigen-Abruf-Helfer). Gleiche Lizenz: 6-stelliger Code, **ein Konto = ein Browser**, Abo-Pflicht,
 Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
 - Freigabe: `BROWSER_HELFER_KUNDEN` (Standard `10001,10002,10007`, `docker-compose.yml`; leer = niemand).
@@ -4559,6 +4559,11 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
   - **2.7.1 — kurze Kleinanzeigen-Adresse (E2E Programm + Erweiterung 07.10.2026):** `inseratKennung` erkennt auch
     `/s-anzeige/<Nr>` ohne Kategorie `-216-` — so öffnet das Programm 1.5.7 das Inserat als Tab (Kleinanzeigen leitet
     nicht auf die lange Form um); vorher blieb der Tab stumm, der Kaufvertrag hatte weder Browser-Lesung noch Apify.
+  - **2.7.2 / Programm 1.5.8 — EINE Portalwahl (Wunsch Ahmad 08.10.2026):** die Wahl mobile.de/AutoScout24/beide steht
+    je Konto in AutoSchnell (`users.vergleich_portale`, `PUT /auth/vergleich-portale`, Schalter auf der
+    Vergleichsseite). Der Server filtert die Links für `/werkzeuge/*/vergleich` und `/inserat`
+    (`werkzeuge.nach_portalen`), `/status` nennt die Wahl; Erweiterung und Programm haben keine eigenen Häkchen mehr.
+    Ältere Erweiterungen/Programme filtern zusätzlich mit ihrer alten Wahl (Schnittmenge) — Update empfohlen.
   - **Passwort trennt Werkzeuge (Entscheidung Ahmad 06.10.2026):** setzt der Betreiber ein neues Passwort
     (`POST /admin/users/{id}/password`), trennt `routes.werkzeuge.alle_trennen` Programm und Helfer des Kontos
     (Grund `passwort` → 401 mit klarem Text, neuer Code nötig; Audit-Meta `werkzeuge_getrennt`).
@@ -4574,7 +4579,7 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
   powershell -File browser-extension\bauen.ps1                                       # lokal: browser-extension\dist\AutoSchnell-Helfer.zip
   scp browser-extension/dist/AutoSchnell-Helfer.zip root@<server>:/tmp/
   docker compose cp /tmp/AutoSchnell-Helfer.zip backend:/tmp/AutoSchnell-Helfer.zip
-  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Helfer.zip --werkzeug browser-helfer --version 2.7.1
+  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Helfer.zip --werkzeug browser-helfer --version 2.7.2
   ```
   Reihenfolge: erst Server deployen (neue Routen), dann ZIP hochladen.
 - Tests: `backend/tests/test_browser_helfer_20261004.py` (Teil 1 ohne Server, Teil 2 über HTTP).

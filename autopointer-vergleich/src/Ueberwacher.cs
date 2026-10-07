@@ -422,9 +422,9 @@ internal sealed class Ueberwacher
             vertragsHinweise.Add(KeinLinkHinweis);
         else if (antwort.VorabStatus is "limit" or "fehler" && antwort.VorabHinweis.Length > 0)
             vertragsHinweise.Add("Für den Kaufvertrag nicht vorab ausgelesen: " + antwort.VorabHinweis);
-        var links = antwort.Links
-            .Where(l => (l.Portal == "mobile.de" && e.MobileDe) || (l.Portal == "AutoScout24" && e.AutoScout24))
-            .ToList();
+        // 1.5.8 (Wunsch Ahmad 08.10.2026): die Portalwahl steht in AutoSchnell, der Server schickt nur deren Links —
+        // hier nur noch die beiden bekannten Vergleichsportale (alles andere ignorieren)
+        var links = antwort.Links.Where(l => l.Portal is "mobile.de" or "AutoScout24").ToList();
         // Wunsch Ahmad 07.10.2026: hat das Konto den Browser-Helfer, oeffnen wir das Inserat als Tab mit (zuletzt, damit
         // es vorne liegt) — der Helfer liest es dort fuer den Kaufvertrag, ganz ohne Apify
         if (antwort.InseratImBrowser && antwort.InseratUrl != null && links.Count > 0)
@@ -434,7 +434,7 @@ internal sealed class Ueberwacher
         {
             if (vertragsHinweise.Count > 0) Melde(string.Join("\n", vertragsHinweise), false);
             MeldeEinmal($"{f.Marke} {f.Modell}: kein Vergleich geöffnet – "
-                        + (antwort.Links.Count > 0 ? "kein Portal in den Einstellungen aktiv." : antwort.Hinweise.FirstOrDefault() ?? "keine Links."));
+                        + (antwort.Hinweise.FirstOrDefault() ?? "keine Links (Portalwahl in AutoSchnell prüfen)."));
             return;
         }
 

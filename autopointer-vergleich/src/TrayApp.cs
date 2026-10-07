@@ -12,13 +12,10 @@ internal sealed class TrayApp : ApplicationContext
     internal const string ZeigenSignalName = @"Local\AutoSchnell.AutoPointerVergleich.Zeigen";
 
     private readonly NotifyIcon _symbol;
-    private readonly ToolStripMenuItem _automatik;
     private readonly Icon _iconAktiv = Symbole.Icon(Symbole.Aktiv);
     private readonly Icon _iconPause = Symbole.Icon(Symbole.Pause);
     private readonly Icon _iconWarten = Symbole.Icon(Symbole.Warten);
     private readonly Icon _iconFehler = Symbole.Icon(Symbole.Fehler);
-    private readonly ToolStripMenuItem _verbindungsZeile;
-    private readonly ToolStripMenuItem _trennen;
     private readonly string? _serverUeberschrieben;
     private AutoSchnellDienst _dienst = null!;
     private VerbindenForm? _verbindenForm;
@@ -42,7 +39,6 @@ internal sealed class TrayApp : ApplicationContext
     private readonly SteuerFenster _fenster;
     private readonly Leiste _leiste;
     private IntPtr _leistenHandle;          // fuer den Lese-Thread (kein Zugriff auf das Steuerelement dort)
-    private readonly ToolStripMenuItem _leisteMenue;
     private AutoPointerQuelle? _quelle;
     /// <summary>Wunsch Ahmad 06.10.2026: letzter Mausklick in AutoPointer — nur danach wird verglichen.</summary>
     private Klicks? _klicks;
@@ -68,27 +64,11 @@ internal sealed class TrayApp : ApplicationContext
         }
         DienstErstellen();
 
+        // 1.5.8 (Wunsch Ahmad 08.10.2026): bedient wird ueber die Leiste — am Symbol nur noch Zeigen und Beenden
         var menue = new ContextMenuStrip();
-        var oeffnen = new ToolStripMenuItem("Fenster öffnen", null, (_, _) => FensterZeigen());
+        var oeffnen = new ToolStripMenuItem("Leiste und Status zeigen", null, (_, _) => FensterZeigen());
         oeffnen.Font = new Font(oeffnen.Font, FontStyle.Bold);
         menue.Items.Add(oeffnen);
-        _leisteMenue = new ToolStripMenuItem("Kleine Leiste anzeigen", null, (_, _) => LeisteUmschalten());
-        menue.Items.Add(_leisteMenue);
-        menue.Items.Add(new ToolStripSeparator());
-        _verbindungsZeile = new ToolStripMenuItem("Nicht verbunden") { Enabled = false };
-        menue.Items.Add(_verbindungsZeile);
-        menue.Items.Add("Mit AutoSchnell verbinden …", null, (_, _) => VerbindenZeigen(null));
-        _trennen = new ToolStripMenuItem("Verbindung trennen", null, async (_, _) => await TrennenAsync());
-        menue.Items.Add(_trennen);
-        menue.Items.Add(new ToolStripSeparator());
-        _automatik = new ToolStripMenuItem("Automatik aktiv", null, (_, _) => AutomatikUmschalten()) { CheckOnClick = false };
-        menue.Items.Add(_automatik);
-        menue.Items.Add("Aktuelles Fahrzeug jetzt vergleichen", null, (_, _) => VergleichenStarten());
-        menue.Items.Add("Letzten Vergleich erneut öffnen", null, (_, _) => _ueberwacher?.LetztenErneutOeffnen());
-        menue.Items.Add("Kaufvertrag: Auto in AutoSchnell öffnen", null, async (_, _) => await VertragOeffnenAsync());
-        menue.Items.Add(new ToolStripSeparator());
-        menue.Items.Add("Einstellungen …", null, (_, _) => EinstellungenZeigen());
-        menue.Items.Add("Systemcheck: läuft alles? …", null, async (_, _) => await SystemcheckZeigenAsync());
         menue.Items.Add(new ToolStripSeparator());
         menue.Items.Add("Beenden", null, (_, _) => Beenden());
 
@@ -106,11 +86,6 @@ internal sealed class TrayApp : ApplicationContext
         AutomatikAnzeigen();
 
         _fenster = new SteuerFenster(ZustandFuersFenster);
-        _fenster.Aktivieren += () => AutomatikSetzen(true);
-        _fenster.Stoppen += () => AutomatikSetzen(false);
-        _fenster.JetztVergleichen += VergleichenStarten;
-        _fenster.LetztenOeffnen += () => _ueberwacher?.LetztenErneutOeffnen();
-        _fenster.VertragOeffnen += async () => await VertragOeffnenAsync();
         _fenster.Verbinden += () => VerbindenZeigen(null);
         _fenster.Trennen += async () => await TrennenAsync();
         _fenster.EinstellungenOeffnen += EinstellungenZeigen;
@@ -122,6 +97,11 @@ internal sealed class TrayApp : ApplicationContext
         _leiste.JetztVergleichen += VergleichenStarten;
         _leiste.VertragOeffnen += async () => await VertragOeffnenAsync();
         _leiste.FensterOeffnen += FensterZeigen;
+        _leiste.LetztenOeffnen += () => _ueberwacher?.LetztenErneutOeffnen();
+        _leiste.EinstellungenOeffnen += EinstellungenZeigen;
+        _leiste.SystemcheckOeffnen += async () => await SystemcheckZeigenAsync();
+        _leiste.Verbinden += () => VerbindenZeigen(null);
+        _leiste.Trennen += async () => await TrennenAsync();
         _leiste.EckeGewechselt += ecke => { _einstellungen.LeisteEcke = ecke; Speichern(_einstellungen); };
         _leiste.PositionGeaendert += stelle =>
         {
@@ -129,7 +109,6 @@ internal sealed class TrayApp : ApplicationContext
             _einstellungen.LeisteY = stelle?.Y;
             Speichern(_einstellungen);
         };
-        _leiste.Ausblenden += () => { _einstellungen.LeisteAnzeigen = false; Speichern(_einstellungen); LeisteAnwenden(); FensterZeigen(); };
         _leiste.Beenden += Beenden;
         AutoPointerFenster.EigeneFenster = () => new[] { _leistenHandle };
         // Nr. 10: liegt die Leiste ueber der AutoPointer-Tabelle, wird sie fuer das Bildschirm-Abbild kurz unsichtbar
@@ -138,12 +117,8 @@ internal sealed class TrayApp : ApplicationContext
             if (!_leiste.IsDisposed && _leiste.Visible) _leiste.Opacity = unsichtbar ? 0 : 1;
         }, null);
         LeisteAnwenden();
-        // Mit Leiste startet nur die Leiste (das grosse Fenster per Klick auf ☰); ohne Leiste das Fenster
-        if (!_einstellungen.LeisteAnzeigen)
-        {
-            if (minimiert) _fenster.WindowState = FormWindowState.Minimized;   // Start mit Windows: nur in der Taskleiste
-            _fenster.Show();
-        }
+        // 1.5.8: es startet nur die Leiste; "Status und Hilfe" ueber "Mehr" bzw. das Symbol im Infobereich
+        _ = minimiert;
 
         Protokoll.KlartextUmstellen();     // alte Klartext-Protokolle verschluesseln (03.10.2026)
         Protokoll.AufraeumenBeiTageswechsel();
@@ -225,36 +200,20 @@ internal sealed class TrayApp : ApplicationContext
 
     private void FensterZeigen()
     {
+        LeisteAnwenden();                                   // falls die Leiste verdeckt/verschoben war: wieder da
         if (!_fenster.IsDisposed) _fenster.Zeigen();
     }
 
-    /// <summary>Wunsch Ahmad 03.10.2026: kleine Leiste immer im Vordergrund, unten links oder rechts.</summary>
+    /// <summary>Wunsch Ahmad 03.10.2026: kleine Leiste immer im Vordergrund, unten links oder rechts.
+    /// Seit 1.5.8 immer an (sie ist die eine Bedienung).</summary>
     private void LeisteAnwenden()
     {
-        bool an = _einstellungen.LeisteAnzeigen;
-        _leisteMenue.Checked = an;
-        _fenster.NurAusblenden(an);
+        _fenster.NurAusblenden(true);
         if (_leiste.IsDisposed) return;
-        if (an)
-        {
-            _leiste.EckeSetzen(_einstellungen.LeisteEcke);
-            _leiste.PositionSetzen(_einstellungen.LeisteX is int x && _einstellungen.LeisteY is int y ? new Point(x, y) : null);
-            if (!_leiste.Visible) _leiste.Show();
-            _leistenHandle = _leiste.Handle;
-        }
-        else
-        {
-            _leiste.Hide();
-            _leistenHandle = IntPtr.Zero;
-        }
-    }
-
-    private void LeisteUmschalten()
-    {
-        _einstellungen.LeisteAnzeigen = !_einstellungen.LeisteAnzeigen;
-        Speichern(_einstellungen);
-        LeisteAnwenden();
-        if (!_einstellungen.LeisteAnzeigen) FensterZeigen();
+        _leiste.EckeSetzen(_einstellungen.LeisteEcke);
+        _leiste.PositionSetzen(_einstellungen.LeisteX is int x && _einstellungen.LeisteY is int y ? new Point(x, y) : null);
+        if (!_leiste.Visible) _leiste.Show();
+        _leistenHandle = _leiste.Handle;
     }
 
     private FensterZustand ZustandFuersFenster()
@@ -417,9 +376,9 @@ internal sealed class TrayApp : ApplicationContext
 
     private void VerbindungAnzeigen()
     {
-        bool verbunden = _dienst.Verbunden;
-        _verbindungsZeile.Text = verbunden ? $"Verbunden: {_einstellungen.VerbundenAls}" : "Nicht mit AutoSchnell verbunden";
-        _trennen.Enabled = verbunden;
+        // 1.5.8: die Verbindung zeigen Leiste ("Mehr") und "Status und Hilfe" (jede Sekunde); am Symbol der Tooltip
+        _symbol.Text = _dienst.Verbunden ? "AutoSchnell Vergleich – verbunden" : "AutoSchnell Vergleich – nicht verbunden";
+        if (!_leiste.IsDisposed) _leiste.Aktualisieren();
     }
 
     /// <summary>Beim Start und alle 15 Minuten: gilt der Schluessel noch, ist das Abo aktiv?
@@ -623,8 +582,6 @@ internal sealed class TrayApp : ApplicationContext
 
     private void AutomatikAnzeigen()
     {
-        _automatik.Checked = _einstellungen.AutomatikAktiv;
-        _automatik.Text = "Automatik aktiv" + (_einstellungen.TastenkuerzelAktiv ? "\tStrg+Alt+P" : "");
         StatusAnzeigen(AktuellerStatus());
     }
 

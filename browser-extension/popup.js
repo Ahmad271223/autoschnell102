@@ -56,9 +56,14 @@ function zeigen(st) {
   $("hinweis").hidden = !texte.length;
   $("hinweis").textContent = texte.join(" ");
   $("oeffnen").checked = !(st.einstellungen && st.einstellungen.vergleicheOeffnen === false);
-  $("mobile").checked = !(st.einstellungen && st.einstellungen.mobile === false);
-  $("autoscout").checked = !(st.einstellungen && st.einstellungen.autoscout === false);
-  $("portalHinweis").hidden = $("mobile").checked || $("autoscout").checked;
+  // 2.7.2 (08.10.2026): die Portalwahl steht in AutoSchnell (Vergleichsseite) — hier nur anzeigen
+  if (st.portale) {
+    const namen = [st.portale.mobile !== false && "mobile.de", st.portale.autoscout !== false && "AutoScout24"]
+      .filter(Boolean);
+    $("portale").textContent = "Vergleiche auf: " + (namen.join(" und ") || "mobile.de und AutoScout24")
+      + " – ändern in AutoSchnell auf der Vergleichsseite.";
+    $("portale").hidden = false;
+  }
 }
 
 async function serverRecht(server) {
@@ -138,12 +143,9 @@ $("vergleich").addEventListener("click", async () => {
 });
 
 async function einstellungenSenden() {
-  await senden({ typ: "einstellungen", einstellungen: {
-    vergleicheOeffnen: $("oeffnen").checked, mobile: $("mobile").checked, autoscout: $("autoscout").checked } });
-  $("portalHinweis").hidden = $("mobile").checked || $("autoscout").checked;
+  await senden({ typ: "einstellungen", einstellungen: { vergleicheOeffnen: $("oeffnen").checked } });
 }
-// Wunsch Ahmad 06.10.2026: wie im Windows-Programm — mobile.de, AutoScout24 oder beide
-for (const id of ["oeffnen", "mobile", "autoscout"]) $(id).addEventListener("change", einstellungenSenden);
+$("oeffnen").addEventListener("change", einstellungenSenden);
 
 // 2.6.3 (Paket 3): erst sofort aus dem Speicher (Konto, Name, Firma), dann der Server-Stand
 senden({ typ: "status", schnell: true }).then((st) => {

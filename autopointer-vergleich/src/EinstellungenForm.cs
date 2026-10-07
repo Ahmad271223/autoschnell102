@@ -1,14 +1,12 @@
 namespace AutoPointerVergleich;
 
-/// <summary>Kleines Einstellungsfenster (ohne Designer gebaut). Die Suchregeln kommen
-/// aus AutoSchnell — hier nur Portale, Browser und Ablauf.</summary>
+/// <summary>Kleines Einstellungsfenster (ohne Designer gebaut). Die Suchregeln UND die Portalwahl (seit 1.5.8)
+/// kommen aus AutoSchnell — hier nur Browser, Leiste und Ablauf.</summary>
 internal sealed class EinstellungenForm : Form
 {
     private readonly Einstellungen _e;
 
     private readonly CheckBox _automatik = Haken("Vergleich automatisch öffnen, sobald in AutoPointer ein Fahrzeug angezeigt wird");
-    private readonly CheckBox _mobile = Haken("mobile.de");
-    private readonly CheckBox _autoscout = Haken("AutoScout24");
 
     private readonly ComboBox _browser = Auswahl("Standardbrowser", "Microsoft Edge", "Google Chrome");
     private readonly CheckBox _zurueck = Haken("danach AutoPointer wieder nach vorne holen (bei zwei Bildschirmen)");
@@ -19,7 +17,6 @@ internal sealed class EinstellungenForm : Form
     private readonly CheckBox _hotkey = Haken("Strg+Alt+P schaltet die Automatik an/aus");
     private readonly CheckBox _autostart = Haken("mit Windows starten");
     private readonly CheckBox _bilder = Haken("Erkennungsbilder speichern (nur zur Fehlersuche)");
-    private readonly CheckBox _leiste = Haken("Kleine Leiste mit den Knöpfen immer im Vordergrund anzeigen");
     private readonly ComboBox _ecke = Auswahl("unten links", "unten rechts");
 
     public Einstellungen Ergebnis => _e;
@@ -46,8 +43,10 @@ internal sealed class EinstellungenForm : Form
             Gruppe("AutoSchnell", verbunden,
                    Beschriftung("Die Suchregeln (Baujahr, Kilometer, Leistung, Kraftstoff, Getriebe …) kommen aus\n" +
                                 "AutoSchnell: Einstellungen → Vergleich. Änderungen dort gelten sofort auch hier.")),
-            Gruppe("Automatische Vergleiche", _automatik, Reihe(_mobile, _autoscout)),
-            Gruppe("Leiste", _leiste, Reihe(Beschriftung("Position:"), _ecke)),
+            Gruppe("Automatische Vergleiche", _automatik,
+                   Beschriftung("Welche Portale (mobile.de, AutoScout24 oder beide) aufgehen, stellst du in\n" +
+                                "AutoSchnell auf der Vergleichsseite ein – das gilt hier automatisch mit.")),
+            Gruppe("Leiste", Reihe(Beschriftung("Position:"), _ecke)),
             Gruppe("Browser", Reihe(Beschriftung("Öffnen mit:"), _browser), _zurueck),
             Gruppe("Ablauf",
                    Reihe(Beschriftung("Wartezeit nach dem Anklicken:"), _wartezeit, Beschriftung("ms")),
@@ -71,8 +70,6 @@ internal sealed class EinstellungenForm : Form
     private void Einlesen()
     {
         _automatik.Checked = _e.AutomatikAktiv;
-        _mobile.Checked = _e.MobileDe;
-        _autoscout.Checked = _e.AutoScout24;
         _browser.SelectedIndex = (int)_e.Browser;
         _zurueck.Checked = _e.ZurueckZuAutoPointer;
         _wartezeit.Value = _e.WartezeitMs;
@@ -81,15 +78,12 @@ internal sealed class EinstellungenForm : Form
         _hotkey.Checked = _e.TastenkuerzelAktiv;
         _autostart.Checked = _e.MitWindowsStarten;
         _bilder.Checked = _e.ErkennungsbilderSpeichern;
-        _leiste.Checked = _e.LeisteAnzeigen;
         _ecke.SelectedIndex = _e.LeisteEcke == Leiste.Rechts ? 1 : 0;
     }
 
     private void Uebernehmen()
     {
         _e.AutomatikAktiv = _automatik.Checked;
-        _e.MobileDe = _mobile.Checked;
-        _e.AutoScout24 = _autoscout.Checked;
         _e.Browser = (BrowserWahl)Math.Max(0, _browser.SelectedIndex);
         _e.ZurueckZuAutoPointer = _zurueck.Checked;
         _e.WartezeitMs = (int)_wartezeit.Value;
@@ -98,12 +92,8 @@ internal sealed class EinstellungenForm : Form
         _e.TastenkuerzelAktiv = _hotkey.Checked;
         _e.MitWindowsStarten = _autostart.Checked;
         _e.ErkennungsbilderSpeichern = _bilder.Checked;
-        _e.LeisteAnzeigen = _leiste.Checked;
         _e.LeisteEcke = _ecke.SelectedIndex == 1 ? Leiste.Rechts : Leiste.Links;
         _e.Bereinigt();
-        if (!_e.MobileDe && !_e.AutoScout24)
-            MessageBox.Show(this, "Kein Portal ausgewählt – es werden keine Vergleiche geöffnet.", Text,
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
     /// <summary>Pruefung 05.10.2026 (Paket 2, A11): nur die Felder dieses Dialogs in die laufenden Einstellungen
@@ -113,8 +103,6 @@ internal sealed class EinstellungenForm : Form
     public void AnwendenAuf(Einstellungen ziel)
     {
         ziel.AutomatikAktiv = _e.AutomatikAktiv;
-        ziel.MobileDe = _e.MobileDe;
-        ziel.AutoScout24 = _e.AutoScout24;
         ziel.Browser = _e.Browser;
         ziel.ZurueckZuAutoPointer = _e.ZurueckZuAutoPointer;
         ziel.WartezeitMs = _e.WartezeitMs;
@@ -123,7 +111,6 @@ internal sealed class EinstellungenForm : Form
         ziel.TastenkuerzelAktiv = _e.TastenkuerzelAktiv;
         ziel.MitWindowsStarten = _e.MitWindowsStarten;
         ziel.ErkennungsbilderSpeichern = _e.ErkennungsbilderSpeichern;
-        ziel.LeisteAnzeigen = _e.LeisteAnzeigen;
         ziel.LeisteEcke = _e.LeisteEcke;
     }
 

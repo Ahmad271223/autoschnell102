@@ -305,13 +305,10 @@
         const ohneText = offen ? "" : z.vomProgramm ? "Im Vergleich-Programm geöffnet"
           : z.automatik === "hintergrund" ? "Öffnet, sobald du hierher wechselst" : "";
         for (const [name, schluessel] of [["mobile.de", "mobile"], ["AutoScout24", "autoscout"]]) {
-          // Wunsch Ahmad 06.10.2026: abgewaehlte Portale (Fenster am Symbol) tauchen in der Box nicht auf
-          if (portale.includes(name) && !(z.portale && z.portale[schluessel] === false)) {
+          // 2.7.2: der Server schickt nur die Links der in AutoSchnell gewaehlten Portale — abgewaehlte fehlen hier
+          if (portale.includes(name)) {
             inhalt.appendChild(lageZeile(name, (z.marktlage || {})[schluessel], offen, ohneText, ampelFehler(z, schluessel)));
           }
-        }
-        if (z.portale && z.portale.mobile === false && z.portale.autoscout === false) {
-          inhalt.appendChild(el("div", "klein", "Kein Portal gewählt – im Fenster am AutoSchnell-Symbol mobile.de oder AutoScout24 einschalten."));
         }
         const bw = bewertungZeile(a.portal_bewertung);
         if (bw) inhalt.appendChild(el("div", "klein", bw));

@@ -57,6 +57,9 @@ Seit Version 2.0.0 (04.10.2026) macht die Erweiterung zwei Dinge:
    Seit 2.7.1 (07.10., E2E Programm + Erweiterung): auch die kurze Kleinanzeigen-Adresse `/s-anzeige/<Nr>` gilt als
    Inserat (`inseratKennung`) — so öffnet das Windows-Programm ab 1.5.7 das Inserat als Tab, damit die Erweiterung es
    liest (Kaufvertrag ohne Apify); vorher brauchte die Adresse die Kategorie `-216-`.
+   Seit 2.7.2 (Wunsch Ahmad 08.10.): die Portalwahl gibt es nur noch EINMAL in AutoSchnell (Vergleichsseite, je
+   Konto, gilt auch für das Windows-Programm). Der Server schickt nur die Links der gewählten Portale; das Fenster am
+   Symbol zeigt die Wahl nur noch an („Vergleiche auf: …“), die Häkchen dafür sind weg.
    **Zusammen mit dem Windows-Programm (seit 2.3.0, dasselbe AutoSchnell-Konto):**
    - Hat das Programm das Auto in den letzten 30 Minuten verglichen (`programm_verglichen` in der Antwort von
      `…/inserat`), öffnet der Helfer **keine** Vergleiche von selbst — nur die Ampel per Direktabruf.

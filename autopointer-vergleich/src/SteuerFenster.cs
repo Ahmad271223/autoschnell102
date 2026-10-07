@@ -7,9 +7,9 @@ internal sealed record FensterZustand(Status Status, bool AutomatikAn, bool Verb
                                       string? Sperrgrund = null);
 
 /// <summary>Wunsch Ahmad 03.10.2026: "man kann nicht stoppen, aktivieren, nichts — das sollen Buttons sein".
-/// Sichtbares Fenster mit Knoepfen statt nur eines Symbols im Infobereich. Solange das Programm laeuft,
-/// steht es in der Taskleiste; Schliessen (X) verkleinert nur, ganz aus nur ueber "Programm beenden".
-/// Ein zweiter Start des Programms holt dieses Fenster nach vorne.</summary>
+/// Seit 1.5.8 (08.10.2026, "zu viele Knoepfe fuer dieselbe Sache"): bedient wird nur noch ueber die kleine Leiste
+/// (Start/Stopp, Vergleichen, Vertrag, Mehr). Dieses Fenster zeigt Status, letztes Auto, Verbindung und Hilfe —
+/// Verbinden, Systemcheck, Einstellungen, Beenden. Ein zweiter Start des Programms holt es nach vorne.</summary>
 internal sealed class SteuerFenster : Form
 {
     private const int Breite = 420;
@@ -17,7 +17,7 @@ internal sealed class SteuerFenster : Form
     private readonly Func<FensterZustand> _zustand;
     private readonly Panel _ampel;
     private readonly Label _titel, _unterzeile, _verbindung, _letztes, _meldung;
-    private readonly Button _aktivieren, _stoppen, _jetzt, _erneut, _vertrag, _verbinden, _einstellungen, _beenden;
+    private readonly Button _verbinden, _einstellungen, _beenden;
     private readonly System.Windows.Forms.Timer _takt;
     private FensterZustand? _zuletzt;
 
@@ -27,8 +27,7 @@ internal sealed class SteuerFenster : Form
     private bool _nurAusblenden;
     private readonly Label _hinweisX;
 
-    public event Action? Aktivieren, Stoppen, JetztVergleichen, LetztenOeffnen, VertragOeffnen,
-        Verbinden, Trennen, EinstellungenOeffnen, Beenden, SystemcheckOeffnen;
+    public event Action? Verbinden, Trennen, EinstellungenOeffnen, Beenden, SystemcheckOeffnen;
 
     public SteuerFenster(Func<FensterZustand> zustand)
     {
@@ -65,22 +64,14 @@ internal sealed class SteuerFenster : Form
         _ampel.Controls.Add(_titel);
         stapel.Controls.Add(_ampel);
 
-        // Die zwei wichtigsten Knoepfe
-        var reihe = Reihe();
-        _aktivieren = Gross("▶  Aktivieren", Symbole.Aktiv);
-        _stoppen = Gross("■  Stoppen", Symbole.Fehler);
-        _stoppen.Margin = new Padding(10, 0, 0, 0);
-        reihe.Controls.Add(_aktivieren);
-        reihe.Controls.Add(_stoppen);
-        stapel.Controls.Add(reihe);
-
-        _jetzt = Knopf("Aktuelles Auto jetzt vergleichen");
-        _erneut = Knopf("Letzten Vergleich nochmal öffnen");
-        _vertrag = Knopf("Kaufvertrag: Auto in AutoSchnell öffnen");
-        _jetzt.Margin = new Padding(0, 14, 0, 0);
-        stapel.Controls.Add(_jetzt);
-        stapel.Controls.Add(_erneut);
-        stapel.Controls.Add(_vertrag);
+        // 1.5.8: bedient wird ueber die Leiste — hier steht, wie
+        var bedienung = Info();
+        bedienung.Text = "Bedienen mit der kleinen Leiste unten am Bildschirm:\n"
+                         + "• Status-Feld anklicken = Start / Stopp\n"
+                         + "• „Vergleichen“ = aktuelles Auto jetzt vergleichen\n"
+                         + "• „Vertrag“ = zuletzt angeklicktes Auto in AutoSchnell öffnen\n"
+                         + "• „Mehr“ = letzter Vergleich, Einstellungen, Systemcheck, Verbindung, Beenden";
+        stapel.Controls.Add(bedienung);
 
         _letztes = Info();
         _letztes.Margin = new Padding(0, 12, 0, 0);
@@ -118,15 +109,10 @@ internal sealed class SteuerFenster : Form
             AutoSize = true, MaximumSize = new Size(Breite, 0), ForeColor = SystemColors.GrayText,
             Font = new Font("Segoe UI", 8.5f), Margin = new Padding(0, 10, 0, 0),
         };
-        NurAusblenden(false);
+        NurAusblenden(true);
         stapel.Controls.Add(_hinweisX);
         Controls.Add(stapel);
 
-        _aktivieren.Click += (_, _) => { Aktivieren?.Invoke(); Aktualisieren(); };
-        _stoppen.Click += (_, _) => { Stoppen?.Invoke(); Aktualisieren(); };
-        _jetzt.Click += (_, _) => JetztVergleichen?.Invoke();
-        _erneut.Click += (_, _) => LetztenOeffnen?.Invoke();
-        _vertrag.Click += (_, _) => VertragOeffnen?.Invoke();
         _verbinden.Click += (_, _) =>
         {
             if (_zuletzt?.Verbunden == true) Trennen?.Invoke(); else Verbinden?.Invoke();
@@ -194,12 +180,6 @@ internal sealed class SteuerFenster : Form
         _unterzeile.Text = unter;
         Text = "AutoSchnell Vergleich – " + titel.ToLowerInvariant() + (z.Probelauf ? " (Probelauf)" : "");
 
-        Faerben(_aktivieren, !z.AutomatikAn, Symbole.Aktiv, z.AutomatikAn ? "✓  Ist aktiv" : "▶  Aktivieren");
-        Faerben(_stoppen, z.AutomatikAn, Symbole.Fehler, z.AutomatikAn ? "■  Stoppen" : "✓  Ist gestoppt");
-
-        _jetzt.Enabled = z.Verbunden;
-        _erneut.Enabled = z.Verbunden && z.LetztesAuto != null;
-        _vertrag.Enabled = z.Verbunden && z.LetztesAuto != null;
         _letztes.Text = z.LetztesAuto != null
             ? "Letztes Auto: " + z.LetztesAuto + (z.HatInseratLink ? "" : "   (Inserat-Adresse fehlt – für den Vertrag selbst einfügen)")
             : "Letztes Auto: noch keins – in AutoPointer ein Inserat anklicken.";
@@ -224,35 +204,14 @@ internal sealed class SteuerFenster : Form
             // Paket 2 (A8): der Text des Servers ("Kein aktives AutoSchnell-Abo …", "Für dein Konto nicht freigeschaltet.")
             return (Symbole.Fehler, "GESPERRT", z.Sperrgrund ?? "Kein aktives Abo oder nicht freigeschaltet.");
         if (!z.AutomatikAn)
-            return (Symbole.Pause, "GESTOPPT", "Es öffnet sich nichts. Zum Starten „Aktivieren“ drücken.");
+            return (Symbole.Pause, "GESTOPPT", "Es öffnet sich nichts. Zum Starten das Status-Feld der Leiste anklicken.");
         if (z.Status == Status.KeinAutoPointer)
             return (Symbole.Warten, "AKTIV – WARTET", "AutoPointer ist nicht offen bzw. zeigt kein Auto.");
         return (Symbole.Aktiv, "AKTIV", "In AutoPointer ein Auto anklicken – die Vergleiche öffnen sich.");
     }
 
-    private static void Faerben(Button b, bool klickbar, Color farbe, string text)
-    {
-        b.Text = text;
-        b.Enabled = klickbar;
-        b.BackColor = klickbar ? farbe : Color.FromArgb(236, 236, 236);
-        b.ForeColor = klickbar ? Color.White : Color.FromArgb(90, 90, 90);
-        b.FlatAppearance.BorderColor = klickbar ? farbe : Color.FromArgb(200, 200, 200);
-    }
-
     private static FlowLayoutPanel Reihe() =>
         new() { FlowDirection = FlowDirection.LeftToRight, WrapContents = false, AutoSize = true, Margin = new Padding(0) };
-
-    private static Button Gross(string text, Color farbe)
-    {
-        var b = new Button
-        {
-            Text = text, Width = (Breite - 10) / 2, Height = 54, Margin = new Padding(0),
-            Font = new Font("Segoe UI", 13f, FontStyle.Bold), FlatStyle = FlatStyle.Flat, BackColor = farbe,
-            ForeColor = Color.White, Cursor = Cursors.Hand, UseVisualStyleBackColor = false,
-        };
-        b.FlatAppearance.BorderSize = 1;
-        return b;
-    }
 
     private static Button Knopf(string text, int breite = Breite) =>
         new()

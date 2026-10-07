@@ -4,7 +4,10 @@ namespace AutoPointerVergleich;
 /// werden — kleiner machen und immer fest vorne lassen, am besten unten rechts oder unten links".
 /// Schmale Leiste mit den wichtigsten Knöpfen: immer im Vordergrund (auch über dem Browser), fest in der
 /// gewählten Ecke über der Taskleiste — auf dem Bildschirm, auf dem AutoPointer läuft. Sie nimmt AutoPointer
-/// nie den Fokus weg (WS_EX_NOACTIVATE): ein Klick auf einen Knopf wirkt, AutoPointer bleibt vorne.</summary>
+/// nie den Fokus weg (WS_EX_NOACTIVATE): ein Klick auf einen Knopf wirkt, AutoPointer bleibt vorne.
+/// 1.5.8 (Wunsch Ahmad 08.10.2026, externe Pruefung "zu viele Knoepfe fuer dieselbe Sache"): die Leiste ist die EINE
+/// Bedienung — Status (Klick = Start/Stopp) | Vergleichen | Vertrag | Mehr (Menue mit allem anderen). Das grosse Fenster
+/// zeigt nur noch Status und Hilfe, das Symbol im Infobereich hat nur "Leiste und Status zeigen" und "Beenden".</summary>
 internal sealed class Leiste : Form
 {
     public const string Links = "links", Rechts = "rechts";
@@ -12,8 +15,9 @@ internal sealed class Leiste : Form
     private readonly Func<FensterZustand> _zustand;
     private readonly Func<IntPtr> _bezug;
     private readonly Label _status;
-    private readonly Button _schalter, _vergleichen, _vertrag, _fenster;
-    private readonly ToolStripMenuItem _links, _rechts;
+    private readonly Button _vergleichen, _vertrag, _mehr;
+    private readonly ToolStripMenuItem _links, _rechts, _verbinden, _letzten;
+    private readonly ContextMenuStrip _menue;
     private readonly ToolTip _tipps = new() { InitialDelay = 300, ShowAlways = true };   // Leiste ist nie aktiv
     private readonly System.Windows.Forms.Timer _takt;
     private string _ecke = Links;
@@ -24,7 +28,8 @@ internal sealed class Leiste : Form
     private Point? _frei;
     private Point? _ziehVersatz;
 
-    public event Action? Aktivieren, Stoppen, JetztVergleichen, VertragOeffnen, FensterOeffnen, Ausblenden, Beenden;
+    public event Action? Aktivieren, Stoppen, JetztVergleichen, VertragOeffnen, FensterOeffnen, Beenden,
+        LetztenOeffnen, EinstellungenOeffnen, SystemcheckOeffnen, Verbinden, Trennen;
     public event Action<string>? EckeGewechselt;
     /// <summary>Leiste per Griff-Punkt verschoben (Stelle) bzw. zurueck in die Ecke (null).</summary>
     public event Action<Point?>? PositionGeaendert;
@@ -53,50 +58,54 @@ internal sealed class Leiste : Form
         };
         _status = new Label
         {
-            AutoSize = false, Width = 152, Height = 34, TextAlign = ContentAlignment.MiddleCenter,
+            AutoSize = false, Width = 172, Height = 34, TextAlign = ContentAlignment.MiddleCenter,
             ForeColor = Color.White, Font = new Font("Segoe UI", 9f, FontStyle.Bold), Margin = new Padding(0),
             Cursor = Cursors.Hand, BackColor = Symbole.Pause,
         };
-        _schalter = Knopf("■  Stopp", 84);
         _vergleichen = Knopf("Vergleichen", 100);
         _vertrag = Knopf("Vertrag", 74);
-        _fenster = Knopf("☰", 36);
+        _mehr = Knopf("Mehr ▾", 70);
         // Wunsch Ahmad 04.10.2026: kleiner runder Punkt in der Ecke — gedrueckt halten und ziehen verschiebt die Leiste
         _griff = new Griff { Width = 16, Height = 34, Margin = new Padding(0, 0, 4, 0), Cursor = Cursors.SizeAll };
         _griff.MouseDown += (_, e) => { if (e.Button == MouseButtons.Left) GriffRunter(Cursor.Position); };
         _griff.MouseMove += (_, e) => { if (e.Button == MouseButtons.Left) GriffZiehen(Cursor.Position); };
         _griff.MouseUp += (_, _) => GriffLos();
-        reihe.Controls.AddRange(new Control[] { _griff, _status, _schalter, _vergleichen, _vertrag, _fenster });
+        reihe.Controls.AddRange(new Control[] { _griff, _status, _vergleichen, _vertrag, _mehr });
         Controls.Add(reihe);
 
         _tipps.SetToolTip(_vergleichen, "Vergleich für das Auto, das AutoPointer gerade zeigt, jetzt öffnen");
         _tipps.SetToolTip(_vertrag, "Kaufvertrag: das zuletzt angeklickte Auto in AutoSchnell öffnen");
-        _tipps.SetToolTip(_fenster, "Großes Fenster mit allen Knöpfen öffnen");
+        _tipps.SetToolTip(_mehr, "Mehr: letzten Vergleich, Einstellungen, Systemcheck, Verbindung, Beenden");
         _tipps.SetToolTip(_griff, "Gedrückt halten und ziehen: Leiste verschieben\n(Rechtsklick: zurück in eine Ecke)");
 
-        var menue = new ContextMenuStrip();
-        menue.Items.Add("Großes Fenster öffnen", null, (_, _) => FensterOeffnen?.Invoke());
-        menue.Items.Add(new ToolStripSeparator());
+        _menue = new ContextMenuStrip();
+        _letzten = new ToolStripMenuItem("Letzten Vergleich nochmal öffnen", null, (_, _) => LetztenOeffnen?.Invoke());
+        _menue.Items.Add(_letzten);
+        _menue.Items.Add("Status und Hilfe …", null, (_, _) => FensterOeffnen?.Invoke());
+        _menue.Items.Add(new ToolStripSeparator());
+        _menue.Items.Add("Einstellungen …", null, (_, _) => EinstellungenOeffnen?.Invoke());
+        _menue.Items.Add("Systemcheck: läuft alles? …", null, (_, _) => SystemcheckOeffnen?.Invoke());
+        _verbinden = new ToolStripMenuItem("Mit AutoSchnell verbinden …", null, (_, _) =>
+        {
+            if (_zuletzt?.Verbunden == true) Trennen?.Invoke(); else Verbinden?.Invoke();
+        });
+        _menue.Items.Add(_verbinden);
+        _menue.Items.Add(new ToolStripSeparator());
         _links = new ToolStripMenuItem("Leiste unten links", null, (_, _) => EckeWaehlen(Links));
         _rechts = new ToolStripMenuItem("Leiste unten rechts", null, (_, _) => EckeWaehlen(Rechts));
-        menue.Items.Add(_links);
-        menue.Items.Add(_rechts);
-        menue.Items.Add("Leiste ausblenden", null, (_, _) => Ausblenden?.Invoke());
-        menue.Items.Add(new ToolStripSeparator());
-        menue.Items.Add("Programm beenden", null, (_, _) => Beenden?.Invoke());
-        ContextMenuStrip = menue;
-        foreach (Control c in reihe.Controls) c.ContextMenuStrip = menue;
-        reihe.ContextMenuStrip = menue;
+        _menue.Items.Add(_links);
+        _menue.Items.Add(_rechts);
+        _menue.Items.Add(new ToolStripSeparator());
+        _menue.Items.Add("Programm beenden", null, (_, _) => Beenden?.Invoke());
+        ContextMenuStrip = _menue;
+        foreach (Control c in reihe.Controls) c.ContextMenuStrip = _menue;
+        reihe.ContextMenuStrip = _menue;
 
-        _status.Click += (_, _) => FensterOeffnen?.Invoke();
-        _schalter.Click += (_, _) =>
-        {
-            if (_zuletzt?.AutomatikAn == true) Stoppen?.Invoke(); else Aktivieren?.Invoke();
-            Aktualisieren();
-        };
+        // Status-Feld = Start/Stopp (nicht verbunden: verbinden)
+        _status.Click += (_, _) => StatusKlick();
         _vergleichen.Click += (_, _) => JetztVergleichen?.Invoke();
         _vertrag.Click += (_, _) => VertragOeffnen?.Invoke();
-        _fenster.Click += (_, _) => FensterOeffnen?.Invoke();
+        _mehr.Click += (_, _) => _menue.Show(_mehr, new Point(0, _mehr.Height));
 
         _takt = new System.Windows.Forms.Timer { Interval = 1000 };
         _takt.Tick += (_, _) => { Aktualisieren(); Platzieren(); ObenHalten(); };
@@ -240,6 +249,19 @@ internal sealed class Leiste : Form
                                 Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
     }
 
+    /// <summary>Klick aufs Status-Feld: nicht verbunden -> verbinden, sonst Automatik an/aus.</summary>
+    internal void StatusKlick()
+    {
+        if (_zuletzt?.Verbunden != true) Verbinden?.Invoke();
+        else if (_zuletzt.AutomatikAn) Stoppen?.Invoke();
+        else Aktivieren?.Invoke();
+        Aktualisieren();
+    }
+
+    /// <summary>Die Eintraege des Mehr-Menues (fuer Tests).</summary>
+    internal IReadOnlyList<string> MenueEintraege() =>
+        _menue.Items.OfType<ToolStripMenuItem>().Select(i => i.Text ?? "").ToList();
+
     public void Aktualisieren()
     {
         FensterZustand z;
@@ -248,16 +270,24 @@ internal sealed class Leiste : Form
         _zuletzt = z;
         var (farbe, titel, unter) = SteuerFenster.Anzeige(z);
         _status.BackColor = farbe;
-        _status.Text = "●  " + Kurz(titel);
+        _status.Text = StatusText(z, titel);
+        string klick = !z.Verbunden ? "Klick: mit AutoSchnell verbinden"
+                     : z.AutomatikAn ? "Klick: stoppen – es öffnet sich nichts mehr"
+                     : "Klick: starten – Vergleiche öffnen sich beim Anklicken";
         _tipps.SetToolTip(_status, unter + (z.LetztesAuto != null ? "\nLetztes Auto: " + z.LetztesAuto : "")
                                    + (string.IsNullOrEmpty(z.LetzteMeldung) ? "" : "\n" + z.LetzteMeldung)
-                                   + "\n(Klick: großes Fenster)");
-        _schalter.Text = z.AutomatikAn ? "■  Stopp" : "▶  Start";
-        _schalter.BackColor = z.AutomatikAn ? Symbole.Fehler : Symbole.Aktiv;
-        _tipps.SetToolTip(_schalter, z.AutomatikAn ? "Automatik stoppen – es öffnet sich nichts mehr"
-                                                   : "Automatik starten – Vergleiche öffnen sich beim Anklicken");
+                                   + "\n(" + klick + ")");
         _vergleichen.Enabled = z.Verbunden;
         _vertrag.Enabled = z.Verbunden && z.LetztesAuto != null;
+        _letzten.Enabled = z.Verbunden && z.LetztesAuto != null;
+        _verbinden.Text = z.Verbunden ? "Verbindung trennen" : "Mit AutoSchnell verbinden …";
+    }
+
+    /// <summary>Status mit dem, was ein Klick tut: "●  AKTIV  ❚❚" (stoppen) bzw. "●  GESTOPPT  ▶" (starten).</summary>
+    internal static string StatusText(FensterZustand z, string titel)
+    {
+        if (!z.Verbunden) return "●  " + Kurz(titel);
+        return "●  " + Kurz(titel) + (z.AutomatikAn ? "  ❚❚" : "  ▶");
     }
 
     internal static string Kurz(string titel) => titel switch

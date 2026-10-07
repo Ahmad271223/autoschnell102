@@ -55,9 +55,13 @@ dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und 
 * Symbol unten rechts im Infobereich: grün = aktiv, grau = Automatik aus, orange = AutoPointer nicht gefunden,
   rot = nicht verbunden bzw. gesperrt (Abo/Freigabe). **Doppelklick** öffnet das Fenster, **Strg+Alt+P**:
   Automatik an/aus.
-* **Rechtsklick**: *Fenster öffnen*, Verbindungsstatus, *Mit AutoSchnell verbinden …*, *Verbindung trennen*, *Automatik*,
-  *Aktuelles Fahrzeug jetzt vergleichen* (auch bei Pause/selbem Auto), *Letzten Vergleich erneut öffnen*,
-  *Einstellungen …* (Portale, Browser, Ablauf, mit Windows starten), *Systemcheck*.
+* **Rechtsklick aufs Symbol** (seit 1.5.8): nur noch *Leiste und Status zeigen* und *Beenden*.
+* **1.5.8 (Wunsch Ahmad 08.10., externe Prüfung „zu viele Knöpfe für dieselbe Sache“):** bedient wird nur noch über
+  die **Leiste**: Status-Feld (Klick = Start/Stopp, nicht verbunden = verbinden) | *Vergleichen* | *Vertrag* |
+  *Mehr ▾* (letzter Vergleich, Status und Hilfe, Einstellungen, Systemcheck, Verbinden/Trennen, Ecke, Beenden). Die
+  Leiste ist immer da (kein Ausblenden mehr); das große Fenster zeigt nur noch Status, letztes Auto, Verbindung und
+  Hilfe. Die **Portalwahl** (mobile.de/AutoScout24) gibt es nur noch in AutoSchnell auf der Vergleichsseite — der
+  Server schickt nur deren Links; im Einstellungsfenster steht der Hinweis darauf.
 * Ein Auto, das beim Programmstart schon angezeigt wird, öffnet nichts – erst das nächste angeklickte. **Nach dem (Neu-)Verbinden**
   dagegen wird das gerade angezeigte Auto sofort verglichen (seit 1.5.3, Befund 04.10.: Mercedes nach Neuverbinden).
 * **Unplausible Daten** (seit 1.5.3, Befund 04.10.: „Kia Rio · EZ 04/2026 · 165.000 km“, „Audi 80 · 1.960.817 km“):

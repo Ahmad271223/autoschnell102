@@ -53,24 +53,22 @@ public class SteuerFensterTests
                 var zustand = Zustand();
                 using var f = new SteuerFenster(() => zustand);
                 f.CreateControl();
+                // 1.5.8 (08.10.2026): nur noch Status und Hilfe — bedient wird ueber die Leiste
                 var knoepfe = Alle<Button>(f).ToDictionary(b => b.Text.Trim(), b => b);
-                Assert.False(knoepfe["✓  Ist aktiv"].Enabled);       // laeuft schon
-                Assert.True(knoepfe["■  Stoppen"].Enabled);
-                Assert.True(knoepfe["Beenden"].Enabled);
-                Assert.True(knoepfe["Verbindung trennen"].Enabled);
+                Assert.Equal(new[] { "Beenden", "Einstellungen", "Systemcheck: läuft alles?", "Verbindung trennen" },
+                             knoepfe.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray());
+                Assert.Contains(Alle<Label>(f), l => l.Text.Contains("Status-Feld anklicken = Start / Stopp"));
+                Assert.Contains(Alle<Label>(f), l => l.Text.Contains("läuft mit der kleinen Leiste weiter"));
                 Bild(f, "steuerfenster-aktiv.png");
 
                 zustand = Zustand(an: false);
                 f.Aktualisieren();
-                knoepfe = Alle<Button>(f).ToDictionary(b => b.Text.Trim(), b => b);
-                Assert.True(knoepfe["▶  Aktivieren"].Enabled);
-                Assert.False(knoepfe["✓  Ist gestoppt"].Enabled);
+                Assert.Contains(Alle<Label>(f), l => l.Text.Contains("Status-Feld der Leiste anklicken"));
 
                 zustand = Zustand(verbunden: false, auto: null);
                 f.Aktualisieren();
                 knoepfe = Alle<Button>(f).ToDictionary(b => b.Text.Trim(), b => b);
                 Assert.True(knoepfe["Mit AutoSchnell verbinden …"].Enabled);
-                Assert.False(knoepfe["Aktuelles Auto jetzt vergleichen"].Enabled);
                 Bild(f, "steuerfenster-nicht-verbunden.png");
             }
             catch (Exception ex) { fehler = ex; }
@@ -117,15 +115,31 @@ public class SteuerFensterTests
             zustand = Zustand();
             l.Aktualisieren();
 
-            var knoepfe = Alle<Button>(l).ToDictionary(b => b.Text.Trim(), b => b);
+            // 1.5.8: Status | Vergleichen | Vertrag | Mehr — das Status-Feld schaltet Start/Stopp
+            var knoepfe = Alle<Button>(l).Select(b => b.Text.Trim()).ToArray();
+            Assert.Equal(new[] { "Vergleichen", "Vertrag", "Mehr ▾" }, knoepfe);
+            var status = Alle<Label>(l).Single();
+            Assert.Equal("●  AKTIV  ❚❚", status.Text);
             Bild(l, "leiste-aktiv.png");
-            knoepfe["■  Stopp"].PerformClick();
+            l.StatusKlick();
             Assert.True(gestoppt);
-            knoepfe = Alle<Button>(l).ToDictionary(b => b.Text.Trim(), b => b);
-            Assert.True(knoepfe.ContainsKey("▶  Start"));
+            Assert.Equal("●  GESTOPPT  ▶", status.Text);
             Bild(l, "leiste-gestoppt.png");
-            knoepfe["▶  Start"].PerformClick();
+            l.StatusKlick();
             Assert.True(gestartet);
+            Assert.Equal(new[] { "Letzten Vergleich nochmal öffnen", "Status und Hilfe …", "Einstellungen …",
+                                 "Systemcheck: läuft alles? …", "Verbindung trennen", "Leiste unten links",
+                                 "Leiste unten rechts", "Programm beenden" }, l.MenueEintraege());
+            // nicht verbunden: das Status-Feld verbindet, statt zu schalten
+            bool verbinden = false;
+            l.Verbinden += () => verbinden = true;
+            zustand = Zustand(verbunden: false);
+            l.Aktualisieren();
+            Assert.Equal("●  NICHT VERBUNDEN", status.Text);
+            Assert.Contains("Mit AutoSchnell verbinden …", l.MenueEintraege());
+            gestoppt = gestartet = false;
+            l.StatusKlick();
+            Assert.True(verbinden && !gestoppt && !gestartet);
             l.EndgueltigSchliessen();
         });
     }

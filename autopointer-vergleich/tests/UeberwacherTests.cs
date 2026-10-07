@@ -41,6 +41,8 @@ public class UeberwacherTests
         public string? InseratUrl;
         public bool InseratImBrowser;
         public List<string>? Melden;
+        /// <summary>1.5.8: wie der echte Server — nur die Links der in AutoSchnell gewaehlten Portale (null = beide).</summary>
+        public string[]? NurPortale;
         public readonly List<Fahrzeug> Anfragen = new();
         public int Vorgewaermt;
         public void Vorwaermen() => Vorgewaermt++;
@@ -61,7 +63,7 @@ public class UeberwacherTests
             {
                 new Vergleich("mobile.de", $"https://suchen.mobile.de/{id}"),
                 new Vergleich("AutoScout24", $"https://www.autoscout24.de/{id}"),
-            }, Array.Empty<string>(), "inland", InseratUrl, InseratImBrowser ? "browser" : InseratUrl != null ? "laeuft" : "kein_link",
+            }.Where(v => NurPortale == null || NurPortale.Contains(v.Portal)).ToArray(), Array.Empty<string>(), "inland", InseratUrl, InseratImBrowser ? "browser" : InseratUrl != null ? "laeuft" : "kein_link",
                ErkanntMarke: "Erkannt", ErkanntModell: f.MarkeModellText, Melden: Melden,
                InseratImBrowser: InseratImBrowser && InseratUrl != null));
         }
@@ -453,11 +455,11 @@ public class UeberwacherTests
         Assert.Equal(new[] { "mobile.de", "AutoScout24" }, _b.Aufrufe[1].Select(v => v.Portal));
     }
 
-    [Fact]
-    public async Task Nur_die_eingestellten_Portale_oeffnen()
+    [Fact]   // 1.5.8 (Wunsch Ahmad 08.10.2026): die Portalwahl steht in AutoSchnell, der Server schickt nur deren Links
+    public async Task Nur_die_Portale_aus_AutoSchnell_oeffnen()
     {
         await Start();
-        _e.MobileDe = false;
+        _server.NurPortale = new[] { "AutoScout24" };
         await Anklicken(Bentley, 1);
         Assert.Single(_b.Aufrufe);
         Assert.Equal(new[] { "AutoScout24" }, _b.Aufrufe[0].Select(v => v.Portal));

@@ -192,16 +192,12 @@ function sitzungAendern(fn) {
   return lauf;
 }
 
-// Wunsch Ahmad 06.10.2026: wie im Windows-Programm waehlen, ob mobile.de, AutoScout24 oder beide aufgehen
-// (vorher immer beide). Die Wahl haelt der Hintergrund auch im Speicher (erlaubteLinks ist synchron).
-let portalWahl = { mobile: true, autoscout: true };
-const portalAn = (portal) => (portal === "AutoScout24" ? portalWahl.autoscout : portalWahl.mobile) !== false;
-
+// 2.7.2 (Wunsch Ahmad 08.10.2026): die Wahl mobile.de / AutoScout24 / beide gibt es nur noch EINMAL — in AutoSchnell
+// (Vergleichsseite, gilt je Konto auch fuer das Windows-Programm). Der Server schickt nur noch die Links der gewaehlten
+// Portale; hier wird nicht mehr gefiltert (eine alte Wahl im Speicher wuerde neu eingeschaltete Portale verschlucken).
 async function einstellungen() {
   const { einstellungen: e } = await lokal("einstellungen");
-  const alle = { vergleicheOeffnen: true, mobile: true, autoscout: true, ...(e || {}) };
-  portalWahl = { mobile: alle.mobile !== false, autoscout: alle.autoscout !== false };
-  return alle;
+  return { vergleicheOeffnen: !(e && e.vergleicheOeffnen === false) };
 }
 einstellungen().catch(() => {});
 
@@ -219,7 +215,7 @@ function erlaubterLink(url) {
   }
 }
 const erlaubteLinks = (antwort) =>
-  ((antwort && antwort.links) || []).filter((l) => l && erlaubterLink(l.url) && portalAn(l.portal));
+  ((antwort && antwort.links) || []).filter((l) => l && erlaubterLink(l.url));
 
 async function vergleicheOeffnen(tab, kennung, antwort) {
   const links = erlaubteLinks(antwort);
@@ -422,7 +418,6 @@ async function inseratBearbeiten(msg, tab) {
   const [jetzt, basis] = await Promise.all([sitzung(), server()]);
   const neu = jetzt.inserate[kennung] || {};
   return { antwort, geoeffnet, ausVergleich, schonOffen: schonOffen || grund === "schon_offen", vomProgramm,
-           portale: { mobile: portalWahl.mobile, autoscout: portalWahl.autoscout },
            automatik: grund, marktlage: neu.marktlage || {}, lageFehler: neu.lageFehler || {}, server: basis,
            // 2.6.0 (Nr. 9): in AutoSchnell gibt es eine neuere Version des Helfers
            neueVersion: statusMerker && istNeuer(statusMerker.aktuelle_version, VERSION) ? statusMerker.aktuelle_version : "" };
@@ -795,9 +790,8 @@ async function trennen() {
 
 async function einstellungenSetzen(msg) {
   const e = { ...(await einstellungen()), ...(msg.einstellungen || {}) };
-  const neu = { vergleicheOeffnen: !!e.vergleicheOeffnen, mobile: e.mobile !== false, autoscout: e.autoscout !== false };
+  const neu = { vergleicheOeffnen: !!e.vergleicheOeffnen };
   await chrome.storage.local.set({ einstellungen: neu });
-  portalWahl = { mobile: neu.mobile, autoscout: neu.autoscout };
   return { ok: true, einstellungen: neu };
 }
 
