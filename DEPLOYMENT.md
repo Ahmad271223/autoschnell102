@@ -4460,7 +4460,7 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
   gleichzeitig statt nacheinander, AutoScout-Markenindex einmal statt je Link (`autoscout_service._marken_index`),
   Werkzeug-Routen stehen zuerst in der Routenliste. Messskript `backend/scripts/lasttest_werkzeuge.py` (nur lokal, Wegwerf-DB).
 - Downloads (Wunsch Ahmad 06.10.2026): `GET /api/admin/werkzeug-downloads` (Super-Admin) listet aus `activity_logs`
-  (`werkzeug_download`, Index `aktion_zeit`), wer wann welches Programm in welcher Version geladen hat — Tabelle „Downloads“
+  (`werkzeug_download`, Index `action_1_created_at_-1`), wer wann welches Programm in welcher Version geladen hat — Tabelle „Downloads“
   auf der Betreiber-Seite Programm-Vergleiche.
 - Inserat öffnen → `POST /api/werkzeuge/browser-helfer/inserat` (Seite gzip+base64, Schlüssel-Kopfzeile). Der Server
   wertet aus (`backend/browser_helfer.py`; mobile.de-Datenstrom = Apify-Format, AutoScout `__NEXT_DATA__`,

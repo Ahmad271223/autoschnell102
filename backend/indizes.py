@@ -908,8 +908,11 @@ async def bestand_lese_indizes(db) -> None:
     for sammlung, schluessel, optionen in (
             ("activity_logs", [("dealer_id", 1), ("ref", 1), ("created_at", -1)],
              {"name": "akte_historie"}),
-            # 06.10.2026: Betreiber-Liste "wer hat welches Programm heruntergeladen" (werkzeug_download)
-            ("activity_logs", [("action", 1), ("created_at", -1)], {"name": "aktion_zeit"}),
+            # 06.10.2026: Betreiber-Liste "wer hat welches Programm heruntergeladen" (werkzeug_download).
+            # Alarm 07.10.2026 (index_fehlt, IndexOptionsConflict): server.py legt denselben Index schon lange
+            # ohne Namen an (Standardname action_1_created_at_-1) — ein zweiter Name fuer dieselben Felder
+            # scheitert. Deshalb hier genau der Standardname: auf bestehenden Servern ein No-op.
+            ("activity_logs", [("action", 1), ("created_at", -1)], {"name": "action_1_created_at_-1"}),
             ("vehicles", [("archiv_aufraeumen_offen", 1)],
              {"name": "archiv_aufraeumen_offen",
               "partialFilterExpression": {"archiv_aufraeumen_offen": True}})):

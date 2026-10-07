@@ -325,6 +325,9 @@ def test_53_nachbesserung_akte_historie_hat_index(welt):
     # Ohne "import server": der Import band den gemeinsamen Motor-Client an
     # diese Test-Schleife, spaetere Tests scheiterten mit "Event loop is closed".
     import indizes as IX
+    # Alarm 07.10.2026: wie auf den Servern steht der (action, created_at)-Index aus server.py schon da
+    # (Standardname) — bestand_lese_indizes darf ihn nicht unter anderem Namen anlegen wollen (index_fehlt)
+    welt.run(welt.db.activity_logs.create_index([("action", 1), ("created_at", -1)]))
     for _ in range(2):
         welt.run(IX.bestand_lese_indizes(welt.db))
     assert "akte_historie" in welt.run(welt.db.activity_logs.index_information())
