@@ -208,6 +208,11 @@ def _meta(soup: BeautifulSoup, *names: str) -> Optional[str]:
 def _parse_title(soup: BeautifulSoup, visible: str) -> Optional[str]:
     h1 = soup.find("h1")
     if h1:
+        # E2E 07.10.2026: Kleinanzeigen setzt versteckte Status-Badges in die Ueberschrift
+        # (<span class="pvap-reserved-title is-hidden">Reserviert • </span> … Geloescht • ) — die standen als
+        # "Reserviert • Gelöscht • BMW X6 …" vorne im Titel (Box der Erweiterung, Kaufvertrag). Nur sichtbarer Text.
+        for badge in h1.find_all(class_=lambda c: c and ({"is-hidden", "pvap-reserved-title"} & set(c.split()))):
+            badge.decompose()
         t = _clean(h1.get_text(" "))
         if t:
             return t
