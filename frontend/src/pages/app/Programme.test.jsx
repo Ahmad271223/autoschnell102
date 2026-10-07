@@ -275,6 +275,8 @@ describe("Programme", () => {
       import("@/components/AppLayout.jsx?raw"), import("@/App.jsx?raw"),
       import("@/components/ProgrammVergleiche.jsx?raw"), import("@/pages/admin_v2/ProgrammVergleiche.jsx?raw"),
       import("@/pages/admin_v2/AdminLayout.jsx?raw"), import("./Vergleich.jsx?raw"), import("@/lib/programmStart.js?raw"),
+      import("./Vorgang.jsx?raw"), import("./vergleich/Suchleiste.jsx?raw"), import("./vergleich/AktionenSpalte.jsx?raw"),
+      import("./vergleich/FahrzeugSpalte.jsx?raw"), import("./vergleich/useVergleichsSchalter.js?raw"),
     ]);
     for (const { default: text } of quellen) {
       expect(text).not.toMatch(/autopointer/i);

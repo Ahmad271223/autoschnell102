@@ -159,7 +159,9 @@ def test_05_vergleich_und_oberflaeche_fragen_nach(welt):
 
     karte = (SRC / "components" / "BeweisCard.jsx").read_text(encoding="utf-8")
     assert "/beweise/anfordern" in karte and "beweis-erstellen-btn" in karte
-    vergleich = (SRC / "pages" / "app" / "Vergleich.jsx").read_text(encoding="utf-8")
+    # 08.10.2026: die Beweis-Karte sitzt in der Aktionen-Spalte (pages/app/vergleich/AktionenSpalte.jsx)
+    vergleich = "\n".join(p.read_text(encoding="utf-8") for p in
+                          [SRC / "pages" / "app" / "Vergleich.jsx", *sorted((SRC / "pages" / "app" / "vergleich").glob("*.js*"))])
     assert "cacheKey={result.cache_key}" in vergleich
 
 

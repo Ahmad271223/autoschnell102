@@ -189,7 +189,10 @@ describe("U-82 / U-15 / U-11 / U-12 / U-14 / U-85: Vergleich", () => {
     expect(vertragErstelltMeldung({})).toBe("PDF erstellt");
   });
   it("Quelltext-Verdrahtung", async () => {
-    const q = await quelle("./Vergleich.jsx");
+    // 08.10.2026: die Vergleichsseite ist in ./vergleich/ aufgeteilt — alle Teile zusammen pruefen
+    const q = (await Promise.all(["./Vergleich.jsx", "./vergleich/Suchleiste.jsx", "./vergleich/FahrzeugSpalte.jsx",
+                                   "./vergleich/AktionenSpalte.jsx", "./vergleich/useVergleichsSchalter.js"]
+      .map(quelle))).join("\n");
     expect(VERGLEICH_LAEUFT_HINWEIS).toMatch(/abbrechen/);
     expect(q).toContain('toast.info(VERGLEICH_LAEUFT_HINWEIS, { id: "vergleich-laeuft" })');
     expect(q).toContain("moeglich={result.beweis_moeglich !== false}");

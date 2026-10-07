@@ -148,7 +148,9 @@ def test_09_einstellungen_zeigen_die_wahl():
 
 def test_10_vergleichsseite_hat_den_abbrechen_knopf():
     src = Path(__file__).resolve().parents[2] / "frontend" / "src"
-    seite = (src / "pages" / "app" / "Vergleich.jsx").read_text(encoding="utf-8")
+    # 08.10.2026: die Vergleichsseite ist in pages/app/vergleich/ aufgeteilt (Suchleiste = Linkfeld + Knoepfe)
+    seite = "\n".join(p.read_text(encoding="utf-8") for p in
+                      [src / "pages" / "app" / "Vergleich.jsx", *sorted((src / "pages" / "app" / "vergleich").glob("*.js*"))])
     assert 'data-testid="vergleich-abbrechen-btn"' in seite
     assert "/abbrechen" in seite and "AbortController" in seite
     pruefung = (src / "lib" / "linkCheck.js").read_text(encoding="utf-8")

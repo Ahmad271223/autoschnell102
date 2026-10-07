@@ -1,77 +1,36 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
-import MarktdatenKarte from "@/components/MarktdatenKarte";
-import { lokalerSpeicher, sitzungsSpeicher } from "@/lib/speicher";
-import { thumbSrc } from "@/lib/bilder";
+import { sitzungsSpeicher } from "@/lib/speicher";
 import {
   abbruchFehler, checkLink, istAbbruch, postWithRetry503, TIMEOUT_MESSAGE,
 } from "@/lib/linkCheck";
 import { inseratsLinkAusText, zwischenablageLesen } from "@/lib/inseratsLink";
 import { extensionReady, fetchViaExtension } from "@/lib/clientFetch";
 import { toast } from "sonner";
-import {
-  ArrowRight, ExternalLink, Activity, Gauge, Calendar as CalendarIcon, Fuel,
-  Cog, Hash, FileText, Send, Loader2, MapPin, Sparkles, Eye, Image as ImageIcon,
-  X as XIcon,
-} from "lucide-react";
+import { Loader2 } from "lucide-react";
 import ContractDialog from "@/components/ContractDialog";
 import SendDialog from "@/components/SendDialog";
-import BeweisCard from "@/components/BeweisCard";
-import BilderNachholen from "@/components/BilderNachholen";
 import ProfileBadge from "@/components/ProfileBadge";
-import PortalBadge from "@/components/PortalBadge";
-import { openContractPdf } from "@/lib/pdf";
 import { filterOeffnen, FILTER_TOAST_ID } from "@/lib/filterOeffnen";
 import { INSERAT_EREIGNIS, protokollSuche, startKennung, startMelden } from "@/lib/programmStart";
-import { fensterDanebenSetzen, zweitenBildschirmAnfragen } from "@/lib/popup";
 import { hinweiseZeigen } from "@/lib/hinweise";
 import { useAuth } from "@/context/AuthContext";
+import { vergleichEntfernen, vergleichLaden, vergleichSichern } from "@/lib/vergleichSpeicher";
+// 08.10.2026 (externe Pruefung "Vergleich.jsx zu gross"): Anzeige-Teile und Schalter liegen in ./vergleich/ —
+// hier bleiben Zustand und Ablaeufe (Auslesen, Abbrechen, Zwischenablage, Programm-/Helfer-Uebergabe).
+import AktionenSpalte from "./vergleich/AktionenSpalte";
+import FahrzeugSpalte from "./vergleich/FahrzeugSpalte";
+import Suchleiste from "./vergleich/Suchleiste";
+import useVergleichsSchalter from "./vergleich/useVergleichsSchalter";
 import {
-  einstellungLesen, einstellungSchreiben, vergleichEntfernen, vergleichLaden, vergleichSichern,
-} from "@/lib/vergleichSpeicher";
+  filterEintraege, liveZaehlerPfad, vertragErstelltMeldung, VERGLEICH_LAEUFT_HINWEIS,
+} from "./vergleich/anzeige";
 
+export {
+  datenStand, liveZaehlerPfad, vertragErstelltMeldung, VERGLEICH_LAEUFT_HINWEIS,
+} from "./vergleich/anzeige";
 
-// Pruefbericht 20.09.2026 (A-03/V5): Stand der Inseratsdaten zeigen — aus dem
-// gemeinsamen Zwischenspeicher koennen Preis und km bis zu 14 Tage alt sein.
-// Aelter als 24 Stunden wird hervorgehoben.
-export function datenStand(result, jetzt = Date.now()) {
-  const roh = result?.abgerufen_am;
-  if (!roh) return null;
-  const t = new Date(roh).getTime();
-  if (!Number.isFinite(t)) return null;
-  const stunden = (jetzt - t) / 3600000;
-  const datum = new Date(t).toLocaleString("de-DE", {
-    day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
-  if (stunden < 1) return { text: "Daten eben abgerufen", alt: false };
-  return { text: `Daten vom ${datum}${stunden >= 24 ? " — Preis/km ggf. veraltet" : ""}`, alt: stunden >= 24 };
-}
-
-// Rollenprüfung 22.09.2026 (RP-207/RP-358): Der LIVE-Zähler zählt je
-// Inserats-Schlüssel (cache_key = "quelle:id"). Gefragt wurde mit ad_id —
-// bei AutoScout24 ist das die Anzeigen-Nummer des Anbieters (uniqueRef), die
-// von der ID in der Adresse abweichen kann; der Zähler stand dann immer auf 0.
-// Jetzt zählt der Schlüssel, unter dem der Vergleich gespeichert wurde.
-export function liveZaehlerPfad(r) {
-  const key = r?.cache_key || "";
-  const i = key.indexOf(":");
-  if (i > 0 && i < key.length - 1) {
-    return `/mobile/live-counter/${encodeURIComponent(key.slice(i + 1))}`
-      + `?quelle=${encodeURIComponent(key.slice(0, i))}`;
-  }
-  if (!r?.ad_id) return null;
-  return `/mobile/live-counter/${encodeURIComponent(r.ad_id)}?quelle=${encodeURIComponent(r.source || "")}`;
-}
-
-// Runde 22 (11.09.2026): Eintraege fuer filterOeffnen aus den Ergebnisdaten
-// und den Portal-Toggles — ein Ort fuer "Filter öffnen", die Einzel-Knoepfe
-// und das automatische Oeffnen nach dem Auslesen.
-function filterEintraege(data, { mobile = true, autoscout = true } = {}) {
-  return [
-    mobile    && data?.search_url    && { url: data.search_url,    name: "mobileFilterWindow",    label: "mobile.de" },
-    autoscout && data?.autoscout_url && { url: data.autoscout_url, name: "autoscoutFilterWindow", label: "AutoScout24" },
-  ].filter(Boolean);
-}
 
 export default function Vergleich() {
   // Runde 27 (12.09.2026, Pruefbefund P0): Der zuletzt angezeigte Vergleich
@@ -102,7 +61,6 @@ export default function Vergleich() {
   const [showContract, setShowContract] = useState(false);
   const [contract, setContract] = useState(restored?.contract || null);
   const [showSend, setShowSend] = useState(false);
-  const [pdfLaeuft, setPdfLaeuft] = useState(false);
 
   // RP-023: Ein wiederhergestellter Kaufvertrag kann inzwischen gelöscht
   // sein (Chef löscht, Übergabe). Vorher standen "PDF öffnen"/"Versenden"
@@ -140,90 +98,10 @@ export default function Vergleich() {
     });
     return () => { aktiv = false; };
   }, [restored]);
-  // Portal-Toggles. Wunsch Ahmad 08.10.2026: EINE Wahl je Konto (users.vergleich_portale) — sie gilt auch fuer das
-  // Windows-Programm und die Browser-Erweiterung; der Browser-Speicher ist nur noch der Rueckfall (alte Konten).
-  const kontoPortale = user?.vergleich_portale;
-  const [portalMobile, setPortalMobile] = useState(() => {
-    if (kontoPortale && typeof kontoPortale.mobile === "boolean") return kontoPortale.mobile;
-    return einstellungLesen(lokalerSpeicher(),
-                            "ah_portal_mobile", user?.id, true);
-  });
-  const [portalAutoscout, setPortalAutoscout] = useState(() => {
-    if (kontoPortale && typeof kontoPortale.autoscout === "boolean") return kontoPortale.autoscout;
-    return einstellungLesen(lokalerSpeicher(),
-                            "ah_portal_autoscout", user?.id, true);
-  });
-
-  // Runde 22 (11.09.2026): Filter nach dem Auslesen automatisch oeffnen —
-  // Standard AN (Wunsch Ahmad: Einfuegen genuegt, alles geht von selbst auf).
-  const [filterAuto, setFilterAuto] = useState(() => {
-    return einstellungLesen(lokalerSpeicher(),
-                            "ah_filter_automatisch", user?.id, true);
-  });
-  // Runde 22 (11.09.2026, Gegenpruefung): aktuelle Schalter-Staende fuer das
-  // automatische Oeffnen. Ein Lauf kann Minuten dauern — die Werte aus dem
-  // Moment des Starts waeren veraltet, wenn der Sucher inzwischen umschaltet.
-  const schalterRef = useRef({ mobile: portalMobile, autoscout: portalAutoscout, auto: filterAuto });
-
-  // Kontowert nachziehen, sobald /auth/me ihn liefert (oder ein anderes Geraet ihn geaendert hat)
-  const kontoMobile = kontoPortale?.mobile;
-  const kontoAutoscout = kontoPortale?.autoscout;
-  useEffect(() => {
-    if (typeof kontoMobile === "boolean") { setPortalMobile(kontoMobile); schalterRef.current.mobile = kontoMobile; }
-    if (typeof kontoAutoscout === "boolean") {
-      setPortalAutoscout(kontoAutoscout); schalterRef.current.autoscout = kontoAutoscout;
-    }
-  }, [kontoMobile, kontoAutoscout]);
-
-  const portaleSetzen = (mobile, autoscout) => {
-    if (!mobile && !autoscout) {
-      toast.info("Mindestens ein Portal muss an sein.");
-      return;
-    }
-    const vorher = { mobile: portalMobile, autoscout: portalAutoscout };
-    setPortalMobile(mobile);
-    setPortalAutoscout(autoscout);
-    schalterRef.current.mobile = mobile;
-    schalterRef.current.autoscout = autoscout;
-    einstellungSchreiben(lokalerSpeicher(), "ah_portal_mobile", kontoId, mobile);
-    einstellungSchreiben(lokalerSpeicher(), "ah_portal_autoscout", kontoId, autoscout);
-    api.put("/auth/vergleich-portale", { mobile, autoscout }).catch((e) => {
-      setPortalMobile(vorher.mobile);
-      setPortalAutoscout(vorher.autoscout);
-      schalterRef.current.mobile = vorher.mobile;
-      schalterRef.current.autoscout = vorher.autoscout;
-      toast.error(errMsg(e, "Portalwahl nicht gespeichert – bitte erneut versuchen."));
-    });
-  };
-  const toggleMobile = (v) => portaleSetzen(v, portalAutoscout);
-  const toggleAutoscout = (v) => portaleSetzen(portalMobile, v);
-  const toggleFilterAuto = (v) => {
-    setFilterAuto(v);
-    schalterRef.current.auto = v;
-    einstellungSchreiben(lokalerSpeicher(), "ah_filter_automatisch", kontoId, v);
-  };
-  // 15.09.2026 (Wunsch Ahmad): Filter-Fenster neben der App bzw. auf dem
-  // zweiten Bildschirm statt ueber der Seite. Die Bildschirm-Berechtigung
-  // fragt der Browser beim Einschalten (Klick) ab; ist sie schon erteilt,
-  // reicht das stille Nachfragen beim Laden.
-  const [fensterDaneben, setFensterDaneben] = useState(() => {
-    return einstellungLesen(lokalerSpeicher(),
-                            "ah_fenster_daneben", user?.id, false);
-  });
-  useEffect(() => {
-    fensterDanebenSetzen(fensterDaneben);
-    if (fensterDaneben) zweitenBildschirmAnfragen().catch(() => {});
-  }, [fensterDaneben]);
-  const toggleFensterDaneben = async (v) => {
-    setFensterDaneben(v);
-    einstellungSchreiben(lokalerSpeicher(), "ah_fenster_daneben", kontoId, v);
-    fensterDanebenSetzen(v);
-    if (!v) return;
-    const r = await zweitenBildschirmAnfragen();
-    if (r.ok && r.anzahl > 1) toast.success("Zweiter Bildschirm erkannt — die Filter öffnen dort.");
-    else if (r.ok) toast.info("Nur ein Bildschirm erkannt — die Filter öffnen neben der App, wenn Platz ist.");
-    else toast.info("Ohne Bildschirm-Berechtigung öffnen die Filter neben dem App-Fenster (gleicher Bildschirm).");
-  };
+  // Portale, Filter automatisch, Filter daneben (./vergleich/useVergleichsSchalter.js); schalterRef = aktuelle
+  // Staende fuer einen laufenden Vergleich
+  const schalterZustand = useVergleichsSchalter(user);
+  const { schalterRef } = schalterZustand;
 
   // Runde 22 (11.09.2026, Gegenpruefung): Seite verlassen -> ein noch
   // laufender Vergleich oeffnet danach keine Filter-Tabs mehr. Im Effekt auf
@@ -613,169 +491,9 @@ export default function Vergleich() {
         }} />
       </div>
 
-      {/* Search bar */}
-      <form onSubmit={startCompare} className="mt-8">
-        {/* Zeile 1: URL-Input + Buttons */}
-        <div className="apple-surface !rounded-2xl !p-1.5 max-w-4xl flex items-stretch gap-1.5 flex-wrap">
-          {/* URL-Input */}
-          <div className="flex-1 min-w-0 flex items-center pl-4" style={{ minWidth: 200 }}>
-            <Sparkles size={15} className="text-[var(--accent-red)] shrink-0 mr-2.5" />
-            <input
-              data-testid="vergleich-url-input"
-              required
-              value={url}
-              onChange={(e) => {
-                const vorher = url;
-                setUrl(e.target.value);
-                vielleichtStarten(e.target.value, vorher);
-              }}
-              onClick={ausZwischenablage}
-              onPaste={(e) => {
-                // Einfuegen genuegt: erkennt der Text einen gueltigen
-                // Inserats-Link (Kleinanzeigen ODER mobile.de), startet das
-                // Auslesen sofort — der Knopf bleibt fuers manuelle
-                // Wiederholen. Nur echte Inserats-URLs, keine Suchseiten.
-                const text = (e.clipboardData?.getData("text") || "").trim();
-                // RP-409: aus "Schau mal: https://…" nur den Link übernehmen
-                const link = inseratsLinkAusText(text);
-                if (link && (loading || laeuftRef.current)) {
-                  // U-15: während eines Laufs nicht einfügen (das Ergebnis
-                  // gehörte sonst zum falschen Link), sondern hinweisen.
-                  e.preventDefault();
-                  toast.info(VERGLEICH_LAEUFT_HINWEIS, { id: "vergleich-laeuft" });
-                } else if (link) {
-                  e.preventDefault();
-                  setUrl(link);
-                  vielleichtStarten(link);
-                }
-              }}
-              placeholder="Ins Feld klicken — kopierter Link wird eingefügt (Kleinanzeigen, mobile.de, AutoScout24)"
-              className="flex-1 bg-transparent py-3 text-base font-mono outline-none truncate"
-              style={{ color: "var(--text-primary)" }}
-              autoFocus
-            />
-            {url && (
-              <button
-                type="button"
-                onClick={() => setUrl("")}
-                data-testid="vergleich-url-clear"
-                title="URL löschen"
-                className="tipp mr-0.5 flex items-center justify-center rounded-md hover:bg-white/5 text-zinc-400 hover:text-white shrink-0"
-              >
-                <XIcon size={16} />
-              </button>
-            )}
-          </div>
-
-          {/* Trennlinie */}
-          <div className="w-px self-stretch my-1" style={{ background: "var(--divider)" }} />
-
-          {/* Auslesen */}
-          <button
-            data-testid="vergleich-start-btn"
-            type="submit"
-            disabled={loading}
-            className="apple-btn apple-btn-primary !px-5 !py-2.5 disabled:opacity-60 disabled:cursor-not-allowed shrink-0"
-          >
-            {loading ? <Loader2 size={15} className="animate-spin" /> : <ArrowRight size={15} />}
-            <span>{loading ? "Lade…" : "Auslesen"}</span>
-          </button>
-
-          {/* Wunsch Ahmad 18.09.2026: Abbrechen, wenn es zu lange dauert. */}
-          {loading && (
-            <button
-              type="button"
-              onClick={abbrechen}
-              data-testid="vergleich-abbrechen-btn"
-              title="Abruf abbrechen"
-              className="apple-btn apple-btn-secondary !px-3 !py-2.5 shrink-0"
-            >
-              <XIcon size={15} />
-              <span className="hidden sm:inline">Abbrechen</span>
-            </button>
-          )}
-
-          {/* Trennlinie */}
-          <div className="w-px self-stretch my-1" style={{ background: "var(--divider)" }} />
-
-          {/* Portal-Toggles — PortalBadge sorgt für konsistenten Look in allen Dialogen */}
-          <button
-            type="button"
-            data-testid="toggle-mobile"
-            onClick={() => toggleMobile(!portalMobile)}
-            title={(portalMobile ? "mobile.de aktiv — klicken zum Deaktivieren" : "mobile.de aktivieren")
-              + " (gilt auch für das Windows-Programm und die Browser-Erweiterung)"}
-            aria-label="mobile.de ein-/ausschalten"
-            aria-pressed={portalMobile}
-            className="shrink-0 p-1.5 rounded-xl bg-transparent border-0 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-red)]"
-          >
-            <PortalBadge kind="mobile" active={portalMobile} size="md" />
-          </button>
-
-          <button
-            type="button"
-            data-testid="toggle-autoscout"
-            onClick={() => toggleAutoscout(!portalAutoscout)}
-            title={(portalAutoscout ? "AutoScout24 aktiv — klicken zum Deaktivieren" : "AutoScout24 aktivieren")
-              + " (gilt auch für das Windows-Programm und die Browser-Erweiterung)"}
-            aria-label="AutoScout24 ein-/ausschalten"
-            aria-pressed={portalAutoscout}
-            className="shrink-0 p-1.5 rounded-xl bg-transparent border-0 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-red)]"
-          >
-            <PortalBadge kind="autoscout" active={portalAutoscout} size="md" />
-          </button>
-
-          {/* Filter öffnen */}
-          <button
-            type="button"
-            data-testid="open-filter-btn"
-            disabled={!result
-              || filterEintraege(result, { mobile: portalMobile, autoscout: portalAutoscout }).length === 0}
-            onClick={() => {
-              // Runde 22: je Klick laesst der Browser nur EIN Fenster zu — den
-              // Rest holt der Hinweis-Knopf nach (oder Pop-ups erlauben).
-              filterOeffnen(filterEintraege(result, { mobile: portalMobile, autoscout: portalAutoscout }));
-            }}
-            className="shrink-0 apple-btn apple-btn-secondary !px-4 !py-2.5 disabled:opacity-40 disabled:cursor-not-allowed"
-            title={result ? "Filter der aktiven Portale öffnen" : "Erst Vergleich auslesen"}
-          >
-            <Eye size={14} />
-            <span>Filter öffnen</span>
-            <ExternalLink size={11} />
-          </button>
-        </div>
-
-        <div className="mt-3 text-xs flex flex-wrap gap-2 items-center" style={{ color: "var(--text-muted)" }}>
-          {/* Runde 22 (11.09.2026): Filter nach dem Auslesen automatisch oeffnen */}
-          <label
-            className="inline-flex items-center gap-2 sm:ml-3 cursor-pointer select-none min-h-[40px]"
-            title="Nach dem Auslesen die Filter der aktiven Portale (mobile.de / AutoScout24) automatisch öffnen"
-          >
-            <input
-              type="checkbox"
-              data-testid="toggle-filter-auto"
-              checked={filterAuto}
-              onChange={(e) => toggleFilterAuto(e.target.checked)}
-              style={{ accentColor: "var(--accent-red)" }}
-            />
-            <span style={{ color: "var(--text-secondary)" }}>Filter nach dem Auslesen automatisch öffnen</span>
-          </label>
-          {/* 15.09.2026 (Wunsch Ahmad): daneben statt darueber — zweiter Bildschirm */}
-          <label
-            className="inline-flex items-center gap-2 sm:ml-3 cursor-pointer select-none min-h-[40px]"
-            title="Filter-Fenster neben der App öffnen — auf dem zweiten Bildschirm, wenn der Browser es erlaubt"
-          >
-            <input
-              type="checkbox"
-              data-testid="toggle-fenster-daneben"
-              checked={fensterDaneben}
-              onChange={(e) => toggleFensterDaneben(e.target.checked)}
-              style={{ accentColor: "var(--accent-red)" }}
-            />
-            <span style={{ color: "var(--text-secondary)" }}>Filter daneben öffnen (zweiter Bildschirm)</span>
-          </label>
-        </div>
-      </form>
+      <Suchleiste url={url} setUrl={setUrl} loading={loading} laeuftRef={laeuftRef} result={result}
+                  schalter={schalterZustand} onSubmit={startCompare} onAbbrechen={abbrechen}
+                  vielleichtStarten={vielleichtStarten} ausZwischenablage={ausZwischenablage} />
 
       {/* Loading skeleton */}
       {waitMsg && loading && (
@@ -811,309 +529,12 @@ export default function Vergleich() {
       {/* RESULT */}
       {result?.vehicle && (
         <div className="mt-10 grid lg:grid-cols-12 gap-5">
-          {/* Left — vehicle */}
-          <div className="lg:col-span-8 space-y-5">
-            <div className="apple-surface p-6">
-              <div className="flex items-start justify-between gap-4 flex-wrap">
-                <div className="min-w-0">
-                  <div className="overline">Fahrzeug erkannt</div>
-                  <h2 className="font-display font-bold text-2xl lg:text-3xl tracking-tight mt-1" data-testid="vehicle-title">
-                    {result.vehicle.make_label} {result.vehicle.model_label}
-                  </h2>
-                  <div className="text-sm mt-1" style={{ color: "var(--text-secondary)" }}>
-                    {result.vehicle.model_description}
-                  </div>
-                  {(result.vehicle.seller_zip || result.vehicle.seller_city || result.vehicle.location) && (
-                    <div className="text-xs mt-2 inline-flex items-center gap-1.5" style={{ color: "var(--text-muted)" }}>
-                      <MapPin size={11} className="text-[var(--accent-red)]" />
-                      Standort: {result.vehicle.location || [result.vehicle.seller_zip, result.vehicle.seller_city].filter(Boolean).join(" ")}
-                    </div>
-                  )}
-                </div>
-                <div className="text-right shrink-0">
-                  <div className="font-display font-black text-3xl">
-                    {result.vehicle.list_price ? `${result.vehicle.list_price.toLocaleString("de-DE")} €` : "—"}
-                  </div>
-                  <div className="text-[11px]" style={{ color: "var(--text-muted)" }}>Listenpreis · nicht im Vertrag</div>
-                  {/* Prüfbericht 20.09.2026 (S-09): Preisart (VB) und MwSt-Ausweis aus dem Inserat */}
-                  {(result.vehicle.price_negotiable || result.vehicle.mwst_ausweisbar === true) && (
-                    <div className="text-[11px] font-semibold" data-testid="vergleich-preisart"
-                         style={{ color: "var(--text-secondary)" }}>
-                      {[result.vehicle.price_negotiable ? "VB (Verhandlungsbasis)" : null,
-                        result.vehicle.mwst_ausweisbar === true ? "MwSt. ausweisbar" : null]
-                        .filter(Boolean).join(" · ")}
-                    </div>
-                  )}
-                  {datenStand(result) && (
-                    <div className={`text-[11px] ${datenStand(result).alt ? "font-semibold" : ""}`}
-                         data-testid="vergleich-datenstand"
-                         style={{ color: datenStand(result).alt ? "var(--tx-amber)" : "var(--text-muted)" }}>
-                      {datenStand(result).text}
-                    </div>
-                  )}
-                </div>
-              </div>
+          <FahrzeugSpalte result={result} url={url} setResult={setResult} />
 
-              <div className="mt-6 grid grid-cols-2 md:grid-cols-3 gap-3">
-                <Stat icon={CalendarIcon} label="Erstzulassung" value={result.vehicle.first_registration} />
-                <Stat icon={Gauge} label="Kilometer" value={result.vehicle.mileage ? `${result.vehicle.mileage.toLocaleString("de-DE")} km` : "—"} />
-                <Stat icon={Activity} label="Leistung" value={result.vehicle.power_kw ? `${result.vehicle.power_kw} kW · ${result.vehicle.power_ps} PS` : "—"} />
-                <Stat icon={Fuel} label="Kraftstoff" value={result.vehicle.fuel_label} />
-                <Stat icon={Cog} label="Getriebe" value={result.vehicle.gearbox_label} />
-                <Stat icon={Hash} label="Hubraum" value={result.vehicle.displacement ? `${result.vehicle.displacement} ccm` : "—"} />
-              </div>
-
-              {result.vehicle.images?.length > 0 && (
-                <div className="mt-6 pt-5 border-t" style={{ borderColor: "var(--hairline)" }}>
-                  <div className="overline mb-3 flex items-center gap-1.5">
-                    <ImageIcon size={11} /> Fotos vom Inserat ({result.vehicle.images.length})
-                  </div>
-                  <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 gap-2" data-testid="kleinanzeigen-gallery">
-                    {/* Prüfbericht 20.09. U-14: Index im Schlüssel — doppelte
-                        Bildadressen ergaben doppelte React-Schlüssel. */}
-                    {result.vehicle.images.slice(0, 10).map((src, idx) => (
-                      <a key={`${idx}-${src}`} href={src} target="_blank" rel="noopener noreferrer"
-                         className="block aspect-[4/3] rounded-lg overflow-hidden border hover:opacity-80 transition"
-                         style={{ borderColor: "var(--hairline)" }}
-                         data-testid={`gallery-thumb-${idx}`}>
-                        {/* 10.09.2026: Vorschaubild ueber den eigenen Bild-Proxy (klein,
-                            zwischengespeichert); schlaegt es fehl, das Portalbild direkt. */}
-                        <img src={thumbSrc(result.vehicle.images_thumbs?.[idx], src)} alt="" loading="lazy"
-                             referrerPolicy="no-referrer" className="w-full h-full object-cover"
-                             onError={(e) => { if (e.currentTarget.src !== src) e.currentTarget.src = src; }} />
-                      </a>
-                    ))}
-                    {result.vehicle.images.length > 10 && (
-                      <div className="aspect-[4/3] rounded-lg flex items-center justify-center text-xs font-semibold"
-                           style={{ background: "var(--apple-btn-secondary-bg)", color: "var(--text-secondary)" }}>
-                        +{result.vehicle.images.length - 10} weitere
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {/* Wunsch Ahmad 03.10.2026: Daten kamen, Fotos nicht -> komplett neu abrufen */}
-              {!(result.vehicle.images?.length > 0) && result.bilder_nachholen_moeglich !== false && (
-                <BilderNachholen
-                  key={result.cache_key || result.vehicle_id}
-                  url={result.link || url}
-                  onBilder={(a) => setResult((r) => (r && r.vehicle_id === result.vehicle_id
-                    ? { ...r, vehicle: { ...r.vehicle, images: a.images, image_urls: a.images,
-                                         image_count: a.bilder, images_thumbs: a.images_thumbs } }
-                    : r))} />
-              )}
-
-              {result.vehicle.features?.length > 0 && (
-                <div className="mt-6 pt-5 border-t" style={{ borderColor: "var(--hairline)" }}>
-                  <div className="overline mb-3">Ausstattung ({result.vehicle.features.length})</div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {result.vehicle.features.map((f, i) => (
-                      <span key={`${i}-${f}`}
-                            className="text-[11px] px-2.5 py-1 rounded-full"
-                            style={{
-                              background: "var(--apple-btn-secondary-bg)",
-                              border: "1px solid var(--apple-btn-secondary-border)",
-                              color: "var(--text-secondary)",
-                            }}>
-                        {f}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {result.vehicle.description && (
-                <div className="mt-6 pt-5 border-t" style={{ borderColor: "var(--hairline)" }}>
-                  <div className="overline mb-3">Beschreibung</div>
-                  <p className="text-sm leading-relaxed whitespace-pre-line" data-testid="vehicle-description"
-                     style={{ color: "var(--text-secondary)" }}>
-                    {result.vehicle.description}
-                  </p>
-                </div>
-              )}
-            </div>
-
-            {/* RP-439/RP-419: ohne erkannte Marke gibt es keinen mobile.de-Link
-                (er hätte über alle Marken gesucht) — der Grund steht im Hinweis. */}
-            {result.search_url && (
-            <div className="apple-surface p-6">
-              <div className="flex items-start justify-between gap-3 mb-3">
-                <div className="flex items-start gap-3">
-                  <PortalBadge kind="mobile" size="sm" />
-                  <div>
-                    <div className="overline">Mobile.de Filter</div>
-                    <div className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>Generierter Such-Link auf Basis deiner Vergleichsregeln</div>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => filterOeffnen(filterEintraege(result, { autoscout: false }))}
-                  data-testid="open-mobile-btn"
-                  className="apple-btn apple-btn-primary"
-                >
-                  <Eye size={14} /> Öffnen <ExternalLink size={12} />
-                </button>
-              </div>
-            </div>
-            )}
-
-            {result.autoscout_url && (
-              <div className="apple-surface p-6">
-                <div className="flex items-start justify-between gap-3 mb-3">
-                  <div className="flex items-start gap-3">
-                    <PortalBadge kind="autoscout" size="sm" />
-                    <div>
-                      <div className="overline">AutoScout24 Filter</div>
-                      <div className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
-                        Gleicher Filter, zweite Plattform — doppelte Reichweite
-                      </div>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => filterOeffnen(filterEintraege(result, { mobile: false }))}
-                    data-testid="open-autoscout-btn"
-                    className="apple-btn apple-btn-secondary"
-                  >
-                    <Eye size={14} /> Öffnen <ExternalLink size={12} />
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Right — actions */}
-          <div className="lg:col-span-4 space-y-5">
-            <div className="apple-surface p-5" data-testid="live-counter-card">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  {/* M8/U-07: den Live-Punkt nur mit echtem Zaehlerstand */}
-                  {counter && <span className="live-dot" />}
-                  <span className="overline">{counter ? "live" : "Zähler nicht verfügbar"}</span>
-                </div>
-                <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>aktualisiert alle 30s</span>
-              </div>
-              <div className="font-display font-black text-4xl mt-3 tracking-tight">
-                {counter ? (counter.active_now ?? 0) : "—"}
-              </div>
-              {/* Runde 27: Gezaehlt werden VERGLEICHE, nicht Haendler — ein
-                  Sucher kann mehrfach vergleichen. Und das Fenster steht dabei. */}
-              <div className="text-sm mt-0.5 font-medium" style={{ color: "var(--text-primary)" }}>
-                {counter?.active_now
-                  ? `${counter.active_now === 1 ? "Vergleich" : "Vergleiche"} in den letzten ${counter?.fenster_minuten ?? 10} Minuten`
-                  : `Keine Vergleiche in den letzten ${counter?.fenster_minuten ?? 10} Minuten`}
-              </div>
-              <div className="text-[11px] mt-3 pt-3 border-t" style={{ color: "var(--text-muted)", borderColor: "var(--hairline)" }}>
-                Heute insg.: <span className="font-semibold" style={{ color: "var(--text-primary)" }}>{counter ? (counter.today ?? 0) : "—"}</span> Vergleiche
-              </div>
-            </div>
-
-            <div className="apple-surface p-5">
-              <div className="overline mb-3">Aktionen</div>
-              {/* Rollenprüfung 22.09.2026 (RP-048/RP-147): Den Hinweis bekommt
-                  nur noch der Chef (Sucher erfahren seit Runde 29 keine
-                  Kollegen) — deshalb in seiner Sicht formuliert. */}
-              {result.kollege && (
-                <div className="text-sm rounded-xl p-3 mb-3" data-testid="kollege-hinweis"
-                     style={{ background: "#f59e0b1c", color: "var(--tx-amber)" }}>
-                  Dieses Fahrzeug bearbeitet bereits <b>{result.kollege.name}</b>.
-                  Legst du selbst einen Kaufvertrag an, bekommt er einen eigenen
-                  Abholtermin — der Vorgang von {result.kollege.name} bleibt unberührt.
-                </div>
-              )}
-              {/* RP-210/RP-361: in der Firma gelöschtes Fahrzeug — kein neuer
-                  Vertrag (vorher endete der Klick mit 404). */}
-              {result.fahrzeug_geloescht ? (
-                <div className="text-sm rounded-xl p-3" data-testid="fahrzeug-geloescht-hinweis"
-                     style={{ background: "#f59e0b1c", color: "var(--tx-amber)" }}>
-                  Dieses Fahrzeug wurde in deiner Firma gelöscht. Ein neuer
-                  Kaufvertrag ist dafür nicht möglich — die Vergleichslinks
-                  funktionieren trotzdem.
-                </div>
-              ) : result.fahrzeug_weg ? (
-                <div className="space-y-2" data-testid="fahrzeug-weg-hinweis">
-                  <div className="text-sm rounded-xl p-3"
-                       style={{ background: "#f59e0b1c", color: "var(--tx-amber)" }}>
-                    Dieses Fahrzeug ist nicht mehr in deinem Fahrzeugpool (ältere
-                    Vergleiche werden aussortiert). Bitte den Link neu vergleichen —
-                    das kostet nichts.
-                  </div>
-                  <button type="button" data-testid="neu-vergleichen-btn"
-                          disabled={loading}
-                          onClick={() => startCompare(null, url, { behalteVertrag: true })}
-                          className="apple-btn apple-btn-primary w-full !py-3 disabled:opacity-60">
-                    <ArrowRight size={15} /> Neu vergleichen
-                  </button>
-                </div>
-              ) : (
-                <>
-                  {/* Rollenprüfung 22.09.2026 (RP-416): Steht der eben erstellte
-                      Vertrag schon da, sagt die Seite das VOR dem Formular —
-                      vorher kam die Rückfrage (409 vertrag_vorhanden) erst nach
-                      dem Ausfüllen. Verträge aus früheren Sitzungen fängt
-                      weiter ContractDialog mit seiner Rückfrage ab. */}
-                  {contract && (
-                    <div className="text-sm rounded-xl p-3 mb-3" data-testid="vertrag-vorhanden-hinweis"
-                         style={{ background: "#f59e0b1c", color: "var(--tx-amber)" }}>
-                      Für dieses Fahrzeug hast du schon einen Kaufvertrag erstellt
-                      {contract.contract_no ? <> (Nr. <b>{contract.contract_no}</b>)</> : null}.
-                      Ein weiterer Vertrag ergibt einen zweiten Kauf mit eigenem
-                      Abholtermin — der erste läuft mit seinem Preis weiter.
-                    </div>
-                  )}
-                  <button onClick={() => setShowContract(true)} data-testid="create-contract-btn"
-                          className={`apple-btn ${contract ? "apple-btn-secondary" : "apple-btn-primary"} w-full !py-3`}>
-                    <FileText size={15} /> {contract ? "Weiteren Kaufvertrag erstellen" : "Kaufvertrag erstellen"}
-                  </button>
-                </>
-              )}
-              {contract && (
-                <div className="mt-3 space-y-2">
-                  <button
-                    onClick={async () => {
-                      if (pdfLaeuft) return;
-                      setPdfLaeuft(true);
-                      try { await openContractPdf(contract.id); }
-                      catch (err) { toast.error(errMsg(err, "Kaufvertrag konnte nicht geladen werden")); }
-                      finally { setPdfLaeuft(false); }
-                    }}
-                    disabled={pdfLaeuft}
-                    data-testid="open-pdf-btn"
-                    className="apple-btn apple-btn-secondary w-full disabled:opacity-60"
-                  >
-                    <FileText size={14} /> {pdfLaeuft ? "Lädt…" : "PDF öffnen"}
-                  </button>
-                  <button onClick={() => setShowSend(true)} data-testid="send-pdf-btn"
-                          className="apple-btn apple-btn-secondary w-full">
-                    <Send size={14} /> Versenden
-                  </button>
-                </div>
-              )}
-            </div>
-
-            {/* 18.09.2026: Gibt es zum Inserat noch kein Dokument, steht hier
-                der Knopf "Beweisdokument erstellen" (frueher entstand es
-                automatisch bei jedem Vergleich). */}
-            {/* Prüfbericht 20.09. U-11: beweis_moeglich === false (Daten aus der
-                Browser-Erweiterung) — die Karte zeigt statt des Knopfs den Hinweis. */}
-            {(result.beweis?.id || result.cache_key) && (
-              <BeweisCard key={result.beweis?.id || result.cache_key}
-                          beweis={result.beweis} cacheKey={result.cache_key}
-                          moeglich={result.beweis_moeglich !== false} />
-            )}
-            {/* Market Intelligence (25.09.2026): laedt NACH dem fertigen Vergleich
-                getrennt, kurzes Zeitlimit, verschwindet still ohne Daten. */}
-            {result.vehicle_id && (
-              <MarktdatenKarte key={`markt-${result.cache_key || result.vehicle_id}`}
-                               vehicleId={result.vehicle_id} preis={result.vehicle.list_price} />
-            )}
-
-            <div className="text-[11px] leading-relaxed px-1" style={{ color: "var(--text-muted)" }}>
-              <strong style={{ color: "var(--text-primary)" }}>Hinweis:</strong> Der Kaufpreis wird nie automatisch übernommen.
-              Verhandelten Preis im nächsten Schritt manuell eintragen.
-            </div>
-          </div>
+          <AktionenSpalte result={result} counter={counter} contract={contract} loading={loading}
+                          onNeuVergleichen={() => startCompare(null, url, { behalteVertrag: true })}
+                          onVertragErstellen={() => setShowContract(true)}
+                          onVersenden={() => setShowSend(true)} />
         </div>
       )}
 
@@ -1139,31 +560,6 @@ export default function Vergleich() {
           onClose={() => setShowSend(false)}
         />
       )}
-    </div>
-  );
-}
-
-/** Prüfbericht 20.09. U-82: der Server meldet bereits_vorhanden, wenn der
- *  Vertrag schon angelegt war (Doppelklick, zweiter Tab) — dann nicht
- *  "PDF erstellt" behaupten. */
-export function vertragErstelltMeldung(c) {
-  if (c?.bereits_vorhanden) return "Dieser Vertrag war schon angelegt — es wurde kein neuer erstellt";
-  if (c?.appointment_id) return "PDF erstellt – Termin automatisch im Terminplaner angelegt";
-  return "PDF erstellt";
-}
-
-/** U-15: Hinweis, wenn während eines laufenden Vergleichs ein neuer Link kommt. */
-export const VERGLEICH_LAEUFT_HINWEIS =
-  "Es läuft noch ein Vergleich – mit dem X abbrechen, dann den neuen Link einfügen.";
-
-function Stat({ icon: Icon, label, value }) {
-  return (
-    <div className="apple-card p-3">
-      <div className="flex items-center gap-1.5 text-[10px] uppercase font-bold tracking-wider"
-           style={{ color: "var(--text-muted)" }}>
-        <Icon size={11} className="text-[var(--accent-red)]" /> {label}
-      </div>
-      <div className="text-base font-semibold mt-1.5 truncate">{value || "—"}</div>
     </div>
   );
 }
