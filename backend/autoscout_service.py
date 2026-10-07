@@ -63,6 +63,19 @@ def _slug(s: str) -> str:
 
 
 # ---------- Lookups ----------
+@lru_cache(maxsize=1)
+def _marken_index() -> tuple:
+    """Lasttest 07.10.2026: die Markennamen EINMAL normalisieren — vorher lief _norm je Vergleichslink ~950-mal
+    ueber den ganzen Katalog (2 ms CPU je Vergleich des Windows-Programms). Reihenfolge wie im Katalog."""
+    exakt: dict = {}
+    reihe = []
+    for m in _load_data():
+        n = _norm(m.get("makeName", ""))
+        exakt.setdefault(n, m)
+        reihe.append((n, m))
+    return exakt, tuple(reihe)
+
+
 def _find_make(make_name: str) -> Optional[dict]:
     """Sucht eine Marke per Name (fuzzy, case-/diakritik-insensitiv)."""
     if not make_name:
@@ -70,21 +83,20 @@ def _find_make(make_name: str) -> Optional[dict]:
     target = _norm(make_name)
     if not target:
         return None
-    data = _load_data()
+    exakt, reihe = _marken_index()
     # 1) Exakter normalisierter Match
-    for m in data:
-        if _norm(m.get("makeName", "")) == target:
-            return m
+    m = exakt.get(target)
+    if m is not None:
+        return m
     # 2) Marke fängt mit Suchbegriff an (z.B. "VW" → "Volkswagen" geht NICHT,
     #    aber "Mercedes" → "Mercedes-Benz" geht). Bekannte Aliase mappen wir
     #    unten via _MAKE_ALIASES.
     alias = _MAKE_ALIASES.get(target)
     if alias:
-        for m in data:
-            if _norm(m.get("makeName", "")) == _norm(alias):
-                return m
-    for m in data:
-        n = _norm(m.get("makeName", ""))
+        m = exakt.get(_norm(alias))
+        if m is not None:
+            return m
+    for n, m in reihe:
         if n.startswith(target):
             return m
     return None

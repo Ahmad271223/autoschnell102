@@ -4436,7 +4436,7 @@ Suchern der Firma) – „alle anderen sollen das gar nicht sehen“.
   cd autopointer-vergleich && powershell -ExecutionPolicy Bypass -File build.ps1   # lokal: dist\AutoSchnell-Vergleich.exe
   scp dist/AutoSchnell-Vergleich.exe root@<server>:/tmp/                            # vom PC aus, nicht auf dem Server
   docker compose cp /tmp/AutoSchnell-Vergleich.exe backend:/tmp/AutoSchnell-Vergleich.exe
-  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.5.6
+  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.5.7
   ```
   Bis dahin zeigt die Seite „Wird gerade bereitgestellt“. Speicher: `werkzeuge/autopointer-vergleich/…`, Eintrag in `werkzeuge`.
 - Tests: `backend/tests/test_werkzeuge_20261003.py`, `frontend/src/pages/app/Programme.test.jsx`,
@@ -4444,10 +4444,21 @@ Suchern der Firma) – „alle anderen sollen das gar nicht sehen“.
 
 ### Browser-Helfer für Chrome und Edge (Wunsch Ahmad 04.10.2026)
 
-Zweites Werkzeug `browser-helfer` neben dem Programm — die Erweiterung `browser-extension/` (Version 2.7.0, enthält
+Zweites Werkzeug `browser-helfer` neben dem Programm — die Erweiterung `browser-extension/` (Version 2.7.1, enthält
 weiter den Kleinanzeigen-Abruf-Helfer). Gleiche Lizenz: 6-stelliger Code, **ein Konto = ein Browser**, Abo-Pflicht,
 Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
 - Freigabe: `BROWSER_HELFER_KUNDEN` (Standard `10001,10002,10007`, `docker-compose.yml`; leer = niemand).
+- Inserat im Browser statt Apify (Wunsch Ahmad 07.10.2026, Programm ≥ 1.5.7): hat das Konto den Browser-Helfer
+  (Verbindung in `werkzeug_verbindungen`), antwortet `/vergleich` mit `inserat_im_browser: true` und `vorab.status
+  "browser"` — kein Vorab-Abruf über Apify; das Programm öffnet das Inserat als Tab mit, der Helfer liest es
+  (`werkzeug_inserate`, 24 h, für alle Konten), der Kaufvertrag nimmt die Lesung. Schalter `AUTOPOINTER_INSERAT_IM_BROWSER`
+  (Compose `true`). Ohne Helfer bleibt der Apify-Vorab-Abruf (`AUTOPOINTER_VORAB_ABRUF`).
+- Tempo des Programm-Vergleichs (Lasttest 07.10.2026, Wunsch Ahmad "keiner soll 2 s warten"): `/vergleich` warm
+  ≈ 30 ms; 40 Sucher GLEICHZEITIG auf EINEM Prozess p95 0,46 s (vorher 0,70 s), zusammen mit 40 gleichzeitigen
+  Helfer-Seiten 0,76 s (vorher 1,19 s); mit zwei Prozessen 0,29 s bzw. 0,39 s — Produktion hat `WEB_CONCURRENCY` 4 je
+  Server. Umgesetzt: Kontopruefung (Firma, Sperre, Abo) und Tageslimit/Firmenregeln/Helfer-Frage/Erkennung laufen
+  gleichzeitig statt nacheinander, AutoScout-Markenindex einmal statt je Link (`autoscout_service._marken_index`),
+  Werkzeug-Routen stehen zuerst in der Routenliste. Messskript `backend/scripts/lasttest_werkzeuge.py` (nur lokal, Wegwerf-DB).
 - Downloads (Wunsch Ahmad 06.10.2026): `GET /api/admin/werkzeug-downloads` (Super-Admin) listet aus `activity_logs`
   (`werkzeug_download`, Index `aktion_zeit`), wer wann welches Programm in welcher Version geladen hat — Tabelle „Downloads“
   auf der Betreiber-Seite Programm-Vergleiche.
@@ -4542,6 +4553,9 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
   - **2.7.0 — Portalwahl (Wunsch Ahmad 06.10.2026):** im Fenster am Symbol wie im Windows-Programm wählbar, ob
     mobile.de, AutoScout24 oder beide aufgehen (`einstellungen.mobile/autoscout`, Vorgabe beide; `erlaubteLinks`
     filtert, die Box zeigt nur gewählte Portale, bei keinem Portal ein Hinweis statt stumm nichts).
+  - **2.7.1 — kurze Kleinanzeigen-Adresse (E2E Programm + Erweiterung 07.10.2026):** `inseratKennung` erkennt auch
+    `/s-anzeige/<Nr>` ohne Kategorie `-216-` — so öffnet das Programm 1.5.7 das Inserat als Tab (Kleinanzeigen leitet
+    nicht auf die lange Form um); vorher blieb der Tab stumm, der Kaufvertrag hatte weder Browser-Lesung noch Apify.
   - **Passwort trennt Werkzeuge (Entscheidung Ahmad 06.10.2026):** setzt der Betreiber ein neues Passwort
     (`POST /admin/users/{id}/password`), trennt `routes.werkzeuge.alle_trennen` Programm und Helfer des Kontos
     (Grund `passwort` → 401 mit klarem Text, neuer Code nötig; Audit-Meta `werkzeuge_getrennt`).
@@ -4557,7 +4571,7 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
   powershell -File browser-extension\bauen.ps1                                       # lokal: browser-extension\dist\AutoSchnell-Helfer.zip
   scp browser-extension/dist/AutoSchnell-Helfer.zip root@<server>:/tmp/
   docker compose cp /tmp/AutoSchnell-Helfer.zip backend:/tmp/AutoSchnell-Helfer.zip
-  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Helfer.zip --werkzeug browser-helfer --version 2.7.0
+  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Helfer.zip --werkzeug browser-helfer --version 2.7.1
   ```
   Reihenfolge: erst Server deployen (neue Routen), dann ZIP hochladen.
 - Tests: `backend/tests/test_browser_helfer_20261004.py` (Teil 1 ohne Server, Teil 2 über HTTP).

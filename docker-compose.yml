@@ -176,6 +176,9 @@ services:
       - BROWSER_HELFER_KUNDEN=${BROWSER_HELFER_KUNDEN:-10001,10002,10007}
       # Inserat beim Klick im Programm vorab auslesen (Daten + Fotos fuer den Kaufvertrag; zaehlt fuers Tageslimit)
       - AUTOPOINTER_VORAB_ABRUF=${AUTOPOINTER_VORAB_ABRUF:-true}
+      # Wunsch Ahmad 07.10.2026: hat das Konto den Browser-Helfer, liest DER das Inserat (Programm oeffnet es als
+      # Tab mit) — kein Apify-Vorab-Abruf fuer dieses Konto; false = immer Apify wie frueher
+      - AUTOPOINTER_INSERAT_IM_BROWSER=${AUTOPOINTER_INSERAT_IM_BROWSER:-true}
       - AUTOPOINTER_VORAB_WARTEN_S=${AUTOPOINTER_VORAB_WARTEN_S:-15}
       - VERGLEICH_JE_KONTO_MINUTE=${VERGLEICH_JE_KONTO_MINUTE:-120}
       # Wunsch Ahmad 06.10.2026: E-Mails je Konto und TAG (Vertrag + Folge-Mail), keine Bremse je Minute/Stunde

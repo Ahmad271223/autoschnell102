@@ -407,6 +407,13 @@ def vorab_warten_s() -> float:
         return 15.0
 
 
+def inserat_im_browser_an() -> bool:
+    """Wunsch Ahmad 07.10.2026: hat das Konto den Browser-Helfer, liest DER das Inserat im Browser (kostenlos, ohne
+    Apify, ohne Tageslimit) — das Programm oeffnet das Inserat dafuer als Tab mit. Standard an; aus = wie frueher
+    immer der Vorab-Abruf ueber Apify."""
+    return (os.environ.get("AUTOPOINTER_INSERAT_IM_BROWSER") or "true").strip().lower() not in ("0", "false", "nein", "aus")
+
+
 def vorab_abruf_an() -> bool:
     """Inserat beim Klick im Programm im Hintergrund auslesen (Standard an). Jeder echte Abruf zaehlt
     wie ein eingefuegter Link fuer das Tageslimit des Kontos; Speicher-Treffer sind kostenlos."""

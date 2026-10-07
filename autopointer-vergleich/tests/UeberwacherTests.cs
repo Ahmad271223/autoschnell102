@@ -39,6 +39,7 @@ public class UeberwacherTests
         public bool Verbunden { get; set; } = true;
         public DienstFehler? Fehler;
         public string? InseratUrl;
+        public bool InseratImBrowser;
         public List<string>? Melden;
         public readonly List<Fahrzeug> Anfragen = new();
         public int Vorgewaermt;
@@ -60,8 +61,9 @@ public class UeberwacherTests
             {
                 new Vergleich("mobile.de", $"https://suchen.mobile.de/{id}"),
                 new Vergleich("AutoScout24", $"https://www.autoscout24.de/{id}"),
-            }, Array.Empty<string>(), "inland", InseratUrl, InseratUrl != null ? "laeuft" : "kein_link",
-               ErkanntMarke: "Erkannt", ErkanntModell: f.MarkeModellText, Melden: Melden));
+            }, Array.Empty<string>(), "inland", InseratUrl, InseratImBrowser ? "browser" : InseratUrl != null ? "laeuft" : "kein_link",
+               ErkanntMarke: "Erkannt", ErkanntModell: f.MarkeModellText, Melden: Melden,
+               InseratImBrowser: InseratImBrowser && InseratUrl != null));
         }
     }
 
@@ -430,6 +432,25 @@ public class UeberwacherTests
         _q.WaehrendDesLesens = null;
         await _u.JetztVergleichenAsync();
         Assert.Equal(2, _b.Aufrufe.Count);
+    }
+
+    [Fact]
+    public async Task Inserat_wird_als_Tab_mitgeoeffnet_wenn_der_Helfer_es_liest()
+    {
+        // Wunsch Ahmad 07.10.2026: Konto hat den Browser-Helfer -> Server sagt inserat_im_browser, wir oeffnen das
+        // Inserat als letzten Tab mit; der Helfer liest es dort (kein Apify)
+        await Start();
+        _server.InseratUrl = "https://www.kleinanzeigen.de/s-anzeige/3529712138";
+        _server.InseratImBrowser = true;
+        await Anklicken(Passat, 1);
+        Assert.Single(_b.Aufrufe);
+        Assert.Equal(new[] { "mobile.de", "AutoScout24", "Inserat" }, _b.Aufrufe[0].Select(v => v.Portal));
+        Assert.Equal(_server.InseratUrl, _b.Aufrufe[0][2].Url);
+        Assert.Equal(_server.InseratUrl, _u.LetzteInseratUrl);
+        // ohne Helfer (Server sagt es nicht): wie bisher nur die Vergleiche
+        _server.InseratImBrowser = false;
+        await Anklicken(Bentley, 2);
+        Assert.Equal(new[] { "mobile.de", "AutoScout24" }, _b.Aufrufe[1].Select(v => v.Portal));
     }
 
     [Fact]

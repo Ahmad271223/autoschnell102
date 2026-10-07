@@ -2210,6 +2210,11 @@ async def on_stop():
 # Go-Live-Schalter (15.09.2026): Marktplatz- und Inserats-Routen antworten mit
 # 503 "Demnaechst verfuegbar", solange MARKTPLATZ_AKTIV nicht gesetzt ist.
 from deps import marktplatz_freigeschaltet  # noqa: E402
+# Werkzeuge (03.10.2026): AutoPointer-Vergleich nur fuer freigegebene Kunden (Standard 10001/10002/10007).
+# Lasttest 07.10.2026: die Werkzeug-Routen (Windows-Programm, Browser-Erweiterung) ZUERST — Starlette prueft die
+# Routen der Reihe nach, der Vergleich des Programms lief vorher an ~600 Routen vorbei (eigene Pfade /werkzeuge/…
+# und /admin/werkzeug-…, keine Ueberschneidung mit anderen Routern)
+api.include_router(werkzeuge_routes.router)
 api.include_router(auth_routes.router)
 api.include_router(admin_routes.router)
 api.include_router(admin_auto_daten_routes.router)
@@ -2230,8 +2235,6 @@ api.include_router(team_routes.router)
 api.include_router(marketplace_routes.router, dependencies=[Depends(marktplatz_freigeschaltet)])
 api.include_router(beweise_routes.router)
 api.include_router(protocols_routes.router)
-# Werkzeuge (03.10.2026): AutoPointer-Vergleich nur fuer freigegebene Kunden (Standard 10002)
-api.include_router(werkzeuge_routes.router)
 
 app.include_router(api)
 

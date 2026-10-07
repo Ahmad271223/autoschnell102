@@ -64,6 +64,10 @@ dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und 
   das Programm zeigt sofort einen „bitte prüfen“-Hinweis (`melden` in der Antwort; Erstzulassung in der Zukunft,
   zu jung für die Kilometer oder über 1 Mio. km). Die Filter bleiben trotzdem genau wie in den Einstellungen
   (Firma/Sucher, z. B. EZ 1 Jahr älter, km +20.000) — es wird nie still ein Filter weggelassen.
+* **1.5.7 (Wunsch Ahmad 07.10.):** hat das Konto den Browser-Helfer, sagt der Server `inserat_im_browser` — das
+  Programm öffnet das Inserat als letzten Tab mit, der Helfer liest es dort (werkzeug_inserate, 24 h) und der
+  Kaufvertrag nimmt diese Daten. Kein Apify-Vorab-Abruf mehr für solche Konten (kein Tageslimit, keine Actor-Plätze);
+  ohne Helfer wie bisher. Der Vergleich selbst bleibt unverändert schnell.
 * **1.5.4 (Paket 1, Prüfung 05./06.10.):** ein Lesefehler (GDI, Texterkennung) wird keine Schleife im 250-ms-Takt
   mehr — 3 Versuche mit 2/4/6 s Abstand, dann Hinweis und Ruhe bis zur nächsten Änderung (vorher Dauerlast und ein
   Protokoll, das um ~1 GB am Tag wuchs; gleiche Fehler im Takt werden außerdem gedrosselt protokolliert).

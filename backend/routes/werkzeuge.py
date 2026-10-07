@@ -308,14 +308,17 @@ async def _konto_pruefen(user: Optional[dict], werkzeug_id: str):
         raise HTTPException(403, "Konto deaktiviert – bitte den Administrator kontaktieren.")
     if user.get("role") not in ("dealer", "sucher") or not user.get("dealer_id"):
         raise HTTPException(403, "Nur für Händler- und Sucher-Konten.")
-    firma = await _firma(user["dealer_id"])
+    # Lasttest 07.10.2026 ("keiner soll warten"): Firma, Sperre und Abo haengen nur vom Konto ab — gleichzeitig
+    # abfragen statt nacheinander (drei Datenbank-Rundreisen weniger in der Kette); geprueft wird in der alten Reihenfolge
+    import asyncio
+    firma, gesperrt, abo = await asyncio.gather(
+        _firma(user["dealer_id"]), firma_gesperrt(user["dealer_id"]), subscription_for(user))
     if not firma or (firma.get("loeschung") or {}).get("status") == "laeuft":
         raise HTTPException(403, "Kein Händlerprofil – bitte den Administrator kontaktieren.")
-    if await firma_gesperrt(user["dealer_id"]):
+    if gesperrt:
         raise HTTPException(403, FIRMA_GESPERRT_TEXT)
     if not wz.ist_freigegeben(werkzeug_id, firma.get("kunden_nr")):
         raise HTTPException(403, "Dieses Programm ist für dein Konto nicht freigeschaltet.")
-    abo = await subscription_for(user)
     if not abo.get("active"):
         raise HTTPException(402, KEIN_ABO_BROWSER if _ist_browser(werkzeug_id) else KEIN_ABO)
     return firma, abo
@@ -488,18 +491,24 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     # Entscheidung Ahmad 06.10.2026: hoechstens 600 Vergleiche je Konto und Tag ueber das Programm
     # (PROGRAMM_TAGESLIMIT_JE_KONTO); der Probelauf zaehlt nicht
     from provider_fetch import TageslimitErreicht, programm_tageslimit
-    verbleibend = None
-    if not body.probelauf:
+    import asyncio
+    f = body.fahrzeug.model_dump()
+
+    async def tageslimit():
+        if body.probelauf:
+            return None
         try:
-            _stand, _limit, verbleibend = await programm_tageslimit(db, user["id"])
+            return (await programm_tageslimit(db, user["id"]))[2]
         except TageslimitErreicht as exc:
             raise HTTPException(429, str(exc))
-    profil, regeln = await _firmenregeln(user)
-    f = body.fahrzeug.model_dump()
-    # Pruefung 05.10.2026 (Paket 1): die Erkennung rechnet (Modell aus der Beschreibung: bis 0,2 s) — im Thread,
-    # damit in der Zeit keine andere Anfrage dieses Prozesses wartet
-    import asyncio
-    erkannt = await asyncio.to_thread(_erkennen, f)
+
+    # Lasttest 07.10.2026 ("keiner soll warten"): Tageslimit, Firmenregeln, Helfer-Frage und die Erkennung (Pruefung
+    # 05.10., Paket 1: im Thread, bis 0,2 s) haengen nicht voneinander ab — gleichzeitig statt nacheinander.
+    # Faellt das Tageslimit (429), sind die anderen Ergebnisse ohne Folgen (nur Lesen).
+    verbleibend, (profil, regeln), helfer_da, erkannt = await asyncio.gather(
+        tageslimit(), _firmenregeln(user),
+        db[wz.SAMMLUNG_VERBINDUNGEN].count_documents({"werkzeug": wz.BROWSER_HELFER, "user_id": user["id"]}, limit=1),
+        asyncio.to_thread(_erkennen, f))
     f["inserat_url"] = wz.inserat_url(f.get("quelle"), f.get("inserat_id"), f.get("hash_id"))
     vehicle = wz.fahrzeug_zu_vehicle(f)
     # Befund 04.10.2026: unplausible EZ/km sagen — die Filter bleiben wie eingestellt (wz.plausibel)
@@ -514,19 +523,34 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     hinweise = melden + hinweise
     # Wunsch Ahmad 03.10.2026: das Inserat schon jetzt im Hintergrund auslesen (Daten + Fotos), damit
     # der Kaufvertrag ohne Link-Einfuegen geht — derselbe Weg wie das Einfuegen in der App.
-    vorab = await _vorab_abrufen(user, f["inserat_url"]) if not body.probelauf else \
-        {"status": "probelauf", "hinweis": ""}
-    if not body.probelauf:
-        await _vorab_ersetzen(user, v, vorab.get("job_id"))
-    await db[wz.SAMMLUNG_VERGLEICHE].insert_one({
+    # Wunsch Ahmad 07.10.2026: hat das Konto den Browser-Helfer, liest der das Inserat im Browser — das Programm
+    # oeffnet das Inserat als Tab mit, der Helfer schickt die Seite (werkzeug_inserate, 24 h), der Kaufvertrag nimmt
+    # sie. Kein Apify, kein Tageslimit, keine 32/128 Plaetze. Ohne Helfer wie bisher: Vorab-Abruf ueber Apify.
+    im_browser = (not body.probelauf and bool(f["inserat_url"]) and wz.inserat_im_browser_an() and helfer_da > 0)
+    if body.probelauf:
+        vorab = {"status": "probelauf", "hinweis": ""}
+    elif im_browser:
+        vorab = {"status": "browser", "hinweis": ""}
+    else:
+        vorab = await _vorab_abrufen(user, f["inserat_url"])
+    eintrag = {
         "id": str(uuid.uuid4()), "werkzeug": werkzeug_id, "dealer_id": user["dealer_id"], "user_id": user["id"],
         "verbindung_id": v["id"], "pc_name": v.get("pc_name") or "", "erstellt_am": now_iso(),
         "fahrzeug": f, "links": links, "hinweise": hinweise, "profil": profil, "probelauf": body.probelauf,
         "vorab": vorab["status"], "ablauf": wz.vergleich_ablauf(),
-    })
+    }
+    if body.probelauf:
+        await db[wz.SAMMLUNG_VERGLEICHE].insert_one(eintrag)
+    else:
+        # Vorab-Abruf tauschen (im Browser-Fall: einen noch wartenden Apify-Abruf des vorigen Autos zurueckziehen)
+        # und den Vergleich protokollieren — unabhaengig voneinander, also gleichzeitig
+        await asyncio.gather(_vorab_ersetzen(user, v, vorab.get("job_id")),
+                             db[wz.SAMMLUNG_VERGLEICHE].insert_one(eintrag))
     return {"links": links, "hinweise": hinweise, "profil": profil, "inserat_url": f["inserat_url"],
             "vorab": {"status": vorab["status"], "hinweis": vorab.get("hinweis", "")}, "fahrzeug": erkannt,
-            "melden": melden}
+            "melden": melden,
+            # Programm ab 1.5.7: das Inserat als Tab mit oeffnen, der Browser-Helfer liest es dort
+            "inserat_im_browser": im_browser}
 
 
 def _erkennen(f: dict) -> dict:

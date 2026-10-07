@@ -39,7 +39,7 @@ internal sealed record Vergleich(string Portal, string Url);
 internal sealed record VergleichAntwort(IReadOnlyList<Vergleich> Links, IReadOnlyList<string> Hinweise, string Profil,
                                         string? InseratUrl = null, string VorabStatus = "", string VorabHinweis = "",
                                        string? ErkanntMarke = null, string? ErkanntModell = null, bool MarkeErkannt = true,
-                                       IReadOnlyList<string>? Melden = null);
+                                       IReadOnlyList<string>? Melden = null, bool InseratImBrowser = false);
 
 /// <summary>Was der Ueberwacher vom Server braucht (in Tests eine Attrappe).</summary>
 internal interface IVergleichsDienst
@@ -334,8 +334,10 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
         List<string>? melden = null;
         if (e.TryGetProperty("melden", out var md) && md.ValueKind == JsonValueKind.Array)
             melden = md.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => x.GetString()!).ToList();
+        // Wunsch Ahmad 07.10.2026: hat das Konto den Browser-Helfer, liest der das Inserat — wir oeffnen es als Tab mit
+        bool imBrowser = e.TryGetProperty("inserat_im_browser", out var ib) && ib.ValueKind == JsonValueKind.True;
         return new VergleichAntwort(links, hinweise, Text(e, "profil"), inseratUrl, vorabStatus, vorabHinweis,
-                                    marke, modell, markeErkannt, melden);
+                                    marke, modell, markeErkannt, melden, imBrowser && inseratUrl != null);
     }
 
     /// <summary>Fahrzeug -> Anfrage an /vergleich (Feldnamen wie routes/werkzeuge.FahrzeugIn).</summary>

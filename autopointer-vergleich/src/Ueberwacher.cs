@@ -425,6 +425,10 @@ internal sealed class Ueberwacher
         var links = antwort.Links
             .Where(l => (l.Portal == "mobile.de" && e.MobileDe) || (l.Portal == "AutoScout24" && e.AutoScout24))
             .ToList();
+        // Wunsch Ahmad 07.10.2026: hat das Konto den Browser-Helfer, oeffnen wir das Inserat als Tab mit (zuletzt, damit
+        // es vorne liegt) — der Helfer liest es dort fuer den Kaufvertrag, ganz ohne Apify
+        if (antwort.InseratImBrowser && antwort.InseratUrl != null && links.Count > 0)
+            links.Add(new Vergleich("Inserat", antwort.InseratUrl));
         LetzteVergleiche = links;
         if (links.Count == 0)
         {

@@ -814,6 +814,39 @@ def test_58_konto_deaktiviert_ist_403_der_schluessel_bleibt(welt):
     assert requests.get(f"{API}/werkzeuge/{WID}/status", headers=prog, timeout=30).status_code == 200
 
 
+def test_59_inserat_im_browser_statt_apify_wenn_der_helfer_verbunden_ist(welt):
+    """Wunsch Ahmad 07.10.2026: hat das Konto den Browser-Helfer, holt das Programm keinen Vorab-Abruf (Apify) mehr —
+    es oeffnet das Inserat als Tab, der Helfer liest es. Ohne Helfer wie bisher."""
+    prog, db = _prog(welt), welt["db"]
+    _code_bremse_frei(welt)                    # 20 Codes je Konto und 10 min — die Tests davor haben viele geholt
+    auto = _roh("VW Polo", "VW Polo 1.4", inserat_id="3529833377")
+    url = "https://www.kleinanzeigen.de/s-anzeige/3529833377"
+    db.link_jobs.delete_many({"url": url})
+    r = requests.post(f"{API}/werkzeuge/browser-helfer/code", headers=welt["sucher"], timeout=30)
+    assert r.status_code == 200, r.text
+    r = requests.post(f"{API}/werkzeuge/browser-helfer/verbinden", timeout=30,
+                      json={"code": r.json()["code"], "pc_name": "Edge", "pc_kennung": "edge-59"})
+    assert r.status_code == 200, r.text
+    try:
+        r = _vergleich(prog, auto)
+        assert r.status_code == 200, r.text
+        d = r.json()
+        assert d["inserat_im_browser"] is True and d["vorab"]["status"] == "browser" and d["inserat_url"] == url
+        assert db.link_jobs.count_documents({"url": url}) == 0, "kein Apify-Vorab-Abruf"
+        assert db.werkzeug_vergleiche.find_one({"user_id": welt["sucher_id"], "fahrzeug.inserat_id": "3529833377"})["vorab"] == "browser"
+        # Probelauf: nie
+        p = requests.post(f"{API}/werkzeuge/{WID}/vergleich", headers=prog, timeout=30,
+                          json={"fahrzeug": auto, "probelauf": True})
+        assert p.status_code == 200 and p.json()["inserat_im_browser"] is False
+    finally:
+        assert requests.delete(f"{API}/werkzeuge/browser-helfer/verbindung", headers=welt["sucher"], timeout=30).status_code == 200
+    # ohne Helfer: Vorab-Abruf wie bisher
+    r = _vergleich(prog, auto)
+    assert r.status_code == 200, r.text
+    assert r.json()["inserat_im_browser"] is False and r.json()["vorab"]["status"] in ("laeuft", "fertig", "in_app")
+    db.link_jobs.delete_many({"url": url})
+
+
 def test_60_anderer_pc_genau_benannt(welt):
     """Nr. 16: der alte PC erfaehrt, dass und wo das Konto neu verbunden wurde."""
     _code_bremse_frei(welt)
