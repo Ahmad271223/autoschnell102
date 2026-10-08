@@ -179,6 +179,9 @@ services:
       # Wunsch Ahmad 07.10.2026: hat das Konto den Browser-Helfer, liest DER das Inserat (Programm oeffnet es als
       # Tab mit) — kein Apify-Vorab-Abruf fuer dieses Konto; false = immer Apify wie frueher
       - AUTOPOINTER_INSERAT_IM_BROWSER=${AUTOPOINTER_INSERAT_IM_BROWSER:-true}
+      # Befund Ahmad 08.10.2026: Vorgangsseite (Programm 1.5.9 + Erweiterung 2.7.3) aus — mit installierter App ging sie
+      # im App-Fenster auf; das Programm oeffnet Vergleiche + Inserat wieder selbst. true = wieder ein
+      - AUTOPOINTER_VORGANG=${AUTOPOINTER_VORGANG:-false}
       - AUTOPOINTER_VORAB_WARTEN_S=${AUTOPOINTER_VORAB_WARTEN_S:-15}
       - VERGLEICH_JE_KONTO_MINUTE=${VERGLEICH_JE_KONTO_MINUTE:-120}
       # Wunsch Ahmad 06.10.2026: E-Mails je Konto und TAG (Vertrag + Folge-Mail), keine Bremse je Minute/Stunde

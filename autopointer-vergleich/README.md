@@ -91,6 +91,15 @@ dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und 
     Windows-Texterkennung hat 10 s Zeit — hängt sie, zählt es als Lesefehler (vorher war das Programm dann taub).
   * **Autostart** wird nach dem ersten Verbinden eingeschaltet (außer der Sucher hat ihn selbst einmal umgestellt);
     Startmenü-Eintrag „AutoSchnell Vergleich“ auf die feste Kopie; „Programm beenden“ fragt erst nach.
+* **1.5.10 (Befund Ahmad 08.10. abends: „mit Erweiterung öffnet es das Inserat statt der Vergleiche“):**
+  * Der Server schaltet die Vorgangsseite ab (`AUTOPOINTER_VORGANG`, Standard aus): mit installierter AutoSchnell-App
+    fing der Browser die Adresse `/app/vorgang/<id>` ab — die Seite ging im App-Fenster auf und blieb vorne, die
+    Vergleiche lagen dahinter. Das Programm öffnet Vergleiche + Inserat wieder selbst.
+  * **Vorne liegt immer ein Vergleich:** das Inserat wird ZUERST geöffnet, die Vergleiche danach. Chrome/Edge machen
+    beim Aufruf mit mehreren Adressen die ERSTE zum aktiven Tab (gemessen am 08.10.), der Standardbrowser die letzte —
+    `BrowserOeffner` öffnet die letzte deshalb in einem eigenen Aufruf: immer liegt die letzte Adresse vorne.
+  * Bei „Standardbrowser“ gehen die Tabs in den Browser, in dem die Erweiterung verbunden ist (`helfer_browser`) —
+    sonst las sie das Inserat nicht und die Vergleiche bekamen keine Ampel. „Letzten Vergleich“ nimmt denselben Browser.
 * Ein Auto, das beim Programmstart schon angezeigt wird, öffnet nichts – erst das nächste angeklickte. **Nach dem (Neu-)Verbinden**
   dagegen wird das gerade angezeigte Auto sofort verglichen (seit 1.5.3, Befund 04.10.: Mercedes nach Neuverbinden).
 * **Unplausible Daten** (seit 1.5.3, Befund 04.10.: „Kia Rio · EZ 04/2026 · 165.000 km“, „Audi 80 · 1.960.817 km“):

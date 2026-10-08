@@ -480,19 +480,36 @@ public class UeberwacherTests
     public async Task Inserat_wird_als_Tab_mitgeoeffnet_wenn_der_Helfer_es_liest()
     {
         // Wunsch Ahmad 07.10.2026: Konto hat den Browser-Helfer -> Server sagt inserat_im_browser, wir oeffnen das
-        // Inserat als letzten Tab mit; der Helfer liest es dort (kein Apify)
+        // Inserat als Tab mit; der Helfer liest es dort (kein Apify). 1.5.10 (Befund Ahmad 08.10. abends): das Inserat
+        // ZUERST — der letzte Tab liegt vorne, und das soll ein Vergleich sein, nicht das Inserat
         await Start();
         _server.InseratUrl = "https://www.kleinanzeigen.de/s-anzeige/3529712138";
         _server.InseratImBrowser = true;
         await Anklicken(Passat, 1);
         Assert.Single(_b.Aufrufe);
-        Assert.Equal(new[] { "mobile.de", "AutoScout24", "Inserat" }, _b.Aufrufe[0].Select(v => v.Portal));
-        Assert.Equal(_server.InseratUrl, _b.Aufrufe[0][2].Url);
+        Assert.Equal(new[] { "Inserat", "mobile.de", "AutoScout24" }, _b.Aufrufe[0].Select(v => v.Portal));
+        Assert.Equal(_server.InseratUrl, _b.Aufrufe[0][0].Url);
         Assert.Equal(_server.InseratUrl, _u.LetzteInseratUrl);
         // ohne Helfer (Server sagt es nicht): wie bisher nur die Vergleiche
         _server.InseratImBrowser = false;
         await Anklicken(Bentley, 2);
         Assert.Equal(new[] { "mobile.de", "AutoScout24" }, _b.Aufrufe[1].Select(v => v.Portal));
+    }
+
+    [Fact]   // 1.5.10 (Befund Ahmad 08.10.2026 abends): ohne Vorgangsseite in den Browser der Erweiterung
+    public async Task Direkter_Weg_oeffnet_im_Browser_der_Erweiterung()
+    {
+        await Start();
+        _server.UeberHelfer = false;
+        _server.HelferBrowser = "chrome";
+        await Anklicken(Passat, 1);
+        Assert.Equal(BrowserWahl.Chrome, _b.Wahl[0]);
+        _u.LetztenErneutOeffnen();
+        Assert.Equal(BrowserWahl.Chrome, _b.Wahl[1]);
+        // ohne Erweiterung (kein Browser gemeldet): wie eingestellt
+        _server.HelferBrowser = "";
+        await Anklicken(Bentley, 2);
+        Assert.Equal(BrowserWahl.Standard, _b.Wahl[2]);
     }
 
     [Fact]   // Befund Ahmad 08.10.2026: mobile.de/Kleinanzeigen ohne lesbare Inserat-ID -> gleich sagen, wie es geht
@@ -610,9 +627,10 @@ public class UeberwacherTests
         _e.Browser = BrowserWahl.Edge;
         await Anklicken(Golf, 2);
         Assert.Equal(BrowserWahl.Edge, _b.Wahl[1]);
-        // ohne Erweiterung: wie eingestellt
+        // ohne Erweiterung (der Server meldet keinen Browser): wie eingestellt
         _e.Browser = BrowserWahl.Standard;
         _server.UeberHelfer = false;
+        _server.HelferBrowser = "";
         await Anklicken(Passat, 3);
         Assert.Equal(BrowserWahl.Standard, _b.Wahl[2]);
 

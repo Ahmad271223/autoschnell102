@@ -4436,7 +4436,7 @@ Suchern der Firma) – „alle anderen sollen das gar nicht sehen“.
   cd autopointer-vergleich && powershell -ExecutionPolicy Bypass -File build.ps1   # lokal: dist\AutoSchnell-Vergleich.exe
   scp dist/AutoSchnell-Vergleich.exe root@<server>:/tmp/                            # vom PC aus, nicht auf dem Server
   docker compose cp /tmp/AutoSchnell-Vergleich.exe backend:/tmp/AutoSchnell-Vergleich.exe
-  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.5.9
+  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.5.10
   ```
   Bis dahin zeigt die Seite „Wird gerade bereitgestellt“. Speicher: `werkzeuge/autopointer-vergleich/…`, Eintrag in `werkzeuge`.
 - Tests: `backend/tests/test_werkzeuge_20261003.py`, `frontend/src/pages/app/Programme.test.jsx`,
@@ -4605,6 +4605,14 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
       höchstens 150 Inserate (10-MB-Grenze), „Erneut versuchen“ fragt wirklich neu.
     - Reihenfolge: Server ausrollen, dann Programm 1.5.9 und Erweiterung 2.7.3 hochladen. Mit älteren Versionen
       bleibt es beim bisherigen Weg (Programm öffnet selbst).
+  - **Vorgangsseite AUS (Befund Ahmad 08.10.2026 abends) — Programm 1.5.10:** mit installierter AutoSchnell-App fängt
+    der Browser `/app/vorgang/<id>` ab (gleiche Adresse wie die App, Scope `/`): die Seite ging im App-Fenster auf und
+    blieb vorne, das Inserat lag im Browser vorne, die Vergleiche dahinter. `AUTOPOINTER_VORGANG` (Standard `false`,
+    `docker-compose.yml`; CI `true`, damit die Tests den Weg weiter prüfen) — das Programm öffnet Vergleiche + Inserat
+    wieder selbst. Programm 1.5.10: Inserat zuerst, Vergleich vorne (Chrome/Edge machen beim Aufruf mit mehreren
+    Adressen die ERSTE aktiv — die letzte geht deshalb in einem eigenen Aufruf), Tabs im Browser der Erweiterung.
+    Wieder einschalten erst, wenn die Übergabe ohne App-Adresse geht (z. B. Inserat-Adresse mit Kennung im `#`, die
+    Erweiterung übernimmt auf der Portalseite).
   - **Passwort trennt Werkzeuge (Entscheidung Ahmad 06.10.2026):** setzt der Betreiber ein neues Passwort
     (`POST /admin/users/{id}/password`), trennt `routes.werkzeuge.alle_trennen` Programm und Helfer des Kontos
     (Grund `passwort` → 401 mit klarem Text, neuer Code nötig; Audit-Meta `werkzeuge_getrennt`).

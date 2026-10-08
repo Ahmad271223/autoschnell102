@@ -523,6 +523,16 @@ def inserat_im_browser_an() -> bool:
     return (os.environ.get("AUTOPOINTER_INSERAT_IM_BROWSER") or "true").strip().lower() not in ("0", "false", "nein", "aus")
 
 
+def vorgang_an() -> bool:
+    """Vorgangsseite (/app/vorgang/<id>, Programm ab 1.5.9 + Erweiterung ab 2.7.3) — Standard AUS.
+    Befund Ahmad 08.10.2026 (abends): mit installierter AutoSchnell-App faengt der Browser die Adresse ab (gleiche
+    Seite wie die App) — die Vorgangsseite ging im App-Fenster auf und blieb vorne, die Erweiterung uebernahm nicht
+    zuverlaessig, nach 5 s oeffnete das Programm selbst, und das Inserat lag vorne statt der Vergleiche. Bis die
+    Uebergabe ohne App-Adresse geht, oeffnet das Programm Vergleiche + Inserat wieder selbst (wie 07.10.).
+    AUTOPOINTER_VORGANG=true schaltet den Weg wieder ein (Tests/CI)."""
+    return (os.environ.get("AUTOPOINTER_VORGANG") or "false").strip().lower() in ("1", "true", "ja", "an")
+
+
 def vorab_abruf_an() -> bool:
     """Inserat beim Klick im Programm im Hintergrund auslesen (Standard an). Jeder echte Abruf zaehlt
     wie ein eingefuegter Link fuer das Tageslimit des Kontos; Speicher-Treffer sind kostenlos."""

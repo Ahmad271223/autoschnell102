@@ -611,7 +611,7 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     # /app/vorgang/<id> — die Erweiterung holt sich den Vorgang und oeffnet Vergleiche + Inserat selbst. So oeffnet
     # genau EINER die Tabs, und die Erweiterung kennt sie (keine Programm-Suche, kein 30-Minuten-Raten).
     ueber_helfer = (not body.probelauf and helfer is not None and bool(links) and vorgang_bekannt
-                    and not helfer_verpasst)
+                    and not helfer_verpasst and wz.vorgang_an())
     if body.probelauf:
         vorab = {"status": "probelauf", "hinweis": ""}
     elif im_browser:

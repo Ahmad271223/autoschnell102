@@ -3,9 +3,10 @@ using Microsoft.Win32;
 
 namespace AutoPointerVergleich;
 
-/// <summary>Oeffnet die Vergleiche als neue Tabs. Edge/Chrome bekommen alle
-/// Adressen in einem Aufruf (neue Tabs im zuletzt benutzten Fenster); der
-/// Standardbrowser je Adresse ueber die Windows-Verknuepfung.</summary>
+/// <summary>Oeffnet die Vergleiche als neue Tabs. Edge/Chrome bekommen die
+/// Adressen per Aufruf (neue Tabs im zuletzt benutzten Fenster, die letzte seit 1.5.10
+/// in einem eigenen Aufruf, damit sie vorne liegt); der Standardbrowser je Adresse
+/// ueber die Windows-Verknuepfung. Immer gilt: die LETZTE Adresse liegt vorne.</summary>
 internal static class BrowserOeffner
 {
     public static void Oeffne(IReadOnlyList<string> urls, BrowserWahl wahl)
@@ -19,9 +20,16 @@ internal static class BrowserOeffner
         };
         if (exe != null)
         {
-            var psi = new ProcessStartInfo(exe) { UseShellExecute = false };
-            foreach (var url in urls) psi.ArgumentList.Add(url);
-            Process.Start(psi)?.Dispose();
+            // 1.5.10 (Befund Ahmad 08.10.2026 abends, "es oeffnet das Inserat statt der Vergleiche"): Chrome/Edge machen
+            // beim Aufruf mit mehreren Adressen die ERSTE zum aktiven Tab, der Standardbrowser (unten, je Adresse) die
+            // LETZTE. Vorne soll immer die letzte liegen (ein Vergleich, nicht das Inserat) — deshalb die letzte in
+            // einem eigenen Aufruf hinterher.
+            if (urls.Count > 1)
+            {
+                Starte(exe, urls.Take(urls.Count - 1));
+                Thread.Sleep(300);
+            }
+            Starte(exe, new[] { urls[^1] });
             return;
         }
         if (wahl != BrowserWahl.Standard)
@@ -32,6 +40,13 @@ internal static class BrowserOeffner
             // kurze Pause, damit die Tabs in der richtigen Reihenfolge entstehen
             if (i < urls.Count - 1) Thread.Sleep(250);
         }
+    }
+
+    private static void Starte(string exe, IEnumerable<string> urls)
+    {
+        var psi = new ProcessStartInfo(exe) { UseShellExecute = false };
+        foreach (var url in urls) psi.ArgumentList.Add(url);
+        Process.Start(psi)?.Dispose();
     }
 
     /// <summary>Systemcheck (Nr. 8): gibt es einen Browser fuer die Vergleiche?</summary>

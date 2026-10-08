@@ -35,6 +35,8 @@ jobs:
       # Entscheidung Ahmad 06.10.2026: 600 Vergleiche je Konto und Tag ueber das Windows-Programm
       # (tests/test_werkzeuge_20261003.py::test_57 rechnet mit diesem Wert)
       PROGRAMM_TAGESLIMIT_JE_KONTO: "600"
+      # Vorgangsseite (in Produktion seit 08.10.2026 abends aus, siehe docker-compose.yml) — die Tests pruefen sie weiter
+      AUTOPOINTER_VORGANG: "true"
       # Pruefbericht 20.09.2026 (T-02): wie in Produktion hinter nginx/LB —
       # tests/test_client_ip.py prueft die Anmeldesperre mit gefaelschten
       # X-Forwarded-For-Kopfzeilen. Fuer das gestartete Backend aendert sich

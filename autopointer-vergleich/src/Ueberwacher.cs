@@ -124,6 +124,8 @@ internal sealed class Ueberwacher
     /// Erweiterung ihn nicht mehr oeffnet) und protokolliert — vorher sprangen die Tabs eines alten Autos auf, waehrend
     /// der Sucher schon das naechste angeklickt hatte.</summary>
     private volatile string? _aktuellerVorgang;
+    /// <summary>1.5.10: in welchem Browser die letzten Vergleiche aufgingen ("Letzten Vergleich" nimmt denselben).</summary>
+    private BrowserWahl? _letzterBrowser;
     internal const string VorgangNichtErreichbar = "AutoSchnell antwortet gerade nicht – für dieses Auto „Vergleichen“ drücken.";
     internal const string ErweiterungNichtUebernommen = "Die Browser-Erweiterung hat nicht übernommen – Vergleiche direkt geöffnet.";
     /// <summary>Die laufende Nachfrage beim Server (fuer Tests).</summary>
@@ -401,7 +403,7 @@ internal sealed class Ueberwacher
             return;
         }
         Protokoll.Schreibe("Letzten Vergleich erneut geöffnet.");
-        Oeffne(LetzteVergleiche, _einstellungen());
+        Oeffne(LetzteVergleiche, _einstellungen(), _letzterBrowser);
     }
 
     /// <param name="wiederholung">1.5.9 (G): der eine Wiederholversuch nach einem voruebergehenden Fehler — schlaegt er
@@ -535,10 +537,13 @@ internal sealed class Ueberwacher
         // 1.5.8 (Wunsch Ahmad 08.10.2026): die Portalwahl steht in AutoSchnell, der Server schickt nur deren Links —
         // hier nur noch die beiden bekannten Vergleichsportale (alles andere ignorieren)
         var links = antwort.Links.Where(l => l.Portal is "mobile.de" or "AutoScout24").ToList();
-        // Wunsch Ahmad 07.10.2026: hat das Konto den Browser-Helfer, oeffnen wir das Inserat als Tab mit (zuletzt, damit
-        // es vorne liegt) — der Helfer liest es dort fuer den Kaufvertrag, ganz ohne Apify
+        // Wunsch Ahmad 07.10.2026: hat das Konto den Browser-Helfer, oeffnen wir das Inserat als Tab mit — der Helfer
+        // liest es dort fuer den Kaufvertrag, ganz ohne Apify.
+        // 1.5.10 (Befund Ahmad 08.10.2026 abends, "oeffnet eher das Inserat statt der Vergleiche"): das Inserat ZUERST,
+        // die Vergleiche danach — der zuletzt geoeffnete Tab liegt vorne, und vorne gehoert der Vergleich hin (das Auto
+        // selbst sieht der Sucher ja schon in AutoPointer). Der Helfer liest das Inserat auch im Hintergrund.
         if (antwort.InseratImBrowser && antwort.InseratUrl != null && links.Count > 0)
-            links.Add(new Vergleich("Inserat", antwort.InseratUrl));
+            links.Insert(0, new Vergleich("Inserat", antwort.InseratUrl));
         LetzteVergleiche = links;
         if (links.Count == 0)
         {
@@ -571,7 +576,13 @@ internal sealed class Ueberwacher
             Oeffne(new[] { new Vergleich("Vorgang", $"{e.Server.TrimEnd('/')}/app/vorgang/{vorgang}") }, e, browser);
             LetzteVorgangsPruefung = VorgangPruefenAsync(vorgang, links, e, browser);
         }
-        else Oeffne(links, e);
+        else
+        {
+            // 1.5.10: auch der direkte Weg geht in den Browser der Erweiterung (bei "Standardbrowser") — sonst las sie das
+            // Inserat nicht (Kaufvertrag ohne Daten) und die Vergleichsseiten bekamen keine Ampel
+            _letzterBrowser = BrowserFuer(e.Browser, antwort.HelferBrowser);
+            Oeffne(links, e, _letzterBrowser);
+        }
         _letzteOeffnung = _takt();
         var hinweise = antwort.Hinweise.Where(h => h.Contains("kein mobile.de-Vergleich") || h.Contains("kein AutoScout24-Vergleich")).ToList();
         var plausi = PlausibilitaetsHinweise(f, _uhr());

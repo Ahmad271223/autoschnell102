@@ -1294,6 +1294,17 @@ def test_47b_vorgang_genau_einer_oeffnet(welt):
         db.link_jobs.delete_many({"url": MOBILE_URL})
 
 
+def test_47d_vorgang_standard_aus(monkeypatch):
+    """Befund Ahmad 08.10.2026 (abends): mit installierter App ging die Vorgangsseite im App-Fenster auf — der Weg ist
+    in Produktion aus (AUTOPOINTER_VORGANG), die Tests/CI schalten ihn ein."""
+    monkeypatch.delenv("AUTOPOINTER_VORGANG", raising=False)
+    assert wz.vorgang_an() is False
+    monkeypatch.setenv("AUTOPOINTER_VORGANG", "true")
+    assert wz.vorgang_an() is True
+    monkeypatch.setenv("AUTOPOINTER_VORGANG", "false")
+    assert wz.vorgang_an() is False
+
+
 def test_47c_helfer_browser_und_merker():
     """Pruefung 08.10.2026: Browser der Erweiterung aus ihrem Namen; die Merker fuer verpasste Vorgaenge."""
     from datetime import datetime, timedelta, timezone
