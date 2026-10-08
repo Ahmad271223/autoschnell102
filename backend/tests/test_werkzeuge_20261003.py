@@ -895,7 +895,7 @@ def test_62_status_nennt_die_angebotene_version_und_merkt_die_eigene(welt):
 
 
 def test_63_app_start_rueckmeldung(welt):
-    """Nr. 12: die App meldet den Start, das Programm fragt danach — nur fuer die eigene Firma."""
+    """App-Start bestaetigt nur das exakt gleiche Konto, nicht nur dieselbe Firma."""
     _code_bremse_frei(welt)
     _abo(welt, True)
     _, prog, _ = _verbinden(welt, "PC-A")
@@ -906,14 +906,23 @@ def test_63_app_start_rueckmeldung(welt):
     assert r.status_code == 200, r.text
     assert requests.post(f"{API}/werkzeuge/app-start/{start}", headers=welt["sucher"], timeout=30).status_code == 200
     assert frage(start).json() == {"bestaetigt": True}
-    # eine fremde Firma meldet denselben Start nicht fuer uns
+
+    # Auch der CHEF derselben Firma darf den Programm-Start dieses Suchers
+    # nicht bestaetigen: sonst koennte dessen App-Fenster den Fallback des
+    # falschen Kontos unterdruecken.
+    kollege = uuid.uuid4().hex
+    assert requests.post(f"{API}/werkzeuge/app-start/{kollege}",
+                         headers=welt["chef"], timeout=30).status_code == 200
+    assert frage(kollege).json() == {"bestaetigt": False}
+
+    # eine fremde Firma ebenfalls nicht
     fremd = uuid.uuid4().hex
     requests.post(f"{API}/werkzeuge/app-start/{fremd}", headers=welt["andere"], timeout=30)
     assert frage(fremd).json() == {"bestaetigt": False}
     assert requests.post(f"{API}/werkzeuge/app-start/kaputt", headers=welt["sucher"], timeout=30).status_code == 400
     assert requests.post(f"{API}/werkzeuge/app-start/{start}", timeout=30).status_code in (401, 403)
     assert frage("kaputt").json() == {"bestaetigt": False}
-    welt["db"].werkzeug_app_starts.delete_many({"start": {"$in": [start, fremd]}})
+    welt["db"].werkzeug_app_starts.delete_many({"start": {"$in": [start, kollege, fremd]}})
 
 
 # ------------------------------------------------------------ Paket 2 (Pruefung 05./06.10.2026)
