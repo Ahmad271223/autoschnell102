@@ -3,8 +3,8 @@ namespace AutoPointerVergleich;
 /// <summary>Was das Steuerfenster anzeigt (jede Sekunde neu abgefragt).</summary>
 /// <param name="Sperrgrund">Paket 2 (A8): Text des Servers zur Sperre (402/403 bei der Lizenzpruefung), sonst null.</param>
 internal sealed record FensterZustand(Status Status, bool AutomatikAn, bool Verbunden, string VerbundenAls,
-                                      string? LetztesAuto, bool HatInseratLink, string? LetzteMeldung, bool Probelauf,
-                                      string? Sperrgrund = null);
+                                      string? LetztesAuto, bool HatInseratLink, bool VertragBereit,
+                                      string? LetzteMeldung, bool Probelauf, string? Sperrgrund = null);
 
 /// <summary>Wunsch Ahmad 03.10.2026: "man kann nicht stoppen, aktivieren, nichts — das sollen Buttons sein".
 /// Sichtbares Fenster mit Knoepfen statt nur eines Symbols im Infobereich. Solange das Programm laeuft,
@@ -199,7 +199,7 @@ internal sealed class SteuerFenster : Form
 
         _jetzt.Enabled = z.Verbunden;
         _erneut.Enabled = z.Verbunden && z.LetztesAuto != null;
-        _vertrag.Enabled = z.Verbunden && z.LetztesAuto != null;
+        _vertrag.Enabled = z.Verbunden && z.VertragBereit;
         _letztes.Text = z.LetztesAuto != null
             ? "Letztes Auto: " + z.LetztesAuto + (z.HatInseratLink ? "" : "   (Inserat-Adresse fehlt – für den Vertrag selbst einfügen)")
             : "Letztes Auto: noch keins – in AutoPointer ein Inserat anklicken.";
