@@ -3586,7 +3586,9 @@ async def folge_mail_senden(contract_id: str, body: FolgeMailIn,
         and int(e.get("version") or 0) == int(c.get("version") or 1)
         and e.get("zustellung") in ("versendet", "mock")
     ), None)
-    if schon_versendet and not body.erneut:
+    if (schon_versendet
+            and schon_versendet.get("idempotency_key") != schluessel
+            and not body.erneut):
         raise HTTPException(409, {
             "code": "bereits_versendet",
             "msg": "Diese Mail wurde bereits verschickt. Wirklich noch einmal senden?",
