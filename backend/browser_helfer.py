@@ -43,8 +43,8 @@ MAX_HTML = 4 * 1024 * 1024
 #: Wiederholungen entfernt sind (_astro_props_kuerzen) — danach gilt wieder MAX_HTML. Schutz gegen Zip-Bomben bleibt.
 MAX_ROH = 16 * 1024 * 1024
 
-#: Pruefung 05.10.2026 (Paket 1): was aus einer Browserseite gespeichert wird, gilt 24 h fuer ALLE Konten —
-#: deshalb feste Grenzen fuer jeden Wert (fahrzeug_bereinigen), bevor irgendetwas gespeichert wird.
+#: Was aus einer Browserseite gespeichert wird, gilt fuer DASSELBE Konto 24 h.
+#: Deshalb feste Grenzen fuer jeden Wert (fahrzeug_bereinigen), bevor irgendetwas gespeichert wird.
 MAX_BESCHREIBUNG_HTML = 200_000
 MAX_BESCHREIBUNG = 20_000
 MAX_TEXT = 500
