@@ -23,6 +23,12 @@ describe("Versand-Dialog: nie unbemerkt doppelt", () => {
     expect(SEND).toMatch(/code === "versand_unklar"\) \{\s*\/\/[^\n]*\n\s*toast\.warning\(d\.msg/);
   });
 
+  it("unklare eigene Belegkopie darf nicht wie fehlgeschlagener Kundenversand wirken", () => {
+    expect(SEND).toContain('data?.kopie === "unklar"');
+    expect(SEND).toContain("der Vertrag ist beim Kunden angekommen");
+    expect(SEND).toContain("NICHT");
+  });
+
   it("WhatsApp-Ersatzfenster ohne noopener (sonst gilt ein offener Tab als blockiert)", () => {
     expect(SEND).not.toMatch(/window\.open\([^)]*"noopener"/);
   });
