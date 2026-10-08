@@ -50,13 +50,17 @@ function abrufHelfer(msg, sendResponse) {
   abrufeLaufend++;
   const abbruch = new AbortController();
   const uhr = setTimeout(() => abbruch.abort(), ABRUF_MS);
+  // 2.7.3 (Pruefung 08.10.2026): die App zeigt diesen Text als Meldung — deutsch statt "HTTP 403"/"Failed to fetch"
   fetch(url, { credentials: "omit", headers: { Accept: "text/html,application/xhtml+xml" }, signal: abbruch.signal })
     .then((r) => {
-      if (!r.ok) throw new Error("HTTP " + r.status);
+      if (!r.ok) throw new Error(`Kleinanzeigen hat die Seite nicht geliefert (Fehler ${r.status}) – bitte gleich noch einmal.`);
       return r.text();
     })
     .then((html) => sendResponse({ ok: true, html }))
-    .catch((e) => sendResponse({ ok: false, error: String((e && e.message) || e) }))
+    .catch((e) => sendResponse({ ok: false, error: e && e.name === "AbortError"
+      ? "Kleinanzeigen antwortet gerade nicht – bitte gleich noch einmal."
+      : String((e && e.message) || "").startsWith("Kleinanzeigen") ? e.message
+        : "Kleinanzeigen ist gerade nicht erreichbar – Internetverbindung prüfen." }))
     .finally(() => { clearTimeout(uhr); abrufeLaufend--; });
 }
 
@@ -180,15 +184,37 @@ async function sitzung() {
 }
 
 let sperre = Promise.resolve();
+// 2.7.3 (Pruefung 08.10.2026): der Sitzungsspeicher hat 10 MB. Je Inserat liegen Antwort + Ampeln (6–15 KB) — wer
+// zwei Stunden lang alle paar Sekunden ein Auto anklickt, kam an die Grenze; dann scheiterte jedes Schreiben (auch das
+// Uebernehmen eines Vorgangs). Jetzt hoechstens SITZUNG_INSERATE Inserate (die neuesten), Tabs-Eintraege 2 h.
+const SITZUNG_INSERATE = 150;
+const SITZUNG_MS = 2 * 60 * 60 * 1000;
+
+function sitzungKuerzen(s, hoechstens) {
+  const jetzt = Date.now();
+  for (const [k, v] of Object.entries(s.inserate)) if (jetzt - (v.zeit || 0) > SITZUNG_MS) delete s.inserate[k];
+  for (const [k, v] of Object.entries(s.programmTabs)) if (jetzt - (v.zeit || 0) > SITZUNG_MS) delete s.programmTabs[k];
+  for (const [k, v] of Object.entries(s.vergleichsTabs)) if (v.zeit && jetzt - v.zeit > SITZUNG_MS) delete s.vergleichsTabs[k];
+  const alle = Object.entries(s.inserate);
+  if (alle.length > hoechstens) {
+    alle.sort((a, b) => (b[1].zeit || 0) - (a[1].zeit || 0));
+    for (const [k] of alle.slice(hoechstens)) delete s.inserate[k];
+  }
+}
+
 /** Lesen-Aendern-Schreiben streng nacheinander (gleichzeitige Tabs ueberschreiben sich sonst). */
 function sitzungAendern(fn) {
   const lauf = sperre.then(async () => {
     const s = await sitzung();
     const ergebnis = await fn(s);
-    const jetzt = Date.now();
-    for (const [k, v] of Object.entries(s.inserate)) if (jetzt - v.zeit > 2 * 60 * 60 * 1000) delete s.inserate[k];
-    for (const [k, v] of Object.entries(s.programmTabs)) if (jetzt - (v.zeit || 0) > 2 * 60 * 60 * 1000) delete s.programmTabs[k];
-    await chrome.storage.session.set(s);
+    sitzungKuerzen(s, SITZUNG_INSERATE);
+    try {
+      await chrome.storage.session.set(s);
+    } catch (e) {
+      // Speicher trotzdem voll: nur die neuesten behalten und noch einmal
+      sitzungKuerzen(s, 20);
+      await chrome.storage.session.set(s);
+    }
     return ergebnis;
   });
   sperre = lauf.catch(() => null);
@@ -226,7 +252,8 @@ async function vergleicheOeffnen(tab, kennung, antwort) {
   const neue = [];
   const abgehaengt = [];
   for (let i = 0; i < links.length; i++) {
-    const eintrag = { vergleich_id: antwort.vergleich_id, inseratTab: tab.id, kennung, portal: links[i].portal };
+    const eintrag = { vergleich_id: antwort.vergleich_id, inseratTab: tab.id, kennung, portal: links[i].portal,
+                      zeit: Date.now() };
     // 2.6.0 (Nr. 2): den Vergleichs-Tab dieses Inserat-Tabs fuer dasselbe Portal wiederverwenden ("naechstes
     // Fahrzeug" ohne Neuladen, erneuter Knopfdruck) — statt bei jedem Auto zwei neue Tabs
     const alt = Object.entries(s.vergleichsTabs).find(([, v]) => v.inseratTab === tab.id && v.portal === links[i].portal);
@@ -372,7 +399,10 @@ async function inseratBearbeiten(msg, tab) {
   if (!schluessel) {
     return { fehler: "nicht_verbunden", text: getrenntGrund || "Nicht verbunden – auf das AutoSchnell-Symbol klicken und den Code aus AutoSchnell eintippen." };
   }
-  const sperre = await sperreLesen();
+  // 2.7.3 (Pruefung 08.10.2026): "Erneut versuchen" fragt wirklich neu — vorher kam bis zu 5 min die gemerkte Sperre
+  // zurueck, auch wenn der Chef das Abo inzwischen verlaengert hatte oder das Netz wieder da war
+  if (msg.erneut) await chrome.storage.session.remove("sperre").catch(() => {});
+  const sperre = msg.erneut ? null : await sperreLesen();
   if (sperre && !(s.inserate[kennung] || {}).antwort) return { fehler: "server", status: sperre.status, text: sperre.text };
   const vorher = s.inserate[kennung];
   // Aus einer unserer Vergleichsseiten geoeffnet (neuer Tab) oder darin weitergeklickt (derselbe Tab)?
@@ -812,7 +842,8 @@ async function einstellungenSetzen(msg) {
 // /app/vorgang/<id>; content.js meldet das, bevor die App laedt. Der Helfer uebernimmt den Vorgang beim Server (genau
 // einmal), oeffnet die Vergleichsseiten als eigene Tabs (-> Ampel wie bei eigenen Vergleichen) und macht aus dem Tab
 // das Inserat (-> Box, Kaufvertrag). Uebernimmt er nicht (nicht verbunden, anderer Browser), oeffnet das Programm
-// nach 3 s selbst.
+// nach 5 s selbst. Seit 2.7.3 / Programm 1.5.9 (Pruefung 08.10.2026) nimmt das Programm den Vorgang dann in EINEM Zug
+// (…/selbst) — kommt der Helfer danach, bekommt er "zu_spaet" und schliesst nur die Vorgangsseite (nie doppelt).
 const VORGANG_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 function inseratAdresse(url) {
@@ -831,6 +862,12 @@ async function vorgangOeffnen(tab, id, alsAppFenster) {
   const r = await api(`/werkzeuge/${WERKZEUG}/vorgang/${id}/uebernehmen`, { methode: "POST" });
   if (r.status !== 200 || !r.daten) return { ok: false, status: r.status };
   const v = r.daten;
+  if (v.zu_spaet) {
+    // 2.7.3 (Pruefung 08.10.2026): das Programm hat nach ein paar Sekunden selbst geoeffnet (genau einer oeffnet) —
+    // die Vorgangsseite ist dann ueberzaehlig. Im App-Fenster bleibt sie (sie sagt, was passiert ist).
+    if (!alsAppFenster) await chrome.tabs.remove(tab.id).catch(() => {});
+    return { ok: false, zu_spaet: true };
+  }
   if (v.schon_uebernommen) return { ok: true, schon: true };            // Neuladen der Seite: nichts doppelt
   const inserat = inseratAdresse(v.inserat_url) && v.kennung ? v.inserat_url : "";
   const kennung = inserat ? String(v.kennung) : "vorgang:" + id;

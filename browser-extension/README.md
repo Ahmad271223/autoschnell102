@@ -65,6 +65,12 @@ Seit Version 2.0.0 (04.10.2026) macht die Erweiterung zwei Dinge:
    selbst (`vorgangOeffnen`) — die Vergleichs-Tabs gehören dann zur Erweiterung (Ampel ohne `/programm-suche`), das
    Inserat geht mit `vorgang_id` an den Server. Im App-Fenster (installierte AutoSchnell-App) öffnet sie alles in
    einem normalen Browserfenster.
+   Seit 2.7.3 (Prüfung 08.10.): **genau einer öffnet** — übernimmt die Erweiterung nicht binnen 5 s, nimmt das
+   Programm (ab 1.5.9) den Vorgang beim Server in einem Zug selbst; kommt die Erweiterung danach, bekommt sie
+   `zu_spaet` und schließt nur die Vorgangsseite. Das Programm öffnet die Vorgangsseite im Browser der Erweiterung
+   (Chrome/Edge). Außerdem: „Erneut versuchen“ fragt wirklich neu (vergisst eine gemerkte Abo-/Offline-Sperre),
+   der Sitzungsspeicher behält höchstens 150 Inserate (vorher konnte er nach Stunden voll laufen), Fehler beim
+   Kleinanzeigen-Abruf kommen deutsch in der App an.
    **Zusammen mit dem Windows-Programm (seit 2.3.0, dasselbe AutoSchnell-Konto):**
    - Hat das Programm das Auto in den letzten 30 Minuten verglichen (`programm_verglichen` in der Antwort von
      `…/inserat`), öffnet der Helfer **keine** Vergleiche von selbst — nur die Ampel per Direktabruf.

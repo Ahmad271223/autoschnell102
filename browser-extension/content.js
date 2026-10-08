@@ -59,7 +59,7 @@ try {
 
 // 4. 2.7.2 (Wunsch Ahmad 08.10.2026, Vorgangsnummer): das Windows-Programm oeffnet nur /app/vorgang/<id>. Der Helfer
 //    uebernimmt den Vorgang sofort (document_start, bevor die App laedt) und oeffnet Vergleiche + Inserat selbst.
-//    Ohne Helfer (oder nicht verbunden) zeigt die App die Seite als Rueckfall, und das Programm oeffnet nach 3 s selbst.
+//    Ohne Helfer (oder nicht verbunden) zeigt die App die Seite als Rueckfall, und das Programm oeffnet nach 5 s selbst.
 const VORGANG_SEITE = /^\/app\/vorgang\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/?$/;
 const vorgangTreffer = VORGANG_SEITE.exec(location.pathname);
 if (vorgangTreffer && window.top === window && helferDa()) {
@@ -70,7 +70,7 @@ if (vorgangTreffer && window.top === window && helferDa()) {
       window.postMessage({ __autoschnell: true, type: "VORGANG_ERGEBNIS", id: vorgangTreffer[1],
                            ok: !!(antwort && antwort.ok) }, "*");
     });
-  } catch (e) { /* Erweiterung neu geladen: das Programm oeffnet nach 3 s selbst */ }
+  } catch (e) { /* Erweiterung neu geladen: das Programm oeffnet nach 5 s selbst */ }
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {

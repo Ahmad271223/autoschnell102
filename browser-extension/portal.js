@@ -285,7 +285,7 @@
           const knoepfe = el("div", "knoepfe");
           const nochmal = el("button", "knopf neben", "Erneut versuchen");
           nochmal.addEventListener("click", (ev) => {
-            if (ev.isTrusted && z.kennung === aktuelleKennung) inserat(z.kennung, true);
+            if (ev.isTrusted && z.kennung === aktuelleKennung) inserat(z.kennung, true, true);
           });
           knoepfe.appendChild(nochmal);
           inhalt.appendChild(knoepfe);
@@ -478,18 +478,20 @@
     return { sichtbar: document.visibilityState === "visible", navTyp, verworfen: !!document.wasDiscarded };
   }
 
-  async function inserat(kennung, ersterAufruf) {
+  async function inserat(kennung, ersterAufruf, erneut = false) {
     zustand = { kennung, phase: "laden" };
     zeichnen();
     // Tempo (2.4.0): erst fragen, ob der Helfer das Inserat gerade schon gelesen hat (Neuladen, zurueck, zweiter
     // Tab) — dann steht die Box sofort, ohne die Seite einzupacken oder neu zu holen.
     const wie = ansicht(ersterAufruf);
-    let antwort = await A.senden({ typ: "inserat", kennung, url: location.href, ansicht: wie });
+    // 2.7.3: "erneut" = Knopf "Erneut versuchen" — der Hintergrund vergisst dann eine gemerkte Sperre (Abo, offline)
+    let antwort = await A.senden({ typ: "inserat", kennung, url: location.href, ansicht: wie, erneut });
     if (!antwort || antwort.bekannt === false) {
       // Erster Aufruf: die geladene Seite enthaelt das Inserat. Nach einem Wechsel ohne Neuladen: frisch holen.
       let html = ersterAufruf ? document.documentElement.outerHTML : await frischHolen(location.href);
       if (!html) html = document.documentElement.outerHTML;
-      antwort = await A.senden({ typ: "inserat", kennung, url: location.href, seite: await A.packen(html), ansicht: wie });
+      antwort = await A.senden({ typ: "inserat", kennung, url: location.href, seite: await A.packen(html), ansicht: wie,
+                                 erneut });
       if (antwort && antwort.fehler === "seite" && ersterAufruf) {
         const frisch = await frischHolen(location.href);
         if (frisch && kennung === aktuelleKennung) {
@@ -577,7 +579,7 @@
                                  lageStart: Date.now() });
       }
       zustand.meldung = r && r.geoeffnet ? ""
-        : r && r.kein_portal ? "Kein Portal gewählt – im Fenster am AutoSchnell-Symbol mobile.de oder AutoScout24 einschalten."
+        : r && r.kein_portal ? "Kein Portal gewählt – in AutoSchnell auf der Seite „Vergleich“ mobile.de oder AutoScout24 einschalten."
         : r && !r.fehler ? "Für dieses Auto gibt es keinen Vergleich (Marke oder Modell unbekannt)."
           : (r && r.text) || "Die Vergleiche konnten nicht geöffnet werden – Seite neu laden und noch einmal drücken.";
       zeichnen();
