@@ -2544,9 +2544,9 @@ def _frueherer_mailversand(eintraege: list, empfaenger: str, version: int) -> Op
 
 VERSAND_UNKLAR_TEXT = (
     "Der Mail-Dienst hat nicht eindeutig geantwortet — die E-Mail ist vielleicht schon beim "
-    "Empfänger angekommen. Ein erneuter Klick auf „Senden“ (gleiche Adresse, gleicher Text) ist "
-    "sicher: AutoSchnell verschickt sie dann nicht doppelt. Klappt es wieder nicht, bitte beim "
-    "Verkäufer nachfragen oder den Vertrag per WhatsApp schicken.")
+    "Empfänger angekommen. Bitte erneut auf „Senden“ klicken: Mit Resend prüft AutoSchnell "
+    "denselben Idempotency-Key; bei SMTP fragt AutoSchnell vor einem bewussten Neuversand "
+    "noch einmal ausdrücklich nach. So wird niemals still doppelt gesendet.")
 # Resend vergisst einen Idempotency-Key nach 24 Stunden — danach ist die
 # Wiederaufnahme eines unklaren Versands nicht mehr vor Doppelversand geschuetzt.
 UNKLAR_WIEDERAUFNAHME_MAX_S = 23 * 3600
@@ -2881,8 +2881,30 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                 await _haengenden_versand_abloesen(contract_id, bereich, haengend)
                 frueherer_versand_abgeloest = True
             elif haengend:
-                body.idempotency_key = haengend["idempotency_key"]
-                vorhanden = haengend
+                # Resend kann denselben Provider-Idempotency-Key sicher
+                # wiederaufnehmen. SMTP kann das NICHT: bei einem unklaren
+                # Ausgang koennte die erste Mail bereits angekommen sein.
+                # SMTP-only verlangt deshalb eine ausdrueckliche Bestaetigung;
+                # erst dann wird der alte Versuch als abgeloest markiert und
+                # mit dem NEUEN Schluessel dieses Klicks gesendet.
+                import email_service as _email_service
+                smtp_only = not _email_service.resend_aktiv()
+                if body.channel == "email" and smtp_only:
+                    if not body.erneut:
+                        wann = _zeit_de(haengend.get("sent_at"))
+                        raise HTTPException(409, {
+                            "code": "frueherer_versand_unklar",
+                            "msg": (f"Ein früherer SMTP-Versand an {body.recipient}"
+                                    f"{(' vom ' + wann) if wann else ''} hatte kein eindeutiges "
+                                    "Ergebnis — die E-Mail ist vielleicht schon angekommen. "
+                                    "Trotzdem bewusst noch einmal senden?"),
+                        })
+                    await _haengenden_versand_abloesen(contract_id, bereich, haengend)
+                    frueherer_versand_abgeloest = True
+                    # Der neue body.idempotency_key bleibt bestehen.
+                else:
+                    body.idempotency_key = haengend["idempotency_key"]
+                    vorhanden = haengend
         if vorhanden and vorhanden.get("anfrage_hash") and vorhanden["anfrage_hash"] != anfrage_hash:
             # Runde 16: gleicher Schluessel, anderer Inhalt (Empfaenger/Text nach
             # einem unklaren Versuch geaendert) -> nie wiederaufnehmen.
