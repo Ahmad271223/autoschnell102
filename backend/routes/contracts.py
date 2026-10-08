@@ -2546,7 +2546,7 @@ VERSAND_UNKLAR_TEXT = (
     "Der Mail-Dienst hat nicht eindeutig geantwortet — die E-Mail ist vielleicht schon beim "
     "Empfänger angekommen. Bitte erneut auf „Senden“ klicken: Mit Resend prüft AutoSchnell "
     "denselben Idempotency-Key; bei SMTP fragt AutoSchnell vor einem bewussten Neuversand "
-    "noch einmal ausdrücklich nach. So wird niemals still doppelt gesendet.")
+    "noch einmal ausdrücklich nach, damit nicht doppelt gesendet wird.")
 # Resend vergisst einen Idempotency-Key nach 24 Stunden — danach ist die
 # Wiederaufnahme eines unklaren Versands nicht mehr vor Doppelversand geschuetzt.
 UNKLAR_WIEDERAUFNAHME_MAX_S = 23 * 3600
