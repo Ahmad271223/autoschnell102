@@ -96,7 +96,12 @@ async function sperreLesen() {
 }
 
 async function sperreMerken(status, text) {
-  const dauer = SPERRE_MS[status];
+  // Ein Normal-Abo darf Pro nicht benutzen. Diese 403 aber nur kurz merken:
+  // wird das Konto im Admin auf Pro hochgestuft, soll ein bereits installierter
+  // Helfer praktisch sofort wieder arbeiten und nicht 5 Minuten am alten
+  // Sperrstand haengen. Andere 403 bleiben wie bisher 5 Minuten gecacht.
+  const proNur = status === 403 && /AutoSchnell Pro/i.test(String(text || ""));
+  const dauer = proNur ? 15000 : SPERRE_MS[status];
   try {
     if (dauer) await chrome.storage.session.set({ sperre: { status, text, bis: Date.now() + dauer } });
     else if (status === 200) await chrome.storage.session.remove("sperre");
