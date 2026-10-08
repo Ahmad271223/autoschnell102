@@ -513,7 +513,11 @@ export default function Vergleich() {
     // Browser-Helfer (04.10.2026): "&vertrag=1" = Kaufvertrag gleich öffnen (vor dem nav lesen — der leert die Adresse)
     const vertrag = suche.get("vertrag") === "1";
     // AutoPointer- und Browser-Helfer-ACK erst NACH erfolgreichem Laden.
-    const start = startKennung(window.location.href);
+    // Beim Protocol-Start des Browser-Helfers steckt der Token IN
+    // web+autoschnell:... und wurde von protokollSuche als "start"
+    // herausgezogen; beim AutoPointer steht er direkt in der URL.
+    const start = startKennung(window.location.href)
+      || startKennung(`${window.location.origin}/app/vergleich?start=${encodeURIComponent(suche.get("start") || "")}`);
     const helferReq = suche.get("helfer_req") || null;
     nav("/app/vergleich", { replace: true });
     const link = inseratsLinkAusText(param);
