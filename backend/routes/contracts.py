@@ -3475,6 +3475,10 @@ class FolgeMailIn(BaseModel):
     idempotency_key: Optional[str] = Field(
         default=None, min_length=8, max_length=80,
         pattern=r"^[A-Za-z0-9_-]+$")
+    # Ein frueherer Versand mit unbekanntem Ausgang darf niemals still
+    # ersetzt werden. Erst die ausdrueckliche Bestaetigung im Dialog erlaubt
+    # eine neue Mail mit neuem Schluessel.
+    erneut: bool = False
 
 
 #: Per E-Mail verschickbar. Die WhatsApp-Fassung wird kopiert, eine
@@ -3521,6 +3525,11 @@ async def _folge_mail_vorhanden(contract_id: str, bereich: dict,
     if zustellung != "laeuft":
         return {"zustellung": zustellung}
     if _zustellung_haengt(eintrag):
+        import email_service
+        if not email_service.resend_aktiv():
+            # SMTP hat keinen providerseitigen Idempotency-Key. Der erste
+            # Versuch koennte angekommen sein; niemals automatisch erneut.
+            return {"zustellung": "unklar"}
         res = await db.generated_pdfs.update_one(
             {"id": contract_id, **bereich,
              "send_status": {"$elemMatch": {
@@ -3616,6 +3625,31 @@ async def folge_mail_senden(contract_id: str, body: FolgeMailIn,
         contract_id, str(c.get("version") or 1), art, empfaenger.lower(), betreff, text]).encode("utf-8")).hexdigest()[:24]
     schluessel = (body.idempotency_key or "").strip() or f"auto-{inhalt_hash}"
     mail_zaehler: Optional[str] = None
+
+    # P1 08.10.2026: Auch bei einem NEUEN Schluessel darf ein frueherer
+    # unbekannter Versand derselben Folge-Mail nicht still uebergangen
+    # werden. Das ist besonders bei SMTP wichtig, gilt aber auch bei
+    # geaendertem Inhalt unter Resend: die erste Nachricht koennte angekommen
+    # sein. Nur ein ausdrueckliches "trotzdem senden" loest den alten Versuch
+    # ab.
+    alter_unklar = next((
+        e for e in (c.get("send_status") or [])
+        if isinstance(e, dict)
+        and e.get("channel") == "email"
+        and e.get("art") == art
+        and (e.get("recipient") or "").strip().lower() == empfaenger.lower()
+        and e.get("zustellung") in ("laeuft", "unklar")
+        and _zustellung_haengt(e)
+    ), None)
+    if alter_unklar and alter_unklar.get("idempotency_key") != schluessel:
+        if not body.erneut:
+            raise HTTPException(409, {
+                "code": "frueherer_versand_unklar",
+                "msg": ("Ein früherer Versand dieser Mail hatte kein eindeutiges Ergebnis — "
+                        "sie ist vielleicht schon angekommen. Trotzdem bewusst noch einmal senden?"),
+            })
+        await _haengenden_versand_abloesen(contract_id, bereich, alter_unklar)
+
     if schluessel:
         # Rollenpruefung 22.09.2026 (RP-434): Ein frueher gescheiterter
         # Versuch mit DIESEM Schluessel (Altbestand: zustellung
@@ -3651,6 +3685,13 @@ async def folge_mail_senden(contract_id: str, body: FolgeMailIn,
             # "laeuft" heisst "laeuft noch", nicht "verschickt".
             antwort = await _folge_mail_vorhanden(contract_id, bereich, schluessel)
             if antwort is not None:
+                if antwort.get("zustellung") == "unklar":
+                    raise HTTPException(409, {
+                        "code": "frueherer_versand_unklar",
+                        "msg": ("Der frühere SMTP-Versand hat kein eindeutiges Ergebnis — "
+                                "die Mail ist vielleicht schon angekommen. Trotzdem bewusst "
+                                "noch einmal senden?"),
+                    })
                 return {"status": "ok", "bereits_gesendet": True, "art": art, **antwort}
             # None: ein abgebrochener Versuch (Prozess starb) wurde gerade neu
             # beansprucht — derselbe Anbieter-Schluessel unten verhindert eine
@@ -3678,9 +3719,29 @@ async def folge_mail_senden(contract_id: str, body: FolgeMailIn,
                 html=None, reply_to=antwort_adresse,
                 absender_name=firma.get("company_name") or "",
                 idempotency_key=f"folge-{contract_id}-{schluessel}-{inhalt_hash[:12]}")
-        except Exception:  # noqa: BLE001 — Anbieterfehler = nicht versendet
-            log.exception("Folge-Mail %s zu %s fehlgeschlagen", art, contract_id)
-            ok, beleg = False, ""
+        except Exception:  # noqa: BLE001
+            # Ein Transportabbruch beweist NICHT, dass nichts zugestellt
+            # wurde. Reservierung als "unklar" behalten, nie blind erneut.
+            log.exception("Folge-Mail %s zu %s: Provider-Ausgang unklar", art, contract_id)
+            if schluessel:
+                await db.generated_pdfs.update_one(
+                    {"id": contract_id, **bereich,
+                     "send_status": {"$elemMatch": {
+                         "idempotency_key": schluessel, "zustellung": "laeuft"}}},
+                    {"$set": {"send_status.$.zustellung": "unklar",
+                              "send_status.$.unklar_am": now_iso()}})
+            raise HTTPException(502, {"code": "versand_unklar",
+                                      "msg": VERSAND_UNKLAR_TEXT})
+    if not ok and beleg == email_service.BELEG_UNKLAR:
+        if schluessel:
+            await db.generated_pdfs.update_one(
+                {"id": contract_id, **bereich,
+                 "send_status": {"$elemMatch": {
+                     "idempotency_key": schluessel, "zustellung": "laeuft"}}},
+                {"$set": {"send_status.$.zustellung": "unklar",
+                          "send_status.$.unklar_am": now_iso()}})
+        raise HTTPException(502, {"code": "versand_unklar",
+                                  "msg": VERSAND_UNKLAR_TEXT})
     if not ok:
         if schluessel:
             # Rollenpruefung 22.09.2026 (RP-434): Reservierung wieder
