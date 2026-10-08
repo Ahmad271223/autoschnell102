@@ -793,7 +793,8 @@ async def _abruf_zaehlen(contract_id: str, token: str, aktuell: bool) -> None:
              "$set": {"freigabe_alt.$.zuletzt_abgerufen": now_iso()}})
 
 
-async def _freigabe_link(contract_id: str, bereich: dict, user: dict) -> tuple[str, str]:
+async def _freigabe_link(contract_id: str, bereich: dict, user: dict,
+                          expected_version: Optional[int] = None) -> tuple[str, str]:
     """Liefert (Link, gueltig_bis) fuer die AKTUELLE Vertragsfassung.
 
     Runde 18: Die Freigabe wird ATOMAR gesetzt — zwei gleichzeitige Versande
@@ -814,6 +815,10 @@ async def _freigabe_link(contract_id: str, bereich: dict, user: dict) -> tuple[s
         if c is None:
             raise HTTPException(404, "Vertrag nicht gefunden")
         version = int(c.get("version") or 1)
+        if expected_version is not None and version != int(expected_version):
+            raise HTTPException(
+                409,
+                "Der Vertrag wurde gerade neu erstellt — bitte die Seite neu laden und erneut senden.")
         f = c.get("freigabe") or {}
         if _freigabe_gueltig(f, version):
             return f"{_oeffentliche_basis()}/api/public/vertrag/{f['token']}", f["laeuft_ab"]
@@ -3105,7 +3110,8 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                 raise HTTPException(422, "WhatsApp-Nummer ungültig — bitte mit Vorwahl "
                                          "eingeben (7 bis 15 Ziffern, z. B. 0170 1234567).")
             try:
-                link, gueltig_bis = await _freigabe_link(contract_id, bereich, user)
+                link, gueltig_bis = await _freigabe_link(
+                    contract_id, bereich, user, expected_version=int(c.get("version") or 1))
             except HTTPException:
                 await _reservierung_zurueck()
                 raise
