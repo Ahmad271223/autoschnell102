@@ -50,6 +50,19 @@ describe("Browser-Helfer: App per Link-Typ web+autoschnell: (04.10.2026)", () =>
     expect(protokollSuche(`?url=${encodeURIComponent(KA)}`).get("url")).toBe(KA);
     expect(protokollSuche(`?protokoll=${encodeURIComponent("javascript:alert(1)")}`).toString()).toBe("");
   });
+  it("Protocol-Link uebernimmt gueltigen Starttoken fuer die spaete Fahrzeug-Bestaetigung", () => {
+    const start = "0123456789abcdef0123456789abcdef";
+    const prot = `web+autoschnell:vertrag?url=${encodeURIComponent(KA)}&start=${start}`;
+    const s = protokollSuche(`?protokoll=${encodeURIComponent(prot)}`);
+    expect(s.get("url")).toBe(KA);
+    expect(s.get("vertrag")).toBe("1");
+    expect(s.get("start")).toBe(start);
+
+    const kaputt = protokollSuche(
+      `?protokoll=${encodeURIComponent("web+autoschnell:vertrag?url=" + encodeURIComponent(KA) + "&start=../admin")}`);
+    expect(kaputt.get("start")).toBeNull();
+  });
+
   it("App schon offen (launchQueue): Ziel aus dem Link-Typ", () => {
     expect(zielAusAppStart(`${O}/app/vergleich?protokoll=${encodeURIComponent(PROT)}`, { origin: O, startAdresse: "" }))
       .toBe(`/app/vergleich?url=${encodeURIComponent(KA)}&vertrag=1`);
