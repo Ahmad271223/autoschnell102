@@ -382,12 +382,15 @@
               return;
             }
             if (!A.helferDa()) { veraltet(); return; }
-            z.meldung = r2 && r2.weg === "app_neu_laden"
-              ? "Die AutoSchnell-App ist offen, kennt die aktualisierte Erweiterung aber noch nicht – dort einmal neu laden "
-                + "(F5), dann hier noch einmal „Kaufvertrag“ drücken."
-              : !r2 || r2.fehler
-                ? (r2 && r2.text) || "AutoSchnell konnte nicht geöffnet werden – Seite neu laden und noch einmal drücken."
-                : "";
+            z.meldung = r2 && r2.weg === "app_wartet"
+              ? "AutoSchnell wartet auf deine Bestätigung, weil dort noch ungespeicherte Arbeit offen ist. "
+                + "In der AutoSchnell-App auf „Trotzdem öffnen“ klicken."
+              : r2 && r2.weg === "app_neu_laden"
+                ? "Die AutoSchnell-App ist offen, kennt die aktualisierte Erweiterung aber noch nicht – dort einmal neu laden "
+                  + "(F5), dann hier noch einmal „Kaufvertrag“ drücken."
+                : !r2 || r2.fehler
+                  ? (r2 && r2.text) || "AutoSchnell konnte nicht geöffnet werden – Seite neu laden und noch einmal drücken."
+                  : "";
           } catch (e) {
             z.meldung = "AutoSchnell konnte nicht geöffnet werden – bitte noch einmal versuchen.";
           } finally {
