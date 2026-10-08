@@ -79,6 +79,20 @@ describe("Betreiber-Liste: Blöcke, Seiten, Top 20", () => {
     expect(el("admin-pv-top").textContent).toContain("Vergleiche 1.001–2.000");
   });
 
+  it("Browser-Erweiterung umschalten: fragt mit werkzeug, beginnt bei Block 1 (Prüfung 08.10.2026)", async () => {
+    await act(async () => { wurzel.render(createElement(AdminProgrammVergleiche)); });
+    await warten();
+    await act(async () => { el("admin-pv-seite-3").click(); });
+    await warten();
+    await act(async () => { el("admin-pv-werkzeug-browser-helfer").click(); });
+    await warten();
+    expect(listenAufrufe().at(-1)[1].params).toEqual({ block: 1, seite: 1, werkzeug: "browser-helfer" });
+    expect(behaelter.textContent).toContain("Verbundene Browser");
+    await act(async () => { el("admin-pv-werkzeug-programm").click(); });
+    await warten();
+    expect(listenAufrufe().at(-1)[1].params).toEqual({ block: 1, seite: 1 });
+  });
+
   it("Suche geht nach kurzer Pause an den Server", async () => {
     await act(async () => { wurzel.render(createElement(AdminProgrammVergleiche)); });
     await warten();

@@ -13,9 +13,13 @@ import { VergleichsTabelle, VerbindungsListe, zeit } from "@/components/Programm
  * Seiten zu 100, und je Block die 20 meistverglichenen Modelle. Die Suche läuft auf dem Server im gewählten Block.
  */
 const zahl = (n) => Number(n || 0).toLocaleString("de-DE");
+// Pruefung 08.10.2026: auch die Browser-Erweiterung zeigen und trennen koennen (vorher nur das Windows-Programm).
+// Das Programm ist der Standard des Servers — sein Kennname steht bewusst nirgends in der Oberflaeche.
+const WERKZEUGE = [{ id: "", text: "Windows-Programm" }, { id: "browser-helfer", text: "Browser-Erweiterung" }];
 
 export default function AdminProgrammVergleiche() {
   const [daten, setDaten] = useState(null);
+  const [werkzeug, setWerkzeug] = useState("");
   const [downloads, setDownloads] = useState(null);
   const [block, setBlock] = useState(1);
   const [seite, setSeite] = useState(1);
@@ -34,7 +38,8 @@ export default function AdminProgrammVergleiche() {
     const nr = ++anfrageRef.current;
     setLaedt(true);
     try {
-      const { data } = await api.get("/admin/werkzeug-vergleiche", { params: { block, seite, ...(q ? { q } : {}) } });
+      const { data } = await api.get("/admin/werkzeug-vergleiche",
+                                     { params: { block, seite, ...(q ? { q } : {}), ...(werkzeug ? { werkzeug } : {}) } });
       if (nr === anfrageRef.current) setDaten(data);       // nur die Antwort auf die letzte Anfrage zeigen
     } catch (e) {
       if (nr === anfrageRef.current) {
@@ -44,7 +49,7 @@ export default function AdminProgrammVergleiche() {
     } finally {
       if (nr === anfrageRef.current) setLaedt(false);
     }
-  }, [block, seite, q]);
+  }, [block, seite, q, werkzeug]);
   useEffect(() => { laden(); }, [laden]);
 
   // Wunsch Ahmad 06.10.2026: wer hat wann welches Programm heruntergeladen
@@ -56,8 +61,9 @@ export default function AdminProgrammVergleiche() {
 
   const trennen = async (v) => {
     try {
-      await api.delete(`/admin/werkzeug-verbindungen/${encodeURIComponent(v.user_id)}`);
-      toast.success("PC getrennt.");
+      await api.delete(`/admin/werkzeug-verbindungen/${encodeURIComponent(v.user_id)}`,
+                       werkzeug ? { params: { werkzeug } } : undefined);
+      toast.success(werkzeug ? "Browser getrennt." : "PC getrennt.");
       laden();
     } catch (e) {
       toast.error(errMsg(e, "Trennen hat nicht geklappt"));
@@ -77,8 +83,18 @@ export default function AdminProgrammVergleiche() {
         title={`Programm-Vergleiche${daten.name ? ` · ${daten.name}` : ""}`}
         subtitle={`${zahl(daten.gesamt)} ${daten.gesamt === 1 ? "Vergleich" : "Vergleiche"} · freigegeben für Kd.-Nr. ${(daten.freigegeben_fuer || []).join(", ") || "niemand"}`}
       />
+      <div className="mb-4 flex flex-wrap gap-2" data-testid="admin-pv-werkzeug">
+        {WERKZEUGE.map((w) => (
+          <button key={w.id || "programm"} type="button" aria-pressed={w.id === werkzeug}
+                  data-testid={`admin-pv-werkzeug-${w.id || "programm"}`}
+                  onClick={() => { setWerkzeug(w.id); setBlock(1); setSeite(1); }}
+                  className={`apple-btn ${w.id === werkzeug ? "apple-btn-primary" : "apple-btn-secondary"} !rounded-full !px-3 !py-1 text-xs`}>
+            {w.text}
+          </button>
+        ))}
+      </div>
       <Card className="mb-4">
-        <div className="text-sm font-semibold mb-2">Verbundene PCs</div>
+        <div className="text-sm font-semibold mb-2">{werkzeug ? "Verbundene Browser" : "Verbundene PCs"}</div>
         <VerbindungsListe verbindungen={daten.verbindungen} onTrennen={trennen} mitFirma />
       </Card>
       <Card className="mb-4">
