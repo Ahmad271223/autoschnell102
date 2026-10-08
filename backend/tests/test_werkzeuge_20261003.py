@@ -347,6 +347,28 @@ def test_30b_normal_abo_sieht_und_nutzt_keine_pro_werkzeuge(welt):
     assert any(x["id"] == WID for x in _liste(welt["sucher"]))
 
 
+def test_30c_normal_abo_sperrt_auch_meine_und_chef_uebersicht(welt):
+    _abo(welt, True, tier="normal")
+    assert requests.get(f"{API}/werkzeuge/{WID}/meine",
+                        headers=welt["sucher"], timeout=30).status_code == 404
+    # Chef hat in der Fixture ein eigenes Pro-Abo; Normal hier betrifft den
+    # Sucher. Die Chef-Uebersicht bleibt also erreichbar. Danach wird auch
+    # der Chef selbst auf Normal gesetzt und muss die Pro-Uebersicht verlieren.
+    db = welt["db"]
+    chef_id = welt["firma"]["user_id"]
+    chef_sub = db.subscriptions.find_one(
+        {"subject_user_id": chef_id, "status": {"$ne": "ersetzt"}},
+        sort=[("created_at", -1)])
+    assert chef_sub
+    db.subscriptions.update_one({"_id": chef_sub["_id"]}, {"$set": {"tier": "normal"}})
+    try:
+        assert requests.get(f"{API}/werkzeuge/{WID}/firma",
+                            headers=welt["chef"], timeout=30).status_code == 404
+    finally:
+        db.subscriptions.update_one({"_id": chef_sub["_id"]}, {"$set": {"tier": "pro"}})
+        _abo(welt, True, tier="pro")
+
+
 def test_31_verbinden_status_vergleich(welt):
     _abo(welt, True)
     code, prog, antwort = _verbinden(welt, "PC-A")
@@ -436,7 +458,10 @@ def test_37_chef_und_admin_sehen_wer_was_verglichen_hat(welt):
     a = requests.get(f"{API}/admin/werkzeug-vergleiche", params={"dealer_id": welt["firma"]["dealer_id"]},
                      headers=konten.super_kopf(), timeout=30)
     assert a.status_code == 200, a.text
-    assert a.json()["vergleiche"][0]["kunden_nr"] == 10002 and a.json()["name"] == "AutoSchnell Vergleich"
+    assert a.json()["vergleiche"][0]["kunden_nr"] == 10002
+    assert a.json()["name"] == "AutoSchnell Vergleich"
+    assert a.json()["produktstufe"] == "pro"
+    assert "freigegeben_fuer" not in a.json()
     assert requests.get(f"{API}/admin/werkzeug-vergleiche", headers=welt["chef"], timeout=30).status_code == 403
 
 
