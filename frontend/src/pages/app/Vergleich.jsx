@@ -328,8 +328,8 @@ export default function Vergleich() {
     const roh = (direktUrl ?? url).trim();
     // RP-409: steht im Feld ein geteilter Text, zählt nur der Link darin.
     const ziel = inseratsLinkAusText(roh) || roh;
-    if (!ziel) return;
-    if (loading || laeuftRef.current) return;   // Mehrfachklicks abfangen
+    if (!ziel) return false;
+    if (loading || laeuftRef.current) return false;   // Mehrfachklicks abfangen
     laeuftRef.current = true;          // Runde 24: sofort, nicht erst nach dem Render
     const steuerung = new AbortController();
     abbruchRef.current = steuerung;
@@ -459,10 +459,14 @@ export default function Vergleich() {
           if (aktuell()) setCounter(cnt);
         }
       } catch (_) { /* ignore */ }
+      // Fuer App-/AutoPointer-Handoffs bedeutet Erfolg erst: das konkrete
+      // Fahrzeug ist serverseitig geladen und als aktuelles Ergebnis gesetzt.
+      // Blosses Navigieren auf /vergleich reicht NICHT als Uebernahme.
+      return true;
     } catch (err) {
       // RP-254: Ein abgebrochener oder überholter Lauf fasst nichts mehr an —
       // weder Hinweise noch Meldungen (die Abbruch-Meldung kam beim Klick).
-      if (istAbbruch(err) || !aktuell()) return;
+      if (istAbbruch(err) || !aktuell()) return false;
       // Runde 24: das alte Ergebnis ist schon weg — seine Hinweise auch.
       hinweisIdsRef.current = hinweiseZeigen(toast, [], hinweisIdsRef.current);
       if (err?.code === "timeout" || err?.code === "ECONNABORTED" || err?.code === "ETIMEDOUT") {
@@ -477,6 +481,7 @@ export default function Vergleich() {
       } else {
         toast.error(errMsg(err, "Vergleich fehlgeschlagen"));
       }
+      return false;
     } finally {
       // RP-254: nur den EIGENEN Lauf aufräumen. Nach "X" (abbruchRef = null)
       // oder einem neuen Lauf gehört der Zustand schon jemand anderem.
@@ -507,7 +512,6 @@ export default function Vergleich() {
     const vertrag = suche.get("vertrag") === "1";
     // Pruefbericht 03.10.2026 (Nr. 12): dem Programm melden, dass die App das Auto uebernommen hat
     const start = startKennung(window.location.href);
-    if (start) startMelden(api, start);
     nav("/app/vergleich", { replace: true });
     const link = inseratsLinkAusText(param);
     if (!link) {
@@ -515,7 +519,8 @@ export default function Vergleich() {
       return;
     }
     setUrl(link);
-    startCompare(null, link, { ohneFilter: true, vertragOeffnen: vertrag });
+    startCompare(null, link, { ohneFilter: true, vertragOeffnen: vertrag })
+      .then((ok) => { if (ok && start) startMelden(api, start); });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -531,7 +536,11 @@ export default function Vergleich() {
       if (!link) return;
       if (laeuftRef.current) abbrechenRef.current?.({ still: true });
       nav("/app/vergleich", { replace: true });
-      setNachLink({ link, vertrag: typeof d === "object" && d?.vertrag === true });
+      setNachLink({
+        link,
+        vertrag: typeof d === "object" && d?.vertrag === true,
+        start: typeof d === "object" ? d?.start || null : null,
+      });
     };
     window.addEventListener(INSERAT_EREIGNIS, uebernehmen);
     return () => window.removeEventListener(INSERAT_EREIGNIS, uebernehmen);
@@ -541,7 +550,8 @@ export default function Vergleich() {
     if (!nachLink || loading || laeuftRef.current) return;
     setNachLink(null);
     setUrl(nachLink.link);
-    startCompare(null, nachLink.link, { ohneFilter: true, vertragOeffnen: nachLink.vertrag });
+    startCompare(null, nachLink.link, { ohneFilter: true, vertragOeffnen: nachLink.vertrag })
+      .then((ok) => { if (ok && nachLink.start) startMelden(api, nachLink.start); });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nachLink, loading]);
 
