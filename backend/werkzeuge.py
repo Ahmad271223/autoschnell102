@@ -264,6 +264,31 @@ def version_mindestens(version: Optional[str], mindest: str) -> bool:
         return False
 
 
+# ---------------------------------------------------------------- Betreiber-Liste: Top-Modelle (08.10.2026)
+def _modell_schluessel(marke, modell) -> str:
+    """"VW up!" und "Vw Up" zaehlen zusammen: klein, ohne Satzzeichen, Leerraum einfach."""
+    text = f"{marke or ''} {modell or ''}".lower()
+    return re.sub(r"\s+", " ", re.sub(r"[^0-9a-zäöüß]+", " ", text)).strip()
+
+
+def top_modelle(fahrzeuge: list, anzahl: int = 20) -> list:
+    """Die meistverglichenen Modelle: [{"modell": "VW Golf", "anzahl": 42}] — Anzeige-Name = haeufigste Schreibweise."""
+    zaehler: dict = {}
+    for f in fahrzeuge:
+        f = f or {}
+        schluessel = _modell_schluessel(f.get("marke"), f.get("modell"))
+        if not schluessel:
+            continue
+        name = " ".join(x for x in (str(f.get("marke") or "").strip(), str(f.get("modell") or "").strip()) if x)
+        eintrag = zaehler.setdefault(schluessel, {"anzahl": 0, "namen": {}})
+        eintrag["anzahl"] += 1
+        eintrag["namen"][name] = eintrag["namen"].get(name, 0) + 1
+    liste = [{"modell": max(e["namen"].items(), key=lambda x: (x[1], x[0]))[0], "anzahl": e["anzahl"]}
+             for e in zaehler.values()]
+    liste.sort(key=lambda x: (-x["anzahl"], x["modell"].lower()))
+    return liste[:anzahl]
+
+
 # ---------------------------------------------------------------- Portalwahl (08.10.2026)
 # Wunsch Ahmad 08.10.2026 (externe Pruefung): die Wahl "mobile.de / AutoScout24 / beide" gab es dreimal — in der App
 # (Browser-Speicher), im Windows-Programm und in der Erweiterung. Jetzt EINMAL je Konto (users.vergleich_portale,

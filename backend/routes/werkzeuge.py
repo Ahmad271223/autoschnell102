@@ -995,9 +995,11 @@ async def werkzeug_meine(werkzeug_id: str, limit: int = Query(30, ge=1, le=100),
 
 
 # ---------------------------------------------------------------- Chef
-async def _uebersicht(filter_: dict, limit: int, ueberspringen: int = 0) -> dict:
+async def _uebersicht(filter_: dict, limit: int, ueberspringen: int = 0,
+                      verbindungen_filter: Optional[dict] = None) -> dict:
     verbindungen = [v async for v in db[wz.SAMMLUNG_VERBINDUNGEN].find(
-        filter_, {"_id": 0, "token_hash": 0, "pc_kennung": 0}).sort("zuletzt_am", -1).limit(500)]
+        verbindungen_filter if verbindungen_filter is not None else filter_,
+        {"_id": 0, "token_hash": 0, "pc_kennung": 0}).sort("zuletzt_am", -1).limit(500)]
     gesamt = await db[wz.SAMMLUNG_VERGLEICHE].count_documents(filter_)
     # Paket 3: ohne die aussortierten Angebote je Portal (bis 25 je Vergleich) — die Uebersicht zeigt sie nicht
     vergleiche = [x async for x in db[wz.SAMMLUNG_VERGLEICHE].find(
@@ -1040,19 +1042,61 @@ async def werkzeug_firma_trennen(werkzeug_id: str, konto_id: str, user=Depends(c
 
 
 # ---------------------------------------------------------------- Betreiber
+#: Wunsch Ahmad 08.10.2026: die Betreiber-Liste in Bloecken zu 1.000 (Block 1 = die neuesten 1.000, Block 2 = die
+#: 1.000 davor …), darin Seiten zu 100 — und je Block die 20 meistverglichenen Modelle.
+LISTE_BLOCK, LISTE_SEITE, TOP_MODELLE = 1000, 100, 20
+
+
+async def _suche_filter(q: str) -> dict:
+    """Suche in der Betreiber-Liste: Fahrzeug, Inserat, PC — und Konto/Firma ueber Namen bzw. Nummern."""
+    muster = {"$regex": re.escape(q.strip()), "$options": "i"}
+    konten = [u["id"] async for u in db.users.find(
+        {"$or": [{"kontonummer": muster}, {"first_name": muster}, {"last_name": muster}, {"name": muster},
+                 {"contact_person": muster}]}, {"_id": 0, "id": 1}).limit(500)]
+    firmen_filter: list = [{"company_name": muster}]
+    if q.strip().isdigit():
+        firmen_filter.append({"kunden_nr": {"$in": [int(q.strip()), q.strip()]}})
+    firmen = [d["id"] async for d in db.dealers.find({"$or": firmen_filter}, {"_id": 0, "id": 1}).limit(500)]
+    return {"$or": [{"fahrzeug.marke": muster}, {"fahrzeug.modell": muster}, {"fahrzeug.titel": muster},
+                    {"fahrzeug.inserat_id": muster}, {"fahrzeug.quelle": muster}, {"pc_name": muster},
+                    {"user_id": {"$in": konten}}, {"dealer_id": {"$in": firmen}}]}
+
+
 @router.get("/admin/werkzeug-vergleiche")
 async def admin_werkzeug_vergleiche(werkzeug: str = wz.AUTOPOINTER, dealer_id: Optional[str] = None,
                                     user_id: Optional[str] = None,
-                                    limit: int = Query(200, ge=1, le=500), seite: int = Query(1, ge=1, le=1000),
+                                    block: int = Query(1, ge=1, le=10000), seite: int = Query(1, ge=1, le=10),
+                                    q: str = Query("", max_length=100),
                                     _=Depends(current_super_admin)):
     filter_: dict = {"werkzeug": werkzeug}
     if dealer_id:
         filter_["dealer_id"] = dealer_id
     if user_id:
         filter_["user_id"] = user_id
-    daten = await _uebersicht(filter_, limit, (seite - 1) * limit)
-    daten["name"] = (wz.WERKZEUGE.get(werkzeug) or {}).get("name", werkzeug)
-    daten["freigegeben_fuer"] = sorted(wz.freigegebene_kunden(werkzeug))
+    gesamt = await db[wz.SAMMLUNG_VERGLEICHE].count_documents(filter_)
+    bloecke = max(1, -(-gesamt // LISTE_BLOCK))
+    block = min(block, bloecke)
+    im_block = [x async for x in db[wz.SAMMLUNG_VERGLEICHE].find(
+        filter_, {"_id": 0, "id": 1, "probelauf": 1, "fahrzeug.marke": 1, "fahrzeug.modell": 1})
+        .sort("erstellt_am", -1).skip((block - 1) * LISTE_BLOCK).limit(LISTE_BLOCK)]
+    liste_filter: dict = {"id": {"$in": [x["id"] for x in im_block]}}
+    if q.strip():
+        liste_filter = {"$and": [liste_filter, await _suche_filter(q)]}
+    treffer = await db[wz.SAMMLUNG_VERGLEICHE].count_documents(liste_filter)
+    seiten = max(1, -(-treffer // LISTE_SEITE))
+    seite = min(seite, seiten)
+    daten = await _uebersicht(liste_filter, LISTE_SEITE, (seite - 1) * LISTE_SEITE, verbindungen_filter=filter_)
+    gezaehlt = [x.get("fahrzeug") for x in im_block if not x.get("probelauf")]
+    von = (block - 1) * LISTE_BLOCK + 1 if im_block else 0
+    daten.update({
+        "gesamt": gesamt, "block": block, "bloecke": bloecke, "block_von": von,
+        "block_bis": (block - 1) * LISTE_BLOCK + len(im_block), "seite": seite, "seiten": seiten,
+        "treffer": treffer, "je_seite": LISTE_SEITE, "je_block": LISTE_BLOCK,
+        # Probelaeufe zaehlen nicht mit (das ist kein Interesse an einem Auto)
+        "top_modelle": wz.top_modelle(gezaehlt, TOP_MODELLE), "top_basis": len(gezaehlt),
+        "name": (wz.WERKZEUGE.get(werkzeug) or {}).get("name", werkzeug),
+        "freigegeben_fuer": sorted(wz.freigegebene_kunden(werkzeug)),
+    })
     return daten
 
 

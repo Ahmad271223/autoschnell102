@@ -428,6 +428,66 @@ def test_37_chef_und_admin_sehen_wer_was_verglichen_hat(welt):
     assert requests.get(f"{API}/admin/werkzeug-vergleiche", headers=welt["chef"], timeout=30).status_code == 403
 
 
+def test_37b_top_modelle_zaehlt_schreibweisen_zusammen():
+    """Wunsch Ahmad 08.10.2026: die 20 meistverglichenen Modelle je 1.000er-Block."""
+    rw = wz          # reine Funktion in werkzeuge.py (ohne Datenbank — kein Routen-Import im Test)
+    f = ([{"marke": "VW", "modell": "up!"}] * 3 + [{"marke": "VW", "modell": "up"}] * 2
+         + [{"marke": "Opel", "modell": "Corsa"}] * 4 + [{"marke": "", "modell": ""}, None])
+    top = rw.top_modelle(f)
+    assert top[0] == {"modell": "VW up!", "anzahl": 5}, top          # "up!" und "up" zusammen, haeufigste Schreibweise
+    assert top[1] == {"modell": "Opel Corsa", "anzahl": 4} and len(top) == 2
+    viele = [{"marke": "M", "modell": str(i)} for i in range(30)]
+    assert len(rw.top_modelle(viele)) == 20
+
+
+def test_37c_betreiber_liste_bloecke_seiten_suche_und_top20():
+    """Wunsch Ahmad 08.10.2026: Bloecke zu 1.000 (Block 1 = die neuesten), darin Seiten zu 100, Suche im Block,
+    je Block die 20 meistverglichenen Modelle (ohne Probelaeufe)."""
+    from datetime import datetime, timedelta, timezone
+    db = konten._db()
+    firma = "d_listentest_" + uuid.uuid4().hex[:8]
+    jetzt = datetime.now(timezone.utc)
+    modelle = [("VW", "Golf"), ("Opel", "Corsa"), ("BMW", "3er")]
+    docs = []
+    for i in range(1050):                                   # i = 0 ist der neueste
+        marke, modell = modelle[0] if i < 600 else modelle[1] if i < 1000 else modelle[2]
+        docs.append({"id": f"lt-{firma}-{i}", "werkzeug": wz.AUTOPOINTER, "dealer_id": firma, "user_id": "u-lt",
+                     "pc_name": "PC-Liste" if i != 5 else "PC-Besonders", "probelauf": i == 7,
+                     "erstellt_am": (jetzt - timedelta(seconds=i)).isoformat(),
+                     "fahrzeug": {"marke": marke, "modell": modell, "inserat_id": str(3500000000 + i)},
+                     "links": [], "hinweise": []})
+    db.werkzeug_vergleiche.insert_many(docs)
+    try:
+        def holen(**p):
+            r = requests.get(f"{API}/admin/werkzeug-vergleiche", params={"dealer_id": firma, **p},
+                             headers=konten.super_kopf(), timeout=60)
+            assert r.status_code == 200, r.text
+            return r.json()
+
+        d = holen()
+        assert (d["gesamt"], d["bloecke"], d["block"], d["seite"], d["seiten"]) == (1050, 2, 1, 1, 10)
+        assert (d["block_von"], d["block_bis"], d["treffer"], len(d["vergleiche"])) == (1, 1000, 1000, 100)
+        assert d["vergleiche"][0]["id"] == f"lt-{firma}-0"
+        assert d["top_modelle"] == [{"modell": "VW Golf", "anzahl": 599}, {"modell": "Opel Corsa", "anzahl": 400}]
+        assert d["top_basis"] == 999, "der Probelauf zaehlt nicht"
+        s10 = holen(seite=10)
+        assert s10["seite"] == 10 and s10["vergleiche"][-1]["id"] == f"lt-{firma}-999"
+        b2 = holen(block=2)
+        assert (b2["block"], b2["block_von"], b2["block_bis"], b2["seiten"], len(b2["vergleiche"])) == (2, 1001, 1050, 1, 50)
+        assert b2["top_modelle"] == [{"modell": "BMW 3er", "anzahl": 50}]
+        assert holen(block=99)["block"] == 2 and holen(seite=10, block=2)["seite"] == 1   # zu weit -> letzte
+        such = holen(q="Besonders")
+        assert such["treffer"] == 1 and such["vergleiche"][0]["id"] == f"lt-{firma}-5"
+        assert holen(q="3500000999")["treffer"] == 1
+        assert holen(q="3500001049")["treffer"] == 0, "Suche nur im gewaehlten Block"
+        assert holen(q="3500001049", block=2)["treffer"] == 1
+        assert holen(q="(.*")["treffer"] == 0, "Sonderzeichen sind kein Muster"
+        assert requests.get(f"{API}/admin/werkzeug-vergleiche", params={"seite": 11},
+                            headers=konten.super_kopf(), timeout=30).status_code == 422
+    finally:
+        db.werkzeug_vergleiche.delete_many({"dealer_id": firma})
+
+
 def test_38_trennen_durch_chef_und_selbst(welt):
     _abo(welt, True)
     _, prog, _ = _verbinden(welt, "PC-A")
