@@ -219,7 +219,9 @@ def test_05_abgelaufener_link_410_und_neuer_link_beim_naechsten_versand(welt):
 
 
 def test_06_handy_weg_teilen_nur_vermerk(welt):
-    r = _senden(welt, methode="teilen", recipient="")
+    version = int(_db().generated_pdfs.find_one(
+        {"id": welt["contract_id"]}, {"version": 1}).get("version") or 1)
+    r = _senden(welt, methode="teilen", recipient="", version=version)
     assert r.status_code == 200, r.text[:300]
     d = r.json()
     assert d["zustellung"] == "geteilt" and d["status"] == "ok"
@@ -229,6 +231,12 @@ def test_06_handy_weg_teilen_nur_vermerk(welt):
     eintrag = doc["send_status"][-1]
     assert eintrag["channel"] == "whatsapp" and eintrag["methode"] == "teilen"
     assert eintrag["zustellung"] == "geteilt" and "download_link" not in eintrag
+
+
+def test_06b_handy_teilen_ohne_versionskennung_wird_abgelehnt(welt):
+    r = _senden(welt, methode="teilen", recipient="")
+    assert r.status_code == 409, r.text[:300]
+    assert r.json()["detail"]["code"] == "fassung_unbekannt"
 
 
 def test_07_unbekannte_methode_422(welt):
