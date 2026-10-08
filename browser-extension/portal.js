@@ -362,38 +362,38 @@
           z.protokollWartet = "";
           z.webseiteAnbieten = false;
           zeichnen();
-          let r2 = await A.senden({ typ: "vertrag", kennung: z.kennung });
-          let nachgelesen = false;
-          // Helfer kennt das Inserat nicht mehr (Browser neu gestartet, lange offen): nachlesen und noch einmal
-          if (r2 && r2.fehler === "unbekannt") {
-            const nach = await nachlesen(z.kennung);
-            nachgelesen = true;
-            r2 = nach && nach.antwort ? await A.senden({ typ: "vertrag", kennung: z.kennung }) : (nach || r2);
-          }
-          if (r2 && r2.protokoll) {
-            if (nachgelesen) {
-              // 2.6.0 (Nr. 19): der Browser startet die App nur direkt nach einem Klick — nach dem Nachlesen ist das
-              // vorbei, also einen zweiten Klick anbieten statt still zu scheitern
-              z.protokollWartet = r2.protokoll;
-              z.meldung = "Inserat neu gelesen – bitte noch einmal klicken:";
-              z.vertragOeffnet = false;
-              zeichnen();
+          try {
+            let r2 = await A.senden({ typ: "vertrag", kennung: z.kennung });
+            let nachgelesen = false;
+            // Helfer kennt das Inserat nicht mehr (Browser neu gestartet, lange offen): nachlesen und noch einmal
+            if (r2 && r2.fehler === "unbekannt") {
+              const nach = await nachlesen(z.kennung);
+              nachgelesen = true;
+              r2 = nach && nach.antwort ? await A.senden({ typ: "vertrag", kennung: z.kennung }) : (nach || r2);
+            }
+            if (r2 && r2.protokoll) {
+              if (nachgelesen) {
+                // Nach dem Nachlesen ist die Klick-Erlaubnis vorbei: zweiten bewussten Klick anbieten.
+                z.protokollWartet = r2.protokoll;
+                z.meldung = "Inserat neu gelesen – bitte noch einmal klicken:";
+                return;
+              }
+              await appStarten(z, r2.protokoll);
               return;
             }
-            await appStarten(z, r2.protokoll);
+            if (!A.helferDa()) { veraltet(); return; }
+            z.meldung = r2 && r2.weg === "app_neu_laden"
+              ? "Die AutoSchnell-App ist offen, kennt die aktualisierte Erweiterung aber noch nicht – dort einmal neu laden "
+                + "(F5), dann hier noch einmal „Kaufvertrag“ drücken."
+              : !r2 || r2.fehler
+                ? (r2 && r2.text) || "AutoSchnell konnte nicht geöffnet werden – Seite neu laden und noch einmal drücken."
+                : "";
+          } catch (e) {
+            z.meldung = "AutoSchnell konnte nicht geöffnet werden – bitte noch einmal versuchen.";
+          } finally {
             z.vertragOeffnet = false;
-            zeichnen();
-            return;
+            if (zustand === z) zeichnen();
           }
-          if (!A.helferDa()) { z.vertragOeffnet = false; veraltet(); return; }
-          z.meldung = r2 && r2.weg === "app_neu_laden"
-            ? "Die AutoSchnell-App ist offen, kennt die aktualisierte Erweiterung aber noch nicht – dort einmal neu laden "
-              + "(F5), dann hier noch einmal „Kaufvertrag“ drücken."
-            : !r2 || r2.fehler
-              ? (r2 && r2.text) || "AutoSchnell konnte nicht geöffnet werden – Seite neu laden und noch einmal drücken."
-              : "";
-          z.vertragOeffnet = false;
-          zeichnen();
         });
         knoepfe.appendChild(vertrag);
         if ((a.links || []).length) {
