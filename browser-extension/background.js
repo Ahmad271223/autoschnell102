@@ -678,6 +678,18 @@ function tabZeigtInserat(tab, kennung) {
   return inseratKennungAusUrl((tab && (tab.pendingUrl || tab.url)) || "") === String(kennung || "");
 }
 
+/** Nicht das alte Message-Tab-Objekt vertrauen: nach einem await kann eine
+ * SPA im selben Tab bereits auf das naechste Fahrzeug gewechselt haben. */
+async function tabZeigtInseratAktuell(tabId, kennung) {
+  if (!Number.isInteger(tabId)) return false;
+  try {
+    const aktuell = await chrome.tabs.get(tabId);
+    return tabZeigtInserat(aktuell, kennung);
+  } catch (e) {
+    return false; // Tab geschlossen/ersetzt -> niemals alten Vertrag oeffnen
+  }
+}
+
 async function vertragsZiel(kennung) {
   const s = await sitzung();
   const i = s.inserate[String(kennung || "")];
@@ -700,17 +712,25 @@ async function webseiteOeffnen(basis, pfad, tab) {
 
 async function vertragOeffnen(msg, tab) {
   // P1-Sicherung: zwischen Box-Anzeige und Klick kann eine SPA schon auf das
-  // naechste Fahrzeug gewechselt haben. Nie einen Vertrag aus altem Zustand
-  // oeffnen; erst das aktuelle Inserat neu lesen lassen.
-  if (!tabZeigtInserat(tab, msg.kennung)) {
-    return { fehler: "veraltet",
-             text: "Das angezeigte Fahrzeug hat sich geändert – AutoSchnell liest das aktuelle Inserat neu. Bitte danach noch einmal auf Kaufvertrag klicken." };
-  }
+  // naechste Fahrzeug gewechselt haben. Das vom Message-Event gelieferte
+  // tab-Objekt kann bereits veraltet sein — deshalb live aus Chrome lesen.
+  const veraltet = () => ({
+    fehler: "veraltet",
+    text: "Das angezeigte Fahrzeug hat sich geändert – AutoSchnell liest das aktuelle Inserat neu. Bitte danach noch einmal auf Kaufvertrag klicken.",
+  });
+  if (!await tabZeigtInseratAktuell(tab?.id, msg.kennung)) return veraltet();
+
   const ziel = await vertragsZiel(msg.kennung);
   if (!ziel) return { fehler: "unbekannt" };
   const basis = await server();
   // 1. offenes App-Fenster
   const app = await appFenster(basis);
+
+  // P0/P1 08.10.2026: vertragsZiel/server/appFenster enthalten awaits.
+  // In dieser Zeit kann mobile.de/AutoScout/Kleinanzeigen im selben SPA-Tab
+  // schon Auto B anzeigen. Unmittelbar VOR dem Handoff noch einmal live
+  // pruefen; die Antwort/Session von Auto A wird dann komplett verworfen.
+  if (!await tabZeigtInseratAktuell(tab?.id, msg.kennung)) return veraltet();
   if (app) {
     const antwort = await anTab(app.id, { type: "AUTOSCHNELL_OEFFNEN", ziel: ziel.pfad });
     await chrome.windows.update(app.windowId, { focused: true });
@@ -736,6 +756,9 @@ async function vertragOeffnen(msg, tab) {
   //    dass es hier keine App gibt
   const { appGesehen } = await lokal("appGesehen");
   const stand = appGesehen && typeof appGesehen === "object" ? appGesehen[basis] : undefined;
+  // Auch der Storage-Zugriff ist asynchron — letzter Identitaetscheck direkt
+  // vor Protocol/Web-Handoff.
+  if (!await tabZeigtInseratAktuell(tab?.id, msg.kennung)) return veraltet();
   if (stand !== 0 && ziel.inseratUrl) {
     return { protokoll: "web+autoschnell:vertrag?url=" + encodeURIComponent(ziel.inseratUrl) };
   }
