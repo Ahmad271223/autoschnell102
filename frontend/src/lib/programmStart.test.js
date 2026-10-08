@@ -82,7 +82,7 @@ describe("Browser-Helfer: Ziel aus der Erweiterung im offenen App-Fenster (04.10
     expect(nav).not.toHaveBeenCalled();
     expect(f.ereignisse[0].detail).toEqual({ link: KA, vertrag: true });
   });
-  it("Browser-Helfer bestaetigt bei ungespeicherter Arbeit erst nach echtem Oeffnen", () => {
+  it("Browser-Helfer bestaetigt Vergleich NICHT schon bei Navigation", () => {
     const f = appFenster("/app/vertraege");
     const nav = vi.fn();
     let knopf = null;
@@ -101,9 +101,32 @@ describe("Browser-Helfer: Ziel aus der Erweiterung im offenen App-Fenster (04.10
     expect(f.ereignisse).toHaveLength(0);
     knopf();
     expect(nav).toHaveBeenCalledTimes(1);
-    expect(f.nachrichten).toContainEqual({
+    const ziel = nav.mock.calls[0][0];
+    const u = new URL(ziel, O);
+    expect(u.pathname).toBe("/app/vergleich");
+    expect(u.searchParams.get("url")).toBe(KA);
+    expect(u.searchParams.get("vertrag")).toBe("1");
+    expect(u.searchParams.get("helfer_req")).toBe("req-123");
+    expect(f.nachrichten).not.toContainEqual({
       __autoschnell: true, type: "OEFFNEN_BESTAETIGT", reqId: "req-123",
     });
+  });
+
+  it("Browser-Helfer gibt Request-ID an offene Vergleichsseite weiter", () => {
+    const f = appFenster("/app/vergleich");
+    const nav = vi.fn();
+    erweiterungZieleVerfolgen(nav, { fenster: f });
+    f.senden({
+      __autoschnell: true,
+      type: "OEFFNEN",
+      ziel: `/app/vergleich?url=${encodeURIComponent(KA)}&vertrag=1`,
+      reqId: "req-456",
+    });
+    expect(nav).not.toHaveBeenCalled();
+    expect(f.ereignisse[0].detail).toEqual({
+      link: KA, vertrag: true, helferReq: "req-456",
+    });
+    expect(f.nachrichten).toHaveLength(0);
   });
 
   it("fremde Quelle, fremde Ziele und ungespeicherte Arbeit", () => {
