@@ -291,7 +291,7 @@ internal sealed class TrayApp : ApplicationContext
         {
             Sprechblase(fahrzeug == null
                 ? "Noch kein Auto verglichen – erst in AutoPointer ein Inserat anklicken."
-                : Ueberwacher.KeinLinkHinweis, true, erzwingen: true);
+                : Ueberwacher.LinkHinweisFuer(fahrzeug), true, erzwingen: true);
             return;
         }
         // Nr. 12: Kennung des Starts — die App meldet sie beim Uebernehmen an AutoSchnell zurueck

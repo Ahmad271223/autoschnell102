@@ -466,6 +466,16 @@ public class UeberwacherTests
         Assert.Equal(new[] { "mobile.de", "AutoScout24" }, _b.Aufrufe[1].Select(v => v.Portal));
     }
 
+    [Fact]   // Befund Ahmad 08.10.2026: mobile.de/Kleinanzeigen ohne lesbare Inserat-ID -> gleich sagen, wie es geht
+    public async Task Ohne_Inserat_ID_sagt_das_Programm_wie_es_geht()
+    {
+        await Start();
+        await Anklicken(() => { var f = Bentley(); f.Quelle = "mobile.de"; f.InseratId = null; return f; }, 1);
+        Assert.Contains(_meldungen, m => m.Contains("Zeile „Inserat-ID“"));
+        Assert.Contains("Zeile „Inserat-ID“", Ueberwacher.LinkHinweisFuer(new Fahrzeug { Quelle = "Kleinanzeigen" }));
+        Assert.Contains("Hash-ID", Ueberwacher.LinkHinweisFuer(new Fahrzeug { Quelle = "AutoScout24" }));
+    }
+
     [Fact]   // 1.5.8 (Vorgangsnummer): mit Erweiterung oeffnet das Programm nur die Vorgangsseite
     public async Task Mit_Erweiterung_oeffnet_das_Programm_nur_die_Vorgangsseite()
     {

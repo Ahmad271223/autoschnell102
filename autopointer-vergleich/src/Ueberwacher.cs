@@ -427,6 +427,12 @@ internal sealed class Ueberwacher
         var vertragsHinweise = new List<string>();
         if (antwort.InseratUrl == null && (f.Quelle ?? "").Contains("AutoScout", StringComparison.OrdinalIgnoreCase))
             vertragsHinweise.Add(KeinLinkHinweis);
+        // Befund Ahmad 08.10.2026 (Liste: bei vielen mobile.de- und einigen Kleinanzeigen-Autos kein "Inserat öffnen"):
+        // die Zeile "Inserat-ID" steht ganz unten in der Tabelle — ist der Detailbereich zu niedrig, liegt sie
+        // ausserhalb des Bildschirms und wird nicht gelesen. Gleich sagen, wie es geht (sonst merkt man es erst beim
+        // Kaufvertrag).
+        else if (antwort.InseratUrl == null && f.Quelle is "mobile.de" or "Kleinanzeigen")
+            vertragsHinweise.Add(KeineNummerHinweis);
         else if (antwort.VorabStatus is "limit" or "fehler" && antwort.VorabHinweis.Length > 0)
             vertragsHinweise.Add("Für den Kaufvertrag nicht vorab ausgelesen: " + antwort.VorabHinweis);
         // 1.5.8 (Wunsch Ahmad 08.10.2026): die Portalwahl steht in AutoSchnell, der Server schickt nur deren Links —
@@ -518,6 +524,13 @@ internal sealed class Ueberwacher
         }
         return hinweise;
     }
+
+    internal const string KeineNummerHinweis =
+        "Inserat-Nummer nicht gelesen: in AutoPointer ist die Zeile „Inserat-ID“ (ganz unten in der Tabelle) nicht zu sehen. Detailbereich in AutoPointer höher ziehen, bis „Inserat-ID“ sichtbar ist – dann klappen „Inserat öffnen“ und der Kaufvertrag von selbst. Für dieses Auto: in AutoPointer „Seite öffnen“, im Browser die Adresse kopieren (Strg+L, dann Strg+C) und hier noch einmal „Kaufvertrag“ drücken.";
+
+    /// <summary>Der passende Hinweis, wenn fuer den Kaufvertrag die Inserat-Adresse fehlt.</summary>
+    internal static string LinkHinweisFuer(Fahrzeug f) =>
+        (f.Quelle ?? "").Contains("AutoScout", StringComparison.OrdinalIgnoreCase) ? KeinLinkHinweis : KeineNummerHinweis;
 
     internal const string KeinLinkHinweis =
         "AutoScout-Inserat: die Kennung (Hash-ID) ist in AutoPointer nicht vollständig sichtbar. Für den Kaufvertrag: in AutoPointer „Seite öffnen“, im Browser die Adresse kopieren (Strg+L, dann Strg+C) und hier noch einmal „Kaufvertrag“ drücken – das Programm übernimmt die kopierte Adresse. Tipp: Detailbereich in AutoPointer breiter ziehen – dann klappt es automatisch.";
