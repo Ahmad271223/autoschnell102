@@ -383,6 +383,10 @@ internal sealed class Ueberwacher
                                + "(Menü „Aktuelles Fahrzeug jetzt vergleichen“).");
             return;
         }
+        // Klickstand VOR dem Serveraufruf merken. Wechselt AutoPointer
+        // waehrend der Anfrage auf ein anderes Auto, darf der alte Klick auf
+        // Fahrzeug A nicht automatisch als Klick fuer Fahrzeug B zaehlen.
+        long klickVorServer = _letzterKlick?.Invoke() ?? long.MinValue;
         VergleichAntwort antwort;
         try { antwort = await _dienst.VergleichAsync(f, Probelauf); }
         catch (DienstFehler ex)
@@ -424,10 +428,19 @@ internal sealed class Ueberwacher
             LetzteVergleiche = Array.Empty<Vergleich>();
             _summe = nachServer.Lage == Lage.Details ? nachServer.Summe : 0;
             _seit = _takt();
-            _offen = nachServer.Lage == Lage.Details;
-            _ungeklickt = false;
+
+            // Nur wenn WAEHREND der Serveranfrage ein neuer AutoPointer-Klick
+            // registriert wurde, darf das neue Fahrzeug nach der
+            // Stabilisierung automatisch verarbeitet werden. Sonst war es
+            // z. B. ein automatischer Live-Listen-Wechsel und wartet wie in
+            // v1.5.6 auf den naechsten echten Klick.
+            bool neuerKlick = _letzterKlick == null || _letzterKlick() > klickVorServer;
+            _offen = nachServer.Lage == Lage.Details && neuerKlick;
+            _ungeklickt = nachServer.Lage == Lage.Details && !neuerKlick;
+
             Protokoll.Schreibe("AutoPointer hat waehrend der Serveranfrage das Fahrzeug gewechselt – "
-                               + "alte Antwort verworfen, kein Vertrag/kein Vergleich fuer das vorige Auto.");
+                               + "alte Antwort verworfen, kein Vertrag/kein Vergleich fuer das vorige Auto."
+                               + (neuerKlick ? "" : " Neues Auto wartet auf einen echten Klick."));
             return;
         }
 
