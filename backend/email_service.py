@@ -629,19 +629,25 @@ def _sicher_nicht_angekommen(exc: BaseException) -> bool:
     return not isinstance(exc, (httpx.TimeoutException, httpx.TransportError))
 
 
-# Ein Eintrag "laeuft" ohne Ergebnis (Prozess mitten im Versand gestorben)
-# sperrt seinen Schluessel: der Ausgang ist unklar, es wird NICHT automatisch
-# wiederholt. Pruefbericht 20.09.2026 (P-10): nach dieser Zeit gilt der
-# haengende Eintrag als aufgegeben und darf neu beansprucht werden — vorher
-# lief ein identischer Versand unter seinem Schluessel fuer immer in 502
-# (die beiden Zweige lieferten ohnehin beide "unklar").
+# SMTP hat – anders als Resend – keinen providerseitigen Idempotency-Key.
+# Ist der Ausgang einer Uebergabe unklar, darf derselbe Schluessel deshalb
+# NIEMALS automatisch erneut senden: die erste Mail koennte angekommen sein.
+# Ein bewusster erneuter Versand laeuft auf Vertragsebene ueber die vorhandene
+# Nutzerbestaetigung und einen neuen Schluessel.
+#
+# Die Konstante bleibt nur fuer Rueckwaertskompatibilitaet/Diagnose bestehen;
+# sie steuert KEINE automatische Wiederaufnahme mehr.
 SMTP_UNKLAR_SPERRE_SEKUNDEN = 24 * 3600
 
 
 async def _smtp_idempotenz_beanspruchen(key: str, to: str) -> str:
     """'neu' = jetzt senden; 'gesendet' = schon abgegeben; 'unklar' = ein
-    frueherer Versuch hat kein Ergebnis hinterlassen (juenger als
-    SMTP_UNKLAR_SPERRE_SEKUNDEN)."""
+    frueherer Versuch hat keinen sicher feststellbaren Ausgang.
+
+    Ein vorhandenes 'laeuft' wird absichtlich nie automatisch uebernommen,
+    egal wie alt es ist. SMTP kann eine bereits angenommene Mail nach einem
+    Antwort-/Verbindungsabbruch nicht deduplizieren.
+    """
     from datetime import datetime, timezone
     try:
         from deps import db
@@ -656,21 +662,9 @@ async def _smtp_idempotenz_beanspruchen(key: str, to: str) -> str:
         alt = await db.mail_idempotenz.find_one({"key": key}, {"_id": 0}) or {}
         if alt.get("status") == "gesendet":
             return "gesendet"
-        begonnen = alt.get("begonnen")
-        if begonnen is not None and begonnen.tzinfo is None:
-            begonnen = begonnen.replace(tzinfo=timezone.utc)
-        if begonnen and (jetzt - begonnen).total_seconds() > SMTP_UNKLAR_SPERRE_SEKUNDEN:
-            # P-10: den haengenden Eintrag uebernehmen — Compare-and-Set auf die
-            # alte Startzeit, damit zwei Wiederaufnahmen nicht beide senden.
-            r2 = await db.mail_idempotenz.update_one(
-                {"key": key, "status": "laeuft", "begonnen": alt.get("begonnen")},
-                {"$set": {"begonnen": jetzt, "empfaenger": to},
-                 "$inc": {"uebernahmen": 1}})
-            if r2.modified_count:
-                log.warning("email_service: haengender SMTP-Versuch unter %s (seit %s) "
-                            "gilt nach %d h als aufgegeben — wird neu gesendet",
-                            key, begonnen.isoformat(), SMTP_UNKLAR_SPERRE_SEKUNDEN // 3600)
-                return "neu"
+        # Vorhandenes "laeuft" bedeutet: Ausgang unbekannt. Nie automatisch
+        # neu senden — auch nicht nach Stunden/Tagen. Doppelte Kaufvertraege
+        # sind schlimmer als ein Zustand, den der Nutzer bewusst klaeren muss.
         return "unklar"
     except Exception as exc:  # noqa: BLE001
         # Phase 3 (3.6, A22): fail-closed — ohne Datenbank ist nicht pruefbar, ob
