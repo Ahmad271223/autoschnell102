@@ -14,6 +14,7 @@ Programm (Kopfzeile X-Werkzeug-Schluessel):
   GET    /api/werkzeuge/{id}/status              Lizenz pruefen (Abo, Freigabe, Sperren) + angebotene Version
   POST   /api/werkzeuge/{id}/vergleich           Abo pruefen, Links mit Firmenregeln, protokollieren
   GET    /api/werkzeuge/{id}/app-start/{start}   hat die App das Auto uebernommen? (Nr. 12)
+  POST   /api/werkzeuge/{id}/vorgang/{v}/selbst  Erweiterung hat nicht uebernommen -> Programm oeffnet selbst (1.5.9)
 Browser-Helfer (04.10.2026, nur Werkzeuge mit art "browser", Kopfzeile X-Werkzeug-Schluessel):
   POST   /api/werkzeuge/{id}/inserat             Inseratsseite aus dem Browser -> Links, Vertragsdaten, Hinweise
   POST   /api/werkzeuge/{id}/marktlage           Vergleichsseite aus dem Browser -> Platz + Ampel
@@ -24,9 +25,13 @@ Betreiber:
 """
 from __future__ import annotations
 
+import asyncio
+import functools
+import ipaddress
 import logging
 import re
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import quote
@@ -50,12 +55,20 @@ NICHT_GEFUNDEN = "Nicht gefunden"
 CODE_FALSCH = "Code ungültig oder abgelaufen – bitte in AutoSchnell einen neuen Code holen."
 NICHT_VERBUNDEN = ("Dieses Programm ist nicht (mehr) verbunden – vielleicht wurde dein Konto auf einem "
                    "anderen PC verbunden. Bitte mit einem neuen Code aus AutoSchnell verbinden.")
-KEIN_ABO = "Kein aktives AutoSchnell-Abo – das Programm ist gesperrt."
+#: Pruefung 08.10.2026: sagen, was zu tun ist — ein Sucher kann das Abo nicht selbst verlaengern, und nach dem
+#: Verlaengern geht es ohne neuen Code weiter. Der Anfang bleibt gleich (das Programm erkennt den Text daran).
+KEIN_ABO = ("Kein aktives AutoSchnell-Abo – das Programm ist gesperrt. Bitte den Chef bzw. AutoSchnell kontaktieren – "
+            "danach geht es von selbst weiter, kein neuer Code nötig.")
 #: Pruefung Browser-Helfer 05.10.2026 (Nr. 24): der Helfer laeuft im Browser — keine Texte von "PC" und "Programm"
 NICHT_VERBUNDEN_BROWSER = ("AutoSchnell Analyse und Vertragsabwicklung ist nicht (mehr) verbunden – vielleicht wurde dein Konto in einem "
                            "anderen Browser verbunden. Bitte auf das AutoSchnell-Symbol klicken und mit einem neuen "
                            "Code aus AutoSchnell verbinden.")
-KEIN_ABO_BROWSER = "Kein aktives AutoSchnell-Abo – die Erweiterung ist gesperrt."
+KEIN_ABO_BROWSER = ("Kein aktives AutoSchnell-Abo – die Erweiterung ist gesperrt. Bitte den Chef bzw. AutoSchnell "
+                    "kontaktieren – danach geht es von selbst weiter, kein neuer Code nötig.")
+#: Pruefung 08.10.2026: auf der Seite "Programme" stehen zwei Knoepfe "Code zum Verbinden" nebeneinander — wer den
+#: Code des einen Werkzeugs im anderen eintippt, bekam nur "ungueltig". Jetzt: welcher Code das ist.
+CODE_ANDERES_WERKZEUG = ("Das ist der Code für „{anderes}“ – für „{dieses}“ bitte in AutoSchnell unter „Programme“ "
+                         "beim Abschnitt „{dieses}“ einen eigenen Code holen.")
 
 
 def _ist_browser(werkzeug_id: str) -> bool:
@@ -112,12 +125,22 @@ async def _getrennt_merken(werkzeug_id: str, token_hashes, grund: str, pc_name: 
             log.exception("Werkzeug: Trenn-Grund nicht gespeichert")
 
 
+async def _codes_verwerfen(werkzeug_id: str, user_id: str) -> None:
+    """Pruefung 08.10.2026: wer trennt (Passwort neu, Chef, Betreiber, App), verwirft auch die noch offenen Codes des
+    Kontos — sonst verband ein vorher geholter Code (10 min) das gerade getrennte Geraet gleich wieder."""
+    try:
+        await db[wz.SAMMLUNG_CODES].delete_many({"werkzeug": werkzeug_id, "user_id": user_id})
+    except Exception:  # noqa: BLE001 — das Trennen selbst ist schon passiert
+        log.exception("Werkzeug: offene Codes nicht verworfen")
+
+
 async def alle_trennen(user_id: str, grund: str = "passwort") -> int:
     """Entscheidung Ahmad 06.10.2026: ein neues Passwort trennt Programm UND Browser-Helfer des Kontos — ein
     gestohlenes Konto behielt sonst den Zugang ueber die Werkzeuge. Der naechste Aufruf bekommt 401 mit dem Grund,
     verbinden geht dann mit einem neuen Code. Rueckgabe: Zahl der getrennten Verbindungen."""
     getrennt = 0
     for werkzeug_id in wz.WERKZEUGE:
+        await _codes_verwerfen(werkzeug_id, user_id)
         filt = {"werkzeug": werkzeug_id, "user_id": user_id}
         alte = [x.get("token_hash") async for x in db[wz.SAMMLUNG_VERBINDUNGEN].find(filt, {"_id": 0, "token_hash": 1})]
         if not alte:
@@ -285,6 +308,7 @@ async def werkzeug_trennen(werkzeug_id: str, user=Depends(current_firma)):
     filt = {"werkzeug": werkzeug_id, "user_id": user["id"]}
     alte = [x.get("token_hash") async for x in db[wz.SAMMLUNG_VERBINDUNGEN].find(filt, {"_id": 0, "token_hash": 1})]
     r = await db[wz.SAMMLUNG_VERBINDUNGEN].delete_many(filt)
+    await _codes_verwerfen(werkzeug_id, user["id"])
     if r.deleted_count:
         await _getrennt_merken(werkzeug_id, alte, "app")
         await log_activity_sicher(user["dealer_id"], user["id"], "werkzeug.getrennt", ref=werkzeug_id)
@@ -310,7 +334,6 @@ async def _konto_pruefen(user: Optional[dict], werkzeug_id: str):
         raise HTTPException(403, "Nur für Händler- und Sucher-Konten.")
     # Lasttest 07.10.2026 ("keiner soll warten"): Firma, Sperre und Abo haengen nur vom Konto ab — gleichzeitig
     # abfragen statt nacheinander (drei Datenbank-Rundreisen weniger in der Kette); geprueft wird in der alten Reihenfolge
-    import asyncio
     firma, gesperrt, abo = await asyncio.gather(
         _firma(user["dealer_id"]), firma_gesperrt(user["dealer_id"]), subscription_for(user))
     if not firma or (firma.get("loeschung") or {}).get("status") == "laeuft":
@@ -324,10 +347,23 @@ async def _konto_pruefen(user: Optional[dict], werkzeug_id: str):
     return firma, abo
 
 
+def _ip_gruppe(ip: str) -> str:
+    """Pruefung 08.10.2026: ein IPv6-Anschluss hat ein ganzes /64-Netz (Milliarden Adressen) — je Adresse gezaehlt,
+    hielt "10 falsche Codes je Adresse" niemanden auf. IPv6 zaehlt deshalb je /64, IPv4 wie bisher je Adresse (ein
+    Buero = eine Adresse; ein /24 traefe Fremde beim selben Anbieter). Lokale Adressen bleiben, wie sie sind."""
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if a.version == 6 and a.ipv4_mapped is None and not a.is_loopback:
+        return str(ipaddress.ip_network(f"{a}/64", strict=False))
+    return ip
+
+
 @router.post("/werkzeuge/{werkzeug_id}/verbinden")
 async def werkzeug_verbinden(werkzeug_id: str, body: VerbindenIn, request: Request):
     _wid_pruefen(werkzeug_id)
-    ip = client_ip(request)
+    ip = _ip_gruppe(client_ip(request))
     if not await _verbinden_limiter_ip.check(ip):
         raise HTTPException(429, "Zu viele falsche Codes – bitte in 10 Minuten erneut.")
     if not await _verbinden_limiter_gesamt.check("alle"):
@@ -344,6 +380,7 @@ async def werkzeug_verbinden(werkzeug_id: str, body: VerbindenIn, request: Reque
         {"werkzeug": werkzeug_id, "code_hash": code_hash, "benutzt": False, "gueltig_bis": {"$gt": now_iso()}},
         {"$set": {"benutzt": True, "benutzt_am": now_iso(), "benutzt_von": pc}},
         return_document=ReturnDocument.AFTER)
+    wiederholung = False
     if not c and pc:
         # Dieselbe Anfrage kam doppelt an (Netz, Doppelklick): derselbe PC bekommt kurz danach
         # denselben Schluessel noch einmal — ein anderer PC kann den Code nicht nachnutzen.
@@ -351,7 +388,14 @@ async def werkzeug_verbinden(werkzeug_id: str, body: VerbindenIn, request: Reque
         c = await db[wz.SAMMLUNG_CODES].find_one(
             {"werkzeug": werkzeug_id, "code_hash": code_hash, "benutzt": True, "benutzt_von": pc,
              "benutzt_am": {"$gt": grenze}})
+        wiederholung = c is not None
     if not c:
+        andere = [w for w in wz.WERKZEUGE if w != werkzeug_id]
+        if andere and await db[wz.SAMMLUNG_CODES].count_documents(
+                {"werkzeug": {"$in": andere}, "code_hash": code_hash, "benutzt": False,
+                 "gueltig_bis": {"$gt": now_iso()}}, limit=1):
+            raise HTTPException(404, CODE_ANDERES_WERKZEUG.format(
+                anderes=wz.WERKZEUGE[andere[0]]["name"], dieses=wz.WERKZEUGE[werkzeug_id]["name"]))
         raise HTTPException(404, CODE_FALSCH)
     user = await db.users.find_one({"id": c["user_id"]}, _USER_FELDER)
     firma, _abo = await _konto_pruefen(user, werkzeug_id)
@@ -362,6 +406,15 @@ async def werkzeug_verbinden(werkzeug_id: str, body: VerbindenIn, request: Reque
         schluessel = wz.schluessel_erzeugen()
     jetzt = now_iso()
     pc_name = wz._text(body.pc_name, 80)
+    if wiederholung:
+        # Pruefung 08.10.2026: die Wiederholung gibt nur den Schluessel einer NOCH BESTEHENDEN Verbindung noch einmal
+        # heraus — wurde das Geraet inzwischen getrennt (Chef, Passwort neu), legte sie es vorher neu an
+        if not await db[wz.SAMMLUNG_VERBINDUNGEN].count_documents(
+                {"werkzeug": werkzeug_id, "user_id": user["id"], "token_hash": wz.streuwert(schluessel)}, limit=1):
+            raise HTTPException(404, CODE_FALSCH)
+        konto = _konto_text(user)
+        return {"schluessel": schluessel, "konto": konto["konto"], "name": konto["name"],
+                "firma": firma.get("company_name") or "", "werkzeug": werkzeug_id}
     alt = await db[wz.SAMMLUNG_VERBINDUNGEN].find_one(
         {"werkzeug": werkzeug_id, "user_id": user["id"]}, {"_id": 0, "token_hash": 1, "pc_kennung": 1})
     if alt and alt.get("token_hash") != wz.streuwert(schluessel) \
@@ -372,7 +425,9 @@ async def werkzeug_verbinden(werkzeug_id: str, body: VerbindenIn, request: Reque
         {"werkzeug": werkzeug_id, "user_id": user["id"]},
         {"$set": {"id": str(uuid.uuid4()), "token_hash": wz.streuwert(schluessel), "dealer_id": user["dealer_id"],
                   "pc_name": pc_name, "pc_kennung": wz._text(body.pc_kennung, 128),
-                  "verbunden_am": jetzt, "zuletzt_am": jetzt}},
+                  "verbunden_am": jetzt, "zuletzt_am": jetzt},
+         # neu verbunden = neuer Versuch fuer die Vorgaenge (Pruefung 08.10.2026, wz.vorgang_verpasst)
+         "$unset": {"vorgang_verpasst_am": "", "vorgang_ok_am": ""}},
         upsert=True)
     await _verbinden_limiter_ip.erstatten(ip)
     await _verbinden_limiter_gesamt.erstatten("alle")
@@ -487,6 +542,10 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     """Abo pruefen, Links mit den Vergleichsregeln der Firma bauen (wie der
     Vergleich in der App: aktives Profil Inland/Export, Sucher-Overrides),
     protokollieren."""
+    if _ist_browser(werkzeug_id):
+        # Pruefung 08.10.2026: nur das Windows-Programm vergleicht hier (ein Erweiterungs-Schluessel loeste sonst
+        # Vorab-Abrufe ueber Apify aus)
+        raise HTTPException(404, NICHT_GEFUNDEN)
     programm_version = _programm_version(user_agent)
     user, v, _firma_doc, _abo = await _programm(werkzeug_id, schluessel, programm_version)
     if not await _vergleich_limiter.check(f"konto:{user['id']}"):      # je Konto (Paket 2): Neu-Verbinden hilft nicht
@@ -494,7 +553,6 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     # Entscheidung Ahmad 06.10.2026: hoechstens 600 Vergleiche je Konto und Tag ueber das Programm
     # (PROGRAMM_TAGESLIMIT_JE_KONTO); der Probelauf zaehlt nicht
     from provider_fetch import TageslimitErreicht, programm_tageslimit
-    import asyncio
     f = body.fahrzeug.model_dump()
 
     async def tageslimit():
@@ -510,9 +568,16 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     # Faellt das Tageslimit (429), sind die anderen Ergebnisse ohne Folgen (nur Lesen).
     verbleibend, (profil, regeln), helfer, erkannt = await asyncio.gather(
         tageslimit(), _firmenregeln(user),
-        db[wz.SAMMLUNG_VERBINDUNGEN].find_one({"werkzeug": wz.BROWSER_HELFER, "user_id": user["id"]},
-                                              {"_id": 0, "programm_version": 1}),
-        asyncio.to_thread(_erkennen, f))
+        db[wz.SAMMLUNG_VERBINDUNGEN].find_one(
+            {"werkzeug": wz.BROWSER_HELFER, "user_id": user["id"]},
+            {"_id": 0, "programm_version": 1, "zuletzt_am": 1, "pc_name": 1, "vorgang_verpasst_am": 1,
+             "vorgang_ok_am": 1}),
+        asyncio.get_running_loop().run_in_executor(_ERKENNEN_POOL, _erkennen, f))
+    # Pruefung 08.10.2026: die Erweiterung zaehlt nur, wenn sie in den letzten Tagen da war (entfernt/abgeschaltet ->
+    # wie ohne), und nicht, solange sie den letzten Vorgang verpasst hat (nicht im Browser des Programms)
+    if not wz.helfer_aktiv(helfer):
+        helfer = None
+    helfer_verpasst = wz.vorgang_verpasst(helfer)
     # 08.10.2026 (Durchsicht vor dem Rollout): neue Wege nur, wenn Programm UND Erweiterung sie kennen —
     # aeltere Versionen arbeiten wie bisher (Vorab-Abruf ueber Apify, Programm oeffnet die Vergleiche selbst)
     helfer_version = (helfer or {}).get("programm_version")
@@ -541,11 +606,12 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     # sie. Kein Apify, kein Tageslimit, keine 32/128 Plaetze. Ohne Helfer wie bisher: Vorab-Abruf ueber Apify.
     # ohne Link (abgewaehltes oder unbekanntes Portal) oeffnet das Programm auch keinen Inserat-Tab -> Vorab wie bisher
     im_browser = (not body.probelauf and bool(f["inserat_url"]) and wz.inserat_im_browser_an() and helfer is not None
-                  and bool(links) and inserat_tab_bekannt)
+                  and bool(links) and inserat_tab_bekannt and not helfer_verpasst)
     # Wunsch Ahmad 08.10.2026 (Vorgangsnummer): hat das Konto die Erweiterung, oeffnet das Programm (ab 1.5.8) nur
     # /app/vorgang/<id> — die Erweiterung holt sich den Vorgang und oeffnet Vergleiche + Inserat selbst. So oeffnet
     # genau EINER die Tabs, und die Erweiterung kennt sie (keine Programm-Suche, kein 30-Minuten-Raten).
-    ueber_helfer = not body.probelauf and helfer is not None and bool(links) and vorgang_bekannt
+    ueber_helfer = (not body.probelauf and helfer is not None and bool(links) and vorgang_bekannt
+                    and not helfer_verpasst)
     if body.probelauf:
         vorab = {"status": "probelauf", "hinweis": ""}
     elif im_browser:
@@ -571,7 +637,9 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
             # Programm ab 1.5.7: das Inserat als Tab mit oeffnen, der Browser-Helfer liest es dort
             "inserat_im_browser": im_browser,
             # Programm ab 1.5.8: Vorgangsnummer; ueber_helfer -> nur /app/vorgang/<id> oeffnen (s. o.)
-            "vorgang_id": eintrag["id"], "ueber_helfer": ueber_helfer}
+            "vorgang_id": eintrag["id"], "ueber_helfer": ueber_helfer,
+            # Programm ab 1.5.9: die Vorgangsseite in DEM Browser oeffnen, in dem die Erweiterung verbunden ist
+            "helfer_browser": wz.helfer_browser((helfer or {}).get("pc_name"))}
 
 
 def _erkennen(f: dict) -> dict:
@@ -646,6 +714,11 @@ _SEITE_MAX = 4 * 1024 * 1024 + 16
 #: gleichzeitig, damit eine Welle grosser Seiten nicht alle Threads (und damit jede andere Anfrage) belegt
 _AUSWERTEN_GLEICHZEITIG = 4
 _auswerten_sperre = None
+#: Pruefung 08.10.2026 (Last): eigene Threads fuer das Auswerten der Seiten und die Erkennung im Programm-Vergleich.
+#: Vorher teilten sie sich den Standard-Pool (8 Threads je Prozess) mit der Passwort-Pruefung (bcrypt), dem Foto-
+#: Verkleinern und dem Betriebscheck — eine Welle grosser Seiten liess Anmeldungen und /vergleich warten.
+_AUSWERTEN_POOL = ThreadPoolExecutor(max_workers=_AUSWERTEN_GLEICHZEITIG, thread_name_prefix="wz-auswerten")
+_ERKENNEN_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="wz-erkennen")
 
 
 _AUSWERTEN_WARTEN_S = 10
@@ -655,7 +728,6 @@ async def _auswerten(fn, *args):
     """Seite im Thread auswerten — hoechstens _AUSWERTEN_GLEICHZEITIG je Prozess. Paket 2 (05.10.2026): wer
     laenger als _AUSWERTEN_WARTEN_S auf einen Platz wartet, bekommt 503 mit Retry-After statt endlos zu warten
     (Cloudflare bricht nach ~100 s ohnehin ab, die Arbeit liefe dann umsonst weiter)."""
-    import asyncio
     global _auswerten_sperre
     if _auswerten_sperre is None:
         _auswerten_sperre = asyncio.Semaphore(_AUSWERTEN_GLEICHZEITIG)
@@ -665,7 +737,7 @@ async def _auswerten(fn, *args):
         raise HTTPException(503, "Gerade werden viele Seiten ausgewertet – bitte gleich noch einmal.",
                             headers={"Retry-After": "5"})
     try:
-        return await asyncio.to_thread(fn, *args)
+        return await asyncio.get_running_loop().run_in_executor(_AUSWERTEN_POOL, functools.partial(fn, *args))
     finally:
         _auswerten_sperre.release()
 
@@ -873,6 +945,10 @@ async def werkzeug_programm_suche(werkzeug_id: str, body: ProgrammSucheIn,
 # Erweiterung uebernimmt ihn (POST …/vorgang/<id>/uebernehmen) und oeffnet Vergleiche + Inserat selbst. Das Programm
 # fragt kurz nach (GET …/vorgang/<id>) und oeffnet nur, wenn niemand uebernommen hat, selbst (Erweiterung nicht in
 # diesem Browser). Ohne Erweiterung bleibt alles wie bisher.
+# Pruefung 08.10.2026: das Nachfragen war nicht exklusiv — kam die Erweiterung nach den 3 s doch noch (kalter
+# Browserstart, langsamer Server), oeffneten BEIDE (alles doppelt), und ein Klick auf das naechste Auto liess die Tabs
+# des alten spaeter aufgehen. Seit Programm 1.5.9 / Erweiterung 2.7.3 nimmt das Programm den Vorgang in EINEM Zug
+# selbst (POST …/selbst, programm_am); danach bekommt die Erweiterung "zu_spaet" — genau einer oeffnet.
 VORGANG_MINUTEN = 10
 _VORGANG_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 _VORGANG_FAHRZEUG = ("marke", "modell", "titel", "ez_monat", "ez_jahr", "kilometer", "ps", "preis", "quelle",
@@ -917,14 +993,51 @@ async def werkzeug_vorgang_uebernehmen(werkzeug_id: str, vorgang_id: str,
         raise HTTPException(404, "Vorgang nicht gefunden.")
     doc = await db[wz.SAMMLUNG_VERGLEICHE].find_one_and_update(
         {"id": vorgang_id, "werkzeug": wz.AUTOPOINTER, "user_id": user["id"], "probelauf": {"$ne": True},
-         "erstellt_am": {"$gte": _seit(VORGANG_MINUTEN)}, "helfer_am": {"$exists": False}},
+         "erstellt_am": {"$gte": _seit(VORGANG_MINUTEN)}, "helfer_am": {"$exists": False},
+         "programm_am": {"$exists": False}},
         {"$set": {"helfer_am": now_iso()}}, projection={"_id": 0}, return_document=ReturnDocument.AFTER)
     if doc is not None:
+        # die Erweiterung ist wieder da: das Programm darf ihr die naechsten Vorgaenge geben (wz.vorgang_verpasst)
+        await db[wz.SAMMLUNG_VERBINDUNGEN].update_one({"id": _v["id"]}, {"$set": {"vorgang_ok_am": now_iso()}})
         return {**_vorgang_antwort(doc), "schon_uebernommen": False}
     vorhanden = await _vorgang_doc(vorgang_id, user["id"])
     if vorhanden is None:
         raise HTTPException(404, "Vorgang nicht gefunden oder abgelaufen.")
+    if not vorhanden.get("helfer_am") and vorhanden.get("programm_am"):
+        # zu spaet: das Programm hat die Tabs schon selbst geoeffnet — die Erweiterung oeffnet nichts (auch 2.7.2 nicht:
+        # schon_uebernommen) und schliesst ab 2.7.3 die Vorgangsseite
+        return {**_vorgang_antwort(vorhanden), "schon_uebernommen": True, "zu_spaet": True}
     return {**_vorgang_antwort(vorhanden), "schon_uebernommen": True}
+
+
+@router.post("/werkzeuge/{werkzeug_id}/vorgang/{vorgang_id}/selbst")
+async def werkzeug_vorgang_selbst(werkzeug_id: str, vorgang_id: str,
+                                  schluessel: Optional[str] = Header(None, alias=wz.TOKEN_KOPF),
+                                  user_agent: Optional[str] = Header(None, alias="User-Agent")):
+    """Pruefung 08.10.2026 (Programm ab 1.5.9): die Erweiterung hat den Vorgang nach ein paar Sekunden nicht
+    uebernommen — das Programm nimmt ihn in EINEM Zug selbst. {"selbst": true} = das Programm oeffnet die Tabs (die
+    Erweiterung bekommt ab jetzt "zu_spaet"), {"selbst": false} = die Erweiterung war schneller, nichts tun.
+    Wiederholt das Programm die Anfrage (Netz), bleibt es bei der ersten Antwort."""
+    if _ist_browser(werkzeug_id):
+        raise HTTPException(404, NICHT_GEFUNDEN)
+    user, _v, _firma_doc, _abo = await _programm(werkzeug_id, schluessel, _programm_version(user_agent))
+    if not _VORGANG_ID.match(vorgang_id):
+        raise HTTPException(404, "Vorgang nicht gefunden.")
+    jetzt = now_iso()
+    r = await db[wz.SAMMLUNG_VERGLEICHE].update_one(
+        {"id": vorgang_id, "werkzeug": wz.AUTOPOINTER, "user_id": user["id"], "probelauf": {"$ne": True},
+         "erstellt_am": {"$gte": _seit(VORGANG_MINUTEN)}, "helfer_am": {"$exists": False},
+         "programm_am": {"$exists": False}},
+        {"$set": {"programm_am": jetzt}})
+    if r.modified_count:
+        # die Erweiterung hat diesen Vorgang verpasst: die naechsten Autos gleich selbst oeffnen (wz.vorgang_verpasst)
+        await db[wz.SAMMLUNG_VERBINDUNGEN].update_one(
+            {"werkzeug": wz.BROWSER_HELFER, "user_id": user["id"]}, {"$set": {"vorgang_verpasst_am": jetzt}})
+        return {"selbst": True}
+    doc = await _vorgang_doc(vorgang_id, user["id"], {"_id": 0, "helfer_am": 1, "programm_am": 1})
+    if doc is None:
+        raise HTTPException(404, "Vorgang nicht gefunden oder abgelaufen.")
+    return {"selbst": not doc.get("helfer_am") and bool(doc.get("programm_am"))}
 
 
 @router.get("/werkzeuge/{werkzeug_id}/vorgang/{vorgang_id}")
@@ -948,7 +1061,9 @@ async def app_vorgang(vorgang_id: str, user=Depends(current_user)):
     doc = await _vorgang_doc(vorgang_id, user["id"], minuten=None)
     if doc is None:
         raise HTTPException(404, "Vorgang nicht gefunden.")
-    return {**_vorgang_antwort(doc), "uebernommen": bool(doc.get("helfer_am"))}
+    return {**_vorgang_antwort(doc), "uebernommen": bool(doc.get("helfer_am")),
+            # Pruefung 08.10.2026: das Programm hat die Vergleiche selbst geoeffnet (Erweiterung hat nicht uebernommen)
+            "programm_selbst": bool(doc.get("programm_am")) and not doc.get("helfer_am")}
 
 
 @router.post("/werkzeuge/app-start/{start}")
@@ -974,6 +1089,8 @@ async def werkzeug_app_start_melden(start: str, user=Depends(current_firma)):
 async def werkzeug_app_start_pruefen(werkzeug_id: str, start: str,
                                      schluessel: Optional[str] = Header(None, alias=wz.TOKEN_KOPF)):
     """Nur fuer Starts derselben Firma — ein fremdes Programm erfaehrt nichts ueber andere Konten."""
+    if _ist_browser(werkzeug_id):
+        raise HTTPException(404, NICHT_GEFUNDEN)        # Pruefung 08.10.2026: nur das Windows-Programm fragt das
     user, _v, _firma_doc, _abo = await _programm(werkzeug_id, schluessel)
     if not _START_KENNUNG.match(start or ""):
         return {"bestaetigt": False}
@@ -1036,6 +1153,7 @@ async def werkzeug_firma_trennen(werkzeug_id: str, konto_id: str, user=Depends(c
     r = await db[wz.SAMMLUNG_VERBINDUNGEN].delete_many(filt)
     if not r.deleted_count:
         raise HTTPException(404, "Keine Verbindung für dieses Konto.")
+    await _codes_verwerfen(werkzeug_id, konto_id)
     await _getrennt_merken(werkzeug_id, alte, "chef")
     await log_activity_sicher(user["dealer_id"], user["id"], "werkzeug.getrennt_durch_chef", ref=konto_id)
     return {"ok": True}
@@ -1134,6 +1252,7 @@ async def admin_werkzeug_trennen(konto_id: str, werkzeug: str = wz.AUTOPOINTER,
     filt = {"werkzeug": werkzeug, "user_id": konto_id}
     alte = [x.get("token_hash") async for x in db[wz.SAMMLUNG_VERBINDUNGEN].find(filt, {"_id": 0, "token_hash": 1})]
     r = await db[wz.SAMMLUNG_VERBINDUNGEN].delete_many(filt)
+    await _codes_verwerfen(werkzeug, konto_id)
     await _getrennt_merken(werkzeug, alte, "betreiber")
     await log_activity_sicher(admin.get("dealer_id", ""), admin["id"], "admin.werkzeug.getrennt", ref=konto_id)
     return {"ok": True, "getrennt": r.deleted_count}

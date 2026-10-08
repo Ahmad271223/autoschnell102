@@ -90,10 +90,19 @@ describe("Vorgangsseite (Rückfall ohne Erweiterung)", () => {
     expect(el("vorgang-fehler").textContent).toContain("gibt es nicht");
   });
 
+  it("hat das Programm selbst geöffnet, sagt die Seite das (Prüfung 08.10.2026)", async () => {
+    api.get.mockResolvedValue({ data: { vorgang_id: ID, uebernommen: false, programm_selbst: true, links: [], fahrzeug: {} } });
+    await act(async () => { wurzel.render(createElement(Vorgang)); });
+    await warten();
+    expect(el("vorgang-hinweis").textContent).toContain("hat die Vergleiche direkt geöffnet");
+  });
+
   it("nur https-Adressen der Portale", () => {
     expect(sichererLink("https://www.kleinanzeigen.de/s-anzeige/123")).toBe("https://www.kleinanzeigen.de/s-anzeige/123");
     expect(sichererLink("http://suchen.mobile.de/x")).toBeNull();
     expect(sichererLink("https://boese.example/x")).toBeNull();
     expect(sichererLink("javascript:alert(1)")).toBeNull();
+    // Pruefung 08.10.2026: Python sah hier suchen.mobile.de, ein Browser oeffnet fremd.example
+    expect(sichererLink("https://fremd.example\\@suchen.mobile.de/fahrzeuge/details.html?id=12345678")).toBeNull();
   });
 });

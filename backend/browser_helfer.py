@@ -22,6 +22,7 @@ Kein FastAPI, keine Datenbank — die Tests nutzen das Modul direkt.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import math
 import re
@@ -51,6 +52,9 @@ MAX_TEXT = 500
 MAX_LISTE = 400
 MAX_BILDER = 60
 MAX_HREF = 2000
+#: Pruefung 08.10.2026: eine echte Ergebnisseite hat je Angebot ein bis drei Inserat-Links (20–50 Angebote) — eine
+#: gebaute Seite mit Tausenden hielt einen Prozess sekundenlang fest (mobile_karten)
+MAX_KARTEN_LINKS = 600
 
 
 def _keine_konstante(name):
@@ -83,17 +87,34 @@ class SeiteUngueltig(ValueError):
 #: Lesung ohne KONTAKT_FELDER (Telefon/E-Mail tragen sie im Kaufvertrag selbst ein).
 SAMMLUNG_INSERATE = "werkzeug_inserate"
 INSERAT_STUNDEN = 24
-KONTAKT_FELDER = ("seller_phone", "seller_email", "seller_address")
+#: Pruefung 08.10.2026 (Datenschutz): auch der Name des Ansprechpartners eines Haendlers (eine Person) bleibt in der
+#: eigenen Firma — und bei PRIVATEN Verkaeufern Name und Kleinanzeigen-Name (personenbezogen). Haendlername, PLZ und
+#: Ort bleiben fuer alle (Firmenangaben, Standort fuer Vergleich und Abholung).
+KONTAKT_FELDER = ("seller_phone", "seller_email", "seller_address", "seller_ansprechpartner")
+PRIVAT_FELDER = ("seller_name", "seller_alias")
+
+
+def _pruefsumme(daten: dict) -> str:
+    return hashlib.sha256(json.dumps(daten, sort_keys=True, default=str, ensure_ascii=False)
+                          .encode("utf-8")).hexdigest()
 
 
 async def inserat_merken(db, identity: dict, url: str, fahrzeug: dict, user: dict) -> None:
     jetzt = datetime.now(timezone.utc)
+    daten = {k: v for k, v in fahrzeug.items() if not str(k).startswith("_")}
+    pruef = _pruefsumme(daten)
+    zeit = {"gelesen_am": jetzt, "ablauf": jetzt + timedelta(hours=INSERAT_STUNDEN)}
+    filt = {"cache_key": identity["cache_key"], "user_id": user["id"]}
+    # Pruefung 08.10.2026 (Last): dieselbe Seite noch einmal (Neuladen, naechster Vorgang zum selben Auto) — nur die
+    # Zeit auffrischen statt die ganze Lesung (10–20 KB) neu zu schreiben (jeder Schreibzugriff geht ins Oplog)
+    r = await db[SAMMLUNG_INSERATE].update_one(
+        {**filt, "pruefsumme": pruef, "url": url, "dealer_id": user.get("dealer_id") or ""}, {"$set": zeit})
+    if r.matched_count:
+        return
     await db[SAMMLUNG_INSERATE].update_one(
-        {"cache_key": identity["cache_key"], "user_id": user["id"]},
+        filt,
         {"$set": {"dealer_id": user.get("dealer_id") or "", "source": identity["source"],
-                  "item_id": identity["item_id"], "url": url,
-                  "data": {k: v for k, v in fahrzeug.items() if not str(k).startswith("_")},
-                  "gelesen_am": jetzt, "ablauf": jetzt + timedelta(hours=INSERAT_STUNDEN)}},
+                  "item_id": identity["item_id"], "url": url, "data": daten, "pruefsumme": pruef, **zeit}},
         upsert=True)
 
 
@@ -126,6 +147,9 @@ async def inserat_lesen(db, cache_key: str, user_id: str,
     if not eigen and (not dealer_id or (d.get("dealer_id") or "") != dealer_id):
         for feld in KONTAKT_FELDER:
             daten.pop(feld, None)
+        if daten.get("seller_type") != "haendler":
+            for feld in PRIVAT_FELDER:
+                daten.pop(feld, None)
     return daten, d.get("gelesen_am"), {"user_id": d.get("user_id") or "",
                                         "dealer_id": d.get("dealer_id") or ""}
 
@@ -630,12 +654,16 @@ def mobile_karten(html: str) -> Dict[str, dict]:
     except Exception:  # noqa: BLE001 — ohne Karten zaehlen nur die eingebetteten Daten
         return {}
     karten: Dict[str, dict] = {}
-    for a in baum.xpath('//a[contains(@href, "details.html?")]'):
+    for n, a in enumerate(baum.xpath('//a[contains(@href, "details.html?")]')):
+        if n >= MAX_KARTEN_LINKS:
+            break
         href = a.get("href") or ""
         if len(href) > MAX_HREF:             # eine echte Inserat-Adresse ist kurz; lange liefen quadratisch
             continue
-        m = re.search(r"details\.html\?(?:[^\"'#]*&)?id=(\d+)", href)
-        if not m or m.group(1) in karten:
+        # Pruefung 08.10.2026: die Nummer per parse_qs (linear) statt mit einem Muster, das bei gebauten Adressen
+        # vielfach zuruecksprang
+        kennung = ((parse_qs(urlparse(href).query).get("id") or [""])[0]).strip()
+        if not (kennung.isascii() and kennung.isdigit()) or kennung in karten:
             continue
         zeilen = [z.strip() for z in a.itertext() if z.strip() and z.strip() != "•"]
         titel = []
@@ -644,7 +672,7 @@ def mobile_karten(html: str) -> Dict[str, dict]:
                 break
             if z.lower() not in _MOBILE_ABZEICHEN:
                 titel.append(z)
-        karten[m.group(1)] = {"titel": " ".join(titel)[:200],
+        karten[kennung] = {"titel": " ".join(titel)[:200],
                               "zustand": [z for z in zeilen if z.lower() in _MOBILE_ZUSTAENDE]}
     return karten
 

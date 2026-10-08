@@ -1270,6 +1270,8 @@ WERKZEUG_INDIZES = (
     # ein PC je Konto und Werkzeug — die Verbindung wird per upsert ersetzt
     ("werkzeug_verbindungen", [("werkzeug", 1), ("user_id", 1)], {"name": "werkzeug_pc_je_konto", "unique": True}),
     ("werkzeug_verbindungen", [("werkzeug", 1), ("token_hash", 1)], {"name": "werkzeug_schluessel"}),
+    # Pruefung 08.10.2026 (Last): "zuletzt aktiv" und der Vorab-Tausch schreiben je Vergleich ueber "id"
+    ("werkzeug_verbindungen", [("id", 1)], {"name": "werkzeug_verbindung_id"}),
     ("werkzeug_codes", [("code_hash", 1), ("benutzt", 1)], {"name": "werkzeug_code"}),
     ("werkzeug_vergleiche", [("werkzeug", 1), ("dealer_id", 1), ("erstellt_am", -1)],
      {"name": "werkzeug_vergleiche_firma"}),
@@ -1294,6 +1296,8 @@ WERKZEUG_INDIZES = (
     # Browser-Helfer (04.10.2026): gelesene Inserate je Konto fuer den Kaufvertrag (24 h, browser_helfer.py)
     ("werkzeug_inserate", [("cache_key", 1), ("user_id", 1)], {"name": "werkzeug_inserat_konto", "unique": True}),
     ("werkzeug_inserate", [("ablauf", 1)], {"name": "werkzeug_inserat_ablauf", "expireAfterSeconds": 0}),
+    # Pruefung 08.10.2026 (Last): Lesung der eigenen Firma bzw. die juengste irgendeines Kontos (inserat_lesen)
+    ("werkzeug_inserate", [("cache_key", 1), ("gelesen_am", -1)], {"name": "werkzeug_inserat_juengste"}),
 )
 
 

@@ -591,7 +591,11 @@ async def _kern_fehler() -> list:
     except Exception:  # noqa: BLE001
         pass
     try:
-        fehler += await asyncio.to_thread(_platte_fehler)
+        # Pruefung 08.10.2026: mit Zeitgrenze — haengt die Platte (oder sind alle Threads belegt), wartete der
+        # Betriebscheck sonst endlos, und der Lastverteiler nahm den Server heraus
+        fehler += await asyncio.wait_for(asyncio.to_thread(_platte_fehler), 5)
+    except asyncio.TimeoutError:
+        fehler.append("platte: Prüfung dauert zu lange")
     except Exception as exc:  # noqa: BLE001
         fehler.append(f"platte: {exc}")
     _KERN_CACHE["bis"] = _time.monotonic() + 60

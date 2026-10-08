@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { ExternalLink, FileSignature, Monitor } from "lucide-react";
 import { api, errMsg } from "@/lib/api";
-import { fahrzeugText } from "@/components/ProgrammVergleiche";
+import { fahrzeugText, sichererLink } from "@/components/ProgrammVergleiche";
 
 /**
  * Vorgangsseite (Wunsch Ahmad 08.10.2026, Vorgangsnummer). Das Windows-Programm (ab 1.5.8) öffnet bei Konten mit
@@ -11,16 +11,7 @@ import { fahrzeugText } from "@/components/ProgrammVergleiche";
  * fehlt die Erweiterung hier (oder sie ist nicht verbunden) — dann öffnet das Programm die Vergleiche nach wenigen
  * Sekunden selbst. Diese Seite sagt das und bietet die Links zum selbst Öffnen und den Kaufvertrag an.
  */
-const PORTAL_HOSTS = /^(suchen\.mobile\.de|www\.autoscout24\.(de|at|ch)|(www\.)?kleinanzeigen\.de)$/;
-
-export function sichererLink(url) {
-  try {
-    const u = new URL(String(url || ""));
-    return u.protocol === "https:" && PORTAL_HOSTS.test(u.hostname) ? u.toString() : null;
-  } catch {
-    return null;
-  }
-}
+export { sichererLink };
 
 export default function Vorgang() {
   const { id } = useParams();
@@ -78,6 +69,10 @@ export default function Vorgang() {
                style={{ border: "1px solid var(--border-default)", background: "var(--bg-surface)" }}>
             {uebernommen
               ? "Die Browser-Erweiterung hat die Vergleiche und das Inserat geöffnet."
+              : daten.programm_selbst
+                ? "Das Vergleichs-Programm hat die Vergleiche direkt geöffnet – die Browser-Erweiterung hat in diesem "
+                  + "Browser nicht übernommen (nicht installiert, abgeschaltet oder nicht verbunden). Diese Seite kann "
+                  + "geschlossen werden."
               : "Die Browser-Erweiterung ist in diesem Browser nicht aktiv (nicht installiert oder nicht verbunden). "
                 + "Das Vergleichs-Programm öffnet die Vergleiche deshalb gleich selbst – ohne Ampel. "
                 + "Für Ampel und Kaufvertrag mit einem Klick: die Erweiterung in dem Browser installieren und verbinden, "

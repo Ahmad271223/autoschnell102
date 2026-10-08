@@ -5,6 +5,19 @@ import { ExternalLink, MonitorX } from "lucide-react";
  * welche PCs sind verbunden. Gemeinsam fuer die Chef-Ansicht (eigene Firma) und den Betreiber (alle).
  * Keine Programmnamen hier — die kommen vom Server.
  */
+// Pruefung 08.10.2026: nur https-Adressen der drei Portale verlinken — eine eingeschickte Adresse wie
+// "https://fremd.de\@suchen.mobile.de/…" landete sonst als "Inserat öffnen" in Chef- und Betreiber-Liste
+const PORTAL_HOSTS = /^(suchen\.mobile\.de|www\.autoscout24\.(de|at|ch)|(www\.)?kleinanzeigen\.de)$/;
+
+export function sichererLink(url) {
+  try {
+    const u = new URL(String(url || ""));
+    return u.protocol === "https:" && PORTAL_HOSTS.test(u.hostname) ? u.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
 export function zeit(iso) {
   if (!iso) return "–";
   const d = new Date(iso);
@@ -72,9 +85,9 @@ export function VergleichsTabelle({ vergleiche = [], mitFirma = false }) {
               <td className="py-2 pr-3">{fahrzeugText(x.fahrzeug)}</td>
               <td className="py-2 pr-3 text-xs text-zinc-500">
                 {[x.fahrzeug?.quelle, x.fahrzeug?.inserat_id].filter(Boolean).join(" · ") || "–"}
-                {x.fahrzeug?.inserat_url && (
+                {sichererLink(x.fahrzeug?.inserat_url) && (
                   <div>
-                    <a href={x.fahrzeug.inserat_url} target="_blank" rel="noopener noreferrer"
+                    <a href={sichererLink(x.fahrzeug.inserat_url)} target="_blank" rel="noopener noreferrer"
                        className="inline-flex items-center gap-1 underline" data-testid={`pv-inserat-${x.id}`}>
                       Inserat öffnen <ExternalLink size={11} />
                     </a>
@@ -83,8 +96,8 @@ export function VergleichsTabelle({ vergleiche = [], mitFirma = false }) {
               </td>
               <td className="py-2 pr-3">
                 <div className="flex flex-wrap gap-2">
-                  {(x.links || []).map((l) => (
-                    <a key={l.portal} href={l.url} target="_blank" rel="noopener noreferrer"
+                  {(x.links || []).filter((l) => sichererLink(l.url)).map((l) => (
+                    <a key={l.portal} href={sichererLink(l.url)} target="_blank" rel="noopener noreferrer"
                        className="inline-flex items-center gap-1 text-xs underline">
                       {l.portal} <ExternalLink size={11} />
                     </a>

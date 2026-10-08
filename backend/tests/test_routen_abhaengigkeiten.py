@@ -112,6 +112,7 @@ OEFFENTLICH = {
     # Vorgaenge DESSELBEN Kontos (routes/werkzeuge._vorgang_doc)
     "/api/werkzeuge/{werkzeug_id}/vorgang/{vorgang_id}",
     "/api/werkzeuge/{werkzeug_id}/vorgang/{vorgang_id}/uebernehmen",
+    "/api/werkzeuge/{werkzeug_id}/vorgang/{vorgang_id}/selbst",      # Pruefung 08.10.2026: Programm nimmt ihn selbst
 }
 # ... davon tragen diese trotzdem eine Kette (Besucher ODER Kaeufer, bzw. der
 # Marktplatz-Schalter) — sie zaehlen nicht als "ganz ohne Abhaengigkeit":

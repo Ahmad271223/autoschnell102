@@ -1093,7 +1093,8 @@ def test_45_inserat_lesen_kontaktdaten_nur_eigene_firma():
         try:
             jetzt = datetime.now(timezone.utc)
             daten = {"make_label": "VW", "seller_name": "Vera", "seller_phone": "0170 1", "seller_email": "v@x.de",
-                     "seller_address": "Weg 1", "seller_zip": "30159"}
+                     "seller_address": "Weg 1", "seller_zip": "30159", "seller_type": "haendler",
+                     "seller_ansprechpartner": "Herr Berater"}
             for uid, did, alter in (("u_a", "firma_a", 5), ("u_b", "firma_b", 1)):
                 await db[bh.SAMMLUNG_INSERATE].insert_one({
                     "cache_key": "mobile:1", "user_id": uid, "dealer_id": did, "data": dict(daten, seller_name=uid),
@@ -1108,6 +1109,18 @@ def test_45_inserat_lesen_kontaktdaten_nur_eigene_firma():
             assert not any(k in fremd[0] for k in bh.KONTAKT_FELDER) and fremd[0]["seller_zip"] == "30159"
             ohne_firma = await bh.inserat_lesen(db, "mobile:1", "", None)
             assert not any(k in ohne_firma[0] for k in bh.KONTAKT_FELDER)
+            # Pruefung 08.10.2026: Ansprechpartner (eine Person) nie fuer Fremde; bei PRIVATEN Verkaeufern auch kein
+            # Name/Kleinanzeigen-Name — PLZ und Ort bleiben (Standort)
+            assert "seller_ansprechpartner" not in fremd[0] and fremd[0]["seller_name"] == "u_b"
+            await db[bh.SAMMLUNG_INSERATE].insert_one({
+                "cache_key": "mobile:2", "user_id": "u_b", "dealer_id": "firma_b", "gelesen_am": jetzt,
+                "ablauf": jetzt + timedelta(hours=1),
+                "data": {"make_label": "VW", "seller_type": "privat", "seller_name": "Vera Muster",
+                         "seller_alias": "vera77", "seller_zip": "30159", "seller_city": "Hannover"}})
+            privat = (await bh.inserat_lesen(db, "mobile:2", "u_c", "firma_c"))[0]
+            assert "seller_name" not in privat and "seller_alias" not in privat
+            assert privat["seller_zip"] == "30159" and privat["seller_city"] == "Hannover"
+            assert (await bh.inserat_lesen(db, "mobile:2", "u_b2", "firma_b"))[0]["seller_name"] == "Vera Muster"
             # gespeichert bleibt alles (die liefernde Firma braucht es weiter)
             roh = await db[bh.SAMMLUNG_INSERATE].find_one({"user_id": "u_b"})
             assert roh["data"]["seller_phone"] == "0170 1"
@@ -1146,8 +1159,9 @@ def test_47_vorgangsnummer_programm_erweiterung_app(welt):
     import re
     from datetime import datetime, timedelta, timezone
     db, helfer = welt["db"], welt.get("prog") or _verbinden(welt)
-    # die Erweiterung muss den Vorgang kennen (ab 2.7.2) — ihre Version kommt mit jeder Anfrage (hier /status)
-    helfer = {**helfer, "X-Werkzeug-Version": "2.7.2"}
+    # die Erweiterung muss den Vorgang kennen (seit Pruefung 08.10.2026: ab 2.7.3) — ihre Version kommt mit jeder
+    # Anfrage (hier /status)
+    helfer = {**helfer, "X-Werkzeug-Version": "2.7.3"}
     assert requests.get(f"{API}/werkzeuge/{WID}/status", headers=helfer, timeout=30).status_code == 200
     pc = _verbinden(welt, "sucher", wid=wz.AUTOPOINTER, name="PC-Vorgang")
     f = {"marke": "VW", "modell": "Golf", "marke_modell_text": "VW Golf", "titel": "VW Golf VII 2.0 GTI TCR",
@@ -1156,7 +1170,7 @@ def test_47_vorgangsnummer_programm_erweiterung_app(welt):
 
     def vergleich(**zusatz):
         return requests.post(f"{API}/werkzeuge/{wz.AUTOPOINTER}/vergleich", timeout=60,
-                             headers={**pc, "User-Agent": "AutoSchnell-Vergleich/1.5.8"}, json={"fahrzeug": f, **zusatz})
+                             headers={**pc, "User-Agent": "AutoSchnell-Vergleich/1.5.9"}, json={"fahrzeug": f, **zusatz})
 
     def uebernehmen(vid):
         return requests.post(f"{API}/werkzeuge/{WID}/vorgang/{vid}/uebernehmen", headers=helfer, timeout=30)
@@ -1212,10 +1226,152 @@ def test_47_vorgangsnummer_programm_erweiterung_app(welt):
         db.link_jobs.delete_many({"url": MOBILE_URL})
 
 
+def test_47b_vorgang_genau_einer_oeffnet(welt):
+    """Pruefung 08.10.2026: die Uebergabe war nicht exklusiv — kam die Erweiterung nach den Sekunden des Programms doch
+    noch, oeffneten BEIDE. Jetzt nimmt das Programm den Vorgang in einem Zug selbst (…/selbst); die Erweiterung
+    bekommt danach "zu_spaet". War die Erweiterung schneller, sagt …/selbst "nein". Wer verpasst, bekommt die naechsten
+    Autos nicht mehr (bis sie wieder einen uebernimmt, neu verbunden wird oder 6 Stunden um sind); eine Erweiterung,
+    die tagelang nichts vom Server wollte, zaehlt nicht. Die Vorgangsseite geht im Browser der Erweiterung auf."""
+    from datetime import datetime, timedelta, timezone
+    db = welt["db"]
+    helfer = {**_verbinden(welt, name="Chrome · Windows"), "X-Werkzeug-Version": "2.7.3"}
+    assert requests.get(f"{API}/werkzeuge/{WID}/status", headers=helfer, timeout=30).status_code == 200
+    pc = {**_verbinden(welt, "sucher", wid=wz.AUTOPOINTER, name="PC-Vorgang2"), "User-Agent": "AutoSchnell-Vergleich/1.5.9"}
+    f = {"marke": "VW", "modell": "Golf", "marke_modell_text": "VW Golf", "titel": "VW Golf VII",
+         "ez_monat": 5, "ez_jahr": 2019, "kilometer": 60000, "kw": 110, "ps": 150, "kraftstoff": "Benzin",
+         "getriebe": "Automatik", "preis": 18850, "quelle": "mobile.de", "inserat_id": MOBILE_ID, "roh": True}
+
+    def vergleich():
+        r = requests.post(f"{API}/werkzeuge/{wz.AUTOPOINTER}/vergleich", headers=pc, json={"fahrzeug": f}, timeout=60)
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    def uebernehmen(vid):
+        return requests.post(f"{API}/werkzeuge/{WID}/vorgang/{vid}/uebernehmen", headers=helfer, timeout=30)
+
+    def selbst(vid, kopf=None):
+        return requests.post(f"{API}/werkzeuge/{wz.AUTOPOINTER}/vorgang/{vid}/selbst", headers=kopf or pc, timeout=30)
+
+    verbindung = {"werkzeug": WID, "user_id": welt["sucher_id"]}
+    try:
+        d = vergleich()
+        assert d["ueber_helfer"] is True and d["helfer_browser"] == "chrome", d
+        # 1) die Erweiterung ist schnell: das Programm nimmt nichts
+        assert uebernehmen(d["vorgang_id"]).json()["schon_uebernommen"] is False
+        assert selbst(d["vorgang_id"]).json() == {"selbst": False}
+        # 2) die Erweiterung kommt zu spaet: das Programm hat ihn, sie oeffnet nichts (auch 2.7.2 nicht)
+        d2 = vergleich()
+        assert d2["ueber_helfer"] is True
+        assert selbst(d2["vorgang_id"]).json() == {"selbst": True}
+        assert selbst(d2["vorgang_id"]).json() == {"selbst": True}, "Wiederholung (Netz): dieselbe Antwort"
+        spaet = uebernehmen(d2["vorgang_id"]).json()
+        assert spaet["zu_spaet"] is True and spaet["schon_uebernommen"] is True
+        app = requests.get(f"{API}/werkzeuge/vorgang/{d2['vorgang_id']}", headers=welt["sucher"], timeout=30).json()
+        assert app["programm_selbst"] is True and app["uebernommen"] is False
+        # 3) verpasst: das naechste Auto oeffnet das Programm gleich selbst — auch kein Inserat-Tab fuer die Erweiterung
+        d3 = vergleich()
+        assert d3["ueber_helfer"] is False and d3["inserat_im_browser"] is False, d3
+        # ... bis die Erweiterung wieder einen Vorgang hat (hier: Merker zurueckgesetzt wie nach 6 Stunden)
+        alt = (datetime.now(timezone.utc) - timedelta(hours=7)).isoformat()
+        db.werkzeug_verbindungen.update_one(verbindung, {"$set": {"vorgang_verpasst_am": alt}})
+        d4 = vergleich()
+        assert d4["ueber_helfer"] is True
+        assert uebernehmen(d4["vorgang_id"]).json()["schon_uebernommen"] is False
+        assert db.werkzeug_verbindungen.find_one(verbindung)["vorgang_ok_am"] > alt
+        assert vergleich()["ueber_helfer"] is True
+        # 4) eine Erweiterung, die seit 8 Tagen nichts wollte, zaehlt nicht (entfernt/abgeschaltet)
+        db.werkzeug_verbindungen.update_one(verbindung, {"$set": {"zuletzt_am": (datetime.now(timezone.utc)
+                                                                                - timedelta(days=8)).isoformat()}})
+        d5 = vergleich()
+        assert d5["ueber_helfer"] is False and d5["helfer_browser"] == "", d5
+        # 5) Fremde Schluessel und Nummern
+        assert requests.post(f"{API}/werkzeuge/{WID}/vorgang/{d4['vorgang_id']}/selbst", headers=helfer,
+                             timeout=30).status_code == 404, "nur das Programm"
+        assert selbst(d4["vorgang_id"], helfer).status_code == 401, "Erweiterungs-Schluessel gilt fuers Programm nicht"
+        assert selbst(str(uuid.uuid4())).status_code == 404 and selbst("kaputt").status_code == 404
+    finally:
+        db.werkzeug_vergleiche.delete_many({"werkzeug": wz.AUTOPOINTER, "user_id": welt["sucher_id"]})
+        db.link_jobs.delete_many({"url": MOBILE_URL})
+
+
+def test_47c_helfer_browser_und_merker():
+    """Pruefung 08.10.2026: Browser der Erweiterung aus ihrem Namen; die Merker fuer verpasste Vorgaenge."""
+    from datetime import datetime, timedelta, timezone
+    assert wz.helfer_browser("Chrome · Windows") == "chrome" and wz.helfer_browser("Edge · Windows") == "edge"
+    assert wz.helfer_browser("Browser") == "" and wz.helfer_browser(None) == ""
+    jetzt = datetime.now(timezone.utc)
+    vor = lambda **k: (jetzt - timedelta(**k)).isoformat()      # noqa: E731
+    assert wz.helfer_aktiv({"zuletzt_am": vor(days=1)}) and not wz.helfer_aktiv({"zuletzt_am": vor(days=8)})
+    assert not wz.helfer_aktiv(None) and not wz.helfer_aktiv({})
+    assert not wz.vorgang_verpasst({}) and wz.vorgang_verpasst({"vorgang_verpasst_am": vor(minutes=5)})
+    assert not wz.vorgang_verpasst({"vorgang_verpasst_am": vor(minutes=5), "vorgang_ok_am": vor(minutes=1)})
+    assert not wz.vorgang_verpasst({"vorgang_verpasst_am": vor(hours=7)}), "nach 6 Stunden ein neuer Versuch"
+
+
 def test_48_mindestversionen():
     """Durchsicht vor dem Rollout 08.10.2026: neue Wege nur mit Programm UND Erweiterung, die sie kennen."""
     assert wz.version_mindestens("1.5.8", "1.5.8") and wz.version_mindestens("1.5.10", "1.5.8")
     assert wz.version_mindestens("2.8.0", "2.7.2") and not wz.version_mindestens("2.7.1", "2.7.2")
     assert not wz.version_mindestens(None, "1.5.7") and not wz.version_mindestens("", "1.5.7")
     assert not wz.version_mindestens("kaputt", "1.5.7") and not wz.version_mindestens("1.5.x", "1.5.7")
+    # Pruefung 08.10.2026: Vorgang erst mit der atomaren Uebergabe (1.5.8 / 2.7.2 kamen nie zum Kunden)
+    assert (wz.VORGANG_PROGRAMM, wz.VORGANG_HELFER) == ("1.5.9", "2.7.3")
+
+
+def test_49_gleiche_seite_schreibt_nur_die_zeit():
+    """Pruefung 08.10.2026 (Last): dieselbe Lesung noch einmal (Neuladen) schreibt nicht die ganze Seite neu."""
+    import asyncio
+    import os
+    from motor.motor_asyncio import AsyncIOMotorClient
+
+    async def lauf():
+        client = AsyncIOMotorClient(os.environ.get("MONGO_URL", "mongodb://localhost:27017"))
+        db = client["bh_merken_" + uuid.uuid4().hex[:8]]
+        try:
+            ident = {"cache_key": "mobile:9", "source": "mobile", "item_id": "9"}
+            user = {"id": "u1", "dealer_id": "d1"}
+            await bh.inserat_merken(db, ident, "https://suchen.mobile.de/x?id=9", {"make_label": "VW", "_tmp": 1}, user)
+            erst = await db[bh.SAMMLUNG_INSERATE].find_one({"user_id": "u1"})
+            assert erst["data"] == {"make_label": "VW"} and erst["pruefsumme"]
+            await db[bh.SAMMLUNG_INSERATE].update_one({"user_id": "u1"}, {"$set": {"data.markiert": True}})
+            await bh.inserat_merken(db, ident, "https://suchen.mobile.de/x?id=9", {"make_label": "VW"}, user)
+            zwei = await db[bh.SAMMLUNG_INSERATE].find_one({"user_id": "u1"})
+            assert zwei["data"].get("markiert") is True, "unveraendert: Daten nicht neu geschrieben"
+            assert zwei["gelesen_am"] >= erst["gelesen_am"] and zwei["ablauf"] >= erst["ablauf"]
+            await bh.inserat_merken(db, ident, "https://suchen.mobile.de/x?id=9", {"make_label": "Opel"}, user)
+            drei = await db[bh.SAMMLUNG_INSERATE].find_one({"user_id": "u1"})
+            assert drei["data"] == {"make_label": "Opel"} and drei["pruefsumme"] != erst["pruefsumme"]
+            assert await db[bh.SAMMLUNG_INSERATE].count_documents({}) == 1
+        finally:
+            await client.drop_database(db.name)
+            client.close()
+
+    asyncio.run(lauf())
+
+
+def test_50_gebaute_ergebnisseite_haelt_niemanden_fest():
+    """Pruefung 08.10.2026: Tausende gebaute Inserat-Links (Ergebnisseite ueber /marktlage) brauchten Sekunden
+    Rechenzeit — jetzt hoechstens MAX_KARTEN_LINKS Links, die Nummer per parse_qs."""
+    import time
+    teil = "details.html?" + "&".join(f"a{i}=1" for i in range(150))
+    html = "<html><body>" + "".join(f'<a href="/fahrzeuge/{teil}&x={i}">Auto {i}</a>' for i in range(3000)) \
+        + '<a href="/fahrzeuge/details.html?id=12345&amp;x=1">VW Golf</a></body></html>'
+    t = time.perf_counter()
+    karten = bh.mobile_karten(html)
+    assert time.perf_counter() - t < 2.0
+    assert karten == {}, "der echte Link nach der Grenze zaehlt nicht mehr"
+    assert bh.mobile_karten('<a href="/fahrzeuge/details.html?vc=Car&amp;id=777">VW</a>') == \
+        {"777": {"titel": "VW", "zustand": []}}
+    assert bh.mobile_karten('<a href="/fahrzeuge/details.html?id=12a">VW</a>') == {}
+
+
+def test_51_adressen_mit_benutzerangaben_sind_kein_inserat():
+    """Pruefung 08.10.2026: Python liest "https://fremd.example\\@suchen.mobile.de/…" als mobile.de, ein Browser (und
+    evtl. der Abruf-Dienst) oeffnet fremd.example — solche Adressen und Nicht-ASCII-Ziffern gelten nicht."""
+    from listing_identity import ListingIdentityError, detect_source, get_listing_identity
+    assert detect_source("https://fremd.example\\@suchen.mobile.de/fahrzeuge/details.html?id=12345678") is None
+    assert detect_source("https://nutzer:pw@suchen.mobile.de/fahrzeuge/details.html?id=12345678") is None
+    assert detect_source("https://suchen.mobile.de/fahrzeuge/details.html?id=12345678") == "mobile"
+    with pytest.raises(ListingIdentityError):
+        get_listing_identity("https://suchen.mobile.de/fahrzeuge/details.html?id=\u0661\u0662\u0663")
 

@@ -62,15 +62,18 @@ WERKZEUGE = {
             "„Der Computer wurde durch Windows geschützt“ – dann „Weitere Informationen“ → „Trotzdem ausführen“.",
             "Das Programm fragt nach einem Code: hier auf „Programm verbinden“ klicken und den 6-stelligen Code "
             "eintippen. Jedes Konto kann auf EINEM PC verbunden sein; ein neuer PC ersetzt den alten.",
-            "Unten rechts erscheint ein grünes Lupen-Symbol. AutoPointer öffnen und ein Inserat anklicken – "
+            # Pruefung 08.10.2026: seit Programm 1.5.8 wird ueber die kleine Leiste bedient (kein Symbol-Menue mehr)
+            "Am Bildschirmrand erscheint eine kleine Leiste: Status-Feld (Klick = Start/Stopp), „Vergleichen“, "
+            "„Vertrag“ und „Mehr ▾“ (Einstellungen, Hilfe, Beenden). AutoPointer öffnen und ein Inserat anklicken – "
             "die Vergleiche öffnen sich als neue Browser-Tabs, mit euren Vergleichsregeln aus AutoSchnell "
             "(Einstellungen → Vergleich). Ohne aktives Abo öffnet das Programm nichts.",
-            "Kaufvertrag: Beim Anklicken liest AutoSchnell das Inserat schon im Hintergrund aus (Daten + Fotos). "
-            "Rechtsklick auf das Symbol → „Kaufvertrag: Auto in AutoSchnell öffnen“ oder hier unten bei „Deine "
-            "letzten Autos“ – kein Link-Einfügen nötig. Nur wenn AutoPointer bei AutoScout die Hash-ID nicht "
-            "vollständig zeigt: Inserat-Adresse selbst kopieren und unter „Vergleich“ einfügen.",
-            "Doppelklick auf das Symbol oder Strg+Alt+P schaltet die Automatik aus und wieder an. "
-            "Rechtsklick: Einstellungen (Portale, Browser, mit Windows starten).",
+            "Kaufvertrag: Beim Anklicken liest AutoSchnell das Inserat schon aus (Daten + Fotos). In der Leiste auf "
+            "„Vertrag“ drücken oder hier unten bei „Deine letzten Autos“ – kein Link-Einfügen nötig. Fehlt die "
+            "Inserat-Adresse (Zeile „Inserat-ID“ in AutoPointer nicht zu sehen): Detailbereich in AutoPointer höher "
+            "ziehen.",
+            "Mit der Erweiterung „AutoSchnell Analyse und Vertragsabwicklung“ im selben Browser öffnet sie die "
+            "Vergleiche – mit Ampel und Kaufvertrag-Knopf im Inserat. Welche Portale (mobile.de, AutoScout24) "
+            "verglichen werden, stellst du in AutoSchnell auf der Seite „Vergleich“ ein.",
         ],
         "dateiname": "AutoSchnell-Vergleich.exe",
         "schluessel": "werkzeuge/autopointer-vergleich/AutoSchnell-Vergleich.exe",
@@ -250,8 +253,43 @@ def vergleich_ablauf(ab: Optional[datetime] = None) -> datetime:
 # Vorgangsseite, die niemand uebernimmt).
 #: Programm oeffnet das Inserat als Tab (inserat_im_browser), Erweiterung liest auch /s-anzeige/<Nr>
 INSERAT_TAB_PROGRAMM, INSERAT_TAB_HELFER = "1.5.7", "2.7.1"
-#: Programm oeffnet nur /app/vorgang/<id>, Erweiterung uebernimmt den Vorgang (ueber_helfer)
-VORGANG_PROGRAMM, VORGANG_HELFER = "1.5.8", "2.7.2"
+#: Programm oeffnet nur /app/vorgang/<id>, Erweiterung uebernimmt den Vorgang (ueber_helfer). Pruefung 08.10.2026:
+#: seit 1.5.9 / 2.7.3 nimmt das Programm den Vorgang in EINEM Zug selbst (…/selbst), wenn die Erweiterung ihn nicht
+#: hat — vorher konnten beide oeffnen (alles doppelt). 1.5.8 / 2.7.2 kamen nie zum Kunden.
+VORGANG_PROGRAMM, VORGANG_HELFER = "1.5.9", "2.7.3"
+#: Pruefung 08.10.2026: die Erweiterung zaehlt nur, wenn sie in dieser Zeit etwas vom Server wollte — eine entfernte
+#: oder abgeschaltete Erweiterung liess sonst bei jedem Auto die Vorgangsseite aufgehen (und den Vorab-Abruf aus)
+HELFER_AKTIV_TAGE = 7
+#: Hat das Programm einen Vorgang selbst nehmen muessen (Erweiterung nicht in dem Browser, abgeschaltet …), oeffnet
+#: es die naechsten Autos gleich selbst — bis die Erweiterung wieder einen Vorgang uebernimmt, neu verbunden wird
+#: oder diese Zeit um ist (dann ein neuer Versuch).
+VORGANG_VERPASST_STUNDEN = 6
+
+
+def helfer_aktiv(helfer: Optional[dict], jetzt: Optional[datetime] = None) -> bool:
+    """Ist die Erweiterung des Kontos in den letzten HELFER_AKTIV_TAGE beim Server gewesen?"""
+    if not helfer:
+        return False
+    grenze = ((jetzt or datetime.now(timezone.utc)) - timedelta(days=HELFER_AKTIV_TAGE)).isoformat()
+    return str(helfer.get("zuletzt_am") or "") >= grenze
+
+
+def vorgang_verpasst(helfer: Optional[dict], jetzt: Optional[datetime] = None) -> bool:
+    """Hat die Erweiterung zuletzt einen Vorgang NICHT uebernommen (und seitdem keinen)? Dann oeffnet das Programm
+    selbst — hoechstens VORGANG_VERPASST_STUNDEN lang, danach versucht es wieder die Erweiterung."""
+    verpasst = str((helfer or {}).get("vorgang_verpasst_am") or "")
+    if not verpasst or str((helfer or {}).get("vorgang_ok_am") or "") > verpasst:
+        return False
+    grenze = ((jetzt or datetime.now(timezone.utc)) - timedelta(hours=VORGANG_VERPASST_STUNDEN)).isoformat()
+    return verpasst > grenze
+
+
+def helfer_browser(pc_name: Optional[str]) -> str:
+    """"chrome" / "edge" / "" aus dem Namen, den die Erweiterung beim Verbinden schickt ("Chrome · Windows"). Das
+    Programm oeffnet die Vorgangsseite dann in DIESEM Browser (Befund 08.10.2026: Erweiterung in Chrome, Standard-
+    browser Edge -> sie sah den Vorgang nie)."""
+    name = str(pc_name or "").strip().lower()
+    return "edge" if name.startswith("edge") else "chrome" if name.startswith("chrome") else ""
 
 
 def version_mindestens(version: Optional[str], mindest: str) -> bool:

@@ -113,6 +113,11 @@ def detect_source(url: str) -> Optional[str]:
     # Nur http/https zulassen — blockt file:, gopher:, ftp: usw.
     if (parsed.scheme or "").lower() not in ("http", "https"):
         return None
+    # Pruefung 08.10.2026: "https://fremd.de\@suchen.mobile.de/…" — Python sieht als Host suchen.mobile.de, ein
+    # Browser (und evtl. der Abruf-Dienst) aber fremd.de. Benutzerangaben (@) und Rueckstriche gehoeren nie in die
+    # Adresse eines Inserats.
+    if "@" in (parsed.netloc or "") or "\\" in (parsed.netloc or ""):
+        return None
     host = (parsed.hostname or "").lower()
     if not host:
         return None
@@ -157,7 +162,7 @@ def extract_mobile_id(url: str) -> Optional[str]:
 
     # Variante a: ?id=
     qs_id = parse_qs(parsed.query).get("id", [None])[0]
-    if qs_id and qs_id.isdigit():
+    if qs_id and qs_id.isascii() and qs_id.isdigit():       # nur 0-9 (isdigit allein nimmt auch "١٢٣")
         return qs_id
 
     # Variante b: /<digits>.html

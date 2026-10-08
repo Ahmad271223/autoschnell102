@@ -4436,7 +4436,7 @@ Suchern der Firma) – „alle anderen sollen das gar nicht sehen“.
   cd autopointer-vergleich && powershell -ExecutionPolicy Bypass -File build.ps1   # lokal: dist\AutoSchnell-Vergleich.exe
   scp dist/AutoSchnell-Vergleich.exe root@<server>:/tmp/                            # vom PC aus, nicht auf dem Server
   docker compose cp /tmp/AutoSchnell-Vergleich.exe backend:/tmp/AutoSchnell-Vergleich.exe
-  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.5.8
+  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.5.9
   ```
   Bis dahin zeigt die Seite „Wird gerade bereitgestellt“. Speicher: `werkzeuge/autopointer-vergleich/…`, Eintrag in `werkzeuge`.
 - Tests: `backend/tests/test_werkzeuge_20261003.py`, `frontend/src/pages/app/Programme.test.jsx`,
@@ -4444,7 +4444,7 @@ Suchern der Firma) – „alle anderen sollen das gar nicht sehen“.
 
 ### Browser-Helfer für Chrome und Edge (Wunsch Ahmad 04.10.2026)
 
-Zweites Werkzeug `browser-helfer` neben dem Programm — die Erweiterung `browser-extension/` (Version 2.7.2, enthält
+Zweites Werkzeug `browser-helfer` neben dem Programm — die Erweiterung `browser-extension/` (Version 2.7.3, enthält
 weiter den Kleinanzeigen-Abruf-Helfer). Gleiche Lizenz: 6-stelliger Code, **ein Konto = ein Browser**, Abo-Pflicht,
 Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
 - Freigabe: `BROWSER_HELFER_KUNDEN` (Standard `10001,10002,10007`, `docker-compose.yml`; leer = niemand).
@@ -4580,8 +4580,31 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
   - **Mindestversionen (Durchsicht vor dem Rollout 08.10.2026):** der Server schaltet die neuen Wege nur ein, wenn
     Programm UND Erweiterung des Kontos sie kennen (`werkzeuge.version_mindestens`; Programm-Version aus dem
     User-Agent, Erweiterung aus `werkzeug_verbindungen.programm_version`): Inserat als Tab ab Programm 1.5.7 +
-    Erweiterung 2.7.1, Vorgangsnummer ab 1.5.8 + 2.7.2. Sonst wie bisher (Apify-Vorab, Programm öffnet selbst) —
-    ein Kunde mit altem Programm oder alter Erweiterung merkt vom Rollout nichts.
+    Erweiterung 2.7.1, Vorgangsnummer ab 1.5.9 + 2.7.3 (seit der Prüfung 08.10.2026, s. u.). Sonst wie bisher
+    (Apify-Vorab, Programm öffnet selbst) — ein Kunde mit altem Programm oder alter Erweiterung merkt vom Rollout nichts.
+  - **Prüfung 08.10.2026 (Last, Zugänge, Bedienung) — Server, Programm 1.5.9, Erweiterung 2.7.3:**
+    - *Genau einer öffnet:* das Programm fragt nicht mehr nur nach, sondern nimmt den Vorgang nach 5 s in einem Zug
+      selbst (`POST …/autopointer-vergleich/vorgang/<id>/selbst` → `programm_am`); `…/uebernehmen` gilt nur ohne
+      `programm_am`, sonst `zu_spaet` (die Erweiterung schließt dann nur die Vorgangsseite). Vorher öffneten bei
+      langsamem Browserstart beide. Hat das Programm selbst genommen, merkt der Server `vorgang_verpasst_am` an der
+      Erweiterungs-Verbindung: die nächsten Autos öffnet das Programm gleich selbst — bis die Erweiterung wieder einen
+      Vorgang übernimmt (`vorgang_ok_am`), neu verbunden wird oder 6 Stunden um sind (`werkzeuge.vorgang_verpasst`).
+      Eine Erweiterung, die 7 Tage nichts vom Server wollte, zählt nicht (`werkzeuge.helfer_aktiv`). `/vergleich`
+      nennt `helfer_browser` (chrome/edge aus `pc_name`) — das Programm öffnet die Vorgangsseite in DEM Browser.
+    - *Zugänge:* Trennen (App, Chef, Betreiber, neues Passwort) verwirft auch offene Codes; die „doppelt angekommene
+      Anfrage“ gibt den Schlüssel nur noch für eine bestehende Verbindung heraus (legte vorher das getrennte Gerät neu
+      an). Falsche Codes zählen bei IPv6 je /64. Der Code des anderen Werkzeugs wird benannt. `/vergleich` und die
+      App-Start-Frage nur für das Windows-Programm. Adressen mit `@`/`\` im Host gelten nicht als Inserat
+      (`listing_identity.detect_source` — Python sah mobile.de, ein Browser die fremde Seite); Chef-/Betreiber-Liste
+      verlinkt nur https-Adressen der Portale. Fremde Firmen bekommen aus Browser-Lesungen auch keinen
+      Ansprechpartner und bei Privatverkäufern keinen Namen (`browser_helfer.PRIVAT_FELDER`).
+    - *Last:* Seiten-Auswertung und Erkennung in eigenen Thread-Pools (nicht mehr im Standard-Pool mit bcrypt und
+      Foto-Verkleinern); gleiche Lesung schreibt nur die Zeit (`pruefsumme`); Ergebnisseiten höchstens 600
+      Inserat-Links (eine gebaute Seite hielt einen Prozess sekundenlang fest); Plattenprüfung im Betriebscheck mit
+      5 s Grenze; Indizes `werkzeug_verbindung_id`, `werkzeug_inserat_juengste`. Erweiterung: Sitzungsspeicher
+      höchstens 150 Inserate (10-MB-Grenze), „Erneut versuchen“ fragt wirklich neu.
+    - Reihenfolge: Server ausrollen, dann Programm 1.5.9 und Erweiterung 2.7.3 hochladen. Mit älteren Versionen
+      bleibt es beim bisherigen Weg (Programm öffnet selbst).
   - **Passwort trennt Werkzeuge (Entscheidung Ahmad 06.10.2026):** setzt der Betreiber ein neues Passwort
     (`POST /admin/users/{id}/password`), trennt `routes.werkzeuge.alle_trennen` Programm und Helfer des Kontos
     (Grund `passwort` → 401 mit klarem Text, neuer Code nötig; Audit-Meta `werkzeuge_getrennt`).

@@ -536,6 +536,59 @@ def test_40_doppelt_angekommene_anfrage_gibt_denselben_schluessel(welt):
     assert welt["db"].werkzeug_verbindungen.count_documents({"user_id": welt["sucher_id"], "werkzeug": WID}) == 1
 
 
+def test_40b_trennen_verwirft_offene_codes_und_die_wiederholung(welt):
+    """Pruefung 08.10.2026: Trennen (App, Chef, Betreiber, neues Passwort) verwirft auch die offenen Codes — und die
+    "doppelt angekommene Anfrage" gibt den Schluessel nur fuer eine NOCH bestehende Verbindung heraus (vorher legte
+    sie das gerade getrennte Geraet wieder an)."""
+    _abo(welt, True)
+    _code_bremse_frei(welt)
+    db = welt["db"]
+    body = {"code": requests.post(f"{API}/werkzeuge/{WID}/code", headers=welt["sucher"], timeout=30).json()["code"],
+            "pc_name": "PC-T", "pc_kennung": "kennung-t"}
+    assert requests.post(f"{API}/werkzeuge/{WID}/verbinden", json=body, timeout=30).status_code == 200
+    offen = requests.post(f"{API}/werkzeuge/{WID}/code", headers=welt["sucher"], timeout=30).json()["code"]
+    assert requests.delete(f"{API}/werkzeuge/{WID}/verbindung", headers=welt["sucher"], timeout=30).status_code == 200
+    assert db.werkzeug_codes.count_documents({"user_id": welt["sucher_id"], "werkzeug": WID}) == 0
+    assert requests.post(f"{API}/werkzeuge/{WID}/verbinden", timeout=30,
+                         json={**body, "code": offen}).status_code == 404, "offener Code ist weg"
+    assert requests.post(f"{API}/werkzeuge/{WID}/verbinden", json=body, timeout=30).status_code == 404, \
+        "Wiederholung nach dem Trennen legt nichts neu an"
+    assert db.werkzeug_verbindungen.count_documents({"user_id": welt["sucher_id"], "werkzeug": WID}) == 0
+
+
+def test_40c_code_des_anderen_werkzeugs_wird_benannt(welt):
+    """Pruefung 08.10.2026: zwei "Code zum Verbinden"-Knoepfe nebeneinander — der Code der Erweiterung im Programm
+    (oder umgekehrt) sagt jetzt, wofuer er ist, statt nur "ungueltig"."""
+    _abo(welt, True)
+    _code_bremse_frei(welt)
+    code = requests.post(f"{API}/werkzeuge/{wz.BROWSER_HELFER}/code", headers=welt["sucher"], timeout=30).json()["code"]
+    try:
+        r = requests.post(f"{API}/werkzeuge/{WID}/verbinden", timeout=30,
+                          json={"code": code, "pc_name": "PC-X", "pc_kennung": "kennung-x"})
+        assert r.status_code == 404 and "Das ist der Code für „AutoSchnell Analyse" in r.json()["detail"], r.text
+        assert "„AutoSchnell Vergleich“" in r.json()["detail"]
+    finally:
+        welt["db"].werkzeug_codes.delete_many({"user_id": welt["sucher_id"], "werkzeug": wz.BROWSER_HELFER})
+
+
+def test_40d_ipv6_zaehlt_je_netz():
+    """Pruefung 08.10.2026: falsche Codes zaehlen bei IPv6 je /64 (sonst hilft jede neue Adresse weiter)."""
+    from routes.werkzeuge import _ip_gruppe
+    assert _ip_gruppe("2a02:8108:1:2:aaaa::1") == _ip_gruppe("2a02:8108:1:2:bbbb::9") == "2a02:8108:1:2::/64"
+    assert _ip_gruppe("2a02:8108:1:3::1") != _ip_gruppe("2a02:8108:1:2::1")
+    assert _ip_gruppe("203.0.113.7") == "203.0.113.7" and _ip_gruppe("::1") == "::1"
+    assert _ip_gruppe("::ffff:203.0.113.7") == "::ffff:203.0.113.7" and _ip_gruppe("unknown") == "unknown"
+
+
+def test_40e_erweiterung_vergleicht_nicht_ueber_die_programm_route(welt):
+    """Pruefung 08.10.2026: /vergleich und die App-Start-Frage nur fuer das Windows-Programm."""
+    r = requests.post(f"{API}/werkzeuge/{wz.BROWSER_HELFER}/vergleich", timeout=30,
+                      json={"fahrzeug": {"marke": "VW", "ez_jahr": 2019, "kilometer": 1}})
+    assert r.status_code == 404
+    r = requests.get(f"{API}/werkzeuge/{wz.BROWSER_HELFER}/app-start/{'a' * 32}", timeout=30)
+    assert r.status_code == 404
+
+
 def test_41_schluessel_ableiten():
     a = wz.schluessel_ableiten("geheim", "code-1", "pc-a")
     assert a == wz.schluessel_ableiten("geheim", "code-1", "pc-a")
@@ -888,7 +941,7 @@ def test_59_inserat_im_browser_statt_apify_wenn_der_helfer_verbunden_ist(welt):
                       json={"code": r.json()["code"], "pc_name": "Edge", "pc_kennung": "edge-59"})
     assert r.status_code == 200, r.text
     helfer = {wz.TOKEN_KOPF: r.json()["schluessel"]}
-    neu = {**prog, "User-Agent": "AutoSchnell-Vergleich/1.5.8"}
+    neu = {**prog, "User-Agent": "AutoSchnell-Vergleich/1.5.9"}
 
     def helfer_version(v):          # die Erweiterung schickt ihre Version mit jeder Anfrage (hier: /status)
         assert requests.get(f"{API}/werkzeuge/browser-helfer/status", headers={**helfer, "X-Werkzeug-Version": v},
@@ -900,7 +953,7 @@ def test_59_inserat_im_browser_statt_apify_wenn_der_helfer_verbunden_ist(welt):
         alt = _vergleich(neu, auto).json()
         assert alt["inserat_im_browser"] is False and alt["ueber_helfer"] is False, "Erweiterung 2.7.0 kennt das nicht"
         db.link_jobs.delete_many({"url": url})
-        helfer_version("2.7.2")
+        helfer_version("2.7.3")
         alt = _vergleich(prog, auto).json()
         assert alt["inserat_im_browser"] is False and alt["ueber_helfer"] is False, "Programm ohne Version = alt"
         db.link_jobs.delete_many({"url": url})
