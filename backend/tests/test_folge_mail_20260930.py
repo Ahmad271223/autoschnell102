@@ -64,3 +64,59 @@ def test_folge_mail_inhalt_gehoert_zum_schluessel(welt, monkeypatch):  # noqa: F
     w.run(w.db.generated_pdfs.update_one({"id": cid}, {"$set": {"version": 2}}))
     out = w.run(senden(recipient="kunde@rpv.test", message="Zweite Nachricht."))
     assert out.get("bereits_gesendet") is not True and len(raus) == 5
+
+
+def test_folge_mail_smtp_unklar_wird_nicht_automatisch_wiederholt(welt, monkeypatch):  # noqa: F811
+    """P1 08.10.2026: SMTP kann einen unbekannten Ausgang nicht deduplizieren."""
+    C = _modul("routes.contracts")
+    w = welt
+    import email_service
+    import provider_fetch
+    monkeypatch.setattr(provider_fetch, "MOCK_PROVIDER_FETCH", False)
+    monkeypatch.setattr(email_service, "email_configured", lambda: True)
+    monkeypatch.setattr(email_service, "resend_aktiv", lambda: False)
+    raus = []
+
+    async def _mit_beleg(to, subject, text, **kw):
+        raus.append(kw.get("idempotency_key"))
+        return True, "smtp:bewusst-neu"
+    monkeypatch.setattr(email_service, "send_email_mit_beleg", _mit_beleg)
+
+    cid = f"cfm_smtp_{w.s}"
+    alt_key = f"fm-alt-{w.s}"
+    alt = {
+        "idempotency_key": alt_key, "channel": "email", "art": "nach_kauf",
+        "recipient": "kunde@rpv.test", "subject": "Alt",
+        "sent_at": "2000-01-01T00:00:00+00:00", "zustellung": "unklar",
+        "version": 1,
+    }
+    w.run(w.db.generated_pdfs.insert_one(_vertrag(w, cid, w.a, send_status=[alt])))
+
+    def senden(key, **extra):
+        return C.folge_mail_senden(
+            cid,
+            C.FolgeMailIn(
+                art="nach_kauf", recipient="kunde@rpv.test",
+                subject="Hinweis", message="Bitte Inserat entfernen.",
+                idempotency_key=key, **extra),
+            w.a)
+
+    # Gleicher unbekannter SMTP-Versand: kein Provider-Aufruf.
+    e = w.run(_erwarte(409, senden(alt_key)))
+    assert e.detail["code"] == "frueherer_versand_unklar"
+    assert raus == []
+
+    # Auch ein neuer Key / geaenderter Versuch darf nicht still vorbeigehen.
+    neu_key = f"fm-neu-{w.s}"
+    e = w.run(_erwarte(409, senden(neu_key)))
+    assert e.detail["code"] == "frueherer_versand_unklar"
+    assert raus == []
+
+    # Erst ausdrueckliche Bestaetigung sendet mit dem neuen Key.
+    out = w.run(senden(neu_key, erneut=True))
+    assert out["zustellung"] == "versendet"
+    assert raus == [f"folge-{cid}-{neu_key}-" + raus[0].rsplit("-", 1)[-1]]
+    status = w.run(w.db.generated_pdfs.find_one(
+        {"id": cid}, {"_id": 0, "send_status": 1}))["send_status"]
+    assert next(x for x in status if x["idempotency_key"] == alt_key)["zustellung"] == "abgeloest"
+    assert next(x for x in status if x["idempotency_key"] == neu_key)["zustellung"] == "versendet"
