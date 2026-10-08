@@ -39,7 +39,7 @@ import werkzeuge as wz
 import werkzeug_erkennung
 from deps import (FIRMA_GESPERRT_TEXT, current_chef, current_firma, current_super_admin, current_user, db,
                   effective_dealer, firma_gesperrt, log_activity_sicher, now_iso, require_active_sub,
-                  subscription_for)
+                  subscription_for, abo_hat_feature)
 from rate_limiter import SlidingWindowRateLimiter, client_ip
 from storage_service import StorageError, bloecke_async, groesse_async
 
@@ -60,6 +60,22 @@ KEIN_ABO_BROWSER = "Kein aktives AutoSchnell-Abo – die Erweiterung ist gesperr
 
 def _ist_browser(werkzeug_id: str) -> bool:
     return wz.art(werkzeug_id) == "browser"
+
+
+_WERKZEUG_FEATURE = {
+    wz.AUTOPOINTER: "autopointer_vergleich",
+    wz.BROWSER_HELFER: "browser_helfer",
+}
+
+
+def _pro_freigeschaltet(werkzeug_id: str, abo: dict) -> bool:
+    """Pro-Werkzeuge ausschliesslich ueber die Produktstufe des aktiven Abos.
+
+    Kundennummern sind kein Berechtigungsmodell mehr. Dadurch kann ein Normal-
+    Abo die Programme weder sehen, herunterladen, verbinden noch mit einem
+    alten Werkzeug-Schluessel weiterbenutzen.
+    """
+    return abo_hat_feature(abo, _WERKZEUG_FEATURE.get(werkzeug_id, ""))
 
 
 _verbinden_limiter_ip = SlidingWindowRateLimiter(max_attempts=10, window_seconds=600,
@@ -208,10 +224,11 @@ async def _konten(ids) -> dict:
 # ---------------------------------------------------------------- App: Liste + Download
 @router.get("/werkzeuge")
 async def werkzeuge_liste(user=Depends(current_user)):
-    """Fuer jede Rolle aufrufbar; nur Chef und Sucher einer freigegebenen
-    Firma bekommen Eintraege — alle anderen eine leere Liste."""
-    kunden_nr = await _kunden_nr(user)
-    ids = wz.freigegebene_werkzeuge(kunden_nr) if kunden_nr is not None else []
+    """Pro-Werkzeuge dieses Kontos. Normal-/abgelaufene Abos sehen keine Helfer."""
+    if user.get("role") not in ("dealer", "sucher") or not user.get("dealer_id"):
+        return {"werkzeuge": []}
+    abo = await subscription_for(user)
+    ids = [wid for wid in wz.WERKZEUGE if _pro_freigeschaltet(wid, abo)]
     liste = []
     for wid in ids:
         meta = await db.werkzeuge.find_one({"id": wid}, {"_id": 0})
@@ -226,8 +243,11 @@ async def werkzeuge_liste(user=Depends(current_user)):
 
 @router.get("/werkzeuge/{werkzeug_id}/download")
 async def werkzeug_download(werkzeug_id: str, user=Depends(current_firma)):
-    kunden_nr = await _kunden_nr(user)
-    if werkzeug_id not in wz.WERKZEUGE or not wz.ist_freigegeben(werkzeug_id, kunden_nr):
+    _wid_pruefen(werkzeug_id)
+    abo = await subscription_for(user)
+    if not _pro_freigeschaltet(werkzeug_id, abo):
+        # Absichtlich 404: Normal-Konten sollen die Pro-Werkzeuge nicht als
+        # versteckten Download-Endpunkt entdecken koennen.
         raise HTTPException(404, NICHT_GEFUNDEN)
     meta = await db.werkzeuge.find_one({"id": werkzeug_id}, {"_id": 0})
     if not meta or not meta.get("schluessel"):
@@ -258,7 +278,8 @@ async def werkzeug_download(werkzeug_id: str, user=Depends(current_firma)):
 async def werkzeug_code(werkzeug_id: str, user=Depends(require_active_sub)):
     """6-stelliger Code (10 Minuten, einmal) — nur mit aktivem Abo."""
     _wid_pruefen(werkzeug_id)
-    if not wz.ist_freigegeben(werkzeug_id, await _kunden_nr(user)):
+    abo = await subscription_for(user)
+    if not _pro_freigeschaltet(werkzeug_id, abo):
         raise HTTPException(404, NICHT_GEFUNDEN)
     if not await _code_limiter_konto.check(f"konto:{user['id']}"):
         raise HTTPException(429, "Zu viele Codes – bitte in ein paar Minuten erneut.")
@@ -313,11 +334,14 @@ async def _konto_pruefen(user: Optional[dict], werkzeug_id: str):
         raise HTTPException(403, "Kein Händlerprofil – bitte den Administrator kontaktieren.")
     if await firma_gesperrt(user["dealer_id"]):
         raise HTTPException(403, FIRMA_GESPERRT_TEXT)
-    if not wz.ist_freigegeben(werkzeug_id, firma.get("kunden_nr")):
-        raise HTTPException(403, "Dieses Programm ist für dein Konto nicht freigeschaltet.")
     abo = await subscription_for(user)
     if not abo.get("active"):
         raise HTTPException(402, KEIN_ABO_BROWSER if _ist_browser(werkzeug_id) else KEIN_ABO)
+    if not _pro_freigeschaltet(werkzeug_id, abo):
+        raise HTTPException(
+            403,
+            "Dieses Werkzeug ist nur mit AutoSchnell Pro verfügbar."
+        )
     return firma, abo
 
 
