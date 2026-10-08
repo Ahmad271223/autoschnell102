@@ -3364,19 +3364,31 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
         except Exception:  # noqa: BLE001 — Archiv ist Zusatz, der Versand ist erfolgt
             log.exception("Versand-Schluessel %s nicht archiviert", contract_id)
     if not vermerkt:
-        # Runde 17 (Nr. 372): Der Versand IST erfolgt, aber der Vertrag war
-        # beim Vermerk nicht mehr im Bereich (Loeschung begonnen, Eintrag
-        # durch $slice verdraengt). Vorher blieb das stumm — die Antwort
-        # sagte "versendet", das Archiv wusste nichts davon. Jetzt im Log,
-        # in der Antwort und als eigener Audit-Eintrag (wirft nie).
-        log.warning("Vertrag %s per %s versendet, Status-Vermerk aber nicht "
-                    "gespeichert (Vertrag nicht mehr im Bereich?)",
-                    contract_id, body.channel)
+        # E-Mail: Provider hat die Zustellung bestaetigt. WhatsApp: AutoSchnell
+        # hat nur Share/Chat vorbereitet — ob der Nutzer dort wirklich sendet,
+        # ist nicht beobachtbar. Auch im Fehler-Audit diese Semantik trennen.
+        ist_mail = body.channel == "email"
+        log.warning(
+            "Vertrag %s per %s %s, Status-Vermerk aber nicht gespeichert "
+            "(Vertrag nicht mehr im Bereich?)",
+            contract_id, body.channel,
+            "versendet" if ist_mail else "zum Versand vorbereitet")
         out["status_vermerk"] = "nicht_gespeichert"
-        await log_activity_sicher(user["dealer_id"], user["id"],
-                                  "pdf.gesendet.ohne_vermerk", ref=contract_id,
-                                  meta={"channel": body.channel})
-    await log_activity_sicher(user["dealer_id"], user["id"], f"pdf.gesendet.{body.channel}", ref=contract_id)
+        await log_activity_sicher(
+            user["dealer_id"], user["id"],
+            ("pdf.gesendet.ohne_vermerk" if ist_mail
+             else "pdf.versand_vorbereitet.ohne_vermerk.whatsapp"),
+            ref=contract_id,
+            meta={"channel": body.channel,
+                  "zustellung": out.get("zustellung", ""),
+                  "methode": body.methode or ""})
+    aktion = ("pdf.gesendet.email" if body.channel == "email"
+              else "pdf.versand_vorbereitet.whatsapp")
+    await log_activity_sicher(
+        user["dealer_id"], user["id"], aktion, ref=contract_id,
+        meta={"zustellung": out.get("zustellung", ""),
+              "methode": body.methode or "",
+              "version": int(c.get("version") or 1)})
     return out
 
 
