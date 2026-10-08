@@ -3419,8 +3419,7 @@ async def folge_mail_vorschau(contract_id: str, art: str,
 
 class FolgeMailIn(BaseModel):
     """Eine Vorlage per E-Mail verschicken (Hinweis nach Kaufabschluss oder
-    Bahnverbindung). Die Art wird in der Route geprueft — so gibt es eine
-    deutsche Meldung statt der englischen Pydantic-Fehlermeldung."""
+    Bahnverbindung)."""
     art: str = Field(max_length=40)
     recipient: str = Field(max_length=200)
     subject: Optional[str] = Field(default=None, max_length=500)
@@ -3428,6 +3427,9 @@ class FolgeMailIn(BaseModel):
     idempotency_key: Optional[str] = Field(
         default=None, min_length=8, max_length=80,
         pattern=r"^[A-Za-z0-9_-]+$")
+    # Nur nach ausdruecklicher UI-Bestaetigung darf ein unklarer/bereits
+    # abgeschlossener Versand bewusst ein zweites Mal ausgefuehrt werden.
+    erneut: bool = False
 
 
 #: Per E-Mail verschickbar. Die WhatsApp-Fassung wird kopiert, eine
@@ -3455,31 +3457,34 @@ def _ohne_leerraum(text: Optional[str]) -> str:
 
 async def _folge_mail_vorhanden(contract_id: str, bereich: dict,
                                 schluessel: str) -> Optional[dict]:
-    """Rollenpruefung 22.09.2026 (RP-434): Was ist mit dem Eintrag, der
-    diesen Schluessel schon traegt?
+    """Status eines vorhandenen Folge-Mail-Versands.
 
-    * versendet/mock -> {"zustellung": …} (wirklich schon verschickt)
-    * laeuft, noch frisch -> {"zustellung": "laeuft"} (die Oberflaeche sagt
-      "laeuft noch" statt "bereits verschickt")
-    * laeuft, aber haengend (Prozess starb) -> wird ATOMAR neu beansprucht,
-      Rueckgabe None: der Aufrufer versendet erneut (derselbe Anbieter-
-      Schluessel verhindert eine doppelte Zustellung)."""
-    doc = await db.generated_pdfs.find_one({"id": contract_id, **bereich},
-                                           {"_id": 0, "send_status": 1})
+    Resend darf einen unbekannten/haengenden Versuch unter demselben
+    Provider-Key atomar wiederaufnehmen. SMTP darf das niemals automatisch,
+    weil eine bereits angenommene Mail nicht providerseitig dedupliziert wird.
+    """
+    doc = await db.generated_pdfs.find_one(
+        {"id": contract_id, **bereich}, {"_id": 0, "send_status": 1})
     eintrag = next((e for e in (doc or {}).get("send_status") or []
                     if isinstance(e, dict) and e.get("idempotency_key") == schluessel), None)
     if eintrag is None:
         return {"zustellung": "laeuft"}
     zustellung = eintrag.get("zustellung") or ""
-    if zustellung != "laeuft":
+    if zustellung not in ("laeuft", "unklar"):
         return {"zustellung": zustellung}
-    if _zustellung_haengt(eintrag):
+
+    import email_service
+    if zustellung == "unklar" or _zustellung_haengt(eintrag):
+        if not email_service.resend_aktiv():
+            return {"zustellung": "unklar"}
         res = await db.generated_pdfs.update_one(
             {"id": contract_id, **bereich,
              "send_status": {"$elemMatch": {
-                 "idempotency_key": schluessel, "zustellung": "laeuft",
+                 "idempotency_key": schluessel,
+                 "zustellung": {"$in": ["laeuft", "unklar"]},
                  "wiederaufnahme_am": eintrag.get("wiederaufnahme_am")}}},
-            {"$set": {"send_status.$.wiederaufnahme_am": now_iso()}})
+            {"$set": {"send_status.$.zustellung": "laeuft",
+                      "send_status.$.wiederaufnahme_am": now_iso()}})
         if res.modified_count:
             return None
     return {"zustellung": "laeuft"}
