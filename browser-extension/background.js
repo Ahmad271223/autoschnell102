@@ -739,6 +739,11 @@ async function vertragOeffnen(msg, tab) {
       // nicht uebernommen. Nicht behaupten, der Vertrag sei geoeffnet.
       return { ok: true, weg: "app_wartet" };
     }
+    if (antwort?.timeout) {
+      // Das Fahrzeug wurde innerhalb des langen Handoff-Fensters nicht
+      // bestaetigt. Das ist NICHT automatisch ungespeicherte Arbeit.
+      return { ok: true, weg: "app_timeout" };
+    }
     if (!antwort || !antwort.ok) {
       // Die App lief schon vor dem (aktualisierten) Helfer — nicht hart neu
       // laden (ein halb ausgefuellter Kaufvertrag waere weg). Nach vorne holen
