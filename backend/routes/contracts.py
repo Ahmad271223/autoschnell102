@@ -2549,6 +2549,15 @@ VERSAND_UNKLAR_TEXT = (
 # Resend vergisst einen Idempotency-Key nach 24 Stunden — danach ist die
 # Wiederaufnahme eines unklaren Versands nicht mehr vor Doppelversand geschuetzt.
 UNKLAR_WIEDERAUFNAHME_MAX_S = 23 * 3600
+# Der Browser wartet bei Vertragsaktionen 95 s. Der KRITISCHE Provider-Aufruf
+# muss vorher mit einem eindeutigen Ergebnis enden; sonst sieht der Nutzer
+# einen Browser-Timeout, obwohl die Mail spaeter noch angenommen werden kann.
+# Bei Ablauf bleibt der Versand "unklar" und wird nur mit DEMSELBEN
+# Idempotency-Key wiederaufgenommen.
+VERSAND_PROVIDER_MAX_SEK = int(os.environ.get("VERSAND_PROVIDER_MAX_SEK", "75"))
+# Die Belegkopie an den Sucher ist Zusatz und darf die bereits erfolgreiche
+# Zustellung an den Verkaeufer niemals in einen sichtbaren Fehler verwandeln.
+BELEGKOPIE_MAX_SEK = int(os.environ.get("BELEGKOPIE_MAX_SEK", "8"))
 
 
 def _auto_schluessel(contract_id: str, c: dict, body) -> str:
@@ -3168,12 +3177,32 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
             # Oberflaeche sagt es dem Sucher.
             if not email_service.gueltige_adresse(antwort_adresse):
                 out["antwort_adresse_fehlt"] = True
-            ok, beleg = await email_service.send_email_mit_beleg(
-                body.recipient, betreff, text, anhang=pdf_bytes,
-                anhang_name=dateiname, html=html,
-                reply_to=antwort_adresse,
-                absender_name=firma.get("company_name") or "",
-                idempotency_key=f"vertrag-{contract_id}-{body.idempotency_key}")
+            try:
+                ok, beleg = await asyncio.wait_for(
+                    email_service.send_email_mit_beleg(
+                        body.recipient, betreff, text, anhang=pdf_bytes,
+                        anhang_name=dateiname, html=html,
+                        reply_to=antwort_adresse,
+                        absender_name=firma.get("company_name") or "",
+                        idempotency_key=f"vertrag-{contract_id}-{body.idempotency_key}"),
+                    timeout=VERSAND_PROVIDER_MAX_SEK)
+            except asyncio.TimeoutError:
+                # Ausgang kann unbekannt sein: Provider kann die Anfrage kurz
+                # vor unserem Abbruch angenommen haben. Reservierung deshalb
+                # NICHT loeschen; gleicher Klick/Schluessel darf sicher
+                # wiederaufnehmen, ohne doppelt zuzustellen.
+                log.error("Vertragsversand %s: Provider nach %ss ohne eindeutige Antwort",
+                          contract_id, VERSAND_PROVIDER_MAX_SEK)
+                await _reservierung_unklar()
+                raise HTTPException(
+                    502, {"code": "versand_unklar", "msg": VERSAND_UNKLAR_TEXT})
+            except Exception:  # noqa: BLE001
+                # Transportabbruch/unerwarteter Providerfehler: ebenfalls
+                # konservativ "unklar", nie "nicht gesendet" behaupten.
+                log.exception("Vertragsversand %s: Provider-Aufruf abgebrochen", contract_id)
+                await _reservierung_unklar()
+                raise HTTPException(
+                    502, {"code": "versand_unklar", "msg": VERSAND_UNKLAR_TEXT})
             if ok and beleg:
                 out["beleg"] = beleg
             if not ok and beleg == "anhang_zu_gross":
@@ -3252,14 +3281,28 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                     empfaenger_adresse=body.recipient,
                     betreff_original=betreff, nachricht=nachricht,
                     zeitpunkt=reserviert_am)
-                out["kopie"] = "gesendet" if await email_service.send_email(
-                    sucher_mail, k_betreff, k_text, anhang=pdf_bytes,
-                    anhang_name=dateiname, html=k_html,
-                    absender_name=firma.get("company_name") or "",
-                    idempotency_key=f"kopie-{contract_id}-{body.idempotency_key}") else "fehlgeschlagen"
+                try:
+                    kopie_ok = await asyncio.wait_for(
+                        email_service.send_email(
+                            sucher_mail, k_betreff, k_text, anhang=pdf_bytes,
+                            anhang_name=dateiname, html=k_html,
+                            absender_name=firma.get("company_name") or "",
+                            idempotency_key=f"kopie-{contract_id}-{body.idempotency_key}"),
+                        timeout=BELEGKOPIE_MAX_SEK)
+                    out["kopie"] = "gesendet" if kopie_ok else "fehlgeschlagen"
+                except asyncio.TimeoutError:
+                    # Hauptmail ist bereits erfolgreich. Nie 500/Timeout nur
+                    # wegen der optionalen Belegkopie; deren Ausgang ist offen.
+                    out["kopie"] = "unklar"
+                    log.warning("Belegkopie des Vertrags %s nach %ss noch ohne Ergebnis",
+                                contract_id, BELEGKOPIE_MAX_SEK)
+                except Exception:  # noqa: BLE001
+                    out["kopie"] = "unklar"
+                    log.exception("Belegkopie des Vertrags %s an %s fehlgeschlagen; "
+                                  "Hauptversand bleibt erfolgreich", contract_id, sucher_mail)
                 if out["kopie"] != "gesendet":
-                    log.warning("Kopie des Vertrags %s an %s fehlgeschlagen",
-                                contract_id, sucher_mail)
+                    log.warning("Kopie des Vertrags %s an %s: %s",
+                                contract_id, sucher_mail, out["kopie"])
     else:
         await _reservierung_zurueck()
         raise HTTPException(400, "Unbekannter Kanal")
