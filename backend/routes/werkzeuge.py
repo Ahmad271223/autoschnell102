@@ -863,12 +863,16 @@ async def werkzeug_app_start_melden(start: str, user=Depends(current_firma)):
 @router.get("/werkzeuge/{werkzeug_id}/app-start/{start}")
 async def werkzeug_app_start_pruefen(werkzeug_id: str, start: str,
                                      schluessel: Optional[str] = Header(None, alias=wz.TOKEN_KOPF)):
-    """Nur fuer Starts derselben Firma — ein fremdes Programm erfaehrt nichts ueber andere Konten."""
+    """Nur fuer Starts desselben Kontos — Kollegen derselben Firma zaehlen nicht als Bestaetigung."""
     user, _v, _firma_doc, _abo = await _programm(werkzeug_id, schluessel)
     if not _START_KENNUNG.match(start or ""):
         return {"bestaetigt": False}
-    d = await db[wz.SAMMLUNG_APP_STARTS].find_one({"start": start}, {"_id": 0, "dealer_id": 1})
-    return {"bestaetigt": bool(d) and bool(user.get("dealer_id")) and d.get("dealer_id") == user.get("dealer_id")}
+    d = await db[wz.SAMMLUNG_APP_STARTS].find_one(
+        {"start": start}, {"_id": 0, "user_id": 1, "dealer_id": 1})
+    # Exakt dasselbe Konto: ein App-Start eines Kollegen derselben Firma darf
+    # den Fallback dieses Programms nicht bestaetigen.
+    return {"bestaetigt": bool(d) and d.get("user_id") == user.get("id")
+            and bool(user.get("dealer_id")) and d.get("dealer_id") == user.get("dealer_id")}
 
 
 @router.get("/werkzeuge/{werkzeug_id}/meine")
