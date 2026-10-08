@@ -170,6 +170,7 @@ def _mail_attrappe(monkeypatch, ergebnisse):
     import provider_fetch
     monkeypatch.setattr(provider_fetch, "MOCK_PROVIDER_FETCH", False)
     monkeypatch.setattr(email_service, "email_configured", lambda: True)
+    monkeypatch.setattr(email_service, "resend_aktiv", lambda: True)
     schluessel = []
 
     async def _mit_beleg(to, subject, text, anhang=None, anhang_name="", **kw):
@@ -236,7 +237,7 @@ def test_22_unklar_bleibt_stehen_und_wird_unter_demselben_schluessel_wiederholt(
     cid = f"cv22u_{w.s}"
     w.run(w.db.generated_pdfs.insert_one(_vertrag(w, cid, w.a)))
     e = w.run(_erwarte(502, C.send_contract(cid, _mail(C, w, f"erst-{w.s}"), w.a)))
-    assert e.detail["code"] == "versand_unklar" and "nicht doppelt" in e.detail["msg"]
+    assert e.detail["code"] == "versand_unklar" and "Resend" in e.detail["msg"]
     eintraege = _status(w, cid)
     assert len(eintraege) == 1 and eintraege[0]["zustellung"] == "unklar", "Eintrag bleibt"
     # Neu laden, gleicher Inhalt: Wiederaufnahme unter dem ERSTEN Schluessel
@@ -294,3 +295,55 @@ def test_13_vermerk_scheitert_an_der_datenbank_kein_500(welt, monkeypatch):
     assert out["zustellung"] == "versendet" and out["status_vermerk"] == "nicht_gespeichert"
     # der reservierte Eintrag bleibt "laeuft" -> spaeter Wiederaufnahme unter demselben Schluessel
     assert [x["zustellung"] for x in _status(w, cid)] == ["laeuft"]
+
+
+def test_22_smtp_unklar_nur_bewusst_mit_neuem_schluessel(welt, monkeypatch):
+    C = _modul("routes.contracts")
+    w = welt
+    import email_service
+    schluessel = _mail_attrappe(monkeypatch, [(False, email_service.BELEG_UNKLAR)])
+    monkeypatch.setattr(email_service, "resend_aktiv", lambda: False)
+
+    cid = f"cv22smtp_{w.s}"
+    w.run(w.db.generated_pdfs.insert_one(_vertrag(w, cid, w.a)))
+
+    e = w.run(_erwarte(502, C.send_contract(
+        cid, _mail(C, w, f"smtp-erst-{w.s}"), w.a)))
+    assert e.detail["code"] == "versand_unklar"
+    assert schluessel == [f"vertrag-{cid}-smtp-erst-{w.s}"]
+
+    # Kein stiller Retry, auch mit neuem UI-Key.
+    e = w.run(_erwarte(409, C.send_contract(
+        cid, _mail(C, w, f"smtp-neu-{w.s}"), w.a)))
+    assert e.detail["code"] == "frueherer_versand_unklar"
+    assert len(schluessel) == 1
+
+    out = w.run(C.send_contract(
+        cid, _mail(C, w, f"smtp-neu-{w.s}", erneut=True), w.a))
+    assert out["zustellung"] == "versendet"
+    assert schluessel[-1] == f"vertrag-{cid}-smtp-neu-{w.s}"
+    assert {x["idempotency_key"]: x["zustellung"] for x in _status(w, cid)} == {
+        f"smtp-erst-{w.s}": "abgeloest",
+        f"smtp-neu-{w.s}": "versendet",
+    }
+
+
+def test_whatsapp_link_keine_andere_fassung_als_send_start(welt):
+    C = _modul("routes.contracts")
+    w = welt
+    cid = f"cvwa_version_{w.s}"
+    w.run(w.db.generated_pdfs.insert_one(_vertrag(w, cid, w.a, version=2)))
+
+    async def lauf():
+        try:
+            await C._freigabe_link(
+                cid, C._vertrag_bereich(w.a), w.a, expected_version=1)
+        except Exception as exc:
+            return exc
+        return None
+
+    e = w.run(lauf())
+    assert getattr(e, "status_code", None) == 409
+    doc = w.run(w.db.generated_pdfs.find_one(
+        {"id": cid}, {"_id": 0, "freigabe": 1}))
+    assert not doc.get("freigabe")
