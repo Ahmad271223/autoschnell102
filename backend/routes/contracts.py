@@ -3639,7 +3639,7 @@ async def folge_mail_senden(contract_id: str, body: FolgeMailIn,
     schluessel = (body.idempotency_key or "").strip() or f"auto-{inhalt_hash}"
     mail_zaehler: Optional[str] = None
 
-    # P1 08.10.2026: Auch bei einem NEUEN Schluessel darf ein frueherer
+    # Gleicher Inhalt/Fassung/Empfaenger ist serverseitig EIN Versand.\n    schon_versendet = next((e for e in (c.get("send_status") or [])\n        if isinstance(e, dict) and e.get("channel") == "email" and e.get("art") == art\n        and (e.get("recipient") or "").strip().lower() == empfaenger.lower()\n        and e.get("anfrage_hash") == inhalt_hash\n        and int(e.get("version") or 0) == int(c.get("version") or 1)\n        and e.get("zustellung") in ("versendet", "mock")), None)\n    if schon_versendet and not body.erneut:\n        raise HTTPException(409, {"code": "bereits_versendet",\n                                  "msg": "Diese Mail wurde bereits verschickt. Wirklich noch einmal senden?"})\n\n    # P1 08.10.2026: Auch bei einem NEUEN Schluessel darf ein frueherer
     # unbekannter Versand derselben Folge-Mail nicht still uebergangen
     # werden. Das ist besonders bei SMTP wichtig, gilt aber auch bei
     # geaendertem Inhalt unter Resend: die erste Nachricht koennte angekommen
