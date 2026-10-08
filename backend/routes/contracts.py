@@ -792,7 +792,8 @@ async def _abruf_zaehlen(contract_id: str, token: str, aktuell: bool) -> None:
              "$set": {"freigabe_alt.$.zuletzt_abgerufen": now_iso()}})
 
 
-async def _freigabe_link(contract_id: str, bereich: dict, user: dict) -> tuple[str, str]:
+async def _freigabe_link(contract_id: str, bereich: dict, user: dict,
+                          expected_version: Optional[int] = None) -> tuple[str, str]:
     """Liefert (Link, gueltig_bis) fuer die AKTUELLE Vertragsfassung.
 
     Runde 18: Die Freigabe wird ATOMAR gesetzt — zwei gleichzeitige Versande
@@ -813,6 +814,10 @@ async def _freigabe_link(contract_id: str, bereich: dict, user: dict) -> tuple[s
         if c is None:
             raise HTTPException(404, "Vertrag nicht gefunden")
         version = int(c.get("version") or 1)
+        if expected_version is not None and version != int(expected_version):
+            raise HTTPException(
+                409,
+                "Der Vertrag wurde gerade neu erstellt — bitte die Seite neu laden und erneut senden.")
         f = c.get("freigabe") or {}
         if _freigabe_gueltig(f, version):
             return f"{_oeffentliche_basis()}/api/public/vertrag/{f['token']}", f["laeuft_ab"]
@@ -2543,9 +2548,9 @@ def _frueherer_mailversand(eintraege: list, empfaenger: str, version: int) -> Op
 
 VERSAND_UNKLAR_TEXT = (
     "Der Mail-Dienst hat nicht eindeutig geantwortet — die E-Mail ist vielleicht schon beim "
-    "Empfänger angekommen. Ein erneuter Klick auf „Senden“ (gleiche Adresse, gleicher Text) ist "
-    "sicher: AutoSchnell verschickt sie dann nicht doppelt. Klappt es wieder nicht, bitte beim "
-    "Verkäufer nachfragen oder den Vertrag per WhatsApp schicken.")
+    "Empfänger angekommen. Bitte erneut auf „Senden“ klicken: Mit Resend prüft AutoSchnell "
+    "denselben Idempotency-Key; bei SMTP fragt AutoSchnell vor einem bewussten Neuversand "
+    "noch einmal ausdrücklich nach, damit nicht doppelt gesendet wird.")
 # Resend vergisst einen Idempotency-Key nach 24 Stunden — danach ist die
 # Wiederaufnahme eines unklaren Versands nicht mehr vor Doppelversand geschuetzt.
 UNKLAR_WIEDERAUFNAHME_MAX_S = 23 * 3600
@@ -2764,16 +2769,23 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
     # Preis nach Abholung, Verkaeufer-Korrektur), ging die ALTE Fassung raus —
     # kein Vermerk; der Dialog laedt die neue Fassung und der Nutzer teilt
     # noch einmal. Vor der Reservierung, damit nichts zurueckzunehmen ist.
-    if body.methode == "teilen" and body.version is not None \
-            and int(c.get("version") or 1) != int(body.version):
-        raise HTTPException(409, {
-            "code": "fassung_veraltet",
-            "msg": "Geteilt wurde eine veraltete Fassung des Vertrags — es gibt inzwischen "
-                   f"Fassung {int(c.get('version') or 1)}. Bitte die neue Fassung noch einmal "
-                   "teilen.",
-            "version": int(c.get("version") or 1),
-            "geteilt": int(body.version),
-        })
+    if body.methode == "teilen":
+        if body.version is None:
+            raise HTTPException(409, {
+                "code": "fassung_unbekannt",
+                "msg": ("Die Vertragsfassung konnte nicht sicher bestimmt werden — "
+                        "bitte die PDF neu laden und danach noch einmal teilen."),
+                "version": int(c.get("version") or 1),
+            })
+        if int(c.get("version") or 1) != int(body.version):
+            raise HTTPException(409, {
+                "code": "fassung_veraltet",
+                "msg": "Geteilt wurde eine veraltete Fassung des Vertrags — es gibt inzwischen "
+                       f"Fassung {int(c.get('version') or 1)}. Bitte die neue Fassung noch einmal "
+                       "teilen.",
+                "version": int(c.get("version") or 1),
+                "geteilt": int(body.version),
+            })
     # Runde 16 (15.09.2026) bremste hier 300 Versaende je 10 Minuten. Seit 06.10.2026 (Wunsch Ahmad) nur
     # noch das Tageslimit fuer E-Mails — gezaehlt nach der Reservierung (_mail_tag_zaehlen unten).
     anfrage_hash = _versand_anfrage_hash(c, body)
@@ -2871,8 +2883,23 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                 await _haengenden_versand_abloesen(contract_id, bereich, haengend)
                 frueherer_versand_abgeloest = True
             elif haengend:
-                body.idempotency_key = haengend["idempotency_key"]
-                vorhanden = haengend
+                import email_service as _email_service
+                smtp_only = not _email_service.resend_aktiv()
+                if body.channel == "email" and smtp_only:
+                    if not body.erneut:
+                        wann = _zeit_de(haengend.get("sent_at"))
+                        raise HTTPException(409, {
+                            "code": "frueherer_versand_unklar",
+                            "msg": (f"Ein früherer SMTP-Versand an {body.recipient}"
+                                    f"{(' vom ' + wann) if wann else ''} hatte kein eindeutiges "
+                                    "Ergebnis — die E-Mail ist vielleicht schon angekommen. "
+                                    "Trotzdem bewusst noch einmal senden?"),
+                        })
+                    await _haengenden_versand_abloesen(contract_id, bereich, haengend)
+                    frueherer_versand_abgeloest = True
+                else:
+                    body.idempotency_key = haengend["idempotency_key"]
+                    vorhanden = haengend
         if vorhanden and vorhanden.get("anfrage_hash") and vorhanden["anfrage_hash"] != anfrage_hash:
             # Runde 16: gleicher Schluessel, anderer Inhalt (Empfaenger/Text nach
             # einem unklaren Versuch geaendert) -> nie wiederaufnehmen.
@@ -3073,7 +3100,9 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                 raise HTTPException(422, "WhatsApp-Nummer ungültig — bitte mit Vorwahl "
                                          "eingeben (7 bis 15 Ziffern, z. B. 0170 1234567).")
             try:
-                link, gueltig_bis = await _freigabe_link(contract_id, bereich, user)
+                link, gueltig_bis = await _freigabe_link(
+                    contract_id, bereich, user,
+                    expected_version=int(c.get("version") or 1))
             except HTTPException:
                 await _reservierung_zurueck()
                 raise
