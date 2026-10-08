@@ -87,8 +87,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (fertig) return;
     fertig = true;
     aufraeumen();
-    sendResponse({ ok: false, wartet: true, app: alsApp() });
-  }, 21000);
+    sendResponse({ ok: false, timeout: true, app: alsApp() });
+  }, 90000);
   window.postMessage({ __autoschnell: true, type: "OEFFNEN", ziel, reqId }, window.location.origin);
   return true;
 });
