@@ -56,6 +56,8 @@ export function protokollSuche(search) {
   const innen = new URLSearchParams(m[2]);
   if (innen.get("url")) neu.set("url", innen.get("url"));
   if (m[1].toLowerCase() === "vertrag") neu.set("vertrag", "1");
+  const start = innen.get("start") || "";
+  if (START_KENNUNG.test(start)) neu.set("start", start);
   return neu;
 }
 
