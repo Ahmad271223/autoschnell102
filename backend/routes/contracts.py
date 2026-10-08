@@ -3391,7 +3391,16 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
         await log_activity_sicher(user["dealer_id"], user["id"],
                                   "pdf.gesendet.ohne_vermerk", ref=contract_id,
                                   meta={"channel": body.channel})
-    await log_activity_sicher(user["dealer_id"], user["id"], f"pdf.gesendet.{body.channel}", ref=contract_id)
+    # E-Mail ist vom Provider bestaetigt; WhatsApp kann AutoSchnell dagegen
+    # nur vorbereiten/ans Share-Sheet uebergeben. Nie einen nicht beweisbaren
+    # WhatsApp-Versand als "gesendet" auditieren.
+    aktion = ("pdf.gesendet.email" if body.channel == "email"
+              else "pdf.versand_vorbereitet.whatsapp")
+    await log_activity_sicher(
+        user["dealer_id"], user["id"], aktion, ref=contract_id,
+        meta={"zustellung": out.get("zustellung", ""),
+              "methode": body.methode or "",
+              "version": int(c.get("version") or 1)})
     return out
 
 
