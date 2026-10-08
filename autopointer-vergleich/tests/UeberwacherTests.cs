@@ -382,6 +382,29 @@ public class UeberwacherTests
     }
 
     [Fact]
+    public async Task Fahrzeugwechsel_sperrt_alten_Vertragslink_sofort()
+    {
+        await Start();
+        _server.InseratUrl = "https://www.kleinanzeigen.de/s-anzeige/3529712138-216-1234";
+        await Anklicken(Bentley, 1);
+        Assert.True(_u.VertragBereit);
+        Assert.NotNull(_u.LetzteInseratUrl);
+
+        // AutoPointer zeigt bereits B, aber Stabilisierung/OCR fuer B ist noch
+        // nicht fertig. In genau diesem Fenster darf Vertrag NIE noch A oeffnen.
+        _server.InseratUrl = "https://www.kleinanzeigen.de/s-anzeige/3529719999-216-1234";
+        _q.Zeige(Passat, 2);
+        await Tick(100);                         // Aenderung nur erkannt
+        Assert.False(_u.VertragBereit);
+        Assert.Null(_u.LetzteInseratUrl);
+
+        // Nach sicherer Verarbeitung gehoeren Link und Fahrzeug wieder zusammen.
+        for (int i = 0; i < 4; i++) await Tick(250);
+        Assert.True(_u.VertragBereit);
+        Assert.Contains("3529719999", _u.LetzteInseratUrl);
+    }
+
+    [Fact]
     public async Task AutoScout_ohne_Hash_ID_sagt_Link_selbst_einfuegen()
     {
         await Start();
