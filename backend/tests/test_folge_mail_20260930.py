@@ -64,3 +64,133 @@ def test_folge_mail_inhalt_gehoert_zum_schluessel(welt, monkeypatch):  # noqa: F
     w.run(w.db.generated_pdfs.update_one({"id": cid}, {"$set": {"version": 2}}))
     out = w.run(senden(recipient="kunde@rpv.test", message="Zweite Nachricht."))
     assert out.get("bereits_gesendet") is not True and len(raus) == 5
+
+
+def test_folge_mail_gleicher_inhalt_neuer_key_braucht_bestaetigung(welt, monkeypatch):  # noqa: F811
+    C = _modul("routes.contracts")
+    w = welt
+    import email_service
+    import provider_fetch
+    monkeypatch.setattr(provider_fetch, "MOCK_PROVIDER_FETCH", False)
+    monkeypatch.setattr(email_service, "email_configured", lambda: True)
+    monkeypatch.setattr(email_service, "resend_aktiv", lambda: True)
+    raus = []
+
+    async def _mit_beleg(to, subject, text, **kw):
+        raus.append(kw.get("idempotency_key"))
+        return True, f"resend:{len(raus)}"
+
+    monkeypatch.setattr(email_service, "send_email_mit_beleg", _mit_beleg)
+    cid = f"cfm_same_{w.s}"
+    w.run(w.db.generated_pdfs.insert_one(_vertrag(w, cid, w.a)))
+
+    def senden(key, **extra):
+        return C.folge_mail_senden(
+            cid,
+            C.FolgeMailIn(
+                art="nach_kauf", recipient="kunde@rpv.test",
+                subject="Hinweis", message="Bitte Inserat entfernen.",
+                idempotency_key=key, **extra),
+            w.a)
+
+    first = f"fm-a-{w.s}"
+    out = w.run(senden(first))
+    assert out["zustellung"] == "versendet" and len(raus) == 1
+
+    # Derselbe Key bleibt echte Idempotenz: kein Dialog/kein zweiter Provider-Aufruf.
+    out = w.run(senden(first))
+    assert out["bereits_gesendet"] is True and len(raus) == 1
+
+    # Neuer Key fuer exakt denselben Inhalt braucht bewusste Bestaetigung.
+    second = f"fm-b-{w.s}"
+    e = w.run(_erwarte(409, senden(second)))
+    assert e.detail["code"] == "bereits_versendet" and len(raus) == 1
+
+    out = w.run(senden(second, erneut=True))
+    assert out["zustellung"] == "versendet" and len(raus) == 2
+
+
+def test_folge_mail_smtp_unklar_wird_nicht_automatisch_wiederholt(welt, monkeypatch):  # noqa: F811
+    C = _modul("routes.contracts")
+    w = welt
+    import email_service
+    import provider_fetch
+    monkeypatch.setattr(provider_fetch, "MOCK_PROVIDER_FETCH", False)
+    monkeypatch.setattr(email_service, "email_configured", lambda: True)
+    monkeypatch.setattr(email_service, "resend_aktiv", lambda: False)
+    raus = []
+
+    async def _mit_beleg(to, subject, text, **kw):
+        raus.append(kw.get("idempotency_key"))
+        return True, "smtp:neu"
+
+    monkeypatch.setattr(email_service, "send_email_mit_beleg", _mit_beleg)
+    cid = f"cfm_smtp_{w.s}"
+    alt_key = f"fm-alt-{w.s}"
+    alt = {
+        "idempotency_key": alt_key, "channel": "email", "art": "nach_kauf",
+        "recipient": "kunde@rpv.test", "subject": "Hinweis",
+        "sent_at": "2000-01-01T00:00:00+00:00", "zustellung": "unklar",
+        "version": 1, "anfrage_hash": "alter-hash",
+    }
+    w.run(w.db.generated_pdfs.insert_one(_vertrag(w, cid, w.a, send_status=[alt])))
+
+    def senden(key, **extra):
+        return C.folge_mail_senden(
+            cid,
+            C.FolgeMailIn(
+                art="nach_kauf", recipient="kunde@rpv.test",
+                subject="Hinweis", message="Bitte Inserat entfernen.",
+                idempotency_key=key, **extra),
+            w.a)
+
+    neu = f"fm-neu-{w.s}"
+    e = w.run(_erwarte(409, senden(neu)))
+    assert e.detail["code"] == "frueherer_versand_unklar"
+    assert raus == []
+
+    out = w.run(senden(neu, erneut=True))
+    assert out["zustellung"] == "versendet"
+    assert len(raus) == 1 and f"-{neu}-" in raus[0]
+    status = w.run(w.db.generated_pdfs.find_one(
+        {"id": cid}, {"_id": 0, "send_status": 1}))["send_status"]
+    assert next(x for x in status if x["idempotency_key"] == alt_key)["zustellung"] == "abgeloest"
+    assert next(x for x in status if x["idempotency_key"] == neu)["zustellung"] == "versendet"
+
+
+def test_folge_mail_fremder_frischer_key_sperrt_parallelversand(welt, monkeypatch):  # noqa: F811
+    C = _modul("routes.contracts")
+    w = welt
+    import email_service
+    import provider_fetch
+    from datetime import datetime, timezone
+    monkeypatch.setattr(provider_fetch, "MOCK_PROVIDER_FETCH", False)
+    monkeypatch.setattr(email_service, "email_configured", lambda: True)
+    monkeypatch.setattr(email_service, "resend_aktiv", lambda: True)
+    raus = []
+
+    async def _mit_beleg(*a, **kw):
+        raus.append(kw.get("idempotency_key"))
+        return True, "resend:should-not-run"
+
+    monkeypatch.setattr(email_service, "send_email_mit_beleg", _mit_beleg)
+
+    cid = f"cfm_parallel_{w.s}"
+    lauf = {
+        "idempotency_key": f"fm-tab-a-{w.s}", "channel": "email", "art": "nach_kauf",
+        "recipient": "kunde@rpv.test", "subject": "Hinweis",
+        "sent_at": datetime.now(timezone.utc).isoformat(), "zustellung": "laeuft",
+        "version": 1, "anfrage_hash": "anderer-hash",
+    }
+    w.run(w.db.generated_pdfs.insert_one(_vertrag(w, cid, w.a, send_status=[lauf])))
+
+    out = w.run(C.folge_mail_senden(
+        cid,
+        C.FolgeMailIn(
+            art="nach_kauf", recipient="kunde@rpv.test",
+            subject="Hinweis", message="Bitte Inserat entfernen.",
+            idempotency_key=f"fm-tab-b-{w.s}"),
+        w.a))
+    assert out["bereits_gesendet"] is True
+    assert out["zustellung"] == "laeuft"
+    assert raus == []
