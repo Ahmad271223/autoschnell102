@@ -28,6 +28,15 @@ export function startMelden(client, start) {
   return client.post(`/werkzeuge/app-start/${start}`).then(() => true, () => false);
 }
 
+/** Browser-Helfer: erst nach wirklich geladenem Ziel bestaetigen. */
+export function helferOeffnenBestaetigen(reqId, fenster = typeof window !== "undefined" ? window : null) {
+  if (!reqId || typeof reqId !== "string" || !fenster?.postMessage) return false;
+  fenster.postMessage({
+    __autoschnell: true, type: "OEFFNEN_BESTAETIGT", reqId,
+  }, fenster.location.origin);
+  return true;
+}
+
 // Adresse, mit der dieses Fenster gestartet wurde (beim Laden des Moduls, bevor eine Seite sie umschreibt).
 const START_ADRESSE = typeof window !== "undefined" ? window.location.href : "";
 
@@ -81,7 +90,9 @@ export function zielUebernehmen(ziel, {
       // bestätigt, nachdem genau dieses Fahrzeug erfolgreich geladen wurde.
       const vertrag = u.searchParams.get("vertrag") === "1";
       const start = startKennung(ziel, fenster.location.origin);
-      const detail = (vertrag || start) ? { link, vertrag, start } : link;
+      const helferReq = u.searchParams.get("helfer_req") || null;
+      const detail = (vertrag || start || helferReq)
+        ? { link, vertrag, start, helferReq } : link;
       fenster.dispatchEvent(new CustomEvent(INSERAT_EREIGNIS, { detail }));
       uebernommen();
       return;
@@ -110,13 +121,24 @@ export function erweiterungZieleVerfolgen(navigieren, {
     const ziel = typeof d.ziel === "string" ? d.ziel : "";
     if (!/^\/app\/[a-z]/.test(ziel) || ziel.startsWith("//")) return;
     const reqId = typeof d.reqId === "string" ? d.reqId : "";
-    zielUebernehmen(ziel, {
+    let zielMitAck = ziel;
+    let vergleichZiel = false;
+    try {
+      const u = new URL(ziel, fenster.location.origin);
+      vergleichZiel = u.pathname === "/app/vergleich" && Boolean(u.searchParams.get("url"));
+      if (vergleichZiel && reqId) {
+        u.searchParams.set("helfer_req", reqId);
+        zielMitAck = u.pathname + "?" + u.searchParams.toString() + u.hash;
+      }
+    } catch { /* Ziel wurde oben bereits validiert */ }
+
+    zielUebernehmen(zielMitAck, {
       fenster, navigieren, beschaeftigt, nachfragen,
+      // Bei einem Vergleich ist Navigation allein KEIN Erfolg. Vergleich.jsx
+      // bestaetigt erst nach erfolgreichem Laden genau dieses Fahrzeugs.
       uebernommen: () => {
-        if (!reqId) return;
-        fenster.postMessage({
-          __autoschnell: true, type: "OEFFNEN_BESTAETIGT", reqId,
-        }, fenster.location.origin);
+        if (!reqId || vergleichZiel) return;
+        helferOeffnenBestaetigen(reqId, fenster);
       },
     });
   };
@@ -142,7 +164,6 @@ export function startZieleVerfolgen(navigieren, {
   fenster.launchQueue.setConsumer((params) => {
     const ziel = zielAusAppStart(params?.targetURL, { origin: fenster.location.origin, startAdresse });
     if (!ziel) return;
-    const start = startKennung(ziel, fenster.location.origin);
     // AutoPointer-Starts werden NICHT schon beim Navigieren bestaetigt.
     // Die Start-Kennung steckt im Ziel/Event; Vergleich.jsx meldet sie erst
     // nach erfolgreichem Laden des konkreten Fahrzeugs. So bleibt der
