@@ -69,7 +69,9 @@ export function zielAusAppStart(targetURL, { origin, startAdresse = START_ADRESS
  * Ein Ziel in der laufenden App öffnen: Vergleichsseite offen -> Ereignis (sie übernimmt das Auto selbst),
  * sonst navigieren; mit ungespeicherter Arbeit erst nachfragen.
  */
-export function zielUebernehmen(ziel, { fenster, navigieren, beschaeftigt = () => false, nachfragen = (f) => f() }) {
+export function zielUebernehmen(ziel, {
+  fenster, navigieren, beschaeftigt = () => false, nachfragen = (f) => f(), uebernommen = () => {},
+}) {
   const ausfuehren = () => {
     const u = new URL(ziel, fenster.location.origin);
     const link = u.pathname === "/app/vergleich" ? u.searchParams.get("url") : null;
@@ -78,9 +80,11 @@ export function zielUebernehmen(ziel, { fenster, navigieren, beschaeftigt = () =
       // Browser-Helfer (04.10.2026): "&vertrag=1" -> Kaufvertrag gleich öffnen (sonst wie bisher nur der Link).
       const vertrag = u.searchParams.get("vertrag") === "1";
       fenster.dispatchEvent(new CustomEvent(INSERAT_EREIGNIS, { detail: vertrag ? { link, vertrag } : link }));
+      uebernommen();
       return;
     }
     navigieren(ziel);
+    uebernommen();
   };
   if (beschaeftigt()) nachfragen(ausfuehren);
   else ausfuehren();
@@ -127,8 +131,14 @@ export function startZieleVerfolgen(navigieren, {
     const ziel = zielAusAppStart(params?.targetURL, { origin: fenster.location.origin, startAdresse });
     if (!ziel) return;
     const start = startKennung(ziel, fenster.location.origin);
-    if (start) melden(start);
-    zielUebernehmen(ziel, { fenster, navigieren, beschaeftigt, nachfragen });
+    // P1 08.10.2026: Dem Windows-Programm erst bestaetigen, wenn das Ziel
+    // WIRKLICH uebernommen wurde. Bei ungespeicherter Arbeit wartet die App
+    // auf den Nutzer. Ohne Klick soll AutoPointer nach 10 s wie vorgesehen
+    // den Browser-Fallback oeffnen, statt faelschlich "uebernommen" zu sehen.
+    zielUebernehmen(ziel, {
+      fenster, navigieren, beschaeftigt, nachfragen,
+      uebernommen: () => { if (start) melden(start); },
+    });
   });
   return true;
 }
