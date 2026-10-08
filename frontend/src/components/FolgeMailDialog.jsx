@@ -162,11 +162,12 @@ export default function FolgeMailDialog({ open, contract, onClose }) {
     schluessel.current = schluesselFuerVersuch(schluessel.current, versuche.current[art], inhalt);
     versuche.current[art] = inhalt;
     setSendet(true);
+    const versenden = async (erneut = false) => api.post(`/contracts/${contract.id}/folge-mail`, {
+      art, recipient: empfaenger.trim(), subject: betreff, message: text,
+      idempotency_key: schluessel.current, ...(erneut ? { erneut: true } : {}),
+    });
     try {
-      const { data } = await api.post(`/contracts/${contract.id}/folge-mail`, {
-        art, recipient: empfaenger.trim(), subject: betreff, message: text,
-        idempotency_key: schluessel.current,
-      });
+      const { data } = await versenden(false);
       // Rollenprüfung 22.09.2026 (RP-434): "läuft noch" ist nicht "verschickt".
       if (data?.bereits_gesendet && data?.zustellung === "laeuft") {
         toast.info("Diese Mail wird gerade verschickt — bitte einen Moment warten.");
@@ -180,6 +181,31 @@ export default function FolgeMailDialog({ open, contract, onClose }) {
       versuche.current[art] = undefined;
       entwuerfe.current[art] = undefined;
     } catch (e) {
+      const d = e?.response?.data?.detail;
+      if (e?.response?.status === 409 && d?.code === "frueherer_versand_unklar") {
+        if (window.confirm(d.msg || "Der frühere Versand hatte kein eindeutiges Ergebnis. Trotzdem noch einmal senden?")) {
+          // Bei SMTP muss der bewusste Neuversand einen NEUEN Schlüssel
+          // bekommen. Bei Resend schadet der neue Schlüssel hier nicht,
+          // weil der Nutzer ausdrücklich eine zweite Mail bestätigt.
+          schluessel.current = neuerSchluessel();
+          try {
+            const { data } = await versenden(true);
+            toast.success(data?.bereits_gesendet ? "Diese Mail wurde bereits verschickt." : "Mail verschickt.");
+            setGesendet(true);
+            schluessel.current = neuerSchluessel();
+            versuche.current[art] = undefined;
+            entwuerfe.current[art] = undefined;
+          } catch (e2) {
+            toast.error(errMsg(e2));
+          }
+        }
+        return;
+      }
+      if (d?.code === "versand_unklar") {
+        toast.warning(d.msg || "Der Versand hat kein eindeutiges Ergebnis. Bitte nicht blind erneut senden.",
+                      { duration: 30000 });
+        return;
+      }
       toast.error(errMsg(e));
     } finally {
       setSendet(false);
