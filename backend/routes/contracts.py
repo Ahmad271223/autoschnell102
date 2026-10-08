@@ -3700,13 +3700,34 @@ async def folge_mail_senden(contract_id: str, body: FolgeMailIn,
                 "$slice": -SEND_STATUS_MAX}}})
         if res.modified_count == 0:
             await _reservierung_nachlesen(contract_id, bereich, schluessel)
-            vorher = await db.generated_pdfs.find_one({"id": contract_id, **bereich}, {"_id": 0, "send_status": 1})
-            alt_eintrag = next((e for e in (vorher or {}).get("send_status") or []
+            vorher = await db.generated_pdfs.find_one(
+                {"id": contract_id, **bereich}, {"_id": 0, "send_status": 1})
+            aktuelle_eintraege = (vorher or {}).get("send_status") or []
+            alt_eintrag = next((e for e in aktuelle_eintraege
                                 if isinstance(e, dict) and e.get("idempotency_key") == schluessel), None)
             if alt_eintrag and alt_eintrag.get("anfrage_hash") and alt_eintrag["anfrage_hash"] != inhalt_hash:
                 raise HTTPException(409, "Dieser Versand-Schlüssel gehört zu einer anderen Nachricht "
                                          "(Empfänger oder Text geändert) — bitte die Seite neu laden "
                                          "und erneut senden.")
+
+            # Ein anderer Tab kann unseren atomaren Push geschlagen und
+            # exakt diese Mail inzwischen abgeschlossen haben. Dann nie mit
+            # unserem anderen Key hinterherschicken.
+            gleich_fertig = next((
+                e for e in aktuelle_eintraege
+                if isinstance(e, dict)
+                and e.get("channel") == "email" and e.get("art") == art
+                and (e.get("recipient") or "").strip().lower() == empfaenger.lower()
+                and e.get("anfrage_hash") == inhalt_hash
+                and int(e.get("version") or 0) == int(c.get("version") or 1)
+                and e.get("zustellung") in ("versendet", "mock")
+            ), None)
+            if gleich_fertig and not body.erneut:
+                raise HTTPException(409, {
+                    "code": "bereits_versendet",
+                    "msg": "Diese Mail wurde bereits verschickt. Wirklich noch einmal senden?",
+                })
+
             # RP-434: ehrlich sagen, was mit dem vorhandenen Eintrag ist —
             # "laeuft" heisst "laeuft noch", nicht "verschickt".
             antwort = await _folge_mail_vorhanden(contract_id, bereich, schluessel)
