@@ -14,6 +14,10 @@ internal interface IAnsichtQuelle
 {
     IntPtr Hauptfenster { get; }
     QuellenZustand Pruefe();
+    /// <summary>Prueft die aktuell sichtbare AutoPointer-Ansicht wirklich neu.
+    /// Echtquelle umgeht dabei die Vordergrund-Optimierung; Testdoubles koennen
+    /// beim normalen Pruefe() bleiben.</summary>
+    QuellenZustand PruefeDirekt() => Pruefe();
     Task<Lesung?> LiesAsync();
 }
 
@@ -405,6 +409,28 @@ internal sealed class Ueberwacher
             _gesperrt = false;
             SetzeStatus(Status.Aktiv);
         }
+
+        // P0/P1 08.10.2026: Waehrend der HTTP-Anfrage kann der Sucher in
+        // AutoPointer bereits auf das naechste Fahrzeug klicken. TickAsync
+        // haelt in dieser Zeit die _einzeln-Sperre und kann die Aenderung
+        // deshalb noch nicht sehen. Vor dem Publizieren von Fahrzeug,
+        // Inserat-URL, Vergleichslinks oder Vertrag IMMER direkt gegenpruefen.
+        // Sonst gibt es ein kurzes Zeitfenster fuer "Vertrag vom vorherigen Auto".
+        var nachServer = _quelle.PruefeDirekt();
+        if (nachServer.Lage != Lage.Details || nachServer.Summe != _summe)
+        {
+            VertragBereit = false;
+            LetzteInseratUrl = null;
+            LetzteVergleiche = Array.Empty<Vergleich>();
+            _summe = nachServer.Lage == Lage.Details ? nachServer.Summe : 0;
+            _seit = _takt();
+            _offen = nachServer.Lage == Lage.Details;
+            _ungeklickt = false;
+            Protokoll.Schreibe("AutoPointer hat waehrend der Serveranfrage das Fahrzeug gewechselt – "
+                               + "alte Antwort verworfen, kein Vertrag/kein Vergleich fuer das vorige Auto.");
+            return;
+        }
+
         Merken(f);
         if (antwort.ErkanntMarke != null)
         {
@@ -565,7 +591,14 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
 
     public IntPtr Hauptfenster => _haupt;
 
-    public QuellenZustand Pruefe()
+    public QuellenZustand Pruefe() => PruefeIntern(erzwingen: false);
+
+    /// <summary>Direkte Gegenprobe fuer den kritischen Server-Handoff:
+    /// niemals einen gecachten Pruefsummenwert liefern, nur weil inzwischen
+    /// das AutoSchnell-Fenster/der Browser im Vordergrund ist.</summary>
+    public QuellenZustand PruefeDirekt() => PruefeIntern(erzwingen: true);
+
+    private QuellenZustand PruefeIntern(bool erzwingen)
     {
         if (_ansicht == null || !AutoPointerFenster.NochGueltig(_ansicht))
         {
@@ -585,7 +618,8 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
         // klickt - dann ist es vorne. Liegt ein anderes Fenster (Browser) davor,
         // gilt die letzte Pruefsumme: kostet nichts und verdeckte Pixel loesen
         // kein erneutes Lesen aus.
-        if (_letzteSumme != 0 && !ImVordergrund()) return new QuellenZustand(Lage.Details, _letzteSumme);
+        if (!erzwingen && _letzteSumme != 0 && !ImVordergrund())
+            return new QuellenZustand(Lage.Details, _letzteSumme);
         ulong summe = AutoPointerFenster.Pruefsumme(_ansicht.TechnikTabelle);
         summe = (summe * 31) ^ AutoPointerFenster.Pruefsumme(_ansicht.KopfTabelle);
         _letzteSumme = summe == 0 ? 1 : summe;
