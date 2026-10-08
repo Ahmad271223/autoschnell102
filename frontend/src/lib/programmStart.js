@@ -106,7 +106,16 @@ export function erweiterungZieleVerfolgen(navigieren, {
     if (e?.source !== fenster || !d || d.__autoschnell !== true || d.type !== "OEFFNEN") return;
     const ziel = typeof d.ziel === "string" ? d.ziel : "";
     if (!/^\/app\/[a-z]/.test(ziel) || ziel.startsWith("//")) return;
-    zielUebernehmen(ziel, { fenster, navigieren, beschaeftigt, nachfragen });
+    const reqId = typeof d.reqId === "string" ? d.reqId : "";
+    zielUebernehmen(ziel, {
+      fenster, navigieren, beschaeftigt, nachfragen,
+      uebernommen: () => {
+        if (!reqId) return;
+        fenster.postMessage({
+          __autoschnell: true, type: "OEFFNEN_BESTAETIGT", reqId,
+        }, fenster.location.origin);
+      },
+    });
   };
   fenster.addEventListener("message", empfangen);
   return () => fenster.removeEventListener("message", empfangen);
