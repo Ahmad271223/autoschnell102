@@ -2520,6 +2520,9 @@ class AboFreischaltenIn(BaseModel):
     Ersetzen durch den Listenpreis, kein 0 EUR), Zahlungsart mit
     Pflichtbegruendung bei Kulanz."""
     plan: Optional[Literal["monthly", "yearly", "probe3", "probe5"]] = None
+    # Produktstufe getrennt von der Laufzeit: normal = nur AutoSchnell-App,
+    # pro = App + AutoSchnell Vergleich + Browser-Helfer.
+    tier: Literal["normal", "pro"] = "normal"
     gueltig_bis: Optional[str] = Field(default=None, max_length=30)
     betrag: Optional[Decimal] = Field(default=None, gt=Decimal("0"),
                                       le=Decimal("100000"))
@@ -2789,6 +2792,7 @@ async def _massgebliches_abo(sucher_id: str, dealer_id: Optional[str],
 
 def _vorgang_antwort(v: dict, **extra) -> dict:
     return {"ok": True, "active": True, "plan": v.get("plan"),
+            "tier": v.get("tier") or "normal",
             "expires_at": v.get("expires_at"), "vorgang_id": v.get("id"),
             "betrag": v.get("betrag"), **extra}
 
@@ -2972,7 +2976,7 @@ async def _abo_freischalten(sucher: dict, sucher_id: str, body: AboFreischaltenI
     vorgang = {
         "id": str(uuid.uuid4()), "typ": "freischaltung",
         "subject_user_id": sucher_id, "dealer_id": sucher.get("dealer_id"),
-        "plan": plan, "expires_at": expires_at, "betrag": betrag,
+        "plan": plan, "tier": body.tier, "expires_at": expires_at, "betrag": betrag,
         "waehrung": "EUR", "zahlungsart": body.zahlungsart,
         "grund": body.grund.strip(), "gezahlt_am": gezahlt_am or now_iso()[:10],
         "notiz": body.notiz.strip(),
@@ -3028,7 +3032,8 @@ async def _abo_vorgang_ausfuehren(v: dict) -> None:
         {"id": vid},
         {"$setOnInsert": {
             "id": vid, "dealer_id": v.get("dealer_id"), "subject_user_id": sid,
-            "plan": v["plan"], "status": "active", "expires_at": v["expires_at"],
+            "plan": v["plan"], "tier": v.get("tier") or "normal",
+            "status": "active", "expires_at": v["expires_at"],
             "price": v["betrag"], "vorgang_id": vid,
             "activated_by": v.get("admin_email", ""), "created_at": jetzt}},
         upsert=True)
@@ -3037,6 +3042,7 @@ async def _abo_vorgang_ausfuehren(v: dict) -> None:
         {"$setOnInsert": {
             "id": str(uuid.uuid4()), "dealer_id": v.get("dealer_id"),
             "subject_user_id": sid, "plan": v["plan"],
+            "tier": v.get("tier") or "normal",
             "amount": float(v["betrag"]), "currency": "EUR",
             "paid_at": v.get("gezahlt_am") or jetzt[:10],
             "period_until": v["expires_at"],       # bezahlt bis = Ablauf bei Freischaltung
@@ -3054,7 +3060,8 @@ async def _abo_vorgang_ausfuehren(v: dict) -> None:
     if not (v.get("schritte") or {}).get("audit"):
         await log_activity_sicher(v.get("dealer_id", "") or "", v.get("admin_id", ""),
                            "admin.sucher.abo.freigeschaltet", ref=sid,
-                           meta={"plan": v["plan"], "betrag": v["betrag"],
+                           meta={"plan": v["plan"], "tier": v.get("tier") or "normal",
+                                 "betrag": v["betrag"],
                                  "zahlungsart": v.get("zahlungsart"),
                                  "vorgang_id": vid})
         await db.abo_vorgaenge.update_one({"id": vid}, {"$set": {"schritte.audit": True}})
