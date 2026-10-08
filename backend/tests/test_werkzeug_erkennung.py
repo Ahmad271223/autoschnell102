@@ -168,3 +168,15 @@ def test_15_beschreibung_ist_strenger_als_die_ueberschrift():
     # mehr Woerter gewinnen
     assert we.aus_beschreibung(["C 300", "C 300 AMG"], "C 300 AMG Line") == "C 300 AMG"
 
+
+
+def test_16_platzhalter_mit_zusammengeschriebenem_modell():
+    """Befund Ahmad 08.10.2026 (AutoScout, Feld "Mercedes-Benz Andere", Ueberschrift "Mercedes-Benz Andere EQA300 ..."):
+    "EQA300" ist EQA (vorher blieb "Andere" stehen); "EQA 300" ergab das alte Mercedes-Modell "300"."""
+    z = we.zuordnen("Mercedes-Benz Andere", "Mercedes-Benz Andere EQA300 ...")
+    assert (z["modell_text"], z["modell"]) == ("EQA", "EQA")
+    assert we.zuordnen("Mercedes-Benz Andere", "Mercedes-Benz Andere EQA 300 4MATIC")["modell"] == "EQA"
+    assert we.zuordnen("Mercedes-Benz Andere", "Mercedes-Benz Andere GLC300 4Matic")["modell"] == "GLC 300"
+    # reine Zahl nur, wenn kein Name mit Buchstaben passt
+    assert we.aus_titel(["300", "EQA"], "Mercedes EQA 300") == "EQA"
+    assert we.aus_titel(["300", "EQA"], "Mercedes 300 SE") == "300"

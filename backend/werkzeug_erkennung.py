@@ -43,6 +43,10 @@ _KLAMMER = re.compile(r"\s*\([^)]*\)\s*")
 _GENERISCH = re.compile(r"^\s*(weitere|andere|sonstige|other|others|misc)\b", re.IGNORECASE)
 _WORT = re.compile(r"[^\W_]+")
 _SAMMELWOERTER = {"andere", "alle", "weitere", "sonstige", "other", "others", "misc"}
+#: Befund Ahmad 08.10.2026 (AutoScout "Mercedes-Benz Andere EQA300 ..."): Modell und Zahl zusammengeschrieben —
+#: "eqa300" -> "eqa" + "300", "glc300" -> "glc" + "300". Bewusst eng (mind. 2 Buchstaben, dann mind. 2 Ziffern, nichts
+#: dahinter): weiter gefasst ("a1le", "c1c", "f512", "200t") verschoben sich Faelle aus dem Abgleich mit dem Programm.
+_ZUSAMMEN = re.compile(r"^([a-z]{2,})(\d{2,})$")
 
 
 # Pruefung 05.10.2026 (Paket 1): "Mercedes Andere" + Beschreibung brauchte 2,5 s — 474.000 Aufrufe von
@@ -120,20 +124,29 @@ def aus_titel(modelle, titel: Optional[str]) -> Optional[str]:
     im_titel = set(woerter)
     for i in range(len(woerter) - 1):
         im_titel.add(woerter[i] + woerter[i + 1])
+    for w in woerter:
+        m = _ZUSAMMEN.match(w)
+        if m:
+            im_titel.update(m.groups())
     im_titel_lese = {lese_form(w) for w in im_titel}
 
     def steht(wort: str) -> bool:
         return wort in im_titel or (any(ch.isdigit() for ch in wort) and lese_form(wort) in im_titel_lese)
 
+    def rang(name: str, w: List[str]) -> tuple:
+        # mehr passende Woerter vor weniger; bei gleich vielen ein Name mit Buchstaben vor einer reinen Zahl (Befund
+        # 08.10.2026: "EQA 300" ergab das alte Mercedes-Modell "300" statt "EQA"); dann der laengere Name
+        return (len(w), any(ch.isalpha() for ch in name), len(name))
+
     bester: Optional[str] = None
-    beste_woerter = 0
+    bester_rang: tuple = ()
     for name in modelle:
         w = _woerter(name)
         if not w or any(x in _SAMMELWOERTER for x in w) or not all(steht(x) for x in w):
             continue
-        if len(w) > beste_woerter or (len(w) == beste_woerter and len(name) > len(bester or "")):
-            bester = name
-            beste_woerter = len(w)
+        r = rang(name, w)
+        if bester is None or r > bester_rang:
+            bester, bester_rang = name, r
     return bester
 
 

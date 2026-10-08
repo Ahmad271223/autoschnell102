@@ -66,19 +66,37 @@ def _norm(wert) -> str:
     return re.sub(r"[^a-z0-9]", "", s.lower())
 
 
+#: Befund Ahmad 08.10.2026 ("bei Elektro erkennt er ab und zu den Kraftstoff nicht"): die Texterkennung des
+#: Windows-Programms liest "Elektro" als "EIektro"/"E1ektro", "Schaltgetriebe" als "SchaItgetriebe" — dann fiel der
+#: Filter weg. Erkennt der normale Weg nichts, ein zweiter Versuch in Leseform: i/l/1 -> 1, o/0 -> 0 (beide Seiten).
+_LESEFORM = str.maketrans("il1o0", "11100")
+
+
+def _leseform(s: str) -> str:
+    return s.translate(_LESEFORM)
+
+
+def _getriebe_aus(n: str, hat) -> Optional[str]:
+    # Reihenfolge wichtig: "Halbautomatik" / "SEMIAUTOMATIC_GEAR" enthalten "auto".
+    if hat("halbauto") or n.startswith("semi"):
+        return "SEMIAUTOMATIC_GEAR"
+    if (hat("auto") or hat("doppelkupplung") or hat("dsg") or hat("cvt")
+            or hat("stufenlos") or hat("tiptronic")):
+        return "AUTOMATIC_GEAR"
+    if hat("schalt") or hat("manu"):
+        return "MANUAL_GEAR"
+    return None
+
+
 def _ein_getriebe(wert) -> Optional[str]:
     n = _norm(wert)
     if not n:
         return None
-    # Reihenfolge wichtig: "Halbautomatik" / "SEMIAUTOMATIC_GEAR" enthalten "auto".
-    if "halbauto" in n or n.startswith("semi"):
-        return "SEMIAUTOMATIC_GEAR"
-    if ("auto" in n or "doppelkupplung" in n or "dsg" in n or "cvt" in n
-            or "stufenlos" in n or "tiptronic" in n):
-        return "AUTOMATIC_GEAR"
-    if "schalt" in n or "manu" in n:
-        return "MANUAL_GEAR"
-    return None
+    code = _getriebe_aus(n, lambda t: t in n)
+    if code is None:
+        lese = _leseform(n)
+        code = _getriebe_aus(lese, lambda t: _leseform(t) in lese)
+    return code
 
 
 def getriebe_code(*werte) -> Optional[str]:
@@ -91,6 +109,32 @@ def getriebe_code(*werte) -> Optional[str]:
     return None
 
 
+def _kraftstoff_aus(n: str, hat) -> Optional[str]:
+    elektrisch = hat("elektr") or hat("electr") or hat("strom")
+    verbrenner = any(hat(t) for t in ("benzin", "petrol", "gasoline", "diesel"))
+    # Reihenfolge wichtig: "Hybrid (Diesel/Elektro)" enthaelt "diesel" und
+    # "elektro", "Benzin/LPG" enthaelt "benzin".
+    if hat("hybrid") or hat("plugin") or (elektrisch and verbrenner):
+        return "HYBRID_DIESEL" if hat("diesel") else "HYBRID"
+    if hat("wasserstoff") or hat("hydrogen"):
+        return "HYDROGENIUM"
+    if hat("lpg") or hat("autogas") or hat("flussiggas"):
+        return "LPG"
+    if hat("cng") or hat("erdgas") or hat("naturalgas"):
+        return "CNG"
+    if hat("ethanol") or hat("e85"):
+        return "ETHANOL"
+    if elektrisch:
+        return "ELECTRICITY"
+    if hat("diesel"):
+        return "DIESEL"
+    if hat("benzin") or hat("petrol") or hat("gasoline") or n.startswith("super"):
+        return "PETROL"
+    if n in ("andere", "sonstige", "sonstiges", "other", "others"):
+        return "OTHER"
+    return None
+
+
 def _ein_kraftstoff(wert) -> Optional[str]:
     roh = str(wert or "").strip()
     if roh.upper() in KRAFTSTOFF_CODES:
@@ -98,29 +142,11 @@ def _ein_kraftstoff(wert) -> Optional[str]:
     n = _norm(roh)
     if not n:
         return None
-    elektrisch = "elektr" in n or "electr" in n or "strom" in n
-    verbrenner = any(t in n for t in ("benzin", "petrol", "gasoline", "diesel"))
-    # Reihenfolge wichtig: "Hybrid (Diesel/Elektro)" enthaelt "diesel" und
-    # "elektro", "Benzin/LPG" enthaelt "benzin".
-    if "hybrid" in n or "plugin" in n or (elektrisch and verbrenner):
-        return "HYBRID_DIESEL" if "diesel" in n else "HYBRID"
-    if "wasserstoff" in n or "hydrogen" in n:
-        return "HYDROGENIUM"
-    if "lpg" in n or "autogas" in n or "flussiggas" in n:
-        return "LPG"
-    if "cng" in n or "erdgas" in n or "naturalgas" in n:
-        return "CNG"
-    if "ethanol" in n or "e85" in n:
-        return "ETHANOL"
-    if elektrisch:
-        return "ELECTRICITY"
-    if "diesel" in n:
-        return "DIESEL"
-    if "benzin" in n or "petrol" in n or "gasoline" in n or n.startswith("super"):
-        return "PETROL"
-    if n in ("andere", "sonstige", "sonstiges", "other", "others"):
-        return "OTHER"
-    return None
+    code = _kraftstoff_aus(n, lambda t: t in n)
+    if code is None:
+        lese = _leseform(n)
+        code = _kraftstoff_aus(lese, lambda t: _leseform(t) in lese)
+    return code
 
 
 def kraftstoff_code(*werte) -> Optional[str]:

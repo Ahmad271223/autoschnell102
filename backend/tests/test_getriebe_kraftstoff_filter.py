@@ -245,3 +245,18 @@ def test_navi_landet_im_mobile_link():
     verneint = _fahrzeug(gearbox="AUTOMATIC_GEAR", fuel="PETROL",
                          description="Guter Zustand, leider ohne Navi")
     assert _fe(verneint) is None
+
+
+@pytest.mark.parametrize("wert,code", [
+    ("EIektro", "ELECTRICITY"), ("Eiektro", "ELECTRICITY"), ("E1ektro", "ELECTRICITY"), ("Elektr0", "ELECTRICITY"),
+    ("Hybrid (Benzin/EIektro)", "HYBRID"), ("Benzln", "PETROL"), ("DieseI", "DIESEL"), ("Dlesel", "DIESEL"),
+])
+def test_kraftstoff_lesefehler_der_texterkennung(wert, code):
+    """Befund Ahmad 08.10.2026: das Windows-Programm liest "Elektro" als "EIektro" — der Filter fiel weg."""
+    assert kraftstoff_code(wert) == code
+
+
+def test_getriebe_lesefehler_der_texterkennung():
+    assert getriebe_code("SchaItgetriebe") == "MANUAL_GEAR" and getriebe_code("Autornatik") == "AUTOMATIC_GEAR"
+    # Unbekanntes bleibt unbekannt (kein Raten)
+    assert kraftstoff_code("xyz") is None and getriebe_code("xyz") is None
