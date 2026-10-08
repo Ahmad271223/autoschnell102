@@ -873,9 +873,10 @@ async def werkzeug_app_start_pruefen(werkzeug_id: str, start: str,
 
 @router.get("/werkzeuge/{werkzeug_id}/meine")
 async def werkzeug_meine(werkzeug_id: str, limit: int = Query(30, ge=1, le=100), user=Depends(current_firma)):
-    """Die eigenen zuletzt im Programm angeklickten Autos — mit Inserat-Link fuer den Kaufvertrag."""
+    """Die eigenen zuletzt im Pro-Werkzeug angeklickten Autos."""
     _wid_pruefen(werkzeug_id)
-    if not wz.ist_freigegeben(werkzeug_id, await _kunden_nr(user)):
+    abo = await subscription_for(user)
+    if not _pro_freigeschaltet(werkzeug_id, abo):
         raise HTTPException(404, NICHT_GEFUNDEN)
     liste = [x async for x in db[wz.SAMMLUNG_VERGLEICHE].find(
         {"werkzeug": werkzeug_id, "user_id": user["id"], "probelauf": {"$ne": True}},
@@ -909,9 +910,10 @@ async def _uebersicht(filter_: dict, limit: int, ueberspringen: int = 0) -> dict
 @router.get("/werkzeuge/{werkzeug_id}/firma")
 async def werkzeug_firma(werkzeug_id: str, limit: int = Query(200, ge=1, le=500),
                          user=Depends(current_chef)):
-    """Chef: wer aus der eigenen Firma hat wann welches Auto verglichen, welche PCs sind verbunden."""
+    """Chef: Pro-Werkzeug-Verbindungen und Vergleiche seiner Firma."""
     _wid_pruefen(werkzeug_id)
-    if not wz.ist_freigegeben(werkzeug_id, await _kunden_nr(user)):
+    abo = await subscription_for(user)
+    if not _pro_freigeschaltet(werkzeug_id, abo):
         raise HTTPException(404, NICHT_GEFUNDEN)
     return await _uebersicht({"werkzeug": werkzeug_id, "dealer_id": user["dealer_id"]}, limit)
 
@@ -942,7 +944,7 @@ async def admin_werkzeug_vergleiche(werkzeug: str = wz.AUTOPOINTER, dealer_id: O
         filter_["user_id"] = user_id
     daten = await _uebersicht(filter_, limit, (seite - 1) * limit)
     daten["name"] = (wz.WERKZEUGE.get(werkzeug) or {}).get("name", werkzeug)
-    daten["freigegeben_fuer"] = sorted(wz.freigegebene_kunden(werkzeug))
+    daten["produktstufe"] = "pro"
     return daten
 
 
