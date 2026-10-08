@@ -60,8 +60,10 @@ describe("Browser-Helfer: Ziel aus der Erweiterung im offenen App-Fenster (04.10
   function appFenster(pfad) {
     const f = fenster(pfad);
     const hoerer = [];
+    f.nachrichten = [];
     f.addEventListener = (typ, h) => hoerer.push(h);
     f.removeEventListener = vi.fn();
+    f.postMessage = (data) => { f.nachrichten.push(data); };
     f.senden = (data, quelle = f) => hoerer.forEach((h) => h({ source: quelle, data }));
     return f;
   }
@@ -99,6 +101,9 @@ describe("Browser-Helfer: Ziel aus der Erweiterung im offenen App-Fenster (04.10
     expect(f.ereignisse).toHaveLength(0);
     knopf();
     expect(nav).toHaveBeenCalledTimes(1);
+    expect(f.nachrichten).toContainEqual({
+      __autoschnell: true, type: "OEFFNEN_BESTAETIGT", reqId: "req-123",
+    });
   });
 
   it("fremde Quelle, fremde Ziele und ungespeicherte Arbeit", () => {
