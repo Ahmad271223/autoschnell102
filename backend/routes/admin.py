@@ -3156,6 +3156,64 @@ def _gueltig_bis_parsen(wert) -> str:
     return tag.replace(hour=23, minute=59, second=59, tzinfo=tz).isoformat()
 
 
+@router.patch("/admin/sucher/{sucher_id}/abo-tier")
+async def admin_set_abo_tier(sucher_id: str, body: dict = Body(...),
+                             admin=Depends(current_super_admin)):
+    """Produktstufe Normal/Pro aendern, ohne Laufzeit oder Zahlung anzufassen."""
+    tier = str(body.get("tier") or "").strip().lower()
+    if tier not in ("normal", "pro"):
+        raise HTTPException(400, "tier muss normal oder pro sein")
+    grund = str(body.get("grund") or "").strip()[:300]
+    if not grund:
+        raise HTTPException(400, "Bitte einen Grund fuer die Produktstufen-Aenderung angeben")
+
+    konto = await db.users.find_one(
+        {"id": sucher_id, "role": {"$in": ["sucher", "dealer"]}},
+        {"_id": 0, "id": 1, "role": 1, "dealer_id": 1, "active": 1})
+    if not konto:
+        raise HTTPException(404, "Sucher nicht gefunden")
+    if konto.get("active") is False and tier == "pro":
+        raise HTTPException(409, "Das Konto ist deaktiviert — Pro kann erst nach dem Entsperren aktiviert werden.")
+
+    ist_chef = await _ist_hauptchef_konto(konto)
+    async with _sperre(f"abo:{sucher_id}", _handelnder(admin)) as wache:
+        wache.pruefen()
+        aktiv = await _massgebliches_abo(
+            sucher_id, konto.get("dealer_id"), ist_chef, auch_abgelaufen=False)
+        if not aktiv or not aktiv.get("id"):
+            raise HTTPException(404, "Kein aktives Abo fuer dieses Konto")
+
+        alt = str(aktiv.get("tier") or "normal").strip().lower()
+        if alt not in ("normal", "pro"):
+            alt = "normal"
+        if alt == tier:
+            return {"ok": True, "active": True, "tier": tier,
+                    "plan": aktiv.get("plan"), "expires_at": aktiv.get("expires_at"),
+                    "unveraendert": True}
+
+        jetzt = now_iso()
+        r = await db.subscriptions.update_one(
+            {"id": aktiv["id"], "status": {"$in": ["active", "cancelled"]}},
+            {"$set": {"tier": tier, "updated_at": jetzt}})
+        if r.matched_count != 1:
+            raise HTTPException(409, "Abo wurde parallel geaendert — bitte neu laden und erneut versuchen")
+
+        await db.zugangs_aenderungen.insert_one({
+            "id": str(uuid.uuid4()), "art": "produktstufe_geaendert",
+            "abo_id": aktiv["id"], "subject_user_id": sucher_id,
+            "dealer_id": konto.get("dealer_id"), "alt": alt, "neu": tier,
+            "grund": grund, "admin_id": admin["id"],
+            "admin_email": _handelnder(admin), "created_at": jetzt,
+        })
+        await log_activity_sicher(
+            konto.get("dealer_id") or "", admin["id"],
+            "admin.sucher.abo.tier_geaendert", ref=sucher_id,
+            meta={"alt": alt, "neu": tier, "abo_id": aktiv["id"], "grund": grund})
+
+        return {"ok": True, "active": True, "tier": tier,
+                "plan": aktiv.get("plan"), "expires_at": aktiv.get("expires_at")}
+
+
 @router.patch("/admin/sucher/{sucher_id}/abo-gueltig-bis")
 async def admin_set_abo_gueltig_bis(sucher_id: str, body: dict = Body(...),
                                     admin=Depends(current_super_admin)):
