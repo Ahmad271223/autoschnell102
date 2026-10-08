@@ -383,3 +383,25 @@ def test_13_vermerk_scheitert_an_der_datenbank_kein_500(welt, monkeypatch):
     assert out["zustellung"] == "versendet" and out["status_vermerk"] == "nicht_gespeichert"
     # der reservierte Eintrag bleibt "laeuft" -> spaeter Wiederaufnahme unter demselben Schluessel
     assert [x["zustellung"] for x in _status(w, cid)] == ["laeuft"]
+
+
+def test_whatsapp_link_bleibt_an_gelesene_vertragsfassung_gebunden(welt):
+    """P1 08.10.2026: N gelesene Nachricht darf nie einen Link auf N+1 bekommen."""
+    C = _modul("routes.contracts")
+    w = welt
+    cid = f"cvwa_version_{w.s}"
+    w.run(w.db.generated_pdfs.insert_one(_vertrag(w, cid, w.a, version=2)))
+
+    async def lauf():
+        try:
+            await C._freigabe_link(
+                cid, C._vertrag_bereich(w.a), w.a, expected_version=1)
+        except Exception as exc:
+            return exc
+        return None
+
+    e = w.run(lauf())
+    assert getattr(e, "status_code", None) == 409
+    doc = w.run(w.db.generated_pdfs.find_one(
+        {"id": cid}, {"_id": 0, "freigabe": 1}))
+    assert not doc.get("freigabe"), "bei Versionskonflikt darf kein neuer Link entstehen"
