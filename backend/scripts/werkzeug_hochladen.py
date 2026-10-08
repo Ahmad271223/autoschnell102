@@ -58,7 +58,7 @@ def main(argv=None, db=None, storage=None) -> int:
         return 2
     print(f"Hochgeladen: {meta['schluessel']}  Version {meta['version']}  "
           f"{meta['groesse'] / 1024 / 1024:.1f} MB  sha256 {meta['sha256'][:16]}…")
-    print("Freigegeben für Kunden: " + (", ".join(sorted(wz.freigegebene_kunden(args.werkzeug))) or "niemand"))
+    print("Verfügbar mit: AutoSchnell Pro")
     return 0
 
 
