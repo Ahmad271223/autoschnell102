@@ -353,9 +353,11 @@
         const knoepfe = el("div", "knoepfe");
         const vertrag = el("button", "knopf haupt", "Kaufvertrag");
         vertrag.title = "Auto sofort in AutoSchnell öffnen – alle Daten sind schon da";
+        vertrag.disabled = !!z.vertragOeffnet;
         vertrag.addEventListener("click", async (ev) => {
-          if (!ev.isTrusted) return;
+          if (!ev.isTrusted || z.vertragOeffnet) return;
           if (!A.helferDa()) { veraltet(); return; }
+          z.vertragOeffnet = true;
           z.meldung = "AutoSchnell wird geöffnet …";
           z.protokollWartet = "";
           z.webseiteAnbieten = false;
@@ -374,19 +376,23 @@
               // vorbei, also einen zweiten Klick anbieten statt still zu scheitern
               z.protokollWartet = r2.protokoll;
               z.meldung = "Inserat neu gelesen – bitte noch einmal klicken:";
+              z.vertragOeffnet = false;
               zeichnen();
               return;
             }
             await appStarten(z, r2.protokoll);
+            z.vertragOeffnet = false;
+            zeichnen();
             return;
           }
-          if (!A.helferDa()) { veraltet(); return; }
+          if (!A.helferDa()) { z.vertragOeffnet = false; veraltet(); return; }
           z.meldung = r2 && r2.weg === "app_neu_laden"
             ? "Die AutoSchnell-App ist offen, kennt die aktualisierte Erweiterung aber noch nicht – dort einmal neu laden "
               + "(F5), dann hier noch einmal „Kaufvertrag“ drücken."
             : !r2 || r2.fehler
               ? (r2 && r2.text) || "AutoSchnell konnte nicht geöffnet werden – Seite neu laden und noch einmal drücken."
               : "";
+          z.vertragOeffnet = false;
           zeichnen();
         });
         knoepfe.appendChild(vertrag);
