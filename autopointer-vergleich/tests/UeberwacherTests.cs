@@ -61,12 +61,14 @@ public class UeberwacherTests
             return SelbstAntwort?.Invoke(vorgangId) ?? Task.FromResult(Selbst);
         }
         public readonly List<Fahrzeug> Anfragen = new();
+        public Action? WaehrendDesVergleichs;
         public int Vorgewaermt;
         public void Vorwaermen() => Vorgewaermt++;
 
         public Task<VergleichAntwort> VergleichAsync(Fahrzeug f, bool probelauf)
         {
             Anfragen.Add(f);
+            WaehrendDesVergleichs?.Invoke();
             if (Fehler != null) return Task.FromException<VergleichAntwort>(Fehler);
             int leer = f.MarkeModellText.IndexOf(' ');
             string id = (leer > 0 ? $"{f.MarkeModellText[..leer]}-{f.MarkeModellText[(leer + 1)..]}" : f.MarkeModellText)
@@ -187,6 +189,34 @@ public class UeberwacherTests
         await Anklicken(Bentley, 101);   // z. B. "Neu"-Markierung weg, Bild nachgeladen
         await Anklicken(Bentley, 102);
         Assert.Single(_b.Aufrufe);
+    }
+
+    [Fact]
+    public async Task Fahrzeugwechsel_waehrend_Serveranfrage_verwirft_alte_Antwort_und_Vorgang()
+    {
+        await Start();
+        _server.UeberHelfer = true;
+        _server.InseratUrl = "https://www.kleinanzeigen.de/s-anzeige/3529712138-216-1234";
+        _q.Zeige(Bentley, 1);
+
+        _server.WaehrendDesVergleichs = () =>
+        {
+            _q.Zeige(Passat, 2);
+            _server.WaehrendDesVergleichs = null;
+        };
+
+        for (int i = 0; i < 4; i++) await Tick();
+
+        Assert.Empty(_b.Aufrufe);
+        Assert.Null(_u.LetzteInseratUrl);
+        Assert.Empty(_u.LetzteVergleiche);
+        Assert.Null(_u.LetztesFahrzeug);
+        Assert.Empty(_server.Nachgefragt);
+
+        // Erst der neue stabile Stand darf danach verarbeitet werden.
+        for (int i = 0; i < 4; i++) await Tick();
+        Assert.Single(_b.Aufrufe);
+        Assert.Contains("vorgang", _b.Aufrufe[0][0].Portal, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
