@@ -3649,17 +3649,41 @@ async def folge_mail_senden(contract_id: str, body: FolgeMailIn,
                 "$slice": -SEND_STATUS_MAX}}})
         if res.modified_count == 0:
             await _reservierung_nachlesen(contract_id, bereich, schluessel)
-            vorher = await db.generated_pdfs.find_one({"id": contract_id, **bereich}, {"_id": 0, "send_status": 1})
-            alt_eintrag = next((e for e in (vorher or {}).get("send_status") or []
+            vorher = await db.generated_pdfs.find_one(
+                {"id": contract_id, **bereich}, {"_id": 0, "send_status": 1})
+            aktuelle_eintraege = (vorher or {}).get("send_status") or []
+            alt_eintrag = next((e for e in aktuelle_eintraege
                                 if isinstance(e, dict) and e.get("idempotency_key") == schluessel), None)
             if alt_eintrag and alt_eintrag.get("anfrage_hash") and alt_eintrag["anfrage_hash"] != inhalt_hash:
                 raise HTTPException(409, "Dieser Versand-Schlüssel gehört zu einer anderen Nachricht "
                                          "(Empfänger oder Text geändert) — bitte die Seite neu laden "
                                          "und erneut senden.")
+
+            gleich_fertig = next((
+                e for e in aktuelle_eintraege
+                if isinstance(e, dict)
+                and e.get("channel") == "email" and e.get("art") == art
+                and (e.get("recipient") or "").strip().lower() == empfaenger.lower()
+                and e.get("anfrage_hash") == inhalt_hash
+                and int(e.get("version") or 0) == int(c.get("version") or 1)
+                and e.get("zustellung") in ("versendet", "mock")
+            ), None)
+            if gleich_fertig and not body.erneut:
+                raise HTTPException(409, {
+                    "code": "bereits_versendet",
+                    "msg": "Diese Mail wurde bereits verschickt. Wirklich noch einmal senden?",
+                })
             # RP-434: ehrlich sagen, was mit dem vorhandenen Eintrag ist —
             # "laeuft" heisst "laeuft noch", nicht "verschickt".
             antwort = await _folge_mail_vorhanden(contract_id, bereich, schluessel)
             if antwort is not None:
+                if antwort.get("zustellung") == "unklar":
+                    raise HTTPException(409, {
+                        "code": "frueherer_versand_unklar",
+                        "msg": ("Der frühere SMTP-Versand hat kein eindeutiges Ergebnis — "
+                                "die Mail ist vielleicht schon angekommen. Trotzdem bewusst "
+                                "noch einmal senden?"),
+                    })
                 return {"status": "ok", "bereits_gesendet": True, "art": art, **antwort}
             # None: ein abgebrochener Versuch (Prozess starb) wurde gerade neu
             # beansprucht — derselbe Anbieter-Schluessel unten verhindert eine
@@ -3687,9 +3711,27 @@ async def folge_mail_senden(contract_id: str, body: FolgeMailIn,
                 html=None, reply_to=antwort_adresse,
                 absender_name=firma.get("company_name") or "",
                 idempotency_key=f"folge-{contract_id}-{schluessel}-{inhalt_hash[:12]}")
-        except Exception:  # noqa: BLE001 — Anbieterfehler = nicht versendet
-            log.exception("Folge-Mail %s zu %s fehlgeschlagen", art, contract_id)
-            ok, beleg = False, ""
+        except Exception:  # noqa: BLE001
+            log.exception("Folge-Mail %s zu %s: Provider-Ausgang unklar", art, contract_id)
+            if schluessel:
+                await db.generated_pdfs.update_one(
+                    {"id": contract_id, **bereich,
+                     "send_status": {"$elemMatch": {
+                         "idempotency_key": schluessel, "zustellung": "laeuft"}}},
+                    {"$set": {"send_status.$.zustellung": "unklar",
+                              "send_status.$.unklar_am": now_iso()}})
+            raise HTTPException(502, {"code": "versand_unklar",
+                                      "msg": VERSAND_UNKLAR_TEXT})
+    if not ok and beleg == email_service.BELEG_UNKLAR:
+        if schluessel:
+            await db.generated_pdfs.update_one(
+                {"id": contract_id, **bereich,
+                 "send_status": {"$elemMatch": {
+                     "idempotency_key": schluessel, "zustellung": "laeuft"}}},
+                {"$set": {"send_status.$.zustellung": "unklar",
+                          "send_status.$.unklar_am": now_iso()}})
+        raise HTTPException(502, {"code": "versand_unklar",
+                                  "msg": VERSAND_UNKLAR_TEXT})
     if not ok:
         if schluessel:
             # Rollenpruefung 22.09.2026 (RP-434): Reservierung wieder
