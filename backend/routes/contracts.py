@@ -2779,16 +2779,23 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
     # Preis nach Abholung, Verkaeufer-Korrektur), ging die ALTE Fassung raus —
     # kein Vermerk; der Dialog laedt die neue Fassung und der Nutzer teilt
     # noch einmal. Vor der Reservierung, damit nichts zurueckzunehmen ist.
-    if body.methode == "teilen" and body.version is not None \
-            and int(c.get("version") or 1) != int(body.version):
-        raise HTTPException(409, {
-            "code": "fassung_veraltet",
-            "msg": "Geteilt wurde eine veraltete Fassung des Vertrags — es gibt inzwischen "
-                   f"Fassung {int(c.get('version') or 1)}. Bitte die neue Fassung noch einmal "
-                   "teilen.",
-            "version": int(c.get("version") or 1),
-            "geteilt": int(body.version),
-        })
+    if body.methode == "teilen":
+        if body.version is None:
+            raise HTTPException(409, {
+                "code": "fassung_unbekannt",
+                "msg": ("Die Vertragsfassung konnte nicht sicher bestimmt werden — "
+                        "bitte die PDF neu laden und danach noch einmal teilen."),
+                "version": int(c.get("version") or 1),
+            })
+        if int(c.get("version") or 1) != int(body.version):
+            raise HTTPException(409, {
+                "code": "fassung_veraltet",
+                "msg": "Geteilt wurde eine veraltete Fassung des Vertrags — es gibt inzwischen "
+                       f"Fassung {int(c.get('version') or 1)}. Bitte die neue Fassung noch einmal "
+                       "teilen.",
+                "version": int(c.get("version") or 1),
+                "geteilt": int(body.version),
+            })
     # Runde 16 (15.09.2026) bremste hier 300 Versaende je 10 Minuten. Seit 06.10.2026 (Wunsch Ahmad) nur
     # noch das Tageslimit fuer E-Mails — gezaehlt nach der Reservierung (_mail_tag_zaehlen unten).
     anfrage_hash = _versand_anfrage_hash(c, body)
