@@ -288,10 +288,12 @@ export default function SendDialog({ open, contract, onClose }) {
   // Pruefbericht 20.09.2026 (U-93): Der Versand IST erfolgt, aber der Vertrag
   // war beim Vermerk nicht mehr erreichbar (Loeschung begonnen) — das Archiv
   // zeigt ihn weiter als unversendet. Bisher sah der Nutzer nur "versendet".
-  const vermerkPruefen = (data) => {
+  const vermerkPruefen = (data, channel) => {
     if (data?.status_vermerk === "nicht_gespeichert") {
-      toast.warning("Versendet, aber im Archiv nicht vermerkt — bitte den Vertrag im "
-        + "Vertragsarchiv prüfen.", { duration: 15000 });
+      toast.warning(channel === "email"
+        ? "E-Mail versendet, aber im Archiv nicht vermerkt — bitte den Vertrag im Vertragsarchiv prüfen."
+        : "WhatsApp-Versand vorbereitet, aber im Archiv nicht vermerkt — bitte den Vertrag im Vertragsarchiv prüfen.",
+      { duration: 15000 });
     }
   };
 
@@ -320,7 +322,7 @@ export default function SendDialog({ open, contract, onClose }) {
             idempotency_key, ...(erneut ? { erneut: true } : {}) };
       const { data } = await api.post(`/contracts/${contract.id}/send`, body);
       keyRef.current = neuerSchluessel();
-      vermerkPruefen(data);
+      vermerkPruefen(data, channel);
       if (channel === "whatsapp" && data.wa_url) {
         setWaUrl(data.wa_url);
         let geoeffnet = false;
@@ -360,8 +362,9 @@ export default function SendDialog({ open, contract, onClose }) {
         if (data?.bereits_gesendet && z === "laeuft") {
           toast.info("Dieser Versand läuft gerade noch — bitte einen Moment warten.");
         } else if (z === "unklar") {
-          toast.warning("Der Versand hat kein Ergebnis gemeldet. Bitte noch einmal "
-            + "auf Senden klicken — es wird garantiert nicht doppelt zugestellt.");
+          toast.warning("Der Versand hat kein eindeutiges Ergebnis. Bitte noch einmal auf Senden klicken: "
+            + "AutoSchnell prüft den bestehenden Versuch; bei SMTP wird vor einem bewussten Neuversand "
+            + "noch einmal ausdrücklich gefragt.");
         } else if (data?.bereits_gesendet) toast.info("Dieser Versand wurde bereits registriert.");
         else if (z === "versendet" && data?.hinweis) {
           // Rollenprüfung 22.09.2026 (RP-448): Während des Versands entstand
@@ -443,17 +446,22 @@ export default function SendDialog({ open, contract, onClose }) {
       // U-73: die Fassung GENAU dieser Datei — nicht die des Vertrags im
       // Zustand, der kann seit dem Vorabladen schon neuer sein.
       const fassung = pdfFassung.current;
+      if (!fassung) {
+        setPdfStand((n) => n + 1);
+        toast.warning("Die Vertragsfassung konnte nicht sicher bestimmt werden. "
+          + "Die PDF wird neu geladen — bitte danach noch einmal teilen.");
+        return;
+      }
       const ergebnis = await dateiTeilen({ datei: pdf, text: waMsg, titel });
       if (ergebnis === "geteilt") {
         let vermerkt = true;
         try {
           const { data } = await api.post(`/contracts/${contract.id}/send`, {
             channel: "whatsapp", recipient: phone, message: waMsg,
-            idempotency_key: keyRef.current, methode: "teilen",
-            ...(fassung ? { version: fassung } : {}),
+            idempotency_key: keyRef.current, methode: "teilen", version: fassung,
           });
           keyRef.current = neuerSchluessel();
-          vermerkPruefen(data);
+          vermerkPruefen(data, "whatsapp");
         } catch (err) {
           const d = err?.response?.data?.detail;
           if (err?.response?.status === 409 && d?.code === "fassung_veraltet") {
