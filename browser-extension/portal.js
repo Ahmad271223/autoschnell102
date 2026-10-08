@@ -346,7 +346,9 @@
           // 2.6.0 (Nr. 19): nach dem Nachlesen ist die Klick-Erlaubnis des Browsers abgelaufen — ein zweiter Klick
           const knoepfe2 = el("div", "knoepfe");
           const jetzt = el("button", "knopf haupt", "In der AutoSchnell-App öffnen");
-          jetzt.addEventListener("click", (ev) => { if (ev.isTrusted) appStarten(z, z.protokollWartet); });
+          jetzt.addEventListener("click", (ev) => {
+            if (ev.isTrusted) appStarten(z, z.protokollWartet, z.protokollStart || "");
+          });
           knoepfe2.appendChild(jetzt);
           inhalt.appendChild(knoepfe2);
         }
@@ -375,10 +377,11 @@
               if (nachgelesen) {
                 // Nach dem Nachlesen ist die Klick-Erlaubnis vorbei: zweiten bewussten Klick anbieten.
                 z.protokollWartet = r2.protokoll;
+                z.protokollStart = r2.start || "";
                 z.meldung = "Inserat neu gelesen – bitte noch einmal klicken:";
                 return;
               }
-              await appStarten(z, r2.protokoll);
+              await appStarten(z, r2.protokoll, r2.start || "");
               return;
             }
             if (!A.helferDa()) { veraltet(); return; }
@@ -428,7 +431,7 @@
   }
 
   /** Installierte App ist zu: per Link-Typ web+autoschnell: starten (noch im Klick, sonst blockt der Browser). */
-  async function appStarten(z, protokoll) {
+  async function appStarten(z, protokoll, start = "") {
     const a = document.createElement("a");
     a.href = protokoll;
     a.style.display = "none";
@@ -437,10 +440,13 @@
     a.click();
     a.remove();
     z.protokollWartet = "";
+    z.protokollStart = "";
     z.webseiteAnbieten = false;
     z.meldung = "AutoSchnell-App wird geöffnet …";
     zeichnen();
-    const r3 = await A.senden({ typ: "app_start_pruefen", kennung: z.kennung });
+    const r3 = await A.senden({
+      typ: "app_start_pruefen", kennung: z.kennung, start,
+    });
     // 2.6.1: kein App-Fenster zu sehen -> fragen statt selbst die Webseite aufzumachen (die App kann in einem anderen
     // Browser aufgegangen sein, oder der Browser fragt noch "AutoSchnell öffnen?")
     const unklar = !r3 || r3.weg === "unklar";
