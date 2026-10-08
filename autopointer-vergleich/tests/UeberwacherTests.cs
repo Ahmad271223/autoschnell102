@@ -45,13 +45,20 @@ public class UeberwacherTests
         public string[]? NurPortale;
         /// <summary>1.5.8: Konto mit Browser-Erweiterung — der Server sagt ueber_helfer + Vorgangsnummer.</summary>
         public bool UeberHelfer;
-        public bool? Uebernommen = true;
+        /// <summary>1.5.9: in welchem Browser die Erweiterung verbunden ist ("chrome", "edge", "").</summary>
+        public string HelferBrowser = "";
+        /// <summary>1.5.9: Antwort auf POST …/selbst — true = das Programm oeffnet, false = die Erweiterung hat ihn,
+        /// null = nicht erreichbar. <see cref="SelbstAntwort"/> geht vor (Antwort spaeter, je Vorgang).</summary>
+        public bool? Selbst = false;
+        public Func<string, Task<bool?>>? SelbstAntwort;
         public readonly List<string> Nachgefragt = new();
+        /// <summary>Erster Vorgang; jeder weitere bekommt eine eigene Nummer (wie beim echten Server).</summary>
         public const string Vorgang = "11111111-2222-3333-4444-555555555555";
-        public Task<bool?> VorgangUebernommenAsync(string vorgangId)
+        public readonly List<string> Vorgaenge = new();
+        public Task<bool?> VorgangSelbstAsync(string vorgangId)
         {
             Nachgefragt.Add(vorgangId);
-            return Task.FromResult(Uebernommen);
+            return SelbstAntwort?.Invoke(vorgangId) ?? Task.FromResult(Selbst);
         }
         public readonly List<Fahrzeug> Anfragen = new();
         public int Vorgewaermt;
@@ -69,6 +76,12 @@ public class UeberwacherTests
                 return Task.FromResult(new VergleichAntwort(Array.Empty<Vergleich>(),
                     new[] { "mobile.de kennt die Marke „Quatschmarke“ nicht – kein mobile.de-Vergleich." }, "inland",
                     InseratUrl, "kein_link", ErkanntMarke: f.MarkeModellText, ErkanntModell: "", MarkeErkannt: false));
+            string? vorgang = null;
+            if (UeberHelfer)
+            {
+                vorgang = Vorgaenge.Count == 0 ? Vorgang : $"11111111-2222-3333-4444-{Vorgaenge.Count:D12}";
+                Vorgaenge.Add(vorgang);
+            }
             return Task.FromResult(new VergleichAntwort(new[]
             {
                 new Vergleich("mobile.de", $"https://suchen.mobile.de/{id}"),
@@ -76,14 +89,20 @@ public class UeberwacherTests
             }.Where(v => NurPortale == null || NurPortale.Contains(v.Portal)).ToArray(), Array.Empty<string>(), "inland", InseratUrl, InseratImBrowser ? "browser" : InseratUrl != null ? "laeuft" : "kein_link",
                ErkanntMarke: "Erkannt", ErkanntModell: f.MarkeModellText, Melden: Melden,
                InseratImBrowser: InseratImBrowser && InseratUrl != null,
-               VorgangId: UeberHelfer ? Vorgang : null, UeberHelfer: UeberHelfer));
+               VorgangId: vorgang, UeberHelfer: UeberHelfer, HelferBrowser: HelferBrowser));
         }
     }
 
     private sealed class Browser : IOeffner
     {
         public readonly List<IReadOnlyList<Vergleich>> Aufrufe = new();
-        public void Oeffne(IReadOnlyList<Vergleich> v, Einstellungen e, IntPtr ap) => Aufrufe.Add(v);
+        /// <summary>1.5.9: in welchem Browser jeder Aufruf geoeffnet wurde.</summary>
+        public readonly List<BrowserWahl> Wahl = new();
+        public void Oeffne(IReadOnlyList<Vergleich> v, Einstellungen e, IntPtr ap, BrowserWahl browser)
+        {
+            Aufrufe.Add(v);
+            Wahl.Add(browser);
+        }
     }
 
     private readonly Attrappe _q = new();
@@ -91,7 +110,9 @@ public class UeberwacherTests
     private readonly Server _server = new();
     private readonly List<string> _verloren = new();
     private readonly Einstellungen _e = new();
+    /// <summary>Text und (falls vorhanden) die ganze Erklaerung je Meldung — die Pruefungen suchen in beidem.</summary>
     private readonly List<string> _meldungen = new();
+    private readonly List<Hinweis> _hinweise = new();
     private DateTime _jetzt = new(2026, 10, 3, 12, 0, 0);
     private readonly List<TimeSpan> _gewartet = new();
     private readonly Ueberwacher _u;
@@ -105,9 +126,17 @@ public class UeberwacherTests
             _jetzt += t;
             return Task.CompletedTask;
         });
-        _u.Meldung += (t, _) => _meldungen.Add(t);
+        _u.Meldung += Gemeldet;
         _u.VerbindungVerloren += m => _verloren.Add(m);
         _u.Neustart();
+    }
+
+    private void Gemeldet(Hinweis h)
+    {
+        // 1.5.9 (C): keine Sprechblase ueber 150 Zeichen — Windows schneidet sonst ab
+        Assert.True(h.Text.Length <= Hinweis.MaxZeichen, $"{h.Text.Length} Zeichen: {h.Text}");
+        _hinweise.Add(h);
+        _meldungen.Add(h.Ausfuehrlich != null ? h.Text + "\n" + h.Ausfuehrlich : h.Text);
     }
 
     private async Task Tick(int ms = 250)
@@ -476,11 +505,15 @@ public class UeberwacherTests
         Assert.Contains("Hash-ID", Ueberwacher.LinkHinweisFuer(new Fahrzeug { Quelle = "AutoScout24" }));
     }
 
+    private const string MobileInserat = "https://suchen.mobile.de/fahrzeuge/details.html?id=440123456";
+
     [Fact]   // 1.5.8 (Vorgangsnummer): mit Erweiterung oeffnet das Programm nur die Vorgangsseite
     public async Task Mit_Erweiterung_oeffnet_das_Programm_nur_die_Vorgangsseite()
     {
         await Start();
         _server.UeberHelfer = true;
+        _server.InseratUrl = MobileInserat;                          // sonst kaeme der Inserat-ID-Hinweis dazu
+        _server.Selbst = false;                                      // die Erweiterung hat den Vorgang schon
         await Anklicken(Bentley, 1);
         Assert.Single(_b.Aufrufe);
         var v = Assert.Single(_b.Aufrufe[0]);
@@ -488,39 +521,106 @@ public class UeberwacherTests
         Assert.Equal($"https://app.auto-schnellkauf.de/app/vorgang/{Server.Vorgang}", v.Url);
         await _u.LetzteVorgangsPruefung!;
         Assert.Equal(new[] { Server.Vorgang }, _server.Nachgefragt);
+        Assert.Contains(TimeSpan.FromMilliseconds(Ueberwacher.VorgangWarteMs), _gewartet);   // 1.5.9: 5 s Zeit
+        Assert.Equal(5000, Ueberwacher.VorgangWarteMs);
         Assert.Single(_b.Aufrufe);                                   // uebernommen: nichts doppelt
+        Assert.Empty(_meldungen);
         Assert.Equal(new[] { "mobile.de", "AutoScout24" }, _u.LetzteVergleiche.Select(x => x.Portal));
     }
 
-    [Fact]   // 1.5.8: uebernimmt die Erweiterung nicht (anderer Browser), oeffnet das Programm selbst — 30 min lang direkt
-    public async Task Uebernimmt_niemand_dann_selbst_und_30_Minuten_direkt()
+    [Fact]   // Pruefung 08.10.2026 (1.5.9, A): "selbst: true" und noch das neueste Auto -> das Programm oeffnet selbst
+    public async Task Selbst_und_noch_aktuell_dann_oeffnet_das_Programm_im_selben_Browser()
     {
         await Start();
         _server.UeberHelfer = true;
-        _server.Uebernommen = false;
+        _server.InseratUrl = MobileInserat;                          // sonst kaeme der Inserat-ID-Hinweis dazu
+        _server.HelferBrowser = "edge";
+        _server.Selbst = true;
         await Anklicken(Bentley, 1);
         await _u.LetzteVorgangsPruefung!;
         Assert.Equal(2, _b.Aufrufe.Count);
+        Assert.Equal("Vorgang", Assert.Single(_b.Aufrufe[0]).Portal);
         Assert.Equal(new[] { "mobile.de", "AutoScout24" }, _b.Aufrufe[1].Select(x => x.Portal));
-        Assert.Contains(_meldungen, m => m.Contains("nicht übernommen"));
-        await Anklicken(Golf, 2);                                    // naechstes Auto: gleich direkt
-        Assert.Equal(3, _b.Aufrufe.Count);
-        Assert.Equal(new[] { "mobile.de", "AutoScout24" }, _b.Aufrufe[2].Select(x => x.Portal));
-        _jetzt = _jetzt.AddMinutes(31);                              // nach 30 min wieder ueber die Erweiterung
-        _server.Uebernommen = true;
-        await Anklicken(Bentley, 3);
-        Assert.Equal("Vorgang", Assert.Single(_b.Aufrufe[3]).Portal);
+        Assert.Equal(new[] { BrowserWahl.Edge, BrowserWahl.Edge }, _b.Wahl);   // dort, wo die Vorgangsseite aufging
+        var h = Assert.Single(_hinweise);
+        Assert.Equal(Ueberwacher.ErweiterungNichtUebernommen, h.Text);
+        Assert.False(h.Fehler);
+        // die 30 Minuten "gleich direkt" (1.5.8) gibt es nicht mehr: das naechste Auto geht wieder ueber den Vorgang
+        await Anklicken(Golf, 2);
+        await _u.LetzteVorgangsPruefung!;
+        Assert.Equal("Vorgang", Assert.Single(_b.Aufrufe[2]).Portal);
+        Assert.Equal(2, _server.Nachgefragt.Count);
     }
 
-    [Fact]   // 1.5.8: nicht pruefbar (Netz weg) -> lieber selbst oeffnen als gar nichts
-    public async Task Vorgang_nicht_pruefbar_dann_selbst_oeffnen()
+    [Fact]   // 1.5.9 (A): "selbst: true", aber inzwischen ist ein anderes Auto dran -> die alten Tabs gehen NICHT auf
+    public async Task Selbst_aber_inzwischen_ein_neueres_Auto_dann_nichts()
     {
         await Start();
         _server.UeberHelfer = true;
-        _server.Uebernommen = null;
+        _server.InseratUrl = MobileInserat;                          // sonst kaeme der Inserat-ID-Hinweis dazu
+        var offen = new Dictionary<string, TaskCompletionSource<bool?>>();
+        _server.SelbstAntwort = id => (offen[id] = new TaskCompletionSource<bool?>()).Task;
+        await Anklicken(Bentley, 1);
+        var bentley = _u.LetzteVorgangsPruefung!;
+        await Anklicken(Golf, 2);                                    // der Sucher klickt weiter, bevor die 5 s um sind
+        var golf = _u.LetzteVorgangsPruefung!;
+        Assert.Equal(2, _b.Aufrufe.Count);                           // zwei Vorgangsseiten
+        Assert.Equal(2, _server.Nachgefragt.Count);                  // beide werden beansprucht (alte: spaete Erweiterung blockiert)
+        offen[_server.Vorgaenge[0]].SetResult(true);
+        await bentley;
+        Assert.Equal(2, _b.Aufrufe.Count);                           // Bentley ist nicht mehr der neueste: nichts
+        Assert.Empty(_meldungen);
+        offen[_server.Vorgaenge[1]].SetResult(true);
+        await golf;
+        Assert.Equal(3, _b.Aufrufe.Count);                           // Golf schon: direkt geoeffnet
+        Assert.Contains("VW-Golf-2019", _b.Aufrufe[2][0].Url);
+    }
+
+    [Fact]   // 1.5.9 (A): "selbst: false" -> die Erweiterung hat ihn; null (nicht erreichbar) -> NICHT oeffnen, kurzer Hinweis
+    public async Task Selbst_false_nichts_und_nicht_erreichbar_kein_Oeffnen_aber_Hinweis()
+    {
+        await Start();
+        _server.UeberHelfer = true;
+        _server.InseratUrl = MobileInserat;                          // sonst kaeme der Inserat-ID-Hinweis dazu
+        _server.Selbst = false;
         await Anklicken(Bentley, 1);
         await _u.LetzteVorgangsPruefung!;
-        Assert.Equal(2, _b.Aufrufe.Count);
+        Assert.Single(_b.Aufrufe);
+        Assert.Empty(_meldungen);
+
+        _server.Selbst = null;                                       // auch der zweite Versuch kam nicht durch
+        await Anklicken(Golf, 2);
+        await _u.LetzteVorgangsPruefung!;
+        Assert.Equal(2, _b.Aufrufe.Count);                           // nur die Vorgangsseite — sonst womoeglich doppelt
+        var h = Assert.Single(_hinweise);
+        Assert.Equal(Ueberwacher.VorgangNichtErreichbar, h.Text);
+        Assert.Contains("„Vergleichen“", h.Text);
+    }
+
+    [Fact]   // 1.5.9 (A): die Vorgangsseite geht im Browser der Erweiterung auf, wenn "Standardbrowser" eingestellt ist
+    public async Task Vorgangsseite_im_Browser_der_Erweiterung()
+    {
+        await Start();
+        _server.UeberHelfer = true;
+        _server.HelferBrowser = "chrome";
+        await Anklicken(Bentley, 1);
+        Assert.Equal(BrowserWahl.Standard, _e.Browser);
+        Assert.Equal(BrowserWahl.Chrome, Assert.Single(_b.Wahl));
+        // eine eigene Wahl (Edge) gilt immer
+        _e.Browser = BrowserWahl.Edge;
+        await Anklicken(Golf, 2);
+        Assert.Equal(BrowserWahl.Edge, _b.Wahl[1]);
+        // ohne Erweiterung: wie eingestellt
+        _e.Browser = BrowserWahl.Standard;
+        _server.UeberHelfer = false;
+        await Anklicken(Passat, 3);
+        Assert.Equal(BrowserWahl.Standard, _b.Wahl[2]);
+
+        Assert.Equal(BrowserWahl.Chrome, Ueberwacher.BrowserFuer(BrowserWahl.Standard, "chrome"));
+        Assert.Equal(BrowserWahl.Edge, Ueberwacher.BrowserFuer(BrowserWahl.Standard, "edge"));
+        Assert.Equal(BrowserWahl.Standard, Ueberwacher.BrowserFuer(BrowserWahl.Standard, ""));
+        Assert.Equal(BrowserWahl.Standard, Ueberwacher.BrowserFuer(BrowserWahl.Standard, null));
+        Assert.Equal(BrowserWahl.Chrome, Ueberwacher.BrowserFuer(BrowserWahl.Chrome, "edge"));
     }
 
     [Fact]   // 1.5.8 (Wunsch Ahmad 08.10.2026): die Portalwahl steht in AutoSchnell, der Server schickt nur deren Links
@@ -708,5 +808,187 @@ public class UeberwacherTests
         await u.JetztVergleichenAsync();                  // "Vergleichen" geht immer
         Assert.Equal(2, _b.Aufrufe.Count);
         Assert.Contains("VW-Passat_Variant-2006", _b.Aufrufe[1][0].Url);
+    }
+
+    [Fact]   // Pruefung 08.10.2026 (1.5.9, H): ohne Klick uebergangen -> einmal je Programmlauf sagen, wie es geht
+    public async Task Ohne_Klick_uebergangen_einmal_je_Programmlauf_ein_Hinweis()
+    {
+        var u = MitKlicks();
+        var hinweise = new List<Hinweis>();
+        u.Meldung += hinweise.Add;
+        await TickK(u);
+        await AnzeigeK(u, Bentley, 1, geklickt: true);
+        Assert.DoesNotContain(hinweise, h => h.Text == Ueberwacher.MausHinweis);
+        _jetzt = _jetzt.AddSeconds(10);
+        await AnzeigeK(u, Passat, 2, geklickt: false);    // Pfeiltaste / Live-Liste
+        await AnzeigeK(u, Golf, 3, geklickt: false);
+        _jetzt = _jetzt.AddSeconds(10);
+        await AnzeigeK(u, Passat, 4, geklickt: false);
+        var h = Assert.Single(hinweise, h => h.Text == Ueberwacher.MausHinweis);
+        Assert.False(h.Fehler);
+        Assert.Contains("„Vergleichen“", h.Text);
+        Assert.Single(_b.Aufrufe);
+    }
+
+    [Fact]   // Pruefung 08.10.2026 (1.5.9, D): das Auto vom Start ist nur gemerkt — nicht "Inserat-ID fehlt" sagen
+    public async Task Beim_Start_gemerktes_Auto_ist_noch_nicht_verglichen()
+    {
+        _q.Zeige(() => { var f = Bentley(); f.Quelle = "mobile.de"; f.InseratId = null; return f; }, 1);
+        for (int i = 0; i < 5; i++) await Tick();
+        Assert.True(_u.LetztesNurGemerkt);
+        Assert.Null(_u.LetzteInseratUrl);
+        _u.LetztenErneutOeffnen();
+        Assert.Equal(Ueberwacher.NochNichtVerglichen, Assert.Single(_hinweise).Text);
+        Assert.DoesNotContain(_meldungen, m => m.Contains("Inserat-ID"));
+        await _u.JetztVergleichenAsync();                // jetzt verglichen
+        Assert.False(_u.LetztesNurGemerkt);
+        Assert.Single(_b.Aufrufe);
+    }
+
+    [Fact]   // Pruefung 08.10.2026 (1.5.9, C): die lange Inserat-ID-Anleitung hoechstens einmal je Programmlauf als Sprechblase
+    public async Task Inserat_ID_Hinweis_hoechstens_einmal_als_Sprechblase_ganz_im_Fenster()
+    {
+        await Start();
+        Fahrzeug OhneId(string modell)
+        {
+            var f = Bentley();
+            f.MarkeModellText = modell;
+            f.Quelle = "mobile.de";
+            f.InseratId = null;
+            return f;
+        }
+        await Anklicken(() => OhneId("Bentley Bentayga"), 1);
+        await Anklicken(() => OhneId("Bentley Continental"), 2);
+        Assert.Equal(2, _b.Aufrufe.Count);
+        Assert.Equal(2, _hinweise.Count);
+        Assert.True(_hinweise[0].Sprechblase);
+        Assert.Equal(Ueberwacher.KeineNummerKurz, _hinweise[0].Text);
+        Assert.Equal(Ueberwacher.KeineNummerHinweis, _hinweise[0].Ausfuehrlich);
+        Assert.False(_hinweise[1].Sprechblase);                      // beim zweiten Auto nur noch im Fenster
+        Assert.Equal(Ueberwacher.KeineNummerHinweis, _hinweise[1].Ausfuehrlich);
+        Assert.Contains("„Vertrag“", Ueberwacher.KeineNummerHinweis);
+        Assert.DoesNotContain("„Kaufvertrag“", Ueberwacher.KeineNummerHinweis + Ueberwacher.KeinLinkHinweis);
+    }
+
+    [Fact]   // 1.5.9 (C): mehrere Hinweise -> eine kurze Sprechblase "+N weitere", alles ganz im Fenster
+    public async Task Mehrere_Hinweise_eine_kurze_Sprechblase()
+    {
+        await Start();
+        _server.Melden = new()
+        {
+            "Erstzulassung 04/2026 passt nicht zu 165.000 km – ohne Erstzulassungs-Filter gesucht. Bitte prüfen und in AutoPointer nachsehen, ob richtig gelesen.",
+            "Modell aus der Beschreibung übernommen („C 300 e“) – bitte kurz prüfen, ob das stimmt.",
+        };
+        await Anklicken(Golf, 1);
+        var h = Assert.Single(_hinweise);
+        Assert.True(h.Text.Length <= Hinweis.MaxZeichen);
+        Assert.EndsWith("(+1 weitere im Fenster „Status und Hilfe“)", h.Text);
+        Assert.Contains("C 300 e", h.Ausfuehrlich);
+        Assert.Contains("165.000 km", h.Ausfuehrlich);
+    }
+
+    [Fact]   // 1.5.9 (C): Kuerzen am Wortende, alle festen Sprechblasen-Texte <= 150 Zeichen
+    public void Sprechblasen_hoechstens_150_Zeichen()
+    {
+        string lang = string.Join(" ", Enumerable.Repeat("Wort", 60));
+        string k = Hinweis.Kuerzen(lang);
+        Assert.True(k.Length <= Hinweis.MaxZeichen, k.Length.ToString());
+        Assert.EndsWith("Wort…", k);
+        Assert.Equal("kurz", Hinweis.Kuerzen("  kurz "));
+        foreach (var t in new[]
+                 {
+                     Ueberwacher.KeineNummerKurz, Ueberwacher.KeinLinkKurz, Ueberwacher.VertragOhneAdresse,
+                     Ueberwacher.MausHinweis, Ueberwacher.NochNichtVerglichen, Ueberwacher.VorgangNichtErreichbar,
+                     Ueberwacher.ErweiterungNichtUebernommen, TrayApp.UpdateText("10.10.10"),
+                 })
+            Assert.True(t.Length <= Hinweis.MaxZeichen, $"{t.Length}: {t}");
+        // die langen Anleitungen waren der Anlass (≈ 400 / 360 Zeichen) — sie bleiben ganz, aber nur fuers Fenster
+        Assert.True(Ueberwacher.KeineNummerHinweis.Length > Hinweis.MaxZeichen);
+    }
+
+    // ------------------------------------------------------------------------------------------------------------
+    // Pruefung 08.10.2026 (1.5.9, G): "wird gleich erneut versucht" — jetzt wirklich: ein Versuch nach 5 s
+    private async Task Ticks(int anzahl)
+    {
+        for (int i = 0; i < anzahl; i++) await Tick();
+    }
+
+    [Fact]
+    public async Task Voruebergehender_Fehler_wird_nach_5_Sekunden_einmal_wiederholt()
+    {
+        await Start();
+        _server.Fehler = new DienstFehler(503, "AutoSchnell ist kurz nicht erreichbar.");
+        await Anklicken(Bentley, 1);
+        Assert.Single(_server.Anfragen);
+        Assert.Contains(_meldungen, m => m.Contains("kurz nicht erreichbar") && m.Contains("Neuer Versuch in 5 Sekunden"));
+        _server.Fehler = null;
+        await Ticks(8);                                              // 2 s: noch nicht
+        Assert.Single(_server.Anfragen);
+        await Ticks(16);                                             // nach 5 s: dasselbe Auto noch einmal
+        Assert.Equal(2, _server.Anfragen.Count);
+        Assert.Single(_b.Aufrufe);
+        Assert.Equal(Status.Aktiv, _u.Status);
+        await Ticks(30);
+        Assert.Equal(2, _server.Anfragen.Count);                     // genau einmal
+    }
+
+    [Fact]
+    public async Task Wiederholung_nur_solange_dasselbe_Auto_angezeigt_wird()
+    {
+        await Start();
+        _server.Fehler = new DienstFehler(0, "AutoSchnell antwortet gerade nicht.");
+        await Anklicken(Bentley, 1);
+        _server.Fehler = null;
+        await Anklicken(Passat, 2);                                  // anderes Auto: der Versuch fuer Bentley entfaellt
+        await Ticks(30);
+        Assert.Equal(2, _server.Anfragen.Count);
+        Assert.Single(_b.Aufrufe);
+        Assert.Contains("VW-Passat_Variant-2006", _b.Aufrufe[0][0].Url);
+    }
+
+    [Fact]
+    public async Task Schlaegt_auch_der_zweite_Versuch_fehl_wird_nichts_mehr_versprochen()
+    {
+        await Start();
+        _server.Fehler = new DienstFehler(504, "AutoSchnell ist kurz nicht erreichbar.");
+        await Anklicken(Bentley, 1);
+        await Ticks(24);
+        Assert.Equal(2, _server.Anfragen.Count);
+        Assert.Contains("später „Vergleichen“ drücken", _meldungen.Last());
+        Assert.DoesNotContain("Neuer Versuch", _meldungen.Last());
+        await Ticks(30);
+        Assert.Equal(2, _server.Anfragen.Count);
+        Assert.Empty(_b.Aufrufe);
+    }
+
+    [Fact]   // kein Wiederholversuch, wo er nichts bringt: ohne Abo, echtes 403, nicht verbunden, bei Pause
+    public async Task Kein_Wiederholversuch_bei_Abo_Sperre_und_Pause()
+    {
+        await Start();
+        _server.Fehler = new DienstFehler(403, "Für dein Konto nicht freigeschaltet.");
+        await Anklicken(Bentley, 1);
+        Assert.Equal(Status.Gesperrt, _u.Status);
+        await Ticks(30);
+        Assert.Single(_server.Anfragen);
+        Assert.DoesNotContain(_meldungen, m => m.Contains("Neuer Versuch"));
+
+        // "Vergleichen" bei Pause: der Takt laeuft nicht -> nichts versprechen
+        _e.AutomatikAktiv = false;
+        _server.Fehler = new DienstFehler(503, "AutoSchnell ist kurz nicht erreichbar.");
+        await _u.JetztVergleichenAsync();
+        Assert.Contains("später „Vergleichen“ drücken", _meldungen.Last());
+    }
+
+    [Fact]   // 1.5.9 (G): ein 403 OHNE JSON (Cloudflare/Firewall) ist voruebergehend — keine Sperre, ein Wiederholversuch
+    public async Task Cloudflare_403_ohne_JSON_ist_keine_Sperre()
+    {
+        await Start();
+        _server.Fehler = new DienstFehler(403, "AutoSchnell ist kurz nicht erreichbar.") { OhneJson = true };
+        await Anklicken(Bentley, 1);
+        Assert.Equal(Status.Aktiv, _u.Status);
+        Assert.Contains(_meldungen, m => m.Contains("Neuer Versuch"));
+        _server.Fehler = null;
+        await Ticks(24);
+        Assert.Single(_b.Aufrufe);
     }
 }

@@ -10,8 +10,8 @@ halbe Sekunde später öffnen sich automatisch die passenden Vergleichssuchen au
 
 ## Lizenz: nur verbunden, nur mit Abo
 
-1. In AutoSchnell anmelden → „AutoPointer-Vergleich“ → **Code zum Verbinden anzeigen** (6 Ziffern, 10 Minuten,
-   nur mit aktivem Abo).
+1. In AutoSchnell anmelden → links „Programme“ (bzw. „AutoSchnell Vergleich“) → **Code zum Verbinden anzeigen**
+   (6 Ziffern, 10 Minuten, nur mit aktivem Abo; ist schon ein PC verbunden: „Anderen PC verbinden“).
 2. Programm starten → Fenster „Mit AutoSchnell verbinden“ → Code eintippen.
 3. **Ein Konto = ein PC.** Wird dasselbe Konto auf einem zweiten PC verbunden, fragt der erste wieder nach einem
    Code. Die Browser-Anmeldung bleibt davon unberührt.
@@ -28,8 +28,7 @@ Beim Anklicken liest das Programm auch die **Inserat-ID** (mobile.de, Kleinanzei
 Inserat **im Hintergrund aus** (Daten + Fotos, wie das Einfügen in der App, zählt fürs Tageslimit). Der Abruf
 wartet dafür 15 Sekunden: klickt der Sucher vorher das nächste Auto an, fällt der alte weg und der neue nimmt
 seinen Platz ein (kein Stau, kein unnötiger Abruf); öffnet er das Auto in der App, startet er sofort. Für den Vertrag:
-Rechtsklick → **„Kaufvertrag: Auto in AutoSchnell öffnen“** (bzw. „Vertrag“ in der Leiste) oder in der App „Deine
-letzten Autos“ → der Vergleich steht sofort da. Seit 1.3.3 öffnet das in der **installierten AutoSchnell-App**
+**„Vertrag“** in der Leiste oder in der App „Deine letzten Autos“ → der Vergleich steht sofort da. Seit 1.3.3 öffnet das in der **installierten AutoSchnell-App**
 (Edge/Chrome, erkannt an ihrer Verknüpfung): ist sie offen, übernimmt dieses Fenster das Auto (manifest
 `launch_handler` „focus-existing“ + `lib/programmStart.js`; mit ungespeicherter Arbeit nur ein Hinweis mit Knopf),
 sonst startet sie; nur ohne installierte App öffnet der Browser. Zeigt AutoPointer die Hash-ID nur abgeschnitten (schmale Detailansicht), gibt es keinen Link –
@@ -64,8 +63,34 @@ dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und 
   Server schickt nur deren Links; im Einstellungsfenster steht der Hinweis darauf.
 * **1.5.8 – Vorgangsnummer:** hat das Konto die Browser-Erweiterung, öffnet das Programm nur die Vorgangsseite
   `/app/vorgang/<id>` — die Erweiterung öffnet Vergleiche und Inserat selbst (Ampel, Kaufvertrag, nichts doppelt).
-  Übernimmt sie nicht binnen 3 s (z. B. in einem anderen Browser installiert), öffnet das Programm wie bisher selbst,
-  mit Hinweis, und die nächsten 30 Minuten gleich direkt.
+  (Seit 1.5.9 eindeutig über den Server, siehe unten; die „30 Minuten gleich direkt“ gibt es nicht mehr.)
+* **1.5.9 (Prüfung 08.10.) — Übergabe eindeutig, Update ersetzt, kurze Hinweise:**
+  * **Vorgang:** die Vorgangsseite geht bei „Standardbrowser“ im Browser auf, in dem die Erweiterung verbunden ist
+    (`helfer_browser` aus `/vergleich`). Nach 5 s beansprucht das Programm den Vorgang beim Server
+    (`POST …/vorgang/<id>/selbst`): `selbst: true` → es öffnet selbst (im selben Browser), aber nur, wenn inzwischen
+    kein anderes Auto dran ist; `selbst: false` oder 404 → nichts (die Erweiterung hat ihn); nicht erreichbar (auch nach
+    einem zweiten Versuch nach 1,5 s) → nichts öffnen (sonst womöglich doppelt), kurzer Hinweis „„Vergleichen“ drücken“.
+    `ueber_helfer` schickt der Server nur noch an Programme ab 1.5.9. (In 1.5.8 reichte das Programm die Nachfrage
+    intern nicht weiter — es öffnete jedes Mal zusätzlich selbst.)
+  * **Update:** startet man eine neuere Version, während eine ältere läuft (Autostart), fragt sie „… läuft noch. Jetzt
+    durch Version … ersetzen?“ — Ja beendet die alte (ab 1.5.9 per Signal `Local\AutoSchnell.AutoPointerVergleich.Beenden`,
+    ältere über die Prozessliste), die neue startet und ersetzt die feste Kopie. Die laufende Version steht im geteilten
+    Speicher `Local\AutoSchnell.AutoPointerVergleich.Version`. Bietet AutoSchnell eine neuere Version an, steht dauerhaft
+    „Update auf … verfügbar …“ oben in „Mehr ▾“ (öffnet die Seite „Programme“).
+  * **Hinweise:** Sprechblasen höchstens 150 Zeichen (Windows schnitt bei ~255 ab — die Anleitungen fehlten); die ganzen
+    Erklärungen stehen unter „Letzte Hinweise“ im Fenster „Status und Hilfe“. Der Inserat-ID-/Hash-ID-Hinweis kommt als
+    Sprechblase höchstens einmal je Programmlauf. Ändert sich AutoPointer ohne Mausklick (Pfeiltasten, Live-Liste), sagt
+    das Programm einmal je Lauf, dass es dann „Vergleichen“ braucht. Keine englischen .NET-Fehlertexte mehr in
+    Sprechblasen/Dialogen (nur im Protokoll); überall „AutoSchnell Vergleich“, „Vergleichen“, „Vertrag“.
+  * **„Vertrag“** beim Auto vom Programmstart (nur gemerkt): „Dieses Auto ist noch nicht verglichen – erst „Vergleichen“
+    drücken.“ statt der falschen Inserat-ID-Diagnose.
+  * **Fehler beim Vergleich:** vorübergehende (kein Netz, Zeitüberschreitung, 5xx, Cloudflare) werden nach 5 s genau
+    einmal wiederholt, wenn AutoPointer noch dasselbe Auto zeigt — die Meldung sagt das nur, wenn es stimmt. Ein 403
+    **ohne JSON** (Cloudflare/Firewall-Seite) ist vorübergehend, nicht „gesperrt“.
+  * **„Vergleichen“** holt AutoPointer erst nach vorne (300 ms), statt den Browser davor zu lesen. Die
+    Windows-Texterkennung hat 10 s Zeit — hängt sie, zählt es als Lesefehler (vorher war das Programm dann taub).
+  * **Autostart** wird nach dem ersten Verbinden eingeschaltet (außer der Sucher hat ihn selbst einmal umgestellt);
+    Startmenü-Eintrag „AutoSchnell Vergleich“ auf die feste Kopie; „Programm beenden“ fragt erst nach.
 * Ein Auto, das beim Programmstart schon angezeigt wird, öffnet nichts – erst das nächste angeklickte. **Nach dem (Neu-)Verbinden**
   dagegen wird das gerade angezeigte Auto sofort verglichen (seit 1.5.3, Befund 04.10.: Mercedes nach Neuverbinden).
 * **Unplausible Daten** (seit 1.5.3, Befund 04.10.: „Kia Rio · EZ 04/2026 · 165.000 km“, „Audi 80 · 1.960.817 km“):

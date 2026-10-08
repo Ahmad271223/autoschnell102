@@ -50,7 +50,7 @@ internal static class Systemcheck
             ? new("AutoSchnell", PruefStufe.Ok, $"erreichbar ({b.Server}).")
             : new("AutoSchnell", PruefStufe.Fehler, $"nicht erreichbar ({b.Server}) – Internet bzw. Firewall prüfen."));
         if (!b.Verbunden)
-            p.Add(new("Verbindung", PruefStufe.Fehler, "nicht verbunden – „Mit AutoSchnell verbinden …“ und den Code aus der App eingeben."));
+            p.Add(new("Verbindung", PruefStufe.Fehler, "nicht verbunden – auf der Leiste „Mehr ▾“ → „Mit AutoSchnell verbinden …“ und den Code aus AutoSchnell eingeben."));
         else if (b.Status != null)
             p.Add(new("Verbindung", PruefStufe.Ok,
                 $"{AutoSchnellDienst.KontoText(b.Status.Name, b.Status.Konto, b.Status.Firma)}"
@@ -92,8 +92,8 @@ internal static class Systemcheck
             ? new("Browser", PruefStufe.Ok, "gefunden.")
             : new("Browser", PruefStufe.Fehler, "kein Browser gefunden – Edge oder Chrome installieren."));
         p.Add(b.AppInstalliert
-            ? new("AutoSchnell-App", PruefStufe.Ok, "installiert – „Kaufvertrag“ öffnet sie.")
-            : new("AutoSchnell-App", PruefStufe.Hinweis, "nicht installiert – „Kaufvertrag“ öffnet den Browser."));
+            ? new("AutoSchnell-App", PruefStufe.Ok, "installiert – „Vertrag“ öffnet sie.")
+            : new("AutoSchnell-App", PruefStufe.Hinweis, "nicht installiert – „Vertrag“ öffnet den Browser."));
         return p;
     }
 
@@ -138,7 +138,14 @@ internal static class Systemcheck
                 if (lesung == null || lesung.Leer) leseFehler = "Tabelle nicht lesbar (verdeckt oder leer).";
                 else gelesen = lesung.Fahrzeug;
             }
-            catch (Exception ex) { leseFehler = "Lesen fehlgeschlagen: " + ex.Message; }
+            catch (Exception ex)
+            {
+                // Pruefung 08.10.2026 (1.5.9, E): die .NET-Meldung (oft englisch) nur ins Protokoll
+                Protokoll.Schreibe("Systemcheck: Lesen fehlgeschlagen: " + ex);
+                leseFehler = ex is TimeoutException
+                    ? "Lesen fehlgeschlagen – die Windows-Texterkennung hat nicht geantwortet."
+                    : "Lesen fehlgeschlagen – AutoPointer neu anklicken und den Systemcheck wiederholen.";
+            }
             if (gelesen != null && DetailLeser.Fehlend(gelesen).Count == 0 && status != null)
             {
                 try { probe = await dienst.VergleichAsync(gelesen, probelauf: true); }

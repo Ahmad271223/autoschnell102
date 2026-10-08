@@ -58,6 +58,55 @@ public class InstallationTests
         Assert.Equal(desktop, Installation.AutostartZiel(desktop, kopieVorhanden: false, Fest, Temp, Profil));
     }
 
+    [Theory]   // Pruefung 08.10.2026 (1.5.9, B): ersetzen nur, wenn die laufende Version sicher aelter ist
+    [InlineData("1.5.8", "1.5.9", true)]
+    [InlineData("1.5.9", "1.6.0", true)]
+    [InlineData("1.5.9", "1.5.9", false)]                   // gleiche: wie bisher nur das Fenster zeigen
+    [InlineData("1.6.0", "1.5.9", false)]                   // die laufende ist neuer
+    [InlineData(null, "1.5.9", false)]                      // unbekannt: nicht raten
+    public void Zweiter_Start_ersetzt_nur_eine_aeltere_Version(string? laufend, string neu, bool fragen)
+    {
+        var instanz = new LaufendesProgramm.Instanz(laufend, 4711, MitSignal: true);
+        string? frage = LaufendesProgramm.ErsetzenFrage(instanz, neu);
+        Assert.Equal(fragen, frage != null);
+        if (frage != null) Assert.Equal($"AutoSchnell Vergleich {laufend} läuft noch. Jetzt durch Version {neu} ersetzen?", frage);
+        Assert.Null(LaufendesProgramm.ErsetzenFrage(null, neu));
+    }
+
+    [Fact]   // 1.5.9 (B): die laufende Instanz veroeffentlicht Version und Prozess im geteilten Speicher
+    public void Version_der_laufenden_Instanz_wird_veroeffentlicht_und_gelesen()
+    {
+        Assert.Equal("1.5.9|4711", LaufendesProgramm.Inhalt("1.5.9", 4711));
+        Assert.Equal(new LaufendesProgramm.Instanz("1.5.9", 4711, true), LaufendesProgramm.AusInhalt("1.5.9|4711"));
+        Assert.Null(LaufendesProgramm.AusInhalt(""));
+        Assert.Null(LaufendesProgramm.AusInhalt("1.5.9"));
+        Assert.Null(LaufendesProgramm.AusInhalt("1.5.9|x"));
+        Assert.Null(LaufendesProgramm.AusInhalt("|12"));
+
+        string name = @"Local\AutoSchnell.Test." + Guid.NewGuid().ToString("N");
+        Assert.Null(LaufendesProgramm.Gelesen(name));
+        using (var v = LaufendesProgramm.Veroeffentlichen("1.5.9", 4711, name))
+        {
+            Assert.NotNull(v);
+            Assert.Equal(new LaufendesProgramm.Instanz("1.5.9", 4711, true), LaufendesProgramm.Gelesen(name));
+        }
+        Assert.Null(LaufendesProgramm.Gelesen(name));                    // beendet: nichts mehr da
+        Assert.True(LaufendesProgramm.UnserProdukt("AutoSchnell Vergleich"));
+        Assert.True(LaufendesProgramm.UnserProdukt("AutoSchnell AutoPointer-Vergleich"));   // Name bis 06.10.2026
+        Assert.False(LaufendesProgramm.UnserProdukt("AutoSchnell Analyse"));
+        Assert.False(LaufendesProgramm.UnserProdukt(null));
+    }
+
+    [Fact]   // 1.5.9 (F): Startmenue-Eintrag nur auf die feste Kopie, nur wenn er fehlt oder woanders hinzeigt
+    public void Startmenue_Eintrag_nur_wenn_noetig()
+    {
+        Assert.True(Installation.StartmenueAnlegen(kopieVorhanden: true, verknuepfungVorhanden: false, null, Fest));
+        Assert.False(Installation.StartmenueAnlegen(kopieVorhanden: true, verknuepfungVorhanden: true, Fest.ToUpperInvariant(), Fest));
+        Assert.True(Installation.StartmenueAnlegen(kopieVorhanden: true, verknuepfungVorhanden: true, @"C:\Users\x\Downloads\a.exe", Fest));
+        Assert.False(Installation.StartmenueAnlegen(kopieVorhanden: false, verknuepfungVorhanden: false, null, Fest));
+        Assert.EndsWith(@"\AutoSchnell Vergleich.lnk", Installation.StartmenuePfad);
+    }
+
     [Fact]   // Paket 2 (A7): Befehlszeile fuer den Neustart nach Absturz
     public void Neustart_Befehlszeile_behaelt_Argumente_und_startet_leise()
     {

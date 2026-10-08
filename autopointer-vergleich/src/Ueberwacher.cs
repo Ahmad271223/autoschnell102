@@ -8,6 +8,27 @@ internal readonly record struct QuellenZustand(Lage Lage, ulong Summe);
 /// "PrintWindow" (AutoPointer hat die Tabelle extra in ein Bild gezeichnet).</param>
 internal sealed record Lesung(Fahrzeug Fahrzeug, bool Leer, string Rohtext, string Weg = "");
 
+/// <summary>Pruefung 08.10.2026 (1.5.9, C): eine Meldung an den Sucher. Windows schneidet Sprechblasen bei ~255 Zeichen
+/// ab — die langen Anleitungen (Inserat-ID ≈ 400, Hash-ID ≈ 360 Zeichen) verloren genau ihre Anweisungen. Deshalb kommt
+/// in die Sprechblase nur <paramref name="Text"/> (hoechstens <see cref="MaxZeichen"/> Zeichen); die ganze Erklaerung
+/// steht in <paramref name="Ausfuehrlich"/> und bleibt unter "Letzte Hinweise" im Fenster "Status und Hilfe".</summary>
+/// <param name="Sprechblase">false = nur ins Fenster (und Protokoll), keine Sprechblase — z. B. ein Hinweis, der in
+/// diesem Programmlauf schon einmal als Sprechblase kam.</param>
+internal sealed record Hinweis(string Text, bool Fehler, string? Ausfuehrlich = null, bool Sprechblase = true)
+{
+    internal const int MaxZeichen = 150;
+
+    /// <summary>Auf hoechstens <paramref name="max"/> Zeichen kuerzen — am Wortende, mit "…". (rein, fuer Tests)</summary>
+    internal static string Kuerzen(string text, int max = MaxZeichen)
+    {
+        text = text.Trim();
+        if (text.Length <= max) return text;
+        int ende = text.LastIndexOf(' ', max - 1);
+        if (ende < max / 2) ende = max - 1;
+        return text[..ende].TrimEnd(' ', ',', ';', ':', '–', '-') + "…";
+    }
+}
+
 /// <summary>Woher die Detailansicht kommt - echt: <see cref="AutoPointerQuelle"/>,
 /// in den Tests eine Attrappe.</summary>
 internal interface IAnsichtQuelle
@@ -19,7 +40,9 @@ internal interface IAnsichtQuelle
 
 internal interface IOeffner
 {
-    void Oeffne(IReadOnlyList<Vergleich> vergleiche, Einstellungen e, IntPtr autoPointer);
+    /// <param name="browser">1.5.9 (A): in diesem Browser oeffnen — meist <see cref="Einstellungen.Browser"/>, fuer die
+    /// Vorgangsseite bei "Standardbrowser" der Browser, in dem die Erweiterung verbunden ist.</param>
+    void Oeffne(IReadOnlyList<Vergleich> vergleiche, Einstellungen e, IntPtr autoPointer, BrowserWahl browser);
 }
 
 /// <param name="TexterkennungFehlt">Paket 2 (A9): Windows-Texterkennung (Sprachpaket) fehlt — wird jede Minute
@@ -77,28 +100,50 @@ internal sealed class Ueberwacher
     private bool _ungeklickt;
     /// <summary>NachVerbinden() zaehlt wie ein Klick: das gerade angezeigte Auto wird verglichen.</summary>
     private long _klickErsatz = long.MinValue / 2;
+    /// <summary>Pruefung 08.10.2026 (1.5.9, H): ohne Klick uebergangene Aenderungen (Pfeiltasten, AutoPointer blaettert
+    /// selbst) waren still — der Sucher wartete auf Tabs, die nie kamen. Einmal je Programmlauf sagen, wie es geht.</summary>
+    private bool _mausHinweisGezeigt;
+    internal const string MausHinweis = "Automatisch geht es nur per Mausklick – für dieses Auto „Vergleichen“ drücken.";
 
     public bool Probelauf { get; set; }
     /// <summary>Paket 2 (A8): die Lizenzpruefung (/status) meldete 402/403 — bis sie wieder gut ist, wird nichts
     /// gelesen (Status "Gesperrt"). Setzt TrayApp.</summary>
     public volatile bool LizenzGesperrt;
     public Fahrzeug? LetztesFahrzeug { get; private set; }
+    /// <summary>Pruefung 08.10.2026 (1.5.9, D): das letzte Auto wurde beim Start nur gemerkt (kein Server-Aufruf) — "Vertrag"
+    /// sagte dann faelschlich, die Inserat-ID sei nicht zu sehen. Jetzt: "erst „Vergleichen“ drücken".</summary>
+    public bool LetztesNurGemerkt { get; private set; }
+    internal const string NochNichtVerglichen = "Dieses Auto ist noch nicht verglichen – erst „Vergleichen“ drücken.";
     public IReadOnlyList<Vergleich> LetzteVergleiche { get; private set; } = Array.Empty<Vergleich>();
-    /// <summary>1.5.8 (Vorgangsnummer): so lange hat die Erweiterung Zeit, den Vorgang zu uebernehmen.</summary>
-    internal const int VorgangWarteMs = 3000;
-    /// <summary>1.5.8: hat sie nicht uebernommen (nicht in diesem Browser), oeffnet das Programm so lange selbst.</summary>
-    internal const int HelferAusfallMs = 30 * 60 * 1000;
-    private long _helferAusfallBis = long.MinValue;
+    /// <summary>Pruefung 08.10.2026 (1.5.9, A): so lange hat die Erweiterung Zeit, den Vorgang zu uebernehmen, bevor das
+    /// Programm ihn beim Server fuer sich beansprucht (vorher 3 s — zu knapp, wenn der Browser erst startet). Die frueheren
+    /// "30 Minuten gleich direkt" (HelferAusfallMs) sind entfallen: ob die Erweiterung zum Zug kommt, entscheidet der Server.</summary>
+    internal const int VorgangWarteMs = 5000;
+    /// <summary>1.5.9 (A): der neueste Vorgang, dessen Seite geoeffnet wurde — null, sobald ein anderes Auto dran ist. Nur
+    /// fuer ihn oeffnet das Programm nach der Wartezeit selbst; ein alter wird nur noch beansprucht (damit eine spaete
+    /// Erweiterung ihn nicht mehr oeffnet) und protokolliert — vorher sprangen die Tabs eines alten Autos auf, waehrend
+    /// der Sucher schon das naechste angeklickt hatte.</summary>
+    private volatile string? _aktuellerVorgang;
+    internal const string VorgangNichtErreichbar = "AutoSchnell antwortet gerade nicht – für dieses Auto „Vergleichen“ drücken.";
+    internal const string ErweiterungNichtUebernommen = "Die Browser-Erweiterung hat nicht übernommen – Vergleiche direkt geöffnet.";
     /// <summary>Die laufende Nachfrage beim Server (fuer Tests).</summary>
     internal Task? LetzteVorgangsPruefung { get; private set; }
-    /// <summary>Original-Inserat des zuletzt verglichenen Autos (fuer "Kaufvertrag: in AutoSchnell oeffnen").</summary>
+    /// <summary>Pruefung 08.10.2026 (1.5.9, G): nach einem voruebergehenden Fehler (kein Netz, Zeitueberschreitung, 5xx,
+    /// Cloudflare) wird das Auto genau einmal nach <see cref="WiederholMs"/> erneut verglichen — wenn AutoPointer es dann
+    /// noch zeigt. Vorher stand "wird gleich erneut versucht" da, aber nichts geschah. null = kein Versuch offen.</summary>
+    private long? _wiederholenAb;
+    private bool _wiederholErzwungen;
+    internal const int WiederholMs = 5000;
+    /// <summary>1.5.9 (C): der lange Inserat-ID-/Hash-ID-Hinweis kommt hoechstens einmal je Programmlauf als Sprechblase.</summary>
+    private bool _inseratHinweisGezeigt;
+    /// <summary>Original-Inserat des zuletzt verglichenen Autos (fuer "Vertrag": in AutoSchnell oeffnen).</summary>
     public string? LetzteInseratUrl { get; private set; }
     public Status Status => _status ?? Status.KeinAutoPointer;
 
     /// <summary>Statuswechsel (fuer das Symbol im Infobereich).</summary>
     public event Action<Status>? StatusGeaendert;
-    /// <summary>Kurze Meldung fuer den Nutzer (Sprechblase). bool = Fehler.</summary>
-    public event Action<string, bool>? Meldung;
+    /// <summary>Meldung fuer den Nutzer (Sprechblase kurz, ausfuehrlich im Fenster — 1.5.9, C).</summary>
+    public event Action<Hinweis>? Meldung;
     /// <summary>Der Server kennt den Schluessel nicht mehr (anderer PC, getrennt) -> neu verbinden.</summary>
     public event Action<string>? VerbindungVerloren;
     /// <summary>Ein neues Auto ist jetzt "das letzte" (Nr. 11: ab hier zaehlt eine neu kopierte Inserat-Adresse).</summary>
@@ -148,6 +193,7 @@ internal sealed class Ueberwacher
         _gesperrt = false;
         _offen = false;
         _ungeklickt = false;
+        _wiederholenAb = null;
         _summe = 0;
         if (a == 2)
         {
@@ -191,6 +237,7 @@ internal sealed class Ueberwacher
                 // A8: /status sagte 402/403 — nichts lesen, bis die Lizenzpruefung wieder gut ist
                 SetzeStatus(Status.Gesperrt);
                 _offen = false;
+                _wiederholenAb = null;
                 return;
             }
             var z = _quelle.Pruefe();
@@ -205,6 +252,7 @@ internal sealed class Ueberwacher
                 _summe = 0;
                 _offen = false;
                 _ungeklickt = false;
+                _wiederholenAb = null;
                 return;
             }
             SetzeStatus(_gesperrt ? Status.Gesperrt : Status.Aktiv);
@@ -215,6 +263,7 @@ internal sealed class Ueberwacher
                 _seit = jetzt;
                 _offen = true;
                 _ungeklickt = false;
+                _wiederholenAb = null;          // 1.5.9 (G): ein anderes Auto — der Wiederholversuch fuers alte entfaellt
                 // Paket 3 (F4): schon jetzt (vor Wartezeit und Lesen) die Verbindung zum Server vorwaermen
                 try { _dienst.Vorwaermen(); } catch (Exception) { }
                 return;
@@ -229,15 +278,34 @@ internal sealed class Ueberwacher
                 _seit = jetzt;
                 return;
             }
-            if (!_offen || jetzt - _seit < e.WartezeitMs) return;
-            if (!_basis && !VomSucher(_seit))
+            // Pruefung 08.10.2026 (1.5.9, G): der eine Wiederholversuch nach einem voruebergehenden Fehler. Die Anzeige ist
+            // unveraendert (sonst waere er oben schon verworfen); kein neuer Klick noetig — der Sucher hatte ja geklickt.
+            bool wiederholung = false;
+            if (_wiederholenAb is { } ab)
             {
-                // Beim Start (_basis) wird nur gemerkt, nie geoeffnet — das darf ohne Klick passieren
-                _offen = false;
-                _ungeklickt = true;
-                Protokoll.SchreibeGedrosselt("ungeklickt", "AutoPointer zeigt ein anderes Auto, ohne dass in AutoPointer "
-                                             + "geklickt wurde – kein Vergleich (erst beim Anklicken).", TimeSpan.FromMinutes(5));
-                return;
+                if (jetzt < ab) return;
+                _wiederholenAb = null;
+                wiederholung = true;
+                Protokoll.Schreibe("Neuer Versuch für das angezeigte Auto.");
+            }
+            else
+            {
+                if (!_offen || jetzt - _seit < e.WartezeitMs) return;
+                if (!_basis && !VomSucher(_seit))
+                {
+                    // Beim Start (_basis) wird nur gemerkt, nie geoeffnet — das darf ohne Klick passieren
+                    _offen = false;
+                    _ungeklickt = true;
+                    Protokoll.SchreibeGedrosselt("ungeklickt", "AutoPointer zeigt ein anderes Auto, ohne dass in AutoPointer "
+                                                 + "geklickt wurde – kein Vergleich (erst beim Anklicken).", TimeSpan.FromMinutes(5));
+                    // 1.5.9 (H): einmal je Programmlauf sagen, warum nichts aufgeht (Pfeiltasten, Live-Liste)
+                    if (!_mausHinweisGezeigt)
+                    {
+                        _mausHinweisGezeigt = true;
+                        Melde(MausHinweis, false);
+                    }
+                    return;
+                }
             }
 
             Lesung? lesung;
@@ -251,9 +319,10 @@ internal sealed class Ueberwacher
                 // Pruefung 05.10.2026 (Paket 1): vorher blieb _offen stehen — derselbe Inhalt wurde alle 250 ms neu
                 // gelesen (volle Texterkennung) und jeder Fehler samt Stapel protokolliert. Jetzt: 3 Versuche mit
                 // 2/4/6 s Abstand, dann ist dieser Inhalt erledigt (naechste Aenderung oder "Vergleichen").
+                // 1.5.9 (J): eine haengende Texterkennung zaehlt nach 10 s ebenso (TimeoutException).
                 _lesefehler++;
                 Protokoll.Schreibe($"Lesen fehlgeschlagen ({_lesefehler}. Versuch): {ex.GetType().Name}: {ex.Message}");
-                if (_lesefehler >= LeseVersuche)
+                if (_lesefehler >= LeseVersuche || wiederholung)
                 {
                     _offen = false;
                     _lesefehler = 0;
@@ -272,17 +341,18 @@ internal sealed class Ueberwacher
                 // sonst koennten Werte zweier Fahrzeuge gemischt werden.
                 _summe = nach.Summe;
                 _seit = _takt();
+                _offen = true;                  // 1.5.9: auch nach einem Wiederholversuch eine neue Aenderung
                 return;
             }
             _offen = false;
             if (lesung == null) return;
-            await VerarbeiteAsync(lesung, e, erzwungen: false);
+            await VerarbeiteAsync(lesung, e, erzwungen: wiederholung && _wiederholErzwungen, wiederholung);
         }
         finally { _einzeln.Release(); }
     }
 
-    /// <summary>Menue "Aktuelles Fahrzeug jetzt vergleichen": sofort lesen und
-    /// oeffnen - auch bei Pause und auch, wenn es dasselbe Fahrzeug ist.</summary>
+    /// <summary>Knopf "Vergleichen": sofort lesen und oeffnen - auch bei Pause und auch, wenn es dasselbe Fahrzeug ist.
+    /// (Dass AutoPointer dafuer vorne liegt, sorgt TrayApp — 1.5.9, I.)</summary>
     public async Task JetztVergleichenAsync()
     {
         // Pruefung 05.10.2026 (Paket 1): laeuft gerade ein Lesen (Doppelklick auf "Vergleichen", Knopf waehrend die
@@ -295,6 +365,7 @@ internal sealed class Ueberwacher
         try
         {
             AnforderungAnwenden();
+            _wiederholenAb = null;              // 1.5.9 (G): der Knopf ersetzt einen offenen Wiederholversuch
             var z = _quelle.Pruefe();
             if (z.Lage != Lage.Details)
             {
@@ -305,7 +376,8 @@ internal sealed class Ueberwacher
             }
             if (!_dienst.Verbunden)
             {
-                Melde("Nicht mit AutoSchnell verbunden – Rechtsklick auf das Symbol → „Mit AutoSchnell verbinden …“.", true);
+                // 1.5.9 (E): seit 1.5.8 verbindet man ueber die Leiste, nicht mehr per Rechtsklick aufs Symbol
+                Melde("Nicht mit AutoSchnell verbunden – auf der Leiste „NICHT VERBUNDEN“ anklicken und den Code eingeben.", true);
                 return;
             }
             var lesung = await _quelle.LiesAsync();
@@ -324,14 +396,17 @@ internal sealed class Ueberwacher
         {
             // Nr. 2: nie die Links eines frueheren Autos — fuer das zuletzt angeklickte gibt es (noch) keine
             Melde(LetztesFahrzeug == null ? "Noch kein Vergleich vorhanden."
-                : "Für das zuletzt angeklickte Auto gibt es keinen Vergleich – „Jetzt vergleichen“ drücken.", false);
+                : LetztesNurGemerkt ? NochNichtVerglichen
+                : "Für das zuletzt angeklickte Auto gibt es keinen Vergleich – „Vergleichen“ drücken.", false);
             return;
         }
         Protokoll.Schreibe("Letzten Vergleich erneut geöffnet.");
         Oeffne(LetzteVergleiche, _einstellungen());
     }
 
-    private async Task VerarbeiteAsync(Lesung lesung, Einstellungen e, bool erzwungen)
+    /// <param name="wiederholung">1.5.9 (G): der eine Wiederholversuch nach einem voruebergehenden Fehler — schlaegt er
+    /// auch fehl, wird nicht noch einmal versucht.</param>
+    private async Task VerarbeiteAsync(Lesung lesung, Einstellungen e, bool erzwungen, bool wiederholung = false)
     {
         var f = lesung.Fahrzeug;
         if (lesung.Leer)
@@ -343,11 +418,11 @@ internal sealed class Ueberwacher
         if (fehlt.Count > 0)
         {
             _basis = false;
+            _aktuellerVorgang = null;           // 1.5.9 (A): ein anderes (unlesbares) Auto ist dran
             Protokoll.Schreibe($"Fahrzeug konnte nicht eindeutig erkannt werden – fehlt: {string.Join(", ", fehlt)}\n"
                                + $"Gelesen: {lesung.Rohtext}");
             MeldeEinmal("Fahrzeug konnte nicht eindeutig erkannt werden (fehlt: " + string.Join(", ", fehlt) + ")."
-                        + (lesung.Weg == "Bildschirm"
-                            ? " Tipp: Detailbereich in AutoPointer größer ziehen, damit alle Zeilen zu sehen sind." : ""));
+                        + (lesung.Weg == "Bildschirm" ? " Detailbereich in AutoPointer größer ziehen." : ""));
             return;
         }
 
@@ -360,18 +435,21 @@ internal sealed class Ueberwacher
 
         Protokoll.Schreibe((lesung.Weg.Length > 0 ? $"Fahrzeug gelesen ({lesung.Weg})\n" : "Fahrzeug gelesen\n")
                            + string.Join("\n", f.Beschreibung()));
+        // 1.5.9 (A): ab hier ist ein anderes Auto (oder "Vergleichen") dran — ein noch offener Vorgang ist nicht mehr
+        // der neueste und oeffnet nichts mehr
+        _aktuellerVorgang = null;
         bool basis = _basis && !erzwungen;
         _basis = false;
         if (basis)
         {
             Merken(f);
             LetztesFahrzeug = f;
+            LetztesNurGemerkt = true;
             // Nr. 2: zu diesem Auto gibt es noch keinen Vergleich — keine Links/Inserat eines frueheren Autos
             LetzteVergleiche = Array.Empty<Vergleich>();
             LetzteInseratUrl = null;
             FahrzeugGewechselt?.Invoke(f);
-            Protokoll.Schreibe("Fahrzeug war beim Start schon angezeigt – nicht automatisch geöffnet "
-                               + "(Menü „Aktuelles Fahrzeug jetzt vergleichen“).");
+            Protokoll.Schreibe("Fahrzeug war beim Start schon angezeigt – nicht automatisch geöffnet (Knopf „Vergleichen“).");
             return;
         }
         VergleichAntwort antwort;
@@ -379,22 +457,39 @@ internal sealed class Ueberwacher
         catch (DienstFehler ex)
         {
             // Schluessel bleibt der alte: nach Behebung (Abo, Verbindung) vergleicht
-            // derselbe Klick bzw. "Jetzt vergleichen" erneut.
+            // derselbe Klick bzw. "Vergleichen" erneut.
             Protokoll.Schreibe("AutoSchnell: " + ex.Message);
             if (ex.NichtVerbunden)
             {
                 _verloren = true;
                 SetzeStatus(Status.NichtVerbunden);
                 VerbindungVerloren?.Invoke(ex.Message);
+                Melde(ex.Message, true);
+                return;
             }
-            else if (ex.KeinAbo || ex.Status == 403)
+            if (ex.KeinAbo || ex.Gesperrt)
             {
+                // 1.5.9 (G): nur ein echtes 403 von AutoSchnell sperrt — eines von Cloudflare (ohne JSON) ist voruebergehend
                 _gesperrt = true;
                 SetzeStatus(Status.Gesperrt);
+                Melde(ex.Message, true);
+                return;
             }
-            Melde(ex.Message, true);
+            // Pruefung 08.10.2026 (1.5.9, G): voruebergehend (kein Netz, Zeitueberschreitung, 5xx, Cloudflare, Antwort zu
+            // einer frueheren Verbindung) -> genau ein Wiederholversuch in 5 s, wenn dann noch dasselbe Auto angezeigt
+            // wird. Der Text sagt nur, was wirklich passiert. (Bei Pause laeuft der Takt nicht — dann kein Versprechen.)
+            bool voruebergehend = ex.Voruebergehend || ex.Veraltet;
+            if (voruebergehend && !wiederholung && e.AutomatikAktiv)
+            {
+                _wiederholenAb = _takt() + WiederholMs;
+                _wiederholErzwungen = erzwungen;
+                Protokoll.Schreibe($"Neuer Versuch in {WiederholMs / 1000} s, wenn AutoPointer dann noch dasselbe Auto zeigt.");
+                Melde(ex.Message + " Neuer Versuch in 5 Sekunden.", true);
+            }
+            else Melde(ex.Message + (voruebergehend ? " Für dieses Auto später „Vergleichen“ drücken." : ""), true);
             return;
         }
+        _wiederholenAb = null;
         if (_gesperrt)
         {
             _gesperrt = false;
@@ -408,6 +503,7 @@ internal sealed class Ueberwacher
             Protokoll.Schreibe($"Erkannt (AutoSchnell): {f.Marke} {f.Modell}".TrimEnd());
         }
         LetztesFahrzeug = f;
+        LetztesNurGemerkt = false;
         LetzteInseratUrl = antwort.InseratUrl;
         // Pruefbericht 03.10.2026 (Nr. 2): ab hier gehoeren die "letzten Vergleiche" zu DIESEM Auto — auch wenn
         // es keine gibt. Vorher blieben die Links des vorigen Autos stehen ("erneut oeffnen" zeigte das falsche Auto).
@@ -423,18 +519,19 @@ internal sealed class Ueberwacher
         Protokoll.Schreibe(antwort.InseratUrl != null
             ? $"Inserat: {antwort.InseratUrl} – für den Kaufvertrag vorab ausgelesen: {antwort.VorabStatus}"
             : "Inserat-Adresse unbekannt – für den Kaufvertrag von Hand einfügen.");
-        // Hinweise fuer den Kaufvertrag (Wunsch Ahmad 03.10.2026)
-        var vertragsHinweise = new List<string>();
+        // Hinweise fuer den Kaufvertrag (Wunsch Ahmad 03.10.2026). 1.5.9 (C): die lange Anleitung (Inserat-ID, Hash-ID)
+        // steht ganz im Fenster; die Sprechblase bekommt die Kurzform, und die nur einmal je Programmlauf.
+        string? inseratLang = null, inseratKurz = null, vorabHinweis = null;
         if (antwort.InseratUrl == null && (f.Quelle ?? "").Contains("AutoScout", StringComparison.OrdinalIgnoreCase))
-            vertragsHinweise.Add(KeinLinkHinweis);
+            (inseratLang, inseratKurz) = (KeinLinkHinweis, KeinLinkKurz);
         // Befund Ahmad 08.10.2026 (Liste: bei vielen mobile.de- und einigen Kleinanzeigen-Autos kein "Inserat öffnen"):
         // die Zeile "Inserat-ID" steht ganz unten in der Tabelle — ist der Detailbereich zu niedrig, liegt sie
         // ausserhalb des Bildschirms und wird nicht gelesen. Gleich sagen, wie es geht (sonst merkt man es erst beim
         // Kaufvertrag).
         else if (antwort.InseratUrl == null && f.Quelle is "mobile.de" or "Kleinanzeigen")
-            vertragsHinweise.Add(KeineNummerHinweis);
+            (inseratLang, inseratKurz) = (KeineNummerHinweis, KeineNummerKurz);
         else if (antwort.VorabStatus is "limit" or "fehler" && antwort.VorabHinweis.Length > 0)
-            vertragsHinweise.Add("Für den Kaufvertrag nicht vorab ausgelesen: " + antwort.VorabHinweis);
+            vorabHinweis = "Für den Kaufvertrag nicht vorab ausgelesen: " + antwort.VorabHinweis;
         // 1.5.8 (Wunsch Ahmad 08.10.2026): die Portalwahl steht in AutoSchnell, der Server schickt nur deren Links —
         // hier nur noch die beiden bekannten Vergleichsportale (alles andere ignorieren)
         var links = antwort.Links.Where(l => l.Portal is "mobile.de" or "AutoScout24").ToList();
@@ -445,9 +542,12 @@ internal sealed class Ueberwacher
         LetzteVergleiche = links;
         if (links.Count == 0)
         {
-            if (vertragsHinweise.Count > 0) Melde(string.Join("\n", vertragsHinweise), false);
             MeldeEinmal($"{f.Marke} {f.Modell}: kein Vergleich geöffnet – "
                         + (antwort.Hinweise.FirstOrDefault() ?? "keine Links (Portalwahl in AutoSchnell prüfen)."));
+            // 1.5.9 (C): die Vertrags-Hinweise nur ins Fenster — die Sprechblase gehoert "kein Vergleich" (vorher
+            // verdraengte der Vertrags-Hinweis sie oft, Sprechblasen kommen hoechstens alle 3 s)
+            var still = new[] { inseratLang, vorabHinweis }.OfType<string>().ToList();
+            if (still.Count > 0) Melde(still[0], false, string.Join("\n", still), blase: false);
             return;
         }
 
@@ -460,43 +560,108 @@ internal sealed class Ueberwacher
         }
         // 1.5.8 (Wunsch Ahmad 08.10.2026, Vorgangsnummer): hat das Konto die Browser-Erweiterung, oeffnet das Programm
         // nur die Vorgangsseite — die Erweiterung holt sich den Vorgang und oeffnet Vergleiche + Inserat selbst (sie kennt
-        // dann ihre Tabs, nichts wird doppelt geoeffnet oder erraten). Uebernimmt sie nicht binnen 3 s (z. B. nicht in
-        // diesem Browser), oeffnet das Programm wie bisher selbst — und die naechsten 30 Minuten gleich direkt.
-        if (antwort.UeberHelfer && antwort.VorgangId is { } vorgang && _takt() >= _helferAusfallBis && !Probelauf)
+        // dann ihre Tabs, nichts wird doppelt geoeffnet oder erraten).
+        // Pruefung 08.10.2026 (1.5.9, A): die Seite geht im Browser der Erweiterung auf (bei "Standardbrowser"; sonst sah
+        // sie die Seite nie), nach 5 s beansprucht das Programm den Vorgang beim Server (VorgangPruefenAsync) — erst dann,
+        // und nur wenn ihn niemand hat, oeffnet es selbst.
+        if (antwort.UeberHelfer && antwort.VorgangId is { } vorgang && !Probelauf)
         {
-            Oeffne(new[] { new Vergleich("Vorgang", $"{e.Server.TrimEnd('/')}/app/vorgang/{vorgang}") }, e);
-            LetzteVorgangsPruefung = VorgangPruefenAsync(vorgang, links, e);
+            var browser = BrowserFuer(e.Browser, antwort.HelferBrowser);
+            _aktuellerVorgang = vorgang;
+            Oeffne(new[] { new Vergleich("Vorgang", $"{e.Server.TrimEnd('/')}/app/vorgang/{vorgang}") }, e, browser);
+            LetzteVorgangsPruefung = VorgangPruefenAsync(vorgang, links, e, browser);
         }
         else Oeffne(links, e);
         _letzteOeffnung = _takt();
-        var fehlendePortale = antwort.Hinweise.Where(h => h.Contains("kein mobile.de-Vergleich") || h.Contains("kein AutoScout24-Vergleich")).ToList();
+        var hinweise = antwort.Hinweise.Where(h => h.Contains("kein mobile.de-Vergleich") || h.Contains("kein AutoScout24-Vergleich")).ToList();
         var plausi = PlausibilitaetsHinweise(f, _uhr());
         if (antwort.Melden != null)
         {
             // Seit 04.10.2026 prueft der Server EZ/km selbst und laesst den falschen Filter weg — dann seine Hinweise
             // statt der eigenen Kilometer-Meldung (sonst doppelt); was das Lesen betrifft (Leistung), bleibt
-            fehlendePortale.InsertRange(0, antwort.Melden);
+            hinweise.InsertRange(0, antwort.Melden);
             plausi = plausi.Where(h => !h.StartsWith("Kilometerstand ungewöhnlich hoch", StringComparison.Ordinal)).ToList();
         }
-        fehlendePortale.AddRange(plausi);
-        fehlendePortale.AddRange(vertragsHinweise);
-        if (fehlendePortale.Count > 0) Melde(string.Join("\n", fehlendePortale), false);
+        hinweise.AddRange(plausi);
+        if (vorabHinweis != null) hinweise.Add(vorabHinweis);
+        MeldeHinweise(hinweise, inseratLang, inseratKurz);
     }
 
-    private async Task VorgangPruefenAsync(string vorgang, IReadOnlyList<Vergleich> links, Einstellungen e)
+    /// <summary>Pruefung 08.10.2026 (1.5.9, C): alle Hinweise zu einem Auto als EINE Meldung — in der Sprechblase der erste
+    /// (gekuerzt) und "+N weitere", ganz im Fenster "Status und Hilfe". Der lange Inserat-ID-/Hash-ID-Hinweis kommt als
+    /// Sprechblase (Kurzform) hoechstens einmal je Programmlauf; danach steht er nur noch im Fenster und im Protokoll.</summary>
+    private void MeldeHinweise(List<string> hinweise, string? inseratLang, string? inseratKurz)
+    {
+        var kurz = new List<string>(hinweise);
+        var lang = new List<string>(hinweise);
+        if (inseratLang != null)
+        {
+            lang.Add(inseratLang);
+            if (!_inseratHinweisGezeigt)
+            {
+                _inseratHinweisGezeigt = true;
+                kurz.Add(inseratKurz ?? inseratLang);
+            }
+            else Protokoll.Schreibe("Hinweis (nur im Fenster): " + inseratLang);
+        }
+        if (lang.Count == 0) return;
+        string ganz = string.Join("\n", lang);
+        if (kurz.Count == 0)
+        {
+            Melde(lang[0], false, ganz, blase: false);
+            return;
+        }
+        string text = kurz[0];
+        if (kurz.Count > 1)
+        {
+            string rest = $" (+{kurz.Count - 1} weitere im Fenster „Status und Hilfe“)";
+            text = Hinweis.Kuerzen(text, Hinweis.MaxZeichen - rest.Length) + rest;
+        }
+        Melde(text, false, ganz);
+    }
+
+    /// <summary>Pruefung 08.10.2026 (1.5.9, A): in welchem Browser geht die Vorgangsseite auf? Wer Edge oder Chrome
+    /// eingestellt hat, bekommt den; bei "Standardbrowser" der Browser, in dem die Erweiterung verbunden ist (helfer_browser
+    /// vom Server) — sonst landete die Seite z. B. in Firefox, die Erweiterung in Chrome sah sie nie, und nach der
+    /// Wartezeit ging alles direkt auf. Fehlt der Browser, nimmt BrowserOeffner den Standardbrowser. (rein, fuer Tests)</summary>
+    internal static BrowserWahl BrowserFuer(BrowserWahl eingestellt, string? helferBrowser) =>
+        eingestellt != BrowserWahl.Standard ? eingestellt
+        : helferBrowser == "chrome" ? BrowserWahl.Chrome
+        : helferBrowser == "edge" ? BrowserWahl.Edge
+        : BrowserWahl.Standard;
+
+    /// <summary>Pruefung 08.10.2026 (1.5.9, A): nach <see cref="VorgangWarteMs"/> den Vorgang beim Server fuer das Programm
+    /// beanspruchen (POST …/selbst) — eindeutig: entweder die Erweiterung oeffnet oder das Programm, nie beide.
+    /// true + noch der neueste Vorgang -> selbst oeffnen (im selben Browser wie die Vorgangsseite); true, aber inzwischen
+    /// ein anderes Auto -> nichts (nur Protokoll); false -> die Erweiterung hat ihn; null (AutoSchnell nicht erreichbar,
+    /// auch nach dem zweiten Versuch) -> NICHT oeffnen (sonst womoeglich doppelt), kurzer Hinweis.</summary>
+    private async Task VorgangPruefenAsync(string vorgang, IReadOnlyList<Vergleich> links, Einstellungen e, BrowserWahl browser)
     {
         try
         {
             await _warte(TimeSpan.FromMilliseconds(VorgangWarteMs));
-            bool? uebernommen = await _dienst.VorgangUebernommenAsync(vorgang);
-            if (uebernommen == true) return;
-            Protokoll.Schreibe(uebernommen == false
-                ? "Browser-Erweiterung hat den Vorgang nicht übernommen – Vergleiche direkt geöffnet."
-                : "Vorgang nicht prüfbar – Vergleiche direkt geöffnet.");
-            _helferAusfallBis = _takt() + HelferAusfallMs;
-            Oeffne(links, e);
-            MeldeEinmal("Die Browser-Erweiterung hat die Vergleiche nicht übernommen (in diesem Browser nicht installiert "
-                        + "oder nicht verbunden?) – sie sind direkt geöffnet, ohne Ampel.");
+            // auch fuer ein inzwischen altes Auto beanspruchen: dann kann eine spaete Erweiterung es nicht mehr oeffnen
+            bool? selbst = await _dienst.VorgangSelbstAsync(vorgang);
+            bool aktuell = _aktuellerVorgang == vorgang;
+            if (selbst == false)
+            {
+                Protokoll.Schreibe($"Vorgang {vorgang}: die Browser-Erweiterung hat übernommen (oder er ist abgelaufen) – das Programm öffnet nichts.");
+                return;
+            }
+            if (selbst == null)
+            {
+                Protokoll.Schreibe($"Vorgang {vorgang}: AutoSchnell nicht erreichbar – Vergleiche NICHT selbst geöffnet (sonst womöglich doppelt).");
+                if (aktuell) Melde(VorgangNichtErreichbar, true);
+                return;
+            }
+            if (!aktuell)
+            {
+                Protokoll.Schreibe($"Vorgang {vorgang}: inzwischen ist ein anderes Auto dran – die alten Vergleiche werden nicht mehr geöffnet.");
+                return;
+            }
+            Protokoll.Schreibe($"Vorgang {vorgang}: die Browser-Erweiterung hat nicht übernommen – Vergleiche direkt geöffnet.");
+            Oeffne(links, e, browser);
+            Melde(ErweiterungNichtUebernommen, false);
         }
         catch (Exception ex) { Protokoll.Schreibe("Vorgang prüfen: " + ex.Message); }
     }
@@ -525,17 +690,28 @@ internal sealed class Ueberwacher
         return hinweise;
     }
 
+    // Pruefung 08.10.2026 (1.5.9, C/E): die langen Anleitungen stehen ganz im Fenster "Status und Hilfe" (Letzte Hinweise);
+    // in der Sprechblase nur die Kurzform (Windows schnitt sie bei ~255 Zeichen ab — genau die Anweisungen fehlten).
+    // Der Knopf heisst "Vertrag", nicht "Kaufvertrag".
     internal const string KeineNummerHinweis =
-        "Inserat-Nummer nicht gelesen: in AutoPointer ist die Zeile „Inserat-ID“ (ganz unten in der Tabelle) nicht zu sehen. Detailbereich in AutoPointer höher ziehen, bis „Inserat-ID“ sichtbar ist – dann klappen „Inserat öffnen“ und der Kaufvertrag von selbst. Für dieses Auto: in AutoPointer „Seite öffnen“, im Browser die Adresse kopieren (Strg+L, dann Strg+C) und hier noch einmal „Kaufvertrag“ drücken.";
+        "Inserat-Nummer nicht gelesen: in AutoPointer ist die Zeile „Inserat-ID“ (ganz unten in der Tabelle) nicht zu sehen. Detailbereich in AutoPointer höher ziehen, bis „Inserat-ID“ sichtbar ist – dann klappen „Inserat öffnen“ und der Kaufvertrag von selbst. Für dieses Auto: in AutoPointer „Seite öffnen“, im Browser die Adresse kopieren (Strg+L, dann Strg+C) und hier noch einmal „Vertrag“ drücken.";
+    internal const string KeineNummerKurz =
+        "Inserat-ID nicht gelesen – Detailbereich in AutoPointer höher ziehen. Anleitung: „Mehr ▾“ → „Status und Hilfe“.";
 
     /// <summary>Der passende Hinweis, wenn fuer den Kaufvertrag die Inserat-Adresse fehlt.</summary>
     internal static string LinkHinweisFuer(Fahrzeug f) =>
         (f.Quelle ?? "").Contains("AutoScout", StringComparison.OrdinalIgnoreCase) ? KeinLinkHinweis : KeineNummerHinweis;
 
     internal const string KeinLinkHinweis =
-        "AutoScout-Inserat: die Kennung (Hash-ID) ist in AutoPointer nicht vollständig sichtbar. Für den Kaufvertrag: in AutoPointer „Seite öffnen“, im Browser die Adresse kopieren (Strg+L, dann Strg+C) und hier noch einmal „Kaufvertrag“ drücken – das Programm übernimmt die kopierte Adresse. Tipp: Detailbereich in AutoPointer breiter ziehen – dann klappt es automatisch.";
+        "AutoScout-Inserat: die Kennung (Hash-ID) ist in AutoPointer nicht vollständig sichtbar. Für den Kaufvertrag: in AutoPointer „Seite öffnen“, im Browser die Adresse kopieren (Strg+L, dann Strg+C) und hier noch einmal „Vertrag“ drücken – das Programm übernimmt die kopierte Adresse. Tipp: Detailbereich in AutoPointer breiter ziehen – dann klappt es automatisch.";
+    internal const string KeinLinkKurz =
+        "AutoScout-Kennung (Hash-ID) nicht lesbar – Detailbereich in AutoPointer breiter ziehen. Anleitung: „Mehr ▾“ → „Status und Hilfe“.";
 
-    private void Oeffne(IReadOnlyList<Vergleich> links, Einstellungen e)
+    /// <summary>1.5.9 (C): Sprechblase, wenn "Vertrag" gedrueckt wird und die Inserat-Adresse fehlt (lang: <see cref="LinkHinweisFuer"/>).</summary>
+    internal const string VertragOhneAdresse =
+        "Inserat-Adresse fehlt: in AutoPointer „Seite öffnen“, im Browser die Adresse kopieren (Strg+L, Strg+C), dann noch einmal „Vertrag“.";
+
+    private void Oeffne(IReadOnlyList<Vergleich> links, Einstellungen e, BrowserWahl? browser = null)
     {
         if (Probelauf)
         {
@@ -544,13 +720,15 @@ internal sealed class Ueberwacher
         }
         try
         {
-            _oeffner.Oeffne(links, e, _quelle.Hauptfenster);
-            Protokoll.Schreibe($"Vergleiche geöffnet ({string.Join(" + ", links.Select(l => l.Portal))}).");
+            _oeffner.Oeffne(links, e, _quelle.Hauptfenster, browser ?? e.Browser);
+            Protokoll.Schreibe($"Vergleiche geöffnet ({string.Join(" + ", links.Select(l => l.Portal))}"
+                               + (browser is { } b && b != e.Browser ? $", im Browser der Erweiterung: {b}" : "") + ").");
         }
         catch (Exception ex)
         {
-            Protokoll.Schreibe("Browser konnte nicht geöffnet werden: " + ex.Message);
-            Melde("Browser konnte nicht geöffnet werden: " + ex.Message, true);
+            // 1.5.9 (E): keine englische .NET-Meldung in der Sprechblase — die steht im Protokoll
+            Protokoll.Schreibe("Browser konnte nicht geöffnet werden: " + ex);
+            Melde("Der Browser ließ sich nicht öffnen – in den Einstellungen einen anderen Browser wählen.", true);
         }
     }
 
@@ -562,7 +740,14 @@ internal sealed class Ueberwacher
         Melde(text, true);
     }
 
-    private void Melde(string text, bool fehler) => Meldung?.Invoke(text, fehler);
+    /// <summary>1.5.9 (C): die Sprechblase bekommt hoechstens <see cref="Hinweis.MaxZeichen"/> Zeichen; ist der Text
+    /// laenger (z. B. ein Text des Servers), steht er ganz im Fenster.</summary>
+    private void Melde(string text, bool fehler, string? ausfuehrlich = null, bool blase = true)
+    {
+        string kurz = Hinweis.Kuerzen(text);
+        if (ausfuehrlich == null && kurz != text.Trim()) ausfuehrlich = text.Trim();
+        Meldung?.Invoke(new Hinweis(kurz, fehler, ausfuehrlich != kurz ? ausfuehrlich : null, blase));
+    }
 
     private void SetzeStatus(Status s)
     {
@@ -619,7 +804,7 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
         // klickt - dann ist es vorne. Liegt ein anderes Fenster (Browser) davor,
         // gilt die letzte Pruefsumme: kostet nichts und verdeckte Pixel loesen
         // kein erneutes Lesen aus.
-        if (_letzteSumme != 0 && !ImVordergrund()) return new QuellenZustand(Lage.Details, _letzteSumme);
+        if (_letzteSumme != 0 && !ImVordergrund(_haupt)) return new QuellenZustand(Lage.Details, _letzteSumme);
         ulong summe = AutoPointerFenster.Pruefsumme(_ansicht.TechnikTabelle);
         summe = (summe * 31) ^ AutoPointerFenster.Pruefsumme(_ansicht.KopfTabelle);
         _letzteSumme = summe == 0 ? 1 : summe;
@@ -628,13 +813,14 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
 
     private ulong _letzteSumme;
 
-    private bool ImVordergrund()
+    /// <summary>Liegt ein Fenster von AutoPointer vorne? (Auch fuer "Vergleichen": 1.5.9, I.)</summary>
+    internal static bool ImVordergrund(IntPtr haupt)
     {
         IntPtr vorne = Native.GetForegroundWindow();
-        if (vorne == IntPtr.Zero) return false;
+        if (vorne == IntPtr.Zero || haupt == IntPtr.Zero) return false;
         Native.GetWindowThreadProcessId(vorne, out uint pidVorne);
-        Native.GetWindowThreadProcessId(_haupt, out uint pidAp);
-        return pidVorne == pidAp;
+        Native.GetWindowThreadProcessId(haupt, out uint pidAp);
+        return pidVorne != 0 && pidVorne == pidAp;
     }
 
     public async Task<Lesung?> LiesAsync()
@@ -829,9 +1015,9 @@ internal sealed class BrowserAusgabe : IOeffner
     /// die AttachThreadInput fuer "zurueck zu AutoPointer" braucht.</param>
     public BrowserAusgabe(SynchronizationContext? ui) => _ui = ui;
 
-    public void Oeffne(IReadOnlyList<Vergleich> vergleiche, Einstellungen e, IntPtr autoPointer)
+    public void Oeffne(IReadOnlyList<Vergleich> vergleiche, Einstellungen e, IntPtr autoPointer, BrowserWahl browser)
     {
-        BrowserOeffner.Oeffne(vergleiche.Select(v => v.Url).ToList(), e.Browser);
+        BrowserOeffner.Oeffne(vergleiche.Select(v => v.Url).ToList(), browser);
         if (e.ZurueckZuAutoPointer && autoPointer != IntPtr.Zero && _ui != null)
             Task.Delay(900).ContinueWith(_ => _ui.Post(__ => BrowserOeffner.ZurueckZu(autoPointer), null));
     }

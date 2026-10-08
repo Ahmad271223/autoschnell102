@@ -24,7 +24,7 @@ internal sealed class EinstellungenForm : Form
     public EinstellungenForm(Einstellungen aktuell)
     {
         _e = aktuell.Kopie();
-        Text = "AutoPointer-Vergleich – Einstellungen";
+        Text = TrayApp.Name + " – Einstellungen";
         Font = new Font("Segoe UI", 9f);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = MinimizeBox = false;
@@ -36,8 +36,9 @@ internal sealed class EinstellungenForm : Form
         ShowInTaskbar = true;
 
         var spalte = new TableLayoutPanel { ColumnCount = 1, AutoSize = true, Padding = new Padding(8), Dock = DockStyle.Fill };
+        // 1.5.9 (E): seit 1.5.8 verbindet man ueber die Leiste (das Symbol im Infobereich hat nur noch zwei Eintraege)
         var verbunden = Beschriftung(string.IsNullOrEmpty(_e.VerbundenAls)
-            ? "Nicht verbunden – Rechtsklick auf das Symbol → „Mit AutoSchnell verbinden …“."
+            ? "Nicht verbunden – auf der Leiste „Mehr ▾“ → „Mit AutoSchnell verbinden …“."
             : $"Verbunden als {_e.VerbundenAls}");
         spalte.Controls.Add(Stapel(
             Gruppe("AutoSchnell", verbunden,
@@ -109,6 +110,8 @@ internal sealed class EinstellungenForm : Form
         ziel.MindestabstandMs = _e.MindestabstandMs;
         ziel.HinweiseAnzeigen = _e.HinweiseAnzeigen;
         ziel.TastenkuerzelAktiv = _e.TastenkuerzelAktiv;
+        // 1.5.9 (F): selbst umgestellt -> das Programm schaltet den Autostart nie mehr von sich aus ein
+        if (ziel.MitWindowsStarten != _e.MitWindowsStarten) ziel.AutostartSelbstGewaehlt = true;
         ziel.MitWindowsStarten = _e.MitWindowsStarten;
         ziel.ErkennungsbilderSpeichern = _e.ErkennungsbilderSpeichern;
         ziel.LeisteEcke = _e.LeisteEcke;

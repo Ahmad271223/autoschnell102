@@ -59,4 +59,22 @@ public class TexterkennungTests
             Assert.Equal(parallel.Rohtext, noch.Rohtext);
         }
     }
+
+    [Fact]   // Pruefung 08.10.2026 (1.5.9, J): eine haengende Erkennung gilt nach der Frist als Lesefehler
+    public async Task Haengende_Erkennung_wird_nach_der_Frist_ein_Lesefehler()
+    {
+        Assert.Equal(TimeSpan.FromSeconds(10), TextErkennung.Frist);
+        var haengt = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var aufgeraeumt = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var uhr = System.Diagnostics.Stopwatch.StartNew();
+        var ex = await Assert.ThrowsAsync<TimeoutException>(
+            () => TextErkennung.MitFrist(haengt.Task, TimeSpan.FromMilliseconds(100), () => aufgeraeumt.SetResult()));
+        Assert.True(uhr.ElapsedMilliseconds < 5000, uhr.ElapsedMilliseconds.ToString());
+        Assert.Contains("Texterkennung", ex.Message);
+        Assert.False(aufgeraeumt.Task.IsCompleted);           // das Bild bleibt, solange die Erkennung noch laeuft
+        haengt.SetResult(1);                                   // kommt sie doch noch zurueck, wird aufgeraeumt
+        await aufgeraeumt.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        // rechtzeitig: das Ergebnis, kein Aufraeumen ueber den Umweg
+        Assert.Equal(7, await TextErkennung.MitFrist(Task.FromResult(7), TimeSpan.FromSeconds(1), () => throw new InvalidOperationException()));
+    }
 }

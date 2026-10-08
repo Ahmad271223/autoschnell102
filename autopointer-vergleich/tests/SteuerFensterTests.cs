@@ -144,6 +144,56 @@ public class SteuerFensterTests
         });
     }
 
+    [Fact]   // Pruefung 08.10.2026 (1.5.9, B): neuere Version -> dauerhafter Eintrag ganz oben in "Mehr ▾"
+    public void Leiste_zeigt_das_Update_dauerhaft_im_Mehr_Menue()
+    {
+        ImSta(() =>
+        {
+            var zustand = Zustand();
+            using var l = new Leiste(() => zustand, () => IntPtr.Zero);
+            bool geoeffnet = false;
+            l.UpdateOeffnen += () => geoeffnet = true;
+            Assert.DoesNotContain(l.MenueEintraege(), e => e.StartsWith("Update"));
+            l.UpdateSetzen("1.6.0");
+            Assert.Equal("Update auf 1.6.0 verfügbar …", l.MenueEintraege()[0]);
+            l.UpdateSetzen("1.6.1");                                 // naechste Lizenzpruefung: neuere Nummer, kein zweiter Eintrag
+            Assert.Single(l.MenueEintraege(), e => e.StartsWith("Update"));
+            Assert.Equal("Update auf 1.6.1 verfügbar …", l.MenueEintraege()[0]);
+            l.UpdateSetzen(null);                                    // nicht mehr angeboten
+            Assert.DoesNotContain(l.MenueEintraege(), e => e.StartsWith("Update"));
+            Assert.Equal("Letzten Vergleich nochmal öffnen", l.MenueEintraege()[0]);
+            Assert.False(geoeffnet);
+            l.EndgueltigSchliessen();
+        });
+    }
+
+    [Fact]   // Pruefung 08.10.2026 (1.5.9, C/D): "Letzte Hinweise" ganz im Fenster; Auto vom Start "noch nicht verglichen"
+    public void Fenster_zeigt_die_letzten_Hinweise_ganz()
+    {
+        var z = Zustand() with { LetzteMeldung = "10:01 kurz", LetzteHinweise = new[] { "10:01 ganz lang …", "09:58 älter" } };
+        Assert.Equal("Letzte Hinweise:\n• 10:01 ganz lang …\n• 09:58 älter", SteuerFenster.HinweisText(z));
+        Assert.Equal("10:01 kurz", SteuerFenster.HinweisText(z with { LetzteHinweise = Array.Empty<string>() }));
+        Assert.Equal("", SteuerFenster.HinweisText(Zustand()));
+        ImSta(() =>
+        {
+            var zustand = z with { HatInseratLink = false, NurGemerkt = true };
+            using var f = new SteuerFenster(() => zustand);
+            f.CreateControl();
+            Assert.Contains(Alle<Label>(f), l => l.Text.StartsWith("Letzte Hinweise:") && l.Text.Contains("09:58 älter"));
+            Assert.Contains(Alle<Label>(f), l => l.Text.Contains("noch nicht verglichen") && !l.Text.Contains("Inserat-Adresse fehlt"));
+        });
+    }
+
+    [Fact]   // Pruefung 08.10.2026 (1.5.9, E): die App zeigt das Programm als "AutoSchnell Vergleich" auf der Seite "Programme"
+    public void Verbinden_nennt_die_Seite_und_den_Knopf_der_App()
+    {
+        Assert.Contains("„Programme“", VerbindenForm.VerbindenAnleitung);
+        Assert.Contains("„Code zum Verbinden anzeigen“", VerbindenForm.VerbindenAnleitung);
+        Assert.DoesNotContain("AutoPointer-Vergleich", VerbindenForm.VerbindenAnleitung);
+        Assert.Equal("AutoSchnell Vergleich", TrayApp.Name);
+        Assert.Contains("Startmenü → AutoSchnell Vergleich", TrayApp.BeendenFrage);
+    }
+
     [Fact]   // Wunsch Ahmad 04.10.2026: runder Punkt in der Ecke — gedrueckt halten und ziehen verschiebt die Leiste
     public void Leiste_mit_dem_Griff_verschieben_und_zurueck_in_die_Ecke()
     {

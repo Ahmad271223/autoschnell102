@@ -25,7 +25,11 @@ internal static class Program
         if (KonsolenModus.Argument(args, "--verbinden") is { } code)
             return KonsolenModus.VerbindenAsync(code, server).GetAwaiter().GetResult();
 
-        Protokoll.Schreibe($"Programmstart {Application.ProductVersion.Split('+')[0]} ({Environment.ProcessPath})");
+        string eigene = Application.ProductVersion.Split('+')[0];
+        Protokoll.Schreibe($"Programmstart {eigene} ({Environment.ProcessPath})");
+        // 1.5.9: schon vor der ersten Rueckfrage (Ersetzen, unten) — sonst sehen die Dialoge altmodisch aus
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
         // Nur EINE Instanz. Befund 03.10.2026: "createdNew" taugte dafuer nicht — ein Startversuch, der
         // mit der Meldung "laeuft bereits" offen stand, hielt die Sperre am Leben, und jede neue Version
         // brach danach sofort ab. Jetzt zaehlt nur, ob eine LAUFENDE Instanz die Sperre wirklich besitzt;
@@ -34,6 +38,31 @@ internal static class Program
         bool erste;
         try { erste = mutex.WaitOne(0, false); }
         catch (AbandonedMutexException) { erste = true; }
+        bool ersetzt = false;
+        if (!erste)
+        {
+            // Pruefung 08.10.2026 (1.5.9, B): laeuft eine AELTERE Version (z. B. per Autostart), fragen und sie ersetzen —
+            // vorher holte der Start der neuen Datei nur das Fenster der alten nach vorne, und es blieb bei der alten.
+            var laufend = LaufendesProgramm.Finden();
+            if (LaufendesProgramm.ErsetzenFrage(laufend, eigene) is { } frage)
+            {
+                Protokoll.Schreibe($"Läuft bereits in Version {laufend!.Version} (Prozess {laufend.Pid}) – Ersetzen angeboten.");
+                if (MessageBox.Show(frage, TrayApp.Name, MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+                {
+                    erste = ersetzt = LaufendesProgramm.Ersetzen(mutex, laufend);
+                    if (!erste)
+                    {
+                        Protokoll.Schreibe("Die alte Version hat sich nicht beendet – zweiter Start beendet.");
+                        MessageBox.Show($"{TrayApp.Name} {laufend.Version} ließ sich nicht beenden. Bitte dort auf der Leiste "
+                                        + "„Mehr ▾“ → „Programm beenden“ wählen und diese Datei dann noch einmal starten.",
+                                        TrayApp.Name, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return 0;
+                    }
+                    Protokoll.Schreibe($"Version {laufend.Version} ersetzt – {eigene} startet.");
+                }
+                else Protokoll.Schreibe("Ersetzen abgelehnt.");
+            }
+        }
         if (!erste)
         {
             // Wunsch Ahmad 03.10.2026: kein "laeuft bereits" mehr — das laufende Programm zeigt sein Fenster.
@@ -43,16 +72,18 @@ internal static class Program
                 return 0;
             }
             Protokoll.Schreibe("Läuft bereits – zweiter Start beendet.");
-            MessageBox.Show("AutoPointer-Vergleich läuft bereits – Symbol unten rechts im Infobereich " +
-                            "(Rechtsklick → „Mit AutoSchnell verbinden …“ bzw. „Beenden“).",
-                "AutoPointer-Vergleich", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            // 1.5.9 (E): seit 1.5.8 wird ueber die Leiste bedient, das Symbol hat nur noch zwei Eintraege
+            MessageBox.Show($"{TrayApp.Name} läuft bereits – unten am Bildschirm ist seine Leiste "
+                            + "(„Mehr ▾“ → „Mit AutoSchnell verbinden …“ bzw. „Programm beenden“).",
+                            TrayApp.Name, MessageBoxButtons.OK, MessageBoxIcon.Information);
             return 0;
         }
-        Installation.Sicherstellen();    // Pruefung 05.10.2026 (Paket 2, A6): Kopie am festen Platz
+        // Pruefung 05.10.2026 (Paket 2, A6): Kopie am festen Platz. 1.5.9 (B): nach dem Ersetzen kann die alte Datei noch
+        // einen Moment gesperrt sein — dann ein paar Versuche
+        Installation.Sicherstellen(versuche: ersetzt ? 6 : 1);
+        Installation.StartmenueVerknuepfung();   // 1.5.9 (F): "Wieder starten: Startmenü → AutoSchnell Vergleich"
         Autostart.PfadNachziehen();      // Pruefung 04.10.2026: nach einem Update an anderer Stelle
         NeustartAnmelden(args);          // Paket 2 (A7): nach Absturz/Haenger startet Windows das Programm neu
-        Application.EnableVisualStyles();
-        Application.SetCompatibleTextRenderingDefault(false);
         Application.ThreadException += (_, e) => Protokoll.Schreibe("Fehler: " + e.Exception);
         AppDomain.CurrentDomain.UnhandledException += (_, e) => Protokoll.Schreibe("Fehler: " + e.ExceptionObject);
         try
@@ -61,9 +92,10 @@ internal static class Program
         }
         catch (Exception ex)
         {
+            // 1.5.9 (E): keine (englische) .NET-Meldung im Dialog — die steht im Protokoll
             Protokoll.Schreibe("Start fehlgeschlagen: " + ex);
-            MessageBox.Show("AutoPointer-Vergleich konnte nicht starten:\n\n" + ex.Message +
-                            "\n\nDetails im Protokoll: " + Protokoll.Ordner, "AutoPointer-Vergleich",
+            MessageBox.Show($"{TrayApp.Name} konnte nicht starten. Bitte noch einmal starten – hilft das nicht, "
+                            + "den PC neu starten. (Die Einzelheiten stehen im Protokoll.)", TrayApp.Name,
                             MessageBoxButtons.OK, MessageBoxIcon.Error);
             return 1;
         }
@@ -213,7 +245,7 @@ internal static class KonsolenModus
         // von dort gleich wieder ueberschrieben (oder umgekehrt). Dann nur im Fenster des laufenden Programms verbinden.
         if (ProgrammLaeuft())
         {
-            Console.WriteLine("AutoPointer-Vergleich läuft gerade – bitte dort im Fenster verbinden (oder das Programm erst beenden).");
+            Console.WriteLine($"{TrayApp.Name} läuft gerade – bitte dort verbinden (oder das Programm erst beenden).");
             return 9;
         }
         var e = Einstellungen.Laden();

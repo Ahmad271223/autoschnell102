@@ -2,9 +2,13 @@ namespace AutoPointerVergleich;
 
 /// <summary>Was das Steuerfenster anzeigt (jede Sekunde neu abgefragt).</summary>
 /// <param name="Sperrgrund">Paket 2 (A8): Text des Servers zur Sperre (402/403 bei der Lizenzpruefung), sonst null.</param>
+/// <param name="LetzteHinweise">Pruefung 08.10.2026 (1.5.9, C): die letzten Hinweise ganz, mit Uhrzeit, der neueste
+/// zuerst — die Sprechblasen sind kurz und verschwinden.</param>
+/// <param name="NurGemerkt">1.5.9 (D): das letzte Auto wurde beim Start nur gemerkt, noch nicht verglichen.</param>
 internal sealed record FensterZustand(Status Status, bool AutomatikAn, bool Verbunden, string VerbundenAls,
                                       string? LetztesAuto, bool HatInseratLink, string? LetzteMeldung, bool Probelauf,
-                                      string? Sperrgrund = null);
+                                      string? Sperrgrund = null, IReadOnlyList<string>? LetzteHinweise = null,
+                                      bool NurGemerkt = false);
 
 /// <summary>Wunsch Ahmad 03.10.2026: "man kann nicht stoppen, aktivieren, nichts — das sollen Buttons sein".
 /// Seit 1.5.8 (08.10.2026, "zu viele Knoepfe fuer dieselbe Sache"): bedient wird nur noch ueber die kleine Leiste
@@ -181,13 +185,24 @@ internal sealed class SteuerFenster : Form
         Text = "AutoSchnell Vergleich – " + titel.ToLowerInvariant() + (z.Probelauf ? " (Probelauf)" : "");
 
         _letztes.Text = z.LetztesAuto != null
-            ? "Letztes Auto: " + z.LetztesAuto + (z.HatInseratLink ? "" : "   (Inserat-Adresse fehlt – für den Vertrag selbst einfügen)")
+            ? "Letztes Auto: " + z.LetztesAuto
+              + (z.NurGemerkt ? "   (noch nicht verglichen – „Vergleichen“ drücken)"
+                 : z.HatInseratLink ? "" : "   (Inserat-Adresse fehlt – für den Vertrag selbst einfügen)")
             : "Letztes Auto: noch keins – in AutoPointer ein Inserat anklicken.";
-        _meldung.Text = z.LetzteMeldung ?? "";
-        _meldung.Visible = !string.IsNullOrEmpty(z.LetzteMeldung);
+        _meldung.Text = HinweisText(z);
+        _meldung.Visible = _meldung.Text.Length > 0;
         _verbindung.Text = z.Verbunden ? "Verbunden: " + z.VerbundenAls : "Nicht mit AutoSchnell verbunden.";
         _verbindung.ForeColor = z.Verbunden ? SystemColors.ControlText : Symbole.Fehler;
         _verbinden.Text = z.Verbunden ? "Verbindung trennen" : "Mit AutoSchnell verbinden …";
+    }
+
+    /// <summary>Pruefung 08.10.2026 (1.5.9, C): "Letzte Hinweise" — die ganzen Erklaerungen mit Uhrzeit (die Sprechblase
+    /// zeigt hoechstens 150 Zeichen). Ohne Liste wie bisher die letzte Meldung. (rein, fuer Tests)</summary>
+    internal static string HinweisText(FensterZustand z)
+    {
+        if (z.LetzteHinweise is { Count: > 0 } liste)
+            return "Letzte Hinweise:\n" + string.Join("\n", liste.Select(h => "• " + h));
+        return z.LetzteMeldung ?? "";
     }
 
     /// <summary>Farbe, grosse Zeile, kleine Zeile — fuer jeden Zustand genau eine klare Aussage.</summary>

@@ -50,6 +50,13 @@ internal sealed class Einstellungen
     public string? VerbundenAls { get; set; }
 
     [JsonIgnore] public bool MitWindowsStarten { get; set; }
+    /// <summary>Pruefung 08.10.2026 (1.5.9, F): hat der Sucher "mit Windows starten" je selbst umgestellt? Dann schaltet
+    /// das Programm den Autostart nie von sich aus ein (ein bewusstes "aus" bleibt aus).</summary>
+    public bool AutostartSelbstGewaehlt { get; set; }
+
+    /// <summary>1.5.9 (F): nach dem (ersten) Verbinden den Autostart einschalten? Nur, wenn er aus ist und der Sucher ihn
+    /// nie selbst umgestellt hat. (rein, fuer Tests)</summary>
+    public bool AutostartNachVerbinden() => !MitWindowsStarten && !AutostartSelbstGewaehlt;
 
     public static string Ordner =>
         Environment.GetEnvironmentVariable("AUTOSCHNELL_VERGLEICH_DATEN") is { Length: > 0 } eigener

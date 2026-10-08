@@ -17,14 +17,21 @@ internal sealed class DienstFehler : Exception
     /// (waehrend der Anfrage neu verbunden) — dann gilt sie nicht als "Verbindung verloren".</summary>
     public bool Veraltet { get; init; }
 
+    /// <summary>Pruefung 08.10.2026 (1.5.9, G): die Antwort hatte keinen JSON-Inhalt — sie kam nicht von AutoSchnell,
+    /// sondern von davor (Cloudflare/Firewall-Seite). Ein 403 davon heisst NICHT "gesperrt", sondern "gerade blockiert".</summary>
+    public bool OhneJson { get; init; }
+
     /// <summary>401: Schluessel ungueltig (anderer PC verbunden, getrennt, Konto gesperrt).</summary>
     public bool NichtVerbunden => Status == 401 && !Veraltet;
     /// <summary>402: kein aktives Abo.</summary>
     public bool KeinAbo => Status == 402;
+    /// <summary>1.5.9 (G): echtes 403 von AutoSchnell (mit JSON, "nicht freigeschaltet") — nur das sperrt.</summary>
+    public bool Gesperrt => Status == 403 && !OhneJson;
     public bool KeineVerbindung => Status == 0;
     /// <summary>Paket 2 (A8): voruebergehend — keine Verbindung, Server ueberlastet (5xx), zu viele Anfragen (429).
-    /// Lizenzpruefung: still bleiben und spaeter erneut versuchen, kein rotes Symbol.</summary>
-    public bool Voruebergehend => Status == 0 || Status == 429 || Status >= 500;
+    /// Lizenzpruefung: still bleiben und spaeter erneut versuchen, kein rotes Symbol.
+    /// 1.5.9 (G): auch ein 403 ohne JSON (Cloudflare/Firewall) — vorher galt das Programm dann als "gesperrt".</summary>
+    public bool Voruebergehend => Status == 0 || Status == 429 || Status >= 500 || (Status == 403 && OhneJson);
 }
 
 internal sealed record VerbindenAntwort(string Schluessel, string Konto, string Name, string Firma);
@@ -40,7 +47,7 @@ internal sealed record VergleichAntwort(IReadOnlyList<Vergleich> Links, IReadOnl
                                         string? InseratUrl = null, string VorabStatus = "", string VorabHinweis = "",
                                        string? ErkanntMarke = null, string? ErkanntModell = null, bool MarkeErkannt = true,
                                        IReadOnlyList<string>? Melden = null, bool InseratImBrowser = false,
-                                       string? VorgangId = null, bool UeberHelfer = false);
+                                       string? VorgangId = null, bool UeberHelfer = false, string HelferBrowser = "");
 
 /// <summary>Was der Ueberwacher vom Server braucht (in Tests eine Attrappe).</summary>
 internal interface IVergleichsDienst
@@ -50,8 +57,12 @@ internal interface IVergleichsDienst
     /// <summary>Paket 3 (F4): Verbindung vorwaermen, sobald eine Aenderung in AutoPointer erkannt ist — die Anfrage
     /// trifft dann auf eine offene Verbindung (kein DNS/TLS-Aufbau mehr auf dem kritischen Weg). Darf nichts tun.</summary>
     void Vorwaermen() { }
-    /// <summary>1.5.8 (Vorgangsnummer): hat die Browser-Erweiterung den Vorgang uebernommen? null = nicht pruefbar.</summary>
-    Task<bool?> VorgangUebernommenAsync(string vorgangId) => Task.FromResult<bool?>(null);
+    /// <summary>Pruefung 08.10.2026 (1.5.9, A): den Vorgang fuer das Programm beanspruchen (POST …/selbst). true = er
+    /// gehoert jetzt dem Programm (die Erweiterung kann ihn nicht mehr nehmen) -> selbst oeffnen; false = die
+    /// Erweiterung hat ihn schon (oder er ist unbekannt/abgelaufen) -> nichts tun; null = AutoSchnell nicht erreichbar.
+    /// Bewusst OHNE Standard-Umsetzung: in 1.5.8 reichte der DienstVermittler die Nachfrage nicht weiter — es galt
+    /// immer "nicht pruefbar" und alles ging doppelt auf.</summary>
+    Task<bool?> VorgangSelbstAsync(string vorgangId);
 }
 
 /// <summary>Verbindung zu AutoSchnell (Wunsch Ahmad 03.10.2026): das Programm arbeitet nur
@@ -155,7 +166,10 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
     /// Nie bei 4xx und nie bei 500 (Serverfehler mitten in der Verarbeitung). (rein, fuer Tests)</summary>
     internal static bool Wiederholbar(int status) => status is 502 or 503 or 504 or (>= 520 and <= 529);
 
-    private async Task<JsonElement> SendeAsync(HttpMethod methode, string pfad, object? inhalt = null, TimeSpan? frist = null)
+    /// <param name="wiederholen">false: kein eigener Wiederholversuch (der Aufrufer wiederholt selbst, z. B.
+    /// <see cref="VorgangSelbstAsync"/> mit 1,5 s Pause).</param>
+    private async Task<JsonElement> SendeAsync(HttpMethod methode, string pfad, object? inhalt = null, TimeSpan? frist = null,
+                                               bool wiederholen = true)
     {
         for (int versuch = 1; ; versuch++)
         {
@@ -169,13 +183,15 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
                 Protokoll.Schreibe($"Netzfehler ({pfad}, {versuch}. Versuch): {Ursache(ex)}");
                 // Zeitueberschreitung NIE wiederholen: /vergleich startet serverseitig den Vorab-Abruf und schreibt einen
                 // Eintrag — eine Wiederholung zaehlte doppelt. Nur ein echter Verbindungsfehler (kein Antwortbeginn) einmal.
-                if (ex is HttpRequestException && versuch == 1)
+                if (ex is HttpRequestException && versuch == 1 && wiederholen)
                 {
                     await _warte(WiederholPause);
                     continue;
                 }
+                // Pruefung 08.10.2026 (1.5.9, G): die Meldungen versprechen nichts mehr ("wird gleich erneut versucht"
+                // stimmte nicht) — ob und wann es erneut versucht wird, sagt der Aufrufer
                 if (abbruch?.IsCancellationRequested == true)
-                    throw new DienstFehler(0, "AutoSchnell antwortet gerade nicht – beim nächsten Auto wird es erneut versucht.");
+                    throw new DienstFehler(0, "AutoSchnell antwortet gerade nicht.");
                 throw new DienstFehler(0, "Keine Verbindung zu AutoSchnell – bitte Internet prüfen.");
             }
             using (antwort)
@@ -187,7 +203,7 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
                     catch (JsonException) { throw new DienstFehler(0, "Unerwartete Antwort von AutoSchnell."); }
                 }
                 int status = (int)antwort.StatusCode;
-                if (Wiederholbar(status) && versuch == 1)
+                if (Wiederholbar(status) && versuch == 1 && wiederholen)
                 {
                     Protokoll.Schreibe($"AutoSchnell antwortet mit {status} ({pfad}) – ein Wiederholversuch in {WiederholPause.TotalSeconds:0} s.");
                     await _warte(WiederholPause);
@@ -195,11 +211,27 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
                 }
                 // A11: 401 zu einem Schluessel, der inzwischen ersetzt wurde (waehrend der Anfrage neu verbunden)?
                 bool veraltet = status == 401 && !string.IsNullOrEmpty(gesendet) && gesendet != _schluessel();
+                // 1.5.9 (G): ohne JSON kam die Antwort nicht von AutoSchnell (Cloudflare-/Firewall-Seite)
+                bool ohneJson = !IstJsonObjekt(text);
+                if (status == 403 && ohneJson)
+                    Protokoll.Schreibe($"403 ohne JSON ({pfad}) – blockiert vor AutoSchnell (Cloudflare/Firewall), keine Sperre.");
                 throw new DienstFehler(status, veraltet
                     ? "Antwort gehört zu einer früheren Verbindung – bitte noch einmal versuchen."
-                    : Meldung(text, status)) { Veraltet = veraltet };
+                    : Meldung(text, status)) { Veraltet = veraltet, OhneJson = ohneJson };
             }
         }
+    }
+
+    /// <summary>Ist der Text ein JSON-Objekt (wie jede Fehlerantwort von AutoSchnell: {"detail": …})? (rein, fuer Tests)</summary>
+    internal static bool IstJsonObjekt(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        try
+        {
+            using var doc = JsonDocument.Parse(text);
+            return doc.RootElement.ValueKind == JsonValueKind.Object;
+        }
+        catch (JsonException) { return false; }
     }
 
     /// <summary>Typ + Meldung der Ausnahme samt innerer Ausnahmen (A14), z. B.
@@ -247,10 +279,13 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
         {
             401 => "Programm nicht verbunden – bitte mit einem Code aus AutoSchnell verbinden.",
             402 => "Kein aktives AutoSchnell-Abo – das Programm ist gesperrt.",
+            // 1.5.9 (G): 403 ohne JSON = Cloudflare/Firewall davor, nicht AutoSchnell — voruebergehend, keine Sperre
+            403 when !IstJsonObjekt(text) => "AutoSchnell ist kurz nicht erreichbar.",
             403 => "Für dein Konto nicht freigeschaltet.",
             429 => "Zu viele Anfragen – bitte kurz warten.",
-            // Paket 2 (A3): Gateway/Ueberlast/Cloudflare — kein Fehler des Suchers, geht gleich wieder
-            502 or 503 or 504 or (>= 520 and <= 529) => "AutoSchnell ist kurz nicht erreichbar – wird gleich erneut versucht.",
+            // Paket 2 (A3): Gateway/Ueberlast/Cloudflare — kein Fehler des Suchers. Seit 1.5.9 ohne "wird gleich erneut
+            // versucht": das sagt (nur, wenn es stimmt) der Aufrufer
+            502 or 503 or 504 or (>= 520 and <= 529) => "AutoSchnell ist kurz nicht erreichbar.",
             _ => $"AutoSchnell antwortet mit Fehler {status}.",
         };
     }
@@ -270,21 +305,45 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
                                  Text(e, "programm_name") is { Length: > 0 } pn ? pn : null);
     }
 
+    /// <summary>1.5.9 (A): so lange wartet der eine Wiederholversuch von <see cref="VorgangSelbstAsync"/>.</summary>
+    internal static readonly TimeSpan VorgangPause = TimeSpan.FromMilliseconds(1500);
+
+    /// <summary>Pruefung 08.10.2026 (1.5.9, A — Uebergabe an die Erweiterung wird eindeutig): POST vorgang/&lt;id&gt;/selbst.
+    /// Vorher fragte das Programm nur "uebernommen?" und oeffnete sonst selbst — eine Erweiterung, die einen Moment
+    /// spaeter doch uebernahm, oeffnete alles ein zweites Mal. Jetzt beansprucht das Programm den Vorgang beim Server;
+    /// wer zuerst kommt, oeffnet. 200 {"selbst": true} = gehoert jetzt dem Programm; {"selbst": false} = die Erweiterung
+    /// hat ihn; 404 = unbekannt/abgelaufen (false). Netzfehler/5xx: nach 1,5 s genau ein zweiter Versuch, dann null
+    /// (= nicht erreichbar — der Aufrufer oeffnet dann NICHT, sonst womoeglich doppelt). Andere Fehler (401, 403 …):
+    /// false — die Vorgangsseite ist schon offen und zeigt die Links.</summary>
+    public async Task<bool?> VorgangSelbstAsync(string vorgangId)
+    {
+        string pfad = "vorgang/" + Uri.EscapeDataString(vorgangId) + "/selbst";
+        for (int versuch = 1; ; versuch++)
+        {
+            try
+            {
+                var e = await SendeAsync(HttpMethod.Post, pfad, frist: TimeSpan.FromSeconds(4), wiederholen: false);
+                return e.TryGetProperty("selbst", out var s) && s.ValueKind == JsonValueKind.True;
+            }
+            catch (DienstFehler ex) when (ex.Voruebergehend || ex.Veraltet)
+            {
+                Protokoll.Schreibe($"Vorgang {vorgangId}: AutoSchnell nicht erreichbar ({versuch}. Versuch): {ex.Message}");
+                if (versuch >= 2) return null;
+                await _warte(VorgangPause);
+            }
+            catch (DienstFehler ex)
+            {
+                Protokoll.Schreibe(ex.Status == 404
+                    ? $"Vorgang {vorgangId}: unbekannt oder abgelaufen – nicht selbst geöffnet."
+                    : $"Vorgang {vorgangId}: AutoSchnell antwortet mit {ex.Status} – nicht selbst geöffnet.");
+                return false;
+            }
+        }
+    }
+
     /// <summary>Pruefbericht 03.10.2026 (Nr. 12): hat die AutoSchnell-App das Auto wirklich uebernommen? Die
     /// Web-App meldet den Start (Kennung im Link) an den Server; ohne Meldung oeffnet das Programm den Browser.
     /// Fehler zaehlen als "nicht bestaetigt".</summary>
-    /// <summary>1.5.8: hat die Erweiterung den Vorgang uebernommen (GET vorgang/&lt;id&gt;)? null = nicht pruefbar.</summary>
-    public async Task<bool?> VorgangUebernommenAsync(string vorgangId)
-    {
-        try
-        {
-            var e = await SendeAsync(HttpMethod.Get, "vorgang/" + Uri.EscapeDataString(vorgangId),
-                                     frist: TimeSpan.FromSeconds(4));
-            return e.TryGetProperty("uebernommen", out var u) && u.ValueKind == JsonValueKind.True;
-        }
-        catch (DienstFehler) { return null; }
-    }
-
     public async Task<bool> AppStartBestaetigtAsync(string startKennung)
     {
         try
@@ -354,9 +413,17 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
         // 1.5.8 (Wunsch Ahmad 08.10.2026): Vorgangsnummer; ueber_helfer = die Erweiterung oeffnet die Tabs
         string? vorgang = Text(e, "vorgang_id") is { Length: 36 } vg && Guid.TryParse(vg, out _) ? vg : null;
         bool ueberHelfer = e.TryGetProperty("ueber_helfer", out var uh) && uh.ValueKind == JsonValueKind.True;
+        // Pruefung 08.10.2026 (1.5.9, A): in welchem Browser die Erweiterung verbunden ist — dort oeffnet das Programm
+        // die Vorgangsseite (bei "Standardbrowser"), sonst sieht sie die Erweiterung nie. Alles andere = unbekannt.
+        string helferBrowser = Text(e, "helfer_browser").Trim().ToLowerInvariant() switch
+        {
+            "chrome" => "chrome",
+            "edge" => "edge",
+            _ => "",
+        };
         return new VergleichAntwort(links, hinweise, Text(e, "profil"), inseratUrl, vorabStatus, vorabHinweis,
                                     marke, modell, markeErkannt, melden, imBrowser && inseratUrl != null,
-                                    vorgang, ueberHelfer && vorgang != null);
+                                    vorgang, ueberHelfer && vorgang != null, helferBrowser);
     }
 
     /// <summary>Fahrzeug -> Anfrage an /vergleich (Feldnamen wie routes/werkzeuge.FahrzeugIn).</summary>

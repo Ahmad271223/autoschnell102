@@ -88,6 +88,44 @@ public class EinstellungenTests
         }
     }
 
+    [Fact]   // Pruefung 08.10.2026 (1.5.9, F): Autostart nach dem ersten Verbinden — ausser der Sucher hat ihn selbst umgestellt
+    public void Autostart_nach_dem_Verbinden_nur_ohne_eigene_Wahl()
+    {
+        var e = new Einstellungen { MitWindowsStarten = false };
+        Assert.True(e.AutostartNachVerbinden());
+        e.MitWindowsStarten = true;
+        Assert.False(e.AutostartNachVerbinden());                    // ist schon an
+        e = new Einstellungen { MitWindowsStarten = false, AutostartSelbstGewaehlt = true };
+        Assert.False(e.AutostartNachVerbinden());                    // bewusst aus: bleibt aus
+        // die eigene Wahl ueberlebt Speichern/Laden (Kopie = JSON hin und zurueck)
+        Assert.True(e.Kopie().AutostartSelbstGewaehlt);
+        Assert.False(new Einstellungen().Kopie().AutostartSelbstGewaehlt);
+    }
+
+    [Fact]   // 1.5.9 (F): nur wer den Haken wirklich umstellt, hat "selbst gewaehlt"
+    public void Einstellungsfenster_merkt_eigene_Autostart_Wahl()
+    {
+        Exception? fehler = null;
+        var t = new Thread(() =>
+        {
+            try
+            {
+                var ziel = new Einstellungen { MitWindowsStarten = false };
+                using (var f = new EinstellungenForm(ziel)) f.AnwendenAuf(ziel);            // nichts umgestellt
+                Assert.False(ziel.AutostartSelbstGewaehlt);
+                var anders = new Einstellungen { MitWindowsStarten = true };                // Dialog zeigte "an"
+                using (var f = new EinstellungenForm(anders)) f.AnwendenAuf(ziel);           // -> ziel war "aus"
+                Assert.True(ziel.AutostartSelbstGewaehlt);
+                Assert.True(ziel.MitWindowsStarten);
+            }
+            catch (Exception ex) { fehler = ex; }
+        });
+        t.SetApartmentState(ApartmentState.STA);
+        t.Start();
+        t.Join();
+        if (fehler != null) throw fehler;
+    }
+
     [Fact]   // Paket 2 (A13): Erkennungsbilder hoechstens ~200 MB — die aeltesten fliegen zuerst
     public void Erkennungsbilder_ueber_dem_Limit_aelteste_zuerst()
     {

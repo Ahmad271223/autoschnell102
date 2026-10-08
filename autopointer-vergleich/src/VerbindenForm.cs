@@ -1,7 +1,7 @@
 namespace AutoPointerVergleich;
 
-/// <summary>"Mit AutoSchnell verbinden": 6-stelliger Code aus der App (AutoPointer-Vergleich →
-/// Programm verbinden). Ein Konto = ein PC — eine neue Verbindung ersetzt die alte.</summary>
+/// <summary>"Mit AutoSchnell verbinden": 6-stelliger Code aus der App (Seite "Programme" bzw. "AutoSchnell Vergleich" →
+/// "Code zum Verbinden anzeigen"). Ein Konto = ein PC — eine neue Verbindung ersetzt die alte.</summary>
 internal sealed class VerbindenForm : Form
 {
     private readonly AutoSchnellDienst _dienst;
@@ -11,10 +11,17 @@ internal sealed class VerbindenForm : Form
 
     public VerbindenAntwort? Ergebnis { get; private set; }
 
+    internal const string VerbindenAnleitung =
+        "Das Programm funktioniert nur mit einem AutoSchnell-Konto mit aktivem Abo.\n\n" +
+        "1. In AutoSchnell anmelden → links „Programme“ (bzw. „AutoSchnell Vergleich“) → „Code zum Verbinden anzeigen“ "
+        + "(ist schon ein anderer PC verbunden: „Anderen PC verbinden“).\n" +
+        "2. Den 6-stelligen Code hier eintippen (10 Minuten gültig).\n\n" +
+        "Jedes Konto kann auf einem PC verbunden sein – ein neuer PC ersetzt den alten.";
+
     public VerbindenForm(AutoSchnellDienst dienst, string? hinweis)
     {
         _dienst = dienst;
-        Text = "AutoPointer-Vergleich – mit AutoSchnell verbinden";
+        Text = TrayApp.Name + " – mit AutoSchnell verbinden";
         Font = new Font("Segoe UI", 9.5f);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = MinimizeBox = false;
@@ -34,10 +41,9 @@ internal sealed class VerbindenForm : Form
             stapel.Controls.Add(new Label { Text = hinweis, AutoSize = true, ForeColor = Color.Firebrick, MaximumSize = new Size(460, 0), Margin = new Padding(0, 0, 0, 10) });
         stapel.Controls.Add(new Label
         {
-            Text = "Das Programm funktioniert nur mit einem AutoSchnell-Konto mit aktivem Abo.\n\n" +
-                   "1. In AutoSchnell anmelden → „AutoPointer-Vergleich“ → „Code zum Verbinden anzeigen“.\n" +
-                   "2. Den 6-stelligen Code hier eintippen (10 Minuten gültig).\n\n" +
-                   "Jedes Konto kann auf einem PC verbunden sein – ein neuer PC ersetzt den alten.",
+            // Pruefung 08.10.2026 (1.5.9, E): die App zeigt das Programm als "AutoSchnell Vergleich" auf der Seite
+            // "Programme" (im Menue links; gibt es nur ein Programm, heisst der Eintrag selbst "AutoSchnell Vergleich")
+            Text = VerbindenAnleitung,
             AutoSize = true, MaximumSize = new Size(460, 0), Margin = new Padding(0, 0, 0, 12),
         });
         _code = new TextBox

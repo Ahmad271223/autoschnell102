@@ -36,14 +36,33 @@ internal sealed class TextErkennung
             engine = OcrEngine.TryCreateFromLanguage(new Windows.Globalization.Language("de-DE"))
                      ?? OcrEngine.TryCreateFromUserProfileLanguages();
         }
-        catch (Exception ex) { fehler = ex.Message; }
+        // Pruefung 08.10.2026 (1.5.9, E): die (englische) .NET-Meldung nur ins Protokoll, nicht in den Text fuer den Sucher
+        catch (Exception ex) { Protokoll.Schreibe("Texterkennung nicht erzeugt: " + ex); }
         if (engine == null)
         {
             fehler = "Windows-Texterkennung nicht verfügbar. Bitte unter Einstellungen > Zeit und Sprache > Sprache "
-                   + "„Deutsch (Deutschland)“ mit „Optische Zeichenerkennung“ installieren. " + fehler;
+                   + "„Deutsch (Deutschland)“ mit „Optische Zeichenerkennung“ installieren.";
             return null;
         }
         return new TextErkennung(engine);
+    }
+
+    /// <summary>Pruefung 08.10.2026 (1.5.9, J): so lange darf eine Erkennung hoechstens dauern. RecognizeAsync hatte keine
+    /// Frist und lief im Takt unter der Sperre des Ueberwachers — hing die Windows-Texterkennung, war das Programm bis zum
+    /// Neustart taub. Nach 10 s gilt es als Lesefehler (TimeoutException; der Ueberwacher versucht es spaeter erneut).</summary>
+    internal static TimeSpan Frist { get; set; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>Auf <paramref name="auftrag"/> hoechstens <paramref name="frist"/> warten; sonst TimeoutException (deutsch).
+    /// Ein haengender Auftrag laeuft im Hintergrund weiter — <paramref name="danach"/> raeumt auf, wenn er doch noch
+    /// endet (das Bild darf nicht unter ihm weg). (fuer Tests)</summary>
+    internal static async Task<T> MitFrist<T>(Task<T> auftrag, TimeSpan frist, Action? danach = null)
+    {
+        try { return await auftrag.WaitAsync(frist); }
+        catch (TimeoutException)
+        {
+            if (danach != null) _ = auftrag.ContinueWith(_ => danach(), TaskScheduler.Default);
+            throw new TimeoutException($"Windows-Texterkennung hat nach {frist.TotalSeconds:0} s nicht geantwortet.");
+        }
     }
 
     /// <summary>Liest das Bild. Kleine Tabellenschrift wird vorher hochskaliert
@@ -75,8 +94,16 @@ internal sealed class TextErkennung
         if (daten.Stride != b * 4) puffer = Verdichte(puffer, daten.Stride, b, h);
         for (int i = 3; i < puffer.Length; i += 4) puffer[i] = 255;
 
-        using var sw = SoftwareBitmap.CreateCopyFromBuffer(puffer.AsBuffer(), BitmapPixelFormat.Bgra8, b, h, BitmapAlphaMode.Premultiplied);
-        var ergebnis = await _engine.RecognizeAsync(sw);
+        var sw = SoftwareBitmap.CreateCopyFromBuffer(puffer.AsBuffer(), BitmapPixelFormat.Bgra8, b, h, BitmapAlphaMode.Premultiplied);
+        OcrResult ergebnis;
+        bool haengt = false;
+        try
+        {
+            // 1.5.9 (J): hoechstens 10 s — haengt sie, wird das Bild erst freigegeben, wenn sie doch noch fertig wird
+            ergebnis = await MitFrist(_engine.RecognizeAsync(sw).AsTask(), Frist, () => sw.Dispose());
+        }
+        catch (TimeoutException) { haengt = true; throw; }
+        finally { if (!haengt) sw.Dispose(); }
         var zeilen = new List<OcrZeile>();
         foreach (var zeile in ergebnis.Lines)
         {

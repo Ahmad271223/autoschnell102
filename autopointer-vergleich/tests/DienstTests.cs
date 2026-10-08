@@ -105,22 +105,75 @@ public class DienstTests
         var kaputt = await d.VergleichAsync(Passat(), probelauf: false);
         Assert.Null(kaputt.VorgangId);
         Assert.False(kaputt.UeberHelfer);
+    }
 
-        a.Antwort = _ => Json(200, """{"uebernommen":true}""");
-        Assert.True(await d.VorgangUebernommenAsync("0f8c1a2b-3c4d-4e5f-8a9b-0c1d2e3f4a5b"));
-        Assert.Equal(HttpMethod.Get, a.Letzte!.Method);
-        Assert.Equal("https://app.example.test/api/werkzeuge/autopointer-vergleich/vorgang/0f8c1a2b-3c4d-4e5f-8a9b-0c1d2e3f4a5b",
+    [Theory]   // Pruefung 08.10.2026 (1.5.9, A): helfer_browser = der Browser, in dem die Erweiterung verbunden ist
+    [InlineData("\"chrome\"", "chrome")]
+    [InlineData("\"Edge\"", "edge")]
+    [InlineData("\"\"", "")]
+    [InlineData("\"firefox\"", "")]
+    [InlineData("null", "")]
+    public async Task Vergleich_liest_den_Browser_der_Erweiterung(string wert, string erwartet)
+    {
+        var (d, a) = Dienst();
+        a.Antwort = _ => Json(200, $$"""
+            {"links":[{"portal":"mobile.de","url":"https://suchen.mobile.de/x?ms=1"}],"hinweise":[],"profil":"inland",
+             "vorgang_id":"0f8c1a2b-3c4d-4e5f-8a9b-0c1d2e3f4a5b","ueber_helfer":true,"helfer_browser":{{wert}}}
+            """);
+        var antwort = await d.VergleichAsync(Passat(), probelauf: false);
+        Assert.Equal(erwartet, antwort.HelferBrowser);
+    }
+
+    private const string VorgangNr = "0f8c1a2b-3c4d-4e5f-8a9b-0c1d2e3f4a5b";
+
+    [Fact]   // Pruefung 08.10.2026 (1.5.9, A): POST …/vorgang/<id>/selbst — der Server entscheidet, wer oeffnet
+    public async Task Vorgang_selbst_beanspruchen()
+    {
+        var (d, a) = Dienst();
+        a.Antwort = _ => Json(200, """{"selbst":true}""");
+        Assert.True(await d.VorgangSelbstAsync(VorgangNr));
+        Assert.Equal(HttpMethod.Post, a.Letzte!.Method);
+        Assert.Equal($"https://app.example.test/api/werkzeuge/autopointer-vergleich/vorgang/{VorgangNr}/selbst",
                      a.Letzte.RequestUri!.ToString());
-        a.Antwort = _ => Json(200, """{"uebernommen":false}""");
-        Assert.False(await d.VorgangUebernommenAsync("0f8c1a2b-3c4d-4e5f-8a9b-0c1d2e3f4a5b"));
+        Assert.Equal("geheim", a.Letzte.Headers.GetValues("X-Werkzeug-Schluessel").Single());
+        Assert.Null(a.Inhalt);                                              // kein Inhalt
+        a.Antwort = _ => Json(200, """{"selbst":false}""");
+        Assert.False(await d.VorgangSelbstAsync(VorgangNr));                // die Erweiterung hat ihn
         a.Antwort = _ => Json(404, """{"detail":"Vorgang nicht gefunden oder abgelaufen."}""");
-        Assert.Null(await d.VorgangUebernommenAsync("0f8c1a2b-3c4d-4e5f-8a9b-0c1d2e3f4a5b"));
+        Assert.False(await d.VorgangSelbstAsync(VorgangNr));                // unbekannt/abgelaufen: nichts tun
+        a.Antwort = _ => Json(401, """{"detail":"Dieses Programm ist nicht (mehr) verbunden"}""");
+        Assert.False(await d.VorgangSelbstAsync(VorgangNr));                // nicht oeffnen (Vorgangsseite ist offen)
+    }
+
+    [Fact]   // 1.5.9 (A): Netzfehler/5xx -> nach 1,5 s genau ein zweiter Versuch, dann null (= nicht oeffnen, Hinweis)
+    public async Task Vorgang_selbst_bei_Netzfehler_einmal_nach_1_5_s_wiederholt()
+    {
+        var pausen = new List<TimeSpan>();
+        var a = new Attrappe();
+        var d = new AutoSchnellDienst("https://app.example.test/", () => "geheim", a, t => { pausen.Add(t); return Task.CompletedTask; });
+        a.Antwort = _ => a.Aufrufe == 1 ? Json(503, "<html>Service Unavailable</html>") : Json(200, """{"selbst":true}""");
+        Assert.True(await d.VorgangSelbstAsync(VorgangNr));
+        Assert.Equal(2, a.Aufrufe);
+        Assert.Equal(new[] { TimeSpan.FromMilliseconds(1500) }, pausen);
+
+        a.Aufrufe = 0;
+        pausen.Clear();
+        a.Antwort = _ => Json(502, "");
+        Assert.Null(await d.VorgangSelbstAsync(VorgangNr));
+        Assert.Equal(2, a.Aufrufe);                                          // kein dritter (auch kein interner) Versuch
+        Assert.Single(pausen);
+
+        a.Aufrufe = 0;
+        a.Ausnahme = new HttpRequestException("weg");
+        Assert.Null(await d.VorgangSelbstAsync(VorgangNr));
+        Assert.Equal(2, a.Aufrufe);
     }
 
     [Theory]
     [InlineData(402, """{"detail":"Kein aktives AutoSchnell-Abo – das Programm ist gesperrt."}""", "Kein aktives AutoSchnell-Abo")]
     [InlineData(401, """{"detail":"Dieses Programm ist nicht (mehr) verbunden"}""", "nicht (mehr) verbunden")]
-    [InlineData(403, "kaputt", "nicht freigeschaltet")]
+    [InlineData(403, """{"detail":"Für dein Konto nicht freigeschaltet."}""", "nicht freigeschaltet")]
+    [InlineData(403, "{}", "nicht freigeschaltet")]
     [InlineData(422, """{"detail":[{"msg":"x"}]}""", "Ungültige Fahrzeugdaten")]
     [InlineData(404, """{"detail":"Not Found"}""", "Server ist noch nicht aktualisiert")]
     [InlineData(404, """{"detail":"Code ungültig oder abgelaufen"}""", "Code ungültig")]
@@ -133,6 +186,34 @@ public class DienstTests
         Assert.Contains(erwartet, ex.Message);
         Assert.Equal(status == 401, ex.NichtVerbunden);
         Assert.Equal(status == 402, ex.KeinAbo);
+        Assert.Equal(status == 403, ex.Gesperrt);
+    }
+
+    [Theory]   // Pruefung 08.10.2026 (1.5.9, G): 403 OHNE JSON kommt von Cloudflare/Firewall — voruebergehend, keine Sperre
+    [InlineData("<html><title>Attention Required! | Cloudflare</title></html>")]
+    [InlineData("")]
+    [InlineData("Forbidden")]
+    public async Task Cloudflare_403_ohne_JSON_ist_voruebergehend(string text)
+    {
+        var (d, a) = Dienst();
+        a.Antwort = _ => new HttpResponseMessage(HttpStatusCode.Forbidden) { Content = new StringContent(text) };
+        var ex = await Assert.ThrowsAsync<DienstFehler>(() => d.VergleichAsync(Passat(), false));
+        Assert.Equal(403, ex.Status);
+        Assert.True(ex.OhneJson);
+        Assert.False(ex.Gesperrt);
+        Assert.True(ex.Voruebergehend);
+        Assert.Contains("kurz nicht erreichbar", ex.Message);
+        Assert.DoesNotContain("freigeschaltet", ex.Message);
+        Assert.Equal(1, a.Aufrufe);                     // in SendeAsync nicht wiederholt (das macht der Ueberwacher in 5 s)
+        Assert.False(AutoSchnellDienst.IstJsonObjekt(text));
+        Assert.True(AutoSchnellDienst.IstJsonObjekt("""{"detail":"x"}"""));
+    }
+
+    [Fact]   // 1.5.9 (G): die Meldungen versprechen keinen Wiederholversuch mehr — das sagt der Aufrufer, wenn es stimmt
+    public void Meldungen_versprechen_nichts()
+    {
+        foreach (int status in new[] { 403, 502, 503, 504, 522 })
+            Assert.DoesNotContain("erneut versucht", AutoSchnellDienst.Meldung("<html></html>", status));
     }
 
     [Fact]

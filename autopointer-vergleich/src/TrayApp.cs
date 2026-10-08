@@ -10,6 +10,12 @@ internal sealed class TrayApp : ApplicationContext
     private const int HotkeyId = 0x4150;
     /// <summary>Ein zweiter Programmstart setzt dieses Signal — die laufende Instanz zeigt ihr Fenster.</summary>
     internal const string ZeigenSignalName = @"Local\AutoSchnell.AutoPointerVergleich.Zeigen";
+    /// <summary>Pruefung 08.10.2026 (1.5.9, B): eine neuere Version setzt dieses Signal — die laufende beendet sich sauber
+    /// (ohne Rueckfrage), damit die neue starten und die feste Kopie ersetzen kann.</summary>
+    internal const string BeendenSignalName = @"Local\AutoSchnell.AutoPointerVergleich.Beenden";
+    /// <summary>Der Name des Programms in Fenstertiteln, Rueckfragen und Sprechblasen (1.5.9, E — nicht mehr
+    /// "AutoPointer-Vergleich"; AutoPointer ist das fremde Programm, aus dem gelesen wird).</summary>
+    internal const string Name = "AutoSchnell Vergleich";
 
     private readonly NotifyIcon _symbol;
     private readonly Icon _iconAktiv = Symbole.Icon(Symbole.Aktiv);
@@ -43,11 +49,19 @@ internal sealed class TrayApp : ApplicationContext
     /// <summary>Wunsch Ahmad 06.10.2026: letzter Mausklick in AutoPointer — nur danach wird verglichen.</summary>
     private Klicks? _klicks;
     private readonly EventWaitHandle _zeigenSignal;
+    private readonly EventWaitHandle _beendenSignal;
+    /// <summary>1.5.9 (B): die eigene Version fuer einen zweiten Start (geteilter Speicher; null = nicht moeglich).</summary>
+    private readonly IDisposable? _versionVeroeffentlicht;
     private string? _letzteMeldung;
+    /// <summary>Pruefung 08.10.2026 (1.5.9, C): die letzten Hinweise (mit Uhrzeit, ganz) fuer "Status und Hilfe" —
+    /// Sprechblasen verschwinden und sind kurz, hier steht die ganze Erklaerung.</summary>
+    private readonly LinkedList<string> _hinweise = new();
+    internal const int HinweiseImFenster = 4;
     /// <summary>Stand der Zwischenablage, als das letzte Auto dran war (Nr. 11).</summary>
     private uint _zwischenablageStand;
     private bool _updateGemeldet;
     private bool _systemcheckLaeuft;
+    private bool _beendet;
 
     public TrayApp(bool probelauf, string? server = null, bool minimiert = false)
     {
@@ -70,12 +84,12 @@ internal sealed class TrayApp : ApplicationContext
         oeffnen.Font = new Font(oeffnen.Font, FontStyle.Bold);
         menue.Items.Add(oeffnen);
         menue.Items.Add(new ToolStripSeparator());
-        menue.Items.Add("Beenden", null, (_, _) => Beenden());
+        menue.Items.Add("Beenden", null, (_, _) => BeendenFragen());
 
         _symbol = new NotifyIcon
         {
             Icon = _iconWarten,
-            Text = "AutoPointer-Vergleich",
+            Text = Name,
             ContextMenuStrip = menue,
             Visible = true,
         };
@@ -90,7 +104,7 @@ internal sealed class TrayApp : ApplicationContext
         _fenster.Trennen += async () => await TrennenAsync();
         _fenster.EinstellungenOeffnen += EinstellungenZeigen;
         _fenster.SystemcheckOeffnen += async () => await SystemcheckZeigenAsync();
-        _fenster.Beenden += Beenden;
+        _fenster.Beenden += BeendenFragen;
         _leiste = new Leiste(ZustandFuersFenster, () => _quelle?.Hauptfenster ?? IntPtr.Zero);
         _leiste.Aktivieren += () => AutomatikSetzen(true);
         _leiste.Stoppen += () => AutomatikSetzen(false);
@@ -109,7 +123,8 @@ internal sealed class TrayApp : ApplicationContext
             _einstellungen.LeisteY = stelle?.Y;
             Speichern(_einstellungen);
         };
-        _leiste.Beenden += Beenden;
+        _leiste.Beenden += BeendenFragen;
+        _leiste.UpdateOeffnen += UpdateOeffnen;
         AutoPointerFenster.EigeneFenster = () => new[] { _leistenHandle };
         // Nr. 10: liegt die Leiste ueber der AutoPointer-Tabelle, wird sie fuer das Bildschirm-Abbild kurz unsichtbar
         AutoPointerFenster.EigeneAusblenden = unsichtbar => _ui.Send(_ =>
@@ -122,7 +137,7 @@ internal sealed class TrayApp : ApplicationContext
 
         Protokoll.KlartextUmstellen();     // alte Klartext-Protokolle verschluesseln (03.10.2026)
         Protokoll.AufraeumenBeiTageswechsel();
-        Protokoll.Schreibe($"AutoPointer-Vergleich {Application.ProductVersion} gestartet{(probelauf ? " – PROBELAUF (öffnet keinen Browser)" : "")}."
+        Protokoll.Schreibe($"{Name} {Application.ProductVersion} gestartet{(probelauf ? " – PROBELAUF (öffnet keinen Browser)" : "")}."
                            + $" Server: {_einstellungen.Server}" + (_einstellungen.ServerNurImSpeicher ? " (nur für diesen Lauf, --server)" : ""));
         VerbindungAnzeigen();
         Starten();
@@ -131,10 +146,28 @@ internal sealed class TrayApp : ApplicationContext
         _ui.Post(async _ => await LizenzPruefenAsync(beimStart: true), null);
         var token = _ende.Token;
         _zeigenSignal = new EventWaitHandle(false, EventResetMode.AutoReset, ZeigenSignalName);
+        // Pruefung 08.10.2026 (1.5.9, B): ein zweiter Start sieht hier, welche Version laeuft, und kann sie per Signal
+        // beenden (vorher holte er nur das Fenster nach vorne — eine neue Version startete nie, die feste Kopie blieb alt)
+        _beendenSignal = new EventWaitHandle(false, EventResetMode.AutoReset, BeendenSignalName);
+        _versionVeroeffentlicht = LaufendesProgramm.Veroeffentlichen(Application.ProductVersion.Split('+')[0], Environment.ProcessId);
         Task.Run(() =>
         {
-            var warten = new[] { _zeigenSignal, token.WaitHandle };
-            while (WaitHandle.WaitAny(warten) == 0) _ui.Post(_ => FensterZeigen(), null);
+            var warten = new[] { _zeigenSignal, _beendenSignal, token.WaitHandle };
+            while (true)
+            {
+                int i = WaitHandle.WaitAny(warten);
+                if (i == 0) _ui.Post(_ => FensterZeigen(), null);
+                else if (i == 1)
+                {
+                    _ui.Post(_ =>
+                    {
+                        Protokoll.Schreibe("Eine neuere Version wird gestartet – dieses Programm beendet sich.");
+                        Beenden();
+                    }, null);
+                    break;
+                }
+                else break;
+            }
         }, token);
         // Paket 2 (A8/A13): alle 15 s nachsehen, ob die Lizenzpruefung faellig ist (15 min, nach Fehlern 1/2/5 min)
         // und ob der Tag gewechselt hat (Protokoll aufraeumen)
@@ -224,7 +257,8 @@ internal sealed class TrayApp : ApplicationContext
               + (f.Kilometer != null ? $" · {f.Kilometer:N0} km" : "");
         return new FensterZustand(AktuellerStatus(), _einstellungen.AutomatikAktiv,
             _dienst.Verbunden, _einstellungen.VerbundenAls ?? "", auto,
-            !string.IsNullOrEmpty(_ueberwacher?.LetzteInseratUrl), _letzteMeldung, _probelauf, _lizenzSperre);
+            !string.IsNullOrEmpty(_ueberwacher?.LetzteInseratUrl), _letzteMeldung, _probelauf, _lizenzSperre,
+            _hinweise.ToList(), _ueberwacher?.LetztesNurGemerkt == true);
     }
 
     /// <summary>Status fuer Symbol, Fenster und Leiste: Lizenzsperre (A8) und fehlende Texterkennung (A9) gehen vor.</summary>
@@ -246,16 +280,40 @@ internal sealed class TrayApp : ApplicationContext
             Sprechblase(_ocrFehlt != null ? "Texterkennung fehlt – es kann nichts gelesen werden." : "Noch nicht bereit.", true, erzwingen: true);
             return;
         }
+        // Pruefung 08.10.2026 (1.5.9, I): der Knopf las den Bildschirm auch, wenn der Browser AutoPointer verdeckte (die
+        // Automatik prueft das, der Knopf nicht) — dann wurde der Browser "gelesen". Jetzt AutoPointer erst nach vorne
+        // holen (hier im Oberflaechen-Thread: AttachThreadInput braucht seine Eingabe-Warteschlange), kurz warten, lesen.
+        IntPtr haupt = _quelle?.Hauptfenster ?? IntPtr.Zero;
+        bool geholt = false;
+        if (haupt != IntPtr.Zero && !AutoPointerQuelle.ImVordergrund(haupt))
+        {
+            try
+            {
+                BrowserOeffner.ZurueckZu(haupt);
+                geholt = true;
+            }
+            catch (Exception ex) { Protokoll.Schreibe("AutoPointer nicht nach vorne geholt: " + ex.Message); }
+        }
         _ = Task.Run(async () =>
         {
-            try { await u.JetztVergleichenAsync(); }
+            try
+            {
+                if (geholt) await Task.Delay(VorneWarteMs);
+                await u.JetztVergleichenAsync();
+            }
             catch (Exception ex)
             {
+                // 1.5.9 (E): die .NET-Meldung (oft englisch) nur ins Protokoll
                 Protokoll.Schreibe("„Vergleichen“ fehlgeschlagen: " + ex);
-                _ui.Post(_ => Sprechblase("Vergleichen fehlgeschlagen: " + ex.Message, true, erzwingen: true), null);
+                _ui.Post(_ => Sprechblase(ex is TimeoutException
+                    ? "Die Texterkennung hängt gerade – bitte gleich noch einmal „Vergleichen“ drücken."
+                    : "Vergleichen hat nicht geklappt – bitte noch einmal „Vergleichen“ drücken.", true, erzwingen: true), null);
             }
         });
     }
+
+    /// <summary>1.5.9 (I): so lange nach dem Nach-vorne-Holen warten, bis AutoPointer neu gezeichnet ist.</summary>
+    internal const int VorneWarteMs = 300;
 
     /// <summary>Wunsch Ahmad 03.10.2026: das zuletzt angeklickte Auto in AutoSchnell oeffnen — der Server hat
     /// es schon ausgelesen, der Vergleich steht sofort mit Fotos da, "Kaufvertrag erstellen" ohne Link-Einfuegen.
@@ -271,7 +329,7 @@ internal sealed class TrayApp : ApplicationContext
         catch (Exception ex)
         {
             Protokoll.Schreibe("Kaufvertrag nicht geöffnet: " + ex);
-            Sprechblase("Kaufvertrag nicht geöffnet: " + ex.Message, true, erzwingen: true);
+            Sprechblase("Der Vertrag ließ sich nicht öffnen – bitte noch einmal „Vertrag“ drücken.", true, erzwingen: true);
         }
         finally { _vertragLaeuft = false; }
     }
@@ -289,9 +347,14 @@ internal sealed class TrayApp : ApplicationContext
         }
         if (string.IsNullOrEmpty(url))
         {
-            Sprechblase(fahrzeug == null
-                ? "Noch kein Auto verglichen – erst in AutoPointer ein Inserat anklicken."
-                : Ueberwacher.LinkHinweisFuer(fahrzeug), true, erzwingen: true);
+            if (fahrzeug == null)
+                Sprechblase("Noch kein Auto verglichen – erst in AutoPointer ein Inserat anklicken.", true, erzwingen: true);
+            // Pruefung 08.10.2026 (1.5.9, D): das Auto vom Programmstart wurde nur gemerkt (kein Server-Aufruf, also auch
+            // keine Inserat-Adresse) — nicht faelschlich "Inserat-ID nicht zu sehen" sagen
+            else if (_ueberwacher?.LetztesNurGemerkt == true)
+                Sprechblase(Ueberwacher.NochNichtVerglichen, true, erzwingen: true);
+            // 1.5.9 (C): kurz in die Sprechblase, die ganze Anleitung ins Fenster
+            else Sprechblase(Ueberwacher.VertragOhneAdresse, true, erzwingen: true, ausfuehrlich: Ueberwacher.LinkHinweisFuer(fahrzeug));
             return;
         }
         // Nr. 12: Kennung des Starts — die App meldet sie beim Uebernehmen an AutoSchnell zurueck
@@ -311,7 +374,20 @@ internal sealed class TrayApp : ApplicationContext
     private void ImBrowserOeffnen(string ziel)
     {
         try { BrowserOeffner.Oeffne(new[] { ziel }, _einstellungen.Browser); }
-        catch (Exception ex) { Sprechblase("Browser konnte nicht geöffnet werden: " + ex.Message, true, erzwingen: true); }
+        catch (Exception ex)
+        {
+            // 1.5.9 (E): keine englische .NET-Meldung in der Sprechblase
+            Protokoll.Schreibe("Browser konnte nicht geöffnet werden: " + ex);
+            Sprechblase("Der Browser ließ sich nicht öffnen – in den Einstellungen einen anderen Browser wählen.", true, erzwingen: true);
+        }
+    }
+
+    /// <summary>Pruefung 08.10.2026 (1.5.9, B): "Mehr ▾" → "Update auf … verfügbar …" — die Seite "Programme" in AutoSchnell
+    /// (dorthin verwies schon die einmalige Sprechblase), dort steht der Download.</summary>
+    private void UpdateOeffnen()
+    {
+        Protokoll.Schreibe("Update: öffne die Seite „Programme“ in AutoSchnell.");
+        ImBrowserOeffnen($"{_einstellungen.Server.TrimEnd('/')}/app/programme");
     }
 
     /// <summary>Pruefbericht 03.10.2026 (Nr. 12): Kommt von der App binnen 10 Sekunden keine Rueckmeldung (Fenster
@@ -407,14 +483,21 @@ internal sealed class TrayApp : ApplicationContext
                 Speichern(_einstellungen);
             }
             Protokoll.Schreibe($"Lizenz ok: {als} · PC {s.PcName}" + (s.AboBis != null ? $" · Abo bis {s.AboBis[..Math.Min(10, s.AboBis.Length)]}" : ""));
-            // Pruefbericht 03.10.2026 (Nr. 4): AutoSchnell bietet eine neuere Version an -> einmal je Programmstart sagen
+            // Pruefbericht 03.10.2026 (Nr. 4): AutoSchnell bietet eine neuere Version an -> einmal je Programmstart sagen.
+            // Pruefung 08.10.2026 (1.5.9, B): die Sprechblase verschwand und war dann weg — jetzt steht dauerhaft ein
+            // Eintrag "Update auf … verfügbar …" in "Mehr ▾" (oeffnet die Seite "Programme" mit dem Download).
             string eigene = Application.ProductVersion.Split('+')[0];
-            if (!_updateGemeldet && AutoSchnellDienst.NeuereVersion(s.AktuelleVersion, eigene))
+            bool neuer = AutoSchnellDienst.NeuereVersion(s.AktuelleVersion, eigene);
+            if (!_leiste.IsDisposed) _leiste.UpdateSetzen(neuer ? s.AktuelleVersion : null);
+            if (!_updateGemeldet && neuer)
             {
                 _updateGemeldet = true;
                 Protokoll.Schreibe($"Neue Version {s.AktuelleVersion} verfügbar (installiert: {eigene}).");
-                Sprechblase($"Neue Version {s.AktuelleVersion} verfügbar – in AutoSchnell unter „{s.ProgrammName ?? "Programme"}“ "
-                            + "herunterladen und starten (installiert: " + eigene + ").", false, erzwingen: true);
+                Sprechblase(UpdateText(s.AktuelleVersion!), false, erzwingen: true,
+                            ausfuehrlich: $"Neue Version {s.AktuelleVersion} verfügbar (installiert: {eigene}). Auf der Leiste "
+                                          + $"„Mehr ▾“ → „Update auf {s.AktuelleVersion} verfügbar …“ öffnet in AutoSchnell die Seite "
+                                          + $"„{s.ProgrammName ?? "Programme"}“: dort herunterladen und die Datei starten – sie ersetzt "
+                                          + "das laufende Programm.");
             }
             VerbindungAnzeigen();
             StatusAnzeigen(AktuellerStatus());
@@ -423,7 +506,8 @@ internal sealed class TrayApp : ApplicationContext
         {
             Protokoll.Schreibe("Lizenzprüfung: " + ex.Message);
             if (ex.NichtVerbunden) VerbindungVerloren(ex.Message);
-            else if (ex.KeinAbo || ex.Status == 403)
+            // 1.5.9 (G): nur ein echtes 403 von AutoSchnell sperrt — eines ohne JSON (Cloudflare) ist voruebergehend
+            else if (ex.KeinAbo || ex.Gesperrt)
             {
                 _lizenzFehler = 0;
                 LizenzSperreSetzen(ex.Message);
@@ -446,6 +530,10 @@ internal sealed class TrayApp : ApplicationContext
         }
         finally { _lizenzLaeuft = false; }
     }
+
+    /// <summary>1.5.9 (B/C): die Sprechblase zur neuen Version — kurz, mit dem Weg zum dauerhaften Menue-Eintrag. (rein, fuer Tests)</summary>
+    internal static string UpdateText(string version) =>
+        $"Neue Version {version} verfügbar – auf der Leiste „Mehr ▾“ → „Update auf {version} verfügbar …“.";
 
     private void LizenzSperreSetzen(string? grund)
     {
@@ -477,6 +565,13 @@ internal sealed class TrayApp : ApplicationContext
             var r = f.Ergebnis;
             string als = AutoSchnellDienst.KontoText(r.Name, r.Konto, r.Firma);
             _einstellungen.SchluesselSetzen(r.Schluessel, als);
+            // Pruefung 08.10.2026 (1.5.9, F): nach dem ersten Verbinden mit Windows starten — sonst oeffnete am naechsten
+            // Morgen nichts mehr, und niemand wusste warum. Ein bewusstes "aus" (einmal selbst umgestellt) bleibt aus.
+            if (_einstellungen.AutostartNachVerbinden())
+            {
+                _einstellungen.MitWindowsStarten = true;
+                Protokoll.Schreibe("Autostart nach dem ersten Verbinden eingeschaltet.");
+            }
             Speichern(_einstellungen);
             Protokoll.Schreibe($"Mit AutoSchnell verbunden: {als}");
             _lizenzFehler = 0;
@@ -484,7 +579,7 @@ internal sealed class TrayApp : ApplicationContext
             VerbindungAnzeigen();
             _ueberwacher?.NachVerbinden();      // das gerade angezeigte Auto gleich vergleichen
             StatusAnzeigen(AktuellerStatus());
-            Sprechblase($"Verbunden als {als}. Klick in AutoPointer ein Inserat an – die Vergleiche öffnen sich automatisch.", false, erzwingen: true);
+            Sprechblase($"Verbunden als {als}. In AutoPointer ein Auto anklicken – die Vergleiche öffnen sich.", false, erzwingen: true);
         }
         finally { _verbindenForm = null; }
     }
@@ -492,7 +587,7 @@ internal sealed class TrayApp : ApplicationContext
     private async Task TrennenAsync()
     {
         if (MessageBox.Show("Verbindung zu AutoSchnell trennen? Danach öffnet das Programm keine Vergleiche mehr, "
-                            + "bis es wieder mit einem Code verbunden wird.", "AutoPointer-Vergleich",
+                            + "bis es wieder mit einem Code verbunden wird.", Name,
                             MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
         await _dienst.AbmeldenAsync();
         _einstellungen.SchluesselSetzen(null, null);
@@ -515,7 +610,9 @@ internal sealed class TrayApp : ApplicationContext
             _fenster.Aktualisieren();
             if (erstesMal)
             {
-                Sprechblase(fehler, true, erzwingen: true);
+                // 1.5.9 (C): kurz in die Sprechblase, die Anleitung ganz ins Fenster (zeigt der Systemcheck auch)
+                Sprechblase("Windows-Texterkennung fehlt – es wird nichts gelesen. Anleitung: „Mehr ▾“ → „Status und Hilfe“.",
+                            true, erzwingen: true, ausfuehrlich: fehler);
                 // Nr. 8: ohne Texterkennung geht nichts — gleich den Systemcheck zeigen (sagt, was fehlt und was zu tun ist)
                 _ui.Post(async _ => await SystemcheckZeigenAsync(), null);
             }
@@ -542,7 +639,7 @@ internal sealed class TrayApp : ApplicationContext
                                        new DienstVermittler(() => _dienst),
                                        letzterKlick: () => klicks.LetzterKlick) { Probelauf = _probelauf, LizenzGesperrt = _lizenzSperre != null };
         _ueberwacher.StatusGeaendert += s => _ui.Post(_ => StatusAnzeigen(AktuellerStatus()), null);
-        _ueberwacher.Meldung += (t, f) => _ui.Post(_ => Sprechblase(t, f), null);
+        _ueberwacher.Meldung += h => _ui.Post(_ => Sprechblase(h.Text, h.Fehler, ausfuehrlich: h.Ausfuehrlich, blase: h.Sprechblase), null);
         _ueberwacher.VerbindungVerloren += m => _ui.Post(_ => VerbindungVerloren(m), null);
         _ueberwacher.FahrzeugGewechselt += _ => _zwischenablageStand = Native.GetClipboardSequenceNumber();
         _ueberwacher.Neustart();
@@ -576,7 +673,8 @@ internal sealed class TrayApp : ApplicationContext
         if (_einstellungen.AutomatikAktiv) _ueberwacher?.Neustart();
         AutomatikAnzeigen();
         Protokoll.Schreibe(_einstellungen.AutomatikAktiv ? "Automatik AN." : "Automatik AUS.");
-        Sprechblase(_einstellungen.AutomatikAktiv ? "Automatik AN – Vergleiche öffnen sich beim Anklicken." : "Automatik AUS – es öffnet sich nichts.", false, erzwingen: true);
+        Sprechblase(_einstellungen.AutomatikAktiv ? "Automatik AN – Vergleiche öffnen sich beim Anklicken." : "Automatik AUS – es öffnet sich nichts.",
+                    false, erzwingen: true, merken: false);
         _fenster.Aktualisieren();
     }
 
@@ -606,19 +704,39 @@ internal sealed class TrayApp : ApplicationContext
             _ => "aktiv",
         };
         var letztes = _ueberwacher?.LetztesFahrzeug;
-        string zeile = $"AutoPointer-Vergleich{(_probelauf ? " (Probelauf)" : "")}: {text}";
+        string zeile = $"{Name}{(_probelauf ? " (Probelauf)" : "")}: {text}";
         if (letztes != null) zeile += $"\nZuletzt: {letztes.Marke} {letztes.Modell} {letztes.EzText}";
         _symbol.Text = zeile.Length > 127 ? zeile[..127] : zeile;
     }
 
-    private void Sprechblase(string text, bool fehler, bool erzwingen = false)
+    /// <param name="ausfuehrlich">1.5.9 (C): die ganze Erklaerung fuer "Letzte Hinweise" im Fenster (die Sprechblase
+    /// bekommt hoechstens 150 Zeichen — Windows schneidet bei ~255 ab, und die Anweisungen standen am Ende).</param>
+    /// <param name="blase">false = nur ins Fenster, keine Sprechblase.</param>
+    /// <param name="merken">false = nicht unter "Letzte Hinweise" (reine Bestaetigungen wie "Automatik AN").</param>
+    private void Sprechblase(string text, bool fehler, bool erzwingen = false, string? ausfuehrlich = null,
+                             bool blase = true, bool merken = true)
     {
-        _letzteMeldung = $"{DateTime.Now:HH:mm} {text}";      // bleibt im Fenster stehen, die Sprechblase verschwindet
+        string kurz = Hinweis.Kuerzen(text);
+        if (ausfuehrlich == null && kurz != text.Trim()) ausfuehrlich = text.Trim();
+        _letzteMeldung = $"{DateTime.Now:HH:mm} {kurz}";      // bleibt im Fenster stehen, die Sprechblase verschwindet
+        if (merken) HinweisMerken(ausfuehrlich ?? kurz);
         StatusAnzeigen(AktuellerStatus());
+        if (!_fenster.IsDisposed && _fenster.Visible) _fenster.Aktualisieren();
+        if (!blase) return;
         if (!erzwingen && !_einstellungen.HinweiseAnzeigen) return;
         if (!erzwingen && Environment.TickCount64 - _letzteSprechblase < 3000) return;    // A10: monoton
         _letzteSprechblase = Environment.TickCount64;
-        _symbol.ShowBalloonTip(4000, "AutoPointer-Vergleich", text, fehler ? ToolTipIcon.Warning : ToolTipIcon.Info);
+        _symbol.ShowBalloonTip(4000, Name, kurz, fehler ? ToolTipIcon.Warning : ToolTipIcon.Info);
+    }
+
+    /// <summary>1.5.9 (C): die letzten <see cref="HinweiseImFenster"/> Hinweise mit Uhrzeit, der neueste zuerst; derselbe
+    /// Text gleich noch einmal ersetzt den alten (nur neue Uhrzeit).</summary>
+    private void HinweisMerken(string text)
+    {
+        string eintrag = $"{DateTime.Now:HH:mm} {text}";
+        if (_hinweise.First is { } erster && erster.Value[(Math.Min(6, erster.Value.Length))..] == text) _hinweise.RemoveFirst();
+        _hinweise.AddFirst(eintrag);
+        while (_hinweise.Count > HinweiseImFenster) _hinweise.RemoveLast();
     }
 
     private void EinstellungenZeigen()
@@ -631,7 +749,8 @@ internal sealed class TrayApp : ApplicationContext
             if (f.ShowDialog() != DialogResult.OK) return;
             bool warAn = _einstellungen.AutomatikAktiv;
             // Paket 2 (A11): nur die Dialogfelder uebernehmen — Schluessel/VerbundenAls/Server koennen sich
-            // waehrend des offenen Dialogs geaendert haben (Lizenzpruefung, 401)
+            // waehrend des offenen Dialogs geaendert haben (Lizenzpruefung, 401). 1.5.9 (F): merkt sich auch, ob der
+            // Sucher "mit Windows starten" selbst umgestellt hat.
             f.AnwendenAuf(_einstellungen);
             Speichern(_einstellungen);
             if (!warAn && _einstellungen.AutomatikAktiv) _ueberwacher?.Neustart();
@@ -648,8 +767,9 @@ internal sealed class TrayApp : ApplicationContext
         try { neu.Speichern(); }
         catch (Exception ex)
         {
-            Protokoll.Schreibe("Einstellungen nicht gespeichert: " + ex.Message);
-            Sprechblase("Einstellungen nicht gespeichert: " + ex.Message, true, erzwingen: true);
+            // 1.5.9 (E): die .NET-Meldung nur ins Protokoll
+            Protokoll.Schreibe("Einstellungen nicht gespeichert: " + ex);
+            Sprechblase("Einstellungen konnten nicht gespeichert werden – bitte noch einmal versuchen.", true, erzwingen: true);
         }
         _einstellungen = neu;
     }
@@ -668,7 +788,7 @@ internal sealed class TrayApp : ApplicationContext
         _systemcheckLaeuft = true;
         try
         {
-            Sprechblase("Systemcheck läuft …", false, erzwingen: true);
+            Sprechblase("Systemcheck läuft …", false, erzwingen: true, merken: false);
             var punkte = await Systemcheck.PruefenAsync(_einstellungen, _dienst);
             string text = Systemcheck.Text(punkte);
             Protokoll.Schreibe("Systemcheck:\n" + text);
@@ -677,12 +797,64 @@ internal sealed class TrayApp : ApplicationContext
                 fehler ? "Systemcheck – bitte beheben" : "Systemcheck – alles bereit",
                 MessageBoxButtons.OK, fehler ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
         }
-        catch (Exception ex) { Protokoll.Schreibe("Systemcheck fehlgeschlagen: " + ex.Message); }
+        catch (Exception ex)
+        {
+            Protokoll.Schreibe("Systemcheck fehlgeschlagen: " + ex);
+            Sprechblase("Der Systemcheck hat nicht geklappt – bitte noch einmal versuchen.", true, erzwingen: true);
+        }
         finally { _systemcheckLaeuft = false; }
     }
 
+    /// <summary>Pruefung 08.10.2026 (1.5.9, F): "Beenden" fragt erst — wer das Programm aus Versehen beendet, bekam sonst
+    /// einfach keine Vergleiche mehr und wusste nicht, wie es wieder angeht.</summary>
+    internal const string BeendenFrage =
+        "Danach öffnen sich keine Vergleiche mehr. Wieder starten: Startmenü → AutoSchnell Vergleich.";
+
+    private bool _frageOffen;
+
+    private void BeendenFragen()
+    {
+        if (_beendet || _frageOffen) return;
+        _frageOffen = true;
+        try
+        {
+            var beenden = new TaskDialogButton("Beenden");
+            var abbrechen = new TaskDialogButton("Abbrechen");
+            var seite = new TaskDialogPage
+            {
+                Caption = Name,
+                Heading = $"{Name} beenden?",
+                Text = BeendenFrage,
+                Icon = TaskDialogIcon.Warning,
+                Buttons = { beenden, abbrechen },
+                DefaultButton = abbrechen,
+                AllowCancel = true,
+            };
+            TaskDialogButton antwort;
+            try { antwort = TaskDialog.ShowDialog(seite, TaskDialogStartupLocation.CenterScreen); }
+            catch (Exception ex)
+            {
+                // ohne TaskDialog (sehr alte Darstellung): dieselbe Frage als einfache Meldung
+                Protokoll.Schreibe("Rückfrage beim Beenden ohne TaskDialog: " + ex.Message);
+                antwort = MessageBox.Show(BeendenFrage + "\n\nJetzt beenden?", Name, MessageBoxButtons.OKCancel,
+                                          MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.OK ? beenden : abbrechen;
+            }
+            if (antwort != beenden)
+            {
+                Protokoll.Schreibe("Beenden abgebrochen.");
+                return;
+            }
+        }
+        finally { _frageOffen = false; }
+        Beenden();
+    }
+
+    /// <summary>Wirklich beenden — ohne Rueckfrage (nach "Beenden" in der Rueckfrage oder wenn eine neuere Version
+    /// startet, 1.5.9 B).</summary>
     private void Beenden()
     {
+        if (_beendet) return;
+        _beendet = true;
         Protokoll.Schreibe("Beendet.");
         SystemEvents.PowerModeChanged -= PowerModeGeaendert;
         NetworkChange.NetworkAvailabilityChanged -= NetzGeaendert;
@@ -695,6 +867,9 @@ internal sealed class TrayApp : ApplicationContext
         _hotkey.DestroyHandle();
         _symbol.Visible = false;
         _symbol.Dispose();
+        // 1.5.9 (B): Version und Signale freigeben — ein zweiter Start sieht dann kein laufendes Programm mehr
+        try { _versionVeroeffentlicht?.Dispose(); } catch (Exception) { }
+        try { _beendenSignal.Dispose(); } catch (Exception) { }
         ExitThread();
     }
 
@@ -739,4 +914,7 @@ internal sealed class DienstVermittler : IVergleichsDienst
     public bool Verbunden => _dienst().Verbunden;
     public Task<VergleichAntwort> VergleichAsync(Fahrzeug f, bool probelauf) => _dienst().VergleichAsync(f, probelauf);
     public void Vorwaermen() => _dienst().Vorwaermen();
+    /// <summary>Pruefung 08.10.2026 (1.5.9, A): in 1.5.8 fehlte hier das Weiterreichen der Vorgangs-Nachfrage — die
+    /// Standard-Umsetzung der Schnittstelle sagte immer "nicht pruefbar", und das Programm oeffnete jedes Mal selbst.</summary>
+    public Task<bool?> VorgangSelbstAsync(string vorgangId) => _dienst().VorgangSelbstAsync(vorgangId);
 }

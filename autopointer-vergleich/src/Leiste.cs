@@ -29,7 +29,11 @@ internal sealed class Leiste : Form
     private Point? _ziehVersatz;
 
     public event Action? Aktivieren, Stoppen, JetztVergleichen, VertragOeffnen, FensterOeffnen, Beenden,
-        LetztenOeffnen, EinstellungenOeffnen, SystemcheckOeffnen, Verbinden, Trennen;
+        LetztenOeffnen, EinstellungenOeffnen, SystemcheckOeffnen, Verbinden, Trennen, UpdateOeffnen;
+    /// <summary>1.5.9 (B): "Update auf … verfügbar …" — erst da, wenn AutoSchnell eine neuere Version anbietet.</summary>
+    private ToolStripMenuItem? _update;
+    private ToolStripSeparator? _updateTrenner;
+    private const string MehrTipp = "Mehr: letzten Vergleich, Einstellungen, Systemcheck, Verbindung, Beenden";
     public event Action<string>? EckeGewechselt;
     /// <summary>Leiste per Griff-Punkt verschoben (Stelle) bzw. zurueck in die Ecke (null).</summary>
     public event Action<Point?>? PositionGeaendert;
@@ -75,7 +79,7 @@ internal sealed class Leiste : Form
 
         _tipps.SetToolTip(_vergleichen, "Vergleich für das Auto, das AutoPointer gerade zeigt, jetzt öffnen");
         _tipps.SetToolTip(_vertrag, "Kaufvertrag: das zuletzt angeklickte Auto in AutoSchnell öffnen");
-        _tipps.SetToolTip(_mehr, "Mehr: letzten Vergleich, Einstellungen, Systemcheck, Verbindung, Beenden");
+        _tipps.SetToolTip(_mehr, MehrTipp);
         _tipps.SetToolTip(_griff, "Gedrückt halten und ziehen: Leiste verschieben\n(Rechtsklick: zurück in eine Ecke)");
 
         _menue = new ContextMenuStrip();
@@ -261,6 +265,35 @@ internal sealed class Leiste : Form
     /// <summary>Die Eintraege des Mehr-Menues (fuer Tests).</summary>
     internal IReadOnlyList<string> MenueEintraege() =>
         _menue.Items.OfType<ToolStripMenuItem>().Select(i => i.Text ?? "").ToList();
+
+    /// <summary>Pruefung 08.10.2026 (1.5.9, B): bietet AutoSchnell eine neuere Version an, steht dauerhaft ganz oben im
+    /// Mehr-Menue "Update auf {version} verfügbar …" (vorher nur eine Sprechblase, die verschwand). null = keiner.</summary>
+    public void UpdateSetzen(string? version)
+    {
+        if (string.IsNullOrWhiteSpace(version))
+        {
+            if (_update == null) return;
+            _menue.Items.Remove(_update);
+            if (_updateTrenner != null) _menue.Items.Remove(_updateTrenner);
+            _update.Dispose();
+            _updateTrenner?.Dispose();
+            _update = null;
+            _updateTrenner = null;
+            _tipps.SetToolTip(_mehr, MehrTipp);
+            return;
+        }
+        string text = $"Update auf {version.Trim()} verfügbar …";
+        if (_update == null)
+        {
+            _update = new ToolStripMenuItem(text, null, (_, _) => UpdateOeffnen?.Invoke());
+            _update.Font = new Font(_update.Font, FontStyle.Bold);
+            _updateTrenner = new ToolStripSeparator();
+            _menue.Items.Insert(0, _updateTrenner);
+            _menue.Items.Insert(0, _update);
+        }
+        else _update.Text = text;
+        _tipps.SetToolTip(_mehr, $"Mehr: Update auf {version.Trim()}, letzter Vergleich, Einstellungen, Systemcheck, Verbindung, Beenden");
+    }
 
     public void Aktualisieren()
     {

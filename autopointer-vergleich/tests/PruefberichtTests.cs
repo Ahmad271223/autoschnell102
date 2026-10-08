@@ -23,6 +23,7 @@ public class PruefberichtTests
     {
         public bool Verbunden => true;
         public bool MarkeUnbekannt;
+        public Task<bool?> VorgangSelbstAsync(string vorgangId) => Task.FromResult<bool?>(false);
         public Task<VergleichAntwort> VergleichAsync(Fahrzeug f, bool probelauf)
         {
             if (MarkeUnbekannt)
@@ -37,7 +38,7 @@ public class PruefberichtTests
     private sealed class Browser : IOeffner
     {
         public readonly List<IReadOnlyList<Vergleich>> Aufrufe = new();
-        public void Oeffne(IReadOnlyList<Vergleich> v, Einstellungen e, IntPtr ap) => Aufrufe.Add(v);
+        public void Oeffne(IReadOnlyList<Vergleich> v, Einstellungen e, IntPtr ap, BrowserWahl browser) => Aufrufe.Add(v);
     }
 
     private readonly Quelle _q = new();
@@ -51,7 +52,7 @@ public class PruefberichtTests
     {
         Protokoll.DateiAktiv = false;
         _u = new Ueberwacher(_q, () => new Einstellungen(), _b, _s, () => _jetzt, t => { _jetzt += t; return Task.CompletedTask; });
-        _u.Meldung += (t, _) => _meldungen.Add(t);
+        _u.Meldung += h => _meldungen.Add(h.Text);
         _u.Neustart();
     }
 
