@@ -3574,6 +3574,44 @@ async def folge_mail_senden(contract_id: str, body: FolgeMailIn,
         contract_id, str(c.get("version") or 1), art, empfaenger.lower(), betreff, text]).encode("utf-8")).hexdigest()[:24]
     schluessel = (body.idempotency_key or "").strip() or f"auto-{inhalt_hash}"
     mail_zaehler: Optional[str] = None
+
+    # Gleicher Inhalt/Fassung/Empfaenger ist serverseitig EIN Versand.
+    schon_versendet = next((
+        e for e in (c.get("send_status") or [])
+        if isinstance(e, dict)
+        and e.get("channel") == "email"
+        and e.get("art") == art
+        and (e.get("recipient") or "").strip().lower() == empfaenger.lower()
+        and e.get("anfrage_hash") == inhalt_hash
+        and int(e.get("version") or 0) == int(c.get("version") or 1)
+        and e.get("zustellung") in ("versendet", "mock")
+    ), None)
+    if schon_versendet and not body.erneut:
+        raise HTTPException(409, {
+            "code": "bereits_versendet",
+            "msg": "Diese Mail wurde bereits verschickt. Wirklich noch einmal senden?",
+        })
+
+    # Ein frueherer unklarer Versuch derselben Art/desselben Empfaengers
+    # darf auch mit einem NEUEN UI-Key nicht still uebergangen werden.
+    alter_unklar = next((
+        e for e in (c.get("send_status") or [])
+        if isinstance(e, dict)
+        and e.get("channel") == "email"
+        and e.get("art") == art
+        and (e.get("recipient") or "").strip().lower() == empfaenger.lower()
+        and e.get("zustellung") in ("laeuft", "unklar")
+        and _zustellung_haengt(e)
+    ), None)
+    if alter_unklar and alter_unklar.get("idempotency_key") != schluessel:
+        if not body.erneut:
+            raise HTTPException(409, {
+                "code": "frueherer_versand_unklar",
+                "msg": ("Ein früherer Versand dieser Mail hatte kein eindeutiges Ergebnis — "
+                        "sie ist vielleicht schon angekommen. Trotzdem bewusst noch einmal senden?"),
+            })
+        await _haengenden_versand_abloesen(contract_id, bereich, alter_unklar)
+
     if schluessel:
         # Rollenpruefung 22.09.2026 (RP-434): Ein frueher gescheiterter
         # Versuch mit DIESEM Schluessel (Altbestand: zustellung
@@ -3587,9 +3625,22 @@ async def folge_mail_senden(contract_id: str, body: FolgeMailIn,
                                        "zustellung": "fehlgeschlagen"}}})
         # Doppelklick-Schutz wie beim Vertragsversand: derselbe Schluessel
         # legt garantiert nur EINEN Eintrag an.
+        frisch_ab = (datetime.now(timezone.utc)
+                     - timedelta(seconds=ZUSTELLUNG_HAENGT_NACH_SEK)).isoformat()
+        sperren = [{"send_status": {"$not": {"$elemMatch": {
+            "channel": "email", "art": art, "recipient": empfaenger,
+            "zustellung": "laeuft",
+            "$or": [{"sent_at": {"$gt": frisch_ab}},
+                    {"wiederaufnahme_am": {"$gt": frisch_ab}}]}}}}]
+        if not body.erneut:
+            sperren.append({"send_status": {"$not": {"$elemMatch": {
+                "channel": "email", "art": art, "recipient": empfaenger,
+                "anfrage_hash": inhalt_hash, "version": int(c.get("version") or 1),
+                "zustellung": {"$in": ["versendet", "mock"]}}}}})
         res = await db.generated_pdfs.update_one(
             {"id": contract_id, **bereich,
-             "send_status.idempotency_key": {"$ne": schluessel}},
+             "send_status.idempotency_key": {"$ne": schluessel},
+             "$and": sperren},
             {"$push": {"send_status": {"$each": [{
                 "idempotency_key": schluessel, "channel": "email",
                 "art": art, "recipient": empfaenger, "subject": betreff,
