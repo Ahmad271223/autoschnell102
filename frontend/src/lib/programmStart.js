@@ -150,7 +150,7 @@ export function startZieleVerfolgen(navigieren, {
     // Vergleich aber scheitert.
     zielUebernehmen(ziel, {
       fenster, navigieren, beschaeftigt, nachfragen,
-      uebernommen: () => { if (!start) melden(); },
+      uebernommen: () => {},
     });
   });
   return true;
