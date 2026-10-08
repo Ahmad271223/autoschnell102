@@ -9,12 +9,12 @@ Aufruf (Server, im Repo-Ordner):
     docker compose cp AutoSchnell-Vergleich.exe backend:/tmp/AutoSchnell-Vergleich.exe
     docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.0.0
 
-Wer das Werkzeug sieht, steht NICHT hier, sondern in AUTOPOINTER_VERGLEICH_KUNDEN
-(Standard 10001,10002).
+Die Werkzeuge sind Bestandteil von AutoSchnell Pro. Die Berechtigung wird
+serverseitig ueber die aktive Produktstufe des Kontos geprueft — nicht ueber
+Kundennummern oder dieses Upload-Skript.
 
 Browser-Helfer (04.10.2026): dieselbe Datei-Pruefung als ZIP mit manifest.json —
     docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Helfer.zip --werkzeug browser-helfer --version 2.0.0
-Freigabe in BROWSER_HELFER_KUNDEN.
 
 Exit 0 = hochgeladen, 2 = Datei fehlt/ungueltig.
 """
