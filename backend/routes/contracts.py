@@ -43,6 +43,7 @@ import cleanup_service as _cleanup
 from lifecycle import try_set_lifecycle
 from pdf_service import DIGITAL_NACHTRAEGLICH, generate_contract_pdf, digitaler_vertragstext
 from rate_limiter import SlidingWindowRateLimiter
+from konfig import zahl_env
 
 router = APIRouter()
 
@@ -2554,10 +2555,10 @@ UNKLAR_WIEDERAUFNAHME_MAX_S = 23 * 3600
 # einen Browser-Timeout, obwohl die Mail spaeter noch angenommen werden kann.
 # Bei Ablauf bleibt der Versand "unklar" und wird nur mit DEMSELBEN
 # Idempotency-Key wiederaufgenommen.
-VERSAND_PROVIDER_MAX_SEK = int(os.environ.get("VERSAND_PROVIDER_MAX_SEK", "75"))
+VERSAND_PROVIDER_MAX_SEK = zahl_env("VERSAND_PROVIDER_MAX_SEK", 75, unten=10, oben=85)
 # Die Belegkopie an den Sucher ist Zusatz und darf die bereits erfolgreiche
 # Zustellung an den Verkaeufer niemals in einen sichtbaren Fehler verwandeln.
-BELEGKOPIE_MAX_SEK = int(os.environ.get("BELEGKOPIE_MAX_SEK", "8"))
+BELEGKOPIE_MAX_SEK = zahl_env("BELEGKOPIE_MAX_SEK", 8, unten=1, oben=15)
 
 
 def _auto_schluessel(contract_id: str, c: dict, body) -> str:
