@@ -3529,20 +3529,26 @@ async def _folge_mail_vorhanden(contract_id: str, bereich: dict,
     if eintrag is None:
         return {"zustellung": "laeuft"}
     zustellung = eintrag.get("zustellung") or ""
-    if zustellung != "laeuft":
+    if zustellung not in ("laeuft", "unklar"):
         return {"zustellung": zustellung}
-    if _zustellung_haengt(eintrag):
-        import email_service
+
+    import email_service
+    if zustellung == "unklar" or _zustellung_haengt(eintrag):
         if not email_service.resend_aktiv():
             # SMTP hat keinen providerseitigen Idempotency-Key. Der erste
             # Versuch koennte angekommen sein; niemals automatisch erneut.
             return {"zustellung": "unklar"}
+        # Resend: derselbe Provider-Key darf sicher wiederaufgenommen werden.
+        # Compare-and-Swap verhindert, dass zwei Klicks denselben unklaren
+        # Eintrag gleichzeitig neu beanspruchen.
         res = await db.generated_pdfs.update_one(
             {"id": contract_id, **bereich,
              "send_status": {"$elemMatch": {
-                 "idempotency_key": schluessel, "zustellung": "laeuft",
+                 "idempotency_key": schluessel,
+                 "zustellung": {"$in": ["laeuft", "unklar"]},
                  "wiederaufnahme_am": eintrag.get("wiederaufnahme_am")}}},
-            {"$set": {"send_status.$.wiederaufnahme_am": now_iso()}})
+            {"$set": {"send_status.$.zustellung": "laeuft",
+                      "send_status.$.wiederaufnahme_am": now_iso()}})
         if res.modified_count:
             return None
     return {"zustellung": "laeuft"}
