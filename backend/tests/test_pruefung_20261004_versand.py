@@ -216,6 +216,55 @@ def test_22_zweiter_versand_nach_dem_neuladen_nur_mit_bestaetigung(welt, monkeyp
     assert _status(w, cid)[-1]["kopie"] == "fehlgeschlagen"
 
 
+def test_14_belegkopie_fehler_macht_erfolgreichen_hauptversand_nicht_kaputt(welt, monkeypatch):
+    C = _modul("routes.contracts")
+    w = welt
+    import email_service
+    import provider_fetch
+    monkeypatch.setattr(provider_fetch, "MOCK_PROVIDER_FETCH", False)
+    monkeypatch.setattr(email_service, "email_configured", lambda: True)
+
+    async def _haupt(*a, **k):
+        return True, "resend:haupt-ok"
+
+    async def _kopie_kaputt(*a, **k):
+        raise RuntimeError("Kopiedienst kaputt")
+
+    monkeypatch.setattr(email_service, "send_email_mit_beleg", _haupt)
+    monkeypatch.setattr(email_service, "send_email", _kopie_kaputt)
+    cid = f"cv14kopie_{w.s}"
+    w.run(w.db.generated_pdfs.insert_one(_vertrag(w, cid, w.a)))
+    out = w.run(C.send_contract(cid, _mail(C, w, f"kopie-{w.s}"), w.a))
+    assert out["zustellung"] == "versendet"
+    assert out["beleg"] == "resend:haupt-ok"
+    assert out["kopie"] == "unklar"
+    assert _status(w, cid)[-1]["zustellung"] == "versendet"
+    assert _status(w, cid)[-1]["kopie"] == "unklar"
+
+
+def test_22_provider_timeout_wird_unklar_vor_browser_timeout(welt, monkeypatch):
+    C = _modul("routes.contracts")
+    w = welt
+    import email_service
+    import provider_fetch
+    monkeypatch.setattr(provider_fetch, "MOCK_PROVIDER_FETCH", False)
+    monkeypatch.setattr(email_service, "email_configured", lambda: True)
+    monkeypatch.setattr(C, "VERSAND_PROVIDER_MAX_SEK", 0.01)
+
+    async def _haengt(*a, **k):
+        await asyncio.sleep(0.2)
+        return True, "zu-spaet"
+
+    monkeypatch.setattr(email_service, "send_email_mit_beleg", _haengt)
+    cid = f"cv22timeout_{w.s}"
+    w.run(w.db.generated_pdfs.insert_one(_vertrag(w, cid, w.a)))
+    e = w.run(_erwarte(502, C.send_contract(cid, _mail(C, w, f"timeout-{w.s}"), w.a)))
+    assert e.detail["code"] == "versand_unklar"
+    eintraege = _status(w, cid)
+    assert len(eintraege) == 1
+    assert eintraege[0]["zustellung"] == "unklar"
+
+
 def test_22_neue_fassung_darf_ohne_rueckfrage(welt, monkeypatch):
     C = _modul("routes.contracts")
     w = welt
