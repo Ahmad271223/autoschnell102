@@ -349,9 +349,9 @@ export default function SendDialog({ open, contract, onClose }) {
         } else {
           toast.warning("Dein Browser hat das WhatsApp-Fenster blockiert — bitte unten auf „WhatsApp jetzt öffnen“ tippen.");
         }
-        // Der Server hat den Versand vermerkt — auch wenn der Browser das
-        // WhatsApp-Fenster blockiert hat und der Nutzer es gleich per Knopf
-        // oeffnet. Deshalb hier fragen, nicht nur im geoeffnet-Fall.
+        // Der Server hat die WhatsApp-Vorbereitung vermerkt — ob der Nutzer
+        // im Chat wirklich auf "Senden" drueckt, kann AutoSchnell nicht
+        // bestaetigen. Der Beweis-Dialog bezieht sich nur auf das Inserat.
         if (contract.vehicle_id && !beweisFertig) setBeweisFrage(true);
       } else {
         if (fenster && !fenster.closed) { try { fenster.close(); } catch { /* egal */ } }
@@ -464,7 +464,8 @@ export default function SendDialog({ open, contract, onClose }) {
           vermerkPruefen(data, "whatsapp");
         } catch (err) {
           const d = err?.response?.data?.detail;
-          if (err?.response?.status === 409 && d?.code === "fassung_veraltet") {
+          if (err?.response?.status === 409
+              && (d?.code === "fassung_veraltet" || d?.code === "fassung_unbekannt")) {
             // U-73: Geteilt wurde eine inzwischen veraltete Fassung (neuer
             // Termin, neuer Preis) — kein Vermerk; die neue Datei wird
             // jetzt geladen, der Nutzer teilt noch einmal.
