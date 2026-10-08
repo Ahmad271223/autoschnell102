@@ -143,7 +143,7 @@ export default function FolgeMailDialog({ open, contract, onClose }) {
     setArt(neu);
   };
 
-  const senden = async () => {
+  const senden = async (erneut = false) => {
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(empfaenger.trim())) {
       toast.error("Bitte eine gültige E-Mail-Adresse angeben.");
       return;
@@ -165,7 +165,7 @@ export default function FolgeMailDialog({ open, contract, onClose }) {
     try {
       const { data } = await api.post(`/contracts/${contract.id}/folge-mail`, {
         art, recipient: empfaenger.trim(), subject: betreff, message: text,
-        idempotency_key: schluessel.current,
+        idempotency_key: schluessel.current, ...(erneut ? { erneut: true } : {}),
       });
       // Rollenprüfung 22.09.2026 (RP-434): "läuft noch" ist nicht "verschickt".
       if (data?.bereits_gesendet && data?.zustellung === "laeuft") {
@@ -180,6 +180,28 @@ export default function FolgeMailDialog({ open, contract, onClose }) {
       versuche.current[art] = undefined;
       entwuerfe.current[art] = undefined;
     } catch (e) {
+      const d = e?.response?.data?.detail;
+      if (e?.response?.status === 409
+          && (d?.code === "frueherer_versand_unklar" || d?.code === "bereits_versendet")
+          && !erneut) {
+        const standard = d?.code === "bereits_versendet"
+          ? "Diese Mail wurde bereits verschickt. Wirklich noch einmal senden?"
+          : "Der frühere Versand hatte kein eindeutiges Ergebnis. Trotzdem noch einmal senden?";
+        if (window.confirm(d.msg || standard)) {
+          // Bewusster Neuversand bekommt einen neuen UI-Key. Bei SMTP ist
+          // das zwingend; bei Resend ist es hier ebenfalls korrekt, weil
+          // ausdrücklich eine zweite Mail gewollt ist.
+          schluessel.current = neuerSchluessel();
+          setSendet(false);
+          await senden(true);
+        }
+        return;
+      }
+      if (d?.code === "versand_unklar") {
+        toast.warning(d.msg || "Der Versand hat kein eindeutiges Ergebnis. Bitte nicht blind erneut senden.",
+                      { duration: 30000 });
+        return;
+      }
       toast.error(errMsg(e));
     } finally {
       setSendet(false);
