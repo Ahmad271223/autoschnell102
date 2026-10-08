@@ -9,8 +9,10 @@ namespace AutoPointerVergleich.Tests;
 public class SteuerFensterTests
 {
     private static FensterZustand Zustand(Status s = Status.Aktiv, bool an = true, bool verbunden = true,
-                                          string? auto = "Volkswagen Beetle · EZ 06/2017 · 41.000 km") =>
-        new(s, an, verbunden, "Konto 10002 · Norden Autoankauf", auto, true, null, false);
+                                          string? auto = "Volkswagen Beetle · EZ 06/2017 · 41.000 km",
+                                          bool vertragBereit = true) =>
+        new(s, an, verbunden, "Konto 10002 · Norden Autoankauf", auto, true,
+            vertragBereit, null, false);
 
     [Fact]
     public void Jeder_Zustand_hat_eine_klare_Aussage()
@@ -59,6 +61,14 @@ public class SteuerFensterTests
                 Assert.True(knoepfe["Beenden"].Enabled);
                 Assert.True(knoepfe["Verbindung trennen"].Enabled);
                 Bild(f, "steuerfenster-aktiv.png");
+
+                // P1 08.10.2026: waehrend AutoPointer bereits auf das naechste
+                // Auto gewechselt hat, bleibt der Vertragsknopf gesperrt, bis
+                // dieses Fahrzeug sicher verarbeitet wurde.
+                zustand = Zustand(vertragBereit: false);
+                f.Aktualisieren();
+                knoepfe = Alle<Button>(f).ToDictionary(b => b.Text.Trim(), b => b);
+                Assert.False(knoepfe["Kaufvertrag: Auto in AutoSchnell öffnen"].Enabled);
 
                 zustand = Zustand(an: false);
                 f.Aktualisieren();
