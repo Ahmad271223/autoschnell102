@@ -632,6 +632,37 @@ public class UeberwacherTests
     }
 
     [Fact]
+    public async Task Automatischer_Wechsel_waehrend_Serveranfrage_erbt_nicht_den_alten_Klick()
+    {
+        var u = MitKlicks();
+        await TickK(u);
+
+        // A wird wirklich angeklickt.
+        _klickMs = JetztMs;
+        _q.Zeige(Bentley, 1);
+
+        // Waehrend A beim Server verarbeitet wird, zeigt AutoPointer B von
+        // selbst. Kein neuer Klick fuer B.
+        _server.WaehrendDesVergleichs = () =>
+        {
+            _q.Zeige(Passat, 2);
+            _server.WaehrendDesVergleichs = null;
+        };
+        for (int i = 0; i < 5; i++) await TickK(u);
+
+        Assert.Empty(_b.Aufrufe);          // A verworfen, B nicht automatisch
+        Assert.False(u.VertragBereit);
+        Assert.Null(u.LetzteInseratUrl);
+
+        // Erst der echte Klick auf das schon sichtbare B gibt es frei.
+        _klickMs = JetztMs;
+        for (int i = 0; i < 5; i++) await TickK(u);
+        Assert.Single(_b.Aufrufe);
+        Assert.Contains("VW-Passat_Variant-2006", _b.Aufrufe[0][0].Url);
+        Assert.True(u.VertragBereit);
+    }
+
+    [Fact]
     public async Task Klick_kurz_vor_der_Aenderung_zaehlt_ein_alter_nicht()
     {
         var u = MitKlicks();
