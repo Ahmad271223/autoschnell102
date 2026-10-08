@@ -30,30 +30,19 @@ WID = wz.AUTOPOINTER
 
 
 # ------------------------------------------------------------ Teil 1: ohne Server
-def test_01_standard_nur_10001_und_10002(monkeypatch):
-    # 03.10.2026 abends (Wunsch Ahmad): "schalte das Programm auch frei jetzt fuer 10001"
-    monkeypatch.delenv("AUTOPOINTER_VERGLEICH_KUNDEN", raising=False)
-    monkeypatch.setenv("BROWSER_HELFER_KUNDEN", "")      # 04.10.2026: zweites Werkzeug, hier nur das Programm
-    assert wz.freigegebene_kunden(WID) == frozenset({"10001", "10002", "10007"})   # 10007 seit 06.10.2026
-    assert wz.ist_freigegeben(WID, 10002)
-    assert wz.ist_freigegeben(WID, 10007)
-    assert wz.ist_freigegeben(WID, "10002")
-    assert wz.ist_freigegeben(WID, " 010002 ")
-    assert wz.ist_freigegeben(WID, 10001)
-    for andere in (10003, 1001, "10002-1", "10001-1", None, "", True):
-        assert not wz.ist_freigegeben(WID, andere), andere
-    assert wz.freigegebene_werkzeuge(10002) == [WID]
-    assert wz.freigegebene_werkzeuge(10023) == []
+def test_01_werkzeuge_sind_pro_metadaten_ohne_kundennummern():
+    assert set(wz.WERKZEUGE) == {wz.AUTOPOINTER, wz.BROWSER_HELFER}
+    for wid, meta in wz.WERKZEUGE.items():
+        assert "kunden_env" not in meta
+        assert "kunden_standard" not in meta
+        assert meta["name"]
+        assert meta["dateiname"]
 
 
-def test_02_liste_per_umgebung(monkeypatch):
-    monkeypatch.setenv("AUTOPOINTER_VERGLEICH_KUNDEN", "10002, 10017;10023")
-    assert wz.freigegebene_kunden(WID) == frozenset({"10002", "10017", "10023"})
-    assert wz.ist_freigegeben(WID, 10017)
-    monkeypatch.setenv("AUTOPOINTER_VERGLEICH_KUNDEN", "")
-    assert wz.freigegebene_kunden(WID) == frozenset()
-    assert not wz.ist_freigegeben(WID, 10002)
-    assert not wz.ist_freigegeben("gibts-nicht", 10002)
+def test_02_keine_alte_kundennummer_berechtigungs_api_mehr():
+    assert not hasattr(wz, "freigegebene_kunden")
+    assert not hasattr(wz, "ist_freigegeben")
+    assert not hasattr(wz, "freigegebene_werkzeuge")
 
 
 def test_03_nur_echte_exe():
