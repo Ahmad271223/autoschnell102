@@ -91,8 +91,12 @@ export function zielUebernehmen(ziel, {
       const vertrag = u.searchParams.get("vertrag") === "1";
       const start = startKennung(ziel, fenster.location.origin);
       const helferReq = u.searchParams.get("helfer_req") || null;
-      const detail = (vertrag || start || helferReq)
-        ? { link, vertrag, start, helferReq } : link;
+      let detail = link;
+      if (vertrag || start || helferReq) {
+        detail = { link, vertrag };
+        if (start) detail.start = start;
+        if (helferReq) detail.helferReq = helferReq;
+      }
       fenster.dispatchEvent(new CustomEvent(INSERAT_EREIGNIS, { detail }));
       uebernommen();
       return;
