@@ -86,6 +86,11 @@ internal sealed class Ueberwacher
     public IReadOnlyList<Vergleich> LetzteVergleiche { get; private set; } = Array.Empty<Vergleich>();
     /// <summary>Original-Inserat des zuletzt verglichenen Autos (fuer "Kaufvertrag: in AutoSchnell oeffnen").</summary>
     public string? LetzteInseratUrl { get; private set; }
+    /// <summary>Nur true, wenn das aktuell angezeigte Auto bereits sicher gelesen
+    /// und vom AutoSchnell-Server als genau dieses Fahrzeug verarbeitet wurde.
+    /// Sobald sich die AutoPointer-Detailansicht ändert, wird der Vertrag
+    /// gesperrt, damit nie noch der Link des vorherigen Autos geöffnet wird.</summary>
+    public bool VertragBereit { get; private set; }
     public Status Status => _status ?? Status.KeinAutoPointer;
 
     /// <summary>Statuswechsel (fuer das Symbol im Infobereich).</summary>
@@ -208,6 +213,12 @@ internal sealed class Ueberwacher
                 _seit = jetzt;
                 _offen = true;
                 _ungeklickt = false;
+                // P1 08.10.2026: AutoPointer zeigt bereits ein anderes Auto.
+                // Ab diesem Moment darf "Kaufvertrag" NIE mehr den Link des
+                // vorherigen Autos benutzen — auch nicht in den 0,4 s
+                // Stabilisierung/OCR oder während der Serveranfrage.
+                VertragBereit = false;
+                LetzteInseratUrl = null;
                 // Paket 3 (F4): schon jetzt (vor Wartezeit und Lesen) die Verbindung zum Server vorwaermen
                 try { _dienst.Vorwaermen(); } catch (Exception) { }
                 return;
@@ -362,6 +373,7 @@ internal sealed class Ueberwacher
             // Nr. 2: zu diesem Auto gibt es noch keinen Vergleich — keine Links/Inserat eines frueheren Autos
             LetzteVergleiche = Array.Empty<Vergleich>();
             LetzteInseratUrl = null;
+            VertragBereit = false;
             FahrzeugGewechselt?.Invoke(f);
             Protokoll.Schreibe("Fahrzeug war beim Start schon angezeigt – nicht automatisch geöffnet "
                                + "(Menü „Aktuelles Fahrzeug jetzt vergleichen“).");
@@ -402,6 +414,11 @@ internal sealed class Ueberwacher
         }
         LetztesFahrzeug = f;
         LetzteInseratUrl = antwort.InseratUrl;
+        // Ab hier gehoeren Fahrzeug + optionale Inserat-URL nachweislich
+        // zusammen. Bei AutoScout ohne vollstaendige URL darf der Nutzer
+        // weiterhin die aktuelle Inserat-Adresse aus der Zwischenablage
+        // uebernehmen, deshalb true auch bei InseratUrl=null.
+        VertragBereit = true;
         // Pruefbericht 03.10.2026 (Nr. 2): ab hier gehoeren die "letzten Vergleiche" zu DIESEM Auto — auch wenn
         // es keine gibt. Vorher blieben die Links des vorigen Autos stehen ("erneut oeffnen" zeigte das falsche Auto).
         LetzteVergleiche = Array.Empty<Vergleich>();
