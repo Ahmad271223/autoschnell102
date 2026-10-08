@@ -71,20 +71,11 @@ class SeiteUngueltig(ValueError):
 
 
 # ---------------------------------------------------------------- Inserat fuer den Kaufvertrag merken
-#: Was der Browser-Helfer eines Kontos gelesen hat (dealer_id + user_id = wer geliefert hat; geht in die Firmen-
-#: und Kontoloeschung). Es ersetzt den Server-Abruf (kein Apify, kein Tageslimit).
-#: Entscheidung Ahmad 04.10.2026 (abends, "alle sofort"): JEDER, der das Inserat in den 24 h vergleicht (Link in
-#: der App, Windows-Programm), bekommt diese Daten — auch fremde Firmen. Das loest die Regel aus dem Pruefbericht
-#: 20.09.2026 (A-01/A-02: nur dieses Konto) bewusst ab; Risiko: eine gezielt gefaelschte Seite erreicht fremde
-#: Kaufvertraege. Dagegen: der Server liest die Seite selbst aus (nie fertige Daten vom Browser), die Inserat-Nummer
-#: in der Seite muss zur Adresse passen, die Marke muss da sein (der Preis seit 06.10.2026 nicht mehr — den Kaufpreis
-#: traegt der Sucher im Vertrag selbst ein); wer geliefert hat, steht am Eintrag und
-#: am Vergleich des Nutzers (vehicle_comparisons.browser_helfer_von). Ein Beweisdokument entsteht nie aus
-#: Browserdaten (RP-446) — dafuer holt der Server das Inserat auf Knopfdruck selbst.
-#: Wunsch Ahmad 08.10.2026 (Datenschutz, externe Pruefung): Fahrzeugdaten weiter fuer ALLE, die KONTAKTDATEN des
-#: Verkaeufers aber nur fuer die Firma, deren Browser die Seite gelesen hat — der Browser eines angemeldeten Nutzers
-#: sieht z. B. bei Kleinanzeigen die Telefonnummer, die ohne Anmeldung niemand sieht. Fremde Firmen bekommen die
-#: Lesung ohne KONTAKT_FELDER (Telefon/E-Mail tragen sie im Kaufvertrag selbst ein).
+#: Browser-Helfer-Snapshots sind eine nicht vertrauenswuerdige Eingabequelle.
+#: Sicherheits-/Vertragsregel 08.10.2026: ein Snapshot darf nur von DEM Konto
+#: wiederverwendet werden, dessen Browser ihn geliefert hat. Nie konto- oder
+#: firmenuebergreifend: manipulierte oder veraltete Browserdaten duerfen
+#: keinen fremden Vergleich oder Kaufvertrag speisen.
 SAMMLUNG_INSERATE = "werkzeug_inserate"
 INSERAT_STUNDEN = 24
 #: Pruefung 08.10.2026 (Datenschutz): auch der Name des Ansprechpartners eines Haendlers (eine Person) bleibt in der
@@ -120,38 +111,27 @@ async def inserat_merken(db, identity: dict, url: str, fahrzeug: dict, user: dic
 
 async def inserat_lesen(db, cache_key: str, user_id: str,
                         dealer_id: Optional[str] = None) -> Optional[Tuple[dict, datetime, dict]]:
-    """(Fahrzeugdaten, gelesen_am, von) aus dem Browser-Helfer — zuerst dieses Konto, dann die eigene Firma, sonst
-    die juengste Lesung irgendeines Kontos (Entscheidung Ahmad 04.10.2026, siehe oben). von = {user_id, dealer_id}
-    des Lieferers. Seit 08.10.2026: stammt die Lesung aus einer ANDEREN Firma als ``dealer_id``, fehlen die
-    KONTAKT_FELDER (ohne ``dealer_id`` ebenso — wer die Firma nicht nennt, bekommt keine fremden Kontaktdaten)."""
-    if not cache_key:
+    """Browser-Helfer-Daten ausschliesslich fuer dasselbe Konto lesen.
+
+    dealer_id bleibt als Parameter fuer bestehende Aufrufer, wird aber
+    bewusst NICHT zum Teilen von Browser-Snapshots benutzt. Ein Snapshot ist
+    eine nicht vertrauenswuerdige Browser-Eingabe und darf weder einen
+    Kollegen noch eine fremde Firma mit Fahrzeug-/Vertragsdaten versorgen.
+    """
+    if not cache_key or not user_id:
         return None
     projektion = {"_id": 0, "data": 1, "gelesen_am": 1, "user_id": 1, "dealer_id": 1}
-    frisch = {"$gt": datetime.now(timezone.utc)}
-    ok = {"$type": "object"}
-    d = None
-    if user_id:
-        d = await db[SAMMLUNG_INSERATE].find_one(
-            {"cache_key": cache_key, "user_id": user_id, "ablauf": frisch, "data": ok}, projektion)
-    if d is None and dealer_id:
-        d = await db[SAMMLUNG_INSERATE].find_one(
-            {"cache_key": cache_key, "dealer_id": dealer_id, "ablauf": frisch, "data": ok}, projektion,
-            sort=[("gelesen_am", -1)])
-    if d is None:
-        d = await db[SAMMLUNG_INSERATE].find_one(
-            {"cache_key": cache_key, "ablauf": frisch, "data": ok}, projektion, sort=[("gelesen_am", -1)])
+    d = await db[SAMMLUNG_INSERATE].find_one(
+        {"cache_key": cache_key, "user_id": user_id,
+         "ablauf": {"$gt": datetime.now(timezone.utc)},
+         "data": {"$type": "object"}},
+        projektion)
     if d is None or not isinstance(d.get("data"), dict):
         return None
-    daten = dict(d["data"])
-    eigen = bool(user_id) and d.get("user_id") == user_id
-    if not eigen and (not dealer_id or (d.get("dealer_id") or "") != dealer_id):
-        for feld in KONTAKT_FELDER:
-            daten.pop(feld, None)
-        if daten.get("seller_type") != "haendler":
-            for feld in PRIVAT_FELDER:
-                daten.pop(feld, None)
-    return daten, d.get("gelesen_am"), {"user_id": d.get("user_id") or "",
-                                        "dealer_id": d.get("dealer_id") or ""}
+    return dict(d["data"]), d.get("gelesen_am"), {
+        "user_id": d.get("user_id") or "",
+        "dealer_id": d.get("dealer_id") or "",
+    }
 
 
 # ---------------------------------------------------------------- Seite entpacken
@@ -503,8 +483,8 @@ def _wert_bereinigen(wert, in_liste: bool = False):
 
 
 def fahrzeug_bereinigen(fahrzeug: dict) -> dict:
-    """Pruefung 05.10.2026 (Paket 1): die Werte kommen aus einer Seite, die ein Browser geschickt hat, und gelten
-    danach fuer alle Konten — vor dem Speichern in feste Formen bringen:
+    """Pruefung 05.10.2026 (Paket 1): die Werte kommen aus einer Browserseite und werden auch
+    fuer dasselbe Konto nur in festen, validierten Formen gespeichert:
       * Zahlen nur endlich und im plausiblen Bereich (sonst None), Texte gekuerzt, falsche Typen (Objekt statt
         Text) werden zu None statt spaeter zu einem 500
       * Beschreibung hoechstens 20.000 Zeichen, Listen hoechstens 400 Eintraege
