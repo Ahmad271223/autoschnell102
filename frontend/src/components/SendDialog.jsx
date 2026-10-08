@@ -363,8 +363,9 @@ export default function SendDialog({ open, contract, onClose }) {
         if (data?.bereits_gesendet && z === "laeuft") {
           toast.info("Dieser Versand läuft gerade noch — bitte einen Moment warten.");
         } else if (z === "unklar") {
-          toast.warning("Der Versand hat kein Ergebnis gemeldet. Bitte noch einmal "
-            + "auf Senden klicken — es wird garantiert nicht doppelt zugestellt.");
+          toast.warning("Der Versand hat kein eindeutiges Ergebnis. Bitte noch einmal auf Senden klicken: "
+            + "AutoSchnell prüft den bestehenden Versuch; bei SMTP wird vor einem bewussten Neuversand "
+            + "noch einmal ausdrücklich gefragt.");
         } else if (data?.bereits_gesendet) toast.info("Dieser Versand wurde bereits registriert.");
         else if (z === "versendet" && data?.hinweis) {
           // Rollenprüfung 22.09.2026 (RP-448): Während des Versands entstand
