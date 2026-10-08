@@ -171,6 +171,12 @@ def test_01_pc_weg_nachricht_enthaelt_download_link(welt):
     eintrag = doc["send_status"][-1]
     assert eintrag["methode"] == "link" if "methode" in eintrag else True
     assert eintrag["download_link"] == d["download_link"]
+    # AutoSchnell kann bei WhatsApp nur den Chat/Link vorbereiten; ob der
+    # Nutzer dort wirklich auf Senden tippt, ist nicht beweisbar.
+    assert _db().activity_logs.find_one({
+        "action": "pdf.versand_vorbereitet.whatsapp", "ref": welt["contract_id"]})
+    assert not _db().activity_logs.find_one({
+        "action": "pdf.gesendet.whatsapp", "ref": welt["contract_id"]})
 
 
 def test_02_link_liefert_digitale_fassung_ohne_anmeldung(welt):
