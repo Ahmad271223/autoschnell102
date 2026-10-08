@@ -182,8 +182,12 @@ export default function FolgeMailDialog({ open, contract, onClose }) {
       entwuerfe.current[art] = undefined;
     } catch (e) {
       const d = e?.response?.data?.detail;
-      if (e?.response?.status === 409 && d?.code === "frueherer_versand_unklar") {
-        if (window.confirm(d.msg || "Der frühere Versand hatte kein eindeutiges Ergebnis. Trotzdem noch einmal senden?")) {
+      if (e?.response?.status === 409
+          && (d?.code === "frueherer_versand_unklar" || d?.code === "bereits_versendet")) {
+        const standard = d?.code === "bereits_versendet"
+          ? "Diese Mail wurde bereits verschickt. Wirklich noch einmal senden?"
+          : "Der frühere Versand hatte kein eindeutiges Ergebnis. Trotzdem noch einmal senden?";
+        if (window.confirm(d.msg || standard)) {
           // Bei SMTP muss der bewusste Neuversand einen NEUEN Schlüssel
           // bekommen. Bei Resend schadet der neue Schlüssel hier nicht,
           // weil der Nutzer ausdrücklich eine zweite Mail bestätigt.
