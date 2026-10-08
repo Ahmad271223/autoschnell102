@@ -265,7 +265,9 @@ internal sealed class TrayApp : ApplicationContext
               + (f.Kilometer != null ? $" · {f.Kilometer:N0} km" : "");
         return new FensterZustand(AktuellerStatus(), _einstellungen.AutomatikAktiv,
             _dienst.Verbunden, _einstellungen.VerbundenAls ?? "", auto,
-            !string.IsNullOrEmpty(_ueberwacher?.LetzteInseratUrl), _letzteMeldung, _probelauf, _lizenzSperre);
+            !string.IsNullOrEmpty(_ueberwacher?.LetzteInseratUrl),
+            _ueberwacher?.VertragBereit == true,
+            _letzteMeldung, _probelauf, _lizenzSperre);
     }
 
     /// <summary>Status fuer Symbol, Fenster und Leiste: Lizenzsperre (A8) und fehlende Texterkennung (A9) gehen vor.</summary>
@@ -319,8 +321,15 @@ internal sealed class TrayApp : ApplicationContext
 
     private async Task VertragOeffnenInternAsync()
     {
-        string? url = _ueberwacher?.LetzteInseratUrl;
-        var fahrzeug = _ueberwacher?.LetztesFahrzeug;
+        var u = _ueberwacher;
+        if (u == null || !u.VertragBereit)
+        {
+            Sprechblase("Das aktuelle Fahrzeug wird noch geprüft – der Kaufvertrag wird erst freigegeben, wenn Fahrzeug und Inserat sicher zusammengehören.",
+                        false, erzwingen: true);
+            return;
+        }
+        string? url = u.LetzteInseratUrl;
+        var fahrzeug = u.LetztesFahrzeug;
         if (string.IsNullOrEmpty(url) && fahrzeug != null)
         {
             // Nr. 11: AutoScout zeigt die Kennung abgeschnitten — hat der Sucher die Adresse seit dem Anklicken
