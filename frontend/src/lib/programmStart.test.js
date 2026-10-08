@@ -164,12 +164,28 @@ describe("Pruefbericht 03.10.2026 (Nr. 12): Rueckmeldung an das Programm", () =>
     expect(client.post).toHaveBeenCalledTimes(1);
   });
 
-  it("offenes Fenster meldet den Start sofort — auch wenn wegen Ungespeichertem erst gefragt wird", () => {
+  it("ungespeicherte Arbeit meldet erst nach wirklicher Uebernahme", () => {
     const f = fenster("/app/vertraege");
     const melden = vi.fn();
-    startZieleVerfolgen(vi.fn(), { fenster: f, startAdresse: `${O}/start`, beschaeftigt: () => true,
-                                   nachfragen: () => {}, melden });
+    const nav = vi.fn();
+    let knopf = null;
+    startZieleVerfolgen(nav, { fenster: f, startAdresse: `${O}/start`, beschaeftigt: () => true,
+                               nachfragen: (ausfuehren) => { knopf = ausfuehren; }, melden });
     f.starten(MIT_START);
+    expect(melden).not.toHaveBeenCalled();
+    expect(nav).not.toHaveBeenCalled();
+    knopf();
+    expect(nav).toHaveBeenCalledTimes(1);
+    expect(melden).toHaveBeenCalledWith(S);
+  });
+
+  it("freie App meldet direkt nach der Uebernahme", () => {
+    const f = fenster("/app/termine");
+    const melden = vi.fn();
+    const nav = vi.fn();
+    startZieleVerfolgen(nav, { fenster: f, startAdresse: `${O}/start`, melden });
+    f.starten(MIT_START);
+    expect(nav).toHaveBeenCalledTimes(1);
     expect(melden).toHaveBeenCalledWith(S);
   });
 
