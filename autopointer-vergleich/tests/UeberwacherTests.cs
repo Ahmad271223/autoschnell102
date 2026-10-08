@@ -40,6 +40,7 @@ public class UeberwacherTests
         public DienstFehler? Fehler;
         public string? InseratUrl;
         public List<string>? Melden;
+        public Action? WaehrendDesVergleichs;
         public readonly List<Fahrzeug> Anfragen = new();
         public int Vorgewaermt;
         public void Vorwaermen() => Vorgewaermt++;
@@ -47,6 +48,7 @@ public class UeberwacherTests
         public Task<VergleichAntwort> VergleichAsync(Fahrzeug f, bool probelauf)
         {
             Anfragen.Add(f);
+            WaehrendDesVergleichs?.Invoke();
             if (Fehler != null) return Task.FromException<VergleichAntwort>(Fehler);
             int leer = f.MarkeModellText.IndexOf(' ');
             string id = (leer > 0 ? $"{f.MarkeModellText[..leer]}-{f.MarkeModellText[(leer + 1)..]}" : f.MarkeModellText)
@@ -402,6 +404,37 @@ public class UeberwacherTests
         for (int i = 0; i < 4; i++) await Tick(250);
         Assert.True(_u.VertragBereit);
         Assert.Contains("3529719999", _u.LetzteInseratUrl);
+    }
+
+    [Fact]
+    public async Task Fahrzeugwechsel_waehrend_Serveranfrage_verwirft_alte_Antwort_und_Vertrag()
+    {
+        await Start();
+        _server.InseratUrl = "https://www.kleinanzeigen.de/s-anzeige/3529712138-216-1234";
+        _q.Zeige(Bentley, 1);
+
+        // Genau der Race: OCR fuer A ist fertig; waehrend AutoSchnell A
+        // verarbeitet, zeigt AutoPointer bereits B. Der Takt kann wegen der
+        // _einzeln-Sperre noch nicht reagieren.
+        _server.WaehrendDesVergleichs = () =>
+        {
+            _q.Zeige(Passat, 2);
+            _server.WaehrendDesVergleichs = null;
+        };
+
+        for (int i = 0; i < 4; i++) await Tick(250);
+
+        Assert.False(_u.VertragBereit);
+        Assert.Null(_u.LetzteInseratUrl);
+        Assert.Empty(_b.Aufrufe);       // auch keine Vergleich-Tabs fuer das alte Auto
+
+        // Danach B normal stabil lesen/verarbeiten.
+        _server.InseratUrl = "https://www.kleinanzeigen.de/s-anzeige/3529719999-216-1234";
+        for (int i = 0; i < 4; i++) await Tick(250);
+        Assert.True(_u.VertragBereit);
+        Assert.Contains("3529719999", _u.LetzteInseratUrl);
+        Assert.Single(_b.Aufrufe);
+        Assert.Contains("VW-Passat", _b.Aufrufe[0][0].Url);
     }
 
     [Fact]
