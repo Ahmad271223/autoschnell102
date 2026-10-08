@@ -451,6 +451,16 @@ export default function SendDialog({ open, contract, onClose }) {
       // U-73: die Fassung GENAU dieser Datei — nicht die des Vertrags im
       // Zustand, der kann seit dem Vorabladen schon neuer sein.
       const fassung = pdfFassung.current;
+      // Ohne Versionskopf kann der Server nach dem nativen Share nicht mehr
+      // beweisen, welche Fassung gerade uebergeben wurde. Deshalb VOR dem
+      // Share-Sheet stoppen und die PDF neu laden; kein "best effort" bei
+      // einem Kaufvertrag.
+      if (!fassung) {
+        setPdfStand((n) => n + 1);
+        toast.warning("Die Vertragsfassung konnte nicht sicher bestimmt werden. "
+          + "Die PDF wird neu geladen — bitte danach noch einmal teilen.");
+        return;
+      }
       const ergebnis = await dateiTeilen({ datei: pdf, text: waMsg, titel });
       if (ergebnis === "geteilt") {
         let vermerkt = true;
