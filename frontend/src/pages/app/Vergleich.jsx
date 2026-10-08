@@ -23,7 +23,9 @@ import ProfileBadge from "@/components/ProfileBadge";
 import PortalBadge from "@/components/PortalBadge";
 import { openContractPdf } from "@/lib/pdf";
 import { filterOeffnen, FILTER_TOAST_ID } from "@/lib/filterOeffnen";
-import { INSERAT_EREIGNIS, protokollSuche, startKennung, startMelden } from "@/lib/programmStart";
+import {
+  INSERAT_EREIGNIS, helferOeffnenBestaetigen, protokollSuche, startKennung, startMelden,
+} from "@/lib/programmStart";
 import { fensterDanebenSetzen, zweitenBildschirmAnfragen } from "@/lib/popup";
 import { hinweiseZeigen } from "@/lib/hinweise";
 import { useAuth } from "@/context/AuthContext";
@@ -510,8 +512,9 @@ export default function Vergleich() {
     adresseGestartet.current = true;
     // Browser-Helfer (04.10.2026): "&vertrag=1" = Kaufvertrag gleich öffnen (vor dem nav lesen — der leert die Adresse)
     const vertrag = suche.get("vertrag") === "1";
-    // Pruefbericht 03.10.2026 (Nr. 12): dem Programm melden, dass die App das Auto uebernommen hat
+    // AutoPointer- und Browser-Helfer-ACK erst NACH erfolgreichem Laden.
     const start = startKennung(window.location.href);
+    const helferReq = suche.get("helfer_req") || null;
     nav("/app/vergleich", { replace: true });
     const link = inseratsLinkAusText(param);
     if (!link) {
@@ -520,7 +523,11 @@ export default function Vergleich() {
     }
     setUrl(link);
     startCompare(null, link, { ohneFilter: true, vertragOeffnen: vertrag })
-      .then((ok) => { if (ok && start) startMelden(api, start); });
+      .then((ok) => {
+        if (!ok) return;
+        if (start) startMelden(api, start);
+        if (helferReq) helferOeffnenBestaetigen(helferReq);
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -540,6 +547,7 @@ export default function Vergleich() {
         link,
         vertrag: typeof d === "object" && d?.vertrag === true,
         start: typeof d === "object" ? d?.start || null : null,
+        helferReq: typeof d === "object" ? d?.helferReq || null : null,
       });
     };
     window.addEventListener(INSERAT_EREIGNIS, uebernehmen);
@@ -551,7 +559,11 @@ export default function Vergleich() {
     setNachLink(null);
     setUrl(nachLink.link);
     startCompare(null, nachLink.link, { ohneFilter: true, vertragOeffnen: nachLink.vertrag })
-      .then((ok) => { if (ok && nachLink.start) startMelden(api, nachLink.start); });
+      .then((ok) => {
+        if (!ok) return;
+        if (nachLink.start) startMelden(api, nachLink.start);
+        if (nachLink.helferReq) helferOeffnenBestaetigen(nachLink.helferReq);
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nachLink, loading]);
 
