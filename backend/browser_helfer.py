@@ -43,8 +43,8 @@ MAX_HTML = 4 * 1024 * 1024
 #: Wiederholungen entfernt sind (_astro_props_kuerzen) — danach gilt wieder MAX_HTML. Schutz gegen Zip-Bomben bleibt.
 MAX_ROH = 16 * 1024 * 1024
 
-#: Pruefung 05.10.2026 (Paket 1): was aus einer Browserseite gespeichert wird, gilt 24 h fuer ALLE Konten —
-#: deshalb feste Grenzen fuer jeden Wert (fahrzeug_bereinigen), bevor irgendetwas gespeichert wird.
+#: Was aus einer Browserseite gespeichert wird, gilt fuer DASSELBE Konto 24 h.
+#: Deshalb feste Grenzen fuer jeden Wert (fahrzeug_bereinigen), bevor irgendetwas gespeichert wird.
 MAX_BESCHREIBUNG_HTML = 200_000
 MAX_BESCHREIBUNG = 20_000
 MAX_TEXT = 500
@@ -67,16 +67,12 @@ class SeiteUngueltig(ValueError):
 
 
 # ---------------------------------------------------------------- Inserat fuer den Kaufvertrag merken
-#: Was der Browser-Helfer eines Kontos gelesen hat (dealer_id + user_id = wer geliefert hat; geht in die Firmen-
-#: und Kontoloeschung). Es ersetzt den Server-Abruf (kein Apify, kein Tageslimit).
-#: Entscheidung Ahmad 04.10.2026 (abends, "alle sofort"): JEDER, der das Inserat in den 24 h vergleicht (Link in
-#: der App, Windows-Programm), bekommt diese Daten — auch fremde Firmen. Das loest die Regel aus dem Pruefbericht
-#: 20.09.2026 (A-01/A-02: nur dieses Konto) bewusst ab; Risiko: eine gezielt gefaelschte Seite erreicht fremde
-#: Kaufvertraege. Dagegen: der Server liest die Seite selbst aus (nie fertige Daten vom Browser), die Inserat-Nummer
-#: in der Seite muss zur Adresse passen, die Marke muss da sein (der Preis seit 06.10.2026 nicht mehr — den Kaufpreis
-#: traegt der Sucher im Vertrag selbst ein); wer geliefert hat, steht am Eintrag und
-#: am Vergleich des Nutzers (vehicle_comparisons.browser_helfer_von). Ein Beweisdokument entsteht nie aus
-#: Browserdaten (RP-446) — dafuer holt der Server das Inserat auf Knopfdruck selbst.
+#: Browser-Helfer-Snapshots sind eine nicht vertrauenswuerdige Eingabequelle.
+#: Sicherheits-/Vertragsregel 08.10.2026: Ein Snapshot darf nur von DEM Konto
+#: wiederverwendet werden, dessen Browser ihn geliefert hat. Nie konto- oder
+#: firmenuebergreifend: manipulierte/veraltete Browserdaten duerfen keinen
+#: fremden Vergleich oder Kaufvertrag speisen. Andere Konten benutzen ihren
+#: eigenen Helfer oder den normalen serverseitigen Anbieterweg.
 SAMMLUNG_INSERATE = "werkzeug_inserate"
 INSERAT_STUNDEN = 24
 
@@ -93,20 +89,19 @@ async def inserat_merken(db, identity: dict, url: str, fahrzeug: dict, user: dic
 
 
 async def inserat_lesen(db, cache_key: str, user_id: str) -> Optional[Tuple[dict, datetime, dict]]:
-    """(Fahrzeugdaten, gelesen_am, von) aus dem Browser-Helfer — zuerst dieses Konto, sonst die juengste Lesung
-    irgendeines Kontos (Entscheidung Ahmad 04.10.2026, siehe oben). von = {user_id, dealer_id} des Lieferers."""
-    if not cache_key:
+    """Browser-Helfer-Daten ausschliesslich fuer dasselbe Konto lesen.
+
+    Ohne user_id gibt es bewusst keinen Treffer. So kann ein Browser-Snapshot
+    nie in den Vergleich oder Kaufvertrag eines anderen Kontos gelangen.
+    """
+    if not cache_key or not user_id:
         return None
     projektion = {"_id": 0, "data": 1, "gelesen_am": 1, "user_id": 1, "dealer_id": 1}
-    frisch = {"$gt": datetime.now(timezone.utc)}
-    d = None
-    if user_id:
-        d = await db[SAMMLUNG_INSERATE].find_one(
-            {"cache_key": cache_key, "user_id": user_id, "ablauf": frisch}, projektion)
-    if d is None or not isinstance(d.get("data"), dict):
-        d = await db[SAMMLUNG_INSERATE].find_one(
-            {"cache_key": cache_key, "ablauf": frisch, "data": {"$type": "object"}}, projektion,
-            sort=[("gelesen_am", -1)])
+    d = await db[SAMMLUNG_INSERATE].find_one(
+        {"cache_key": cache_key, "user_id": user_id,
+         "ablauf": {"$gt": datetime.now(timezone.utc)},
+         "data": {"$type": "object"}},
+        projektion)
     if d is None or not isinstance(d.get("data"), dict):
         return None
     return dict(d["data"]), d.get("gelesen_am"), {"user_id": d.get("user_id") or "",

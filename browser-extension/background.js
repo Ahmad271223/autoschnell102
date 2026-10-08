@@ -96,7 +96,12 @@ async function sperreLesen() {
 }
 
 async function sperreMerken(status, text) {
-  const dauer = SPERRE_MS[status];
+  // Ein Normal-Abo darf Pro nicht benutzen. Diese 403 aber nur kurz merken:
+  // wird das Konto im Admin auf Pro hochgestuft, soll ein bereits installierter
+  // Helfer praktisch sofort wieder arbeiten und nicht 5 Minuten am alten
+  // Sperrstand haengen. Andere 403 bleiben wie bisher 5 Minuten gecacht.
+  const proNur = status === 403 && /AutoSchnell Pro/i.test(String(text || ""));
+  const dauer = proNur ? 15000 : SPERRE_MS[status];
   try {
     if (dauer) await chrome.storage.session.set({ sperre: { status, text, bis: Date.now() + dauer } });
     else if (status === 200) await chrome.storage.session.remove("sperre");
@@ -646,6 +651,45 @@ function anTab(tabId, nachricht) {
   });
 }
 
+function inseratKennungAusUrl(href) {
+  let u;
+  try { u = new URL(String(href || "")); } catch (e) { return null; }
+  const host = u.hostname.toLowerCase();
+  if (host === "suchen.mobile.de") {
+    const p = u.pathname;
+    const id = p.startsWith("/fahrzeuge/details.html") ? u.searchParams.get("id")
+      : p.startsWith("/auto-inserat/") ? (/\/(\d{6,})\.html$/.exec(p) || [])[1] : null;
+    return id && /^\d{6,20}$/.test(id) ? "mobile:" + id : null;
+  }
+  if (/^www\.autoscout24\.(de|at|ch)$/.test(host) && u.pathname.toLowerCase().includes("/angebote/")) {
+    const m = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(u.pathname);
+    return m ? "autoscout24:" + m[1].toLowerCase() : null;
+  }
+  if (/(^|\.)kleinanzeigen\.de$/.test(host)) {
+    const m = /\/s-anzeige\/(?:[^/]+\/)?(\d{6,})-216(?:-|$)/.exec(u.pathname);
+    return m ? "kleinanzeigen:" + m[1] : null;
+  }
+  return null;
+}
+
+/** Letzte Sicherung vor dem Vertrags-Handoff: der aktuell sichtbare Portal-Tab
+ * muss noch GENAU das Inserat zeigen, dessen Box/Session wir benutzen. */
+function tabZeigtInserat(tab, kennung) {
+  return inseratKennungAusUrl((tab && (tab.pendingUrl || tab.url)) || "") === String(kennung || "");
+}
+
+/** Nicht das alte Message-Tab-Objekt vertrauen: nach einem await kann eine
+ * SPA im selben Tab bereits auf das naechste Fahrzeug gewechselt haben. */
+async function tabZeigtInseratAktuell(tabId, kennung) {
+  if (!Number.isInteger(tabId)) return false;
+  try {
+    const aktuell = await chrome.tabs.get(tabId);
+    return tabZeigtInserat(aktuell, kennung);
+  } catch (e) {
+    return false; // Tab geschlossen/ersetzt -> niemals alten Vertrag oeffnen
+  }
+}
+
 async function vertragsZiel(kennung) {
   const s = await sitzung();
   const i = s.inserate[String(kennung || "")];
@@ -653,7 +697,8 @@ async function vertragsZiel(kennung) {
   // 2.6.3 (Paket 2): nur ein Pfad in der App (nie "//fremd.de/…" oder "@fremd.de") — auch wenn der Server falsch antwortet
   const pfad = String(i.antwort.app_pfad);
   if (!pfad.startsWith("/app/") || pfad.startsWith("//") || /[@\\]/.test(pfad.split("?")[0])) return null;
-  return { pfad: pfad + "&vertrag=1", inseratUrl: i.antwort.inserat_url };
+  const trenner = pfad.includes("?") ? "&" : "?";
+  return { pfad: pfad + trenner + "vertrag=1", inseratUrl: i.antwort.inserat_url };
 }
 
 async function webseiteOeffnen(basis, pfad, tab) {
@@ -666,17 +711,38 @@ async function webseiteOeffnen(basis, pfad, tab) {
 }
 
 async function vertragOeffnen(msg, tab) {
+  // P1-Sicherung: zwischen Box-Anzeige und Klick kann eine SPA schon auf das
+  // naechste Fahrzeug gewechselt haben. Das vom Message-Event gelieferte
+  // tab-Objekt kann bereits veraltet sein — deshalb live aus Chrome lesen.
+  const veraltet = () => ({
+    fehler: "veraltet",
+    text: "Das angezeigte Fahrzeug hat sich geändert – AutoSchnell liest das aktuelle Inserat neu. Bitte danach noch einmal auf Kaufvertrag klicken.",
+  });
+  if (!await tabZeigtInseratAktuell(tab?.id, msg.kennung)) return veraltet();
+
   const ziel = await vertragsZiel(msg.kennung);
   if (!ziel) return { fehler: "unbekannt" };
   const basis = await server();
   // 1. offenes App-Fenster
   const app = await appFenster(basis);
+
+  // P0/P1 08.10.2026: vertragsZiel/server/appFenster enthalten awaits.
+  // In dieser Zeit kann mobile.de/AutoScout/Kleinanzeigen im selben SPA-Tab
+  // schon Auto B anzeigen. Unmittelbar VOR dem Handoff noch einmal live
+  // pruefen; die Antwort/Session von Auto A wird dann komplett verworfen.
+  if (!await tabZeigtInseratAktuell(tab?.id, msg.kennung)) return veraltet();
   if (app) {
     const antwort = await anTab(app.id, { type: "AUTOSCHNELL_OEFFNEN", ziel: ziel.pfad });
     await chrome.windows.update(app.windowId, { focused: true });
+    if (antwort?.wartet) {
+      // App ist offen, hat das Ziel aber wegen ungespeicherter Arbeit noch
+      // nicht uebernommen. Nicht behaupten, der Vertrag sei geoeffnet.
+      return { ok: true, weg: "app_wartet" };
+    }
     if (!antwort || !antwort.ok) {
-      // 2.6.0 (Pruefung 05.10.2026, Nr. 6): Die App lief schon vor dem (aktualisierten) Helfer — nicht hart neu
-      // laden (ein halb ausgefuellter Kaufvertrag waere weg). Nach vorne holen und sagen, was zu tun ist.
+      // Die App lief schon vor dem (aktualisierten) Helfer — nicht hart neu
+      // laden (ein halb ausgefuellter Kaufvertrag waere weg). Nach vorne holen
+      // und sagen, was zu tun ist.
       return { ok: true, weg: "app_neu_laden" };
     }
     return { ok: true, weg: "app" };
@@ -690,6 +756,9 @@ async function vertragOeffnen(msg, tab) {
   //    dass es hier keine App gibt
   const { appGesehen } = await lokal("appGesehen");
   const stand = appGesehen && typeof appGesehen === "object" ? appGesehen[basis] : undefined;
+  // Auch der Storage-Zugriff ist asynchron — letzter Identitaetscheck direkt
+  // vor Protocol/Web-Handoff.
+  if (!await tabZeigtInseratAktuell(tab?.id, msg.kennung)) return veraltet();
   if (stand !== 0 && ziel.inseratUrl) {
     return { protokoll: "web+autoschnell:vertrag?url=" + encodeURIComponent(ziel.inseratUrl) };
   }

@@ -14,6 +14,10 @@ internal interface IAnsichtQuelle
 {
     IntPtr Hauptfenster { get; }
     QuellenZustand Pruefe();
+    /// <summary>Prueft die aktuell sichtbare AutoPointer-Ansicht wirklich neu.
+    /// Echtquelle umgeht dabei die Vordergrund-Optimierung; Testdoubles koennen
+    /// beim normalen Pruefe() bleiben.</summary>
+    QuellenZustand PruefeDirekt() => Pruefe();
     Task<Lesung?> LiesAsync();
 }
 
@@ -86,6 +90,11 @@ internal sealed class Ueberwacher
     public IReadOnlyList<Vergleich> LetzteVergleiche { get; private set; } = Array.Empty<Vergleich>();
     /// <summary>Original-Inserat des zuletzt verglichenen Autos (fuer "Kaufvertrag: in AutoSchnell oeffnen").</summary>
     public string? LetzteInseratUrl { get; private set; }
+    /// <summary>Nur true, wenn das aktuell angezeigte Auto bereits sicher gelesen
+    /// und vom AutoSchnell-Server als genau dieses Fahrzeug verarbeitet wurde.
+    /// Sobald sich die AutoPointer-Detailansicht ändert, wird der Vertrag
+    /// gesperrt, damit nie noch der Link des vorherigen Autos geöffnet wird.</summary>
+    public bool VertragBereit { get; private set; }
     public Status Status => _status ?? Status.KeinAutoPointer;
 
     /// <summary>Statuswechsel (fuer das Symbol im Infobereich).</summary>
@@ -208,6 +217,12 @@ internal sealed class Ueberwacher
                 _seit = jetzt;
                 _offen = true;
                 _ungeklickt = false;
+                // P1 08.10.2026: AutoPointer zeigt bereits ein anderes Auto.
+                // Ab diesem Moment darf "Kaufvertrag" NIE mehr den Link des
+                // vorherigen Autos benutzen — auch nicht in den 0,4 s
+                // Stabilisierung/OCR oder während der Serveranfrage.
+                VertragBereit = false;
+                LetzteInseratUrl = null;
                 // Paket 3 (F4): schon jetzt (vor Wartezeit und Lesen) die Verbindung zum Server vorwaermen
                 try { _dienst.Vorwaermen(); } catch (Exception) { }
                 return;
@@ -362,11 +377,16 @@ internal sealed class Ueberwacher
             // Nr. 2: zu diesem Auto gibt es noch keinen Vergleich — keine Links/Inserat eines frueheren Autos
             LetzteVergleiche = Array.Empty<Vergleich>();
             LetzteInseratUrl = null;
+            VertragBereit = false;
             FahrzeugGewechselt?.Invoke(f);
             Protokoll.Schreibe("Fahrzeug war beim Start schon angezeigt – nicht automatisch geöffnet "
                                + "(Menü „Aktuelles Fahrzeug jetzt vergleichen“).");
             return;
         }
+        // Klickstand VOR dem Serveraufruf merken. Wechselt AutoPointer
+        // waehrend der Anfrage auf ein anderes Auto, darf der alte Klick auf
+        // Fahrzeug A nicht automatisch als Klick fuer Fahrzeug B zaehlen.
+        long klickVorServer = _letzterKlick?.Invoke() ?? long.MinValue;
         VergleichAntwort antwort;
         try { antwort = await _dienst.VergleichAsync(f, Probelauf); }
         catch (DienstFehler ex)
@@ -393,6 +413,37 @@ internal sealed class Ueberwacher
             _gesperrt = false;
             SetzeStatus(Status.Aktiv);
         }
+
+        // P0/P1 08.10.2026: Waehrend der HTTP-Anfrage kann der Sucher in
+        // AutoPointer bereits auf das naechste Fahrzeug klicken. TickAsync
+        // haelt in dieser Zeit die _einzeln-Sperre und kann die Aenderung
+        // deshalb noch nicht sehen. Vor dem Publizieren von Fahrzeug,
+        // Inserat-URL, Vergleichslinks oder Vertrag IMMER direkt gegenpruefen.
+        // Sonst gibt es ein kurzes Zeitfenster fuer "Vertrag vom vorherigen Auto".
+        var nachServer = _quelle.PruefeDirekt();
+        if (nachServer.Lage != Lage.Details || nachServer.Summe != _summe)
+        {
+            VertragBereit = false;
+            LetzteInseratUrl = null;
+            LetzteVergleiche = Array.Empty<Vergleich>();
+            _summe = nachServer.Lage == Lage.Details ? nachServer.Summe : 0;
+            _seit = _takt();
+
+            // Nur wenn WAEHREND der Serveranfrage ein neuer AutoPointer-Klick
+            // registriert wurde, darf das neue Fahrzeug nach der
+            // Stabilisierung automatisch verarbeitet werden. Sonst war es
+            // z. B. ein automatischer Live-Listen-Wechsel und wartet wie in
+            // v1.5.6 auf den naechsten echten Klick.
+            bool neuerKlick = _letzterKlick == null || _letzterKlick() > klickVorServer;
+            _offen = nachServer.Lage == Lage.Details && neuerKlick;
+            _ungeklickt = nachServer.Lage == Lage.Details && !neuerKlick;
+
+            Protokoll.Schreibe("AutoPointer hat waehrend der Serveranfrage das Fahrzeug gewechselt – "
+                               + "alte Antwort verworfen, kein Vertrag/kein Vergleich fuer das vorige Auto."
+                               + (neuerKlick ? "" : " Neues Auto wartet auf einen echten Klick."));
+            return;
+        }
+
         Merken(f);
         if (antwort.ErkanntMarke != null)
         {
@@ -402,6 +453,11 @@ internal sealed class Ueberwacher
         }
         LetztesFahrzeug = f;
         LetzteInseratUrl = antwort.InseratUrl;
+        // Ab hier gehoeren Fahrzeug + optionale Inserat-URL nachweislich
+        // zusammen. Bei AutoScout ohne vollstaendige URL darf der Nutzer
+        // weiterhin die aktuelle Inserat-Adresse aus der Zwischenablage
+        // uebernehmen, deshalb true auch bei InseratUrl=null.
+        VertragBereit = true;
         // Pruefbericht 03.10.2026 (Nr. 2): ab hier gehoeren die "letzten Vergleiche" zu DIESEM Auto — auch wenn
         // es keine gibt. Vorher blieben die Links des vorigen Autos stehen ("erneut oeffnen" zeigte das falsche Auto).
         LetzteVergleiche = Array.Empty<Vergleich>();
@@ -548,7 +604,14 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
 
     public IntPtr Hauptfenster => _haupt;
 
-    public QuellenZustand Pruefe()
+    public QuellenZustand Pruefe() => PruefeIntern(erzwingen: false);
+
+    /// <summary>Direkte Gegenprobe fuer den kritischen Server-Handoff:
+    /// niemals einen gecachten Pruefsummenwert liefern, nur weil inzwischen
+    /// das AutoSchnell-Fenster/der Browser im Vordergrund ist.</summary>
+    public QuellenZustand PruefeDirekt() => PruefeIntern(erzwingen: true);
+
+    private QuellenZustand PruefeIntern(bool erzwingen)
     {
         if (_ansicht == null || !AutoPointerFenster.NochGueltig(_ansicht))
         {
@@ -568,7 +631,8 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
         // klickt - dann ist es vorne. Liegt ein anderes Fenster (Browser) davor,
         // gilt die letzte Pruefsumme: kostet nichts und verdeckte Pixel loesen
         // kein erneutes Lesen aus.
-        if (_letzteSumme != 0 && !ImVordergrund()) return new QuellenZustand(Lage.Details, _letzteSumme);
+        if (!erzwingen && _letzteSumme != 0 && !ImVordergrund())
+            return new QuellenZustand(Lage.Details, _letzteSumme);
         ulong summe = AutoPointerFenster.Pruefsumme(_ansicht.TechnikTabelle);
         summe = (summe * 31) ^ AutoPointerFenster.Pruefsumme(_ansicht.KopfTabelle);
         _letzteSumme = summe == 0 ? 1 : summe;

@@ -1,16 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Werkzeuge zum Herunterladen — Programme, die nur bestimmte Kunden bekommen.
+"""Werkzeuge zum Herunterladen — Zusatzprogramme fuer AutoSchnell Pro.
 
-03.10.2026 (Wunsch Ahmad): Der AutoPointer-Vergleich (Windows-Programm, Quelle
-in autopointer-vergleich/) ist erst einmal NUR fuer Kunde 10002 freigeschaltet, seit dem Abend
-auch fuer Kunde 10001, seit 06.10.2026 auch fuer Kunde 10007 (Wunsch Ahmad).
-"Alle anderen bekommen das nicht, die sollen das gar nicht sehen": Fuer andere
-Firmen gibt es weder einen Menuepunkt noch einen Download — die Route antwortet
-404, als gaebe es sie nicht.
-
-Freigabe je Werkzeug ueber eine Umgebungsvariable mit Kundennummern (Firma =
-dealers.kunden_nr; Chef UND alle Sucher der Firma). Standard ohne Variable:
-10001, 10002 und 10007. Mehrere Kunden: AUTOPOINTER_VERGLEICH_KUNDEN=10001,10002,10007,10017
+Seit 08.10.2026 ist die Berechtigung nicht mehr an Kundennummern gekoppelt.
+Normal-Abo = normale AutoSchnell-App. Pro-Abo = normale App plus
+AutoSchnell Vergleich (AutoPointer) und Browser-Helfer. Die zentrale
+Berechtigungspruefung liegt in routes/werkzeuge.py und deps.ABO_FEATURES.
 
 Die Programmdatei liegt im Datei-Speicher (S3/R2 bzw. lokal) unter
 werkzeuge/<id>/<dateiname>, Version/Groesse/Pruefsumme in der Sammlung
@@ -74,8 +68,6 @@ WERKZEUGE = {
         ],
         "dateiname": "AutoSchnell-Vergleich.exe",
         "schluessel": "werkzeuge/autopointer-vergleich/AutoSchnell-Vergleich.exe",
-        "kunden_env": "AUTOPOINTER_VERGLEICH_KUNDEN",
-        "kunden_standard": "10001,10002,10007",
     },
     BROWSER_HELFER: {
         "name": "AutoSchnell Analyse und Vertragsabwicklung",
@@ -97,8 +89,6 @@ WERKZEUGE = {
         ],
         "dateiname": "AutoSchnell-Helfer.zip",
         "schluessel": "werkzeuge/browser-helfer/AutoSchnell-Helfer.zip",
-        "kunden_env": "BROWSER_HELFER_KUNDEN",
-        "kunden_standard": "10001,10002,10007",
     },
 }
 
@@ -111,38 +101,6 @@ MAX_ZIP_MB = 20
 
 def art(werkzeug_id: str) -> str:
     return (WERKZEUGE.get(werkzeug_id) or {}).get("art", "windows")
-
-
-def kunden_text(kunden_nr) -> str:
-    """Kundennummer als Text ohne fuehrende Nullen/Leerzeichen ("10002")."""
-    if kunden_nr is None or isinstance(kunden_nr, bool):
-        return ""
-    try:
-        return str(int(str(kunden_nr).strip()))
-    except ValueError:
-        return str(kunden_nr).strip()
-
-
-def freigegebene_kunden(werkzeug_id: str) -> frozenset:
-    """Kundennummern, die das Werkzeug sehen. Eine gesetzte, aber LEERE
-    Variable schaltet es fuer alle ab."""
-    w = WERKZEUGE.get(werkzeug_id)
-    if not w:
-        return frozenset()
-    roh = os.environ.get(w["kunden_env"])
-    if roh is None:
-        roh = w["kunden_standard"]
-    teile = (kunden_text(t) for t in roh.replace(";", ",").split(","))
-    return frozenset(t for t in teile if t)
-
-
-def ist_freigegeben(werkzeug_id: str, kunden_nr) -> bool:
-    k = kunden_text(kunden_nr)
-    return bool(k) and k in freigegebene_kunden(werkzeug_id)
-
-
-def freigegebene_werkzeuge(kunden_nr) -> list:
-    return [wid for wid in WERKZEUGE if ist_freigegeben(wid, kunden_nr)]
 
 
 def exe_pruefen(daten: bytes) -> None:

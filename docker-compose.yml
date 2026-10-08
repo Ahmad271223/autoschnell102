@@ -170,10 +170,8 @@ services:
       # Bilder nachholen (03.10.2026): Versuche ohne Fotos je Inserat, Pause in Sekunden
       - BILDER_NACHHOLEN_MAX=${BILDER_NACHHOLEN_MAX:-3}
       - BILDER_NACHHOLEN_PAUSE_S=${BILDER_NACHHOLEN_PAUSE_S:-60}
-      # Werkzeuge (03.10.2026): wer den AutoPointer-Vergleich sieht (Kundennummern, Komma-getrennt)
-      - AUTOPOINTER_VERGLEICH_KUNDEN=${AUTOPOINTER_VERGLEICH_KUNDEN:-10001,10002,10007}
-      # Browser-Helfer (04.10.2026): wer die Erweiterung fuer Chrome/Edge sieht und verbinden darf
-      - BROWSER_HELFER_KUNDEN=${BROWSER_HELFER_KUNDEN:-10001,10002,10007}
+      # AutoPointer/Browser-Helfer sind AutoSchnell-Pro-Leistungen.
+      # Die Berechtigung kommt ausschliesslich aus dem aktiven Abo-Tier.
       # Inserat beim Klick im Programm vorab auslesen (Daten + Fotos fuer den Kaufvertrag; zaehlt fuers Tageslimit)
       - AUTOPOINTER_VORAB_ABRUF=${AUTOPOINTER_VORAB_ABRUF:-true}
       - AUTOPOINTER_VORAB_WARTEN_S=${AUTOPOINTER_VORAB_WARTEN_S:-15}
@@ -220,6 +218,11 @@ services:
       - RESEND_PARALLEL=${RESEND_PARALLEL:-3}
       - RESEND_VERSUCHE=${RESEND_VERSUCHE:-6}
       - RESEND_WARTEN_MAX=${RESEND_WARTEN_MAX:-20}
+      # Vertragsversand: kritischer Provider-Aufruf endet sicher vor dem
+      # 95-s-Browser-Timeout; die optionale Belegkopie darf den Hauptversand
+      # nicht aufhalten.
+      - VERSAND_PROVIDER_MAX_SEK=${VERSAND_PROVIDER_MAX_SEK:-75}
+      - BELEGKOPIE_MAX_SEK=${BELEGKOPIE_MAX_SEK:-8}
       # Takt (Nachpruefung 20.09.2026): Anfragen JE SEKUNDE, die Resend fuers
       # ganze Konto erlaubt, geteilt durch die Zahl der Worker im Verbund
       # (WEB_CONCURRENCY x Server). Ohne das schickten 46 gleichzeitige

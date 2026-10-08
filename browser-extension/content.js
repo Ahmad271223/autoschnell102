@@ -64,7 +64,31 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ ok: false });
     return false;
   }
-  window.postMessage({ __autoschnell: true, type: "OEFFNEN", ziel }, window.location.origin);
-  sendResponse({ ok: true, app: alsApp() });
-  return false;
+
+  // P1 08.10.2026: Nicht schon den Empfang des postMessage als Erfolg
+  // melden. AutoSchnell kann wegen ungespeicherter Arbeit erst eine
+  // Rueckfrage zeigen. Der Helfer bekommt ok erst nach echter Navigation/
+  // Fahrzeuguebernahme aus programmStart.js.
+  const reqId = (crypto.randomUUID ? crypto.randomUUID()
+    : (Date.now().toString(36) + Math.random().toString(36).slice(2)));
+  let fertig = false;
+  const aufraeumen = () => window.removeEventListener("message", bestaetigt);
+  const bestaetigt = (event) => {
+    const d = event.data;
+    if (event.source !== window || !d || d.__autoschnell !== true
+        || d.type !== "OEFFNEN_BESTAETIGT" || d.reqId !== reqId || fertig) return;
+    fertig = true;
+    clearTimeout(uhr);
+    aufraeumen();
+    sendResponse({ ok: true, app: alsApp() });
+  };
+  window.addEventListener("message", bestaetigt);
+  const uhr = setTimeout(() => {
+    if (fertig) return;
+    fertig = true;
+    aufraeumen();
+    sendResponse({ ok: false, wartet: true, app: alsApp() });
+  }, 21000);
+  window.postMessage({ __autoschnell: true, type: "OEFFNEN", ziel, reqId }, window.location.origin);
+  return true;
 });

@@ -43,6 +43,7 @@ import cleanup_service as _cleanup
 from lifecycle import try_set_lifecycle
 from pdf_service import DIGITAL_NACHTRAEGLICH, generate_contract_pdf, digitaler_vertragstext
 from rate_limiter import SlidingWindowRateLimiter
+from konfig import zahl_env
 
 router = APIRouter()
 
@@ -2543,12 +2544,21 @@ def _frueherer_mailversand(eintraege: list, empfaenger: str, version: int) -> Op
 
 VERSAND_UNKLAR_TEXT = (
     "Der Mail-Dienst hat nicht eindeutig geantwortet — die E-Mail ist vielleicht schon beim "
-    "Empfänger angekommen. Ein erneuter Klick auf „Senden“ (gleiche Adresse, gleicher Text) ist "
-    "sicher: AutoSchnell verschickt sie dann nicht doppelt. Klappt es wieder nicht, bitte beim "
-    "Verkäufer nachfragen oder den Vertrag per WhatsApp schicken.")
+    "Empfänger angekommen. Bitte erneut auf „Senden“ klicken: Mit Resend prüft AutoSchnell "
+    "denselben Idempotency-Key; bei SMTP fragt AutoSchnell vor einem bewussten Neuversand "
+    "noch einmal ausdrücklich nach, damit nicht doppelt gesendet wird.")
 # Resend vergisst einen Idempotency-Key nach 24 Stunden — danach ist die
 # Wiederaufnahme eines unklaren Versands nicht mehr vor Doppelversand geschuetzt.
 UNKLAR_WIEDERAUFNAHME_MAX_S = 23 * 3600
+# Der Browser wartet bei Vertragsaktionen 95 s. Der KRITISCHE Provider-Aufruf
+# muss vorher mit einem eindeutigen Ergebnis enden; sonst sieht der Nutzer
+# einen Browser-Timeout, obwohl die Mail spaeter noch angenommen werden kann.
+# Bei Ablauf bleibt der Versand "unklar" und wird nur mit DEMSELBEN
+# Idempotency-Key wiederaufgenommen.
+VERSAND_PROVIDER_MAX_SEK = zahl_env("VERSAND_PROVIDER_MAX_SEK", 75, unten=10, oben=85)
+# Die Belegkopie an den Sucher ist Zusatz und darf die bereits erfolgreiche
+# Zustellung an den Verkaeufer niemals in einen sichtbaren Fehler verwandeln.
+BELEGKOPIE_MAX_SEK = zahl_env("BELEGKOPIE_MAX_SEK", 8, unten=1, oben=15)
 
 
 def _auto_schluessel(contract_id: str, c: dict, body) -> str:
@@ -2871,8 +2881,30 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                 await _haengenden_versand_abloesen(contract_id, bereich, haengend)
                 frueherer_versand_abgeloest = True
             elif haengend:
-                body.idempotency_key = haengend["idempotency_key"]
-                vorhanden = haengend
+                # Resend kann denselben Provider-Idempotency-Key sicher
+                # wiederaufnehmen. SMTP kann das NICHT: bei einem unklaren
+                # Ausgang koennte die erste Mail bereits angekommen sein.
+                # SMTP-only verlangt deshalb eine ausdrueckliche Bestaetigung;
+                # erst dann wird der alte Versuch als abgeloest markiert und
+                # mit dem NEUEN Schluessel dieses Klicks gesendet.
+                import email_service as _email_service
+                smtp_only = not _email_service.resend_aktiv()
+                if body.channel == "email" and smtp_only:
+                    if not body.erneut:
+                        wann = _zeit_de(haengend.get("sent_at"))
+                        raise HTTPException(409, {
+                            "code": "frueherer_versand_unklar",
+                            "msg": (f"Ein früherer SMTP-Versand an {body.recipient}"
+                                    f"{(' vom ' + wann) if wann else ''} hatte kein eindeutiges "
+                                    "Ergebnis — die E-Mail ist vielleicht schon angekommen. "
+                                    "Trotzdem bewusst noch einmal senden?"),
+                        })
+                    await _haengenden_versand_abloesen(contract_id, bereich, haengend)
+                    frueherer_versand_abgeloest = True
+                    # Der neue body.idempotency_key bleibt bestehen.
+                else:
+                    body.idempotency_key = haengend["idempotency_key"]
+                    vorhanden = haengend
         if vorhanden and vorhanden.get("anfrage_hash") and vorhanden["anfrage_hash"] != anfrage_hash:
             # Runde 16: gleicher Schluessel, anderer Inhalt (Empfaenger/Text nach
             # einem unklaren Versuch geaendert) -> nie wiederaufnehmen.
@@ -3168,12 +3200,32 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
             # Oberflaeche sagt es dem Sucher.
             if not email_service.gueltige_adresse(antwort_adresse):
                 out["antwort_adresse_fehlt"] = True
-            ok, beleg = await email_service.send_email_mit_beleg(
-                body.recipient, betreff, text, anhang=pdf_bytes,
-                anhang_name=dateiname, html=html,
-                reply_to=antwort_adresse,
-                absender_name=firma.get("company_name") or "",
-                idempotency_key=f"vertrag-{contract_id}-{body.idempotency_key}")
+            try:
+                ok, beleg = await asyncio.wait_for(
+                    email_service.send_email_mit_beleg(
+                        body.recipient, betreff, text, anhang=pdf_bytes,
+                        anhang_name=dateiname, html=html,
+                        reply_to=antwort_adresse,
+                        absender_name=firma.get("company_name") or "",
+                        idempotency_key=f"vertrag-{contract_id}-{body.idempotency_key}"),
+                    timeout=VERSAND_PROVIDER_MAX_SEK)
+            except asyncio.TimeoutError:
+                # Ausgang kann unbekannt sein: Provider kann die Anfrage kurz
+                # vor unserem Abbruch angenommen haben. Reservierung deshalb
+                # NICHT loeschen; gleicher Klick/Schluessel darf sicher
+                # wiederaufnehmen, ohne doppelt zuzustellen.
+                log.error("Vertragsversand %s: Provider nach %ss ohne eindeutige Antwort",
+                          contract_id, VERSAND_PROVIDER_MAX_SEK)
+                await _reservierung_unklar()
+                raise HTTPException(
+                    502, {"code": "versand_unklar", "msg": VERSAND_UNKLAR_TEXT})
+            except Exception:  # noqa: BLE001
+                # Transportabbruch/unerwarteter Providerfehler: ebenfalls
+                # konservativ "unklar", nie "nicht gesendet" behaupten.
+                log.exception("Vertragsversand %s: Provider-Aufruf abgebrochen", contract_id)
+                await _reservierung_unklar()
+                raise HTTPException(
+                    502, {"code": "versand_unklar", "msg": VERSAND_UNKLAR_TEXT})
             if ok and beleg:
                 out["beleg"] = beleg
             if not ok and beleg == "anhang_zu_gross":
@@ -3252,14 +3304,28 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                     empfaenger_adresse=body.recipient,
                     betreff_original=betreff, nachricht=nachricht,
                     zeitpunkt=reserviert_am)
-                out["kopie"] = "gesendet" if await email_service.send_email(
-                    sucher_mail, k_betreff, k_text, anhang=pdf_bytes,
-                    anhang_name=dateiname, html=k_html,
-                    absender_name=firma.get("company_name") or "",
-                    idempotency_key=f"kopie-{contract_id}-{body.idempotency_key}") else "fehlgeschlagen"
+                try:
+                    kopie_ok = await asyncio.wait_for(
+                        email_service.send_email(
+                            sucher_mail, k_betreff, k_text, anhang=pdf_bytes,
+                            anhang_name=dateiname, html=k_html,
+                            absender_name=firma.get("company_name") or "",
+                            idempotency_key=f"kopie-{contract_id}-{body.idempotency_key}"),
+                        timeout=BELEGKOPIE_MAX_SEK)
+                    out["kopie"] = "gesendet" if kopie_ok else "fehlgeschlagen"
+                except asyncio.TimeoutError:
+                    # Hauptmail ist bereits erfolgreich. Nie 500/Timeout nur
+                    # wegen der optionalen Belegkopie; deren Ausgang ist offen.
+                    out["kopie"] = "unklar"
+                    log.warning("Belegkopie des Vertrags %s nach %ss noch ohne Ergebnis",
+                                contract_id, BELEGKOPIE_MAX_SEK)
+                except Exception:  # noqa: BLE001
+                    out["kopie"] = "unklar"
+                    log.exception("Belegkopie des Vertrags %s an %s fehlgeschlagen; "
+                                  "Hauptversand bleibt erfolgreich", contract_id, sucher_mail)
                 if out["kopie"] != "gesendet":
-                    log.warning("Kopie des Vertrags %s an %s fehlgeschlagen",
-                                contract_id, sucher_mail)
+                    log.warning("Kopie des Vertrags %s an %s: %s",
+                                contract_id, sucher_mail, out["kopie"])
     else:
         await _reservierung_zurueck()
         raise HTTPException(400, "Unbekannter Kanal")
@@ -3335,19 +3401,35 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
         except Exception:  # noqa: BLE001 — Archiv ist Zusatz, der Versand ist erfolgt
             log.exception("Versand-Schluessel %s nicht archiviert", contract_id)
     if not vermerkt:
-        # Runde 17 (Nr. 372): Der Versand IST erfolgt, aber der Vertrag war
-        # beim Vermerk nicht mehr im Bereich (Loeschung begonnen, Eintrag
-        # durch $slice verdraengt). Vorher blieb das stumm — die Antwort
-        # sagte "versendet", das Archiv wusste nichts davon. Jetzt im Log,
-        # in der Antwort und als eigener Audit-Eintrag (wirft nie).
-        log.warning("Vertrag %s per %s versendet, Status-Vermerk aber nicht "
-                    "gespeichert (Vertrag nicht mehr im Bereich?)",
-                    contract_id, body.channel)
+        # E-Mail: Provider hat die Zustellung bestaetigt. WhatsApp: AutoSchnell
+        # hat nur Share/Chat vorbereitet — ob der Nutzer dort wirklich sendet,
+        # ist nicht beobachtbar. Auch im Fehler-Audit diese Semantik niemals
+        # vermischen.
+        ist_mail = body.channel == "email"
+        log.warning(
+            "Vertrag %s per %s %s, Status-Vermerk aber nicht gespeichert "
+            "(Vertrag nicht mehr im Bereich?)",
+            contract_id, body.channel,
+            "versendet" if ist_mail else "zum Versand vorbereitet")
         out["status_vermerk"] = "nicht_gespeichert"
-        await log_activity_sicher(user["dealer_id"], user["id"],
-                                  "pdf.gesendet.ohne_vermerk", ref=contract_id,
-                                  meta={"channel": body.channel})
-    await log_activity_sicher(user["dealer_id"], user["id"], f"pdf.gesendet.{body.channel}", ref=contract_id)
+        await log_activity_sicher(
+            user["dealer_id"], user["id"],
+            ("pdf.gesendet.ohne_vermerk" if ist_mail
+             else "pdf.versand_vorbereitet.ohne_vermerk.whatsapp"),
+            ref=contract_id,
+            meta={"channel": body.channel,
+                  "zustellung": out.get("zustellung", ""),
+                  "methode": body.methode or ""})
+    # E-Mail ist vom Provider bestaetigt; WhatsApp kann AutoSchnell dagegen
+    # nur vorbereiten/ans Share-Sheet uebergeben. Nie einen nicht beweisbaren
+    # WhatsApp-Versand als "gesendet" auditieren.
+    aktion = ("pdf.gesendet.email" if body.channel == "email"
+              else "pdf.versand_vorbereitet.whatsapp")
+    await log_activity_sicher(
+        user["dealer_id"], user["id"], aktion, ref=contract_id,
+        meta={"zustellung": out.get("zustellung", ""),
+              "methode": body.methode or "",
+              "version": int(c.get("version") or 1)})
     return out
 
 

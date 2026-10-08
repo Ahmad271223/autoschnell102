@@ -79,6 +79,7 @@ export default function AdminUserDetail() {
   const [firmaFehler, setFirmaFehler] = useState("");
   const [showAdd, setShowAdd] = useState(false);
   const [gueltigBis, setGueltigBis] = useState({});   // je Konto-Id das Datumsfeld
+  const [aboTier, setAboTier] = useState({});          // je Konto: normal | pro
   // Wunsch Ahmad 20.09.2026: Vertraege in 20er-Schritten nachladen statt
   // bis zu 2000 auf einmal. Die schon geladenen bleiben stehen, die
   // naechsten 20 kommen darunter dazu.
@@ -188,6 +189,7 @@ export default function AdminUserDetail() {
     setZahlungenFehler("");
     setShowAdd(false);
     setGueltigBis({});
+    setAboTier({});
     loadFirma();
   }, [loadFirma]);
 
@@ -270,26 +272,27 @@ export default function AdminUserDetail() {
   const grantAbo = async (s, plan) => {
     if (!firmaStimmt(s)) return;
     const probe = !!PLAENE[plan]?.probe;
+    const tier = aboTier[s.id] || "normal";
     // Rollenpruefung 22.09.2026 (RP-050/RP-224): eine weitere Probe fuer ein
     // Konto, das schon eine hatte, nur nach ausdruecklicher Rueckfrage.
     if (probe && s.probe_vergeben_am && !window.confirm(
       `${sucherLabel(s)} hatte bereits ein Probe-Abo (vergeben am ${fmtTag(s.probe_vergeben_am)}).\n\n`
       + "Wirklich noch eine kostenlose Probe vergeben?")) return;
     if (!firmaStimmt(s) || !sperren(s.id)) return;             // zweiter Klick waehrend der Anfrage: ignorieren
-    const schluesselName = `${s.id}:${plan}`;
+    const schluesselName = `${s.id}:${plan}:${tier}`;
     if (!schluesselRef.current[schluesselName]) schluesselRef.current[schluesselName] = neuerSchluessel();
     try {
       // Beim Probe-Abo entscheidet die Laufzeit des Plans — ein eigenes
       // Datum lehnt der Server ausdruecklich ab.
       const datum = probe ? "" : (gueltigBis[s.id] || "").trim();
       const { data: erg } = await api.post(`/admin/sucher/${s.id}/abo`,
-        { plan, ...(datum ? { gueltig_bis: datum } : {}),
+        { plan, tier, ...(datum ? { gueltig_bis: datum } : {}),
           idempotenz_schluessel: schluesselRef.current[schluesselName] });
       delete schluesselRef.current[schluesselName];
       if (erg?.bereits_freigeschaltet) {
         toast.info("Diese Freischaltung war schon gebucht — nichts doppelt erfasst.");
       } else {
-        toast.success(`Abo freigeschaltet (${planText(plan, "lang")})`
+        toast.success(`Abo freigeschaltet (${planText(plan, "lang")}) · ${tier === "pro" ? "Pro" : "Normal"}`
           + (datum ? ` · gültig bis ${datum}` : "")
           + (probe ? " — kostenlos, sperrt danach automatisch" : " — Zahlung erfasst"));
       }
@@ -300,6 +303,21 @@ export default function AdminUserDetail() {
     } catch (e) { toast.error(errMsg(e)); }
     finally { freigeben(); }
   };
+  const saveAboTier = async (s, tier) => {
+    if (!firmaStimmt(s) || !sperren(s.id)) return;
+    try {
+      const grund = window.prompt(
+        `Produktstufe auf ${tier === "pro" ? "Pro" : "Normal"} ändern? Grund für den Verlauf:`);
+      if (!grund) return;
+      await api.patch(`/admin/sucher/${s.id}/abo-tier`, { tier, grund });
+      toast.success(tier === "pro"
+        ? "Pro aktiviert — Helfer und Vergleichsprogramm sind sofort freigeschaltet"
+        : "Auf Normal zurückgestuft — Pro-Helfer sind sofort gesperrt");
+      await loadFirma();
+    } catch (e) { toast.error(errMsg(e, "Produktstufe konnte nicht geändert werden")); }
+    finally { freigeben(); }
+  };
+
   const saveGueltigBis = async (s) => {
     const datum = (gueltigBis[s.id] || "").trim();
     if (!datum) { toast.error("Bitte ein Datum wählen"); return; }
@@ -575,12 +593,36 @@ export default function AdminUserDetail() {
                         </td>
                         <td className="px-4 py-2.5">
                           {s.subscription?.active ? (
-                            <Badge tone="green">
-                              Sucher-Funktion: ja · {planText(s.subscription.plan, "zeigen")}
-                            </Badge>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <Badge tone="green">
+                                Sucher-Funktion: ja · {planText(s.subscription.plan, "zeigen")}
+                              </Badge>
+                              <Badge tone={s.subscription?.tier === "pro" ? "purple" : "gray"}>
+                                {s.subscription?.tier === "pro" ? "Pro" : "Normal"}
+                              </Badge>
+                              {superAdmin && (
+                                <Button size="sm" variant="ghost"
+                                  onClick={() => saveAboTier(s, s.subscription?.tier === "pro" ? "normal" : "pro")}
+                                  disabled={busy === s.id}
+                                  data-testid={`abo-tier-${s.id}`}>
+                                  {s.subscription?.tier === "pro" ? "Auf Normal" : "Auf Pro"}
+                                </Button>
+                              )}
+                            </div>
                           ) : (
                             <div className="flex items-center gap-1.5 flex-wrap">
                               <Badge tone="red">Sucher-Funktion: nein</Badge>
+                              <select
+                                value={aboTier[s.id] || "normal"}
+                                onChange={(e) => setAboTier((x) => ({ ...x, [s.id]: e.target.value }))}
+                                disabled={busy === s.id || !superAdmin}
+                                data-testid={`abo-tier-wahl-${s.id}`}
+                                className="h-8 rounded-lg px-2 text-[12px]"
+                                style={{ background: "var(--bg-input-solid)", color: "var(--text-primary)",
+                                         border: "1px solid var(--wa-12)" }}>
+                                <option value="normal">Normal · nur AutoSchnell</option>
+                                <option value="pro">Pro · App + Helfer + Vergleich</option>
+                              </select>
                               <Button size="sm" onClick={() => grantAbo(s, "monthly")} disabled={busy === s.id || !superAdmin}
                                       data-testid={`abo-monat-${s.id}`}
                                       title="Freischalten — erfasst 150 € Zahlung (Rechnung bezahlt); ohne Datum 30 Tage gültig">

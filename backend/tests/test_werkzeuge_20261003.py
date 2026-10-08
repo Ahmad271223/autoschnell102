@@ -30,30 +30,19 @@ WID = wz.AUTOPOINTER
 
 
 # ------------------------------------------------------------ Teil 1: ohne Server
-def test_01_standard_nur_10001_und_10002(monkeypatch):
-    # 03.10.2026 abends (Wunsch Ahmad): "schalte das Programm auch frei jetzt fuer 10001"
-    monkeypatch.delenv("AUTOPOINTER_VERGLEICH_KUNDEN", raising=False)
-    monkeypatch.setenv("BROWSER_HELFER_KUNDEN", "")      # 04.10.2026: zweites Werkzeug, hier nur das Programm
-    assert wz.freigegebene_kunden(WID) == frozenset({"10001", "10002", "10007"})   # 10007 seit 06.10.2026
-    assert wz.ist_freigegeben(WID, 10002)
-    assert wz.ist_freigegeben(WID, 10007)
-    assert wz.ist_freigegeben(WID, "10002")
-    assert wz.ist_freigegeben(WID, " 010002 ")
-    assert wz.ist_freigegeben(WID, 10001)
-    for andere in (10003, 1001, "10002-1", "10001-1", None, "", True):
-        assert not wz.ist_freigegeben(WID, andere), andere
-    assert wz.freigegebene_werkzeuge(10002) == [WID]
-    assert wz.freigegebene_werkzeuge(10023) == []
+def test_01_werkzeuge_sind_pro_metadaten_ohne_kundennummern():
+    assert set(wz.WERKZEUGE) == {wz.AUTOPOINTER, wz.BROWSER_HELFER}
+    for wid, meta in wz.WERKZEUGE.items():
+        assert "kunden_env" not in meta
+        assert "kunden_standard" not in meta
+        assert meta["name"]
+        assert meta["dateiname"]
 
 
-def test_02_liste_per_umgebung(monkeypatch):
-    monkeypatch.setenv("AUTOPOINTER_VERGLEICH_KUNDEN", "10002, 10017;10023")
-    assert wz.freigegebene_kunden(WID) == frozenset({"10002", "10017", "10023"})
-    assert wz.ist_freigegeben(WID, 10017)
-    monkeypatch.setenv("AUTOPOINTER_VERGLEICH_KUNDEN", "")
-    assert wz.freigegebene_kunden(WID) == frozenset()
-    assert not wz.ist_freigegeben(WID, 10002)
-    assert not wz.ist_freigegeben("gibts-nicht", 10002)
+def test_02_keine_alte_kundennummer_berechtigungs_api_mehr():
+    assert not hasattr(wz, "freigegebene_kunden")
+    assert not hasattr(wz, "ist_freigegeben")
+    assert not hasattr(wz, "freigegebene_werkzeuge")
 
 
 def test_03_nur_echte_exe():
@@ -154,6 +143,19 @@ def welt():
     s = konten.sucher_als_chef_anlegen(firma["token"], json={"password": "Wz-Sucher-" + secrets.token_hex(6) + "!"})
     assert s.status_code == 200, s.text
     sucher_token = konten.token_direkt(s.json()["sucher_id"])
+    # Seit 08.10.2026: Werkzeuge sind Pro-Leistung, nicht Kundennummer-Leistung.
+    from datetime import datetime, timezone
+    db.subscriptions.delete_many({"id": f"wz-test-{s.json()['sucher_id']}"})
+    db.subscriptions.insert_one({
+        "id": f"wz-test-{s.json()['sucher_id']}", "subject_user_id": s.json()["sucher_id"],
+        "dealer_id": firma["dealer_id"], "plan": "monthly", "tier": "pro",
+        "status": "active", "expires_at": "2099-01-01T00:00:00+00:00",
+        "created_at": datetime.now(timezone.utc).isoformat()})
+    db.subscriptions.insert_one({
+        "id": f"wz-test-chef-{firma['user_id']}", "subject_user_id": firma["user_id"],
+        "dealer_id": firma["dealer_id"], "plan": "monthly", "tier": "pro",
+        "status": "active", "expires_at": "2099-01-01T00:00:00+00:00",
+        "created_at": datetime.now(timezone.utc).isoformat()})
     meta_vorher = db.werkzeuge.find_one({"id": WID}, {"_id": 0})
     try:
         yield {"db": db, "chef": konten._kopf(firma["token"]), "sucher": konten._kopf(sucher_token),
@@ -298,14 +300,14 @@ def test_23_weitere_vw_modell_aus_dem_titel():
     assert links == [] and any("Weitere VW" in h for h in hinweise)
 
 
-def _abo(welt, an: bool):
+def _abo(welt, an: bool, tier: str = "pro"):
     db = welt["db"]
     db.subscriptions.delete_many({"id": f"wz-test-{welt['sucher_id']}"})
     if an:
         from datetime import datetime, timezone
         db.subscriptions.insert_one({
             "id": f"wz-test-{welt['sucher_id']}", "subject_user_id": welt["sucher_id"],
-            "dealer_id": welt["firma"]["dealer_id"], "plan": "monthly", "status": "active",
+            "dealer_id": welt["firma"]["dealer_id"], "plan": "monthly", "tier": tier, "status": "active",
             "expires_at": "2099-01-01T00:00:00+00:00", "created_at": datetime.now(timezone.utc).isoformat()})
 
 
@@ -333,6 +335,38 @@ def test_30_code_nur_mit_abo(welt):
     _abo(welt, False)
     r = requests.post(f"{API}/werkzeuge/{WID}/code", headers=welt["sucher"], timeout=30)
     assert r.status_code == 402
+
+
+def test_30b_normal_abo_sieht_und_nutzt_keine_pro_werkzeuge(welt):
+    _abo(welt, True, tier="normal")
+    assert _liste(welt["sucher"]) == []
+    assert _download(welt["sucher"]).status_code == 404
+    assert requests.post(f"{API}/werkzeuge/{WID}/code",
+                         headers=welt["sucher"], timeout=30).status_code == 404
+    _abo(welt, True, tier="pro")
+    assert any(x["id"] == WID for x in _liste(welt["sucher"]))
+
+
+def test_30c_normal_abo_sperrt_auch_meine_und_chef_uebersicht(welt):
+    _abo(welt, True, tier="normal")
+    assert requests.get(f"{API}/werkzeuge/{WID}/meine",
+                        headers=welt["sucher"], timeout=30).status_code == 404
+    # Chef hat in der Fixture ein eigenes Pro-Abo; Normal hier betrifft den
+    # Sucher. Die Chef-Uebersicht bleibt also erreichbar. Danach wird auch
+    # der Chef selbst auf Normal gesetzt und muss die Pro-Uebersicht verlieren.
+    db = welt["db"]
+    chef_id = welt["firma"]["user_id"]
+    chef_sub = db.subscriptions.find_one(
+        {"subject_user_id": chef_id, "status": {"$ne": "ersetzt"}},
+        sort=[("created_at", -1)])
+    assert chef_sub
+    db.subscriptions.update_one({"_id": chef_sub["_id"]}, {"$set": {"tier": "normal"}})
+    try:
+        assert requests.get(f"{API}/werkzeuge/{WID}/firma",
+                            headers=welt["chef"], timeout=30).status_code == 404
+    finally:
+        db.subscriptions.update_one({"_id": chef_sub["_id"]}, {"$set": {"tier": "pro"}})
+        _abo(welt, True, tier="pro")
 
 
 def test_31_verbinden_status_vergleich(welt):
@@ -424,7 +458,10 @@ def test_37_chef_und_admin_sehen_wer_was_verglichen_hat(welt):
     a = requests.get(f"{API}/admin/werkzeug-vergleiche", params={"dealer_id": welt["firma"]["dealer_id"]},
                      headers=konten.super_kopf(), timeout=30)
     assert a.status_code == 200, a.text
-    assert a.json()["vergleiche"][0]["kunden_nr"] == 10002 and a.json()["name"] == "AutoSchnell Vergleich"
+    assert a.json()["vergleiche"][0]["kunden_nr"] == 10002
+    assert a.json()["name"] == "AutoSchnell Vergleich"
+    assert a.json()["produktstufe"] == "pro"
+    assert "freigegeben_fuer" not in a.json()
     assert requests.get(f"{API}/admin/werkzeug-vergleiche", headers=welt["chef"], timeout=30).status_code == 403
 
 
@@ -858,7 +895,7 @@ def test_62_status_nennt_die_angebotene_version_und_merkt_die_eigene(welt):
 
 
 def test_63_app_start_rueckmeldung(welt):
-    """Nr. 12: die App meldet den Start, das Programm fragt danach — nur fuer die eigene Firma."""
+    """App-Start bestaetigt nur das exakt gleiche Konto, nicht nur dieselbe Firma."""
     _code_bremse_frei(welt)
     _abo(welt, True)
     _, prog, _ = _verbinden(welt, "PC-A")
@@ -869,14 +906,23 @@ def test_63_app_start_rueckmeldung(welt):
     assert r.status_code == 200, r.text
     assert requests.post(f"{API}/werkzeuge/app-start/{start}", headers=welt["sucher"], timeout=30).status_code == 200
     assert frage(start).json() == {"bestaetigt": True}
-    # eine fremde Firma meldet denselben Start nicht fuer uns
+
+    # Auch der CHEF derselben Firma darf den Programm-Start dieses Suchers
+    # nicht bestaetigen: sonst koennte dessen App-Fenster den Fallback des
+    # falschen Kontos unterdruecken.
+    kollege = uuid.uuid4().hex
+    assert requests.post(f"{API}/werkzeuge/app-start/{kollege}",
+                         headers=welt["chef"], timeout=30).status_code == 200
+    assert frage(kollege).json() == {"bestaetigt": False}
+
+    # eine fremde Firma ebenfalls nicht
     fremd = uuid.uuid4().hex
     requests.post(f"{API}/werkzeuge/app-start/{fremd}", headers=welt["andere"], timeout=30)
     assert frage(fremd).json() == {"bestaetigt": False}
     assert requests.post(f"{API}/werkzeuge/app-start/kaputt", headers=welt["sucher"], timeout=30).status_code == 400
     assert requests.post(f"{API}/werkzeuge/app-start/{start}", timeout=30).status_code in (401, 403)
     assert frage("kaputt").json() == {"bestaetigt": False}
-    welt["db"].werkzeug_app_starts.delete_many({"start": {"$in": [start, fremd]}})
+    welt["db"].werkzeug_app_starts.delete_many({"start": {"$in": [start, kollege, fremd]}})
 
 
 # ------------------------------------------------------------ Paket 2 (Pruefung 05./06.10.2026)

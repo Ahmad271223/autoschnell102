@@ -565,6 +565,37 @@ async def current_super_admin(user=Depends(current_admin)):
 # geben (der Plan gilt dann als "ungueltig", siehe unten).
 ABO_PLAENE_ERLAUBT = {"monthly", "yearly", "trial", "lifetime",
                       "probe3", "probe5"}
+# Produktstufe ist absichtlich getrennt von der Laufzeit (monthly/yearly/...):
+# Normal = normale AutoSchnell-App, Pro = normale App + AutoSchnell Vergleich
+# (AutoPointer) + Browser-Helfer. Alt-Abos ohne Feld bleiben als Normal gueltig.
+ABO_STUFEN_ERLAUBT = {"normal", "pro"}
+ABO_FEATURES = {
+    "normal": frozenset({"app"}),
+    "pro": frozenset({"app", "autopointer_vergleich", "browser_helfer"}),
+}
+
+
+def abo_stufe(sub: Optional[dict]) -> str:
+    """Produktstufe eines Abo-Dokuments/Status. Altbestand ohne tier = normal.
+
+    Ein unbekannter expliziter Wert faellt sicher auf Normal zurueck: Zugang
+    zur normalen App bleibt erhalten, Pro-Werkzeuge werden niemals versehentlich
+    freigeschaltet.
+    """
+    roh = str((sub or {}).get("tier") or "normal").strip().lower()
+    if roh not in ABO_STUFEN_ERLAUBT:
+        log.error("Abo %s: unbekannte Produktstufe %r -> normal",
+                  (sub or {}).get("id"), roh)
+        return "normal"
+    return roh
+
+
+def abo_hat_feature(sub: Optional[dict], feature: str) -> bool:
+    """Hat dieser *aktive* Abo-Status die angeforderte Produktfunktion?"""
+    if not sub or not sub.get("active"):
+        return False
+    return feature in ABO_FEATURES.get(abo_stufe(sub), frozenset())
+
 # Zustaende, in denen ein Abo (noch) Zugang gewaehrt: gekuendigt laeuft bis
 # zum Ablaufdatum weiter. Alles andere (ersetzt, expired, suspended,
 # revoked, unbekannt) ist fail-closed inaktiv.
@@ -602,11 +633,14 @@ def sub_status_from_doc(sub) -> dict:
     - naives Datum -> als UTC interpretiert (nie "ewig aktiv")
     """
     if not sub:
-        return {"active": False, "plan": None, "expires_at": None, "status": "none"}
+        return {"active": False, "plan": None, "tier": "normal",
+                "expires_at": None, "status": "none"}
     plan = sub.get("plan")
     status_ = sub.get("status", "active") or "active"
     expires_at = sub.get("expires_at")
-    out = {"active": False, "plan": plan, "expires_at": expires_at, "status": status_}
+    tier = abo_stufe(sub)
+    out = {"active": False, "plan": plan, "tier": tier,
+           "expires_at": expires_at, "status": status_}
     if status_ not in _ABO_STATUS_ZUGANG:
         return out
     if plan not in ABO_PLAENE_ERLAUBT:
@@ -616,8 +650,8 @@ def sub_status_from_doc(sub) -> dict:
     if plan == "lifetime" and not expires_at:
         # Lifetime ohne gesetztes Ende: aktiv, solange der Status es erlaubt.
         # "Abo aufheben" setzt cancelled + expires_at=jetzt -> unten inaktiv.
-        return {"active": True, "plan": "lifetime", "expires_at": None,
-                "status": status_}
+        return {"active": True, "plan": "lifetime", "tier": tier,
+                "expires_at": None, "status": status_}
     if not expires_at:
         log.error("Abo %s (%s): kein Ablaufdatum -> inaktiv", sub.get("id"), plan)
         out["status"] = "ungueltig"

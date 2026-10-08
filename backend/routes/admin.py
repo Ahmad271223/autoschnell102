@@ -2520,6 +2520,9 @@ class AboFreischaltenIn(BaseModel):
     Ersetzen durch den Listenpreis, kein 0 EUR), Zahlungsart mit
     Pflichtbegruendung bei Kulanz."""
     plan: Optional[Literal["monthly", "yearly", "probe3", "probe5"]] = None
+    # Produktstufe getrennt von der Laufzeit: normal = nur AutoSchnell-App,
+    # pro = App + AutoSchnell Vergleich + Browser-Helfer.
+    tier: Literal["normal", "pro"] = "normal"
     gueltig_bis: Optional[str] = Field(default=None, max_length=30)
     betrag: Optional[Decimal] = Field(default=None, gt=Decimal("0"),
                                       le=Decimal("100000"))
@@ -2789,6 +2792,7 @@ async def _massgebliches_abo(sucher_id: str, dealer_id: Optional[str],
 
 def _vorgang_antwort(v: dict, **extra) -> dict:
     return {"ok": True, "active": True, "plan": v.get("plan"),
+            "tier": v.get("tier") or "normal",
             "expires_at": v.get("expires_at"), "vorgang_id": v.get("id"),
             "betrag": v.get("betrag"), **extra}
 
@@ -2972,7 +2976,7 @@ async def _abo_freischalten(sucher: dict, sucher_id: str, body: AboFreischaltenI
     vorgang = {
         "id": str(uuid.uuid4()), "typ": "freischaltung",
         "subject_user_id": sucher_id, "dealer_id": sucher.get("dealer_id"),
-        "plan": plan, "expires_at": expires_at, "betrag": betrag,
+        "plan": plan, "tier": body.tier, "expires_at": expires_at, "betrag": betrag,
         "waehrung": "EUR", "zahlungsart": body.zahlungsart,
         "grund": body.grund.strip(), "gezahlt_am": gezahlt_am or now_iso()[:10],
         "notiz": body.notiz.strip(),
@@ -3028,7 +3032,8 @@ async def _abo_vorgang_ausfuehren(v: dict) -> None:
         {"id": vid},
         {"$setOnInsert": {
             "id": vid, "dealer_id": v.get("dealer_id"), "subject_user_id": sid,
-            "plan": v["plan"], "status": "active", "expires_at": v["expires_at"],
+            "plan": v["plan"], "tier": v.get("tier") or "normal",
+            "status": "active", "expires_at": v["expires_at"],
             "price": v["betrag"], "vorgang_id": vid,
             "activated_by": v.get("admin_email", ""), "created_at": jetzt}},
         upsert=True)
@@ -3037,6 +3042,7 @@ async def _abo_vorgang_ausfuehren(v: dict) -> None:
         {"$setOnInsert": {
             "id": str(uuid.uuid4()), "dealer_id": v.get("dealer_id"),
             "subject_user_id": sid, "plan": v["plan"],
+            "tier": v.get("tier") or "normal",
             "amount": float(v["betrag"]), "currency": "EUR",
             "paid_at": v.get("gezahlt_am") or jetzt[:10],
             "period_until": v["expires_at"],       # bezahlt bis = Ablauf bei Freischaltung
@@ -3054,7 +3060,8 @@ async def _abo_vorgang_ausfuehren(v: dict) -> None:
     if not (v.get("schritte") or {}).get("audit"):
         await log_activity_sicher(v.get("dealer_id", "") or "", v.get("admin_id", ""),
                            "admin.sucher.abo.freigeschaltet", ref=sid,
-                           meta={"plan": v["plan"], "betrag": v["betrag"],
+                           meta={"plan": v["plan"], "tier": v.get("tier") or "normal",
+                                 "betrag": v["betrag"],
                                  "zahlungsart": v.get("zahlungsart"),
                                  "vorgang_id": vid})
         await db.abo_vorgaenge.update_one({"id": vid}, {"$set": {"schritte.audit": True}})
@@ -3147,6 +3154,64 @@ def _gueltig_bis_parsen(wert) -> str:
     except Exception:
         tz = timezone(timedelta(hours=1))
     return tag.replace(hour=23, minute=59, second=59, tzinfo=tz).isoformat()
+
+
+@router.patch("/admin/sucher/{sucher_id}/abo-tier")
+async def admin_set_abo_tier(sucher_id: str, body: dict = Body(...),
+                             admin=Depends(current_super_admin)):
+    """Produktstufe Normal/Pro aendern, ohne Laufzeit oder Zahlung anzufassen."""
+    tier = str(body.get("tier") or "").strip().lower()
+    if tier not in ("normal", "pro"):
+        raise HTTPException(400, "tier muss normal oder pro sein")
+    grund = str(body.get("grund") or "").strip()[:300]
+    if not grund:
+        raise HTTPException(400, "Bitte einen Grund fuer die Produktstufen-Aenderung angeben")
+
+    konto = await db.users.find_one(
+        {"id": sucher_id, "role": {"$in": ["sucher", "dealer"]}},
+        {"_id": 0, "id": 1, "role": 1, "dealer_id": 1, "active": 1})
+    if not konto:
+        raise HTTPException(404, "Sucher nicht gefunden")
+    if konto.get("active") is False and tier == "pro":
+        raise HTTPException(409, "Das Konto ist deaktiviert — Pro kann erst nach dem Entsperren aktiviert werden.")
+
+    ist_chef = await _ist_hauptchef_konto(konto)
+    async with _sperre(f"abo:{sucher_id}", _handelnder(admin)) as wache:
+        wache.pruefen()
+        aktiv = await _massgebliches_abo(
+            sucher_id, konto.get("dealer_id"), ist_chef, auch_abgelaufen=False)
+        if not aktiv or not aktiv.get("id"):
+            raise HTTPException(404, "Kein aktives Abo fuer dieses Konto")
+
+        alt = str(aktiv.get("tier") or "normal").strip().lower()
+        if alt not in ("normal", "pro"):
+            alt = "normal"
+        if alt == tier:
+            return {"ok": True, "active": True, "tier": tier,
+                    "plan": aktiv.get("plan"), "expires_at": aktiv.get("expires_at"),
+                    "unveraendert": True}
+
+        jetzt = now_iso()
+        r = await db.subscriptions.update_one(
+            {"id": aktiv["id"], "status": {"$in": ["active", "cancelled"]}},
+            {"$set": {"tier": tier, "updated_at": jetzt}})
+        if r.matched_count != 1:
+            raise HTTPException(409, "Abo wurde parallel geaendert — bitte neu laden und erneut versuchen")
+
+        await db.zugangs_aenderungen.insert_one({
+            "id": str(uuid.uuid4()), "art": "produktstufe_geaendert",
+            "abo_id": aktiv["id"], "subject_user_id": sucher_id,
+            "dealer_id": konto.get("dealer_id"), "alt": alt, "neu": tier,
+            "grund": grund, "admin_id": admin["id"],
+            "admin_email": _handelnder(admin), "created_at": jetzt,
+        })
+        await log_activity_sicher(
+            konto.get("dealer_id") or "", admin["id"],
+            "admin.sucher.abo.tier_geaendert", ref=sucher_id,
+            meta={"alt": alt, "neu": tier, "abo_id": aktiv["id"], "grund": grund})
+
+        return {"ok": True, "active": True, "tier": tier,
+                "plan": aktiv.get("plan"), "expires_at": aktiv.get("expires_at")}
 
 
 @router.patch("/admin/sucher/{sucher_id}/abo-gueltig-bis")

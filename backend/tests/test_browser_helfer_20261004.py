@@ -269,10 +269,9 @@ def test_10_verhandlung_hinweise_kurz_und_ehrlich():
     assert bh.verhandlung_hinweise({"hu": "Neu", "previous_owners": "1"}) == []
 
 
-def test_11_werkzeug_eintrag_zip_statt_exe(monkeypatch):
-    monkeypatch.delenv("BROWSER_HELFER_KUNDEN", raising=False)
-    monkeypatch.delenv("AUTOPOINTER_VERGLEICH_KUNDEN", raising=False)
-    assert wz.freigegebene_werkzeuge(10002) == [wz.AUTOPOINTER, WID]
+def test_11_werkzeug_eintrag_zip_statt_exe():
+    # Produktberechtigung liegt nicht in werkzeuge.py/Kundennummern, sondern
+    # zentral im aktiven Abo-Tier der Route. Hier nur Dateityp/Metadaten pruefen.
     assert wz.art(WID) == "browser" and wz.art(wz.AUTOPOINTER) == "windows"
     puffer = io.BytesIO()
     with zipfile.ZipFile(puffer, "w") as z:
@@ -540,7 +539,7 @@ def welt():
     for uid in (sucher_id, firma["user_id"]):
         db.subscriptions.insert_one({
             "id": f"bh-test-{uid}", "subject_user_id": uid, "dealer_id": firma["dealer_id"], "plan": "monthly",
-            "status": "active", "expires_at": "2099-01-01T00:00:00+00:00",
+            "tier": "pro", "status": "active", "expires_at": "2099-01-01T00:00:00+00:00",
             "created_at": datetime.now(timezone.utc).isoformat()})
     try:
         yield {"db": db, "chef": konten._kopf(firma["token"]), "sucher": konten._kopf(konten.token_direkt(sucher_id)),
@@ -619,21 +618,17 @@ def test_32_kaufvertrag_nimmt_die_browserdaten_ohne_abruf(welt):
     assert db.listings_cache.count_documents({"cache_key": f"mobile:{MOBILE_ID}"}) == 0, "nicht im Server-Speicher"
     vc = db.vehicle_comparisons.find_one({"user_id": welt["sucher_id"], "cache_key": f"mobile:{MOBILE_ID}"})
     assert vc and "browser_helfer_von" not in vc, "eigene Lesung: kein Lieferer vermerkt"
-    # Entscheidung Ahmad 04.10.2026 abends ("alle sofort"): auch der Chef nimmt die Lesung des Suchers — kein Abruf
-    chef = requests.post(f"{API}/mobile/compare", json={"url": MOBILE_URL}, headers=welt["chef"], timeout=60)
-    assert chef.status_code == 200, chef.text[:300]
-    assert chef.json()["cached"] is True and chef.json()["vehicle"]["make_label"] == "Volkswagen"
-    assert not chef.json()["vehicle"].get("_mock")
-    assert db.link_jobs.count_documents({"url": {"$regex": MOBILE_ID}}) == jobs_vorher, "kein Abruf fuer den Chef"
-    vc = db.vehicle_comparisons.find_one({"user_id": welt["firma"]["user_id"], "cache_key": f"mobile:{MOBILE_ID}"})
-    assert vc["browser_helfer_von"] == {"user_id": welt["sucher_id"], "dealer_id": welt["firma"]["dealer_id"]}
+    # Sicherheitsregel 08.10.2026: selbst der Chef derselben Firma darf
+    # NICHT die Browser-Lesung des Suchers als Vertragsquelle erben.
+    chef_check = requests.post(f"{API}/listings/check", json={"url": MOBILE_URL},
+                               headers=welt["chef"], timeout=30)
+    assert chef_check.status_code == 200, chef_check.text[:300]
+    assert not chef_check.json().get("browser_helfer"),         "Browserdaten eines anderen Kontos duerfen nicht wiederverwendet werden"
     db.listings_cache.delete_many({"cache_key": f"mobile:{MOBILE_ID}"})
 
 
-def test_32b_fremde_firma_nimmt_die_lesung_ohne_apify(welt):
-    """Entscheidung Ahmad 04.10.2026 abends: wer den mobile.de-Link direkt in AutoSchnell einfuegt (ohne Helfer und
-    Programm), bekommt die Lesung des Helfers irgendeines Kontos aus den letzten 24 h — kein Apify-Abruf. Wer
-    geliefert hat, steht nur am Vergleich (nie in der Antwort)."""
+def test_32b_fremde_firma_bekommt_keine_browserdaten(welt):
+    """Browser-Snapshots sind kontogebunden: fremde Firmen muessen den normalen Anbieterweg benutzen."""
     from datetime import datetime, timezone
     db = welt["db"]
     andere = welt["andere_firma"]
@@ -643,18 +638,14 @@ def test_32b_fremde_firma_nimmt_die_lesung_ohne_apify(welt):
         "id": f"bh-test-andere-{andere['user_id']}", "subject_user_id": andere["user_id"],
         "dealer_id": andere["dealer_id"], "plan": "monthly", "status": "active",
         "expires_at": "2099-01-01T00:00:00+00:00", "created_at": datetime.now(timezone.utc).isoformat()})
-    jobs_vorher = db.link_jobs.count_documents({"url": {"$regex": MOBILE_ID}})
     chk = requests.post(f"{API}/listings/check", json={"url": MOBILE_URL}, headers=welt["andere"], timeout=30)
-    assert chk.status_code == 200 and chk.json()["status"] == "completed" and chk.json().get("browser_helfer"), chk.text
-    r = requests.post(f"{API}/mobile/compare", json={"url": MOBILE_URL}, headers=welt["andere"], timeout=60)
-    assert r.status_code == 200, r.text[:300]
-    d = r.json()
-    assert d["cached"] is True and d["vehicle"]["make_label"] == "Volkswagen" and d["vehicle"]["mobile_ad_id"] == MOBILE_ID
-    assert d["beweis_moeglich"] is True, "Beweis auf Knopfdruck per Server-Abruf (RP-446)"
-    assert db.link_jobs.count_documents({"url": {"$regex": MOBILE_ID}}) == jobs_vorher, "kein Apify-Abruf"
-    assert welt["sucher_id"] not in r.text, "der Lieferer steht nie in der Antwort"
+    assert chk.status_code == 200, chk.text
+    assert not chk.json().get("browser_helfer"), \
+        "Fremde Browser-Lesung darf nie Fahrzeug-/Vertragsquelle sein"
+    # Insbesondere darf kein Vergleich dieser Firma den fremden Lieferer vermerken.
     vc = db.vehicle_comparisons.find_one({"dealer_id": andere["dealer_id"], "cache_key": ck})
-    assert vc["browser_helfer_von"] == {"user_id": welt["sucher_id"], "dealer_id": welt["firma"]["dealer_id"]}
+    assert not vc or vc.get("browser_helfer_von") != {
+        "user_id": welt["sucher_id"], "dealer_id": welt["firma"]["dealer_id"]}
     db.listings_cache.delete_many({"cache_key": ck})
 
 

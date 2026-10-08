@@ -257,7 +257,7 @@ internal sealed class Leiste : Form
         _tipps.SetToolTip(_schalter, z.AutomatikAn ? "Automatik stoppen – es öffnet sich nichts mehr"
                                                    : "Automatik starten – Vergleiche öffnen sich beim Anklicken");
         _vergleichen.Enabled = z.Verbunden;
-        _vertrag.Enabled = z.Verbunden && z.LetztesAuto != null;
+        _vertrag.Enabled = z.Verbunden && z.VertragBereit;
     }
 
     internal static string Kurz(string titel) => titel switch

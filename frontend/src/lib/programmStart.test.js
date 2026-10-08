@@ -60,8 +60,10 @@ describe("Browser-Helfer: Ziel aus der Erweiterung im offenen App-Fenster (04.10
   function appFenster(pfad) {
     const f = fenster(pfad);
     const hoerer = [];
+    f.nachrichten = [];
     f.addEventListener = (typ, h) => hoerer.push(h);
     f.removeEventListener = vi.fn();
+    f.postMessage = (data) => { f.nachrichten.push(data); };
     f.senden = (data, quelle = f) => hoerer.forEach((h) => h({ source: quelle, data }));
     return f;
   }
@@ -80,6 +82,30 @@ describe("Browser-Helfer: Ziel aus der Erweiterung im offenen App-Fenster (04.10
     expect(nav).not.toHaveBeenCalled();
     expect(f.ereignisse[0].detail).toEqual({ link: KA, vertrag: true });
   });
+  it("Browser-Helfer bestaetigt bei ungespeicherter Arbeit erst nach echtem Oeffnen", () => {
+    const f = appFenster("/app/vertraege");
+    const nav = vi.fn();
+    let knopf = null;
+    erweiterungZieleVerfolgen(nav, {
+      fenster: f,
+      beschaeftigt: () => true,
+      nachfragen: (ausfuehren) => { knopf = ausfuehren; },
+    });
+    f.senden({
+      __autoschnell: true,
+      type: "OEFFNEN",
+      ziel: `/app/vergleich?url=${encodeURIComponent(KA)}&vertrag=1`,
+      reqId: "req-123",
+    });
+    expect(nav).not.toHaveBeenCalled();
+    expect(f.ereignisse).toHaveLength(0);
+    knopf();
+    expect(nav).toHaveBeenCalledTimes(1);
+    expect(f.nachrichten).toContainEqual({
+      __autoschnell: true, type: "OEFFNEN_BESTAETIGT", reqId: "req-123",
+    });
+  });
+
   it("fremde Quelle, fremde Ziele und ungespeicherte Arbeit", () => {
     const f = appFenster("/app/termine");
     const nav = vi.fn();
@@ -164,12 +190,28 @@ describe("Pruefbericht 03.10.2026 (Nr. 12): Rueckmeldung an das Programm", () =>
     expect(client.post).toHaveBeenCalledTimes(1);
   });
 
-  it("offenes Fenster meldet den Start sofort — auch wenn wegen Ungespeichertem erst gefragt wird", () => {
+  it("ungespeicherte Arbeit meldet erst nach wirklicher Uebernahme", () => {
     const f = fenster("/app/vertraege");
     const melden = vi.fn();
-    startZieleVerfolgen(vi.fn(), { fenster: f, startAdresse: `${O}/start`, beschaeftigt: () => true,
-                                   nachfragen: () => {}, melden });
+    const nav = vi.fn();
+    let knopf = null;
+    startZieleVerfolgen(nav, { fenster: f, startAdresse: `${O}/start`, beschaeftigt: () => true,
+                               nachfragen: (ausfuehren) => { knopf = ausfuehren; }, melden });
     f.starten(MIT_START);
+    expect(melden).not.toHaveBeenCalled();
+    expect(nav).not.toHaveBeenCalled();
+    knopf();
+    expect(nav).toHaveBeenCalledTimes(1);
+    expect(melden).toHaveBeenCalledWith(S);
+  });
+
+  it("freie App meldet direkt nach der Uebernahme", () => {
+    const f = fenster("/app/termine");
+    const melden = vi.fn();
+    const nav = vi.fn();
+    startZieleVerfolgen(nav, { fenster: f, startAdresse: `${O}/start`, melden });
+    f.starten(MIT_START);
+    expect(nav).toHaveBeenCalledTimes(1);
     expect(melden).toHaveBeenCalledWith(S);
   });
 

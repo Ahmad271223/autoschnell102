@@ -40,6 +40,7 @@ public class UeberwacherTests
         public DienstFehler? Fehler;
         public string? InseratUrl;
         public List<string>? Melden;
+        public Action? WaehrendDesVergleichs;
         public readonly List<Fahrzeug> Anfragen = new();
         public int Vorgewaermt;
         public void Vorwaermen() => Vorgewaermt++;
@@ -47,6 +48,7 @@ public class UeberwacherTests
         public Task<VergleichAntwort> VergleichAsync(Fahrzeug f, bool probelauf)
         {
             Anfragen.Add(f);
+            WaehrendDesVergleichs?.Invoke();
             if (Fehler != null) return Task.FromException<VergleichAntwort>(Fehler);
             int leer = f.MarkeModellText.IndexOf(' ');
             string id = (leer > 0 ? $"{f.MarkeModellText[..leer]}-{f.MarkeModellText[(leer + 1)..]}" : f.MarkeModellText)
@@ -382,6 +384,60 @@ public class UeberwacherTests
     }
 
     [Fact]
+    public async Task Fahrzeugwechsel_sperrt_alten_Vertragslink_sofort()
+    {
+        await Start();
+        _server.InseratUrl = "https://www.kleinanzeigen.de/s-anzeige/3529712138-216-1234";
+        await Anklicken(Bentley, 1);
+        Assert.True(_u.VertragBereit);
+        Assert.NotNull(_u.LetzteInseratUrl);
+
+        // AutoPointer zeigt bereits B, aber Stabilisierung/OCR fuer B ist noch
+        // nicht fertig. In genau diesem Fenster darf Vertrag NIE noch A oeffnen.
+        _server.InseratUrl = "https://www.kleinanzeigen.de/s-anzeige/3529719999-216-1234";
+        _q.Zeige(Passat, 2);
+        await Tick(100);                         // Aenderung nur erkannt
+        Assert.False(_u.VertragBereit);
+        Assert.Null(_u.LetzteInseratUrl);
+
+        // Nach sicherer Verarbeitung gehoeren Link und Fahrzeug wieder zusammen.
+        for (int i = 0; i < 4; i++) await Tick(250);
+        Assert.True(_u.VertragBereit);
+        Assert.Contains("3529719999", _u.LetzteInseratUrl);
+    }
+
+    [Fact]
+    public async Task Fahrzeugwechsel_waehrend_Serveranfrage_verwirft_alte_Antwort_und_Vertrag()
+    {
+        await Start();
+        _server.InseratUrl = "https://www.kleinanzeigen.de/s-anzeige/3529712138-216-1234";
+        _q.Zeige(Bentley, 1);
+
+        // Genau der Race: OCR fuer A ist fertig; waehrend AutoSchnell A
+        // verarbeitet, zeigt AutoPointer bereits B. Der Takt kann wegen der
+        // _einzeln-Sperre noch nicht reagieren.
+        _server.WaehrendDesVergleichs = () =>
+        {
+            _q.Zeige(Passat, 2);
+            _server.WaehrendDesVergleichs = null;
+        };
+
+        for (int i = 0; i < 4; i++) await Tick(250);
+
+        Assert.False(_u.VertragBereit);
+        Assert.Null(_u.LetzteInseratUrl);
+        Assert.Empty(_b.Aufrufe);       // auch keine Vergleich-Tabs fuer das alte Auto
+
+        // Danach B normal stabil lesen/verarbeiten.
+        _server.InseratUrl = "https://www.kleinanzeigen.de/s-anzeige/3529719999-216-1234";
+        for (int i = 0; i < 4; i++) await Tick(250);
+        Assert.True(_u.VertragBereit);
+        Assert.Contains("3529719999", _u.LetzteInseratUrl);
+        Assert.Single(_b.Aufrufe);
+        Assert.Contains("VW-Passat", _b.Aufrufe[0][0].Url);
+    }
+
+    [Fact]
     public async Task AutoScout_ohne_Hash_ID_sagt_Link_selbst_einfuegen()
     {
         await Start();
@@ -573,6 +629,37 @@ public class UeberwacherTests
         for (int i = 0; i < 4; i++) await TickK(u);
         Assert.Equal(2, _b.Aufrufe.Count);
         Assert.Contains("VW-Golf-2019", _b.Aufrufe[1][0].Url);
+    }
+
+    [Fact]
+    public async Task Automatischer_Wechsel_waehrend_Serveranfrage_erbt_nicht_den_alten_Klick()
+    {
+        var u = MitKlicks();
+        await TickK(u);
+
+        // A wird wirklich angeklickt.
+        _klickMs = JetztMs;
+        _q.Zeige(Bentley, 1);
+
+        // Waehrend A beim Server verarbeitet wird, zeigt AutoPointer B von
+        // selbst. Kein neuer Klick fuer B.
+        _server.WaehrendDesVergleichs = () =>
+        {
+            _q.Zeige(Passat, 2);
+            _server.WaehrendDesVergleichs = null;
+        };
+        for (int i = 0; i < 5; i++) await TickK(u);
+
+        Assert.Empty(_b.Aufrufe);          // A verworfen, B nicht automatisch
+        Assert.False(u.VertragBereit);
+        Assert.Null(u.LetzteInseratUrl);
+
+        // Erst der echte Klick auf das schon sichtbare B gibt es frei.
+        _klickMs = JetztMs;
+        for (int i = 0; i < 5; i++) await TickK(u);
+        Assert.Single(_b.Aufrufe);
+        Assert.Contains("VW-Passat_Variant-2006", _b.Aufrufe[0][0].Url);
+        Assert.True(u.VertragBereit);
     }
 
     [Fact]
