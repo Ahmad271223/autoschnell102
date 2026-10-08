@@ -357,6 +357,24 @@ internal sealed class TrayApp : ApplicationContext
             else Sprechblase(Ueberwacher.VertragOhneAdresse, true, erzwingen: true, ausfuehrlich: Ueberwacher.LinkHinweisFuer(fahrzeug));
             return;
         }
+        // 1.5.11 (Wunsch Ahmad 08.10.2026 abends, "Vertrag: Inserat oeffnen und lesen, kein Apify"): hat das Konto die
+        // Erweiterung und liegt das Inserat noch nicht gelesen vor, erst das Inserat in IHREM Browser oeffnen und warten,
+        // bis sie es gelesen hat — sonst haette die App es ueber Apify geholt.
+        if (_ueberwacher?.HatHelfer == true)
+        {
+            var browser = Ueberwacher.BrowserFuer(_einstellungen.Browser, _ueberwacher.HelferBrowser);
+            string inserat = url;
+            bool bereit = await VertragsWeg.InseratBereitAsync(url, _dienst.InseratGelesenAsync,
+                () =>
+                {
+                    Protokoll.Schreibe("Kaufvertrag: Inserat zum Lesen geöffnet: " + inserat);
+                    try { BrowserOeffner.Oeffne(new[] { inserat }, browser); }
+                    catch (Exception ex) { Protokoll.Schreibe("Inserat nicht geöffnet: " + ex); }
+                },
+                (text, fehler) => Sprechblase(text, fehler, erzwingen: true),
+                t => Task.Delay(t), () => Environment.TickCount64);
+            if (!bereit) return;
+        }
         // Nr. 12: Kennung des Starts — die App meldet sie beim Uebernehmen an AutoSchnell zurueck
         string start = Guid.NewGuid().ToString("N");
         string ziel = $"{_einstellungen.Server}/app/vergleich?url={Uri.EscapeDataString(url)}&start={start}";

@@ -15,6 +15,7 @@ Programm (Kopfzeile X-Werkzeug-Schluessel):
   POST   /api/werkzeuge/{id}/vergleich           Abo pruefen, Links mit Firmenregeln, protokollieren
   GET    /api/werkzeuge/{id}/app-start/{start}   hat die App das Auto uebernommen? (Nr. 12)
   POST   /api/werkzeuge/{id}/vorgang/{v}/selbst  Erweiterung hat nicht uebernommen -> Programm oeffnet selbst (1.5.9)
+  GET    /api/werkzeuge/{id}/inserat-gelesen     liegt das Inserat schon gelesen vor? ("Vertrag" ab 1.5.11, ohne Apify)
 Browser-Helfer (04.10.2026, nur Werkzeuge mit art "browser", Kopfzeile X-Werkzeug-Schluessel):
   POST   /api/werkzeuge/{id}/inserat             Inseratsseite aus dem Browser -> Links, Vertragsdaten, Hinweise
   POST   /api/werkzeuge/{id}/marktlage           Vergleichsseite aus dem Browser -> Platz + Ampel
@@ -639,7 +640,9 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
             # Programm ab 1.5.8: Vorgangsnummer; ueber_helfer -> nur /app/vorgang/<id> oeffnen (s. o.)
             "vorgang_id": eintrag["id"], "ueber_helfer": ueber_helfer,
             # Programm ab 1.5.9: die Vorgangsseite in DEM Browser oeffnen, in dem die Erweiterung verbunden ist
-            "helfer_browser": wz.helfer_browser((helfer or {}).get("pc_name"))}
+            "helfer_browser": wz.helfer_browser((helfer or {}).get("pc_name")),
+            # Programm ab 1.5.11: "Vertrag" oeffnet mit Erweiterung erst das Inserat (sie liest es), nie Apify
+            "hat_helfer": helfer is not None}
 
 
 def _erkennen(f: dict) -> dict:
@@ -1052,6 +1055,32 @@ async def werkzeug_vorgang_stand(werkzeug_id: str, vorgang_id: str,
     if doc is None:
         raise HTTPException(404, "Vorgang nicht gefunden oder abgelaufen.")
     return {"uebernommen": bool(doc.get("helfer_am"))}
+
+
+@router.get("/werkzeuge/{werkzeug_id}/inserat-gelesen")
+async def werkzeug_inserat_gelesen(werkzeug_id: str, url: str = Query(..., min_length=10, max_length=2048),
+                                   schluessel: Optional[str] = Header(None, alias=wz.TOKEN_KOPF),
+                                   user_agent: Optional[str] = Header(None, alias="User-Agent")):
+    """Wunsch Ahmad 08.10.2026 (abends): "Vertrag" im Programm soll das Inserat oeffnen und lesen lassen — kein Apify.
+    Das Programm (ab 1.5.11) fragt hier, ob das Auto schon gelesen vorliegt (Lesung der Erweiterung oder gemeinsamer
+    Speicher); erst dann oeffnet es den Kaufvertrag, der /mobile/compare dann ohne Abruf bedient. Nur Lesen: nichts
+    wird abgerufen, gezaehlt oder veraendert."""
+    from listing_identity import ListingIdentityError, get_listing_identity
+    from browser_helfer import inserat_lesen
+    if _ist_browser(werkzeug_id):
+        raise HTTPException(404, NICHT_GEFUNDEN)
+    user, _v, _firma_doc, _abo = await _programm(werkzeug_id, schluessel, _programm_version(user_agent))
+    try:
+        identity = get_listing_identity(url.strip())
+    except ListingIdentityError:
+        raise HTTPException(400, "Kein Inserat von mobile.de, AutoScout24 oder Kleinanzeigen.")
+    if await inserat_lesen(db, identity["cache_key"], user["id"], user.get("dealer_id") or "") is not None:
+        return {"gelesen": True, "quelle": "browser"}
+    if await db.listings_cache.count_documents(
+            {"cache_key": identity["cache_key"], "data": {"$ne": None},
+             "expires_at": {"$gt": datetime.now(timezone.utc)}}, limit=1):
+        return {"gelesen": True, "quelle": "speicher"}
+    return {"gelesen": False}
 
 
 @router.get("/werkzeuge/vorgang/{vorgang_id}")

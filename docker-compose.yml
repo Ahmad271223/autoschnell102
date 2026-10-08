@@ -174,8 +174,9 @@ services:
       - AUTOPOINTER_VERGLEICH_KUNDEN=${AUTOPOINTER_VERGLEICH_KUNDEN:-10001,10002,10007}
       # Browser-Helfer (04.10.2026): wer die Erweiterung fuer Chrome/Edge sieht und verbinden darf
       - BROWSER_HELFER_KUNDEN=${BROWSER_HELFER_KUNDEN:-10001,10002,10007}
-      # Inserat beim Klick im Programm vorab auslesen (Daten + Fotos fuer den Kaufvertrag; zaehlt fuers Tageslimit)
-      - AUTOPOINTER_VORAB_ABRUF=${AUTOPOINTER_VORAB_ABRUF:-true}
+      # Inserat beim Klick im Programm vorab ueber Apify auslesen — Entscheidung Ahmad 08.10.2026: AUS ("Apify nur, wenn
+      # das Auto nicht im Speicher ist und jemand den Link in der App einfuegt"); true = wieder an
+      - AUTOPOINTER_VORAB_ABRUF=${AUTOPOINTER_VORAB_ABRUF:-false}
       # Wunsch Ahmad 07.10.2026: hat das Konto den Browser-Helfer, liest DER das Inserat (Programm oeffnet es als
       # Tab mit) — kein Apify-Vorab-Abruf fuer dieses Konto; false = immer Apify wie frueher
       - AUTOPOINTER_INSERAT_IM_BROWSER=${AUTOPOINTER_INSERAT_IM_BROWSER:-true}

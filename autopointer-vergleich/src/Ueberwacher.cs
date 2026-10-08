@@ -124,6 +124,11 @@ internal sealed class Ueberwacher
     /// Erweiterung ihn nicht mehr oeffnet) und protokolliert — vorher sprangen die Tabs eines alten Autos auf, waehrend
     /// der Sucher schon das naechste angeklickt hatte.</summary>
     private volatile string? _aktuellerVorgang;
+    /// <summary>1.5.11 (Wunsch Ahmad 08.10.2026 abends): laut letzter Server-Antwort hat das Konto die Browser-Erweiterung —
+    /// "Vertrag" oeffnet dann erst das Inserat (die Erweiterung liest es), nie einen Apify-Abruf.</summary>
+    public bool HatHelfer { get; private set; }
+    /// <summary>1.5.11: der Browser der Erweiterung ("chrome"/"edge"/"").</summary>
+    public string HelferBrowser { get; private set; } = "";
     /// <summary>1.5.10: in welchem Browser die letzten Vergleiche aufgingen ("Letzten Vergleich" nimmt denselben).</summary>
     private BrowserWahl? _letzterBrowser;
     internal const string VorgangNichtErreichbar = "AutoSchnell antwortet gerade nicht – für dieses Auto „Vergleichen“ drücken.";
@@ -507,6 +512,9 @@ internal sealed class Ueberwacher
         LetztesFahrzeug = f;
         LetztesNurGemerkt = false;
         LetzteInseratUrl = antwort.InseratUrl;
+        // 1.5.11: hat das Konto die Erweiterung (und in welchem Browser)? "Vertrag" oeffnet dann erst das Inserat
+        HatHelfer = antwort.HatHelfer;
+        HelferBrowser = antwort.HelferBrowser;
         // Pruefbericht 03.10.2026 (Nr. 2): ab hier gehoeren die "letzten Vergleiche" zu DIESEM Auto — auch wenn
         // es keine gibt. Vorher blieben die Links des vorigen Autos stehen ("erneut oeffnen" zeigte das falsche Auto).
         LetzteVergleiche = Array.Empty<Vergleich>();
@@ -1031,5 +1039,36 @@ internal sealed class BrowserAusgabe : IOeffner
         BrowserOeffner.Oeffne(vergleiche.Select(v => v.Url).ToList(), browser);
         if (e.ZurueckZuAutoPointer && autoPointer != IntPtr.Zero && _ui != null)
             Task.Delay(900).ContinueWith(_ => _ui.Post(__ => BrowserOeffner.ZurueckZu(autoPointer), null));
+    }
+}
+
+/// <summary>1.5.11 (Wunsch Ahmad 08.10.2026 abends): "Vertrag" mit Browser-Erweiterung — kein Apify. Liegt das Inserat noch
+/// nicht gelesen vor, oeffnet das Programm das Inserat (die Erweiterung liest es) und wartet, bis die Lesung beim Server ist;
+/// erst dann geht der Kaufvertrag auf (/mobile/compare nimmt die Lesung, ohne abzurufen). Kommt sie nicht, nur ein
+/// Hinweis — nie ein Abruf. (rein, fuer Tests)</summary>
+internal static class VertragsWeg
+{
+    internal const int WarteMs = 25_000;
+    internal const int TaktMs = 1500;
+    internal const string WirdGelesen = "Inserat wird geöffnet und gelesen – der Kaufvertrag öffnet sich gleich.";
+    internal const string NichtGelesen = "Das Inserat ist noch nicht gelesen – im Inserat unten rechts auf „Kaufvertrag“ drücken.";
+
+    /// <returns>true = gelesen, Kaufvertrag oeffnen; false = (noch) nicht — der Hinweis kam schon.</returns>
+    internal static async Task<bool> InseratBereitAsync(string url, Func<string, Task<bool?>> gelesen, Action oeffneInserat,
+                                                         Action<string, bool> melde, Func<TimeSpan, Task> warte,
+                                                         Func<long> takt)
+    {
+        if (await gelesen(url) == true) return true;
+        oeffneInserat();
+        melde(WirdGelesen, false);
+        long bis = takt() + WarteMs;
+        while (takt() < bis)
+        {
+            await warte(TimeSpan.FromMilliseconds(TaktMs));
+            if (await gelesen(url) == true) return true;
+        }
+        Protokoll.Schreibe("Kaufvertrag: Inserat nach " + WarteMs / 1000 + " s noch nicht gelesen – kein Abruf, Hinweis gezeigt.");
+        melde(NichtGelesen, true);
+        return false;
     }
 }

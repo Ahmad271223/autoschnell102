@@ -100,6 +100,12 @@ dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und 
     `BrowserOeffner` öffnet die letzte deshalb in einem eigenen Aufruf: immer liegt die letzte Adresse vorne.
   * Bei „Standardbrowser“ gehen die Tabs in den Browser, in dem die Erweiterung verbunden ist (`helfer_browser`) —
     sonst las sie das Inserat nicht und die Vergleiche bekamen keine Ampel. „Letzten Vergleich“ nimmt denselben Browser.
+* **1.5.11 (Wunsch Ahmad 08.10. abends: „Vertrag soll das Inserat öffnen und lesen – kein Apify“):** hat das Konto die
+  Erweiterung (`hat_helfer` aus `/vergleich`), fragt „Vertrag“ erst `GET …/inserat-gelesen?url=` (nur Lesen). Liegt das
+  Inserat noch nicht gelesen vor, öffnet das Programm es im Browser der Erweiterung, fragt alle 1,5 s nach (höchstens
+  25 s) und öffnet den Kaufvertrag erst, wenn die Lesung da ist — die App nimmt dann die Lesung, ohne abzurufen. Kommt
+  sie nicht: nur der Hinweis „im Inserat unten rechts auf „Kaufvertrag“ drücken“, nie ein Abruf (`VertragsWeg`).
+  Ohne Erweiterung bleibt „Vertrag“ wie bisher (Kaufvertrag in der App mit dem Link).
 * Ein Auto, das beim Programmstart schon angezeigt wird, öffnet nichts – erst das nächste angeklickte. **Nach dem (Neu-)Verbinden**
   dagegen wird das gerade angezeigte Auto sofort verglichen (seit 1.5.3, Befund 04.10.: Mercedes nach Neuverbinden).
 * **Unplausible Daten** (seit 1.5.3, Befund 04.10.: „Kia Rio · EZ 04/2026 · 165.000 km“, „Audi 80 · 1.960.817 km“):

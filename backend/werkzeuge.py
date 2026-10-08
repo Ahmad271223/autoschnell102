@@ -534,9 +534,12 @@ def vorgang_an() -> bool:
 
 
 def vorab_abruf_an() -> bool:
-    """Inserat beim Klick im Programm im Hintergrund auslesen (Standard an). Jeder echte Abruf zaehlt
-    wie ein eingefuegter Link fuer das Tageslimit des Kontos; Speicher-Treffer sind kostenlos."""
-    return (os.environ.get("AUTOPOINTER_VORAB_ABRUF") or "true").strip().lower() not in ("0", "false", "nein", "aus")
+    """Inserat beim Klick im Programm im Hintergrund ueber Apify auslesen. Jeder echte Abruf zaehlt wie ein
+    eingefuegter Link fuer das Tageslimit des Kontos; Speicher-Treffer sind kostenlos.
+    Entscheidung Ahmad 08.10.2026 (abends): Standard AUS — "Apify nur, wenn das Auto nicht im Speicher ist und jemand
+    den Link in der App einfuegt". Vorher kostete JEDER Klick im Programm (Konten ohne Erweiterung) einen Abruf.
+    AUTOPOINTER_VORAB_ABRUF=true schaltet ihn wieder ein (Tests/CI)."""
+    return (os.environ.get("AUTOPOINTER_VORAB_ABRUF") or "false").strip().lower() in ("1", "true", "ja", "an")
 
 
 def inserat_url(quelle, inserat_id, hash_id=None) -> Optional[str]:

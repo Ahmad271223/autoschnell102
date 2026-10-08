@@ -113,6 +113,7 @@ OEFFENTLICH = {
     "/api/werkzeuge/{werkzeug_id}/vorgang/{vorgang_id}",
     "/api/werkzeuge/{werkzeug_id}/vorgang/{vorgang_id}/uebernehmen",
     "/api/werkzeuge/{werkzeug_id}/vorgang/{vorgang_id}/selbst",      # Pruefung 08.10.2026: Programm nimmt ihn selbst
+    "/api/werkzeuge/{werkzeug_id}/inserat-gelesen",                  # 08.10.2026: "Vertrag" ohne Apify (Programm-Schluessel)
 }
 # ... davon tragen diese trotzdem eine Kette (Besucher ODER Kaeufer, bzw. der
 # Marktplatz-Schalter) — sie zaehlen nicht als "ganz ohne Abhaengigkeit":

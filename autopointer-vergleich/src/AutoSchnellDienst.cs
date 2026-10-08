@@ -47,7 +47,8 @@ internal sealed record VergleichAntwort(IReadOnlyList<Vergleich> Links, IReadOnl
                                         string? InseratUrl = null, string VorabStatus = "", string VorabHinweis = "",
                                        string? ErkanntMarke = null, string? ErkanntModell = null, bool MarkeErkannt = true,
                                        IReadOnlyList<string>? Melden = null, bool InseratImBrowser = false,
-                                       string? VorgangId = null, bool UeberHelfer = false, string HelferBrowser = "");
+                                       string? VorgangId = null, bool UeberHelfer = false, string HelferBrowser = "",
+                                       bool HatHelfer = false);
 
 /// <summary>Was der Ueberwacher vom Server braucht (in Tests eine Attrappe).</summary>
 internal interface IVergleichsDienst
@@ -421,9 +422,28 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
             "edge" => "edge",
             _ => "",
         };
+        // 1.5.11 (Wunsch Ahmad 08.10.2026 abends): hat das Konto die Erweiterung? Dann oeffnet "Vertrag" erst das Inserat
+        bool hatHelfer = e.TryGetProperty("hat_helfer", out var hh) && hh.ValueKind == JsonValueKind.True;
         return new VergleichAntwort(links, hinweise, Text(e, "profil"), inseratUrl, vorabStatus, vorabHinweis,
                                     marke, modell, markeErkannt, melden, imBrowser && inseratUrl != null,
-                                    vorgang, ueberHelfer && vorgang != null, helferBrowser);
+                                    vorgang, ueberHelfer && vorgang != null, helferBrowser, hatHelfer);
+    }
+
+    /// <summary>1.5.11 (Wunsch Ahmad 08.10.2026 abends, "Vertrag ohne Apify"): liegt das Inserat schon gelesen vor (Lesung
+    /// der Erweiterung oder gemeinsamer Speicher)? Nur Lesen — der Server ruft dabei nichts ab. null = nicht pruefbar.</summary>
+    public async Task<bool?> InseratGelesenAsync(string inseratUrl)
+    {
+        try
+        {
+            var e = await SendeAsync(HttpMethod.Get, "inserat-gelesen?url=" + Uri.EscapeDataString(inseratUrl),
+                                     frist: TimeSpan.FromSeconds(4), wiederholen: false);
+            return e.TryGetProperty("gelesen", out var g) && g.ValueKind == JsonValueKind.True;
+        }
+        catch (DienstFehler ex)
+        {
+            Protokoll.Schreibe("Inserat gelesen? " + ex.Message);
+            return null;
+        }
     }
 
     /// <summary>Fahrzeug -> Anfrage an /vergleich (Feldnamen wie routes/werkzeuge.FahrzeugIn).</summary>

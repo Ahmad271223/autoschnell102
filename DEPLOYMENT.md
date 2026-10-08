@@ -4436,7 +4436,7 @@ Suchern der Firma) – „alle anderen sollen das gar nicht sehen“.
   cd autopointer-vergleich && powershell -ExecutionPolicy Bypass -File build.ps1   # lokal: dist\AutoSchnell-Vergleich.exe
   scp dist/AutoSchnell-Vergleich.exe root@<server>:/tmp/                            # vom PC aus, nicht auf dem Server
   docker compose cp /tmp/AutoSchnell-Vergleich.exe backend:/tmp/AutoSchnell-Vergleich.exe
-  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.5.10
+  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.5.11
   ```
   Bis dahin zeigt die Seite „Wird gerade bereitgestellt“. Speicher: `werkzeuge/autopointer-vergleich/…`, Eintrag in `werkzeuge`.
 - Tests: `backend/tests/test_werkzeuge_20261003.py`, `frontend/src/pages/app/Programme.test.jsx`,
@@ -4613,6 +4613,13 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
     Adressen die ERSTE aktiv — die letzte geht deshalb in einem eigenen Aufruf), Tabs im Browser der Erweiterung.
     Wieder einschalten erst, wenn die Übergabe ohne App-Adresse geht (z. B. Inserat-Adresse mit Kennung im `#`, die
     Erweiterung übernimmt auf der Portalseite).
+  - **Apify nur beim Einfügen in der App (Entscheidung Ahmad 08.10.2026 abends) — Programm 1.5.11:**
+    `AUTOPOINTER_VORAB_ABRUF` jetzt Standard `false` (vorher kostete jeder Programm-Klick eines Kontos ohne Erweiterung
+    einen Apify-Abruf; CI `true`). „Vertrag“ im Programm mit Erweiterung: `GET /werkzeuge/autopointer-vergleich/
+    inserat-gelesen?url=` (Lesung der Erweiterung oder `listings_cache`, nur Lesen) — sonst öffnet das Programm das
+    Inserat, wartet bis 25 s auf die Lesung und öffnet erst dann den Kaufvertrag (kein Abruf); `/vergleich` nennt
+    `hat_helfer`. Ohne Erweiterung öffnet „Vertrag“ den Kaufvertrag in der App mit dem Link (dort gilt: Speicher oder,
+    falls unbekannt, ein Abruf). Weitere Abrufe, die bleiben: Beweisdokument auf Knopfdruck, Marktanalyse.
   - **Passwort trennt Werkzeuge (Entscheidung Ahmad 06.10.2026):** setzt der Betreiber ein neues Passwort
     (`POST /admin/users/{id}/password`), trennt `routes.werkzeuge.alle_trennen` Programm und Helfer des Kontos
     (Grund `passwort` → 401 mit klarem Text, neuer Code nötig; Audit-Meta `werkzeuge_getrennt`).

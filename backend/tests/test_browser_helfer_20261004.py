@@ -1305,6 +1305,60 @@ def test_47d_vorgang_standard_aus(monkeypatch):
     assert wz.vorgang_an() is False
 
 
+def test_47e_vorab_abruf_standard_aus(monkeypatch):
+    """Entscheidung Ahmad 08.10.2026 (abends): Apify nur beim Einfuegen eines unbekannten Links in der App — der
+    Vorab-Abruf beim Programm-Klick ist in Produktion aus, Tests/CI schalten ihn ein."""
+    monkeypatch.delenv("AUTOPOINTER_VORAB_ABRUF", raising=False)
+    assert wz.vorab_abruf_an() is False
+    monkeypatch.setenv("AUTOPOINTER_VORAB_ABRUF", "true")
+    assert wz.vorab_abruf_an() is True
+
+
+def test_47f_vertrag_fragt_ob_das_inserat_gelesen_ist(welt):
+    """Wunsch Ahmad 08.10.2026 (abends): "Vertrag" im Programm oeffnet mit Erweiterung erst das Inserat — das
+    Programm fragt /inserat-gelesen, bis die Lesung da ist (nichts wird dabei abgerufen); /vergleich sagt hat_helfer."""
+    from datetime import datetime, timedelta, timezone
+    db = welt["db"]
+    helfer = {**_verbinden(welt, name="Edge · Windows"), "X-Werkzeug-Version": "2.7.3"}
+    assert requests.get(f"{API}/werkzeuge/{WID}/status", headers=helfer, timeout=30).status_code == 200
+    pc = {**_verbinden(welt, "sucher", wid=wz.AUTOPOINTER, name="PC-Vertrag"), "User-Agent": "AutoSchnell-Vergleich/1.5.11"}
+    url = "https://suchen.mobile.de/fahrzeuge/details.html?id=487654321"
+
+    def gelesen(u=url, kopf=None):
+        return requests.get(f"{API}/werkzeuge/{wz.AUTOPOINTER}/inserat-gelesen", params={"url": u},
+                            headers=kopf or pc, timeout=30)
+
+    try:
+        db.werkzeug_inserate.delete_many({"cache_key": "mobile:487654321"})
+        db.listings_cache.delete_many({"cache_key": "mobile:487654321"})
+        jobs_vorher = db.link_jobs.count_documents({})
+        assert gelesen().json() == {"gelesen": False}
+        assert db.link_jobs.count_documents({}) == jobs_vorher, "nur Lesen, kein Abruf"
+        r = requests.post(f"{API}/werkzeuge/{WID}/inserat", headers=helfer, timeout=60,
+                          json={"url": url, "seite": _seite(_mobile_inserat_html(_mobile_listing(id=487654321)))})
+        assert r.status_code == 200, r.text
+        assert gelesen().json() == {"gelesen": True, "quelle": "browser"}
+        # gemeinsamer Speicher zaehlt auch
+        db.werkzeug_inserate.delete_many({"cache_key": "mobile:487654321"})
+        db.listings_cache.insert_one({"cache_key": "mobile:487654321", "source": "mobile", "item_id": "487654321",
+                                      "data": {"make_label": "VW"},
+                                      "expires_at": datetime.now(timezone.utc) + timedelta(days=1)})
+        assert gelesen().json() == {"gelesen": True, "quelle": "speicher"}
+        assert gelesen("https://example.com/x").status_code == 400
+        assert requests.get(f"{API}/werkzeuge/{WID}/inserat-gelesen", params={"url": url}, headers=helfer,
+                            timeout=30).status_code == 404, "nur das Programm"
+        f = {"marke": "VW", "modell": "Golf", "marke_modell_text": "VW Golf", "titel": "VW Golf", "ez_monat": 1,
+             "ez_jahr": 2018, "kilometer": 90000, "kw": 81, "preis": 12000, "quelle": "mobile.de",
+             "inserat_id": "487654321", "roh": True}
+        d = requests.post(f"{API}/werkzeuge/{wz.AUTOPOINTER}/vergleich", headers=pc, json={"fahrzeug": f}, timeout=60)
+        assert d.status_code == 200 and d.json()["hat_helfer"] is True, d.text
+    finally:
+        db.werkzeug_inserate.delete_many({"cache_key": "mobile:487654321"})
+        db.listings_cache.delete_many({"cache_key": "mobile:487654321"})
+        db.werkzeug_vergleiche.delete_many({"werkzeug": wz.AUTOPOINTER, "user_id": welt["sucher_id"]})
+        db.link_jobs.delete_many({"url": url})
+
+
 def test_47c_helfer_browser_und_merker():
     """Pruefung 08.10.2026: Browser der Erweiterung aus ihrem Namen; die Merker fuer verpasste Vorgaenge."""
     from datetime import datetime, timedelta, timezone

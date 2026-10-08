@@ -126,6 +126,32 @@ public class DienstTests
 
     private const string VorgangNr = "0f8c1a2b-3c4d-4e5f-8a9b-0c1d2e3f4a5b";
 
+    [Fact]   // 1.5.11 (Wunsch Ahmad 08.10.2026 abends): "Vertrag" fragt, ob das Inserat schon gelesen ist — nur Lesen
+    public async Task Inserat_gelesen_fragt_den_Server()
+    {
+        var (d, a) = Dienst();
+        a.Antwort = _ => Json(200, """{"gelesen":true,"quelle":"browser"}""");
+        const string url = "https://suchen.mobile.de/fahrzeuge/details.html?id=487654321";
+        Assert.True(await d.InseratGelesenAsync(url));
+        Assert.Equal(HttpMethod.Get, a.Letzte!.Method);
+        Assert.Equal("https://app.example.test/api/werkzeuge/autopointer-vergleich/inserat-gelesen?url="
+                     + Uri.EscapeDataString(url), a.Letzte.RequestUri!.AbsoluteUri);
+        a.Antwort = _ => Json(200, """{"gelesen":false}""");
+        Assert.False(await d.InseratGelesenAsync(url));
+        a.Antwort = _ => Json(500, """{"detail":"x"}""");
+        Assert.Null(await d.InseratGelesenAsync(url));
+    }
+
+    [Fact]
+    public async Task Vergleich_liest_hat_helfer()
+    {
+        var (d, a) = Dienst();
+        a.Antwort = _ => Json(200, """{"links":[],"hinweise":[],"profil":"inland","hat_helfer":true}""");
+        Assert.True((await d.VergleichAsync(Passat(), probelauf: false)).HatHelfer);
+        a.Antwort = _ => Json(200, """{"links":[],"hinweise":[],"profil":"inland"}""");
+        Assert.False((await d.VergleichAsync(Passat(), probelauf: false)).HatHelfer);
+    }
+
     [Fact]   // Pruefung 08.10.2026 (1.5.9, A): POST …/vorgang/<id>/selbst — der Server entscheidet, wer oeffnet
     public async Task Vorgang_selbst_beanspruchen()
     {
