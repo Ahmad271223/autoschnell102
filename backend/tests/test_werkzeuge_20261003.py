@@ -154,6 +154,19 @@ def welt():
     s = konten.sucher_als_chef_anlegen(firma["token"], json={"password": "Wz-Sucher-" + secrets.token_hex(6) + "!"})
     assert s.status_code == 200, s.text
     sucher_token = konten.token_direkt(s.json()["sucher_id"])
+    # Seit 08.10.2026: Werkzeuge sind Pro-Leistung, nicht Kundennummer-Leistung.
+    from datetime import datetime, timezone
+    db.subscriptions.delete_many({"id": f"wz-test-{s.json()['sucher_id']}"})
+    db.subscriptions.insert_one({
+        "id": f"wz-test-{s.json()['sucher_id']}", "subject_user_id": s.json()["sucher_id"],
+        "dealer_id": firma["dealer_id"], "plan": "monthly", "tier": "pro",
+        "status": "active", "expires_at": "2099-01-01T00:00:00+00:00",
+        "created_at": datetime.now(timezone.utc).isoformat()})
+    db.subscriptions.insert_one({
+        "id": f"wz-test-chef-{firma['user_id']}", "subject_user_id": firma["user_id"],
+        "dealer_id": firma["dealer_id"], "plan": "monthly", "tier": "pro",
+        "status": "active", "expires_at": "2099-01-01T00:00:00+00:00",
+        "created_at": datetime.now(timezone.utc).isoformat()})
     meta_vorher = db.werkzeuge.find_one({"id": WID}, {"_id": 0})
     try:
         yield {"db": db, "chef": konten._kopf(firma["token"]), "sucher": konten._kopf(sucher_token),
@@ -298,14 +311,14 @@ def test_23_weitere_vw_modell_aus_dem_titel():
     assert links == [] and any("Weitere VW" in h for h in hinweise)
 
 
-def _abo(welt, an: bool):
+def _abo(welt, an: bool, tier: str = "pro"):
     db = welt["db"]
     db.subscriptions.delete_many({"id": f"wz-test-{welt['sucher_id']}"})
     if an:
         from datetime import datetime, timezone
         db.subscriptions.insert_one({
             "id": f"wz-test-{welt['sucher_id']}", "subject_user_id": welt["sucher_id"],
-            "dealer_id": welt["firma"]["dealer_id"], "plan": "monthly", "status": "active",
+            "dealer_id": welt["firma"]["dealer_id"], "plan": "monthly", "tier": tier, "status": "active",
             "expires_at": "2099-01-01T00:00:00+00:00", "created_at": datetime.now(timezone.utc).isoformat()})
 
 
@@ -333,6 +346,16 @@ def test_30_code_nur_mit_abo(welt):
     _abo(welt, False)
     r = requests.post(f"{API}/werkzeuge/{WID}/code", headers=welt["sucher"], timeout=30)
     assert r.status_code == 402
+
+
+def test_30b_normal_abo_sieht_und_nutzt_keine_pro_werkzeuge(welt):
+    _abo(welt, True, tier="normal")
+    assert _liste(welt["sucher"]) == []
+    assert _download(welt["sucher"]).status_code == 404
+    assert requests.post(f"{API}/werkzeuge/{WID}/code",
+                         headers=welt["sucher"], timeout=30).status_code == 404
+    _abo(welt, True, tier="pro")
+    assert any(x["id"] == WID for x in _liste(welt["sucher"]))
 
 
 def test_31_verbinden_status_vergleich(welt):
