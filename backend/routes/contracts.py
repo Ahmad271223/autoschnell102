@@ -3676,9 +3676,22 @@ async def folge_mail_senden(contract_id: str, body: FolgeMailIn,
                                        "zustellung": "fehlgeschlagen"}}})
         # Doppelklick-Schutz wie beim Vertragsversand: derselbe Schluessel
         # legt garantiert nur EINEN Eintrag an.
+        frisch_ab = (datetime.now(timezone.utc)
+                     - timedelta(seconds=ZUSTELLUNG_HAENGT_NACH_SEK)).isoformat()
+        sperren = [{"send_status": {"$not": {"$elemMatch": {
+            "channel": "email", "art": art, "recipient": empfaenger,
+            "zustellung": "laeuft",
+            "$or": [{"sent_at": {"$gt": frisch_ab}},
+                    {"wiederaufnahme_am": {"$gt": frisch_ab}}]}}}}]
+        if not body.erneut:
+            sperren.append({"send_status": {"$not": {"$elemMatch": {
+                "channel": "email", "art": art, "recipient": empfaenger,
+                "anfrage_hash": inhalt_hash, "version": int(c.get("version") or 1),
+                "zustellung": {"$in": ["versendet", "mock"]}}}}})
         res = await db.generated_pdfs.update_one(
             {"id": contract_id, **bereich,
-             "send_status.idempotency_key": {"$ne": schluessel}},
+             "send_status.idempotency_key": {"$ne": schluessel},
+             "$and": sperren},
             {"$push": {"send_status": {"$each": [{
                 "idempotency_key": schluessel, "channel": "email",
                 "art": art, "recipient": empfaenger, "subject": betreff,
