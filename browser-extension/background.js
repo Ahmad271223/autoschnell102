@@ -621,7 +621,19 @@ async function sucheBearbeiten(msg, tab) {
 //   3. Webseite nur, wenn der Nutzer das dort gewaehlt hat (merkt sich der Helfer: appGesehen = 0, bis die App wieder
 //      als App laeuft) oder es keine Inserats-Adresse gibt
 // "&vertrag=1": AutoSchnell oeffnet gleich das Vertragsfenster — mit den Daten, die hier aus der Seite kamen.
-const APP_START_MS = 8000;
+const APP_START_MS = 90000;
+
+function neueAppStartKennung() {
+  try {
+    const u = crypto.randomUUID?.().replace(/-/g, "").toLowerCase() || "";
+    if (/^[a-f0-9]{32}$/.test(u)) return u;
+    const b = new Uint8Array(16);
+    crypto.getRandomValues(b);
+    return Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+  } catch (e) {
+    return null;
+  }
+}
 
 async function appStandMerken(basis, wert) {
   const { appGesehen } = await lokal("appGesehen");
@@ -765,7 +777,10 @@ async function vertragOeffnen(msg, tab) {
   // vor Protocol/Web-Handoff.
   if (!await tabZeigtInseratAktuell(tab?.id, msg.kennung)) return veraltet();
   if (stand !== 0 && ziel.inseratUrl) {
-    return { protokoll: "web+autoschnell:vertrag?url=" + encodeURIComponent(ziel.inseratUrl) };
+    const start = neueAppStartKennung();
+    const protokoll = "web+autoschnell:vertrag?url=" + encodeURIComponent(ziel.inseratUrl)
+      + (start ? "&start=" + start : "");
+    return { protokoll, start };
   }
   return webseiteOeffnen(basis, ziel.pfad, tab);
 }
@@ -774,13 +789,36 @@ async function vertragOeffnen(msg, tab) {
  *  aufzumachen (die App koennte in einem anderen Browser aufgegangen sein). */
 async function appStartPruefen(msg, tab) {
   const basis = await server();
+  const start = String(msg?.start || "");
   const ende = Date.now() + APP_START_MS;
-  while (Date.now() < ende) {
+
+  // Neue Version: nicht irgendein App-Fenster zaehlt, sondern nur die
+  // serverseitige Bestaetigung, dass genau dieses Konto genau diesen
+  // Start-Token NACH erfolgreichem Fahrzeugladen gemeldet hat.
+  if (/^[a-f0-9]{32}$/.test(start)) {
+    while (Date.now() < ende) {
+      const r = await api(`/werkzeuge/${WERKZEUG}/app-start/${start}`);
+      if (r.status === 200 && r.daten?.bestaetigt === true) {
+        await appStandMerken(basis, Date.now());
+        return { ok: true, weg: "app" };
+      }
+      // Verbindung/Abo weg: nicht 90 s blind weiterpolling.
+      if ([401, 402, 403, 404].includes(r.status)) {
+        return { ok: true, weg: "unklar" };
+      }
+      await new Promise((fertig) => setTimeout(fertig, 750));
+    }
+    return { ok: true, weg: "unklar" };
+  }
+
+  // Rueckwaertskompatibilitaet zu bereits erzeugten Protokoll-Links alter
+  // Erweiterungen: nur dort bleibt die schwächere Fensterpruefung.
+  while (Date.now() < Math.min(ende, Date.now() + 8000)) {
     if (await appFenster(basis)) {
       await appStandMerken(basis, Date.now());
       return { ok: true, weg: "app" };
     }
-    await new Promise((r) => setTimeout(r, 500));
+    await new Promise((fertig) => setTimeout(fertig, 500));
   }
   return { ok: true, weg: "unklar" };
 }
