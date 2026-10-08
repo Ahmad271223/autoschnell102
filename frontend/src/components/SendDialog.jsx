@@ -288,10 +288,12 @@ export default function SendDialog({ open, contract, onClose }) {
   // Pruefbericht 20.09.2026 (U-93): Der Versand IST erfolgt, aber der Vertrag
   // war beim Vermerk nicht mehr erreichbar (Loeschung begonnen) — das Archiv
   // zeigt ihn weiter als unversendet. Bisher sah der Nutzer nur "versendet".
-  const vermerkPruefen = (data) => {
+  const vermerkPruefen = (data, channel) => {
     if (data?.status_vermerk === "nicht_gespeichert") {
-      toast.warning("Versendet, aber im Archiv nicht vermerkt — bitte den Vertrag im "
-        + "Vertragsarchiv prüfen.", { duration: 15000 });
+      toast.warning(channel === "email"
+        ? "E-Mail versendet, aber im Archiv nicht vermerkt — bitte den Vertrag im Vertragsarchiv prüfen."
+        : "WhatsApp-Versand vorbereitet, aber im Archiv nicht vermerkt — bitte den Vertrag im Vertragsarchiv prüfen.",
+      { duration: 15000 });
     }
   };
 
@@ -320,7 +322,7 @@ export default function SendDialog({ open, contract, onClose }) {
             idempotency_key, ...(erneut ? { erneut: true } : {}) };
       const { data } = await api.post(`/contracts/${contract.id}/send`, body);
       keyRef.current = neuerSchluessel();
-      vermerkPruefen(data);
+      vermerkPruefen(data, channel);
       if (channel === "whatsapp" && data.wa_url) {
         setWaUrl(data.wa_url);
         let geoeffnet = false;
@@ -347,9 +349,10 @@ export default function SendDialog({ open, contract, onClose }) {
         } else {
           toast.warning("Dein Browser hat das WhatsApp-Fenster blockiert — bitte unten auf „WhatsApp jetzt öffnen“ tippen.");
         }
-        // Der Server hat den Versand vermerkt — auch wenn der Browser das
-        // WhatsApp-Fenster blockiert hat und der Nutzer es gleich per Knopf
-        // oeffnet. Deshalb hier fragen, nicht nur im geoeffnet-Fall.
+        // AutoSchnell hat nur die WhatsApp-Vorbereitung vermerkt. Ob der
+        // Nutzer im WhatsApp-Chat wirklich auf "Senden" tippt, kann die App
+        // technisch nicht bestaetigen. Der Beweis-Dialog bezieht sich deshalb
+        // nur auf das Inserat, nicht auf eine behauptete Zustellung.
         if (contract.vehicle_id && !beweisFertig) setBeweisFrage(true);
       } else {
         if (fenster && !fenster.closed) { try { fenster.close(); } catch { /* egal */ } }
@@ -457,7 +460,7 @@ export default function SendDialog({ open, contract, onClose }) {
             ...(fassung ? { version: fassung } : {}),
           });
           keyRef.current = neuerSchluessel();
-          vermerkPruefen(data);
+          vermerkPruefen(data, "whatsapp");
         } catch (err) {
           const d = err?.response?.data?.detail;
           if (err?.response?.status === 409 && d?.code === "fassung_veraltet") {
