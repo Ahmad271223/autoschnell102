@@ -170,6 +170,9 @@ def _mail_attrappe(monkeypatch, ergebnisse):
     import provider_fetch
     monkeypatch.setattr(provider_fetch, "MOCK_PROVIDER_FETCH", False)
     monkeypatch.setattr(email_service, "email_configured", lambda: True)
+    # Diese Attrappe simuliert den normalen Resend-Weg: derselbe Provider-Key
+    # darf bei unklarem Ausgang sicher wiederaufgenommen werden.
+    monkeypatch.setattr(email_service, "resend_aktiv", lambda: True)
     schluessel = []
 
     async def _mit_beleg(to, subject, text, anhang=None, anhang_name="", **kw):
@@ -293,6 +296,43 @@ def test_22_unklar_bleibt_stehen_und_wird_unter_demselben_schluessel_wiederholt(
     assert out["zustellung"] == "versendet"
     assert schluessel == [f"vertrag-{cid}-erst-{w.s}"] * 2, "Resend erkennt den Schluessel"
     assert [x["zustellung"] for x in _status(w, cid)] == ["versendet"]
+
+
+def test_22_smtp_unklar_wird_nie_still_wiederholt_nur_bewusst_mit_neuem_schluessel(welt, monkeypatch):
+    C = _modul("routes.contracts")
+    w = welt
+    import email_service
+    schluessel = _mail_attrappe(monkeypatch, [(False, email_service.BELEG_UNKLAR)])
+    monkeypatch.setattr(email_service, "resend_aktiv", lambda: False)
+
+    cid = f"cv22smtp_{w.s}"
+    w.run(w.db.generated_pdfs.insert_one(_vertrag(w, cid, w.a)))
+
+    # Erster SMTP-Ausgang ist unklar.
+    e = w.run(_erwarte(502, C.send_contract(
+        cid, _mail(C, w, f"smtp-erst-{w.s}"), w.a)))
+    assert e.detail["code"] == "versand_unklar"
+    assert schluessel == [f"vertrag-{cid}-smtp-erst-{w.s}"]
+    assert _status(w, cid)[0]["zustellung"] == "unklar"
+
+    # Neuer Klick darf NICHT still denselben SMTP-Versand wiederholen.
+    e = w.run(_erwarte(409, C.send_contract(
+        cid, _mail(C, w, f"smtp-neu-{w.s}"), w.a)))
+    assert e.detail["code"] == "frueherer_versand_unklar"
+    assert schluessel == [f"vertrag-{cid}-smtp-erst-{w.s}"]
+
+    # Erst ausdrueckliche Bestaetigung sendet neu — mit dem NEUEN Key.
+    out = w.run(C.send_contract(
+        cid, _mail(C, w, f"smtp-neu-{w.s}", erneut=True), w.a))
+    assert out["zustellung"] == "versendet"
+    assert schluessel == [
+        f"vertrag-{cid}-smtp-erst-{w.s}",
+        f"vertrag-{cid}-smtp-neu-{w.s}",
+    ]
+    assert {x["idempotency_key"]: x["zustellung"] for x in _status(w, cid)} == {
+        f"smtp-erst-{w.s}": "abgeloest",
+        f"smtp-neu-{w.s}": "versendet",
+    }
 
 
 def test_22_unklar_mit_anderem_text_nur_mit_bestaetigung(welt, monkeypatch):
