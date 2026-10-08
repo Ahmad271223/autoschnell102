@@ -77,9 +77,12 @@ export function zielUebernehmen(ziel, {
     const link = u.pathname === "/app/vergleich" ? u.searchParams.get("url") : null;
     if (link && fenster.location.pathname === "/app/vergleich") {
       // Die Vergleichsseite ist offen und bleibt eingehängt — sie übernimmt das neue Auto selbst.
-      // Browser-Helfer (04.10.2026): "&vertrag=1" -> Kaufvertrag gleich öffnen (sonst wie bisher nur der Link).
+      // Start-Kennung mitreichen: AutoPointer wird ERST von Vergleich.jsx
+      // bestätigt, nachdem genau dieses Fahrzeug erfolgreich geladen wurde.
       const vertrag = u.searchParams.get("vertrag") === "1";
-      fenster.dispatchEvent(new CustomEvent(INSERAT_EREIGNIS, { detail: vertrag ? { link, vertrag } : link }));
+      const start = startKennung(ziel, fenster.location.origin);
+      const detail = (vertrag || start) ? { link, vertrag, start } : link;
+      fenster.dispatchEvent(new CustomEvent(INSERAT_EREIGNIS, { detail }));
       uebernommen();
       return;
     }
@@ -140,13 +143,14 @@ export function startZieleVerfolgen(navigieren, {
     const ziel = zielAusAppStart(params?.targetURL, { origin: fenster.location.origin, startAdresse });
     if (!ziel) return;
     const start = startKennung(ziel, fenster.location.origin);
-    // P1 08.10.2026: Dem Windows-Programm erst bestaetigen, wenn das Ziel
-    // WIRKLICH uebernommen wurde. Bei ungespeicherter Arbeit wartet die App
-    // auf den Nutzer. Ohne Klick soll AutoPointer nach 10 s wie vorgesehen
-    // den Browser-Fallback oeffnen, statt faelschlich "uebernommen" zu sehen.
+    // AutoPointer-Starts werden NICHT schon beim Navigieren bestaetigt.
+    // Die Start-Kennung steckt im Ziel/Event; Vergleich.jsx meldet sie erst
+    // nach erfolgreichem Laden des konkreten Fahrzeugs. So bleibt der
+    // 10-Sekunden-Browser-Fallback aktiv, wenn die App nur aufgeht, der
+    // Vergleich aber scheitert.
     zielUebernehmen(ziel, {
       fenster, navigieren, beschaeftigt, nachfragen,
-      uebernommen: () => { if (start) melden(start); },
+      uebernommen: () => { if (!start) melden(); },
     });
   });
   return true;
