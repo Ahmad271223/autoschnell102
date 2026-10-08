@@ -450,7 +450,7 @@ public class UeberwacherTests
         _q.Zeige(() => throw new InvalidOperationException("GDI+ generic error"), 1);
         for (int i = 0; i < 200; i++) await Tick();               // 50 Sekunden
         Assert.Equal(Ueberwacher.LeseVersuche, _q.Lesungen);      // 3 Versuche (2/4/6 s Abstand), dann Ruhe
-        Assert.Single(_meldungen.Where(m => m.Contains("konnte nicht gelesen werden")));
+        Assert.Single(_meldungen, m => m.Contains("konnte nicht gelesen werden"));
         Assert.Empty(_b.Aufrufe);
         // naechstes Auto: alles wie gewohnt
         await Anklicken(Bentley, 2);

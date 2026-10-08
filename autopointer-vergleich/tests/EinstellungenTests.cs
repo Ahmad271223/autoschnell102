@@ -151,7 +151,7 @@ public class EinstellungenTests
         {
             string schluessel = "test:" + Guid.NewGuid().ToString("N");
             for (int i = 0; i < 5; i++) Protokoll.SchreibeGedrosselt(schluessel, "Fehler X", TimeSpan.FromMinutes(1));
-            Assert.Single(zeilen.Where(z => z.Contains("Fehler X")));
+            Assert.Single(zeilen, z => z.Contains("Fehler X"));
             Protokoll.SchreibeGedrosselt(schluessel, "Fehler X", TimeSpan.Zero);
             Assert.Contains(zeilen, z => z.Contains("4-mal dieselbe Meldung unterdrückt"));
         }
