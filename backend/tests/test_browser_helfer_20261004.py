@@ -269,10 +269,9 @@ def test_10_verhandlung_hinweise_kurz_und_ehrlich():
     assert bh.verhandlung_hinweise({"hu": "Neu", "previous_owners": "1"}) == []
 
 
-def test_11_werkzeug_eintrag_zip_statt_exe(monkeypatch):
-    monkeypatch.delenv("BROWSER_HELFER_KUNDEN", raising=False)
-    monkeypatch.delenv("AUTOPOINTER_VERGLEICH_KUNDEN", raising=False)
-    assert wz.freigegebene_werkzeuge(10002) == [wz.AUTOPOINTER, WID]
+def test_11_werkzeug_eintrag_zip_statt_exe():
+    # Produktberechtigung liegt nicht in werkzeuge.py/Kundennummern, sondern
+    # zentral im aktiven Abo-Tier der Route. Hier nur Dateityp/Metadaten pruefen.
     assert wz.art(WID) == "browser" and wz.art(wz.AUTOPOINTER) == "windows"
     puffer = io.BytesIO()
     with zipfile.ZipFile(puffer, "w") as z:
@@ -540,7 +539,7 @@ def welt():
     for uid in (sucher_id, firma["user_id"]):
         db.subscriptions.insert_one({
             "id": f"bh-test-{uid}", "subject_user_id": uid, "dealer_id": firma["dealer_id"], "plan": "monthly",
-            "status": "active", "expires_at": "2099-01-01T00:00:00+00:00",
+            "tier": "pro", "status": "active", "expires_at": "2099-01-01T00:00:00+00:00",
             "created_at": datetime.now(timezone.utc).isoformat()})
     try:
         yield {"db": db, "chef": konten._kopf(firma["token"]), "sucher": konten._kopf(konten.token_direkt(sucher_id)),
