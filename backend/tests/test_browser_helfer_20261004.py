@@ -1146,6 +1146,9 @@ def test_47_vorgangsnummer_programm_erweiterung_app(welt):
     import re
     from datetime import datetime, timedelta, timezone
     db, helfer = welt["db"], welt.get("prog") or _verbinden(welt)
+    # die Erweiterung muss den Vorgang kennen (ab 2.7.2) — ihre Version kommt mit jeder Anfrage (hier /status)
+    helfer = {**helfer, "X-Werkzeug-Version": "2.7.2"}
+    assert requests.get(f"{API}/werkzeuge/{WID}/status", headers=helfer, timeout=30).status_code == 200
     pc = _verbinden(welt, "sucher", wid=wz.AUTOPOINTER, name="PC-Vorgang")
     f = {"marke": "VW", "modell": "Golf", "marke_modell_text": "VW Golf", "titel": "VW Golf VII 2.0 GTI TCR",
          "ez_monat": 5, "ez_jahr": 2019, "kilometer": 60000, "kw": 213, "ps": 290, "kraftstoff": "Benzin",
@@ -1207,4 +1210,12 @@ def test_47_vorgangsnummer_programm_erweiterung_app(welt):
     finally:
         db.werkzeug_vergleiche.delete_many({"werkzeug": wz.AUTOPOINTER, "user_id": welt["sucher_id"]})
         db.link_jobs.delete_many({"url": MOBILE_URL})
+
+
+def test_48_mindestversionen():
+    """Durchsicht vor dem Rollout 08.10.2026: neue Wege nur mit Programm UND Erweiterung, die sie kennen."""
+    assert wz.version_mindestens("1.5.8", "1.5.8") and wz.version_mindestens("1.5.10", "1.5.8")
+    assert wz.version_mindestens("2.8.0", "2.7.2") and not wz.version_mindestens("2.7.1", "2.7.2")
+    assert not wz.version_mindestens(None, "1.5.7") and not wz.version_mindestens("", "1.5.7")
+    assert not wz.version_mindestens("kaputt", "1.5.7") and not wz.version_mindestens("1.5.x", "1.5.7")
 

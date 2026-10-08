@@ -244,6 +244,26 @@ def vergleich_ablauf(ab: Optional[datetime] = None) -> datetime:
     return (ab or datetime.now(timezone.utc)) + timedelta(days=max(1, VERGLEICHE_TAGE))
 
 
+# ---------------------------------------------------------------- Mindestversionen (08.10.2026)
+# Durchsicht vor dem Rollout 08.10.2026: der Server schaltet neue Wege nur ein, wenn Programm UND Erweiterung beim
+# Kunden sie kennen — sonst arbeiten aeltere Versionen wie bisher weiter (kein Vorab-Abruf ohne Inserat-Tab, keine
+# Vorgangsseite, die niemand uebernimmt).
+#: Programm oeffnet das Inserat als Tab (inserat_im_browser), Erweiterung liest auch /s-anzeige/<Nr>
+INSERAT_TAB_PROGRAMM, INSERAT_TAB_HELFER = "1.5.7", "2.7.1"
+#: Programm oeffnet nur /app/vorgang/<id>, Erweiterung uebernimmt den Vorgang (ueber_helfer)
+VORGANG_PROGRAMM, VORGANG_HELFER = "1.5.8", "2.7.2"
+
+
+def version_mindestens(version: Optional[str], mindest: str) -> bool:
+    """"1.5.10" >= "1.5.8"; fehlende oder unlesbare Version zaehlt als zu alt."""
+    def teile(v):
+        return tuple(int(x) for x in str(v).split("."))
+    try:
+        return bool(version) and teile(version) >= teile(mindest)
+    except ValueError:
+        return False
+
+
 # ---------------------------------------------------------------- Portalwahl (08.10.2026)
 # Wunsch Ahmad 08.10.2026 (externe Pruefung): die Wahl "mobile.de / AutoScout24 / beide" gab es dreimal — in der App
 # (Browser-Speicher), im Windows-Programm und in der Erweiterung. Jetzt EINMAL je Konto (users.vergleich_portale,

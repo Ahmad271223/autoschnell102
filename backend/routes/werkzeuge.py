@@ -487,7 +487,8 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     """Abo pruefen, Links mit den Vergleichsregeln der Firma bauen (wie der
     Vergleich in der App: aktives Profil Inland/Export, Sucher-Overrides),
     protokollieren."""
-    user, v, _firma_doc, _abo = await _programm(werkzeug_id, schluessel, _programm_version(user_agent))
+    programm_version = _programm_version(user_agent)
+    user, v, _firma_doc, _abo = await _programm(werkzeug_id, schluessel, programm_version)
     if not await _vergleich_limiter.check(f"konto:{user['id']}"):      # je Konto (Paket 2): Neu-Verbinden hilft nicht
         raise HTTPException(429, "Zu viele Vergleiche in kurzer Zeit – bitte kurz warten.")
     # Entscheidung Ahmad 06.10.2026: hoechstens 600 Vergleiche je Konto und Tag ueber das Programm
@@ -507,10 +508,18 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     # Lasttest 07.10.2026 ("keiner soll warten"): Tageslimit, Firmenregeln, Helfer-Frage und die Erkennung (Pruefung
     # 05.10., Paket 1: im Thread, bis 0,2 s) haengen nicht voneinander ab — gleichzeitig statt nacheinander.
     # Faellt das Tageslimit (429), sind die anderen Ergebnisse ohne Folgen (nur Lesen).
-    verbleibend, (profil, regeln), helfer_da, erkannt = await asyncio.gather(
+    verbleibend, (profil, regeln), helfer, erkannt = await asyncio.gather(
         tageslimit(), _firmenregeln(user),
-        db[wz.SAMMLUNG_VERBINDUNGEN].count_documents({"werkzeug": wz.BROWSER_HELFER, "user_id": user["id"]}, limit=1),
+        db[wz.SAMMLUNG_VERBINDUNGEN].find_one({"werkzeug": wz.BROWSER_HELFER, "user_id": user["id"]},
+                                              {"_id": 0, "programm_version": 1}),
         asyncio.to_thread(_erkennen, f))
+    # 08.10.2026 (Durchsicht vor dem Rollout): neue Wege nur, wenn Programm UND Erweiterung sie kennen —
+    # aeltere Versionen arbeiten wie bisher (Vorab-Abruf ueber Apify, Programm oeffnet die Vergleiche selbst)
+    helfer_version = (helfer or {}).get("programm_version")
+    inserat_tab_bekannt = (wz.version_mindestens(programm_version, wz.INSERAT_TAB_PROGRAMM)
+                           and wz.version_mindestens(helfer_version, wz.INSERAT_TAB_HELFER))
+    vorgang_bekannt = (wz.version_mindestens(programm_version, wz.VORGANG_PROGRAMM)
+                       and wz.version_mindestens(helfer_version, wz.VORGANG_HELFER))
     f["inserat_url"] = wz.inserat_url(f.get("quelle"), f.get("inserat_id"), f.get("hash_id"))
     vehicle = wz.fahrzeug_zu_vehicle(f)
     # Befund 04.10.2026: unplausible EZ/km sagen — die Filter bleiben wie eingestellt (wz.plausibel)
@@ -531,12 +540,12 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     # oeffnet das Inserat als Tab mit, der Helfer schickt die Seite (werkzeug_inserate, 24 h), der Kaufvertrag nimmt
     # sie. Kein Apify, kein Tageslimit, keine 32/128 Plaetze. Ohne Helfer wie bisher: Vorab-Abruf ueber Apify.
     # ohne Link (abgewaehltes oder unbekanntes Portal) oeffnet das Programm auch keinen Inserat-Tab -> Vorab wie bisher
-    im_browser = (not body.probelauf and bool(f["inserat_url"]) and wz.inserat_im_browser_an() and helfer_da > 0
-                  and bool(links))
+    im_browser = (not body.probelauf and bool(f["inserat_url"]) and wz.inserat_im_browser_an() and helfer is not None
+                  and bool(links) and inserat_tab_bekannt)
     # Wunsch Ahmad 08.10.2026 (Vorgangsnummer): hat das Konto die Erweiterung, oeffnet das Programm (ab 1.5.8) nur
     # /app/vorgang/<id> — die Erweiterung holt sich den Vorgang und oeffnet Vergleiche + Inserat selbst. So oeffnet
     # genau EINER die Tabs, und die Erweiterung kennt sie (keine Programm-Suche, kein 30-Minuten-Raten).
-    ueber_helfer = not body.probelauf and helfer_da > 0 and bool(links)
+    ueber_helfer = not body.probelauf and helfer is not None and bool(links) and vorgang_bekannt
     if body.probelauf:
         vorab = {"status": "probelauf", "hinweis": ""}
     elif im_browser:

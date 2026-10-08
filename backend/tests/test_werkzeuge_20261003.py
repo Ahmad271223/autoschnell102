@@ -827,14 +827,31 @@ def test_59_inserat_im_browser_statt_apify_wenn_der_helfer_verbunden_ist(welt):
     r = requests.post(f"{API}/werkzeuge/browser-helfer/verbinden", timeout=30,
                       json={"code": r.json()["code"], "pc_name": "Edge", "pc_kennung": "edge-59"})
     assert r.status_code == 200, r.text
+    helfer = {wz.TOKEN_KOPF: r.json()["schluessel"]}
+    neu = {**prog, "User-Agent": "AutoSchnell-Vergleich/1.5.8"}
+
+    def helfer_version(v):          # die Erweiterung schickt ihre Version mit jeder Anfrage (hier: /status)
+        assert requests.get(f"{API}/werkzeuge/browser-helfer/status", headers={**helfer, "X-Werkzeug-Version": v},
+                            timeout=30).status_code == 200
+
     try:
-        r = _vergleich(prog, auto)
+        # 08.10.2026 (Durchsicht vor dem Rollout): alte Erweiterung oder altes Programm -> wie bisher (Apify-Vorab)
+        helfer_version("2.7.0")
+        alt = _vergleich(neu, auto).json()
+        assert alt["inserat_im_browser"] is False and alt["ueber_helfer"] is False, "Erweiterung 2.7.0 kennt das nicht"
+        db.link_jobs.delete_many({"url": url})
+        helfer_version("2.7.2")
+        alt = _vergleich(prog, auto).json()
+        assert alt["inserat_im_browser"] is False and alt["ueber_helfer"] is False, "Programm ohne Version = alt"
+        db.link_jobs.delete_many({"url": url})
+        r = _vergleich(neu, auto)
         assert r.status_code == 200, r.text
         d = r.json()
         assert d["inserat_im_browser"] is True and d["vorab"]["status"] == "browser" and d["inserat_url"] == url
         assert d["ueber_helfer"] is True and d["vorgang_id"], "08.10.2026: mit Erweiterung oeffnet sie die Tabs"
         assert db.link_jobs.count_documents({"url": url}) == 0, "kein Apify-Vorab-Abruf"
-        assert db.werkzeug_vergleiche.find_one({"user_id": welt["sucher_id"], "fahrzeug.inserat_id": "3529833377"})["vorab"] == "browser"
+        assert db.werkzeug_vergleiche.find_one({"user_id": welt["sucher_id"], "fahrzeug.inserat_id": "3529833377"},
+                                               sort=[("erstellt_am", -1)])["vorab"] == "browser"
         # Probelauf: nie
         p = requests.post(f"{API}/werkzeuge/{WID}/vergleich", headers=prog, timeout=30,
                           json={"fahrzeug": auto, "probelauf": True})

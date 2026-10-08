@@ -4577,6 +4577,11 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
     nach 2,6 s mit Vorgang gelesen, Ampel am Programm-Vergleich, zweiter Aufruf öffnet nichts. `/programm-suche` und
     `_programm_vergleich` bleiben für Programme ≤ 1.5.7 / Erweiterungen ≤ 2.7.1 — entfernen, sobald alle aktualisiert
     haben.
+  - **Mindestversionen (Durchsicht vor dem Rollout 08.10.2026):** der Server schaltet die neuen Wege nur ein, wenn
+    Programm UND Erweiterung des Kontos sie kennen (`werkzeuge.version_mindestens`; Programm-Version aus dem
+    User-Agent, Erweiterung aus `werkzeug_verbindungen.programm_version`): Inserat als Tab ab Programm 1.5.7 +
+    Erweiterung 2.7.1, Vorgangsnummer ab 1.5.8 + 2.7.2. Sonst wie bisher (Apify-Vorab, Programm öffnet selbst) —
+    ein Kunde mit altem Programm oder alter Erweiterung merkt vom Rollout nichts.
   - **Passwort trennt Werkzeuge (Entscheidung Ahmad 06.10.2026):** setzt der Betreiber ein neues Passwort
     (`POST /admin/users/{id}/password`), trennt `routes.werkzeuge.alle_trennen` Programm und Helfer des Kontos
     (Grund `passwort` → 401 mit klarem Text, neuer Code nötig; Audit-Meta `werkzeuge_getrennt`).
