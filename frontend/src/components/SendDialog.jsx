@@ -380,6 +380,10 @@ export default function SendDialog({ open, contract, onClose }) {
           if (data?.kopie === "fehlgeschlagen") {
             toast.warning("Die Kopie an dich konnte nicht zugestellt werden — "
               + "der Vertrag ist beim Kunden angekommen.");
+          } else if (data?.kopie === "unklar") {
+            toast.warning("Der Vertrag ist beim Kunden angekommen. Nur bei deiner eigenen "
+              + "Belegkopie ist der Ausgang noch unklar — bitte den Vertrag deshalb NICHT "
+              + "noch einmal an den Kunden senden.", { duration: 15000 });
           }
         }
         else if (z === "mock") toast.success("Testmodus: Versand nur protokolliert, keine E-Mail");
