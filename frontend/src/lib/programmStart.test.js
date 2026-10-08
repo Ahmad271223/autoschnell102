@@ -143,6 +143,13 @@ describe("startZieleVerfolgen", () => {
     expect(f.ereignisse[0].detail).toBe(KA);
   });
 
+  it("AutoPointer-Kennung geht bei bereits offener Vergleichsseite im Ereignis mit", () => {
+    const f = fenster("/app/vergleich");
+    startZieleVerfolgen(vi.fn(), { fenster: f, startAdresse: O + "/start" });
+    f.starten(MIT_START);
+    expect(f.ereignisse[0].detail).toEqual({ link: KA, vertrag: false, start: S });
+  });
+
   it("Browser-Helfer (04.10.2026): &vertrag=1 geht mit (Kaufvertrag gleich öffnen)", () => {
     const f = fenster("/app/vergleich");
     startZieleVerfolgen(vi.fn(), { fenster: f, startAdresse: `${O}/start` });
@@ -190,29 +197,29 @@ describe("Pruefbericht 03.10.2026 (Nr. 12): Rueckmeldung an das Programm", () =>
     expect(client.post).toHaveBeenCalledTimes(1);
   });
 
-  it("ungespeicherte Arbeit meldet erst nach wirklicher Uebernahme", () => {
+  it("AutoPointer-Start wird beim blossen Navigieren noch NICHT bestaetigt", () => {
     const f = fenster("/app/vertraege");
     const melden = vi.fn();
     const nav = vi.fn();
     let knopf = null;
-    startZieleVerfolgen(nav, { fenster: f, startAdresse: `${O}/start`, beschaeftigt: () => true,
+    startZieleVerfolgen(nav, { fenster: f, startAdresse: O + "/start", beschaeftigt: () => true,
                                nachfragen: (ausfuehren) => { knopf = ausfuehren; }, melden });
     f.starten(MIT_START);
     expect(melden).not.toHaveBeenCalled();
     expect(nav).not.toHaveBeenCalled();
     knopf();
     expect(nav).toHaveBeenCalledTimes(1);
-    expect(melden).toHaveBeenCalledWith(S);
+    expect(melden).not.toHaveBeenCalled();
   });
 
-  it("freie App meldet direkt nach der Uebernahme", () => {
+  it("freie App bestaetigt AutoPointer ebenfalls nicht vor dem geladenen Fahrzeug", () => {
     const f = fenster("/app/termine");
     const melden = vi.fn();
     const nav = vi.fn();
-    startZieleVerfolgen(nav, { fenster: f, startAdresse: `${O}/start`, melden });
+    startZieleVerfolgen(nav, { fenster: f, startAdresse: O + "/start", melden });
     f.starten(MIT_START);
     expect(nav).toHaveBeenCalledTimes(1);
-    expect(melden).toHaveBeenCalledWith(S);
+    expect(melden).not.toHaveBeenCalled();
   });
 
   it("ohne Kennung (App-Symbol, alte Programmversion) wird nichts gemeldet", () => {
