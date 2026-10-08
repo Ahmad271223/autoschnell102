@@ -651,6 +651,33 @@ function anTab(tabId, nachricht) {
   });
 }
 
+function inseratKennungAusUrl(href) {
+  let u;
+  try { u = new URL(String(href || "")); } catch (e) { return null; }
+  const host = u.hostname.toLowerCase();
+  if (host === "suchen.mobile.de") {
+    const p = u.pathname;
+    const id = p.startsWith("/fahrzeuge/details.html") ? u.searchParams.get("id")
+      : p.startsWith("/auto-inserat/") ? (/\/(\d{6,})\.html$/.exec(p) || [])[1] : null;
+    return id && /^\d{6,20}$/.test(id) ? "mobile:" + id : null;
+  }
+  if (/^www\.autoscout24\.(de|at|ch)$/.test(host) && u.pathname.toLowerCase().includes("/angebote/")) {
+    const m = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(u.pathname);
+    return m ? "autoscout24:" + m[1].toLowerCase() : null;
+  }
+  if (/(^|\.)kleinanzeigen\.de$/.test(host)) {
+    const m = /\/s-anzeige\/(?:[^/]+\/)?(\d{6,})-216(?:-|$)/.exec(u.pathname);
+    return m ? "kleinanzeigen:" + m[1] : null;
+  }
+  return null;
+}
+
+/** Letzte Sicherung vor dem Vertrags-Handoff: der aktuell sichtbare Portal-Tab
+ * muss noch GENAU das Inserat zeigen, dessen Box/Session wir benutzen. */
+function tabZeigtInserat(tab, kennung) {
+  return inseratKennungAusUrl((tab && (tab.pendingUrl || tab.url)) || "") === String(kennung || "");
+}
+
 async function vertragsZiel(kennung) {
   const s = await sitzung();
   const i = s.inserate[String(kennung || "")];
@@ -658,7 +685,8 @@ async function vertragsZiel(kennung) {
   // 2.6.3 (Paket 2): nur ein Pfad in der App (nie "//fremd.de/…" oder "@fremd.de") — auch wenn der Server falsch antwortet
   const pfad = String(i.antwort.app_pfad);
   if (!pfad.startsWith("/app/") || pfad.startsWith("//") || /[@\\]/.test(pfad.split("?")[0])) return null;
-  return { pfad: pfad + "&vertrag=1", inseratUrl: i.antwort.inserat_url };
+  const trenner = pfad.includes("?") ? "&" : "?";
+  return { pfad: pfad + trenner + "vertrag=1", inseratUrl: i.antwort.inserat_url };
 }
 
 async function webseiteOeffnen(basis, pfad, tab) {
@@ -671,6 +699,13 @@ async function webseiteOeffnen(basis, pfad, tab) {
 }
 
 async function vertragOeffnen(msg, tab) {
+  // P1-Sicherung: zwischen Box-Anzeige und Klick kann eine SPA schon auf das
+  // naechste Fahrzeug gewechselt haben. Nie einen Vertrag aus altem Zustand
+  // oeffnen; erst das aktuelle Inserat neu lesen lassen.
+  if (!tabZeigtInserat(tab, msg.kennung)) {
+    return { fehler: "veraltet",
+             text: "Das angezeigte Fahrzeug hat sich geändert – AutoSchnell liest das aktuelle Inserat neu. Bitte danach noch einmal auf Kaufvertrag klicken." };
+  }
   const ziel = await vertragsZiel(msg.kennung);
   if (!ziel) return { fehler: "unbekannt" };
   const basis = await server();
