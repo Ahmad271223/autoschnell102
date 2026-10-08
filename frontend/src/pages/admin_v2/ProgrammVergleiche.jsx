@@ -54,7 +54,7 @@ export default function AdminProgrammVergleiche() {
     <div data-testid="admin-programm-vergleiche">
       <PageHeader
         title={`Programm-Vergleiche${daten.name ? ` · ${daten.name}` : ""}`}
-        subtitle={`${daten.gesamt} ${daten.gesamt === 1 ? "Vergleich" : "Vergleiche"} · freigegeben für Kd.-Nr. ${(daten.freigegeben_fuer || []).join(", ") || "niemand"}`}
+        subtitle={`${daten.gesamt} ${daten.gesamt === 1 ? "Vergleich" : "Vergleiche"} · verfügbar mit AutoSchnell Pro`}
       />
       <Card className="mb-4">
         <div className="text-sm font-semibold mb-2">Verbundene PCs</div>
