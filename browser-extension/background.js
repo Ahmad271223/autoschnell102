@@ -714,9 +714,15 @@ async function vertragOeffnen(msg, tab) {
   if (app) {
     const antwort = await anTab(app.id, { type: "AUTOSCHNELL_OEFFNEN", ziel: ziel.pfad });
     await chrome.windows.update(app.windowId, { focused: true });
+    if (antwort?.wartet) {
+      // App ist offen, hat das Ziel aber wegen ungespeicherter Arbeit noch
+      // nicht uebernommen. Nicht behaupten, der Vertrag sei geoeffnet.
+      return { ok: true, weg: "app_wartet" };
+    }
     if (!antwort || !antwort.ok) {
-      // 2.6.0 (Pruefung 05.10.2026, Nr. 6): Die App lief schon vor dem (aktualisierten) Helfer — nicht hart neu
-      // laden (ein halb ausgefuellter Kaufvertrag waere weg). Nach vorne holen und sagen, was zu tun ist.
+      // Die App lief schon vor dem (aktualisierten) Helfer — nicht hart neu
+      // laden (ein halb ausgefuellter Kaufvertrag waere weg). Nach vorne holen
+      // und sagen, was zu tun ist.
       return { ok: true, weg: "app_neu_laden" };
     }
     return { ok: true, weg: "app" };
