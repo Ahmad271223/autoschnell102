@@ -35,6 +35,7 @@ internal interface IAnsichtQuelle
 {
     IntPtr Hauptfenster { get; }
     QuellenZustand Pruefe();
+    QuellenZustand PruefeDirekt() => Pruefe();
     Task<Lesung?> LiesAsync();
 }
 
@@ -452,6 +453,7 @@ internal sealed class Ueberwacher
             Protokoll.Schreibe("Fahrzeug war beim Start schon angezeigt – nicht automatisch geöffnet (Knopf „Vergleichen“).");
             return;
         }
+        long klickVorServer = _letzterKlick?.Invoke() ?? long.MinValue;
         VergleichAntwort antwort;
         try { antwort = await _dienst.VergleichAsync(f, Probelauf); }
         catch (DienstFehler ex)
@@ -495,6 +497,30 @@ internal sealed class Ueberwacher
             _gesperrt = false;
             SetzeStatus(Status.Aktiv);
         }
+
+        // P0/P1: Waehrend /vergleich laeuft, kann AutoPointer bereits ein
+        // anderes Fahrzeug zeigen. TickAsync ist in dieser Zeit gesperrt.
+        // Vor dem Publizieren von Links/Inserat/Vertrag/Vorgang deshalb die
+        // sichtbare Ansicht zwingend neu pruefen.
+        var nachServer = _quelle.PruefeDirekt();
+        if (nachServer.Lage != Lage.Details || nachServer.Summe != _summe)
+        {
+            LetzteInseratUrl = null;
+            LetzteVergleiche = Array.Empty<Vergleich>();
+            LetztesNurGemerkt = false;
+            _aktuellerVorgang = null;
+            _summe = nachServer.Lage == Lage.Details ? nachServer.Summe : 0;
+            _seit = _takt();
+
+            bool neuerKlick = _letzterKlick == null || _letzterKlick() > klickVorServer;
+            _offen = nachServer.Lage == Lage.Details && neuerKlick;
+            _ungeklickt = nachServer.Lage == Lage.Details && !neuerKlick;
+            Protokoll.Schreibe("AutoPointer hat waehrend der Serveranfrage das Fahrzeug gewechselt – "
+                               + "alte Antwort samt Vorgang/Vertrag verworfen."
+                               + (neuerKlick ? "" : " Neues Auto wartet auf einen echten Klick."));
+            return;
+        }
+
         Merken(f);
         if (antwort.ErkanntMarke != null)
         {
@@ -784,7 +810,11 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
 
     public IntPtr Hauptfenster => _haupt;
 
-    public QuellenZustand Pruefe()
+    public QuellenZustand Pruefe() => PruefeIntern(erzwingen: false);
+
+    public QuellenZustand PruefeDirekt() => PruefeIntern(erzwingen: true);
+
+    private QuellenZustand PruefeIntern(bool erzwingen)
     {
         if (_ansicht == null || !AutoPointerFenster.NochGueltig(_ansicht))
         {
@@ -804,7 +834,8 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
         // klickt - dann ist es vorne. Liegt ein anderes Fenster (Browser) davor,
         // gilt die letzte Pruefsumme: kostet nichts und verdeckte Pixel loesen
         // kein erneutes Lesen aus.
-        if (_letzteSumme != 0 && !ImVordergrund(_haupt)) return new QuellenZustand(Lage.Details, _letzteSumme);
+        if (!erzwingen && _letzteSumme != 0 && !ImVordergrund(_haupt))
+            return new QuellenZustand(Lage.Details, _letzteSumme);
         ulong summe = AutoPointerFenster.Pruefsumme(_ansicht.TechnikTabelle);
         summe = (summe * 31) ^ AutoPointerFenster.Pruefsumme(_ansicht.KopfTabelle);
         _letzteSumme = summe == 0 ? 1 : summe;
