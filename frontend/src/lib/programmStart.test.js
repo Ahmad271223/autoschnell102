@@ -80,6 +80,27 @@ describe("Browser-Helfer: Ziel aus der Erweiterung im offenen App-Fenster (04.10
     expect(nav).not.toHaveBeenCalled();
     expect(f.ereignisse[0].detail).toEqual({ link: KA, vertrag: true });
   });
+  it("Browser-Helfer bestaetigt bei ungespeicherter Arbeit erst nach echtem Oeffnen", () => {
+    const f = appFenster("/app/vertraege");
+    const nav = vi.fn();
+    let knopf = null;
+    erweiterungZieleVerfolgen(nav, {
+      fenster: f,
+      beschaeftigt: () => true,
+      nachfragen: (ausfuehren) => { knopf = ausfuehren; },
+    });
+    f.senden({
+      __autoschnell: true,
+      type: "OEFFNEN",
+      ziel: `/app/vergleich?url=${encodeURIComponent(KA)}&vertrag=1`,
+      reqId: "req-123",
+    });
+    expect(nav).not.toHaveBeenCalled();
+    expect(f.ereignisse).toHaveLength(0);
+    knopf();
+    expect(nav).toHaveBeenCalledTimes(1);
+  });
+
   it("fremde Quelle, fremde Ziele und ungespeicherte Arbeit", () => {
     const f = appFenster("/app/termine");
     const nav = vi.fn();
