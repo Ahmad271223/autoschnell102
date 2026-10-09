@@ -9,6 +9,18 @@ internal enum Feld
     Schadstoffklasse, Sitzplaetze, HashId,
 }
 
+/// <summary>1.5.12: eine erkannte Zeile der Tabelle "Technische Daten" mit der Lage ihres Werts im Bild (Pixel im
+/// unskalierten Abbild wie <see cref="OcrZeile"/>).</summary>
+/// <param name="Wert">gelesener Wert (getrimmt, sonst roh), "" = keiner gelesen.</param>
+/// <param name="WertX">wo der gelesene Wert beginnt — geschaetzt, wenn Bezeichnung und Wert als ein Stueck gelesen wurden.</param>
+/// <param name="Spalte">wo die Wertspalte beginnt (aus allen Reihen, die Werte stehen linksbuendig); null = unbekannt.</param>
+/// <param name="LinksMin">rechtes Ende der Bezeichnung, wenn sie ein eigenes Stueck ist (sonst 0).</param>
+/// <param name="Rechts">rechtes Ende des gelesenen Werts; null = kein Wert gelesen.</param>
+/// <param name="VorherUnten">Unterkante der Reihe darueber (null = erste Reihe).</param>
+/// <param name="DanachOben">Oberkante der Reihe darunter (null = letzte Reihe).</param>
+internal sealed record TabellenZeile(Feld Feld, string Wert, double WertX, double? Spalte, double LinksMin,
+                                     double? Rechts, double Oben, double Unten, double? VorherUnten, double? DanachOben);
+
 /// <summary>Macht aus den erkannten Textzeilen der beiden Tabellen ein Fahrzeug.</summary>
 /// <remarks>Die Tabelle "Technische Daten" hat links die Bezeichnung
 /// ("Kilometerstand:"), rechts den Wert. Zeilen werden ueber die Hoehe
@@ -57,39 +69,124 @@ internal static class DetailLeser
     public static Dictionary<Feld, string> Tabelle(IReadOnlyList<OcrZeile> zeilen)
     {
         var ergebnis = new Dictionary<Feld, string>();
-        if (zeilen.Count == 0) return ergebnis;
+        foreach (var z in Zeilen(zeilen))
+            if (z.Wert.Length > 0 && !ergebnis.ContainsKey(z.Feld)) ergebnis[z.Feld] = z.Wert;
+        return ergebnis;
+    }
+
+    /// <summary>Befund Ahmad 09.10.2026 (1.5.12, zweiter Blick): jede erkannte Zeile der Tabelle samt Lage des Werts im
+    /// Bild — dieselbe Zuordnung Bezeichnung -> Wert wie <see cref="Tabelle"/> (die nimmt genau diese Zeilen), damit der
+    /// zweite Blick denselben Wert noch einmal liest und nicht den einer Nachbarzeile. Auch Zeilen OHNE gelesenen Wert
+    /// ("Inserat-ID:" und daneben nichts Lesbares) kommen mit — gerade die soll der zweite Blick noch lesen.</summary>
+    internal static List<TabellenZeile> Zeilen(IReadOnlyList<OcrZeile> zeilen)
+    {
+        var liste = new List<TabellenZeile>();
+        if (zeilen.Count == 0) return liste;
 
         var reihen = InReihen(zeilen);
         // Spaltengrenze: wo in mehrteiligen Reihen der Wert beginnt.
         var wertStarts = reihen.Where(r => r.Count >= 2).Select(r => r[1].X).OrderBy(x => x).ToList();
         double grenze = wertStarts.Count > 0 ? wertStarts[wertStarts.Count / 2] - 8 : double.MaxValue;
 
-        foreach (var reihe in reihen)
+        double? spalte = grenze != double.MaxValue ? grenze + 8 : null;
+        for (int i = 0; i < reihen.Count; i++)
         {
+            var reihe = reihen[i];
             string bezeichnung, wert;
+            double wertX, linksMin = 0;
             if (reihe.Count >= 2 && reihe[0].X < grenze)
             {
                 bezeichnung = reihe[0].Text;
                 wert = string.Join(" ", reihe.Skip(1).Select(z => z.Text));
+                wertX = reihe[1].X;
+                linksMin = reihe[0].Rechts;
                 int dp = bezeichnung.IndexOf(':');
                 if (dp >= 0 && dp < bezeichnung.Length - 1)
                 {
                     wert = bezeichnung[(dp + 1)..].Trim() + " " + wert;
                     bezeichnung = bezeichnung[..dp];
+                    wertX = WertBeginn(reihe[0], dp, grenze);
+                    linksMin = 0;               // die Bezeichnung endet irgendwo in reihe[0] — nicht genau bekannt
                 }
             }
             else
             {
+                // hier ist reihe[0] das einzige Stueck (mehrteilige Reihen links der Grenze nimmt der Zweig oben)
                 string text = string.Join(" ", reihe.Select(z => z.Text));
                 int dp = text.IndexOf(':');
                 if (dp <= 0 || reihe[0].X >= grenze) continue;   // nur Wert oder nur Bezeichnung
                 bezeichnung = text[..dp];
                 wert = text[(dp + 1)..];
+                wertX = WertBeginn(reihe[0], dp, grenze);
             }
-            wert = wert.Trim();
-            if (wert.Length == 0) continue;
             var feld = BezeichnungErkennen(bezeichnung.TrimEnd(':', ' '));
-            if (feld != null && !ergebnis.ContainsKey(feld.Value)) ergebnis[feld.Value] = wert;
+            if (feld == null) continue;
+            liste.Add(new TabellenZeile(feld.Value, wert.Trim(), wertX, spalte, linksMin,
+                                        wert.Trim().Length > 0 ? reihe.Max(z => z.Rechts) : null,
+                                        reihe.Min(z => z.Y), reihe.Max(z => z.Y + z.Hoehe),
+                                        i > 0 ? reihen[i - 1].Max(z => z.Y + z.Hoehe) : null,
+                                        i + 1 < reihen.Count ? reihen[i + 1].Min(z => z.Y) : null));
+        }
+        return liste;
+    }
+
+    /// <summary>Wo beginnt der Wert, wenn die Texterkennung Bezeichnung und Wert als EIN Stueck gelesen hat
+    /// ("Kraftstoff: Diesel")? Ist die Wertspalte aus anderen Reihen bekannt (<paramref name="grenze"/>), dort; sonst
+    /// nach dem Anteil der Zeichen bis zum Doppelpunkt geschaetzt.</summary>
+    private static double WertBeginn(OcrZeile z, int dp, double grenze)
+    {
+        bool ohneWert = z.Text[(dp + 1)..].Trim().Length == 0;
+        if (grenze != double.MaxValue)
+        {
+            double spalte = grenze + 8;
+            if (spalte > z.X && (ohneWert || spalte < z.Rechts)) return spalte;
+        }
+        if (ohneWert) return z.Rechts;
+        return z.X + z.Breite * (dp + 1) / z.Text.Length;
+    }
+
+    /// <summary>1.5.12: so weit (in Zeilenhoehen) reicht der Ausschnitt rechts ueber das Gelesene hinaus. Gemessen
+    /// 09.10.2026 (1.080 gezeichnete Tabellen): genauso viele Treffer wie bis zum Tabellenrand (939 statt 938), aber
+    /// ein Viertel weniger Zeit (+59 statt +76 ms je Lesung) — das Sammelbild wird schmaler.</summary>
+    internal const double RechtsZeilen = 8;
+
+    /// <summary>1.5.12: Ausschnitt (Pixel im Abbild) um den Wert einer Zeile. Waagrecht ab der Wertspalte (etwas Rand
+    /// davor, nie in die Bezeichnung) bis <see cref="RechtsZeilen"/> Zeilenhoehen hinter das Gelesene (ohne gelesenen
+    /// Wert bis zum Rand der Tabelle) — NICHT nur so weit, wie der erste Durchgang gelesen hat: der verschluckt gern ein
+    /// ganzes Wort ("Golf" statt "VW Golf", "BMW" statt "BMW X1"), und genau das soll der zweite Blick noch sehen
+    /// (gemessen: zu knappe Ausschnitte lasen "/ Polo" und "BMW X"). Senkrecht die Reihe mit etwas Rand, aber nie ueber
+    /// die halbe Luecke zur Nachbarreihe hinaus (sonst liest er deren Wert mit). null, wenn nichts uebrig bleibt.
+    /// (rein, fuer Tests)</summary>
+    internal static System.Drawing.Rectangle? WertAusschnitt(TabellenZeile z, int bildBreite, int bildHoehe)
+    {
+        double h = Math.Max(4, z.Unten - z.Oben);
+        double randX = Math.Max(4, h * 0.5), randY = Math.Max(3, h * 0.3);
+        double links = Math.Max(Math.Min(z.WertX, z.Spalte ?? z.WertX) - randX, z.LinksMin + 1);
+        double rechts = bildBreite - 1;                 // die aeusserste Pixelspalte (Rahmen der Tabelle) nicht
+        if (z.Rechts is { } gelesenBis) rechts = Math.Min(rechts, gelesenBis + RechtsZeilen * h);
+        double oben = z.Oben - randY, unten = z.Unten + randY;
+        if (z.VorherUnten is { } vu) oben = Math.Max(oben, (vu + z.Oben) / 2);
+        if (z.DanachOben is { } d) unten = Math.Min(unten, (z.Unten + d) / 2);
+        int x1 = Math.Max(0, (int)Math.Floor(links)), y1 = Math.Max(0, (int)Math.Floor(oben));
+        int x2 = Math.Min(bildBreite, (int)Math.Ceiling(rechts)), y2 = Math.Min(bildHoehe, (int)Math.Ceiling(unten));
+        if (x2 - x1 < 4 || y2 - y1 < 4) return null;
+        return new System.Drawing.Rectangle(x1, y1, x2 - x1, y2 - y1);
+    }
+
+    /// <summary>1.5.12: Ausschnitte der Werte von <paramref name="felder"/> — je Feld die Zeile, die auch
+    /// <see cref="Tabelle"/> nimmt (die erste mit Wert), sonst die erste ohne gelesenen Wert. (rein, fuer Tests)</summary>
+    internal static Dictionary<Feld, System.Drawing.Rectangle> WertBereiche(IReadOnlyList<OcrZeile> zeilen, int bildBreite,
+                                                                            int bildHoehe, IReadOnlyCollection<Feld> felder)
+    {
+        var ergebnis = new Dictionary<Feld, System.Drawing.Rectangle>();
+        var mitWert = new HashSet<Feld>();
+        foreach (var z in Zeilen(zeilen))
+        {
+            if (!felder.Contains(z.Feld) || mitWert.Contains(z.Feld)) continue;
+            if (ergebnis.ContainsKey(z.Feld) && z.Wert.Length == 0) continue;
+            if (WertAusschnitt(z, bildBreite, bildHoehe) is not { } r) continue;
+            ergebnis[z.Feld] = r;
+            if (z.Wert.Length > 0) mitWert.Add(z.Feld);
         }
         return ergebnis;
     }
@@ -220,7 +317,16 @@ internal static class DetailLeser
         return Uuid.IsMatch(h) ? h : null;
     }
 
-    private static string? Sauber(string? s)
+    /// <summary>Inserat-ID wie gelesen -> nur Buchstaben, Ziffern, Bindestrich; leer = null. (Auch fuer den zweiten
+    /// Blick, 1.5.12 — dieselbe Regel wie fuer den ersten.)</summary>
+    internal static string? InseratIdSauber(string? s)
+    {
+        if (s == null) return null;
+        string sauber = Regex.Replace(s, @"[^A-Za-z0-9\-]", "");
+        return sauber.Length > 0 ? sauber : null;
+    }
+
+    internal static string? Sauber(string? s)
     {
         if (string.IsNullOrWhiteSpace(s)) return null;
         s = Regex.Replace(s, @"\s+", " ").Trim().TrimEnd('.', '…').Trim();
@@ -286,11 +392,7 @@ internal static class DetailLeser
         };
         (f.EzMonat, f.EzJahr) = Erstzulassung(tab.GetValueOrDefault(Feld.Erstzulassung));
         (f.Kw, f.Ps, f.LeistungUnsicher) = LeistungGeprueft(tab.GetValueOrDefault(Feld.Leistung));
-        if (tab.TryGetValue(Feld.InseratId, out var id))
-        {
-            string sauber = Regex.Replace(id, @"[^A-Za-z0-9\-]", "");
-            f.InseratId = sauber.Length > 0 ? sauber : null;
-        }
+        if (tab.TryGetValue(Feld.InseratId, out var id)) f.InseratId = InseratIdSauber(id);
         f.HashId = HashId(tab.GetValueOrDefault(Feld.HashId));
         var (quelle, titel, preis) = Kopf(kopf, kopfBreite);
         f.Quelle = quelle;

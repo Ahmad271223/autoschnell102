@@ -959,9 +959,12 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
     /// gebraucht: Hash-ID, fehlende Felder) und nur dann verwendet, wenn die bisherige Regel es verlangt. Die Regel
     /// "Hash-ID nur, wenn beide Durchgaenge gleich lesen" bleibt. Ohne eigene Engines (null, Tests) wie bisher
     /// nacheinander auf <paramref name="ocr"/>.</summary>
+    /// <param name="zweiterBlick">Befund Ahmad 09.10.2026 (1.5.12): danach die Werte von Marke/Modell, Kraftstoff und
+    /// Inserat-ID einzeln noch einmal lesen (<see cref="ZweiterBlick"/>) — false nur fuer Tests/Messungen.</param>
     internal static async Task<Lesung> LiesBilderAsync(TextErkennung ocr, System.Drawing.Bitmap technik,
                                                        System.Drawing.Bitmap? kopf, uint dpi, bool bilderSpeichern,
-                                                       TextErkennung? ocrKopf = null, TextErkennung? ocrZweiter = null)
+                                                       TextErkennung? ocrKopf = null, TextErkennung? ocrZweiter = null,
+                                                       bool zweiterBlick = true)
     {
         double faktor = Math.Clamp(3.0 * 96 / (dpi == 0 ? 96 : dpi), 1.5, 3.0);
         var leer = new List<OcrZeile>();
@@ -987,15 +990,24 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
         }
         var f = DetailLeser.Auswerten(zt, zk, kopf?.Width ?? 0);
         string roh = Rohtext(zt, zk);
+        List<OcrZeile>? zt2 = null;
         if (DetailLeser.Fehlend(f).Count > 0 || DetailLeser.Unvollstaendig(f).Count > 0 || f.HashId != null)
         {
-            var zt2 = zweiter != null ? zweiter.Result : await ocr.LiesAsync(technik, faktor * 2 / 3);
+            zt2 = zweiter != null ? zweiter.Result : await ocr.LiesAsync(technik, faktor * 2 / 3);
             var f2 = DetailLeser.Auswerten(zt2, zk, kopf?.Width ?? 0);
             // Hash-ID (fuer den AutoScout-Link) nur, wenn beide Durchlaeufe genau dasselbe lesen
             string? hash = f.HashId != null && f.HashId == f2.HashId ? f.HashId : null;
             f = DetailLeser.Ergaenzen(f, f2);
             f.HashId = hash;
             roh += "  ||  2. Durchlauf: " + Rohtext(zt2, Array.Empty<OcrZeile>());
+        }
+        // 1.5.12 (Befund Ahmad 09.10.2026): zweiter Blick auf Marke/Modell, Kraftstoff, Inserat-ID — aus demselben Abbild,
+        // hoechstens 10 s, Fehler nur ins Protokoll. Fehlt eine Pflichtangabe, geht ohnehin nichts an den Server: dann nicht.
+        if (zweiterBlick && DetailLeser.Fehlend(f).Count == 0)
+        {
+            // Lage der Zeilen aus dem ersten Durchgang; was er nicht fand, aus dem zweiten (falls schon gelesen)
+            string? blick = await ZweiterBlick.AnwendenAsync(f, technik, zt, zt2 ?? zweiter?.Result, dpi, ocr, ocrZweiter);
+            if (blick != null) roh += "  ||  2. Blick: " + blick;
         }
         if (bilderSpeichern) Speichere(technik, kopf, roh);
         return new Lesung(f, zt.Count == 0, roh);

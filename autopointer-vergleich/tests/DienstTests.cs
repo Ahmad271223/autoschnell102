@@ -88,6 +88,57 @@ public class DienstTests
         Assert.True(fz.TryGetProperty("hash_id", out _));
     }
 
+    [Fact]   // Befund Ahmad 09.10.2026 (1.5.12): was der zweite Blick anders las, geht als fahrzeug.alternativen mit
+    public async Task Vergleich_schickt_Alternativen_des_zweiten_Blicks()
+    {
+        var (d, a) = Dienst();
+        a.Antwort = _ => Json(200, """{"links":[],"hinweise":[],"profil":"inland"}""");
+        var f = Passat();
+        f.AlternativenMarkeModell = new() { "VW Passat Variant 2", "VW Passat Varlant" };
+        f.AlternativenKraftstoff = new() { "DieseI" };
+        f.AlternativenInseratId = new();                                 // leer: Schluessel faellt weg
+        await d.VergleichAsync(f, probelauf: false);
+
+        using var doc = JsonDocument.Parse(a.Inhalt!);
+        var fz = doc.RootElement.GetProperty("fahrzeug");
+        var alt = fz.GetProperty("alternativen");
+        Assert.Equal(JsonValueKind.Object, alt.ValueKind);
+        Assert.Equal(new[] { "VW Passat Variant 2", "VW Passat Varlant" },
+                     alt.GetProperty("marke_modell_text").EnumerateArray().Select(x => x.GetString()));
+        Assert.Equal(new[] { "DieseI" }, alt.GetProperty("kraftstoff").EnumerateArray().Select(x => x.GetString()));
+        Assert.False(alt.TryGetProperty("inserat_id", out _));
+        Assert.Equal(new[] { "marke_modell_text", "kraftstoff" }, alt.EnumerateObject().Select(p => p.Name));
+        // die Hauptwerte bleiben, wie sie sind
+        Assert.Equal("VW Passat Variant", fz.GetProperty("marke_modell_text").GetString());
+        Assert.Equal("Diesel", fz.GetProperty("kraftstoff").GetString());
+    }
+
+    [Fact]   // 1.5.12: nichts Abweichendes gelesen -> kein "alternativen" (auch kein null, kein leeres Objekt)
+    public async Task Vergleich_ohne_Alternativen_laesst_das_Feld_weg()
+    {
+        var (d, a) = Dienst();
+        a.Antwort = _ => Json(200, """{"links":[],"hinweise":[],"profil":"inland"}""");
+        var f = Passat();
+        f.AlternativenKraftstoff = new() { "", "   " };                    // nur Leeres zaehlt nicht
+        await d.VergleichAsync(f, probelauf: false);
+        using var doc = JsonDocument.Parse(a.Inhalt!);
+        Assert.False(doc.RootElement.GetProperty("fahrzeug").TryGetProperty("alternativen", out _));
+        Assert.DoesNotContain("alternativen", a.Inhalt);
+    }
+
+    [Fact]   // 1.5.12: hoechstens 3 je Feld, je hoechstens 160 Zeichen, keine Doppelten
+    public void Alternativen_in_der_Nutzlast_begrenzt()
+    {
+        var f = Passat();
+        f.AlternativenMarkeModell = new() { new string('x', 200), "a", "a", "b", "c", "d" };
+        var alt = Assert.IsType<Dictionary<string, List<string>>>(AutoSchnellDienst.Nutzlast(f)["alternativen"]);
+        var mm = alt["marke_modell_text"];
+        Assert.Equal(3, mm.Count);
+        Assert.Equal(160, mm[0].Length);
+        Assert.Equal(new[] { "a", "b" }, mm.Skip(1));
+        Assert.Single(alt);
+    }
+
     [Fact]   // 1.5.8 (Wunsch Ahmad 08.10.2026): Vorgangsnummer und "die Erweiterung oeffnet"
     public async Task Vergleich_liest_Vorgangsnummer_und_fragt_nach()
     {

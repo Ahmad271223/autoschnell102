@@ -106,6 +106,38 @@ dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und 
   25 s) und öffnet den Kaufvertrag erst, wenn die Lesung da ist — die App nimmt dann die Lesung, ohne abzurufen. Kommt
   sie nicht: nur der Hinweis „im Inserat unten rechts auf „Kaufvertrag“ drücken“, nie ein Abruf (`VertragsWeg`).
   Ohne Erweiterung bleibt „Vertrag“ wie bisher (Kaufvertrag in der App mit dem Link).
+* **1.5.12 (Befund Ahmad 09.10.: „Hyundai IBO“ statt i30, „VWT- Ro c“ statt VW T-Roc, „EIektro“, Inserat-ID mit
+  Buchstaben) — zweiter Blick auf die wichtigen Werte:**
+  * Nach dem normalen Lesen werden die **Werte** der Zeilen „Marke, Modell“, „Kraftstoff“ und „Inserat-ID“ noch einmal
+    einzeln gelesen — aus **demselben** Bildschirm-Abbild (kein neues Abbild, kein PrintWindow, AutoPointer bleibt
+    unberührt). Wo die Zeilen stehen, sagt der erste Durchgang (`DetailLeser.WertBereiche`, dieselbe Zuordnung
+    Bezeichnung → Wert wie beim Lesen). Der Ausschnitt beginnt an der Wertspalte und reicht 8 Zeilenhöhen über das
+    Gelesene hinaus (ohne gelesenen Wert bis zum Rand der Tabelle) — der erste Durchgang verschluckt gern ein ganzes
+    Wort („Golf“ statt „VW Golf“, „BMW“ statt „BMW X1“), zu knappe Ausschnitte lasen in der Messung „/ Polo“ und
+    „BMW X“. Bis ganz zum Rand brachte gleich viel, kostete aber ein Viertel mehr Zeit. Senkrecht nie über die halbe
+    Lücke zur Nachbarzeile.
+  * Anders aufbereitet als der erste Durchgang (ganze Tabelle, Zoom 3, Farbe): **Zoom 5 in Farbe** und **Zoom 4 in
+    Graustufen mit gestrecktem Kontrast** (Hintergrund weiß, Schrift schwarz — auch bei markierter Zeile oder heller
+    Schrift auf dunklem Grund). Alle Ausschnitte stehen untereinander in **einem** Bild je Aufbereitung: zwei
+    Texterkennungen insgesamt, gleichzeitig auf eigenen Engines. Schwellwert (schwarz/weiß) und Zoom 6 lasen in der
+    Messung schlechter.
+  * Was davon — gesäubert wie der Hauptwert — **anders** lautet, geht als `fahrzeug.alternativen`
+    (`marke_modell_text`, `kraftstoff`, `inserat_id`; je höchstens 3, je ≤ 160 Zeichen, ohne Doppelte; ohne Abweichung
+    fehlt das Feld ganz) an `/vergleich`. Der Server probiert sie, wenn er den Hauptwert nicht erkennt; ältere Server
+    ignorieren das unbekannte Feld. Hatte der erste Durchgang **keine Inserat-ID**, nimmt das Programm die des zweiten
+    Blicks (die Hash-ID-Regel „nur wenn beide Durchgänge gleich lesen“ bleibt).
+  * Fand der erste Durchgang keine der drei Zeilen oder fehlt eine Pflichtangabe (dann geht ohnehin nichts an den
+    Server), entfällt der zweite Blick. Er hat zusammen höchstens 10 s (wie jede Texterkennung, `TextErkennung.Frist`);
+    jeder Fehler steht nur im Protokoll — der Vergleich geht dann ohne Alternativen raus. Im Rohtext/Protokoll steht,
+    was er gelesen hat („2. Blick: …“).
+  * Gemessen (gezeichnete Tabellen: Tahoma/Segoe UI/MS Sans Serif × ClearType/Graustufen/ungeglättet × weiße,
+    hellblaue, dunkelblau markierte Zeile, je 40 Autos = 1.080 Lesungen; `ZweiterBlickMessung`, läuft nur mit
+    `ZWEITER_BLICK_MESSEN=1`): Marke/Modell las der erste Durchgang 888-mal richtig — mit dem zweiten Blick liegt der
+    richtige Text in 939 Fällen vor (Hauptwert oder Alternative); Kraftstoff 1.064 → 1.066, Inserat-ID 1.075 → 1.077
+    (eine davon als übernommene ID). Was beide Blicke gleich falsch lesen („Fiat 5001“, „BMW Xl“, „Hyundai ilO“),
+    bleibt Sache der Reparaturen auf dem Server. Zusatzzeit je Lesung auf dem Entwicklungs-PC: Median 40 → 83 ms
+    (+43 ms, Test `ZweiterBlickTests.Zusatzzeit_je_Lesung`, 6 Zeilen), in der großen Messung im Mittel 66 → 125 ms
+    (+59 ms, 8 Zeilen).
 * Ein Auto, das beim Programmstart schon angezeigt wird, öffnet nichts – erst das nächste angeklickte. **Nach dem (Neu-)Verbinden**
   dagegen wird das gerade angezeigte Auto sofort verglichen (seit 1.5.3, Befund 04.10.: Mercedes nach Neuverbinden).
 * **Unplausible Daten** (seit 1.5.3, Befund 04.10.: „Kia Rio · EZ 04/2026 · 165.000 km“, „Audi 80 · 1.960.817 km“):
@@ -191,7 +223,9 @@ gezeichnet). Deshalb:
    Tabelle selbst zeichnen lassen (`PrintWindow`) ist seit 1.5.2 **ganz entfernt** (Wunsch Ahmad 04.10.): am
    03.10.2026 meldete AutoPointer zweimal genau dabei dieselbe „Zugriffsverletzung“ (aprun.exe, Offset 16B050B).
    Die **Windows-Texterkennung** (offline, de-DE) liest es mit 3-fachem Zoom; fehlende Felder aus einem zweiten
-   Durchlauf. Bezeichnungen werden unscharf erkannt („Kibmeterstand“).
+   Durchlauf. Bezeichnungen werden unscharf erkannt („Kibmeterstand“). Seit 1.5.12 liest ein **zweiter Blick** die
+   Werte von Marke/Modell, Kraftstoff und Inserat-ID einzeln und anders aufbereitet noch einmal (`ZweiterBlick`,
+   Abweichungen gehen als `alternativen` an den Server).
    (Anlass 03.10.2026: AutoPointer meldete eine „Zugriffsverletzung“ in aprun.exe. AutoPointer stürzt
    nachweislich auch ohne uns ab – Windows-Ereignis vom 24.09. –, trotzdem fassen wir es so wenig wie möglich an.)
 4. Hat sich die Anzeige während des Lesens geändert, wird verworfen (keine Mischdaten bei A → B → C).

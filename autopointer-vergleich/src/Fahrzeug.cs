@@ -33,6 +33,14 @@ internal sealed class Fahrzeug
     /// laeuft ohne Leistungsfilter, mit Hinweis) statt mit einem moeglicherweise falschen Wert.</summary>
     public bool LeistungUnsicher { get; set; }
 
+    /// <summary>Befund Ahmad 09.10.2026 (1.5.12, "IBO" statt i30, "VWT- Ro c", "EIektro", Inserat-ID mit Buchstaben):
+    /// was der zweite Blick auf die Werte (eigene Ausschnitte, andere Aufbereitung) ANDERS gelesen hat als der erste —
+    /// gesaeubert wie der Hauptwert, ohne Doppelte, hoechstens 3 je Feld. Der Server probiert sie, wenn er den Hauptwert
+    /// nicht erkennt (<c>fahrzeug.alternativen</c>). Leer = nichts Abweichendes gelesen.</summary>
+    public List<string> AlternativenMarkeModell { get; set; } = new();
+    public List<string> AlternativenKraftstoff { get; set; } = new();
+    public List<string> AlternativenInseratId { get; set; } = new();
+
     /// <summary>Pruefbericht 03.10.2026 (Nr. 1): Kennung des Inserats (Inserat-ID, sonst AutoScout-Hash-ID), klein
     /// und ohne Leer-/Sonderzeichen; null ohne Kennung. Bewusst OHNE Quelle — die steht in einer anderen Zeile
     /// und darf als Lesefehler nicht aus demselben Auto zwei machen.</summary>

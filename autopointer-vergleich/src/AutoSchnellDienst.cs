@@ -455,7 +455,7 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
         // nur, damit ein Server ohne Erkennung weiter antwortet.
         string text = (f.MarkeModellText ?? "").Trim();
         int leer = text.IndexOf(' ');
-        return new Dictionary<string, object?>
+        var nutzlast = new Dictionary<string, object?>
         {
             ["marke"] = K(leer > 0 ? text[..leer] : text, 60),
             ["modell"] = K(leer > 0 ? text[(leer + 1)..] : "", 80),
@@ -478,6 +478,20 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
             ["hash_id"] = K(f.HashId, 60),
             ["beschreibung"] = K(f.BeschreibungText, 1500),
         };
+        // Befund Ahmad 09.10.2026 (1.5.12): was der zweite Blick anders gelesen hat — nur Felder mit Abweichung, ganz
+        // ohne "alternativen", wenn nichts abweicht. Aeltere Server ignorieren das unbekannte Feld (pydantic-Standard).
+        var alternativen = new Dictionary<string, List<string>>();
+        void Liste(string name, IEnumerable<string>? werte)
+        {
+            var l = (werte ?? Enumerable.Empty<string>()).Select(w => K(w, ZweiterBlick.MaxLaenge))
+                .Where(w => w.Length > 0).Distinct(StringComparer.Ordinal).Take(ZweiterBlick.MaxJeFeld).ToList();
+            if (l.Count > 0) alternativen[name] = l;
+        }
+        Liste("marke_modell_text", f.AlternativenMarkeModell);
+        Liste("kraftstoff", f.AlternativenKraftstoff);
+        Liste("inserat_id", f.AlternativenInseratId);
+        if (alternativen.Count > 0) nutzlast["alternativen"] = alternativen;
+        return nutzlast;
     }
 
     private static string Text(JsonElement e, string name) =>
