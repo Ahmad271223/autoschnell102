@@ -14,6 +14,8 @@ public class UeberwacherTests
         public Func<Fahrzeug>? Fahrzeug;
         public Action? WaehrendDesLesens;
         public int Lesungen;
+        /// <summary>1.5.13: das "gelesene Bild" jeder Lesung (nur ein Stummel; null = kein Bild).</summary>
+        public byte[]? Bild = { 0x89, 0x50, 0x4E, 0x47 };
         public IntPtr Hauptfenster => IntPtr.Zero;
         public QuellenZustand Pruefe() => new(Lage, Lage == Lage.Details ? Summe : 0);
 
@@ -22,7 +24,7 @@ public class UeberwacherTests
             Lesungen++;
             var f = Fahrzeug!();
             WaehrendDesLesens?.Invoke();
-            return Task.FromResult<Lesung?>(new Lesung(f, f.MarkeModellText.Length == 0 && f.Kilometer == null, "roh"));
+            return Task.FromResult<Lesung?>(new Lesung(f, f.MarkeModellText.Length == 0 && f.Kilometer == null, "roh", Bild: Bild));
         }
 
         public void Zeige(Func<Fahrzeug> f, ulong summe)
@@ -63,6 +65,19 @@ public class UeberwacherTests
         public readonly List<Fahrzeug> Anfragen = new();
         public int Vorgewaermt;
         public void Vorwaermen() => Vorgewaermt++;
+        /// <summary>1.5.13: der Server kennt die Marke, fand aber kein Modell (fahrzeug.modell_gefunden = false).</summary>
+        public bool ModellGefunden = true;
+        /// <summary>1.5.13: alle Lesebilder, die das Programm geschickt hat (kommen aus dem Hintergrund — unter Sperre lesen);
+        /// <see cref="LesebildAntwort"/> = was der Server sagt, <see cref="LesebildFehler"/> = der Versand wirft.</summary>
+        public readonly List<Lesebild> Bilder = new();
+        public bool LesebildAntwort = true;
+        public Exception? LesebildFehler;
+        public Task<bool> LesebildSendenAsync(Lesebild bild)
+        {
+            lock (Bilder) Bilder.Add(bild);
+            if (LesebildFehler != null) throw LesebildFehler;
+            return Task.FromResult(LesebildAntwort);
+        }
 
         public Task<VergleichAntwort> VergleichAsync(Fahrzeug f, bool probelauf)
         {
@@ -89,7 +104,7 @@ public class UeberwacherTests
             }.Where(v => NurPortale == null || NurPortale.Contains(v.Portal)).ToArray(), Array.Empty<string>(), "inland", InseratUrl, InseratImBrowser ? "browser" : InseratUrl != null ? "laeuft" : "kein_link",
                ErkanntMarke: "Erkannt", ErkanntModell: f.MarkeModellText, Melden: Melden,
                InseratImBrowser: InseratImBrowser && InseratUrl != null,
-               VorgangId: vorgang, UeberHelfer: UeberHelfer, HelferBrowser: HelferBrowser));
+               VorgangId: vorgang, UeberHelfer: UeberHelfer, HelferBrowser: HelferBrowser, ModellGefunden: ModellGefunden));
         }
     }
 
@@ -1008,5 +1023,171 @@ public class UeberwacherTests
         _server.Fehler = null;
         await Ticks(24);
         Assert.Single(_b.Aufrufe);
+    }
+
+    // ------------------------------------------------------------------------------------------------------------
+    // Wunsch Ahmad 09.10.2026 (1.5.13): bei nicht erkannten Autos das gelesene Bild an AutoSchnell
+
+    /// <summary>Der Versand laeuft im Hintergrund — fuer die Pruefung abwarten.</summary>
+    private async Task Versandt() => await (_u.LetzterLesebildVersand ?? Task.CompletedTask);
+
+    private List<Lesebild> Bilder
+    {
+        get { lock (_server.Bilder) return _server.Bilder.ToList(); }
+    }
+
+    private static Fahrzeug OhneEz()
+    {
+        var f = Bentley();
+        f.EzJahr = null;
+        f.EzMonat = null;
+        return f;
+    }
+
+    [Fact]
+    public async Task Nicht_erkanntes_Auto_schickt_das_Lesebild_genau_einmal_je_Inhalt()
+    {
+        await Start();
+        await Anklicken(OhneEz, 5);
+        await Versandt();
+        await Anklicken(OhneEz, 5);              // dieselbe Anzeige noch einmal
+        await _u.JetztVergleichenAsync();        // und "Vergleichen" fuer dieselbe Anzeige
+        await Versandt();
+        var b = Assert.Single(Bilder);
+        Assert.Equal(Lesebilder.PflichtfeldFehlt, b.Grund);
+        Assert.Equal(new[] { "Erstzulassung" }, b.Fehlt);
+        Assert.Equal("roh", b.Rohtext);
+        Assert.Equal("Bentley Bentayga", b.Fahrzeug!.MarkeModellText);
+        Assert.Null(b.VorgangId);
+        Assert.Equal(new byte[] { 0x89, 0x50, 0x4E, 0x47 }, b.Bild);
+        Assert.Empty(_b.Aufrufe);
+        Assert.Contains(Protokoll.Letzte(), z => z.Contains("Lesebild gesendet (pflichtfeld_fehlt)"));
+        // keine eigene Sprechblase dazu — nur die bekannte Meldung
+        Assert.Single(_meldungen, m => m.StartsWith("Fahrzeug konnte nicht eindeutig erkannt werden"));
+        Assert.DoesNotContain(_meldungen, m => m.Contains("Lesebild"));
+        // ein anderer Ausschnitt ohne Inserat-Kennung zeigt etwas anderes -> ein neues Bild
+        await Anklicken(OhneEz, 6);
+        await Versandt();
+        Assert.Equal(2, Bilder.Count);
+    }
+
+    [Fact]   // 1.5.13: unbekannte Marke / unbekanntes Modell laut Server — je ein Bild (mit Vorgangsnummer), der Vergleich laeuft weiter
+    public async Task Unbekannte_Marke_und_unbekanntes_Modell_schicken_je_ein_Lesebild()
+    {
+        await Start();
+        await Anklicken(() => { var f = Golf(); f.MarkeModellText = "Quatschmarke X1"; return f; }, 1);
+        await Versandt();
+        var b = Assert.Single(Bilder);
+        Assert.Equal(Lesebilder.MarkeUnbekannt, b.Grund);
+        Assert.Null(b.Fehlt);
+        Assert.Empty(_b.Aufrufe);
+        _server.ModellGefunden = false;
+        _server.UeberHelfer = true;              // mit Vorgangsnummer: sie geht mit
+        await Anklicken(Golf, 2);
+        await Versandt();
+        Assert.Equal(2, Bilder.Count);
+        Assert.Equal(Lesebilder.ModellUnbekannt, Bilder[1].Grund);
+        Assert.Equal(Server.Vorgang, Bilder[1].VorgangId);
+        Assert.Single(_b.Aufrufe);               // die Vorgangsseite geht trotzdem auf
+    }
+
+    [Fact]   // 1.5.13: Inserat-ID (mobile.de/Kleinanzeigen) bzw. Hash-ID (AutoScout) nicht gelesen -> ein Bild; mit Inserat-Adresse keins
+    public async Task Fehlende_Inserat_ID_schickt_ein_Lesebild()
+    {
+        await Start();
+        await Anklicken(() => { var f = Bentley(); f.Quelle = "mobile.de"; f.InseratId = null; return f; }, 1);
+        await Versandt();
+        Assert.Equal(Lesebilder.InseratIdFehlt, Assert.Single(Bilder).Grund);
+        await Anklicken(() => { var f = Passat(); f.Quelle = "AutoScout24"; f.InseratId = null; f.HashId = null; return f; }, 2);
+        await Versandt();
+        Assert.Equal(2, Bilder.Count);
+        Assert.Equal(Lesebilder.InseratIdFehlt, Bilder[1].Grund);
+        Assert.Equal(2, _b.Aufrufe.Count);       // die Vergleiche gehen trotzdem auf
+        _server.InseratUrl = "https://suchen.mobile.de/fahrzeuge/details.html?id=1";
+        await Anklicken(() => { var f = Golf(); f.Quelle = "mobile.de"; return f; }, 3);
+        await Versandt();
+        Assert.Equal(2, Bilder.Count);
+        Assert.Equal(3, _b.Aufrufe.Count);
+    }
+
+    [Fact]   // 1.5.13: dasselbe Auto (Inserat-Kennung) nie zweimal — auch nicht aus einem zweiten Grund oder nach "Vergleichen"
+    public async Task Lesebild_nie_zweimal_fuer_dieselbe_Inserat_Kennung()
+    {
+        await Start();
+        _server.ModellGefunden = false;
+        await Anklicken(Passat, 1);              // Inserat-ID 3529712138; Kleinanzeigen ohne Inserat-Adresse: zwei Gruende
+        await Versandt();
+        Assert.Equal(Lesebilder.ModellUnbekannt, Assert.Single(Bilder).Grund);   // der erste Grund gewinnt
+        await Anklicken(Passat, 2);              // Anzeige neu gezeichnet: gleiches Auto
+        await _u.JetztVergleichenAsync();        // erzwungen: der Server antwortet wieder modell_unbekannt
+        await Versandt();
+        Assert.Single(Bilder);
+        Assert.Equal(2, _server.Anfragen.Count);
+    }
+
+    [Fact]   // 1.5.13: hoechstens 30 je Tag, dann nur Protokoll; am naechsten Tag wieder
+    public async Task Hoechstens_30_Lesebilder_je_Tag()
+    {
+        await Start();
+        _server.ModellGefunden = false;
+        for (int i = 1; i <= Ueberwacher.LesebilderJeTag + 5; i++)
+        {
+            int nr = i;
+            await Anklicken(() => { var f = Golf(); f.InseratId = $"id{nr:D6}"; return f; }, (ulong)i);
+            await Versandt();
+        }
+        Assert.Equal(Ueberwacher.LesebilderJeTag, Bilder.Count);
+        Assert.Equal(Ueberwacher.LesebilderJeTag + 5, _b.Aufrufe.Count);
+        Assert.Contains(Protokoll.Letzte(), z => z.Contains("Tagesgrenze des Programms"));
+        _jetzt = _jetzt.Date.AddDays(1).AddHours(8);
+        await Anklicken(() => { var f = Golf(); f.InseratId = "id999999"; return f; }, 999);
+        await Versandt();
+        Assert.Equal(Ueberwacher.LesebilderJeTag + 1, Bilder.Count);
+    }
+
+    [Fact]   // 1.5.13: Probelauf schickt nie ein Bild; Einstellung aus auch nicht (die Meldung bleibt)
+    public async Task Probelauf_und_abgeschaltete_Einstellung_schicken_kein_Lesebild()
+    {
+        await Start();
+        _u.Probelauf = true;
+        await Anklicken(OhneEz, 1);
+        await Versandt();
+        Assert.Empty(Bilder);
+        Assert.Contains(Protokoll.Letzte(), z => z.Contains("Probelauf: Lesebild (pflichtfeld_fehlt) NICHT gesendet"));
+        _u.Probelauf = false;
+        _e.LesebilderSenden = false;
+        await Anklicken(OhneEz, 2);
+        await Versandt();
+        Assert.Empty(Bilder);
+        Assert.Equal(2, _meldungen.Count(m => m.StartsWith("Fahrzeug konnte nicht eindeutig erkannt werden")));
+    }
+
+    [Fact]   // 1.5.13: ein Fehler beim Versand (Server sagt nein, Ausnahme) bleibt im Protokoll — kein Hinweis, der Vergleich geht auf
+    public async Task Fehler_beim_Lesebild_stoeren_den_Vergleich_nicht()
+    {
+        await Start();
+        _server.ModellGefunden = false;
+        _server.LesebildAntwort = false;
+        await Anklicken(Golf, 1);
+        await Versandt();
+        Assert.Single(_b.Aufrufe);
+        _server.LesebildFehler = new InvalidOperationException("kaputt");
+        await Anklicken(Passat, 2);
+        await Versandt();
+        Assert.Equal(2, _b.Aufrufe.Count);
+        Assert.Equal(2, Bilder.Count);
+        Assert.DoesNotContain(_meldungen, m => m.Contains("kaputt") || m.Contains("Lesebild"));
+        Assert.Contains(Protokoll.Letzte(), z => z.Contains("Lesebild (modell_unbekannt) nicht gesendet: kaputt"));
+    }
+
+    [Fact]   // 1.5.13: ohne Bild zur Lesung (Kodieren fehlgeschlagen) nur eine Protokollzeile
+    public async Task Ohne_Bild_zur_Lesung_wird_nichts_gesendet()
+    {
+        await Start();
+        _q.Bild = null;
+        await Anklicken(OhneEz, 1);
+        await Versandt();
+        Assert.Empty(Bilder);
+        Assert.Contains(Protokoll.Letzte(), z => z.Contains("Lesebild (pflichtfeld_fehlt): zu dieser Lesung gibt es kein Bild"));
     }
 }

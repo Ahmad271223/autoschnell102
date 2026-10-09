@@ -138,6 +138,28 @@ dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und 
     bleibt Sache der Reparaturen auf dem Server. Zusatzzeit je Lesung auf dem Entwicklungs-PC: Median 40 → 83 ms
     (+43 ms, Test `ZweiterBlickTests.Zusatzzeit_je_Lesung`, 6 Zeilen), in der großen Messung im Mittel 66 → 125 ms
     (+59 ms, 8 Zeilen).
+* **1.5.13 (Wunsch Ahmad 09.10.: „wenn er etwas ausliest und nicht erkennt: bitte uns automatisch ein Screenshot des
+  nicht Erkannten geben“) — Lesebild an AutoSchnell:**
+  * Wird ein Auto nicht erkannt, schickt das Programm **genau das Bild, das die Texterkennung gelesen hat** (Kopf-Tabelle
+    über Technik-Tabelle in einem PNG, 24 Bit, Originalgröße — kein neues Abbild, nie PrintWindow) an
+    `POST …/lesebild` (`Lesebild.cs`): mit Grund, Rohtext (≤ 6000 Zeichen), den gelesenen Feldern (Marke/Modell-Text,
+    Titel, Quelle, Inserat-ID, je ≤ 160) und, wenn es eine gab, der Vorgangsnummer. Gründe: `pflichtfeld_fehlt`
+    (Marke/Modell, Erstzulassung oder Kilometer nicht gelesen — erst, wenn zweiter Durchlauf und zweiter Blick durch
+    sind; `fehlt` nennt die Felder), `marke_unbekannt` (der Server kennt die Marke nicht), `modell_unbekannt` (Marke
+    bekannt, aber kein Modell zugeordnet — neu in der `/vergleich`-Antwort: `fahrzeug.modell_gefunden`; fehlt das Feld,
+    älterer Server, gilt „gefunden“), `inserat_id_fehlt` (Inserat-ID bzw. AutoScout-Hash-ID nicht gelesen).
+  * **Je Auto genau einmal** (Inserat-Kennung; ohne sie der angezeigte Inhalt samt gelesenen Daten — ein anderer
+    Ausschnitt desselben Autos ohne Kennung ist ein neues Bild, er zeigt ja etwas anderes), auch nicht aus einem zweiten
+    Grund oder nach „Vergleichen“; **höchstens 30 je Tag** (darüber nur Protokoll; der Server hat seine eigene Grenze,
+    429); **nie im Probelauf**. Das PNG entsteht neben der Texterkennung (die Abbilder werden vorher 1:1 zusammengesetzt,
+    das Kodieren läuft im Hintergrund — das Lesen wird nicht langsamer); ist es größer als 1,5 MB, wird es in Schritten
+    von 0,75 verkleinert, bis es passt. Der Versand läuft im Hintergrund (die Vergleiche warten nie darauf), höchstens
+    15 s, ohne Wiederholversuch — jeder Fehler (413 zu groß, 429 Tagesgrenze, 404 älterer Server, kein Netz) ist nur eine
+    Protokollzeile, nie eine Meldung an den Sucher. Im Protokoll steht „Lesebild gesendet (grund): … KB – heute n von
+    30“. Das Bild lebt nur mit der einen Lesung; es wird nichts je Auto gesammelt.
+  * Einstellungen: **„Bei nicht erkannten Autos ein Bild der Anzeige an AutoSchnell senden“**, Standard **an** (Wunsch
+    Ahmad); aus = kein Bild und auch kein Kodieren. „Erkennungsbilder speichern“ (lokal, verschlüsselt) bleibt davon
+    unberührt.
 * Ein Auto, das beim Programmstart schon angezeigt wird, öffnet nichts – erst das nächste angeklickte. **Nach dem (Neu-)Verbinden**
   dagegen wird das gerade angezeigte Auto sofort verglichen (seit 1.5.3, Befund 04.10.: Mercedes nach Neuverbinden).
 * **Unplausible Daten** (seit 1.5.3, Befund 04.10.: „Kia Rio · EZ 04/2026 · 165.000 km“, „Audi 80 · 1.960.817 km“):
@@ -225,7 +247,9 @@ gezeichnet). Deshalb:
    Die **Windows-Texterkennung** (offline, de-DE) liest es mit 3-fachem Zoom; fehlende Felder aus einem zweiten
    Durchlauf. Bezeichnungen werden unscharf erkannt („Kibmeterstand“). Seit 1.5.12 liest ein **zweiter Blick** die
    Werte von Marke/Modell, Kraftstoff und Inserat-ID einzeln und anders aufbereitet noch einmal (`ZweiterBlick`,
-   Abweichungen gehen als `alternativen` an den Server).
+   Abweichungen gehen als `alternativen` an den Server). Wird das Auto trotzdem nicht erkannt, geht seit 1.5.13 genau
+   dieses Abbild (Kopf über Technik, PNG) als **Lesebild** an AutoSchnell — einmal je Auto, höchstens 30 am Tag,
+   abschaltbar in den Einstellungen.
    (Anlass 03.10.2026: AutoPointer meldete eine „Zugriffsverletzung“ in aprun.exe. AutoPointer stürzt
    nachweislich auch ohne uns ab – Windows-Ereignis vom 24.09. –, trotzdem fassen wir es so wenig wie möglich an.)
 4. Hat sich die Anzeige während des Lesens geändert, wird verworfen (keine Mischdaten bei A → B → C).

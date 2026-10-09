@@ -29,6 +29,10 @@ internal sealed class Einstellungen
     public bool HinweiseAnzeigen { get; set; } = true;
     public bool TastenkuerzelAktiv { get; set; } = true;
     public bool ErkennungsbilderSpeichern { get; set; } = false;
+    /// <summary>Wunsch Ahmad 09.10.2026 (1.5.13): bei einem nicht erkannten Auto das gelesene Bild der Anzeige an AutoSchnell
+    /// schicken (einmal je Auto, hoechstens 30 am Tag, nie im Probelauf) — damit man dort sieht, was auf dem Bildschirm
+    /// stand. Standard AN (Wunsch Ahmad); eine alte einstellungen.json ohne das Feld bekommt denselben Standard.</summary>
+    public bool LesebilderSenden { get; set; } = true;
 
     // 1.5.8: die kleine Leiste ist immer da (EINE Bedienung statt Fenster + Leiste + Menue am Symbol);
     // ein altes "LeisteAnzeigen": false in einstellungen.json wird ignoriert.

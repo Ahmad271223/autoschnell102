@@ -24,6 +24,7 @@ public class PruefberichtTests
         public bool Verbunden => true;
         public bool MarkeUnbekannt;
         public Task<bool?> VorgangSelbstAsync(string vorgangId) => Task.FromResult<bool?>(false);
+        public Task<bool> LesebildSendenAsync(Lesebild bild) => Task.FromResult(true);
         public Task<VergleichAntwort> VergleichAsync(Fahrzeug f, bool probelauf)
         {
             if (MarkeUnbekannt)

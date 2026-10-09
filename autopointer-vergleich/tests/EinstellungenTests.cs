@@ -161,4 +161,37 @@ public class EinstellungenTests
             Protokoll.DateiAktiv = dateiVorher;
         }
     }
+
+    [Fact]   // Wunsch Ahmad 09.10.2026 (1.5.13): Lesebilder an AutoSchnell — Standard AN, auch fuer eine alte einstellungen.json ohne das Feld
+    public void Lesebilder_senden_ist_standardmaessig_an_und_ueberlebt_die_Kopie()
+    {
+        Assert.True(new Einstellungen().LesebilderSenden);
+        var alt = System.Text.Json.JsonSerializer.Deserialize<Einstellungen>("""{"WartezeitMs": 400}""")!;
+        Assert.True(alt.LesebilderSenden);
+        var e = new Einstellungen { LesebilderSenden = false };
+        Assert.False(e.Kopie().LesebilderSenden);          // Kopie = JSON hin und zurueck, wie Speichern/Laden
+        Assert.True(new Einstellungen().Kopie().LesebilderSenden);
+    }
+
+    [Fact]   // 1.5.13: der Haken im Einstellungsfenster kommt in den laufenden Einstellungen an (AnwendenAuf, vgl. A11)
+    public void Einstellungsfenster_uebernimmt_Lesebilder_senden()
+    {
+        Exception? fehler = null;
+        var t = new Thread(() =>
+        {
+            try
+            {
+                var ziel = new Einstellungen();
+                using (var f = new EinstellungenForm(new Einstellungen { LesebilderSenden = false })) f.AnwendenAuf(ziel);
+                Assert.False(ziel.LesebilderSenden);
+                using (var f = new EinstellungenForm(new Einstellungen())) f.AnwendenAuf(ziel);
+                Assert.True(ziel.LesebilderSenden);
+            }
+            catch (Exception ex) { fehler = ex; }
+        });
+        t.SetApartmentState(ApartmentState.STA);
+        t.Start();
+        t.Join();
+        if (fehler != null) throw fehler;
+    }
 }

@@ -43,12 +43,14 @@ internal sealed record Vergleich(string Portal, string Url);
 
 /// <param name="ErkanntMarke">Seit 1.4.0: Marke/Modell erkennt der SERVER (Katalognamen zur Anzeige);
 /// null bei einem Server ohne Erkennung.</param>
+/// <param name="ModellGefunden">1.5.13: der Server kennt die Marke, konnte aber kein Modell zuordnen (fahrzeug.modell_gefunden
+/// = false) — dann geht das Lesebild an AutoSchnell. Fehlt die Angabe (aelterer Server), gilt das Modell als gefunden.</param>
 internal sealed record VergleichAntwort(IReadOnlyList<Vergleich> Links, IReadOnlyList<string> Hinweise, string Profil,
                                         string? InseratUrl = null, string VorabStatus = "", string VorabHinweis = "",
                                        string? ErkanntMarke = null, string? ErkanntModell = null, bool MarkeErkannt = true,
                                        IReadOnlyList<string>? Melden = null, bool InseratImBrowser = false,
                                        string? VorgangId = null, bool UeberHelfer = false, string HelferBrowser = "",
-                                       bool HatHelfer = false);
+                                       bool HatHelfer = false, bool ModellGefunden = true);
 
 /// <summary>Was der Ueberwacher vom Server braucht (in Tests eine Attrappe).</summary>
 internal interface IVergleichsDienst
@@ -64,6 +66,10 @@ internal interface IVergleichsDienst
     /// Bewusst OHNE Standard-Umsetzung: in 1.5.8 reichte der DienstVermittler die Nachfrage nicht weiter — es galt
     /// immer "nicht pruefbar" und alles ging doppelt auf.</summary>
     Task<bool?> VorgangSelbstAsync(string vorgangId);
+    /// <summary>Wunsch Ahmad 09.10.2026 (1.5.13): das gelesene Bild eines nicht erkannten Autos an AutoSchnell (POST …/lesebild).
+    /// true = angenommen; jeder Fehler ist nur eine Protokollzeile und false. Ohne Standard-Umsetzung — wie bei
+    /// <see cref="VorgangSelbstAsync"/>, damit der DienstVermittler das Weiterreichen nicht vergessen kann.</summary>
+    Task<bool> LesebildSendenAsync(Lesebild bild);
 }
 
 /// <summary>Verbindung zu AutoSchnell (Wunsch Ahmad 03.10.2026): das Programm arbeitet nur
@@ -397,12 +403,15 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
             vorabHinweis = Text(vorab, "hinweis");
         }
         string? marke = null, modell = null;
-        bool markeErkannt = true;
+        bool markeErkannt = true, modellGefunden = true;
         if (e.TryGetProperty("fahrzeug", out var fz) && fz.ValueKind == JsonValueKind.Object)
         {
             marke = Text(fz, "marke") is { Length: > 0 } m ? m : null;
             modell = Text(fz, "modell");
             markeErkannt = !fz.TryGetProperty("erkannt", out var ek) || ek.ValueKind != JsonValueKind.False;
+            // 1.5.13: konnte der Server das Modell zuordnen? Nur ein ausdrueckliches false zaehlt (aeltere Server ohne
+            // die Angabe: gefunden) — sonst ginge nach einem Server-Update ohne das Feld jedes Auto als Lesebild raus
+            modellGefunden = !fz.TryGetProperty("modell_gefunden", out var mg) || mg.ValueKind != JsonValueKind.False;
         }
         // Seit 04.10.2026: was der Server dem Sucher sofort zeigen will (unplausible EZ/km, Modell aus der Beschreibung);
         // null = Server ohne diese Angabe
@@ -426,7 +435,42 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
         bool hatHelfer = e.TryGetProperty("hat_helfer", out var hh) && hh.ValueKind == JsonValueKind.True;
         return new VergleichAntwort(links, hinweise, Text(e, "profil"), inseratUrl, vorabStatus, vorabHinweis,
                                     marke, modell, markeErkannt, melden, imBrowser && inseratUrl != null,
-                                    vorgang, ueberHelfer && vorgang != null, helferBrowser, hatHelfer);
+                                    vorgang, ueberHelfer && vorgang != null, helferBrowser, hatHelfer, modellGefunden);
+    }
+
+    /// <summary>1.5.13: so lange darf der Versand eines Lesebilds dauern (bis 1,5 MB, laeuft im Hintergrund).</summary>
+    internal static readonly TimeSpan LesebildFrist = TimeSpan.FromSeconds(15);
+
+    /// <summary>Wunsch Ahmad 09.10.2026 (1.5.13): POST lesebild — das gelesene Bild eines nicht erkannten Autos. Kein eigener
+    /// Wiederholversuch (ein Bild weniger ist egal, eines doppelt waere laestig), hoechstens <see cref="LesebildFrist"/>.
+    /// true = angenommen (200 {"ok": true}); jeder Fehler — 413 zu gross, 429 Tagesgrenze des Servers, 404 aelterer Server,
+    /// 401, kein Netz — ist nur eine Protokollzeile und false: nie eine Meldung an den Sucher, nie Einfluss auf den
+    /// Vergleich (der Aufrufer wartet nicht darauf).</summary>
+    public async Task<bool> LesebildSendenAsync(Lesebild bild)
+    {
+        try
+        {
+            var e = await SendeAsync(HttpMethod.Post, "lesebild", Lesebilder.Nutzlast(bild), LesebildFrist, wiederholen: false);
+            if (e.TryGetProperty("ok", out var ok) && ok.ValueKind == JsonValueKind.True) return true;
+            Protokoll.Schreibe($"Lesebild ({bild.Grund}): AutoSchnell hat es nicht angenommen.");
+            return false;
+        }
+        catch (DienstFehler ex)
+        {
+            Protokoll.Schreibe(ex.Status switch
+            {
+                413 => $"Lesebild ({bild.Grund}) zu groß ({bild.Bild.Length / 1024} KB) – nicht angenommen.",
+                429 => $"Lesebild ({bild.Grund}): Tagesgrenze bei AutoSchnell erreicht – heute keine weiteren Bilder.",
+                404 => $"Lesebild ({bild.Grund}): dieser AutoSchnell-Server nimmt noch keine Lesebilder an (älterer Stand).",
+                _ => $"Lesebild ({bild.Grund}) nicht gesendet: {ex.Message}",
+            });
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Protokoll.Schreibe($"Lesebild ({bild.Grund}) nicht gesendet: {Ursache(ex)}");
+            return false;
+        }
     }
 
     /// <summary>1.5.11 (Wunsch Ahmad 08.10.2026 abends, "Vertrag ohne Apify"): liegt das Inserat schon gelesen vor (Lesung

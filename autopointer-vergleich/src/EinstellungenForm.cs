@@ -17,6 +17,8 @@ internal sealed class EinstellungenForm : Form
     private readonly CheckBox _hotkey = Haken("Strg+Alt+P schaltet die Automatik an/aus");
     private readonly CheckBox _autostart = Haken("mit Windows starten");
     private readonly CheckBox _bilder = Haken("Erkennungsbilder speichern (nur zur Fehlersuche)");
+    /// <summary>Wunsch Ahmad 09.10.2026 (1.5.13): Standard an — der Haken ist nur zum Abschalten da.</summary>
+    private readonly CheckBox _lesebilder = Haken("Bei nicht erkannten Autos ein Bild der Anzeige an AutoSchnell senden");
     private readonly ComboBox _ecke = Auswahl("unten links", "unten rechts");
 
     public Einstellungen Ergebnis => _e;
@@ -52,7 +54,7 @@ internal sealed class EinstellungenForm : Form
             Gruppe("Ablauf",
                    Reihe(Beschriftung("Wartezeit nach dem Anklicken:"), _wartezeit, Beschriftung("ms")),
                    Reihe(Beschriftung("Mindestabstand zwischen Vergleichen:"), _abstand, Beschriftung("ms")),
-                   _hinweise, _hotkey, _autostart, _bilder)), 0, 0);
+                   _hinweise, _hotkey, _autostart, _bilder, _lesebilder)), 0, 0);
 
         var speichern = new Button { Text = "Speichern", AutoSize = true, DialogResult = DialogResult.OK };
         var abbrechen = new Button { Text = "Abbrechen", AutoSize = true, DialogResult = DialogResult.Cancel };
@@ -79,6 +81,7 @@ internal sealed class EinstellungenForm : Form
         _hotkey.Checked = _e.TastenkuerzelAktiv;
         _autostart.Checked = _e.MitWindowsStarten;
         _bilder.Checked = _e.ErkennungsbilderSpeichern;
+        _lesebilder.Checked = _e.LesebilderSenden;
         _ecke.SelectedIndex = _e.LeisteEcke == Leiste.Rechts ? 1 : 0;
     }
 
@@ -93,6 +96,7 @@ internal sealed class EinstellungenForm : Form
         _e.TastenkuerzelAktiv = _hotkey.Checked;
         _e.MitWindowsStarten = _autostart.Checked;
         _e.ErkennungsbilderSpeichern = _bilder.Checked;
+        _e.LesebilderSenden = _lesebilder.Checked;
         _e.LeisteEcke = _ecke.SelectedIndex == 1 ? Leiste.Rechts : Leiste.Links;
         _e.Bereinigt();
     }
@@ -114,6 +118,7 @@ internal sealed class EinstellungenForm : Form
         if (ziel.MitWindowsStarten != _e.MitWindowsStarten) ziel.AutostartSelbstGewaehlt = true;
         ziel.MitWindowsStarten = _e.MitWindowsStarten;
         ziel.ErkennungsbilderSpeichern = _e.ErkennungsbilderSpeichern;
+        ziel.LesebilderSenden = _e.LesebilderSenden;
         ziel.LeisteEcke = _e.LeisteEcke;
     }
 

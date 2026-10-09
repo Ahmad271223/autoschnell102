@@ -935,4 +935,6 @@ internal sealed class DienstVermittler : IVergleichsDienst
     /// <summary>Pruefung 08.10.2026 (1.5.9, A): in 1.5.8 fehlte hier das Weiterreichen der Vorgangs-Nachfrage — die
     /// Standard-Umsetzung der Schnittstelle sagte immer "nicht pruefbar", und das Programm oeffnete jedes Mal selbst.</summary>
     public Task<bool?> VorgangSelbstAsync(string vorgangId) => _dienst().VorgangSelbstAsync(vorgangId);
+    /// <summary>1.5.13: Lesebild an den jeweils aktuellen Dienst (nach einem Neu-Verbinden der neue Schluessel).</summary>
+    public Task<bool> LesebildSendenAsync(Lesebild bild) => _dienst().LesebildSendenAsync(bild);
 }

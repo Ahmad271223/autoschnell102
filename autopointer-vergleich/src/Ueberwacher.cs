@@ -6,7 +6,10 @@ internal readonly record struct QuellenZustand(Lage Lage, ulong Summe);
 
 /// <param name="Weg">"Bildschirm" (nur kopiert, was AutoPointer ohnehin zeigt) oder
 /// "PrintWindow" (AutoPointer hat die Tabelle extra in ein Bild gezeichnet).</param>
-internal sealed record Lesung(Fahrzeug Fahrzeug, bool Leer, string Rohtext, string Weg = "");
+/// <param name="Bild">1.5.13 (Wunsch Ahmad 09.10.2026): genau das Bild, das die Texterkennung gelesen hat (Kopf ueber Technik,
+/// PNG, 24 Bit, ≤ 1,5 MB) — geht an AutoSchnell, wenn das Auto nicht erkannt wird. null: kein Bild (Tests, Einstellung aus,
+/// Kodieren fehlgeschlagen). Lebt nur mit dieser Lesung — nach dem Verarbeiten ist es weg, es wird nie je Auto gesammelt.</param>
+internal sealed record Lesung(Fahrzeug Fahrzeug, bool Leer, string Rohtext, string Weg = "", byte[]? Bild = null);
 
 /// <summary>Pruefung 08.10.2026 (1.5.9, C): eine Meldung an den Sucher. Windows schneidet Sprechblasen bei ~255 Zeichen
 /// ab — die langen Anleitungen (Inserat-ID ≈ 400, Hash-ID ≈ 360 Zeichen) verloren genau ihre Anweisungen. Deshalb kommt
@@ -145,6 +148,20 @@ internal sealed class Ueberwacher
     private bool _inseratHinweisGezeigt;
     /// <summary>Original-Inserat des zuletzt verglichenen Autos (fuer "Vertrag": in AutoSchnell oeffnen).</summary>
     public string? LetzteInseratUrl { get; private set; }
+    // ---- Wunsch Ahmad 09.10.2026 (1.5.13): Bild der Anzeige bei nicht erkannten Autos an AutoSchnell -----------------
+    /// <summary>Hoechstens so viele Lesebilder je Programmlauf und Tag — darueber nur noch eine Protokollzeile (der Server
+    /// hat seine eigene Grenze, 429). Der Zaehler beginnt beim Datumswechsel neu.</summary>
+    internal const int LesebilderJeTag = 30;
+    private int _lesebilderHeute;
+    private DateTime _lesebilderTag;
+    /// <summary>Fuer welche Autos schon ein Bild ging (Inserat-Kennung; ohne sie der angezeigte Inhalt samt gelesenen
+    /// Daten) — nie zweimal dasselbe Auto, auch nicht aus einem anderen Grund oder nach "Vergleichen". Nur die letzten
+    /// <see cref="LesebilderGemerkt"/>, damit die Liste bei einem wochenlang laufenden Programm nicht waechst.</summary>
+    private readonly HashSet<string> _lesebildGesendet = new();
+    private readonly Queue<string> _lesebildReihe = new();
+    internal const int LesebilderGemerkt = 500;
+    /// <summary>Der laufende Versand (fuer Tests) — die Vergleiche warten nie darauf.</summary>
+    internal Task? LetzterLesebildVersand { get; private set; }
     public Status Status => _status ?? Status.KeinAutoPointer;
 
     /// <summary>Statuswechsel (fuer das Symbol im Infobereich).</summary>
@@ -430,6 +447,9 @@ internal sealed class Ueberwacher
                                + $"Gelesen: {lesung.Rohtext}");
             MeldeEinmal("Fahrzeug konnte nicht eindeutig erkannt werden (fehlt: " + string.Join(", ", fehlt) + ")."
                         + (lesung.Weg == "Bildschirm" ? " Detailbereich in AutoPointer größer ziehen." : ""));
+            // 1.5.13 (Wunsch Ahmad 09.10.2026): das gelesene Bild an AutoSchnell — hier sind alle Durchgaenge (zweiter
+            // Durchlauf, zweiter Blick) schon durch; einmal je angezeigtem Inhalt, wie die Meldung darueber
+            LesebildSenden(lesung, Lesebilder.PflichtfeldFehlt, e, fehlt);
             return;
         }
 
@@ -522,8 +542,11 @@ internal sealed class Ueberwacher
         if (!antwort.MarkeErkannt)
         {
             MeldeEinmal($"Marke in „{f.MarkeModellText}“ nicht erkannt – kein Vergleich.");
+            LesebildSenden(lesung, Lesebilder.MarkeUnbekannt, e, vorgangId: antwort.VorgangId);
             return;
         }
+        // 1.5.13: Marke bekannt, aber der Server fand kein Modell — das Bild zeigt, was wirklich dastand (Katalog/Reparaturen)
+        if (!antwort.ModellGefunden) LesebildSenden(lesung, Lesebilder.ModellUnbekannt, e, vorgangId: antwort.VorgangId);
         foreach (var v in antwort.Links) Protokoll.Schreibe($"{v.Portal} URL (Regeln {antwort.Profil}): {v.Url}");
         foreach (var h in antwort.Hinweise) Protokoll.Schreibe("Hinweis: " + h);
         Protokoll.Schreibe(antwort.InseratUrl != null
@@ -542,6 +565,9 @@ internal sealed class Ueberwacher
             (inseratLang, inseratKurz) = (KeineNummerHinweis, KeineNummerKurz);
         else if (antwort.VorabStatus is "limit" or "fehler" && antwort.VorabHinweis.Length > 0)
             vorabHinweis = "Für den Kaufvertrag nicht vorab ausgelesen: " + antwort.VorabHinweis;
+        // 1.5.13: Inserat-ID (mobile.de/Kleinanzeigen) bzw. Hash-ID (AutoScout) nicht gelesen — das Bild zeigt, ob die Zeile
+        // fehlte oder nur falsch gelesen wurde (nicht noch einmal, wenn fuer dieses Auto schon ein Bild ging)
+        if (inseratLang != null) LesebildSenden(lesung, Lesebilder.InseratIdFehlt, e, vorgangId: antwort.VorgangId);
         // 1.5.8 (Wunsch Ahmad 08.10.2026): die Portalwahl steht in AutoSchnell, der Server schickt nur deren Links —
         // hier nur noch die beiden bekannten Vergleichsportale (alles andere ignorieren)
         var links = antwort.Links.Where(l => l.Portal is "mobile.de" or "AutoScout24").ToList();
@@ -689,6 +715,58 @@ internal sealed class Ueberwacher
     {
         _letzterSchluessel = f.Schluessel;
         _letzteKennung = f.InseratKennung;
+    }
+
+    /// <summary>Wunsch Ahmad 09.10.2026 (1.5.13, "wenn er etwas ausliest und nicht erkennt: automatisch ein Screenshot des
+    /// nicht Erkannten"): das gelesene Bild an AutoSchnell schicken — im Hintergrund (die Vergleiche warten nicht), je Auto
+    /// genau einmal (Inserat-Kennung; ohne sie der angezeigte Inhalt samt gelesenen Daten — ein anderer Ausschnitt desselben
+    /// Autos ohne Kennung ist dann ein neues Bild, das darf es: er zeigt ja etwas anderes), hoechstens
+    /// <see cref="LesebilderJeTag"/> je Tag, nie im Probelauf, nie bei abgeschalteter Einstellung. Jeder Fehler ist nur eine
+    /// Protokollzeile. Laeuft unter <see cref="_einzeln"/> (aus VerarbeiteAsync) — Zaehler und Liste brauchen keine Sperre.</summary>
+    private void LesebildSenden(Lesung lesung, string grund, Einstellungen e, IReadOnlyList<string>? fehlt = null,
+                                string? vorgangId = null)
+    {
+        if (!e.LesebilderSenden) return;
+        var f = lesung.Fahrzeug;
+        string schluessel = f.InseratKennung ?? $"{_summe}|{f.Schluessel}";
+        if (_lesebildGesendet.Contains(schluessel)) return;
+        if (Probelauf)
+        {
+            Protokoll.Schreibe($"Probelauf: Lesebild ({grund}) NICHT gesendet.");
+            return;
+        }
+        if (lesung.Bild == null)
+        {
+            Protokoll.Schreibe($"Lesebild ({grund}): zu dieser Lesung gibt es kein Bild – nichts gesendet.");
+            return;
+        }
+        var heute = _uhr().Date;
+        if (heute != _lesebilderTag)
+        {
+            _lesebilderTag = heute;
+            _lesebilderHeute = 0;
+        }
+        if (_lesebilderHeute >= LesebilderJeTag)
+        {
+            Protokoll.Schreibe($"Lesebild ({grund}) nicht gesendet – heute schon {LesebilderJeTag} Bilder (Tagesgrenze des Programms).");
+            return;
+        }
+        _lesebilderHeute++;
+        _lesebildGesendet.Add(schluessel);
+        _lesebildReihe.Enqueue(schluessel);
+        while (_lesebildReihe.Count > LesebilderGemerkt) _lesebildGesendet.Remove(_lesebildReihe.Dequeue());
+        int nummer = _lesebilderHeute;
+        var bild = new Lesebild(grund, lesung.Bild, lesung.Rohtext, f, fehlt, vorgangId);
+        // Task.Run: auch der Aufbau der Anfrage (Base64 von bis zu 1,5 MB, JSON) kostet den Vergleich keine Zeit
+        LetzterLesebildVersand = Task.Run(async () =>
+        {
+            try
+            {
+                if (await _dienst.LesebildSendenAsync(bild))
+                    Protokoll.Schreibe($"Lesebild gesendet ({grund}): {f.MarkeModellText} · {bild.Bild.Length / 1024} KB – heute {nummer} von {LesebilderJeTag}.");
+            }
+            catch (Exception ex) { Protokoll.Schreibe($"Lesebild ({grund}) nicht gesendet: {ex.Message}"); }
+        });
     }
 
     /// <summary>Pruefbericht 03.10.2026 (Nr. 9): Werte, die technisch moeglich, aber verdaechtig sind — nur als Hinweis
@@ -847,7 +925,7 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
         var ansicht = _ansicht;
         if (ansicht == null) return null;
         var e = _einstellungen();
-        return await LiesAnsichtAsync(_ocr, ansicht, e.ErkennungsbilderSpeichern);
+        return await LiesAnsichtAsync(_ocr, ansicht, e.ErkennungsbilderSpeichern, lesebild: e.LesebilderSenden);
     }
 
     /// <summary>Befund 03.10.2026: AutoPointer zeigte eine "Zugriffsverletzung" (aprun.exe). Es stuerzt
@@ -857,12 +935,15 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
     /// <remarks>Zweiter Befund 03.10.2026 abends: dieselbe Zugriffsverletzung (Offset 16B050B) noch einmal —
     /// PrintWindow nur noch, wenn der Sucher es in den Einstellungen ausdruecklich erlaubt
     /// (<paramref name="zeichnenErlaubt"/>). Sonst gilt, was auf dem Bildschirm steht.</remarks>
+    /// <param name="lesebild">1.5.13: das gelesene Bild als PNG mitgeben (<see cref="Lesung.Bild"/>) — aus, wenn der Sucher
+    /// das Senden abgeschaltet hat (dann auch kein Kodieren).</param>
     internal static async Task<Lesung?> LiesAnsichtAsync(TextErkennung ocr, DetailAnsicht ansicht, bool bilderSpeichern,
-                                                         Action<System.Drawing.Bitmap, System.Drawing.Bitmap?>? bilder = null)
+                                                         Action<System.Drawing.Bitmap, System.Drawing.Bitmap?>? bilder = null,
+                                                         bool lesebild = true)
     {
         // Beschreibung GLEICHZEITIG mit der Tabelle lesen (eigene Texterkennung) — sonst +0,15-0,2 s je Auto
         var beschreibung = BeschreibungLesenAsync(WeitereErkennung(0) ?? ocr, ansicht);
-        var lesung = await LiesTabellenAsync(ocr, ansicht, bilderSpeichern, bilder);
+        var lesung = await LiesTabellenAsync(ocr, ansicht, bilderSpeichern, bilder, lesebild);
         string? text = await beschreibung;
         if (lesung != null) lesung.Fahrzeug.BeschreibungText = text;
         return lesung;
@@ -913,7 +994,8 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
     }
 
     private static async Task<Lesung?> LiesTabellenAsync(TextErkennung ocr, DetailAnsicht ansicht, bool bilderSpeichern,
-                                                         Action<System.Drawing.Bitmap, System.Drawing.Bitmap?>? bilder)
+                                                         Action<System.Drawing.Bitmap, System.Drawing.Bitmap?>? bilder,
+                                                         bool lesebild)
     {
         uint dpi = Native.GetDpiForWindow(ansicht.TechnikTabelle);
         // Wunsch Ahmad 04.10.2026: AutoPointer NIE selbst zeichnen lassen (PrintWindow ist ganz entfernt) —
@@ -943,7 +1025,8 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
             using var kopf = kopfBild;
             if (technik != null)
             {
-                var sicht = await LiesBilderAsync(ocr, technik, kopf, dpi, bilderSpeichern, WeitereErkennung(1), WeitereErkennung(2));
+                var sicht = await LiesBilderAsync(ocr, technik, kopf, dpi, bilderSpeichern, WeitereErkennung(1), WeitereErkennung(2),
+                                                  lesebild: lesebild);
                 bilder?.Invoke(technik, kopf);
                 return sicht with { Weg = "Bildschirm" };
             }
@@ -961,11 +1044,17 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
     /// nacheinander auf <paramref name="ocr"/>.</summary>
     /// <param name="zweiterBlick">Befund Ahmad 09.10.2026 (1.5.12): danach die Werte von Marke/Modell, Kraftstoff und
     /// Inserat-ID einzeln noch einmal lesen (<see cref="ZweiterBlick"/>) — false nur fuer Tests/Messungen.</param>
+    /// <param name="lesebild">1.5.13 (Wunsch Ahmad 09.10.2026): genau diese Bilder (Kopf ueber Technik) als PNG in
+    /// <see cref="Lesung.Bild"/> mitgeben — fuer das Bild an AutoSchnell, wenn das Auto nicht erkannt wird. Kein neues Abbild.</param>
     internal static async Task<Lesung> LiesBilderAsync(TextErkennung ocr, System.Drawing.Bitmap technik,
                                                        System.Drawing.Bitmap? kopf, uint dpi, bool bilderSpeichern,
                                                        TextErkennung? ocrKopf = null, TextErkennung? ocrZweiter = null,
-                                                       bool zweiterBlick = true)
+                                                       bool zweiterBlick = true, bool lesebild = false)
     {
+        // 1.5.13: das Bild fuer AutoSchnell JETZT zusammensetzen — gleich gehoeren die Abbilder der Texterkennung (GDI+ erlaubt
+        // kein gleichzeitiges Lesen desselben Bildes) — und nebenher als PNG kodieren; gebraucht wird es nur, wenn das Auto
+        // nicht erkannt wird, kostet das Lesen so aber keine Zeit
+        Task<byte[]?>? png = lesebild ? Lesebilder.PngImHintergrund(technik, kopf) : null;
         double faktor = Math.Clamp(3.0 * 96 / (dpi == 0 ? 96 : dpi), 1.5, 3.0);
         var leer = new List<OcrZeile>();
         List<OcrZeile> zt, zk;
@@ -1010,7 +1099,9 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
             if (blick != null) roh += "  ||  2. Blick: " + blick;
         }
         if (bilderSpeichern) Speichere(technik, kopf, roh);
-        return new Lesung(f, zt.Count == 0, roh);
+        // 1.5.13: das PNG ist laengst fertig (lief neben der Texterkennung); Fehler hat PngImHintergrund schon protokolliert
+        byte[]? bild = png != null ? await png : null;
+        return new Lesung(f, zt.Count == 0, roh, Bild: bild);
     }
 
     private static string Rohtext(IEnumerable<OcrZeile> technik, IEnumerable<OcrZeile> kopf) =>

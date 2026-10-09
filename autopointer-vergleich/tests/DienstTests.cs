@@ -501,4 +501,84 @@ public class DienstTests
     [InlineData(" Max ", "", "AH", "Max · AH")]
     public void Kontozeile_ohne_leeren_Namen(string? name, string konto, string firma, string erwartet) =>
         Assert.Equal(erwartet, AutoSchnellDienst.KontoText(name, konto, firma));
+
+    // ------------------------------------------------------------------------------------------------------------
+    // Wunsch Ahmad 09.10.2026 (1.5.13): das gelesene Bild eines nicht erkannten Autos an POST …/lesebild
+
+    private static readonly byte[] Png = { 0x89, 0x50, 0x4E, 0x47, 1, 2, 3 };
+
+    private static Lesebild Stummel() => new(Lesebilder.MarkeUnbekannt, Png, "Marke, Model: | VW Passat");
+
+    [Fact]
+    public async Task Lesebild_geht_mit_Grund_Rohtext_Fahrzeug_und_Bild_an_den_Server()
+    {
+        var (d, a) = Dienst();
+        a.Antwort = _ => Json(200, """{"ok":true,"id":"abc"}""");
+        var bild = new Lesebild(Lesebilder.PflichtfeldFehlt, Png, "Marke, Model: | VW Passat", Passat(),
+                                new[] { "Erstzulassung" }, "11111111-2222-3333-4444-555555555555");
+        Assert.True(await d.LesebildSendenAsync(bild));
+
+        Assert.Equal(HttpMethod.Post, a.Letzte!.Method);
+        Assert.Equal("https://app.example.test/api/werkzeuge/autopointer-vergleich/lesebild", a.Letzte.RequestUri!.ToString());
+        Assert.Equal("geheim", a.Letzte.Headers.GetValues("X-Werkzeug-Schluessel").Single());
+        using var doc = JsonDocument.Parse(a.Inhalt!);
+        var r = doc.RootElement;
+        Assert.Equal("pflichtfeld_fehlt", r.GetProperty("grund").GetString());
+        Assert.Equal(new[] { "Erstzulassung" }, r.GetProperty("fehlt").EnumerateArray().Select(x => x.GetString()));
+        Assert.Equal("Marke, Model: | VW Passat", r.GetProperty("rohtext").GetString());
+        Assert.Equal("11111111-2222-3333-4444-555555555555", r.GetProperty("vorgang_id").GetString());
+        var fz = r.GetProperty("fahrzeug");
+        Assert.Equal("VW Passat Variant", fz.GetProperty("marke_modell_text").GetString());
+        Assert.Equal("VW Passat B6 - Bastlerfahrzeug", fz.GetProperty("titel").GetString());
+        Assert.Equal("Kleinanzeigen", fz.GetProperty("quelle").GetString());
+        Assert.Equal("3529712138", fz.GetProperty("inserat_id").GetString());
+        Assert.Equal(4, fz.EnumerateObject().Count());
+        Assert.Equal(Png, Convert.FromBase64String(r.GetProperty("bild").GetString()!));
+        Assert.Equal(1, a.Aufrufe);
+    }
+
+    [Theory]   // 1.5.13: jeder Fehler nur eine Protokollzeile und false — kein Wiederholversuch (auch nicht bei 503), nie eine Ausnahme
+    [InlineData(413)]
+    [InlineData(429)]
+    [InlineData(401)]
+    [InlineData(404)]
+    [InlineData(503)]
+    public async Task Lesebild_Fehler_sind_nur_false_ohne_Wiederholung(int status)
+    {
+        var (d, a) = Dienst();
+        a.Antwort = _ => Json(status, """{"detail":"nein"}""");
+        Assert.False(await d.LesebildSendenAsync(Stummel()));
+        Assert.Equal(1, a.Aufrufe);
+    }
+
+    [Fact]   // 1.5.13: kein Netz, "ok": false, kein JSON — alles nur false
+    public async Task Lesebild_ohne_Netz_oder_ohne_ok_ist_nur_false()
+    {
+        var (d, a) = Dienst();
+        a.Ausnahme = new HttpRequestException("kein Netz");
+        Assert.False(await d.LesebildSendenAsync(Stummel()));
+        Assert.Equal(1, a.Aufrufe);
+        a.Ausnahme = null;
+        a.Antwort = _ => Json(200, """{"ok":false}""");
+        Assert.False(await d.LesebildSendenAsync(Stummel()));
+        a.Antwort = _ => Json(200, "kein json");
+        Assert.False(await d.LesebildSendenAsync(Stummel()));
+    }
+
+    [Theory]   // 1.5.13: fahrzeug.modell_gefunden — fehlt es (aelterer Server) oder ist es null, gilt das Modell als gefunden
+    [InlineData("""{"marke":"VW","modell":"Golf","erkannt":true}""", true)]
+    [InlineData("""{"marke":"VW","modell":"","erkannt":true,"modell_gefunden":false}""", false)]
+    [InlineData("""{"marke":"VW","modell":"Golf","erkannt":true,"modell_gefunden":true}""", true)]
+    [InlineData("""{"marke":"VW","modell":"Golf","erkannt":true,"modell_gefunden":null}""", true)]
+    public async Task Vergleich_liest_modell_gefunden(string fahrzeug, bool erwartet)
+    {
+        var (d, a) = Dienst();
+        a.Antwort = _ => Json(200, $$"""{"links":[],"hinweise":[],"profil":"inland","fahrzeug":{{fahrzeug}}}""");
+        var antwort = await d.VergleichAsync(Passat(), probelauf: false);
+        Assert.Equal(erwartet, antwort.ModellGefunden);
+        Assert.True(antwort.MarkeErkannt);
+        // ganz ohne "fahrzeug" (Server ohne Erkennung) ebenso
+        a.Antwort = _ => Json(200, """{"links":[],"hinweise":[],"profil":"inland"}""");
+        Assert.True((await d.VergleichAsync(Passat(), probelauf: false)).ModellGefunden);
+    }
 }
