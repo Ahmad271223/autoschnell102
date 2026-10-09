@@ -3,6 +3,7 @@ import { ChevronLeft, ChevronRight, Search } from "lucide-react";
 import { toast } from "sonner";
 import { api, errMsg } from "@/lib/api";
 import { Card, PageHeader, Spinner } from "./_ui";
+import { blobOeffnen } from "@/lib/dateiOeffnen";
 import { VergleichsTabelle, VerbindungsListe, zeit } from "@/components/ProgrammVergleiche";
 
 /**
@@ -21,6 +22,8 @@ export default function AdminProgrammVergleiche() {
   const [daten, setDaten] = useState(null);
   const [werkzeug, setWerkzeug] = useState("");
   const [downloads, setDownloads] = useState(null);
+  // Wunsch Ahmad 09.10.2026: Bilder der Anzeigen, die das Programm nicht erkannt hat (Lesebilder)
+  const [lesebilder, setLesebilder] = useState(null);
   const [block, setBlock] = useState(1);
   const [seite, setSeite] = useState(1);
   const [eingabe, setEingabe] = useState("");
@@ -58,6 +61,32 @@ export default function AdminProgrammVergleiche() {
       .then(({ data }) => setDownloads(data.downloads || []))
       .catch(() => setDownloads([]));
   }, []);
+
+  const lesebilderLaden = useCallback(() => {
+    api.get("/admin/werkzeug-lesebilder", { params: { limit: 60 } })
+      .then(({ data }) => setLesebilder(data))
+      .catch(() => setLesebilder({ lesebilder: [], gesamt: 0 }));
+  }, []);
+  useEffect(() => { if (!werkzeug) lesebilderLaden(); }, [werkzeug, lesebilderLaden]);
+
+  const lesebildOeffnen = async (b) => {
+    const startMs = Date.now();
+    try {
+      const r = await api.get(`/admin/werkzeug-lesebilder/${encodeURIComponent(b.id)}/bild`, { responseType: "blob" });
+      blobOeffnen(r.data, { startMs, titel: "Das Lesebild", mime: "image/png", dateiname: `lesebild-${b.id}.png` });
+    } catch (e) {
+      toast.error(errMsg(e, "Das Bild ließ sich nicht öffnen"));
+    }
+  };
+  const lesebildLoeschen = async (b) => {
+    try {
+      await api.delete(`/admin/werkzeug-lesebilder/${encodeURIComponent(b.id)}`);
+      toast.success("Lesebild gelöscht.");
+      lesebilderLaden();
+    } catch (e) {
+      toast.error(errMsg(e, "Löschen hat nicht geklappt"));
+    }
+  };
 
   const trennen = async (v) => {
     try {
@@ -128,6 +157,40 @@ export default function AdminProgrammVergleiche() {
             </div>
           )}
       </Card>
+
+      {!werkzeug && (
+        <Card className="mb-4" data-testid="admin-pv-lesebilder">
+          <div className="text-sm font-semibold">
+            Nicht erkannt – Bilder der Anzeige{lesebilder ? ` (${zahl(lesebilder.gesamt)})` : ""}
+            <span className="font-normal text-zinc-500"> · schickt das Programm ab 1.5.13 von selbst, {lesebilder?.tage || 30} Tage</span>
+          </div>
+          {!lesebilder ? <Spinner /> : !lesebilder.lesebilder.length
+            ? <div className="text-sm text-zinc-500 mt-2" data-testid="admin-pv-keine-lesebilder">Keine nicht erkannten Anzeigen.</div>
+            : (
+              <div className="mt-3 grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 19rem), 1fr))" }}>
+                {lesebilder.lesebilder.map((b) => (
+                  <div key={b.id} className="rounded-lg border p-2 text-xs" style={{ borderColor: "var(--border-default)" }}
+                       data-testid={`admin-pv-lesebild-${b.id}`}>
+                    <button type="button" onClick={() => lesebildOeffnen(b)} className="block w-full" title="In voller Größe öffnen">
+                      <img src={`data:image/jpeg;base64,${b.vorschau_b64}`} alt={b.grund_text}
+                           className="w-full rounded" style={{ maxHeight: "11rem", objectFit: "contain", background: "var(--wa-08)" }} />
+                    </button>
+                    <div className="mt-1.5 font-medium" style={{ color: "var(--accent-red)" }}>{b.grund_text}</div>
+                    {!!(b.fehlt || []).length && <div className="text-zinc-500">fehlt: {b.fehlt.join(", ")}</div>}
+                    <div className="text-zinc-500">{zeit(b.erstellt_am)} · {b.name || "–"} ({b.konto || "–"}) · {b.firma}{b.kunden_nr ? ` · Kd.-Nr. ${b.kunden_nr}` : ""}</div>
+                    {b.fahrzeug?.marke_modell_text && <div>Gelesen: „{b.fahrzeug.marke_modell_text}“{b.fahrzeug.inserat_id ? ` · ID ${b.fahrzeug.inserat_id}` : ""}</div>}
+                    {b.rohtext && <div className="text-zinc-500 truncate" title={b.rohtext}>{b.rohtext.slice(0, 120)}</div>}
+                    <div className="mt-1.5 flex gap-2">
+                      <button type="button" onClick={() => lesebildOeffnen(b)} className="apple-btn apple-btn-secondary !rounded-full !px-2.5 !py-0.5 text-xs">Groß öffnen</button>
+                      <button type="button" onClick={() => lesebildLoeschen(b)} className="apple-btn apple-btn-secondary !rounded-full !px-2.5 !py-0.5 text-xs"
+                              data-testid={`admin-pv-lesebild-loeschen-${b.id}`}>Löschen</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+        </Card>
+      )}
 
       {bloecke > 1 && (
         <div className="mb-4 flex flex-wrap items-center gap-2" data-testid="admin-pv-bloecke">

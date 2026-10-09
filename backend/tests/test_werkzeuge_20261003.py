@@ -807,7 +807,8 @@ def test_51_server_erkennt_marke_und_modell(welt):
                               kw=57, ps=78))
     assert r.status_code == 200, r.text
     d = r.json()
-    assert d["fahrzeug"] == {"marke": "Hyundai", "modell": "i10", "erkannt": True}
+    # 09.10.2026: modell_gefunden sagt dem Programm (ab 1.5.13), ob es ein Lesebild schicken soll
+    assert d["fahrzeug"] == {"marke": "Hyundai", "modell": "i10", "erkannt": True, "modell_gefunden": True}
     assert [x["portal"] for x in d["links"]] == ["mobile.de", "AutoScout24"]
     gespeichert = welt["db"].werkzeug_vergleiche.find_one({"user_id": welt["sucher_id"]}, sort=[("erstellt_am", -1)])
     assert (gespeichert["fahrzeug"]["marke"], gespeichert["fahrzeug"]["modell"]) == ("Hyundai", "i10")
@@ -826,7 +827,7 @@ def test_53_aeltere_programme_wie_bisher(welt):
     """Programme bis 1.3.5 schicken schon erkannte Werte (ohne roh) — der Server nimmt sie wie bisher."""
     prog = _prog(welt)
     d = _vergleich(prog, POLO).json()
-    assert d["fahrzeug"] == {"marke": "VW", "modell": "Polo", "erkannt": True}
+    assert d["fahrzeug"] == {"marke": "VW", "modell": "Polo", "erkannt": True, "modell_gefunden": True}
     assert [x["portal"] for x in d["links"]] == ["mobile.de", "AutoScout24"]
 
 

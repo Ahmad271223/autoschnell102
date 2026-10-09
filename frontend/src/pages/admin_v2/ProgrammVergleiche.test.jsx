@@ -11,6 +11,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const api = vi.hoisted(() => ({ get: vi.fn(), delete: vi.fn() }));
 vi.mock("@/lib/api", () => ({ api, errMsg: (e, f) => e?.message || f }));
 vi.mock("sonner", () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
+vi.mock("@/lib/dateiOeffnen", () => ({ blobOeffnen: vi.fn() }));
 
 const { default: AdminProgrammVergleiche } = await import("./ProgrammVergleiche");
 
@@ -41,6 +42,11 @@ beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   api.get.mockImplementation(async (pfad, { params } = {}) => {
     if (pfad === "/admin/werkzeug-downloads") return { data: { downloads: [] } };
+    if (pfad === "/admin/werkzeug-lesebilder") {
+      return { data: { gesamt: 1, tage: 30, lesebilder: [{ id: "lb-1", grund: "modell_unbekannt", grund_text: "Modell nicht erkannt",
+        fehlt: [], rohtext: "Marke, Modell: Hyundai IBO", fahrzeug: { marke_modell_text: "Hyundai IBO", inserat_id: "476271020" },
+        vorschau_b64: "/9j/4AAQ", erstellt_am: "2026-10-09T10:00:00Z", name: "Sucher", konto: "10007-1", firma: "FS", kunden_nr: 10007 }] } };
+    }
     return { data: antwort(params) };
   });
   behaelter = document.createElement("div");
@@ -65,6 +71,23 @@ describe("Betreiber-Liste: Blöcke, Seiten, Top 20", () => {
     expect(el("admin-pv-block-3").textContent).toBe("2.001–2.345");
     expect(el("admin-pv-seiten").textContent).toContain("Seite 1 von 10");
     expect(el("admin-pv-seite-10")).not.toBeNull();
+  });
+
+  it("zeigt die nicht erkannten Anzeigen mit Vorschau und Grund (Wunsch Ahmad 09.10.2026)", async () => {
+    await act(async () => { wurzel.render(createElement(AdminProgrammVergleiche)); });
+    await warten();
+    const karte = el("admin-pv-lesebild-lb-1");
+    expect(karte).not.toBeNull();
+    expect(karte.textContent).toContain("Modell nicht erkannt");
+    expect(karte.textContent).toContain("Hyundai IBO");
+    expect(karte.querySelector("img").getAttribute("src")).toBe("data:image/jpeg;base64,/9j/4AAQ");
+    await act(async () => { el("admin-pv-lesebild-loeschen-lb-1").click(); });
+    await warten();
+    expect(api.delete).toHaveBeenCalledWith("/admin/werkzeug-lesebilder/lb-1");
+    // bei der Erweiterung gibt es keine Lesebilder (nur das Windows-Programm liest den Bildschirm)
+    await act(async () => { el("admin-pv-werkzeug-browser-helfer").click(); });
+    await warten();
+    expect(el("admin-pv-lesebilder")).toBeNull();
   });
 
   it("Seite und Block wechseln fragt den Server; neuer Block beginnt auf Seite 1", async () => {

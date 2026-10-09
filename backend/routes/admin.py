@@ -1308,6 +1308,9 @@ _COMPANY_COLLECTIONS = (
     "werkzeug_app_starts",
     # Browser-Helfer (04.10.2026): vom Browser gelesene Inserate (Verkaeuferdaten, 24 h TTL) tragen dealer_id.
     "werkzeug_inserate",
+    # 09.10.2026: Lesebilder nicht erkannter Anzeigen tragen dealer_id (die Dateien loescht lesebilder_loeschen,
+    # siehe admin_delete_dealer)
+    "werkzeug_lesebilder",
     # Go-Live 14.09.2026 (B6): users steht NICHT mehr im Tupel. Als letzter
     # Eintrag der Schleife lief users.delete_many noch VOR Snapshots, Dateien
     # und dealers.delete_many — brach einer dieser Schritte ab, fand der
@@ -1472,6 +1475,9 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
         await db.werkzeug_codes.delete_many({"user_id": user_id})
         # Browser-Helfer (04.10.2026): vom Browser des Kontos gelesene Inserate (Verkaeuferdaten) weg
         await db.werkzeug_inserate.delete_many({"user_id": user_id})
+        # 09.10.2026: Lesebilder des Kontos samt Dateien weg
+        from routes.werkzeuge import lesebilder_loeschen
+        await lesebilder_loeschen({"user_id": user_id})
         await db.werkzeug_vergleiche.update_many(
             {"user_id": user_id}, {"$set": {"user_id": _nutzer_pseudonym(user_id), "pc_name": ""}})
         await db.network_members.delete_many({"buyer_user_id": user_id})
@@ -1589,6 +1595,15 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
         # deshalb in der Schlange stehen — der Worker haette sie mitten in der
         # Loeschkaskade noch extern abgerufen, und abbrechen konnte sie
         # niemand mehr (die Firma ist gesperrt).
+        # 09.10.2026: Lesebilder (nicht erkannte Anzeigen) samt Dateien im Speicher — die Sammlung steht auch im
+        # Tupel unten, die DATEIEN loescht nur der Helfer (nie daran scheitern)
+        try:
+            from routes.werkzeuge import lesebilder_loeschen
+            n_bilder = await lesebilder_loeschen({"dealer_id": dealer_id})
+            if n_bilder:
+                geloescht["werkzeug_lesebilder_dateien"] = n_bilder
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Firmenloeschung %s: Lesebilder nicht bereinigt: %s", dealer_id, exc)
         try:
             from link_jobs import firma_austragen
             n_jobs = await firma_austragen(db, dealer_id)

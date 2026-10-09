@@ -4436,7 +4436,7 @@ Suchern der Firma) – „alle anderen sollen das gar nicht sehen“.
   cd autopointer-vergleich && powershell -ExecutionPolicy Bypass -File build.ps1   # lokal: dist\AutoSchnell-Vergleich.exe
   scp dist/AutoSchnell-Vergleich.exe root@<server>:/tmp/                            # vom PC aus, nicht auf dem Server
   docker compose cp /tmp/AutoSchnell-Vergleich.exe backend:/tmp/AutoSchnell-Vergleich.exe
-  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.5.12
+  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.5.13
   ```
   Bis dahin zeigt die Seite „Wird gerade bereitgestellt“. Speicher: `werkzeuge/autopointer-vergleich/…`, Eintrag in `werkzeuge`.
 - Tests: `backend/tests/test_werkzeuge_20261003.py`, `frontend/src/pages/app/Programme.test.jsx`,
@@ -4633,6 +4633,16 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
     `fahrzeug.erkennung` (bildschirm/gelernt/zweite_lesung/inserat). Dazu Einzelreparaturen vom 08./09.10.: „EQA300“,
     „EIektro“ (Leseform i/l/1, o/0), „IBO“→i30 (B/3, S/5, Z/2, G/6/9 nur Buchstabe→Ziffer), „VWT-Roc“ (Marke vorn im
     Wort), Inserat-ID mit O/I/S/Z (höchstens 3, nie B/G). Die 1.676 Abgleichfälle zu Programm 1.3.5 bleiben unverändert.
+  - **Lesebilder (Wunsch Ahmad 09.10.2026 „automatisch ein Screenshot des nicht Erkannten“) — Programm 1.5.13:**
+    erkennt das Programm etwas nicht (Pflichtfeld fehlt, Marke/Modell unbekannt — `/vergleich` nennt dafür
+    `fahrzeug.modell_gefunden` —, Inserat-ID/Hash-ID nicht gelesen), schickt es das Bild, das die Texterkennung gelesen
+    hat (kein neues Abgreifen), samt Rohtext und Grund: `POST /werkzeuge/autopointer-vergleich/lesebild` (PNG ≤ 1,5 MB,
+    30 je Konto und Tag, nie im Probelauf; Einstellung „Bei nicht erkannten Autos ein Bild … senden“, Standard an).
+    Datei im Datei-Speicher (`werkzeug-lesebilder/<Firma>/…png`), Vorschau (JPEG ≤ 480 px) + Rohtext in
+    `werkzeug_lesebilder`, 30 Tage — abgelaufene räumt der nächste Aufruf samt Datei weg (bewusst kein TTL-Index).
+    Betreiber: `GET /admin/werkzeug-lesebilder`, `…/{id}/bild`, `DELETE …/{id}`; Karte „Nicht erkannt – Bilder der
+    Anzeige“ auf der Seite Programm-Vergleiche (nur Windows-Programm). Konto-/Firmenlöschung entfernt sie samt Dateien
+    (`routes.werkzeuge.lesebilder_loeschen`).
   - **Kaufvertrag/Abholprotokoll (Wunsch Ahmad 09.10.2026):** „Datum und Ort“ bei Verkäufer UND Käufer = Ort des
     Kunden (`pdf_service._uebergabe_ort`; Dialog befüllt den Käufer-Ort nicht mehr aus dem Firmensitz); unter den
     Unterschriften kein Satz mehr; „Erfassung anhand der Fahrzeugskizze …“ und „Ausstattung laut Inseratsangaben.“

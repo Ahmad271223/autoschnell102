@@ -237,6 +237,13 @@ CODE_MINUTEN = 10
 SAMMLUNG_CODES = "werkzeug_codes"
 SAMMLUNG_VERBINDUNGEN = "werkzeug_verbindungen"
 SAMMLUNG_VERGLEICHE = "werkzeug_vergleiche"
+#: Wunsch Ahmad 09.10.2026: Bild der AutoPointer-Anzeige, wenn das Programm etwas nicht erkannt hat (Programm ab
+#: 1.5.13, routes/werkzeuge.werkzeug_lesebild) — die Datei im Datei-Speicher, Vorschau + Rohtext hier, 30 Tage
+SAMMLUNG_LESEBILDER = "werkzeug_lesebilder"
+LESEBILD_TAGE = 30
+LESEBILD_GRUENDE = {"pflichtfeld_fehlt": "Pflichtfeld fehlt (Marke/Modell, EZ oder km nicht lesbar)",
+                    "marke_unbekannt": "Marke nicht erkannt", "modell_unbekannt": "Modell nicht erkannt",
+                    "inserat_id_fehlt": "Inserat-ID / Hash-ID nicht gelesen"}
 #: Entscheidung Ahmad 06.10.2026: Vergleiche (Programm + Browser-Helfer) 60 Tage aufbewahren — wie Logs und
 #: Vertraege; "Deine letzten Autos" zeigt 30, die Chef-Uebersicht die letzten Wochen. Danach loescht Mongo (TTL).
 VERGLEICHE_TAGE = int(os.environ.get("WERKZEUG_VERGLEICHE_TAGE", "60") or 60)

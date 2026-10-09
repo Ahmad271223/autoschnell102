@@ -16,25 +16,29 @@ Programm (Kopfzeile X-Werkzeug-Schluessel):
   GET    /api/werkzeuge/{id}/app-start/{start}   hat die App das Auto uebernommen? (Nr. 12)
   POST   /api/werkzeuge/{id}/vorgang/{v}/selbst  Erweiterung hat nicht uebernommen -> Programm oeffnet selbst (1.5.9)
   GET    /api/werkzeuge/{id}/inserat-gelesen     liegt das Inserat schon gelesen vor? ("Vertrag" ab 1.5.11, ohne Apify)
+  POST   /api/werkzeuge/{id}/lesebild            Bild der Anzeige, wenn etwas nicht erkannt wurde (ab 1.5.13)
 Browser-Helfer (04.10.2026, nur Werkzeuge mit art "browser", Kopfzeile X-Werkzeug-Schluessel):
   POST   /api/werkzeuge/{id}/inserat             Inseratsseite aus dem Browser -> Links, Vertragsdaten, Hinweise
   POST   /api/werkzeuge/{id}/marktlage           Vergleichsseite aus dem Browser -> Platz + Ampel
   POST   /api/werkzeuge/{id}/programm-suche      gehoert diese Vergleichsseite zu einem Vergleich des Programms?
 Betreiber:
   GET    /api/admin/werkzeug-vergleiche          wer hat wann welches Auto verglichen
+  GET    /api/admin/werkzeug-lesebilder          nicht erkannte Anzeigen (Vorschau, Rohtext); /{id}/bild = das PNG
   DELETE /api/admin/werkzeug-verbindungen/{uid}  PC eines Kontos trennen
 """
 from __future__ import annotations
 
 import asyncio
+import base64
 import functools
+import io
 import ipaddress
 import logging
 import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from typing import Annotated, List, Optional
+from typing import Annotated, List, Literal, Optional
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
@@ -49,7 +53,8 @@ from deps import (FIRMA_GESPERRT_TEXT, current_chef, current_firma, current_supe
                   effective_dealer, firma_gesperrt, log_activity_sicher, now_iso, require_active_sub,
                   subscription_for)
 from rate_limiter import SlidingWindowRateLimiter, client_ip
-from storage_service import StorageError, bloecke_async, groesse_async
+from storage_service import (StorageError, bloecke_async, delete_async, groesse_async, load_async, make_key,
+                             save_async, validate_image_bytes)
 
 log = logging.getLogger("autohandel")
 router = APIRouter()
@@ -633,7 +638,8 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
                            modell=echt.get("model_label") or erkannt.get("modell"), erkannt=True,
                            modell_gefunden=True, quelle="inserat")
     f["erkennung"] = erkannt.pop("quelle", "bildschirm")
-    f["modell_gefunden"] = bool(erkannt.pop("modell_gefunden", False))
+    # bleibt in "fahrzeug" der Antwort: das Programm (ab 1.5.13) schickt bei False ein Bild der Anzeige (Lesebild)
+    f["modell_gefunden"] = erkannt["modell_gefunden"] = bool(erkannt.get("modell_gefunden", False))
     # Befund 04.10.2026: unplausible EZ/km sagen — die Filter bleiben wie eingestellt (wz.plausibel)
     melden = wz.plausibel(f)
     links, hinweise = wz.vergleichs_links(vehicle, regeln)      # Navi + Beschaedigte wie eingestellt (04.10.)
@@ -1184,6 +1190,156 @@ async def app_vorgang(vorgang_id: str, user=Depends(current_user)):
     return {**_vorgang_antwort(doc), "uebernommen": bool(doc.get("helfer_am")),
             # Pruefung 08.10.2026: das Programm hat die Vergleiche selbst geoeffnet (Erweiterung hat nicht uebernommen)
             "programm_selbst": bool(doc.get("programm_am")) and not doc.get("helfer_am")}
+
+
+# ---------------------------------------------------------------- Lesebild (Wunsch Ahmad 09.10.2026)
+# "Wenn er etwas ausliest und nicht erkennt: automatisch ein Bild des nicht Erkannten an uns." Das Programm (ab 1.5.13)
+# schickt das Bild, das die Texterkennung gelesen hat (kein neues Abgreifen), samt Rohtext und Grund. Die Datei liegt
+# im Datei-Speicher, eine kleine Vorschau + Rohtext in der Datenbank (LESEBILD_TAGE, danach raeumt der naechste Aufruf
+# auf — Datei UND Eintrag). Der Betreiber sieht sie unter Programm-Vergleiche.
+_lesebild_limiter = SlidingWindowRateLimiter(max_attempts=30, window_seconds=86400, name="werkzeug_lesebild")
+LESEBILD_MAX = 1536 * 1024
+_LESEBILD_FAHRZEUG = ("marke_modell_text", "titel", "quelle", "inserat_id")
+
+
+class LesebildIn(BaseModel):
+    grund: Literal["pflichtfeld_fehlt", "marke_unbekannt", "modell_unbekannt", "inserat_id_fehlt"]
+    fehlt: List[Annotated[str, Field(max_length=60)]] = Field(default_factory=list, max_length=10)
+    rohtext: str = Field("", max_length=6000)
+    vorgang_id: Optional[str] = Field(None, max_length=64)
+    fahrzeug: Optional[dict] = None
+    #: base64(PNG) — hoechstens LESEBILD_MAX Bytes entpackt
+    bild: str = Field(..., min_length=20, max_length=LESEBILD_MAX * 4 // 3 + 16)
+
+
+def _lesebild_vorschau(raw: bytes) -> str:
+    """Kleine JPEG-Vorschau (hoechstens 480 px) fuer die Liste — als base64, damit die Seite sie direkt zeigt."""
+    from PIL import Image
+    im = Image.open(io.BytesIO(raw))
+    im.load()
+    im = im.convert("RGB")
+    im.thumbnail((480, 480))
+    buf = io.BytesIO()
+    im.save(buf, "JPEG", quality=72, optimize=True)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+async def lesebilder_loeschen(filt: dict, hoechstens: int = 500) -> int:
+    """Eintraege UND Dateien weg (Ablauf, Konto-/Firmenloeschung, Betreiber). Fehler beim Datei-Loeschen halten
+    nichts auf (der Eintrag geht trotzdem weg; eine verwaiste Datei ist kein Datenschutzproblem: nur eine Anzeige)."""
+    n = 0
+    async for d in db[wz.SAMMLUNG_LESEBILDER].find(filt, {"_id": 0, "id": 1, "key": 1}).limit(hoechstens):
+        if d.get("key"):
+            try:
+                await delete_async(d["key"])
+            except Exception:  # noqa: BLE001
+                log.warning("Lesebild %s: Datei %s nicht geloescht", d.get("id"), d.get("key"))
+        r = await db[wz.SAMMLUNG_LESEBILDER].delete_one({"id": d["id"]})
+        n += r.deleted_count
+    return n
+
+
+async def _lesebilder_aufraeumen(dealer_id: Optional[str] = None) -> None:
+    """Abgelaufene Lesebilder (LESEBILD_TAGE) samt Datei entfernen — beim naechsten Hochladen bzw. Betreiber-Aufruf.
+    (Ein TTL-Index allein liesse die Dateien im Speicher liegen.)"""
+    filt: dict = {"ablauf": {"$lt": datetime.now(timezone.utc)}}
+    if dealer_id:
+        filt["dealer_id"] = dealer_id
+    try:
+        await lesebilder_loeschen(filt, hoechstens=200)
+    except Exception:  # noqa: BLE001
+        log.exception("Lesebilder nicht aufgeraeumt")
+
+
+@router.post("/werkzeuge/{werkzeug_id}/lesebild")
+async def werkzeug_lesebild(werkzeug_id: str, body: LesebildIn,
+                            schluessel: Optional[str] = Header(None, alias=wz.TOKEN_KOPF),
+                            user_agent: Optional[str] = Header(None, alias="User-Agent")):
+    if _ist_browser(werkzeug_id):
+        raise HTTPException(404, NICHT_GEFUNDEN)
+    user, v, _firma_doc, _abo = await _programm(werkzeug_id, schluessel, _programm_version(user_agent))
+    if not await _lesebild_limiter.check(f"konto:{user['id']}"):
+        raise HTTPException(429, "Heute schon 30 Lesebilder von diesem Konto – weitere erst morgen.")
+    try:
+        raw = base64.b64decode(body.bild, validate=True)
+    except Exception:  # noqa: BLE001
+        raise HTTPException(422, "Bild nicht lesbar.")
+    if len(raw) > LESEBILD_MAX:
+        raise HTTPException(413, "Bild zu groß (höchstens 1,5 MB).")
+    if not raw.startswith(b"\x89PNG"):
+        raise HTTPException(422, "Nur PNG.")
+    try:
+        validate_image_bytes(raw, "Lesebild")
+        vorschau = await asyncio.to_thread(_lesebild_vorschau, raw)
+    except Exception as exc:  # noqa: BLE001
+        log.info("Lesebild von %s nicht lesbar: %s", user["id"], exc)
+        raise HTTPException(422, "Bild nicht lesbar.")
+    key = make_key("werkzeug-lesebilder", user["dealer_id"], "lesebild.png")
+    try:
+        await save_async(key, raw)
+    except StorageError as exc:
+        log.error("Lesebild nicht gespeichert: %s", exc)
+        raise HTTPException(503, "Speicher gerade nicht erreichbar – bitte später.")
+    jetzt = datetime.now(timezone.utc)
+    fz = body.fahrzeug if isinstance(body.fahrzeug, dict) else {}
+    doc = {
+        "id": str(uuid.uuid4()), "werkzeug": werkzeug_id, "dealer_id": user["dealer_id"], "user_id": user["id"],
+        "pc_name": v.get("pc_name") or "", "grund": body.grund,
+        "fehlt": [wz._text(x, 60) for x in body.fehlt][:10], "rohtext": body.rohtext[:6000],
+        "vorgang_id": body.vorgang_id if body.vorgang_id and _VORGANG_ID.match(body.vorgang_id) else None,
+        "fahrzeug": {k: wz._text(fz.get(k), 160) for k in _LESEBILD_FAHRZEUG if fz.get(k)},
+        "key": key, "vorschau_b64": vorschau, "groesse": len(raw), "erstellt_am": jetzt.isoformat(),
+        "ablauf": jetzt + timedelta(days=wz.LESEBILD_TAGE),
+    }
+    await db[wz.SAMMLUNG_LESEBILDER].insert_one(doc)
+    await _lesebilder_aufraeumen(user["dealer_id"])
+    return {"ok": True, "id": doc["id"]}
+
+
+@router.get("/admin/werkzeug-lesebilder")
+async def admin_lesebilder(limit: int = Query(50, ge=1, le=200), dealer_id: Optional[str] = None,
+                           _=Depends(current_super_admin)):
+    """Betreiber: die nicht erkannten Anzeigen (neueste zuerst) mit Vorschau, Rohtext, Konto und Firma."""
+    await _lesebilder_aufraeumen()
+    filt: dict = {}
+    if dealer_id:
+        filt["dealer_id"] = dealer_id
+    roh = [x async for x in db[wz.SAMMLUNG_LESEBILDER].find(filt, {"_id": 0, "key": 0, "ablauf": 0})
+           .sort("erstellt_am", -1).limit(limit)]
+    namen = await _konten([x.get("user_id") for x in roh])
+    firmen = {}
+    ids = list({x.get("dealer_id") for x in roh if x.get("dealer_id")})
+    if ids:
+        async for d in db.dealers.find({"id": {"$in": ids}}, {"_id": 0, "id": 1, "company_name": 1, "kunden_nr": 1}):
+            firmen[d["id"]] = {"firma": d.get("company_name") or "", "kunden_nr": d.get("kunden_nr")}
+    leer = {"konto": "", "name": "gelöschtes Konto", "rolle": ""}
+    for x in roh:
+        x.update(namen.get(x.get("user_id"), leer))
+        x.update(firmen.get(x.get("dealer_id"), {"firma": "", "kunden_nr": None}))
+        x["grund_text"] = wz.LESEBILD_GRUENDE.get(x.get("grund"), x.get("grund") or "")
+    return {"lesebilder": roh, "gesamt": await db[wz.SAMMLUNG_LESEBILDER].count_documents(filt),
+            "tage": wz.LESEBILD_TAGE}
+
+
+@router.get("/admin/werkzeug-lesebilder/{bild_id}/bild")
+async def admin_lesebild_datei(bild_id: str, _=Depends(current_super_admin)):
+    d = await db[wz.SAMMLUNG_LESEBILDER].find_one({"id": bild_id}, {"_id": 0, "key": 1})
+    if not d or not d.get("key"):
+        raise HTTPException(404, NICHT_GEFUNDEN)
+    try:
+        raw = await load_async(d["key"])
+    except StorageError:
+        raise HTTPException(404, "Die Bilddatei ist nicht mehr da.")
+    return StreamingResponse(iter([raw]), media_type="image/png",
+                             headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+
+@router.delete("/admin/werkzeug-lesebilder/{bild_id}")
+async def admin_lesebild_loeschen(bild_id: str, _=Depends(current_super_admin)):
+    n = await lesebilder_loeschen({"id": bild_id}, hoechstens=1)
+    if not n:
+        raise HTTPException(404, NICHT_GEFUNDEN)
+    return {"ok": True}
 
 
 @router.post("/werkzeuge/app-start/{start}")

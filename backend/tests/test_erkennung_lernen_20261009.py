@@ -129,7 +129,14 @@ def test_10_vergleich_nimmt_echte_daten_lernt_und_nutzt_das_gelernte(welt):
             "cache_key": f"mobile:{nr}", "source": "mobile", "item_id": nr, "data": {**VW, **anders},
             "expires_at": jetzt + timedelta(days=1)}}, upsert=True)
 
-    def vergleich(nr, text="VW XQ9", **zusatz):
+    # eigene Fantasie-Texte je Lauf: der Server haelt gelernte Zuordnungen 5 min im Prozess-Speicher — mit festen
+    # Texten "wusste" er beim zweiten Lauf noch, was der Test in der Datenbank schon geloescht hatte
+    import uuid as _uuid
+    TEXT_A, TEXT_B = "VW XQ" + _uuid.uuid4().hex[:5], "VW QQ" + _uuid.uuid4().hex[:5]
+    K_A, K_B = el.schluessel(TEXT_A), el.schluessel(TEXT_B)
+
+    def vergleich(nr, text=None, **zusatz):
+        text = text or TEXT_A
         f = {"marke": "VW", "modell": "", "marke_modell_text": text, "titel": text, "ez_monat": 6, "ez_jahr": 2020,
              "kilometer": 48100, "kw": 110, "kraftstoff": "EIktr", "getriebe": "Schaltgetriebe", "preis": 21000,
              "quelle": "mobile.de", "inserat_id": nr, "roh": True, **zusatz}
@@ -139,7 +146,7 @@ def test_10_vergleich_nimmt_echte_daten_lernt_und_nutzt_das_gelernte(welt):
         return r.json()
 
     try:
-        db.erkennung_gelernt.delete_many({"_id": {"$in": ["vwxq9", "vwqqq"]}})
+        db.erkennung_gelernt.delete_many({"_id": {"$in": [K_A, K_B]}})
         speicher(ids[0])
         d = vergleich(ids[0])
         assert (d["fahrzeug"]["marke"], d["fahrzeug"]["modell"]) == ("Volkswagen", "T-Roc"), d["fahrzeug"]
@@ -148,7 +155,7 @@ def test_10_vergleich_nimmt_echte_daten_lernt_und_nutzt_das_gelernte(welt):
         assert "ft=PETROL" in mobile, "Kraftstoff aus dem Inserat, nicht vom Bildschirm"
         doc = db.werkzeug_vergleiche.find_one({"fahrzeug.inserat_id": ids[0], "user_id": welt["sucher_id"]})
         assert doc["fahrzeug"]["erkennung"] == "inserat"
-        assert len(db.erkennung_gelernt.find_one({"_id": "vwxq9"})["eintraege"]) == 1
+        assert len(db.erkennung_gelernt.find_one({"_id": K_A})["eintraege"]) == 1
         speicher(ids[1])
         vergleich(ids[1])
         # ohne Speicher-Treffer: das Gelernte (zwei Inserate) gilt
@@ -157,16 +164,16 @@ def test_10_vergleich_nimmt_echte_daten_lernt_und_nutzt_das_gelernte(welt):
         assert db.werkzeug_vergleiche.find_one({"fahrzeug.inserat_id": ids[2]})["fahrzeug"]["erkennung"] == "gelernt"
         # EZ passt nicht (falsche Nummer gelesen?): Bildschirm bleibt
         speicher(ids[3], first_registration="06/2012")
-        d = vergleich(ids[3], text="VW QQQ")
+        d = vergleich(ids[3], text=TEXT_B)
         assert d["fahrzeug"]["modell"] != "T-Roc"
-        assert db.erkennung_gelernt.count_documents({"_id": "vwqqq"}) == 0, "nichts gelernt"
+        assert db.erkennung_gelernt.count_documents({"_id": K_B}) == 0, "nichts gelernt"
         # zweiter Leseversuch des Programms
-        d = vergleich("487000199", text="VW QQQ", alternativen={"marke_modell_text": ["VW Golf"],
+        d = vergleich("487000199", text=TEXT_B, alternativen={"marke_modell_text": ["VW Golf"],
                                                                 "kraftstoff": ["Benzin"]})
         assert d["fahrzeug"]["modell"] == "Golf"
         assert "ft=PETROL" in next(l["url"] for l in d["links"] if l["portal"] == "mobile.de")
     finally:
         db.listings_cache.delete_many({"cache_key": {"$in": [f"mobile:{n}" for n in ids]}})
-        db.erkennung_gelernt.delete_many({"_id": {"$in": ["vwxq9", "vwqqq"]}})
+        db.erkennung_gelernt.delete_many({"_id": {"$in": [K_A, K_B]}})
         db.werkzeug_vergleiche.delete_many({"user_id": welt["sucher_id"]})
         db.link_jobs.delete_many({"url": {"$regex": "48700"}})
