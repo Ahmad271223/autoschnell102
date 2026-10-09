@@ -283,22 +283,40 @@ internal sealed class TrayApp : ApplicationContext
         // Pruefung 08.10.2026 (1.5.9, I): der Knopf las den Bildschirm auch, wenn der Browser AutoPointer verdeckte (die
         // Automatik prueft das, der Knopf nicht) — dann wurde der Browser "gelesen". Jetzt AutoPointer erst nach vorne
         // holen (hier im Oberflaechen-Thread: AttachThreadInput braucht seine Eingabe-Warteschlange), kurz warten, lesen.
+        // Pruefung 09.10.2026 (Befund 3): ein minimiertes AutoPointer wird nicht angefasst (Hinweis, nicht lesen); und nach
+        // dem Warten wird GEPRUEFT, ob AutoPointer wirklich vorne liegt — scheitert SetForegroundWindow (Windows verweigert,
+        // Modal-Dialog), kam vorher der Browser-Inhalt ins Abbild ("nicht erkannt", Lesebild mit fremdem Inhalt).
         IntPtr haupt = _quelle?.Hauptfenster ?? IntPtr.Zero;
         bool geholt = false;
-        if (haupt != IntPtr.Zero && !AutoPointerQuelle.ImVordergrund(haupt))
+        if (haupt != IntPtr.Zero)
         {
-            try
+            if (Native.IsIconic(haupt))
             {
-                BrowserOeffner.ZurueckZu(haupt);
-                geholt = true;
+                Protokoll.Schreibe("„Vergleichen“: AutoPointer ist minimiert – nicht gelesen.");
+                Sprechblase(Ueberwacher.AutoPointerMinimiert, true, erzwingen: true);
+                return;
             }
-            catch (Exception ex) { Protokoll.Schreibe("AutoPointer nicht nach vorne geholt: " + ex.Message); }
+            if (!AutoPointerFenster.ImVordergrund(haupt))
+            {
+                geholt = true;                                   // versucht — danach kurz warten und nachsehen
+                try
+                {
+                    if (!BrowserOeffner.ZurueckZu(haupt)) Protokoll.Schreibe("„Vergleichen“: AutoPointer ließ sich nicht nach vorne holen.");
+                }
+                catch (Exception ex) { Protokoll.Schreibe("AutoPointer nicht nach vorne geholt: " + ex.Message); }
+            }
         }
         _ = Task.Run(async () =>
         {
             try
             {
                 if (geholt) await Task.Delay(VorneWarteMs);
+                if (haupt != IntPtr.Zero && !AutoPointerFenster.ImVordergrund(haupt))
+                {
+                    Protokoll.Schreibe("„Vergleichen“: AutoPointer liegt nicht vorne – nicht gelesen.");
+                    _ui.Post(_ => Sprechblase(Ueberwacher.AutoPointerNichtVorne, true, erzwingen: true), null);
+                    return;
+                }
                 await u.JetztVergleichenAsync();
             }
             catch (Exception ex)
@@ -484,7 +502,8 @@ internal sealed class TrayApp : ApplicationContext
     {
         if (!_dienst.Verbunden)
         {
-            if (beimStart) VerbindenZeigen(null);
+            // Befund 7 (09.10.2026): beim Start ohne Nutzerklick — der Dialog kommt, wird aber nicht aktiv erzwungen
+            if (beimStart) VerbindenZeigen(null, aktivieren: false);
             return;
         }
         if (_lizenzLaeuft) return;
@@ -562,6 +581,14 @@ internal sealed class TrayApp : ApplicationContext
         _fenster.Aktualisieren();
     }
 
+    /// <summary>Befund 7 (09.10.2026): der Grund des letzten Verbindungsverlusts — steht im Verbinden-Dialog, sobald der
+    /// Sucher ihn selbst oeffnet (Leiste "NICHT VERBUNDEN" bzw. "Mehr ▾" → "Mit AutoSchnell verbinden …").</summary>
+    private string? _verlustHinweis;
+
+    /// <summary>Pruefung 09.10.2026 (Befund 7): die Verbindung ging UNAUFGEFORDERT verloren (401 aus dem Lese-Takt oder der
+    /// 15-min-Lizenzpruefung — ein anderer PC hat sich mit dem Konto verbunden). Vorher sprang hier sofort der
+    /// Verbinden-Dialog auf (TopMost, aktiviert) und unterbrach das Tippen in AutoPointer. Jetzt: nur Sprechblase,
+    /// Leisten-Status "NICHT VERBUNDEN" (Klick = verbinden) und rotes Symbol — der Dialog kommt erst auf Klick.</summary>
     private void VerbindungVerloren(string meldung)
     {
         _einstellungen.SchluesselSetzen(null, null);
@@ -569,13 +596,29 @@ internal sealed class TrayApp : ApplicationContext
         LizenzSperreSetzen(null);
         VerbindungAnzeigen();
         StatusAnzeigen(Status.NichtVerbunden);
-        VerbindenZeigen(meldung);
+        _verlustHinweis = meldung;
+        if (_verbindenForm is { IsDisposed: false }) return;       // der Dialog ist schon offen
+        Sprechblase(VerlustText(meldung), true, erzwingen: true, ausfuehrlich: meldung + " " + VerlustAnleitung);
     }
 
-    private void VerbindenZeigen(string? hinweis)
+    internal const string VerlustAnleitung = "Zum Neuverbinden auf der Leiste „NICHT VERBUNDEN“ anklicken.";
+
+    /// <summary>Befund 7: Sprechblase zum Verbindungsverlust — die Meldung des Servers (gekuerzt) plus der Weg zum Dialog,
+    /// zusammen hoechstens <see cref="Hinweis.MaxZeichen"/>. (rein, fuer Tests)</summary>
+    internal static string VerlustText(string meldung)
     {
-        if (_verbindenForm is { IsDisposed: false }) { _verbindenForm.Activate(); return; }
-        using var f = new VerbindenForm(_dienst, hinweis);
+        string rest = " " + VerlustAnleitung;
+        return Hinweis.Kuerzen(meldung.Trim(), Hinweis.MaxZeichen - rest.Length) + rest;
+    }
+
+    /// <param name="aktivieren">Befund 7: true auf Nutzerklick (der Dialog darf aktiv werden); false ohne Anlass vom Nutzer
+    /// (Programmstart) — dann nimmt er niemandem den Fokus.</param>
+    private void VerbindenZeigen(string? hinweis, bool aktivieren = true)
+    {
+        if (_verbindenForm is { IsDisposed: false }) { if (aktivieren) _verbindenForm.Activate(); return; }
+        hinweis ??= _verlustHinweis;
+        _verlustHinweis = null;
+        using var f = new VerbindenForm(_dienst, hinweis, aktivieren);
         _verbindenForm = f;
         try
         {

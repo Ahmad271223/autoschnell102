@@ -61,9 +61,52 @@ internal sealed class TextErkennung
         catch (TimeoutException)
         {
             if (danach != null) _ = auftrag.ContinueWith(_ => danach(), TaskScheduler.Default);
-            throw new TimeoutException($"Windows-Texterkennung hat nach {frist.TotalSeconds:0} s nicht geantwortet.");
+            throw new TimeoutException(NichtGeantwortet(frist));
         }
     }
+
+    internal static string NichtGeantwortet(TimeSpan frist) => $"Windows-Texterkennung hat nach {frist.TotalSeconds:0} s nicht geantwortet.";
+
+    /// <summary>Pruefung 09.10.2026 (Befund 9): je Engine hoechstens EIN haengender Auftrag. Nach einer Zeitueberschreitung
+    /// lief RecognizeAsync samt SoftwareBitmap (bis ~10 MB) im Hintergrund weiter — der Takt versuchte es 3-mal,
+    /// "Vergleichen" beliebig oft: bei toter OcrEngine stapelten sich Auftraege und Speicher. Solange der haengende Auftrag
+    /// nicht zurueck ist, wirft jeder neue sofort TimeoutException (gleicher Lesefehler, kein neuer Auftrag); kommt er
+    /// doch noch, ist die Engine wieder frei. Eigene Klasse, damit es sich ohne OcrEngine pruefen laesst.</summary>
+    internal sealed class Haengewache
+    {
+        private volatile bool _haengt;
+
+        /// <summary>Ein Auftrag laeuft seit der Frist noch — die Engine nimmt keinen neuen an.</summary>
+        public bool Haengt => _haengt;
+
+        internal const string HaengtNoch = "Windows-Texterkennung hängt noch (seit der letzten Zeitüberschreitung) – kein neuer Auftrag gestartet.";
+
+        /// <param name="auftrag">Wird NUR gestartet, wenn kein Auftrag haengt.</param>
+        /// <param name="danach">Aufraeumen, wenn ein haengender Auftrag doch noch endet (laeuft dann einmal, nach dem Freigeben).</param>
+        public async Task<T> MitFrist<T>(Func<Task<T>> auftrag, TimeSpan frist, Action? danach = null)
+        {
+            if (_haengt) throw new TimeoutException(HaengtNoch);
+            Task<T> task = auftrag();
+            try { return await task.WaitAsync(frist); }
+            catch (TimeoutException)
+            {
+                // erst sperren, dann die Fortsetzung anhaengen — ist der Auftrag genau jetzt fertig, laeuft sie sofort
+                // und gibt wieder frei (nie umgekehrt: sonst bliebe die Sperre fuer immer)
+                _haengt = true;
+                _ = task.ContinueWith(_ =>
+                {
+                    _haengt = false;
+                    danach?.Invoke();
+                }, TaskScheduler.Default);
+                throw new TimeoutException(NichtGeantwortet(frist));
+            }
+        }
+    }
+
+    private readonly Haengewache _wache = new();
+
+    /// <summary>Befund 9: haengt gerade ein Auftrag dieser Engine?</summary>
+    internal bool Haengt => _wache.Haengt;
 
     /// <summary>Liest das Bild. Kleine Tabellenschrift wird vorher hochskaliert
     /// (Faktor 3 bei 96 dpi) - das macht die Erkennung deutlich sicherer.</summary>
@@ -94,13 +137,16 @@ internal sealed class TextErkennung
         if (daten.Stride != b * 4) puffer = Verdichte(puffer, daten.Stride, b, h);
         for (int i = 3; i < puffer.Length; i += 4) puffer[i] = 255;
 
+        // Befund 9 (09.10.2026): haengt noch ein Auftrag dieser Engine, gar nicht erst ein Bild anlegen
+        if (_wache.Haengt) throw new TimeoutException(Haengewache.HaengtNoch);
         var sw = SoftwareBitmap.CreateCopyFromBuffer(puffer.AsBuffer(), BitmapPixelFormat.Bgra8, b, h, BitmapAlphaMode.Premultiplied);
         OcrResult ergebnis;
         bool haengt = false;
         try
         {
-            // 1.5.9 (J): hoechstens 10 s — haengt sie, wird das Bild erst freigegeben, wenn sie doch noch fertig wird
-            ergebnis = await MitFrist(_engine.RecognizeAsync(sw).AsTask(), Frist, () => sw.Dispose());
+            // 1.5.9 (J): hoechstens 10 s — haengt sie, wird das Bild erst freigegeben, wenn sie doch noch fertig wird.
+            // Befund 9: bis dahin nimmt die Engine keinen neuen Auftrag an (Haengewache)
+            ergebnis = await _wache.MitFrist(() => _engine.RecognizeAsync(sw).AsTask(), Frist, () => sw.Dispose());
         }
         catch (TimeoutException) { haengt = true; throw; }
         finally { if (!haengt) sw.Dispose(); }

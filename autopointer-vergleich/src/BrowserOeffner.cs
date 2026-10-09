@@ -76,23 +76,88 @@ internal static class BrowserOeffner
         return null;
     }
 
-    /// <summary>Holt AutoPointer wieder nach vorne (Einstellung "Danach zurueck zu
-    /// AutoPointer") - fuer Arbeitsplaetze mit zwei Bildschirmen.</summary>
-    public static void ZurueckZu(IntPtr fenster)
+    /// <summary>Pruefung 09.10.2026 (Befund 2): was ueber die Fenster bekannt ist, bevor AutoPointer nach vorne geholt
+    /// wird — per Win32 gelesen in <see cref="FensterLageLesen"/>, in Tests frei gesetzt.</summary>
+    /// <param name="Gueltig">Das Handle ist (noch) das AutoPointer-Hauptfenster (IsWindow + Klasse TMainForm — Handles
+    /// werden von Windows wiederverwendet).</param>
+    /// <param name="Minimiert">IsIconic — ein minimiertes Fenster darf nie zum Vordergrund werden: Windows stellt es
+    /// nicht wieder her, Tastatureingaben gingen danach ins Leere (Befund 2b).</param>
+    /// <param name="SchonVorne">Das Vordergrundfenster gehoert schon zu AutoPointer (gleiche Prozess-ID) — dann nie an
+    /// AutoPointers eigenen Thread haengen, nichts tun (Befund 2a).</param>
+    /// <param name="Aktiviert">IsWindowEnabled — false, wenn AutoPointer einen Modal-Dialog offen hat (Befund 2c).</param>
+    /// <param name="HatPopup">GetLastActivePopup nennt ein anderes Fenster (den Dialog) — das wird dann das Ziel.</param>
+    /// <param name="Haengt">IsHungAppWindow(AutoPointer) — antwortet seit ≥ 5 s nicht: nichts anfassen.</param>
+    /// <param name="VorneHaengt">IsHungAppWindow(Vordergrundfenster) — z. B. eingefrorener Browser: nicht anhaengen (Befund 2d).</param>
+    /// <param name="FremderThread">Thread des Vordergrundfensters (0 = unbekannt).</param>
+    /// <param name="EigenerThread">Unser Oberflaechen-Thread.</param>
+    internal sealed record FensterLage(bool Gueltig, bool Minimiert, bool SchonVorne, bool Aktiviert, bool HatPopup,
+                                       bool Haengt, bool VorneHaengt, uint FremderThread, uint EigenerThread);
+
+    internal enum ZurueckZuZiel
     {
-        if (fenster == IntPtr.Zero || !Native.IsWindow(fenster)) return;
-        IntPtr vorne = Native.GetForegroundWindow();
-        uint fremd = Native.GetWindowThreadProcessId(vorne, out _);
-        uint ich = Native.GetCurrentThreadId();
-        bool verbunden = fremd != 0 && fremd != ich && Native.AttachThreadInput(ich, fremd, true);
-        try
+        /// <summary>Nichts anfassen (ungueltig, minimiert, haengt, deaktiviert ohne Dialog) — Ergebnis "nicht vorne".</summary>
+        Nichts,
+        /// <summary>AutoPointer liegt schon vorne — nichts tun, Ergebnis "vorne".</summary>
+        SchonVorne,
+        /// <summary>Das Hauptfenster nach vorne holen.</summary>
+        Hauptfenster,
+        /// <summary>Den offenen Dialog (GetLastActivePopup) nach vorne holen.</summary>
+        Popup,
+    }
+
+    /// <param name="Anhaengen">AttachThreadInput an den Thread des Vordergrundfensters (nur fremd, nie unser eigener, nie
+    /// an ein haengendes Fenster).</param>
+    internal sealed record ZurueckZuPlan(ZurueckZuZiel Ziel, bool Anhaengen);
+
+    /// <summary>Pruefung 09.10.2026 (Befund 2): die Entscheidung, was beim Nach-vorne-Holen zu tun ist — rein, ohne Win32,
+    /// damit sie sich pruefen laesst.</summary>
+    internal static ZurueckZuPlan Planen(FensterLage l)
+    {
+        if (!l.Gueltig || l.Minimiert || l.Haengt) return new ZurueckZuPlan(ZurueckZuZiel.Nichts, false);
+        if (l.SchonVorne) return new ZurueckZuPlan(ZurueckZuZiel.SchonVorne, false);
+        if (!l.Aktiviert && !l.HatPopup) return new ZurueckZuPlan(ZurueckZuZiel.Nichts, false);
+        bool anhaengen = l.FremderThread != 0 && l.FremderThread != l.EigenerThread && !l.VorneHaengt;
+        return new ZurueckZuPlan(l.Aktiviert ? ZurueckZuZiel.Hauptfenster : ZurueckZuZiel.Popup, anhaengen);
+    }
+
+    /// <summary>Die Lage per Win32 lesen (alles Abfragen ohne Nachricht an AutoPointer).</summary>
+    private static FensterLage FensterLageLesen(IntPtr fenster, out IntPtr vorne, out IntPtr popup)
+    {
+        vorne = Native.GetForegroundWindow();
+        popup = IntPtr.Zero;
+        if (!AutoPointerFenster.IstHauptfenster(fenster))
+            return new FensterLage(false, false, false, false, false, false, false, 0, 0);
+        uint fremd = vorne == IntPtr.Zero ? 0 : Native.GetWindowThreadProcessId(vorne, out _);
+        bool aktiviert = Native.IsWindowEnabled(fenster);
+        if (!aktiviert) popup = Native.GetLastActivePopup(fenster);
+        bool hatPopup = popup != IntPtr.Zero && popup != fenster && Native.IsWindow(popup);
+        return new FensterLage(true, Native.IsIconic(fenster), AutoPointerFenster.ImVordergrund(fenster), aktiviert, hatPopup,
+                               Native.IsHungAppWindow(fenster), vorne != IntPtr.Zero && Native.IsHungAppWindow(vorne),
+                               fremd, Native.GetCurrentThreadId());
+    }
+
+    /// <summary>Holt AutoPointer wieder nach vorne (Einstellung "Danach zurueck zu AutoPointer" — fuer Arbeitsplaetze
+    /// mit zwei Bildschirmen — und vor "Vergleichen", 1.5.9 I). Muss im Oberflaechen-Thread laufen (AttachThreadInput
+    /// braucht dessen Eingabe-Warteschlange).
+    /// Pruefung 09.10.2026 (Befund 1/2): kein BringWindowToTop mehr (synchron an AutoPointer, fror uns ein); minimiert,
+    /// haengend oder schon vorne wird nichts angefasst; bei offenem Modal-Dialog wird der Dialog geholt; nie an unseren
+    /// eigenen oder einen haengenden Thread anhaengen. Liefert, ob danach ein AutoPointer-Fenster vorne liegt.</summary>
+    public static bool ZurueckZu(IntPtr fenster)
+    {
+        var lage = FensterLageLesen(fenster, out _, out IntPtr popup);
+        var plan = Planen(lage);
+        switch (plan.Ziel)
         {
-            Native.BringWindowToTop(fenster);
-            Native.SetForegroundWindow(fenster);
+            case ZurueckZuZiel.Nichts: return false;
+            case ZurueckZuZiel.SchonVorne: return true;
         }
+        IntPtr ziel = plan.Ziel == ZurueckZuZiel.Popup ? popup : fenster;
+        bool verbunden = plan.Anhaengen && Native.AttachThreadInput(lage.EigenerThread, lage.FremderThread, true);
+        try { Native.SetForegroundWindow(ziel); }
         finally
         {
-            if (verbunden) Native.AttachThreadInput(ich, fremd, false);
+            if (verbunden) Native.AttachThreadInput(lage.EigenerThread, lage.FremderThread, false);
         }
+        return AutoPointerFenster.ImVordergrund(fenster);
     }
 }

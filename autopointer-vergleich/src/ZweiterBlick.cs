@@ -124,7 +124,9 @@ internal static class ZweiterBlick
         try
         {
             // hoechstens so lange wie eine Texterkennung — haengt sie, gilt der zweite Blick als fehlgeschlagen; die
-            // Bilder werden erst freigegeben, wenn sie doch noch fertig wird
+            // Bilder werden erst freigegeben, wenn sie doch noch fertig wird.
+            // Pruefung 09.10.2026 (Befund 9): dass eine haengende Engine keinen neuen Auftrag mehr bekommt, sichert
+            // TextErkennung.LiesAsync je Engine (Haengewache) — hier wirft sie dann sofort, der zweite Blick entfaellt.
             ergebnisse = await TextErkennung.MitFrist(Beide(), TextErkennung.Frist, Freigeben);
         }
         catch (TimeoutException) { haengt = true; throw; }
@@ -326,7 +328,9 @@ internal static class ZweiterBlick
     {
         IEnumerable<string?> Je(Feld feld) => gelesen.TryGetValue(feld, out var l) ? l : Enumerable.Empty<string?>();
         f.AlternativenMarkeModell = Alternativen(Feld.MarkeModell, f.MarkeModellText, Je(Feld.MarkeModell));
-        f.AlternativenKraftstoff = Alternativen(Feld.Kraftstoff, f.Kraftstoff, Je(Feld.Kraftstoff));
+        // Wunsch Ahmad 09.10.2026 (1.5.14, Elektroautos): eine Alternative, die der erste Durchgang schon kannte (Elektro-
+        // Kennzeichen im Titel, DetailLeser.ElektroKennzeichen), bleibt vorne — der zweite Blick ersetzt sie nicht
+        f.AlternativenKraftstoff = Alternativen(Feld.Kraftstoff, f.Kraftstoff, f.AlternativenKraftstoff.Concat(Je(Feld.Kraftstoff)));
         var ids = Alternativen(Feld.InseratId, f.InseratId, Je(Feld.InseratId));
         if (string.IsNullOrEmpty(f.InseratId) && ids.Count > 0)
         {

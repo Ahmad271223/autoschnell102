@@ -37,6 +37,9 @@ internal sealed record Hinweis(string Text, bool Fehler, string? Ausfuehrlich = 
 internal interface IAnsichtQuelle
 {
     IntPtr Hauptfenster { get; }
+    /// <summary>Pruefung 09.10.2026 (Befund 3): liegt gerade ein Fenster von AutoPointer vorne? Nur dann zeigt der
+    /// Bildschirm im Rechteck der Tabellen auch AutoPointer — sonst wuerde der Browser "gelesen".</summary>
+    bool ImVordergrund { get; }
     QuellenZustand Pruefe();
     Task<Lesung?> LiesAsync();
 }
@@ -107,6 +110,12 @@ internal sealed class Ueberwacher
     /// selbst) waren still — der Sucher wartete auf Tabs, die nie kamen. Einmal je Programmlauf sagen, wie es geht.</summary>
     private bool _mausHinweisGezeigt;
     internal const string MausHinweis = "Automatisch geht es nur per Mausklick – für dieses Auto „Vergleichen“ drücken.";
+    /// <summary>Pruefung 09.10.2026 (Befund 3): "Vergleichen", aber vorne liegt ein anderes Fenster (Browser) — nicht lesen,
+    /// sonst stuende der Browser-Inhalt im Abbild ("Fahrzeug nicht erkannt", Lesebild mit fremdem Inhalt an AutoSchnell).</summary>
+    internal const string AutoPointerNichtVorne = "AutoPointer liegt nicht vorne – bitte AutoPointer anklicken und erneut „Vergleichen“ drücken.";
+    /// <summary>Pruefung 09.10.2026 (Befund 2b/3): ein minimiertes AutoPointer wird nie nach vorne geholt (Windows stellt es
+    /// nicht wieder her, Tasten gingen ins Leere) — der Sucher oeffnet es selbst.</summary>
+    internal const string AutoPointerMinimiert = "AutoPointer ist minimiert – bitte AutoPointer öffnen und erneut „Vergleichen“ drücken.";
 
     public bool Probelauf { get; set; }
     /// <summary>Paket 2 (A8): die Lizenzpruefung (/status) meldete 402/403 — bis sie wieder gut ist, wird nichts
@@ -265,10 +274,14 @@ internal sealed class Ueberwacher
                 return;
             }
             var z = _quelle.Pruefe();
+            bool vorne = z.Lage == Lage.Details && _quelle.ImVordergrund;
             if (_ersterTick)
             {
                 _ersterTick = false;
-                if (z.Lage != Lage.Details) _basis = false;
+                // Befund 3 (09.10.2026): liegt AutoPointer beim Start hinter dem Browser, ist unbekannt, was es zeigt —
+                // dann zaehlt das erste Auto, das vorne zu sehen ist, wie ein neu angeklicktes (vorher las der erste Takt
+                // den Browser-Inhalt und verbrauchte damit den Startzustand)
+                if (z.Lage != Lage.Details || !vorne) _basis = false;
             }
             if (z.Lage != Lage.Details)
             {
@@ -280,6 +293,10 @@ internal sealed class Ueberwacher
                 return;
             }
             SetzeStatus(_gesperrt ? Status.Gesperrt : Status.Aktiv);
+            // Pruefung 09.10.2026 (Befund 3): solange ein anderes Fenster (Browser) vor AutoPointer liegt, wird weder eine
+            // Aenderung gewertet noch gelesen — das Abbild zeigte sonst den Browser ("Fahrzeug nicht erkannt", Lesebild
+            // mit fremdem Inhalt). Sobald AutoPointer wieder vorne ist, geht es an derselben Stelle weiter.
+            if (!vorne) return;
             long jetzt = _takt();
             if (z.Summe != _summe)
             {
@@ -402,6 +419,14 @@ internal sealed class Ueberwacher
             {
                 // 1.5.9 (E): seit 1.5.8 verbindet man ueber die Leiste, nicht mehr per Rechtsklick aufs Symbol
                 Melde("Nicht mit AutoSchnell verbunden – auf der Leiste „NICHT VERBUNDEN“ anklicken und den Code eingeben.", true);
+                return;
+            }
+            if (!_quelle.ImVordergrund)
+            {
+                // Pruefung 09.10.2026 (Befund 3, letzte Sicherung — TrayApp prueft es schon vor dem Aufruf): liegt kein
+                // AutoPointer-Fenster vorne, wird NICHT gelesen — und damit entsteht auch nie ein Lesebild mit fremdem Inhalt
+                Protokoll.Schreibe("„Vergleichen“: AutoPointer liegt nicht vorne – nicht gelesen.");
+                Melde(AutoPointerNichtVorne, true);
                 return;
             }
             var lesung = await _quelle.LiesAsync();
@@ -864,66 +889,90 @@ internal sealed class Ueberwacher
     }
 }
 
+/// <summary>Pruefung 09.10.2026 (Befund 4/5): die Fenster-Zugriffe der Quelle — echt Win32 (<see cref="Echt"/>), in Tests
+/// Attrappen, damit sich Drossel und Handle-Pruefung ohne AutoPointer pruefen lassen.</summary>
+internal sealed record FensterZugriff(Func<IntPtr> FindeHauptfenster, Func<IntPtr, bool> IstHauptfenster,
+                                      Func<IntPtr, DetailAnsicht?> FindeDetails, Func<DetailAnsicht, bool> NochGueltig,
+                                      Func<IntPtr, bool> ImVordergrund, Func<IntPtr, ulong> Pruefsumme)
+{
+    public static FensterZugriff Echt { get; } = new(AutoPointerFenster.FindeHauptfenster, AutoPointerFenster.IstHauptfenster,
+                                                    AutoPointerFenster.FindeDetails, AutoPointerFenster.NochGueltig,
+                                                    AutoPointerFenster.ImVordergrund, AutoPointerFenster.Pruefsumme);
+}
+
 /// <summary>Die echte Quelle: AutoPointer-Fenster, PrintWindow, Windows-OCR.</summary>
 internal sealed class AutoPointerQuelle : IAnsichtQuelle
 {
-    private readonly TextErkennung _ocr;
+    private readonly TextErkennung? _ocr;
     private readonly Func<Einstellungen> _einstellungen;
+    private readonly FensterZugriff _fenster;
+    private readonly Func<long> _takt;
     private DetailAnsicht? _ansicht;
     private IntPtr _haupt;
     private long _letzteSuche = long.MinValue / 2;      // A10: monoton (TickCount64)
+    private long _letzteDetailSuche = long.MinValue / 2;
+    /// <summary>Die Suche nach dem Hauptfenster (EnumWindows ueber alle Fenster) hoechstens alle 2 s.</summary>
+    internal const int HauptSucheMs = 2000;
+    /// <summary>Pruefung 09.10.2026 (Befund 5): die Suche nach der Detailansicht (EnumChildWindows ueber 500–1.500
+    /// Kindfenster von AutoPointer) hoechstens jede Sekunde, solange AutoPointer kein Auto zeigt — vorher lief sie alle
+    /// 250 ms ungedrosselt (nur die Hauptfenster-Suche war gedrosselt).</summary>
+    internal const int DetailSucheMs = 1000;
 
     public AutoPointerQuelle(TextErkennung ocr, Func<Einstellungen> einstellungen)
+        : this(ocr, einstellungen, FensterZugriff.Echt, null) { }
+
+    /// <param name="ocr">null nur in Tests — dann liest <see cref="LiesAsync"/> nichts.</param>
+    /// <param name="takt">Monotone Uhr in ms (Tests); sonst Environment.TickCount64.</param>
+    internal AutoPointerQuelle(TextErkennung? ocr, Func<Einstellungen> einstellungen, FensterZugriff fenster, Func<long>? takt)
     {
         _ocr = ocr;
         _einstellungen = einstellungen;
+        _fenster = fenster;
+        _takt = takt ?? (() => Environment.TickCount64);
     }
 
     public IntPtr Hauptfenster => _haupt;
 
+    /// <summary>Befund 3 (09.10.2026): liegt ein Fenster von AutoPointer vorne? (Fuer den Takt und "Vergleichen".)</summary>
+    public bool ImVordergrund => _haupt != IntPtr.Zero && _fenster.ImVordergrund(_haupt);
+
     public QuellenZustand Pruefe()
     {
-        if (_ansicht == null || !AutoPointerFenster.NochGueltig(_ansicht))
+        if (_ansicht == null || !_fenster.NochGueltig(_ansicht))
         {
             _ansicht = null;
-            if (_haupt == IntPtr.Zero || !Native.IsWindow(_haupt))
+            // Befund 4 (09.10.2026): auch das Hauptfenster-Handle kann nach einem AutoPointer-Neustart ein fremdes Fenster
+            // sein (IsWindow sagt dann noch "ja") — es muss weiter ein TMainForm sein, sonst wird neu gesucht
+            if (!_fenster.IstHauptfenster(_haupt))
             {
                 _haupt = IntPtr.Zero;
-                if (Environment.TickCount64 - _letzteSuche < 2000) return new QuellenZustand(Lage.KeinAutoPointer, 0);
-                _letzteSuche = Environment.TickCount64;
-                _haupt = AutoPointerFenster.FindeHauptfenster();
+                if (_takt() - _letzteSuche < HauptSucheMs) return new QuellenZustand(Lage.KeinAutoPointer, 0);
+                _letzteSuche = _takt();
+                _haupt = _fenster.FindeHauptfenster();
                 if (_haupt == IntPtr.Zero) return new QuellenZustand(Lage.KeinAutoPointer, 0);
             }
-            _ansicht = AutoPointerFenster.FindeDetails(_haupt);
+            if (_takt() - _letzteDetailSuche < DetailSucheMs) return new QuellenZustand(Lage.KeineDetails, 0);
+            _letzteDetailSuche = _takt();
+            _ansicht = _fenster.FindeDetails(_haupt);
             if (_ansicht == null) return new QuellenZustand(Lage.KeineDetails, 0);
         }
         // Ein anderes Fahrzeug kann nur erscheinen, wenn der Sucher in AutoPointer
         // klickt - dann ist es vorne. Liegt ein anderes Fenster (Browser) davor,
         // gilt die letzte Pruefsumme: kostet nichts und verdeckte Pixel loesen
         // kein erneutes Lesen aus.
-        if (_letzteSumme != 0 && !ImVordergrund(_haupt)) return new QuellenZustand(Lage.Details, _letzteSumme);
-        ulong summe = AutoPointerFenster.Pruefsumme(_ansicht.TechnikTabelle);
-        summe = (summe * 31) ^ AutoPointerFenster.Pruefsumme(_ansicht.KopfTabelle);
+        if (_letzteSumme != 0 && !_fenster.ImVordergrund(_haupt)) return new QuellenZustand(Lage.Details, _letzteSumme);
+        ulong summe = _fenster.Pruefsumme(_ansicht.TechnikTabelle);
+        summe = (summe * 31) ^ _fenster.Pruefsumme(_ansicht.KopfTabelle);
         _letzteSumme = summe == 0 ? 1 : summe;
         return new QuellenZustand(Lage.Details, _letzteSumme);
     }
 
     private ulong _letzteSumme;
 
-    /// <summary>Liegt ein Fenster von AutoPointer vorne? (Auch fuer "Vergleichen": 1.5.9, I.)</summary>
-    internal static bool ImVordergrund(IntPtr haupt)
-    {
-        IntPtr vorne = Native.GetForegroundWindow();
-        if (vorne == IntPtr.Zero || haupt == IntPtr.Zero) return false;
-        Native.GetWindowThreadProcessId(vorne, out uint pidVorne);
-        Native.GetWindowThreadProcessId(haupt, out uint pidAp);
-        return pidVorne != 0 && pidVorne == pidAp;
-    }
-
     public async Task<Lesung?> LiesAsync()
     {
         var ansicht = _ansicht;
-        if (ansicht == null) return null;
+        if (ansicht == null || _ocr == null) return null;
         var e = _einstellungen();
         return await LiesAnsichtAsync(_ocr, ansicht, e.ErkennungsbilderSpeichern, lesebild: e.LesebilderSenden);
     }
@@ -1013,8 +1062,10 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
             System.Drawing.Bitmap? technikBild, kopfBild;
             try
             {
-                technikBild = AutoPointerFenster.Abbild(ansicht.TechnikTabelle);
-                kopfBild = AutoPointerFenster.Abbild(ansicht.KopfTabelle);
+                // Pruefung 09.10.2026 (Befund 8): wirft das Kopf-Abbild, gibt Abbilder() das Technik-Bild wieder frei —
+                // vorher war es dann erzeugt, aber noch in keinem using (Bitmap-Leck je Fehlversuch)
+                (technikBild, kopfBild) = AutoPointerFenster.Abbilder(() => AutoPointerFenster.Abbild(ansicht.TechnikTabelle),
+                                                                      () => AutoPointerFenster.Abbild(ansicht.KopfTabelle));
             }
             finally
             {
@@ -1141,7 +1192,18 @@ internal sealed class BrowserAusgabe : IOeffner
     {
         BrowserOeffner.Oeffne(vergleiche.Select(v => v.Url).ToList(), browser);
         if (e.ZurueckZuAutoPointer && autoPointer != IntPtr.Zero && _ui != null)
-            Task.Delay(900).ContinueWith(_ => _ui.Post(__ => BrowserOeffner.ZurueckZu(autoPointer), null));
+            Task.Delay(900).ContinueWith(_ => _ui.Post(__ =>
+            {
+                // Pruefung 09.10.2026 (Befund 2): liegt AutoPointer schon vorne, tut ZurueckZu nichts; minimiert oder
+                // haengend ebenso — dann nur eine (gedrosselte) Protokollzeile, kein Hinweis an den Sucher
+                try
+                {
+                    if (!BrowserOeffner.ZurueckZu(autoPointer))
+                        Protokoll.SchreibeGedrosselt("zurueck", "Zurück zu AutoPointer: nicht nach vorne geholt (minimiert, beschäftigt oder von Windows verweigert).",
+                                                     TimeSpan.FromMinutes(5));
+                }
+                catch (Exception ex) { Protokoll.SchreibeGedrosselt("zurueck:fehler", "Zurück zu AutoPointer: " + ex.Message, TimeSpan.FromMinutes(5)); }
+            }, null));
     }
 }
 

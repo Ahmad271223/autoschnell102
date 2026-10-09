@@ -203,6 +203,134 @@ public class DetailLeserTests
         Assert.Equal("V8 Diesel, 1. Hand, Mulliner, Nai", Bentley().Variante);
     }
 
+    // ------------------------------------------------------------------------------------------------------------
+    // Wunsch Ahmad 09.10.2026 (1.5.14): Elektroautos (Opel Mokka-e) — AutoPointer zeigt den Antrieb nicht in einer Zeile
+    // "Kraftstoff"; "Elektroantrieb — Elektro ist Kraftstoff Elektro, nicht 'nicht erkannt' ausgeben"
+
+    private static OcrZeile[] OhneKraftstoff(params OcrZeile[] dazu) =>
+        PassatTechnik.Where(z => z.Text is not ("Kraftstoff:" or "Diesel")).Concat(dazu).ToArray();
+
+    [Fact]   // (1) keine Zeile "Kraftstoff", dafuer eine Antriebs-Zeile mit Kraftstoff-Wort -> deren Wert; "Allrad" nie
+    public void Elektroauto_Kraftstoff_aus_der_Antriebs_Zeile_nur_als_Rueckfall()
+    {
+        Assert.Equal("Elektro", DetailLeser.Auswerten(OhneKraftstoff(Z("Antrieb:", 12, 180), Z("Elektro", 212, 180)), PassatKopf, 846).Kraftstoff);
+        Assert.Equal("EIektro", DetailLeser.Auswerten(OhneKraftstoff(Z("Antriebsart:", 12, 180), Z("EIektro", 212, 180)), PassatKopf, 846).Kraftstoff);
+        Assert.Equal("Elektromotor", DetailLeser.Auswerten(OhneKraftstoff(Z("Motor:", 12, 180), Z("Elektromotor", 212, 180)), PassatKopf, 846).Kraftstoff);
+        Assert.Equal("Strom", DetailLeser.Auswerten(OhneKraftstoff(Z("Energieträger:", 12, 180), Z("Strom", 212, 180)), PassatKopf, 846).Kraftstoff);
+        // Antriebsart ist kein Kraftstoff
+        Assert.Null(DetailLeser.Auswerten(OhneKraftstoff(Z("Antrieb:", 12, 180), Z("Allrad", 212, 180)), PassatKopf, 846).Kraftstoff);
+        Assert.Null(DetailLeser.Auswerten(OhneKraftstoff(Z("Antriebsart:", 12, 180), Z("Frontantrieb", 212, 180)), PassatKopf, 846).Kraftstoff);
+        Assert.Null(DetailLeser.Auswerten(OhneKraftstoff(Z("Motor:", 12, 180), Z("1.6 TSI", 212, 180)), PassatKopf, 846).Kraftstoff);
+        // die normale Zeile "Kraftstoff" geht immer vor
+        var beides = PassatTechnik.Concat(new[] { Z("Antrieb:", 12, 335), Z("Elektro", 212, 335) }).ToArray();
+        Assert.Equal("Diesel", DetailLeser.Auswerten(beides, PassatKopf, 846).Kraftstoff);
+        // eine zweite Antriebs-Zeile darf noch liefern, wenn die erste keinen Kraftstoff nennt
+        var zwei = OhneKraftstoff(Z("Antrieb:", 12, 180), Z("Allrad", 212, 180), Z("Motor:", 12, 335), Z("Elektro", 212, 335));
+        Assert.Equal("Elektro", DetailLeser.Auswerten(zwei, PassatKopf, 846).Kraftstoff);
+    }
+
+    [Fact]   // (2) steht "elektro" in der Bezeichnung, ist es Elektro — ausser der Wert verneint
+    public void Elektroantrieb_in_der_Bezeichnung_ist_Kraftstoff_Elektro()
+    {
+        Assert.Equal("Elektro", DetailLeser.Auswerten(OhneKraftstoff(Z("Elektroantrieb:", 12, 180), Z("Ja", 212, 180)), PassatKopf, 846).Kraftstoff);
+        Assert.Equal("Elektro", DetailLeser.KraftstoffAusAntrieb("Elektroantrieb", "Elektro"));
+        Assert.Equal("Elektro", DetailLeser.KraftstoffAusAntrieb("Elektroantrieb", "Ja"));
+        Assert.Null(DetailLeser.KraftstoffAusAntrieb("Elektroantrieb", "Nein"));
+        Assert.Null(DetailLeser.KraftstoffAusAntrieb("Elektroantrieb", "kein"));
+        Assert.Null(DetailLeser.KraftstoffAusAntrieb("Elektroantrieb", ""));
+        Assert.Equal("Dieselmotor", DetailLeser.KraftstoffAusAntrieb("Motor", "Dieselmotor"));
+        Assert.Equal("Plug-in-Hybrid", DetailLeser.KraftstoffAusAntrieb("Antrieb", "Plug-in-Hybrid"));
+        Assert.Null(DetailLeser.KraftstoffAusAntrieb("Antrieb", "Heckantrieb"));
+        Assert.True(DetailLeser.IstKraftstoffWort("E1ektro"));
+        Assert.True(DetailLeser.IstKraftstoffWort("Benzin/LPG"));
+        Assert.False(DetailLeser.IstKraftstoffWort("4x4"));
+    }
+
+    [Theory]
+    [InlineData("Antrieb", "Antrieb")]
+    [InlineData("Antriebsart", "Antrieb")]
+    [InlineData("Motor", "Antrieb")]
+    [InlineData("Energie", "Antrieb")]
+    [InlineData("Energieträger", "Antrieb")]
+    [InlineData("Elektroantrieb", "Antrieb")]
+    [InlineData("Getriebeart", "Getriebe")]       // bleibt, trotz Aehnlichkeit zu "Antriebsart"
+    [InlineData("Kraftstoff", "Kraftstoff")]
+    public void Antriebs_Bezeichnungen(string text, string erwartet) =>
+        Assert.Equal(Enum.Parse<Feld>(erwartet), DetailLeser.BezeichnungErkennen(text));
+
+    [Fact]   // (3) kein Kraftstoff, aber ein eindeutiges Elektro-Kennzeichen im Titel -> "Elektro" als ALTERNATIVE, nie als Hauptwert
+    public void Elektro_Kennzeichen_im_Titel_wird_Alternative_nicht_Hauptwert()
+    {
+        var kopf = new[] { Z("09.10.2026 10:00:00 - Inserat von Mobile.de", 13, 27, 400, 14), Z("Opel Mokka-e Elegance", 72, 54, 330, 20) };
+        var f = DetailLeser.Auswerten(OhneKraftstoff(), kopf, 846);
+        Assert.Null(f.Kraftstoff);
+        Assert.Equal(new[] { "Elektro" }, f.AlternativenKraftstoff);
+        var nutzlast = AutoSchnellDienst.Nutzlast(f);
+        Assert.Equal("", nutzlast["kraftstoff"]);                    // kein Hauptwert — der Server nimmt die Alternative
+        var alternativen = Assert.IsType<Dictionary<string, List<string>>>(nutzlast["alternativen"]);
+        Assert.Equal(new[] { "Elektro" }, alternativen["kraftstoff"]);
+        // der zweite Blick ersetzt die Alternative nicht (er haengt seine dahinter)
+        ZweiterBlick.Uebernehmen(f, new Dictionary<Feld, List<string?>> { [Feld.Kraftstoff] = new() { "EIektro" } });
+        Assert.Equal(new[] { "Elektro", "EIektro" }, f.AlternativenKraftstoff);
+        // liefert der zweite Durchlauf doch einen Kraftstoff, ist "Elektro" Hauptwert und keine Alternative mehr
+        var g = DetailLeser.Auswerten(OhneKraftstoff(), kopf, 846);
+        var zweiter = DetailLeser.Auswerten(OhneKraftstoff(Z("Antrieb:", 12, 180), Z("Elektro", 212, 180)), kopf, 846);
+        DetailLeser.Ergaenzen(g, zweiter);
+        Assert.Equal("Elektro", g.Kraftstoff);
+        Assert.Empty(g.AlternativenKraftstoff);
+        // mit gelesenem Kraftstoff keine Alternative (der Server nimmt sie ohnehin nur ohne Hauptwert)
+        var diesel = DetailLeser.Auswerten(PassatTechnik, kopf, 846);
+        Assert.Equal("Diesel", diesel.Kraftstoff);
+        Assert.Empty(diesel.AlternativenKraftstoff);
+        // auch "Marke, Modell" zaehlt
+        var id3 = DetailLeser.Auswerten(OhneKraftstoff().Select(z => z.Text == "VW Passat Variant" ? z with { Text = "VW ID.3" } : z).ToArray(),
+                                        PassatKopf, 846);
+        Assert.Equal(new[] { "Elektro" }, id3.AlternativenKraftstoff);
+    }
+
+    [Theory]
+    [InlineData("Opel Mokka-e Elegance", true)]
+    [InlineData("Opel Mokka e", true)]
+    [InlineData("Opel Corsa-e", true)]
+    [InlineData("Audi e-tron 55 quattro", true)]
+    [InlineData("Mercedes-Benz EQA 250", true)]
+    [InlineData("Mercedes EQS 450+", true)]
+    [InlineData("VW ID.3 Pro", true)]
+    [InlineData("VW ID4 GTX", true)]
+    [InlineData("VW e-Golf", true)]
+    [InlineData("VW e-up!", true)]
+    [InlineData("Renault Zoe R135", true)]
+    [InlineData("Nissan Leaf", true)]
+    [InlineData("Tesla Model 3", true)]
+    [InlineData("Porsche Taycan", true)]
+    [InlineData("BMW i3 94Ah", true)]
+    [InlineData("BMW iX3", true)]
+    [InlineData("BMW iX", true)]
+    [InlineData("BMW i4 eDrive40", true)]
+    [InlineData("Kia EV6", true)]
+    [InlineData("Hyundai Ioniq 5", true)]
+    [InlineData("Hyundai IONIQ 6", true)]
+    [InlineData("Peugeot e-208", true)]
+    [InlineData("Peugeot e-2008", true)]
+    [InlineData("Kia e-Niro", true)]
+    [InlineData("Mazda MX-30", true)]
+    [InlineData("Skoda Enyaq iV", true)]
+    [InlineData("Cupra Born", true)]
+    [InlineData("Dacia Spring", true)]
+    [InlineData("Hyundai i30", false)]
+    [InlineData("Hyundai i40", false)]
+    [InlineData("Hyundai ix35", false)]
+    [InlineData("Opel Mokka 1.4 Turbo Edition", false)]
+    [InlineData("Mazda MX-5", false)]
+    [InlineData("Peugeot 208", false)]
+    [InlineData("Peugeot 2008", false)]
+    [InlineData("Audi A4 Avant", false)]
+    [InlineData("VW Golf VII", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void Elektro_Kennzeichen_nur_ganze_Modellnamen(string? text, bool erwartet) =>
+        Assert.Equal(erwartet, DetailLeser.ElektroKennzeichen(text));
+
     [Fact]   // seit 1.4.0: Kennung aus dem gelesenen Text, Lesefehler i/l/1 und o/0 zaehlen nicht als neues Auto
     public void Schluessel_aus_dem_gelesenen_Text()
     {

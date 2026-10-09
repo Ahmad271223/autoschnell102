@@ -18,7 +18,9 @@ internal sealed class VerbindenForm : Form
         "2. Den 6-stelligen Code hier eintippen (10 Minuten gültig).\n\n" +
         "Jedes Konto kann auf einem PC verbunden sein – ein neuer PC ersetzt den alten.";
 
-    public VerbindenForm(AutoSchnellDienst dienst, string? hinweis)
+    /// <param name="aktivieren">Pruefung 09.10.2026 (Befund 7): nur auf Nutzerklick darf der Dialog aktiv werden
+    /// (Activate beim Zeigen); ohne Anlass vom Nutzer nimmt er AutoPointer nie den Fokus.</param>
+    public VerbindenForm(AutoSchnellDienst dienst, string? hinweis, bool aktivieren = true)
     {
         _dienst = dienst;
         Text = TrayApp.Name + " – mit AutoSchnell verbinden";
@@ -31,7 +33,8 @@ internal sealed class VerbindenForm : Form
         AutoScaleMode = AutoScaleMode.Dpi;
         Icon = Symbole.Icon(Symbole.Aktiv);
         ShowInTaskbar = true;
-        TopMost = true;
+        // Befund 7 (09.10.2026): nicht mehr "immer oben" — der Dialog lag sonst dauerhaft ueber AutoPointer
+        TopMost = false;
 
         var stapel = new FlowLayoutPanel
         {
@@ -66,7 +69,7 @@ internal sealed class VerbindenForm : Form
         Controls.Add(stapel);
         AcceptButton = _verbinden;
         _verbinden.Click += async (_, _) => await VerbindenAsync();
-        Shown += (_, _) => { Activate(); _code.Focus(); };
+        Shown += (_, _) => { if (aktivieren) Activate(); _code.Focus(); };
     }
 
     private async Task VerbindenAsync()

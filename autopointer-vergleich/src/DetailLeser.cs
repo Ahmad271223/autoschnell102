@@ -7,6 +7,10 @@ internal enum Feld
     MarkeModell, Preis, Zustand, Kategorie, Erstzulassung, Kilometer, Leistung, Getriebe, Kraftstoff,
     Farbe, Herstellerfarbe, Klimatisierung, Interieur, Tueren, Umweltplakette, InseratId, Hubraum,
     Schadstoffklasse, Sitzplaetze, HashId,
+    /// <summary>Wunsch Ahmad 09.10.2026 (1.5.14, Elektroautos): Zeilen "Antrieb", "Antriebsart", "Motor", "Energie",
+    /// "Energieträger", "Elektroantrieb" — nur ein Rueckfall fuer den Kraftstoff, wenn die Zeile "Kraftstoff" fehlt
+    /// (<see cref="DetailLeser.KraftstoffAusAntrieb"/>): "Antrieb: Allrad" wird nie Kraftstoff.</summary>
+    Antrieb,
 }
 
 /// <summary>1.5.12: eine erkannte Zeile der Tabelle "Technische Daten" mit der Lage ihres Werts im Bild (Pixel im
@@ -18,8 +22,11 @@ internal enum Feld
 /// <param name="Rechts">rechtes Ende des gelesenen Werts; null = kein Wert gelesen.</param>
 /// <param name="VorherUnten">Unterkante der Reihe darueber (null = erste Reihe).</param>
 /// <param name="DanachOben">Oberkante der Reihe darunter (null = letzte Reihe).</param>
+/// <param name="Bezeichnung">1.5.14: die gelesene Bezeichnung (ohne Doppelpunkt) — fuer <see cref="Feld.Antrieb"/>
+/// entscheidet sie mit ("Elektroantrieb").</param>
 internal sealed record TabellenZeile(Feld Feld, string Wert, double WertX, double? Spalte, double LinksMin,
-                                     double? Rechts, double Oben, double Unten, double? VorherUnten, double? DanachOben);
+                                     double? Rechts, double Oben, double Unten, double? VorherUnten, double? DanachOben,
+                                     string Bezeichnung = "");
 
 /// <summary>Macht aus den erkannten Textzeilen der beiden Tabellen ein Fahrzeug.</summary>
 /// <remarks>Die Tabelle "Technische Daten" hat links die Bezeichnung
@@ -41,6 +48,9 @@ internal static class DetailLeser
         ("inseratid", Feld.InseratId), ("hubraum", Feld.Hubraum),
         ("schadstoffklasse", Feld.Schadstoffklasse), ("sitzplatze", Feld.Sitzplaetze),
         ("hashid", Feld.HashId),
+        // 1.5.14 (Wunsch Ahmad 09.10.2026, Opel Mokka-e ohne Kraftstoff): der Antrieb unter anderer Beschriftung
+        ("antrieb", Feld.Antrieb), ("antriebsart", Feld.Antrieb), ("motor", Feld.Antrieb), ("energie", Feld.Antrieb),
+        ("energietrager", Feld.Antrieb), ("elektroantrieb", Feld.Antrieb),
     };
 
     public static Feld? BezeichnungErkennen(string text)
@@ -65,14 +75,69 @@ internal static class DetailLeser
         return mehrdeutig ? null : bestes;
     }
 
-    /// <summary>Bezeichnung -> Wert aus der Tabelle "Technische Daten".</summary>
+    /// <summary>Bezeichnung -> Wert aus der Tabelle "Technische Daten". Fuer <see cref="Feld.Antrieb"/> steht hier schon
+    /// der daraus abgeleitete Kraftstoff (<see cref="KraftstoffAusAntrieb"/>) — oder nichts.</summary>
     public static Dictionary<Feld, string> Tabelle(IReadOnlyList<OcrZeile> zeilen)
     {
         var ergebnis = new Dictionary<Feld, string>();
         foreach (var z in Zeilen(zeilen))
-            if (z.Wert.Length > 0 && !ergebnis.ContainsKey(z.Feld)) ergebnis[z.Feld] = z.Wert;
+        {
+            if (z.Wert.Length == 0 || ergebnis.ContainsKey(z.Feld)) continue;
+            string? wert = z.Feld == Feld.Antrieb ? KraftstoffAusAntrieb(z.Bezeichnung, z.Wert) : z.Wert;
+            if (!string.IsNullOrEmpty(wert)) ergebnis[z.Feld] = wert;
+        }
         return ergebnis;
     }
+
+    // ---- Wunsch Ahmad 09.10.2026 (1.5.14): "Elektroantrieb — Elektro ist Kraftstoff Elektro, nicht 'nicht erkannt'" ----
+
+    /// <summary>Kraftstoff-Woerter, die in einer Antriebs-Zeile zaehlen (Teilwort, in Leseform — "EIektro"/"E1ektro"
+    /// wie "Elektro").</summary>
+    private static readonly string[] KraftstoffWoerter =
+        { "elektr", "strom", "benzin", "diesel", "hybrid", "gas", "lpg", "cng", "wasserstoff" };
+
+    /// <summary>Leseform wie <see cref="Fahrzeug.Schluessel"/>: i/l/1 und o/0 gleich (typische Verwechslungen).</summary>
+    private static string Leseform(string norm) =>
+        new(norm.Select(c => c switch { 'i' or 'l' => '1', 'o' => '0', _ => c }).ToArray());
+
+    /// <summary>Enthaelt der Wert ein Kraftstoff-Wort (auch in Leseform)? "Allrad", "Front", "1.6 TSI" nicht. (rein, fuer Tests)</summary>
+    internal static bool IstKraftstoffWort(string? wert)
+    {
+        string lese = Leseform(FahrzeugCodes.Norm(wert));
+        return lese.Length > 0 && KraftstoffWoerter.Any(w => lese.Contains(Leseform(w)));
+    }
+
+    /// <summary>Kraftstoff aus einer Antriebs-Zeile ("Antrieb", "Antriebsart", "Motor", "Energie", "Energieträger",
+    /// "Elektroantrieb") — NUR ein Rueckfall, wenn die Zeile "Kraftstoff" fehlt (<see cref="Auswerten"/>):
+    /// (1) der Wert zaehlt nur, wenn er ein Kraftstoff-Wort enthaelt ("Antrieb: Elektro" ja, "Antrieb: Allrad" nein);
+    /// (2) steht "elektro" schon in der Bezeichnung ("Elektroantrieb: Ja"), ist es "Elektro" — ausser der Wert verneint.
+    /// null = kein Kraftstoff. (rein, fuer Tests)</summary>
+    internal static string? KraftstoffAusAntrieb(string bezeichnung, string? wert)
+    {
+        if (string.IsNullOrWhiteSpace(wert)) return null;
+        string b = FahrzeugCodes.Norm(bezeichnung);
+        if (b.Contains("elektro"))
+        {
+            string w = FahrzeugCodes.Norm(wert);
+            bool verneint = w.StartsWith("nein") || w.StartsWith("kein") || w.StartsWith("nicht") || w.StartsWith("ohne");
+            return verneint ? null : "Elektro";
+        }
+        return IstKraftstoffWort(wert) ? Sauber(wert) : null;
+    }
+
+    /// <summary>Eindeutige Elektro-Modelle im Titel bzw. in "Marke, Modell" (Liste Ahmad 09.10.2026): Mokka-e, e-tron,
+    /// EQA/EQB/EQC/EQE/EQS, ID.3/4/5/7, e-Golf, e-up, Zoe, Leaf, Tesla, Taycan, i3, iX, i4, EV6, Ioniq 5/6, e-208,
+    /// e-2008, Corsa-e, e-Niro, MX-30, Enyaq, Born, Spring — als ganze Woerter ("i30" und "ix35" sind keine).</summary>
+    private static readonly Regex ElektroMuster = new(
+        @"(?<![\w-])(?:mokka[\s-]?e|corsa[\s-]?e|e-tron|eq[abces]|id\.?\s?[3457]|e-golf|e-up!?|zoe|leaf|tesla|taycan"
+        + @"|i3s?|ix\d?|i4|ev6|ioniq\s?[56]|e-20{1,2}8|e-niro|mx-30|enyaq|born|spring)(?![\w-])",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>Traegt der Text ein eindeutiges Elektro-Kennzeichen? Bleibt der Kraftstoff leer, geht dann "Elektro" als
+    /// ALTERNATIVE mit (<c>alternativen.kraftstoff</c>) — nicht als sicherer Wert: der Server nimmt Alternativen nur,
+    /// wenn der Hauptwert fehlt. (rein, fuer Tests)</summary>
+    internal static bool ElektroKennzeichen(string? text) =>
+        !string.IsNullOrWhiteSpace(text) && ElektroMuster.IsMatch(text);
 
     /// <summary>Befund Ahmad 09.10.2026 (1.5.12, zweiter Blick): jede erkannte Zeile der Tabelle samt Lage des Werts im
     /// Bild — dieselbe Zuordnung Bezeichnung -> Wert wie <see cref="Tabelle"/> (die nimmt genau diese Zeilen), damit der
@@ -119,13 +184,15 @@ internal static class DetailLeser
                 wert = text[(dp + 1)..];
                 wertX = WertBeginn(reihe[0], dp, grenze);
             }
-            var feld = BezeichnungErkennen(bezeichnung.TrimEnd(':', ' '));
+            bezeichnung = bezeichnung.Trim().TrimEnd(':', ' ');
+            var feld = BezeichnungErkennen(bezeichnung);
             if (feld == null) continue;
             liste.Add(new TabellenZeile(feld.Value, wert.Trim(), wertX, spalte, linksMin,
                                         wert.Trim().Length > 0 ? reihe.Max(z => z.Rechts) : null,
                                         reihe.Min(z => z.Y), reihe.Max(z => z.Y + z.Hoehe),
                                         i > 0 ? reihen[i - 1].Max(z => z.Y + z.Hoehe) : null,
-                                        i + 1 < reihen.Count ? reihen[i + 1].Min(z => z.Y) : null));
+                                        i + 1 < reihen.Count ? reihen[i + 1].Min(z => z.Y) : null,
+                                        bezeichnung));
         }
         return liste;
     }
@@ -386,7 +453,8 @@ internal static class DetailLeser
             Kategorie = Sauber(tab.GetValueOrDefault(Feld.Kategorie)),
             Kilometer = Kilometer(tab.GetValueOrDefault(Feld.Kilometer)),
             Getriebe = Sauber(tab.GetValueOrDefault(Feld.Getriebe)),
-            Kraftstoff = Sauber(tab.GetValueOrDefault(Feld.Kraftstoff)),
+            // 1.5.14: fehlt die Zeile "Kraftstoff" (Elektroautos, Opel Mokka-e), der Rueckfall aus der Antriebs-Zeile
+            Kraftstoff = Sauber(tab.GetValueOrDefault(Feld.Kraftstoff)) ?? Sauber(tab.GetValueOrDefault(Feld.Antrieb)),
             Tueren = Sauber(tab.GetValueOrDefault(Feld.Tueren)),
             Preis = Betrag(tab.GetValueOrDefault(Feld.Preis)),
         };
@@ -398,6 +466,10 @@ internal static class DetailLeser
         f.Quelle = quelle;
         f.Titel = titel;
         f.Preis ??= preis;
+        // 1.5.14 (Wunsch Ahmad 09.10.2026): kein Kraftstoff gelesen, aber Titel/Modell sagen eindeutig "Elektroauto" —
+        // als Alternative mitschicken (der Server nimmt sie nur, wenn der Hauptwert fehlt), nie als sicheren Wert
+        if (f.Kraftstoff == null && (ElektroKennzeichen(f.Titel) || ElektroKennzeichen(f.MarkeModellText)))
+            f.AlternativenKraftstoff.Add("Elektro");
         NeuwagenErgaenzen(f, DateTime.Now);
         return f;
     }
@@ -424,6 +496,10 @@ internal static class DetailLeser
         // Nr. 9: unsicher bleibt die Leistung nur, wenn KEIN Durchgang einen stimmigen Wert lieferte
         a.LeistungUnsicher = a.Kw == null && (a.LeistungUnsicher || b.LeistungUnsicher);
         a.Kraftstoff ??= b.Kraftstoff;
+        // 1.5.14: die Elektro-Alternative des anderen Durchlaufs behalten — aber nie den Hauptwert doppeln
+        foreach (var alt in b.AlternativenKraftstoff)
+            if (!a.AlternativenKraftstoff.Contains(alt, StringComparer.Ordinal)) a.AlternativenKraftstoff.Add(alt);
+        a.AlternativenKraftstoff.RemoveAll(alt => string.Equals(alt, a.Kraftstoff, StringComparison.Ordinal));
         a.Getriebe ??= b.Getriebe;
         a.Zustand ??= b.Zustand;
         a.Kategorie ??= b.Kategorie;

@@ -4436,7 +4436,7 @@ Suchern der Firma) – „alle anderen sollen das gar nicht sehen“.
   cd autopointer-vergleich && powershell -ExecutionPolicy Bypass -File build.ps1   # lokal: dist\AutoSchnell-Vergleich.exe
   scp dist/AutoSchnell-Vergleich.exe root@<server>:/tmp/                            # vom PC aus, nicht auf dem Server
   docker compose cp /tmp/AutoSchnell-Vergleich.exe backend:/tmp/AutoSchnell-Vergleich.exe
-  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.5.13
+  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.5.14
   ```
   Bis dahin zeigt die Seite „Wird gerade bereitgestellt“. Speicher: `werkzeuge/autopointer-vergleich/…`, Eintrag in `werkzeuge`.
 - Tests: `backend/tests/test_werkzeuge_20261003.py`, `frontend/src/pages/app/Programme.test.jsx`,
@@ -4649,6 +4649,25 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
     `tabelle(db, dealer_id)`) — eine Firma kann mit zwei gefälschten Lesungen sonst die Erkennung aller anderen
     vergiften. (3) „Echte Daten vor Bildschirm“ nimmt nur Lesungen der EIGENEN Firma oder den Server-Speicher
     (`listings_cache`), nie fremde Browser-Lesungen (`erkennung_lernen.inserat_daten`).
+  - **Prüfung 09.10.2026 „dass AutoPointer nicht meckert“ — Programm 1.5.14 (nur Programm, kein Server-Teil):** das
+    Programm darf AutoPointer (aprun.exe, Delphi/DevExpress) nie stören, hängen lassen oder ihm Fokus/Tasten nehmen.
+    (1) Nach-vorne-Holen ohne `BringWindowToTop` (stellte synchron an AutoPointers Thread zu, fror bei beschäftigtem
+    AutoPointer unseren Oberflächen-Thread ein); liegt AutoPointer schon vorne, minimiert oder hängt es
+    (`IsHungAppWindow`), wird nichts angefasst; bei Modal-Dialog wird der Dialog geholt (`GetLastActivePopup`); nie
+    `AttachThreadInput` an den eigenen oder einen hängenden Thread (`BrowserOeffner.Planen`, rein). (2) „Vergleichen“
+    liest nur, wenn AutoPointer wirklich vorne liegt (sonst Hinweis „AutoPointer liegt nicht vorne …“ bzw. „… ist
+    minimiert …“, keine Lesung, kein Lesebild mit Browser-Inhalt); der Takt wertet hinter dem Browser nichts
+    (`IAnsichtQuelle.ImVordergrund`). (3) Wiederverwendete Fensterhandles nach AutoPointer-Neustart: Klasse + Thread der
+    Tabellen und des Hauptfensters werden geprüft (`AutoPointerFenster.GehoertZusammen`); Detailansicht-Suche höchstens
+    jede Sekunde (`AutoPointerQuelle.DetailSucheMs`). (4) Verbindungsverlust (401, anderer PC): kein TopMost-Dialog
+    mehr, nur Sprechblase + Leiste „NICHT VERBUNDEN“; Dialog erst auf Klick. (5) Texterkennung: je Engine höchstens ein
+    hängender Auftrag (`TextErkennung.Haengewache`); Bitmap-Leck beim Abbild (`Abbilder`); gedrosseltes Protokoll
+    höchstens 200 Schlüssel. (6) Elektroautos (Wunsch Ahmad, Opel Mokka-e): Kraftstoff aus „Antrieb/Antriebsart/
+    Motor/Energie/Energieträger/Elektroantrieb“ nur als Rückfall mit Kraftstoff-Wort; Elektro-Modell im Titel →
+    `alternativen.kraftstoff = ["Elektro"]` (der Server nimmt es nur ohne Hauptwert, `_erkennen`). Nicht umgesetzt
+    (Entscheidung Ahmad): Strg+Alt+P, Leiste über AutoPointer-Kanten, `Process.MainModule`-Pfadprüfung. Tests:
+    `autopointer-vergleich/tests/Pruefung20261009Tests.cs` + UeberwacherTests/DetailLeserTests (363 Tests).
+    Hochladen wie oben mit `--version 1.5.14`.
   - **Kaufvertrag/Abholprotokoll (Wunsch Ahmad 09.10.2026):** „Datum und Ort“ bei Verkäufer UND Käufer = Ort des
     Kunden (`pdf_service._uebergabe_ort`; Dialog befüllt den Käufer-Ort nicht mehr aus dem Firmensitz); unter den
     Unterschriften kein Satz mehr; „Erfassung anhand der Fahrzeugskizze …“ und „Ausstattung laut Inseratsangaben.“

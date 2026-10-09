@@ -43,7 +43,18 @@ internal static class Native
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool AllowSetForegroundWindow(int dwProcessId);
     public const int ASFW_ANY = -1;
-    [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hwnd);
+    // Pruefung 09.10.2026 (Befund 1): BringWindowToTop ist hier bewusst NICHT mehr vorhanden — es ist SetWindowPos ohne
+    // SWP_ASYNCWINDOWPOS und stellt WM_WINDOWPOSCHANGING synchron an AutoPointers Oberflaechen-Thread zu; war AutoPointer
+    // gerade beschaeftigt (Laden, Modal-Dialog ohne Nachrichtenschleife), fror UNSER Oberflaechen-Thread ein (Leiste, Tray,
+    // Lese-Takt ueber _ui.Send). SetForegroundWindow holt das Fenster ohnehin nach oben.
+    /// <summary>Pruefung 09.10.2026 (Befund 2c): false, solange AutoPointer einen Modal-Dialog offen hat — dann darf
+    /// nicht das deaktivierte Hauptfenster aktiviert werden (die VCL piept/flackert), sondern der Dialog.</summary>
+    [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr hwnd);
+    /// <summary>Pruefung 09.10.2026 (Befund 2d): antwortet das Fenster seit ≥ 5 s nicht mehr auf Nachrichten? An so
+    /// einen Thread haengen wir uns nie (AttachThreadInput an ein haengendes Fenster friert uns mit ein).</summary>
+    [DllImport("user32.dll")] public static extern bool IsHungAppWindow(IntPtr hwnd);
+    /// <summary>Pruefung 09.10.2026 (Befund 2c): der zuletzt aktive Dialog des Fensters (oder das Fenster selbst).</summary>
+    [DllImport("user32.dll")] public static extern IntPtr GetLastActivePopup(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr nach, int x, int y, int cx, int cy, uint flags);
     public static readonly IntPtr HWND_TOPMOST = new(-1);
     public const uint SWP_NOSIZE = 0x1, SWP_NOMOVE = 0x2, SWP_NOACTIVATE = 0x10;

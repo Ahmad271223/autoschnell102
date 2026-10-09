@@ -56,7 +56,18 @@ internal static class Protokoll
         NeueZeile?.Invoke(eintrag);
     }
 
-    private static readonly Dictionary<string, (long Zuletzt, int Unterdrueckt)> Gedrosselt = new();
+    /// <param name="Folge">Befund 11a: laufende Nummer der letzten Beruehrung (auch einer unterdrueckten) — danach wird
+    /// verdraengt, nicht nach der ms-Uhr (viele Schluessel in derselben Millisekunde waeren sonst nicht zu ordnen).</param>
+    private static readonly Dictionary<string, (long Zuletzt, int Unterdrueckt, long Folge)> Gedrosselt = new();
+    private static long _folge;
+
+    /// <summary>Pruefung 09.10.2026 (Befund 11a): hoechstens so viele Schluessel — die Schluessel enthalten Fehlertexte mit
+    /// Handles und Zahlen, jede neue Variante war ein neuer Eintrag, das Woerterbuch wuchs wochenlang. Darueber fliegen die
+    /// am laengsten nicht beruehrten raus.</summary>
+    internal const int GedrosseltMax = 200;
+
+    /// <summary>Anzahl der gemerkten Schluessel (fuer Tests).</summary>
+    internal static int GedrosseltAnzahl { get { lock (Sperre) return Gedrosselt.Count; } }
 
     /// <summary>Pruefung 05.10.2026 (Paket 1): dieselbe Meldung je Schluessel hoechstens einmal je <paramref name="abstand"/>
     /// — ein Fehler im 250-ms-Takt fuellte sonst das Protokoll (bis ~1 GB am Tag). Unterdrueckte werden gezaehlt
@@ -69,11 +80,17 @@ internal static class Protokoll
             long jetzt = Environment.TickCount64;
             if (Gedrosselt.TryGetValue(schluessel, out var g) && jetzt - g.Zuletzt < abstand.TotalMilliseconds)
             {
-                Gedrosselt[schluessel] = (g.Zuletzt, g.Unterdrueckt + 1);
+                Gedrosselt[schluessel] = (g.Zuletzt, g.Unterdrueckt + 1, ++_folge);
                 return;
             }
             unterdrueckt = Gedrosselt.TryGetValue(schluessel, out g) ? g.Unterdrueckt : 0;
-            Gedrosselt[schluessel] = (jetzt, 0);
+            Gedrosselt[schluessel] = (jetzt, 0, ++_folge);
+            if (Gedrosselt.Count > GedrosseltMax)
+            {
+                // Befund 11a: die am laengsten nicht beruehrten Schluessel vergessen
+                foreach (var alt in Gedrosselt.OrderBy(kv => kv.Value.Folge).Take(Gedrosselt.Count - GedrosseltMax).Select(kv => kv.Key).ToList())
+                    Gedrosselt.Remove(alt);
+            }
         }
         Schreibe(unterdrueckt > 0 ? $"{text}\n(dazwischen {unterdrueckt}-mal dieselbe Meldung unterdrückt)" : text);
     }

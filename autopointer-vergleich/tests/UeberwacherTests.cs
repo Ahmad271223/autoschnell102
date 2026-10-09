@@ -16,7 +16,10 @@ public class UeberwacherTests
         public int Lesungen;
         /// <summary>1.5.13: das "gelesene Bild" jeder Lesung (nur ein Stummel; null = kein Bild).</summary>
         public byte[]? Bild = { 0x89, 0x50, 0x4E, 0x47 };
+        /// <summary>Pruefung 09.10.2026 (Befund 3): liegt AutoPointer vorne? (false = der Browser liegt davor)</summary>
+        public bool Vorne = true;
         public IntPtr Hauptfenster => IntPtr.Zero;
+        public bool ImVordergrund => Vorne;
         public QuellenZustand Pruefe() => new(Lage, Lage == Lage.Details ? Summe : 0);
 
         public Task<Lesung?> LiesAsync()
@@ -933,6 +936,9 @@ public class UeberwacherTests
                      Ueberwacher.KeineNummerKurz, Ueberwacher.KeinLinkKurz, Ueberwacher.VertragOhneAdresse,
                      Ueberwacher.MausHinweis, Ueberwacher.NochNichtVerglichen, Ueberwacher.VorgangNichtErreichbar,
                      Ueberwacher.ErweiterungNichtUebernommen, TrayApp.UpdateText("10.10.10"),
+                     // Pruefung 09.10.2026 (Befund 3/7)
+                     Ueberwacher.AutoPointerNichtVorne, Ueberwacher.AutoPointerMinimiert, TrayApp.VerlustAnleitung,
+                     TrayApp.VerlustText("Dieses Programm ist nicht (mehr) verbunden – ein anderer PC hat sich mit dem Konto verbunden."),
                  })
             Assert.True(t.Length <= Hinweis.MaxZeichen, $"{t.Length}: {t}");
         // die langen Anleitungen waren der Anlass (≈ 400 / 360 Zeichen) — sie bleiben ganz, aber nur fuers Fenster
@@ -1189,5 +1195,64 @@ public class UeberwacherTests
         await Versandt();
         Assert.Empty(Bilder);
         Assert.Contains(Protokoll.Letzte(), z => z.Contains("Lesebild (pflichtfeld_fehlt): zu dieser Lesung gibt es kein Bild"));
+    }
+
+    // ------------------------------------------------------------------------------------------------------------
+    // Pruefung 09.10.2026 (Befund 3, 1.5.14): gelesen wird nur, wenn AutoPointer wirklich vorne liegt — sonst stuende der
+    // Browser im Abbild ("Fahrzeug nicht erkannt") und ein Lesebild mit fremdem Inhalt ginge an AutoSchnell
+
+    [Fact]   // "Vergleichen", aber der Browser liegt vor AutoPointer: Hinweis statt Lesung, nie ein Lesebild
+    public async Task Vergleichen_liest_nicht_wenn_AutoPointer_nicht_vorne_liegt()
+    {
+        await Start();
+        _q.Zeige(OhneEz, 1);
+        _q.Vorne = false;
+        await _u.JetztVergleichenAsync();
+        await Versandt();
+        Assert.Equal(0, _q.Lesungen);
+        Assert.Empty(_b.Aufrufe);
+        Assert.Empty(Bilder);
+        var h = Assert.Single(_hinweise);
+        Assert.Equal(Ueberwacher.AutoPointerNichtVorne, h.Text);
+        Assert.True(h.Fehler);
+        Assert.Contains("„Vergleichen“", h.Text);
+        // AutoPointer wieder vorne: dieselbe Taste liest und schickt (jetzt) das Bild von AutoPointer
+        _q.Vorne = true;
+        await _u.JetztVergleichenAsync();
+        await Versandt();
+        Assert.Equal(1, _q.Lesungen);
+        Assert.Single(Bilder);
+    }
+
+    [Fact]   // die Automatik wertet hinter dem Browser weder Aenderungen noch liest sie — und macht vorne weiter
+    public async Task Automatik_liest_erst_wenn_AutoPointer_wieder_vorne_liegt()
+    {
+        await Start();
+        _q.Vorne = false;
+        _q.Zeige(OhneEz, 1);
+        await Ticks(8);                                              // 2 s hinter dem Browser
+        Assert.Equal(0, _q.Lesungen);
+        Assert.Empty(Bilder);
+        Assert.Empty(_hinweise);
+        Assert.Equal(Status.Aktiv, _u.Status);
+        _q.Vorne = true;
+        await Ticks(4);
+        Assert.Equal(1, _q.Lesungen);
+        await Versandt();
+        Assert.Single(Bilder);                                       // das Bild zeigt AutoPointer, nicht den Browser
+    }
+
+    [Fact]   // beim Start hinter dem Browser ist unbekannt, was AutoPointer zeigt — das erste vorne sichtbare Auto zaehlt wie angeklickt
+    public async Task Beim_Start_hinter_dem_Browser_zaehlt_das_erste_sichtbare_Auto_wie_angeklickt()
+    {
+        _q.Vorne = false;
+        _q.Zeige(Bentley, 1);
+        await Ticks(4);
+        Assert.Equal(0, _q.Lesungen);                                // vorher: der Browser-Inhalt wurde gelesen
+        _q.Vorne = true;
+        _q.Zeige(Passat, 2);                                         // der Sucher holt AutoPointer vor und klickt ein Auto
+        await Ticks(4);
+        Assert.Single(_b.Aufrufe);
+        Assert.Contains("VW-Passat_Variant-2006", _b.Aufrufe[0][0].Url);
     }
 }

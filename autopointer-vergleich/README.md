@@ -160,6 +160,46 @@ dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und 
   * Einstellungen: **„Bei nicht erkannten Autos ein Bild der Anzeige an AutoSchnell senden“**, Standard **an** (Wunsch
     Ahmad); aus = kein Bild und auch kein Kodieren. „Erkennungsbilder speichern“ (lokal, verschlüsselt) bleibt davon
     unberührt.
+* **1.5.14 (Prüfung 09.10., Wunsch Ahmad „dass AutoPointer nicht meckert“) — AutoPointer nie stören, hängen lassen
+  oder ihm Fokus/Tasten nehmen:**
+  * **Nach vorne holen** (`BrowserOeffner.ZurueckZu`, vor „Vergleichen“ und bei „Danach zurück zu AutoPointer“): kein
+    `BringWindowToTop` mehr (SetWindowPos ohne SWP_ASYNCWINDOWPOS stellte synchron an AutoPointers Thread zu — war
+    AutoPointer beschäftigt, fror unser Oberflächen-Thread samt Leiste und Lese-Takt ein). Liegt AutoPointer schon vorne,
+    passiert nichts (nie an seinen eigenen Thread hängen); minimiert oder hängend (`IsHungAppWindow`) wird es nicht
+    angefasst; bei offenem Modal-Dialog wird der Dialog geholt (`GetLastActivePopup`), nie das deaktivierte Hauptfenster;
+    an ein hängendes Vordergrundfenster (eingefrorener Browser) wird nie angehängt. Die Entscheidung ist eine reine
+    Funktion (`Planen`), `ZurueckZu` liefert, ob AutoPointer danach vorne liegt.
+  * **Gelesen wird nur, wenn AutoPointer wirklich vorne liegt:** „Vergleichen“ sagt bei minimiertem AutoPointer
+    „AutoPointer ist minimiert – bitte AutoPointer öffnen …“, und prüft nach dem Nach-vorne-Holen (300 ms), ob es vorne
+    ist — sonst „AutoPointer liegt nicht vorne – bitte AutoPointer anklicken und erneut „Vergleichen“ drücken.“ und keine
+    Lesung (vorher wurde dann der Browser im Rechteck der Tabelle gelesen: „nicht erkannt“ und ein Lesebild mit fremdem
+    Inhalt). Der Überwacher sichert das selbst noch einmal (`IAnsichtQuelle.ImVordergrund`), auch im Takt: hinter dem
+    Browser wird weder eine Änderung gewertet noch gelesen; beim Start hinter dem Browser zählt das erste vorne sichtbare
+    Auto wie ein neu angeklicktes.
+  * **Handles:** Windows verwendet Fensterhandles wieder — nach einem AutoPointer-Neustart gelten die gemerkten Tabellen
+    nur, wenn Hauptfenster (TMainForm) und Tabellen (TcxGridSite) die richtige Klasse haben und auf demselben Thread
+    liegen (`GehoertZusammen`); auch das Hauptfenster-Handle wird so geprüft. Die Suche nach der Detailansicht
+    (EnumChildWindows über 500–1.500 Kindfenster) läuft höchstens **jede Sekunde**, solange AutoPointer kein Auto zeigt
+    (vorher alle 250 ms).
+  * **Verbindung verloren** (401 im Takt oder in der 15-min-Lizenzprüfung, anderer PC hat sich verbunden): kein Dialog
+    mehr, der das Tippen in AutoPointer unterbricht — nur Sprechblase, Leiste „NICHT VERBUNDEN“ (Klick = verbinden) und
+    rotes Symbol; der Verbinden-Dialog kommt erst auf Klick, ist nicht mehr TopMost und wird ohne Nutzerklick (Programmstart)
+    nicht aktiv erzwungen. Der Grund steht dann im Dialog.
+  * **Texterkennung:** je Engine höchstens ein hängender Auftrag (`Haengewache`) — nach einer Zeitüberschreitung bekam eine
+    tote OcrEngine vom Takt (3×) und von „Vergleichen“ immer neue Aufträge samt Bild (~10 MB). Bis der hängende zurück ist,
+    gilt sofort derselbe Lesefehler. Bitmap-Leck beim Abbild behoben (`Abbilder`); gedrosseltes Protokoll merkt sich
+    höchstens 200 Schlüssel.
+  * **Elektroautos (Wunsch Ahmad 09.10., Opel Mokka-e: „Im Inserat ist kein Kraftstoff angegeben“):** fehlt die Zeile
+    „Kraftstoff“, zählt als Rückfall eine Zeile „Antrieb“, „Antriebsart“, „Motor“, „Energie“, „Energieträger“ oder
+    „Elektroantrieb“ — nur, wenn der Wert ein Kraftstoff-Wort enthält (elektr/strom/benzin/diesel/hybrid/gas/lpg/cng/
+    wasserstoff, auch in Leseform „EIektro“); „Antrieb: Allrad“ wird nie Kraftstoff. Steht „elektro“ in der Beschriftung
+    („Elektroantrieb: Ja“), ist es „Elektro“. Bleibt der Kraftstoff leer, trägt aber Titel oder „Marke, Modell“ ein
+    eindeutiges Elektro-Modell (Mokka-e, e-tron, EQA–EQS, ID.3/4/5/7, e-Golf, e-up, Zoe, Leaf, Tesla, Taycan, i3, iX, i4,
+    EV6, Ioniq 5/6, e-208, e-2008, Corsa-e, e-Niro, MX-30, Enyaq, Born, Spring — als ganze Wörter, „i30“/„ix35“ nicht),
+    geht „Elektro“ als **Alternative** mit (`alternativen.kraftstoff`; der Server nimmt sie nur ohne Hauptwert), nie als
+    sicherer Wert.
+  * Nicht umgesetzt (Entscheidung Ahmad): globales Tastenkürzel Strg+Alt+P, Leiste über AutoPointer-Kanten,
+    Pfadprüfung über `Process.MainModule`.
 * Ein Auto, das beim Programmstart schon angezeigt wird, öffnet nichts – erst das nächste angeklickte. **Nach dem (Neu-)Verbinden**
   dagegen wird das gerade angezeigte Auto sofort verglichen (seit 1.5.3, Befund 04.10.: Mercedes nach Neuverbinden).
 * **Unplausible Daten** (seit 1.5.3, Befund 04.10.: „Kia Rio · EZ 04/2026 · 165.000 km“, „Audi 80 · 1.960.817 km“):

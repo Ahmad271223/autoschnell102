@@ -15,6 +15,7 @@ public class PruefberichtTests
         public Func<Fahrzeug>? Fahrzeug;
         public ulong Summe;
         public IntPtr Hauptfenster => IntPtr.Zero;
+        public bool ImVordergrund => true;
         public QuellenZustand Pruefe() => new(Fahrzeug == null ? Lage.KeineDetails : Lage.Details, Fahrzeug == null ? 0 : Summe);
         public Task<Lesung?> LiesAsync() => Task.FromResult<Lesung?>(new Lesung(Fahrzeug!(), false, "roh"));
     }

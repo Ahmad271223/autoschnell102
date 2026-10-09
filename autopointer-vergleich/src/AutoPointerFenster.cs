@@ -134,8 +134,48 @@ internal static class AutoPointerFenster
         return false;
     }
 
+    /// <summary>Klasse des Hauptfensters bzw. der Tabellen, die <see cref="FindeDetails"/> verlangt.</summary>
+    internal const string HauptfensterKlasse = "TMainForm", TabellenKlasse = "TcxGridSite";
+
+    /// <summary>Pruefung 09.10.2026 (Befund 4): ist das Handle (noch) das AutoPointer-Hauptfenster? Windows verwendet
+    /// Handles wieder — nach einem AutoPointer-Neustart kann ein gemerktes Handle auf ein fremdes Fenster zeigen.</summary>
+    public static bool IstHauptfenster(IntPtr h) =>
+        h != IntPtr.Zero && Native.IsWindow(h) && Native.Klasse(h) == HauptfensterKlasse;
+
+    /// <summary>Pruefung 09.10.2026 (Befund 4): Klasse und Thread eines Fensters — die Kennung, an der sich erkennen
+    /// laesst, ob ein gemerktes Handle noch zu AutoPointer gehoert.</summary>
+    internal sealed record FensterKennung(string Klasse, uint Thread);
+
+    /// <summary>Pruefung 09.10.2026 (Befund 4): gehoeren die gemerkten Tabellen noch zum Hauptfenster? Das Hauptfenster
+    /// muss ein TMainForm sein, die Tabellen TcxGridSite, und alle auf DEMSELBEN Thread (eine Delphi-Oberflaeche hat genau
+    /// einen) — ein wiederverwendetes Handle eines fremden Programms faellt so durch, statt fotografiert und gelesen zu
+    /// werden (mit Lesebild-Folge). (rein, fuer Tests)</summary>
+    internal static bool GehoertZusammen(FensterKennung haupt, FensterKennung technik, FensterKennung? kopf)
+    {
+        if (haupt.Klasse != HauptfensterKlasse || haupt.Thread == 0) return false;
+        if (technik.Klasse != TabellenKlasse || technik.Thread != haupt.Thread) return false;
+        return kopf == null || (kopf.Klasse == TabellenKlasse && kopf.Thread == haupt.Thread);
+    }
+
+    private static FensterKennung Kennung(IntPtr h) => new(Native.Klasse(h), Native.GetWindowThreadProcessId(h, out _));
+
+    /// <summary>Liegt ein Fenster von AutoPointer (gleicher Prozess wie <paramref name="haupt"/>) vorne? (Fuer den Takt
+    /// und "Vergleichen": 1.5.9 I, Befund 3 vom 09.10.2026.)</summary>
+    public static bool ImVordergrund(IntPtr haupt)
+    {
+        IntPtr vorne = Native.GetForegroundWindow();
+        if (vorne == IntPtr.Zero || haupt == IntPtr.Zero) return false;
+        Native.GetWindowThreadProcessId(vorne, out uint pidVorne);
+        Native.GetWindowThreadProcessId(haupt, out uint pidAp);
+        return pidVorne != 0 && pidVorne == pidAp;
+    }
+
     public static bool NochGueltig(DetailAnsicht d) =>
-        Native.IsWindow(d.TechnikTabelle) && Brauchbar(d.TechnikTabelle) && !Native.IsIconic(d.Hauptfenster)
+        Native.IsWindow(d.Hauptfenster) && Native.IsWindow(d.TechnikTabelle)
+        && (d.KopfTabelle == IntPtr.Zero || Native.IsWindow(d.KopfTabelle))
+        && GehoertZusammen(Kennung(d.Hauptfenster), Kennung(d.TechnikTabelle),
+                           d.KopfTabelle == IntPtr.Zero ? null : Kennung(d.KopfTabelle))
+        && Brauchbar(d.TechnikTabelle) && !Native.IsIconic(d.Hauptfenster)
         && (d.KopfTabelle == IntPtr.Zero || Brauchbar(d.KopfTabelle));
 
     /// <summary>Eigene Fenster, die ueber AutoPointer liegen koennen (die Leiste, immer im Vordergrund).
@@ -182,6 +222,20 @@ internal static class AutoPointerFenster
             }
             return bmp;
         });
+    }
+
+    /// <summary>Pruefung 09.10.2026 (Befund 8): beide Abbilder in einem Zug — wirft das zweite (Kopf-Tabelle), wird das
+    /// erste wieder freigegeben. Vorher war das Technik-Bild dann schon erzeugt, aber noch in keinem using: ein
+    /// Bitmap-Leck je Fehlversuch. (rein, fuer Tests)</summary>
+    internal static (Bitmap? Technik, Bitmap? Kopf) Abbilder(Func<Bitmap?> technik, Func<Bitmap?> kopf)
+    {
+        var t = technik();
+        try { return (t, kopf()); }
+        catch
+        {
+            t?.Dispose();
+            throw;
+        }
     }
 
     /// <summary>Billige Pruefsumme des sichtbaren Inhalts (BitBlt, kein Aufruf in
