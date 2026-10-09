@@ -183,14 +183,17 @@ public class DienstTests
         var (d, a) = Dienst();
         a.Antwort = _ => Json(200, """{"gelesen":true,"quelle":"browser"}""");
         const string url = "https://suchen.mobile.de/fahrzeuge/details.html?id=487654321";
-        Assert.True(await d.InseratGelesenAsync(url));
+        Assert.True((await d.InseratGelesenAsync(url)).Gelesen);
         Assert.Equal(HttpMethod.Get, a.Letzte!.Method);
         Assert.Equal("https://app.example.test/api/werkzeuge/autopointer-vergleich/inserat-gelesen?url="
                      + Uri.EscapeDataString(url), a.Letzte.RequestUri!.AbsoluteUri);
         a.Antwort = _ => Json(200, """{"gelesen":false}""");
-        Assert.False(await d.InseratGelesenAsync(url));
+        Assert.False((await d.InseratGelesenAsync(url)).Gelesen);
         a.Antwort = _ => Json(500, """{"detail":"x"}""");
-        Assert.Null(await d.InseratGelesenAsync(url));
+        // Pruefung 09.10.2026 (Vertragsweg): 5xx = nicht pruefbar (keine Sperre); 402 = Sperre mit Servertext
+        Assert.Equal(new InseratStand(null), await d.InseratGelesenAsync(url));
+        a.Antwort = _ => Json(402, """{"detail":"Kein Abo."}""");
+        Assert.Equal(new InseratStand(null, "Kein Abo."), await d.InseratGelesenAsync(url));
     }
 
     [Fact]

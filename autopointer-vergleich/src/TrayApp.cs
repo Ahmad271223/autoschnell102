@@ -258,7 +258,7 @@ internal sealed class TrayApp : ApplicationContext
         return new FensterZustand(AktuellerStatus(), _einstellungen.AutomatikAktiv,
             _dienst.Verbunden, _einstellungen.VerbundenAls ?? "", auto,
             !string.IsNullOrEmpty(_ueberwacher?.LetzteInseratUrl), _letzteMeldung, _probelauf, _lizenzSperre,
-            _hinweise.ToList(), _ueberwacher?.LetztesNurGemerkt == true);
+            _hinweise.ToList(), _ueberwacher?.LetztesNurGemerkt == true, _vertragLaeuft);
     }
 
     /// <summary>Status fuer Symbol, Fenster und Leiste: Lizenzsperre (A8) und fehlende Texterkennung (A9) gehen vor.</summary>
@@ -338,18 +338,30 @@ internal sealed class TrayApp : ApplicationContext
     /// Paket 3 (F3): die Suche nach der App-Verknuepfung laeuft im Hintergrund (vorher fror die Oberflaeche bei jedem
     /// Klick, solange alle Verknuepfungen per COM gelesen wurden).</summary>
     private bool _vertragLaeuft;
+    /// <summary>Pruefung 09.10.2026 (Vertragsweg, P1): ein zweiter Klick, waehrend der erste noch laeuft (Lesung abwarten,
+    /// App suchen, App-Start pruefen), endete stumm — der Sucher drueckte weiter und glaubte, es haenge.</summary>
+    internal const string VertragLaeuftSchon = "Kaufvertrag wird gerade geöffnet – bitte kurz warten.";
 
     private async Task VertragOeffnenAsync()
     {
-        if (_vertragLaeuft) return;
+        if (_vertragLaeuft)
+        {
+            Sprechblase(VertragLaeuftSchon, false, erzwingen: true, merken: false);
+            return;
+        }
         _vertragLaeuft = true;
+        if (!_leiste.IsDisposed) _leiste.Aktualisieren();          // Knopf sofort "Vertrag …", nicht erst im Sekundentakt
         try { await VertragOeffnenInternAsync(); }
         catch (Exception ex)
         {
             Protokoll.Schreibe("Kaufvertrag nicht geöffnet: " + ex);
             Sprechblase("Der Vertrag ließ sich nicht öffnen – bitte noch einmal „Vertrag“ drücken.", true, erzwingen: true);
         }
-        finally { _vertragLaeuft = false; }
+        finally
+        {
+            _vertragLaeuft = false;
+            if (!_leiste.IsDisposed) _leiste.Aktualisieren();
+        }
     }
 
     private async Task VertragOeffnenInternAsync()
@@ -378,11 +390,15 @@ internal sealed class TrayApp : ApplicationContext
         // 1.5.11 (Wunsch Ahmad 08.10.2026 abends, "Vertrag: Inserat oeffnen und lesen, kein Apify"): hat das Konto die
         // Erweiterung und liegt das Inserat noch nicht gelesen vor, erst das Inserat in IHREM Browser oeffnen und warten,
         // bis sie es gelesen hat — sonst haette die App es ueber Apify geholt.
+        // Pruefung 09.10.2026 (Vertragsweg): der Weg endet nie stumm — ohne Lesung geht der Kaufvertrag trotzdem auf, die
+        // App liest dann nur auf Knopfdruck ("&lesung=fehlt", Ahmads Regel: Apify nur, wenn jemand bewusst einfuegt/klickt).
+        bool lesungFehlt = false;
         if (_ueberwacher?.HatHelfer == true)
         {
-            var browser = Ueberwacher.BrowserFuer(_einstellungen.Browser, _ueberwacher.HelferBrowser);
+            // 3a: das Inserat zum Lesen in den Browser der ERWEITERUNG — nur dort liest sie es
+            var browser = Ueberwacher.BrowserFuerLesung(_einstellungen.Browser, _ueberwacher.HelferBrowser);
             string inserat = url;
-            bool bereit = await VertragsWeg.InseratBereitAsync(url, _dienst.InseratGelesenAsync,
+            var stand = await VertragsWeg.InseratBereitAsync(url, _dienst.InseratGelesenAsync,
                 () =>
                 {
                     Protokoll.Schreibe("Kaufvertrag: Inserat zum Lesen geöffnet: " + inserat);
@@ -391,25 +407,33 @@ internal sealed class TrayApp : ApplicationContext
                 },
                 (text, fehler) => Sprechblase(text, fehler, erzwingen: true),
                 t => Task.Delay(t), () => Environment.TickCount64);
-            if (!bereit) return;
+            if (stand == LesungsStand.Gesperrt) return;            // kein Vertrag ohne Abo — der Servertext kam schon
+            lesungFehlt = stand == LesungsStand.NichtGelesen;
         }
         // Nr. 12: Kennung des Starts — die App meldet sie beim Uebernehmen an AutoSchnell zurueck
         string start = Guid.NewGuid().ToString("N");
-        string ziel = $"{_einstellungen.Server}/app/vergleich?url={Uri.EscapeDataString(url)}&start={start}";
+        string ziel = $"{_einstellungen.Server}/app/vergleich?url={Uri.EscapeDataString(url)}&start={start}"
+                      + (lesungFehlt ? "&lesung=fehlt" : "");
         Protokoll.Schreibe("Kaufvertrag: öffne " + ziel);
         // Wunsch Ahmad 03.10.2026: zuerst die installierte AutoSchnell-App (offenes Fenster oder neu starten),
-        // nur ohne App im Browser
-        if (await AutoSchnellApp.OeffnenAsync(ziel, _einstellungen.Server))
+        // nur ohne App im Browser. Pruefung 09.10.2026 (Vertragsweg, 4a): die App des Browsers, in dem die Erweiterung
+        // verbunden ist — dort ist der Sucher angemeldet.
+        var app = await AutoSchnellApp.OeffnenAsync(ziel, _einstellungen.Server, _ueberwacher?.HelferBrowser);
+        if (app != null)
         {
-            _ = AppStartPruefenAsync(start, ziel);
+            // P1: der Knopf bleibt "Vertrag …", bis die App sich gemeldet hat (oder der Browser aufging) — vorher lief die
+            // Pruefung nebenher und ein zweiter Klick startete die App ein zweites Mal
+            await AppStartPruefenAsync(start, ziel, app);
             return;
         }
         ImBrowserOeffnen(ziel);
     }
 
+    /// <summary>Pruefung 09.10.2026 (Vertragsweg, P6): die Webseite im Browser der Erweiterung/App (bei "Standardbrowser") —
+    /// vorher landete der Kaufvertrag z. B. in Firefox, waehrend die Anmeldung in Chrome lag.</summary>
     private void ImBrowserOeffnen(string ziel)
     {
-        try { BrowserOeffner.Oeffne(new[] { ziel }, _einstellungen.Browser); }
+        try { BrowserOeffner.Oeffne(new[] { ziel }, Ueberwacher.BrowserFuer(_einstellungen.Browser, _ueberwacher?.HelferBrowser)); }
         catch (Exception ex)
         {
             // 1.5.9 (E): keine englische .NET-Meldung in der Sprechblase
@@ -426,23 +450,28 @@ internal sealed class TrayApp : ApplicationContext
         ImBrowserOeffnen($"{_einstellungen.Server.TrimEnd('/')}/app/programme");
     }
 
-    /// <summary>Pruefbericht 03.10.2026 (Nr. 12): Kommt von der App binnen 10 Sekunden keine Rueckmeldung (Fenster
-    /// nicht nach vorne gekommen, falsche App, nicht angemeldet), oeffnet das Programm den Kaufvertrag im Browser.</summary>
-    private async Task AppStartPruefenAsync(string start, string ziel)
+    /// <summary>Pruefbericht 03.10.2026 (Nr. 12): Kommt von der App keine Rueckmeldung (Fenster nicht nach vorne gekommen,
+    /// falsche App), oeffnet das Programm den Kaufvertrag im Browser. Pruefung 09.10.2026 (Vertragsweg, P5): 20 s statt 10,
+    /// und die App sagt, was sie tut (<see cref="AppStartWeg"/>) — "nachgefragt" (etwas ungespeichert), "anmeldung" und
+    /// "abo" sind eine Meldung an den Sucher, KEIN Browser (vorher ging dann nach 10 s zusaetzlich die Webseite auf, und
+    /// der Sucher hatte den Vertrag zweimal). Nur ohne jede Meldung: Browser der Erweiterung, Suche verwerfen (4c) und
+    /// dieselbe App nach dem zweiten Fehlschlag hintereinander ueberspringen.</summary>
+    private async Task AppStartPruefenAsync(string start, string ziel, AutoSchnellApp.Verknuepfung app)
     {
         if (!_dienst.Verbunden) return;
-        long bis = Environment.TickCount64 + 10_000;     // A10: monoton
-        while (Environment.TickCount64 < bis)
+        string? zustand = await AppStartWeg.WartenAsync(() => _dienst.AppStartBestaetigtAsync(start),
+                                                        t => Task.Delay(t), () => Environment.TickCount64);
+        if (zustand != null)
         {
-            await Task.Delay(700);
-            if (await _dienst.AppStartBestaetigtAsync(start))
-            {
-                Protokoll.Schreibe("AutoSchnell-App hat das Auto übernommen.");
-                return;
-            }
+            AutoSchnellApp.StartGeglueckt();
+            Protokoll.Schreibe("AutoSchnell-App hat sich gemeldet: " + zustand + ".");
+            Sprechblase(AppStartWeg.Meldung(zustand), zustand == AppStartWeg.Abo, erzwingen: true, merken: zustand != AppStartWeg.Offen);
+            return;
         }
-        Protokoll.Schreibe("AutoSchnell-App hat sich nicht gemeldet – Kaufvertrag im Browser geöffnet.");
-        Sprechblase("Die AutoSchnell-App hat nicht reagiert – der Kaufvertrag ist im Browser geöffnet.", false, erzwingen: true);
+        bool uebersprungen = AutoSchnellApp.StartFehlgeschlagen(app);
+        Protokoll.Schreibe("AutoSchnell-App hat sich nicht gemeldet – Kaufvertrag im Browser geöffnet"
+                           + (uebersprungen ? $" (App {app.AppId} in {Path.GetFileName(app.Programm)} wird ab jetzt übersprungen)." : "."));
+        Sprechblase(AppStartWeg.NichtGemeldet, false, erzwingen: true);
         ImBrowserOeffnen(ziel);
     }
 

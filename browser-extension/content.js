@@ -73,6 +73,13 @@ if (vorgangTreffer && window.top === window && helferDa()) {
   } catch (e) { /* Erweiterung neu geladen: das Programm oeffnet nach 5 s selbst */ }
 }
 
+// 5. 2.7.4 (Pruefung 09.10.2026, Vertragsweg, E1): nach OEFFNEN sagt die App zurueck, was sie mit dem Ziel tut —
+//    "uebernommen" (Vertrag geht auf), "nachgefragt" (etwas ungespeichert, sie fragt den Sucher), "anmeldung" (Anmeldeseite,
+//    danach geht es dort weiter), "abo" (kein Sucher-Abo). Darauf wartet der Helfer bis 1,5 s und reicht den Stand in die
+//    Box durch; aeltere App-Fenster melden nichts -> Antwort wie bisher ohne "stand".
+const ERGEBNIS_WARTE_MS = 1500;
+const ERGEBNIS_STAENDE = new Set(["uebernommen", "nachgefragt", "anmeldung", "abo"]);
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || sender.id !== chrome.runtime.id || msg.type !== "AUTOSCHNELL_OEFFNEN") return false;
   const ziel = typeof msg.ziel === "string" ? msg.ziel : "";
@@ -80,7 +87,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ ok: false });
     return false;
   }
+  let beantwortet = false;
+  let uhr = 0;
+  const antworten = (stand) => {
+    if (beantwortet) return;
+    beantwortet = true;
+    clearTimeout(uhr);
+    window.removeEventListener("message", horcher);
+    sendResponse(stand ? { ok: true, app: alsApp(), stand } : { ok: true, app: alsApp() });
+  };
+  const horcher = (event) => {
+    if (event.source !== window) return;
+    const d = event.data;
+    if (!d || d.__autoschnell !== true || d.type !== "OEFFNEN_ERGEBNIS" || d.ziel !== ziel) return;
+    antworten(ERGEBNIS_STAENDE.has(d.stand) ? d.stand : "");
+  };
+  window.addEventListener("message", horcher);
+  uhr = setTimeout(() => antworten(""), ERGEBNIS_WARTE_MS);
   window.postMessage({ __autoschnell: true, type: "OEFFNEN", ziel }, window.location.origin);
-  sendResponse({ ok: true, app: alsApp() });
-  return false;
+  return true;        // sendResponse kommt, sobald die App geantwortet hat (oder nach 1,5 s)
 });

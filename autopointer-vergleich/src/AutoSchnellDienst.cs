@@ -52,6 +52,15 @@ internal sealed record VergleichAntwort(IReadOnlyList<Vergleich> Links, IReadOnl
                                        string? VorgangId = null, bool UeberHelfer = false, string HelferBrowser = "",
                                        bool HatHelfer = false, bool ModellGefunden = true);
 
+/// <summary>Pruefung 09.10.2026 (Vertragsweg, 1.5.15): Antwort auf GET …/inserat-gelesen. Gelesen: true/false, null = nicht
+/// pruefbar (kein Netz, 5xx, Zeitueberschreitung). Sperre: der Servertext bei 402/403 (kein Abo, gesperrt) — dann kein
+/// Vertrag.</summary>
+internal sealed record InseratStand(bool? Gelesen, string? Sperre = null);
+
+/// <summary>Pruefung 09.10.2026 (Vertragsweg, 1.5.15): Antwort auf GET …/app-start/&lt;start&gt;. Zustand: "offen",
+/// "nachgefragt", "anmeldung" oder "abo" (siehe <see cref="AppStartWeg"/>); aeltere Server nennen keinen — dann "offen".</summary>
+internal sealed record AppStartAntwort(bool Bestaetigt, string Zustand = AppStartWeg.Offen);
+
 /// <summary>Was der Ueberwacher vom Server braucht (in Tests eine Attrappe).</summary>
 internal interface IVergleichsDienst
 {
@@ -350,17 +359,28 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
 
     /// <summary>Pruefbericht 03.10.2026 (Nr. 12): hat die AutoSchnell-App das Auto wirklich uebernommen? Die
     /// Web-App meldet den Start (Kennung im Link) an den Server; ohne Meldung oeffnet das Programm den Browser.
-    /// Fehler zaehlen als "nicht bestaetigt".</summary>
-    public async Task<bool> AppStartBestaetigtAsync(string startKennung)
+    /// Fehler zaehlen als "nicht bestaetigt". Pruefung 09.10.2026 (Vertragsweg, 1.5.15): der Server nennt dazu einen
+    /// Zustand ("offen", "nachgefragt", "anmeldung", "abo") — aeltere Server nicht (dann "offen", sobald bestaetigt).</summary>
+    public async Task<AppStartAntwort> AppStartBestaetigtAsync(string startKennung)
     {
         try
         {
             var e = await SendeAsync(HttpMethod.Get, "app-start/" + Uri.EscapeDataString(startKennung),
                                      frist: TimeSpan.FromSeconds(4));
-            return e.TryGetProperty("bestaetigt", out var b) && b.ValueKind == JsonValueKind.True;
+            bool bestaetigt = e.TryGetProperty("bestaetigt", out var b) && b.ValueKind == JsonValueKind.True;
+            return new AppStartAntwort(bestaetigt, AppStartZustand(Text(e, "zustand")));
         }
-        catch (DienstFehler) { return false; }
+        catch (DienstFehler) { return new AppStartAntwort(false, AppStartWeg.Offen); }
     }
+
+    /// <summary>Nur die bekannten Zustaende; alles andere (aelterer Server, Tippfehler) gilt als "offen". (rein, fuer Tests)</summary>
+    internal static string AppStartZustand(string? zustand) => zustand?.Trim().ToLowerInvariant() switch
+    {
+        AppStartWeg.Nachgefragt => AppStartWeg.Nachgefragt,
+        AppStartWeg.Anmeldung => AppStartWeg.Anmeldung,
+        AppStartWeg.Abo => AppStartWeg.Abo,
+        _ => AppStartWeg.Offen,
+    };
 
     /// <summary>Ist <paramref name="angeboten"/> neuer als <paramref name="eigene"/>? ("1.5.0" vs "1.4.2"; Zusaetze
     /// wie "+abc" zaehlen nicht). Unlesbares -> false.</summary>
@@ -474,19 +494,27 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
     }
 
     /// <summary>1.5.11 (Wunsch Ahmad 08.10.2026 abends, "Vertrag ohne Apify"): liegt das Inserat schon gelesen vor (Lesung
-    /// der Erweiterung oder gemeinsamer Speicher)? Nur Lesen — der Server ruft dabei nichts ab. null = nicht pruefbar.</summary>
-    public async Task<bool?> InseratGelesenAsync(string inseratUrl)
+    /// der Erweiterung oder gemeinsamer Speicher)? Nur Lesen — der Server ruft dabei nichts ab. Gelesen null = nicht
+    /// pruefbar. Pruefung 09.10.2026 (Vertragsweg): 402/403 von AutoSchnell (kein Abo, gesperrt) kommen als
+    /// <see cref="InseratStand.Sperre"/> mit dem Servertext — dann gibt es keinen Vertrag; ein 403 ohne JSON (Cloudflare/
+    /// Firewall davor) ist keine Sperre, nur "nicht pruefbar".</summary>
+    public async Task<InseratStand> InseratGelesenAsync(string inseratUrl)
     {
         try
         {
             var e = await SendeAsync(HttpMethod.Get, "inserat-gelesen?url=" + Uri.EscapeDataString(inseratUrl),
                                      frist: TimeSpan.FromSeconds(4), wiederholen: false);
-            return e.TryGetProperty("gelesen", out var g) && g.ValueKind == JsonValueKind.True;
+            return new InseratStand(e.TryGetProperty("gelesen", out var g) && g.ValueKind == JsonValueKind.True);
+        }
+        catch (DienstFehler ex) when (ex.Status is 402 or 403 && !ex.OhneJson)
+        {
+            Protokoll.Schreibe($"Inserat gelesen? AutoSchnell sperrt ({ex.Status}): {ex.Message}");
+            return new InseratStand(null, ex.Message);
         }
         catch (DienstFehler ex)
         {
             Protokoll.Schreibe("Inserat gelesen? " + ex.Message);
-            return null;
+            return new InseratStand(null);
         }
     }
 

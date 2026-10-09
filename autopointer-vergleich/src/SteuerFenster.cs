@@ -5,10 +5,12 @@ namespace AutoPointerVergleich;
 /// <param name="LetzteHinweise">Pruefung 08.10.2026 (1.5.9, C): die letzten Hinweise ganz, mit Uhrzeit, der neueste
 /// zuerst — die Sprechblasen sind kurz und verschwinden.</param>
 /// <param name="NurGemerkt">1.5.9 (D): das letzte Auto wurde beim Start nur gemerkt, noch nicht verglichen.</param>
+/// <param name="VertragLaeuft">Pruefung 09.10.2026 (Vertragsweg, P1): "Vertrag" laeuft gerade (Lesung abwarten, App
+/// suchen/starten, Rueckmeldung der App) — der Knopf zeigt "Vertrag …" und ist gesperrt.</param>
 internal sealed record FensterZustand(Status Status, bool AutomatikAn, bool Verbunden, string VerbundenAls,
                                       string? LetztesAuto, bool HatInseratLink, string? LetzteMeldung, bool Probelauf,
                                       string? Sperrgrund = null, IReadOnlyList<string>? LetzteHinweise = null,
-                                      bool NurGemerkt = false);
+                                      bool NurGemerkt = false, bool VertragLaeuft = false);
 
 /// <summary>Wunsch Ahmad 03.10.2026: "man kann nicht stoppen, aktivieren, nichts — das sollen Buttons sein".
 /// Seit 1.5.8 (08.10.2026, "zu viele Knoepfe fuer dieselbe Sache"): bedient wird nur noch ueber die kleine Leiste

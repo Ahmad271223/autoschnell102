@@ -311,7 +311,9 @@ internal sealed class Leiste : Form
                                    + (string.IsNullOrEmpty(z.LetzteMeldung) ? "" : "\n" + z.LetzteMeldung)
                                    + "\n(" + klick + ")");
         _vergleichen.Enabled = z.Verbunden;
-        _vertrag.Enabled = z.Verbunden && z.LetztesAuto != null;
+        // Pruefung 09.10.2026 (Vertragsweg, P1): solange "Vertrag" laeuft, zeigt der Knopf das und nimmt keinen zweiten Klick
+        _vertrag.Text = VertragText(z);
+        _vertrag.Enabled = z.Verbunden && z.LetztesAuto != null && !z.VertragLaeuft;
         _letzten.Enabled = z.Verbunden && z.LetztesAuto != null;
         _verbinden.Text = z.Verbunden ? "Verbindung trennen" : "Mit AutoSchnell verbinden …";
     }
@@ -322,6 +324,9 @@ internal sealed class Leiste : Form
         if (!z.Verbunden) return "●  " + Kurz(titel);
         return "●  " + Kurz(titel) + (z.AutomatikAn ? "  ❚❚" : "  ▶");
     }
+
+    /// <summary>Pruefung 09.10.2026 (Vertragsweg, P1): "Vertrag …", solange der Kaufvertrag geoeffnet wird. (rein, fuer Tests)</summary>
+    internal static string VertragText(FensterZustand z) => z.VertragLaeuft ? "Vertrag …" : "Vertrag";
 
     internal static string Kurz(string titel) => titel switch
     {

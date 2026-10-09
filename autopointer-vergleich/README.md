@@ -160,6 +160,45 @@ dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und 
   * Einstellungen: **„Bei nicht erkannten Autos ein Bild der Anzeige an AutoSchnell senden“**, Standard **an** (Wunsch
     Ahmad); aus = kein Bild und auch kein Kodieren. „Erkennungsbilder speichern“ (lokal, verschlüsselt) bleibt davon
     unberührt.
+* **1.5.15 (Prüfung 09.10.2026 (Vertragsweg), Befund Ahmad „Kaufvertrag erstellen aus den Programmen heraus hängt
+  häufig — wenn in der App schon einer am Arbeiten ist oder man auf einer anderen Seite ist“) — „Vertrag“ endet nie
+  stumm:**
+  * **Rückmeldung (P1):** ein zweiter Klick, während „Vertrag“ noch läuft, sagt „Kaufvertrag wird gerade geöffnet – bitte
+    kurz warten.“ (vorher stumm); der Knopf in der Leiste zeigt „Vertrag …“ und ist gesperrt, bis die App sich gemeldet
+    hat oder der Browser aufging (`FensterZustand.VertragLaeuft`). Die App-Start-Prüfung läuft dafür jetzt im selben
+    Zug (vorher nebenher — ein zweiter Klick startete die App ein zweites Mal).
+  * **Lesung im Browser der Erweiterung (P3a):** das Inserat zum Lesen geht immer in den Browser, in dem die Erweiterung
+    verbunden ist (`Ueberwacher.BrowserFuerLesung`; Einstellung nur, wenn der Helfer-Browser unbekannt ist) — wer Edge
+    eingestellt hatte, die Erweiterung aber in Chrome, bekam das Inserat in Edge, und die Lesung kam nie. Die
+    Vergleichs-Links nehmen weiter die Einstellung (`BrowserFuer`).
+  * **Nie stumm (P3c–f, `VertragsWeg.InseratBereitAsync` → `LesungsStand`):** antwortet AutoSchnell auf die erste
+    Frage „schon gelesen?“ nicht → nicht 40 s warten, Sprechblase „AutoSchnell antwortet gerade nicht – der Kaufvertrag
+    wird trotzdem geöffnet.“ (`NichtPruefbar`). Kommt die Lesung in **40 s** (vorher 25, Takt 1,5 s) nicht → „Das Inserat
+    wurde im Browser nicht gelesen – in AutoSchnell kannst du es jetzt selbst auslesen.“ und der Kaufvertrag öffnet
+    trotzdem mit `&lesung=fehlt` (`NichtGelesen`; die App ruft dann NICHT von selbst ab, sondern zeigt den Link mit
+    „Jetzt auslesen“ — Ahmads Regel: Apify nur, wenn jemand bewusst einfügt/klickt). 402/403 vom Server (kein Abo,
+    gesperrt; `InseratStand.Sperre`) → Sprechblase mit dem Servertext und Abbruch (`Gesperrt`) — kein Vertrag ohne Abo;
+    ein 403 ohne JSON (Cloudflare) ist keine Sperre.
+  * **Richtige App (P4a):** sind mehrere AutoSchnell-Apps installiert (Edge UND Chrome), gilt zuerst die des Browsers, in
+    dem die Erweiterung verbunden ist (`AutoSchnellApp.Auswaehlen(kandidaten, helferBrowser)`, `msedge*` ↔ edge,
+    `chrome*` ↔ chrome), danach die bisherige Regel (per Adresse, sonst eindeutiger Name). Der Zwischenspeicher hält
+    deshalb alle Kandidaten statt der Wahl.
+  * **Nach Fehlschlag (P4c):** meldet sich die App nicht, wird die Suche verworfen; schlägt DIESELBE Verknüpfung zweimal
+    hintereinander fehl, wird sie für den Rest des Programmlaufs übersprungen → sofort Browser
+    (`AutoSchnellApp.StartFehlgeschlagen`).
+  * **Vordergrund-Recht (P4e):** vor dem Start `AllowSetForegroundWindow(ASFW_ANY)` — sonst blinkte das vorhandene
+    App-Fenster nur in der Taskleiste.
+  * **Wartezeit + Zustand (P5, `AppStartWeg`):** 20 s statt 10; die Antwort auf `GET …/app-start/<start>` nennt jetzt
+    `zustand`: `offen` → „Kaufvertrag in der AutoSchnell-App geöffnet.“; `nachgefragt` → „In der AutoSchnell-App ist
+    noch etwas ungespeichert – dort im Fenster „Hier öffnen“ oder „In neuem Fenster öffnen“ wählen.“; `anmeldung` →
+    „Bitte in der AutoSchnell-App anmelden – der Kaufvertrag öffnet sich danach dort.“; `abo` → „Für den Kaufvertrag
+    braucht das Konto ein Sucher-Abo.“ In keinem dieser Fälle geht der Browser auf (vorher nach 10 s zusätzlich die
+    Webseite — der Sucher hatte den Vertrag zweimal). Ältere Server ohne `zustand` = `offen`, sobald bestätigt. Nur ohne
+    jede Meldung nach 20 s: Browser, und zwar (P6) der Browser der Erweiterung/App (`ImBrowserOeffnen` mit
+    `BrowserFuer`), Text „Die AutoSchnell-App hat sich nicht gemeldet – der Kaufvertrag ist jetzt im Browser geöffnet.“
+  * Nicht umgesetzt (Entscheidung Ahmad): `&vertrag=1` am Programm-Ziel.
+  * Tests: `VertragsWegTests` (Lesungsstände, AppStartWeg, Browser der Lesung, Leiste), `AutoSchnellAppTests`
+    (Helfer-Vorrang, Überspring-Merker), `DienstTests`/`PruefberichtTests` (Sperre, `zustand`) — 377 Tests.
 * **1.5.14 (Prüfung 09.10., Wunsch Ahmad „dass AutoPointer nicht meckert“) — AutoPointer nie stören, hängen lassen
   oder ihm Fokus/Tasten nehmen:**
   * **Nach vorne holen** (`BrowserOeffner.ZurueckZu`, vor „Vergleichen“ und bei „Danach zurück zu AutoPointer“): kein

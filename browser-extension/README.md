@@ -71,6 +71,18 @@ Seit Version 2.0.0 (04.10.2026) macht die Erweiterung zwei Dinge:
    (Chrome/Edge). Außerdem: „Erneut versuchen“ fragt wirklich neu (vergisst eine gemerkte Abo-/Offline-Sperre),
    der Sitzungsspeicher behält höchstens 150 Inserate (vorher konnte er nach Stunden voll laufen), Fehler beim
    Kleinanzeigen-Abruf kommen deutsch in der App an.
+   Seit 2.7.4 (Prüfung 09.10.2026 (Vertragsweg), Befund Ahmad „Kaufvertrag erstellen hängt häufig“): **die Box sagt,
+   was die App tut** — nach `OEFFNEN` wartet `content.js` bis 1,5 s auf `OEFFNEN_ERGEBNIS` der App (gleiches Ziel,
+   `stand` = `uebernommen` / `nachgefragt` / `anmeldung` / `abo`; ältere App-Fenster melden nichts → wie bisher), der
+   Hintergrund reicht `stand` durch, die Box zeigt „Kaufvertrag wird in der App geöffnet.“, „In der AutoSchnell-App ist
+   noch etwas ungespeichert – dort im Fenster „Hier öffnen“ oder „In neuem Fenster öffnen“ wählen.“, „In der
+   AutoSchnell-App bitte anmelden – der Kaufvertrag öffnet sich danach.“ bzw. „Für den Kaufvertrag braucht das Konto ein
+   Sucher-Abo.“ (vorher blieb sie leer). **Fensterwahl:** bei mehreren App-Fenstern das fokussierte, sonst das zuletzt
+   aktive (`appTabWaehlen`, `chrome.windows.getAll({windowTypes:["app"]})`). **„Webseite öffnen“ nicht für immer:** der
+   Merker gilt 24 h (`appGesehen[basis] = {webseite_bis}`, die alte `0` zählt nicht mehr), ein neues Verbinden löscht
+   ihn, und in der Box steht daneben **„Doch die App“** (vergisst den Merker, startet die App erneut); ging die Webseite
+   wegen des Merkers auf, sagt die Box das und bietet „Doch die App“ an. `&vertrag=1` wird nur hinter einem `?`
+   angehängt (`vertragsZiel`).
    **Zusammen mit dem Windows-Programm (seit 2.3.0, dasselbe AutoSchnell-Konto):**
    - Hat das Programm das Auto in den letzten 30 Minuten verglichen (`programm_verglichen` in der Antwort von
      `…/inserat`), öffnet der Helfer **keine** Vergleiche von selbst — nur die Ampel per Direktabruf.

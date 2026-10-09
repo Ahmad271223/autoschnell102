@@ -700,6 +700,15 @@ internal sealed class Ueberwacher
         : helferBrowser == "edge" ? BrowserWahl.Edge
         : BrowserWahl.Standard;
 
+    /// <summary>Pruefung 09.10.2026 (Vertragsweg, 3a): das Inserat ZUM LESEN geht immer in den Browser der Erweiterung — nur
+    /// dort kann sie es lesen. Wer Edge eingestellt hat, aber die Erweiterung in Chrome verbunden, bekam das Inserat vorher in
+    /// Edge, und die Lesung kam nie. Ist der Helfer-Browser unbekannt, gilt die Einstellung. Die Vergleichs-Links nehmen
+    /// weiter <see cref="BrowserFuer"/>. (rein, fuer Tests)</summary>
+    internal static BrowserWahl BrowserFuerLesung(BrowserWahl eingestellt, string? helferBrowser) =>
+        helferBrowser == "chrome" ? BrowserWahl.Chrome
+        : helferBrowser == "edge" ? BrowserWahl.Edge
+        : eingestellt;
+
     /// <summary>Pruefung 08.10.2026 (1.5.9, A): nach <see cref="VorgangWarteMs"/> den Vorgang beim Server fuer das Programm
     /// beanspruchen (POST …/selbst) — eindeutig: entweder die Erweiterung oeffnet oder das Programm, nie beide.
     /// true + noch der neueste Vorgang -> selbst oeffnen (im selben Browser wie die Vorgangsseite); true, aber inzwischen
@@ -1207,33 +1216,105 @@ internal sealed class BrowserAusgabe : IOeffner
     }
 }
 
+/// <summary>Pruefung 09.10.2026 (Vertragsweg, 1.5.15): wie "Vertrag" mit Erweiterung endet — nie stumm.
+/// Gelesen = Kaufvertrag oeffnen; NichtGelesen = die Erweiterung hat das Inserat in der Wartezeit nicht gelesen (die App
+/// bekommt "&amp;lesung=fehlt" und bietet "Jetzt auslesen" an — kein Abruf von selbst); NichtPruefbar = AutoSchnell hat auf
+/// die erste Frage nicht geantwortet (Kaufvertrag trotzdem oeffnen, nicht 40 s warten); Gesperrt = 402/403 (kein Abo,
+/// gesperrt) — der Servertext kam als Sprechblase, kein Vertrag.</summary>
+internal enum LesungsStand { Gelesen, NichtGelesen, NichtPruefbar, Gesperrt }
+
 /// <summary>1.5.11 (Wunsch Ahmad 08.10.2026 abends): "Vertrag" mit Browser-Erweiterung — kein Apify. Liegt das Inserat noch
 /// nicht gelesen vor, oeffnet das Programm das Inserat (die Erweiterung liest es) und wartet, bis die Lesung beim Server ist;
 /// erst dann geht der Kaufvertrag auf (/mobile/compare nimmt die Lesung, ohne abzurufen). Kommt sie nicht, nur ein
-/// Hinweis — nie ein Abruf. (rein, fuer Tests)</summary>
+/// Hinweis — nie ein Abruf. Pruefung 09.10.2026 (Vertragsweg): der Weg endet nie stumm — jeder Ausgang ist ein
+/// <see cref="LesungsStand"/>, und der Aufrufer oeffnet den Kaufvertrag auch ohne Lesung (die App liest dann auf Knopfdruck).
+/// (rein, fuer Tests)</summary>
 internal static class VertragsWeg
 {
-    internal const int WarteMs = 25_000;
+    /// <summary>Pruefung 09.10.2026 (Vertragsweg): 40 s statt 25 — ein Browser, der erst startet, brauchte laenger.</summary>
+    internal const int WarteMs = 40_000;
     internal const int TaktMs = 1500;
     internal const string WirdGelesen = "Inserat wird geöffnet und gelesen – der Kaufvertrag öffnet sich gleich.";
-    internal const string NichtGelesen = "Das Inserat ist noch nicht gelesen – im Inserat unten rechts auf „Kaufvertrag“ drücken.";
+    internal const string NichtGelesen = "Das Inserat wurde im Browser nicht gelesen – in AutoSchnell kannst du es jetzt selbst auslesen.";
+    internal const string NichtPruefbar = "AutoSchnell antwortet gerade nicht – der Kaufvertrag wird trotzdem geöffnet.";
 
-    /// <returns>true = gelesen, Kaufvertrag oeffnen; false = (noch) nicht — der Hinweis kam schon.</returns>
-    internal static async Task<bool> InseratBereitAsync(string url, Func<string, Task<bool?>> gelesen, Action oeffneInserat,
-                                                         Action<string, bool> melde, Func<TimeSpan, Task> warte,
-                                                         Func<long> takt)
+    /// <param name="gelesen">Antwort des Servers auf "liegt das Inserat gelesen vor?" — Gelesen null = nicht pruefbar,
+    /// Sperre = Servertext bei 402/403.</param>
+    internal static async Task<LesungsStand> InseratBereitAsync(string url, Func<string, Task<InseratStand>> gelesen,
+                                                                 Action oeffneInserat, Action<string, bool> melde,
+                                                                 Func<TimeSpan, Task> warte, Func<long> takt)
     {
-        if (await gelesen(url) == true) return true;
+        var erste = await gelesen(url);
+        if (erste.Sperre != null) return Gesperrt(erste.Sperre, melde);
+        if (erste.Gelesen == true) return LesungsStand.Gelesen;
+        if (erste.Gelesen == null)
+        {
+            // Pruefung 09.10.2026 (Vertragsweg, 3c): AutoSchnell antwortet nicht — vorher wartete das Programm die ganze
+            // Zeit auf eine Lesung, die der Server gar nicht melden konnte. Jetzt sofort weiter zum Kaufvertrag.
+            Protokoll.Schreibe("Kaufvertrag: AutoSchnell sagt nicht, ob das Inserat gelesen ist – Kaufvertrag wird trotzdem geöffnet.");
+            melde(NichtPruefbar, true);
+            return LesungsStand.NichtPruefbar;
+        }
         oeffneInserat();
         melde(WirdGelesen, false);
         long bis = takt() + WarteMs;
         while (takt() < bis)
         {
             await warte(TimeSpan.FromMilliseconds(TaktMs));
-            if (await gelesen(url) == true) return true;
+            var stand = await gelesen(url);
+            if (stand.Sperre != null) return Gesperrt(stand.Sperre, melde);
+            if (stand.Gelesen == true) return LesungsStand.Gelesen;
         }
-        Protokoll.Schreibe("Kaufvertrag: Inserat nach " + WarteMs / 1000 + " s noch nicht gelesen – kein Abruf, Hinweis gezeigt.");
+        Protokoll.Schreibe("Kaufvertrag: Inserat nach " + WarteMs / 1000 + " s noch nicht gelesen – kein Abruf, Kaufvertrag öffnet mit „lesung=fehlt“.");
         melde(NichtGelesen, true);
-        return false;
+        return LesungsStand.NichtGelesen;
+    }
+
+    private static LesungsStand Gesperrt(string sperre, Action<string, bool> melde)
+    {
+        Protokoll.Schreibe("Kaufvertrag: AutoSchnell sperrt den Vertrag – " + sperre);
+        melde(sperre, true);
+        return LesungsStand.Gesperrt;
+    }
+}
+
+/// <summary>Pruefung 09.10.2026 (Vertragsweg, 1.5.15): nach dem Start der AutoSchnell-App fragt das Programm bis 20 s (vorher
+/// 10) beim Server nach, was die App mit dem Ziel gemacht hat. Die Antwort nennt seit diesem Server einen Zustand:
+/// "offen" (Vertrag ist in der App auf), "nachgefragt" (in der App ist etwas ungespeichert, sie fragt den Sucher),
+/// "anmeldung" (die App steht auf der Anmeldeseite, danach geht es dort weiter), "abo" (kein Sucher-Abo). In keinem dieser
+/// Faelle oeffnet das Programm den Browser — nur, wenn gar nichts kommt. Aeltere Server kennen nur "bestaetigt" (= "offen").
+/// (rein, fuer Tests)</summary>
+internal static class AppStartWeg
+{
+    internal const int WarteMs = 20_000;
+    internal const int TaktMs = 700;
+    internal const string Offen = "offen", Nachgefragt = "nachgefragt", Anmeldung = "anmeldung", Abo = "abo";
+    internal const string NichtGemeldet = "Die AutoSchnell-App hat sich nicht gemeldet – der Kaufvertrag ist jetzt im Browser geöffnet.";
+
+    /// <summary>Hat die App sich gemeldet? Dann ihr Zustand, sonst null (weiter warten). Ein Zustand ausser "offen" zaehlt
+    /// auch ohne "bestaetigt" als Meldung — die App hat das Ziel ja bekommen.</summary>
+    internal static string? Gemeldet(AppStartAntwort a) =>
+        a.Zustand is Nachgefragt or Anmeldung or Abo ? a.Zustand
+        : a.Bestaetigt ? Offen
+        : null;
+
+    internal static string Meldung(string zustand) => zustand switch
+    {
+        Nachgefragt => "In der AutoSchnell-App ist noch etwas ungespeichert – dort im Fenster „Hier öffnen“ oder „In neuem Fenster öffnen“ wählen.",
+        Anmeldung => "Bitte in der AutoSchnell-App anmelden – der Kaufvertrag öffnet sich danach dort.",
+        Abo => "Für den Kaufvertrag braucht das Konto ein Sucher-Abo.",
+        _ => "Kaufvertrag in der AutoSchnell-App geöffnet.",
+    };
+
+    /// <returns>Der gemeldete Zustand; null = die App hat sich in <see cref="WarteMs"/> nicht gemeldet (dann Browser).</returns>
+    internal static async Task<string?> WartenAsync(Func<Task<AppStartAntwort>> frage, Func<TimeSpan, Task> warte, Func<long> takt)
+    {
+        long bis = takt() + WarteMs;     // A10: monoton
+        while (takt() < bis)
+        {
+            await warte(TimeSpan.FromMilliseconds(TaktMs));
+            if (Gemeldet(await frage()) is { } zustand) return zustand;
+        }
+        return null;
     }
 }

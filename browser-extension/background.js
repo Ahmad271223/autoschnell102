@@ -650,10 +650,13 @@ async function sucheBearbeiten(msg, tab) {
 //      Helfer die App noch nie gesehen hat (Befund Ahmad 05.10.: in Chrome frisch installiert -> es ging gleich die
 //      Webseite auf). Kommt kein App-Fenster, macht der Helfer NICHT selbst die Webseite auf: die App kann in einem
 //      anderen Browser liegen oder der Browser fragt erst "AutoSchnell oeffnen?" — die Box bietet "Webseite oeffnen".
-//   3. Webseite nur, wenn der Nutzer das dort gewaehlt hat (merkt sich der Helfer: appGesehen = 0, bis die App wieder
-//      als App laeuft) oder es keine Inserats-Adresse gibt
+//   3. Webseite nur, wenn der Nutzer das dort gewaehlt hat (merkt sich der Helfer 24 h: appGesehen = {webseite_bis},
+//      seit 2.7.4 — vorher 0 "fuer immer", bis die App wieder als App lief; "Doch die App" in der Box und ein neues
+//      Verbinden loeschen den Merker) oder es keine Inserats-Adresse gibt
 // "&vertrag=1": AutoSchnell oeffnet gleich das Vertragsfenster — mit den Daten, die hier aus der Seite kamen.
 const APP_START_MS = 8000;
+// 2.7.4 (Pruefung 09.10.2026, Vertragsweg, E7): so lange gilt "Webseite oeffnen"
+const WEBSEITE_MERKEN_MS = 24 * 60 * 60 * 1000;
 
 async function appStandMerken(basis, wert) {
   const { appGesehen } = await lokal("appGesehen");
@@ -661,9 +664,60 @@ async function appStandMerken(basis, wert) {
                                                  [basis]: wert } });
 }
 
+/** 2.7.4 (E7): Gilt fuer diese AutoSchnell-Adresse noch "Webseite statt App"? Nur ein Merker mit Ablauf zaehlt — die 0
+ *  aelterer Versionen (<= 2.7.3, "fuer immer") gilt nicht mehr, sonst bliebe ein Nutzer, der einmal "Webseite oeffnen"
+ *  gedrueckt hat, fuer immer ohne App. (rein) */
+function webseiteGemerkt(stand, jetzt) {
+  return !!(stand && typeof stand === "object" && typeof stand.webseite_bis === "number" && jetzt < stand.webseite_bis);
+}
+
+/** 2.7.4 (E7): appGesehen ohne die "Webseite statt App"-Merker (und ohne die alte 0) — die Zeiten, wann AutoSchnell als
+ *  App lief, bleiben. (rein) */
+function ohneWebseiteMerker(appGesehen) {
+  const rest = {};
+  for (const [basis, stand] of Object.entries(appGesehen && typeof appGesehen === "object" ? appGesehen : {})) {
+    if (stand === 0 || (stand && typeof stand === "object" && "webseite_bis" in stand)) continue;
+    rest[basis] = stand;
+  }
+  return rest;
+}
+
+async function webseiteMerkerLoeschen() {
+  const { appGesehen } = await lokal("appGesehen");
+  await chrome.storage.local.set({ appGesehen: ohneWebseiteMerker(appGesehen) });
+}
+
+/** 2.7.4 (Pruefung 09.10.2026, Vertragsweg, E5): bei mehreren App-Fenstern (zwei Profile, zweimal gestartet) das
+ *  fokussierte, sonst das zuletzt aktive, sonst das erste — vorher nahm der Helfer irgendeines, oft das hinterste, und der
+ *  Sucher sah den Vertrag nicht. tabs = AutoSchnell-Tabs, fenster = alle App-Fenster ({id, focused}), zuletzt = Kennung
+ *  des zuletzt fokussierten Fensters (oder null). Tabs in Fenstern, die keine App-Fenster sind, zaehlen nicht. (rein) */
+function appTabWaehlen(tabs, fenster, zuletzt) {
+  const rang = (windowId) => {
+    const f = (fenster || []).find((w) => w && w.id === windowId);
+    return !f ? -1 : f.focused ? 2 : windowId === zuletzt ? 1 : 0;
+  };
+  let bester = null;
+  let besterRang = -1;
+  for (const t of tabs || []) {
+    const r = rang(t.windowId);
+    if (r > besterRang) { bester = t; besterRang = r; }
+  }
+  return bester;
+}
+
 async function appFenster(basis) {
   let tabs = [];
   try { tabs = await chrome.tabs.query({ url: basis + "/*" }); } catch (e) { tabs = []; }
+  if (!tabs.length) return null;
+  // E5: alle App-Fenster auf einmal, das fokussierte bzw. zuletzt aktive zuerst
+  try {
+    const fenster = await chrome.windows.getAll({ windowTypes: ["app"] });
+    if (fenster && fenster.length) {
+      let zuletzt = null;
+      try { zuletzt = (await chrome.windows.getLastFocused({ windowTypes: ["app"] })).id; } catch (e) { zuletzt = null; }
+      return appTabWaehlen(tabs, fenster, zuletzt);
+    }
+  } catch (e) { /* aelterer Browser: wie bisher je Tab nachsehen */ }
   for (const t of tabs) {
     try {
       const fenster = await chrome.windows.get(t.windowId);
@@ -690,7 +744,8 @@ async function vertragsZiel(kennung) {
   // 2.6.3 (Paket 2): nur ein Pfad in der App (nie "//fremd.de/…" oder "@fremd.de") — auch wenn der Server falsch antwortet
   const pfad = String(i.antwort.app_pfad);
   if (!pfad.startsWith("/app/") || pfad.startsWith("//") || /[@\\]/.test(pfad.split("?")[0])) return null;
-  return { pfad: pfad + "&vertrag=1", inseratUrl: i.antwort.inserat_url };
+  // 2.7.4 (E4): "&vertrag=1" nur hinter einem "?" — ein Pfad ohne Abfrage bekaeme sonst "/app/x&vertrag=1"
+  return { pfad: pfad + (pfad.includes("?") ? "&" : "?") + "vertrag=1", inseratUrl: i.antwort.inserat_url };
 }
 
 async function webseiteOeffnen(basis, pfad, tab) {
@@ -706,31 +761,37 @@ async function vertragOeffnen(msg, tab) {
   const ziel = await vertragsZiel(msg.kennung);
   if (!ziel) return { fehler: "unbekannt" };
   const basis = await server();
+  // 2.7.4 (E7): "Doch die App" in der Box — der Merker "Webseite statt App" ist damit weg
+  if (msg.dochApp) await webseiteMerkerLoeschen();
   // 1. offenes App-Fenster
   const app = await appFenster(basis);
   if (app) {
-    const antwort = await anTab(app.id, { type: "AUTOSCHNELL_OEFFNEN", ziel: ziel.pfad });
+    // erst nach vorne (sofort sichtbar), dann das Ziel — content.js wartet seit 2.7.4 bis 1,5 s auf die Antwort der App
     await chrome.windows.update(app.windowId, { focused: true });
+    const antwort = await anTab(app.id, { type: "AUTOSCHNELL_OEFFNEN", ziel: ziel.pfad });
     if (!antwort || !antwort.ok) {
       // 2.6.0 (Pruefung 05.10.2026, Nr. 6): Die App lief schon vor dem (aktualisierten) Helfer — nicht hart neu
       // laden (ein halb ausgefuellter Kaufvertrag waere weg). Nach vorne holen und sagen, was zu tun ist.
       return { ok: true, weg: "app_neu_laden" };
     }
-    return { ok: true, weg: "app" };
+    // 2.7.4 (E3): was die App mit dem Ziel tut (uebernommen / nachgefragt / anmeldung / abo) — die Box sagt es
+    return antwort.stand ? { ok: true, weg: "app", stand: String(antwort.stand) } : { ok: true, weg: "app" };
   }
-  // 3. der Nutzer hat in der Box "Webseite oeffnen" gewaehlt -> merken, ab jetzt gleich die Webseite
+  // 3. der Nutzer hat in der Box "Webseite oeffnen" gewaehlt -> 24 h merken, so lange gleich die Webseite
   if (msg.webseite) {
-    await appStandMerken(basis, 0);
+    await appStandMerken(basis, { webseite_bis: Date.now() + WEBSEITE_MERKEN_MS });
     return webseiteOeffnen(basis, ziel.pfad, tab);
   }
   // 2. App starten (das Seiten-Skript klickt den Link, noch im Klick des Nutzers) — ausser der Nutzer hat gesagt,
   //    dass es hier keine App gibt
   const { appGesehen } = await lokal("appGesehen");
   const stand = appGesehen && typeof appGesehen === "object" ? appGesehen[basis] : undefined;
-  if (stand !== 0 && ziel.inseratUrl) {
+  if (!webseiteGemerkt(stand, Date.now()) && ziel.inseratUrl) {
     return { protokoll: "web+autoschnell:vertrag?url=" + encodeURIComponent(ziel.inseratUrl) };
   }
-  return webseiteOeffnen(basis, ziel.pfad, tab);
+  // gemerkt (oder keine Inserat-Adresse): Webseite — die Box bietet "Doch die App" an, wenn es der Merker war
+  const r = await webseiteOeffnen(basis, ziel.pfad, tab);
+  return ziel.inseratUrl ? { ...r, gemerkt: true } : r;
 }
 
 /** Nach dem Start per Link-Typ: App-Fenster da -> merken; sonst "unklar" — die Box fragt, statt selbst die Webseite
@@ -788,6 +849,7 @@ async function verbinden(msg) {
     schluessel: r.daten.schluessel, konto: r.daten.konto || "", name: r.daten.name || "", firma: r.daten.firma || "",
   });
   await chrome.storage.local.remove(["getrenntGrund", "statusMerker"]);
+  await webseiteMerkerLoeschen();          // 2.7.4 (E7): neu verbunden -> "Webseite statt App" gilt nicht mehr
   await sitzungLeeren();
   return { ok: true, konto: r.daten.konto, name: r.daten.name, firma: r.daten.firma };
 }

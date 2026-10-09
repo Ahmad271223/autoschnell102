@@ -4436,7 +4436,7 @@ Suchern der Firma) – „alle anderen sollen das gar nicht sehen“.
   cd autopointer-vergleich && powershell -ExecutionPolicy Bypass -File build.ps1   # lokal: dist\AutoSchnell-Vergleich.exe
   scp dist/AutoSchnell-Vergleich.exe root@<server>:/tmp/                            # vom PC aus, nicht auf dem Server
   docker compose cp /tmp/AutoSchnell-Vergleich.exe backend:/tmp/AutoSchnell-Vergleich.exe
-  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.5.14
+  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.5.15
   ```
   Bis dahin zeigt die Seite „Wird gerade bereitgestellt“. Speicher: `werkzeuge/autopointer-vergleich/…`, Eintrag in `werkzeuge`.
 - Tests: `backend/tests/test_werkzeuge_20261003.py`, `frontend/src/pages/app/Programme.test.jsx`,
@@ -4444,7 +4444,7 @@ Suchern der Firma) – „alle anderen sollen das gar nicht sehen“.
 
 ### Browser-Helfer für Chrome und Edge (Wunsch Ahmad 04.10.2026)
 
-Zweites Werkzeug `browser-helfer` neben dem Programm — die Erweiterung `browser-extension/` (Version 2.7.3, enthält
+Zweites Werkzeug `browser-helfer` neben dem Programm — die Erweiterung `browser-extension/` (Version 2.7.4, enthält
 weiter den Kleinanzeigen-Abruf-Helfer). Gleiche Lizenz: 6-stelliger Code, **ein Konto = ein Browser**, Abo-Pflicht,
 Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
 - Freigabe: `BROWSER_HELFER_KUNDEN` (Standard `10001,10002,10007`, `docker-compose.yml`; leer = niemand).
@@ -4668,6 +4668,34 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
     (Entscheidung Ahmad): Strg+Alt+P, Leiste über AutoPointer-Kanten, `Process.MainModule`-Pfadprüfung. Tests:
     `autopointer-vergleich/tests/Pruefung20261009Tests.cs` + UeberwacherTests/DetailLeserTests (363 Tests).
     Hochladen wie oben mit `--version 1.5.14`.
+  - **Prüfung 09.10.2026 (Vertragsweg) — Programm 1.5.15, Erweiterung 2.7.4** (Befund Ahmad: „Kaufvertrag erstellen
+    aus den Programmen heraus hängt häufig — wenn in der App schon einer am Arbeiten ist oder man auf einer anderen
+    Seite ist“; Server und App parallel geändert, Schnittstellen: `GET …/app-start/<start>` antwortet `{bestaetigt,
+    zustand: offen|nachgefragt|anmeldung|abo, angemeldet}`, die App postet nach `OEFFNEN` ein `OEFFNEN_ERGEBNIS`
+    (`stand`), die Vergleichsseite versteht `&lesung=fehlt`):
+    - *Programm 1.5.15:* „Vertrag“ endet nie stumm. (P1) Zweiter Klick während es läuft → „Kaufvertrag wird gerade
+      geöffnet – bitte kurz warten.“, Leisten-Knopf „Vertrag …“ gesperrt (`FensterZustand.VertragLaeuft`), die
+      App-Start-Prüfung läuft im selben Zug. (P3a) Inserat zum Lesen immer im Browser der Erweiterung
+      (`Ueberwacher.BrowserFuerLesung`). (P3c–f) `VertragsWeg.InseratBereitAsync` → `LesungsStand`: Server antwortet
+      auf die erste Frage nicht → sofort weiter („… wird trotzdem geöffnet“, `NichtPruefbar`); nach **40 s** (vorher
+      25) ohne Lesung → Hinweis und Kaufvertrag mit `&lesung=fehlt` (`NichtGelesen`, die App liest nur auf Knopfdruck);
+      402/403 → Servertext als Sprechblase, kein Vertrag (`InseratStand.Sperre`, `Gesperrt`). (P4a) Bei mehreren
+      Apps zuerst die des Browsers der Erweiterung (`AutoSchnellApp.Auswaehlen(kandidaten, helferBrowser)`; der
+      Zwischenspeicher hält die Kandidaten). (P4c) Ohne Rückmeldung Suche verwerfen; dieselbe Verknüpfung nach dem
+      zweiten Fehlschlag hintereinander für den Programmlauf überspringen (`StartFehlgeschlagen`). (P4e)
+      `AllowSetForegroundWindow(ASFW_ANY)` vor dem Start. (P5) `AppStartWeg`: 20 s statt 10; `zustand` → Sprechblase
+      (`offen`/`nachgefragt`/`anmeldung`/`abo`), in keinem Fall Browser; nur ohne jede Meldung Browser — (P6) der der
+      Erweiterung/App (`BrowserFuer`). Nicht umgesetzt (Entscheidung Ahmad): `&vertrag=1` am Programm-Ziel. Tests
+      `VertragsWegTests`, `AutoSchnellAppTests`, `DienstTests`, `PruefberichtTests` (377 Tests). Hochladen wie oben mit
+      `--version 1.5.15`.
+    - *Erweiterung 2.7.4:* (E1/E3) `content.js` wartet nach `OEFFNEN` bis 1,5 s auf `OEFFNEN_ERGEBNIS` und antwortet
+      `{ok, app, stand}`; `background.js` reicht `stand` durch; die Box sagt, was die App tut (nie mehr leer). (E5)
+      `appFenster`: bei mehreren App-Fenstern das fokussierte, sonst das zuletzt aktive (`appTabWaehlen`). (E7)
+      „Webseite öffnen“ gilt 24 h (`appGesehen[basis] = {webseite_bis}`; die alte `0` gilt nicht mehr), neues
+      Verbinden löscht den Merker, Knopf „Doch die App“ in der Box (`dochApp` → Merker weg, Protokoll-Start erneut).
+      (E4) `&vertrag=1` nur hinter `?`. Keine Node-Tests für die Erweiterung; die neuen Funktionen sind rein.
+    - Reihenfolge: Server + App ausrollen, dann Programm 1.5.15 und Erweiterung 2.7.4 hochladen. Mit älterem Server
+      fehlt `zustand` (= `offen`), mit älterer App kommt kein `OEFFNEN_ERGEBNIS` (Box wie bisher) — nichts bricht.
   - **Kaufvertrag/Abholprotokoll (Wunsch Ahmad 09.10.2026):** „Datum und Ort“ bei Verkäufer UND Käufer = Ort des
     Kunden (`pdf_service._uebergabe_ort`; Dialog befüllt den Käufer-Ort nicht mehr aus dem Firmensitz); unter den
     Unterschriften kein Satz mehr; „Erfassung anhand der Fahrzeugskizze …“ und „Ausstattung laut Inseratsangaben.“

@@ -26,6 +26,16 @@
     hintergrund: "Im Hintergrund geöffnet – die Vergleiche gehen auf, sobald du hierher wechselst.",
     gebremst: "Viele Inserate auf einmal geöffnet – hier die Vergleiche per Knopf öffnen.",
   };
+  // 2.7.4 (Pruefung 09.10.2026, Vertragsweg, E1/E3): was die AutoSchnell-App mit dem Kaufvertrag gemacht hat — vorher
+  // blieb die Box leer, und der Sucher wusste nicht, ob er in der App noch etwas tun muss
+  const APP_STAENDE = {
+    nachgefragt: "In der AutoSchnell-App ist noch etwas ungespeichert – dort im Fenster „Hier öffnen“ oder „In neuem Fenster öffnen“ wählen.",
+    anmeldung: "In der AutoSchnell-App bitte anmelden – der Kaufvertrag öffnet sich danach.",
+    abo: "Für den Kaufvertrag braucht das Konto ein Sucher-Abo.",
+  };
+  function appMeldung(stand) {
+    return APP_STAENDE[stand] || "Kaufvertrag wird in der App geöffnet.";
+  }
   // 2.6.0 (Nr. 18): mit × geschlossene Boxen (je Inserat) bleiben zu, bis die Seite neu geladen wird
   const geschlossen = new Set();
   // ohne Ampel nach so vielen ms: sagen, was los ist (statt endlos "wird ausgewertet") — 2.6.0
@@ -331,12 +341,19 @@
           inhalt.appendChild(el("div", "klein", `Neue Version ${z.neueVersion} der Erweiterung verfügbar – in AutoSchnell unter Programme.`));
         }
         if (z.meldung) inhalt.appendChild(el("div", "klein", z.meldung));
-        if (z.webseiteAnbieten) {
+        if (z.webseiteAnbieten || z.dochAppAnbieten) {
           const knoepfe3 = el("div", "knoepfe");
-          const web = el("button", "knopf neben", "Webseite öffnen");
-          web.title = "Keine AutoSchnell-App installiert? Dann AutoSchnell als Webseite öffnen (merkt sich die Erweiterung).";
-          web.addEventListener("click", (ev) => { if (ev.isTrusted) webseiteStatt(z); });
-          knoepfe3.appendChild(web);
+          if (z.webseiteAnbieten) {
+            const web = el("button", "knopf neben", "Webseite öffnen");
+            web.title = "Keine AutoSchnell-App installiert? Dann AutoSchnell als Webseite öffnen (merkt sich die Erweiterung 24 Stunden).";
+            web.addEventListener("click", (ev) => { if (ev.isTrusted) webseiteStatt(z); });
+            knoepfe3.appendChild(web);
+          }
+          // 2.7.4 (E7): zurueck zur App — vergisst "Webseite oeffnen" und startet die App noch einmal
+          const doch = el("button", "knopf neben", "Doch die App");
+          doch.title = "Die AutoSchnell-App ist doch da? Dann die App noch einmal starten (vergisst „Webseite öffnen“).";
+          doch.addEventListener("click", (ev) => { if (ev.isTrusted) dochApp(z); });
+          knoepfe3.appendChild(doch);
           inhalt.appendChild(knoepfe3);
         }
         if (z.protokollWartet) {
@@ -356,6 +373,7 @@
           z.meldung = "AutoSchnell wird geöffnet …";
           z.protokollWartet = "";
           z.webseiteAnbieten = false;
+          z.dochAppAnbieten = false;
           zeichnen();
           let r2 = await A.senden({ typ: "vertrag", kennung: z.kennung });
           let nachgelesen = false;
@@ -378,12 +396,9 @@
             return;
           }
           if (!A.helferDa()) { veraltet(); return; }
-          z.meldung = r2 && r2.weg === "app_neu_laden"
-            ? "Die AutoSchnell-App ist offen, kennt die aktualisierte Erweiterung aber noch nicht – dort einmal neu laden "
-              + "(F5), dann hier noch einmal „Kaufvertrag“ drücken."
-            : !r2 || r2.fehler
-              ? (r2 && r2.text) || "AutoSchnell konnte nicht geöffnet werden – Seite neu laden und noch einmal drücken."
-              : "";
+          z.meldung = ergebnisMeldung(r2);
+          // 2.7.4 (E7): die Webseite ging nur wegen "Webseite oeffnen" (24 h gemerkt) auf — Weg zurueck zur App anbieten
+          z.dochAppAnbieten = !!(r2 && r2.weg === "webseite" && r2.gemerkt);
           zeichnen();
         });
         knoepfe.appendChild(vertrag);
@@ -412,6 +427,38 @@
     box.scrollTop = scroll;
   }
 
+  /** Was die Box nach "vertrag" sagt. 2.7.4 (E3): im App-Fenster den Stand der App (nie mehr leer); Webseite wegen
+   *  "Webseite oeffnen" (gemerkt) wird benannt. */
+  function ergebnisMeldung(r) {
+    if (!r || r.fehler) {
+      return (r && r.text) || "AutoSchnell konnte nicht geöffnet werden – Seite neu laden und noch einmal drücken.";
+    }
+    if (r.weg === "app_neu_laden") {
+      return "Die AutoSchnell-App ist offen, kennt die aktualisierte Erweiterung aber noch nicht – dort einmal neu laden "
+        + "(F5), dann hier noch einmal „Kaufvertrag“ drücken.";
+    }
+    if (r.weg === "app") return appMeldung(r.stand);
+    if (r.weg === "webseite" && r.gemerkt) return "AutoSchnell als Webseite geöffnet (so gewählt). Ist die App doch installiert:";
+    return "";
+  }
+
+  /** 2.7.4 (E7): "Doch die App" — der Helfer vergisst "Webseite oeffnen" und versucht den App-Start noch einmal
+   *  (noch im Klick des Nutzers, sonst blockt der Browser den Link-Typ). */
+  async function dochApp(z) {
+    z.webseiteAnbieten = false;
+    z.dochAppAnbieten = false;
+    z.meldung = "AutoSchnell-App wird geöffnet …";
+    zeichnen();
+    const r = await A.senden({ typ: "vertrag", kennung: z.kennung, dochApp: true });
+    if (r && r.protokoll) {
+      await appStarten(z, r.protokoll);
+      return;
+    }
+    if (!A.helferDa()) { veraltet(); return; }
+    z.meldung = ergebnisMeldung(r);       // App-Fenster war inzwischen offen, oder keine Inserat-Adresse (Webseite)
+    zeichnen();
+  }
+
   /** Installierte App ist zu: per Link-Typ web+autoschnell: starten (noch im Klick, sonst blockt der Browser). */
   async function appStarten(z, protokoll) {
     const a = document.createElement("a");
@@ -423,6 +470,7 @@
     a.remove();
     z.protokollWartet = "";
     z.webseiteAnbieten = false;
+    z.dochAppAnbieten = false;
     z.meldung = "AutoSchnell-App wird geöffnet …";
     zeichnen();
     const r3 = await A.senden({ typ: "app_start_pruefen", kennung: z.kennung });
@@ -434,9 +482,10 @@
     zeichnen();
   }
 
-  /** 2.6.1: "Webseite öffnen" — der Nutzer sagt, es gibt hier keine App; der Helfer merkt sich das. */
+  /** 2.6.1: "Webseite öffnen" — der Nutzer sagt, es gibt hier keine App; der Helfer merkt sich das (seit 2.7.4: 24 h). */
   async function webseiteStatt(z) {
     z.webseiteAnbieten = false;
+    z.dochAppAnbieten = false;
     z.meldung = "AutoSchnell wird geöffnet …";
     zeichnen();
     const r = await A.senden({ typ: "vertrag", kennung: z.kennung, webseite: true });

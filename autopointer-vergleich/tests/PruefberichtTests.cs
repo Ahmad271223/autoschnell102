@@ -334,11 +334,33 @@ public class PruefberichtTests
             },
         };
         var d = new AutoSchnellDienst("https://app.example.test", () => "k", h);
-        Assert.True(await d.AppStartBestaetigtAsync("abc123"));
+        // aelterer Server ohne "zustand": bestaetigt = "offen"
+        Assert.Equal(new AppStartAntwort(true, AppStartWeg.Offen), await d.AppStartBestaetigtAsync("abc123"));
         Assert.Equal("/api/werkzeuge/autopointer-vergleich/app-start/abc123", pfad);
-        Assert.False(await d.AppStartBestaetigtAsync("anders"));
+        Assert.Equal(new AppStartAntwort(false, AppStartWeg.Offen), await d.AppStartBestaetigtAsync("anders"));
         h.Antwort = _ => Task.FromResult(Json("{}", 500));
-        Assert.False(await d.AppStartBestaetigtAsync("abc123"));            // Fehler zaehlen als "nicht bestaetigt"
+        Assert.False((await d.AppStartBestaetigtAsync("abc123")).Bestaetigt);            // Fehler zaehlen als "nicht bestaetigt"
+        // Pruefung 09.10.2026 (Vertragsweg): der Server nennt, was die App tut
+        h.Antwort = _ => Task.FromResult(Json("""{"bestaetigt":false,"zustand":"nachgefragt","angemeldet":true}"""));
+        Assert.Equal(new AppStartAntwort(false, AppStartWeg.Nachgefragt), await d.AppStartBestaetigtAsync("abc123"));
+        h.Antwort = _ => Task.FromResult(Json("""{"bestaetigt":true,"zustand":"abo","angemeldet":true}"""));
+        Assert.Equal(new AppStartAntwort(true, AppStartWeg.Abo), await d.AppStartBestaetigtAsync("abc123"));
+    }
+
+    [Fact]   // Pruefung 09.10.2026 (Vertragsweg, 3f): 402/403 von AutoSchnell kommen mit dem Servertext als Sperre; 403 ohne JSON nicht
+    public async Task Inserat_gelesen_nennt_eine_Sperre_des_Servers()
+    {
+        var h = new Http { Antwort = _ => Task.FromResult(Json("""{"gelesen":true,"quelle":"erweiterung"}""")) };
+        var d = new AutoSchnellDienst("https://app.example.test", () => "k", h);
+        Assert.Equal(new InseratStand(true), await d.InseratGelesenAsync("https://suchen.mobile.de/fahrzeuge/details.html?id=1"));
+        h.Antwort = _ => Task.FromResult(Json("""{"detail":"Für dieses Konto ist kein Sucher-Abo aktiv."}""", 402));
+        Assert.Equal(new InseratStand(null, "Für dieses Konto ist kein Sucher-Abo aktiv."), await d.InseratGelesenAsync("https://suchen.mobile.de/x"));
+        h.Antwort = _ => Task.FromResult(Json("""{"detail":"Konto gesperrt."}""", 403));
+        Assert.Equal(new InseratStand(null, "Konto gesperrt."), await d.InseratGelesenAsync("https://suchen.mobile.de/x"));
+        h.Antwort = _ => Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden) { Content = new StringContent("<html>blocked</html>", Encoding.UTF8, "text/html") });
+        Assert.Equal(new InseratStand(null), await d.InseratGelesenAsync("https://suchen.mobile.de/x"));     // Cloudflare: keine Sperre
+        h.Antwort = _ => Task.FromResult(Json("{}", 500));
+        Assert.Equal(new InseratStand(null), await d.InseratGelesenAsync("https://suchen.mobile.de/x"));
     }
 
     // ------------------------------------------------------------------ Nr. 6/8
