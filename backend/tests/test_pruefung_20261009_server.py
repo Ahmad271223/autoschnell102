@@ -326,3 +326,78 @@ def test_14_nicht_lesbare_seite_fuer_den_betreiber(welt):
     finally:
         db.werkzeug_leseseiten.delete_many({"url": url})
         db.rate_limits.delete_many({"_id": {"$regex": "^werkzeug_leseseite:"}})
+
+
+# ------------------------------------------------------------ Vertragsweg (Befund Ahmad 09.10.2026: "Vertrag haengt")
+@pytestmark_http
+def test_15_app_start_mit_zustand_auch_ohne_anmeldung(welt):
+    """Die App meldet den Start mit Zustand (offen / nachgefragt / anmeldung / abo) — auch ohne Anmeldung; die juengste
+    Meldung gilt; eine angemeldete Meldung sieht nur das Programm derselben Firma."""
+    import test_browser_helfer_20261004 as tb
+    db = welt["db"]
+    pc = _pc(welt, "PC-Start")
+    frage = lambda s: requests.get(f"{tb.API}/werkzeuge/{wz.AUTOPOINTER}/app-start/{s}", headers=pc, timeout=30).json()  # noqa: E731
+    start = uuid.uuid4().hex
+    try:
+        # Anmeldeseite: ohne Anmeldung, ohne Koerper -> "anmeldung"
+        r = requests.post(f"{tb.API}/werkzeuge/app-start/{start}", timeout=30)
+        assert r.status_code == 200 and r.json()["zustand"] == "anmeldung", r.text
+        assert frage(start) == {"bestaetigt": True, "zustand": "anmeldung", "angemeldet": False}
+        # nach der Anmeldung meldet die Vergleichsseite "offen" -> die juengste Meldung gilt
+        r = requests.post(f"{tb.API}/werkzeuge/app-start/{start}", headers=welt["sucher"], json={"zustand": "offen"},
+                          timeout=30)
+        assert r.status_code == 200, r.text
+        assert frage(start) == {"bestaetigt": True, "zustand": "offen", "angemeldet": True}
+        # etwas ungespeichert: "nachgefragt" — das Programm sagt dem Sucher, dass in der App ein Dialog wartet
+        requests.post(f"{tb.API}/werkzeuge/app-start/{start}", headers=welt["sucher"], json={"zustand": "nachgefragt"},
+                      timeout=30)
+        assert frage(start)["zustand"] == "nachgefragt"
+        # unbekannter Zustand -> 422; abgelaufenes/fremdes Token zaehlt wie ohne Anmeldung
+        assert requests.post(f"{tb.API}/werkzeuge/app-start/{start}", headers=welt["sucher"], json={"zustand": "x"},
+                             timeout=30).status_code == 422
+        s2 = uuid.uuid4().hex
+        r = requests.post(f"{tb.API}/werkzeuge/app-start/{s2}", headers={"Authorization": "Bearer kaputt"},
+                          json={"zustand": "offen"}, timeout=30)
+        assert r.status_code == 200 and r.json()["zustand"] == "anmeldung"
+        # angemeldete Meldung einer anderen Firma: fuer unser Programm nicht bestaetigt
+        s3 = uuid.uuid4().hex
+        requests.post(f"{tb.API}/werkzeuge/app-start/{s3}", headers=welt["andere"], timeout=30)
+        assert frage(s3) == {"bestaetigt": False}
+    finally:
+        db.werkzeug_app_starts.delete_many({"start": {"$in": [start, s2, s3]}})
+        db.rate_limits.delete_many({"_id": {"$regex": "^werkzeug_app_start:"}})
+
+
+@pytestmark_http
+def test_16_statusabfrage_nimmt_nachtraegliche_lesung(welt):
+    """Kam die Lesung der Erweiterung erst NACH dem Einreihen, wartete die Seite bis 120 s auf den Anbieter-Abruf.
+    Jetzt: Statusabfrage -> completed (browser_helfer), der Wartende steigt aus, ohne Wartende ist der Job weg."""
+    import test_browser_helfer_20261004 as tb
+    from datetime import datetime as _dt
+    db = welt["db"]
+    nr = "487000601"
+    url = f"https://suchen.mobile.de/fahrzeuge/details.html?id={nr}"
+    jetzt = datetime.now(timezone.utc)
+    job_id = str(uuid.uuid4())
+    try:
+        db.link_jobs.insert_one({
+            "id": job_id, "cache_key": f"mobile:{nr}", "source": "mobile", "item_id": nr, "url": url,
+            "status": "queued", "active": True, "attempts": 0, "error": None,
+            "requested_by_dealer": welt["firma"]["dealer_id"], "requested_by_user": welt["sucher_id"],
+            "rueckfall_schluessel": "", "intern": False, "user_ids": [welt["sucher_id"]],
+            "dealer_ids": [welt["firma"]["dealer_id"]], "created_at": _dt.now(timezone.utc) + timedelta(hours=1),
+            "updated_at": jetzt, "fruehestens": jetzt + timedelta(hours=1)})      # der Worker fasst ihn so nicht an
+        r = requests.get(f"{tb.API}/listings/check/{job_id}", headers=welt["sucher"], timeout=30)
+        assert r.status_code == 200 and r.json()["status"] == "queued", r.text
+        # jetzt liest die Erweiterung des Kontos das Inserat
+        db.werkzeug_inserate.insert_one({
+            "cache_key": f"mobile:{nr}", "user_id": welt["sucher_id"], "dealer_id": welt["firma"]["dealer_id"],
+            "source": "mobile", "item_id": nr, "url": url, "data": dict(VW), "pruefsumme": "x", "gelesen_am": jetzt,
+            "ablauf": jetzt + timedelta(hours=1)})
+        r = requests.get(f"{tb.API}/listings/check/{job_id}", headers=welt["sucher"], timeout=30)
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "completed" and r.json()["browser_helfer"] is True, r.json()
+        assert db.link_jobs.count_documents({"id": job_id}) == 0, "niemand wartet mehr -> kein Abruf"
+    finally:
+        db.link_jobs.delete_many({"id": job_id})
+        db.werkzeug_inserate.delete_many({"cache_key": f"mobile:{nr}"})

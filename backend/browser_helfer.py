@@ -111,11 +111,15 @@ async def inserat_merken(db, identity: dict, url: str, fahrzeug: dict, user: dic
         {**filt, "pruefsumme": pruef, "url": url, "dealer_id": user.get("dealer_id") or ""}, {"$set": zeit})
     if r.matched_count:
         return
-    await db[SAMMLUNG_INSERATE].update_one(
-        filt,
-        {"$set": {"dealer_id": user.get("dealer_id") or "", "source": identity["source"],
-                  "item_id": identity["item_id"], "url": url, "data": daten, "pruefsumme": pruef, **zeit}},
-        upsert=True)
+    from pymongo.errors import DuplicateKeyError
+    werte = {"$set": {"dealer_id": user.get("dealer_id") or "", "source": identity["source"],
+                      "item_id": identity["item_id"], "url": url, "data": daten, "pruefsumme": pruef, **zeit}}
+    try:
+        await db[SAMMLUNG_INSERATE].update_one(filt, werte, upsert=True)
+    except DuplicateKeyError:
+        # Pruefung 09.10.2026: zwei Lesungen desselben Kontos im selben Augenblick (Unique-Index cache_key+user_id) —
+        # die zweite traegt ihre Werte ohne upsert nach statt mit 500 zu scheitern
+        await db[SAMMLUNG_INSERATE].update_one(filt, werte)
 
 
 async def inserat_lesen(db, cache_key: str, user_id: str,

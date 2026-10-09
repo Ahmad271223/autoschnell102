@@ -1358,6 +1358,17 @@ async def listings_check_status(job_id: str, user=Depends(require_active_sub)):
                 and user.get("id") not in konten
                 and job.get("requested_by_user") != user.get("id")):
             raise HTTPException(404, "Job nicht gefunden (evtl. abgelaufen)")
+        # Pruefung 09.10.2026 (Befund Ahmad "Vertrag aus dem Programm haengt"): kam die Lesung der Erweiterung erst
+        # NACH dem Einreihen (Link von Hand, waehrend die Erweiterung noch liest), wartete die Seite trotzdem auf den
+        # Anbieter-Abruf (Plaetze, Tageslimit, bis 120 s). Jetzt gilt die Lesung sofort — dieser Wartende steigt aus,
+        # ohne weitere Wartende endet der Job (kein Abruf mehr).
+        if schritt == 0 and job["status"] in ("queued", "processing") and job.get("cache_key"):
+            from browser_helfer import inserat_lesen
+            from link_jobs import warten_beenden
+            if await inserat_lesen(db, job["cache_key"], user.get("id") or "") is not None:
+                await warten_beenden(db, job_id, eigene or "", user.get("id") or "")
+                return {"status": "completed", "job_id": job["id"], "source": job.get("source"),
+                        "item_id": job.get("item_id"), "error": None, "browser_helfer": True}
         if job["status"] in ("completed", "failed") or schritt >= len(pausen):
             break
         await _aio.sleep(pausen[schritt])

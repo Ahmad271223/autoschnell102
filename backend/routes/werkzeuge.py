@@ -53,6 +53,8 @@ from deps import (FIRMA_GESPERRT_TEXT, current_chef, current_firma, current_supe
                   effective_dealer, firma_gesperrt, log_activity_sicher, now_iso, require_active_sub,
                   subscription_for)
 from rate_limiter import SlidingWindowRateLimiter, client_ip
+from deps import bearer
+from fastapi.security import HTTPAuthorizationCredentials
 from storage_service import (StorageError, bloecke_async, delete_async, groesse_async, load_async, make_key,
                              save_async, validate_image_bytes)
 
@@ -854,7 +856,9 @@ _AUSWERTEN_POOL = ThreadPoolExecutor(max_workers=_AUSWERTEN_GLEICHZEITIG, thread
 _ERKENNEN_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="wz-erkennen")
 
 
-_AUSWERTEN_WARTEN_S = 10
+#: Pruefung 09.10.2026 (Vertragsweg): 20 statt 10 s — das Programm wartet 25 s auf die Lesung der Erweiterung; ein 503
+#: nach 10 s unter Last liess "Vertrag" scheitern, obwohl die Seite in 15 s dran gewesen waere
+_AUSWERTEN_WARTEN_S = 20
 
 
 async def _auswerten(fn, *args):
@@ -1516,36 +1520,73 @@ async def admin_leseseite_loeschen(seite_id: str, _=Depends(current_super_admin)
     return {"ok": True}
 
 
+class AppStartIn(BaseModel):
+    """Pruefung 09.10.2026 (Vertragsweg): was die App mit dem Start gemacht hat — das Programm sagt es dem Sucher.
+    offen = Vergleich/Vertrag geht auf; nachgefragt = in der App ist etwas ungespeichert, sie fragt erst;
+    anmeldung = die App steht auf der Anmeldeseite; abo = das Konto hat kein Sucher-Abo."""
+    zustand: Literal["offen", "nachgefragt", "anmeldung", "abo"] = "offen"
+
+
+#: Pruefung 09.10.2026: die Bestaetigung braucht keine Anmeldung mehr (s. werkzeug_app_start_melden) — darum je IP begrenzt
+_app_start_limiter = SlidingWindowRateLimiter(max_attempts=60, window_seconds=60, name="werkzeug_app_start")
+
+
 @router.post("/werkzeuge/app-start/{start}")
-async def werkzeug_app_start_melden(start: str, user=Depends(current_firma)):
+async def werkzeug_app_start_melden(start: str, request: Request, body: Optional[AppStartIn] = None,
+                                    creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer)):
     """Pruefbericht 03.10.2026 (Nr. 12): die AutoSchnell-App hat ein Auto aus dem Programm uebernommen (Kennung im
-    Link "start"). Das Programm fragt danach — ohne Meldung oeffnet es den Kaufvertrag im Browser. 10 Minuten."""
+    Link "start"). Das Programm fragt danach — ohne Meldung oeffnet es den Kaufvertrag im Browser. 10 Minuten.
+    Pruefung 09.10.2026 (Befund Ahmad "Vertrag haengt"): OHNE Anmeldepflicht. Stand die App auf der Anmeldeseite
+    (Sitzung von einem zweiten Browser uebernommen, Token abgelaufen), konnte sie nicht melden; das Programm oeffnete
+    nach 10 s den Browser ZUSAETZLICH, und die Anmeldung dort warf die App per Single-Session raus. Die Kennung kennt
+    nur das Programm (128 Bit Zufall) — ein Fremder koennte damit hoechstens das eigene Programm vom Browser-Oeffnen
+    abhalten; ohne Anmeldung wird keine Firma gespeichert. Die App meldet dazu, was sie getan hat (zustand)."""
     if not _START_KENNUNG.match(start or ""):
         raise HTTPException(400, "Ungültige Kennung")
+    if not await _app_start_limiter.check(f"ip:{_ip_gruppe(client_ip(request))}"):
+        raise HTTPException(429, "Zu viele Meldungen – bitte kurz warten.")
+    user = None
+    if creds and creds.credentials:
+        try:
+            user = await current_user(creds, None)
+        except HTTPException:
+            user = None                            # abgelaufen/beendet: zaehlt wie ohne Anmeldung
+    zustand = body.zustand if body else "offen"
+    if user is None and zustand == "offen":
+        zustand = "anmeldung"
     jetzt = datetime.now(timezone.utc)
     from pymongo.errors import DuplicateKeyError
     try:
         await db[wz.SAMMLUNG_APP_STARTS].update_one(
             {"start": start},
-            {"$setOnInsert": {"start": start, "user_id": user["id"], "dealer_id": user.get("dealer_id"),
-                              "am": jetzt.isoformat(), "ablauf": jetzt + timedelta(minutes=10)}},
+            {"$setOnInsert": {"start": start, "am": jetzt.isoformat(), "ablauf": jetzt + timedelta(minutes=10)},
+             # die juengste Meldung gilt (Anmeldeseite -> nach der Anmeldung "offen")
+             "$set": {"user_id": (user or {}).get("id"), "dealer_id": (user or {}).get("dealer_id"),
+                      "angemeldet": user is not None, "zustand": zustand, "aktualisiert": jetzt.isoformat()}},
             upsert=True)
     except DuplicateKeyError:
         pass                                   # zwei Meldungen gleichzeitig (Fenster + Ereignis): eine reicht
-    return {"ok": True}
+    return {"ok": True, "zustand": zustand}
 
 
 @router.get("/werkzeuge/{werkzeug_id}/app-start/{start}")
 async def werkzeug_app_start_pruefen(werkzeug_id: str, start: str,
                                      schluessel: Optional[str] = Header(None, alias=wz.TOKEN_KOPF)):
-    """Nur fuer Starts derselben Firma — ein fremdes Programm erfaehrt nichts ueber andere Konten."""
+    """Eine angemeldete Meldung zaehlt nur fuer Starts derselben Firma — ein fremdes Programm erfaehrt nichts ueber
+    andere Konten; eine Meldung ohne Anmeldung (Anmeldeseite) zaehlt ueber die Kennung allein. Antwort seit
+    09.10.2026 mit zustand (s. AppStartIn) — das Programm (ab 1.5.15) sagt dem Sucher, was in der App zu tun ist."""
     if _ist_browser(werkzeug_id):
         raise HTTPException(404, NICHT_GEFUNDEN)        # Pruefung 08.10.2026: nur das Windows-Programm fragt das
     user, _v, _firma_doc, _abo = await _programm(werkzeug_id, schluessel)
     if not _START_KENNUNG.match(start or ""):
         return {"bestaetigt": False}
-    d = await db[wz.SAMMLUNG_APP_STARTS].find_one({"start": start}, {"_id": 0, "dealer_id": 1})
-    return {"bestaetigt": bool(d) and bool(user.get("dealer_id")) and d.get("dealer_id") == user.get("dealer_id")}
+    d = await db[wz.SAMMLUNG_APP_STARTS].find_one({"start": start},
+                                                   {"_id": 0, "dealer_id": 1, "zustand": 1, "angemeldet": 1})
+    if not d:
+        return {"bestaetigt": False}
+    if d.get("angemeldet", "dealer_id" in d) and (d.get("dealer_id") or "") != (user.get("dealer_id") or ""):
+        return {"bestaetigt": False}
+    return {"bestaetigt": True, "zustand": d.get("zustand") or "offen", "angemeldet": bool(d.get("angemeldet"))}
 
 
 @router.get("/werkzeuge/{werkzeug_id}/meine")

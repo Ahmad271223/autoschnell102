@@ -1093,15 +1093,21 @@ def test_63_app_start_rueckmeldung(welt):
     r = requests.post(f"{API}/werkzeuge/app-start/{start}", headers=welt["sucher"], timeout=30)
     assert r.status_code == 200, r.text
     assert requests.post(f"{API}/werkzeuge/app-start/{start}", headers=welt["sucher"], timeout=30).status_code == 200
-    assert frage(start).json() == {"bestaetigt": True}
+    # Pruefung 09.10.2026: mit Zustand (offen = Vergleich/Vertrag geht in der App auf)
+    assert frage(start).json() == {"bestaetigt": True, "zustand": "offen", "angemeldet": True}
     # eine fremde Firma meldet denselben Start nicht fuer uns
     fremd = uuid.uuid4().hex
     requests.post(f"{API}/werkzeuge/app-start/{fremd}", headers=welt["andere"], timeout=30)
     assert frage(fremd).json() == {"bestaetigt": False}
     assert requests.post(f"{API}/werkzeuge/app-start/kaputt", headers=welt["sucher"], timeout=30).status_code == 400
-    assert requests.post(f"{API}/werkzeuge/app-start/{start}", timeout=30).status_code in (401, 403)
+    # Pruefung 09.10.2026 (Vertragsweg): ohne Anmeldung (App steht auf der Anmeldeseite) zaehlt die Meldung ueber die
+    # Kennung allein — das Programm oeffnet dann keinen zweiten Browser, sondern sagt "bitte in der App anmelden"
+    ohne = uuid.uuid4().hex
+    r = requests.post(f"{API}/werkzeuge/app-start/{ohne}", timeout=30)
+    assert r.status_code == 200 and r.json()["zustand"] == "anmeldung", r.text
+    assert frage(ohne).json() == {"bestaetigt": True, "zustand": "anmeldung", "angemeldet": False}
     assert frage("kaputt").json() == {"bestaetigt": False}
-    welt["db"].werkzeug_app_starts.delete_many({"start": {"$in": [start, fremd]}})
+    welt["db"].werkzeug_app_starts.delete_many({"start": {"$in": [start, fremd, ohne]}})
 
 
 # ------------------------------------------------------------ Paket 2 (Pruefung 05./06.10.2026)

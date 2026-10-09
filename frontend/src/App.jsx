@@ -5,7 +5,10 @@ import SeiteLaedt from "@/components/SeiteLaedt";
 import FassungsHinweis from "@/components/FassungsHinweis";
 import { nachladenGescheitert } from "@/lib/fassung";
 import { hatUngespeichert } from "@/lib/ungespeichert";
-import { erweiterungZieleVerfolgen, startMelden, startZieleVerfolgen } from "@/lib/programmStart";
+import {
+  erweiterungZieleVerfolgen, startMelden, startZieleVerfolgen, zielGemerkt, zielUebernehmen, zielVergessen,
+} from "@/lib/programmStart";
+import StartZielDialog, { zielBeschreibung } from "@/components/StartZielDialog";
 import { api } from "@/lib/api";
 import { istFirmenHostKandidat } from "@/lib/firmenHost";
 
@@ -102,25 +105,71 @@ function vorladen() {
 // nicht fuer den Admin, der die Haendlerseiten nie sieht.
 // Wunsch Ahmad 03.10.2026: Das Windows-Programm öffnet den Kaufvertrag in der installierten App. Ist sie schon
 // offen, kommt das Ziel hier an (launchQueue) — mit ungespeicherter Arbeit nur als Hinweis mit Knopf.
+// Prüfung 09.10.2026 (Befund Ahmad "Kaufvertrag aus dem Programm hängt, wenn in der App schon einer arbeitet"):
+// statt des kleinen 20-Sekunden-Hinweises ein Dialog, der stehen bleibt (StartZielDialog); das Ziel bleibt gemerkt
+// (zielMerken) und ein Hinweis mit Knopf, bis es geöffnet oder verworfen ist. Gemeldet wird IMMER (der Server nimmt
+// die Meldung auch ohne Anmeldung an) — mit Zustand: offen / nachgefragt / anmeldung / abo. Das Programm (ab 1.5.15)
+// sagt dem Sucher dann, was in der App zu tun ist, statt nach 10 s zusätzlich den Browser zu öffnen (dessen
+// Anmeldung warf die App per Single-Session raus).
 function AppStartZiele() {
   const nav = useNavigate();
-  const { user } = useAuth();
-  const angemeldet = useRef(false);
-  angemeldet.current = !!user && !user.is_super_admin && user.role !== "admin";
+  const { user, subscription } = useAuth();
+  const zustandRef = useRef(() => null);
+  zustandRef.current = () => {
+    if (!user || user.is_super_admin || user.role === "admin") return "anmeldung";
+    if (subscription && !subscription.active) return "abo";
+    return null;
+  };
+  const [frage, setFrage] = useState(null);                  // { ziel, ausfuehren } — Dialog offen
+  const [gemerkt, setGemerkt] = useState(() => zielGemerkt());
   useEffect(() => {
-    const nachfragen = (ausfuehren) => toast.info("Neues Auto — hier ist noch etwas ungespeichert.", {
-      id: "app-start-ziel", duration: 20000, action: { label: "Trotzdem öffnen", onClick: ausfuehren },
-    });
-    startZieleVerfolgen((ziel) => nav(ziel), {
-      beschaeftigt: hatUngespeichert,
-      // Pruefbericht 03.10.2026 (Nr. 12): nur angemeldet melden — eine Anfrage ohne Anmeldung liefe in die 401-Abmeldung
-      melden: (start) => { if (angemeldet.current) startMelden(api, start); },
-      nachfragen,
-    });
+    const nachfragen = (ausfuehren, ziel) => { setFrage({ ziel, ausfuehren }); setGemerkt(ziel); };
+    const melden = (start, zustand) => startMelden(api, start, zustandRef.current() || zustand);
+    startZieleVerfolgen((ziel) => nav(ziel), { beschaeftigt: hatUngespeichert, melden, nachfragen });
     // Browser-Helfer (04.10.2026): "Kaufvertrag" aus der Erweiterung im schon offenen App-Fenster
-    return erweiterungZieleVerfolgen((ziel) => nav(ziel), { beschaeftigt: hatUngespeichert, nachfragen });
+    return erweiterungZieleVerfolgen((ziel) => nav(ziel), {
+      beschaeftigt: hatUngespeichert, nachfragen, zustand: () => zustandRef.current(),
+    });
   }, [nav]);
-  return null;
+
+  const hier = () => {
+    const f = frage;
+    setFrage(null);
+    setGemerkt(null);
+    f?.ausfuehren?.();
+  };
+  const neuesFenster = () => {
+    const f = frage;
+    setFrage(null);
+    setGemerkt(null);
+    zielVergessen();
+    let fenster = null;
+    try { fenster = window.open(f?.ziel, "_blank"); } catch { fenster = null; }
+    if (!fenster) f?.ausfuehren?.();                   // blockiert: dann doch hier
+  };
+  const hinweisOeffnen = () => {
+    const stand = zielUebernehmen(gemerkt, {
+      fenster: window, navigieren: (z) => nav(z), beschaeftigt: hatUngespeichert,
+      nachfragen: (ausfuehren, ziel) => setFrage({ ziel, ausfuehren }),
+    });
+    if (stand === "uebernommen") setGemerkt(null);
+  };
+  return (
+    <>
+      <StartZielDialog ziel={frage?.ziel || null} onHier={hier} onNeuesFenster={neuesFenster} onSpaeter={() => setFrage(null)} />
+      {gemerkt && !frage && (
+        <div className="fixed top-2 left-1/2 -translate-x-1/2 z-[55] max-w-[95vw] rounded-full px-4 py-2 text-sm shadow-lg flex flex-wrap items-center gap-2"
+             style={{ background: "var(--bg-elevated)", border: "1px solid var(--border-default)", color: "var(--text-primary)" }}
+             data-testid="start-ziel-hinweis">
+          <span>Kaufvertrag aus dem Programm wartet{zielBeschreibung(gemerkt, window.location.origin) ? ` (${zielBeschreibung(gemerkt, window.location.origin)})` : ""}</span>
+          <button type="button" onClick={hinweisOeffnen} data-testid="start-ziel-hinweis-oeffnen"
+                  className="apple-btn apple-btn-primary !rounded-full !px-3 !py-0.5 text-xs">Öffnen</button>
+          <button type="button" onClick={() => { zielVergessen(); setGemerkt(null); }} data-testid="start-ziel-hinweis-weg"
+                  className="apple-btn apple-btn-secondary !rounded-full !px-3 !py-0.5 text-xs">Verwerfen</button>
+        </div>
+      )}
+    </>
+  );
 }
 
 function Vorladen() {

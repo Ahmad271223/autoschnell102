@@ -148,6 +148,9 @@ export default function Vergleich() {
   // mehr und hat der Abruf noch nicht begonnen, faellt er ganz weg.
   const abbruchRef = useRef(null);
   const jobRef = useRef(null);
+  // Prüfung 09.10.2026 (Vertragsweg): der Wunsch "Kaufvertrag gleich öffnen" überlebt einen Fehlversuch — ein
+  // zweiter Lauf desselben Links (Knopf "Auslesen") öffnet ihn dann noch
+  const vertragWunschRef = useRef(null);
 
   const abbrechen = (art) => {
     const job = jobRef.current;
@@ -234,6 +237,8 @@ export default function Vergleich() {
     const ziel = inseratsLinkAusText(roh) || roh;
     if (!ziel) return;
     if (loading || laeuftRef.current) return;   // Mehrfachklicks abfangen
+    if (vertragOeffnen) vertragWunschRef.current = ziel;
+    const vertragGewuenscht = vertragOeffnen || vertragWunschRef.current === ziel;
     laeuftRef.current = true;          // Runde 24: sofort, nicht erst nach dem Render
     const steuerung = new AbortController();
     abbruchRef.current = steuerung;
@@ -338,7 +343,10 @@ export default function Vergleich() {
       }
       const t1 = Date.now();
       setResult({ ...data, ms: t1 - t0, link: ziel });
-      if (vertragOeffnen && aktuell() && data.vehicle_id && !data.fahrzeug_geloescht) setShowContract(true);
+      if (vertragGewuenscht && aktuell() && data.vehicle_id && !data.fahrzeug_geloescht) {
+        setShowContract(true);
+        vertragWunschRef.current = null;
+      }
       // Runde 22 (11.09.2026): Filter der aktiven Portale gleich mit oeffnen.
       // Nur hier (echter Vergleichslauf), nie beim Wiederherstellen aus der
       // sessionStorage. Benannte Fenster -> derselbe Tab wird wiederverwendet;
@@ -399,6 +407,17 @@ export default function Vergleich() {
   // ausgelesen — der Vergleich steht sofort mit Fotos da, der Kaufvertrag geht ohne Link-Einfügen.
   // Die Filter (mobile.de/AutoScout24) hat das Programm schon geöffnet: hier nur auslesen, den
   // Kaufvertrag startet der Sucher selbst (Wunsch Ahmad 03.10.2026).
+  // Prüfung 09.10.2026 (Vertragsweg): die Erweiterung hat das Inserat im Browser nicht gelesen — das Programm (ab
+  // 1.5.15) hängt "&lesung=fehlt" an. Ahmads Regel: Apify nur, wenn jemand in der App bewusst einfügt/klickt —
+  // darum kein Abruf von selbst, sondern Link im Feld und ein Knopf (ein Speicher-Treffer kostet trotzdem nichts).
+  const lesungFehltZeigen = (link, vertrag) => {
+    toast.warning("Das Inserat wurde im Browser nicht gelesen. Du kannst es jetzt selbst auslesen — das zählt wie "
+                  + "ein eingefügter Link.", {
+      id: "lesung-fehlt", duration: 60000,
+      action: { label: "Jetzt auslesen", onClick: () => startCompare(null, link, { ohneFilter: true, vertragOeffnen: vertrag }) },
+    });
+  };
+
   const adresseGestartet = useRef(false);
   useEffect(() => {
     if (adresseGestartet.current) return;
@@ -409,9 +428,10 @@ export default function Vergleich() {
     adresseGestartet.current = true;
     // Browser-Helfer (04.10.2026): "&vertrag=1" = Kaufvertrag gleich öffnen (vor dem nav lesen — der leert die Adresse)
     const vertrag = suche.get("vertrag") === "1";
+    const lesungFehlt = suche.get("lesung") === "fehlt";
     // Pruefbericht 03.10.2026 (Nr. 12): dem Programm melden, dass die App das Auto uebernommen hat
     const start = startKennung(window.location.href);
-    if (start) startMelden(api, start);
+    if (start) startMelden(api, start, "offen");
     nav("/app/vergleich", { replace: true });
     const link = inseratsLinkAusText(param);
     if (!link) {
@@ -419,6 +439,10 @@ export default function Vergleich() {
       return;
     }
     setUrl(link);
+    if (lesungFehlt) {
+      lesungFehltZeigen(link, vertrag);
+      return;
+    }
     startCompare(null, link, { ohneFilter: true, vertragOeffnen: vertrag });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -429,13 +453,16 @@ export default function Vergleich() {
   const [nachLink, setNachLink] = useState(null);
   useEffect(() => {
     const uebernehmen = (e) => {
-      // detail: der Link (Programm) oder { link, vertrag } (Browser-Helfer "Kaufvertrag", 04.10.2026)
+      // detail: der Link (ältere Aufrufer) oder { link, vertrag, lesungFehlt, uebernommen } (lib/programmStart)
       const d = e?.detail;
       const link = inseratsLinkAusText((typeof d === "string" ? d : d?.link) || "");
       if (!link) return;
+      // Prüfung 09.10.2026: Rückkanal — ohne diese Marke navigiert programmStart, statt das Ziel zu verlieren
+      if (d && typeof d === "object") d.uebernommen = true;
       if (laeuftRef.current) abbrechenRef.current?.({ still: true });
       nav("/app/vergleich", { replace: true });
-      setNachLink({ link, vertrag: typeof d === "object" && d?.vertrag === true });
+      setNachLink({ link, vertrag: typeof d === "object" && d?.vertrag === true,
+                    lesungFehlt: typeof d === "object" && d?.lesungFehlt === true });
     };
     window.addEventListener(INSERAT_EREIGNIS, uebernehmen);
     return () => window.removeEventListener(INSERAT_EREIGNIS, uebernehmen);
@@ -445,6 +472,10 @@ export default function Vergleich() {
     if (!nachLink || loading || laeuftRef.current) return;
     setNachLink(null);
     setUrl(nachLink.link);
+    if (nachLink.lesungFehlt) {
+      lesungFehltZeigen(nachLink.link, nachLink.vertrag);
+      return;
+    }
     startCompare(null, nachLink.link, { ohneFilter: true, vertragOeffnen: nachLink.vertrag });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nachLink, loading]);

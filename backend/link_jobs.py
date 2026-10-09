@@ -1110,6 +1110,22 @@ async def _process(db, job: dict) -> None:
                 eigener_claim,
                 {"$set": neu_setzen, "$unset": {"claim_id": ""}})
 
+    # Pruefung 09.10.2026 (Vertragsweg): liegt inzwischen eine Lesung der Erweiterung vor (kam erst nach dem
+    # Einreihen), kein Anbieter-Abruf — fertig, wie /listings/check es am Anfang getan haette (spart Apify-Lauf,
+    # Plaetze und Tageslimit; /mobile/compare nimmt dann die Lesung)
+    if not job.get("intern") and job.get("cache_key"):
+        try:
+            from browser_helfer import inserat_lesen
+            gelesen = await inserat_lesen(db, job["cache_key"], job.get("requested_by_user") or "")
+        except Exception:  # noqa: BLE001 — ohne Lesung wie bisher abrufen
+            gelesen = None
+        if gelesen is not None:
+            await db.link_jobs.update_one(
+                eigener_claim,
+                {"$set": {"status": "completed", "active": False, "error": None, "browser_helfer": True,
+                          "finished_at": _now(), "updated_at": _now()}})
+            log.info("link_jobs: Job %s ohne Abruf fertig — Lesung der Erweiterung liegt vor", job["id"])
+            return
     herz = None
     if claim_id:
         herz = asyncio.create_task(_frist_verlaengern(db, job["id"], claim_id))

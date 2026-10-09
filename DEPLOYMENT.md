@@ -4701,6 +4701,28 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
     Fahrer-App, Abholprotokoll Abschnitt 1 „Fahrzeugdaten — vor Ort prüfen“: je Zeile Bezeichnung, Wert laut Vertrag
     und die Kreise „stimmt / weicht ab“ (bzw. Ja/Nein) nebeneinander wie im PDF (`driver/Protokoll.jsx`, Testkennungen
     `vc-<feld>-<option>` unverändert).
+  - **Vertragsweg (Befund Ahmad 09.10.2026 „Kaufvertrag aus den Programmen hängt, wenn in der App schon einer arbeitet
+    oder man auf einer anderen Seite ist“; drei Prüfer, Server + App + Programm 1.5.15 + Erweiterung 2.7.4):**
+    (1) **App:** bei ungespeicherter Arbeit kein 20-s-Toast mehr, sondern ein Dialog, der stehen bleibt
+    (`components/StartZielDialog.jsx`: „Hier öffnen“ / „In neuem Fenster öffnen“ (window.open im Klick) / „Später“);
+    das Ziel bleibt 15 min gemerkt (`programmStart.zielMerken`, sessionStorage `ah_startziel`) mit Hinweisleiste
+    und Knopf. Rückkanal: das Ereignis `autoschnell:inserat` trägt `detail.uebernommen` — hört keine Vergleichsseite
+    zu (Route zeigt „Lade…“/Abo-Prüfung), wird navigiert statt das Ziel zu verlieren; Pfadvergleich normalisiert.
+    Der Vertragswunsch (`&vertrag=1`) überlebt einen Fehlversuch (`vertragWunschRef`). `&lesung=fehlt` (Programm
+    1.5.15: Erweiterung hat das Inserat nicht gelesen) → kein Abruf von selbst, Link im Feld + Knopf „Jetzt auslesen“
+    (Ahmads Regel: Apify nur bewusst in der App). Die App meldet den Start IMMER (auch auf der Anmeldeseite) mit
+    Zustand: `POST /werkzeuge/app-start/{start}` `{zustand: offen|nachgefragt|anmeldung|abo}`.
+    (2) **Server:** `POST …/app-start/{start}` ohne Anmeldepflicht (Kennung 128 Bit, 60/min je IP; ohne Anmeldung keine
+    Firma gespeichert); `GET …/app-start/{start}` liefert `zustand` + `angemeldet` (angemeldete Meldung nur für
+    dieselbe Firma). Vorher: App auf der Anmeldeseite konnte nicht melden → Programm öffnete nach 10 s den Browser
+    ZUSÄTZLICH → Anmeldung dort warf die App per Single-Session raus. `GET /listings/check/{job}` und
+    `link_jobs._process` nehmen eine Lesung der Erweiterung, die erst NACH dem Einreihen kam (kein Apify, kein
+    Warten auf Plätze). `_AUSWERTEN_WARTEN_S` 10 → 20 s (unter den 25/40 s des Programms). `inserat_merken` fängt
+    das Doppel-Upsert-Rennen ab. Für die Erweiterung antwortet die App auf OEFFNEN mit `OEFFNEN_ERGEBNIS`
+    (`stand`), damit die Box sagt, was in der App zu tun ist.
+    (3) **Programm 1.5.15 / Erweiterung 2.7.4:** siehe die eigenen Abschnitte unten.
+    Offen (Entscheidung Ahmad): `&vertrag=1` am Programm-Ziel (Vertragsdialog sofort statt nur Vergleich);
+    Vorrang für App-Wartende in der Abruf-Warteschlange gegenüber Kollegen-Jobs (heute fair je Konto).
   - **Passwort trennt Werkzeuge (Entscheidung Ahmad 06.10.2026):** setzt der Betreiber ein neues Passwort
     (`POST /admin/users/{id}/password`), trennt `routes.werkzeuge.alle_trennen` Programm und Helfer des Kontos
     (Grund `passwort` → 401 mit klarem Text, neuer Code nötig; Audit-Meta `werkzeuge_getrennt`).

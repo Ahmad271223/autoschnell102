@@ -181,6 +181,60 @@ describe("Vergleich über ?url= (Programm)", () => {
     expect(navMock).not.toHaveBeenCalled();
   });
 
+  it("Prüfung 09.10.2026: &lesung=fehlt — kein Abruf von selbst, Link im Feld, Knopf „Jetzt auslesen“", async () => {
+    const S = "0123456789abcdef0123456789abcdef";
+    window.history.replaceState({}, "", `/app/vergleich?url=${encodeURIComponent(KA)}&lesung=fehlt&vertrag=1&start=${S}`);
+    await act(async () => { wurzel.render(createElement(Vergleich)); });
+    await warten();
+    const pfade = api.post.mock.calls.map((c) => c[0]);
+    expect(pfade).not.toContain("/mobile/compare");
+    expect(pfade).not.toContain("/listings/check");
+    expect(pfade.filter((x) => x === `/werkzeuge/app-start/${S}`)).toHaveLength(1);
+    expect(toastMock.warning).toHaveBeenCalledWith(expect.stringContaining("nicht gelesen"), expect.anything());
+    expect(behaelter.querySelector("input").value).toBe(KA);
+    // der Knopf im Hinweis startet den Lauf — mit Kaufvertrag, wie gewünscht
+    await act(async () => { toastMock.warning.mock.calls[0][1].action.onClick(); });
+    await warten();
+    expect(api.post.mock.calls.find((c) => c[0] === "/mobile/compare")?.[1]).toMatchObject({ url: KA });
+    expect(behaelter.querySelector('[data-testid="vertrag-dialog"]')).not.toBeNull();
+  });
+
+  it("Prüfung 09.10.2026: das Ereignis bekommt die Marke „uebernommen“ (Rückkanal an programmStart)", async () => {
+    const { INSERAT_EREIGNIS } = await import("@/lib/programmStart");
+    window.history.replaceState({}, "", "/app/vergleich");
+    await act(async () => { wurzel.render(createElement(Vergleich)); });
+    await warten();
+    const detail = { link: KA, vertrag: false, lesungFehlt: true, uebernommen: false };
+    await act(async () => { window.dispatchEvent(new CustomEvent(INSERAT_EREIGNIS, { detail })); });
+    await warten();
+    expect(detail.uebernommen).toBe(true);
+    expect(api.post.mock.calls.map((c) => c[0])).not.toContain("/mobile/compare");
+    expect(toastMock.warning).toHaveBeenCalledWith(expect.stringContaining("nicht gelesen"), expect.anything());
+  });
+
+  it("Prüfung 09.10.2026: der Vertragswunsch überlebt einen Fehlversuch", async () => {
+    let versuch = 0;
+    api.post.mockImplementation((pfad) => {
+      if (pfad === "/listings/check") {
+        versuch += 1;
+        return versuch === 1 ? Promise.reject(new Error("Server gerade nicht da"))
+          : Promise.resolve({ data: { status: "completed", cached: true, source: "kleinanzeigen" } });
+      }
+      return Promise.resolve({ data: { vehicle_id: "v_3529833344", cache_key: "kleinanzeigen:3529833344",
+        source: "kleinanzeigen", cached: true, vehicle: { make_label: "VW", model_label: "Polo", images: [], images_thumbs: [] } } });
+    });
+    window.history.replaceState({}, "", `/app/vergleich?url=${encodeURIComponent(KA)}&vertrag=1`);
+    await act(async () => { wurzel.render(createElement(Vergleich)); });
+    await warten();
+    expect(toastMock.error).toHaveBeenCalled();
+    expect(behaelter.querySelector('[data-testid="vertrag-dialog"]')).toBeNull();
+    // zweiter Anlauf über das Formular (Knopf „Auslesen“) — ohne &vertrag=1, der Wunsch ist gemerkt
+    const form = behaelter.querySelector("form");
+    await act(async () => { form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })); });
+    await warten();
+    expect(behaelter.querySelector('[data-testid="vertrag-dialog"]')).not.toBeNull();
+  });
+
   it("kaputter Link in der Adresse: Meldung, kein Vergleich", async () => {
     window.history.replaceState({}, "", `/app/vergleich?url=${encodeURIComponent("https://example.com/x")}`);
     await act(async () => { wurzel.render(createElement(Vergleich)); });
