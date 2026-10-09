@@ -437,6 +437,28 @@ def _inserat_zustand(inserat, *, offenlegung: bool) -> str:
     return _ja_nein_oder_nichts(inserat)
 
 
+#: Wunsch Ahmad 09.10.2026: Motor, Getriebe, Kupplung im Abschnitt Zustand — "in Ordnung" oder "Schaden vorhanden",
+#: dazu einmal der Schadentext. Ohne Angabe (Altvertraege) keine Zeile.
+_TECHNIK = (("motor_zustand", "Motor"), ("getriebe_zustand", "Getriebe"), ("kupplung_zustand", "Kupplung"))
+
+
+def _technik_zeilen(contract) -> list:
+    c = contract or {}
+    rows = []
+    schaden = False
+    for key, label in _TECHNIK:
+        wert = str(c.get(key) or "").strip()
+        if not wert:
+            continue
+        if wert.lower().startswith("schaden"):
+            schaden = True
+        rows.append((label, wert))
+    text = str(c.get("technik_schaden_text") or "").strip()
+    if schaden and text:
+        rows.append(("Schaden an Motor/Getriebe/Kupplung", text))
+    return rows
+
+
 def _ohne_leere(rows):
     """Wunsch Ahmad (16.09.2026): nicht ausgefuellte Punkte (z. B. E-Mail, Bereifung)
     erscheinen im Vertrag gar nicht — statt einer Zeile mit Strich."""
@@ -612,7 +634,8 @@ STEMPEL_HOEHE = 3 * UNTERSCHRIFT_HOEHE
 #: sind weg.
 TITEL_ZUSTAND = "2 · Zustand"
 TITEL_AUSSTATTUNG = "Ausstattung"
-TITEL_BESCHREIBUNG = "Beschreibung"
+#: Wunsch Ahmad 09.10.2026: wieder "Fahrzeugbeschreibung" (seit 04.10. stand nur "Beschreibung")
+TITEL_BESCHREIBUNG = "Fahrzeugbeschreibung"
 #: Wunsch Ahmad 06.10.2026: "Kaufpreis & Konditionen" heisst im fertigen Vertrag nur noch "Kaufpreis".
 TITEL_KAUFPREIS = "Kaufpreis"
 
@@ -1258,6 +1281,7 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
         ("Scheckheftgepflegt", _scheckheft_anzeige(contract)),
         ("HU/AU", hu_value or "—"),
         ("Unfallfrei", accident_value),
+        *_technik_zeilen(contract),                       # Wunsch Ahmad 09.10.2026
         ("EU-Import", _yn(contract.get("eu_import"))),
         ("Fahrtauglich", _yn(contract.get("drivable"))),
         ("Gewerblich genutzt seit EZ", _yn(contract.get("commercial_since_ez"))),

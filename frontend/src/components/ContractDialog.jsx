@@ -24,6 +24,15 @@ const YN_OPTIONS = [
   { value: "Nein", label: "Nein" },
 ];
 
+// Wunsch Ahmad 09.10.2026: "Motor, Getriebe, Kupplung — alles in Ordnung oder Schaden vorhanden?" — Pflicht beim
+// Erstellen (der Browser hält den Vertrag ohne Antwort auf), beim nachträglichen Ändern bleibt der alte Stand.
+const TECHNIK_OPTIONS = [
+  { value: "", label: "— bitte wählen —" },
+  { value: "in Ordnung", label: "in Ordnung" },
+  { value: "Schaden vorhanden", label: "Schaden vorhanden" },
+];
+export const TECHNIK_FELDER = [["motor_zustand", "Motor"], ["getriebe_zustand", "Getriebe"], ["kupplung_zustand", "Kupplung"]];
+
 // Wunsch Ahmad (15.09.2026): Scheckheftgepflegt als Auswahl; bei "teilweise"
 // zusaetzlich Monat/Jahr, bis zu dem das Scheckheft gefuehrt wurde.
 const SCHECKHEFT_OPTIONS = [
@@ -264,6 +273,10 @@ export function anfangsFormular(v, dealer, heute) {
     service_book_until: "",
     accident_free: "",
     accident_location: "",
+    motor_zustand: "",
+    getriebe_zustand: "",
+    kupplung_zustand: "",
+    technik_schaden_text: "",
     eu_import: "",
     drivable: "",
     commercial_since_ez: "",
@@ -1044,6 +1057,18 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                 testid="contract-drivable"
               />
             </div>
+            {/* Wunsch Ahmad 09.10.2026: beim Erstellen fragen — Motor, Getriebe, Kupplung */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5" data-testid="contract-technik">
+              {TECHNIK_FELDER.map(([key, label]) => (
+                <SelectField key={key} label={`${label} – in Ordnung oder Schaden?${bearbeiten ? "" : " *"}`}
+                             value={form[key]} onChange={(v) => set(key, v)} options={TECHNIK_OPTIONS}
+                             required={!bearbeiten} testid={`contract-${key.replace("_", "-")}`} />
+              ))}
+            </div>
+            {TECHNIK_FELDER.some(([key]) => form[key] === "Schaden vorhanden") && (
+              <Field label="Schaden an Motor/Getriebe/Kupplung: was genau" value={form.technik_schaden_text}
+                     onChange={(v) => set("technik_schaden_text", v)} testid="contract-technik-schaden" />
+            )}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
               <SelectField
                 label="Gewerblich genutzt seit EZ"

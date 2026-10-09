@@ -160,6 +160,22 @@ def kundennummer_einsetzen(contract_dict: dict) -> dict:
     return contract_dict
 
 
+#: Wunsch Ahmad 09.10.2026: beim Erstellen fragt der Dialog nach Motor, Getriebe und Kupplung
+TECHNIK_OK, TECHNIK_SCHADEN = "in Ordnung", "Schaden vorhanden"
+
+
+def technik_zustand_normieren(v) -> str:
+    """"" (keine Angabe — Altvertraege, API) | "in Ordnung" | "Schaden vorhanden"; anderes wird abgelehnt."""
+    t = str(v or "").strip().lower()
+    if not t:
+        return ""
+    if t in ("in ordnung", "ok", "ja", "i.o.", "io", "ordnung"):
+        return TECHNIK_OK
+    if t.startswith("schaden") or t in ("nein", "defekt", "schaden vorhanden"):
+        return TECHNIK_SCHADEN
+    raise ValueError("Motor/Getriebe/Kupplung: bitte „in Ordnung“ oder „Schaden vorhanden“ wählen")
+
+
 class ContractIn(BaseModel):
     # Pruefung 14.09.2026 (Liste 3, Nr. 1): Idempotenz je Anlage — ein Doppelklick
     # oder eine verlorene Antwort mit Wiederholung legt keinen zweiten Vertrag an.
@@ -260,6 +276,17 @@ class ContractIn(BaseModel):
 
     accident_free: Optional[str] = ""      # "Ja" | "Nein" | ""
     accident_location: Optional[str] = ""  # nur wenn accident_free == "Nein"
+    # Wunsch Ahmad 09.10.2026: "Motor, Getriebe, Kupplung — alles in Ordnung oder Schaden vorhanden?" Der Dialog
+    # fragt es beim Erstellen (Pflicht dort); leer = keine Angabe (Altvertraege, API) -> keine Zeile im Vertrag
+    motor_zustand: Optional[str] = ""      # "" | "in Ordnung" | "Schaden vorhanden"
+    getriebe_zustand: Optional[str] = ""
+    kupplung_zustand: Optional[str] = ""
+    technik_schaden_text: Optional[str] = Field(default="", max_length=300)   # nur bei "Schaden vorhanden"
+
+    @field_validator("motor_zustand", "getriebe_zustand", "kupplung_zustand")
+    @classmethod
+    def _technik_zustand_pruefen(cls, v):
+        return technik_zustand_normieren(v)
     eu_import: Optional[str] = ""          # "Ja" | "Nein" | ""
     drivable: Optional[str] = ""           # "Ja" | "Nein" | ""
     commercial_since_ez: Optional[str] = ""  # "Ja" | "Nein" | ""

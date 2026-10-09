@@ -55,7 +55,7 @@ VERTRAG = {
 # Die Hinweiszeile "Ausstattung laut Inseratsangaben." ist seit 09.10.2026 weg (Wunsch Ahmad) — fuer Reihenfolge
 # und "genau einmal" zaehlt die erste Ausstattung des Testfahrzeugs (steht nur in diesem Abschnitt).
 AUSSTATTUNG = "Navigationssystem"
-BESCHREIBUNG = "Beschreibung"
+BESCHREIBUNG = "Fahrzeugbeschreibung"      # Wunsch Ahmad 09.10.2026: wieder die lange Ueberschrift
 GEWAEHR = "Gewährleistung:"
 BESONDERE = "Besondere Vereinbarungen"
 AGB_ALT = "Allgemeine Geschäftsbedingungen"

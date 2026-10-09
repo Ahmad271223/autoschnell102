@@ -4436,7 +4436,7 @@ Suchern der Firma) – „alle anderen sollen das gar nicht sehen“.
   cd autopointer-vergleich && powershell -ExecutionPolicy Bypass -File build.ps1   # lokal: dist\AutoSchnell-Vergleich.exe
   scp dist/AutoSchnell-Vergleich.exe root@<server>:/tmp/                            # vom PC aus, nicht auf dem Server
   docker compose cp /tmp/AutoSchnell-Vergleich.exe backend:/tmp/AutoSchnell-Vergleich.exe
-  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.5.11
+  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.5.12
   ```
   Bis dahin zeigt die Seite „Wird gerade bereitgestellt“. Speicher: `werkzeuge/autopointer-vergleich/…`, Eintrag in `werkzeuge`.
 - Tests: `backend/tests/test_werkzeuge_20261003.py`, `frontend/src/pages/app/Programme.test.jsx`,
@@ -4620,6 +4620,27 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
     Inserat, wartet bis 25 s auf die Lesung und öffnet erst dann den Kaufvertrag (kein Abruf); `/vergleich` nennt
     `hat_helfer`. Ohne Erweiterung öffnet „Vertrag“ den Kaufvertrag in der App mit dem Link (dort gilt: Speicher oder,
     falls unbekannt, ein Abruf). Weitere Abrufe, die bleiben: Beweisdokument auf Knopfdruck, Marktanalyse.
+  - **Bildschirm-Lesung abgesichert (Wunsch Ahmad 09.10.2026 „das darf alles nicht passieren“) — Programm 1.5.12:**
+    `backend/erkennung_lernen.py`. (1) Liegt das Inserat gelesen vor (Erweiterung irgendeiner Firma, `werkzeug_inserate`,
+    oder `listings_cache`), baut `/vergleich` die Links aus diesen Daten — wenn EZ (±1 Jahr) und km (±10 %, mind. 5.000)
+    zum Bildschirm passen und die erkannte Marke nicht widerspricht (sonst Nummer falsch gelesen?). (2) Lernen:
+    weicht die Bildschirm-Lesung vom Inserat ab, merkt sich der Server „gelesener Text → Marke/Modell“ in
+    `erkennung_gelernt` (TTL 180 Tage, je Prozess 5 min gecacht); gilt ab zwei verschiedenen Inseraten ohne
+    Widerspruch; gefüttert aus `/vergleich` (Speichertreffer) und `/inserat` (Lesung zu einem Programm-Vergleich,
+    `_aus_lesung_lernen`). (3) `fahrzeug.alternativen` (Programm ab 1.5.12, `src/ZweiterBlick.cs`): zweite Lesung
+    der Zeilen Marke/Modell, Kraftstoff, Inserat-ID aus demselben Bild mit anderer Aufbereitung, höchstens 3 je Feld;
+    der Server nimmt sie, wenn die erste Lesung nichts ergab (`_erkennen`). Der Vergleich speichert
+    `fahrzeug.erkennung` (bildschirm/gelernt/zweite_lesung/inserat). Dazu Einzelreparaturen vom 08./09.10.: „EQA300“,
+    „EIektro“ (Leseform i/l/1, o/0), „IBO“→i30 (B/3, S/5, Z/2, G/6/9 nur Buchstabe→Ziffer), „VWT-Roc“ (Marke vorn im
+    Wort), Inserat-ID mit O/I/S/Z (höchstens 3, nie B/G). Die 1.676 Abgleichfälle zu Programm 1.3.5 bleiben unverändert.
+  - **Kaufvertrag/Abholprotokoll (Wunsch Ahmad 09.10.2026):** „Datum und Ort“ bei Verkäufer UND Käufer = Ort des
+    Kunden (`pdf_service._uebergabe_ort`; Dialog befüllt den Käufer-Ort nicht mehr aus dem Firmensitz); unter den
+    Unterschriften kein Satz mehr; „Erfassung anhand der Fahrzeugskizze …“ und „Ausstattung laut Inseratsangaben.“
+    weg; Überschrift wieder „Fahrzeugbeschreibung“. Neu im Dialog (Pflicht beim Erstellen, `required`): Motor,
+    Getriebe, Kupplung je „in Ordnung“/„Schaden vorhanden“ + Schadentext (`motor_zustand`, `getriebe_zustand`,
+    `kupplung_zustand`, `technik_schaden_text`; `technik_zustand_normieren`), im PDF unter „2 · Zustand“.
+    Abholauftrag/-protokoll: Zeile „Ladekabel / Adapter“ weg; „Gewerbliche Nutzung“/„Unfallfrei laut Angabe“ nur
+    Ja/Nein (`protokoll_vergleich.FELDER`; die Fahrer-App nimmt die Antworten aus der Server-Vorlage).
   - **Passwort trennt Werkzeuge (Entscheidung Ahmad 06.10.2026):** setzt der Betreiber ein neues Passwort
     (`POST /admin/users/{id}/password`), trennt `routes.werkzeuge.alle_trennen` Programm und Helfer des Kontos
     (Grund `passwort` → 401 mit klarem Text, neuer Code nötig; Audit-Meta `werkzeuge_getrennt`).
