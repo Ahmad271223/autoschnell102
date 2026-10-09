@@ -336,10 +336,45 @@ def mobile_bewertung(listing: dict) -> Optional[dict]:
     }
 
 
+#: Befund Ahmad 09.10.2026 (Opel Mokka-e, "Auf der Seite stehen keine Inseratsdaten"): das Inserat-Objekt im
+#: Datenstrom faengt nicht immer mit "attributes" an — bisher wurde NUR die Marke '"listing":{"attributes":' gesucht.
+#: Jetzt jedes '"listing":{' der Reihe nach, hoechstens so viele (eine Seite aus lauter "listing" darf nicht Minuten
+#: kosten).
+_LISTING_VERSUCHE = 40
+
+
+def mobile_listing_objekt(text: str, item_id: str) -> Optional[dict]:
+    """Das Inserat-Objekt zu ``item_id`` aus dem Datenstrom: zuerst der schnelle Weg (Objekt beginnt mit
+    "attributes"), sonst jedes "listing"-Objekt mit Attributen — das mit der passenden Nummer gewinnt, sonst das
+    erste mit Attributen (dann meldet der Aufrufer "anderes Inserat")."""
+    schnell = json_objekt_nach(text, '"listing":{"attributes":')
+    if schnell and str(schnell.get("id") or "") == str(item_id):
+        return schnell
+    erstes = schnell if schnell and schnell.get("attributes") else None
+    marke = '"listing":{'
+    pos, versuche = 0, 0
+    while versuche < _LISTING_VERSUCHE:
+        i = text.find(marke, pos)
+        if i < 0:
+            break
+        versuche += 1
+        pos = i + len(marke)
+        try:
+            wert, _ = _DEC.raw_decode(text, i + len(marke) - 1)
+        except ValueError:
+            continue
+        if not isinstance(wert, dict) or not wert.get("attributes"):
+            continue
+        if str(wert.get("id") or "") == str(item_id):
+            return wert
+        erstes = erstes or wert
+    return erstes
+
+
 def mobile_inserat(html: str, item_id: str, url: str) -> Tuple[dict, Optional[dict]]:
     import mobile_service as ms
     text = next_flight_text(html)
-    listing = json_objekt_nach(text, '"listing":{"attributes":')
+    listing = mobile_listing_objekt(text, item_id)
     if not listing:
         raise SeiteUngueltig("Auf der Seite stehen keine Inseratsdaten (Prüfseite von mobile.de oder "
                              "Inserat nicht mehr online).")

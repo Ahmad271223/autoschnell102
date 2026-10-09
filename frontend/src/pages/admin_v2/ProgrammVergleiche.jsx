@@ -24,6 +24,8 @@ export default function AdminProgrammVergleiche() {
   const [downloads, setDownloads] = useState(null);
   // Wunsch Ahmad 09.10.2026: Bilder der Anzeigen, die das Programm nicht erkannt hat (Lesebilder)
   const [lesebilder, setLesebilder] = useState(null);
+  // Pruefung 09.10.2026 (Befund Mokka-e): Inseratsseiten, die die Erweiterung nicht lesen konnte (Leseseiten)
+  const [leseseiten, setLeseseiten] = useState(null);
   const [block, setBlock] = useState(1);
   const [seite, setSeite] = useState(1);
   const [eingabe, setEingabe] = useState("");
@@ -83,6 +85,39 @@ export default function AdminProgrammVergleiche() {
       await api.delete(`/admin/werkzeug-lesebilder/${encodeURIComponent(b.id)}`);
       toast.success("Lesebild gelöscht.");
       lesebilderLaden();
+    } catch (e) {
+      toast.error(errMsg(e, "Löschen hat nicht geklappt"));
+    }
+  };
+
+  const leseseitenLaden = useCallback(() => {
+    api.get("/admin/werkzeug-leseseiten", { params: { limit: 60 } })
+      .then(({ data }) => setLeseseiten(data))
+      .catch(() => setLeseseiten({ leseseiten: [], gesamt: 0 }));
+  }, []);
+  useEffect(() => { if (werkzeug === "browser-helfer") leseseitenLaden(); }, [werkzeug, leseseitenLaden]);
+
+  const leseseiteLaden = async (s) => {
+    try {
+      const r = await api.get(`/admin/werkzeug-leseseiten/${encodeURIComponent(s.id)}/seite`, { responseType: "blob" });
+      // nie im Browser anzeigen (fremde Seite, fremde Skripte) — nur als Textdatei speichern
+      const url = URL.createObjectURL(new Blob([r.data], { type: "text/plain" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `leseseite-${s.id}.html.txt`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (e) {
+      toast.error(errMsg(e, "Die Seite ließ sich nicht laden"));
+    }
+  };
+  const leseseiteLoeschen = async (s) => {
+    try {
+      await api.delete(`/admin/werkzeug-leseseiten/${encodeURIComponent(s.id)}`);
+      toast.success("Seite gelöscht.");
+      leseseitenLaden();
     } catch (e) {
       toast.error(errMsg(e, "Löschen hat nicht geklappt"));
     }
@@ -187,6 +222,50 @@ export default function AdminProgrammVergleiche() {
                     </div>
                   </div>
                 ))}
+              </div>
+            )}
+        </Card>
+      )}
+
+      {werkzeug === "browser-helfer" && (
+        <Card className="mb-4" data-testid="admin-pv-leseseiten">
+          <div className="text-sm font-semibold">
+            Nicht lesbar – Inseratsseiten{leseseiten ? ` (${zahl(leseseiten.gesamt)})` : ""}
+            <span className="font-normal text-zinc-500"> · Seiten, auf denen die Erweiterung keine Inseratsdaten fand, {leseseiten?.tage || 14} Tage</span>
+          </div>
+          {!leseseiten ? <Spinner /> : !leseseiten.leseseiten.length
+            ? <div className="text-sm text-zinc-500 mt-2" data-testid="admin-pv-keine-leseseiten">Keine nicht lesbaren Seiten.</div>
+            : (
+              <div className="mt-2 overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-xs text-zinc-500">
+                      <th className="py-1 pr-3">Wann</th><th className="py-1 pr-3">Inserat</th><th className="py-1 pr-3">Grund</th>
+                      <th className="py-1 pr-3">Konto</th><th className="py-1 pr-3">Firma</th><th className="py-1"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {leseseiten.leseseiten.map((s) => (
+                      <tr key={s.id} className="border-t" style={{ borderColor: "var(--border-default)" }}
+                          data-testid={`admin-pv-leseseite-${s.id}`}>
+                        <td className="py-2 pr-3 text-xs text-zinc-500 whitespace-nowrap">{zeit(s.erstellt_am)}</td>
+                        <td className="py-2 pr-3">
+                          <a href={s.url} target="_blank" rel="noreferrer" className="underline break-all">{s.portal || "–"} {s.item_id || ""}</a>
+                        </td>
+                        <td className="py-2 pr-3 text-xs">{s.grund}</td>
+                        <td className="py-2 pr-3">{s.name || "–"}{s.konto ? <div className="text-xs text-zinc-500">{s.konto}</div> : null}</td>
+                        <td className="py-2 pr-3">{s.firma}{s.kunden_nr ? <div className="text-xs text-zinc-500">Kd.-Nr. {s.kunden_nr}</div> : null}</td>
+                        <td className="py-2 whitespace-nowrap">
+                          <button type="button" onClick={() => leseseiteLaden(s)}
+                                  className="apple-btn apple-btn-secondary !rounded-full !px-2.5 !py-0.5 text-xs mr-1">Seite herunterladen</button>
+                          <button type="button" onClick={() => leseseiteLoeschen(s)}
+                                  className="apple-btn apple-btn-secondary !rounded-full !px-2.5 !py-0.5 text-xs"
+                                  data-testid={`admin-pv-leseseite-loeschen-${s.id}`}>Löschen</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             )}
         </Card>

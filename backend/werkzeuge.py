@@ -241,6 +241,12 @@ SAMMLUNG_VERGLEICHE = "werkzeug_vergleiche"
 #: 1.5.13, routes/werkzeuge.werkzeug_lesebild) — die Datei im Datei-Speicher, Vorschau + Rohtext hier, 30 Tage
 SAMMLUNG_LESEBILDER = "werkzeug_lesebilder"
 LESEBILD_TAGE = 30
+#: Pruefung 09.10.2026 (Befund Ahmad, Opel Mokka-e: "Auf der Seite stehen keine Inseratsdaten"): Seiten, die die
+#: Erweiterung nicht lesen konnte, gepackt wie sie ankamen fuer den Betreiber aufheben (TTL-Index, hoechstens
+#: LESESEITEN_HOECHSTENS gesamt, 10 je Konto und Tag) — damit sich der Lesefehler nachstellen laesst.
+SAMMLUNG_LESESEITEN = "werkzeug_leseseiten"
+LESESEITE_TAGE = 14
+LESESEITEN_HOECHSTENS = 300
 LESEBILD_GRUENDE = {"pflichtfeld_fehlt": "Pflichtfeld fehlt (Marke/Modell, EZ oder km nicht lesbar)",
                     "marke_unbekannt": "Marke nicht erkannt", "modell_unbekannt": "Modell nicht erkannt",
                     "inserat_id_fehlt": "Inserat-ID / Hash-ID nicht gelesen"}

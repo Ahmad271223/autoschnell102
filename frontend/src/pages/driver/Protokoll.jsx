@@ -989,10 +989,12 @@ export default function Protokoll() {
         </div>
       )}
 
-      {/* 1 Fahrzeugdaten — alle 12 Zeilen wie im PDF, einzeln ankreuzbar */}
-      <Section n="1" title="Fahrzeugdaten"
-               hint="Jede Zeile mit dem Vertrag abgleichen: stimmt oder weicht ab. Bei Abweichung den richtigen Wert eintippen.">
-        <div className="space-y-3">
+      {/* 1 Fahrzeugdaten — alle 12 Zeilen wie im PDF, einzeln ankreuzbar.
+          Wunsch Ahmad 09.10.2026 ("Abholprotokoll so machen"): wie im PDF — je Zeile Bezeichnung, Wert laut
+          Vertrag und die Kreise "stimmt / weicht ab" (bzw. Ja/Nein) NEBENEINANDER statt einer Knopfreihe darunter. */}
+      <Section n="1" title="Fahrzeugdaten — vor Ort prüfen"
+               hint="Bitte Angaben mit dem Vertrag abgleichen und den zutreffenden Kreis ankreuzen. Bei „weicht ab“ den richtigen Wert eintippen.">
+        <div data-testid="vc-tabelle">
           {(tpl.vehicle_check_fields || []).map((fld) => {
             const istWert = (tpl.vehicle_check_values || {})[fld.key];
             const entry = f.vehicle_check?.[fld.key] || {};
@@ -1000,29 +1002,37 @@ export default function Protokoll() {
             const abweichend = entry.status === "weicht ab";
             const art = (tpl.vehicle_check_art || {})[fld.key] || "text";
             return (
-              <div key={fld.key} className="pb-2 border-b" style={{ borderColor: "var(--wa-06)" }}>
-                <div className="flex items-baseline justify-between gap-2">
-                  <span className="text-[11px] text-zinc-500">{fld.label}</span>
-                  <span className="text-sm text-right">
-                    <span className="text-[10px] text-zinc-500 mr-1">laut Vertrag</span>{istWert || "—"}
+              <div key={fld.key} className="py-2 border-b" style={{ borderColor: "var(--wa-06)" }}>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <span className="text-xs text-zinc-500 w-[7.5rem] shrink-0">{fld.label}</span>
+                  <span className="text-sm font-semibold flex-1 min-w-[5rem] break-words"
+                        data-testid={`vc-${fld.key}-vertrag`}>
+                    {istWert || "—"}
                   </span>
-                </div>
-                <div className="flex flex-wrap gap-1.5 mt-1.5">
-                  {fld.options.map((o) => (
-                    <button key={o} type="button" disabled={gesperrt}
-                            data-testid={`vc-${fld.key}-${o}`}
-                            onClick={() => {
-                              setVCheck(fld.key, "status", o);
-                              // Runde 33: Zurueck auf "stimmt" — der alte Korrekturwert
-                              // landete sonst trotzdem im unterschriebenen PDF.
-                              if (o !== "weicht ab" && entry.value) setVCheck(fld.key, "value", "");
-                            }}
-                            className={`px-3.5 tipp-40 rounded-lg text-xs border disabled:opacity-60 ${
-                              entry.status === o ? "bg-white/15 font-semibold text-white" : "text-zinc-400"}`}
-                            style={st}>
-                      {o}
-                    </button>
-                  ))}
+                  <div className="flex items-center gap-3 shrink-0">
+                    {fld.options.map((o) => {
+                      const gewaehlt = entry.status === o;
+                      return (
+                        <button key={o} type="button" disabled={gesperrt} aria-pressed={gewaehlt}
+                                data-testid={`vc-${fld.key}-${o}`}
+                                onClick={() => {
+                                  setVCheck(fld.key, "status", o);
+                                  // Runde 33: Zurueck auf "stimmt" — der alte Korrekturwert
+                                  // landete sonst trotzdem im unterschriebenen PDF.
+                                  if (o !== "weicht ab" && entry.value) setVCheck(fld.key, "value", "");
+                                }}
+                                className={`tipp-40 inline-flex items-center gap-1.5 text-sm disabled:opacity-60 ${
+                                  gewaehlt ? "font-semibold" : "text-zinc-400"}`}>
+                          <span aria-hidden="true"
+                                className="w-4 h-4 rounded-full border-2 inline-flex items-center justify-center shrink-0"
+                                style={{ borderColor: gewaehlt ? "var(--accent-red)" : "var(--border-default)" }}>
+                            {gewaehlt && <span className="w-2 h-2 rounded-full" style={{ background: "var(--accent-red)" }} />}
+                          </span>
+                          {o}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
                 {abweichend && (art === "monat_jahr" || art === "hu" ? (
                   // Wunsch Ahmad: nur Ziffern, der "/" kommt von selbst (MM/JJJJ).

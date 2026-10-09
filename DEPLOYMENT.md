@@ -4657,6 +4657,31 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
     `kupplung_zustand`, `technik_schaden_text`; `technik_zustand_normieren`), im PDF unter „2 · Zustand“.
     Abholauftrag/-protokoll: Zeile „Ladekabel / Adapter“ weg; „Gewerbliche Nutzung“/„Unfallfrei laut Angabe“ nur
     Ja/Nein (`protokoll_vergleich.FELDER`; die Fahrer-App nimmt die Antworten aus der Server-Vorlage).
+  - **Prüfung 09.10.2026 (Server-Review, Wunsch Ahmad „besser und sicherer“):** (M1) eine **reparierte Inserat-Nummer**
+    (`wz.inserat_nummer`, O→0 …) ist nie sicher: passt das Inserat dazu nicht zum Bildschirm → kein Link + Hinweis;
+    ohne Daten bleibt der Link mit Hinweis „unsicher gelesen“ (`fahrzeug.inserat_nummer_unsicher`). (M2) Erkennung
+    im Programm-Vergleich mit Wartegrenze wie die Seiten-Auswertung (`_erkennen_im_pool`, 2 Threads, 10 s → 503
+    Retry-After); **Probelauf** hat einen eigenen Minuten-Zähler (20/min je Konto, `_probelauf_limiter`). (M3) der
+    Probelauf **lernt nicht**; höchstens `erkennung_lernen.JE_FIRMA_HOECHSTENS` (3.000) gelernte Texte je Firma.
+    (N1) Lesebild ≤ 4 MP, `fahrzeug` als kleines Modell (`LesebildFahrzeugIn`), Vorschau über `_auswerten` (Pool +
+    Wartegrenze). (N2) Aufräumen der Lesebilder läuft nebenher (`_im_hintergrund`), Betreiber-Liste Standard 30.
+    (H1, Teil) **„Vertrag“ zählt nur die eigene Lesung**: `GET …/inserat-gelesen` sagt `gelesen` nur bei einer Lesung
+    der EIGENEN Firma oder dem Server-Speicher — bei fremder Lesung öffnet das Programm das Inserat und die eigene
+    Erweiterung liest es (kostet nichts). Die 24-h-Teilung fremder Lesungen für Links/Ampel und beim Einfügen in der
+    App (Entscheidung 04.10.) bleibt; ob auch dort nur eigene/bestätigte Lesungen gelten sollen, entscheidet Ahmad.
+  - **Befund Ahmad 09.10.2026 (Opel Mokka-e, Erweiterung: „Auf der Seite stehen keine Inseratsdaten“):**
+    `browser_helfer.mobile_listing_objekt` sucht jedes `"listing":{`-Objekt mit Attributen (vorher nur
+    `"listing":{"attributes":` — ein Inserat-Objekt, das mit `id` beginnt, wurde nicht gefunden); die passende Nummer
+    gewinnt. Dazu **Leseseiten**: Seiten, die die Erweiterung nicht lesen konnte (`SeiteUngueltig` „keine
+    Inseratsdaten“/„anderes Inserat“/„nicht ausgewertet“), bleiben gepackt in `werkzeug_leseseiten` (TTL 14 Tage,
+    10 je Konto und Tag, 300 gesamt; Konto-/Firmenlöschung räumt sie weg). Betreiber: Seite Programm-Vergleiche →
+    Browser-Erweiterung → „Nicht lesbar – Inseratsseiten“: `GET /admin/werkzeug-leseseiten`, Download
+    `…/{id}/seite` (entpackt, **text/plain + attachment + nosniff** — nie als HTML gerendert), `DELETE …/{id}`.
+  - **Wunsch Ahmad 09.10.2026 (Vertrag/Protokoll):** im Vertragsdialog sind „Abholuhrzeit (nur Terminplaner)“ und
+    „Notizen (intern)“ ganz weg (auch für den Chef; vorhandene Werte gehen beim Bearbeiten unverändert durch).
+    Fahrer-App, Abholprotokoll Abschnitt 1 „Fahrzeugdaten — vor Ort prüfen“: je Zeile Bezeichnung, Wert laut Vertrag
+    und die Kreise „stimmt / weicht ab“ (bzw. Ja/Nein) nebeneinander wie im PDF (`driver/Protokoll.jsx`, Testkennungen
+    `vc-<feld>-<option>` unverändert).
   - **Passwort trennt Werkzeuge (Entscheidung Ahmad 06.10.2026):** setzt der Betreiber ein neues Passwort
     (`POST /admin/users/{id}/password`), trennt `routes.werkzeuge.alle_trennen` Programm und Helfer des Kontos
     (Grund `passwort` → 401 mit klarem Text, neuer Code nötig; Audit-Meta `werkzeuge_getrennt`).

@@ -38,6 +38,8 @@ SAMMLUNG = "erkennung_gelernt"
 BELEGE_MINDESTENS = 2
 #: hoechstens so viele Belege je gelesenem Text (Speicher bleibt klein)
 BELEGE_HOECHSTENS = 50
+#: hoechstens so viele verschiedene gelesene Texte je Firma (Haertung 09.10.2026, M3) — ``tabelle`` laedt bis 5.000
+JE_FIRMA_HOECHSTENS = 3000
 GELERNT_TAGE = 180
 #: je Firma: {dealer_id: {"bis": monotonic, "daten": {schluessel: (Marke, Modell)}}}
 _TABELLEN: Dict[str, dict] = {}
@@ -131,6 +133,14 @@ async def lernen(db, roh: Optional[str], marke: Optional[str], modell: Optional[
         return
     jetzt = datetime.now(timezone.utc)
     try:
+        # Haertung 09.10.2026 (M3): hoechstens JE_FIRMA_HOECHSTENS gelesene Texte je Firma — ein neuer Text kommt
+        # dann nicht mehr dazu (bekannte Texte bekommen weiter Belege)
+        if (await db[SAMMLUNG].count_documents({"dealer_id": dealer_id}, limit=JE_FIRMA_HOECHSTENS)
+                >= JE_FIRMA_HOECHSTENS
+                and not await db[SAMMLUNG].count_documents({"_id": doc_id(dealer_id, roh)}, limit=1)):
+            log.warning("Erkennung: Firma %s hat schon %d gelernte Texte — %r nicht gespeichert",
+                        dealer_id, JE_FIRMA_HOECHSTENS, roh)
+            return
         await db[SAMMLUNG].update_one(
             {"_id": doc_id(dealer_id, roh), f"eintraege.{BELEGE_HOECHSTENS - 1}": {"$exists": False}},
             {"$addToSet": {"eintraege": {"marke": marke, "modell": modell, "beleg": str(beleg)[:80]}},

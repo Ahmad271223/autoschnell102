@@ -1251,17 +1251,14 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                 </span>
               </span>
             </label>
+            {/* Wunsch Ahmad 06.10.2026: der Sucher trägt keine Abholuhrzeit mehr ein — die Uhrzeit
+                legt der Terminplaner fest (sie steht ohnehin nicht im Vertrag).
+                Wunsch Ahmad 09.10.2026: das Uhrzeit-Feld ganz weg, auch für den Chef (pickup_time bleibt im
+                Formular, damit eine vorhandene Uhrzeit beim Bearbeiten unverändert durchgeht). */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
               <Field label="Abholdatum" type="date" value={form.pickup_date} onChange={(v) => set("pickup_date", v)} testid="contract-pickup-date"
                      disabled={bearbeiten}
                      helper={bearbeiten ? "Den Abholtermin bitte im Terminplaner verschieben — der Vertrag bekommt dann selbst eine neue Fassung." : undefined} />
-              {/* Wunsch Ahmad 06.10.2026: der Sucher trägt keine Abholuhrzeit mehr ein — die Uhrzeit
-                  legt der Terminplaner fest (sie steht ohnehin nicht im Vertrag). */}
-              {user?.role !== "sucher" && (
-                <Field label="Abholuhrzeit (nur Terminplaner)" type="time" value={form.pickup_time} onChange={(v) => set("pickup_time", v)} testid="contract-pickup-time"
-                       disabled={bearbeiten}
-                       helper="Steht nicht im Vertrag — nur für den Termin und die Fahrer-App." />
-              )}
             </div>
             {/* Rollenprüfung 22.09.2026 (RP-218): Der Hilfetext sagt jetzt, was
                 beim Leeren passiert — wie bei den Vertragsbedingungen ("leer =
@@ -1272,11 +1269,9 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
             {/* Wunsch Ahmad (15.09.2026): Sucher schreiben interne Notizen nicht beim
                 Vertrag, sondern spaeter im Terminplaner am Termin.
                 Wunsch Ahmad 21.09.2026: die Notiz steht nicht mehr im Vertrags-PDF
-                (beide Fassungen gehen an den Verkaeufer). */}
-            {user?.role !== "sucher" && (
-              <Field label="Notizen (intern)" value={form.notes} onChange={(v) => set("notes", v)} multiline testid="contract-notes"
-                     helper="Steht nicht im Vertrag — nur intern sichtbar (im Vertragsarchiv)." />
-            )}
+                (beide Fassungen gehen an den Verkaeufer).
+                Wunsch Ahmad 09.10.2026: das Notiz-Feld ganz weg (auch fuer den Chef) — Notizen
+                gehoeren an den Termin; eine vorhandene Notiz geht beim Bearbeiten unveraendert durch. */}
           </Section>
 
           {/* Wunsch Ahmad 26.09.2026 abends: Vertragsnummer und Kundennummer

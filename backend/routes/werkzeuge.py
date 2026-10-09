@@ -570,6 +570,8 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     user, v, _firma_doc, _abo = await _programm(werkzeug_id, schluessel, programm_version)
     if not await _vergleich_limiter.check(f"konto:{user['id']}"):      # je Konto (Paket 2): Neu-Verbinden hilft nicht
         raise HTTPException(429, "Zu viele Vergleiche in kurzer Zeit – bitte kurz warten.")
+    if body.probelauf and not await _probelauf_limiter.check(f"konto:{user['id']}"):
+        raise HTTPException(429, "Zu viele Probeläufe in kurzer Zeit – bitte kurz warten.")
     # Entscheidung Ahmad 06.10.2026: hoechstens 600 Vergleiche je Konto und Tag ueber das Programm
     # (PROGRAMM_TAGESLIMIT_JE_KONTO); der Probelauf zaehlt nicht
     from provider_fetch import TageslimitErreicht, programm_tageslimit
@@ -594,7 +596,7 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
             {"werkzeug": wz.BROWSER_HELFER, "user_id": user["id"]},
             {"_id": 0, "programm_version": 1, "zuletzt_am": 1, "pc_name": 1, "vorgang_verpasst_am": 1,
              "vorgang_ok_am": 1}),
-        asyncio.get_running_loop().run_in_executor(_ERKENNEN_POOL, _erkennen, f, gelernt_tab, alternativen))
+        _erkennen_im_pool(f, gelernt_tab, alternativen))
     # Pruefung 08.10.2026: die Erweiterung zaehlt nur, wenn sie in den letzten Tagen da war (entfernt/abgeschaltet ->
     # wie ohne), und nicht, solange sie den letzten Vorgang verpasst hat (nicht im Browser des Programms)
     if not wz.helfer_aktiv(helfer):
@@ -609,6 +611,7 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
                        and wz.version_mindestens(helfer_version, wz.VORGANG_HELFER))
     # 09.10.2026: eindeutige Lesefehler der Texterkennung in der Nummer reparieren (O->0, I->1 …), dann der Link;
     # ergibt die erste Lesung keinen, die zweite des Programms (ab 1.5.12)
+    roh_nummer = str(f.get("inserat_id") or "").strip()
     f["inserat_id"] = wz.inserat_nummer(f.get("inserat_id"))
     f["inserat_url"] = wz.inserat_url(f.get("quelle"), f.get("inserat_id"), f.get("hash_id"))
     for alt in alternativen.get("inserat_id") or []:
@@ -617,9 +620,15 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
         nummer = wz.inserat_nummer(alt)
         if wz.inserat_url(f.get("quelle"), nummer, f.get("hash_id")):
             f["inserat_id"], f["inserat_url"] = nummer, wz.inserat_url(f.get("quelle"), nummer, f.get("hash_id"))
+    # Haertung 09.10.2026 (M1): eine reparierte Nummer (oder eine aus dem zweiten Leseversuch) ist nie sicher — die
+    # Texterkennung verwechselt auch 7/Z oder 8/S, und mobile.de-Nummern liegen dicht: eine falsche Ziffer trifft ein
+    # fremdes Inserat (fremdes Auto im Vergleich und im Kaufvertrag). Darum: passt das Inserat zur Nummer NICHT zum
+    # Bildschirm, kein Link; gibt es keine Daten dazu, bleibt der Link (zum Oeffnen und Lesen) mit Hinweis.
+    nummer_unsicher = bool(f["inserat_url"]) and f["inserat_id"] != roh_nummer
+    nummer_hinweis = None
     vehicle = wz.fahrzeug_zu_vehicle(f)
-    # Befund/Wunsch Ahmad 09.10.2026 ("das darf alles nicht passieren"): liegt das Inserat schon gelesen vor (Erweiterung
-    # irgendeiner Firma, gemeinsamer Speicher), die Vergleiche aus DIESEN Daten bauen — wenn EZ/km zum Bildschirm passen
+    # Befund/Wunsch Ahmad 09.10.2026 ("das darf alles nicht passieren"): liegt das Inserat schon gelesen vor (eigene
+    # Erweiterung, gemeinsamer Speicher), die Vergleiche aus DIESEN Daten bauen — wenn EZ/km zum Bildschirm passen
     # (sonst koennte die Nummer falsch gelesen sein). Weicht die Bildschirm-Lesung ab, lernt der Server daraus.
     if f["inserat_url"]:
         from listing_identity import ListingIdentityError, get_listing_identity
@@ -628,20 +637,35 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
         except ListingIdentityError:
             cache_key = ""
         echt = await erkennung_lernen.inserat_daten(db, cache_key, user)
-        if erkennung_lernen.passt_zum_bildschirm(echt, f, erkannt.get("marke") if erkannt.get("erkannt") else None):
-            if erkennung_lernen.modell_weicht_ab(echt, erkannt.get("marke"), erkannt.get("modell"),
-                                                 bool(erkannt.get("modell_gefunden"))):
+        passt = erkennung_lernen.passt_zum_bildschirm(echt, f, erkannt.get("marke") if erkannt.get("erkannt") else None)
+        if passt:
+            # Haertung 09.10.2026 (M3): der Probelauf lernt nicht (er zaehlt zu keinem Tageslimit — sonst liesse sich
+            # die Sammlung der Firma mit beliebigen Bildschirmtexten fuellen)
+            if not body.probelauf and erkennung_lernen.modell_weicht_ab(
+                    echt, erkannt.get("marke"), erkannt.get("modell"), bool(erkannt.get("modell_gefunden"))):
                 await erkennung_lernen.lernen(db, f.get("marke_modell_text"), echt.get("make_label"),
                                               echt.get("model_label"), cache_key, user.get("dealer_id"))
             vehicle = erkennung_lernen.vehicle_aus_inserat(echt, vehicle)
             erkannt.update(marke=echt.get("make_label") or erkannt.get("marke"),
                            modell=echt.get("model_label") or erkannt.get("modell"), erkannt=True,
                            modell_gefunden=True, quelle="inserat")
+        elif nummer_unsicher and isinstance(echt, dict) and echt:
+            # die reparierte Nummer gehoert zu einem ANDEREN Auto: kein Link, Bildschirm-Werte, Nummer wie gelesen
+            f["inserat_url"], f["inserat_id"], f["inserat_nummer_unsicher"] = None, roh_nummer, True
+            nummer_hinweis = ("Inserat-Nummer unsicher gelesen – das Inserat zu dieser Nummer ist ein anderes Auto. "
+                              "Kein Inserat-Link; für den Kaufvertrag bitte die Adresse aus dem Browser einfügen.")
+        elif nummer_unsicher:
+            f["inserat_nummer_unsicher"] = True
+            nummer_hinweis = (f"Inserat-Nummer {f['inserat_id']} unsicher gelesen"
+                              + (f" (auf dem Bildschirm „{roh_nummer}“)" if roh_nummer else "")
+                              + " – bitte im Inserat prüfen, ob es dasselbe Auto ist.")
     f["erkennung"] = erkannt.pop("quelle", "bildschirm")
     # bleibt in "fahrzeug" der Antwort: das Programm (ab 1.5.13) schickt bei False ein Bild der Anzeige (Lesebild)
     f["modell_gefunden"] = erkannt["modell_gefunden"] = bool(erkannt.get("modell_gefunden", False))
     # Befund 04.10.2026: unplausible EZ/km sagen — die Filter bleiben wie eingestellt (wz.plausibel)
     melden = wz.plausibel(f)
+    if nummer_hinweis:
+        melden.insert(0, nummer_hinweis)
     links, hinweise = wz.vergleichs_links(vehicle, regeln)      # Navi + Beschaedigte wie eingestellt (04.10.)
     # 08.10.2026: nur die Portale, die das Konto in AutoSchnell gewaehlt hat (eine Wahl fuer App/Programm/Helfer)
     links, hinweise = wz.nach_portalen(links, hinweise, wz.portale_von(user))
@@ -785,6 +809,37 @@ async def _vorab_abrufen(user: dict, url: Optional[str]) -> dict:
 # Vergleichsseite, die die Erweiterung danach oeffnet, kommt ueber /marktlage zurueck: Platz + Ampel.
 # Kein Apify-Abruf, kein Tageslimit, keine KI.
 _inserat_limiter = SlidingWindowRateLimiter(max_attempts=120, window_seconds=60, name="werkzeug_inserat")
+#: Haertung 09.10.2026 (M2): der Probelauf zaehlt nicht zum Tageslimit — darum ein eigener, kleiner Minuten-Zaehler
+#: (sonst 120 Erkennungen je Minute ohne jede Grenze)
+_probelauf_limiter = SlidingWindowRateLimiter(max_attempts=20, window_seconds=60, name="werkzeug_probelauf")
+#: Pruefung 09.10.2026 (Befund Mokka-e): nicht lesbare Seiten fuer den Betreiber — hoechstens 10 je Konto und Tag
+_leseseite_limiter = SlidingWindowRateLimiter(max_attempts=10, window_seconds=86400, name="werkzeug_leseseite")
+_LESESEITE_GRUENDE = ("keine Inseratsdaten", "anderen Inserat", "nicht ausgewertet")
+
+
+async def _leseseite_merken(user: dict, v: dict, body, identity: dict, grund: str) -> None:
+    """Pruefung 09.10.2026 (Befund Ahmad, Opel Mokka-e): eine Seite, die der Helfer nicht lesen konnte, fuer den
+    Betreiber aufheben — gepackt, wie sie ankam (werkzeug_leseseiten, LESESEITE_TAGE per TTL, LESESEITEN_HOECHSTENS
+    gesamt), damit sich der Lesefehler nachstellen laesst. Fehler hier aendern die Antwort an die Erweiterung nie."""
+    try:
+        if not any(g in grund for g in _LESESEITE_GRUENDE):
+            return
+        if not await _leseseite_limiter.check(f"konto:{user['id']}"):
+            return
+        jetzt = datetime.now(timezone.utc)
+        await db[wz.SAMMLUNG_LESESEITEN].insert_one({
+            "id": str(uuid.uuid4()), "dealer_id": user["dealer_id"], "user_id": user["id"],
+            "pc_name": v.get("pc_name") or "", "url": body.url.strip()[:2048], "portal": identity.get("source") or "",
+            "item_id": str(identity.get("item_id") or "")[:60], "grund": grund[:200], "seite": body.seite,
+            "groesse": len(body.seite), "erstellt_am": jetzt.isoformat(),
+            "ablauf": jetzt + timedelta(days=wz.LESESEITE_TAGE)})
+        n = await db[wz.SAMMLUNG_LESESEITEN].count_documents({})
+        if n > wz.LESESEITEN_HOECHSTENS:        # Obergrenze gesamt: die aeltesten weg
+            alte = [d["id"] async for d in db[wz.SAMMLUNG_LESESEITEN].find({}, {"_id": 0, "id": 1})
+                    .sort("erstellt_am", 1).limit(n - wz.LESESEITEN_HOECHSTENS)]
+            await db[wz.SAMMLUNG_LESESEITEN].delete_many({"id": {"$in": alte}})
+    except Exception:  # noqa: BLE001
+        log.exception("Leseseite nicht aufgehoben")
 _marktlage_limiter = SlidingWindowRateLimiter(max_attempts=240, window_seconds=60, name="werkzeug_marktlage")
 #: base64(gzip(HTML)): ~4/3 der gepackten Groesse (browser_helfer.MAX_GEPACKT)
 _SEITE_MAX = 4 * 1024 * 1024 + 16
@@ -818,6 +873,40 @@ async def _auswerten(fn, *args):
         return await asyncio.get_running_loop().run_in_executor(_AUSWERTEN_POOL, functools.partial(fn, *args))
     finally:
         _auswerten_sperre.release()
+
+
+#: Haertung 09.10.2026 (M2): die Erkennung im Programm-Vergleich (bis 4 Laeufe je Anfrage, je ~0,2 s) lief ohne
+#: Wartegrenze auf zwei Threads — ein Konto mit 120 Vergleichen je Minute liess alle /vergleich des Prozesses endlos
+#: warten. Jetzt wie die Seiten-Auswertung: wer laenger als _ERKENNEN_WARTEN_S auf einen Thread wartet, bekommt 503.
+_ERKENNEN_GLEICHZEITIG = 2
+_ERKENNEN_WARTEN_S = 10
+_erkennen_sperre = None
+
+
+async def _erkennen_im_pool(f: dict, gelernt_tab: Optional[dict], alternativen: Optional[dict]) -> dict:
+    global _erkennen_sperre
+    if _erkennen_sperre is None:
+        _erkennen_sperre = asyncio.Semaphore(_ERKENNEN_GLEICHZEITIG)
+    try:
+        await asyncio.wait_for(_erkennen_sperre.acquire(), _ERKENNEN_WARTEN_S)
+    except asyncio.TimeoutError:
+        raise HTTPException(503, "Gerade werden viele Vergleiche erkannt – bitte gleich noch einmal.",
+                            headers={"Retry-After": "5"})
+    try:
+        return await asyncio.get_running_loop().run_in_executor(_ERKENNEN_POOL, _erkennen, f, gelernt_tab, alternativen)
+    finally:
+        _erkennen_sperre.release()
+
+
+#: Haertung 09.10.2026 (N2): Aufraeumen nebenher — das Programm wartet nach dem Hochladen nicht auf bis zu 200
+#: Speicher-Loeschungen. Die Aufgaben bleiben referenziert, bis sie fertig sind (sonst raeumt sie die Muellabfuhr ab).
+_hintergrund: set = set()
+
+
+def _im_hintergrund(coro) -> None:
+    t = asyncio.get_running_loop().create_task(coro)
+    _hintergrund.add(t)
+    t.add_done_callback(_hintergrund.discard)
 
 
 #: Wunsch Ahmad 04.10.2026: Programm und Helfer arbeiten zusammen — was das Programm in dieser Zeit verglichen
@@ -885,11 +974,13 @@ async def werkzeug_inserat(werkzeug_id: str, body: InseratIn,
         fahrzeug, bewertung = await _auswerten(
             lambda: bh.inserat_auslesen(identity, body.url.strip(), bh.seite_entpacken(body.seite)))
     except bh.SeiteUngueltig as exc:
+        await _leseseite_merken(user, v, body, identity, str(exc))       # Befund Mokka-e: Seite fuer den Betreiber
         raise HTTPException(422, str(exc))
     except ListingGone as exc:
         raise HTTPException(404, str(exc))
     except Exception:  # noqa: BLE001 — eine unbekannte Seite ist ein 422, kein 500
         log.exception("Browser-Helfer: Inserat %s nicht auswertbar", identity["cache_key"])
+        await _leseseite_merken(user, v, body, identity, "Die Seite konnte nicht ausgewertet werden.")
         raise HTTPException(422, "Die Seite konnte nicht ausgewertet werden.")
     inserat_url = wz.inserat_url(identity["source"], identity["item_id"], identity["item_id"]) or body.url.strip()
     profil, regeln = await _firmenregeln(user)
@@ -1171,7 +1262,11 @@ async def werkzeug_inserat_gelesen(werkzeug_id: str, url: str = Query(..., min_l
         identity = get_listing_identity(url.strip())
     except ListingIdentityError:
         raise HTTPException(400, "Kein Inserat von mobile.de, AutoScout24 oder Kleinanzeigen.")
-    if await inserat_lesen(db, identity["cache_key"], user["id"], user.get("dealer_id") or "") is not None:
+    # Haertung 09.10.2026: fuer "Vertrag" zaehlt nur die Lesung der EIGENEN Firma (oder der Server-Speicher) —
+    # eine fremde Lesung (anderes Konto, anderer Firma, 24 h) koennte gefaelscht sein; das Programm oeffnet dann das
+    # Inserat und die eigene Erweiterung liest es (kostet nichts). Diesen Weg geht nur ein Konto mit Erweiterung.
+    gelesen = await inserat_lesen(db, identity["cache_key"], user["id"], user.get("dealer_id") or "")
+    if gelesen is not None and (gelesen[2].get("dealer_id") or "") == (user.get("dealer_id") or ""):
         return {"gelesen": True, "quelle": "browser"}
     if await db.listings_cache.count_documents(
             {"cache_key": identity["cache_key"], "data": {"$ne": None},
@@ -1202,19 +1297,29 @@ LESEBILD_MAX = 1536 * 1024
 _LESEBILD_FAHRZEUG = ("marke_modell_text", "titel", "quelle", "inserat_id")
 
 
+class LesebildFahrzeugIn(BaseModel):
+    """Pruefung 09.10.2026 (N1): nur die vier genutzten Felder, begrenzt — vorher ein beliebig grosses dict."""
+    marke_modell_text: Optional[str] = Field(None, max_length=160)
+    titel: Optional[str] = Field(None, max_length=160)
+    quelle: Optional[str] = Field(None, max_length=60)
+    inserat_id: Optional[str] = Field(None, max_length=60)
+
+
 class LesebildIn(BaseModel):
     grund: Literal["pflichtfeld_fehlt", "marke_unbekannt", "modell_unbekannt", "inserat_id_fehlt"]
     fehlt: List[Annotated[str, Field(max_length=60)]] = Field(default_factory=list, max_length=10)
     rohtext: str = Field("", max_length=6000)
     vorgang_id: Optional[str] = Field(None, max_length=64)
-    fahrzeug: Optional[dict] = None
+    fahrzeug: Optional[LesebildFahrzeugIn] = None
     #: base64(PNG) — hoechstens LESEBILD_MAX Bytes entpackt
     bild: str = Field(..., min_length=20, max_length=LESEBILD_MAX * 4 // 3 + 16)
 
 
 #: Haertung 09.10.2026: ein 1,5-MB-PNG kann 10.000 x 8.000 Pixel tragen (320 MB entpackt, unter Pillows Bomben-
 #: Grenze) — die Maße stehen im Kopf (IHDR), darum VOR dem Entpacken pruefen. AutoPointer-Anzeigen sind <= ~2.000 px.
-LESEBILD_KANTE_MAX, LESEBILD_PIXEL_MAX = 4096, 8_000_000
+#: Pruefung 09.10.2026 (N1): 4 Megapixel reichen (Kopf + Technik-Tabelle, <= ~2.000 px breit und niedrig) — bei
+#: 16-Bit-RGBA waeren 8 MP sonst 64 MB + 24 MB je Bild im Thread.
+LESEBILD_KANTE_MAX, LESEBILD_PIXEL_MAX = 4096, 4_000_000
 
 
 def png_masse(raw: bytes) -> tuple:
@@ -1286,8 +1391,15 @@ async def werkzeug_lesebild(werkzeug_id: str, body: LesebildIn,
         raise HTTPException(422, "Bild zu groß (Maße).")
     try:
         validate_image_bytes(raw, "Lesebild")
-        # im begrenzten Pool der Seiten-Auswertung (hoechstens 4 je Prozess), nicht im Standard-Pool
-        vorschau = await asyncio.get_running_loop().run_in_executor(_AUSWERTEN_POOL, _lesebild_vorschau, raw)
+    except Exception as exc:  # noqa: BLE001
+        log.info("Lesebild von %s nicht lesbar: %s", user["id"], exc)
+        raise HTTPException(422, "Bild nicht lesbar.")
+    try:
+        # Pruefung 09.10.2026 (N1): ueber _auswerten — derselbe begrenzte Pool UND dieselbe Wartegrenze (503) wie die
+        # Seiten-Auswertung; vorher stellten sich Lesebilder ohne Grenze vor die Seiten
+        vorschau = await _auswerten(_lesebild_vorschau, raw)
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         log.info("Lesebild von %s nicht lesbar: %s", user["id"], exc)
         raise HTTPException(422, "Bild nicht lesbar.")
@@ -1298,7 +1410,7 @@ async def werkzeug_lesebild(werkzeug_id: str, body: LesebildIn,
         log.error("Lesebild nicht gespeichert: %s", exc)
         raise HTTPException(503, "Speicher gerade nicht erreichbar – bitte später.")
     jetzt = datetime.now(timezone.utc)
-    fz = body.fahrzeug if isinstance(body.fahrzeug, dict) else {}
+    fz = body.fahrzeug.model_dump() if body.fahrzeug is not None else {}
     doc = {
         "id": str(uuid.uuid4()), "werkzeug": werkzeug_id, "dealer_id": user["dealer_id"], "user_id": user["id"],
         "pc_name": v.get("pc_name") or "", "grund": body.grund,
@@ -1309,15 +1421,16 @@ async def werkzeug_lesebild(werkzeug_id: str, body: LesebildIn,
         "ablauf": jetzt + timedelta(days=wz.LESEBILD_TAGE),
     }
     await db[wz.SAMMLUNG_LESEBILDER].insert_one(doc)
-    await _lesebilder_aufraeumen(user["dealer_id"])
+    _im_hintergrund(_lesebilder_aufraeumen(user["dealer_id"]))       # N2: das Programm wartet nicht darauf
     return {"ok": True, "id": doc["id"]}
 
 
 @router.get("/admin/werkzeug-lesebilder")
-async def admin_lesebilder(limit: int = Query(50, ge=1, le=200), dealer_id: Optional[str] = None,
+async def admin_lesebilder(limit: int = Query(30, ge=1, le=200), dealer_id: Optional[str] = None,
                            _=Depends(current_super_admin)):
-    """Betreiber: die nicht erkannten Anzeigen (neueste zuerst) mit Vorschau, Rohtext, Konto und Firma."""
-    await _lesebilder_aufraeumen()
+    """Betreiber: die nicht erkannten Anzeigen (neueste zuerst) mit Vorschau, Rohtext, Konto und Firma.
+    Pruefung 09.10.2026 (N2): Standard 30 (je Eintrag bis ~70 KB Vorschau + Rohtext), Aufraeumen nebenher."""
+    _im_hintergrund(_lesebilder_aufraeumen())
     filt: dict = {}
     if dealer_id:
         filt["dealer_id"] = dealer_id
@@ -1355,6 +1468,50 @@ async def admin_lesebild_datei(bild_id: str, _=Depends(current_super_admin)):
 async def admin_lesebild_loeschen(bild_id: str, _=Depends(current_super_admin)):
     n = await lesebilder_loeschen({"id": bild_id}, hoechstens=1)
     if not n:
+        raise HTTPException(404, NICHT_GEFUNDEN)
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- Leseseiten (Pruefung 09.10.2026, Befund Mokka-e)
+@router.get("/admin/werkzeug-leseseiten")
+async def admin_leseseiten(limit: int = Query(30, ge=1, le=200), _=Depends(current_super_admin)):
+    """Betreiber: Inseratsseiten, die die Erweiterung nicht lesen konnte (neueste zuerst) — ohne die Seite selbst."""
+    roh = [x async for x in db[wz.SAMMLUNG_LESESEITEN].find({}, {"_id": 0, "seite": 0, "ablauf": 0})
+           .sort("erstellt_am", -1).limit(limit)]
+    namen = await _konten([x.get("user_id") for x in roh])
+    firmen = {}
+    ids = list({x.get("dealer_id") for x in roh if x.get("dealer_id")})
+    if ids:
+        async for d in db.dealers.find({"id": {"$in": ids}}, {"_id": 0, "id": 1, "company_name": 1, "kunden_nr": 1}):
+            firmen[d["id"]] = {"firma": d.get("company_name") or "", "kunden_nr": d.get("kunden_nr")}
+    leer = {"konto": "", "name": "gelöschtes Konto", "rolle": ""}
+    for x in roh:
+        x.update(namen.get(x.get("user_id"), leer))
+        x.update(firmen.get(x.get("dealer_id"), {"firma": "", "kunden_nr": None}))
+    return {"leseseiten": roh, "gesamt": await db[wz.SAMMLUNG_LESESEITEN].count_documents({}),
+            "tage": wz.LESESEITE_TAGE}
+
+
+@router.get("/admin/werkzeug-leseseiten/{seite_id}/seite")
+async def admin_leseseite_datei(seite_id: str, _=Depends(current_super_admin)):
+    """Die Seite entpackt als Download — NIE zum Anzeigen (fremde Seite, fremde Skripte): text/plain, attachment."""
+    import browser_helfer as bh
+    d = await db[wz.SAMMLUNG_LESESEITEN].find_one({"id": seite_id}, {"_id": 0, "seite": 1})
+    if not d or not d.get("seite"):
+        raise HTTPException(404, NICHT_GEFUNDEN)
+    try:
+        html = await _auswerten(bh.seite_entpacken, d["seite"])       # Bomben-Grenzen wie beim Einreichen
+    except bh.SeiteUngueltig as exc:
+        raise HTTPException(422, str(exc))
+    return StreamingResponse(iter([html.encode("utf-8")]), media_type="text/plain; charset=utf-8",
+                             headers={"Content-Disposition": f'attachment; filename="leseseite-{seite_id}.html.txt"',
+                                      "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+
+@router.delete("/admin/werkzeug-leseseiten/{seite_id}")
+async def admin_leseseite_loeschen(seite_id: str, _=Depends(current_super_admin)):
+    r = await db[wz.SAMMLUNG_LESESEITEN].delete_one({"id": seite_id})
+    if not r.deleted_count:
         raise HTTPException(404, NICHT_GEFUNDEN)
     return {"ok": True}
 

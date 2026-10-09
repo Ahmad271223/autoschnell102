@@ -156,17 +156,20 @@ describe("kein Ansprechpartner, Schäden unter der Skizze, Karten", () => {
   });
 });
 
-describe("Abholuhrzeit (Wunsch Ahmad 06.10.2026)", () => {
-  it("der Sucher sieht nur das Abholdatum — die Uhrzeit legt der Terminplaner fest", async () => {
+describe("Abholuhrzeit und interne Notiz (Wunsch Ahmad 06.10. und 09.10.2026)", () => {
+  it("der Sucher sieht nur das Abholdatum — die Uhrzeit legt der Terminplaner fest, Notizen gehören an den Termin", async () => {
     await oeffnen({ seller_name: "V", make_label: "VW" });
     expect(feld("contract-pickup-date")).not.toBeNull();
     expect(feld("contract-pickup-time")).toBeNull();
+    expect(feld("contract-notes")).toBeNull();
   });
 
-  it("der Chef sieht die Uhrzeit weiter", async () => {
+  it("auch der Chef sieht weder Uhrzeit noch Notiz-Feld (09.10.2026)", async () => {
     rolle.wert = "dealer";
     await oeffnen({ seller_name: "V", make_label: "VW" });
-    expect(feld("contract-pickup-time")).not.toBeNull();
+    expect(feld("contract-pickup-date")).not.toBeNull();
+    expect(feld("contract-pickup-time")).toBeNull();
+    expect(feld("contract-notes")).toBeNull();
   });
 });
 

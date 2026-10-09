@@ -1311,6 +1311,8 @@ _COMPANY_COLLECTIONS = (
     # 09.10.2026: Lesebilder nicht erkannter Anzeigen tragen dealer_id (die Dateien loescht lesebilder_loeschen,
     # siehe admin_delete_dealer)
     "werkzeug_lesebilder",
+    # Pruefung 09.10.2026 (Befund Mokka-e): nicht lesbare Inseratsseiten der Erweiterung tragen dealer_id (14 Tage TTL)
+    "werkzeug_leseseiten",
     # Go-Live 14.09.2026 (B6): users steht NICHT mehr im Tupel. Als letzter
     # Eintrag der Schleife lief users.delete_many noch VOR Snapshots, Dateien
     # und dealers.delete_many — brach einer dieser Schritte ab, fand der
@@ -1475,9 +1477,10 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
         await db.werkzeug_codes.delete_many({"user_id": user_id})
         # Browser-Helfer (04.10.2026): vom Browser des Kontos gelesene Inserate (Verkaeuferdaten) weg
         await db.werkzeug_inserate.delete_many({"user_id": user_id})
-        # 09.10.2026: Lesebilder des Kontos samt Dateien weg
+        # 09.10.2026: Lesebilder des Kontos samt Dateien weg; nicht lesbare Seiten (Befund Mokka-e) ebenso
         from routes.werkzeuge import lesebilder_loeschen
         await lesebilder_loeschen({"user_id": user_id})
+        await db.werkzeug_leseseiten.delete_many({"user_id": user_id})
         await db.werkzeug_vergleiche.update_many(
             {"user_id": user_id}, {"$set": {"user_id": _nutzer_pseudonym(user_id), "pc_name": ""}})
         await db.network_members.delete_many({"buyer_user_id": user_id})

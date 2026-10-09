@@ -82,6 +82,12 @@ def test_01_lesebild_hochladen_sehen_loeschen(welt):
         # Ablauf: ein alter Eintrag verschwindet samt Datei beim naechsten Aufruf
         db.werkzeug_lesebilder.update_one({"id": bid}, {"$set": {"ablauf": datetime.now(timezone.utc) - timedelta(days=1)}})
         requests.get(f"{API}/admin/werkzeug-lesebilder", headers=konten.super_kopf(), timeout=30)
+        # Pruefung 09.10.2026 (N2): das Aufraeumen laeuft nebenher — kurz warten statt sofort pruefen
+        import time
+        for _ in range(60):
+            if db.werkzeug_lesebilder.count_documents({"id": bid}) == 0:
+                break
+            time.sleep(0.1)
         assert db.werkzeug_lesebilder.count_documents({"id": bid}) == 0
         assert requests.get(f"{API}/admin/werkzeug-lesebilder/{bid}/bild", headers=konten.super_kopf(),
                             timeout=30).status_code == 404

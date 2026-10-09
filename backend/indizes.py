@@ -1305,6 +1305,9 @@ WERKZEUG_INDIZES = (
     # 09.10.2026: gelernte Lesefehler der Bildschirm-Erkennung (erkennung_lernen) — 180 Tage nach dem letzten Beleg weg
     ("erkennung_gelernt", [("ablauf", 1)], {"name": "erkennung_gelernt_ablauf", "expireAfterSeconds": 0}),
     ("erkennung_gelernt", [("dealer_id", 1)], {"name": "erkennung_gelernt_firma"}),       # Haertung 09.10.: je Firma
+    # Pruefung 09.10.2026 (Befund Mokka-e): Seiten, die die Erweiterung nicht lesen konnte — 14 Tage (TTL), Liste neueste zuerst
+    ("werkzeug_leseseiten", [("ablauf", 1)], {"name": "werkzeug_leseseiten_ablauf", "expireAfterSeconds": 0}),
+    ("werkzeug_leseseiten", [("erstellt_am", -1)], {"name": "werkzeug_leseseiten_zeit"}),
 )
 
 

@@ -42,6 +42,11 @@ beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   api.get.mockImplementation(async (pfad, { params } = {}) => {
     if (pfad === "/admin/werkzeug-downloads") return { data: { downloads: [] } };
+    if (pfad === "/admin/werkzeug-leseseiten") {
+      return { data: { gesamt: 1, tage: 14, leseseiten: [{ id: "ls-1", url: "https://suchen.mobile.de/fahrzeuge/details.html?id=4711",
+        portal: "mobile", item_id: "4711", grund: "Auf der Seite stehen keine Inseratsdaten (Prüfseite von mobile.de oder Inserat nicht mehr online).",
+        groesse: 120000, erstellt_am: "2026-10-09T12:00:00Z", name: "Sucher", konto: "10007-1", firma: "FS", kunden_nr: 10007 }] } };
+    }
     if (pfad === "/admin/werkzeug-lesebilder") {
       return { data: { gesamt: 1, tage: 30, lesebilder: [{ id: "lb-1", grund: "modell_unbekannt", grund_text: "Modell nicht erkannt",
         fehlt: [], rohtext: "Marke, Modell: Hyundai IBO", fahrzeug: { marke_modell_text: "Hyundai IBO", inserat_id: "476271020" },
@@ -88,6 +93,23 @@ describe("Betreiber-Liste: Blöcke, Seiten, Top 20", () => {
     await act(async () => { el("admin-pv-werkzeug-browser-helfer").click(); });
     await warten();
     expect(el("admin-pv-lesebilder")).toBeNull();
+  });
+
+  it("Erweiterung: zeigt die nicht lesbaren Inseratsseiten mit Grund und Löschen (Prüfung 09.10.2026, Mokka-e)", async () => {
+    await act(async () => { wurzel.render(createElement(AdminProgrammVergleiche)); });
+    await warten();
+    expect(el("admin-pv-leseseiten")).toBeNull();                    // nur in der Erweiterungs-Ansicht
+    expect(api.get.mock.calls.some(([p]) => p === "/admin/werkzeug-leseseiten")).toBe(false);
+    await act(async () => { el("admin-pv-werkzeug-browser-helfer").click(); });
+    await warten();
+    const zeile = el("admin-pv-leseseite-ls-1");
+    expect(zeile).not.toBeNull();
+    expect(zeile.textContent).toContain("keine Inseratsdaten");
+    expect(zeile.textContent).toContain("mobile 4711");
+    expect(zeile.querySelector("a").getAttribute("href")).toBe("https://suchen.mobile.de/fahrzeuge/details.html?id=4711");
+    await act(async () => { el("admin-pv-leseseite-loeschen-ls-1").click(); });
+    await warten();
+    expect(api.delete).toHaveBeenCalledWith("/admin/werkzeug-leseseiten/ls-1");
   });
 
   it("Seite und Block wechseln fragt den Server; neuer Block beginnt auf Seite 1", async () => {
