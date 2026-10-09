@@ -542,6 +542,25 @@ def vorab_abruf_an() -> bool:
     return (os.environ.get("AUTOPOINTER_VORAB_ABRUF") or "false").strip().lower() in ("1", "true", "ja", "an")
 
 
+#: Befund Ahmad 09.10.2026 ("ab und zu erkennt er die Inserat-ID nicht"): die Texterkennung liest in der Nummer einzelne
+#: Ziffern als Buchstaben ("47627IO2O"). Nur EINDEUTIGE Verwechslungen werden repariert — O->0, I/l/i/|->1, S->5, Z->2;
+#: "B" (8 oder 3?) oder "G" (6 oder 9?) nicht: eine falsche Nummer fuehrte zu einem fremden Inserat (fremdes Auto im
+#: Kaufvertrag) — dann lieber kein Link und der Hinweis.
+_NUMMER_LESEFEHLER = str.maketrans({"O": "0", "o": "0", "I": "1", "l": "1", "i": "1", "|": "1",
+                                    "S": "5", "s": "5", "Z": "2", "z": "2"})
+
+
+def inserat_nummer(roh) -> str:
+    """Inserat-Nummer, wie AutoPointer sie zeigt — mit hoechstens 3 eindeutigen Lesefehlern (und hoechstens jedem dritten
+    Zeichen) repariert; sonst unveraendert."""
+    s = str(roh or "").strip()
+    if not s or s.isdigit():
+        return s
+    neu = s.translate(_NUMMER_LESEFEHLER)
+    geaendert = sum(1 for a, b in zip(s, neu) if a != b)
+    return neu if neu.isascii() and neu.isdigit() and len(neu) >= 6 and geaendert <= 3 and geaendert * 3 <= len(neu) else s
+
+
 def inserat_url(quelle, inserat_id, hash_id=None) -> Optional[str]:
     """Adresse des Original-Inserats oder None (lieber kein Link als ein falscher).
 

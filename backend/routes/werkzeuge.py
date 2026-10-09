@@ -586,6 +586,8 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
                            and wz.version_mindestens(helfer_version, wz.INSERAT_TAB_HELFER))
     vorgang_bekannt = (wz.version_mindestens(programm_version, wz.VORGANG_PROGRAMM)
                        and wz.version_mindestens(helfer_version, wz.VORGANG_HELFER))
+    # 09.10.2026: eindeutige Lesefehler der Texterkennung in der Nummer reparieren (O->0, I->1 …), dann der Link
+    f["inserat_id"] = wz.inserat_nummer(f.get("inserat_id"))
     f["inserat_url"] = wz.inserat_url(f.get("quelle"), f.get("inserat_id"), f.get("hash_id"))
     vehicle = wz.fahrzeug_zu_vehicle(f)
     # Befund 04.10.2026: unplausible EZ/km sagen — die Filter bleiben wie eingestellt (wz.plausibel)

@@ -180,3 +180,13 @@ def test_16_platzhalter_mit_zusammengeschriebenem_modell():
     # reine Zahl nur, wenn kein Name mit Buchstaben passt
     assert we.aus_titel(["300", "EQA"], "Mercedes EQA 300") == "EQA"
     assert we.aus_titel(["300", "EQA"], "Mercedes 300 SE") == "300"
+
+
+def test_17_weitere_lesefehler_der_texterkennung():
+    """Befund Ahmad 09.10.2026: Hyundai "i30" als "IBO" gelesen (3 -> B, 0 -> O) — nur eindeutige Treffer."""
+    z = we.zuordnen("Hyundai IBO", "Hyundai IBO 1.4 Trend")
+    assert (z["modell_text"], z["modell"]) == ("i30", "i30")
+    assert we.verwechslung(["i30", "i10", "i20"], "IBO") == "i30"
+    assert we.verwechslung(["i30", "i80"], "IBO") is None, "B kann 3 oder 8 sein -> zwei Treffer, keiner"
+    assert we.verwechslung(["X5", "X3"], "XS") == "X5"
+    assert we.verwechslung(["Golf"], "Go1f") is None, "nur Namen mit Ziffern"

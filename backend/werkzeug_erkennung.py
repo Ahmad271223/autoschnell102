@@ -95,19 +95,33 @@ def lese_form(s: Optional[str]) -> str:
     return "".join("1" if c in "il1" else "0" if c in "o0" else c for c in norm(s))
 
 
+#: Befund Ahmad 09.10.2026 (Hyundai "i30" als "IBO" gelesen): weitere Verwechslungen der Texterkennung — nur in EINE
+#: Richtung (gelesen ein Buchstabe, im Katalog eine Ziffer; nie Ziffer gegen Ziffer: "Q8O" ist Q80, nicht Q30), nur fuer
+#: Katalognamen mit Ziffern, Stelle fuer Stelle, und nur, wenn GENAU ein Name passt
+_BUCHSTABE_STATT_ZIFFER = {("b", "3"), ("b", "8"), ("s", "5"), ("z", "2"), ("g", "6"), ("g", "9")}
+
+
+def _aehnlich(gelesen: str, name: str) -> bool:
+    return len(gelesen) == len(name) and all(a == b or (a, b) in _BUCHSTABE_STATT_ZIFFER for a, b in zip(gelesen, name))
+
+
 def verwechslung(namen, modell: str) -> Optional[str]:
     """Katalogname, der sich vom gelesenen Modell nur durch i/l/1- bzw. o/0-Verwechslungen unterscheidet —
-    nur fuer Namen mit Ziffern und nur, wenn genau einer passt."""
+    nur fuer Namen mit Ziffern und nur, wenn genau einer passt. Seit 09.10.2026 als zweiter Schritt auch B statt 3/8,
+    S statt 5, Z statt 2, G statt 6/9 ("IBO" -> "i30"), ebenfalls nur bei genau einem Treffer."""
     ziel = lese_form(modell)
     if len(ziel) < 2:
         return None
-    treffer: List[str] = []
-    gesehen = set()
-    for n in namen:
-        if any(ch.isdigit() for ch in n) and lese_form(n) == ziel and n.lower() not in gesehen:
-            gesehen.add(n.lower())
-            treffer.append(n)
-    return treffer[0] if len(treffer) == 1 else None
+    for passt in (lambda n: lese_form(n) == ziel, lambda n: _aehnlich(ziel, lese_form(n))):
+        treffer: List[str] = []
+        gesehen = set()
+        for n in namen:
+            if any(ch.isdigit() for ch in n) and passt(n) and n.lower() not in gesehen:
+                gesehen.add(n.lower())
+                treffer.append(n)
+        if treffer:
+            return treffer[0] if len(treffer) == 1 else None
+    return None
 
 
 def _woerter(text: str) -> List[str]:

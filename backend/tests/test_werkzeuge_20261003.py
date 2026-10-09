@@ -589,6 +589,19 @@ def test_40e_erweiterung_vergleicht_nicht_ueber_die_programm_route(welt):
     assert r.status_code == 404
 
 
+def test_40f_inserat_nummer_mit_lesefehlern():
+    """Befund Ahmad 09.10.2026: "ab und zu erkennt er die Inserat-ID nicht" — eindeutige Lesefehler werden repariert,
+    mehrdeutige (B: 8 oder 3) nicht (lieber kein Link als ein fremdes Inserat)."""
+    assert wz.inserat_nummer("47627IO2O") == "476271020"
+    assert wz.inserat_nummer("3529S12138") == "3529512138"
+    assert wz.inserat_nummer("476271020") == "476271020"
+    assert wz.inserat_nummer("4762B1020") == "4762B1020", "B bleibt (8 oder 3?)"
+    assert wz.inserat_nummer("4OO27IOSO") == "4OO27IOSO", "zu viele Lesefehler: lieber nicht raten"
+    assert wz.inserat_nummer("") == "" and wz.inserat_nummer(None) == ""
+    assert wz.inserat_url("mobile.de", wz.inserat_nummer("47627IO2O")) == \
+        "https://suchen.mobile.de/fahrzeuge/details.html?id=476271020"
+
+
 def test_41_schluessel_ableiten():
     a = wz.schluessel_ableiten("geheim", "code-1", "pc-a")
     assert a == wz.schluessel_ableiten("geheim", "code-1", "pc-a")
