@@ -158,12 +158,13 @@ def test_05_quelle_liest_die_notizen_nicht_mehr():
 
 
 def test_06_dialog_sagt_dass_notizen_nicht_im_vertrag_stehen():
+    """Wunsch Ahmad 09.10.2026: das Notiz-Feld steht nicht mehr im Vertragsdialog (Notizen gehoeren an den Termin);
+    eine vorhandene Notiz bleibt im Vertragsarchiv sichtbar."""
     jsx = (PROJEKT / "frontend" / "src" / "components"
            / "ContractDialog.jsx").read_text(encoding="utf-8")
-    feld = jsx[jsx.index('label="Notizen (intern)"'):]
-    feld = feld[:feld.index("/>")]
-    assert 'helper="Steht nicht im Vertrag — nur intern sichtbar (im Vertragsarchiv)."' in feld
-    # ... und dort wird sie auch wirklich angezeigt
+    assert 'label="Notizen (intern)"' not in jsx and 'label="Abholuhrzeit' not in jsx
+    assert 'testid="contract-pickup-date"' in jsx, "das Abholdatum bleibt"
+    # ... im Archiv wird eine vorhandene Notiz weiter angezeigt
     archiv = (PROJEKT / "frontend" / "src" / "pages" / "app"
               / "PDFArchiv.jsx").read_text(encoding="utf-8")
     assert "it.contract_data?.notes" in archiv and "Notiz (intern)" in archiv
