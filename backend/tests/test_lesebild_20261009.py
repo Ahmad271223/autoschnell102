@@ -88,6 +88,28 @@ def test_01_lesebild_hochladen_sehen_loeschen(welt):
         db.werkzeug_lesebilder.delete_many({"dealer_id": welt["firma"]["dealer_id"]})
 
 
+def test_01b_genau_die_form_des_programms(welt):
+    """Programm 1.5.13 (Lesebilder.Nutzlast): vorgang_id immer vorhanden (null ohne Vorgang), fehlende Fahrzeugwerte
+    als "" statt null, "fehlt" nur bei pflichtfeld_fehlt — der Server nimmt genau das an."""
+    db = welt["db"]
+    pc = {**_verbinden(welt, "sucher", wid=wz.AUTOPOINTER, name="PC-Lesebild3"), "User-Agent": "AutoSchnell-Vergleich/1.5.13"}
+    body = {"grund": "pflichtfeld_fehlt", "rohtext": "Marke, Modell: / Erstzulassung: ", "vorgang_id": None,
+            "bild": base64.b64encode(_png(text="leer")).decode("ascii"),
+            "fehlt": ["Marke/Modell", "Erstzulassung", "Kilometerstand"],
+            "fahrzeug": {"marke_modell_text": "", "titel": "", "quelle": "mobile.de", "inserat_id": ""}}
+    try:
+        r = requests.post(f"{API}/werkzeuge/{wz.AUTOPOINTER}/lesebild", headers=pc, json=body, timeout=60)
+        assert r.status_code == 200, r.text
+        doc = db.werkzeug_lesebilder.find_one({"id": r.json()["id"]})
+        assert doc["fehlt"] == ["Marke/Modell", "Erstzulassung", "Kilometerstand"] and doc["vorgang_id"] is None
+        assert doc["fahrzeug"] == {"quelle": "mobile.de"}, "leere Werte werden nicht gespeichert"
+        liste = requests.get(f"{API}/admin/werkzeug-lesebilder", headers=konten.super_kopf(), timeout=30).json()
+        e = next(x for x in liste["lesebilder"] if x["id"] == doc["id"])
+        assert e["grund_text"].startswith("Pflichtfeld fehlt") and e["fehlt"] == doc["fehlt"]
+    finally:
+        db.werkzeug_lesebilder.delete_many({"dealer_id": welt["firma"]["dealer_id"]})
+
+
 def test_02_vergleich_nennt_modell_gefunden(welt):
     """Das Programm (ab 1.5.13) schickt bei modell_gefunden=false ein Lesebild — die Antwort muss es nennen."""
     pc = {**_verbinden(welt, "sucher", wid=wz.AUTOPOINTER, name="PC-Lesebild2"), "User-Agent": "AutoSchnell-Vergleich/1.5.13"}
