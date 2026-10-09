@@ -52,9 +52,9 @@ VERTRAG = {
 # vollstaendig (Klausel 4 enthaelt "auch ohne Unterschrift gültig").
 # Wunsch Ahmad 04.10.2026: kuerzere Ueberschriften (vorher "Ausstattung laut Inserat / Verkäuferangaben",
 # "Fahrzeugbeschreibung (vom Inserat)", "2 · Zusicherungen & Zustand")
-# Die Ueberschrift "Ausstattung" steckt auch in der Hinweiszeile darunter — fuer Reihenfolge und
-# "genau einmal" zaehlt deshalb die Hinweiszeile (sie gehoert fest zum Abschnitt).
-AUSSTATTUNG = "Ausstattung laut Inseratsangaben."
+# Die Hinweiszeile "Ausstattung laut Inseratsangaben." ist seit 09.10.2026 weg (Wunsch Ahmad) — fuer Reihenfolge
+# und "genau einmal" zaehlt die erste Ausstattung des Testfahrzeugs (steht nur in diesem Abschnitt).
+AUSSTATTUNG = "Navigationssystem"
 BESCHREIBUNG = "Beschreibung"
 GEWAEHR = "Gewährleistung:"
 BESONDERE = "Besondere Vereinbarungen"
@@ -123,7 +123,8 @@ def test_02_die_letzten_drei_teile(digital):
         assert UNTERSCHRIFTEN not in f, "die digitale Fassung hat keinen Abschnitt Unterschriften"
         assert "Mit ihrer Unterschrift" not in f
     else:
-        assert danach.index("Mit ihrer Unterschrift bestätigen beide Parteien") > 0
+        # Wunsch Ahmad 09.10.2026: unter den Unterschriften steht kein Satz mehr
+        assert "Mit ihrer Unterschrift bestätigen beide Parteien" not in f
 
 
 @pytest.mark.parametrize("digital", [False, True], ids=["druck", "digital"])

@@ -109,8 +109,7 @@ def test_05_anlegeweg_firma_aus_kein_block():
     text = _text(pdf)
     assert BLOCK not in text
     assert "Zulassungsbescheinigung Teil I & II" not in text
-    assert "Datum und Ort: 30.09.2026, Berlin" in text
-    assert "Datum und Ort: 30.09.2026, Dresden" in text
+    assert text.count("Datum und Ort: 30.09.2026, Dresden") == 2       # 09.10.2026: beide Seiten Ort des Kunden
 
 
 def test_06_anlegeweg_firma_an_und_ohne_einstellung_block():
@@ -280,7 +279,7 @@ def test_11_vorschau_und_vertrag_zeigen_denselben_block(welt, einstellung):
     vertrag_text = _text(base64.b64decode(doc["pdf_b64"]))
     assert (BLOCK in vorschau_text) is einstellung
     assert (BLOCK in vertrag_text) is einstellung, "Vertrag wie Vorschau"
-    assert "Datum und Ort: 30.09.2026, Berlin" in vertrag_text
+    assert "Datum und Ort: 30.09.2026, Dresden" in vertrag_text and "30.09.2026, Berlin" not in vertrag_text
 
 
 def test_12_migration_m7_friert_bool_ein(welt):

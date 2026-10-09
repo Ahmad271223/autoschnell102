@@ -60,7 +60,8 @@ DOCUMENT_ITEMS = [
     "COC-Papiere (EG-Übereinstimmung)",
     "Bedienungsanleitung",
     "Zweitsatz Reifen",
-    "Ladekabel / Adapter",
+    # Wunsch Ahmad 09.10.2026: "Ladekabel / Adapter" entfaellt im Abholauftrag/-protokoll (aeltere Apps, die die Zeile
+    # noch schicken, verlieren sie still in vorlage_filtern)
     "Werkzeug / Warndreieck / Verbandskasten",
 ]
 

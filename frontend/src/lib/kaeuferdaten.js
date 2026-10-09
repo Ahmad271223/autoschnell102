@@ -57,11 +57,8 @@ export function kaeuferLueckenFuellen(form, dealer) {
       geaendert = true;
     }
   }
-  if (!geaendert) return form;
-  if (next.dealer_city !== form.dealer_city && form.empfang_ort_kaeufer === form.dealer_city) {
-    next.empfang_ort_kaeufer = next.dealer_city;
-  }
-  return next;
+  // 09.10.2026: der Ort bei "Datum und Ort" ist der des Kunden — er folgt dem Firmensitz nicht mehr
+  return geaendert ? next : form;
 }
 
 // Rollenprüfung 22.09.2026 (RP-490): Ändert der Chef die Firmenadresse, während
@@ -81,10 +78,5 @@ export function kaeuferAktualisieren(form, dealer, beruehrt = {}) {
       geaendert = true;
     }
   }
-  if (!geaendert) return form;
-  if (next.dealer_city !== form.dealer_city && form.empfang_ort_kaeufer === form.dealer_city
-      && !beruehrt?.empfang_ort_kaeufer) {
-    next.empfang_ort_kaeufer = next.dealer_city;
-  }
-  return next;
+  return geaendert ? next : form;
 }

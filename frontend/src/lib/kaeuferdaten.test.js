@@ -102,8 +102,8 @@ describe("kaeuferLueckenFuellen", () => {
     expect(kaeuferLueckenFuellen({ ...LEER, dealer_city: "  " }, PROFIL).dealer_city).toBe("Nürnberg");
   });
 
-  test("Empfangs-Ort (Kaeufer) folgt dem Kaeufer-Ort nur, solange er ihm folgte", () => {
-    expect(kaeuferLueckenFuellen(LEER, PROFIL).empfang_ort_kaeufer).toBe("Nürnberg");
+  test("Empfangs-Ort (Kaeufer) folgt dem Firmensitz NICHT mehr (Wunsch Ahmad 09.10.2026: Ort des Kunden)", () => {
+    expect(kaeuferLueckenFuellen(LEER, PROFIL).empfang_ort_kaeufer).toBe(LEER.empfang_ort_kaeufer);
     const vonHand = { ...LEER, empfang_ort_kaeufer: "Fürth" };
     expect(kaeuferLueckenFuellen(vonHand, PROFIL).empfang_ort_kaeufer).toBe("Fürth");
     const ortGetippt = { ...LEER, dealer_city: "Erlangen", empfang_ort_kaeufer: "Erlangen" };

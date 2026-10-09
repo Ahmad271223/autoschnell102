@@ -39,7 +39,8 @@ def test_kurze_ueberschriften(layout):
         assert neu in gross, neu
     for alt in ("ZUSICHERUNGEN & ZUSTAND", "LAUT INSERAT / VERKÄUFERANGABEN", "FAHRZEUGBESCHREIBUNG (VOM INSERAT)"):
         assert alt not in gross, alt
-    assert "Ausstattung laut Inseratsangaben." in f, "die Hinweiszeile bleibt"
+    assert "Ausstattung laut Inseratsangaben." not in f, "Wunsch Ahmad 09.10.2026: die Hinweiszeile ist weg"
+    assert "Erfassung anhand der Fahrzeugskizze" not in f
 
 
 def test_stempel_dreimal_so_gross():

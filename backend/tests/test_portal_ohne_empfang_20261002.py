@@ -32,7 +32,8 @@ def test_01_portal_fassung_ohne_empfangsbestaetigung():
     for verboten in ("bestätigt Empfang von", "Schlüssel(n)", "Datum und Ort", "Kaufpreis erhalten", "Zulassungsbescheinigung Teil"):
         assert verboten not in portal, verboten
     assert portal.count("Unterschrift") >= 3                      # zwei Kaesten + Abschnittstitel
-    assert "Verkäufer" in portal and "Käufer" in portal and "Mit ihrer Unterschrift bestätigen beide Parteien" in portal
+    assert "Verkäufer" in portal and "Käufer" in portal
+    assert "Mit ihrer Unterschrift bestätigen beide Parteien" not in portal     # Wunsch Ahmad 09.10.2026: Satz weg
     # der Rest des Vertrags ist identisch (Kaufpreis, Fahrzeug, Verkaeufer)
     for stueck in ("12.500,00", "Golf", "Erika Mustermann", "KFZ-KAUFVERTRAG"):
         assert stueck in portal, stueck

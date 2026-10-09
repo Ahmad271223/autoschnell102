@@ -113,8 +113,8 @@ def test_01_empfangsbestaetigung_in_beiden_fassungen(digital):
     assert "Zulassungsbescheinigung Teil I & II" in f
     assert "KFZ mit 2 Schlüssel(n)" in f
     assert "Kaufpreis" in f
-    assert "Datum und Ort: 18.08.2026, Rensenheim" in f
-    assert "Datum und Ort: 18.08.2026, Grethem" in f
+    # Wunsch Ahmad 09.10.2026: beide Seiten derselbe Ort — der des Kunden (Verkaeufer), nicht der Firmensitz
+    assert f.count("Datum und Ort: 18.08.2026, Grethem") == 2 and "Rensenheim" not in f
     assert "Zulassung" in f and "Abgemeldet" in f
     assert "Echtzeitüberweisung" in f            # Umlaut korrekt
     # Wunsch Ahmad 01.10.2026: nur "Verkäufer" und "Käufer" — kein Halter/Händler mehr in den Kaesten
@@ -127,10 +127,10 @@ def test_02_druckfassung_behaelt_linien_digital_ohne():
     digital = _flach(_text(_pdf(dict(_BASIS, **_EMPFANG), digital=True)))
     # Beschluss 11.09.2026: je Partei nur noch "Datum und Ort" (Vorlage
     # Ahmad) — die fruehere zweite Linie "Ort, Datum" ist weg. Marker der
-    # Druckfassung ist "Mit ihrer Unterschrift".
+    # Druckfassung ist der Abschnitt "Unterschriften" (der Satz "Mit ihrer Unterschrift …" entfiel 09.10.2026).
     assert "Ort, Datum" not in druck and "Unterschrift" in druck
     assert druck.count("Datum und Ort:") == 2
-    assert "Mit ihrer Unterschrift" in druck
+    assert "UNTERSCHRIFTEN" in druck.upper() and "Mit ihrer Unterschrift" not in druck
     assert "Ort, Datum" not in digital and "Mit ihrer Unterschrift" not in digital
     assert "Dieser Vertrag ist ohne Unterschrift gültig." not in digital      # Wunsch Ahmad 01.10.2026: Satz weg
     # Wunsch Ahmad (15.09.2026): die Kundenfassung traegt KEINE Empfangs-
@@ -173,16 +173,15 @@ def test_05_nur_datum_oder_nur_ort():
     # nur Datum (Formular fuellt es immer vor) -> Linie fuer den Ort
     f = _flach(_text(_pdf(dict(_BASIS, empfang_datum="2026-08-18"))))
     assert f.count(f"Datum und Ort: 18.08.2026, {linie_ort}") == 2
-    # nur Ort -> Linie fuer das Datum; die andere Seite: durchgehende Linie
-    f = _flach(_text(_pdf(dict(_BASIS, empfang_ort_kaeufer="Rensenheim"))))
-    assert f"Datum und Ort: {linie_datum}, Rensenheim" in f
-    assert f"Datum und Ort: {linie_voll}" in f
-    # typischer Fall: Datum + Kaeufer-Ort, Inserat ohne Verkaeufer-Ort
+    # nur Ort (des Kunden) -> Linie fuer das Datum, auf beiden Seiten
+    f = _flach(_text(_pdf(dict(_BASIS, empfang_ort_verkaeufer="Grethem"))))
+    assert f.count(f"Datum und Ort: {linie_datum}, Grethem") == 2
+    # Wunsch Ahmad 09.10.2026: der Ort ist auf beiden Seiten der des Kunden — ein Kaeufer-Ort (Firmensitz) allein
+    # zaehlt nicht mehr: dann auf beiden Seiten die Linie fuer den Ort
     f = _flach(_text(_pdf(dict(_BASIS, empfang_datum="2026-08-18",
                                empfang_ort_kaeufer="Rensenheim"))))
-    assert "Datum und Ort: 18.08.2026, Rensenheim" in f
-    assert f"Datum und Ort: 18.08.2026, {linie_ort}" in f
-    assert f.count("Datum und Ort: 18.08.2026") == 2
+    assert "Rensenheim" not in f
+    assert f.count(f"Datum und Ort: 18.08.2026, {linie_ort}") == 2
     # beides da -> keine Linie im Empfangsblock
     f = _flach(_text(_pdf(dict(_BASIS, **_EMPFANG))))
     assert "Datum und Ort: 18.08.2026, Grethem" in f
@@ -237,8 +236,8 @@ def test_08_xml_im_ort_bricht_pdf_nicht(digital):
                         "empfang_ort_verkaeufer": "A & B <b>",
                         "schluessel_anzahl": "3"})
     f = _flach(_text(_pdf(c, digital=digital)))
-    assert f"Datum und Ort: 18.08.2026, {boese}" in f
-    assert "Datum und Ort: 18.08.2026, A & B <b>" in f
+    assert boese not in f, "der Kaeufer-Ort zaehlt seit 09.10.2026 nicht mehr (beide Seiten: Ort des Kunden)"
+    assert f.count("Datum und Ort: 18.08.2026, A & B <b>") == 2
     assert "KFZ mit 3 Schlüssel(n)" in f
 
 
@@ -247,9 +246,9 @@ def test_09_alles_auf_einer_seite_zusammen():
     pdf = _pdf(dict(_BASIS, **_EMPFANG))
     seiten = [_flach(p.extract_text() or "") for p in PdfReader(io.BytesIO(pdf)).pages]
     seite = next(s for s in seiten if "bestätigt Empfang von" in s)
-    for teil in ("Unterschrift", "Datum und Ort: 18.08.2026, Grethem",
-                 "Datum und Ort: 18.08.2026, Rensenheim", "Mit ihrer Unterschrift"):
+    for teil in ("Unterschrift", "Datum und Ort: 18.08.2026, Grethem"):
         assert teil in seite, teil
+    assert seite.count("Datum und Ort: 18.08.2026, Grethem") == 2
 
 
 # ---------------------------------------------------------------------------
@@ -321,5 +320,5 @@ def test_23_contractin_bis_ins_pdf():
     d["digital_vertragstext"] = DIGITAL_VERTRAGSTEXT_STANDARD
     for digital in (False,):                 # 15.09.2026: Empfang nur in der Druckfassung
         f = _flach(_text(_pdf(d, digital=digital)))
-        assert "Datum und Ort: 18.08.2026, Rensenheim" in f
+        assert f.count("Datum und Ort: 18.08.2026, Grethem") == 2       # 09.10.2026: beide Seiten Ort des Kunden
         assert "KFZ mit 2 Schlüssel(n)" in f and "Abgemeldet" in f

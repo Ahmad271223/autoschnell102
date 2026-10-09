@@ -536,6 +536,13 @@ def _empfang_datum_ort(datum_iso, ort) -> str:
     return f"{datum or '_' * 10}, {ort or '_' * 14}"
 
 
+def _uebergabe_ort(contract) -> str:
+    """Wunsch Ahmad 09.10.2026: "Datum und Ort" steht bei BEIDEN Parteien gleich — der Ort des Kunden (Verkaeufers),
+    denn dort wird das Auto uebergeben (vorher stand beim Kaeufer der Firmensitz: links "Wuppertal", rechts
+    "Hannover"). Fehlt der Ort des Kunden, bleibt auf beiden Seiten die Linie zum Ausfuellen von Hand."""
+    return str((contract or {}).get("empfang_ort_verkaeufer") or "").strip()
+
+
 def _empfang_block(seite, contract, st, breite):
     """Inhalt der Empfangsbestaetigung einer Partei (seite: "kaeufer" |
     "verkaeufer") als randlose Tabelle der Breite `breite`."""
@@ -546,10 +553,9 @@ def _empfang_block(seite, contract, st, breite):
             (c.get("empfang_zulassungsbescheinigung"), "Zulassungsbescheinigung Teil I & II"),
             (c.get("empfang_schluessel"), f"KFZ mit {anzahl or '____'} Schlüssel(n)"),
         ]
-        ort = c.get("empfang_ort_kaeufer")
     else:
         punkte = [(c.get("empfang_kaufpreis"), "Kaufpreis")]
-        ort = c.get("empfang_ort_verkaeufer")
+    ort = _uebergabe_ort(c)
     rows = [[Paragraph("<b>bestätigt Empfang von:</b>", st["sig_label"]), ""]]
     for an, text in punkte:
         rows.append([_Kaestchen(_angekreuzt(an)),
@@ -601,8 +607,9 @@ UNTERSCHRIFT_HOEHE = 1.3 * cm
 STEMPEL_HOEHE = 3 * UNTERSCHRIFT_HOEHE
 
 #: Wunsch Ahmad 04.10.2026: kuerzere Ueberschriften im Vertrag (vorher "2 · Zusicherungen & Zustand",
-#: "Ausstattung laut Inserat / Verkäuferangaben", "Fahrzeugbeschreibung (vom Inserat)"). Die Hinweiszeilen
-#: darunter ("Ausstattung laut Inseratsangaben." usw.) bleiben.
+#: "Ausstattung laut Inserat / Verkäuferangaben", "Fahrzeugbeschreibung (vom Inserat)"). Wunsch Ahmad 09.10.2026:
+#: auch die Hinweiszeilen darunter ("Ausstattung laut Inseratsangaben.", "Erfassung anhand der Fahrzeugskizze …")
+#: sind weg.
 TITEL_ZUSTAND = "2 · Zustand"
 TITEL_AUSSTATTUNG = "Ausstattung"
 TITEL_BESCHREIBUNG = "Beschreibung"
@@ -639,7 +646,7 @@ def _empfang_kasten(rolle, seite, contract, st, unterschrift, mit_empfang=True, 
     11.09.2026, wie Ahmads Vorlage): "Datum und Ort" steht schon im Kasten —
     zwei Datums-/Ortsangaben je Partei verwirrten."""
     c = contract or {}
-    ort = c.get("empfang_ort_kaeufer") if seite == "kaeufer" else c.get("empfang_ort_verkaeufer")
+    ort = _uebergabe_ort(c)          # 09.10.2026: beide Seiten derselbe Ort (der des Kunden)
     if portal:
         # Wunsch Ahmad 02.10.2026: im Kundenportal unten NUR die Unterschrift des Kunden und die der Firma —
         # kein "Kaufpreis erhalten", keine Schluesselanzahl, kein "Datum und Ort" (Zeit und Name stehen auf
@@ -1314,18 +1321,9 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
                 st["body"],
             ))
             story.append(Spacer(1, 2))
-        if damages_text or damages_list:
-            # Rollenpruefung 22.09.2026 (RP-429): Hier stand "Erfassung erfolgte
-            # vor Übergabe gemeinsam mit dem Verkäufer … siehe interne
-            # Dokumentation". Der Sucher erfasst die Schaeden aber meist aus der
-            # Ferne (Inserat/Telefon), und eine "interne Dokumentation" hat der
-            # Verkaeufer nie gesehen. Sachlich, ohne Behauptung, die nicht
-            # stimmt. (Wortlaut mit Ahmad abstimmen — Vertragstext.)
-            story.append(Paragraph(
-                "<i>Erfassung anhand der Fahrzeugskizze nach Angaben des Verkäufers "
-                "bzw. laut Inserat.</i>",
-                st["small"],
-            ))
+        # Rollenpruefung 22.09.2026 (RP-429): hier stand ein Hinweis zur Erfassung ("… gemeinsam mit dem Verkaeufer …",
+        # spaeter "Erfassung anhand der Fahrzeugskizze nach Angaben des Verkaeufers bzw. laut Inserat.") —
+        # Wunsch Ahmad 09.10.2026: entfaellt ganz.
         story.append(Spacer(1, 12))
 
     # ---------- Features ----------
@@ -1335,8 +1333,6 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
         story.append(_section(TITEL_AUSSTATTUNG, st))
         story.append(Spacer(1, 6))
         story.append(Paragraph(", ".join(_xml_escape(str(x)) for x in feats), st["body"]))
-        story.append(Spacer(1, 4))
-        story.append(Paragraph("<i>Ausstattung laut Inseratsangaben.</i>", st["small"]))
         story.append(Spacer(1, 12))
     elif feats:
         story.append(_section(TITEL_AUSSTATTUNG, st))
@@ -1352,13 +1348,9 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
         t.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"),
                                ("BOTTOMPADDING", (0, 0), (-1, -1), 2)]))
         story.append(t)
-        story.append(Spacer(1, 4))
-        # Rollenpruefung 22.09.2026 (RP-429): "Vor Vertragsabschluss vom Händler
-        # zu prüfen" war eine interne Arbeitsanweisung im Kundenvertrag.
-        story.append(Paragraph(
-            "<i>Ausstattung laut Inseratsangaben.</i>",
-            st["small"],
-        ))
+        # Rollenpruefung 22.09.2026 (RP-429): "Vor Vertragsabschluss vom Haendler zu pruefen" war eine interne
+        # Arbeitsanweisung im Kundenvertrag; danach stand hier "Ausstattung laut Inseratsangaben." —
+        # Wunsch Ahmad 09.10.2026: auch dieser Satz entfaellt.
         story.append(Spacer(1, 12))
 
     # Wunsch Ahmad 21.09.2026: Das Vertragsende lautet in BEIDEN Fassungen
@@ -1471,16 +1463,9 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
         Spacer(1, 8),
         sig,
         *([Spacer(1, 4), Paragraph(_xml_escape(str(hinweis)), st["small"])] if hinweis else []),
-        Spacer(1, 4),
-        Paragraph(
-            # Wunsch Ahmad (12.09.2026): der Satz zur elektronischen Uebermittlung
-            # ("eine eigenhaendige Unterschrift ist dann nicht erforderlich") stand
-            # hier als letzter Satz — Wunsch Ahmad 01.10.2026: dieser Satz entfaellt,
-            # unter den Unterschriften bleibt nur die Bestaetigung.
-            "Mit ihrer Unterschrift bestätigen beide Parteien die Richtigkeit "
-            "aller Angaben sowie den Erhalt einer Vertragsausfertigung.",
-            st["small"],
-        ),
+        # Wunsch Ahmad 09.10.2026: auch der Satz "Mit ihrer Unterschrift bestaetigen beide Parteien die Richtigkeit
+        # aller Angaben sowie den Erhalt einer Vertragsausfertigung." entfaellt ("ueberfluessig") — unter den
+        # Unterschriften steht nichts mehr (der Satz zur elektronischen Uebermittlung fiel schon am 01.10.2026).
     ]))
 
     footer_left = company

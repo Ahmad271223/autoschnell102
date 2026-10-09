@@ -34,7 +34,8 @@ def test_01_standard_an_wie_bisher():
     text = _text(_pdf(CONTRACT))
     assert "bestätigt Empfang von" in text
     assert "Zulassungsbescheinigung Teil I & II" in text and "Kaufpreis" in text
-    assert "25.09.2026, Berlin" in text and "25.09.2026, Dresden" in text
+    # Wunsch Ahmad 09.10.2026: beide Seiten der Ort des Kunden (Verkaeufer: Dresden), nicht der Firmensitz (Berlin)
+    assert text.count("25.09.2026, Dresden") == 2 and "25.09.2026, Berlin" not in text
 
 
 def test_02_firmeneinstellung_aus_laesst_nur_datum_und_ort():
@@ -42,8 +43,7 @@ def test_02_firmeneinstellung_aus_laesst_nur_datum_und_ort():
     assert "bestätigt Empfang von" not in text
     assert "Zulassungsbescheinigung Teil I & II" not in text
     assert "Unterschriften" in text and "Unterschrift" in text
-    assert "Datum und Ort: 25.09.2026, Berlin" in text
-    assert "Datum und Ort: 25.09.2026, Dresden" in text
+    assert text.count("Datum und Ort: 25.09.2026, Dresden") == 2
 
 
 def test_03_stand_im_vertrag_gewinnt_ueber_die_firma():

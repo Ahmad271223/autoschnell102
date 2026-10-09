@@ -66,9 +66,10 @@ _CONTRACT = {"seller_name": "Max Muster", "purchase_price": 1000,
 def test_01_druckfassung_hat_unterschriftslinien():
     c = dict(_CONTRACT, digital_vertragstext=DIGITAL_VERTRAGSTEXT_STANDARD)
     t = _text(generate_contract_pdf(dealer=_DEALER, vehicle=_VEHICLE, contract=c))
-    # Druckfassung erkennbar an "Mit ihrer Unterschrift" (die Linie
-    # "Ort, Datum" entfiel 11.09.2026 zugunsten von "Datum und Ort").
-    assert "Mit ihrer Unterschrift" in _flach(t)
+    # Druckfassung erkennbar am Abschnitt "Unterschriften" (die Linie "Ort, Datum" entfiel 11.09.2026 zugunsten von
+    # "Datum und Ort"; der Satz "Mit ihrer Unterschrift bestaetigen …" entfiel 09.10.2026, Wunsch Ahmad)
+    assert "UNTERSCHRIFTEN" in _flach(t).upper()
+    assert "Mit ihrer Unterschrift" not in _flach(t)
     assert "Ort, Datum" not in t
     assert "digitale Ausfertigung" not in t
     # Beschluss 10.09.2026: die Vertragsbedingungen stehen auch im Druck —
@@ -85,7 +86,8 @@ def test_01b_druckfassung_nennt_die_elektronische_uebermittlung():
     druck = _flach(_text(generate_contract_pdf(dealer=_DEALER, vehicle=_VEHICLE, contract=c)))
     digital = _flach(_text(generate_contract_pdf(dealer=_DEALER, vehicle=_VEHICLE,
                                                  contract=c, digital=True)))
-    assert "Mit ihrer Unterschrift bestätigen beide Parteien die Richtigkeit aller Angaben" in druck
+    # Wunsch Ahmad 09.10.2026: auch "Mit ihrer Unterschrift bestaetigen beide Parteien …" ist weg ("ueberfluessig")
+    assert "Mit ihrer Unterschrift bestätigen beide Parteien die Richtigkeit aller Angaben" not in druck
     # Wunsch Ahmad 01.10.2026: der letzte Satz ("eigenhaendige Unterschrift ist dann nicht erforderlich") ist weg
     assert "Wird dieser Vertrag elektronisch übermittelt" not in druck
     assert "eigenhändige Unterschrift ist dann nicht erforderlich" not in druck
@@ -295,7 +297,7 @@ def test_20_vertrag_chef_beide_fassungen(welt):
     # Druckfassung (Standard) — mit Unterschriftslinien
     r = requests.get(f"{API}/contracts/{body['id']}/pdf", headers=welt["H"], timeout=60)
     assert r.status_code == 200 and r.content[:4] == b"%PDF"
-    assert "Mit ihrer Unterschrift" in _flach(_text(r.content))
+    assert "UNTERSCHRIFTEN" in _flach(_text(r.content)).upper()
     # Digitale Fassung — Firmentext statt Linien
     r = requests.get(f"{API}/contracts/{body['id']}/pdf",
                      params={"variante": "digital"}, headers=welt["H"], timeout=60)
@@ -366,7 +368,7 @@ def test_23_altvertrag_behaelt_seinen_gespeicherten_text(welt):
                      json={"digital_vertragstext": SUCHER_TEXT}, timeout=30)
     r = requests.get(f"{API}/contracts/{welt['contract_sucher']}/pdf",
                      headers=welt["H"], timeout=60)
-    assert "Mit ihrer Unterschrift" in _flach(_text(r.content))        # Druckfassung unveraendert
+    assert "UNTERSCHRIFTEN" in _flach(_text(r.content)).upper()        # Druckfassung unveraendert
 
 
 def test_23b_echter_altvertrag_wird_als_nachtraeglich_gekennzeichnet(welt):
@@ -423,7 +425,7 @@ def test_24_vorschau_kennt_beide_fassungen(welt):
     payload = {"vehicle_id": welt["vehicle_id"], "seller_name": "Vorschau V",
                "purchase_price": 100}
     r = requests.post(f"{API}/contracts/preview", headers=welt["H"], json=payload, timeout=60)
-    assert r.status_code == 200 and "Mit ihrer Unterschrift" in _flach(_text(r.content))
+    assert r.status_code == 200 and "UNTERSCHRIFTEN" in _flach(_text(r.content)).upper()
     r = requests.post(f"{API}/contracts/preview", params={"variante": "digital"},
                       headers=welt["H"], json=payload, timeout=60)
     assert r.status_code == 200
@@ -459,7 +461,7 @@ def test_25_termin_verschieben_archiviert_beide_fassungen(welt):
     assert "Datum und Ort" not in alt          # 15.09.2026: Empfang nur in der Druckfassung
     r = requests.get(f"{API}/contracts/{welt['contract_chef']}/versions/1/pdf",
                      headers=welt["H"], timeout=60)
-    assert "Mit ihrer Unterschrift" in _flach(_text(r.content))
+    assert "UNTERSCHRIFTEN" in _flach(_text(r.content)).upper()
 
 
 def test_26_leerer_text_bedeutet_standard(welt):
@@ -537,7 +539,7 @@ def test_28_scheitert_die_digitale_fassung_kommt_keine_druckfassung(welt):
         assert "digitale Vertragsfassung" in r.json()["detail"]
         # Druckfassung selbst bleibt abrufbar
         r = requests.get(f"{API}/contracts/{cid}/pdf", headers=welt["H"], timeout=60)
-        assert r.status_code == 200 and "Mit ihrer Unterschrift" in _flach(_text(r.content))
+        assert r.status_code == 200 and "UNTERSCHRIFTEN" in _flach(_text(r.content)).upper()
     finally:
         setzen = {"contract_data": sicherung.get("contract_data")}
         if sicherung.get("pdf_digital_b64"):

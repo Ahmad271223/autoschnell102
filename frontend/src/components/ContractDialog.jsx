@@ -283,7 +283,8 @@ export function anfangsFormular(v, dealer, heute) {
     schluessel_anzahl: "",
     empfang_kaufpreis: false,
     empfang_datum: heute,
-    empfang_ort_kaeufer: dealer?.city || "",
+    // Wunsch Ahmad 09.10.2026: "Datum und Ort" bei beiden Parteien gleich — der Ort des Kunden (Verkäufers)
+    empfang_ort_kaeufer: v.seller_city || "",
     empfang_ort_verkaeufer: v.seller_city || "",
 
     // Fahrzeugdaten — vom Inserat vorbefüllt, vor Vertrags-Erstellung
@@ -577,7 +578,8 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
     if (k === "seller_city" && f.empfang_ort_verkaeufer === f.seller_city) {
       next.empfang_ort_verkaeufer = v;
     }
-    if (k === "dealer_city" && f.empfang_ort_kaeufer === f.dealer_city) {
+    // 09.10.2026: der Ort beim Käufer folgt ebenfalls dem Ort des Kunden (nicht mehr dem Firmensitz)
+    if (k === "seller_city" && f.empfang_ort_kaeufer === f.seller_city) {
       next.empfang_ort_kaeufer = v;
     }
     // Rollenprüfung 22.09.2026 (RP-405): Das Datumsfeld wurde bei "HU: Nein"

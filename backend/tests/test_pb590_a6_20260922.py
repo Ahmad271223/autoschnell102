@@ -114,8 +114,11 @@ def test_p15_ausstattung_als_text_oder_mit_leeren_eintraegen():
     assert PS._ausstattung_liste(42) == [] and PS._ausstattung_liste(None) == []
     text = _text(_pdf_vertrag(vehicle={"make_label": "BMW", "model_label": "320d",
                                        "features": "Klimaautomatik, Navi ,, Sitzheizung"}))
-    assert "Klimaautomatik" in text and "Sitzheizung" in text and "Ausstattung laut" in text
-    assert "Ausstattung laut" not in _text(_pdf_vertrag(
+    # Wunsch Ahmad 09.10.2026: die Hinweiszeile "Ausstattung laut Inseratsangaben." ist weg — Marker des
+    # Abschnitts ist seine Ueberschrift "Ausstattung" (nur bei vorhandener Ausstattung)
+    assert "Klimaautomatik" in text and "Sitzheizung" in text and "Ausstattung" in text
+    assert "Ausstattung laut" not in text
+    assert "Ausstattung" not in _text(_pdf_vertrag(
         vehicle={"make_label": "BMW", "features": ["", " "]}))
 
 

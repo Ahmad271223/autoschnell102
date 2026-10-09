@@ -56,8 +56,10 @@ FELDER: List[Tuple[str, str, List[str]]] = [
     ("fuel", "Kraftstoff", ["stimmt", "weicht ab"]),
     ("hu", "HU", ["stimmt", "weicht ab"]),
     ("mileage_contract", "KM-Stand laut Vertrag", ["stimmt", "weicht ab"]),
-    ("commercial", "Gewerbliche Nutzung", ["Ja", "Nein", "unbekannt"]),
-    ("accident_free", "Unfallfrei laut Angabe", ["Ja", "Nein", "unbekannt"]),
+    # Wunsch Ahmad 09.10.2026: nur Ja / Nein — "unbekannt" gibt es nicht mehr (alte Protokolle mit "unbekannt"
+    # werden weiter angezeigt; ein offenes Protokoll muss vor dem Abschliessen Ja oder Nein bekommen)
+    ("commercial", "Gewerbliche Nutzung", ["Ja", "Nein"]),
+    ("accident_free", "Unfallfrei laut Angabe", ["Ja", "Nein"]),
 ]
 
 # Wie werden die Werte einer Zeile gelesen und angezeigt?

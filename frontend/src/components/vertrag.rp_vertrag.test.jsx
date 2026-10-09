@@ -80,7 +80,8 @@ describe("RP-490: Käuferdaten nach dem Nachladen", () => {
     const neu = kaeuferAktualisieren(form, profil, {});
     expect(neu.dealer_company).toBe("Neu GmbH");
     expect(neu.dealer_address).toBe("Neue Str. 9");
-    expect(neu.empfang_ort_kaeufer).toBe("Neu");
+    // Wunsch Ahmad 09.10.2026: "Datum und Ort" ist der Ort des Kunden — er folgt dem Firmensitz nicht mehr
+    expect(neu.empfang_ort_kaeufer).toBe("Alt");
   });
   it("Getipptes bleibt", () => {
     const neu = kaeuferAktualisieren(form, profil, { dealer_company: true });

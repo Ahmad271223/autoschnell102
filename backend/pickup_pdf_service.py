@@ -1028,10 +1028,9 @@ def _build_pickup_pdf(
         _vrow("fuel", "Kraftstoff", fuel),
         _vrow("hu", "HU", hu_disp),
         _vrow("mileage_contract", "KM-Stand laut Vertrag", km),
-        _vrow("commercial", "Gewerbliche Nutzung", commercial,
-              ["Ja", "Nein", "unbekannt"]),
-        _vrow("accident_free", "Unfallfrei laut Angabe", accident,
-              ["Ja", "Nein", "unbekannt"]),
+        # Wunsch Ahmad 09.10.2026: nur noch Ja / Nein (kein "unbekannt")
+        _vrow("commercial", "Gewerbliche Nutzung", commercial, ["Ja", "Nein"]),
+        _vrow("accident_free", "Unfallfrei laut Angabe", accident, ["Ja", "Nein"]),
     ]
     # Normalise to 5 columns (add empty col for 3-option rows via compute)
     norm = []
@@ -1082,7 +1081,7 @@ def _build_pickup_pdf(
         ("Schlüssel", (f"Anzahl: {_anzahl(filled.get('keys_count'))} von "
                        f"{_anzahl(filled.get('keys_expected'))}")),
         ("Zweitsatz Reifen", "Winter / Sommer / nein"),
-        ("Ladekabel / Adapter", "bei E-/Hybrid-Fahrzeugen"),
+        # Wunsch Ahmad 09.10.2026: "Ladekabel / Adapter" entfaellt
         ("Werkzeug / Warndreieck / Verbandskasten", ""),
     ]
     story.append(_checklist(docs_items, st, col_count=2, checked=_fill_docs))
