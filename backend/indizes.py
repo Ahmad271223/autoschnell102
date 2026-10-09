@@ -1298,6 +1298,8 @@ WERKZEUG_INDIZES = (
     ("werkzeug_inserate", [("ablauf", 1)], {"name": "werkzeug_inserat_ablauf", "expireAfterSeconds": 0}),
     # Pruefung 08.10.2026 (Last): Lesung der eigenen Firma bzw. die juengste irgendeines Kontos (inserat_lesen)
     ("werkzeug_inserate", [("cache_key", 1), ("gelesen_am", -1)], {"name": "werkzeug_inserat_juengste"}),
+    # 09.10.2026: gelernte Lesefehler der Bildschirm-Erkennung (erkennung_lernen) — 180 Tage nach dem letzten Beleg weg
+    ("erkennung_gelernt", [("ablauf", 1)], {"name": "erkennung_gelernt_ablauf", "expireAfterSeconds": 0}),
 )
 
 

@@ -34,13 +34,15 @@ import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Annotated, List, Optional
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+import erkennung_lernen
+import fahrzeug_codes
 import werkzeuge as wz
 import werkzeug_erkennung
 from deps import (FIRMA_GESPERRT_TEXT, current_chef, current_firma, current_super_admin, current_user, db,
@@ -502,6 +504,17 @@ async def werkzeug_abmelden(werkzeug_id: str,
     return {"ok": True, "getrennt": bool(v)}
 
 
+_Lesung = Annotated[str, Field(max_length=160)]
+
+
+class AlternativenIn(BaseModel):
+    """Programm ab 1.5.12 (Befund Ahmad 09.10.2026): zweiter Leseversuch der wichtigsten Felder (andere Vergroesserung/
+    Aufbereitung) — der Server nimmt sie, wenn die erste Lesung nichts ergab."""
+    marke_modell_text: List[_Lesung] = Field(default_factory=list, max_length=3)
+    kraftstoff: List[_Lesung] = Field(default_factory=list, max_length=3)
+    inserat_id: List[_Lesung] = Field(default_factory=list, max_length=3)
+
+
 class FahrzeugIn(BaseModel):
     marke: str = Field(..., min_length=1, max_length=60)
     modell: str = Field("", max_length=80)
@@ -529,6 +542,7 @@ class FahrzeugIn(BaseModel):
     #: Seit Programm 1.4.1: Anfang der Beschreibung (vom Bildschirm gelesen) — nur, falls Feld und Ueberschrift
     #: kein Modell hergeben (Befund 04.10.2026: "meinen Mercedes C 300 e"). Wird nicht gespeichert.
     beschreibung: str = Field("", max_length=2000)
+    alternativen: Optional[AlternativenIn] = None
 
 
 class VergleichIn(BaseModel):
@@ -555,6 +569,8 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     # (PROGRAMM_TAGESLIMIT_JE_KONTO); der Probelauf zaehlt nicht
     from provider_fetch import TageslimitErreicht, programm_tageslimit
     f = body.fahrzeug.model_dump()
+    alternativen = f.pop("alternativen", None) or {}
+    gelernt_tab = await erkennung_lernen.tabelle(db)
 
     async def tageslimit():
         if body.probelauf:
@@ -573,7 +589,7 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
             {"werkzeug": wz.BROWSER_HELFER, "user_id": user["id"]},
             {"_id": 0, "programm_version": 1, "zuletzt_am": 1, "pc_name": 1, "vorgang_verpasst_am": 1,
              "vorgang_ok_am": 1}),
-        asyncio.get_running_loop().run_in_executor(_ERKENNEN_POOL, _erkennen, f))
+        asyncio.get_running_loop().run_in_executor(_ERKENNEN_POOL, _erkennen, f, gelernt_tab, alternativen))
     # Pruefung 08.10.2026: die Erweiterung zaehlt nur, wenn sie in den letzten Tagen da war (entfernt/abgeschaltet ->
     # wie ohne), und nicht, solange sie den letzten Vorgang verpasst hat (nicht im Browser des Programms)
     if not wz.helfer_aktiv(helfer):
@@ -586,10 +602,38 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
                            and wz.version_mindestens(helfer_version, wz.INSERAT_TAB_HELFER))
     vorgang_bekannt = (wz.version_mindestens(programm_version, wz.VORGANG_PROGRAMM)
                        and wz.version_mindestens(helfer_version, wz.VORGANG_HELFER))
-    # 09.10.2026: eindeutige Lesefehler der Texterkennung in der Nummer reparieren (O->0, I->1 …), dann der Link
+    # 09.10.2026: eindeutige Lesefehler der Texterkennung in der Nummer reparieren (O->0, I->1 …), dann der Link;
+    # ergibt die erste Lesung keinen, die zweite des Programms (ab 1.5.12)
     f["inserat_id"] = wz.inserat_nummer(f.get("inserat_id"))
     f["inserat_url"] = wz.inserat_url(f.get("quelle"), f.get("inserat_id"), f.get("hash_id"))
+    for alt in alternativen.get("inserat_id") or []:
+        if f["inserat_url"]:
+            break
+        nummer = wz.inserat_nummer(alt)
+        if wz.inserat_url(f.get("quelle"), nummer, f.get("hash_id")):
+            f["inserat_id"], f["inserat_url"] = nummer, wz.inserat_url(f.get("quelle"), nummer, f.get("hash_id"))
     vehicle = wz.fahrzeug_zu_vehicle(f)
+    # Befund/Wunsch Ahmad 09.10.2026 ("das darf alles nicht passieren"): liegt das Inserat schon gelesen vor (Erweiterung
+    # irgendeiner Firma, gemeinsamer Speicher), die Vergleiche aus DIESEN Daten bauen — wenn EZ/km zum Bildschirm passen
+    # (sonst koennte die Nummer falsch gelesen sein). Weicht die Bildschirm-Lesung ab, lernt der Server daraus.
+    if f["inserat_url"]:
+        from listing_identity import ListingIdentityError, get_listing_identity
+        try:
+            cache_key = get_listing_identity(f["inserat_url"])["cache_key"]
+        except ListingIdentityError:
+            cache_key = ""
+        echt = await erkennung_lernen.inserat_daten(db, cache_key, user)
+        if erkennung_lernen.passt_zum_bildschirm(echt, f, erkannt.get("marke") if erkannt.get("erkannt") else None):
+            if erkennung_lernen.modell_weicht_ab(echt, erkannt.get("marke"), erkannt.get("modell"),
+                                                 bool(erkannt.get("modell_gefunden"))):
+                await erkennung_lernen.lernen(db, f.get("marke_modell_text"), echt.get("make_label"),
+                                              echt.get("model_label"), cache_key)
+            vehicle = erkennung_lernen.vehicle_aus_inserat(echt, vehicle)
+            erkannt.update(marke=echt.get("make_label") or erkannt.get("marke"),
+                           modell=echt.get("model_label") or erkannt.get("modell"), erkannt=True,
+                           modell_gefunden=True, quelle="inserat")
+    f["erkennung"] = erkannt.pop("quelle", "bildschirm")
+    f["modell_gefunden"] = bool(erkannt.pop("modell_gefunden", False))
     # Befund 04.10.2026: unplausible EZ/km sagen — die Filter bleiben wie eingestellt (wz.plausibel)
     melden = wz.plausibel(f)
     links, hinweise = wz.vergleichs_links(vehicle, regeln)      # Navi + Beschaedigte wie eingestellt (04.10.)
@@ -647,18 +691,41 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
             "hat_helfer": helfer is not None}
 
 
-def _erkennen(f: dict) -> dict:
+def _erkennen(f: dict, gelernt_tab: Optional[dict] = None, alternativen: Optional[dict] = None) -> dict:
     """Programm ab 1.4.0 (roh=True): Marke/Modell auf dem Server erkennen und in f eintragen — so, wie es das
     Programm bis 1.3.5 selbst tat (1:1 uebertragen, am 03.10.2026 ueber 16.636 Faelle abgeglichen).
-    Rueckgabe fuer die Anzeige im Programm: Katalognamen und ob die Marke bekannt ist."""
+    Rueckgabe fuer die Anzeige im Programm: Katalognamen und ob die Marke bekannt ist.
+    09.10.2026: ergibt die erste Lesung kein Katalogmodell, zuerst eine GELERNTE Zuordnung (erkennung_lernen), dann der
+    zweite Leseversuch des Programms (ab 1.5.12); ebenso beim Kraftstoff."""
+    alternativen = alternativen or {}
+    if not fahrzeug_codes.kraftstoff_code(f.get("kraftstoff")):
+        for alt in alternativen.get("kraftstoff") or []:
+            if fahrzeug_codes.kraftstoff_code(alt):
+                f["kraftstoff"] = alt
+                break
     if not f.get("roh"):
         f.pop("beschreibung", None)
-        return {"marke": f.get("marke") or "", "modell": f.get("modell") or "", "erkannt": True}
+        return {"marke": f.get("marke") or "", "modell": f.get("modell") or "", "erkannt": True,
+                "modell_gefunden": True}
     text = (f.get("marke_modell_text") or f"{f.get('marke') or ''} {f.get('modell') or ''}").strip()
     z = werkzeug_erkennung.zuordnen(text, f.get("titel"), beschreibung=f.pop("beschreibung", "") or None)
+    quelle = "bildschirm"
+    if not (z["erkannt"] and z["modell_gefunden"]):
+        for i, kandidat in enumerate([text] + list(alternativen.get("marke_modell_text") or [])):
+            g = erkennung_lernen.gelernt(gelernt_tab, kandidat)
+            if g:
+                z = {"marke_text": g[0], "modell_text": g[1], "marke": g[0], "modell": g[1], "erkannt": True,
+                     "aus_beschreibung": False, "modell_gefunden": True}
+                quelle = "gelernt"
+                break
+            if i:
+                z2 = werkzeug_erkennung.zuordnen(kandidat, f.get("titel"))
+                if z2["erkannt"] and z2["modell_gefunden"]:
+                    z, quelle = z2, "zweite_lesung"
+                    break
     f["marke"], f["modell"] = z["marke_text"], z["modell_text"]
     return {"marke": z["marke"] or text, "modell": z["modell"] or "", "erkannt": z["erkannt"],
-            "aus_beschreibung": z["aus_beschreibung"]}
+            "aus_beschreibung": z["aus_beschreibung"], "modell_gefunden": z["modell_gefunden"], "quelle": quelle}
 
 
 async def _vorab_ersetzen(user: dict, v: dict, neuer_job: Optional[str]) -> None:
@@ -840,6 +907,8 @@ async def werkzeug_inserat(werkzeug_id: str, body: InseratIn,
     # 08.10.2026: mit Vorgangsnummer genau dieser Vergleich des Programms; ohne (aeltere Erweiterung) wie bisher
     programm = (await _vorgang_doc(body.vorgang_id, user["id"], {"_id": 0, "id": 1, "erstellt_am": 1})
                 if body.vorgang_id else None) or await _programm_vergleich(user, inserat_url)
+    if programm:
+        await _aus_lesung_lernen(programm["id"], fahrzeug, identity["cache_key"])
     vergleich_id = str(uuid.uuid4())
     await db[wz.SAMMLUNG_VERGLEICHE].insert_one({
         "id": vergleich_id, "werkzeug": werkzeug_id, "dealer_id": user["dealer_id"], "user_id": user["id"],
@@ -855,6 +924,26 @@ async def werkzeug_inserat(werkzeug_id: str, body: InseratIn,
             # das Programm hat dieses Auto gerade verglichen -> der Helfer oeffnet nichts von selbst
             "programm_verglichen": programm["erstellt_am"] if programm else None,
             "verkaeufer": {"name": fahrzeug.get("seller_name") or "", "art": fahrzeug.get("seller_type") or ""}}
+
+
+async def _aus_lesung_lernen(vergleich_id: str, lesung: dict, cache_key: str) -> None:
+    """Befund/Wunsch Ahmad 09.10.2026: die Erweiterung hat das Inserat zu einem Programm-Vergleich gelesen — hat das
+    Programm Marke/Modell vom Bildschirm anders (oder gar nicht) erkannt, lernt der Server daraus (erkennung_lernen).
+    Nie den Vorgang aufhalten."""
+    try:
+        doc = await db[wz.SAMMLUNG_VERGLEICHE].find_one(
+            {"id": vergleich_id}, {"_id": 0, "fahrzeug.marke_modell_text": 1, "fahrzeug.marke": 1,
+                                   "fahrzeug.modell": 1, "fahrzeug.ez_jahr": 1, "fahrzeug.kilometer": 1,
+                                   "fahrzeug.modell_gefunden": 1, "fahrzeug.erkennung": 1})
+        bild = (doc or {}).get("fahrzeug") or {}
+        if not bild.get("marke_modell_text") or bild.get("erkennung") == "inserat":
+            return
+        if erkennung_lernen.passt_zum_bildschirm(lesung, bild, None) and erkennung_lernen.modell_weicht_ab(
+                lesung, bild.get("marke"), bild.get("modell"), bool(bild.get("modell_gefunden", True))):
+            await erkennung_lernen.lernen(db, bild["marke_modell_text"], lesung.get("make_label"),
+                                          lesung.get("model_label"), cache_key)
+    except Exception:  # noqa: BLE001
+        log.exception("Erkennung: aus der Lesung %s nicht gelernt", cache_key)
 
 
 class MarktlageIn(BaseModel):

@@ -562,7 +562,7 @@ def zuordnen(marke_modell_text: str, titel: Optional[str] = None, k: Optional[Ka
             ganz_aus_titel = teile is not None
     if teile is None:
         return {"marke_text": text, "modell_text": "", "marke": None, "modell": None, "erkannt": False,
-                "aus_beschreibung": False}
+                "aus_beschreibung": False, "modell_gefunden": False}
     marke, modell = teile
     mm = k.mobile_marke(marke)
     am = k.autoscout_marke(marke)
@@ -598,4 +598,7 @@ def zuordnen(marke_modell_text: str, titel: Optional[str] = None, k: Optional[Ka
         "modell": mob.name if mob else (asm.name if asm else modell),
         "erkannt": bool(mm or am),
         "aus_beschreibung": aus_text,
+        # 09.10.2026: ergab der Text ein Modell aus einem der Kataloge? Sonst versucht der Server Gelerntes und die
+        # zweite Lesung des Programms (erkennung_lernen)
+        "modell_gefunden": bool(mob or asm),
     }
