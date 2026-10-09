@@ -190,3 +190,16 @@ def test_17_weitere_lesefehler_der_texterkennung():
     assert we.verwechslung(["i30", "i80"], "IBO") is None, "B kann 3 oder 8 sein -> zwei Treffer, keiner"
     assert we.verwechslung(["X5", "X3"], "XS") == "X5"
     assert we.verwechslung(["Golf"], "Go1f") is None, "nur Namen mit Ziffern"
+
+
+def test_18_leerzeichen_zwischen_marke_und_modell_verschluckt():
+    """Befund Ahmad 09.10.2026: "VW T-Roc" als "VWT- Ro c" gelesen -> nichts erkannt. Getrennt wird nur, wenn der Rest
+    ein Modell genau dieser Marke ergibt."""
+    for feld in ("VWT- Ro c", "VWT-Roc", "VWTRoc"):
+        z = we.zuordnen(feld, "")
+        assert (z["marke"], z["modell"], z["erkannt"]) == ("Volkswagen", "T-Roc", True), (feld, z)
+    assert we.zuordnen("AudiA4 Avant", "")["modell"] == "A4"
+    z = we.zuordnen("VWT", "VWT 1.5 TSI")
+    assert z["erkannt"] is False, "ohne passendes Modell keine geratene Marke"
+    # Marke als eigenes Wort: wie bisher
+    assert we.zuordnen("VW T-Roc", "")["modell"] == "T-Roc"

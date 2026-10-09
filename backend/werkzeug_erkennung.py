@@ -336,6 +336,44 @@ class Katalog:
                 return name, " ".join(woerter[1:])
         return None
 
+    def teile_zusammengeschrieben(self, text: Optional[str]) -> Optional[Tuple[str, str]]:
+        """Befund Ahmad 09.10.2026 ("VW T-Roc" als "VWT-Roc" gelesen): die Texterkennung verschluckt das Leerzeichen
+        zwischen Marke und Modell. Nur wenn keine Marke als eigenes Wort dasteht: steckt eine bekannte Marke VORN im
+        ersten Wort und ergibt der Rest ein Modell DIESER Marke, wird getrennt ("VWT-Roc" -> "VW" + "T-Roc"). Ohne
+        passendes Modell nie (lieber unerkannt als eine geratene Marke). Die laengste passende Marke gewinnt."""
+        woerter = [w for w in (text or "").split(" ") if w]
+        if not woerter:
+            return None
+        erstes = woerter[0]
+        n = norm(erstes)
+        marken = set(self.mobile) | set(MOBILE_ALIASE) | set(AUTOSCOUT_ALIASE) | set(self._as_norm)
+        for b in sorted((m for m in marken if 2 <= len(m) < len(n) and n.startswith(m)), key=len, reverse=True):
+            # die Stelle im Original nach len(b) Buchstaben/Ziffern ("VWT-Roc": nach "VW")
+            gezaehlt, schnitt = 0, len(erstes)
+            for i, c in enumerate(erstes):
+                if norm(c):
+                    gezaehlt += 1
+                    if gezaehlt == len(b):
+                        schnitt = i + 1
+                        break
+            marke, rest = erstes[:schnitt], " ".join([erstes[schnitt:]] + woerter[1:]).strip(" -")
+            if not rest or ist_platzhalter(rest):
+                continue
+            mm, am = self.mobile_marke(marke), self.autoscout_marke(marke)
+            namen = set()
+            if mm:
+                namen.update(x[0] for x in mm.modelle)
+            if am:
+                namen.update(norm(x[1]) for x in am.modelle if not _GENERISCH.match(x[1]))
+            # streng: die ersten Woerter des Rests ergeben GENAU einen Katalognamen ("T- Ro c" -> "troc"); unscharfe
+            # Treffer zaehlen hier nicht ("VWT 1.5 TSI" ergab sonst "T1")
+            teil = ""
+            for w in rest.split(" ")[:4]:
+                teil += norm(w)
+                if teil in namen:
+                    return marke, rest
+        return None
+
     # ---- mobile.de -----------------------------------------------------------
     def mobile_marke(self, name: Optional[str]) -> Optional[MobileMarke]:
         n = norm(name)
@@ -516,6 +554,12 @@ def zuordnen(marke_modell_text: str, titel: Optional[str] = None, k: Optional[Ka
         if aus_t is not None and not ist_platzhalter(aus_t[0]):
             teile = aus_t
             ganz_aus_titel = True
+    if teile is None:
+        # 09.10.2026: Leerzeichen zwischen Marke und Modell verschluckt ("VWT-Roc") — erst das Feld, dann die Ueberschrift
+        teile = k.teile_zusammengeschrieben(text)
+        if teile is None and titel:
+            teile = k.teile_zusammengeschrieben(titel.strip())
+            ganz_aus_titel = teile is not None
     if teile is None:
         return {"marke_text": text, "modell_text": "", "marke": None, "modell": None, "erkannt": False,
                 "aus_beschreibung": False}
