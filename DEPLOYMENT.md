@@ -4643,6 +4643,12 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
     Betreiber: `GET /admin/werkzeug-lesebilder`, `…/{id}/bild`, `DELETE …/{id}`; Karte „Nicht erkannt – Bilder der
     Anzeige“ auf der Seite Programm-Vergleiche (nur Windows-Programm). Konto-/Firmenlöschung entfernt sie samt Dateien
     (`routes.werkzeuge.lesebilder_loeschen`).
+  - **Härtung 09.10.2026 (abends):** (1) Lesebild-PNG: Maße aus dem IHDR-Kopf VOR dem Entpacken geprüft (≤ 4096 px
+    Kante, ≤ 8 MP, `png_masse`) — ein 1,5-MB-PNG könnte sonst 300 MB entpacken; Vorschau im begrenzten
+    `_AUSWERTEN_POOL`. (2) Gelernte Zuordnungen gelten **je Firma** (`erkennung_gelernt._id = <dealer>:<schluessel>`,
+    `tabelle(db, dealer_id)`) — eine Firma kann mit zwei gefälschten Lesungen sonst die Erkennung aller anderen
+    vergiften. (3) „Echte Daten vor Bildschirm“ nimmt nur Lesungen der EIGENEN Firma oder den Server-Speicher
+    (`listings_cache`), nie fremde Browser-Lesungen (`erkennung_lernen.inserat_daten`).
   - **Kaufvertrag/Abholprotokoll (Wunsch Ahmad 09.10.2026):** „Datum und Ort“ bei Verkäufer UND Käufer = Ort des
     Kunden (`pdf_service._uebergabe_ort`; Dialog befüllt den Käufer-Ort nicht mehr aus dem Firmensitz); unter den
     Unterschriften kein Satz mehr; „Erfassung anhand der Fahrzeugskizze …“ und „Ausstattung laut Inseratsangaben.“

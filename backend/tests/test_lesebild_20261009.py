@@ -72,6 +72,13 @@ def test_01_lesebild_hochladen_sehen_loeschen(welt):
                              json={**body, "bild": zu_gross}).status_code in (413, 422)
         assert requests.post(f"{API}/werkzeuge/{wz.AUTOPOINTER}/lesebild", headers=pc, timeout=30,
                              json={**body, "grund": "egal"}).status_code == 422
+        # Haertung 09.10.2026: riesige Masse im PNG-Kopf werden VOR dem Entpacken abgelehnt
+        from routes.werkzeuge import png_masse
+        riesig = bytearray(_png(64, 64))
+        riesig[16:20], riesig[20:24] = (9000).to_bytes(4, "big"), (9000).to_bytes(4, "big")
+        assert png_masse(bytes(riesig)) == (9000, 9000) and png_masse(b"kein png") == (0, 0)
+        assert requests.post(f"{API}/werkzeuge/{wz.AUTOPOINTER}/lesebild", headers=pc, timeout=30,
+                             json={**body, "bild": base64.b64encode(bytes(riesig)).decode()}).status_code == 422
         # Ablauf: ein alter Eintrag verschwindet samt Datei beim naechsten Aufruf
         db.werkzeug_lesebilder.update_one({"id": bid}, {"$set": {"ablauf": datetime.now(timezone.utc) - timedelta(days=1)}})
         requests.get(f"{API}/admin/werkzeug-lesebilder", headers=konten.super_kopf(), timeout=30)

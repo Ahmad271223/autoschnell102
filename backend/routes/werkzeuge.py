@@ -575,7 +575,7 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     from provider_fetch import TageslimitErreicht, programm_tageslimit
     f = body.fahrzeug.model_dump()
     alternativen = f.pop("alternativen", None) or {}
-    gelernt_tab = await erkennung_lernen.tabelle(db)
+    gelernt_tab = await erkennung_lernen.tabelle(db, user.get("dealer_id"))      # je Firma (Haertung 09.10.)
 
     async def tageslimit():
         if body.probelauf:
@@ -632,7 +632,7 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
             if erkennung_lernen.modell_weicht_ab(echt, erkannt.get("marke"), erkannt.get("modell"),
                                                  bool(erkannt.get("modell_gefunden"))):
                 await erkennung_lernen.lernen(db, f.get("marke_modell_text"), echt.get("make_label"),
-                                              echt.get("model_label"), cache_key)
+                                              echt.get("model_label"), cache_key, user.get("dealer_id"))
             vehicle = erkennung_lernen.vehicle_aus_inserat(echt, vehicle)
             erkannt.update(marke=echt.get("make_label") or erkannt.get("marke"),
                            modell=echt.get("model_label") or erkannt.get("modell"), erkannt=True,
@@ -938,7 +938,7 @@ async def _aus_lesung_lernen(vergleich_id: str, lesung: dict, cache_key: str) ->
     Nie den Vorgang aufhalten."""
     try:
         doc = await db[wz.SAMMLUNG_VERGLEICHE].find_one(
-            {"id": vergleich_id}, {"_id": 0, "fahrzeug.marke_modell_text": 1, "fahrzeug.marke": 1,
+            {"id": vergleich_id}, {"_id": 0, "dealer_id": 1, "fahrzeug.marke_modell_text": 1, "fahrzeug.marke": 1,
                                    "fahrzeug.modell": 1, "fahrzeug.ez_jahr": 1, "fahrzeug.kilometer": 1,
                                    "fahrzeug.modell_gefunden": 1, "fahrzeug.erkennung": 1})
         bild = (doc or {}).get("fahrzeug") or {}
@@ -947,7 +947,7 @@ async def _aus_lesung_lernen(vergleich_id: str, lesung: dict, cache_key: str) ->
         if erkennung_lernen.passt_zum_bildschirm(lesung, bild, None) and erkennung_lernen.modell_weicht_ab(
                 lesung, bild.get("marke"), bild.get("modell"), bool(bild.get("modell_gefunden", True))):
             await erkennung_lernen.lernen(db, bild["marke_modell_text"], lesung.get("make_label"),
-                                          lesung.get("model_label"), cache_key)
+                                          lesung.get("model_label"), cache_key, (doc or {}).get("dealer_id"))
     except Exception:  # noqa: BLE001
         log.exception("Erkennung: aus der Lesung %s nicht gelernt", cache_key)
 
@@ -1212,6 +1212,18 @@ class LesebildIn(BaseModel):
     bild: str = Field(..., min_length=20, max_length=LESEBILD_MAX * 4 // 3 + 16)
 
 
+#: Haertung 09.10.2026: ein 1,5-MB-PNG kann 10.000 x 8.000 Pixel tragen (320 MB entpackt, unter Pillows Bomben-
+#: Grenze) — die Maße stehen im Kopf (IHDR), darum VOR dem Entpacken pruefen. AutoPointer-Anzeigen sind <= ~2.000 px.
+LESEBILD_KANTE_MAX, LESEBILD_PIXEL_MAX = 4096, 8_000_000
+
+
+def png_masse(raw: bytes) -> tuple:
+    """(Breite, Hoehe) aus dem PNG-Kopf; (0, 0), wenn kein lesbarer Kopf."""
+    if len(raw) < 24 or raw[:8] != b"\x89PNG\r\n\x1a\n" or raw[12:16] != b"IHDR":
+        return (0, 0)
+    return (int.from_bytes(raw[16:20], "big"), int.from_bytes(raw[20:24], "big"))
+
+
 def _lesebild_vorschau(raw: bytes) -> str:
     """Kleine JPEG-Vorschau (hoechstens 480 px) fuer die Liste — als base64, damit die Seite sie direkt zeigt."""
     from PIL import Image
@@ -1268,9 +1280,14 @@ async def werkzeug_lesebild(werkzeug_id: str, body: LesebildIn,
         raise HTTPException(413, "Bild zu groß (höchstens 1,5 MB).")
     if not raw.startswith(b"\x89PNG"):
         raise HTTPException(422, "Nur PNG.")
+    breite, hoehe = png_masse(raw)
+    if not (0 < breite <= LESEBILD_KANTE_MAX and 0 < hoehe <= LESEBILD_KANTE_MAX
+            and breite * hoehe <= LESEBILD_PIXEL_MAX):
+        raise HTTPException(422, "Bild zu groß (Maße).")
     try:
         validate_image_bytes(raw, "Lesebild")
-        vorschau = await asyncio.to_thread(_lesebild_vorschau, raw)
+        # im begrenzten Pool der Seiten-Auswertung (hoechstens 4 je Prozess), nicht im Standard-Pool
+        vorschau = await asyncio.get_running_loop().run_in_executor(_AUSWERTEN_POOL, _lesebild_vorschau, raw)
     except Exception as exc:  # noqa: BLE001
         log.info("Lesebild von %s nicht lesbar: %s", user["id"], exc)
         raise HTTPException(422, "Bild nicht lesbar.")

@@ -1304,6 +1304,7 @@ WERKZEUG_INDIZES = (
     ("werkzeug_lesebilder", [("ablauf", 1)], {"name": "werkzeug_lesebilder_ablauf"}),
     # 09.10.2026: gelernte Lesefehler der Bildschirm-Erkennung (erkennung_lernen) — 180 Tage nach dem letzten Beleg weg
     ("erkennung_gelernt", [("ablauf", 1)], {"name": "erkennung_gelernt_ablauf", "expireAfterSeconds": 0}),
+    ("erkennung_gelernt", [("dealer_id", 1)], {"name": "erkennung_gelernt_firma"}),       # Haertung 09.10.: je Firma
 )
 
 

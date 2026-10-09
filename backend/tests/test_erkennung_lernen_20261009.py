@@ -54,20 +54,26 @@ def test_04_lernen_und_tabelle():
         client = AsyncIOMotorClient(os.environ.get("MONGO_URL", "mongodb://localhost:27017"))
         db = client["el_lernen_" + uuid.uuid4().hex[:8]]
         try:
-            await el.lernen(db, "Hyundai IBO", "Hyundai", "i30", "mobile:1")
-            assert el.gelernt(await el.tabelle(db), "Hyundai IBO") is None
-            await el.lernen(db, "HYUNDAI  IBO", "Hyundai", "i30", "mobile:2")       # gleicher Schluessel
-            tab = await el.tabelle(db)
+            F = "firma_a"
+            await el.lernen(db, "Hyundai IBO", "Hyundai", "i30", "mobile:1", F)
+            assert el.gelernt(await el.tabelle(db, F), "Hyundai IBO") is None
+            await el.lernen(db, "HYUNDAI  IBO", "Hyundai", "i30", "mobile:2", F)       # gleicher Schluessel
+            tab = await el.tabelle(db, F)
             assert el.gelernt(tab, "Hyundai IBO") == ("Hyundai", "i30")
             assert el.gelernt(tab, "Hyundai i30") is None
-            doc = await db[el.SAMMLUNG].find_one({"_id": "hyundaiibo"})
+            # Haertung 09.10.2026: je Firma — eine andere Firma sieht die Zuordnung nicht
+            assert el.gelernt(await el.tabelle(db, "firma_b"), "Hyundai IBO") is None
+            assert await el.tabelle(db, None) == {}
+            doc = await db[el.SAMMLUNG].find_one({"_id": el.doc_id(F, "Hyundai IBO")})
+            assert doc["dealer_id"] == F and doc["schluessel"] == "hyundaiibo"
             assert doc["ablauf"] > datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=100)
             # Widerspruch nimmt die Zuordnung wieder weg
-            await el.lernen(db, "Hyundai IBO", "Hyundai", "i20", "mobile:3")
-            assert el.gelernt(await el.tabelle(db), "Hyundai IBO") is None
-            # nie zu kurz/leer
-            await el.lernen(db, "", "Hyundai", "i30", "mobile:4")
-            await el.lernen(db, "x", "Hyundai", "", "mobile:4")
+            await el.lernen(db, "Hyundai IBO", "Hyundai", "i20", "mobile:3", F)
+            assert el.gelernt(await el.tabelle(db, F), "Hyundai IBO") is None
+            # nie zu kurz/leer/ohne Firma
+            await el.lernen(db, "", "Hyundai", "i30", "mobile:4", F)
+            await el.lernen(db, "x", "Hyundai", "", "mobile:4", F)
+            await el.lernen(db, "Hyundai IBO", "Hyundai", "i30", "mobile:5", None)
             assert await db[el.SAMMLUNG].count_documents({}) == 1
         finally:
             await client.drop_database(db.name)
@@ -133,7 +139,7 @@ def test_10_vergleich_nimmt_echte_daten_lernt_und_nutzt_das_gelernte(welt):
     # Texten "wusste" er beim zweiten Lauf noch, was der Test in der Datenbank schon geloescht hatte
     import uuid as _uuid
     TEXT_A, TEXT_B = "VW XQ" + _uuid.uuid4().hex[:5], "VW QQ" + _uuid.uuid4().hex[:5]
-    K_A, K_B = el.schluessel(TEXT_A), el.schluessel(TEXT_B)
+    K_A, K_B = el.doc_id(welt["firma"]["dealer_id"], TEXT_A), el.doc_id(welt["firma"]["dealer_id"], TEXT_B)
 
     def vergleich(nr, text=None, **zusatz):
         text = text or TEXT_A

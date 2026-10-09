@@ -6,12 +6,16 @@ Das Windows-Programm liest AutoPointer per Texterkennung (DevExpress gibt keinen
 "i30", "VWT- Ro c" statt "VW T-Roc" oder "EIektro" lassen sich nie ganz vermeiden. Drei Sicherungen:
 
 1. Echte Daten vor Bildschirm (``inserat_daten`` + ``passt_zum_bildschirm`` + ``vehicle_aus_inserat``): liegt das
-   Inserat schon gelesen vor (Lesung der Erweiterung irgendeiner Firma, 24 h, oder gemeinsamer Speicher, 14 Tage),
-   baut der Server die Vergleiche aus DIESEN Daten — wenn Erstzulassung und Kilometer zum Bildschirm passen (sonst
-   koennte die Inserat-Nummer falsch gelesen sein) und die erkannte Marke nicht widerspricht.
+   Inserat schon gelesen vor (Lesung der Erweiterung der EIGENEN Firma, 24 h, oder der gemeinsame Speicher aus
+   Server-Abrufen, 14 Tage), baut der Server die Vergleiche aus DIESEN Daten — wenn Erstzulassung und Kilometer zum
+   Bildschirm passen (sonst koennte die Inserat-Nummer falsch gelesen sein) und die erkannte Marke nicht widerspricht.
+   Haertung 09.10.2026: Lesungen FREMDER Firmen zaehlen hier nicht — eine gefaelschte Seite einer anderen Firma
+   duerfte sonst eine richtige Bildschirm-Lesung ueberschreiben (fuer Links/Kaufvertrag gilt weiter inserat_lesen).
 2. Lernen (``lernen`` / ``gelernt``): zeigt eine Lesung des Inserats, dass der Bildschirmtext etwas anderes war, merkt
-   sich der Server "dieser gelesene Text = diese Marke/dieses Modell". Erst wenn ZWEI verschiedene Inserate dasselbe
-   sagen und keines widerspricht, gilt es — dann wird derselbe Lesefehler beim naechsten Mal richtig erkannt.
+   sich der Server "dieser gelesene Text = diese Marke/dieses Modell" — JE FIRMA (Haertung 09.10.2026: eine Firma
+   kann mit zwei gefaelschten Lesungen sonst die Erkennung aller anderen vergiften; dieselbe Firma hat ohnehin
+   dieselbe AutoPointer-Einstellung und denselben Lesefehler). Erst wenn ZWEI verschiedene Inserate dasselbe sagen
+   und keines widerspricht, gilt es — dann wird derselbe Lesefehler beim naechsten Mal richtig erkannt.
 3. Zweiter Leseversuch des Programms (ab 1.5.12, ``fahrzeug.alternativen``): routes/werkzeuge._erkennen nimmt eine
    Alternative, wenn die erste Lesung nicht erkannt wurde.
 
@@ -35,8 +39,10 @@ BELEGE_MINDESTENS = 2
 #: hoechstens so viele Belege je gelesenem Text (Speicher bleibt klein)
 BELEGE_HOECHSTENS = 50
 GELERNT_TAGE = 180
-_TABELLE: Dict[str, object] = {"bis": 0.0, "daten": {}}
+#: je Firma: {dealer_id: {"bis": monotonic, "daten": {schluessel: (Marke, Modell)}}}
+_TABELLEN: Dict[str, dict] = {}
 _TABELLE_SEKUNDEN = 300
+_TABELLEN_HOECHSTENS = 2000
 
 #: Felder einer Inserats-Lesung, die die Vergleichs-Links bestimmen (mobile_service/autoscout_service)
 _ECHTE_FELDER = ("make", "make_label", "model", "model_label", "model_description", "category", "first_registration",
@@ -52,7 +58,9 @@ async def inserat_daten(db, cache_key: str, user: dict) -> Optional[dict]:
     from browser_helfer import inserat_lesen
     try:
         lesung = await inserat_lesen(db, cache_key, user.get("id") or "", user.get("dealer_id") or "")
-        if lesung is not None and isinstance(lesung[0], dict):
+        # nur die eigene Firma (Haertung 09.10.2026, s. o.) — inserat_lesen nimmt sonst auch fremde Lesungen
+        if (lesung is not None and isinstance(lesung[0], dict)
+                and (lesung[2] or {}).get("dealer_id") == (user.get("dealer_id") or "")):
             return lesung[0]
         doc = await db.listings_cache.find_one(
             {"cache_key": cache_key, "data": {"$type": "object"}, "expires_at": {"$gt": datetime.now(timezone.utc)}},
@@ -108,21 +116,28 @@ def schluessel(roh: Optional[str]) -> str:
     return norm(roh)[:120]
 
 
-async def lernen(db, roh: Optional[str], marke: Optional[str], modell: Optional[str], beleg: str) -> None:
-    """Der Bildschirmtext ``roh`` war laut Inserat ``beleg`` (cache_key) das Auto ``marke`` ``modell``."""
+def doc_id(dealer_id: Optional[str], roh: Optional[str]) -> str:
+    """Schluessel in der Sammlung: Firma + gelesener Text."""
+    return f"{dealer_id or ''}:{schluessel(roh)}"
+
+
+async def lernen(db, roh: Optional[str], marke: Optional[str], modell: Optional[str], beleg: str,
+                 dealer_id: Optional[str] = None) -> None:
+    """Der Bildschirmtext ``roh`` war laut Inserat ``beleg`` (cache_key) das Auto ``marke`` ``modell`` — fuer die
+    Firma ``dealer_id``."""
     k = schluessel(roh)
     marke, modell = str(marke or "").strip()[:60], str(modell or "").strip()[:80]
-    if len(k) < 2 or not marke or not modell or not beleg:
+    if len(k) < 2 or not marke or not modell or not beleg or not dealer_id:
         return
     jetzt = datetime.now(timezone.utc)
     try:
         await db[SAMMLUNG].update_one(
-            {"_id": k, f"eintraege.{BELEGE_HOECHSTENS - 1}": {"$exists": False}},
+            {"_id": doc_id(dealer_id, roh), f"eintraege.{BELEGE_HOECHSTENS - 1}": {"$exists": False}},
             {"$addToSet": {"eintraege": {"marke": marke, "modell": modell, "beleg": str(beleg)[:80]}},
-             "$set": {"roh": str(roh or "")[:160], "aktualisiert": jetzt,
+             "$set": {"dealer_id": dealer_id, "schluessel": k, "roh": str(roh or "")[:160], "aktualisiert": jetzt,
                       "ablauf": jetzt + timedelta(days=GELERNT_TAGE)}},
             upsert=True)
-        _TABELLE["bis"] = 0.0                  # beim naechsten Vergleich neu laden
+        _TABELLEN.pop(dealer_id, None)          # beim naechsten Vergleich dieser Firma neu laden
     except Exception as exc:  # noqa: BLE001 — Lernen ist Zusatz (DuplicateKey bei voller Liste: egal)
         if "duplicate key" not in str(exc).lower():
             log.exception("Erkennung: Lernen %r -> %s %s nicht gespeichert", roh, marke, modell)
@@ -141,20 +156,25 @@ def auswerten(eintraege) -> Optional[Tuple[str, str]]:
     return wert if len(belege) >= BELEGE_MINDESTENS else None
 
 
-async def tabelle(db) -> Dict[str, Tuple[str, str]]:
-    """Alle geltenden Zuordnungen {schluessel: (Marke, Modell)} — je Prozess 5 Minuten zwischengespeichert."""
-    if time.monotonic() < float(_TABELLE["bis"]):
-        return _TABELLE["daten"]  # type: ignore[return-value]
+async def tabelle(db, dealer_id: Optional[str]) -> Dict[str, Tuple[str, str]]:
+    """Die geltenden Zuordnungen EINER Firma {schluessel: (Marke, Modell)} — je Prozess 5 Minuten zwischengespeichert."""
+    if not dealer_id:
+        return {}
+    eintrag = _TABELLEN.get(dealer_id)
+    if eintrag and time.monotonic() < eintrag["bis"]:
+        return eintrag["daten"]
     daten: Dict[str, Tuple[str, str]] = {}
     try:
-        async for d in db[SAMMLUNG].find({}, {"_id": 1, "eintraege": 1}).limit(20000):
+        async for d in db[SAMMLUNG].find({"dealer_id": dealer_id}, {"schluessel": 1, "eintraege": 1}).limit(5000):
             wert = auswerten(d.get("eintraege"))
-            if wert:
-                daten[d["_id"]] = wert
+            if wert and d.get("schluessel"):
+                daten[d["schluessel"]] = wert
     except Exception:  # noqa: BLE001
         log.exception("Erkennung: gelernte Zuordnungen nicht geladen")
-        return _TABELLE["daten"]  # type: ignore[return-value]
-    _TABELLE.update(bis=time.monotonic() + _TABELLE_SEKUNDEN, daten=daten)
+        return (eintrag or {}).get("daten", {})
+    if len(_TABELLEN) >= _TABELLEN_HOECHSTENS:
+        _TABELLEN.clear()
+    _TABELLEN[dealer_id] = {"bis": time.monotonic() + _TABELLE_SEKUNDEN, "daten": daten}
     return daten
 
 
