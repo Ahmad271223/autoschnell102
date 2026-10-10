@@ -1,0 +1,1308 @@
+{
+  "szenario": "S2",
+  "nutzer": 100,
+  "zeitstempel": "2026-09-05T12:15:53.673954+00:00",
+  "freigabe": "2026-09-05T12:15:38.101751+00:00",
+  "stoss_spannweite_ms": 17,
+  "antworten_nach_status": {
+    "200": 100
+  },
+  "annahme_ms": {
+    "p50": 420.9,
+    "p95": 435.4,
+    "p99": 438.8,
+    "max": 439.7
+  },
+  "fertig_ms": {
+    "p50": 8440,
+    "p95": 14751,
+    "p99": 15459,
+    "max": 15553
+  },
+  "sofort_verfuegbar": 0,
+  "nach_warteschlange_fertig": 100,
+  "verlorene_requests": 0,
+  "queue_max": 97,
+  "drain_s": 0,
+  "doppelte_anbieter_abrufe": 0,
+  "doppelte_jobs_je_inserat": 0,
+  "doppelte_snapshots": 0,
+  "haengende_jobs": 0,
+  "neue_jobs_gesamt": 100,
+  "normale_seite_waehrend_spitze": {
+    "ok": true,
+    "ms": 5
+  },
+  "system_erste_10s": [
+    {
+      "s_nach_freigabe": 0.5,
+      "cpu": 46.2,
+      "ram": 13.3,
+      "mongo": 91,
+      "queue": 97
+    },
+    {
+      "s_nach_freigabe": 1.0,
+      "cpu": 5.5,
+      "ram": 13.3,
+      "mongo": 91,
+      "queue": 94
+    },
+    {
+      "s_nach_freigabe": 1.5,
+      "cpu": 5.4,
+      "ram": 13.3,
+      "mongo": 91,
+      "queue": 91
+    },
+    {
+      "s_nach_freigabe": 2.0,
+      "cpu": 21.7,
+      "ram": 13.3,
+      "mongo": 91,
+      "queue": 88
+    },
+    {
+      "s_nach_freigabe": 2.5,
+      "cpu": 11.6,
+      "ram": 13.3,
+      "mongo": 91,
+      "queue": 85
+    },
+    {
+      "s_nach_freigabe": 3.0,
+      "cpu": 9.5,
+      "ram": 13.3,
+      "mongo": 91,
+      "queue": 82
+    },
+    {
+      "s_nach_freigabe": 3.5,
+      "cpu": 6.0,
+      "ram": 13.3,
+      "mongo": 91,
+      "queue": 79
+    },
+    {
+      "s_nach_freigabe": 4.0,
+      "cpu": 8.5,
+      "ram": 13.3,
+      "mongo": 91,
+      "queue": 76
+    },
+    {
+      "s_nach_freigabe": 4.5,
+      "cpu": 15.0,
+      "ram": 13.3,
+      "mongo": 91,
+      "queue": 73
+    },
+    {
+      "s_nach_freigabe": 5.0,
+      "cpu": 6.0,
+      "ram": 13.3,
+      "mongo": 91,
+      "queue": 68
+    },
+    {
+      "s_nach_freigabe": 5.6,
+      "cpu": 22.7,
+      "ram": 14.2,
+      "mongo": 91,
+      "queue": 65
+    },
+    {
+      "s_nach_freigabe": 6.1,
+      "cpu": 31.2,
+      "ram": 13.6,
+      "mongo": 91,
+      "queue": 62
+    },
+    {
+      "s_nach_freigabe": 6.6,
+      "cpu": 9.6,
+      "ram": 13.6,
+      "mongo": 91,
+      "queue": 58
+    },
+    {
+      "s_nach_freigabe": 7.1,
+      "cpu": 8.5,
+      "ram": 13.6,
+      "mongo": 91,
+      "queue": 55
+    },
+    {
+      "s_nach_freigabe": 7.6,
+      "cpu": 5.9,
+      "ram": 13.6,
+      "mongo": 91,
+      "queue": 52
+    },
+    {
+      "s_nach_freigabe": 8.1,
+      "cpu": 7.0,
+      "ram": 13.6,
+      "mongo": 91,
+      "queue": 49
+    },
+    {
+      "s_nach_freigabe": 8.6,
+      "cpu": 10.6,
+      "ram": 13.6,
+      "mongo": 91,
+      "queue": 46
+    },
+    {
+      "s_nach_freigabe": 9.1,
+      "cpu": 5.5,
+      "ram": 13.6,
+      "mongo": 91,
+      "queue": 43
+    },
+    {
+      "s_nach_freigabe": 9.6,
+      "cpu": 6.5,
+      "ram": 13.6,
+      "mongo": 91,
+      "queue": 38
+    },
+    {
+      "s_nach_freigabe": 10.1,
+      "cpu": 14.1,
+      "ram": 13.6,
+      "mongo": 91,
+      "queue": 34
+    },
+    {
+      "s_nach_freigabe": 10.6,
+      "cpu": 8.0,
+      "ram": 13.6,
+      "mongo": 91,
+      "queue": 31
+    },
+    {
+      "s_nach_freigabe": 11.1,
+      "cpu": 7.0,
+      "ram": 13.6,
+      "mongo": 91,
+      "queue": 28
+    },
+    {
+      "s_nach_freigabe": 11.6,
+      "cpu": 5.5,
+      "ram": 13.6,
+      "mongo": 91,
+      "queue": 25
+    },
+    {
+      "s_nach_freigabe": 12.1,
+      "cpu": 9.5,
+      "ram": 13.6,
+      "mongo": 91,
+      "queue": 22
+    }
+  ],
+  "einzel_ergebnisse": [
+    {
+      "idx": 3,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.102939+00:00",
+      "annahme_ms": 67.6,
+      "job_status": "queued",
+      "job_id": "6093a95d-1994-402c-8f11-c4a29642f3e8",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700003-216-1",
+      "fertig_nach_ms": 1572,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 95,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.118329+00:00",
+      "annahme_ms": 54.4,
+      "job_status": "queued",
+      "job_id": "7b7e5abf-7322-4074-a7fe-5b24f1ba4c37",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700095-216-1",
+      "fertig_nach_ms": 1564,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 2,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.102648+00:00",
+      "annahme_ms": 74.5,
+      "job_status": "queued",
+      "job_id": "9b6845bc-7a11-4e82-9518-6adf569bd0c6",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700002-216-1",
+      "fertig_nach_ms": 1580,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 94,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.118175+00:00",
+      "annahme_ms": 54.6,
+      "job_status": "queued",
+      "job_id": "ff5a1b3d-8bfb-479c-81c5-001493619191",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700094-216-1",
+      "fertig_nach_ms": 1568,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 20,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.106682+00:00",
+      "annahme_ms": 75.5,
+      "job_status": "queued",
+      "job_id": "4933b481-6d70-41e8-9479-cd794d5f02ef",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700020-216-1",
+      "fertig_nach_ms": 1589,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 17,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.106221+00:00",
+      "annahme_ms": 75.7,
+      "job_status": "queued",
+      "job_id": "9e5f9cfc-9d76-41c6-82a6-4642e0403868",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700017-216-1",
+      "fertig_nach_ms": 1591,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 98,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.118735+00:00",
+      "annahme_ms": 69.2,
+      "job_status": "queued",
+      "job_id": "4eb857dc-b89c-4b8a-8b9b-160f634e91ac",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700098-216-1",
+      "fertig_nach_ms": 1587,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 77,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.115618+00:00",
+      "annahme_ms": 72.4,
+      "job_status": "queued",
+      "job_id": "2e4f73ce-26cb-4fab-8881-1e89dcbaf001",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700077-216-1",
+      "fertig_nach_ms": 1592,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 79,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.115875+00:00",
+      "annahme_ms": 76.2,
+      "job_status": "queued",
+      "job_id": "6963b26c-3b81-47da-ab4b-d5a3ceec2f80",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700079-216-1",
+      "fertig_nach_ms": 1593,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 64,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.113532+00:00",
+      "annahme_ms": 348.2,
+      "job_status": "queued",
+      "job_id": "0befae3b-254a-4fc8-be26-7d3288ff1a6a",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700064-216-1",
+      "fertig_nach_ms": 1858,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 65,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.113725+00:00",
+      "annahme_ms": 349.6,
+      "job_status": "queued",
+      "job_id": "91224b42-4648-498d-9626-b056d469ee8b",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700065-216-1",
+      "fertig_nach_ms": 1859,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 68,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.114210+00:00",
+      "annahme_ms": 353.6,
+      "job_status": "queued",
+      "job_id": "3df56604-ec93-40b7-9560-b68194a496e2",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700068-216-1",
+      "fertig_nach_ms": 1861,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 9,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.104609+00:00",
+      "annahme_ms": 362.4,
+      "job_status": "queued",
+      "job_id": "a9db2db0-fcfd-496b-b323-c8a370778441",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700009-216-1",
+      "fertig_nach_ms": 2340,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 67,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.114053+00:00",
+      "annahme_ms": 379.7,
+      "job_status": "queued",
+      "job_id": "4a9e1cfa-8636-4846-bf70-1e8aa1226cf3",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700067-216-1",
+      "fertig_nach_ms": 2341,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 18,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.106383+00:00",
+      "annahme_ms": 75.9,
+      "job_status": "queued",
+      "job_id": "c7a3ebc8-9111-4ae9-9deb-e2a15c491fda",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700018-216-1",
+      "fertig_nach_ms": 2548,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 21,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.106822+00:00",
+      "annahme_ms": 82.4,
+      "job_status": "queued",
+      "job_id": "87b8b36d-bf44-4cfd-948e-b2f6c044a34a",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700021-216-1",
+      "fertig_nach_ms": 3253,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 74,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.115117+00:00",
+      "annahme_ms": 77.6,
+      "job_status": "queued",
+      "job_id": "7637589e-bf9c-415d-a3d8-f42b4c396c9a",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700074-216-1",
+      "fertig_nach_ms": 3248,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 1,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.102436+00:00",
+      "annahme_ms": 333.7,
+      "job_status": "queued",
+      "job_id": "7bf45069-b759-4dd2-b1cd-38c0614f2c11",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700001-216-1",
+      "fertig_nach_ms": 3537,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 34,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.108894+00:00",
+      "annahme_ms": 390.0,
+      "job_status": "queued",
+      "job_id": "15ac8c8c-0a58-4f28-9d37-52d0c6ca3867",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700034-216-1",
+      "fertig_nach_ms": 3552,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 8,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.104412+00:00",
+      "annahme_ms": 402.8,
+      "job_status": "queued",
+      "job_id": "1bf08d2f-3271-42c0-9941-45fd9be99059",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700008-216-1",
+      "fertig_nach_ms": 3580,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 19,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.106535+00:00",
+      "annahme_ms": 83.1,
+      "job_status": "queued",
+      "job_id": "4873c5ae-7b06-4439-95d6-f7f75e2000ca",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700019-216-1",
+      "fertig_nach_ms": 4004,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 97,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.118599+00:00",
+      "annahme_ms": 68.8,
+      "job_status": "queued",
+      "job_id": "d3b3a6bd-4879-4172-9f27-71446f3921b3",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700097-216-1",
+      "fertig_nach_ms": 3995,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 69,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.114362+00:00",
+      "annahme_ms": 380.0,
+      "job_status": "queued",
+      "job_id": "38c455ee-4bbc-4336-a47f-a6e2c9cb6527",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700069-216-1",
+      "fertig_nach_ms": 4299,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 7,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.104198+00:00",
+      "annahme_ms": 402.7,
+      "job_status": "queued",
+      "job_id": "6844c9bf-417b-4c06-9759-f6d4a2d7eade",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700007-216-1",
+      "fertig_nach_ms": 4336,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 6,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.103588+00:00",
+      "annahme_ms": 405.7,
+      "job_status": "queued",
+      "job_id": "0d6c6d17-7c96-4a6a-af49-68d5a55a705f",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700006-216-1",
+      "fertig_nach_ms": 4336,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 33,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.108747+00:00",
+      "annahme_ms": 401.5,
+      "job_status": "queued",
+      "job_id": "7c3f9bfc-176c-428b-b164-77021fbcf430",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700033-216-1",
+      "fertig_nach_ms": 4332,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 66,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.113868+00:00",
+      "annahme_ms": 420.1,
+      "job_status": "queued",
+      "job_id": "97fdaaed-9049-446f-9389-45820bad29b1",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700066-216-1",
+      "fertig_nach_ms": 4417,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 92,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.117787+00:00",
+      "annahme_ms": 385.2,
+      "job_status": "queued",
+      "job_id": "02d22971-91ca-4825-ad51-33c958364373",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700092-216-1",
+      "fertig_nach_ms": 5823,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 93,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.117934+00:00",
+      "annahme_ms": 390.1,
+      "job_status": "queued",
+      "job_id": "a68884e8-5e4e-46e5-b05d-609c4efa14b4",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700093-216-1",
+      "fertig_nach_ms": 5828,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 60,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.112975+00:00",
+      "annahme_ms": 398.4,
+      "job_status": "queued",
+      "job_id": "59331737-4224-4be9-b92b-b6210e21f2dd",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700060-216-1",
+      "fertig_nach_ms": 5834,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 37,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.109420+00:00",
+      "annahme_ms": 422.2,
+      "job_status": "queued",
+      "job_id": "00690f0e-d350-4e59-b859-b5cb6372c975",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700037-216-1",
+      "fertig_nach_ms": 5918,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 38,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.109569+00:00",
+      "annahme_ms": 421.5,
+      "job_status": "queued",
+      "job_id": "c2e6d446-d492-4fa4-b351-2ab1e1664ae1",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700038-216-1",
+      "fertig_nach_ms": 5919,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 30,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.108299+00:00",
+      "annahme_ms": 422.7,
+      "job_status": "queued",
+      "job_id": "08d28237-73b7-42e1-b8a8-e53eb1b60b9c",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700030-216-1",
+      "fertig_nach_ms": 5920,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 32,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.108599+00:00",
+      "annahme_ms": 422.6,
+      "job_status": "queued",
+      "job_id": "40000763-e861-4b97-9ca7-3d3a9272e595",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700032-216-1",
+      "fertig_nach_ms": 5923,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 63,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.113404+00:00",
+      "annahme_ms": 417.7,
+      "job_status": "queued",
+      "job_id": "243c49eb-fe2d-40b7-a354-227977e25366",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700063-216-1",
+      "fertig_nach_ms": 5921,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 31,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.108446+00:00",
+      "annahme_ms": 429.6,
+      "job_status": "queued",
+      "job_id": "cbf2dc99-1941-49b8-a126-f4a92486355b",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700031-216-1",
+      "fertig_nach_ms": 5933,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 5,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.103368+00:00",
+      "annahme_ms": 430.5,
+      "job_status": "queued",
+      "job_id": "3c5c2f12-d962-4966-b2c0-e521ff87cd81",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700005-216-1",
+      "fertig_nach_ms": 6089,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 72,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.114791+00:00",
+      "annahme_ms": 417.4,
+      "job_status": "queued",
+      "job_id": "d11a7ede-dcba-47f8-b9b3-97114933676f",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700072-216-1",
+      "fertig_nach_ms": 6186,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 82,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.116310+00:00",
+      "annahme_ms": 416.6,
+      "job_status": "queued",
+      "job_id": "058d5278-dbca-4b5c-9a81-fe8e94da7674",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700082-216-1",
+      "fertig_nach_ms": 6208,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 90,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.117505+00:00",
+      "annahme_ms": 390.3,
+      "job_status": "queued",
+      "job_id": "8927c773-f487-4d5a-a059-3bda4e4abc32",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700090-216-1",
+      "fertig_nach_ms": 6779,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 4,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.103178+00:00",
+      "annahme_ms": 402.1,
+      "job_status": "queued",
+      "job_id": "d0c529f5-bc83-4d12-a13b-924305652fba",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700004-216-1",
+      "fertig_nach_ms": 6794,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 61,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.113124+00:00",
+      "annahme_ms": 425.1,
+      "job_status": "queued",
+      "job_id": "dd11de18-75cc-4042-80aa-7ed1a9677fca",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700061-216-1",
+      "fertig_nach_ms": 6883,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 0,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.101947+00:00",
+      "annahme_ms": 79.5,
+      "job_status": "queued",
+      "job_id": "83d0f9d6-cb15-4533-aa0c-b2c2f7a5537c",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700000-216-1",
+      "fertig_nach_ms": 7167,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 78,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.115752+00:00",
+      "annahme_ms": 56.9,
+      "job_status": "queued",
+      "job_id": "0b43cb83-dea2-45b6-9857-cba5d65b9896",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700078-216-1",
+      "fertig_nach_ms": 7232,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 35,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.109064+00:00",
+      "annahme_ms": 423.5,
+      "job_status": "queued",
+      "job_id": "db36d7d2-4525-4faa-af17-edbcfe644a67",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700035-216-1",
+      "fertig_nach_ms": 7576,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 71,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.114648+00:00",
+      "annahme_ms": 422.9,
+      "job_status": "queued",
+      "job_id": "22db70a3-5058-497d-8e62-9a2eb068889d",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700071-216-1",
+      "fertig_nach_ms": 7615,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 86,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.116944+00:00",
+      "annahme_ms": 417.1,
+      "job_status": "queued",
+      "job_id": "f740011d-f0ce-4d62-aeef-e39e90c01695",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700086-216-1",
+      "fertig_nach_ms": 7689,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 87,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.117103+00:00",
+      "annahme_ms": 416.9,
+      "job_status": "queued",
+      "job_id": "c451267a-1826-430f-abbb-7131c8beb344",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700087-216-1",
+      "fertig_nach_ms": 7726,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 36,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.109212+00:00",
+      "annahme_ms": 425.0,
+      "job_status": "queued",
+      "job_id": "e345696b-809b-4c28-8088-57576855a8ea",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700036-216-1",
+      "fertig_nach_ms": 8341,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 10,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.104792+00:00",
+      "annahme_ms": 433.5,
+      "job_status": "queued",
+      "job_id": "04aa2e31-bdca-4e73-bd72-27d995981895",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700010-216-1",
+      "fertig_nach_ms": 8440,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 81,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.116172+00:00",
+      "annahme_ms": 417.9,
+      "job_status": "queued",
+      "job_id": "b6be8860-1c01-4e41-a481-a2c1d0843441",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700081-216-1",
+      "fertig_nach_ms": 8440,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 24,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.107306+00:00",
+      "annahme_ms": 430.1,
+      "job_status": "queued",
+      "job_id": "3c7e8647-8e96-4b0e-8e8e-9afde84af95e",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700024-216-1",
+      "fertig_nach_ms": 8450,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 84,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.116590+00:00",
+      "annahme_ms": 420.9,
+      "job_status": "queued",
+      "job_id": "14657abe-7c5d-4d25-910a-2677a17ced39",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700084-216-1",
+      "fertig_nach_ms": 8480,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 70,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.114505+00:00",
+      "annahme_ms": 424.0,
+      "job_status": "queued",
+      "job_id": "a75f5a30-6ace-4743-9bec-0efc4bca39c7",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700070-216-1",
+      "fertig_nach_ms": 8492,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 39,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.109720+00:00",
+      "annahme_ms": 393.5,
+      "job_status": "queued",
+      "job_id": "10cbf754-7920-4c29-b074-3f542abc45ac",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700039-216-1",
+      "fertig_nach_ms": 9797,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 91,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.117643+00:00",
+      "annahme_ms": 377.6,
+      "job_status": "queued",
+      "job_id": "9ea39511-13ab-4d63-97ee-8378ee88a886",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700091-216-1",
+      "fertig_nach_ms": 9790,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 96,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.118472+00:00",
+      "annahme_ms": 69.1,
+      "job_status": "queued",
+      "job_id": "55c642e3-956c-4d4d-8ab6-065e596e4ef6",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700096-216-1",
+      "fertig_nach_ms": 9872,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 11,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.105003+00:00",
+      "annahme_ms": 432.9,
+      "job_status": "queued",
+      "job_id": "cd3c4ed5-9abc-42d6-9e10-957c9af925e9",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700011-216-1",
+      "fertig_nach_ms": 9888,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 42,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.110171+00:00",
+      "annahme_ms": 427.9,
+      "job_status": "queued",
+      "job_id": "173d6bf7-8ba6-47f5-b877-137d97a78161",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700042-216-1",
+      "fertig_nach_ms": 9968,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 83,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.116449+00:00",
+      "annahme_ms": 421.0,
+      "job_status": "queued",
+      "job_id": "ac3efc88-4cf4-4275-8742-13279492a724",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700083-216-1",
+      "fertig_nach_ms": 9980,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 89,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.117372+00:00",
+      "annahme_ms": 420.4,
+      "job_status": "queued",
+      "job_id": "87c584be-1675-40c8-875e-5feb42edbd60",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700089-216-1",
+      "fertig_nach_ms": 9991,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 44,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.110465+00:00",
+      "annahme_ms": 427.5,
+      "job_status": "queued",
+      "job_id": "6a171b48-aa8b-4c6c-9652-346abcdfce73",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700044-216-1",
+      "fertig_nach_ms": 10000,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 14,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.105568+00:00",
+      "annahme_ms": 432.8,
+      "job_status": "queued",
+      "job_id": "004caa97-f521-4a37-85c9-19987b109903",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700014-216-1",
+      "fertig_nach_ms": 10015,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 75,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.115327+00:00",
+      "annahme_ms": 422.8,
+      "job_status": "queued",
+      "job_id": "34d91b39-f59e-4478-bcae-4cb43e4e1270",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700075-216-1",
+      "fertig_nach_ms": 10125,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 99,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.118856+00:00",
+      "annahme_ms": 68.5,
+      "job_status": "queued",
+      "job_id": "248354b6-77d3-4dc8-91bd-d271e179f26a",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700099-216-1",
+      "fertig_nach_ms": 10374,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 45,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.110610+00:00",
+      "annahme_ms": 427.8,
+      "job_status": "queued",
+      "job_id": "8934d160-6405-4836-b5b7-20ae36eee372",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700045-216-1",
+      "fertig_nach_ms": 10436,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 22,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.106998+00:00",
+      "annahme_ms": 81.8,
+      "job_status": "queued",
+      "job_id": "c620fc89-e5a9-4639-9392-422a06720e67",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700022-216-1",
+      "fertig_nach_ms": 10453,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 49,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.111293+00:00",
+      "annahme_ms": 427.0,
+      "job_status": "queued",
+      "job_id": "f2ee57bf-b9bd-4679-aa56-8bcaedaa4f7c",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700049-216-1",
+      "fertig_nach_ms": 10489,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 85,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.116792+00:00",
+      "annahme_ms": 421.1,
+      "job_status": "queued",
+      "job_id": "4fc424c6-4191-4afb-9dc7-0709bc6166d5",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700085-216-1",
+      "fertig_nach_ms": 10826,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 51,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.111577+00:00",
+      "annahme_ms": 426.6,
+      "job_status": "queued",
+      "job_id": "836d64f8-e797-4bde-bf4d-2f01cf49fe92",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700051-216-1",
+      "fertig_nach_ms": 10852,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 26,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.107598+00:00",
+      "annahme_ms": 434.3,
+      "job_status": "queued",
+      "job_id": "71dd7a0c-2816-48ee-bfa2-44bfb88b38c5",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700026-216-1",
+      "fertig_nach_ms": 11599,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 13,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.105386+00:00",
+      "annahme_ms": 432.6,
+      "job_status": "queued",
+      "job_id": "044ec5e2-95ea-4ade-8a33-ffdf4d6fa661",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700013-216-1",
+      "fertig_nach_ms": 11607,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 53,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.111848+00:00",
+      "annahme_ms": 427.5,
+      "job_status": "queued",
+      "job_id": "bd0fea1e-9219-4ba5-8000-3d600b690458",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700053-216-1",
+      "fertig_nach_ms": 11631,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 29,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.108143+00:00",
+      "annahme_ms": 433.1,
+      "job_status": "queued",
+      "job_id": "8b4aedb2-5f17-42a7-94a1-f19926192237",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700029-216-1",
+      "fertig_nach_ms": 11666,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 88,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.117240+00:00",
+      "annahme_ms": 424.2,
+      "job_status": "queued",
+      "job_id": "1c75ac7b-195e-4135-8411-a8e0b7ea39cd",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700088-216-1",
+      "fertig_nach_ms": 11683,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 27,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.107800+00:00",
+      "annahme_ms": 433.5,
+      "job_status": "queued",
+      "job_id": "de03b697-e74a-439b-88d4-c0664ac24eb2",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700027-216-1",
+      "fertig_nach_ms": 12356,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 56,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.112361+00:00",
+      "annahme_ms": 434.0,
+      "job_status": "queued",
+      "job_id": "1deb2b93-415e-42d2-ad3f-52b7d1305e89",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700056-216-1",
+      "fertig_nach_ms": 12397,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 48,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.111149+00:00",
+      "annahme_ms": 435.9,
+      "job_status": "queued",
+      "job_id": "60763c9b-d5b6-4487-94bd-a08109adbab1",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700048-216-1",
+      "fertig_nach_ms": 12440,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 41,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.110028+00:00",
+      "annahme_ms": 434.0,
+      "job_status": "queued",
+      "job_id": "2d86492e-c2d0-4d38-93bc-e40e7566fcf6",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700041-216-1",
+      "fertig_nach_ms": 12446,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 43,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.110319+00:00",
+      "annahme_ms": 431.6,
+      "job_status": "queued",
+      "job_id": "e1780d52-bdfe-4a15-92b2-08e2fda914f3",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700043-216-1",
+      "fertig_nach_ms": 12448,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 15,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.105756+00:00",
+      "annahme_ms": 435.7,
+      "job_status": "queued",
+      "job_id": "b006da04-2012-4977-a0bc-318e8b5fabf0",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700015-216-1",
+      "fertig_nach_ms": 12454,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 58,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.112645+00:00",
+      "annahme_ms": 434.1,
+      "job_status": "queued",
+      "job_id": "58b6efec-a591-4064-bf01-9d37b96b2f00",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700058-216-1",
+      "fertig_nach_ms": 13820,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 76,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.115476+00:00",
+      "annahme_ms": 72.1,
+      "job_status": "queued",
+      "job_id": "758d5e2a-6884-445b-873a-913b408864d1",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700076-216-1",
+      "fertig_nach_ms": 13857,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 47,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.110992+00:00",
+      "annahme_ms": 434.2,
+      "job_status": "queued",
+      "job_id": "2403ecc9-1f7e-4eb3-9150-768dda27c19b",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700047-216-1",
+      "fertig_nach_ms": 13892,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 57,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.112498+00:00",
+      "annahme_ms": 435.4,
+      "job_status": "queued",
+      "job_id": "c3ec8a38-e9b0-4235-af74-11bde7239e29",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700057-216-1",
+      "fertig_nach_ms": 13916,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 59,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.112805+00:00",
+      "annahme_ms": 432.8,
+      "job_status": "queued",
+      "job_id": "b089ac79-cfd5-4bab-8ed4-3b9a5337f137",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700059-216-1",
+      "fertig_nach_ms": 13916,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 50,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.111437+00:00",
+      "annahme_ms": 435.6,
+      "job_status": "queued",
+      "job_id": "2c71b93f-129e-43cc-9214-5a36e0efc49f",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700050-216-1",
+      "fertig_nach_ms": 13923,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 28,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.107959+00:00",
+      "annahme_ms": 438.8,
+      "job_status": "queued",
+      "job_id": "1f2f2e91-c2a4-4a0f-9c34-7f16550cdfcc",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700028-216-1",
+      "fertig_nach_ms": 13952,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 52,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.111712+00:00",
+      "annahme_ms": 435.2,
+      "job_status": "queued",
+      "job_id": "17351d7b-5f5e-4f73-a025-df80362a2d0b",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700052-216-1",
+      "fertig_nach_ms": 13951,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 46,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.110810+00:00",
+      "annahme_ms": 435.3,
+      "job_status": "queued",
+      "job_id": "95f1898f-0a60-41f9-8902-1e5b34315afb",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700046-216-1",
+      "fertig_nach_ms": 13955,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 54,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.112012+00:00",
+      "annahme_ms": 428.3,
+      "job_status": "queued",
+      "job_id": "f0ab8e33-178b-49c0-a1f9-30a87df2f38a",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700054-216-1",
+      "fertig_nach_ms": 14053,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 62,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.113273+00:00",
+      "annahme_ms": 425.2,
+      "job_status": "queued",
+      "job_id": "a4551954-8b2c-4dc7-8c37-d1edefaade5f",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700062-216-1",
+      "fertig_nach_ms": 14208,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 16,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.105949+00:00",
+      "annahme_ms": 69.4,
+      "job_status": "queued",
+      "job_id": "c241a3fc-d489-4e1e-8974-72d15944c5e1",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700016-216-1",
+      "fertig_nach_ms": 14288,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 40,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.109862+00:00",
+      "annahme_ms": 428.5,
+      "job_status": "queued",
+      "job_id": "24d7b6a7-54cf-49de-b181-c3f8399d9701",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700040-216-1",
+      "fertig_nach_ms": 14352,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 73,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.114943+00:00",
+      "annahme_ms": 418.9,
+      "job_status": "queued",
+      "job_id": "fa3cfcca-1b72-4b65-85da-6f016d502bb3",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700073-216-1",
+      "fertig_nach_ms": 14751,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 25,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.107455+00:00",
+      "annahme_ms": 430.8,
+      "job_status": "queued",
+      "job_id": "5fcd1946-9dbf-42c2-931c-3b13198f58b3",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700025-216-1",
+      "fertig_nach_ms": 14910,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 23,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.107153+00:00",
+      "annahme_ms": 439.7,
+      "job_status": "queued",
+      "job_id": "e67747a8-7731-429f-958d-6674552ab83d",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700023-216-1",
+      "fertig_nach_ms": 14912,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 12,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.105203+00:00",
+      "annahme_ms": 428.9,
+      "job_status": "queued",
+      "job_id": "70e9b656-5b55-4ba6-a338-2d4710f9cdd4",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700012-216-1",
+      "fertig_nach_ms": 15459,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 80,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.116030+00:00",
+      "annahme_ms": 421.5,
+      "job_status": "queued",
+      "job_id": "a996f15f-d141-4d33-8d06-4b9ed466c301",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700080-216-1",
+      "fertig_nach_ms": 15449,
+      "endstatus": "completed"
+    },
+    {
+      "idx": 55,
+      "status": 200,
+      "gesendet": "2026-09-05T12:15:38.112149+00:00",
+      "annahme_ms": 426.0,
+      "job_status": "queued",
+      "job_id": "3d9c62da-90fe-4003-96c2-a2dc1338fdfc",
+      "url": "https://www.kleinanzeigen.de/s-anzeige/st/126631700055-216-1",
+      "fertig_nach_ms": 15553,
+      "endstatus": "completed"
+    }
+  ]
+}

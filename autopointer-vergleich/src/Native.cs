@@ -1,0 +1,130 @@
+using System.Runtime.InteropServices;
+using System.Text;
+
+namespace AutoPointerVergleich;
+
+/// <summary>Win32-Aufrufe. Alles hier liest nur: Fenster finden, Klassen/Texte
+/// abfragen, Inhalte abfotografieren. AutoPointer wird nie veraendert.</summary>
+internal static class Native
+{
+    public delegate bool EnumProc(IntPtr hwnd, IntPtr lParam);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT
+    {
+        public int Left, Top, Right, Bottom;
+        public readonly int Width => Right - Left;
+        public readonly int Height => Bottom - Top;
+    }
+
+    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lParam);
+    /// <summary>Zaehler, der bei jeder Aenderung der Zwischenablage steigt (Nr. 11: "seit dem Anklicken kopiert?").</summary>
+    [DllImport("user32.dll")] public static extern uint GetClipboardSequenceNumber();
+    [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr parent, EnumProc cb, IntPtr lParam);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr hwnd, StringBuilder sb, int max);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr hwnd, StringBuilder sb, int max);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out RECT r);
+    [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hwnd, out RECT r);
+    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern IntPtr GetParent(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern IntPtr GetDC(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr hwnd, IntPtr dc);
+    [DllImport("gdi32.dll")] public static extern bool BitBlt(IntPtr dst, int x, int y, int w, int h, IntPtr src, int sx, int sy, int rop);
+    public const int SRCCOPY = 0x00CC0020;
+
+    [DllImport("user32.dll")] public static extern IntPtr GetWindowDpiAwarenessContext(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr ctx);
+    [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hwnd);
+
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern bool AllowSetForegroundWindow(int dwProcessId);
+    public const int ASFW_ANY = -1;
+    // Pruefung 09.10.2026 (Befund 1): BringWindowToTop ist hier bewusst NICHT mehr vorhanden — es ist SetWindowPos ohne
+    // SWP_ASYNCWINDOWPOS und stellt WM_WINDOWPOSCHANGING synchron an AutoPointers Oberflaechen-Thread zu; war AutoPointer
+    // gerade beschaeftigt (Laden, Modal-Dialog ohne Nachrichtenschleife), fror UNSER Oberflaechen-Thread ein (Leiste, Tray,
+    // Lese-Takt ueber _ui.Send). SetForegroundWindow holt das Fenster ohnehin nach oben.
+    /// <summary>Pruefung 09.10.2026 (Befund 2c): false, solange AutoPointer einen Modal-Dialog offen hat — dann darf
+    /// nicht das deaktivierte Hauptfenster aktiviert werden (die VCL piept/flackert), sondern der Dialog.</summary>
+    [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr hwnd);
+    /// <summary>Pruefung 09.10.2026 (Befund 2d): antwortet das Fenster seit ≥ 5 s nicht mehr auf Nachrichten? An so
+    /// einen Thread haengen wir uns nie (AttachThreadInput an ein haengendes Fenster friert uns mit ein).</summary>
+    [DllImport("user32.dll")] public static extern bool IsHungAppWindow(IntPtr hwnd);
+    /// <summary>Pruefung 09.10.2026 (Befund 2c): der zuletzt aktive Dialog des Fensters (oder das Fenster selbst).</summary>
+    [DllImport("user32.dll")] public static extern IntPtr GetLastActivePopup(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr nach, int x, int y, int cx, int cy, uint flags);
+    public static readonly IntPtr HWND_TOPMOST = new(-1);
+    public const uint SWP_NOSIZE = 0x1, SWP_NOMOVE = 0x2, SWP_NOACTIVATE = 0x10;
+    public const int WS_EX_TOPMOST = 0x8, WS_EX_TOOLWINDOW = 0x80, WS_EX_NOACTIVATE = 0x08000000;
+    public const int WM_MOUSEACTIVATE = 0x21, MA_NOACTIVATE = 3;
+    [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
+    [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")] public static extern bool RegisterHotKey(IntPtr hwnd, int id, uint modifiers, uint vk);
+    [DllImport("user32.dll")] public static extern bool UnregisterHotKey(IntPtr hwnd, int id);
+    public const uint MOD_ALT = 0x1, MOD_CONTROL = 0x2, MOD_NOREPEAT = 0x4000;
+    public const int WM_HOTKEY = 0x0312;
+
+    // Wunsch Ahmad 06.10.2026 (Klicks.cs): nur die Maustasten abfragen und, ob der Zeiger ueber AutoPointer liegt
+    [StructLayout(LayoutKind.Sequential)]
+    public struct POINT { public int X, Y; }
+    [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vk);
+    [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
+    [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
+    public const uint GA_ROOT = 2;
+
+    [DllImport("kernel32.dll")] public static extern bool AttachConsole(int pid);
+
+    /// <summary>Pruefung 05.10.2026 (Paket 2, A7): Windows startet das Programm nach einem Absturz oder Haenger
+    /// (Windows-Fehlerberichterstattung, fruehestens nach 60 s Laufzeit) mit dieser Befehlszeile neu.
+    /// Rueckgabe S_OK (0) bei Erfolg.</summary>
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    public static extern int RegisterApplicationRestart(string? befehlszeile, uint flags);
+    public const uint RESTART_NO_CRASH = 1, RESTART_NO_HANG = 2, RESTART_NO_PATCH = 4, RESTART_NO_REBOOT = 8;
+
+    [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr hIcon);
+
+    public static string Klasse(IntPtr hwnd)
+    {
+        var sb = new StringBuilder(256);
+        GetClassName(hwnd, sb, sb.Capacity);
+        return sb.ToString();
+    }
+
+    public static string Text(IntPtr hwnd)
+    {
+        var sb = new StringBuilder(512);
+        GetWindowText(hwnd, sb, sb.Capacity);
+        return sb.ToString();
+    }
+
+    public static List<IntPtr> Kinder(IntPtr parent)
+    {
+        var liste = new List<IntPtr>();
+        EnumChildWindows(parent, (h, _) => { liste.Add(h); return true; }, IntPtr.Zero);
+        return liste;
+    }
+
+    /// <summary>Fuehrt <paramref name="aktion"/> im DPI-Kontext des Zielfensters aus,
+    /// damit Groessen und PrintWindow-Ausgabe zusammenpassen - auch wenn
+    /// AutoPointer nicht DPI-bewusst ist und Windows es skaliert.</summary>
+    public static T ImDpiKontext<T>(IntPtr hwnd, Func<T> aktion)
+    {
+        IntPtr alt = IntPtr.Zero;
+        try
+        {
+            var ctx = GetWindowDpiAwarenessContext(hwnd);
+            if (ctx != IntPtr.Zero) alt = SetThreadDpiAwarenessContext(ctx);
+        }
+        catch (EntryPointNotFoundException) { }
+        try { return aktion(); }
+        finally
+        {
+            if (alt != IntPtr.Zero) SetThreadDpiAwarenessContext(alt);
+        }
+    }
+}

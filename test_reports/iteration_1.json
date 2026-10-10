@@ -30,7 +30,7 @@
     "/app/backend/tests/backend_test.py"
   ],
   "success_rate": {"backend": "96% (23/24)", "frontend": "100% smoke"},
-  "test_credentials": "Admin: admin@autohandel.app / Admin123! (lifetime, seeded). Dealer test users created with TEST_ prefix during pytest run; cleanup not implemented (manual mongo cleanup if needed).",
+  "test_credentials": "Admin: <ADMIN_EMAIL> / <ADMIN_PASSWORD> (lifetime, seeded). Dealer test users created with TEST_ prefix during pytest run; cleanup not implemented (manual mongo cleanup if needed).",
   "seed_data_creation": "pytest creates ~6 TEST_-prefixed dealers per run + a few contracts/appointments/drivers. No teardown; fine for shared dev mongo.",
   "retest_needed": false,
   "main_agent_can_self_test": true,

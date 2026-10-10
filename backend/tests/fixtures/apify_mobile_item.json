@@ -1,0 +1,821 @@
+[{
+  "attributes": [
+    {
+      "label": "Vehicle condition",
+      "tag": "damageCondition",
+      "value": "Used vehicle, Accident-free",
+      "infoText": {
+        "headline": "Info",
+        "text": "Damaged vehicles are any vehicles with unrepaired significant damage, e.g. due to a road traffic accident, fire damage, hail damage, water damage, engine damage or damage to the gearbox. This does not include: 1.) normal wear and tear; 2.) minor damage; 3.) a vehicle which has previously had an accident but has since been repaired. Also, a vehicle is only deemed to be accident-free if it has never suffered any significant damage in an accident. This means anything more serious than minor damage (e.g. scratched paintwork). Even if the damage has been properly repaired, the vehicle is no longer accident-free. Finally, 'Roadworthy' means that the vehicle is technically capable of being driven (no engine damage or the like). This does not refer to aspects of traffic safety or other suitability of the vehicle."
+      }
+    },
+    {
+      "label": "Category",
+      "tag": "category",
+      "value": "Saloon"
+    },
+    {
+      "label": "Model range",
+      "tag": "modelRange",
+      "value": "BQ1/BE2"
+    },
+    {
+      "label": "Trim line",
+      "tag": "trimLine",
+      "value": "2.0 GTI TCR "
+    },
+    {
+      "label": "Vehicle Number",
+      "tag": "sku",
+      "value": "B1-D-66-00581"
+    },
+    {
+      "label": "Origin",
+      "tag": "countryVersion",
+      "value": "German edition"
+    },
+    {
+      "label": "Mileage",
+      "tag": "mileage",
+      "value": "111,016 km"
+    },
+    {
+      "label": "Cubic Capacity",
+      "tag": "cubicCapacity",
+      "value": "1,984 ccm"
+    },
+    {
+      "label": "Power",
+      "tag": "power",
+      "value": "213 kW (290 hp)"
+    },
+    {
+      "label": "Drive type",
+      "tag": "envkv.engineType",
+      "value": "Internal combustion engine"
+    },
+    {
+      "label": "Fuel",
+      "tag": "fuel",
+      "value": "Petrol"
+    },
+    {
+      "label": "Energy consumption (comb.)",
+      "tag": "envkv.energyConsumption",
+      "value": "6.7 l/100km",
+      "footnoteIndices": [
+        0
+      ]
+    },
+    {
+      "label": "CO₂ emissions (comb.)",
+      "tag": "envkv.co2Emissions",
+      "value": "153 g/km",
+      "infoText": {
+        "headline": "CO₂ emissions",
+        "text": "Only the CO₂ emissions resulting from the operation of the car are specified. CO₂ emissions that are generated or avoided through the production and provision of the car and the fuel or energy source are not taken into account when determining CO₂ emissions in accordance with the WLTP."
+      },
+      "footnoteIndices": [
+        0
+      ]
+    },
+    {
+      "label": "Fuel consumption",
+      "tag": "envkv.consumptionDetails.fuel",
+      "value": [
+        "6.7 l/100km (combined)"
+      ],
+      "footnoteIndices": [
+        0
+      ]
+    },
+    {
+      "label": "Number of Seats",
+      "tag": "numSeats",
+      "value": "5"
+    },
+    {
+      "label": "Door Count",
+      "tag": "doorCount",
+      "value": "4/5"
+    },
+    {
+      "label": "Transmission",
+      "tag": "transmission",
+      "value": "Automatic"
+    },
+    {
+      "label": "Emission Class",
+      "tag": "emissionClass",
+      "value": "Euro6d-TEMP"
+    },
+    {
+      "label": "Emissions Sticker",
+      "tag": "emissionsSticker",
+      "value": "4 (Green)"
+    },
+    {
+      "label": "First Registration",
+      "tag": "firstRegistration",
+      "value": "06/2019"
+    },
+    {
+      "label": "Number of Vehicle Owners",
+      "tag": "numberOfPreviousOwners",
+      "value": "2"
+    },
+    {
+      "label": "HU",
+      "tag": "hu",
+      "value": "New"
+    },
+    {
+      "label": "Climatisation",
+      "tag": "climatisation",
+      "value": "Automatic climatisation, 2 zones"
+    },
+    {
+      "label": "Parking sensors",
+      "tag": "parkAssists",
+      "value": "Camera, Front, Rear"
+    },
+    {
+      "label": "Airbags",
+      "tag": "airbag",
+      "value": "Front and Side and More Airbags"
+    },
+    {
+      "label": "Colour (Manufacturer)",
+      "tag": "manufacturerColorName",
+      "value": "PURE WHITE"
+    },
+    {
+      "label": "Colour",
+      "tag": "color",
+      "value": "White"
+    },
+    {
+      "label": "Interior Design",
+      "tag": "interior",
+      "value": "Part leather, Black"
+    },
+    {
+      "label": "Trailer load braked",
+      "tag": "trailerLoadBraked",
+      "value": "1,600 kg"
+    },
+    {
+      "label": "Trailer load unbraked",
+      "tag": "trailerLoadUnbraked",
+      "value": "680 kg"
+    },
+    {
+      "label": "Support load",
+      "tag": "maxNoseWeight",
+      "value": "75 kg"
+    },
+    {
+      "label": "Weight",
+      "tag": "netWeight",
+      "value": "1,430 kg"
+    },
+    {
+      "label": "Date of last service (date)",
+      "tag": "lastMaintenanceDate",
+      "value": "03/2026"
+    },
+    {
+      "label": "Last service (mileage)",
+      "tag": "lastMaintenanceMileage",
+      "value": "106,287 km"
+    },
+    {
+      "label": "Cylinders",
+      "tag": "cylinder",
+      "value": "4"
+    },
+    {
+      "label": "Tank capacity",
+      "tag": "fuelTankVolume",
+      "value": "50 l"
+    }
+  ],
+  "adMobPlacements": {
+    "contentUrl": "https://m.mobile.de/auto-inserat/vw-golf/42196329136896.html",
+    "ppid": "5f33d0c2cd3f3c05ef4ba740d27c1f842ff44f22c80a0a4f35c1f4a01c7bcc9e",
+    "slots": {
+      "vip_1": {
+        "adId": "/4288/mobile.de.ios/vip/mr2",
+        "targeting": {
+          "pos": "vip_1",
+          "a": [
+            "i162",
+            "i160"
+          ]
+        },
+        "adSizes": [
+          "fluid",
+          "300x250",
+          "336x280"
+        ]
+      },
+      "vip_2": {
+        "adId": "/4288/mobile.de.ios/vip/mr3",
+        "targeting": {
+          "pos": "vip_2",
+          "a": [
+            "i163",
+            "i160"
+          ]
+        },
+        "adSizes": [
+          "fluid",
+          "300x250",
+          "336x280"
+        ]
+      },
+      "vip_3": {
+        "adId": "/4288/mobile.de.ios/vip/mr4",
+        "targeting": {
+          "pos": "vip_3",
+          "a": [
+            "i168",
+            "i160"
+          ]
+        },
+        "adSizes": [
+          "fluid",
+          "300x250",
+          "336x280"
+        ]
+      },
+      "vip_gal": {
+        "adId": "/4288/mobile.de.ios/vip/gallery",
+        "targeting": {
+          "pos": "vip_gal",
+          "a": [
+            "i170",
+            "i160",
+            "i300",
+            "d300"
+          ]
+        },
+        "adSizes": [
+          "300x250"
+        ]
+      },
+      "vip_gal2": {
+        "adId": "/4288/mobile.de.ios/vip/gallery2",
+        "targeting": {
+          "pos": "vip_gal2",
+          "a": [
+            "i173",
+            "i160",
+            "i300",
+            "d300"
+          ]
+        },
+        "adSizes": [
+          "300x250"
+        ]
+      },
+      "vip_top": {
+        "adId": "/4288/mobile.de.ios/vip/mr1",
+        "targeting": {
+          "pos": "vip_top",
+          "a": [
+            "i171",
+            "i160",
+            "i300",
+            "d300"
+          ]
+        },
+        "adSizes": [
+          "fluid",
+          "300x250",
+          "336x280"
+        ]
+      }
+    }
+  },
+  "adMobTargeting": {
+    "ab": "it07",
+    "cap": "09",
+    "ch": "01",
+    "ch24cat": "LIMOU",
+    "ch24fuel": "BENZIN",
+    "ch24mak": "VOW",
+    "ch24mod": "VOWGOLF",
+    "ch24reg": "062019",
+    "ch24usg": "GEBR",
+    "city": "012",
+    "cm": "vw",
+    "cm_mod": "vw.golf,vw.golf",
+    "co2": "153",
+    "coSt": "CQVKQkAQVKQkAEy-gAENB0FgAP_gAELAAAYgJepR5CzdbWFBcb53aPskOYwX19BDIsQhAgSAAyAFgBOQ8JQA02E6NASABiACEAAAoxTBAAEEHABEAQCAAAAEAADMIAQEgAAIIABEgAEQAAJYAAgKAIAgEAAIgAIFEgAAmBiAIdLkXUCAgIAACgAQAAABAIAAAAMABAAIAAIAAAAAQgAAAAAAAAIAAAAAARAAAAAAAAAAAAAAIF5wBAAQAA0ACYAvMAYJAtAAWABUADgAHgAZAA8ACGAFUAN4AfgBCACGgEQARIAjgBNACtAGAAMMAdwA9oB9gH6ARQAjQBHACRQElASYAuYBegDFAG0ANwAkQBOwChwFHgKRAU2AtgBhoDJAGTgMzAauA1kB446BkAAsACoAHAAZAA8ACrAFwAXQAxABvAD8AIaARABEgCOAE0AKMAVoAwABhgDRAHcAPaAfYB-gEUAItARwBHQCRQElASYAucBeQF6AMUAbQA3ACEAEXgJEATsAocBR4CmwFsAMNAZIAycBlQDLAGZgNXAcWA8cCAJCAkAAsAKoAXAAxABvAD8AMAAdwBFACOAEpALmAYoA2gCmwFogMnAeOSgNgALAA4ADwAIYAVQAuABiAENAIgAiQBHACjAFaAMAAfgBHAC5gGKAQgAi8BIgCjwFNgLYAZIAycBlgEASkCcABYAFQAOAAyAB4AEMAKoAYgA_ACGgEQARIAjgBRgCtAGAANGAfYB-gEWgI4AjoBIgCSgFzALyAYoA2gBuAEXgJEATsAocBTYC2AGGgMkAZOAywBrIDxwIcloBIAQwBgADuAI4AXoBQ4CmwGZgPHA.YAAAAAAADgAAAKgAAAAA",
+    "cond": "02",
+    "ct": "car",
+    "ez": "06.2019",
+    "fid": "5f33d0c2cd3f3c05ef4ba740d27c1f842ff44f22c80a0a4f35c1f4a01c7bcc9e",
+    "fuel": "02",
+    "g_adid": "42196329136896",
+    "g_cco": "USED",
+    "g_cm": "vw",
+    "g_cmo": "golf",
+    "g_cy": "2019",
+    "g_hd": "85485f7adfee58ad8e67b9e970c4b5dd0c83cefa74628fc5a76707f5cdb525f8",
+    "gear": "03",
+    "geo": "us|60009|Elk Grove Village|42.0026|-87.9644",
+    "hn": "de.mobile.iphone",
+    "hsn": "0603",
+    "hvs": "0",
+    "img": "img.classistatic.de/api/v1/mo-prod/images/ef/ef0759a3-d104-4499-a32e-5302338ac31a",
+    "intid": "42196329136896",
+    "kba": "03",
+    "km": "07",
+    "kw": "213",
+    "lang": "en",
+    "li": "0",
+    "ma": "111016",
+    "make": "vw",
+    "mod": "golf",
+    "model": "golf",
+    "na": "1",
+    "pr": "23850",
+    "preis": "23850",
+    "price": "07",
+    "pt": "VIP",
+    "ptg": "cosadvertisingiosinterstitialappopentest.cosadvertisingiosinterstitialappopentestcontrol,cossrpsrxiosv2.cossrpsrxiosv2v1",
+    "reg": "06",
+    "regy": "2019",
+    "restr": "02,12",
+    "sl": "03,05",
+    "slv": "01",
+    "spv": "50",
+    "tsn": "CIY",
+    "tuev": "Neu",
+    "typ": "06",
+    "ug": "it07",
+    "vat": "0"
+  },
+  "mediaGallery": {
+    "youtubeId": "rPp6L9xRWhQ",
+    "slideShow": false,
+    "additionalAds": false
+  },
+  "shortTitle": "Volkswagen Golf",
+  "subTitle": "VII 2.0 GTI TCR*ACC*LED*Virtual*Assist*TOP*",
+  "makeKey": "Volkswagen",
+  "modelKey": "Golf",
+  "sku": "B1-D-66-00581",
+  "youtubeId": "rPp6L9xRWhQ",
+  "isNew": false,
+  "footnotes": [
+    "The information is provided in accordance with the Passenger Car Energy Consumption Labelling Regulation. The values stated were determined in accordance with the prescribed WLTP (Worldwide Harmonised Light-Duty Vehicles Test Procedure) measurement method. The fuel consumption and CO₂ emissions of a car depend not only on the efficient utilisation of fuel by the car, but also on driving style and other non-technical factors. CO₂ is the main greenhouse gas responsible for global warming. A guide to the fuel consumption and CO₂ emissions of all new car models offered in Germany can be viewed free of charge at any point of sale in Germany where new cars are displayed or offered for sale. The guide is also available here: <a href=\"https://www.dat.de/co2/\" target=\"_blank\">www.dat.de/co2/</a>",
+    "The terms and conditions of the service provider apply."
+  ],
+  "isDamageCase": false,
+  "isVideoEnabled": true,
+  "readyToDrive": true,
+  "isConditionNew": false,
+  "contact": {
+    "type": "Dealer",
+    "country": "DE",
+    "enumType": "DEALER",
+    "name": "AUTO-MAGER.DE",
+    "address1": "Versbacher Str. 6",
+    "address2": "DE-97078 Würzburg",
+    "phones": [
+      {
+        "type": "MOBILE",
+        "number": "+49 (0)1515 1747777",
+        "uri": "tel:+4915151747777"
+      },
+      {
+        "type": "FAX",
+        "number": "+49 931 2704680"
+      }
+    ],
+    "messengers": [
+      {
+        "type": "WHATS_APP",
+        "number": "+49 1515 1747777",
+        "uri": "https://wa.me/4915151747777?ref=wa"
+      }
+    ],
+    "latLong": {
+      "lat": 49.8038403,
+      "lon": 9.9612146
+    },
+    "languages": "Deutsch, English, Français",
+    "withMobileSince": "With mobile.de since Feb 28, 2002",
+    "canSendCcMail": false,
+    "openingHours": [
+      {
+        "day": "Mon - Fri",
+        "time": "09:00 h - 18:00 h"
+      }
+    ],
+    "rating": {
+      "count": 56,
+      "totalCount": 355,
+      "score": 5,
+      "scoreLocalized": "5.0",
+      "link": "https://www.mobile.de/bewertungen/MAGER?lang=en",
+      "recommendationRate": 100,
+      "adRealityRate": 100,
+      "consultingScore": 4.925925925925926,
+      "friendlinessScore": 5,
+      "responseTimeScore": 4.946428571428571
+    },
+    "homepageUrl": "https://home.mobile.de/home/redirect.html?customerId=452433",
+    "logo": "img.classistatic.de/api/v1/mo-prod/images/d0/d0398caf-7222-48ee-a02b-13c45f98138e",
+    "heroImage": {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/fa/fa6c2ff7-0986-46ed-852c-67f6921b5528"
+    },
+    "showroomGallery": [
+      {
+        "uri": "img.classistatic.de/api/v1/mo-prod/images/dd/ddb0dbd7-6207-4f84-ae7d-e3a38e7916d5"
+      },
+      {
+        "uri": "img.classistatic.de/api/v1/mo-prod/images/59/59a5fbf6-19ca-4d24-8946-c07f0b0cd1a3"
+      },
+      {
+        "uri": "img.classistatic.de/api/v1/mo-prod/images/f8/f8568624-e97f-4e85-be8c-0ff7c1fae05b"
+      },
+      {
+        "uri": "img.classistatic.de/api/v1/mo-prod/images/39/3973895f-fe1b-4215-b7f6-48339cf5eb3a"
+      },
+      {
+        "uri": "img.classistatic.de/api/v1/mo-prod/images/98/98dbc895-ddf3-4b37-9a0a-6f1b12cb361e"
+      },
+      {
+        "uri": "img.classistatic.de/api/v1/mo-prod/images/23/23554792-c3cb-4cfc-8b5c-5149f49d77d7"
+      }
+    ],
+    "person": {
+      "name": "Daniel Türker",
+      "role": "Ankäufer / Verkäufer / Gewährleistung"
+    },
+    "canBeFollowed": true
+  },
+  "created": 1787829276,
+  "modified": 1788090921,
+  "renewed": 1787829276,
+  "version": 7,
+  "makeId": 25200,
+  "modelId": 14,
+  "make": {
+    "id": "25200",
+    "localized": "Volkswagen"
+  },
+  "model": {
+    "id": "14",
+    "localized": "Golf"
+  },
+  "financePlans": [
+    {
+      "type": "DF",
+      "url": "https://www.mobile.de/finanzierung/route/outlink/2?adId=42196329136896&campaign=MzYyNGQzODAtZDU4MS00ODQ2LWI5OTgtODc3OWRmY2U0OGNhOjpmYWxzZQ%3D%3D",
+      "shortFlow": true,
+      "promotion": false,
+      "showInGallery": true,
+      "bankId": "Santander",
+      "offer": {
+        "bankId": "Santander",
+        "bankName": "Openbank Deutschland AG",
+        "loanType": "BALLOON",
+        "downPayment": 4770,
+        "creditTerm": 60,
+        "yearlyMileage": 10000,
+        "creditAmount": 19080,
+        "interestRateNominal": 6.78,
+        "interestRateEffective": 6.99,
+        "monthlyInstallment": 229,
+        "finalInstallment": 10732.5,
+        "totalInterest": 5123.9,
+        "totalAmount": 24203.9,
+        "localized": {
+          "downPayment": "€4,770.00",
+          "downPaymentInPercent": "20%",
+          "creditTerm": "60",
+          "creditTermInYears": "5",
+          "yearlyMileage": "10,000",
+          "creditAmount": "€19,080.00",
+          "interestRateNominal": "6.78%",
+          "interestRateEffective": "6.99%",
+          "monthlyInstallment": "€229",
+          "finalInstallment": "€10,732.50",
+          "totalInterest": "€5,123.90",
+          "totalAmount": "€24,203.90",
+          "disclaimer": "Representative example: The above information also represents the 2/3 example in accordance with Section 17 (4) of the Price Indication Regulation (PAngV). A financing offer from Openbank Deutschland AG (lender), Santander-Platz 1, 41061 Mönchengladbach. Creditworthiness required."
+        }
+      }
+    }
+  ],
+  "insurancePlans": [
+    {
+      "href": "https://www.mobile.de/adv/insurance/redirect?pageId=DE/M/S/XD&placementId=insurancePlans&client.header.x-mobile-client=de.mobile.iphone.app&client.abtests=cosadvertisingiosinterstitialappopentest.cosadvertisingiosinterstitialappopentestcontrol&client.abtests=cossrpsrxiosv2.cossrpsrxiosv2v1&adId=42196329136896",
+      "provider": "CHECK24",
+      "title": "Compare insurance",
+      "description": "Compare over 330 fares & find the right one!",
+      "icon": "https://static.classistatic.de/adv/public/png/check24@075dc71bece96ddddb9ec5b2f95f9c8d.png",
+      "iconDark": "https://static.classistatic.de/adv/public/png/check24Dark@d27b642f7c5e0da2098fc6633866983d.png",
+      "insuranceOffers": [
+        {
+          "id": "Liability",
+          "name": "Liability",
+          "startPrice": 12.53,
+          "href": "https://www.mobile.de/adv/insurance/redirect?pageId=DE/M/S/XD&placementId=insurancePlans&client.header.x-mobile-client=de.mobile.iphone.app&client.abtests=cosadvertisingiosinterstitialappopentest.cosadvertisingiosinterstitialappopentestcontrol&client.abtests=cossrpsrxiosv2.cossrpsrxiosv2v1&adId=42196329136896"
+        },
+        {
+          "id": "PartialCover",
+          "name": "PartialCover",
+          "startPrice": 23.25,
+          "href": "https://www.mobile.de/adv/insurance/redirect?pageId=DE/M/S/XD&placementId=insurancePlans&client.header.x-mobile-client=de.mobile.iphone.app&client.abtests=cosadvertisingiosinterstitialappopentest.cosadvertisingiosinterstitialappopentestcontrol&client.abtests=cossrpsrxiosv2.cossrpsrxiosv2v1&adId=42196329136896"
+        },
+        {
+          "id": "FullCover",
+          "name": "FullCover",
+          "startPrice": 35.54,
+          "href": "https://www.mobile.de/adv/insurance/redirect?pageId=DE/M/S/XD&placementId=insurancePlans&client.header.x-mobile-client=de.mobile.iphone.app&client.abtests=cosadvertisingiosinterstitialappopentest.cosadvertisingiosinterstitialappopentestcontrol&client.abtests=cossrpsrxiosv2.cossrpsrxiosv2v1&adId=42196329136896"
+        }
+      ]
+    }
+  ],
+  "links": [
+    {
+      "rel": "similar-seller-ads",
+      "href": "/svc/similar/?p=23850&c=Limousine&ms=25200%3B14&id%21=42196329136896&vc=Car&sid=452433"
+    },
+    {
+      "rel": "insurance",
+      "href": "https://www.mobile.de/adv/insurance/redirect?pageId=DE/M/S/XD&placementId=insurance&client.header.x-mobile-client=de.mobile.iphone.app&client.abtests=cosadvertisingiosinterstitialappopentest.cosadvertisingiosinterstitialappopentestcontrol&client.abtests=cossrpsrxiosv2.cossrpsrxiosv2v1&adId=42196329136896",
+      "provider": "CHECK24",
+      "title": "Compare insurance",
+      "description": "Compare over 330 fares & find the right one!",
+      "icon": "https://static.classistatic.de/adv/public/png/check24@075dc71bece96ddddb9ec5b2f95f9c8d.png",
+      "iconDark": "https://static.classistatic.de/adv/public/png/check24Dark@d27b642f7c5e0da2098fc6633866983d.png",
+      "state": "legacy"
+    }
+  ],
+  "images": [
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/ef/ef0759a3-d104-4499-a32e-5302338ac31a"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/00/00d20906-c3ac-4f60-9d4b-848f06622cca"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/fe/fe9360a7-6f17-47a6-ba7b-2b6e73253a19"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/9a/9a7820a4-afc7-4626-893b-571c7a5e2571"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/40/40701b66-9077-44db-a554-af5068ef6f82"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/03/0327e826-1f29-4043-8dbf-ddd85dc166ce"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/a7/a75d3b5b-1cf0-4023-980a-1f1b8ae0e878"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/16/16c3aa32-ba2d-475a-850e-5fef2358ebdd"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/65/65af6816-3631-46b2-bf5e-018528c2d8fd"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/33/337771b2-4626-47de-b15a-2ee5839ef699"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/9d/9dfc6726-502e-4d8a-beff-d604823d35f0"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/b6/b65c0b33-f595-4c2c-9b61-8a52124d279c"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/68/68f8d02f-7f9d-406e-8b0d-2b56fd60d6ee"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/ed/ed5f1bd3-9133-4be9-99df-5bafbe85144c"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/6b/6b1bf2b9-92b6-4754-afa8-7b47bef332ca"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/cd/cd1ce56a-9779-4db4-9854-0631a046804b"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/9f/9f184d40-c411-43c3-b563-a53b258c87f4"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/c4/c4208c92-5ee3-41d9-9467-1ec77eac1fff"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/69/699311d9-66a1-4900-84da-d3ea35c592a6"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/83/83d76e48-7752-4f97-b349-556079aac5d1"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/f6/f67b1ead-f074-40d8-b2cf-396dc96b6f0d"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/14/14acf74f-34a1-4c2d-8458-928ccb298f2c"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/47/47888383-5f55-4d79-8cdc-46930a831207"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/56/565834e3-9a3a-443b-a392-18258212d96f"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/5f/5fef8746-1751-4625-8db6-c910d16ce2de"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/67/67c366e8-63ca-44fe-b9bc-36ba36435a55"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/fc/fc960ab7-558d-4279-95ad-3f693770c9e5"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/96/961368d1-b445-4db7-9b84-026bd442b369"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/8a/8abf3744-6226-48d4-a6c9-a63714d1dc90"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/6b/6b01d05a-c018-4443-8d53-dfed7fe1650b"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/fe/feaf5461-da12-44f3-8308-5830b2714614"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/78/78303d8e-65ec-4795-b7f6-011206182c46"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/15/1545561b-88e1-4460-9bca-3ac309d62446"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/1a/1a2720d6-748f-40e9-b4a7-53baa830619a"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/62/62f164ba-df55-4720-b8ec-dc9b617874f4"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/4c/4c668bfe-498c-49d5-a640-927132000944"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/71/71a144d8-102d-4e08-89bd-8c2ef8fbe7be"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/68/68db7df6-ec85-443d-93fd-2cf7c14b81cb"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/f3/f347f488-b2f1-46cc-8287-f2df77a07c52"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/6f/6f53de7c-3e48-4443-b4a5-a9ef65c70654"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/b6/b6106dac-7776-4ea8-b87b-ade288649306"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/d7/d7da4bd7-d44e-4a5b-8a84-ecad9d42348e"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/42/42aa6399-db05-4dcc-ace7-50990f742fd8"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/c2/c282ff54-860e-4151-aaa3-3524b32a5c98"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/32/32fbbdad-358b-4af1-8f7d-67e5e75dd5f4"
+    },
+    {
+      "uri": "img.classistatic.de/api/v1/mo-prod/images/2d/2d6a5dd4-51a5-4338-9aa1-c4d87043cd27"
+    }
+  ],
+  "features": [
+    "ABS",
+    "Adaptive cornering lights",
+    "Adaptive Cruise Control",
+    "Alarm system",
+    "Alloy wheels",
+    "Ambient lighting",
+    "Android Auto",
+    "Apple CarPlay",
+    "Arm rest",
+    "Autom. dimming interior mirror",
+    "Blind spot assist",
+    "Bluetooth",
+    "CD player",
+    "Central locking",
+    "DAB radio",
+    "Digital cockpit",
+    "Distance warning system",
+    "Dynamic chassis control",
+    "Electric side mirror",
+    "Electric windows",
+    "Emergency brake assist",
+    "Emergency call system",
+    "ESP",
+    "Fatigue warning system",
+    "Fog lamps",
+    "Folding exterior mirrors",
+    "Front wheel drive",
+    "Full Service History",
+    "Hands-free kit",
+    "Headlight washer system",
+    "Heated seats",
+    "High beam assist",
+    "Hill-start assist",
+    "Immobilizer",
+    "Isofix",
+    "Lane change assist",
+    "Leather steering wheel",
+    "LED headlights",
+    "LED running lights",
+    "Light sensor",
+    "Lumbar support",
+    "Multifunction steering wheel",
+    "Navigation system",
+    "New service",
+    "Non-smoker vehicle",
+    "On-board computer",
+    "Paddle shifters",
+    "Power Assisted Steering",
+    "Rain sensor",
+    "Rear traffic alert",
+    "Ski bag",
+    "Speed limit control system",
+    "Sport seats",
+    "Sports package",
+    "Sports suspension",
+    "Start-stop system",
+    "Summer tyres",
+    "Tinted windows",
+    "Touchscreen",
+    "Traction control",
+    "Traffic sign recognition",
+    "Trailer assist",
+    "Tuner/radio",
+    "Tyre pressure monitoring",
+    "USB port",
+    "Voice control",
+    "Warranty",
+    "Winter package",
+    "Winter tyres"
+  ],
+  "highlights": [
+    "2.Hand,TCR,DSG,Assist",
+    "ACC,LED,RKam,Virtual",
+    "TÜV&INSP. NEU+GARANTIE"
+  ],
+  "sellerId": 452433,
+  "priceRating": {
+    "rating": "REASONABLE_PRICE",
+    "ratingLabel": "Fair price",
+    "thresholdLabels": [
+      "€15,700",
+      "€20,400",
+      "€22,000",
+      "€24,400",
+      "€26,200",
+      "€29,100"
+    ],
+    "vehiclePriceOffset": 77
+  },
+  "segment": "Car",
+  "title": "Volkswagen Golf VII 2.0 GTI TCR*ACC*LED*Virtual*Assist*TOP*",
+  "url": "https://suchen.mobile.de/auto-inserat/volkswagen-golf-vii-2-0-gti-tcr-acc-led-virtual-assist-top-w%C3%BCrzburg/42196329136896.html",
+  "vc": "Car",
+  "category": "Limousine",
+  "id": 42196329136896,
+  "price": {
+    "grs": {
+      "amount": 23850,
+      "currency": "EUR",
+      "localized": "€23,850"
+    },
+    "type": "FIXED"
+  },
+  "kba": {
+    "hsn": "0603",
+    "tsn": "CIY"
+  },
+  "customDimensions": {
+    "10": "platinum",
+    "47": "NA_NA_NA_NA_NA_3usp",
+    "126": "NA_logo_46_name_NA_languages_showroom"
+  },
+  "onLoadFlags": {
+    "welcomeMessage": true,
+    "dealershipDetails": true,
+    "map": true
+  },
+  "htmlDescription": "<ul><li>Herzlich Willkommen bei Auto Mager - Seit über 25 Jahren stehen wir für gute und preiswerte Gebrauchtwagen.</li><li>Wir kaufen Ihren Gebrauchten ! Selbst wenn sie kein Fahrzeug bei uns erwerben, unterbreiten wir Ihnen gerne ein unverbindliches Angebot für ihr Fahrzeug.</li></ul><br><ul><li><b>Wegen hoher Nachfragen kann es bei E-Mails zu längeren Wartezeiten kommen!</b></li><li><b>Wir bevorzugen den direkten Kontakt zu uns.</b></li><li><b>Bitte rufen sie uns an Tel.: 0049 151-51747777 oder schreiben Sie uns per Whatsapp.</b></li><li><b>Due to high demand, there may be longer waiting times for E-Mails !</b></li><li><b>Please call us Tel.: 0049 151-51747777 or write us a message on Whatsapp.</b></li></ul><br><ul><li><b>Zum Verkauf bieten wir Ihnen hier einen sehr gepflegten VW Golf VII 2.0 TSI GTI TCR OPF an.</b></li><li><b>Siehe VIDEO-Beschreibung ( Der Link des Videos befindet sich im Inserat).</b></li><li><b>Alle Fahrzeuge werden vor einem Verkauf (an Privat) durch unsere Werkstatt geprüft!</b></li></ul><br><ul><li><b>Leistung: 213 kW / 290 PS (TCR)</b></li></ul><br><ul><li><b>Deutsches Fahrzeug aus 2.Hand.</b></li><li><b>Scheckheft digital bei VW, siehe Bilder </b></li><li><b>Innen so wie außen in einem sehr gutem &amp; gepflegtem Zustand. (TOP)</b></li></ul><br><ul><li><b>Technisch in einem sehr gutem Zustand.</b></li><li><b>Motor &amp; Getriebe laufen sehr gut.</b></li></ul><br><ul><li><b>Inspektion wird bei Bedarf erneuert.</b></li><li><b>HU/AU (TÜV) bis 06.2027, kann bei Kauf auf Wunsch erneuert werden.</b></li></ul><br><ul><li><b>Gebrauchtwagen-Garantie gegen einen kleinen Aufpreis möglich. </b></li><li><b>TÜV Berichte vorhanden.</b></li><li><b>C.O.C Papier vorhanden.</b></li></ul><br><ul><li>Das Auto kann vor einem Kauf probe gefahren und sehr gerne von einer KFZ-Werkstatt Ihrer Wahl geprüft werden.</li><li>Rufen Sie uns bei ernsthaftem Interesse bitte direkt persönlich an um die Kommunikation zu beschleunigen und zu vereinfachen.</li><li>Besichtigung nur mit Terminvereinbarung !</li><li>Wir freuen uns Ihr Interesse erweckt zu haben.</li></ul><b><br>Sonderausstattung:</b><br>Audio-Navigationssystem Discover Pro (Touchscreen, CD/DVD, MP3, Festplattenspeicher, Bluetooth)<br>Sprachsteuerungs-System<br>Multimedia-Schnittstelle USB (iPhone / iPod)<br>Volkswagen Media Control und App-Connect / MirrorLink App-Connect<br>Leuchtweitenregelung automatisch<br>Geschwindigkeits-Begrenzeranlage<br>Fahrwerks-Paket mit LM-Felgen Reifnitz<br>Fahrassistenz-System: Adaptive Fahrwerksregelung (DCC)<br>Fahrassistenz-System: Fahrprofilauswahl<br>LM-Felgen<br>Reifen: Sportreifen<br>Sonderlackierung Pure-White uni<br>Außenspiegel elektr. anklappbar<br>Verglasung hinten abgedunkelt (90 %)<br><br><b>Weitere Ausstattung:</b><br>3-Punkt-Sicherheitsgurt hinten mitte<br>Active Info-Display (Instrumentenanzeige digital)<br>Airbag Beifahrerseite abschaltbar<br>Airbag Fahrer-/Beifahrerseite<br>Ambiente-Beleuchtung<br>Antriebs-Schlupfregelung (ASR)<br>Ausstattung GTI<br>Automatische Fahrlichtschaltung (ALS) mit Leaving Home / Coming-Home-Lichtfunktion<br>Bremssättel Rot lackiert<br>Dachhimmel Stoff, schwarz<br>Differentialsperre (Vorderachse)<br>Durchladeeinrichtung (Mittelarmlehne hinten)<br>Einparkhilfe vorn und hinten<br>Einstiegsleisten vorn beleuchtet<br>Elektron. Differentialsperre (EDS)<br>Elektron. Differentialsperre (XDS)<br>Fahrassistenz-System: Anhänger-Stabilisierungs-Programm<br>Heckleuchten LED, dunkelrot<br>Blinkleuchten dynamisch<br>Heckscheibenwischer<br>Innenausstattung: Dekoreinlagen Honeycomb Black<br>Innenspiegel mit Abblendautomatik<br>Isofix-Aufnahmen für Kindersitz an Rücksitz<br>Karosserie: 5-türig<br>Klimaanlage Climatronic 2-Zonen<br>Innenraumfilter: Staub- und Pollenfilter mit Aktivkohlefilter<br>Knieairbag Fahrerseite<br>Kopf-Airbag-System vorn und hinten inkl. Seitenairbag vorn<br>Kopfstützen hinten (3-fach)<br>Lenkrad (Sport/Leder - TCR) mit Multifunktion und Schaltfunktion<br>Leseleuchten vorn und hinten LED<br>Modellpflege<br>Motor 2,0 Ltr. - 213 kW 16V TSI<br>Multifunktionsanzeige Premium (Farbdisplay)<br>Nebelschlussleuchte<br>Notrufsystem<br>Otto-Partikelfilter (OPF)<br>Parkbremse elektrisch<br>Pedale Edelstahl<br>Reifen-Reparaturkit (Tire Mobility Set)<br>Rücksitzlehne geteilt<br>Schadstoffarm nach Abgasnorm Euro 6d-TEMP<br>Schalt-/Wählhebelgriff Aluminium<br>Sicherheitsgurte vorn mit Gurtstraffer, höhenverstellbar<br>Sitz vorn links höhenverstellbar<br>Sitz vorn rechts höhenverstellbar<br>Sitzbezug / Polsterung: Stoff<br>Sitze: Top-Sportsitze vorn<br>Stabilisator vorn<br>Start/Stop-Anlage<br>Stoßfänger Sport-Design, lackiert<br>Türgriffe außen Wagenfarbe<br>Warnanlage für Sicherheitsgurte vorn<br>Scheibenwaschdüsen heizbar<br>Anzeige für Waschwasserstand<br>Sitzheizung vorn.<br><br><b>Sonstiges</b>:<br><ul><li>Zwischenverkauf und Irrtümer sind ausdrücklich vorbehalten.</li><li>Die Beschreibung dient der allgemeinen Identifizierung des Fahrzeuges und stellt keine Gewährleistung im kaufrechtlichen Sinne dar.</li><li>Fahrzeugabbildung zeigt Sonderausstattungen.</li><li>Bildliche Darstellungen können vom Ausleiferungsstand abweichen.</li><li>Ausschlaggebend ist die Beschreibung gemäß Kaufvertrag.</li></ul>"
+}]
