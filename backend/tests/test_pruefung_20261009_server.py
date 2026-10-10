@@ -56,6 +56,26 @@ def test_01_mobile_listing_auch_wenn_attributes_nicht_vorne_steht():
                             _mobile_inserat_html({"id": 123456789, **{k: v for k, v in listing.items() if k != "id"}}))
 
 
+def test_04_hinweise_nur_fuer_gewaehlte_portale():
+    """Befund Ahmad 10.10.2026 ("AutoScout ist doch aus"): Hinweise ueber ein abgewaehltes Portal fallen weg — in der
+    App (/mobile/compare) wie im Programm; ein Hinweis, der beide nennt, bleibt."""
+    hinweise = ["AutoScout24 kennt das Modell „T-Klasse“ nicht eindeutig — der AutoScout-Link sucht über die ganze Marke.",
+                "mobile.de kennt das Modell „X“ nicht — der mobile.de-Link sucht über die ganze Marke.",
+                "Modell „Y“ nicht erkannt — beide Links suchen über die ganze Marke Z.",
+                "Kein Modell im Inserat — die Links suchen über die ganze Marke Z.",
+                "kein AutoScout24-Vergleich (unbekanntes Modell)"]
+    nur_mobile = wz.hinweise_nach_portalen(hinweise, {"mobile": True, "autoscout": False})
+    assert nur_mobile == [hinweise[1], hinweise[2], hinweise[3]]
+    nur_autoscout = wz.hinweise_nach_portalen(hinweise, {"mobile": False, "autoscout": True})
+    assert nur_autoscout == [hinweise[0], hinweise[2], hinweise[3], hinweise[4]]
+    assert wz.hinweise_nach_portalen(hinweise, wz.portale_von({})) == hinweise, "ohne Wahl: alles"
+    assert wz.hinweise_nach_portalen(hinweise, wz.portale_von({"vergleich_portale": {"autoscout": False}}))[0] == hinweise[1]
+    # nach_portalen (Programm) nutzt dieselbe Regel
+    links = [{"portal": "mobile.de", "url": "m"}, {"portal": "AutoScout24", "url": "a"}]
+    l2, h2 = wz.nach_portalen(links, hinweise, {"mobile": True, "autoscout": False})
+    assert [l["url"] for l in l2] == ["m"] and h2 == nur_mobile
+
+
 class _FakeSammlung:
     def __init__(self, anzahl, bekannt):
         self.anzahl, self.bekannt, self.schreib = anzahl, bekannt, []

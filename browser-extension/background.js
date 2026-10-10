@@ -727,6 +727,17 @@ async function appFenster(basis) {
   return null;
 }
 
+/** 2.7.5: content.js in einem offenen App-Fenster neu einspielen (nach einem Helfer-Update ist das alte verwaist).
+ *  Braucht die Berechtigung "scripting"; false, wenn der Browser es nicht zulaesst (dann wie bisher "F5"). */
+async function seitenSkriptErneuern(tabId) {
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 function anTab(tabId, nachricht) {
   return new Promise((fertig) => {
     try {
@@ -768,7 +779,12 @@ async function vertragOeffnen(msg, tab) {
   if (app) {
     // erst nach vorne (sofort sichtbar), dann das Ziel — content.js wartet seit 2.7.4 bis 1,5 s auf die Antwort der App
     await chrome.windows.update(app.windowId, { focused: true });
-    const antwort = await anTab(app.id, { type: "AUTOSCHNELL_OEFFNEN", ziel: ziel.pfad });
+    let antwort = await anTab(app.id, { type: "AUTOSCHNELL_OEFFNEN", ziel: ziel.pfad });
+    if (!antwort) {
+      // 2.7.5 (Befund Ahmad 10.10.2026): nach einem Helfer-Update ist das Seiten-Skript im offenen App-Fenster
+      // verwaist (antwortet nicht) — neu einspielen und noch einmal fragen, statt "F5" zu verlangen
+      if (await seitenSkriptErneuern(app.id)) antwort = await anTab(app.id, { type: "AUTOSCHNELL_OEFFNEN", ziel: ziel.pfad });
+    }
     if (!antwort || !antwort.ok) {
       // 2.6.0 (Pruefung 05.10.2026, Nr. 6): Die App lief schon vor dem (aktualisierten) Helfer — nicht hart neu
       // laden (ein halb ausgefuellter Kaufvertrag waere weg). Nach vorne holen und sagen, was zu tun ist.

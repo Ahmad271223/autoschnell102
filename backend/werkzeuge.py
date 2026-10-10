@@ -358,12 +358,27 @@ def portale_von(user: Optional[dict]) -> dict:
     return {"mobile": mobile, "autoscout": autoscout}
 
 
+#: Befund Ahmad 10.10.2026 ("warum AutoScout, ist doch aus"): Hinweise, die ein abgewaehltes Portal nennen, gehoeren
+#: nirgends hin — weder in die App (/mobile/compare) noch ins Programm. Schreibweisen je Portal.
+_PORTAL_NAMEN = {"mobile": ("mobile.de",), "autoscout": ("AutoScout24", "AutoScout")}
+
+
+def hinweise_nach_portalen(hinweise: list, portale: dict) -> list:
+    """Keine Hinweise ueber abgewaehlte Portale ("AutoScout24 kennt das Modell nicht eindeutig", "kein mobile.de-
+    Vergleich"). Ein Hinweis, der beide Portale nennt ("beide Links suchen ueber die ganze Marke"), bleibt."""
+    aus = [k for k in ("mobile", "autoscout") if portale.get(k) is False]
+    an = [k for k in ("mobile", "autoscout") if k not in aus]
+    if not aus:
+        return list(hinweise)
+    def nennt(h, k):
+        return any(n.lower() in str(h).lower() for n in _PORTAL_NAMEN[k])
+    return [h for h in hinweise if not (any(nennt(h, k) for k in aus) and not any(nennt(h, k) for k in an))]
+
+
 def nach_portalen(links: list, hinweise: list, portale: dict) -> tuple:
-    """Nur die Links der gewaehlten Portale — und keine Hinweise "kein <Portal>-Vergleich" fuer abgewaehlte."""
-    aus = [name for name, k in PORTAL_SCHLUESSEL.items() if portale.get(k) is False]
+    """Nur die Links der gewaehlten Portale — und keine Hinweise ueber abgewaehlte Portale."""
     links = [l for l in links if portale.get(PORTAL_SCHLUESSEL.get(l.get("portal"), ""), True) is not False]
-    hinweise = [h for h in hinweise if not any(f"kein {name}-Vergleich" in str(h) for name in aus)]
-    return links, hinweise
+    return links, hinweise_nach_portalen(hinweise, portale)
 #: Pruefbericht 03.10.2026 (Nr. 12): die App meldet, dass sie ein Auto aus dem Programm uebernommen hat
 SAMMLUNG_APP_STARTS = "werkzeug_app_starts"
 #: Pruefbericht 03.10.2026 (Nr. 16): warum ein Programm-Schluessel nicht mehr gilt (anderer PC, Chef, Betreiber)

@@ -5,6 +5,11 @@
 // 2.6.0 (Pruefung 05.10.2026, Nr. 20): Nach einem Update/Neuladen der Erweiterung laeuft dieses Skript in offenen
 // Tabs weiter, erreicht den Helfer aber nicht mehr — dann nicht mehr "bereit" melden und sofort mit Fehler antworten
 // (vorher wartete die App 25 s).
+// 2.7.5 (Befund Ahmad 10.10.2026, "Kaufvertrag oeffnet sich nicht — App ja, aber so"): nach einem Helfer-Update ist
+// dieses Skript im offenen App-Fenster verwaist; der Hintergrund spielt es dann per chrome.scripting neu ein (kein F5).
+// Damit das in derselben isolierten Welt ein zweites Mal laufen darf, steht alles in einer Funktion — keine
+// Bindungen auf oberster Ebene (ein zweites "const" waere ein Syntaxfehler).
+(() => {
 function helferDa() {
   try { return !!(chrome.runtime && chrome.runtime.id); } catch (e) { return false; }
 }
@@ -107,3 +112,4 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   window.postMessage({ __autoschnell: true, type: "OEFFNEN", ziel }, window.location.origin);
   return true;        // sendResponse kommt, sobald die App geantwortet hat (oder nach 1,5 s)
 });
+})();

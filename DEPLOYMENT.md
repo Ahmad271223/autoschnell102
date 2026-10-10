@@ -4444,7 +4444,7 @@ Suchern der Firma) – „alle anderen sollen das gar nicht sehen“.
 
 ### Browser-Helfer für Chrome und Edge (Wunsch Ahmad 04.10.2026)
 
-Zweites Werkzeug `browser-helfer` neben dem Programm — die Erweiterung `browser-extension/` (Version 2.7.4, enthält
+Zweites Werkzeug `browser-helfer` neben dem Programm — die Erweiterung `browser-extension/` (Version 2.7.5, enthält
 weiter den Kleinanzeigen-Abruf-Helfer). Gleiche Lizenz: 6-stelliger Code, **ein Konto = ein Browser**, Abo-Pflicht,
 Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
 - Freigabe: `BROWSER_HELFER_KUNDEN` (Standard `10001,10002,10007`, `docker-compose.yml`; leer = niemand).
@@ -4694,7 +4694,14 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
       „Webseite öffnen“ gilt 24 h (`appGesehen[basis] = {webseite_bis}`; die alte `0` gilt nicht mehr), neues
       Verbinden löscht den Merker, Knopf „Doch die App“ in der Box (`dochApp` → Merker weg, Protokoll-Start erneut).
       (E4) `&vertrag=1` nur hinter `?`. Keine Node-Tests für die Erweiterung; die neuen Funktionen sind rein.
-    - Reihenfolge: Server + App ausrollen, dann Programm 1.5.15 und Erweiterung 2.7.4 hochladen. Mit älterem Server
+    - *Erweiterung 2.7.5 (Befund Ahmad 10.10.2026, „Kaufvertrag öffnet sich nicht – App ja, aber so“):* nach einem
+      Helfer-Update ist `content.js` im offenen App-Fenster verwaist (antwortet nicht) — die Box verlangte „F5“. Jetzt
+      spielt `background.js` das Seiten-Skript per `chrome.scripting.executeScript` neu ein (`seitenSkriptErneuern`,
+      Berechtigung `scripting`, ohne neue Nutzerabfrage) und fragt noch einmal; `content.js` steht komplett in einer
+      Funktion (keine Bindungen auf oberster Ebene). Dazu Server: `werkzeuge.hinweise_nach_portalen` — Hinweise über ein
+      abgewähltes Portal („AutoScout24 kennt das Modell nicht eindeutig“) fallen in `/mobile/compare` und im
+      Programm weg (Befund „AutoScout ist doch aus“).
+    - Reihenfolge: Server + App ausrollen, dann Programm 1.5.15 und Erweiterung 2.7.5 hochladen. Mit älterem Server
       fehlt `zustand` (= `offen`), mit älterer App kommt kein `OEFFNEN_ERGEBNIS` (Box wie bisher) — nichts bricht.
   - **Kaufvertrag/Abholprotokoll (Wunsch Ahmad 09.10.2026):** „Datum und Ort“ bei Verkäufer UND Käufer = Ort des
     Kunden (`pdf_service._uebergabe_ort`; Dialog befüllt den Käufer-Ort nicht mehr aus dem Firmensitz); unter den

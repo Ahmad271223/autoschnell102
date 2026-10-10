@@ -852,6 +852,10 @@ async def compare(body: CompareIn, background: BackgroundTasks,
         beweis = oeffentlich(await beweis_fuer_schluessel(db, identity["cache_key"]))
 
     hinweise = list(katalog_hinweise) + list(regeln_nicht_abgebildet(vehicle, rules))
+    # Befund Ahmad 10.10.2026 ("AutoScout ist doch aus"): EINE Portalwahl je Konto (08.10.) — Hinweise ueber ein
+    # abgewaehltes Portal ("AutoScout24 kennt das Modell nicht eindeutig") gehoeren nicht in die App
+    import werkzeuge as wz
+    hinweise = wz.hinweise_nach_portalen(hinweise, wz.portale_von(user))
     nfz = _nutzfahrzeug_hinweis(vehicle, raw_url, source)
     if nfz:
         hinweise.append(nfz)

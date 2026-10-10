@@ -83,6 +83,12 @@ Seit Version 2.0.0 (04.10.2026) macht die Erweiterung zwei Dinge:
    ihn, und in der Box steht daneben **„Doch die App“** (vergisst den Merker, startet die App erneut); ging die Webseite
    wegen des Merkers auf, sagt die Box das und bietet „Doch die App“ an. `&vertrag=1` wird nur hinter einem `?`
    angehängt (`vertragsZiel`).
+   Seit 2.7.5 (Befund Ahmad 10.10.2026, „Kaufvertrag öffnet sich nicht – App ja, aber so“): nach einem Update des
+   Helfers ist `content.js` im schon offenen App-Fenster verwaist und antwortet nicht mehr — die Box verlangte „F5“.
+   Jetzt spielt der Hintergrund das Seiten-Skript per `chrome.scripting.executeScript` neu ein (`seitenSkriptErneuern`,
+   Berechtigung `scripting`) und fragt noch einmal; `content.js` steht dafür komplett in einer Funktion (keine
+   Bindungen auf oberster Ebene — ein zweites `const` wäre ein Syntaxfehler). Nur wenn auch das scheitert, bleibt der
+   „F5“-Hinweis.
    **Zusammen mit dem Windows-Programm (seit 2.3.0, dasselbe AutoSchnell-Konto):**
    - Hat das Programm das Auto in den letzten 30 Minuten verglichen (`programm_verglichen` in der Antwort von
      `…/inserat`), öffnet der Helfer **keine** Vergleiche von selbst — nur die Ampel per Direktabruf.
