@@ -4701,6 +4701,15 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
       Funktion (keine Bindungen auf oberster Ebene). Dazu Server: `werkzeuge.hinweise_nach_portalen` — Hinweise über ein
       abgewähltes Portal („AutoScout24 kennt das Modell nicht eindeutig“) fallen in `/mobile/compare` und im
       Programm weg (Befund „AutoScout ist doch aus“).
+    - *Fotos (Befund Ahmad 10.10.2026, BMW 730d: „Daten kamen, Fotos nicht“ + Cloudflare-524 beim Nachholen):*
+      (1) `browser_helfer.bilder_aus_objekt` — trägt das mobile.de-Inserat-Objekt die Fotos nicht unter `images`,
+      zählt jede `img.classistatic.de/…/mo-prod/images/…`-Adresse IM Objekt (nicht auf der ganzen Seite — dort
+      stehen die „ähnlichen Fahrzeuge“). (2) Eine Lesung ohne Fotos landet als Leseseite („Lesung ohne Fotos (zur
+      Analyse)“) beim Betreiber, damit sich nachlesen lässt, wo mobile.de die Fotos ablegt. (3) `POST
+      /mobile/bilder-nachholen` wartet höchstens `BILDER_NACHHOLEN_FRIST_S` (50 s) auf den Anbieter — danach
+      `{laeuft: true}` statt Cloudflare-Abbruch nach 100 s (der Abruf läuft im Hintergrund zu Ende, der nächste Klick
+      findet die Fotos im Speicher); und es geht jetzt auch nach einer reinen Browser-Lesung (vorher 409 „keine
+      Daten“). Die App zeigt bei Proxy-Abbrüchen (502/504/524) einen deutschen Hinweis statt des Cloudflare-Texts.
     - Reihenfolge: Server + App ausrollen, dann Programm 1.5.15 und Erweiterung 2.7.5 hochladen. Mit älterem Server
       fehlt `zustand` (= `offen`), mit älterer App kommt kein `OEFFNEN_ERGEBNIS` (Box wie bisher) — nichts bricht.
   - **Kaufvertrag/Abholprotokoll (Wunsch Ahmad 09.10.2026):** „Datum und Ort“ bei Verkäufer UND Käufer = Ort des

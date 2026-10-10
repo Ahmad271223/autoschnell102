@@ -375,6 +375,40 @@ def mobile_listing_objekt(text: str, item_id: str) -> Optional[dict]:
     return erstes
 
 
+#: Befund Ahmad 10.10.2026 (BMW 730d: "Beim Auslesen kamen die Daten, aber keine Fotos mit"): das Inserat-Objekt traegt
+#: die Fotos nicht immer unter "images" — dann jede Bildadresse von mobile.de IM Inserat-Objekt nehmen (nicht von der
+#: ganzen Seite: dort stehen auch die Fotos der "aehnlichen Fahrzeuge").
+_MOBILE_BILD = re.compile(r"(?:https?:)?//img\.classistatic\.de/api/v1/mo-prod/images/[A-Za-z0-9_\-/]+(?:\?[^\s\"'<>]*)?")
+_BILDER_HOECHSTENS = 60
+
+
+def bilder_aus_objekt(objekt) -> List[str]:
+    """Alle mobile.de-Bildadressen innerhalb eines Inserat-Objekts (Reihenfolge wie gefunden, ohne Doppelte, ohne
+    Groessenregel — die setzt mobile_service._apify_bild_url)."""
+    gefunden: List[str] = []
+    gesehen = set()
+
+    def gehe(w, tiefe=0):
+        if len(gefunden) >= _BILDER_HOECHSTENS or tiefe > 12:
+            return
+        if isinstance(w, str):
+            for m in _MOBILE_BILD.finditer(w):
+                kern = m.group(0).split("?")[0]
+                schluessel = kern[kern.index("img.classistatic.de"):]       # mit und ohne Schema dasselbe Bild
+                if schluessel not in gesehen:
+                    gesehen.add(schluessel)
+                    gefunden.append(kern)
+        elif isinstance(w, dict):
+            for v in w.values():
+                gehe(v, tiefe + 1)
+        elif isinstance(w, list):
+            for v in w[:400]:
+                gehe(v, tiefe + 1)
+
+    gehe(objekt)
+    return gefunden
+
+
 def mobile_inserat(html: str, item_id: str, url: str) -> Tuple[dict, Optional[dict]]:
     import mobile_service as ms
     text = next_flight_text(html)
@@ -387,6 +421,12 @@ def mobile_inserat(html: str, item_id: str, url: str) -> Tuple[dict, Optional[di
     listing = dict(listing)
     listing["htmlDescription"] = (flight_textblock(text, listing.get("htmlDescription")) or "")[:MAX_BESCHREIBUNG_HTML]
     fahrzeug = ms._parse_apify_item(listing, str(item_id), url)
+    if not fahrzeug.get("images"):
+        bilder = [b for b in (ms._apify_bild_url(u) for u in bilder_aus_objekt(listing)) if b]
+        if bilder:
+            fahrzeug["images"] = bilder
+            fahrzeug["image_urls"] = bilder
+            fahrzeug["image_count"] = len(bilder)
     return fahrzeug, mobile_bewertung(listing)
 
 

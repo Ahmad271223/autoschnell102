@@ -1019,6 +1019,48 @@ def _nachholen_fehler(exc: Exception, raw_url: str) -> HTTPException:
     return HTTPException(500, "Die Fotos konnten nicht nachgeholt werden — bitte später noch einmal.")
 
 
+#: Befund Ahmad 10.10.2026 (Cloudflare 524 "origin did not respond"): der Abruf blieb bis ~100 s offen (Platz-Warten +
+#: Apify bis 85 s) — Cloudflare brach ab, die Seite zeigte den englischen Cloudflare-Text. Jetzt wartet die Antwort
+#: hoechstens so lange; der Abruf laeuft im Hintergrund zu Ende und landet im Speicher (der naechste Klick findet ihn).
+BILDER_NACHHOLEN_FRIST_S = int(os.environ.get("BILDER_NACHHOLEN_FRIST_S", "50") or 50)
+NACHHOLEN_LAEUFT_HINWEIS = ("Der Abruf läuft noch im Hintergrund — bitte in einer Minute noch einmal „Bilder "
+                            "nachholen“ drücken, dann sind die Fotos da.")
+
+
+def _nachholen_laeuft() -> dict:
+    return {"ok": True, "laeuft": True, "bilder": 0, "nachgeholt": False, "images": [], "images_thumbs": [],
+            "versuche_uebrig": None, "hinweis": NACHHOLEN_LAEUFT_HINWEIS}
+
+
+async def _anbieter_abruf(user: dict, raw_url: str, ck: str, vorher: Optional[dict]) -> Optional[dict]:
+    """Das Inserat komplett beim Anbieter holen (Konto-Bremse, Tageslimit). None = laeuft im Hintergrund weiter
+    (Frist BILDER_NACHHOLEN_FRIST_S, der Versuch zaehlt); sonst die Daten. Fehler -> HTTPException wie bisher,
+    der Versuch wird zurueckgenommen (nur mit ``vorher``, d. h. bei einem Speichereintrag)."""
+    from listing_identity import AbrufDauertZuLange
+
+    async def _fetcher(src: str, iid: str, url: str) -> dict:
+        async with _AbrufSlot(user):
+            return await fetch_listing(db, src, iid, url,
+                                       dealer_id=user.get("dealer_id") or "",
+                                       user_id=user.get("id") or "")
+
+    try:
+        daten, _aus_speicher = await get_or_fetch_listing(
+            db, raw_url, _fetcher, ttl_hours=LISTING_CACHE_TTL_HOURS,
+            dealer_id=user.get("dealer_id") or "", frist_sekunden=BILDER_NACHHOLEN_FRIST_S)
+    except AbrufDauertZuLange as exc:
+        if getattr(exc, "hintergrund", False):
+            return None
+        if vorher is not None:
+            await _nachholen_zuruecknehmen(ck, vorher)
+        raise _nachholen_fehler(exc, raw_url)
+    except Exception as exc:  # noqa: BLE001
+        if vorher is not None:
+            await _nachholen_zuruecknehmen(ck, vorher)
+        raise _nachholen_fehler(exc, raw_url)
+    return daten
+
+
 @router.post("/mobile/bilder-nachholen")
 async def bilder_nachholen(body: CompareIn, user=Depends(require_active_sub)):
     raw_url = (body.url or "").strip()
@@ -1043,13 +1085,29 @@ async def bilder_nachholen(body: CompareIn, user=Depends(require_active_sub)):
 
     eintrag = await db.listings_cache.find_one(
         {"cache_key": ck}, {"_id": 0, "data": 1, "bilder_nachholen": 1})
+    from bild_proxy import thumbs as _thumbs
     if not eintrag or not eintrag.get("data"):
-        # Der erste Abruf hat nicht geklappt -> kein Nachholen, sondern neu auslesen.
-        raise HTTPException(409, "Für dieses Inserat liegen keine Daten vor — bitte den Link "
-                                 "neu auslesen.")
+        # Befund Ahmad 10.10.2026 (BMW 730d): die Daten kamen aus der Browser-Lesung der Erweiterung
+        # (werkzeug_inserate), nicht aus dem Server-Speicher — dann einmal komplett beim Anbieter holen (zaehlt wie
+        # ein eingefuegter Link). Ohne Lesung: der erste Abruf hat nicht geklappt -> neu auslesen.
+        from browser_helfer import inserat_lesen
+        lesung = await inserat_lesen(db, ck, user.get("id") or "", user.get("dealer_id") or "")
+        if lesung is None:
+            raise HTTPException(409, "Für dieses Inserat liegen keine Daten vor — bitte den Link "
+                                     "neu auslesen.")
+        vid = await _fahrzeug_id(source, (lesung[0] or {}).get("mobile_ad_id") or item_id, user["dealer_id"])
+        daten = await _anbieter_abruf(user, raw_url, ck, vorher=None)
+        if daten is None:
+            return _nachholen_laeuft()
+        bilder = _bilder_von(daten)
+        fahrzeuge = await _bilder_ins_fahrzeug(user, ck, vid, bilder)
+        await log_activity_sicher(user["dealer_id"], user["id"], "vergleich.bilder_nachgeholt", ref=item_id,
+                                  meta={"bilder": len(bilder), "fahrzeuge": fahrzeuge, "lesung": True})
+        return {"ok": True, "bilder": len(bilder), "nachgeholt": bool(bilder), "images": bilder,
+                "images_thumbs": _thumbs(bilder[:40]), "abgerufen_am": now_iso(),
+                "versuche_uebrig": None, "hinweis": None if bilder else KEINE_FOTOS_HINWEIS}
     ad_id = (eintrag["data"] or {}).get("mobile_ad_id") or item_id
     vid = await _fahrzeug_id(source, ad_id, user["dealer_id"])
-    from bild_proxy import thumbs as _thumbs
     schon_da = _bilder_von(eintrag["data"])
     if schon_da:
         # Inzwischen sind Fotos da (z. B. hat ein Kollege nachgeholt): kein Abruf.
@@ -1093,19 +1151,9 @@ async def bilder_nachholen(body: CompareIn, user=Depends(require_active_sub)):
         # Zweiter Speicher nur bei mobile.de (30 min) — sonst waere der Abruf keiner.
         await db.vehicle_cache.delete_one({"mobile_ad_id": item_id})
 
-    async def _fetcher(src: str, iid: str, url: str) -> dict:
-        async with _AbrufSlot(user):
-            return await fetch_listing(db, src, iid, url,
-                                       dealer_id=user.get("dealer_id") or "",
-                                       user_id=user.get("id") or "")
-
-    try:
-        daten, _aus_speicher = await get_or_fetch_listing(
-            db, raw_url, _fetcher, ttl_hours=LISTING_CACHE_TTL_HOURS,
-            dealer_id=user.get("dealer_id") or "")
-    except Exception as exc:  # noqa: BLE001
-        await _nachholen_zuruecknehmen(ck, vorher)
-        raise _nachholen_fehler(exc, raw_url)
+    daten = await _anbieter_abruf(user, raw_url, ck, vorher=vorher)
+    if daten is None:
+        return _nachholen_laeuft()
 
     bilder = _bilder_von(daten)
     fahrzeuge = await _bilder_ins_fahrzeug(user, ck, vid, bilder)

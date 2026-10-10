@@ -816,7 +816,7 @@ _inserat_limiter = SlidingWindowRateLimiter(max_attempts=120, window_seconds=60,
 _probelauf_limiter = SlidingWindowRateLimiter(max_attempts=20, window_seconds=60, name="werkzeug_probelauf")
 #: Pruefung 09.10.2026 (Befund Mokka-e): nicht lesbare Seiten fuer den Betreiber — hoechstens 10 je Konto und Tag
 _leseseite_limiter = SlidingWindowRateLimiter(max_attempts=10, window_seconds=86400, name="werkzeug_leseseite")
-_LESESEITE_GRUENDE = ("keine Inseratsdaten", "anderen Inserat", "nicht ausgewertet")
+_LESESEITE_GRUENDE = ("keine Inseratsdaten", "anderen Inserat", "nicht ausgewertet", "ohne Fotos")
 
 
 async def _leseseite_merken(user: dict, v: dict, body, identity: dict, grund: str) -> None:
@@ -987,6 +987,10 @@ async def werkzeug_inserat(werkzeug_id: str, body: InseratIn,
         await _leseseite_merken(user, v, body, identity, "Die Seite konnte nicht ausgewertet werden.")
         raise HTTPException(422, "Die Seite konnte nicht ausgewertet werden.")
     inserat_url = wz.inserat_url(identity["source"], identity["item_id"], identity["item_id"]) or body.url.strip()
+    if not (fahrzeug.get("images") or fahrzeug.get("image_urls")):
+        # Befund Ahmad 10.10.2026 (BMW 730d: Daten ja, Fotos nein): die Seite fuer den Betreiber aufheben, damit sich
+        # nachlesen laesst, wo mobile.de die Fotos ablegt (Leseseiten, 10 je Konto und Tag)
+        await _leseseite_merken(user, v, body, identity, "Lesung ohne Fotos (zur Analyse)")
     profil, regeln = await _firmenregeln(user)
     # Wunsch Ahmad 04.10.2026 (abends): immer an die AutoSchnell-Einstellungen halten — Beschaedigte und Navi wie
     # eingestellt (vorher hier immer "ohne Beschaedigte"). Was trotzdem durchrutscht (Unfall, Export, Neuwagen,

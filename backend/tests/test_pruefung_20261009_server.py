@@ -76,6 +76,28 @@ def test_04_hinweise_nur_fuer_gewaehlte_portale():
     assert [l["url"] for l in l2] == ["m"] and h2 == nur_mobile
 
 
+def test_05_fotos_aus_dem_inserat_objekt_wenn_images_fehlt():
+    """Befund Ahmad 10.10.2026 (BMW 730d: "Daten ja, Fotos nein"): traegt das Inserat-Objekt die Fotos nicht unter
+    "images", zaehlt jede mobile.de-Bildadresse IM Objekt (nicht auf der ganzen Seite)."""
+    listing = _mobile_listing()
+    listing.pop("images", None)
+    listing["gallery"] = {"items": [
+        {"srcSet": "//img.classistatic.de/api/v1/mo-prod/images/ab/ab12-cd34?rule=mo-640.jpg 640w, "
+                   "//img.classistatic.de/api/v1/mo-prod/images/ab/ab12-cd34?rule=mo-1024.jpg 1024w"},
+        {"src": "https://img.classistatic.de/api/v1/mo-prod/images/ef/ef56-gh78?rule=mo-360.jpg"},
+        {"src": "https://img.classistatic.de/api/v1/mo-prod/images/ab/ab12-cd34?rule=mo-1024.jpg"},   # Doppelt
+    ]}
+    assert bh.bilder_aus_objekt(listing) == ["//img.classistatic.de/api/v1/mo-prod/images/ab/ab12-cd34",
+                                              "https://img.classistatic.de/api/v1/mo-prod/images/ef/ef56-gh78"]
+    fz, _ = bh.inserat_auslesen(_identity(MOBILE_URL), MOBILE_URL, _mobile_inserat_html(listing))
+    assert fz["image_count"] == 2 and fz["images"][0] == "https://img.classistatic.de/api/v1/mo-prod/images/ab/ab12-cd34?rule=mo-1024.jpg"
+    assert fz["image_urls"] == fz["images"]
+    # mit "images" wie bisher — der Rueckfall greift nicht
+    fz2, _ = bh.inserat_auslesen(_identity(MOBILE_URL), MOBILE_URL, _mobile_inserat_html(_mobile_listing()))
+    assert fz2["image_count"] > 0
+    assert bh.bilder_aus_objekt({"a": [1, None, {"b": "kein bild"}]}) == []
+
+
 class _FakeSammlung:
     def __init__(self, anzahl, bekannt):
         self.anzahl, self.bekannt, self.schreib = anzahl, bekannt, []
@@ -421,3 +443,37 @@ def test_16_statusabfrage_nimmt_nachtraegliche_lesung(welt):
     finally:
         db.link_jobs.delete_many({"id": job_id})
         db.werkzeug_inserate.delete_many({"cache_key": f"mobile:{nr}"})
+
+
+@pytestmark_http
+def test_17_bilder_nachholen_nach_browser_lesung(welt):
+    """Befund Ahmad 10.10.2026: die Daten kamen aus der Browser-Lesung (kein Server-Speicher) — "Bilder nachholen"
+    sagte dann 409 "keine Daten" bzw. lief in den Cloudflare-Abbruch. Jetzt: ein Anbieter-Abruf (Mock), Antwort 200."""
+    import test_browser_helfer_20261004 as tb
+    db = welt["db"]
+    nr = "487000701"
+    url = f"https://suchen.mobile.de/fahrzeuge/details.html?id={nr}"
+    ck = f"mobile:{nr}"
+    jetzt = datetime.now(timezone.utc)
+    try:
+        # ohne Lesung und ohne Speicher: wie bisher 409
+        db.vehicle_comparisons.insert_one({"id": str(uuid.uuid4()), "cache_key": ck, "user_id": welt["sucher_id"],
+                                           "dealer_id": welt["firma"]["dealer_id"], "created_at": jetzt})
+        r = requests.post(f"{tb.API}/mobile/bilder-nachholen", headers=welt["sucher"], json={"url": url}, timeout=90)
+        assert r.status_code == 409, r.text
+        db.werkzeug_inserate.insert_one({
+            "cache_key": ck, "user_id": welt["sucher_id"], "dealer_id": welt["firma"]["dealer_id"],
+            "source": "mobile", "item_id": nr, "url": url, "data": {**VW, "mobile_ad_id": nr, "images": []},
+            "pruefsumme": "x", "gelesen_am": jetzt, "ablauf": jetzt + timedelta(hours=1)})
+        r = requests.post(f"{tb.API}/mobile/bilder-nachholen", headers=welt["sucher"], json={"url": url}, timeout=90)
+        assert r.status_code == 200, r.text
+        d = r.json()
+        assert d["ok"] is True and "bilder" in d and isinstance(d["images"], list)
+        # nach dem Abruf liegt das Inserat im Server-Speicher (oder der Abruf laeuft noch im Hintergrund)
+        assert d.get("laeuft") or db.listings_cache.count_documents({"cache_key": ck}) == 1
+    finally:
+        db.vehicle_comparisons.delete_many({"cache_key": ck})
+        db.werkzeug_inserate.delete_many({"cache_key": ck})
+        db.listings_cache.delete_many({"cache_key": ck})
+        db.vehicles.delete_many({"inserat_schluessel": ck})
+        db.rate_limits.delete_many({"_id": {"$regex": "^listings-"}})

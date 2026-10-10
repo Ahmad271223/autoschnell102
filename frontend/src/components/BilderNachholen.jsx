@@ -23,14 +23,24 @@ export default function BilderNachholen({ url, onBilder }) {
       if (data?.bilder > 0) {
         toast.success(data.bilder === 1 ? "1 Foto nachgeholt." : `${data.bilder} Fotos nachgeholt.`);
         onBilder?.(data);
+      } else if (data?.laeuft) {
+        // Befund Ahmad 10.10.2026: der Abruf läuft im Hintergrund weiter (Frist des Servers) — kein Fehler,
+        // der Knopf bleibt; der nächste Klick findet die Fotos im Speicher
+        setHinweis(data.hinweis || "Der Abruf läuft noch — gleich noch einmal „Bilder nachholen“ drücken.");
       } else {
         setHinweis(data?.hinweis || "Auch beim neuen Abruf kamen keine Fotos mit.");
         if (!data?.versuche_uebrig) setGesperrt(true);
       }
     } catch (err) {
-      setHinweis(errMsg(err, "Die Fotos konnten nicht nachgeholt werden"));
+      // Befund Ahmad 10.10.2026: Cloudflare/Proxy-Abbruch (502/504/524, englischer HTML-Text) -> deutscher Hinweis
+      const status = err?.response?.status;
+      const roh = typeof err?.response?.data === "string" ? err.response.data : "";
+      const gateway = [502, 504, 524].includes(status) || /cloudflare|origin web server/i.test(roh);
+      setHinweis(gateway
+        ? "Der Abruf dauert gerade zu lange — bitte in einer Minute noch einmal „Bilder nachholen“ drücken."
+        : errMsg(err, "Die Fotos konnten nicht nachgeholt werden"));
       // 409: nicht (mehr) möglich — z. B. dreimal ohne Fotos, Link neu auslesen
-      if (err?.response?.status === 409) setGesperrt(true);
+      if (status === 409) setGesperrt(true);
     } finally {
       setLaeuft(false);
     }
