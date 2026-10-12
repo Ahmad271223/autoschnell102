@@ -596,14 +596,31 @@ def inserat_url(quelle, inserat_id, hash_id=None) -> Optional[str]:
     Kleinanzeigen:  www.kleinanzeigen.de/s-anzeige/<Inserat-ID>
     AutoScout24:    www.autoscout24.de/angebote/<Hash-ID>  (die Inserat-ID aus AutoPointer
                     kennt AutoScout nicht — "Seite nicht gefunden")"""
-    q = re.sub(r"[^a-z0-9]", "", str(quelle or "").lower())
+    q = quelle_code(quelle)
     nummer = str(inserat_id or "").strip()
-    if "mobile" in q and re.fullmatch(r"\d{6,20}", nummer):
+    if q == "mobile" and re.fullmatch(r"\d{6,20}", nummer):
         return f"https://suchen.mobile.de/fahrzeuge/details.html?id={nummer}"
-    if "kleinanzeigen" in q and re.fullmatch(r"\d{6,20}", nummer):
+    if q == "kleinanzeigen" and re.fullmatch(r"\d{6,20}", nummer):
         return f"https://www.kleinanzeigen.de/s-anzeige/{nummer}"
-    if "autoscout" in q:
+    if q == "autoscout":
         h = str(hash_id or "").strip().lower()
         if _UUID.match(h):
             return f"https://www.autoscout24.de/angebote/{h}"
     return None
+
+
+def quelle_code(quelle) -> str:
+    """"mobile" | "kleinanzeigen" | "autoscout" | "" aus dem Portal-Text, wie AutoPointer ihn zeigt.
+    Systemcheck 12.10.2026: die Portal-Spalte ist in AutoPointer oft abgeschnitten ("Mo...", "Klei...", "Aut...",
+    "Autosc...") — 32 Vergleiche in 14 Tagen bekamen deshalb keinen Inserat-Link. Ein eindeutiger Anfang reicht:
+    kein anderes Portal beginnt mit "mo", "kl" oder "au"."""
+    q = re.sub(r"[^a-z0-9]", "", str(quelle or "").lower())
+    if not q:
+        return ""
+    if "mobile" in q or q.startswith("mo"):
+        return "mobile"
+    if "kleinanzeigen" in q or "ebay" in q or q.startswith("kl"):
+        return "kleinanzeigen"
+    if "autoscout" in q or q.startswith("au"):
+        return "autoscout"
+    return ""

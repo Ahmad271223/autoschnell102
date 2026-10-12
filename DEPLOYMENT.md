@@ -4710,6 +4710,16 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
       `{laeuft: true}` statt Cloudflare-Abbruch nach 100 s (der Abruf läuft im Hintergrund zu Ende, der nächste Klick
       findet die Fotos im Speicher); und es geht jetzt auch nach einer reinen Browser-Lesung (vorher 409 „keine
       Daten“). Die App zeigt bei Proxy-Abbrüchen (502/504/524) einen deutschen Hinweis statt des Cloudflare-Texts.
+    - *Systemcheck 12.10.2026 (Wunsch Ahmad „kritische Punkte im System und bei den Benutzern“):*
+      `backend/scripts/systemcheck.py` (nur lesen, nur Zahlen/Zustände; im Container: `docker compose cp
+      backend/scripts/systemcheck.py backend:/app/scripts/systemcheck.py && docker compose exec -T backend python
+      scripts/systemcheck.py --tage 14`) und `scripts/leseseite_analysieren.py` (Struktur gespeicherter Leseseiten,
+      ohne die Seite zu übertragen). Befunde aus dem ersten Lauf: (1) Portal-Spalte in AutoPointer abgeschnitten
+      („Mo...“, „Klei...“, „Aut...“) → kein Inserat-Link bei 32 Vergleichen → `werkzeuge.quelle_code` nimmt einen
+      eindeutigen Anfang. (2) Offener Alarm `index_fehlt` (IndexOptionsConflict: gleicher Index unter anderem Namen)
+      → `bestand_lese_indizes` behandelt Code 85/86 als „steht“ und schließt den Alarm. (3) 20 Leseseiten mobile.de
+      „keine Inseratsdaten“ (Adressform `/auto-inserat/<slug>/<id>.html`, ~60 KB) → Analyse per
+      `leseseite_analysieren.py`, Leser ggf. anpassen. (4) Alte Werkzeugversionen bei Kunden (1.5.5/2.7.0, 1.5.11/2.7.3).
     - Reihenfolge: Server + App ausrollen, dann Programm 1.5.15 und Erweiterung 2.7.5 hochladen. Mit älterem Server
       fehlt `zustand` (= `offen`), mit älterer App kommt kein `OEFFNEN_ERGEBNIS` (Box wie bisher) — nichts bricht.
   - **Kaufvertrag/Abholprotokoll (Wunsch Ahmad 09.10.2026):** „Datum und Ort“ bei Verkäufer UND Käufer = Ort des

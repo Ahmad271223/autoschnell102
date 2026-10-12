@@ -920,6 +920,14 @@ async def bestand_lese_indizes(db) -> None:
         try:
             await db[sammlung].create_index(schluessel, **optionen)
         except Exception as exc:  # noqa: BLE001
+            # Systemcheck 12.10.2026: auf Produktion steht derselbe Index (gleiche Felder) seit dem 06.10. unter einem
+            # ANDEREN Namen (IndexOptionsConflict 85 / "already exists with a different name") — der Index ist da,
+            # die Abfragen laufen damit; kein Alarm, sondern den alten schliessen.
+            code = getattr(exc, "code", None)
+            if code in (85, 86) or "different name" in str(exc).lower():
+                log.info("ensure_indexes: Index %s besteht unter anderem Namen — in Ordnung (%s)", ref, str(exc)[:120])
+                await alarm_schliessen(db, "index_fehlt", ref=ref)
+                continue
             log.warning("ensure_indexes: Index %s nicht angelegt — Abfragen "
                         "laufen ohne ihn langsamer: %s", ref, exc)
             await alarm(db, "index_fehlt", ref=ref, fehler=str(exc)[:300])

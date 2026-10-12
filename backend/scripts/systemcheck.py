@@ -246,6 +246,21 @@ async def abschnitt_konten(db):
             elif ende and ende < jetzt + timedelta(days=7):
                 bald += 1
         zeile(f"  Abos abgelaufen (Datum in der Vergangenheit): {abgelaufen}   laufen in 7 Tagen ab: {bald}")
+        konten = await konten_namen(db)
+        zeile("  Abos mit Status active, die abgelaufen sind oder binnen 14 Tagen ablaufen (Konto, Ablauf):")
+        n = 0
+        async for s in db.subscriptions.find({"status": "active"}, {"_id": 0}):
+            ende = None
+            for k in ("expires_at", "valid_until", "ends_at", "gueltig_bis", "ende", "current_period_end", "bis"):
+                ende = _als_utc(s.get(k))
+                if ende:
+                    break
+            if ende and ende < jetzt + timedelta(days=14):
+                n += 1
+                wer = konten.get(s.get("subject_user_id") or s.get("user_id"), f"Firma {str(s.get('dealer_id'))[:8]}")
+                zeile(f"    {wer:<24} {ende.strftime('%d.%m.%Y')}  {'ABGELAUFEN' if ende < jetzt else 'laeuft ab'}  Plan {s.get('plan')}")
+        if not n:
+            zeile("    (keine)")
     tabelle(await gruppen(db, "abo_vorgaenge", "status"), "  Abo-Vorgaenge je Status:")
     tabelle(await gruppen(db, "manual_payments", "status"), "  manuelle Zahlungen je Status:")
     tabelle(await gruppen(db, "sperren", "art"), "  Sperren je Art:")
@@ -312,7 +327,11 @@ async def abschnitt_werkzeuge(db, seit, tage):
         {"$match": filt}, {"$unwind": "$hinweise"},
         {"$group": {"_id": "$hinweise", "n": {"$sum": 1}}}, {"$sort": {"n": -1}}, {"$limit": 20}])
     tabelle([(d["_id"], d["n"]) async for d in cursor], "  haeufigste Hinweise an die Sucher:")
-    tabelle(await gruppen(db, "werkzeug_vergleiche", "user_id", filt, 15), "  Vergleiche je Konto (ID gekuerzt):",)
+    tabelle([(konten.get(u, f"unbekanntes Konto {str(u)[:8]}"), n)
+             for u, n in await gruppen(db, "werkzeug_vergleiche", "user_id", filt, 15)], "  Vergleiche je Konto:")
+    tabelle([(konten.get(u, f"unbekanntes Konto {str(u)[:8]}"), n)
+             for u, n in await gruppen(db, "werkzeug_vergleiche", "user_id", {**filt, "fahrzeug.inserat_url": None}, 10)],
+            "  davon OHNE Inserat-Link je Konto:")
     tabelle(await gruppen(db, "werkzeug_app_starts", "zustand", {"am": {"$gte": seit.isoformat()}}),
             "  App-Starts (Vertrag aus dem Programm) je Zustand:")
     zeile(f"  Lesebilder (nicht erkannte Anzeigen): gesamt {await anzahl(db, 'werkzeug_lesebilder')}")
@@ -326,6 +345,8 @@ async def abschnitt_werkzeuge(db, seit, tage):
     zeile(f"  Leseseiten (Seiten, die die Erweiterung nicht lesen konnte): gesamt {await anzahl(db, 'werkzeug_leseseiten')}")
     tabelle(await gruppen(db, "werkzeug_leseseiten", "grund"), "    je Grund:")
     tabelle(await gruppen(db, "werkzeug_leseseiten", "portal"), "    je Portal:")
+    tabelle([(konten.get(u, f"unbekanntes Konto {str(u)[:8]}"), n)
+             for u, n in await gruppen(db, "werkzeug_leseseiten", "user_id")], "    je Konto:")
     async for s in db.werkzeug_leseseiten.find({}, {"_id": 0, "id": 1, "url": 1, "grund": 1, "erstellt_am": 1, "groesse": 1}) \
             .sort("erstellt_am", -1).limit(10):
         zeile(f"    {str(s.get('erstellt_am'))[:16]}  {kurz(s.get('grund'), 40)}  {s.get('groesse')} B  {kurz(s.get('url'), 80)}  id={s.get('id')}")
@@ -346,7 +367,8 @@ async def abschnitt_vorgaenge(db, seit, tage):
     beispiel = await db.appointments.find_one({}, sort=[("_id", -1)])
     if beispiel:
         zeile("  appointments-Felder (nur Namen): " + ", ".join(sorted(k for k in beispiel if k != "_id")))
-        ueberfaellig = 0
+        ueberfaellig = Counter()
+        aeltester = {}
         async for t in db.appointments.find({"status": {"$nin": ["abgeholt", "storniert", "erledigt", "abgesagt", "final"]}},
                                             {"_id": 0}).limit(5000):
             w = None
@@ -355,8 +377,12 @@ async def abschnitt_vorgaenge(db, seit, tage):
                 if w:
                     break
             if w and w < jetzt - timedelta(days=1):
-                ueberfaellig += 1
-        zeile(f"  Termine offen, aber Datum mehr als 1 Tag vorbei: {ueberfaellig}")
+                ueberfaellig[t.get("dealer_id")] += 1
+                aeltester[t.get("dealer_id")] = min(aeltester.get(t.get("dealer_id"), w), w)
+        firmen = await firmen_namen(db)
+        zeile(f"  Termine offen, aber Datum mehr als 1 Tag vorbei: {sum(ueberfaellig.values())}")
+        for d, n in ueberfaellig.most_common(10):
+            zeile(f"    {firmen.get(d, 'unbekannte Firma'):<16} {n:>3}  aeltester {aeltester[d].strftime('%d.%m.%Y')}")
     zeile(f"  Fahrzeuge ohne Fotos (data.images leer): "
           f"{await anzahl(db, 'vehicles', {'$or': [{'data.images': {'$exists': False}}, {'data.images': None}, {'data.images': {'$size': 0}}]})}")
     zeile(f"  Protokolle ohne Unterschrift (signature/unterschrift leer): "
@@ -399,6 +425,7 @@ async def abschnitt_betrieb(db, seit):
     async for b in db.ki_budget.find({}, {"_id": 0}).sort("_id", -1).limit(3):
         zeile(f"  ki_budget: {kurz({k: v for k, v in b.items() if isinstance(v, (int, float, str))}, 200)}")
     tabelle(await gruppen(db, "ki_bewertungen", "status", {}), "  KI-Bewertungen je Status (gesamt):")
+    tabelle(await gruppen(db, "ki_bewertungen", "grund", {"status": "fehler"}), "  KI-Fehlergruende (gesamt):")
     tabelle(await gruppen(db, "market_crawl_jobs", "status", {}), "  Markt-Laeufe je Status (gesamt):")
     zf = await zeitfeld(db, "market_crawl_jobs")
     if zf:

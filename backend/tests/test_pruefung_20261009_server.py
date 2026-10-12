@@ -76,6 +76,19 @@ def test_04_hinweise_nur_fuer_gewaehlte_portale():
     assert [l["url"] for l in l2] == ["m"] and h2 == nur_mobile
 
 
+def test_06_portal_abgeschnitten_gibt_trotzdem_den_link():
+    """Systemcheck 12.10.2026: AutoPointer zeigt das Portal oft abgeschnitten ("Mo...", "Klei...", "Aut...") — 32
+    Vergleiche in 14 Tagen bekamen deshalb keinen Inserat-Link. Ein eindeutiger Anfang reicht."""
+    assert wz.quelle_code("Mo...") == "mobile" and wz.quelle_code("mobile.de") == "mobile"
+    assert wz.quelle_code("Klei...") == "kleinanzeigen" and wz.quelle_code("Kleinanzeigen") == "kleinanzeigen"
+    assert wz.quelle_code("Aut...") == "autoscout" and wz.quelle_code("Autosc...") == "autoscout"
+    assert wz.quelle_code("AutoScout24") == "autoscout" and wz.quelle_code("") == "" and wz.quelle_code("Sonstige") == ""
+    assert wz.inserat_url("Mo...", "487000201") == "https://suchen.mobile.de/fahrzeuge/details.html?id=487000201"
+    assert wz.inserat_url("Klei...", "3530379782") == "https://www.kleinanzeigen.de/s-anzeige/3530379782"
+    assert wz.inserat_url("Aut...", "1", "d4dd34a4-1795-4bd8-a7d8-064f3b73d8f5").endswith("/angebote/d4dd34a4-1795-4bd8-a7d8-064f3b73d8f5")
+    assert wz.inserat_url("Sonst...", "487000201") is None
+
+
 def test_05_fotos_aus_dem_inserat_objekt_wenn_images_fehlt():
     """Befund Ahmad 10.10.2026 (BMW 730d: "Daten ja, Fotos nein"): traegt das Inserat-Objekt die Fotos nicht unter
     "images", zaehlt jede mobile.de-Bildadresse IM Objekt (nicht auf der ganzen Seite)."""
