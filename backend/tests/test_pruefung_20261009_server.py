@@ -103,6 +103,35 @@ def test_07_mobile_nicht_gefunden_seite_wird_benannt():
         __import__("routes.werkzeuge", fromlist=["_LESESEITE_GRUENDE"])._LESESEITE_GRUENDE)
 
 
+def test_08_elektro_ohne_kraftstoffzeile_wird_erkannt():
+    """Befund Ahmad 12.10.2026 ("Basis Elektro ist Elektro-Kraftstoff, wird aber nie uebertragen"): E-Autos auf
+    mobile.de haben keine Zeile "Kraftstoffart" — der Kraftstoff kommt aus Antriebsart / Energietraeger / Batterie-
+    Zeilen / Ausstattungslinie; Hybride ebenso; sonst bleibt er wie bisher leer."""
+    import mobile_service as ms
+
+    def inserat(*zeilen):
+        listing = _mobile_listing()
+        listing["attributes"] = [a for a in listing["attributes"] if str(a.get("tag")).lower() != "fuel"]
+        listing["attributes"] += [dict(z) for z in zeilen]
+        fz, _ = bh.inserat_auslesen(_identity(MOBILE_URL), MOBILE_URL, _mobile_inserat_html(listing))
+        return fz
+
+    assert inserat({"label": "Antriebsart", "tag": "driveType", "value": "Elektromotor"})["fuel"] == "ELECTRICITY"
+    fz = inserat({"label": "Anderer Energieträger", "tag": "otherEnergySource", "value": "Strom"})
+    assert fz["fuel"] == "ELECTRICITY" and fz["fuel_label"] == "Elektro"
+    assert inserat({"label": "Ausstattungslinie", "tag": "trimLine", "value": "Basis Elektro"})["fuel"] == "ELECTRICITY"
+    assert inserat({"label": "Batteriekapazität (in kWh)", "tag": "batteryCapacity", "value": "77 kWh"})["fuel"] == "ELECTRICITY"
+    assert inserat({"label": "Antriebsart", "tag": "driveType", "value": "Hybrid (Benzin/Elektro)"})["fuel"] == "HYBRID"
+    assert inserat({"label": "Antriebsart", "tag": "driveType", "value": "Hybrid (Diesel/Elektro)"})["fuel"] == "HYBRID_DIESEL"
+    assert inserat({"label": "Antriebsart", "tag": "driveType", "value": "Allrad"})["fuel"] in ("", None), "Allrad ist kein Kraftstoff"
+    assert ms.kraftstoff_ableiten({"attributes": [{"tag": "color", "value": "Rot"}]}) is None
+    # mit Zeile "Kraftstoffart" gilt weiter die Zeile (Diesel bleibt Diesel, auch mit Batterie-Zeile)
+    listing = _mobile_listing()
+    listing["attributes"] += [{"label": "Batteriekapazität", "tag": "batteryCapacity", "value": "1 kWh"}]
+    fz, _ = bh.inserat_auslesen(_identity(MOBILE_URL), MOBILE_URL, _mobile_inserat_html(listing))
+    assert fz["fuel"] in ("PETROL", "DIESEL")
+
+
 def test_05_fotos_aus_dem_inserat_objekt_wenn_images_fehlt():
     """Befund Ahmad 10.10.2026 (BMW 730d: "Daten ja, Fotos nein"): traegt das Inserat-Objekt die Fotos nicht unter
     "images", zaehlt jede mobile.de-Bildadresse IM Objekt (nicht auf der ganzen Seite)."""

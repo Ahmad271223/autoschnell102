@@ -499,6 +499,45 @@ def _apify_attr(item: dict, *tags: str) -> Optional[str]:
     return None
 
 
+#: Zeilen, in denen mobile.de bei E-Autos und Hybriden den Antrieb nennt (Tag oder deutsche Beschriftung)
+_ANTRIEB_ZEILEN = ("antrieb", "drive", "energietr", "energy", "motor", "fueltype")
+_BATTERIE_ZEILEN = ("batterie", "battery", "elektrische reichweite", "electricrange", "ladedauer", "chargingtime",
+                    "schnellladezeit", "fastcharg")
+_LINIE_ZEILEN = ("ausstattungslinie", "trimline", "trim", "modelline", "variante")
+
+
+def kraftstoff_ableiten(item: dict) -> Optional[str]:
+    """Kraftstoff-Beschriftung ("Elektro", "Hybrid", "Hybrid (Diesel/Elektro)") aus den uebrigen Zeilen eines
+    Inserats, wenn die Zeile "Kraftstoffart" fehlt \u2014 sonst None. Befund Ahmad 12.10.2026: E-Autos auf mobile.de
+    haben "Antriebsart: Elektromotor", "Anderer Energietraeger: Strom", Batterie-/Ladezeilen und oft
+    "Ausstattungslinie: \u2026 Elektro"; vorher blieb der Kraftstoff leer ("Im Inserat ist kein Kraftstoff angegeben")
+    und fehlte in Vergleichslinks und Kaufvertrag."""
+    attrs = item.get("attributes") or []
+    if isinstance(attrs, dict):
+        attrs = [{"tag": k, "value": v} for k, v in attrs.items()]
+    hat_batterie = False
+    aus_linie = None
+    for a in attrs:
+        if not isinstance(a, dict):
+            continue
+        k = f"{a.get('tag') or ''} {a.get('label') or ''}".lower()
+        v = a.get("value")
+        v = ", ".join(str(x) for x in v) if isinstance(v, list) else str(v or "")
+        vl = v.lower()
+        if any(w in k for w in _BATTERIE_ZEILEN):
+            hat_batterie = True
+        if any(w in k for w in _ANTRIEB_ZEILEN):
+            if "hybrid" in vl:
+                return "Hybrid (Diesel/Elektro)" if "diesel" in vl else "Hybrid"
+            if any(w in vl for w in ("elektr", "strom", "electric")):
+                return "Elektro"
+        if any(w in k for w in _LINIE_ZEILEN) and ("elektro" in vl or "electric" in vl or vl.endswith(" ev")):
+            aus_linie = "Elektro"
+    if aus_linie:
+        return aus_linie
+    return "Elektro" if hat_batterie else None
+
+
 _ZAHL_MIT_TRENNER = re.compile(r"\d{1,3}(?:[.,\u00a0\u202f]\d{3})+(?!\d)|\d+")
 _BEREICH = re.compile(r"\d\s*(?:-|–|bis)\s*\d")
 
@@ -692,7 +731,10 @@ def _parse_apify_item(item: dict, ad_id: str, url: Optional[str] = None) -> Dict
         preis = float(p)
 
     kw, ps = _apify_leistung(_apify_attr(item, "power"))
-    fuel_raw = _apify_attr(item, "fuel") or ""
+    # Befund Ahmad 12.10.2026 ("Basis Elektro ist Elektro-Kraftstoff, wird aber nie uebertragen"): bei E-Autos hat
+    # mobile.de keine Zeile "Kraftstoffart", sondern "Antriebsart: Elektromotor", "Anderer Energietraeger: Strom",
+    # Batterie-Zeilen, "Ausstattungslinie: Basis Elektro" — daraus den Kraftstoff ableiten, wenn "fuel" fehlt
+    fuel_raw = _apify_attr(item, "fuel") or kraftstoff_ableiten(item) or ""
     gear_raw = _apify_attr(item, "transmission", "gearbox") or ""
     cat_raw = str(item.get("category") or _apify_attr(item, "category") or "")
 
