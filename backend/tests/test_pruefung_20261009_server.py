@@ -89,6 +89,20 @@ def test_06_portal_abgeschnitten_gibt_trotzdem_den_link():
     assert wz.inserat_url("Sonst...", "487000201") is None
 
 
+def test_07_mobile_nicht_gefunden_seite_wird_benannt():
+    """Systemcheck 12.10.2026: mobile.de liefert fuer ein verschwundenes Inserat nur die App-Huelle der "nicht
+    gefunden"-Seite (notFound-Bloecke, kein Inserat-Objekt) — klare Meldung statt "Pruefseite oder nicht mehr online"."""
+    huelle = _flight_html('0:{"P":null,"c":["","auto-inserat","x","50342132635392.html?source=api"]}\n',
+                          '7:["$","$L33",null,{"appVersion":"2026-10-12","notFound":["$","div",null,{}],"params":{}}]\n')
+    with pytest.raises(bh.SeiteUngueltig, match="nicht gefunden"):
+        bh.inserat_auslesen(_identity(MOBILE_URL), MOBILE_URL, huelle)
+    # eine fremde Seite ohne notFound-Bloecke heisst weiter "keine Inseratsdaten" (und wird als Leseseite aufgehoben)
+    with pytest.raises(bh.SeiteUngueltig, match="keine Inseratsdaten"):
+        bh.inserat_auslesen(_identity(MOBILE_URL), MOBILE_URL, "<html><body>Zugriff verweigert</body></html>")
+    assert "nicht gefunden" not in " ".join(
+        __import__("routes.werkzeuge", fromlist=["_LESESEITE_GRUENDE"])._LESESEITE_GRUENDE)
+
+
 def test_05_fotos_aus_dem_inserat_objekt_wenn_images_fehlt():
     """Befund Ahmad 10.10.2026 (BMW 730d: "Daten ja, Fotos nein"): traegt das Inserat-Objekt die Fotos nicht unter
     "images", zaehlt jede mobile.de-Bildadresse IM Objekt (nicht auf der ganzen Seite)."""

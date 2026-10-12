@@ -409,11 +409,25 @@ def bilder_aus_objekt(objekt) -> List[str]:
     return gefunden
 
 
+#: Systemcheck 12.10.2026 (20 Leseseiten eines Hyundai i10, /auto-inserat/…/<nummer>.html?source=api, ~60 KB gepackt):
+#: mobile.de liefert fuer ein nicht (mehr) vorhandenes Inserat nur die App-Huelle seiner "nicht gefunden"-Seite — kein
+#: <title>, kein sichtbarer Text, kein Inserat-Objekt, dafuer die "notFound"-Bloecke des Next.js-Routers. Der Sucher
+#: drueckte zehnmal "Erneut versuchen"; der Text sagte "Pruefseite oder nicht mehr online", nicht WAS davon.
+NICHT_GEFUNDEN_TEXT = ("mobile.de zeigt dieses Inserat nicht (mehr) an — Seite nicht gefunden (verkauft oder offline). "
+                       "Ein erneuter Versuch hilft nicht.")
+
+
+def mobile_seite_nicht_gefunden(text: str) -> bool:
+    return '"notFound":[' in text and '"listing":{' not in text
+
+
 def mobile_inserat(html: str, item_id: str, url: str) -> Tuple[dict, Optional[dict]]:
     import mobile_service as ms
     text = next_flight_text(html)
     listing = mobile_listing_objekt(text, item_id)
     if not listing:
+        if mobile_seite_nicht_gefunden(text):
+            raise SeiteUngueltig(NICHT_GEFUNDEN_TEXT)
         raise SeiteUngueltig("Auf der Seite stehen keine Inseratsdaten (Prüfseite von mobile.de oder "
                              "Inserat nicht mehr online).")
     if str(listing.get("id") or "") != str(item_id):
