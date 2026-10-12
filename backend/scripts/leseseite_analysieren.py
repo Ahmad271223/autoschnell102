@@ -73,7 +73,7 @@ def untersuchen(html: str, text_n: int) -> None:
     if m:
         print(f"    META-REFRESH: {m.group(1)[:160]}")
     print(f"    <script>-Bloecke: {len(re.findall(r'(?i)<script', html))}   davon __next_f.push: "
-          f"{len(re.findall(r'__next_f\\.push', html))}   JSON-Skripte: {len(re.findall(r'application/json', html))}")
+          f"{html.count('__next_f.push')}   JSON-Skripte: {len(re.findall(r'application/json', html))}")
     print("    Marker:")
     klein = html.lower()
     for muster, name in MARKER:
@@ -128,11 +128,34 @@ async def main() -> int:
             print(f"  nicht entpackbar: {exc}")
             continue
         untersuchen(html, args.text)
-        # was sagt unser Leser heute dazu?
+        # was sagt unser Leser heute dazu? — und wie ist der ENTPACKTE Datenstrom aufgebaut (die Schluessel stehen im
+        # rohen HTML mit Backslash-Anfuehrungszeichen, darum hier auf dem entpackten Text)
         try:
             text = bh.next_flight_text(html)
             print(f"    Flight-Text: {len(text):,} Zeichen; listing-Objekt gefunden: "
                   f"{bool(bh.mobile_listing_objekt(text, (ident or {}).get('item_id') or ''))}")
+            schluessel = Counter(re.findall(r'"([A-Za-z_]{3,40})":\{', text))
+            print("    Objekt-Schluessel im Datenstrom: " + ", ".join(f"{k} ({n})" for k, n in schluessel.most_common(60)))
+            listen = Counter(re.findall(r'"([A-Za-z_]{3,40})":\[', text))
+            print("    Listen-Schluessel im Datenstrom: " + ", ".join(f"{k} ({n})" for k, n in listen.most_common(30)))
+            verweise = Counter(re.findall(r'"([A-Za-z_]{3,40})":"\$L?[0-9a-f]{1,4}"', text))
+            if verweise:
+                print("    Verweis-Schluessel ($-Referenzen): " + ", ".join(f"{k} ({n})" for k, n in verweise.most_common(30)))
+            for wort in ("listing", "attributes", "priceRating", "make", "model", "firstRegistration", "mileage",
+                         "images", "htmlDescription", "seller", "contact", "vehicle", "adId", "adDetails", "searchResult",
+                         "ad", "classified", "id"):
+                n = text.count(f'"{wort}"')
+                if n:
+                    print(f"      \"{wort}\": {n} x")
+            for m in list(re.finditer(r'"listing"\s*:\s*.{0,60}', text))[:5]:
+                print(f"      listing-Stelle: {m.group(0)[:80]!r}")
+            for m in list(re.finditer(r'"attributes"\s*:\s*.{0,80}', text))[:3]:
+                print(f"      attributes-Stelle: {m.group(0)[:100]!r}")
+            # die laengsten Datenstrom-Zeilen (Kennung: Anfang) — dort steckt meist das Inserat
+            zeilen = sorted(text.split("\n"), key=len, reverse=True)[:10]
+            print("    laengste Datenstrom-Zeilen (Laenge, Anfang):")
+            for z in zeilen:
+                print(f"      {len(z):>8}  {z[:110]!r}")
         except Exception as exc:  # noqa: BLE001
             print(f"    Leser: {exc}")
     if not n:
