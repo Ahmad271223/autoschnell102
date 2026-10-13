@@ -624,3 +624,16 @@ def quelle_code(quelle) -> str:
     if "autoscout" in q or q.startswith("au"):
         return "autoscout"
     return ""
+
+
+def nummer_plausibel(quelle, nummer) -> bool:
+    """Stellenzahl je Portal (Analyse 13.10.2026, "Inserat-ID sicher lesen", B1): mobile.de 9 (aeltere) oder 14
+    (seit 2025) Ziffern, Kleinanzeigen 9–11 — eine 13- oder 15-stellige Lesung ist sicher falsch gelesen. AutoScout
+    (Hash) und unbekannte Portale: keine Pruefung (True)."""
+    n = str(nummer or "").strip()
+    q = quelle_code(quelle)
+    if q == "mobile":
+        return n.isascii() and n.isdigit() and len(n) in (9, 14)
+    if q == "kleinanzeigen":
+        return n.isascii() and n.isdigit() and 9 <= len(n) <= 11
+    return True

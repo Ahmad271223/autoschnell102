@@ -542,6 +542,10 @@ class FahrzeugIn(BaseModel):
     inserat_id: str = Field("", max_length=60)
     #: AutoScout24: Kennung fuer den Inserat-Link (nur wenn vollstaendig gelesen)
     hash_id: str = Field("", max_length=60)
+    #: Programm ab 1.5.16 (Wunsch Ahmad 13.10.2026, "Inserat-Nummer sicher lesen"): die Mehrfachlesung der Nummer war
+    #: NICHT eindeutig (keine zwei gleichen Lesungen oder falsche Stellenzahl) — der Server behandelt sie wie eine
+    #: reparierte Nummer (kein Link, wenn das Inserat dazu nicht zum Bildschirm passt; sonst Link mit Hinweis)
+    inserat_id_unsicher: bool = False
     #: Seit Programm 1.4.0 (Wunsch Ahmad 03.10.2026): Marke/Modell sind nur Rohtext (erstes Wort / Rest) —
     #: der SERVER erkennt sie aus marke_modell_text + titel (werkzeug_erkennung). Aeltere Programme schicken
     #: schon erkannte Werte (roh=False) und werden wie bisher behandelt.
@@ -626,7 +630,11 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     # Texterkennung verwechselt auch 7/Z oder 8/S, und mobile.de-Nummern liegen dicht: eine falsche Ziffer trifft ein
     # fremdes Inserat (fremdes Auto im Vergleich und im Kaufvertrag). Darum: passt das Inserat zur Nummer NICHT zum
     # Bildschirm, kein Link; gibt es keine Daten dazu, bleibt der Link (zum Oeffnen und Lesen) mit Hinweis.
-    nummer_unsicher = bool(f["inserat_url"]) and f["inserat_id"] != roh_nummer
+    # Analyse 13.10.2026 ("Inserat-ID sicher lesen", B1/B4): unsicher ist auch, was das Programm (ab 1.5.16) als
+    # unsicher meldet oder was die Stellenzahl des Portals nicht trifft (mobile.de 9/14, Kleinanzeigen 9–11)
+    nummer_unsicher = bool(f["inserat_url"]) and (
+        f["inserat_id"] != roh_nummer or bool(f.get("inserat_id_unsicher"))
+        or not wz.nummer_plausibel(f.get("quelle"), f["inserat_id"]))
     nummer_hinweis = None
     vehicle = wz.fahrzeug_zu_vehicle(f)
     # Befund/Wunsch Ahmad 09.10.2026 ("das darf alles nicht passieren"): liegt das Inserat schon gelesen vor (eigene
@@ -651,10 +659,13 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
             erkannt.update(marke=echt.get("make_label") or erkannt.get("marke"),
                            modell=echt.get("model_label") or erkannt.get("modell"), erkannt=True,
                            modell_gefunden=True, quelle="inserat")
-        elif nummer_unsicher and isinstance(echt, dict) and echt:
-            # die reparierte Nummer gehoert zu einem ANDEREN Auto: kein Link, Bildschirm-Werte, Nummer wie gelesen
+        elif isinstance(echt, dict) and echt:
+            # Analyse 13.10.2026 (B4): das Inserat zu dieser Nummer liegt vor und passt NICHT zum Bildschirm (EZ/km/
+            # Marke) — dann ist die Nummer falsch gelesen (eine Ziffer, die trotzdem eine Ziffer ist, faellt sonst
+            # nicht auf; vorher nur bei reparierten Nummern geprueft): kein Link, Bildschirm-Werte, Nummer wie gelesen
             f["inserat_url"], f["inserat_id"], f["inserat_nummer_unsicher"] = None, roh_nummer, True
-            nummer_hinweis = ("Inserat-Nummer unsicher gelesen – das Inserat zu dieser Nummer ist ein anderes Auto. "
+            nummer_hinweis = (("Inserat-Nummer unsicher gelesen – " if nummer_unsicher else "Inserat-Nummer falsch gelesen – ")
+                              + "das Inserat zu dieser Nummer ist ein anderes Auto (EZ/km passen nicht). "
                               "Kein Inserat-Link; für den Kaufvertrag bitte die Adresse aus dem Browser einfügen.")
         elif nummer_unsicher:
             f["inserat_nummer_unsicher"] = True
@@ -933,6 +944,48 @@ async def _programm_vergleich(user: dict, inserat_url: str) -> Optional[dict]:
         {"_id": 0, "id": 1, "erstellt_am": 1}, sort=[("erstellt_am", -1)])
 
 
+#: Wunsch Ahmad 13.10.2026 ("mobile Inserat-ID beim AutoPointer-Auslesen direkt erkennen und speichern"): so lange nach
+#: dem Programm-Vergleich traegt eine Browser-Lesung desselben Autos die Nummer nach
+NACHTRAG_MINUTEN = 60
+
+
+async def _nummer_nachtragen(user: dict, identity: dict, lesung: dict, inserat_url: str) -> int:
+    """Die Erweiterung hat ein Inserat gelesen: Programm-Vergleiche DIESES Kontos der letzten NACHTRAG_MINUTEN ohne
+    (sicheren) Inserat-Link, deren Bildschirmwerte (EZ ±1 Jahr, km ±10 %, Marke) zur Lesung passen, bekommen Nummer
+    und Link nachgetragen (erkennung "browser"). So steht die Nummer am Vergleich und unter "Deine letzten Autos",
+    auch wenn die Texterkennung sie nicht (sicher) lesen konnte. Nie den Vorgang aufhalten; Rueckgabe: Anzahl."""
+    try:
+        nummer = str(identity.get("item_id") or "")
+        portal = wz.quelle_code(identity.get("source"))
+        if not inserat_url or not nummer or not portal:
+            return 0
+        n = 0
+        cursor = db[wz.SAMMLUNG_VERGLEICHE].find(
+            {"werkzeug": wz.AUTOPOINTER, "user_id": user["id"], "probelauf": {"$ne": True},
+             "erstellt_am": {"$gte": _seit(NACHTRAG_MINUTEN)},
+             "$or": [{"fahrzeug.inserat_url": None}, {"fahrzeug.inserat_url": {"$exists": False}},
+                     {"fahrzeug.inserat_nummer_unsicher": True}]},
+            {"_id": 0, "id": 1, "fahrzeug": 1}).sort("erstellt_am", -1).limit(20)
+        async for doc in cursor:
+            bild = doc.get("fahrzeug") or {}
+            if wz.quelle_code(bild.get("quelle")) not in ("", portal):
+                continue
+            if not erkennung_lernen.passt_zum_bildschirm(lesung, bild, bild.get("marke")):
+                continue
+            r = await db[wz.SAMMLUNG_VERGLEICHE].update_one(
+                {"id": doc["id"]},
+                {"$set": {"fahrzeug.inserat_id": nummer, "fahrzeug.inserat_url": inserat_url,
+                          "fahrzeug.inserat_nummer_unsicher": False, "fahrzeug.erkennung": "browser",
+                          "fahrzeug.nummer_nachgetragen_am": now_iso()}})
+            n += r.modified_count
+        if n:
+            log.info("Werkzeug: Inserat-Nummer %s bei %d Vergleich(en) von %s nachgetragen", nummer, n, user["id"])
+        return n
+    except Exception:  # noqa: BLE001
+        log.exception("Werkzeug: Inserat-Nummer nicht nachgetragen")
+        return 0
+
+
 def _browser_werkzeug(werkzeug_id: str) -> None:
     _wid_pruefen(werkzeug_id)
     if wz.art(werkzeug_id) != "browser":
@@ -1009,6 +1062,9 @@ async def werkzeug_inserat(werkzeug_id: str, body: InseratIn,
     # Pruefung 05.10.2026 (Paket 1): ERST nach allen Rechenschritten merken — die Lesung gilt 24 h fuer alle Konten;
     # vorher wurde gespeichert und danach scheiterte die Anfrage (500), der kaputte Wert blieb liegen.
     await bh.inserat_merken(db, identity, inserat_url, fahrzeug, user)
+    # Wunsch Ahmad 13.10.2026: die Nummer an die Programm-Vergleiche dieses Kontos nachtragen, bei denen die
+    # Texterkennung sie nicht (sicher) lesen konnte — VOR _programm_vergleich, damit der Treffer dort zaehlt
+    await _nummer_nachtragen(user, identity, fahrzeug, inserat_url)
     # 08.10.2026: mit Vorgangsnummer genau dieser Vergleich des Programms; ohne (aeltere Erweiterung) wie bisher
     programm = (await _vorgang_doc(body.vorgang_id, user["id"], {"_id": 0, "id": 1, "erstellt_am": 1})
                 if body.vorgang_id else None) or await _programm_vergleich(user, inserat_url)

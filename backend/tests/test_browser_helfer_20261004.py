@@ -813,7 +813,9 @@ def test_38_programm_und_helfer_arbeiten_zusammen(welt):
     assert _inserat(helfer).json()["programm_verglichen"] is None
     pc = _verbinden(welt, "sucher", wid=wz.AUTOPOINTER, name="PC-Buero")
     f = {"marke": "VW", "modell": "Golf", "marke_modell_text": "VW Golf", "titel": "VW Golf VII 2.0 GTI TCR",
-         "ez_monat": 5, "ez_jahr": 2019, "kilometer": 60000, "kw": 213, "ps": 290, "kraftstoff": "Benzin",
+         # Analyse 13.10.2026 (B4): EZ/km muessen zum Inserat passen (06/2019, 111.016 km) — sonst gilt die Nummer als
+         # falsch gelesen und der Link faellt weg; vorher standen hier erfundene 60.000 km
+         "ez_monat": 6, "ez_jahr": 2019, "kilometer": 111000, "kw": 213, "ps": 290, "kraftstoff": "Benzin",
          "getriebe": "Automatik", "preis": 23850, "quelle": "mobile.de", "inserat_id": MOBILE_ID, "roh": True}
     r = requests.post(f"{API}/werkzeuge/{wz.AUTOPOINTER}/vergleich", headers=pc, json={"fahrzeug": f}, timeout=60)
     assert r.status_code == 200, r.text
@@ -1165,7 +1167,9 @@ def test_47_vorgangsnummer_programm_erweiterung_app(welt):
     assert requests.get(f"{API}/werkzeuge/{WID}/status", headers=helfer, timeout=30).status_code == 200
     pc = _verbinden(welt, "sucher", wid=wz.AUTOPOINTER, name="PC-Vorgang")
     f = {"marke": "VW", "modell": "Golf", "marke_modell_text": "VW Golf", "titel": "VW Golf VII 2.0 GTI TCR",
-         "ez_monat": 5, "ez_jahr": 2019, "kilometer": 60000, "kw": 213, "ps": 290, "kraftstoff": "Benzin",
+         # Analyse 13.10.2026 (B4): EZ/km muessen zum Inserat passen (06/2019, 111.016 km) — sonst gilt die Nummer als
+         # falsch gelesen und der Link faellt weg; vorher standen hier erfundene 60.000 km
+         "ez_monat": 6, "ez_jahr": 2019, "kilometer": 111000, "kw": 213, "ps": 290, "kraftstoff": "Benzin",
          "getriebe": "Automatik", "preis": 23850, "quelle": "mobile.de", "inserat_id": MOBILE_ID, "roh": True}
 
     def vergleich(**zusatz):

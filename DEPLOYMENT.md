@@ -4720,6 +4720,18 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
       → `bestand_lese_indizes` behandelt Code 85/86 als „steht“ und schließt den Alarm. (3) 20 Leseseiten mobile.de
       „keine Inseratsdaten“ (Adressform `/auto-inserat/<slug>/<id>.html`, ~60 KB) → Analyse per
       `leseseite_analysieren.py`, Leser ggf. anpassen. (4) Alte Werkzeugversionen bei Kunden (1.5.5/2.7.0, 1.5.11/2.7.3).
+    - *Inserat-Nummer sicher (Wunsch Ahmad 13.10.2026 „mobile Inserat-ID beim AutoPointer-Auslesen direkt erkennen und
+      speichern“, Analyse `docs/inserat-id-sicher-lesen.md`):* (B1) `werkzeuge.nummer_plausibel` — mobile.de 9 oder 14
+      Ziffern, Kleinanzeigen 9–11; andere Stellenzahl = unsicher. (B4) Im Programm-Vergleich gilt JEDE Nummer als falsch
+      gelesen, wenn das Inserat dazu vorliegt (eigene Lesung/Server-Speicher) und EZ/km/Marke nicht zum Bildschirm passen
+      → kein Link + Hinweis „falsch gelesen“ (vorher nur bei reparierten Nummern). Neues Feld `fahrzeug.inserat_id_unsicher`
+      (Programm ab 1.5.16: Mehrfachlesung ohne Mehrheit) → wie eine reparierte Nummer behandelt. **Nachtragen:** liest
+      die Erweiterung ein Inserat, bekommen Programm-Vergleiche desselben Kontos der letzten 60 Minuten ohne (sicheren)
+      Link, deren Bildschirmwerte passen, Nummer + Link nachgetragen (`_nummer_nachtragen`, `erkennung: "browser"`,
+      `nummer_nachgetragen_am`) — sichtbar unter „Deine letzten Autos“ und in der Betreiber-Liste. Mobile-Leser:
+      „nicht gefunden“-Hülle (notFound-Blöcke) wird klar benannt; Elektro/Hybrid ohne Zeile „Kraftstoffart“ aus
+      Antriebsart/Energieträger/Batterie/Ausstattungslinie (`mobile_service.kraftstoff_ableiten`).
+      Offen (Entscheidung Ahmad): UI-Automation-Probe an AutoPointer (A1 der Analyse) — braucht einen Test am echten PC.
     - Reihenfolge: Server + App ausrollen, dann Programm 1.5.15 und Erweiterung 2.7.5 hochladen. Mit älterem Server
       fehlt `zustand` (= `offen`), mit älterer App kommt kein `OEFFNEN_ERGEBNIS` (Box wie bisher) — nichts bricht.
   - **Kaufvertrag/Abholprotokoll (Wunsch Ahmad 09.10.2026):** „Datum und Ort“ bei Verkäufer UND Käufer = Ort des

@@ -132,6 +132,15 @@ def test_08_elektro_ohne_kraftstoffzeile_wird_erkannt():
     assert fz["fuel"] in ("PETROL", "DIESEL")
 
 
+def test_09_stellenzahl_je_portal():
+    """Analyse 13.10.2026 (B1): mobile.de 9 oder 14 Ziffern, Kleinanzeigen 9–11, AutoScout/unbekannt ohne Pruefung."""
+    assert wz.nummer_plausibel("mobile.de", "454498952") and wz.nummer_plausibel("Mo...", "50342132635392")
+    assert not wz.nummer_plausibel("mobile.de", "5034213263539") and not wz.nummer_plausibel("mobile.de", "4544989")
+    assert wz.nummer_plausibel("Kleinanzeigen", "3538924652") and not wz.nummer_plausibel("Kleinanzeigen", "35389246")
+    assert wz.nummer_plausibel("AutoScout24", "476609216") and wz.nummer_plausibel("", "1")
+    assert not wz.nummer_plausibel("mobile.de", "4544989O2")
+
+
 def test_05_fotos_aus_dem_inserat_objekt_wenn_images_fehlt():
     """Befund Ahmad 10.10.2026 (BMW 730d: "Daten ja, Fotos nein"): traegt das Inserat-Objekt die Fotos nicht unter
     "images", zaehlt jede mobile.de-Bildadresse IM Objekt (nicht auf der ganzen Seite)."""
@@ -533,3 +542,83 @@ def test_17_bilder_nachholen_nach_browser_lesung(welt):
         db.listings_cache.delete_many({"cache_key": ck})
         db.vehicles.delete_many({"inserat_schluessel": ck})
         db.rate_limits.delete_many({"_id": {"$regex": "^listings-"}})
+
+
+# ------------------------------------------------------------ Inserat-Nummer sicher (Wunsch Ahmad 13.10.2026)
+def _vergleich_schicken(welt, pc, **fahrzeug):
+    import test_browser_helfer_20261004 as tb
+    f = {"marke": "VW", "modell": "", "marke_modell_text": "VW Golf", "titel": "VW Golf", "ez_monat": 6, "ez_jahr": 2020,
+         "kilementer": None, "kilometer": 48100, "kw": 110, "kraftstoff": "Benzin", "getriebe": "Schaltgetriebe",
+         "preis": 21000, "quelle": "mobile.de", "inserat_id": "", "roh": True}
+    f.pop("kilementer")
+    f.update(fahrzeug)
+    r = requests.post(f"{tb.API}/werkzeuge/{wz.AUTOPOINTER}/vergleich", headers=pc, json={"fahrzeug": f}, timeout=60)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+@pytestmark_http
+def test_18_browser_lesung_traegt_die_nummer_am_programm_vergleich_nach(welt):
+    """Die Texterkennung las keine Nummer (kein Link). Liest die Erweiterung danach dasselbe Auto (EZ/km/Marke passen),
+    bekommt der Programm-Vergleich Nummer + Link nachgetragen — und ein anderes Auto bleibt ohne."""
+    import test_browser_helfer_20261004 as tb
+    db = welt["db"]
+    pc = _pc(welt, "PC-Nachtrag")
+    kopf = tb._verbinden(welt, "sucher", name="Edge · Nachtrag")
+    listing = _mobile_listing()
+    fz, _ = bh.inserat_auslesen(_identity(MOBILE_URL), MOBILE_URL, _mobile_inserat_html(listing))
+    jahr = int(str(fz["first_registration"])[-4:])
+    try:
+        db.werkzeug_vergleiche.delete_many({"user_id": welt["sucher_id"]})
+        passt = _vergleich_schicken(welt, pc, marke=fz["make_label"], marke_modell_text=f"{fz['make_label']} {fz['model_label']}",
+                                    ez_jahr=jahr, kilometer=int(fz["mileage"]) + 100, inserat_id="")
+        anderes = _vergleich_schicken(welt, pc, marke=fz["make_label"], marke_modell_text=f"{fz['make_label']} {fz['model_label']}",
+                                      ez_jahr=jahr - 5, kilometer=int(fz["mileage"]) * 3 + 90000, inserat_id="")
+        assert passt["inserat_url"] is None and anderes["inserat_url"] is None
+        r = requests.post(f"{tb.API}/werkzeuge/{tb.WID}/inserat", headers=kopf, timeout=60,
+                          json={"url": MOBILE_URL, "seite": tb._seite(_mobile_inserat_html(listing))})
+        assert r.status_code == 200, r.text
+        d1 = db.werkzeug_vergleiche.find_one({"id": passt["vorgang_id"]})
+        assert d1["fahrzeug"]["inserat_id"] == MOBILE_ID and d1["fahrzeug"]["inserat_url"].endswith(f"id={MOBILE_ID}")
+        assert d1["fahrzeug"]["erkennung"] == "browser" and d1["fahrzeug"]["inserat_nummer_unsicher"] is False
+        d2 = db.werkzeug_vergleiche.find_one({"id": anderes["vorgang_id"]})
+        assert not d2["fahrzeug"].get("inserat_url"), "anderes Auto (EZ/km passen nicht) bekommt keine Nummer"
+        # "Deine letzten Autos" zeigt den Link
+        r = requests.get(f"{tb.API}/werkzeuge/{wz.AUTOPOINTER}/meine", headers=welt["sucher"], timeout=30)
+        assert r.status_code == 200
+        eintrag = next(x for x in r.json().get("vergleiche", r.json() if isinstance(r.json(), list) else [])
+                       if x.get("id") == passt["vorgang_id"])
+        assert eintrag["fahrzeug"]["inserat_url"].endswith(f"id={MOBILE_ID}")
+    finally:
+        db.werkzeug_vergleiche.delete_many({"user_id": welt["sucher_id"]})
+        db.werkzeug_inserate.delete_many({"cache_key": f"mobile:{MOBILE_ID}"})
+        db.link_jobs.delete_many({"url": {"$regex": MOBILE_ID}})
+
+
+@pytestmark_http
+def test_19_falsche_und_unsichere_nummern(welt):
+    """(B4) Eine sauber gelesene Nummer, deren Inserat nicht zum Bildschirm passt, verliert den Link ("falsch gelesen");
+    (B1) eine 13-stellige mobile.de-Nummer und (1.5.16) eine vom Programm als unsicher gemeldete Nummer bekommen den
+    Hinweis "unsicher gelesen" (Link bleibt, solange keine Daten dagegen sprechen)."""
+    db = welt["db"]
+    pc = _pc(welt, "PC-Unsicher")
+    jetzt = datetime.now(timezone.utc)
+    nr = "487000801"
+    try:
+        db.listings_cache.update_one({"cache_key": f"mobile:{nr}"}, {"$set": {
+            "cache_key": f"mobile:{nr}", "source": "mobile", "item_id": nr, "data": {**VW, "first_registration": "06/2011"},
+            "expires_at": jetzt + timedelta(days=1)}}, upsert=True)
+        d = _vergleich_schicken(welt, pc, inserat_id=nr)
+        assert d["inserat_url"] is None and any("falsch gelesen" in h for h in d["melden"]), d["melden"]
+        d = _vergleich_schicken(welt, pc, inserat_id="5034213263539")               # 13 Stellen: sicher falsch
+        assert d["inserat_url"] and any("unsicher gelesen" in h for h in d["melden"]), d["melden"]
+        d = _vergleich_schicken(welt, pc, inserat_id="487000802", inserat_id_unsicher=True)
+        assert d["inserat_url"] and any("unsicher gelesen" in h for h in d["melden"]), d["melden"]
+        doc = db.werkzeug_vergleiche.find_one({"id": d["vorgang_id"]})
+        assert doc["fahrzeug"]["inserat_nummer_unsicher"] is True
+        d = _vergleich_schicken(welt, pc, inserat_id="487000803")
+        assert d["inserat_url"] and not any("unsicher" in h or "falsch" in h for h in d["melden"])
+    finally:
+        db.listings_cache.delete_many({"cache_key": f"mobile:{nr}"})
+        db.werkzeug_vergleiche.delete_many({"user_id": welt["sucher_id"]})
+        db.link_jobs.delete_many({"url": {"$regex": "48700080"}})
