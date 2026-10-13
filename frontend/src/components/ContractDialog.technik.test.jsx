@@ -1,7 +1,8 @@
 /**
- * Wunsch Ahmad 09.10.2026: beim Vertrag-Erstellen fragt der Dialog nach Motor, Getriebe und Kupplung
- * („in Ordnung“ oder „Schaden vorhanden“, Pflicht beim Erstellen, Schadentext bei „Schaden vorhanden“);
- * beim nachträglichen Ändern stehen die gespeicherten Werte drin und sind keine Pflicht.
+ * Wunsch Ahmad 09.10.2026: beim Vertrag-Erstellen fragt der Dialog nach Motor, Getriebe und Kupplung.
+ * Wunsch Ahmad 13.10.2026: daraus EIN freiwilliger Punkt „Motor / Getriebe / Kupplung“ (`technik_zustand`,
+ * „in Ordnung“ oder „Schaden vorhanden“, leer = keine Angabe; Schadentext bei „Schaden vorhanden“). Altverträge mit
+ * den drei Einzelfeldern zeigen beim Bearbeiten den zusammengefassten Stand.
  */
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
@@ -32,7 +33,8 @@ vi.mock("@/lib/ungespeichert", () => ({ useUngespeichert: () => {} }));
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
-const { default: ContractDialog, anfangsFormular, formularAusVertrag, TECHNIK_FELDER } = await import("./ContractDialog");
+const { default: ContractDialog, anfangsFormular, formularAusVertrag, technikGesamt, TECHNIK_FELD, TECHNIK_FELDER } =
+  await import("./ContractDialog");
 
 let wurzel = null;
 let behaelter = null;
@@ -79,45 +81,59 @@ async function absenden() {
   });
 }
 
-describe("Motor / Getriebe / Kupplung im Vertragsdialog", () => {
-  it("reine Helfer: Startwerte leer, Felderliste, Übernahme aus dem Vertrag", () => {
-    const f = anfangsFormular({}, DEALER, "2026-10-09");
-    expect([f.motor_zustand, f.getriebe_zustand, f.kupplung_zustand, f.technik_schaden_text]).toEqual(["", "", "", ""]);
-    expect(TECHNIK_FELDER.map(([k]) => k)).toEqual(["motor_zustand", "getriebe_zustand", "kupplung_zustand"]);
-    const aus = formularAusVertrag(f, { contract_no: "KV-9", contract_data: {
+describe("Motor / Getriebe / Kupplung im Vertragsdialog (ein Punkt, freiwillig)", () => {
+  it("reine Helfer: Startwert leer, ein Feld, Zusammenfassung alter Verträge", () => {
+    const f = anfangsFormular({}, DEALER, "2026-10-13");
+    expect([f.technik_zustand, f.technik_schaden_text]).toEqual(["", ""]);
+    expect(TECHNIK_FELD).toBe("technik_zustand");
+    expect(TECHNIK_FELDER.map(([k]) => k)).toEqual(["technik_zustand"]);
+    // neuer Vertrag
+    const neu = formularAusVertrag(f, { contract_no: "KV-9", contract_data: {
+      technik_zustand: "Schaden vorhanden", technik_schaden_text: "springt raus" } });
+    expect([neu.technik_zustand, neu.technik_schaden_text]).toEqual(["Schaden vorhanden", "springt raus"]);
+    // Altvertrag mit drei Einzelfeldern: ein Schaden zaehlt als Schaden …
+    const alt = formularAusVertrag(f, { contract_no: "KV-8", contract_data: {
       motor_zustand: "in Ordnung", getriebe_zustand: "Schaden vorhanden", kupplung_zustand: "in Ordnung",
-      technik_schaden_text: "springt raus" } });
-    expect([aus.motor_zustand, aus.getriebe_zustand, aus.kupplung_zustand, aus.technik_schaden_text])
-      .toEqual(["in Ordnung", "Schaden vorhanden", "in Ordnung", "springt raus"]);
+      technik_schaden_text: "Ölverlust" } });
+    expect(alt.technik_zustand).toBe("Schaden vorhanden");
+    expect(alt.getriebe_zustand).toBe("Schaden vorhanden");           // bleibt erhalten (geht unveraendert mit)
+    // … alles in Ordnung bleibt in Ordnung, nichts angegeben bleibt leer
+    expect(technikGesamt({ motor_zustand: "in Ordnung", kupplung_zustand: "in Ordnung" })).toBe("in Ordnung");
+    expect(technikGesamt({})).toBe("");
+    expect(technikGesamt({ technik_zustand: "in Ordnung", getriebe_zustand: "Schaden vorhanden" })).toBe("in Ordnung");
   });
 
-  it("beim Erstellen: drei Pflichtfragen, Schadentext erst bei „Schaden vorhanden“, alles geht im Payload mit", async () => {
+  it("beim Erstellen: ein freiwilliges Feld, Schadentext erst bei „Schaden vorhanden“, Payload passt", async () => {
     rendern(createElement(ContractDialog, { open: true, onClose: () => {}, vehicleId: "v1", onCreated: () => {}, vehicle: FAHRZEUG }));
     await act(async () => { await Promise.resolve(); });
-    for (const id of ["contract-motor-zustand", "contract-getriebe-zustand", "contract-kupplung-zustand"]) {
-      expect(feld(id)).not.toBeNull();
-      expect(feld(id).required).toBe(true);
-      expect(feld(id).value).toBe("");
-      expect([...feld(id).options].map((o) => o.value)).toEqual(["", "in Ordnung", "Schaden vorhanden"]);
-    }
+    const sel = feld("contract-technik-zustand");
+    expect(sel).not.toBeNull();
+    expect(sel.required).toBe(false);
+    expect(sel.value).toBe("");
+    expect([...sel.options].map((o) => o.value)).toEqual(["", "in Ordnung", "Schaden vorhanden"]);
+    expect(feld("contract-motor-zustand")).toBeNull();
+    expect(feld("contract-getriebe-zustand")).toBeNull();
+    expect(feld("contract-kupplung-zustand")).toBeNull();
     expect(feld("contract-technik-schaden")).toBeNull();
-    tippen(feld("contract-motor-zustand"), "in Ordnung");
-    tippen(feld("contract-getriebe-zustand"), "Schaden vorhanden");
-    tippen(feld("contract-kupplung-zustand"), "in Ordnung");
-    expect(feld("contract-technik-schaden")).not.toBeNull();
-    tippen(feld("contract-technik-schaden"), "springt im 3. Gang raus");
+    // ohne Angabe geht der Vertrag durch (freiwillig)
     tippen(feld("contract-price"), "4.500");
     tippen(feld("contract-payment"), "Bar");
     await absenden();
-    expect(post).toHaveBeenCalled();
-    const body = post.mock.calls[0][1];
-    expect(body.motor_zustand).toBe("in Ordnung");
-    expect(body.getriebe_zustand).toBe("Schaden vorhanden");
-    expect(body.kupplung_zustand).toBe("in Ordnung");
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post.mock.calls[0][1].technik_zustand).toBe("");
+    // mit Schaden: Text erscheint und geht mit
+    tippen(sel, "Schaden vorhanden");
+    expect(feld("contract-technik-schaden")).not.toBeNull();
+    tippen(feld("contract-technik-schaden"), "springt im 3. Gang raus");
+    await absenden();
+    const body = post.mock.calls[1][1];
+    expect(body.technik_zustand).toBe("Schaden vorhanden");
     expect(body.technik_schaden_text).toBe("springt im 3. Gang raus");
+    tippen(sel, "in Ordnung");
+    expect(feld("contract-technik-schaden")).toBeNull();
   });
 
-  it("beim nachträglichen Ändern: gespeicherte Werte stehen drin, keine Pflicht", async () => {
+  it("beim nachträglichen Ändern: gespeicherter Stand drin, auch aus einem Altvertrag", async () => {
     rendern(createElement(ContractDialog, {
       open: true, onClose: () => {}, vehicleId: "v1", onCreated: () => {},
       vehicle: { make_label: "BMW", model_label: "320d" },
@@ -127,8 +143,8 @@ describe("Motor / Getriebe / Kupplung im Vertragsdialog", () => {
         technik_schaden_text: "Ölverlust" } },
     }));
     await act(async () => { await Promise.resolve(); });
-    expect(feld("contract-motor-zustand").value).toBe("Schaden vorhanden");
-    expect(feld("contract-motor-zustand").required).toBe(false);
+    expect(feld("contract-technik-zustand").value).toBe("Schaden vorhanden");
+    expect(feld("contract-technik-zustand").required).toBe(false);
     expect(feld("contract-technik-schaden").value).toBe("Ölverlust");
   });
 });

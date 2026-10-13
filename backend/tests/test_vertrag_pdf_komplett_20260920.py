@@ -192,8 +192,8 @@ def test_a2_das_pdf_einer_neuen_firma_ist_vollstaendig(welt):
 def test_a3_kaufpreis_steht_vor_den_fahrzeugdaten(welt):
     v = _vertrag(welt, nr=2)
     text = _pdf(welt, v["id"])
-    assert text.index("Kaufpreis") < text.index("Fahrzeugdaten")
-    assert text.index("Käufer") < text.index("Kaufpreis")
+    assert text.index("KAUFPREIS (VEREINBART)") < text.index("Fahrzeugdaten")
+    assert text.index("Käufer") < text.index("KAUFPREIS (VEREINBART)")
 
 
 def test_a4_auch_die_druckfassung_ist_vollstaendig(welt):

@@ -857,6 +857,33 @@ async def m22_werkzeug_vergleiche_ablauf(db) -> dict:
     return z
 
 
+async def m23_vertragstext_ohne_14bgb(db) -> dict:
+    """Wunsch Ahmad 13.10.2026: "Der Käufer ist Händler im Sinne des § 14 BGB" gehoert nicht in den Kaufvertrag.
+    Einmalig aus den gespeicherten Texten der Firmen (dealers.digital_vertragstext, default_terms) und den
+    persoenlichen Texten der Sucher (users.settings_override) entfernen — pdf_service.vertragstext_ohne_paragraf_14
+    nimmt nur diesen Absatz bzw. Satz und zieht lueckenlose Nummern nach. Gespeicherte Vertraege und PDF-Dateien
+    bleiben unveraendert (Archiv); jede NEUE Fassung filtert den Satz beim Erzeugen. Idempotent."""
+    from pdf_service import vertragstext_ohne_paragraf_14 as ohne
+    felder = ("digital_vertragstext", "default_terms")
+    z = {"firmen": 0, "sucher": 0}
+    async for d in db.dealers.find({"$or": [{f: {"$regex": "14\\s*BGB"}} for f in felder]},
+                                   {"_id": 1, **{f: 1 for f in felder}}):
+        upd = {f: ohne(d[f]) for f in felder if isinstance(d.get(f), str) and ohne(d[f]) != d[f]}
+        if upd:
+            await db.dealers.update_one({"_id": d["_id"]}, {"$set": upd})
+            z["firmen"] += 1
+    async for u in db.users.find({"$or": [{f"settings_override.{f}": {"$regex": "14\\s*BGB"}} for f in felder]},
+                                 {"_id": 1, "settings_override": 1}):
+        so = u.get("settings_override") or {}
+        upd = {f"settings_override.{f}": ohne(so[f]) for f in felder
+               if isinstance(so.get(f), str) and ohne(so[f]) != so[f]}
+        if upd:
+            await db.users.update_one({"_id": u["_id"]}, {"$set": upd})
+            z["sucher"] += 1
+    log.info("Migration 23 (§ 14 BGB raus): firmen=%s sucher=%s", z["firmen"], z["sucher"])
+    return z
+
+
 MIGRATIONEN = [
     (1, "abos_normalisieren", m1_abos_normalisieren),
     (2, "lifecycle_nachziehen", m2_lifecycle),
@@ -890,6 +917,8 @@ MIGRATIONEN = [
     (21, "empfang_kaestchen_leeren", m21_empfang_kaestchen_leeren),
     # Entscheidung Ahmad 06.10.2026: Werkzeug-Vergleiche 60 Tage (TTL)
     (22, "werkzeug_vergleiche_ablauf", m22_werkzeug_vergleiche_ablauf),
+    # Wunsch Ahmad 13.10.2026: "Händler im Sinne des § 14 BGB" raus aus den gespeicherten Vertragstexten
+    (23, "vertragstext_ohne_14bgb", m23_vertragstext_ohne_14bgb),
 ]
 
 

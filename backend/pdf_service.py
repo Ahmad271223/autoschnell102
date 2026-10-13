@@ -125,19 +125,55 @@ DIGITAL_VERTRAGSTEXT_STANDARD = (
 # zusammenlegen): Startertext fuer NEUE Firmen — die vier Klauseln plus die
 # AGB-Punkte, die frueher getrennt unter default_terms standen. Alles steht
 # ab Anlage im EINEN Feld "Vertragsbedingungen" und ist dort editierbar.
+# Wunsch Ahmad 13.10.2026: der fruehere Punkt 6 ("Der Käufer ist Händler im Sinne des § 14 BGB. Der Erwerb
+# erfolgt zum Zwecke des gewerblichen Wiederverkaufs.") gehoerte nie in den Vertrag — raus, Punkte nachgezogen.
 AGB_PUNKTE_START = (
     "5. Das Fahrzeug wird unter Ausschluss jeglicher Sachmängelhaftung verkauft, "
     "soweit gesetzlich zulässig (§ 444 BGB bleibt unberührt).\n\n"
-    "6. Der Käufer ist Händler im Sinne des § 14 BGB. Der Erwerb erfolgt zum "
-    "Zwecke des gewerblichen Wiederverkaufs.\n\n"
-    "7. Eigentumsübergang erfolgt erst nach vollständigem Zahlungseingang.\n\n"
-    "8. Mündliche Nebenabreden bestehen nicht. Änderungen oder Ergänzungen "
+    "6. Eigentumsübergang erfolgt erst nach vollständigem Zahlungseingang.\n\n"
+    "7. Mündliche Nebenabreden bestehen nicht. Änderungen oder Ergänzungen "
     "bedürfen der Schriftform.\n\n"
-    "9. Erfüllungsort und Gerichtsstand ist der Sitz des Käufers, soweit "
+    "8. Erfüllungsort und Gerichtsstand ist der Sitz des Käufers, soweit "
     "gesetzlich zulässig."
 )
 
 VERTRAGSTEXT_START = DIGITAL_VERTRAGSTEXT_STANDARD + "\n\n" + AGB_PUNKTE_START
+
+#: Wunsch Ahmad 13.10.2026: "Der Käufer ist Händler im Sinne des § 14 BGB" gehoerte nie in den Kaufvertrag. Der Satz
+#: stand seit 22.05.2026 im Gewaehrleistungs-Absatz und seit 12.09.2026 als Punkt 6 des Startertexts (am 01.10.
+#: bewusst stehen gelassen). Jetzt: raus aus dem Startertext, aus den gespeicherten Texten der Firmen und Sucher
+#: (Migration 23) und beim Erzeugen JEDES PDFs aus dem festgehaltenen Vertragstext gefiltert — so steht er in
+#: keiner neuen Fassung mehr, auch nicht bei Altvertraegen. Gespeicherte PDF-Dateien bleiben, wie sie sind.
+PARAGRAF_14_SATZ = "Der Käufer ist Händler im Sinne des § 14 BGB."
+_P14_SATZ = re.compile(r"\s*Der Käufer ist Händler im Sinne des §\s*14\s*BGB\.?"
+                      r"(?:\s*Der Erwerb erfolgt zum Zwecke des gewerblichen Wiederverkaufs\.?)?")
+_P14_NUMMER = re.compile(r"^(\s*)(\d+)\.(?=\s)")
+
+
+def vertragstext_ohne_paragraf_14(text) -> str:
+    """Den § 14-BGB-Satz (und den Wiederverkaufs-Satz dahinter) aus einem Vertragstext entfernen. Ein Absatz, der
+    danach leer ist (oder nur noch aus seiner Nummer besteht), faellt weg; waren die nummerierten Absaetze vorher
+    lueckenlos (1., 2., 3., …), werden sie wieder lueckenlos durchnummeriert, sonst bleiben die Nummern. Texte ohne
+    den Satz kommen unveraendert zurueck."""
+    s = str(text or "")
+    if not re.search(r"§\s*14\s*BGB", s):
+        return s
+    teile = s.split("\n\n")
+    nummern = [int(m.group(2)) for t in teile if (m := _P14_NUMMER.match(t))]
+    lueckenlos = bool(nummern) and nummern == list(range(1, len(nummern) + 1))
+    neu = []
+    for t in teile:
+        t = _P14_SATZ.sub("", t)
+        if re.fullmatch(r"\s*(?:\d+\.)?\s*", t):
+            continue
+        neu.append(t)
+    if lueckenlos:
+        n = 0
+        for i, t in enumerate(neu):
+            if _P14_NUMMER.match(t):
+                n += 1
+                neu[i] = _P14_NUMMER.sub(lambda m, n=n: f"{m.group(1)}{n}.", t, count=1)
+    return "\n\n".join(neu)
 
 
 # Hinweis fuer Altvertraege (vor Einfuehrung der Vertragsbedingungen): steht
@@ -154,7 +190,7 @@ DIGITAL_NACHTRAEGLICH = (
 def digitaler_vertragstext(dealer: dict) -> str:
     """Wirksamer Text fuer die digitale Ausfertigung: eigener Text der Firma
     bzw. des Suchers (effective_dealer), sonst der Standard."""
-    eigen = ((dealer or {}).get("digital_vertragstext") or "").strip()
+    eigen = vertragstext_ohne_paragraf_14((dealer or {}).get("digital_vertragstext") or "").strip()
     return eigen or DIGITAL_VERTRAGSTEXT_STANDARD
 
 
@@ -438,24 +474,37 @@ def _inserat_zustand(inserat, *, offenlegung: bool) -> str:
 
 
 #: Wunsch Ahmad 09.10.2026: Motor, Getriebe, Kupplung im Abschnitt Zustand — "in Ordnung" oder "Schaden vorhanden",
-#: dazu einmal der Schadentext. Ohne Angabe (Altvertraege) keine Zeile.
-_TECHNIK = (("motor_zustand", "Motor"), ("getriebe_zustand", "Getriebe"), ("kupplung_zustand", "Kupplung"))
+#: dazu einmal der Schadentext. Ohne Angabe keine Zeile.
+#: Wunsch Ahmad 13.10.2026: nur noch EINE Zeile "Motor/Getriebe/Kupplung" (Feld `technik_zustand`, freiwillig).
+#: Altvertraege mit den drei Einzelfeldern: ein "Schaden vorhanden" zaehlt als Schaden, sonst "in Ordnung".
+_TECHNIK_ALT = ("motor_zustand", "getriebe_zustand", "kupplung_zustand")
+TECHNIK_LABEL = "Motor/Getriebe/Kupplung"
+TECHNIK_OK, TECHNIK_SCHADEN = "in Ordnung", "Schaden vorhanden"
+
+
+def technik_gesamt(contract) -> str:
+    """"" (keine Angabe) | "in Ordnung" | "Schaden vorhanden" — aus `technik_zustand`, sonst aus den drei
+    Einzelfeldern der Altvertraege."""
+    c = contract or {}
+    wert = str(c.get("technik_zustand") or "").strip()
+    if wert:
+        return TECHNIK_SCHADEN if wert.lower().startswith("schaden") else TECHNIK_OK
+    alt = [str(c.get(k) or "").strip() for k in _TECHNIK_ALT]
+    if any(w.lower().startswith("schaden") for w in alt):
+        return TECHNIK_SCHADEN
+    if any(alt):
+        return TECHNIK_OK
+    return ""
 
 
 def _technik_zeilen(contract) -> list:
-    c = contract or {}
-    rows = []
-    schaden = False
-    for key, label in _TECHNIK:
-        wert = str(c.get(key) or "").strip()
-        if not wert:
-            continue
-        if wert.lower().startswith("schaden"):
-            schaden = True
-        rows.append((label, wert))
-    text = str(c.get("technik_schaden_text") or "").strip()
-    if schaden and text:
-        rows.append(("Schaden an Motor/Getriebe/Kupplung", text))
+    wert = technik_gesamt(contract)
+    if not wert:
+        return []
+    rows = [(TECHNIK_LABEL, wert)]
+    text = str((contract or {}).get("technik_schaden_text") or "").strip()
+    if wert == TECHNIK_SCHADEN and text:
+        rows.append((f"Schaden an {TECHNIK_LABEL}", text))
     return rows
 
 
@@ -637,6 +686,8 @@ TITEL_AUSSTATTUNG = "Ausstattung"
 #: Wunsch Ahmad 09.10.2026: wieder "Fahrzeugbeschreibung" (seit 04.10. stand nur "Beschreibung")
 TITEL_BESCHREIBUNG = "Fahrzeugbeschreibung"
 #: Wunsch Ahmad 06.10.2026: "Kaufpreis & Konditionen" heisst im fertigen Vertrag nur noch "Kaufpreis".
+#: Wunsch Ahmad 13.10.2026: die Ueberschrift wird NICHT mehr gedruckt — der Kasten darunter sagt selbst
+#: "KAUFPREIS (VEREINBART) 12.000,00 EUR", vorher stand "Kaufpreis" doppelt untereinander.
 TITEL_KAUFPREIS = "Kaufpreis"
 
 
@@ -1192,13 +1243,9 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("LINEBEFORE", (0, 0), (0, -1), 2.5, _akzent()),
         ]))
-    story.append(KeepTogether([
-        # Wunsch Ahmad 21.09.2026: der Kaufpreis ohne Nummer, die
-        # Abschnitte danach zaehlen ab 1.
-        _section(TITEL_KAUFPREIS, st),
-        Spacer(1, 6),
-        price_box,
-    ]))
+    # Wunsch Ahmad 21.09.2026: der Kaufpreis ohne Nummer, die Abschnitte danach zaehlen ab 1.
+    # Wunsch Ahmad 13.10.2026: keine Ueberschrift "Kaufpreis" mehr ueber dem Kasten (stand doppelt).
+    story.append(KeepTogether([Spacer(1, 2), price_box]))
     story.append(Spacer(1, 12))
 
     # ---------- Vehicle data — 2 columns ----------
@@ -1395,10 +1442,10 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
     # bleibt im Vertragsdatensatz gespeichert.
 
     # ---------- Disclaimer ----------
+    # Wunsch Ahmad 13.10.2026: ohne den Satz "Der Käufer ist Händler im Sinne des § 14 BGB." (stand hier seit 22.05.2026)
     story.append(Paragraph(
         "<b>Gewährleistung:</b> Das Fahrzeug wird unter Ausschluss jeglicher Gewährleistung verkauft, "
-        "soweit gesetzlich zulässig. Eigenschaftszusicherungen siehe oben. "
-        "Der Käufer ist Händler im Sinne des § 14 BGB.",
+        "soweit gesetzlich zulässig. Eigenschaftszusicherungen siehe oben.",
         st["body"],
     ))
     story.append(Spacer(1, 12))
@@ -1428,7 +1475,7 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
     agb = _platzhalter_ersetzen(
         (contract.get("agb_text") or "").strip(), pl_vertrag, dealer, mit_uhrzeit=False)
     story.extend(_abschnitt_mit_text(
-        "Allgemeine Geschäftsbedingungen", _absaetze(agb, st["small"]), st, 4))
+        "Allgemeine Geschäftsbedingungen", _absaetze(vertragstext_ohne_paragraf_14(agb), st["small"]), st, 4))
 
     # ---------- Allgemeine Vertragsbedingungen (Beschluss Ahmad 10.09.2026) ----------
     # Der Standardtext (vier Klauseln) bzw. der in den Einstellungen
@@ -1439,8 +1486,9 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
     # fuer die Unterschriften-Zeile, kein Vertragstext).
     # Auch der Vertragstext der digitalen Ausfertigung (Ahmads AGB-Block)
     # darf Platzhalter tragen — sonst waere es die einzige Ausnahme.
+    # 13.10.2026: auch aus dem bei der Erstellung festgehaltenen Text (Altvertraege) kommt der § 14-Satz nicht mehr
     avb = _platzhalter_ersetzen(
-        (contract.get("digital_vertragstext") or "").strip(), pl_vertrag, dealer,
+        vertragstext_ohne_paragraf_14(contract.get("digital_vertragstext") or "").strip(), pl_vertrag, dealer,
         mit_uhrzeit=False)
     nachtraeglich = bool(avb) and avb == DIGITAL_NACHTRAEGLICH.strip()
     if avb and not nachtraeglich:

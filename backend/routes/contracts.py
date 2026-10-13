@@ -160,7 +160,10 @@ def kundennummer_einsetzen(contract_dict: dict) -> dict:
     return contract_dict
 
 
-#: Wunsch Ahmad 09.10.2026: beim Erstellen fragt der Dialog nach Motor, Getriebe und Kupplung
+#: Wunsch Ahmad 09.10.2026: beim Erstellen fragt der Dialog nach Motor, Getriebe und Kupplung.
+#: Wunsch Ahmad 13.10.2026: daraus wird EIN Punkt "Motor/Getriebe/Kupplung" (`technik_zustand`) und der ist
+#: freiwillig — ein Automatik hat keine Kupplung, ein E-Auto kein Schaltgetriebe. Die drei alten Felder bleiben
+#: lesbar (Altvertraege bis 12.10.2026, `pdf_service.technik_gesamt` fasst sie zusammen).
 TECHNIK_OK, TECHNIK_SCHADEN = "in Ordnung", "Schaden vorhanden"
 
 
@@ -276,14 +279,16 @@ class ContractIn(BaseModel):
 
     accident_free: Optional[str] = ""      # "Ja" | "Nein" | ""
     accident_location: Optional[str] = ""  # nur wenn accident_free == "Nein"
-    # Wunsch Ahmad 09.10.2026: "Motor, Getriebe, Kupplung — alles in Ordnung oder Schaden vorhanden?" Der Dialog
-    # fragt es beim Erstellen (Pflicht dort); leer = keine Angabe (Altvertraege, API) -> keine Zeile im Vertrag
-    motor_zustand: Optional[str] = ""      # "" | "in Ordnung" | "Schaden vorhanden"
+    # Wunsch Ahmad 13.10.2026: EIN freiwilliger Punkt "Motor/Getriebe/Kupplung — in Ordnung oder Schaden?";
+    # leer = keine Angabe -> keine Zeile im Vertrag. Die drei Einzelfelder stammen aus Vertraegen bis 12.10.2026
+    # (damals Pflicht beim Erstellen) und werden weiter angenommen und im PDF zusammengefasst.
+    technik_zustand: Optional[str] = ""    # "" | "in Ordnung" | "Schaden vorhanden"
+    motor_zustand: Optional[str] = ""      # Altvertraege: je Teil "" | "in Ordnung" | "Schaden vorhanden"
     getriebe_zustand: Optional[str] = ""
     kupplung_zustand: Optional[str] = ""
     technik_schaden_text: Optional[str] = Field(default="", max_length=300)   # nur bei "Schaden vorhanden"
 
-    @field_validator("motor_zustand", "getriebe_zustand", "kupplung_zustand")
+    @field_validator("technik_zustand", "motor_zustand", "getriebe_zustand", "kupplung_zustand")
     @classmethod
     def _technik_zustand_pruefen(cls, v):
         return technik_zustand_normieren(v)

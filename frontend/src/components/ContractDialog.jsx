@@ -24,14 +24,27 @@ const YN_OPTIONS = [
   { value: "Nein", label: "Nein" },
 ];
 
-// Wunsch Ahmad 09.10.2026: "Motor, Getriebe, Kupplung — alles in Ordnung oder Schaden vorhanden?" — Pflicht beim
-// Erstellen (der Browser hält den Vertrag ohne Antwort auf), beim nachträglichen Ändern bleibt der alte Stand.
+// Wunsch Ahmad 09.10.2026: "Motor, Getriebe, Kupplung — alles in Ordnung oder Schaden vorhanden?"
+// Wunsch Ahmad 13.10.2026: daraus EIN Punkt "Motor / Getriebe / Kupplung" — freiwillig (ein Automatik hat keine
+// Kupplung, ein E-Auto kein Schaltgetriebe); leer = keine Angabe, dann steht nichts davon im Vertrag.
 const TECHNIK_OPTIONS = [
-  { value: "", label: "— bitte wählen —" },
+  { value: "", label: "— keine Angabe —" },
   { value: "in Ordnung", label: "in Ordnung" },
   { value: "Schaden vorhanden", label: "Schaden vorhanden" },
 ];
-export const TECHNIK_FELDER = [["motor_zustand", "Motor"], ["getriebe_zustand", "Getriebe"], ["kupplung_zustand", "Kupplung"]];
+export const TECHNIK_FELD = "technik_zustand";
+export const TECHNIK_FELDER = [[TECHNIK_FELD, "Motor / Getriebe / Kupplung"]];
+
+/** Verträge bis 12.10.2026 tragen drei Einzelfelder (motor_/getriebe_/kupplung_zustand): ein „Schaden vorhanden“
+ *  zählt als Schaden, sonst „in Ordnung“; nichts angegeben = "". Neuere Verträge haben `technik_zustand`. */
+export function technikGesamt(cd) {
+  const c = cd || {};
+  const neu = String(c.technik_zustand || "").trim();
+  if (neu) return neu.toLowerCase().startsWith("schaden") ? "Schaden vorhanden" : "in Ordnung";
+  const alt = ["motor_zustand", "getriebe_zustand", "kupplung_zustand"].map((k) => String(c[k] || "").trim());
+  if (alt.some((w) => w.toLowerCase().startsWith("schaden"))) return "Schaden vorhanden";
+  return alt.some(Boolean) ? "in Ordnung" : "";
+}
 
 // Wunsch Ahmad (15.09.2026): Scheckheftgepflegt als Auswahl; bei "teilweise"
 // zusaetzlich Monat/Jahr, bis zu dem das Scheckheft gefuehrt wurde.
@@ -273,6 +286,8 @@ export function anfangsFormular(v, dealer, heute) {
     service_book_until: "",
     accident_free: "",
     accident_location: "",
+    technik_zustand: "",
+    // Altvertraege (bis 12.10.2026): bleiben beim Bearbeiten unveraendert erhalten, der Dialog zeigt technik_zustand
     motor_zustand: "",
     getriebe_zustand: "",
     kupplung_zustand: "",
@@ -340,6 +355,8 @@ export function formularAusVertrag(basis, vertrag) {
   }
   neu.contract_no = vertrag?.contract_no || cd.contract_no || "";
   neu.kundennummer = cd.vertrags_kundennummer || cd.kundennummer || basis.kundennummer || "";
+  // 13.10.2026: Altvertrag mit drei Einzelfeldern -> der eine Punkt zeigt den zusammengefassten Stand
+  if (!neu.technik_zustand) neu.technik_zustand = technikGesamt(cd);
   const preis = cd.purchase_price ?? vertrag?.purchase_price;
   neu.purchase_price = preis == null ? "" : String(preis);
   neu.pickup_date = vertrag?.pickup_date || cd.pickup_date || "";
@@ -1057,15 +1074,13 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                 testid="contract-drivable"
               />
             </div>
-            {/* Wunsch Ahmad 09.10.2026: beim Erstellen fragen — Motor, Getriebe, Kupplung */}
+            {/* Wunsch Ahmad 13.10.2026: EIN freiwilliger Punkt Motor / Getriebe / Kupplung (vorher drei Pflichtfragen) */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5" data-testid="contract-technik">
-              {TECHNIK_FELDER.map(([key, label]) => (
-                <SelectField key={key} label={`${label} – in Ordnung oder Schaden?${bearbeiten ? "" : " *"}`}
-                             value={form[key]} onChange={(v) => set(key, v)} options={TECHNIK_OPTIONS}
-                             required={!bearbeiten} testid={`contract-${key.replace("_", "-")}`} />
-              ))}
+              <SelectField label="Motor / Getriebe / Kupplung – in Ordnung oder Schaden? (freiwillig)"
+                           value={form.technik_zustand} onChange={(v) => set(TECHNIK_FELD, v)} options={TECHNIK_OPTIONS}
+                           testid="contract-technik-zustand" />
             </div>
-            {TECHNIK_FELDER.some(([key]) => form[key] === "Schaden vorhanden") && (
+            {form.technik_zustand === "Schaden vorhanden" && (
               <Field label="Schaden an Motor/Getriebe/Kupplung: was genau" value={form.technik_schaden_text}
                      onChange={(v) => set("technik_schaden_text", v)} testid="contract-technik-schaden" />
             )}

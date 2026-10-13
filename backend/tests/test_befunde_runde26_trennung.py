@@ -275,12 +275,12 @@ def test_13_startertext_enthaelt_klauseln_und_agb():
                              VERTRAGSTEXT_START)
     assert DIGITAL_VERTRAGSTEXT_STANDARD in VERTRAGSTEXT_START
     assert AGB_PUNKTE_START in VERTRAGSTEXT_START
-    for stueck in ("Sachmängelhaftung", "§ 14 BGB", "Eigentumsübergang",
-                   "Schriftform", "Gerichtsstand"):
+    for stueck in ("Sachmängelhaftung", "Eigentumsübergang", "Schriftform", "Gerichtsstand"):
         assert stueck in VERTRAGSTEXT_START, stueck
+    assert "§ 14 BGB" not in VERTRAGSTEXT_START     # 13.10.2026: gehoert nicht in den Vertrag
     # Absaetze sind durch Leerzeilen getrennt (so rendert das PDF sie)
     absaetze = [a for a in VERTRAGSTEXT_START.split(chr(10) + chr(10)) if a.strip()]
-    assert len(absaetze) >= 9, absaetze
+    assert len(absaetze) >= 8, absaetze
 
 
 def test_14_neue_firmen_bekommen_nur_noch_ein_textfeld():

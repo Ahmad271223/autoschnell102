@@ -361,11 +361,11 @@ def test_22_kaufpreis_steht_vor_den_fahrzeugdaten():
     vertrag = dict(VERTRAG,
                    additional_terms=V.sondervereinbarungen(firma))
     text = _pdf_text(vertrag, firma)
-    assert "Kaufpreis" in text and "Fahrzeugdaten" in text, text[:400]
-    assert text.index("Kaufpreis") < text.index("Fahrzeugdaten"), (
+    assert "KAUFPREIS (VEREINBART)" in text and "Fahrzeugdaten" in text, text[:400]   # 13.10.2026: keine Ueberschrift mehr
+    assert text.index("KAUFPREIS (VEREINBART)") < text.index("Fahrzeugdaten"), (
         "der Kaufpreis steht immer noch hinter den Fahrzeugdaten")
     # Und unter den beiden Parteien, nicht darueber.
-    assert text.index("Käufer") < text.index("Kaufpreis"), (
+    assert text.index("Käufer") < text.index("KAUFPREIS (VEREINBART)"), (
         "der Kaufpreis steht ueber den Angaben zu Halter und Käufer")
 
 

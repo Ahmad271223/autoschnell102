@@ -3,7 +3,8 @@
 
   * "Halter" und "Händler" verschwinden ueberall aus dem Kaufvertrag — Beschriftungen der Parteien,
     Unterschriftskaesten, Untertitel ("Ankauf durch Händler") und die Abschnitte im Vertragsdialog.
-    Die Rechtsklausel "Der Käufer ist Händler im Sinne des § 14 BGB" bleibt (Inhalt, keine Beschriftung).
+    Die Rechtsklausel "Der Käufer ist Händler im Sinne des § 14 BGB" blieb damals — seit 13.10.2026 ist sie
+    ueberall raus (Wunsch Ahmad; siehe test_paragraf14_weg_20261013.py).
   * Klarstellung Ahmad (abends): Punkt 4 des Standardtexts ("… auch ohne Unterschrift gültig.") BLEIBT,
     die gespeicherten Vertragsbedingungen der Firmen werden nicht angefasst. Weg ist nur die zusaetzliche
     Zeile "Dieser Vertrag ist ohne Unterschrift gültig." ganz unten in der Online-Fassung.
@@ -28,9 +29,11 @@ def test_01_standardtext_behaelt_punkt_4_und_keine_migration_dazu():
     assert PUNKT_4 in P.DIGITAL_VERTRAGSTEXT_STANDARD and PUNKT_4 in P.VERTRAGSTEXT_START
     absaetze = [a for a in P.VERTRAGSTEXT_START.split("\n\n") if a.strip()]
     nummern = [int(a.split(".")[0]) for a in absaetze if a[:1].isdigit()]
-    assert nummern == list(range(1, 10)), nummern
-    # keine Migration, die gespeicherte Vertragstexte umschreibt
-    assert all("vertragstext" not in name for _, name, _ in MI.MIGRATIONEN if name != "vorlagen_texte")
+    assert nummern == list(range(1, 9)), nummern          # 13.10.2026: acht Punkte (§ 14 BGB raus)
+    # keine Migration, die gespeicherte Vertragstexte umschreibt — ausser der vom 13.10.2026, die NUR den
+    # § 14-BGB-Satz entfernt (Punkt 4 bleibt)
+    assert all("vertragstext" not in name for _, name, _ in MI.MIGRATIONEN
+               if name not in ("vorlagen_texte", "vertragstext_ohne_14bgb"))
     assert not hasattr(P, "vertragstext_ohne_unterschriftssatz")
 
 
@@ -47,7 +50,7 @@ def test_02_pdf_und_dialog_ohne_halter_haendler_nur_die_zeile_unten_weg():
         for verboten in ("/ Halter", "(Halter)", "/ Händler", "(Händler)", "eigenhändige Unterschrift", ZEILE_UNTEN):
             assert verboten not in t, (digital, verboten)
         assert "Verkäufer" in t and "Käufer" in t
-        assert PUNKT_4 in t and "§ 14 BGB" in t                 # Vertragsbedingungen unveraendert
+        assert PUNKT_4 in t and "§ 14 BGB" not in t             # Punkt 4 bleibt; § 14 BGB seit 13.10.2026 raus
     quelle = (FRONTEND / "components" / "ContractDialog.jsx").read_text(encoding="utf-8")
     assert 'title="Verkäufer"' in quelle and 'title="Käufer (du)"' in quelle
     assert "Verkäufer / Halter" not in quelle and "Händler — du" not in quelle

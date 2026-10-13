@@ -4940,3 +4940,39 @@ Kundenportal unterschriebenen Verträge) ist jetzt `STEMPEL_HOEHE` = 3 × 1,3 cm
 Unterschriftskästen bleiben gleich hoch, die Kundenunterschrift steht unten auf der Linie. Gilt für neu erzeugte
 PDFs (jede neue Fassung); bereits gespeicherte PDF-Dateien ändern sich nicht. Der Vertragsdialog behält seine
 Abschnittsnamen. Tests: `backend/tests/test_vertrag_titel_stempel_20261004.py`.
+
+## Vertrag: ein freiwilliger Punkt Motor/Getriebe/Kupplung, „Kaufpreis“ nur einmal (Wunsch Ahmad 13.10.2026)
+
+- **Motor/Getriebe/Kupplung:** Aus den drei Pflichtfragen vom 09.10. (Motor, Getriebe, Kupplung je „in Ordnung“/
+  „Schaden vorhanden“) wird EIN Punkt „Motor / Getriebe / Kupplung – in Ordnung oder Schaden?“ und der ist
+  **freiwillig** (ein Automatik hat keine Kupplung, ein E-Auto kein Schaltgetriebe). Neues Feld `technik_zustand`
+  („“ | „in Ordnung“ | „Schaden vorhanden“, `technik_zustand_normieren`), Schadentext wie bisher nur bei „Schaden
+  vorhanden“. Leer = keine Zeile im Vertrag. Die drei alten Felder (`motor_zustand`, `getriebe_zustand`,
+  `kupplung_zustand`) werden weiter angenommen; `pdf_service.technik_gesamt` fasst sie für Altverträge zusammen
+  (ein „Schaden vorhanden“ = Schaden, sonst „in Ordnung“) — im PDF steht immer nur die eine Zeile
+  „Motor/Getriebe/Kupplung“. Der Dialog zeigt bei Altverträgen den zusammengefassten Stand (`technikGesamt`), die
+  alten Felder gehen beim Bearbeiten unverändert mit. Keine Migration, keine neuen Umgebungswerte.
+- **Kaufpreis:** Über dem Preiskasten stand die Überschrift „Kaufpreis“ und darunter im Kasten „KAUFPREIS
+  (VEREINBART) 12.000,00 EUR“ — der Kasten bleibt, die Überschrift ist weg (`TITEL_KAUFPREIS` wird nicht mehr
+  gedruckt). Gilt für neu erzeugte PDFs (jede neue Fassung); gespeicherte PDF-Dateien ändern sich nicht.
+- Tests: `backend/tests/test_technik_zustand_20261009.py` (erweitert), `frontend/src/components/
+  ContractDialog.technik.test.jsx`; angepasst: `test_vertrag_design_20261003.py`, `test_vorlagen_kopieren_20260921.py`,
+  `test_vertragstexte_20260920.py` (Layout-Erkennung jetzt über „FAHRZEUGDATEN“ statt der doppelten Überschrift).
+- Analyse „Inserat-ID sicher lesen“ (AutoPointer-Programm): `docs/inserat-id-sicher-lesen.md`.
+
+## Vertrag: „Der Käufer ist Händler im Sinne des § 14 BGB“ ist raus (Wunsch Ahmad 13.10.2026)
+
+- Herkunft: Der Satz stand seit 22.05.2026 im Gewährleistungs-Absatz (`pdf_service`, „Disclaimer“) und seit 12.09.2026
+  als Punkt 6 des Startertexts `AGB_PUNKTE_START` („… Der Erwerb erfolgt zum Zwecke des gewerblichen Wiederverkaufs.“);
+  am 01.10.2026 wurde er beim Entfernen der „Händler“-Beschriftungen bewusst stehen gelassen. Entscheidung Ahmad
+  13.10.: er gehört nicht in den Kaufvertrag.
+- Jetzt: (1) Gewährleistungs-Absatz ohne den Satz. (2) Startertext ohne Punkt 6, Punkte 7–9 → 6–8 (acht Punkte).
+  (3) `pdf_service.vertragstext_ohne_paragraf_14` entfernt den Satz (und den Wiederverkaufs-Satz) aus jedem Vertragstext
+  beim Erzeugen eines PDFs — aus dem festgehaltenen Text der Altverträge (`contract_data.digital_vertragstext`), aus
+  `agb_text`/`default_terms` und beim Lesen des Firmentexts (`digitaler_vertragstext`); lückenlose Nummern werden
+  nachgezogen, eigene Nummern bleiben. (4) **Migration 23 `vertragstext_ohne_14bgb`** bereinigt einmalig die
+  gespeicherten Texte der Firmen (`dealers.digital_vertragstext`, `default_terms`) und der Sucher
+  (`users.settings_override.*`), damit auch die Einstellungen und Mail-Vorschauen ohne den Satz sind.
+- Gespeicherte Verträge und PDF-Dateien bleiben unverändert (Archiv); jede neue Fassung ist ohne den Satz.
+- Tests: `backend/tests/test_paragraf14_weg_20261013.py`; angepasst `test_vertragstext_satz_20261001.py`,
+  `test_befunde_runde26_trennung.py`. Keine neuen Umgebungswerte.
