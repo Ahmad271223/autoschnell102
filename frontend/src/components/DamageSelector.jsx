@@ -92,6 +92,9 @@ const VIEW_IMAGES = {
   right: { src: "/damage/right-v2.jpg", w: IMG_W, h: IMG_H },
   top:   { src: "/damage/top-v2.jpg",   w: IMG_W, h: IMG_H },
 };
+/** Wunsch Ahmad 14.10.2026: ab Bildschirmbreite lg ist jede Skizze hoechstens so hoch (in vh) — bei drei Spalten
+ *  (3 + 2 Ansichten) passen damit alle fuenf Ansichten auf einmal ins Bild. */
+export const SKIZZE_HOEHE_VH = 34;
 
 /** Skizze mit Lade- und Fehlerbehandlung: bis zu drei Versuche, danach ein
  *  Knopf zum Neuladen — eine leere Fläche ohne Erklärung gibt es nicht mehr. */
@@ -584,9 +587,12 @@ export default function DamageSelector({ damages = [], onChange, lackMessungen, 
         )}
       </div>
 
-      {/* 5 Ansichten gleichzeitig — responsive Grid */}
+      {/* 5 Ansichten gleichzeitig — responsive Grid.
+          Wunsch Ahmad 14.10.2026: am grossen Bildschirm sollen ALLE Ansichten auf einmal ins Bild — drei Spalten
+          (3 + 2) und je Karte hoechstens SKIZZE_HOEHE_VH der Fensterhoehe (ViewCard begrenzt die Breite passend zum
+          Seitenverhaeltnis, Punkte bleiben an Ort und Stelle). Handy/Tablet wie bisher: eine bzw. zwei Spalten. */}
       <div
-        className="grid grid-cols-1 md:grid-cols-2 gap-3"
+        className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3"
         data-testid="damage-grid"
       >
         <ViewCard view="front" markers={grouped.front || []}
@@ -785,8 +791,12 @@ function ViewCard({ view, markers, activeColor, onDotClick, onSvgClick, onMarker
         )}
       </div>
       <div
-        className="relative w-full overflow-hidden rounded-md bg-white"
-        style={{ aspectRatio: `${dim.w} / ${dim.h}` }}
+        className="relative w-full lg:max-w-[var(--skizze-max)] mx-auto overflow-hidden rounded-md bg-white"
+        // Wunsch Ahmad 14.10.2026: ab Bildschirmbreite lg hoechstens SKIZZE_HOEHE_VH hoch — die Breite folgt dem
+        // Seitenverhaeltnis, damit alle fuenf Ansichten auf einmal ins Bild passen (Punkte liegen im viewBox, also
+        // unveraendert an Ort und Stelle)
+        style={{ aspectRatio: `${dim.w} / ${dim.h}`, "--skizze-max": `calc(${SKIZZE_HOEHE_VH}vh * ${dim.w} / ${dim.h})` }}
+        data-testid={`damage-bild-${view}`}
       >
         <SkizzenBild src={dim.src} alt={VIEW_LABELS[view]} />
         <svg
