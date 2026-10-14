@@ -36,7 +36,8 @@ export default function AdminComparisons() {
     if (!s) return items;
     return items.filter((it) => {
       const v = it.vehicle || {};
-      const txt = [it.ad_id, v.make, v.model, v.vin, ...(it.users || []).map((u) => u.email + " " + (u.company_name || ""))].join(" ").toLowerCase();
+      const txt = [it.ad_id, v.make, v.model, v.vin, ...(it.users || []).map((u) => [u.kontonummer, u.username, u.email, u.company_name].filter(Boolean).join(" "))]
+        .filter(Boolean).join(" ").toLowerCase();   // Kontonummer (13.09.2026): kein "undefined" bei Konten ohne E-Mail
       return txt.includes(s);
     });
   }, [items, q]);
@@ -49,7 +50,7 @@ export default function AdminComparisons() {
       />
 
       <Card padded={false}>
-        <div className="px-4 py-3 flex items-center gap-2" style={{ borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+        <div className="px-4 py-3 flex items-center gap-2" style={{ borderBottom: "1px solid var(--wa-08)" }}>
           <Search size={16} className="text-zinc-500" />
           <input
             value={q}
@@ -64,7 +65,7 @@ export default function AdminComparisons() {
         ) : filtered.length === 0 ? (
           <EmptyState title="Keine Vergleiche" hint="Es wurden noch keine Fahrzeuge verglichen." />
         ) : (
-          <ul className="divide-y" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
+          <ul className="divide-y" style={{ borderColor: "var(--wa-06)" }}>
             {filtered.map((it) => {
               const v = it.vehicle || {};
               const isOpen = open[it.ad_id];
@@ -74,7 +75,7 @@ export default function AdminComparisons() {
                     className="w-full flex items-center gap-3 text-left"
                     onClick={() => setOpen((o) => ({ ...o, [it.ad_id]: !o[it.ad_id] }))}
                   >
-                    <div className="w-12 h-12 rounded-xl flex items-center justify-center text-zinc-200 font-semibold text-[12px] shrink-0" style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.08)" }}>
+                    <div className="w-12 h-12 rounded-xl flex items-center justify-center text-zinc-200 font-semibold text-[12px] shrink-0" style={{ background: "var(--wa-06)", border: "1px solid var(--wa-08)" }}>
                       {(v.make?.[0] || "?").toUpperCase()}
                     </div>
                     <div className="flex-1 min-w-0">
@@ -101,7 +102,7 @@ export default function AdminComparisons() {
                   </button>
 
                   {isOpen && (
-                    <div className="mt-3 pt-3" style={{ paddingLeft: 60, borderTop: "1px solid rgba(255,255,255,0.06)" }}>
+                    <div className="mt-3 pt-3" style={{ paddingLeft: 60, borderTop: "1px solid var(--wa-06)" }}>
                       {v.url && (
                         <a href={v.url} target="_blank" rel="noreferrer"
                            className="inline-flex items-center gap-1 text-[12.5px] text-blue-400 hover:underline mb-2">
@@ -114,8 +115,8 @@ export default function AdminComparisons() {
                           <span className="text-[12px] text-zinc-500">— keine Nutzer-Zuordnung —</span>
                         ) : (
                           it.users.map((u) => (
-                            <span key={u.id} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[12px]" style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.08)" }}>
-                              <span className="font-medium text-white">{u.company_name || u.username || u.email}</span>
+                            <span key={u.id} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[12px]" style={{ background: "var(--wa-06)", border: "1px solid var(--wa-08)" }}>
+                              <span className="font-medium text-white">{u.company_name || u.username || u.kontonummer || u.email || "—"}</span>
                               {u.email && u.email !== (u.company_name || u.username) && <span className="text-zinc-400">{u.email}</span>}
                               {u.active === false && <Badge tone="red">gesperrt</Badge>}
                             </span>

@@ -17,13 +17,18 @@ export function PageHeader({ title, subtitle, action }) {
   );
 }
 
-export function Card({ children, className = "", padded = true }) {
+// Pruefung 21.09.2026 (Betrieb): weitere Props (data-testid, id, aria-*) an das
+// div weiterreichen — vorher fielen sie still weg, data-testid="alarm-empfaenger",
+// "betrieb-ladefehler", "mfa-hinweis" u. a. standen nie im DOM. className und
+// style der Karte bleiben massgeblich (stehen nach ...rest).
+export function Card({ children, className = "", padded = true, ...rest }) {
   return (
     <div
+      {...rest}
       className={`rounded-2xl ${padded ? "p-5" : ""} ${className}`}
       style={{
-        background: "rgba(255,255,255,0.03)",
-        border: "1px solid rgba(255,255,255,0.08)",
+        background: "var(--wa-03)",
+        border: "1px solid var(--wa-08)",
         boxShadow: "0 1px 2px rgba(0,0,0,0.3)",
       }}
     >

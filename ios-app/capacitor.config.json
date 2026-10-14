@@ -1,0 +1,21 @@
+{
+  "appId": "de.autoschnellkauf.app",
+  "appName": "AutoSchnell",
+  "webDir": "www",
+  "backgroundColor": "#0A0A0A",
+  "server": {
+    "url": "https://app.auto-schnellkauf.de/start",
+    "allowNavigation": [
+      "app.auto-schnellkauf.de",
+      "*.auto-schnellkauf.de"
+    ],
+    "errorPath": "index.html"
+  },
+  "ios": {
+    "scheme": "AutoSchnell",
+    "contentInset": "automatic",
+    "backgroundColor": "#0A0A0A",
+    "preferredContentMode": "mobile",
+    "limitsNavigationsToAppBoundDomains": false
+  }
+}

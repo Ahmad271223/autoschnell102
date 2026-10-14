@@ -1,0 +1,362 @@
+# AutoSchnell AutoPointer-Vergleich
+
+Kleines Windows-Hintergrundprogramm: Der Sucher klickt in **AutoPointer** ein Inserat an – ca. eine
+halbe Sekunde später öffnen sich automatisch die passenden Vergleichssuchen auf **mobile.de** und/oder
+**AutoScout24** als neue Browser-Tabs. Keine Eingabe, kein zusätzlicher Knopf.
+
+> Stand 03.10.2026: erst einmal **nur für die Kunden 10001 und 10002** (Chef + Sucher). Download in der App unter
+> „Programme“ – nur für freigegebene Firmen sichtbar (`AUTOPOINTER_VERGLEICH_KUNDEN`, siehe DEPLOYMENT.md,
+> Abschnitt „Programme zum Herunterladen“). Allen anderen zeigt die App nichts davon.
+
+## Lizenz: nur verbunden, nur mit Abo
+
+1. In AutoSchnell anmelden → links „Programme“ (bzw. „AutoSchnell Vergleich“) → **Code zum Verbinden anzeigen**
+   (6 Ziffern, 10 Minuten, nur mit aktivem Abo; ist schon ein PC verbunden: „Anderen PC verbinden“).
+2. Programm starten → Fenster „Mit AutoSchnell verbinden“ → Code eintippen.
+3. **Ein Konto = ein PC.** Wird dasselbe Konto auf einem zweiten PC verbunden, fragt der erste wieder nach einem
+   Code. Die Browser-Anmeldung bleibt davon unberührt.
+4. Jeder Vergleich geht über den AutoSchnell-Server: Abo prüfen, Links mit den **Vergleichsregeln der Firma**
+   bauen (AutoSchnell → Einstellungen → Vergleich, wie der Vergleich in der App), protokollieren. Ohne Abo
+   (402) oder ohne Verbindung öffnet das Programm nichts und sagt warum (rotes Symbol).
+5. Wer wann welches Auto verglichen hat: Super-Admin unter Admin → „Programm-Vergleiche“, der Chef in der App
+   beim Programm (nur seine Firma). Beide können PCs trennen.
+
+## Kaufvertrag ohne Link-Einfügen
+
+Beim Anklicken liest das Programm auch die **Inserat-ID** (mobile.de, Kleinanzeigen) bzw. die **Hash-ID**
+(AutoScout24, nur vollständig und zweimal gleich gelesen). Der Server baut daraus den Inserat-Link und liest das
+Inserat **im Hintergrund aus** (Daten + Fotos, wie das Einfügen in der App, zählt fürs Tageslimit). Der Abruf
+wartet dafür 15 Sekunden: klickt der Sucher vorher das nächste Auto an, fällt der alte weg und der neue nimmt
+seinen Platz ein (kein Stau, kein unnötiger Abruf); öffnet er das Auto in der App, startet er sofort. Für den Vertrag:
+**„Vertrag“** in der Leiste oder in der App „Deine letzten Autos“ → der Vergleich steht sofort da. Seit 1.3.3 öffnet das in der **installierten AutoSchnell-App**
+(Edge/Chrome, erkannt an ihrer Verknüpfung): ist sie offen, übernimmt dieses Fenster das Auto (manifest
+`launch_handler` „focus-existing“ + `lib/programmStart.js`; mit ungespeicherter Arbeit nur ein Hinweis mit Knopf),
+sonst startet sie; nur ohne installierte App öffnet der Browser. Zeigt AutoPointer die Hash-ID nur abgeschnitten (schmale Detailansicht), gibt es keinen Link –
+dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und in AutoSchnell einfügen.
+
+## Bedienung
+
+* **Fenster mit Knöpfen** (seit 1.2.0, Wunsch Ahmad 03.10.): große Anzeige AKTIV / GESTOPPT / NICHT VERBUNDEN,
+  Knöpfe *Aktivieren*, *Stoppen*, *Aktuelles Auto jetzt vergleichen*, *Letzten Vergleich nochmal öffnen*,
+  *Kaufvertrag: Auto in AutoSchnell öffnen*, *Mit AutoSchnell verbinden / Verbindung trennen*, *Einstellungen*,
+  *Beenden*. Das X verkleinert nur in die Taskleiste; aus ist das Programm nur mit *Beenden*.
+  Ein zweiter Start (Doppelklick auf die EXE) holt das Fenster nach vorne. Beim Start mit Windows startet es
+  verkleinert.
+* **Kleine Leiste** (seit 1.3.0, Wunsch Ahmad 03.10.): Status, *Stopp/Start*, *Vergleichen*, *Vertrag*, ☰ (großes
+  Fenster) — **immer im Vordergrund**, auch wenn der Browser Tabs öffnet, fest **unten links** (Standard, verdeckt die
+  Detailansicht von AutoPointer nicht) oder **unten rechts**, auf dem Bildschirm von AutoPointer. Sie nimmt
+  AutoPointer nie den Fokus weg. Rechtsklick auf die Leiste: Ecke wählen, ausblenden, beenden. Mit Leiste startet
+  das Programm nur mit der Leiste; das X am großen Fenster blendet es aus. Liegt die Leiste über der Tabelle, wird
+  sie für das Bildschirm-Abbild kurz unsichtbar.
+* **Griff-Punkt** (seit 1.5.2, Wunsch Ahmad 04.10.): der kleine runde Punkt links an der Leiste — gedrückt halten und
+  ziehen, dann steht die Leiste, wo man will (Stelle wird gemerkt). Rechtsklick → „unten links/rechts“ setzt sie
+  zurück in die Ecke; liegt die Stelle auf keinem Bildschirm mehr (Bildschirm abgesteckt), springt sie selbst zurück.
+* Symbol unten rechts im Infobereich: grün = aktiv, grau = Automatik aus, orange = AutoPointer nicht gefunden,
+  rot = nicht verbunden bzw. gesperrt (Abo/Freigabe). **Doppelklick** öffnet das Fenster, **Strg+Alt+P**:
+  Automatik an/aus.
+* **Rechtsklick aufs Symbol** (seit 1.5.8): nur noch *Leiste und Status zeigen* und *Beenden*.
+* **1.5.8 (Wunsch Ahmad 08.10., externe Prüfung „zu viele Knöpfe für dieselbe Sache“):** bedient wird nur noch über
+  die **Leiste**: Status-Feld (Klick = Start/Stopp, nicht verbunden = verbinden) | *Vergleichen* | *Vertrag* |
+  *Mehr ▾* (letzter Vergleich, Status und Hilfe, Einstellungen, Systemcheck, Verbinden/Trennen, Ecke, Beenden). Die
+  Leiste ist immer da (kein Ausblenden mehr); das große Fenster zeigt nur noch Status, letztes Auto, Verbindung und
+  Hilfe. Die **Portalwahl** (mobile.de/AutoScout24) gibt es nur noch in AutoSchnell auf der Vergleichsseite — der
+  Server schickt nur deren Links; im Einstellungsfenster steht der Hinweis darauf.
+* **1.5.8 – Vorgangsnummer:** hat das Konto die Browser-Erweiterung, öffnet das Programm nur die Vorgangsseite
+  `/app/vorgang/<id>` — die Erweiterung öffnet Vergleiche und Inserat selbst (Ampel, Kaufvertrag, nichts doppelt).
+  (Seit 1.5.9 eindeutig über den Server, siehe unten; die „30 Minuten gleich direkt“ gibt es nicht mehr.)
+* **1.5.9 (Prüfung 08.10.) — Übergabe eindeutig, Update ersetzt, kurze Hinweise:**
+  * **Vorgang:** die Vorgangsseite geht bei „Standardbrowser“ im Browser auf, in dem die Erweiterung verbunden ist
+    (`helfer_browser` aus `/vergleich`). Nach 5 s beansprucht das Programm den Vorgang beim Server
+    (`POST …/vorgang/<id>/selbst`): `selbst: true` → es öffnet selbst (im selben Browser), aber nur, wenn inzwischen
+    kein anderes Auto dran ist; `selbst: false` oder 404 → nichts (die Erweiterung hat ihn); nicht erreichbar (auch nach
+    einem zweiten Versuch nach 1,5 s) → nichts öffnen (sonst womöglich doppelt), kurzer Hinweis „„Vergleichen“ drücken“.
+    `ueber_helfer` schickt der Server nur noch an Programme ab 1.5.9. (In 1.5.8 reichte das Programm die Nachfrage
+    intern nicht weiter — es öffnete jedes Mal zusätzlich selbst.)
+  * **Update:** startet man eine neuere Version, während eine ältere läuft (Autostart), fragt sie „… läuft noch. Jetzt
+    durch Version … ersetzen?“ — Ja beendet die alte (ab 1.5.9 per Signal `Local\AutoSchnell.AutoPointerVergleich.Beenden`,
+    ältere über die Prozessliste), die neue startet und ersetzt die feste Kopie. Die laufende Version steht im geteilten
+    Speicher `Local\AutoSchnell.AutoPointerVergleich.Version`. Bietet AutoSchnell eine neuere Version an, steht dauerhaft
+    „Update auf … verfügbar …“ oben in „Mehr ▾“ (öffnet die Seite „Programme“).
+  * **Hinweise:** Sprechblasen höchstens 150 Zeichen (Windows schnitt bei ~255 ab — die Anleitungen fehlten); die ganzen
+    Erklärungen stehen unter „Letzte Hinweise“ im Fenster „Status und Hilfe“. Der Inserat-ID-/Hash-ID-Hinweis kommt als
+    Sprechblase höchstens einmal je Programmlauf. Ändert sich AutoPointer ohne Mausklick (Pfeiltasten, Live-Liste), sagt
+    das Programm einmal je Lauf, dass es dann „Vergleichen“ braucht. Keine englischen .NET-Fehlertexte mehr in
+    Sprechblasen/Dialogen (nur im Protokoll); überall „AutoSchnell Vergleich“, „Vergleichen“, „Vertrag“.
+  * **„Vertrag“** beim Auto vom Programmstart (nur gemerkt): „Dieses Auto ist noch nicht verglichen – erst „Vergleichen“
+    drücken.“ statt der falschen Inserat-ID-Diagnose.
+  * **Fehler beim Vergleich:** vorübergehende (kein Netz, Zeitüberschreitung, 5xx, Cloudflare) werden nach 5 s genau
+    einmal wiederholt, wenn AutoPointer noch dasselbe Auto zeigt — die Meldung sagt das nur, wenn es stimmt. Ein 403
+    **ohne JSON** (Cloudflare/Firewall-Seite) ist vorübergehend, nicht „gesperrt“.
+  * **„Vergleichen“** holt AutoPointer erst nach vorne (300 ms), statt den Browser davor zu lesen. Die
+    Windows-Texterkennung hat 10 s Zeit — hängt sie, zählt es als Lesefehler (vorher war das Programm dann taub).
+  * **Autostart** wird nach dem ersten Verbinden eingeschaltet (außer der Sucher hat ihn selbst einmal umgestellt);
+    Startmenü-Eintrag „AutoSchnell Vergleich“ auf die feste Kopie; „Programm beenden“ fragt erst nach.
+* **1.5.10 (Befund Ahmad 08.10. abends: „mit Erweiterung öffnet es das Inserat statt der Vergleiche“):**
+  * Der Server schaltet die Vorgangsseite ab (`AUTOPOINTER_VORGANG`, Standard aus): mit installierter AutoSchnell-App
+    fing der Browser die Adresse `/app/vorgang/<id>` ab — die Seite ging im App-Fenster auf und blieb vorne, die
+    Vergleiche lagen dahinter. Das Programm öffnet Vergleiche + Inserat wieder selbst.
+  * **Vorne liegt immer ein Vergleich:** das Inserat wird ZUERST geöffnet, die Vergleiche danach. Chrome/Edge machen
+    beim Aufruf mit mehreren Adressen die ERSTE zum aktiven Tab (gemessen am 08.10.), der Standardbrowser die letzte —
+    `BrowserOeffner` öffnet die letzte deshalb in einem eigenen Aufruf: immer liegt die letzte Adresse vorne.
+  * Bei „Standardbrowser“ gehen die Tabs in den Browser, in dem die Erweiterung verbunden ist (`helfer_browser`) —
+    sonst las sie das Inserat nicht und die Vergleiche bekamen keine Ampel. „Letzten Vergleich“ nimmt denselben Browser.
+* **1.5.11 (Wunsch Ahmad 08.10. abends: „Vertrag soll das Inserat öffnen und lesen – kein Apify“):** hat das Konto die
+  Erweiterung (`hat_helfer` aus `/vergleich`), fragt „Vertrag“ erst `GET …/inserat-gelesen?url=` (nur Lesen). Liegt das
+  Inserat noch nicht gelesen vor, öffnet das Programm es im Browser der Erweiterung, fragt alle 1,5 s nach (höchstens
+  25 s) und öffnet den Kaufvertrag erst, wenn die Lesung da ist — die App nimmt dann die Lesung, ohne abzurufen. Kommt
+  sie nicht: nur der Hinweis „im Inserat unten rechts auf „Kaufvertrag“ drücken“, nie ein Abruf (`VertragsWeg`).
+  Ohne Erweiterung bleibt „Vertrag“ wie bisher (Kaufvertrag in der App mit dem Link).
+* **1.5.12 (Befund Ahmad 09.10.: „Hyundai IBO“ statt i30, „VWT- Ro c“ statt VW T-Roc, „EIektro“, Inserat-ID mit
+  Buchstaben) — zweiter Blick auf die wichtigen Werte:**
+  * Nach dem normalen Lesen werden die **Werte** der Zeilen „Marke, Modell“, „Kraftstoff“ und „Inserat-ID“ noch einmal
+    einzeln gelesen — aus **demselben** Bildschirm-Abbild (kein neues Abbild, kein PrintWindow, AutoPointer bleibt
+    unberührt). Wo die Zeilen stehen, sagt der erste Durchgang (`DetailLeser.WertBereiche`, dieselbe Zuordnung
+    Bezeichnung → Wert wie beim Lesen). Der Ausschnitt beginnt an der Wertspalte und reicht 8 Zeilenhöhen über das
+    Gelesene hinaus (ohne gelesenen Wert bis zum Rand der Tabelle) — der erste Durchgang verschluckt gern ein ganzes
+    Wort („Golf“ statt „VW Golf“, „BMW“ statt „BMW X1“), zu knappe Ausschnitte lasen in der Messung „/ Polo“ und
+    „BMW X“. Bis ganz zum Rand brachte gleich viel, kostete aber ein Viertel mehr Zeit. Senkrecht nie über die halbe
+    Lücke zur Nachbarzeile.
+  * Anders aufbereitet als der erste Durchgang (ganze Tabelle, Zoom 3, Farbe): **Zoom 5 in Farbe** und **Zoom 4 in
+    Graustufen mit gestrecktem Kontrast** (Hintergrund weiß, Schrift schwarz — auch bei markierter Zeile oder heller
+    Schrift auf dunklem Grund). Alle Ausschnitte stehen untereinander in **einem** Bild je Aufbereitung: zwei
+    Texterkennungen insgesamt, gleichzeitig auf eigenen Engines. Schwellwert (schwarz/weiß) und Zoom 6 lasen in der
+    Messung schlechter.
+  * Was davon — gesäubert wie der Hauptwert — **anders** lautet, geht als `fahrzeug.alternativen`
+    (`marke_modell_text`, `kraftstoff`, `inserat_id`; je höchstens 3, je ≤ 160 Zeichen, ohne Doppelte; ohne Abweichung
+    fehlt das Feld ganz) an `/vergleich`. Der Server probiert sie, wenn er den Hauptwert nicht erkennt; ältere Server
+    ignorieren das unbekannte Feld. Hatte der erste Durchgang **keine Inserat-ID**, nimmt das Programm die des zweiten
+    Blicks (die Hash-ID-Regel „nur wenn beide Durchgänge gleich lesen“ bleibt).
+  * Fand der erste Durchgang keine der drei Zeilen oder fehlt eine Pflichtangabe (dann geht ohnehin nichts an den
+    Server), entfällt der zweite Blick. Er hat zusammen höchstens 10 s (wie jede Texterkennung, `TextErkennung.Frist`);
+    jeder Fehler steht nur im Protokoll — der Vergleich geht dann ohne Alternativen raus. Im Rohtext/Protokoll steht,
+    was er gelesen hat („2. Blick: …“).
+  * Gemessen (gezeichnete Tabellen: Tahoma/Segoe UI/MS Sans Serif × ClearType/Graustufen/ungeglättet × weiße,
+    hellblaue, dunkelblau markierte Zeile, je 40 Autos = 1.080 Lesungen; `ZweiterBlickMessung`, läuft nur mit
+    `ZWEITER_BLICK_MESSEN=1`): Marke/Modell las der erste Durchgang 888-mal richtig — mit dem zweiten Blick liegt der
+    richtige Text in 939 Fällen vor (Hauptwert oder Alternative); Kraftstoff 1.064 → 1.066, Inserat-ID 1.075 → 1.077
+    (eine davon als übernommene ID). Was beide Blicke gleich falsch lesen („Fiat 5001“, „BMW Xl“, „Hyundai ilO“),
+    bleibt Sache der Reparaturen auf dem Server. Zusatzzeit je Lesung auf dem Entwicklungs-PC: Median 40 → 83 ms
+    (+43 ms, Test `ZweiterBlickTests.Zusatzzeit_je_Lesung`, 6 Zeilen), in der großen Messung im Mittel 66 → 125 ms
+    (+59 ms, 8 Zeilen).
+* **1.5.13 (Wunsch Ahmad 09.10.: „wenn er etwas ausliest und nicht erkennt: bitte uns automatisch ein Screenshot des
+  nicht Erkannten geben“) — Lesebild an AutoSchnell:**
+  * Wird ein Auto nicht erkannt, schickt das Programm **genau das Bild, das die Texterkennung gelesen hat** (Kopf-Tabelle
+    über Technik-Tabelle in einem PNG, 24 Bit, Originalgröße — kein neues Abbild, nie PrintWindow) an
+    `POST …/lesebild` (`Lesebild.cs`): mit Grund, Rohtext (≤ 6000 Zeichen), den gelesenen Feldern (Marke/Modell-Text,
+    Titel, Quelle, Inserat-ID, je ≤ 160) und, wenn es eine gab, der Vorgangsnummer. Gründe: `pflichtfeld_fehlt`
+    (Marke/Modell, Erstzulassung oder Kilometer nicht gelesen — erst, wenn zweiter Durchlauf und zweiter Blick durch
+    sind; `fehlt` nennt die Felder), `marke_unbekannt` (der Server kennt die Marke nicht), `modell_unbekannt` (Marke
+    bekannt, aber kein Modell zugeordnet — neu in der `/vergleich`-Antwort: `fahrzeug.modell_gefunden`; fehlt das Feld,
+    älterer Server, gilt „gefunden“), `inserat_id_fehlt` (Inserat-ID bzw. AutoScout-Hash-ID nicht gelesen).
+  * **Je Auto genau einmal** (Inserat-Kennung; ohne sie der angezeigte Inhalt samt gelesenen Daten — ein anderer
+    Ausschnitt desselben Autos ohne Kennung ist ein neues Bild, er zeigt ja etwas anderes), auch nicht aus einem zweiten
+    Grund oder nach „Vergleichen“; **höchstens 30 je Tag** (darüber nur Protokoll; der Server hat seine eigene Grenze,
+    429); **nie im Probelauf**. Das PNG entsteht neben der Texterkennung (die Abbilder werden vorher 1:1 zusammengesetzt,
+    das Kodieren läuft im Hintergrund — das Lesen wird nicht langsamer); ist es größer als 1,5 MB, wird es in Schritten
+    von 0,75 verkleinert, bis es passt. Der Versand läuft im Hintergrund (die Vergleiche warten nie darauf), höchstens
+    15 s, ohne Wiederholversuch — jeder Fehler (413 zu groß, 429 Tagesgrenze, 404 älterer Server, kein Netz) ist nur eine
+    Protokollzeile, nie eine Meldung an den Sucher. Im Protokoll steht „Lesebild gesendet (grund): … KB – heute n von
+    30“. Das Bild lebt nur mit der einen Lesung; es wird nichts je Auto gesammelt.
+  * Einstellungen: **„Bei nicht erkannten Autos ein Bild der Anzeige an AutoSchnell senden“**, Standard **an** (Wunsch
+    Ahmad); aus = kein Bild und auch kein Kodieren. „Erkennungsbilder speichern“ (lokal, verschlüsselt) bleibt davon
+    unberührt.
+* **1.5.15 (Prüfung 09.10.2026 (Vertragsweg), Befund Ahmad „Kaufvertrag erstellen aus den Programmen heraus hängt
+  häufig — wenn in der App schon einer am Arbeiten ist oder man auf einer anderen Seite ist“) — „Vertrag“ endet nie
+  stumm:**
+  * **Rückmeldung (P1):** ein zweiter Klick, während „Vertrag“ noch läuft, sagt „Kaufvertrag wird gerade geöffnet – bitte
+    kurz warten.“ (vorher stumm); der Knopf in der Leiste zeigt „Vertrag …“ und ist gesperrt, bis die App sich gemeldet
+    hat oder der Browser aufging (`FensterZustand.VertragLaeuft`). Die App-Start-Prüfung läuft dafür jetzt im selben
+    Zug (vorher nebenher — ein zweiter Klick startete die App ein zweites Mal).
+  * **Lesung im Browser der Erweiterung (P3a):** das Inserat zum Lesen geht immer in den Browser, in dem die Erweiterung
+    verbunden ist (`Ueberwacher.BrowserFuerLesung`; Einstellung nur, wenn der Helfer-Browser unbekannt ist) — wer Edge
+    eingestellt hatte, die Erweiterung aber in Chrome, bekam das Inserat in Edge, und die Lesung kam nie. Die
+    Vergleichs-Links nehmen weiter die Einstellung (`BrowserFuer`).
+  * **Nie stumm (P3c–f, `VertragsWeg.InseratBereitAsync` → `LesungsStand`):** antwortet AutoSchnell auf die erste
+    Frage „schon gelesen?“ nicht → nicht 40 s warten, Sprechblase „AutoSchnell antwortet gerade nicht – der Kaufvertrag
+    wird trotzdem geöffnet.“ (`NichtPruefbar`). Kommt die Lesung in **40 s** (vorher 25, Takt 1,5 s) nicht → „Das Inserat
+    wurde im Browser nicht gelesen – in AutoSchnell kannst du es jetzt selbst auslesen.“ und der Kaufvertrag öffnet
+    trotzdem mit `&lesung=fehlt` (`NichtGelesen`; die App ruft dann NICHT von selbst ab, sondern zeigt den Link mit
+    „Jetzt auslesen“ — Ahmads Regel: Apify nur, wenn jemand bewusst einfügt/klickt). 402/403 vom Server (kein Abo,
+    gesperrt; `InseratStand.Sperre`) → Sprechblase mit dem Servertext und Abbruch (`Gesperrt`) — kein Vertrag ohne Abo;
+    ein 403 ohne JSON (Cloudflare) ist keine Sperre.
+  * **Richtige App (P4a):** sind mehrere AutoSchnell-Apps installiert (Edge UND Chrome), gilt zuerst die des Browsers, in
+    dem die Erweiterung verbunden ist (`AutoSchnellApp.Auswaehlen(kandidaten, helferBrowser)`, `msedge*` ↔ edge,
+    `chrome*` ↔ chrome), danach die bisherige Regel (per Adresse, sonst eindeutiger Name). Der Zwischenspeicher hält
+    deshalb alle Kandidaten statt der Wahl.
+  * **Nach Fehlschlag (P4c):** meldet sich die App nicht, wird die Suche verworfen; schlägt DIESELBE Verknüpfung zweimal
+    hintereinander fehl, wird sie für den Rest des Programmlaufs übersprungen → sofort Browser
+    (`AutoSchnellApp.StartFehlgeschlagen`).
+  * **Vordergrund-Recht (P4e):** vor dem Start `AllowSetForegroundWindow(ASFW_ANY)` — sonst blinkte das vorhandene
+    App-Fenster nur in der Taskleiste.
+  * **Wartezeit + Zustand (P5, `AppStartWeg`):** 20 s statt 10; die Antwort auf `GET …/app-start/<start>` nennt jetzt
+    `zustand`: `offen` → „Kaufvertrag in der AutoSchnell-App geöffnet.“; `nachgefragt` → „In der AutoSchnell-App ist
+    noch etwas ungespeichert – dort im Fenster „Hier öffnen“ oder „In neuem Fenster öffnen“ wählen.“; `anmeldung` →
+    „Bitte in der AutoSchnell-App anmelden – der Kaufvertrag öffnet sich danach dort.“; `abo` → „Für den Kaufvertrag
+    braucht das Konto ein Sucher-Abo.“ In keinem dieser Fälle geht der Browser auf (vorher nach 10 s zusätzlich die
+    Webseite — der Sucher hatte den Vertrag zweimal). Ältere Server ohne `zustand` = `offen`, sobald bestätigt. Nur ohne
+    jede Meldung nach 20 s: Browser, und zwar (P6) der Browser der Erweiterung/App (`ImBrowserOeffnen` mit
+    `BrowserFuer`), Text „Die AutoSchnell-App hat sich nicht gemeldet – der Kaufvertrag ist jetzt im Browser geöffnet.“
+  * Nicht umgesetzt (Entscheidung Ahmad): `&vertrag=1` am Programm-Ziel.
+  * Tests: `VertragsWegTests` (Lesungsstände, AppStartWeg, Browser der Lesung, Leiste), `AutoSchnellAppTests`
+    (Helfer-Vorrang, Überspring-Merker), `DienstTests`/`PruefberichtTests` (Sperre, `zustand`) — 377 Tests.
+* **1.5.14 (Prüfung 09.10., Wunsch Ahmad „dass AutoPointer nicht meckert“) — AutoPointer nie stören, hängen lassen
+  oder ihm Fokus/Tasten nehmen:**
+  * **Nach vorne holen** (`BrowserOeffner.ZurueckZu`, vor „Vergleichen“ und bei „Danach zurück zu AutoPointer“): kein
+    `BringWindowToTop` mehr (SetWindowPos ohne SWP_ASYNCWINDOWPOS stellte synchron an AutoPointers Thread zu — war
+    AutoPointer beschäftigt, fror unser Oberflächen-Thread samt Leiste und Lese-Takt ein). Liegt AutoPointer schon vorne,
+    passiert nichts (nie an seinen eigenen Thread hängen); minimiert oder hängend (`IsHungAppWindow`) wird es nicht
+    angefasst; bei offenem Modal-Dialog wird der Dialog geholt (`GetLastActivePopup`), nie das deaktivierte Hauptfenster;
+    an ein hängendes Vordergrundfenster (eingefrorener Browser) wird nie angehängt. Die Entscheidung ist eine reine
+    Funktion (`Planen`), `ZurueckZu` liefert, ob AutoPointer danach vorne liegt.
+  * **Gelesen wird nur, wenn AutoPointer wirklich vorne liegt:** „Vergleichen“ sagt bei minimiertem AutoPointer
+    „AutoPointer ist minimiert – bitte AutoPointer öffnen …“, und prüft nach dem Nach-vorne-Holen (300 ms), ob es vorne
+    ist — sonst „AutoPointer liegt nicht vorne – bitte AutoPointer anklicken und erneut „Vergleichen“ drücken.“ und keine
+    Lesung (vorher wurde dann der Browser im Rechteck der Tabelle gelesen: „nicht erkannt“ und ein Lesebild mit fremdem
+    Inhalt). Der Überwacher sichert das selbst noch einmal (`IAnsichtQuelle.ImVordergrund`), auch im Takt: hinter dem
+    Browser wird weder eine Änderung gewertet noch gelesen; beim Start hinter dem Browser zählt das erste vorne sichtbare
+    Auto wie ein neu angeklicktes.
+  * **Handles:** Windows verwendet Fensterhandles wieder — nach einem AutoPointer-Neustart gelten die gemerkten Tabellen
+    nur, wenn Hauptfenster (TMainForm) und Tabellen (TcxGridSite) die richtige Klasse haben und auf demselben Thread
+    liegen (`GehoertZusammen`); auch das Hauptfenster-Handle wird so geprüft. Die Suche nach der Detailansicht
+    (EnumChildWindows über 500–1.500 Kindfenster) läuft höchstens **jede Sekunde**, solange AutoPointer kein Auto zeigt
+    (vorher alle 250 ms).
+  * **Verbindung verloren** (401 im Takt oder in der 15-min-Lizenzprüfung, anderer PC hat sich verbunden): kein Dialog
+    mehr, der das Tippen in AutoPointer unterbricht — nur Sprechblase, Leiste „NICHT VERBUNDEN“ (Klick = verbinden) und
+    rotes Symbol; der Verbinden-Dialog kommt erst auf Klick, ist nicht mehr TopMost und wird ohne Nutzerklick (Programmstart)
+    nicht aktiv erzwungen. Der Grund steht dann im Dialog.
+  * **Texterkennung:** je Engine höchstens ein hängender Auftrag (`Haengewache`) — nach einer Zeitüberschreitung bekam eine
+    tote OcrEngine vom Takt (3×) und von „Vergleichen“ immer neue Aufträge samt Bild (~10 MB). Bis der hängende zurück ist,
+    gilt sofort derselbe Lesefehler. Bitmap-Leck beim Abbild behoben (`Abbilder`); gedrosseltes Protokoll merkt sich
+    höchstens 200 Schlüssel.
+  * **Elektroautos (Wunsch Ahmad 09.10., Opel Mokka-e: „Im Inserat ist kein Kraftstoff angegeben“):** fehlt die Zeile
+    „Kraftstoff“, zählt als Rückfall eine Zeile „Antrieb“, „Antriebsart“, „Motor“, „Energie“, „Energieträger“ oder
+    „Elektroantrieb“ — nur, wenn der Wert ein Kraftstoff-Wort enthält (elektr/strom/benzin/diesel/hybrid/gas/lpg/cng/
+    wasserstoff, auch in Leseform „EIektro“); „Antrieb: Allrad“ wird nie Kraftstoff. Steht „elektro“ in der Beschriftung
+    („Elektroantrieb: Ja“), ist es „Elektro“. Bleibt der Kraftstoff leer, trägt aber Titel oder „Marke, Modell“ ein
+    eindeutiges Elektro-Modell (Mokka-e, e-tron, EQA–EQS, ID.3/4/5/7, e-Golf, e-up, Zoe, Leaf, Tesla, Taycan, i3, iX, i4,
+    EV6, Ioniq 5/6, e-208, e-2008, Corsa-e, e-Niro, MX-30, Enyaq, Born, Spring — als ganze Wörter, „i30“/„ix35“ nicht),
+    geht „Elektro“ als **Alternative** mit (`alternativen.kraftstoff`; der Server nimmt sie nur ohne Hauptwert), nie als
+    sicherer Wert.
+  * Nicht umgesetzt (Entscheidung Ahmad): globales Tastenkürzel Strg+Alt+P, Leiste über AutoPointer-Kanten,
+    Pfadprüfung über `Process.MainModule`.
+* Ein Auto, das beim Programmstart schon angezeigt wird, öffnet nichts – erst das nächste angeklickte. **Nach dem (Neu-)Verbinden**
+  dagegen wird das gerade angezeigte Auto sofort verglichen (seit 1.5.3, Befund 04.10.: Mercedes nach Neuverbinden).
+* **Unplausible Daten** (seit 1.5.3, Befund 04.10.: „Kia Rio · EZ 04/2026 · 165.000 km“, „Audi 80 · 1.960.817 km“):
+  das Programm zeigt sofort einen „bitte prüfen“-Hinweis (`melden` in der Antwort; Erstzulassung in der Zukunft,
+  zu jung für die Kilometer oder über 1 Mio. km). Die Filter bleiben trotzdem genau wie in den Einstellungen
+  (Firma/Sucher, z. B. EZ 1 Jahr älter, km +20.000) — es wird nie still ein Filter weggelassen.
+* **1.5.7 (Wunsch Ahmad 07.10.):** hat das Konto den Browser-Helfer, sagt der Server `inserat_im_browser` — das
+  Programm öffnet das Inserat als letzten Tab mit, der Helfer liest es dort (werkzeug_inserate, 24 h) und der
+  Kaufvertrag nimmt diese Daten. Kein Apify-Vorab-Abruf mehr für solche Konten (kein Tageslimit, keine Actor-Plätze);
+  ohne Helfer wie bisher. Der Vergleich selbst bleibt unverändert schnell.
+* **1.5.4 (Paket 1, Prüfung 05./06.10.):** ein Lesefehler (GDI, Texterkennung) wird keine Schleife im 250-ms-Takt
+  mehr — 3 Versuche mit 2/4/6 s Abstand, dann Hinweis und Ruhe bis zur nächsten Änderung (vorher Dauerlast und ein
+  Protokoll, das um ~1 GB am Tag wuchs; gleiche Fehler im Takt werden außerdem gedrosselt protokolliert).
+  Einstellungen (mit dem Programm-Schlüssel) werden in einem Zug getauscht und behalten eine `.bak` — ein Absturz
+  beim Speichern kostet keinen Code mehr. Doppelklick auf „Vergleichen“ öffnet nicht mehr doppelt.
+* **1.5.5 (Paket 2+3, Prüfung 05./06.10.) — ausfallsicherer und schneller:** ein Netzaussetzer oder 502/503/504
+  (Cloudflare 52x) wird genau einmal nach 1 s wiederholt (nie bei Zeitüberschreitung oder 4xx); die Lizenzprüfung bleibt
+  bei kein Netz/5xx still und versucht es nach 1/2/5 min, nach dem Standby und bei Netzwechsel sofort; kein Abo (402)
+  oder keine Freigabe (403) zeigen Leiste und Fenster als **GESPERRT** mit dem Text des Servers. Beim Start kopiert sich
+  das Programm nach `%LOCALAPPDATA%\Programs\AutoSchnell-Vergleich\` (nicht über eine neuere Kopie) — der Autostart
+  zeigt nur noch dorthin, nie mehr auf Downloads oder die ZIP-Vorschau; nach einem Absturz startet Windows es neu
+  (`RegisterApplicationRestart`). Fehlt die Windows-Texterkennung, zeigt das Programm **TEXTERKENNUNG FEHLT** und
+  versucht es jede Minute erneut (kein Neustart nötig). `--server` gilt nur für diesen Lauf und wird nie gespeichert;
+  `--verbinden` bricht ab, solange das Programm läuft. Zeitabstände laufen monoton (kein Hänger beim Stellen der Uhr),
+  das Protokoll wird bei jedem Datumswechsel aufgeräumt, Erkennungsbilder bleiben unter 200 MB.
+  Schneller: Technik-Tabelle, Kopf-Tabelle und zweiter Durchgang werden **gleichzeitig** gelesen (eigene Engines,
+  Regel „Hash-ID nur, wenn beide Durchgänge gleich lesen“ bleibt); solange eine Änderung offen ist, prüft der Takt alle
+  100 ms statt 250 ms; die Verbindung zum Server wird beim Anklicken vorgewärmt und 5 min offen gehalten;
+  „Vergleichen“ und die App-Suche für „Vertrag“ (Ergebnis 10 min gemerkt) laufen im Hintergrund statt im
+  Oberflächen-Thread; der Programm-Schlüssel wird nicht mehr 6-mal je Sekunde per DPAPI entschlüsselt.
+  `PublishReadyToRun` wurde gemessen (Start `--einmal` ≈ 1,29 s statt ≈ 1,23 s, Datei 70 statt 55 MB) und nicht
+  übernommen.
+* **1.5.6 (Wunsch Ahmad 06.10.) — nur angeklickte Autos:** Zeigt AutoPointer von selbst ein anderes Auto (die
+  Live-Liste fügt neue Inserate oben ein, die Markierung rutscht weiter), wird es nicht mehr verglichen — nur nach einem
+  **Mausklick in AutoPointer** (höchstens 5 s vor der Änderung, oder danach auf das angezeigte Auto). Dafür fragt ein
+  eigener Faden alle 15 ms nur die Maustasten ab und ob der Zeiger über AutoPointer liegt (`Klicks.cs`, kein Hook,
+  keine Tastatur). Der Start (nur merken), das (Neu-)Verbinden und „Vergleichen“ brauchen keinen Klick. Wer mit den
+  Pfeiltasten wechselt, drückt „Vergleichen“.
+* **Neuwagen** (Zustand „Neu“) haben in AutoPointer weder Erstzulassung noch Kilometerstand: dann gilt dieses Jahr
+  und 0 km (Befund 03.10.: BYD Dolphin, mobile.de).
+* Dasselbe Fahrzeug öffnet nie zweimal hintereinander (Kennung aus dem gelesenen Text `Marke Modell | EZ | km | kW`,
+  Lesefehler i/l/1 und o/0 zählen nicht als neues Auto). **Seit 1.5.0** entscheidet die Inserat-ID (AutoScout: Hash-ID),
+  wenn beide Lesungen eine haben: zwei verschiedene Inserate mit gleichen Daten sind zwei Autos; fehlt die ID in einer
+  Lesung, gilt weiter die Kennung aus den Daten (ein Lesefehler macht aus einem Auto nicht zwei).
+* Bei jedem neuen Auto werden „Letzten Vergleich erneut öffnen“ und das gemerkte Inserat sofort geleert — es öffnen
+  nie die Links eines früheren Autos.
+* **Seit 1.4.0 erkennt der Server Marke und Modell** (Wunsch Ahmad 03.10.: „das Programm enthält kaum noch Wissen“):
+  das Programm schickt nur, was AutoPointer zeigt (`roh: true`), `backend/werkzeug_erkennung.py` erkennt es — 1:1 die
+  frühere Programm-Logik (am 03.10. über 16.636 Fälle ohne Abweichung abgeglichen). Verbesserungen brauchen damit nur
+  ein Server-Update. Alle Regeln unten gelten weiter, laufen aber auf dem Server.
+* Kann ein Auto nicht sicher gelesen werden (Marke/Modell, EZ oder km fehlen), öffnet sich **nichts**;
+  unten rechts erscheint „Fahrzeug konnte nicht eindeutig erkannt werden“.
+* Kennt ein Portal das Modell nicht, öffnet dieses Portal nicht (sonst gäbe es eine Suche „nur Bentley“).
+* Steht in AutoPointer nur ein Platzhalter („VW Weitere VW“, „Andere“, „Sonstige“) oder eine Kleinanzeigen-
+  Kategorie („VW VW-Busse“), kommt das Modell aus der Überschrift — die Wörter dürfen verstreut stehen („T5 Bulli
+  multivan“ → T5 Multivan, „VW Beetle Cabrio 1.2 TSI“ → Beetle; nur Treffer im Modell-Katalog, nie Sammelnamen wie
+  „T5 andere“). Fehlt sogar die Marke („Andere“), kommen Marke und Modell aus der Überschrift („Ford Mondeo
+  Turnier …“ → Ford Mondeo).
+* **Modell nur in der Beschreibung** (seit 1.5.1, Befund 04.10.: Mercedes „Andere“, Überschrift „Mercedes-Benz Weitere
+  Mercedes Be…“, Beschreibung „meinen Mercedes C 300 e“): das Programm liest den sichtbaren Anfang der Beschreibung
+  mit (vom Bildschirm, parallel zur Tabelle, kein Zeitverlust); der Server nimmt das Modell daraus nur, wenn Feld und
+  Überschrift keins hergeben, und strenger als bei der Überschrift (Wörter direkt hintereinander, keine Kurznamen wie
+  „G“) — mit Hinweis „Modell aus der Beschreibung übernommen … bitte kurz prüfen“. Die Beschreibung wird nicht
+  gespeichert.
+* Typische Lesefehler der Texterkennung bei Modellen mit Ziffern: i/l/1 und O/0 werden verwechselt („Hyundai ilO“ →
+  i10; nur wenn genau ein Katalogmodell passt). In der Überschrift dürfen zwei Wörter zusammengehören („XC 60“ →
+  XC60).
+* Das Programm filtert **nie nach Navigationssystem** (Wunsch Ahmad 03.10.) – in der App bleibt die
+  Einstellung „Navi mitvergleichen“ wie sie ist.
+
+## Wie es funktioniert
+
+AutoPointer (vitdev, `aprun.exe`) ist eine Delphi-Anwendung mit DevExpress-Tabellen. Geprüft am
+03.10.2026: **Windows UI Automation und MSAA liefern den Zelltext nicht** (die Tabellen werden
+gezeichnet). Deshalb:
+
+1. Fenster-Handles finden: Überschrift „Technische Daten“ → `TcxGrid` → `TcxGridSite`, dazu die
+   Kopf-Tabelle (Quelle, Titel, Preis). Unabhängig von Auflösung, Fenstergröße und Position.
+2. Nur solange AutoPointer im Vordergrund ist, alle 250 ms eine billige Prüfsumme (BitBlt) – ändert sich
+   etwas, wird gewartet, bis die Ansicht 400 ms stillsteht (seit 1.5.5 in dieser Zeit alle 100 ms geprüft).
+3. Es wird nur **kopiert, was ohnehin auf dem Bildschirm steht** (BitBlt – AutoPointer bekommt davon nichts mit).
+   Fehlen Zeilen (weggescrollt, schmale Ansicht), sagt das Programm „Detailbereich größer ziehen“. AutoPointer die
+   Tabelle selbst zeichnen lassen (`PrintWindow`) ist seit 1.5.2 **ganz entfernt** (Wunsch Ahmad 04.10.): am
+   03.10.2026 meldete AutoPointer zweimal genau dabei dieselbe „Zugriffsverletzung“ (aprun.exe, Offset 16B050B).
+   Die **Windows-Texterkennung** (offline, de-DE) liest es mit 3-fachem Zoom; fehlende Felder aus einem zweiten
+   Durchlauf. Bezeichnungen werden unscharf erkannt („Kibmeterstand“). Seit 1.5.12 liest ein **zweiter Blick** die
+   Werte von Marke/Modell, Kraftstoff und Inserat-ID einzeln und anders aufbereitet noch einmal (`ZweiterBlick`,
+   Abweichungen gehen als `alternativen` an den Server). Wird das Auto trotzdem nicht erkannt, geht seit 1.5.13 genau
+   dieses Abbild (Kopf über Technik, PNG) als **Lesebild** an AutoSchnell — einmal je Auto, höchstens 30 am Tag,
+   abschaltbar in den Einstellungen.
+   (Anlass 03.10.2026: AutoPointer meldete eine „Zugriffsverletzung“ in aprun.exe. AutoPointer stürzt
+   nachweislich auch ohne uns ab – Windows-Ereignis vom 24.09. –, trotzdem fassen wir es so wenig wie möglich an.)
+4. Hat sich die Anzeige während des Lesens geändert, wird verworfen (keine Mischdaten bei A → B → C).
+5. Marke/Modell erkennt seit 1.4.0 der Server (`backend/werkzeug_erkennung.py`, Kataloge aus `backend/`,
+   Lesefehler wie „Bentavga“ werden korrigiert); die Links baut er ebenfalls (`backend/routes/werkzeuge.py`).
+
+AutoPointer wird nie verändert – das Programm liest nur, was ohnehin angezeigt wird.
+
+Voraussetzung: Windows 10/11 mit deutscher Texterkennung (bei deutschem Windows vorhanden; sonst
+*Einstellungen → Zeit und Sprache → Sprache → Deutsch → Optische Zeichenerkennung*).
+
+## Entwickeln
+
+```
+dotnet test tests\AutoPointerVergleich.Tests.csproj
+powershell -ExecutionPolicy Bypass -File build.ps1     # → dist\AutoSchnell-Vergleich.exe (eine Datei)
+```
+
+Fehlersuche: `AutoSchnell-Vergleich.exe --einmal` liest das gerade angezeigte Auto einmal und gibt Werte
+(und, falls verbunden, die Server-Links im Probelauf) aus; `--verbinden <code>` verbindet ohne Fenster;
+`--server <url>` nimmt einen Testserver; `--probelauf` startet das Tray-Programm, öffnet aber keinen Browser.
+`AUTOSCHNELL_VERGLEICH_DATEN=<ordner>` legt Einstellungen/Schlüssel woanders ab (Tests).
+`--systemcheck` (auch Knopf „Systemcheck“ im Fenster und im Menü) prüft Windows, Texterkennung, Server, Verbindung/Abo,
+Version, AutoPointer, eine Probe-Lesung samt Probe-Vergleich (öffnet nichts), Browser und App. Die Tests laufen seit
+1.5.0 auch in der GitHub-CI (Job „AutoPointer-Vergleich (Windows-Tests)“).
+
+Protokoll: `%LOCALAPPDATA%\AutoSchnell\AutoPointer-Vergleich\protokoll\` (14 Tage) — **verschlüsselt** (Windows-DPAPI,
+nur derselbe Windows-Benutzer) und seit 1.5.2 **im Programm nirgends mehr anzuzeigen** (Wunsch Ahmad 04.10.: kein
+Protokollfenster, kein `--protokoll`, kein `--entschluesseln`). Für den Support liest es nur ein eigenes Werkzeug
+außerhalb des Programms auf dem betroffenen PC unter demselben Windows-Konto. Erkennungsbilder ebenfalls verschlüsselt,
+Einstellungen: `%APPDATA%\AutoSchnell\AutoPointer-Vergleich\einstellungen.json` (Schlüssel DPAPI-verschlüsselt).

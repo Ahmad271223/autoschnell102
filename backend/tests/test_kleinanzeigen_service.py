@@ -106,3 +106,19 @@ def test_build_search_url_from_kleinanzeigen(monkeypatch):
     assert "ml=" in url   # mileage filter applied
     assert "pw=" in url   # power filter applied
     assert "cn=DE" in url  # default country
+
+
+def test_titel_ohne_versteckte_status_badges():
+    """E2E 07.10.2026: Kleinanzeigen setzt versteckte Badges ("Reserviert • ", "Gelöscht • ", class is-hidden) in die
+    h1 — die standen vorne im Titel (Box der Erweiterung, Kaufvertrag). Nur der sichtbare Text zaehlt."""
+    from bs4 import BeautifulSoup
+    html = ('<html><body><h1 id="viewad-title" class="boxedarticle--title" data-soldlabel="Verkauft">'
+            '<span class="pvap-reserved-title is-hidden">Reserviert • </span>'
+            '<span class="pvap-reserved-title is-hidden">Gelöscht • </span>\n        BMW X6 3.0 Diesel M-packet</h1>'
+            '</body></html>')
+    assert ka._parse_title(BeautifulSoup(html, "html.parser"), "") == "BMW X6 3.0 Diesel M-packet"
+    # sichtbarer Badge (wirklich reserviert) gehoert ebenfalls nicht in den Titel
+    html2 = '<h1><span class="pvap-reserved-title">Reserviert • </span>VW Golf VII</h1>'
+    assert ka._parse_title(BeautifulSoup(html2, "html.parser"), "") == "VW Golf VII"
+    # ohne Badges wie bisher
+    assert ka._parse_title(BeautifulSoup("<h1>  Audi A4   Avant </h1>", "html.parser"), "") == "Audi A4 Avant"

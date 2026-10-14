@@ -1,5 +1,12 @@
 # PRD — Autohandel SaaS (mobile.de Filter-Generator)
 
+> **Historisch, Stand 02/2026.** Dieses Dokument beschreibt den Anfangsstand
+> und wird nicht mehr gepflegt. Stripe-Checkout und -Webhook, die
+> Playwright-Snapshots samt Snapshot-Cleanup und die Selbstregistrierung sind
+> inzwischen entfernt (Anmeldung nur mit Kontonummer, Konten legt der
+> Super-Admin an; Beweisdokumente entstehen ohne Browser auf Knopfdruck).
+> Der heutige Stand steht in `DEPLOYMENT.md` und `README.md`.
+
 ## Original Problem Statement
 Eine SaaS-Web-App für deutsche Autohändler. Händler gibt mobile.de-URL ein → App holt Fahrzeugdaten → öffnet mobile.de mit den entsprechenden Filtern.
 
@@ -11,7 +18,7 @@ Eine SaaS-Web-App für deutsche Autohändler. Händler gibt mobile.de-URL ein �
 - Vergleichs-URL im kompakten `ms=`-Format generieren
 - Kaufvertrag-PDF (reportlab) inkl. AGBs/Vereinbarungen
 - Apple-Style UI: Termine, Einstellungen, Vergleich
-- Auth (admin@autohandel.app / Admin123!)
+- Auth: Anmeldung mit Kontonummer + Passwort (Chef `10023`, Sucher `10023-2`, Zwischenhändler/Fahrer eigene Nummer); Konten und Passwörter vergibt nur der Super-Admin (Zugang aus der .env — SUPER_ADMIN_USERNAME/SUPER_ADMIN_PASSWORD; niemals im Repo). ADMIN_EMAIL/ADMIN_PASSWORD und die Selbstregistrierung entfielen am 13.09.2026.
 
 ## Implemented (Changelog)
 - 2026-02: Apple-Style UI (Termine, Einstellungen, Vergleich, AppLayout)
@@ -26,7 +33,7 @@ Eine SaaS-Web-App für deutsche Autohändler. Händler gibt mobile.de-URL ein �
 - 2026-02-27: **KA-Parser Bugfixes**: (a) Modell-Lookup mit Klammer-Varianten korrigiert — JSON enthält Namen wie `"Aygo (X)"`, `_load_makes_models` indexiert jetzt zusätzlich die parens-stripped Form. KA-Parser cleant Modellname vor Lookup. → `Toyota Aygo` löst jetzt korrekt zu `ms=24100;5;;;` auf. (b) Beschreibung wird im Vergleich-UI angezeigt (neuer Block unter Ausstattung). (c) Equipment-Filter entfernt Müll-Items wie "Der Preis ist Verhandlungsbasis.", "Privatanbieter", "41352 Korschenbroich", "Deutschland".
 - 2026-02-27: **Globaler `errMsg`-Helper** (`/app/frontend/src/lib/api.js`) — alle 11 `toast.error(...)`-Aufrufe normalisiert; FastAPI-422-Pydantic-Errors werden nicht mehr als Object-Array gerendert (kein React-Crash mehr).
 - 2026-02-27: **Auto-Snapshot Inserat-Seite** (Beweis-Archiv) — Playwright headless rendert KA/mobile.de Inserate beim Vergleich asynchron in PNG + PDF, persistiert in **Emergent Object Storage**. Neuer Service `snapshot_service.py`, neue Collection `listing_snapshots`, Endpoints `GET /api/snapshots`, `GET /api/snapshots/{id}`, `GET /api/snapshots/{id}/{pdf|png}` (Auth via Header oder `?auth=` Query-Param für `<iframe>`/`<img>`-Direktnutzung). Frontend `SnapshotCard.jsx` mit Live-Polling (4s), Status-Badges (läuft / fertig / Fehler) und Download-Buttons mit Bytes-Info. Erfolgt automatisch im Hintergrund bei jedem `/api/mobile/compare`. End-to-End verifiziert (snapshot ready in 5s, PDF 62 KB / PNG 102 KB).
-- 2026-02-07: **Apple-Style Admin-Dashboard** (`/admin/*`). Super-Admin Login per Username **CashCarHannover2025** / Passwort **MaW34543WaM** (`/auth/login` akzeptiert E-Mail oder Username). Neue React-Struktur unter `/app/frontend/src/pages/admin_v2/` (AdminLayout mit Sidebar + Light-Theme, Overview, Users, UserDetail, Comparisons, UrlStats, Settings) — als verschachtelte Routen in `App.js` registriert. Backend-Endpoints (alle Admin-only):
+- 2026-02-07: **Apple-Style Admin-Dashboard** (`/admin/*`). Super-Admin Login per Username/Passwort aus der .env (SUPER_ADMIN_USERNAME/SUPER_ADMIN_PASSWORD — niemals im Repo) (`/auth/login` akzeptiert E-Mail oder Username). Neue React-Struktur unter `/app/frontend/src/pages/admin_v2/` (AdminLayout mit Sidebar + Light-Theme, Overview, Users, UserDetail, Comparisons, UrlStats, Settings) — als verschachtelte Routen in `App.js` registriert. Backend-Endpoints (alle Admin-only):
   - `GET /admin/users` (mit Subscription, Company, Active-Status)
   - `POST /admin/users/{id}/active` — **Soft-Block** (Login → 403 "Account ist deaktiviert"); Schutz gegen Selbst- und Super-Admin-Sperre
   - `POST /admin/users/{id}/password` — Admin Reset (min. 8 Zeichen, invalidiert Session)
@@ -116,8 +123,8 @@ Siehe `/app/memory/test_credentials.md`
   - `driver_accounts` – echte Fahrer-Accounts mit E-Mail/Passwort/display_name/driver_code (`FD-XXXXXXXX`)
   - `dealer_drivers` – Link-Collection dealer↔driver_account (Fahrer kann bei mehreren Händlern aktiv sein)
 - **Fahrer-Endpoints (neu)**:
-  - `POST /api/driver/register` – direkt eingeloggt (kein Bestätigungs-Schritt)
-  - `POST /api/driver/login` (E-Mail + Passwort statt Code)
+  - `POST /api/driver/register` – direkt eingeloggt (kein Bestätigungs-Schritt) — *seit 13.09.2026 entfallen (410): Fahrer legt der Super-Admin an (`POST /api/admin/drivers`)*
+  - `POST /api/driver/login` (E-Mail + Passwort statt Code) — *seit 13.09.2026 Kontonummer + Passwort*
   - `GET /api/driver/me` (inkl. dealers[])
   - `PUT /api/driver/me` (nur display_name, propagiert zu allen Dealer-Links)
   - `GET /api/driver/appointments` – alle Fahrten über alle Händler
