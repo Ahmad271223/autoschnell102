@@ -20,7 +20,11 @@ namespace AutoPointerVergleich;
 /// </remarks>
 internal static class ZweiterBlick
 {
-    internal static readonly Feld[] Felder = { Feld.MarkeModell, Feld.Kraftstoff, Feld.InseratId };
+    /// <summary>1.5.16 (Wunsch Ahmad 13.10.2026): auch die Zeile "Hash-ID" (AutoScout) — ihre Lesungen gehen in die
+    /// Mehrheit der Kennung (<see cref="InseratNummer"/>).</summary>
+    internal static readonly Feld[] Felder = { Feld.MarkeModell, Feld.Kraftstoff, Feld.InseratId, Feld.HashId };
+    /// <summary>Die Kennungs-Zeilen: nur sie bekommen die dritte Aufbereitung (<see cref="Aufbereitung.SchwarzWeiss"/>).</summary>
+    internal static readonly Feld[] Kennungen = { Feld.InseratId, Feld.HashId };
     internal const int MaxJeFeld = 3;
     internal const int MaxLaenge = 160;
 
@@ -33,33 +37,44 @@ internal static class ZweiterBlick
         /// <summary>Zoom 4, Graustufen, Kontrast gestreckt: Hintergrund weiss, Schrift schwarz — auch bei farbig
         /// markierter Zeile oder heller Schrift auf dunklem Grund.</summary>
         Kontrast,
+        /// <summary>1.5.16 (Wunsch Ahmad 13.10.2026, Inserat-Nummer sicher lesen): Zoom 6, Schwarz/Weiss mit Schwellwert
+        /// (Kontrast gestreckt, dann jedes Pixel ganz weiss oder ganz schwarz) — nur fuer die Kennungs-Zeilen
+        /// (<see cref="Kennungen"/>), als dritte, unabhaengige Lesung fuer die Mehrheit. Allein las sie in der Messung vom
+        /// 09.10. schlechter als Gross/Kontrast; hier zaehlt, dass ihre Fehler ANDERE sind.</summary>
+        SchwarzWeiss,
     }
 
     /// <summary>Reihenfolge der Aufbereitungen — die erste ist die sicherere (sie liefert z. B. die Inserat-ID, wenn der
     /// erste Durchgang keine hatte). Gemessen 09.10.2026 (<c>ZweiterBlickMessung</c>, 1.080 gezeichnete Tabellen): allein
     /// richtig Marke/Modell Gross x5 872 / Kontrast x4 848, Inserat-ID 1.069 / 1.060; als Paar zum ersten Durchgang
-    /// gehoeren sie zu den besten (Schwellwert schwarz/weiss und Zoom 6 lasen schlechter).</summary>
-    internal static readonly Aufbereitung[] Reihenfolge = { Aufbereitung.Gross, Aufbereitung.Kontrast };
+    /// gehoeren sie zu den besten (Schwellwert schwarz/weiss und Zoom 6 lasen schlechter — seit 1.5.16 trotzdem als
+    /// DRITTE Lesung nur fuer die Kennungen, siehe <see cref="Aufbereitung.SchwarzWeiss"/>).</summary>
+    internal static readonly Aufbereitung[] Reihenfolge = { Aufbereitung.Gross, Aufbereitung.Kontrast, Aufbereitung.SchwarzWeiss };
+
+    /// <summary>Welche Felder in der Aufbereitung gelesen werden: Schwarz/Weiss nur die Kennungen, sonst alle.</summary>
+    internal static bool Liest(Aufbereitung art, Feld feld) => art != Aufbereitung.SchwarzWeiss || Kennungen.Contains(feld);
 
     /// <summary>Vergroesserung je Aufbereitung (bei 96 dpi; bei hoeherer Skalierung entsprechend weniger, wie im
     /// ersten Durchgang).</summary>
     internal static double Zoom(Aufbereitung art, uint dpi)
     {
-        double basis = art == Aufbereitung.Gross ? 5.0 : 4.0;
+        double basis = art switch { Aufbereitung.Gross => 5.0, Aufbereitung.SchwarzWeiss => 6.0, _ => 4.0 };
         return Math.Clamp(basis * 96 / (dpi == 0 ? 96 : dpi), 2.0, basis);
     }
 
     /// <summary>Ein Feld im Sammelbild: senkrechter Streifen [Oben, Unten) in Pixeln des Sammelbilds.</summary>
     internal sealed record Platz(Feld Feld, double Oben, double Unten);
 
-    /// <summary>Zweiter Blick fuer <paramref name="f"/> (setzt die Alternativen, ggf. die Inserat-ID). Liefert den Text
-    /// fuers Protokoll/Rohtext oder null (nichts gelesen, uebersprungen oder fehlgeschlagen — dann nur protokolliert).
-    /// Wirft nie.</summary>
+    /// <summary>Zweiter Blick fuer <paramref name="f"/> (setzt die Alternativen und — 1.5.16 — die Kennung per Mehrheit).
+    /// Liefert den Text fuers Protokoll/Rohtext oder null (nichts gelesen, uebersprungen oder fehlgeschlagen — dann nur
+    /// protokolliert; die Mehrheit der Kennung bildet der Aufrufer dann aus den Durchgaengen allein). Wirft nie.</summary>
     /// <param name="zeilen2">Zeilen eines zweiten Durchgangs (anderer Zoom) — nur fuer Felder, die der erste nicht fand.</param>
     /// <param name="ocr2">eigene Engine fuer die zweite Aufbereitung (gleichzeitig); null = nacheinander auf <paramref name="ocr"/>.</param>
+    /// <param name="ocr3">1.5.16: eigene Engine fuer die dritte Aufbereitung (Schwarz/Weiss der Kennungen); null = auf
+    /// einer der anderen nacheinander.</param>
     internal static async Task<string?> AnwendenAsync(Fahrzeug f, Bitmap technik, IReadOnlyList<OcrZeile> zeilen,
                                                       IReadOnlyList<OcrZeile>? zeilen2, uint dpi, TextErkennung ocr,
-                                                      TextErkennung? ocr2)
+                                                      TextErkennung? ocr2, TextErkennung? ocr3 = null)
     {
         try
         {
@@ -69,7 +84,7 @@ internal static class ZweiterBlick
                     bereiche.TryAdd(feld, r);
             if (bereiche.Count == 0) return null;          // keine der Zeilen gefunden: kein zweiter Blick
             var liste = Felder.Where(bereiche.ContainsKey).Select(x => (x, bereiche[x])).ToList();
-            var gelesen = await LesenAsync(technik, liste, dpi, ocr, ocr2);
+            var gelesen = await LesenAsync(technik, liste, dpi, ocr, ocr2, ocr3);
             Uebernehmen(f, gelesen);
             return Rohtext(gelesen);
         }
@@ -80,17 +95,27 @@ internal static class ZweiterBlick
         }
     }
 
-    /// <summary>Beide Aufbereitungen lesen (je ein Sammelbild, je eine Texterkennung). Ergebnis je Feld: die rohen
-    /// Lesungen in <see cref="Reihenfolge"/> (null = in dieser Aufbereitung nichts gelesen).</summary>
+    /// <summary>Alle Aufbereitungen lesen (je ein Sammelbild, je eine Texterkennung; Schwarz/Weiss nur, wenn eine
+    /// Kennungs-Zeile dabei ist). Ergebnis je Feld: die rohen Lesungen in <see cref="Reihenfolge"/> (null = in dieser
+    /// Aufbereitung nichts gelesen oder das Feld gehoert nicht zu ihr).</summary>
+    /// <param name="ocr3">1.5.16: dritte Engine; Bilder werden reihum auf die vorhandenen Engines verteilt — jede Engine
+    /// liest ihre Bilder nacheinander, die Engines untereinander gleichzeitig.</param>
     internal static async Task<Dictionary<Feld, List<string?>>> LesenAsync(Bitmap technik, IReadOnlyList<(Feld Feld, Rectangle Bereich)> bereiche,
-                                                                          uint dpi, TextErkennung ocr, TextErkennung? ocr2)
+                                                                          uint dpi, TextErkennung ocr, TextErkennung? ocr2,
+                                                                          TextErkennung? ocr3 = null)
     {
         // Bilder hier (synchron, auf diesem Faden) aus dem Abbild bauen — GDI+-Bitmaps duerfen nicht gleichzeitig
         // gelesen werden; danach arbeitet jede Engine nur noch auf ihrem eigenen Sammelbild
-        var bilder = new List<(Bitmap Bild, List<Platz> Plaetze)>();
+        var bilder = new List<(Aufbereitung Art, Bitmap Bild, List<Platz> Plaetze)>();
         try
         {
-            foreach (var art in Reihenfolge) bilder.Add(Sammelbild(technik, bereiche, Zoom(art, dpi), art));
+            foreach (var art in Reihenfolge)
+            {
+                var dazu = bereiche.Where(b => Liest(art, b.Feld)).ToList();
+                if (dazu.Count == 0) continue;
+                var (bild, plaetze) = Sammelbild(technik, dazu, Zoom(art, dpi), art);
+                bilder.Add((art, bild, plaetze));
+            }
         }
         catch
         {
@@ -98,24 +123,26 @@ internal static class ZweiterBlick
             throw;
         }
 
-        async Task<List<OcrZeile>[]> Beide()
+        // Pruefung 05.10.2026 (Paket 3, F1) / 1.5.16: je Engine ein eigener Faden (auch das Hochskalieren laeuft so
+        // nebeneinander); Bild i geht an Engine i mod n. Task.WhenAll wartet auf ALLE, auch wenn eine wirft — sonst
+        // wuerde einer noch laufenden Engine ihr Bild unter ihr weg freigegeben.
+        var engines = new[] { ocr, ocr2, ocr3 }.OfType<TextErkennung>().Distinct().ToList();
+        async Task<List<OcrZeile>[]> Alle()
         {
-            if (ocr2 != null && bilder.Count == 2)
+            var ergebnisse = new List<OcrZeile>[bilder.Count];
+            async Task Nacheinander(int start)
             {
-                var zweite = Task.Run(() => ocr2.LiesAsync(bilder[1].Bild, 1.0));
-                List<OcrZeile> erste;
-                try { erste = await ocr.LiesAsync(bilder[0].Bild, 1.0); }
-                catch
-                {
-                    // erst fertig werden lassen — sonst wuerde ihr Bild unter ihr weg freigegeben
-                    try { await zweite; } catch (Exception) { }
-                    throw;
-                }
-                return new[] { erste, await zweite };
+                for (int i = start; i < bilder.Count; i += engines.Count)
+                    ergebnisse[i] = await engines[start].LiesAsync(bilder[i].Bild, 1.0);
             }
-            var alle = new List<List<OcrZeile>>();
-            foreach (var b in bilder) alle.Add(await ocr.LiesAsync(b.Bild, 1.0));
-            return alle.ToArray();
+            var auftraege = new List<Task>();
+            for (int e = 0; e < engines.Count && e < bilder.Count; e++)
+            {
+                int start = e;
+                auftraege.Add(e == 0 ? Nacheinander(0) : Task.Run(() => Nacheinander(start)));
+            }
+            await Task.WhenAll(auftraege);
+            return ergebnisse;
         }
 
         void Freigeben() { foreach (var b in bilder) b.Bild.Dispose(); }
@@ -127,15 +154,17 @@ internal static class ZweiterBlick
             // Bilder werden erst freigegeben, wenn sie doch noch fertig wird.
             // Pruefung 09.10.2026 (Befund 9): dass eine haengende Engine keinen neuen Auftrag mehr bekommt, sichert
             // TextErkennung.LiesAsync je Engine (Haengewache) — hier wirft sie dann sofort, der zweite Blick entfaellt.
-            ergebnisse = await TextErkennung.MitFrist(Beide(), TextErkennung.Frist, Freigeben);
+            ergebnisse = await TextErkennung.MitFrist(Alle(), TextErkennung.Frist, Freigeben);
         }
         catch (TimeoutException) { haengt = true; throw; }
         finally { if (!haengt) Freigeben(); }
 
+        // je Feld genau ein Eintrag je Aufbereitung in Reihenfolge (null, wo die Aufbereitung das Feld nicht liest)
         var gelesen = bereiche.ToDictionary(b => b.Feld, _ => new List<string?>());
-        for (int i = 0; i < bilder.Count; i++)
+        foreach (var art in Reihenfolge)
         {
-            var je = Zuordnen(ergebnisse[i], bilder[i].Plaetze);
+            int i = bilder.FindIndex(b => b.Art == art);
+            var je = i < 0 ? new Dictionary<Feld, string>() : Zuordnen(ergebnisse[i], bilder[i].Plaetze);
             foreach (var feld in gelesen.Keys) gelesen[feld].Add(je.GetValueOrDefault(feld));
         }
         return gelesen;
@@ -203,9 +232,9 @@ internal static class ZweiterBlick
                 g.PixelOffsetMode = PixelOffsetMode.HighQuality;
                 g.DrawImage(technik, new Rectangle(0, 0, b, h), r.X, r.Y, r.Width, r.Height, GraphicsUnit.Pixel, attr);
             }
-            if (art == Aufbereitung.Kontrast)
+            if (art is Aufbereitung.Kontrast or Aufbereitung.SchwarzWeiss)
             {
-                KontrastStrecken(gross, Helligkeit(hintergrund));
+                KontrastStrecken(gross, Helligkeit(hintergrund), schwellwert: art == Aufbereitung.SchwarzWeiss);
                 hintergrund = Color.White;
             }
             return (gross, hintergrund);
@@ -238,7 +267,9 @@ internal static class ZweiterBlick
     /// <summary>Graustufen, Hintergrund (<paramref name="hintergrund"/> = dessen Helligkeit) -> weiss, Schrift -> schwarz,
     /// dazwischen linear. Die Schrift ist das Ende der Helligkeiten (2 %/98 %), das am weitesten vom Hintergrund
     /// liegt — helle Schrift auf dunkler Markierung wird so umgedreht.</summary>
-    internal static void KontrastStrecken(Bitmap bild, int hintergrund)
+    /// <param name="schwellwert">1.5.16 (Schwarz/Weiss): statt linear jedes Pixel ganz schwarz (naeher an der Schrift) oder
+    /// ganz weiss (naeher am Hintergrund) — Mitte der gestreckten Spanne.</param>
+    internal static void KontrastStrecken(Bitmap bild, int hintergrund, bool schwellwert = false)
     {
         var daten = bild.LockBits(new Rectangle(0, 0, bild.Width, bild.Height), ImageLockMode.ReadWrite, PixelFormat.Format32bppArgb);
         try
@@ -268,7 +299,7 @@ internal static class ZweiterBlick
                     else
                     {
                         double t = (Helligkeit(puffer[i + 2], puffer[i + 1], puffer[i]) - schrift) / spanne;
-                        v = (byte)Math.Round(Math.Clamp(t, 0, 1) * 255);
+                        v = schwellwert ? (byte)(t < 0.5 ? 0 : 255) : (byte)Math.Round(Math.Clamp(t, 0, 1) * 255);
                     }
                     puffer[i] = puffer[i + 1] = puffer[i + 2] = v;
                     puffer[i + 3] = 255;
@@ -321,9 +352,10 @@ internal static class ZweiterBlick
         return liste;
     }
 
-    /// <summary>Lesungen ins Fahrzeug: Alternativen je Feld; fehlt die Inserat-ID aus dem ersten Durchgang, wird die
-    /// erste Alternative zur Inserat-ID (kostet nichts, der Server repariert sie wie sonst). Die Hash-ID bleibt, wie sie
-    /// ist (nur wenn beide Durchgaenge gleich lesen). (rein, fuer Tests)</summary>
+    /// <summary>Lesungen ins Fahrzeug: Alternativen je Feld. Die Kennung (Inserat-ID, Hash-ID) entscheidet seit 1.5.16
+    /// die Mehrheit ueber alle Lesungen (<see cref="InseratNummer.Uebernehmen"/>): sicher nur, wenn zwei Lesungen Zeichen
+    /// fuer Zeichen gleich sind und die Stellenzahl passt — sonst die plausibelste als Hauptwert, der Rest als
+    /// Alternativen und <see cref="Fahrzeug.InseratIdUnsicher"/>. (rein, fuer Tests)</summary>
     internal static void Uebernehmen(Fahrzeug f, IReadOnlyDictionary<Feld, List<string?>> gelesen)
     {
         IEnumerable<string?> Je(Feld feld) => gelesen.TryGetValue(feld, out var l) ? l : Enumerable.Empty<string?>();
@@ -331,13 +363,7 @@ internal static class ZweiterBlick
         // Wunsch Ahmad 09.10.2026 (1.5.14, Elektroautos): eine Alternative, die der erste Durchgang schon kannte (Elektro-
         // Kennzeichen im Titel, DetailLeser.ElektroKennzeichen), bleibt vorne — der zweite Blick ersetzt sie nicht
         f.AlternativenKraftstoff = Alternativen(Feld.Kraftstoff, f.Kraftstoff, f.AlternativenKraftstoff.Concat(Je(Feld.Kraftstoff)));
-        var ids = Alternativen(Feld.InseratId, f.InseratId, Je(Feld.InseratId));
-        if (string.IsNullOrEmpty(f.InseratId) && ids.Count > 0)
-        {
-            f.InseratId = ids[0];
-            ids.RemoveAt(0);
-        }
-        f.AlternativenInseratId = ids;
+        InseratNummer.Uebernehmen(f, Je(Feld.InseratId), Je(Feld.HashId));
     }
 
     private static string Rohtext(Dictionary<Feld, List<string?>> gelesen)
@@ -346,6 +372,7 @@ internal static class ZweiterBlick
         {
             Feld.MarkeModell => "Marke/Modell",
             Feld.InseratId => "Inserat-ID",
+            Feld.HashId => "Hash-ID",
             _ => f.ToString(),
         };
         return string.Join("; ", gelesen.Select(kv => Name(kv.Key) + " " + string.Join(" / ", kv.Value.Select(v => "„" + (v ?? "") + "“"))));

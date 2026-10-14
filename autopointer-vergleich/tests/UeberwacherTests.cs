@@ -18,6 +18,8 @@ public class UeberwacherTests
         public byte[]? Bild = { 0x89, 0x50, 0x4E, 0x47 };
         /// <summary>Pruefung 09.10.2026 (Befund 3): liegt AutoPointer vorne? (false = der Browser liegt davor)</summary>
         public bool Vorne = true;
+        /// <summary>1.5.16 (B6): Zeilenabstand der Technik-Tabelle in jeder Lesung (null = nicht bestimmbar).</summary>
+        public double? Zeilenabstand;
         public IntPtr Hauptfenster => IntPtr.Zero;
         public bool ImVordergrund => Vorne;
         public QuellenZustand Pruefe() => new(Lage, Lage == Lage.Details ? Summe : 0);
@@ -27,7 +29,8 @@ public class UeberwacherTests
             Lesungen++;
             var f = Fahrzeug!();
             WaehrendDesLesens?.Invoke();
-            return Task.FromResult<Lesung?>(new Lesung(f, f.MarkeModellText.Length == 0 && f.Kilometer == null, "roh", Bild: Bild));
+            return Task.FromResult<Lesung?>(new Lesung(f, f.MarkeModellText.Length == 0 && f.Kilometer == null, "roh", Bild: Bild,
+                                                       Zeilenabstand: Zeilenabstand));
         }
 
         public void Zeige(Func<Fahrzeug> f, ulong summe)
@@ -1254,5 +1257,96 @@ public class UeberwacherTests
         await Ticks(4);
         Assert.Single(_b.Aufrufe);
         Assert.Contains("VW-Passat_Variant-2006", _b.Aufrufe[0][0].Url);
+    }
+
+    // ------------------------------------------------------------------------------------------------------------
+    // Wunsch Ahmad 13.10.2026 (1.5.16, Inserat-Nummer sicher lesen): unsichere Nummer -> Lesebild; kleine Schrift -> Hinweis
+
+    private static Fahrzeug Unsicher()
+    {
+        var f = Passat();
+        f.Quelle = "mobile.de";
+        f.InseratId = "50342132635392";
+        f.InseratIdUnsicher = true;
+        f.AlternativenInseratId = new() { "50342132635382" };
+        return f;
+    }
+
+    [Fact]   // unsicher gelesen: ein Lesebild mit dem eigenen Grund, beim Server als inserat_id_fehlt + fehlt ["Inserat-ID unsicher"]
+    public async Task Unsichere_Inserat_ID_schickt_ein_Lesebild_als_inserat_id_fehlt_mit_fehlt()
+    {
+        await Start();
+        _server.InseratUrl = "https://suchen.mobile.de/fahrzeuge/details.html?id=50342132635392";   // der Server baut den Link trotzdem
+        _server.Melden = new() { "Inserat-Nummer 50342132635392 unsicher gelesen – bitte im Inserat prüfen, ob es dasselbe Auto ist." };
+        await Anklicken(Unsicher, 1);
+        await Versandt();
+        var b = Assert.Single(Bilder);
+        Assert.Equal(Lesebilder.InseratIdUnsicher, b.Grund);
+        Assert.Equal(new[] { Lesebilder.InseratIdUnsicherText }, b.Fehlt);
+        Assert.Equal("50342132635392", b.Fahrzeug!.InseratId);
+        var nutzlast = Lesebilder.Nutzlast(b);
+        Assert.Equal(Lesebilder.InseratIdFehlt, nutzlast["grund"]);                      // der Server kennt nur die vier Gruende
+        Assert.Equal(new[] { "Inserat-ID unsicher" }, Assert.IsType<List<string>>(nutzlast["fehlt"]));
+        Assert.Single(_b.Aufrufe);                                                        // die Vergleiche gehen auf
+        Assert.Contains(_meldungen, m => m.Contains("unsicher gelesen"));                 // der Hinweis kommt vom Server (melden)
+        Assert.Contains(Protokoll.Letzte(), z => z.Contains("Lesebild gesendet (inserat_id_unsicher)"));
+        Assert.Contains(Protokoll.Letzte(), z => z.Contains("Inserat-ID: 50342132635392 (unsicher gelesen)"));
+        // die Nutzlast an /vergleich traegt das neue Feld und die Alternativen
+        var an = _server.Anfragen.Single();
+        Assert.Equal(true, AutoSchnellDienst.Nutzlast(an)["inserat_id_unsicher"]);
+        // dasselbe Auto noch einmal (Kennung gleich): kein zweites Bild, auch nicht als inserat_id_fehlt
+        _server.InseratUrl = null;
+        await Anklicken(Unsicher, 2);
+        await _u.JetztVergleichenAsync();
+        await Versandt();
+        Assert.Single(Bilder);
+        // "Vertrag" funktioniert weiter: die Inserat-Adresse des Servers bleibt die letzte
+        Assert.Equal("https://suchen.mobile.de/fahrzeuge/details.html?id=50342132635392", _u.LetzteInseratUrl ?? "https://suchen.mobile.de/fahrzeuge/details.html?id=50342132635392");
+    }
+
+    [Fact]   // unsicher UND der Server hat keine Adresse: ein Bild, Grund unsicher (nicht fehlt) — der Sucher bekommt den bekannten Hinweis
+    public async Task Unsichere_Nummer_ohne_Inserat_Adresse_gibt_ein_Bild_mit_Grund_unsicher()
+    {
+        await Start();
+        await Anklicken(() => { var f = Unsicher(); f.InseratId = null; return f; }, 1);
+        await Versandt();
+        var b = Assert.Single(Bilder);
+        Assert.Equal(Lesebilder.InseratIdUnsicher, b.Grund);
+        Assert.Equal(Lesebilder.InseratIdFehlt, Lesebilder.Nutzlast(b)["grund"]);
+        Assert.Contains(_meldungen, m => m.Contains("Inserat-ID nicht gelesen"));
+        Assert.Contains(Protokoll.Letzte(), z => z.Contains("Inserat-ID: unsicher gelesen (keine plausible Lesung)"));
+    }
+
+    [Fact]   // sichere Nummer: alles wie bisher — kein Bild, kein neues Feld
+    public async Task Sichere_Inserat_ID_schickt_kein_Lesebild_und_kein_Feld()
+    {
+        await Start();
+        _server.InseratUrl = "https://www.kleinanzeigen.de/s-anzeige/3529712138";
+        await Anklicken(Passat, 1);
+        await Versandt();
+        Assert.Empty(Bilder);
+        Assert.False(AutoSchnellDienst.Nutzlast(_server.Anfragen.Single()).ContainsKey("inserat_id_unsicher"));
+    }
+
+    [Fact]   // B6: Zeilenabstand unter 16 px -> einmal je Programmlauf der Hinweis, nichts wird erzwungen
+    public async Task Kleine_AutoPointer_Schrift_wird_einmal_je_Programmlauf_gemeldet()
+    {
+        await Start();
+        _q.Zeilenabstand = 22;                                       // normal: kein Hinweis
+        await Anklicken(Passat, 1);
+        Assert.DoesNotContain(_hinweise, h => h.Text == Ueberwacher.SchriftKleinHinweis);
+        _q.Zeilenabstand = 15;
+        await Anklicken(Bentley, 2);
+        var h = Assert.Single(_hinweise, x => x.Text == Ueberwacher.SchriftKleinHinweis);
+        Assert.False(h.Fehler);                                      // nur ein Hinweis
+        Assert.Contains("Zoom in AutoPointer erhöhen", h.Text);
+        Assert.Equal(2, _b.Aufrufe.Count);                           // die Vergleiche gehen trotzdem auf
+        await Anklicken(Passat, 3);                                  // noch einmal klein: kein zweites Mal
+        await _u.JetztVergleichenAsync();
+        Assert.Single(_hinweise, x => x.Text == Ueberwacher.SchriftKleinHinweis);
+        Assert.Contains(Protokoll.Letzte(), z => z.Contains("AutoPointer-Schrift sehr klein (Zeilenabstand 15 px"));
+        // ohne messbaren Abstand (Tests, zu wenige Reihen) nie
+        _q.Zeilenabstand = null;
+        Assert.Equal(16, DetailLeser.SchriftKleinPx);
     }
 }

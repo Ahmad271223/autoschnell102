@@ -563,6 +563,10 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
         Liste("kraftstoff", f.AlternativenKraftstoff);
         Liste("inserat_id", f.AlternativenInseratId);
         if (alternativen.Count > 0) nutzlast["alternativen"] = alternativen;
+        // 1.5.16 (Wunsch Ahmad 13.10.2026, Inserat-Nummer sicher lesen): keine zwei Lesungen der Kennung stimmen ueberein
+        // (oder die Stellenzahl passt nicht) — der Server (ab 13.10.) meldet dann "unsicher gelesen" und baut keinen sicheren
+        // Link; aeltere Server ignorieren das Feld. Nur bei true dabei, damit die Nutzlast sonst unveraendert bleibt.
+        if (f.InseratIdUnsicher) nutzlast["inserat_id_unsicher"] = true;
         return nutzlast;
     }
 

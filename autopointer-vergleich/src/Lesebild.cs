@@ -9,9 +9,11 @@ namespace AutoPointerVergleich;
 /// Technik-Tabelle, KEIN neues Abbild und nie PrintWindow —, samt Grund und Rohtext fuer POST …/lesebild. Bei AutoSchnell
 /// sieht man dann, was auf dem Bildschirm stand, und der Server kann daraus lernen (Reparaturen, Katalog).</summary>
 /// <param name="Grund"><see cref="Lesebilder.PflichtfeldFehlt"/>, <see cref="Lesebilder.MarkeUnbekannt"/>,
-/// <see cref="Lesebilder.ModellUnbekannt"/> oder <see cref="Lesebilder.InseratIdFehlt"/>.</param>
+/// <see cref="Lesebilder.ModellUnbekannt"/>, <see cref="Lesebilder.InseratIdFehlt"/> oder (1.5.16)
+/// <see cref="Lesebilder.InseratIdUnsicher"/>.</param>
 /// <param name="Bild">PNG (24 Bit, hoechstens <see cref="Lesebilder.MaxBytes"/>).</param>
-/// <param name="Fehlt">Nur bei pflichtfeld_fehlt: die Bezeichnungen aus <see cref="DetailLeser.Fehlend"/>.</param>
+/// <param name="Fehlt">Bei pflichtfeld_fehlt die Bezeichnungen aus <see cref="DetailLeser.Fehlend"/>; bei inserat_id_unsicher
+/// <see cref="Lesebilder.InseratIdUnsicherText"/>.</param>
 /// <param name="VorgangId">Die Vorgangsnummer aus der /vergleich-Antwort, wenn es schon eine gab.</param>
 internal sealed record Lesebild(string Grund, byte[] Bild, string Rohtext, Fahrzeug? Fahrzeug = null,
                                 IReadOnlyList<string>? Fehlt = null, string? VorgangId = null);
@@ -23,6 +25,12 @@ internal static class Lesebilder
     public const string MarkeUnbekannt = "marke_unbekannt";
     public const string ModellUnbekannt = "modell_unbekannt";
     public const string InseratIdFehlt = "inserat_id_fehlt";
+    /// <summary>1.5.16 (Wunsch Ahmad 13.10.2026, Inserat-Nummer sicher lesen): die Kennung wurde gelesen, aber keine zwei
+    /// Lesungen stimmen ueberein (oder die Stellenzahl passt nicht). Der Server (routes/werkzeuge.LesebildIn) nimmt nur die
+    /// vier Gruende oben an — deshalb geht dieser Grund als <see cref="InseratIdFehlt"/> mit
+    /// <c>fehlt: ["Inserat-ID unsicher"]</c> hinaus (<see cref="Nutzlast"/>); im Protokoll steht der eigene Grund.</summary>
+    public const string InseratIdUnsicher = "inserat_id_unsicher";
+    public const string InseratIdUnsicherText = "Inserat-ID unsicher";
 
     /// <summary>Groesser darf das PNG nicht sein (der Server lehnt mehr mit 413 ab). Eine Detailansicht ist als PNG
     /// meist 30-300 KB — die Grenze greift praktisch nur bei riesigen Bildschirmen mit hoher Skalierung.</summary>
@@ -143,8 +151,9 @@ internal static class Lesebilder
     }
 
     /// <summary>Anfrage an POST …/lesebild (Feldnamen wie routes/werkzeuge.LesebildIn): grund, rohtext (≤ 6000),
-    /// vorgang_id (oder null), bild (Base64-PNG); fehlt nur bei pflichtfeld_fehlt; fahrzeug nur, wenn eines gelesen
-    /// wurde (je Feld ≤ 160 Zeichen). (rein, fuer Tests)</summary>
+    /// vorgang_id (oder null), bild (Base64-PNG); fehlt bei pflichtfeld_fehlt (und 1.5.16: bei inserat_id_unsicher, das
+    /// als inserat_id_fehlt mit fehlt ["Inserat-ID unsicher"] geht — hoechstens 10 Eintraege); fahrzeug nur, wenn eines
+    /// gelesen wurde (je Feld ≤ 160 Zeichen). (rein, fuer Tests)</summary>
     public static Dictionary<string, object?> Nutzlast(Lesebild b)
     {
         static string K(string? s, int n)
@@ -152,15 +161,19 @@ internal static class Lesebilder
             s = (s ?? "").Trim();
             return s.Length > n ? s[..n] : s;
         }
+        bool unsicher = b.Grund == InseratIdUnsicher;
         var nutzlast = new Dictionary<string, object?>
         {
-            ["grund"] = b.Grund,
+            ["grund"] = unsicher ? InseratIdFehlt : b.Grund,
             ["rohtext"] = K(b.Rohtext, MaxRohtext),
             ["vorgang_id"] = b.VorgangId,
             ["bild"] = Convert.ToBase64String(b.Bild),
         };
-        if (b.Grund == PflichtfeldFehlt && b.Fehlt is { Count: > 0 })
-            nutzlast["fehlt"] = b.Fehlt.Select(f => K(f, 60)).Where(f => f.Length > 0).ToList();
+        if (unsicher)
+            nutzlast["fehlt"] = new[] { InseratIdUnsicherText }.Concat(b.Fehlt ?? Array.Empty<string>())
+                .Select(f => K(f, 60)).Where(f => f.Length > 0).Distinct(StringComparer.Ordinal).Take(10).ToList();
+        else if (b.Grund == PflichtfeldFehlt && b.Fehlt is { Count: > 0 })
+            nutzlast["fehlt"] = b.Fehlt.Select(f => K(f, 60)).Where(f => f.Length > 0).Take(10).ToList();
         if (b.Fahrzeug is { } f)
             nutzlast["fahrzeug"] = new Dictionary<string, string>
             {

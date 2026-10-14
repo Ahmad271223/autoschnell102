@@ -4436,7 +4436,7 @@ Suchern der Firma) – „alle anderen sollen das gar nicht sehen“.
   cd autopointer-vergleich && powershell -ExecutionPolicy Bypass -File build.ps1   # lokal: dist\AutoSchnell-Vergleich.exe
   scp dist/AutoSchnell-Vergleich.exe root@<server>:/tmp/                            # vom PC aus, nicht auf dem Server
   docker compose cp /tmp/AutoSchnell-Vergleich.exe backend:/tmp/AutoSchnell-Vergleich.exe
-  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.5.15
+  docker compose exec backend python scripts/werkzeug_hochladen.py /tmp/AutoSchnell-Vergleich.exe --version 1.5.16
   ```
   Bis dahin zeigt die Seite „Wird gerade bereitgestellt“. Speicher: `werkzeuge/autopointer-vergleich/…`, Eintrag in `werkzeuge`.
 - Tests: `backend/tests/test_werkzeuge_20261003.py`, `frontend/src/pages/app/Programme.test.jsx`,
@@ -4734,6 +4734,31 @@ Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
       Offen (Entscheidung Ahmad): UI-Automation-Probe an AutoPointer (A1 der Analyse) — braucht einen Test am echten PC.
     - Reihenfolge: Server + App ausrollen, dann Programm 1.5.15 und Erweiterung 2.7.5 hochladen. Mit älterem Server
       fehlt `zustand` (= `offen`), mit älterer App kommt kein `OEFFNEN_ERGEBNIS` (Box wie bisher) — nichts bricht.
+  - **Wunsch Ahmad 13.10.2026 „Inserat-Nummer sicher lesen“ — Programm 1.5.16** (Systemcheck 12.10.2026: die
+    14-stellige mobile.de-Nummer fehlt beim Kunden sehr oft, eine falsch gelesene Ziffer fiel nicht auf → fremdes Auto
+    im Kaufvertrag; Analyse `docs/inserat-id-sicher-lesen.md`, Abschnitt B1/B2/B6; nur Programm, Server-Teil
+    `inserat_id_unsicher` parallel):
+    - *Mehrheit (B2, `autopointer-vergleich/src/InseratNummer.cs`):* Inserat-ID und Hash-ID werden aus demselben
+      Abbild bis zu fünfmal gelesen (Durchgänge Zoom 3/2, zweiter Blick Farbe x5, Kontrast x4, **neu Schwarz/Weiß
+      mit Schwellwert x6** nur für die Kennungs-Zeilen, drei Engines gleichzeitig), jede Lesung normalisiert wie
+      `werkzeuge.inserat_nummer` (O→0, I/l/i/|→1, S→5, Z→2). Sicher nur bei zwei Zeichen für Zeichen gleichen
+      Lesungen UND passender Stellenzahl; sonst plausibelste Lesung als `inserat_id`, Rest als
+      `alternativen.inserat_id` und **`fahrzeug.inserat_id_unsicher: true`** in `POST …/vergleich` (nur bei true;
+      ältere Server ignorieren es — dann fehlt nur der Hinweis). Hash-ID nur sicher als Hauptwert (sonst leer wie
+      bisher); bei AutoScout entscheidet sie über „unsicher“. Eine einzelne Lesung (zweiter Blick fehlgeschlagen) ist
+      unsicher; keine Lesung ist „fehlt“.
+    - *Stellenzahl (B1):* mobile.de 9 oder 14, Kleinanzeigen 9–11, unbekanntes Portal 9–14, AutoScout-Inserat-ID
+      6–20; Portal auch aus abgeschnittener Quelle („Mo...“, „Klei...“, „Aut...“).
+    - *Lesebild:* bei unsicher Grund `inserat_id_unsicher` (Protokoll), beim Server als `inserat_id_fehlt` +
+      `fehlt: ["Inserat-ID unsicher"]` (`LesebildIn` kennt nur die vier Gründe); Dedupe je Auto wie bisher.
+    - *Leiste:* nichts Neues — der Server meldet „Inserat-Nummer … unsicher gelesen – bitte im Inserat prüfen“ über
+      `melden`; „Vertrag“ läuft weiter (der Server entscheidet).
+    - *Schrift zu klein (B6):* Zeilenabstand der Technik-Tabelle unter 16 px (normal ≈ 22) → einmal je Programmlauf
+      die Sprechblase „AutoPointer-Schrift ist sehr klein – Zoom in AutoPointer erhöhen …“; nur Hinweis. Keine
+      UI-Automation/MSAA, keine Tasten/Klicks in AutoPointer, kein PrintWindow (Entscheidung steht aus).
+    - Tests `InseratNummerTests`, `ZweiterBlickTests`, `UeberwacherTests`, `LesebildTests` (431 Tests). Hochladen wie
+      oben mit `--version 1.5.16`; Reihenfolge: Server mit `inserat_id_unsicher` zuerst, dann das Programm (mit
+      älterem Server bricht nichts, es fehlt nur der Unsicher-Hinweis).
   - **Kaufvertrag/Abholprotokoll (Wunsch Ahmad 09.10.2026):** „Datum und Ort“ bei Verkäufer UND Käufer = Ort des
     Kunden (`pdf_service._uebergabe_ort`; Dialog befüllt den Käufer-Ort nicht mehr aus dem Firmensitz); unter den
     Unterschriften kein Satz mehr; „Erfassung anhand der Fahrzeugskizze …“ und „Ausstattung laut Inseratsangaben.“

@@ -258,6 +258,26 @@ internal static class DetailLeser
         return ergebnis;
     }
 
+    /// <summary>Wunsch Ahmad 13.10.2026 (1.5.16, B6 "Schrift zu klein"): der Zeilenabstand der Technik-Tabelle — Median des
+    /// Abstands von Oberkante zu Oberkante aufeinanderfolgender erkannter Reihen, in Pixeln des Abbilds (bei 100 % und
+    /// AutoPointers Standardschrift ≈ 22 px; die Schrift selbst ist ≈ 13 px hoch). Unter etwa
+    /// <see cref="SchriftKleinPx"/> liest jede Texterkennung Ziffern schlecht — dann bekommt der Sucher einmal den Hinweis,
+    /// den Zoom in AutoPointer zu erhoehen. null, wenn weniger als drei Reihen erkannt wurden (kein verlaesslicher Wert).
+    /// (rein, fuer Tests)</summary>
+    internal static double? Zeilenabstand(IReadOnlyList<OcrZeile> zeilen)
+    {
+        if (zeilen.Count == 0) return null;
+        var oben = Zeilen(zeilen).Select(z => z.Oben).OrderBy(y => y).ToList();
+        if (oben.Count < 3) return null;
+        var abstaende = new List<double>();
+        for (int i = 1; i < oben.Count; i++) abstaende.Add(oben[i] - oben[i - 1]);
+        abstaende.Sort();
+        return abstaende[abstaende.Count / 2];
+    }
+
+    /// <summary>Unter diesem Zeilenabstand (Pixel) gilt AutoPointers Schrift als sehr klein (B6).</summary>
+    internal const double SchriftKleinPx = 16;
+
     private static List<List<OcrZeile>> InReihen(IReadOnlyList<OcrZeile> zeilen)
     {
         var hoehen = zeilen.Select(z => z.Hoehe).OrderBy(h => h).ToList();
@@ -460,8 +480,18 @@ internal static class DetailLeser
         };
         (f.EzMonat, f.EzJahr) = Erstzulassung(tab.GetValueOrDefault(Feld.Erstzulassung));
         (f.Kw, f.Ps, f.LeistungUnsicher) = LeistungGeprueft(tab.GetValueOrDefault(Feld.Leistung));
-        if (tab.TryGetValue(Feld.InseratId, out var id)) f.InseratId = InseratIdSauber(id);
-        f.HashId = HashId(tab.GetValueOrDefault(Feld.HashId));
+        // 1.5.16 (Wunsch Ahmad 13.10.2026): jede rohe Lesung der Kennung merken — die Mehrheit ueber alle Durchgaenge und
+        // den zweiten Blick bildet InseratNummer.Uebernehmen (sie setzt InseratId/HashId am Ende noch einmal)
+        if (tab.TryGetValue(Feld.InseratId, out var id))
+        {
+            f.InseratId = InseratIdSauber(id);
+            f.InseratIdLesungen.Add(id);
+        }
+        if (tab.TryGetValue(Feld.HashId, out var hash))
+        {
+            f.HashId = HashId(hash);
+            f.HashIdLesungen.Add(hash);
+        }
         var (quelle, titel, preis) = Kopf(kopf, kopfBreite);
         f.Quelle = quelle;
         f.Titel = titel;
@@ -508,6 +538,9 @@ internal static class DetailLeser
         a.InseratId ??= b.InseratId;
         // Hash-ID bewusst NICHT ergaenzen: sie gilt nur, wenn beide Durchlaeufe dasselbe lesen
         // (AutoPointerQuelle.LiesBilderAsync) — lieber kein Link als ein falscher.
+        // 1.5.16: die Lesungen des anderen Durchlaufs zaehlen zur Mehrheit der Kennung mit
+        a.InseratIdLesungen.AddRange(b.InseratIdLesungen);
+        a.HashIdLesungen.AddRange(b.HashIdLesungen);
         a.Quelle ??= b.Quelle;
         a.Titel ??= b.Titel;
         return a;

@@ -41,6 +41,19 @@ internal sealed class Fahrzeug
     public List<string> AlternativenKraftstoff { get; set; } = new();
     public List<string> AlternativenInseratId { get; set; } = new();
 
+    /// <summary>Wunsch Ahmad 13.10.2026 (1.5.16, Inserat-Nummer sicher lesen): alle rohen Lesungen der Zeile "Inserat-ID"
+    /// aus den Durchgaengen (erster Durchgang Zoom 3, zweiter Durchlauf Zoom 2) — der zweite Blick legt seine drei dazu und
+    /// bildet die Mehrheit (<see cref="InseratNummer.Uebernehmen"/>). Nur zum Lesen, geht nicht an den Server.</summary>
+    public List<string?> InseratIdLesungen { get; } = new();
+    /// <summary>Dasselbe fuer die Zeile "Hash-ID" (AutoScout).</summary>
+    public List<string?> HashIdLesungen { get; } = new();
+    /// <summary>1.5.16: die Kennung (Inserat-ID; bei AutoScout die Hash-ID) wurde gelesen, aber keine zwei Lesungen stimmten
+    /// Zeichen fuer Zeichen ueberein oder die Stellenzahl passt nicht zum Portal — <see cref="InseratId"/> ist dann nur die
+    /// plausibelste Lesung (oder null). Geht als <c>fahrzeug.inserat_id_unsicher: true</c> an den Server (der meldet
+    /// "unsicher gelesen – bitte im Inserat pruefen" und baut keinen sicheren Link daraus); ein Lesebild geht mit.
+    /// false auch, wenn die Zeile gar nicht gelesen wurde (das ist "fehlt", nicht "unsicher").</summary>
+    public bool InseratIdUnsicher { get; set; }
+
     /// <summary>Pruefbericht 03.10.2026 (Nr. 1): Kennung des Inserats (Inserat-ID, sonst AutoScout-Hash-ID), klein
     /// und ohne Leer-/Sonderzeichen; null ohne Kennung. Bewusst OHNE Quelle — die steht in einer anderen Zeile
     /// und darf als Lesefehler nicht aus demselben Auto zwei machen.</summary>
@@ -106,7 +119,9 @@ internal sealed class Fahrzeug
         if (Zustand != null) rest.Add($"Zustand: {Zustand}");
         if (Kategorie != null) rest.Add($"Kategorie: {Kategorie}");
         if (Quelle != null) rest.Add($"Quelle: {Quelle}");
-        if (InseratId != null) rest.Add($"Inserat-ID: {InseratId}");
+        // 1.5.16: im Protokoll sieht man, ob die Nummer sicher war
+        if (InseratId != null) rest.Add($"Inserat-ID: {InseratId}" + (InseratIdUnsicher ? " (unsicher gelesen)" : ""));
+        else if (InseratIdUnsicher) rest.Add("Inserat-ID: unsicher gelesen (keine plausible Lesung)");
         if (rest.Count > 0) yield return string.Join("   ", rest);
     }
 }

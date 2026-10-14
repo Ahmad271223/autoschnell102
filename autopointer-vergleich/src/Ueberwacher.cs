@@ -9,7 +9,11 @@ internal readonly record struct QuellenZustand(Lage Lage, ulong Summe);
 /// <param name="Bild">1.5.13 (Wunsch Ahmad 09.10.2026): genau das Bild, das die Texterkennung gelesen hat (Kopf ueber Technik,
 /// PNG, 24 Bit, ≤ 1,5 MB) — geht an AutoSchnell, wenn das Auto nicht erkannt wird. null: kein Bild (Tests, Einstellung aus,
 /// Kodieren fehlgeschlagen). Lebt nur mit dieser Lesung — nach dem Verarbeiten ist es weg, es wird nie je Auto gesammelt.</param>
-internal sealed record Lesung(Fahrzeug Fahrzeug, bool Leer, string Rohtext, string Weg = "", byte[]? Bild = null);
+/// <param name="Zeilenabstand">1.5.16 (Wunsch Ahmad 13.10.2026, B6): Zeilenabstand der Technik-Tabelle in Pixeln
+/// (<see cref="DetailLeser.Zeilenabstand"/>) — unter <see cref="DetailLeser.SchriftKleinPx"/> ist AutoPointers Schrift sehr
+/// klein; null = nicht bestimmbar (Tests, zu wenige Reihen).</param>
+internal sealed record Lesung(Fahrzeug Fahrzeug, bool Leer, string Rohtext, string Weg = "", byte[]? Bild = null,
+                              double? Zeilenabstand = null);
 
 /// <summary>Pruefung 08.10.2026 (1.5.9, C): eine Meldung an den Sucher. Windows schneidet Sprechblasen bei ~255 Zeichen
 /// ab — die langen Anleitungen (Inserat-ID ≈ 400, Hash-ID ≈ 360 Zeichen) verloren genau ihre Anweisungen. Deshalb kommt
@@ -155,6 +159,10 @@ internal sealed class Ueberwacher
     internal const int WiederholMs = 5000;
     /// <summary>1.5.9 (C): der lange Inserat-ID-/Hash-ID-Hinweis kommt hoechstens einmal je Programmlauf als Sprechblase.</summary>
     private bool _inseratHinweisGezeigt;
+    /// <summary>1.5.16 (Wunsch Ahmad 13.10.2026, B6): der Hinweis zur kleinen AutoPointer-Schrift kommt einmal je Programmlauf.</summary>
+    private bool _schriftHinweisGezeigt;
+    internal const string SchriftKleinHinweis =
+        "AutoPointer-Schrift ist sehr klein – Zoom in AutoPointer erhöhen, dann liest das Programm die Nummern sicherer.";
     /// <summary>Original-Inserat des zuletzt verglichenen Autos (fuer "Vertrag": in AutoSchnell oeffnen).</summary>
     public string? LetzteInseratUrl { get; private set; }
     // ---- Wunsch Ahmad 09.10.2026 (1.5.13): Bild der Anzeige bei nicht erkannten Autos an AutoSchnell -----------------
@@ -463,6 +471,14 @@ internal sealed class Ueberwacher
             Protokoll.Schreibe("Detailansicht ohne lesbaren Text – nichts zu tun.");
             return;
         }
+        // 1.5.16 (Wunsch Ahmad 13.10.2026, B6): sehr kleine Schrift in AutoPointer — einmal je Programmlauf sagen, nur ein
+        // Hinweis (nichts wird erzwungen, AutoPointer bleibt unberuehrt)
+        if (lesung.Zeilenabstand is { } zeilenabstand && zeilenabstand < DetailLeser.SchriftKleinPx && !_schriftHinweisGezeigt)
+        {
+            _schriftHinweisGezeigt = true;
+            Protokoll.Schreibe($"AutoPointer-Schrift sehr klein (Zeilenabstand {zeilenabstand:0} px, normal ≈ 22) – Hinweis an den Sucher.");
+            Melde(SchriftKleinHinweis, false);
+        }
         var fehlt = DetailLeser.Fehlend(f);
         if (fehlt.Count > 0)
         {
@@ -591,8 +607,13 @@ internal sealed class Ueberwacher
         else if (antwort.VorabStatus is "limit" or "fehler" && antwort.VorabHinweis.Length > 0)
             vorabHinweis = "Für den Kaufvertrag nicht vorab ausgelesen: " + antwort.VorabHinweis;
         // 1.5.13: Inserat-ID (mobile.de/Kleinanzeigen) bzw. Hash-ID (AutoScout) nicht gelesen — das Bild zeigt, ob die Zeile
-        // fehlte oder nur falsch gelesen wurde (nicht noch einmal, wenn fuer dieses Auto schon ein Bild ging)
-        if (inseratLang != null) LesebildSenden(lesung, Lesebilder.InseratIdFehlt, e, vorgangId: antwort.VorgangId);
+        // fehlte oder nur falsch gelesen wurde (nicht noch einmal, wenn fuer dieses Auto schon ein Bild ging).
+        // 1.5.16 (Wunsch Ahmad 13.10.2026): auch, wenn die Kennung gelesen, aber UNSICHER ist (keine zwei Lesungen gleich,
+        // Stellenzahl falsch) — Grund inserat_id_unsicher, beim Server als inserat_id_fehlt mit fehlt ["Inserat-ID unsicher"]
+        // (er kennt nur die vier Gruende). Den Hinweis "unsicher gelesen – bitte pruefen" meldet der Server (melden).
+        if (f.InseratIdUnsicher)
+            LesebildSenden(lesung, Lesebilder.InseratIdUnsicher, e, new[] { Lesebilder.InseratIdUnsicherText }, antwort.VorgangId);
+        else if (inseratLang != null) LesebildSenden(lesung, Lesebilder.InseratIdFehlt, e, vorgangId: antwort.VorgangId);
         // 1.5.8 (Wunsch Ahmad 08.10.2026): die Portalwahl steht in AutoSchnell, der Server schickt nur deren Links —
         // hier nur noch die beiden bekannten Vergleichsportale (alles andere ignorieren)
         var links = antwort.Links.Where(l => l.Portal is "mobile.de" or "AutoScout24").ToList();
@@ -1144,24 +1165,29 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
         {
             zt2 = zweiter != null ? zweiter.Result : await ocr.LiesAsync(technik, faktor * 2 / 3);
             var f2 = DetailLeser.Auswerten(zt2, zk, kopf?.Width ?? 0);
-            // Hash-ID (fuer den AutoScout-Link) nur, wenn beide Durchlaeufe genau dasselbe lesen
-            string? hash = f.HashId != null && f.HashId == f2.HashId ? f.HashId : null;
+            // Hash-ID (fuer den AutoScout-Link) nur, wenn mehrere Lesungen genau dasselbe lesen — seit 1.5.16 die Mehrheit
+            // ueber beide Durchlaeufe und den zweiten Blick (InseratNummer.Uebernehmen, unten), vorher "beide Durchlaeufe gleich"
             f = DetailLeser.Ergaenzen(f, f2);
-            f.HashId = hash;
             roh += "  ||  2. Durchlauf: " + Rohtext(zt2, Array.Empty<OcrZeile>());
         }
-        // 1.5.12 (Befund Ahmad 09.10.2026): zweiter Blick auf Marke/Modell, Kraftstoff, Inserat-ID — aus demselben Abbild,
-        // hoechstens 10 s, Fehler nur ins Protokoll. Fehlt eine Pflichtangabe, geht ohnehin nichts an den Server: dann nicht.
+        // 1.5.12 (Befund Ahmad 09.10.2026): zweiter Blick auf Marke/Modell, Kraftstoff, Inserat-ID (1.5.16: auch Hash-ID) —
+        // aus demselben Abbild, hoechstens 10 s, Fehler nur ins Protokoll. Fehlt eine Pflichtangabe, geht ohnehin nichts
+        // an den Server: dann nicht.
+        string? blick = null;
         if (zweiterBlick && DetailLeser.Fehlend(f).Count == 0)
         {
-            // Lage der Zeilen aus dem ersten Durchgang; was er nicht fand, aus dem zweiten (falls schon gelesen)
-            string? blick = await ZweiterBlick.AnwendenAsync(f, technik, zt, zt2 ?? zweiter?.Result, dpi, ocr, ocrZweiter);
+            // Lage der Zeilen aus dem ersten Durchgang; was er nicht fand, aus dem zweiten (falls schon gelesen).
+            // 1.5.16: die Kopf-Engine ist hier schon frei — sie liest die dritte Aufbereitung gleichzeitig mit
+            blick = await ZweiterBlick.AnwendenAsync(f, technik, zt, zt2 ?? zweiter?.Result, dpi, ocr, ocrZweiter, ocrKopf);
             if (blick != null) roh += "  ||  2. Blick: " + blick;
         }
+        // 1.5.16 (Wunsch Ahmad 13.10.2026): ohne zweiten Blick (uebersprungen, Zeile nicht gefunden, fehlgeschlagen) bildet
+        // die Mehrheit der Kennung allein aus den Durchgaengen — eine einzelne Lesung ist dann "unsicher", nie "sicher"
+        if (blick == null) InseratNummer.Uebernehmen(f, Enumerable.Empty<string?>(), Enumerable.Empty<string?>());
         if (bilderSpeichern) Speichere(technik, kopf, roh);
         // 1.5.13: das PNG ist laengst fertig (lief neben der Texterkennung); Fehler hat PngImHintergrund schon protokolliert
         byte[]? bild = png != null ? await png : null;
-        return new Lesung(f, zt.Count == 0, roh, Bild: bild);
+        return new Lesung(f, zt.Count == 0, roh, Bild: bild, Zeilenabstand: DetailLeser.Zeilenabstand(zt));
     }
 
     private static string Rohtext(IEnumerable<OcrZeile> technik, IEnumerable<OcrZeile> kopf) =>

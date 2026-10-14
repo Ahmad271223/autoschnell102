@@ -143,29 +143,40 @@ public class ZweiterBlickTests
         Assert.Equal(new[] { "VW T-Roc" }, ZweiterBlick.Alternativen(Feld.MarkeModell, "", new[] { "VW T-Roc" }));
     }
 
-    [Fact]   // fehlt die Inserat-ID aus dem ersten Durchgang, nimmt das Programm die erste Lesung des zweiten Blicks
-    public void Inserat_ID_aus_dem_zweiten_Blick_nur_wenn_der_erste_keine_hatte()
+    [Fact]   // 1.5.16 (Wunsch Ahmad 13.10.2026): die Inserat-ID entscheidet die Mehrheit ueber ALLE Lesungen (Durchgaenge + zweiter Blick)
+    public void Inserat_ID_aus_dem_zweiten_Blick_per_Mehrheit()
     {
-        var f = Passat();
+        var f = Passat();                                                           // Kleinanzeigen, erster Durchgang "3529712138"
+        f.InseratIdLesungen.Clear();                                                // ... hier: der erste Durchgang las nichts
         f.InseratId = null;
+        f.HashIdLesungen.Add("ee31ae2a-9d2f-4c62-b078-cc6af83d3f1d");
         f.HashId = "ee31ae2a-9d2f-4c62-b078-cc6af83d3f1d";
         ZweiterBlick.Uebernehmen(f, new Dictionary<Feld, List<string?>>
         {
-            [Feld.InseratId] = new() { "3529712138", "35297I2138" },
-            [Feld.MarkeModell] = new() { "VW Passat Variant", "VW Passat Varlant" },
-            [Feld.Kraftstoff] = new() { null, "Diesel" },
+            [Feld.InseratId] = new() { "3529712138", "35297I2138", null },         // I -> 1: zweimal dieselbe Nummer -> sicher
+            [Feld.MarkeModell] = new() { "VW Passat Variant", "VW Passat Varlant", null },
+            [Feld.Kraftstoff] = new() { null, "Diesel", null },
         });
         Assert.Equal("3529712138", f.InseratId);
-        Assert.Equal(new[] { "35297I2138" }, f.AlternativenInseratId);              // die genommene ist keine Alternative
-        Assert.Equal("ee31ae2a-9d2f-4c62-b078-cc6af83d3f1d", f.HashId);             // Hash-ID-Regel unveraendert
+        Assert.False(f.InseratIdUnsicher);
+        Assert.Empty(f.AlternativenInseratId);                                      // normalisiert gleich: keine Alternative
+        Assert.Null(f.HashId);                                                      // Hash-ID nur einmal gelesen: nicht sicher — aber
+        Assert.False(f.InseratIdUnsicher);                                          // bei Kleinanzeigen zaehlt die Inserat-ID
         Assert.Equal(new[] { "VW Passat Varlant" }, f.AlternativenMarkeModell);
         Assert.Empty(f.AlternativenKraftstoff);
         Assert.Equal("VW Passat Variant", f.MarkeModellText);                       // Hauptwerte bleiben
 
-        var g = Passat();                                                           // ID gelesen: bleibt
-        ZweiterBlick.Uebernehmen(g, new Dictionary<Feld, List<string?>> { [Feld.InseratId] = new() { "3529712I38" } });
+        var g = Passat();                                                           // erster Durchgang "3529712138" + zweiter Blick gleich
+        ZweiterBlick.Uebernehmen(g, new Dictionary<Feld, List<string?>> { [Feld.InseratId] = new() { "3529712I38", null, null } });
         Assert.Equal("3529712138", g.InseratId);
-        Assert.Equal(new[] { "3529712I38" }, g.AlternativenInseratId);
+        Assert.False(g.InseratIdUnsicher);
+        Assert.Empty(g.AlternativenInseratId);
+
+        var h = Passat();                                                           // alle verschieden: unsicher, alles als Alternativen
+        ZweiterBlick.Uebernehmen(h, new Dictionary<Feld, List<string?>> { [Feld.InseratId] = new() { "3529712188", "3529712B38", null } });
+        Assert.Equal("3529712138", h.InseratId);                                    // die erste plausible (Durchgang) bleibt Hauptwert
+        Assert.True(h.InseratIdUnsicher);
+        Assert.Equal(new[] { "3529712188", "3529712B38" }, h.AlternativenInseratId);
     }
 
     [Fact]
@@ -222,6 +233,18 @@ public class ZweiterBlickTests
                     Assert.True(mitte.R < 60 && mitte.R == mitte.G && mitte.G == mitte.B, mitte.ToString());   // dunkel, grau
                     Assert.Equal(Color.White.ToArgb(), ecke.ToArgb());             // Hintergrund weiss
                 }
+                else if (art == ZweiterBlick.Aufbereitung.SchwarzWeiss)
+                {
+                    // 1.5.16: Schwellwert — Schrift ganz schwarz, Hintergrund ganz weiss, nichts dazwischen
+                    Assert.Equal(Color.Black.ToArgb(), mitte.ToArgb());
+                    Assert.Equal(Color.White.ToArgb(), ecke.ToArgb());
+                    for (int x = 0; x < bild.Width; x += 7)
+                        for (int y = 0; y < bild.Height; y += 5)
+                        {
+                            var p = bild.GetPixel(x, y);
+                            Assert.True(p.R is 0 or 255 && p.R == p.G && p.G == p.B, $"({x},{y}) {p}");
+                        }
+                }
                 else
                 {
                     Assert.True(mitte.R > 200 && mitte.G > 200, mitte.ToString());  // Farbe wie angezeigt
@@ -229,8 +252,11 @@ public class ZweiterBlickTests
                 }
             }
         }
-        Assert.Equal(new[] { 5.0, 4.0 }, ZweiterBlick.Reihenfolge.Select(a => ZweiterBlick.Zoom(a, 96)));
-        Assert.Equal(new[] { 2.5, 2.0 }, ZweiterBlick.Reihenfolge.Select(a => ZweiterBlick.Zoom(a, 192)));
+        Assert.Equal(new[] { 5.0, 4.0, 6.0 }, ZweiterBlick.Reihenfolge.Select(a => ZweiterBlick.Zoom(a, 96)));
+        Assert.Equal(new[] { 2.5, 2.0, 3.0 }, ZweiterBlick.Reihenfolge.Select(a => ZweiterBlick.Zoom(a, 192)));
+        // 1.5.16: Schwarz/Weiss liest nur die Kennungs-Zeilen, die beiden anderen Aufbereitungen alle Felder
+        Assert.Equal(new[] { Feld.InseratId, Feld.HashId }, ZweiterBlick.Felder.Where(f => ZweiterBlick.Liest(ZweiterBlick.Aufbereitung.SchwarzWeiss, f)));
+        Assert.All(ZweiterBlick.Felder, f => Assert.True(ZweiterBlick.Liest(ZweiterBlick.Aufbereitung.Gross, f) && ZweiterBlick.Liest(ZweiterBlick.Aufbereitung.Kontrast, f)));
     }
 
     // ---- Ablauf: ueberspringen, Fehler, Frist ---------------------------------------------------------------------
@@ -337,25 +363,51 @@ public class ZweiterBlickTests
                                  ("Kilometerstand:", "61.000 km"), ("Kraftstoff:", "Elektro"), ("Inserat-ID:", "3529712138"));
         var zt = await ocr.LiesAsync(bild, 3);
         var bereiche = DetailLeser.WertBereiche(zt, bild.Width, bild.Height, ZweiterBlick.Felder);
-        Assert.Equal(3, bereiche.Count);
-        var liste = ZweiterBlick.Felder.Select(f => (f, bereiche[f])).ToList();
+        Assert.Equal(3, bereiche.Count);                             // keine Hash-ID-Zeile in dieser Tabelle
+        var liste = ZweiterBlick.Felder.Where(bereiche.ContainsKey).Select(f => (f, bereiche[f])).ToList();
         var gelesen = await ZweiterBlick.LesenAsync(bild, liste, 96, ocr, ocr2);
         foreach (var (feld, l) in gelesen) _aus.WriteLine($"{feld}: {string.Join(" / ", l)}");
-        // je Feld genau eine Lesung je Aufbereitung, und jede Lesung ist nur der Wert (nicht die Bezeichnung,
-        // nicht die Nachbarzeile)
+        // je Feld genau ein Eintrag je Aufbereitung (1.5.16: drei — Schwarz/Weiss liest nur die Inserat-ID, die anderen
+        // Felder haben dort null), und jede Lesung ist nur der Wert (nicht die Bezeichnung, nicht die Nachbarzeile)
         Assert.All(gelesen.Values, l => Assert.Equal(ZweiterBlick.Reihenfolge.Length, l.Count));
+        Assert.Null(gelesen[Feld.MarkeModell][2]);
+        Assert.Null(gelesen[Feld.Kraftstoff][2]);
         Assert.Contains("Hyundai i30", gelesen[Feld.MarkeModell].Select(s => ZweiterBlick.Saeubern(Feld.MarkeModell, s)));
         Assert.Contains("Elektro", gelesen[Feld.Kraftstoff].Select(s => ZweiterBlick.Saeubern(Feld.Kraftstoff, s)));
         Assert.Contains("3529712138", gelesen[Feld.InseratId].Select(s => ZweiterBlick.Saeubern(Feld.InseratId, s)));
+        // 1.5.16: mindestens zwei der drei Aufbereitungen lesen die Nummer gleich — sonst waere sie nie "sicher"
+        Assert.True(gelesen[Feld.InseratId].Select(InseratNummer.Normalisieren).Count(s => s == "3529712138") >= 2,
+                    string.Join(" / ", gelesen[Feld.InseratId]));
         Assert.All(gelesen.Values.SelectMany(l => l), s => Assert.DoesNotContain(":", s ?? ""));
 
-        // im ganzen Lesen: Rohtext nennt den zweiten Blick, Alternativen weichen immer vom Hauptwert ab
+        // im ganzen Lesen: Rohtext nennt den zweiten Blick, Alternativen weichen immer vom Hauptwert ab, die Nummer ist sicher
         var lesung = await AutoPointerQuelle.LiesBilderAsync(ocr, bild, null, 96, false);
         Assert.Contains("2. Blick:", lesung.Rohtext);
         var f = lesung.Fahrzeug;
         Assert.DoesNotContain(f.MarkeModellText, f.AlternativenMarkeModell);
         Assert.DoesNotContain(f.Kraftstoff, f.AlternativenKraftstoff);
         Assert.DoesNotContain(f.InseratId, f.AlternativenInseratId);
+        Assert.Equal("3529712138", f.InseratId);
+        Assert.False(f.InseratIdUnsicher);
+        Assert.InRange(lesung.Zeilenabstand!.Value, 20, 24);         // gezeichnet: 22 px je Zeile — keine "kleine Schrift"
+    }
+
+    [Fact]   // 1.5.16: ohne zweiten Blick (Messung/Tests) ist eine EINZELN gelesene Nummer "unsicher", nie "sicher"
+    public async Task Ohne_zweiten_Blick_ist_eine_einzelne_Lesung_unsicher()
+    {
+        var ocr = TextErkennung.Erstelle(out _);
+        if (ocr == null) return;                                     // keine Texterkennung auf diesem PC
+        // vollstaendige Tabelle: kein zweiter Durchlauf (der laeuft nur bei fehlenden Feldern oder Hash-ID) -> eine Lesung
+        using var bild = Tabelle(("Marke, Modell:", "VW Golf"), ("Erstzulassung:", "05/2019"), ("Kilometerstand:", "61.000 km"),
+                                 ("Leistung:", "110 kW (150 PS)"), ("Getriebeart:", "Automatik"), ("Kraftstoff:", "Benzin"),
+                                 ("Inserat-ID:", "3529712138"));
+        var lesung = await AutoPointerQuelle.LiesBilderAsync(ocr, bild, null, 96, false, zweiterBlick: false);
+        var f = lesung.Fahrzeug;
+        _aus.WriteLine(lesung.Rohtext);
+        Assert.Single(f.InseratIdLesungen);
+        Assert.Equal("3529712138", f.InseratId);
+        Assert.True(f.InseratIdUnsicher);
+        Assert.Equal(true, AutoSchnellDienst.Nutzlast(f)["inserat_id_unsicher"]);
     }
 
     /// <summary>Der erste Durchgang hat ein Wort verschluckt ("Golf" statt "VW Golf", "BMW" statt "BMW X1" — gemessen

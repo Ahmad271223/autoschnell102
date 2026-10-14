@@ -199,6 +199,41 @@ dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und 
   * Nicht umgesetzt (Entscheidung Ahmad): `&vertrag=1` am Programm-Ziel.
   * Tests: `VertragsWegTests` (Lesungsstände, AppStartWeg, Browser der Lesung, Leiste), `AutoSchnellAppTests`
     (Helfer-Vorrang, Überspring-Merker), `DienstTests`/`PruefberichtTests` (Sperre, `zustand`) — 377 Tests.
+* **1.5.16 (Wunsch Ahmad 13.10.2026 „Inserat-Nummer sicher lesen“; Systemcheck 12.10.2026: beim Kunden fehlt die
+  14-stellige mobile.de-Nummer sehr oft, und eine falsch gelesene Ziffer, die trotzdem eine Ziffer ist, fiel nicht auf —
+  fremdes Auto im Kaufvertrag; Analyse `docs/inserat-id-sicher-lesen.md`, Abschnitt B) — die Nummer ist entweder SICHER
+  oder als unsicher markiert:**
+  * **Mehrfachlesung mit Mehrheit (B2, `InseratNummer`):** die Zeile „Inserat-ID“ (mobile.de/Kleinanzeigen) und die
+    „Hash-ID“ (AutoScout, jetzt auch im zweiten Blick) werden aus demselben Abbild bis zu fünfmal gelesen — erster
+    Durchgang (Zoom 3), zweiter Durchlauf (Zoom 2, wenn er ohnehin läuft) und drei Aufbereitungen des zweiten Blicks:
+    Farbe Zoom 5, Graustufen Zoom 4 mit Kontrast und **neu Schwarz/Weiß mit Schwellwert bei Zoom 6**
+    (`ZweiterBlick.Aufbereitung.SchwarzWeiss`, nur für die Kennungs-Zeilen; drei Engines gleichzeitig — die Kopf-Engine
+    ist dann frei). Jede Lesung wird normalisiert wie `backend/werkzeuge.inserat_nummer` (nur die Zelle rechts der
+    Beschriftung, Leerzeichen raus, O→0, I/l/i/|→1, S→5, Z→2; B/G bleiben stehen). **Sicher** = mindestens zwei
+    Lesungen Zeichen für Zeichen gleich UND die Stellenzahl passt. Sonst: Hauptwert = die plausibelste Lesung (oder
+    leer), alle verschiedenen Lesungen als `alternativen.inserat_id` (≤ 3) und **neu `fahrzeug.inserat_id_unsicher:
+    true`** in der Nutzlast an `/vergleich` (nur bei true dabei; der Server kennt es seit 13.10., ältere ignorieren es).
+    Die Hash-ID bleibt wie bisher nur als sichere Hauptwert (zweimal gleich, vollständige UUID), sonst leer — lieber
+    kein Link als ein falscher; bei AutoScout entscheidet sie über „unsicher“, sonst die Inserat-ID. Ohne zweiten Blick
+    (fehlgeschlagen, Zeile nicht gefunden) bildet das Programm die Mehrheit aus den Durchgängen allein — eine einzelne
+    Lesung ist dann unsicher, nie sicher. Gar keine Lesung ist „fehlt“, nicht „unsicher“.
+  * **Stellenzahl je Portal (B1, `InseratNummer.StellenzahlPasst`):** mobile.de genau 9 oder 14 Ziffern, Kleinanzeigen
+    9–11, unbekanntes Portal (Quelle nicht gelesen) 9–14, AutoScout-Inserat-ID wie der Server 6–20 (zählt dort nicht
+    für den Link); die Hash-ID muss eine vollständige UUID sein. Das Portal kommt wie `werkzeuge.quelle_code` auch aus
+    abgeschnittenen Quellen („Mo...“, „Klei...“, „Aut...“).
+  * **Lesebild bei unsicher:** Grund `inserat_id_unsicher` (im Protokoll) — beim Server als `inserat_id_fehlt` mit
+    `fehlt: ["Inserat-ID unsicher"]` (er kennt nur die vier Gründe, `fehlt` ist frei, ≤ 10); Dedupe je Auto wie bisher.
+    Fehlt die Adresse UND ist die Nummer unsicher, gilt der Grund unsicher.
+  * **Leiste:** der Hinweis „Inserat-Nummer … unsicher gelesen – bitte im Inserat prüfen“ kommt vom Server (`melden`)
+    wie andere Hinweise; „Vertrag“ funktioniert mit unsicherer Nummer weiter (der Server entscheidet über den Link).
+    Im Protokoll steht „Inserat-ID: … (unsicher gelesen)“.
+  * **Schrift zu klein (B6):** liegt der Zeilenabstand der Technik-Tabelle (`DetailLeser.Zeilenabstand`, Median
+    Oberkante zu Oberkante, normal ≈ 22 px) unter 16 px, einmal je Programmlauf die Sprechblase „AutoPointer-Schrift ist
+    sehr klein – Zoom in AutoPointer erhöhen, dann liest das Programm die Nummern sicherer.“ — nur ein Hinweis, nichts
+    wird erzwungen; keine UI-Automation, keine Tasten, kein PrintWindow.
+  * Tests: `InseratNummerTests` (Normalisieren, Portal, Stellenzahl, Mehrheit, Hash, Nutzlast, Zeilenabstand),
+    `ZweiterBlickTests` (dritte Aufbereitung, Mehrheit mit echter Texterkennung), `UeberwacherTests` (Lesebild bei
+    unsicher, Schrift-Hinweis), `LesebildTests` (Grund-Abbildung) — 431 Tests.
 * **1.5.14 (Prüfung 09.10., Wunsch Ahmad „dass AutoPointer nicht meckert“) — AutoPointer nie stören, hängen lassen
   oder ihm Fokus/Tasten nehmen:**
   * **Nach vorne holen** (`BrowserOeffner.ZurueckZu`, vor „Vergleichen“ und bei „Danach zurück zu AutoPointer“): kein

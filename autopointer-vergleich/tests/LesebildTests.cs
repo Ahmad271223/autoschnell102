@@ -113,12 +113,30 @@ public class LesebildTests
         Assert.Equal("AQID", r.GetProperty("bild").GetString());
         Assert.Equal(JsonValueKind.Null, r.GetProperty("vorgang_id").ValueKind);    // ohne Vorgang ausdruecklich null
 
-        // "fehlt" nur bei pflichtfeld_fehlt; ohne Fahrzeug kein "fahrzeug"; die Vorgangsnummer geht mit
+        // "fehlt" nur bei pflichtfeld_fehlt (und 1.5.16: inserat_id_unsicher); ohne Fahrzeug kein "fahrzeug"; die Vorgangsnummer geht mit
         var n2 = Lesebilder.Nutzlast(new Lesebild(Lesebilder.MarkeUnbekannt, new byte[] { 1 }, "roh", null, new[] { "Erstzulassung" }, "abc"));
         Assert.False(n2.ContainsKey("fehlt"));
         Assert.False(n2.ContainsKey("fahrzeug"));
         Assert.Equal("abc", n2["vorgang_id"]);
         Assert.Equal(new[] { "pflichtfeld_fehlt", "marke_unbekannt", "modell_unbekannt", "inserat_id_fehlt" },
                      new[] { Lesebilder.PflichtfeldFehlt, Lesebilder.MarkeUnbekannt, Lesebilder.ModellUnbekannt, Lesebilder.InseratIdFehlt });
+    }
+
+    [Fact]   // 1.5.16 (Wunsch Ahmad 13.10.2026): der Grund inserat_id_unsicher geht als inserat_id_fehlt + fehlt ["Inserat-ID unsicher"]
+    public void Unsichere_Inserat_ID_geht_als_inserat_id_fehlt_mit_fehlt_hinaus()
+    {
+        var b = new Lesebild(Lesebilder.InseratIdUnsicher, new byte[] { 1 }, "roh", Passat(), null, "abc");
+        var n = Lesebilder.Nutzlast(b);
+        Assert.Equal("inserat_id_fehlt", n["grund"]);                               // routes/werkzeuge.LesebildIn kennt nur vier Gruende
+        Assert.Equal(new[] { "Inserat-ID unsicher" }, Assert.IsType<List<string>>(n["fehlt"]));
+        string json = JsonSerializer.Serialize(n, AutoSchnellDienst.Json);
+        Assert.DoesNotContain("inserat_id_unsicher", json);
+        // eine mitgegebene Liste haengt dahinter, ohne Doppelte, hoechstens 10 (Grenze des Servers)
+        var viele = Enumerable.Range(1, 12).Select(i => $"f{i}").Prepend("Inserat-ID unsicher").ToArray();
+        var fehlt = Assert.IsType<List<string>>(Lesebilder.Nutzlast(b with { Fehlt = viele })["fehlt"]);
+        Assert.Equal(10, fehlt.Count);
+        Assert.Equal("Inserat-ID unsicher", fehlt[0]);
+        Assert.Equal("f9", fehlt[9]);
+        Assert.Equal(("inserat_id_unsicher", "Inserat-ID unsicher"), (Lesebilder.InseratIdUnsicher, Lesebilder.InseratIdUnsicherText));
     }
 }
