@@ -933,6 +933,10 @@ async def bestand_lese_indizes(db) -> None:
             await alarm(db, "index_fehlt", ref=ref, fehler=str(exc)[:300])
         else:
             await alarm_schliessen(db, "index_fehlt", ref=ref)
+    # Betreiber-Seite 15.10.2026: der Alarm vom 06./07.10. trug noch den ALTEN Indexnamen "aktion_zeit" (seitdem heisst
+    # der Index wie der Standardname, s. o.) — niemand schloss ihn, er stand als "6x offen" bis heute. Steht der Index
+    # (unter welchem Namen auch immer), ist auch dieser alte Alarm erledigt.
+    await alarm_schliessen(db, "index_fehlt", ref="activity_logs.aktion_zeit")
 
 
 #: Startpruefung 27.09.2026 (H1): Lese-Indizes auf der eigenen id von Terminen
