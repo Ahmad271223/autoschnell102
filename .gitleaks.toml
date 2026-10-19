@@ -84,4 +84,8 @@ regexes = [
   # JEDEM Lauf rot (Backend-Tests liefen vom 10. bis 19.10. nicht mehr).
   # Kein Schluessel: ein Dictionary-Feldname.
   '''vorschau_b64''',
+  # Systemtest 19.10.2026: erfundener Testwert in tests/test_systemtest_20261019.py —
+  # prueft, dass ein ECHT aussehender Apify-Schluessel (apify_api_...) im Mock-Betrieb
+  # ignoriert wird. Kein Schluessel (Buchstabenfolge ABCDEF0123456789).
+  '''apify_api_ABCDEF0123456789''',
 ]
