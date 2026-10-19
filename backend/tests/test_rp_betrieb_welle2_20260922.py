@@ -292,7 +292,11 @@ def test_migrationen_eingetragen():
     M = _m("migrationen")
     nummern = [n for n, _, _ in M.MIGRATIONEN]
     assert nummern == sorted(nummern) and len(set(nummern)) == len(nummern)
-    assert M.ZIEL_VERSION == max(nummern) == 22   # 22: werkzeug_vergleiche_ablauf (06.10.2026), 21: Empfangs-Kaestchen
+    # 23: vertragstext_ohne_14bgb (13.10.2026), 22: werkzeug_vergleiche_ablauf (06.10.2026),
+    # 21: Empfangs-Kaestchen. Systemtest 19.10.2026: ZIEL_VERSION hing bei 22 hinter der
+    # Liste — Migration 23 lief bei jedem Start erneut; migrationen.py prueft das jetzt
+    # selbst beim Import (assert), hier bleibt die ausdrueckliche Nummer.
+    assert M.ZIEL_VERSION == max(nummern) == 23
     namen = {n: name for n, name, _ in M.MIGRATIONEN}
     assert namen[11] == "firmen_abo_art" and namen[12] == "termine_abschluss_zeit" \
         and namen[13] == "inserat_fotomodus" and namen[14] == "vertrags_kundennummern"

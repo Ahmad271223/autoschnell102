@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 log = logging.getLogger("autohandel.migrationen")
 
-ZIEL_VERSION = 22   # 22: werkzeug_vergleiche_ablauf (Entscheidung Ahmad 06.10.2026: 60 Tage)
+ZIEL_VERSION = 23   # 23: vertragstext_ohne_14bgb (13.10.2026); 22: werkzeug_vergleiche_ablauf
 _SPERRE = "migration"
 
 
@@ -920,6 +920,12 @@ MIGRATIONEN = [
     # Wunsch Ahmad 13.10.2026: "Händler im Sinne des § 14 BGB" raus aus den gespeicherten Vertragstexten
     (23, "vertragstext_ohne_14bgb", m23_vertragstext_ohne_14bgb),
 ]
+# Systemtest 19.10.2026: Zielversion MUSS die hoechste Nummer der Liste sein —
+# sonst meldet /ready einen falschen Stand und die letzte Migration laeuft bei
+# jedem Start erneut (so geschehen mit 23 bei Ziel 22).
+assert ZIEL_VERSION == max(nr for nr, _n, _f in MIGRATIONEN), (
+    f"ZIEL_VERSION {ZIEL_VERSION} != hoechste Migration "
+    f"{max(nr for nr, _n, _f in MIGRATIONEN)}")
 
 
 # ---------------------------------------------------------------------
@@ -1034,7 +1040,12 @@ async def ausfuehren(db, indexe=None, seeds=(), wache=None) -> dict:
             {"_id": "schema"}, {"$set": {"version": nr, "updated_at": _now()}},
             upsert=True)
         erledigt[name] = stats
+        stand = nr
         log.info("Migration %d (%s) fertig: %s", nr, name, stats)
+    # Systemtest 19.10.2026: `stand` ist jetzt die zuletzt GELAUFENE Nummer.
+    # Vorher stand hier der Wert VOR der Schleife — lag ZIEL_VERSION hinter
+    # der Liste (23 definiert, Ziel 22), wurde die Version nach dem Lauf von
+    # 23 auf 22 zurueckgeschrieben und Migration 23 lief bei jedem Start neu.
     await db.system_flags.update_one(
         {"_id": "schema"},
         {"$set": {"version": max(stand, ZIEL_VERSION), "updated_at": _now(),

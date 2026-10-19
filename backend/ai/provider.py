@@ -86,12 +86,32 @@ def ki_recherche_modell() -> str:
     return (os.environ.get("KI_RECHERCHE_MODELL") or "").strip() or "claude-haiku-4-5-20251001"
 
 
+_echt_im_mock_gemeldet = False
+
+
 def ki_aktiv() -> bool:
     """Schalter KI_BEWERTUNG_AKTIV (Standard an) UND ein Schluessel vorhanden.
-    Ohne Schluessel ist die Funktion still aus — kein Fehler, keine Karte."""
+    Ohne Schluessel ist die Funktion still aus — kein Fehler, keine Karte.
+
+    Systemtest 19.10.2026: Im Mock-Betrieb (MOCK_PROVIDER_FETCH=true — Test-,
+    Lasttest- und Werkzeug-Backends) zaehlt ein ECHTER Schluessel (sk-ant-…)
+    nur, wenn KI_BEWERTUNG_AKTIV ausdruecklich gesetzt ist (so macht es das
+    "Lauf-Backend" fuer den KI-Komplettlauf). Vorher rief jedes lokale
+    Test-Backend den KI-Anbieter auf (Marktdaten-Recherche im Aufraeumlauf)."""
+    global _echt_im_mock_gemeldet
     if not schalter_env("KI_BEWERTUNG_AKTIV", True):
         return False
-    return bool((os.environ.get("ANTHROPIC_API_KEY") or "").strip())
+    key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+    if not key:
+        return False
+    mock = (os.environ.get("MOCK_PROVIDER_FETCH") or "").strip().lower() in ("1", "true", "yes")
+    if mock and key.startswith("sk-ant-") and not (os.environ.get("KI_BEWERTUNG_AKTIV") or "").strip():
+        if not _echt_im_mock_gemeldet:
+            _echt_im_mock_gemeldet = True
+            log.warning("KI: echter ANTHROPIC_API_KEY im Mock-Betrieb (MOCK_PROVIDER_FETCH) wird ignoriert — "
+                        "bewusst einschalten mit KI_BEWERTUNG_AKTIV=true.")
+        return False
+    return True
 
 
 _client = None

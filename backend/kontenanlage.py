@@ -1,10 +1,6 @@
 # -*- coding: utf-8 -*-
 """Kontonummer (13.09.2026): EINE Stelle fuer Nummernvergabe und Kontenanlage.
 
-import logging
-
-log = logging.getLogger("autohandel")
-
 Alle Funktionen bekommen `db` vom Aufrufer (Modul-Global des Routenmoduls zur
 Aufrufzeit) — Tests, die routes.admin.db, routes.marketplace.db oder deps.db
 ersetzen, greifen damit weiter. Kein Import von server.py oder routes.*.
@@ -17,7 +13,13 @@ Regeln fuer Aufrufer:
 3. Nummern vergibt nur die Anlage — es gibt KEIN automatisches Nachziehen
    fuer Bestandskonten (konten_ohne_nummer zaehlt nur).
 """
+# Systemtest 19.10.2026: Import und Logger standen versehentlich IM Docstring —
+# `log` war nie definiert, _chef_aufraeumen/_firma_aufraeumen brachen im
+# Fehlerpfad mit NameError ab (statt den Betriebsalarm zu setzen).
+import logging
 import secrets
+
+log = logging.getLogger("autohandel")
 
 from fastapi import HTTPException
 from pymongo import ReturnDocument

@@ -76,4 +76,12 @@ regexes = [
   # den Variablennamen der naechsten Zeile als "Geheimnis". Kein Schluessel;
   # im Arbeitsbaum steht seither ein Kommentar dazwischen.
   '''^KI_BEWERTUNG_AKTIV''',
+  # Systemtest 19.10.2026: Commit e2099acb (09.10.) hatte in
+  # backend/routes/werkzeuge.py die Zeile `"key": key, "vorschau_b64": vorschau`
+  # (Lesebild-Dokument: Speicher-Schluessel + Base64-Vorschau). Die Standard-
+  # regel generic-api-key hielt den Feldnamen "vorschau_b64" fuer ein
+  # Geheimnis — weil die ganze Historie gescannt wird, war die CI danach bei
+  # JEDEM Lauf rot (Backend-Tests liefen vom 10. bis 19.10. nicht mehr).
+  # Kein Schluessel: ein Dictionary-Feldname.
+  '''vorschau_b64''',
 ]

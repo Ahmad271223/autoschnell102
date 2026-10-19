@@ -112,6 +112,9 @@ services:
       # Betriebsschalter — ohne Durchreichen wirken Aenderungen in der .env nicht.
       - ENABLE_DOCS=${ENABLE_DOCS:-false}
       - MOCK_PROVIDER_FETCH=${MOCK_PROVIDER_FETCH:-false}
+      # Systemtest 19.10.2026: im Mock-Betrieb werden echte Apify-/KI-Schluessel ignoriert;
+      # nur mit diesem Schalter crawlt der Markt-Worker im Mock trotzdem echt (Kosten!).
+      - MARKT_APIFY_IM_MOCK=${MARKT_APIFY_IM_MOCK:-false}
       - MOBILE_SANDBOX_MODE=${MOBILE_SANDBOX_MODE:-false}
       - RATE_LIMIT_ENABLED=${RATE_LIMIT_ENABLED:-true}
       # Anbieter-Abrufe: Tageslimits und Gleichzeitigkeit
@@ -170,6 +173,10 @@ services:
       # Bilder nachholen (03.10.2026): Versuche ohne Fotos je Inserat, Pause in Sekunden
       - BILDER_NACHHOLEN_MAX=${BILDER_NACHHOLEN_MAX:-3}
       - BILDER_NACHHOLEN_PAUSE_S=${BILDER_NACHHOLEN_PAUSE_S:-60}
+      # Bilder nachholen mit Frist (10.10.2026, routes/listings.py): Sekunden, die der
+      # Nachhol-Abruf hoechstens dauern darf — fehlte hier (Systemtest 19.10.2026),
+      # ein Wert in der Server-.env waere wirkungslos geblieben.
+      - BILDER_NACHHOLEN_FRIST_S=${BILDER_NACHHOLEN_FRIST_S:-50}
       # Werkzeuge (03.10.2026): wer den AutoPointer-Vergleich sieht (Kundennummern, Komma-getrennt)
       - AUTOPOINTER_VERGLEICH_KUNDEN=${AUTOPOINTER_VERGLEICH_KUNDEN:-10001,10002,10007}
       # Browser-Helfer (04.10.2026): wer die Erweiterung fuer Chrome/Edge sieht und verbinden darf

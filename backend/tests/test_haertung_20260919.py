@@ -161,6 +161,10 @@ NICHT_IM_CONTAINER = {
     "LASTTEST_API", "LASTTEST_JE_QUELLE", "LASTTEST_NUR_A",
     "LASTTEST_SUCHER", "LASTTEST_LINKS_JE_SUCHER", "LASTTEST_SZENARIO", "LASTTEST_FRIST_S",   # lasttest_30x30.py
     "PORTS", "SUCHER", "WELLEN",                                                              # lasttest_werkzeuge.py
+    # Systemtest 19.10.2026: scripts/systemcheck.py (nur lesendes Pruefskript des
+    # Betreibers) nimmt den Port des lokalen Backends aus der Befehlszeile —
+    # der Dienst selbst hoert im Container fest auf 8001.
+    "PORT",
 }
 
 

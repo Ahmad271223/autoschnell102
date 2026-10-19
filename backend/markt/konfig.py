@@ -322,8 +322,38 @@ def kosten_buendel_usd(actor_name: str, laeufe: int, rows: int) -> float:
     return round(laeufe * start + rows * row, 4)
 
 
+def mock_betrieb() -> bool:
+    """MOCK_PROVIDER_FETCH an (Test-/Lasttest-/Werkzeug-Backends, CI)."""
+    return (os.environ.get("MOCK_PROVIDER_FETCH") or "").strip().lower() in ("1", "true", "yes")
+
+
+_echt_im_mock_gemeldet = False
+
+
 def token() -> str:
-    return (os.environ.get("APIFY_TOKEN") or "").strip()
+    """APIFY_TOKEN — im Mock-Betrieb wird ein ECHTER Schluessel ignoriert.
+
+    Systemtest 19.10.2026: Ein lokales Test-Backend (MOCK_PROVIDER_FETCH=true,
+    aber die .env mit dem Produktions-Token) startete auf einer frischen
+    Datenbank binnen Minuten 20 echte Apify-Laeufe — der Markt-Worker plant im
+    Minutentakt, der Crawler-Schalter faellt ohne Datenbank-Eintrag auf
+    MARKT_AKTIV zurueck, und der Mock gilt nur fuer den Fahrzeug-Abruf. Echte
+    Schluessel beginnen mit "apify_api_"; die Testwerte der Suiten
+    ("test-token", "ci-test-apify-token") bleiben wirksam, damit die
+    Worker-/Lauf-Tests mit gefaelschtem httpx weiter laufen. Wer im Mock
+    bewusst echt crawlen will, setzt MARKT_APIFY_IM_MOCK=true."""
+    global _echt_im_mock_gemeldet
+    tok = (os.environ.get("APIFY_TOKEN") or "").strip()
+    if (tok.startswith("apify_api_") and mock_betrieb()
+            and (os.environ.get("MARKT_APIFY_IM_MOCK") or "").strip().lower() not in ("1", "true", "yes")):
+        if not _echt_im_mock_gemeldet:
+            _echt_im_mock_gemeldet = True
+            import logging
+            logging.getLogger("autohandel").warning(
+                "Marktdaten: echter APIFY_TOKEN im Mock-Betrieb (MOCK_PROVIDER_FETCH) wird ignoriert — "
+                "keine Apify-Laeufe. Bewusst erlauben mit MARKT_APIFY_IM_MOCK=true.")
+        return ""
+    return tok
 
 
 def budget_monat_usd() -> float:
