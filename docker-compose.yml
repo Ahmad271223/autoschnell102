@@ -178,9 +178,9 @@ services:
       # ein Wert in der Server-.env waere wirkungslos geblieben.
       - BILDER_NACHHOLEN_FRIST_S=${BILDER_NACHHOLEN_FRIST_S:-50}
       # Werkzeuge (03.10.2026): wer den AutoPointer-Vergleich sieht (Kundennummern, Komma-getrennt)
-      - AUTOPOINTER_VERGLEICH_KUNDEN=${AUTOPOINTER_VERGLEICH_KUNDEN:-10001,10002,10007}
+      - AUTOPOINTER_VERGLEICH_KUNDEN=${AUTOPOINTER_VERGLEICH_KUNDEN:-10001,10002,10007,10008}
       # Browser-Helfer (04.10.2026): wer die Erweiterung fuer Chrome/Edge sieht und verbinden darf
-      - BROWSER_HELFER_KUNDEN=${BROWSER_HELFER_KUNDEN:-10001,10002,10007}
+      - BROWSER_HELFER_KUNDEN=${BROWSER_HELFER_KUNDEN:-10001,10002,10007,10008}
       # Inserat beim Klick im Programm vorab ueber Apify auslesen — Entscheidung Ahmad 08.10.2026: AUS ("Apify nur, wenn
       # das Auto nicht im Speicher ist und jemand den Link in der App einfuegt"); true = wieder an
       - AUTOPOINTER_VORAB_ABRUF=${AUTOPOINTER_VORAB_ABRUF:-false}

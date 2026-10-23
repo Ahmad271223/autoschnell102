@@ -4370,14 +4370,16 @@ Kommen beim Auslesen eines Inserats die Daten, aber keine Fotos, zeigt die Vergl
 - Die Vergleichsantwort trägt `bilder_nachholen_moeglich` (Kleinanzeigen im Browser-Modus: nein).
 - Tests: `backend/tests/test_bilder_nachholen_20261003.py`, `frontend/src/pages/app/Vergleich.bilderNachholen.test.jsx`.
 
-## Programme zum Herunterladen: AutoPointer-Vergleich nur für Kunden 10001, 10002 und 10007 (Wunsch Ahmad 03.10.2026, 10007 seit 06.10.)
+## Programme zum Herunterladen: AutoPointer-Vergleich nur für Kunden 10001, 10002, 10007 und 10008 (Wunsch Ahmad 03.10.2026, 10007 seit 06.10., 10008 seit 23.10.)
 
 Windows-Programm (Quelle `autopointer-vergleich/`, C#/.NET 10): erkennt in AutoPointer das rechts angezeigte Inserat
 (Fenster-Handles + Windows-Texterkennung) und öffnet automatisch die passenden mobile.de-/AutoScout24-Suchen.
-Erst einmal **nur für Kunde 10002**, seit dem Abend des 03.10. auch **10001**, seit 06.10. auch **10007** (mit allen
+Erst einmal **nur für Kunde 10002**, seit dem Abend des 03.10. auch **10001**, seit 06.10. auch **10007**, seit 23.10. auch **10008** (mit allen
 Suchern der Firma) – „alle anderen sollen das gar nicht sehen“.
 
-- Freigabe: `AUTOPOINTER_VERGLEICH_KUNDEN` (Kundennummern, Komma-getrennt; Standard `10001,10002,10007`, steht in `docker-compose.yml`).
+- Freigabe: `AUTOPOINTER_VERGLEICH_KUNDEN` (Kundennummern, Komma-getrennt; Standard `10001,10002,10007,10008`, steht in `docker-compose.yml`).
+  Achtung: steht die Variable in der Server-`.env` (seit 06.10. über `deploy/env_setzen.sh`), gewinnt sie — ein neuer Kunde muss
+  dort nachgetragen werden (beide Server), sonst bleibt der Standard aus `docker-compose.yml` wirkungslos.
   Steht die Variable in der `.env` eines Servers, gilt DIESER Wert — dann dort mit ändern.
   Gilt für Chef **und** alle Sucher der Firma. Leer gesetzt = für niemanden.
 - `GET /api/werkzeuge` liefert nur freigegebenen Firmen einen Eintrag (Name, Texte, Version, verbundener PC), allen
@@ -4447,7 +4449,7 @@ Suchern der Firma) – „alle anderen sollen das gar nicht sehen“.
 Zweites Werkzeug `browser-helfer` neben dem Programm — die Erweiterung `browser-extension/` (Version 2.7.5, enthält
 weiter den Kleinanzeigen-Abruf-Helfer). Gleiche Lizenz: 6-stelliger Code, **ein Konto = ein Browser**, Abo-Pflicht,
 Chef-Übersicht und „Deine letzten Autos“ auf der Seite Programme.
-- Freigabe: `BROWSER_HELFER_KUNDEN` (Standard `10001,10002,10007`, `docker-compose.yml`; leer = niemand).
+- Freigabe: `BROWSER_HELFER_KUNDEN` (Standard `10001,10002,10007,10008`, `docker-compose.yml`; leer = niemand; Server-`.env` gewinnt).
 - Inserat im Browser statt Apify (Wunsch Ahmad 07.10.2026, Programm ≥ 1.5.7): hat das Konto den Browser-Helfer
   (Verbindung in `werkzeug_verbindungen`), antwortet `/vergleich` mit `inserat_im_browser: true` und `vorab.status
   "browser"` — kein Vorab-Abruf über Apify; das Programm öffnet das Inserat als Tab mit, der Helfer liest es
