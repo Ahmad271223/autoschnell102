@@ -55,7 +55,7 @@ uvicorn==0.52.4
 watchfiles==1.1.1
 websockets==16.0
 xmltodict==1.0.4
-yarl==1.24.5
+yarl==1.25.1
 
 annotated-doc==0.0.5
 anthropic>=1.0.0
