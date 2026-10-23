@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "de.autoschnellkauf.app",
+      "sha256_cert_fingerprints": [
+        "AF:42:83:65:87:D7:E2:1E:8D:79:29:3E:62:73:CB:AE:45:6A:90:DF:99:EF:F3:0C:29:4D:EE:44:6A:11:A3:C6"
+      ]
+    }
+  }
+]

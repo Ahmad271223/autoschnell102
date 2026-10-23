@@ -81,7 +81,7 @@ export default function AdminUrlStats() {
                   return (
                     <div key={s.key} className="flex items-center gap-3">
                       <div className="w-28 text-[13px] text-zinc-300 truncate">{s.label}</div>
-                      <div className="flex-1 h-1.5 rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,0.08)" }}>
+                      <div className="flex-1 h-1.5 rounded-full overflow-hidden" style={{ background: "var(--wa-08)" }}>
                         <div className="h-full rounded-full transition-all duration-500" style={{ width: `${pct}%`, background: s.color }} />
                       </div>
                       <div className="w-12 text-right tabular-nums text-[13px] font-semibold text-white">{v}</div>

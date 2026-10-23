@@ -1,0 +1,295 @@
+{
+  "szenario": "T2",
+  "wiederholung": 1,
+  "zeitstempel": "20260829T235352Z",
+  "konfiguration": {
+    "nutzer": 100,
+    "dauer_s": 300,
+    "warmup_s": 30,
+    "firmen": 10,
+    "ziel": "http://localhost:8001",
+    "workers_hinweis": "s. Start"
+  },
+  "anfragen_gesamt": 28785,
+  "endpunkte": {
+    "abo_status": {
+      "ok": 468,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 74,
+      "p95_ms": 326,
+      "p99_ms": 397,
+      "fehler_nach_status": {}
+    },
+    "fahrer_termine": {
+      "ok": 446,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 92,
+      "p95_ms": 365,
+      "p99_ms": 437,
+      "fehler_nach_status": {}
+    },
+    "foto_loeschen": {
+      "ok": 720,
+      "fehler": 8,
+      "fehlerrate_prozent": 1.1,
+      "p50_ms": 61,
+      "p95_ms": 281,
+      "p99_ms": 384,
+      "fehler_nach_status": {
+        "404": 8
+      }
+    },
+    "foto_oeffnen": {
+      "ok": 393,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 60,
+      "p95_ms": 354,
+      "p99_ms": 449,
+      "fehler_nach_status": {}
+    },
+    "foto_upload_gross": {
+      "ok": 90,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 522,
+      "p95_ms": 1170,
+      "p99_ms": 1610,
+      "fehler_nach_status": {}
+    },
+    "foto_upload_klein": {
+      "ok": 515,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 93,
+      "p95_ms": 370,
+      "p99_ms": 510,
+      "fehler_nach_status": {}
+    },
+    "foto_upload_normal": {
+      "ok": 379,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 291,
+      "p95_ms": 694,
+      "p99_ms": 923,
+      "fehler_nach_status": {}
+    },
+    "link_bekannt": {
+      "ok": 704,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 164,
+      "p95_ms": 458,
+      "p99_ms": 594,
+      "fehler_nach_status": {}
+    },
+    "link_job_ende": {
+      "ok": 767,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 2173,
+      "p95_ms": 2505,
+      "p99_ms": 2671,
+      "fehler_nach_status": {}
+    },
+    "link_neu_check": {
+      "ok": 767,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 90,
+      "p95_ms": 353,
+      "p99_ms": 455,
+      "fehler_nach_status": {}
+    },
+    "link_neu_vergleich": {
+      "ok": 767,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 115,
+      "p95_ms": 354,
+      "p99_ms": 444,
+      "fehler_nach_status": {}
+    },
+    "markt_favorit": {
+      "ok": 242,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 64,
+      "p95_ms": 301,
+      "p99_ms": 423,
+      "fehler_nach_status": {}
+    },
+    "markt_haendler": {
+      "ok": 208,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 88,
+      "p95_ms": 368,
+      "p99_ms": 473,
+      "fehler_nach_status": {}
+    },
+    "markt_suche": {
+      "ok": 465,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 113,
+      "p95_ms": 391,
+      "p99_ms": 456,
+      "fehler_nach_status": {}
+    },
+    "pdf_download_protokoll": {
+      "ok": 2965,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 103,
+      "p95_ms": 355,
+      "p99_ms": 447,
+      "fehler_nach_status": {}
+    },
+    "pdf_download_vertrag": {
+      "ok": 3032,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 58,
+      "p95_ms": 308,
+      "p99_ms": 394,
+      "fehler_nach_status": {}
+    },
+    "pdf_vertrag_neu": {
+      "ok": 12204,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 247,
+      "p95_ms": 563,
+      "p99_ms": 703,
+      "fehler_nach_status": {}
+    },
+    "protokoll_abschluss": {
+      "ok": 2447,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 724,
+      "p95_ms": 1161,
+      "p99_ms": 1353,
+      "fehler_nach_status": {}
+    },
+    "versand_email": {
+      "ok": 592,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 106,
+      "p95_ms": 365,
+      "p99_ms": 510,
+      "fehler_nach_status": {}
+    },
+    "versand_whatsapp": {
+      "ok": 606,
+      "fehler": 0,
+      "fehlerrate_prozent": 0.0,
+      "p50_ms": 104,
+      "p95_ms": 357,
+      "p99_ms": 552,
+      "fehler_nach_status": {}
+    }
+  },
+  "jobs": {
+    "annahme_p50_ms": 90,
+    "annahme_p95_ms": 353,
+    "warte_p50_ms": 2173,
+    "warte_p95_ms": 2505,
+    "warte_p99_ms": 2671,
+    "queue_max": 5,
+    "queue_schnitt": 1.8,
+    "drain_sekunden": 0,
+    "offene_jobs_nach_drain": 0,
+    "haengende_jobs": 0
+  },
+  "klassen": {
+    "technisch_unerwartet": 0,
+    "fachlich_erwartet": 0,
+    "sicherheitstest_ok": 0,
+    "race_ux_befund": 8,
+    "verbindungsabbruch_client": 0,
+    "erfolgreich": 28777
+  },
+  "klassen_details": {
+    "foto_loeschen": {
+      "404": "8x Race/UX-Befund"
+    }
+  },
+  "reset_forensik": [],
+  "server_abschluss_nachweis": {
+    "pdf_vertraege_db_delta": 13412,
+    "pdf_vertraege_client_ok_inkl_warmup": 13412,
+    "ohne_client_antwort_abgeschlossen": 0
+  },
+  "speicher": {
+    "vorher": {
+      "resale": {
+        "dateien": 4688,
+        "mb": 9853.3
+      },
+      "protocol": {
+        "dateien": 18603,
+        "mb": 1977.7
+      },
+      "pickup": {
+        "dateien": 0,
+        "mb": 0.0
+      },
+      "disk_frei_gb": 535.9
+    },
+    "nachher": {
+      "resale": {
+        "dateien": 5030,
+        "mb": 10666.1
+      },
+      "protocol": {
+        "dateien": 26649,
+        "mb": 2821.9
+      },
+      "pickup": {
+        "dateien": 0,
+        "mb": 0.0
+      },
+      "disk_frei_gb": 534.2
+    }
+  },
+  "pdf_beweis": {
+    "vertraege_gesamt": 13422,
+    "speicher_mb_in_db": 78.3,
+    "stichprobe_geprueft": 15,
+    "eindeutige_dateien_in_stichprobe": 15,
+    "befunde": []
+  },
+  "foto_audit": {
+    "dateien_ohne_db": 8,
+    "db_ohne_datei": 7
+  },
+  "integritaet": {
+    "doppelte_anbieter_abrufe": 0,
+    "versand_gesendet": 1304,
+    "versand_eintraege_delta": 1304,
+    "doppel_versand": 0,
+    "jobs_nicht_fertig_im_messfenster": 0
+  },
+  "system": {
+    "cpu_median": 55,
+    "cpu_spitze": 64,
+    "ram_median": 53,
+    "ram_spitze": 54,
+    "ram_nach_drain": 53.3,
+    "mongo_verbindungen": 127,
+    "db_ops_pro_anfrage": 11.9,
+    "disk_write_mb_delta": 4107,
+    "net_mb_delta": 7
+  },
+  "cleanup_beweis": {
+    "db_reste": 0,
+    "datei_reste": 0,
+    "disk_frei_gb_nach_cleanup": 535.9
+  }
+}

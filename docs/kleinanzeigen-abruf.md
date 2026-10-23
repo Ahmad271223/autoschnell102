@@ -1,0 +1,173 @@
+# Kleinanzeigen-Abruf: Wer ruft wann mit welcher IP ab? (Stand 22.09.2026)
+
+Reine Dokumentation des Ist-Zustands — keine Änderung. Alle Zeilenangaben
+beziehen sich auf den aktuellen Branch-Stand. Nachgeführt am 22.09.2026
+(Prüfbericht 20.09.2026, DO-16/DO-20): Limit 2 statt 3, API-Dienst (Runde 29).
+
+## Klare Antwort vorab
+
+**„Teilweise Nutzer-PC."** Es hängt vom Schalter `CLIENT_FETCH_KLEINANZEIGEN`
+ab (Standard: **aus**):
+
+| Konstellation | Wer ruft die Kleinanzeigen-Seite ab | Welche IP sieht Kleinanzeigen |
+| --- | --- | --- |
+| Schalter AUS (Standard, heutiger Betrieb) | **Backend-Server** (Datenabruf) | Server-IP |
+| `KLEINANZEIGEN_API_KEY` gesetzt (API-Dienst, Runde 29) — egal welcher Schalter | **API-Dienst kleinanzeigen-agent.de** (der Server fragt die API, der Dienst holt das Inserat); bei API-Störung Rückfall auf den Backend-Server | IP des API-Dienstes (Rückfall: Server-IP) |
+| Schalter AN, Inseratsdaten | **Browser des Nutzers** über die Erweiterung | Nutzer-IP |
+| Schalter AN, `/listings/resolve` bei unbekanntem Link | **Backend-Server** | Server-IP |
+| Bekanntes Inserat (Cache-Treffer), egal welcher Schalter | **niemand** — nur Datenbank | keine |
+
+Ein reiner „immer Nutzer-PC"-Betrieb existiert derzeit **nicht**, selbst mit
+aktivem Schalter, wegen des server-seitigen Restpfads (resolve). Seit
+10.09.2026 ruft das Beweisdokument die Inseratsseite NICHT mehr ab: es
+entsteht aus den bereits ausgelesenen Daten, nur die Fotos kommen vom
+Bilder-CDN.
+
+## Der vollständige Ablauf (mit Codestellen)
+
+### 1. Nutzer fügt Link ein
+
+Frontend [Vergleich.jsx](../frontend/src/pages/app/Vergleich.jsx) →
+`POST /api/listings/check` ([routes/listings.py:400 ff.](../backend/routes/listings.py))
+bzw. anschließend `POST /api/mobile/compare`
+([routes/listings.py:67 ff.](../backend/routes/listings.py)).
+
+### 2. Cache-Prüfung
+
+`peek_cached_listing` ([listing_identity.py](../backend/listing_identity.py))
+prüft **zuerst** den globalen Cache (`listings_cache`, ein Eintrag je
+Inserat) und — wenn eine `dealer_id` übergeben wird — zusätzlich die
+**händler-eigene Quarantäne** (`listings_cache_client`).
+
+### 3. Inserat bekannt → nur vorhandene Daten
+
+**Ja, ausschließlich.** Bei frischem Treffer werden die gespeicherten Daten
+zurückgegeben (`use_count`/`last_used_at` werden aktualisiert); es findet
+**kein** externer Abruf statt. Der Regressionstest
+[test_link_jobs.py](../backend/tests/test_link_jobs.py) beweist per
+`fetch_count == 1`, dass auch 15 parallele Anfragen keinen zweiten Abruf
+auslösen.
+
+### 4. Inserat unbekannt — wer ruft ab?
+
+**Schalter AUS (Standard):** `/listings/check` legt einen Hintergrundjob an
+([link_jobs.py](../backend/link_jobs.py)); der Job ruft
+`get_or_fetch_listing` → `fetch_listing`
+([provider_fetch.py](../backend/provider_fetch.py)) →
+`fetch_kleinanzeigen_vehicle` → `_fetch_html`
+([kleinanzeigen_service.py:480/555](../backend/kleinanzeigen_service.py)).
+Das ist ein **HTTP-Abruf durch den Backend-Server** — Kleinanzeigen sieht
+die **Server-IP**. Gedrosselt auf `MAX_CONCURRENT_KLEINANZEIGEN` (Standard
+2) gleichzeitige Abrufe über alle Prozesse
+([provider_limiter.py](../backend/provider_limiter.py)).
+
+**API-Dienst (Runde 29, 12.09.2026):** Ist `KLEINANZEIGEN_API_KEY` gesetzt,
+versucht `fetch_listing` ([provider_fetch.py](../backend/provider_fetch.py))
+**zuerst** die API von kleinanzeigen-agent.de
+([kleinanzeigen_api.py](../backend/kleinanzeigen_api.py); Adresse
+`KLEINANZEIGEN_API_URL`, Zeitlimit `KLEINANZEIGEN_API_TIMEOUT` = 12 s, bis zu
+`MAX_CONCURRENT_KLEINANZEIGEN_API` = 20 gleichzeitig). An den Dienst gehen
+Anzeigen-Nummer und Link; er holt das Inserat — Kleinanzeigen sieht dann die
+**IP des API-Dienstes**, nicht die des Servers. Bei jedem API-Problem
+(Schlüssel abgelaufen, Limit erreicht, Störung) fällt der Abruf still auf den
+eigenen Server-Abruf zurück (`ApiNichtNutzbar`). Ohne Schlüssel (Tests,
+Entwicklung) bleibt alles beim Server-Abruf. Mit Schlüssel greift der
+Client-Abruf über die Erweiterung nicht mehr (`needs_client_fetch` nur ohne
+API, [routes/listings.py](../backend/routes/listings.py)). Läuft der Dienst in
+Produktion, ist er ein weiterer Empfänger der Inseratslinks — ob und wie das
+in die Datenschutzerklärung kommt, entscheidet der Inhaber (nicht Teil dieser
+Doku).
+
+**Schalter AN:** `/listings/check` und `/mobile/compare` antworten bei
+unbekanntem Link mit `needs_client_fetch`
+([routes/listings.py:118–125 und 434–436](../backend/routes/listings.py)).
+Das Frontend lädt die Seite über die **Browser-Erweiterung**
+([frontend/src/lib/clientFetch.js](../frontend/src/lib/clientFetch.js),
+[browser-extension/](../browser-extension/)) — also mit der **IP des
+eingeloggten Nutzers** — und schickt das HTML an `POST /api/listings/ingest`.
+
+### 5. Automatischer Backend-Fallback, wenn die Erweiterung fehlt?
+
+**Für die Inseratsdaten: NEIN.** Ohne Erweiterung zeigt das Frontend die
+Meldung „Abruf-Helfer benötigt" und bricht ab
+([Vergleich.jsx, Zweig `needs_client_fetch`](../frontend/src/pages/app/Vergleich.jsx));
+der Server holt die Seite dann **nicht** ersatzweise selbst.
+
+**ABER es gibt einen server-seitigen Restpfad, der auch bei aktivem
+Schalter greift** (der frühere Beweis-Snapshot per Playwright ist seit
+10.09.2026 entfallen; das Beweisdokument entsteht ohne Seitenabruf):
+
+1. **`POST /listings/resolve`**: prüft zwar Quarantäne und Cache, ruft bei
+   Miss aber direkt `get_or_fetch_listing` auf — **ohne**
+   `needs_client_fetch`-Weiche ([routes/listings.py:559 ff.](../backend/routes/listings.py)).
+   Das Haupt-Frontend nutzt diesen Endpunkt nicht, er ist aber per API
+   erreichbar.
+
+### 6. Was bewirken die Umgebungsvariablen?
+
+| Variable | Wirkung |
+| --- | --- |
+| `CLIENT_FETCH_KLEINANZEIGEN` (Standard aus) | AN = neue Kleinanzeigen-Links holt der Nutzer-Browser via Erweiterung; Server-Datenabruf für diese Links abgeschaltet (außer Restpfade oben) |
+| `MAX_CONCURRENT_KLEINANZEIGEN` (Standard 2) | globale Obergrenze gleichzeitiger Server-Abrufe, über alle Worker/Server |
+| `KLEINANZEIGEN_API_KEY`, `KLEINANZEIGEN_API_URL`, `KLEINANZEIGEN_API_TIMEOUT` (12 s), `MAX_CONCURRENT_KLEINANZEIGEN_API` (20) | Schlüssel gesetzt = neue Kleinanzeigen-Links zuerst über den API-Dienst kleinanzeigen-agent.de (Runde 29), Rückfall auf den Server-Abruf |
+| `LISTING_CACHE_TTL_HOURS` (336 = 14 Tage) | wie lange ein Server-Abruf im globalen Cache gilt; geloescht wird spaetestens 21 Tage nach dem Abruf (`cleanup_service.INSERATSCACHE_MAX_TAGE`); der Vertragsinhaber behaelt den Stand am Vertrag |
+| `CLIENT_INGEST_TTL_HOURS` (24) / `CLIENT_CONFIRMED_TTL_HOURS` (168) | Gültigkeit von Client-Einreichungen in Quarantäne / nach Freigabe |
+| `MOCK_PROVIDER_FETCH` (aus; nur Staging) | ersetzt JEDEN externen Abruf durch synthetische Daten; Produktions-Check verweigert damit den Start |
+| `PROXY_ENABLED`/`PROXY_URL` | optionaler Proxy für Server-Abrufe (dann sieht Kleinanzeigen die Proxy-IP) |
+
+### 7. Ein Abruf bei vielen gleichzeitigen Nutzern?
+
+**Ja, bewiesen.** Lease + Single-Flight in `get_or_fetch_listing`, EIN
+aktiver Job je Inserat (Unique-Index in [link_jobs.py](../backend/link_jobs.py)),
+und der Zähler `fetch_count`. Tests:
+[test_listing_cache.py](../backend/tests/test_listing_cache.py) (90
+parallele Aufrufer → 1 Abruf/Link) und
+[test_link_jobs.py](../backend/tests/test_link_jobs.py) (15 parallele
+Checks → 1 Job, `fetch_count == 1`); Lasttest 300/500 Nutzer:
+`inserate_mehrfach_extern_geholt: 0`.
+
+### 8. Quarantäne vor globalem Cache?
+
+**Ja.** `POST /listings/ingest` validiert das HTML (≥3 Strukturmarker der
+echten Detailseite + Anzeigen-Nummer aus der URL muss im HTML stehen +
+Pflichtfelder Titel/Preis/Marke) und schreibt dann **ausschließlich** in
+die händler-eigene Quarantäne (`store_client_listing`,
+[listing_identity.py](../backend/listing_identity.py)). Global freigegeben
+wird erst, wenn ein **zweiter, unabhängiger Händler** dieselben Kerndaten
+einreicht (Preis ±1 %, Titel, km ±1 %, Erstzulassung, Marke) — und dann
+werden die Daten der **älteren** Einreichung veröffentlicht.
+
+### 9. Kann ein manipulierter Client gefälschte Daten einreichen?
+
+**In die eigene Quarantäne: ja** — ein manipulierter Client kann sich
+selbst gefälschte Daten vorsetzen (Schaden: nur der eigene Händler,
+nachvollziehbar über `ingested_by_user/_dealer`, 24 h TTL).
+**Global: nur mit Kollusion zweier Händler-Konten**, die identische
+Kerndaten einreichen — Einzeltäter erreichen andere Händler nicht.
+Restrisiko dokumentiert; ein gemeinsames Beweisdokument entsteht nur aus
+Server-Abrufen, nicht aus Browser-Einreichungen.
+
+### 10. Welche IP sieht Kleinanzeigen?
+
+Siehe Tabelle oben. Zusammengefasst: Standardbetrieb = **Server-IP** für
+alles; Client-Modus = **Nutzer-IP** für Inseratsdaten, **Server-IP** für
+den resolve-Restpfad; Cache-Treffer = keine.
+
+## Zulässigkeit / Anbieterbedingungen — Einschätzung, kein Rechtsrat
+
+Automatisierter Abruf („Crawling/Scraping") ist laut Kleinanzeigen-
+Nutzungsbedingungen ohne Zustimmung **untersagt** — das betrifft den
+server-seitigen Standardmodus genauso wie den verteilten Abruf über die
+Erweiterung: auch der ist ein automatisierter Abruf im Auftrag der
+Plattform, nur mit anderer IP. Die Verteilung auf Nutzer-IPs ist eine
+**technische** Entlastung, keine **rechtliche**. Konsequenz für den
+Livegang (steht so auch in der [STAGING-CHECKLISTE](STAGING-CHECKLISTE.md)):
+
+1. **Vor dem öffentlichen Start eine ausdrückliche Vereinbarung bzw. einen
+   offiziellen API-Zugang anstreben** (analog zur mobile.de Search-API);
+   bis dahin die Abrufe minimal halten (`MAX_CONCURRENT_KLEINANZEIGEN`, Standard 2 gleichzeitig, 1 Abruf je Inserat,
+   14-Tage-Cache, spätestens nach 21 Tagen gelöscht — genau das belegen die Tests).
+2. Die Drosselung und der Nachweis „kein Inserat doppelt" sind Argumente
+   FÜR eine solche Vereinbarung, ersetzen sie aber nicht.
+3. Lasttests laufen ausschließlich gegen den Mock — nie gegen den
+   Anbieter (vom Skript erzwungen).
