@@ -14,6 +14,7 @@ Die Ausgabe kann 1:1 an den Betreiber/Entwickler weitergegeben werden.
 import argparse
 import asyncio
 import os
+import re
 import sys
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -42,6 +43,17 @@ def zeile(text: str = "") -> None:
 def kurz(text, n=140) -> str:
     t = " ".join(str(text or "").split())
     return t if len(t) <= n else t[: n - 1] + "…"
+
+
+_MASKE_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_MASKE_TELEFON = re.compile(r"(?<![\w/])\+?\d[\d \-/().]{5,}\d(?![\w/])")
+
+
+def maskieren(text) -> str:
+    """Pruefung 23.10.2026 (zweiter Bericht): E-Mail-Adressen und Telefonnummern in freien Texten (Alarme, Fehler,
+    Seitentext) unkenntlich machen — die Ausgabe wird kopiert und weitergegeben."""
+    t = _MASKE_EMAIL.sub("[e-mail]", str(text or ""))
+    return _MASKE_TELEFON.sub(lambda m: "[nummer]" if sum(c.isdigit() for c in m.group(0)) >= 7 else m.group(0), t)
 
 
 def _als_utc(wert):
@@ -168,7 +180,7 @@ async def abschnitt_alarme(db, seit):
         det = a.get("details") or {}
         text = det.get("text") or det.get("message") or det.get("grund") or det.get("fehler") or ""
         zeile(f"    {str(a.get('zuletzt') or a.get('created_at'))[:16]}  {a.get('typ')}  x{a.get('anzahl') or 1}  "
-              f"{kurz(text or {k: v for k, v in det.items() if k not in ('key', 'token')}, 150)}")
+              f"{maskieren(kurz(text or {k: v for k, v in det.items() if k not in ('key', 'token')}, 150))}")
     if not n:
         zeile("    (keine)")
 
@@ -186,7 +198,7 @@ async def abschnitt_fehler(db, seit):
     async for e in db.error_logs.find(filt, {"_id": 0, "source": 1, "method": 1, "path": 1, "error_type": 1,
                                              "message": 1, "created_at": 1}).sort("_id", -1).limit(15):
         zeile(f"    {str(e.get('created_at'))[:16]}  {e.get('source')}  {e.get('method') or ''} {kurz(e.get('path'), 50)}  "
-              f"{e.get('error_type') or ''}: {kurz(e.get('message'), 120)}")
+              f"{e.get('error_type') or ''}: {maskieren(kurz(e.get('message'), 120))}")
 
 
 async def abschnitt_aktivitaet(db, seit, tage):

@@ -2986,6 +2986,13 @@ async def _archiv_nebenaufraeumen(db, vid: str, firma: str) -> bool:
     return True
 
 
+async def _lesebilder_verfallen(db) -> None:
+    """Pruefung 23.10.2026 (zweiter Bericht): abgelaufene Lesebilder (routes/werkzeuge.LESEBILD_TAGE) samt Datei auch im
+    stuendlichen Lauf entfernen — vorher nur beim naechsten Hochladen eines Programms oder beim Betreiber-Aufruf."""
+    from routes.werkzeuge import _lesebilder_aufraeumen
+    await _lesebilder_aufraeumen()
+
+
 async def run_cleanup_forever(db):
     """Endlosschleife; wird beim FastAPI-Startup als Task gestartet."""
     # kurze Verzögerung beim Start, damit andere Init-Jobs fertig werden
@@ -3031,6 +3038,7 @@ async def run_cleanup_forever(db):
                         ("snapshot reaper", _reap_stuck_snapshots),
                         ("snapshot expiry", _expire_old_snapshots),
                         ("beweis expiry", _beweise_verfallen),
+                        ("lesebild expiry", _lesebilder_verfallen),
                     )
                     for name, schritt in schritte:
                         try:

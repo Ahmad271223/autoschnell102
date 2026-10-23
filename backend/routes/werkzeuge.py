@@ -380,6 +380,12 @@ async def werkzeug_verbinden(werkzeug_id: str, body: VerbindenIn, request: Reque
     if not await _verbinden_limiter_gesamt.check("alle"):
         await _verbinden_limiter_ip.erstatten(ip)
         log.warning("Werkzeug: Grenze fuer falsche Codes insgesamt erreicht (Raten ueber viele Adressen?)")
+        # Pruefung 23.10.2026 (zweiter Bericht): die gemeinsame Grenze sperrt das Verbinden fuer ALLE — der Betreiber
+        # muss das sehen (Alarm, je Typ/ref hochgezaehlt), statt es nur im Protokoll zu finden
+        from betrieb import alarm
+        await alarm(db, "werkzeug_code_grenze", ref="alle",
+                    hinweis="200 falsche Verbindungscodes in 10 Minuten ueber alle Adressen (Raten?) — Verbinden ist "
+                            "fuer alle Konten bis zum Ablauf des Fensters gesperrt.")
         raise HTTPException(429, "Gerade zu viele Verbindungsversuche – bitte in ein paar Minuten erneut.")
     code = wz.code_normalisieren(body.code)
     if len(code) != wz.CODE_LAENGE:
@@ -978,6 +984,13 @@ def modell_und_preis_passen(lesung: dict, bild: dict) -> bool:
     return True
 
 
+def _bildschirm_schluessel(bild: dict) -> tuple:
+    """Dasselbe Auto auf dem Bildschirm = dieselben gelesenen Werte (Marke/Modell-Zeile bzw. Marke+Modell, EZ, km, Preis)."""
+    norm = werkzeug_erkennung.norm
+    text = norm(bild.get("marke_modell_text")) or norm(f"{bild.get('marke') or ''} {bild.get('modell') or ''}")
+    return (text, bild.get("ez_jahr"), bild.get("ez_monat"), bild.get("kilometer"), bild.get("preis"))
+
+
 async def _nummer_nachtragen(user: dict, identity: dict, lesung: dict, inserat_url: str) -> int:
     """Die Erweiterung hat ein Inserat gelesen: Programm-Vergleiche DIESES Kontos der letzten NACHTRAG_MINUTEN ohne
     (sicheren) Inserat-Link, deren Bildschirmwerte (EZ ±1 Jahr, km ±10 %, Marke; seit 23.10.2026 auch Modell und
@@ -989,13 +1002,13 @@ async def _nummer_nachtragen(user: dict, identity: dict, lesung: dict, inserat_u
         portal = wz.quelle_code(identity.get("source"))
         if not inserat_url or not nummer or not portal:
             return 0
-        n = 0
         cursor = db[wz.SAMMLUNG_VERGLEICHE].find(
             {"werkzeug": wz.AUTOPOINTER, "user_id": user["id"], "probelauf": {"$ne": True},
              "erstellt_am": {"$gte": _seit(NACHTRAG_MINUTEN)},
              "$or": [{"fahrzeug.inserat_url": None}, {"fahrzeug.inserat_url": {"$exists": False}},
                      {"fahrzeug.inserat_nummer_unsicher": True}]},
             {"_id": 0, "id": 1, "fahrzeug": 1}).sort("erstellt_am", -1).limit(20)
+        treffer = []
         async for doc in cursor:
             bild = doc.get("fahrzeug") or {}
             if wz.quelle_code(bild.get("quelle")) not in ("", portal):
@@ -1004,6 +1017,20 @@ async def _nummer_nachtragen(user: dict, identity: dict, lesung: dict, inserat_u
                 continue
             if not modell_und_preis_passen(lesung, bild):        # Pruefung 23.10.2026: sonst bekam der Golf die Passat-Nummer
                 continue
+            treffer.append(doc)
+        if not treffer:
+            return 0
+        # Pruefung 23.10.2026 (zweiter Bericht): EINE Lesung gehoert zu EINEM Auto. Passen mehrere, voneinander
+        # VERSCHIEDENE Bildschirm-Autos (zwei aehnliche Golf desselben Haendlers), bleibt die Nummer weg — lieber keine
+        # als eine falsche (sie fuehrt in den Kaufvertrag). Derselbe Bildschirm mehrfach (gleiche Werte: das Auto zweimal
+        # verglichen) bekommt sie an allen Vergleichen.
+        verschieden = {_bildschirm_schluessel(d.get("fahrzeug") or {}) for d in treffer}
+        if len(verschieden) > 1:
+            log.info("Werkzeug: Inserat-Nummer %s nicht nachgetragen — %d verschiedene passende Bildschirm-Autos bei %s",
+                     nummer, len(verschieden), user["id"])
+            return 0
+        n = 0
+        for doc in treffer:
             r = await db[wz.SAMMLUNG_VERGLEICHE].update_one(
                 {"id": doc["id"]},
                 {"$set": {"fahrzeug.inserat_id": nummer, "fahrzeug.inserat_url": inserat_url,
@@ -1350,7 +1377,7 @@ async def werkzeug_inserat_gelesen(werkzeug_id: str, url: str = Query(..., min_l
     Speicher); erst dann oeffnet es den Kaufvertrag, der /mobile/compare dann ohne Abruf bedient. Nur Lesen: nichts
     wird abgerufen, gezaehlt oder veraendert."""
     from listing_identity import ListingIdentityError, get_listing_identity
-    from browser_helfer import inserat_lesen
+    from browser_helfer import inserat_lesen, vertragsdaten_vollstaendig
     if _ist_browser(werkzeug_id):
         raise HTTPException(404, NICHT_GEFUNDEN)
     user, _v, _firma_doc, _abo = await _programm(werkzeug_id, schluessel, _programm_version(user_agent))
@@ -1361,12 +1388,16 @@ async def werkzeug_inserat_gelesen(werkzeug_id: str, url: str = Query(..., min_l
     # Haertung 09.10.2026: fuer "Vertrag" zaehlt nur die Lesung der EIGENEN Firma (oder der Server-Speicher) —
     # eine fremde Lesung (anderes Konto, anderer Firma, 24 h) koennte gefaelscht sein; das Programm oeffnet dann das
     # Inserat und die eigene Erweiterung liest es (kostet nichts). Diesen Weg geht nur ein Konto mit Erweiterung.
+    # Pruefung 23.10.2026 (zweiter Bericht): "gelesen" nur mit vollstaendigen Vertragsdaten (Marke, Modell, EZ/km) —
+    # ein halber Speichereintrag (nur Preis) oeffnete sonst den Kaufvertrag ohne Auto
     gelesen = await inserat_lesen(db, identity["cache_key"], user["id"], user.get("dealer_id") or "")
-    if gelesen is not None and (gelesen[2].get("dealer_id") or "") == (user.get("dealer_id") or ""):
+    if (gelesen is not None and (gelesen[2].get("dealer_id") or "") == (user.get("dealer_id") or "")
+            and vertragsdaten_vollstaendig(gelesen[0])):
         return {"gelesen": True, "quelle": "browser"}
-    if await db.listings_cache.count_documents(
-            {"cache_key": identity["cache_key"], "data": {"$ne": None},
-             "expires_at": {"$gt": datetime.now(timezone.utc)}}, limit=1):
+    eintrag = await db.listings_cache.find_one(
+        {"cache_key": identity["cache_key"], "data": {"$ne": None},
+         "expires_at": {"$gt": datetime.now(timezone.utc)}}, {"_id": 0, "data": 1})
+    if eintrag and vertragsdaten_vollstaendig(eintrag.get("data")):
         return {"gelesen": True, "quelle": "speicher"}
     return {"gelesen": False}
 
@@ -1447,6 +1478,13 @@ async def lesebilder_loeschen(filt: dict, hoechstens: int = 500) -> int:
     async for d in db[wz.SAMMLUNG_LESEBILDER].find(filt, {"_id": 0, "id": 1, "key": 1, "dealer_id": 1}).limit(hoechstens):
         if d.get("key") and not await loeschen_oder_vormerken(db, key=d["key"], grund="lesebild",
                                                                 dealer_id=d.get("dealer_id") or ""):
+            if not await db.storage_delete_retry.count_documents({"art": "key", "key": d["key"]}, limit=1):
+                # zweiter Bericht 23.10.2026: auch die Vormerkung schlug fehl — der Eintrag bleibt mit Vermerk stehen
+                # (der naechste Lauf versucht es wieder), damit der Dateiverweis nie verloren geht
+                log.error("Lesebild %s: Datei %s weder geloescht noch vorgemerkt — Eintrag bleibt", d.get("id"), d["key"])
+                await db[wz.SAMMLUNG_LESEBILDER].update_one(
+                    {"id": d["id"]}, {"$set": {"datei_loeschung_offen": True, "datei_loeschung_versucht_am": now_iso()}})
+                continue
             log.warning("Lesebild %s: Datei %s nicht geloescht — fuer den Aufraeum-Lauf vorgemerkt", d.get("id"), d["key"])
         r = await db[wz.SAMMLUNG_LESEBILDER].delete_one({"id": d["id"]})
         n += r.deleted_count

@@ -5041,3 +5041,31 @@ Ein externer Bericht zum Stand 30f409f nannte sieben Punkte; fünf waren echt un
   und `AUTOPOINTER_VORAB_ABRUF` an, Produktion läuft seit 08.10. ohne — ein zweiter CI-Lauf mit Produktionsschaltern
   wäre möglich, verdoppelt aber die Laufzeit.
 - Tests: `test_pruefung_20261009_server.py` (08, 09b, 09c, 17, 18), `InseratNummerTests.Gleichstand_ist_keine_Mehrheit`.
+
+### Zweiter Bericht 23.10.2026 (Head 41ba8d7): Vertrag „Neue Fassung“, CI-Abhängigkeiten, Nachtragen, Lesebilder
+
+- **Vertrag „Neue Fassung“ (hoch, echt):** `POST /contracts/{id}/neue-fassung` nahm mit `model_dump()` auch die
+  Standardwerte („“) mit — eine Anfrage ohne Telefon-, Unfall-, Technik- oder Notizfeld leerte diese Angaben in der
+  neuen Fassung (Teilanfragen, ältere Clients; der vollständige Dialog war nicht betroffen). Jetzt `exclude_unset=True`:
+  nur mitgeschickte Felder zählen. Dazu gilt die Kontaktpflicht (Telefon ODER E-Mail, 06.10.2026) auch hier (422).
+  Test `test_vertrag_nachtraeglich_20261001.py::test_05`.
+- **CI (Blocker):** neue Abhängigkeits-Meldungen, nicht vom Code: Frontend `vite` 6.4.3 → ≥ 6.4.4 (launch-editor) und
+  `follow-redirects` → ≥ 1.16.1 (beide über `resolutions`); Backend `aiohttp` 3.14.4, `certifi` 2026.10.19,
+  `pillow` 13.0.0, `pypdf` 6.21.1 (pip-audit und Trivy meldeten dieselben Pakete). Lokal: `node audit-pruefen.js`
+  0 blockierend, Frontend-Build mit vite 6.4.5 läuft.
+- **Nachtragen eindeutig:** eine Browser-Lesung trägt die Nummer nur nach, wenn alle passenden Programm-Vergleiche
+  DASSELBE Bildschirm-Auto zeigen (`_bildschirm_schluessel`: Marke/Modell-Zeile, EZ, km, Preis). Zwei verschiedene
+  passende Autos (zwei ähnliche Golf) bleiben ohne Nummer — lieber keine als eine falsche.
+- **Lesebilder:** schlägt auch die Vormerkung in `storage_delete_retry` fehl, bleibt der Eintrag mit
+  `datei_loeschung_offen` stehen (nächster Lauf versucht es wieder). Neu im stündlichen Aufräum-Lauf: Schritt
+  „lesebild expiry“ (`cleanup_service._lesebilder_verfallen`).
+- **`/inserat-gelesen` (Vertrag bereit):** nur mit vollständigen Daten (Marke, Modell oder Titel, EZ oder km;
+  `browser_helfer.vertragsdaten_vollstaendig`) — für die eigene Browser-Lesung wie für den Server-Speicher.
+- **Verbindungscodes:** die gemeinsame Grenze (200 falsche Codes in 10 Minuten) bleibt bewusst (sie schützt den
+  Code-Raum gegen Raten über viele Adressen; Verbinden ist selten), löst jetzt aber den Betriebsalarm
+  `werkzeug_code_grenze` aus, damit ein Angriff sichtbar wird.
+- **Skripte:** `systemcheck.py` und `leseseite_analysieren.py` maskieren E-Mail-Adressen und Telefonnummern in freien
+  Texten; `--text` ist auf 3000 Zeichen begrenzt.
+- **Entscheidungen (unverändert):** fremde Firmen-Lesung als dritte Stufe von `inserat_lesen` (nur Vergleich, nie
+  Vertrag); CI-Schalter; kein Wiederherstellungslauf des Backups durchgeführt.
+

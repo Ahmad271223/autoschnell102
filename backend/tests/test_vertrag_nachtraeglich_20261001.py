@@ -170,3 +170,45 @@ def test_04_route_und_oberflaeche():
     # 03.10.2026: der Knopf steht im Menue "Mehr" der Aktionsleiste
     aktionen = (front / "components" / "VertragAktionen.jsx").read_text(encoding="utf-8")
     assert "vertrag-aendern-${it.id}" in aktionen and "onClick={a.aendern}" in aktionen
+
+
+def test_05_teilanfrage_leert_keine_angaben_und_kontaktpflicht_bleibt(welt, monkeypatch):
+    """Pruefung 23.10.2026 (zweiter externer Bericht): model_dump() ohne exclude_unset nahm Standardwerte ("") mit —
+    eine Anfrage ohne Telefon-, Unfall-, Technik- oder Notizfeld leerte diese Angaben in der neuen Fassung (Teilanfragen,
+    aeltere Clients). Jetzt zaehlen nur mitgeschickte Felder; und die Kontaktpflicht (06.10.2026) gilt auch hier:
+    ausdruecklich leer geschickter Kontakt -> 422, keine neue Fassung."""
+    C = _module("routes.contracts")
+    w, db = welt.w, welt.db
+    _auto_daten_aus(monkeypatch)
+    cid = f"cna5_{w.s}"
+    bleibt = {"seller_phone": "0170 5555555", "seller_email": "", "accident_free": "Nein",
+              "accident_location": "Frontschaden", "technik_zustand": "Schaden vorhanden",
+              "technik_schaden_text": "Motor defekt", "notes": "Vereinbart: Winterreifen dabei",
+              "payment_method": "Überweisung"}
+
+    async def lauf():
+        doc = _vertrag(w, cid)
+        doc["contract_data"].update(bleibt)
+        await db.generated_pdfs.insert_one(doc)
+        nur_preis = C.ContractIn(vehicle_id="v-egal", seller_name="Vera Verkauf", purchase_price=13900.0)
+        antwort = await C.vertrag_nachtraeglich_aendern(cid, nur_preis, user=w.chef)
+        d = await db.generated_pdfs.find_one({"id": cid}, {"_id": 0, "contract_data": 1, "version": 1})
+        try:
+            await C.vertrag_nachtraeglich_aendern(
+                cid, C.ContractIn(vehicle_id="v-egal", seller_name="Vera Verkauf", purchase_price=13900.0,
+                                  seller_phone="", seller_email=""), user=w.chef)
+            status = None
+        except HTTPException as e:
+            status = e.status_code
+        d2 = await db.generated_pdfs.find_one({"id": cid}, {"_id": 0, "version": 1, "contract_data": 1})
+        return antwort, d, status, d2
+
+    antwort, d, status, d2 = welt.run(lauf())
+    assert antwort["geaendert"] is True and d["version"] == 2
+    cd = d["contract_data"]
+    assert cd["purchase_price"] == 13900.0
+    for feld, wert in bleibt.items():
+        assert cd.get(feld) == wert, (feld, cd.get(feld))
+    assert status == 422, "Kontaktpflicht gilt auch fuer die neue Fassung"
+    assert d2["version"] == 2 and d2["contract_data"]["seller_phone"] == "0170 5555555"
+

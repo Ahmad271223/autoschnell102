@@ -94,6 +94,17 @@ KONTAKT_FELDER = ("seller_phone", "seller_email", "seller_address", "seller_ansp
 PRIVAT_FELDER = ("seller_name", "seller_alias")
 
 
+def vertragsdaten_vollstaendig(daten) -> bool:
+    """Pruefung 23.10.2026 (zweiter Bericht): "gelesen" fuer den Kaufvertrag heisst Marke, Modell (oder Titel) UND
+    Erstzulassung oder Kilometer liegen vor — ein halber Speichereintrag (nur Preis, nur Nummer) ist nicht vertragsbereit."""
+    if not isinstance(daten, dict):
+        return False
+    marke = daten.get("make_label") or daten.get("make")
+    modell = daten.get("model_label") or daten.get("model") or daten.get("title")
+    stand = bool(daten.get("first_registration")) or isinstance(daten.get("mileage"), (int, float))
+    return bool(marke and modell and stand)
+
+
 def _pruefsumme(daten: dict) -> str:
     return hashlib.sha256(json.dumps(daten, sort_keys=True, default=str, ensure_ascii=False)
                           .encode("utf-8")).hexdigest()

@@ -187,10 +187,11 @@ def test_09b_nachtragen_prueft_modell_und_preis():
 def test_09c_lesebild_datei_wird_bei_fehler_vorgemerkt(monkeypatch):
     """Pruefung 23.10.2026 (externer Bericht zu 30f409f): schlug das Loeschen der Lesebild-Datei fehl, ging der Eintrag
     trotzdem weg und die Datei blieb fuer immer liegen. Jetzt landet der Schluessel in storage_delete_retry (der
-    stuendliche Aufraeum-Lauf holt das Loeschen nach); der Eintrag geht weiter weg. Klappt das Loeschen: keine Vormerkung."""
+    stuendliche Aufraeum-Lauf holt das Loeschen nach); der Eintrag geht weiter weg. Zweiter Bericht: schlaegt AUCH die
+    Vormerkung fehl, bleibt der Eintrag mit Vermerk stehen (Dateiverweis nie verloren). Klappt das Loeschen: nichts davon."""
     import storage_service as ss
     rw = __import__("routes.werkzeuge", fromlist=["lesebilder_loeschen"])
-    vorgemerkt, geloescht = [], []
+    vorgemerkt, geloescht, vermerkt = [], [], []
 
     class _Cursor:
         def __init__(self, docs):
@@ -219,9 +220,19 @@ def test_09c_lesebild_datei_wird_bei_fehler_vorgemerkt(monkeypatch):
             geloescht.append(filt["id"])
             return type("R", (), {"deleted_count": 1})()
 
+        async def update_one(self, filt, upd):
+            vermerkt.append((filt["id"], upd["$set"]))
+
     class _Retry:
+        kaputt = False
+
         async def update_one(self, filt, upd, upsert=False):
+            if self.kaputt:
+                raise RuntimeError("Mongo weg")
             vorgemerkt.append((filt, upd))
+
+        async def count_documents(self, filt, limit=0):
+            return sum(1 for f, _u in vorgemerkt if f.get("key") == filt.get("key"))
 
     class _Db:
         storage_delete_retry = _Retry()
@@ -236,18 +247,35 @@ def test_09c_lesebild_datei_wird_bei_fehler_vorgemerkt(monkeypatch):
     monkeypatch.setattr(ss, "delete_async", kaputt)
     monkeypatch.setattr(rw, "db", _Db())
     assert asyncio.run(rw.lesebilder_loeschen({"id": "b1"}, hoechstens=1)) == 1
-    assert geloescht == ["b1"]
+    assert geloescht == ["b1"] and vermerkt == []
     assert len(vorgemerkt) == 1 and vorgemerkt[0][0] == {"art": "key", "key": "lesebilder/b1.png", "prefix": None}
     assert vorgemerkt[0][1]["$set"]["grund"] == "lesebild" and vorgemerkt[0][1]["$set"]["dealer_id"] == "firma-a"
+    # auch die Vormerkung schlaegt fehl: Eintrag bleibt mit Vermerk, nichts geloescht
     vorgemerkt.clear()
     geloescht.clear()
+    _Db.storage_delete_retry.kaputt = True
+    assert asyncio.run(rw.lesebilder_loeschen({"id": "b1"}, hoechstens=1)) == 0
+    assert geloescht == [] and len(vermerkt) == 1 and vermerkt[0][1]["datei_loeschung_offen"] is True
+    _Db.storage_delete_retry.kaputt = False
+    vermerkt.clear()
 
     async def ok(key):
         return True
 
     monkeypatch.setattr(ss, "delete_async", ok)
     assert asyncio.run(rw.lesebilder_loeschen({"id": "b1"}, hoechstens=1)) == 1
-    assert geloescht == ["b1"] and vorgemerkt == []
+    assert geloescht == ["b1"] and vorgemerkt == [] and vermerkt == []
+
+
+def test_09d_vertragsbereit_nur_mit_vollstaendigen_daten():
+    """Pruefung 23.10.2026 (zweiter Bericht): fuer /inserat-gelesen zaehlt nur ein Eintrag mit Marke, Modell (oder Titel)
+    und EZ oder km — nicht ein halber Speichereintrag."""
+    assert bh.vertragsdaten_vollstaendig(dict(VW))
+    assert bh.vertragsdaten_vollstaendig({"make": "BMW", "title": "BMW 730d", "mileage": 0})
+    assert not bh.vertragsdaten_vollstaendig({"price": 9999})
+    assert not bh.vertragsdaten_vollstaendig({"make_label": "VW", "model_label": "Golf"})
+    assert not bh.vertragsdaten_vollstaendig({"make_label": "VW", "first_registration": "06/2020"})
+    assert not bh.vertragsdaten_vollstaendig(None)
 
 
 def test_05_fotos_aus_dem_inserat_objekt_wenn_images_fehlt():
@@ -464,6 +492,11 @@ def test_12_vertrag_zaehlt_nur_eigene_lesung_oder_speicher(welt):
         lesung(welt["firma"]["dealer_id"], "kollege-" + uuid.uuid4().hex[:6])
         assert gelesen() == {"gelesen": True, "quelle": "browser"}, "Kollege derselben Firma zaehlt"
         db.werkzeug_inserate.delete_many({"cache_key": f"mobile:{nr}"})
+        # zweiter Bericht 23.10.2026: ein halber Speichereintrag (nur Preis) ist nicht vertragsbereit
+        db.listings_cache.update_one({"cache_key": f"mobile:{nr}"}, {"$set": {
+            "cache_key": f"mobile:{nr}", "source": "mobile", "item_id": nr, "data": {"price": 9999},
+            "expires_at": jetzt + timedelta(days=1)}}, upsert=True)
+        assert gelesen() == {"gelesen": False}, "halber Speichereintrag zaehlt nicht"
         db.listings_cache.update_one({"cache_key": f"mobile:{nr}"}, {"$set": {
             "cache_key": f"mobile:{nr}", "source": "mobile", "item_id": nr, "data": dict(VW),
             "expires_at": jetzt + timedelta(days=1)}}, upsert=True)
@@ -715,6 +748,30 @@ def test_18_browser_lesung_traegt_die_nummer_am_programm_vergleich_nach(welt):
         eintrag = next(x for x in r.json().get("vergleiche", r.json() if isinstance(r.json(), list) else [])
                        if x.get("id") == passt["vorgang_id"])
         assert eintrag["fahrzeug"]["inserat_url"].endswith(f"id={MOBILE_ID}")
+        # zweiter Bericht 23.10.2026: EINE Lesung gehoert zu EINEM Auto — zwei verschiedene passende Bildschirm-Autos
+        # (zwei aehnliche Golf) bleiben beide ohne Nummer; dasselbe Auto zweimal verglichen bekommt sie an beiden
+        def golf(**extra):
+            werte = dict(marke=fz["make_label"], ez_jahr=jahr, preis=preis, inserat_id="",
+                         marke_modell_text=f"{fz['make_label']} {fz['model_label']}", kilometer=int(fz["mileage"]) + 100)
+            werte.update(extra)
+            return _vergleich_schicken(welt, pc, **werte)
+
+        def lesung_schicken():
+            r = requests.post(f"{tb.API}/werkzeuge/{tb.WID}/inserat", headers=kopf, timeout=60,
+                              json={"url": MOBILE_URL, "seite": tb._seite(_mobile_inserat_html(listing))})
+            assert r.status_code == 200, r.text
+
+        def link_von(v):
+            return (db.werkzeug_vergleiche.find_one({"id": v["vorgang_id"]})["fahrzeug"].get("inserat_url") or "")
+
+        db.werkzeug_vergleiche.delete_many({"user_id": welt["sucher_id"]})
+        golf_a, golf_b = golf(), golf(kilometer=int(fz["mileage"]) + 2500, preis=preis - 300)
+        lesung_schicken()
+        assert link_von(golf_a) == "" and link_von(golf_b) == "", "zwei verschiedene passende Autos: keine Nummer"
+        db.werkzeug_vergleiche.delete_many({"user_id": welt["sucher_id"]})
+        gleich = [golf(), golf()]
+        lesung_schicken()
+        assert all(link_von(v).endswith(f"id={MOBILE_ID}") for v in gleich), "dasselbe Auto zweimal: beide"
     finally:
         db.werkzeug_vergleiche.delete_many({"user_id": welt["sucher_id"]})
         db.werkzeug_inserate.delete_many({"cache_key": f"mobile:{MOBILE_ID}"})

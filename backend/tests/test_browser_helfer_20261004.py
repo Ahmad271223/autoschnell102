@@ -1342,11 +1342,15 @@ def test_47f_vertrag_fragt_ob_das_inserat_gelesen_ist(welt):
                           json={"url": url, "seite": _seite(_mobile_inserat_html(_mobile_listing(id=487654321)))})
         assert r.status_code == 200, r.text
         assert gelesen().json() == {"gelesen": True, "quelle": "browser"}
-        # gemeinsamer Speicher zaehlt auch
+        # gemeinsamer Speicher zaehlt auch — aber nur mit vollstaendigen Vertragsdaten (zweiter Bericht 23.10.2026):
+        # ein halber Eintrag (nur Marke) oeffnete sonst den Kaufvertrag ohne Auto
         db.werkzeug_inserate.delete_many({"cache_key": "mobile:487654321"})
         db.listings_cache.insert_one({"cache_key": "mobile:487654321", "source": "mobile", "item_id": "487654321",
                                       "data": {"make_label": "VW"},
                                       "expires_at": datetime.now(timezone.utc) + timedelta(days=1)})
+        assert gelesen().json() == {"gelesen": False}, "halber Speichereintrag ist nicht vertragsbereit"
+        db.listings_cache.update_one({"cache_key": "mobile:487654321"}, {"$set": {"data": {
+            "make_label": "VW", "model_label": "Golf", "first_registration": "06/2019", "mileage": 111016}}})
         assert gelesen().json() == {"gelesen": True, "quelle": "speicher"}
         assert gelesen("https://example.com/x").status_code == 400
         assert requests.get(f"{API}/werkzeuge/{WID}/inserat-gelesen", params={"url": url}, headers=helfer,

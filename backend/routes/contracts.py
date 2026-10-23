@@ -1497,6 +1497,10 @@ KONTAKT_PFLICHT = ("Bitte Telefonnummer oder E-Mail des Verkäufers eintragen �
 
 
 def verkaeufer_kontakt_fehlt(body) -> bool:
+    """Telefon ODER E-Mail des Verkaeufers (06.10.2026) — body ist das Eingabemodell oder (neue Fassung, 23.10.2026)
+    der zusammengefuehrte Vertragsinhalt als dict."""
+    if isinstance(body, dict):
+        return not (str(body.get("seller_phone") or "").strip() or str(body.get("seller_email") or "").strip())
     return not (str(getattr(body, "seller_phone", "") or "").strip()
                 or str(getattr(body, "seller_email", "") or "").strip())
 
@@ -3782,8 +3786,9 @@ async def vertrag_nachtraeglich_aendern(contract_id: str, body: ContractIn, user
     denselben Link erneut einfuegen und einen zweiten Vertrag anlegen.
 
     Bleibt wie bisher: Vertragsnummer, Abholdatum/-uhrzeit (_NICHT_AUS_DEM_FORMULAR), eingefrorener
-    Inseratsstand, Preis vor der Abholung, Logo. Nicht geschickte Felder (None) behalten ihren Wert;
-    leer geschickte Textfelder werden wie beim Anlegen behandelt (leer = Vorlage/Einstellung).
+    Inseratsstand, Preis vor der Abholung, Logo. Nicht geschickte Felder behalten ihren Wert (exclude_unset,
+    Pruefung 23.10.2026); leer geschickte Textfelder werden wie beim Anlegen behandelt (leer = Vorlage/Einstellung);
+    Telefon oder E-Mail des Verkaeufers muss auch danach vorhanden sein (422, Kontaktpflicht 06.10.2026).
     Chef: alle Vertraege der Firma; Sucher: nur eigene (_vertrag_bereich) und nur mit aktivem Abo
     (Entscheidung Ahmad 04.10.2026, aendern_braucht_abo). Nicht mitten im Versand (409).
     Antwort: der Vertrag ohne PDF-Daten (wie GET /contracts/{id}) plus geaendert=True — oder
@@ -3797,8 +3802,11 @@ async def vertrag_nachtraeglich_aendern(contract_id: str, body: ContractIn, user
     dealer_id = user["dealer_id"]
     alte_version = int(doc.get("version") or 1)
     cd_alt = dict(doc.get("contract_data") or {})
-    eingaben = body.model_dump(exclude={"zweiter_vertrag_bestaetigt", "ki_bewertung_id",
-                                        "idempotency_key", "vehicle_id"})
+    # Pruefung 23.10.2026 (zweiter externer Bericht): NUR mitgeschickte Felder (exclude_unset) — model_dump() ohne das
+    # nahm auch die Standardwerte ("" bei Telefon, Unfallfrei, Technik, Notizen) mit und leerte damit in der neuen
+    # Fassung jede Angabe, die eine Teilanfrage oder ein aelterer Client nicht mitschickte.
+    eingaben = body.model_dump(exclude_unset=True, exclude={"zweiter_vertrag_bestaetigt", "ki_bewertung_id",
+                                                            "idempotency_key", "vehicle_id"})
     contract_dict = dict(cd_alt)
     for k, w in eingaben.items():
         if k in _NICHT_AUS_DEM_FORMULAR:
@@ -3809,6 +3817,10 @@ async def vertrag_nachtraeglich_aendern(contract_id: str, body: ContractIn, user
     contract_dict["contract_no"] = str(doc.get("contract_no") or cd_alt.get("contract_no") or "")
     for k in ("pickup_date", "pickup_time"):
         contract_dict[k] = cd_alt[k] if cd_alt.get(k) is not None else (doc.get(k) or "")
+    # Pruefung 23.10.2026 (zweiter externer Bericht): die Kontaktpflicht vom 06.10.2026 (Telefon ODER E-Mail, 422) gilt
+    # auch fuer die neue Fassung — vorher liess sie sich hier nachtraeglich umgehen
+    if verkaeufer_kontakt_fehlt(contract_dict):
+        raise HTTPException(422, KONTAKT_PFLICHT)
 
     v = await db.vehicles.find_one({"id": doc.get("vehicle_id"), "dealer_id": dealer_id}, {"_id": 0}) or {}
     vehicle = dict(v.get("data") or {})

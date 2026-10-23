@@ -60,7 +60,18 @@ def sichtbarer_text(html: str, n: int) -> str:
     t = re.sub(r"(?s)<[^>]+>", " ", t)
     t = htmllib.unescape(t)
     t = " ".join(t.split())
-    return t[:n]
+    return maskieren(t[:n])
+
+
+_MASKE_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_MASKE_TELEFON = re.compile(r"(?<![\w/])\+?\d[\d \-/().]{5,}\d(?![\w/])")
+
+
+def maskieren(text) -> str:
+    """Pruefung 23.10.2026 (zweiter Bericht): E-Mail-Adressen und Telefonnummern in freien Texten (Alarme, Fehler,
+    Seitentext) unkenntlich machen — die Ausgabe wird kopiert und weitergegeben."""
+    t = _MASKE_EMAIL.sub("[e-mail]", str(text or ""))
+    return _MASKE_TELEFON.sub(lambda m: "[nummer]" if sum(c.isdigit() for c in m.group(0)) >= 7 else m.group(0), t)
 
 
 def untersuchen(html: str, text_n: int) -> None:
@@ -101,7 +112,7 @@ async def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--id", default=None)
     p.add_argument("--anzahl", type=int, default=5)
-    p.add_argument("--text", type=int, default=600)
+    p.add_argument("--text", type=int, default=600, help="Zeichen sichtbarer Text je Seite (hoechstens 3000)")
     args = p.parse_args()
     from deps import db
     import browser_helfer as bh
@@ -127,7 +138,7 @@ async def main() -> int:
         except Exception as exc:  # noqa: BLE001
             print(f"  nicht entpackbar: {exc}")
             continue
-        untersuchen(html, args.text)
+        untersuchen(html, min(args.text, 3000))
         # was sagt unser Leser heute dazu? — und wie ist der ENTPACKTE Datenstrom aufgebaut (die Schluessel stehen im
         # rohen HTML mit Backslash-Anfuehrungszeichen, darum hier auf dem entpackten Text)
         try:
