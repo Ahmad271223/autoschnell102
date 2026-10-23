@@ -5013,3 +5013,31 @@ Abschnittsnamen. Tests: `backend/tests/test_vertrag_titel_stempel_20261004.py`.
 - Gespeicherte Verträge und PDF-Dateien bleiben unverändert (Archiv); jede neue Fassung ist ohne den Satz.
 - Tests: `backend/tests/test_paragraf14_weg_20261013.py`; angepasst `test_vertragstext_satz_20261001.py`,
   `test_befunde_runde26_trennung.py`. Keine neuen Umgebungswerte.
+
+## Prüfung 23.10.2026: externer Bericht zu 30f409f (CI, Nachtragen, Lesebild-Dateien, Kraftstoff, Programm 1.5.17)
+
+Ein externer Bericht zum Stand 30f409f nannte sieben Punkte; fünf waren echt und sind behoben, zwei sind Entscheidungen.
+
+- **CI rot (Blocker):** `test_pruefung_20261009_server.py::test_17` erwartete 409 von `/mobile/bilder-nachholen`, die
+  CI hat aber keinen mobile.de-Anbieter (kein `APIFY_TOKEN`, keine Sandbox) — der Weg endet dort richtig mit 400
+  „noch nicht freigeschaltet“. Der Test überspringt jetzt in diesem Fall (lokal mit `backend/.env` läuft er voll).
+- **Nummer nachtragen (`_nummer_nachtragen`):** EZ ±1 Jahr, km ±10 % und Marke reichten — ein Golf hätte die Nummer
+  eines Passat desselben Händlers bekommen. Neu `modell_und_preis_passen`: das Modell der Lesung muss im
+  Bildschirmtext vorkommen (Modell, Marke/Modell-Zeile, Titel) oder das Bildschirm-Modell ein Anfang davon sein;
+  Preis höchstens 10 % (mind. 500 €) daneben (`NACHTRAG_PREIS_TOLERANZ`). Fehlt eine Angabe, entscheidet sie nicht.
+- **Lesebild-Dateien:** `lesebilder_loeschen` löschte den Eintrag auch, wenn die Datei nicht wegging (verwaiste Datei).
+  Jetzt über `storage_service.loeschen_oder_vormerken` (Grund `lesebild`): klappt es nicht, steht der Schlüssel in
+  `storage_delete_retry`, der stündliche Aufräum-Lauf holt das Löschen nach (Alarm `datei_loeschung_aufgegeben` wie
+  bei anderen Dateien). Keine neue Sammlung, kein neuer Umgebungswert.
+- **Kraftstoff ableiten (`mobile_service.kraftstoff_ableiten`):** eine Batterie-Zeile ohne Wert („-“, „“, „0 kWh“,
+  „k. A.“) zählt nicht mehr als E-Auto (`wert_leer`); „Hybrid“ gewinnt immer, auch wenn „Strom“/„Elektromotor“ in
+  einer früheren Zeile steht.
+- **Programm 1.5.17 (`InseratNummer.Mehrheit`):** Gleichstand zweier plausibler Lesungen (A, B, A, B) galt als
+  „sicher“ (die frühere gewann). Jetzt unsicher (`inserat_id_unsicher`), gilt auch für die Hash-ID (kein AutoScout-
+  Link). Ausrollen: Server zuerst, dann Programm hochladen (`autopointer-vergleich\hochladen.ps1`).
+- **Entscheidungen (nicht geändert):** (a) `browser_helfer.inserat_lesen` nimmt als dritte Stufe die jüngste Lesung
+  irgendeiner Firma (Entscheidung Ahmad 04.10.2026; Kontaktdaten seit 08.10. gestrichen) — der Bericht sieht darin
+  ein Risiko (gefälschte Lesung einer fremden Firma färbt Preis/km ab). (b) Die CI prüft mit `AUTOPOINTER_VORGANG`
+  und `AUTOPOINTER_VORAB_ABRUF` an, Produktion läuft seit 08.10. ohne — ein zweiter CI-Lauf mit Produktionsschaltern
+  wäre möglich, verdoppelt aber die Laufzeit.
+- Tests: `test_pruefung_20261009_server.py` (08, 09b, 09c, 17, 18), `InseratNummerTests.Gleichstand_ist_keine_Mehrheit`.

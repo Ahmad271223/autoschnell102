@@ -504,6 +504,15 @@ _ANTRIEB_ZEILEN = ("antrieb", "drive", "energietr", "energy", "motor", "fueltype
 _BATTERIE_ZEILEN = ("batterie", "battery", "elektrische reichweite", "electricrange", "ladedauer", "chargingtime",
                     "schnellladezeit", "fastcharg")
 _LINIE_ZEILEN = ("ausstattungslinie", "trimline", "trim", "modelline", "variante")
+_LEERE_WERTE = {"", "-", "--", "\u2013", "\u2014", "k.a.", "k. a.", "k.a", "n/a", "na", "nein", "no", "keine angabe",
+                "none", "null"}
+_NULL_WERT = re.compile(r"^[0\s.,]*(?:kwh|km|h|min|std\.?|%)?\.?$")
+
+
+def wert_leer(wert) -> bool:
+    """Zeile ohne Aussage: leer, Strich, "k. A." oder eine Null ("0", "0 kWh", "0,0 km") — Pruefung 23.10.2026."""
+    v = str(wert or "").strip().lower()
+    return v in _LEERE_WERTE or bool(_NULL_WERT.match(v))
 
 
 def kraftstoff_ableiten(item: dict) -> Optional[str]:
@@ -515,7 +524,11 @@ def kraftstoff_ableiten(item: dict) -> Optional[str]:
     attrs = item.get("attributes") or []
     if isinstance(attrs, dict):
         attrs = [{"tag": k, "value": v} for k, v in attrs.items()]
+    # Pruefung 23.10.2026 (externer Bericht zu 30f409f): (1) eine Batterie-Zeile ohne Wert ("-", "", "0 kWh", "k. A.")
+    # zaehlt nicht — sie steht auch bei Verbrennern leer in der Liste; (2) "Hybrid" gewinnt immer, auch wenn eine Zeile
+    # "Strom"/"Elektromotor" FRUEHER steht (Plug-in: "Anderer Energietraeger: Strom" vor "Antriebsart: Hybrid").
     hat_batterie = False
+    aus_antrieb = None
     aus_linie = None
     for a in attrs:
         if not isinstance(a, dict):
@@ -524,15 +537,17 @@ def kraftstoff_ableiten(item: dict) -> Optional[str]:
         v = a.get("value")
         v = ", ".join(str(x) for x in v) if isinstance(v, list) else str(v or "")
         vl = v.lower()
-        if any(w in k for w in _BATTERIE_ZEILEN):
+        if any(w in k for w in _BATTERIE_ZEILEN) and not wert_leer(vl):
             hat_batterie = True
         if any(w in k for w in _ANTRIEB_ZEILEN):
             if "hybrid" in vl:
                 return "Hybrid (Diesel/Elektro)" if "diesel" in vl else "Hybrid"
-            if any(w in vl for w in ("elektr", "strom", "electric")):
-                return "Elektro"
+            if aus_antrieb is None and any(w in vl for w in ("elektr", "strom", "electric")):
+                aus_antrieb = "Elektro"
         if any(w in k for w in _LINIE_ZEILEN) and ("elektro" in vl or "electric" in vl or vl.endswith(" ev")):
             aus_linie = "Elektro"
+    if aus_antrieb:
+        return aus_antrieb
     if aus_linie:
         return aus_linie
     return "Elektro" if hat_batterie else None

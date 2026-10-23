@@ -76,9 +76,33 @@ public class InseratNummerTests
         Assert.False(m.Unsicher);
         Assert.Equal(new[] { "50342132635382" }, m.Alternativen);       // die abweichende bleibt als Alternative
         Assert.Equal(3, m.Lesungen);
-        // bei zwei Paaren gewinnt das haeufigere, bei Gleichstand das fruehere
-        Assert.Equal("503421326", InseratNummer.Mehrheit(new[] { "503421326", "503421327", "503421326", "503421327", "503421326" }, Portal.Mobile).Wert);
-        Assert.Equal("503421327", InseratNummer.Mehrheit(new[] { "503421327", "503421326", "503421327", "503421326" }, Portal.Mobile).Wert);
+        // bei zwei Paaren gewinnt das haeufigere (3 zu 2: sicher)
+        var drei = InseratNummer.Mehrheit(new[] { "503421326", "503421327", "503421326", "503421327", "503421326" }, Portal.Mobile);
+        Assert.Equal("503421326", drei.Wert);
+        Assert.True(drei.Sicher);
+    }
+
+    [Fact]
+    public void Gleichstand_ist_keine_Mehrheit()
+    {
+        // 1.5.17 (Pruefung 23.10.2026, externer Bericht zu 1.5.16): A, B, A, B — vorher gewann die fruehere Lesung als
+        // "sicher". Zwei plausible Lesungen mit gleich vielen Treffern widersprechen sich: unsicher, die fruehere bleibt
+        // Hauptwert, die andere Alternative — der Server bekommt inserat_id_unsicher und prueft das Inserat gegen den Bildschirm.
+        var m = InseratNummer.Mehrheit(new[] { "503421327", "503421326", "503421327", "503421326" }, Portal.Mobile);
+        Assert.Equal("503421327", m.Wert);
+        Assert.False(m.Sicher);
+        Assert.True(m.Unsicher);
+        Assert.Equal(new[] { "503421326" }, m.Alternativen);
+        // Gleichstand zaehlt nur unter PLAUSIBLEN Lesungen: zweimal richtig gegen zweimal falsche Stellenzahl bleibt sicher
+        var k = InseratNummer.Mehrheit(new[] { "5034213263539", "50342132635392", "5034213263539", "50342132635392" }, Portal.Mobile);
+        Assert.Equal("50342132635392", k.Wert);
+        Assert.True(k.Sicher);
+        // dasselbe fuer die Hash-ID (AutoScout): bei Gleichstand kein sicherer Wert -> Uebernehmen setzt keine Hash-ID
+        const string a = "ee31ae2a-9d2f-4c62-b078-cc6af83d3f1d", b = "ee31ae2a-9d2f-4c62-b078-cc6af83d3f1e";
+        var h = InseratNummer.HashMehrheit(new[] { a, b, a, b });
+        Assert.False(h.Sicher);
+        Assert.True(h.Unsicher);
+        Assert.Equal(a, h.Wert);
     }
 
     [Fact]

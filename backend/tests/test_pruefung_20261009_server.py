@@ -125,6 +125,20 @@ def test_08_elektro_ohne_kraftstoffzeile_wird_erkannt():
     assert inserat({"label": "Antriebsart", "tag": "driveType", "value": "Hybrid (Diesel/Elektro)"})["fuel"] == "HYBRID_DIESEL"
     assert inserat({"label": "Antriebsart", "tag": "driveType", "value": "Allrad"})["fuel"] in ("", None), "Allrad ist kein Kraftstoff"
     assert ms.kraftstoff_ableiten({"attributes": [{"tag": "color", "value": "Rot"}]}) is None
+    # Pruefung 23.10.2026 (externer Bericht): eine Batterie-Zeile OHNE Wert ("-", "", "0 kWh", "k. A.") macht kein
+    # E-Auto; und steht "Strom"/"Elektromotor" VOR einer Hybrid-Zeile, gewinnt trotzdem Hybrid
+    for leer in ("-", "", "0 kWh", "k. A.", "--", None):
+        assert inserat({"label": "Batteriekapazität", "tag": "batteryCapacity", "value": leer})["fuel"] in ("", None), leer
+    assert ms.kraftstoff_ableiten({"attributes": [{"tag": "batteryCapacity", "value": "0,0 kWh"},
+                                                  {"tag": "chargingTime", "value": "–"}]}) is None
+    assert ms.kraftstoff_ableiten({"attributes": [{"tag": "batteryCapacity", "value": "77 kWh"}]}) == "Elektro"
+    assert ms.kraftstoff_ableiten({"attributes": [{"tag": "otherEnergySource", "value": "Strom"},
+                                                  {"tag": "driveType", "value": "Hybrid (Benzin/Elektro)"}]}) == "Hybrid"
+    assert ms.kraftstoff_ableiten({"attributes": [{"tag": "driveType", "value": "Elektromotor"},
+                                                  {"tag": "otherEnergySource", "value": "Hybrid (Diesel/Elektro)"}]}) \
+        == "Hybrid (Diesel/Elektro)"
+    assert inserat({"label": "Anderer Energieträger", "tag": "otherEnergySource", "value": "Strom"},
+                   {"label": "Antriebsart", "tag": "driveType", "value": "Hybrid (Benzin/Elektro)"})["fuel"] == "HYBRID"
     # mit Zeile "Kraftstoffart" gilt weiter die Zeile (Diesel bleibt Diesel, auch mit Batterie-Zeile)
     listing = _mobile_listing()
     listing["attributes"] += [{"label": "Batteriekapazität", "tag": "batteryCapacity", "value": "1 kWh"}]
@@ -139,6 +153,101 @@ def test_09_stellenzahl_je_portal():
     assert wz.nummer_plausibel("Kleinanzeigen", "3538924652") and not wz.nummer_plausibel("Kleinanzeigen", "35389246")
     assert wz.nummer_plausibel("AutoScout24", "476609216") and wz.nummer_plausibel("", "1")
     assert not wz.nummer_plausibel("mobile.de", "4544989O2")
+
+
+def test_09b_nachtragen_prueft_modell_und_preis():
+    """Pruefung 23.10.2026 (externer Bericht zu 30f409f): beim Nachtragen der Inserat-Nummer aus einer Browser-Lesung
+    reichten EZ/km/Marke — ein Golf haette die Nummer eines Passat bekommen. Jetzt muss das Modell der Lesung im
+    Bildschirmtext vorkommen (oder das Bildschirm-Modell ein Anfang davon sein) und der Preis darf hoechstens 10 %
+    (mind. 500 EUR) abweichen; fehlt eine Angabe, entscheidet sie nicht."""
+    rw = __import__("routes.werkzeuge", fromlist=["modell_und_preis_passen"])
+    passt = rw.modell_und_preis_passen
+    golf = {"model_label": "Golf", "list_price": 21000.0}             # die Lesung nennt den Preis als list_price
+    assert passt(golf, {"marke": "VW", "modell": "Golf", "marke_modell_text": "VW Golf", "titel": "VW Golf", "preis": 21000})
+    assert not passt(golf, {"marke": "VW", "modell": "Passat", "marke_modell_text": "VW Passat",
+                            "titel": "VW Passat Variant", "preis": 21000})
+    # Modell nur im Titel / Bildschirm-Modell als Anfang ("Mokka" zu "Mokka-e", "C 300" zu "C 300 e")
+    assert passt(golf, {"marke": "VW", "modell": "", "marke_modell_text": "", "titel": "VW Golf VII 2.0 GTI", "preis": 21000})
+    assert passt({"model_label": "Mokka-e", "price": 30000},
+                 {"marke": "Opel", "modell": "Mokka", "marke_modell_text": "Opel Mokka Elegance", "preis": 30000})
+    assert passt({"model_label": "C 300", "price": 30000},
+                 {"marke": "Mercedes-Benz", "modell": "C 300 e", "marke_modell_text": "Mercedes C 300 e", "preis": 30000})
+    # ohne Modell/Preis auf einer Seite (oder nur die Marke auf dem Bildschirm) entscheidet nur EZ/km/Marke wie bisher
+    assert passt({"list_price": 21000.0}, {"marke": "VW", "modell": "Passat", "preis": 21000})
+    assert not passt({"price": 21000}, {"marke": "VW", "modell": "Golf", "preis": 30000}), "auch price zaehlt"
+    assert passt({"model_label": "Golf"}, {"marke": "VW", "modell": "", "marke_modell_text": "VW", "titel": "", "preis": 21000})
+    assert passt(golf, {"marke": "VW", "modell": "Golf", "preis": None})
+    # Preis: 10 % (mind. 500 EUR) Toleranz
+    assert passt(golf, {"marke": "VW", "modell": "Golf", "preis": 22900})
+    assert not passt(golf, {"marke": "VW", "modell": "Golf", "preis": 24000})
+    assert passt({"model_label": "Golf", "price": 3000}, {"marke": "VW", "modell": "Golf", "preis": 3450})
+    assert not passt({"model_label": "Golf", "price": 3000}, {"marke": "VW", "modell": "Golf", "preis": 3600})
+
+
+def test_09c_lesebild_datei_wird_bei_fehler_vorgemerkt(monkeypatch):
+    """Pruefung 23.10.2026 (externer Bericht zu 30f409f): schlug das Loeschen der Lesebild-Datei fehl, ging der Eintrag
+    trotzdem weg und die Datei blieb fuer immer liegen. Jetzt landet der Schluessel in storage_delete_retry (der
+    stuendliche Aufraeum-Lauf holt das Loeschen nach); der Eintrag geht weiter weg. Klappt das Loeschen: keine Vormerkung."""
+    import storage_service as ss
+    rw = __import__("routes.werkzeuge", fromlist=["lesebilder_loeschen"])
+    vorgemerkt, geloescht = [], []
+
+    class _Cursor:
+        def __init__(self, docs):
+            self._docs = docs
+
+        def limit(self, n):
+            self._docs = self._docs[:n]
+            return self
+
+        def __aiter__(self):
+            self._it = iter(self._docs)
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._it)
+            except StopIteration:
+                raise StopAsyncIteration
+
+    class _Lesebilder:
+        def find(self, filt, proj):
+            assert proj.get("dealer_id") == 1, "dealer_id gehoert in die Vormerkung"
+            return _Cursor([{"id": "b1", "key": "lesebilder/b1.png", "dealer_id": "firma-a"}])
+
+        async def delete_one(self, filt):
+            geloescht.append(filt["id"])
+            return type("R", (), {"deleted_count": 1})()
+
+    class _Retry:
+        async def update_one(self, filt, upd, upsert=False):
+            vorgemerkt.append((filt, upd))
+
+    class _Db:
+        storage_delete_retry = _Retry()
+
+        def __getitem__(self, name):
+            assert name == wz.SAMMLUNG_LESEBILDER
+            return _Lesebilder()
+
+    async def kaputt(key):
+        raise ss.StorageError("Speicher antwortet nicht")
+
+    monkeypatch.setattr(ss, "delete_async", kaputt)
+    monkeypatch.setattr(rw, "db", _Db())
+    assert asyncio.run(rw.lesebilder_loeschen({"id": "b1"}, hoechstens=1)) == 1
+    assert geloescht == ["b1"]
+    assert len(vorgemerkt) == 1 and vorgemerkt[0][0] == {"art": "key", "key": "lesebilder/b1.png", "prefix": None}
+    assert vorgemerkt[0][1]["$set"]["grund"] == "lesebild" and vorgemerkt[0][1]["$set"]["dealer_id"] == "firma-a"
+    vorgemerkt.clear()
+    geloescht.clear()
+
+    async def ok(key):
+        return True
+
+    monkeypatch.setattr(ss, "delete_async", ok)
+    assert asyncio.run(rw.lesebilder_loeschen({"id": "b1"}, hoechstens=1)) == 1
+    assert geloescht == ["b1"] and vorgemerkt == []
 
 
 def test_05_fotos_aus_dem_inserat_objekt_wenn_images_fehlt():
@@ -525,6 +634,11 @@ def test_17_bilder_nachholen_nach_browser_lesung(welt):
         db.vehicle_comparisons.insert_one({"id": str(uuid.uuid4()), "cache_key": ck, "user_id": welt["sucher_id"],
                                            "dealer_id": welt["firma"]["dealer_id"], "created_at": jetzt})
         r = requests.post(f"{tb.API}/mobile/bilder-nachholen", headers=welt["sucher"], json={"url": url}, timeout=90)
+        if r.status_code == 400 and "freigeschaltet" in r.text:
+            # Pruefung 23.10.2026 (externer Bericht: CI rot): ohne mobile.de-Anbieter (kein APIFY_TOKEN, keine Sandbox —
+            # so laeuft die CI) endet der Weg mit 400 VOR der 409-Pruefung; der Test braucht einen Server mit Anbieter
+            # (lokal: backend/.env). Das 400 ist richtig, nicht der Fehler.
+            pytest.skip("mobile.de-Anbieter auf diesem Server nicht freigeschaltet (CI) — Weg endet vor dem 409 mit 400")
         assert r.status_code == 409, r.text
         db.werkzeug_inserate.insert_one({
             "cache_key": ck, "user_id": welt["sucher_id"], "dealer_id": welt["firma"]["dealer_id"],
@@ -570,11 +684,20 @@ def test_18_browser_lesung_traegt_die_nummer_am_programm_vergleich_nach(welt):
     jahr = int(str(fz["first_registration"])[-4:])
     try:
         db.werkzeug_vergleiche.delete_many({"user_id": welt["sucher_id"]})
+        preis = int(fz.get("list_price") or fz.get("price") or 23850)
         passt = _vergleich_schicken(welt, pc, marke=fz["make_label"], marke_modell_text=f"{fz['make_label']} {fz['model_label']}",
-                                    ez_jahr=jahr, kilometer=int(fz["mileage"]) + 100, inserat_id="")
+                                    ez_jahr=jahr, kilometer=int(fz["mileage"]) + 100, preis=preis, inserat_id="")
         anderes = _vergleich_schicken(welt, pc, marke=fz["make_label"], marke_modell_text=f"{fz['make_label']} {fz['model_label']}",
                                       ez_jahr=jahr - 5, kilometer=int(fz["mileage"]) * 3 + 90000, inserat_id="")
+        # Pruefung 23.10.2026 (externer Bericht): gleiche EZ/km/Marke, aber anderes Modell (Passat) oder ein Preis, der
+        # weit abweicht — beides bleibt ohne Nummer (sonst bekaeme der Golf die Nummer des Passat)
+        passat = _vergleich_schicken(welt, pc, marke=fz["make_label"], marke_modell_text=f"{fz['make_label']} Passat",
+                                     titel=f"{fz['make_label']} Passat Variant 2.0 TDI", ez_jahr=jahr,
+                                     kilometer=int(fz["mileage"]) + 100, preis=preis, inserat_id="")
+        teuer = _vergleich_schicken(welt, pc, marke=fz["make_label"], marke_modell_text=f"{fz['make_label']} {fz['model_label']}",
+                                    ez_jahr=jahr, kilometer=int(fz["mileage"]) + 100, preis=preis * 2, inserat_id="")
         assert passt["inserat_url"] is None and anderes["inserat_url"] is None
+        assert passat["inserat_url"] is None and teuer["inserat_url"] is None
         r = requests.post(f"{tb.API}/werkzeuge/{tb.WID}/inserat", headers=kopf, timeout=60,
                           json={"url": MOBILE_URL, "seite": tb._seite(_mobile_inserat_html(listing))})
         assert r.status_code == 200, r.text
@@ -583,6 +706,9 @@ def test_18_browser_lesung_traegt_die_nummer_am_programm_vergleich_nach(welt):
         assert d1["fahrzeug"]["erkennung"] == "browser" and d1["fahrzeug"]["inserat_nummer_unsicher"] is False
         d2 = db.werkzeug_vergleiche.find_one({"id": anderes["vorgang_id"]})
         assert not d2["fahrzeug"].get("inserat_url"), "anderes Auto (EZ/km passen nicht) bekommt keine Nummer"
+        for v, grund in ((passat, "anderes Modell"), (teuer, "Preis weicht weit ab")):
+            dv = db.werkzeug_vergleiche.find_one({"id": v["vorgang_id"]})
+            assert not dv["fahrzeug"].get("inserat_url"), f"{grund}: bekommt keine Nummer"
         # "Deine letzten Autos" zeigt den Link
         r = requests.get(f"{tb.API}/werkzeuge/{wz.AUTOPOINTER}/meine", headers=welt["sucher"], timeout=30)
         assert r.status_code == 200

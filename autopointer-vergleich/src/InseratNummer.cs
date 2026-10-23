@@ -85,7 +85,8 @@ internal static class InseratNummer
     }
 
     /// <summary>Mehrheit ueber alle Lesungen der Inserat-ID (B2). Sicher = eine normalisierte Lesung kommt mindestens
-    /// <see cref="MindestGleich"/>-mal vor und ihre Stellenzahl passt (bei mehreren die haeufigste, dann die fruehere).
+    /// <see cref="MindestGleich"/>-mal vor und ihre Stellenzahl passt (bei mehreren die haeufigste; Gleichstand zweier
+    /// plausibler Lesungen ist seit 1.5.17 KEINE Mehrheit, sondern unsicher).
     /// Sonst Hauptwert = die erste plausible Lesung (Stellenzahl passt) oder null; alle anderen verschiedenen Lesungen
     /// werden Alternativen (Reihenfolge wie gelesen).</summary>
     internal static NummernLesung Mehrheit(IEnumerable<string?> lesungen, Portal portal) =>
@@ -113,11 +114,16 @@ internal static class InseratNummer
     {
         var werte = normalisiert.OfType<string>().Where(s => s.Length > 0).ToList();
         if (werte.Count == 0) return new NummernLesung(null, false, new List<string>(), 0);
-        string? sicher = werte.GroupBy(s => s, StringComparer.Ordinal)
+        var kandidaten = werte.GroupBy(s => s, StringComparer.Ordinal)
             .Select(g => (Wert: g.Key, Anzahl: g.Count(), Erste: werte.IndexOf(g.Key)))
             .Where(g => g.Anzahl >= MindestGleich && plausibel(g.Wert))
             .OrderByDescending(g => g.Anzahl).ThenBy(g => g.Erste)
-            .Select(g => g.Wert).FirstOrDefault();
+            .ToList();
+        // 1.5.17 (Pruefung 23.10.2026, externer Bericht zu 1.5.16): zwei plausible Lesungen mit gleich vielen Treffern
+        // (A, B, A, B) sind KEINE Mehrheit — vorher gewann die fruehere als "sicher". Jetzt: unsicher, Hauptwert = erste
+        // plausible Lesung, die andere Alternative; der Server prueft das Inserat zur Nummer gegen den Bildschirm.
+        string? sicher = kandidaten.Count > 0 && (kandidaten.Count == 1 || kandidaten[0].Anzahl > kandidaten[1].Anzahl)
+            ? kandidaten[0].Wert : null;
         string? wert = sicher ?? werte.FirstOrDefault(plausibel);
         var alternativen = werte.Distinct(StringComparer.Ordinal)
             .Where(w => !string.Equals(w, wert, StringComparison.Ordinal)).Take(ZweiterBlick.MaxJeFeld).ToList();

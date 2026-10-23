@@ -199,6 +199,12 @@ dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und 
   * Nicht umgesetzt (Entscheidung Ahmad): `&vertrag=1` am Programm-Ziel.
   * Tests: `VertragsWegTests` (Lesungsstände, AppStartWeg, Browser der Lesung, Leiste), `AutoSchnellAppTests`
     (Helfer-Vorrang, Überspring-Merker), `DienstTests`/`PruefberichtTests` (Sperre, `zustand`) — 377 Tests.
+* **1.5.17 (Prüfung 23.10.2026, externer Bericht zu 1.5.16) — Gleichstand ist keine Mehrheit:** lasen zwei
+  Aufbereitungen A und zwei B (A, B, A, B), galt bisher die frühere Lesung als „sicher“. Jetzt ist die Nummer dann
+  **unsicher** (`inserat_id_unsicher` an den Server), die frühere bleibt Hauptwert, die andere Alternative; der
+  Server prüft das Inserat zur Nummer gegen den Bildschirm und baut keinen sicheren Link. Gleichstand zählt nur unter
+  plausiblen Lesungen (zweimal richtige gegen zweimal falsche Stellenzahl bleibt sicher); für die Hash-ID (AutoScout)
+  ebenso — dann kein Link. Sonst unverändert. Tests: `InseratNummerTests.Gleichstand_ist_keine_Mehrheit` — 432 Tests.
 * **1.5.16 (Wunsch Ahmad 13.10.2026 „Inserat-Nummer sicher lesen“; Systemcheck 12.10.2026: beim Kunden fehlt die
   14-stellige mobile.de-Nummer sehr oft, und eine falsch gelesene Ziffer, die trotzdem eine Ziffer ist, fiel nicht auf —
   fremdes Auto im Kaufvertrag; Analyse `docs/inserat-id-sicher-lesen.md`, Abschnitt B) — die Nummer ist entweder SICHER

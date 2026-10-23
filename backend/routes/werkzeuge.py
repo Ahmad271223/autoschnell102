@@ -55,7 +55,8 @@ from deps import (FIRMA_GESPERRT_TEXT, current_chef, current_firma, current_supe
 from rate_limiter import SlidingWindowRateLimiter, client_ip
 from deps import bearer
 from fastapi.security import HTTPAuthorizationCredentials
-from storage_service import (StorageError, bloecke_async, delete_async, groesse_async, load_async, make_key,
+from storage_service import loeschen_oder_vormerken
+from storage_service import (StorageError, bloecke_async, groesse_async, load_async, make_key,
                              save_async, validate_image_bytes)
 
 log = logging.getLogger("autohandel")
@@ -949,9 +950,38 @@ async def _programm_vergleich(user: dict, inserat_url: str) -> Optional[dict]:
 NACHTRAG_MINUTEN = 60
 
 
+NACHTRAG_PREIS_TOLERANZ = 0.10      # Preis der Lesung darf hoechstens 10 % (mindestens 500 EUR) vom Bildschirm abweichen
+
+
+def modell_und_preis_passen(lesung: dict, bild: dict) -> bool:
+    """Pruefung 23.10.2026 (externer Bericht zu 30f409f): EZ ±1 Jahr, km ±10 % und Marke (passt_zum_bildschirm) reichen
+    beim Nachtragen nicht — ein Golf und ein Passat desselben Haendlers koennen beides erfuellen, dann bekaeme der Golf
+    die Nummer des Passat. Darum zusaetzlich: das Modell der Lesung (model_label) muss im Bildschirmtext vorkommen
+    (Modell, Marke/Modell-Zeile oder Titel) oder das Bildschirm-Modell ein Anfang davon sein ("Mokka" zu "Mokka-e",
+    "C 300" zu "C 300 e"); fehlt eines von beiden (oder steht auf dem Bildschirm nur die Marke), zaehlt nur EZ/km/Marke
+    wie bisher. Und nennen beide Seiten einen Preis, darf er hoechstens NACHTRAG_PREIS_TOLERANZ (mindestens 500 EUR)
+    abweichen. Rein (fuer Tests)."""
+    norm = werkzeug_erkennung.norm
+    echt = norm(lesung.get("model_label") or lesung.get("model"))
+    if echt:
+        marke = norm(bild.get("marke"))
+        bild_modell = norm(bild.get("modell"))
+        texte = [t for t in (norm(bild.get(k)) for k in ("modell", "marke_modell_text", "titel")) if t and t != marke]
+        if texte and not any(echt in t for t in texte) and not (bild_modell and echt.startswith(bild_modell)):
+            return False
+    preis_echt, preis_bild = lesung.get("list_price") or lesung.get("price"), bild.get("preis")   # Lesung: list_price
+    if (isinstance(preis_echt, (int, float)) and isinstance(preis_bild, (int, float))
+            and preis_echt > 0 and preis_bild > 0):
+        a, b = float(preis_echt), float(preis_bild)
+        if abs(a - b) > max(500.0, NACHTRAG_PREIS_TOLERANZ * max(a, b)):
+            return False
+    return True
+
+
 async def _nummer_nachtragen(user: dict, identity: dict, lesung: dict, inserat_url: str) -> int:
     """Die Erweiterung hat ein Inserat gelesen: Programm-Vergleiche DIESES Kontos der letzten NACHTRAG_MINUTEN ohne
-    (sicheren) Inserat-Link, deren Bildschirmwerte (EZ ±1 Jahr, km ±10 %, Marke) zur Lesung passen, bekommen Nummer
+    (sicheren) Inserat-Link, deren Bildschirmwerte (EZ ±1 Jahr, km ±10 %, Marke; seit 23.10.2026 auch Modell und
+    Preis ±10 %, siehe modell_und_preis_passen) zur Lesung passen, bekommen Nummer
     und Link nachgetragen (erkennung "browser"). So steht die Nummer am Vergleich und unter "Deine letzten Autos",
     auch wenn die Texterkennung sie nicht (sicher) lesen konnte. Nie den Vorgang aufhalten; Rueckgabe: Anzahl."""
     try:
@@ -971,6 +1001,8 @@ async def _nummer_nachtragen(user: dict, identity: dict, lesung: dict, inserat_u
             if wz.quelle_code(bild.get("quelle")) not in ("", portal):
                 continue
             if not erkennung_lernen.passt_zum_bildschirm(lesung, bild, bild.get("marke")):
+                continue
+            if not modell_und_preis_passen(lesung, bild):        # Pruefung 23.10.2026: sonst bekam der Golf die Passat-Nummer
                 continue
             r = await db[wz.SAMMLUNG_VERGLEICHE].update_one(
                 {"id": doc["id"]},
@@ -1406,15 +1438,16 @@ def _lesebild_vorschau(raw: bytes) -> str:
 
 
 async def lesebilder_loeschen(filt: dict, hoechstens: int = 500) -> int:
-    """Eintraege UND Dateien weg (Ablauf, Konto-/Firmenloeschung, Betreiber). Fehler beim Datei-Loeschen halten
-    nichts auf (der Eintrag geht trotzdem weg; eine verwaiste Datei ist kein Datenschutzproblem: nur eine Anzeige)."""
+    """Eintraege UND Dateien weg (Ablauf, Konto-/Firmenloeschung, Betreiber). Pruefung 23.10.2026 (externer Bericht zu
+    30f409f): schlaegt das Datei-Loeschen fehl, merkt storage_service.loeschen_oder_vormerken den Schluessel in
+    storage_delete_retry vor — der stuendliche Aufraeum-Lauf (cleanup_service.storage_loeschungen_nachholen) holt das
+    Loeschen nach, bis es klappt, und schlaegt sonst Alarm. Vorher ging der Eintrag weg und die Datei blieb fuer immer
+    verwaist liegen (sie zeigt eine fremde Anzeige). Der Eintrag geht erst weg, wenn die Datei weg ODER vorgemerkt ist."""
     n = 0
-    async for d in db[wz.SAMMLUNG_LESEBILDER].find(filt, {"_id": 0, "id": 1, "key": 1}).limit(hoechstens):
-        if d.get("key"):
-            try:
-                await delete_async(d["key"])
-            except Exception:  # noqa: BLE001
-                log.warning("Lesebild %s: Datei %s nicht geloescht", d.get("id"), d.get("key"))
+    async for d in db[wz.SAMMLUNG_LESEBILDER].find(filt, {"_id": 0, "id": 1, "key": 1, "dealer_id": 1}).limit(hoechstens):
+        if d.get("key") and not await loeschen_oder_vormerken(db, key=d["key"], grund="lesebild",
+                                                                dealer_id=d.get("dealer_id") or ""):
+            log.warning("Lesebild %s: Datei %s nicht geloescht — fuer den Aufraeum-Lauf vorgemerkt", d.get("id"), d["key"])
         r = await db[wz.SAMMLUNG_LESEBILDER].delete_one({"id": d["id"]})
         n += r.deleted_count
     return n
