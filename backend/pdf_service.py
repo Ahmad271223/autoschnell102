@@ -480,6 +480,8 @@ def _inserat_zustand(inserat, *, offenlegung: bool) -> str:
 _TECHNIK_ALT = ("motor_zustand", "getriebe_zustand", "kupplung_zustand")
 TECHNIK_LABEL = "Motor/Getriebe/Kupplung"
 TECHNIK_OK, TECHNIK_SCHADEN = "in Ordnung", "Schaden vorhanden"
+#: Wunsch Ahmad 04.11.2026: im Vertrag steht "alles in Ordnung" (gespeichert bleibt "in Ordnung", Altvertraege gleich)
+TECHNIK_OK_ANZEIGE = "alles in Ordnung"
 
 
 def technik_gesamt(contract) -> str:
@@ -501,7 +503,7 @@ def _technik_zeilen(contract) -> list:
     wert = technik_gesamt(contract)
     if not wert:
         return []
-    rows = [(TECHNIK_LABEL, wert)]
+    rows = [(TECHNIK_LABEL, TECHNIK_OK_ANZEIGE if wert == TECHNIK_OK else wert)]
     text = str((contract or {}).get("technik_schaden_text") or "").strip()
     if wert == TECHNIK_SCHADEN and text:
         rows.append((f"Schaden an {TECHNIK_LABEL}", text))
@@ -1328,6 +1330,7 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
         ("Scheckheftgepflegt", _scheckheft_anzeige(contract)),
         ("HU/AU", hu_value or "—"),
         ("Unfallfrei", accident_value),
+        ("Nachlackierungsfrei", _yn(contract.get("nachlackierungsfrei"))),   # Wunsch Ahmad 04.11.2026
         *_technik_zeilen(contract),                       # Wunsch Ahmad 09.10.2026
         ("EU-Import", _yn(contract.get("eu_import"))),
         ("Fahrtauglich", _yn(contract.get("drivable"))),

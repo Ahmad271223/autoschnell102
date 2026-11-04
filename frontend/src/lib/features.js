@@ -8,7 +8,8 @@ import { api } from "@/lib/api";
  * "Demnaechst verfuegbar" statt einer halben Seite.
  */
 // Wunsch Ahmad 27.09.2026: marktdaten = Marktanalyse fuer Chef/Sucher sichtbar (Standard aus, Knopf im Admin)
-const STANDARD = { marktplatz: false, marktdaten: false, markt_chancen: false };
+// Entscheidung Ahmad 29.10.2026: ki = KI-Karten (Vertragsdialog, Freigaben, Fahrer-App) — Standard aus
+const STANDARD = { marktplatz: false, marktdaten: false, markt_chancen: false, ki: false };
 /** Nach einem Fehlschlag fragt eine offene Seite nach dieser Zeit erneut. */
 export const FEATURES_NEU_VERSUCH_MS = 30000;
 let cache = null;
@@ -17,8 +18,8 @@ let laufend = null;
 export async function featuresLaden() {
   if (cache) return cache;
   if (!laufend) {
-    laufend = api.get("/features")
-      .then((r) => { cache = { ...STANDARD, ...(r.data || {}) }; return cache; })
+    laufend = Promise.resolve().then(() => api.get("/features"))
+      .then((r) => { cache = { ...STANDARD, ...(r?.data || {}) }; return cache; })
       // Rollenprüfung 22.09.2026 (RP-045/RP-144): Ein einziger Fehlschlag
       // (Funkloch, Neustart des Servers) blieb bis zum Neuladen der Seite
       // als "Marktplatz aus" stehen. Jetzt gilt "aus" nur für DIESEN Aufruf;

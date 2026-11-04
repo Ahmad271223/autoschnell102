@@ -10,6 +10,9 @@
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { featuresSetzen } from "@/lib/features";
+// Entscheidung Ahmad 29.10.2026: KI-Karten nur mit Freigabe des Servers (features.ki)
+featuresSetzen({ ki: true });
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 

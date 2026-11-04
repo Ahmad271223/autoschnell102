@@ -250,7 +250,9 @@ services:
       # der Server-.env (deploy/env_setzen.sh ANTHROPIC_API_KEY=...). Ohne
       # Schluessel ist die Funktion still aus.
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - KI_BEWERTUNG_AKTIV=${KI_BEWERTUNG_AKTIV:-true}
+      # Entscheidung Ahmad 29.10.2026: KI erst einmal fuer ALLE Nutzer aus (Monatslimit/Schluessel beim Anbieter) —
+      # spaeter mit true wieder an; die Karten in App und Fahrer-App verschwinden ueber /api/features (ki)
+      - KI_BEWERTUNG_AKTIV=${KI_BEWERTUNG_AKTIV:-false}
       - KI_MODELL=${KI_MODELL:-claude-sonnet-5}
       - KI_EFFORT=${KI_EFFORT:-low}
       - KI_ZEITLIMIT_SEKUNDEN=${KI_ZEITLIMIT_SEKUNDEN:-30}
@@ -258,7 +260,7 @@ services:
       - KI_RECHERCHE_MODELL=${KI_RECHERCHE_MODELL:-claude-haiku-4-5-20251001}
       - KI_VERTRAG_MAX_JE_STUNDE=${KI_VERTRAG_MAX_JE_STUNDE:-40}
       - KI_KALIBRIERUNG_MIN_FAELLE=${KI_KALIBRIERUNG_MIN_FAELLE:-5}
-      - KI_MARKTANALYSE_AKTIV=${KI_MARKTANALYSE_AKTIV:-true}
+      - KI_MARKTANALYSE_AKTIV=${KI_MARKTANALYSE_AKTIV:-false}
       - KI_MARKTDATEN_TAGE=${KI_MARKTDATEN_TAGE:-30}
       - KI_MARKTANALYSE_ABHOLUNG=${KI_MARKTANALYSE_ABHOLUNG:-true}
       - KI_MARKTANALYSE_VERTRAG=${KI_MARKTANALYSE_VERTRAG:-true}

@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { RefreshCw, Sparkles } from "lucide-react";
 import { eur, kiStatusText, kiWartet } from "@/lib/kiSchaden";
 import KiErgebnis from "./KiErgebnis";
+import { useFeatures } from "@/lib/features";
 
 const TAKT_MS = 3000;          // waehrend "laeuft": alle 3 s nachsehen
 const WARTE_MAX_MS = 160000;   // Websuche + KI: bis zu gut zwei Minuten
@@ -14,7 +15,7 @@ const WARTE_MAX_MS = 160000;   // Websuche + KI: bis zu gut zwei Minuten
  * "Neuer Preis" ein, gibt nie frei. Keine Rückfragen mehr — alles kommt aus
  * dem Fahrer-Formular; vier Geldwerte statt Spanne und Prozent.
  */
-export default function KiBewertungKarte({ eintrag, onPreis, busy, onErgebnis }) {
+function KiBewertungKarteInhalt({ eintrag, onPreis, busy, onErgebnis }) {
   const id = eintrag.protocol_id;
   const kurz = eintrag.ki_bewertung || null;
   const [daten, setDaten] = useState(null);
@@ -140,4 +141,12 @@ export default function KiBewertungKarte({ eintrag, onPreis, busy, onErgebnis })
                   onPreis={(p) => onPreis?.(p)} disabled={busy} />
     </div>
   );
+}
+
+/** Entscheidung Ahmad 29.10.2026: KI fuer alle Nutzer aus — ohne Freigabe des Servers (/api/features: ki) erscheint
+ *  die Karte gar nicht, weder Knopf noch Hinweis. */
+export default function KiBewertungKarte(props) {
+  const features = useFeatures();
+  if (!features.ki) return null;
+  return <KiBewertungKarteInhalt {...props} />;
 }

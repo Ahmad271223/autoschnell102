@@ -3,6 +3,7 @@ import { api, errMsg } from "@/lib/api";
 import { RefreshCw, Sparkles } from "lucide-react";
 import { alleVollstaendig, kiStatusText, schaedenStand, schadenZeile, schwereOffen } from "@/lib/kiSchaden";
 import KiErgebnis from "./KiErgebnis";
+import { useFeatures } from "@/lib/features";
 
 const TAKT_MS = 3000;
 const WARTE_MAX_MS = 160000;
@@ -16,7 +17,7 @@ const WARTE_MAX_MS = 160000;
  * die Vorschau. Keine Rückfragen mehr. Rein beratend: "als Preis übernehmen"
  * füllt nur das Preisfeld.
  */
-export default function KiSchadenKarte({ vehicleId, damages, preisBetrag, onPreis, onBewertungId, onWeitere, disabled }) {
+function KiSchadenKarteInhalt({ vehicleId, damages, preisBetrag, onPreis, onBewertungId, onWeitere, disabled }) {
   const [daten, setDaten] = useState(null);
   const [startet, setStartet] = useState(false);
   const [bewertetStand, setBewertetStand] = useState(null);
@@ -171,4 +172,12 @@ export default function KiSchadenKarte({ vehicleId, damages, preisBetrag, onPrei
                   onPreis={onPreis} disabled={disabled} />
     </div>
   );
+}
+
+/** Entscheidung Ahmad 29.10.2026: KI fuer alle Nutzer aus — ohne Freigabe des Servers (/api/features: ki) erscheint
+ *  die Karte gar nicht, weder Knopf noch Hinweis. */
+export default function KiSchadenKarte(props) {
+  const features = useFeatures();
+  if (!features.ki) return null;
+  return <KiSchadenKarteInhalt {...props} />;
 }

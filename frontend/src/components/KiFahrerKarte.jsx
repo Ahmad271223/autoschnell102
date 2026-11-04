@@ -4,6 +4,7 @@ import { driverApi } from "@/context/DriverContext";
 import { errMsg } from "@/lib/api";
 import { eur, kiStatusText, kiWartet } from "@/lib/kiSchaden";
 import KiErgebnis from "./KiErgebnis";
+import { useFeatures } from "@/lib/features";
 
 const TAKT_MS = 3000;          // waehrend "laeuft": alle 3 s nachsehen
 const WARTE_MAX_MS = 160000;   // Websuche + KI: bis zu gut zwei Minuten
@@ -16,7 +17,7 @@ const WARTE_MAX_MS = 160000;   // Websuche + KI: bis zu gut zwei Minuten
  * Kosten- oder Budgetangaben (die gehoeren dem Chef). Die Bewertung selbst
  * startet der Server beim Abschicken; hier wird nur nachgesehen.
  */
-export default function KiFahrerKarte({ apptId, preisVertrag, preisVorschlag }) {
+function KiFahrerKarteInhalt({ apptId, preisVertrag, preisVorschlag }) {
   const [offen, setOffen] = useState(false);
   const [daten, setDaten] = useState(null);
   const [fehler, setFehler] = useState("");
@@ -108,4 +109,12 @@ export default function KiFahrerKarte({ apptId, preisVertrag, preisVorschlag }) 
       )}
     </div>
   );
+}
+
+/** Entscheidung Ahmad 29.10.2026: KI fuer alle Nutzer aus — ohne Freigabe des Servers (/api/features: ki) erscheint
+ *  die Karte gar nicht, weder Knopf noch Hinweis. */
+export default function KiFahrerKarte(props) {
+  const features = useFeatures();
+  if (!features.ki) return null;
+  return <KiFahrerKarteInhalt {...props} />;
 }

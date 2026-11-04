@@ -161,8 +161,8 @@ describe("kiSchaden", () => {
     const entwurf = { hu_valid: "Ja", hu_until: "07/2028", accident_free: "Ja", drivable: "Nein",
                       service_book: "ja", service_book_until: "", eu_import: "Ja", schluessel_anzahl: "2" };
     expect(zusicherungenOhneWahlLeeren(entwurf, { drivable: true })).toEqual({
-      hu_valid: "", hu_until: "", accident_free: "", drivable: "Nein", service_book: "", service_book_until: "",
-      eu_import: "", schluessel_anzahl: "2" });
+      hu_valid: "", hu_until: "", accident_free: "", drivable: "Nein", service_book: "ja", service_book_until: "",
+      eu_import: "", schluessel_anzahl: "2" });   // service_book "ja" = Standardwert (04.11.2026), bleibt
     expect(zusicherungenOhneWahlLeeren(entwurf, { hu_valid: true, hu_until: true, accident_free: true,
                                                   drivable: true, service_book: true, eu_import: true }))
       .toEqual(entwurf);

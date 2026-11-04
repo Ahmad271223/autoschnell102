@@ -499,8 +499,11 @@ async def features():
     from markt import konfig as markt_konfig
     # Wunsch Ahmad 27.09.2026: Marktdaten fuer Firmen erst nach Freischaltung im Admin (Standard aus)
     marktdaten = await markt_konfig.firmen_sichtbar(db)
+    # Entscheidung Ahmad 29.10.2026: KI erst einmal fuer alle aus — die Oberflaeche zeigt dann keine KI-Karten
+    # (Vertragsdialog, Freigaben, Fahrer-App); true nur mit KI_BEWERTUNG_AKTIV und Schluessel
+    from ai.provider import ki_aktiv
     return {"marktplatz": marktplatz_aktiv(), "marktdaten": marktdaten,
-            "markt_chancen": markt_konfig.chancen_aktiv() and marktdaten}
+            "markt_chancen": markt_konfig.chancen_aktiv() and marktdaten, "ki": ki_aktiv()}
 
 
 @api.get("/health")

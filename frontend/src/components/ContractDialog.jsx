@@ -11,7 +11,7 @@ import { X, Eye, FileText, Loader2, AlertTriangle, ExternalLink, Hash, UserRound
          Wrench, Euro, AlignLeft, ScrollText, CheckCircle2 } from "lucide-react";
 import DamageSelector, { damagesToText } from "./DamageSelector";
 import KiSchadenKarte from "./KiSchadenKarte";
-import { offeneVorschlaege, uebernahmenAusEntwurf, vorschlaegeAuswerten, vorschlaegeFuerAlle,
+import { ZUSICHERUNG_STANDARD, offeneVorschlaege, uebernahmenAusEntwurf, vorschlaegeAuswerten, vorschlaegeFuerAlle,
          eigeneWahlText, vorschlagSetzen, vorschlagWeichtAb, zusicherungenOhneWahlLeeren } from "@/lib/kiSchaden";
 import { fehlendeKaeuferfelder, kaeuferAktualisieren, kaeuferAusProfil } from "@/lib/kaeuferdaten";
 import { kmAusText, preisAusText, preisText } from "@/lib/preis";
@@ -27,9 +27,10 @@ const YN_OPTIONS = [
 // Wunsch Ahmad 09.10.2026: "Motor, Getriebe, Kupplung — alles in Ordnung oder Schaden vorhanden?"
 // Wunsch Ahmad 13.10.2026: daraus EIN Punkt "Motor / Getriebe / Kupplung" — freiwillig (ein Automatik hat keine
 // Kupplung, ein E-Auto kein Schaltgetriebe); leer = keine Angabe, dann steht nichts davon im Vertrag.
+// Wunsch Ahmad 04.11.2026: Wortlaut "alles in Ordnung" (gespeichert bleibt "in Ordnung" — Altvertraege, Server)
 const TECHNIK_OPTIONS = [
   { value: "", label: "— keine Angabe —" },
-  { value: "in Ordnung", label: "in Ordnung" },
+  { value: "in Ordnung", label: "alles in Ordnung" },
   { value: "Schaden vorhanden", label: "Schaden vorhanden" },
 ];
 export const TECHNIK_FELD = "technik_zustand";
@@ -282,10 +283,13 @@ export function anfangsFormular(v, dealer, heute) {
     tires: "",
     hu_valid: "",
     hu_until: "",
-    service_book: "",
+    // Wunsch Ahmad 04.11.2026: Scheckheft "Ja, lueckenlos", Fahrtauglich "Ja", Gewerblich seit EZ "Nein" stehen
+    // immer automatisch da (aenderbar) — ZUSICHERUNG_STANDARD, nicht aus dem Inserat
+    service_book: ZUSICHERUNG_STANDARD.service_book,
     service_book_until: "",
     accident_free: "",
     accident_location: "",
+    nachlackierungsfrei: "",                // Wunsch Ahmad 04.11.2026: neben Unfallfrei, Ja/Nein, leer = keine Angabe
     technik_zustand: "",
     // Altvertraege (bis 12.10.2026): bleiben beim Bearbeiten unveraendert erhalten, der Dialog zeigt technik_zustand
     motor_zustand: "",
@@ -293,8 +297,8 @@ export function anfangsFormular(v, dealer, heute) {
     kupplung_zustand: "",
     technik_schaden_text: "",
     eu_import: "",
-    drivable: "",
-    commercial_since_ez: "",
+    drivable: ZUSICHERUNG_STANDARD.drivable,
+    commercial_since_ez: ZUSICHERUNG_STANDARD.commercial_since_ez,
     previous_owners: cleanIntStr(v.previous_owners ?? ""),
     vehicle_description: v.description || "",
     damages: [],
@@ -1043,7 +1047,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                                   className="input-base w-full mt-1 disabled:opacity-50" />
               </div>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-2.5">
               <div>
                 <SelectField
                   label="Unfallfrei"
@@ -1059,6 +1063,13 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                   </div>
                 )}
               </div>
+              <SelectField
+                label="Nachlackierungsfrei"
+                value={form.nachlackierungsfrei}
+                onChange={(v) => set("nachlackierungsfrei", v)}
+                options={YN_OPTIONS}
+                testid="contract-nachlackierungsfrei"
+              />
               <SelectField
                 label="EU-Import"
                 value={form.eu_import}
@@ -1076,7 +1087,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
             </div>
             {/* Wunsch Ahmad 13.10.2026: EIN freiwilliger Punkt Motor / Getriebe / Kupplung (vorher drei Pflichtfragen) */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5" data-testid="contract-technik">
-              <SelectField label="Motor / Getriebe / Kupplung – in Ordnung oder Schaden? (freiwillig)"
+              <SelectField label="Motor / Getriebe / Kupplung – alles in Ordnung oder Schaden? (freiwillig)"
                            value={form.technik_zustand} onChange={(v) => set(TECHNIK_FELD, v)} options={TECHNIK_OPTIONS}
                            testid="contract-technik-zustand" />
             </div>

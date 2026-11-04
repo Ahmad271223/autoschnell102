@@ -478,10 +478,31 @@ async def _alarm(db, status: str, grund: str) -> None:
         pass
 
 
+ALARM_TYPEN = ("ki_marktdaten_limit", "ki_marktdaten_fehlgeschlagen")
+
+
+async def alarme_schliessen_wenn_aus(db) -> int:
+    """Entscheidung Ahmad 29.10.2026 (KI fuer alle aus): offene Marktdaten-Alarme (Monatsgrenze 51x, Schluessel 401)
+    blieben sonst auf der Betreiber-Seite stehen, obwohl nichts mehr laeuft. Schliesst sie ueber betrieb.alarm_schliessen
+    (je typ/ref). Wirft nie."""
+    n = 0
+    try:
+        import betrieb
+        async for a in db.betriebsalarme.find({"typ": {"$in": list(ALARM_TYPEN)}, "offen": True},
+                                              {"_id": 0, "typ": 1, "ref": 1}).limit(50):
+            n += await betrieb.alarm_schliessen(db, a["typ"], ref=a.get("ref") or "")
+    except Exception:  # noqa: BLE001
+        log.exception("Marktdaten-Alarme nicht geschlossen")
+    if n:
+        log.info("Marktdaten: %d offene Alarme geschlossen (KI aus)", n)
+    return n
+
+
 async def pruefen_und_aktualisieren(db=None) -> dict:
     """Schritt im stuendlichen Aufraeumlauf: nur, wenn keine frische Tabelle da ist."""
     db = db if db is not None else _db
     if not aktiv() or not ki_aktiv():
+        await alarme_schliessen_wenn_aus(db)
         return {"status": "aus"}
     doc = await aktuell(db)
     if doc and frisch(doc):

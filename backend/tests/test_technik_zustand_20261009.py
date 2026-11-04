@@ -75,7 +75,7 @@ def test_04_pdf_eine_zeile_und_ueberschrift(layout):
     # in Ordnung: eine Zeile, kein Schadentext (auch wenn einer im Feld steht)
     ok = _text(P.generate_contract_pdf(dealer=dealer, vehicle=vehicle,
                                        contract={**c, "technik_zustand": "in Ordnung"}))
-    assert "Motor/Getriebe/Kupplung in Ordnung" in ok and "springt im 3. Gang raus" not in ok
+    assert "Motor/Getriebe/Kupplung alles in Ordnung" in ok and "springt im 3. Gang raus" not in ok   # Wortlaut 04.11.2026
     # ohne Angabe: keine der Zeilen, kein Schadentext
     ohne = _text(P.generate_contract_pdf(dealer=dealer, vehicle=vehicle,
                                          contract={**_KOPF, "technik_schaden_text": "vergessen"}))

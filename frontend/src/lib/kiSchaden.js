@@ -228,6 +228,9 @@ export function vorschlagWertText(feld, wert) {
  *  sie NIE selbst (weder beim Öffnen noch beim Wiederherstellen eines
  *  Entwurfs). Er zeigt je Feld den Vorschlag aus dem Inserat mit Fundstelle
  *  und einem Knopf „Übernehmen“; erst der Klick setzt den Wert. */
+/** Wunsch Ahmad 04.11.2026: diese Zusicherungen stehen immer automatisch so im Dialog (aenderbar). Sie kommen NICHT
+ *  aus dem Inserat und gelten darum nicht als Vorbelegung, die beim Wiederherstellen eines Entwurfs geleert wird. */
+export const ZUSICHERUNG_STANDARD = { service_book: "ja", drivable: "Ja", commercial_since_ez: "Nein" };
 export const ZUSICHERUNG_FELDER = ["hu_valid", "hu_until", "service_book", "accident_free", "drivable", "eu_import"];
 
 /** Regel ab inserat5 (28.09.2026): AUS DEM INSERAT WIRD NICHTS MEHR UNGEFRAGT
@@ -338,6 +341,7 @@ export function zusicherungenOhneWahlLeeren(form, beruehrt = {}, uebernommen = [
   const neu = { ...form };
   for (const feld of ZUSICHERUNG_FELDER) {
     if (feld === "hu_until" || beruehrt?.[feld] || String(neu[feld] ?? "") === "") continue;
+    if (String(neu[feld]) === ZUSICHERUNG_STANDARD[feld]) continue;      // Standardwert (04.11.2026) bleibt
     neu[feld] = "";
     if (feld === "hu_valid" && !beruehrt?.hu_until) neu.hu_until = "";
     if (feld === "service_book" && !beruehrt?.service_book_until) neu.service_book_until = "";

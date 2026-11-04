@@ -116,7 +116,9 @@ async function pdfErstellen() {
 
 const zusicherungswerte = () => Object.fromEntries(
   Object.entries(FELD_TESTID).map(([feld, id]) => [feld, el(id).value]));
-const LEER = { hu_valid: "", service_book: "", accident_free: "", drivable: "", eu_import: "" };
+// Wunsch Ahmad 04.11.2026: Scheckheft "ja" und Fahrtauglich "Ja" sind Standardwerte (ZUSICHERUNG_STANDARD) — die
+// kommen NICHT aus dem Inserat; der Dialog setzt aus dem Inserat weiter nichts von selbst
+const LEER = { hu_valid: "", service_book: "ja", accident_free: "", drivable: "Ja", eu_import: "" };
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -148,14 +150,16 @@ describe("Zusicherungen aus dem Inserat nur als Vorschlag", () => {
     expect(el("contract-vorschlag-schluessel_anzahl").textContent).toContain("Schlüssel: 2");
     expect(el("contract-vorschlag-uebernehmen-tires").textContent).toBe("Übernehmen");
     expect(el("contract-vorschlag-uebernehmen-schluessel_anzahl").textContent).toBe("Übernehmen");
-    // je Zusicherung ein Vorschlag mit Fundstelle, Quelle und Knopf
-    for (const feld of Object.keys(FELD_TESTID)) {
+    // je Zusicherung ein Vorschlag mit Fundstelle, Quelle und Knopf — ausser Scheckheft/Fahrtauglich: der Vorschlag
+    // entspricht dem Standardwert (04.11.2026), es gibt nichts zu uebernehmen
+    for (const feld of ["hu_valid", "accident_free", "eu_import"]) {
       expect(el(`contract-vorschlag-${feld}`), feld).toBeTruthy();
       expect(el(`contract-vorschlag-uebernehmen-${feld}`).textContent).toBe("Übernehmen");
     }
+    expect(el("contract-vorschlag-service_book")).toBeNull();
+    expect(el("contract-vorschlag-drivable")).toBeNull();
     expect(el("contract-vorschlag-hu_valid").textContent).toContain("HU/AU vorhanden: Ja, gültig bis 07/2028");
     expect(el("contract-vorschlag-accident_free").textContent).toContain("Inseratstext: „Unfallfrei, Nichtraucher“");
-    expect(el("contract-vorschlag-service_book").textContent).toContain("Ja, lückenlos");
     expect(el("contract-vorschlaege-alle").textContent).toBe("Alle Vorschläge übernehmen");
   });
 
@@ -177,7 +181,7 @@ describe("Zusicherungen aus dem Inserat nur als Vorschlag", () => {
     expect(hinweis.textContent).toContain("Fahrbereitschaft nicht eindeutig");
     expect(hinweis.querySelector("button")).toBeNull();
     expect(el("contract-inserat-vorschlaege").querySelectorAll("button")).toHaveLength(0);
-    expect(el("contract-drivable").value).toBe("");
+    expect(el("contract-drivable").value).toBe("Ja");
   });
 
   it("„Übernehmen“ setzt genau dieses Feld und nimmt den Vorschlag aus der Liste", async () => {
@@ -185,7 +189,7 @@ describe("Zusicherungen aus dem Inserat nur als Vorschlag", () => {
     await klicken("contract-vorschlag-uebernehmen-accident_free");
     expect(zusicherungswerte()).toEqual({ ...LEER, accident_free: "Ja" });
     expect(el("contract-vorschlag-accident_free")).toBeNull();
-    expect(el("contract-vorschlag-drivable")).toBeTruthy();
+    expect(el("contract-vorschlag-eu_import")).toBeTruthy();
     // HU: Ja + Datum in einem Schritt
     await klicken("contract-vorschlag-uebernehmen-hu_valid");
     expect(el("contract-hu-valid").value).toBe("Ja");
@@ -268,16 +272,18 @@ describe("Zusicherungen aus dem Inserat nur als Vorschlag", () => {
 
   it("PDF-Payload enthält nur bewusst gesetzte Zusicherungen — ohne Rückfrage", async () => {
     await oeffnen();
-    await klicken("contract-vorschlag-uebernehmen-drivable");
+    await klicken("contract-vorschlag-uebernehmen-eu_import");
     await pdfErstellen();
     expect(window.confirm).not.toHaveBeenCalled();
     expect(api.post).toHaveBeenCalledTimes(1);
     const [url, payload] = api.post.mock.calls[0];
     expect(url).toBe("/contracts");
-    expect(payload.drivable).toBe("Ja");
-    for (const feld of ["hu_valid", "hu_until", "service_book", "accident_free", "eu_import"]) {
+    expect(payload.eu_import).toBe("Ja");
+    for (const feld of ["hu_valid", "hu_until", "accident_free"]) {
       expect(payload[feld], feld).toBe("");
     }
+    // Standardwerte (04.11.2026) gehen mit — sie sind keine Inserat-Vorbelegung
+    expect([payload.service_book, payload.drivable, payload.commercial_since_ez]).toEqual(["ja", "Ja", "Nein"]);
     // inserat5: auch Schlüssel/Bereifung nicht ohne Klick
     expect(payload.schluessel_anzahl).toBe("");
     expect(payload.tires).toBe("");
@@ -288,10 +294,10 @@ describe("Zusicherungen aus dem Inserat nur als Vorschlag", () => {
     await pdfErstellen();
     expect(window.confirm).not.toHaveBeenCalled();
     const payload = api.post.mock.calls[0][1];
-    for (const feld of ["hu_valid", "hu_until", "service_book", "accident_free", "drivable", "eu_import",
-                        "tires", "schluessel_anzahl"]) {
+    for (const feld of ["hu_valid", "hu_until", "accident_free", "eu_import", "tires", "schluessel_anzahl"]) {
       expect(payload[feld], feld).toBe("");
     }
+    expect([payload.service_book, payload.drivable]).toEqual(["ja", "Ja"]);   // Standard, nicht aus dem Inserat
   });
 
   it("Entwurf wiederherstellen setzt nichts ungefragt (alter Entwurf mit Vorbelegung)", async () => {
@@ -345,7 +351,7 @@ describe("Zusicherungen aus dem Inserat nur als Vorschlag", () => {
     await oeffnen();
     expect(zusicherungswerte()).toEqual({ ...LEER, accident_free: "Ja" });
     expect(el("contract-vorschlag-accident_free")).toBeNull();
-    expect(el("contract-vorschlag-drivable")).toBeTruthy();
+    expect(el("contract-vorschlag-eu_import")).toBeTruthy();
   });
 
   it("schmaler Dialog: Vorschlagszeile bricht um, Knöpfe haben Token-Farben", async () => {

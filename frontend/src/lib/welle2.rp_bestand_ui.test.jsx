@@ -155,10 +155,11 @@ describe("RP-045/RP-144: /features", () => {
     const get = vi.spyOn(api, "get")
       .mockRejectedValueOnce(new Error("Network Error"))
       .mockResolvedValueOnce({ data: { marktplatz: true } });
-    // Wunsch Ahmad 27.09.2026: neuer Schalter marktdaten (Marktdaten fuer Firmen), Standard aus
-    expect(await featuresLaden()).toEqual({ marktplatz: false, marktdaten: false, markt_chancen: false });
-    expect(await featuresLaden()).toEqual({ marktplatz: true, marktdaten: false, markt_chancen: false });
-    expect(await featuresLaden()).toEqual({ marktplatz: true, marktdaten: false, markt_chancen: false });   // jetzt zwischengespeichert
+    // Wunsch Ahmad 27.09.2026: neuer Schalter marktdaten (Marktdaten fuer Firmen), Standard aus;
+    // 29.10.2026: Schalter ki (KI-Karten), Standard aus
+    expect(await featuresLaden()).toEqual({ marktplatz: false, marktdaten: false, markt_chancen: false, ki: false });
+    expect(await featuresLaden()).toEqual({ marktplatz: true, marktdaten: false, markt_chancen: false, ki: false });
+    expect(await featuresLaden()).toEqual({ marktplatz: true, marktdaten: false, markt_chancen: false, ki: false });   // jetzt zwischengespeichert
     expect(get).toHaveBeenCalledTimes(2);
   });
 });

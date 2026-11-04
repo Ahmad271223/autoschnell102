@@ -5071,3 +5071,33 @@ Ein externer Bericht zum Stand 30f409f nannte sieben Punkte; fünf waren echt un
 - **Entscheidungen (unverändert):** fremde Firmen-Lesung als dritte Stufe von `inserat_lesen` (nur Vergleich, nie
   Vertrag); CI-Schalter; kein Wiederherstellungslauf des Backups durchgeführt.
 
+## KI für alle Nutzer aus (Entscheidung Ahmad 29.10.2026)
+
+Befund 29.10.: 4 von 7 Vertragsbewertungen „Monatslimit beim KI-Anbieter erreicht“, Marktanalyse 401 „invalid
+x-api-key“ (Schlüssel ungültig), Alarm `ki_marktdaten_limit` 51×. Entscheidung: KI erst einmal für alle aus, später
+wieder dazu.
+- `docker-compose.yml`: `KI_BEWERTUNG_AKTIV` und `KI_MARKTANALYSE_AKTIV` Standard **false**. Steht in der Server-`.env`
+  noch `true`, gewinnt die `.env` — darum auf beiden Servern vor dem Rollout
+  `sh deploy/env_setzen.sh KI_BEWERTUNG_AKTIV=false KI_MARKTANALYSE_AKTIV=false`.
+- `GET /api/features` trägt `ki` (nur true mit Schalter UND Schlüssel). Die drei KI-Karten (`KiSchadenKarte` im
+  Vertragsdialog, `KiBewertungKarte` auf Freigaben, `KiFahrerKarte` in der Fahrer-App) sind Hüllen, die ohne `ki`
+  nichts zeichnen — kein Knopf, kein Hinweis. Die Freischaltung je Konto (`users.ki_aktiv`) bleibt gespeichert.
+- Der stündliche Marktdaten-Schritt schließt bei ausgeschalteter KI die offenen Alarme `ki_marktdaten_limit` und
+  `ki_marktdaten_fehlgeschlagen` (`ai/marktdaten.alarme_schliessen_wenn_aus`).
+- Wieder einschalten: gültigen `ANTHROPIC_API_KEY` und Limit in der Anthropic-Konsole prüfen, dann
+  `sh deploy/env_setzen.sh KI_BEWERTUNG_AKTIV=true KI_MARKTANALYSE_AKTIV=true` und Rollout.
+- Tests: `backend/tests/test_vertrag_zustand_20261104.py` (02/03), `frontend/src/components/KiAus.test.jsx`.
+
+## Vertrag: Standardwerte, „alles in Ordnung“, Nachlackierungsfrei (Wunsch Ahmad 04.11.2026)
+
+- Im Vertragsdialog stehen **immer automatisch**: Scheckheftgepflegt „Ja, lückenlos“, Fahrtauglich „Ja“, Gewerblich
+  genutzt seit EZ „Nein“ (`ZUSICHERUNG_STANDARD` in `lib/kiSchaden.js`; änderbar). Das sind Vorgaben des Betreibers,
+  keine Inserat-Vorbelegung — beim Wiederherstellen eines Entwurfs bleiben sie stehen; aus dem Inserat wird weiter
+  nichts ungefragt übernommen (inserat5). Bestehende Verträge behalten ihre gespeicherten Werte.
+- Motor/Getriebe/Kupplung: Wortlaut „alles in Ordnung“ im Dialog und im PDF (`pdf_service.TECHNIK_OK_ANZEIGE`);
+  gespeichert bleibt `in Ordnung`, der Server nimmt auch „alles in Ordnung“ an.
+- Neuer Punkt **Nachlackierungsfrei** (Ja/Nein, leer = keine Angabe) neben Unfallfrei: Feld `nachlackierungsfrei`
+  in `ContractIn`, Zeile im PDF unter „Zusicherungen & Zustand“ direkt nach Unfallfrei. Keine Migration (leer = „—“).
+- Tests: `test_vertrag_zustand_20261104.py` (01), `test_technik_zustand_20261009.py` (Wortlaut),
+  `ContractDialog.zustand.test.jsx`, angepasst `ContractDialog.zusicherung_vorschlag.test.jsx`, `kiSchaden.test.js`.
+

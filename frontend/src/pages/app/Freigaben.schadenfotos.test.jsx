@@ -20,6 +20,9 @@ vi.mock("@/components/AbholFoto", async () => {
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const { default: Freigaben } = await import("./Freigaben");
+// Entscheidung Ahmad 29.10.2026: KI-Karten nur mit Freigabe des Servers (features.ki) — nach den Mocks laden
+const { featuresSetzen } = await import("@/lib/features");
+featuresSetzen({ ki: true });
 
 const KARTE = {
   protocol_id: "p1", appointment_id: "t1", vehicle_id: "v1", status: "zur_freigabe", stand: "s1",

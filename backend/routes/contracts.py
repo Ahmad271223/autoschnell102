@@ -172,7 +172,7 @@ def technik_zustand_normieren(v) -> str:
     t = str(v or "").strip().lower()
     if not t:
         return ""
-    if t in ("in ordnung", "ok", "ja", "i.o.", "io", "ordnung"):
+    if t in ("in ordnung", "alles in ordnung", "ok", "ja", "i.o.", "io", "ordnung"):
         return TECHNIK_OK
     if t.startswith("schaden") or t in ("nein", "defekt", "schaden vorhanden"):
         return TECHNIK_SCHADEN
@@ -279,6 +279,8 @@ class ContractIn(BaseModel):
 
     accident_free: Optional[str] = ""      # "Ja" | "Nein" | ""
     accident_location: Optional[str] = ""  # nur wenn accident_free == "Nein"
+    # Wunsch Ahmad 04.11.2026: neben "Unfallfrei" der Punkt "Nachlackierungsfrei" (Ja/Nein, leer = keine Angabe)
+    nachlackierungsfrei: Optional[str] = ""   # "Ja" | "Nein" | ""
     # Wunsch Ahmad 13.10.2026: EIN freiwilliger Punkt "Motor/Getriebe/Kupplung — in Ordnung oder Schaden?";
     # leer = keine Angabe -> keine Zeile im Vertrag. Die drei Einzelfelder stammen aus Vertraegen bis 12.10.2026
     # (damals Pflicht beim Erstellen) und werden weiter angenommen und im PDF zusammengefasst.
