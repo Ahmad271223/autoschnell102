@@ -199,6 +199,24 @@ dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und 
   * Nicht umgesetzt (Entscheidung Ahmad): `&vertrag=1` am Programm-Ziel.
   * Tests: `VertragsWegTests` (Lesungsstände, AppStartWeg, Browser der Lesung, Leiste), `AutoSchnellAppTests`
     (Helfer-Vorrang, Überspring-Merker), `DienstTests`/`PruefberichtTests` (Sperre, `zustand`) — 377 Tests.
+* **1.5.18 (Wunsch Ahmad 04.11.2026: zwölf Lesebilder nicht erkannter Anzeigen ausgewertet, Messung
+  `tests/LesebilderMessung.cs` — von zwölf Vorschaubildern bekommen neun einen Vergleich statt drei):**
+  * **Hash-ID robuster:** „S“ statt „5“, „Z“ statt „2“, „•“/„.“/Leerzeichen statt Bindestrich werden repariert (in einer
+    Hex-Kennung eindeutig); fünf Gruppen müssen 8-4-4-4-12 lang sein, sonst zählen 32 Hex-Zeichen (Kia Stonic: jetzt
+    AutoScout-Link). Ein Doppelpunkt am Ende kostet keine Lesung mehr.
+  * **Hash-ID abgeschnitten** („…“ oder am Rand gekappt, Mercedes GLE / VW Passat): eigener Hinweis „Detailbereich in
+    AutoPointer breiter ziehen“ statt „nicht lesbar“, Lesebild mit Vermerk „Hash-ID abgeschnitten“.
+  * **Erstzulassung** auch mit dem Schrägstrich als „1“ gelesen („0712019“ = 07/2019, Hyundai i30).
+  * **Verwaschene Beschriftung:** Erstzulassung/Kilometerstand auch, wenn die Beschriftung kaum lesbar ist und der Wert
+    die eindeutige Form hat (Monat/Jahr ohne „bis“, „201.000 km“ ohne „/“); fehlt die Beschriftung ganz, zählt GENAU
+    EIN solcher Wert (bei zweien — z. B. Reichweite — wird nichts geraten). Eine lesbare Zeile geht immer vor.
+  * **Marke/Modell aus dem Titel,** wenn die Zeile „Marke, Modell“ nicht zu sehen ist (Reiter „Übersicht“, Tabelle
+    gescrollt, BMW 530d) — der Server erkennt beides aus dem Titel.
+  * **Kopf:** „Irserat von“ wird erkannt (vorher wurde die Datumszeile zum Titel), Datumszeilen sind nie Titel, das
+    Portal-Logo in der Titelzeile („…amobile.de“, „Auto Scout24“) fällt weg, „Mo…/Klei…/Aut…“ werden zum Portal.
+  * **Tabelle nicht zu sehen** (Bilder groß geöffnet, schwarzer Bereich): Hinweis „Bilder schließen oder zur Übersicht
+    wechseln“, kein Lesebild.
+  * Tests: `Lesebilder20261104Tests`, `UeberwacherTests` (Tabelle nicht sichtbar, Hash abgeschnitten) — 470 Tests.
 * **1.5.17 (Prüfung 23.10.2026, externer Bericht zu 1.5.16) — Gleichstand ist keine Mehrheit:** lasen zwei
   Aufbereitungen A und zwei B (A, B, A, B), galt bisher die frühere Lesung als „sicher“. Jetzt ist die Nummer dann
   **unsicher** (`inserat_id_unsicher` an den Server), die frühere bleibt Hauptwert, die andere Alternative; der

@@ -1119,6 +1119,43 @@ public class UeberwacherTests
         Assert.Equal(3, _b.Aufrufe.Count);
     }
 
+    [Fact]   // 1.5.18 (Lesebild BMW 530d, schwarzer Bereich): Tabelle gar nicht zu sehen -> klarer Hinweis, kein Lesebild, keine Anfrage
+    public async Task Tabelle_nicht_sichtbar_schickt_kein_Lesebild()
+    {
+        await Start();
+        // (Kilometer gesetzt, damit die Attrappe die Lesung nicht als leer meldet — live ist es eine Zeile ausserhalb der Tabelle)
+        await Anklicken(() => new Fahrzeug { Titel = "BMW 530d - F10", Quelle = "mobile.de", Preis = 6100, Kilometer = 381000,
+                                             TabellenFelder = 0 }, 7);
+        await Versandt();
+        Assert.Empty(Bilder);
+        Assert.Empty(_server.Anfragen);
+        Assert.Empty(_b.Aufrufe);
+        Assert.Contains(_meldungen, m => m.StartsWith("In AutoPointer ist die Fahrzeug-Tabelle gerade nicht zu sehen"));
+        Assert.DoesNotContain(_meldungen, m => m.StartsWith("Fahrzeug konnte nicht eindeutig erkannt werden"));
+        Assert.Contains(Protokoll.Letzte(), z => z.Contains("Technik-Tabelle in AutoPointer nicht zu sehen"));
+    }
+
+    [Fact]   // 1.5.18 (Lesebilder Mercedes GLE / VW Passat): Hash-ID abgeschnitten -> eigener Hinweis und Vermerk im Lesebild
+    public async Task Abgeschnittene_Hash_ID_meldet_breiter_ziehen()
+    {
+        await Start();
+        await Anklicken(() =>
+        {
+            var f = Passat();
+            f.Quelle = "AutoScout24";
+            f.HashId = null;
+            f.HashAbgeschnitten = true;
+            f.InseratIdUnsicher = true;
+            return f;
+        }, 3);
+        await Versandt();
+        var b = Assert.Single(Bilder);
+        Assert.Equal(Lesebilder.InseratIdFehlt, b.Grund);
+        Assert.Equal(new[] { Lesebilder.HashAbgeschnittenText }, b.Fehlt);
+        Assert.Contains(_meldungen, m => m.Contains("Hash-ID abgeschnitten"));
+        Assert.Single(_b.Aufrufe);               // die Vergleiche gehen trotzdem auf
+    }
+
     [Fact]   // 1.5.13: dasselbe Auto (Inserat-Kennung) nie zweimal — auch nicht aus einem zweiten Grund oder nach "Vergleichen"
     public async Task Lesebild_nie_zweimal_fuer_dieselbe_Inserat_Kennung()
     {

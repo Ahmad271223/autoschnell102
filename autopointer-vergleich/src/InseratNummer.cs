@@ -66,8 +66,7 @@ internal static class InseratNummer
     internal static string? Normalisieren(string? roh)
     {
         if (string.IsNullOrWhiteSpace(roh)) return null;
-        int dp = roh.LastIndexOf(':');
-        if (dp >= 0) roh = roh[(dp + 1)..];
+        roh = NachBeschriftung(roh);
         roh = roh.Replace('|', '1');                   // faellt sonst in InseratIdSauber weg
         string? sauber = DetailLeser.InseratIdSauber(roh);
         if (sauber == null) return null;
@@ -103,12 +102,28 @@ internal static class InseratNummer
     internal static string? HashNormalisieren(string? roh)
     {
         if (string.IsNullOrWhiteSpace(roh)) return null;
-        int dp = roh.LastIndexOf(':');
-        if (dp >= 0) roh = roh[(dp + 1)..];
+        roh = NachBeschriftung(roh);
         if (DetailLeser.HashId(roh) is { } uuid) return uuid;
         string s = new(roh.Where(c => !char.IsWhiteSpace(c)).ToArray());
         return s.Length > 0 ? s.ToLowerInvariant() : null;
     }
+
+    /// <summary>Nur die Zelle rechts der Beschriftung (nach dem letzten Doppelpunkt) — 1.5.18 (Lesebild Mercedes GLE): ein
+    /// Doppelpunkt GANZ am Ende ("…fdcc2f8:") ist ein Lesefehler und keine Beschriftung; dann der Text davor.</summary>
+    private static string NachBeschriftung(string roh)
+    {
+        string t = roh.TrimEnd();
+        while (t.EndsWith(':')) t = t[..^1].TrimEnd();
+        int dp = t.LastIndexOf(':');
+        return dp >= 0 ? t[(dp + 1)..] : t;
+    }
+
+    /// <summary>1.5.18 (Wunsch Ahmad 04.11.2026, Lesebilder Mercedes GLE / VW Passat): keine Lesung ergibt eine ganze Hash-ID,
+    /// aber eine zeigt „…“ oder nur einen Teil (12–30 Hex-Zeichen) — AutoPointer zeigt die Kennung abgeschnitten.</summary>
+    internal static bool HashAbgeschnitten(IEnumerable<string?> lesungen) =>
+        lesungen.Any(s => s != null && DetailLeser.HashId(s) == null
+                          && (s.Contains("...") || s.Contains('…')
+                              || DetailLeser.HexZeichen(NachBeschriftung(s)) is >= 12 and <= 30));
 
     private static NummernLesung Mehrheit(IEnumerable<string?> normalisiert, Func<string, bool> plausibel)
     {
@@ -145,5 +160,6 @@ internal static class InseratNummer
         f.HashId = hash.Sicher ? hash.Wert : null;
         bool hashZaehlt = portal == Portal.AutoScout || (portal == Portal.Unbekannt && hash.Lesungen > 0);
         f.InseratIdUnsicher = hashZaehlt ? hash.Unsicher : id.Unsicher;
+        f.HashAbgeschnitten = f.HashId == null && HashAbgeschnitten(f.HashIdLesungen.Concat(hashLesungen));
     }
 }

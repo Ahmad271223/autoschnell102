@@ -146,7 +146,27 @@ def _ein_kraftstoff(wert) -> Optional[str]:
     if code is None:
         lese = _leseform(n)
         code = _kraftstoff_aus(lese, lambda t: _leseform(t) in lese)
+    if code is None:
+        # Wunsch Ahmad 04.11.2026 (Lesebild VW Polo: "Benzhi"): EIN Wort, das bis auf zwei Zeichen einem Kraftstoff-Wort
+        # gleicht — nur wenn genau eines so nah ist (die Woerter liegen weit auseinander)
+        nah = [w for w in _KRAFTSTOFF_WOERTER if len(n) >= 5 and abs(len(n) - len(w)) <= 2 and _abstand(n, w) <= 2]
+        if len(nah) == 1:
+            code = _kraftstoff_aus(nah[0], lambda t: t in nah[0])
     return code
+
+
+_KRAFTSTOFF_WOERTER = ("benzin", "diesel", "elektro", "hybrid", "autogas", "erdgas")
+
+
+def _abstand(a: str, b: str) -> int:
+    """Levenshtein-Abstand (kurze Woerter)."""
+    vorher = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        jetzt = [i]
+        for j, cb in enumerate(b, 1):
+            jetzt.append(min(vorher[j] + 1, jetzt[j - 1] + 1, vorher[j - 1] + (ca != cb)))
+        vorher = jetzt
+    return vorher[-1]
 
 
 def kraftstoff_code(*werte) -> Optional[str]:

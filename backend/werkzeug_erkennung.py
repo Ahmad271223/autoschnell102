@@ -18,6 +18,7 @@ Was sie kann (jeweils mit Befund):
 from __future__ import annotations
 
 import functools
+import html
 import json
 import re
 import unicodedata
@@ -47,6 +48,19 @@ _SAMMELWOERTER = {"andere", "alle", "weitere", "sonstige", "other", "others", "m
 #: "eqa300" -> "eqa" + "300", "glc300" -> "glc" + "300". Bewusst eng (mind. 2 Buchstaben, dann mind. 2 Ziffern, nichts
 #: dahinter): weiter gefasst ("a1le", "c1c", "f512", "200t") verschoben sich Faelle aus dem Abgleich mit dem Programm.
 _ZUSAMMEN = re.compile(r"^([a-z]{2,})(\d{2,})$")
+#: Wunsch Ahmad 04.11.2026 (Lesebild BMW 540d, Kleinanzeigen): Modellzahl mit Motor-Buchstaben dahinter ("540d", "320i",
+#: "330e", "c200d", "m340i") — fuer den Vergleich mit dem Katalog zaehlt auch die Form ohne die Endung ("540", "c200").
+#: Nur d/i/e (Diesel/Benzin/Plug-in): "200t" oder "300h" (Lexus) sind eigene Katalogmodelle und bleiben, wie sie sind
+_MIT_ENDUNG = re.compile(r"^([a-z]{0,3}\d{2,4})(d|i|e|is|xd|xi)$")
+#: das Portal-Logo rechts in derselben Textzeile wie der Titel ("Hyundai i30 1...amobile.de", "GLE ... Auto Scout24")
+_LOGO_AM_ENDE = re.compile(r"\s*(?:auto\s*scout\s*24|[a-z]{0,3}mobile\.de|kleinanzeigen)\s*$", re.IGNORECASE)
+
+
+def text_saeubern(text: Optional[str]) -> str:
+    """Wunsch Ahmad 04.11.2026 (Lesebilder): AutoPointer zeigt Kleinanzeigen-Titel mit HTML-Zeichen ("xDrive/H&amp;...")
+    und die Texterkennung zieht das Portal-Logo in die Titelzeile — beides weg, bevor Marke/Modell gesucht werden."""
+    t = html.unescape(str(text or ""))
+    return _LOGO_AM_ENDE.sub("", t).strip()
 
 
 # Pruefung 05.10.2026 (Paket 1): "Mercedes Andere" + Beschreibung brauchte 2,5 s — 474.000 Aufrufe von
@@ -142,6 +156,9 @@ def aus_titel(modelle, titel: Optional[str]) -> Optional[str]:
         m = _ZUSAMMEN.match(w)
         if m:
             im_titel.update(m.groups())
+        m = _MIT_ENDUNG.match(w)
+        if m:
+            im_titel.add(m.group(1))
     im_titel_lese = {lese_form(w) for w in im_titel}
 
     def steht(wort: str) -> bool:
@@ -445,7 +462,24 @@ class Katalog:
                     return ModellTreffer(vid, self._modell_name(marke, vid) or v, True)
         t = aus_titel(marke.roh, titel)
         tid = self._mobile_aufloesen(marke, t) if t else None
-        return ModellTreffer(tid, self._modell_name(marke, tid) or t, False, True) if tid is not None else None
+        if tid is not None:
+            return ModellTreffer(tid, self._modell_name(marke, tid) or t, False, True)
+        # Wunsch Ahmad 04.11.2026 (Lesebild "BMW Weitere BMW", Titel "BMW 540d xDrive/H&amp;..."): NUR bei einem
+        # Platzhalter im Feld und erst, wenn die Ueberschrift kein ganzes Katalogmodell enthaelt — beginnt der Titel mit
+        # DERSELBEN Marke, den Rest wie ein Modellfeld aufloesen (die 1.676 Soll-Werte aus 1.3.5 bleiben unberuehrt)
+        rest = self._titel_rest(titel, lambda m: self.mobile_marke(m) is marke) if ist_platzhalter(modell) else None
+        rid = self._mobile_aufloesen(marke, rest) if rest else None
+        return ModellTreffer(rid, self._modell_name(marke, rid) or rest, False, True) if rid is not None else None
+
+    def _titel_rest(self, titel: Optional[str], gleiche_marke) -> Optional[str]:
+        """Der Titel ohne die Marke vorn ("BMW 540d xDrive" -> "540d xDrive"), nur wenn der Titel mit derselben Marke
+        beginnt und der Rest kein Platzhalter ist; sonst None."""
+        if not titel or not titel.strip():
+            return None
+        t = self.teile(titel.strip())
+        if t is None or ist_platzhalter(t[1]) or not gleiche_marke(t[0]):
+            return None
+        return t[1]
 
     # ---- AutoScout24 ---------------------------------------------------------
     def autoscout_marke(self, name: Optional[str]) -> Optional[AutoScoutMarke]:
@@ -519,7 +553,12 @@ class Katalog:
                     return ModellTreffer(str(vm[0]), vm[1], True)
         t = aus_titel([x[1] for x in marke.modelle if not _GENERISCH.match(x[1])], titel)
         tm = self._autoscout_aufloesen(marke, t) if t else None
-        return ModellTreffer(str(tm[0]), tm[1], False, True) if tm is not None else None
+        if tm is not None:
+            return ModellTreffer(str(tm[0]), tm[1], False, True)
+        # Wunsch Ahmad 04.11.2026: wie mobile_modell — nur bei Platzhalter, nach der Ueberschrift
+        rest = self._titel_rest(titel, lambda m: self.autoscout_marke(m) is marke) if ist_platzhalter(modell) else None
+        rm = self._autoscout_aufloesen(marke, rest) if rest else None
+        return ModellTreffer(str(rm[0]), rm[1], False, True) if rm is not None else None
 
 
 _KATALOG: Optional[Katalog] = None
@@ -546,7 +585,8 @@ def zuordnen(marke_modell_text: str, titel: Optional[str] = None, k: Optional[Ka
       aus_beschreibung       — Modell kam aus der Beschreibung (nur wenn Feld und Ueberschrift nichts ergaben)
     """
     k = k or katalog()
-    text = marke_modell_text or ""
+    text = text_saeubern(marke_modell_text)
+    titel = text_saeubern(titel) or None
     teile = k.teile(text)
     ganz_aus_titel = False
     if (teile is None or ist_platzhalter(teile[0])) and titel and titel.strip():

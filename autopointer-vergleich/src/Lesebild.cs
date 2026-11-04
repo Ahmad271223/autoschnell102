@@ -31,6 +31,9 @@ internal static class Lesebilder
     /// <c>fehlt: ["Inserat-ID unsicher"]</c> hinaus (<see cref="Nutzlast"/>); im Protokoll steht der eigene Grund.</summary>
     public const string InseratIdUnsicher = "inserat_id_unsicher";
     public const string InseratIdUnsicherText = "Inserat-ID unsicher";
+    /// <summary>1.5.18 (Wunsch Ahmad 04.11.2026): Vermerk im Lesebild, wenn die Hash-ID in AutoPointer abgeschnitten ist
+    /// (Grund inserat_id_fehlt, fehlt ["Hash-ID abgeschnitten"]).</summary>
+    public const string HashAbgeschnittenText = "Hash-ID abgeschnitten";
 
     /// <summary>Groesser darf das PNG nicht sein (der Server lehnt mehr mit 413 ab). Eine Detailansicht ist als PNG
     /// meist 30-300 KB — die Grenze greift praktisch nur bei riesigen Bildschirmen mit hoher Skalierung.</summary>
@@ -172,6 +175,8 @@ internal static class Lesebilder
         if (unsicher)
             nutzlast["fehlt"] = new[] { InseratIdUnsicherText }.Concat(b.Fehlt ?? Array.Empty<string>())
                 .Select(f => K(f, 60)).Where(f => f.Length > 0).Distinct(StringComparer.Ordinal).Take(10).ToList();
+        else if (b.Grund == InseratIdFehlt && b.Fehlt is { Count: > 0 })      // 1.5.18: z. B. „Hash-ID abgeschnitten“
+            nutzlast["fehlt"] = b.Fehlt.Select(f => K(f, 60)).Where(f => f.Length > 0).Take(10).ToList();
         else if (b.Grund == PflichtfeldFehlt && b.Fehlt is { Count: > 0 })
             nutzlast["fehlt"] = b.Fehlt.Select(f => K(f, 60)).Where(f => f.Length > 0).Take(10).ToList();
         if (b.Fahrzeug is { } f)

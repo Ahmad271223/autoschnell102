@@ -26,7 +26,7 @@ internal enum Feld
 /// entscheidet sie mit ("Elektroantrieb").</param>
 internal sealed record TabellenZeile(Feld Feld, string Wert, double WertX, double? Spalte, double LinksMin,
                                      double? Rechts, double Oben, double Unten, double? VorherUnten, double? DanachOben,
-                                     string Bezeichnung = "");
+                                     string Bezeichnung = "", bool AusWert = false);
 
 /// <summary>Macht aus den erkannten Textzeilen der beiden Tabellen ein Fahrzeug.</summary>
 /// <remarks>Die Tabelle "Technische Daten" hat links die Bezeichnung
@@ -80,7 +80,8 @@ internal static class DetailLeser
     public static Dictionary<Feld, string> Tabelle(IReadOnlyList<OcrZeile> zeilen)
     {
         var ergebnis = new Dictionary<Feld, string>();
-        foreach (var z in Zeilen(zeilen))
+        // 1.5.18: erst die Zeilen mit lesbarer Bezeichnung, dann die nur an der Form des Werts erkannten (AusWert)
+        foreach (var z in Zeilen(zeilen).OrderBy(z => z.AusWert))
         {
             if (z.Wert.Length == 0 || ergebnis.ContainsKey(z.Feld)) continue;
             string? wert = z.Feld == Feld.Antrieb ? KraftstoffAusAntrieb(z.Bezeichnung, z.Wert) : z.Wert;
@@ -154,6 +155,7 @@ internal static class DetailLeser
         double grenze = wertStarts.Count > 0 ? wertStarts[wertStarts.Count / 2] - 8 : double.MaxValue;
 
         double? spalte = grenze != double.MaxValue ? grenze + 8 : null;
+        var nurWert = new List<(OcrZeile Stueck, string Text, int Reihe)>();       // 1.5.18: Wert ohne lesbare Bezeichnung
         for (int i = 0; i < reihen.Count; i++)
         {
             var reihe = reihen[i];
@@ -179,6 +181,7 @@ internal static class DetailLeser
                 // hier ist reihe[0] das einzige Stueck (mehrteilige Reihen links der Grenze nimmt der Zweig oben)
                 string text = string.Join(" ", reihe.Select(z => z.Text));
                 int dp = text.IndexOf(':');
+                if (reihe[0].X >= grenze && grenze != double.MaxValue) nurWert.Add((reihe[0], text, i));
                 if (dp <= 0 || reihe[0].X >= grenze) continue;   // nur Wert oder nur Bezeichnung
                 bezeichnung = text[..dp];
                 wert = text[(dp + 1)..];
@@ -186,15 +189,58 @@ internal static class DetailLeser
             }
             bezeichnung = bezeichnung.Trim().TrimEnd(':', ' ');
             var feld = BezeichnungErkennen(bezeichnung);
+            bool ausWert = false;
+            if (feld == null)
+            {
+                // 1.5.18 (Wunsch Ahmad 04.11.2026, Lesebilder Hyundai i30 / BMW 530d): Bezeichnung zu verwaschen
+                // ("ErstzUa$9.ng", "Kbmeterstand"), der Wert aber eindeutig — siehe LockerErkannt
+                feld = LockerErkannt(bezeichnung, wert);
+                ausWert = feld != null;
+            }
             if (feld == null) continue;
             liste.Add(new TabellenZeile(feld.Value, wert.Trim(), wertX, spalte, linksMin,
                                         wert.Trim().Length > 0 ? reihe.Max(z => z.Rechts) : null,
                                         reihe.Min(z => z.Y), reihe.Max(z => z.Y + z.Hoehe),
                                         i > 0 ? reihen[i - 1].Max(z => z.Y + z.Hoehe) : null,
                                         i + 1 < reihen.Count ? reihen[i + 1].Min(z => z.Y) : null,
-                                        bezeichnung));
+                                        bezeichnung, ausWert));
+        }
+        // 1.5.18 (Wunsch Ahmad 04.11.2026, Lesebilder BMW 530d / Ford Ka / VW Touran): die Bezeichnung wurde gar nicht
+        // gelesen, nur der Wert rechts. Steht GENAU EIN solcher Wert mit der eindeutigen Form da (und fehlt die Zeile
+        // sonst), gilt er — bei zwei passenden (z. B. Reichweite und Kilometerstand) wird nichts geraten.
+        foreach (var (feld, form) in new[] { (Feld.Erstzulassung, (Func<string, bool>)IstEzWert), (Feld.Kilometer, IstKmWert) })
+        {
+            if (liste.Any(z => z.Feld == feld)) continue;
+            var treffer = nurWert.Where(w => form(w.Text)).ToList();
+            if (treffer.Count != 1) continue;
+            var (stueck, text, r) = treffer[0];
+            liste.Add(new TabellenZeile(feld, text.Trim(), stueck.X, spalte, 0, stueck.Rechts, stueck.Y, stueck.Y + stueck.Hoehe,
+                                        r > 0 ? reihen[r - 1].Max(z => z.Y + z.Hoehe) : null,
+                                        r + 1 < reihen.Count ? reihen[r + 1].Min(z => z.Y) : null, "", AusWert: true));
         }
         return liste;
+    }
+
+    private static bool IstEzWert(string wert) => EzWert.IsMatch(wert) && !wert.Contains("bis", StringComparison.OrdinalIgnoreCase);
+    private static bool IstKmWert(string wert) => KmWert.IsMatch(wert) && !wert.Contains('/');
+
+    private static readonly Regex EzWert = new(@"^\s*(0?[1-9]|1[0-2])\s*[/.\-1lI|]\s*(19|20)\d{2}\s*$", RegexOptions.Compiled);
+    private static readonly Regex KmWert = new(@"^\s*\d{1,3}(?:[.,' ]\d{3})*\s*km\s*$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>1.5.18 (Wunsch Ahmad 04.11.2026): Erstzulassung und Kilometerstand auch bei verwaschener Bezeichnung — wenn
+    /// der WERT die eindeutige Form hat (Monat/Jahr ohne "bis" bzw. "201.000 km" ohne "/": Verbrauch "Liter/100 km" und
+    /// CO2 "g/km" nicht) UND die Bezeichnung noch entfernt danach aussieht (hoechstens die Haelfte der Zeichen anders —
+    /// "Reichweite: 450 km" oder "HU: bis 10/2028" nie). Solche Zeilen zaehlen erst, wenn die Bezeichnung selbst nicht
+    /// gelesen wurde. (rein, fuer Tests)</summary>
+    internal static Feld? LockerErkannt(string bezeichnung, string wert)
+    {
+        string n = FahrzeugCodes.Norm(bezeichnung);
+        if (n.Length < 4 || string.IsNullOrWhiteSpace(wert)) return null;
+        if (IstEzWert(wert) && FahrzeugCodes.Abstand(n, "erstzulassung") <= "erstzulassung".Length / 2)
+            return Feld.Erstzulassung;
+        if (IstKmWert(wert) && FahrzeugCodes.Abstand(n, "kilometerstand") <= "kilometerstand".Length / 2)
+            return Feld.Kilometer;
+        return null;
     }
 
     /// <summary>Wo beginnt der Wert, wenn die Texterkennung Bezeichnung und Wert als EIN Stueck gelesen hat
@@ -309,6 +355,14 @@ internal static class DetailLeser
             int monat = int.Parse(m.Groups[1].Value), jahr = int.Parse(m.Groups[2].Value);
             if (jahr >= 1950 && jahr <= maxJahr) return (monat is >= 1 and <= 12 ? monat : null, jahr);
         }
+        // 1.5.18 (Wunsch Ahmad 04.11.2026, Lesebild Hyundai i30): der Schraegstrich als "1" gelesen — "0712019" statt
+        // "07/2019". Nur genau Monat (01-12) + 1 + Jahr, sieben Ziffern am Stueck; sonst wie bisher
+        m = Regex.Match(t, @"(?<!\d)(0[1-9]|1[0-2])[1lI|]((?:19|20)\d{2})(?!\d)");
+        if (m.Success)
+        {
+            int monat = int.Parse(m.Groups[1].Value), jahr = int.Parse(m.Groups[2].Value);
+            if (jahr >= 1950 && jahr <= maxJahr) return (monat, jahr);
+        }
         m = Regex.Match(t, @"(?<!\d)((?:19|20)\d{2})(?!\d)");
         if (m.Success)
         {
@@ -388,21 +442,42 @@ internal static class DetailLeser
     public static string? HashId(string? s)
     {
         if (string.IsNullOrWhiteSpace(s) || s.Contains("...") || s.Contains('…')) return null;
-        var sb = new System.Text.StringBuilder();
+        // 1.5.18 (Wunsch Ahmad 04.11.2026, Lesebild Kia Stonic): die Texterkennung liest in der Hash-ID "S" statt "5" und
+        // "•", "." oder ein Leerzeichen statt des Bindestrichs ("f3ccc64S.6ca4-49f7-baa9•aa5ad8cSSe3d") — in einer
+        // Hex-Kennung gibt es weder S noch Z noch Punkte, die Verwechslung ist eindeutig. Gruppen an jedem Trennzeichen;
+        // stehen fuenf da, muessen sie 8-4-4-4-12 lang sein; sonst (Trennzeichen verschluckt) zaehlen 32 Hex-Zeichen.
+        var gruppen = new List<System.Text.StringBuilder> { new() };
         foreach (char c in s)
         {
-            if (char.IsWhiteSpace(c)) continue;
-            sb.Append(c switch
+            char k = c switch
             {
                 'O' or 'o' => '0',
-                'l' or 'I' or '|' => '1',
-                '–' or '—' => '-',
+                'l' or 'I' or 'i' or '|' or '!' => '1',
+                'S' or 's' => '5',
+                'Z' or 'z' => '2',
                 _ => char.ToLowerInvariant(c),
-            });
+            };
+            if (k is >= '0' and <= '9' or >= 'a' and <= 'f') gruppen[^1].Append(k);
+            else if (char.IsWhiteSpace(k) || k is '-' or '–' or '—' or '•' or '·' or '.' or ',' or '_' or ':' or ';' or '~')
+            {
+                if (gruppen[^1].Length > 0) gruppen.Add(new());
+            }
+            else return null;          // ein anderes Zeichen (g, h, …): nicht eindeutig — dann lieber keine Hash-ID
         }
-        string h = sb.ToString();
+        var teile = gruppen.Where(g => g.Length > 0).Select(g => g.ToString()).ToList();
+        string alle = string.Concat(teile);
+        if (alle.Length != 32) return null;
+        if (teile.Count == 5 && !teile.Select(t => t.Length).SequenceEqual(new[] { 8, 4, 4, 4, 12 })) return null;
+        string h = $"{alle[..8]}-{alle[8..12]}-{alle[12..16]}-{alle[16..20]}-{alle[20..]}";
         return Uuid.IsMatch(h) ? h : null;
     }
+
+    /// <summary>1.5.18: wie viele Hex-Zeichen eine Hash-Lesung traegt (Verwechslungen wie bei <see cref="HashId"/>) —
+    /// fuer "abgeschnitten" (<see cref="InseratNummer.HashAbgeschnitten"/>).</summary>
+    internal static int HexZeichen(string? s) =>
+        (s ?? "").Select(c => c switch { 'O' or 'o' => '0', 'l' or 'I' or 'i' or '|' => '1', 'S' or 's' => '5', 'Z' or 'z' => '2',
+                                         _ => char.ToLowerInvariant(c) })
+                 .Count(k => k is >= '0' and <= '9' or >= 'a' and <= 'f');
 
     /// <summary>Inserat-ID wie gelesen -> nur Buchstaben, Ziffern, Bindestrich; leer = null. (Auch fuer den zweiten
     /// Blick, 1.5.12 — dieselbe Regel wie fuer den ersten.)</summary>
@@ -430,7 +505,8 @@ internal static class DetailLeser
         var sortiert = zeilen.OrderBy(z => z.Y).ToList();
         foreach (var z in sortiert)
         {
-            var m = Regex.Match(z.Text, @"[Il1]nserat\s+v[o0]n\s+(.+)$", RegexOptions.IgnoreCase);
+            // 1.5.18 (Lesebilder 04.11.2026): auch "Irserat von" (n als r gelesen) — sonst wurde die Datumszeile zum Titel
+            var m = Regex.Match(z.Text, @"[Il1|][nr]{1,2}serat\s+v[o0]n\s+(.+)$", RegexOptions.IgnoreCase);
             if (!m.Success) continue;
             quelle = QuelleName(m.Groups[1].Value);
             quelleY = z.Y + z.Hoehe / 2;
@@ -447,15 +523,35 @@ internal static class DetailLeser
                 continue;
             }
             if (t.Length < 4 || FahrzeugCodes.Norm(t) == "neu") continue;
-            titel ??= Sauber(t);
+            if (Datumszeile.IsMatch(t)) continue;                    // 1.5.18: "23.10.2026 19:33:08 - …" ist kein Titel
+            titel ??= Sauber(OhneLogo(t));
         }
         return (quelle, titel, preis);
     }
 
+    private static readonly Regex Datumszeile = new(@"^\d{1,2}\.\d{1,2}\.\d{2,4}\b", RegexOptions.Compiled);
+
+    /// <summary>1.5.18 (Wunsch Ahmad 04.11.2026, Lesebilder): das Portal-Logo rechts ("Auto Scout24", "mobile.de",
+    /// "kleinanzeigen") rutscht bei abgeschnittenen Titeln in dieselbe Textzeile ("Hyundai i30 1...amobile.de") — weg
+    /// damit, sonst steht es im Titel, aus dem der Server Modelle liest. (rein, fuer Tests)</summary>
+    internal static string OhneLogo(string titel) =>
+        Regex.Replace(titel, @"\s*(?:auto\s*scout\s*24|[a-z]{0,3}mobile\.de|kleinanzeigen)\s*$", "",
+                      RegexOptions.IgnoreCase).Trim();
+
     private static string QuelleName(string roh)
     {
         string n = FahrzeugCodes.Norm(roh);
-        if (n.Contains("mobi")) return "mobile.de";          // auch Lesefehler wie "Mobie.de"
+        if (n.Contains("mobi") || n.StartsWith("mob")) return "mobile.de";   // auch Lesefehler wie "Mobie.de", "Mobk.de"
+        // 1.5.18 (Lesebild Hyundai i30): AutoPointer kuerzt die Quelle ("Mo...", "Klei...", "Aut...") — wie
+        // InseratNummer.PortalVon und backend werkzeuge.quelle_code; vorher blieb "Mo..." stehen, und der Hinweis
+        // "Inserat-ID nicht gelesen – Detailbereich hoeher ziehen" kam fuer diese Autos nie
+        string r = roh.Trim();
+        if (r.EndsWith("...") || r.EndsWith('…'))
+        {
+            if (n.StartsWith("mo")) return "mobile.de";
+            if (n.StartsWith("kl")) return "Kleinanzeigen";
+            if (n.StartsWith("au")) return "AutoScout24";
+        }
         if (n.Contains("scout")) return "AutoScout24";
         if (n.Contains("anzeigen") || n.StartsWith("klein") || n.StartsWith("kkin")) return "Kleinanzeigen";
         return roh.Trim();
@@ -468,6 +564,8 @@ internal static class DetailLeser
         var tab = Tabelle(technik);
         var f = new Fahrzeug
         {
+            // 1.5.18: wie viele Zeilen der Technik-Tabelle erkannt wurden — 0/1 heisst "Tabelle nicht zu sehen"
+            TabellenFelder = tab.Count,
             MarkeModellText = Sauber(tab.GetValueOrDefault(Feld.MarkeModell)) ?? "",
             Zustand = Sauber(tab.GetValueOrDefault(Feld.Zustand)),
             Kategorie = Sauber(tab.GetValueOrDefault(Feld.Kategorie)),
@@ -543,7 +641,24 @@ internal static class DetailLeser
         a.HashIdLesungen.AddRange(b.HashIdLesungen);
         a.Quelle ??= b.Quelle;
         a.Titel ??= b.Titel;
+        if (a.TabellenFelder != null || b.TabellenFelder != null)
+            a.TabellenFelder = Math.Max(a.TabellenFelder ?? 0, b.TabellenFelder ?? 0);
         return a;
+    }
+
+    /// <summary>1.5.18 (Wunsch Ahmad 04.11.2026, Lesebilder BMW 530d / Audi Q6): in manchen AutoPointer-Ansichten (Reiter
+    /// „Übersicht“, Tabelle gescrollt, Bilder-Bereich darueber) ist die Zeile „Marke, Modell“ nicht zu sehen — der Titel
+    /// darueber („BMW 530d - F10“) schon. Dann geht der Titel als Marke/Modell an den Server (der erkennt Marke und
+    /// Modell daraus, wie bei „Andere“), statt „fehlt: Marke/Modell“ und gar kein Vergleich. Erst NACH beiden Durchlaeufen
+    /// (die Zeile selbst geht immer vor). true = uebernommen. (rein, fuer Tests)</summary>
+    internal static bool MarkeModellAusTitel(Fahrzeug f)
+    {
+        if (f.MarkeModellText.Length > 0 || string.IsNullOrWhiteSpace(f.Titel)) return false;
+        string t = Sauber(OhneLogo(f.Titel)) ?? "";
+        if (t.Length < 3 || t.Count(char.IsLetter) < 2 || Datumszeile.IsMatch(t)) return false;
+        f.MarkeModellText = t;
+        f.MarkeModellAusTitel = true;
+        return true;
     }
 
     /// <summary>Was fehlt, damit ein Vergleich Sinn ergibt (Marke/Modell + EZ + km)?</summary>

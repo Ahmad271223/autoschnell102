@@ -5101,3 +5101,23 @@ wieder dazu.
 - Tests: `test_vertrag_zustand_20261104.py` (01), `test_technik_zustand_20261009.py` (Wortlaut),
   `ContractDialog.zustand.test.jsx`, angepasst `ContractDialog.zusicherung_vorschlag.test.jsx`, `kiSchaden.test.js`.
 
+## Erkennung aus zwölf Lesebildern verbessert (Wunsch Ahmad 04.11.2026), Programm 1.5.18
+
+Zwölf Lesebilder (Vorschauen der Betreiber-Seite) mit der echten Lesekette des Programms nachgelesen
+(`autopointer-vergleich/tests/LesebilderMessung.cs`, Ordner per `LESEBILDER_ORDNER`; Bilder vom Server holt
+`backend/scripts/lesebilder_export.py`). Ergebnis: neun statt drei Anzeigen bekommen einen Vergleich.
+
+- **Server** (`werkzeug_erkennung`): Kleinanzeigen-Platzhalter „BMW Weitere BMW“ mit Titel derselben Marke
+  („BMW 540d xDrive/H&amp;…“) ergibt jetzt das Modell (nur bei Platzhalter und erst nach der bisherigen Titelsuche —
+  die 1.676 Soll-Werte aus Programm 1.3.5 bleiben gleich); HTML-Zeichen (`&amp;`) und das Portal-Logo am Ende des
+  Titels fallen weg (`text_saeubern`); „540d“, „320i“, „330e“ zählen in der Überschrift als 540/320/330 (nur d/i/e —
+  „200t“/„300h“ bleiben eigene Modelle). `fahrzeug_codes`: ein Kraftstoff-Wort mit bis zu zwei falschen Zeichen
+  („Benzhi“) wird erkannt, wenn genau ein Kraftstoff so nah ist.
+- **Programm 1.5.18:** siehe `autopointer-vergleich/README.md` (Hash-ID mit S/•/., abgeschnittene Hash-ID mit eigenem
+  Hinweis, Erstzulassung „0712019“, verwaschene Beschriftung, Marke/Modell aus dem Titel, „Irserat von“, Logo im Titel,
+  Tabelle nicht sichtbar ohne Lesebild).
+- Ausrollen: Server zuerst (rückwärtsverträglich), dann Programm hochladen
+  (`autopointer-vergleich\hochladen.ps1`). Keine Migration, keine neuen Umgebungswerte.
+- Tests: `backend/tests/test_lesebilder_20261104.py`, `test_werkzeug_erkennung.py` (unverändert grün),
+  `autopointer-vergleich/tests/Lesebilder20261104Tests.cs`, `UeberwacherTests` — Programm 470 Tests.
+

@@ -480,6 +480,17 @@ internal sealed class Ueberwacher
             Melde(SchriftKleinHinweis, false);
         }
         var fehlt = DetailLeser.Fehlend(f);
+        if (fehlt.Count > 0 && f.TabellenFelder is < 2)
+        {
+            // 1.5.18 (Wunsch Ahmad 04.11.2026, Lesebild BMW 530d): die Technik-Tabelle ist gar nicht zu sehen (Bilder gross
+            // geoeffnet, schwarzer Bereich, gerade umgeschaltet) — kein Lesebild (es zeigt nichts) und ein klarer Hinweis
+            _basis = false;
+            _aktuellerVorgang = null;
+            Protokoll.Schreibe($"Technik-Tabelle in AutoPointer nicht zu sehen ({f.TabellenFelder} Zeilen erkannt) – kein Vergleich, kein Lesebild.\n"
+                               + $"Gelesen: {lesung.Rohtext}");
+            MeldeEinmal(TabelleNichtSichtbar);
+            return;
+        }
         if (fehlt.Count > 0)
         {
             _basis = false;
@@ -596,7 +607,10 @@ internal sealed class Ueberwacher
         // Hinweise fuer den Kaufvertrag (Wunsch Ahmad 03.10.2026). 1.5.9 (C): die lange Anleitung (Inserat-ID, Hash-ID)
         // steht ganz im Fenster; die Sprechblase bekommt die Kurzform, und die nur einmal je Programmlauf.
         string? inseratLang = null, inseratKurz = null, vorabHinweis = null;
-        if (antwort.InseratUrl == null && (f.Quelle ?? "").Contains("AutoScout", StringComparison.OrdinalIgnoreCase))
+        bool autoScout = (f.Quelle ?? "").Contains("AutoScout", StringComparison.OrdinalIgnoreCase);
+        if (antwort.InseratUrl == null && autoScout && f.HashAbgeschnitten)
+            (inseratLang, inseratKurz) = (HashAbgeschnittenHinweis, HashAbgeschnittenKurz);     // 1.5.18
+        else if (antwort.InseratUrl == null && autoScout)
             (inseratLang, inseratKurz) = (KeinLinkHinweis, KeinLinkKurz);
         // Befund Ahmad 08.10.2026 (Liste: bei vielen mobile.de- und einigen Kleinanzeigen-Autos kein "Inserat öffnen"):
         // die Zeile "Inserat-ID" steht ganz unten in der Tabelle — ist der Detailbereich zu niedrig, liegt sie
@@ -611,7 +625,10 @@ internal sealed class Ueberwacher
         // 1.5.16 (Wunsch Ahmad 13.10.2026): auch, wenn die Kennung gelesen, aber UNSICHER ist (keine zwei Lesungen gleich,
         // Stellenzahl falsch) — Grund inserat_id_unsicher, beim Server als inserat_id_fehlt mit fehlt ["Inserat-ID unsicher"]
         // (er kennt nur die vier Gruende). Den Hinweis "unsicher gelesen – bitte pruefen" meldet der Server (melden).
-        if (f.InseratIdUnsicher)
+        // 1.5.18: abgeschnittene Hash-ID ist kein Lesefehler, sondern zu schmal — eigener Vermerk im Lesebild
+        if (antwort.InseratUrl == null && autoScout && f.HashAbgeschnitten)
+            LesebildSenden(lesung, Lesebilder.InseratIdFehlt, e, new[] { Lesebilder.HashAbgeschnittenText }, antwort.VorgangId);
+        else if (f.InseratIdUnsicher)
             LesebildSenden(lesung, Lesebilder.InseratIdUnsicher, e, new[] { Lesebilder.InseratIdUnsicherText }, antwort.VorgangId);
         else if (inseratLang != null) LesebildSenden(lesung, Lesebilder.InseratIdFehlt, e, vorgangId: antwort.VorgangId);
         // 1.5.8 (Wunsch Ahmad 08.10.2026): die Portalwahl steht in AutoSchnell, der Server schickt nur deren Links —
@@ -853,6 +870,15 @@ internal sealed class Ueberwacher
     /// <summary>Der passende Hinweis, wenn fuer den Kaufvertrag die Inserat-Adresse fehlt.</summary>
     internal static string LinkHinweisFuer(Fahrzeug f) =>
         (f.Quelle ?? "").Contains("AutoScout", StringComparison.OrdinalIgnoreCase) ? KeinLinkHinweis : KeineNummerHinweis;
+
+    /// <summary>1.5.18 (Wunsch Ahmad 04.11.2026): die Technik-Tabelle ist in AutoPointer gerade nicht zu sehen.</summary>
+    internal const string TabelleNichtSichtbar =
+        "In AutoPointer ist die Fahrzeug-Tabelle gerade nicht zu sehen (z. B. Bilder groß geöffnet) – Bilder schließen oder zur Übersicht wechseln.";
+    /// <summary>1.5.18: die Hash-ID steht in AutoPointer abgeschnitten da („…“ oder am Rand gekappt).</summary>
+    internal const string HashAbgeschnittenHinweis =
+        "AutoScout-Inserat: die Hash-ID ist in AutoPointer abgeschnitten („…“) – ohne die ganze Kennung gibt es keinen AutoScout-Link. Detailbereich in AutoPointer breiter ziehen, bis die Hash-ID ganz zu sehen ist – dann klappt es von selbst. Für dieses Auto: in AutoPointer „Seite öffnen“, im Browser die Adresse kopieren (Strg+L, dann Strg+C) und hier noch einmal „Vertrag“ drücken.";
+    internal const string HashAbgeschnittenKurz =
+        "Hash-ID abgeschnitten – Detailbereich in AutoPointer breiter ziehen. Anleitung: „Mehr ▾“ → „Status und Hilfe“.";
 
     internal const string KeinLinkHinweis =
         "AutoScout-Inserat: die Kennung (Hash-ID) ist in AutoPointer nicht vollständig sichtbar. Für den Kaufvertrag: in AutoPointer „Seite öffnen“, im Browser die Adresse kopieren (Strg+L, dann Strg+C) und hier noch einmal „Vertrag“ drücken – das Programm übernimmt die kopierte Adresse. Tipp: Detailbereich in AutoPointer breiter ziehen – dann klappt es automatisch.";
@@ -1170,6 +1196,8 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
             f = DetailLeser.Ergaenzen(f, f2);
             roh += "  ||  2. Durchlauf: " + Rohtext(zt2, Array.Empty<OcrZeile>());
         }
+        // 1.5.18 (Wunsch Ahmad 04.11.2026): Zeile „Marke, Modell“ nicht zu sehen, Titel schon -> der Titel geht an den Server
+        if (DetailLeser.MarkeModellAusTitel(f)) roh += "  ||  Marke/Modell aus dem Titel: " + f.MarkeModellText;
         // 1.5.12 (Befund Ahmad 09.10.2026): zweiter Blick auf Marke/Modell, Kraftstoff, Inserat-ID (1.5.16: auch Hash-ID) —
         // aus demselben Abbild, hoechstens 10 s, Fehler nur ins Protokoll. Fehlt eine Pflichtangabe, geht ohnehin nichts
         // an den Server: dann nicht.

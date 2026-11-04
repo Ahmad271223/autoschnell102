@@ -54,6 +54,16 @@ internal sealed class Fahrzeug
     /// false auch, wenn die Zeile gar nicht gelesen wurde (das ist "fehlt", nicht "unsicher").</summary>
     public bool InseratIdUnsicher { get; set; }
 
+    /// <summary>1.5.18 (Wunsch Ahmad 04.11.2026): erkannte Zeilen der Technik-Tabelle (beide Durchlaeufe, das Maximum).
+    /// Unter 2 ist die Tabelle gar nicht zu sehen (Bilder gross geoeffnet, schwarzer Bereich) — dann kein Lesebild und
+    /// ein eigener Hinweis. null = nicht gezaehlt (Tests, andere Lesewege).</summary>
+    public int? TabellenFelder { get; set; }
+    /// <summary>1.5.18: Marke/Modell kam aus dem Titel, weil die Zeile „Marke, Modell“ nicht zu sehen war.</summary>
+    public bool MarkeModellAusTitel { get; set; }
+    /// <summary>1.5.18: die Hash-ID (AutoScout) steht in AutoPointer abgeschnitten da („9e26ebe6-44e7-4e12-97a5-a…“ oder am
+    /// Rand gekappt) — ohne die ganze Kennung gibt es keinen AutoScout-Link; eigener Hinweis „breiter ziehen“.</summary>
+    public bool HashAbgeschnitten { get; set; }
+
     /// <summary>Pruefbericht 03.10.2026 (Nr. 1): Kennung des Inserats (Inserat-ID, sonst AutoScout-Hash-ID), klein
     /// und ohne Leer-/Sonderzeichen; null ohne Kennung. Bewusst OHNE Quelle — die steht in einer anderen Zeile
     /// und darf als Lesefehler nicht aus demselben Auto zwei machen.</summary>
