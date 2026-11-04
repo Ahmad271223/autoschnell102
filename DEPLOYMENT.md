@@ -5121,3 +5121,25 @@ Zwölf Lesebilder (Vorschauen der Betreiber-Seite) mit der echten Lesekette des 
 - Tests: `backend/tests/test_lesebilder_20261104.py`, `test_werkzeug_erkennung.py` (unverändert grün),
   `autopointer-vergleich/tests/Lesebilder20261104Tests.cs`, `UeberwacherTests` — Programm 470 Tests.
 
+## Kaufvertrag neu gegliedert, Schrift schwarz (Wunsch Ahmad 04.11.2026)
+
+- **Ein Punkt „1 · Fahrzeugdaten“:** Fahrzeugdaten, Zustand (Bereifung, Scheckheft, HU, Unfallfrei, Nachlackierungsfrei,
+  Motor/Getriebe/Kupplung, …) und Schäden stehen in einem Abschnitt — „2 · Zustand“ und „Schäden / Beschädigungen“ sind
+  keine eigenen Punkte mehr. Die Schäden aus der Skizze stehen als Zeile „Schäden“, das Freitextfeld als
+  „Sonstige Schäden“ (im Dialog jetzt so beschriftet).
+- **„Hersteller / Typ“** fasst Marke und Modell in einer Zeile zusammen (`pdf_service.hersteller_typ`), die
+  „Modellbezeichnung“ entfällt.
+- **Käufer:** Beschriftung „Name / Firma“ wie beim Verkäufer. **Kaufpreis** ohne „(vereinbart)“.
+- **Kundennummer** steht im Kopf unter Vertrags-Nr. und Datum („KUNDEN-NR.“; eigene des Vertrags, sonst die der Firma).
+- **Neu: „2 · Zusätzliche Vereinbarung“** aus dem neuen Dialogfeld „Sonstige Vereinbarung“ (`sonstige_vereinbarung`,
+  bis 3000 Zeichen; z. B. „8-fach bereift, Winterräder auf Felgen“). Leer = kein solcher Punkt. Die „Besonderen
+  Vereinbarungen“ (Text aus den Einstellungen) bleiben unverändert weiter unten.
+- **Schrift für den Ausdruck:** alle Beschriftungen und kleinen Texte schwarz statt hellgrau (`pdf_service.SCHRIFT`), die
+  Beschriftungen in den Tabellen fett; die Beschriftungsspalte ist dafür 3,8 cm breit. Gilt für beide Layouts und alle
+  neu erzeugten PDFs; gespeicherte Verträge bleiben, wie sie sind (neue Fassung erzeugt das neue Bild).
+- Keine Migration, keine neuen Umgebungswerte. Tests: `backend/tests/test_vertrag_aufbau_20261104.py`, angepasst
+  `test_vertrag_design_20261003.py`, `test_vertrag_titel_stempel_20261004.py`, `test_vorlagen_kopieren_20260921.py`,
+  `test_vertrag_reihenfolge_20260921.py`, `test_vertragstexte_20260920.py`, `test_vertrag_pdf_komplett_20260920.py`,
+  `test_technik_zustand_20261009.py`, `test_golive_20260915_vertrag_kundenfassung.py`; Oberfläche
+  `ContractDialog.zustand.test.jsx`.
+

@@ -107,9 +107,10 @@ def test_02_die_letzten_drei_teile(digital):
     """Hinter "Besondere Vereinbarungen" kommen nur noch AGB und Unterschrift."""
     f = _text(digital=digital)
     hinten = f[f.index(BESONDERE):]
-    for frueher in (AUSSTATTUNG, BESCHREIBUNG, GEWAEHR, "Schäden / Beschädigungen",
-                    "2 · Zustand", "1 · Fahrzeugdaten",
-                    "KAUFPREIS (VEREINBART)", "Notizen"):
+    # 04.11.2026: Zustand und Schaeden stehen im Punkt "1 · Fahrzeugdaten", dazu "2 · Zusätzliche Vereinbarung"
+    for frueher in (AUSSTATTUNG, BESCHREIBUNG, GEWAEHR, "Sonstige Schäden", "Scheckheftgepflegt",
+                    "1 · Fahrzeugdaten", "Zusätzliche Vereinbarung",
+                    "KAUFPREIS", "Notizen"):
         assert frueher not in hinten, f"{frueher!r} steht hinter den Besonderen Vereinbarungen"
     assert hinten.index(BESONDERE) < hinten.index("Allgemeine") < hinten.index(_schluss(digital))
     # Inhalt der Besonderen Vereinbarungen steht vor den AGB (Platzhalter ersetzt).

@@ -61,7 +61,8 @@ beforeEach(() => {
 });
 
 function tippen(input, wert) {
-  const proto = input.tagName === "SELECT" ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+  const proto = input.tagName === "SELECT" ? HTMLSelectElement.prototype
+    : input.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
   const setter = Object.getOwnPropertyDescriptor(proto, "value").set;
   act(() => {
     setter.call(input, wert);
@@ -119,5 +120,28 @@ describe("Standardwerte, „alles in Ordnung“ und Nachlackierungsfrei (Wunsch 
     expect([body.service_book, body.drivable, body.commercial_since_ez]).toEqual(["ja", "Ja", "Nein"]);
     expect(body.nachlackierungsfrei).toBe("Nein");
     expect(body.technik_zustand).toBe("in Ordnung");
+  });
+});
+
+describe("Sonstige Vereinbarung (Wunsch Ahmad 04.11.2026)", () => {
+  it("eigenes Feld, leer zu Beginn, geht mit dem Vertrag an den Server", async () => {
+    expect(anfangsFormular({}, DEALER, "2026-11-04").sonstige_vereinbarung).toBe("");
+    rendern(createElement(ContractDialog, { open: true, onClose: () => {}, vehicleId: "v1", onCreated: () => {}, vehicle: FAHRZEUG }));
+    await act(async () => { await Promise.resolve(); });
+    const sv = feld("contract-sonstige-vereinbarung");
+    expect(sv).not.toBeNull();
+    expect(sv.value).toBe("");
+    expect(behaelter.textContent).toContain("Sonstige Vereinbarung (im Vertrag unter „Zusätzliche Vereinbarung“)");
+    expect(behaelter.textContent).toContain("Sonstige Schäden (erscheint im Vertrag bei den Fahrzeugdaten)");
+    tippen(sv, "8-fach bereift, Winterräder auf Felgen");
+    tippen(feld("contract-price"), "4.500");
+    tippen(feld("contract-payment"), "Bar");
+    await absenden();
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post.mock.calls[0][1].sonstige_vereinbarung).toBe("8-fach bereift, Winterräder auf Felgen");
+    // Bearbeiten: der gespeicherte Text steht wieder im Feld
+    const f = formularAusVertrag(anfangsFormular({}, DEALER, "2026-11-04"),
+                                 { contract_no: "KV-1", contract_data: { sonstige_vereinbarung: "2 Schlüssel" } });
+    expect(f.sonstige_vereinbarung).toBe("2 Schlüssel");
   });
 });

@@ -41,6 +41,9 @@ GREY = colors.HexColor("#71717A")
 DIVIDER = colors.HexColor("#E4E4E7")
 LIGHT = colors.HexColor("#F4F4F5")
 DARK = colors.HexColor("#0A0A0A")
+#: Wunsch Ahmad 04.11.2026: "Schrift dicker und schwarz, klarer beim Ausdrucken — aktuell hellgrau". Alle Beschriftungen
+#: und kleinen Texte (vorher GREY #71717A) sind jetzt schwarz, die Beschriftungen in den Tabellen zusaetzlich fett.
+SCHRIFT = colors.black
 
 # Wunsch Ahmad 03.10.2026: Farbe und Layout des Kaufvertrags waehlt der Chef in den Einstellungen
 # (dealers.vertrag_farbe / dealers.vertrag_layout). Dieselben Farbnamen wie die Farbe der App
@@ -200,27 +203,27 @@ def _styles():
     from pdf_schrift import styles_anpassen
     return styles_anpassen({
         "title": ParagraphStyle("title", parent=s["Title"], fontSize=24, leading=27,
-                                textColor=PRIMARY, alignment=TA_LEFT, spaceAfter=0),
+                                textColor=SCHRIFT, alignment=TA_LEFT, spaceAfter=0),
         "subtitle": ParagraphStyle("subtitle", parent=s["Normal"], fontSize=9,
-                                   leading=12, textColor=GREY),
+                                   leading=12, textColor=SCHRIFT),
         "brand": ParagraphStyle("brand", parent=s["Normal"], fontSize=10, leading=13,
                                 textColor=_akzent()),
         "meta_label": ParagraphStyle("meta_label", parent=s["Normal"], fontSize=7,
-                                     leading=9, textColor=GREY, alignment=TA_RIGHT),
+                                     leading=9, textColor=SCHRIFT, alignment=TA_RIGHT),
         "meta_value": ParagraphStyle("meta_value", parent=s["Normal"], fontSize=10,
-                                     leading=13, textColor=PRIMARY, alignment=TA_RIGHT),
+                                     leading=13, textColor=SCHRIFT, alignment=TA_RIGHT),
         "section": ParagraphStyle("section", parent=s["Normal"], fontSize=10,
-                                  leading=13, textColor=PRIMARY),
+                                  leading=13, textColor=SCHRIFT),
         "boxtitle": ParagraphStyle("boxtitle", parent=s["Normal"], fontSize=9,
-                                   leading=12, textColor=PRIMARY),
+                                   leading=12, textColor=SCHRIFT),
         "label": ParagraphStyle("label", parent=s["Normal"], fontSize=7, leading=9,
-                                textColor=GREY, alignment=TA_LEFT),
+                                textColor=SCHRIFT, alignment=TA_LEFT),
         "value": ParagraphStyle("value", parent=s["Normal"], fontSize=9, leading=11,
-                                textColor=PRIMARY, alignment=TA_LEFT),
+                                textColor=SCHRIFT, alignment=TA_LEFT),
         "small": ParagraphStyle("small", parent=s["Normal"], fontSize=8, leading=11,
-                                textColor=GREY),
+                                textColor=SCHRIFT),
         "body": ParagraphStyle("body", parent=s["Normal"], fontSize=9, leading=12,
-                               textColor=PRIMARY),
+                               textColor=SCHRIFT),
         "price_label": ParagraphStyle("price_label", parent=s["Normal"], fontSize=8,
                                       leading=10, textColor=colors.HexColor("#A1A1AA")),
         "price_value": ParagraphStyle("price_value", parent=s["Normal"], fontSize=17,
@@ -230,24 +233,24 @@ def _styles():
                                     leading=10, textColor=colors.HexColor("#D4D4D8"),
                                     alignment=TA_RIGHT),
         "sig_label": ParagraphStyle("sig_label", parent=s["Normal"], fontSize=8,
-                                    leading=10, textColor=GREY),
+                                    leading=10, textColor=SCHRIFT),
         # Layout "formular" (Wunsch Ahmad 03.10.2026)
         "f_title": ParagraphStyle("f_title", parent=s["Normal"], fontSize=19, leading=22,
                                   textColor=_akzent(), alignment=1),
         "f_subtitle": ParagraphStyle("f_subtitle", parent=s["Normal"], fontSize=8.5, leading=11,
-                                     textColor=GREY, alignment=1),
+                                     textColor=SCHRIFT, alignment=1),
         "f_firma": ParagraphStyle("f_firma", parent=s["Normal"], fontSize=10, leading=12.5,
                                   textColor=_akzent()),
         "f_section": ParagraphStyle("f_section", parent=s["Normal"], fontSize=9.5, leading=12,
                                     textColor=_akzent()),
         "f_label": ParagraphStyle("f_label", parent=s["Normal"], fontSize=7.5, leading=10,
-                                  textColor=GREY),
+                                  textColor=SCHRIFT),
         "f_price_label": ParagraphStyle("f_price_label", parent=s["Normal"], fontSize=7, leading=9,
-                                        textColor=GREY, alignment=1),
+                                        textColor=SCHRIFT, alignment=1),
         "f_price_value": ParagraphStyle("f_price_value", parent=s["Normal"], fontSize=18, leading=21,
                                         textColor=_akzent(), alignment=1),
         "f_price_sub": ParagraphStyle("f_price_sub", parent=s["Normal"], fontSize=10.5, leading=13,
-                                      textColor=PRIMARY, alignment=1),
+                                      textColor=SCHRIFT, alignment=1),
     })
 
 
@@ -346,7 +349,8 @@ def _kv_compact(rows, st, label_w, value_w):
     data = []
     for label, value in rows:
         data.append([
-            Paragraph(label, st["f_label" if _formular() else "label"]),
+            # Wunsch Ahmad 04.11.2026: Beschriftungen fett und schwarz (vorher hellgrau, beim Ausdruck kaum lesbar)
+            Paragraph(f"<b>{label}</b>", st["f_label" if _formular() else "label"]),
             Paragraph(_safe_para(value), st["value"]),
         ])
     t = Table(data, colWidths=[label_w, value_w])
@@ -424,6 +428,39 @@ def _two_boxes(left_title, left_rows, right_title, right_rows, st):
     return t
 
 
+def hersteller_typ(vehicle: dict) -> str:
+    """Wunsch Ahmad 04.11.2026: "Hersteller / Typ" = Marke und Modell in einer Zeile ("BMW 530"); steht die Marke schon
+    vorn im Modell ("BMW 530d"), nicht doppelt. (rein, fuer Tests)"""
+    marke = str(vehicle.get("make_label") or vehicle.get("make") or "").strip()
+    modell = str(vehicle.get("model_label") or vehicle.get("model") or "").strip()
+    if marke and modell.lower().startswith(marke.lower()):
+        return modell
+    return f"{marke} {modell}".strip()
+
+
+def schaden_zeilen(contract: dict) -> list:
+    """Die Schaeden aus der Skizze als Textzeilen ("Delle – Tür vorne links"): aus damages_text, sonst aus der Liste
+    (auch Freitext-Eintraege). Leer = keine. (rein, fuer Tests)"""
+    text = str(contract.get("damages_text") or "").strip()
+    if text:
+        return [z.strip() for z in text.split("\n") if z.strip()]
+    raus = []
+    for d in contract.get("damages") or []:
+        if not isinstance(d, dict):
+            # Nachpruefung Runde 14: Freitext-Eintraege (Strings) sind erlaubt
+            if str(d or "").strip():
+                raus.append(str(d).strip())
+            continue
+        tl = str(d.get("type_label") or d.get("type_key") or d.get("label") or d.get("type") or "Schaden")
+        zone = str(d.get("zone") or d.get("part_label") or d.get("part") or "")
+        raus.append(f"{tl}: {zone}" if zone else tl)
+    return raus
+
+
+#: Breite der Beschriftungsspalte in den Fahrzeugdaten (seit 04.11.2026 fett gedruckt, deshalb 3,8 statt 3,2 cm)
+KV_LABEL_W = 3.8 * cm
+
+
 def _two_col_kv(rows, st):
     """Render a flat list of (label,value) into a 2-column kv layout
     (so Fahrzeugdaten fit compactly side by side)."""
@@ -433,7 +470,8 @@ def _two_col_kv(rows, st):
     # Runde 22: keine Fuellzeile mehr bei ungerader Zeilenzahl — sie erschien
     # als leere Zeile mit "—" (seit der Zeile "Zulassung" in Abschnitt 2).
     # Die Spalten stehen oben buendig (VALIGN TOP), unterschiedliche Hoehe stoert nicht.
-    label_w = 3.2 * cm
+    # 04.11.2026: Beschriftungen fett -> breiter (sonst "Motor/Getriebe/Kupplu-ng" mitten im Wort umbrochen)
+    label_w = KV_LABEL_W
     val_w = COL_W - label_w - 0.2 * cm
     left_t = _kv_compact(left, st, label_w, val_w)
     right_t = _kv_compact(right, st, label_w, val_w) if any(r[0] for r in right) else Paragraph("", st["value"])
@@ -683,7 +721,9 @@ STEMPEL_HOEHE = 3 * UNTERSCHRIFT_HOEHE
 #: "Ausstattung laut Inserat / Verkäuferangaben", "Fahrzeugbeschreibung (vom Inserat)"). Wunsch Ahmad 09.10.2026:
 #: auch die Hinweiszeilen darunter ("Ausstattung laut Inseratsangaben.", "Erfassung anhand der Fahrzeugskizze …")
 #: sind weg.
-TITEL_ZUSTAND = "2 · Zustand"
+TITEL_ZUSTAND = "2 · Zustand"     # bis 03.11.2026 eigener Punkt — seit 04.11.2026 Teil von "1 · Fahrzeugdaten"
+#: Wunsch Ahmad 04.11.2026: Punkt fuer das Feld "Sonstige Vereinbarung" aus dem Vertragsdialog
+TITEL_ZUSAETZLICH = "2 · Zusätzliche Vereinbarung"
 TITEL_AUSSTATTUNG = "Ausstattung"
 #: Wunsch Ahmad 09.10.2026: wieder "Fahrzeugbeschreibung" (seit 04.10. stand nur "Beschreibung")
 TITEL_BESCHREIBUNG = "Fahrzeugbeschreibung"
@@ -836,7 +876,7 @@ def _numbered_canvas_factory(footer_left: str, footer_center: str):
             self.setStrokeColor(DIVIDER)
             self.setLineWidth(0.5)
             self.line(MARGIN, y + 0.35 * cm, PAGE_W - MARGIN, y + 0.35 * cm)
-            self.setFillColor(GREY)
+            self.setFillColor(SCHRIFT)                  # 04.11.2026: Fusszeile schwarz (Ausdruck)
             from pdf_schrift import auf_breite, ersatz_fuer
             schrift = ersatz_fuer("Helvetica")
             self.setFont(schrift, 7)
@@ -1088,6 +1128,12 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
         Paragraph("DATUM", st["meta_label"]),
         Paragraph(f"<b>{today}</b>", st["meta_value"]),
     ]
+    # Wunsch Ahmad 04.11.2026: die Kundennummer gut lesbar im Kopf (eigene des Vertrags, sonst die der Firma)
+    kundennummer = str(contract.get("vertrags_kundennummer") or contract.get("kundennummer")
+                       or dealer.get("vertrags_kundennummer") or "").strip()
+    if kundennummer:
+        header_right += [Spacer(1, 5), Paragraph("KUNDEN-NR.", st["meta_label"]),
+                         Paragraph(f"<b>{_xml_escape(kundennummer)}</b>", st["meta_value"])]
     if _formular():
         # Layout "formular" (Wunsch Ahmad 03.10.2026, nach seiner Vorlage): links Logo/Firma,
         # in der Mitte die Ueberschrift in der Vertragsfarbe, rechts Nummer und Datum.
@@ -1136,7 +1182,7 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
         ("Ausweis", contract.get("id_document", "")),
     ]
     buyer_rows = [
-        ("Firma", dealer.get("company_name", "")),
+        ("Name / Firma", dealer.get("company_name", "")),     # Wunsch Ahmad 04.11.2026 (wie beim Verkaeufer)
         # Wunsch Ahmad (16.09.2026): kein Ansprechpartner im Kaufvertrag.
         ("Anschrift", f"{dealer.get('address','')}".strip()),
         ("PLZ / Ort", f"{dealer.get('zip_code','')} {dealer.get('city','')}".strip()),
@@ -1198,7 +1244,7 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
     if _formular():
         # Layout "formular" (03.10.2026): heller Preisstreifen — Kaufpreis gross in der Vertragsfarbe,
         # daneben die Zahlungsart (bei MwSt-Ausweis zusaetzlich Netto und MwSt).
-        spalten = [[Paragraph("KAUFPREIS (VEREINBART)", st["f_price_label"]),
+        spalten = [[Paragraph("KAUFPREIS", st["f_price_label"]),          # 04.11.2026: ohne "(vereinbart)"
                     Paragraph(f"<b>{price_str}</b>", st["f_price_value"])]]
         if contract.get("show_vat"):
             spalten += [[Paragraph("NETTO", st["f_price_label"]),
@@ -1225,7 +1271,7 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
     else:
         price_box = Table([
             [
-                Paragraph("KAUFPREIS (VEREINBART)", st["price_label"]),
+                Paragraph("KAUFPREIS", st["price_label"]),              # 04.11.2026: ohne "(vereinbart)"
                 Paragraph(f"<b>{price_str}</b>", st["price_value"]),
             ],
             [
@@ -1277,9 +1323,8 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
     cc_str = f"{cc_int} ccm" if cc_int is not None else ""
 
     veh_rows = [
-        ("Marke", vehicle.get("make_label") or vehicle.get("make", "")),
-        ("Modell", vehicle.get("model_label") or vehicle.get("model", "")),
-        ("Modellbezeichnung", vehicle.get("model_description", "")),
+        # Wunsch Ahmad 04.11.2026: "Hersteller / Typ" fasst Marke und Modell zusammen, die Modellbezeichnung entfaellt
+        ("Hersteller / Typ", hersteller_typ(vehicle)),
         ("Kategorie", vehicle.get("category_label") or vehicle.get("category", "")),
         ("Erstzulassung", vehicle.get("first_registration", "")),
         ("Kilometerstand", mileage_str),
@@ -1300,12 +1345,9 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
         # im Dialog bewusst geleert ("") heisst: keine Angabe.
         ("Fahrzeughalter (Anzahl)", _halter_anzahl(contract, vehicle)),
     ]
-    story.append(_section("1 · Fahrzeugdaten", st))
-    story.append(Spacer(1, 6))
+    # Wunsch Ahmad 04.11.2026: Fahrzeugdaten, Zustand und Schaeden stehen in EINEM Punkt "1 · Fahrzeugdaten" —
+    # Zustand und Schaeden sind keine eigenen Abschnitte mehr (Ueberschrift und Grid folgen unten nach dem Zustand)
     veh_rows = _ohne_leere(veh_rows)
-    if veh_rows:
-        story.append(_two_col_kv(veh_rows, st))
-    story.append(Spacer(1, 12))
 
     # ---------- Zusicherungen & Zustand — manual fields entered by dealer ----------
     # Seit 16.09.2026: ohne Angabe kein "—, gültig bis …" — nur die Teile,
@@ -1353,52 +1395,34 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
         ("Fahrbereit (Inserat)", _inserat_zustand(vehicle.get("roadworthy"), offenlegung=False)),
     ]
     zus_rows = _ohne_leere(zus_rows)
-    if zus_rows:
-        story.append(_section(TITEL_ZUSTAND, st))
-        story.append(Spacer(1, 6))
-        story.append(_two_col_kv(zus_rows, st))
-        story.append(Spacer(1, 12))
 
-    # ---------- Schäden / Beschädigungen — aus interaktiver Skizze ----------
-    damages_text = (contract.get("damages_text") or "").strip()
-    damages_list = contract.get("damages") or []
-    damage_note = (contract.get("vehicle_damage_note") or "").strip()
-    if damages_text or damages_list or damage_note:
-        story.append(_section("Schäden / Beschädigungen", st))
-        story.append(Spacer(1, 6))
-        if damages_text:
-            for line_txt in damages_text.split("\n"):
-                line_txt = _xml_escape(line_txt.strip())
-                if line_txt:
-                    story.append(Paragraph(line_txt, st["body"]))
-                    story.append(Spacer(1, 1))
-        elif damages_list:
-            # Fallback if only the array was sent.
-            for d in damages_list:
-                if not isinstance(d, dict):
-                    # Nachpruefung Runde 14: Freitext-Eintraege (Strings) sind
-                    # erlaubt — vorher stuerzte `d.get` hier mit 500 ab.
-                    story.append(Paragraph(f"• {_xml_escape(str(d or ''))}", st["body"]))
-                    story.append(Spacer(1, 1))
-                    continue
-                tl = _xml_escape(str(d.get("type_label") or d.get("type_key")
-                                     or d.get("label") or d.get("type") or "Schaden"))
-                zone = _xml_escape(str(d.get("zone") or d.get("part_label") or d.get("part") or ""))
-                story.append(Paragraph(f"• {tl}: {zone}" if zone else f"• {tl}", st["body"]))
-                story.append(Spacer(1, 1))
-        if damage_note:
-            # Freitextfeld "Sonstige Schäden / Hinweis" aus dem Formular —
-            # stand bisher nur in der Datenbank, nie im Vertrag.
-            story.append(Spacer(1, 4))
-            story.append(Paragraph(
-                f"<b>Sonstige Schäden / Hinweis:</b> {_xml_escape(damage_note)}",
-                st["body"],
-            ))
-            story.append(Spacer(1, 2))
-        # Rollenpruefung 22.09.2026 (RP-429): hier stand ein Hinweis zur Erfassung ("… gemeinsam mit dem Verkaeufer …",
-        # spaeter "Erfassung anhand der Fahrzeugskizze nach Angaben des Verkaeufers bzw. laut Inserat.") —
-        # Wunsch Ahmad 09.10.2026: entfaellt ganz.
-        story.append(Spacer(1, 12))
+    # Schaeden (Skizze) und "Sonstige Schaeden" (Freitext im Dialog) — seit 04.11.2026 Zeilen im Punkt Fahrzeugdaten
+    schaden_rows = _ohne_leere([("Schäden", "; ".join(schaden_zeilen(contract))),
+                                ("Sonstige Schäden", (contract.get("vehicle_damage_note") or "").strip())])
+
+    story.append(_section("1 · Fahrzeugdaten", st))
+    story.append(Spacer(1, 6))
+    if veh_rows:
+        story.append(_two_col_kv(veh_rows, st))
+    if zus_rows:
+        story.append(Spacer(1, 4))
+        story.append(_two_col_kv(zus_rows, st))
+    if schaden_rows:
+        # ueber die ganze Breite (lange Aufzaehlungen), dieselben Beschriftungen wie im Grid
+        story.append(Spacer(1, 4))
+        voll = Table([[_kv_compact(schaden_rows, st, KV_LABEL_W, CONTENT_W - KV_LABEL_W - 0.2 * cm)]],
+                     colWidths=[CONTENT_W], hAlign="LEFT")      # wie _two_col_kv: gleiche Kante wie das Grid
+        voll.setStyle(TableStyle([("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                                  ("VALIGN", (0, 0), (-1, -1), "TOP")]))
+        story.append(voll)
+    # Rollenpruefung 22.09.2026 (RP-429) / Wunsch Ahmad 09.10.2026: kein Hinweis zur Erfassung der Schaeden
+    story.append(Spacer(1, 12))
+
+    # ---------- 2 · Zusätzliche Vereinbarung (Wunsch Ahmad 04.11.2026) ----------
+    # Freitext "Sonstige Vereinbarung" aus dem Dialog (z. B. "8-fach bereift, Winterräder auf Felgen") — nur wenn
+    # etwas drinsteht; die Besonderen Vereinbarungen (Text aus den Einstellungen) bleiben weiter unten
+    story.extend(_abschnitt_mit_text(
+        TITEL_ZUSAETZLICH, _absaetze((contract.get("sonstige_vereinbarung") or "").strip(), st["body"]), st, 2))
 
     # ---------- Features ----------
     feats = _ausstattung_liste(vehicle.get("features"))   # P-15

@@ -290,6 +290,7 @@ export function anfangsFormular(v, dealer, heute) {
     accident_free: "",
     accident_location: "",
     nachlackierungsfrei: "",                // Wunsch Ahmad 04.11.2026: neben Unfallfrei, Ja/Nein, leer = keine Angabe
+    sonstige_vereinbarung: "",              // Wunsch Ahmad 04.11.2026: Punkt "Zusätzliche Vereinbarung" im Vertrag
     technik_zustand: "",
     // Altvertraege (bis 12.10.2026): bleiben beim Bearbeiten unveraendert erhalten, der Dialog zeigt technik_zustand
     motor_zustand: "",
@@ -1216,7 +1217,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
             {/* Wunsch Ahmad 04.10.2026: Schäden von Hand UNTER der Skizze eintragen — vorher stand das
                 Textfeld oben bei den Fahrzeugdaten bzw. neben "Unfallfrei". */}
             <div className="space-y-2.5" data-testid="contract-schaeden-text">
-              <Field label="Schäden selbst eintragen (erscheint im Vertrag)" multiline rows={2}
+              <Field label="Sonstige Schäden (erscheint im Vertrag bei den Fahrzeugdaten)" multiline rows={2}
                      value={form.vehicle_damage_note} onChange={(v) => set("vehicle_damage_note", v)}
                      testid="contract-veh-damage" placeholder="z. B. Kratzer Heckklappe, Delle Tür hinten links, Motorschaden" />
               {form.accident_free === "Nein" && (
@@ -1290,6 +1291,11 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                 beim Leeren passiert — wie bei den Vertragsbedingungen ("leer =
                 Standard", Entscheidung 09.09.). Ob "leer" künftig "weglassen"
                 heißen soll, entscheidet Ahmad. */}
+            {/* Wunsch Ahmad 04.11.2026: eigener Satz für diesen Vertrag ("8-fach bereift" …) — Punkt "Zusätzliche Vereinbarung" */}
+            <Field label="Sonstige Vereinbarung (im Vertrag unter „Zusätzliche Vereinbarung“)" multiline rows={2}
+                   value={form.sonstige_vereinbarung} onChange={(v) => set("sonstige_vereinbarung", v)}
+                   testid="contract-sonstige-vereinbarung"
+                   placeholder="z. B. 8-fach bereift, Winterräder auf Felgen, 2 Schlüssel, Service neu" />
             <Field label="Besondere Vereinbarungen" value={form.additional_terms} onChange={(v) => set("additional_terms", v)} multiline rows={4} testid="contract-terms"
                    helper="Aus deinen Einstellungen vorausgefüllt — hier nur für diesen Vertrag anpassbar. Leerst du das Feld, gilt wieder der Text aus den Einstellungen. Platzhalter in geschweiften Klammern (z. B. {abholdatum}) werden beim Erstellen des PDF automatisch eingesetzt." />
             {/* Wunsch Ahmad (15.09.2026): Sucher schreiben interne Notizen nicht beim

@@ -88,7 +88,8 @@ def test_03_formular_hat_denselben_inhalt(digital):
                                              contract={**VERTRAG, "vertrag_layout": "formular"}))
     # 13.10.2026: keine Ueberschrift "Kaufpreis" mehr ueber dem Kasten (stand doppelt); das Layout erkennt man an den
     # Abschnittstiteln (formular: GROSS)
-    assert "KAUFPREIS (VEREINBART)" in formular and "KAUFPREIS (VEREINBART)" in modern
+    assert "KAUFPREIS" in formular and "KAUFPREIS" in modern               # 04.11.2026: ohne "(vereinbart)"
+    assert "(VEREINBART)" not in formular and "(VEREINBART)" not in modern
     assert "KAUFPREIS KAUFPREIS" not in formular and "Kaufpreis KAUFPREIS" not in modern, "Kaufpreis steht doppelt"
     assert "FAHRZEUGDATEN" in formular and "FAHRZEUGDATEN" not in modern, "Layout greift"
     assert "Konditionen" not in formular and "Konditionen" not in modern
@@ -98,7 +99,8 @@ def test_03_formular_hat_denselben_inhalt(digital):
                    "auch ohne Unterschrift gültig", "Gewährleistung"):
         assert stueck in modern, stueck
         assert stueck in formular, stueck
-    for titel in ("Verkäufer", "Käufer", "Fahrzeugdaten", "2 · Zustand", "Besondere Vereinbarungen",
+    # 04.11.2026: Zustand ist Teil der Fahrzeugdaten (kein eigener Punkt "2 · Zustand" mehr)
+    for titel in ("Verkäufer", "Käufer", "Fahrzeugdaten", "Besondere Vereinbarungen",
                   "Allgemeine Vertragsbedingungen"):
         assert titel.upper() in formular, titel
     assert "ABS, Navigationssystem, Sitzheizung" in formular, "Ausstattung als Fliesstext"

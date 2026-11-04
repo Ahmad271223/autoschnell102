@@ -93,5 +93,5 @@ def test_04_pdf_eine_zeile_und_ueberschrift(layout):
 def test_05_kaufpreis_nicht_doppelt(layout):
     f = _text(P.generate_contract_pdf(dealer={"company_name": "Firma"}, vehicle={"make_label": "VW", "model_label": "Golf"},
                                       contract={**_KOPF, "vertrag_layout": layout, "purchase_price": 12000}))
-    assert "KAUFPREIS (VEREINBART) 12.000,00 EUR" in f
+    assert "KAUFPREIS 12.000,00 EUR" in f and "(VEREINBART)" not in f    # 04.11.2026: ohne "(vereinbart)"
     assert "Kaufpreis KAUFPREIS" not in f and "KAUFPREIS KAUFPREIS" not in f, "Kaufpreis steht doppelt"

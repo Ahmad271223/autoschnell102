@@ -35,9 +35,11 @@ def test_kurze_ueberschriften(layout):
     vehicle = {"make_label": "Cupra", "model_label": "Leon", "features": ["ABS", "Navigationssystem"]}
     f = _text(P.generate_contract_pdf(dealer={"company_name": "Firma"}, vehicle=vehicle, contract=contract))
     gross = f.upper()
-    for neu in ("2 · ZUSTAND", "AUSSTATTUNG", "BESCHREIBUNG"):
+    # 04.11.2026: der Zustand steht im Punkt "1 · Fahrzeugdaten" (kein eigener Punkt "2 · Zustand" mehr)
+    for neu in ("1 · FAHRZEUGDATEN", "SCHECKHEFTGEPFLEGT", "AUSSTATTUNG", "BESCHREIBUNG"):
         assert neu in gross, neu
-    for alt in ("ZUSICHERUNGEN & ZUSTAND", "LAUT INSERAT / VERKÄUFERANGABEN", "FAHRZEUGBESCHREIBUNG (VOM INSERAT)"):
+    for alt in ("ZUSICHERUNGEN & ZUSTAND", "2 · ZUSTAND", "LAUT INSERAT / VERKÄUFERANGABEN",
+                "FAHRZEUGBESCHREIBUNG (VOM INSERAT)"):
         assert alt not in gross, alt
     assert "Ausstattung laut Inseratsangaben." not in f, "Wunsch Ahmad 09.10.2026: die Hinweiszeile ist weg"
     assert "Erfassung anhand der Fahrzeugskizze" not in f

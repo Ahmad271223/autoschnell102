@@ -111,5 +111,5 @@ def test_leere_felder_erscheinen_nicht_im_vertrag():
         contract={**BASIS, "seller_email": "", "tires": ""}))
     assert "Ansprechpartner" not in ohne and "Bereifung" not in ohne
     assert "chef@example.com" not in ohne and "v@example.com" not in ohne
-    assert "Marke" in ohne and "VW" in ohne          # gefuellte Felder bleiben
+    assert "Hersteller / Typ" in ohne and "VW" in ohne   # gefuellte Felder bleiben (04.11.2026: statt "Marke")
 

@@ -281,6 +281,9 @@ class ContractIn(BaseModel):
     accident_location: Optional[str] = ""  # nur wenn accident_free == "Nein"
     # Wunsch Ahmad 04.11.2026: neben "Unfallfrei" der Punkt "Nachlackierungsfrei" (Ja/Nein, leer = keine Angabe)
     nachlackierungsfrei: Optional[str] = ""   # "Ja" | "Nein" | ""
+    # Wunsch Ahmad 04.11.2026: eigener Freitext "Sonstige Vereinbarung" (z. B. "8-fach bereift") — steht im Vertrag unter
+    # "2 · Zusätzliche Vereinbarung"; leer = kein solcher Punkt
+    sonstige_vereinbarung: Optional[str] = Field(default="", max_length=3000)
     # Wunsch Ahmad 13.10.2026: EIN freiwilliger Punkt "Motor/Getriebe/Kupplung — in Ordnung oder Schaden?";
     # leer = keine Angabe -> keine Zeile im Vertrag. Die drei Einzelfelder stammen aus Vertraegen bis 12.10.2026
     # (damals Pflicht beim Erstellen) und werden weiter angenommen und im PDF zusammengefasst.
@@ -441,6 +444,7 @@ class ContractIn(BaseModel):
             long_fields = {
                 "additional_terms", "notes", "agb_text",
                 "vehicle_description", "damages_text", "digital_vertragstext",
+                "sonstige_vereinbarung",          # 04.11.2026 (eigene Grenze 3000 im Feld)
             }
             limit = 20000 if info.field_name in long_fields else 500
             if len(v) > limit:
