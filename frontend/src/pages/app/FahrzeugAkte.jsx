@@ -720,13 +720,6 @@ export default function FahrzeugAkte() {
             <KV key={a.id} k="Geplante Abholung"
                 val={`${datumDE(a.pickup_date)}${a.pickup_time ? ` · ${a.pickup_time}\u00a0Uhr` : ""} · ${lesbar(a.status || "offen")}`} />
           ))}
-          {(akte.appointments || []).slice(0, 1).map((a) => (
-            <div key={`ue-${a.id}`} className="mt-1"><UeberweisungKarte terminId={a.id} kompakt /></div>
-          ))}
-          {/* Chat Büro/Fahrer (24.11.2026) zu Terminen mit Fahrer — der Verlauf gehört zum Auftrag */}
-          {(akte.appointments || []).filter((a) => a.driver_id).slice(0, 3).map((a) => (
-            <div key={`chat-${a.id}`} className="mt-2"><AuftragChat rolle="buero" terminId={a.id} /></div>
-          ))}
           {(akte.contracts || []).map((c, i) => (
             <button key={c.id || i} type="button" data-testid={`akte-vertrag-${c.id}`}
                     onClick={() => openContractPdf(c.id)
@@ -893,6 +886,19 @@ export default function FahrzeugAkte() {
           {akte.appointments.map((a) => (
             <KV key={a.id} k={`${datumDE(a.pickup_date)}${a.pickup_time ? ` · ${a.pickup_time} Uhr` : ""}`}
                 val={`${lesbar(a.status || "offen")}${a.driver_name ? ` · Fahrer: ${a.driver_name}` : ""}`} />
+          ))}
+        </Section>
+      )}
+      {(akte.appointments || []).length > 0 && (
+        <Section title="Überweisung" reiter="abholung" testid="akte-ueberweisung">
+          <UeberweisungKarte terminId={akte.appointments[0].id} kompakt />
+        </Section>
+      )}
+      {/* Chat Büro/Fahrer (24.11.2026) zu Terminen mit Fahrer — der Verlauf gehört zum Auftrag */}
+      {(akte.appointments || []).some((a) => a.driver_id) && (
+        <Section title="Chat mit dem Fahrer" reiter="abholung" testid="akte-chat">
+          {akte.appointments.filter((a) => a.driver_id).slice(0, 3).map((a) => (
+            <div key={`chat-${a.id}`} className="mt-2"><AuftragChat rolle="buero" terminId={a.id} /></div>
           ))}
         </Section>
       )}
