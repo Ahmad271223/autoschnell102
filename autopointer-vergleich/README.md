@@ -419,3 +419,18 @@ nur derselbe Windows-Benutzer) und seit 1.5.2 **im Programm nirgends mehr anzuze
 Protokollfenster, kein `--protokoll`, kein `--entschluesseln`). Für den Support liest es nur ein eigenes Werkzeug
 außerhalb des Programms auf dem betroffenen PC unter demselben Windows-Konto. Erkennungsbilder ebenfalls verschlüsselt,
 Einstellungen: `%APPDATA%\AutoSchnell\AutoPointer-Vergleich\einstellungen.json` (Schlüssel DPAPI-verschlüsselt).
+
+## Sprachdiktat (1.5.19, Wunsch Ahmad 24.11.2026)
+
+* Knopf **„Diktat“** in der Leiste oder **Strg+Alt+D**: erst ins Feld klicken (AutoSchnell im Browser, Vertrag,
+  Notiz – egal wo), dann „Diktat“ tippen und sprechen, nochmal tippen → der Text wird in das Feld **getippt**
+  (Unicode über `SendInput`, die Zwischenablage bleibt unberührt). Die Leiste nimmt nie den Fokus, der Cursor bleibt im
+  Feld. Ist inzwischen ein anderes Fenster vorne, liegt der Text in der Zwischenablage (Sprechblase). Zeilenumbrüche
+  werden Leerzeichen (ein Enter würde einzeilige Formulare abschicken). Höchstens 5 Minuten am Stück.
+* Erkennung **auf dem PC** mit Whisper.net 1.9.1 (whisper.cpp, MIT), Modell `ggml-large-v3-turbo-q5_0.bin` (574 MB),
+  beim ersten Diktat nach Rückfrage von Hugging Face geladen nach `%LOCALAPPDATA%\AutoSchnell\Diktat` (`.part`, erst
+  vollständig umbenannt). Die vier whisper.cpp-DLLs stecken als Ressource in der EXE (`ExcludeAssets="build"`) und werden
+  beim ersten Diktat nach `…\Diktat\laufzeit-1.9.1\runtimes\win-x64` entpackt (`RuntimeOptions.LibraryPath`).
+  Mikrofon über NAudio (WinMM, 16 kHz mono). Der Ton verlässt den PC nie; ins Protokoll kommt nur die Textlänge.
+* Nur verbunden und mit Abo (wie der Vergleich). Ohne Mikrofon / gesperrtes Mikrofon: Sprechblase mit Hinweis.
+* Tests: `DiktatTests` (PCM, Platzhalter, Eingabe, `INPUT`-Größe, Ressourcen, Laufzeit aus der EXE laden, Leiste) — 479 Tests.

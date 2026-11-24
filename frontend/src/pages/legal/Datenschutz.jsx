@@ -286,16 +286,17 @@ export default function Datenschutz() {
       </p>
 
       <p>
-        <strong>Sprachdiktat in der iPhone-App:</strong> Tippst du in der
-        iPhone-App auf „Diktieren“, nimmt die App über das Mikrofon auf und
-        wandelt die Sprache direkt auf deinem iPhone in Text um. Die Aufnahme
+        <strong>Sprachdiktat (iPhone-App und Windows-Programm):</strong> Tippst du
+        in der iPhone-App auf „Diktieren“ oder im Programm „AutoSchnell Vergleich“
+        auf „Diktat“, wird über das Mikrofon aufgenommen und die Sprache direkt auf
+        deinem Gerät in Text umgewandelt. Die Aufnahme
         wird nicht an uns oder Dritte übertragen und nach der Umwandlung sofort
         gelöscht; nur der erkannte Text landet im Feld und wird wie jede andere
         Eingabe gespeichert. Für die Erkennung lädt die App einmalig ein
         Sprachmodell von Hugging Face (huggingface.co) herunter; dabei wird wie
         bei jedem Download deine IP-Adresse an den Anbieter übermittelt. Den
-        Mikrofonzugriff kannst du jederzeit in den iPhone-Einstellungen
-        widerrufen.
+        Mikrofonzugriff kannst du jederzeit in den iPhone- bzw.
+        Windows-Einstellungen widerrufen.
       </p>
 
       <H2>8. Datensicherheit</H2>
@@ -306,11 +307,14 @@ export default function Datenschutz() {
         protokolliert.
       </p>
 
-      <H2>9. Open-Source-Bestandteile der iPhone-App</H2>
+      <H2>9. Open-Source-Bestandteile (Sprachdiktat)</H2>
       <p>
-        Das Sprachdiktat der iPhone-App nutzt WhisperKit (argmax-oss-swift) und
-        die Whisper-Sprachmodelle. Beide stehen unter der MIT-Lizenz:
-        Copyright (c) 2024 argmax, inc. · Copyright (c) 2022 OpenAI.
+        Das Sprachdiktat der iPhone-App nutzt WhisperKit (argmax-oss-swift), das
+        Programm „AutoSchnell Vergleich“ für Windows nutzt Whisper.net, whisper.cpp
+        und NAudio; beide nutzen die Whisper-Sprachmodelle. Alle stehen unter der
+        MIT-Lizenz: Copyright (c) 2024 argmax, inc. · Copyright (c) 2022 OpenAI ·
+        Copyright (c) 2023-2026 The ggml authors (whisper.cpp) · Copyright (c) 2024
+        sandrohanea (Whisper.net) · Copyright 2020 Mark Heath (NAudio).
       </p>
       <p className="text-zinc-500 text-xs" data-testid="lizenz-mit">
         Permission is hereby granted, free of charge, to any person obtaining a

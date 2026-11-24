@@ -15,7 +15,7 @@ internal sealed class Leiste : Form
     private readonly Func<FensterZustand> _zustand;
     private readonly Func<IntPtr> _bezug;
     private readonly Label _status;
-    private readonly Button _vergleichen, _vertrag, _mehr;
+    private readonly Button _vergleichen, _vertrag, _diktat, _mehr;
     private readonly ToolStripMenuItem _links, _rechts, _verbinden, _letzten;
     private readonly ContextMenuStrip _menue;
     private readonly ToolTip _tipps = new() { InitialDelay = 300, ShowAlways = true };   // Leiste ist nie aktiv
@@ -29,7 +29,9 @@ internal sealed class Leiste : Form
     private Point? _ziehVersatz;
 
     public event Action? Aktivieren, Stoppen, JetztVergleichen, VertragOeffnen, FensterOeffnen, Beenden,
-        LetztenOeffnen, EinstellungenOeffnen, SystemcheckOeffnen, Verbinden, Trennen, UpdateOeffnen;
+        LetztenOeffnen, EinstellungenOeffnen, SystemcheckOeffnen, Verbinden, Trennen, UpdateOeffnen,
+        /// <summary>24.11.2026: Diktat starten/stoppen (wie Strg+Alt+D).</summary>
+        Diktieren;
     /// <summary>1.5.9 (B): "Update auf … verfügbar …" — erst da, wenn AutoSchnell eine neuere Version anbietet.</summary>
     private ToolStripMenuItem? _update;
     private ToolStripSeparator? _updateTrenner;
@@ -68,17 +70,19 @@ internal sealed class Leiste : Form
         };
         _vergleichen = Knopf("Vergleichen", 100);
         _vertrag = Knopf("Vertrag", 74);
+        _diktat = Knopf("Diktat", 92);
         _mehr = Knopf("Mehr ▾", 70);
         // Wunsch Ahmad 04.10.2026: kleiner runder Punkt in der Ecke — gedrueckt halten und ziehen verschiebt die Leiste
         _griff = new Griff { Width = 16, Height = 34, Margin = new Padding(0, 0, 4, 0), Cursor = Cursors.SizeAll };
         _griff.MouseDown += (_, e) => { if (e.Button == MouseButtons.Left) GriffRunter(Cursor.Position); };
         _griff.MouseMove += (_, e) => { if (e.Button == MouseButtons.Left) GriffZiehen(Cursor.Position); };
         _griff.MouseUp += (_, _) => GriffLos();
-        reihe.Controls.AddRange(new Control[] { _griff, _status, _vergleichen, _vertrag, _mehr });
+        reihe.Controls.AddRange(new Control[] { _griff, _status, _vergleichen, _vertrag, _diktat, _mehr });
         Controls.Add(reihe);
 
         _tipps.SetToolTip(_vergleichen, "Vergleich für das Auto, das AutoPointer gerade zeigt, jetzt öffnen");
         _tipps.SetToolTip(_vertrag, "Kaufvertrag: das zuletzt angeklickte Auto in AutoSchnell öffnen");
+        _tipps.SetToolTip(_diktat, DiktatTipp);
         _tipps.SetToolTip(_mehr, MehrTipp);
         _tipps.SetToolTip(_griff, "Gedrückt halten und ziehen: Leiste verschieben\n(Rechtsklick: zurück in eine Ecke)");
 
@@ -109,6 +113,8 @@ internal sealed class Leiste : Form
         _status.Click += (_, _) => StatusKlick();
         _vergleichen.Click += (_, _) => JetztVergleichen?.Invoke();
         _vertrag.Click += (_, _) => VertragOeffnen?.Invoke();
+        // Die Leiste nimmt nie den Fokus — der Cursor bleibt im Feld, in das der Text soll.
+        _diktat.Click += (_, _) => Diktieren?.Invoke();
         _mehr.Click += (_, _) => _menue.Show(_mehr, new Point(0, _mehr.Height));
 
         _takt = new System.Windows.Forms.Timer { Interval = 1000 };
@@ -353,6 +359,19 @@ internal sealed class Leiste : Form
             e.Graphics.FillEllipse(pinsel, kreis);
         }
     }
+
+    internal const string DiktatTipp =
+        "Diktat: erst ins Feld klicken, dann hier tippen und sprechen, nochmal tippen = Text wird eingefügt (Strg+Alt+D)";
+
+    /// <summary>Diktat-Knopf beschriften: null = Ruhe ("Diktat"), sonst z. B. "Stopp 0:12", "Erkennt …", "Lädt 40 %".</summary>
+    public void DiktatAnzeigen(string? text, bool aufnahme)
+    {
+        if (IsDisposed) return;
+        _diktat.Text = text ?? "Diktat";
+        _diktat.BackColor = aufnahme ? Color.FromArgb(220, 38, 38) : Color.FromArgb(55, 65, 81);
+    }
+
+    internal string DiktatText => _diktat.Text;
 
     private Button Knopf(string text, int breite)
     {

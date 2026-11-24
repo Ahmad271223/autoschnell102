@@ -95,8 +95,11 @@ internal sealed class TrayApp : ApplicationContext
         };
         _symbol.DoubleClick += (_, _) => FensterZeigen();
 
-        _hotkey = new HotkeyFenster(() => AutomatikUmschalten());
+        _hotkey = new HotkeyFenster(id => { if (id == DiktatHotkeyId) DiktatUmschalten(); else AutomatikUmschalten(); });
         HotkeyAnwenden();
+        // 24.11.2026: Strg+Alt+D = Diktat (immer, unabhaengig vom Kuerzel fuer die Automatik)
+        if (!_hotkey.Anmelden(DiktatHotkeyId, Native.MOD_CONTROL | Native.MOD_ALT, (uint)Keys.D))
+            Protokoll.Schreibe("Strg+Alt+D ist schon von einem anderen Programm belegt – Diktat nur über den Knopf in der Leiste.");
         AutomatikAnzeigen();
 
         _fenster = new SteuerFenster(ZustandFuersFenster);
@@ -110,6 +113,7 @@ internal sealed class TrayApp : ApplicationContext
         _leiste.Stoppen += () => AutomatikSetzen(false);
         _leiste.JetztVergleichen += VergleichenStarten;
         _leiste.VertragOeffnen += async () => await VertragOeffnenAsync();
+        _leiste.Diktieren += DiktatUmschalten;
         _leiste.FensterOeffnen += FensterZeigen;
         _leiste.LetztenOeffnen += () => _ueberwacher?.LetztenErneutOeffnen();
         _leiste.EinstellungenOeffnen += EinstellungenZeigen;
@@ -939,6 +943,132 @@ internal sealed class TrayApp : ApplicationContext
         Beenden();
     }
 
+    // ---- Sprachdiktat (Wunsch Ahmad 24.11.2026) ----
+    // Knopf "Diktat" in der Leiste oder Strg+Alt+D: aufnehmen, nochmal = auf diesem PC erkennen (Whisper) und in das
+    // Fenster tippen, das beim Start vorne war. Ist inzwischen ein anderes Fenster vorne, landet der Text in der
+    // Zwischenablage. Ins Protokoll kommt nur die Laenge, nie der gesprochene Text.
+    private const int DiktatHotkeyId = 0x4151;
+    private readonly Diktat _diktat = new();
+    private bool _diktatBeschaeftigt;
+    private IntPtr _diktatZiel;
+    private long _diktatStart;
+    private System.Windows.Forms.Timer? _diktatUhr;
+
+    private void DiktatUmschalten()
+    {
+        if (_beendet || _diktatBeschaeftigt) return;
+        if (_diktat.NimmtAuf) { _ = DiktatBeendenAsync(); return; }
+        if (!_dienst.Verbunden || _lizenzSperre != null)
+        {
+            Sprechblase("Diktat geht nur, wenn das Programm mit AutoSchnell verbunden ist und das Abo läuft.", true, erzwingen: true);
+            return;
+        }
+        if (!Diktat.HatMikrofon)
+        {
+            Sprechblase("Kein Mikrofon gefunden – bitte Mikrofon oder Headset anschließen.", true, erzwingen: true);
+            return;
+        }
+        if (!_diktat.ModellVorhanden) { _ = DiktatModellLadenAsync(); return; }
+        _diktatZiel = Native.GetForegroundWindow();
+        try { _diktat.AufnahmeStarten(); }
+        catch (Exception ex)
+        {
+            Protokoll.Schreibe("Diktat: Mikrofon ließ sich nicht öffnen: " + ex.Message);
+            Sprechblase("Das Mikrofon lässt sich nicht öffnen – in Windows unter Datenschutz → Mikrofon erlauben.", true, erzwingen: true);
+            return;
+        }
+        _diktatStart = Environment.TickCount64;
+        if (_diktatUhr == null)
+        {
+            _diktatUhr = new System.Windows.Forms.Timer { Interval = 500 };
+            _diktatUhr.Tick += (_, _) => DiktatUhrTick();
+        }
+        _diktatUhr.Start();
+        DiktatUhrTick();
+    }
+
+    private void DiktatUhrTick()
+    {
+        long sek = (Environment.TickCount64 - _diktatStart) / 1000;
+        if (sek >= Diktat.MaxSekunden) { _ = DiktatBeendenAsync(); return; }
+        if (!_leiste.IsDisposed) _leiste.DiktatAnzeigen($"Stopp {sek / 60}:{sek % 60:00}", aufnahme: true);
+    }
+
+    private async Task DiktatBeendenAsync()
+    {
+        _diktatUhr?.Stop();
+        if (!_diktat.NimmtAuf) return;
+        var proben = _diktat.AufnahmeStoppen();
+        _diktatBeschaeftigt = true;
+        if (!_leiste.IsDisposed) _leiste.DiktatAnzeigen("Erkennt …", aufnahme: false);
+        try
+        {
+            var abbruch = _ende.Token;
+            string text = await Task.Run(() => _diktat.ErkennenAsync(proben, abbruch), abbruch);
+            if (_beendet) return;
+            if (text.Length == 0)
+            {
+                Sprechblase("Nichts verstanden – bitte näher am Mikrofon noch einmal sprechen.", false, erzwingen: true);
+                return;
+            }
+            if (_diktatZiel != IntPtr.Zero && Native.GetForegroundWindow() == _diktatZiel && Diktat.Eintippen(text))
+            {
+                Protokoll.Schreibe($"Diktat: {text.Length} Zeichen eingefügt.");
+            }
+            else
+            {
+                Clipboard.SetText(text);
+                Sprechblase("Das Diktat liegt in der Zwischenablage – mit Strg+V einfügen.", false, erzwingen: true);
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            Protokoll.Schreibe("Diktat fehlgeschlagen: " + ex);
+            Sprechblase("Das Diktat hat nicht geklappt – bitte noch einmal versuchen.", true, erzwingen: true);
+        }
+        finally
+        {
+            _diktatBeschaeftigt = false;
+            if (!_leiste.IsDisposed) _leiste.DiktatAnzeigen(null, aufnahme: false);
+        }
+    }
+
+    private async Task DiktatModellLadenAsync()
+    {
+        if (MessageBox.Show(
+                $"Für das Diktat lädt das Programm einmalig ein Sprachmodell (ca. {Diktat.ModellMB} MB) auf diesen PC.\n\n"
+                + "Danach funktioniert das Diktat auch ohne Internet, und die Sprache verlässt den PC nie.\n\nJetzt laden?",
+                Name, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+        _diktatBeschaeftigt = true;
+        int zuletzt = -1;
+        var fortschritt = new Progress<double>(p =>
+        {
+            int prozent = (int)(p * 100);
+            if (prozent == zuletzt || _leiste.IsDisposed) return;
+            zuletzt = prozent;
+            _leiste.DiktatAnzeigen($"Lädt {prozent} %", aufnahme: false);
+        });
+        try
+        {
+            if (!_leiste.IsDisposed) _leiste.DiktatAnzeigen("Lädt 0 %", aufnahme: false);
+            await _diktat.ModellLadenAsync(fortschritt, _ende.Token);
+            Protokoll.Schreibe("Diktat: Sprachmodell geladen.");
+            Sprechblase("Diktat ist bereit: ins Feld klicken, dann „Diktat“ tippen (oder Strg+Alt+D) und sprechen.", false, erzwingen: true);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            Protokoll.Schreibe("Diktat: Sprachmodell nicht geladen: " + ex.Message);
+            Sprechblase("Das Sprachmodell konnte nicht geladen werden – bitte Internet prüfen und erneut versuchen.", true, erzwingen: true);
+        }
+        finally
+        {
+            _diktatBeschaeftigt = false;
+            if (!_leiste.IsDisposed) _leiste.DiktatAnzeigen(null, aufnahme: false);
+        }
+    }
+
     /// <summary>Wirklich beenden — ohne Rueckfrage (nach "Beenden" in der Rueckfrage oder wenn eine neuere Version
     /// startet, 1.5.9 B).</summary>
     private void Beenden()
@@ -953,7 +1083,10 @@ internal sealed class TrayApp : ApplicationContext
         _leiste.EndgueltigSchliessen();
         _ende.Cancel();
         _klicks?.Dispose();
+        _diktatUhr?.Stop();
+        _diktat.Dispose();
         _hotkey.Abmelden(HotkeyId);
+        _hotkey.Abmelden(DiktatHotkeyId);
         _hotkey.DestroyHandle();
         _symbol.Visible = false;
         _symbol.Dispose();
@@ -966,10 +1099,10 @@ internal sealed class TrayApp : ApplicationContext
     /// <summary>Unsichtbares Fenster, das die globale Tastenkombination empfaengt.</summary>
     private sealed class HotkeyFenster : NativeWindow
     {
-        private readonly Action _aktion;
+        private readonly Action<int> _aktion;
         private readonly HashSet<int> _angemeldet = new();
 
-        public HotkeyFenster(Action aktion)
+        public HotkeyFenster(Action<int> aktion)
         {
             _aktion = aktion;
             CreateHandle(new CreateParams());
@@ -989,7 +1122,7 @@ internal sealed class TrayApp : ApplicationContext
 
         protected override void WndProc(ref Message m)
         {
-            if (m.Msg == Native.WM_HOTKEY) _aktion();
+            if (m.Msg == Native.WM_HOTKEY) _aktion((int)m.WParam);
             base.WndProc(ref m);
         }
     }

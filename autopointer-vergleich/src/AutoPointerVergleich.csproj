@@ -12,13 +12,25 @@
     <RootNamespace>AutoPointerVergleich</RootNamespace>
     <Product>AutoSchnell Vergleich</Product>
     <Company>Auto Schnell</Company>
-    <Version>1.5.18</Version>
+    <Version>1.5.19</Version>
     <ApplicationIcon>app.ico</ApplicationIcon>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>
     <InternalsVisibleTo Include="AutoPointerVergleich.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NAudio.WinMM" Version="2.2.1" />
+    <PackageReference Include="Whisper.net" Version="1.9.1" />
+    <!-- Sprachdiktat (24.11.2026): die nativen DLLs nicht lose ausgeben, sondern als Ressource in die EXE
+         (Diktat.LaufzeitBereitstellen entpackt sie beim ersten Diktat). -->
+    <PackageReference Include="Whisper.net.Runtime" Version="1.9.1" ExcludeAssets="build" GeneratePathProperty="true" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="$(PkgWhisper_net_Runtime)\build\win-x64\*.dll" LogicalName="diktat/%(Filename)%(Extension)" />
   </ItemGroup>
 
 </Project>
