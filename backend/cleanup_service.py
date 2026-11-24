@@ -599,6 +599,9 @@ async def _cleanup_once(db, wache=None) -> dict:
             lambda: vertragsloeschungen_wiederaufnehmen(db, now))
     await s("contracts_deleted", lambda: vertraege_nach_frist_loeschen(db, now, stats=stats))
     await s("termine_ohne_vertrag_bereinigt", lambda: termine_ohne_vertrag_bereinigen(db, now))
+    # 24.11.2026: Chat Buero/Fahrer folgt Termin und Frist (auftrag_chat.chat_nach_frist_loeschen)
+    await s("auftrag_chat_bereinigt",
+            lambda: __import__("auftrag_chat").chat_nach_frist_loeschen(db, now))
     await s("protokoll_orte_nachgezogen", lambda: protokoll_orte_nachziehen(db))
     # Pruefung 14.09.2026: liegengebliebene Nacharbeit (C4), gescheiterte
     # Freigabe-Ruecknahmen (C19), Termine ohne aktuelle Protokollversion
@@ -1541,6 +1544,8 @@ async def vertrag_endgueltig_loeschen(db, contract_id: str, *, scrub_pii: bool,
         await _protokolle_pii_entfernen(db, termin_ids, dealer_id, jetzt,
                                         contract_id=contract_id)
         await berichte_pii_entfernen(db, termin_ids, jetzt)
+        # 24.11.2026: Chat Buero/Fahrer der Termine geht mit (Nachrichten + Fotos)
+        await __import__("auftrag_chat").chat_loeschen(db, termin_ids, "vertrag_geloescht")
         # Termin: Verweis kappen UND die dort kopierten Verkaeuferdaten
         # (Name, Telefon, E-Mail, Abholanschrift) entfernen — sie blieben
         # sonst nach der Vertragsloeschung erhalten (Runde 5).

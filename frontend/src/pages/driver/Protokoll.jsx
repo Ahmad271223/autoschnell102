@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import SignaturePad from "@/components/SignaturePad";
 import DiktatKnopf from "@/components/DiktatKnopf";
+import AuftragChat from "@/components/AuftragChat";
 import { textAnhaengen } from "@/lib/sprachdiktat";
 import DamageSelector from "@/components/DamageSelector";
 import KiFahrerKarte from "@/components/KiFahrerKarte";
@@ -826,6 +827,9 @@ export default function Protokoll() {
           <FileText size={13} /> Papier-PDF
         </button>
       </div>
+
+      {/* Chat Büro/Fahrer (24.11.2026) — zugeklappt mit Zähler */}
+      <div className="mt-3"><AuftragChat rolle="fahrer" terminId={id} /></div>
 
       {/* Runde 30: Wo steht das Protokoll gerade? */}
       {wartetAufFreigabe && (

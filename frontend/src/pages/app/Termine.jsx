@@ -13,6 +13,7 @@ import {
 import BeweisCard from "@/components/BeweisCard";
 import PhotoGallery from "@/components/PhotoGallery";
 import AbholberichtDialog from "@/components/AbholberichtDialog";
+import AuftragChat, { ChatNeu } from "@/components/AuftragChat";
 import { Link } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { useFreigabeZaehler } from "@/lib/freigaben";
@@ -826,6 +827,7 @@ function DayApptItem({ a, onEdit, compact, mitBeweis = false }) {
           <span className={`text-[10px] uppercase tracking-wider font-bold px-1.5 py-0.5 rounded-md ${meta.chipClass} ${meta.text}`}>
             {a.status}
           </span>
+          {a.driver_id && <ChatNeu rolle="buero" terminId={a.id} />}
           {a.driver?.name && (
             <span className="inline-flex items-center gap-1 text-[11px] text-zinc-400" data-testid={`fahrer-${a.id}`}>
               <UserIcon size={10} /> {a.driver.name}
@@ -1364,6 +1366,9 @@ function EditDialog({ appt, drivers, fahrerGeladen = true, chef = false, isNew, 
               </div>
             </div>
           )}
+
+          {/* Chat Büro/Fahrer (24.11.2026) — nur am gespeicherten Termin */}
+          {!isNew && appt?.id && <AuftragChat rolle="buero" terminId={appt.id} />}
 
           {a.vehicle_id && (
             <div className="mt-4">

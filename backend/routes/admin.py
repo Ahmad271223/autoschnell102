@@ -1313,6 +1313,8 @@ _COMPANY_COLLECTIONS = (
     "werkzeug_lesebilder",
     # Pruefung 09.10.2026 (Befund Mokka-e): nicht lesbare Inseratsseiten der Erweiterung tragen dealer_id (14 Tage TTL)
     "werkzeug_leseseiten",
+    # 24.11.2026: Chat Buero/Fahrer je Abholtermin (Fotos liegen unter protocol/<firma>/)
+    "auftrag_chat", "auftrag_chat_status",
     # Go-Live 14.09.2026 (B6): users steht NICHT mehr im Tupel. Als letzter
     # Eintrag der Schleife lief users.delete_many noch VOR Snapshots, Dateien
     # und dealers.delete_many — brach einer dieser Schritte ab, fand der

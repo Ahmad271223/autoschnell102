@@ -70,6 +70,7 @@ from routes import resale as resale_routes
 from routes import team as team_routes
 from routes import marketplace as marketplace_routes
 from routes import beweise as beweise_routes
+from routes import chat as chat_routes
 from routes import werkzeuge as werkzeuge_routes
 
 ROOT_DIR = Path(__file__).parent
@@ -1644,6 +1645,9 @@ async def ensure_indexes():
     # Werkzeuge (03.10.2026): ein PC je Konto, Vergleichsprotokoll je Firma
     from indizes import werkzeug_indizes
     await werkzeug_indizes(db)
+    # Chat Buero <-> Fahrer je Abholtermin (24.11.2026)
+    from indizes import chat_indizes
+    await chat_indizes(db)
     try:
         from kontenanlage import konten_ohne_nummer
         ohne = await konten_ohne_nummer(db)
@@ -2241,6 +2245,7 @@ api.include_router(resale_routes.router, dependencies=[Depends(marktplatz_freige
 api.include_router(team_routes.router)
 api.include_router(marketplace_routes.router, dependencies=[Depends(marktplatz_freigeschaltet)])
 api.include_router(beweise_routes.router)
+api.include_router(chat_routes.router)
 api.include_router(protocols_routes.router)
 
 app.include_router(api)

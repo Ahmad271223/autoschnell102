@@ -12,6 +12,7 @@ import { toast } from "sonner";
 import AbholFoto from "@/components/AbholFoto";
 import SchadenFotos from "@/components/SchadenFotos";
 import BeweisCard from "@/components/BeweisCard";
+import AuftragChat from "@/components/AuftragChat";
 import { fotosBis } from "@/components/AbholberichtDialog";
 import StatusSchild from "@/components/StatusSchild";
 import {
@@ -623,6 +624,10 @@ export default function FahrzeugAkte() {
           {(akte.appointments || []).slice(0, 1).map((a) => (
             <KV key={a.id} k="Geplante Abholung"
                 val={`${datumDE(a.pickup_date)}${a.pickup_time ? ` · ${a.pickup_time}\u00a0Uhr` : ""} · ${lesbar(a.status || "offen")}`} />
+          ))}
+          {/* Chat Büro/Fahrer (24.11.2026) zu Terminen mit Fahrer — der Verlauf gehört zum Auftrag */}
+          {(akte.appointments || []).filter((a) => a.driver_id).slice(0, 3).map((a) => (
+            <div key={`chat-${a.id}`} className="mt-2"><AuftragChat rolle="buero" terminId={a.id} /></div>
           ))}
           {(akte.contracts || []).map((c, i) => (
             <button key={c.id || i} type="button" data-testid={`akte-vertrag-${c.id}`}
