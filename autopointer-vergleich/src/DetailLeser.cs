@@ -566,6 +566,8 @@ internal static class DetailLeser
         {
             // 1.5.18: wie viele Zeilen der Technik-Tabelle erkannt wurden — 0/1 heisst "Tabelle nicht zu sehen"
             TabellenFelder = tab.Count,
+            // 1.5.20: davon die oberen Zeilen — 0 heisst "Tabelle nach unten geschoben"
+            ObenFelder = tab.Keys.Count(IstObenFeld),
             MarkeModellText = Sauber(tab.GetValueOrDefault(Feld.MarkeModell)) ?? "",
             Zustand = Sauber(tab.GetValueOrDefault(Feld.Zustand)),
             Kategorie = Sauber(tab.GetValueOrDefault(Feld.Kategorie)),
@@ -643,8 +645,19 @@ internal static class DetailLeser
         a.Titel ??= b.Titel;
         if (a.TabellenFelder != null || b.TabellenFelder != null)
             a.TabellenFelder = Math.Max(a.TabellenFelder ?? 0, b.TabellenFelder ?? 0);
+        if (a.ObenFelder != null || b.ObenFelder != null)
+            a.ObenFelder = Math.Max(a.ObenFelder ?? 0, b.ObenFelder ?? 0);
         return a;
     }
+
+    /// <summary>1.5.20: die oberen Zeilen der Technik-Tabelle in AutoPointer (bis Kilometerstand) — sind sie alle nicht zu
+    /// sehen, obwohl andere Zeilen da sind, ist die Tabelle nach unten geschoben. (rein, fuer Tests)</summary>
+    internal static bool IstObenFeld(Feld feld) =>
+        feld is Feld.MarkeModell or Feld.Preis or Feld.Zustand or Feld.Kategorie or Feld.Erstzulassung or Feld.Kilometer;
+
+    /// <summary>1.5.20 (Serverpruefung 24.11.2026): Tabelle da (mindestens 2 Zeilen), aber keine der oberen Zeilen —
+    /// in AutoPointer nach unten geschoben. (rein, fuer Tests)</summary>
+    internal static bool TabelleNachUntenGeschoben(Fahrzeug f) => f.TabellenFelder is >= 2 && f.ObenFelder == 0;
 
     /// <summary>1.5.18 (Wunsch Ahmad 04.11.2026, Lesebilder BMW 530d / Audi Q6): in manchen AutoPointer-Ansichten (Reiter
     /// „Übersicht“, Tabelle gescrollt, Bilder-Bereich darueber) ist die Zeile „Marke, Modell“ nicht zu sehen — der Titel

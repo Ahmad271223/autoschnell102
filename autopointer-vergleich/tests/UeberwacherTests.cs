@@ -1135,6 +1135,31 @@ public class UeberwacherTests
         Assert.Contains(Protokoll.Letzte(), z => z.Contains("Technik-Tabelle in AutoPointer nicht zu sehen"));
     }
 
+    [Fact]   // 1.5.20 (Serverpruefung 24.11.2026, Lesebilder Honda Jazz / Dacia Dokker): Tabelle nach unten geschoben ->
+             // "nach oben schieben", kein Lesebild, keine Anfrage
+    public async Task Tabelle_nach_unten_geschoben_meldet_nach_oben_schieben()
+    {
+        await Start();
+        await Anklicken(() => new Fahrzeug { Titel = "Honda Jazz 1.4 Elegance", MarkeModellText = "Honda Jazz 1.4 Elegance",
+                                             MarkeModellAusTitel = true, Quelle = "mobile.de", Preis = 4499,
+                                             Kilometer = 1,      // (die Attrappe meldet sonst "leer"; Erstzulassung fehlt)
+                                             TabellenFelder = 6, ObenFelder = 0 }, 8);
+        await Versandt();
+        Assert.Empty(Bilder);
+        Assert.Empty(_server.Anfragen);
+        Assert.Empty(_b.Aufrufe);
+        Assert.True(Ueberwacher.TabelleNachUnten.Length <= Hinweis.MaxZeichen);     // ganz in der Sprechblase
+        Assert.Contains(_meldungen, m => m == Ueberwacher.TabelleNachUnten);
+        Assert.DoesNotContain(_meldungen, m => m.StartsWith("Fahrzeug konnte nicht eindeutig erkannt werden"));
+        Assert.Contains(Protokoll.Letzte(), z => z.Contains("Technik-Tabelle in AutoPointer nach unten geschoben"));
+        // sieht die Lesung die oberen Zeilen, bleibt es beim alten Weg ("fehlt: …" + Lesebild)
+        await Anklicken(() => new Fahrzeug { Titel = "Dacia Dokker", MarkeModellText = "Dacia Dokker", Quelle = "mobile.de",
+                                             Preis = 7500, Kilometer = 2, TabellenFelder = 6, ObenFelder = 2 }, 9);
+        await Versandt();
+        Assert.Equal(Lesebilder.PflichtfeldFehlt, Assert.Single(Bilder).Grund);
+        Assert.Contains(_meldungen, m => m.StartsWith("Fahrzeug konnte nicht eindeutig erkannt werden"));
+    }
+
     [Fact]   // 1.5.18 (Lesebilder Mercedes GLE / VW Passat): Hash-ID abgeschnitten -> eigener Hinweis und Vermerk im Lesebild
     public async Task Abgeschnittene_Hash_ID_meldet_breiter_ziehen()
     {

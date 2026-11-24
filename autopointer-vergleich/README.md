@@ -199,6 +199,13 @@ dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und 
   * Nicht umgesetzt (Entscheidung Ahmad): `&vertrag=1` am Programm-Ziel.
   * Tests: `VertragsWegTests` (Lesungsstände, AppStartWeg, Browser der Lesung, Leiste), `AutoSchnellAppTests`
     (Helfer-Vorrang, Überspring-Merker), `DienstTests`/`PruefberichtTests` (Sperre, `zustand`) — 377 Tests.
+* **1.5.20 (Serverprüfung 24.11.2026, Lesebilder Honda Jazz / Dacia Dokker) — Tabelle nach unten geschoben:** ist die
+  Technik-Tabelle in AutoPointer nach unten gescrollt (zu sehen nur Farbe, Klimatisierung, Hubraum, Türen …, keine Zeile
+  von „Marke, Modell“ bis „Kilometerstand“), sagt das Programm „Tabelle ganz nach oben schieben“ statt „fehlt:
+  Erstzulassung, Kilometerstand – Detailbereich größer ziehen“ und schickt kein Lesebild (es zeigt nur den unteren
+  Teil). Gezählt werden die oberen Zeilen (`Fahrzeug.ObenFelder`, beide Durchläufe, das Maximum); unter zwei
+  Tabellenzeilen bleibt es beim Hinweis „Tabelle nicht zu sehen“ (1.5.18). Enthält das Sprachdiktat aus 1.5.19.
+  Tests: `TabelleGeschoben20261124Tests`, `UeberwacherTests.Tabelle_nach_unten_geschoben_meldet_nach_oben_schieben`.
 * **1.5.18 (Wunsch Ahmad 04.11.2026: zwölf Lesebilder nicht erkannter Anzeigen ausgewertet, Messung
   `tests/LesebilderMessung.cs` — von zwölf Vorschaubildern bekommen neun einen Vergleich statt drei):**
   * **Hash-ID robuster:** „S“ statt „5“, „Z“ statt „2“, „•“/„.“/Leerzeichen statt Bindestrich werden repariert (in einer

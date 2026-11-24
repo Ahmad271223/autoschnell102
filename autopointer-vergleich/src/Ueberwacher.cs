@@ -491,6 +491,19 @@ internal sealed class Ueberwacher
             MeldeEinmal(TabelleNichtSichtbar);
             return;
         }
+        if (fehlt.Count > 0 && DetailLeser.TabelleNachUntenGeschoben(f))
+        {
+            // 1.5.20 (Serverpruefung 24.11.2026, Lesebilder Honda Jazz / Dacia Dokker): die Tabelle ist da, aber nach unten
+            // geschoben — Marke, Erstzulassung und Kilometerstand stehen ausserhalb des Bilds. Das Lesebild zeigt nur Farbe,
+            // Tueren, Hubraum … und hilft nicht; der Sucher muss nur die Tabelle nach oben schieben
+            _basis = false;
+            _aktuellerVorgang = null;
+            Protokoll.Schreibe($"Technik-Tabelle in AutoPointer nach unten geschoben ({f.TabellenFelder} Zeilen, keine von "
+                               + "Marke/Modell bis Kilometerstand) – kein Vergleich, kein Lesebild.\n"
+                               + $"Gelesen: {lesung.Rohtext}");
+            MeldeEinmal(TabelleNachUnten);
+            return;
+        }
         if (fehlt.Count > 0)
         {
             _basis = false;
@@ -874,6 +887,10 @@ internal sealed class Ueberwacher
     /// <summary>1.5.18 (Wunsch Ahmad 04.11.2026): die Technik-Tabelle ist in AutoPointer gerade nicht zu sehen.</summary>
     internal const string TabelleNichtSichtbar =
         "In AutoPointer ist die Fahrzeug-Tabelle gerade nicht zu sehen (z. B. Bilder groß geöffnet) – Bilder schließen oder zur Übersicht wechseln.";
+    /// <summary>1.5.20 (Serverpruefung 24.11.2026): die Technik-Tabelle ist in AutoPointer nach unten geschoben. Passt
+    /// ganz in die Sprechblase (hoechstens <see cref="Hinweis.MaxZeichen"/> Zeichen).</summary>
+    internal const string TabelleNachUnten =
+        "In AutoPointer ist die Fahrzeug-Tabelle nach unten geschoben (Marke, EZ, km nicht zu sehen) – Tabelle ganz nach oben schieben.";
     /// <summary>1.5.18: die Hash-ID steht in AutoPointer abgeschnitten da („…“ oder am Rand gekappt).</summary>
     internal const string HashAbgeschnittenHinweis =
         "AutoScout-Inserat: die Hash-ID ist in AutoPointer abgeschnitten („…“) – ohne die ganze Kennung gibt es keinen AutoScout-Link. Detailbereich in AutoPointer breiter ziehen, bis die Hash-ID ganz zu sehen ist – dann klappt es von selbst. Für dieses Auto: in AutoPointer „Seite öffnen“, im Browser die Adresse kopieren (Strg+L, dann Strg+C) und hier noch einmal „Vertrag“ drücken.";

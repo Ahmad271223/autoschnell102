@@ -58,6 +58,11 @@ internal sealed class Fahrzeug
     /// Unter 2 ist die Tabelle gar nicht zu sehen (Bilder gross geoeffnet, schwarzer Bereich) — dann kein Lesebild und
     /// ein eigener Hinweis. null = nicht gezaehlt (Tests, andere Lesewege).</summary>
     public int? TabellenFelder { get; set; }
+    /// <summary>1.5.20 (Serverpruefung 24.11.2026, Lesebilder Honda Jazz / Dacia Dokker): wie viele der OBEREN Zeilen der
+    /// Technik-Tabelle zu sehen waren (Marke/Modell, Preis, Zustand, Kategorie, Erstzulassung, Kilometerstand; beide
+    /// Durchlaeufe, das Maximum). 0 bei mindestens 2 Tabellenzeilen heisst: die Tabelle ist in AutoPointer nach unten
+    /// geschoben (nur Farbe, Tueren, Hubraum … zu sehen) — eigener Hinweis, kein Lesebild. null = nicht gezaehlt.</summary>
+    public int? ObenFelder { get; set; }
     /// <summary>1.5.18: Marke/Modell kam aus dem Titel, weil die Zeile „Marke, Modell“ nicht zu sehen war.</summary>
     public bool MarkeModellAusTitel { get; set; }
     /// <summary>1.5.18: die Hash-ID (AutoScout) steht in AutoPointer abgeschnitten da („9e26ebe6-44e7-4e12-97a5-a…“ oder am

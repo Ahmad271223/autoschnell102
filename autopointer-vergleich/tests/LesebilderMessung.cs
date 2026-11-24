@@ -55,6 +55,9 @@ public class LesebilderMessung
                 ["nutzlast"] = AutoSchnellDienst.Nutzlast(f),
                 ["fehlt"] = DetailLeser.Fehlend(f),
                 ["unvollstaendig"] = DetailLeser.Unvollstaendig(f),
+                // 1.5.20: Tabellenzeilen gesamt / davon obere — "geschoben" = Hinweis "nach oben schieben", kein Lesebild
+                ["tabelle"] = $"{f.TabellenFelder}/{f.ObenFelder}",
+                ["geschoben"] = DetailLeser.TabelleNachUntenGeschoben(f),
                 ["inserat_id_lesungen"] = f.InseratIdLesungen,
                 ["hash_lesungen"] = f.HashIdLesungen,
                 ["zeilenabstand"] = lesung.Zeilenabstand,
