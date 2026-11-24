@@ -1421,8 +1421,10 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
     # ---------- 2 · Zusätzliche Vereinbarung (Wunsch Ahmad 04.11.2026) ----------
     # Freitext "Sonstige Vereinbarung" aus dem Dialog (z. B. "8-fach bereift, Winterräder auf Felgen") — nur wenn
     # etwas drinsteht; die Besonderen Vereinbarungen (Text aus den Einstellungen) bleiben weiter unten
+    # 24.11.2026: dazu der Satz zur "Zulassung bei Übergabe" (vertrag_zulassung; unbekannt = kein Satz)
+    from vertrag_zulassung import zusaetzliche_vereinbarung_text
     story.extend(_abschnitt_mit_text(
-        TITEL_ZUSAETZLICH, _absaetze((contract.get("sonstige_vereinbarung") or "").strip(), st["body"]), st, 2))
+        TITEL_ZUSAETZLICH, _absaetze(zusaetzliche_vereinbarung_text(contract), st["body"]), st, 2))
 
     # ---------- Features ----------
     feats = _ausstattung_liste(vehicle.get("features"))   # P-15

@@ -43,6 +43,7 @@ import cleanup_service as _cleanup
 from lifecycle import try_set_lifecycle
 from pdf_service import DIGITAL_NACHTRAEGLICH, generate_contract_pdf, digitaler_vertragstext
 from rate_limiter import SlidingWindowRateLimiter
+from vertrag_storno import falls_storniert  # 24.11.2026: STORNIERT-Zeichen beim Ausliefern
 
 router = APIRouter()
 
@@ -328,8 +329,10 @@ class ContractIn(BaseModel):
         if v is None:
             return v
         s = str(v).strip().lower()
+        if s == "unbekannt":      # Wunsch Ahmad 24.11.2026: "Zulassung bei Übergabe" unbekannt = leer
+            s = ""
         if s not in ("", "angemeldet", "abgemeldet"):
-            raise ValueError("Zulassung muss 'angemeldet' oder 'abgemeldet' sein")
+            raise ValueError("Zulassung muss 'angemeldet', 'abgemeldet' oder 'unbekannt' sein")
         return s
 
     @field_validator("schluessel_anzahl")
@@ -2345,6 +2348,7 @@ async def get_contract_pdf(contract_id: str, user=Depends(current_firma),
         pdf_bytes = await _druck_pdf_bytes(c)
         if not pdf_bytes:
             raise HTTPException(503, DRUCK_FEHLER_HINWEIS)
+    pdf_bytes = await falls_storniert(contract_id, pdf_bytes)   # 24.11.2026: nur beim Ausliefern
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
@@ -2472,6 +2476,7 @@ async def public_vertrag_pdf(token: str, request: Request):
     if not await db.generated_pdfs.count_documents(
             {"id": c["id"], "loeschung.status": {"$ne": "laeuft"}}, limit=1):
         raise HTTPException(404, "Link ungültig oder Vertrag nicht mehr vorhanden")
+    pdf_bytes = await falls_storniert(c["id"], pdf_bytes)       # 24.11.2026: STORNIERT-Zeichen
     await _abruf_zaehlen(c["id"], token, aktuell=(c.get("freigabe") or {}).get("token") == token)
     # Anonymer Abruf: KEINEM Konto zurechenbar (weder Ersteller noch
     # Empfaenger) — der Audit-Eintrag sagt genau das.
@@ -2548,6 +2553,7 @@ async def get_contract_version_pdf(contract_id: str, version: int,
             raise HTTPException(503, DIGITAL_FEHLER_HINWEIS)
     else:
         pdf_bytes = base64.b64decode(v["pdf_b64"])
+    pdf_bytes = await falls_storniert(contract_id, pdf_bytes)   # 24.11.2026: auch archivierte Fassungen
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
@@ -3172,6 +3178,7 @@ async def send_contract(contract_id: str, body: SendIn, user=Depends(require_act
                 await _reservierung_zurueck()
                 raise HTTPException(503, DIGITAL_FEHLER_HINWEIS
                                     + " Der Vertrag wurde NICHT versendet.")
+            pdf_bytes = await falls_storniert(c["id"], pdf_bytes)   # 24.11.2026: Mailanhang mit Zeichen
             # Pruefbericht 20.09.2026 (P-11): Altvertraege tragen einen
             # unbereinigten Dateinamen — im Mailanhang genauso saeubern wie
             # bei der Anlage und im Download.

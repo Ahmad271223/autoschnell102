@@ -64,8 +64,9 @@ const TIRE_OPTIONS = [
 ];
 
 // Runde 22 (11.09.2026): Zulassungsstatus wie auf Ahmads Vertragsvorlage.
+// Wunsch Ahmad 24.11.2026: "Zulassung bei Übergabe" — leer heißt "unbekannt" (kein Satz im Vertrag).
 const ZULASSUNG_OPTIONS = [
-  { value: "", label: "—" },
+  { value: "", label: "Unbekannt" },
   { value: "angemeldet", label: "Angemeldet" },
   { value: "abgemeldet", label: "Abgemeldet" },
 ];
@@ -1104,13 +1105,21 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                 options={YN_OPTIONS}
                 testid="contract-commercial"
               />
-              <SelectField
-                label="Zulassung"
-                value={form.zulassung}
-                onChange={(v) => set("zulassung", v)}
-                options={ZULASSUNG_OPTIONS}
-                testid="contract-zulassung"
-              />
+              <div>
+                <SelectField
+                  label="Zulassung bei Übergabe"
+                  value={form.zulassung || ""}
+                  onChange={(v) => set("zulassung", v)}
+                  options={ZULASSUNG_OPTIONS}
+                  testid="contract-zulassung"
+                />
+                {!form.zulassung && (
+                  <div className="text-[11px] mt-1 leading-snug" style={{ color: "var(--st-amber)" }}
+                       data-testid="contract-zulassung-hinweis">
+                    Bitte klären, ob das Auto angemeldet ist.
+                  </div>
+                )}
+              </div>
               {/* Entscheidung Ahmad 26.09.2026: Schlüsselanzahl gehört in den Vertrag —
                   der Fahrer gleicht vor Ort dagegen ab (Abholprotokoll, KI). Fehlt sie,
                   nur ein Hinweis, kein Blockieren. */}
