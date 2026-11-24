@@ -1552,6 +1552,8 @@ async def driver_contract_pdf(contract_id: str, driver=Depends(current_driver)):
     pdf_bytes = await _druck_pdf_bytes(doc)
     if not pdf_bytes:
         raise HTTPException(404, "Vertrag nicht gefunden")
+    from vertrag_storno import falls_storniert          # 24.11.2026: STORNIERT-Zeichen beim Ausliefern
+    pdf_bytes = await falls_storniert(contract_id, pdf_bytes)
     return Response(
         content=pdf_bytes, media_type="application/pdf",
         headers={"Content-Disposition": 'inline; filename="Kaufvertrag.pdf"',

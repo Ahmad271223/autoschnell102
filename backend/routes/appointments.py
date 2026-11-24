@@ -2118,6 +2118,9 @@ async def update_appointment(appt_id: str, body: AppointmentIn, user=Depends(cur
         hinweise.append(dbh)
     if hinweise:
         out["hinweis"] = " ".join(hinweise)
+    # Ueberweisung (24.11.2026): abgeholt/Preis vor Ort -> Betrag fest -> Meldung (wirft nie)
+    from ueberweisung import meldungen_pruefen_sicher
+    await meldungen_pruefen_sicher(appt_id, user["dealer_id"])
     return out
 
 

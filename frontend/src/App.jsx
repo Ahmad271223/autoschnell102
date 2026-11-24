@@ -241,7 +241,10 @@ const Team = seite(() => import("@/pages/app/Team"));
 const Einstellungen = seite(() => import("@/pages/app/Einstellungen"));
 // Kundenportal (29.09.2026): Meldungen "Kaufvertrag bestätigt" und die öffentliche Firmenseite
 const Meldungen = seite(() => import("@/pages/app/Meldungen"));
+// Wunsch Ahmad 24.11.2026: "Was ist neu" fuer Chef und Sucher
+const Neuigkeiten = seite(() => import("@/pages/app/Neuigkeiten"));
 const FirmenSeite = seite(() => import("@/pages/firma/FirmenSeite"));
+const AbaenderungUnterschreiben = seite(() => import("@/pages/firma/AbaenderungUnterschreiben")); // 24.11.2026
 const Anfragen = seite(() => import("@/pages/app/Anfragen"));
 const Freigaben = seite(() => import("@/pages/app/Freigaben"));
 const Chancen = seite(() => import("@/pages/app/Chancen"));
@@ -375,6 +378,7 @@ export default function App() {
             <Route path="/agb" element={<AGB />} />
             {/* Kundenportal (29.09.2026): Firmenseite auch über den Pfad (Vorschau, lokal ohne Unterdomains) */}
             <Route path="/firma/:slug" element={<FirmenSeite />} />
+            <Route path="/abaenderung" element={<AbaenderungUnterschreiben />} />
 
             <Route path="/abo" element={<ProtectedRoute requireSub={false}><Subscription /></ProtectedRoute>} />
 
@@ -400,6 +404,7 @@ export default function App() {
             <Route path="/app/fahrer" element={<WrapFree><Fahrer /></WrapFree>} />
             {/* Kundenportal (29.09.2026): Bestätigungen "Kaufvertrag digital unterschrieben" */}
             <Route path="/app/meldungen" element={<WrapFree><Meldungen /></WrapFree>} />
+            <Route path="/app/neuigkeiten" element={<WrapFree><Neuigkeiten /></WrapFree>} />
             <Route path="/app/team" element={<WrapFree><Team /></WrapFree>} />
             <Route path="/app/einstellungen" element={<WrapFree><Einstellungen /></WrapFree>} />
             <Route path="/app/programme" element={<WrapFree><Programme /></WrapFree>} />

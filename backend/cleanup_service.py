@@ -599,6 +599,11 @@ async def _cleanup_once(db, wache=None) -> dict:
             lambda: vertragsloeschungen_wiederaufnehmen(db, now))
     await s("contracts_deleted", lambda: vertraege_nach_frist_loeschen(db, now, stats=stats))
     await s("termine_ohne_vertrag_bereinigt", lambda: termine_ohne_vertrag_bereinigen(db, now))
+    # Ueberweisung (24.11.2026): Kontodaten nach VERTRAG_AUFBEWAHRUNG_TAGE und ohne Termin
+    await s("ueberweisungen_frist", lambda: _ueberweisungen_frist(db, now))
+    # 24.11.2026: Chat Buero/Fahrer folgt Termin und Frist (auftrag_chat.chat_nach_frist_loeschen)
+    await s("auftrag_chat_bereinigt",
+            lambda: __import__("auftrag_chat").chat_nach_frist_loeschen(db, now))
     await s("protokoll_orte_nachgezogen", lambda: protokoll_orte_nachziehen(db))
     # Pruefung 14.09.2026: liegengebliebene Nacharbeit (C4), gescheiterte
     # Freigabe-Ruecknahmen (C19), Termine ohne aktuelle Protokollversion
@@ -888,6 +893,11 @@ async def _hinweis_bei_storno_entfernen(db, appt: dict, protokoll_id: Optional[s
                                     frisch.get("dealer_id") or appt.get("dealer_id", ""),
                                     appt["contract_id"], protokoll_id=protokoll_id)
     return True
+
+
+async def _ueberweisungen_frist(db, now: datetime) -> int:
+    from ueberweisung import ueberweisungen_nach_frist_loeschen
+    return await ueberweisungen_nach_frist_loeschen(db, now, VERTRAG_AUFBEWAHRUNG_TAGE)
 
 
 async def _protokolle_pii_entfernen(db, termin_ids: list, dealer_id,
@@ -1448,6 +1458,8 @@ async def _portal_unterschriften_entfernen(db, contract_id: str, dealer_id: Opti
         await loeschen_oder_vormerken(db, key=key, grund="vertrag_geloescht_portal_unterschrift",
                                       dealer_id=dealer_id or "", ref={"contract_id": contract_id})
     await db.meldungen.delete_many({"ref": contract_id})
+    # Abaenderungsvertraege (24.11.2026) mit Unterschrift des Verkaeufers gehen mit dem Vertrag
+    await db.vertrag_abaenderungen.delete_many({"contract_id": contract_id})
     return len(keys)
 
 
@@ -1541,6 +1553,11 @@ async def vertrag_endgueltig_loeschen(db, contract_id: str, *, scrub_pii: bool,
         await _protokolle_pii_entfernen(db, termin_ids, dealer_id, jetzt,
                                         contract_id=contract_id)
         await berichte_pii_entfernen(db, termin_ids, jetzt)
+        # Ueberweisung (24.11.2026): IBAN + Kontoinhaber gehen mit dem Vertrag
+        from ueberweisung import ueberweisungen_entfernen
+        await ueberweisungen_entfernen(db, termin_ids, contract_id)
+        # 24.11.2026: Chat Buero/Fahrer der Termine geht mit (Nachrichten + Fotos)
+        await __import__("auftrag_chat").chat_loeschen(db, termin_ids, "vertrag_geloescht")
         # Termin: Verweis kappen UND die dort kopierten Verkaeuferdaten
         # (Name, Telefon, E-Mail, Abholanschrift) entfernen — sie blieben
         # sonst nach der Vertragsloeschung erhalten (Runde 5).
@@ -2670,6 +2687,8 @@ async def termine_ohne_vertrag_bereinigen(db, now: datetime, frist_tage: int = 0
         jetzt = now.isoformat()
         try:
             await _protokolle_pii_entfernen(db, [a["id"]], a.get("dealer_id", ""), jetzt)
+            from ueberweisung import ueberweisungen_entfernen
+            await ueberweisungen_entfernen(db, [a["id"]])
         except Exception as exc:                        # noqa: BLE001
             # Nachpruefung Runde 10: NICHT als bereinigt markieren — sonst
             # blieben die Protokoll-Dateien fuer immer liegen. Naechster Lauf.

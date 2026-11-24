@@ -58,6 +58,7 @@ from routes import appointments as appointments_routes
 from routes import auth as auth_routes
 from routes import bestand as bestand_routes
 from routes import kundenportal as kundenportal_routes
+from routes import abaenderungen as abaenderungen_routes  # Abaenderungsvertrag (24.11.2026)
 from routes import contracts as contracts_routes
 from routes import dealer as dealer_routes
 from routes import drivers as drivers_routes
@@ -70,7 +71,11 @@ from routes import resale as resale_routes
 from routes import team as team_routes
 from routes import marketplace as marketplace_routes
 from routes import beweise as beweise_routes
+from routes import chat as chat_routes
 from routes import werkzeuge as werkzeuge_routes
+from routes import abweichungen as abweichungen_routes  # Wunsch Ahmad 24.11.2026
+from routes import neuigkeiten as neuigkeiten_routes  # Wunsch Ahmad 24.11.2026
+from routes import ueberweisung as ueberweisung_routes  # Wunsch Ahmad 24.11.2026
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -1613,6 +1618,9 @@ async def ensure_indexes():
     await _unique_index_sicher(db.driver_accounts, "driver_code")
     await unique_anlegen(db.dealer_drivers, [("dealer_id", 1), ("driver_account_id", 1)])
     await db.dealer_drivers.create_index("driver_account_id")
+    # Ueberweisung mit GiroCode (24.11.2026): ein Eintrag je Termin
+    from ueberweisung import indizes_anlegen as _ueberweisung_indizes
+    await _ueberweisung_indizes(db)
     # Single-Flight-Lease braucht Eindeutigkeit pro cache_key
     # Audit 13.09.2026 (#36): Cache-Dubletten werden automatisch
     # zusammengelegt; scheitert es trotzdem, Betriebsalarm statt Warnung.
@@ -1644,6 +1652,9 @@ async def ensure_indexes():
     # Werkzeuge (03.10.2026): ein PC je Konto, Vergleichsprotokoll je Firma
     from indizes import werkzeug_indizes
     await werkzeug_indizes(db)
+    # Chat Buero <-> Fahrer je Abholtermin (24.11.2026)
+    from indizes import chat_indizes
+    await chat_indizes(db)
     try:
         from kontenanlage import konten_ohne_nummer
         ohne = await konten_ohne_nummer(db)
@@ -2229,6 +2240,7 @@ api.include_router(dealer_routes.router)
 api.include_router(contracts_routes.router)
 # Firmenseite + Kundenportal (29.09.2026): oeffentliche Firmenseite, Code-Freigabe, Unterschrift, Meldungen
 api.include_router(kundenportal_routes.router)
+api.include_router(abaenderungen_routes.router)
 api.include_router(appointments_routes.router)
 api.include_router(drivers_routes.router)
 api.include_router(listings_routes.router)
@@ -2241,7 +2253,11 @@ api.include_router(resale_routes.router, dependencies=[Depends(marktplatz_freige
 api.include_router(team_routes.router)
 api.include_router(marketplace_routes.router, dependencies=[Depends(marktplatz_freigeschaltet)])
 api.include_router(beweise_routes.router)
+api.include_router(chat_routes.router)
 api.include_router(protocols_routes.router)
+api.include_router(abweichungen_routes.router)
+api.include_router(neuigkeiten_routes.router)
+api.include_router(ueberweisung_routes.router)
 
 app.include_router(api)
 

@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Bell, CheckCheck, FileSignature } from "lucide-react";
+import { Bell, CheckCheck, FileSignature, MessageCircle } from "lucide-react";
 import { toast } from "sonner";
 import { api, errMsg } from "@/lib/api";
+import AuftragChat from "@/components/AuftragChat";
 
 /**
  * Meldungen (Kundenportal, 29.09.2026): "Kaufvertrag bestätigt" — der Kunde hat über die
@@ -13,6 +14,8 @@ export default function Meldungen() {
   const nav = useNavigate();
   const [liste, setListe] = useState(null);
   const [fehler, setFehler] = useState("");
+  // Chat Büro/Fahrer (24.11.2026): Meldung "Fahrer hat geschrieben" öffnet den Chat direkt hier
+  const [chatOffen, setChatOffen] = useState(null);
   const laden = useCallback(async () => {
     try {
       const { data } = await api.get("/meldungen", { params: { limit: 100 } });
@@ -46,7 +49,7 @@ export default function Meldungen() {
         <div>
           <h1 className="font-display font-black text-2xl tracking-tight">Meldungen</h1>
           <p className="text-sm text-zinc-500 mt-1">
-            Bestätigungen aus dem Kundenportal — sobald ein Kunde einen Kaufvertrag auf eurer Firmenseite unterschrieben hat.
+            Bestätigungen aus dem Kundenportal, Hinweise zur Überweisung des Kaufpreises und neue Nachrichten von Fahrern.
           </p>
         </div>
         {ungelesen > 0 && (
@@ -67,11 +70,11 @@ export default function Meldungen() {
       <div className="space-y-2">
         {(liste || []).map((m) => (
           <div key={m.id} data-testid={`meldung-${m.id}`}
-               className="apple-surface p-4 flex items-start gap-3"
+               className="apple-surface p-4 flex flex-wrap items-start gap-3"
                style={{ borderLeft: m.gelesen ? "3px solid transparent" : "3px solid var(--accent-red)" }}>
             <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0"
                  style={{ background: "rgba(48,209,88,0.14)", color: "var(--st-gruen, #30d158)" }}>
-              <FileSignature size={17} />
+              {m.typ === "chat_fahrer" ? <MessageCircle size={17} /> : <FileSignature size={17} />}
             </div>
             <div className="min-w-0 flex-1">
               <div className="text-[14px] leading-snug">{m.text}</div>
@@ -81,7 +84,24 @@ export default function Meldungen() {
               </div>
             </div>
             <div className="flex items-center gap-2 shrink-0">
-              {m.ref && (
+              {m.termin_id && String(m.typ || "").startsWith("ueberweisung") && (
+                <button onClick={() => { gelesen(m); nav(`/app/termine?termin=${encodeURIComponent(m.termin_id)}`); }}
+                        className="text-[12px] font-semibold px-3 py-1.5 rounded-full"
+                        style={{ background: "var(--apple-btn-secondary-bg)", color: "var(--text-primary)" }}
+                        data-testid={`meldung-abholung-${m.id}`}>
+                  Abholung öffnen
+                </button>
+              )}
+              {m.ref && m.typ === "chat_fahrer" && (
+                <button onClick={() => { gelesen(m); setChatOffen(chatOffen === m.id ? null : m.id); }}
+                        className="text-[12px] font-semibold px-3 py-1.5 rounded-full"
+                        style={{ background: "var(--apple-btn-secondary-bg)", color: "var(--text-primary)" }}
+                        data-testid={`meldung-chat-${m.id}`}>
+                  {chatOffen === m.id ? "Chat schließen" : "Chat öffnen"}
+                </button>
+              )}
+              {m.ref && m.typ !== "chat_fahrer"
+                && !(m.termin_id && String(m.typ || "").startsWith("ueberweisung")) && (
                 <button onClick={() => { gelesen(m); nav("/app/vertraege"); }}
                         className="text-[12px] font-semibold px-3 py-1.5 rounded-full"
                         style={{ background: "var(--apple-btn-secondary-bg)", color: "var(--text-primary)" }}
@@ -97,6 +117,9 @@ export default function Meldungen() {
                 </button>
               )}
             </div>
+            {chatOffen === m.id && m.ref && (
+              <div className="basis-full"><AuftragChat rolle="buero" terminId={m.ref} startOffen /></div>
+            )}
           </div>
         ))}
       </div>

@@ -10,17 +10,25 @@ import {
 import { protokollBefundHinweis, termineOffenDetail, termineStornoFrage } from "@/lib/akteHinweise";
 import { toast } from "sonner";
 import AbholFoto from "@/components/AbholFoto";
+import UeberweisungKarte from "@/components/UeberweisungKarte";
 import SchadenFotos from "@/components/SchadenFotos";
 import BeweisCard from "@/components/BeweisCard";
+import AuftragChat from "@/components/AuftragChat";
 import { fotosBis } from "@/components/AbholberichtDialog";
 import StatusSchild from "@/components/StatusSchild";
 import {
   aktionText, beschreibungLesbar, datumDE, inseratText, kaufvorgangText, lesbar, lifecycleText,
 } from "@/lib/fahrzeugStatus";
 import {
-  ArrowLeft, AlertTriangle, Clock, Tag, Archive, Trash2, FileText, PenLine,
+  ArrowLeft, AlertTriangle, Clock, Tag, Archive, Trash2, FileText, PenLine, MoreHorizontal, CalendarDays,
 } from "lucide-react";
 import { openContractPdf } from "@/lib/pdf";
+import {
+  AkteReiterLeiste, ReiterContext, REITER_STANDARD, useAkteReiter, useReiterSichtbar,
+} from "./akte/AkteReiter";
+import AkteUebersicht from "./akte/AkteUebersicht";
+import AkteStickyZeile from "./akte/AkteStickyZeile";
+import { einkaufAus, eur as eurKurz, erstesFoto } from "./akte/akteDaten";
 
 /**
  * Durchgehende Fahrzeugakte: Beschaffung · Kauf · Abholung (mit Abweichungs-
@@ -47,9 +55,16 @@ const fmtKm = (n) => {
 // Seitenfunktion. Bei jedem Render entstand ein neuer Komponententyp, React
 // baute den ganzen Block samt <input> neu auf — im Bestandsformular sprang
 // der Fokus nach jedem Zeichen heraus. Auf Modulebene bleibt der Typ stabil.
-function Section({ title, children, warn }) {
+//
+// Wunsch Ahmad 24.11.2026: `reiter` ordnet den Abschnitt einem Reiter zu
+// (uebersicht | vertrag | abholung | notizen | dokumente, siehe
+// akte/AkteReiter.jsx). Ohne Angabe steht er unter "Übersicht". Neue Karten
+// (Überweisung, Chat, Abänderungsverträge …) einfach als eigene <Section>
+// mit passendem reiter einhängen.
+function Section({ title, children, warn, reiter = REITER_STANDARD, testid }) {
+  const sichtbar = useReiterSichtbar(reiter);
   return (
-    <div className="tactical-card p-4 mt-4 min-w-0">
+    <div className="tactical-card p-4 mt-4 min-w-0" hidden={!sichtbar} data-reiter={reiter} data-testid={testid}>
       <div className="flex items-center gap-2 mb-3">
         <div className="w-1 h-4 rounded" style={{ background: "var(--accent-red)" }} />
         <div className="text-sm font-bold uppercase tracking-wide">{title}</div>
@@ -130,6 +145,23 @@ export default function FahrzeugAkte() {
   // beim Wechsel Akte A→B (Zurück/Vor) überschrieb sonst die langsamere
   // Antwort von A die schon angezeigte Akte B (wie anfrageNr in Bestand.jsx).
   const anfrageNr = useRef(0);
+  // Wunsch Ahmad 24.11.2026: Reiter (im URL-Hash gemerkt), schmale Zeile oben
+  const [reiter, reiterWechseln] = useAkteReiter();
+  const kopfRef = useRef(null);
+  const seiteRef = useRef(null);
+  const mehrRef = useRef(null);
+  // "Mehr"-Menü schließt bei Klick daneben, Escape und Reiterwechsel
+  useEffect(() => {
+    const zu = () => { if (mehrRef.current) mehrRef.current.open = false; };
+    const klick = (e) => { if (mehrRef.current && !mehrRef.current.contains(e.target)) zu(); };
+    const taste = (e) => { if (e.key === "Escape") zu(); };
+    document.addEventListener("mousedown", klick);
+    document.addEventListener("keydown", taste);
+    return () => {
+      document.removeEventListener("mousedown", klick);
+      document.removeEventListener("keydown", taste);
+    };
+  }, []);
   const load = useCallback(async ({ offeneVerwerfen = false } = {}) => {
     const nr = ++anfrageNr.current;
     try {
@@ -313,63 +345,88 @@ export default function FahrzeugAkte() {
     } finally { setBusy(false); }
   };
 
+  // Wunsch Ahmad 24.11.2026: Kopfleiste mit Foto, Preis und den wichtigen
+  // Knöpfen; Seltenes im „Mehr“-Menü (details: ohne Zustand, per Tastatur
+  // bedienbar). Keine Funktion entfernt — nur umgeordnet.
+  const foto = erstesFoto(d);
+  const einkauf = einkaufAus(akte);
+  const neuesterVertrag = (akte.contracts || [])[0];
+  const vertragOeffnen = (c) => openContractPdf(c.id)
+    .catch((e) => toast.error(errMsg(e, "Kaufvertrag konnte nicht geladen werden")));
+  const zaehler = {
+    vertrag: akte.contracts_gesamt || 0,
+    dokumente: akte.protocols_gesamt || 0,
+  };
+  const mehrKnopf = "w-full text-left rounded-lg px-3 py-2 text-sm inline-flex items-center gap-2 hover:bg-white/[0.06] disabled:opacity-50";
+
   return (
-    <div className="p-3 sm:p-6 lg:p-10 max-w-5xl mx-auto" data-testid="akte-page">
+    <div ref={seiteRef} className="p-3 sm:p-6 lg:p-10 max-w-6xl mx-auto" data-testid="akte-page">
+      <AkteStickyZeile kopfRef={kopfRef} seiteRef={seiteRef} foto={foto}
+                       titel={`${d.make_label || ""} ${d.model_label || ""}`.trim() || "Fahrzeug"}
+                       preis={eurKurz(einkauf.preis)} status={v.lifecycle} statusText={lifecycleText(v.lifecycle)} />
       <Link to={zurueck.pfad} className="inline-flex items-center gap-1.5 text-xs text-zinc-400 hover:text-white">
         <ArrowLeft size={14} /> {zurueck.text}
       </Link>
-      {/* 11.09.2026 (Befund Ahmad "zu eng da oben"): Modellbeschreibung in
-          eigener Zeile, Status/Bearbeiter/Frist als eine Zeile, Knoepfe rechts
-          (auf dem Handy darunter) und Abstand zum Beweisdokument. */}
-      <header className="mt-3 mb-6 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between"
+      {/* 11.09.2026 (Befund Ahmad "zu eng da oben") / 24.11.2026 (Wunsch Ahmad):
+          Foto, Modell, Status und Preis links, Knöpfe rechts (auf dem Handy darunter). */}
+      <header ref={kopfRef} className="mt-3 tactical-card p-3 sm:p-4 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between"
               data-testid="akte-kopf">
-        <div className="min-w-0 flex-1">
-          <div className="overline">Fahrzeugakte · {v.source === "manuell" ? "manuell angelegt" : "über System beschafft"}</div>
-          <h1 className="font-display font-black text-2xl lg:text-3xl tracking-tighter mt-2 break-words">
-            {d.make_label} {d.model_label}
-          </h1>
-          {d.model_description && (
-            <p className="mt-1 text-sm break-words" style={{ color: "var(--text-secondary)" }}
-               data-testid="akte-beschreibung">
-              {beschreibungLesbar(d.model_description)}
-            </p>
+        <div className="min-w-0 flex-1 flex gap-3 sm:gap-4">
+          {foto ? (
+            <img src={foto} alt="" data-testid="akte-foto"
+                 className="w-24 h-20 sm:w-36 sm:h-28 rounded-xl object-cover shrink-0" />
+          ) : (
+            <div className="w-24 h-20 sm:w-36 sm:h-28 rounded-xl shrink-0 flex items-center justify-center text-[11px]"
+                 style={{ background: "var(--wa-06)", color: "var(--text-muted)" }} data-testid="akte-foto-leer">
+              kein Foto
+            </div>
           )}
-          <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-2.5 text-xs text-zinc-500">
-            <span className="inline-flex items-center gap-2">
-              Status
-              <StatusSchild status={v.lifecycle} text={lifecycleText(v.lifecycle)} data-testid="akte-status" />
-            </span>
-            {/* Wunsch Ahmad 21.09.2026 (R1-01): "man soll nie an dem sein
-                abgeschlossenen Vertrag oder sonstwas wegnehmen" — das
-                Auswahlfeld zum Umhaengen ist entfallen. Der Chef sieht den
-                Bearbeiter nur noch als Text. */}
-            {!sucher && (
-              <span className="inline-flex flex-wrap items-center gap-2" data-testid="akte-besitzer">
-                Bearbeiter
-                <span style={{ color: "var(--text-primary)" }}>
-                  {akte.owner
-                    ? `${akte.owner.name}${akte.owner.hauptaccount ? " (Hauptaccount)" : ""}`
-                    : "— nicht zugeordnet —"}
+          <div className="min-w-0 flex-1">
+            <div className="overline">Fahrzeugakte · {v.source === "manuell" ? "manuell angelegt" : "über System beschafft"}</div>
+            <h1 className="font-display font-black text-xl sm:text-2xl lg:text-3xl tracking-tighter mt-1 break-words">
+              {d.make_label} {d.model_label}
+            </h1>
+            {d.model_description && (
+              <p className="mt-0.5 text-sm break-words line-clamp-2" style={{ color: "var(--text-secondary)" }}
+                 data-testid="akte-beschreibung">
+                {beschreibungLesbar(d.model_description)}
+              </p>
+            )}
+            <div className="mt-2 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-zinc-500">
+              <span className="inline-flex items-center gap-2">
+                Status
+                <StatusSchild status={v.lifecycle} text={lifecycleText(v.lifecycle)} data-testid="akte-status" />
+              </span>
+              <span className="inline-flex items-center gap-1.5" data-testid="akte-kopf-preis">
+                Einkauf
+                <span className="text-base font-bold" style={{ color: "var(--text-primary)" }}>{eurKurz(einkauf.preis) || "—"}</span>
+              </span>
+              {/* Wunsch Ahmad 21.09.2026 (R1-01): "man soll nie an dem sein
+                  abgeschlossenen Vertrag oder sonstwas wegnehmen" — das
+                  Auswahlfeld zum Umhaengen ist entfallen. Der Chef sieht den
+                  Bearbeiter nur noch als Text. */}
+              {!sucher && (
+                <span className="inline-flex flex-wrap items-center gap-2" data-testid="akte-besitzer">
+                  Bearbeiter
+                  <span style={{ color: "var(--text-primary)" }}>
+                    {akte.owner
+                      ? `${akte.owner.name}${akte.owner.hauptaccount ? " (Hauptaccount)" : ""}`
+                      : "— nicht zugeordnet —"}
+                  </span>
+                  {akte.mitbearbeiter?.length > 0 && (
+                    <span data-testid="akte-mitbearbeiter">mit {akte.mitbearbeiter.map((m) => m.name).join(", ")}</span>
+                  )}
                 </span>
-                {akte.mitbearbeiter?.length > 0 && (
-                  <span data-testid="akte-mitbearbeiter">mit {akte.mitbearbeiter.map((m) => m.name).join(", ")}</span>
-                )}
-              </span>
-            )}
-            {akte.retention_days_left != null && (
-              <span className={`inline-flex items-center gap-1 ${akte.retention_days_left <= 10 ? "text-amber-400" : ""}`}>
-                <Clock size={12} /> noch {akte.retention_days_left} Tage im Bestand
-              </span>
-            )}
+              )}
+              {akte.retention_days_left != null && (
+                <span className={`inline-flex items-center gap-1 ${akte.retention_days_left <= 10 ? "text-amber-400" : ""}`}>
+                  <Clock size={12} /> noch {akte.retention_days_left} Tage im Bestand
+                </span>
+              )}
+            </div>
           </div>
         </div>
-        <div className="flex flex-wrap gap-2 lg:justify-end lg:shrink-0 lg:max-w-[50%]">
-          {sucher && (
-            <button onClick={entfernen} disabled={busy} data-testid="akte-sucher-entfernen"
-                    className="rounded-lg px-3 py-2 text-xs text-zinc-500 hover:text-red-400 inline-flex items-center gap-1.5 disabled:opacity-50">
-              <Trash2 size={13} /> Aus meiner Liste entfernen
-            </button>
-          )}
+        <div className="flex flex-wrap items-start gap-2 lg:justify-end lg:shrink-0 lg:max-w-[48%]" data-testid="akte-knoepfe">
           {!sucher && v.lifecycle === "abgeholt" && (
             <>
               {/* Rollenprüfung 22.09.2026 (RP-045/RP-144): nur mit
@@ -382,9 +439,6 @@ export default function FahrzeugAkte() {
               )}
               <button onClick={() => decide("bestand")} disabled={busy} className="rounded-lg px-3 py-2 text-xs border inline-flex items-center gap-1.5 disabled:opacity-50" style={{ borderColor: "var(--border-default)" }}>
                 <Archive size={13} /> Nur speichern
-              </button>
-              <button onClick={() => decide("loeschen")} disabled={busy} className="rounded-lg px-3 py-2 text-xs text-zinc-500 hover:text-red-400 inline-flex items-center gap-1.5 disabled:opacity-50">
-                <Trash2 size={13} /> Löschen
               </button>
             </>
           )}
@@ -434,12 +488,54 @@ export default function FahrzeugAkte() {
               {listing.status === "veroeffentlicht" ? "Inserat öffnen (live · vom Marktplatz nehmen / löschen)" : `Inserat öffnen (${inseratText(listing.status)})`}
             </Link>
           )}
+          {neuesterVertrag?.id && (
+            <button type="button" onClick={() => vertragOeffnen(neuesterVertrag)} data-testid="akte-kopf-vertrag"
+                    className="rounded-lg px-3 py-2 text-xs border inline-flex items-center gap-1.5" style={{ borderColor: "var(--border-default)" }}>
+              <FileText size={13} /> Kaufvertrag (PDF)
+            </button>
+          )}
+          <details className="relative" data-testid="akte-mehr" ref={mehrRef}>
+            <summary className="list-none cursor-pointer rounded-lg px-3 py-2 text-xs border inline-flex items-center gap-1.5 select-none"
+                     style={{ borderColor: "var(--border-default)" }} aria-label="Weitere Aktionen">
+              <MoreHorizontal size={14} /> Mehr
+            </summary>
+            <div className="absolute right-0 z-30 mt-1 w-64 rounded-xl p-1.5 shadow-xl"
+                 style={{ background: "var(--bg-elevated)", border: "1px solid var(--wa-10)" }}>
+              <Link to="/app/vertraege" className={mehrKnopf} data-testid="akte-mehr-vertraege">
+                <FileText size={14} /> Verträge bearbeiten / senden
+              </Link>
+              <Link to="/app/termine" className={mehrKnopf} data-testid="akte-mehr-termine">
+                <CalendarDays size={14} /> Abholtermine
+              </Link>
+              {!sucher && v.lifecycle === "abgeholt" && (
+                <button onClick={() => decide("loeschen")} disabled={busy} data-testid="akte-loeschen"
+                        className={`${mehrKnopf} hover:text-red-400`} style={{ color: "var(--text-secondary)" }}>
+                  <Trash2 size={14} /> Löschen
+                </button>
+              )}
+              {sucher && (
+                <button onClick={entfernen} disabled={busy} data-testid="akte-sucher-entfernen"
+                        className={`${mehrKnopf} hover:text-red-400`} style={{ color: "var(--text-secondary)" }}>
+                  <Trash2 size={14} /> Aus meiner Liste entfernen
+                </button>
+              )}
+            </div>
+          </details>
         </div>
       </header>
 
+      <AkteReiterLeiste aktiv={reiter} onWechsel={reiterWechseln} zaehler={zaehler} />
+
+      {/* Ab hier: Abschnitte je Reiter (Section reiter="…"; ohne Angabe = Übersicht). */}
+      <ReiterContext.Provider value={reiter}>
+      <div hidden={reiter !== "uebersicht"}>
+        <AkteUebersicht akte={akte} sucher={sucher} marktplatz={features.marktplatz}
+                        befundOffen={befundOffen} onReiter={reiterWechseln} />
+      </div>
+
       {/* Beweisdokument zum Inserat (ersetzt die Snapshots, 10.09.2026) */}
       {v.id && v.source !== "manuell" && (
-        <div className="mb-4" data-testid="akte-beweis">
+        <div className="mt-4" data-testid="akte-beweis" hidden={reiter !== "dokumente"}>
           <BeweisCard vehicleId={v.id} />
         </div>
       )}
@@ -447,7 +543,7 @@ export default function FahrzeugAkte() {
       {/* Abholung + Diff */}
       {report && (
         <Section
-          title="Abholung"
+          title="Abholung" reiter="abholung"
           warn={deviations.length > 0 && (
             <span className="ml-auto inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md" style={{ background: "#f59e0b1c", color: "var(--tx-amber)" }}>
               <AlertTriangle size={12} /> {deviations.length} Abweichung(en)
@@ -534,7 +630,7 @@ export default function FahrzeugAkte() {
           UNTERSCHRIEBENEN Abholprotokoll — auch ohne Abhol-Check. Vorher kamen
           sie nie ins Fahrzeug (nur ins Inserat, und auch das erst seit heute). */}
       {befundOffen && (
-        <Section title={protokollBefundHinweis({ km: befundKmNeu ? befund.km : null, schaeden: befundNeueSchaeden.length })}
+        <Section reiter="uebersicht" title={protokollBefundHinweis({ km: befundKmNeu ? befund.km : null, schaeden: befundNeueSchaeden.length })}
                  warn={<span className="text-[11px] font-normal normal-case text-amber-400">Nach der Unterschrift</span>}>
           <div className="text-xs text-zinc-400 mb-2">
             Im unterschriebenen Abholprotokoll steht etwas, das noch nicht in den Fahrzeugdaten ist:
@@ -560,7 +656,7 @@ export default function FahrzeugAkte() {
       {/* grid-cols-1 = minmax(0,1fr): ein langer Name darf die Spalte auf dem
           Handy nicht breiter als den Bildschirm machen (Pruefbefund 11.09.2026). */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <Section title="Fahrzeugdaten">
+        <Section title="Fahrzeugdaten" reiter="uebersicht">
           <KV k="Erstzulassung" val={d.first_registration} />
           <KV k="Kilometerstand" val={fmtKm(d.mileage)} />
           <KV k="Kraftstoff" val={d.fuel_label || d.fuel} />
@@ -582,7 +678,7 @@ export default function FahrzeugAkte() {
             eigenem Sucher, Preis, Status und Termin. Chef sieht alle,
             Sucher nur eigene. */}
         {(akte.kaufvorgaenge || []).length > 0 && (
-          <Section title="Kaufvorgänge">
+          <Section title="Kaufvorgänge" reiter="vertrag">
             {akte.kaufvorgaenge.map((k) => (
               <div key={k.id} className="py-2 border-b last:border-b-0 text-sm"
                    style={{ borderColor: "var(--wa-04)" }} data-testid={`kaufvorgang-${k.id}`}>
@@ -607,7 +703,7 @@ export default function FahrzeugAkte() {
             )}
           </Section>
         )}
-        <Section title="Beschaffung & Kauf">
+        <Section title="Beschaffung & Kauf" reiter="vertrag">
           {v.purchase_price != null
             ? <KV k="Einkaufspreis (realisiert)" val={fmtEur(v.purchase_price)} />
             : akte.einkaufspreis?.preis != null
@@ -665,7 +761,7 @@ export default function FahrzeugAkte() {
         {/* Unterschriebene Abhol-Protokolle vom Fahrer (mit Unterschrift des
             Kunden/Verkäufers) — als Unterlage zum Auto, für Chef + Sucher. */}
         {(akte.protocols || []).length > 0 && (
-          <Section title="Unterlagen · Abhol-Protokoll">
+          <Section title="Unterlagen · Abhol-Protokoll" reiter="dokumente">
             {akte.protocols.map((p) => (
               <div key={p.id}>
               <button type="button"
@@ -706,7 +802,7 @@ export default function FahrzeugAkte() {
       {/* Bestand */}
       {/* Runde 19: Standort, Kosten und Notizen bearbeitet nur der Chef (Backend chef-only) */}
       {!sucher && bestandForm && ["bestand", "verkaufsentwurf", "verkaufsbereit", "abgeholt", "reserviert"].includes(v.lifecycle) && (
-        <Section title="Bestand · Standort & Kosten">
+        <Section title="Bestand · Standort & Kosten" reiter="notizen">
           <div className="grid sm:grid-cols-2 gap-3">
             <div>
               <label className="text-[11px] text-zinc-500">Standort</label>
@@ -756,7 +852,7 @@ export default function FahrzeugAkte() {
       )}
 
       {/* Historie */}
-      <Section title="Historie">
+      <Section title="Historie" reiter="notizen">
         <div className="space-y-1 max-h-64 overflow-y-auto">
           {(akte.history || []).map((h) => (
             <div key={h.id} className="flex justify-between gap-4 text-xs py-1 border-b" style={{ borderColor: "var(--wa-04)" }}>
@@ -775,6 +871,38 @@ export default function FahrzeugAkte() {
           </div>
         )}
       </Section>
+
+      {/* Abholung: noch nichts da — der Reiter sagt es statt leer zu bleiben */}
+      {!report && !(akte.appointments || []).length && (
+        <Section title="Abholung" reiter="abholung">
+          <div className="text-sm" style={{ color: "var(--text-secondary)" }}>
+            Noch kein Abholtermin und kein Abholbericht. Termine legst du unter{" "}
+            <Link to="/app/termine" className="underline">Termine</Link> an.
+          </div>
+        </Section>
+      )}
+      {(akte.appointments || []).length > 0 && (
+        <Section title="Abholtermine" reiter="abholung" testid="akte-termine">
+          {akte.appointments.map((a) => (
+            <KV key={a.id} k={`${datumDE(a.pickup_date)}${a.pickup_time ? ` · ${a.pickup_time} Uhr` : ""}`}
+                val={`${lesbar(a.status || "offen")}${a.driver_name ? ` · Fahrer: ${a.driver_name}` : ""}`} />
+          ))}
+        </Section>
+      )}
+      {(akte.appointments || []).length > 0 && (
+        <Section title="Überweisung" reiter="abholung" testid="akte-ueberweisung">
+          <UeberweisungKarte terminId={akte.appointments[0].id} kompakt />
+        </Section>
+      )}
+      {/* Chat Büro/Fahrer (24.11.2026) zu Terminen mit Fahrer — der Verlauf gehört zum Auftrag */}
+      {(akte.appointments || []).some((a) => a.driver_id) && (
+        <Section title="Chat mit dem Fahrer" reiter="abholung" testid="akte-chat">
+          {akte.appointments.filter((a) => a.driver_id).slice(0, 3).map((a) => (
+            <div key={`chat-${a.id}`} className="mt-2"><AuftragChat rolle="buero" terminId={a.id} /></div>
+          ))}
+        </Section>
+      )}
+      </ReiterContext.Provider>
     </div>
   );
 }

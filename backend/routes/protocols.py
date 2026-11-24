@@ -27,6 +27,8 @@ from pymongo.errors import DuplicateKeyError
 import betrieb
 import protokoll_vergleich as PV
 import schadenfotos as SF
+import ueberweisung as _ueberweisung  # Ueberweisung mit GiroCode (24.11.2026)
+from abaenderung import lack_befund  # Nachlackierung aus der Lackdicke (24.11.2026)
 from ai import pickup_assessment as KI
 from deps import (besitzer_namen, current_chef, db, ist_sucher,
                   log_activity, log_activity_sicher, now_iso, termin_bereich,
@@ -1259,6 +1261,9 @@ async def protokoll_korrekturen(appt: dict, protokoll: dict) -> tuple:
                               protokoll.get("condition"),
                               PV.vertragswerte(vehicle, contract))
         korrekturen = PV.vertrags_korrekturen(zeilen)
+        # Wunsch Ahmad 24.11.2026: auffaellige Lackdicke = nicht nachlackierungsfrei (Schwelle in abaenderung.py)
+        from abaenderung import lack_korrektur
+        korrekturen.update(lack_korrektur(protokoll.get("lackmessungen")))
         schaeden = [d for d in (protokoll.get("new_damages") or []) if d]
         return korrekturen, schaeden
     except Exception:  # noqa: BLE001
@@ -1693,7 +1698,12 @@ async def get_protocol(appt_id: str, driver=Depends(current_driver)):
     vehicle_voll, contract = await _fahrzeug_und_vertrag(appt)
     # Review 26.09.2026 (Nr. 128): an die App geht nur die Whitelist.
     vehicle = fahrzeug_fuer_fahrer(vehicle_voll)
+    # Wunsch Ahmad 24.11.2026: dieselben festen Nummern wie im Buero (Entwurf: nur rechnen)
+    from routes.abweichungen import nummeriert as _abw_nummeriert
+    abw = await _abw_nummeriert(appt, doc, vehicle_voll, contract,
+                                sichern=bool(doc) and doc.get("status") != "entwurf")
     return {
+        "abweichungen_nummeriert": abw,
         # Gegenpruefung 12.09.2026: Infinity/NaN aus Altdaten nicht ans JSON geben.
         "protocol": PV.json_sicher(SF.ohne_keys(doc)),
         "template": {
@@ -1731,6 +1741,8 @@ async def get_protocol(appt_id: str, driver=Depends(current_driver)):
         # Rollenprüfung 22.09.2026 (RP-480): der Preis VOR der Abholung —
         # derselbe wie in Freigabe und Protokoll-PDF.
         "preis_vertrag": vertragspreis_vor_abholung(contract),
+        # Ueberweisung (24.11.2026): Kontodaten-Stand fuer die Fahrer-App (wirft nie)
+        "ueberweisung": await _ueberweisung.fahrer_sicht_sicher(appt),
         "appointment": {k: appt.get(k) for k in
                         ("id", "title", "pickup_date", "pickup_time",
                          "pickup_address", "seller_name", "status")},
@@ -2231,6 +2243,9 @@ async def submit_protocol(appt_id: str, driver=Depends(current_driver)):
     # Wunsch Ahmad 25.09.2026: KI-Abholbewertung im Hintergrund — die
     # Uebergabe an den Chef haengt NICHT davon ab (feuer-und-vergiss).
     KI.bewertung_anstossen(doc["id"], appt.get("dealer_id", ""))
+    # Wunsch Ahmad 24.11.2026: feste Nummern der Abweichungen + Zahl am Termin
+    from routes.abweichungen import nach_aenderung as _abw_nachziehen
+    await _abw_nachziehen(appt_id)
     return {"ok": True, "status": ZUR_FREIGABE, "protocol_id": doc["id"]}
 
 
@@ -2683,7 +2698,9 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
     filled = {k: doc.get(k) for k in
               ("vehicle_check", "documents", "keys_count", "keys_expected",
                "features", "condition", "damages_confirmed", "new_damages",
-               "notes", "lackmessungen")}
+               "notes", "lackmessungen",
+               # Wunsch Ahmad 24.11.2026: feste Nummern der Abweichungen auch im PDF
+               "abweichung_nummern")}
     # Pruefung 14.09.2026 (P2): Was der Chef freigegeben hat, gilt — Ort und
     # Verkaeufername aus dem Protokoll; die App-Werte nur, wenn dort nichts steht.
     filled["place"] = doc.get("place") or body.place or ""
@@ -3147,6 +3164,7 @@ async def protokolle_zur_freigabe(user=Depends(_chef_dep), response: Response = 
     paare, abgeschnitten = await _wartende_protokolle(user)
     if abgeschnitten and response is not None:
         response.headers["X-Truncated"] = "1"
+    from routes.abweichungen import nummeriert as _abw_nummeriert
     fz_ids = sorted({d.get("vehicle_id") or a.get("vehicle_id") for d, a in paare} - {None, ""})
     fahrzeuge: Dict[str, dict] = {}
     if fz_ids:
@@ -3194,10 +3212,14 @@ async def protokolle_zur_freigabe(user=Depends(_chef_dep), response: Response = 
                 "kilometerstand": (d.get("condition") or {}).get("mileage") or "",
                 "kilometerstand_text": PV.km_text(km) if km is not None else "",
                 "abweichungen": PV.abweichungen(zeilen),
+                # Wunsch Ahmad 24.11.2026: feste Nummern (routes/abweichungen.py)
+                "abweichungen_nummeriert": await _abw_nummeriert(appt, d, fahrzeug, vertrag),
                 "vergleich": zeilen,
                 "neue_schaeden": d.get("new_damages") or [],
                 # Wunsch Ahmad 06.10.2026: Lackdicke-Messungen und Schadenfotos (7 Tage sichtbar)
                 "lackmessungen": d.get("lackmessungen") or [],
+                # Wunsch Ahmad 24.11.2026: auffaellige Lackdicke = Nachlackierung (Abweichung zum Vertrag)
+                "nachlackierung": lack_befund(d.get("lackmessungen"), vertrag),
                 "schaden_fotos": SF.fuer_anzeige(d),
                 "schaeden_bestaetigt": d.get("damages_confirmed"),
                 "bemerkungen": d.get("notes") or "",
@@ -3591,6 +3613,9 @@ async def protokoll_freigeben(protocol_id: str, body: FreigabeIn,
     await KI.lernfall_speichern(protocol_id, user["dealer_id"],
                                 chef_preis=setzen.get("neuer_preis", doc.get("neuer_preis")),
                                 quelle=setzen.get("preis_quelle") or doc.get("preis_quelle") or "vertrag")
+    # Ueberweisung (24.11.2026): Betrag steht jetzt fest -> Meldung (einmal, wirft nie)
+    from ueberweisung import meldungen_pruefen_sicher
+    await meldungen_pruefen_sicher(doc.get("appointment_id"), user["dealer_id"])
     return {"ok": True, "status": FREIGEGEBEN,
             "neuer_preis": setzen.get("neuer_preis", doc.get("neuer_preis")),
             "stand": jetzt}

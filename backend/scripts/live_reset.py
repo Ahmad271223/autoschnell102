@@ -69,6 +69,8 @@ GANZ_LEEREN = (
     "vehicles", "kaufvorgaenge", "generated_pdfs", "generated_pdf_versions",
     # Termine, Protokolle, Berichte
     "appointments", "pickup_protocols", "pickup_reports",
+    # Kontodaten fuer die Ueberweisung (24.11.2026)
+    "ueberweisungen",
     # Inserate, Vergleiche, Beweise
     "resale_listings", "vehicle_comparisons", "listing_snapshots",
     "inserat_beweise", "link_jobs",

@@ -7,6 +7,9 @@ import { useUngespeichert } from "@/lib/ungespeichert";
 import { toast } from "sonner";
 import KiBewertungKarte from "@/components/KiBewertungKarte";
 import SchadenFotos from "@/components/SchadenFotos";
+import AbweichungenListe from "@/components/AbweichungenListe";
+import UeberweisungKarte from "@/components/UeberweisungKarte";
+import NachlackierungHinweis from "@/components/NachlackierungHinweis"; // 24.11.2026
 import RueckfrageDialog from "@/components/RueckfrageDialog";
 import DiktatKnopf from "@/components/DiktatKnopf";
 import { rueckfrageBezug, schadenBezeichnung } from "@/lib/kiSchaden";
@@ -385,6 +388,10 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
         ))}
       </div>
 
+      {/* Wunsch Ahmad 24.11.2026: feste Nummern — dieselben sieht der Fahrer */}
+      {!e.ladefehler && e.abweichungen_nummeriert?.anzahl > 0 && (
+        <div className="mt-3"><AbweichungenListe daten={e.abweichungen_nummeriert} testId={`freigabe-abweichungen-${e.protocol_id}`} /></div>
+      )}
       {!e.ladefehler && <div className="mt-3"><Vergleich eintrag={e} /></div>}
       {!e.ladefehler && <VorOrt eintrag={e} />}
 
@@ -433,6 +440,7 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
         </div>
       )}
 
+      <NachlackierungHinweis befund={e.nachlackierung} testid={`freigabe-nachlackierung-${e.protocol_id}`} />
       {/* Wunsch Ahmad 06.10.2026: Lackdicke-Messungen des Fahrers (kein Schaden) mit Fotos */}
       {(e.lackmessungen || []).length > 0 && (
         <div className="mt-3 rounded-lg p-2.5" style={{ border: "1px solid var(--border-default)" }}
@@ -453,6 +461,11 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
         <div className="mt-2 text-[12px] text-zinc-400">
           <span className="text-zinc-500">Bemerkung des Fahrers:</span> {e.bemerkungen}
         </div>
+      )}
+
+      {/* Wunsch Ahmad 24.11.2026: nach der Freigabe steht der Betrag fest — hier überweisen */}
+      {freigegeben && e.appointment_id && (
+        <div className="mt-3"><UeberweisungKarte terminId={e.appointment_id} /></div>
       )}
 
       {/* Wunsch Ahmad 25.09.2026: KI-Einschätzung der Abweichungen — nur

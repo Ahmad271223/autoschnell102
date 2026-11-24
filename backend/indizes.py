@@ -1323,6 +1323,42 @@ WERKZEUG_INDIZES = (
 )
 
 
+# Chat Buero <-> Fahrer je Abholtermin (Wunsch Ahmad 24.11.2026, auftrag_chat.py / routes/chat.py)
+CHAT_INDIZES = (
+    ("auftrag_chat", [("id", 1)], {"name": "auftrag_chat_id", "unique": True}),
+    # Verlauf je Termin (neueste zuerst gelesen) und Obergrenze je Termin
+    ("auftrag_chat", [("appointment_id", 1), ("erstellt_am", -1)], {"name": "auftrag_chat_termin"}),
+    # Zaehler: Buero je Firma, Fahrer je Fahrer (nur ungelesene der Gegenseite)
+    ("auftrag_chat", [("dealer_id", 1), ("von", 1), ("gelesen_am", 1)], {"name": "auftrag_chat_buero_offen"}),
+    ("auftrag_chat", [("fahrer_id", 1), ("von", 1), ("gelesen_am", 1)], {"name": "auftrag_chat_fahrer_offen"}),
+    # Frist-Loeschung (aelter als CHAT_AUFBEWAHRUNG_TAGE)
+    ("auftrag_chat", [("erstellt_am", 1)], {"name": "auftrag_chat_zeit"}),
+    # eine Meldung je Gespraech und Stunde: atomarer Anspruch braucht den Unique-Index
+    ("auftrag_chat_status", [("appointment_id", 1)], {"name": "auftrag_chat_status_termin", "unique": True}),
+    ("auftrag_chat_status", [("dealer_id", 1)], {"name": "auftrag_chat_status_firma"}),
+)
+
+
+async def chat_indizes(db) -> dict:
+    """Indizes des Auftrags-Chats. Scheitert einer, bricht der Start NICHT ab (Warnung + Betriebsalarm
+    index_fehlt) — ohne den Unique-Index auf auftrag_chat_status koennten bei gleichzeitigen Nachrichten
+    zwei Meldungen entstehen, mehr nicht."""
+    from betrieb import alarm, alarm_schliessen
+    stand = {}
+    for sammlung, schluessel, optionen in CHAT_INDIZES:
+        ref = f"{sammlung}.{optionen['name']}"
+        try:
+            await db[sammlung].create_index(schluessel, **optionen)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ensure_indexes: Index %s nicht angelegt: %s", ref, exc)
+            await alarm(db, "index_fehlt", ref=ref, fehler=str(exc)[:300])
+            stand[ref] = False
+        else:
+            await alarm_schliessen(db, "index_fehlt", ref=ref)
+            stand[ref] = True
+    return stand
+
+
 async def werkzeug_indizes(db) -> dict:
     """Indizes der Werkzeug-Sammlungen. Scheitert einer (z.B. Dubletten vor dem
     Unique-Index), bricht der Start NICHT ab: Warnung + Betriebsalarm index_fehlt

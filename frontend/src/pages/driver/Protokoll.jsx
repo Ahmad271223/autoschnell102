@@ -15,8 +15,11 @@ import {
 import SignaturePad from "@/components/SignaturePad";
 import DiktatKnopf from "@/components/DiktatKnopf";
 import { zahlText } from "@/lib/diktatRegeln";
+import AuftragChat from "@/components/AuftragChat";
 import DamageSelector from "@/components/DamageSelector";
 import KiFahrerKarte from "@/components/KiFahrerKarte";
+import AbweichungenListe from "@/components/AbweichungenListe";
+import UeberweisungFahrer from "@/components/UeberweisungFahrer";
 import { alleVollstaendig, rueckfrageBezug, schwereOffen } from "@/lib/kiSchaden";
 import {
   LEERER_ENTWURF, entwurfAusServer, entwurfZusammenfuehren, istAnnahmeFehlt, istRevisionsKonflikt,
@@ -827,6 +830,9 @@ export default function Protokoll() {
         </button>
       </div>
 
+      {/* Chat Büro/Fahrer (24.11.2026) — zugeklappt mit Zähler */}
+      <div className="mt-3"><AuftragChat rolle="fahrer" terminId={id} /></div>
+
       {/* Runde 30: Wo steht das Protokoll gerade? */}
       {wartetAufFreigabe && (
         <div className="mt-4 rounded-xl border px-4 py-3 text-sm flex items-start gap-2"
@@ -865,6 +871,10 @@ export default function Protokoll() {
       {(wartetAufFreigabe || freigegeben || wirdAbgeschlossen || isFinal) && (
         <KiFahrerKarte apptId={id} preisVertrag={data?.preis_vertrag}
                        preisVorschlag={data?.protocol?.preis_vorschlag ?? null} />
+      )}
+      {/* Wunsch Ahmad 24.11.2026: dieselben festen Nummern wie im Büro („Nr. 3“ am Telefon) */}
+      {(wartetAufFreigabe || freigegeben || wirdAbgeschlossen || isFinal) && data?.abweichungen_nummeriert?.anzahl > 0 && (
+        <div className="mt-4"><AbweichungenListe daten={data.abweichungen_nummeriert} testId="protokoll-abweichungen" /></div>
       )}
       {wirdAbgeschlossen && (
         <div className="mt-4 rounded-xl border px-4 py-3 text-sm flex items-start gap-2"
@@ -1319,6 +1329,8 @@ export default function Protokoll() {
             Vermerk des Händlers: {data.protocol.preis_notiz}
           </div>
         )}
+        {/* Wunsch Ahmad 24.11.2026: Kontodaten des Verkäufers für die Überweisung */}
+        <UeberweisungFahrer terminId={id} start={data?.ueberweisung ?? null} />
         {/* Wunsch Ahmad 14.09.2026: Preis und Sondervereinbarung auch vom Fahrer vor Ort.
             Der Händler sieht beides bei der Freigabe; gibt er ohne eigenen Preis frei,
             gilt der hier eingetragene. */}

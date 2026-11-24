@@ -5,7 +5,7 @@ import DiktatKnopf from "@/components/DiktatKnopf";
 import {
   Calendar as CalIcon, FileText, Edit3, X, ChevronLeft, ChevronRight,
   Plus, MapPin, Phone, User as UserIcon, Trash2, Clock, Printer,
-  ClipboardCheck, Download, Camera,
+  ClipboardCheck, Download, Camera, AlertTriangle,
 } from "lucide-react";
 import {
   openContractPdf, printContractPdf,
@@ -14,7 +14,10 @@ import {
 import BeweisCard from "@/components/BeweisCard";
 import PhotoGallery from "@/components/PhotoGallery";
 import AbholberichtDialog from "@/components/AbholberichtDialog";
-import { Link } from "react-router-dom";
+import AbweichungenDialog from "@/components/AbweichungenDialog";
+import { Link, useSearchParams } from "react-router-dom";
+import UeberweisungKarte from "@/components/UeberweisungKarte";
+import AuftragChat, { ChatNeu } from "@/components/AuftragChat";
 import { useAuth } from "@/context/AuthContext";
 import { useFreigabeZaehler } from "@/lib/freigaben";
 import { preisAusText } from "@/lib/preis";
@@ -345,6 +348,15 @@ export default function Termine() {
   const [filter, setFilter] = useState("");
   const [editing, setEditing] = useState(null);       // appt being edited
   const [creating, setCreating] = useState(false);
+  // Ueberweisung (24.11.2026): Meldung "jetzt ueberweisen" oeffnet den Termin direkt
+  const [suchParameter] = useSearchParams();
+  const terminAusLink = suchParameter.get("termin");
+  useEffect(() => {
+    if (!terminAusLink) return;
+    api.get(`/appointments/${encodeURIComponent(terminAusLink)}`)
+      .then((r) => { if (r?.data?.id) setEditing(r.data); })
+      .catch((e) => toast.error(errMsg(e, "Termin konnte nicht geöffnet werden")));
+  }, [terminAusLink]);
 
   // Runde 16 (15.09.2026): Kuerzung (X-Truncated ab 2.000) und Ladefehler
   // sichtbar machen — vorher sah beides wie "keine Termine" aus.
@@ -789,6 +801,7 @@ function DayApptItem({ a, onEdit, compact, mitBeweis = false }) {
   const meta = STATUS_META[a.status] || STATUS_META.offen;
   // Runde 21: Abholbericht samt Fahrerfotos direkt am Termin (auch fuer Sucher).
   const [bericht, setBericht] = useState(false);
+  const [abweichungen, setAbweichungen] = useState(false);   // Wunsch Ahmad 24.11.2026
   const v = a.vehicle?.data;
   const date = safeParse(a.pickup_date);
   return (
@@ -827,6 +840,7 @@ function DayApptItem({ a, onEdit, compact, mitBeweis = false }) {
           <span className={`text-[10px] uppercase tracking-wider font-bold px-1.5 py-0.5 rounded-md ${meta.chipClass} ${meta.text}`}>
             {a.status}
           </span>
+          {a.driver_id && <ChatNeu rolle="buero" terminId={a.id} />}
           {a.driver?.name && (
             <span className="inline-flex items-center gap-1 text-[11px] text-zinc-400" data-testid={`fahrer-${a.id}`}>
               <UserIcon size={10} /> {a.driver.name}
@@ -860,6 +874,15 @@ function DayApptItem({ a, onEdit, compact, mitBeweis = false }) {
               {a.deviations_count ? ` · ${a.deviations_count} Abweichung${a.deviations_count === 1 ? "" : "en"}` : ""}
             </button>
           )}
+          {/* Wunsch Ahmad 24.11.2026: Zahl der Abweichungen im Protokoll — ein Klick zeigt die nummerierte Liste */}
+          {a.protokoll_abweichungen > 0 && (
+            <button type="button" data-testid={`abweichungen-${a.id}`}
+                    onClick={(e) => { e.stopPropagation(); setAbweichungen(true); }}
+                    className="inline-flex items-center gap-1 text-[11px] hover:underline min-h-[36px] px-1 -mx-1"
+                    style={{ color: "var(--st-amber)" }}>
+              <AlertTriangle size={10} /> {a.protokoll_abweichungen} Abweichung{a.protokoll_abweichungen === 1 ? "" : "en"}
+            </button>
+          )}
           {a.contract_id && (
             <span className="inline-flex items-center gap-1 text-[11px]" style={{ color: "var(--st-gruen)" }}>
               <FileText size={10} /> PDF
@@ -873,6 +896,7 @@ function DayApptItem({ a, onEdit, compact, mitBeweis = false }) {
         )}
       </div>
       {bericht && <AbholberichtDialog appt={a} onClose={() => setBericht(false)} />}
+      {abweichungen && <AbweichungenDialog appt={a} onClose={() => setAbweichungen(false)} />}
     </div>
   );
 }
@@ -1367,6 +1391,11 @@ function EditDialog({ appt, drivers, fahrerGeladen = true, chef = false, isNew, 
               </div>
             </div>
           )}
+
+          {/* Wunsch Ahmad 24.11.2026: Kaufpreis direkt aus dem Abholauftrag ueberweisen */}
+          {a.id && !isNew && <UeberweisungKarte terminId={a.id} />}
+          {/* Chat Büro/Fahrer (24.11.2026) — nur am gespeicherten Termin */}
+          {!isNew && appt?.id && <AuftragChat rolle="buero" terminId={appt.id} />}
 
           {a.vehicle_id && (
             <div className="mt-4">

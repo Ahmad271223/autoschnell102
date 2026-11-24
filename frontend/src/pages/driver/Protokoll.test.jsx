@@ -23,6 +23,7 @@ vi.mock("react-router-dom", () => ({ useParams: () => ({ id: "t1" }), useNavigat
 vi.mock("@/lib/ungespeichert", () => ({ useUngespeichert: () => {} }));
 vi.mock("@/components/DamageSelector", () => ({ default: () => null }));
 vi.mock("@/components/MonatJahrEingabe", () => ({ default: () => null }));
+vi.mock("@/components/AuftragChat", () => ({ default: () => null, ChatNeu: () => null }));
 // Unterschriftsfeld: ein Knopf, der eine "Unterschrift" meldet.
 vi.mock("@/components/SignaturePad", async () => {
   const { createElement: h } = await import("react");

@@ -9,8 +9,9 @@
 import logging
 import math
 import uuid
-from datetime import datetime, timedelta, timezone
-from typing import Annotated, Any, Dict, List, Literal, Optional
+from datetime import date, datetime, time, timedelta, timezone
+from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, StringConstraints
@@ -317,6 +318,17 @@ async def vehicle_decision(vehicle_id: str, body: DecisionIn,
     # Bestand (oder in einen neuen Entwurf), solange ein Inserat
     # verkaufsbereit, live oder reserviert ist. Entwurf und "zurueckgezogen"
     # sind nicht sichtbar und blockieren nicht (create_draft nimmt sie wieder).
+    return await _bestand_oder_entwurf(vehicle_id, v, body.decision, user)
+
+
+async def _bestand_oder_entwurf(vehicle_id: str, v: Dict[str, Any], decision: str,
+                                user: Dict[str, Any]) -> Dict[str, Any]:
+    """Entscheidung "bestand" (Nur speichern / Frist erneuern) bzw.
+    "verkaufsentwurf" fuer ein gelesenes Fahrzeug. Eigene Funktion seit dem
+    24.11.2026 (Wunsch Ahmad, Sammeländerung in der Fahrzeugliste): die
+    Sammeländerung "Status ändern auf Im Bestand" geht durch GENAU diesen Weg
+    — gleiche Prüfungen (Inserat live -> 409, erlaubter Übergang), gleiche
+    Frist, gleicher Verlauf je Fahrzeug."""
     live = await db.resale_listings.find_one(
         {"vehicle_id": vehicle_id, "dealer_id": user["dealer_id"],
          "status": {"$in": list(_INSERAT_LIVE)}}, {"_id": 0, "id": 1, "status": 1})
@@ -325,10 +337,10 @@ async def vehicle_decision(vehicle_id: str, body: DecisionIn,
                                  f"{_INSERAT_LIVE_TEXT.get(live.get('status'), 'aktiv')} ist — "
                                  "bitte das Inserat zuerst zurückziehen "
                                  "(Inserat öffnen → „Vom Marktplatz nehmen“).")
-    target = "bestand" if body.decision == "bestand" else "verkaufsentwurf"
+    target = "bestand" if decision == "bestand" else "verkaufsentwurf"
     extra: Dict[str, Any] = {}
     verlaengert = False
-    if body.decision == "bestand":
+    if decision == "bestand":
         expires = (datetime.now(timezone.utc)
                    + timedelta(days=BESTAND_RETENTION_DAYS)).isoformat()
         extra["bestand.expires_at"] = expires
@@ -354,7 +366,7 @@ async def vehicle_decision(vehicle_id: str, body: DecisionIn,
     except LifecycleError as exc:
         raise HTTPException(409, str(exc))
     aktion = ("fahrzeug.bestand.verlaengert" if verlaengert
-              else f"fahrzeug.entscheidung.{body.decision}")
+              else f"fahrzeug.entscheidung.{decision}")
     await log_activity_sicher(user["dealer_id"], user["id"], aktion, ref=vehicle_id,
                               meta={"expires_at": expires} if verlaengert else None)
     return {"ok": True, "lifecycle": target, "expires_at": expires,
@@ -627,12 +639,154 @@ async def bestand_filter(user) -> Dict[str, Any]:
             "lifecycle": {"$nin": ["geloescht"]}}
 
 
-@router.get("/bestand")
-async def list_bestand(user=Depends(current_firma),
-                       lifecycle: Optional[str] = None,
-                       source: Optional[str] = None):
-    """Fahrzeugbestand des Händlers mit Lifecycle-/Quellen-Filter.
-    Liefert zusätzlich Zählergruppen für die Dashboard-Kacheln."""
+# ---------------------------------------------------------------------
+# Wunsch Ahmad 24.11.2026: Fahrzeugliste mit Filter "Gekauft im Zeitraum",
+# Anzahl + "Einkauf gesamt" ueber ALLE Treffer (nicht nur die Seite) und
+# Sammeländerung des Status.
+# ---------------------------------------------------------------------
+ZEITZONE = ZoneInfo("Europe/Berlin")
+ZEITRAEUME = ("heute", "diese_woche", "letzte_woche", "dieser_monat", "letzter_monat",
+              "eigener")
+# Laengster eigener Zeitraum (Tippfehler wie 0202 statt 2026 abfangen).
+ZEITRAUM_MAX_TAGE = 3660
+# Fahrzeuge in diesen Zustaenden zaehlen in "Einkauf gesamt" nicht mit —
+# der Kauf kam nicht zustande.
+_OHNE_EINKAUF = ("storniert", "nicht_abgeholt")
+
+
+def _tag(wert: Optional[str], feld: str) -> Optional[date]:
+    if not wert:
+        return None
+    try:
+        return date.fromisoformat(str(wert)[:10])
+    except ValueError:
+        raise HTTPException(422, f"{feld}: bitte ein Datum wie 2026-11-24 angeben")
+
+
+def zeitraum_grenzen(zeitraum: Optional[str], von: Optional[str] = None,
+                     bis: Optional[str] = None, *,
+                     jetzt: Optional[datetime] = None
+                     ) -> Optional[Tuple[Optional[datetime], Optional[datetime]]]:
+    """Grenzen [Anfang, Ende) in UTC fuer "Gekauft im Zeitraum".
+
+    Gerechnet wird in Europe/Berlin (Tageswechsel um Mitternacht deutscher
+    Zeit, Sommer-/Winterzeit eingeschlossen), die Woche beginnt am Montag.
+    "eigener": von/bis als Kalendertage, beide einschliesslich; einer darf
+    fehlen (offen). None = kein Zeitraum-Filter."""
+    if not zeitraum:
+        return None
+    if zeitraum not in ZEITRAEUME:
+        raise HTTPException(422, "Unbekannter Zeitraum")
+    heute = (jetzt or datetime.now(timezone.utc)).astimezone(ZEITZONE).date()
+    anfang: Optional[date]
+    ende: Optional[date]
+    if zeitraum == "heute":
+        anfang, ende = heute, heute + timedelta(days=1)
+    elif zeitraum in ("diese_woche", "letzte_woche"):
+        anfang = heute - timedelta(days=heute.weekday())
+        if zeitraum == "letzte_woche":
+            anfang -= timedelta(days=7)
+        ende = anfang + timedelta(days=7)
+    elif zeitraum == "dieser_monat":
+        anfang = heute.replace(day=1)
+        ende = (anfang + timedelta(days=32)).replace(day=1)
+    elif zeitraum == "letzter_monat":
+        ende = heute.replace(day=1)
+        anfang = (ende - timedelta(days=1)).replace(day=1)
+    else:
+        anfang, bis_tag = _tag(von, "Von"), _tag(bis, "Bis")
+        if anfang is None and bis_tag is None:
+            raise HTTPException(422, "Eigener Zeitraum: bitte „von“ oder „bis“ angeben")
+        if anfang and bis_tag and bis_tag < anfang:
+            raise HTTPException(422, "Eigener Zeitraum: „bis“ liegt vor „von“")
+        if anfang and bis_tag and (bis_tag - anfang).days > ZEITRAUM_MAX_TAGE:
+            raise HTTPException(422, "Eigener Zeitraum: höchstens 10 Jahre")
+        ende = bis_tag + timedelta(days=1) if bis_tag else None
+
+    def _utc(t: Optional[date]) -> Optional[datetime]:
+        if t is None:
+            return None
+        return datetime.combine(t, time(0), tzinfo=ZEITZONE).astimezone(timezone.utc)
+
+    return _utc(anfang), _utc(ende)
+
+
+def einkaufspreis_sichtbar(user) -> bool:
+    """Wer bekommt Kaufpreise (und damit "Einkauf gesamt")? Entscheidung
+    Ahmad 13.09.2026: Chef UND Sucher — Sucher nur die eigenen (die Summe
+    rechnet fuer Sucher deshalb nur ueber eigene Kaufvorgaenge). Jede andere
+    Rolle bekommt den Betrag gar nicht erst."""
+    return (user or {}).get("role") in ("dealer", "sucher")
+
+
+def _anreicherung(user) -> List[Dict[str, Any]]:
+    """Aggregations-Stufen: Kaufdatum (gekauft_am) und Kaufpreis (_preis) je
+    Fahrzeug — im Bereich des Kontos (Sucher: nur eigene Vorgaenge/Vertraege).
+
+    gekauft_am = aeltester nicht stornierter Kaufvorgang; ohne Vorgang der
+    aelteste Vertrag; ohne beides (von Hand angelegt, Altbestand) das
+    Anlagedatum bzw. die Aufnahme in den Bestand.
+    Kaufpreis Chef: realisierter Preis am Fahrzeug, sonst der Preis des
+    juengsten Vorgangs. Sucher: Preis seines abgeholten Vorgangs, sonst
+    seines juengsten (wie kaufvorgang.einkauf_fuer_sucher_maskieren —
+    nie der Preis eines Kollegen oder ein vom Chef eingetragener)."""
+    sucher = ist_sucher(user)
+    gleich = {"$expr": {"$and": [{"$eq": ["$vehicle_id", "$$vid"]},
+                                 {"$eq": ["$dealer_id", "$$did"]}]}}
+    kv_match: Dict[str, Any] = {**gleich, "status": {"$ne": "storniert"}}
+    vt_match: Dict[str, Any] = {**gleich, "loeschung.status": {"$ne": "laeuft"}}
+    if sucher:
+        kv_match["user_id"] = user["id"]
+        vt_match["user_id"] = user["id"]
+    kv_preis = {"$arrayElemAt": [{"$filter": {"input": "$_kv.purchase_price",
+                                              "cond": {"$ne": ["$$this", None]}}}, 0]}
+    if sucher:
+        eigener_abgeholt = {"$arrayElemAt": [{"$map": {
+            "input": {"$filter": {"input": "$_kv",
+                                  "cond": {"$eq": ["$$this.id", "$abgeholt_kaufvorgang_id"]}}},
+            "in": "$$this.purchase_price"}}, 0]}
+        preis: Any = {"$ifNull": [eigener_abgeholt, kv_preis]}
+    else:
+        preis = {"$ifNull": ["$purchase_price", kv_preis]}
+    ersatz = {"$cond": [{"$eq": ["$source", "manuell"]},
+                        {"$ifNull": ["$created_at", "$bestand.saved_at"]},
+                        {"$ifNull": ["$bestand.saved_at",
+                                     {"$ifNull": ["$created_at", "$lifecycle_changed_at"]}]}]}
+    return [
+        {"$lookup": {"from": "kaufvorgaenge", "let": {"vid": "$id", "did": "$dealer_id"},
+                     "pipeline": [{"$match": kv_match}, {"$sort": {"created_at": -1}},
+                                  {"$project": {"_id": 0, "id": 1, "created_at": 1,
+                                                "purchase_price": 1}}],
+                     "as": "_kv"}},
+        {"$lookup": {"from": "generated_pdfs", "let": {"vid": "$id", "did": "$dealer_id"},
+                     "pipeline": [{"$match": vt_match},
+                                  {"$project": {"_id": 0, "created_at": 1}}],
+                     "as": "_vt"}},
+        {"$addFields": {
+            "gekauft_am": {"$ifNull": [{"$min": "$_kv.created_at"},
+                                       {"$ifNull": [{"$min": "$_vt.created_at"}, ersatz]}]},
+            "_preis": preis,
+        }},
+        {"$addFields": {"_gekauft_dt": {"$convert": {"input": "$gekauft_am", "to": "date",
+                                                     "onError": None, "onNull": None}}}},
+    ]
+
+
+def _zeitraum_match(grenzen) -> List[Dict[str, Any]]:
+    if not grenzen:
+        return []
+    anfang, ende = grenzen
+    bed: Dict[str, Any] = {"$ne": None}
+    if anfang is not None:
+        bed["$gte"] = anfang
+    if ende is not None:
+        bed["$lt"] = ende
+    return [{"$match": {"_gekauft_dt": bed}}]
+
+
+async def _bestand_abfrage(user, lifecycle: Optional[str], source: Optional[str]):
+    """(Grundfilter, Filter mit Lifecycle/Quelle) — gemeinsam fuer Liste und
+    "Alle Treffer auswählen"."""
     # Runde 16: Sucher sehen nur eigene Fahrzeuge (owner_user_id).
     # Runde 32: und davon nur die mit Kaufvertrag oder von Hand hinzugefuegte.
     grundfilter = await bestand_filter(user)
@@ -643,20 +797,81 @@ async def list_bestand(user=Depends(current_firma),
         query["lifecycle"] = lifecycle
     if source in ("plattform", "manuell"):
         query["source"] = source
+    return grundfilter, query
+
+
+def _seite_lesen(seite, je_seite) -> Tuple[int, int, bool]:
+    """(skip, limit, geblaettert). Ohne Angaben wie bisher: die neuesten
+    BESTAND_MAX Fahrzeuge (Runde 27)."""
+    if seite is None and je_seite is None:
+        return 0, BESTAND_MAX, False
+    try:
+        s = max(1, int(seite or 1))
+        j = min(BESTAND_MAX, max(1, int(je_seite or 50)))
+    except (TypeError, ValueError):
+        raise HTTPException(422, "Seite und Seitengröße bitte als Zahl angeben")
+    return (s - 1) * j, j, True
+
+
+@router.get("/bestand")
+async def list_bestand(user=Depends(current_firma),
+                       lifecycle: Optional[str] = None,
+                       source: Optional[str] = None,
+                       zeitraum: Optional[str] = None,
+                       von: Optional[str] = None,
+                       bis: Optional[str] = None,
+                       seite: Optional[int] = None,
+                       je_seite: Optional[int] = None):
+    """Fahrzeugbestand des Händlers mit Lifecycle-/Quellen-/Zeitraum-Filter.
+    Liefert zusätzlich Zählergruppen für die Dashboard-Kacheln und eine
+    Zusammenfassung über ALLE Treffer (Anzahl, Einkauf gesamt)."""
+    grundfilter, query = await _bestand_abfrage(user, lifecycle, source)
+    grenzen = zeitraum_grenzen(zeitraum, von, bis)
+    skip, limit, geblaettert = _seite_lesen(seite, je_seite)
+    preis_sichtbar = einkaufspreis_sichtbar(user)
+    zaehlt = {"$not": [{"$in": ["$lifecycle", list(_OHNE_EINKAUF)]}]}
     # Runde 27 (12.09.2026, Pruefbefund): Die Liste endete still bei 500
-    # Fahrzeugen — bei 30 Suchern ist das erreichbar, und aeltere Autos
-    # schienen einfach zu fehlen. Jetzt wird die Gesamtzahl mitgeliefert,
-    # die Oberflaeche sagt es und bietet die Filter an.
-    # .limit() gehoert an den Cursor: sonst sortiert Mongo ALLE Treffer im
-    # Speicher (Gegenpruefung 12.09.2026: bei vielen Fahrzeugen 500er-Fehler
-    # "Sort exceeded memory limit") statt nur die neuesten zu halten.
-    items = await db.vehicles.find(query, {"_id": 0}).sort(
-        "lifecycle_changed_at", -1).limit(BESTAND_MAX).to_list(BESTAND_MAX)
-    gesamt = await db.vehicles.count_documents(query)
+    # Fahrzeugen — die Gesamtzahl wird mitgeliefert. Wunsch Ahmad 24.11.2026:
+    # Anzahl und Summe kommen aus DERSELBEN Aggregation wie die Seite, also
+    # immer ueber alle Treffer. Die Seite liefert nur IDs (Ganzdokumente in
+    # $facet koennten die 16-MB-Grenze einer Antwort sprengen); die Fahrzeuge
+    # werden danach gezielt gelesen.
+    pipeline = [{"$match": query}, *_anreicherung(user), *_zeitraum_match(grenzen),
+                {"$facet": {
+                    "seite": [{"$sort": {"lifecycle_changed_at": -1, "id": 1}},
+                              {"$skip": skip}, {"$limit": limit},
+                              {"$project": {"_id": 0, "id": 1, "gekauft_am": 1}}],
+                    "summe": [{"$group": {
+                        "_id": None, "n": {"$sum": 1},
+                        "eur": {"$sum": {"$cond": [zaehlt, {"$ifNull": ["$_preis", 0]}, 0]}},
+                        "ohne_preis": {"$sum": {"$cond": [
+                            {"$and": [zaehlt, {"$eq": [{"$ifNull": ["$_preis", None]}, None]}]},
+                            1, 0]}},
+                    }}],
+                }}]
+    ergebnis = await db.vehicles.aggregate(pipeline, allowDiskUse=True).to_list(1)
+    facet = ergebnis[0] if ergebnis else {"seite": [], "summe": []}
+    seite_ids = [r["id"] for r in facet.get("seite") or []]
+    kauf_am = {r["id"]: r.get("gekauft_am") for r in facet.get("seite") or []}
+    summe = (facet.get("summe") or [{}])[0] if facet.get("summe") else {}
+    gesamt = int(summe.get("n") or 0)
+
+    docs: Dict[str, Dict[str, Any]] = {}
+    if seite_ids:
+        async for d in db.vehicles.find({"id": {"$in": seite_ids},
+                                         "dealer_id": user["dealer_id"]}, {"_id": 0}):
+            docs[d["id"]] = d
+    items = [docs[i] for i in seite_ids if i in docs]
+    for it in items:
+        it["gekauft_am"] = kauf_am.get(it["id"])
     await besitzer_anreichern(user, items)
     # Runde 23 (11.09.2026, Befund A): Sucher sehen nur den eigenen Einkaufspreis.
     import kaufvorgang as _kv
     await _kv.einkauf_fuer_sucher_maskieren(user, items)
+    if not preis_sichtbar:
+        for it in items:
+            for feld in _kv.EINKAUF_FELDER:
+                it.pop(feld, None)
 
     # Restlaufzeit für Bestandsfahrzeuge berechnen (Warnstufen im Frontend).
     now = datetime.now(timezone.utc)
@@ -669,14 +884,196 @@ async def list_bestand(user=Depends(current_firma),
             except (ValueError, TypeError):
                 pass
 
+    # Die Zaehler der Filterknoepfe folgen dem Zeitraum (sonst passen Knopf
+    # und Liste nicht zusammen), nicht aber Lifecycle/Quelle (wie bisher).
+    zaehl_pipeline: List[Dict[str, Any]] = [{"$match": grundfilter}]
+    if grenzen:
+        zaehl_pipeline += [*_anreicherung(user), *_zeitraum_match(grenzen)]
+    zaehl_pipeline.append({"$group": {"_id": "$lifecycle", "n": {"$sum": 1}}})
     counts: Dict[str, int] = {}
-    async for row in db.vehicles.aggregate([
-        {"$match": grundfilter},
-        {"$group": {"_id": "$lifecycle", "n": {"$sum": 1}}},
-    ]):
+    async for row in db.vehicles.aggregate(zaehl_pipeline, allowDiskUse=True):
         counts[row["_id"] or "unbekannt"] = row["n"]
-    return {"items": items, "counts": counts, "gesamt": gesamt,
-            "gekuerzt": gesamt > len(items)}
+
+    zusammenfassung: Dict[str, Any] = {"anzahl": gesamt}
+    if preis_sichtbar:
+        zusammenfassung["einkauf_gesamt"] = round(float(summe.get("eur") or 0), 2)
+        zusammenfassung["ohne_preis"] = int(summe.get("ohne_preis") or 0)
+    antwort: Dict[str, Any] = {
+        "items": items, "counts": counts, "gesamt": gesamt,
+        "gekuerzt": (not geblaettert) and gesamt > len(items),
+        "zusammenfassung": zusammenfassung,
+    }
+    if geblaettert:
+        antwort.update({"seite": skip // limit + 1, "je_seite": limit})
+    if grenzen:
+        anfang, ende = grenzen
+        antwort["zeitraum"] = {"name": zeitraum,
+                               "von": anfang.isoformat() if anfang else None,
+                               "bis": ende.isoformat() if ende else None}
+    return antwort
+
+
+@router.get("/bestand/ids")
+async def bestand_ids(user=Depends(current_haendler),
+                      lifecycle: Optional[str] = None,
+                      source: Optional[str] = None,
+                      zeitraum: Optional[str] = None,
+                      von: Optional[str] = None,
+                      bis: Optional[str] = None):
+    """Wunsch Ahmad 24.11.2026: "Alle Treffer auswählen" — die IDs ALLER
+    Fahrzeuge unter den aktuellen Filtern (gleiche Regeln wie die Liste),
+    hoechstens SAMMEL_MAX; die Gesamtzahl steht dabei. Nur der Chef (die
+    Sammeländerung ist Chefsache)."""
+    _, query = await _bestand_abfrage(user, lifecycle, source)
+    grenzen = zeitraum_grenzen(zeitraum, von, bis)
+    pipeline: List[Dict[str, Any]] = [{"$match": query}]
+    if grenzen:
+        pipeline += [*_anreicherung(user), *_zeitraum_match(grenzen)]
+    pipeline.append({"$facet": {
+        "ids": [{"$sort": {"lifecycle_changed_at": -1, "id": 1}}, {"$limit": SAMMEL_MAX},
+                {"$project": {"_id": 0, "id": 1}}],
+        "n": [{"$count": "n"}]}})
+    ergebnis = await db.vehicles.aggregate(pipeline, allowDiskUse=True).to_list(1)
+    facet = ergebnis[0] if ergebnis else {}
+    ids = [r["id"] for r in facet.get("ids") or []]
+    gesamt = int(((facet.get("n") or [{}])[0]).get("n") or 0) if facet.get("n") else 0
+    return {"ids": ids, "gesamt": gesamt, "gekuerzt": gesamt > len(ids),
+            "max": SAMMEL_MAX}
+
+
+# ---------------------------------------------------------------------
+# Sammeländerung (Wunsch Ahmad 24.11.2026)
+# ---------------------------------------------------------------------
+SAMMEL_MAX = 500
+#: Ziele der Sammeländerung — nur Zustaende, die der Chef heute schon von
+#: Hand setzt bzw. die lifecycle.ALLOWED_TRANSITIONS als Handschritt kennt.
+#: Bewusst NICHT: gekauft/abgeholt/verkauft usw. — die entstehen nur aus
+#: Vertrag, Termin, Protokoll oder Inserat ("abgeholt nie ohne Protokoll").
+#: "geloescht" bleibt Einzelentscheidung in der Akte (offene Termine fragen nach).
+SAMMEL_ZIELE = ("bestand", "archiviert", "storniert", "verglichen")
+SAMMEL_ZIEL_TEXT = {"bestand": "Im Bestand", "archiviert": "Archiviert",
+                    "storniert": "Storniert", "verglichen": "Wieder aktiv (verglichen)"}
+#: Anzeigenamen der Zustände für Übersprung-Gründe (wie frontend/src/lib/fahrzeugStatus.js).
+ZUSTAND_TEXT = {
+    "gefunden": "Gefunden", "geloescht": "Gelöscht", "verglichen": "Verglichen",
+    "besichtigung": "Besichtigung", "verhandlung": "Verhandlung",
+    "vertrag_erstellt": "Vertrag erstellt", "gekauft": "Gekauft",
+    "abholung_geplant": "Abholung geplant", "abgeholt": "Abgeholt", "bestand": "Im Bestand",
+    "verkaufsentwurf": "Verkaufsentwurf", "verkaufsbereit": "Verkaufsbereit",
+    "veroeffentlicht": "Veröffentlicht", "reserviert": "Reserviert", "verkauft": "Verkauft",
+    "nicht_abgeholt": "Nicht abgeholt", "storniert": "Storniert", "archiviert": "Archiviert",
+}
+
+
+def _zustand(z) -> str:
+    return ZUSTAND_TEXT.get(z or "", z or "ohne Status")
+
+
+class SammelStatusIn(BaseModel):
+    ids: List[Annotated[str, StringConstraints(min_length=1, max_length=120)]] = Field(
+        min_length=1, max_length=SAMMEL_MAX)
+    ziel: Literal["bestand", "archiviert", "storniert", "verglichen"]
+
+
+def _fehlertext(exc: Exception) -> str:
+    detail = getattr(exc, "detail", None)
+    if isinstance(detail, dict):
+        detail = detail.get("msg")
+    return str(detail or exc)[:300] or "Nicht möglich"
+
+
+async def _status_einzeln(vehicle_id: str, ziel: str, user: Dict[str, Any]) -> Dict[str, Any]:
+    """Ein Fahrzeug der Sammeländerung. Prueft Firma (dealer_id), erlaubten
+    Uebergang (lifecycle.ALLOWED_TRANSITIONS, ohne den Rueckweg aus dem
+    Verkauf) und die Sperren der Einzelwege; wirft HTTPException mit dem
+    Grund, wenn das Fahrzeug uebersprungen wird."""
+    from lifecycle import ALLOWED_TRANSITIONS
+    from kaufvorgang import OFFEN as KV_OFFEN
+    v = await db.vehicles.find_one(
+        {"id": vehicle_id, "dealer_id": user["dealer_id"], "lifecycle": {"$ne": "geloescht"}},
+        {"_id": 0, "id": 1, "lifecycle": 1, "status": 1, "bestand": 1, "data": 1})
+    if v is None:
+        raise HTTPException(404, "Fahrzeug nicht gefunden (andere Firma oder gelöscht)")
+    von = v.get("lifecycle") or "verglichen"
+    # Bestand -> Bestand ist "Frist erneuern" und bleibt erlaubt.
+    if von != ziel and ziel not in ALLOWED_TRANSITIONS.get(von, set()):
+        raise HTTPException(409, f"Von „{_zustand(von)}“ nach „{_zustand(ziel)}“ ist nicht erlaubt")
+    if ziel == "bestand":
+        # Derselbe Weg wie "Nur speichern" / "Frist erneuern" (gleiche
+        # Sperren, gleiche Frist, gleicher Verlauf).
+        r = await _bestand_oder_entwurf(vehicle_id, v, "bestand", user)
+        return {"id": vehicle_id, "von": von, "nach": "bestand",
+                "verlaengert": bool(r.get("verlaengert"))}
+    if von == ziel:
+        raise HTTPException(409, f"Steht schon auf „{SAMMEL_ZIEL_TEXT.get(ziel, ziel)}“")
+    extra: Dict[str, Any] = {}
+    if ziel == "storniert":
+        # Keine Abkuerzung: der Fahrzeugstatus fasst die Kaufvorgaenge
+        # zusammen. Laeuft noch ein Vertrag oder Termin, wird dort storniert.
+        if await db.kaufvorgaenge.count_documents(
+                {"dealer_id": user["dealer_id"], "vehicle_id": vehicle_id,
+                 "status": {"$in": list(KV_OFFEN)}}, limit=1):
+            raise HTTPException(409, "Kaufvertrag läuft noch — bitte zuerst den Vertrag "
+                                     "stornieren oder löschen")
+        if await db.appointments.count_documents(
+                {"dealer_id": user["dealer_id"], "vehicle_id": vehicle_id,
+                 "status": {"$in": TERMIN_OFFEN_WERTE}}, limit=1):
+            raise HTTPException(409, "Abholtermin offen — bitte unter Termine stornieren")
+    if ziel == "archiviert":
+        # Wie das Archivieren nach Fristablauf (cleanup_service): Fotos weg,
+        # Inserats-Entwuerfe und Snapshots raeumt _archiv_nebenaufraeumen
+        # (bei einem Fehler holt der Stundenlauf es ueber den Merker nach).
+        from cleanup_service import _iter_photo_keys
+        data = v.get("data")
+        if isinstance(data, dict):
+            extra.update({f"data.{k}": [] for k in _iter_photo_keys() if data.get(k)})
+        extra.update({"archived_at": now_iso(), "archiv_aufraeumen_offen": True})
+    try:
+        await set_lifecycle(vehicle_id, user["dealer_id"], ziel, user=user,
+                            extra_set=extra or None, verkauf_rueckweg=False)
+    except LifecycleError as exc:
+        raise HTTPException(409, str(exc))
+    if ziel == "archiviert":
+        await log_activity_sicher(user["dealer_id"], user["id"], "fahrzeug.archiviert.hand",
+                                  ref=vehicle_id, meta={"von": von})
+        try:
+            from cleanup_service import _archiv_nebenaufraeumen
+            await _archiv_nebenaufraeumen(db, vehicle_id, user["dealer_id"])
+        except Exception:  # noqa: BLE001 — Merker bleibt, Stundenlauf holt nach
+            logging.getLogger("autohandel").exception(
+                "Archiv-Aufraeumen fuer %s nicht gelaufen", vehicle_id)
+    return {"id": vehicle_id, "von": von, "nach": ziel}
+
+
+@router.post("/bestand/status")
+async def bestand_status_sammel(body: SammelStatusIn, user=Depends(current_haendler)):
+    """Wunsch Ahmad 24.11.2026: Status mehrerer Fahrzeuge auf einmal aendern.
+    Jedes Fahrzeug wird einzeln geprueft (Firma, Recht, erlaubter Uebergang)
+    und bekommt denselben Verlauf wie eine Einzelaenderung; ein
+    Fehlschlag haelt die anderen nicht auf. Antwort: geaendert /
+    uebersprungen (mit Grund). Hoechstens SAMMEL_MAX Fahrzeuge je Aufruf."""
+    sammel_id = uuid.uuid4().hex[:16]
+    gesehen: set = set()
+    ids = [i for i in body.ids if not (i in gesehen or gesehen.add(i))]
+    geaendert: List[Dict[str, Any]] = []
+    uebersprungen: List[Dict[str, Any]] = []
+    for vid in ids:
+        try:
+            geaendert.append(await _status_einzeln(vid, body.ziel, user))
+        except HTTPException as exc:
+            uebersprungen.append({"id": vid, "grund": _fehlertext(exc)})
+        except Exception as exc:  # noqa: BLE001 — ein Fahrzeug haelt die anderen nicht auf
+            logging.getLogger("autohandel").exception(
+                "Sammeländerung %s: Fahrzeug %s fehlgeschlagen", sammel_id, vid)
+            uebersprungen.append({"id": vid, "grund": "Technischer Fehler — bitte einzeln "
+                                                      "in der Fahrzeugakte versuchen"})
+    await log_activity_sicher(user["dealer_id"], user["id"], "fahrzeug.sammelaenderung",
+                              ref=sammel_id,
+                              meta={"ziel": body.ziel, "angefragt": len(ids),
+                                    "geaendert": [g["id"] for g in geaendert],
+                                    "uebersprungen": len(uebersprungen)})
+    return {"ok": True, "sammel_id": sammel_id, "ziel": body.ziel,
+            "geaendert": geaendert, "uebersprungen": uebersprungen}
 
 
 # =========================================================
@@ -719,6 +1116,15 @@ async def vehicle_akte(vehicle_id: str, user=Depends(current_firma)):
         {"_id": 0},
     ).sort("created_at", -1).to_list(AKTE_MAX)
     appointments_gesamt = await db.appointments.count_documents(termin_filter)
+    # Wunsch Ahmad 24.11.2026 (Kachel "Abholung/Fahrer" der neuen Akte): der
+    # Fahrername zu den gezeigten Terminen (gleiche Quelle wie _offene_termine).
+    fahrer_ids = sorted({a["driver_id"] for a in appointments if a.get("driver_id")})
+    if fahrer_ids:
+        fahrer_namen = {f["id"]: f.get("display_name") or "" async for f in db.driver_accounts.find(
+            {"id": {"$in": fahrer_ids}}, {"_id": 0, "id": 1, "display_name": 1})}
+        for a in appointments:
+            if a.get("driver_id") and fahrer_namen.get(a["driver_id"]):
+                a["driver_name"] = fahrer_namen[a["driver_id"]]
     eigene_termin_ids = [a["id"] for a in appointments]
     # Runde 21: ALLE Termine im Bereich (nicht nur die 10 neuesten) fuer
     # Bericht, Protokolle und Historie.

@@ -1,9 +1,10 @@
 import { Suspense } from "react";
 import NachladeFehler from "@/components/NachladeFehler";
 import SeiteLaedt from "@/components/SeiteLaedt";
-import { Link, NavLink, Navigate, Outlet, useNavigate } from "react-router-dom";
+import { Link, NavLink, Navigate, Outlet, useLocation, useNavigate } from "react-router-dom";
 import RechtsLinks from "@/components/RechtsLinks";
-import { useDriver } from "@/context/DriverContext";
+import { driverApi, useDriver } from "@/context/DriverContext";
+import NeuigkeitenHinweis from "@/components/NeuigkeitenHinweis";
 import { Truck, Calendar, Settings, LogOut } from "lucide-react";
 import InstallPWAButton from "@/components/InstallPWAButton";
 import VerbindungsFehler from "@/components/VerbindungsFehler";
@@ -11,6 +12,7 @@ import VerbindungsFehler from "@/components/VerbindungsFehler";
 export default function DriverLayout() {
   const { driver, ready, fehler, logout } = useDriver();
   const nav = useNavigate();
+  const { pathname } = useLocation();
 
   if (!ready) return null;
   // Runde 22 (11.09.2026): Server nicht erreichbar -> Anmeldung behalten
@@ -73,6 +75,10 @@ export default function DriverLayout() {
           </Suspense>
         </NachladeFehler>
       </main>
+
+      {/* Wunsch Ahmad 24.11.2026: kurzer Hinweis auf Neues fuer Fahrer (hoechstens einer pro Tag,
+          nicht mitten im Protokoll beim Verkaeufer) */}
+      <NeuigkeitenHinweis aktiv={!pathname.includes("/protokoll/")} kontoId={driver.id} client={driverApi} basis="/driver/neuigkeiten" alleLink={null} />
 
       {/* Bottom Tab Bar */}
       <nav className="fixed bottom-0 inset-x-0 border-t z-40"

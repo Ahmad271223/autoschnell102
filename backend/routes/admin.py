@@ -1294,6 +1294,8 @@ _COMPANY_COLLECTIONS = (
     # Runde 18: Kaufvorgaenge (Umbau 09.09.2026) tragen dealer_id, Sucher,
     # Vertrag, Fahrzeug und Kaufpreis — blieben bei der Firmenloeschung liegen.
     "kaufvorgaenge",
+    # Ueberweisung (24.11.2026): Kontodaten des Verkaeufers je Termin
+    "ueberweisungen",
     # Review 26.09.2026 (Nr. 141/142): KI-Bewertungen (Eingabepakete, Ergebnisse)
     # und Lernfaelle der Firma tragen dealer_id — blieben bei der Firmen-
     # loeschung liegen. ki_budget hat KEIN dealer_id-Feld (Kennung im
@@ -1313,6 +1315,8 @@ _COMPANY_COLLECTIONS = (
     "werkzeug_lesebilder",
     # Pruefung 09.10.2026 (Befund Mokka-e): nicht lesbare Inseratsseiten der Erweiterung tragen dealer_id (14 Tage TTL)
     "werkzeug_leseseiten",
+    # 24.11.2026: Chat Buero/Fahrer je Abholtermin (Fotos liegen unter protocol/<firma>/)
+    "auftrag_chat", "auftrag_chat_status",
     # Go-Live 14.09.2026 (B6): users steht NICHT mehr im Tupel. Als letzter
     # Eintrag der Schleife lief users.delete_many noch VOR Snapshots, Dateien
     # und dealers.delete_many — brach einer dieser Schritte ab, fand der
@@ -2166,6 +2170,8 @@ async def admin_contract_pdf(contract_id: str, _=Depends(current_admin)):
     pdf_bytes = await _druck_pdf_bytes(doc)
     if not pdf_bytes:
         raise HTTPException(404, "Vertrag oder PDF nicht gefunden")
+    from vertrag_storno import falls_storniert          # 24.11.2026: STORNIERT-Zeichen beim Ausliefern
+    pdf_bytes = await falls_storniert(contract_id, pdf_bytes)
     raw_name = doc.get("filename") or f"vertrag_{contract_id}.pdf"
     # Rollenprüfung 22.09.2026 (RP-200/RP-351, Welle 2): Starlette kodiert
     # Kopfzeilen als latin-1 — ein 'Š', '–' oder Emoji im Dateinamen gab

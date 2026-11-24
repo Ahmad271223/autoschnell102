@@ -1115,7 +1115,12 @@ async def portal_sitzung_pdf(sitzung: SitzungKopf):
         raise HTTPException(404, "Das Vertrags-PDF fehlt — bitte das Autohaus ansprechen.")
     name = f"Kaufvertrag-{c.get('contract_no') or c['id']}.pdf"
     await _gelesen_vermerken(c, pdf)                # Pruefliste 01.10.2026 (Nr. 2)
-    return Response(content=pdf, media_type="application/pdf",
+    if p.get("status") != "unterschrieben":
+        # 24.11.2026: STORNIERT-Zeichen nur auf die ungezeichnete Fassung (Pruefsumme oben aus dem Original);
+        # die unterschriebene bleibt unveraendert (Nachweis)
+        from vertrag_storno import falls_storniert
+        pdf = await falls_storniert(c["id"], pdf)
+    return Response(content=pdf,media_type="application/pdf",
                     headers={"Content-Disposition": content_disposition(name),
                              "Cache-Control": "private, no-store", "X-Robots-Tag": "noindex"})
 
@@ -1261,6 +1266,7 @@ async def meldung_anlegen(dealer_id: str, empfaenger: List[str], typ: str, text:
 def _meldung_sicht(m: dict, user_id: str) -> dict:
     return {"id": m["id"], "typ": m.get("typ"), "text": m.get("text"), "ref": m.get("ref"),
             "contract_no": m.get("contract_no"), "erstellt_am": m.get("erstellt_am"),
+            "termin_id": m.get("termin_id"),
             "gelesen": bool((m.get("gelesen") or {}).get(user_id))}
 
 
