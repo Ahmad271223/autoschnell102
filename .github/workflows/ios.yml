@@ -32,7 +32,9 @@ on:
         type: boolean
         default: false
   push:
-    tags: ["ios-v*"]
+    # ios-pruefen-* = nur Pruefbau; geht auch, solange ios.yml noch nicht auf main liegt
+    # (workflow_dispatch funktioniert erst, wenn der Workflow auf dem Standard-Branch ist).
+    tags: ["ios-v*", "ios-pruefen-*"]
 
 concurrency:
   group: ios-build
@@ -43,7 +45,7 @@ jobs:
   # braucht keine Secrets und kein Apple-Konto.
   pruefen:
     name: Kompilieren (ohne Signatur)
-    if: ${{ github.event.inputs.nur_pruefen == 'true' }}
+    if: ${{ github.event.inputs.nur_pruefen == 'true' || startsWith(github.ref, 'refs/tags/ios-pruefen-') }}
     runs-on: macos-15
     timeout-minutes: 45
     defaults:
@@ -66,7 +68,7 @@ jobs:
 
   ios:
     name: Archiv + Upload
-    if: ${{ github.event.inputs.nur_pruefen != 'true' }}
+    if: ${{ github.event.inputs.nur_pruefen != 'true' && !startsWith(github.ref, 'refs/tags/ios-pruefen-') }}
     runs-on: macos-15
     timeout-minutes: 45
     defaults:
