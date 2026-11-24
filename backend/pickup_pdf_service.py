@@ -715,6 +715,54 @@ def _technik_zeile(d: dict) -> str:
     return f"{zone} – {_xe(note)}" if note else zone
 
 
+#: Hoechstens so viele nummerierte Abweichungen im PDF (Ausreisser-Schutz).
+ABWEICHUNGEN_PDF_MAX = 150
+
+
+def _protokoll_felder():
+    """Zustandsfelder/Unterlagen aus routes.protocols — im Server immer geladen. Bewusst KEIN
+    Import (test_18: das PDF braucht weder Routen noch Datenbank); ohne die Routen bleiben
+    Zustand und Unterlagen in der Zusammenfassung aussen vor."""
+    import sys
+    rp = sys.modules.get("routes.protocols")
+    return (getattr(rp, "CONDITION_FIELDS", None) or [], getattr(rp, "DOCUMENT_ITEMS", None) or [])
+
+
+def abweichungen_absaetze(filled: Dict[str, Any], vehicle: Optional[Dict[str, Any]],
+                          contract: Optional[Dict[str, Any]], st) -> List[Flowable]:
+    """Wunsch Ahmad 24.11.2026: "Nr. 3 · Kratzer · Tür hinten links" — dieselben Nummern wie
+    Freigaben und Fahrer-App (abweichung_nummern.py). Leer, wenn es keine Abweichung gibt."""
+    import abweichung_nummern as AN
+    import protokoll_vergleich as PV
+    try:
+        bedingungen, unterlagen = _protokoll_felder()
+        erg = AN.berechnen(filled, vehicle, contract, felder=PV.FELDER,
+                           condition_fields=bedingungen, document_items=unterlagen)
+    except Exception:  # noqa: BLE001 — das PDF scheitert nie an der Zusammenfassung
+        import logging
+        logging.getLogger("autohandel").exception("Abholprotokoll: Abweichungen nicht nummeriert")
+        return []
+    if not erg["eintraege"]:
+        return []
+    raus: List[Flowable] = [Paragraph(f"<b>Abweichungen ({erg['anzahl']})</b> — "
+                                      "Nummern wie in der App", st["small"])]
+    gezeigt = 0
+    for g in erg["gruppen"]:
+        if gezeigt >= ABWEICHUNGEN_PDF_MAX:
+            break
+        raus.append(Paragraph(f"<b>{_xe(g['titel'])}</b>", st["small"]))
+        for e in g["eintraege"]:
+            if gezeigt >= ABWEICHUNGEN_PDF_MAX:
+                break
+            text = f" — {_xe(str(e['text'])[:200])}" if e.get("text") else ""
+            raus.append(Paragraph(f"Nr. {e['nr']} · {_xe(str(e['titel'])[:120])}{text}", st["small"]))
+            gezeigt += 1
+    if erg["anzahl"] > gezeigt:
+        raus.append(Paragraph(f"… und {erg['anzahl'] - gezeigt} weitere (siehe App)", st["small"]))
+    raus.append(Spacer(1, 0.3 * cm))
+    return raus
+
+
 def build_pickup_pdf(
     *,
     appointment: Dict[str, Any],
@@ -1225,6 +1273,9 @@ def _build_pickup_pdf(
     # -----------------------------------------------------------------
     story.append(_section("6 · Vor-Ort-Aufnahme durch den Fahrer", st))
     story.append(Spacer(1, 4))
+    # Wunsch Ahmad 24.11.2026: Abweichungen mit denselben festen Nummern wie in App und Freigabe.
+    if filled:
+        story.extend(abweichungen_absaetze(filled, vehicle, contract, st))
     _new_damages = [d for d in (filled.get("new_damages") or []) if isinstance(d, dict)]
     if _new_damages:
         # Digital ausgefuellt: die vom Fahrer auf der Skizze markierten

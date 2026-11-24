@@ -1693,7 +1693,12 @@ async def get_protocol(appt_id: str, driver=Depends(current_driver)):
     vehicle_voll, contract = await _fahrzeug_und_vertrag(appt)
     # Review 26.09.2026 (Nr. 128): an die App geht nur die Whitelist.
     vehicle = fahrzeug_fuer_fahrer(vehicle_voll)
+    # Wunsch Ahmad 24.11.2026: dieselben festen Nummern wie im Buero (Entwurf: nur rechnen)
+    from routes.abweichungen import nummeriert as _abw_nummeriert
+    abw = await _abw_nummeriert(appt, doc, vehicle_voll, contract,
+                                sichern=bool(doc) and doc.get("status") != "entwurf")
     return {
+        "abweichungen_nummeriert": abw,
         # Gegenpruefung 12.09.2026: Infinity/NaN aus Altdaten nicht ans JSON geben.
         "protocol": PV.json_sicher(SF.ohne_keys(doc)),
         "template": {
@@ -2231,6 +2236,9 @@ async def submit_protocol(appt_id: str, driver=Depends(current_driver)):
     # Wunsch Ahmad 25.09.2026: KI-Abholbewertung im Hintergrund — die
     # Uebergabe an den Chef haengt NICHT davon ab (feuer-und-vergiss).
     KI.bewertung_anstossen(doc["id"], appt.get("dealer_id", ""))
+    # Wunsch Ahmad 24.11.2026: feste Nummern der Abweichungen + Zahl am Termin
+    from routes.abweichungen import nach_aenderung as _abw_nachziehen
+    await _abw_nachziehen(appt_id)
     return {"ok": True, "status": ZUR_FREIGABE, "protocol_id": doc["id"]}
 
 
@@ -2683,7 +2691,9 @@ async def finalize_protocol(appt_id: str, body: FinalizeIn,
     filled = {k: doc.get(k) for k in
               ("vehicle_check", "documents", "keys_count", "keys_expected",
                "features", "condition", "damages_confirmed", "new_damages",
-               "notes", "lackmessungen")}
+               "notes", "lackmessungen",
+               # Wunsch Ahmad 24.11.2026: feste Nummern der Abweichungen auch im PDF
+               "abweichung_nummern")}
     # Pruefung 14.09.2026 (P2): Was der Chef freigegeben hat, gilt — Ort und
     # Verkaeufername aus dem Protokoll; die App-Werte nur, wenn dort nichts steht.
     filled["place"] = doc.get("place") or body.place or ""
@@ -3147,6 +3157,7 @@ async def protokolle_zur_freigabe(user=Depends(_chef_dep), response: Response = 
     paare, abgeschnitten = await _wartende_protokolle(user)
     if abgeschnitten and response is not None:
         response.headers["X-Truncated"] = "1"
+    from routes.abweichungen import nummeriert as _abw_nummeriert
     fz_ids = sorted({d.get("vehicle_id") or a.get("vehicle_id") for d, a in paare} - {None, ""})
     fahrzeuge: Dict[str, dict] = {}
     if fz_ids:
@@ -3194,6 +3205,8 @@ async def protokolle_zur_freigabe(user=Depends(_chef_dep), response: Response = 
                 "kilometerstand": (d.get("condition") or {}).get("mileage") or "",
                 "kilometerstand_text": PV.km_text(km) if km is not None else "",
                 "abweichungen": PV.abweichungen(zeilen),
+                # Wunsch Ahmad 24.11.2026: feste Nummern (routes/abweichungen.py)
+                "abweichungen_nummeriert": await _abw_nummeriert(appt, d, fahrzeug, vertrag),
                 "vergleich": zeilen,
                 "neue_schaeden": d.get("new_damages") or [],
                 # Wunsch Ahmad 06.10.2026: Lackdicke-Messungen und Schadenfotos (7 Tage sichtbar)

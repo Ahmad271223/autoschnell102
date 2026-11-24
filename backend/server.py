@@ -71,6 +71,8 @@ from routes import team as team_routes
 from routes import marketplace as marketplace_routes
 from routes import beweise as beweise_routes
 from routes import werkzeuge as werkzeuge_routes
+from routes import abweichungen as abweichungen_routes  # Wunsch Ahmad 24.11.2026
+from routes import neuigkeiten as neuigkeiten_routes  # Wunsch Ahmad 24.11.2026
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -2242,6 +2244,8 @@ api.include_router(team_routes.router)
 api.include_router(marketplace_routes.router, dependencies=[Depends(marktplatz_freigeschaltet)])
 api.include_router(beweise_routes.router)
 api.include_router(protocols_routes.router)
+api.include_router(abweichungen_routes.router)
+api.include_router(neuigkeiten_routes.router)
 
 app.include_router(api)
 

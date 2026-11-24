@@ -17,6 +17,7 @@ import DiktatKnopf from "@/components/DiktatKnopf";
 import { textAnhaengen } from "@/lib/sprachdiktat";
 import DamageSelector from "@/components/DamageSelector";
 import KiFahrerKarte from "@/components/KiFahrerKarte";
+import AbweichungenListe from "@/components/AbweichungenListe";
 import { alleVollstaendig, rueckfrageBezug, schwereOffen } from "@/lib/kiSchaden";
 import {
   LEERER_ENTWURF, entwurfAusServer, entwurfZusammenfuehren, istAnnahmeFehlt, istRevisionsKonflikt,
@@ -865,6 +866,10 @@ export default function Protokoll() {
       {(wartetAufFreigabe || freigegeben || wirdAbgeschlossen || isFinal) && (
         <KiFahrerKarte apptId={id} preisVertrag={data?.preis_vertrag}
                        preisVorschlag={data?.protocol?.preis_vorschlag ?? null} />
+      )}
+      {/* Wunsch Ahmad 24.11.2026: dieselben festen Nummern wie im Büro („Nr. 3“ am Telefon) */}
+      {(wartetAufFreigabe || freigegeben || wirdAbgeschlossen || isFinal) && data?.abweichungen_nummeriert?.anzahl > 0 && (
+        <div className="mt-4"><AbweichungenListe daten={data.abweichungen_nummeriert} testId="protokoll-abweichungen" /></div>
       )}
       {wirdAbgeschlossen && (
         <div className="mt-4 rounded-xl border px-4 py-3 text-sm flex items-start gap-2"
