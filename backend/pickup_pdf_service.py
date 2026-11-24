@@ -754,7 +754,12 @@ def abweichungen_absaetze(filled: Dict[str, Any], vehicle: Optional[Dict[str, An
         for e in g["eintraege"]:
             if gezeigt >= ABWEICHUNGEN_PDF_MAX:
                 break
-            text = f" — {_xe(str(e['text'])[:200])}" if e.get("text") else ""
+            roh = str(e.get("text") or "")
+            # Kurz wie in der Ausstattungsliste (Pruefer-Restpunkt 28.09.2026): im PDF nie
+            # "vorhanden, defekt"/"fehlt komplett" — die App behaelt ihre ausfuehrlichen Texte.
+            roh = {"fehlt komplett": NEIN_GRUENDE["fehlt"],
+                   "vorhanden, defekt": NEIN_GRUENDE["defekt"]}.get(roh, roh)
+            text = f" — {_xe(roh[:200])}" if roh else ""
             raus.append(Paragraph(f"Nr. {e['nr']} · {_xe(str(e['titel'])[:120])}{text}", st["small"]))
             gezeigt += 1
     if erg["anzahl"] > gezeigt:
