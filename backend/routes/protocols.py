@@ -27,6 +27,7 @@ from pymongo.errors import DuplicateKeyError
 import betrieb
 import protokoll_vergleich as PV
 import schadenfotos as SF
+from abaenderung import lack_befund  # Nachlackierung aus der Lackdicke (24.11.2026)
 from ai import pickup_assessment as KI
 from deps import (besitzer_namen, current_chef, db, ist_sucher,
                   log_activity, log_activity_sicher, now_iso, termin_bereich,
@@ -1259,6 +1260,9 @@ async def protokoll_korrekturen(appt: dict, protokoll: dict) -> tuple:
                               protokoll.get("condition"),
                               PV.vertragswerte(vehicle, contract))
         korrekturen = PV.vertrags_korrekturen(zeilen)
+        # Wunsch Ahmad 24.11.2026: auffaellige Lackdicke = nicht nachlackierungsfrei (Schwelle in abaenderung.py)
+        from abaenderung import lack_korrektur
+        korrekturen.update(lack_korrektur(protokoll.get("lackmessungen")))
         schaeden = [d for d in (protokoll.get("new_damages") or []) if d]
         return korrekturen, schaeden
     except Exception:  # noqa: BLE001
@@ -3198,6 +3202,8 @@ async def protokolle_zur_freigabe(user=Depends(_chef_dep), response: Response = 
                 "neue_schaeden": d.get("new_damages") or [],
                 # Wunsch Ahmad 06.10.2026: Lackdicke-Messungen und Schadenfotos (7 Tage sichtbar)
                 "lackmessungen": d.get("lackmessungen") or [],
+                # Wunsch Ahmad 24.11.2026: auffaellige Lackdicke = Nachlackierung (Abweichung zum Vertrag)
+                "nachlackierung": lack_befund(d.get("lackmessungen"), vertrag),
                 "schaden_fotos": SF.fuer_anzeige(d),
                 "schaeden_bestaetigt": d.get("damages_confirmed"),
                 "bemerkungen": d.get("notes") or "",

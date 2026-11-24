@@ -13,6 +13,7 @@ import VerkaeuferKorrekturDialog from "@/components/VerkaeuferKorrekturDialog";
 import ContractDialog from "@/components/ContractDialog";
 import KundenportalDialog, { portalUnterschrift } from "@/components/KundenportalDialog";
 import VertragAktionen from "@/components/VertragAktionen";
+import AbaenderungDialog, { abaenderungNoetig } from "@/components/AbaenderungDialog";
 import { useAuth } from "@/context/AuthContext";
 
 // Rollenprüfung 22.09.2026 (RP-007/RP-106/RP-257): Verträge je Seite.
@@ -75,6 +76,8 @@ export default function PDFArchiv() {
   const [aendern, setAendern] = useState(null);
   // Kundenportal (29.09.2026): Code fuer die digitale Unterschrift des Kunden
   const [portal, setPortal] = useState(null);
+  // Wunsch Ahmad 24.11.2026: Änderung nach der Unterschrift -> Abänderungsvertrag
+  const [abaenderung, setAbaenderung] = useState(null);
 
   // Runde 16 (15.09.2026): ein Ladefehler sah aus wie "keine Vertraege", und
   // die Kuerzung des Servers (X-Truncated ab 2.000) blieb unsichtbar.
@@ -384,6 +387,7 @@ export default function PDFArchiv() {
                         folgeMail: () => setFolgeMail(it),
                         aendern: () => setAendern(it),
                         korrektur: () => setKorrektur(it),
+                        abaenderungen: () => setAbaenderung(it),
                         loeschen: () => remove(it.id),
                       }}
                       zustand={{
@@ -435,10 +439,16 @@ export default function PDFArchiv() {
             setAendern(null);
             if (!c || c.geaendert === false) return;
             toast.success(`Fassung ${c.version || ""} erstellt — die alte bleibt im Archiv.`);
-            // gleich weiter zum Versand, wie nach der Verkaeufer-Korrektur
-            setSenden({ ...it, ...c });
+            // gleich weiter zum Versand, wie nach der Verkaeufer-Korrektur —
+            // war er schon unterschrieben: zum Abaenderungsvertrag (24.11.2026)
+            abaenderungNoetig(it.id).then((ab) => (ab ? setAbaenderung({ ...it, ...c }) : setSenden({ ...it, ...c })));
             load();
           }} />
+      )}
+
+      {abaenderung && (
+        <AbaenderungDialog open contract={abaenderung} key={abaenderung.id}
+                           onClose={(geaendert) => { setAbaenderung(null); if (geaendert) load(); }} />
       )}
 
       {korrektur && (
@@ -450,7 +460,8 @@ export default function PDFArchiv() {
               // Gleich weiter zum Versand: neue Fassung, Empfaenger aus der
               // Korrektur; der Versand-Dialog erkennt die fruehere Fassung im
               // send_status und nimmt die Korrektur-Vorlage.
-              setSenden({ ...it, ...(erg.verkaeufer || {}), version: erg.version });
+              const neu = { ...it, ...(erg.verkaeufer || {}), version: erg.version };
+              abaenderungNoetig(it.id).then((ab) => (ab ? setAbaenderung(neu) : setSenden(neu)));
             }
             if (erg) load();
           }} />

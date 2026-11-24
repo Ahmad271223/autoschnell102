@@ -1448,6 +1448,8 @@ async def _portal_unterschriften_entfernen(db, contract_id: str, dealer_id: Opti
         await loeschen_oder_vormerken(db, key=key, grund="vertrag_geloescht_portal_unterschrift",
                                       dealer_id=dealer_id or "", ref={"contract_id": contract_id})
     await db.meldungen.delete_many({"ref": contract_id})
+    # Abaenderungsvertraege (24.11.2026) mit Unterschrift des Verkaeufers gehen mit dem Vertrag
+    await db.vertrag_abaenderungen.delete_many({"contract_id": contract_id})
     return len(keys)
 
 
