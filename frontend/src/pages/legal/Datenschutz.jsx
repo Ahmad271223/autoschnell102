@@ -285,6 +285,19 @@ export default function Datenschutz() {
         Internetverbindung einen Hinweis an.
       </p>
 
+      <p>
+        <strong>Sprachdiktat in der iPhone-App:</strong> Tippst du in der
+        iPhone-App auf „Diktieren“, nimmt die App über das Mikrofon auf und
+        wandelt die Sprache direkt auf deinem iPhone in Text um. Die Aufnahme
+        wird nicht an uns oder Dritte übertragen und nach der Umwandlung sofort
+        gelöscht; nur der erkannte Text landet im Feld und wird wie jede andere
+        Eingabe gespeichert. Für die Erkennung lädt die App einmalig ein
+        Sprachmodell von Hugging Face (huggingface.co) herunter; dabei wird wie
+        bei jedem Download deine IP-Adresse an den Anbieter übermittelt. Den
+        Mikrofonzugriff kannst du jederzeit in den iPhone-Einstellungen
+        widerrufen.
+      </p>
+
       <H2>8. Datensicherheit</H2>
       <p>
         Passwörter werden ausschließlich als bcrypt-Hash gespeichert. Die
@@ -293,7 +306,31 @@ export default function Datenschutz() {
         protokolliert.
       </p>
 
-      <p className="text-zinc-500 text-sm">Stand: September 2026</p>
+      <H2>9. Open-Source-Bestandteile der iPhone-App</H2>
+      <p>
+        Das Sprachdiktat der iPhone-App nutzt WhisperKit (argmax-oss-swift) und
+        die Whisper-Sprachmodelle. Beide stehen unter der MIT-Lizenz:
+        Copyright (c) 2024 argmax, inc. · Copyright (c) 2022 OpenAI.
+      </p>
+      <p className="text-zinc-500 text-xs" data-testid="lizenz-mit">
+        Permission is hereby granted, free of charge, to any person obtaining a
+        copy of this software and associated documentation files (the
+        "Software"), to deal in the Software without restriction, including
+        without limitation the rights to use, copy, modify, merge, publish,
+        distribute, sublicense, and/or sell copies of the Software, and to
+        permit persons to whom the Software is furnished to do so, subject to
+        the following conditions: The above copyright notice and this
+        permission notice shall be included in all copies or substantial
+        portions of the Software. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT
+        WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
+        THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+        NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+        LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+        OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+        WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+      </p>
+
+      <p className="text-zinc-500 text-sm">Stand: November 2026</p>
     </LegalLayout>
   );
 }

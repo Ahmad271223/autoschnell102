@@ -19,7 +19,7 @@ Du brauchst dafür keinen Mac — nur ein Apple-Entwicklerkonto und vier Werte i
 | `ExportOptions.plist` | Export-Einstellungen für App Store Connect (Team-ID setzt der Workflow ein) |
 | `package.json` | Capacitor 7 (`npm ci`, `npx cap sync ios`) |
 
-Paketname (Bundle-ID): `de.autoschnellkauf.app` · Version 1.0.0 · Build-Nummer = Laufnummer des Workflows · nur iPhone (kein iPad-Eintrag nötig) · iOS 14 oder neuer.
+Paketname (Bundle-ID): `de.autoschnellkauf.app` · Version 1.0.0 · Build-Nummer = Laufnummer des Workflows · nur iPhone (kein iPad-Eintrag nötig) · iOS 16 oder neuer (wegen Sprachdiktat/WhisperKit).
 
 ## Einmalig: Apple-Konto und Schlüssel (ca. 30 Minuten + Wartezeit)
 

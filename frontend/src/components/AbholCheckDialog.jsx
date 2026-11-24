@@ -8,6 +8,8 @@ import { kmAusText } from "@/lib/preis";
 import { lesen, schreiben, sitzungsSpeicher } from "@/lib/speicher";
 import { protokollIstFinal, protokollNachsehen } from "@/pages/driver/fahrtPruefung";
 import { toast } from "sonner";
+import DiktatKnopf from "@/components/DiktatKnopf";
+import { textAnhaengen } from "@/lib/sprachdiktat";
 import { X, Plus, Trash2, Camera, CheckCircle2 } from "lucide-react";
 
 // Rollenprüfung 22.09.2026 (RP-070): Der Server nimmt höchstens 10 Schlüssel
@@ -379,6 +381,8 @@ export default function AbholCheckDialog({ appointment, onDone, onClose }) {
           <label className="text-[11px] text-zinc-500">Bemerkungen (optional)</label>
           <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2}
                     maxLength={BEMERKUNG_MAX} className={inputCls} style={inputStyle} />
+          <DiktatKnopf testid="abholcheck-bemerkungen-diktat" className="mt-1"
+                       onText={(t) => setNotes((alt) => textAnhaengen(alt, t, BEMERKUNG_MAX))} />
         </div>
 
         <button onClick={submit} disabled={busy || fotoLaeuft > 0} data-testid="abholcheck-absenden"

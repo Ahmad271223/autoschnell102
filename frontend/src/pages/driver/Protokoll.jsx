@@ -13,6 +13,8 @@ import {
   ArrowLeft, Save, CheckCircle2, FileText, AlertTriangle, Pencil,
 } from "lucide-react";
 import SignaturePad from "@/components/SignaturePad";
+import DiktatKnopf from "@/components/DiktatKnopf";
+import { textAnhaengen } from "@/lib/sprachdiktat";
 import DamageSelector from "@/components/DamageSelector";
 import KiFahrerKarte from "@/components/KiFahrerKarte";
 import { alleVollstaendig, rueckfrageBezug, schwereOffen } from "@/lib/kiSchaden";
@@ -29,6 +31,8 @@ import {
 const NETZ_WIEDERHOLUNG_MS = 10000;
 // Rollenprüfung 22.09.2026 (RP-535): Servergrenze ProtocolIn.notes.
 const BEMERKUNG_MAX = 5000;
+// Servergrenze ProtocolUpdate.sondervereinbarung (routes/protocols.py)
+const SONDERVEREINBARUNG_MAX = 2000;
 // Rollenprüfung 22.09.2026 (RP-068/RP-167): Nach dem Abschluss steht der Termin
 // auf "abgeholt" — eine Korrektur-Version lehnt der Server dann immer ab (409),
 // bis der Händler den Termin wieder öffnet.
@@ -1277,9 +1281,14 @@ export default function Protokoll() {
                   className={inputCls} style={st}
                   placeholder="Auffälligkeiten, Absprachen, Zustand …" />
         {!gesperrt && (
-          <div className="mt-1 text-right text-[10px] text-zinc-500" data-testid="protokoll-bemerkungen-zaehler"
-               style={{ color: String(f.notes || "").length >= BEMERKUNG_MAX ? "var(--st-rot)" : undefined }}>
-            {String(f.notes || "").length} / {BEMERKUNG_MAX}
+          <div className="mt-1 flex items-center justify-between gap-2">
+            {/* Sprachdiktat nur in der iPhone-App (Wunsch Ahmad 24.11.2026) */}
+            <DiktatKnopf testid="protokoll-bemerkungen-diktat"
+                         onText={(t) => upd((s) => ({ notes: textAnhaengen(s.notes, t, BEMERKUNG_MAX) }))} />
+            <div className="ml-auto text-right text-[10px] text-zinc-500" data-testid="protokoll-bemerkungen-zaehler"
+                 style={{ color: String(f.notes || "").length >= BEMERKUNG_MAX ? "var(--st-rot)" : undefined }}>
+              {String(f.notes || "").length} / {BEMERKUNG_MAX}
+            </div>
           </div>
         )}
       </Section>
@@ -1338,6 +1347,12 @@ export default function Protokoll() {
                       onChange={(e) => upd({ sondervereinbarung: e.target.value })}
                       className={inputCls} style={st}
                       placeholder="z. B. Verkäufer liefert Winterreifen nach" />
+            {!gesperrt && (
+              <DiktatKnopf testid="protokoll-sondervereinbarung-diktat" className="mt-1"
+                           onText={(t) => upd((s) => ({
+                             sondervereinbarung: textAnhaengen(s.sondervereinbarung, t, SONDERVEREINBARUNG_MAX),
+                           }))} />
+            )}
           </div>
         </div>
         <div className="grid grid-cols-2 gap-3">

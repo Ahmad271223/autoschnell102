@@ -47,6 +47,8 @@
 	<false/>
 	<key>NSCameraUsageDescription</key>
 	<string>AutoSchnell nutzt die Kamera, um Fotos für das Abholprotokoll (Fahrzeug, Schäden, Ausweis, Unterlagen) aufzunehmen.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>AutoSchnell nutzt das Mikrofon nur, wenn Sie auf das Mikrofon-Symbol tippen, um Bemerkungen zu diktieren. Die Sprache wird ausschließlich auf Ihrem iPhone in Text umgewandelt und nicht hochgeladen.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>AutoSchnell greift auf Ihre Fotos zu, damit Sie vorhandene Bilder zum Abholprotokoll oder Inserat hinzufügen können.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
