@@ -14,6 +14,8 @@ Was sie kann (jeweils mit Befund):
   * Platzhalter ("Andere", "Weitere VW") und Kategorien ("VW-Busse"): Modell aus der Ueberschrift, auch
     verstreut oder zusammengezogen ("T5 Bulli multivan" -> T5 Multivan, "XC 60" -> XC60)
   * fehlt die Marke ("Andere"), Marke UND Modell aus der Ueberschrift ("Ford Mondeo Turnier ..." -> Ford Mondeo)
+  * zuletzt (24.11.2026) die ersten Woerter des Modells ("ceed Automatik" -> Ceed), nur wenn sonst nichts passt
+  * keine Marke irgendwo (24.11.2026): ein Modellname vorn, den genau eine Marke fuehrt ("Tiguan ..." -> Volkswagen)
 """
 from __future__ import annotations
 
@@ -287,10 +289,25 @@ class ModellTreffer:
     name: str
     unscharf: bool
     aus_titel: bool = False
+    #: Serverpruefung 24.11.2026: nur die ersten Woerter des Modells passten ("ceed Automatik" -> Ceed)
+    gekuerzt: bool = False
 
 
 def _klammer_weg(name: str) -> str:
     return _KLAMMER.sub(" ", name).strip()
+
+
+def kuerzer(modell: Optional[str]) -> List[str]:
+    """Serverpruefung 24.11.2026 (Kleinanzeigen "Andere", Titel "Kia ceed Automatik"): das Modell ohne die letzten
+    Woerter, laengste Form zuerst ("ceed Automatik" -> ["ceed"]; "Range Rover Sport HSE" -> ["Range Rover Sport",
+    "Range Rover", "Range"]). Platzhalter nie."""
+    woerter = [w for w in (modell or "").split(" ") if w]
+    raus = []
+    for i in range(len(woerter) - 1, 0, -1):
+        k = " ".join(woerter[:i])
+        if not ist_platzhalter(k) and norm(k):
+            raus.append(k)
+    return raus
 
 
 class Katalog:
@@ -391,6 +408,33 @@ class Katalog:
                     return marke, rest
         return None
 
+    def marke_aus_modell(self, text: Optional[str]) -> Optional[Tuple[str, str]]:
+        """Serverpruefung 24.11.2026 (Lesebild Kleinanzeigen, Titel "Tiguan 2,0 dti Allrad", keine Marke im Feld): steht
+        VORN ein Modellname, den genau EINE Marke fuehrt (beide Kataloge, genau so geschrieben, mind. 4 Zeichen mit
+        Buchstaben), ist das die Marke -> ("Volkswagen", "Tiguan 2,0 dti Allrad"). Mehrdeutig ("500": Fiat und Mercedes),
+        kurz ("Up") oder ein Platzhalter: nie. Nur wenn sonst gar keine Marke zu finden ist; der Sucher bekommt dazu
+        "bitte pruefen" (routes/werkzeuge)."""
+        woerter = [w for w in (text or "").split(" ") if w]
+        if not woerter or ist_platzhalter(woerter[0]):
+            return None
+        erstes = norm(woerter[0])
+        if len(erstes) < 4 or not any(c.isalpha() for c in erstes) or erstes in _SAMMELWOERTER:
+            return None
+        marken = set()
+        for mn, m in self.mobile.items():
+            if mn not in _SAMMELWOERTER and erstes in m.index:
+                marken.add(mn)
+        for a, an in zip(self.autoscout, self._as_norm):
+            if an in _SAMMELWOERTER or not any(norm(x[1]) == erstes for x in a.modelle):
+                continue
+            mm = self.mobile_marke(a.name)
+            marken.add(norm(mm.name) if mm else an)
+        if len(marken) != 1:
+            return None
+        n = marken.pop()
+        name = self.mobile[n].name if n in self.mobile else next(a.name for a in self.autoscout if norm(a.name) == n)
+        return name, " ".join(woerter)
+
     # ---- mobile.de -----------------------------------------------------------
     def mobile_marke(self, name: Optional[str]) -> Optional[MobileMarke]:
         n = norm(name)
@@ -469,7 +513,16 @@ class Katalog:
         # DERSELBEN Marke, den Rest wie ein Modellfeld aufloesen (die 1.676 Soll-Werte aus 1.3.5 bleiben unberuehrt)
         rest = self._titel_rest(titel, lambda m: self.mobile_marke(m) is marke) if ist_platzhalter(modell) else None
         rid = self._mobile_aufloesen(marke, rest) if rest else None
-        return ModellTreffer(rid, self._modell_name(marke, rid) or rest, False, True) if rid is not None else None
+        if rid is not None:
+            return ModellTreffer(rid, self._modell_name(marke, rid) or rest, False, True)
+        # Serverpruefung 24.11.2026: erst ganz am Ende (Feld, Lesefehler, Ueberschrift ergaben nichts) die ersten
+        # Woerter des Modells ("ceed Automatik" -> "ceed" -> cee'd / Ceed) — bei einem Platzhalter im Feld die des
+        # Titels ohne die Marke ("Weitere Kia", Titel "Kia ceed Automatik"); die 1.676 Soll-Werte bleiben unberuehrt
+        for k in kuerzer(rest if ist_platzhalter(modell) else modell):
+            kid = self._mobile_aufloesen(marke, k)
+            if kid is not None:
+                return ModellTreffer(kid, self._modell_name(marke, kid) or k, False, gekuerzt=True)
+        return None
 
     def _titel_rest(self, titel: Optional[str], gleiche_marke) -> Optional[str]:
         """Der Titel ohne die Marke vorn ("BMW 540d xDrive" -> "540d xDrive"), nur wenn der Titel mit derselben Marke
@@ -558,7 +611,14 @@ class Katalog:
         # Wunsch Ahmad 04.11.2026: wie mobile_modell — nur bei Platzhalter, nach der Ueberschrift
         rest = self._titel_rest(titel, lambda m: self.autoscout_marke(m) is marke) if ist_platzhalter(modell) else None
         rm = self._autoscout_aufloesen(marke, rest) if rest else None
-        return ModellTreffer(str(rm[0]), rm[1], False, True) if rm is not None else None
+        if rm is not None:
+            return ModellTreffer(str(rm[0]), rm[1], False, True)
+        # Serverpruefung 24.11.2026: wie mobile_modell — zuletzt die ersten Woerter des Modells (bzw. des Titels)
+        for k in kuerzer(rest if ist_platzhalter(modell) else modell):
+            km = self._autoscout_aufloesen(marke, k)
+            if km is not None:
+                return ModellTreffer(str(km[0]), km[1], False, gekuerzt=True)
+        return None
 
 
 _KATALOG: Optional[Katalog] = None
@@ -600,6 +660,13 @@ def zuordnen(marke_modell_text: str, titel: Optional[str] = None, k: Optional[Ka
         if teile is None and titel:
             teile = k.teile_zusammengeschrieben(titel.strip())
             ganz_aus_titel = teile is not None
+    marke_aus_modell = False
+    if teile is None:
+        # 24.11.2026: gar keine Marke — ein eindeutiger Modellname vorn ("Tiguan ...") nennt sie (mit "bitte pruefen")
+        teile = k.marke_aus_modell(text)
+        if teile is None and titel:
+            teile = k.marke_aus_modell(titel.strip())
+        marke_aus_modell = teile is not None
     if teile is None:
         return {"marke_text": text, "modell_text": "", "marke": None, "modell": None, "erkannt": False,
                 "aus_beschreibung": False, "modell_gefunden": False}
@@ -608,6 +675,12 @@ def zuordnen(marke_modell_text: str, titel: Optional[str] = None, k: Optional[Ka
     am = k.autoscout_marke(marke)
     mob = k.mobile_modell(mm, modell, titel) if mm else None
     asm = k.autoscout_modell(am, modell, titel) if am else None
+    # Serverpruefung 24.11.2026: ein gekuerzter Treffer ist der schwaechste — fand das andere Portal das Modell ganz
+    # ("Morgan Aero Max": AutoScout kennt es, mobile.de haette aus "Aero" das Aero 8 gemacht), zaehlt nur dieser
+    if mob and mob.gekuerzt and asm and not asm.gekuerzt:
+        mob = None
+    if asm and asm.gekuerzt and mob and not mob.gekuerzt:
+        asm = None
     aus_text = False
     if (mm or am) and mob is None and asm is None and beschreibung:
         # Befund 04.10.2026: Feld und Ueberschrift ohne Modell — die Beschreibung fragen (strenger)
@@ -623,6 +696,9 @@ def zuordnen(marke_modell_text: str, titel: Optional[str] = None, k: Optional[Ka
                 asm = ModellTreffer(str(tm[0]), tm[1], False, True)
         aus_text = bool(mob or asm)
     ersetzt = ganz_aus_titel or ist_platzhalter(modell) or bool(mob and mob.aus_titel) or bool(asm and asm.aus_titel)
+    # Serverpruefung 24.11.2026: gekuerzt gefunden ("ceed Automatik") -> an die Link-Bauer geht der Katalogname, sonst
+    # scheitern sie an denselben Zusatzwoertern
+    ersetzt = ersetzt or bool(mob and mob.gekuerzt) or bool(asm and asm.gekuerzt) or marke_aus_modell
     if mob and mob.unscharf:
         modell_text = mob.name
     elif asm and asm.unscharf:
@@ -641,4 +717,9 @@ def zuordnen(marke_modell_text: str, titel: Optional[str] = None, k: Optional[Ka
         # 09.10.2026: ergab der Text ein Modell aus einem der Kataloge? Sonst versucht der Server Gelerntes und die
         # zweite Lesung des Programms (erkennung_lernen)
         "modell_gefunden": bool(mob or asm),
+        # 24.11.2026: nur ueber die ersten Woerter gefunden ("ceed Automatik" -> Ceed) — Gelerntes und die zweite
+        # Lesung des Programms gehen vor (routes/werkzeuge._erkennen)
+        "modell_gekuerzt": bool(mob or asm) and all(x.gekuerzt for x in (mob, asm) if x),
+        # 24.11.2026: die Marke stand nirgends, sie folgt aus dem Modellnamen (Katalog.marke_aus_modell)
+        "marke_aus_modell": marke_aus_modell,
     }

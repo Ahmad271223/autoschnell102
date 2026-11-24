@@ -1268,13 +1268,62 @@ def _modell_aus_beschreibung(raw_models: List[str], text: str, formen: set) -> O
     return next(iter(gefunden)) if len(gefunden) == 1 else None
 
 
+def _steht_als_wort_im_titel(modell: str, titel: str) -> bool:
+    """Steht das Katalogmodell (oder ein Teil eines "/"-Namens wie "cee'd / Ceed") zusammenhaengend im Titel — als
+    ganze Woerter oder vorn an einem Wort bis zu einem Wechsel Buchstabe/Ziffer ("Golf7" -> Golf)? "3200" ist NICHT
+    das Modell 320 (BMW 3200 CS, test_modell_aus_text_20261004::test_kein_falscher_zusatz)."""
+    woerter = _text_woerter(titel)
+    for teil in [modell] + modell.split("/"):
+        ziel = _normalize(teil)
+        if not ziel:
+            continue
+        for i in range(len(woerter)):
+            s = ""
+            for w in woerter[i:i + 4]:
+                s += w
+                if s == ziel:
+                    return True
+                if len(s) > len(ziel):
+                    if s.startswith(ziel) and s[len(ziel) - 1].isalpha() != s[len(ziel)].isalpha():
+                        return True
+                    break
+    return False
+
+
+def _modell_wie_im_programm(make_entry: Dict[str, Any], titel: str) -> Optional[str]:
+    """Serverpruefung 24.11.2026: Modell aus dem Titel mit der Erkennung des Windows-Programms
+    (werkzeug_erkennung: "Golf7" -> Golf, "ceed Automatik" -> Ceed). Uebernommen wird nur ein Katalogmodell DERSELBEN
+    Marke ("ateca 1.5 dsg" unter VW bleibt offen), das zusammenhaengend im Titel steht (_steht_als_wort_im_titel —
+    die Programm-Regeln fuer Lesefehler und verstreute Woerter gelten fuer getippte Titel nicht)."""
+    try:
+        import werkzeug_erkennung as we
+        marke = make_entry.get("raw_name") or ""
+        if not marke:
+            return None
+        r = we.zuordnen(f"{marke} Weitere", titel)
+        if not r.get("modell_gefunden") or _normalize(r.get("marke") or "") != _normalize(marke):
+            return None
+        modell = (r.get("modell") or "").strip()
+        return modell if modell and _steht_als_wort_im_titel(modell, titel) else None
+    except Exception:  # noqa: BLE001 — die Erkennung ist eine Zugabe, nie ein Fehler beim Auslesen
+        log.exception("Modell-Erkennung aus dem Titel fehlgeschlagen")
+        return None
+
+
 def _enhance_generic_model(vehicle: Dict[str, Any]) -> Dict[str, Any]:
     """If `model_label` is generic (e.g. 'Weitere Peugeot'), try to find
     the real model name in the listing title (`model_description`) or
     the body description by matching against the brand's known models.
-    Mutates and returns `vehicle`."""
+    Mutates and returns `vehicle`.
+
+    Serverpruefung 24.11.2026 (Wunsch Ahmad, "schau alle nicht erkannten Inserate an"): Kleinanzeigen-Inserate OHNE
+    Modell in der Tabelle ("Seat Arona", "Hyundai i20 1.2 ...", "Tiguan 2,0 dti Allrad" — Marke in der Tabelle,
+    Modell leer) blieben ohne Vergleich, weil nur ein Platzhalter ("Weitere VW") den Titel fragte. Jetzt fragt auch
+    ein LEERES Modell den Titel — aber nur nach einem Treffer im Katalog (kein Freitext-Rueckfall, kein Vorschlag
+    aus der Beschreibung als Modell)."""
     label = vehicle.get("model_label") or ""
-    if not _is_generic_model_label(label):
+    leer = not str(label).strip()
+    if not leer and not _is_generic_model_label(label):
         return vehicle
     if not _MAKES_INDEX:
         return vehicle
@@ -1319,9 +1368,17 @@ def _enhance_generic_model(vehicle: Dict[str, Any]) -> Dict[str, Any]:
     if not matched and md:
         # 04.10.2026: "c300e", "C300" im Titel (Leerzeichen egal, Zusatz an der Nummer)
         matched = _modell_kompakt(raw_models, md)
+    if not matched and md:
+        # 24.11.2026: dieselbe Erkennung wie im Windows-Programm ("VW Golf7 1.5TSI ACT Join" -> Golf,
+        # "Kia ceed Automatik" -> cee'd / Ceed) — nur der Titel, nur dieselbe Marke
+        matched = _modell_wie_im_programm(make_entry, md)
     if matched:
         vehicle["model_label"] = matched
         vehicle["model"] = matched.upper()
+        return vehicle
+    if leer:
+        # 24.11.2026: ohne Modell in der Tabelle nur ein Katalogtreffer im Titel — die Beschreibung und der
+        # Freitext-Rueckfall unten bleiben den Platzhaltern vorbehalten (Pruefbericht B-10)
         return vehicle
     if desc:
         # 04.10.2026 (Wunsch Ahmad): aus der Beschreibung nur mit der Marke direkt davor und eindeutig;

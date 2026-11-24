@@ -691,6 +691,10 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     links, hinweise = wz.nach_portalen(links, hinweise, wz.portale_von(user))
     if erkannt.pop("aus_beschreibung", False):
         melden.insert(0, f"Modell aus der Beschreibung übernommen: {erkannt['modell']} – bitte kurz prüfen.")
+    if erkannt.pop("marke_aus_modell", False) and erkannt.get("erkannt") and f["erkennung"] != "inserat":
+        # Serverpruefung 24.11.2026: keine Marke auf dem Bildschirm, nur ein eindeutiger Modellname ("Tiguan ...")
+        melden.insert(0, f"Marke aus dem Modell geschlossen: {erkannt.get('marke')} {erkannt.get('modell')} – "
+                         "bitte kurz prüfen.")
     if verbleibend in (50, 20, 5, 1):
         melden.append(f"Noch {verbleibend} Vergleich{'e' if verbleibend != 1 else ''} heute über das Programm "
                       "(Tageslimit), dann wieder ab 0 Uhr.")
@@ -760,7 +764,11 @@ def _erkennen(f: dict, gelernt_tab: Optional[dict] = None, alternativen: Optiona
     text = (f.get("marke_modell_text") or f"{f.get('marke') or ''} {f.get('modell') or ''}").strip()
     z = werkzeug_erkennung.zuordnen(text, f.get("titel"), beschreibung=f.pop("beschreibung", "") or None)
     quelle = "bildschirm"
-    if not (z["erkannt"] and z["modell_gefunden"]):
+    # Serverpruefung 24.11.2026: ein nur gekuerzt gefundenes Modell ("ceed Automatik" -> Ceed) und eine aus dem Modell
+    # geschlossene Marke ("Tiguan" -> Volkswagen) sind die schwaechsten Treffer — Gelerntes und eine zweite Lesung, die
+    # Marke und Modell ganz trifft, gehen vor; sonst bleiben sie
+    schwach = ("modell_gekuerzt", "marke_aus_modell")
+    if not (z["erkannt"] and z["modell_gefunden"]) or any(z.get(s) for s in schwach):
         for i, kandidat in enumerate([text] + list(alternativen.get("marke_modell_text") or [])):
             g = erkennung_lernen.gelernt(gelernt_tab, kandidat)
             if g:
@@ -770,12 +778,13 @@ def _erkennen(f: dict, gelernt_tab: Optional[dict] = None, alternativen: Optiona
                 break
             if i:
                 z2 = werkzeug_erkennung.zuordnen(kandidat, f.get("titel"))
-                if z2["erkannt"] and z2["modell_gefunden"]:
+                if z2["erkannt"] and z2["modell_gefunden"] and not any(z2.get(s) for s in schwach):
                     z, quelle = z2, "zweite_lesung"
                     break
     f["marke"], f["modell"] = z["marke_text"], z["modell_text"]
     return {"marke": z["marke"] or text, "modell": z["modell"] or "", "erkannt": z["erkannt"],
-            "aus_beschreibung": z["aus_beschreibung"], "modell_gefunden": z["modell_gefunden"], "quelle": quelle}
+            "aus_beschreibung": z["aus_beschreibung"], "modell_gefunden": z["modell_gefunden"], "quelle": quelle,
+            "marke_aus_modell": bool(z.get("marke_aus_modell"))}
 
 
 async def _vorab_ersetzen(user: dict, v: dict, neuer_job: Optional[str]) -> None:

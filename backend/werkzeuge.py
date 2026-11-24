@@ -502,13 +502,18 @@ def vergleichs_links(vehicle: dict, regeln: dict) -> tuple:
     import autoscout_service as asv
     import mobile_service as ms
     links, hinweise = [], []
-    marke = vehicle.get("make_label", "")
-    modell = vehicle.get("model_label", "")
+    # Serverpruefung 24.11.2026: fehlt ein Wert ganz (None), stand im Hinweis „None“ bzw. „“ — jetzt ein Satz
+    marke = str(vehicle.get("make_label") or "").strip()
+    modell = str(vehicle.get("model_label") or "").strip()
     m_marke, m_modell = ms.modell_aufgeloest(vehicle)
     if m_marke and m_modell:
         links.append({"portal": "mobile.de", "url": ms.build_search_url(vehicle, regeln)})
+    elif not marke:
+        hinweise.append("Im Inserat steht keine Marke – kein mobile.de-Vergleich.")
     elif not m_marke:
         hinweise.append(f"mobile.de kennt die Marke „{marke}“ nicht – kein mobile.de-Vergleich.")
+    elif not modell:
+        hinweise.append(f"Im Inserat steht kein Modell (nur „{marke}“) – kein mobile.de-Vergleich.")
     else:
         hinweise.append(f"mobile.de kennt das Modell „{modell}“ nicht – kein mobile.de-Vergleich "
                         f"(sonst würde nur nach „{marke}“ gesucht).")
@@ -516,8 +521,12 @@ def vergleichs_links(vehicle: dict, regeln: dict) -> tuple:
     as_modell = asv._find_model(as_marke, modell) if (as_marke and modell) else None
     if as_marke and as_modell:
         links.append({"portal": "AutoScout24", "url": asv.build_search_url(vehicle, regeln)})
+    elif not marke:
+        hinweise.append("Im Inserat steht keine Marke – kein AutoScout24-Vergleich.")
     elif not as_marke:
         hinweise.append(f"AutoScout24 kennt die Marke „{marke}“ nicht – kein AutoScout24-Vergleich.")
+    elif not modell:
+        hinweise.append(f"Im Inserat steht kein Modell (nur „{marke}“) – kein AutoScout24-Vergleich.")
     else:
         hinweise.append(f"AutoScout24 kennt das Modell „{modell}“ nicht – kein AutoScout24-Vergleich "
                         f"(sonst würde nur nach „{marke}“ gesucht).")

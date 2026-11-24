@@ -5166,3 +5166,28 @@ powershell -ExecutionPolicy Bypass -File deploy\serverpruefung.ps1
   LF-Zeilen hinüber (git auf Windows checkt CRLF aus). Auf dem Server von Hand:
   `cd /opt/autoschnell && sh deploy/serverpruefung.sh voll 30 > /tmp/pruefung.tgz`.
 - Tests: `backend/tests/test_serverpruefung_20261124.py`.
+- Seit dem zweiten Stand (24.11. abends) zusätzlich `leseseiten_fotos.txt`: für Lesungen „ohne Fotos“, wo die
+  Bildadressen in der Seite stehen, wie viele unser Leser findet und (Kleinanzeigen) ob ein Stopp-Wort
+  („Weitere Anzeigen“ …) VOR dem ersten Foto steht und die Fotos abschneidet (`leseseite_analysieren.py --grund`).
+
+### Befund und Verbesserungen aus der ersten Prüfung (24.11.2026)
+Ergebnis der ersten Prüfung (30 Tage): beide Server gesund (Platte, Speicher, Replica-Set, Sicherungen, keine 5xx-Häufung);
+beide melden „System restart required“ (Kernel-Updates, 81 Tage ohne Neustart). Nicht erkannt waren vor allem:
+- **Kleinanzeigen ohne Modell in der Tabelle** (Erweiterung: „Seat Arona“, „Hyundai i20 …“, „Tiguan 2,0 dti Allrad“,
+  „Kia Venga“, „Skoda Fabia/Superb“): jetzt Modell aus dem Titel, nur ein Katalogtreffer derselben Marke
+  (`mobile_service._enhance_generic_model`, kein Freitext, kein Modell aus der Beschreibung). Unter „Weitere VW“ zusätzlich
+  die Erkennung des Programms, wenn das Modell zusammenhängend im Titel steht („VW Golf7 1.5TSI“ → Golf, nie „3200“ → 320).
+- **Programm, Modell mit Zusatzwörtern** („Kia ceed Automatik“): zuletzt die ersten Wörter („ceed“ → cee'd / Ceed) —
+  schwächster Treffer: das andere Portal, Gelerntes und die zweite Lesung gehen vor (`werkzeug_erkennung.kuerzer`).
+- **Programm, keine Marke irgendwo** („Tiguan 2,0 dti Allrad“): ein Modellname vorn, den genau eine Marke führt →
+  diese Marke, Hinweis „Marke aus dem Modell geschlossen … bitte kurz prüfen“ (`Katalog.marke_aus_modell`;
+  mehrdeutig wie „500“ oder „Corsa“ nie).
+- **Hinweis ohne „None“**: fehlt das Modell ganz, heißt es „Im Inserat steht kein Modell (nur „Opel“)“.
+- **mobile.de-Sicherheitsprüfung** (12 von 20 Leseseiten, ~1,5 KB „Powered and protected by Akamai“): eigener Text
+  „kurz eine Sicherheitsprüfung gezeigt – neu laden“, die Seite wird nicht mehr als Leseseite aufgehoben.
+- **Programm 1.5.20**: Tabelle in AutoPointer nach unten geschoben (Honda Jazz, Dacia Dokker) → Hinweis „Tabelle ganz
+  nach oben schieben“, kein Lesebild.
+- Bleibt offen (keine Information im Bild/Inserat): „Weitere VW“ ohne Modell im Titel, „Skoda“ allein, „Gebrauchtwagen“,
+  Tippfehler („Opel Avila“), Ateca unter VW, abgeschnittene AutoScout-Hash-ID (Hinweis seit 1.5.18).
+- Tests: `backend/tests/test_erkennung_20261124.py`, `test_werkzeuge_20261003.py::test_52b`,
+  `autopointer-vergleich/tests/TabelleGeschoben20261124Tests.cs`.

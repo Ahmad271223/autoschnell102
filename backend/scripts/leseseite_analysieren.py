@@ -10,6 +10,11 @@ Aufruf im Backend-Container:
     docker compose exec -T backend python scripts/leseseite_analysieren.py            # die 5 neuesten
     docker compose exec -T backend python scripts/leseseite_analysieren.py --id <id>  # eine bestimmte
     docker compose exec -T backend python scripts/leseseite_analysieren.py --anzahl 10 --text 1200
+    docker compose exec -T backend python scripts/leseseite_analysieren.py --grund "ohne Fotos" --anzahl 10
+
+Serverpruefung 24.11.2026: je Seite zusaetzlich ein Foto-Teil (fotos_untersuchen) — wo die Bildadressen stehen, was
+unser Leser heute davon findet und (Kleinanzeigen) ob ein Stopp-Wort VOR dem ersten Foto steht und die Fotos
+abschneidet. Ausgegeben werden nur Hosts/Pfadmuster und Stellen, keine Seiteninhalte.
 """
 import argparse
 import asyncio
@@ -74,6 +79,60 @@ def maskieren(text) -> str:
     return _MASKE_TELEFON.sub(lambda m: "[nummer]" if sum(c.isdigit() for c in m.group(0)) >= 7 else m.group(0), t)
 
 
+#: Bildadressen in der Seite (auch mit \/ im JSON); Gruppe 1 Host, Gruppe 2 Pfad
+_BILD_ADRESSE = re.compile(r'(?i)https?:(?:\\?/){2}([a-z0-9.-]+\.[a-z]{2,})((?:\\?/[A-Za-z0-9_.$%-]+){1,8})')
+_BILD_ENDUNG = re.compile(r"(?i)\.(?:jpe?g|png|webp|avif)$")
+
+
+def _bild_muster(host: str, pfad: str) -> str:
+    """Host + die ersten Pfadteile, Ziffern/Kennungen als # ("img.kleinanzeigen.de/api/v1/prod-ads/images/#")."""
+    teile = [x for x in pfad.replace("\\/", "/").split("/") if x][:5]
+    teile = ["#" if (re.search(r"\d", x) and len(x) > 3) or len(x) > 24 else x for x in teile]
+    return host.lower() + "/" + "/".join(teile)
+
+
+def fotos_untersuchen(html: str, portal: str) -> None:
+    """Serverpruefung 24.11.2026 (Kleinanzeigen 3580652424: live 13 Fotos, die Lesung fand keins): wo stehen die
+    Bildadressen, wie viele findet unser Leser heute, und schneidet ein Stopp-Wort sie ab?"""
+    muster: Counter = Counter()
+    erste: dict = {}
+    for m in _BILD_ADRESSE.finditer(html):
+        host, pfad = m.group(1), m.group(2)
+        bildartig = (host.lower().startswith(("img", "image", "i.", "static", "cdn", "prod"))
+                     or "image" in pfad.lower() or _BILD_ENDUNG.search(pfad))
+        if not bildartig:
+            continue
+        k = _bild_muster(host, pfad)
+        muster[k] += 1
+        erste.setdefault(k, m.start())
+    print("    Fotos:")
+    if not muster:
+        print("      keine Bildadressen in der Seite")
+    for k, n in muster.most_common(8):
+        print(f"      {n:>5} x {k}   (erste Stelle {erste[k]:,})")
+    if portal == "kleinanzeigen":
+        import kleinanzeigen_service as ks
+        try:
+            gefunden = ks._extract_images(html)
+        except Exception as exc:  # noqa: BLE001
+            print(f"      Leser: {exc}")
+            return
+        roh = [m.start() for m in re.finditer(
+            r"img\.kleinanzeigen\.de(?:\\?/)api(?:\\?/)v1(?:\\?/)prod-ads(?:\\?/)images", html)]
+        print(f"      prod-ads-Adressen in der Seite: {len(roh)}"
+              + (f" (erste Stelle {roh[0]:,})" if roh else "") + f"   unser Leser findet heute: {len(gefunden)}")
+        klein = html.lower()
+        for marker in ks.STOP_MARKERS:
+            pos = klein.find(marker.lower())
+            if pos == -1:
+                continue
+            vorher = bool(roh) and pos < roh[0]
+            warnung = "   <-- VOR dem ersten Foto: schneidet die Fotos ab" if vorher else ""
+            print(f"      Stopp-Wort {marker!r} an Stelle {pos:,}{warnung}")
+        schnitt = len(ks._cut_at_stop(html))
+        print(f"      nach dem Abschneiden bleiben {schnitt:,} von {len(html):,} Zeichen")
+
+
 def untersuchen(html: str, text_n: int) -> None:
     print(f"    Laenge entpackt: {len(html):,} Zeichen")
     m = re.search(r"(?is)<title[^>]*>(.*?)</title>", html)
@@ -113,12 +172,15 @@ async def main() -> int:
     p.add_argument("--id", default=None)
     p.add_argument("--anzahl", type=int, default=5)
     p.add_argument("--text", type=int, default=600, help="Zeichen sichtbarer Text je Seite (hoechstens 3000)")
+    p.add_argument("--grund", default=None, help='nur Seiten, deren Grund diesen Text enthaelt (z. B. "ohne Fotos")')
     args = p.parse_args()
     from deps import db
     import browser_helfer as bh
     import werkzeuge as wz
     from listing_identity import ListingIdentityError, get_listing_identity
     filt = {"id": args.id} if args.id else {}
+    if args.grund:
+        filt["grund"] = {"$regex": re.escape(args.grund), "$options": "i"}
     n = 0
     async for s in db[wz.SAMMLUNG_LESESEITEN].find(filt, {"_id": 0}).sort("erstellt_am", -1).limit(args.anzahl):
         n += 1
@@ -139,6 +201,10 @@ async def main() -> int:
             print(f"  nicht entpackbar: {exc}")
             continue
         untersuchen(html, min(args.text, 3000))
+        try:
+            fotos_untersuchen(html, (ident or {}).get("source") or s.get("portal") or "")
+        except Exception as exc:  # noqa: BLE001
+            print(f"    Fotos: {exc}")
         # was sagt unser Leser heute dazu? — und wie ist der ENTPACKTE Datenstrom aufgebaut (die Schluessel stehen im
         # rohen HTML mit Backslash-Anfuehrungszeichen, darum hier auf dem entpackten Text)
         try:

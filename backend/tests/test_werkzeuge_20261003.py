@@ -823,6 +823,21 @@ def test_52_server_erkennt_aus_der_ueberschrift_und_meldet_unbekanntes(welt):
     assert any("Marke" in h for h in d["hinweise"])
 
 
+def test_52b_marke_aus_dem_modell_und_gekuerztes_modell(welt):
+    """Serverpruefung 24.11.2026 (Lesebilder Kleinanzeigen): Titel "Tiguan 2,0 dti Allrad" ohne jede Marke ->
+    Volkswagen Tiguan mit "bitte kurz pruefen"; Feld "Andere", Titel "Kia ceed Automatik" -> cee'd / Ceed. Die Antwort
+    an das Programm behaelt ihre Form (keine neuen Schluessel in "fahrzeug")."""
+    prog = _prog(welt)
+    d = _vergleich(prog, _roh("Tiguan 2,0 dti Allrad", "Tiguan 2,0 dti Allrad")).json()
+    assert d["fahrzeug"] == {"marke": "Volkswagen", "modell": "Tiguan", "erkannt": True, "modell_gefunden": True}
+    assert [x["portal"] for x in d["links"]] == ["mobile.de", "AutoScout24"]
+    assert d["hinweise"][0] == "Marke aus dem Modell geschlossen: Volkswagen Tiguan – bitte kurz prüfen."
+    d = _vergleich(prog, _roh("Andere", "Kia ceed Automatik")).json()
+    assert d["fahrzeug"] == {"marke": "Kia", "modell": "cee'd / Ceed", "erkannt": True, "modell_gefunden": True}
+    assert [x["portal"] for x in d["links"]] == ["mobile.de", "AutoScout24"]
+    assert not any("geschlossen" in h for h in d["hinweise"])
+
+
 def test_53_aeltere_programme_wie_bisher(welt):
     """Programme bis 1.3.5 schicken schon erkannte Werte (ohne roh) — der Server nimmt sie wie bisher."""
     prog = _prog(welt)

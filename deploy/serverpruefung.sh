@@ -82,6 +82,10 @@ if [ "$ART" = "voll" ]; then
     docker compose exec -T backend rm -rf /tmp/lesebilder-pruefung
     schritt "Leseseiten-Struktur"
     docker compose exec -T backend python scripts/leseseite_analysieren.py --anzahl 10 > "$AUS/leseseiten_struktur.txt" 2>&1
+    # 24.11.2026: Lesungen ohne Fotos — wo die Bildadressen stehen und ob ein Stopp-Wort sie abschneidet
+    schritt "Leseseiten ohne Fotos"
+    docker compose exec -T backend python scripts/leseseite_analysieren.py --grund "ohne Fotos" --anzahl 10 \
+        > "$AUS/leseseiten_fotos.txt" 2>&1
 fi
 
 schritt "packe Ergebnis ($(du -sh "$AUS" | cut -f1))"

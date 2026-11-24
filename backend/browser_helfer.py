@@ -432,6 +432,22 @@ def mobile_seite_nicht_gefunden(text: str) -> bool:
     return '"notFound":[' in text and '"listing":{' not in text
 
 
+#: Serverpruefung 24.11.2026: 12 von 20 aufgehobenen Leseseiten (Nov. 2026) waren keine Inserate, sondern die kurze
+#: Sicherheitspruefung vor mobile.de (~1,5 KB, kein Titel, "Powered and protected by Akamai") — sie verschwindet nach
+#: wenigen Sekunden von selbst. Der Sucher bekam "Pruefseite oder nicht mehr online" und wusste nicht, was davon; die
+#: Seite selbst hilft beim Nachstellen nicht und wird darum auch nicht mehr aufgehoben (_LESESEITE_GRUENDE).
+PRUEFSEITE_TEXT = ("mobile.de hat statt des Inserats kurz eine Sicherheitsprüfung gezeigt. Bitte die Seite neu laden "
+                   "und noch einmal versuchen.")
+_PRUEFSEITE_HOECHSTENS = 20_000          # Zeichen; echte Inseratseiten (auch die leere Huelle) sind viel groesser
+
+
+def mobile_pruefseite(html: str) -> bool:
+    if not html or len(html) > _PRUEFSEITE_HOECHSTENS:
+        return False
+    klein = html.lower()
+    return "akamai" in klein and '"listing":{' not in html
+
+
 def mobile_inserat(html: str, item_id: str, url: str) -> Tuple[dict, Optional[dict]]:
     import mobile_service as ms
     text = next_flight_text(html)
@@ -439,6 +455,8 @@ def mobile_inserat(html: str, item_id: str, url: str) -> Tuple[dict, Optional[di
     if not listing:
         if mobile_seite_nicht_gefunden(text):
             raise SeiteUngueltig(NICHT_GEFUNDEN_TEXT)
+        if mobile_pruefseite(html):
+            raise SeiteUngueltig(PRUEFSEITE_TEXT)
         raise SeiteUngueltig("Auf der Seite stehen keine Inseratsdaten (Prüfseite von mobile.de oder "
                              "Inserat nicht mehr online).")
     if str(listing.get("id") or "") != str(item_id):
