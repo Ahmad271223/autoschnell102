@@ -1233,3 +1233,8 @@ select:focus-visible, textarea:focus-visible, input:focus-visible {
 @media (max-width: 600px) {
   [data-sonner-toaster] { top: calc(12px + env(safe-area-inset-top, 0px)) !important; }
 }
+
+/* Wunsch Ahmad 24.11.2026: Reiter der Fahrzeugakte — ein ausgeblendeter
+   Abschnitt bleibt aus, auch wenn seine Klasse (tactical-card, flex, grid)
+   selbst ein display setzt. */
+[data-reiter][hidden] { display: none !important; }

@@ -15,6 +15,10 @@ import { kmAusText, preisAusText } from "@/lib/preis";
 import { betragAlsText, fristErneuertText } from "@/lib/bestandForm";
 import { termineOffenDetail, termineStornoFrage } from "@/lib/akteHinweise";
 import { MODAL_ATTRIBUTE, useModal } from "@/lib/useModal";
+import {
+  JE_SEITE, SAMMEL_ZIELE, ZEITRAEUME, auswahlUmschalten, euro, kaufDatum, listenParameter,
+  sammelErgebnisText, sammelFrage, seiteAuswaehlen, seiteGanzGewaehlt, zeitraumFehler, zielText,
+} from "@/lib/fahrzeugListe";
 
 /**
  * Fahrzeugbestand (B2B-Modul Phase 1).
@@ -69,14 +73,27 @@ export default function Bestand() {
   // M20: Beim schnellen Filterwechsel gewinnt nur die LETZTE Anfrage —
   // eine langsamere aeltere Antwort darf die Liste nicht ueberschreiben.
   const anfrageNr = useRef(0);
+  // Wunsch Ahmad 24.11.2026: "Gekauft im Zeitraum", Seiten, Mehrfachauswahl.
+  const [zeitraum, setZeitraum] = useState("");
+  const [von, setVon] = useState("");
+  const [bis, setBis] = useState("");
+  const [seite, setSeite] = useState(1);
+  const [auswahl, setAuswahl] = useState(() => new Set());
+  const [ziel, setZiel] = useState("");
+  const [sammelOffen, setSammelOffen] = useState(false);
+  const zFehler = zeitraumFehler(zeitraum, von, bis);
+  const filterParameter = { filter, quelle: sourceFilter, zeitraum, von, bis };
+  const filterSchluessel = listenParameter(filterParameter);
+
+  // Neuer Filter: erste Seite, Auswahl leeren (sonst änderte man unbemerkt
+  // Fahrzeuge, die gar nicht mehr in der Liste stehen).
+  useEffect(() => { setSeite(1); setAuswahl(new Set()); }, [filterSchluessel]);
 
   const load = useCallback(async () => {
     const nr = ++anfrageNr.current;
     try {
-      const params = new URLSearchParams();
-      if (filter) params.set("lifecycle", filter);
-      if (sourceFilter) params.set("source", sourceFilter);
-      const r = await api.get(`/bestand?${params.toString()}`);
+      const params = listenParameter({ ...filterParameter, seite, jeSeite: JE_SEITE });
+      const r = await api.get(`/bestand?${params}`);
       if (nr !== anfrageNr.current) return;
       setData(r.data || { items: [], counts: {} });
       setLadeFehler(null);
@@ -86,9 +103,29 @@ export default function Bestand() {
     } finally {
       if (nr === anfrageNr.current) setGeladen(true);
     }
-  }, [filter, sourceFilter]);
+    // filterParameter steckt vollständig in filterSchluessel
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterSchluessel, seite]);
 
   useEffect(() => { load(); }, [load]);
+
+  const [alleLaden, setAlleLaden] = useState(false);
+  const alleTrefferWaehlen = async () => {
+    if (alleLaden) return;
+    setAlleLaden(true);
+    try {
+      const r = await api.get(`/bestand/ids?${listenParameter(filterParameter)}`);
+      const ids = r.data?.ids || [];
+      setAuswahl(new Set(ids));
+      if (r.data?.gekuerzt) {
+        toast.warning(`Es wurden die ersten ${ids.length} von ${r.data.gesamt} Treffern ausgewählt — höchstens ${r.data.max || ids.length} auf einmal.`);
+      }
+    } catch (e) {
+      toast.error(errMsg(e, "Treffer konnten nicht ausgewählt werden"));
+    } finally {
+      setAlleLaden(false);
+    }
+  };
 
   const features = useFeatures();          // Go-Live-Schalter (15.09.2026)
   const decide = async (vehicleId, decision, vonLifecycle) => {
@@ -260,6 +297,95 @@ export default function Bestand() {
         </div>
       </div>
 
+      {/* Wunsch Ahmad 24.11.2026: Gekauft im Zeitraum (deutsche Zeit, Woche ab Montag) */}
+      <div className="mt-3 flex flex-wrap items-center gap-2 text-[13px]" data-testid="bestand-zeitraum">
+        <label htmlFor="bestand-zeitraum-wahl" style={{ color: "var(--text-secondary)" }}>Gekauft im Zeitraum</label>
+        <select id="bestand-zeitraum-wahl" value={zeitraum} onChange={(e) => setZeitraum(e.target.value)}
+                data-testid="bestand-zeitraum-wahl"
+                className="rounded-lg border px-2.5 py-1.5 text-[13px]"
+                style={{ borderColor: "var(--border-default)", background: "var(--bg-input-solid)",
+                  color: "var(--text-primary)", colorScheme: "var(--scheme)" }}>
+          {ZEITRAEUME.map((z) => <option key={z.key} value={z.key}>{z.label}</option>)}
+        </select>
+        {zeitraum === "eigener" && (
+          <>
+            <input type="date" value={von} onChange={(e) => setVon(e.target.value)} aria-label="Gekauft von"
+                   data-testid="bestand-zeitraum-von" className="rounded-lg border px-2 py-1.5 text-[13px]"
+                   style={{ borderColor: "var(--border-default)", background: "var(--bg-input-solid)",
+                     color: "var(--text-primary)", colorScheme: "var(--scheme)" }} />
+            <span style={{ color: "var(--text-muted)" }}>bis</span>
+            <input type="date" value={bis} onChange={(e) => setBis(e.target.value)} aria-label="Gekauft bis"
+                   data-testid="bestand-zeitraum-bis" className="rounded-lg border px-2 py-1.5 text-[13px]"
+                   style={{ borderColor: "var(--border-default)", background: "var(--bg-input-solid)",
+                     color: "var(--text-primary)", colorScheme: "var(--scheme)" }} />
+            {zFehler && <span className="text-[12px]" style={{ color: "var(--tx-amber)" }}>{zFehler}</span>}
+          </>
+        )}
+      </div>
+
+      {/* Anzahl und Einkauf gesamt über ALLE Treffer (Server rechnet; den
+          Betrag liefert er nur Rollen, die Kaufpreise sehen dürfen). */}
+      {data.zusammenfassung && (
+        <div className="mt-3 tactical-card px-4 py-3 flex flex-wrap items-end gap-x-8 gap-y-2" data-testid="bestand-summe">
+          <div>
+            <div className="text-[11px] uppercase tracking-wide" style={{ color: "var(--text-muted)" }}>Gekaufte Fahrzeuge</div>
+            <div className="text-xl font-bold" data-testid="bestand-anzahl">{data.zusammenfassung.anzahl ?? 0}</div>
+          </div>
+          {data.zusammenfassung.einkauf_gesamt != null && (
+            <div>
+              <div className="text-[11px] uppercase tracking-wide" style={{ color: "var(--text-muted)" }}>Einkauf gesamt</div>
+              <div className="text-xl font-bold" data-testid="bestand-einkauf-gesamt">
+                {euro(data.zusammenfassung.einkauf_gesamt)}
+              </div>
+            </div>
+          )}
+          {data.zusammenfassung.ohne_preis > 0 && (
+            <div className="text-[12px] pb-1" style={{ color: "var(--text-secondary)" }} data-testid="bestand-ohne-preis">
+              {data.zusammenfassung.ohne_preis} ohne Preis · stornierte und nicht abgeholte zählen nicht mit
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Mehrere Fahrzeuge auf einmal (nur Chef — der Server prüft jedes einzeln) */}
+      {chef && (data.items || []).length > 0 && (
+        <div className="mt-3 flex flex-wrap items-center gap-2 text-[13px]" data-testid="bestand-auswahl-leiste">
+          <label className="inline-flex items-center gap-2 min-h-[36px] cursor-pointer">
+            <input type="checkbox" data-testid="bestand-seite-auswaehlen"
+                   checked={seiteGanzGewaehlt(auswahl, (data.items || []).map((v) => v.id))}
+                   onChange={(e) => setAuswahl((a) => seiteAuswaehlen(a, (data.items || []).map((v) => v.id), e.target.checked))} />
+            Seite auswählen
+          </label>
+          {(data.gesamt || 0) > (data.items || []).length && (
+            <button type="button" onClick={alleTrefferWaehlen} disabled={alleLaden} data-testid="bestand-alle-treffer"
+                    className="rounded-lg px-3 py-1.5 border disabled:opacity-50" style={{ borderColor: "var(--border-default)" }}>
+              Alle {data.gesamt} Treffer auswählen
+            </button>
+          )}
+          {auswahl.size > 0 && (
+            <>
+              <span className="font-semibold" data-testid="bestand-auswahl-anzahl">{auswahl.size} ausgewählt</span>
+              <button type="button" onClick={() => setAuswahl(new Set())} data-testid="bestand-auswahl-leeren"
+                      className="rounded-lg px-2.5 py-1.5" style={{ color: "var(--text-secondary)" }}>
+                Auswahl aufheben
+              </button>
+              <select value={ziel} onChange={(e) => setZiel(e.target.value)} aria-label="Status ändern auf"
+                      data-testid="bestand-ziel" className="rounded-lg border px-2.5 py-1.5 text-[13px]"
+                      style={{ borderColor: "var(--border-default)", background: "var(--bg-input-solid)",
+                        color: "var(--text-primary)", colorScheme: "var(--scheme)" }}>
+                <option value="">Status ändern auf …</option>
+                {SAMMEL_ZIELE.map((z) => <option key={z.key} value={z.key}>{z.label}</option>)}
+              </select>
+              <button type="button" disabled={!ziel} onClick={() => setSammelOffen(true)} data-testid="bestand-sammel-start"
+                      className="rounded-lg px-3 py-1.5 font-semibold text-white disabled:opacity-50"
+                      style={{ background: "var(--accent-red)" }}>
+                Ändern …
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
       {/* Runde 27: Die Liste endet bei 500 Fahrzeugen — das sagen wir jetzt,
           statt aeltere Autos stillschweigend wegzulassen. */}
       {data.gekuerzt && (
@@ -298,7 +424,8 @@ export default function Bestand() {
           const lc = v.lifecycle || "verglichen";
           const img = (d.image_urls || d.images || [])[0];
           return (
-            <div key={v.id} className="tactical-card overflow-hidden flex flex-col" data-testid={`bestand-${v.id}`}>
+            <div key={v.id} className="tactical-card overflow-hidden flex flex-col relative" data-testid={`bestand-${v.id}`}
+                 style={auswahl.has(v.id) ? { boxShadow: "0 0 0 2px var(--accent-red)" } : undefined}>
               {img && (
                 <div className="h-36 overflow-hidden">
                   <img src={img} alt="" className="w-full h-full object-cover" />
@@ -308,6 +435,13 @@ export default function Bestand() {
                 {/* min-w-0: sonst drueckt ein langer Untertitel das
                     Status-Schild aus der Karte (11.09.2026). */}
                 <div className="flex items-start justify-between gap-3">
+                  {/* Wunsch Ahmad 24.11.2026: Häkchen je Fahrzeug (nur Chef) */}
+                  {chef && (
+                    <input type="checkbox" checked={auswahl.has(v.id)} data-testid={`bestand-waehlen-${v.id}`}
+                           aria-label={`${d.make_label || "Fahrzeug"} ${d.model_label || ""} auswählen`}
+                           onChange={() => setAuswahl((a) => auswahlUmschalten(a, v.id))}
+                           className="mt-1 w-4 h-4 shrink-0 cursor-pointer" />
+                  )}
                   <div className="min-w-0 flex-1">
                     <div className="font-semibold line-clamp-2 break-words">{d.make_label} {d.model_label}</div>
                     {d.model_description && (
@@ -320,6 +454,7 @@ export default function Bestand() {
                   <StatusSchild status={lc} text={lifecycleText(lc)} data-testid={`bestand-status-${v.id}`} />
                 </div>
                 <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs" style={{ color: "var(--text-secondary)" }}>
+                  {kaufDatum(v.gekauft_am) && <span data-testid={`bestand-gekauft-${v.id}`}>Gekauft {kaufDatum(v.gekauft_am)}</span>}
                   {d.first_registration && <span>EZ {d.first_registration}</span>}
                   {kmText(d.mileage) && <span>{kmText(d.mileage)}</span>}
                   {v.purchase_price != null && (
@@ -457,11 +592,127 @@ export default function Bestand() {
         })}
       </div>
 
+      {/* Seiten (Wunsch Ahmad 24.11.2026) — Anzahl/Summe oben gelten immer für alle Treffer */}
+      {data.je_seite && (data.gesamt || 0) > data.je_seite && (
+        <div className="mt-4 flex items-center justify-center gap-3 text-[13px]" data-testid="bestand-seiten">
+          <button type="button" disabled={seite <= 1} onClick={() => setSeite((s) => Math.max(1, s - 1))}
+                  data-testid="bestand-seite-zurueck"
+                  className="rounded-lg px-3 py-1.5 border disabled:opacity-40" style={{ borderColor: "var(--border-default)" }}>
+            ‹ Zurück
+          </button>
+          <span style={{ color: "var(--text-secondary)" }}>
+            Seite {seite} von {Math.max(1, Math.ceil(data.gesamt / data.je_seite))}
+          </span>
+          <button type="button" disabled={seite >= Math.ceil(data.gesamt / data.je_seite)}
+                  onClick={() => setSeite((s) => s + 1)} data-testid="bestand-seite-weiter"
+                  className="rounded-lg px-3 py-1.5 border disabled:opacity-40" style={{ borderColor: "var(--border-default)" }}>
+            Weiter ›
+          </button>
+        </div>
+      )}
+
+      {sammelOffen && (
+        <SammelDialog ids={[...auswahl]} ziel={ziel} namen={Object.fromEntries((data.items || []).map((v) => [
+          v.id, `${v.data?.make_label || ""} ${v.data?.model_label || ""}`.trim()]))}
+                      onClose={(fertig) => {
+                        setSammelOffen(false);
+                        if (fertig) { setAuswahl(new Set()); setZiel(""); load(); }
+                      }} />
+      )}
+
       {showManual && <ManualVehicleDialog onClose={() => setShowManual(false)} onDone={() => { setShowManual(false); load(); }} />}
       {bearbeiten && (
         <ManualVehicleDialog fahrzeug={bearbeiten} onClose={() => setBearbeiten(null)}
                              onDone={() => { setBearbeiten(null); load(); }} />
       )}
+    </div>
+  );
+}
+
+/**
+ * Wunsch Ahmad 24.11.2026: Rückfrage vor der Sammeländerung, danach das
+ * Ergebnis (geändert / übersprungen mit Grund). onClose(true) = es wurde
+ * ausgeführt (Liste neu laden, Auswahl leeren).
+ */
+export function SammelDialog({ ids, ziel, namen = {}, onClose }) {
+  const [laeuft, setLaeuft] = useState(false);
+  const [ergebnis, setErgebnis] = useState(null);
+  const dialogRef = useModal(() => { if (!laeuft) onClose?.(Boolean(ergebnis)); });
+  const hinweis = SAMMEL_ZIELE.find((z) => z.key === ziel)?.hinweis;
+
+  const ausfuehren = async () => {
+    if (laeuft) return;
+    setLaeuft(true);
+    try {
+      const r = await api.post("/bestand/status", { ids, ziel });
+      setErgebnis(r.data);
+      toast.success(sammelErgebnisText(r.data));
+    } catch (e) {
+      toast.error(errMsg(e, "Status konnte nicht geändert werden"));
+    } finally {
+      setLaeuft(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.7)" }}>
+      <div ref={dialogRef} {...MODAL_ATTRIBUTE} aria-labelledby="sammel-dialog-titel" data-testid="bestand-sammel-dialog"
+           className="w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-2xl p-5"
+           style={{ background: "var(--bg-elevated)", border: "1px solid var(--wa-10)" }}>
+        <div className="text-lg font-bold" id="sammel-dialog-titel">
+          {ergebnis ? "Erledigt" : sammelFrage(ids.length, ziel)}
+        </div>
+        {!ergebnis && (
+          <>
+            {hinweis && (
+              <div className="mt-3 rounded-xl border px-3 py-2 text-sm" data-testid="bestand-sammel-hinweis"
+                   style={{ borderColor: "color-mix(in srgb, var(--st-amber) 40%, transparent)",
+                     background: "color-mix(in srgb, var(--st-amber) 10%, transparent)", color: "var(--tx-amber)" }}>
+                {hinweis}
+              </div>
+            )}
+            <div className="mt-3 text-sm" style={{ color: "var(--text-secondary)" }}>
+              Jedes Fahrzeug wird einzeln geprüft. Was nicht geht, wird übersprungen und mit Grund angezeigt.
+            </div>
+            <div className="mt-5 flex flex-wrap justify-end gap-2">
+              <button type="button" onClick={() => onClose?.(false)} disabled={laeuft} data-testid="bestand-sammel-abbrechen"
+                      className="rounded-xl px-4 py-2.5 text-sm border min-h-[44px]" style={{ borderColor: "var(--border-default)" }}>
+                Abbrechen
+              </button>
+              <button type="button" onClick={ausfuehren} disabled={laeuft} data-testid="bestand-sammel-ja"
+                      className="rounded-xl px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50 min-h-[44px]"
+                      style={{ background: "var(--accent-red)" }}>
+                {laeuft ? "Wird geändert …" : `Ja, auf „${zielText(ziel)}“ setzen`}
+              </button>
+            </div>
+          </>
+        )}
+        {ergebnis && (
+          <div className="mt-3 text-sm" data-testid="bestand-sammel-ergebnis">
+            <div style={{ color: "var(--tx-gruen)" }}>{sammelErgebnisText(ergebnis)}.</div>
+            {(ergebnis.uebersprungen || []).length > 0 && (
+              <div className="mt-3">
+                <div className="text-[12px] uppercase tracking-wide" style={{ color: "var(--text-muted)" }}>Übersprungen</div>
+                <ul className="mt-1 space-y-1 max-h-64 overflow-y-auto">
+                  {ergebnis.uebersprungen.map((u) => (
+                    <li key={u.id} className="text-[13px]" data-testid={`bestand-sammel-skip-${u.id}`}>
+                      <span className="font-medium" style={{ color: "var(--text-primary)" }}>{namen[u.id] || u.id}</span>
+                      <span style={{ color: "var(--text-secondary)" }}> — {u.grund}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            <div className="mt-5 flex justify-end">
+              <button type="button" onClick={() => onClose?.(true)} data-testid="bestand-sammel-fertig"
+                      className="rounded-xl px-4 py-2.5 text-sm font-semibold border min-h-[44px]"
+                      style={{ borderColor: "var(--border-default)" }}>
+                Schließen
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

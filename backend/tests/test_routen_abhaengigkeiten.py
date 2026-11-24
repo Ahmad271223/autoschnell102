@@ -142,6 +142,8 @@ CHEF_ROUTEN = {
     "/api/vehicles/{vehicle_id}/decision", "/api/vehicles/{vehicle_id}/bestand",
     "/api/vehicles/{vehicle_id}/apply-deviations", "/api/vehicles/manual",
     "/api/vehicles/manual/{vehicle_id}", "/api/vehicles/{vehicle_id}/besitzer",
+    # Fahrzeugliste 24.11.2026: Auswahl aller Treffer + Sammel-Statusänderung
+    "/api/bestand/ids", "/api/bestand/status",
     "/api/dealer/sucher", "/api/dealer/sucher/{sucher_id}",
     "/api/dealer/sucher/{sucher_id}/abo-anfrage", "/api/dealer/sucher-plans",
     "/api/dealer/sale-plan", "/api/dealer/sale-plan/upgrade-request",
