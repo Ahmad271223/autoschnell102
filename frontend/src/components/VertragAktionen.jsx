@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
-  CalendarPlus, Eye, FileText, Mail, MoreHorizontal, PenLine, Pencil, Send, Trash2, UserRoundPen,
+  CalendarPlus, Eye, FilePenLine, FileText, Mail, MoreHorizontal, PenLine, Pencil, Send, Trash2, UserRoundPen,
 } from "lucide-react";
 
 // Wunsch Ahmad 03.10.2026: Im Vertragsarchiv standen acht runde Symbol-Knöpfe
@@ -139,6 +139,12 @@ export default function VertragAktionen({ it, a, zustand = {} }) {
                  onClick={a.korrektur} disabled={!!zustand.aendernOhneAbo} titel="Verkäuferdaten korrigieren"
                  text={zustand.aendernOhneAbo ? "Nur mit aktivem Abo"
                    : "Name, Anschrift, Kontakt – ergibt eine neue Fassung"} />
+        {/* Wunsch Ahmad 24.11.2026: Änderungen nach der Unterschrift als eigener Abänderungsvertrag */}
+        {a.abaenderungen && (
+          <Eintrag testid={`abaenderungen-${it.id}`} icon={FilePenLine} schliessen={schliessen}
+                   onClick={a.abaenderungen} titel="Abänderungsverträge"
+                   text="Änderungen nach der Unterschrift – ansehen, senden, unterschreiben lassen" />
+        )}
       </Gruppe>
       <div className="my-1 border-t" style={{ borderColor: "var(--border-default)" }} />
       <Eintrag testid={`del-pdf-${it.id}`} icon={Trash2} schliessen={schliessen} onClick={a.loeschen}

@@ -244,6 +244,7 @@ const Meldungen = seite(() => import("@/pages/app/Meldungen"));
 // Wunsch Ahmad 24.11.2026: "Was ist neu" fuer Chef und Sucher
 const Neuigkeiten = seite(() => import("@/pages/app/Neuigkeiten"));
 const FirmenSeite = seite(() => import("@/pages/firma/FirmenSeite"));
+const AbaenderungUnterschreiben = seite(() => import("@/pages/firma/AbaenderungUnterschreiben")); // 24.11.2026
 const Anfragen = seite(() => import("@/pages/app/Anfragen"));
 const Freigaben = seite(() => import("@/pages/app/Freigaben"));
 const Chancen = seite(() => import("@/pages/app/Chancen"));
@@ -377,6 +378,7 @@ export default function App() {
             <Route path="/agb" element={<AGB />} />
             {/* Kundenportal (29.09.2026): Firmenseite auch über den Pfad (Vorschau, lokal ohne Unterdomains) */}
             <Route path="/firma/:slug" element={<FirmenSeite />} />
+            <Route path="/abaenderung" element={<AbaenderungUnterschreiben />} />
 
             <Route path="/abo" element={<ProtectedRoute requireSub={false}><Subscription /></ProtectedRoute>} />
 

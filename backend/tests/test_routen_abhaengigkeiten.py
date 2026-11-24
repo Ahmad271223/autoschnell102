@@ -95,6 +95,8 @@ OEFFENTLICH = {
     "/api/public/firma", "/api/public/portal/oeffnen",
     "/api/public/portal/vertrag", "/api/public/portal/vertrag/pdf",
     "/api/public/portal/vertrag/unterschreiben",
+    # Abaenderungsvertrag (24.11.2026): Link mit Zufallsschluessel in der Kopfzeile X-Portal-Sitzung, je IP gedrosselt
+    "/api/public/abaenderung", "/api/public/abaenderung/pdf", "/api/public/abaenderung/unterschreiben",
     "/api/marktplatz/haendler", "/api/marktplatz/listings",
     "/api/marktplatz/haendler/{slug}",        # Marktplatz ohne Anmeldung (Wunsch 09/2026)
     "/api/files/{key:path}",                  # signierte Dateilinks (dateien.signatur_gueltig)

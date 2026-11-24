@@ -58,6 +58,7 @@ from routes import appointments as appointments_routes
 from routes import auth as auth_routes
 from routes import bestand as bestand_routes
 from routes import kundenportal as kundenportal_routes
+from routes import abaenderungen as abaenderungen_routes  # Abaenderungsvertrag (24.11.2026)
 from routes import contracts as contracts_routes
 from routes import dealer as dealer_routes
 from routes import drivers as drivers_routes
@@ -2239,6 +2240,7 @@ api.include_router(dealer_routes.router)
 api.include_router(contracts_routes.router)
 # Firmenseite + Kundenportal (29.09.2026): oeffentliche Firmenseite, Code-Freigabe, Unterschrift, Meldungen
 api.include_router(kundenportal_routes.router)
+api.include_router(abaenderungen_routes.router)
 api.include_router(appointments_routes.router)
 api.include_router(drivers_routes.router)
 api.include_router(listings_routes.router)

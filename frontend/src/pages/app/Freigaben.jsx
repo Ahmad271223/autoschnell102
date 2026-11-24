@@ -9,6 +9,7 @@ import KiBewertungKarte from "@/components/KiBewertungKarte";
 import SchadenFotos from "@/components/SchadenFotos";
 import AbweichungenListe from "@/components/AbweichungenListe";
 import UeberweisungKarte from "@/components/UeberweisungKarte";
+import NachlackierungHinweis from "@/components/NachlackierungHinweis"; // 24.11.2026
 import RueckfrageDialog from "@/components/RueckfrageDialog";
 import { rueckfrageBezug, schadenBezeichnung } from "@/lib/kiSchaden";
 import { datumZeit } from "@/lib/markt";
@@ -438,6 +439,7 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
         </div>
       )}
 
+      <NachlackierungHinweis befund={e.nachlackierung} testid={`freigabe-nachlackierung-${e.protocol_id}`} />
       {/* Wunsch Ahmad 06.10.2026: Lackdicke-Messungen des Fahrers (kein Schaden) mit Fotos */}
       {(e.lackmessungen || []).length > 0 && (
         <div className="mt-3 rounded-lg p-2.5" style={{ border: "1px solid var(--border-default)" }}
