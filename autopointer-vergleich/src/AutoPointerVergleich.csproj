@@ -27,10 +27,13 @@
     <!-- Sprachdiktat (24.11.2026): die nativen DLLs nicht lose ausgeben, sondern als Ressource in die EXE
          (Diktat.LaufzeitBereitstellen entpackt sie beim ersten Diktat). -->
     <PackageReference Include="Whisper.net.Runtime" Version="1.9.1" ExcludeAssets="build" GeneratePathProperty="true" />
+    <PackageReference Include="Whisper.net.Runtime.Vulkan" Version="1.9.1" ExcludeAssets="build" GeneratePathProperty="true" />
   </ItemGroup>
 
   <ItemGroup>
     <EmbeddedResource Include="$(PkgWhisper_net_Runtime)\build\win-x64\*.dll" LogicalName="diktat/%(Filename)%(Extension)" />
+    <!-- Grafikkarte (Vulkan, auch Intel/AMD-Onboard): Encoder ein Vielfaches schneller; ohne Vulkan bleibt es die CPU -->
+    <EmbeddedResource Include="$(PkgWhisper_net_Runtime_Vulkan)\build\win-x64\*.dll" LogicalName="diktat-vulkan/%(Filename)%(Extension)" />
   </ItemGroup>
 
 </Project>

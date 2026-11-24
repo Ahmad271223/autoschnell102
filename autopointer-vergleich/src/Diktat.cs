@@ -122,8 +122,10 @@ internal sealed class Diktat : IDisposable
     public async Task<string> ErkennenAsync(float[] proben, CancellationToken abbruch)
     {
         if (proben.Length < Abtastrate / 2) return "";           // unter einer halben Sekunde: nichts gesagt
-        var fabrik = FabrikHolen();
-        int kerne = Math.Clamp(Environment.ProcessorCount - 1, 2, 8);
+        WhisperFactory fabrik;
+        lock (_fabrikSperre) fabrik = FabrikHolen();
+        // Messung 24.11.2026 (Ryzen 7, 8 Kerne/16 Threads, nur CPU): 16 Threads 10 s statt 13 s mit 8
+        int kerne = Math.Clamp(Environment.ProcessorCount, 2, 16);
         await using var verarbeitung = fabrik.CreateBuilder()
             .WithLanguage("de")
             .WithThreads(kerne)
@@ -145,12 +147,32 @@ internal sealed class Diktat : IDisposable
         return string.Join(" ", sauber);
     }
 
+    /// <summary>Modell schon beim Start der Aufnahme in den Speicher holen (dauert einige Sekunden) — waehrend
+    /// gesprochen wird, statt danach. Mehrfach aufrufbar.</summary>
+    public void Vorbereiten()
+    {
+        lock (_fabrikSperre) FabrikHolen();
+    }
+
+    private readonly object _fabrikSperre = new();
+
+    /// <summary>Modell laden und einmal mit einer Sekunde Stille rechnen lassen — beim allerersten Mal richtet der
+    /// Grafiktreiber dabei seine Programme ein (gemessen ~30 s, danach dauerhaft im Treiber-Cache). Im Hintergrund
+    /// beim Programmstart, damit das erste echte Diktat nicht wartet.</summary>
+    public async Task AufwaermenAsync(CancellationToken abbruch)
+    {
+        if (!ModellVorhanden) return;
+        await Task.Run(Vorbereiten, abbruch);
+        await ErkennenAsync(new float[Abtastrate], abbruch);
+    }
+
     private WhisperFactory FabrikHolen()
     {
         if (_fabrik != null) return _fabrik;
         if (!ModellVorhanden) throw new InvalidOperationException("Das Sprachmodell fehlt.");
         LaufzeitBereitstellen();
-        _fabrik = WhisperFactory.FromPath(ModellPfad);
+        // Flash Attention: CPU 15,6 → 13 s je Diktat; auf der Grafikkarte (Vulkan) 0,3-0,8 s
+        _fabrik = WhisperFactory.FromPath(ModellPfad, new WhisperFactoryOptions { UseFlashAttention = true });
         return _fabrik;
     }
 
@@ -159,23 +181,36 @@ internal sealed class Diktat : IDisposable
     /// ersten Diktat nach %LOCALAPPDATA%\AutoSchnell\Diktat\laufzeit-…\runtimes\win-x64 entpackt. Whisper.net sucht
     /// unter dem Ordner von RuntimeOptions.LibraryPath nach "runtimes\win-x64".
     /// </summary>
+    /// <summary>Fuer Messungen/Notfall: Grafikkarte nicht nutzen (Umgebungsvariable AUTOSCHNELL_DIKTAT_NUR_CPU=1).</summary>
+    internal static bool NurCpu => Environment.GetEnvironmentVariable("AUTOSCHNELL_DIKTAT_NUR_CPU") == "1";
+
     internal void LaufzeitBereitstellen()
     {
         if (_laufzeitBereit) return;
         string basis = Path.Combine(_ordner, "laufzeit-" + LaufzeitVersion);
-        string ziel = Path.Combine(basis, "runtimes", "win-x64");
-        Directory.CreateDirectory(ziel);
         var asm = Assembly.GetExecutingAssembly();
-        foreach (var name in asm.GetManifestResourceNames().Where(n => n.StartsWith("diktat/", StringComparison.Ordinal)))
+        // "diktat/" = CPU (runtimes\win-x64), "diktat-vulkan/" = Grafikkarte (runtimes\vulkan\win-x64)
+        foreach (var (praefix, ziel) in new[]
+                 {
+                     ("diktat/", Path.Combine(basis, "runtimes", "win-x64")),
+                     ("diktat-vulkan/", Path.Combine(basis, "runtimes", "vulkan", "win-x64")),
+                 })
         {
-            string datei = Path.Combine(ziel, name["diktat/".Length..]);
-            using var quelle = asm.GetManifestResourceStream(name)!;
-            if (File.Exists(datei) && new FileInfo(datei).Length == quelle.Length) continue;
-            using var aus = File.Create(datei);
-            quelle.CopyTo(aus);
+            Directory.CreateDirectory(ziel);
+            foreach (var name in asm.GetManifestResourceNames().Where(n => n.StartsWith(praefix, StringComparison.Ordinal)))
+            {
+                string datei = Path.Combine(ziel, name[praefix.Length..]);
+                using var quelle = asm.GetManifestResourceStream(name)!;
+                if (File.Exists(datei) && new FileInfo(datei).Length == quelle.Length) continue;
+                using var aus = File.Create(datei);
+                quelle.CopyTo(aus);
+            }
         }
         RuntimeOptions.LibraryPath = Path.Combine(basis, "whisper.dll");
-        RuntimeOptions.RuntimeLibraryOrder = new List<RuntimeLibrary> { RuntimeLibrary.Cpu, RuntimeLibrary.CpuNoAvx };
+        // Grafikkarte zuerst; ohne Vulkan-Treiber nimmt Whisper.net die naechste (CPU)
+        RuntimeOptions.RuntimeLibraryOrder = NurCpu
+            ? new List<RuntimeLibrary> { RuntimeLibrary.Cpu, RuntimeLibrary.CpuNoAvx }
+            : new List<RuntimeLibrary> { RuntimeLibrary.Vulkan, RuntimeLibrary.Cpu, RuntimeLibrary.CpuNoAvx };
         _laufzeitBereit = true;
     }
 

@@ -141,6 +141,7 @@ internal sealed class TrayApp : ApplicationContext
 
         Protokoll.KlartextUmstellen();     // alte Klartext-Protokolle verschluesseln (03.10.2026)
         Protokoll.AufraeumenBeiTageswechsel();
+        _ = DiktatAufwaermenAsync();
         Protokoll.Schreibe($"{Name} {Application.ProductVersion} gestartet{(probelauf ? " – PROBELAUF (öffnet keinen Browser)" : "")}."
                            + $" Server: {_einstellungen.Server}" + (_einstellungen.ServerNurImSpeicher ? " (nur für diesen Lauf, --server)" : ""));
         VerbindungAnzeigen();
@@ -978,6 +979,7 @@ internal sealed class TrayApp : ApplicationContext
             return;
         }
         _diktatStart = Environment.TickCount64;
+        _ = Task.Run(() => { try { _diktat.Vorbereiten(); } catch (Exception) { /* Fehler kommt beim Erkennen */ } });
         if (_diktatUhr == null)
         {
             _diktatUhr = new System.Windows.Forms.Timer { Interval = 500 };
@@ -1034,6 +1036,19 @@ internal sealed class TrayApp : ApplicationContext
         }
     }
 
+    /// <summary>Im Hintergrund: Modell in den Speicher, Grafikkarte einrichten (erstes Mal ~30 s, danach &lt;1 s).</summary>
+    private async Task DiktatAufwaermenAsync()
+    {
+        try
+        {
+            var uhr = System.Diagnostics.Stopwatch.StartNew();
+            await _diktat.AufwaermenAsync(_ende.Token);
+            if (_diktat.ModellVorhanden) Protokoll.Schreibe($"Diktat: bereit nach {uhr.Elapsed.TotalSeconds:F1} s.");
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { Protokoll.Schreibe("Diktat: Vorwärmen ging nicht: " + ex.Message); }
+    }
+
     private async Task DiktatModellLadenAsync()
     {
         if (MessageBox.Show(
@@ -1054,6 +1069,7 @@ internal sealed class TrayApp : ApplicationContext
             if (!_leiste.IsDisposed) _leiste.DiktatAnzeigen("Lädt 0 %", aufnahme: false);
             await _diktat.ModellLadenAsync(fortschritt, _ende.Token);
             Protokoll.Schreibe("Diktat: Sprachmodell geladen.");
+            _ = DiktatAufwaermenAsync();
             Sprechblase("Diktat ist bereit: ins Feld klicken, dann „Diktat“ tippen (oder Strg+Alt+D) und sprechen.", false, erzwingen: true);
         }
         catch (OperationCanceledException) { }

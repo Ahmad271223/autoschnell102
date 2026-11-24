@@ -433,4 +433,12 @@ Einstellungen: `%APPDATA%\AutoSchnell\AutoPointer-Vergleich\einstellungen.json` 
   beim ersten Diktat nach `…\Diktat\laufzeit-1.9.1\runtimes\win-x64` entpackt (`RuntimeOptions.LibraryPath`).
   Mikrofon über NAudio (WinMM, 16 kHz mono). Der Ton verlässt den PC nie; ins Protokoll kommt nur die Textlänge.
 * Nur verbunden und mit Abo (wie der Vergleich). Ohne Mikrofon / gesperrtes Mikrofon: Sprechblase mit Hinweis.
-* Tests: `DiktatTests` (PCM, Platzhalter, Eingabe, `INPUT`-Größe, Ressourcen, Laufzeit aus der EXE laden, Leiste) — 479 Tests.
+* **Tempo (gemessen 24.11.2026, Ryzen 7 260 / Radeon 780M, Hedda-Testsätze, Ergebnis wortgenau):** Grafikkarte über
+  **Vulkan** (auch Intel/AMD-Onboard) 0,3–0,8 s je Diktat; nur CPU (16 Threads + Flash Attention) 10–13 s. Das erste
+  Mal je PC richtet der Grafiktreiber sich ~30 s ein (danach Treiber-Cache) — passiert beim Programmstart im
+  Hintergrund (`AufwaermenAsync`), beim Aufnahmestart wird das Modell schon geladen. Reihenfolge Vulkan → CPU → CPU ohne
+  AVX; Notschalter `AUTOSCHNELL_DIKTAT_NUR_CPU=1`. Verkürztes Audio-Fenster (`audio_ctx`) bewusst nicht: Whisper
+  wiederholt dann Sätze. Die Vulkan-DLL (58 MB) macht die EXE 73,6 statt 56,5 MB.
+* Echte Erkennung prüfen: `DIKTAT_WAV_ORDNER=<Ordner mit 16-kHz-WAVs + .txt mit Pflichtwörtern>` → `DiktatEchtTests`;
+  Varianten messen mit zusätzlich `DIKTAT_TEMPO=1` → `DiktatTempoMessung`.
+* Tests: `DiktatTests` (PCM, Platzhalter, Eingabe, `INPUT`-Größe, Ressourcen, Laufzeit aus der EXE laden, Leiste) — 481 Tests.

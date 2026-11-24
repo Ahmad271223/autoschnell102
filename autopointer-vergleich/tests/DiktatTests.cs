@@ -47,6 +47,8 @@ public class DiktatTests
         Assert.Contains("diktat/ggml-whisper.dll", namen);
         Assert.Contains("diktat/ggml-base-whisper.dll", namen);
         Assert.Contains("diktat/ggml-cpu-whisper.dll", namen);
+        // Grafikkarte (Vulkan): 0,3-0,8 s statt 10-17 s je Diktat (Messung 24.11.2026)
+        Assert.Contains("diktat-vulkan/ggml-vulkan-whisper.dll", typeof(Diktat).Assembly.GetManifestResourceNames());
     }
 
     [Fact]   // entpacken + laden klappt ohne lose runtimes-Ordner neben der EXE
