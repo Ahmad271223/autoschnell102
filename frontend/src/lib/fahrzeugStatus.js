@@ -85,6 +85,9 @@ const AKTION_TEXTE = {
   // Rollenprüfung 22.09.2026 (RP-483/RP-450): die Akte zeigt jetzt auch
   // Vertrags-, Protokoll- und Inserats-Einträge sowie die verlängerte Frist.
   "fahrzeug.bestand.verlaengert": "Bestandsfrist um 50 Tage verlängert",
+  // Wunsch Ahmad 24.11.2026: Archivieren von Hand (Sammeländerung)
+  "fahrzeug.archiviert.hand": "Fahrzeug von Hand archiviert",
+  "fahrzeug.archiviert.50tage": "Fahrzeug nach 50 Tagen archiviert",
   "bestand.geaendert": "Standort, Notizen oder Kosten geändert",
   "pdf.erstellt": "Kaufvertrag erstellt",
   "pdf.gesendet.email": "Kaufvertrag per E-Mail verschickt",
