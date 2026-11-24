@@ -46,7 +46,7 @@ export default function Meldungen() {
         <div>
           <h1 className="font-display font-black text-2xl tracking-tight">Meldungen</h1>
           <p className="text-sm text-zinc-500 mt-1">
-            Bestätigungen aus dem Kundenportal — sobald ein Kunde einen Kaufvertrag auf eurer Firmenseite unterschrieben hat.
+            Bestätigungen aus dem Kundenportal und Hinweise zur Überweisung des Kaufpreises.
           </p>
         </div>
         {ungelesen > 0 && (
@@ -81,7 +81,14 @@ export default function Meldungen() {
               </div>
             </div>
             <div className="flex items-center gap-2 shrink-0">
-              {m.ref && (
+              {m.termin_id && String(m.typ || "").startsWith("ueberweisung") ? (
+                <button onClick={() => { gelesen(m); nav(`/app/termine?termin=${encodeURIComponent(m.termin_id)}`); }}
+                        className="text-[12px] font-semibold px-3 py-1.5 rounded-full"
+                        style={{ background: "var(--apple-btn-secondary-bg)", color: "var(--text-primary)" }}
+                        data-testid={`meldung-abholung-${m.id}`}>
+                  Abholung öffnen
+                </button>
+              ) : m.ref && (
                 <button onClick={() => { gelesen(m); nav("/app/vertraege"); }}
                         className="text-[12px] font-semibold px-3 py-1.5 rounded-full"
                         style={{ background: "var(--apple-btn-secondary-bg)", color: "var(--text-primary)" }}

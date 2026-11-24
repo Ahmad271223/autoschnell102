@@ -17,6 +17,7 @@ import DiktatKnopf from "@/components/DiktatKnopf";
 import { textAnhaengen } from "@/lib/sprachdiktat";
 import DamageSelector from "@/components/DamageSelector";
 import KiFahrerKarte from "@/components/KiFahrerKarte";
+import UeberweisungFahrer from "@/components/UeberweisungFahrer";
 import { alleVollstaendig, rueckfrageBezug, schwereOffen } from "@/lib/kiSchaden";
 import {
   LEERER_ENTWURF, entwurfAusServer, entwurfZusammenfuehren, istAnnahmeFehlt, istRevisionsKonflikt,
@@ -1315,6 +1316,8 @@ export default function Protokoll() {
             Vermerk des Händlers: {data.protocol.preis_notiz}
           </div>
         )}
+        {/* Wunsch Ahmad 24.11.2026: Kontodaten des Verkäufers für die Überweisung */}
+        <UeberweisungFahrer terminId={id} start={data?.ueberweisung ?? null} />
         {/* Wunsch Ahmad 14.09.2026: Preis und Sondervereinbarung auch vom Fahrer vor Ort.
             Der Händler sieht beides bei der Freigabe; gibt er ohne eigenen Preis frei,
             gilt der hier eingetragene. */}

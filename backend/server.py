@@ -71,6 +71,7 @@ from routes import team as team_routes
 from routes import marketplace as marketplace_routes
 from routes import beweise as beweise_routes
 from routes import werkzeuge as werkzeuge_routes
+from routes import ueberweisung as ueberweisung_routes  # Wunsch Ahmad 24.11.2026
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -1613,6 +1614,9 @@ async def ensure_indexes():
     await _unique_index_sicher(db.driver_accounts, "driver_code")
     await unique_anlegen(db.dealer_drivers, [("dealer_id", 1), ("driver_account_id", 1)])
     await db.dealer_drivers.create_index("driver_account_id")
+    # Ueberweisung mit GiroCode (24.11.2026): ein Eintrag je Termin
+    from ueberweisung import indizes_anlegen as _ueberweisung_indizes
+    await _ueberweisung_indizes(db)
     # Single-Flight-Lease braucht Eindeutigkeit pro cache_key
     # Audit 13.09.2026 (#36): Cache-Dubletten werden automatisch
     # zusammengelegt; scheitert es trotzdem, Betriebsalarm statt Warnung.
@@ -2242,6 +2246,7 @@ api.include_router(team_routes.router)
 api.include_router(marketplace_routes.router, dependencies=[Depends(marktplatz_freigeschaltet)])
 api.include_router(beweise_routes.router)
 api.include_router(protocols_routes.router)
+api.include_router(ueberweisung_routes.router)
 
 app.include_router(api)
 

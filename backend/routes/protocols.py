@@ -27,6 +27,7 @@ from pymongo.errors import DuplicateKeyError
 import betrieb
 import protokoll_vergleich as PV
 import schadenfotos as SF
+import ueberweisung as _ueberweisung  # Ueberweisung mit GiroCode (24.11.2026)
 from ai import pickup_assessment as KI
 from deps import (besitzer_namen, current_chef, db, ist_sucher,
                   log_activity, log_activity_sicher, now_iso, termin_bereich,
@@ -1731,6 +1732,8 @@ async def get_protocol(appt_id: str, driver=Depends(current_driver)):
         # Rollenprüfung 22.09.2026 (RP-480): der Preis VOR der Abholung —
         # derselbe wie in Freigabe und Protokoll-PDF.
         "preis_vertrag": vertragspreis_vor_abholung(contract),
+        # Ueberweisung (24.11.2026): Kontodaten-Stand fuer die Fahrer-App (wirft nie)
+        "ueberweisung": await _ueberweisung.fahrer_sicht_sicher(appt),
         "appointment": {k: appt.get(k) for k in
                         ("id", "title", "pickup_date", "pickup_time",
                          "pickup_address", "seller_name", "status")},
@@ -3591,6 +3594,9 @@ async def protokoll_freigeben(protocol_id: str, body: FreigabeIn,
     await KI.lernfall_speichern(protocol_id, user["dealer_id"],
                                 chef_preis=setzen.get("neuer_preis", doc.get("neuer_preis")),
                                 quelle=setzen.get("preis_quelle") or doc.get("preis_quelle") or "vertrag")
+    # Ueberweisung (24.11.2026): Betrag steht jetzt fest -> Meldung (einmal, wirft nie)
+    from ueberweisung import meldungen_pruefen_sicher
+    await meldungen_pruefen_sicher(doc.get("appointment_id"), user["dealer_id"])
     return {"ok": True, "status": FREIGEGEBEN,
             "neuer_preis": setzen.get("neuer_preis", doc.get("neuer_preis")),
             "stand": jetzt}
