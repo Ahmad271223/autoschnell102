@@ -22,6 +22,9 @@ public class DiktatEchtTests
         if (string.IsNullOrEmpty(ordner) || !Directory.Exists(ordner)) return;
         using var d = new Diktat();
         Assert.True(d.ModellVorhanden, "Sprachmodell fehlt unter " + d.ModellPfad);
+        // Messung Fachwoerter-Vorabtext (24.11.2026): DIKTAT_PROMPT="AHK, TÜV, HU, …"
+        d.Hinweistext = Environment.GetEnvironmentVariable("DIKTAT_PROMPT");
+        _aus.WriteLine("Vorabtext: " + (d.Hinweistext ?? "(keiner)"));
 
         var laden = Stopwatch.StartNew();
         d.Vorbereiten();
@@ -39,8 +42,10 @@ public class DiktatEchtTests
                 Diktat.PcmAnhaengen(proben, bytes, n, int.MaxValue);
             }
             var uhr = Stopwatch.StartNew();
-            string text = await d.ErkennenAsync(proben.ToArray(), CancellationToken.None);
+            string roh = await d.ErkennenAsync(proben.ToArray(), CancellationToken.None);
             uhr.Stop();
+            string text = DiktatRegeln.Nachbearbeiten(roh);
+            if (text != roh) _aus.WriteLine($"  roh: \"{roh}\"");
             double sek = proben.Count / 16000.0;
             _aus.WriteLine($"{Path.GetFileName(wav)}: {sek:F1} s Ton, {uhr.Elapsed.TotalSeconds:F1} s Erkennung → \"{text}\"");
 

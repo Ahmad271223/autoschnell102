@@ -199,6 +199,9 @@ dann die Inserat-Adresse selbst kopieren (AutoPointer: „Seite öffnen“) und 
   * Nicht umgesetzt (Entscheidung Ahmad): `&vertrag=1` am Programm-Ziel.
   * Tests: `VertragsWegTests` (Lesungsstände, AppStartWeg, Browser der Lesung, Leiste), `AutoSchnellAppTests`
     (Helfer-Vorrang, Überspring-Merker), `DienstTests`/`PruefberichtTests` (Sperre, `zustand`) — 377 Tests.
+* **1.5.21 (Wunsch Ahmad 24.11.2026) — Diktat besser:** Pegel im Knopf („Stopp 0:05 ▮▮▮▯▯“), Auto-Stopp nach 2 s
+  Stille, Knopf „↶“ 8 s lang zum Zurücknehmen, Sprachbefehle und Fachwörter (`DiktatRegeln`), keine Erkennung ohne
+  Sprache. Enthält 1.5.20. Details unten unter „Sprachdiktat“.
 * **1.5.20 (Serverprüfung 24.11.2026, Lesebilder Honda Jazz / Dacia Dokker) — Tabelle nach unten geschoben:** ist die
   Technik-Tabelle in AutoPointer nach unten gescrollt (zu sehen nur Farbe, Klimatisierung, Hubraum, Türen …, keine Zeile
   von „Marke, Modell“ bis „Kilometerstand“), sagt das Programm „Tabelle ganz nach oben schieben“ statt „fehlt:
@@ -449,3 +452,15 @@ Einstellungen: `%APPDATA%\AutoSchnell\AutoPointer-Vergleich\einstellungen.json` 
 * Echte Erkennung prüfen: `DIKTAT_WAV_ORDNER=<Ordner mit 16-kHz-WAVs + .txt mit Pflichtwörtern>` → `DiktatEchtTests`;
   Varianten messen mit zusätzlich `DIKTAT_TEMPO=1` → `DiktatTempoMessung`.
 * Tests: `DiktatTests` (PCM, Platzhalter, Eingabe, `INPUT`-Größe, Ressourcen, Laufzeit aus der EXE laden, Leiste) — 481 Tests.
+* **1.5.21 (24.11.2026):**
+  * **Pegel + Auto-Stopp:** Lautstärke je 100-ms-Puffer (`PegelDb`), Grundrauschen wird mitgeführt
+    (`StilleMesser`, steigt ~1 dB/s nach); Sprache = 12 dB über dem Rauschen und mindestens −50 dB. Nach 2 s Stille
+    (erst wenn gesprochen wurde) hört die Aufnahme von selbst auf. Wurde nie gesprochen, wird gar nicht erkannt —
+    Whisper macht aus 5 s Stille sonst „Amen.“ (gemessen).
+  * **Rückgängig:** nach dem Eintippen 8 s der Knopf „↶“ neben „Diktat“ — löscht per Rücktaste genau so viele Zeichen,
+    nur wenn dasselbe Fenster noch vorne ist. Strg+Alt+D startet immer ein neues Diktat.
+  * **Sprachbefehle + Fachwörter** (`DiktatRegeln`, gleiche Regeln wie `frontend/src/lib/diktatRegeln.js`):
+    „Komma“, „Punkt“, „Doppelpunkt“, „neue Zeile“ (am PC ein Leerzeichen) …; AHK, TÜV, HU, AU, ABS, ESP,
+    scheckheftgepflegt („checkheft gepflegt“ hört Whisper oft), Zahnriemen, Steuerkette …
+  * **Fachwörter-Vorabtext (Prompt) bewusst AUS** (Messung 24.11.2026, Hedda-Sätze): bringt nichts („checkheft“ blieb)
+    und erfindet aus Stille „Konec, TÜV“. Messbar mit `DIKTAT_PROMPT=…` in `DiktatEchtTests`.

@@ -116,7 +116,7 @@ public class SteuerFensterTests
             l.Aktualisieren();
 
             // 1.5.8: Status | Vergleichen | Vertrag | Mehr — das Status-Feld schaltet Start/Stopp; 1.5.19: + Diktat
-            var knoepfe = Alle<Button>(l).Select(b => b.Text.Trim()).ToArray();
+            var knoepfe = Alle<Button>(l).Where(b => b.Visible).Select(b => b.Text.Trim()).ToArray();   // "↶" nur nach einem Diktat
             Assert.Equal(new[] { "Vergleichen", "Vertrag", "Diktat", "Mehr ▾" }, knoepfe);
             var status = Alle<Label>(l).Single();
             Assert.Equal("●  AKTIV  ❚❚", status.Text);

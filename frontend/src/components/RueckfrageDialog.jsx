@@ -2,6 +2,7 @@ import { useState } from "react";
 import { MODAL_ATTRIBUTE, useModal } from "@/lib/useModal";
 import { MessageSquare, Plus, X } from "lucide-react";
 import { toast } from "sonner";
+import DiktatKnopf from "@/components/DiktatKnopf";
 
 /**
  * Rückfrage an den Fahrer (Entscheidung Ahmad 26.09.2026, Nr. 3 der offenen
@@ -123,6 +124,7 @@ export default function RueckfrageDialog({ open, onClose, onSenden, bezuege = []
                       className="px-3 py-2 rounded-xl outline-none" style={feld} />
             <span className="text-[11px] text-right" style={{ color: "var(--text-dim)" }}>{frage.length}/{FRAGE_MAX}</span>
           </label>
+          <DiktatKnopf testid="rueckfrage-frage-diktat" wert={frage} onChange={setFrage} max={FRAGE_MAX} />
 
           <label className="flex flex-col gap-1">
             <span className="text-xs" style={{ color: "var(--text-secondary)" }}>Bezug</span>

@@ -114,6 +114,7 @@ internal sealed class TrayApp : ApplicationContext
         _leiste.JetztVergleichen += VergleichenStarten;
         _leiste.VertragOeffnen += async () => await VertragOeffnenAsync();
         _leiste.Diktieren += DiktatUmschalten;
+        _leiste.DiktatZuruecknehmen += DiktatZuruecknehmen;
         _leiste.FensterOeffnen += FensterZeigen;
         _leiste.LetztenOeffnen += () => _ueberwacher?.LetztenErneutOeffnen();
         _leiste.EinstellungenOeffnen += EinstellungenZeigen;
@@ -954,11 +955,41 @@ internal sealed class TrayApp : ApplicationContext
     private IntPtr _diktatZiel;
     private long _diktatStart;
     private System.Windows.Forms.Timer? _diktatUhr;
+    // Rückgängig (24.11.2026): 8 s nach dem Eintippen Knopf "↶" — loescht per Ruecktaste genau das Eingetippte,
+    // aber nur, wenn dasselbe Fenster noch vorne ist.
+    private const int RueckgaengigMs = 8000;
+    private int _diktatLaenge;
+    private IntPtr _diktatGetipptIn;
+    private System.Windows.Forms.Timer? _diktatZurueckUhr;
+
+    private void DiktatZuruecknehmenBeenden()
+    {
+        _diktatZurueckUhr?.Stop();
+        _diktatLaenge = 0;
+        _diktatGetipptIn = IntPtr.Zero;
+        if (!_leiste.IsDisposed) _leiste.DiktatZuruecknehmenZeigen(false);
+    }
+
+    private void DiktatZuruecknehmen()
+    {
+        int laenge = _diktatLaenge;
+        IntPtr ziel = _diktatGetipptIn;
+        DiktatZuruecknehmenBeenden();
+        if (laenge <= 0) return;
+        if (ziel == IntPtr.Zero || Native.GetForegroundWindow() != ziel)
+        {
+            Sprechblase("Rückgängig geht nur, solange das Fenster mit dem Text vorne ist.", false, erzwingen: true);
+            return;
+        }
+        Diktat.Loeschen(laenge);
+        Protokoll.Schreibe($"Diktat: {laenge} Zeichen zurückgenommen.");
+    }
 
     private void DiktatUmschalten()
     {
         if (_beendet || _diktatBeschaeftigt) return;
         if (_diktat.NimmtAuf) { _ = DiktatBeendenAsync(); return; }
+        DiktatZuruecknehmenBeenden();
         if (!_dienst.Verbunden || _lizenzSperre != null)
         {
             Sprechblase("Diktat geht nur, wenn das Programm mit AutoSchnell verbunden ist und das Abo läuft.", true, erzwingen: true);
@@ -982,7 +1013,7 @@ internal sealed class TrayApp : ApplicationContext
         _ = Task.Run(() => { try { _diktat.Vorbereiten(); } catch (Exception) { /* Fehler kommt beim Erkennen */ } });
         if (_diktatUhr == null)
         {
-            _diktatUhr = new System.Windows.Forms.Timer { Interval = 500 };
+            _diktatUhr = new System.Windows.Forms.Timer { Interval = 200 };
             _diktatUhr.Tick += (_, _) => DiktatUhrTick();
         }
         _diktatUhr.Start();
@@ -993,14 +1024,25 @@ internal sealed class TrayApp : ApplicationContext
     {
         long sek = (Environment.TickCount64 - _diktatStart) / 1000;
         if (sek >= Diktat.MaxSekunden) { _ = DiktatBeendenAsync(); return; }
-        if (!_leiste.IsDisposed) _leiste.DiktatAnzeigen($"Stopp {sek / 60}:{sek % 60:00}", aufnahme: true);
+        // Auto-Stopp: 2 s Stille, nachdem schon gesprochen wurde
+        if (_diktat.StilleMs >= Diktat.AutoStoppMs) { _ = DiktatBeendenAsync(); return; }
+        if (!_leiste.IsDisposed)
+            _leiste.DiktatAnzeigen($"Stopp {sek / 60}:{sek % 60:00} {Diktat.PegelBalken(_diktat.Pegel)}", aufnahme: true);
     }
 
     private async Task DiktatBeendenAsync()
     {
         _diktatUhr?.Stop();
         if (!_diktat.NimmtAuf) return;
+        bool gesprochen = _diktat.StilleMs >= 0;
         var proben = _diktat.AufnahmeStoppen();
+        // Messung 24.11.2026: aus 5 s Stille macht Whisper "Amen." — ohne Sprache gar nicht erst erkennen
+        if (!gesprochen)
+        {
+            if (!_leiste.IsDisposed) _leiste.DiktatAnzeigen(null, aufnahme: false);
+            Sprechblase("Nichts gehört – bitte näher am Mikrofon noch einmal sprechen.", false, erzwingen: true);
+            return;
+        }
         _diktatBeschaeftigt = true;
         if (!_leiste.IsDisposed) _leiste.DiktatAnzeigen("Erkennt …", aufnahme: false);
         try
@@ -1008,6 +1050,8 @@ internal sealed class TrayApp : ApplicationContext
             var abbruch = _ende.Token;
             string text = await Task.Run(() => _diktat.ErkennenAsync(proben, abbruch), abbruch);
             if (_beendet) return;
+            // Sprachbefehle ("Komma", "Punkt") und Fachwoerter (TÜV, AHK …), wie in der App
+            text = Diktat.FuerEingabe(DiktatRegeln.Nachbearbeiten(text));
             if (text.Length == 0)
             {
                 Sprechblase("Nichts verstanden – bitte näher am Mikrofon noch einmal sprechen.", false, erzwingen: true);
@@ -1016,6 +1060,16 @@ internal sealed class TrayApp : ApplicationContext
             if (_diktatZiel != IntPtr.Zero && Native.GetForegroundWindow() == _diktatZiel && Diktat.Eintippen(text))
             {
                 Protokoll.Schreibe($"Diktat: {text.Length} Zeichen eingefügt.");
+                _diktatLaenge = text.Length;
+                _diktatGetipptIn = _diktatZiel;
+                if (_diktatZurueckUhr == null)
+                {
+                    _diktatZurueckUhr = new System.Windows.Forms.Timer { Interval = RueckgaengigMs };
+                    _diktatZurueckUhr.Tick += (_, _) => DiktatZuruecknehmenBeenden();
+                }
+                _diktatZurueckUhr.Stop();
+                _diktatZurueckUhr.Start();
+                if (!_leiste.IsDisposed) _leiste.DiktatZuruecknehmenZeigen(true);
             }
             else
             {
@@ -1100,6 +1154,7 @@ internal sealed class TrayApp : ApplicationContext
         _ende.Cancel();
         _klicks?.Dispose();
         _diktatUhr?.Stop();
+        _diktatZurueckUhr?.Stop();
         _diktat.Dispose();
         _hotkey.Abmelden(HotkeyId);
         _hotkey.Abmelden(DiktatHotkeyId);

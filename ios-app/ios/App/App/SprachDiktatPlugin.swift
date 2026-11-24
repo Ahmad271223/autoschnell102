@@ -8,7 +8,8 @@
 // (argmaxinc/whisperkit-coreml) geladen und danach offline genutzt.
 //
 // Methoden (alle Promises):
-//   status()          -> { phase, fortschritt, modell, groesseMB, fehler, aufnahme }
+//   status()          -> { phase, fortschritt, modell, groesseMB, fehler, aufnahme,
+//                          pegel (0..1), gesprochen, stille_ms }  (Pegel/Stille für Anzeige + Auto-Stopp)
 //   vorbereiten()     -> laedt + kompiliert das Modell (einmalig, Fortschritt per status())
 //   aufnahmeStarten() -> fragt einmalig nach dem Mikrofon, nimmt auf (max. 5 Minuten)
 //   aufnahmeStoppen() -> { text }  (deutsch)
@@ -106,6 +107,10 @@ actor DiktatMotor {
     private var ladeTask: Task<Void, Never>?
     private var recorder: AVAudioRecorder?
     private var aufnahmeUrl: URL?
+    // Pegel (24.11.2026): Grundrauschen wird mitgeführt, Sprache = deutlich darüber
+    private var rauschenDb: Float = 0
+    private var gesprochen = false
+    private var letzteStimme = Date()
 
     private let gewaehlt: (name: String, mb: Int)
 
@@ -115,15 +120,29 @@ actor DiktatMotor {
     }
 
     func status() -> [String: Any] {
-        return [
+        var s: [String: Any] = [
             "phase": phase,
             "fortschritt": fortschritt,
             "modell": gewaehlt.name,
             "groesseMB": gewaehlt.mb,
             "heruntergeladen": gespeicherterOrdner() != nil,
             "fehler": fehler ?? "",
-            "aufnahme": recorder != nil,
+            // isRecording: nach 5 Minuten hört der Recorder selbst auf, die Webseite holt dann den Text
+            "aufnahme": recorder?.isRecording ?? false,
         ]
+        if let r = recorder, r.isRecording {
+            r.updateMeters()
+            let db = r.averagePower(forChannel: 0)          // -160 (still) … 0 (laut)
+            rauschenDb = min(rauschenDb + 0.2, db)           // Grundrauschen, steigt langsam nach
+            if db > max(rauschenDb + 12, -50) {
+                gesprochen = true
+                letzteStimme = Date()
+            }
+            s["pegel"] = Double(min(max((db + 50) / 40, 0), 1))
+            s["gesprochen"] = gesprochen
+            s["stille_ms"] = gesprochen ? Int(Date().timeIntervalSince(letzteStimme) * 1000) : 0
+        }
+        return s
     }
 
     func vorbereitenImHintergrund() {
@@ -198,6 +217,10 @@ actor DiktatMotor {
             AVLinearPCMIsBigEndianKey: false,
         ]
         let r = try AVAudioRecorder(url: url, settings: einstellungen)
+        r.isMeteringEnabled = true
+        rauschenDb = 0
+        gesprochen = false
+        letzteStimme = Date()
         guard r.record(forDuration: Self.maxSekunden) else {
             try? session.setActive(false, options: .notifyOthersOnDeactivation)
             throw DiktatFehler.aufnahmeFehlgeschlagen

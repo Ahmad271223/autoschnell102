@@ -84,12 +84,72 @@ internal sealed class Diktat : IDisposable
                 {
                     if (!ReferenceEquals(_proben, proben)) return;
                     PcmAnhaengen(proben, e.Buffer, e.BytesRecorded, Abtastrate * MaxSekunden);
+                    _stille.Messen(PegelDb(e.Buffer, e.BytesRecorded), Environment.TickCount64);
                 }
             };
+            _stille = new StilleMesser();
             mikro.StartRecording();
             _mikro = mikro;
             _proben = proben;
         }
+    }
+
+    // ---- Pegel + Auto-Stopp (24.11.2026): Anzeige in der Leiste, nach 2 s Stille hoert die Aufnahme auf ----
+
+    public const int AutoStoppMs = 2000;
+    private StilleMesser _stille = new();
+
+    /// <summary>Lautstaerke 0..1 fuer die Anzeige.</summary>
+    public double Pegel { get { lock (_sperre) return _stille.Pegel; } }
+
+    /// <summary>Millisekunden seit zuletzt gesprochen wurde; -1, solange noch nichts gesagt wurde.</summary>
+    public long StilleMs { get { lock (_sperre) return _stille.StilleMs(Environment.TickCount64); } }
+
+    /// <summary>Lautstaerke eines 16-bit-PCM-Puffers in dBFS (-160 = still, 0 = Vollaussteuerung).</summary>
+    internal static float PegelDb(byte[] puffer, int bytes)
+    {
+        int n = bytes / 2;
+        if (n == 0) return -160f;
+        double summe = 0;
+        for (int i = 0; i + 1 < bytes; i += 2)
+        {
+            double p = BitConverter.ToInt16(puffer, i) / 32768.0;
+            summe += p * p;
+        }
+        double rms = Math.Sqrt(summe / n);
+        return rms <= 1e-8 ? -160f : (float)(20 * Math.Log10(rms));
+    }
+
+    /// <summary>Wie in der iPhone-App: Grundrauschen wird mitgefuehrt (steigt ~1 dB/s nach), Sprache ist deutlich
+    /// lauter (12 dB ueber dem Rauschen, mindestens -50 dB). So stoppt es auch im lauten Buero nicht zu frueh.
+    /// Wurde nie gesprochen, wird gar nicht erst erkannt: Whisper erfindet aus Stille Woerter ("Amen.").</summary>
+    internal sealed class StilleMesser
+    {
+        private float _rauschen = float.NaN;
+        private float _letzter = -160f;
+        private bool _gesprochen;
+        private long _letzteStimme;
+
+        public void Messen(float db, long jetzt)
+        {
+            _letzter = db;
+            _rauschen = float.IsNaN(_rauschen) ? db : Math.Min(_rauschen + 0.1f, db);   // je 100-ms-Puffer
+            if (db > Math.Max(_rauschen + 12f, -50f))
+            {
+                _gesprochen = true;
+                _letzteStimme = jetzt;
+            }
+        }
+
+        public double Pegel => Math.Clamp((_letzter + 50.0) / 40.0, 0, 1);
+        public long StilleMs(long jetzt) => _gesprochen ? jetzt - _letzteStimme : -1;
+    }
+
+    /// <summary>"▮▮▯▯▯" fuer den Leisten-Knopf.</summary>
+    internal static string PegelBalken(double pegel)
+    {
+        int voll = (int)Math.Round(Math.Clamp(pegel, 0, 1) * 5);
+        return new string('▮', voll) + new string('▯', 5 - voll);
     }
 
     /// <summary>16-bit-PCM (little endian) als float -1..1 anhaengen, hoechstens bis max Proben.</summary>
@@ -119,6 +179,10 @@ internal sealed class Diktat : IDisposable
         return proben?.ToArray() ?? Array.Empty<float>();
     }
 
+    /// <summary>Optionaler Vorab-Text fuer Whisper (Fachwoerter). Nur fuer Messungen (DiktatEchtTests,
+    /// DIKTAT_PROMPT) — ob er eingeschaltet wird, entscheidet die Messung, siehe README.</summary>
+    internal string? Hinweistext { get; set; }
+
     public async Task<string> ErkennenAsync(float[] proben, CancellationToken abbruch)
     {
         if (proben.Length < Abtastrate / 2) return "";           // unter einer halben Sekunde: nichts gesagt
@@ -126,11 +190,12 @@ internal sealed class Diktat : IDisposable
         lock (_fabrikSperre) fabrik = FabrikHolen();
         // Messung 24.11.2026 (Ryzen 7, 8 Kerne/16 Threads, nur CPU): 16 Threads 10 s statt 13 s mit 8
         int kerne = Math.Clamp(Environment.ProcessorCount, 2, 16);
-        await using var verarbeitung = fabrik.CreateBuilder()
+        var bauer = fabrik.CreateBuilder()
             .WithLanguage("de")
             .WithThreads(kerne)
-            .WithNoContext()
-            .Build();
+            .WithNoContext();
+        if (!string.IsNullOrWhiteSpace(Hinweistext)) bauer = bauer.WithPrompt(Hinweistext);
+        await using var verarbeitung = bauer.Build();
         var teile = new List<string>();
         await foreach (var abschnitt in verarbeitung.ProcessAsync(proben, abbruch))
             teile.Add(abschnitt.Text);
@@ -240,6 +305,27 @@ internal sealed class Diktat : IDisposable
         uint gesendet = SendInput((uint)eingaben.Length, eingaben, Marshal.SizeOf<INPUT>());
         return gesendet == eingaben.Length;
     }
+
+    /// <summary>"Rückgängig": so viele Zeichen per Rücktaste wieder loeschen, wie eingetippt wurden.</summary>
+    public static bool Loeschen(int anzahl)
+    {
+        if (anzahl <= 0) return true;
+        var eingaben = new INPUT[anzahl * 2];
+        for (int i = 0; i < anzahl; i++)
+        {
+            eingaben[2 * i] = Ruecktaste(hoch: false);
+            eingaben[2 * i + 1] = Ruecktaste(hoch: true);
+        }
+        return SendInput((uint)eingaben.Length, eingaben, Marshal.SizeOf<INPUT>()) == eingaben.Length;
+    }
+
+    private static INPUT Ruecktaste(bool hoch) => new()
+    {
+        type = INPUT_KEYBOARD,
+        U = new InputUnion { ki = new KEYBDINPUT { wVk = VK_BACK, dwFlags = hoch ? KEYEVENTF_KEYUP : 0 } },
+    };
+
+    private const ushort VK_BACK = 0x08;
 
     private static INPUT Taste(char zeichen, bool hoch) => new()
     {

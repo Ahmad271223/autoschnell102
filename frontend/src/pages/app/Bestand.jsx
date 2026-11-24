@@ -10,6 +10,7 @@ import {
   Plus, AlertTriangle, Archive, Trash2, Tag, Clock, X, Pencil,
 } from "lucide-react";
 import StatusSchild from "@/components/StatusSchild";
+import DiktatKnopf from "@/components/DiktatKnopf";
 import { beschreibungLesbar, lifecycleText } from "@/lib/fahrzeugStatus";
 import { kmAusText, preisAusText } from "@/lib/preis";
 import { betragAlsText, fristErneuertText } from "@/lib/bestandForm";
@@ -600,6 +601,8 @@ function ManualVehicleDialog({ fahrzeug = null, onClose, onDone }) {
           </div>
           <div className="col-span-2">
             <Field label="Beschreibung"><textarea rows={3} value={f.description} onChange={set("description")} className={inputCls} style={st} /></Field>
+            <DiktatKnopf testid="bestand-beschreibung-diktat" className="mt-1" wert={f.description} max={20000}
+                         onChange={(v) => setF((s) => ({ ...s, description: v }))} />
           </div>
           <Field label="Einkaufspreis (€)"><input type="text" inputMode="decimal" autoComplete="off" value={f.purchase_price} onChange={set("purchase_price")} className={inputCls} style={st} placeholder="z. B. 12.990" data-testid="manuell-ek" /></Field>
         </div>

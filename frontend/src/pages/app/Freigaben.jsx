@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import KiBewertungKarte from "@/components/KiBewertungKarte";
 import SchadenFotos from "@/components/SchadenFotos";
 import RueckfrageDialog from "@/components/RueckfrageDialog";
+import DiktatKnopf from "@/components/DiktatKnopf";
 import { rueckfrageBezug, schadenBezeichnung } from "@/lib/kiSchaden";
 import { datumZeit } from "@/lib/markt";
 import {
@@ -506,6 +507,10 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
                    placeholder="z. B. Rost am Schweller"
                    className="mt-1 w-full rounded-lg border bg-transparent px-2.5 py-1.5 text-sm outline-none focus:border-white/40"
                    style={{ borderColor: "var(--border-default)" }} />
+            {/* Sprachdiktat nur in der iPhone-App (Wunsch Ahmad 24.11.2026) */}
+            <DiktatKnopf testid={`freigabe-notiz-diktat-${e.protocol_id}`} className="mt-1" einzeilig max={200}
+                         wert={"notiz" in meinEntwurf ? (meinEntwurf.notiz ?? "") : (e.preis_notiz || "")}
+                         onChange={(v) => setzen("notiz", v)} />
           </div>
         </div>
         {/* Wunsch Ahmad 14.09.2026: Vorschlag und Sondervereinbarung des Fahrers vor Ort */}

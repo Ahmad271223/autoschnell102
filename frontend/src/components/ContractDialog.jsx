@@ -17,7 +17,7 @@ import { fehlendeKaeuferfelder, kaeuferAktualisieren, kaeuferAusProfil } from "@
 import { kmAusText, preisAusText, preisText } from "@/lib/preis";
 import { openContractPdf } from "@/lib/pdf";
 import DiktatKnopf from "@/components/DiktatKnopf";
-import { textAnhaengen } from "@/lib/sprachdiktat";
+import { zahlText } from "@/lib/diktatRegeln";
 import { MODAL_ATTRIBUTE, useModal } from "@/lib/useModal";
 
 const YN_OPTIONS = [
@@ -975,7 +975,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
               {/* Rollenprüfung 22.09.2026: "85.120" / "150 Tkm" werden richtig
                   gelesen (kmAusText); Unlesbares blockiert "PDF erstellen". */}
               <Field label="Kilometerstand" value={form.vehicle_mileage} onChange={(v) => set("vehicle_mileage", v)} testid="contract-veh-km"
-                     inputMode="numeric"
+                     inputMode="numeric" zahlDiktat="km"
                      helper={kmText === null ? "Nicht lesbar — bitte z. B. 85.120 eingeben." : undefined} />
               {/* M-12: Zifferntastatur fuer reine Zahlenfelder */}
               <Field label="Hubraum (ccm)" inputMode="numeric" value={form.vehicle_displacement} onChange={(v) => set("vehicle_displacement", v)} testid="contract-veh-ccm" />
@@ -1238,7 +1238,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                 <Field
                   label="Kaufpreis (€) *" required inputMode="decimal"
                   value={form.purchase_price} onChange={(v) => set("purchase_price", v)}
-                  testid="contract-price" placeholder="z.B. 8.900" fehlt={fehlt("purchase_price")}
+                  testid="contract-price" placeholder="z.B. 8.900" fehlt={fehlt("purchase_price")} zahlDiktat="preis"
                 />
                 {String(form.purchase_price || "").trim() !== "" && (
                   <div className="text-[11px] mt-1 leading-snug" data-testid="contract-price-erkannt"
@@ -1450,8 +1450,9 @@ const Section = ({ title, subtitle, icon: Icon, children }) => (
 
 // M-12: autoComplete durchreichen (type="tel" autoComplete="tel" an den Telefonfeldern).
 // 04.10.2026: `fehlt` markiert ein wichtiges, noch leeres Feld (Rahmen + "fehlt" an der Beschriftung).
-// 24.11.2026: `diktat` zeigt in der iPhone-App den Mikrofon-Knopf (Text wird angehängt).
-const Field = ({ label, value, onChange, type = "text", multiline, rows = 2, required, testid, placeholder, disabled, helper, inputMode, maxLength, autoComplete, fehlt, diktat }) => (
+// 24.11.2026: `diktat` zeigt in der iPhone-App den Mikrofon-Knopf (Text wird angehängt);
+// `zahlDiktat` ("km" | "preis"): Zahl sprechen, nach Bestätigung eingetragen.
+const Field = ({ label, value, onChange, type = "text", multiline, rows = 2, required, testid, placeholder, disabled, helper, inputMode, maxLength, autoComplete, fehlt, diktat, zahlDiktat }) => (
   <div>
     <label className="text-xs text-zinc-400 flex items-center gap-1.5">
       {label}
@@ -1468,7 +1469,11 @@ const Field = ({ label, value, onChange, type = "text", multiline, rows = 2, req
     )}
     {diktat && !disabled && (
       <DiktatKnopf testid={testid ? `${testid}-diktat` : undefined} className="mt-1"
-                   onText={(t) => onChange(textAnhaengen(value, t, maxLength))} />
+                   wert={value} onChange={onChange} max={maxLength} />
+    )}
+    {zahlDiktat && !disabled && (
+      <DiktatKnopf testid={testid ? `${testid}-diktat` : undefined} className="mt-1" beschriftung="Zahl sagen"
+                   zahl={zahlDiktat} onZahl={(n) => onChange(zahlText(n))} />
     )}
     {helper && <div className="text-[11px] text-zinc-500 mt-1 leading-snug">{helper}</div>}
   </div>

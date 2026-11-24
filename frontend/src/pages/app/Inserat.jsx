@@ -10,7 +10,6 @@ import { kmAusText, preisAusText, preisText } from "@/lib/preis";
 import { useUngespeichert } from "@/lib/ungespeichert";
 import { toast } from "sonner";
 import DiktatKnopf from "@/components/DiktatKnopf";
-import { textAnhaengen } from "@/lib/sprachdiktat";
 import {
   ArrowLeft, Camera, CheckCircle2, Undo2, Tag, Globe, EyeOff, Trash2, X, FileText, PenLine,
   ChevronLeft, ChevronRight, Star,
@@ -858,7 +857,8 @@ export default function Inserat() {
                       className={inputCls} style={st} disabled={l.status === "verkauft"} />
             {l.status !== "verkauft" && (
               <DiktatKnopf testid="beschreibung-diktat" className="mt-1"
-                           onText={(t) => setL((s) => ({ ...s, description: textAnhaengen(s.description, t, BESCHREIBUNG_MAX) }))} />
+                           wert={l.description} max={BESCHREIBUNG_MAX}
+                           onChange={(v) => setL((s) => ({ ...s, description: v }))} />
             )}
             <label className="text-[11px] text-zinc-500 mt-3 block">Bekannte Mängel (eine je Zeile)</label>
             <textarea value={(l.known_defects || []).join("\n")}
@@ -866,10 +866,8 @@ export default function Inserat() {
                       rows={4} className={inputCls} style={st} disabled={gesperrt} />
             {!gesperrt && (
               <DiktatKnopf testid="maengel-diktat" className="mt-1"
-                           onText={(t) => setL((s) => ({
-                             ...s,
-                             known_defects: [...(s.known_defects || []).filter((z) => String(z).trim()), String(t).trim()],
-                           }))} />
+                           wert={(l.known_defects || []).filter((z) => String(z).trim()).join("\n")} neueZeile
+                           onChange={(v) => setL((s) => ({ ...s, known_defects: v.split("\n") }))} />
             )}
           </div>
 

@@ -78,6 +78,60 @@ public class DiktatTests
         Assert.Equal("", await d.ErkennenAsync(new float[4000], CancellationToken.None));
     }
 
+    [Fact]   // dieselben Regeln wie frontend/src/lib/diktatRegeln.test.js
+    public void Sprachbefehle_und_Fachwoerter_wie_in_der_App()
+    {
+        Assert.Equal("Kratzer, Delle.", DiktatRegeln.Sprachbefehle("Kratzer Komma Delle Punkt"));
+        Assert.Equal("Kratzer, Delle.", DiktatRegeln.Sprachbefehle("Kratzer, Komma, Delle, Punkt."));
+        Assert.Equal("Kratzer hinten\nDelle vorne", DiktatRegeln.Sprachbefehle("Kratzer hinten neue Zeile Delle vorne"));
+        Assert.Equal("Achtung: zwei Schlüssel", DiktatRegeln.Sprachbefehle("Achtung Doppelpunkt zwei Schlüssel"));
+        Assert.Equal("Alles gut. Zwei Schlüssel.", DiktatRegeln.Sprachbefehle("alles gut Punkt zwei Schlüssel Punkt"));
+        Assert.Equal("Druckpunkt der Kupplung hoch", DiktatRegeln.Sprachbefehle("Druckpunkt der Kupplung hoch"));
+        Assert.Equal("Kommata", DiktatRegeln.Sprachbefehle("Kommata"));
+        Assert.Equal("AHK abnehmbar, TÜV neu, HU bis 2027", DiktatRegeln.FachwoerterSchreiben("A H K abnehmbar, Tüv neu, H.U. bis 2027"));
+        Assert.Equal("Zahnriemen neu, Steinschlag", DiktatRegeln.FachwoerterSchreiben("Zahn Riemen neu, Stein Schlag"));
+        Assert.Equal("Hupe geht, Hut ab", DiktatRegeln.FachwoerterSchreiben("Hupe geht, Hut ab"));
+        Assert.Equal("Das Auto ist scheckheftgepflegt, Scheckheft liegt bei",
+            DiktatRegeln.FachwoerterSchreiben("Das Auto ist checkheft gepflegt, Checkheft liegt bei"));
+        Assert.Equal("TÜV neu, AHK", DiktatRegeln.Nachbearbeiten("Tüv neu Komma A H K"));
+        // am PC: "neue Zeile" wird beim Eintippen ein Leerzeichen (Enter wuerde Formulare abschicken)
+        Assert.Equal("Kratzer Delle", Diktat.FuerEingabe(DiktatRegeln.Nachbearbeiten("Kratzer neue Zeile Delle")));
+    }
+
+    [Fact]
+    public void Pegel_wird_aus_dem_Ton_berechnet()
+    {
+        Assert.Equal(-160f, Diktat.PegelDb(new byte[200], 200));
+        var laut = new byte[200];
+        for (int i = 0; i < 200; i += 2) BitConverter.GetBytes((short)(i % 4 == 0 ? 16384 : -16384)).CopyTo(laut, i);
+        Assert.InRange(Diktat.PegelDb(laut, 200), -6.1f, -5.9f);          // halbe Aussteuerung = -6 dB
+        Assert.Equal("▮▮▮▯▯", Diktat.PegelBalken(0.6));
+        Assert.Equal("▯▯▯▯▯", Diktat.PegelBalken(-1));
+    }
+
+    [Fact]   // Auto-Stopp erst, wenn gesprochen wurde; Grundrauschen zaehlt nicht als Sprache
+    public void Stille_zaehlt_erst_nach_dem_Sprechen()
+    {
+        var m = new Diktat.StilleMesser();
+        long t = 0;
+        for (int i = 0; i < 30; i++, t += 100) m.Messen(-55f, t);         // 3 s leises Rauschen
+        Assert.Equal(-1, m.StilleMs(t));
+        for (int i = 0; i < 10; i++, t += 100) m.Messen(-20f, t);         // 1 s Sprache
+        Assert.Equal(100, m.StilleMs(t));
+        for (int i = 0; i < 21; i++, t += 100) m.Messen(-54f, t);         // 2,1 s Pause
+        Assert.True(m.StilleMs(t) >= Diktat.AutoStoppMs);
+        m.Messen(-22f, t);                                                 // weiter gesprochen
+        Assert.Equal(0, m.StilleMs(t));
+    }
+
+    [Fact]   // im lauten Raum: Rauschen bei -35 dB ist keine Sprache
+    public void Lautes_Rauschen_ist_keine_Sprache()
+    {
+        var m = new Diktat.StilleMesser();
+        for (long t = 0; t < 3000; t += 100) m.Messen(-35f + (t % 300 == 0 ? 2f : 0f), t);
+        Assert.Equal(-1, m.StilleMs(3000));
+    }
+
     [Fact]
     public void Leiste_zeigt_den_Diktat_Zustand()
     {
@@ -97,6 +151,18 @@ public class DiktatTests
                 Assert.Equal("Stopp 0:07", l.DiktatText);
                 l.DiktatAnzeigen(null, aufnahme: false);
                 Assert.Equal("Diktat", l.DiktatText);
+                // Rückgängig-Knopf: erst nach einem Diktat sichtbar
+                Assert.False(l.DiktatZuruecknehmenSichtbar);
+                bool zurueck = false;
+                l.DiktatZuruecknehmen += () => zurueck = true;
+                l.DiktatZuruecknehmenZeigen(true);
+                Application.DoEvents();
+                Assert.True(l.DiktatZuruecknehmenSichtbar);
+                var zk = typeof(Leiste).GetField("_zurueck", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(l) as Button;
+                zk!.PerformClick();
+                Assert.True(zurueck);
+                l.DiktatZuruecknehmenZeigen(false);
+                Assert.False(l.DiktatZuruecknehmenSichtbar);
                 var knopf = typeof(Leiste).GetField("_diktat", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(l) as Button;
                 knopf!.PerformClick();
                 Assert.True(geklickt);

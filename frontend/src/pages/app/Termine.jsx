@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api, errMsg } from "@/lib/api";
 import { toast } from "sonner";
 import DiktatKnopf from "@/components/DiktatKnopf";
-import { textAnhaengen } from "@/lib/sprachdiktat";
 import {
   Calendar as CalIcon, FileText, Edit3, X, ChevronLeft, ChevronRight,
   Plus, MapPin, Phone, User as UserIcon, Trash2, Clock, Printer,
@@ -1295,7 +1294,7 @@ function EditDialog({ appt, drivers, fahrerGeladen = true, chef = false, isNew, 
                       placeholder="Zusatzinfos, Treffpunkt, Schlüsselübergabe …"
                       className="apple-input resize-none" />
             <DiktatKnopf testid="edit-notes-diktat"
-                         onText={(t) => setA((alt) => ({ ...alt, notes: textAnhaengen(alt.notes, t) }))} />
+                         wert={a.notes || ""} onChange={(v) => set("notes", v)} />
           </div>
 
           {/* PDF link if connected — „Öffnen" behält altes Verhalten

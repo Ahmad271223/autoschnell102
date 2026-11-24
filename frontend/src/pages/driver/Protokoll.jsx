@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import SignaturePad from "@/components/SignaturePad";
 import DiktatKnopf from "@/components/DiktatKnopf";
-import { textAnhaengen } from "@/lib/sprachdiktat";
+import { zahlText } from "@/lib/diktatRegeln";
 import DamageSelector from "@/components/DamageSelector";
 import KiFahrerKarte from "@/components/KiFahrerKarte";
 import { alleVollstaendig, rueckfrageBezug, schwereOffen } from "@/lib/kiSchaden";
@@ -1194,6 +1194,10 @@ export default function Protokoll() {
                        className={inputCls} style={st}
                        placeholder={fld.key === "mileage" ? "z.B. 85120" : ""} />
               )}
+              {fld.key === "mileage" && !gesperrt && !fld.options && (
+                <DiktatKnopf testid="protokoll-km-diktat" className="mt-1" beschriftung="km sagen"
+                             zahl="km" onZahl={(n) => setCond("mileage", String(n))} />
+              )}
             </div>
           ))}
         </div>
@@ -1284,7 +1288,7 @@ export default function Protokoll() {
           <div className="mt-1 flex items-center justify-between gap-2">
             {/* Sprachdiktat nur in der iPhone-App (Wunsch Ahmad 24.11.2026) */}
             <DiktatKnopf testid="protokoll-bemerkungen-diktat"
-                         onText={(t) => upd((s) => ({ notes: textAnhaengen(s.notes, t, BEMERKUNG_MAX) }))} />
+                         wert={f.notes} max={BEMERKUNG_MAX} onChange={(v) => upd({ notes: v })} />
             <div className="ml-auto text-right text-[10px] text-zinc-500" data-testid="protokoll-bemerkungen-zaehler"
                  style={{ color: String(f.notes || "").length >= BEMERKUNG_MAX ? "var(--st-rot)" : undefined }}>
               {String(f.notes || "").length} / {BEMERKUNG_MAX}
@@ -1326,6 +1330,10 @@ export default function Protokoll() {
                    value={f.preis_vorschlag ?? ""}
                    onChange={(e) => upd({ preis_vorschlag: e.target.value.replace(/[^0-9.,]/g, "") })}
                    className={inputCls} style={st} placeholder="z. B. 15.000" />
+            {!gesperrt && (
+              <DiktatKnopf testid="protokoll-preis-diktat" className="mt-1" beschriftung="Preis sagen"
+                           zahl="preis" onZahl={(n) => upd({ preis_vorschlag: zahlText(n) })} />
+            )}
             {/* RP-060/RP-159: zeigen, welcher Betrag erkannt wurde ("15.000" = 15.000 €). */}
             {String(f.preis_vorschlag ?? "").trim() !== "" && (
               preisErkannt.lesbar ? (
@@ -1349,9 +1357,8 @@ export default function Protokoll() {
                       placeholder="z. B. Verkäufer liefert Winterreifen nach" />
             {!gesperrt && (
               <DiktatKnopf testid="protokoll-sondervereinbarung-diktat" className="mt-1"
-                           onText={(t) => upd((s) => ({
-                             sondervereinbarung: textAnhaengen(s.sondervereinbarung, t, SONDERVEREINBARUNG_MAX),
-                           }))} />
+                           wert={f.sondervereinbarung || ""} max={SONDERVEREINBARUNG_MAX}
+                           onChange={(v) => upd({ sondervereinbarung: v })} />
             )}
           </div>
         </div>

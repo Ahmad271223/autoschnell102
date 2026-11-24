@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Camera, Trash2, Eraser, X } from "lucide-react";
 import { toast } from "sonner";
 import AbholFoto from "@/components/AbholFoto";
+import DiktatKnopf from "@/components/DiktatKnopf";
+import { schaedenAusSprache } from "@/lib/diktatSchaeden";
 import { TECHNIK_BEREICHE, TECHNIK_TYP, fragenFuer, istTechnik, mitAntwort, mitBetrag, technikSchaden } from "@/lib/kiSchaden";
 
 // Wunsch Ahmad 06.10.2026 (nur Fahrer-Protokoll): Lackdicke als EIGENE Markierung — kein Schaden, kommt
@@ -138,7 +140,7 @@ const P = (name, cx, cy) => ({ name, cx, cy });
    Das Label ist im Bild UNSICHTBAR und erscheint nur im Tooltip
    beim Hover sowie später als Text im Vertrag.
    ------------------------------------------------------------------ */
-const DOTS = {
+export const DOTS = {
   /* ---------------- FRONTANSICHT (SUV, 1536x1024) ----------------
      Neu kalibriert direkt an public/damage/front.png (08/2026).
      Konvention: "rechts" (Beifahrerseite) = LINKE Bildhaelfte,
@@ -297,6 +299,69 @@ function findNearestDot(view, x, y) {
  * Fotos zu einer Markierung (Wunsch Ahmad 06.10.2026, nur Fahrer-Protokoll): Vorschaubilder, Entfernen und
  * ein Knopf "Foto" (Kamera oder Galerie). Hochgeladen wird über `onHinzu(schadenId, datei)` des Protokolls.
  */
+/**
+ * Schäden ansagen (Wunsch Ahmad 24.11.2026, nur iPhone-App): "Kratzer Stoßstange hinten, Delle Fahrertür"
+ * -> Vorschläge mit Häkchen; erst "Übernehmen" setzt die Punkte. Ohne KI, feste Regeln (lib/diktatSchaeden).
+ */
+function SchadenDiktat({ damages, onUebernehmen }) {
+  const [ergebnis, setErgebnis] = useState(null);   // { vorschlaege, offen, gewaehlt: Set }
+  const vorhanden = new Set(damages.map((d) => `${d.type_key}|${d.zone}`));
+  const erkannt = (text) => {
+    const r = schaedenAusSprache(text, DOTS);
+    const neu = r.vorschlaege.filter((v) => !vorhanden.has(`${v.type_key}|${v.dot.name}`));
+    if (!neu.length && !r.offen.length) { toast.info("Keinen Schaden erkannt."); return; }
+    // Unsichere (z. B. "Tür" ohne vorne/hinten) nicht vorab anhaken
+    setErgebnis({ vorschlaege: neu, offen: r.offen, gewaehlt: new Set(neu.map((v, i) => (v.unsicher ? null : i)).filter((i) => i != null)) });
+  };
+  const umschalten = (i) => setErgebnis((e) => {
+    const g = new Set(e.gewaehlt);
+    if (g.has(i)) g.delete(i); else g.add(i);
+    return { ...e, gewaehlt: g };
+  });
+  return (
+    <div>
+      <DiktatKnopf testid="schaden-diktat" beschriftung="Schäden ansagen" onText={erkannt} />
+      {ergebnis && (
+        <div className="mt-2 rounded-lg border p-3 space-y-2" style={{ borderColor: "var(--border-subtle, rgba(255,255,255,0.12))" }}
+             data-testid="schaden-diktat-vorschlaege">
+          <div className="text-[11px] text-zinc-400">Erkannt — bitte prüfen und übernehmen:</div>
+          {ergebnis.vorschlaege.map((v, i) => {
+            const typ = DAMAGE_TYPES.find((t) => t.key === v.type_key);
+            return (
+              <label key={i} className="flex items-center gap-2 text-xs" data-testid={`schaden-diktat-vorschlag-${i}`}>
+                <input type="checkbox" checked={ergebnis.gewaehlt.has(i)} onChange={() => umschalten(i)} />
+                <span className="rounded px-1.5 py-0.5 text-[10px] font-bold text-white" style={{ background: typ?.color }}>{typ?.abbr}</span>
+                <span>{typ?.label} – {v.dot.name}</span>
+                {v.unsicher && <span className="text-[10px] text-zinc-500">(Stelle genauer prüfen)</span>}
+              </label>
+            );
+          })}
+          {ergebnis.offen.length > 0 && (
+            <div className="text-[11px] text-zinc-500" data-testid="schaden-diktat-offen">
+              Nicht zugeordnet: {ergebnis.offen.map((o) => `„${o}“`).join(", ")} — bitte in der Skizze antippen.
+            </div>
+          )}
+          <div className="flex gap-2">
+            {ergebnis.vorschlaege.length > 0 && (
+              <button type="button" className="rounded-lg px-3 py-1 text-xs font-semibold" data-testid="schaden-diktat-uebernehmen"
+                      style={{ background: "var(--accent-blue, #0A84FF)", color: "#fff" }}
+                      disabled={!ergebnis.gewaehlt.size}
+                      onClick={() => { onUebernehmen(ergebnis.vorschlaege.filter((_, i) => ergebnis.gewaehlt.has(i))); setErgebnis(null); }}>
+                Übernehmen ({ergebnis.gewaehlt.size})
+              </button>
+            )}
+            <button type="button" className="rounded-lg px-3 py-1 text-xs" data-testid="schaden-diktat-verwerfen"
+                    style={{ background: "var(--apple-btn-secondary-bg)", color: "var(--text-primary)" }}
+                    onClick={() => setErgebnis(null)}>
+              Verwerfen
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function FotoLeiste({ schadenId, foto }) {
   const [laedt, setLaedt] = useState(false);
   if (!foto) return null;
@@ -410,6 +475,18 @@ export default function DamageSelector({ damages = [], onChange, lackMessungen, 
     toast.success(`${activeType.label}: ${dot.name}`, { duration: 1600 });
   };
 
+  const diktatUebernehmen = (liste) => {
+    const neu = liste.map((v) => {
+      const typ = DAMAGE_TYPES.find((t) => t.key === v.type_key);
+      return { id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, view: v.view, type_key: typ.key,
+               type_label: typ.label, abbr: typ.abbr, color: typ.color, zone: v.dot.name, x: v.dot.cx, y: v.dot.cy };
+    });
+    if (!neu.length) return;
+    const next = [...damages, ...neu];
+    onChange?.(next, damagesToText(next));
+    toast.success(neu.length === 1 ? "1 Schaden eingetragen" : `${neu.length} Schäden eingetragen`, { duration: 1600 });
+  };
+
   const handleSvgClick = (view, e) => {
     // Sicherheitsnetz: Wenn der User danebentippt, schnappen wir zum
     // nächsten Dot innerhalb von SNAP_RADIUS — sonst wird der Klick
@@ -508,6 +585,7 @@ export default function DamageSelector({ damages = [], onChange, lackMessungen, 
 
   return (
     <div className="space-y-4">
+      {onChange && <SchadenDiktat damages={damages} onUebernehmen={diktatUebernehmen} />}
       {/* Schadensart-Chips */}
       <div className="flex flex-wrap gap-2" data-testid="damage-types">
         {(mitLack ? [...DAMAGE_TYPES, LACK_TYP] : DAMAGE_TYPES).map((t) => {

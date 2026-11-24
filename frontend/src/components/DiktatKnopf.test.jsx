@@ -24,13 +24,13 @@ async function rendern(el) {
 }
 const knopf = () => behaelter.querySelector('[data-testid="diktat-knopf"]');
 
-function fakeCapacitor({ phase = "bereit", heruntergeladen = true, text = "Kratzer hinten links" } = {}) {
+function fakeCapacitor({ phase = "bereit", heruntergeladen = true, text = "Kratzer hinten links", aufnahmeStatus = {} } = {}) {
   const aufrufe = [];
   window.Capacitor = {
     getPlatform: () => "ios",
     nativePromise: vi.fn(async (plugin, methode) => {
       aufrufe.push(`${plugin}.${methode}`);
-      if (methode === "status") return { phase, fortschritt: 0, groesseMB: 632, heruntergeladen, fehler: "" };
+      if (methode === "status") return { phase, fortschritt: 0, groesseMB: 632, heruntergeladen, fehler: "", ...aufnahmeStatus };
       if (methode === "aufnahmeStoppen") return { text };
       return {};
     }),
@@ -95,6 +95,97 @@ describe("DiktatKnopf", () => {
     await act(async () => { wurzel.unmount(); });
     wurzel = null;
     expect(aufrufe).toContain("SprachDiktat.abbrechen");
+  });
+});
+
+const warten = (ms) => act(async () => { await new Promise((r) => setTimeout(r, ms)); });
+
+describe("DiktatKnopf — Pegel, Auto-Stopp, Rückgängig, Zahlen (24.11.2026)", () => {
+  it("hört nach 2 s Stille von selbst auf und zeigt vorher den Pegel", async () => {
+    const aufrufe = fakeCapacitor({ aufnahmeStatus: { aufnahme: true, pegel: 0.7, gesprochen: true, stille_ms: 2100 } });
+    const onText = vi.fn();
+    await rendern(createElement(DiktatKnopf, { onText }));
+    await act(async () => { knopf().click(); });
+    expect(behaelter.querySelector('[data-testid="diktat-knopf-pegel"]')).not.toBeNull();
+    await warten(350);
+    expect(aufrufe).toContain("SprachDiktat.aufnahmeStoppen");
+    expect(onText).toHaveBeenCalledWith("Kratzer hinten links");
+  });
+
+  it("hört nicht auf, solange noch nichts gesagt wurde", async () => {
+    const aufrufe = fakeCapacitor({ aufnahmeStatus: { aufnahme: true, pegel: 0, gesprochen: false, stille_ms: 5000 } });
+    await rendern(createElement(DiktatKnopf, { onText: () => {} }));
+    await act(async () => { knopf().click(); });
+    await warten(350);
+    expect(aufrufe).not.toContain("SprachDiktat.aufnahmeStoppen");
+  });
+
+  it("erkennt nichts, wenn nur Stille aufgenommen wurde (Whisper würde Wörter erfinden)", async () => {
+    const aufrufe = fakeCapacitor({ text: "Amen.", aufnahmeStatus: { aufnahme: true, pegel: 0, gesprochen: false, stille_ms: 0 } });
+    const onText = vi.fn();
+    await rendern(createElement(DiktatKnopf, { onText }));
+    await act(async () => { knopf().click(); });
+    await warten(250);
+    await act(async () => { knopf().click(); });
+    expect(aufrufe).toContain("SprachDiktat.abbrechen");
+    expect(aufrufe).not.toContain("SprachDiktat.aufnahmeStoppen");
+    expect(onText).not.toHaveBeenCalled();
+  });
+
+  it("setzt Sprachbefehle um, hängt an und kann es rückgängig machen", async () => {
+    fakeCapacitor({ text: "Delle Komma Tüv neu" });
+    let wert = "Kratzer.";
+    const onChange = vi.fn((v) => { wert = v; });
+    await rendern(createElement(DiktatKnopf, { wert, onChange }));
+    await act(async () => { knopf().click(); });
+    await act(async () => { knopf().click(); });
+    expect(onChange).toHaveBeenLastCalledWith("Kratzer.\nDelle, TÜV neu");
+    await act(async () => { wurzel.render(createElement(DiktatKnopf, { wert, onChange })); });
+    const rueck = behaelter.querySelector('[data-testid="diktat-knopf-rueckgaengig"]');
+    expect(rueck).not.toBeNull();
+    await act(async () => { rueck.click(); });
+    expect(onChange).toHaveBeenLastCalledWith("Kratzer.");
+  });
+
+  it("macht nichts rückgängig, wenn das Feld inzwischen geändert wurde", async () => {
+    fakeCapacitor({ text: "Delle" });
+    const onChange = vi.fn();
+    await rendern(createElement(DiktatKnopf, { wert: "", onChange }));
+    await act(async () => { knopf().click(); });
+    await act(async () => { knopf().click(); });
+    await act(async () => { wurzel.render(createElement(DiktatKnopf, { wert: "Delle und mehr", onChange })); });
+    await act(async () => { behaelter.querySelector('[data-testid="diktat-knopf-rueckgaengig"]').click(); });
+    expect(onChange).toHaveBeenCalledTimes(1);
+  });
+
+  it("Mängel: jedes Diktat in eine eigene Zeile", async () => {
+    fakeCapacitor({ text: "Zahnriemen fällig" });
+    const onChange = vi.fn();
+    await rendern(createElement(DiktatKnopf, { wert: "Kupplung rutscht", onChange, neueZeile: true }));
+    await act(async () => { knopf().click(); });
+    await act(async () => { knopf().click(); });
+    expect(onChange).toHaveBeenCalledWith("Kupplung rutscht\nZahnriemen fällig");
+  });
+
+  it("Zahl sprechen: erst nach Bestätigung übernehmen", async () => {
+    fakeCapacitor({ text: "Hundertzwanzigtausend Kilometer." });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const onZahl = vi.fn();
+    await rendern(createElement(DiktatKnopf, { zahl: "km", onZahl }));
+    await act(async () => { knopf().click(); });
+    await act(async () => { knopf().click(); });
+    expect(confirm.mock.calls[0][0]).toBe("Erkannt: 120.000 km — übernehmen?");
+    expect(onZahl).toHaveBeenCalledWith(120000);
+  });
+
+  it("Zahl sprechen: Nein übernimmt nichts, Unklares auch nicht", async () => {
+    fakeCapacitor({ text: "15.000 Euro" });
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+    const onZahl = vi.fn();
+    await rendern(createElement(DiktatKnopf, { zahl: "preis", onZahl }));
+    await act(async () => { knopf().click(); });
+    await act(async () => { knopf().click(); });
+    expect(onZahl).not.toHaveBeenCalled();
   });
 });
 
