@@ -10,6 +10,7 @@ import {
 import PhotoGallery from "@/components/PhotoGallery";
 import AbholCheckDialog from "@/components/AbholCheckDialog";
 import DiktatKnopf from "@/components/DiktatKnopf";
+import AuftragChat, { ChatNeu } from "@/components/AuftragChat";
 import { textAnhaengen } from "@/lib/sprachdiktat";
 import { NICHT_ABGEHOLT_GRUENDE, nichtAbgeholtNotiz, protokollIstFinal } from "./fahrtPruefung";
 
@@ -338,6 +339,7 @@ export default function DriverDashboard() {
                               {a.status}
                             </span>
                           )}
+                          <ChatNeu rolle="fahrer" terminId={a.id} className={a.status ? "" : "ml-auto"} />
                         </div>
                         <div className={`font-display font-bold text-lg tracking-tight mt-1 ${isOpen ? "break-words" : "truncate"}`}>
                           {v.make || "Fahrzeug"} {v.model || ""}
@@ -392,6 +394,11 @@ export default function DriverDashboard() {
                             </a>
                           )}
                         </div>
+
+                        {/* Chat Büro/Fahrer (24.11.2026) — Server prüft Zugriff und Sichtfrist */}
+                        {a.zuteilung !== "abgelehnt" && a.status !== "storniert" && (
+                          <AuftragChat rolle="fahrer" terminId={a.id} />
+                        )}
 
                         {photos.length > 0 && (
                           <PhotoGallery photos={photos} label="Fahrzeug-Fotos" />
