@@ -5143,3 +5143,26 @@ Zwölf Lesebilder (Vorschauen der Betreiber-Seite) mit der echten Lesekette des 
   `test_technik_zustand_20261009.py`, `test_golive_20260915_vertrag_kundenfassung.py`; Oberfläche
   `ContractDialog.zustand.test.jsx`.
 
+
+## Serverprüfung mit einem Befehl (Wunsch Ahmad 24.11.2026)
+„Prüfe den Server, ist alles gut, gibt es Probleme; schau alle nicht erkannten Inserate an“ — vom PC aus, im
+Projektordner (je Server einmal anmelden, wie beim Hochladen):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy\serverpruefung.ps1
+```
+
+- **Nur lesen**: keine Daten, keine Einstellungen, kein Neustart. Kein `git pull` nötig — die Skripte kommen vom PC
+  (`deploy/serverpruefung.sh` + `systemcheck.py`, `lesebilder_export.py`, `leseseite_analysieren.py`), werden nach
+  `/tmp/autoschnell-pruefung` gepackt, dort gestartet und danach wieder entfernt.
+- Erster Server (`-Server`, Standard `root@2.28.66.8`): Zustand (Platte, Speicher, Container, `/api/ready`,
+  Replica-Set, Sicherungen, Fehlerzeilen/5xx der letzten 72 h aus backend/web/proxy) + Systemcheck
+  (`-Tage`, Standard 30) + alle nicht erkannten Anzeigen: Lesebilder in voller Größe, `vergleiche_problem.jsonl`
+  (Programm-Vergleiche ohne Modell/Inserat-Link/Vergleichslinks, mit Grund) und `leseseiten.jsonl` (nur Kennzahlen,
+  nie die Seite). Weitere Server (`-Weitere`, Standard `root@167.233.243.23`): nur der Zustand.
+- Ergebnis: `Downloads\serverpruefung-<Datum>\<server>\<rechnername>\` (`server.txt`, `systemcheck.txt`,
+  `lesebilder\uebersicht.txt` …).
+- Technik: das Archiv läuft über `cmd` (PowerShell 5.1 würde die Binärdaten als Text umkodieren), die Dateien gehen mit
+  LF-Zeilen hinüber (git auf Windows checkt CRLF aus). Auf dem Server von Hand:
+  `cd /opt/autoschnell && sh deploy/serverpruefung.sh voll 30 > /tmp/pruefung.tgz`.
+- Tests: `backend/tests/test_serverpruefung_20261124.py`.
