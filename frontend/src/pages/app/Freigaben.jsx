@@ -7,6 +7,7 @@ import { useUngespeichert } from "@/lib/ungespeichert";
 import { toast } from "sonner";
 import KiBewertungKarte from "@/components/KiBewertungKarte";
 import SchadenFotos from "@/components/SchadenFotos";
+import AbweichungenListe from "@/components/AbweichungenListe";
 import RueckfrageDialog from "@/components/RueckfrageDialog";
 import { rueckfrageBezug, schadenBezeichnung } from "@/lib/kiSchaden";
 import { datumZeit } from "@/lib/markt";
@@ -384,6 +385,10 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
         ))}
       </div>
 
+      {/* Wunsch Ahmad 24.11.2026: feste Nummern — dieselben sieht der Fahrer */}
+      {!e.ladefehler && e.abweichungen_nummeriert?.anzahl > 0 && (
+        <div className="mt-3"><AbweichungenListe daten={e.abweichungen_nummeriert} testId={`freigabe-abweichungen-${e.protocol_id}`} /></div>
+      )}
       {!e.ladefehler && <div className="mt-3"><Vergleich eintrag={e} /></div>}
       {!e.ladefehler && <VorOrt eintrag={e} />}
 

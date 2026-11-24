@@ -7,7 +7,7 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   Car, FileText, Calendar, Users, Settings as SettingsIcon, ShieldCheck, Truck,
   Layers, LogOut, Activity, Search, Warehouse, Inbox, ClipboardCheck, Radar, Bell, MonitorDown,
-  Menu, X, PanelLeftClose, PanelLeftOpen,
+  Menu, X, PanelLeftClose, PanelLeftOpen, Sparkles,
 } from "lucide-react";
 import { useProgramme } from "@/lib/programme";
 import { useAuth } from "@/context/AuthContext";
@@ -17,6 +17,8 @@ import { verlassenBestaetigen } from "@/lib/ungespeichert";
 import { useAnfragenZaehler } from "@/lib/anfragenZaehler";
 import { useAbgelehntZaehler } from "@/lib/abgelehntZaehler";
 import { neueMeldungen, useMeldungenZaehler } from "@/lib/meldungen";
+import { useNeuigkeitenZaehler } from "@/lib/neuigkeiten";
+import NeuigkeitenHinweis from "@/components/NeuigkeitenHinweis";
 import { lesen, lokalerSpeicher, schreiben } from "@/lib/speicher";
 import ThemeToggle from "@/components/ThemeToggle";
 import InstallPWAButton from "@/components/InstallPWAButton";
@@ -54,6 +56,8 @@ export const NAV = [
   { to: "/app/fahrer", label: "Fahrer", icon: Truck, gruppe: "team" },
   // Kundenportal (29.09.2026): "Kaufvertrag bestätigt" — Chef und Sucher, mit Zähler und Hinweis
   { to: "/app/meldungen", label: "Meldungen", icon: Bell, meldungen: true, gruppe: "allgemein" },
+  // Wunsch Ahmad 24.11.2026: "Was ist neu" mit Zahl der ungelesenen Eintraege
+  { to: "/app/neuigkeiten", label: "Was ist neu", icon: Sparkles, neuigkeiten: true, gruppe: "allgemein" },
   { to: "/app/einstellungen", label: "Einstellungen", icon: SettingsIcon, gruppe: "allgemein" },
 ];
 
@@ -126,6 +130,8 @@ export default function AppLayout({ children }) {
   // Kundenportal (29.09.2026): Meldungen "Kaufvertrag bestätigt" — Chef UND Sucher; neue Meldung
   // = neue ID (nicht nur eine höhere Zahl), erster Abruf meldet den Altbestand nicht.
   const meldungen = useMeldungenZaehler(Boolean(user) && user.role !== "admin", user?.id);
+  const firmenKonto = Boolean(user) && (user.role === "dealer" || user.role === "sucher");
+  const neuigkeiten = useNeuigkeitenZaehler(firmenKonto, user?.id);
   useEffect(() => {
     if (!meldungen.geladen || !Array.isArray(meldungen.ids)) return;
     const neu = neueMeldungen(GESEHEN_MELDUNGEN, user?.id, meldungen.ids);
@@ -177,11 +183,13 @@ export default function AppLayout({ children }) {
 
   // Zahl + Beschriftung je Eintrag (Freigaben, Anfragen, abgelehnte Fahrten, Meldungen)
   const zahlFuer = (it) => (it.zaehler ? freigabe.wartet
-    : it.anfragen ? anfragenWarten : it.abgelehnt ? abgelehnt : it.meldungen ? meldungen.ungelesen : 0);
+    : it.anfragen ? anfragenWarten : it.abgelehnt ? abgelehnt : it.meldungen ? meldungen.ungelesen
+    : it.neuigkeiten ? neuigkeiten : 0);
   const zahlText = (it) => (it.anfragen ? "brauchen eine Antwort"
-    : it.abgelehnt ? "vom Fahrer abgelehnt, bitte neu zuteilen" : it.meldungen ? "ungelesen" : "warten");
+    : it.abgelehnt ? "vom Fahrer abgelehnt, bitte neu zuteilen" : (it.meldungen || it.neuigkeiten) ? "ungelesen" : "warten");
   const zaehlerId = (it) => (it.anfragen ? "nav-anfragen-zaehler"
-    : it.abgelehnt ? "nav-termine-zaehler" : it.meldungen ? "nav-meldungen-zaehler" : "nav-freigaben-zaehler");
+    : it.abgelehnt ? "nav-termine-zaehler" : it.meldungen ? "nav-meldungen-zaehler"
+    : it.neuigkeiten ? "nav-neuigkeiten-zaehler" : "nav-freigaben-zaehler");
 
   const firmaName = (dealer?.company_name || "").trim();
   const rolleText = user?.role === "dealer" ? "Chef" : user?.role === "sucher" ? "Sucher"
@@ -413,6 +421,8 @@ export default function AppLayout({ children }) {
             jeder Seite des angemeldeten Bereichs aus erreichbar. */}
         <RechtsLinks className="py-4" />
       </main>
+      {/* Wunsch Ahmad 24.11.2026: hoechstens ein "Was ist neu"-Hinweis pro Tag (Server entscheidet) */}
+      <NeuigkeitenHinweis aktiv={firmenKonto && !pathname.startsWith("/app/neuigkeiten")} kontoId={user?.id} />
 
     </div>
   );

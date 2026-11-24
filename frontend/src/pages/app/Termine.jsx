@@ -6,7 +6,7 @@ import { textAnhaengen } from "@/lib/sprachdiktat";
 import {
   Calendar as CalIcon, FileText, Edit3, X, ChevronLeft, ChevronRight,
   Plus, MapPin, Phone, User as UserIcon, Trash2, Clock, Printer,
-  ClipboardCheck, Download, Camera,
+  ClipboardCheck, Download, Camera, AlertTriangle,
 } from "lucide-react";
 import {
   openContractPdf, printContractPdf,
@@ -15,6 +15,7 @@ import {
 import BeweisCard from "@/components/BeweisCard";
 import PhotoGallery from "@/components/PhotoGallery";
 import AbholberichtDialog from "@/components/AbholberichtDialog";
+import AbweichungenDialog from "@/components/AbweichungenDialog";
 import { Link } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { useFreigabeZaehler } from "@/lib/freigaben";
@@ -790,6 +791,7 @@ function DayApptItem({ a, onEdit, compact, mitBeweis = false }) {
   const meta = STATUS_META[a.status] || STATUS_META.offen;
   // Runde 21: Abholbericht samt Fahrerfotos direkt am Termin (auch fuer Sucher).
   const [bericht, setBericht] = useState(false);
+  const [abweichungen, setAbweichungen] = useState(false);   // Wunsch Ahmad 24.11.2026
   const v = a.vehicle?.data;
   const date = safeParse(a.pickup_date);
   return (
@@ -861,6 +863,15 @@ function DayApptItem({ a, onEdit, compact, mitBeweis = false }) {
               {a.deviations_count ? ` · ${a.deviations_count} Abweichung${a.deviations_count === 1 ? "" : "en"}` : ""}
             </button>
           )}
+          {/* Wunsch Ahmad 24.11.2026: Zahl der Abweichungen im Protokoll — ein Klick zeigt die nummerierte Liste */}
+          {a.protokoll_abweichungen > 0 && (
+            <button type="button" data-testid={`abweichungen-${a.id}`}
+                    onClick={(e) => { e.stopPropagation(); setAbweichungen(true); }}
+                    className="inline-flex items-center gap-1 text-[11px] hover:underline min-h-[36px] px-1 -mx-1"
+                    style={{ color: "var(--st-amber)" }}>
+              <AlertTriangle size={10} /> {a.protokoll_abweichungen} Abweichung{a.protokoll_abweichungen === 1 ? "" : "en"}
+            </button>
+          )}
           {a.contract_id && (
             <span className="inline-flex items-center gap-1 text-[11px]" style={{ color: "var(--st-gruen)" }}>
               <FileText size={10} /> PDF
@@ -874,6 +885,7 @@ function DayApptItem({ a, onEdit, compact, mitBeweis = false }) {
         )}
       </div>
       {bericht && <AbholberichtDialog appt={a} onClose={() => setBericht(false)} />}
+      {abweichungen && <AbweichungenDialog appt={a} onClose={() => setAbweichungen(false)} />}
     </div>
   );
 }

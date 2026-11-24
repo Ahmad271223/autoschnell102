@@ -1,0 +1,119 @@
+{
+  "_hinweis": "Was ist neu (Wunsch Ahmad 24.11.2026). Neue Eintraege OBEN anfuegen, id nie aendern oder wiederverwenden (Gelesen-Stand haengt daran). Felder: id, datum JJJJ-MM-TT, titel, bereich, art neu|verbessert|behoben, text, punkte (optional), link (optional, Pfad in der App), wichtig (optional), fuer: chef/sucher/fahrer.",
+  "eintraege": [
+    {
+      "id": "2026-11-24-abweichungen-nummern",
+      "datum": "2026-11-24",
+      "titel": "Abweichungen mit festen Nummern",
+      "bereich": "Abholung",
+      "art": "verbessert",
+      "text": "Jede Abweichung im Abholprotokoll hat jetzt eine feste Nummer. Büro und Fahrer sehen dieselbe Nummer – am Telefon reicht also „Nr. 3“.",
+      "punkte": [
+        "Die Nummer bleibt gleich, auch wenn später eine Abweichung dazukommt oder wegfällt.",
+        "Fehlende Ausstattung steht gesammelt unter „Ausstattung fehlt“.",
+        "Im Terminplaner öffnet ein Klick auf die Zahl der Abweichungen direkt die Liste.",
+        "Auch im Abholprotokoll als PDF stehen dieselben Nummern."
+      ],
+      "link": "/app/termine",
+      "fuer": ["chef", "sucher"]
+    },
+    {
+      "id": "2026-11-24-fahrer-abweichungen-nummern",
+      "datum": "2026-11-24",
+      "titel": "Abweichungen haben Nummern",
+      "bereich": "Abholung",
+      "art": "verbessert",
+      "text": "Nach dem Abschicken siehst du im Protokoll alle Abweichungen mit einer festen Nummer. Das Büro sieht dieselben Nummern – sag am Telefon einfach „Nr. 3“.",
+      "fuer": ["fahrer"]
+    },
+    {
+      "id": "2026-11-24-fahrzeugseite",
+      "datum": "2026-11-24",
+      "titel": "Neue Fahrzeugseite",
+      "bereich": "Fahrzeuge",
+      "art": "verbessert",
+      "text": "Die Seite eines Fahrzeugs ist neu aufgebaut. Die Angaben zum Fahrzeug stehen übersichtlicher an einem Ort.",
+      "link": "/app/fahrzeuge",
+      "fuer": ["chef", "sucher"]
+    },
+    {
+      "id": "2026-11-24-fahrzeugliste",
+      "datum": "2026-11-24",
+      "titel": "Fahrzeugliste: Kaufzeitraum, Einkaufssumme, Status",
+      "bereich": "Fahrzeuge",
+      "art": "neu",
+      "text": "In der Fahrzeugliste kannst du nach dem Kaufzeitraum auswählen und siehst die Einkaufssumme der gezeigten Fahrzeuge.",
+      "punkte": [
+        "Kaufzeitraum wählen, zum Beispiel einen Monat.",
+        "Die Einkaufssumme passt sich der Auswahl an.",
+        "Den Status kannst du für mehrere Fahrzeuge auf einmal ändern."
+      ],
+      "link": "/app/fahrzeuge",
+      "fuer": ["chef", "sucher"]
+    },
+    {
+      "id": "2026-11-24-zulassungsstatus",
+      "datum": "2026-11-24",
+      "titel": "Zulassungsstatus im Vertrag",
+      "bereich": "Vertrag",
+      "art": "neu",
+      "text": "Im Kaufvertrag kannst du jetzt festhalten, wie es um die Zulassung des Fahrzeugs steht.",
+      "link": "/app/vertraege",
+      "fuer": ["chef", "sucher"]
+    },
+    {
+      "id": "2026-11-24-storniert-zeichen",
+      "datum": "2026-11-24",
+      "titel": "STORNIERT-Zeichen auf Verträgen",
+      "bereich": "Vertrag",
+      "art": "neu",
+      "text": "Ein stornierter Vertrag trägt jetzt gut sichtbar das Zeichen „STORNIERT“. So wird er nicht aus Versehen weiter benutzt.",
+      "link": "/app/vertraege",
+      "fuer": ["chef", "sucher"]
+    },
+    {
+      "id": "2026-11-24-abaenderungsvertrag",
+      "datum": "2026-11-24",
+      "titel": "Abänderungsvertrag nach der Unterschrift",
+      "bereich": "Vertrag",
+      "art": "neu",
+      "text": "Ändert sich nach der Unterschrift noch etwas, kannst du einen Abänderungsvertrag erstellen. Der ursprüngliche Vertrag bleibt dabei erhalten.",
+      "punkte": [
+        "Der Verkäufer kann online unterschreiben.",
+        "Oder du schickst den Abänderungsvertrag per E-Mail."
+      ],
+      "link": "/app/vertraege",
+      "wichtig": true,
+      "fuer": ["chef", "sucher"]
+    },
+    {
+      "id": "2026-11-24-chat-fahrer",
+      "datum": "2026-11-24",
+      "titel": "Chat mit dem Fahrer",
+      "bereich": "Abholung",
+      "art": "neu",
+      "text": "Zu einem Abholauftrag kannst du dem Fahrer jetzt direkt schreiben. Die Nachrichten bleiben beim Auftrag.",
+      "link": "/app/termine",
+      "fuer": ["chef", "sucher"]
+    },
+    {
+      "id": "2026-11-24-fahrer-chat",
+      "datum": "2026-11-24",
+      "titel": "Chat mit dem Büro",
+      "bereich": "Abholung",
+      "art": "neu",
+      "text": "Im Abholauftrag kannst du dem Büro jetzt direkt schreiben. Die Nachrichten bleiben beim Auftrag.",
+      "fuer": ["fahrer"]
+    },
+    {
+      "id": "2026-11-24-ueberweisung-qr",
+      "datum": "2026-11-24",
+      "titel": "Überweisung mit QR-Code",
+      "bereich": "Abholung",
+      "art": "neu",
+      "text": "Im Abholauftrag gibt es jetzt einen QR-Code für die Überweisung. Mit einer Banking-App scannen – die Zahlungsdaten müssen nicht mehr abgetippt werden.",
+      "link": "/app/termine",
+      "fuer": ["chef", "sucher"]
+    }
+  ]
+}
