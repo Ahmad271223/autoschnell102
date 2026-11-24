@@ -2166,6 +2166,8 @@ async def admin_contract_pdf(contract_id: str, _=Depends(current_admin)):
     pdf_bytes = await _druck_pdf_bytes(doc)
     if not pdf_bytes:
         raise HTTPException(404, "Vertrag oder PDF nicht gefunden")
+    from vertrag_storno import falls_storniert          # 24.11.2026: STORNIERT-Zeichen beim Ausliefern
+    pdf_bytes = await falls_storniert(contract_id, pdf_bytes)
     raw_name = doc.get("filename") or f"vertrag_{contract_id}.pdf"
     # Rollenprüfung 22.09.2026 (RP-200/RP-351, Welle 2): Starlette kodiert
     # Kopfzeilen als latin-1 — ein 'Š', '–' oder Emoji im Dateinamen gab
