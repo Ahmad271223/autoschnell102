@@ -1266,6 +1266,7 @@ async def meldung_anlegen(dealer_id: str, empfaenger: List[str], typ: str, text:
 def _meldung_sicht(m: dict, user_id: str) -> dict:
     return {"id": m["id"], "typ": m.get("typ"), "text": m.get("text"), "ref": m.get("ref"),
             "contract_no": m.get("contract_no"), "erstellt_am": m.get("erstellt_am"),
+            "termin_id": m.get("termin_id"),
             "gelesen": bool((m.get("gelesen") or {}).get(user_id))}
 
 

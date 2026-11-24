@@ -16,7 +16,8 @@ import BeweisCard from "@/components/BeweisCard";
 import PhotoGallery from "@/components/PhotoGallery";
 import AbholberichtDialog from "@/components/AbholberichtDialog";
 import AbweichungenDialog from "@/components/AbweichungenDialog";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
+import UeberweisungKarte from "@/components/UeberweisungKarte";
 import { useAuth } from "@/context/AuthContext";
 import { useFreigabeZaehler } from "@/lib/freigaben";
 import { preisAusText } from "@/lib/preis";
@@ -347,6 +348,15 @@ export default function Termine() {
   const [filter, setFilter] = useState("");
   const [editing, setEditing] = useState(null);       // appt being edited
   const [creating, setCreating] = useState(false);
+  // Ueberweisung (24.11.2026): Meldung "jetzt ueberweisen" oeffnet den Termin direkt
+  const [suchParameter] = useSearchParams();
+  const terminAusLink = suchParameter.get("termin");
+  useEffect(() => {
+    if (!terminAusLink) return;
+    api.get(`/appointments/${encodeURIComponent(terminAusLink)}`)
+      .then((r) => { if (r?.data?.id) setEditing(r.data); })
+      .catch((e) => toast.error(errMsg(e, "Termin konnte nicht geöffnet werden")));
+  }, [terminAusLink]);
 
   // Runde 16 (15.09.2026): Kuerzung (X-Truncated ab 2.000) und Ladefehler
   // sichtbar machen — vorher sah beides wie "keine Termine" aus.
@@ -1380,6 +1390,9 @@ function EditDialog({ appt, drivers, fahrerGeladen = true, chef = false, isNew, 
               </div>
             </div>
           )}
+
+          {/* Wunsch Ahmad 24.11.2026: Kaufpreis direkt aus dem Abholauftrag ueberweisen */}
+          {a.id && !isNew && <UeberweisungKarte terminId={a.id} />}
 
           {a.vehicle_id && (
             <div className="mt-4">

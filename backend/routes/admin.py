@@ -1294,6 +1294,8 @@ _COMPANY_COLLECTIONS = (
     # Runde 18: Kaufvorgaenge (Umbau 09.09.2026) tragen dealer_id, Sucher,
     # Vertrag, Fahrzeug und Kaufpreis — blieben bei der Firmenloeschung liegen.
     "kaufvorgaenge",
+    # Ueberweisung (24.11.2026): Kontodaten des Verkaeufers je Termin
+    "ueberweisungen",
     # Review 26.09.2026 (Nr. 141/142): KI-Bewertungen (Eingabepakete, Ergebnisse)
     # und Lernfaelle der Firma tragen dealer_id — blieben bei der Firmen-
     # loeschung liegen. ki_budget hat KEIN dealer_id-Feld (Kennung im

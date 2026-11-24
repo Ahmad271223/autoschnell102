@@ -10,6 +10,7 @@ import {
 import { protokollBefundHinweis, termineOffenDetail, termineStornoFrage } from "@/lib/akteHinweise";
 import { toast } from "sonner";
 import AbholFoto from "@/components/AbholFoto";
+import UeberweisungKarte from "@/components/UeberweisungKarte";
 import SchadenFotos from "@/components/SchadenFotos";
 import BeweisCard from "@/components/BeweisCard";
 import { fotosBis } from "@/components/AbholberichtDialog";
@@ -623,6 +624,9 @@ export default function FahrzeugAkte() {
           {(akte.appointments || []).slice(0, 1).map((a) => (
             <KV key={a.id} k="Geplante Abholung"
                 val={`${datumDE(a.pickup_date)}${a.pickup_time ? ` · ${a.pickup_time}\u00a0Uhr` : ""} · ${lesbar(a.status || "offen")}`} />
+          ))}
+          {(akte.appointments || []).slice(0, 1).map((a) => (
+            <div key={`ue-${a.id}`} className="mt-1"><UeberweisungKarte terminId={a.id} kompakt /></div>
           ))}
           {(akte.contracts || []).map((c, i) => (
             <button key={c.id || i} type="button" data-testid={`akte-vertrag-${c.id}`}

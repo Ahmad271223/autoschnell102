@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import KiBewertungKarte from "@/components/KiBewertungKarte";
 import SchadenFotos from "@/components/SchadenFotos";
 import AbweichungenListe from "@/components/AbweichungenListe";
+import UeberweisungKarte from "@/components/UeberweisungKarte";
 import RueckfrageDialog from "@/components/RueckfrageDialog";
 import { rueckfrageBezug, schadenBezeichnung } from "@/lib/kiSchaden";
 import { datumZeit } from "@/lib/markt";
@@ -457,6 +458,11 @@ function Karte({ eintrag: e, entwurf, setEntwurf, busy, senden }) {
         <div className="mt-2 text-[12px] text-zinc-400">
           <span className="text-zinc-500">Bemerkung des Fahrers:</span> {e.bemerkungen}
         </div>
+      )}
+
+      {/* Wunsch Ahmad 24.11.2026: nach der Freigabe steht der Betrag fest — hier überweisen */}
+      {freigegeben && e.appointment_id && (
+        <div className="mt-3"><UeberweisungKarte terminId={e.appointment_id} /></div>
       )}
 
       {/* Wunsch Ahmad 25.09.2026: KI-Einschätzung der Abweichungen — nur
