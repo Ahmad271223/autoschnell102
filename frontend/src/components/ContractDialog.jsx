@@ -16,6 +16,8 @@ import { ZUSICHERUNG_STANDARD, offeneVorschlaege, uebernahmenAusEntwurf, vorschl
 import { fehlendeKaeuferfelder, kaeuferAktualisieren, kaeuferAusProfil } from "@/lib/kaeuferdaten";
 import { kmAusText, preisAusText, preisText } from "@/lib/preis";
 import { openContractPdf } from "@/lib/pdf";
+import DiktatKnopf from "@/components/DiktatKnopf";
+import { textAnhaengen } from "@/lib/sprachdiktat";
 import { MODAL_ATTRIBUTE, useModal } from "@/lib/useModal";
 
 const YN_OPTIONS = [
@@ -1094,7 +1096,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
             </div>
             {form.technik_zustand === "Schaden vorhanden" && (
               <Field label="Schaden an Motor/Getriebe/Kupplung: was genau" value={form.technik_schaden_text}
-                     onChange={(v) => set("technik_schaden_text", v)} testid="contract-technik-schaden" />
+                     onChange={(v) => set("technik_schaden_text", v)} testid="contract-technik-schaden" diktat />
             )}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
               <SelectField
@@ -1219,11 +1221,11 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
             <div className="space-y-2.5" data-testid="contract-schaeden-text">
               <Field label="Sonstige Schäden (erscheint im Vertrag bei den Fahrzeugdaten)" multiline rows={2}
                      value={form.vehicle_damage_note} onChange={(v) => set("vehicle_damage_note", v)}
-                     testid="contract-veh-damage" placeholder="z. B. Kratzer Heckklappe, Delle Tür hinten links, Motorschaden" />
+                     testid="contract-veh-damage" placeholder="z. B. Kratzer Heckklappe, Delle Tür hinten links, Motorschaden" diktat />
               {form.accident_free === "Nein" && (
                 <Field label="Unfallschaden: wo / Beschreibung" value={form.accident_location}
                        onChange={(v) => set("accident_location", v)} testid="contract-accident-loc"
-                       placeholder="z. B. Heckschaden rechts, repariert" />
+                       placeholder="z. B. Heckschaden rechts, repariert" diktat />
               )}
             </div>
           </Section>
@@ -1294,7 +1296,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
             {/* Wunsch Ahmad 04.11.2026: eigener Satz für diesen Vertrag ("8-fach bereift" …) — Punkt "Zusätzliche Vereinbarung" */}
             <Field label="Sonstige Vereinbarung (im Vertrag unter „Zusätzliche Vereinbarung“)" multiline rows={2}
                    value={form.sonstige_vereinbarung} onChange={(v) => set("sonstige_vereinbarung", v)}
-                   testid="contract-sonstige-vereinbarung"
+                   testid="contract-sonstige-vereinbarung" diktat
                    placeholder="z. B. 8-fach bereift, Winterräder auf Felgen, 2 Schlüssel, Service neu" />
             <Field label="Besondere Vereinbarungen" value={form.additional_terms} onChange={(v) => set("additional_terms", v)} multiline rows={4} testid="contract-terms"
                    helper="Aus deinen Einstellungen vorausgefüllt — hier nur für diesen Vertrag anpassbar. Leerst du das Feld, gilt wieder der Text aus den Einstellungen. Platzhalter in geschweiften Klammern (z. B. {abholdatum}) werden beim Erstellen des PDF automatisch eingesetzt." />
@@ -1448,7 +1450,8 @@ const Section = ({ title, subtitle, icon: Icon, children }) => (
 
 // M-12: autoComplete durchreichen (type="tel" autoComplete="tel" an den Telefonfeldern).
 // 04.10.2026: `fehlt` markiert ein wichtiges, noch leeres Feld (Rahmen + "fehlt" an der Beschriftung).
-const Field = ({ label, value, onChange, type = "text", multiline, rows = 2, required, testid, placeholder, disabled, helper, inputMode, maxLength, autoComplete, fehlt }) => (
+// 24.11.2026: `diktat` zeigt in der iPhone-App den Mikrofon-Knopf (Text wird angehängt).
+const Field = ({ label, value, onChange, type = "text", multiline, rows = 2, required, testid, placeholder, disabled, helper, inputMode, maxLength, autoComplete, fehlt, diktat }) => (
   <div>
     <label className="text-xs text-zinc-400 flex items-center gap-1.5">
       {label}
@@ -1462,6 +1465,10 @@ const Field = ({ label, value, onChange, type = "text", multiline, rows = 2, req
              required={required} className={`input-base w-full mt-1 disabled:opacity-50${fehlt ? " vf-fehlt" : ""}`}
              placeholder={placeholder} disabled={disabled}
              inputMode={inputMode} maxLength={maxLength} autoComplete={autoComplete} />
+    )}
+    {diktat && !disabled && (
+      <DiktatKnopf testid={testid ? `${testid}-diktat` : undefined} className="mt-1"
+                   onText={(t) => onChange(textAnhaengen(value, t, maxLength))} />
     )}
     {helper && <div className="text-[11px] text-zinc-500 mt-1 leading-snug">{helper}</div>}
   </div>
