@@ -265,19 +265,18 @@ def _styles():
         "f_price_value": ParagraphStyle("f_price_value", parent=s["Normal"], fontSize=18, leading=21,
                                         textColor=_akzent(), alignment=1),
         # Layout "uebersicht" (Wunsch Ahmad 25.11.2026)
-        "u_title": ParagraphStyle("u_title", parent=s["Normal"], fontSize=20, leading=24, textColor=_akzent(),
+        "u_title": ParagraphStyle("u_title", parent=s["Normal"], fontSize=20, leading=24, textColor=SCHRIFT,
                                   alignment=1),
         "u_firma": ParagraphStyle("u_firma", parent=s["Normal"], fontSize=10, leading=13, textColor=_akzent(),
                                   alignment=TA_RIGHT),
         "u_section": ParagraphStyle("u_section", parent=s["Normal"], fontSize=10.5, leading=13, textColor=SCHRIFT,
                                     wordSpace=1.2),
-        "u_kdnr": ParagraphStyle("u_kdnr", parent=s["Normal"], fontSize=9.5, leading=12, textColor=_akzent(),
-                                 alignment=TA_RIGHT),
+        "u_kdnr": ParagraphStyle("u_kdnr", parent=s["Normal"], fontSize=9, leading=11, textColor=colors.white),
         "u_label": ParagraphStyle("u_label", parent=s["Normal"], fontSize=8.5, leading=10.5, textColor=SCHRIFT),
         "u_value": ParagraphStyle("u_value", parent=s["Normal"], fontSize=9.5, leading=11.5, textColor=SCHRIFT),
-        "u_price_label": ParagraphStyle("u_price_label", parent=s["Normal"], fontSize=8, leading=10,
-                                        textColor=SCHRIFT, alignment=1),
-        "u_price": ParagraphStyle("u_price", parent=s["Normal"], fontSize=20, leading=24, textColor=_akzent(),
+        "u_price_label": ParagraphStyle("u_price_label", parent=s["Normal"], fontSize=8.5, leading=10.5,
+                                        textColor=_akzent(), alignment=1),
+        "u_price": ParagraphStyle("u_price", parent=s["Normal"], fontSize=20, leading=24, textColor=SCHRIFT,
                                   alignment=1),
         "u_price_sub": ParagraphStyle("u_price_sub", parent=s["Normal"], fontSize=8.5, leading=11,
                                       textColor=SCHRIFT, alignment=1),
@@ -301,15 +300,11 @@ def _section(title, st):
     Layout "formular": Titel in der Vertragsfarbe, GROSS, mit duenner Linie darunter.
     Layout "uebersicht": Titel fett, darunter eine Linie in der Vertragsfarbe (wie ein Formularkopf)."""
     if _uebersicht():
-        # 25.11.2026 (Bild Ahmad): GROSS, gesperrt, darunter eine duenne Linie in der aufgehellten Vertragsfarbe
-        t = Table([[Paragraph(f"<b>{_xml_escape(_titel_ohne_nummer(title).upper())}</b>", st["u_section"])]],
+        # 25.11.2026 abends (Wunsch Ahmad: "etwas eigen, aber aehnlich, Anordnung gleich"): unser Zeichen —
+        # Balken in der Vertragsfarbe links, Titel fett in normaler Schreibweise, feine graue Linie darunter
+        t = Table([[Paragraph(f"<b>{_xml_escape(_titel_ohne_nummer(title))}</b>", st["u_section"])]],
                   colWidths=[CONTENT_W], hAlign="LEFT")
-        t.setStyle(TableStyle([
-            ("LINEBELOW", (0, 0), (-1, -1), 0.8, _aufgehellt(_akzent(), 0.55)),
-            ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-            ("TOPPADDING", (0, 0), (-1, -1), 1 if _dicht() else 2),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 2 if _dicht() else 4),
-        ]))
+        t.setStyle(_u_kopf_stil())
         return t
     if _formular():
         t = Table([[Paragraph(f"<b>{_xml_escape(str(title).upper())}</b>", st["f_section"])]],
@@ -582,17 +577,45 @@ def uebersicht_zeilen(rows) -> list:
     return raus
 
 
+def _u_kopf_stil(extra=()):
+    """Kopfzeile im Layout "uebersicht": Balken links in der Vertragsfarbe, feine Linie darunter."""
+    return TableStyle([
+        ("LINEBEFORE", (0, 0), (0, -1), 3, _akzent()),
+        ("LINEBELOW", (0, 0), (-1, -1), 0.6, DIVIDER),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (0, -1), 7), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 1 if _dicht() else 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2 if _dicht() else 3.5),
+        *extra,
+    ])
+
+
+def _u_kdnr_marke(text, st):
+    """Kundennummer als kleine Marke: weisse Schrift auf der Vertragsfarbe, rechtsbuendig."""
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+    from pdf_schrift import schriften
+    stil = st["u_kdnr"]
+    breite = stringWidth(str(text), schriften()[1], stil.fontSize) + 12
+    m = Table([[Paragraph(f"<b>{_xml_escape(text)}</b>", stil)]], colWidths=[breite], hAlign="RIGHT")
+    m.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), _akzent()), ("ROUNDEDCORNERS", [3, 3, 3, 3]),
+                           ("LEFTPADDING", (0, 0), (-1, -1), 5), ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                           ("TOPPADDING", (0, 0), (-1, -1), 1), ("BOTTOMPADDING", (0, 0), (-1, -1), 2)]))
+    return m
+
+
 def _u_feldtabelle(data, breiten, voll_zeilen=()):
-    """Felder wie in Ahmads Vorlage: Beschriftung normal, Wert auf einer gepunkteten Linie."""
+    """Felder im Layout "uebersicht": Beschriftung | Wert, je Feld eine feine durchgehende Linie darunter
+    (unser eigenes Zeichen statt der gepunkteten Linie der Vorlage)."""
     t = Table(data, colWidths=breiten, hAlign="LEFT")
     pad = 0.7 if _dicht() else 2.2
     stil = [("VALIGN", (0, 0), (-1, -1), "TOP"),
             ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 6),
             ("TOPPADDING", (0, 0), (-1, -1), pad), ("BOTTOMPADDING", (0, 0), (-1, -1), pad)]
-    for k in range(1, len(breiten), 2):        # gepunktete Linie unter jedem Wert
-        stil.append(("LINEBELOW", (k, 0), (k, -1), 0.6, FORMULAR_PUNKTLINIE, None, (0.8, 1.6)))
+    for k in range(0, len(breiten), 2):        # Linie unter Beschriftung UND Wert (je Feld)
+        stil.append(("LINEBELOW", (k, 0), (k + 1, -1), 0.5, DIVIDER))
     for z in voll_zeilen:
         stil.append(("SPAN", (1, z), (-1, z)))
+        stil.append(("LINEBELOW", (0, z), (-1, z), 0.5, DIVIDER))
     t.setStyle(TableStyle(stil))
     return t
 
@@ -630,15 +653,10 @@ def _uebersicht_raster(rows, st, spalten: int = 2, erste_voll: bool = False):
 def _uebersicht_partei(titel, rechts, rows, st, breite):
     """Partei wie in Ahmads Vorlage: Ueberschrift GROSS mit Linie (rechts z. B. "KdNr: 25304" in der
     Vertragsfarbe), darunter Beschriftung | Wert auf gepunkteter Linie."""
-    kopf = Table([[Paragraph(f"<b>{_xml_escape(titel.upper())}</b>", st["u_section"]),
-                   Paragraph(f"<b>{_xml_escape(rechts)}</b>" if rechts else "", st["u_kdnr"])]],
+    kopf = Table([[Paragraph(f"<b>{_xml_escape(titel)}</b>", st["u_section"]),
+                   _u_kdnr_marke(rechts, st) if rechts else ""]],
                  colWidths=[breite * 0.5, breite * 0.5])
-    kopf.setStyle(TableStyle([
-        ("VALIGN", (0, 0), (-1, -1), "BOTTOM"),
-        ("LINEBELOW", (0, 0), (-1, -1), 0.8, _aufgehellt(_akzent(), 0.55)),
-        ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-        ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 2 if _dicht() else 4),
-    ]))
+    kopf.setStyle(_u_kopf_stil([("ALIGN", (1, 0), (1, 0), "RIGHT")]))
     label_w = 2.6 * cm
     daten = [[Paragraph(_xml_escape(str(l)), st["u_label"]), Paragraph(_safe_para(w), st["u_value"])]
              for l, w in rows] or [["", ""]]
@@ -1346,10 +1364,14 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
             logo.hAlign = "RIGHT"
             rechts = [logo, Spacer(1, 3)] + rechts
         seite_w = 4.6 * cm
-        head = Table([["", Paragraph("<b>KFZ Kaufvertrag</b>", st["u_title"]), rechts]],
+        # eigen: Titel dunkel, darunter ein kurzer Balken in der Vertragsfarbe
+        balken = Table([[""]], colWidths=[2.2 * cm], rowHeights=[2.5], hAlign="CENTER")
+        balken.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), _akzent())]))
+        titel = [Paragraph("<b>KFZ Kaufvertrag</b>", st["u_title"]), Spacer(1, 3), balken]
+        head = Table([["", titel, rechts]],
                      colWidths=[seite_w, CONTENT_W - 2 * seite_w, seite_w], hAlign="LEFT")
         head.setStyle(TableStyle([
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("ALIGN", (1, 0), (1, 0), "CENTER"),
             ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
         ]))
         story.append(head)
@@ -1479,15 +1501,15 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
         unter = [_xml_escape(preis_label)] if preis_label else []
         if pay_sub:
             unter.append(pay_sub)
-        zeilen = [[Paragraph("KAUFPREIS", st["u_price_label"])],
+        zeilen = [[Paragraph("<b>KAUFPREIS</b>", st["u_price_label"])],
                   [Paragraph(f"<b>{_xml_escape(_euro_kurz(brutto))}</b>", st["u_price"])]]
         if unter:
             zeilen.append([Paragraph(" · ".join(unter), st["u_price_sub"])])
         price_box = Table(zeilen, colWidths=[CONTENT_W], hAlign="LEFT")
         price_box.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), FORMULAR_FLAECHE),
-            ("BOX", (0, 0), (-1, -1), 0.6, DIVIDER),
-            ("ROUNDEDCORNERS", [4, 4, 4, 4]),
+            # eigen: helle Flaeche mit Balken oben in der Vertragsfarbe (statt Rahmen mit runden Ecken)
+            ("BACKGROUND", (0, 0), (-1, -1), LIGHT),
+            ("LINEABOVE", (0, 0), (-1, 0), 2.5, _akzent()),
             ("TOPPADDING", (0, 0), (-1, 0), 4 if _dicht() else 7),
             ("TOPPADDING", (0, 1), (-1, -1), 0),
             ("BOTTOMPADDING", (0, 0), (-1, -2), 1),

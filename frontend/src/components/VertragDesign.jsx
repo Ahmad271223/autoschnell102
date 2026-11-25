@@ -21,24 +21,28 @@ function Skizze({ layout, hex }) {
       <div style={{ background: hex, height: 4 }} />
       {layout === "uebersicht" ? (
         <div className="px-3 pt-2 space-y-2">
-          <div style={{ background: "#18181b", height: 7, width: "42%", borderRadius: 2 }} />
+          <div className="flex flex-col items-center gap-0.5">
+            <div style={{ background: "#18181b", height: 6, width: "40%", borderRadius: 2 }} />
+            <div style={{ background: hex, height: 2, width: "16%" }} />
+          </div>
           <div className="grid grid-cols-2 gap-3">
             {[0, 1].map((i) => (
               <div key={i} className="space-y-1">
-                <div style={{ background: "#18181b", height: 4, width: "40%", borderRadius: 2 }} />
-                <div style={{ background: hex, height: 1.5 }} />
+                <div className="flex items-center justify-between" style={{ borderLeft: `2px solid ${hex}`, paddingLeft: 3 }}>
+                  <div style={{ background: "#18181b", height: 4, width: "40%", borderRadius: 2 }} />
+                  {i === 1 && <div style={{ background: hex, height: 4, width: "28%", borderRadius: 2 }} />}
+                </div>
                 <div style={linie} /><div style={linie} />
               </div>
             ))}
           </div>
-          <div style={{ background: hex, height: 1.5 }} />
-          <div style={{ background: "#18181b", height: 7, width: "30%", borderRadius: 2 }} />
-          <div className="grid grid-cols-4 gap-0" style={{ border: "1px solid #e4e4e7" }}>
-            {Array.from({ length: 8 }, (_, i) => (
-              <div key={i} style={{ borderBottom: "1px solid #e4e4e7", height: 7,
-                                    background: i % 2 ? "#ffffff" : "#f4f4f5" }} />
-            ))}
+          <div className="flex justify-center py-1" style={{ background: "#f4f4f5", borderTop: `2px solid ${hex}` }}>
+            <div style={{ background: "#18181b", height: 6, width: "22%", borderRadius: 2 }} />
           </div>
+          <div style={{ borderLeft: `2px solid ${hex}`, paddingLeft: 3 }}>
+            <div style={{ background: "#18181b", height: 4, width: "30%", borderRadius: 2 }} />
+          </div>
+          <div className="grid grid-cols-2 gap-3"><div style={linie} /><div style={linie} /></div>
         </div>
       ) : layout === "formular" ? (
         <div className="px-3 pt-2 space-y-2">

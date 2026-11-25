@@ -86,9 +86,10 @@ def test_02_nichts_geht_verloren_druck_und_digital():
 
 def test_03_aufbau_wie_vorlage():
     t = _text(_pdf("uebersicht"))
-    reihenfolge = ["KFZ Kaufvertrag", "KÄUFER", "VERKÄUFER KdNr: 25304", "KAUFPREIS", "FAHRZEUGDATEN",
-                   "Hersteller/Typ", "AUSSTATTUNG", "BESCHREIBUNG", "ZUSÄTZLICHE VEREINBARUNG",
-                   "BESONDERE VEREINBARUNGEN", "ALLGEMEINE VERTRAGSBEDINGUNGEN", "UNTERSCHRIFTEN"]
+    # 25.11.2026 abends: eigene Gestaltung (Balken links, normale Schreibweise), Anordnung wie Ahmads Vorlage
+    reihenfolge = ["KFZ Kaufvertrag", "Käufer", "Verkäufer KdNr: 25304", "KAUFPREIS", "Fahrzeugdaten",
+                   "Hersteller/Typ", "Ausstattung", "Beschreibung", "Zusätzliche Vereinbarung",
+                   "Besondere Vereinbarungen", "Allgemeine Vertragsbedingungen", "Unterschriften"]
     pos = [t.find(x) for x in reihenfolge]
     assert -1 not in pos, dict(zip(reihenfolge, pos))
     assert pos == sorted(pos), dict(zip(reihenfolge, pos))
@@ -138,8 +139,8 @@ def test_06_kurze_beschreibung_eine_seite_ohne_verlust():
     t = _text(eng)
     fehlt = _woerter(_text(_pdf("modern", **KURZ))) - _woerter(t) - UMBENANNT
     assert not fehlt, sorted(fehlt)
-    for teil in ("UNTERSCHRIFTEN", "Datum und Ort", "Zulassungsbescheinigung", "VSSZZZ5FZHR012345",
-                 "ALLGEMEINE VERTRAGSBEDINGUNGEN", "KAUFPREIS 11.000 €"):
+    for teil in ("Unterschriften", "Datum und Ort", "Zulassungsbescheinigung", "VSSZZZ5FZHR012345",
+                 "Allgemeine Vertragsbedingungen", "KAUFPREIS 11.000 €"):
         assert teil in t, teil
 
 
