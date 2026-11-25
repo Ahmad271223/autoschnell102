@@ -101,8 +101,10 @@ describe("Einstellungen: Kundennummer für Verträge selbst setzen", () => {
     await klick(feld("set-vertrags-kundennummer-speichern"));
     expect(put).toHaveBeenCalledWith("/dealer/vertrags-kundennummer", { vertrags_kundennummer: "NEU-1" });
   });
-  it("Quelltext: Feld sitzt im Profil (Chef und Sucher), Farben nur als Token", () => {
-    expect(QUELLE).toContain("<VertragsKundennummerFeld dealer={dealer} refresh={refresh} />");
+  // Wunsch Ahmad 25.11.2026: in den Einstellungen ausgeblendet (Kundennummer jetzt fortlaufend je Vertrag) —
+  // die Komponente bleibt, falls das Feld zurueck soll
+  it("Quelltext: Feld ist ausgeblendet, Komponente bleibt (Farben nur als Token)", () => {
+    expect(QUELLE).not.toContain("<VertragsKundennummerFeld dealer={dealer} refresh={refresh} />");
     const block = QUELLE.slice(QUELLE.indexOf("export function VertragsKundennummerFeld"),
                                QUELLE.indexOf("function AppleField("));
     expect(block).toContain('data-testid="vertrags-kundennummer"');

@@ -480,11 +480,10 @@ export default function Einstellungen() {
                 )}
               </div>
 
-              {/* Entscheidung Ahmad 22.09.2026: eigene Kundennummer fuer Vertraege —
-                  im Kaufvertrag, in den Vorlagen ({kundennummer}) und im Abholauftrag.
-                  Nicht die Anmeldenummer. Wunsch Ahmad 26.09.2026 abends: die Firma
-                  (Chef UND Sucher) setzt sie selbst — eigene Route, sofort gespeichert. */}
-              <VertragsKundennummerFeld dealer={dealer} refresh={refresh} />
+              {/* Wunsch Ahmad 25.11.2026: das Feld "Kundennummer für Verträge" ist ausgeblendet — jeder Vertrag
+                  bekommt seine Kundennummer fortlaufend (ab 1002, backend/vertrag_kundennummer.py). Die gespeicherte
+                  Firmen-Kundennummer bleibt nur Rueckfall fuer Altvertraege; VertragsKundennummerFeld (unten) und
+                  PUT /dealer/vertrags-kundennummer bleiben bestehen, falls es zurueck soll. */}
               {/* Kundenportal (29.09.2026): eigene Firmenseite (Adresse per DNS), Bilder, Über uns,
                   Unterschrift des Chefs — Kunden unterschreiben Kaufverträge dort digital */}
               <FirmenseiteEinstellungen user={user} />
