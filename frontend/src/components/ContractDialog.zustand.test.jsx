@@ -85,7 +85,8 @@ describe("Standardwerte, „alles in Ordnung“ und Nachlackierungsfrei (Wunsch 
   it("Startwerte: Scheckheft ja, Fahrtauglich Ja, Gewerblich Nein, Nachlackierungsfrei leer", () => {
     const f = anfangsFormular({}, DEALER, "2026-11-04");
     expect([f.service_book, f.drivable, f.commercial_since_ez, f.nachlackierungsfrei]).toEqual(["ja", "Ja", "Nein", ""]);
-    expect(ZUSICHERUNG_STANDARD).toEqual({ service_book: "ja", drivable: "Ja", commercial_since_ez: "Nein" });
+    expect(f.eu_import).toBe("Nein");  // Wunsch Ahmad 25.11.2026
+    expect(ZUSICHERUNG_STANDARD).toEqual({ service_book: "ja", drivable: "Ja", commercial_since_ez: "Nein", eu_import: "Nein" });
     // bestehender Vertrag: was gespeichert ist, gilt — auch leer; ohne das neue Feld bleibt es leer
     const alt = formularAusVertrag(f, { contract_no: "KV-1", contract_data: { drivable: "", service_book: "nein",
                                                                             commercial_since_ez: "" } });

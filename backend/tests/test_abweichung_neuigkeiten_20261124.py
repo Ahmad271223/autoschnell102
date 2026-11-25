@@ -261,6 +261,19 @@ def test_08_ein_hinweis_pro_tag_ueber_alle_geraete(welt):  # noqa: F811
     assert doc["hinweis_tag"] == "2026-11-25"
 
 
+def test_08b_schalter_hinweis_aus(welt, monkeypatch):  # noqa: F811
+    """25.11.2026: NEUIGKEITEN_HINWEIS=false (E2E) — kein Fenster, und der Tag wird nicht verbraucht."""
+    w = welt
+    N = _modul("routes.neuigkeiten")
+    konto = N._konto_firma(w.chef)
+    tag = datetime(2026, 11, 26, 9, 0, tzinfo=timezone.utc)
+    monkeypatch.setenv("NEUIGKEITEN_HINWEIS", "false")
+    assert w.run(N._hinweis(konto, "chef", tag))["hinweis"] is None
+    assert w.run(w.db[N.SAMMLUNG].find_one({"konto": konto, "hinweis_tag": "2026-11-26"})) is None
+    monkeypatch.delenv("NEUIGKEITEN_HINWEIS")
+    assert w.run(N._hinweis(konto, "chef", tag))["hinweis"], "Standard: Fenster an"
+
+
 def test_09_fahrer_sieht_nur_fahrer_eintraege(welt):  # noqa: F811
     w = welt
     N = _modul("routes.neuigkeiten")

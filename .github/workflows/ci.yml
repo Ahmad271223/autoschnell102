@@ -382,6 +382,8 @@ jobs:
     env:
       MONGO_URL: mongodb://127.0.0.1:27017
       DB_NAME: autoschnell_e2e
+      # Was ist neu (25.11.2026): das Hinweisfenster legt sich ueber die Seite und blockiert Klicks der Suite
+      NEUIGKEITEN_HINWEIS: "false"
       JWT_SECRET: ci-nur-zum-testen-nicht-produktiv
       AUTO_DATEN_SCHAEDEN_FREITEXT: "true"
       MOCK_PROVIDER_FETCH: "true"

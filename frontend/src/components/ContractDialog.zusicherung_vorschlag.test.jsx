@@ -118,7 +118,8 @@ const zusicherungswerte = () => Object.fromEntries(
   Object.entries(FELD_TESTID).map(([feld, id]) => [feld, el(id).value]));
 // Wunsch Ahmad 04.11.2026: Scheckheft "ja" und Fahrtauglich "Ja" sind Standardwerte (ZUSICHERUNG_STANDARD) — die
 // kommen NICHT aus dem Inserat; der Dialog setzt aus dem Inserat weiter nichts von selbst
-const LEER = { hu_valid: "", service_book: "ja", accident_free: "", drivable: "Ja", eu_import: "" };
+// 25.11.2026: EU-Import „Nein“ ist ebenfalls Standard
+const LEER = { hu_valid: "", service_book: "ja", accident_free: "", drivable: "Ja", eu_import: "Nein" };
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -209,6 +210,22 @@ describe("Zusicherungen aus dem Inserat nur als Vorschlag", () => {
     expect(el("contract-vorschlaege-alle")).toBeNull();
   });
 
+  it("Standard EU-Import „Nein“ ist keine eigene Wahl: „Alle übernehmen“ setzt „Ja“ aus dem Inserat (25.11.2026)", async () => {
+    await oeffnen();
+    expect(el("contract-eu-import").value).toBe("Nein");
+    expect(el("contract-vorschlag-abweichung-eu_import")).toBeNull();
+    await klicken("contract-vorschlaege-alle");
+    expect(el("contract-eu-import").value).toBe("Ja");
+  });
+
+  it("von Hand gewähltes EU-Import „Nein“ bleibt bei „Alle übernehmen“ stehen", async () => {
+    await oeffnen();
+    await eingeben("contract-eu-import", "Nein");
+    expect(el("contract-vorschlag-abweichung-eu_import")).toBeTruthy();
+    await klicken("contract-vorschlaege-alle");
+    expect(el("contract-eu-import").value).toBe("Nein");
+  });
+
   it("ein Vorschlag, der dem Feldwert entspricht, wird nicht erneut angeboten", async () => {
     await oeffnen();
     await eingeben("contract-accident-free", "Ja");
@@ -294,10 +311,11 @@ describe("Zusicherungen aus dem Inserat nur als Vorschlag", () => {
     await pdfErstellen();
     expect(window.confirm).not.toHaveBeenCalled();
     const payload = api.post.mock.calls[0][1];
-    for (const feld of ["hu_valid", "hu_until", "accident_free", "eu_import", "tires", "schluessel_anzahl"]) {
+    for (const feld of ["hu_valid", "hu_until", "accident_free", "tires", "schluessel_anzahl"]) {
       expect(payload[feld], feld).toBe("");
     }
-    expect([payload.service_book, payload.drivable]).toEqual(["ja", "Ja"]);   // Standard, nicht aus dem Inserat
+    // Standard, nicht aus dem Inserat (EU-Import „Nein“ seit 25.11.2026 — das Inserat sagt „Ja“, ohne Klick bleibt „Nein“)
+    expect([payload.service_book, payload.drivable, payload.eu_import]).toEqual(["ja", "Ja", "Nein"]);
   });
 
   it("Entwurf wiederherstellen setzt nichts ungefragt (alter Entwurf mit Vorbelegung)", async () => {

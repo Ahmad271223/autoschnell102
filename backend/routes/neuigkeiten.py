@@ -19,6 +19,7 @@ Fahrer (current_driver): dieselben Wege unter /api/driver/neuigkeiten — nur Ei
 """
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -162,7 +163,13 @@ async def _alle_gelesen(konto: str, rolle: str) -> Dict[str, Any]:
 async def _hinweis(konto: str, rolle: str, jetzt: Optional[datetime] = None) -> Dict[str, Any]:
     """Hoechstens EIN Hinweis je Konto und Tag (Europe/Berlin) — Handy und PC
     zusammen. Der Tag wird atomar vergeben: wer ihn nicht bekommt, bekommt
-    keinen Hinweis. Ohne ungelesenen Eintrag wird der Tag nicht verbraucht."""
+    keinen Hinweis. Ohne ungelesenen Eintrag wird der Tag nicht verbraucht.
+
+    NEUIGKEITEN_HINWEIS=false schaltet das Fenster ab (25.11.2026: die E2E-Suite
+    klickt sonst gegen das Fenster, das sich ueber die Seite legt). Die Seite
+    „Was ist neu“ und der Zaehler bleiben."""
+    if os.environ.get("NEUIGKEITEN_HINWEIS", "true").strip().lower() in ("false", "0", "nein", "aus"):
+        return {"hinweis": None}
     stand = await _stand(konto)
     eintrag = hinweis_waehlen(fuer_rolle(rolle), set(stand.get("gelesen") or []))
     heute = heute_berlin(jetzt)

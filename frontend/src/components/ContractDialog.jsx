@@ -300,7 +300,7 @@ export function anfangsFormular(v, dealer, heute) {
     getriebe_zustand: "",
     kupplung_zustand: "",
     technik_schaden_text: "",
-    eu_import: "",
+    eu_import: ZUSICHERUNG_STANDARD.eu_import,  // Wunsch Ahmad 25.11.2026: automatisch "Nein"
     drivable: ZUSICHERUNG_STANDARD.drivable,
     commercial_since_ez: ZUSICHERUNG_STANDARD.commercial_since_ez,
     previous_owners: cleanIntStr(v.previous_owners ?? ""),
@@ -650,7 +650,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
   // Verkäufer „Unfallfrei: Nein“) — ihre Zeile bleibt mit Kennzeichnung und
   // eigenem Knopf stehen.
   const offeneInseratVorschlaege = offeneVorschlaege(inseratVorschlaege?.vorschlaege, form);
-  const vorschlaegeAlle = vorschlaegeFuerAlle(inseratVorschlaege?.vorschlaege, form);
+  const vorschlaegeAlle = vorschlaegeFuerAlle(inseratVorschlaege?.vorschlaege, form, beruehrt.current || {});
   const vorschlaegeUebernehmen = (liste) => {
     if (!liste.length) return;
     bearbeitet.current = true;
@@ -1171,7 +1171,7 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                             style={{ borderColor: "var(--border-default)" }}>
                           <div className="flex-1 min-w-0 break-words">
                             <span className="font-semibold" style={{ color: "var(--text-primary)" }}>{z.label}: {z.wert}</span>
-                            {vorschlagWeichtAb(z, form) && (
+                            {vorschlagWeichtAb(z, form, beruehrt.current || {}) && (
                               <span className="block font-semibold" style={{ color: "var(--st-amber)" }}
                                     data-testid={`contract-vorschlag-abweichung-${z.feld}`}>
                                 Weicht von deiner Wahl ab (du: {eigeneWahlText(z, form)}) —

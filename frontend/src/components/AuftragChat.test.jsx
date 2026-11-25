@@ -68,7 +68,8 @@ describe("Hilfen", () => {
   it("Gelesen-Haken unter der letzten eigenen Nachricht", () => {
     const h = gelesenText(VERLAUF.nachrichten);
     expect(h.id).toBe("m1");
-    expect(h.text).toMatch(/^Gelesen \d\d:\d\d$/);
+    // 25.11.2026: die Testnachricht ist vom 24.11. — ab dem Folgetag steht das Datum davor
+    expect(h.text).toMatch(/^Gelesen (\d\d\.\d\d\. )?\d\d:\d\d$/);
     expect(gelesenText([{ id: "x", eigene: true, gelesen_am: null }]).text).toBe("Gesendet");
     expect(gelesenText([{ id: "y", eigene: false }])).toBeNull();
   });

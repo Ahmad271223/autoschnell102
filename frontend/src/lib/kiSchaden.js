@@ -230,7 +230,8 @@ export function vorschlagWertText(feld, wert) {
  *  und einem Knopf „Übernehmen“; erst der Klick setzt den Wert. */
 /** Wunsch Ahmad 04.11.2026: diese Zusicherungen stehen immer automatisch so im Dialog (aenderbar). Sie kommen NICHT
  *  aus dem Inserat und gelten darum nicht als Vorbelegung, die beim Wiederherstellen eines Entwurfs geleert wird. */
-export const ZUSICHERUNG_STANDARD = { service_book: "ja", drivable: "Ja", commercial_since_ez: "Nein" };
+// Wunsch Ahmad 25.11.2026: EU-Import "Nein" ebenfalls automatisch (aenderbar)
+export const ZUSICHERUNG_STANDARD = { service_book: "ja", drivable: "Ja", commercial_since_ez: "Nein", eu_import: "Nein" };
 export const ZUSICHERUNG_FELDER = ["hu_valid", "hu_until", "service_book", "accident_free", "drivable", "eu_import"];
 
 /** Regel ab inserat5 (28.09.2026): AUS DEM INSERAT WIRD NICHTS MEHR UNGEFRAGT
@@ -300,9 +301,12 @@ export function offeneVorschlaege(vorschlaege, form) {
  *  zusicherungenOhneWahlLeeren) — jeder Wert darin ist also die eigene Wahl,
  *  auch aus einem Entwurf, in dem sie noch nicht als „angefasst“ vermerkt war
  *  (die Schlüsselanzahl wurde bis inserat5 nicht vermerkt). */
-export function vorschlagWeichtAb(vorschlag, form) {
+export function vorschlagWeichtAb(vorschlag, form, beruehrt = null) {
+  // 25.11.2026: ein unangefasster Standardwert (ZUSICHERUNG_STANDARD, z. B. EU-Import „Nein“) ist keine
+  // eigene Wahl — sagt das Inserat „EU-Import: Ja“, übernimmt „Alle Vorschläge übernehmen“ das mit.
   return Object.entries(vorschlag?.setzt || {}).some(([k, w]) => String(form?.[k] ?? "").trim() !== ""
-    && String(form?.[k] ?? "") !== String(w));
+    && String(form?.[k] ?? "") !== String(w)
+    && !(beruehrt && !beruehrt[k] && String(form?.[k] ?? "") === ZUSICHERUNG_STANDARD[k]));
 }
 
 /** Die eigene Wahl im Feld eines Vorschlags als Text ("Nein", "Ja, gültig bis 05/2027"). */
@@ -315,8 +319,8 @@ export function eigeneWahlText(vorschlag, form) {
 }
 
 /** Die Vorschläge für „Alle Vorschläge übernehmen“: offen und nicht gegen die eigene Wahl. */
-export function vorschlaegeFuerAlle(vorschlaege, form) {
-  return offeneVorschlaege(vorschlaege, form).filter((z) => !vorschlagWeichtAb(z, form));
+export function vorschlaegeFuerAlle(vorschlaege, form, beruehrt = null) {
+  return offeneVorschlaege(vorschlaege, form).filter((z) => !vorschlagWeichtAb(z, form, beruehrt));
 }
 
 /** Einen Vorschlag ins Formular übernehmen (nur auf Klick). Abhängige Felder
