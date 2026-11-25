@@ -212,15 +212,18 @@ def test_05_kundennummer_je_vertrag_in_pdf_daten_platzhalter_abholauftrag(welt, 
     assert doc_mit["kundennummer"] == "K-77"
     assert doc_mit["contract_data"]["kundennummer"] == "K-77"
     assert doc_mit["contract_data"]["vertrags_kundennummer"] == "K-77", "eingefroren wie die Kaeuferdaten"
-    assert doc_ohne["kundennummer"] == FIRMEN_NR and doc_ohne["contract_data"]["vertrags_kundennummer"] == FIRMEN_NR
+    # Wunsch Ahmad 25.11.2026: leer = fortlaufende Nummer der Firma (erster Vertrag 1002; die eigene "K-77"
+    # verbraucht keine) — nicht mehr die feste Firmen-Kundennummer
+    assert doc_ohne["kundennummer"] == "1002" and doc_ohne["contract_data"]["vertrags_kundennummer"] == "1002"
     # PDF-Datenstruktur (ohne Rendern): das Kaeufer-Dokument, das der PDF-Bauer bekam
     mit_pdf = [a for a in aufrufe if a["contract"].get("kundennummer") == "K-77"]
     assert mit_pdf and all(a["dealer"]["vertrags_kundennummer"] == "K-77" for a in mit_pdf)
-    ohne_pdf = [a for a in aufrufe if not a["contract"].get("kundennummer")]
-    assert ohne_pdf and all(a["dealer"]["vertrags_kundennummer"] == FIRMEN_NR for a in ohne_pdf)
-    # Platzhalter {kundennummer}: Vertrag gewinnt, Firma ist Rueckfall
+    ohne_pdf = [a for a in aufrufe if a["contract"].get("kundennummer") == "1002"]
+    assert ohne_pdf and all(a["dealer"]["vertrags_kundennummer"] == "1002" for a in ohne_pdf)
+    # Platzhalter {kundennummer}: Vertrag gewinnt, Firma ist Rueckfall (Altvertraege ohne Nummer)
     assert P.werte(doc_mit, firma)["{kundennummer}"] == "K-77"
-    assert P.werte(doc_ohne, firma)["{kundennummer}"] == FIRMEN_NR
+    assert P.werte(doc_ohne, firma)["{kundennummer}"] == "1002"
+    assert P.werte({}, firma)["{kundennummer}"] == FIRMEN_NR
     assert P.ersetzen("Nr. {kundennummer}", doc_mit, firma) == "Nr. K-77"
     # Abholauftrag / Fahrer-Ansicht: auftraggeber_fuer_termin laeuft ueber
     # _apply_contract_overrides mit den Vertragsdaten
@@ -328,7 +331,9 @@ def test_09_verdrahtung_oberflaeche_server_index():
     src = (PROJEKT / "frontend" / "src")
     dialog = (src / "components" / "ContractDialog.jsx").read_text(encoding="utf-8")
     assert 'testid="contract-vertragsnummer"' in dialog and 'testid="contract-kundennummer"' in dialog
-    assert 'kundennummer: dealer?.vertrags_kundennummer || ""' in dialog, "Vorbelegung Firmenwert"
+    # 25.11.2026: keine Vorbelegung mehr — leer = fortlaufende Nummer vom Server
+    assert 'kundennummer: dealer?.vertrags_kundennummer || ""' not in dialog
+    assert "leer = automatisch (fortlaufend)" in dialog
     assert 'data-testid="contract-nummern-fehler"' in dialog, "409-Text unter dem Feld"
     send = (src / "components" / "SendDialog.jsx").read_text(encoding="utf-8")
     assert "cd.kundennummer || cd.vertrags_kundennummer || d?.vertrags_kundennummer" in send

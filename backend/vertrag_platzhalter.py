@@ -178,8 +178,9 @@ def werte(vertrag: dict, firma: Optional[dict] = None,
         # Wunsch Ahmad 26.09.2026 abends: zuerst die je Vertrag selbst
         # vergebene Kundennummer (ContractIn.kundennummer), dann die beim
         # Vertrag eingefrorene Firmen-Kundennummer, sonst die heutige der Firma.
-        "{kundennummer}": (_text(daten.get("kundennummer"))
-                           or _text(daten.get("vertrags_kundennummer"))
+        # 25.11.2026: auch direkt aus den Vertragsdaten (das PDF bekommt sie ohne Huelle "contract_data")
+        "{kundennummer}": (aus_vertrag("kundennummer")
+                           or aus_vertrag("vertrags_kundennummer")
                            or _text(firma.get("vertrags_kundennummer"))),
         "{telefon}": telefon,
         "{email}": mail,

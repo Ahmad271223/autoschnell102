@@ -38,12 +38,13 @@ VERTRAG = {"seller_name": "Max Mustermann", "seller_address": "Beispielweg 4", "
            "sonstige_vereinbarung": "8-fach bereift", "vehicle_description": "Fahrzeug aus zweiter Hand.\n\n• Nichtraucher",
            "agb_text": "AGB-Punkt Eins.", "digital_vertragstext": P.DIGITAL_VERTRAGSTEXT_STANDARD}
 
-#: Woerter, die NUR in den alten Beschriftungen/Ueberschriften stehen (siehe UEBERSICHT_BESCHRIFTUNG)
-UMBENANNT = {"Anschrift", "Fahrtauglich", "Fahrzeugbeschreibung", "HU/AU", "KAUFPREIS", "KFZ-KAUFVERTRAG",
-             "Kategorie", "Kilometerstand", "Leistung", "Motor/Getriebe/Kupplung", "Nachlackierungsfrei",
-             "Scheckheftgepflegt", "seit", "Fahrzeughalter", "Anzahl", "1", "2",
-             # enger Kopf (eine Seite): "Vertrags-Nr.: …" statt "VERTRAGS-NR." — Werte stehen weiter da
-             "DATUM", "KUNDEN-NR.", "VERTRAGS-NR."}
+#: Woerter (klein geschrieben), die NUR in den alten Beschriftungen/Ueberschriften stehen (UEBERSICHT_BESCHRIFTUNG)
+#: oder bewusst wegfallen (Wunsch Ahmad 25.11.2026: keine Vertragsnummer; Preis "11.000 €" statt "11.000,00 EUR";
+#: kein Untertitel "für ein gebrauchtes Kraftfahrzeug"). Kein Wert eines Feldes darf hier stehen.
+UMBENANNT = {"anschrift", "fahrtauglich", "fahrzeugbeschreibung", "hu/au", "kfz-kaufvertrag", "kategorie",
+             "kilometerstand", "leistung", "motor/getriebe/kupplung", "nachlackierungsfrei", "scheckheftgepflegt",
+             "seit", "fahrzeughalter", "anzahl", "1", "2", "name", "firma", "hersteller", "typ",
+             "datum", "kunden-nr.", "vertrags-nr.", "kv-ueb-1", "00", "eur", "ein", "gebrauchtes", "kraftfahrzeug"}
 
 
 def _text(pdf: bytes) -> str:
@@ -57,7 +58,7 @@ def _pdf(layout, digital=False, **mehr):
 
 
 def _woerter(t):
-    return set(re.findall(r"[\wÄÖÜäöüß./@+-]+", t))
+    return {w.lower() for w in re.findall(r"[\wÄÖÜäöüß./@+-]+", t)}
 
 
 def test_01_layout_bekannt_und_waehlbar():
@@ -76,7 +77,7 @@ def test_02_nichts_geht_verloren_druck_und_digital():
         assert not fehlt, f"digital={digital}: {sorted(fehlt)}"
         # Stichproben aller Bereiche
         for teil in ("Max Mustermann", "L01X00T47", "max@example.de", "info@autohaus-beispiel.example",
-                     "11.000,00 EUR", "Zahlungsart: Überweisung", "VSSZZZ5FZHR012345", "91.000 km",
+                     "11.000 €", "Zahlungsart: Überweisung", "VSSZZZ5FZHR012345", "91.000 km",
                      "Kupplung rutscht", "Delle – Tür vorne links", "Steinschlag Scheibe", "Sommer und Winter",
                      "Rückfahrkamera", "Nichtraucher", "8-fach bereift", "Zweiter Punkt", "AGB-Punkt Eins",
                      "Unfallschaden (Inserat)", "Fahrbereit (Inserat)", "Stoßstange hinten"):
@@ -85,14 +86,17 @@ def test_02_nichts_geht_verloren_druck_und_digital():
 
 def test_03_aufbau_wie_vorlage():
     t = _text(_pdf("uebersicht"))
-    reihenfolge = ["KFZ Kaufvertrag", "Käufer", "Verkäufer KdNr: 25304", "Kaufpreis", "Fahrzeugdaten",
-                   "Ausstattung", "Beschreibung", "Zusätzliche Vereinbarung", "Besondere Vereinbarungen",
-                   "Allgemeine Vertragsbedingungen", "Unterschriften"]
+    reihenfolge = ["KFZ Kaufvertrag", "KÄUFER", "VERKÄUFER KdNr: 25304", "KAUFPREIS", "FAHRZEUGDATEN",
+                   "Hersteller/Typ", "AUSSTATTUNG", "BESCHREIBUNG", "ZUSÄTZLICHE VEREINBARUNG",
+                   "BESONDERE VEREINBARUNGEN", "ALLGEMEINE VERTRAGSBEDINGUNGEN", "UNTERSCHRIFTEN"]
     pos = [t.find(x) for x in reihenfolge]
     assert -1 not in pos, dict(zip(reihenfolge, pos))
     assert pos == sorted(pos), dict(zip(reihenfolge, pos))
-    for label in ("Straße, Nr.", "PLZ, Ort", "Gesamtfahrleistung", "Halter", "PS/KW", "Fahrzeugtyp", "TÜV/AU",
-                  "Scheckheft", "Gewerblich genutzt ab EZ", "Uneingeschränkt fahrbereit", "Motor/Getriebe",
+    # Wunsch Ahmad 25.11.2026: keine Vertragsnummer, Kundennummer nur EINMAL (beim Verkäufer)
+    assert "KV-UEB-1" not in t and "Vertrags-Nr" not in t.replace("VERTRAGS", "")
+    assert t.count("25304") == 1 + t.count("Kundennummer 25304")
+    for label in ("Name/Firma", "Straße, Nr.", "PLZ, Ort", "Gesamtfahrleistung", "Halter", "PS/KW", "Fahrzeugtyp",
+                  "TÜV/AU", "Scheckheft", "Gewerblich genutzt ab EZ", "Uneingeschränkt Fahrbereit", "Motor/Getriebe",
                   "Nachlackierung Nein", "Unfallfrei"):
         assert label in t, label
     assert "1 · Fahrzeugdaten" not in t and "2 · Zusätzliche" not in t
@@ -102,7 +106,7 @@ def test_03_aufbau_wie_vorlage():
 
 def test_04_nachlackierung_umgedreht_und_unbekanntes_bleibt():
     z = P.uebersicht_zeilen([("Nachlackierungsfrei", "Ja"), ("Neu erfunden", "X"), ("Hersteller / Typ", "Seat")])
-    assert z == [("Hersteller / Typ", "Seat"), ("Nachlackierung", "Nein"), ("Neu erfunden", "X")]
+    assert z == [("Hersteller/Typ", "Seat"), ("Nachlackierung", "Nein"), ("Neu erfunden", "X")]
     assert P.uebersicht_zeilen([("Nachlackierungsfrei", "Nein")]) == [("Nachlackierung", "Ja")]
     # kein Ja/Nein: alte Beschriftung, nichts umgedreht
     assert P.uebersicht_zeilen([("Nachlackierungsfrei", "teilweise")]) == [("Nachlackierungsfrei", "teilweise")]
@@ -134,8 +138,8 @@ def test_06_kurze_beschreibung_eine_seite_ohne_verlust():
     t = _text(eng)
     fehlt = _woerter(_text(_pdf("modern", **KURZ))) - _woerter(t) - UMBENANNT
     assert not fehlt, sorted(fehlt)
-    for teil in ("Unterschriften", "Datum und Ort", "Zulassungsbescheinigung", "VSSZZZ5FZHR012345",
-                 "Allgemeine Vertragsbedingungen", "Kaufpreis 11.000,00 EUR"):
+    for teil in ("UNTERSCHRIFTEN", "Datum und Ort", "Zulassungsbescheinigung", "VSSZZZ5FZHR012345",
+                 "ALLGEMEINE VERTRAGSBEDINGUNGEN", "KAUFPREIS 11.000 €"):
         assert teil in t, teil
 
 
@@ -145,4 +149,6 @@ def test_07_zu_lang_fuer_eine_seite_bleibt_normal():
     assert _seiten(lang) >= 2
     from pypdf import PdfReader
     erste = PdfReader(io.BytesIO(lang)).pages[0].extract_text()
-    assert "VERTRAGS-NR." in erste           # normaler Kopf, nicht der enge ("Vertrags-Nr.: …")
+    assert "Ausweis" in erste                # alles da, nur auf mehr Seiten
+    import pdf_service as P2
+    assert P2._GESTALTUNG.get() is None      # Gestaltung zurueckgesetzt

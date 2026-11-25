@@ -258,7 +258,8 @@ export function anfangsFormular(v, dealer, heute) {
     // Wunsch Ahmad 26.09.2026 abends: Vertrags- und Kundennummer selbst
     // vergeben. Leer = automatisch (KV-<Datum>-…) bzw. die Firmen-Kundennummer.
     contract_no: "",
-    kundennummer: dealer?.vertrags_kundennummer || "",
+    // Wunsch Ahmad 25.11.2026: leer = fortlaufende Nummer der Firma (1002, 1003, …), vergibt der Server
+    kundennummer: "",
     seller_name: v.seller_name || "",
     seller_address: v.seller_address || "",
     seller_zip: v.seller_zip || "",
@@ -565,9 +566,8 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
       additional_terms: dealer.sondervereinbarungen_effektiv
         ?? (dealer.default_special_agreements || ""),
       agb_text: dealer.default_terms || "",
-      // 26.09.2026: die Firmen-Kundennummer folgt dem frischen Stand, solange
-      // der Sucher das Feld nicht selbst angefasst hat.
-      kundennummer: dealer.vertrags_kundennummer || "",
+      // 25.11.2026: keine Vorbelegung mehr — leer = fortlaufende Nummer (Server)
+      kundennummer: "",
     };
     setForm((f) => {
       const kaeufer = kaeuferAktualisieren(f, dealer, beruehrt.current);
@@ -1328,10 +1328,11 @@ export default function ContractDialog({ open, onClose, vehicle, vehicleId, onCr
                      maxLength={40} placeholder="z. B. AH-2026-0042" disabled={bearbeiten}
                      helper={bearbeiten ? "Eine neue Fassung behält die Vertragsnummer."
                        : "3–40 Zeichen: Buchstaben, Ziffern, Leerzeichen und - _ / . — je Firma nur einmal vergebbar."} />
-              <Field label="Kundennummer (Vorbelegung: Firmenwert)" value={form.kundennummer}
+              <Field label="Kundennummer" value={form.kundennummer}
                      onChange={(v) => set("kundennummer", v)} testid="contract-kundennummer"
-                     maxLength={30} placeholder="z. B. 482913"
-                     helper="Steht im Vertrag („nur unter Vorlage der Kundennummer“), in den Vorlagen als {kundennummer} und im Abholauftrag. Darf in mehreren Verträgen gleich sein." />
+                     maxLength={30} placeholder={bearbeiten ? "" : "leer = automatisch (fortlaufend)"}
+                     helper={bearbeiten ? "Die Kundennummer dieses Vertrags."
+                       : "Leer lassen: jeder Vertrag eurer Firma bekommt automatisch die nächste Nummer (ab 1002, nie doppelt). Steht im Vertrag, in den Vorlagen als {kundennummer} und im Abholauftrag."} />
             </div>
             {nummernFehler && (
               <div role="alert" data-testid="contract-nummern-fehler"

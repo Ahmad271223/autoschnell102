@@ -265,12 +265,22 @@ def _styles():
         "f_price_value": ParagraphStyle("f_price_value", parent=s["Normal"], fontSize=18, leading=21,
                                         textColor=_akzent(), alignment=1),
         # Layout "uebersicht" (Wunsch Ahmad 25.11.2026)
-        "u_title": ParagraphStyle("u_title", parent=s["Normal"], fontSize=20, leading=24, textColor=SCHRIFT),
-        "u_firma": ParagraphStyle("u_firma", parent=s["Normal"], fontSize=10, leading=13, textColor=_akzent()),
-        "u_section": ParagraphStyle("u_section", parent=s["Normal"], fontSize=11, leading=14, textColor=SCHRIFT),
-        "u_label": ParagraphStyle("u_label", parent=s["Normal"], fontSize=8, leading=10, textColor=SCHRIFT),
-        "u_value": ParagraphStyle("u_value", parent=s["Normal"], fontSize=9, leading=11, textColor=SCHRIFT),
-        "u_price": ParagraphStyle("u_price", parent=s["Normal"], fontSize=18, leading=22, textColor=SCHRIFT),
+        "u_title": ParagraphStyle("u_title", parent=s["Normal"], fontSize=20, leading=24, textColor=_akzent(),
+                                  alignment=1),
+        "u_firma": ParagraphStyle("u_firma", parent=s["Normal"], fontSize=10, leading=13, textColor=_akzent(),
+                                  alignment=TA_RIGHT),
+        "u_section": ParagraphStyle("u_section", parent=s["Normal"], fontSize=10.5, leading=13, textColor=SCHRIFT,
+                                    wordSpace=1.2),
+        "u_kdnr": ParagraphStyle("u_kdnr", parent=s["Normal"], fontSize=9.5, leading=12, textColor=_akzent(),
+                                 alignment=TA_RIGHT),
+        "u_label": ParagraphStyle("u_label", parent=s["Normal"], fontSize=8.5, leading=10.5, textColor=SCHRIFT),
+        "u_value": ParagraphStyle("u_value", parent=s["Normal"], fontSize=9.5, leading=11.5, textColor=SCHRIFT),
+        "u_price_label": ParagraphStyle("u_price_label", parent=s["Normal"], fontSize=8, leading=10,
+                                        textColor=SCHRIFT, alignment=1),
+        "u_price": ParagraphStyle("u_price", parent=s["Normal"], fontSize=20, leading=24, textColor=_akzent(),
+                                  alignment=1),
+        "u_price_sub": ParagraphStyle("u_price_sub", parent=s["Normal"], fontSize=8.5, leading=11,
+                                      textColor=SCHRIFT, alignment=1),
         "f_price_sub": ParagraphStyle("f_price_sub", parent=s["Normal"], fontSize=10.5, leading=13,
                                       textColor=SCHRIFT, alignment=1),
     }))
@@ -281,8 +291,8 @@ def _styles_dicht(st: dict) -> dict:
     if not (_uebersicht() and _dicht()):
         return st
     for name, stil in st.items():
-        stil.fontSize = round(stil.fontSize * 0.88, 2)
-        stil.leading = round(stil.leading * 0.86, 2)
+        stil.fontSize = round(stil.fontSize * 0.87, 2)
+        stil.leading = round(stil.leading * 0.83, 2)
     return st
 
 
@@ -291,13 +301,14 @@ def _section(title, st):
     Layout "formular": Titel in der Vertragsfarbe, GROSS, mit duenner Linie darunter.
     Layout "uebersicht": Titel fett, darunter eine Linie in der Vertragsfarbe (wie ein Formularkopf)."""
     if _uebersicht():
-        t = Table([[Paragraph(f"<b>{_xml_escape(_titel_ohne_nummer(title))}</b>", st["u_section"])]],
+        # 25.11.2026 (Bild Ahmad): GROSS, gesperrt, darunter eine duenne Linie in der aufgehellten Vertragsfarbe
+        t = Table([[Paragraph(f"<b>{_xml_escape(_titel_ohne_nummer(title).upper())}</b>", st["u_section"])]],
                   colWidths=[CONTENT_W], hAlign="LEFT")
         t.setStyle(TableStyle([
-            ("LINEBELOW", (0, 0), (-1, -1), 1.2, _akzent()),
+            ("LINEBELOW", (0, 0), (-1, -1), 0.8, _aufgehellt(_akzent(), 0.55)),
             ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
             ("TOPPADDING", (0, 0), (-1, -1), 1 if _dicht() else 2),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 2 if _dicht() else 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2 if _dicht() else 4),
         ]))
         return t
     if _formular():
@@ -536,10 +547,11 @@ def _two_col_kv(rows, st):
 #: Beschriftungen im Layout "uebersicht" — NUR die Beschriftung aendert sich, jede Zeile der anderen Layouts bleibt
 #: (nichts geht verloren: Zeilen ohne Eintrag hier behalten ihre Beschriftung).
 UEBERSICHT_BESCHRIFTUNG = {
+    "Name / Firma": "Name/Firma", "Hersteller / Typ": "Hersteller/Typ",
     "Anschrift": "Straße, Nr.", "PLZ / Ort": "PLZ, Ort",
     "Kilometerstand": "Gesamtfahrleistung", "Fahrzeughalter (Anzahl)": "Halter", "Leistung": "PS/KW",
     "Kategorie": "Fahrzeugtyp", "Scheckheftgepflegt": "Scheckheft", "HU/AU": "TÜV/AU",
-    "Gewerblich genutzt seit EZ": "Gewerblich genutzt ab EZ", "Fahrtauglich": "Uneingeschränkt fahrbereit",
+    "Gewerblich genutzt seit EZ": "Gewerblich genutzt ab EZ", "Fahrtauglich": "Uneingeschränkt Fahrbereit",
     "Motor/Getriebe/Kupplung": "Motor/Getriebe",
 }
 #: Reihenfolge im Raster "Fahrzeugdaten" (nach Ahmads Vorlage); was hier fehlt, folgt dahinter in der bisherigen
@@ -570,63 +582,67 @@ def uebersicht_zeilen(rows) -> list:
     return raus
 
 
-def _uebersicht_raster(rows, st, spalten: int = 2):
-    """Raster mit duennen Linien: je Zeile `spalten` Felder (Beschriftung fett | Wert), zeilenweise gefuellt."""
-    if not rows:
-        return Paragraph("", st["u_value"])
-    feld_w = CONTENT_W / spalten
-    label_w = min(3.6 * cm, feld_w * 0.45)
-    pad = 2 if _dicht() else 4
-    if spalten >= 3:
-        # schmal: Beschriftung so breit wie ihr laengstes WORT (fett), damit nie mitten im Wort umbrochen wird —
-        # der Rest bleibt dem Wert (eine FIN mit 17 Zeichen soll in eine Zeile passen)
-        from reportlab.pdfbase.pdfmetrics import stringWidth
-        from pdf_schrift import schriften
-        stil = st["u_label"]
-        fett = schriften()[1]
-        breitestes = max((stringWidth(w, fett, stil.fontSize) for l, _ in rows for w in str(l).split()), default=0)
-        label_w = min(feld_w * 0.5, breitestes * 1.08 + 2 * pad + 1)
-    data = []
-    for i in range(0, len(rows), spalten):
-        zeile = []
-        for label, wert in rows[i:i + spalten]:
-            zeile += [Paragraph(f"<b>{_xml_escape(str(label))}</b>", st["u_label"]),
-                      Paragraph(_safe_para(wert), st["u_value"])]
-        while len(zeile) < 2 * spalten:
-            zeile += ["", ""]
-        data.append(zeile)
-    t = Table(data, colWidths=[label_w, feld_w - label_w] * spalten, hAlign="LEFT")
-    t.setStyle(TableStyle([
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LINEBELOW", (0, 0), (-1, -1), 0.4, DIVIDER),
-        *[("LINEBEFORE", (2 * k, 0), (2 * k, -1), 0.4, DIVIDER) for k in range(1, spalten)],
-        ("TOPPADDING", (0, 0), (-1, -1), 1.5 if _dicht() else 3),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5 if _dicht() else 3),
-        ("LEFTPADDING", (0, 0), (-1, -1), pad), ("RIGHTPADDING", (0, 0), (-1, -1), pad),
-    ]))
+def _u_feldtabelle(data, breiten, voll_zeilen=()):
+    """Felder wie in Ahmads Vorlage: Beschriftung normal, Wert auf einer gepunkteten Linie."""
+    t = Table(data, colWidths=breiten, hAlign="LEFT")
+    pad = 0.7 if _dicht() else 2.2
+    stil = [("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), pad), ("BOTTOMPADDING", (0, 0), (-1, -1), pad)]
+    for k in range(1, len(breiten), 2):        # gepunktete Linie unter jedem Wert
+        stil.append(("LINEBELOW", (k, 0), (k, -1), 0.6, FORMULAR_PUNKTLINIE, None, (0.8, 1.6)))
+    for z in voll_zeilen:
+        stil.append(("SPAN", (1, z), (-1, z)))
+    t.setStyle(TableStyle(stil))
     return t
 
 
+def _uebersicht_raster(rows, st, spalten: int = 2, erste_voll: bool = False):
+    """Fahrzeugdaten: je Zeile `spalten` Felder, zeilenweise gefuellt; `erste_voll`: die erste Zeile
+    (Hersteller/Typ) geht ueber die ganze Breite."""
+    if not rows:
+        return Paragraph("", st["u_value"])
+    luecke = 0.6 * cm
+    feld_w = (CONTENT_W - luecke * (spalten - 1)) / spalten
+    label_w = min(3.4 * cm, feld_w * 0.42)
+    breiten = []
+    for k in range(spalten):
+        breiten += [label_w, feld_w - label_w + (luecke if k < spalten - 1 else 0)]
+
+    def zelle(label, wert):
+        return [Paragraph(_xml_escape(str(label)), st["u_label"]), Paragraph(_safe_para(wert), st["u_value"])]
+
+    data, voll = [], []
+    rest = list(rows)
+    if erste_voll and rest:
+        data.append(zelle(*rest.pop(0)) + ["", ""] * (spalten - 1))
+        voll.append(0)
+    for i in range(0, len(rest), spalten):
+        zeile = []
+        for label, wert in rest[i:i + spalten]:
+            zeile += zelle(label, wert)
+        while len(zeile) < 2 * spalten:
+            zeile += ["", ""]
+        data.append(zeile)
+    return _u_feldtabelle(data, breiten, voll)
+
+
 def _uebersicht_partei(titel, rechts, rows, st, breite):
-    """Kasten einer Vertragspartei: Kopfzeile (Titel, rechts z. B. "KdNr: 25304"), darunter Beschriftung | Wert."""
-    kopf = Table([[Paragraph(f"<b>{_xml_escape(titel)}</b>", st["u_section"]),
-                   Paragraph(f"<b>{_xml_escape(rechts)}</b>" if rechts else "", st["u_value"])]],
+    """Partei wie in Ahmads Vorlage: Ueberschrift GROSS mit Linie (rechts z. B. "KdNr: 25304" in der
+    Vertragsfarbe), darunter Beschriftung | Wert auf gepunkteter Linie."""
+    kopf = Table([[Paragraph(f"<b>{_xml_escape(titel.upper())}</b>", st["u_section"]),
+                   Paragraph(f"<b>{_xml_escape(rechts)}</b>" if rechts else "", st["u_kdnr"])]],
                  colWidths=[breite * 0.5, breite * 0.5])
     kopf.setStyle(TableStyle([
-        ("ALIGN", (1, 0), (1, 0), "RIGHT"), ("VALIGN", (0, 0), (-1, -1), "BOTTOM"),
-        ("LINEBELOW", (0, 0), (-1, -1), 1.2, _akzent()),
+        ("VALIGN", (0, 0), (-1, -1), "BOTTOM"),
+        ("LINEBELOW", (0, 0), (-1, -1), 0.8, _aufgehellt(_akzent(), 0.55)),
         ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-        ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 2 if _dicht() else 4),
     ]))
-    label_w = 2.4 * cm
-    daten = [[Paragraph(f"<b>{_xml_escape(str(l))}</b>", st["u_label"]), Paragraph(_safe_para(w), st["u_value"])]
+    label_w = 2.6 * cm
+    daten = [[Paragraph(_xml_escape(str(l)), st["u_label"]), Paragraph(_safe_para(w), st["u_value"])]
              for l, w in rows] or [["", ""]]
-    inner = Table(daten, colWidths=[label_w, breite - label_w])
-    inner.setStyle(TableStyle([
-        ("VALIGN", (0, 0), (-1, -1), "TOP"), ("LINEBELOW", (0, 0), (-1, -1), 0.4, DIVIDER),
-        ("LEFTPADDING", (0, 0), (-1, -1), 0), ("TOPPADDING", (0, 0), (-1, -1), 1.2 if _dicht() else 2.5),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 1.2 if _dicht() else 2.5),
-    ]))
+    inner = _u_feldtabelle(daten, [label_w, breite - label_w])
     t = Table([[kopf], [inner]], colWidths=[breite])
     t.setStyle(TableStyle([("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
                            ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (0, 0), 3)]))
@@ -1252,6 +1268,13 @@ def _story_dichter(story: list) -> list:
     return raus
 
 
+def _euro_kurz(betrag: float) -> str:
+    """Layout "uebersicht": "11.000 €" (ohne ",00"), mit Cent "11.000,50 €"."""
+    if abs(betrag - round(betrag)) < 0.005:
+        return f"{int(round(betrag)):,} €".replace(",", ".")
+    return f"{betrag:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
 def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
                    digital: bool = False, unterschriften: Optional[dict] = None,
                    portal: bool = False) -> bytes:
@@ -1315,25 +1338,18 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
         header_right += [Spacer(1, 5), Paragraph("KUNDEN-NR.", st["meta_label"]),
                          Paragraph(f"<b>{_xml_escape(kundennummer)}</b>", st["meta_value"])]
     if _uebersicht():
-        # Layout "uebersicht" (Wunsch Ahmad 25.11.2026): links "KFZ Kaufvertrag" und darunter die Firma (Logo
-        # davor), rechts Nummer, Datum, Kunden-Nr. wie in den anderen Layouts.
-        links = [Paragraph("<b>KFZ Kaufvertrag</b>", st["u_title"]),
-                 # eng: Untertitel und Firma in einer Zeile
-                 *([Paragraph(f"<b>{_xml_escape(company)}</b> · für ein gebrauchtes Kraftfahrzeug", st["u_firma"])]
-                   if _dicht() else
-                   [Paragraph("für ein gebrauchtes Kraftfahrzeug", st["subtitle"]), Spacer(1, 3),
-                    Paragraph(f"<b>{_xml_escape(company)}</b>", st["u_firma"])])]
+        # Layout "uebersicht" (Wunsch Ahmad 25.11.2026, nach seinem Bild): "KFZ Kaufvertrag" mittig in der
+        # Vertragsfarbe, rechts die Firma (Logo darueber). KEINE Vertrags-Nr. und keine Kunden-Nr. im Kopf — die
+        # Kundennummer steht einmal beim Verkaeufer ("KdNr:"), das Datum in der Fusszeile ("erstellt am").
+        rechts = [Paragraph(f"<b>{_xml_escape(company)}</b>", st["u_firma"])]
         if logo is not None:
-            links = [logo, Spacer(1, 4)] + links
-        rechts = header_right
-        if _dicht():
-            # eng: Nummer, Datum, Kunden-Nr. als drei kurze Zeilen statt sechs
-            meta = [("Vertrags-Nr.", contract_no), ("Datum", today)] + (
-                [("Kunden-Nr.", kundennummer)] if kundennummer else [])
-            rechts = [Paragraph(f"{_xml_escape(k)}: <b>{_xml_escape(v)}</b>", st["meta_value"]) for k, v in meta]
-        head = Table([[links, rechts]], colWidths=[CONTENT_W - 5.5 * cm, 5.5 * cm])
+            logo.hAlign = "RIGHT"
+            rechts = [logo, Spacer(1, 3)] + rechts
+        seite_w = 4.6 * cm
+        head = Table([["", Paragraph("<b>KFZ Kaufvertrag</b>", st["u_title"]), rechts]],
+                     colWidths=[seite_w, CONTENT_W - 2 * seite_w, seite_w], hAlign="LEFT")
         head.setStyle(TableStyle([
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
             ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
         ]))
         story.append(head)
@@ -1458,37 +1474,25 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
         for k, v in pay_bits if str(v).strip()
     )
     if _uebersicht():
-        # Layout "uebersicht" (25.11.2026): Ueberschrift "Kaufpreis", darunter der Betrag gross, daneben
-        # Zahlungsart (bei MwSt-Ausweis Netto und MwSt) — dieselben Angaben wie in den anderen Layouts.
-        neben = [_xml_escape(preis_label)] if preis_label else []
+        # Layout "uebersicht" (25.11.2026, Bild Ahmad): heller Kasten, mittig "KAUFPREIS" und der Betrag gross in der
+        # Vertragsfarbe ("11.000 €"); darunter klein die Zahlungsart (bei MwSt-Ausweis Netto und MwSt).
+        unter = [_xml_escape(preis_label)] if preis_label else []
         if pay_sub:
-            neben.append(pay_sub)
-        price_box = Table([[Paragraph(f"<b>{price_str}</b>", st["u_price"]),
-                            Paragraph("<br/>".join(neben), st["u_value"])]],
-                          colWidths=[CONTENT_W * 0.45, CONTENT_W * 0.55], hAlign="LEFT")
+            unter.append(pay_sub)
+        zeilen = [[Paragraph("KAUFPREIS", st["u_price_label"])],
+                  [Paragraph(f"<b>{_xml_escape(_euro_kurz(brutto))}</b>", st["u_price"])]]
+        if unter:
+            zeilen.append([Paragraph(" · ".join(unter), st["u_price_sub"])])
+        price_box = Table(zeilen, colWidths=[CONTENT_W], hAlign="LEFT")
         price_box.setStyle(TableStyle([
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("ALIGN", (1, 0), (1, 0), "RIGHT"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-            ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+            ("BACKGROUND", (0, 0), (-1, -1), FORMULAR_FLAECHE),
+            ("BOX", (0, 0), (-1, -1), 0.6, DIVIDER),
+            ("ROUNDEDCORNERS", [4, 4, 4, 4]),
+            ("TOPPADDING", (0, 0), (-1, 0), 4 if _dicht() else 7),
+            ("TOPPADDING", (0, 1), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -2), 1),
+            ("BOTTOMPADDING", (0, -1), (-1, -1), 4 if _dicht() else 8),
         ]))
-        # Ueberschrift und Betrag in EINER Tabelle (ein KeepTogether im KeepTogether brach die Seite zu frueh um)
-        if _dicht():
-            # eng: "Kaufpreis" steht als Beschriftung vor dem Betrag statt als eigene Ueberschrift
-            price_box = Table([[Paragraph(f"<b>{TITEL_KAUFPREIS}</b>", st["u_section"]),
-                                Paragraph(f"<b>{price_str}</b>", st["u_price"]),
-                                Paragraph("<br/>".join(neben), st["u_value"])]],
-                              colWidths=[CONTENT_W * 0.18, CONTENT_W * 0.37, CONTENT_W * 0.45], hAlign="LEFT")
-            price_box.setStyle(TableStyle([
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("ALIGN", (2, 0), (2, 0), "RIGHT"),
-                ("LINEBELOW", (0, 0), (-1, -1), 1.2, _akzent()),
-                ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-                ("TOPPADDING", (0, 0), (-1, -1), 2), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-            ]))
-        price_box = Table([[_section(TITEL_KAUFPREIS, st)], [price_box]], colWidths=[CONTENT_W], hAlign="LEFT")
-        if _dicht():
-            price_box = Table([[price_box._cellvalues[1][0]]], colWidths=[CONTENT_W], hAlign="LEFT")
-        price_box.setStyle(TableStyle([("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-                                       ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (0, 0), 4)]))
     elif _formular():
         # Layout "formular" (03.10.2026): heller Preisstreifen — Kaufpreis gross in der Vertragsfarbe,
         # daneben die Zahlungsart (bei MwSt-Ausweis zusaetzlich Netto und MwSt).
@@ -1653,7 +1657,8 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
     if _uebersicht():
         # Wunsch Ahmad 25.11.2026: EIN Raster mit allen Zeilen (Fahrzeug + Zustand), danach die Schaeden ueber die
         # ganze Breite — dieselben Zeilen wie in den anderen Layouts, nur anders angeordnet und beschriftet
-        story.append(_uebersicht_raster(uebersicht_zeilen(veh_rows + zus_rows), st, spalten=3 if _dicht() else 2))
+        zeilen = uebersicht_zeilen(veh_rows + zus_rows)
+        story.append(_uebersicht_raster(zeilen, st, erste_voll=bool(zeilen) and zeilen[0][0] == "Hersteller/Typ"))
         if schaden_rows:
             story.append(_uebersicht_raster(schaden_rows, st, spalten=1))
     elif veh_rows:
@@ -1804,7 +1809,9 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
             story.append(Spacer(1, 8))
             story.append(KeepTogether(block))
         footer_left = company
-        footer_center = f"Kaufvertrag {contract_no} · erstellt am {today} · digitale Ausfertigung"
+        # 25.11.2026: im Layout "uebersicht" keine Vertragsnummer (Wunsch Ahmad)
+        footer_center = (f"Kaufvertrag · erstellt am {today} · digitale Ausfertigung" if _uebersicht()
+                         else f"Kaufvertrag {contract_no} · erstellt am {today} · digitale Ausfertigung")
         doc.build(_story_dichter(story), canvasmaker=_numbered_canvas_factory(footer_left, footer_center))
         return buf.getvalue()
 
@@ -1829,6 +1836,7 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
     ]))
 
     footer_left = company
-    footer_center = f"Kaufvertrag {contract_no} · erstellt am {today}"
+    footer_center = (f"Kaufvertrag · erstellt am {today}" if _uebersicht()
+                     else f"Kaufvertrag {contract_no} · erstellt am {today}")
     doc.build(_story_dichter(story), canvasmaker=_numbered_canvas_factory(footer_left, footer_center))
     return buf.getvalue()

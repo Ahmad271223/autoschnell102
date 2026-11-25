@@ -1372,6 +1372,10 @@ async def preview_contract(body: ContractIn, user=Depends(require_active_sub),
         contract_dict["vehicle_description"] = vehicle.get("description", "") or ""
     # Wunsch Ahmad 26.09.2026 abends: eigene Kundennummer auch in der Vorschau
     # (die eigene Vertragsnummer steht schon als contract_no in den Daten).
+    # Wunsch Ahmad 25.11.2026: ohne eigene Nummer zeigt die Vorschau die naechste fortlaufende (ohne sie zu verbrauchen)
+    if not str(contract_dict.get("kundennummer") or "").strip():
+        import vertrag_kundennummer as _kdnr
+        contract_dict["kundennummer"] = await _kdnr.naechste(db, user["dealer_id"])
     kundennummer_einsetzen(contract_dict)
     vehicle, dealer = _apply_contract_overrides(
         contract=contract_dict, vehicle=vehicle, dealer=dealer,
@@ -1625,6 +1629,11 @@ async def create_contract(body: ContractIn, user=Depends(require_active_sub)):
     eigener_text = (contract_dict.get("digital_vertragstext") or "").strip()
     contract_dict["digital_vertragstext"] = eigener_text or digitaler_vertragstext(dealer)
     # Wunsch Ahmad 26.09.2026 abends: Kundennummer je Vertrag (leer = Firmenwert).
+    # Wunsch Ahmad 25.11.2026: leer = naechste fortlaufende Nummer der Firma (1002, 1003, … — Chef und Sucher
+    # teilen den Zaehler, nie zweimal dieselbe); eine selbst eingetragene Nummer gilt weiter
+    if not str(contract_dict.get("kundennummer") or "").strip():
+        import vertrag_kundennummer as _kdnr
+        contract_dict["kundennummer"] = await _kdnr.ziehen(db, user["dealer_id"])
     kundennummer_einsetzen(contract_dict)
     vehicle, dealer = _apply_contract_overrides(
         contract=contract_dict, vehicle=vehicle, dealer=dealer,
@@ -3853,6 +3862,9 @@ async def vertrag_nachtraeglich_aendern(contract_id: str, body: ContractIn, user
         contract_dict["vehicle_description"] = vehicle.get("description", "") or ""
     eigener_text = (contract_dict.get("digital_vertragstext") or "").strip()
     contract_dict["digital_vertragstext"] = eigener_text or digitaler_vertragstext(dealer)
+    # 25.11.2026: leer = die Nummer, die der Vertrag schon hat (nie eine neue fortlaufende ziehen)
+    if not str(contract_dict.get("kundennummer") or "").strip():
+        contract_dict["kundennummer"] = str(cd_alt.get("vertrags_kundennummer") or "")
     kundennummer_einsetzen(contract_dict)
     if not await uebergabe_erfolgt(db, doc):
         empfang_kaestchen_leeren(contract_dict)

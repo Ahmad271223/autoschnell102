@@ -92,10 +92,11 @@ async function absenden() {
 }
 
 describe("Nummern: Vorbelegung und Fehlertext (reine Helfer)", () => {
-  it("anfangsFormular: Vertragsnummer leer (= automatisch), Kundennummer = Firmenwert", () => {
+  // 25.11.2026: Kundennummer nicht mehr mit dem Firmenwert vorbelegt — leer = fortlaufend (Server, ab 1002)
+  it("anfangsFormular: Vertrags- und Kundennummer leer (= automatisch)", () => {
     const f = anfangsFormular({}, DEALER, "2026-09-26");
     expect(f.contract_no).toBe("");
-    expect(f.kundennummer).toBe("482913");
+    expect(f.kundennummer).toBe("");
     expect(anfangsFormular({}, {}, "2026-09-26").kundennummer).toBe("");
     expect(anfangsFormular({}, null, "2026-09-26").kundennummer).toBe("");
   });
@@ -119,10 +120,11 @@ describe("Nummern: Vorbelegung und Fehlertext (reine Helfer)", () => {
 });
 
 describe("Nummern: im Dialog", () => {
-  it("Felder stehen im Dialog, Kundennummer vorbelegt, beide gehen im Payload an /contracts", async () => {
+  it("Felder stehen im Dialog, Kundennummer leer (automatisch), beide gehen im Payload an /contracts", async () => {
     post.mockResolvedValue({ data: { id: "c1", contract_no: "AH-2026-0042" } });
     await dialogOeffnenUndAusfuellen();
-    expect(feld("contract-kundennummer").value).toBe("482913");
+    expect(feld("contract-kundennummer").value).toBe("");
+    expect(feld("contract-kundennummer").placeholder).toContain("fortlaufend");
     expect(feld("contract-vertragsnummer").value).toBe("");
     tippen(feld("contract-vertragsnummer"), "AH-2026-0042");
     tippen(feld("contract-kundennummer"), "K-77");
@@ -134,13 +136,13 @@ describe("Nummern: im Dialog", () => {
     expect(aufruf[1].purchase_price).toBe(4500);
     expect(feld("contract-nummern-fehler")).toBeNull();
   });
-  it("leer gelassen: leere Vertragsnummer (= automatisch) und Firmen-Kundennummer im Payload", async () => {
+  it("leer gelassen: leere Vertrags- und Kundennummer im Payload (beide vergibt der Server)", async () => {
     post.mockResolvedValue({ data: { id: "c2" } });
     await dialogOeffnenUndAusfuellen();
     await absenden();
     const aufruf = post.mock.calls.find((c) => c[0] === "/contracts");
     expect(aufruf[1].contract_no).toBe("");
-    expect(aufruf[1].kundennummer).toBe("482913");
+    expect(aufruf[1].kundennummer).toBe("");
   });
   it("409 „Vertragsnummer bereits vergeben“ steht unter dem Feld und verschwindet beim Ändern", async () => {
     const text = "Vertragsnummer bereits vergeben: „AH-1“ trägt in eurer Firma schon ein anderer Kaufvertrag — bitte eine andere Nummer wählen.";
