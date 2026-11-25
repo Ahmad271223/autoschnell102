@@ -56,7 +56,10 @@ VERTRAG_FARBEN = {
 #: "modern" = das bisherige Layout (Balken-Ueberschriften, Kaesten, dunkler Preisblock);
 #: "formular" = nach Ahmads Vorlage: Ueberschrift mittig, Abschnittstitel mit Linie,
 #: Felder mit gepunkteter Linie, heller Preisstreifen, Ausstattung als Fliesstext.
-VERTRAG_LAYOUTS = ("modern", "formular")
+#: "uebersicht" (Wunsch Ahmad 25.11.2026, nach seiner Vorlage): Kaeufer links, Verkaeufer rechts mit KdNr, darunter
+#: "Kaufpreis", EIN Raster "Fahrzeugdaten" (Beschriftung/Wert, je Zeile zwei Felder, duenne Linien), dann Ausstattung,
+#: Beschreibung, Vereinbarungen, Bedingungen. Gleiche Daten wie die anderen Layouts — nur Anordnung und Beschriftung.
+VERTRAG_LAYOUTS = ("modern", "formular", "uebersicht")
 VERTRAG_LAYOUT_STANDARD = "modern"
 
 # Gestaltung des gerade gebauten Vertrags (Farbe, Layout) — gesetzt nur in generate_contract_pdf,
@@ -88,6 +91,18 @@ def _akzent_hex() -> str:
 def _formular() -> bool:
     g = _GESTALTUNG.get()
     return bool(g) and g["layout"] == "formular"
+
+
+def _uebersicht() -> bool:
+    g = _GESTALTUNG.get()
+    return bool(g) and g["layout"] == "uebersicht"
+
+
+def _dicht() -> bool:
+    """Layout "uebersicht", zweiter Versuch (Wunsch Ahmad 25.11.2026): kleinere Schrift und Abstaende, damit ein
+    Vertrag mit kurzer Beschreibung auf EINE Seite passt — genommen nur, wenn er dann wirklich auf eine passt."""
+    g = _GESTALTUNG.get()
+    return bool(g) and bool(g.get("dicht"))
 
 
 def _aufgehellt(farbe, anteil: float):
@@ -201,7 +216,7 @@ def _styles():
     s = getSampleStyleSheet()
     # Pruefbericht 20.09.2026 (P-01): Unicode-Schrift statt Helvetica.
     from pdf_schrift import styles_anpassen
-    return styles_anpassen({
+    return _styles_dicht(styles_anpassen({
         "title": ParagraphStyle("title", parent=s["Title"], fontSize=24, leading=27,
                                 textColor=SCHRIFT, alignment=TA_LEFT, spaceAfter=0),
         "subtitle": ParagraphStyle("subtitle", parent=s["Normal"], fontSize=9,
@@ -249,14 +264,42 @@ def _styles():
                                         textColor=SCHRIFT, alignment=1),
         "f_price_value": ParagraphStyle("f_price_value", parent=s["Normal"], fontSize=18, leading=21,
                                         textColor=_akzent(), alignment=1),
+        # Layout "uebersicht" (Wunsch Ahmad 25.11.2026)
+        "u_title": ParagraphStyle("u_title", parent=s["Normal"], fontSize=20, leading=24, textColor=SCHRIFT),
+        "u_firma": ParagraphStyle("u_firma", parent=s["Normal"], fontSize=10, leading=13, textColor=_akzent()),
+        "u_section": ParagraphStyle("u_section", parent=s["Normal"], fontSize=11, leading=14, textColor=SCHRIFT),
+        "u_label": ParagraphStyle("u_label", parent=s["Normal"], fontSize=8, leading=10, textColor=SCHRIFT),
+        "u_value": ParagraphStyle("u_value", parent=s["Normal"], fontSize=9, leading=11, textColor=SCHRIFT),
+        "u_price": ParagraphStyle("u_price", parent=s["Normal"], fontSize=18, leading=22, textColor=SCHRIFT),
         "f_price_sub": ParagraphStyle("f_price_sub", parent=s["Normal"], fontSize=10.5, leading=13,
                                       textColor=SCHRIFT, alignment=1),
-    })
+    }))
+
+
+def _styles_dicht(st: dict) -> dict:
+    """Layout "uebersicht" dicht: alle Schriften etwas kleiner (Faktor 0,88), engere Zeilen."""
+    if not (_uebersicht() and _dicht()):
+        return st
+    for name, stil in st.items():
+        stil.fontSize = round(stil.fontSize * 0.88, 2)
+        stil.leading = round(stil.leading * 0.86, 2)
+    return st
 
 
 def _section(title, st):
     """Section heading: light bar with red accent edge — consistent visual anchor.
-    Layout "formular": Titel in der Vertragsfarbe, GROSS, mit duenner Linie darunter."""
+    Layout "formular": Titel in der Vertragsfarbe, GROSS, mit duenner Linie darunter.
+    Layout "uebersicht": Titel fett, darunter eine Linie in der Vertragsfarbe (wie ein Formularkopf)."""
+    if _uebersicht():
+        t = Table([[Paragraph(f"<b>{_xml_escape(_titel_ohne_nummer(title))}</b>", st["u_section"])]],
+                  colWidths=[CONTENT_W], hAlign="LEFT")
+        t.setStyle(TableStyle([
+            ("LINEBELOW", (0, 0), (-1, -1), 1.2, _akzent()),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 1 if _dicht() else 2),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2 if _dicht() else 3),
+        ]))
+        return t
     if _formular():
         t = Table([[Paragraph(f"<b>{_xml_escape(str(title).upper())}</b>", st["f_section"])]],
                   colWidths=[CONTENT_W], hAlign="LEFT")
@@ -283,10 +326,15 @@ def _section(title, st):
     return t
 
 
+def _titel_ohne_nummer(title) -> str:
+    """Layout "uebersicht": Abschnitte ohne Nummer ("1 · Fahrzeugdaten" -> "Fahrzeugdaten")."""
+    return re.sub(r"^\s*\d+\s*·\s*", "", str(title))
+
+
 def _zeile_auszeichnen(zeile: str) -> str:
     """Layout "formular": ein Aufzaehlungspunkt (•) oder eine Nummer ("1.") am Zeilenanfang steht in
     der Vertragsfarbe und fett. Die Zeile ist schon escaped; sonst unveraendert."""
-    if not _formular():
+    if not (_formular() or _uebersicht()):
         return zeile
     m = re.match(r"^(\s*)•\s*", zeile)
     if m:
@@ -481,6 +529,107 @@ def _two_col_kv(rows, st):
         ("LEFTPADDING", (0, 0), (-1, -1), 0),
         ("RIGHTPADDING", (0, 0), (-1, -1), 0),
     ]))
+    return t
+
+
+# ---------- Layout "uebersicht" (Wunsch Ahmad 25.11.2026) ----------
+#: Beschriftungen im Layout "uebersicht" — NUR die Beschriftung aendert sich, jede Zeile der anderen Layouts bleibt
+#: (nichts geht verloren: Zeilen ohne Eintrag hier behalten ihre Beschriftung).
+UEBERSICHT_BESCHRIFTUNG = {
+    "Anschrift": "Straße, Nr.", "PLZ / Ort": "PLZ, Ort",
+    "Kilometerstand": "Gesamtfahrleistung", "Fahrzeughalter (Anzahl)": "Halter", "Leistung": "PS/KW",
+    "Kategorie": "Fahrzeugtyp", "Scheckheftgepflegt": "Scheckheft", "HU/AU": "TÜV/AU",
+    "Gewerblich genutzt seit EZ": "Gewerblich genutzt ab EZ", "Fahrtauglich": "Uneingeschränkt fahrbereit",
+    "Motor/Getriebe/Kupplung": "Motor/Getriebe",
+}
+#: Reihenfolge im Raster "Fahrzeugdaten" (nach Ahmads Vorlage); was hier fehlt, folgt dahinter in der bisherigen
+#: Reihenfolge — so faellt nie eine Zeile weg, auch keine spaeter neu eingefuehrte.
+UEBERSICHT_REIHENFOLGE = (
+    "Hersteller / Typ", "Erstzulassung", "Kilometerstand", "Fahrzeughalter (Anzahl)", "Farbe", "Leistung",
+    "Hubraum", "Getriebe", "Kraftstoff", "Scheckheftgepflegt", "HU/AU", "Kategorie", "Türen", "Sitze",
+    "EU-Import", "Gewerblich genutzt seit EZ", "Motor/Getriebe/Kupplung", "Fahrtauglich", "FIN",
+    "Nachlackierungsfrei", "Unfallfrei", "Bereifung", "Zulassung",
+)
+
+
+def uebersicht_zeilen(rows) -> list:
+    """(rein, fuer Tests) Zeilen der anderen Layouts -> Zeilen im Layout "uebersicht": sortiert nach
+    UEBERSICHT_REIHENFOLGE, neue Beschriftungen. "Nachlackierungsfrei: Ja" heisst in der Vorlage
+    "Nachlackierung: Nein" — der Wert wird dafuer umgedreht (nur Ja/Nein; sonst bleibt die alte Beschriftung)."""
+    rang = {k: i for i, k in enumerate(UEBERSICHT_REIHENFOLGE)}
+    sortiert = sorted(enumerate(rows), key=lambda x: (rang.get(x[1][0], len(rang)), x[0]))
+    raus = []
+    for _, (label, wert) in sortiert:
+        if label == "Nachlackierungsfrei" and str(wert).strip() in ("Ja", "Nein"):
+            raus.append(("Nachlackierung", "Nein" if str(wert).strip() == "Ja" else "Ja"))
+            continue
+        if label.startswith("Schaden an Motor/Getriebe/Kupplung"):
+            raus.append(("Schaden an Motor/Getriebe", wert))
+            continue
+        raus.append((UEBERSICHT_BESCHRIFTUNG.get(label, label), wert))
+    return raus
+
+
+def _uebersicht_raster(rows, st, spalten: int = 2):
+    """Raster mit duennen Linien: je Zeile `spalten` Felder (Beschriftung fett | Wert), zeilenweise gefuellt."""
+    if not rows:
+        return Paragraph("", st["u_value"])
+    feld_w = CONTENT_W / spalten
+    label_w = min(3.6 * cm, feld_w * 0.45)
+    pad = 2 if _dicht() else 4
+    if spalten >= 3:
+        # schmal: Beschriftung so breit wie ihr laengstes WORT (fett), damit nie mitten im Wort umbrochen wird —
+        # der Rest bleibt dem Wert (eine FIN mit 17 Zeichen soll in eine Zeile passen)
+        from reportlab.pdfbase.pdfmetrics import stringWidth
+        from pdf_schrift import schriften
+        stil = st["u_label"]
+        fett = schriften()[1]
+        breitestes = max((stringWidth(w, fett, stil.fontSize) for l, _ in rows for w in str(l).split()), default=0)
+        label_w = min(feld_w * 0.5, breitestes * 1.08 + 2 * pad + 1)
+    data = []
+    for i in range(0, len(rows), spalten):
+        zeile = []
+        for label, wert in rows[i:i + spalten]:
+            zeile += [Paragraph(f"<b>{_xml_escape(str(label))}</b>", st["u_label"]),
+                      Paragraph(_safe_para(wert), st["u_value"])]
+        while len(zeile) < 2 * spalten:
+            zeile += ["", ""]
+        data.append(zeile)
+    t = Table(data, colWidths=[label_w, feld_w - label_w] * spalten, hAlign="LEFT")
+    t.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LINEBELOW", (0, 0), (-1, -1), 0.4, DIVIDER),
+        *[("LINEBEFORE", (2 * k, 0), (2 * k, -1), 0.4, DIVIDER) for k in range(1, spalten)],
+        ("TOPPADDING", (0, 0), (-1, -1), 1.5 if _dicht() else 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5 if _dicht() else 3),
+        ("LEFTPADDING", (0, 0), (-1, -1), pad), ("RIGHTPADDING", (0, 0), (-1, -1), pad),
+    ]))
+    return t
+
+
+def _uebersicht_partei(titel, rechts, rows, st, breite):
+    """Kasten einer Vertragspartei: Kopfzeile (Titel, rechts z. B. "KdNr: 25304"), darunter Beschriftung | Wert."""
+    kopf = Table([[Paragraph(f"<b>{_xml_escape(titel)}</b>", st["u_section"]),
+                   Paragraph(f"<b>{_xml_escape(rechts)}</b>" if rechts else "", st["u_value"])]],
+                 colWidths=[breite * 0.5, breite * 0.5])
+    kopf.setStyle(TableStyle([
+        ("ALIGN", (1, 0), (1, 0), "RIGHT"), ("VALIGN", (0, 0), (-1, -1), "BOTTOM"),
+        ("LINEBELOW", (0, 0), (-1, -1), 1.2, _akzent()),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    label_w = 2.4 * cm
+    daten = [[Paragraph(f"<b>{_xml_escape(str(l))}</b>", st["u_label"]), Paragraph(_safe_para(w), st["u_value"])]
+             for l, w in rows] or [["", ""]]
+    inner = Table(daten, colWidths=[label_w, breite - label_w])
+    inner.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"), ("LINEBELOW", (0, 0), (-1, -1), 0.4, DIVIDER),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0), ("TOPPADDING", (0, 0), (-1, -1), 1.2 if _dicht() else 2.5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 1.2 if _dicht() else 2.5),
+    ]))
+    t = Table([[kopf], [inner]], colWidths=[breite])
+    t.setStyle(TableStyle([("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                           ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (0, 0), 3)]))
     return t
 
 
@@ -686,7 +835,7 @@ def _empfang_block(seite, contract, st, breite):
         ("RIGHTPADDING", (0, 0), (-1, -1), 0),
         ("TOPPADDING", (0, 0), (-1, -1), 2),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-        ("TOPPADDING", (0, -1), (-1, -1), 6),
+        ("TOPPADDING", (0, -1), (-1, -1), 3 if _dicht() else 6),
     ]))
     return t
 
@@ -783,10 +932,10 @@ def _empfang_kasten(rolle, seite, contract, st, unterschrift, mit_empfang=True, 
         ("LINEBELOW", (0, 0), (0, 0), 0.5, DIVIDER),
         ("LEFTPADDING", (0, 0), (-1, -1), 8),
         ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-        ("TOPPADDING", (0, 0), (0, 0), 5),
-        ("BOTTOMPADDING", (0, 0), (0, 0), 5),
-        ("TOPPADDING", (0, 1), (0, 1), 5),
-        ("BOTTOMPADDING", (0, -1), (0, -1), 6),
+        ("TOPPADDING", (0, 0), (0, 0), 2 if _dicht() else 5),
+        ("BOTTOMPADDING", (0, 0), (0, 0), 2 if _dicht() else 5),
+        ("TOPPADDING", (0, 1), (0, 1), 3 if _dicht() else 5),
+        ("BOTTOMPADDING", (0, -1), (0, -1), 3 if _dicht() else 6),
     ]
     if unterschrift:
         # Kundenportal (29.09.2026): liegt ein Unterschriftsbild vor (Kunde am Bildschirm bzw. die
@@ -794,7 +943,7 @@ def _empfang_kasten(rolle, seite, contract, st, unterschrift, mit_empfang=True, 
         # 04.10.2026: im Kasten "Käufer" steht der Firmenstempel des Chefs — dreimal so gross
         flow = _unterschrift_flowable(bild, COL_W - 16,
                                       STEMPEL_HOEHE if seite == "kaeufer" else UNTERSCHRIFT_HOEHE) if bild else None
-        zeile = flow if flow is not None else Spacer(1, 34)
+        zeile = flow if flow is not None else Spacer(1, 26 if _dicht() else 34)
         if zeile_hoehe:
             # beide Kaesten gleich hoch; die Unterschrift steht unten auf der Linie
             hoehe = flow.drawHeight if flow is not None else 0
@@ -1066,10 +1215,41 @@ def generate_contract_pdf(*, dealer: dict, vehicle: dict, contract: dict,
         "layout": vertrag_layout(layout if layout is not None else c.get("vertrag_layout")),
     })
     try:
-        return _vertrag_bauen(dealer=dealer, vehicle=vehicle, contract=contract, digital=digital,
-                              unterschriften=unterschriften, portal=portal)
+        pdf = _vertrag_bauen(dealer=dealer, vehicle=vehicle, contract=contract, digital=digital,
+                             unterschriften=unterschriften, portal=portal)
+        if _uebersicht() and _seiten(pdf) > 1:
+            # Wunsch Ahmad 25.11.2026: bei kurzer Beschreibung moeglichst auf EINE Seite — enger gesetzt nur dann,
+            # wenn es so wirklich auf eine Seite passt; sonst bleibt die normale Fassung
+            _GESTALTUNG.get()["dicht"] = True
+            try:
+                eng = _vertrag_bauen(dealer=dealer, vehicle=vehicle, contract=contract, digital=digital,
+                                     unterschriften=unterschriften, portal=portal)
+            finally:
+                _GESTALTUNG.get()["dicht"] = False
+            if _seiten(eng) == 1:
+                return eng
+        return pdf
     finally:
         _GESTALTUNG.reset(token)
+
+
+def _seiten(pdf: bytes) -> int:
+    from pypdf import PdfReader
+    return len(PdfReader(io.BytesIO(pdf)).pages)
+
+
+def _story_dichter(story: list) -> list:
+    """Im dichten Versuch die Abstaende zwischen den Abschnitten auf gut die Haelfte (auch in KeepTogether)."""
+    if not _dicht():
+        return story
+    raus = []
+    for x in story:
+        if isinstance(x, Spacer) and x.height >= 6:
+            x = Spacer(1, round(x.height * 0.3, 1))
+        elif isinstance(x, KeepTogether):
+            x._content = _story_dichter(list(x._content))
+        raus.append(x)
+    return raus
 
 
 def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
@@ -1096,7 +1276,7 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
     doc = SimpleDocTemplate(
         buf, pagesize=A4,
         leftMargin=MARGIN, rightMargin=MARGIN,
-        topMargin=1.6 * cm, bottomMargin=2.0 * cm,
+        topMargin=(1.0 if _dicht() else 1.6) * cm, bottomMargin=(1.5 if _dicht() else 2.0) * cm,
         title="KFZ-Kaufvertrag", author=dealer.get("company_name", "Autohändler"),
     )
     st = _styles()
@@ -1134,7 +1314,31 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
     if kundennummer:
         header_right += [Spacer(1, 5), Paragraph("KUNDEN-NR.", st["meta_label"]),
                          Paragraph(f"<b>{_xml_escape(kundennummer)}</b>", st["meta_value"])]
-    if _formular():
+    if _uebersicht():
+        # Layout "uebersicht" (Wunsch Ahmad 25.11.2026): links "KFZ Kaufvertrag" und darunter die Firma (Logo
+        # davor), rechts Nummer, Datum, Kunden-Nr. wie in den anderen Layouts.
+        links = [Paragraph("<b>KFZ Kaufvertrag</b>", st["u_title"]),
+                 # eng: Untertitel und Firma in einer Zeile
+                 *([Paragraph(f"<b>{_xml_escape(company)}</b> · für ein gebrauchtes Kraftfahrzeug", st["u_firma"])]
+                   if _dicht() else
+                   [Paragraph("für ein gebrauchtes Kraftfahrzeug", st["subtitle"]), Spacer(1, 3),
+                    Paragraph(f"<b>{_xml_escape(company)}</b>", st["u_firma"])])]
+        if logo is not None:
+            links = [logo, Spacer(1, 4)] + links
+        rechts = header_right
+        if _dicht():
+            # eng: Nummer, Datum, Kunden-Nr. als drei kurze Zeilen statt sechs
+            meta = [("Vertrags-Nr.", contract_no), ("Datum", today)] + (
+                [("Kunden-Nr.", kundennummer)] if kundennummer else [])
+            rechts = [Paragraph(f"{_xml_escape(k)}: <b>{_xml_escape(v)}</b>", st["meta_value"]) for k, v in meta]
+        head = Table([[links, rechts]], colWidths=[CONTENT_W - 5.5 * cm, 5.5 * cm])
+        head.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ]))
+        story.append(head)
+        story.append(Spacer(1, 14))
+    elif _formular():
         # Layout "formular" (Wunsch Ahmad 03.10.2026, nach seiner Vorlage): links Logo/Firma,
         # in der Mitte die Ueberschrift in der Vertragsfarbe, rechts Nummer und Datum.
         links = [Paragraph(f"<b>{_xml_escape(company)}</b>", st["f_firma"])]
@@ -1190,11 +1394,23 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
         ("E-Mail", dealer.get("email", "")),
     ]
     # Wunsch Ahmad 01.10.2026: nur "Verkäufer" und "Käufer" — ohne den Zusatz Halter/Händler
-    story.append(_two_boxes(
-        "Verkäufer", _ohne_leere(seller_rows),
-        "Käufer", _ohne_leere(buyer_rows),
-        st,
-    ))
+    if _uebersicht():
+        # Wunsch Ahmad 25.11.2026: Käufer links, Verkäufer rechts mit "KdNr:" in der Kopfzeile
+        breite = (CONTENT_W - 0.8 * cm) / 2
+        paar = Table([[
+            _uebersicht_partei("Käufer", "", uebersicht_zeilen(_ohne_leere(buyer_rows)), st, breite), "",
+            _uebersicht_partei("Verkäufer", f"KdNr: {kundennummer}" if kundennummer else "",
+                               uebersicht_zeilen(_ohne_leere(seller_rows)), st, breite),
+        ]], colWidths=[breite, 0.8 * cm, breite], hAlign="LEFT")
+        paar.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"),
+                                  ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0)]))
+        story.append(paar)
+    else:
+        story.append(_two_boxes(
+            "Verkäufer", _ohne_leere(seller_rows),
+            "Käufer", _ohne_leere(buyer_rows),
+            st,
+        ))
     story.append(Spacer(1, 12))
 
     # Abholung direkt unter den Halter-/Kaeuferangaben (Wunsch Ahmad 12.09.2026).
@@ -1241,7 +1457,39 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
         (f"{k}: {_xml_escape(str(v))}" if k else _xml_escape(str(v)))
         for k, v in pay_bits if str(v).strip()
     )
-    if _formular():
+    if _uebersicht():
+        # Layout "uebersicht" (25.11.2026): Ueberschrift "Kaufpreis", darunter der Betrag gross, daneben
+        # Zahlungsart (bei MwSt-Ausweis Netto und MwSt) — dieselben Angaben wie in den anderen Layouts.
+        neben = [_xml_escape(preis_label)] if preis_label else []
+        if pay_sub:
+            neben.append(pay_sub)
+        price_box = Table([[Paragraph(f"<b>{price_str}</b>", st["u_price"]),
+                            Paragraph("<br/>".join(neben), st["u_value"])]],
+                          colWidths=[CONTENT_W * 0.45, CONTENT_W * 0.55], hAlign="LEFT")
+        price_box.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("ALIGN", (1, 0), (1, 0), "RIGHT"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ]))
+        # Ueberschrift und Betrag in EINER Tabelle (ein KeepTogether im KeepTogether brach die Seite zu frueh um)
+        if _dicht():
+            # eng: "Kaufpreis" steht als Beschriftung vor dem Betrag statt als eigene Ueberschrift
+            price_box = Table([[Paragraph(f"<b>{TITEL_KAUFPREIS}</b>", st["u_section"]),
+                                Paragraph(f"<b>{price_str}</b>", st["u_price"]),
+                                Paragraph("<br/>".join(neben), st["u_value"])]],
+                              colWidths=[CONTENT_W * 0.18, CONTENT_W * 0.37, CONTENT_W * 0.45], hAlign="LEFT")
+            price_box.setStyle(TableStyle([
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("ALIGN", (2, 0), (2, 0), "RIGHT"),
+                ("LINEBELOW", (0, 0), (-1, -1), 1.2, _akzent()),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                ("TOPPADDING", (0, 0), (-1, -1), 2), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ]))
+        price_box = Table([[_section(TITEL_KAUFPREIS, st)], [price_box]], colWidths=[CONTENT_W], hAlign="LEFT")
+        if _dicht():
+            price_box = Table([[price_box._cellvalues[1][0]]], colWidths=[CONTENT_W], hAlign="LEFT")
+        price_box.setStyle(TableStyle([("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                                       ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (0, 0), 4)]))
+    elif _formular():
         # Layout "formular" (03.10.2026): heller Preisstreifen — Kaufpreis gross in der Vertragsfarbe,
         # daneben die Zahlungsart (bei MwSt-Ausweis zusaetzlich Netto und MwSt).
         spalten = [[Paragraph("KAUFPREIS", st["f_price_label"]),          # 04.11.2026: ohne "(vereinbart)"
@@ -1402,12 +1650,18 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
 
     story.append(_section("1 · Fahrzeugdaten", st))
     story.append(Spacer(1, 6))
-    if veh_rows:
+    if _uebersicht():
+        # Wunsch Ahmad 25.11.2026: EIN Raster mit allen Zeilen (Fahrzeug + Zustand), danach die Schaeden ueber die
+        # ganze Breite — dieselben Zeilen wie in den anderen Layouts, nur anders angeordnet und beschriftet
+        story.append(_uebersicht_raster(uebersicht_zeilen(veh_rows + zus_rows), st, spalten=3 if _dicht() else 2))
+        if schaden_rows:
+            story.append(_uebersicht_raster(schaden_rows, st, spalten=1))
+    elif veh_rows:
         story.append(_two_col_kv(veh_rows, st))
-    if zus_rows:
+    if zus_rows and not _uebersicht():
         story.append(Spacer(1, 4))
         story.append(_two_col_kv(zus_rows, st))
-    if schaden_rows:
+    if schaden_rows and not _uebersicht():
         # ueber die ganze Breite (lange Aufzaehlungen), dieselben Beschriftungen wie im Grid
         story.append(Spacer(1, 4))
         voll = Table([[_kv_compact(schaden_rows, st, KV_LABEL_W, CONTENT_W - KV_LABEL_W - 0.2 * cm)]],
@@ -1423,12 +1677,14 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
     # etwas drinsteht; die Besonderen Vereinbarungen (Text aus den Einstellungen) bleiben weiter unten
     # 24.11.2026: dazu der Satz zur "Zulassung bei Übergabe" (vertrag_zulassung; unbekannt = kein Satz)
     from vertrag_zulassung import zusaetzliche_vereinbarung_text
-    story.extend(_abschnitt_mit_text(
-        TITEL_ZUSAETZLICH, _absaetze(zusaetzliche_vereinbarung_text(contract), st["body"]), st, 2))
+    zusaetzlich = _abschnitt_mit_text(
+        TITEL_ZUSAETZLICH, _absaetze(zusaetzliche_vereinbarung_text(contract), st["body"]), st, 2)
+    if not _uebersicht():
+        story.extend(zusaetzlich)
 
     # ---------- Features ----------
     feats = _ausstattung_liste(vehicle.get("features"))   # P-15
-    if feats and _formular():
+    if feats and (_formular() or _uebersicht()):
         # Layout "formular": Ausstattung als Fliesstext, durch Kommas getrennt
         story.append(_section(TITEL_AUSSTATTUNG, st))
         story.append(Spacer(1, 6))
@@ -1463,7 +1719,10 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
     # Kommt wie die Ausstattung aus dem Inserat, steht deshalb direkt dahinter.
     vd = (contract.get("vehicle_description") or "").strip()
     story.extend(_abschnitt_mit_text(
-        TITEL_BESCHREIBUNG, _absaetze(vd, st["body"]), st, 2))
+        "Beschreibung" if _uebersicht() else TITEL_BESCHREIBUNG, _absaetze(vd, st["body"]), st, 2))
+    if _uebersicht():
+        # Layout "uebersicht": die Zusaetzliche Vereinbarung (Dialogfeld) nach der Beschreibung, vor den Besonderen
+        story.extend(zusaetzlich)
 
     # Wunsch Ahmad 21.09.2026: "Notizen (intern)" (contract.notes, traegt nur
     # der Chef im Vertragsdialog ein) stehen NICHT mehr im Vertrag — beide
@@ -1546,7 +1805,7 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
             story.append(KeepTogether(block))
         footer_left = company
         footer_center = f"Kaufvertrag {contract_no} · erstellt am {today} · digitale Ausfertigung"
-        doc.build(story, canvasmaker=_numbered_canvas_factory(footer_left, footer_center))
+        doc.build(_story_dichter(story), canvasmaker=_numbered_canvas_factory(footer_left, footer_center))
         return buf.getvalue()
 
     # ---------- Signatures — boxed, kept on one page ----------
@@ -1571,5 +1830,5 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
 
     footer_left = company
     footer_center = f"Kaufvertrag {contract_no} · erstellt am {today}"
-    doc.build(story, canvasmaker=_numbered_canvas_factory(footer_left, footer_center))
+    doc.build(_story_dichter(story), canvasmaker=_numbered_canvas_factory(footer_left, footer_center))
     return buf.getvalue()

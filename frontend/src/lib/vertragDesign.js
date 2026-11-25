@@ -20,6 +20,8 @@ export const VERTRAG_FARBEN = [
 export const VERTRAG_LAYOUTS = [
   { key: "modern", label: "Modern", text: "Wie bisher: Balken-Überschriften, Kästen für die Parteien, dunkler Preisblock." },
   { key: "formular", label: "Formular", text: "Überschrift mittig, Felder auf Linien wie ein ausgefülltes Formular, heller Preisstreifen." },
+  // Wunsch Ahmad 25.11.2026: Aufbau nach seiner Vorlage — gleiche Angaben, nur anders angeordnet und beschriftet
+  { key: "uebersicht", label: "Übersicht", text: "Käufer links, Verkäufer mit KdNr rechts, dann Kaufpreis und alle Fahrzeugdaten in einer Tabelle." },
 ];
 
 /** Gültiger Farbname ("rot" zählt als Standard) — sonst "standard". */

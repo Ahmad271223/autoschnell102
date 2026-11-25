@@ -2,6 +2,18 @@
   "_hinweis": "Was ist neu (Wunsch Ahmad 24.11.2026). Neue Eintraege OBEN anfuegen, id nie aendern oder wiederverwenden (Gelesen-Stand haengt daran). Felder: id, datum JJJJ-MM-TT, titel, bereich, art neu|verbessert|behoben, text, punkte (optional), link (optional, Pfad in der App), wichtig (optional), fuer: chef/sucher/fahrer.",
   "eintraege": [
     {
+      "id": "2026-11-25-vertrag-uebersicht",
+      "datum": "2026-11-25",
+      "titel": "Neue Vertragsvorlage „Übersicht“",
+      "bereich": "Kaufvertrag",
+      "art": "neu",
+      "text": "In den Einstellungen unter Vertragsdesign gibt es jetzt eine dritte Vorlage: Käufer links, Verkäufer mit Kundennummer rechts, darunter Kaufpreis und alle Fahrzeugdaten in einer Tabelle. Es stehen dieselben Angaben drin wie bisher, nur anders angeordnet. Bei kurzer Beschreibung passt der Vertrag auf eine Seite. Modern und Formular bleiben wählbar.",
+      "link": "/app/einstellungen",
+      "fuer": [
+        "chef"
+      ]
+    },
+    {
       "id": "2026-11-24-fahrer-ueberweisung",
       "datum": "2026-11-24",
       "titel": "Kontodaten des Verkäufers",

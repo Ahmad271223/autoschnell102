@@ -211,4 +211,4 @@ def test_09_frontend_und_server_kennen_dieselben_farben():
     assert len(paare) == 10
     for key, hexwert in paare.items():
         assert P.VERTRAG_FARBEN[key].upper() == hexwert.upper(), key
-    assert re.findall(r'key:\s*"(\w+)",\s*label:\s*"(?:Modern|Formular)"', js) == list(P.VERTRAG_LAYOUTS)
+    assert re.findall(r'key:\s*"(\w+)",\s*label:\s*"(?:Modern|Formular|Übersicht)"', js) == list(P.VERTRAG_LAYOUTS)

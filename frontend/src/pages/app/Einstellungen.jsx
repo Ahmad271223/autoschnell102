@@ -402,7 +402,7 @@ export default function Einstellungen() {
         </div>
       )}
 
-      <div className="grid lg:grid-cols-[220px_1fr] gap-5">
+      <div className="grid grid-cols-1 lg:grid-cols-[220px_minmax(0,1fr)] gap-5">
         {/* Sidebar nav */}
         <nav className="apple-surface p-2 self-start lg:sticky lg:top-6">
           {sections.map((s) => {
@@ -861,7 +861,7 @@ export default function Einstellungen() {
 
           {active === "vertragsdesign" && istChef && (
             <Section title="Vertragsdesign"
-                     subtitle="Wie deine Kaufverträge aussehen: Layout und Farbe. Die Inhalte bleiben in beiden Layouts gleich.">
+                     subtitle="Wie deine Kaufverträge aussehen: Layout und Farbe. In allen Layouts stehen dieselben Angaben.">
               <VertragDesign farbe={form.vertrag_farbe} layout={form.vertrag_layout}
                              onChange={(w) => setForm((f) => ({ ...f, ...w }))} />
             </Section>
