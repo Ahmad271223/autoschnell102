@@ -10,6 +10,9 @@ internal static class Program
     ///   --verbinden &lt;code&gt; ohne Fenster mit dem 6-stelligen Code aus AutoSchnell verbinden (nur, wenn das
     ///                    Programm nicht gerade laeuft)
     ///   --systemcheck    prueft Windows, Texterkennung, Server, Abo, AutoPointer (mit Probe) und gibt es aus
+    ///   --dauerlauf &lt;Sekunden&gt; Probelauf des Dauerlaufs (nichts geht an den Server): Liste mitlesen, vorsortieren,
+    ///                    passende Autos anklicken und ganz lesen. --nur-liste klickt nichts an,
+    ///                    --regeln "privat;unfall;preis=500-30000;km=250000;jahr=2008", --hoechstens &lt;n&gt; Klicks
     ///   --einmal         liest das gerade angezeigte Fahrzeug einmal und gibt die Werte
     ///                    aus; ist das Programm verbunden, fragt es den Server (Probelauf)
     ///                    nach den Links. --oeffnen oeffnet sie, --bilder &lt;Ordner&gt;
@@ -21,6 +24,8 @@ internal static class Program
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         string? server = KonsolenModus.Argument(args, "--server");
         if (args.Contains("--einmal")) return KonsolenModus.EinmalAsync(args, server).GetAwaiter().GetResult();
+        if (KonsolenModus.Argument(args, "--dauerlauf") is { } sekunden)
+            return DauerlaufProbe.LaufAsync(args, sekunden).GetAwaiter().GetResult();
         if (args.Contains("--systemcheck")) return KonsolenModus.SystemcheckAsync(server).GetAwaiter().GetResult();
         if (KonsolenModus.Argument(args, "--verbinden") is { } code)
             return KonsolenModus.VerbindenAsync(code, server).GetAwaiter().GetResult();
@@ -145,14 +150,30 @@ internal static class KonsolenModus
         var ocr = TextErkennung.Erstelle(out string fehler);
         if (ocr == null) { Console.WriteLine(fehler); return 4; }
 
+        BeschreibungGanz.Diagnose = args.Contains("--ganz");
+        BeschreibungGanz.Abgleich = !args.Contains("--ohne-abgleich");
+        if (bilder != null && args.Contains("--ganz"))
+        {
+            Directory.CreateDirectory(bilder);
+            BeschreibungGanz.BildSpeichern = Path.Combine(bilder, "beschreibung.png");
+        }
+        if (double.TryParse(Argument(args, "--vergroesserung"), System.Globalization.CultureInfo.InvariantCulture, out double vg))
+            BeschreibungGanz.Vergroesserung = Math.Clamp(vg, 1.0, 5.0);      // nur zum Messen
+        // 1.5.22: steht die Detailansicht nach dem Rollen wieder GENAU wie vorher? (Sonst hielte der Ueberwacher das
+        // fuer ein anderes Auto und laese noch einmal.)
+        ulong Summe() => AutoPointerFenster.Pruefsumme(ansicht.TechnikTabelle) * 31 ^ AutoPointerFenster.Pruefsumme(ansicht.KopfTabelle);
+        ulong summeVorher = Summe();
         var start = DateTime.Now;
         var lesung = await AutoPointerQuelle.LiesAnsichtAsync(ocr, ansicht, false, bilder == null ? null : (technik, kopf) =>
         {
             Directory.CreateDirectory(bilder);
             technik.Save(Path.Combine(bilder, "technik.png"));
             kopf?.Save(Path.Combine(bilder, "kopf.png"));
-        });
+        }, beschreibungGanz: args.Contains("--ganz"));      // 1.5.22: rollt die Detailansicht (AutoPointer muss vorne liegen)
         var dauer = (DateTime.Now - start).TotalMilliseconds;
+        if (BeschreibungGanz.Diagnose)
+            Console.WriteLine(Summe() == summeVorher ? "Detailansicht steht wieder wie vorher (Prüfsumme gleich)."
+                                                     : "ACHTUNG: Detailansicht steht NICHT wie vorher (Prüfsumme anders).");
         if (lesung == null) { Console.WriteLine("Tabelle nicht lesbar."); return 5; }
 
         Console.WriteLine($"Gelesen in {dauer:0} ms vom Bildschirm (AutoPointer unberührt), Texterkennung {ocr.Sprache}:");
@@ -163,6 +184,9 @@ internal static class KonsolenModus
         Console.WriteLine("  Schlüssel: " + f.Schluessel);
         if (f.BeschreibungText != null)
             Console.WriteLine("  Beschreibung: " + (f.BeschreibungText.Length > 120 ? f.BeschreibungText[..120] + " …" : f.BeschreibungText));
+        if (f.BeschreibungVoll != null)
+            Console.WriteLine($"  Beschreibung ganz ({f.BeschreibungVoll.Length} Zeichen, {(f.BeschreibungExakt ? "EXAKT abgeglichen" : "Texterkennung/Lücken")}): "
+                              + f.BeschreibungVoll.Replace("\n", " ⏎ "));
         Console.WriteLine("  An den Server: " + System.Text.Json.JsonSerializer.Serialize(AutoSchnellDienst.Nutzlast(f)));
         if (fehlt.Count > 0)
         {

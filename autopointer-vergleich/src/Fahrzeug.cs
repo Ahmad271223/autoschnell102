@@ -17,6 +17,17 @@ internal sealed class Fahrzeug
     /// <summary>Sichtbarer Anfang der Beschreibung (seit 1.5.1) — der Server nimmt das Modell daraus nur, wenn
     /// Feld und Ueberschrift keins hergeben.</summary>
     public string? BeschreibungText { get; set; }
+    /// <summary>1.5.22 (Wunsch Ahmad 27.11.2026): die GANZE Beschreibung (Detailansicht gerollt, siehe
+    /// <see cref="BeschreibungGanz"/>) — fuer die Schadenspruefung auf dem Server. null = nicht ganz gelesen.</summary>
+    public string? BeschreibungVoll { get; set; }
+    /// <summary>1.5.22: <see cref="BeschreibungVoll"/> ist Buchstabe fuer Buchstabe mit der echten Schrift abgeglichen
+    /// (<see cref="SchriftLeser"/>) — keine Lesefehler. false = Texterkennung oder Luecken.</summary>
+    public bool BeschreibungExakt { get; set; }
+    /// <summary>Dauerlauf (27.11.2026): alle Zeilen der Tabelle „Technische Daten“ (Bezeichnung → Wert), exakt mit dem
+    /// Schrift-Abgleich gelesen (<see cref="TabellenLeser"/>) — fuer den vorausgefuellten Kaufvertrag. Leer = nicht gelesen.</summary>
+    public List<KeyValuePair<string, string>> Merkmale { get; set; } = new();
+    /// <summary>Dauerlauf: die Eintraege unter „Ausstattung“, exakt gelesen.</summary>
+    public List<string> Ausstattung { get; set; } = new();
     public int? Preis { get; set; }
     public int? EzMonat { get; set; }
     public int? EzJahr { get; set; }

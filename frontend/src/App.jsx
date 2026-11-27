@@ -250,6 +250,8 @@ const Freigaben = seite(() => import("@/pages/app/Freigaben"));
 const Chancen = seite(() => import("@/pages/app/Chancen"));
 // Programme zum Herunterladen (03.10.2026): Inhalte nur vom Server, je Firma freigeschaltet
 const Programme = seite(() => import("@/pages/app/Programme"));
+// Trefferliste des Dauerlaufs (27.11.2026): nur mit freigeschaltetem Windows-Programm (sonst 404 -> Startseite)
+const Treffer = seite(() => import("@/pages/app/Treffer"));
 const AdminProgrammVergleiche = seite(() => import("@/pages/admin_v2/ProgrammVergleiche"));
 
 const DriverLogin = seite(() => import("@/pages/driver/DriverLogin"));
@@ -408,6 +410,7 @@ export default function App() {
             <Route path="/app/team" element={<WrapFree><Team /></WrapFree>} />
             <Route path="/app/einstellungen" element={<WrapFree><Einstellungen /></WrapFree>} />
             <Route path="/app/programme" element={<WrapFree><Programme /></WrapFree>} />
+            <Route path="/app/treffer" element={<WrapFree><Treffer /></WrapFree>} />
 
             {/* B2B-Marktplatz (Zwischenhändler, eigenständig) */}
             <Route path="/markt/login" element={<FeatureGate bereich="Der B2B-Marktplatz"><BuyerLogin /></FeatureGate>} />

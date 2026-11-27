@@ -10,7 +10,9 @@ namespace AutoPointerVergleich;
 internal sealed record FensterZustand(Status Status, bool AutomatikAn, bool Verbunden, string VerbundenAls,
                                       string? LetztesAuto, bool HatInseratLink, string? LetzteMeldung, bool Probelauf,
                                       string? Sperrgrund = null, IReadOnlyList<string>? LetzteHinweise = null,
-                                      bool NurGemerkt = false, bool VertragLaeuft = false);
+                                      bool NurGemerkt = false, bool VertragLaeuft = false,
+                                      // Dauerlauf (27.11.2026): null = aus; sonst der kurze Stand ("12 gelesen · 5 Treffer")
+                                      string? Dauerlauf = null);
 
 /// <summary>Wunsch Ahmad 03.10.2026: "man kann nicht stoppen, aktivieren, nichts — das sollen Buttons sein".
 /// Seit 1.5.8 (08.10.2026, "zu viele Knoepfe fuer dieselbe Sache"): bedient wird nur noch ueber die kleine Leiste

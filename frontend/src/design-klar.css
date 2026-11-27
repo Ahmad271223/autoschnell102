@@ -1,0 +1,98 @@
+/* ══════════════════════════════════════════════════════════════════════════
+   „Klar“ (Wunsch Ahmad 27.11.2026: das alte Design behalten, nur sehr clean
+   und übersichtlich). Diese Schicht lässt Farben, Schrift und Rundungen des
+   bisherigen Designs, wie sie sind, und räumt nur auf:
+     1. ruhigere Knöpfe (einfarbig, ohne Farbschein),
+     2. dichtere, ruhigere Tabellen,
+     3. Bestand am PC als Liste statt Kacheln (gleiche Inhalte und Knöpfe),
+     4. Lesbarkeit: zu blasse Schrift, die eine Prüfung der gerenderten
+        Seiten gefunden hat.
+   Wird NACH index.css geladen; zurück = den Import in index.jsx entfernen.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── 1. Knöpfe: einfarbig, ohne Schein ───────────────────────────────────── */
+.apple-btn-primary,
+.apple-fab {
+  background: var(--knopf-primaer, var(--accent-blue));
+  box-shadow: none;
+}
+.apple-btn-primary:hover,
+.apple-fab:hover {
+  background: var(--knopf-primaer-hover, var(--knopf-primaer, var(--accent-blue)));
+  filter: brightness(1.05);
+}
+
+/* ── 2. Tabellen: ruhiger Kopf, flachere Zeilen, Zahlen untereinander ────── */
+main table:not(.bleibt-dunkel *) { font-variant-numeric: tabular-nums; }
+main table:not(.bleibt-dunkel *) thead th {
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+  padding-top: 9px !important;
+  padding-bottom: 9px !important;
+}
+main table:not(.bleibt-dunkel *) tbody td {
+  padding-top: 9px !important;
+  padding-bottom: 9px !important;
+}
+main table:not(.bleibt-dunkel *) tbody tr:hover > td { background: var(--wa-03); }
+
+/* ── 3. Bestand: am PC eine Liste statt Kacheln ────────────────────────────
+   Dieselben Elemente wie in der Kachel (nichts fehlt, alle Knöpfe bleiben) —
+   nur nebeneinander: Fahrzeug | Daten | Aktionen. Am Handy und Tablet
+   bleiben es Karten. */
+@media (min-width: 1180px) {
+  .bestand-raster {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+    border: 1px solid var(--border-default);
+    border-radius: 12px;
+    background: var(--bg-surface);
+    box-shadow: var(--schatten-karte);
+    overflow: hidden;
+  }
+  .bestand-raster > .bestand-zeile {
+    flex-direction: row;
+    align-items: stretch;
+    border: 0;
+    border-bottom: 1px solid var(--divider);
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+  .bestand-raster > .bestand-zeile:last-child { border-bottom: 0; }
+  .bestand-raster > .bestand-zeile:hover { background: var(--wa-03); }
+  .bestand-zeile > .h-36 { width: 104px; height: auto; min-height: 68px; flex: none; }
+  .bestand-zeile > .p-4 {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr) 29rem;
+    align-items: center;
+    column-gap: 24px;
+    row-gap: 2px;
+    padding: 12px 16px;
+  }
+  .bestand-zeile > .p-4 > :nth-child(1) { grid-column: 1; grid-row: 1 / span 2; align-items: center; }
+  .bestand-zeile > .p-4 > :nth-child(2) { grid-column: 2; margin-top: 0; }
+  .bestand-zeile > .p-4 > .inline-flex { grid-column: 2; margin-top: 0; }
+  .bestand-zeile > .p-4 > .flex-1.min-h-3 { display: none; }
+  .bestand-zeile > .p-4 > .border-t { grid-column: 3; grid-row: 1 / span 2; border-top: 0; padding-top: 0; justify-content: flex-end; }
+}
+
+/* ── 4. Lesbarkeit ───────────────────────────────────────────────────────── */
+/* Platzhalter in Feldern: war in der hellen Ansicht #9ca3af auf Weiß (2,5:1) */
+[data-theme="light"] input::placeholder,
+[data-theme="light"] textarea::placeholder { color: var(--text-muted); opacity: 1; }
+/* Knöpfe mit der Hauptfarbe per style-Angabe: die helle Ansicht lenkte ihr „text-white“ auf dunkle Schrift um */
+[data-theme="light"] [style*="background: var(--knopf-primaer"],
+[data-theme="light"] [style*="background-color: var(--knopf-primaer"],
+[data-theme="light"] [style*="background: var(--accent-blue"],
+[data-theme="light"] [style*="background-color: var(--accent-blue"] { color: #fff !important; }
+/* Dunkles Design: text-zinc-500 (#71717a) kam auf den Flächen nur auf 3,7:1 */
+:root:not([data-theme="light"]) .text-zinc-500:not(.bleibt-dunkel *) { color: var(--text-muted); }
+/* Kalender: Tage des Nachbarmonats verblassten samt ihren Terminen (40 % Deckkraft) — nur die Tageszahl dämpfen */
+.cal-day.muted { opacity: 1; }
+.cal-day.muted .cal-daynum { color: var(--text-muted); opacity: 0.7; }
+/* Uhrzeit im Kalendereintrag war mit 70 % Deckkraft gedämpft */
+.cal-event .opacity-70 { opacity: 1; }
+/* Fließtext: sehr lange Zeilen auf Lesebreite begrenzen */
+main p:not([class*="max-w"]):not(.truncate) { max-width: 80ch; }

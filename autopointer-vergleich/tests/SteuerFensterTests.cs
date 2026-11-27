@@ -128,7 +128,7 @@ public class SteuerFensterTests
             l.StatusKlick();
             Assert.True(gestartet);
             Assert.Equal(new[] { "Letzten Vergleich nochmal öffnen", "Status und Hilfe …", "Einstellungen …",
-                                 "Systemcheck: läuft alles? …", "Verbindung trennen", "Leiste unten links",
+                                 "Systemcheck: läuft alles? …", "Dauerlauf starten …", "Verbindung trennen", "Leiste unten links",
                                  "Leiste unten rechts", "Programm beenden" }, l.MenueEintraege());
             // nicht verbunden: das Status-Feld verbindet, statt zu schalten
             bool verbinden = false;

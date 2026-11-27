@@ -47,6 +47,7 @@ from pydantic import BaseModel, Field
 
 import erkennung_lernen
 import fahrzeug_codes
+import schaden_pruefung
 import werkzeuge as wz
 import werkzeug_erkennung
 from deps import (FIRMA_GESPERRT_TEXT, current_chef, current_firma, current_super_admin, current_user, db,
@@ -560,6 +561,13 @@ class FahrzeugIn(BaseModel):
     #: Seit Programm 1.4.1: Anfang der Beschreibung (vom Bildschirm gelesen) — nur, falls Feld und Ueberschrift
     #: kein Modell hergeben (Befund 04.10.2026: "meinen Mercedes C 300 e"). Wird nicht gespeichert.
     beschreibung: str = Field("", max_length=2000)
+    #: Programm ab 1.5.22 (Wunsch Ahmad 27.11.2026): die GANZE Beschreibung (das Programm rollt dafuer die Detailansicht
+    #: in AutoPointer) — Grundlage fuer die Schadenspruefung im geplanten Dauerlauf. Wird nicht gespeichert und bisher
+    #: nicht ausgewertet; die Modell-Erkennung bleibt beim kurzen Anfang (``beschreibung``).
+    beschreibung_voll: str = Field("", max_length=8000)
+    #: Programm ab 1.5.22: ``beschreibung_voll`` ist Buchstabe fuer Buchstabe mit der echten Schrift abgeglichen
+    #: (keine Lesefehler). False = Texterkennung oder Luecken — die Schadenspruefung kann dann etwas uebersehen.
+    beschreibung_exakt: bool = False
     alternativen: Optional[AlternativenIn] = None
 
 
@@ -590,6 +598,13 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     from provider_fetch import TageslimitErreicht, programm_tageslimit
     f = body.fahrzeug.model_dump()
     alternativen = f.pop("alternativen", None) or {}
+    # 1.5.22 (Wunsch Ahmad 27.11.2026): Schadenspruefung aus der ganzen Beschreibung (aeltere Programme: aus dem
+    # sichtbaren Anfang). Der Text selbst wird nicht gespeichert (wie "beschreibung") — nur Stufe und Fundstellen.
+    voll, exakt = f.pop("beschreibung_voll", None), bool(f.pop("beschreibung_exakt", False))
+    schaden = schaden_pruefung.pruefen(voll or f.get("beschreibung"), f.get("zustand"), f.get("kategorie"),
+                                       f.get("titel"))
+    # nur ein exakt abgeglichener, ganzer Text traegt ein sicheres "kein Schaden" (sonst: Lesefehler moeglich)
+    schaden["text_exakt"] = bool(voll) and exakt
     gelernt_tab = await erkennung_lernen.tabelle(db, user.get("dealer_id"))      # je Firma (Haertung 09.10.)
 
     async def tageslimit():
@@ -686,6 +701,8 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     melden = wz.plausibel(f)
     if nummer_hinweis:
         melden.insert(0, nummer_hinweis)
+    if schaden_pruefung.meldung(schaden):       # nur "schwer": der Sucher sieht es sofort
+        melden.insert(0, schaden_pruefung.meldung(schaden))
     links, hinweise = wz.vergleichs_links(vehicle, regeln)      # Navi + Beschaedigte wie eingestellt (04.10.)
     # 08.10.2026: nur die Portale, die das Konto in AutoSchnell gewaehlt hat (eine Wahl fuer App/Programm/Helfer)
     links, hinweise = wz.nach_portalen(links, hinweise, wz.portale_von(user))
@@ -724,6 +741,7 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
         "verbindung_id": v["id"], "pc_name": v.get("pc_name") or "", "erstellt_am": now_iso(),
         "fahrzeug": f, "links": links, "hinweise": hinweise, "profil": profil, "probelauf": body.probelauf,
         "vorab": vorab["status"], "ablauf": wz.vergleich_ablauf(), "ueber_helfer": ueber_helfer,
+        "schaden": schaden,
     }
     if body.probelauf:
         await db[wz.SAMMLUNG_VERGLEICHE].insert_one(eintrag)
@@ -735,6 +753,8 @@ async def werkzeug_vergleich(werkzeug_id: str, body: VergleichIn,
     return {"links": links, "hinweise": hinweise, "profil": profil, "inserat_url": f["inserat_url"],
             "vorab": {"status": vorab["status"], "hinweis": vorab.get("hinweis", "")}, "fahrzeug": erkannt,
             "melden": melden,
+            # 27.11.2026: Stufe (schwer/unklar/leicht/kein/ohne_text) + Fundstellen — Grundlage fuer den Dauerlauf
+            "schaden": schaden,
             # Programm ab 1.5.7: das Inserat als Tab mit oeffnen, der Browser-Helfer liest es dort
             "inserat_im_browser": im_browser,
             # Programm ab 1.5.8: Vorgangsnummer; ueber_helfer -> nur /app/vorgang/<id> oeffnen (s. o.)

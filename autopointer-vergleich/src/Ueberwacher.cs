@@ -1047,7 +1047,8 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
         var ansicht = _ansicht;
         if (ansicht == null || _ocr == null) return null;
         var e = _einstellungen();
-        return await LiesAnsichtAsync(_ocr, ansicht, e.ErkennungsbilderSpeichern, lesebild: e.LesebilderSenden);
+        return await LiesAnsichtAsync(_ocr, ansicht, e.ErkennungsbilderSpeichern, lesebild: e.LesebilderSenden,
+                                      beschreibungGanz: e.BeschreibungGanzLesen);
     }
 
     /// <summary>Befund 03.10.2026: AutoPointer zeigte eine "Zugriffsverletzung" (aprun.exe). Es stuerzt
@@ -1061,13 +1062,21 @@ internal sealed class AutoPointerQuelle : IAnsichtQuelle
     /// das Senden abgeschaltet hat (dann auch kein Kodieren).</param>
     internal static async Task<Lesung?> LiesAnsichtAsync(TextErkennung ocr, DetailAnsicht ansicht, bool bilderSpeichern,
                                                          Action<System.Drawing.Bitmap, System.Drawing.Bitmap?>? bilder = null,
-                                                         bool lesebild = true)
+                                                         bool lesebild = true, bool beschreibungGanz = false)
     {
         // Beschreibung GLEICHZEITIG mit der Tabelle lesen (eigene Texterkennung) — sonst +0,15-0,2 s je Auto
         var beschreibung = BeschreibungLesenAsync(WeitereErkennung(0) ?? ocr, ansicht);
         var lesung = await LiesTabellenAsync(ocr, ansicht, bilderSpeichern, bilder, lesebild);
         string? text = await beschreibung;
         if (lesung != null) lesung.Fahrzeug.BeschreibungText = text;
+        // 1.5.22 (Wunsch Ahmad 27.11.2026): die GANZE Beschreibung — erst NACH den Tabellen, denn dafuer wird die
+        // Detailansicht gerollt (die Tabellen stehen dabei nicht mehr an ihrem Platz) und wieder zurueckgestellt
+        if (lesung != null && beschreibungGanz)
+        {
+            var ganz = await BeschreibungGanz.LiesAsync(WeitereErkennung(0) ?? ocr, ansicht);
+            lesung.Fahrzeug.BeschreibungVoll = ganz?.Text;
+            lesung.Fahrzeug.BeschreibungExakt = ganz?.Exakt ?? false;
+        }
         return lesung;
     }
 

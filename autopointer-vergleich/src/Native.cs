@@ -4,7 +4,8 @@ using System.Text;
 namespace AutoPointerVergleich;
 
 /// <summary>Win32-Aufrufe. Alles hier liest nur: Fenster finden, Klassen/Texte
-/// abfragen, Inhalte abfotografieren. AutoPointer wird nie veraendert.</summary>
+/// abfragen, Inhalte abfotografieren. AutoPointer wird nie veraendert — einzige Ausnahme seit 1.5.22: die
+/// Detailansicht wird fuer die ganze Beschreibung kurz gerollt und wieder zurueckgestellt (BeschreibungGanz).</summary>
 internal static class Native
 {
     public delegate bool EnumProc(IntPtr hwnd, IntPtr lParam);
@@ -34,6 +35,19 @@ internal static class Native
     [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr hwnd, IntPtr dc);
     [DllImport("gdi32.dll")] public static extern bool BitBlt(IntPtr dst, int x, int y, int w, int h, IntPtr src, int sx, int sy, int rop);
     public const int SRCCOPY = 0x00CC0020;
+
+    // 1.5.22 (Wunsch Ahmad 27.11.2026, BeschreibungGanz): die EINZIGE Stelle, an der AutoPointer etwas geschickt wird —
+    // das Mausrad fuer den Rollbereich der Detailansicht (PostMessage: wartet nicht auf AutoPointer, kann uns also nicht
+    // einfrieren), danach wieder zurueck an den Anfang.
+    [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr hwnd, ref POINT p);
+    public const uint WM_MOUSEWHEEL = 0x020A;
+
+    // Dauerlauf (Wunsch Ahmad 27.11.2026): das Programm klickt Listenzeilen in AutoPointer selbst an — mit der echten
+    // Maus (per Nachricht geschickte Klicks/Tasten nimmt die Liste nicht an, gemessen 27.11.2026).
+    [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint daten, UIntPtr extra);
+    public const uint MOUSEEVENTF_LEFTDOWN = 0x2, MOUSEEVENTF_LEFTUP = 0x4, MOUSEEVENTF_WHEEL = 0x0800;
 
     [DllImport("user32.dll")] public static extern IntPtr GetWindowDpiAwarenessContext(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr ctx);

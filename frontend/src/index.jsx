@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import "@/index.css";
+import "@/design-klar.css";     // 27.11.2026: altes Design, nur aufgeräumt (Knöpfe, Tabellen, Bestandsliste, Lesbarkeit)
 import App from "@/App";
 import { applyStoredTheme } from "@/components/ThemeToggle";
 import { FehlerGrenze } from "@/components/NachladeFehler";

@@ -114,6 +114,7 @@ internal sealed class TrayApp : ApplicationContext
         _leiste.JetztVergleichen += VergleichenStarten;
         _leiste.VertragOeffnen += async () => await VertragOeffnenAsync();
         _leiste.Diktieren += DiktatUmschalten;
+        _leiste.DauerlaufUmschalten += DauerlaufUmschalten;
         _leiste.DiktatZuruecknehmen += DiktatZuruecknehmen;
         _leiste.FensterOeffnen += FensterZeigen;
         _leiste.LetztenOeffnen += () => _ueberwacher?.LetztenErneutOeffnen();
@@ -264,7 +265,8 @@ internal sealed class TrayApp : ApplicationContext
         return new FensterZustand(AktuellerStatus(), _einstellungen.AutomatikAktiv,
             _dienst.Verbunden, _einstellungen.VerbundenAls ?? "", auto,
             !string.IsNullOrEmpty(_ueberwacher?.LetzteInseratUrl), _letzteMeldung, _probelauf, _lizenzSperre,
-            _hinweise.ToList(), _ueberwacher?.LetztesNurGemerkt == true, _vertragLaeuft);
+            _hinweise.ToList(), _ueberwacher?.LetztesNurGemerkt == true, _vertragLaeuft,
+            _dauerlaufAn ? DauerlaufStand(_dlNeu, _dlAussortiert, _dlGelesen, _dlTreffer, _dlHindernis) : null);
     }
 
     /// <summary>Status fuer Symbol, Fenster und Leiste: Lizenzsperre (A8) und fehlende Texterkennung (A9) gehen vor.</summary>
@@ -727,6 +729,7 @@ internal sealed class TrayApp : ApplicationContext
             _ocrFehlt = null;
         }
         Protokoll.Schreibe($"Texterkennung: {ocr.Sprache}");
+        _ocr = ocr;
         var quelle = new AutoPointerQuelle(ocr, () => _einstellungen);
         _quelle = quelle;
         _klicks = new Klicks(() => quelle.Hauptfenster);
@@ -745,6 +748,20 @@ internal sealed class TrayApp : ApplicationContext
         {
             while (!token.IsCancellationRequested)
             {
+                // Dauerlauf (27.11.2026): solange er laeuft, ruht die Klick-Automatik — sonst loesten die Klicks des
+                // Dauerlaufs fuer jedes Auto einen Vergleich samt Browser-Tabs aus
+                if (_dauerlaufAn)
+                {
+                    bool tat = false;
+                    try { tat = await DauerlaufSchrittAsync(); }
+                    catch (Exception ex)
+                    {
+                        Protokoll.SchreibeGedrosselt("dauerlauf:" + ex.GetType().Name, "Dauerlauf: " + ex, TimeSpan.FromSeconds(60));
+                    }
+                    try { await Task.Delay(tat ? 20 : 150, token); }
+                    catch (OperationCanceledException) { break; }
+                    continue;
+                }
                 try { await _ueberwacher.TickAsync(); }
                 catch (Exception ex)
                 {
@@ -757,6 +774,150 @@ internal sealed class TrayApp : ApplicationContext
                 catch (OperationCanceledException) { break; }
             }
         }, token);
+    }
+
+    // ---- Dauerlauf (Wunsch Ahmad 27.11.2026) ------------------------------------------------------------------
+    // Der PC laeuft unbeaufsichtigt: das Programm liest die Liste mit, sortiert vor, klickt passende Autos selbst an,
+    // liest sie ganz und legt sie in die Trefferliste in AutoSchnell. Immer von Hand gestartet (nie gespeichert),
+    // und er haelt an, sobald jemand die Maus bewegt.
+    private TextErkennung? _ocr;
+    private Dauerlauf? _dauerlauf;
+    private volatile bool _dauerlaufAn;
+    private int _dlNeu, _dlAussortiert, _dlGelesen, _dlTreffer;
+    private volatile string _dlHindernis = "";
+    private Native.POINT? _dlMaus;
+    private long _dlAnzeige, _dlStart;
+    internal const int DauerlaufSchonfristMs = 4000;
+
+    /// <summary>So weit darf der Zeiger zwischen zwei Schritten wandern, ohne dass es als „jemand benutzt die Maus“ gilt.</summary>
+    internal const int DauerlaufMausSpiel = 10;
+    internal const string DauerlaufMausText = "Dauerlauf angehalten – die Maus wurde bewegt. Zum Weitermachen: „Mehr ▾“ → „Dauerlauf starten“.";
+    internal const string DauerlaufServerAlt = "Dauerlauf angehalten – AutoSchnell kennt die Trefferliste noch nicht (Server-Update fehlt).";
+
+    /// <summary>Der kurze Stand fuer Leiste und Tooltip. (rein, fuer Tests)</summary>
+    internal static string DauerlaufStand(int neu, int aussortiert, int gelesen, int treffer, string hindernis) =>
+        $"{neu} neu · {aussortiert} aussortiert · {gelesen} gelesen · {treffer} in der Trefferliste"
+        + (string.IsNullOrEmpty(hindernis) ? "" : $" – wartet: {hindernis}");
+
+    /// <summary>Hat jemand die Maus bewegt? Verglichen wird, wo das Programm den Zeiger nach seinem letzten Schritt
+    /// gelassen hat, mit dem, wo er jetzt steht. (rein, fuer Tests)</summary>
+    internal static bool MausBewegt(Native.POINT? gelassen, Native.POINT jetzt) =>
+        gelassen is { } g && (Math.Abs(g.X - jetzt.X) > DauerlaufMausSpiel || Math.Abs(g.Y - jetzt.Y) > DauerlaufMausSpiel);
+
+    private void DauerlaufUmschalten()
+    {
+        if (_dauerlaufAn) { DauerlaufStoppen("Dauerlauf gestoppt.", false); return; }
+        if (!_dienst.Verbunden || _lizenzSperre != null)
+        {
+            Sprechblase("Der Dauerlauf geht nur, wenn das Programm mit AutoSchnell verbunden ist und das Abo läuft.", true, erzwingen: true);
+            return;
+        }
+        if (_ocr == null || _ueberwacher == null)
+        {
+            Sprechblase("Noch nicht bereit – bitte gleich noch einmal versuchen.", true, erzwingen: true);
+            return;
+        }
+        IntPtr haupt = _quelle?.Hauptfenster ?? IntPtr.Zero;
+        if (haupt == IntPtr.Zero || Native.IsIconic(haupt))
+        {
+            Sprechblase("Für den Dauerlauf muss AutoPointer offen und sichtbar sein (nicht minimiert).", true, erzwingen: true);
+            return;
+        }
+        using var form = new DauerlaufForm(DauerlaufRegeln.Aus(_einstellungen.DauerlaufRegeln));
+        if (form.ShowDialog() != DialogResult.OK) return;
+        var regeln = form.Regeln;
+        _einstellungen.DauerlaufRegeln = regeln.AlsText();
+        Speichern(_einstellungen);
+
+        _dlNeu = _dlAussortiert = _dlGelesen = _dlTreffer = 0;
+        _dlHindernis = "";
+        _dlMaus = null;
+        _dlStart = Environment.TickCount64;
+        _dauerlauf = new Dauerlauf(_ocr, () => regeln, DauerlaufEreignis);
+        try { if (!AutoPointerFenster.ImVordergrund(haupt)) BrowserOeffner.ZurueckZu(haupt); }
+        catch (Exception ex) { Protokoll.Schreibe("Dauerlauf: AutoPointer nicht nach vorne geholt: " + ex.Message); }
+        _dauerlaufAn = true;
+        Protokoll.Schreibe("Dauerlauf AN (" + regeln.AlsText() + ").");
+        Sprechblase("Dauerlauf läuft – das Programm führt jetzt die Maus. Maus bewegen hält ihn an.", false, erzwingen: true, merken: false);
+        StatusAnzeigen(AktuellerStatus());
+        _fenster.Aktualisieren();
+        _leiste.Aktualisieren();
+    }
+
+    /// <summary>Haelt den Dauerlauf an (aus jedem Faden aufrufbar).</summary>
+    private void DauerlaufStoppen(string meldung, bool fehler)
+    {
+        if (!_dauerlaufAn) return;
+        _dauerlaufAn = false;
+        BeschreibungGanz.EchtesRad = false;          // der normale Betrieb nimmt dem Sucher nie die Maus
+        Protokoll.Schreibe($"Dauerlauf AUS: {meldung} ({DauerlaufStand(_dlNeu, _dlAussortiert, _dlGelesen, _dlTreffer, "")})");
+        _ui.Post(_ =>
+        {
+            // das gerade angezeigte Auto gilt als gesehen — sonst oeffnete die Automatik dafuer sofort einen Vergleich
+            _ueberwacher?.Neustart();
+            Sprechblase(meldung, fehler, erzwingen: true);
+            StatusAnzeigen(AktuellerStatus());
+            _fenster.Aktualisieren();
+            _leiste.Aktualisieren();
+        }, null);
+    }
+
+    private async Task<bool> DauerlaufSchrittAsync()
+    {
+        var lauf = _dauerlauf;
+        if (lauf == null) return false;
+        if (!_dienst.Verbunden || _lizenzSperre != null)
+        {
+            DauerlaufStoppen("Dauerlauf angehalten – das Programm ist nicht mehr verbunden.", true);
+            return false;
+        }
+        // die ersten Sekunden nach dem Start laesst der Sucher die Maus erst los
+        if (Environment.TickCount64 - _dlStart > DauerlaufSchonfristMs && Native.GetCursorPos(out var jetzt) && MausBewegt(_dlMaus, jetzt))
+        {
+            DauerlaufStoppen(DauerlaufMausText, false);
+            return false;
+        }
+        bool tat = await lauf.SchrittAsync();
+        _dlMaus = Native.GetCursorPos(out var danach) ? danach : null;
+        _dlNeu = lauf.Neu;
+        _dlAussortiert = lauf.Aussortiert;
+        _dlGelesen = lauf.Gelesen;
+        bool geaendert = _dlHindernis != lauf.Hindernis;
+        _dlHindernis = lauf.Hindernis;
+        // Leiste hoechstens alle 2 s auffrischen (und sofort, wenn sich aendert, worauf gewartet wird)
+        if (geaendert || Environment.TickCount64 - _dlAnzeige > 2000)
+        {
+            _dlAnzeige = Environment.TickCount64;
+            _ui.Post(_ => _leiste.Aktualisieren(), null);
+        }
+        return tat;
+    }
+
+    private void DauerlaufEreignis(Dauerlauf.Ereignis e)
+    {
+        if (e.Art != "gelesen" || e.Fahrzeug is not { } f) return;
+        if (_probelauf || !AutoSchnellDienst.TrefferMeldbar(f)) return;
+        var zeile = e.Zeile;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await _dienst.TrefferMeldenAsync(f, zeile);
+                Interlocked.Increment(ref _dlTreffer);
+            }
+            catch (DienstFehler ex) when (ex.Status == 404)
+            {
+                DauerlaufStoppen(DauerlaufServerAlt, true);
+            }
+            catch (DienstFehler ex) when (ex.Status is 401 or 402 or 403)
+            {
+                DauerlaufStoppen("Dauerlauf angehalten – " + ex.Message, true);
+            }
+            catch (Exception ex)
+            {
+                Protokoll.SchreibeGedrosselt("dauerlauf-senden", "Dauerlauf: Treffer nicht gesendet: " + ex.Message, TimeSpan.FromSeconds(60));
+            }
+        });
     }
 
     private void AutomatikUmschalten() => AutomatikSetzen(!_einstellungen.AutomatikAktiv);

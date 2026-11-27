@@ -17,8 +17,9 @@ namespace AutoPointerVergleich;
 /// </remarks>
 /// <param name="Beschreibung">Textfeld unter "Beschreibung" (THTMLStaticText) oder Zero — seit 1.5.1 gelesen,
 /// damit der Server das Modell notfalls dort findet (Befund 04.10.2026: "meinen Mercedes C 300 e").</param>
+/// <param name="Ausstattung">Gitter unter „Ausstattung“ oder Zero (Dauerlauf 27.11.2026: fuer den vorausgefuellten Vertrag).</param>
 internal sealed record DetailAnsicht(IntPtr Hauptfenster, IntPtr TechnikTabelle, IntPtr KopfTabelle,
-                                     IntPtr Beschreibung = default);
+                                     IntPtr Beschreibung = default, IntPtr Ausstattung = default);
 
 internal static class AutoPointerFenster
 {
@@ -115,7 +116,17 @@ internal static class AutoPointerFenster
                                                           && K(h) != "TJvNavPanelHeader" && Brauchbar(h));
                 if (beschreibung != IntPtr.Zero) break;
             }
-            return new DetailAnsicht(hauptfenster, technik, kopf, beschreibung);
+            IntPtr ausstattung = IntPtr.Zero;
+            foreach (var ak in kinder.Where(h => K(h) == "TJvNavPanelHeader" && Native.IsWindowVisible(h)
+                                                 && Native.Text(h).Trim() == "Ausstattung"))
+            {
+                var ap = eltern[ak];
+                if (!IstNachfahre(ap, bereich, eltern)) continue;
+                var ag = DirekteKinder(ap, "TcxGrid").FirstOrDefault();
+                ausstattung = ag == IntPtr.Zero ? IntPtr.Zero : DirekteKinder(ag, "TcxGridSite").FirstOrDefault();
+                if (ausstattung != IntPtr.Zero) break;
+            }
+            return new DetailAnsicht(hauptfenster, technik, kopf, beschreibung, ausstattung);
         }
         return null;
     }

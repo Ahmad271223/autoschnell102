@@ -1320,6 +1320,13 @@ WERKZEUG_INDIZES = (
     # Pruefung 09.10.2026 (Befund Mokka-e): Seiten, die die Erweiterung nicht lesen konnte — 14 Tage (TTL), Liste neueste zuerst
     ("werkzeug_leseseiten", [("ablauf", 1)], {"name": "werkzeug_leseseiten_ablauf", "expireAfterSeconds": 0}),
     ("werkzeug_leseseiten", [("erstellt_am", -1)], {"name": "werkzeug_leseseiten_zeit"}),
+    # Dauerlauf (27.11.2026): Trefferliste — je Konto EIN Eintrag je Inserat (das Programm kann ein Auto zweimal lesen),
+    # Liste neueste zuerst je Konto bzw. Firma, nach 48 h loescht die Datenbank selbst (dauerlauf_treffer.ablauf)
+    ("dauerlauf_treffer", [("id", 1)], {"name": "dauerlauf_treffer_id", "unique": True}),
+    ("dauerlauf_treffer", [("user_id", 1), ("kennung", 1)], {"name": "dauerlauf_treffer_kennung", "unique": True}),
+    ("dauerlauf_treffer", [("user_id", 1), ("erstellt_am", -1)], {"name": "dauerlauf_treffer_konto"}),
+    ("dauerlauf_treffer", [("dealer_id", 1), ("erstellt_am", -1)], {"name": "dauerlauf_treffer_firma"}),
+    ("dauerlauf_treffer", [("ablauf", 1)], {"name": "dauerlauf_treffer_ablauf", "expireAfterSeconds": 0}),
 )
 
 

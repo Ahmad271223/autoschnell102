@@ -19,6 +19,8 @@ internal sealed class EinstellungenForm : Form
     private readonly CheckBox _bilder = Haken("Erkennungsbilder speichern (nur zur Fehlersuche)");
     /// <summary>Wunsch Ahmad 09.10.2026 (1.5.13): Standard an — der Haken ist nur zum Abschalten da.</summary>
     private readonly CheckBox _lesebilder = Haken("Bei nicht erkannten Autos ein Bild der Anzeige an AutoSchnell senden");
+    /// <summary>1.5.22 (Wunsch Ahmad 27.11.2026): Standard an.</summary>
+    private readonly CheckBox _beschreibung = Haken("Ganze Beschreibung lesen (rollt die Anzeige in AutoPointer kurz nach unten und zurück)");
     private readonly ComboBox _ecke = Auswahl("unten links", "unten rechts");
 
     public Einstellungen Ergebnis => _e;
@@ -54,7 +56,7 @@ internal sealed class EinstellungenForm : Form
             Gruppe("Ablauf",
                    Reihe(Beschriftung("Wartezeit nach dem Anklicken:"), _wartezeit, Beschriftung("ms")),
                    Reihe(Beschriftung("Mindestabstand zwischen Vergleichen:"), _abstand, Beschriftung("ms")),
-                   _hinweise, _hotkey, _autostart, _bilder, _lesebilder)), 0, 0);
+                   _hinweise, _hotkey, _autostart, _bilder, _lesebilder, _beschreibung)), 0, 0);
 
         var speichern = new Button { Text = "Speichern", AutoSize = true, DialogResult = DialogResult.OK };
         var abbrechen = new Button { Text = "Abbrechen", AutoSize = true, DialogResult = DialogResult.Cancel };
@@ -82,6 +84,7 @@ internal sealed class EinstellungenForm : Form
         _autostart.Checked = _e.MitWindowsStarten;
         _bilder.Checked = _e.ErkennungsbilderSpeichern;
         _lesebilder.Checked = _e.LesebilderSenden;
+        _beschreibung.Checked = _e.BeschreibungGanzLesen;
         _ecke.SelectedIndex = _e.LeisteEcke == Leiste.Rechts ? 1 : 0;
     }
 
@@ -97,6 +100,7 @@ internal sealed class EinstellungenForm : Form
         _e.MitWindowsStarten = _autostart.Checked;
         _e.ErkennungsbilderSpeichern = _bilder.Checked;
         _e.LesebilderSenden = _lesebilder.Checked;
+        _e.BeschreibungGanzLesen = _beschreibung.Checked;
         _e.LeisteEcke = _ecke.SelectedIndex == 1 ? Leiste.Rechts : Leiste.Links;
         _e.Bereinigt();
     }
@@ -119,6 +123,7 @@ internal sealed class EinstellungenForm : Form
         ziel.MitWindowsStarten = _e.MitWindowsStarten;
         ziel.ErkennungsbilderSpeichern = _e.ErkennungsbilderSpeichern;
         ziel.LesebilderSenden = _e.LesebilderSenden;
+        ziel.BeschreibungGanzLesen = _e.BeschreibungGanzLesen;
         ziel.LeisteEcke = _e.LeisteEcke;
     }
 

@@ -33,6 +33,12 @@ internal sealed class Einstellungen
     /// schicken (einmal je Auto, hoechstens 30 am Tag, nie im Probelauf) — damit man dort sieht, was auf dem Bildschirm
     /// stand. Standard AN (Wunsch Ahmad); eine alte einstellungen.json ohne das Feld bekommt denselben Standard.</summary>
     public bool LesebilderSenden { get; set; } = true;
+    /// <summary>Wunsch Ahmad 27.11.2026 (1.5.22): die ganze Beschreibung lesen — dafuer rollt das Programm die
+    /// Detailansicht in AutoPointer kurz nach unten und wieder zurueck. Standard AN; der Haken ist zum Abschalten da.</summary>
+    public bool BeschreibungGanzLesen { get; set; } = true;
+    /// <summary>Dauerlauf (27.11.2026): die zuletzt gewaehlten Regeln (Text wie <see cref="DauerlaufRegeln.AlsText"/>). Ob
+    /// der Dauerlauf laeuft, wird bewusst NICHT gespeichert — er wird immer von Hand gestartet.</summary>
+    public string DauerlaufRegeln { get; set; } = "privat;unfall";
 
     // 1.5.8: die kleine Leiste ist immer da (EINE Bedienung statt Fenster + Leiste + Menue am Symbol);
     // ein altes "LeisteAnzeigen": false in einstellungen.json wird ignoriert.

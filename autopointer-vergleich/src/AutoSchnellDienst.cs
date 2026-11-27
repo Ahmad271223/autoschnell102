@@ -40,6 +40,8 @@ internal sealed record VerbindenAntwort(string Schluessel, string Konto, string 
 internal sealed record StatusAntwort(string Konto, string Name, string Firma, string PcName, string? AboBis,
                                      string? AktuelleVersion = null, string? ProgrammName = null);
 internal sealed record Vergleich(string Portal, string Url);
+/// <summary>Antwort auf einen gemeldeten Treffer: „gut“, „leicht“, „pruefen“ oder „schwer“.</summary>
+internal sealed record TrefferAntwort(string Urteil, bool Neu, string? InseratUrl);
 
 /// <param name="ErkanntMarke">Seit 1.4.0: Marke/Modell erkennt der SERVER (Katalognamen zur Anzeige);
 /// null bei einem Server ohne Erkennung.</param>
@@ -399,6 +401,41 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
         catch (DienstFehler) { /* lokal wird trotzdem getrennt */ }
     }
 
+    /// <summary>Dauerlauf (27.11.2026): reicht, was gelesen wurde, fuer die Trefferliste? (Pflichtfelder des Servers:
+    /// Marke/Modell-Text, Erstzulassungsjahr, Kilometer.) (rein, fuer Tests)</summary>
+    internal static bool TrefferMeldbar(Fahrzeug f) =>
+        !string.IsNullOrWhiteSpace(f.MarkeModellText) && f.EzJahr != null && f.Kilometer != null;
+
+    /// <summary>Dauerlauf (27.11.2026): ein selbst gelesenes Auto in die Trefferliste des Kontos legen. Der Server prueft
+    /// Schaden und Preislage — kein Vergleich, kein Abruf, kein Tageslimit.</summary>
+    public async Task<TrefferAntwort> TrefferMeldenAsync(Fahrzeug f, ListenZeile zeile)
+    {
+        var e = await SendeAsync(HttpMethod.Post, "dauerlauf/treffer", new
+        {
+            fahrzeug = Nutzlast(f), liste = ListenNutzlast(zeile),
+            // alle Zeilen der Tabelle „Technische Daten“ und die Ausstattung, exakt gelesen — fuer den vorausgefuellten Vertrag
+            merkmale = f.Merkmale.Take(60).Select(m => new[] { m.Key, m.Value }).ToList(),
+            ausstattung = f.Ausstattung.Take(120).ToList(),
+        }, VergleichFrist);
+        string url = Text(e, "inserat_url");
+        return new TrefferAntwort(Text(e, "urteil"), e.TryGetProperty("neu", out var n) && n.ValueKind == JsonValueKind.True,
+                                  url.Length > 0 ? url : null);
+    }
+
+    /// <summary>Die Listenzeile fuer die Trefferliste (Feldnamen wie routes/dauerlauf.ListeIn): so, wie sie in AutoPointer
+    /// stand — samt Verkaeufer, Telefon und Ort fuer den Telefon-Knopf. (rein, fuer Tests)</summary>
+    internal static Dictionary<string, object?> ListenNutzlast(ListenZeile z)
+    {
+        static string K(string? s, int n) => (s ?? "").Trim() is var t && t.Length > n ? t[..n] : (s ?? "").Trim();
+        return new Dictionary<string, object?>
+        {
+            ["zeit"] = K(z.Zeit, 30), ["privat"] = z.Privat, ["portal"] = K(z.Portal, 40),
+            ["art"] = K(z.Art, 200), ["daten"] = K(z.Daten, 200), ["ausstattung"] = K(z.Ausstattung, 200),
+            ["anbieter"] = K(z.Anbieter, 80), ["telefone"] = z.Nummern.Take(3).Select(n => K(n, 40)).ToList(),
+            ["entfernung_km"] = z.EntfernungKm, ["ort"] = K(z.Ort, 80),
+        };
+    }
+
     public async Task<VergleichAntwort> VergleichAsync(Fahrzeug f, bool probelauf)
     {
         var e = await SendeAsync(HttpMethod.Post, "vergleich", new { fahrzeug = Nutzlast(f), probelauf }, VergleichFrist);
@@ -567,6 +604,14 @@ internal sealed class AutoSchnellDienst : IVergleichsDienst
         // (oder die Stellenzahl passt nicht) — der Server (ab 13.10.) meldet dann "unsicher gelesen" und baut keinen sicheren
         // Link; aeltere Server ignorieren das Feld. Nur bei true dabei, damit die Nutzlast sonst unveraendert bleibt.
         if (f.InseratIdUnsicher) nutzlast["inserat_id_unsicher"] = true;
+        // 1.5.22 (Wunsch Ahmad 27.11.2026): die ganze Beschreibung in einem EIGENEN Feld — "beschreibung" bleibt der
+        // kurze Anfang (dort erlaubt der Server hoechstens 2000 Zeichen). Aeltere Server ignorieren das Feld.
+        if (K(f.BeschreibungVoll, BeschreibungGanz.MaxZeichen) is { Length: > 0 } voll)
+        {
+            nutzlast["beschreibung_voll"] = voll;
+            // exakt = mit der echten Schrift abgeglichen (keine Lesefehler); nur bei true dabei
+            if (f.BeschreibungExakt) nutzlast["beschreibung_exakt"] = true;
+        }
         return nutzlast;
     }
 

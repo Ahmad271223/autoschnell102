@@ -106,6 +106,8 @@ OEFFENTLICH = {
     # Status/Vergleich/Abmelden DIESES Werkzeugs erlaubt; Abo, Sperre und Freigabe prueft routes/werkzeuge._programm.
     "/api/werkzeuge/{werkzeug_id}/verbinden", "/api/werkzeuge/{werkzeug_id}/status",
     "/api/werkzeuge/{werkzeug_id}/vergleich", "/api/werkzeuge/{werkzeug_id}/abmelden",
+    # Dauerlauf (27.11.2026): Programm-Schluessel im Kopf (wie /vergleich), geprueft in routes.dauerlauf
+    "/api/werkzeuge/{werkzeug_id}/dauerlauf/treffer",
     "/api/werkzeuge/{werkzeug_id}/app-start/{start}",   # 03.10.2026 Nr. 12: Programm-Schluessel statt Anmeldung
     # Pruefung 09.10.2026 (Vertragsweg): die App meldet den Start auch OHNE Anmeldung (Anmeldeseite) — Kennung
     # 128 Bit Zufall, je IP gedrosselt, ohne Anmeldung wird keine Firma gespeichert (routes/werkzeuge.AppStartIn)

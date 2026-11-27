@@ -1305,6 +1305,8 @@ _COMPANY_COLLECTIONS = (
     # Werkzeuge (03.10.2026): Codes, verbundene PCs und Vergleichsprotokoll des
     # AutoPointer-Vergleichs tragen dealer_id (backend/werkzeuge.py).
     "werkzeug_codes", "werkzeug_verbindungen", "werkzeug_vergleiche",
+    # Dauerlauf (27.11.2026): Trefferliste (Inserat-Daten samt Beschreibung, 48 h TTL) traegt dealer_id.
+    "dauerlauf_treffer",
     # Pruefbericht 03.10.2026 (Nr. 12): App-Start-Meldungen (10 Minuten TTL) tragen dealer_id.
     # werkzeug_getrennt hat keine dealer_id (Werkzeug + Schluessel-Streuwert, 30 Tage TTL).
     "werkzeug_app_starts",
@@ -1481,6 +1483,8 @@ async def admin_delete_user(user_id: str, firma_loeschen: bool = False,
         await db.werkzeug_codes.delete_many({"user_id": user_id})
         # Browser-Helfer (04.10.2026): vom Browser des Kontos gelesene Inserate (Verkaeuferdaten) weg
         await db.werkzeug_inserate.delete_many({"user_id": user_id})
+        # Dauerlauf (27.11.2026): die Trefferliste des Kontos (Inserat-Daten samt Beschreibung) weg
+        await db.dauerlauf_treffer.delete_many({"user_id": user_id})
         # 09.10.2026: Lesebilder des Kontos samt Dateien weg; nicht lesbare Seiten (Befund Mokka-e) ebenso
         from routes.werkzeuge import lesebilder_loeschen
         await lesebilder_loeschen({"user_id": user_id})

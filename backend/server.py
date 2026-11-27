@@ -73,6 +73,7 @@ from routes import marketplace as marketplace_routes
 from routes import beweise as beweise_routes
 from routes import chat as chat_routes
 from routes import werkzeuge as werkzeuge_routes
+from routes import dauerlauf as dauerlauf_routes
 from routes import abweichungen as abweichungen_routes  # Wunsch Ahmad 24.11.2026
 from routes import neuigkeiten as neuigkeiten_routes  # Wunsch Ahmad 24.11.2026
 from routes import ueberweisung as ueberweisung_routes  # Wunsch Ahmad 24.11.2026
@@ -2233,6 +2234,7 @@ from deps import marktplatz_freigeschaltet  # noqa: E402
 # Routen der Reihe nach, der Vergleich des Programms lief vorher an ~600 Routen vorbei (eigene Pfade /werkzeuge/…
 # und /admin/werkzeug-…, keine Ueberschneidung mit anderen Routern)
 api.include_router(werkzeuge_routes.router)
+api.include_router(dauerlauf_routes.router)       # 27.11.2026: Trefferliste des Dauerlaufs
 api.include_router(auth_routes.router)
 api.include_router(admin_routes.router)
 api.include_router(admin_auto_daten_routes.router)

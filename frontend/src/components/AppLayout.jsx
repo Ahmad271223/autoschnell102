@@ -7,7 +7,7 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   Car, FileText, Calendar, Users, Settings as SettingsIcon, ShieldCheck, Truck,
   Layers, LogOut, Activity, Search, Warehouse, Inbox, ClipboardCheck, Radar, Bell, MonitorDown,
-  Menu, X, PanelLeftClose, PanelLeftOpen, Sparkles,
+  Menu, X, PanelLeftClose, PanelLeftOpen, Sparkles, Zap,
 } from "lucide-react";
 import { useProgramme } from "@/lib/programme";
 import { useAuth } from "@/context/AuthContext";
@@ -114,6 +114,12 @@ export default function AppLayout({ children }) {
       to: "/app/programme", label: programme.length === 1 ? programme[0].name : "Programme", icon: MonitorDown,
       gruppe: "allgemein",
     });
+    // Dauerlauf (27.11.2026): die Trefferliste gibt es nur mit dem Windows-Programm
+    if (programme.some((p) => p.art === "windows")) {
+      items.splice(vorEinstellungen < 0 ? items.length - 1 : vorEinstellungen, 0, {
+        to: "/app/treffer", label: "Treffer", icon: Zap, gruppe: "allgemein",
+      });
+    }
   }
   const gruppen = gruppiert(items);
 
