@@ -132,7 +132,7 @@ export default function ZugangsdatenKarte({ titel = "Konto angelegt", name, kont
       {onClose && (
         <button type="button" onClick={fertig} data-testid="zugangsdaten-fertig"
                 className="mt-4 w-full h-10 rounded-xl text-[14px] font-medium text-white"
-                style={{ background: "var(--accent-red)" }}>
+                style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
           Fertig
         </button>
       )}

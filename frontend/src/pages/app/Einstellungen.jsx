@@ -404,14 +404,14 @@ export default function Einstellungen() {
 
       <div className="grid grid-cols-1 lg:grid-cols-[220px_minmax(0,1fr)] gap-5">
         {/* Sidebar nav */}
-        <nav className="apple-surface p-2 self-start lg:sticky lg:top-6">
+        <nav className="apple-surface p-2 self-start lg:sticky lg:top-6 flex lg:block gap-1 overflow-x-auto scrollbar-hide max-w-full" aria-label="Bereiche der Einstellungen">
           {sections.map((s) => {
             const Icon = s.icon;
             const isActive = active === s.id;
             return (
               <button key={s.id} onClick={() => setActive(s.id)}
                       data-testid={`settings-tab-${s.id}`}
-                      className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-all mb-1 ${
+                      className={`shrink-0 lg:w-full flex items-center gap-2 lg:gap-3 px-3 py-2.5 rounded-lg text-sm whitespace-nowrap transition-all lg:mb-1 ${
                         isActive
                           ? "bg-white/[0.08] text-white shadow-[inset_0_0_0_1px_var(--wa-06)]"
                           : "text-zinc-400 hover:text-white hover:bg-white/[0.04]"
@@ -453,7 +453,7 @@ export default function Einstellungen() {
                 <div>
                   <div className="flex flex-wrap items-center gap-2">
                   <label className="inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold text-white cursor-pointer"
-                         style={{ background: "var(--accent-red)" }} data-testid="set-logo">
+                         style={{ background: "var(--knopf-primaer, var(--accent-blue))" }} data-testid="set-logo">
                     {form.profile.logo_url ? "Logo ersetzen" : "Logo hochladen"}
                     {/* U-133/M50: nach einem Fehlschlag laesst sich dieselbe Datei
                         wieder waehlen (sonst feuert onChange nicht erneut). */}
@@ -535,7 +535,7 @@ export default function Einstellungen() {
                         editProfile === p.v ? "shadow-sm" : "opacity-60 hover:opacity-100"
                       }`}
                       style={editProfile === p.v
-                        ? { background: "var(--accent-red)", color: "white" }
+                        ? { background: "var(--knopf-primaer, var(--accent-blue))", color: "white" }
                         : { color: "var(--text-secondary)" }}
                     >
                       {p.l}
@@ -1289,7 +1289,7 @@ function MarketplacePanel() {
                   className="w-full rounded-xl border bg-transparent px-3 py-2 text-sm outline-none focus:border-white/40"
                   style={{ borderColor: "var(--divider)" }} />
         <button onClick={saveDesc} className="mt-2 inline-flex items-center gap-1.5 rounded-xl px-4 py-2 text-sm font-semibold text-white"
-                style={{ background: "var(--accent-red)" }}>
+                style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
           <Save size={14} /> Beschreibung speichern
         </button>
       </div>
@@ -1371,7 +1371,7 @@ function InvitePanel() {
         </div>
         <button onClick={create} data-testid="invite-create"
                 className="h-9 px-4 rounded-lg text-sm font-semibold text-white"
-                style={{ background: "var(--accent-red)" }}>
+                style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
           + Einladungslink erstellen
         </button>
       </div>

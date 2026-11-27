@@ -984,7 +984,7 @@ export default function Protokoll() {
             <div className="mt-2 flex flex-wrap gap-2">
               <button onClick={() => oeffnePdf(`/driver/appointments/${id}/protocol.pdf`)}
                       className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white"
-                      style={{ background: "var(--accent-red)" }}>
+                      style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
                 <FileText size={13} /> Ausgefülltes PDF öffnen
               </button>
               {terminGeschlossen ? (
@@ -1453,7 +1453,7 @@ export default function Protokoll() {
             <button onClick={() => oeffnePdf(`/driver/appointments/${id}/protocol.pdf`)}
                     data-testid="protokoll-pdf-unten"
                     className="flex-1 rounded-xl py-3 text-sm font-semibold text-white inline-flex items-center justify-center gap-2"
-                    style={{ background: "var(--accent-red)" }}>
+                    style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
               <FileText size={15} /> PDF öffnen
             </button>
             {!terminGeschlossen && (
@@ -1489,7 +1489,7 @@ export default function Protokoll() {
           <button onClick={finalize} disabled={busy}
                   data-testid="protokoll-abschliessen"
                   className="flex-1 rounded-xl py-3 text-sm font-semibold text-white inline-flex items-center justify-center gap-2 disabled:opacity-50"
-                  style={{ background: "var(--accent-red)" }}>
+                  style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
             <CheckCircle2 size={16} /> Unterschrieben — abschließen
           </button>
         ) : (
@@ -1502,7 +1502,7 @@ export default function Protokoll() {
             <button onClick={zurFreigabe} disabled={busy}
                     data-testid="protokoll-zur-freigabe"
                     className="flex-1 rounded-xl py-3 text-sm font-semibold text-white inline-flex items-center justify-center gap-2 disabled:opacity-50"
-                    style={{ background: "var(--accent-red)" }}>
+                    style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
               <CheckCircle2 size={16} /> Zur Freigabe senden
             </button>
           </>

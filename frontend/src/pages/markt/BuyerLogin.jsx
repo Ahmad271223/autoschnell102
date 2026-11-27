@@ -136,7 +136,7 @@ export default function BuyerLogin() {
           </div>
           <button type="submit" disabled={busy} data-testid="buyer-login-submit"
                   className="w-full inline-flex items-center justify-center gap-2 rounded-xl py-3 font-semibold text-white disabled:opacity-50"
-                  style={{ background: "var(--accent-red)" }}>
+                  style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
             {busy ? "Anmelden…" : <>Anmelden <ArrowRight size={16} /></>}
           </button>
         </form>

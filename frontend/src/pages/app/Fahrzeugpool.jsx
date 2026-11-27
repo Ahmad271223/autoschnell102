@@ -73,7 +73,7 @@ export default function Fahrzeugpool() {
           seitlich wischbar, mit Hinweis (nur unter 768 px sichtbar). */}
       <p className="tabelle-hinweis mt-6">Tabelle seitlich wischen, um alle Spalten zu sehen.</p>
       <div className="mt-2 md:mt-6 tactical-card overflow-x-auto tabelle-wischen">
-        <table className="w-full text-sm min-w-[720px]">
+        <table className="w-full text-sm min-w-[860px]">
           <thead>
             <tr className="text-left overline" style={{ background: "var(--wa-02)" }}>
               <th className="px-4 py-3">Mobile-ID</th>
@@ -102,7 +102,7 @@ export default function Fahrzeugpool() {
               const url = inseratUrl(v);
               return (
               <tr key={v.id} className="border-t" style={{ borderColor: "var(--border-default)" }} data-testid={`pool-${v.id}`}>
-                <td className="px-4 py-3 font-mono text-xs text-zinc-400">{v.mobile_ad_id}</td>
+                <td className="px-4 py-3 font-mono text-xs text-zinc-400 whitespace-nowrap">{v.mobile_ad_id}</td>
                 <td className="px-4 py-3">
                   {/* Weg zur Fahrzeugakte — fuer Sucher ist dies die einzige
                       Fahrzeugliste (der Bestand ist Chefsache). */}
@@ -112,9 +112,9 @@ export default function Fahrzeugpool() {
                   </Link>
                   <div className="text-xs text-zinc-500">{v.data?.model_description}</div>
                 </td>
-                <td className="px-4 py-3">{v.data?.first_registration || "—"}</td>
-                <td className="px-4 py-3">{kmText(v.data?.mileage)}</td>
-                <td className="px-4 py-3">{v.data?.power_ps ? `${v.data.power_ps} PS` : "—"}</td>
+                <td className="px-4 py-3 whitespace-nowrap">{v.data?.first_registration || "—"}</td>
+                <td className="px-4 py-3 whitespace-nowrap">{kmText(v.data?.mileage)}</td>
+                <td className="px-4 py-3 whitespace-nowrap">{v.data?.power_ps ? `${v.data.power_ps} PS` : "—"}</td>
                 <td className="px-4 py-3">
                   {/* Pruefbericht 20.09.2026 (U-40/H16): der aktuelle Lebenszyklus
                       statt des alten Freitext-Status — sonst stand ein laengst
@@ -150,7 +150,9 @@ export default function Fahrzeugpool() {
                     <span className="text-xs text-zinc-600">—</span>
                   )}
                 </td>
-                <td className="px-4 py-3 text-zinc-500 font-mono text-xs">{v.updated_at && new Date(v.updated_at).toLocaleString("de-DE")}</td>
+                <td className="px-4 py-3 text-zinc-500 text-xs whitespace-nowrap" title={v.updated_at ? new Date(v.updated_at).toLocaleString("de-DE") : undefined}>
+                  {v.updated_at && new Date(v.updated_at).toLocaleString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}
+                </td>
               </tr>
             );})}
           </tbody>

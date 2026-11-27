@@ -588,15 +588,12 @@ export default function Termine() {
       </div>
 
       {/* Filter chips (always visible) */}
-      <div className="flex flex-wrap gap-1.5 mb-6">
+      <div className="filter-zeile mb-6" role="group" aria-label="Nach Status filtern">
         {["", ...STATUSES].map((s) => (
           <button key={s || "all"} onClick={() => setFilter(s)}
                   data-testid={`filter-status-${s || "all"}`}
-                  className={`px-3 py-1.5 tipp-40 rounded-full text-xs font-medium transition-colors border ${
-                    filter === s
-                      ? "bg-white/10 text-white border-white/15"
-                      : "bg-white/[0.03] text-zinc-400 border-white/[0.06] hover:bg-white/[0.06] hover:text-white"
-                  }`}>
+                  aria-pressed={filter === s}
+                  className={`filter-chip ${filter === s ? "aktiv" : ""}`}>
             {s ? (
               <span className="inline-flex items-center gap-1.5">
                 <span className="cal-dot" style={{ background: STATUS_META[s]?.dot }} />

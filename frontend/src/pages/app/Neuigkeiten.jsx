@@ -108,7 +108,7 @@ export default function Neuigkeiten() {
   const ungelesen = (liste || []).filter((x) => !x.gelesen).length;
 
   return (
-    <div className="max-w-3xl mx-auto">
+    <div className="p-3 sm:p-6 lg:p-10 max-w-4xl mx-auto">
       <div className="flex flex-wrap items-start justify-between gap-3 mb-5">
         <div className="min-w-0">
           <h1 className="font-display font-black text-2xl tracking-tight">Was ist neu</h1>

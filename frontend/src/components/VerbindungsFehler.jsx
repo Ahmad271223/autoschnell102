@@ -108,7 +108,7 @@ export default function VerbindungsFehler({ grund = null, onRetry = null }) {
         <button type="button" onClick={() => { erneut(); }}
                 data-testid="verbindungsfehler-erneut"
                 className="kinetic-button mt-6 inline-flex items-center gap-2 px-5 py-2.5 rounded-sm text-sm"
-                style={{ background: "var(--accent-red)", color: "var(--text-primary)" }}>
+                style={{ background: "var(--knopf-primaer, var(--accent-blue))", color: "var(--text-primary)" }}>
           <RotateCw size={14} aria-hidden="true" /> Erneut versuchen
         </button>
         {automatisch && (

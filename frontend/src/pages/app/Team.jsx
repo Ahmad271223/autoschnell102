@@ -148,7 +148,7 @@ export default function Team() {
         <button type="button" onClick={() => setWeitereOffen(true)}
                 data-testid="team-request-sucher"
                 className="inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold text-white"
-                style={{ background: "var(--accent-red)" }}>
+                style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
           <UserPlus size={16} /> Weitere Sucher anfragen
         </button>
       </div>
@@ -305,7 +305,7 @@ export default function Team() {
             )}
             {sucher.map((s) => (
               <tr key={s.id} className="border-t" style={{ borderColor: "var(--border-default)" }}>
-                <td className="px-4 py-3 font-semibold">
+                <td className="px-4 py-3 font-semibold whitespace-nowrap">
                   {s.first_name} {s.last_name}
                   {s.employee_id && <span className="ml-2 text-[10px] text-zinc-500">#{s.employee_id}</span>}
                 </td>

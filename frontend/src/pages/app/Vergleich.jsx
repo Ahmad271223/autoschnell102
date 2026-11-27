@@ -495,11 +495,11 @@ export default function Vergleich() {
 
   return (
     <div className="p-3 sm:p-6 lg:p-10 max-w-[1480px] mx-auto" data-testid="vergleich-page">
-      <div className="flex items-start justify-between gap-4">
-        <div>
+      <div className="flex flex-col-reverse sm:flex-row items-start justify-between gap-3 sm:gap-4">
+        <div className="min-w-0">
           <div className="overline">Vergleich · Hauptansicht</div>
           <h1 className="font-display font-black text-3xl lg:text-5xl tracking-tighter mt-2">
-            URL einfügen. <span style={{ color: "var(--accent-red)" }}>Vergleich starten.</span>
+            URL einfügen. <span style={{ color: "var(--text-muted)" }}>Vergleich starten.</span>
           </h1>
           <p className="mt-3 max-w-2xl" style={{ color: "var(--text-secondary)" }}>
             Kleinanzeigen-, mobile.de- oder AutoScout24-Link einfügen — Daten laden, Regeln anwenden, mobile.de &amp; AutoScout24 mit fertigem Filter öffnen.

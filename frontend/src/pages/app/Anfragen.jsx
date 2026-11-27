@@ -479,7 +479,7 @@ export default function Anfragen() {
                   <button onClick={() => sendCounter(it)} disabled={busyId === it.id}
                           data-testid={`gegenangebot-senden-${it.id}`}
                           className="h-9 rounded-lg px-4 text-sm font-semibold text-white disabled:opacity-50"
-                          style={{ background: "var(--accent-red)" }}>
+                          style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
                     Senden
                   </button>
                 </div>

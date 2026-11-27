@@ -14,7 +14,8 @@ import {
 const MENU_BREITE = 300;
 
 const knopfStil = { background: "var(--apple-btn-secondary-bg)", color: "var(--text-primary)" };
-const knopfKlasse = "h-10 px-3.5 rounded-full inline-flex items-center gap-1.5 text-[13px] font-semibold "
+// Design 11/2026: am Handy teilen sich die Knöpfe EINE Zeile (flex-1), ab sm wieder nach Inhalt
+const knopfKlasse = "h-10 px-2.5 sm:px-3.5 rounded-full inline-flex items-center justify-center gap-1.5 text-[13px] font-semibold flex-1 sm:flex-none "
   + "transition-colors hover:brightness-125 disabled:opacity-50 whitespace-nowrap";
 
 function Eintrag({ testid, icon: Icon, titel, text, onClick, disabled, farbe, schliessen }) {
@@ -154,7 +155,7 @@ export default function VertragAktionen({ it, a, zustand = {} }) {
   );
 
   return (
-    <div className="flex flex-wrap items-center justify-end gap-2" data-testid={`vertrag-aktionen-${it.id}`}>
+    <div className="w-full sm:w-auto flex flex-wrap items-center justify-end gap-1.5 sm:gap-2" data-testid={`vertrag-aktionen-${it.id}`}>
       {zustand.termin && (
         <button type="button" onClick={a.termin} data-testid={`termin-anlegen-${it.id}`}
                 disabled={!!zustand.terminLaeuft}
@@ -177,9 +178,10 @@ export default function VertragAktionen({ it, a, zustand = {} }) {
       </button>
       <button type="button" ref={knopfRef} onClick={umschalten} data-testid={`pdf-mehr-${it.id}`}
               aria-haspopup="menu" aria-expanded={offen}
-              className={knopfKlasse} style={knopfStil}
+              className={`${knopfKlasse} !flex-none w-10 sm:w-auto !px-0 sm:!px-3.5`} style={knopfStil}
               title="Weitere Aktionen: digitale Fassung, online unterschreiben, Hinweis-Mail, ändern, löschen">
-        <MoreHorizontal size={15} /> Mehr
+        {/* Design 11/2026: am Handy nur „…" (Beschriftung bleibt für Vorleser), damit alle drei in EINE Zeile passen */}
+        <MoreHorizontal size={16} /> <span className="sr-only sm:not-sr-only">Mehr</span>
       </button>
       {menu}
     </div>

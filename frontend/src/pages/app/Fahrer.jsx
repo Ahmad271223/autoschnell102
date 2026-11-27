@@ -178,7 +178,7 @@ export default function Fahrer() {
             {items.map((d) => (
               <tr key={d.id} className="border-t" style={{ borderColor: "var(--border-default)" }}
                   data-testid={`driver-row-${d.id}`}>
-                <td className="px-4 py-3">
+                <td className="px-4 py-3 whitespace-nowrap">
                   <div className="font-semibold">{d.name}</div>
                   {/* RP-542: Telefonnummer des Fahrers (nur Hauptchef, vom Betreiber erfasst) */}
                   {d.phone && (

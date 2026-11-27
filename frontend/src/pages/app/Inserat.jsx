@@ -724,7 +724,7 @@ export default function Inserat() {
           {l.status === "entwurf" && (
             <button onClick={() => setStatus("verkaufsbereit")} disabled={statusGesperrt}
                     className="inline-flex items-center gap-1.5 rounded-xl px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
-                    style={{ background: "var(--accent-red)" }}>
+                    style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
               <CheckCircle2 size={16} /> Verkaufsbereit machen
             </button>
           )}
@@ -732,7 +732,7 @@ export default function Inserat() {
             <>
               <button onClick={() => publish("public")} disabled={statusGesperrt || erneutGesperrt}
                       className="inline-flex items-center gap-1.5 rounded-xl px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
-                      style={{ background: "var(--accent-red)" }}>
+                      style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
                 <Globe size={16} /> Öffentlich veröffentlichen
               </button>
               {/* Prüfbericht 20.09. M-18: Statusknöpfe mindestens 44 px hoch;
@@ -783,7 +783,7 @@ export default function Inserat() {
               <button onClick={() => publish(l.visibility === "private" ? "private" : "public")}
                       disabled={statusGesperrt || erneutGesperrt} data-testid="inserat-erneut-veroeffentlichen"
                       className="inline-flex items-center gap-1.5 rounded-xl px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
-                      style={{ background: "var(--accent-red)" }}>
+                      style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
                 {l.visibility === "private" ? <EyeOff size={16} /> : <Globe size={16} />}
                 {l.visibility === "private" ? " Erneut veröffentlichen (nur Netzwerk)" : " Erneut veröffentlichen (öffentlich)"}
               </button>

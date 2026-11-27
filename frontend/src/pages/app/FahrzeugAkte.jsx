@@ -433,7 +433,7 @@ export default function FahrzeugAkte() {
                   freigeschaltetem Marktplatz — sonst 503 "Demnächst verfügbar". */}
               {features.marktplatz && (
                 <button onClick={() => decide("verkaufsentwurf")} disabled={busy} data-testid="akte-weiterverkaufen"
-                        className="rounded-lg px-3 py-2 text-xs font-semibold text-white inline-flex items-center gap-1.5 disabled:opacity-50" style={{ background: "var(--accent-red)" }}>
+                        className="rounded-lg px-3 py-2 text-xs font-semibold text-white inline-flex items-center gap-1.5 disabled:opacity-50" style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
                   <Tag size={13} /> Speichern & weiterverkaufen
                 </button>
               )}
@@ -444,7 +444,7 @@ export default function FahrzeugAkte() {
           )}
           {features.marktplatz && !sucher && v.lifecycle === "bestand" && (
             <button onClick={() => decide("verkaufsentwurf")} disabled={busy}
-                    className="rounded-lg px-3 py-2 text-xs font-semibold text-white inline-flex items-center gap-1.5 disabled:opacity-50" style={{ background: "var(--accent-red)" }}>
+                    className="rounded-lg px-3 py-2 text-xs font-semibold text-white inline-flex items-center gap-1.5 disabled:opacity-50" style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
               <Tag size={13} /> Weiterverkaufen
             </button>
           )}
@@ -468,14 +468,14 @@ export default function FahrzeugAkte() {
             && !(akte.listings || []).some((l) => INSERAT_AKTIV.includes(l.status)) && (
             <button onClick={() => decide("verkaufsentwurf")} disabled={busy} data-testid="akte-inserat-anlegen"
                     className="rounded-lg px-3 py-2 text-xs font-semibold text-white inline-flex items-center gap-1.5 disabled:opacity-50"
-                    style={{ background: "var(--accent-red)" }}>
+                    style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
               <Tag size={13} /> Inserat anlegen
             </button>
           )}
           {/* Ab Vertragserstellung sofort inserierbar (Abholung läuft parallel) */}
           {features.marktplatz && !sucher && ["vertrag_erstellt", "gekauft", "abholung_geplant"].includes(v.lifecycle) && (
             <button onClick={() => decide("verkaufsentwurf")} disabled={busy}
-                    className="rounded-lg px-3 py-2 text-xs font-semibold text-white inline-flex items-center gap-1.5 disabled:opacity-50" style={{ background: "var(--accent-red)" }}>
+                    className="rounded-lg px-3 py-2 text-xs font-semibold text-white inline-flex items-center gap-1.5 disabled:opacity-50" style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
               <Tag size={13} /> Jetzt inserieren
             </button>
           )}
@@ -613,7 +613,7 @@ export default function FahrzeugAkte() {
               {!sucher && (
                 <button onClick={applyDeviations} disabled={busy}
                         className="mt-3 rounded-lg px-3 py-2 text-xs font-semibold text-white disabled:opacity-50"
-                        style={{ background: "var(--accent-red)" }}>
+                        style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
                   Änderungen übernehmen ({selectedDevs.length})
                 </button>
               )}
@@ -646,7 +646,7 @@ export default function FahrzeugAkte() {
           </div>
           <button onClick={befundUebernehmen} disabled={busy} data-testid="akte-protokoll-uebernehmen"
                   className="mt-3 rounded-lg px-3 py-2 text-xs font-semibold text-white disabled:opacity-50"
-                  style={{ background: "var(--accent-red)" }}>
+                  style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
             In die Fahrzeugdaten übernehmen
           </button>
         </Section>

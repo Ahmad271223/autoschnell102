@@ -225,19 +225,19 @@ export default function PDFArchiv() {
       <h1 className="font-display font-black text-4xl lg:text-5xl tracking-tighter mt-1">Vertragsarchiv</h1>
 
       {/* Suche + Zeitraum als Apple-Segmentleiste */}
-      <div className="mt-8 flex flex-wrap gap-3 items-center">
-        <div className="flex-1 min-w-[260px] flex items-center gap-3 apple-input !rounded-full !py-3 !px-5">
+      <div className="mt-4 sm:mt-8 flex flex-wrap gap-2 sm:gap-3 items-center">
+        <div className="flex-1 min-w-0 basis-full sm:basis-0 sm:min-w-[260px] flex items-center gap-3 apple-input !rounded-full !py-2.5 sm:!py-3 !px-4 sm:!px-5">
           <Search size={17} className="shrink-0" style={{ color: "var(--text-muted)" }} />
           <input data-testid="pdf-search-input" value={q} onChange={(e) => setQ(e.target.value)}
                  onKeyDown={(e) => e.key === "Enter" && load()}
                  placeholder="Suche nach Marke / Modell / Verkäufer / Vertragsnummer"
                  className="bg-transparent outline-none w-full text-[15px]" />
         </div>
-        <div className="flex items-center gap-1 rounded-full p-1"
+        <div className="flex items-center gap-1 rounded-full p-1 max-w-full overflow-x-auto scrollbar-hide flex-1 basis-0 min-w-0 sm:flex-none sm:basis-auto"
              style={{ background: "var(--apple-btn-secondary-bg)" }}>
           {DAY_FILTERS.map((d) => (
             <button key={d.v} onClick={() => setDays(d.v)} data-testid={`filter-days-${d.v}`}
-                    className={`px-4 py-2 rounded-full text-[13px] font-semibold transition-colors ${
+                    className={`px-3 sm:px-4 py-2 rounded-full text-[13px] font-semibold whitespace-nowrap transition-colors ${
                       days === d.v ? "bg-white/15 text-white shadow-sm" : "hover:text-white"
                     }`}
                     style={days === d.v ? {} : { color: "var(--text-muted)" }}>
@@ -245,14 +245,15 @@ export default function PDFArchiv() {
             </button>
           ))}
         </div>
-        <button onClick={load}
-                className="apple-btn apple-btn-secondary !rounded-full !px-5 !py-2.5">
-          Aktualisieren
+        <button onClick={load} aria-label="Aktualisieren" title="Aktualisieren"
+                className="apple-btn apple-btn-secondary shrink-0 !rounded-full !px-3.5 sm:!px-5 !py-2.5">
+          <span className="sm:hidden text-[16px] leading-none" aria-hidden="true">↻</span>
+          <span className="hidden sm:inline">Aktualisieren</span>
         </button>
       </div>
 
       {/* Vertragsliste als grosse Apple-Karten */}
-      <div className="mt-8 space-y-4" data-testid="pdfs-table">
+      <div className="mt-4 sm:mt-8 space-y-2.5 sm:space-y-4" data-testid="pdfs-table">
         {loading && (
           <div className="apple-surface p-12 text-center text-[15px]"
                style={{ color: "var(--text-muted)" }}>Lade…</div>
@@ -269,9 +270,9 @@ export default function PDFArchiv() {
         )}
         {items.map((it) => (
           <div key={it.id}
-               className="apple-surface p-5 sm:p-6 transition-colors hover:border-white/20"
+               className="relative apple-surface p-3.5 sm:p-6 transition-colors hover:border-white/20"
                data-testid={`pdf-card-${it.id}`}>
-            <div className="flex flex-col sm:flex-row sm:items-center gap-5">
+            <div className="flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-5">
               {/* Grosses Fahrzeugbild */}
               <VehicleThumb
                 item={it}
@@ -285,10 +286,10 @@ export default function PDFArchiv() {
                   Verkäufer und Hinweise. Unter sm stehen Preis und Knöpfe
                   jetzt UNTER dem Inhalt, die Knopfleiste bricht um. */}
               <div className="flex-1 min-w-0">
-                <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
+                <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2.5 sm:gap-4">
                   <div className="min-w-0">
-                    <div className="flex items-center gap-3 flex-wrap">
-                      <span className="font-display font-bold text-xl tracking-tight truncate">
+                    <div className="flex items-center gap-x-2 gap-y-1 sm:gap-3 flex-wrap pr-24 sm:pr-0">
+                      <span className="font-display font-bold text-[17px] sm:text-xl tracking-tight truncate">
                         {it.make || "—"} {it.model || ""}
                       </span>
                       <span className="text-[11px] font-semibold px-2.5 py-1 rounded-full"
@@ -370,7 +371,7 @@ export default function PDFArchiv() {
                   {/* Preis + Aktionen rechts (am Handy darunter) */}
                   <div className="sm:shrink-0 flex flex-row sm:flex-col flex-wrap items-center sm:items-end justify-between gap-3"
                        data-testid={`pdf-aktionen-${it.id}`}>
-                    <div className="font-display font-black text-2xl tracking-tight whitespace-nowrap">
+                    <div className="absolute top-3 right-3.5 sm:static font-display font-black text-lg sm:text-2xl tracking-tight whitespace-nowrap">
                       {it.purchase_price
                         ? `${Number(it.purchase_price).toLocaleString("de-DE")} €` : "—"}
                     </div>
@@ -535,7 +536,7 @@ function NachAbholungHinweis({ item, onSenden }) {
       {offen && (
         <button onClick={onSenden} data-testid={`nach-abholung-senden-${item.id}`}
                 className="ml-auto inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white"
-                style={{ background: "var(--accent-red)" }}>
+                style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
           <Send size={13} /> Neuen Vertrag senden
         </button>
       )}
@@ -616,7 +617,7 @@ function VehicleThumb({ item, onOpen }) {
   if (urls.length === 0) {
     return (
       <div
-        className="h-24 w-full sm:w-36 shrink-0 rounded-xl flex items-center justify-center"
+        className="hidden sm:flex h-24 sm:w-36 shrink-0 rounded-xl items-center justify-center"
         style={{ background: "var(--wa-03)",
                  border: "1px solid var(--border-default)",
                  color: "var(--text-muted)" }}

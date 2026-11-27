@@ -374,7 +374,7 @@ export default function Marktplatz() {
                     className="text-zinc-400 hover:text-white text-sm tipp-h px-2 whitespace-nowrap">Anmelden</button>
             <button onClick={() => nav("/anfrage?art=kaeufer")} data-testid="markt-anfrage"
                     className="rounded-lg px-3 tipp-h text-sm font-semibold text-white whitespace-nowrap"
-                    style={{ background: "var(--accent-red)" }}>Zugang anfragen</button>
+                    style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>Zugang anfragen</button>
           </>
         )}
       </div>
@@ -390,7 +390,7 @@ export default function Marktplatz() {
           <div className="mt-2 text-sm text-zinc-400">{accessFehler}</div>
           <button type="button" onClick={loadAccess} data-testid="markt-zugang-erneut"
                   className="mt-5 rounded-xl px-5 py-2.5 text-sm font-semibold text-white"
-                  style={{ background: "var(--accent-red)" }}>
+                  style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
             Erneut versuchen
           </button>
         </div>
@@ -441,7 +441,7 @@ export default function Marktplatz() {
               </div>
               <button onClick={requestAccess} disabled={requesting} data-testid="markt-access-request"
                       className="mt-5 w-full rounded-xl py-3 font-semibold text-white disabled:opacity-50"
-                      style={{ background: "var(--accent-red)" }}>
+                      style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
                 {requesting ? "Wird gesendet…" : "Zugang per Rechnung anfragen"}
               </button>
               <p className="mt-3 text-[11px] text-zinc-600">
@@ -505,7 +505,7 @@ export default function Marktplatz() {
                     {dealerView.phone && (
                       <a href={`tel:${dealerView.phone.replace(/\s/g, "")}`}
                          className="inline-flex items-center gap-2 rounded-xl px-4 py-3 font-semibold text-white shrink-0"
-                         style={{ background: "var(--accent-red)" }}>
+                         style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
                         <Phone size={16} /> {dealerView.phone}
                       </a>
                     )}
@@ -637,7 +637,7 @@ export default function Marktplatz() {
               <button onClick={() => { apply(); setFilterOffen(false); }}
                       data-testid="filter-anwenden"
                       className="h-10 sm:h-9 px-4 rounded-lg text-sm font-semibold text-white w-full sm:w-auto"
-                      style={{ background: "var(--accent-red)" }}>Anwenden</button>
+                      style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>Anwenden</button>
               <button onClick={() => { setFilters(EMPTY); setSort(""); setQ(""); apply(); }}
                       className="h-9 px-3 rounded-lg text-sm text-zinc-400 hover:text-white w-full sm:w-auto">Zurücksetzen</button>
             </div>
@@ -702,7 +702,7 @@ export default function Marktplatz() {
                       {phone ? (
                         <a href={`tel:${phone.replace(/\s/g, "")}`} onClick={(e) => e.stopPropagation()}
                            className="mt-3 inline-flex items-center justify-center gap-2 rounded-xl py-2.5 text-sm font-semibold text-white"
-                           style={{ background: "var(--accent-red)" }}>
+                           style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
                           <Phone size={15} /> {phone}
                         </a>
                       ) : (
@@ -890,7 +890,7 @@ function DetailModal({ v, onClose, isFav, onFav, onDealer }) {
             {phone ? (
               <a href={`tel:${phone.replace(/\s/g, "")}`}
                  className="mt-3 w-full inline-flex items-center justify-center gap-2 rounded-xl py-3 font-semibold text-white"
-                 style={{ background: "var(--accent-red)" }}>
+                 style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
                 <Phone size={17} /> {phone} — jetzt anrufen
               </a>
             ) : (
@@ -1035,7 +1035,7 @@ function InteresseForm({ v }) {
           </FField>
           <button onClick={senden} disabled={busy} data-testid="interesse-senden"
                   className="w-full rounded-xl py-2.5 font-semibold text-white disabled:opacity-50"
-                  style={{ background: "var(--accent-red)" }}>
+                  style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
             {busy ? "Wird gesendet…" : "Anfrage senden"}
           </button>
         </div>
@@ -1301,7 +1301,7 @@ function MeineAnfragen({ onClose, gesehenVorher = "" }) {
                               disabled={busyId === it.id}
                               data-testid={`kaeufer-gegenangebot-senden-${it.id}`}
                               className="h-9 rounded-lg px-4 text-sm font-semibold text-white disabled:opacity-50"
-                              style={{ background: "var(--accent-red)" }}>
+                              style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
                         Senden
                       </button>
                     </div>
@@ -1334,7 +1334,7 @@ function MeineAnfragen({ onClose, gesehenVorher = "" }) {
                             {kontakt.phone && (
                               <a href={`tel:${kontakt.phone.replace(/\s/g, "")}`}
                                  className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 font-semibold text-white"
-                                 style={{ background: "var(--accent-red)" }}>
+                                 style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
                                 <Phone size={13} /> {kontakt.phone}
                               </a>
                             )}

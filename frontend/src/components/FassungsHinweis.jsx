@@ -62,7 +62,7 @@ export default function FassungsHinweis() {
       <button type="button" data-testid="fassungs-hinweis-laden"
               onClick={aktualisieren}
               className="rounded-full px-3 py-1 text-[12.5px] font-semibold text-white whitespace-nowrap"
-              style={{ background: "var(--accent-red)" }}>
+              style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
         Aktualisieren
       </button>
       <button type="button" aria-label="Später" title="Später"

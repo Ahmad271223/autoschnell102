@@ -222,24 +222,25 @@ export default function Bestand() {
 
   return (
     <div className="p-3 sm:p-6 lg:p-10 max-w-7xl mx-auto" data-testid="bestand-page">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
+      <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div className="min-w-0">
           <div className="overline">Bestand</div>
           <h1 className="font-display font-black text-3xl lg:text-4xl tracking-tighter mt-1">
             Fahrzeugbestand & Weiterverkauf
           </h1>
           {/* Runde 32 (Wunsch Ahmad): nur Autos mit gespeichertem oder
               verschicktem Kaufvertrag, dazu von Hand hinzugefuegte. */}
-          <div className="text-[13px] mt-1" style={{ color: "var(--text-muted)" }}
+          <div className="hidden sm:block text-[13px] mt-1" style={{ color: "var(--text-muted)" }}
                data-testid="bestand-regel">
             Fahrzeuge mit gespeichertem oder verschicktem Kaufvertrag und von Hand hinzugefügte.
           </div>
         </div>
         {chef && (
-          <button onClick={() => setShowManual(true)}
-                  className="inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold text-white"
-                  style={{ background: "var(--accent-red)" }}>
-            <Plus size={16} /> Fahrzeug manuell hinzufügen
+          <button onClick={() => setShowManual(true)} aria-label="Fahrzeug manuell hinzufügen"
+                  className="apple-btn apple-btn-primary shrink-0">
+            <Plus size={16} />
+            <span className="sm:hidden" aria-hidden="true">Hinzufügen</span>
+            <span className="hidden sm:inline">Fahrzeug manuell hinzufügen</span>
           </button>
         )}
       </div>
@@ -278,32 +279,33 @@ export default function Bestand() {
         </Link>
       )}
 
-      <div className="mt-5 flex flex-wrap items-center gap-2">
+      {/* Design 11/2026: Status-Filter als EINE Zeile (am Handy seitlich wischen) */}
+      <div className="mt-5 filter-zeile" role="group" aria-label="Nach Status filtern">
         {FILTERS.filter((f) => f.key !== "veroeffentlicht" || features.marktplatz).map((f) => (
-          <button key={f.key} onClick={() => setFilter(f.key)}
-                  className={`px-3 py-1.5 rounded-lg text-[13px] border transition ${
-                    filter === f.key ? "bg-white/10 font-semibold" : "text-zinc-400 hover:text-white"}`}
-                  style={{ borderColor: "var(--border-default)" }}>
+          <button key={f.key} onClick={() => setFilter(f.key)} aria-pressed={filter === f.key}
+                  className={`filter-chip ${filter === f.key ? "aktiv" : ""}`}>
             {f.label}
-            {f.key && counts[f.key] ? ` (${counts[f.key]})` : ""}
+            {f.key && counts[f.key] ? <span className="filter-chip-zahl">{counts[f.key]}</span> : null}
           </button>
         ))}
-        <div className="ml-auto flex gap-1.5">
-          {[["", "Alle Quellen"], ["plattform", "Über Sucher"], ["manuell", "Manuell"]].map(([k, l]) => (
-            <button key={k} onClick={() => setSourceFilter(k)}
-                    className={`px-2.5 py-1.5 rounded-lg text-[12px] ${sourceFilter === k ? "bg-white/10 font-semibold" : "text-zinc-500 hover:text-white"}`}>
-              {l}
-            </button>
-          ))}
-        </div>
       </div>
 
       {/* Wunsch Ahmad 24.11.2026: Gekauft im Zeitraum (deutsche Zeit, Woche ab Montag) */}
       <div className="mt-3 flex flex-wrap items-center gap-2 text-[13px]" data-testid="bestand-zeitraum">
-        <label htmlFor="bestand-zeitraum-wahl" style={{ color: "var(--text-secondary)" }}>Gekauft im Zeitraum</label>
+        {/* Herkunft als Apple-Segment — steht jetzt neben dem Zeitraum statt in der Status-Zeile */}
+        <div className="apple-segment mr-1" role="group" aria-label="Nach Herkunft filtern">
+          {[["", "Alle"], ["plattform", "Über Sucher"], ["manuell", "Manuell"]].map(([k, l]) => (
+            <button key={k} onClick={() => setSourceFilter(k)} aria-pressed={sourceFilter === k}
+                    aria-label={k === "" ? "Alle Quellen" : l}
+                    className={`apple-segment-item ${sourceFilter === k ? "active" : ""}`}>
+              {l}
+            </button>
+          ))}
+        </div>
+        <label htmlFor="bestand-zeitraum-wahl" className="sr-only sm:not-sr-only" style={{ color: "var(--text-secondary)" }}>Gekauft im Zeitraum</label>
         <select id="bestand-zeitraum-wahl" value={zeitraum} onChange={(e) => setZeitraum(e.target.value)}
                 data-testid="bestand-zeitraum-wahl"
-                className="rounded-lg border px-2.5 py-1.5 text-[13px]"
+                className="rounded-lg border px-2.5 py-1.5 text-[13px] min-h-[34px]"
                 style={{ borderColor: "var(--border-default)", background: "var(--bg-input-solid)",
                   color: "var(--text-primary)", colorScheme: "var(--scheme)" }}>
           {ZEITRAEUME.map((z) => <option key={z.key} value={z.key}>{z.label}</option>)}
@@ -327,21 +329,21 @@ export default function Bestand() {
       {/* Anzahl und Einkauf gesamt über ALLE Treffer (Server rechnet; den
           Betrag liefert er nur Rollen, die Kaufpreise sehen dürfen). */}
       {data.zusammenfassung && (
-        <div className="mt-3 tactical-card px-4 py-3 flex flex-wrap items-end gap-x-8 gap-y-2" data-testid="bestand-summe">
+        <div className="mt-3 tactical-card px-4 py-3 kennzahlen" data-testid="bestand-summe">
           <div>
             <div className="text-[11px] uppercase tracking-wide" style={{ color: "var(--text-muted)" }}>Gekaufte Fahrzeuge</div>
-            <div className="text-xl font-bold" data-testid="bestand-anzahl">{data.zusammenfassung.anzahl ?? 0}</div>
+            <div className="kennzahl-wert" data-testid="bestand-anzahl">{data.zusammenfassung.anzahl ?? 0}</div>
           </div>
           {data.zusammenfassung.einkauf_gesamt != null && (
             <div>
               <div className="text-[11px] uppercase tracking-wide" style={{ color: "var(--text-muted)" }}>Einkauf gesamt</div>
-              <div className="text-xl font-bold" data-testid="bestand-einkauf-gesamt">
+              <div className="kennzahl-wert" data-testid="bestand-einkauf-gesamt">
                 {euro(data.zusammenfassung.einkauf_gesamt)}
               </div>
             </div>
           )}
           {data.zusammenfassung.ohne_preis > 0 && (
-            <div className="text-[12px] pb-1" style={{ color: "var(--text-secondary)" }} data-testid="bestand-ohne-preis">
+            <div className="col-span-2 text-[12px] pb-1" style={{ color: "var(--text-secondary)" }} data-testid="bestand-ohne-preis">
               {data.zusammenfassung.ohne_preis} ohne Preis · stornierte und nicht abgeholte zählen nicht mit
             </div>
           )}
@@ -379,7 +381,7 @@ export default function Bestand() {
               </select>
               <button type="button" disabled={!ziel} onClick={() => setSammelOffen(true)} data-testid="bestand-sammel-start"
                       className="rounded-lg px-3 py-1.5 font-semibold text-white disabled:opacity-50"
-                      style={{ background: "var(--accent-red)" }}>
+                      style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
                 Ändern …
               </button>
             </>
@@ -409,7 +411,7 @@ export default function Bestand() {
           </button>
         </div>
       )}
-      <div className="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+      <div className="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 bestand-raster">
         {!geladen && !ladeFehler && (
           <div className="col-span-full text-center py-16 text-zinc-500 text-sm">lade…</div>
         )}
@@ -425,7 +427,7 @@ export default function Bestand() {
           const lc = v.lifecycle || "verglichen";
           const img = (d.image_urls || d.images || [])[0];
           return (
-            <div key={v.id} className="tactical-card overflow-hidden flex flex-col relative" data-testid={`bestand-${v.id}`}
+            <div key={v.id} className="tactical-card overflow-hidden flex flex-col relative bestand-zeile" data-testid={`bestand-${v.id}`}
                  style={auswahl.has(v.id) ? { boxShadow: "0 0 0 2px var(--accent-red)" } : undefined}>
               {img && (
                 <div className="h-36 overflow-hidden">
@@ -444,7 +446,7 @@ export default function Bestand() {
                            className="mt-1 w-4 h-4 shrink-0 cursor-pointer" />
                   )}
                   <div className="min-w-0 flex-1">
-                    <div className="font-semibold line-clamp-2 break-words">{d.make_label} {d.model_label}</div>
+                    <div className="font-semibold text-[15px] leading-snug line-clamp-2 break-words">{d.make_label} {d.model_label}</div>
                     {d.model_description && (
                       <div className="mt-0.5 text-xs text-zinc-500 line-clamp-2 break-words"
                            title={d.model_description} data-testid={`bestand-beschreibung-${v.id}`}>
@@ -459,7 +461,7 @@ export default function Bestand() {
                   {d.first_registration && <span>EZ {d.first_registration}</span>}
                   {kmText(d.mileage) && <span>{kmText(d.mileage)}</span>}
                   {v.purchase_price != null && (
-                    <span className="text-zinc-300">EK {Number(v.purchase_price).toLocaleString("de-DE")} €</span>
+                    <span className="font-semibold whitespace-nowrap" style={{ color: "var(--text-primary)" }}>EK {Number(v.purchase_price).toLocaleString("de-DE")} €</span>
                   )}
                   <span className="text-zinc-600">{v.source === "manuell" ? "manuell" : "über System"}</span>
                   {v.owner_name && <span className="text-zinc-500" data-testid={`bestand-owner-${v.id}`}>Bearbeiter: {v.owner_name}{v.mitbearbeiter_namen?.length > 0 ? ` · mit ${v.mitbearbeiter_namen.join(", ")}` : ""}</span>}
@@ -476,7 +478,9 @@ export default function Bestand() {
                   </div>
                 )}
 
-                <div className="mt-3 pt-3 border-t flex flex-wrap gap-2" style={{ borderColor: "var(--border-default)" }}>
+                {/* Design 11/2026: Knopfzeile in jeder Karte einer Reihe auf gleicher Höhe */}
+                <div className="flex-1 min-h-3" />
+                <div className="pt-3 border-t flex flex-wrap items-center gap-2" style={{ borderColor: "var(--border-default)" }}>
                   {lc === "abgeholt" ? (
                     <>
                       {chef && (<>
@@ -486,8 +490,7 @@ export default function Bestand() {
                       {features.marktplatz && (
                         <button onClick={() => decide(v.id, "verkaufsentwurf", lc)} disabled={busy === v.id}
                                 data-testid={`bestand-weiterverkaufen-${v.id}`}
-                                className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white"
-                                style={{ background: "var(--accent-red)" }}>
+                                className="apple-btn-primary inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white">
                           <Tag size={13} /> Speichern & weiterverkaufen
                         </button>
                       )}
@@ -516,8 +519,7 @@ export default function Bestand() {
                           endete der Klick in "Demnächst verfügbar" (503). */}
                       {chef && features.marktplatz && (lc === "bestand") && (
                         <button onClick={() => decide(v.id, "verkaufsentwurf", lc)} disabled={busy === v.id}
-                                className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white"
-                                style={{ background: "var(--accent-red)" }}>
+                                className="apple-btn-primary inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white">
                           <Tag size={13} /> Weiterverkaufen
                         </button>
                       )}
@@ -557,8 +559,7 @@ export default function Bestand() {
                       {chef && features.marktplatz && lc === "verkaufsentwurf" && (
                         <button onClick={() => decide(v.id, "verkaufsentwurf", lc)} disabled={busy === v.id}
                                 data-testid={`bestand-inserat-${v.id}`}
-                                className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white"
-                                style={{ background: "var(--accent-red)" }}>
+                                className="apple-btn-primary inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white">
                           <Tag size={13} /> Zum Inserat
                         </button>
                       )}
@@ -566,8 +567,7 @@ export default function Bestand() {
                           läuft parallel weiter (Bericht landet in der Akte). */}
                       {chef && features.marktplatz && ["vertrag_erstellt", "gekauft", "abholung_geplant"].includes(lc) && (
                         <button onClick={() => decide(v.id, "verkaufsentwurf", lc)} disabled={busy === v.id}
-                                className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white"
-                                style={{ background: "var(--accent-red)" }}>
+                                className="apple-btn-primary inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white">
                           <Tag size={13} /> Jetzt inserieren
                         </button>
                       )}
@@ -682,7 +682,7 @@ export function SammelDialog({ ids, ziel, namen = {}, onClose }) {
               </button>
               <button type="button" onClick={ausfuehren} disabled={laeuft} data-testid="bestand-sammel-ja"
                       className="rounded-xl px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50 min-h-[44px]"
-                      style={{ background: "var(--accent-red)" }}>
+                      style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
                 {laeuft ? "Wird geändert …" : `Ja, auf „${zielText(ziel)}“ setzen`}
               </button>
             </div>
@@ -859,7 +859,7 @@ function ManualVehicleDialog({ fahrzeug = null, onClose, onDone }) {
         </div>
         <button onClick={submit} disabled={busy}
                 className="mt-4 w-full rounded-xl py-3 font-semibold text-white disabled:opacity-50"
-                style={{ background: "var(--accent-red)" }}>
+                style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
           {bearbeiten
             ? (busy ? "Wird gespeichert…" : "Änderungen speichern")
             : (busy ? "Wird angelegt…" : "In den Bestand aufnehmen")}

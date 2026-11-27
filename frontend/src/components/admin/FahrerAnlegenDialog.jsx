@@ -76,7 +76,7 @@ export default function FahrerAnlegenDialog({ request = null, onClose, onAngeleg
             </div>
             <button onClick={submit} disabled={busy} data-testid="fahrer-anlegen-submit"
                     className="mt-4 w-full h-10 rounded-xl text-[14px] font-medium text-white disabled:opacity-50"
-                    style={{ background: "var(--accent-red)" }}>
+                    style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
               {busy ? "Wird angelegt…" : "Fahrer-Konto anlegen"}
             </button>
           </>

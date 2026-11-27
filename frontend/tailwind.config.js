@@ -8,9 +8,12 @@ module.exports = {
   theme: {
   	extend: {
   		borderRadius: {
+  			// Design 11/2026: eine Radien-Staffel fuer die ganze App (vorher 0/2/4 px
+  			// neben 10-18 px der Karten): sm/Standard 6, md 8, lg 12 (--radius).
   			lg: 'var(--radius)',
-  			md: 'calc(var(--radius) - 2px)',
-  			sm: 'calc(var(--radius) - 4px)'
+  			md: 'calc(var(--radius) - 4px)',
+  			sm: 'calc(var(--radius) - 6px)',
+  			DEFAULT: 'calc(var(--radius) - 6px)'
   		},
   		colors: {
   			background: 'hsl(var(--background))',

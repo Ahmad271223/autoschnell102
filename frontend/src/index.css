@@ -219,38 +219,38 @@ a[href*="emergent.sh"],
      Ohne dies werden Optionen einer <select> mit weiss/schwarz vom OS
      gezeichnet und sind im Dark-Mode unlesbar (white-on-white). */
   color-scheme: dark;
-  --bg-app: #0a0a0a;
-  --bg-surface: #141414;
-  --bg-input: #0f0f0f;
+  --bg-app: #000000;
+  --bg-surface: #1c1c1e;
+  --bg-input: rgba(118,118,128,0.18);
   --text-primary: #ffffff;
-  --text-secondary: #a1a1aa;
-  --text-muted: #71717a;
+  --text-secondary: #aeaeb2;
+  --text-muted: #8e8e93;
   --accent-red: #ff3b30;
   --accent-red-hover: #e6352b;
-  --accent-blue: #007aff;
-  --accent-green: #34c759;
-  --border-default: rgba(255, 255, 255, 0.1);
+  --accent-blue: #0a84ff;
+  --accent-green: #30d158;
+  --border-default: rgba(84, 84, 88, 0.65);
   --border-focus: rgba(255, 59, 48, 0.5);
   /* tokens used by themed Apple components */
   --apple-surface-bg: linear-gradient(180deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.02) 100%);
   --apple-surface-border: rgba(255,255,255,0.08);
-  --apple-card-bg: rgba(20,20,22,0.85);
-  --apple-card-bg-hover: rgba(28,28,30,0.9);
+  --apple-card-bg: #1c1c1e;
+  --apple-card-bg-hover: #2c2c2e;
   --apple-card-border: rgba(255,255,255,0.08);
   --apple-card-border-hover: rgba(255,255,255,0.14);
   --apple-input-bg: rgba(255,255,255,0.05);
   --apple-input-bg-focus: rgba(255,255,255,0.07);
-  --apple-input-border: rgba(255,255,255,0.08);
+  --apple-input-border: rgba(255,255,255,0.14);
   --apple-input-text: #ffffff;
-  --apple-input-placeholder: rgba(255,255,255,0.35);
+  --apple-input-placeholder: rgba(255,255,255,0.45);
   --apple-btn-secondary-bg: rgba(255,255,255,0.07);
   --apple-btn-secondary-bg-hover: rgba(255,255,255,0.11);
   --apple-btn-secondary-border: rgba(255,255,255,0.10);
   --apple-btn-secondary-text: #ffffff;
   --apple-modal-bg: linear-gradient(180deg, rgba(28,28,30,0.98) 0%, rgba(20,20,22,0.98) 100%);
   --apple-modal-border: rgba(255,255,255,0.10);
-  --hairline: rgba(255,255,255,0.06);
-  --hairline-strong: rgba(255,255,255,0.10);
+  --hairline: rgba(255,255,255,0.08);
+  --hairline-strong: rgba(255,255,255,0.14);
   /* Aliase für Komponenten (ManuelleSuche, etc.) */
   --card-bg: #1c1c1e;
   --input-bg: rgba(255,255,255,0.05);
@@ -266,12 +266,14 @@ a[href*="emergent.sh"],
   --wa-08: rgba(255,255,255,0.08);
   --wa-10: rgba(255,255,255,0.10);
   --wa-12: rgba(255,255,255,0.12);
-  --bg-elevated: #141416;
-  --bg-deep: #0a0a0a;
-  --bg-input-solid: #18181b;
-  --text-strong: #e4e4e7;
-  --text-dim: #a1a1aa;
+  --bg-elevated: #2c2c2e;
+  --bg-deep: #000000;
+  --bg-input-solid: #2c2c2e;
+  --text-strong: #f2f2f7;
+  --text-dim: #aeaeb2;
   --scheme: dark;
+  /* Design 11/2026: Karten heben sich im Hellen mit einem leichten Schatten ab */
+  --schatten-karte: none;
   /* Statusfarben (18.09.2026): im dunklen Design wie bisher. Im hellen
      Design waren Gruen/Gelb/Amber/Rot auf Weiss kaum zu lesen (Kontrast
      unter 2:1) — dort stehen kraeftigere Werte in [data-theme="light"]. */
@@ -307,35 +309,35 @@ a[href*="emergent.sh"],
 /* ─────── LIGHT THEME (Apple-Style) ─────── */
 [data-theme="light"] {
   color-scheme: light;
-  --bg-app: #f5f5f7;
+  --bg-app: #f2f2f7;
   --bg-surface: #ffffff;
   --bg-input: #ffffff;
   --text-primary: #1d1d1f;
   /* 18.09.2026: Apples Grautoene (#6e6e73/#86868b) kommen auf hellem Grund nur
      auf 3,3:1 — Nebentexte, Wochentage und Platzhalter waren kaum zu lesen.
      Jetzt dunkler (>4,5:1), Reihenfolge primary > secondary > muted bleibt. */
-  --text-secondary: #55555a;
-  --text-muted: #646469;
+  --text-secondary: #48484a;
+  --text-muted: #636366;
   --accent-red: #ff3b30;
   --accent-red-hover: #e6352b;
   --accent-blue: #0071e3;
   --accent-green: #167a45;
-  --border-default: rgba(0, 0, 0, 0.10);
+  --border-default: rgba(60, 60, 67, 0.20);
   --border-focus: rgba(0, 113, 227, 0.55);
 
   --apple-surface-bg: linear-gradient(180deg, #ffffff 0%, #fafafc 100%);
-  --apple-surface-border: rgba(0,0,0,0.08);
+  --apple-surface-border: rgba(60,60,67,0.14);
   --apple-card-bg: #ffffff;
   --apple-card-bg-hover: #fafafc;
-  --apple-card-border: rgba(0,0,0,0.08);
+  --apple-card-border: rgba(60,60,67,0.14);
   --apple-card-border-hover: rgba(0,0,0,0.14);
   --apple-input-bg: #ffffff;
   --apple-input-bg-focus: #ffffff;
-  --apple-input-border: rgba(0,0,0,0.14);
+  --apple-input-border: rgba(60,60,67,0.29);
   --apple-input-text: #1d1d1f;
   --apple-input-placeholder: rgba(0,0,0,0.55);
-  --apple-btn-secondary-bg: rgba(0,0,0,0.05);
-  --apple-btn-secondary-bg-hover: rgba(0,0,0,0.09);
+  --apple-btn-secondary-bg: rgba(118,118,128,0.12);
+  --apple-btn-secondary-bg-hover: rgba(118,118,128,0.20);
   --apple-btn-secondary-border: rgba(0,0,0,0.10);
   --apple-btn-secondary-text: #1d1d1f;
   --apple-modal-bg: linear-gradient(180deg, #ffffff 0%, #fafafc 100%);
@@ -344,8 +346,8 @@ a[href*="emergent.sh"],
   --hairline-strong: rgba(0,0,0,0.12);
   /* Aliase für Komponenten (ManuelleSuche, etc.) */
   --card-bg: #ffffff;
-  --input-bg: #f5f5f7;
-  --hover-bg: #f0f0f2;
+  --input-bg: #f2f2f7;
+  --hover-bg: #e5e5ea;
   --divider: rgba(0,0,0,0.09);
   --wa-02: rgba(0,0,0,0.02);
   --wa-03: rgba(0,0,0,0.03);
@@ -356,11 +358,12 @@ a[href*="emergent.sh"],
   --wa-10: rgba(0,0,0,0.10);
   --wa-12: rgba(0,0,0,0.12);
   --bg-elevated: #ffffff;
-  --bg-deep: #f5f5f7;
+  --bg-deep: #f2f2f7;
   --bg-input-solid: #ffffff;
   --text-strong: #1d1d1f;
-  --text-dim: #5a5a5f;
+  --text-dim: #636366;
   --scheme: light;
+  --schatten-karte: 0 1px 2px rgba(28,32,36,0.05), 0 2px 6px -2px rgba(28,32,36,0.06);
   --st-blau: #0062cc;
   --st-himmel: #0b6e8f;
   --st-cyan: #0369a1;
@@ -388,7 +391,9 @@ a[href*="emergent.sh"],
 html, body, #root {
   background: var(--bg-app);
   color: var(--text-primary);
-  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  /* Design 11/2026 (Apple-Logik): auf iPhone, iPad und Mac die Systemschrift
+     (San Francisco), sonst weiter die mitgelieferte IBM Plex Sans. */
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "IBM Plex Sans", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   margin: 0;
@@ -401,7 +406,7 @@ html, body, #root {
 }
 
 .font-display {
-  font-family: "Cabinet Grotesk", "IBM Plex Sans", sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Cabinet Grotesk", "IBM Plex Sans", sans-serif;
   letter-spacing: -0.025em;
 }
 
@@ -409,26 +414,36 @@ html, body, #root {
   font-family: "IBM Plex Mono", monospace;
 }
 
+/* Design 11/2026: Die Abschnitts-Beschriftung hiess "overline" — Tailwind hat
+   eine gleichnamige Utility (text-decoration: overline), dadurch stand ueber
+   JEDER Beschriftung ungewollt ein Strich. Jetzt ohne Strich, 12 px, engerer
+   Zeichenabstand (0.2em zog Tabellenkoepfe auseinander und brach sie um). */
 .overline {
-  font-size: 11px;
+  font-size: 12px;
+  line-height: 1.35;
   text-transform: uppercase;
-  letter-spacing: 0.2em;
+  letter-spacing: 0.06em;
   font-weight: 600;
-  color: var(--text-secondary);
+  color: var(--text-muted);
+  text-decoration-line: none;
 }
 
 .tactical-card {
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
-  border-radius: 4px;
+  border-radius: 14px;
+  box-shadow: var(--schatten-karte);
   transition: border-color 0.15s ease-out, transform 0.15s ease-out;
 }
 .tactical-card:hover {
   border-color: rgba(255, 255, 255, 0.18);
 }
 
+/* Design 11/2026 (Apple-Logik): EIN Hauptknopf-Ton in der ganzen App — Blau
+   bzw. die gewaehlte Akzentfarbe. Rot bleibt Loeschen und Warnungen vorbehalten
+   (vorher waren Hauptknoepfe mal rot, mal blau). */
 .kinetic-button {
-  background: var(--accent-red);
+  background: var(--knopf-primaer, var(--accent-blue));
   color: #fff;
   border: 0;
   font-weight: 700;
@@ -436,7 +451,8 @@ html, body, #root {
   transition: background-color 0.15s ease-out, transform 0.1s ease-out;
 }
 .kinetic-button:hover {
-  background: var(--accent-red-hover);
+  background: var(--knopf-primaer-hover, var(--accent-blue));
+  filter: brightness(1.06);
 }
 .kinetic-button:active {
   transform: scale(0.98);
@@ -466,10 +482,10 @@ html, body, #root {
   background: var(--bg-input);
   border: 1px solid var(--border-default);
   color: var(--text-primary);
-  border-radius: 4px;
+  border-radius: 10px;
   padding: 0.625rem 0.875rem;
   font-family: inherit;
-  font-size: 0.95rem;
+  font-size: 0.9375rem;
   transition: border-color 0.15s ease-out, box-shadow 0.15s ease-out;
   outline: none;
 }
@@ -611,7 +627,12 @@ html, body, #root {
 .sidebar-link.sidebar-link-active {
   color: var(--text-primary);
   background: var(--apple-btn-secondary-bg-hover);
-  box-shadow: inset 0 0 0 1px var(--apple-btn-secondary-border);
+  font-weight: 600;
+}
+@supports (color: color-mix(in srgb, red 10%, transparent)) {
+  .sidebar-link.sidebar-link-active {
+    background: color-mix(in srgb, var(--accent-red) 11%, transparent);
+  }
 }
 
 .apple-surface {
@@ -957,7 +978,7 @@ select option {
     --border: 0 0% 16%;
     --input: 0 0% 14%;
     --ring: 4 100% 60%;
-    --radius: 0.25rem;
+    --radius: 0.75rem;
   }
 }
 
@@ -1238,3 +1259,99 @@ select:focus-visible, textarea:focus-visible, input:focus-visible {
    Abschnitt bleibt aus, auch wenn seine Klasse (tactical-card, flex, grid)
    selbst ein display setzt. */
 [data-reiter][hidden] { display: none !important; }
+
+/* ─────── DESIGN 11/2026: Uebersicht (Wunsch Ahmad 25.11.2026) ───────
+   Messung vorher (13 Seiten): 16 Schriftgroessen, die meisten Texte 11-12 px,
+   Seitentitel 24/36/48 px in Staerke 900, neun Eckenradien. Jetzt:
+   - Schriftstaffel 11 / 12 / 13 / 14 px fuer Kleintext (nichts unter 11 px),
+     die krummen Zwischengroessen (10.5, 11.5, 12.5, 13.5) fallen auf die Staffel
+   - Seitentitel einheitlich 26 px (ab 1024 px Breite 30 px), Staerke 800
+   - Neutralfarben: Apple-Systemfarben (Grund #f2f2f7 / #000000, Flaechen
+     #ffffff / #1c1c1e / #2c2c2e, Grautoene #48484a / #636366 / #8e8e93 / #aeaeb2)
+   Die Klassen im JSX bleiben unveraendert — hier werden sie nur umgelenkt, so
+   aendert sich an keiner Seite die Logik. */
+html, body, #root { line-height: 1.5; }
+
+.text-\[9px\], .text-\[10px\], .text-\[10\.5px\] { font-size: 11px; }
+.text-\[11px\], .text-\[11\.5px\] { font-size: 12px; }
+.text-\[12px\], .text-\[12\.5px\], .text-xs { font-size: 13px; }
+.text-\[13px\], .text-\[13\.5px\] { font-size: 14px; }
+.cal-event { font-size: 12px; }
+/* Grossbuchstaben-Beschriftungen: sehr weiter Zeichenabstand war fuer 9-10 px
+   gedacht — bei 11-12 px reicht 0.08em, sonst laufen Knoepfe ueber. */
+.tracking-\[0\.2em\], .tracking-\[0\.15em\], .tracking-widest { letter-spacing: 0.08em; }
+
+/* Ueberschriften: 900 war in Cabinet Grotesk sehr laut — 800 reicht. */
+.font-black { font-weight: 800; }
+.font-display { letter-spacing: -0.02em; }
+main h1.font-display {
+  font-size: 1.625rem;
+  line-height: 1.2;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+@media (min-width: 1024px) {
+  main h1.font-display { font-size: 1.875rem; }
+}
+
+/* Seiten der Haupt-App beginnen alle an derselben linken Kante: vorher waren
+   sie je nach Maximalbreite (max-w-3xl bis 1480 px) mittig gesetzt, der
+   Seitentitel sprang beim Wechsel um bis zu 200 px hin und her. */
+@media (min-width: 768px) {
+  main > .flex-1 > .mx-auto { margin-left: 0; }
+}
+
+/* Tabellen: Kopfzeilen brechen nicht mitten im Wort um, Zahlen stehen
+   spaltengenau untereinander. */
+main table th { white-space: nowrap; }
+main table { font-variant-numeric: tabular-nums; }
+
+/* Karten: gleicher leichter Schatten wie .tactical-card */
+.apple-surface, .apple-card { box-shadow: var(--schatten-karte); }
+
+/* Dunkles Design: text-zinc-600 kam auf dunklem Grund nur auf 2,4:1
+   (Altlast aus der Pruefung 18.09.2026) — jetzt lesbar (5:1). */
+html:not([data-theme="light"]) .text-zinc-600,
+.bleibt-dunkel .text-zinc-600 { color: #8e8e93; }
+
+/* ─────── Apple-Bausteine (Wunsch Ahmad 25.11.2026) ───────
+   Filterzeile: EINE Zeile zum seitlichen Wischen statt drei umbrechender
+   Reihen (am Handy nahm der Filter den halben Bildschirm ein). Ab 640 px
+   darf sie wieder umbrechen. */
+.filter-zeile {
+  display: flex; align-items: center; gap: 8px;
+  overflow-x: auto; scrollbar-width: none;
+  -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain;
+  margin-inline: -12px; padding-inline: 12px;
+}
+.filter-zeile::-webkit-scrollbar { display: none; }
+@media (min-width: 640px) {
+  .filter-zeile { flex-wrap: wrap; overflow: visible; margin-inline: 0; padding-inline: 0; }
+}
+.filter-chip {
+  flex-shrink: 0; white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 6px;
+  min-height: 34px; padding: 0 14px;
+  border-radius: 999px; border: 0;
+  font-size: 14px; font-weight: 500;
+  color: var(--text-primary);
+  background: var(--apple-btn-secondary-bg);
+  transition: background 0.15s ease-out, color 0.15s ease-out;
+  cursor: pointer;
+}
+.filter-chip:hover { background: var(--apple-btn-secondary-bg-hover); }
+.filter-chip.aktiv { background: var(--text-primary); color: var(--bg-surface); font-weight: 600; }
+.filter-chip-zahl {
+  min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 600;
+  background: var(--st-amber); color: #fff;
+}
+[data-theme="light"] .filter-chip-zahl { background: var(--st-amber); }
+.filter-chip.aktiv .filter-chip-zahl { background: var(--bg-surface); color: var(--text-primary); }
+@media (pointer: coarse) { .filter-chip { min-height: 38px; } }
+
+/* Kennzahlen-Kachel (Bestand): zwei Werte nebeneinander, auch am Handy */
+.kennzahlen { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 16px; }
+@media (min-width: 640px) { .kennzahlen { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 32px; } }
+.kennzahl-wert { font-size: 22px; line-height: 1.2; font-weight: 700; letter-spacing: -0.01em; }

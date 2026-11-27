@@ -57,7 +57,7 @@ export default function KontoPruefen() {
                style={{ background: "var(--bg-input-solid)", color: "var(--text-primary)", border: "1px solid var(--wa-12)" }} />
         <button type="submit" disabled={busy || !kennung.trim()} data-testid="konto-pruefen-submit"
                 className="h-10 px-4 rounded-xl text-[13px] font-medium text-white inline-flex items-center gap-1.5 disabled:opacity-50"
-                style={{ background: "var(--accent-red)" }}>
+                style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
           <Search size={14} /> Prüfen
         </button>
       </form>

@@ -44,7 +44,7 @@ export default function Meldungen() {
   const ungelesen = (liste || []).filter((m) => !m.gelesen).length;
 
   return (
-    <div className="max-w-3xl mx-auto">
+    <div className="p-3 sm:p-6 lg:p-10 max-w-4xl mx-auto">
       <div className="flex items-center justify-between gap-3 mb-5">
         <div>
           <h1 className="font-display font-black text-2xl tracking-tight">Meldungen</h1>
