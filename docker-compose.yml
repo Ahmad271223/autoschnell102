@@ -191,6 +191,8 @@ services:
       # im App-Fenster auf; das Programm oeffnet Vergleiche + Inserat wieder selbst. true = wieder ein
       - AUTOPOINTER_VORGANG=${AUTOPOINTER_VORGANG:-false}
       - AUTOPOINTER_VORAB_WARTEN_S=${AUTOPOINTER_VORAB_WARTEN_S:-15}
+      # Dauerlauf (27.11.2026): so lange bleibt ein Treffer in der Trefferliste liegen
+      - DAUERLAUF_TREFFER_STUNDEN=${DAUERLAUF_TREFFER_STUNDEN:-48}
       - VERGLEICH_JE_KONTO_MINUTE=${VERGLEICH_JE_KONTO_MINUTE:-120}
       # Wunsch Ahmad 06.10.2026: E-Mails je Konto und TAG (Vertrag + Folge-Mail), keine Bremse je Minute/Stunde
       - VERSAND_JE_KONTO_TAG=${VERSAND_JE_KONTO_TAG:-100}
