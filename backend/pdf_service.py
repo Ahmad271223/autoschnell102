@@ -1342,10 +1342,9 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
     logo = _logo_flowable(dealer.get("_logo_bytes"))
     if logo is not None:
         header_left = [logo, Spacer(1, 4)] + header_left
+    # Wunsch Ahmad 28.11.2026: die Vertrags-Nr. steht in KEINEM Layout mehr im Vertrag (weder im Kopf noch in der
+    # Fusszeile). Intern bleibt sie (Archiv-Suche, Eindeutigkeit, Signaturnachweis).
     header_right = [
-        Paragraph("VERTRAGS-NR.", st["meta_label"]),
-        Paragraph(f"<b>{_xml_escape(contract_no)}</b>", st["meta_value"]),
-        Spacer(1, 5),
         Paragraph("DATUM", st["meta_label"]),
         Paragraph(f"<b>{today}</b>", st["meta_value"]),
     ]
@@ -1832,8 +1831,7 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
             story.append(KeepTogether(block))
         footer_left = company
         # 25.11.2026: im Layout "uebersicht" keine Vertragsnummer (Wunsch Ahmad)
-        footer_center = (f"Kaufvertrag · erstellt am {today} · digitale Ausfertigung" if _uebersicht()
-                         else f"Kaufvertrag {contract_no} · erstellt am {today} · digitale Ausfertigung")
+        footer_center = f"Kaufvertrag · erstellt am {today} · digitale Ausfertigung"
         doc.build(_story_dichter(story), canvasmaker=_numbered_canvas_factory(footer_left, footer_center))
         return buf.getvalue()
 
@@ -1858,7 +1856,6 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
     ]))
 
     footer_left = company
-    footer_center = (f"Kaufvertrag · erstellt am {today}" if _uebersicht()
-                     else f"Kaufvertrag {contract_no} · erstellt am {today}")
+    footer_center = f"Kaufvertrag · erstellt am {today}"      # 28.11.2026: ohne Vertrags-Nr. (alle Layouts)
     doc.build(_story_dichter(story), canvasmaker=_numbered_canvas_factory(footer_left, footer_center))
     return buf.getvalue()

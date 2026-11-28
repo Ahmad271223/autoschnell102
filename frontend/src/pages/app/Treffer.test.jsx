@@ -95,7 +95,10 @@ describe("Trefferliste", () => {
     expect(q("treffer-anrufen-t-leicht")).toBeNull();
     expect(q("treffer-mail-t-leicht")).toBeNull();
     // je Zeile: Titel (öffnet die Details), Kaufvertrag, dazu Anrufen/Mail nur wenn vorhanden
-    expect(q("treffer-t-gut").querySelectorAll("a, button").length).toBe(4);
+    // 28.11.2026: dazu IMMER der Link zum Inserat, sobald die Adresse bekannt ist
+    expect(q("treffer-t-gut").querySelectorAll("a, button").length).toBe(5);
+    expect(q("treffer-inserat-t-gut").getAttribute("href")).toBe("https://www.kleinanzeigen.de/s-anzeige/3584036047");
+    expect(q("treffer-inserat-t-leicht")).toBeNull();
     expect(q("treffer-t-leicht").querySelectorAll("a, button").length).toBe(2);
   });
 

@@ -35,7 +35,8 @@ def test_01_keine_fassung_im_vertrag_in_keiner_ausfertigung():
     for layout in ("modern", "formular"):
         for art in ({}, {"digital": True}, {"portal": True}):
             text = _text(generate_contract_pdf(dealer=HAENDLER, vehicle=FZ, contract=CD, layout=layout, **art))
-            assert "KV-F3" in text and "Erika Mustermann" in text, (layout, art)
+            assert "Erika Mustermann" in text, (layout, art)
+            assert "KV-F3" not in text and "VERTRAGS-NR" not in text, (layout, art)   # 28.11.2026: keine Vertrags-Nr.
             for verboten in ("FASSUNG", "ersetzt Fassung", "Fassung 3", "Fassung 2", "04.10.2026 · Fassung"):
                 assert verboten not in text, (layout, art, verboten)
 

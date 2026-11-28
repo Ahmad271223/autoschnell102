@@ -42,6 +42,24 @@ def _kurz(wert: Any, laenge: int) -> str:
     return re.sub(r"[ \t]+", " ", str(wert or "")).strip()[:laenge]
 
 
+#: AutoPointer zeigt bei manchen Inseraten (v. a. AutoScout24) die HTML-Auszeichnung OHNE spitze Klammern an:
+#: „…Laderaum/li/ulbrbAusstattung:/bbrulliAbgedunkelte Scheiben/liliAmbiente…“ (Bild Ahmad 28.11.2026). Ein Lauf aus
+#: Tag-Namen zaehlt nur, wenn er einen Schraegstrich enthaelt und danach ein neues Wort (gross/Ziffer), Leerraum oder
+#: das Textende kommt — so bleibt „km/bar“ oder „und/oder“ unberuehrt.
+_HTML_REST = re.compile(r"(?:/?(?:li|ul|ol|br|b|p|strong|em))*/(?:li|ul|ol|br|b|p|strong|em)(?:/?(?:li|ul|ol|br|b|p|strong|em))*"
+                        r"(?=[A-ZÄÖÜ0-9\s(\[„\"▯□]|$)")
+
+
+def html_reste(text: Any) -> str:
+    """Macht aus den Tag-Resten wieder Zeilen (Listenpunkte als „• “); sonst bleibt der Text, wie er ist."""
+    def ersatz(m: "re.Match[str]") -> str:
+        return "\n• " if m.group(0).endswith("li") else "\n"
+    s = _HTML_REST.sub(ersatz, str(text or ""))
+    s = re.sub(r"[ \t]*\n[ \t]*", "\n", s)
+    s = re.sub(r"(?:\n•\s*)+(?=\n|$)", "", s)          # leere Listenpunkte
+    return re.sub(r"\n{3,}", "\n\n", s).strip()
+
+
 def kennung(f: Dict[str, Any]) -> str:
     """Woran dasselbe Inserat wiedererkannt wird (das Programm kann ein Auto zweimal lesen): Portal + Inserat-Nummer;
     ohne Nummer die gelesenen Eckdaten."""
@@ -265,7 +283,7 @@ def dokument(user: Dict[str, Any], verbindung: Dict[str, Any], f: Dict[str, Any]
         "fahrzeug": {k: f.get(k) for k in _FAHRZEUG_FELDER if f.get(k) not in (None, "")},
         "liste": listenzeile(liste),
         "schaden": schaden, "urteil": urteil(schaden), "preislage": lage,
-        "beschreibung": str(beschreibung or "")[:6000],
+        "beschreibung": html_reste(str(beschreibung or "")[:6000]),
         "merkmale": merkmal_liste(merkmale), "ausstattung": ausstattung_liste(ausstattung),
         "erledigt": False,
     }
@@ -277,6 +295,7 @@ def antwort(doc: Dict[str, Any]) -> Dict[str, Any]:
                                     "beschreibung", "pc_name", "erledigt")}
     raus["merkmale"], raus["ausstattung"] = doc.get("merkmale") or [], doc.get("ausstattung") or []
     raus["fehlt"] = fehlt(doc)
+    raus["beschreibung"] = html_reste(raus.get("beschreibung"))     # auch bei schon gespeicherten Treffern
     return raus
 
 

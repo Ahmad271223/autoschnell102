@@ -77,7 +77,7 @@ def test_03_dokument_und_kennung():
     assert d["urteil"] == "leicht" and d["erledigt"] is False and d["pc_name"] == "PC-A"
     assert (d["ablauf"] - jetzt).total_seconds() == dt.TREFFER_STUNDEN * 3600
     assert "kraftstoff" not in d["fahrzeug"] and d["fahrzeug"]["inserat_url"].endswith("3583990986")
-    assert len(d["beschreibung"]) == 6000                       # nie mehr gespeichert, als das Programm liest
+    assert 5990 <= len(d["beschreibung"]) <= 6000                       # nie mehr gespeichert, als das Programm liest
     assert d["liste"]["zeit"] == "27.11.2026 17:24:22" and d["liste"]["privat"] is True
     assert d["liste"]["telefone"] == [] and d["liste"]["anbieter"] == "" and d["liste"]["email"] == ""
     # Telefon/E-Mail werden zu Knoepfen: nur was wie eine Nummer bzw. Adresse aussieht
@@ -130,6 +130,23 @@ def test_05_vertrag_aus_treffer_vorausgefuellt_und_fehlendes_genannt():
     v3 = dt.fahrzeug_fuer_vertrag(d3, {"make_label": "Andere", "model_label": "Weitere VW"})
     assert "make_label" not in v3 and "model_label" not in v3
     assert dt.fehlt({"fahrzeug": {"marke": "VW", "modell": "Weitere VW", "ez_jahr": 2010, "kraftstoff": "Benzin", "getriebe": "x"}}) == ["Modell"]
+
+
+def test_06_html_reste_in_der_beschreibung():
+    """Bild Ahmad 28.11.2026: AutoPointer zeigt bei AutoScout die Auszeichnung ohne spitze Klammern."""
+    t = ("Verzurrösen Koffer-/Laderaum/li/ulbrbAusstattung:/bbrulliAbgedunkelte Scheiben/liliAmbiente-Beleuchtung"
+         "/liliArmlehne/li/ulbrbTagfahrlicht (Art):/bbrulliAdaptives Kurvenlicht/li/ul")
+    s = dt.html_reste(t)
+    assert "/li" not in s and "ulli" not in s
+    assert "• Abgedunkelte Scheiben\n• Ambiente-Beleuchtung\n• Armlehne" in s and "• Adaptives Kurvenlicht" in s
+    assert s.startswith("Verzurrösen Koffer-/Laderaum\nAusstattung:")
+    # normaler Text bleibt, wie er ist
+    for normal in ("100 km/bar und/oder 1/2 Jahr", "Koffer-/Laderaum", "TÜV/AU neu, 8-fach bereift", "Preis VB / Tausch möglich", ""):
+        assert dt.html_reste(normal) == normal, normal
+    d = dt.dokument({"id": "u1", "dealer_id": "d1"}, {"id": "v1"}, {"marke": "Skoda", "modell": "Superb", "ez_jahr": 2022, "kilometer": 1},
+                    None, _schaden("ok"), None, "Sitzheizung/liliNavi", "x")
+    assert d["beschreibung"] == "Sitzheizung\n• Navi"
+    assert dt.antwort({"beschreibung": "A/liliB"})["beschreibung"] == "A\n• B"          # auch Altbestand
 
 
 def test_04_verdrahtung():

@@ -184,7 +184,8 @@ def test_04_pdf_nur_aenderungen_ursprungsfassung_unveraendert(w):
     assert _lauf(AR.abaenderungen_liste(c["id"], user=w.sucher))["vorschlag"] == []
     pdf = _lauf(AR.abaenderung_pdf(c["id"], ab["id"], user=w.sucher)).body
     t = _text(pdf)
-    assert "ABÄNDERUNGSVERTRAG" in t and f"KFZ-Kaufvertrag Nr. KV-{w.s}" in t
+    assert "ABÄNDERUNGSVERTRAG" in t and "zum KFZ-Kaufvertrag vom" in t
+    assert f"KV-{w.s}" not in t and "VERTRAGS-NR" not in t          # 28.11.2026: keine Vertrags-Nr. mehr
     assert "Kaufpreis: 12.500 € → 11.900 €" in t and "Golf VII" in t
     assert "Alle übrigen Vereinbarungen des Kaufvertrags bleiben unverändert" in t
     for nie in ("Kilometerstand", "Erstzulassung", "Diesel", "Fassung", "ohne Unterschrift", "Signaturnachweis"):

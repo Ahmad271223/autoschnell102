@@ -71,10 +71,11 @@ def _bauen(P, *, dealer, vehicle, contract, aenderungen, vertrag_datum, datum) -
     firma = (dealer.get("company_name") or "Autohändler").strip()
     nr = str(contract.get("contract_no") or "").strip()
     vom = datum_de(vertrag_datum)
-    untertitel = f"zum KFZ-Kaufvertrag{(' Nr. ' + nr) if nr else ''} vom {vom}"
+    # Wunsch Ahmad 28.11.2026: keine Vertrags-Nr. mehr in den Vertraegen — der Bezug laeuft ueber das Datum
+    nr = ""
+    untertitel = f"zum KFZ-Kaufvertrag vom {vom}"
 
-    rechts = [Paragraph("VERTRAGS-NR.", st["meta_label"]), Paragraph(f"<b>{_xml_escape(nr or '—')}</b>", st["meta_value"]),
-              Spacer(1, 5), Paragraph("DATUM", st["meta_label"]), Paragraph(f"<b>{heute}</b>", st["meta_value"])]
+    rechts = [Paragraph("DATUM", st["meta_label"]), Paragraph(f"<b>{heute}</b>", st["meta_value"])]
     kundennummer = str(contract.get("vertrags_kundennummer") or contract.get("kundennummer")
                        or dealer.get("vertrags_kundennummer") or "").strip()
     if kundennummer:

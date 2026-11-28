@@ -93,7 +93,7 @@ def test_03_formular_hat_denselben_inhalt(digital):
     assert "KAUFPREIS KAUFPREIS" not in formular and "Kaufpreis KAUFPREIS" not in modern, "Kaufpreis steht doppelt"
     assert "FAHRZEUGDATEN" in formular and "FAHRZEUGDATEN" not in modern, "Layout greift"
     assert "Konditionen" not in formular and "Konditionen" not in modern
-    for stueck in ("KFZ-KAUFVERTRAG", "für ein gebrauchtes Kraftfahrzeug", "KV-DESIGN-1", "Erika Mustermann",
+    for stueck in ("KFZ-KAUFVERTRAG", "für ein gebrauchtes Kraftfahrzeug", "Erika Mustermann",
                    "Musterweg 5", "KFZ Müller GmbH", "22.500,00 EUR", "Echtzeitüberweisung", "Volkswagen",
                    "112.700 km", "Ja, gültig bis 06/2027", "Zweite Hand.", "Erster Punkt.", "Zweiter Punkt.",
                    "auch ohne Unterschrift gültig", "Gewährleistung"):
@@ -186,7 +186,8 @@ def test_08_vorschau_mit_musterdaten(welt):
     r = w.run(D.vertrag_vorschau(D.VertragVorschauIn(), w.chef))
     assert r.media_type == "application/pdf" and r.body.startswith(b"%PDF")
     t = _text(r.body)
-    assert "MUSTER-0001" in t and "Max Mustermann" in t and "KFZ Müller GmbH" in t
+    assert "Max Mustermann" in t and "KFZ Müller GmbH" in t
+    assert "MUSTER-0001" not in t and "VERTRAGS-NR" not in t           # 28.11.2026: keine Vertrags-Nr. im Vertrag
     assert "FAHRZEUGDATEN" in t, "ohne Auswahl: gespeichertes Layout der Firma (formular)"
     assert _rgb("#4F46E5") in _inhaltsstroeme(r.body), "ohne Auswahl: gespeicherte Farbe der Firma (indigo)"
     # Auswahl vor dem Speichern

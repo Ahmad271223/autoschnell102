@@ -793,16 +793,18 @@ internal sealed class TrayApp : ApplicationContext
     private Dauerlauf? _dauerlauf;
     private volatile bool _dauerlaufAn, _dlStartet;
     /// <summary>So lange muessen Maus und Tastatur ruhen, bevor der wartende Dauerlauf von selbst weitermacht.</summary>
-    internal const int DauerlaufRuheS = 30;
+    internal const int DauerlaufRuheS = 8;
     private int _dlNeu, _dlAussortiert, _dlGelesen, _dlTreffer;
     private volatile string _dlHindernis = "";
     private Native.POINT? _dlMaus;
     private long _dlAnzeige, _dlStart;
-    internal const int DauerlaufSchonfristMs = 4000;
+    // 28.11.2026: nach dem Klick auf „Dauerlauf starten“ hat der Sucher die Maus noch in der Hand — 4 s waren zu kurz,
+    // der Dauerlauf wartete fast sofort wieder (im Protokoll fuenfmal hintereinander)
+    internal const int DauerlaufSchonfristMs = 8000;
 
     /// <summary>So weit darf der Zeiger zwischen zwei Schritten wandern, ohne dass es als „jemand benutzt die Maus“ gilt.</summary>
     internal const int DauerlaufMausSpiel = 10;
-    internal const string DauerlaufMausText = "Dauerlauf wartet – die Maus wurde bewegt. Er macht von selbst weiter, sobald der PC 30 s nicht benutzt wird. Ganz aus: Klick auf das Feld „DAUERLAUF“.";
+    internal const string DauerlaufMausText = "Dauerlauf wartet – die Maus wurde bewegt. Er macht von selbst weiter, sobald der PC 8 s nicht benutzt wird. Ganz aus: Klick auf das Feld „DAUERLAUF“.";
     internal const string DauerlaufServerAlt = "Dauerlauf angehalten – AutoSchnell kennt die Trefferliste noch nicht (Server-Update fehlt).";
 
     /// <summary>Der kurze Stand fuer Leiste und Tooltip. (rein, fuer Tests)</summary>

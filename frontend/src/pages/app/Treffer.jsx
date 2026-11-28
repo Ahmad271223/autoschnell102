@@ -121,7 +121,7 @@ function teile(t) {
   };
 }
 
-function Knoepfe({ t, x, onVertrag, laedt, mitInserat = false }) {
+function Knoepfe({ t, x, onVertrag, laedt }) {
   const halt = (e) => e.stopPropagation();
   return (
     <>
@@ -140,8 +140,10 @@ function Knoepfe({ t, x, onVertrag, laedt, mitInserat = false }) {
           <Mail size={15} aria-hidden="true" /> Mail
         </a>
       )}
-      {mitInserat && x.inserat && (
-        <a href={x.inserat} target="_blank" rel="noopener noreferrer" className="apple-btn apple-btn-ghost min-h-[40px]">
+      {/* Wunsch Ahmad 28.11.2026: der Link zum Inserat steht IMMER dabei (Zeile und Detailansicht) */}
+      {x.inserat && (
+        <a href={x.inserat} target="_blank" rel="noopener noreferrer" onClick={halt} data-testid={`treffer-inserat-${t.id}`}
+           className="apple-btn apple-btn-ghost min-h-[40px]">
           <ExternalLink size={15} aria-hidden="true" /> Inserat
         </a>
       )}
@@ -196,7 +198,7 @@ function Zeile({ t, neu, aktiv, onDetails, onVertrag, laedt }) {
 
       <div className="tz-verkaeufer min-w-0">
         {(l.anbieter || x.nummern.length > 0) && (
-          <div className="truncate text-[14px]" style={{ color: "var(--text-primary)" }}>{l.anbieter || x.nummern[0]}</div>
+          <div className="truncate text-[12.5px]" style={{ color: "var(--text-primary)" }}>{l.anbieter || x.nummern[0]}</div>
         )}
         {l.anbieter && x.nummern.length > 0 && <div className="tz-leise truncate">{x.nummern.join(" · ")}</div>}
         {x.ort && <div className="tz-leise truncate flex items-center gap-1"><MapPin size={12} aria-hidden="true" className="shrink-0" /><span className="truncate">{x.ort}</span></div>}
@@ -217,7 +219,7 @@ function Details({ t, onZu, onVertrag, laedt }) {
     <aside className="td tactical-card" data-testid="treffer-detail" aria-label={`Details zu ${x.titel}`}>
       <div className="td-kopf">
         <div className="min-w-0 flex-1">
-          <h2 className="text-[17px] font-semibold leading-snug" style={{ color: "var(--text-strong)" }}>{x.titel}</h2>
+          <h2 className="text-[15px] font-semibold leading-snug" style={{ color: "var(--text-strong)" }}>{x.titel}</h2>
           <div className="tz-leise mt-0.5">{x.herkunft}{l.zeit ? ` · ${l.zeit}` : ""}</div>
         </div>
         <button type="button" onClick={onZu} aria-label="Details schließen" data-testid="treffer-detail-zu"
@@ -226,7 +228,7 @@ function Details({ t, onZu, onVertrag, laedt }) {
 
       <div className="td-inhalt">
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-          <span className="text-[22px] font-bold" style={{ color: "var(--text-strong)", fontVariantNumeric: "tabular-nums" }}>
+          <span className="text-[18px] font-bold" style={{ color: "var(--text-strong)", fontVariantNumeric: "tabular-nums" }}>
             {f.preis != null ? `${Number(f.preis).toLocaleString("de-DE")} €` : "Preis nicht gelesen"}
           </span>
           {x.preis && <span className="tz-leise">{x.preis}</span>}
@@ -246,7 +248,7 @@ function Details({ t, onZu, onVertrag, laedt }) {
           </div>
         )}
 
-        <div className="flex flex-wrap gap-2 mt-4"><Knoepfe t={t} x={x} onVertrag={onVertrag} laedt={laedt} mitInserat /></div>
+        <div className="flex flex-wrap gap-2 mt-4"><Knoepfe t={t} x={x} onVertrag={onVertrag} laedt={laedt} /></div>
 
         <h3 className="td-titel">Daten</h3>
         {merkmale.length > 0 ? (
@@ -304,12 +306,12 @@ const STIL = `
   .tz-verkaeufer { grid-area: verkaeufer; }
   .tz-knoepfe { grid-area: knoepfe; display: flex; flex-wrap: wrap; gap: 8px; }
   .tz-knoepfe > .apple-btn { flex: 1 1 8.5rem; }
-  .tz-titel { font-size: 15px; font-weight: 600; line-height: 1.35; color: var(--text-strong); display: flex; }
+  .tz-titel { font-size: 13.5px; font-weight: 600; line-height: 1.35; color: var(--text-strong); display: flex; }
   .tz-titel-knopf { font: inherit; color: inherit; text-align: left; background: none; border: 0; padding: 0; cursor: pointer; max-width: 100%; }
   .tz-titel-knopf:hover { text-decoration: underline; }
-  .tz-daten { font-size: 14px; line-height: 1.5; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
-  .tz-leise { font-size: 13px; line-height: 1.45; color: var(--text-muted); }
-  .tz-preis-wert { font-size: 17px; font-weight: 700; line-height: 1.35; color: var(--text-strong); font-variant-numeric: tabular-nums; }
+  .tz-daten { font-size: 12.5px; line-height: 1.5; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+  .tz-leise { font-size: 12px; line-height: 1.45; color: var(--text-muted); }
+  .tz-preis-wert { font-size: 15px; font-weight: 700; line-height: 1.35; color: var(--text-strong); font-variant-numeric: tabular-nums; }
   .tz-punkt { width: 8px; height: 8px; border-radius: 999px; flex: none; }
   .tz-neu { font-size: 12px; font-weight: 700; line-height: 18px; padding: 0 6px; border-radius: 6px; flex: none;
             color: var(--tx-blau); background: color-mix(in srgb, var(--st-blau) 14%, transparent); }
@@ -339,14 +341,14 @@ const STIL = `
   .td { display: flex; flex-direction: column; overflow: hidden; }
   .td-kopf { display: flex; align-items: flex-start; gap: 8px; padding: 16px 12px 12px 20px; border-bottom: 1px solid var(--divider); }
   .td-inhalt { padding: 16px 20px 24px; overflow-y: auto; }
-  .td-titel { font-size: 13px; font-weight: 600; color: var(--text-muted); margin: 24px 0 8px; }
-  .td-zeile { display: grid; grid-template-columns: minmax(0, 11rem) minmax(0, 1fr); gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--divider); font-size: 14px; }
+  .td-titel { font-size: 12px; font-weight: 600; color: var(--text-muted); margin: 18px 0 6px; }
+  .td-zeile { display: grid; grid-template-columns: minmax(0, 11rem) minmax(0, 1fr); gap: 12px; padding: 4px 0; border-bottom: 1px solid var(--divider); font-size: 12.5px; }
   .td-zeile:last-child { border-bottom: 0; }
   .td-zeile dt { color: var(--text-muted); }
   .td-zeile dd { color: var(--text-strong); font-weight: 500; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-  .td-ausstattung { display: grid; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); gap: 4px 16px; font-size: 14px; color: var(--text-primary); }
-  .td-text { font-size: 14px; line-height: 1.6; color: var(--text-primary); white-space: pre-line; overflow-wrap: anywhere; max-width: 70ch; }
-  .td-hinweis { display: flex; gap: 8px; padding: 10px 12px; border-radius: 10px; font-size: 13px; line-height: 1.45;
+  .td-ausstattung { display: grid; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); gap: 2px 14px; font-size: 12.5px; color: var(--text-primary); }
+  .td-text { font-size: 12.5px; line-height: 1.5; color: var(--text-primary); white-space: pre-line; overflow-wrap: anywhere; max-width: 70ch; }
+  .td-hinweis { display: flex; gap: 8px; padding: 10px 12px; border-radius: 10px; font-size: 12px; line-height: 1.45;
                 color: var(--tx-amber); background: color-mix(in srgb, var(--st-amber) 12%, transparent); }
   .td { position: fixed; inset: 0; z-index: 40; border-radius: 0; }
   @media (min-width: 1200px) {
