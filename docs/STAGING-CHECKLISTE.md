@@ -1,0 +1,128 @@
+# Staging-/Livegang-Checkliste
+
+Reihenfolge einhalten. Punkte mit **[Server]** gehen nur auf der echten
+Staging-/Produktionsmaschine — sie sind hier bewusst NICHT abgehakt,
+Befehl und Abnahmekriterium stehen jeweils dabei.
+
+## 1. Konfiguration (.env)
+
+- [ ] **[Server]** `.env` aus `.env.example` erstellen und füllen:
+  `JWT_SECRET` (openssl rand -hex 32), `SUPER_ADMIN_USERNAME` (keine Zahl)
+  und starkes `SUPER_ADMIN_PASSWORD`,
+  `FRONTEND_URL=https://…`, `CORS_ORIGINS=https://…`
+- [x] Das Backend **verweigert den Start** mit Entwicklungswerten:
+  `APP_ENV=production` ist im docker-compose gesetzt, `production_check.py`
+  prüft JWT_SECRET, das Super-Admin-Passwort (und dass der Benutzername nicht
+  wie eine Kontonummer aussieht), FRONTEND_URL, CORS, Mongo-Auth und
+  einen versehentlich aktiven Anbieter-Mock (Exit 78 mit klarer Meldung —
+  automatisiert getestet).
+
+## 2. MongoDB — Authentifizierung + private Erreichbarkeit
+
+- [ ] **[Server]** Admin-Nutzer anlegen und Auth erzwingen:
+  ```bash
+  docker compose exec mongo mongosh --eval '
+    use admin;
+    db.createUser({user:"autoschnell", pwd:"<STARKES-PASSWORT>",
+                   roles:[{role:"readWrite", db:"autoschnell"}]})'
+  ```
+  danach im Compose beim mongo-Dienst `command: ["--auth"]` aktivieren und
+  in `.env` setzen:
+  `MONGO_URL=mongodb://autoschnell:<PASSWORT>@mongo:27017/autoschnell?authSource=admin`
+- [ ] **[Server]** KEIN öffentlicher Mongo-Port: im docker-compose darf der
+  mongo-Dienst **kein** `ports:`-Mapping haben (nur das interne
+  Docker-Netz). Abnahme: `nmap <server-ip> -p 27017` von außen → closed.
+- [x] Der Produktions-Check bricht ab, wenn `MONGO_URL` keine Zugangsdaten
+  enthält.
+
+## 3. Domain + HTTPS
+
+- [ ] **[Server]** DNS: `autoschnell.de` + `www` auf die Server-IP.
+- [ ] **[Server]** TLS-Zertifikat (z.B. certbot/Traefik/Caddy) vor
+  `deploy/nginx.conf`; HTTP→HTTPS-Umleitung. Abnahme:
+  `curl -I http://autoschnell.de` → 301 auf https;
+  SSL-Labs-Note mindestens A.
+
+## 4. Anmeldung mit Kontonummer und E-Mail-Versand
+
+- [ ] **[Server]** Login mit Kontonummer: Der Super-Admin legt eine Testfirma
+  an (Admin → Nutzer) und einen Sucher dazu. Abnahme: Chef meldet sich mit der
+  angezeigten Nummer (z. B. `10023`) an, der Sucher mit `10023-2`; eine
+  falsche Nummer ergibt „Kontonummer oder Passwort falsch“.
+- [ ] **[Server]** Betreiber setzt Passwort: Admin → Konto → Passwort setzen.
+  Abnahme: die offene Sitzung des Kontos endet, die Anmeldung klappt nur mit
+  dem neuen Passwort; die Seite „Passwort vergessen?“ zeigt nur den Hinweis auf
+  den Betreiber (kein Formular, keine Mail).
+- [ ] **[Server]** Resend-/SMTP-Zugang in `.env` (`RESEND_API_KEY` bzw.
+  `SMTP_*`), Absender-Domain verifizieren (SPF/DKIM). Abnahme: einen
+  Kaufvertrag an eine Test-Adresse schicken → Mail kommt an, die Antwort geht
+  an den Sucher (ohne eigene Adresse an die Firmenadresse).
+
+## 5. Browser-Erweiterung (Client-Abruf)
+
+- [ ] Erweiterung aus `browser-extension/` paketieren und an die Sucher
+  verteilen (oder Chrome-Web-Store-Eintrag).
+- [ ] Erst DANACH `CLIENT_FETCH_KLEINANZEIGEN=true` setzen — vorher holt
+  der Server neue Kleinanzeigen-Links selbst (Details:
+  docs/kleinanzeigen-abruf.md).
+
+## 6. Anbieterzugänge
+
+- [ ] mobile.de Search-API: Vertrag (Professional-Tarif) abschließen,
+  `MOBILE_API_USER/PASS` in `.env`. Ohne Zugang bleiben mobile.de-Links
+  gesperrt (klare 400-Meldung — gewollt).
+- [ ] Kleinanzeigen: schriftlich klären, ob der geplante Abrufweg
+  (Server-Abruf gedrosselt auf `MAX_CONCURRENT_KLEINANZEIGEN`, Standard 2 gleichzeitig, bzw. Client-Abruf über die
+  Erweiterung) den Nutzungsbedingungen entspricht — siehe
+  docs/kleinanzeigen-abruf.md. **Keine Lasttests gegen echte Anbieter**
+  (der Lasttest verweigert den Start ohne Mock — automatisiert geprüft).
+
+## 7. Stripe — entfällt seit 14.09.2026
+
+Stripe ist entfernt (Entscheidung Ahmad: Rechnung, Zahlung, dann Zugangsdaten);
+es gibt keinen Webhook mehr. Der folgende Abschnitt ist nur noch historisch.
+
+- [ ] Live-Keys (`STRIPE_API_KEY`) + Webhook-Endpunkt
+  `https://…/api/webhook/stripe` im Stripe-Dashboard anlegen und das
+  `whsec_…` als `STRIPE_WEBHOOK_SECRET` setzen (Signatur wird geprüft,
+  Fehler → 400, Stripe wiederholt).
+- [ ] Testkauf im Stripe-Testmodus: Abo wird nach `checkout.session.completed`
+  aktiv; fremde Session-ID liefert 403 (automatisiert getestet).
+
+## 8. Backup + Wiederherstellung
+
+- [x] Nächtliches Backup läuft im Backend (03:00, 14 Tage Rotation,
+  Ein-Worker-Sperre) — im Container nach `/backups` (Volume).
+- [x] **Wiederherstellung automatisiert bewiesen**:
+  `python -X utf8 scripts/wiederherstellung_testen.py`
+  (Backup → Restore in separate Testdatenbank → Zähl- und Lesevergleich →
+  Aufräumen; letzter Lauf: 30/30 Collections identisch).
+- [ ] **[Server]** Denselben Test dort wöchentlich per Cron laufen lassen;
+  Abnahme: Exit 0 und „Wiederherstellung bewiesen" im Log. Backups
+  zusätzlich **außer Haus** kopieren (z.B. Object Storage).
+
+## 9. Monitoring
+
+- [x] `GET /api/admin/monitoring` (nur Super-Admin, Betriebsseite): Ampel +
+  unerwartete Fehler der letzten Stunde (error_logs), Job-Rückstau inkl. Alter
+  des ältesten wartenden Jobs, aktive Anbieter-Slots, Abrufe heute. **Nicht**
+  für eine externe Überwachung geeignet: braucht ein Super-Admin-Token, und
+  jede Anmeldung beendet die vorige Sitzung (Einzelsitzung).
+- [ ] **[Server]** Externe Überwachung (Prüfbericht 20.09.2026, DO-19): alle
+  1–5 min `GET /api/ready` ohne Anmeldung — 200 = bereit, 503 = nicht bereit
+  (Datenbank, Migrationsstand, Speicher, Datei-Speicher); nach außen nur
+  `ready` true/false, Einzelheiten im Container
+  (`docker compose exec -T backend curl -s http://localhost:8001/api/ready`).
+  Dazu Betriebsmeldungen per E-Mail: `BETRIEB_MELDUNG_AN` in der `.env` setzen
+  (Sofortmeldung bei neuem Betriebsalarm, Freischaltungs-Anfragen,
+  Tagesbericht — DEPLOYMENT.md „Betriebsmeldungen per E-Mail“) und
+  Host-Metriken (CPU/RAM/Disk).
+
+## 10. Lasttest auf der Zielumgebung
+
+- [ ] **[Server]** `MOCK_PROVIDER_FETCH=true python -X utf8
+  scripts/lasttest.py --users 500 --duration 300` — Abnahmekriterien in
+  docs/lasttests/README.md (Fehlerrate < 1 % nur 503-Rückstau,
+  0 Mehrfach-Abrufe, Vergleich p95 < 3 s, Jobwartezeit p95 < 60 s).
+  Danach `MOCK_PROVIDER_FETCH` wieder ENTFERNEN (der Produktions-Check
+  verweigert sonst den Start).

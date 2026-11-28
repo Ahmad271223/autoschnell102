@@ -1,7 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
+import { lesen, schreiben, sitzungsSpeicher } from "@/lib/speicher";
+import { ladeMakes } from "@/lib/katalog";
 import { toast } from "sonner";
 import PortalSheet from "@/components/PortalSheet";
+import { FILTER_TOAST_ID } from "@/lib/filterOeffnen";
+import { hinweiseZeigen } from "@/lib/hinweise";
+import { useAuth } from "@/context/AuthContext";
 import {
   Search, Car, Calendar, Gauge, Zap, Fuel, Cog, Eye, ExternalLink,
   ChevronDown, X,
@@ -13,7 +19,59 @@ const FUELS = [
 ];
 const GEARBOXES = ["Automatik", "Manuell"];
 
+// Pruefbericht 20.09.2026 (U-21/M14): Grenzen wie im Backend (manual_search.py).
+// Vorher kamen englische Pydantic-Meldungen — und 2050 PS (erlaubt) wurden
+// automatisch zu 1508 kW umgerechnet, was der Server ablehnte.
+const KW_MAX = 1500;
+const PS_MAX = 2039;          // = 1500 kW
+const KM_MAX = 2000000;
+
+/** Eingaben pruefen, deutsche Meldung oder null. */
+export function sucheFehler({ ezFrom, ezTo, kmMin, kmMax, kw, ps, leistungQuelle }) {
+  const zahl = (v) => (v === "" || v === null || v === undefined ? null : Number(v));
+  const km1 = zahl(kmMin); const km2 = zahl(kmMax);
+  for (const [name, v] of [["von km", km1], ["bis km", km2]]) {
+    if (v !== null && (!Number.isInteger(v) || v < 0 || v > KM_MAX)) {
+      return `Kilometerstand (${name}): bitte eine ganze Zahl zwischen 0 und 2.000.000.`;
+    }
+  }
+  if (km1 !== null && km2 !== null && km1 > km2) return "Kilometerstand: „von“ liegt über „bis“.";
+  if (ezFrom && ezTo && Number(ezFrom) > Number(ezTo)) return "Erstzulassung: „von“ liegt nach „bis“.";
+  if (leistungQuelle === "kw") {
+    const v = zahl(kw);
+    if (v !== null && (!Number.isInteger(v) || v < 1 || v > KW_MAX)) return `Leistung: bitte 1 bis ${KW_MAX} kW.`;
+  }
+  if (leistungQuelle === "ps") {
+    const v = zahl(ps);
+    if (v !== null && (!Number.isInteger(v) || v < 1 || v > PS_MAX)) return `Leistung: bitte 1 bis ${PS_MAX} PS.`;
+  }
+  return null;
+}
+
+// U-24/M17: Das ausgefuellte Formular ging bei jedem Seitenwechsel verloren.
+// Je Konto im Sitzungsspeicher (nicht dauerhaft, nicht fuer andere Konten).
+const FORM_KEY = (userId) => `ah_suche:${userId || "unbekannt"}`;
+
 export default function ManuelleSuche() {
+  const { dealer, user, refresh } = useAuth();
+  const nav = useNavigate();
+  // Runde 11: Das aktive Regelprofil (Inland/Export) bestimmt Land,
+  // Unfallwagen, Anbieter usw. der Suche — vorher stand es nirgends auf
+  // dieser Seite, zwei gleiche Eingaben konnten voellig verschieden suchen.
+  // Rollenprüfung 22.09.2026 (RP-123): Der Anmeldezustand (dealer) kennt
+  // einen Profilwechsel über das Abzeichen im Vergleich erst nach dem
+  // Neuladen — hier stand dann das alte Profil. Deshalb das wirksame Profil
+  // einmal frisch vom Server lesen (wie das Abzeichen selbst); bis dahin und
+  // bei Fehlern gilt der Wert aus dem Anmeldezustand.
+  const [profilServer, setProfilServer] = useState(null);
+  useEffect(() => {
+    let aktiv = true;
+    api.get("/dealer/settings")
+      .then((r) => { if (aktiv && r.data?.active_profile) setProfilServer(r.data.active_profile); })
+      .catch(() => { /* Anzeige bleibt beim Anmeldezustand */ });
+    return () => { aktiv = false; };
+  }, []);
+  const aktivesProfil = (profilServer || dealer?.active_profile) === "export" ? "Export" : "Inland";
   const [makes, setMakes] = useState([]);
   const [makeId, setMakeId] = useState(null);
   const [modelId, setModelId] = useState(null);
@@ -31,14 +89,45 @@ export default function ManuelleSuche() {
   const [fuel, setFuel] = useState("");
   const [gearbox, setGearbox] = useState("");
   const [busy, setBusy] = useState(false);
-  const [portalUrls, setPortalUrls] = useState(null); // { mobile, autoscout }
+  const [portalUrls, setPortalUrls] = useState(null); // { mobile, autoscout, aufgeloest, profil }
+  // U-22/M15: Nur das Feld, das der Nutzer selbst getippt hat, geht an den
+  // Server — vorher immer beide, und jede Suche meldete "kW und PS beide".
+  const [leistungQuelle, setLeistungQuelle] = useState(null);
 
-  // Marken laden — einmal beim Mount
+  // U-24: gespeicherten Formularstand einmal wiederherstellen.
+  const wiederhergestellt = useRef(false);
   useEffect(() => {
-    api.get("/manual/makes")
-      .then(({ data }) => setMakes(data))
-      .catch((e) => toast.error(errMsg(e, "Marken konnten nicht geladen werden")));
-  }, []);
+    if (wiederhergestellt.current || !user?.id) return;
+    wiederhergestellt.current = true;
+    try {
+      const roh = lesen(sitzungsSpeicher(), FORM_KEY(user.id));
+      if (!roh) return;
+      const f = JSON.parse(roh);
+      setMakeId(f.makeId ?? null); setModelId(f.modelId ?? null);
+      setEzFrom(f.ezFrom || ""); setEzTo(f.ezTo || "");
+      setKmMin(f.kmMin || ""); setKmMax(f.kmMax || "");
+      setKw(f.kw || ""); setPs(f.ps || ""); setLeistungQuelle(f.leistungQuelle || null);
+      setFuel(f.fuel || ""); setGearbox(f.gearbox || "");
+    } catch { /* unlesbar — dann eben leer */ }
+  }, [user?.id]);
+  useEffect(() => {
+    if (!user?.id || !wiederhergestellt.current) return;
+    schreiben(sitzungsSpeicher(), FORM_KEY(user.id), JSON.stringify({
+      makeId, modelId, ezFrom, ezTo, kmMin, kmMax, kw, ps, leistungQuelle, fuel, gearbox,
+    }));
+  }, [user?.id, makeId, modelId, ezFrom, ezTo, kmMin, kmMax, kw, ps, leistungQuelle, fuel, gearbox]);
+
+  // Marken laden — einmal je Sitzung (Modul-Cache, Nachpruefung Runde 10).
+  // U-17/H10: Scheitert der Abruf, bleibt die Seite nicht dauerhaft tot —
+  // "Erneut versuchen" laedt neu (der Modul-Cache verwirft Fehler selbst).
+  const [makesFehler, setMakesFehler] = useState("");
+  const markenLaden = () => {
+    setMakesFehler("");
+    ladeMakes(api)
+      .then((data) => setMakes(Array.isArray(data) ? data : []))
+      .catch((e) => setMakesFehler(errMsg(e, "Marken konnten nicht geladen werden")));
+  };
+  useEffect(() => { markenLaden(); }, []);
 
   const selectedMake = useMemo(
     () => makes.find((m) => m.id === makeId) || null,
@@ -65,22 +154,33 @@ export default function ManuelleSuche() {
   // Wenn der User KW eingibt, schätzen wir PS und umgekehrt
   const onKwChange = (v) => {
     setKw(v);
+    setLeistungQuelle(v ? "kw" : null);
     if (v && !isNaN(Number(v))) {
       setPs(String(Math.round(Number(v) * 1.359621617)));
     } else if (!v) setPs("");
   };
   const onPsChange = (v) => {
     setPs(v);
+    setLeistungQuelle(v ? "ps" : null);
     if (v && !isNaN(Number(v))) {
       setKw(String(Math.round(Number(v) / 1.359621617)));
     } else if (!v) setKw("");
   };
+
+  // Runde 24 (11.09.2026): ids der gezeigten Server-Hinweise — eine weitere
+  // Suche ersetzt denselben Text, statt ihn zu stapeln (siehe lib/hinweise).
+  const hinweisIdsRef = useRef([]);
 
   const submit = async () => {
     if (!selectedMake) {
       toast.error("Bitte zuerst eine Marke auswählen");
       return;
     }
+    const fehler = sucheFehler({ ezFrom, ezTo, kmMin, kmMax, kw, ps, leistungQuelle });
+    if (fehler) { toast.error(fehler); return; }
+    // Runde 22 (11.09.2026, Gegenpruefung): ein stehender Blockade-Hinweis
+    // der vorherigen Suche wuerde deren Link in den Filter-Tab laden.
+    toast.dismiss(FILTER_TOAST_ID);
     setBusy(true);
     try {
       const { data } = await api.post("/manual/search", {
@@ -90,15 +190,33 @@ export default function ManuelleSuche() {
         ez_to: ezTo ? parseInt(ezTo, 10) : null,
         km_min: kmMin ? parseInt(kmMin, 10) : null,
         km_max: kmMax ? parseInt(kmMax, 10) : null,
-        kw: kw ? parseInt(kw, 10) : null,
-        ps: ps ? parseInt(ps, 10) : null,
+        kw: leistungQuelle === "kw" && kw ? parseInt(kw, 10) : null,
+        ps: leistungQuelle === "ps" && ps ? parseInt(ps, 10) : null,
         fuel: fuel || null,
         gearbox: gearbox || null,
       });
       // Dialog anzeigen — User wählt welches Portal er öffnen will
-      setPortalUrls({ mobile: data.mobile_url, autoscout: data.autoscout_url });
+      setPortalUrls({
+        mobile: data.mobile_url,
+        autoscout: data.autoscout_url,
+        aufgeloest: data.aufgeloest || null,
+        profil: data.profil,
+      });
+      // Runde 10: Der Server sagt, wenn ein Portal Marke oder Modell nicht
+      // kennt — vorher lief die Suche dann still ueber die ganze Marke.
+      // Runde 24 (11.09.2026): feste id je Text — derselbe Hinweis steht nie doppelt.
+      hinweisIdsRef.current = hinweiseZeigen(toast, data.hinweise, hinweisIdsRef.current);
     } catch (e) {
-      toast.error(errMsg(e, "Suche fehlgeschlagen"));
+      if (e?.response?.status === 402) {
+        // U-18/H11: Abo abgelaufen — Kontext neu laden (die Routensperre greift
+        // dann) und den Weg zur Abo-Seite anbieten statt drei Worten.
+        refresh?.();
+        toast.error("Für die Suche brauchst du ein aktives persönliches Sucher-Abo.", {
+          duration: 12000, action: { label: "Zum Abo", onClick: () => nav("/abo") },
+        });
+      } else {
+        toast.error(errMsg(e, "Suche fehlgeschlagen"));
+      }
     } finally {
       setBusy(false);
     }
@@ -107,7 +225,12 @@ export default function ManuelleSuche() {
   const reset = () => {
     setMakeId(null); setModelId(null); setMakeSearch(""); setModelSearch("");
     setEzFrom(""); setEzTo(""); setKmMin(""); setKmMax("");
-    setKw(""); setPs(""); setFuel(""); setGearbox("");
+    setKw(""); setPs(""); setFuel(""); setGearbox(""); setLeistungQuelle(null);
+    // Runde 11: Links der VORHERIGEN Suche gehoeren nicht zu leeren Feldern.
+    setPortalUrls(null);
+    toast.dismiss(FILTER_TOAST_ID);   // Runde 22: dito fuer den Blockade-Hinweis
+    // Runde 24 (11.09.2026): dito fuer die Server-Hinweise der vorigen Suche.
+    hinweisIdsRef.current = hinweiseZeigen(toast, [], hinweisIdsRef.current);
   };
 
   const years = useMemo(() => {
@@ -118,7 +241,10 @@ export default function ManuelleSuche() {
   }, []);
 
   return (
-    <div className="space-y-6">
+    // Befund Ahmad (12.09.2026): Die Seite hatte weder Rand noch Breiten-
+    // begrenzung — alles klebte am Bildschirmrand. Jetzt derselbe Rahmen wie
+    // im Vergleich, mehr Abstand und zweispaltige Filter ab Tablet-Breite.
+    <div className="p-3 sm:p-6 lg:p-10 max-w-5xl mx-auto space-y-8" data-testid="suche-page">
       <div>
         <div className="overline">MANUELLE SUCHE · MOBILE.DE & AUTOSCOUT24</div>
         <h1 className="font-display font-black text-4xl tracking-tighter leading-none mt-2">
@@ -127,12 +253,29 @@ export default function ManuelleSuche() {
         </h1>
         <p className="text-sm mt-2 max-w-2xl" style={{ color: "var(--text-secondary)" }}>
           Wähle Marke, Modell und Filter aus — wir öffnen mobile.de und AutoScout24
-          gleichzeitig in zwei Tabs mit fertigem Filter.
+          mit fertigem Filter (beide auf einmal, sobald Pop-ups für AutoSchnell erlaubt sind).
+        </p>
+        <p className="text-xs mt-1" style={{ color: "var(--text-secondary)" }} data-testid="suche-profil">
+          Aktives Regelprofil: <strong>{portalUrls?.profil
+            ? (portalUrls.profil === "export" ? "Export" : "Inland")
+            : aktivesProfil}</strong> — Land, Unfallwagen und Anbieter
+          kommen aus diesem Profil (Einstellungen).
         </p>
       </div>
 
+      {makesFehler && (
+        <div className="rounded-xl border px-4 py-3 text-sm flex flex-wrap items-center gap-3" role="alert"
+             data-testid="manual-makes-fehler"
+             style={{ borderColor: "#ef444455", background: "#ef444414", color: "var(--text-primary)" }}>
+          <span className="flex-1 min-w-0">{makesFehler}</span>
+          <button type="button" onClick={markenLaden} className="apple-btn apple-btn-secondary">
+            Erneut versuchen
+          </button>
+        </div>
+      )}
+
       {/* Marke + Modell */}
-      <div className="grid md:grid-cols-2 gap-4">
+      <div className="grid md:grid-cols-2 gap-5">
         <PickerCard
           icon={<Car size={14} />}
           label="MARKE"
@@ -168,14 +311,16 @@ export default function ManuelleSuche() {
       </div>
 
       {/* Filter-Block */}
-      <div className="apple-card p-6">
-        <div className="overline mb-4 flex items-center gap-2">
+      <div className="apple-card p-5 sm:p-7">
+        <div className="overline mb-5 flex items-center gap-2">
           <Search size={11} /> FILTER
         </div>
 
+        <div className="grid gap-x-10 gap-y-1 sm:grid-cols-2">
+
         {/* Erstzulassung */}
         <FieldGroup icon={<Calendar size={14} />} label="Erstzulassung">
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-2 gap-3">
             <YearSelect testid="manual-ez-from" value={ezFrom} onChange={setEzFrom} years={years} placeholder="von" />
             <YearSelect testid="manual-ez-to"   value={ezTo}   onChange={setEzTo}   years={years} placeholder="bis" />
           </div>
@@ -183,7 +328,7 @@ export default function ManuelleSuche() {
 
         {/* KM */}
         <FieldGroup icon={<Gauge size={14} />} label="Kilometerstand">
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-2 gap-3">
             <NumInput testid="manual-km-min" value={kmMin} onChange={setKmMin} placeholder="von km" suffix="km" />
             <NumInput testid="manual-km-max" value={kmMax} onChange={setKmMax} placeholder="bis km" suffix="km" />
           </div>
@@ -191,7 +336,7 @@ export default function ManuelleSuche() {
 
         {/* Leistung */}
         <FieldGroup icon={<Zap size={14} />} label="Leistung">
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-2 gap-3">
             <NumInput testid="manual-kw" value={kw} onChange={onKwChange} placeholder="kW" suffix="kW" />
             <NumInput testid="manual-ps" value={ps} onChange={onPsChange} placeholder="PS" suffix="PS" />
           </div>
@@ -200,15 +345,18 @@ export default function ManuelleSuche() {
           </p>
         </FieldGroup>
 
-        {/* Kraftstoff */}
-        <FieldGroup icon={<Fuel size={14} />} label="Kraftstoff">
-          <ChipRow value={fuel} onChange={setFuel} options={FUELS} testidPrefix="manual-fuel" />
-        </FieldGroup>
-
-        {/* Getriebe */}
-        <FieldGroup icon={<Cog size={14} />} label="Getriebe">
-          <ChipRow value={gearbox} onChange={setGearbox} options={GEARBOXES} testidPrefix="manual-gear" />
-        </FieldGroup>
+        {/* Kraftstoff und Getriebe brauchen die volle Breite */}
+        <div className="sm:col-span-2">
+          <FieldGroup icon={<Fuel size={14} />} label="Kraftstoff">
+            <ChipRow value={fuel} onChange={setFuel} options={FUELS} testidPrefix="manual-fuel" />
+          </FieldGroup>
+        </div>
+        <div className="sm:col-span-2">
+          <FieldGroup icon={<Cog size={14} />} label="Getriebe">
+            <ChipRow value={gearbox} onChange={setGearbox} options={GEARBOXES} testidPrefix="manual-gear" />
+          </FieldGroup>
+        </div>
+        </div>
 
         {/* CTA */}
         {/* Portal-Auswahl-Dialog */}
@@ -216,10 +364,11 @@ export default function ManuelleSuche() {
           <PortalSheet
             mobileUrl={portalUrls.mobile}
             autoscoutUrl={portalUrls.autoscout}
+            aufgeloest={portalUrls.aufgeloest}
             onClose={() => setPortalUrls(null)}
           />
         )}
-        <div className="flex flex-wrap items-center gap-3 pt-4 mt-2"
+        <div className="flex flex-wrap items-center gap-3 pt-5 mt-5"
              style={{ borderTop: "1px solid var(--hairline)" }}>
           <button
             data-testid="manual-submit"
@@ -264,6 +413,10 @@ function FieldGroup({ icon, label, children }) {
   );
 }
 
+// Prüfbericht 20.09. M-17: sichtbarer Tastatur-Fokus (outline-none hatte
+// keinen Ersatz) — an Eingaben, Auswahl, Chips und Auswahlfeldern.
+const FOKUS = "focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-red)]";
+
 function NumInput({ value, onChange, placeholder, suffix, testid }) {
   return (
     <div className="relative">
@@ -273,7 +426,7 @@ function NumInput({ value, onChange, placeholder, suffix, testid }) {
         value={value}
         onChange={(e) => onChange(e.target.value.replace(/\D/g, ""))}
         placeholder={placeholder}
-        className="w-full h-11 px-4 pr-10 rounded-xl outline-none text-[14px]"
+        className={`w-full h-11 px-4 pr-10 rounded-xl text-[14px] ${FOKUS}`}
         style={{
           background: "var(--input-bg)",
           border: "1px solid var(--divider)",
@@ -305,9 +458,12 @@ function YearSelect({ value, onChange, years, placeholder, testid }) {
         data-testid={testid}
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="w-full h-11 px-4 pr-9 rounded-xl outline-none text-[14px] appearance-none"
+        className={`w-full h-11 px-4 pr-9 rounded-xl text-[14px] appearance-none ${FOKUS}`}
         style={{
-          background: "var(--input-bg)",
+          // Deckend statt var(--input-bg) (rgba 5%): Chromium nutzt diese
+          // Farbe auch fuer den Rahmen der aufgeklappten Options-Liste —
+          // halbtransparent ergab dort einen weisslichen Kasten.
+          background: "var(--bg-surface)",
           border: "1px solid var(--divider)",
           color: value ? "var(--text-primary)" : "var(--text-muted)",
         }}
@@ -334,7 +490,8 @@ function ChipRow({ value, onChange, options, testidPrefix }) {
             type="button"
             data-testid={`${testidPrefix}-${opt.toLowerCase().replace(/[^a-z]/g, "-")}`}
             onClick={() => onChange(active ? "" : opt)}
-            className="px-3 py-1.5 rounded-lg text-[12.5px] font-medium transition-all"
+            // M-18: mindestens 44 px Tipp-Höhe
+            className={`px-3 py-1.5 min-h-[44px] rounded-lg text-[12.5px] font-medium transition-all ${FOKUS}`}
             style={active ? {
               background: "var(--accent-red)", color: "white",
               border: "1px solid var(--accent-red)",
@@ -351,11 +508,39 @@ function ChipRow({ value, onChange, options, testidPrefix }) {
   );
 }
 
+/** M-17: Tastatur im Auswahlfeld — liefert die neue Markierung (Index) für
+ *  Pfeil hoch/runter, sonst den alten Wert. */
+export function naechsteMarkierung(taste, aktuell, anzahl) {
+  if (!anzahl) return 0;
+  const jetzt = Math.min(Math.max(0, aktuell || 0), anzahl - 1);
+  if (taste === "ArrowDown") return Math.min(jetzt + 1, anzahl - 1);
+  if (taste === "ArrowUp") return Math.max(jetzt - 1, 0);
+  if (taste === "Home") return 0;
+  if (taste === "End") return anzahl - 1;
+  return jetzt;
+}
+
 function PickerCard({
   icon, label, value, placeholder, isOpen, onOpen, onClose,
   searchValue, onSearch, searchPlaceholder, items, onPick, disabled,
   testid, extraItemHint,
 }) {
+  // M-17: Escape schließt, Pfeiltasten bewegen die Markierung, Enter wählt.
+  const [markiert, setMarkiert] = useState(0);
+  useEffect(() => { setMarkiert(0); }, [searchValue, isOpen]);
+  const tasten = (e) => {
+    if (e.key === "Escape") { e.preventDefault(); onClose(); return; }
+    if (["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) {
+      e.preventDefault();
+      setMarkiert((i) => naechsteMarkierung(e.key, i, items.length));
+      return;
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const it = items[Math.min(markiert, items.length - 1)];
+      if (it) onPick(it);
+    }
+  };
   return (
     <div className="apple-card p-4 relative">
       <div className="overline mb-2 flex items-center gap-1.5">
@@ -366,7 +551,9 @@ function PickerCard({
         disabled={disabled}
         onClick={onOpen}
         data-testid={`${testid}-trigger`}
-        className="w-full h-12 px-4 rounded-xl text-left flex items-center justify-between text-[14px] transition-all"
+        aria-haspopup="listbox"
+        aria-expanded={Boolean(isOpen)}
+        className={`w-full h-12 px-4 rounded-xl text-left flex items-center justify-between text-[14px] transition-all ${FOKUS}`}
         style={{
           background: "var(--input-bg)",
           border: "1px solid var(--divider)",
@@ -390,6 +577,7 @@ function PickerCard({
               maxHeight: 380,
             }}
             data-testid={`${testid}-dropdown`}
+            onKeyDown={tasten}
           >
             <div className="p-2.5 flex items-center gap-2"
                  style={{ borderBottom: "1px solid var(--hairline)" }}>
@@ -400,26 +588,28 @@ function PickerCard({
                 value={searchValue}
                 onChange={(e) => onSearch(e.target.value)}
                 placeholder={searchPlaceholder}
-                className="flex-1 bg-transparent border-0 outline-none text-[14px]"
+                aria-label={searchPlaceholder || label}
+                className={`flex-1 bg-transparent border-0 text-[14px] rounded-md ${FOKUS}`}
                 style={{ color: "var(--text-primary)" }}
               />
             </div>
-            <ul className="overflow-y-auto" style={{ maxHeight: 320 }}>
+            <ul className="overflow-y-auto" role="listbox" style={{ maxHeight: 320 }}>
               {items.length === 0 ? (
                 <li className="px-4 py-6 text-center text-[13px]" style={{ color: "var(--text-muted)" }}>
                   Keine Treffer
                 </li>
               ) : (
-                items.map((it) => (
-                  <li key={it.id}>
+                items.map((it, i) => (
+                  <li key={it.id} role="option" aria-selected={i === markiert}>
                     <button
                       type="button"
                       onClick={() => onPick(it)}
                       data-testid={`${testid}-item-${it.id}`}
-                      className="w-full text-left px-4 py-2.5 text-[14px] transition-colors"
-                      style={{ color: "var(--text-primary)" }}
-                      onMouseEnter={(e) => e.currentTarget.style.background = "var(--hover-bg)"}
-                      onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
+                      data-markiert={i === markiert ? "1" : undefined}
+                      ref={i === markiert ? (el) => el?.scrollIntoView?.({ block: "nearest" }) : undefined}
+                      className={`w-full text-left px-4 py-2.5 text-[14px] transition-colors ${FOKUS}`}
+                      style={{ color: "var(--text-primary)", background: i === markiert ? "var(--hover-bg)" : "transparent" }}
+                      onMouseEnter={() => setMarkiert(i)}
                     >
                       {extraItemHint ? extraItemHint(it) : it.name}
                     </button>

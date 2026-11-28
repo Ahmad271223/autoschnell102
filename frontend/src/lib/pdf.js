@@ -1,26 +1,23 @@
 /**
- * Open a backend PDF in a new tab without being blocked by popup blockers.
- * Uses a temporary <a target="_blank"> click which browsers reliably allow
- * inside a user gesture handler.
+ * PDFs vom Server laden und öffnen, drucken oder speichern.
+ *
+ * Prüfbericht 20.09.2026 (B15): Das Öffnen läuft über lib/dateiOeffnen.js —
+ * dauert das Laden länger als der Browser einen Klick gelten lässt, kommt ein
+ * Hinweis mit Knopf statt eines still verworfenen Tabs. Fehler (404, 503 …)
+ * werfen die Funktionen weiter; jeder Aufrufer zeigt sie mit errMsg an.
  */
 import { api } from "@/lib/api";
+import { blobOeffnen, blobUrlImTab } from "@/lib/dateiOeffnen";
 
-export async function openContractPdf(contractId) {
-  const r = await api.get(`/contracts/${contractId}/pdf`, { responseType: "blob" });
-  const blobUrl = URL.createObjectURL(r.data);
-  // Use a real <a target="_blank"> click – this is the most popup-blocker-
-  // resistant way and never falls back to navigating the current tab.
-  const a = document.createElement("a");
-  a.href = blobUrl;
-  a.target = "_blank";
-  a.rel = "noopener noreferrer";
-  a.style.display = "none";
-  document.body.appendChild(a);
-  a.click();
-  setTimeout(() => {
-    document.body.removeChild(a);
-    URL.revokeObjectURL(blobUrl);
-  }, 1000);
+/**
+ * variante: "druck" (Standard, mit Unterschriftslinien) oder "digital"
+ * (Ausfertigung für E-Mail/WhatsApp — Vertragstext statt Unterschriftslinien).
+ */
+export async function openContractPdf(contractId, { variante = "druck" } = {}) {
+  const startMs = Date.now();
+  const params = variante === "digital" ? { variante: "digital" } : undefined;
+  const r = await api.get(`/contracts/${contractId}/pdf`, { responseType: "blob", params });
+  return blobOeffnen(r.data, { startMs, titel: "Der Kaufvertrag", mime: "application/pdf" });
 }
 
 /**
@@ -30,8 +27,9 @@ export async function openContractPdf(contractId) {
  * ohne Zwischenschritt durch einen neuen Tab.
  *
  * Fallback: scheitert der iframe-Trick (z.B. durch Content-Disposition
- * oder CSP), öffnen wir die URL stattdessen in einem neuen Tab und
- * triggern `window.print()` nach dem Load.
+ * oder CSP), öffnen wir die URL stattdessen in einem neuen Tab. Nicht mehr
+ * mit "noopener": ein so abgekoppelter Tab darf die Blob-Adresse in neueren
+ * Chrome-Versionen nicht laden und bleibt weiß (siehe api.openAuthedFile).
  */
 export function printBlobUrl(blobUrl, { label = "Dokument" } = {}) {
   try {
@@ -65,17 +63,17 @@ export function printBlobUrl(blobUrl, { label = "Dokument" } = {}) {
           } catch {
             // Cross-origin / PDF-Viewer blockiert .print()?
             // -> neuen Tab als Fallback
-            window.open(blobUrl, "_blank", "noopener,noreferrer");
+            blobUrlImTab(blobUrl);
           }
           cleanup();
         }, 400);
       } catch {
         cleanup();
-        window.open(blobUrl, "_blank", "noopener,noreferrer");
+        blobUrlImTab(blobUrl);
       }
     };
   } catch {
-    window.open(blobUrl, "_blank", "noopener,noreferrer");
+    blobUrlImTab(blobUrl);
   }
 }
 
@@ -87,9 +85,8 @@ export async function printContractPdf(contractId) {
   const r = await api.get(`/contracts/${contractId}/pdf`, { responseType: "blob" });
   const blobUrl = URL.createObjectURL(r.data);
   printBlobUrl(blobUrl, { label: "Kaufvertrag" });
-  // Blob-URL bleibt für die Lebensdauer des iframe gültig – nach
-  // cleanup() automatisch GC-tauglich.
-  setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
+  // Blob-URL bleibt für die Lebensdauer des iframe gültig — danach frei.
+  setTimeout(() => URL.revokeObjectURL(blobUrl), 10 * 60 * 1000);
 }
 
 /**
@@ -99,21 +96,11 @@ export async function printContractPdf(contractId) {
  * dem Kaufvertrag und leere Vor-Ort-Skizze für neue Markierungen.
  */
 export async function openPickupOrderPdf(appointmentId) {
+  const startMs = Date.now();
   const r = await api.get(`/appointments/${appointmentId}/pickup-order.pdf`, {
     responseType: "blob",
   });
-  const blobUrl = URL.createObjectURL(r.data);
-  const a = document.createElement("a");
-  a.href = blobUrl;
-  a.target = "_blank";
-  a.rel = "noopener noreferrer";
-  a.style.display = "none";
-  document.body.appendChild(a);
-  a.click();
-  setTimeout(() => {
-    document.body.removeChild(a);
-    URL.revokeObjectURL(blobUrl);
-  }, 1000);
+  return blobOeffnen(r.data, { startMs, titel: "Der Abholauftrag", mime: "application/pdf" });
 }
 
 /**
@@ -125,38 +112,17 @@ export async function printPickupOrderPdf(appointmentId) {
   });
   const blobUrl = URL.createObjectURL(r.data);
   printBlobUrl(blobUrl, { label: "Abholauftrag" });
-  setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
+  setTimeout(() => URL.revokeObjectURL(blobUrl), 10 * 60 * 1000);
 }
 
 /**
  * Abholauftrag herunterladen (Browser-Save-Dialog).
  */
 export async function downloadPickupOrderPdf(appointmentId, filename = "Abholauftrag.pdf") {
+  const startMs = Date.now();
   const r = await api.get(`/appointments/${appointmentId}/pickup-order.pdf?download=1`, {
     responseType: "blob",
   });
-  const blobUrl = URL.createObjectURL(r.data);
-  const a = document.createElement("a");
-  a.href = blobUrl;
-  a.download = filename;
-  a.style.display = "none";
-  document.body.appendChild(a);
-  a.click();
-  setTimeout(() => {
-    document.body.removeChild(a);
-    URL.revokeObjectURL(blobUrl);
-  }, 1000);
+  return blobOeffnen(r.data, { startMs, titel: "Der Abholauftrag", dateiname: filename,
+                               mime: "application/pdf" });
 }
-
-/**
- * Druckt einen Listing-Snapshot (PDF-Variante des Beweises) direkt.
- * Nutzt denselben Auth-Flow wie das &lt;a&gt;-Download: Token im Query.
- */
-export async function printSnapshot(snapshotId, kind = "pdf") {
-  // Snapshot-Bytes holen (respektiert Auth via axios-Interceptor).
-  const r = await api.get(`/snapshots/${snapshotId}/${kind}`, { responseType: "blob" });
-  const blobUrl = URL.createObjectURL(r.data);
-  printBlobUrl(blobUrl, { label: "Snapshot" });
-  setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
-}
-

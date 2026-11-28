@@ -1,0 +1,39 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <!-- 10.0.19041: Windows-Texterkennung (Windows.Media.Ocr) ueber die WinRT-Projektion -->
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>AutoSchnell-Vergleich</AssemblyName>
+    <RootNamespace>AutoPointerVergleich</RootNamespace>
+    <Product>AutoSchnell Vergleich</Product>
+    <Company>Auto Schnell</Company>
+    <Version>1.5.25</Version>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="AutoPointerVergleich.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NAudio.WinMM" Version="2.2.1" />
+    <PackageReference Include="Whisper.net" Version="1.9.1" />
+    <!-- Sprachdiktat (24.11.2026): die nativen DLLs nicht lose ausgeben, sondern als Ressource in die EXE
+         (Diktat.LaufzeitBereitstellen entpackt sie beim ersten Diktat). -->
+    <PackageReference Include="Whisper.net.Runtime" Version="1.9.1" ExcludeAssets="build" GeneratePathProperty="true" />
+    <PackageReference Include="Whisper.net.Runtime.Vulkan" Version="1.9.1" ExcludeAssets="build" GeneratePathProperty="true" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="$(PkgWhisper_net_Runtime)\build\win-x64\*.dll" LogicalName="diktat/%(Filename)%(Extension)" />
+    <!-- Grafikkarte (Vulkan, auch Intel/AMD-Onboard): Encoder ein Vielfaches schneller; ohne Vulkan bleibt es die CPU -->
+    <EmbeddedResource Include="$(PkgWhisper_net_Runtime_Vulkan)\build\win-x64\*.dll" LogicalName="diktat-vulkan/%(Filename)%(Extension)" />
+  </ItemGroup>
+
+</Project>

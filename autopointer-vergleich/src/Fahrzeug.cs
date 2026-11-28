@@ -1,0 +1,153 @@
+namespace AutoPointerVergleich;
+
+/// <summary>Was aus der AutoPointer-Detailansicht gelesen wurde.</summary>
+internal sealed class Fahrzeug
+{
+    /// <summary>Feld "Marke, Modell" wie angezeigt, z. B. "Bentley Bentayga".</summary>
+    public string MarkeModellText { get; set; } = "";
+    /// <summary>Katalognamen, wie sie der Server erkannt hat (seit 1.4.0) — nur zur Anzeige.</summary>
+    public string? Marke { get; set; }
+    public string? Modell { get; set; }
+    /// <summary>Inserat-Titel aus dem Kopf (oft mit Motor/Ausstattung).</summary>
+    public string? Titel { get; set; }
+    public string? Quelle { get; set; }
+    public string? InseratId { get; set; }
+    /// <summary>AutoScout-Kennung (Zeile "Hash-ID"), nur wenn vollstaendig und zweimal gleich gelesen.</summary>
+    public string? HashId { get; set; }
+    /// <summary>Sichtbarer Anfang der Beschreibung (seit 1.5.1) — der Server nimmt das Modell daraus nur, wenn
+    /// Feld und Ueberschrift keins hergeben.</summary>
+    public string? BeschreibungText { get; set; }
+    /// <summary>1.5.22 (Wunsch Ahmad 27.11.2026): die GANZE Beschreibung (Detailansicht gerollt, siehe
+    /// <see cref="BeschreibungGanz"/>) — fuer die Schadenspruefung auf dem Server. null = nicht ganz gelesen.</summary>
+    public string? BeschreibungVoll { get; set; }
+    /// <summary>1.5.22: <see cref="BeschreibungVoll"/> ist Buchstabe fuer Buchstabe mit der echten Schrift abgeglichen
+    /// (<see cref="SchriftLeser"/>) — keine Lesefehler. false = Texterkennung oder Luecken.</summary>
+    public bool BeschreibungExakt { get; set; }
+    /// <summary>Dauerlauf (27.11.2026): alle Zeilen der Tabelle „Technische Daten“ (Bezeichnung → Wert), exakt mit dem
+    /// Schrift-Abgleich gelesen (<see cref="TabellenLeser"/>) — fuer den vorausgefuellten Kaufvertrag. Leer = nicht gelesen.</summary>
+    public List<KeyValuePair<string, string>> Merkmale { get; set; } = new();
+    /// <summary>Dauerlauf: die Eintraege unter „Ausstattung“, exakt gelesen.</summary>
+    public List<string> Ausstattung { get; set; } = new();
+    public int? Preis { get; set; }
+    public int? EzMonat { get; set; }
+    public int? EzJahr { get; set; }
+    public int? Kilometer { get; set; }
+    public int? Kw { get; set; }
+    public int? Ps { get; set; }
+    public string? Kraftstoff { get; set; }
+    public string? Getriebe { get; set; }
+    public string? Kategorie { get; set; }
+    public string? Zustand { get; set; }
+    public string? Tueren { get; set; }
+    /// <summary>Pruefbericht 03.10.2026 (Nr. 9): kW und PS widersprachen sich in BEIDEN Lesedurchgaengen —
+    /// welcher Wert falsch gelesen ist, laesst sich nicht sagen. Dann gilt die Leistung als unbekannt (der Vergleich
+    /// laeuft ohne Leistungsfilter, mit Hinweis) statt mit einem moeglicherweise falschen Wert.</summary>
+    public bool LeistungUnsicher { get; set; }
+
+    /// <summary>Befund Ahmad 09.10.2026 (1.5.12, "IBO" statt i30, "VWT- Ro c", "EIektro", Inserat-ID mit Buchstaben):
+    /// was der zweite Blick auf die Werte (eigene Ausschnitte, andere Aufbereitung) ANDERS gelesen hat als der erste —
+    /// gesaeubert wie der Hauptwert, ohne Doppelte, hoechstens 3 je Feld. Der Server probiert sie, wenn er den Hauptwert
+    /// nicht erkennt (<c>fahrzeug.alternativen</c>). Leer = nichts Abweichendes gelesen.</summary>
+    public List<string> AlternativenMarkeModell { get; set; } = new();
+    public List<string> AlternativenKraftstoff { get; set; } = new();
+    public List<string> AlternativenInseratId { get; set; } = new();
+
+    /// <summary>Wunsch Ahmad 13.10.2026 (1.5.16, Inserat-Nummer sicher lesen): alle rohen Lesungen der Zeile "Inserat-ID"
+    /// aus den Durchgaengen (erster Durchgang Zoom 3, zweiter Durchlauf Zoom 2) — der zweite Blick legt seine drei dazu und
+    /// bildet die Mehrheit (<see cref="InseratNummer.Uebernehmen"/>). Nur zum Lesen, geht nicht an den Server.</summary>
+    public List<string?> InseratIdLesungen { get; } = new();
+    /// <summary>Dasselbe fuer die Zeile "Hash-ID" (AutoScout).</summary>
+    public List<string?> HashIdLesungen { get; } = new();
+    /// <summary>1.5.16: die Kennung (Inserat-ID; bei AutoScout die Hash-ID) wurde gelesen, aber keine zwei Lesungen stimmten
+    /// Zeichen fuer Zeichen ueberein oder die Stellenzahl passt nicht zum Portal — <see cref="InseratId"/> ist dann nur die
+    /// plausibelste Lesung (oder null). Geht als <c>fahrzeug.inserat_id_unsicher: true</c> an den Server (der meldet
+    /// "unsicher gelesen – bitte im Inserat pruefen" und baut keinen sicheren Link daraus); ein Lesebild geht mit.
+    /// false auch, wenn die Zeile gar nicht gelesen wurde (das ist "fehlt", nicht "unsicher").</summary>
+    public bool InseratIdUnsicher { get; set; }
+
+    /// <summary>1.5.18 (Wunsch Ahmad 04.11.2026): erkannte Zeilen der Technik-Tabelle (beide Durchlaeufe, das Maximum).
+    /// Unter 2 ist die Tabelle gar nicht zu sehen (Bilder gross geoeffnet, schwarzer Bereich) — dann kein Lesebild und
+    /// ein eigener Hinweis. null = nicht gezaehlt (Tests, andere Lesewege).</summary>
+    public int? TabellenFelder { get; set; }
+    /// <summary>1.5.20 (Serverpruefung 24.11.2026, Lesebilder Honda Jazz / Dacia Dokker): wie viele der OBEREN Zeilen der
+    /// Technik-Tabelle zu sehen waren (Marke/Modell, Preis, Zustand, Kategorie, Erstzulassung, Kilometerstand; beide
+    /// Durchlaeufe, das Maximum). 0 bei mindestens 2 Tabellenzeilen heisst: die Tabelle ist in AutoPointer nach unten
+    /// geschoben (nur Farbe, Tueren, Hubraum … zu sehen) — eigener Hinweis, kein Lesebild. null = nicht gezaehlt.</summary>
+    public int? ObenFelder { get; set; }
+    /// <summary>1.5.18: Marke/Modell kam aus dem Titel, weil die Zeile „Marke, Modell“ nicht zu sehen war.</summary>
+    public bool MarkeModellAusTitel { get; set; }
+    /// <summary>1.5.18: die Hash-ID (AutoScout) steht in AutoPointer abgeschnitten da („9e26ebe6-44e7-4e12-97a5-a…“ oder am
+    /// Rand gekappt) — ohne die ganze Kennung gibt es keinen AutoScout-Link; eigener Hinweis „breiter ziehen“.</summary>
+    public bool HashAbgeschnitten { get; set; }
+
+    /// <summary>Pruefbericht 03.10.2026 (Nr. 1): Kennung des Inserats (Inserat-ID, sonst AutoScout-Hash-ID), klein
+    /// und ohne Leer-/Sonderzeichen; null ohne Kennung. Bewusst OHNE Quelle — die steht in einer anderen Zeile
+    /// und darf als Lesefehler nicht aus demselben Auto zwei machen.</summary>
+    public string? InseratKennung
+    {
+        get
+        {
+            string roh = !string.IsNullOrWhiteSpace(InseratId) ? InseratId! : HashId ?? "";
+            string id = new(roh.Trim().ToLowerInvariant().Where(char.IsLetterOrDigit).ToArray());
+            return id.Length >= 4 ? id : null;
+        }
+    }
+
+    /// <summary>Ist <paramref name="neu"/> dasselbe Auto wie das zuletzt gemerkte? Haben BEIDE eine Inserat-Kennung,
+    /// entscheidet sie (zwei Neuwagen mit 0 km und gleichen Daten sind verschiedene Inserate); sonst der Schluessel
+    /// aus den Fahrzeugdaten wie bisher.</summary>
+    public static bool GleichesAuto(string? altSchluessel, string? altKennung, Fahrzeug neu)
+    {
+        if (altSchluessel == null) return false;
+        string? kennung = neu.InseratKennung;
+        if (kennung != null && altKennung != null) return kennung == altKennung;
+        return neu.Schluessel == altSchluessel;
+    }
+
+    public bool Unfallwagen => (Zustand ?? "").Contains("unfall", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Zusatz aus dem Titel nach Marke/Modell ("V8 Diesel, 1. Hand ...").</summary>
+    public string? Variante
+    {
+        get
+        {
+            if (string.IsNullOrWhiteSpace(Titel)) return null;
+            // fuehrende Woerter weglassen, die schon in Marke/Modell stehen
+            // ("VW Passat B6 - Bastler" bei "VW Passat Variant" -> "B6 - Bastler")
+            var bekannt = $"{MarkeModellText} {Marke} {Modell}"
+                .Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                .Select(FahrzeugCodes.Norm).Where(w => w.Length > 0).ToHashSet();
+            var woerter = Titel.Split(' ', StringSplitOptions.RemoveEmptyEntries).ToList();
+            int i = 0;
+            while (i < woerter.Count && bekannt.Contains(FahrzeugCodes.Norm(woerter[i]))) i++;
+            string t = string.Join(" ", woerter.Skip(i)).Trim(' ', '-', ',', '·');
+            return t.Length > 0 ? t : null;
+        }
+    }
+
+    /// <summary>Kennung "bent1eybentayga | 03/2017 | 84975 km | 320 kW": bleibt sie gleich, ist es dasselbe
+    /// Fahrzeug und es wird nichts neu geoeffnet. Aus dem gelesenen Text (die Erkennung macht der Server) —
+    /// klein, ohne Zeichen, i/l/1 und o/0 gleich, damit ein Lesefehler kein zweites Oeffnen ausloest.</summary>
+    public string Schluessel => $"{Kennwort(MarkeModellText)} | {EzText} | {Kilometer} km | {Kw} kW";
+
+    private static string Kennwort(string text) =>
+        new(FahrzeugCodes.Norm(text).Select(c => c switch { 'i' or 'l' => '1', 'o' => '0', _ => c }).ToArray());
+
+    public string EzText => EzJahr == null ? "?" : EzMonat != null ? $"{EzMonat:00}/{EzJahr}" : $"{EzJahr}";
+
+    public IEnumerable<string> Beschreibung()
+    {
+        yield return $"{(Marke != null ? $"{Marke} {Modell}".Trim() : MarkeModellText)}"
+                     + (Variante != null ? $"  ({Variante})" : "");
+        yield return $"EZ: {EzText}   KM: {(Kilometer?.ToString("N0") ?? "?")}   Leistung: {(Kw != null ? $"{Kw} kW / {Ps} PS" : "?")}";
+        yield return $"Kraftstoff: {Kraftstoff ?? "?"}   Getriebe: {Getriebe ?? "?"}   Preis: {(Preis != null ? $"{Preis:N0} €" : "?")}";
+        var rest = new List<string>();
+        if (Zustand != null) rest.Add($"Zustand: {Zustand}");
+        if (Kategorie != null) rest.Add($"Kategorie: {Kategorie}");
+        if (Quelle != null) rest.Add($"Quelle: {Quelle}");
+        // 1.5.16: im Protokoll sieht man, ob die Nummer sicher war
+        if (InseratId != null) rest.Add($"Inserat-ID: {InseratId}" + (InseratIdUnsicher ? " (unsicher gelesen)" : ""));
+        else if (InseratIdUnsicher) rest.Add("Inserat-ID: unsicher gelesen (keine plausible Lesung)");
+        if (rest.Count > 0) yield return string.Join("   ", rest);
+    }
+}

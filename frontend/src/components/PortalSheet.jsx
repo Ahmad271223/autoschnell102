@@ -2,29 +2,75 @@
  * PortalSheet – modales Fenster zur Portal-Auswahl.
  *
  * Erscheint nach Vergleich oder manueller Suche.
- * Jeder Button ist ein direkter User-Klick → kein Popup-Blocker.
+ * Jeder Button ist ein direkter User-Klick — Chrome/Edge lassen damit aber
+ * nur EIN neues Fenster je Klick zu (Runde 22, 11.09.2026). "Beide öffnen"
+ * laeuft deshalb ueber filterOeffnen: das zweite Portal kommt per Hinweis-
+ * Knopf (neue Geste) nach, oder sofort, wenn Pop-ups erlaubt sind.
  */
+import { useEffect, useRef } from "react";
 import { ExternalLink, X } from "lucide-react";
-import { openInPopup, openMultiple } from "@/lib/popup";
+import { filterOeffnen } from "@/lib/filterOeffnen";
 import PortalBadge from "@/components/PortalBadge";
 
-export default function PortalSheet({ mobileUrl, autoscoutUrl, onClose }) {
-  if (!mobileUrl && !autoscoutUrl) return null;
+const MOBILE = { name: "mobileFilterWindow", label: "mobile.de" };
+const AUTOSCOUT = { name: "autoscoutFilterWindow", label: "AutoScout24" };
+
+const FOKUSSIERBAR = 'button:not([disabled]), a[href], input:not([disabled]), select, textarea, [tabindex]:not([tabindex="-1"])';
+
+/** Prüfbericht 20.09. U-117: Fokusfalle — welches Element bekommt nach
+ *  Tab/Shift+Tab den Fokus, damit er im Blatt bleibt? null = Browser macht es. */
+export function fokusFalle(shiftKey, elemente, aktiv) {
+  if (!elemente || !elemente.length) return null;
+  const erster = elemente[0];
+  const letzter = elemente[elemente.length - 1];
+  if (!elemente.includes(aktiv)) return erster;
+  if (shiftKey && aktiv === erster) return letzter;
+  if (!shiftKey && aktiv === letzter) return erster;
+  return null;
+}
+
+export default function PortalSheet({ mobileUrl, autoscoutUrl, aufgeloest, onClose }) {
+  const blattRef = useRef(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const offen = Boolean(mobileUrl || autoscoutUrl);
+
+  // U-117: Escape schließt, der erste Portal-Knopf bekommt den Fokus, Tab
+  // bleibt im Blatt — vorher schloss nur der Klick auf den Hintergrund.
+  useEffect(() => {
+    if (!offen) return undefined;
+    const blatt = blattRef.current;
+    const vorher = document.activeElement;
+    (blatt?.querySelector("[data-portal-knopf]") || blatt?.querySelector("button"))?.focus?.();
+    const tasten = (e) => {
+      if (e.key === "Escape") { e.preventDefault(); onCloseRef.current?.(); return; }
+      if (e.key !== "Tab" || !blatt) return;
+      const ziel = fokusFalle(e.shiftKey, [...blatt.querySelectorAll(FOKUSSIERBAR)], document.activeElement);
+      if (ziel) { e.preventDefault(); ziel.focus(); }
+    };
+    document.addEventListener("keydown", tasten);
+    return () => {
+      document.removeEventListener("keydown", tasten);
+      if (vorher && typeof vorher.focus === "function" && document.contains(vorher)) vorher.focus();
+    };
+  }, [offen]);
+
+  if (!offen) return null;
 
   const openMobile = () => {
-    openInPopup(mobileUrl, "mobileFilterWindow");
+    filterOeffnen([{ ...MOBILE, url: mobileUrl }]);
     onClose();
   };
 
   const openAutoscout = () => {
-    openInPopup(autoscoutUrl, "autoscoutFilterWindow");
+    filterOeffnen([{ ...AUTOSCOUT, url: autoscoutUrl }]);
     onClose();
   };
 
   const openBoth = () => {
-    openMultiple([
-      { url: mobileUrl,     name: "mobileFilterWindow" },
-      { url: autoscoutUrl,  name: "autoscoutFilterWindow" },
+    filterOeffnen([
+      { ...MOBILE,    url: mobileUrl },
+      { ...AUTOSCOUT, url: autoscoutUrl },
     ].filter((u) => u.url));
     onClose();
   };
@@ -38,12 +84,14 @@ export default function PortalSheet({ mobileUrl, autoscoutUrl, onClose }) {
         onClick={onClose}
       />
 
-      {/* Sheet */}
+      {/* Sheet — Prüfbericht 20.09. M-14: Breite = Bildschirm minus 2 × 16 px
+          (vorher w-full + mx-4: bei 375–390 px ragte das Blatt rechts hinaus). */}
       <div
+        ref={blattRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="portal-sheet-title"
-        className="fixed z-50 left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-sm mx-4 rounded-2xl shadow-2xl overflow-hidden"
+        className="fixed z-50 left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[calc(100%-2rem)] max-w-sm rounded-2xl shadow-2xl overflow-hidden"
         style={{ background: "var(--card-bg)", border: "1px solid var(--divider)" }}
       >
         {/* Akzent-Balken oben — visueller Anker */}
@@ -114,6 +162,36 @@ export default function PortalSheet({ mobileUrl, autoscoutUrl, onClose }) {
           )}
         </div>
 
+        {/* Aufloesung (manuelle Suche): bleibt sichtbar, anders als der Toast */}
+        {aufgeloest && (
+          <div className="px-5 pb-3" data-testid="portal-aufloesung">
+            <p className="overline mb-1.5">So wurde die Auswahl aufgelöst</p>
+            {/* U-124: hier ist das Abzeichen die einzige Portal-Angabe — deshalb
+                für Vorleser benannt (dekorativ={false}). */}
+            <div className="text-[12px] space-y-1" style={{ color: "var(--text-secondary)" }}>
+              <div className="flex items-center gap-2">
+                <PortalBadge kind="autoscout" size="sm" dekorativ={false} />
+                <span>
+                  {aufgeloest.autoscout?.make}
+                  {aufgeloest.autoscout?.model ? ` · ${aufgeloest.autoscout.model}` : " · alle Modelle"}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <PortalBadge kind="mobile" size="sm" dekorativ={false} />
+                <span style={{ color: aufgeloest.mobile?.make ? "inherit" : "var(--accent-red)" }}>
+                  {!aufgeloest.mobile?.make
+                    ? "Marke unbekannt — Suche ohne Markenfilter"
+                    : aufgeloest.mobile?.model === false
+                      ? "Modell unbekannt — Suche zeigt die ganze Marke"
+                      : aufgeloest.mobile?.model === null
+                        ? "Marke erkannt · alle Modelle"
+                        : "Marke und Modell erkannt"}
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Footer */}
         <div className="px-5 pb-4">
           <button
@@ -139,7 +217,8 @@ function PortalActionButton({ kind, accent, label, url, onClick }) {
     <button
       type="button"
       onClick={onClick}
-      className="group w-full flex items-center gap-3 px-3 py-3 rounded-xl text-left transition-all"
+      data-portal-knopf=""
+      className="group w-full flex items-center gap-3 px-3 py-3 rounded-xl text-left transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-red)]"
       style={{
         background: "var(--hover-bg)",
         border: "1px solid var(--divider)",

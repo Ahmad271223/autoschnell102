@@ -1,0 +1,870 @@
+import MonatJahrEingabe from "@/components/MonatJahrEingabe";
+import { monatJahrFehler } from "@/lib/monatJahr";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { api, errMsg } from "@/lib/api";
+import { useAuth } from "@/context/AuthContext";
+import { useFeatures } from "@/lib/features";
+import { toast } from "sonner";
+import {
+  Plus, AlertTriangle, Archive, Trash2, Tag, Clock, X, Pencil,
+} from "lucide-react";
+import StatusSchild from "@/components/StatusSchild";
+import DiktatKnopf from "@/components/DiktatKnopf";
+import { beschreibungLesbar, lifecycleText } from "@/lib/fahrzeugStatus";
+import { kmAusText, preisAusText } from "@/lib/preis";
+import { betragAlsText, fristErneuertText } from "@/lib/bestandForm";
+import { termineOffenDetail, termineStornoFrage } from "@/lib/akteHinweise";
+import { MODAL_ATTRIBUTE, useModal } from "@/lib/useModal";
+import {
+  JE_SEITE, SAMMEL_ZIELE, ZEITRAEUME, auswahlUmschalten, euro, kaufDatum, listenParameter,
+  sammelErgebnisText, sammelFrage, seiteAuswaehlen, seiteGanzGewaehlt, zeitraumFehler, zielText,
+} from "@/lib/fahrzeugListe";
+
+/**
+ * Fahrzeugbestand (B2B-Modul Phase 1).
+ * - Entscheidungs-Warteschlange: abgeholte Fahrzeuge (Speichern / Verkaufen / Löschen)
+ * - Bestand mit Lifecycle-Filter, 50-Tage-Countdown und Quellen-Kennzeichnung
+ * - Manuelles Hinzufügen vorhandener Fahrzeuge (source: manuell)
+ */
+
+// Kilometer nur als echte Zahl anzeigen — Altdaten mit Text ergaben "NaN km"
+// (Pruefbericht 20.09.2026, N17).
+function kmText(n) {
+  const zahl = typeof n === "number" ? n : Number(n);
+  return Number.isFinite(zahl) && zahl > 0 ? `${zahl.toLocaleString("de-DE")} km` : "";
+}
+
+// Pruefbericht 20.09.2026 (B8): Field stand INNERHALB des Dialogs — jeder
+// Tastendruck erzeugte einen neuen Komponententyp, React baute das Feld neu
+// auf und der Fokus sprang heraus (ein Zeichen pro Klick, 14 Felder).
+function Field({ label, children }) {
+  return (
+    <div>
+      <label className="text-[11px] text-zinc-500">{label}</label>
+      {children}
+    </div>
+  );
+}
+
+const FILTERS = [
+  { key: "",                label: "Alle" },
+  { key: "abgeholt",        label: "Entscheidung fällig" },
+  { key: "bestand",         label: "Im Bestand" },
+  { key: "verkaufsentwurf", label: "Entwürfe" },
+  { key: "verkaufsbereit",  label: "Verkaufsbereit" },
+  { key: "veroeffentlicht", label: "Auf dem Marktplatz" },
+  { key: "reserviert",      label: "Reserviert" },
+  { key: "verkauft",        label: "Verkauft" },
+];
+
+export default function Bestand() {
+  const [data, setData] = useState({ items: [], counts: {} });
+  const [filter, setFilter] = useState("");
+  const [sourceFilter, setSourceFilter] = useState("");
+  const [showManual, setShowManual] = useState(false);
+  // Rollenprüfung 22.09.2026 (RP-411): manuelles Fahrzeug in Bearbeitung
+  const [bearbeiten, setBearbeiten] = useState(null);
+  const [busy, setBusy] = useState(null);
+  const nav = useNavigate();
+  // Pruefbericht 20.09.2026 (M23/F8): Ladefehler NICHT als "Noch keine
+  // Fahrzeuge" zeigen — sonst haelt der Nutzer seinen Bestand fuer weg.
+  const [ladeFehler, setLadeFehler] = useState(null);
+  const [geladen, setGeladen] = useState(false);
+  // M20: Beim schnellen Filterwechsel gewinnt nur die LETZTE Anfrage —
+  // eine langsamere aeltere Antwort darf die Liste nicht ueberschreiben.
+  const anfrageNr = useRef(0);
+  // Wunsch Ahmad 24.11.2026: "Gekauft im Zeitraum", Seiten, Mehrfachauswahl.
+  const [zeitraum, setZeitraum] = useState("");
+  const [von, setVon] = useState("");
+  const [bis, setBis] = useState("");
+  const [seite, setSeite] = useState(1);
+  const [auswahl, setAuswahl] = useState(() => new Set());
+  const [ziel, setZiel] = useState("");
+  const [sammelOffen, setSammelOffen] = useState(false);
+  const zFehler = zeitraumFehler(zeitraum, von, bis);
+  const filterParameter = { filter, quelle: sourceFilter, zeitraum, von, bis };
+  const filterSchluessel = listenParameter(filterParameter);
+
+  // Neuer Filter: erste Seite, Auswahl leeren (sonst änderte man unbemerkt
+  // Fahrzeuge, die gar nicht mehr in der Liste stehen).
+  useEffect(() => { setSeite(1); setAuswahl(new Set()); }, [filterSchluessel]);
+
+  const load = useCallback(async () => {
+    const nr = ++anfrageNr.current;
+    try {
+      const params = listenParameter({ ...filterParameter, seite, jeSeite: JE_SEITE });
+      const r = await api.get(`/bestand?${params}`);
+      if (nr !== anfrageNr.current) return;
+      setData(r.data || { items: [], counts: {} });
+      setLadeFehler(null);
+    } catch (e) {
+      if (nr !== anfrageNr.current) return;
+      setLadeFehler(errMsg(e, "Bestand konnte nicht geladen werden"));
+    } finally {
+      if (nr === anfrageNr.current) setGeladen(true);
+    }
+    // filterParameter steckt vollständig in filterSchluessel
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterSchluessel, seite]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const [alleLaden, setAlleLaden] = useState(false);
+  const alleTrefferWaehlen = async () => {
+    if (alleLaden) return;
+    setAlleLaden(true);
+    try {
+      const r = await api.get(`/bestand/ids?${listenParameter(filterParameter)}`);
+      const ids = r.data?.ids || [];
+      setAuswahl(new Set(ids));
+      if (r.data?.gekuerzt) {
+        toast.warning(`Es wurden die ersten ${ids.length} von ${r.data.gesamt} Treffern ausgewählt — höchstens ${r.data.max || ids.length} auf einmal.`);
+      }
+    } catch (e) {
+      toast.error(errMsg(e, "Treffer konnten nicht ausgewählt werden"));
+    } finally {
+      setAlleLaden(false);
+    }
+  };
+
+  const features = useFeatures();          // Go-Live-Schalter (15.09.2026)
+  const decide = async (vehicleId, decision, vonLifecycle) => {
+    if (busy) return;
+    if (decision === "loeschen" &&
+        !window.confirm("Fahrzeug wirklich löschen?\nFotos werden entfernt — Vertrag und Historie bleiben erhalten.")) {
+      return;
+    }
+    setBusy(vehicleId);
+    try {
+      if (decision === "verkaufsentwurf") {
+        // Rollenprüfung 22.09.2026 (RP-092/RP-191/RP-342): EIN Aufruf statt
+        // zwei. create_draft setzt den Fahrzeugstatus selbst (und nimmt ihn
+        // bei einem Fehler zurück) — vorher blieb nach einem Abbruch
+        // zwischen /decision und /resale/draft ein "Verkaufsentwurf" ohne
+        // Inserat und ohne Knopf zurück.
+        const draft = await api.post(`/resale/draft/${vehicleId}`);
+        toast.success("Inseratsentwurf erstellt");
+        // N14: innerhalb der App navigieren statt die Seite neu zu laden.
+        if (draft?.data?.id) nav(`/app/inserat/${draft.data.id}`);
+        else load();
+        return;
+      }
+      // RP-496: der angezeigte Zustand geht mit (409, wenn ein anderer Tab
+      // das Fahrzeug inzwischen inseriert hat).
+      const body = { decision, von_lifecycle: vonLifecycle };
+      let r;
+      try {
+        r = await api.post(`/vehicles/${vehicleId}/decision`, body);
+      } catch (e) {
+        // RP-454 (Welle B2): offene Abholtermine — der Chef sieht sie (Datum,
+        // Fahrer) und entscheidet, ob sie mit dem Fahrzeug storniert werden.
+        // Nie still: erst nach dem Ja geht termine_stornieren=true raus.
+        const offen = termineOffenDetail(e);
+        if (!offen || !window.confirm(termineStornoFrage(offen))) throw e;
+        r = await api.post(`/vehicles/${vehicleId}/decision`, { ...body, termine_stornieren: true });
+      }
+      toast.success(r.data?.verlaengert
+        ? fristErneuertText(r.data?.expires_at)
+        : decision === "bestand"
+          ? "Ins Bestand übernommen (50 Tage Aufbewahrung)"
+          : r.data?.termine_storniert?.length
+            ? `Fahrzeug gelöscht, ${r.data.termine_storniert.length} Termin(e) storniert`
+            : "Fahrzeug gelöscht");
+      load();
+    } catch (e) {
+      toast.error(errMsg(e));
+      if (e?.response?.status === 409) load();
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // Prüfbericht 20.09. U-44: Sucher haben hier keine Chef-Entscheidungen,
+  // aber wie in der Akte "Aus meiner Liste entfernen" — verschwindet nur bei
+  // ihnen, der Chef behält Fahrzeug, Vertrag, Termine und Historie.
+  const entfernen = async (vehicleId) => {
+    if (busy) return;
+    if (!window.confirm("Fahrzeug aus deiner Liste entfernen?\n"
+        + "Es verschwindet nur bei dir — der Chef behält Fahrzeug, Vertrag, Termine und Historie.")) return;
+    setBusy(vehicleId);
+    try {
+      await api.post(`/vehicles/${vehicleId}/entfernen`);
+      toast.success("Aus deiner Liste entfernt — der Chef behält das Fahrzeug");
+      load();
+    } catch (e) {
+      toast.error(errMsg(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // Offene Marktplatz-Anfragen (nur Chef — der Endpunkt ist dealer-only,
+  // Sucher bekommen 403 und sehen still kein Banner).
+  const { user } = useAuth();
+  const [anfragenOffen, setAnfragenOffen] = useState(0);
+  useEffect(() => {
+    if (user?.role !== "dealer") return;
+    api.get("/dealer/interessen", { params: { status: "offen" } })
+      .then((r) => setAnfragenOffen(Array.isArray(r.data) ? r.data.length : 0))
+      .catch(() => {});
+  }, [user?.role]);
+
+  const counts = data.counts || {};
+  const pending = (counts["abgeholt"] || 0);
+  // Rollenprüfung 22.09.2026 (RP-450): Fahrzeuge, deren Bestandsfrist in den
+  // nächsten 7 Tagen endet — danach archiviert der Aufräumer sie endgültig.
+  const baldArchiviert = (data.items || []).filter((v) => v.lifecycle === "bestand"
+    && v.retention_days_left != null && v.retention_days_left <= 7).length;
+  // Runde 19: Entscheidungen und manuelles Anlegen sind Chefsache (Backend:
+  // current_haendler) — Sucher sehen die Knoepfe nicht mehr (vorher 403 erst beim Klick).
+  const chef = user?.role === "dealer";
+
+  return (
+    <div className="p-3 sm:p-6 lg:p-10 max-w-7xl mx-auto" data-testid="bestand-page">
+      <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div className="min-w-0">
+          <div className="overline">Bestand</div>
+          <h1 className="font-display font-black text-3xl lg:text-4xl tracking-tighter mt-1">
+            Fahrzeugbestand & Weiterverkauf
+          </h1>
+          {/* Runde 32 (Wunsch Ahmad): nur Autos mit gespeichertem oder
+              verschicktem Kaufvertrag, dazu von Hand hinzugefuegte. */}
+          <div className="hidden sm:block text-[13px] mt-1" style={{ color: "var(--text-muted)" }}
+               data-testid="bestand-regel">
+            Fahrzeuge mit gespeichertem oder verschicktem Kaufvertrag und von Hand hinzugefügte.
+          </div>
+        </div>
+        {chef && (
+          <button onClick={() => setShowManual(true)} aria-label="Fahrzeug manuell hinzufügen"
+                  className="apple-btn apple-btn-primary shrink-0">
+            <Plus size={16} />
+            <span className="sm:hidden" aria-hidden="true">Hinzufügen</span>
+            <span className="hidden sm:inline">Fahrzeug manuell hinzufügen</span>
+          </button>
+        )}
+      </div>
+
+      {pending > 0 && (
+        <div className="mt-4 rounded-xl border px-4 py-3 flex items-center gap-2 text-sm"
+             style={{ borderColor: "#f59e0b55", background: "#f59e0b14", color: "var(--tx-amber)" }}>
+          <AlertTriangle size={16} />
+          {/* Prüfbericht 20.09. U-44: Sucher entscheiden nicht (Knöpfe sind
+              chef-gated) — der Hinweis sagt ihnen, dass der Chef dran ist. */}
+          {pending} abgeholte(s) Fahrzeug(e) warten auf {chef ? "deine Entscheidung" : "die Entscheidung des Chefs"}.
+        </div>
+      )}
+
+      {chef && baldArchiviert > 0 && (
+        <div className="mt-4 rounded-xl border px-4 py-3 flex items-center gap-2 text-sm"
+             data-testid="bestand-frist-hinweis"
+             style={{ borderColor: "#f59e0b55", background: "#f59e0b14", color: "var(--tx-amber)" }}>
+          <Clock size={16} />
+          {/* Rollenprüfung 22.09.2026 (Review): der Server setzt die Frist auf
+              50 Tage AB HEUTE (nicht alte Frist + 50) — Knopf und Hinweis sagen
+              das jetzt so; dazu Einzahl/Mehrzahl ("Stehen sie ..."). */}
+          {baldArchiviert === 1
+            ? "Ein Fahrzeug wird in den nächsten 7 Tagen archiviert (Fotos werden gelöscht). Steht es noch auf dem Hof?"
+            : `${baldArchiviert} Fahrzeuge werden in den nächsten 7 Tagen archiviert (Fotos werden gelöscht). Stehen sie noch auf dem Hof?`}
+          {" "}Dann „Frist erneuern“ wählen — sie gilt danach 50 Tage ab heute.
+        </div>
+      )}
+
+      {anfragenOffen > 0 && features.marktplatz && (
+        <Link to="/app/anfragen" data-testid="bestand-anfragen-banner"
+              className="mt-4 rounded-xl border px-4 py-3 flex items-center gap-2 text-sm hover:bg-sky-500/10 transition"
+              style={{ borderColor: "#38bdf855", background: "#38bdf814", color: "var(--tx-cyan)" }}>
+          <AlertTriangle size={16} />
+          {anfragenOffen} offene Kaufanfrage(n) vom Marktplatz — jetzt beantworten ›
+        </Link>
+      )}
+
+      {/* Design 11/2026: Status-Filter als EINE Zeile (am Handy seitlich wischen) */}
+      <div className="mt-5 filter-zeile" role="group" aria-label="Nach Status filtern">
+        {FILTERS.filter((f) => f.key !== "veroeffentlicht" || features.marktplatz).map((f) => (
+          <button key={f.key} onClick={() => setFilter(f.key)} aria-pressed={filter === f.key}
+                  className={`filter-chip ${filter === f.key ? "aktiv" : ""}`}>
+            {f.label}
+            {f.key && counts[f.key] ? <span className="filter-chip-zahl">{counts[f.key]}</span> : null}
+          </button>
+        ))}
+      </div>
+
+      {/* Wunsch Ahmad 24.11.2026: Gekauft im Zeitraum (deutsche Zeit, Woche ab Montag) */}
+      <div className="mt-3 flex flex-wrap items-center gap-2 text-[13px]" data-testid="bestand-zeitraum">
+        {/* Herkunft als Apple-Segment — steht jetzt neben dem Zeitraum statt in der Status-Zeile */}
+        <div className="apple-segment mr-1" role="group" aria-label="Nach Herkunft filtern">
+          {[["", "Alle"], ["plattform", "Über Sucher"], ["manuell", "Manuell"]].map(([k, l]) => (
+            <button key={k} onClick={() => setSourceFilter(k)} aria-pressed={sourceFilter === k}
+                    aria-label={k === "" ? "Alle Quellen" : l}
+                    className={`apple-segment-item ${sourceFilter === k ? "active" : ""}`}>
+              {l}
+            </button>
+          ))}
+        </div>
+        <label htmlFor="bestand-zeitraum-wahl" className="sr-only sm:not-sr-only" style={{ color: "var(--text-secondary)" }}>Gekauft im Zeitraum</label>
+        <select id="bestand-zeitraum-wahl" value={zeitraum} onChange={(e) => setZeitraum(e.target.value)}
+                data-testid="bestand-zeitraum-wahl"
+                className="rounded-lg border px-2.5 py-1.5 text-[13px] min-h-[34px]"
+                style={{ borderColor: "var(--border-default)", background: "var(--bg-input-solid)",
+                  color: "var(--text-primary)", colorScheme: "var(--scheme)" }}>
+          {ZEITRAEUME.map((z) => <option key={z.key} value={z.key}>{z.label}</option>)}
+        </select>
+        {zeitraum === "eigener" && (
+          <>
+            <input type="date" value={von} onChange={(e) => setVon(e.target.value)} aria-label="Gekauft von"
+                   data-testid="bestand-zeitraum-von" className="rounded-lg border px-2 py-1.5 text-[13px]"
+                   style={{ borderColor: "var(--border-default)", background: "var(--bg-input-solid)",
+                     color: "var(--text-primary)", colorScheme: "var(--scheme)" }} />
+            <span style={{ color: "var(--text-muted)" }}>bis</span>
+            <input type="date" value={bis} onChange={(e) => setBis(e.target.value)} aria-label="Gekauft bis"
+                   data-testid="bestand-zeitraum-bis" className="rounded-lg border px-2 py-1.5 text-[13px]"
+                   style={{ borderColor: "var(--border-default)", background: "var(--bg-input-solid)",
+                     color: "var(--text-primary)", colorScheme: "var(--scheme)" }} />
+            {zFehler && <span className="text-[12px]" style={{ color: "var(--tx-amber)" }}>{zFehler}</span>}
+          </>
+        )}
+      </div>
+
+      {/* Anzahl und Einkauf gesamt über ALLE Treffer (Server rechnet; den
+          Betrag liefert er nur Rollen, die Kaufpreise sehen dürfen). */}
+      {data.zusammenfassung && (
+        <div className="mt-3 tactical-card px-4 py-3 kennzahlen" data-testid="bestand-summe">
+          <div>
+            <div className="text-[11px] uppercase tracking-wide" style={{ color: "var(--text-muted)" }}>Gekaufte Fahrzeuge</div>
+            <div className="kennzahl-wert" data-testid="bestand-anzahl">{data.zusammenfassung.anzahl ?? 0}</div>
+          </div>
+          {data.zusammenfassung.einkauf_gesamt != null && (
+            <div>
+              <div className="text-[11px] uppercase tracking-wide" style={{ color: "var(--text-muted)" }}>Einkauf gesamt</div>
+              <div className="kennzahl-wert" data-testid="bestand-einkauf-gesamt">
+                {euro(data.zusammenfassung.einkauf_gesamt)}
+              </div>
+            </div>
+          )}
+          {data.zusammenfassung.ohne_preis > 0 && (
+            <div className="col-span-2 text-[12px] pb-1" style={{ color: "var(--text-secondary)" }} data-testid="bestand-ohne-preis">
+              {data.zusammenfassung.ohne_preis} ohne Preis · stornierte und nicht abgeholte zählen nicht mit
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Mehrere Fahrzeuge auf einmal (nur Chef — der Server prüft jedes einzeln) */}
+      {chef && (data.items || []).length > 0 && (
+        <div className="mt-3 flex flex-wrap items-center gap-2 text-[13px]" data-testid="bestand-auswahl-leiste">
+          <label className="inline-flex items-center gap-2 min-h-[36px] cursor-pointer">
+            <input type="checkbox" data-testid="bestand-seite-auswaehlen"
+                   checked={seiteGanzGewaehlt(auswahl, (data.items || []).map((v) => v.id))}
+                   onChange={(e) => setAuswahl((a) => seiteAuswaehlen(a, (data.items || []).map((v) => v.id), e.target.checked))} />
+            Seite auswählen
+          </label>
+          {(data.gesamt || 0) > (data.items || []).length && (
+            <button type="button" onClick={alleTrefferWaehlen} disabled={alleLaden} data-testid="bestand-alle-treffer"
+                    className="rounded-lg px-3 py-1.5 border disabled:opacity-50" style={{ borderColor: "var(--border-default)" }}>
+              Alle {data.gesamt} Treffer auswählen
+            </button>
+          )}
+          {auswahl.size > 0 && (
+            <>
+              <span className="font-semibold" data-testid="bestand-auswahl-anzahl">{auswahl.size} ausgewählt</span>
+              <button type="button" onClick={() => setAuswahl(new Set())} data-testid="bestand-auswahl-leeren"
+                      className="rounded-lg px-2.5 py-1.5" style={{ color: "var(--text-secondary)" }}>
+                Auswahl aufheben
+              </button>
+              <select value={ziel} onChange={(e) => setZiel(e.target.value)} aria-label="Status ändern auf"
+                      data-testid="bestand-ziel" className="rounded-lg border px-2.5 py-1.5 text-[13px]"
+                      style={{ borderColor: "var(--border-default)", background: "var(--bg-input-solid)",
+                        color: "var(--text-primary)", colorScheme: "var(--scheme)" }}>
+                <option value="">Status ändern auf …</option>
+                {SAMMEL_ZIELE.map((z) => <option key={z.key} value={z.key}>{z.label}</option>)}
+              </select>
+              <button type="button" disabled={!ziel} onClick={() => setSammelOffen(true)} data-testid="bestand-sammel-start"
+                      className="rounded-lg px-3 py-1.5 font-semibold text-white disabled:opacity-50"
+                      style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
+                Ändern …
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Runde 27: Die Liste endet bei 500 Fahrzeugen — das sagen wir jetzt,
+          statt aeltere Autos stillschweigend wegzulassen. */}
+      {data.gekuerzt && (
+        <div className="mt-4 rounded-xl border px-4 py-3 text-sm"
+             data-testid="bestand-gekuerzt"
+             style={{ borderColor: "#f59e0b55", background: "#f59e0b14", color: "var(--tx-amber)" }}>
+          Es werden {(data.items || []).length} von {data.gesamt} Fahrzeugen angezeigt.
+          Nutze die Filter oben, um ältere Fahrzeuge zu finden.
+        </div>
+      )}
+      {ladeFehler && (
+        <div className="mt-4 rounded-xl border px-4 py-3 text-sm flex flex-wrap items-center gap-3" role="alert"
+             data-testid="bestand-ladefehler"
+             style={{ borderColor: "#ef444455", background: "#ef444414", color: "var(--text-primary)" }}>
+          <AlertTriangle size={16} />
+          <span className="flex-1 min-w-0">{ladeFehler}</span>
+          <button type="button" onClick={load} className="rounded-lg px-3 py-1.5 text-xs border font-semibold"
+                  style={{ borderColor: "var(--border-default)" }}>
+            Erneut versuchen
+          </button>
+        </div>
+      )}
+      <div className="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 bestand-raster">
+        {!geladen && !ladeFehler && (
+          <div className="col-span-full text-center py-16 text-zinc-500 text-sm">lade…</div>
+        )}
+        {geladen && !ladeFehler && (data.items || []).length === 0 && (
+          <div className="col-span-full text-center py-16 text-zinc-500 text-sm">
+            {filter || sourceFilter
+              ? "Keine Fahrzeuge für diesen Filter."
+              : "Noch keine Fahrzeuge im Bestand. Ein Auto erscheint hier, sobald ein Kaufvertrag gespeichert oder verschickt ist — oder wenn du es von Hand hinzufügst."}
+          </div>
+        )}
+        {(data.items || []).map((v) => {
+          const d = v.data || {};
+          const lc = v.lifecycle || "verglichen";
+          const img = (d.image_urls || d.images || [])[0];
+          return (
+            <div key={v.id} className="tactical-card overflow-hidden flex flex-col relative bestand-zeile" data-testid={`bestand-${v.id}`}
+                 style={auswahl.has(v.id) ? { boxShadow: "0 0 0 2px var(--accent-red)" } : undefined}>
+              {img && (
+                <div className="h-36 overflow-hidden">
+                  <img src={img} alt="" className="w-full h-full object-cover" />
+                </div>
+              )}
+              <div className="p-4 flex-1 flex flex-col">
+                {/* min-w-0: sonst drueckt ein langer Untertitel das
+                    Status-Schild aus der Karte (11.09.2026). */}
+                <div className="flex items-start justify-between gap-3">
+                  {/* Wunsch Ahmad 24.11.2026: Häkchen je Fahrzeug (nur Chef) */}
+                  {chef && (
+                    <input type="checkbox" checked={auswahl.has(v.id)} data-testid={`bestand-waehlen-${v.id}`}
+                           aria-label={`${d.make_label || "Fahrzeug"} ${d.model_label || ""} auswählen`}
+                           onChange={() => setAuswahl((a) => auswahlUmschalten(a, v.id))}
+                           className="mt-1 w-4 h-4 shrink-0 cursor-pointer" />
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <div className="font-semibold text-[15px] leading-snug line-clamp-2 break-words">{d.make_label} {d.model_label}</div>
+                    {d.model_description && (
+                      <div className="mt-0.5 text-xs text-zinc-500 line-clamp-2 break-words"
+                           title={d.model_description} data-testid={`bestand-beschreibung-${v.id}`}>
+                        {beschreibungLesbar(d.model_description)}
+                      </div>
+                    )}
+                  </div>
+                  <StatusSchild status={lc} text={lifecycleText(lc)} data-testid={`bestand-status-${v.id}`} />
+                </div>
+                <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs" style={{ color: "var(--text-secondary)" }}>
+                  {kaufDatum(v.gekauft_am) && <span data-testid={`bestand-gekauft-${v.id}`}>Gekauft {kaufDatum(v.gekauft_am)}</span>}
+                  {d.first_registration && <span>EZ {d.first_registration}</span>}
+                  {kmText(d.mileage) && <span>{kmText(d.mileage)}</span>}
+                  {v.purchase_price != null && (
+                    <span className="font-semibold whitespace-nowrap" style={{ color: "var(--text-primary)" }}>EK {Number(v.purchase_price).toLocaleString("de-DE")} €</span>
+                  )}
+                  <span className="text-zinc-600">{v.source === "manuell" ? "manuell" : "über System"}</span>
+                  {v.owner_name && <span className="text-zinc-500" data-testid={`bestand-owner-${v.id}`}>Bearbeiter: {v.owner_name}{v.mitbearbeiter_namen?.length > 0 ? ` · mit ${v.mitbearbeiter_namen.join(", ")}` : ""}</span>}
+                </div>
+
+                {lc === "bestand" && v.retention_days_left != null && (
+                  <div className={`mt-2 inline-flex items-center gap-1.5 text-[11px] ${
+                    v.retention_days_left <= 3 ? "text-red-400"
+                    : v.retention_days_left <= 10 ? "text-amber-400" : "text-zinc-500"}`}>
+                    <Clock size={12} />
+                    {v.retention_days_left <= 10
+                      ? `Fahrzeugdaten werden in ${v.retention_days_left} Tag(en) archiviert`
+                      : `Noch ${v.retention_days_left} Tage im Bestand`}
+                  </div>
+                )}
+
+                {/* Design 11/2026: Knopfzeile in jeder Karte einer Reihe auf gleicher Höhe */}
+                <div className="flex-1 min-h-3" />
+                <div className="pt-3 border-t flex flex-wrap items-center gap-2" style={{ borderColor: "var(--border-default)" }}>
+                  {lc === "abgeholt" ? (
+                    <>
+                      {chef && (<>
+                      {/* Rollenprüfung 22.09.2026 (RP-045/RP-144): auch hier nur
+                          mit freigeschaltetem Marktplatz — sonst endete der
+                          Klick in "Demnächst verfügbar" (503). */}
+                      {features.marktplatz && (
+                        <button onClick={() => decide(v.id, "verkaufsentwurf", lc)} disabled={busy === v.id}
+                                data-testid={`bestand-weiterverkaufen-${v.id}`}
+                                className="apple-btn-primary inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white">
+                          <Tag size={13} /> Speichern & weiterverkaufen
+                        </button>
+                      )}
+                      <button onClick={() => decide(v.id, "bestand", v.lifecycle)} disabled={busy === v.id}
+                              className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs border text-zinc-200"
+                              style={{ borderColor: "var(--border-default)" }}>
+                        <Archive size={13} /> Nur speichern
+                      </button>
+                      <button onClick={() => decide(v.id, "loeschen", v.lifecycle)} disabled={busy === v.id}
+                              className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs text-zinc-500 hover:text-red-400">
+                        <Trash2 size={13} /> Löschen
+                      </button>
+                      </>)}
+                      {/* Runde 21: gerade frisch abgeholte Fahrzeuge brauchen den Weg
+                          zum Abholbericht mit den Fahrerfotos — vorher fehlte er hier. */}
+                      <Link to={`/app/akte/${v.id}`} data-testid={`akte-link-${v.id}`}
+                            className="inline-flex items-center rounded-lg px-3 py-1.5 text-xs border hover:opacity-80"
+                            style={{ borderColor: "var(--border-default)", color: "var(--text-primary)" }}>
+                        Fahrzeugakte · Abholbericht
+                      </Link>
+                    </>
+                  ) : (
+                    <>
+                      {/* Rollenprüfung 22.09.2026: "Weiterverkaufen" nur mit
+                          freigeschaltetem Marktplatz (wie in der Akte) — sonst
+                          endete der Klick in "Demnächst verfügbar" (503). */}
+                      {chef && features.marktplatz && (lc === "bestand") && (
+                        <button onClick={() => decide(v.id, "verkaufsentwurf", lc)} disabled={busy === v.id}
+                                className="apple-btn-primary inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white">
+                          <Tag size={13} /> Weiterverkaufen
+                        </button>
+                      )}
+                      {/* Rollenprüfung 22.09.2026 (RP-450): Frist verlängern,
+                          bevor der Aufräumer das Fahrzeug archiviert.
+                          Review 22.09.: die neue Frist ist 50 Tage ab heute,
+                          nicht die alte Frist + 50 — so steht es jetzt da. */}
+                      {chef && lc === "bestand" && (
+                        <button onClick={() => decide(v.id, "bestand", v.lifecycle)} disabled={busy === v.id}
+                                data-testid={`bestand-verlaengern-${v.id}`}
+                                title="Setzt die Frist neu auf 50 Tage ab heute"
+                                className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs border text-zinc-200"
+                                style={{ borderColor: "var(--border-default)" }}>
+                          <Clock size={13} /> Frist erneuern (50 Tage ab heute)
+                        </button>
+                      )}
+                      {/* RP-411: von Hand angelegte Fahrzeuge lassen sich
+                          korrigieren und — solange sie nur im Bestand stehen —
+                          auch wieder löschen. */}
+                      {chef && v.source === "manuell" && !["verkauft", "archiviert", "geloescht"].includes(lc) && (
+                        <button onClick={() => setBearbeiten(v)} disabled={busy === v.id}
+                                data-testid={`bestand-bearbeiten-${v.id}`}
+                                className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs border text-zinc-200"
+                                style={{ borderColor: "var(--border-default)" }}>
+                          <Pencil size={13} /> Bearbeiten
+                        </button>
+                      )}
+                      {chef && v.source === "manuell" && lc === "bestand" && (
+                        <button onClick={() => decide(v.id, "loeschen", v.lifecycle)} disabled={busy === v.id}
+                                data-testid={`bestand-loeschen-${v.id}`}
+                                className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs text-zinc-500 hover:text-red-400">
+                          <Trash2 size={13} /> Löschen
+                        </button>
+                      )}
+                      {/* RP-191/RP-342: "Verkaufsentwurf" ohne geöffnetes
+                          Inserat — öffnet das vorhandene oder legt es an. */}
+                      {chef && features.marktplatz && lc === "verkaufsentwurf" && (
+                        <button onClick={() => decide(v.id, "verkaufsentwurf", lc)} disabled={busy === v.id}
+                                data-testid={`bestand-inserat-${v.id}`}
+                                className="apple-btn-primary inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white">
+                          <Tag size={13} /> Zum Inserat
+                        </button>
+                      )}
+                      {/* Ab Vertragserstellung sofort inserierbar — die Abholung
+                          läuft parallel weiter (Bericht landet in der Akte). */}
+                      {chef && features.marktplatz && ["vertrag_erstellt", "gekauft", "abholung_geplant"].includes(lc) && (
+                        <button onClick={() => decide(v.id, "verkaufsentwurf", lc)} disabled={busy === v.id}
+                                className="apple-btn-primary inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white">
+                          <Tag size={13} /> Jetzt inserieren
+                        </button>
+                      )}
+                      <Link to={`/app/akte/${v.id}`}
+                            className="inline-flex items-center rounded-lg px-3 py-1.5 text-xs border hover:opacity-80"
+                            style={{ borderColor: "var(--border-default)", color: "var(--text-primary)" }}>
+                        Fahrzeugakte
+                      </Link>
+                    </>
+                  )}
+                  {/* U-44: Sucher — nur aus der eigenen Liste entfernen (wie in der Akte) */}
+                  {!chef && (
+                    <button onClick={() => entfernen(v.id)} disabled={busy === v.id}
+                            data-testid={`bestand-sucher-entfernen-${v.id}`}
+                            className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs text-zinc-500 hover:text-red-400 disabled:opacity-50">
+                      <Trash2 size={13} /> Aus meiner Liste entfernen
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Seiten (Wunsch Ahmad 24.11.2026) — Anzahl/Summe oben gelten immer für alle Treffer */}
+      {data.je_seite && (data.gesamt || 0) > data.je_seite && (
+        <div className="mt-4 flex items-center justify-center gap-3 text-[13px]" data-testid="bestand-seiten">
+          <button type="button" disabled={seite <= 1} onClick={() => setSeite((s) => Math.max(1, s - 1))}
+                  data-testid="bestand-seite-zurueck"
+                  className="rounded-lg px-3 py-1.5 border disabled:opacity-40" style={{ borderColor: "var(--border-default)" }}>
+            ‹ Zurück
+          </button>
+          <span style={{ color: "var(--text-secondary)" }}>
+            Seite {seite} von {Math.max(1, Math.ceil(data.gesamt / data.je_seite))}
+          </span>
+          <button type="button" disabled={seite >= Math.ceil(data.gesamt / data.je_seite)}
+                  onClick={() => setSeite((s) => s + 1)} data-testid="bestand-seite-weiter"
+                  className="rounded-lg px-3 py-1.5 border disabled:opacity-40" style={{ borderColor: "var(--border-default)" }}>
+            Weiter ›
+          </button>
+        </div>
+      )}
+
+      {sammelOffen && (
+        <SammelDialog ids={[...auswahl]} ziel={ziel} namen={Object.fromEntries((data.items || []).map((v) => [
+          v.id, `${v.data?.make_label || ""} ${v.data?.model_label || ""}`.trim()]))}
+                      onClose={(fertig) => {
+                        setSammelOffen(false);
+                        if (fertig) { setAuswahl(new Set()); setZiel(""); load(); }
+                      }} />
+      )}
+
+      {showManual && <ManualVehicleDialog onClose={() => setShowManual(false)} onDone={() => { setShowManual(false); load(); }} />}
+      {bearbeiten && (
+        <ManualVehicleDialog fahrzeug={bearbeiten} onClose={() => setBearbeiten(null)}
+                             onDone={() => { setBearbeiten(null); load(); }} />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Wunsch Ahmad 24.11.2026: Rückfrage vor der Sammeländerung, danach das
+ * Ergebnis (geändert / übersprungen mit Grund). onClose(true) = es wurde
+ * ausgeführt (Liste neu laden, Auswahl leeren).
+ */
+export function SammelDialog({ ids, ziel, namen = {}, onClose }) {
+  const [laeuft, setLaeuft] = useState(false);
+  const [ergebnis, setErgebnis] = useState(null);
+  const dialogRef = useModal(() => { if (!laeuft) onClose?.(Boolean(ergebnis)); });
+  const hinweis = SAMMEL_ZIELE.find((z) => z.key === ziel)?.hinweis;
+
+  const ausfuehren = async () => {
+    if (laeuft) return;
+    setLaeuft(true);
+    try {
+      const r = await api.post("/bestand/status", { ids, ziel });
+      setErgebnis(r.data);
+      toast.success(sammelErgebnisText(r.data));
+    } catch (e) {
+      toast.error(errMsg(e, "Status konnte nicht geändert werden"));
+    } finally {
+      setLaeuft(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.7)" }}>
+      <div ref={dialogRef} {...MODAL_ATTRIBUTE} aria-labelledby="sammel-dialog-titel" data-testid="bestand-sammel-dialog"
+           className="w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-2xl p-5"
+           style={{ background: "var(--bg-elevated)", border: "1px solid var(--wa-10)" }}>
+        <div className="text-lg font-bold" id="sammel-dialog-titel">
+          {ergebnis ? "Erledigt" : sammelFrage(ids.length, ziel)}
+        </div>
+        {!ergebnis && (
+          <>
+            {hinweis && (
+              <div className="mt-3 rounded-xl border px-3 py-2 text-sm" data-testid="bestand-sammel-hinweis"
+                   style={{ borderColor: "color-mix(in srgb, var(--st-amber) 40%, transparent)",
+                     background: "color-mix(in srgb, var(--st-amber) 10%, transparent)", color: "var(--tx-amber)" }}>
+                {hinweis}
+              </div>
+            )}
+            <div className="mt-3 text-sm" style={{ color: "var(--text-secondary)" }}>
+              Jedes Fahrzeug wird einzeln geprüft. Was nicht geht, wird übersprungen und mit Grund angezeigt.
+            </div>
+            <div className="mt-5 flex flex-wrap justify-end gap-2">
+              <button type="button" onClick={() => onClose?.(false)} disabled={laeuft} data-testid="bestand-sammel-abbrechen"
+                      className="rounded-xl px-4 py-2.5 text-sm border min-h-[44px]" style={{ borderColor: "var(--border-default)" }}>
+                Abbrechen
+              </button>
+              <button type="button" onClick={ausfuehren} disabled={laeuft} data-testid="bestand-sammel-ja"
+                      className="rounded-xl px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50 min-h-[44px]"
+                      style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
+                {laeuft ? "Wird geändert …" : `Ja, auf „${zielText(ziel)}“ setzen`}
+              </button>
+            </div>
+          </>
+        )}
+        {ergebnis && (
+          <div className="mt-3 text-sm" data-testid="bestand-sammel-ergebnis">
+            <div style={{ color: "var(--tx-gruen)" }}>{sammelErgebnisText(ergebnis)}.</div>
+            {(ergebnis.uebersprungen || []).length > 0 && (
+              <div className="mt-3">
+                <div className="text-[12px] uppercase tracking-wide" style={{ color: "var(--text-muted)" }}>Übersprungen</div>
+                <ul className="mt-1 space-y-1 max-h-64 overflow-y-auto">
+                  {ergebnis.uebersprungen.map((u) => (
+                    <li key={u.id} className="text-[13px]" data-testid={`bestand-sammel-skip-${u.id}`}>
+                      <span className="font-medium" style={{ color: "var(--text-primary)" }}>{namen[u.id] || u.id}</span>
+                      <span style={{ color: "var(--text-secondary)" }}> — {u.grund}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            <div className="mt-5 flex justify-end">
+              <button type="button" onClick={() => onClose?.(true)} data-testid="bestand-sammel-fertig"
+                      className="rounded-xl px-4 py-2.5 text-sm font-semibold border min-h-[44px]"
+                      style={{ borderColor: "var(--border-default)" }}>
+                Schließen
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Formular eines manuellen Fahrzeugs (leer oder aus einem vorhandenen). */
+export function manuellFormAus(fahrzeug) {
+  const d = fahrzeug?.data || {};
+  const text = (x) => (x === null || x === undefined ? "" : String(x));
+  return {
+    make_label: text(d.make_label), model_label: text(d.model_label),
+    model_description: text(d.model_description),
+    first_registration: text(d.first_registration),
+    mileage: typeof d.mileage === "number" ? d.mileage.toLocaleString("de-DE") : text(d.mileage),
+    fuel_label: text(d.fuel_label), gearbox_label: text(d.gearbox_label),
+    power_ps: text(d.power_ps), color: text(d.color), vin: text(d.vin),
+    previous_owners: text(d.previous_owners),
+    features: Array.isArray(d.features) ? d.features.join(", ") : text(d.features),
+    description: text(d.description),
+    purchase_price: betragAlsText(fahrzeug?.purchase_price),
+  };
+}
+
+/**
+ * Rollenprüfung 22.09.2026 (RP-411/RP-146): Kilometer, PS und Einkaufspreis
+ * deutsch lesen. Vorher machten parseInt/parseFloat aus "150.000 km" 150 km
+ * und aus "12.990 €" 12,99 € — und korrigieren ließ es sich nicht.
+ * Liefert { payload, fehler }. power_kw bleibt beim Bearbeiten erhalten.
+ */
+export function manuellPayload(f, fahrzeug = null) {
+  if (!String(f.make_label || "").trim() || !String(f.model_label || "").trim()) {
+    return { payload: null, fehler: "Marke und Modell sind Pflichtfelder" };
+  }
+  const km = kmAusText(f.mileage);
+  if (Number.isNaN(km)) {
+    return { payload: null, fehler: "Kilometerstand: bitte als ganze Zahl eingeben, z. B. 150.000" };
+  }
+  const psRoh = String(f.power_ps ?? "").trim();
+  if (psRoh && !/^\d{1,4}$/.test(psRoh)) {
+    return { payload: null, fehler: "Leistung: bitte die PS als ganze Zahl eingeben, z. B. 150" };
+  }
+  const ekRoh = String(f.purchase_price ?? "").trim();
+  const ek = ekRoh ? preisAusText(ekRoh) : null;
+  if (ekRoh && ek === null) {
+    return { payload: null, fehler: "Einkaufspreis: bitte als Betrag eingeben, z. B. 12.990 oder 12.990,50" };
+  }
+  const altKw = fahrzeug?.data?.power_kw;
+  return {
+    fehler: null,
+    payload: {
+      ...f,
+      make_label: f.make_label.trim(), model_label: f.model_label.trim(),
+      mileage: km,
+      power_ps: psRoh ? Number(psRoh) : null,
+      power_kw: typeof altKw === "number" ? altKw : null,
+      purchase_price: ek,
+      features: String(f.features || "").split(",").map((x) => x.trim()).filter(Boolean),
+    },
+  };
+}
+
+function ManualVehicleDialog({ fahrzeug = null, onClose, onDone }) {
+  const [f, setF] = useState(() => manuellFormAus(fahrzeug));
+  const [busy, setBusy] = useState(false);
+  const set = (k) => (e) => setF((s) => ({ ...s, [k]: e.target.value }));
+  const bearbeiten = Boolean(fahrzeug?.id);
+
+  const submit = async () => {
+    const { payload, fehler } = manuellPayload(f, fahrzeug);
+    if (fehler) { toast.error(fehler); return; }
+    const ezFehler = monatJahrFehler(f.first_registration);
+    if (ezFehler) { toast.error(`Erstzulassung: ${ezFehler}`); return; }
+    setBusy(true);
+    try {
+      if (bearbeiten) {
+        // RP-411: PUT /vehicles/manual/{id} hatte keinen Aufrufer — ein
+        // Tippfehler ließ sich nicht mehr korrigieren.
+        await api.put(`/vehicles/manual/${fahrzeug.id}`, payload);
+        toast.success("Fahrzeugdaten gespeichert");
+      } else {
+        await api.post("/vehicles/manual", payload);
+        toast.success("Fahrzeug im Bestand angelegt");
+      }
+      onDone?.();
+    } catch (e) {
+      toast.error(errMsg(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const inputCls = "w-full rounded-lg border bg-transparent px-3 py-2 text-sm outline-none focus:border-white/40";
+  const st = { borderColor: "var(--border-default)" };
+  // Pruefbericht 20.09.2026 (M-07): role=dialog, Escape, Fokus (lib/useModal);
+  // waehrend des Speicherns schliesst Escape nicht.
+  const dialogRef = useModal(() => { if (!busy) onClose?.(); });
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.7)" }}>
+      <div ref={dialogRef} {...MODAL_ATTRIBUTE} aria-labelledby="manuell-dialog-titel"
+           className="w-full max-w-2xl max-h-[92vh] overflow-y-auto rounded-2xl px-5 pb-5"
+           style={{ background: "var(--bg-elevated)", border: "1px solid var(--wa-10)" }}>
+        {/* M-11: Kopfzeile bleibt beim Scrollen oben, Schliessen mit 44-px-Trefferflaeche */}
+        <div className="flex items-center justify-between gap-3 py-4 mb-1 sticky top-0 z-10"
+             style={{ background: "var(--bg-elevated)" }}>
+          <div>
+            <div className="text-lg font-bold" id="manuell-dialog-titel">
+              {bearbeiten ? "Fahrzeugdaten bearbeiten" : "Fahrzeug manuell hinzufügen"}
+            </div>
+            <div className="text-xs text-zinc-500">
+              {bearbeiten
+                ? "Von Hand angelegtes Fahrzeug korrigieren. Ein bestehendes Inserat behält seine eigene Kopie der Daten."
+                : "Für Fahrzeuge, die du bereits besitzt oder außerhalb der Plattform gekauft hast."}
+            </div>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Schließen" data-testid="manuell-schliessen"
+                  className="w-11 h-11 -mr-2 shrink-0 flex items-center justify-center rounded-full text-zinc-400 hover:text-white hover:bg-white/10">
+            <X size={20} />
+          </button>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Marke *"><input value={f.make_label} onChange={set("make_label")} className={inputCls} style={st} placeholder="BMW" /></Field>
+          <Field label="Modell *"><input value={f.model_label} onChange={set("model_label")} className={inputCls} style={st} placeholder="320d" /></Field>
+          <div className="col-span-2">
+            <Field label="Modellbezeichnung"><input value={f.model_description} onChange={set("model_description")} className={inputCls} style={st} placeholder="320d Touring M Sport" /></Field>
+          </div>
+          <Field label="Erstzulassung"><MonatJahrEingabe value={f.first_registration} onChange={(v) => set("first_registration")({ target: { value: v } })} art="ez" testid="manuell-ez" className={inputCls} style={st} /></Field>
+          <Field label="Kilometerstand"><input type="text" inputMode="numeric" autoComplete="off" value={f.mileage} onChange={set("mileage")} className={inputCls} style={st} placeholder="z. B. 150.000" data-testid="manuell-km" /></Field>
+          <Field label="Kraftstoff"><input value={f.fuel_label} onChange={set("fuel_label")} className={inputCls} style={st} placeholder="Diesel" /></Field>
+          <Field label="Getriebe"><input value={f.gearbox_label} onChange={set("gearbox_label")} className={inputCls} style={st} placeholder="Automatik" /></Field>
+          <Field label="Leistung (PS)"><input type="text" inputMode="numeric" autoComplete="off" value={f.power_ps} onChange={set("power_ps")} className={inputCls} style={st} placeholder="z. B. 150" /></Field>
+          <Field label="Farbe"><input value={f.color} onChange={set("color")} className={inputCls} style={st} /></Field>
+          <Field label="FIN"><input value={f.vin} onChange={set("vin")} className={inputCls} style={st} /></Field>
+          <Field label="Vorbesitzer"><input value={f.previous_owners} onChange={set("previous_owners")} className={inputCls} style={st} /></Field>
+          <div className="col-span-2">
+            <Field label="Ausstattung (Komma-getrennt)"><input value={f.features} onChange={set("features")} className={inputCls} style={st} placeholder="Navi, LED, AHK" /></Field>
+          </div>
+          <div className="col-span-2">
+            <Field label="Beschreibung"><textarea rows={3} value={f.description} onChange={set("description")} className={inputCls} style={st} /></Field>
+            <DiktatKnopf testid="bestand-beschreibung-diktat" className="mt-1" wert={f.description} max={20000}
+                         onChange={(v) => setF((s) => ({ ...s, description: v }))} />
+          </div>
+          <Field label="Einkaufspreis (€)"><input type="text" inputMode="decimal" autoComplete="off" value={f.purchase_price} onChange={set("purchase_price")} className={inputCls} style={st} placeholder="z. B. 12.990" data-testid="manuell-ek" /></Field>
+        </div>
+        <button onClick={submit} disabled={busy}
+                className="mt-4 w-full rounded-xl py-3 font-semibold text-white disabled:opacity-50"
+                style={{ background: "var(--knopf-primaer, var(--accent-blue))" }}>
+          {bearbeiten
+            ? (busy ? "Wird gespeichert…" : "Änderungen speichern")
+            : (busy ? "Wird angelegt…" : "In den Bestand aufnehmen")}
+        </button>
+      </div>
+    </div>
+  );
+}

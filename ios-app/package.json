@@ -1,0 +1,14 @@
+{
+  "name": "autoschnell-ios-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AutoSchnell fuer iPhone (App Store): Capacitor-Huelle um https://app.auto-schnellkauf.de — gebaut per GitHub Actions auf macOS (.github/workflows/ios.yml)",
+  "scripts": {
+    "sync": "cap sync ios"
+  },
+  "dependencies": {
+    "@capacitor/cli": "^7.6.9",
+    "@capacitor/core": "^7.6.9",
+    "@capacitor/ios": "^7.6.9"
+  }
+}

@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <title>AutoSchnell Analyse und Vertragsabwicklung</title>
+  <style>
+    :root { color-scheme: light; }
+    body { margin: 0; width: 300px; font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+           color: #111827; background: #fff; }
+    header { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-bottom: 1px solid #f3f4f6; }
+    header img { width: 24px; height: 24px; border-radius: 6px; }
+    header b { font-size: 14px; }
+    header b span { color: #ff3b30; }
+    main { padding: 12px 14px 14px; }
+    .klein { color: #6b7280; font-size: 12px; }
+    .fehler { color: #b91c1c; margin-top: 8px; }
+    .ok { color: #15803d; }
+    label { display: block; font-weight: 600; margin: 4px 0 6px; }
+    input[type=text] { width: 100%; box-sizing: border-box; font: 700 22px/1.2 ui-monospace, Consolas, monospace; letter-spacing: .3em;
+                       text-align: center; padding: 8px; border: 1px solid #d1d5db; border-radius: 10px; }
+    input[type=text]:focus { outline: 2px solid #ff3b30; outline-offset: 1px; border-color: transparent; }
+    button { width: 100%; margin-top: 10px; border: 0; border-radius: 999px; padding: 9px 12px; font: 600 13px/1.2 inherit; cursor: pointer; }
+    .haupt { background: #ff3b30; color: #fff; } .haupt:hover { background: #e6352b; }
+    .neben { background: #f3f4f6; color: #111827; } .neben:hover { background: #e5e7eb; }
+    .schalter { display: flex; gap: 8px; align-items: flex-start; margin: 12px 0 4px; cursor: pointer; font-weight: 400; }
+    .schalter input { margin-top: 2px; }
+    dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 0 0 6px; }
+    dt { color: #6b7280; } dd { margin: 0; font-weight: 600; }
+    details { margin-top: 12px; } summary { cursor: pointer; color: #6b7280; font-size: 12px; }
+    #server { font: 12px/1.3 inherit; width: 100%; box-sizing: border-box; padding: 6px; border: 1px solid #d1d5db; border-radius: 8px; margin-top: 6px; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <header><img src="icons/icon-48.png" alt=""><b><span>Auto</span>Schnell Analyse &amp; Vertragsabwicklung</b></header>
+  <main>
+    <div id="laden" class="klein">Lade …</div>
+
+    <section id="getrennt" hidden>
+      <p class="klein" style="margin-top:0">In AutoSchnell unter <b>Programme → AutoSchnell Analyse und Vertragsabwicklung</b> auf „Code zum Verbinden anzeigen“
+        klicken und den Code hier eintippen.</p>
+      <div id="grund" class="fehler" hidden></div>
+      <form id="formular">
+        <label for="code">Code aus AutoSchnell</label>
+        <input id="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="7" placeholder="123456" required>
+        <button class="haupt" type="submit" id="verbinden">Verbinden</button>
+        <details>
+          <summary>Server (nur zum Testen)</summary>
+          <input id="server" type="url" placeholder="https://app.auto-schnellkauf.de">
+        </details>
+      </form>
+      <div id="fehler" class="fehler" hidden></div>
+    </section>
+
+    <section id="verbunden" hidden>
+      <p class="ok" style="margin-top:0">✓ Verbunden</p>
+      <dl>
+        <dt>Konto</dt><dd id="konto"></dd>
+        <dt>Name</dt><dd id="name"></dd>
+        <dt>Firma</dt><dd id="firma"></dd>
+        <dt>Abo bis</dt><dd id="abo"></dd>
+      </dl>
+      <div id="hinweis" class="fehler" hidden></div>
+      <button class="haupt" id="vergleich" type="button" title="Vergleichsseiten zum offenen Inserat mit euren AutoSchnell-Einstellungen öffnen">Vergleich öffnen</button>
+      <div id="vergleichText" class="klein" style="margin-top:6px" hidden></div>
+      <label class="schalter"><input type="checkbox" id="oeffnen">
+        <span>Vergleiche beim Öffnen eines Inserats automatisch öffnen</span></label>
+      <p class="klein" id="portale" hidden></p>
+      <p class="klein">Ein Konto kann in einem Browser verbunden sein – ein neuer Browser ersetzt diesen.</p>
+      <button class="neben" id="trennen" type="button">Verbindung trennen</button>
+    </section>
+    <p class="klein" id="version" style="margin:10px 0 0"></p>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

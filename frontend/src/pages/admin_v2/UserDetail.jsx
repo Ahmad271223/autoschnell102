@@ -1,40 +1,425 @@
-import { useEffect, useState } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useParams, Link, useNavigate } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
+import { preisAusText, preisText } from "@/lib/preis";
+import { blobOeffnen } from "@/lib/dateiOeffnen";
 import { toast } from "sonner";
-import { ArrowLeft, FileText, Crown, Mail, Building2, Calendar, Download, Eye } from "lucide-react";
+import { useAuth } from "@/context/AuthContext";
+import {
+  ArrowLeft, FileText, Crown, Mail, Building2, Calendar, Download, Eye,
+  UserPlus, X, Euro, Ban, Trash2, Check, ChevronDown,
+} from "lucide-react";
 import { PageHeader, Card, Badge, Button, Spinner, EmptyState, fmtDate, fmtNum } from "./_ui";
+import ZugangsdatenKarte from "@/components/admin/ZugangsdatenKarte";
+import PasswortFeld from "@/components/admin/PasswortFeld";
+import FirmenseiteEinstellungen from "@/components/FirmenseiteEinstellungen";
+import { passwortProblem } from "@/lib/passwort";
+
+// Nur der Kalendertag (aus dem ISO-String, ohne Zeitzonen-Verschiebung):
+// "2026-12-31T23:59:59+01:00" -> "31.12.2026"
+const fmtTag = (iso) => (iso ? String(iso).slice(0, 10).split("-").reverse().join(".") : "—");
+const istIsoTag = (v) => typeof v === "string" && /^\d{4}-\d{2}-\d{2}/.test(v);
+
+// Kontonummer (13.09.2026): Sucher haben nicht immer eine E-Mail — Dialoge
+// nennen Name und Kontonummer.
+const sucherLabel = (s) => {
+  const name = `${s.first_name || ""} ${s.last_name || ""}`.trim() || s.email || "Sucher";
+  return s.kontonummer ? `${name} (Kontonummer ${s.kontonummer})` : name;
+};
+
+// Rollenpruefung 22.09.2026 (RP-225/RP-376): ein Schluessel je beabsichtigter
+// Freischaltung. Er bleibt stehen, bis der Server sie bestaetigt hat — ein
+// erneuter Klick nach einem Netzfehler (obwohl die erste Buchung durchlief)
+// schickt denselben Schluessel und bucht nicht doppelt.
+export function neuerSchluessel() {
+  try {
+    if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  } catch { /* aeltere Browser: Rueckfall unten */ }
+  return `k${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
+}
+
+const ZAHLUNG_PLAN = {
+  monthly: "Monats-Abo", yearly: "Jahres-Abo",
+  probe3: "Probe-Abo (3 Tage)", probe5: "Probe-Abo (5 Tage)",
+};
+
+// Rollenpruefung 22.09.2026 (RP-033/RP-132): Firmen-Verwaltung nur fuer den
+// Hauptchef (Zeiger am Firmenprofil), nicht fuer jedes Konto mit Rolle
+// "dealer". Aeltere Server ohne `ist_chef`: Rolle wie bisher.
+export function istHauptchef(u) {
+  if (!u) return false;
+  if (typeof u.ist_chef === "boolean") return u.ist_chef;
+  return u.role === "dealer";
+}
+
+// Startpruefung 27.09.2026 (H9-Kern): "Speichern" (nur Datum, keine Zahlung) stand nur bei aktivem Abo.
+// Ein per DATUM abgelaufenes Abo (z. B. vertipptes Jahr) liess sich in der Oberflaeche nur neu BUCHEN,
+// obwohl PATCH /admin/sucher/{id}/abo-gueltig-bis es annimmt (auch_abgelaufen). Der Server sagt je
+// Konto, ob er das Datum annimmt (ablauf_korrigierbar — aufgehobene Abos nicht); aeltere Server ohne
+// das Feld: jedes per Datum abgelaufene Abo.
+export function ablaufKorrigierbar(s) {
+  if (s?.subscription?.active) return true;
+  if (typeof s?.ablauf_korrigierbar === "boolean") return s.ablauf_korrigierbar;
+  return s?.subscription?.status === "expired";
+}
 
 export default function AdminUserDetail() {
+  const { user: ich } = useAuth();
+  const superAdmin = !!ich?.is_super_admin;   // Betreiber-Funktionen (Audit 09/2026)
   const { id } = useParams();
+  const nav = useNavigate();
+  const schluesselRef = useRef({});                 // RP-225: je Konto+Plan bis zur Bestaetigung
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [sucher, setSucher] = useState(null);
+  const [zahlungen, setZahlungen] = useState(null);
+  // Pruefbericht 20.09.2026 (AD-02/O5): Ein Ladefehler zeigte "Noch keine
+  // Sucher — lege die Zugaenge an"; der Betreiber legte bestehende Konten ein
+  // zweites Mal an und rechnete sie ab. Jetzt: Fehlerkarte statt Leerzustand.
+  const [firmaFehler, setFirmaFehler] = useState("");
+  const [showAdd, setShowAdd] = useState(false);
+  const [gueltigBis, setGueltigBis] = useState({});   // je Konto-Id das Datumsfeld
+  // Wunsch Ahmad 20.09.2026: Vertraege in 20er-Schritten nachladen statt
+  // bis zu 2000 auf einmal. Die schon geladenen bleiben stehen, die
+  // naechsten 20 kommen darunter dazu.
+  const [mehr, setMehr] = useState([]);        // nachgeladene Vertraege
+  const [seite, setSeite] = useState(1);       // zuletzt geladene Seite
+  const [laedtMehr, setLaedtMehr] = useState(false);
+  const [busy, setBusy] = useState(null);           // Doppelklick-Schutz je Konto
+  const busyRef = useRef(null);                     // synchroner Guard (State hinkt im selben Tick nach)
+  const sperren = (id) => { if (busyRef.current) return false; busyRef.current = id; setBusy(id); return true; };
+  const freigeben = () => { busyRef.current = null; setBusy(null); };
 
+  // Startpruefung 27.09.2026 (H10): Netzfehler, 500 oder Zeitueberschreitung zeigten dauerhaft "Nutzer
+  // nicht gefunden" (nur ein kurzer Toast) — wie ein echtes 404. Jetzt getrennt: 404 = nicht gefunden,
+  // alles andere = Ladefehler mit Knopf "Erneut versuchen".
+  const [ladeFehler, setLadeFehler] = useState(null);   // null | { nichtGefunden: bool, text }
+
+  // Startpruefung 28.09.2026: Wechsel zu einem anderen Nutzer, waehrend die Anfrage fuer den vorigen noch
+  // laeuft — scheiterte die alte spaet, leerte ihr setData(null) den schon geladenen NEUEN Nutzer (bzw. ihre
+  // Antwort ueberschrieb ihn). Jede Anfrage bekommt eine laufende Nummer; nur die juengste darf schreiben.
+  const ladeNr = useRef(0);
   const load = async () => {
+    const nr = ++ladeNr.current;
+    const aktuell = () => nr === ladeNr.current;
     setLoading(true);
     try {
-      const r = await api.get(`/admin/users/${id}/contracts`);
+      const r = await api.get(`/admin/users/${id}/contracts`, { params: { seite: 1 } });
+      if (!aktuell()) return;
       setData(r.data);
+      setLadeFehler(null);
+      setMehr([]);
+      setSeite(1);
     } catch (e) {
-      toast.error(errMsg(e, "Fehler beim Laden"));
+      if (!aktuell()) return;
+      // Kein alter Stand (ggf. eines ANDEREN Nutzers) stehen lassen
+      setData(null);
+      if (e?.response?.status === 404) setLadeFehler({ nichtGefunden: true, text: "" });
+      else setLadeFehler({ nichtGefunden: false, text: errMsg(e, "Fehler beim Laden") });
     } finally {
-      setLoading(false);
+      if (aktuell()) setLoading(false);
     }
   };
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [id]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); }, [id]);
+
+  const dealerId = istHauptchef(data?.user) ? data.user.dealer_id : null;
+
+  // Go-Live-Pruefung 28.09.2026 (admin4): loadFirma und die Zahlungen hatten keine Wache. Chef A
+  // oeffnen, dessen Sucherliste haengt, zu Chef B wechseln, B laedt — danach kam A's Antwort und die
+  // Freischaltungstabelle zeigte Firma A unter Firma B; Freischalten/Speichern/Aufheben trafen Konten
+  // der falschen Firma. Jetzt: laufende Nummer wie bei load(), dazu die Firma, fuer die gerade die
+  // Seite steht (firmaRef). Jede Liste merkt sich, zu welcher Firma sie gehoert (sucherFirma,
+  // zahlungenFirma) — angezeigt und bedient wird sie nur, wenn das die Firma der Seite ist.
+  const firmaNr = useRef(0);
+  const firmaRef = useRef(null);
+  firmaRef.current = dealerId;
+  const [sucherFirma, setSucherFirma] = useState(null);
+  const [zahlungenFirma, setZahlungenFirma] = useState(null);
+  const [zahlungenFehler, setZahlungenFehler] = useState("");
+
+  const loadFirma = useCallback(async () => {
+    if (!dealerId) return;
+    // Ein Neuladen aus einer Aktion, die noch fuer die VORIGE Firma lief: nichts tun — und vor allem
+    // keine neue Nummer ziehen, sonst wuerde die laufende Anfrage der jetzigen Firma verworfen.
+    if (firmaRef.current !== dealerId) return;
+    const nr = ++firmaNr.current;
+    const aktuell = () => nr === firmaNr.current && firmaRef.current === dealerId;
+    // AD-01/O4: Die Liste endete bei 200 Konten (aelteste zuerst) — neue
+    // Sucher ab Nr. 201 waren unsichtbar und damit nie freischaltbar. Jetzt
+    // seitenweise ALLE Konten; getrennt von den Zahlungen, damit ein Fehler
+    // dort die Sucherliste nicht mitreisst.
+    try {
+      const alle = [];
+      for (let seite = 1; seite <= 50; seite += 1) {
+        const r = await api.get(`/admin/dealers/${dealerId}/sucher`, { params: { limit: 2000, seite } });
+        if (!aktuell()) return;
+        alle.push(...(Array.isArray(r.data) ? r.data : []));
+        if (String(r.headers?.["x-truncated"] || "") !== "1") break;
+      }
+      setSucher(alle);
+      setSucherFirma(dealerId);
+      setFirmaFehler("");
+    } catch (e) {
+      if (!aktuell()) return;             // Fehler einer veralteten Anfrage: weder Karte noch Toast
+      setFirmaFehler(errMsg(e, "Chef und Sucher konnten nicht geladen werden"));
+    }
+    if (!aktuell()) return;
+    try {
+      const z = await api.get(`/admin/dealers/${dealerId}/zahlungen`);
+      if (!aktuell()) return;
+      setZahlungen(Array.isArray(z.data) ? z.data : []);
+      setZahlungenFirma(dealerId);
+      setZahlungenFehler("");
+    } catch (e) {
+      if (!aktuell()) return;
+      const text = errMsg(e, "Zahlungen konnten nicht geladen werden");
+      setZahlungenFehler(text);
+      toast.error(text);
+    }
+  }, [dealerId]);
+  useEffect(() => {
+    // Andere Firma: nichts von der vorigen stehen lassen (Liste, Fehler, offener Anlege-Dialog).
+    setSucher(null);
+    setSucherFirma(null);
+    setZahlungen(null);
+    setZahlungenFirma(null);
+    setFirmaFehler("");
+    setZahlungenFehler("");
+    setShowAdd(false);
+    setGueltigBis({});
+    loadFirma();
+  }, [loadFirma]);
+
+  // Nur die Liste der Firma, fuer die die Seite gerade steht (sonst "lade…").
+  const sucherListe = dealerId && sucherFirma === dealerId ? sucher : null;
+  const zahlungenListe = dealerId && zahlungenFirma === dealerId ? zahlungen : null;
+
+  // Vor jedem Senden: gehoert die angezeigte Tabelle (und die Zeile) zur Firma dieser Seite?
+  const firmaStimmt = (s) => {
+    const ok = !!dealerId && firmaRef.current === dealerId && sucherFirma === dealerId
+      && (!s?.dealer_id || s.dealer_id === dealerId);
+    if (!ok) toast.error("Die angezeigte Liste gehört nicht zu dieser Firma — bitte die Seite neu laden. Nichts gesendet.");
+    return ok;
+  };
+  const zahlungenStimmen = () => {
+    const ok = !!dealerId && firmaRef.current === dealerId && zahlungenFirma === dealerId;
+    if (!ok) toast.error("Die Zahlungen dieser Firma sind nicht geladen — bitte neu laden. Nichts erfasst.");
+    return ok;
+  };
 
   if (loading) return <div className="flex items-center gap-2 text-zinc-500 text-sm py-10"><Spinner /> lade…</div>;
-  if (!data) return <EmptyState title="Nutzer nicht gefunden" />;
+  if (!data) {
+    if (ladeFehler && !ladeFehler.nichtGefunden) {
+      return (
+        <Card className="max-w-xl" data-testid="nutzer-ladefehler">
+          <div className="text-[15px] font-semibold text-white">Konnte nicht geladen werden</div>
+          <div className="mt-1 text-[13px] text-red-300">{ladeFehler.text}</div>
+          <div className="mt-1 text-[12px] text-zinc-500">Der Nutzer existiert vermutlich — nur das Laden ist gescheitert (Netz oder Server).</div>
+          <Button size="sm" className="mt-3" onClick={load} data-testid="nutzer-erneut-laden">Erneut versuchen</Button>
+        </Card>
+      );
+    }
+    return <EmptyState title="Nutzer nicht gefunden" />;
+  }
   const u = data.user || {};
-  const contracts = data.contracts || [];
+  const contracts = [...(data.contracts || []), ...mehr];
+  const gesamt = data.gesamt != null ? data.gesamt : contracts.length;
 
+  const weitereLaden = async () => {
+    if (laedtMehr) return;
+    setLaedtMehr(true);
+    const nr = ladeNr.current;           // inzwischen anderer Nutzer/neu geladen -> Antwort verwerfen
+    try {
+      const naechste = seite + 1;
+      const r = await api.get(`/admin/users/${id}/contracts`, { params: { seite: naechste } });
+      if (nr !== ladeNr.current) return;
+      setMehr((m) => [...m, ...(r.data?.contracts || [])]);
+      setSeite(naechste);
+      // "weitere" kommt vom Server mit — so weiss die Oberflaeche, wann
+      // der Knopf verschwinden muss, ohne selbst zu rechnen.
+      setData((d) => ({ ...d, weitere: r.data?.weitere, gesamt: r.data?.gesamt }));
+    } catch (e) {
+      if (nr === ladeNr.current) toast.error(errMsg(e, "Weitere Verträge konnten nicht geladen werden"));
+    }
+    finally { setLaedtMehr(false); }
+  };
+
+  // B15/M36: nach dem Laden kein window.open (Popup-Sperre, mit noopener
+  // ausserdem weisser Tab) — derselbe Weg wie in der Haendler-Oberflaeche.
   const openPdf = async (c) => {
+    const startMs = Date.now();
     try {
       const r = await api.get(`/admin/contracts/${c.id}/pdf`, { responseType: "blob" });
-      const url = URL.createObjectURL(r.data);
-      window.open(url, "_blank");
-      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      blobOeffnen(r.data, { startMs, titel: "Der Kaufvertrag", mime: "application/pdf" });
     } catch (e) { toast.error(errMsg(e, "PDF nicht verfügbar")); }
+  };
+
+  // Wunsch Ahmad 20.09.2026: dazu die Probe-Abos. Sie sind kostenlos, laufen
+  // nach 3 bzw. 5 Tagen ab und sperren die Sucher-Funktion dann automatisch.
+  // EINE Tabelle fuer Knopf, Erfolgsmeldung und Anzeige des laufenden Abos —
+  // vorher stand "jährlich · 1.500 €" an drei Stellen im Text.
+  const PLAENE = {
+    monthly: { kurz: "150 €/M", lang: "150 € / Monat", zeigen: "monatlich · 150 €" },
+    yearly: { kurz: "1.500 €/J", lang: "1.500 € / Jahr", zeigen: "jährlich · 1.500 €" },
+    probe3: { kurz: "Probe 3 T", lang: "Probe, 3 Tage", zeigen: "Probe · 3 Tage", probe: true },
+    probe5: { kurz: "Probe 5 T", lang: "Probe, 5 Tage", zeigen: "Probe · 5 Tage", probe: true },
+  };
+  const planText = (plan, feld) => (PLAENE[plan] || {})[feld] || plan || "—";
+
+  const grantAbo = async (s, plan) => {
+    if (!firmaStimmt(s)) return;
+    const probe = !!PLAENE[plan]?.probe;
+    // Rollenpruefung 22.09.2026 (RP-050/RP-224): eine weitere Probe fuer ein
+    // Konto, das schon eine hatte, nur nach ausdruecklicher Rueckfrage.
+    if (probe && s.probe_vergeben_am && !window.confirm(
+      `${sucherLabel(s)} hatte bereits ein Probe-Abo (vergeben am ${fmtTag(s.probe_vergeben_am)}).\n\n`
+      + "Wirklich noch eine kostenlose Probe vergeben?")) return;
+    if (!firmaStimmt(s) || !sperren(s.id)) return;             // zweiter Klick waehrend der Anfrage: ignorieren
+    const schluesselName = `${s.id}:${plan}`;
+    if (!schluesselRef.current[schluesselName]) schluesselRef.current[schluesselName] = neuerSchluessel();
+    try {
+      // Beim Probe-Abo entscheidet die Laufzeit des Plans — ein eigenes
+      // Datum lehnt der Server ausdruecklich ab.
+      const datum = probe ? "" : (gueltigBis[s.id] || "").trim();
+      const { data: erg } = await api.post(`/admin/sucher/${s.id}/abo`,
+        { plan, ...(datum ? { gueltig_bis: datum } : {}),
+          idempotenz_schluessel: schluesselRef.current[schluesselName] });
+      delete schluesselRef.current[schluesselName];
+      if (erg?.bereits_freigeschaltet) {
+        toast.info("Diese Freischaltung war schon gebucht — nichts doppelt erfasst.");
+      } else {
+        toast.success(`Abo freigeschaltet (${planText(plan, "lang")})`
+          + (datum ? ` · gültig bis ${datum}` : "")
+          + (probe ? " — kostenlos, sperrt danach automatisch" : " — Zahlung erfasst"));
+      }
+      setGueltigBis((g) => ({ ...g, [s.id]: "" }));
+      // AD-12: erst nach dem Neuladen freigeben — sonst zeigte die Zeile kurz
+      // den alten Stand mit aktiven Knoepfen, ein zweiter Klick buchte doppelt.
+      await loadFirma();
+    } catch (e) { toast.error(errMsg(e)); }
+    finally { freigeben(); }
+  };
+  const saveGueltigBis = async (s) => {
+    const datum = (gueltigBis[s.id] || "").trim();
+    if (!datum) { toast.error("Bitte ein Datum wählen"); return; }
+    if (!firmaStimmt(s) || !sperren(s.id)) return;
+    try {
+      // Der Server verlangt seit dem Audit 09/2026 einen Grund — die
+      // Änderung ohne Zahlung landet unveränderbar im Zugangsverlauf.
+      const grund = window.prompt("Grund für die Laufzeitänderung (wird protokolliert):");
+      if (!grund) return;
+      await api.patch(`/admin/sucher/${s.id}/abo-gueltig-bis`, { gueltig_bis: datum, grund });
+      toast.success(`Gültig bis ${datum} gespeichert — danach wird automatisch gesperrt`);
+      setGueltigBis((g) => ({ ...g, [s.id]: "" }));
+      await loadFirma();
+    } catch (e) { toast.error(errMsg(e)); }
+    finally { freigeben(); }
+  };
+  const revokeAbo = async (s) => {
+    if (!firmaStimmt(s)) return;
+    if (!window.confirm(`Sucher-Funktion (Suche & Vergleich) von ${sucherLabel(s)} aufheben?\n\nDas Konto bleibt aktiv: Anmelden, Bestand, Vertraege und Termine gehen weiter. Zum kompletten Sperren "Konto sperren" bzw. in der Nutzerliste "Firma sperren" verwenden.`)) return;
+    if (!firmaStimmt(s) || !sperren(s.id)) return;
+    try {
+      const { data: erg } = await api.post(`/admin/sucher/${s.id}/abo`, { plan: null });
+      // Rollenpruefung 22.09.2026 (RP-229/RP-380): der Server meldet den
+      // TATSAECHLICHEN Stand danach — nie mehr "aufgehoben", waehrend der
+      // Zugang (z. B. ueber ein Firmen-Abo) weiterlaeuft.
+      if (erg?.active) {
+        toast.warning("Aufgehoben — aber die Sucher-Funktion ist weiter aktiv "
+          + `(${planText(erg?.subscription?.plan, "zeigen")}). Bitte die Seite neu laden und prüfen.`,
+        { duration: 12000 });
+      } else {
+        toast.success("Abo aufgehoben");
+      }
+      await loadFirma();
+    }
+    catch (e) { toast.error(errMsg(e)); }
+    finally { freigeben(); }
+  };
+  // Rollenpruefung 22.09.2026 (RP-558): Einen neuen Chef bestimmen ging bisher
+  // nur per API. Der bisherige Chef wird dabei zum Sucher (seine Sitzung
+  // endet), der neue meldet sich mit seiner bisherigen Kontonummer an.
+  const zumChefMachen = async (s) => {
+    if (!firmaStimmt(s)) return;
+    const alt = sucherListe?.find((x) => x.ist_chef);
+    if (!window.confirm(
+      `${sucherLabel(s)} zum neuen Chef dieser Firma machen?\n\n`
+      + `Der bisherige Chef${alt?.kontonummer ? ` (Kontonummer ${alt.kontonummer})` : ""} wird dabei zum Sucher. `
+      + "Beide werden abgemeldet; die Kontonummern bleiben, wie sie sind.")) return;
+    if (!firmaStimmt(s) || !sperren(s.id)) return;
+    try {
+      await api.put(`/admin/users/${s.id}`, { role: "dealer", chef_wechsel: true });
+      toast.success(`${sucherLabel(s)} ist jetzt Chef der Firma`);
+      // Diese Seite gehoert dem bisherigen Chef — die Firmenansicht wandert
+      // zum neuen (dieselbe Firma: die Liste frisch laden, sonst stuende der
+      // alte Chef-Vermerk da).
+      nav(`/admin/users/${s.id}`);
+      await loadFirma();
+    } catch (e) { toast.error(errMsg(e)); }
+    finally { freigeben(); }
+  };
+  // Pruefbericht 20.09.2026 (AD-22): Sperren und Loeschen liefen ohne
+  // sperren()/freigeben() — ein zweiter Klick schickte den Aufruf doppelt
+  // (zwei Toasts, zwei Audit-Eintraege, beim Sperren die Umkehr). Jetzt wie
+  // grantAbo: Zeile bis nach dem Neuladen gesperrt.
+  // Wunsch Ahmad 25.09.2026 abends: KI-Bewertung je Konto freischalten (wie Abo).
+  const toggleKi = async (s) => {
+    if (!firmaStimmt(s)) return;
+    const aktiv = !s.ki_aktiv;
+    if (!aktiv && !window.confirm(`KI-Bewertung für ${sucherLabel(s)} sperren?`)) return;
+    if (!firmaStimmt(s)) return;
+    setBusy(s.id);
+    try {
+      await api.post(`/admin/sucher/${s.id}/ki`, { aktiv });
+      toast.success(aktiv ? "KI-Bewertung freigeschaltet" : "KI-Bewertung gesperrt");
+      await loadFirma();
+    } catch (e) {
+      toast.error(errMsg(e, "KI-Freischaltung fehlgeschlagen"));
+    } finally { setBusy(null); }
+  };
+
+  const toggleSucherActive = async (s) => {
+    if (!firmaStimmt(s)) return;
+    if (s.active && !window.confirm(`Konto ${sucherLabel(s)} komplett sperren?\n\nAnmeldung sofort unmoeglich (nicht nur die Sucher-Funktion).`)) return;
+    if (!firmaStimmt(s) || !sperren(s.id)) return;
+    try {
+      await api.post(`/admin/users/${s.id}/active`, { active: !s.active });
+      toast.success(s.active ? "Sucher gesperrt" : "Sucher entsperrt");
+      await loadFirma();
+    } catch (e) { toast.error(errMsg(e)); }
+    finally { freigeben(); }
+  };
+  const removeSucher = async (s) => {
+    if (!firmaStimmt(s)) return;
+    if (!window.confirm(`Sucher ${sucherLabel(s)} endgültig löschen?`)) return;
+    if (!firmaStimmt(s) || !sperren(s.id)) return;
+    try { await api.delete(`/admin/users/${s.id}`); toast.success("Sucher gelöscht"); await loadFirma(); }
+    catch (e) { toast.error(errMsg(e)); }
+    finally { freigeben(); }
+  };
+  const addZahlung = async () => {
+    // admin4: nur, wenn die angezeigten Zahlungen zu DIESER Firma gehoeren — und noch einmal direkt
+    // vor dem Senden (nach den Rueckfragen)
+    if (!zahlungenStimmen()) return;
+    const betrag = window.prompt("Betrag in € (z. B. 1.500 oder 150,00):");
+    if (!betrag) return;
+    // Rollenpruefung 22.09.2026: deutsche Schreibweise ueber preisAusText —
+    // parseFloat machte aus "1.500" (Jahres-Abo) still 1,50 €.
+    const amount = preisAusText(betrag);
+    if (amount === null) { toast.error("Betrag nicht lesbar — bitte z. B. 1.500 oder 150,00 eingeben"); return; }
+    // Rollenprüfung 22.09.2026 (RP-349, Welle 2): den GELESENEN Betrag vor dem
+    // Buchen bestätigen lassen — ein Tippfehler ("15.00" statt "150,00")
+    // landete sonst still in der Zahlungshistorie.
+    if (!window.confirm(`Zahlung über ${preisText(amount)} erfassen?`)) return;
+    const note = window.prompt("Notiz (optional, z.B. Rechnungsnummer):") || "";
+    if (!zahlungenStimmen()) return;
+    try {
+      await api.post(`/admin/dealers/${dealerId}/zahlungen`,
+        { amount, note });
+      toast.success("Zahlung erfasst");
+      loadFirma();
+    } catch (e) { toast.error(errMsg(e)); }
   };
 
   return (
@@ -43,8 +428,8 @@ export default function AdminUserDetail() {
         <ArrowLeft size={14} /> Zurück zu Nutzern
       </Link>
       <PageHeader
-        title={u.company_name || u.username || u.email}
-        subtitle="Nutzerprofil & Verträge (read-only)"
+        title={u.company_name || u.username || u.kontonummer || u.email}
+        subtitle={dealerId ? "Firma: Profil, Sucher, Zahlungen & Verträge" : "Nutzerprofil & Verträge (read-only)"}
       />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -53,8 +438,12 @@ export default function AdminUserDetail() {
             {u.is_super_admin && <Crown size={16} className="text-amber-400" />}
             <span className="text-[15px] font-semibold text-white">Profil</span>
           </div>
-          <Row icon={<Mail size={14} />}     label="E-Mail"        value={u.email} />
+          {u.kontonummer && (
+            <Row label="Kontonummer" value={<span className="font-mono" data-testid="profil-kontonummer">{u.kontonummer}</span>} />
+          )}
+          <Row icon={<Mail size={14} />}     label="Kontakt-E-Mail" value={u.email} />
           <Row icon={<Building2 size={14} />} label="Firma"        value={u.company_name || "—"} />
+          {u.kunden_nr != null && <Row label="Kundennummer" value={<Badge tone="blue">#{u.kunden_nr}</Badge>} />}
           <Row icon={<Calendar size={14} />}  label="Erstellt"      value={fmtDate(u.created_at)} />
           <Row label="Rolle"        value={<Badge tone={u.role === "admin" ? "purple" : "gray"}>{u.role || "dealer"}</Badge>} />
           <Row label="Status"       value={u.active === false
@@ -64,18 +453,23 @@ export default function AdminUserDetail() {
         </Card>
 
         <Card className="lg:col-span-2" padded={false}>
-          <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+          <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: "1px solid var(--wa-08)" }}>
             <div className="flex items-center gap-2">
               <FileText size={16} className="text-zinc-500" />
               <span className="text-[15px] font-semibold text-white">Verträge</span>
-              <Badge>{fmtNum(contracts.length)}</Badge>
+              <Badge>{fmtNum(gesamt)}</Badge>
+              {contracts.length < gesamt && (
+                <span className="text-[12px] text-zinc-500">
+                  {fmtNum(contracts.length)} geladen
+                </span>
+              )}
             </div>
             <span className="text-[12px] text-zinc-500">read-only · keine Bearbeitung</span>
           </div>
           {contracts.length === 0 ? (
             <EmptyState title="Noch keine Verträge" hint="Dieser Nutzer hat bisher keine Verträge erzeugt." />
           ) : (
-            <ul className="divide-y" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
+            <ul className="divide-y" style={{ borderColor: "var(--wa-06)" }}>
               {contracts.map((c) => (
                 <li key={c.id} className="px-5 py-3 flex items-center gap-3">
                   <div className="flex-1 min-w-0">
@@ -100,7 +494,329 @@ export default function AdminUserDetail() {
               ))}
             </ul>
           )}
+          {data.weitere && (
+            <div className="px-5 py-4 flex justify-center"
+                 style={{ borderTop: "1px solid var(--wa-06)" }}>
+              <Button variant="outline" size="sm" onClick={weitereLaden}
+                      disabled={laedtMehr} data-testid="vertraege-mehr">
+                {laedtMehr ? <Spinner /> : <ChevronDown size={14} />}
+                {laedtMehr ? "lädt…" : "Weitere 20 anzeigen"}
+              </Button>
+            </div>
+          )}
+          {data.abgeschnitten && !data.weitere && (
+            <div className="px-5 py-3 text-[12px] text-zinc-500 text-center"
+                 style={{ borderTop: "1px solid var(--wa-06)" }}>
+              Es werden höchstens 2.000 Verträge angezeigt — diese Firma hat{" "}
+              {fmtNum(gesamt)}.
+            </div>
+          )}
         </Card>
+      </div>
+
+      {/* ---- Firmen-Verwaltung (nur Händler-Hauptaccounts, 09/2026) ---- */}
+      {dealerId && (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-4">
+          {/* Sucher der Firma */}
+          <Card className="lg:col-span-2" padded={false}>
+            <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: "1px solid var(--wa-08)" }}>
+              <div className="flex items-center gap-2">
+                <span className="text-[15px] font-semibold text-white">Chef & Sucher — Freischaltung</span>
+                <Badge>{fmtNum((sucherListe || []).length)}</Badge>
+              </div>
+              <Button size="sm" onClick={() => setShowAdd(true)} data-testid="admin-add-sucher"
+                      disabled={!superAdmin || !!firmaFehler || sucherListe === null}
+                      title={!superAdmin ? "Nur der Super-Admin" : firmaFehler ? "Erst die Liste laden — sonst drohen doppelte Konten" : ""}>
+                <UserPlus size={14} /> Sucher anlegen
+              </Button>
+            </div>
+            {firmaFehler ? (
+              <div className="px-5 py-6 text-[13px] text-red-300" role="alert" data-testid="admin-sucher-ladefehler">
+                {firmaFehler} — die Liste ist NICHT leer, sie konnte nur nicht geladen werden.{" "}
+                <button type="button" onClick={loadFirma} className="underline underline-offset-2 font-semibold text-white">
+                  Erneut laden
+                </button>
+              </div>
+            ) : sucherListe === null ? (
+              <div className="flex items-center gap-2 text-zinc-500 text-sm px-5 py-6"><Spinner /> lade…</div>
+            ) : !sucherListe.length ? (
+              <EmptyState title="Noch keine Sucher" hint="Lege die Zugänge an — die Kontonummer vergibt das System, das Passwort vergibst du hier." />
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-[13px] min-w-[620px]">
+                  <thead>
+                    <tr className="text-left text-zinc-500 text-[11px] uppercase tracking-wide">
+                      <th className="px-4 py-2.5 font-medium">Sucher</th>
+                      <th className="px-4 py-2.5 font-medium">Abo</th>
+                      <th className="px-4 py-2.5 font-medium">KI</th>
+                      <th className="px-4 py-2.5 font-medium">Gültig bis / nächste Zahlung</th>
+                      <th className="px-4 py-2.5 font-medium">Status</th>
+                      <th className="px-4 py-2.5 font-medium text-right">Aktion</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sucherListe.map((s) => (
+                      <tr key={s.id} className="border-t border-white/5">
+                        <td className="px-4 py-2.5">
+                          <div className="text-white font-medium flex items-center gap-1.5">
+                            {s.ist_chef ? (u.contact_person || u.company_name || "Firmenchef") : `${s.first_name || ""} ${s.last_name || ""}`.trim() || "—"}
+                            {s.ist_chef && <Badge tone="yellow">Chef</Badge>}
+                            {/* RP-132: liegengebliebenes zweites dealer-Konto — arbeitet als Sucher */}
+                            {s.weiteres_dealer_konto && (
+                              <span title="Altbestand: Rolle „dealer“, aber nicht der eingetragene Chef — arbeitet als Sucher">
+                                <Badge tone="gray">weiteres Konto (arbeitet als Sucher)</Badge>
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[11px] text-zinc-500">
+                            <span className="font-mono text-zinc-300" data-testid={`sucher-kontonummer-${s.id}`}>{s.kontonummer || "—"}</span>
+                            {s.email ? ` · ${s.email}` : ""}
+                          </div>
+                        </td>
+                        <td className="px-4 py-2.5">
+                          {s.subscription?.active ? (
+                            <Badge tone="green">
+                              Sucher-Funktion: ja · {planText(s.subscription.plan, "zeigen")}
+                            </Badge>
+                          ) : (
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <Badge tone="red">Sucher-Funktion: nein</Badge>
+                              <Button size="sm" onClick={() => grantAbo(s, "monthly")} disabled={busy === s.id || !superAdmin}
+                                      data-testid={`abo-monat-${s.id}`}
+                                      title="Freischalten — erfasst 150 € Zahlung (Rechnung bezahlt); ohne Datum 30 Tage gültig">
+                                <Check size={13} /> 150 €/M
+                              </Button>
+                              <Button size="sm" variant="outline" onClick={() => grantAbo(s, "yearly")} disabled={busy === s.id || !superAdmin}
+                                      data-testid={`abo-jahr-${s.id}`}
+                                      title="Freischalten — erfasst 1.500 € Zahlung (Rechnung bezahlt); ohne Datum 365 Tage gültig">
+                                1.500 €/J
+                              </Button>
+                              <Button size="sm" variant="outline" onClick={() => grantAbo(s, "probe3")} disabled={busy === s.id || !superAdmin}
+                                      data-testid={`abo-probe3-${s.id}`}
+                                      title="Probe-Abo: kostenlos, 3 Tage. Danach sperrt die Sucher-Funktion automatisch. Nur für Konten ohne laufendes bezahltes Abo.">
+                                Probe 3 T
+                              </Button>
+                              <Button size="sm" variant="outline" onClick={() => grantAbo(s, "probe5")} disabled={busy === s.id || !superAdmin}
+                                      data-testid={`abo-probe5-${s.id}`}
+                                      title="Probe-Abo: kostenlos, 5 Tage. Danach sperrt die Sucher-Funktion automatisch. Nur für Konten ohne laufendes bezahltes Abo.">
+                                Probe 5 T
+                              </Button>
+                            </div>
+                          )}
+                        </td>
+                        <td className="px-4 py-2.5" data-testid={`ki-zelle-${s.id}`}>
+                          <div className="flex flex-col items-start gap-1">
+                            <Badge tone={s.ki_aktiv ? "green" : "gray"}>{s.ki_aktiv ? "KI: ja" : "KI: nein"}</Badge>
+                            <Button size="sm" variant="ghost" onClick={() => toggleKi(s)} disabled={busy === s.id || !superAdmin}
+                                    data-testid={`ki-schalten-${s.id}`}
+                                    title={s.ist_chef
+                                      ? "KI-Bewertung für Vertrag UND Abholung dieser Firma (Chef-Konto)"
+                                      : "KI-Schadennachlass im Vertragsdialog dieses Kontos"}>
+                              {s.ki_aktiv ? "KI sperren" : "KI freischalten"}
+                            </Button>
+                          </div>
+                        </td>
+                        <td className="px-4 py-2.5 text-zinc-400 tabular-nums">
+                          <div className="flex items-center gap-1.5">
+                            <input type="date" value={gueltigBis[s.id] || ""}
+                                   onChange={(e) => setGueltigBis((g) => ({ ...g, [s.id]: e.target.value }))}
+                                   data-testid={`gueltig-bis-${s.id}`}
+                                   title={s.subscription?.active
+                                     ? "Neues Ablaufdatum — Speichern ändert NUR das Datum (keine neue Zahlung)"
+                                     : (ablaufKorrigierbar(s)
+                                       ? "Neues Ablaufdatum — „Speichern“ korrigiert NUR das Datum (keine Zahlung); die Bezahl-Knöpfe buchen dagegen neu"
+                                       : "Optional: gilt beim Freischalten als Ablaufdatum")}
+                                   className="h-8 px-2 rounded-lg text-[12px] outline-none"
+                                   style={{ background: "var(--bg-input-solid)", color: "var(--text-primary)",
+                                            border: "1px solid var(--wa-12)", colorScheme: "var(--scheme)" }} />
+                            {ablaufKorrigierbar(s) && (
+                              <Button size="sm" variant="ghost" onClick={() => saveGueltigBis(s)} disabled={busy === s.id || !superAdmin}
+                                      data-testid={`gueltig-bis-speichern-${s.id}`}
+                                      title={s.subscription?.active
+                                        ? "Ablaufdatum speichern — danach automatisch gesperrt"
+                                        : "Vertipptes Ablaufdatum korrigieren — ohne neue Zahlung; ein Datum in der Zukunft gibt den Zugang zurück"}>
+                                Speichern
+                              </Button>
+                            )}
+                          </div>
+                          <div className="text-[11px] mt-1" style={{ color: "var(--text-muted, #71717a)" }}>
+                            {s.subscription?.active
+                              ? <>gültig bis {fmtTag(s.naechste_zahlung_am)} · danach automatisch gesperrt</>
+                              : (s.subscription?.status === "expired" && s.subscription?.expires_at
+                                ? <span className="text-red-300" data-testid={`abo-abgelaufen-${s.id}`}>abgelaufen am {fmtTag(s.subscription.expires_at)} · automatisch gesperrt
+                                    {ablaufKorrigierbar(s) ? " · Datum vertippt? Neues Datum wählen und „Speichern“ (keine Zahlung)" : ""}</span>
+                                // Startpruefung 28.09.2026 (H9-Rest): Chef mit eigenem, abgelaufenem Abo ohne
+                                // Firmen-Abo (Anzeige 'none') oder Abo ohne/mit unlesbarem Datum ('ungueltig').
+                                : (ablaufKorrigierbar(s)
+                                  ? <span className="text-red-300" data-testid={`abo-datum-korrigierbar-${s.id}`}>
+                                      {istIsoTag(s.ablauf_abo_bis)
+                                        ? `abgelaufen am ${fmtTag(s.ablauf_abo_bis)}`
+                                        : "Ablaufdatum fehlt oder ist unlesbar"}
+                                      {" · automatisch gesperrt · neues Datum wählen und „Speichern“ (keine Zahlung)"}</span>
+                                  : "—"))}
+                          </div>
+                        </td>
+                        <td className="px-4 py-2.5">
+                          <Badge tone={s.active ? "green" : "red"}>{s.active ? "aktiv" : "gesperrt"}</Badge>
+                        </td>
+                        <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                          {s.subscription?.active && (
+                            <Button size="sm" variant="ghost" onClick={() => revokeAbo(s)} disabled={busy === s.id || !superAdmin} title="Nur Suche & Vergleich sperren (Konto bleibt aktiv)">
+                              Abo aufheben
+                            </Button>
+                          )}
+                          {!s.ist_chef && (
+                            <>
+                              {s.active && (
+                                <Button size="sm" variant="ghost" onClick={() => zumChefMachen(s)} disabled={!superAdmin || busy === s.id}
+                                        data-testid={`zum-chef-${s.id}`}
+                                        title="Dieses Konto wird Chef der Firma, der bisherige Chef wird Sucher">
+                                  <Crown size={13} /> Zum Chef machen
+                                </Button>
+                              )}
+                              <Button size="sm" variant="ghost" onClick={() => toggleSucherActive(s)} disabled={busy === s.id || !superAdmin}
+                                      data-testid={`sucher-sperren-${s.id}`}
+                                      title={s.active ? "Konto komplett sperren (Anmeldung unmoeglich)" : "Konto entsperren"}>
+                                <Ban size={13} /> {s.active ? "Konto sperren" : "Entsperren"}
+                              </Button>
+                              <Button size="sm" variant="ghost" onClick={() => removeSucher(s)} disabled={busy === s.id || !superAdmin}
+                                      data-testid={`sucher-loeschen-${s.id}`} title="Löschen">
+                                <Trash2 size={13} />
+                              </Button>
+                            </>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Card>
+
+          {/* Zahlungen */}
+          <Card className="lg:col-span-1" padded={false}>
+            <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: "1px solid var(--wa-08)" }}>
+              <div className="flex items-center gap-2">
+                <Euro size={15} className="text-zinc-500" />
+                <span className="text-[15px] font-semibold text-white">Zahlungen</span>
+              </div>
+              <Button size="sm" variant="outline" onClick={addZahlung} disabled={!superAdmin || zahlungenListe === null}
+                      data-testid="zahlung-nachtragen">Nachtragen</Button>
+            </div>
+            {zahlungenFehler ? (
+              <div className="px-5 py-6 text-[13px] text-red-300" role="alert" data-testid="admin-zahlungen-ladefehler">
+                {zahlungenFehler} — die Liste ist NICHT leer, sie konnte nur nicht geladen werden.{" "}
+                <button type="button" onClick={loadFirma} className="underline underline-offset-2 font-semibold text-white">
+                  Erneut laden
+                </button>
+              </div>
+            ) : zahlungenListe === null ? (
+              <div className="flex items-center gap-2 text-zinc-500 text-sm px-5 py-6"><Spinner /> lade…</div>
+            ) : !zahlungenListe.length ? (
+              <EmptyState title="Noch keine Zahlungen" hint="Beim Freischalten eines Abos wird die Zahlung automatisch erfasst." />
+            ) : (
+              <ul className="divide-y" style={{ borderColor: "var(--wa-06)" }}>
+                {zahlungenListe.slice(0, 20).map((z) => (
+                  <li key={z.id} className="px-5 py-3" data-testid={`zahlung-${z.id}`}>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-white font-semibold tabular-nums">
+                        {Number(z.amount).toLocaleString("de-DE", { minimumFractionDigits: 2 })} €
+                      </span>
+                      <span className="text-[12px] text-zinc-500 tabular-nums">{z.paid_at}</span>
+                    </div>
+                    <div className="text-[12px] text-zinc-400">
+                      {/* RP-232: Proben erschienen hier als "Monats-Abo" */}
+                      {z.plan ? (ZAHLUNG_PLAN[z.plan] || z.plan) : "manuell"}
+                      {z.period_until ? ` · bezahlt bis ${fmtTag(z.period_until)}` : ""}
+                      {z.note ? ` · ${z.note}` : ""}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Card>
+        </div>
+      )}
+
+      {/* Kundenportal (29.09.2026, Weg A): der Betreiber richtet die Firmenseite fuer den Kunden ein —
+          Adresse, Ein/Aus, Ueber uns, Bilder, Domains (mit "Domain pruefen") und die Unterschrift des Chefs */}
+      {dealerId && (
+        <div className="mt-4" data-testid="admin-firmenseite">
+          <FirmenseiteEinstellungen adminDealerId={dealerId} />
+        </div>
+      )}
+
+      {showAdd && dealerId && (
+        <AddSucherDialog
+          dealerId={dealerId}
+          onClose={() => setShowAdd(false)}
+          onAngelegt={loadFirma}
+        />
+      )}
+    </div>
+  );
+}
+
+/** Betreiber legt einen Sucher an. Kontonummer (13.09.2026): die Nummer
+ *  '<kunden_nr>-<zusatz>' vergibt das Backend, die E-Mail ist optional.
+ *  Nach der Anlage zeigt der Dialog die Zugangsdaten. */
+function AddSucherDialog({ dealerId, onClose, onAngelegt }) {
+  const [f, setF] = useState({ email: "", password: "", first_name: "", last_name: "", phone: "" });
+  const [busy, setBusy] = useState(false);
+  const [ergebnis, setErgebnis] = useState(null);
+  const set = (k) => (e) => setF((s) => ({ ...s, [k]: e.target.value }));
+
+  const submit = async () => {
+    const problem = passwortProblem(f.password);
+    if (problem) { toast.error(problem); return; }
+    setBusy(true);
+    try {
+      const r = await api.post(`/admin/dealers/${dealerId}/sucher`, { ...f, email: f.email.trim() });
+      setErgebnis({ ...r.data, name: `${f.first_name} ${f.last_name}`.trim(), passwort: f.password });
+      onAngelegt?.();
+    } catch (e) { toast.error(errMsg(e)); }
+    finally { setBusy(false); }
+  };
+
+  // Fest dunkel wie die uebrigen Admin-Dialoge — "dark:"-Varianten greifen
+  // in dieser App nicht (keine "dark"-Klasse am Dokument), der Dialog war
+  // weiss mit unsichtbarer weisser Schrift.
+  const inputCls = "w-full rounded-lg px-3 py-2 text-sm outline-none";
+  const inputStyle = { background: "var(--bg-input-solid)", color: "var(--text-primary)", border: "1px solid var(--wa-12)" };
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.6)" }}>
+      <div className="w-full max-w-md rounded-2xl p-5"
+           style={{ background: "var(--bg-elevated)", border: "1px solid var(--wa-10)" }}
+           data-testid="sucher-anlegen-dialog">
+        <div className="flex items-center justify-between mb-3">
+          <div className="text-lg font-bold text-white">Sucher anlegen</div>
+          {/* AD-08: mit angezeigtem Passwort nur ueber "Fertig" schliessen */}
+          {!ergebnis && <button onClick={onClose} className="text-zinc-400 hover:text-zinc-200" aria-label="Schließen"><X size={20} /></button>}
+        </div>
+        {ergebnis ? (
+          <ZugangsdatenKarte titel="Sucher angelegt" name={ergebnis.name} kontonummer={ergebnis.kontonummer}
+                             passwort={ergebnis.passwort}
+                             bereich="app" hinweis={ergebnis.hinweis} onClose={onClose} />
+        ) : (<>
+        <div className="grid grid-cols-2 gap-3">
+          <input value={f.first_name} onChange={set("first_name")} placeholder="Vorname" className={inputCls} style={inputStyle} autoFocus data-testid="sucher-anlegen-vorname" />
+          <input value={f.last_name} onChange={set("last_name")} placeholder="Nachname" className={inputCls} style={inputStyle} data-testid="sucher-anlegen-nachname" />
+          <div className="col-span-2"><input value={f.email} onChange={set("email")} placeholder="Kontakt-E-Mail (optional)" type="email" className={inputCls} style={inputStyle} data-testid="sucher-anlegen-email" /></div>
+          <div className="col-span-2">
+            <PasswortFeld value={f.password} onChange={(v) => setF((s) => ({ ...s, password: v }))}
+                          testid="sucher-anlegen-passwort" className={inputCls} style={inputStyle} />
+          </div>
+          <input value={f.phone} onChange={set("phone")} placeholder="Telefon" className={inputCls} style={inputStyle} />
+        </div>
+        <div className="mt-3 text-[11px] text-zinc-500">
+          Die Kontonummer vergibt das System. Zugangsdaten danach an die Firma weitergeben.
+          Suchen &amp; Vergleichen funktioniert erst nach Abo-Freischaltung (150 €/M · 1.500 €/J).
+        </div>
+        <Button className="mt-4 w-full" onClick={submit} disabled={busy} data-testid="sucher-anlegen-submit">
+          {busy ? "Wird angelegt…" : "Sucher anlegen"}
+        </Button>
+        </>)}
       </div>
     </div>
   );

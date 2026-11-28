@@ -38,25 +38,6 @@ def get_proxy_url() -> Optional[str]:
     return None
 
 
-def get_playwright_proxy() -> Optional[dict]:
-    """Zerlegt die PROXY_URL in das von Playwright erwartete dict-Format:
-        {"server": "http://host:port", "username": "...", "password": "..."}
-    Gibt None zurueck, wenn kein Proxy konfiguriert ist.
-    """
-    url = get_proxy_url()
-    if not url:
-        return None
-    parsed = urlparse(url)
-    scheme = parsed.scheme or "http"
-    host = parsed.hostname or ""
-    port = f":{parsed.port}" if parsed.port else ""
-    proxy: dict = {"server": f"{scheme}://{host}{port}"}
-    if parsed.username:
-        proxy["username"] = parsed.username
-    if parsed.password:
-        proxy["password"] = parsed.password
-    return proxy
-
 
 # ---------------------------------------------------------------------------
 # User-Agent-Rotation
