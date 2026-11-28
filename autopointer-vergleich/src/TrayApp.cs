@@ -266,7 +266,9 @@ internal sealed class TrayApp : ApplicationContext
             _dienst.Verbunden, _einstellungen.VerbundenAls ?? "", auto,
             !string.IsNullOrEmpty(_ueberwacher?.LetzteInseratUrl), _letzteMeldung, _probelauf, _lizenzSperre,
             _hinweise.ToList(), _ueberwacher?.LetztesNurGemerkt == true, _vertragLaeuft,
-            _dauerlaufAn ? DauerlaufStand(_dlNeu, _dlAussortiert, _dlGelesen, _dlTreffer, _dlHindernis) : null);
+            _dauerlaufAn || _einstellungen.DauerlaufEingeschaltet
+                ? DauerlaufStand(_dlNeu, _dlAussortiert, _dlGelesen, _dlTreffer, _dauerlaufAn ? _dlHindernis : "") : null,
+            DauerlaufWartet: !_dauerlaufAn && _einstellungen.DauerlaufEingeschaltet);
     }
 
     /// <summary>Status fuer Symbol, Fenster und Leiste: Lizenzsperre (A8) und fehlende Texterkennung (A9) gehen vor.</summary>
@@ -762,6 +764,12 @@ internal sealed class TrayApp : ApplicationContext
                     catch (OperationCanceledException) { break; }
                     continue;
                 }
+                // 28.11.2026: eingeschaltet, aber wartend — sobald der PC ruht, von selbst weitermachen
+                if (_einstellungen.DauerlaufEingeschaltet && !_dlStartet && DauerlaufKannWeiter())
+                {
+                    _dlStartet = true;
+                    _ui.Post(_ => { try { DauerlaufLos(null); } finally { _dlStartet = false; } }, null);
+                }
                 try { await _ueberwacher.TickAsync(); }
                 catch (Exception ex)
                 {
@@ -778,11 +786,14 @@ internal sealed class TrayApp : ApplicationContext
 
     // ---- Dauerlauf (Wunsch Ahmad 27.11.2026) ------------------------------------------------------------------
     // Der PC laeuft unbeaufsichtigt: das Programm liest die Liste mit, sortiert vor, klickt passende Autos selbst an,
-    // liest sie ganz und legt sie in die Trefferliste in AutoSchnell. Immer von Hand gestartet (nie gespeichert),
-    // und er haelt an, sobald jemand die Maus bewegt.
+    // liest sie ganz und legt sie in die Trefferliste in AutoSchnell. Einmal im Regelfenster eingeschaltet, bleibt er
+    // an (28.11.2026): bewegt jemand die Maus, WARTET er und macht nach DauerlaufRuheS Sekunden ohne Maus und Tastatur
+    // von selbst weiter — auch nach einem Neustart des Programms. Ganz aus: Klick aufs blaue Feld oder Menue.
     private TextErkennung? _ocr;
     private Dauerlauf? _dauerlauf;
-    private volatile bool _dauerlaufAn;
+    private volatile bool _dauerlaufAn, _dlStartet;
+    /// <summary>So lange muessen Maus und Tastatur ruhen, bevor der wartende Dauerlauf von selbst weitermacht.</summary>
+    internal const int DauerlaufRuheS = 30;
     private int _dlNeu, _dlAussortiert, _dlGelesen, _dlTreffer;
     private volatile string _dlHindernis = "";
     private Native.POINT? _dlMaus;
@@ -791,7 +802,7 @@ internal sealed class TrayApp : ApplicationContext
 
     /// <summary>So weit darf der Zeiger zwischen zwei Schritten wandern, ohne dass es als „jemand benutzt die Maus“ gilt.</summary>
     internal const int DauerlaufMausSpiel = 10;
-    internal const string DauerlaufMausText = "Dauerlauf angehalten – die Maus wurde bewegt. Zum Weitermachen: „Mehr ▾“ → „Dauerlauf starten“.";
+    internal const string DauerlaufMausText = "Dauerlauf wartet – die Maus wurde bewegt. Er macht von selbst weiter, sobald der PC 30 s nicht benutzt wird. Ganz aus: Klick auf das Feld „DAUERLAUF“.";
     internal const string DauerlaufServerAlt = "Dauerlauf angehalten – AutoSchnell kennt die Trefferliste noch nicht (Server-Update fehlt).";
 
     /// <summary>Der kurze Stand fuer Leiste und Tooltip. (rein, fuer Tests)</summary>
@@ -806,7 +817,22 @@ internal sealed class TrayApp : ApplicationContext
 
     private void DauerlaufUmschalten()
     {
-        if (_dauerlaufAn) { DauerlaufStoppen("Dauerlauf gestoppt.", false); return; }
+        if (_dauerlaufAn || _einstellungen.DauerlaufEingeschaltet)
+        {
+            bool lief = _dauerlaufAn;
+            _einstellungen.DauerlaufEingeschaltet = false;
+            Speichern(_einstellungen);
+            if (lief) DauerlaufStoppen("Dauerlauf ausgeschaltet.", false);
+            else
+            {
+                Protokoll.Schreibe("Dauerlauf ausgeschaltet (wartete).");
+                Sprechblase("Dauerlauf ausgeschaltet.", false, erzwingen: true);
+                StatusAnzeigen(AktuellerStatus());
+                _fenster.Aktualisieren();
+                _leiste.Aktualisieren();
+            }
+            return;
+        }
         if (!_dienst.Verbunden || _lizenzSperre != null)
         {
             Sprechblase("Der Dauerlauf geht nur, wenn das Programm mit AutoSchnell verbunden ist und das Abo läuft.", true, erzwingen: true);
@@ -825,30 +851,64 @@ internal sealed class TrayApp : ApplicationContext
         }
         using var form = new DauerlaufForm(DauerlaufRegeln.Aus(_einstellungen.DauerlaufRegeln));
         if (form.ShowDialog() != DialogResult.OK) return;
-        var regeln = form.Regeln;
-        _einstellungen.DauerlaufRegeln = regeln.AlsText();
+        _einstellungen.DauerlaufRegeln = form.Regeln.AlsText();
+        _einstellungen.DauerlaufEingeschaltet = true;
         Speichern(_einstellungen);
-
         _dlNeu = _dlAussortiert = _dlGelesen = _dlTreffer = 0;
+        _dauerlauf = null;
+        DauerlaufLos(haupt);
+    }
+
+    /// <summary>Darf der eingeschaltete, wartende Dauerlauf jetzt von selbst weitermachen? Nur wenn Maus und Tastatur
+    /// <see cref="DauerlaufRuheS"/> Sekunden ruhen (niemand arbeitet am PC) und alles da ist.</summary>
+    private bool DauerlaufKannWeiter()
+    {
+        if (_dauerlaufAn || !_dienst.Verbunden || _lizenzSperre != null || _ocr == null || _ueberwacher == null) return false;
+        if (!RuheReicht(Native.RuheMs())) return false;
+        IntPtr haupt = _quelle?.Hauptfenster ?? IntPtr.Zero;
+        return haupt != IntPtr.Zero && !Native.IsIconic(haupt);
+    }
+
+    /// <summary>(rein, fuer Tests)</summary>
+    internal static bool RuheReicht(long ruheMs) => ruheMs >= DauerlaufRuheS * 1000L;
+
+    /// <summary>Startet bzw. setzt fort (UI-Faden). haupt = null: von selbst nach der Ruhezeit — dann still, ohne Sprechblase.</summary>
+    private void DauerlaufLos(IntPtr? hauptVomStart)
+    {
+        if (_dauerlaufAn || !_einstellungen.DauerlaufEingeschaltet || _ocr == null) return;
+        bool vonSelbst = hauptVomStart == null;
+        if (vonSelbst && !DauerlaufKannWeiter()) return;
+        IntPtr haupt = hauptVomStart ?? _quelle?.Hauptfenster ?? IntPtr.Zero;
+        if (haupt == IntPtr.Zero) return;
+        var regeln = DauerlaufRegeln.Aus(_einstellungen.DauerlaufRegeln);
         _dlHindernis = "";
         _dlMaus = null;
         _dlStart = Environment.TickCount64;
-        _dauerlauf = new Dauerlauf(_ocr, () => regeln, DauerlaufEreignis);
+        // beim Fortsetzen dasselbe Objekt: es weiss, welche Autos schon gelesen sind
+        _dauerlauf ??= new Dauerlauf(_ocr, () => regeln, DauerlaufEreignis);
         try { if (!AutoPointerFenster.ImVordergrund(haupt)) BrowserOeffner.ZurueckZu(haupt); }
         catch (Exception ex) { Protokoll.Schreibe("Dauerlauf: AutoPointer nicht nach vorne geholt: " + ex.Message); }
         _dauerlaufAn = true;
-        Protokoll.Schreibe("Dauerlauf AN (" + regeln.AlsText() + ").");
-        Sprechblase("Dauerlauf läuft – das Programm führt jetzt die Maus. Maus bewegen hält ihn an.", false, erzwingen: true, merken: false);
+        Protokoll.Schreibe((vonSelbst ? "Dauerlauf macht weiter (" : "Dauerlauf AN (") + regeln.AlsText() + ").");
+        if (!vonSelbst)
+            Sprechblase("Dauerlauf läuft – das Programm führt jetzt die Maus. Wird der PC benutzt, wartet er und macht danach von selbst weiter.",
+                        false, erzwingen: true, merken: false);
         StatusAnzeigen(AktuellerStatus());
         _fenster.Aktualisieren();
         _leiste.Aktualisieren();
     }
 
     /// <summary>Haelt den Dauerlauf an (aus jedem Faden aufrufbar).</summary>
-    private void DauerlaufStoppen(string meldung, bool fehler)
+    /// <param name="wartet">true = nur unterbrochen (bleibt eingeschaltet, macht von selbst weiter); false = ganz aus.</param>
+    private void DauerlaufStoppen(string meldung, bool fehler, bool wartet = false)
     {
         if (!_dauerlaufAn) return;
         _dauerlaufAn = false;
+        if (!wartet && _einstellungen.DauerlaufEingeschaltet)
+        {
+            _einstellungen.DauerlaufEingeschaltet = false;
+            _ui.Post(_ => Speichern(_einstellungen), null);
+        }
         BeschreibungGanz.EchtesRad = false;          // der normale Betrieb nimmt dem Sucher nie die Maus
         Protokoll.Schreibe($"Dauerlauf AUS: {meldung} ({DauerlaufStand(_dlNeu, _dlAussortiert, _dlGelesen, _dlTreffer, "")})");
         _ui.Post(_ =>
@@ -868,13 +928,13 @@ internal sealed class TrayApp : ApplicationContext
         if (lauf == null) return false;
         if (!_dienst.Verbunden || _lizenzSperre != null)
         {
-            DauerlaufStoppen("Dauerlauf angehalten – das Programm ist nicht mehr verbunden.", true);
+            DauerlaufStoppen("Dauerlauf wartet – das Programm ist nicht mehr verbunden.", true, wartet: true);
             return false;
         }
         // die ersten Sekunden nach dem Start laesst der Sucher die Maus erst los
         if (Environment.TickCount64 - _dlStart > DauerlaufSchonfristMs && Native.GetCursorPos(out var jetzt) && MausBewegt(_dlMaus, jetzt))
         {
-            DauerlaufStoppen(DauerlaufMausText, false);
+            DauerlaufStoppen(DauerlaufMausText, false, wartet: true);
             return false;
         }
         bool tat = await lauf.SchrittAsync();

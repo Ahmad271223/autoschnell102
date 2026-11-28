@@ -449,7 +449,7 @@ export default function Treffer() {
         <div className="tactical-card p-5 text-sm" style={{ color: "var(--text-dim)" }} data-testid="treffer-leer">
           {daten.gesamt > 0
             ? "Im Moment ist nichts Passendes dabei – alles Gelesene war aussortiert."
-            : "Noch keine Treffer. Sobald das Programm im Dauerlauf ein passendes Auto gelesen hat, steht es hier."}
+            : "Noch keine Treffer. Den Dauerlauf schaltest du einmal im Windows-Programm ein: in der Leiste „Mehr“ → „Dauerlauf starten …“. Danach läuft er von selbst, sobald der PC nicht benutzt wird, und jedes passende Auto steht hier."}
         </div>
       )}
       {liste.length > 0 && (

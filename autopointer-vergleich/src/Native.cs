@@ -87,6 +87,14 @@ internal static class Native
     public struct POINT { public int X, Y; }
     [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vk);
     [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
+    [StructLayout(LayoutKind.Sequential)] private struct LASTINPUTINFO { public uint cbSize, dwTime; }
+    [DllImport("user32.dll")] private static extern bool GetLastInputInfo(ref LASTINPUTINFO l);
+    /// <summary>Millisekunden seit der letzten Eingabe (Maus ODER Tastatur) an diesem PC; -1 = unbekannt.</summary>
+    public static long RuheMs()
+    {
+        var l = new LASTINPUTINFO { cbSize = 8 };
+        return GetLastInputInfo(ref l) ? unchecked((uint)Environment.TickCount - l.dwTime) : -1;
+    }
     [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
     [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
     public const uint GA_ROOT = 2;

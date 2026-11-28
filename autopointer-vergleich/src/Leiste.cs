@@ -38,7 +38,7 @@ internal sealed class Leiste : Form
         DiktatZuruecknehmen;
     /// <summary>1.5.9 (B): "Update auf … verfügbar …" — erst da, wenn AutoSchnell eine neuere Version anbietet.</summary>
     private readonly ToolStripMenuItem _dauerlauf;
-    internal const string DauerlaufStart = "Dauerlauf starten …", DauerlaufStopp = "Dauerlauf stoppen";
+    internal const string DauerlaufStart = "Dauerlauf starten …", DauerlaufStopp = "Dauerlauf ausschalten";
     private ToolStripMenuItem? _update;
     private ToolStripSeparator? _updateTrenner;
     private const string MehrTipp = "Mehr: letzten Vergleich, Einstellungen, Systemcheck, Verbindung, Beenden";
@@ -271,7 +271,7 @@ internal sealed class Leiste : Form
                                 Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
     }
 
-    internal static readonly Color DauerlaufFarbe = Color.FromArgb(29, 78, 216);
+    internal static readonly Color DauerlaufFarbe = Color.FromArgb(29, 78, 216), DauerlaufWartetFarbe = Color.FromArgb(71, 85, 105);
 
     /// <summary>Klick aufs Status-Feld: nicht verbunden -> verbinden, sonst Automatik an/aus.</summary>
     internal void StatusKlick()
@@ -323,19 +323,22 @@ internal sealed class Leiste : Form
         catch (Exception ex) { Protokoll.Schreibe("Leiste: " + ex.Message); return; }
         _zuletzt = z;
         var (farbe, titel, unter) = SteuerFenster.Anzeige(z);
-        _status.BackColor = z.Dauerlauf != null ? DauerlaufFarbe : farbe;
+        _status.BackColor = z.Dauerlauf == null ? farbe : z.DauerlaufWartet ? DauerlaufWartetFarbe : DauerlaufFarbe;
         _status.Text = StatusText(z, titel);
         _dauerlauf.Text = z.Dauerlauf != null ? DauerlaufStopp : DauerlaufStart;
         _dauerlauf.Enabled = z.Verbunden || z.Dauerlauf != null;
-        if (z.Dauerlauf != null) unter = "Dauerlauf: " + z.Dauerlauf + "\nDas Programm führt die Maus – Maus bewegen hält ihn an.";
-        string klick = z.Dauerlauf != null ? "Klick: Dauerlauf stoppen"
+        if (z.Dauerlauf != null)
+            unter = "Dauerlauf: " + z.Dauerlauf + (z.DauerlaufWartet
+                ? $"\nWartet, solange der PC benutzt wird – macht nach {TrayApp.DauerlaufRuheS} s Ruhe von selbst weiter."
+                : "\nDas Programm führt die Maus – Maus bewegen lässt ihn warten.");
+        string klick = z.Dauerlauf != null ? "Klick: Dauerlauf ganz ausschalten"
                      : !z.Verbunden ? "Klick: mit AutoSchnell verbinden"
                      : z.AutomatikAn ? "Klick: stoppen – es öffnet sich nichts mehr"
                      : "Klick: starten – Vergleiche öffnen sich beim Anklicken";
         _tipps.SetToolTip(_status, unter + (z.LetztesAuto != null ? "\nLetztes Auto: " + z.LetztesAuto : "")
                                    + (string.IsNullOrEmpty(z.LetzteMeldung) ? "" : "\n" + z.LetzteMeldung)
                                    + "\n(" + klick + ")");
-        _vergleichen.Enabled = z.Verbunden && z.Dauerlauf == null;
+        _vergleichen.Enabled = z.Verbunden && (z.Dauerlauf == null || z.DauerlaufWartet);
         // Pruefung 09.10.2026 (Vertragsweg, P1): solange "Vertrag" laeuft, zeigt der Knopf das und nimmt keinen zweiten Klick
         _vertrag.Text = VertragText(z);
         _vertrag.Enabled = z.Verbunden && z.LetztesAuto != null && !z.VertragLaeuft;
@@ -346,7 +349,7 @@ internal sealed class Leiste : Form
     /// <summary>Status mit dem, was ein Klick tut: "●  AKTIV  ❚❚" (stoppen) bzw. "●  GESTOPPT  ▶" (starten).</summary>
     internal static string StatusText(FensterZustand z, string titel)
     {
-        if (z.Dauerlauf != null) return "●  DAUERLAUF  ■";
+        if (z.Dauerlauf != null) return z.DauerlaufWartet ? "●  DAUERLAUF wartet" : "●  DAUERLAUF  ■";
         if (!z.Verbunden) return "●  " + Kurz(titel);
         return "●  " + Kurz(titel) + (z.AutomatikAn ? "  ❚❚" : "  ▶");
     }

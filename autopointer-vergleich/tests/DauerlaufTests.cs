@@ -202,6 +202,13 @@ public class DauerlaufTests
         var aus = new FensterZustand(Status.Aktiv, true, true, "Konto 10002", null, false, null, false);
         Assert.Equal("●  DAUERLAUF  ■", Leiste.StatusText(aus with { Dauerlauf = "3 gelesen" }, "AKTIV"));
         Assert.DoesNotContain("DAUERLAUF", Leiste.StatusText(aus, "AKTIV"));
+        // 28.11.2026: eingeschaltet, aber jemand benutzt den PC -> wartet (und macht von selbst weiter)
+        Assert.Equal("●  DAUERLAUF wartet", Leiste.StatusText(aus with { Dauerlauf = "3 gelesen", DauerlaufWartet = true }, "AKTIV"));
+        Assert.False(TrayApp.RuheReicht(-1));
+        Assert.False(TrayApp.RuheReicht(TrayApp.DauerlaufRuheS * 1000L - 1));
+        Assert.True(TrayApp.RuheReicht(TrayApp.DauerlaufRuheS * 1000L));
+        Assert.Contains(TrayApp.DauerlaufRuheS + " s", TrayApp.DauerlaufMausText);
+        Assert.False(new Einstellungen().DauerlaufEingeschaltet);          // nie von selbst an, bevor es jemand einschaltet
     }
 
     // ---- Listenbild nachzeichnen ----------------------------------------------------------------

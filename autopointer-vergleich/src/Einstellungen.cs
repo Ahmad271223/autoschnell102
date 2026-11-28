@@ -36,9 +36,12 @@ internal sealed class Einstellungen
     /// <summary>Wunsch Ahmad 27.11.2026 (1.5.22): die ganze Beschreibung lesen — dafuer rollt das Programm die
     /// Detailansicht in AutoPointer kurz nach unten und wieder zurueck. Standard AN; der Haken ist zum Abschalten da.</summary>
     public bool BeschreibungGanzLesen { get; set; } = true;
-    /// <summary>Dauerlauf (27.11.2026): die zuletzt gewaehlten Regeln (Text wie <see cref="DauerlaufRegeln.AlsText"/>). Ob
-    /// der Dauerlauf laeuft, wird bewusst NICHT gespeichert — er wird immer von Hand gestartet.</summary>
+    /// <summary>Dauerlauf (27.11.2026): die zuletzt gewaehlten Regeln (Text wie <see cref="DauerlaufRegeln.AlsText"/>).</summary>
     public string DauerlaufRegeln { get; set; } = "privat;unfall";
+    /// <summary>Wunsch Ahmad 28.11.2026 („das Programm muss von selbst laufen“): einmal im Regelfenster eingeschaltet,
+    /// bleibt der Dauerlauf an — auch nach einem Neustart. Benutzt jemand den PC, wartet er und macht von selbst
+    /// weiter, sobald Maus und Tastatur eine Weile ruhen. Aus geht er nur per Klick (blaues Feld / Menue).</summary>
+    public bool DauerlaufEingeschaltet { get; set; }
 
     // 1.5.8: die kleine Leiste ist immer da (EINE Bedienung statt Fenster + Leiste + Menue am Symbol);
     // ein altes "LeisteAnzeigen": false in einstellungen.json wird ignoriert.
