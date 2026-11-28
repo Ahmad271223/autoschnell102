@@ -56,6 +56,49 @@ internal sealed class Dauerlauf
     public string Hindernis { get; private set; } = "";
     /// <summary>Nur zum Messen: was der letzte Schritt im Listenbild fand.</summary>
     public string Stand { get; private set; } = "";
+
+    // ---- Selbstdiagnose (28.11.2026: „bei einem Nutzer macht der Dauerlauf nichts“) ----------------------------
+    // Der Schrift-Abgleich ist bildpunktgenau und bisher nur an EINEM PC gemessen (125 %). Kommt der Dauerlauf an
+    // einem anderen PC ProblemNachMs lang nicht voran, meldet er EINMAL je ProblemAbstandMs, woran es haengt — samt
+    // Abbild des AutoPointer-Fensters (vom Bildschirm, nie PrintWindow), damit man es nachstellen kann.
+    internal const int ProblemNachMs = 15_000, ProblemAbstandMs = 600_000, FehlLesungenBisProblem = 3;
+    /// <summary>(Text fuer den Sucher, Einzelheiten, PNG oder null, dem Sucher sagen?).</summary>
+    public Action<string, string, byte[]?, bool>? Problem { get; set; }
+    private long _problemSeit = -1, _problemGemeldet = long.MinValue / 2;
+    private int _fehlInFolge;
+
+    /// <summary>Soll jetzt gemeldet werden? (rein, fuer Tests)</summary>
+    internal static bool ProblemFaellig(long seit, long gemeldet, long jetzt) =>
+        seit >= 0 && jetzt - seit >= ProblemNachMs && jetzt - gemeldet >= ProblemAbstandMs;
+
+    private void Gut()
+    {
+        _problemSeit = -1;
+        _fehlInFolge = 0;
+    }
+
+    /// <param name="sagen">false = nur melden: eine leere Liste sieht genauso aus wie eine nicht erkannte.</param>
+    private void Schlecht(string was, bool sagen = true)
+    {
+        long jetzt = Environment.TickCount64;
+        if (_problemSeit < 0) _problemSeit = jetzt;
+        if (Problem == null || !ProblemFaellig(_problemSeit, _problemGemeldet, jetzt)) return;
+        _problemGemeldet = jetzt;
+        byte[]? png = null;
+        string einzel = was;
+        try
+        {
+            uint dpi = _haupt != IntPtr.Zero ? Native.GetDpiForWindow(_haupt) : 0;
+            var schirm = Screen.PrimaryScreen?.Bounds ?? Rectangle.Empty;
+            einzel = $"Dauerlauf: {was}\n{Stand}\nFenster-DPI {dpi} ({dpi * 100 / 96} %), Bildschirm {schirm.Width}x{schirm.Height}, "
+                     + $"Programm {Application.ProductVersion.Split('+')[0]}, neu {Neu}, gelesen {Gelesen}, verpasst {Verpasst}, falsch {Falsch}";
+            if (_haupt != IntPtr.Zero && !Native.IsIconic(_haupt))
+                using (var bild = AutoPointerFenster.Abbild(_haupt))
+                    if (bild != null) png = Lesebilder.Png(bild);
+        }
+        catch (Exception ex) { einzel += "\n(Abbild nicht moeglich: " + ex.Message + ")"; }
+        Problem(was, einzel, png, sagen);
+    }
     /// <summary>Nur zum Messen: das naechste Listenbild hierhin speichern.</summary>
     internal static string? BildSpeichern;
 
@@ -79,7 +122,7 @@ internal sealed class Dauerlauf
             _ansicht = null;
         }
         if (_haupt == IntPtr.Zero) return Ruhe("AutoPointer läuft nicht");
-        if (!AutoPointerFenster.ImVordergrund(_haupt)) return Ruhe("AutoPointer liegt nicht vorne");
+        if (!AutoPointerFenster.ImVordergrund(_haupt)) return Ruhe(NichtVorne);
         if (_ansicht != null && !AutoPointerFenster.NochGueltig(_ansicht)) _ansicht = null;
         if (_liste == IntPtr.Zero || !Native.IsWindow(_liste) || !Native.IsWindowVisible(_liste))
             _liste = ListenLeser.FindeListe(_haupt, _ansicht);
@@ -99,7 +142,12 @@ internal sealed class Dauerlauf
             }
             var p = ListenLeser.Punkte(bild);
             var r = ListenLeser.FindeRaster(p, bild.Width, bild.Height);
-            if (r == null) return Ruhe("keine Listenzeilen erkannt");
+            if (r == null)
+            {
+                Stand = $"Listenbild {bild.Width}x{bild.Height}, kein Raster";
+                Schlecht("die Liste der Inserate wurde nicht erkannt", sagen: false);
+                return Ruhe("keine Listenzeilen erkannt");
+            }
             var regeln = _regeln();
             int markiert = 0, unlesbar = 0;
             foreach (var z in r.Zeilen)
@@ -119,6 +167,9 @@ internal sealed class Dauerlauf
                 else _warten.Add(zeile);
             }
             markierte = markiert;
+            // Zeilen da, aber keine einzige lesbar: andere Schrift/Skalierung an diesem PC
+            if (unlesbar > 0 && sichtbar.Count == 0) Schlecht($"keine der {unlesbar} Listenzeilen war lesbar");
+            else if (sichtbar.Count > 0 && _fehlInFolge < FehlLesungenBisProblem) _problemSeit = -1;
             Stand = $"Listenbild {bild.Width}x{bild.Height}, {r.Zeilen.Count} Zeilen, davon markiert {markiert}, nicht lesbar {unlesbar}";
         }
         Hindernis = "";
@@ -148,6 +199,8 @@ internal sealed class Dauerlauf
         if (_gelesen.Count > Gemerkt) _gelesen.Clear();
         return _gelesen[s] = ListenLeser.Lies(bild, p, r, z);
     }
+
+    internal const string NichtVorne = "AutoPointer liegt nicht vorne";
 
     private bool Ruhe(string warum)
     {
@@ -310,6 +363,7 @@ internal sealed class Dauerlauf
         // Titel und Preis stehen im Kopf exakt — die gehen vor der Texterkennung
         Genau(f, kopf, ziel);
         Gelesen++;
+        Gut();
         _melde(new Ereignis("gelesen", ziel, null, f, geladen, uhr.ElapsedMilliseconds));
     }
 
@@ -442,6 +496,7 @@ internal sealed class Dauerlauf
             return;
         }
         Falsch++;
+        if (++_fehlInFolge >= FehlLesungenBisProblem) Schlecht($"{_fehlInFolge} Autos hintereinander nicht sicher gelesen ({grund})");
         _melde(new Ereignis("falsch", ziel, grund, KlickBisGeladenMs: geladen, GesamtMs: uhr.ElapsedMilliseconds));
     }
 

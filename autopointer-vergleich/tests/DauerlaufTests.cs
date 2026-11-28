@@ -205,6 +205,12 @@ public class DauerlaufTests
         // 28.11.2026: eingeschaltet, aber jemand benutzt den PC -> wartet (und macht von selbst weiter)
         Assert.Equal("●  DAUERLAUF wartet", Leiste.StatusText(aus with { Dauerlauf = "3 gelesen", DauerlaufWartet = true }, "AKTIV"));
         Assert.False(TrayApp.RuheReicht(-1));
+        // 28.11.2026 Selbstdiagnose: erst nach 15 s ohne Fortschritt, dann hoechstens alle 10 Minuten
+        Assert.False(Dauerlauf.ProblemFaellig(-1, long.MinValue / 2, 1_000_000));
+        Assert.False(Dauerlauf.ProblemFaellig(1_000_000, long.MinValue / 2, 1_000_000 + Dauerlauf.ProblemNachMs - 1));
+        Assert.True(Dauerlauf.ProblemFaellig(1_000_000, long.MinValue / 2, 1_000_000 + Dauerlauf.ProblemNachMs));
+        Assert.False(Dauerlauf.ProblemFaellig(1_000_000, 1_100_000, 1_100_000 + Dauerlauf.ProblemAbstandMs - 1));
+        Assert.True(Dauerlauf.ProblemFaellig(1_000_000, 1_100_000, 1_100_000 + Dauerlauf.ProblemAbstandMs));
         Assert.False(TrayApp.RuheReicht(TrayApp.DauerlaufRuheS * 1000L - 1));
         Assert.True(TrayApp.RuheReicht(TrayApp.DauerlaufRuheS * 1000L));
         Assert.Contains(TrayApp.DauerlaufRuheS + " s", TrayApp.DauerlaufMausText);

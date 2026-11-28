@@ -887,7 +887,7 @@ internal sealed class TrayApp : ApplicationContext
         _dlMaus = null;
         _dlStart = Environment.TickCount64;
         // beim Fortsetzen dasselbe Objekt: es weiss, welche Autos schon gelesen sind
-        _dauerlauf ??= new Dauerlauf(_ocr, () => regeln, DauerlaufEreignis);
+        _dauerlauf ??= new Dauerlauf(_ocr, () => regeln, DauerlaufEreignis) { Problem = DauerlaufProblem };
         try { if (!AutoPointerFenster.ImVordergrund(haupt)) BrowserOeffner.ZurueckZu(haupt); }
         catch (Exception ex) { Protokoll.Schreibe("Dauerlauf: AutoPointer nicht nach vorne geholt: " + ex.Message); }
         _dauerlaufAn = true;
@@ -940,6 +940,20 @@ internal sealed class TrayApp : ApplicationContext
             return false;
         }
         bool tat = await lauf.SchrittAsync();
+        // 28.11.2026: liegt AutoPointer nicht vorne (der Sucher hat z. B. den Browser geoeffnet), liest der Dauerlauf
+        // nichts. Ruht der PC, holt er AutoPointer selbst wieder nach vorne — hoechstens alle 5 s ein Versuch.
+        if (!tat && lauf.Hindernis == Dauerlauf.NichtVorne && RuheReicht(Native.RuheMs())
+            && Environment.TickCount64 - _dlVorholen > 5000)
+        {
+            _dlVorholen = Environment.TickCount64;
+            IntPtr haupt = _quelle?.Hauptfenster ?? IntPtr.Zero;
+            if (haupt != IntPtr.Zero && !Native.IsIconic(haupt))
+                _ui.Post(_ =>
+                {
+                    try { BrowserOeffner.ZurueckZu(haupt); }
+                    catch (Exception ex) { Protokoll.SchreibeGedrosselt("dauerlauf-vor", "Dauerlauf: AutoPointer nicht nach vorne geholt: " + ex.Message, TimeSpan.FromSeconds(60)); }
+                }, null);
+        }
         _dlMaus = Native.GetCursorPos(out var danach) ? danach : null;
         _dlNeu = lauf.Neu;
         _dlAussortiert = lauf.Aussortiert;
@@ -953,6 +967,23 @@ internal sealed class TrayApp : ApplicationContext
             _ui.Post(_ => _leiste.Aktualisieren(), null);
         }
         return tat;
+    }
+
+    private long _dlVorholen;
+
+    /// <summary>Der Dauerlauf kommt an diesem PC nicht voran: dem Sucher sagen, und (wie bei jedem nicht erkannten
+    /// Auto, Einstellung „Lesebilder“) das Abbild zur Fehlersuche melden.</summary>
+    private void DauerlaufProblem(string was, string einzelheiten, byte[]? png, bool sagen)
+    {
+        Protokoll.Schreibe(einzelheiten);
+        if (sagen) _ui.Post(_ => Sprechblase("Dauerlauf kommt nicht voran: " + was + ".", true, erzwingen: true), null);
+        if (_probelauf || png == null || !_einstellungen.LesebilderSenden) return;
+        var bild = new Lesebild(Lesebilder.PflichtfeldFehlt, png, einzelheiten, null, new[] { "Dauerlauf: " + was });
+        _ = Task.Run(async () =>
+        {
+            try { if (await _dienst.LesebildSendenAsync(bild)) Protokoll.Schreibe($"Dauerlauf: Abbild zur Fehlersuche gesendet ({png.Length / 1024} KB)."); }
+            catch (Exception ex) { Protokoll.Schreibe("Dauerlauf: Abbild nicht gesendet: " + ex.Message); }
+        });
     }
 
     private void DauerlaufEreignis(Dauerlauf.Ereignis e)
