@@ -116,7 +116,7 @@ def test_01_empfangsbestaetigung_in_beiden_fassungen(digital):
     # Wunsch Ahmad 09.10.2026: beide Seiten derselbe Ort — der des Kunden (Verkaeufer), nicht der Firmensitz
     assert f.count("Datum und Ort: 18.08.2026, Grethem") == 2 and "Rensenheim" not in f
     assert "Zulassung" in f and "Abgemeldet" in f
-    assert "Echtzeitüberweisung" in f            # Umlaut korrekt
+    assert "Echtzeitüberweisung" not in f and "Zahlungsart" not in f   # 28.11.2026: Zahlungsart nicht mehr neben dem Kaufpreis
     # Wunsch Ahmad 01.10.2026: nur "Verkäufer" und "Käufer" — kein Halter/Händler mehr in den Kaesten
     assert "Verkäufer" in f and "Käufer" in f
     assert "Verkäufer / Halter" not in f and "Käufer / Händler" not in f and "(Halter)" not in f and "(Händler)" not in f
@@ -163,7 +163,7 @@ def test_04_altvertrag_ohne_felder(digital):
     assert "bestätigt Empfang von" in f
     assert "Datum und Ort: ____" in f            # Linie zum Ausfuellen
     assert "18.08.2026" not in f                 # nichts erfunden
-    assert "Bar / Überweisung" in f              # Standard-Zahlungsart alter Vertraege
+    assert "Bar / Überweisung" not in f   # 28.11.2026: Zahlungsart nicht mehr neben dem Kaufpreis
 
 
 def test_05_nur_datum_oder_nur_ort():

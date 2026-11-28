@@ -108,7 +108,7 @@ def test_04_abholzeile_steht_unter_den_kaeuferangaben():
     assert i_ab > 0, f
     assert i_ab < f.index("Fahrzeugdaten"), "Abholung steht VOR den Fahrzeugdaten"
     assert i_ab < f.index("Kaufpreis"), "und nicht mehr im Kaufpreis-Kasten"
-    assert "Zahlungsart: Bar" in f
+    assert "Zahlungsart" not in f   # 28.11.2026: Zahlungsart nicht mehr neben dem Kaufpreis
     # Wunsch Ahmad 21.09.2026: Kaufpreis ohne Nummer, danach ab 1 gezaehlt
     # (vorher "2 · Kaufpreis", "3 · Fahrzeugdaten").
     assert "1 · Fahrzeugdaten" in f and "3 · " not in f

@@ -1332,9 +1332,8 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
         Paragraph(f"<b>{_xml_escape(company)}</b>", st["brand"]),
         Spacer(1, 2),
         # Wunsch Ahmad 01.10.2026: "KFZ-Kaufvertrag" statt "Kaufvertrag" in der Ueberschrift
+        # Wunsch Ahmad 28.11.2026: nur noch die Ueberschrift — "für ein gebrauchtes Kraftfahrzeug" entfaellt
         Paragraph("<b>KFZ-KAUFVERTRAG</b>", st["title"]),
-        # Wunsch Ahmad 01.10.2026: kein "Händler" mehr in den Beschriftungen
-        Paragraph("für ein gebrauchtes Kraftfahrzeug", st["subtitle"]),
     ]
     # Rollenpruefung 22.09.2026 (RP-452): Firmenlogo ueber dem Firmennamen,
     # wenn beim Vertrag eines festgehalten ist (routes.contracts legt die
@@ -1381,8 +1380,7 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
         links = [Paragraph(f"<b>{_xml_escape(company)}</b>", st["f_firma"])]
         if logo is not None:
             links = [logo, Spacer(1, 3)] + links
-        mitte = [Paragraph("<b>KFZ-KAUFVERTRAG</b>", st["f_title"]),
-                 Paragraph("für ein gebrauchtes Kraftfahrzeug", st["f_subtitle"])]
+        mitte = [Paragraph("<b>KFZ-KAUFVERTRAG</b>", st["f_title"])]      # 28.11.2026: ohne Unterzeile
         head = Table([[links, mitte, header_right]],
                      colWidths=[5.2 * cm, CONTENT_W - 9.4 * cm, 4.2 * cm], hAlign="LEFT")
         head.setStyle(TableStyle([
@@ -1489,7 +1487,9 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
 
     # Pruefbericht 20.09.2026 (P-09): ein vorhandenes, aber leeres Feld (None)
     # stand als "None" im Vertrag — der Standard griff nur bei fehlendem Feld.
-    pay_bits = [("Zahlungsart", contract.get("payment_method") or "Bar / Überweisung")]
+    # Wunsch Ahmad 28.11.2026: die Zahlungsart steht NICHT mehr neben dem Kaufpreis (in keinem Layout) — sie steht
+    # schon unter "Besondere Vereinbarungen". Das Feld im Formular und der Platzhalter {zahlungsart} bleiben.
+    pay_bits = []
     pay_sub = "   ·   ".join(
         (f"{k}: {_xml_escape(str(v))}" if k else _xml_escape(str(v)))
         for k, v in pay_bits if str(v).strip()
@@ -1524,10 +1524,6 @@ def _vertrag_bauen(*, dealer: dict, vehicle: dict, contract: dict,
                          Paragraph(_xml_escape(_eur(brutto / 1.19)), st["f_price_sub"])],
                         [Paragraph("19 % MWST", st["f_price_label"]),
                          Paragraph(_xml_escape(_eur(brutto - brutto / 1.19)), st["f_price_sub"])]]
-        zahlungsart = str(contract.get("payment_method") or "Bar / Überweisung").strip()
-        if zahlungsart:
-            spalten.append([Paragraph("ZAHLUNGSART", st["f_price_label"]),
-                            Paragraph(_xml_escape(zahlungsart), st["f_price_sub"])])
         # Die Kaufpreis-Spalte ist breiter, damit auch ein siebenstelliger Preis in EINE Zeile passt.
         erste = CONTENT_W * (0.5 if len(spalten) <= 2 else 0.38)
         rest = (CONTENT_W - erste) / max(1, len(spalten) - 1)

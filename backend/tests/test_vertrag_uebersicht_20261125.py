@@ -77,7 +77,7 @@ def test_02_nichts_geht_verloren_druck_und_digital():
         assert not fehlt, f"digital={digital}: {sorted(fehlt)}"
         # Stichproben aller Bereiche
         for teil in ("Max Mustermann", "L01X00T47", "max@example.de", "info@autohaus-beispiel.example",
-                     "11.000 €", "Zahlungsart: Überweisung", "VSSZZZ5FZHR012345", "91.000 km",
+                     "11.000 €", "VSSZZZ5FZHR012345", "91.000 km",
                      "Kupplung rutscht", "Delle – Tür vorne links", "Steinschlag Scheibe", "Sommer und Winter",
                      "Rückfahrkamera", "Nichtraucher", "8-fach bereift", "Zweiter Punkt", "AGB-Punkt Eins",
                      "Unfallschaden (Inserat)", "Fahrbereit (Inserat)", "Stoßstange hinten"):

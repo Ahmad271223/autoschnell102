@@ -93,8 +93,8 @@ def test_03_formular_hat_denselben_inhalt(digital):
     assert "KAUFPREIS KAUFPREIS" not in formular and "Kaufpreis KAUFPREIS" not in modern, "Kaufpreis steht doppelt"
     assert "FAHRZEUGDATEN" in formular and "FAHRZEUGDATEN" not in modern, "Layout greift"
     assert "Konditionen" not in formular and "Konditionen" not in modern
-    for stueck in ("KFZ-KAUFVERTRAG", "für ein gebrauchtes Kraftfahrzeug", "Erika Mustermann",
-                   "Musterweg 5", "KFZ Müller GmbH", "22.500,00 EUR", "Echtzeitüberweisung", "Volkswagen",
+    for stueck in ("KFZ-KAUFVERTRAG", "Erika Mustermann",
+                   "Musterweg 5", "KFZ Müller GmbH", "22.500,00 EUR", "Volkswagen",
                    "112.700 km", "Ja, gültig bis 06/2027", "Zweite Hand.", "Erster Punkt.", "Zweiter Punkt.",
                    "auch ohne Unterschrift gültig", "Gewährleistung"):
         assert stueck in modern, stueck

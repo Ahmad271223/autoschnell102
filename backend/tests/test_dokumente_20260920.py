@@ -117,7 +117,7 @@ def test_p04_p09_leere_felder_brechen_den_vertrag_nicht():
     roh = _pdf_vertrag(accident_free=None, payment_method=None)
     text = _text(roh)
     assert "None" not in text
-    assert "Bar / Überweisung" in text
+    assert "Bar / Überweisung" not in text and "None" not in text   # 28.11.2026: Zahlungsart nicht mehr neben dem Kaufpreis
 
 
 @pytest.mark.parametrize("wert, zeile", [(None, False), (True, True), (False, True)])
