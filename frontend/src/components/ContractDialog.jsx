@@ -341,7 +341,10 @@ export function anfangsFormular(v, dealer, heute) {
     vehicle_seats: v.seat_count || v.seats || "",
     vehicle_vin: v.vin || v.fin || "",
     // Wunsch Ahmad (15.09.2026): kein Kennzeichen mehr im Vertrag (Feld entfernt).
-    vehicle_damage_note: v.damage_unrepaired ? "Motorschaden / Unfallschaden vorhanden"
+    // Wunsch Ahmad 28.11.2026: aus der Trefferliste kommen die im Inserat erkannten Schaeden gleich mit (damage_note,
+    // ganze Saetze des Verkaeufers) — der Sucher sieht und aendert sie hier vor dem Speichern.
+    vehicle_damage_note: v.damage_note ? String(v.damage_note).slice(0, 1000)
+                       : v.damage_unrepaired ? "Motorschaden / Unfallschaden vorhanden"
                        : (v.accident_damaged ? "Unfallschaden" : ""),
 
     // Händler-Profil — pre-filled, kann pro Vertrag überschrieben werden

@@ -209,6 +209,35 @@ def _ganzzahl(text: Any) -> Optional[int]:
     return int(m.group()) if m else None
 
 
+def schaeden_fuer_vertrag(doc: Dict[str, Any]) -> str:
+    """Wunsch Ahmad 28.11.2026: die im Inserat erkannten Schaeden stehen im Kaufvertrag gleich unter „Sonstige
+    Schäden“ — als ganze Saetze des Verkaeufers (nicht als abgeschnittene Fundstellen), hoechstens fuenf. Jeder Satz
+    wird einzeln mit derselben Schadenspruefung geprueft; „unfallfrei“, „keine Kratzer“ usw. zaehlen also nicht.
+    Der Sucher sieht und aendert den Text im Vertrag, bevor er gespeichert wird."""
+    import schaden_pruefung as sp
+    text = html_reste(doc.get("beschreibung"))
+    saetze: List[str] = []
+    art = str((doc.get("liste") or {}).get("art") or "")
+    if "Unfallwagen" in [t.strip() for t in art.split(",")]:
+        saetze.append("Unfallwagen (laut Inserat)")
+    for zeile in text.split("\n"):
+        for stueck in re.split(r"(?<=[.!?;])\s+|\s+[•*]\s+", zeile):
+            satz = re.sub(r"\s+", " ", stueck).strip(" •*-–\t")
+            if len(satz) < 4:
+                continue
+            e = sp.pruefen(satz, "", "", "")
+            if e.get("stufe") not in (sp.SCHWER, sp.LEICHT, sp.UNKLAR):
+                continue
+            if e.get("stufe") == sp.UNKLAR and (e.get("gruende") or [""])[0].startswith("Unfallfreiheit nicht eindeutig"):
+                continue
+            satz = satz.rstrip(".;!") if len(satz) <= 200 else satz[:197].rstrip() + "…"
+            if satz.lower() not in [s.lower() for s in saetze]:
+                saetze.append(satz)
+            if len(saetze) >= 5:
+                return "; ".join(saetze)
+    return "; ".join(saetze)
+
+
 def fahrzeug_fuer_vertrag(doc: Dict[str, Any], grund: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Aus einem Treffer das Fahrzeug, mit dem der Kaufvertrag vorausgefuellt wird (Feldnamen wie bei einem
     ausgelesenen Inserat: make_label, model_label, first_registration, mileage, fuel_label, features, description,
@@ -232,6 +261,7 @@ def fahrzeug_fuer_vertrag(doc: Dict[str, Any], grund: Optional[Dict[str, Any]] =
     elif _KEIN_MODELL.match(str(v.get("model_label") or "")):
         v.pop("model_label", None)
     setze("title", f.get("titel"))
+    setze("damage_note", schaeden_fuer_vertrag(doc))
     setze("model_description", f.get("titel"))
     if f.get("ez_jahr"):
         monat, jahr = f.get("ez_monat"), int(f["ez_jahr"])

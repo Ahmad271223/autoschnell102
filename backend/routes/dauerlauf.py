@@ -157,7 +157,11 @@ async def dauerlauf_treffer_vertrag(treffer_id: str, user=Depends(current_firma)
     # was wirklich am Fahrzeug steht (ein Kollege oder ein frueherer Vergleich kann schon Daten hinterlegt haben)
     gespeichert = await db.vehicles.find_one({"id": vid, "dealer_id": user["dealer_id"]}, {"_id": 0, "data": 1})
     await db[dt.SAMMLUNG].update_one({"id": doc["id"]}, {"$set": {"vehicle_id": vid}})
-    return {"vehicle_id": vid, "vehicle": (gespeichert or {}).get("data") or vehicle, "fehlt": dt.fehlt(doc), "kollege": kollege}
+    daten = dict((gespeichert or {}).get("data") or vehicle)
+    # 28.11.2026: erkannte Schaeden fuer „Sonstige Schäden“ — auch bei einem Fahrzeug, das schon vorher angelegt war
+    if not daten.get("damage_note") and vehicle.get("damage_note"):
+        daten["damage_note"] = vehicle["damage_note"]
+    return {"vehicle_id": vid, "vehicle": daten, "fehlt": dt.fehlt(doc), "kollege": kollege}
 
 
 @router.post("/dauerlauf/treffer/{treffer_id}/erledigt")

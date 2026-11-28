@@ -149,6 +149,26 @@ def test_06_html_reste_in_der_beschreibung():
     assert dt.antwort({"beschreibung": "A/liliB"})["beschreibung"] == "A\n• B"          # auch Altbestand
 
 
+def test_07_erkannte_schaeden_stehen_im_vertrag_unter_sonstige_schaeden():
+    text = ("Verkaufe meinen Golf, TÜV neu. Rechte Seite ein paar Kratzer und kleine Dellen. Unfallfrei!\n"
+            "Steuerkette wurde erneuert. Keine Kratzer am Dach.\n• Klimaanlage defekt\n• Sitzheizung")
+    d = dt.dokument({"id": "u1", "dealer_id": "d1"}, {"id": "v1"}, {"marke": "VW", "modell": "Golf", "ez_jahr": 2012, "kilometer": 1},
+                    {"art": "PKW, Gebraucht, Limousine"}, _schaden(text), None, text, "x")
+    s = dt.schaeden_fuer_vertrag(d)
+    assert "Rechte Seite ein paar Kratzer und kleine Dellen" in s and "Klimaanlage defekt" in s
+    for nicht in ("Unfallfrei", "TÜV neu", "Steuerkette", "Keine Kratzer", "Sitzheizung", "…"):
+        assert nicht not in s, (nicht, s)
+    assert dt.fahrzeug_fuer_vertrag(d)["damage_note"] == s
+    # nichts genannt -> Feld bleibt leer (nichts erfunden); Unfallwagen aus der Listenzeile steht vorne
+    sauber = dt.dokument({"id": "u1", "dealer_id": "d1"}, {"id": "v1"}, {"marke": "VW", "modell": "Golf", "ez_jahr": 2012, "kilometer": 1},
+                         None, _schaden("Top gepflegt, unfallfrei."), None, "Top gepflegt, unfallfrei.", "x")
+    assert dt.schaeden_fuer_vertrag(sauber) == "" and "damage_note" not in dt.fahrzeug_fuer_vertrag(sauber)
+    unfall = dt.dokument({"id": "u1", "dealer_id": "d1"}, {"id": "v1"}, {"marke": "VW", "modell": "Golf", "ez_jahr": 2012, "kilometer": 1},
+                         {"art": "PKW, Unfallwagen, Limousine"}, _schaden("Motorschaden, nicht fahrbereit."), None, "Motorschaden, nicht fahrbereit.", "x")
+    assert dt.schaeden_fuer_vertrag(unfall).startswith("Unfallwagen (laut Inserat); Motorschaden")
+    assert len(dt.schaeden_fuer_vertrag({"beschreibung": ". ".join(f"Delle Nummer {i} an der Tür" for i in range(9))}).split("; ")) == 5
+
+
 def test_04_verdrahtung():
     srv = (BACKEND / "server.py").read_text(encoding="utf-8")
     assert "include_router(dauerlauf_routes.router)" in srv
@@ -254,6 +274,7 @@ def test_10b_kaufvertrag_aus_treffer_ohne_link_und_ohne_abruf(welt):  # noqa: F8
     assert v["features"] == ["ABS", "Radio"] and v["description"] == "TÜV neu. Unfallfrei." and v["color"] == "Silber metallic"
     assert (v["seller_name"], v["seller_phone"], v["seller_zip"]) == ("Semo", "+49 (0)151 5550177", "40233")
     assert not v.get("fuel_label") and not v.get("gearbox_label")          # nichts erfunden
+    assert not v.get("damage_note")                                        # „TÜV neu. Unfallfrei.“ nennt keinen Schaden
     # das Fahrzeug liegt im Pool der Firma, der Treffer kennt es; ein zweiter Klick legt kein zweites an
     assert db.vehicles.count_documents({"id": j["vehicle_id"], "dealer_id": welt["firma"]["dealer_id"]}) == 1
     assert db.dauerlauf_treffer.find_one({"id": tid})["vehicle_id"] == j["vehicle_id"]
